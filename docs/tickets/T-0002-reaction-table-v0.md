@@ -3,7 +3,7 @@
 - Status: Todo
 - 種類: 設計
 - PC: 不要(紙とペン・スマホのチャットで進められる)
-- 道: 中身の道 C1(ROADMAP)。期限は P1 の前。**中身はユーザーが決める**。仕組みは docs/design/02-reaction-system.md
+- 道: 中身の道 C1(ROADMAP)。期限は M5(非公開リポジトリに載せ始める時)。元素は現実の元素すべて + 魔素(D-418)。**中身はユーザーが決める**。仕組みは docs/design/02-reaction-system.md
 - 見積もり: チャット 2〜3 回分
 
 ## 目的

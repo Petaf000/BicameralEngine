@@ -3,7 +3,7 @@
 - Status: Todo
 - 種類: 工学
 - PC: 必須
-- マイルストーン: M2(2026-09-30 T-0009 で範囲を見直し。設計は docs/design/06-simulation-loop.md §4)
+- マイルストーン: M1(レビュー 1 で M1 へ。クリックをコマンドにする。2026-09-30 T-0009 で範囲を見直し。設計は docs/design/06-simulation-loop.md §4)
 
 ## 目的
 「CPU は投げて Present するだけ」の形を最初から作る。
