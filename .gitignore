@@ -19,3 +19,7 @@ captures/
 
 # 個人的なメモ(公開しない)
 CLAUDE.local.md
+
+# Python
+__pycache__/
+*.pyc
