@@ -36,7 +36,7 @@ namespace {
     std::expected<Results, std::string> RunGraph(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
         const auto library = gpu::LoadShader("sim/work_graph_probe.cso");
         if (!library) return std::unexpected(library.error());
-        const ComPtr<ID3D12RootSignature> rootSignature = gpu::CreateRootUavSignature(device, 1);
+        const ComPtr<ID3D12RootSignature> rootSignature = gpu::CreateRootSignature(device, {.uavCount = 1});
         if (!rootSignature) return std::unexpected("ルート署名を作れない");
         const auto graph = gpu::WorkGraph::Create(device, rootSignature.Get(), *library, L"Probe");
         if (!graph) return std::unexpected(graph.error());
@@ -74,7 +74,7 @@ namespace {
         Log(Channel::WorkGraph, Level::Info, "gpu_work_graph_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
 
-        const auto device = gpu::CreateDevice(options->adapter);
+        const auto device = gpu::Device::Create(options->adapter);
         if (!device) {
             Log(Channel::WorkGraph, Level::Error, "gpu_work_graph_test: FAILED ({})", device.error());
             return 1;
@@ -94,6 +94,7 @@ namespace {
             Log(Channel::WorkGraph, Level::Error, "gpu_work_graph_test: FAILED(結果が期待と違う)");
             return 1;
         }
+        if (!test::PassesValidation(*device, "gpu_work_graph_test")) return 1;
         Log(Channel::WorkGraph, Level::Info, "gpu_work_graph_test: OK");
         return 0;
     }

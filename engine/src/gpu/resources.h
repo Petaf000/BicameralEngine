@@ -21,11 +21,19 @@ namespace bicameral::gpu {
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t sizeBytes,
                                                                       BufferKind kind);
 
-    // u0 から uavCount 個の「ルートの UAV」を持つルート署名。記述子のヒープが要らない一番簡単な形。
-    // rootConstantCount > 0 なら、その後ろ(ルートの番号 uavCount)に b0 のルート定数(32bit × rootConstantCount)を足す
-    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12RootSignature> CreateRootUavSignature(ID3D12Device* device,
-                                                                                     uint32_t uavCount,
-                                                                                     uint32_t rootConstantCount = 0);
+    // 「ルートの UAV」とルート定数だけのルート署名の形。記述子のヒープが要らない一番簡単な形。
+    // ルートの番号は並び順: u0..u(uavCount-1)(space0)→ b0 のルート定数(あれば)→ デバッグのリング(あれば)
+    struct RootSignatureLayout {
+        uint32_t uavCount = 0;           // space0 の u0 から
+        uint32_t rootConstantCount = 0;  // b0 の 32bit の値の数。0 なら無し
+        bool debugRing = false;          // u0 space1 のデバッグのリング(shaders/common/debug_ring.hlsli、T-0003)
+
+        [[nodiscard]] uint32_t RootConstantIndex() const { return uavCount; }
+        [[nodiscard]] uint32_t DebugRingIndex() const { return uavCount + (rootConstantCount > 0 ? 1 : 0); }
+    };
+
+    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12RootSignature> CreateRootSignature(ID3D12Device* device,
+                                                                                  const RootSignatureLayout& layout);
 
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12PipelineState> CreateComputePipeline(
         ID3D12Device* device, ID3D12RootSignature* rootSignature, std::span<const std::byte> bytecode);

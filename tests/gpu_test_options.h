@@ -1,4 +1,4 @@
-// gpu_test_options.h — GPU を使うテスト(gpu_*_test.cpp)に共通の引数(T-0013)。
+// gpu_test_options.h — GPU を使うテスト(gpu_*_test.cpp)に共通の引数(T-0013)と、検証の確かめ方(T-0003)。
 //   --warp                  ハードウェアの GPU の代わりに WARP(ソフトウェアの D3D12)で走らせる
 //   --queue direct|compute  コマンドを投げるキュー(既定は compute。シミュは compute キューで走らせる予定: 06 §4)
 // 同じテストを引数だけ変えて ctest に複数登録する(tests/CMakeLists.txt)。
@@ -8,6 +8,7 @@
 #include <span>
 #include <string_view>
 
+#include "core/log.h"
 #include "gpu/device.h"
 
 namespace bicameral::test {
@@ -39,6 +40,15 @@ namespace bicameral::test {
             }
         }
         return options;
+    }
+
+    // debug layer(debug プリセットで有効。T-0003)がエラーを報告していたら false。テストの最後に呼び、false なら失敗にする
+    inline bool PassesValidation(const gpu::Device& device, std::string_view testName) {
+        const uint32_t errorCount = device.ValidationErrorCount();
+        if (errorCount == 0) return true;
+        Log(Channel::Gpu, Level::Error, "{}: FAILED(debug layer のエラーが {} 件。上のログの D3D12 [...] の行)",
+            testName, errorCount);
+        return false;
     }
 
 }  // namespace bicameral::test

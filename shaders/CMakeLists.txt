@@ -16,6 +16,9 @@ file(GLOB_RECURSE BICAMERAL_SHADER_HEADERS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOU
 
 # Debug では最適化を切り、デバッグ情報を埋め込む(PIX でソースを見るため)。整数の結果は最適化で変わらない(04「未確認」、T-0013 で確かめる)
 set(BICAMERAL_DXC_CONFIG_FLAGS $<$<CONFIG:Debug>:-Od$<SEMICOLON>-Zi$<SEMICOLON>-Qembed_debug>)
+# Debug のシミュのシェーダーだけ、デバッグのリング(common/debug_ring.hlsli、T-0003)の DEBUG_PRINT・DEBUG_ASSERT・FX_ASSERT を有効にする。
+# 計測(bench)は付けない(費用を測るのにデバッグの書き込みが混ざらないように)
+set(BICAMERAL_DXC_SIM_DEBUG_FLAGS $<$<CONFIG:Debug>:-DBICAMERAL_GPU_DEBUG=1>)
 
 # --- bicameral_add_shader(<shaders/ からの相対パス> PROFILE <cs_6_8|lib_6_8|...> [ENTRY <関数名>]
 #                         [NAME <出力の名前>] [DEFINES <名前=値>...] [FLAGS <DXC の引数>...]) ---
@@ -50,7 +53,9 @@ function(bicameral_add_shader source)
 
   # シミュのシェーダーだけ、コンパイルの直後に DXIL の浮動小数点を検査する(違反なら .cso を消して失敗)
   set(checkCommand "")
+  set(kindFlags "")
   if(kind STREQUAL "sim")
+    set(kindFlags ${BICAMERAL_DXC_SIM_DEBUG_FLAGS})
     set(checkCommand COMMAND ${Python3_EXECUTABLE} ${BICAMERAL_FLOAT_CHECK_DIR}/dxil_float_check.py
                              ${asm} --source ${source} --remove ${cso})
   endif()
@@ -58,7 +63,7 @@ function(bicameral_add_shader source)
   add_custom_command(
     OUTPUT ${cso} ${asm}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${BICAMERAL_SHADER_OUT}/${kind} ${BICAMERAL_SHADER_ASM}/${kind}
-    COMMAND ${DIRECTX_DXC_TOOL} -HV 2021 -T ${arg_PROFILE} ${entryFlags} -WX ${BICAMERAL_DXC_CONFIG_FLAGS}
+    COMMAND ${DIRECTX_DXC_TOOL} -HV 2021 -T ${arg_PROFILE} ${entryFlags} -WX ${BICAMERAL_DXC_CONFIG_FLAGS} ${kindFlags}
             ${defineFlags} ${arg_FLAGS} -I ${CMAKE_CURRENT_SOURCE_DIR} -Fo ${cso} -Fc ${asm} ${input}
     ${checkCommand}
     DEPENDS ${input} ${BICAMERAL_SHADER_HEADERS} ${BICAMERAL_FLOAT_CHECK_DIR}/dxil_float_check.py
@@ -90,6 +95,8 @@ add_custom_command(
 # --- シェーダーの一覧 ---------------------------------------------------------------------------------
 bicameral_add_shader(sim/fixed_selftest.hlsl PROFILE cs_6_8 ENTRY Main)  # 整数の数学ライブラリの自己テスト(T-0010 / T-0013)
 bicameral_add_shader(sim/work_graph_probe.hlsl PROFILE lib_6_8)  # Work Graphs が動くかの確認(T-0013)
+bicameral_add_shader(sim/debug_ring_probe.hlsl PROFILE cs_6_8 ENTRY Main)  # デバッグのリングの確認(T-0003)
+bicameral_add_shader(sim/debug_ring_graph_probe.hlsl PROFILE lib_6_8)    # 同じく Work Graphs のノードから(T-0003)
 
 # 整数のルーチンの費用のマイクロベンチ(T-0010、04 §6)。1 つのソースを計測する演算ごとにコンパイルする。
 # 一覧は tests/gpu_fixed_bench.cpp の BENCH_OPERATIONS と同じ順・同じ名前にする(番号 = BENCH_OP)。

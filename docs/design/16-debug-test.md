@@ -13,6 +13,28 @@ GPU の中だけで走り切る世界を、症状から原因に辿れるよう�
 - **連鎖の記録(トレース)**: 選んだ範囲(セル・刻み)だけ「どのレコードがどのレコードを生んだか」をファイルへ。重すぎたら(伝播の時間が 2 倍を超える)サンプリングかカウンタだけに落とす(旧 T-0008 の打ち切り条件)。
 - **D3D12 の debug layer / GPU-based validation / DRED**: debug プリセットで有効。
 
+### 1.1 実装(T-0003、2026-09-30)
+- **リング**(`shaders/common/debug_ring.hlsli` / `engine/src/gpu/debug_ring.{h,cpp}`):
+  - シェーダーは `DEBUG_PRINT(DebugFormat::名前, 引数...)` / `DEBUG_ASSERT(条件, DebugFormat::名前, 引数...)`。引数は 0〜6 個、
+    `uint32_t`・`int32_t`・`uint64_t`・`int64_t`・`bool`(04 R1。浮動小数点は持ち込まない)。compute でも Work Graphs のノードでも同じ。
+  - 書式の文字列は CPU だけが持つ(`shaders/common/debug_formats.hlsli` の `DEBUG_FORMAT(名前, チャンネル, 場所, 書式)`)。
+    GPU は書式の番号・`__LINE__`・引数を 64 バイトのレコードに書く。場所(ファイル名・ノード名)は書式の一覧に書き、
+    刻み・セル・レコードの ID は引数で渡す(T-0008 はノード名・世代・レコード ID をこの形で出す)。
+  - バインドは u0 space1 のルートの UAV(`gpu::RootSignatureLayout::debugRing`)。容量 4096 件 / フレーム(256 KiB)。
+    溢れたら書かずに数える(落とした数 = 要求の数 − 容量)。
+  - CPU: `RecordBegin` → 書く → `RecordReadbackAndReset`(読み戻し + 見出しを 0 に戻す)→ 待つ → `Drain`(assert を先に、
+    既定 32 行までログへ。残りは件数だけ)。読み戻しのバッファは 1 つなので、フレームを重ねるときはフレームごとに持たせる(T-0004)。
+  - 有効になるのは Debug のシミュのシェーダーだけ(shaders/CMakeLists.txt が `-DBICAMERAL_GPU_DEBUG=1` を付ける)。
+    それ以外では何もしない(リングも宣言しない)。`FX_ASSERT`(fixed.hlsli)もここへつないだ。bench には付けない。
+- **検証**(`engine/src/gpu/device.{h,cpp}` の `gpu::Device`):
+  - `DeviceOptions{debugLayer, gpuBasedValidation, dred}`。既定は debug プリセット(`BICAMERAL_GPU_VALIDATION`)で全部有効。
+  - debug layer の報告は `ID3D12InfoQueue1` のコールバックで `Channel::Gpu` のログへ(ERROR/CORRUPTION → Error、WARNING → Warning)。
+    エラーの数を数え、GPU のテストは最後に 0 件であることを確かめる(`test::PassesValidation`)。
+  - デバイスが失われたら `LogDeviceRemoved` が理由・DRED のブレッドクラム(止まったコマンドの前後)・ページフォールトの場所をログへ。
+    ImmediateQueue が自動で呼ぶ。キューとリストには名前を付ける(DRED の記録に出る)。
+- テスト: `gpu_debug_ring_test`(デコード・compute・溢れ・空に戻るか・ノードから)、`gpu_debug_device_test`
+  (わざと誤った呼び出しでエラーが数えられるか・`RemoveDevice` の後に DRED の記録を読めるか)。ハードウェアと WARP の両方。
+
 ## 2. テストの種類
 | テスト | 内容 | どこで回すか |
 |---|---|---|
@@ -35,4 +57,9 @@ GPU の中だけで走り切る世界を、症状から原因に辿れるよう�
   (gpu_fixed_warp・gpu_work_graph_warp_*)が通った。GPU のテストは同じ exe を `--warp` 付きでも登録し、
   ハードウェアが要るもの(ラベル gpu)は CI で外す(`ctest --label-exclude gpu`)。ビット一致と決定性のテストもこの形で CI に入れる。
   WARP での速さは未測定(重いテストを CI に入れる時に測り、盤面の大きさを決める)。
+- ~~GPU-based validation と Work Graphs を組み合わせて動くか~~ → 動く(T-0003、2026-09-30)。debug プリセットの GPU のテスト
+  (Work Graph・自己テスト・リング)が、ハードウェア(開発機)と WARP の両方で debug layer のエラー 0 件で通る。
+  GBV の分だけ遅い(gpu_fixed の 65536 ケースで約 7 秒)。重くなったら GBV だけ切る(`DeviceOptions`)。
+- DRED のブレッドクラムが本物のハング(TDR)で「止まったコマンド」を指すか。`RemoveDevice` の試験では、
+  終わったコマンドリストの記録は残らない(記録のあるリスト 0 本)ので、止まった所の表示は未確認。初めて本物のハングが起きた時に確かめる。
 - PIX で Work Graphs のノードごとの時間・レコードが見られる範囲。

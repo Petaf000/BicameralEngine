@@ -1,6 +1,7 @@
 // resources.cpp — バッファ・ルート署名・パイプライン・シェーダーのファイル(T-0013)。
 #include "gpu/resources.h"
 
+#include "common/debug_ring.hlsli"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
@@ -74,22 +75,26 @@ namespace bicameral::gpu {
 
     // --- ルート署名とパイプライン ---
 
-    ComPtr<ID3D12RootSignature> CreateRootUavSignature(ID3D12Device* device, uint32_t uavCount,
-                                                       uint32_t rootConstantCount) {
-        std::vector<D3D12_ROOT_PARAMETER1> parameters(uavCount);
-        for (uint32_t index = 0; index < uavCount; ++index) {
-            parameters[index] = {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV,
-                                 .Descriptor = {.ShaderRegister = index,
-                                                .RegisterSpace = 0,
-                                                .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE},
-                                 .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL};
+    ComPtr<ID3D12RootSignature> CreateRootSignature(ID3D12Device* device, const RootSignatureLayout& layout) {
+        const auto rootUav = [](uint32_t shaderRegister, uint32_t registerSpace) {
+            return D3D12_ROOT_PARAMETER1{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV,
+                                         .Descriptor = {.ShaderRegister = shaderRegister,
+                                                        .RegisterSpace = registerSpace,
+                                                        .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE},
+                                         .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL};
+        };
+        std::vector<D3D12_ROOT_PARAMETER1> parameters;
+        parameters.reserve(layout.uavCount + 2);
+        for (uint32_t index = 0; index < layout.uavCount; ++index) {
+            parameters.push_back(rootUav(index, 0));
         }
-        if (rootConstantCount > 0) {
+        if (layout.rootConstantCount > 0) {
             parameters.push_back(
                 {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-                 .Constants = {.ShaderRegister = 0, .RegisterSpace = 0, .Num32BitValues = rootConstantCount},
+                 .Constants = {.ShaderRegister = 0, .RegisterSpace = 0, .Num32BitValues = layout.rootConstantCount},
                  .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
         }
+        if (layout.debugRing) parameters.push_back(rootUav(0, DEBUG_RING_REGISTER_SPACE));
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc{.Version = D3D_ROOT_SIGNATURE_VERSION_1_1};
         desc.Desc_1_1 = {.NumParameters = static_cast<UINT>(parameters.size()), .pParameters = parameters.data()};
 

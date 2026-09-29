@@ -24,7 +24,8 @@ views:
       起動して GPU の対応状況(SM 6.8 / DXR / Mesh / Work Graphs)を調べるところまで(T-0001)と、
       シミュの整数の数学ライブラリ(T-0010。GPU と CPU が同じソースで計算する)と、
       シミュに浮動小数点が入ったらビルドを落とす検査(T-0011)と、
-      GPU の小さな道具(デバイス・1 回投げて待つキュー・Work Graph)で自己テストと最小のグラフを GPU / WARP で走らせるテスト(T-0013)。
+      GPU の小さな道具(デバイス・1 回投げて待つキュー・Work Graph)で自己テストと最小のグラフを GPU / WARP で走らせるテスト(T-0013)と、
+      シェーダーの printf / assert のリング・debug layer / GBV / DRED(T-0003)。
       Agility SDK は exe が 2 つの値をエクスポートすることで、OS の d3d12.dll に読み込ませる。
     direction: TD
     groups:
@@ -60,8 +61,17 @@ views:
           note: "ビルドで DXC が通す。GPU で走らせて比べるのは T-0013" }
       - { id: fixedtest, group: tests, label: "fixed_test<br/>128bit 組み込み関数とのビット一致・誤差の測定",
           code: "tests/fixed_test.cpp::TestSelfTestDigest", ticket: T-0010 }
-      - { id: gpudevice, group: gpulib, label: "CreateDevice()<br/>ハードウェアの GPU か WARP",
-          code: "engine/src/gpu/device.cpp::CreateDevice", ticket: T-0013 }
+      - { id: gpudevice, group: gpulib, label: "Device::Create()<br/>ハードウェアの GPU か WARP・debug layer / GBV / DRED",
+          code: "engine/src/gpu/device.cpp::Device::Create", ticket: T-0003, doc: docs/design/16-debug-test.md,
+          note: "debug プリセットで検証を有効化。debug layer の報告はログへ流して数える(テストは 0 件を確かめる)" }
+      - { id: dred, group: gpulib, label: "LogDeviceRemoved()<br/>デバイス喪失の理由・DRED のブレッドクラムとページフォールト",
+          code: "engine/src/gpu/device.cpp::LogDeviceRemoved", ticket: T-0003 }
+      - { id: debugring, group: gpulib, label: "DebugRing<br/>シェーダーの printf / assert を読み戻してログへ",
+          code: "engine/src/gpu/debug_ring.cpp::DebugRing::Drain", ticket: T-0003, doc: docs/design/16-debug-test.md,
+          note: "書式の番号 + 整数の引数だけを GPU が書き、文字列は CPU が持つ(debug_formats.hlsli)" }
+      - { id: debugringhlsl, group: shared, label: "debug_ring.hlsli<br/>DEBUG_PRINT / DEBUG_ASSERT(ノードからも)",
+          code: "shaders/common/debug_ring.hlsli::DebugFormat", ticket: T-0003,
+          note: "u0 space1。Debug のシミュのシェーダーだけ有効(FX_ASSERT もここへ)" }
       - { id: immediate, group: gpulib, label: "ImmediateQueue<br/>1 本記録して投げて待つ(direct / compute)",
           code: "engine/src/gpu/immediate_queue.cpp::ImmediateQueue::ExecuteAndWait", ticket: T-0013,
           note: "テストと準備用。フレームのループは待たない別の仕組み(T-0012)" }
@@ -76,6 +86,9 @@ views:
       - { id: wgtest, group: tests, label: "gpu_work_graph_test<br/>Root → Leaf の最小のグラフ",
           code: "tests/gpu_work_graph_test.cpp::RunGraph", ticket: T-0013,
           note: "direct / compute キュー × ハードウェア / WARP。64bit atomic" }
+      - { id: ringtest, group: tests, label: "gpu_debug_ring_test / gpu_debug_device_test<br/>リング・debug layer・DRED",
+          code: "tests/gpu_debug_ring_test.cpp::RunGpuTests", ticket: T-0003,
+          note: "compute とノードからの print、溢れ、空に戻るか。わざと誤った呼び出しとデバイスの喪失" }
       - { id: d3d12, group: os, status: external, label: "d3d12.dll(OS)",
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
       - { id: core, group: os, status: external, label: "D3D12Core.dll<br/>Agility SDK 1.619",
@@ -116,6 +129,13 @@ views:
       - [wgtest, workgraph]
       - [wgtest, immediate, "direct / compute"]
       - [gpudevice, d3d12]
+      - [gpudevice, log, "debug layer の報告"]
+      - [immediate, dred, "デバイスが失われたら"]
+      - [fixed, debugringhlsl, "FX_ASSERT"]
+      - [debugringhlsl, debugring, "読み戻し(フレームの終わり)"]
+      - [debugring, log, "Channel::Gpu / WorkGraph"]
+      - [ringtest, debugring]
+      - [ringtest, workgraph, "ノードから print"]
 
   # ---------------------------------------------------------------------------------------------
   - id: frame

@@ -7,12 +7,14 @@
 #include <windows.h>
 
 #include <directx/d3d12.h>
-#include <directx/d3dx12.h>  // 状態オブジェクト(Work Graphs)の組み立て
+#include <directx/d3d12sdklayers.h>  // debug layer の報告(ID3D12InfoQueue1)と DRED
+#include <directx/d3dx12.h>          // 状態オブジェクト(Work Graphs)の組み立て
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
 // --- 標準ライブラリ ---
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -20,6 +22,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>

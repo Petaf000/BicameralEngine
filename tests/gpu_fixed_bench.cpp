@@ -77,7 +77,7 @@ namespace {
 
     std::expected<BenchContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
         BenchContext context{.device = device, .queue = &queue};
-        context.rootSignature = gpu::CreateRootUavSignature(device, 1, 1);
+        context.rootSignature = gpu::CreateRootSignature(device, {.uavCount = 1, .rootConstantCount = 1});
         context.results = gpu::CreateBuffer(device, uint64_t{THREAD_COUNT} * 8, gpu::BufferKind::UnorderedAccess);
         context.timestampReadback = gpu::CreateBuffer(device, 2 * sizeof(uint64_t), gpu::BufferKind::Readback);
         const D3D12_QUERY_HEAP_DESC heapDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2};
@@ -186,7 +186,7 @@ namespace {
             Log(Channel::Gpu, Level::Error, "使い方: gpu_fixed_bench [--warp] [--queue direct|compute]");
             return 2;
         }
-        const auto device = gpu::CreateDevice(options->adapter);
+        const auto device = gpu::Device::Create(options->adapter);
         if (!device) {
             Log(Channel::Gpu, Level::Error, "gpu_fixed_bench: {}", device.error());
             return 1;

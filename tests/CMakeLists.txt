@@ -45,6 +45,14 @@ bicameral_add_gpu_test_case(gpu_work_graph_compute gpu_work_graph_test gpu --que
 bicameral_add_gpu_test_case(gpu_work_graph_warp_direct gpu_work_graph_test warp --warp --queue direct)
 bicameral_add_gpu_test_case(gpu_work_graph_warp_compute gpu_work_graph_test warp --warp --queue compute)
 
+# GPU のデバッグ基盤(T-0003): シェーダーの printf / assert のリング、debug layer の報告と DRED
+bicameral_add_gpu_test(gpu_debug_ring_test)
+bicameral_add_gpu_test_case(gpu_debug_ring gpu_debug_ring_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_debug_ring_warp gpu_debug_ring_test warp --warp --queue compute)
+bicameral_add_gpu_test(gpu_debug_device_test)
+bicameral_add_gpu_test_case(gpu_debug_device gpu_debug_device_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_debug_device_warp gpu_debug_device_test warp --warp --queue compute)
+
 # --- 浮動小数点の検査(tools/float_check、04 §4)が本当に落ちるかのテスト ---------------------------------
 # わざと浮動小数点を使うシェーダーを(検査なしで)逆アセンブルし、検査が「拒否する」ことを確かめる。
 # 検査がいつの間にか何も捕まえなくなっていたら、ここが落ちる。

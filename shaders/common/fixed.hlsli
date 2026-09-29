@@ -22,12 +22,14 @@
 #define FX_ASSERT(condition) assert(condition)
 #endif
 #else
+#include "common/debug_ring.hlsli"
 #define FX_FN
 #define FX_CONST static const
 #define FX_NAMESPACE_BEGIN
 #define FX_NAMESPACE_END
 #ifndef FX_ASSERT
-#define FX_ASSERT(condition)  // GPU の assert は T-0003(デバッグのリング)でつなぐ
+// GPU では debug のビルドだけ、デバッグのリング(T-0003)に書く。書いたシェーダーのルート署名に u0 space1 が要る
+#define FX_ASSERT(condition) DEBUG_ASSERT(condition, DebugFormat::FxAssert)
 #endif
 #endif
 

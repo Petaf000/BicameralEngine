@@ -4,6 +4,7 @@
 
 #include "core/hresult.h"
 #include "core/log.h"
+#include "gpu/device.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -21,6 +22,9 @@ namespace bicameral::gpu {
                                 device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&queue.m_fence)))) {
             return std::unexpected("キュー・コマンドリスト・フェンスを作れない");
         }
+        // DRED と debug layer の報告に出る名前
+        queue.m_queue->SetName(L"ImmediateQueue");
+        queue.m_list->SetName(L"ImmediateQueue.list");
         return queue;
     }
 
@@ -39,13 +43,10 @@ namespace bicameral::gpu {
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, m_queue->Signal(m_fence.Get(), m_fenceValue))) return false;
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, m_fence->SetEventOnCompletion(m_fenceValue, nullptr))) return false;
 
-        // デバイスが失われるとフェンスの値は UINT64_MAX になる
+        // デバイスが失われるとフェンスの値は UINT64_MAX になる。理由と DRED の記録(有効なら)をログへ
         if (m_fence->GetCompletedValue() != UINT64_MAX) return true;
         ComPtr<ID3D12Device> device;
-        if (SUCCEEDED(m_queue->GetDevice(IID_PPV_ARGS(&device)))) {
-            Log(Channel::Gpu, Level::Error, "デバイスが失われた: {}",
-                DescribeHresult(device->GetDeviceRemovedReason()));
-        }
+        if (SUCCEEDED(m_queue->GetDevice(IID_PPV_ARGS(&device)))) LogDeviceRemoved(device.Get());
         return false;
     }
 

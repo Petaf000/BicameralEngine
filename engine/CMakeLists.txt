@@ -16,6 +16,7 @@ target_include_directories(bicameral_fixed INTERFACE ${PROJECT_SOURCE_DIR}/shade
 # --- gpu: D3D12 のデバイス・キュー・バッファ・Work Graph の小さな道具(T-0013)。core だけを知る ---
 # ランタイムと GPU のテスト(tests/gpu_*_test.cpp)が使う。
 add_library(bicameral_gpu STATIC
+  src/gpu/debug_ring.cpp
   src/gpu/device.cpp
   src/gpu/immediate_queue.cpp
   src/gpu/resources.cpp
@@ -25,8 +26,13 @@ target_include_directories(bicameral_gpu PUBLIC src)
 target_precompile_headers(bicameral_gpu PRIVATE src/pch.h)
 target_link_libraries(bicameral_gpu PUBLIC
   bicameral_core
+  bicameral_fixed  # shaders/common/debug_ring.hlsli(デバッグのリングのレイアウトと書式の一覧。T-0003)
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   d3d12 dxgi)
+# debug プリセット: デバイスを作るとき debug layer・GPU-based validation・DRED を既定で有効にする(gpu/device.cpp、T-0003)
+if(BICAMERAL_GPU_VALIDATION)
+  target_compile_definitions(bicameral_gpu PRIVATE BICAMERAL_GPU_VALIDATION=1)
+endif()
 
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral

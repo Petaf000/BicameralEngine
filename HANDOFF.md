@@ -1,29 +1,30 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0084 128÷64 の割り算の高速化 — 完了
+最終更新: 2026-09-30 / チケット: T-0003 GPU デバッグ基盤 — 完了
 
 ## 状態(3 行以内)
-- ユーザーが 04 §6 の書き方の方針を採用(ADR-0010・D-322)。SASS は T-0016 で、RDNA3 は AMD 機で測る。128÷64 の高速化を M1 に入れ(T-0084)、完了した。
-- `FxDivU128By64` を逆数 + Newton 法(Möller & Granlund 2011)に替えた(新しい `FxReciprocalNormalizedU64`)。商と余りは厳密で、自己テストの要約 605bc2e41947d188 は変わらず。
-- 費用(fmul = 1): 128÷64 1925 → 247、FxDivShiftS64 1829 → 247、FxMakeRecipU64 1494 → 301。04 §6・perf.md を更新。
+- シェーダー(compute と Work Graphs のノード)から書ける printf / assert のリングを作った(`DEBUG_PRINT` / `DEBUG_ASSERT`、書式は CPU 側の一覧)。FX_ASSERT もつないだ。
+- `gpu::Device` が debug プリセットで debug layer・GBV・DRED を有効にし、debug layer の報告をログへ流して数える。GPU のテストはエラー 0 件も確かめる。
+- テスト 19/19(debug / release、ハードウェアと WARP)。設計は 16 §1.1。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(19 ファイル)。
-- `job.py test` → 15/15(`-Filter fixed -Show` で GPU・WARP の要約 605bc2e41947d188 が CPU と一致)。
-- `job.py run -Preset release -Exe gpu_fixed_bench` → 29 演算の表(約 1 分)。`python3 tools/fixed_bench/dxil_count.py out/build/release/shaders/asm/bench` → DXIL の命令数。
-- `python3 tools/archmap/archmap.py --check` → OK(リンク 21 個)。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(22 ファイル)。
+- `job.py test` → 19/19。`-Filter gpu_debug -Show` でリングの行(`GPU print debug_ring_probe/Main:18 ...`)と DRED の記録が見える。
+- `job.py run -Preset release -Exe gpu_fixed_bench` → 29 演算の表(bench のシェーダーはリング無し)。
+- `python3 tools/archmap/archmap.py --check` → OK(リンク 25 個)。
 
 ## 壊れている/未確認のもの
-- 04 §6 の NVIDIA(SASS)は T-0016、RDNA3(ISA)は AMD 機(D-207)で。AMD での一致・費用は未確認。
-- GPU のテストは D3D12 のデバッグレイヤー無しで走っている。デバッグレイヤーと GBV は T-0003(次)。
+- DRED の「止まったコマンド」表示は本物のハング(TDR)で未確認(RemoveDevice では終わったリストの記録が残らない。16 §4)。
+- 04 §6 の NVIDIA(SASS)は T-0016、RDNA3(ISA)は AMD 機(D-207)で。
 - ベンチは GPU のクロックを固定していない(2 回の実行の差は数 %)。
 
 ## このチャットで決めたこと
-- ADR-0010 / D-322(整数の演算の書き方の方針)。決定 2(128÷64 と Q 形式の割り算をセルごとの毎刻みで使わない)は、速くなった後もそのまま。
-- ベンチの div128・divshift64 は除数を毎回変える(同じ除数だと、逆数を作る所がループの外へ出されて 75 になる)。
+- リングのバインドは u0 space1 のルートの UAV で固定(space0 はシェーダーが自由に使う)。容量 4096 件 / フレーム。有効なのは Debug のシミュのシェーダーだけ。
+- 書式の文字列は GPU に置かない(番号 + 整数の引数)。場所は書式の一覧に、刻み・セル・レコードの ID は引数で(T-0008 もこの形)。
+- ADR にはしていない(16 §1.1 に書いた。方針の変更ではなく実装の詳細)。
 
 ## 次にやること
-NEXT.md の先頭(T-0003 GPU デバッグ基盤)。
+NEXT.md の先頭(T-0004 窓とフレームループ)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **GPU のテストを足すとき**: tests/CMakeLists.txt の `bicameral_add_gpu_test(<名前>)` と `bicameral_add_gpu_test_case(<テスト名> <exe> <gpu|warp> <引数>)`。
@@ -50,3 +51,10 @@ NEXT.md の先頭(T-0003 GPU デバッグ基盤)。
   ただし `job.py raw` に渡す .ps1 は本文が埋め込まれるので BOM を付けない。
 - Windows の Python がパイプに書く文字は CP932 になる。ビルドの中で呼ぶ Python は `sys.stdout.reconfigure(encoding="utf-8")` する。
 - **fixed.hlsli の割り算を変えるとき**: 先に 64bit の剰余演算を Python で真似て突き合わせると早い(T-0084 はそうした)。fixed_test の `TestDivide128` が _udiv128 と境界まで比べる。
+- **デバッグのリングを使うシェーダー**: ルート署名を `gpu::CreateRootSignature(device, {.uavCount = n, .debugRing = true})` で作り、
+  `ring.RecordBegin(list)` → `SetComputeRootUnorderedAccessView(layout.DebugRingIndex(), ring.GpuAddress())` → 書く → `ring.RecordReadbackAndReset(list)` → 待つ → `ring.Drain()`。
+  fixed.hlsli を使うシミュのシェーダーは Debug で FX_ASSERT がリングを使うので、必ずリングを結ぶ(結ばないと PSO / 実行が壊れる)。
+- 書式を足すときは shaders/common/debug_formats.hlsli に `DEBUG_FORMAT(名前, チャンネル, 場所, 書式)` を 1 行。HLSL では `DebugFormat::名前`。
+- **HLSL で `line` は予約語**(ジオメトリシェーダーの修飾子)。変数名に使うと「modifiers must appear before type」になる。
+- debug layer は、デバイスを作った後に有効にするとデバイスが失われる。`gpu::Device::Create` は必ず最初のデバイスより前に設定する(1 プロセス 1 回の想定)。
+- `DebugRing` の読み戻しのバッファは 1 つ。フレームを重ねる(T-0004)ときはフレームごとに持たせる。
