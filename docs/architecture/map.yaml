@@ -21,12 +21,15 @@ views:
   - id: now
     title: 今動いているもの
     description: >-
-      起動して GPU の対応状況(SM 6.8 / DXR / Mesh / Work Graphs)を調べるところまで(T-0001)。
+      起動して GPU の対応状況(SM 6.8 / DXR / Mesh / Work Graphs)を調べるところまで(T-0001)と、
+      シミュの整数の数学ライブラリ(T-0010。GPU と CPU が同じソースで計算する)。
       Agility SDK は exe が 2 つの値をエクスポートすることで、OS の d3d12.dll に読み込ませる。
     direction: TD
     groups:
       - { id: exe, label: "bicameral.exe" }
       - { id: corelib, label: "core(どこからでも使う部品)" }
+      - { id: shared, label: "shaders/common(HLSL と C++ で共通)" }
+      - { id: tests, label: "テスト(ctest)" }
       - { id: os, label: "OS / ドライバ" }
     nodes:
       - { id: main, group: exe, label: "wmain()<br/>コマンドラインの振り分け", code: "engine/src/main.cpp::wmain" }
@@ -45,6 +48,14 @@ views:
           code: "engine/src/core/hresult.cpp::CheckHresult", doc: docs/decisions/ADR-0006-logging.md }
       - { id: sinks, group: corelib, label: "出力先<br/>コンソール / VS 出力 / logs/*.log",
           code: "engine/src/core/log_sinks.cpp::OpenLogFile", note: "ログは exe の横の logs/(ADR-0006)" }
+      - { id: fixed, group: shared, label: "整数の数学ライブラリ(fixed.hlsli)<br/>128bit 積・割り算・平方根・log/exp・sin/cos・乱数",
+          code: "shaders/common/fixed.hlsli::FxMulU64Full", ticket: T-0010, doc: docs/design/04-numerics-determinism.md,
+          note: "1 つのソースを HLSL と C++ で使う(D-307)" }
+      - { id: selftest, group: shared, label: "自己テスト(fixed_selftest)<br/>CPU と GPU が同じ列を計算",
+          code: "shaders/common/fixed_selftest.hlsli::FxSelfTestCase", ticket: T-0010,
+          note: "ビルドで DXC が通す。GPU で走らせて比べるのは T-0013" }
+      - { id: fixedtest, group: tests, label: "fixed_test<br/>128bit 組み込み関数とのビット一致・誤差の測定",
+          code: "tests/fixed_test.cpp::TestSelfTestDigest", ticket: T-0010 }
       - { id: d3d12, group: os, status: external, label: "d3d12.dll(OS)",
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
       - { id: core, group: os, status: external, label: "D3D12Core.dll<br/>Agility SDK 1.619",
@@ -61,75 +72,89 @@ views:
       - [caps, log, "結果"]
       - [checkhr, log, "Error"]
       - [log, sinks]
+      - [selftest, fixed]
+      - [fixedtest, selftest, "CPU で要約を作る"]
+      - [fixedtest, fixed]
 
   # ---------------------------------------------------------------------------------------------
   - id: frame
-    title: 1 フレームの流れ(計画)
+    title: 1 刻みとフレーム(計画)
     description: >-
-      CPU は入力を渡してコマンドリストを投げ、Present するだけ。世界の状態は VRAM に常駐し、
-      反応の連鎖は Work Graphs が実行時に決まる深さまで走り切る。GPU → CPU はブロックしないリングバッファ。
+      世界の状態と因果はすべて GPU(D-107)。CPU は入力をコマンドにして積み、Present するだけ。
+      シミュは compute キュー、描画は direct キューで並べて走らせ、同期は GPU のフェンスだけ。
+      1 刻み = 世界時間 1/60 秒。重いと世界の時間が遅くなるが、結果は変わらない(D-202・D-409)。
     direction: TD
     groups:
-      - { id: cpu, label: "CPU(薄い)" }
-      - { id: gpu, label: "GPU(世界の真実)" }
+      - { id: cpu, label: "CPU(View と Controller)" }
+      - { id: sim, label: "GPU の 1 刻み(compute キュー。docs/design/06 §2 の段)" }
+      - { id: view, label: "GPU の描画(direct キュー)" }
     nodes:
-      - { id: input, group: cpu, status: planned, label: "入力を GPU へ", ticket: T-0004 }
-      - { id: submit, group: cpu, status: planned, label: "事前記録のコマンドリストを投入", ticket: T-0004 }
+      - { id: input, group: cpu, status: planned, label: "入力 → コマンド<br/>(適用する刻みつき)", ticket: T-0004,
+          doc: docs/design/06-simulation-loop.md }
       - { id: present, group: cpu, status: planned, label: "Present", ticket: T-0004 }
-      - { id: audio, group: cpu, status: planned, label: "音の出力<br/>(見込み発音 → GPU の結果で確定)",
-          doc: docs/design/01-architecture.md }
-      - { id: hash, group: gpu, status: planned, label: "空間ハッシュ・近傍検索<br/>Compute",
-          doc: docs/design/01-architecture.md }
-      - { id: active, group: gpu, status: planned, label: "活性ノード選別<br/>Work Graphs",
-          doc: docs/design/01-architecture.md }
-      - { id: react, group: gpu, status: planned, label: "反応の連鎖(世代同期)<br/>Work Graphs",
-          doc: docs/design/02-reaction-system.md, ticket: T-0005,
-          note: "決定性は ADR-0003(提案中)" }
-      - { id: field, group: gpu, status: planned, label: "見た目の場(炎・煙・空気)<br/>Work Graphs でセルを Spawn/Destroy",
-          doc: docs/design/01-architecture.md }
-      - { id: contact, group: gpu, status: planned, label: "AVBD 接触生成<br/>Work Graphs",
-          doc: docs/decisions/ADR-0002-avbd-execution.md }
-      - { id: solve, group: gpu, status: planned, label: "AVBD ソルバー(色 × 反復)<br/>Compute",
-          doc: docs/decisions/ADR-0002-avbd-execution.md, note: "ADR-0002(提案中)" }
-      - { id: draw, group: gpu, status: planned, label: "Visibility Buffer 描画", doc: docs/design/01-architecture.md }
-      - { id: sound, group: gpu, status: planned, label: "音の種類を決める<br/>(反応の出力)", doc: docs/design/01-architecture.md }
-      - { id: ring, group: gpu, status: planned, label: "GPU → CPU リングバッファ<br/>音イベント・UI・デバッグ出力",
+      - { id: audio, group: cpu, status: planned, label: "音・UI<br/>(リングを 1〜3 フレーム遅れで読む)",
+          doc: docs/design/11-audio.md }
+      - { id: command, group: sim, status: planned, label: "1 コマンド適用<br/>Compute", doc: docs/design/06-simulation-loop.md }
+      - { id: active, group: sim, status: planned, label: "2 活性の整理<br/>Work Graphs", doc: docs/design/05-world-data.md }
+      - { id: transport, group: sim, status: planned, label: "3 輸送(熱・気体・水・魔素)<br/>測って安い方(D-302)",
+          ticket: T-0005, doc: docs/design/07-transport.md, note: "M1 はクリックした点から熱が伝わるだけ" }
+      - { id: react, group: sim, status: planned, label: "4 反応<br/>Work Graphs", doc: docs/design/02-reaction-system.md }
+      - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
+          doc: docs/design/08-bodies-physics.md, note: "研究 R-PHYS" }
+      - { id: creatures, group: sim, status: planned, label: "6 生き物", doc: docs/design/09-creatures-animation.md }
+      - { id: couple, group: sim, status: planned, label: "7 結合(物 ↔ 場)", doc: docs/design/08-bodies-physics.md }
+      - { id: coarse, group: sim, status: planned, label: "8 粗い層(60 刻みに 1 回)", doc: docs/design/05-world-data.md }
+      - { id: check, group: sim, status: planned, label: "9 検査と出力<br/>保存則・状態のハッシュ・リング",
+          doc: docs/design/16-debug-test.md }
+      - { id: ring, group: sim, status: planned, label: "GPU → CPU の待たないリング<br/>イベント・スナップショット・デバッグ",
           ticket: T-0003 }
+      - { id: extract, group: view, status: planned, label: "描画用の抽出(2 組)", doc: docs/design/10-rendering.md }
+      - { id: draw, group: view, status: planned, label: "Visibility Buffer・PBR・ReSTIR", doc: docs/design/10-rendering.md }
+      - { id: math, group: sim, label: "整数の数学ライブラリ<br/>(全部の段が使う)", code: "shaders/common/fixed.hlsli::FxMulU64Full",
+          ticket: T-0010 }
     edges:
-      - [input, submit]
-      - [submit, hash]
-      - [hash, active]
-      - [active, react]
-      - [react, field]
-      - [react, contact, "破壊・変形"]
-      - [contact, solve]
-      - [field, draw]
-      - [solve, draw]
-      - [react, sound]
-      - [sound, ring]
+      - [input, command, "コマンドキュー"]
+      - [command, active]
+      - [active, transport]
+      - [transport, react]
+      - [react, physics]
+      - [physics, creatures]
+      - [creatures, couple]
+      - [couple, coarse]
+      - [coarse, check]
+      - [check, ring]
+      - [check, extract]
+      - [extract, draw]
       - [draw, present]
       - [ring, audio, "", async]
+      - [react, math]
 
   # ---------------------------------------------------------------------------------------------
   - id: data
     title: データの流れ(計画)
     description: >-
-      反応則はエディタ(CPU)で書き、GPU 用のバイナリにベイクする。ランタイムは起動時に VRAM へ載せたら、
-      以後 CPU には戻さない。魔法は Circuit Table へのパッチ。
+      ゲームを作る人が触るものは全部 Luau(D-318)。エディタが整数の表にベイクし(保存則を検査)、GPU に載せる。
+      世界は決定的な生成 + 差分(D-312)。魔法は刻みの境界で適用される表へのパッチ(コマンド)。
     direction: LR
     groups:
       - { id: tool, label: "エディタ・ツール(CPU を好きなだけ使う)" }
-      - { id: rt, label: "ランタイム" }
+      - { id: rt, label: "ランタイム(GPU)" }
     nodes:
-      - { id: rules, group: tool, status: planned, label: "反応則を書く<br/>(Luau)", doc: docs/design/02-reaction-system.md }
-      - { id: bake, group: tool, status: planned, label: "ベイク", doc: docs/design/01-architecture.md }
-      - { id: table, group: rt, status: planned, label: "Circuit Table / 世界データ<br/>(バイナリ)", ticket: T-0002 }
-      - { id: dstorage, group: rt, status: planned, label: "DirectStorage で VRAM へ", doc: docs/design/01-architecture.md }
-      - { id: vram, group: rt, status: planned, label: "VRAM 常駐の世界", doc: docs/decisions/ADR-0001-gpu-resident-runtime.md }
-      - { id: magic, group: rt, status: planned, label: "魔法<br/>= 反応則へのパッチ", doc: docs/design/02-reaction-system.md }
+      - { id: luau, group: tool, status: planned, label: "反応則・生き物・進行を書く<br/>(Luau)",
+          doc: docs/design/13-scripting-game-model.md }
+      - { id: bake, group: tool, status: planned, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
+          doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)" }
+      - { id: table, group: rt, status: planned, label: "反応表・物質の表<br/>(版つきのバイナリ)", ticket: T-0002 }
+      - { id: gen, group: rt, status: planned, label: "決定的な生成(シード)+ 差分", doc: docs/design/05-world-data.md }
+      - { id: vram, group: rt, status: planned, label: "多重解像度の疎な木<br/>(VRAM 常駐の世界)",
+          doc: docs/design/17-multiresolution.md }
+      - { id: magic, group: rt, status: planned, label: "魔法<br/>= 表へのパッチ + 魔素を使う放出", doc: docs/design/02-reaction-system.md }
+      - { id: save, group: tool, status: planned, label: "セーブ・再生ファイル<br/>(差分 + コマンドの列)",
+          doc: docs/design/15-save-replay-mods.md }
     edges:
-      - [rules, bake]
+      - [luau, bake]
       - [bake, table]
-      - [table, dstorage]
-      - [dstorage, vram]
+      - [table, vram]
+      - [gen, vram]
       - [magic, vram, "触媒・阻害・転換・増幅"]
+      - [vram, save, "差分"]

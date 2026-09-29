@@ -8,6 +8,11 @@ add_library(bicameral_core STATIC
 )
 target_include_directories(bicameral_core PUBLIC src)
 
+# --- fixed: シミュの整数の数学ライブラリ(shaders/common/*.hlsli を C++ からも読む。04 §3)---
+# CPU のリファレンス・ベイク・テストがこれを使い、GPU のシェーダーと同じソースで計算する(D-307)
+add_library(bicameral_fixed INTERFACE)
+target_include_directories(bicameral_fixed INTERFACE ${PROJECT_SOURCE_DIR}/shaders)
+
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp

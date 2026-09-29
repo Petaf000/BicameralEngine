@@ -2,9 +2,11 @@
 # テスト: ctest。GPU テスト(CPU リファレンスとの突き合わせ)もここで回す。
 #   job.py test
 #   job.py test -Filter reaction
+#   job.py test -Filter fixed -Show     # テストが表示した行(誤差の測定値など)も出す
 param(
   [ValidateSet('debug', 'release', 'profile')][string]$Preset = 'debug',
-  [string]$Filter = ''
+  [string]$Filter = '',
+  [switch]$Show
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\_vsenv.ps1"
@@ -12,5 +14,6 @@ $ErrorActionPreference = 'Stop'
 $ErrorActionPreference = 'Continue'
 $a = @('--preset', $Preset, '--output-on-failure')
 if ($Filter) { $a += @('-R', $Filter) }
+if ($Show) { $a += @('-V') }
 ctest @a
 exit $LASTEXITCODE

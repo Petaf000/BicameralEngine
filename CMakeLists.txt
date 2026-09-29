@@ -28,6 +28,7 @@ find_package(directx-dxc CONFIG REQUIRED)        # シェーダーコンパイ�
 message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
 
 add_subdirectory(engine)
+add_subdirectory(shaders)
 
 enable_testing()
 add_subdirectory(tests)

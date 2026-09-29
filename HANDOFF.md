@@ -1,38 +1,35 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0009(ゴールから全部決める)— 完了(レビュー 1 反映済み)
+最終更新: 2026-09-30 / チケット: T-0010(整数の数学ライブラリ)— 完了
 
 ## 状態(3 行以内)
-- ユーザーの指示「何か作る前に、ゴールから全部決める」(ADR-0007)で、L0〜L3 をユーザーと決定(docs/plan/DECISIONS.md、D-001〜D-321)。
-- L4 詳細設計(docs/design/02・04〜16)、L5 ロードマップ(docs/plan/ROADMAP.md)、L6 運用(CLAUDE.md 原則 8、BACKLOG.md)を書いた。
-- レビュー 1 を反映(D-401〜D-422): 多重解像度(分子まで・観測と介入。17)、体積の物と任意の破壊(08)、上限なし、研究に時間の打ち切りなし、魔法具(18)。
-  ROADMAP は M1「原理の確認」(クリック → Work Graphs で自動伝播・化学・角ばった箱の物理・多重解像度)から始める。
+- M1「原理の確認」の最初のチケット T-0010 が完了。シミュの整数の数学を HLSL と C++ の共通のソース(shaders/common/fixed.hlsli)で書いた。
+- CPU のテスト(fixed_test)で 128bit の組み込み関数とビット一致・誤差を実測。GPU で同じ列を計算して比べるのは T-0013。
+- 図(docs/architecture/map.yaml)を新しい設計(06 の 1 刻みの段・02 のベイク)に合わせて直した。
 
 ## 動いているもの(確認方法つき)
-- コードは T-0007 から変えていない。`job.py build` / `job.py test`(3/3)/ `job.py run -- --caps` は前回のまま。
-- `python3 tools/archmap/archmap.py --check`(Linux 側)→ OK
+- `job.py build`(debug / release とも警告なし)→ DXC が shaders/sim/fixed_selftest.hlsl を cs_6_8 で通す(bin/shaders/fixed_selftest.cso)。
+- `job.py test`(4/4)。`job.py test -Filter fixed -Show` で誤差の実測と自己テストの要約(65536 件、85c154e666febd92)が出る。
+- `python3 tools/archmap/archmap.py --check`(Linux 側)→ OK(リンク 12 個)。
+- `job.py run -- --caps` は前回のまま(コードは変えていない)。
 
 ## 壊れている/未確認のもの
-- 図(docs/architecture/map.yaml)はまだ旧設計のまま(ノードの名前・チケット番号)。M1 の最初(T-0010)で新しい設計に合わせて直す。
-- 未確認の一覧は各設計文書の「未確認」(int64 と 64bit atomic・compute キューでの DispatchGraph・WARP の Work Graphs → T-0013)。
+- fixed.hlsli の GPU での実行結果と速さは未確認(T-0013 で自己テストのシェーダーを走らせ、要約 85c154e666febd92 と比べる)。
+- シェーダーのビルドは自己テスト 1 本だけの仮の仕組み(shaders/CMakeLists.txt)。一般化と DXIL の float 検査は T-0011。
 
 ## このチャットで決めたこと
-- ゴールは販売(D-001)。ゲームの中身はすべてユーザーが決める。エンジン公開・ゲーム非公開(D-006)。
-- Model は全部 GPU、View と Controller は CPU(D-107、ADR-0001 改訂)。
-- 機種が違っても完全に同じ結果。シミュは物理も含めて整数(D-205、ADR-0008)。SI 単位と保存則(D-206)。
-- シミュに上限なし、重いと世界の時間が遅くなる(D-201・D-202)。エンジンに固定の上限を置かない(D-401)。どんな細かさでもシームレス(D-402)、見るだけなら変わらず触れば変わる(D-403)。
-- 理想(完全 GPU 駆動のエンジンと構想しているゲーム)を下げない(D-414)。研究に時間の打ち切りを置かない(D-411)。
-- できる限り Work Graphs、同等なら測って安い方(D-302、ADR-0002 Accepted)。ADR-0003 Accepted。
+- 丸めは積も割り算も 0 方向の切り捨てで統一。角度は 1 周 = 2^32(04 §2 に行を足した)。log・exp は Q32。
+- exp2・log2 はビットごとの方法(定数表はソースに書く)。精度は 04 の目標を満たした。速さが足りなければ多項式へ(04「研究」)。
 
 ## 次にやること
-NEXT.md の先頭(M1 の T-0010 から)。
+NEXT.md の先頭(T-0011 シェーダーのビルドの仕組みと float の検査)。
 
 ## 注意(次の Claude がハマりそうな所)
-- **レビューの回答を反映する時**: 答えを DECISIONS.md に D-ID で足す → 影響する設計文書と ROADMAP を直す → REVIEW.md の該当項目に「→ D-xxx」を書く。
-- 旧チケット T-0003/0004/0005/0008 は範囲を見直し済み(マイルストーンの行あり)。新しいチケット(T-0010〜)は ROADMAP の表にあり、着手時にファイルを作る。
-- **公開リポジトリ。** 鍵(.bicameral-runner/)・CLAUDE.local.md・PC 固有のパスをコミットしない。ゲームの中身(製品の反応表など)も公開側に入れない(D-006)。
-- 鍵は `H:\BicameralEngine\.bicameral-runner\key.txt` にもある(.gitignore 済み)。
-- Linux 側の整形: `python3 -m pip install --user clang-format==23.1.1` → `~/.local/bin/clang-format -i`(セッションごとに入れ直し)。
+- **fixed.hlsli の約束**: 64bit の定数は `FX_U64(上位, 下位)`、関数は `FX_FN`(C++ では constexpr)、定数は `FX_CONST`。桁あふれしうる計算は符号なしで。
+  clang-format は `FX_NAMESPACE_BEGIN` を名前空間と知らないので、中身は字下げされない(それで良い)。
+- 自己テストに関数を足したら `FX_SELF_TEST_OUTPUT_COUNT` を増やす。要約の値が変わるので、T-0013 の比べる値も合わせる。
+- **公開リポジトリ。** 鍵(.bicameral-runner/)・CLAUDE.local.md・PC 固有のパスをコミットしない。ゲームの中身も公開側に入れない(D-006)。
+- Linux 側の整形: `python3 -m pip install --user clang-format==23.1.1` → `~/.local/bin/clang-format -i`(セッションごとに入れ直し)。archmap の検査には pyyaml も入れる。
 - `.github/` 以下は device_commit_files では書けない(保護)。runner/staging/ に書いてから device_bash で cp する。
 - runner の結果 JSON(runner/logs/*.result.json)を cat しない。job.py の要約か .log を grep する。
-- 外部コマンドを呼ぶ .ps1 で `$ErrorActionPreference='Stop'` にしない(PS 5.1 は stderr の警告で止まる)。
+- 外部コマンドを呼ぶ .ps1 で `$ErrorActionPreference='Stop'` にしない(PS 5.1 は stderr の警告で止まる)。.ps1 は UTF-8(BOM 付き)+ CRLF。
