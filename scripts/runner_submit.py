@@ -15,8 +15,8 @@ runner_submit.py — Claude 側(device_bash の Linux 環境)から Windows の�
 出力はコンテキストを食わないように要約する: 終了コード・時間・エラー行・末尾 N 行・成果物パス。
 ログ全文が要るときだけ runner/logs/<job>.log を grep / 範囲指定で読む。
 
-鍵: PC の %USERPROFILE%\.bicameral-runner\key.txt(固定)。チャットの最初にそのフォルダの接続を求めて読む。
-    探す順: 環境変数 BICAMERAL_KEYFILE → ~/.bicameral-runner-key → ~/mnt/.bicameral-runner/key.txt
+鍵: <リポジトリ>/.bicameral-runner/key.txt(固定・git 管理外)。リポジトリのフォルダを接続すれば直接読める。
+    探す順: 環境変数 BICAMERAL_KEYFILE → <ルート>/.bicameral-runner/key.txt → ~/.bicameral-runner-key
     鍵をリポジトリ・メモリ・文書に書き写さない。
 ルート: 環境変数 BICAMERAL_ROOT(既定 ~/mnt/BicameralEngine)
 """
@@ -24,10 +24,11 @@ import hashlib, hmac, json, os, sys, time, datetime, re, pathlib
 
 ROOT = pathlib.Path(os.environ.get("BICAMERAL_ROOT", os.path.expanduser("~/mnt/BicameralEngine")))
 RUNNER = ROOT / "runner"
+# リポジトリの中の鍵を先に見る(-RotateKey で作り直されても読み直しが要らない)
 KEY_CANDIDATES = [p for p in [
     os.environ.get("BICAMERAL_KEYFILE"),
+    str(ROOT / ".bicameral-runner" / "key.txt"),
     os.path.expanduser("~/.bicameral-runner-key"),
-    os.path.expanduser("~/mnt/.bicameral-runner/key.txt"),
 ] if p]
 JOBS = {"build", "test", "run", "git", "env", "tidy"}   # scripts/jobs/<name>.ps1
 
@@ -40,8 +41,8 @@ def die(msg, code=2):
 def load_key():
     found = next((pathlib.Path(p) for p in KEY_CANDIDATES if pathlib.Path(p).exists()), None)
     if not found:
-        die("鍵が見つかりません。PC の %USERPROFILE%\\.bicameral-runner フォルダの接続を依頼し、"
-            "マウント先の key.txt を BICAMERAL_KEYFILE で指定してください(ランナーを一度も起動していなければ key.txt はまだ無い)。")
+        die("鍵が見つかりません。リポジトリのフォルダが接続されているか、<リポジトリ>/.bicameral-runner/key.txt があるかを確かめてください"
+            "(ランナーを一度も起動していなければ key.txt はまだ無い)。")
     k = found.read_text(encoding="utf-8-sig").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", k):
         die("鍵の形式が不正です(64 桁の16進数)。")
@@ -69,7 +70,7 @@ def check_runner(k):
     if d.get("state") == "stopped":
         die("ランナーは停止しています。ユーザーにランナーの起動を頼んでください。")
     if d.get("keyId") != key_id(k):
-        die(f"鍵 ID が一致しません(ランナー {d.get('keyId')} / 手元 {key_id(k)})。鍵が作り直された(-RotateKey)可能性があります。key.txt を読み直してください。")
+        die(f"鍵 ID が一致しません(ランナー {d.get('keyId')} / 手元 {key_id(k)})。BICAMERAL_KEYFILE や ~/.bicameral-runner-key の古い鍵を使っていないか確かめ、ランナーを起動し直してください。")
     # PC 側の時計とタイムゾーンがずれている可能性があるので、古さは警告にとどめる
     if not str(d.get("state", "")).startswith("running") and abs(age) > 120:
         print(f"[job] 注意: heartbeat が {int(age)} 秒前(時計ずれ or ランナー停止の可能性)")

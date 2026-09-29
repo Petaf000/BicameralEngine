@@ -27,9 +27,9 @@
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File H:\BicameralEngine\runner\runner.ps1
    ```
-   初回に固定の鍵が `%USERPROFILE%\.bicameral-runner\key.txt` に作られる(以後ずっと同じ)。
+   初回に固定の鍵が `H:\BicameralEngine\.bicameral-runner\key.txt` に作られる(以後ずっと同じ。git 管理外)。
 2. デスクトップアプリで、プロジェクトの新しいチャットに「続き」と送る。
-   フォルダ 2 つ(リポジトリと鍵フォルダ)の接続許可が出るので承認する。鍵を貼る必要はない。
+   リポジトリのフォルダの接続許可が出るので承認する。鍵を貼る必要はない。
 3. 使わないときはランナーのウィンドウを閉じる(閉じている間は、どのチャットからも実行できない)。
    鍵を作り直すときは `runner.ps1 -RotateKey`。
 

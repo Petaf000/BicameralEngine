@@ -50,11 +50,12 @@
 
 ### ランナー
 
-- 鍵は固定で、PC の `%USERPROFILE%\.bicameral-runner\key.txt` にある。ユーザーは貼らない。
-  チャットの最初に `~/.bicameral-runner` フォルダの接続を依頼し、device_bash でマウント先の key.txt を読んで
-  `~/.bicameral-runner-key` にコピー(chmod 600)する。`scripts/runner_submit.py` を `~/job.py` にコピーする。
-- **鍵の中身をリポジトリ・文書・コミット・メモリ・返答に書かない。**
-- `job.py check` が「鍵 ID が一致しません」と言ったら、鍵が作り直された(-RotateKey)。key.txt を読み直す。
+- 鍵は固定で、リポジトリの `.bicameral-runner/key.txt` にある(git 管理外。runner.ps1 が初回に作る。2026-09-30 ユーザー決定)。
+  ユーザーは貼らない。別のフォルダの接続も要らない。`scripts/runner_submit.py` を `~/job.py` にコピーすれば、
+  job.py が `$HOME/mnt/BicameralEngine/.bicameral-runner/key.txt` を直接読む(コピーしない。-RotateKey 後も読み直し不要)。
+- **鍵の中身をリポジトリ・文書・コミット・メモリ・返答に書かない。** cat しない。`.bicameral-runner/` を git に入れない。
+- `job.py check` が「鍵 ID が一致しません」と言ったら、古い鍵(BICAMERAL_KEYFILE・~/.bicameral-runner-key)を見ていないか確かめ、
+  それでも合わなければユーザーにランナーの起動し直しを頼む。
 - 「停止しています / heartbeat がありません」なら、ユーザーにランナーの起動だけを頼む。
 - コマンド: `job.py check` / `env` / `build [-Preset release] [-Clean]` / `test [-Filter x]` / `tidy [-Preset p]`(clang-tidy。先に build)/ `run [-Preset p] -- <args>` / `git <args>` / `raw <file.ps1>`
 - `raw` は最後の手段。繰り返し使うことになったら scripts/jobs/ にジョブとして足す。
@@ -92,7 +93,7 @@
 4. NEXT.md の先頭を次にやることに更新
 5. `job.py git add -A` → `job.py git commit -m "<チケットID>: <要約>"`
 6. ユーザーに次の 1 行を返して終える:
-   > 引き継ぎを書きました。新しいチャットで「続き」と送ってください(ランナーの鍵も一緒に)。
+   > 引き継ぎを書きました。新しいチャットで「続き」と送ってください。
 
 **区切りのたびに HANDOFF.md を更新しておく**(途中でチャットが切れても失うものがないように)。
 

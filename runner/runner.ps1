@@ -9,10 +9,9 @@
   止め方: ウィンドウを閉じる / Ctrl+C / runner\STOP を置く
 
   鍵(固定):
-    - %USERPROFILE%\.bicameral-runner\key.txt。初回起動時に作り、以後ずっと同じ鍵を使う
-    - Claude はチャットの最初にこのフォルダの接続許可を求め、鍵を自分で読む(ユーザーが貼る必要はない)
-      → 「ランナーが動いていて、鍵フォルダの接続を許可したチャット」だけがジョブを実行できる
-    - リポジトリのフォルダだけを接続したチャットは、ファイルは編集できてもジョブは実行できない
+    - <リポジトリ>\.bicameral-runner\key.txt。初回起動時に作り、以後ずっと同じ鍵を使う
+    - git 管理外(.gitignore)。Claude はリポジトリのフォルダの接続だけで鍵を読める(ユーザーが貼る必要はない)
+      → 「ランナーが動いていて、リポジトリのフォルダを接続したチャット」がジョブを実行できる
     - 鍵を作り直すとき: -RotateKey(以前の鍵で署名されたジョブは拒否される)
 
   その他の仕組み:
@@ -53,8 +52,8 @@ foreach ($n in 'queue', 'running', 'done', 'rejected', 'logs', 'out') {
 }
 Remove-Item -LiteralPath (Join-Path $Root 'STOP') -ErrorAction SilentlyContinue
 
-# ---- 固定鍵(Claude が触れるリポジトリの外) ----
-$KeyDir  = Join-Path $env:USERPROFILE '.bicameral-runner'
+# ---- 固定鍵(リポジトリの中の git 管理外。PC 固有のパスを書かないよう $Project から作る) ----
+$KeyDir  = Join-Path $Project '.bicameral-runner'
 $KeyFile = Join-Path $KeyDir 'key.txt'
 if ($RotateKey -or -not (Test-Path $KeyFile)) {
   New-Item -ItemType Directory -Force -Path $KeyDir | Out-Null
