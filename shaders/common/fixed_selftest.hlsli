@@ -9,7 +9,7 @@
 
 FX_NAMESPACE_BEGIN
 
-FX_CONST uint32_t FX_SELF_TEST_OUTPUT_COUNT = 18;
+FX_CONST uint32_t FX_SELF_TEST_OUTPUT_COUNT = 21;
 
 struct FxSelfTestOutput {
     uint64_t values[FX_SELF_TEST_OUTPUT_COUNT];
@@ -61,6 +61,11 @@ FX_FN FxSelfTestOutput FxSelfTestCase(uint64_t a, uint64_t b) {
     output.values[15] = ((uint64_t)(uint32_t)sinCos.sine << 32) | (uint64_t)(uint32_t)sinCos.cosine;
     output.values[16] = FxHash64(a, b, a ^ b, (uint32_t)b);
     output.values[17] = FxMsbU64(a | 1);
+
+    // --- 逆数の掛け算(除数 0 は 1 にする。INT64_MIN / −1 を避けるため被除数を 1 ビットずらす)---
+    output.values[18] = FxDivRecipU64(a, FxMakeRecipU64(b == 0 ? 1 : b));
+    output.values[19] = (uint64_t)FxDivRecipS64(signedA >> 1, FxMakeRecipS64(signedB == 0 ? 1 : signedB));
+    output.values[20] = FxDivRecipU32((uint32_t)a, FxMakeRecipU32((uint32_t)b == 0 ? 1 : (uint32_t)b));
     return output;
 }
 

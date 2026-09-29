@@ -187,6 +187,80 @@ FX_FN int64_t FxDivS64(int64_t a, int64_t b) {
     return FxApplySign(FxAbsU64(a) / FxAbsU64(b), (a < 0) != (b < 0));
 }
 
+// --- 逆数の掛け算(同じ除数で何度も割る所の割り算を、掛け算とシフトに置き換える)--------------------------
+// Granlund & Montgomery(1994)の「除数が不変な割り算」の方法。除数 d から逆数(乗数とシフト)を 1 回作っておけば、
+// どの被除数 n でも floor(n / d) を**厳密に**返す(近似ではない。FxDivS64 などと結果がビット単位で同じ)。
+// 乗数 m' = floor(2^N × (2^l − d) / d) + 1(l = ceil(log2 d))、商 = (t + ((n − t) >> min(l, 1))) >> max(l − 1, 0)、t = mulhi(m', n)。
+// 逆数を作るのは割り算 1 回分の費用なので、除数がベイクの定数か、多くのセルで共有される値のときに使う(04 §6)。
+struct FxRecip64 {
+    uint64_t multiplier;
+    uint32_t shift1;
+    uint32_t shift2;
+};
+
+struct FxRecip32 {
+    uint32_t multiplier;
+    uint32_t shift1;
+    uint32_t shift2;
+};
+
+// 符号つき: 除数の大きさの逆数と、除数の符号
+struct FxRecipS64 {
+    FxRecip64 magnitude;
+    bool negative;
+};
+
+// ceil(log2 d)(d ≥ 1)。d = 1 なら 0
+FX_FN uint32_t FxCeilLog2U64(uint64_t value) {
+    FX_ASSERT(value != 0);
+    return value == 1 ? 0 : FxMsbU64(value - 1) + 1;
+}
+
+FX_FN FxRecip64 FxMakeRecipU64(uint64_t divisor) {
+    FX_ASSERT(divisor != 0);
+    const uint32_t ceilLog2 = FxCeilLog2U64(divisor);
+    // 2^l − d。l = 64 のときも符号なしの桁あふれで正しく 2^64 − d になる(2^l − d < d なので商は 64bit に収まる)
+    const uint64_t powerOfTwo = ceilLog2 == 64 ? (uint64_t)0 : ((uint64_t)1 << ceilLog2);
+    const FxU128 numerator = {powerOfTwo - divisor, 0};
+    FxRecip64 recip = {FxDivU128By64(numerator, divisor).quotient + 1, ceilLog2 < 1 ? ceilLog2 : 1,
+                       ceilLog2 > 1 ? ceilLog2 - 1 : 0};
+    return recip;
+}
+
+// floor(n / d)。FxMakeRecipU64(d) で作った逆数を使う
+FX_FN uint64_t FxDivRecipU64(uint64_t numerator, FxRecip64 recip) {
+    const uint64_t high = FxMulHiU64(recip.multiplier, numerator);
+    return (high + ((numerator - high) >> recip.shift1)) >> recip.shift2;
+}
+
+FX_FN FxRecip32 FxMakeRecipU32(uint32_t divisor) {
+    FX_ASSERT(divisor != 0);
+    const uint32_t ceilLog2 = FxCeilLog2U64(divisor);
+    const uint64_t powerOfTwo = (uint64_t)1 << ceilLog2;  // l ≤ 32
+    const uint64_t multiplier = ((powerOfTwo - divisor) << 32) / divisor + 1;
+    FX_ASSERT(multiplier <= FX_LOW32_MASK);
+    FxRecip32 recip = {(uint32_t)multiplier, ceilLog2 < 1 ? ceilLog2 : 1, ceilLog2 > 1 ? ceilLog2 - 1 : 0};
+    return recip;
+}
+
+// floor(n / d)(32bit)。上位 32bit の積は 64bit の掛け算 1 回
+FX_FN uint32_t FxDivRecipU32(uint32_t numerator, FxRecip32 recip) {
+    const uint32_t high = (uint32_t)(((uint64_t)recip.multiplier * numerator) >> 32);
+    return (high + ((numerator - high) >> recip.shift1)) >> recip.shift2;
+}
+
+FX_FN FxRecipS64 FxMakeRecipS64(int64_t divisor) {
+    FX_ASSERT(divisor != 0);
+    FxRecipS64 recip = {FxMakeRecipU64(FxAbsU64(divisor)), divisor < 0};
+    return recip;
+}
+
+// 0 方向に切り捨てた a / d。FxDivS64(a, d) とビット単位で同じ(商の桁あふれ INT64_MIN / −1 は FX_ASSERT)
+FX_FN int64_t FxDivRecipS64(int64_t numerator, FxRecipS64 recip) {
+    const bool negative = (numerator < 0) != recip.negative;
+    return FxApplySign(FxDivRecipU64(FxAbsU64(numerator), recip.magnitude), negative);
+}
+
 // --- 平方根(桁ごとの方法。入力のビットだけで決まる)-------------------------------------------
 // floor(sqrt(value))。いつも 32 回まわす(GPU で分岐のばらつきを減らす)
 FX_FN uint32_t FxSqrtU64(uint64_t value) {

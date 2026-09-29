@@ -70,6 +70,9 @@ views:
       - { id: gpufixedtest, group: tests, label: "gpu_fixed_test<br/>自己テストを GPU で走らせ CPU と 1 値ずつ比べる",
           code: "tests/gpu_fixed_test.cpp::CompareWithCpu", ticket: T-0013,
           note: "ハードウェアと WARP、debug(-Od)と release で一致" }
+      - { id: fixedbench, group: tests, label: "gpu_fixed_bench<br/>整数のルーチンの費用(タイムスタンプ)",
+          code: "tests/gpu_fixed_bench.cpp::Measure", ticket: T-0010, doc: docs/design/04-numerics-determinism.md,
+          note: "ctest に入れない計測。shaders/bench を演算ごとにコンパイル。DXIL の命令数は tools/fixed_bench/dxil_count.py" }
       - { id: wgtest, group: tests, label: "gpu_work_graph_test<br/>Root → Leaf の最小のグラフ",
           code: "tests/gpu_work_graph_test.cpp::RunGraph", ticket: T-0013,
           note: "direct / compute キュー × ハードウェア / WARP。64bit atomic" }
@@ -107,6 +110,9 @@ views:
       - [gpufixedtest, gpudevice]
       - [gpufixedtest, immediate, "compute キュー"]
       - [gpufixedtest, selftest, "GPU(.cso)と CPU で同じ列"]
+      - [fixedbench, fixed, "演算ごとの .cso(shaders/bench)"]
+      - [fixedbench, immediate, "タイムスタンプ"]
+      - [addshader, fixedbench, "DEFINES で変種"]
       - [wgtest, workgraph]
       - [wgtest, immediate, "direct / compute"]
       - [gpudevice, d3d12]

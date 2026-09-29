@@ -35,6 +35,10 @@ bicameral_add_gpu_test(gpu_fixed_test)
 bicameral_add_gpu_test_case(gpu_fixed gpu_fixed_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_fixed_warp gpu_fixed_test warp --warp --queue compute)
 
+# 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
+# 走らせ方: job.py run -Preset release -Exe gpu_fixed_bench
+bicameral_add_gpu_test(gpu_fixed_bench)
+
 bicameral_add_gpu_test(gpu_work_graph_test)
 bicameral_add_gpu_test_case(gpu_work_graph_direct gpu_work_graph_test gpu --queue direct)
 bicameral_add_gpu_test_case(gpu_work_graph_compute gpu_work_graph_test gpu --queue compute)

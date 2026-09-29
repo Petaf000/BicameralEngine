@@ -1,6 +1,6 @@
 # T-0010 整数の数学ライブラリ(HLSL と C++ で共通のソース)・単位の表・単体テスト
 
-- Status: Doing(2026-09-30 に計測を追加。GPU で走らせる仕組みは T-0013 で作るので、T-0013 の後に行う)
+- Status: Done(2026-09-30。追加分の SASS・RDNA3 の命令数は BACKLOG へ)
 - 種類: 工学(exp・log の精度と速さの目標は研究。04「研究」)
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -20,8 +20,8 @@
       exp・log・sin・cos は double との誤差の最大値を測って上限以内(値は perf.md ではなくこのチケットのログに残す)、乱数は既知の値と雪崩の性質
 - [x] 図(docs/architecture/map.yaml)を新しい設計(06 の 1 刻みの段・02 のベイク)に合わせて直す(NEXT.md 2)
 - [x] GPU で走らせて CPU とビット一致 → **T-0013 に回す**(int64 の対応を確かめるチケットで、この自己テストのシェーダーを GPU で走らせる)
-- [ ] (2026-09-30 追加)ルーチンごとの命令数(DXIL と、NVIDIA・RDNA3 の命令列。RDNA3 は Radeon GPU Analyzer でオフラインで出す)と、
-      3070 Ti での実測を表にして 04 §6 に載せる
+- [x] (2026-09-30 追加)ルーチンごとの命令数(DXIL)と 3070 Ti での実測を表にして 04 §6 に載せる。逆数の掛け算を足してビット一致を確かめる
+- [ ] 同じ表の NVIDIA(SASS)・RDNA3(ISA)の命令数 → BACKLOG(Nsight Graphics の GUI・RGA のインストールが要る。ユーザーと決める)
 
 ## 作業(2026-09-30 追加)
 - 各ルーチンのマイクロベンチ: 掛け算とシフト・割り算・逆数の掛け算・平方根・指数・int64 の四則(比べるために 32bit と float も)。
@@ -41,3 +41,7 @@
   実測: log2 ≤ 1.0 × 2^-32、ln ≤ 1.7 × 2^-32、exp2 の相対誤差 ≤ 2.2e-16、exp ≤ 1.6e-10、sin/cos ≤ 17.6 × 2^-30、乱数の雪崩 31.99 ビット・カイ 2 乗 4.89。
   `job.py test -Filter fixed -Show` でテストの表示(測定値)も見られるようにした。図を 06 の 1 刻みの段・02 のベイクに合わせて直した。
   持ち越し: GPU での実行と速さ → T-0013、レベルごとの単位の余り → T-0017(BACKLOG)。
+- 2026-09-30(追加分): fixed.hlsli に逆数の掛け算(FxMakeRecip*/FxDivRecip*、Granlund-Montgomery)を足し、fixed_test(境目と乱数)と
+  GPU の自己テスト(21 値、要約 605bc2e41947d188、3070 Ti・WARP)でビット一致。マイクロベンチ shaders/bench/fixed_bench.hlsl(演算ごとに DXC、
+  bicameral_add_shader に NAME・DEFINES・FLAGS)と tests/gpu_fixed_bench.cpp(タイムスタンプ、ctest 外)、DXIL の数え方 tools/fixed_bench/dxil_count.py。
+  結果(fmul = 1): int64 の割り算 113・逆数 33、128÷64 1925、exp2 553・log2 1190 → 04 §6 と perf.md。128÷64 の高速化と SASS/RGA は BACKLOG。

@@ -23,6 +23,9 @@ namespace bicameral::gpu {
         // 記録を閉じて投げ、GPU が終えるまで待つ。記録の誤りやデバイスの喪失なら false(理由はログ)
         [[nodiscard]] bool ExecuteAndWait();
 
+        // タイムスタンプの周波数を得るなど、キューそのものが要るとき
+        [[nodiscard]] ID3D12CommandQueue* Native() const { return m_queue.Get(); }
+
     private:
         ImmediateQueue() = default;
 

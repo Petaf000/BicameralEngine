@@ -21,9 +21,11 @@ namespace bicameral::gpu {
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t sizeBytes,
                                                                       BufferKind kind);
 
-    // u0 から uavCount 個の「ルートの UAV」だけを持つルート署名。記述子のヒープが要らない一番簡単な形
+    // u0 から uavCount 個の「ルートの UAV」を持つルート署名。記述子のヒープが要らない一番簡単な形。
+    // rootConstantCount > 0 なら、その後ろ(ルートの番号 uavCount)に b0 のルート定数(32bit × rootConstantCount)を足す
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12RootSignature> CreateRootUavSignature(ID3D12Device* device,
-                                                                                     uint32_t uavCount);
+                                                                                     uint32_t uavCount,
+                                                                                     uint32_t rootConstantCount = 0);
 
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12PipelineState> CreateComputePipeline(
         ID3D12Device* device, ID3D12RootSignature* rootSignature, std::span<const std::byte> bytecode);

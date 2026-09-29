@@ -25,6 +25,8 @@ static_assert(FxMix64(FX_GOLDEN_GAMMA) == 0xE220A8397B1DCDAFull);  // SplitMix64
 static_assert(FxMix64(FX_GOLDEN_GAMMA * 2) == 0x6E789E6AA1B965F4ull);
 static_assert(FxMulShiftS64(-3, 5, 1) == -7 && FxMulShiftS64(3, 5, 1) == 7);  // 0 方向の切り捨て
 static_assert(FxDivShiftS64(-7, 2, 0) == -3 && FxDivS64(-7, 2) == -3);
+static_assert(FxDivRecipU64(100, FxMakeRecipU64(7)) == 14 && FxDivRecipU32(100, FxMakeRecipU32(7)) == 14);
+static_assert(FxDivRecipS64(-7, FxMakeRecipS64(2)) == -3 && FxDivRecipS64(7, FxMakeRecipS64(-2)) == -3);
 
 namespace {
 
@@ -244,6 +246,59 @@ static void TestHash(std::mt19937_64& random) {
     EXPECT(chiSquare < 27.9);
 }
 
+// --- 逆数の掛け算(ふつうの割り算とビット一致)----------------------------------------------------------
+// 境目になりやすい除数(1・2 のべき乗とその前後・最大値)と、それぞれの境目の被除数(0・d − 1・d・d + 1・最大値)を全部試し、
+// 残りは乱数で試す
+static void CheckRecipU64(uint64_t numerator, uint64_t divisor) {
+    EXPECT(FxDivRecipU64(numerator, FxMakeRecipU64(divisor)) == numerator / divisor);
+}
+
+static void CheckRecipU32(uint32_t numerator, uint32_t divisor) {
+    EXPECT(FxDivRecipU32(numerator, FxMakeRecipU32(divisor)) == numerator / divisor);
+}
+
+// 1 つの除数について、境目の被除数をすべて試す
+static void CheckRecipEdges(uint64_t divisor) {
+    const bool fits32 = divisor <= 0xFFFFFFFFull;
+    for (const uint64_t numerator : {0ull, 1ull, divisor - 1, divisor, divisor + 1, ~0ull, ~0ull - 1}) {
+        CheckRecipU64(numerator, divisor);
+        if (fits32) {
+            CheckRecipU32(static_cast<uint32_t>(numerator), static_cast<uint32_t>(divisor));
+        }
+    }
+}
+
+static void TestReciprocalEdges() {
+    for (uint32_t bit = 0; bit < 64; ++bit) {
+        const uint64_t power = 1ull << bit;
+        for (const uint64_t divisor : {power - 1, power, power + 1, ~0ull >> (63 - bit)}) {
+            if (divisor != 0) CheckRecipEdges(divisor);
+        }
+    }
+    for (uint32_t divisor = 1; divisor <= 4096; ++divisor) {
+        for (const uint32_t numerator : {0u, divisor - 1, divisor, 0xFFFFFFFFu, 0xFFFFFFFEu, 0x80000000u}) {
+            CheckRecipU32(numerator, divisor);
+        }
+    }
+    EXPECT(FxDivRecipS64(INT64_MIN, FxMakeRecipS64(INT64_MIN)) == 1);
+    EXPECT(FxDivRecipS64(INT64_MAX, FxMakeRecipS64(INT64_MIN)) == 0);
+    EXPECT(FxDivRecipS64(INT64_MIN, FxMakeRecipS64(3)) == INT64_MIN / 3);
+}
+
+static void TestReciprocalRandom(std::mt19937_64& random) {
+    for (int i = 0; i < RANDOM_CASES; ++i) {
+        const uint64_t divisor = SpreadBits(random) | 1;
+        const uint64_t numerator = SpreadBits(random);
+        CheckRecipU64(numerator, divisor);
+        CheckRecipU64(numerator, divisor + 1);  // 偶数の除数も
+        CheckRecipU32(static_cast<uint32_t>(numerator), static_cast<uint32_t>(divisor));
+        const auto signedNumerator = static_cast<int64_t>(SpreadBits(random) >> 1) * ((random() & 1) != 0 ? -1 : 1);
+        const auto signedDivisor = static_cast<int64_t>(SpreadBits(random) >> 1 | 1) * ((random() & 1) != 0 ? -1 : 1);
+        EXPECT(FxDivRecipS64(signedNumerator, FxMakeRecipS64(signedDivisor)) ==
+               FxDivS64(signedNumerator, signedDivisor));
+    }
+}
+
 // --- 自己テスト(GPU と比べる列)---------------------------------------------------------------------
 // shaders/sim/fixed_selftest.hlsl と同じ関数を同じ番号の列で呼び、結果の要約を表示する。T-0013 で GPU の要約と比べる
 static void TestSelfTestDigest() {
@@ -275,6 +330,8 @@ int main() {
     TestHelpers();
     TestMultiply(random);
     TestDivide(random);
+    TestReciprocalEdges();
+    TestReciprocalRandom(random);
     TestSquareRoot(random);
     TestLogExp(random);
     TestSinCos(random);

@@ -74,7 +74,8 @@ namespace bicameral::gpu {
 
     // --- ルート署名とパイプライン ---
 
-    ComPtr<ID3D12RootSignature> CreateRootUavSignature(ID3D12Device* device, uint32_t uavCount) {
+    ComPtr<ID3D12RootSignature> CreateRootUavSignature(ID3D12Device* device, uint32_t uavCount,
+                                                       uint32_t rootConstantCount) {
         std::vector<D3D12_ROOT_PARAMETER1> parameters(uavCount);
         for (uint32_t index = 0; index < uavCount; ++index) {
             parameters[index] = {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV,
@@ -83,8 +84,14 @@ namespace bicameral::gpu {
                                                 .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE},
                                  .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL};
         }
+        if (rootConstantCount > 0) {
+            parameters.push_back(
+                {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                 .Constants = {.ShaderRegister = 0, .RegisterSpace = 0, .Num32BitValues = rootConstantCount},
+                 .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
+        }
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc{.Version = D3D_ROOT_SIGNATURE_VERSION_1_1};
-        desc.Desc_1_1 = {.NumParameters = uavCount, .pParameters = parameters.data()};
+        desc.Desc_1_1 = {.NumParameters = static_cast<UINT>(parameters.size()), .pParameters = parameters.data()};
 
         ComPtr<ID3DBlob> blob;
         ComPtr<ID3DBlob> error;
