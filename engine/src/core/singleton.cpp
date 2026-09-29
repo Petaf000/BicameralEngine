@@ -29,8 +29,9 @@ namespace bicameral {
             std::scoped_lock lock(s_mutex);
             entries.swap(s_finalizers);
         }
-        for (const Entry& entry : entries | std::views::reverse)
+        for (const Entry& entry : entries | std::views::reverse) {
             entry.finalize();
+        }
     }
 
     void SingletonFinalizer::FinalizeType(std::type_index type) {

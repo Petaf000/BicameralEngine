@@ -69,6 +69,8 @@ namespace bicameral {
             }
 
             // 古いランタイムでは OPTIONS21 の問い合わせ自体が失敗する。バグではなく環境の問題なので Warning
+            // 0 で埋めて渡し、CheckFeatureSupport が書き込む(Tier の enum に 0 の値が無いのは SDK の定義による)
+            // NOLINTNEXTLINE(bugprone-invalid-enum-default-initialization)
             D3D12_FEATURE_DATA_D3D12_OPTIONS21 options21{};
             const HRESULT result =
                 device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options21, sizeof(options21));

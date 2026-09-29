@@ -38,9 +38,8 @@ namespace {
                 options.logDirectory = arguments[++i];
             } else if (argument == L"--log-level" && hasValue) {
                 const std::string name = ToUtf8(arguments[++i]);
-                if (!ParseLevel(name, options.logLevel))
-                    return std::unexpected(std::format("知らないログの重大度: {}", name));
-                options.hasLogLevel = true;
+                options.hasLogLevel = ParseLevel(name, options.logLevel);
+                if (!options.hasLogLevel) return std::unexpected(std::format("知らないログの重大度: {}", name));
             } else {
                 return std::unexpected(std::format("知らない引数: {}", ToUtf8(argument)));
             }

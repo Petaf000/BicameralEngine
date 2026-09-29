@@ -22,7 +22,8 @@ views:
     title: 今動いているもの
     description: >-
       起動して GPU の対応状況(SM 6.8 / DXR / Mesh / Work Graphs)を調べるところまで(T-0001)と、
-      シミュの整数の数学ライブラリ(T-0010。GPU と CPU が同じソースで計算する)。
+      シミュの整数の数学ライブラリ(T-0010。GPU と CPU が同じソースで計算する)と、
+      シミュに浮動小数点が入ったらビルドを落とす検査(T-0011)。
       Agility SDK は exe が 2 つの値をエクスポートすることで、OS の d3d12.dll に読み込ませる。
     direction: TD
     groups:
@@ -30,6 +31,7 @@ views:
       - { id: corelib, label: "core(どこからでも使う部品)" }
       - { id: shared, label: "shaders/common(HLSL と C++ で共通)" }
       - { id: tests, label: "テスト(ctest)" }
+      - { id: build, label: "ビルドの中の検査(CMake + Python)" }
       - { id: os, label: "OS / ドライバ" }
     nodes:
       - { id: main, group: exe, label: "wmain()<br/>コマンドラインの振り分け", code: "engine/src/main.cpp::wmain" }
@@ -60,6 +62,15 @@ views:
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
       - { id: core, group: os, status: external, label: "D3D12Core.dll<br/>Agility SDK 1.619",
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
+      - { id: addshader, group: build, label: "bicameral_add_shader()<br/>DXC で sim / render を分けてコンパイル",
+          code: "shaders/CMakeLists.txt::bicameral_add_shader", ticket: T-0011, doc: docs/design/04-numerics-determinism.md,
+          note: "成果物は bin/shaders/sim|render/*.cso" }
+      - { id: dxilcheck, group: build, label: "dxil_float_check<br/>シミュの DXIL に浮動小数点があれば落とす",
+          code: "tools/float_check/dxil_float_check.py::FindViolations", ticket: T-0011,
+          note: "型(float など)と命令(fadd・sitofp など)。asfloat の抜け道も捕まる" }
+      - { id: srccheck, group: build, label: "source_float_check<br/>共通のヘッダ・CPU リファレンスの float / double",
+          code: "tools/float_check/source_float_check.py::FindViolations", ticket: T-0011,
+          note: "型・小数のリテラル・<cmath> の関数。HLSL と C++ を同じ規則で" }
     edges:
       - [main, caps, "--caps"]
       - [caps, d3d12, "D3D12CreateDevice"]
@@ -75,6 +86,9 @@ views:
       - [selftest, fixed]
       - [fixedtest, selftest, "CPU で要約を作る"]
       - [fixedtest, fixed]
+      - [addshader, selftest, "DXC(cs_6_8)"]
+      - [addshader, dxilcheck, "sim は逆アセンブルを検査"]
+      - [srccheck, fixed, "トークンを検査"]
 
   # ---------------------------------------------------------------------------------------------
   - id: frame

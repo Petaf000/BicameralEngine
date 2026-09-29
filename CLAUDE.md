@@ -56,7 +56,7 @@
 - **鍵の中身をリポジトリ・文書・コミット・メモリ・返答に書かない。**
 - `job.py check` が「鍵 ID が一致しません」と言ったら、鍵が作り直された(-RotateKey)。key.txt を読み直す。
 - 「停止しています / heartbeat がありません」なら、ユーザーにランナーの起動だけを頼む。
-- コマンド: `job.py check` / `env` / `build [-Preset release] [-Clean]` / `test [-Filter x]` / `run [-Preset p] -- <args>` / `git <args>` / `raw <file.ps1>`
+- コマンド: `job.py check` / `env` / `build [-Preset release] [-Clean]` / `test [-Filter x]` / `tidy [-Preset p]`(clang-tidy。先に build)/ `run [-Preset p] -- <args>` / `git <args>` / `raw <file.ps1>`
 - `raw` は最後の手段。繰り返し使うことになったら scripts/jobs/ にジョブとして足す。
 - リポジトリは GitHub の公開リポジトリ `Petaf000/BicameralEngine`(ADR-0005)。通常の `job.py git push` は Claude がやってよい。
   force push・reset --hard などの破壊的操作は git ジョブが拒否する。必要ならユーザーに頼む。
@@ -107,7 +107,8 @@
 - 重い外部ヘッダは `engine/src/pch.h`(プリコンパイルヘッダ)に置き、.cpp では include しない。
 - コメントと文書は日本語。公開予定のもの(README・英語ブログ用)は英語で別に書く。
 - 新しいサブシステムは engine/src/<subsystem>/ に置き、docs/design/ に設計メモを 1 枚書く。
-- シェーダーは shaders/<subsystem>/。
+- シェーダーは shaders/sim/(シミュ)か shaders/render/(描画)に置き、shaders/CMakeLists.txt の `bicameral_add_shader()` で足す。
+  **シミュのコード(shaders/sim・shaders/common・engine/src/sim)に浮動小数点があるとビルドが落ちる**(tools/float_check、04 §4)。
 - **.ps1 は UTF-8(BOM 付き)+ CRLF で保存する。** BOM が無いと Windows PowerShell 5.1 が日本語を CP932 で読み、文字化けや構文エラーになる。
 - 計測値(ms・メモリ)は docs/perf.md に日付と GPU とともに残す(比較できるように)。
 

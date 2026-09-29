@@ -26,6 +26,8 @@ find_package(directx-headers CONFIG REQUIRED)    # d3d12.h など(Agility SDK �
 find_package(directx12-agility CONFIG REQUIRED)  # D3D12Core.dll / d3d12SDKLayers.dll(ADR-0004)
 find_package(directx-dxc CONFIG REQUIRED)        # シェーダーコンパイラ。DIRECTX_DXC_TOOL に dxc.exe の場所が入る
 message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
+# ビルドの中の検査(tools/float_check: シミュの浮動小数点の禁止、04 §4)に使う
+find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 add_subdirectory(engine)
 add_subdirectory(shaders)

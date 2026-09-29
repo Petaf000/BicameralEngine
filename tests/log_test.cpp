@@ -42,8 +42,11 @@ namespace {
     class MemorySink final : public LogSink {
     public:
         void Write(const LogRecord& record) override {
-            captured.push_back({record.channel, record.level, std::string(record.message),
-                                std::string(FileNameOnly(record.location.file_name())), record.location.line()});
+            captured.push_back({.channel = record.channel,
+                                .level = record.level,
+                                .message = std::string(record.message),
+                                .fileName = std::string(FileNameOnly(record.location.file_name())),
+                                .line = record.location.line()});
         }
     };
 

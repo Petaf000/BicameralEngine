@@ -50,11 +50,19 @@
 - 乱数: `FxHash64(seed, tick, id, purpose)`(SplitMix64 の混ぜ合わせを 4 回)。雪崩(平均 32.0 ビット)とカイ 2 乗で確認。
 - 自己テスト `shaders/common/fixed_selftest.hlsli`: 全部の関数を番号から作った入力で呼ぶ。CPU(tests/fixed_test.cpp)と GPU(shaders/sim/fixed_selftest.hlsl、T-0013)が同じ列を計算し、要約のハッシュで比べる。
 
-## 4. 浮動小数点の禁止を機械的に守る
+## 4. 浮動小数点の禁止を機械的に守る(T-0011 で実装)
 - シェーダーをシミュ用(`shaders/sim/`)と描画用(`shaders/render/`)に分ける。描画は浮動小数点を使ってよい(D-205 の範囲外)。
-- ビルド時に、シミュ用のシェーダーの DXIL を逆アセンブルして、浮動小数点の命令(fadd・fmul・fdiv・sitofp・fptosi など)と
-  浮動小数点の型があれば**ビルドを落とす**(`tools/dxil_float_check`)。
-- C++ 側のシミュのコード(CPU リファレンス・ベイク)は `sim/` 以下に置き、clang-tidy のカスタム検査で float/double を禁止する。
+  `shaders/common/` はシミュから読む共通のヘッダ(C++ からも読む)なので、浮動小数点は禁止。描画だけの共通部品は `shaders/render/` に置く。
+  シェーダーは `shaders/CMakeLists.txt` の `bicameral_add_shader(<sim|render>/x.hlsl PROFILE cs_6_8 [ENTRY Main])` で足す。
+- **DXIL の検査**(`tools/float_check/dxil_float_check.py`): シミュのシェーダーはコンパイルの直後に逆アセンブル(`dxc -Fc`)を調べ、
+  浮動小数点の型(half・float・double。`<N x float>`・`dx.op.*.f32` も)と命令(fadd・fmul・fdiv・fcmp・sitofp・fptosi など)があれば
+  **ビルドを落とし、.cso を消す**。ソースに型を書かない抜け道(`asfloat` → bitcast、整数を渡した `sqrt` → uitofp)も捕まる。
+- **ソースの検査**(`tools/float_check/source_float_check.py`): `shaders/common/`・`shaders/sim/`・`engine/src/sim/`(CPU リファレンス・ベイク)の
+  浮動小数点の型・小数のリテラル(`0.5`・`1e3`・`0x1.8p3`)・浮動小数点になる関数(`<cmath>` の関数・`asfloat` など)・`<cmath>` の include で
+  ビルドを落とす。コメントと文字列の中は見ない。
+  - 最初は「clang-tidy のカスタム検査」の予定だったが、カスタム検査はプラグインのビルドが要り、HLSL も読めない。
+    共通のヘッダを HLSL と C++ の両方の目で同じ規則で見るため、トークンの検査にした(2026-09-30)。
+- 検査が何も捕まえなくなっていないかは ctest の `float_check_*`(tests/float_check/ のわざと違反する入力)で確かめる。
 
 ## 5. 決定性の確かめ方
 - **状態のハッシュ**: 毎刻み(デバッグ)または N 刻みごと(リリース)に、世界の状態全体の 64bit ハッシュを取る(順番に依存しない合成: 各ブロックのハッシュを XOR ではなく「ブロック ID で並べた順の合成」)。
@@ -73,3 +81,4 @@
 - SM 6.x の 64bit 整数演算と 64bit atomic の対応(Int64ShaderOps・64bit atomics)は機能として任意。対応状況を `--caps` で確かめ、最低機の条件に入れる。
 - DXC の最適化で整数演算の結果が変わることはない(整数演算は厳密)はずだが、ビット一致テストで確かめ続ける。
 - DXC は fixed.hlsli を cs_6_8・-WX で通した(64bit の整数の割り算を含む。2026-09-30)。GPU で CPU とビット一致するかは T-0013。
+  使う DXC は vcpkg の 1.9.2602.24(ADR-0004)。Debug のシェーダーは -Od(最適化なし)なので、T-0013 では debug と release の両方で比べる。

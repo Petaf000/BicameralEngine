@@ -62,8 +62,8 @@ static void TestMultiply(std::mt19937_64& random) {
         const FxU128 product = FxMulU64Full(a, b);
         EXPECT(product.hi == expectedHigh && product.lo == expectedLow);
 
-        const int64_t signedA = static_cast<int64_t>(random());
-        const int64_t signedB = static_cast<int64_t>(SpreadBits(random)) * ((random() & 1) != 0 ? -1 : 1);
+        const auto signedA = static_cast<int64_t>(random());
+        const auto signedB = static_cast<int64_t>(SpreadBits(random)) * ((random() & 1) != 0 ? -1 : 1);
         int64_t expectedSignedHigh = 0;
         const int64_t expectedSignedLow = _mul128(signedA, signedB, &expectedSignedHigh);
         const FxU128 signedProduct = FxMulS64Full(signedA, signedB);
@@ -72,8 +72,8 @@ static void TestMultiply(std::mt19937_64& random) {
     }
     // Q 形式の積: 符号を反転すると結果の符号だけが反転する(0 方向の切り捨ての対称性)
     for (int i = 0; i < RANDOM_CASES; ++i) {
-        const int64_t a = static_cast<int64_t>(random() >> 20);
-        const int64_t b = static_cast<int64_t>(random() >> 20);
+        const auto a = static_cast<int64_t>(random() >> 20);
+        const auto b = static_cast<int64_t>(random() >> 20);
         const uint32_t shift = 26 + static_cast<uint32_t>(random() % 38);  // 積 < 2^88 なので結果が 63bit に収まる範囲
         const int64_t positive = FxMulShiftS64(a, b, shift);
         EXPECT(FxMulShiftS64(-a, b, shift) == -positive && FxMulShiftS64(a, -b, shift) == -positive);
@@ -89,21 +89,21 @@ static void TestMultiply(std::mt19937_64& random) {
 static void TestDivide(std::mt19937_64& random) {
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const uint64_t divisor = SpreadBits(random) | 1;
-        const FxU128 numerator = {random() % divisor, random()};
+        const FxU128 numerator = {.hi = random() % divisor, .lo = random()};
         uint64_t expectedRemainder = 0;
         const uint64_t expectedQuotient = _udiv128(numerator.hi, numerator.lo, divisor, &expectedRemainder);
         const FxDivResult result = FxDivU128By64(numerator, divisor);
         EXPECT(result.quotient == expectedQuotient && result.remainder == expectedRemainder);
 
-        const int64_t a = static_cast<int64_t>(SpreadBits(random) >> 1) * ((random() & 1) != 0 ? -1 : 1);
-        const int64_t b = static_cast<int64_t>(SpreadBits(random) >> 1 | 1) * ((random() & 1) != 0 ? -1 : 1);
+        const auto a = static_cast<int64_t>(SpreadBits(random) >> 1) * ((random() & 1) != 0 ? -1 : 1);
+        const auto b = static_cast<int64_t>(SpreadBits(random) >> 1 | 1) * ((random() & 1) != 0 ? -1 : 1);
         EXPECT(FxDivS64(a, b) == a / b);  // C++ の / も 0 方向の切り捨て
     }
     // Q 形式の割り算: 商が収まる範囲で、(a × 2^shift) / b の切り捨てと一致
     for (int i = 0; i < RANDOM_CASES; ++i) {
-        const uint32_t shift = static_cast<uint32_t>(random() % 33);
-        const int64_t a = static_cast<int64_t>(random() >> 32);
-        const int64_t b = static_cast<int64_t>((random() >> 34) | 2);  // 2 以上なら商が 63bit に収まる
+        const auto shift = static_cast<uint32_t>(random() % 33);
+        const auto a = static_cast<int64_t>(random() >> 32);
+        const auto b = static_cast<int64_t>((random() >> 34) | 2);  // 2 以上なら商が 63bit に収まる
         const bool negative = (random() & 1) != 0;
         uint64_t remainder = 0;
         const uint64_t high = shift == 0 ? 0 : static_cast<uint64_t>(a) >> (64 - shift);
@@ -131,7 +131,7 @@ static void TestSquareRoot(std::mt19937_64& random) {
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const uint64_t value = SpreadBits(random);
         EXPECT(IsFloorSqrt64(value, FxSqrtU64(value)));
-        const uint32_t value32 = static_cast<uint32_t>(random());
+        const auto value32 = static_cast<uint32_t>(random());
         EXPECT(FxSqrtU32(value32) == FxSqrtU64(value32));
     }
 }
@@ -153,15 +153,15 @@ static void TestLogExp(std::mt19937_64& random) {
     double maxExpRelative = 0;
     for (int i = 0; i < RANDOM_CASES; ++i) {
         // x を [-40, 40) の Q32 に。出力の桁は、結果が 2^59〜2^63 に入るように x ごとに選ぶ(最後の切り捨ての誤差を測らないため)
-        const int64_t x = static_cast<int64_t>(random() % (80ull << 32)) - (40ll << 32);
+        const auto x = static_cast<int64_t>(random() % (80ull << 32)) - (40ll << 32);
         const double xReal = static_cast<double>(x) / TWO_POW_32;
-        const uint32_t outBits2 = static_cast<uint32_t>(61 - static_cast<int>(std::floor(xReal)));
+        const auto outBits2 = static_cast<uint32_t>(61 - static_cast<int>(std::floor(xReal)));
         const double exact2 = std::exp2(xReal + outBits2);
         maxExp2Relative =
             std::fmax(maxExp2Relative, std::fabs(static_cast<double>(FxExp2Q32(x, outBits2)) - exact2) / exact2);
         const int64_t xNatural = x / 2;
         const double xNaturalReal = static_cast<double>(xNatural) / TWO_POW_32;
-        const uint32_t outBitsE =
+        const auto outBitsE =
             static_cast<uint32_t>(61 - static_cast<int>(std::floor(xNaturalReal * 1.4426950408889634)));
         const double exactE = std::exp(xNaturalReal) * std::exp2(static_cast<double>(outBitsE));
         maxExpRelative =
@@ -181,7 +181,7 @@ static void TestLogExp(std::mt19937_64& random) {
 static void TestSinCos(std::mt19937_64& random) {
     double maxError = 0;  // Q30 の単位
     for (int i = 0; i < RANDOM_CASES; ++i) {
-        const uint32_t angle = static_cast<uint32_t>(random());
+        const auto angle = static_cast<uint32_t>(random());
         const double radians = static_cast<double>(angle) / TWO_POW_32 * 2 * PI;
         const FxSinCos result = FxSinCosTurn32(angle);
         maxError = std::fmax(maxError, std::fabs(result.sine - std::sin(radians) * TWO_POW_30));
@@ -206,7 +206,7 @@ static void TestHash(std::mt19937_64& random) {
         const uint64_t tick = random() % 100000;
         const uint64_t id = random();
         const uint64_t base = FxHash64(seed, tick, id, 7);
-        const uint32_t bit = static_cast<uint32_t>(random() % 64);
+        const auto bit = static_cast<uint32_t>(random() % 64);
         flippedBits += static_cast<double>(__popcnt64(base ^ FxHash64(seed, tick, id ^ (1ull << bit), 7)));
         flippedBits += static_cast<double>(__popcnt64(base ^ FxHash64(seed, tick ^ (1ull << (bit % 20)), id, 7)));
         samples += 2;
@@ -220,8 +220,9 @@ static void TestHash(std::mt19937_64& random) {
     constexpr int BUCKETS = 10;
     constexpr int DRAWS = 1000000;
     int counts[BUCKETS] = {};
-    for (int i = 0; i < DRAWS; ++i)
+    for (int i = 0; i < DRAWS; ++i) {
         ++counts[FxRandomBelow(FxHash64(42, 0, static_cast<uint64_t>(i), 0), BUCKETS)];
+    }
     double chiSquare = 0;
     for (const int count : counts) {
         const double difference = count - DRAWS / static_cast<double>(BUCKETS);
@@ -238,8 +239,9 @@ static void TestSelfTestDigest() {
     for (uint32_t caseIndex = 0; caseIndex < FIXED_SELF_TEST_CASES; ++caseIndex) {
         const FxU128 inputs = FxSelfTestInputs(caseIndex);
         const FxSelfTestOutput output = FxSelfTestCase(inputs.hi, inputs.lo);
-        for (const uint64_t value : output.values)
+        for (const uint64_t value : output.values) {
             digest = FxHashCombine(digest, value);
+        }
     }
     std::printf("selftest: %u cases, digest %016llx\n", FIXED_SELF_TEST_CASES, static_cast<unsigned long long>(digest));
     EXPECT(FxSelfTestCase(3, 5).values[1] == 15 && FxSelfTestCase(144, 0).values[9] == 12);

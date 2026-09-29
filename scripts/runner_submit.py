@@ -6,6 +6,7 @@ runner_submit.py — Claude 側(device_bash の Linux 環境)から Windows の�
   python3 ~/job.py build                     # scripts/jobs/build.ps1 を実行(引数は後ろに続ける)
   python3 ~/job.py build -Preset release
   python3 ~/job.py test
+  python3 ~/job.py tidy                      # clang-tidy(先に build。scripts/jobs/tidy.ps1)
   python3 ~/job.py run -- --caps             # エンジン実行ファイルに --caps を渡す
   python3 ~/job.py git status
   python3 ~/job.py raw path/to/script.ps1    # 任意の PowerShell を実行(最小限に)
@@ -28,7 +29,7 @@ KEY_CANDIDATES = [p for p in [
     os.path.expanduser("~/.bicameral-runner-key"),
     os.path.expanduser("~/mnt/.bicameral-runner/key.txt"),
 ] if p]
-JOBS = {"build", "test", "run", "git", "env"}   # scripts/jobs/<name>.ps1
+JOBS = {"build", "test", "run", "git", "env", "tidy"}   # scripts/jobs/<name>.ps1
 
 
 def die(msg, code=2):
@@ -109,7 +110,7 @@ def build_body(argv):
                 m = re.search(r"(?m)^#\s*timeout:\s*(\d+)", src.read_text(encoding="utf-8-sig"))
                 if m: timeout = int(m.group(1))
     else:
-        die(f"不明なジョブ種別: {kind}(build/test/run/git/env/raw/check)")
+        die(f"不明なジョブ種別: {kind}(build/test/run/git/env/tidy/raw/check)")
     if timeout:
         body = f"# timeout: {timeout}\n" + body
     return name, body

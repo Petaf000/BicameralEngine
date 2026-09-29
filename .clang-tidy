@@ -1,5 +1,7 @@
 # 名前の付け方と、読みにくさ・古い書き方の検出(docs/style.md)。
-# VS 2026 の「Clang-Tidy」コード分析がこれを読む。CI での強制はまだしていない(T-0006 の後で検討)。
+# VS 2026 の「Clang-Tidy」コード分析がこれを読む。PC では job.py tidy、CI では build ジョブが tools/tidy/run_clang_tidy.py で強制する(T-0011)。
+# shaders/ の共通のヘッダ(.hlsli)は HLSL でもコンパイルするので、auto と指示付き初期化子の検査は run_clang_tidy.py が外す。
+# bugprone-random-generator-seed は外す: 決まった種で毎回同じ列を出すのがこのプロジェクトの方針(決定性、ADR-0008)。
 Checks: >
   -*,
   readability-identifier-naming,
@@ -14,6 +16,7 @@ Checks: >
   modernize-use-designated-initializers,
   bugprone-*,
   -bugprone-easily-swappable-parameters,
+  -bugprone-random-generator-seed,
   performance-*
 CheckOptions:
   # --- 型・関数: 大文字始まり(UpperCamel) ---
@@ -45,6 +48,12 @@ CheckOptions:
   - { key: readability-identifier-naming.EnumConstantCase,         value: CamelCase }
   - { key: readability-identifier-naming.MacroDefinitionCase,      value: UPPER_CASE }
   - { key: readability-identifier-naming.NamespaceCase,            value: lower_case }
+  # --- 名前が外から決まっているもの(OS の入口・Agility SDK が探すエクスポート名)は除く ---
+  - { key: readability-identifier-naming.FunctionIgnoredRegexp,       value: '^wmain$' }
+  - { key: readability-identifier-naming.GlobalConstantIgnoredRegexp, value: '^D3D12SDK.*$' }
+  - { key: readability-identifier-naming.VariableIgnoredRegexp,       value: '^D3D12SDK.*$' }
+  # 長さを渡している Win32 の文字コード変換は、data() が 0 終端でなくてよい
+  - { key: bugprone-suspicious-stringview-data-usage.AllowedCallees, value: 'WideCharToMultiByte;MultiByteToWideChar' }
   # --- 1 関数の大きさの目安(超えたら分ける)---
   - { key: readability-function-size.LineThreshold,                value: 60 }
   - { key: readability-function-size.NestingThreshold,             value: 3 }

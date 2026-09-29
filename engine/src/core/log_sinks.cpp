@@ -99,7 +99,7 @@ namespace bicameral {
         class FileSink final : public LogSink {
         public:
             explicit FileSink(std::ofstream stream) : m_stream(std::move(stream)) {}
-            ~FileSink() override { m_stream.flush(); }
+            // 破棄のときの書き出しは std::ofstream のデストラクタに任せる(デストラクタから例外を出さないため)
 
             void Write(const LogRecord& record) override { m_stream << FormatLogLine(record, true) << '\n'; }
             void Flush() override { m_stream.flush(); }
@@ -168,7 +168,7 @@ namespace bicameral {
         const std::wstring fileName =
             std::format(L"{}{:04}{:02}{:02}-{:02}{:02}{:02}{}", LOG_FILE_PREFIX, now.tm_year + 1900, now.tm_mon + 1,
                         now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec, LOG_FILE_EXTENSION);
-        const std::filesystem::path path = directory / fileName;
+        std::filesystem::path path = directory / fileName;             // const にしない(return で move させる)
         std::ofstream stream(path, std::ios::binary | std::ios::app);  // 同じ秒に 2 回起動したら追記になる
         if (!stream) return std::unexpected(std::format("ログのファイルを開けない: {}", ToUtf8(path.wstring())));
 

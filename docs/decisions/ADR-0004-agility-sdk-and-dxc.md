@@ -38,4 +38,6 @@ D3D12SDKVersion / D3D12SDKPath を exe からエクスポートし、D3D12Core.d
   D3D12SDKVersion(= ヘッダの D3D12_SDK_VERSION = 619)と D3D12SDKPath(`.\D3D12\`)をエクスポート。
 - engine/CMakeLists.txt の POST_BUILD で D3D12Core.dll と d3d12SDKLayers.dll を `bin/D3D12/` にコピー。
 - `--caps` で `D3D12Core : ...\bin\D3D12\D3D12Core.dll (D3D12SDKVersion 619)` を確認。WorkGraphsTier 1.0 のまま。
-- DXC は CMake 変数 DIRECTX_DXC_TOOL(vcpkg の tools/directx-dxc/dxc.exe)で使う。版と lib_6_9 対応は未確認(T-0005 で確認)。
+- DXC は CMake 変数 DIRECTX_DXC_TOOL(vcpkg の tools/directx-dxc/dxc.exe)で使う。
+- 確認(2026-09-30、T-0011): vcpkg の DXC は **1.9.2602.24**(SDK 同梱の 1.8.2502 より新しい)。`lib_6_9` でノードのシェーダーをコンパイルできる。
+  ビルドはこちらだけを使う(SDK 同梱のものは使わない)。lib_6_9 を実行できるかはドライバと Agility SDK 次第で、未確認(T-0013)。

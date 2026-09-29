@@ -1,0 +1,5 @@
+# テストは親の規則(../.clang-tidy)に従う。ただし、テストの main やテスト用のデストラクタから例外が出たら、
+# そのテストが失敗するだけでよい(ゲーム本体のコードには適用しない)。
+InheritParentConfig: true
+Checks: >
+  -bugprone-exception-escape
