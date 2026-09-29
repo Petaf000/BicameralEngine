@@ -1,0 +1,31 @@
+# コードの整形(docs/style.md、ADR-0005)。CI が clang-format 23 で差分を検査する。
+# 手元で整形: clang-format -i <ファイル>(VS 2026 は保存時に自動で読む)
+BasedOnStyle: Google
+Standard: Latest
+ColumnLimit: 120               # 日本語コメントは 1 文字 2 桁で数えられるので広め
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4       # public: / private: は行頭
+BreakBeforeBraces: Attach      # { は同じ行
+NamespaceIndentation: None
+FixNamespaceComments: true
+PointerAlignment: Left
+DerivePointerAlignment: false
+
+# 1 行の if は { } を省いて同じ行に書いてよい(if (x == nullptr) return;)。ループと else 付きは改行する
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLambdasOnASingleLine: Inline
+AllowShortCaseLabelsOnASingleLine: true
+
+# 日本語のコメントを勝手に折り返さない(意味の切れ目が壊れる)
+ReflowComments: Never
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+MaxEmptyLinesToKeep: 1
+KeepEmptyLines:
+  AtStartOfBlock: false
+  AtStartOfFile: false
+InsertNewlineAtEOF: true

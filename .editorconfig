@@ -12,5 +12,5 @@ end_of_line = crlf
 # PowerShell 5.1 は BOM が無いと日本語を CP932 で読んで壊すので、必ず BOM 付き
 charset = utf-8-bom
 
-[*.{hlsl,hlsli}]
+[*.{cpp,h,hpp,hlsl,hlsli}]
 indent_size = 4

@@ -1,0 +1,49 @@
+# 名前の付け方と、読みにくさ・古い書き方の検出(docs/style.md)。
+# VS 2026 の「Clang-Tidy」コード分析がこれを読む。CI での強制はまだしていない(T-0006 の後で検討)。
+Checks: >
+  -*,
+  readability-identifier-naming,
+  readability-else-after-return,
+  readability-function-size,
+  readability-braces-around-statements,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-using,
+  modernize-use-auto,
+  modernize-loop-convert,
+  modernize-use-designated-initializers,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*
+CheckOptions:
+  # --- 型・関数: 大文字始まり(UpperCamel) ---
+  - { key: readability-identifier-naming.ClassCase,                value: CamelCase }
+  - { key: readability-identifier-naming.StructCase,               value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase,                 value: CamelCase }
+  - { key: readability-identifier-naming.TypeAliasCase,            value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase,             value: CamelCase }
+  - { key: readability-identifier-naming.MethodCase,               value: CamelCase }
+  # --- メンバー: class は m_ + 小文字始まり、struct(public)は小文字始まり ---
+  - { key: readability-identifier-naming.PrivateMemberPrefix,      value: m_ }
+  - { key: readability-identifier-naming.PrivateMemberCase,        value: camelBack }
+  - { key: readability-identifier-naming.ProtectedMemberPrefix,    value: m_ }
+  - { key: readability-identifier-naming.ProtectedMemberCase,      value: camelBack }
+  - { key: readability-identifier-naming.PublicMemberCase,         value: camelBack }
+  # --- 関数の中の物・引数: 小文字始まり(hogeHuga)---
+  - { key: readability-identifier-naming.LocalVariableCase,        value: camelBack }
+  - { key: readability-identifier-naming.ParameterCase,            value: camelBack }
+  - { key: readability-identifier-naming.VariableCase,             value: camelBack }
+  # --- 定数: k + 大文字始まり(kMaxDepth)---
+  - { key: readability-identifier-naming.ConstexprVariablePrefix,  value: k }
+  - { key: readability-identifier-naming.ConstexprVariableCase,    value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix,     value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase,       value: CamelCase }
+  # --- enum の値・マクロ: 全部大文字のスネークケース ---
+  - { key: readability-identifier-naming.EnumConstantCase,         value: UPPER_CASE }
+  - { key: readability-identifier-naming.MacroDefinitionCase,      value: UPPER_CASE }
+  - { key: readability-identifier-naming.NamespaceCase,            value: lower_case }
+  # --- 1 関数の大きさの目安(超えたら分ける)---
+  - { key: readability-function-size.LineThreshold,                value: 60 }
+  - { key: readability-function-size.NestingThreshold,             value: 3 }
+  # 1 行の if の { } 省略は許す(2 行以上に渡るなら { } を付ける)
+  - { key: readability-braces-around-statements.ShortStatementLines, value: 1 }

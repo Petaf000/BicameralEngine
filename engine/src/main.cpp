@@ -8,9 +8,9 @@
 #include <cstring>
 
 int main(int argc, char** argv) {
-  for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--caps") == 0) return bicameral::RunCapsProbe();
-  }
-  std::printf("Bicameral Engine (skeleton). Try --caps\n");
-  return 0;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--caps") == 0) return bicameral::RunCapsProbe();
+    }
+    std::printf("Bicameral Engine (skeleton). Try --caps\n");
+    return 0;
 }

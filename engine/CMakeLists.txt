@@ -5,6 +5,7 @@ add_executable(bicameral
   src/platform/caps.cpp
 )
 target_include_directories(bicameral PRIVATE src)
+target_precompile_headers(bicameral PRIVATE src/pch.h)  # 重い外部ヘッダをまとめる(docs/style.md)
 target_link_libraries(bicameral PRIVATE
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility

@@ -1,6 +1,6 @@
 # CI(T-0006, ADR-0005)
 #   build : Windows でビルド(debug / release)+ CPU で走るテスト(ctest)。GPU を使うテストはまだ無い
-#   docs  : アーキテクチャ図のリンク切れ検査(archmap --check)→ 図のページ + Doxygen を作る
+#   docs  : 整形の検査(clang-format)・アーキテクチャ図のリンク切れ検査(archmap --check)→ 図のページ + Doxygen を作る
 #   deploy: main への push のときだけ、docs の成果物を GitHub Pages に出す
 name: CI
 
@@ -68,7 +68,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install pyyaml
+      - run: pip install pyyaml clang-format==23.1.1
+
+      # 整形のずれ(.clang-format、docs/style.md)。直し方: clang-format -i <ファイル>
+      - name: Check formatting
+        run: git ls-files '*.cpp' '*.h' '*.hpp' '*.hlsl' '*.hlsli' | xargs --no-run-if-empty clang-format --dry-run --Werror
 
       # 図のノードが指す関数が消えたり改名されたりしていたら、ここで落ちる
       - name: Check architecture map links

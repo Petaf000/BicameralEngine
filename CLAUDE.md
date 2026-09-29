@@ -97,7 +97,11 @@
 
 ## 4. 書き方のルール
 
-- コード: C++20、MSVC /W4 で警告ゼロを目指す。HLSL は SM 6.8。
+- コード: **C++23**(MSVC は /std:c++latest)、MSVC /W4 で警告ゼロを目指す。HLSL は SM 6.8。
+- **規約は docs/style.md**(インデント 4・`{` は同じ行・関数は大文字始まり・class メンバーは `m_`・関数内は小文字始まり・
+  enum の値とマクロは大文字スネーク・1 行の if は `{}` 省略・早期リターンでネストを浅く・グローバル/シングルトンを避ける)。
+  見た目は `.clang-format`(CI が検査)、名前は `.clang-tidy`。書いたら `~/.local/bin/clang-format -i`(Linux 側、pip の clang-format 23)で整形する。
+- 重い外部ヘッダは `engine/src/pch.h`(プリコンパイルヘッダ)に置き、.cpp では include しない。
 - コメントと文書は日本語。公開予定のもの(README・英語ブログ用)は英語で別に書く。
 - 新しいサブシステムは engine/src/<subsystem>/ に置き、docs/design/ に設計メモを 1 枚書く。
 - シェーダーは shaders/<subsystem>/。
@@ -113,7 +117,7 @@
   https://petaf000.github.io/BicameralEngine/ に出す。関数を移す・改名したら map.yaml も直す(CI の `archmap --check` が落ちて教える)。
   新しいサブシステムを作ったら図にノードを足す。確認: `python3 tools/archmap/archmap.py --check`(Linux 側で動く。PyYAML が要る)。
 - CI: GitHub Actions(`.github/workflows/ci.yml`)。Windows でビルド + ctest、図の検査、Pages へのデプロイ。
-- 整形の流儀(.clang-format)は未決(T-0006)。決まったらこの節を更新する。
+- CI の docs ジョブが整形のずれ(clang-format --dry-run --Werror)も落とす。
 
 ---
 

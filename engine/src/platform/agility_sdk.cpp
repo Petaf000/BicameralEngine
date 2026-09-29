@@ -7,7 +7,7 @@
 //
 // こうすると、OS の更新に左右されずにヘッダと同じ版のランタイムで動き、
 // Work Graphs が入っていない古い Windows でも同じ機能が使える。
-#include <directx/d3d12.h>
+// d3d12.h(D3D12_SDK_VERSION)は pch.h から来る。
 
 extern "C" {
 __declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;

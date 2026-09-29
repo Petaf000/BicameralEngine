@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-29 / チケット: T-0006(見せられるリポジトリにする)— 途中(整形だけ残り)
+最終更新: 2026-09-29 / チケット: T-0006(見せられるリポジトリにする)— 完了
 
 ## 状態(3 行以内)
 - GitHub の公開リポジトリ Petaf000/BicameralEngine に push 済み。CI(Windows debug/release ビルド + ctest、図の検査、Pages デプロイ)が緑。
 - クリックできるアーキテクチャ図(案 C)が https://petaf000.github.io/BicameralEngine/ に出ている。Doxygen は /api/。
-- 残りは整形の流儀の決定 → .clang-format・CI の整形チェック・既存コードの整形。
+- 整形・名前の規約を決めて docs/style.md・.clang-format(CI で検査)・.clang-tidy に。C++23 化とプリコンパイルヘッダ(engine/src/pch.h)も。
 
 ## 動いているもの(確認方法つき)
 - `job.py check` → OK。`job.py build` / `job.py test` は T-0001 のまま通る
@@ -14,8 +14,8 @@
 - `job.py git push` → 通常の push は通る(force・削除・+refspec は git.ps1 が拒否)
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- ci.yml の actions を最新のメジャー(checkout@v7 ほか)に上げた直後。その run の結果は次のチャットで確認する
-  (Node.js 20 の非推奨警告を消すため。ilammy/msvc-dev-cmd@v1 は新版が無いので警告が残る)。
+- ilammy/msvc-dev-cmd@v1 は Node.js 20 の非推奨警告が出る(新版が無い)。他の actions は最新メジャーに上げた。
+- .clang-tidy は置いただけで CI では走らせていない(compile_commands.json が要る。Windows ジョブで回すかは後で)。
 - ubuntu-latest は 2026-10-19 から Ubuntu 26 に移る(GitHub の告知)。docs ジョブが落ちたらまずここを疑う。
 - GPU を使うテストを CI でどう回すか(WARP の Work Graphs 対応は未確認)。テストができたときに決める。
 - T-0001 からの持ち越し: RTX 3070 Ti が 2 つ列挙される件(T-0004)、vcpkg の DXC の版(T-0005)。
@@ -25,14 +25,17 @@
 - Claude が通常の push をしてよい(scripts/jobs/git.ps1 を変更)。
 - 個人的な背景は CLAUDE.local.md(git 管理外)へ。作者メールは 84941361+Petaf000@users.noreply.github.com(リポジトリの git config)。
   公開前に 3 コミットを作り直して、履歴からも個人情報を消した。ブランチ名は main。
-- 整形の流儀: 未決。候補 4 つ(Google 風 100 桁 / Microsoft 風 / Unreal 風 / LLVM 風)をコード例つきで提示済み、ユーザーの返事待ち。
+- 規約(ユーザーの流儀): インデント 4・{ は同じ行・関数は大文字始まり・class メンバー m_・関数内は小文字始まり・enum 値とマクロは大文字スネーク・
+  struct メンバーは小文字始まり・1 行の if は {} 省略・早期リターン・疎結合・カスタムログ。詳細は docs/style.md。ADR-0005 に追記。
+- 未確認でユーザーに聞くもの: static メンバーの接頭辞(s_ か)、定数の k 接頭辞(ユーザーのファイルにあったので採用)でよいか。
+- ユーザー提供の singleton_template はまだ取り込んでいない。T-0007(ログ)で使うかを決める(気になる点はチケットに記載)。
 
 ## 次にやること
-NEXT.md の先頭 → T-0006 の残り: 整形の流儀をユーザーに聞く(答えが無ければ Google 風 100 桁を推す)→ .clang-format
-(ReflowComments: false。日本語コメントは 1 文字 2 桁で数えられる)→ CI に整形チェック → 既存コードを整形 → docs/style.md と CLAUDE.md §4。
+NEXT.md の先頭(T-0007 ログ、または T-0003 / T-0004)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **公開リポジトリ。** 鍵(.bicameral-runner/)・CLAUDE.local.md・PC 固有のパスをコミットしない。
+- Linux 側の整形: `~/.local/bin/clang-format`(`python3 -m pip install --user clang-format==23.1.1`。セッションごとに入れ直しが要るかも)。CI と同じ版にする。
 - `.github/` 以下は device_commit_files では書けない(保護)。runner/staging/ に書いてから device_bash で cp する。
 - 図のノードが指す関数を移す・改名したら docs/architecture/map.yaml を直す(CI の archmap --check が落ちる)。
 - gh は PC で Petaf000 としてログイン済み(scope に workflow あり)。gh は `job.py raw` の .ps1 から呼ぶ。
