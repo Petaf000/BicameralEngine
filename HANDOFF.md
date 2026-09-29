@@ -14,7 +14,7 @@
 - `python3 tools/archmap/archmap.py --check`(Linux 側)→ OK(リンク 15 個。図に「ビルドの中の検査」を足した)。
 
 ## 壊れている/未確認のもの
-- CI の新しい手順(vcvars64 の環境の受け渡し・pip の clang-tidy 22.1.8・ubuntu-26.04)は push 後の CI の結果で確かめる。落ちていたら最初に直す。
+- CI は全部通った(68567ec)。pip の clang-tidy 22.1.8 は `_udiv128` を知らないので、fixed_test の参照値は clang では __int128 で求める。
 - fixed.hlsli の GPU での結果と速さは未確認のまま(T-0013)。Debug のシェーダーは -Od なので debug / release の両方で比べる。
 
 ## このチャットで決めたこと
@@ -22,6 +22,8 @@
 - .clang-tidy: random-generator-seed を外す(決まった種が方針)、tests/ では exception-escape を外す、wmain・D3D12SDK* は名前の検査から除く。
   .hlsli では auto・指示付き初期化子の検査を run_clang_tidy.py が外す(HLSL に無い書き方)。
 - vcpkg の DXC(1.9.2602.24、lib_6_9 可)だけを使う(ADR-0004 に追記)。
+- ユーザーの追加(2026-09-30): 整数のルーチンのマイクロベンチと命令数の表(T-0010 を Doing に戻した。T-0013 の後)、置き場所は 04 §6。
+  T-0016 に「Nsight で演算と帯域のどちらで詰まるかを 1 回記録」(チケットのファイルを先に作った)。AMD の実測は D-207 の時。
 
 ## 次にやること
 NEXT.md の先頭(T-0013 能力の確認)。
