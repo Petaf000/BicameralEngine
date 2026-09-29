@@ -1,0 +1,100 @@
+# CI(T-0006, ADR-0005)
+#   build : Windows でビルド(debug / release)+ CPU で走るテスト(ctest)。GPU を使うテストはまだ無い
+#   docs  : アーキテクチャ図のリンク切れ検査(archmap --check)→ 図のページ + Doxygen を作る
+#   deploy: main への push のときだけ、docs の成果物を GitHub Pages に出す
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & test (${{ matrix.preset }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- ツール: cmake + ninja、MSVC の環境変数 -------------------------------------------------
+      - uses: lukka/get-cmake@latest
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # --- vcpkg: vcpkg.json の builtin-baseline と同じ版を使う(ADR-0004)---------------------------
+      - name: Set up vcpkg at builtin-baseline
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git clone --quiet https://github.com/microsoft/vcpkg $root
+          git -C $root checkout --quiet $baseline
+          & (Join-Path $root 'bootstrap-vcpkg.bat') -disableMetrics
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+
+      # CMakePresets.json がバイナリキャッシュとダウンロードを out/vcpkg に置くので、そこを保存する
+      - uses: actions/cache@v4
+        with:
+          path: |
+            out/vcpkg/archives
+            out/vcpkg/downloads
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      # --- ビルドとテスト ---------------------------------------------------------------------------
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  docs:
+    name: Architecture map & API docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # 図のノードが指す関数が消えたり改名されたりしていたら、ここで落ちる
+      - name: Check architecture map links
+        run: python tools/archmap/archmap.py --check
+
+      - name: Install Doxygen and Graphviz
+        run: sudo apt-get update -q && sudo apt-get install -y -q doxygen graphviz
+      - name: Build site
+        run: |
+          python tools/archmap/archmap.py --out out/site --rev ${{ github.sha }}
+          doxygen docs/Doxyfile
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: docs
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

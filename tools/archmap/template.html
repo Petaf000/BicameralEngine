@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- archmap.py が {{...}} を埋める。手で編集するのはこのテンプレートと docs/architecture/map.yaml だけ -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root {
+    --bg: #fbfbf9; --fg: #1d1d20; --muted: #62626b; --line: #e3e3e0; --card: #ffffff;
+    --accent: #2f5fd0; --done: #2f7d45; --planned: #8a8a93; --research: #b7791f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15161a; --fg: #e8e8ea; --muted: #a0a0aa; --line: #2c2d33; --card: #1c1d22; --accent: #8fb0ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.6 system-ui, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { padding: 20px 16px 8px; max-width: 1200px; margin: 0 auto; }
+  header h1 { margin: 0 0 4px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); }
+  nav.links { margin-top: 8px; display: flex; gap: 16px; flex-wrap: wrap; }
+  a { color: var(--accent); }
+  main { max-width: 1200px; margin: 0 auto; padding: 0 16px 48px; }
+  [role=tablist] { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin: 16px 0; }
+  [role=tab] { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px;
+               color: var(--muted); font: inherit; cursor: pointer; }
+  [role=tab][aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+  .lead { color: var(--muted); }
+  pre.mermaid { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px;
+                overflow-x: auto; text-align: center; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+  .legend i { display: inline-block; width: 14px; height: 10px; margin-right: 6px; border: 1.5px solid; vertical-align: middle; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin-top: 16px; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  .st { font-size: 12px; padding: 1px 6px; border-radius: 4px; border: 1px solid; white-space: nowrap; }
+  .st.done { color: var(--done); } .st.planned { color: var(--planned); } .st.research { color: var(--research); }
+  .st.external { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{TITLE}}</h1>
+  <p>ノードをクリックすると、その処理のソース(実装済み)か設計書・チケット(計画中)を GitHub で開きます。
+     リンクは版 <code>{{REV_SHORT}}</code> に固定。図の定義は <code>docs/architecture/map.yaml</code>。</p>
+  <nav class="links">
+    <a href="https://github.com/{{REPO}}">GitHub</a>
+    <a href="api/index.html">API リファレンス(Doxygen・呼び出し図)</a>
+    <a href="https://github.com/{{REPO}}/blob/{{REV}}/docs/architecture/map.yaml">map.yaml</a>
+  </nav>
+</header>
+<main>
+  <div role="tablist">{{TABS}}</div>
+  <div class="legend">
+    <span><i style="border-color:var(--done)"></i>動いている(クリックでコードへ)</span>
+    <span><i style="border-color:var(--planned);border-style:dashed"></i>計画(設計書・チケットへ)</span>
+    <span><i style="border-color:var(--research);border-style:dotted"></i>研究(結果が読めない項目)</span>
+    <span><i style="border-color:var(--accent)"></i>外部(OS・ドライバ)</span>
+  </div>
+  {{PANELS}}
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: dark ? "dark" : "neutral",
+                       flowchart: { htmlLabels: true, curve: "basis" } });
+  // 隠れたタブの中で描くと大きさが 0 になるので、表示したときに初めて描く
+  const drawn = new Set();
+  async function show(id) {
+    for (const s of document.querySelectorAll("section.view")) s.hidden = s.id !== "view-" + id;
+    for (const t of document.querySelectorAll("[role=tab]")) t.setAttribute("aria-selected", t.dataset.view === id);
+    if (!drawn.has(id)) { drawn.add(id); await mermaid.run({ querySelector: `#view-${id} pre.mermaid` }); }
+    history.replaceState(null, "", "#" + id);
+  }
+  for (const t of document.querySelectorAll("[role=tab]")) t.addEventListener("click", () => show(t.dataset.view));
+  for (const s of document.querySelectorAll("section.view table")) {
+    const w = document.createElement("div"); w.className = "table-wrap"; s.before(w); w.append(s);
+  }
+  const first = document.querySelector("[role=tab]").dataset.view;
+  const wanted = location.hash.slice(1);
+  show(document.getElementById("view-" + wanted) ? wanted : first);
+</script>
+</body>
+</html>

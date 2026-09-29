@@ -56,7 +56,9 @@
 - 「停止しています / heartbeat がありません」なら、ユーザーにランナーの起動だけを頼む。
 - コマンド: `job.py check` / `env` / `build [-Preset release] [-Clean]` / `test [-Filter x]` / `run [-Preset p] -- <args>` / `git <args>` / `raw <file.ps1>`
 - `raw` は最後の手段。繰り返し使うことになったら scripts/jobs/ にジョブとして足す。
-- push・reset --hard などの破壊的操作は git ジョブが拒否する。必要ならユーザーに頼む。
+- リポジトリは GitHub の公開リポジトリ `Petaf000/BicameralEngine`(ADR-0005)。通常の `job.py git push` は Claude がやってよい。
+  force push・reset --hard などの破壊的操作は git ジョブが拒否する。必要ならユーザーに頼む。
+- **公開リポジトリなので、鍵・個人情報・PC 固有のパスをコミットしない。** 個人的な背景は `CLAUDE.local.md`(git 管理外)。
 
 ---
 
@@ -107,7 +109,11 @@
 - コメントは「何を」より「なぜ」。仕様・論文・ADR に根拠があるなら番号や節を書く。
 - 処理のまとまりごとに空行と区切りコメント(`// --- 〇〇 ---`)を入れる。1 関数は 1 つの仕事、目安 50 行以内。
 - 名前で意味が分かるようにする(略語を避ける。単位が要る値は名前に単位を付ける: `timeoutMs`)。
-- 詳しい規約・整形ツール・CI・アーキテクチャ図は T-0006 で決める。決まったらこの節を更新する。
+- **アーキテクチャ図**: `docs/architecture/map.yaml` に「ノード → ファイル::シンボル」で書き、`tools/archmap/archmap.py` が行番号を解決して
+  https://petaf000.github.io/BicameralEngine/ に出す。関数を移す・改名したら map.yaml も直す(CI の `archmap --check` が落ちて教える)。
+  新しいサブシステムを作ったら図にノードを足す。確認: `python3 tools/archmap/archmap.py --check`(Linux 側で動く。PyYAML が要る)。
+- CI: GitHub Actions(`.github/workflows/ci.yml`)。Windows でビルド + ctest、図の検査、Pages へのデプロイ。
+- 整形の流儀(.clang-format)は未決(T-0006)。決まったらこの節を更新する。
 
 ---
 

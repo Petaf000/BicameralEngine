@@ -1,0 +1,37 @@
+# Doxygen の設定(T-0006)。リポジトリのルートで `doxygen docs/Doxyfile` を実行する。
+# 出力は out/site/api(アーキテクチャ図のページ out/site/index.html から「API リファレンス」でリンク)。
+# クラス・インクルード・呼び出しの図を自動で作る。フレームの流れは docs/architecture/map.yaml の手書きの図が担う。
+PROJECT_NAME           = "Bicameral Engine"
+PROJECT_BRIEF          = "GPU-resident engine for a magic-research open-world game"
+OUTPUT_DIRECTORY       = out/site
+HTML_OUTPUT            = api
+GENERATE_LATEX         = NO
+INPUT                  = engine/src
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.hpp *.cpp *.hlsl *.hlsli
+EXTENSION_MAPPING      = hlsl=C++ hlsli=C++
+INPUT_ENCODING         = UTF-8
+STRIP_FROM_PATH        = .
+
+# コメントが無い関数も、無名名前空間の関数も載せる(流れを追うため)
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+EXTRACT_ANON_NSPACES   = YES
+EXTRACT_PRIVATE        = YES
+JAVADOC_AUTOBRIEF      = YES
+
+# ソースを読めるページと、関数から呼び出し元・呼び出し先への図
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+DOT_GRAPH_MAX_NODES    = 80
+
+GENERATE_TREEVIEW      = YES
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
