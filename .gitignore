@@ -16,3 +16,6 @@ captures/
 
 # ランナーの鍵(リポジトリ内に置いた場合)。絶対にコミットしない
 .bicameral-runner/
+
+# 個人的なメモ(公開しない)
+CLAUDE.local.md
