@@ -12,6 +12,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $path = Join-Path (Get-Location) "out\build\$Preset\bin\$Exe.exe"
 if (-not (Test-Path $path)) { Write-Host "実行ファイルがありません: $path(先に build)"; exit 2 }
+# エンジンの終了コードで判定する。PS 5.1 は 'Stop' だと stderr への出力(デバッグレイヤーのメッセージなど)だけで止まる
+$ErrorActionPreference = 'Continue'
 
 $env:BICAMERAL_OUT = $env:JOB_OUT      # エンジンはスクショ・計測をここに書く
 Push-Location (Split-Path $path)

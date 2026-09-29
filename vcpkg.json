@@ -2,6 +2,7 @@
   "name": "bicameral-engine",
   "version-string": "0.0.1",
   "description": "GPU-resident simulation engine for a magic-research x open-world game",
+  "builtin-baseline": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
   "dependencies": [
     "directx-headers"
   ]

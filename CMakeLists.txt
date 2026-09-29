@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
+
+# vcpkg のキャッシュはリポジトリの out/vcpkg に置く(CMakePresets.json の environment)。
+# 既定の %LOCALAPPDATA% はユーザー名が日本語+空白だと vcpkg が扱えない。
+# vcpkg はこれらのフォルダが存在することを要求し、project() の中で走るので、その前に作る。
+foreach(_d IN ITEMS registries archives downloads)
+  file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/out/vcpkg/${_d}")
+endforeach()
+
 project(BicameralEngine LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

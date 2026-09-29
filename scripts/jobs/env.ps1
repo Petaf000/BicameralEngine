@@ -11,7 +11,8 @@ Get-CimInstance Win32_VideoController | ForEach-Object { Write-Host "$($_.Name) 
 Write-Host '== Visual Studio =='
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (Test-Path $vswhere) {
-  & $vswhere -all -prerelease -products * -format json | ConvertFrom-Json |
+  # PS 5.1 の ConvertFrom-Json は行ごとに流すと失敗するので、1 つの文字列にまとめてから渡す
+  (& $vswhere -all -prerelease -products * -format json -utf8 | Out-String) | ConvertFrom-Json | ForEach-Object { $_ } |
     ForEach-Object { Write-Host "$($_.displayName)  $($_.installationVersion)  $($_.installationPath)" }
 } else { Write-Host 'vswhere なし' }
 
@@ -26,5 +27,12 @@ foreach ($t in 'cmake', 'ninja', 'cl', 'dxc') {
   if ($c) { Write-Host "[VS] $t : $($c.Source)" } else { Write-Host "[VS] $t : なし" }
 }
 cmake --version | Select-Object -First 1
+# DXC の版(SM6.8 = lib_6_8 / cs_6_8 が通るか)
+$dxc = Get-Command dxc -ErrorAction SilentlyContinue
+if ($dxc) {
+  & dxc --version 2>&1 | ForEach-Object { "dxc: $_" }
+  $prof = (& dxc -help 2>&1 | Out-String)
+  foreach ($t in 'lib_6_8', 'cs_6_8', 'lib_6_9') { Write-Host ("dxc profile {0} : {1}" -f $t, $(if ($prof -match $t) { 'あり' } else { 'なし' })) }
+}
 Write-Host '== git =='
 git -c color.ui=false status --short --branch

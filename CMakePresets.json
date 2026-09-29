@@ -9,6 +9,12 @@
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "installDir": "${sourceDir}/out/install/${presetName}",
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "environment": {
+        "X_VCPKG_REGISTRIES_CACHE": "${sourceDir}/out/vcpkg/registries",
+        "VCPKG_DEFAULT_BINARY_CACHE": "${sourceDir}/out/vcpkg/archives",
+        "VCPKG_DOWNLOADS": "${sourceDir}/out/vcpkg/downloads",
+        "VCPKG_KEEP_ENV_VARS": "X_VCPKG_REGISTRIES_CACHE;VCPKG_DEFAULT_BINARY_CACHE;VCPKG_DOWNLOADS"
+      },
       "cacheVariables": {
         "CMAKE_C_COMPILER": "cl.exe",
         "CMAKE_CXX_COMPILER": "cl.exe",
