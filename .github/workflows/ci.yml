@@ -26,7 +26,7 @@ jobs:
       matrix:
         preset: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # --- ツール: cmake + ninja、MSVC の環境変数 -------------------------------------------------
       - uses: lukka/get-cmake@latest
@@ -44,7 +44,7 @@ jobs:
           "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
 
       # CMakePresets.json がバイナリキャッシュとダウンロードを out/vcpkg に置くので、そこを保存する
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             out/vcpkg/archives
@@ -64,8 +64,8 @@ jobs:
     name: Architecture map & API docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install pyyaml
@@ -80,7 +80,7 @@ jobs:
         run: |
           python tools/archmap/archmap.py --out out/site --rev ${{ github.sha }}
           doxygen docs/Doxyfile
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: out/site
 
@@ -97,4 +97,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
