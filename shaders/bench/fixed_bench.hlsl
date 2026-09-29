@@ -97,10 +97,11 @@ Value Operate(Value x, Operand operand) {
 #elif BENCH_OP == 14
     return (uint64_t)FxDivS64((int64_t)operand.divisor, (int64_t)(x | 1));
 #elif BENCH_OP == 15
-    return (uint64_t)FxDivShiftS64((int64_t)(x >> 16), (int64_t)operand.divisor, 16);
+    // 除数を毎回変える(T-0084 から、除数が同じだと逆数を作る所がループの外へ出されてしまう)
+    return (uint64_t)FxDivShiftS64((int64_t)(operand.divisor >> 8), (int64_t)((x >> 1) | FX_U64(0x100u, 0u)), 16);
 #elif BENCH_OP == 16
-    const FxU128 numerator = {x >> 48, x};  // 上位 < 除数(除数は 2^40 以上)
-    return FxDivU128By64(numerator, operand.divisor).quotient;
+    const FxU128 numerator = {x >> 40, operand.y};  // 上位 < 2^24 < 除数(除数は 2^40 以上で毎回変わる)
+    return FxDivU128By64(numerator, x | FX_U64(0x100u, 0u)).quotient;
 #elif BENCH_OP == 17
     return FxDivRecipU32(x, operand.recip32);
 #elif BENCH_OP == 18

@@ -100,6 +100,46 @@ static void TestMultiply(std::mt19937_64& random) {
 }
 
 // --- 割り算 -----------------------------------------------------------------------------------------
+// 128÷64 を 1 つ、参照(_udiv128)とビット単位で比べる
+static void ExpectDivide128(uint64_t high, uint64_t low, uint64_t divisor) {
+    uint64_t expectedRemainder = 0;
+    const uint64_t expectedQuotient = ReferenceDivide128(high, low, divisor, &expectedRemainder);
+    const FxDivResult result = FxDivU128By64({.hi = high, .lo = low}, divisor);
+    EXPECT(result.quotient == expectedQuotient && result.remainder == expectedRemainder);
+}
+
+// 1 つの除数で、上位 = 0・除数 − 1・除数 / 2 と 下位 = 0・全部 1・乱数 の組を全部試す
+static void ExpectDivide128Edges(uint64_t divisor, uint64_t randomLow) {
+    for (const uint64_t high : {static_cast<uint64_t>(0), divisor - 1, divisor >> 1}) {
+        for (const uint64_t low : {static_cast<uint64_t>(0), ~static_cast<uint64_t>(0), randomLow}) {
+            ExpectDivide128(high, low, divisor);
+        }
+    }
+}
+
+// 128÷64(逆数 + Newton 法、T-0084)の境界と正規化のずらし
+static void TestDivide128(std::mt19937_64& random) {
+    // --- 境界: 除数が 1・2 のべき・2 のべき ± 1・2^64 − 1 ---
+    const uint64_t allOnes = ~static_cast<uint64_t>(0);
+    for (uint32_t bit = 0; bit < 64; ++bit) {
+        const uint64_t power = static_cast<uint64_t>(1) << bit;
+        for (const uint64_t divisor : {power, power - 1, power + 1, allOnes >> bit, allOnes - power}) {
+            if (divisor != 0) ExpectDivide128Edges(divisor, random());
+        }
+    }
+    // --- 乱数: 偶数の除数(正規化のずらし)と、正規化した除数の逆数 ---
+    for (int i = 0; i < RANDOM_CASES; ++i) {
+        const uint64_t divisor = (SpreadBits(random) | 1) << (random() % 8);
+        ExpectDivide128(random() % divisor, random(), divisor);
+
+        // 逆数 floor((2^128 − 1) / d) − 2^64 = floor((~d · 2^64 + 2^64 − 1) / d)
+        const uint64_t normalized = random() | (static_cast<uint64_t>(1) << 63);
+        uint64_t unusedRemainder = 0;
+        EXPECT(FxReciprocalNormalizedU64(normalized) ==
+               ReferenceDivide128(~normalized, allOnes, normalized, &unusedRemainder));
+    }
+}
+
 static void TestDivide(std::mt19937_64& random) {
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const uint64_t divisor = SpreadBits(random) | 1;
@@ -330,6 +370,7 @@ int main() {
     TestHelpers();
     TestMultiply(random);
     TestDivide(random);
+    TestDivide128(random);
     TestReciprocalEdges();
     TestReciprocalRandom(random);
     TestSquareRoot(random);

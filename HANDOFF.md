@@ -1,31 +1,29 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0010 の追加分(整数のルーチンの費用の計測)— 完了
+最終更新: 2026-09-30 / チケット: T-0084 128÷64 の割り算の高速化 — 完了
 
 ## 状態(3 行以内)
-- fixed.hlsli に逆数の掛け算(FxMakeRecip*/FxDivRecip*)を足し、CPU・3070 Ti・WARP でビット一致(自己テスト 21 値、要約 605bc2e41947d188)。
-- マイクロベンチ(shaders/bench/fixed_bench.hlsl を演算ごとにコンパイル + tests/gpu_fixed_bench.cpp)で 3070 Ti の費用を測り、DXIL の命令数と合わせて 04 §6 の表に載せた。
-- 結果(fmul = 1): int64 の割り算 113・逆数の掛け算 33、128÷64(FxDivShiftS64)1925、exp2 553・log2 1190。書き方の方針の案は 04 §6 の末尾(ユーザー判断待ち)。
+- ユーザーが 04 §6 の書き方の方針を採用(ADR-0010・D-322)。SASS は T-0016 で、RDNA3 は AMD 機で測る。128÷64 の高速化を M1 に入れ(T-0084)、完了した。
+- `FxDivU128By64` を逆数 + Newton 法(Möller & Granlund 2011)に替えた(新しい `FxReciprocalNormalizedU64`)。商と余りは厳密で、自己テストの要約 605bc2e41947d188 は変わらず。
+- 費用(fmul = 1): 128÷64 1925 → 247、FxDivShiftS64 1829 → 247、FxMakeRecipU64 1494 → 301。04 §6・perf.md を更新。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(19 ファイル)。
-- `job.py test` → 15/15(自己テストの要約は 605bc2e41947d188 に変わった)。
-- `job.py run -Preset release -Exe gpu_fixed_bench` → 29 演算の Markdown の表がログに出る(約 1 分)。
-- `python3 tools/fixed_bench/dxil_count.py out/build/release/shaders/asm/bench` → DXIL の命令数の表(Linux 側で動く)。
-- `python3 tools/archmap/archmap.py --check` → OK(リンク 21 個)。CI はまだ回していない(push 後に確認)。
+- `job.py test` → 15/15(`-Filter fixed -Show` で GPU・WARP の要約 605bc2e41947d188 が CPU と一致)。
+- `job.py run -Preset release -Exe gpu_fixed_bench` → 29 演算の表(約 1 分)。`python3 tools/fixed_bench/dxil_count.py out/build/release/shaders/asm/bench` → DXIL の命令数。
+- `python3 tools/archmap/archmap.py --check` → OK(リンク 21 個)。
 
 ## 壊れている/未確認のもの
-- 04 §6 の NVIDIA(SASS)・RDNA3(ISA)の命令数は未計測(BACKLOG、ユーザー判断待ち)。
-- GPU のテストは D3D12 のデバッグレイヤー無しで走っている(API の誤用は見えない)。デバッグレイヤーと GBV は T-0003。
-- AMD(D-207)での一致・費用は未確認。ベンチは GPU のクロックを固定していない(2 回の実行の差は数 %)。
+- 04 §6 の NVIDIA(SASS)は T-0016、RDNA3(ISA)は AMD 機(D-207)で。AMD での一致・費用は未確認。
+- GPU のテストは D3D12 のデバッグレイヤー無しで走っている。デバッグレイヤーと GBV は T-0003(次)。
+- ベンチは GPU のクロックを固定していない(2 回の実行の差は数 %)。
 
 ## このチャットで決めたこと
-- bicameral_add_shader に NAME・DEFINES・FLAGS を足した(同じソースを変種ごとにコンパイル)。shaders/bench/ は計測専用で浮動小数点を使ってよい(検査しない)。
-- gpu::CreateRootUavSignature に rootConstantCount(b0 のルート定数)を足した。ImmediateQueue::Native() でキューを取れる。
-- 計測の exe は ctest に登録しない(合否の無い計測)。
+- ADR-0010 / D-322(整数の演算の書き方の方針)。決定 2(128÷64 と Q 形式の割り算をセルごとの毎刻みで使わない)は、速くなった後もそのまま。
+- ベンチの div128・divshift64 は除数を毎回変える(同じ除数だと、逆数を作る所がループの外へ出されて 75 になる)。
 
 ## 次にやること
-NEXT.md の先頭(T-0003 GPU デバッグ基盤)。その前に BACKLOG の 2 件(128÷64 の高速化・SASS/RGA)と 04 §6 の方針の案をユーザーと決める。
+NEXT.md の先頭(T-0003 GPU デバッグ基盤)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **GPU のテストを足すとき**: tests/CMakeLists.txt の `bicameral_add_gpu_test(<名前>)` と `bicameral_add_gpu_test_case(<テスト名> <exe> <gpu|warp> <引数>)`。
@@ -51,3 +49,4 @@ NEXT.md の先頭(T-0003 GPU デバッグ基盤)。その前に BACKLOG の 2 �
 - 外部コマンドを呼ぶ .ps1 で `$ErrorActionPreference='Stop'` にしない(PS 5.1 は stderr の警告で止まる)。.ps1 は UTF-8(BOM 付き)+ CRLF。
   ただし `job.py raw` に渡す .ps1 は本文が埋め込まれるので BOM を付けない。
 - Windows の Python がパイプに書く文字は CP932 になる。ビルドの中で呼ぶ Python は `sys.stdout.reconfigure(encoding="utf-8")` する。
+- **fixed.hlsli の割り算を変えるとき**: 先に 64bit の剰余演算を Python で真似て突き合わせると早い(T-0084 はそうした)。fixed_test の `TestDivide128` が _udiv128 と境界まで比べる。

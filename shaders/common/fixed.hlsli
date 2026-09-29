@@ -152,23 +152,61 @@ FX_FN int32_t FxMulShiftS32(int32_t a, int32_t b, uint32_t shift) {
 }
 
 // --- 割り算 ------------------------------------------------------------------------------------
-// 128bit ÷ 64bit。商が 64bit に収まること(numerator.hi < divisor)。1 ビットずつ引く方法(64 回、分岐のみで決定的)
+// 最上位のビットが 1 の(正規化した)除数 d の逆数 v = floor((2^128 − 1) / d) − 2^64 を**厳密に**求める。
+// Möller & Granlund(2011)"Improved division by invariant integers" の Algorithm 3(RECIPROCAL_WORD)。
+// 最初の見積もり(約 11bit)を 32bit の割り算 1 回で作り(論文の表と同じ値)、掛け算だけの Newton 法で 21 → 34 → 64bit と精度を倍にする。
+// 途中の値の範囲は論文の証明どおり(v0·v0·d40 < 2^62、2^60 − v1·d40 ≥ 0、e < 2^64)。T-0084 で全体を _udiv128 と突き合わせた
+FX_FN uint64_t FxReciprocalNormalizedU64(uint64_t divisor) {
+    FX_ASSERT((divisor >> 63) != 0);
+    const uint64_t d0 = divisor & 1;
+    const uint32_t d9 = (uint32_t)(divisor >> 55);  // 上位 9bit(256〜511)
+    const uint64_t d40 = (divisor >> 24) + 1;       // 上位 40bit を切り上げ
+    const uint64_t d63 = (divisor >> 1) + d0;       // ceil(d / 2)
+
+    // --- Newton 法: v0(11bit)→ v1(21bit)→ v2(34bit)→ v3(64bit、1 小さいことがある)---
+    const uint64_t v0 = (uint64_t)((0x80000u - 0x300u) / d9);  // floor((2^19 − 3·2^8) / d9)
+    const uint64_t v1 = (v0 << 11) - ((v0 * v0 * d40) >> 40) - 1;
+    const uint64_t v2 = (v1 << 13) + ((v1 * (FX_U64(0x10000000u, 0u) - v1 * d40)) >> 47);
+    // e = 2^96 − v2·d63 + floor(v2 / 2)·d0。真の値は 0〜2^64 − 1 なので、2^64 を法として計算してよい(2^96 は 0 になる)
+    const uint64_t e = ((v2 >> 1) & ((uint64_t)0 - d0)) - v2 * d63;
+    const uint64_t v3 = (v2 << 31) + (FxMulHiU64(v2, e) >> 1);
+
+    // --- 最後の直し: v4 = v3 − floor((2^64 + v3 + 1)·d / 2^64) = v3 − d − 上位 64bit((v3 + 1)·d)---
+    const FxU128 product = FxMulU64Full(v3, divisor);
+    const uint64_t productLow = product.lo + divisor;  // (v3 + 1)·d = v3·d + d
+    const uint64_t productHigh = product.hi + (productLow < divisor ? (uint64_t)1 : (uint64_t)0);
+    return v3 - productHigh - divisor;
+}
+
+// 128bit ÷ 64bit。商が 64bit に収まること(numerator.hi < divisor)。商と余りは厳密。
+// 除数を正規化して逆数を作り、Möller & Granlund(2011)の Algorithm 4(DIV_2_BY_1)で商を出す(掛け算 1 回と直し 2 回まで)。
+// 以前の 1 ビットずつ 64 回の方法(fmul の約 1900 回分)を置き換えた(T-0084、04 §6)
 FX_FN FxDivResult FxDivU128By64(FxU128 numerator, uint64_t divisor) {
     FX_ASSERT(divisor != 0 && numerator.hi < divisor);
-    uint64_t remainder = numerator.hi;
-    uint64_t low = numerator.lo;
-    uint64_t quotient = 0;
-    for (uint32_t i = 0; i < 64; ++i) {
-        const uint64_t carry = remainder >> 63;  // 左へずらすと 2^64 を超える分
-        remainder = (remainder << 1) | (low >> 63);
-        low <<= 1;
-        quotient <<= 1;
-        if (carry != 0 || remainder >= divisor) {
-            remainder -= divisor;  // carry があるときは 2^64 を足した値から引くのと同じ(真の値 < divisor)
-            quotient |= 1;
-        }
+
+    // --- 正規化: 除数の最上位ビットが 1 になるまで両方を左へずらす(商は変わらず、余りは同じだけずれる)---
+    const uint32_t shift = 63 - FxMsbU64(divisor);
+    const uint64_t normalizedDivisor = divisor << shift;
+    const uint64_t high = shift == 0 ? numerator.hi : (numerator.hi << shift) | (numerator.lo >> (64 - shift));
+    const uint64_t low = numerator.lo << shift;
+    const uint64_t reciprocal = FxReciprocalNormalizedU64(normalizedDivisor);
+
+    // --- 商の見積もり: (q1, q0) = v·high + (high, low)、q1 + 1 ---
+    const FxU128 estimate = FxMulU64Full(reciprocal, high);
+    const uint64_t estimateLow = estimate.lo + low;
+    uint64_t quotient = estimate.hi + high + (estimateLow < low ? (uint64_t)1 : (uint64_t)0) + 1;
+    uint64_t remainder = low - quotient * normalizedDivisor;  // 2^64 を法とする
+
+    // --- 直し: 見積もりが 1 大きい / 1 小さい場合(論文の証明で高々この 2 つ)---
+    if (remainder > estimateLow) {
+        quotient -= 1;
+        remainder += normalizedDivisor;
     }
-    FxDivResult result = {quotient, remainder};
+    if (remainder >= normalizedDivisor) {
+        quotient += 1;
+        remainder -= normalizedDivisor;
+    }
+    FxDivResult result = {quotient, remainder >> shift};
     return result;
 }
 
