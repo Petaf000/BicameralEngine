@@ -1,0 +1,8 @@
+{
+  "name": "bicameral-engine",
+  "version-string": "0.0.1",
+  "description": "GPU-resident simulation engine for a magic-research x open-world game",
+  "dependencies": [
+    "directx-headers"
+  ]
+}

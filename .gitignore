@@ -1,0 +1,18 @@
+# ビルド成果物
+out/
+.vs/
+*.user
+CMakeUserPresets.json
+vcpkg_installed/
+
+# ランナーの実行時ファイル(ログ・キュー・成果物)。runner.ps1 本体だけを管理する
+runner/*
+!runner/runner.ps1
+
+# キャプチャ・計測の大物
+*.wpix
+*.pix
+captures/
+
+# ランナーの鍵(リポジトリ内に置いた場合)。絶対にコミットしない
+.bicameral-runner/
