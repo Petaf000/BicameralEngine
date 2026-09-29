@@ -30,6 +30,18 @@ namespace {
 
     int failureCount = 0;
 
+    // 128÷64 の割り算の参照値。MSVC は組み込み関数 _udiv128 を使う。clang(CI の clang-tidy が解析するとき)は
+    // unsigned __int128 で求める。clang の intrin.h には _udiv128 が無い版がある(pip の clang-tidy 22.1.8。2026-09-30)
+    uint64_t ReferenceDivide128(uint64_t high, uint64_t low, uint64_t divisor, uint64_t* remainder) {
+#if defined(__clang__)
+        const unsigned __int128 numerator = (static_cast<unsigned __int128>(high) << 64) | low;
+        *remainder = static_cast<uint64_t>(numerator % divisor);
+        return static_cast<uint64_t>(numerator / divisor);
+#else
+        return _udiv128(high, low, divisor, remainder);
+#endif
+    }
+
     void Expect(bool condition, const char* text, int line) {
         if (condition) return;
         std::printf("FAILED line %d: %s\n", line, text);
@@ -91,7 +103,7 @@ static void TestDivide(std::mt19937_64& random) {
         const uint64_t divisor = SpreadBits(random) | 1;
         const FxU128 numerator = {.hi = random() % divisor, .lo = random()};
         uint64_t expectedRemainder = 0;
-        const uint64_t expectedQuotient = _udiv128(numerator.hi, numerator.lo, divisor, &expectedRemainder);
+        const uint64_t expectedQuotient = ReferenceDivide128(numerator.hi, numerator.lo, divisor, &expectedRemainder);
         const FxDivResult result = FxDivU128By64(numerator, divisor);
         EXPECT(result.quotient == expectedQuotient && result.remainder == expectedRemainder);
 
@@ -108,7 +120,7 @@ static void TestDivide(std::mt19937_64& random) {
         uint64_t remainder = 0;
         const uint64_t high = shift == 0 ? 0 : static_cast<uint64_t>(a) >> (64 - shift);
         const uint64_t expected =
-            _udiv128(high, static_cast<uint64_t>(a) << shift, static_cast<uint64_t>(b), &remainder);
+            ReferenceDivide128(high, static_cast<uint64_t>(a) << shift, static_cast<uint64_t>(b), &remainder);
         const int64_t result = FxDivShiftS64(negative ? -a : a, b, shift);
         EXPECT(result == (negative ? -static_cast<int64_t>(expected) : static_cast<int64_t>(expected)));
     }
