@@ -23,12 +23,14 @@ views:
     description: >-
       起動して GPU の対応状況(SM 6.8 / DXR / Mesh / Work Graphs)を調べるところまで(T-0001)と、
       シミュの整数の数学ライブラリ(T-0010。GPU と CPU が同じソースで計算する)と、
-      シミュに浮動小数点が入ったらビルドを落とす検査(T-0011)。
+      シミュに浮動小数点が入ったらビルドを落とす検査(T-0011)と、
+      GPU の小さな道具(デバイス・1 回投げて待つキュー・Work Graph)で自己テストと最小のグラフを GPU / WARP で走らせるテスト(T-0013)。
       Agility SDK は exe が 2 つの値をエクスポートすることで、OS の d3d12.dll に読み込ませる。
     direction: TD
     groups:
       - { id: exe, label: "bicameral.exe" }
       - { id: corelib, label: "core(どこからでも使う部品)" }
+      - { id: gpulib, label: "gpu(D3D12 の小さな道具)" }
       - { id: shared, label: "shaders/common(HLSL と C++ で共通)" }
       - { id: tests, label: "テスト(ctest)" }
       - { id: build, label: "ビルドの中の検査(CMake + Python)" }
@@ -58,6 +60,19 @@ views:
           note: "ビルドで DXC が通す。GPU で走らせて比べるのは T-0013" }
       - { id: fixedtest, group: tests, label: "fixed_test<br/>128bit 組み込み関数とのビット一致・誤差の測定",
           code: "tests/fixed_test.cpp::TestSelfTestDigest", ticket: T-0010 }
+      - { id: gpudevice, group: gpulib, label: "CreateDevice()<br/>ハードウェアの GPU か WARP",
+          code: "engine/src/gpu/device.cpp::CreateDevice", ticket: T-0013 }
+      - { id: immediate, group: gpulib, label: "ImmediateQueue<br/>1 本記録して投げて待つ(direct / compute)",
+          code: "engine/src/gpu/immediate_queue.cpp::ImmediateQueue::ExecuteAndWait", ticket: T-0013,
+          note: "テストと準備用。フレームのループは待たない別の仕組み(T-0012)" }
+      - { id: workgraph, group: gpulib, label: "WorkGraph<br/>状態オブジェクト・裏のメモリ・DispatchGraph",
+          code: "engine/src/gpu/work_graph.cpp::WorkGraph::Create", ticket: T-0013 }
+      - { id: gpufixedtest, group: tests, label: "gpu_fixed_test<br/>自己テストを GPU で走らせ CPU と 1 値ずつ比べる",
+          code: "tests/gpu_fixed_test.cpp::CompareWithCpu", ticket: T-0013,
+          note: "ハードウェアと WARP、debug(-Od)と release で一致" }
+      - { id: wgtest, group: tests, label: "gpu_work_graph_test<br/>Root → Leaf の最小のグラフ",
+          code: "tests/gpu_work_graph_test.cpp::RunGraph", ticket: T-0013,
+          note: "direct / compute キュー × ハードウェア / WARP。64bit atomic" }
       - { id: d3d12, group: os, status: external, label: "d3d12.dll(OS)",
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
       - { id: core, group: os, status: external, label: "D3D12Core.dll<br/>Agility SDK 1.619",
@@ -89,6 +104,12 @@ views:
       - [addshader, selftest, "DXC(cs_6_8)"]
       - [addshader, dxilcheck, "sim は逆アセンブルを検査"]
       - [srccheck, fixed, "トークンを検査"]
+      - [gpufixedtest, gpudevice]
+      - [gpufixedtest, immediate, "compute キュー"]
+      - [gpufixedtest, selftest, "GPU(.cso)と CPU で同じ列"]
+      - [wgtest, workgraph]
+      - [wgtest, immediate, "direct / compute"]
+      - [gpudevice, d3d12]
 
   # ---------------------------------------------------------------------------------------------
   - id: frame

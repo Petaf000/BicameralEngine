@@ -14,6 +14,33 @@ add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
 
+# --- GPU を使うテスト(T-0013)-------------------------------------------------------------------------
+# ラベル gpu: ハードウェアの GPU が要る(CI の Windows の機械には無いので CI は -LE gpu で外す)。
+# ラベル warp: WARP(ソフトウェアの D3D12)で走る。GPU の無い機械でも回る。
+# exe はランタイムと同じ bin/ に出るので、Agility SDK の D3D12Core.dll(bin/D3D12)とシェーダー(bin/shaders)をそのまま使う。
+function(bicameral_add_gpu_test name)
+  add_executable(${name} ${name}.cpp ${PROJECT_SOURCE_DIR}/engine/src/platform/agility_sdk.cpp)
+  target_precompile_headers(${name} PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)
+  target_link_libraries(${name} PRIVATE bicameral_gpu bicameral_fixed Microsoft::DirectX12-Agility)
+  add_dependencies(${name} bicameral bicameral_shaders)  # bin/D3D12 と bin/shaders を先に作る
+endfunction()
+
+# add_gpu_test_case(<テスト名> <exe> <ラベル> <引数...>)
+function(bicameral_add_gpu_test_case testName executable label)
+  add_test(NAME ${testName} COMMAND ${executable} ${ARGN})
+  set_tests_properties(${testName} PROPERTIES LABELS ${label})
+endfunction()
+
+bicameral_add_gpu_test(gpu_fixed_test)
+bicameral_add_gpu_test_case(gpu_fixed gpu_fixed_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_fixed_warp gpu_fixed_test warp --warp --queue compute)
+
+bicameral_add_gpu_test(gpu_work_graph_test)
+bicameral_add_gpu_test_case(gpu_work_graph_direct gpu_work_graph_test gpu --queue direct)
+bicameral_add_gpu_test_case(gpu_work_graph_compute gpu_work_graph_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_work_graph_warp_direct gpu_work_graph_test warp --warp --queue direct)
+bicameral_add_gpu_test_case(gpu_work_graph_warp_compute gpu_work_graph_test warp --warp --queue compute)
+
 # --- 浮動小数点の検査(tools/float_check、04 §4)が本当に落ちるかのテスト ---------------------------------
 # わざと浮動小数点を使うシェーダーを(検査なしで)逆アセンブルし、検査が「拒否する」ことを確かめる。
 # 検査がいつの間にか何も捕まえなくなっていたら、ここが落ちる。

@@ -1,5 +1,6 @@
 # CI(T-0006, ADR-0005)
-#   build : Windows でビルド(debug / release)+ CPU で走るテスト(ctest)。GPU を使うテストはまだ無い。
+#   build : Windows でビルド(debug / release)+ ctest。GPU の無い機械なので、ハードウェアの GPU が要るテスト(ラベル gpu)は外し、
+#           WARP(ソフトウェアの D3D12)で走る GPU のテスト(ラベル warp)は回す(T-0013)。
 #           ビルドの中でシミュの浮動小数点の検査(tools/float_check)が走る。debug では clang-tidy も(tools/tidy)
 #   docs  : 整形の検査(clang-format)・アーキテクチャ図のリンク切れ検査(archmap --check)→ 図のページ + Doxygen を作る
 #   deploy: main への push のときだけ、docs の成果物を GitHub Pages に出す
@@ -78,7 +79,7 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
-        run: ctest --preset ${{ matrix.preset }}
+        run: ctest --preset ${{ matrix.preset }} --label-exclude gpu
 
       # .clang-tidy の規則(docs/style.md)。PC では job.py tidy(VS 同梱の clang-tidy 22)で同じことをする
       - name: clang-tidy

@@ -42,8 +42,10 @@ def _strip_comment(line: str) -> str:
 
 
 def _find_candidates(lines: list[str], symbol: str) -> list[int]:
-    """symbol の定義らしい行(0 始まり)を返す。関数 → 型 → 変数 の順に探し、最初に見つかった種類を使う。"""
+    """symbol の定義らしい行(0 始まり)を返す。CMake の関数 → 関数 → 型 → 変数 の順に探し、最初に見つかった種類を使う。"""
     name = re.escape(symbol)
+    # CMake の function(name ...) / macro(name ...)。呼び出し(name(...))より先に見る
+    cmake_re = re.compile(rf"^\s*(?:function|macro)\s*\(\s*{name}\b", re.IGNORECASE)
     function_re = re.compile(rf"^(\s*)({_TYPE_PREFIX})(?<![\w:]){name}\s*\(")
     type_re = re.compile(rf"^\s*(?:template\s*<.*>\s*)?(class|struct|union|enum(?:\s+class)?)\s+{name}\b")
     # 変数は __declspec(dllexport) などの括弧を前に許す(Agility SDK のエクスポート)
@@ -53,11 +55,14 @@ def _find_candidates(lines: list[str], symbol: str) -> list[int]:
         s = line.strip()
         return bool(s) and not s.startswith(("//", "#", "*", "/*"))
 
-    functions, types, variables = [], [], []
+    cmake_functions, functions, types, variables = [], [], [], []
     for i, raw in enumerate(lines):
         if not is_code(raw):
             continue
         line = _strip_comment(raw).rstrip()
+        if cmake_re.match(line):
+            cmake_functions.append(i)
+            continue
         m = function_re.match(line)
         if m:
             words = set(re.findall(r"\w+", m.group(2)))
@@ -70,7 +75,7 @@ def _find_candidates(lines: list[str], symbol: str) -> list[int]:
             continue
         if variable_re.match(line) and not (set(re.findall(r"\w+", line.split(symbol)[0])) & _KEYWORDS):
             variables.append(i)
-    return functions or types or variables
+    return cmake_functions or functions or types or variables
 
 
 def _block_end(lines: list[str], start: int) -> int:

@@ -13,6 +13,21 @@ target_include_directories(bicameral_core PUBLIC src)
 add_library(bicameral_fixed INTERFACE)
 target_include_directories(bicameral_fixed INTERFACE ${PROJECT_SOURCE_DIR}/shaders)
 
+# --- gpu: D3D12 のデバイス・キュー・バッファ・Work Graph の小さな道具(T-0013)。core だけを知る ---
+# ランタイムと GPU のテスト(tests/gpu_*_test.cpp)が使う。
+add_library(bicameral_gpu STATIC
+  src/gpu/device.cpp
+  src/gpu/immediate_queue.cpp
+  src/gpu/resources.cpp
+  src/gpu/work_graph.cpp
+)
+target_include_directories(bicameral_gpu PUBLIC src)
+target_precompile_headers(bicameral_gpu PRIVATE src/pch.h)
+target_link_libraries(bicameral_gpu PUBLIC
+  bicameral_core
+  Microsoft::DirectX-Headers Microsoft::DirectX-Guids
+  d3d12 dxgi)
+
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp

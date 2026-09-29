@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <directx/d3d12.h>
+#include <directx/d3dx12.h>  // 状態オブジェクト(Work Graphs)の組み立て
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -14,9 +15,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <span>
 #include <string>
 #include <string_view>

@@ -1,5 +1,6 @@
 // caps.cpp — GPU の対応状況を調べてログに出す(T-0001 の到達点。T-0007 で printf からログへ)。
 // Work Graphs / Mesh Shader / DXR / SM6.8 がこの PC で使えるかを、エンジン開発の最初に確定させる。
+// T-0013: シミュが頼る 64bit 整数演算・64bit atomic と、WARP(ソフトウェアの D3D12。CI で GPU テストを回せるか)も表示する。
 //
 // 注意: OS 標準の D3D12 ランタイムで問い合わせている。古い OS では Agility SDK(1.613 以降)を
 // 読み込まないと Work Graphs が NOT_SUPPORTED になる。Windows 11 build 26200 + RTX 3070 Ti では
@@ -49,6 +50,31 @@ namespace bicameral {
                 D3D12_SDK_VERSION);
         }
 
+        const char* YesNo(BOOL value) {
+            return value ? "yes" : "no";
+        }
+
+        // シミュは 64bit の整数で計算し(04 §2)、保存量の足し合わせに 64bit atomic を使う(R4)。
+        // Int64ShaderOps と、64bit atomic のうち任意の機能(typed・groupshared・ヒープの記述子経由)を表示する。
+        // raw / structured バッファへの 64bit atomic は SM 6.6 以上で必須なので問い合わせる項目が無い(実際の動作は gpu_work_graph_test で確かめる)
+        void ReportIntegerFeatures(ID3D12Device* device) {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1{};
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1)))) {
+                Log(Channel::Platform, Level::Info, "  Int64ShaderOps     : {}", YesNo(options1.Int64ShaderOps));
+            }
+            D3D12_FEATURE_DATA_D3D12_OPTIONS9 options9{};
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS9, &options9, sizeof(options9)))) {
+                Log(Channel::Platform, Level::Info, "  Atomic64 typed     : {}  groupshared: {}",
+                    YesNo(options9.AtomicInt64OnTypedResourceSupported),
+                    YesNo(options9.AtomicInt64OnGroupSharedSupported));
+            }
+            D3D12_FEATURE_DATA_D3D12_OPTIONS11 options11{};
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS11, &options11, sizeof(options11)))) {
+                Log(Channel::Platform, Level::Info, "  Atomic64 heap      : {}",
+                    YesNo(options11.AtomicInt64OnDescriptorHeapResourceSupported));
+            }
+        }
+
         void ReportDevice(ID3D12Device* device) {
             D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{D3D_SHADER_MODEL_6_8};
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel)))) {
@@ -56,6 +82,7 @@ namespace bicameral {
             }
             Log(Channel::Platform, Level::Info, "  HighestShaderModel : {}",
                 ShaderModelName(shaderModel.HighestShaderModel));
+            ReportIntegerFeatures(device);
 
             D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
             if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5)))) {
@@ -86,6 +113,27 @@ namespace bicameral {
 
         bool SameLuid(const LUID& a, const LUID& b) {
             return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
+        }
+
+        // WARP(ソフトウェアの D3D12)。CI の GPU の無い機械で GPU テストを回せるかを知るために表示する(16 §4)。
+        // WARP は FL 12_2 に届かない版があるので、作れる一番高い FL で作ってから機能を問い合わせる
+        void ReportWarp(IDXGIFactory6* factory) {
+            ComPtr<IDXGIAdapter1> adapter;
+            if (FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)))) {
+                Log(Channel::Platform, Level::Warning, "WARP: アダプタを取れない");
+                return;
+            }
+            constexpr D3D_FEATURE_LEVEL LEVELS[] = {D3D_FEATURE_LEVEL_12_2, D3D_FEATURE_LEVEL_12_1,
+                                                    D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_0};
+            for (const D3D_FEATURE_LEVEL level : LEVELS) {
+                ComPtr<ID3D12Device> device;
+                if (FAILED(D3D12CreateDevice(adapter.Get(), level, IID_PPV_ARGS(&device)))) continue;
+                Log(Channel::Platform, Level::Info, "WARP: FL {}_{} でデバイスを作れた", (level >> 12) & 0xF,
+                    (level >> 8) & 0xF);
+                ReportDevice(device.Get());
+                return;
+            }
+            Log(Channel::Platform, Level::Warning, "WARP: デバイスを作れない");
         }
 
     }  // namespace
@@ -126,6 +174,8 @@ namespace bicameral {
             ReportDevice(device.Get());
             ++found;
         }
+        if (found == 0) ReportRuntime();  // WARP の前に、どのランタイムかを出しておく
+        ReportWarp(factory.Get());
         if (found == 0) {
             Log(Channel::Platform, Level::Error, "DX12 Ultimate 対応の GPU が見つからない");
             return 1;
