@@ -11,9 +11,11 @@
 #include <wrl/client.h>
 
 // --- 標準ライブラリ ---
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <span>
 #include <string>

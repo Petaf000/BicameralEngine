@@ -1,6 +1,10 @@
-# --- core: どのサブシステムからも使う小さな部品(シングルトンの破棄順、今後ログ)。他のサブシステムを知らない ---
+# --- core: どのサブシステムからも使う小さな部品(シングルトンの破棄順・ログ・HRESULT・文字コード)。他のサブシステムを知らない ---
 add_library(bicameral_core STATIC
+  src/core/hresult.cpp
+  src/core/log.cpp
+  src/core/log_sinks.cpp
   src/core/singleton.cpp
+  src/core/unicode.cpp
 )
 target_include_directories(bicameral_core PUBLIC src)
 

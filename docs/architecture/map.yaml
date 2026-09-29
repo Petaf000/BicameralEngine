@@ -26,9 +26,10 @@ views:
     direction: TD
     groups:
       - { id: exe, label: "bicameral.exe" }
+      - { id: corelib, label: "core(どこからでも使う部品)" }
       - { id: os, label: "OS / ドライバ" }
     nodes:
-      - { id: main, group: exe, label: "main()<br/>コマンドラインの振り分け", code: "engine/src/main.cpp::main" }
+      - { id: main, group: exe, label: "wmain()<br/>コマンドラインの振り分け", code: "engine/src/main.cpp::wmain" }
       - { id: caps, group: exe, label: "RunCapsProbe()<br/>アダプタを列挙して機能を問い合わせる",
           code: "engine/src/platform/caps.cpp::RunCapsProbe", ticket: T-0001 }
       - { id: runtime, group: exe, label: "ReportRuntime()<br/>どの D3D12Core.dll が読まれたか",
@@ -38,6 +39,12 @@ views:
       - { id: sdkver, group: exe, label: "D3D12SDKVersion / D3D12SDKPath<br/>Agility SDK のエクスポート",
           code: "engine/src/platform/agility_sdk.cpp::D3D12SDKVersion",
           note: "ADR-0004。D3D12Core.dll は CMake が bin/D3D12 にコピーする" }
+      - { id: log, group: corelib, label: "Log() / Logger(シングルトン)<br/>サブシステム名・重大度つきのログ",
+          code: "engine/src/core/log.h::Log", ticket: T-0007, doc: docs/design/03-logging.md }
+      - { id: checkhr, group: corelib, label: "BICAMERAL_CHECK_HR<br/>HRESULT の失敗を式・場所つきで",
+          code: "engine/src/core/hresult.cpp::CheckHresult", doc: docs/decisions/ADR-0006-logging.md }
+      - { id: sinks, group: corelib, label: "出力先<br/>コンソール / VS 出力 / logs/*.log",
+          code: "engine/src/core/log_sinks.cpp::OpenLogFile", note: "ログは exe の横の logs/(ADR-0006)" }
       - { id: d3d12, group: os, status: external, label: "d3d12.dll(OS)",
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
       - { id: core, group: os, status: external, label: "D3D12Core.dll<br/>Agility SDK 1.619",
@@ -49,6 +56,11 @@ views:
       - [d3d12, core, "bin/D3D12 から読み込む"]
       - [caps, device, "アダプタごと"]
       - [caps, runtime, "デバイス作成後"]
+      - [main, sinks, "ログファイルを開く"]
+      - [caps, checkhr, "失敗しうる API"]
+      - [caps, log, "結果"]
+      - [checkhr, log, "Error"]
+      - [log, sinks]
 
   # ---------------------------------------------------------------------------------------------
   - id: frame

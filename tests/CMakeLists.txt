@@ -5,3 +5,7 @@ add_test(NAME smoke COMMAND smoke_test)
 add_executable(singleton_test singleton_test.cpp)
 target_link_libraries(singleton_test PRIVATE bicameral_core)
 add_test(NAME singleton COMMAND singleton_test)
+
+add_executable(log_test log_test.cpp)
+target_link_libraries(log_test PRIVATE bicameral_core)
+add_test(NAME log COMMAND log_test)
