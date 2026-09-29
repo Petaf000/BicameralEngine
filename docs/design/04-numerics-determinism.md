@@ -108,7 +108,10 @@ GPU は浮動小数点が得意に作られている。シミュを整数で書�
 - 物理の整数化は 08-bodies-physics.md の研究(R-PHYS)。
 
 ## 未確認
-- SM 6.x の 64bit 整数演算と 64bit atomic の対応(Int64ShaderOps・64bit atomics)は機能として任意。対応状況を `--caps` で確かめ、最低機の条件に入れる。
+- 64bit 整数演算(Int64ShaderOps)と 64bit atomic のうち typed・groupshared・ヒープの記述子経由は、機能として任意。
+  開発機(RTX 3070 Ti)と WARP は全部 yes(`--caps`、2026-09-30、docs/perf.md)。最低機の条件は ADR-0009(D-211): Int64ShaderOps と raw バッファの 64bit atomic を必須、他の 64bit atomic は使わない。
+  raw / structured バッファへの 64bit atomic は SM 6.6 以上で必須(gpu_work_graph_test で動作を確認)。
 - DXC の最適化で整数演算の結果が変わることはない(整数演算は厳密)はずだが、ビット一致テストで確かめ続ける。
-- DXC は fixed.hlsli を cs_6_8・-WX で通した(64bit の整数の割り算を含む。2026-09-30)。GPU で CPU とビット一致するかは T-0013。
-  使う DXC は vcpkg の 1.9.2602.24(ADR-0004)。Debug のシェーダーは -Od(最適化なし)なので、T-0013 では debug と release の両方で比べる。
+  → T-0013 で確かめた: fixed の自己テスト(65536 case × 18 値)が RTX 3070 Ti と WARP の両方で、debug(-Od)と release の
+  どちらでも CPU とビット一致(要約 85c154e666febd92)。`ctest -R gpu_fixed` で毎回確かめる。DXC は vcpkg の 1.9.2602.24(ADR-0004)。
+- AMD(D-207)での一致は未確認。

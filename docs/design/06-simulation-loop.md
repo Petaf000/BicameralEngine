@@ -80,4 +80,6 @@ struct Command { uint64 targetTick; uint32 sequence; uint16 type; uint16 size; u
 - R-LOOP-2 compute キューと direct キューの並走で、描画が 30fps を保てるか。保てなければ、シミュを投げる単位を小さくする。
 
 ## 未確認
-- DispatchGraph を compute キューで使えるか(仕様とドライバで確かめる)。使えなければ、direct キューで描画とシミュを交互に投げる。
+- ~~DispatchGraph を compute キューで使えるか~~ → 使える(T-0013、2026-09-30)。RTX 3070 Ti(ドライバ 32.0.15.9597)と WARP で、
+  compute キューのコマンドリストから最小のグラフ(Root → Leaf)が正しく走った(`ctest -R gpu_work_graph`)。
+  並走したときの速さ(R-LOOP-2)は T-0004 で測る。AMD は未確認(D-207)。
