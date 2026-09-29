@@ -1,8 +1,8 @@
 # ADR-0004 Agility SDK と DXC の入れ方
 
-- Status: Proposed
+- Status: Accepted(A 案)
 - 日付: 2026-09-29
-- 決めた人: 未定(ユーザー)
+- 決めた人: ユーザー(「Claude がやりやすい方法で」→ A)
 
 ## 背景
 - T-0001 で `--caps` を実行したところ、Agility SDK を入れていない状態(OS 標準の D3D12 ランタイム)で
@@ -32,3 +32,10 @@ D3D12SDKVersion / D3D12SDKPath を exe からエクスポートし、D3D12Core.d
 ## 影響
 - A/B: 実行ファイルの横に D3D12 フォルダが要る(配布物に含める)。デバッグレイヤーの版もヘッダと揃う。
 - C: T-0001 の完了条件「Agility SDK 導入」を外すか、別チケットに移す。
+
+## 実施結果(2026-09-29)
+- vcpkg.json に `directx12-agility` と `directx-dxc` を追加。exe は engine/src/platform/agility_sdk.cpp で
+  D3D12SDKVersion(= ヘッダの D3D12_SDK_VERSION = 619)と D3D12SDKPath(`.\D3D12\`)をエクスポート。
+- engine/CMakeLists.txt の POST_BUILD で D3D12Core.dll と d3d12SDKLayers.dll を `bin/D3D12/` にコピー。
+- `--caps` で `D3D12Core : ...\bin\D3D12\D3D12Core.dll (D3D12SDKVersion 619)` を確認。WorkGraphsTier 1.0 のまま。
+- DXC は CMake 変数 DIRECTX_DXC_TOOL(vcpkg の tools/directx-dxc/dxc.exe)で使う。版と lib_6_9 対応は未確認(T-0005 で確認)。

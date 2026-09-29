@@ -16,7 +16,7 @@
 | ninja | VS 2026 同梱 |
 | vcpkg | VS 2026 同梱(VC\vcpkg) |
 | dxc | Windows SDK 10.0.26100.0 同梱 1.8.2502(lib_6_8 / cs_6_8 あり、lib_6_9 なし) |
-| D3D12 | OS 標準ランタイムで SM 6.8 / DXR 1.2 / Mesh 1.0 / WorkGraphs 1.0(Agility SDK 無し) |
+| D3D12 | OS 標準ランタイムで SM 6.8 / DXR 1.2 / Mesh 1.0 / WorkGraphs 1.0(Agility SDK 無し)。Agility SDK 1.619 でも同じ |
 
 ## 記録
 | 日付 | 項目 | 条件 | 結果 | GPU / ドライバ | コミット |

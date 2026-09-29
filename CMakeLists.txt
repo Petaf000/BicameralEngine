@@ -21,7 +21,11 @@ if(MSVC)
   add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 endif()
 
-find_package(directx-headers CONFIG REQUIRED)
+# --- 依存(すべて vcpkg。版は vcpkg.json の builtin-baseline で固定)-----------------------------
+find_package(directx-headers CONFIG REQUIRED)    # d3d12.h など(Agility SDK と同じ版)
+find_package(directx12-agility CONFIG REQUIRED)  # D3D12Core.dll / d3d12SDKLayers.dll(ADR-0004)
+find_package(directx-dxc CONFIG REQUIRED)        # シェーダーコンパイラ。DIRECTX_DXC_TOOL に dxc.exe の場所が入る
+message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
 
 add_subdirectory(engine)
 

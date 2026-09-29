@@ -40,6 +40,20 @@ std::string Narrow(const wchar_t* w) {
   return s;
 }
 
+// どの D3D12Core.dll が読み込まれたかを表示する。
+// exe 横の D3D12\ から読まれていれば Agility SDK、System32 からなら OS 標準のランタイム。
+// D3D12Core.dll はデバイスを作った後でないと読み込まれていないので、その後に呼ぶ。
+void ReportRuntime() {
+  HMODULE core = GetModuleHandleW(L"D3D12Core.dll");
+  if (core == nullptr) {
+    std::printf("D3D12Core : (読み込まれていない)\n");
+    return;
+  }
+  wchar_t path[MAX_PATH] = {};
+  GetModuleFileNameW(core, path, MAX_PATH);
+  std::printf("D3D12Core : %s  (D3D12SDKVersion %u)\n", Narrow(path).c_str(), D3D12_SDK_VERSION);
+}
+
 void ReportDevice(ID3D12Device* dev) {
   D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_8};
   if (FAILED(dev->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm)))) {
@@ -102,6 +116,7 @@ int RunCapsProbe() {
       std::printf("  FL 12_2 device を作れない(DX12 Ultimate 非対応)\n");
       continue;
     }
+    if (found == 0) ReportRuntime();
     ReportDevice(dev.Get());
     ++found;
   }
