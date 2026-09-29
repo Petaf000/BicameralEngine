@@ -49,4 +49,5 @@
   tools/archmap(map.yaml → 定義行を解決 → Mermaid のページ。解決できなければ CI 失敗)、英語 README、ADR-0005。
   整形の流儀は候補 4 つを提示して返事待ち。
 - 2026-09-29: ユーザーの流儀で docs/style.md・.clang-format・.clang-tidy。既存コードを整形、C++23 化、pch.h。CI に整形チェック。
+  追加の決定: 定数は大文字スネーク・enum 値は UpperCamel・static は s_・名前空間の中もインデント。singleton を core に取り込み。
   ログの仕組みは T-0007 に切り出し(ユーザー提供の singleton_template の扱いもそこで決める)。

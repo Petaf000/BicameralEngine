@@ -5,7 +5,7 @@
 
 ## 見た目(clang-format が揃える)
 - インデント 4、`{` は同じ行、1 行の上限 120 桁(日本語コメントは 1 文字 2 桁で数えられる)。
-- `public:` / `private:` は行頭。名前空間の中はインデントしない。
+- `public:` / `private:` はクラスの行頭に揃える。名前空間の中もインデントする(入れ子の名前空間も 1 段ずつ)。
 - 1 行の if は `{ }` を省いて同じ行に書く: `if (device == nullptr) return false;`
   2 行以上になる if・else 付き・ループは `{ }` を付ける。
 - 日本語のコメントは自動で折り返さない(自分で切れ目を選んで改行する)。
@@ -16,17 +16,17 @@
 | 型(class / struct / enum / using) | 大文字始まり | `ReactionGraph`, `NodeState` |
 | 関数・メソッド | 大文字始まり(UpperCamel) | `Dispatch()`, `RunCapsProbe()` |
 | class のメンバー変数 | `m_` + 小文字始まり | `m_maxDepth` |
+| static メンバー変数 | `s_` + 小文字始まり | `s_instance` |
 | struct のメンバー | 小文字始まり(接頭辞なし) | `temperature`, `nodeCount` |
 | 関数の中の変数・引数 | 小文字始まり | `hogeHuga`, `commandList` |
-| 定数(constexpr・グローバルの const) | `k` + 大文字始まり | `kMaxFinalizers` |
-| enum の値 | 全部大文字のスネークケース | `NOT_SUPPORTED`, `TIER_1_0` |
+| 定数(constexpr・static const・グローバルの const) | 全部大文字のスネークケース | `MAX_FINALIZERS`, `MAX_DEPTH` |
+| enum の値 | 大文字始まり(UpperCamel) | `NotSupported`, `Tier1_0` |
 | マクロ(#define) | 全部大文字のスネークケース | `BICAMERAL_GPU_VALIDATION` |
 | 名前空間 | 小文字 | `bicameral`, `bicameral::reaction` |
 
-- **enum の値・マクロの大文字名は windows.h のマクロと衝突しうる**(`ERROR`・`DELETE`・`IN`・`OUT`・`ABSOLUTE`・`TRANSPARENT` など)。
-  衝突したら、その値だけ別の語にする(`ERROR` → `FAILURE` など)。
+- 定数・マクロの全部大文字の名前は windows.h のマクロと衝突しうる(`MAX_PATH`・`ERROR`・`DELETE` など)。
+  衝突したら、その名前だけ別の語にする(`MAX_PATH` → `MAX_PATH_LENGTH` など)。enum の値は UpperCamel なので衝突しない。
 - 略語を避ける。単位が要る値は名前に単位を付ける(`timeoutMs`, `sizeBytes`)。
-- 未確定(ユーザーに確認中): static メンバーの接頭辞(`s_` にするか)。
 
 ## 書き方
 - **C++23**(MSVC では `/std:c++latest`)。簡潔に書ける所は新しい機能を使う:
@@ -42,7 +42,7 @@
 - 機能ごとに `engine/src/<subsystem>/` に分ける。サブシステムどうしは小さなインターフェース(ヘッダの関数・構造体)だけで
   つなぎ、中身(実装の型・グローバル)を他から直接触らせない。依存は引数で渡す。
 - グローバルな状態・シングルトンは使わない(どこから壊されたか分からなくなる)。例外はログのように本当に 1 つしか
-  要らず、どこからでも呼ぶもの。それも生成と破棄の順序をはっきりさせる。
+  要らず、どこからでも呼ぶもの。それも `engine/src/core/singleton.h`(作った順の逆に破棄)を使い、生成と破棄の順序をはっきりさせる。
 - 壊れた場所が分かるように、サブシステム名つきのログを出す(`[reaction] ...`)。HRESULT の失敗は、呼んだ API と
   場所を必ずログに残す。ログの仕組みは T-0007 で作る。
 

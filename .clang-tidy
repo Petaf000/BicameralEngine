@@ -29,17 +29,20 @@ CheckOptions:
   - { key: readability-identifier-naming.ProtectedMemberPrefix,    value: m_ }
   - { key: readability-identifier-naming.ProtectedMemberCase,      value: camelBack }
   - { key: readability-identifier-naming.PublicMemberCase,         value: camelBack }
+  # --- static メンバー: s_ + 小文字始まり ---
+  - { key: readability-identifier-naming.ClassMemberPrefix,        value: s_ }
+  - { key: readability-identifier-naming.ClassMemberCase,          value: camelBack }
   # --- 関数の中の物・引数: 小文字始まり(hogeHuga)---
   - { key: readability-identifier-naming.LocalVariableCase,        value: camelBack }
   - { key: readability-identifier-naming.ParameterCase,            value: camelBack }
   - { key: readability-identifier-naming.VariableCase,             value: camelBack }
-  # --- 定数: k + 大文字始まり(kMaxDepth)---
-  - { key: readability-identifier-naming.ConstexprVariablePrefix,  value: k }
-  - { key: readability-identifier-naming.ConstexprVariableCase,    value: CamelCase }
-  - { key: readability-identifier-naming.GlobalConstantPrefix,     value: k }
-  - { key: readability-identifier-naming.GlobalConstantCase,       value: CamelCase }
-  # --- enum の値・マクロ: 全部大文字のスネークケース ---
-  - { key: readability-identifier-naming.EnumConstantCase,         value: UPPER_CASE }
+  # --- 定数・マクロ: 全部大文字のスネークケース(MAX_DEPTH)---
+  - { key: readability-identifier-naming.ConstexprVariableCase,    value: UPPER_CASE }
+  - { key: readability-identifier-naming.GlobalConstantCase,       value: UPPER_CASE }
+  - { key: readability-identifier-naming.StaticConstantCase,       value: UPPER_CASE }
+  - { key: readability-identifier-naming.ClassConstantCase,        value: UPPER_CASE }
+  # --- enum の値: 大文字始まり(NotSupported)---
+  - { key: readability-identifier-naming.EnumConstantCase,         value: CamelCase }
   - { key: readability-identifier-naming.MacroDefinitionCase,      value: UPPER_CASE }
   - { key: readability-identifier-naming.NamespaceCase,            value: lower_case }
   # --- 1 関数の大きさの目安(超えたら分ける)---

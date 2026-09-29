@@ -9,6 +9,7 @@
 
 ## 動いているもの(確認方法つき)
 - `job.py check` → OK。`job.py build` / `job.py test` は T-0001 のまま通る
+- `job.py test` → smoke と singleton の 2/2 passed
 - `python3 tools/archmap/archmap.py --check`(Linux 側)→ OK(コードへのリンク 5 個)
 - CI: `job.py raw` で `gh run list -R Petaf000/BicameralEngine -L 3`。初回の run は全ジョブ緑(ビルド 1〜1.5 分)
 - `job.py git push` → 通常の push は通る(force・削除・+refspec は git.ps1 が拒否)
@@ -27,8 +28,10 @@
   公開前に 3 コミットを作り直して、履歴からも個人情報を消した。ブランチ名は main。
 - 規約(ユーザーの流儀): インデント 4・{ は同じ行・関数は大文字始まり・class メンバー m_・関数内は小文字始まり・enum 値とマクロは大文字スネーク・
   struct メンバーは小文字始まり・1 行の if は {} 省略・早期リターン・疎結合・カスタムログ。詳細は docs/style.md。ADR-0005 に追記。
-- 未確認でユーザーに聞くもの: static メンバーの接頭辞(s_ か)、定数の k 接頭辞(ユーザーのファイルにあったので採用)でよいか。
-- ユーザー提供の singleton_template はまだ取り込んでいない。T-0007(ログ)で使うかを決める(気になる点はチケットに記載)。
+- 追加の決定(同日): 定数は大文字スネーク(MAX_DEPTH)、enum の値は UpperCamel(NotSupported)、static メンバーは s_、名前空間の中もインデント。
+- ユーザー提供の singleton_template を engine/src/core/singleton.h に取り込み(規約に合わせ、破棄順・二重 delete・作り直しを修正)。
+  core は静的ライブラリ bicameral_core。tests/singleton_test.cpp が通る(ctest 2/2)。
+- **引き継ぎの区切りは機能(チケット)ごと。ツール呼び出しの回数では区切らない**(CLAUDE.md §3・docs/claude/ を更新)。
 
 ## 次にやること
 NEXT.md の先頭(T-0007 ログ、または T-0003 / T-0004)。

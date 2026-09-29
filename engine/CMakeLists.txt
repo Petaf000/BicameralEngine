@@ -1,3 +1,9 @@
+# --- core: どのサブシステムからも使う小さな部品(シングルトンの破棄順、今後ログ)。他のサブシステムを知らない ---
+add_library(bicameral_core STATIC
+  src/core/singleton.cpp
+)
+target_include_directories(bicameral_core PUBLIC src)
+
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp
@@ -7,6 +13,7 @@ add_executable(bicameral
 target_include_directories(bicameral PRIVATE src)
 target_precompile_headers(bicameral PRIVATE src/pch.h)  # 重い外部ヘッダをまとめる(docs/style.md)
 target_link_libraries(bicameral PRIVATE
+  bicameral_core
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility
   d3d12 dxgi)

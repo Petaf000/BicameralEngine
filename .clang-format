@@ -7,7 +7,7 @@ IndentWidth: 4
 ContinuationIndentWidth: 4
 AccessModifierOffset: -4       # public: / private: は行頭
 BreakBeforeBraces: Attach      # { は同じ行
-NamespaceIndentation: None
+NamespaceIndentation: All     # 名前空間の中もインデントする
 FixNamespaceComments: true
 PointerAlignment: Left
 DerivePointerAlignment: false
