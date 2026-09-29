@@ -15,7 +15,7 @@
 - `python3 tools/archmap/archmap.py --check`(Linux 側)→ OK(コードへのリンク 8 個)
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- この commit の CI は push 後に確認(下の「注意」)。図の core グループ(corelib)が Mermaid で正しく描けるかはページで目視が要る。
+- CI は e74d36a で全ジョブ緑(debug/release ビルド+ctest・図・Pages)。図の core グループ(corelib)の見た目はページで未目視。
 - コンソールのシンクは毎行 fflush、書き込みは鍵の中。毎フレーム大量に出すようになったら見直す(ADR-0006「影響」)。
 - T-0006 からの持ち越し: ilammy/msvc-dev-cmd の Node 20 警告、.clang-tidy を CI で未実行、ubuntu-latest の 26 移行(10/19)、
   GPU テストを CI でどう回すか、RTX 3070 Ti が 2 つ列挙される件(T-0004)、vcpkg の DXC の版(T-0005)。
