@@ -73,12 +73,14 @@ uint32_t WgGaugeAddress(uint32_t gauge) {
 // ウェーブの中の値を足してから 1 回だけ atomic(同じ番地への atomic を減らす)。分岐の中で呼んでよい(生きているレーンだけ)
 void WgAddAcrossWave(uint32_t address, uint32_t value) {
     const uint32_t total = WaveActiveSum(value);
-    if (WaveIsFirstLane() && total != 0) bicameralGraphStats.InterlockedAdd(address, total);
+    if (WaveIsFirstLane() && total != 0)
+        bicameralGraphStats.InterlockedAdd(address, total);
 }
 
 void WgMaxAcrossWave(uint32_t address, uint32_t value) {
     const uint32_t peak = WaveActiveMax(value);
-    if (WaveIsFirstLane() && peak != 0) bicameralGraphStats.InterlockedMax(address, peak);
+    if (WaveIsFirstLane() && peak != 0)
+        bicameralGraphStats.InterlockedMax(address, peak);
 }
 
 // 1 回の起動を数える。スレッド起動は全部のスレッドが、ブロードキャスト/合体はグループの 1 スレッドだけが呼ぶ
@@ -98,6 +100,7 @@ void WgCountOutputs(uint32_t node, uint32_t requested, uint32_t granted) {
 uint32_t WgGrantOutputs(uint32_t node, uint32_t requested, uint32_t maxRecords) {
     const uint32_t granted = min(requested, maxRecords);
     WgCountOutputs(node, requested, granted);
+
     return granted;
 }
 
@@ -108,6 +111,7 @@ bool WgTryRecurse(uint32_t node, uint32_t remainingLevels, uint32_t declaredDept
     WgMaxAcrossWave(WgNodeAddress(node, WG_NODE_DEEPEST_RECURSION), depth);
     const bool allowed = wants && remainingLevels > 0;
     WgAddAcrossWave(WgNodeAddress(node, WG_NODE_REFUSED_RECURSIONS), wants && !allowed ? 1u : 0u);
+
     return allowed;
 }
 

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/work_graph_stats.hlsli"
+#include "core/aliases.h"
 #include "gpu/readback_ring.h"
 
 namespace bicameral::gpu {
@@ -96,9 +97,8 @@ namespace bicameral::gpu {
         // 同じ Warning(種類 × 番号)をもう一度ログに出すのは、この回数の Report() の後(毎フレームの Warning でログを埋めない)
         static constexpr uint64_t WARNING_REPEAT_REPORTS = 600;
 
-        [[nodiscard]] static std::expected<WorkGraphStats, std::string> Create(ID3D12Device* device,
-                                                                               GraphStatsLayout layout,
-                                                                               uint32_t slotCount = 1);
+        [[nodiscard]] static expected<WorkGraphStats, std::string> Create(ID3D12Device* device, GraphStatsLayout layout,
+                                                                          uint32_t slotCount = 1);
 
         // ルートの UAV(u1 space1)に渡すアドレス
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS GpuAddress() const { return m_ring.GpuAddress(); }
@@ -111,7 +111,7 @@ namespace bicameral::gpu {
         void RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot = 0) const;
 
         // slot のリストを GPU が終えた後に呼ぶ
-        [[nodiscard]] std::expected<GraphStatsSnapshot, std::string> Read(uint32_t slot = 0) const;
+        [[nodiscard]] expected<GraphStatsSnapshot, std::string> Read(uint32_t slot = 0) const;
 
         // 要約を Trace で、見つかった上限を Warning でログへ(同じものは WARNING_REPEAT_REPORTS 回に 1 回)。見つかったものを全部返す
         std::vector<GraphFinding> Report(const GraphStatsSnapshot& snapshot);

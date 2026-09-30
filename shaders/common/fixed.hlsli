@@ -69,23 +69,30 @@ FX_FN uint32_t FxMsbU64(uint64_t value) {
         value >>= 32;
         position += 32;
     }
+
     if (value >= (uint64_t)0x10000u) {
         value >>= 16;
         position += 16;
     }
+
     if (value >= (uint64_t)0x100u) {
         value >>= 8;
         position += 8;
     }
+
     if (value >= (uint64_t)0x10u) {
         value >>= 4;
         position += 4;
     }
+
     if (value >= (uint64_t)0x4u) {
         value >>= 2;
         position += 2;
     }
-    if (value >= (uint64_t)0x2u) position += 1;
+
+    if (value >= (uint64_t)0x2u)
+        position += 1;
+
     return position;
 }
 
@@ -109,6 +116,7 @@ FX_FN FxU128 FxMulU64Full(uint64_t a, uint64_t b) {
     const uint64_t middle = (lowLow >> 32) + (lowHigh & FX_LOW32_MASK) + (highLow & FX_LOW32_MASK);
     FxU128 result = {highHigh + (lowHigh >> 32) + (highLow >> 32) + (middle >> 32),
                      (middle << 32) | (lowLow & FX_LOW32_MASK)};
+
     return result;
 }
 
@@ -119,8 +127,12 @@ FX_FN uint64_t FxMulHiU64(uint64_t a, uint64_t b) {
 // 符号つき 64bit × 64bit → 128bit(2 の補数)。符号なしの積から、負の側の分を上位から引いて直す
 FX_FN FxU128 FxMulS64Full(int64_t a, int64_t b) {
     FxU128 result = FxMulU64Full((uint64_t)a, (uint64_t)b);
-    if (a < 0) result.hi -= (uint64_t)b;
-    if (b < 0) result.hi -= (uint64_t)a;
+    if (a < 0)
+        result.hi -= (uint64_t)b;
+
+    if (b < 0)
+        result.hi -= (uint64_t)a;
+
     return result;
 }
 
@@ -131,10 +143,12 @@ FX_FN uint64_t FxShiftRightU128(FxU128 value, uint32_t shift) {
         FX_ASSERT(value.hi == 0);
         return value.lo;
     }
+
     if (shift < 64) {
         FX_ASSERT((value.hi >> shift) == 0);
         return (value.lo >> shift) | (value.hi << (64 - shift));
     }
+
     return shift == 64 ? value.hi : value.hi >> (shift - 64);
 }
 
@@ -142,6 +156,7 @@ FX_FN uint64_t FxShiftRightU128(FxU128 value, uint32_t shift) {
 FX_FN int64_t FxMulShiftS64(int64_t a, int64_t b, uint32_t shift) {
     const bool negative = (a < 0) != (b < 0);
     const uint64_t magnitude = FxShiftRightU128(FxMulU64Full(FxAbsU64(a), FxAbsU64(b)), shift);
+
     return FxApplySign(magnitude, negative);
 }
 
@@ -150,6 +165,7 @@ FX_FN int32_t FxMulShiftS32(int32_t a, int32_t b, uint32_t shift) {
     const bool negative = (a < 0) != (b < 0);
     const uint64_t magnitude = (FxAbsU64(a) * FxAbsU64(b)) >> shift;
     FX_ASSERT(magnitude <= (negative ? (uint64_t)0x80000000u : (uint64_t)0x7FFFFFFFu));
+
     return (int32_t)FxApplySign(magnitude, negative);
 }
 
@@ -177,6 +193,7 @@ FX_FN uint64_t FxReciprocalNormalizedU64(uint64_t divisor) {
     const FxU128 product = FxMulU64Full(v3, divisor);
     const uint64_t productLow = product.lo + divisor;  // (v3 + 1)·d = v3·d + d
     const uint64_t productHigh = product.hi + (productLow < divisor ? (uint64_t)1 : (uint64_t)0);
+
     return v3 - productHigh - divisor;
 }
 
@@ -204,11 +221,14 @@ FX_FN FxDivResult FxDivU128By64(FxU128 numerator, uint64_t divisor) {
         quotient -= 1;
         remainder += normalizedDivisor;
     }
+
     if (remainder >= normalizedDivisor) {
         quotient += 1;
         remainder -= normalizedDivisor;
     }
+
     FxDivResult result = {quotient, remainder >> shift};
+
     return result;
 }
 
@@ -218,6 +238,7 @@ FX_FN int64_t FxDivShiftS64(int64_t a, int64_t b, uint32_t shift) {
     const bool negative = (a < 0) != (b < 0);
     const uint64_t magnitudeA = FxAbsU64(a);
     FxU128 numerator = {shift == 0 ? (uint64_t)0 : magnitudeA >> (64 - shift), magnitudeA << shift};
+
     return FxApplySign(FxDivU128By64(numerator, FxAbsU64(b)).quotient, negative);
 }
 
@@ -264,6 +285,7 @@ FX_FN FxRecip64 FxMakeRecipU64(uint64_t divisor) {
     const FxU128 numerator = {powerOfTwo - divisor, 0};
     FxRecip64 recip = {FxDivU128By64(numerator, divisor).quotient + 1, ceilLog2 < 1 ? ceilLog2 : 1,
                        ceilLog2 > 1 ? ceilLog2 - 1 : 0};
+
     return recip;
 }
 
@@ -280,6 +302,7 @@ FX_FN FxRecip32 FxMakeRecipU32(uint32_t divisor) {
     const uint64_t multiplier = ((powerOfTwo - divisor) << 32) / divisor + 1;
     FX_ASSERT(multiplier <= FX_LOW32_MASK);
     FxRecip32 recip = {(uint32_t)multiplier, ceilLog2 < 1 ? ceilLog2 : 1, ceilLog2 > 1 ? ceilLog2 - 1 : 0};
+
     return recip;
 }
 
@@ -292,6 +315,7 @@ FX_FN uint32_t FxDivRecipU32(uint32_t numerator, FxRecip32 recip) {
 FX_FN FxRecipS64 FxMakeRecipS64(int64_t divisor) {
     FX_ASSERT(divisor != 0);
     FxRecipS64 recip = {FxMakeRecipU64(FxAbsU64(divisor)), divisor < 0};
+
     return recip;
 }
 
@@ -310,11 +334,12 @@ FX_FN uint32_t FxSqrtU64(uint64_t value) {
         if (value >= result + bit) {
             value -= result + bit;
             result = (result >> 1) + bit;
-        } else {
+        } else
             result >>= 1;
-        }
+
         bit >>= 2;
     }
+
     return (uint32_t)result;
 }
 
@@ -325,11 +350,12 @@ FX_FN uint32_t FxSqrtU32(uint32_t value) {
         if (value >= result + bit) {
             value -= result + bit;
             result = (result >> 1) + bit;
-        } else {
+        } else
             result >>= 1;
-        }
+
         bit >>= 2;
     }
+
     return result;
 }
 
@@ -355,6 +381,7 @@ FX_FN int64_t FxLog2U64(uint64_t value) {
     const uint32_t msb = FxMsbU64(value);
     uint64_t mantissa = value << (63 - msb);  // Q63 で [1, 2)
     uint64_t fraction = 0;
+
     for (uint32_t i = 0; i < 32; ++i) {
         const uint64_t square = FxMulHiU64(mantissa, mantissa);  // Q62 で [1, 4)
         fraction <<= 1;
@@ -365,6 +392,7 @@ FX_FN int64_t FxLog2U64(uint64_t value) {
             mantissa = square << 1;
         }
     }
+
     return (int64_t)(((uint64_t)msb << 32) | fraction);
 }
 
@@ -378,13 +406,18 @@ FX_FN uint64_t FxExp2Q32(int64_t x, uint32_t outFractionBits) {
     const int64_t integerPart = x >> 32;  // 算術シフト = 下への切り捨て(小数部を [0, 1) にするため)
     const uint64_t fraction = (uint64_t)x & FX_LOW32_MASK;
     uint64_t result = FX_U64(0x80000000u, 0u);  // 1.0(Q63)
+
     for (uint32_t k = 0; k < 32; ++k) {
-        if (((fraction >> (31 - k)) & 1) != 0) result = FxMulHiU64(result, FX_EXP2_STEP_Q63[k]) << 1;
+        if (((fraction >> (31 - k)) & 1) != 0)
+            result = FxMulHiU64(result, FX_EXP2_STEP_Q63[k]) << 1;
     }
+
     // result は 2^小数部 の Q63。2^整数部 と出力の桁に合わせてずらす
     const int64_t shift = integerPart + (int64_t)outFractionBits - 63;
     FX_ASSERT(shift <= 0);
-    if (shift > 0) return 0;
+    if (shift > 0)
+        return 0;
+
     return -shift >= 64 ? (uint64_t)0 : result >> (uint32_t)(-shift);
 }
 
@@ -416,6 +449,7 @@ FX_FN FxSinCos FxSinCosTurn32(uint32_t angle) {
     int32_t remaining = (int32_t)(angle - (quadrant << 30));
     int32_t x = FX_CORDIC_GAIN_INVERSE_Q30;
     int32_t y = 0;
+
     for (uint32_t i = 0; i < 30; ++i) {
         const int32_t xShifted = x >> i;
         const int32_t yShifted = y >> i;
@@ -429,19 +463,23 @@ FX_FN FxSinCos FxSinCosTurn32(uint32_t angle) {
             remaining += FX_CORDIC_ATAN_TURN32[i];
         }
     }
+
     FxSinCos result = {y, x};
     if (quadrant == 1) {
         result.sine = x;
         result.cosine = -y;
     }
+
     if (quadrant == 2) {
         result.sine = -y;
         result.cosine = -x;
     }
+
     if (quadrant == 3) {
         result.sine = -x;
         result.cosine = y;
     }
+
     return result;
 }
 
@@ -452,6 +490,7 @@ FX_CONST uint64_t FX_GOLDEN_GAMMA = FX_U64(0x9E3779B9u, 0x7F4A7C15u);
 FX_FN uint64_t FxMix64(uint64_t value) {
     value = (value ^ (value >> 30)) * FX_U64(0xBF58476Du, 0x1CE4E5B9u);
     value = (value ^ (value >> 27)) * FX_U64(0x94D049BBu, 0x133111EBu);
+
     return value ^ (value >> 31);
 }
 
@@ -464,6 +503,7 @@ FX_FN uint64_t FxHash64(uint64_t seed, uint64_t tick, uint64_t id, uint32_t purp
     uint64_t hash = FxMix64(seed + FX_GOLDEN_GAMMA);
     hash = FxHashCombine(hash, tick);
     hash = FxHashCombine(hash, id);
+
     return FxHashCombine(hash, (uint64_t)purpose);
 }
 

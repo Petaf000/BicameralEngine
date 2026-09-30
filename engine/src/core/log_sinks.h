@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 
+#include "core/aliases.h"
 #include "core/log.h"
 
 namespace bicameral {
@@ -21,10 +22,9 @@ namespace bicameral {
 
     // directory に bicameral-YYYYMMDD-HHMMSS.log を作ってファイルのシンクを logger に足す。成功ならファイルのパス。
     // 古いログは新しい方から MAX_LOG_FILES 個だけ残して消す
-    std::expected<std::filesystem::path, std::string> OpenLogFile(Logger& logger,
-                                                                  const std::filesystem::path& directory);
+    expected<fs::path, std::string> OpenLogFile(Logger& logger, const fs::path& directory);
 
     // 既定のログの置き場所: exe の横の logs/(ADR-0006。PC 固有のパスを埋め込まない)
-    std::filesystem::path DefaultLogDirectory();
+    fs::path DefaultLogDirectory();
 
 }  // namespace bicameral

@@ -5,6 +5,7 @@
 #include <array>
 #include <format>
 
+#include "core/aliases.h"
 #include "core/log.h"
 
 namespace bicameral::render {
@@ -12,12 +13,13 @@ namespace bicameral::render {
 
         constexpr uint32_t SLICE_FAST_STEP = 8;  // Shift を押しながら断面を動かす幅
 
-        std::string_view ModeName(DebugViewMode mode) {
+        string_view ModeName(DebugViewMode mode) {
             switch (mode) {
                 case DebugViewMode::Volume: return "ボリューム";
                 case DebugViewMode::MaximumProjection: return "最大値の投影";
                 case DebugViewMode::Slice: return "断面";
             }
+
             return "?";
         }
 
@@ -36,18 +38,18 @@ namespace bicameral::render {
         m_settings.slicePosition = std::min(m_settings.slicePosition, gridSize - 1);
     }
 
-    std::vector<CellCoordinate> DebugViewController::HandleInput(std::span<const InputEvent> events, uint32_t width,
+    std::vector<CellCoordinate> DebugViewController::HandleInput(span<const InputEvent> events, uint32_t width,
                                                                  uint32_t height) {
         std::vector<CellCoordinate> pokes;
         for (const InputEvent& event : events) {
-            if (event.kind == InputKind::KeyDown) {
+            if (event.kind == InputKind::KeyDown)
                 HandleKey(event);
-            } else if (event.kind == InputKind::Wheel) {
+            else if (event.kind == InputKind::Wheel)
                 m_camera.Zoom(event.wheelSteps);
-            } else {
+            else
                 HandlePointer(event, width, height, pokes);
-            }
         }
+
         return pokes;
     }
 
@@ -59,19 +61,24 @@ namespace bicameral::render {
         if (event.kind == InputKind::PointerMove) {
             const auto deltaX = static_cast<float>(event.x - m_lastX);
             const auto deltaY = static_cast<float>(event.y - m_lastY);
-            if (m_rotating) m_camera.Orbit(deltaX, deltaY);
-            if (m_panning) m_camera.Pan(deltaX, deltaY, height);
-        } else if (event.button == PointerButton::Right) {
+            if (m_rotating)
+                m_camera.Orbit(deltaX, deltaY);
+
+            if (m_panning)
+                m_camera.Pan(deltaX, deltaY, height);
+        } else if (event.button == PointerButton::Right)
             m_rotating = down;
-        } else if (event.button == PointerButton::Middle) {
+        else if (event.button == PointerButton::Middle)
             m_panning = down;
-        } else if (down) {
+        else if (down) {
             // 左クリック: 画素の中心を通る光線が断面に当たったセルをつつく
             const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(event.x) + 0.5f,
                                                   static_cast<float>(event.y) + 0.5f, width, height);
             const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
-            if (cell) pokes.push_back(*cell);
+            if (cell)
+                pokes.push_back(*cell);
         }
+
         m_lastX = event.x;
         m_lastY = event.y;
     }
@@ -102,11 +109,14 @@ namespace bicameral::render {
                 return;
             default: return;
         }
+
         const bool changed = before.mode != m_settings.mode || before.sliceAxis != m_settings.sliceAxis ||
                              before.slicePosition != m_settings.slicePosition ||
                              before.showActiveBlocks != m_settings.showActiveBlocks ||
                              before.logarithmic != m_settings.logarithmic;
-        if (changed) Log(Channel::Render, Level::Info, "表示: {}", Describe());
+
+        if (changed)
+            Log(Channel::Render, Level::Info, "表示: {}", Describe());
     }
 
     // --- 描画へ ---
@@ -114,8 +124,12 @@ namespace bicameral::render {
     ProbeViewConstants DebugViewController::Constants(uint32_t extractionIndex, uint32_t width, uint32_t height) const {
         const CameraBasis basis = m_camera.Basis(width, height);
         uint32_t flags = 0;
-        if (m_settings.showActiveBlocks) flags |= VIEW_FLAG_ACTIVE_BLOCKS;
-        if (m_settings.logarithmic) flags |= VIEW_FLAG_LOGARITHMIC;
+        if (m_settings.showActiveBlocks)
+            flags |= VIEW_FLAG_ACTIVE_BLOCKS;
+
+        if (m_settings.logarithmic)
+            flags |= VIEW_FLAG_LOGARITHMIC;
+
         return {.extractionIndex = extractionIndex,
                 .width = width,
                 .height = height,
@@ -131,21 +145,21 @@ namespace bicameral::render {
     }
 
     std::string DebugViewController::Describe() const {
-        return std::format("{}  断面 {} = {}  活性なブロック {}  色 {}", ModeName(m_settings.mode),
-                           AXIS_NAMES[m_settings.sliceAxis], m_settings.slicePosition,
-                           m_settings.showActiveBlocks ? "あり" : "なし", m_settings.logarithmic ? "対数" : "線形");
+        return format("{}  断面 {} = {}  活性なブロック {}  色 {}", ModeName(m_settings.mode),
+                      AXIS_NAMES[m_settings.sliceAxis], m_settings.slicePosition,
+                      m_settings.showActiveBlocks ? "あり" : "なし", m_settings.logarithmic ? "対数" : "線形");
     }
 
-    bool ParseDebugViewMode(std::string_view name, DebugViewMode& mode) {
-        if (name == "volume") {
+    bool ParseDebugViewMode(string_view name, DebugViewMode& mode) {
+        if (name == "volume")
             mode = DebugViewMode::Volume;
-        } else if (name == "mip") {
+        else if (name == "mip")
             mode = DebugViewMode::MaximumProjection;
-        } else if (name == "slice") {
+        else if (name == "slice")
             mode = DebugViewMode::Slice;
-        } else {
+        else
             return false;
-        }
+
         return true;
     }
 

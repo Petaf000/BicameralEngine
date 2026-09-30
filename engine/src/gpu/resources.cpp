@@ -3,16 +3,16 @@
 
 #include "common/debug_ring.hlsli"
 #include "common/work_graph_stats.hlsli"
+#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
-
-using Microsoft::WRL::ComPtr;
+#include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
     namespace {
 
-        std::filesystem::path ExecutableDirectory() {
+        fs::path ExecutableDirectory() {
             std::wstring path(MAX_PATH, L'\0');
             for (;;) {
                 const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
@@ -20,9 +20,11 @@ namespace bicameral::gpu {
                     path.resize(length);
                     break;
                 }
+
                 path.resize(path.size() * 2);  // 長いパスでは切り詰められるので広げて取り直す
             }
-            return std::filesystem::path(path).parent_path();
+
+            return fs::path(path).parent_path();
         }
 
     }  // namespace
@@ -32,9 +34,11 @@ namespace bicameral::gpu {
     ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t sizeBytes, BufferKind kind) {
         const bool isReadback = kind == BufferKind::Readback;
         const bool isUpload = kind == BufferKind::Upload;
+
         const D3D12_HEAP_PROPERTIES heap{.Type = isReadback ? D3D12_HEAP_TYPE_READBACK
                                                  : isUpload ? D3D12_HEAP_TYPE_UPLOAD
                                                             : D3D12_HEAP_TYPE_DEFAULT};
+
         const D3D12_RESOURCE_DESC desc{
             .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Width = sizeBytes,
@@ -46,24 +50,31 @@ namespace bicameral::gpu {
             .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             .Flags = isReadback || isUpload ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         };
+
         const D3D12_RESOURCE_STATES state = isReadback ? D3D12_RESOURCE_STATE_COPY_DEST
                                             : isUpload ? D3D12_RESOURCE_STATE_GENERIC_READ
                                                        : D3D12_RESOURCE_STATE_COMMON;
+
         ComPtr<ID3D12Resource> buffer;
+
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
                                                                               nullptr, IID_PPV_ARGS(&buffer)))) {
             return nullptr;
         }
+
         return buffer;
     }
 
-    bool ReadBuffer(ID3D12Resource* readback, std::span<std::byte> destination) {
+    bool ReadBuffer(ID3D12Resource* readback, span<std::byte> destination) {
         const D3D12_RANGE readRange{.Begin = 0, .End = destination.size()};
         void* mapped = nullptr;
-        if (!BICAMERAL_CHECK_HR(Channel::Gpu, readback->Map(0, &readRange, &mapped))) return false;
+        if (!BICAMERAL_CHECK_HR(Channel::Gpu, readback->Map(0, &readRange, &mapped)))
+            return false;
+
         std::memcpy(destination.data(), mapped, destination.size());
         const D3D12_RANGE writtenRange{};  // CPU は書いていない
         readback->Unmap(0, &writtenRange);
+
         return true;
     }
 
@@ -88,6 +99,7 @@ namespace bicameral::gpu {
                            .StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                            .StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE},
         };
+
         list->ResourceBarrier(1, &barrier);
         list->CopyResource(readback, source);
     }
@@ -102,19 +114,25 @@ namespace bicameral::gpu {
                                                         .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE},
                                          .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL};
         };
+
         std::vector<D3D12_ROOT_PARAMETER1> parameters;
         parameters.reserve(layout.uavCount + layout.srvCount + 3);
-        for (uint32_t index = 0; index < layout.uavCount; ++index) {
+        for (uint32_t index = 0; index < layout.uavCount; ++index)
             parameters.push_back(rootUav(index, 0));
-        }
+
         if (layout.rootConstantCount > 0) {
             parameters.push_back(
                 {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
                  .Constants = {.ShaderRegister = 0, .RegisterSpace = 0, .Num32BitValues = layout.rootConstantCount},
                  .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
         }
-        if (layout.debugRing) parameters.push_back(rootUav(0, DEBUG_RING_REGISTER_SPACE));
-        if (layout.graphStats) parameters.push_back(rootUav(WG_STATS_REGISTER, WG_STATS_REGISTER_SPACE));
+
+        if (layout.debugRing)
+            parameters.push_back(rootUav(0, DEBUG_RING_REGISTER_SPACE));
+
+        if (layout.graphStats)
+            parameters.push_back(rootUav(WG_STATS_REGISTER, WG_STATS_REGISTER_SPACE));
+
         for (uint32_t index = 0; index < layout.srvCount; ++index) {
             parameters.push_back({.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV,
                                   .Descriptor = {.ShaderRegister = index,
@@ -122,48 +140,57 @@ namespace bicameral::gpu {
                                                  .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE},
                                   .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
         }
+
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc{.Version = D3D_ROOT_SIGNATURE_VERSION_1_1};
         desc.Desc_1_1 = {.NumParameters = static_cast<UINT>(parameters.size()), .pParameters = parameters.data()};
 
         ComPtr<ID3DBlob> blob;
         ComPtr<ID3DBlob> error;
         if (FAILED(D3D12SerializeVersionedRootSignature(&desc, &blob, &error))) {
-            const std::string_view message = error ? static_cast<const char*>(error->GetBufferPointer()) : "";
+            const string_view message = error ? static_cast<const char*>(error->GetBufferPointer()) : "";
             Log(Channel::Gpu, Level::Error, "ルート署名をシリアライズできない: {}", message);
+
             return nullptr;
         }
+
         ComPtr<ID3D12RootSignature> rootSignature;
         if (!BICAMERAL_CHECK_HR(Channel::Gpu,
                                 device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                                             IID_PPV_ARGS(&rootSignature)))) {
             return nullptr;
         }
+
         return rootSignature;
     }
 
     ComPtr<ID3D12PipelineState> CreateComputePipeline(ID3D12Device* device, ID3D12RootSignature* rootSignature,
-                                                      std::span<const std::byte> bytecode) {
+                                                      span<const std::byte> bytecode) {
         const D3D12_COMPUTE_PIPELINE_STATE_DESC desc{
             .pRootSignature = rootSignature,
             .CS = {.pShaderBytecode = bytecode.data(), .BytecodeLength = bytecode.size()},
         };
+
         ComPtr<ID3D12PipelineState> pipeline;
-        if (!BICAMERAL_CHECK_HR(Channel::Gpu, device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline)))) {
+        if (!BICAMERAL_CHECK_HR(Channel::Gpu, device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&pipeline))))
             return nullptr;
-        }
+
         return pipeline;
     }
 
     // --- シェーダーのファイル ---
 
-    std::expected<std::vector<std::byte>, std::string> LoadShader(std::string_view relativePath) {
-        const std::filesystem::path path = ExecutableDirectory() / "shaders" / ToWide(relativePath);
+    expected<std::vector<std::byte>, std::string> LoadShader(string_view relativePath) {
+        const fs::path path = ExecutableDirectory() / "shaders" / ToWide(relativePath);
         std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file) return std::unexpected("シェーダーを開けない: " + ToUtf8(path.wstring()));
+        if (!file)
+            return unexpected("シェーダーを開けない: " + ToUtf8(path.wstring()));
+
         std::vector<std::byte> bytes(static_cast<size_t>(file.tellg()));
         file.seekg(0);
         file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!file) return std::unexpected("シェーダーを読めない: " + ToUtf8(path.wstring()));
+        if (!file)
+            return unexpected("シェーダーを読めない: " + ToUtf8(path.wstring()));
+
         return bytes;
     }
 

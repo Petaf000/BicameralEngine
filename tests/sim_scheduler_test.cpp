@@ -9,16 +9,21 @@
 #include <span>
 #include <vector>
 
+#include "core/aliases.h"
+
 namespace {
 
-    using bicameral::frame::SimCursor;
-    using bicameral::frame::SimScheduler;
-    using bicameral::frame::SimSchedulerSettings;
+    using namespace bicameral;
+    using frame::SimCursor;
+    using frame::SimScheduler;
+    using frame::SimSchedulerSettings;
 
     int failureCount = 0;
 
     void Expect(bool condition, const char* text, int line) {
-        if (condition) return;
+        if (condition)
+            return;
+
         std::printf("FAILED line %d: %s\n", line, text);
         ++failureCount;
     }
@@ -30,7 +35,7 @@ namespace {
     };
 
     // frames 回、seconds ずつ時間を進め、毎フレーム TakeUnits して、その単位の時間(unitMilliseconds)を報告する
-    RunTotals RunFrames(SimScheduler& scheduler, int frames, double seconds, std::span<const double> unitMilliseconds,
+    RunTotals RunFrames(SimScheduler& scheduler, int frames, double seconds, span<const double> unitMilliseconds,
                         double renderMilliseconds = 2.0, double speedScale = 1.0) {
         RunTotals totals;
         const uint64_t firstTick = scheduler.Cursor().tick;
@@ -39,17 +44,23 @@ namespace {
             SimCursor cursor = scheduler.Cursor();
             const uint32_t count = scheduler.TakeUnits();
             double simMilliseconds = 0.0;
+
             for (uint32_t index = 0; index < count; ++index) {
                 scheduler.ReportUnitTime(cursor.unit, unitMilliseconds[cursor.unit]);
                 simMilliseconds += unitMilliseconds[cursor.unit];
-                if (++cursor.unit == scheduler.UnitsPerTick()) cursor = {.tick = cursor.tick + 1, .unit = 0};
+                if (++cursor.unit == scheduler.UnitsPerTick())
+                    cursor = {.tick = cursor.tick + 1, .unit = 0};
             }
+
             Expect(cursor == scheduler.Cursor(), "cursor == scheduler.Cursor()", __LINE__);
             scheduler.ReportRenderTime(renderMilliseconds);
             totals.maxUnitsPerFrame = std::max(totals.maxUnitsPerFrame, count);
-            if (frame >= 10) totals.maxSimMilliseconds = std::max(totals.maxSimMilliseconds, simMilliseconds);
+            if (frame >= 10)
+                totals.maxSimMilliseconds = std::max(totals.maxSimMilliseconds, simMilliseconds);
         }
+
         totals.ticks = scheduler.Cursor().tick - firstTick;
+
         return totals;
     }
 
@@ -128,12 +139,12 @@ namespace {
     // 投げられないフレームが続いても(シミュの枠が空いていない)、戻ったら未処理の上限の分だけ取り返す
     void TestCatchUpLimit() {
         SimScheduler scheduler(2);
-        for (uint32_t unit = 0; unit < 2; ++unit) {
+        for (uint32_t unit = 0; unit < 2; ++unit)
             scheduler.ReportUnitTime(unit, 0.1);
-        }
-        for (int frame = 0; frame < 10; ++frame) {
+
+        for (int frame = 0; frame < 10; ++frame)
             scheduler.AddRealTime(1.0 / 48.0);  // 1.25 刻みずつ → 12.5(上限 8 を超えた分は捨てる)
-        }
+
         EXPECT(scheduler.PendingTicks() < 9.0);
         EXPECT(scheduler.TakeUnits() == 16);  // 8 刻み分(残りは捨てた)
         EXPECT(scheduler.TakeUnits() == 0);
@@ -148,6 +159,8 @@ int main() {
     TestUnitHeavierThanBudget();
     TestUnmeasuredIsCautious();
     TestCatchUpLimit();
-    if (failureCount == 0) std::printf("sim_scheduler_test: OK\n");
+    if (failureCount == 0)
+        std::printf("sim_scheduler_test: OK\n");
+
     return failureCount == 0 ? 0 : 1;
 }

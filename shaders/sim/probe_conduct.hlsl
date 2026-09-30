@@ -29,24 +29,32 @@ bool TrySchedule(uint32_t block, uint64_t tick) {
     const uint32_t mark = (uint32_t)tick + 1;
     uint32_t previous;
     InterlockedExchange(blockSchedule[block], mark, previous);
-    if (previous == mark) return false;
+    if (previous == mark)
+        return false;
+
     uint32_t count;
     hashes.InterlockedAdd(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SCHEDULED, 1, count);
+
     return true;
 }
 
 // 伝導の 1 セルが読む隣(格子の外なら自分 = 断熱)
 uint32_t NeighborOrSelf(uint32_t base, int3 cell, int3 offset, uint32_t self) {
     const int3 neighbor = cell + offset;
-    if (any(neighbor < 0) || any(neighbor >= (int)PROBE_GRID_SIZE)) return self;
+    if (any(neighbor < 0) || any(neighbor >= (int)PROBE_GRID_SIZE))
+        return self;
+
     return world[base + ProbeCellIndex((uint32_t)neighbor.x, (uint32_t)neighbor.y, (uint32_t)neighbor.z)];
 }
 
 // 自分(0)と 6 面の隣(1〜6: −x, +x, −y, +y, −z, +z)
 int3 FaceOffset(uint32_t index) {
-    if (index == 0) return int3(0, 0, 0);
+    if (index == 0)
+        return int3(0, 0, 0);
+
     const uint32_t axis = (index - 1) / 2;
     const int32_t step = ((index - 1) & 1) != 0 ? 1 : -1;
+
     return int3(axis == 0 ? step : 0, axis == 1 ? step : 0, axis == 2 ? step : 0);
 }
 

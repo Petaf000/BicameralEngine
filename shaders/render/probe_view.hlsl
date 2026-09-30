@@ -59,12 +59,17 @@ ViewConstants LoadConstants() {
     constants.forward = asfloat(frame.Load3(48));
     constants.right = asfloat(frame.Load3(64));
     constants.up = asfloat(frame.Load3(80));
+
     return constants;
 }
 
 uint32_t LoadExtraction(uint32_t extraction, uint32_t index) {
-    if (extraction == 0) return extraction0[index];
-    if (extraction == 1) return extraction1[index];
+    if (extraction == 0)
+        return extraction0[index];
+
+    if (extraction == 1)
+        return extraction1[index];
+
     return extraction2[index];
 }
 
@@ -105,6 +110,7 @@ Ray MakeRay(ViewConstants constants, float2 pixel) {
     Ray ray;
     ray.origin = constants.orthographic ? constants.position + offset : constants.position;
     ray.direction = constants.orthographic ? constants.forward : constants.forward + offset;
+
     return ray;
 }
 
@@ -121,6 +127,7 @@ float2 IntersectGrid(Ray ray) {
     const float3 far = ((float)PROBE_GRID_SIZE - ray.origin) * inverse;
     const float3 low = min(near, far);
     const float3 high = max(near, far);
+
     return float2(max(max(max(low.x, low.y), low.z), 0.0), min(min(high.x, high.y), high.z));
 }
 
@@ -129,6 +136,7 @@ bool OnGridEdge(float3 location, float width) {
     const float3 distance = min(location, (float)PROBE_GRID_SIZE - location);
     const uint32_t nearCount =
         (distance.x < width ? 1 : 0) + (distance.y < width ? 1 : 0) + (distance.z < width ? 1 : 0);
+
     return nearCount >= 2;
 }
 
@@ -173,7 +181,8 @@ March MarchGrid(ViewConstants constants, Ray ray, float2 range) {
         const float3 emitted = amount > 0.0 ? HeatColor(amount) * 1.5 : ACTIVE_COLOR;
         march.color += (1.0 - march.opacity) * alpha * emitted;
         march.opacity += (1.0 - march.opacity) * alpha;
-        if (constants.mode == VIEW_MODE_VOLUME && march.opacity > OPAQUE_ENOUGH) break;
+        if (constants.mode == VIEW_MODE_VOLUME && march.opacity > OPAQUE_ENOUGH)
+            break;
 
         // 次のセルへ(いちばん近い境界の軸)
         if (tMax.x <= tMax.y && tMax.x <= tMax.z) {
@@ -186,9 +195,12 @@ March MarchGrid(ViewConstants constants, Ray ray, float2 range) {
             cell.z += step.z;
             tMax.z += tDelta.z;
         }
+
         t = tNext;
-        if (any(cell < 0) || any(cell >= (int)PROBE_GRID_SIZE)) break;
+        if (any(cell < 0) || any(cell >= (int)PROBE_GRID_SIZE))
+            break;
     }
+
     return march;
 }
 
@@ -207,10 +219,13 @@ SliceHit IntersectSlice(ViewConstants constants, Ray ray) {
     result.t = 0;
     result.location = 0;
     const float along = ray.direction[constants.sliceAxis];
-    if (abs(along) < 1e-6) return result;
+    if (abs(along) < 1e-6)
+        return result;
+
     result.t = ((float)constants.slicePosition + 0.5 - ray.origin[constants.sliceAxis]) / along;
     result.location = ray.origin + ray.direction * result.t;
     result.hit = result.t >= 0.0 && all(result.location >= 0.0) && all(result.location < (float)PROBE_GRID_SIZE);
+
     return result;
 }
 
@@ -219,6 +234,7 @@ float3 SliceColor(ViewConstants constants, float3 location) {
     const float amount = Normalized(LoadCell(constants.extraction, cell), constants.flags);
     float3 color = amount > 0.0 ? HeatColor(amount) : COLD_SLICE_COLOR;
     const bool active = (constants.flags & VIEW_FLAG_ACTIVE_BLOCKS) != 0 && IsBlockActive(constants.extraction, cell);
+
     return active ? lerp(color, ACTIVE_COLOR, 0.25) : color;
 }
 
@@ -227,8 +243,10 @@ bool OnSliceFrame(ViewConstants constants, float3 location, float width) {
     const float3 distance = min(location, (float)PROBE_GRID_SIZE - location);
     float nearest = 1e30;
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
-        if (axis != constants.sliceAxis) nearest = min(nearest, distance[axis]);
+        if (axis != constants.sliceAxis)
+            nearest = min(nearest, distance[axis]);
     }
+
     return nearest < width;
 }
 
@@ -238,17 +256,22 @@ bool Legend(float2 pixel, float2 viewport, uint32_t flags, out float3 color) {
     const float2 size = float2(256.0, 12.0);
     const float2 inside = pixel - float2(16.0, viewport.y - 28.0);
     color = 0;
-    if (any(inside < -1.0) || any(inside > size + 1.0)) return false;
+    if (any(inside < -1.0) || any(inside > size + 1.0))
+        return false;
+
     if (any(inside < 0.0) || any(inside > size)) {
         color = FRAME_COLOR;  // 帯の縁(1 画素)
         return true;
     }
+
     const float2 local = inside / size;
     color = HeatColor(local.x);
     // 目盛り: 対数なら 2^8 ごと(2^0・2^8・2^16・2^24)、線形なら 1/4 ごと
     const float divisions = (flags & VIEW_FLAG_LOGARITHMIC) != 0 ? 3.0 : 4.0;
     const float tickDistancePixels = abs(frac(local.x * divisions + 0.5) - 0.5) / divisions * size.x;
-    if (tickDistancePixels < 0.75 && local.y > 0.5) color = 1.0;
+    if (tickDistancePixels < 0.75 && local.y > 0.5)
+        color = 1.0;
+
     return true;
 }
 
@@ -263,6 +286,7 @@ VertexOutput VSMain(uint vertexId : SV_VertexID) {
     const float2 uv = float2((vertexId << 1) & 2, vertexId & 2);
     VertexOutput output;
     output.position = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+
     return output;
 }
 
@@ -270,11 +294,13 @@ float4 PSMain(VertexOutput input) : SV_Target {
     const ViewConstants constants = LoadConstants();
     const float2 pixel = input.position.xy;
     float3 legend;
-    if (Legend(pixel, constants.viewport, constants.flags, legend)) return float4(legend, 1);
+    if (Legend(pixel, constants.viewport, constants.flags, legend))
+        return float4(legend, 1);
 
     const Ray ray = MakeRay(constants, pixel);
     const float2 range = IntersectGrid(ray);
-    if (range.x >= range.y) return float4(BACKGROUND, 1);
+    if (range.x >= range.y)
+        return float4(BACKGROUND, 1);
 
     const float3 enter = ray.origin + ray.direction * range.x;
     const float3 exit = ray.origin + ray.direction * range.y;
@@ -286,8 +312,12 @@ float4 PSMain(VertexOutput input) : SV_Target {
 
     // 断面の表示: 断面だけを不透明に(枠は上に)
     if (constants.mode == VIEW_MODE_SLICE) {
-        if (sliceFrame) return float4(SLICE_FRAME_COLOR, 1);
-        if (slice.hit) return float4(SliceColor(constants, slice.location), 1);
+        if (sliceFrame)
+            return float4(SLICE_FRAME_COLOR, 1);
+
+        if (slice.hit)
+            return float4(SliceColor(constants, slice.location), 1);
+
         return float4(frontEdge || backEdge ? FRAME_COLOR : BACKGROUND, 1);
     }
 
@@ -296,12 +326,18 @@ float4 PSMain(VertexOutput input) : SV_Target {
     if (constants.mode == VIEW_MODE_MAXIMUM) {
         color = march.maximum > 0.0 ? HeatColor(march.maximum) : BACKGROUND;
         color = lerp(color, ACTIVE_COLOR, (1.0 - exp(-march.activeLength * ACTIVE_DENSITY * 2.0)) * 0.5);
-    } else {
+    } else
         color = march.color + (1.0 - march.opacity) * BACKGROUND;
-    }
+
     // 奥の枠は中身の後ろ(暗く)、手前の枠と断面の枠は上に
-    if (backEdge) color = lerp(color, FRAME_COLOR, (1.0 - march.opacity) * 0.6);
-    if (sliceFrame) color = lerp(color, SLICE_FRAME_COLOR, 0.8);
-    if (frontEdge) color = FRAME_COLOR;
+    if (backEdge)
+        color = lerp(color, FRAME_COLOR, (1.0 - march.opacity) * 0.6);
+
+    if (sliceFrame)
+        color = lerp(color, SLICE_FRAME_COLOR, 0.8);
+
+    if (frontEdge)
+        color = FRAME_COLOR;
+
     return float4(color, 1);
 }

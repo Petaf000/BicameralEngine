@@ -22,6 +22,7 @@ FX_FN FxU128 FxSelfTestInputs(uint32_t caseIndex) {
     const uint64_t shifts = FxHash64(seed, 0, caseIndex, 2);
     FxU128 inputs = {FxHash64(seed, 0, caseIndex, 0) >> (shifts & 63),
                      FxHash64(seed, 0, caseIndex, 1) >> ((shifts >> 6) & 63)};
+
     return inputs;
 }
 
@@ -66,6 +67,7 @@ FX_FN FxSelfTestOutput FxSelfTestCase(uint64_t a, uint64_t b) {
     output.values[18] = FxDivRecipU64(a, FxMakeRecipU64(b == 0 ? 1 : b));
     output.values[19] = (uint64_t)FxDivRecipS64(signedA >> 1, FxMakeRecipS64(signedB == 0 ? 1 : signedB));
     output.values[20] = FxDivRecipU32((uint32_t)a, FxMakeRecipU32((uint32_t)b == 0 ? 1 : (uint32_t)b));
+
     return output;
 }
 

@@ -17,7 +17,9 @@ namespace bicameral::frame {
         : m_settings(settings), m_unitsPerTick(std::max(unitsPerTick, 1u)), m_unitMilliseconds(m_unitsPerTick, 0.0) {}
 
     void SimScheduler::AddRealTime(double seconds, double speedScale) {
-        if (seconds <= 0.0) return;
+        if (seconds <= 0.0)
+            return;
+
         m_pendingTicks += seconds * m_settings.ticksPerSecond * std::max(speedScale, 0.0);
         // 未処理が上限を超えたら、超えた分は捨てる(追いつこうとして重くなり続けるのを防ぐ。世界が遅くなる。D-202)
         if (m_pendingTicks > m_settings.maxBacklogTicks) {
@@ -28,12 +30,16 @@ namespace bicameral::frame {
     }
 
     void SimScheduler::ReportUnitTime(uint32_t unit, double gpuMilliseconds) {
-        if (unit >= m_unitsPerTick || gpuMilliseconds <= 0.0) return;
+        if (unit >= m_unitsPerTick || gpuMilliseconds <= 0.0)
+            return;
+
         m_unitMilliseconds[unit] = Blend(m_unitMilliseconds[unit], gpuMilliseconds, m_settings.smoothing);
     }
 
     void SimScheduler::ReportRenderTime(double gpuMilliseconds) {
-        if (gpuMilliseconds <= 0.0) return;
+        if (gpuMilliseconds <= 0.0)
+            return;
+
         m_renderMilliseconds = Blend(m_renderMilliseconds, gpuMilliseconds, m_settings.smoothing);
     }
 
@@ -53,13 +59,19 @@ namespace bicameral::frame {
         const double budget = BudgetMilliseconds();
         double used = 0.0;
         uint32_t count = 0;
+
         while (count < m_settings.maxUnitsPerFrame) {
             const bool startsTick = m_cursor.unit == 0;
-            if (startsTick && m_pendingTicks < 1.0) break;  // 現実の時間より先へは進めない
-            const double estimate = EstimateMilliseconds(m_cursor.unit, budget);
-            if (count > 0 && used + estimate > budget) break;
+            if (startsTick && m_pendingTicks < 1.0)
+                break;  // 現実の時間より先へは進めない
 
-            if (startsTick) m_pendingTicks -= 1.0;
+            const double estimate = EstimateMilliseconds(m_cursor.unit, budget);
+            if (count > 0 && used + estimate > budget)
+                break;
+
+            if (startsTick)
+                m_pendingTicks -= 1.0;
+
             used += estimate;
             ++count;
             if (++m_cursor.unit == m_unitsPerTick) {
@@ -67,6 +79,7 @@ namespace bicameral::frame {
                 ++m_cursor.tick;
             }
         }
+
         return count;
     }
 

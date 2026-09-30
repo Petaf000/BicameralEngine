@@ -45,7 +45,9 @@ namespace {
     }
 
     void Expect(bool condition, const char* text, int line) {
-        if (condition) return;
+        if (condition)
+            return;
+
         std::printf("FAILED line %d: %s\n", line, text);
         ++failureCount;
     }
@@ -84,6 +86,7 @@ static void TestMultiply(std::mt19937_64& random) {
         EXPECT(signedProduct.hi == static_cast<uint64_t>(expectedSignedHigh) &&
                signedProduct.lo == static_cast<uint64_t>(expectedSignedLow));
     }
+
     // Q 形式の積: 符号を反転すると結果の符号だけが反転する(0 方向の切り捨ての対称性)
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const auto a = static_cast<int64_t>(random() >> 20);
@@ -95,6 +98,7 @@ static void TestMultiply(std::mt19937_64& random) {
         const uint64_t low = _umul128(static_cast<uint64_t>(a), static_cast<uint64_t>(b), &high);
         EXPECT(static_cast<uint64_t>(positive) == __shiftright128(low, high, static_cast<uint8_t>(shift)));
     }
+
     EXPECT(FxMulShiftS32(-65536, 98304, 16) == -98304);  // -1.0 × 1.5(Q16.16)
     EXPECT(FxMulShiftS32(-1, 1, 1) == 0);                // -0.5 は 0 へ
 }
@@ -111,9 +115,8 @@ static void ExpectDivide128(uint64_t high, uint64_t low, uint64_t divisor) {
 // 1 つの除数で、上位 = 0・除数 − 1・除数 / 2 と 下位 = 0・全部 1・乱数 の組を全部試す
 static void ExpectDivide128Edges(uint64_t divisor, uint64_t randomLow) {
     for (const uint64_t high : {static_cast<uint64_t>(0), divisor - 1, divisor >> 1}) {
-        for (const uint64_t low : {static_cast<uint64_t>(0), ~static_cast<uint64_t>(0), randomLow}) {
+        for (const uint64_t low : {static_cast<uint64_t>(0), ~static_cast<uint64_t>(0), randomLow})
             ExpectDivide128(high, low, divisor);
-        }
     }
 }
 
@@ -124,9 +127,11 @@ static void TestDivide128(std::mt19937_64& random) {
     for (uint32_t bit = 0; bit < 64; ++bit) {
         const uint64_t power = static_cast<uint64_t>(1) << bit;
         for (const uint64_t divisor : {power, power - 1, power + 1, allOnes >> bit, allOnes - power}) {
-            if (divisor != 0) ExpectDivide128Edges(divisor, random());
+            if (divisor != 0)
+                ExpectDivide128Edges(divisor, random());
         }
     }
+
     // --- 乱数: 偶数の除数(正規化のずらし)と、正規化した除数の逆数 ---
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const uint64_t divisor = (SpreadBits(random) | 1) << (random() % 8);
@@ -153,6 +158,7 @@ static void TestDivide(std::mt19937_64& random) {
         const auto b = static_cast<int64_t>(SpreadBits(random) >> 1 | 1) * ((random() & 1) != 0 ? -1 : 1);
         EXPECT(FxDivS64(a, b) == a / b);  // C++ の / も 0 方向の切り捨て
     }
+
     // Q 形式の割り算: 商が収まる範囲で、(a × 2^shift) / b の切り捨てと一致
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const auto shift = static_cast<uint32_t>(random() % 33);
@@ -173,6 +179,7 @@ static bool IsFloorSqrt64(uint64_t value, uint64_t root) {
     uint64_t high = 0;
     const uint64_t low = _umul128(root + 1, root + 1, &high);
     const bool nextIsLarger = high != 0 || low > value;
+
     return root * root <= value && nextIsLarger;
 }
 
@@ -180,8 +187,10 @@ static void TestSquareRoot(std::mt19937_64& random) {
     for (uint32_t value = 0; value < (1u << 22); ++value) {
         const uint32_t root = FxSqrtU32(value);
         EXPECT(root * root <= value && (root + 1) * (root + 1) > value);
-        if (failureCount > 10) return;
+        if (failureCount > 10)
+            return;
     }
+
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const uint64_t value = SpreadBits(random);
         EXPECT(IsFloorSqrt64(value, FxSqrtU64(value)));
@@ -221,6 +230,7 @@ static void TestLogExp(std::mt19937_64& random) {
         maxExpRelative =
             std::fmax(maxExpRelative, std::fabs(static_cast<double>(FxExpQ32(xNatural, outBitsE)) - exactE) / exactE);
     }
+
     std::printf("log2: max error %.2f (2^-32)  ln: max error %.2f (2^-32)\n", maxLog2Error, maxLnError);
     std::printf("exp2: max relative error %.3e  exp: max relative error %.3e\n", maxExp2Relative, maxExpRelative);
     EXPECT(maxLog2Error <= 4);         // 2^-30 以内(2026-09-30 の実測 1.0)
@@ -241,6 +251,7 @@ static void TestSinCos(std::mt19937_64& random) {
         maxError = std::fmax(maxError, std::fabs(result.sine - std::sin(radians) * TWO_POW_30));
         maxError = std::fmax(maxError, std::fabs(result.cosine - std::cos(radians) * TWO_POW_30));
     }
+
     std::printf("sin/cos: max error %.2f (2^-30)\n", maxError);
     EXPECT(maxError <= 32);  // 3e-8 以内(実測 17.6)
     // 90° ごとの点
@@ -255,6 +266,7 @@ static void TestHash(std::mt19937_64& random) {
     // 雪崩: 入力の 1 ビットを変えると、出力のおよそ半分(32 ビット)が変わる
     double flippedBits = 0;
     int samples = 0;
+
     for (int i = 0; i < 20000; ++i) {
         const uint64_t seed = random();
         const uint64_t tick = random() % 100000;
@@ -265,6 +277,7 @@ static void TestHash(std::mt19937_64& random) {
         flippedBits += static_cast<double>(__popcnt64(base ^ FxHash64(seed, tick ^ (1ull << (bit % 20)), id, 7)));
         samples += 2;
     }
+
     const double average = flippedBits / samples;
     std::printf("hash: average flipped bits %.3f / 64\n", average);
     EXPECT(average > 31.5 && average < 32.5);
@@ -274,14 +287,15 @@ static void TestHash(std::mt19937_64& random) {
     constexpr int BUCKETS = 10;
     constexpr int DRAWS = 1000000;
     int counts[BUCKETS] = {};
-    for (int i = 0; i < DRAWS; ++i) {
+    for (int i = 0; i < DRAWS; ++i)
         ++counts[FxRandomBelow(FxHash64(42, 0, static_cast<uint64_t>(i), 0), BUCKETS)];
-    }
+
     double chiSquare = 0;
     for (const int count : counts) {
         const double difference = count - DRAWS / static_cast<double>(BUCKETS);
         chiSquare += difference * difference / (DRAWS / static_cast<double>(BUCKETS));
     }
+
     std::printf("hash: chi-square %.2f (df 9)\n", chiSquare);
     EXPECT(chiSquare < 27.9);
 }
@@ -302,9 +316,8 @@ static void CheckRecipEdges(uint64_t divisor) {
     const bool fits32 = divisor <= 0xFFFFFFFFull;
     for (const uint64_t numerator : {0ull, 1ull, divisor - 1, divisor, divisor + 1, ~0ull, ~0ull - 1}) {
         CheckRecipU64(numerator, divisor);
-        if (fits32) {
+        if (fits32)
             CheckRecipU32(static_cast<uint32_t>(numerator), static_cast<uint32_t>(divisor));
-        }
     }
 }
 
@@ -312,14 +325,16 @@ static void TestReciprocalEdges() {
     for (uint32_t bit = 0; bit < 64; ++bit) {
         const uint64_t power = 1ull << bit;
         for (const uint64_t divisor : {power - 1, power, power + 1, ~0ull >> (63 - bit)}) {
-            if (divisor != 0) CheckRecipEdges(divisor);
+            if (divisor != 0)
+                CheckRecipEdges(divisor);
         }
     }
+
     for (uint32_t divisor = 1; divisor <= 4096; ++divisor) {
-        for (const uint32_t numerator : {0u, divisor - 1, divisor, 0xFFFFFFFFu, 0xFFFFFFFEu, 0x80000000u}) {
+        for (const uint32_t numerator : {0u, divisor - 1, divisor, 0xFFFFFFFFu, 0xFFFFFFFEu, 0x80000000u})
             CheckRecipU32(numerator, divisor);
-        }
     }
+
     EXPECT(FxDivRecipS64(INT64_MIN, FxMakeRecipS64(INT64_MIN)) == 1);
     EXPECT(FxDivRecipS64(INT64_MAX, FxMakeRecipS64(INT64_MIN)) == 0);
     EXPECT(FxDivRecipS64(INT64_MIN, FxMakeRecipS64(3)) == INT64_MIN / 3);
@@ -346,10 +361,10 @@ static void TestSelfTestDigest() {
     for (uint32_t caseIndex = 0; caseIndex < FIXED_SELF_TEST_CASES; ++caseIndex) {
         const FxU128 inputs = FxSelfTestInputs(caseIndex);
         const FxSelfTestOutput output = FxSelfTestCase(inputs.hi, inputs.lo);
-        for (const uint64_t value : output.values) {
+        for (const uint64_t value : output.values)
             digest = FxHashCombine(digest, value);
-        }
     }
+
     std::printf("selftest: %u cases, digest %016llx\n", FIXED_SELF_TEST_CASES, static_cast<unsigned long long>(digest));
     EXPECT(FxSelfTestCase(3, 5).values[1] == 15 && FxSelfTestCase(144, 0).values[9] == 12);
 }
@@ -360,6 +375,7 @@ static void TestHelpers() {
         EXPECT(FxMsbU64(1ull << bit) == bit);
         EXPECT(FxMsbU64(~0ull >> (63 - bit)) == bit);
     }
+
     EXPECT(FxAbsU64(INT64_MIN) == (1ull << 63));
     EXPECT(FxAddOverflowsS64(INT64_MAX, 1) && FxAddOverflowsS64(INT64_MIN, -1));
     EXPECT(!FxAddOverflowsS64(INT64_MAX, -1) && !FxAddOverflowsS64(-5, 3));
@@ -378,10 +394,13 @@ int main() {
     TestSinCos(random);
     TestHash(random);
     TestSelfTestDigest();
+
     if (failureCount != 0) {
         std::printf("fixed_test: %d failure(s)\n", failureCount);
         return 1;
     }
+
     std::printf("fixed_test: OK\n");
+
     return 0;
 }

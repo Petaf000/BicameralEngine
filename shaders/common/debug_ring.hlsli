@@ -86,15 +86,19 @@ RWByteAddressBuffer bicameralDebugRing : register(u0, space1);
 uint32_t DebugArgKind(uint32_t value) {
     return DEBUG_ARG_U32;
 }
+
 uint32_t DebugArgKind(int32_t value) {
     return DEBUG_ARG_I32;
 }
+
 uint32_t DebugArgKind(uint64_t value) {
     return DEBUG_ARG_U64;
 }
+
 uint32_t DebugArgKind(int64_t value) {
     return DEBUG_ARG_I64;
 }
+
 uint32_t DebugArgKind(bool value) {
     return DEBUG_ARG_U32;
 }
@@ -102,15 +106,19 @@ uint32_t DebugArgKind(bool value) {
 uint2 DebugArgWords(uint32_t value) {
     return uint2(value, 0u);
 }
+
 uint2 DebugArgWords(int32_t value) {
     return uint2((uint32_t)value, value < 0 ? 0xFFFFFFFFu : 0u);  // 符号を上位の語へ広げる
 }
+
 uint2 DebugArgWords(uint64_t value) {
     return uint2((uint32_t)value, (uint32_t)(value >> 32));
 }
+
 uint2 DebugArgWords(int64_t value) {
     return DebugArgWords((uint64_t)value);
 }
+
 uint2 DebugArgWords(bool value) {
     return uint2(value ? 1u : 0u, 0u);
 }
@@ -121,7 +129,9 @@ void DebugWrite(uint32_t kind, uint32_t sourceLine, DebugFormat format, uint32_t
                 uint4 args01, uint4 args23, uint4 args45) {
     uint32_t index;
     bicameralDebugRing.InterlockedAdd(0, 1u, index);
-    if (index >= DEBUG_RING_CAPACITY) return;
+    if (index >= DEBUG_RING_CAPACITY)
+        return;
+
     const uint32_t offset = DEBUG_RING_HEADER_BYTES + index * DEBUG_RECORD_BYTES;
     bicameralDebugRing.Store4(offset,
                               uint4((uint32_t)format, kind | (argCount << 4) | (argKinds << 8), sourceLine, 0u));
@@ -179,9 +189,10 @@ void DebugEmitAt(uint32_t kind, uint32_t sourceLine, DebugFormat format, A0 a0, 
 
 // 行は書いた所の __LINE__(マクロの中の __LINE__ は呼んだ行になる)
 #define DEBUG_PRINT(...) DebugEmitAt(DEBUG_KIND_PRINT, __LINE__, __VA_ARGS__)
-#define DEBUG_ASSERT(condition, ...)                                             \
-    do {                                                                         \
-        if (!(condition)) DebugEmitAt(DEBUG_KIND_ASSERT, __LINE__, __VA_ARGS__); \
+#define DEBUG_ASSERT(condition, ...)                               \
+    do {                                                           \
+        if (!(condition))                                          \
+            DebugEmitAt(DEBUG_KIND_ASSERT, __LINE__, __VA_ARGS__); \
     } while (false)
 
 #else  // BICAMERAL_GPU_DEBUG == 0: 何もしない(引数も評価しない)

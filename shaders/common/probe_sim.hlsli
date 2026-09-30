@@ -212,6 +212,7 @@ PROBE_FN uint32_t ProbeConductValue(uint32_t self, uint32_t minusX, uint32_t plu
                                     uint32_t minusZ, uint32_t plusZ) {
     const int32_t outflow = ProbeFaceFlow(self, minusX) + ProbeFaceFlow(self, plusX) + ProbeFaceFlow(self, minusY) +
                             ProbeFaceFlow(self, plusY) + ProbeFaceFlow(self, minusZ) + ProbeFaceFlow(self, plusZ);
+
     return (uint32_t)((int32_t)self - outflow);
 }
 
@@ -222,6 +223,7 @@ PROBE_FN uint64_t ProbeMix64(uint64_t value) {
     value ^= value >> 27;
     value *= PROBE_U64(0x94D049BBu, 0x133111EBu);
     value ^= value >> 31;
+
     return value;
 }
 

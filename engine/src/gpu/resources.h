@@ -1,5 +1,5 @@
 // resources.h — バッファ・ルート署名・パイプライン・シェーダーのファイルを作る小さな関数(T-0013)。
-// 失敗したら理由をログ(Channel::Gpu)に出し、nullptr か std::unexpected を返す。
+// 失敗したら理由をログ(Channel::Gpu)に出し、nullptr か unexpected を返す。
 // シェーダーはビルドが bin/shaders/<sim|render>/*.cso に置く(shaders/CMakeLists.txt)。exe の横から読む。
 #pragma once
 
@@ -11,6 +11,9 @@
 #include <string_view>
 #include <vector>
 
+#include "core/aliases.h"
+#include "gpu/com_ptr.h"
+
 namespace bicameral::gpu {
 
     enum class BufferKind : uint8_t {
@@ -19,8 +22,7 @@ namespace bicameral::gpu {
         Upload,           // CPU → GPU(アップロードのヒープ)。GENERIC_READ のまま使い、CPU は Map したまま書く(T-0004)
     };
 
-    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t sizeBytes,
-                                                                      BufferKind kind);
+    [[nodiscard]] ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t sizeBytes, BufferKind kind);
 
     // 「ルートの UAV」とルート定数だけのルート署名の形。記述子のヒープが要らない一番簡単な形。
     // ルートの番号は並び順: u0..u(uavCount-1)(space0)→ b0 のルート定数(あれば)→ デバッグのリング(あれば)
@@ -41,17 +43,18 @@ namespace bicameral::gpu {
         }
     };
 
-    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12RootSignature> CreateRootSignature(ID3D12Device* device,
-                                                                                  const RootSignatureLayout& layout);
+    [[nodiscard]] ComPtr<ID3D12RootSignature> CreateRootSignature(ID3D12Device* device,
+                                                                  const RootSignatureLayout& layout);
 
-    [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12PipelineState> CreateComputePipeline(
-        ID3D12Device* device, ID3D12RootSignature* rootSignature, std::span<const std::byte> bytecode);
+    [[nodiscard]] ComPtr<ID3D12PipelineState> CreateComputePipeline(ID3D12Device* device,
+                                                                    ID3D12RootSignature* rootSignature,
+                                                                    span<const std::byte> bytecode);
 
     // exe の横の shaders/<relativePath> を読む。relativePath の例: "sim/fixed_selftest.cso"
-    [[nodiscard]] std::expected<std::vector<std::byte>, std::string> LoadShader(std::string_view relativePath);
+    [[nodiscard]] expected<std::vector<std::byte>, std::string> LoadShader(string_view relativePath);
 
     // 読み戻しのバッファの先頭から destination の大きさだけ写す
-    [[nodiscard]] bool ReadBuffer(ID3D12Resource* readback, std::span<std::byte> destination);
+    [[nodiscard]] bool ReadBuffer(ID3D12Resource* readback, span<std::byte> destination);
 
     // リソース全体の状態の遷移
     [[nodiscard]] D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,

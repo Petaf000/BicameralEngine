@@ -17,9 +17,11 @@
 #include <expected>
 #include <thread>
 
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/unicode.h"
 #include "frame/sim_scheduler.h"
+#include "gpu/com_ptr.h"
 #include "gpu/queue.h"
 #include "gpu/resources.h"
 #include "gpu/swap_chain.h"
@@ -30,12 +32,10 @@
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
 
-using Microsoft::WRL::ComPtr;
-
 namespace bicameral::frame {
     namespace {
 
-        using Clock = std::chrono::steady_clock;
+        using Clock = chr::steady_clock;
 
         constexpr uint32_t FRAME_SLOT_COUNT = gpu::SwapChain::BUFFER_COUNT;
         constexpr uint32_t SIM_SLOT_COUNT = sim::ProbeSim::FRAME_SLOT_COUNT;
@@ -45,15 +45,16 @@ namespace bicameral::frame {
         constexpr uint32_t CONSTANTS_BYTES = 256;
         constexpr uint32_t TIMESTAMPS_PER_FRAME = 2;
         constexpr uint32_t AUTO_CLICK_INTERVAL_FRAMES = 20;
-        constexpr auto STATS_INTERVAL = std::chrono::seconds(1);
-        constexpr auto MINIMIZED_SLEEP = std::chrono::milliseconds(16);
+        constexpr auto STATS_INTERVAL = chr::seconds(1);
+        constexpr auto MINIMIZED_SLEEP = chr::milliseconds(16);
 
         double Milliseconds(Clock::duration duration) {
-            return std::chrono::duration<double, std::milli>(duration).count();
+            return chr::duration<double, std::milli>(duration).count();
         }
 
         double TimestampMilliseconds(uint64_t ticks, uint64_t frequency) {
-            if (frequency == 0) return 0.0;
+            if (frequency == 0)
+                return 0.0;
             return static_cast<double>(ticks) * 1000.0 / static_cast<double>(frequency);
         }
 
@@ -119,7 +120,7 @@ namespace bicameral::frame {
             sim::ProbeSim simulation;
             render::ProbeView view;
             std::vector<save::ReplayPlayer>
-                replay;  // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
+                replay;  // --replay のときだけ 1 つ(optional は tidy の警告が多いので使わない)
         };
 
         class FrameLoop {
@@ -163,7 +164,7 @@ namespace bicameral::frame {
             int Finish(bool failed, Clock::time_point start);
 
             [[nodiscard]] bool IsDeviceLost() const;
-            void LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const;
+            void LogStats(const Stats& stats, Clock::duration elapsed, string_view label) const;
             void AddStats(const Stats& frame);
 
             FrameLoopOptions m_options;
@@ -203,44 +204,64 @@ namespace bicameral::frame {
 
         // --- 作る ---
 
-        std::expected<std::unique_ptr<Window>, std::string> CreateWindowForLoop() {
+        expected<std::unique_ptr<Window>, std::string> CreateWindowForLoop() {
             auto window = Window::Create(L"Bicameral Engine", INITIAL_CLIENT_WIDTH, INITIAL_CLIENT_HEIGHT);
-            if (!window) return std::unexpected(window.error());
+            if (!window)
+                return unexpected(window.error());
+
             (*window)->PumpMessages();
             (void)(*window)->TakeResized();  // 最初の WM_SIZE。スワップチェインはこの大きさで作る
+
             return window;
         }
 
-        std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
+        expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
             auto window = CreateWindowForLoop();
-            if (!window) return std::unexpected(window.error());
+            if (!window)
+                return unexpected(window.error());
+
             gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
             deviceOptions.presentMonitor = MonitorFromWindow((*window)->Handle(), MONITOR_DEFAULTTONEAREST);
             auto device = gpu::Device::Create(options.adapter, deviceOptions);
-            if (!device) return std::unexpected(device.error());
+            if (!device)
+                return unexpected(device.error());
+
             ID3D12Device5* native = device->Get();
 
             // 描画のキューは優先度を上げる(効果は無かったが害も無い。R-LOOP-2。docs/perf.md)
             auto direct = gpu::Queue::Create(
                 native, D3D12_COMMAND_LIST_TYPE_DIRECT, L"Render",
                 options.renderHighPriority ? D3D12_COMMAND_QUEUE_PRIORITY_HIGH : D3D12_COMMAND_QUEUE_PRIORITY_NORMAL);
+
             auto compute = gpu::Queue::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"Sim");
-            if (!direct || !compute) return std::unexpected("キューを作れない");
+            if (!direct || !compute)
+                return unexpected("キューを作れない");
+
             auto swapChain = gpu::SwapChain::Create(native, device->Factory(), direct->Native(), (*window)->Handle(),
                                                     options.maxFrameLatency);
-            if (!swapChain) return std::unexpected(swapChain.error());
+            if (!swapChain)
+                return unexpected(swapChain.error());
+
             auto simulation =
                 sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                       {.busyIterations = options.simLoad, .busyPieces = options.simSplit});
-            if (!simulation) return std::unexpected(simulation.error());
+
+            if (!simulation)
+                return unexpected(simulation.error());
+
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
-            if (!view) return std::unexpected(view.error());
+            if (!view)
+                return unexpected(view.error());
+
             std::vector<save::ReplayPlayer> replay;
             if (!options.replayPath.empty()) {
                 auto player = save::ReplayPlayer::Load(options.replayPath);
-                if (!player) return std::unexpected(player.error());
+                if (!player)
+                    return unexpected(player.error());
+
                 replay.push_back(std::move(*player));
             }
+
             return FrameLoopParts{.window = std::move(*window),
                                   .device = std::move(*device),
                                   .direct = std::move(*direct),
@@ -260,18 +281,27 @@ namespace bicameral::frame {
                                                       IID_PPV_ARGS(&slot.list)))) {
                     return false;
                 }
+
                 slot.constants = gpu::CreateBuffer(device, CONSTANTS_BYTES, gpu::BufferKind::Upload);
-                if (!slot.constants) return false;
+                if (!slot.constants)
+                    return false;
+
                 void* mapped = nullptr;
                 const D3D12_RANGE noRead{};
-                if (FAILED(slot.constants->Map(0, &noRead, &mapped))) return false;
+                if (FAILED(slot.constants->Map(0, &noRead, &mapped)))
+                    return false;
+
                 slot.mappedConstants = static_cast<render::ProbeViewConstants*>(mapped);
             }
+
             const D3D12_QUERY_HEAP_DESC queryDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
                                                   .Count = FRAME_SLOT_COUNT * TIMESTAMPS_PER_FRAME};
-            if (FAILED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_renderTimestamps)))) return false;
+            if (FAILED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_renderTimestamps))))
+                return false;
+
             m_renderTimestampReadback = gpu::CreateBuffer(device, uint64_t{FRAME_SLOT_COUNT} * TIMESTAMPS_PER_FRAME * 8,
                                                           gpu::BufferKind::Readback);
+
             return m_renderTimestampReadback != nullptr && RecordRenderLists();
         }
 
@@ -279,12 +309,13 @@ namespace bicameral::frame {
         bool FrameLoop::RecordRenderLists() {
             for (uint32_t index = 0; index < FRAME_SLOT_COUNT; ++index) {
                 FrameSlot& slot = m_frames[index];
-                if (FAILED(slot.allocator->Reset()) || FAILED(slot.list->Reset(slot.allocator.Get(), nullptr))) {
+                if (FAILED(slot.allocator->Reset()) || FAILED(slot.list->Reset(slot.allocator.Get(), nullptr)))
                     return false;
-                }
+
                 ID3D12GraphicsCommandList10* list = slot.list.Get();
                 const uint32_t firstQuery = index * TIMESTAMPS_PER_FRAME;
                 list->EndQuery(m_renderTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
+
                 m_view.Record(list,
                               {.backBuffer = m_swapChain.BackBuffer(index),
                                .renderTargetView = m_swapChain.RenderTargetView(index),
@@ -294,24 +325,34 @@ namespace bicameral::frame {
                                .extraction1 = m_sim.Extraction(1)->GetGPUVirtualAddress(),
                                .extraction2 = m_sim.Extraction(2)->GetGPUVirtualAddress(),
                                .constants = slot.constants->GetGPUVirtualAddress()});
+
                 list->EndQuery(m_renderTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery + 1);
                 list->ResolveQueryData(m_renderTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery,
                                        TIMESTAMPS_PER_FRAME, m_renderTimestampReadback.Get(), uint64_t{firstQuery} * 8);
-                if (FAILED(list->Close())) return false;
+                if (FAILED(list->Close()))
+                    return false;
             }
+
             return true;
         }
 
         bool FrameLoop::HandleResize() {
-            if (m_window->IsMinimized()) return true;
+            if (m_window->IsMinimized())
+                return true;
+
             // バックバッファを使うリストを GPU が全部終えてから(ここだけ CPU が待つ。Present の分も待つ)
-            if (!m_direct.Flush() || !m_compute.Flush()) return false;
+            if (!m_direct.Flush() || !m_compute.Flush())
+                return false;
+
             CollectSimSubmissions();
-            for (uint32_t index = 0; index < FRAME_SLOT_COUNT; ++index) {
+            for (uint32_t index = 0; index < FRAME_SLOT_COUNT; ++index)
                 CollectFrameSlot(index);
-            }
-            if (!m_swapChain.Resize(m_device.Get(), m_window->ClientWidth(), m_window->ClientHeight())) return false;
+
+            if (!m_swapChain.Resize(m_device.Get(), m_window->ClientWidth(), m_window->ClientHeight()))
+                return false;
+
             Log(Channel::Render, Level::Info, "窓の大きさ: {}×{}", m_swapChain.Width(), m_swapChain.Height());
+
             return RecordRenderLists();
         }
 
@@ -320,12 +361,13 @@ namespace bicameral::frame {
         void FrameLoop::CollectSimSubmissions() {
             for (uint32_t slot = 0; slot < SIM_SLOT_COUNT; ++slot) {
                 SimSubmission& submission = m_simSubmissions[slot];
-                if (submission.read || !m_compute.IsComplete(submission.fence)) continue;
+                if (submission.read || !m_compute.IsComplete(submission.fence))
+                    continue;
+
                 submission.read = true;
                 ReportSimReadback(m_sim.ReadFrame(slot));
-                if (submission.extraction > m_completedExtraction.number) {
+                if (submission.extraction > m_completedExtraction.number)
                     m_completedExtraction = {.number = submission.extraction, .fence = submission.fence};
-                }
             }
         }
 
@@ -337,16 +379,23 @@ namespace bicameral::frame {
                 m_scheduler.ReportUnitTime(unit,
                                            TimestampMilliseconds(readback.unitGpuTicks[index], m_computeFrequency));
             }
+
             gpu::AccumulateGraphStats(m_interval.conductGraph, readback.graphStats);
             m_interval.simGpuMilliseconds +=
                 TimestampMilliseconds(readback.gpuBeginTimestamp, readback.gpuEndTimestamp, m_computeFrequency);
             ++m_interval.simSubmissionsMeasured;
             m_interval.ticks += readback.hashes.size();
-            if (!readback.hashes.empty()) m_latestHash = readback.hashes.back();
+            if (!readback.hashes.empty())
+                m_latestHash = readback.hashes.back();
+
             for (const sim::ProbeTickHash& tickHash : readback.hashes) {
-                if (!m_options.recordPath.empty()) m_recorder.AddHash(tickHash.tick, tickHash.hash);
-                if (!m_replay.empty()) m_replay.front().CheckHash(tickHash.tick, tickHash.hash);
+                if (!m_options.recordPath.empty())
+                    m_recorder.AddHash(tickHash.tick, tickHash.hash);
+
+                if (!m_replay.empty())
+                    m_replay.front().CheckHash(tickHash.tick, tickHash.hash);
             }
+
             ReportEvents(readback);
         }
 
@@ -360,16 +409,22 @@ namespace bicameral::frame {
                         event.place, event.tick);
                     continue;
                 }
+
                 const render::CellCoordinate cell{.x = event.PokeX(), .y = event.PokeY(), .z = event.PokeZ()};
-                const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
+                const auto click = rng::find_if(m_clicks, [&](const PendingClick& pending) {
                     return pending.tick == event.tick && pending.cell == cell;
                 });
+
                 const double latency = click != m_clicks.end() ? Milliseconds(now - click->time) : 0.0;
+
                 Log(Channel::Sim, Level::Info,
                     "つつき ({}, {}, {}) を刻み {} で適用(クリックから CPU に戻るまで {:.1f} ms)", cell.x, cell.y,
                     cell.z, event.tick, latency);
-                if (click != m_clicks.end()) m_clicks.erase(click);
+
+                if (click != m_clicks.end())
+                    m_clicks.erase(click);
             }
+
             if (readback.droppedEventCount > 0) {
                 Log(Channel::Sim, Level::Warning, "イベントのリングが溢れて {} 件を落とした",
                     readback.droppedEventCount);
@@ -379,13 +434,16 @@ namespace bicameral::frame {
         // 描画の枠を使い回す前に: 前にその枠で投げたリストの終わりを確かめ、タイムスタンプを読む
         void FrameLoop::CollectFrameSlot(uint32_t slotIndex) {
             FrameSlot& slot = m_frames[slotIndex];
-            if (slot.renderFence == 0) return;
+            if (slot.renderFence == 0)
+                return;
+
             if (!m_direct.IsComplete(slot.renderFence)) {
                 ++m_interval.cpuWaits;  // スワップチェインの待ちがあるので、ふつうは起きない
                 m_direct.WaitCpu(slot.renderFence);
             }
+
             std::array<uint64_t, size_t{FRAME_SLOT_COUNT} * TIMESTAMPS_PER_FRAME> timestamps{};
-            if (gpu::ReadBuffer(m_renderTimestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
+            if (gpu::ReadBuffer(m_renderTimestampReadback.Get(), std::as_writable_bytes(span(timestamps)))) {
                 const size_t first = size_t{slotIndex} * TIMESTAMPS_PER_FRAME;
                 const double milliseconds =
                     TimestampMilliseconds(timestamps[first], timestamps[first + 1], m_directFrequency);
@@ -393,6 +451,7 @@ namespace bicameral::frame {
                 m_interval.renderGpuMilliseconds += milliseconds;
                 ++m_interval.renderFramesMeasured;
             }
+
             slot.renderFence = 0;
         }
 
@@ -403,7 +462,10 @@ namespace bicameral::frame {
             const std::vector<InputEvent> events = m_window->TakeInputEvents();
             std::vector<render::CellCoordinate> cells =
                 m_viewController.HandleInput(events, m_swapChain.Width(), m_swapChain.Height());
-            if (!m_replay.empty()) return;  // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
+
+            if (!m_replay.empty())
+                return;  // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
+
             if (m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0) {
                 // z = PROBE_VIEW_Z の面の決まった場所を順に押す(人がいない確認用。表示やカメラに依らない)
                 const auto step = static_cast<uint32_t>(m_frameNumber / AUTO_CLICK_INTERVAL_FRAMES);
@@ -411,6 +473,7 @@ namespace bicameral::frame {
                 const uint32_t v = (step * 11 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
                 cells.push_back(render::CellOnSlice(2, sim::PROBE_VIEW_Z, u, v));
             }
+
             const auto now = Clock::now();
             for (const render::CellCoordinate& cell : cells) {
                 m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cell.x, cell.y, cell.z));
@@ -424,10 +487,14 @@ namespace bicameral::frame {
         std::vector<sim::ProbeCommand> FrameLoop::TakeCommands(SimCursor start) {
             const uint64_t applyTick = sim::ProbeSim::NextApplyTick(start.tick, start.unit);
             const uint32_t limit = std::min(m_sim.FreeCommandSlots(), sim::PROBE_MAX_COMMANDS);
+
             std::vector<sim::ProbeCommand> commands = m_replay.empty()
                                                           ? TakeClickCommands(applyTick, limit)
                                                           : m_replay.front().TakeCommands(applyTick, limit);
-            if (!m_options.recordPath.empty()) m_recorder.AddCommands(commands);
+
+            if (!m_options.recordPath.empty())
+                m_recorder.AddCommands(commands);
+
             return commands;
         }
 
@@ -437,15 +504,19 @@ namespace bicameral::frame {
                                                     m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(count));
             m_pendingCommands.erase(m_pendingCommands.begin(),
                                     m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(count));
+
             for (sim::ProbeCommand& command : commands) {
                 command.targetTick = applyTick;
                 const render::CellCoordinate cell{
                     .x = command.payload[0], .y = command.payload[1], .z = command.payload[2]};
-                const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
+                const auto click = rng::find_if(m_clicks, [&](const PendingClick& pending) {
                     return pending.tick == UINT64_MAX && pending.cell == cell;
                 });
-                if (click != m_clicks.end()) click->tick = applyTick;
+
+                if (click != m_clicks.end())
+                    click->tick = applyTick;
             }
+
             return commands;
         }
 
@@ -457,34 +528,44 @@ namespace bicameral::frame {
             SimSubmission& submission = m_simSubmissions[slot];
             if (!submission.read) {  // その枠のリストがまだ GPU にある(読めていない)
                 ++m_interval.skippedSubmissions;
+
                 return true;
             }
+
             const SimCursor start = m_scheduler.Cursor();
             const uint32_t unitCount = m_scheduler.TakeUnits();
-            if (unitCount == 0) return true;
+            if (unitCount == 0)
+                return true;
 
             const std::vector<sim::ProbeCommand> commands = TakeCommands(start);
             const uint64_t extraction = m_lastExtraction + 1;
             const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
-            if (!extract) ++m_interval.skippedExtractions;
+            if (!extract)
+                ++m_interval.skippedExtractions;
+
             const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
+
             ID3D12CommandList* list = m_sim.RecordFrame(slot, {.firstTick = start.tick,
                                                                .firstUnit = start.unit,
                                                                .unitCount = unitCount,
                                                                .extract = extract,
                                                                .extractionTarget = extractionTarget,
                                                                .commands = commands});
-            if (list == nullptr) return false;
+
+            if (list == nullptr)
+                return false;
 
             if (extract) {
                 // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
                 m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
                 m_lastExtraction = extraction;
             }
+
             submission = {.fence = m_compute.Submit(list), .extraction = extract ? extraction : 0, .read = false};
             ++m_simSubmissionCount;
             ++m_interval.simSubmissions;
             m_interval.units += unitCount;
+
             return true;
         }
 
@@ -503,29 +584,39 @@ namespace bicameral::frame {
 
         // --screenshot: 最後のフレームの描画の後・Present の前に、バックバッファを読み戻しへ写す
         bool FrameLoop::SubmitScreenshot() {
-            if (m_options.screenshotPath.empty() || m_frameNumber + 1 != m_options.frameLimit) return true;
+            if (m_options.screenshotPath.empty() || m_frameNumber + 1 != m_options.frameLimit)
+                return true;
+
             ID3D12Resource* backBuffer = m_swapChain.BackBuffer(m_swapChain.CurrentIndex());
             auto capture = render::ScreenshotCapture::Create(m_device.Get(), backBuffer);
             if (!capture) {
                 Log(Channel::Render, Level::Error, "画像を写せない: {}", capture.error());
                 return false;
             }
+
             m_screenshot.push_back(std::move(*capture));
             ID3D12CommandList* list = m_screenshot.front().Record(backBuffer);
-            if (list == nullptr) return false;
+            if (list == nullptr)
+                return false;
+
             m_direct.Submit(list);
+
             return true;
         }
 
         // 写した画像をファイルへ(GPU を待った後)。写していなければ何もしない
         bool FrameLoop::WriteScreenshot() {
-            if (m_screenshot.empty()) return true;
+            if (m_screenshot.empty())
+                return true;
+
             const auto written = m_screenshot.front().WriteBmp(m_options.screenshotPath);
             if (!written) {
                 Log(Channel::Render, Level::Error, "画像を書けない: {}", written.error());
                 return false;
             }
+
             Log(Channel::Render, Level::Info, "画像: {}", ToUtf8(m_options.screenshotPath.wstring()));
+
             return true;
         }
 
@@ -555,15 +646,19 @@ namespace bicameral::frame {
             gpu::AccumulateGraphStats(m_total.conductGraph, frame.conductGraph);
         }
 
-        void FrameLoop::LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const {
-            const double seconds = std::chrono::duration<double>(elapsed).count();
-            if (seconds <= 0.0 || stats.frames == 0) return;
+        void FrameLoop::LogStats(const Stats& stats, Clock::duration elapsed, string_view label) const {
+            const double seconds = chr::duration<double>(elapsed).count();
+            if (seconds <= 0.0 || stats.frames == 0)
+                return;
+
             const auto average = [](double sum, uint64_t count) {
                 return count > 0 ? sum / static_cast<double>(count) : 0.0;
             };
+
             const auto perSecond = [&](uint64_t count) {
                 return static_cast<double>(count) / seconds;
             };
+
             Log(Channel::Core, Level::Info,
                 "{}: {:.1f} fps  CPU {:.3f} ms/フレーム(うち Present {:.3f}、最大 {:.3f})  世界 {:.1f} 刻み/秒  "
                 "シミュ {:.1f} 単位/投入・GPU {:.3f} ms/投入(予算 {:.2f})  描画 GPU {:.3f} ms/フレーム  "
@@ -576,6 +671,7 @@ namespace bicameral::frame {
                 average(stats.renderGpuMilliseconds, stats.renderFramesMeasured), m_scheduler.DroppedTicks(),
                 stats.skippedSubmissions, stats.skippedExtractions, stats.cpuWaits, stats.events, m_latestHash.tick,
                 m_latestHash.hash, m_latestHash.heat, m_latestHash.scheduledBlocks);
+
             if (!stats.conductGraph.nodes.empty()) {
                 Log(Channel::WorkGraph, Level::Info, "{}: {}", label,
                     gpu::FormatGraphStats(m_sim.ConductStatsLayout(), stats.conductGraph));
@@ -588,19 +684,25 @@ namespace bicameral::frame {
         bool FrameLoop::RunFrame(Clock::time_point frameStart) {
             CollectSimSubmissions();
             QueueClicks();
-            if (!SubmitSim()) return false;
+            if (!SubmitSim())
+                return false;
+
             SubmitRender();
-            if (!SubmitScreenshot()) return false;
+            if (!SubmitScreenshot())
+                return false;
+
             const auto presentStart = Clock::now();
             const bool presented = m_swapChain.Present(m_options.vsync);
             m_interval.presentMilliseconds += Milliseconds(Clock::now() - presentStart);
-            if (!presented || IsDeviceLost()) return false;
+            if (!presented || IsDeviceLost())
+                return false;
 
             const double cpuMilliseconds = Milliseconds(Clock::now() - frameStart);
             m_interval.cpuMilliseconds += cpuMilliseconds;
             m_interval.cpuMaxMilliseconds = std::max(m_interval.cpuMaxMilliseconds, cpuMilliseconds);
             ++m_interval.frames;
             ++m_frameNumber;
+
             return true;
         }
 
@@ -611,24 +713,33 @@ namespace bicameral::frame {
                 m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.targetFps, m_options.simLoad,
                 m_options.simSplit, m_sim.UnitsPerTick(), m_options.renderHighPriority ? "HIGH" : "NORMAL",
                 m_options.autoClick ? "あり" : "なし");
+
             const render::OrbitCameraState& camera = m_viewController.Camera().State();
             Log(Channel::Render, Level::Info, "表示: {}  カメラ 向き {:.0f}° 上下 {:.0f}° 距離 {:.0f}",
                 m_viewController.Describe(), camera.yawDegrees, camera.pitchDegrees, camera.distance);
-            if (!m_options.screenshotPath.empty() && m_options.frameLimit == 0) {
+            if (!m_options.screenshotPath.empty() && m_options.frameLimit == 0)
                 Log(Channel::Render, Level::Warning, "--screenshot は --frames と一緒に使う(最後のフレームを写す)");
-            }
+
             if (!m_replay.empty()) {
                 Log(Channel::Sim, Level::Info, "再生: {}(コマンド {} 個、ハッシュ {} 個、刻み {} まで)",
                     ToUtf8(m_options.replayPath.wstring()), m_replay.front().CommandCount(),
                     m_replay.front().HashCount(), m_replay.front().LastTick());
             }
+
             const auto start = Clock::now();
             auto lastFrame = start;
             auto intervalStart = start;
+
             while (m_window->PumpMessages()) {
-                if (m_options.frameLimit > 0 && m_frameNumber >= m_options.frameLimit) break;
-                if (!m_replay.empty() && m_replay.front().Finished()) break;  // 最後のハッシュまで確かめた
-                if (m_window->TakeResized() && !HandleResize()) return Finish(true, start);
+                if (m_options.frameLimit > 0 && m_frameNumber >= m_options.frameLimit)
+                    break;
+
+                if (!m_replay.empty() && m_replay.front().Finished())
+                    break;  // 最後のハッシュまで確かめた
+
+                if (m_window->TakeResized() && !HandleResize())
+                    return Finish(true, start);
+
                 if (m_window->IsMinimized()) {
                     std::this_thread::sleep_for(MINIMIZED_SLEEP);
                     lastFrame = Clock::now();  // 最小化の間は世界を進めない
@@ -637,41 +748,53 @@ namespace bicameral::frame {
 
                 m_swapChain.WaitForFrame(FRAME_WAIT_TIMEOUT_MS);  // フレームの歩調(CPU が GPU より先に行き過ぎない)
                 const auto frameStart = Clock::now();
-                m_scheduler.AddRealTime(std::chrono::duration<double>(frameStart - lastFrame).count());
+                m_scheduler.AddRealTime(chr::duration<double>(frameStart - lastFrame).count());
                 lastFrame = frameStart;
-                if (!RunFrame(frameStart)) return Finish(true, start);
-                if (frameStart - intervalStart < STATS_INTERVAL) continue;
+                if (!RunFrame(frameStart))
+                    return Finish(true, start);
+
+                if (frameStart - intervalStart < STATS_INTERVAL)
+                    continue;
+
                 LogStats(m_interval, frameStart - intervalStart, "1 秒");
                 AddStats(m_interval);
                 m_interval = {};
                 intervalStart = frameStart;
             }
+
             return Finish(false, start);
         }
 
         // 終わり: GPU を待って残りを読み、全体の要約を出す
         int FrameLoop::Finish(bool failed, Clock::time_point start) {
             if (failed || IsDeviceLost()) {
-                if (IsDeviceLost()) {
+                if (IsDeviceLost())
                     gpu::LogDeviceRemoved(m_device.Get());
-                } else {
+                else {
                     m_direct.Flush();  // 解放する前に GPU を終わらせる
                     m_compute.Flush();
                 }
+
                 Log(Channel::Core, Level::Error, "フレームのループが失敗で終わった");
+
                 return 1;
             }
+
             m_direct.Flush();  // Present の分も待つ(バックバッファを解放する前に)
             m_compute.Flush();
-            if (!WriteScreenshot()) return 1;
+            if (!WriteScreenshot())
+                return 1;
+
             CollectSimSubmissions();
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");
             const bool replayPassed = FinishReplay();
+
             if (m_device.ValidationErrorCount() > 0) {
                 Log(Channel::Gpu, Level::Error, "debug layer のエラーが {} 件", m_device.ValidationErrorCount());
                 return 1;
             }
+
             return replayPassed ? 0 : 1;
         }
 
@@ -689,12 +812,17 @@ namespace bicameral::frame {
                     passed = false;
                 }
             }
-            if (m_replay.empty()) return passed;
+
+            if (m_replay.empty())
+                return passed;
+
             const save::ReplayPlayer& player = m_replay.front();
+
             Log(Channel::Sim, player.Passed() ? Level::Info : Level::Error,
                 "再生: {}(ハッシュ 一致 {} / 不一致 {} / 全部 {}、間に合わなかったコマンド {}{})",
                 player.Passed() ? "OK" : "FAILED", player.Matches(), player.Mismatches(), player.HashCount(),
                 player.LateCommands(), player.Finished() ? "" : "、最後まで進む前に終わった");
+
             return passed && player.Passed();
         }
 
@@ -706,11 +834,13 @@ namespace bicameral::frame {
             Log(Channel::Core, Level::Error, "フレームのループを始められない: {}", parts.error());
             return 1;
         }
+
         FrameLoop loop(options, std::move(*parts));
         if (!loop.CreateFrameSlots()) {
             Log(Channel::Gpu, Level::Error, "描画のフレームの枠を作れない");
             return 1;
         }
+
         return loop.Run();
     }
 

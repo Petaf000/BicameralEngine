@@ -10,12 +10,15 @@
 #include <expected>
 #include <string>
 
+#include "core/aliases.h"
+#include "gpu/com_ptr.h"
+
 namespace bicameral::gpu {
 
     class ImmediateQueue {
     public:
-        [[nodiscard]] static std::expected<ImmediateQueue, std::string> Create(ID3D12Device5* device,
-                                                                               D3D12_COMMAND_LIST_TYPE type);
+        [[nodiscard]] static expected<ImmediateQueue, std::string> Create(ID3D12Device5* device,
+                                                                          D3D12_COMMAND_LIST_TYPE type);
 
         // 記録を始める(前の記録は捨てる)。失敗なら nullptr
         [[nodiscard]] ID3D12GraphicsCommandList10* Begin();
@@ -29,10 +32,10 @@ namespace bicameral::gpu {
     private:
         ImmediateQueue() = default;
 
-        Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
-        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_allocator;
-        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList10> m_list;
-        Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
+        ComPtr<ID3D12CommandQueue> m_queue;
+        ComPtr<ID3D12CommandAllocator> m_allocator;
+        ComPtr<ID3D12GraphicsCommandList10> m_list;
+        ComPtr<ID3D12Fence> m_fence;
         uint64_t m_fenceValue = 0;
     };
 

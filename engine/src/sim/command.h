@@ -25,6 +25,7 @@ namespace bicameral::sim {
 
         friend bool operator==(const Command&, const Command&) = default;
     };
+
     static_assert(sizeof(Command) == COMMAND_BYTES);
 
     // キューと再生ファイルの並び: (targetTick, sequence) の昇順。a が b より前なら true

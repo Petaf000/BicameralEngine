@@ -19,18 +19,23 @@ uint32_t QueueRecordAddress(uint32_t position) {
 void EmitTickEvent(uint32_t type, uint32_t place) {
     uint32_t slot;
     tickEvents.InterlockedAdd(0, 1, slot);
-    if (slot >= PROBE_TICK_EVENT_CAPACITY) return;
+    if (slot >= PROBE_TICK_EVENT_CAPACITY)
+        return;
+
     tickEvents.Store2(PROBE_TICK_EVENT_HEADER_BYTES + slot * PROBE_TICK_EVENT_RECORD_BYTES, uint2(type, place));
 }
 
 // 1 つのコマンドを適用する(適用の単位の 1 スレッドが番号順に呼ぶ)。commandHead = 語 [0..3]、address = キューの中の場所
 // つつき: 熱を足し、そのブロックを刻み t の活性の一覧へ(伝導の Work Graph が、そのブロックと隣を起こす)
 void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
-    if ((commandHead.w & 0xFFFFu) != PROBE_COMMAND_TYPE_POKE) return;
+    if ((commandHead.w & 0xFFFFu) != PROBE_COMMAND_TYPE_POKE)
+        return;
+
     const uint3 cell = commandQueue.Load3(address + 16);
     const bool inside = all(cell < PROBE_GRID_SIZE);
     DEBUG_ASSERT(inside, DebugFormat::ProbePokeOutOfRange, cell.x, cell.y, cell.z);
-    if (!inside) return;
+    if (!inside)
+        return;
 
     const uint32_t index = GenerationBase(tick) + ProbeCellIndex(cell.x, cell.y, cell.z);
     world[index] = ProbeAddHeat(world[index], PROBE_POKE_AMOUNT);
@@ -63,13 +68,16 @@ void BeginTick(uint64_t tick) {
     if (parity == 0) {
         WriteActiveListDescriptor(activeList0, 0);
         WriteActiveListDescriptor(activeList1, 1);
-        if (tick == 0) ResetActiveList(activeList0);
+        if (tick == 0)
+            ResetActiveList(activeList0);
+
         ResetActiveList(activeList1);
     } else {
         WriteActiveListDescriptor(activeList1, 1);
         WriteActiveListDescriptor(activeList0, 0);
         ResetActiveList(activeList0);
     }
+
     const uint64_t stateTick = tick + 1;
     const uint32_t entry = HashEntryAddress(stateTick);
     hashes.Store4(entry, uint4((uint32_t)stateTick, (uint32_t)(stateTick >> 32), 0, 0));
@@ -89,6 +97,7 @@ void SortEventKeys(uint32_t thread) {
                 const uint64_t mine = g_eventKeys[thread];
                 const uint64_t theirs = g_eventKeys[partner];
                 const bool ascending = (thread & size) == 0;
+
                 if ((mine > theirs) == ascending) {
                     g_eventKeys[thread] = theirs;
                     g_eventKeys[partner] = mine;
@@ -96,6 +105,7 @@ void SortEventKeys(uint32_t thread) {
             }
         }
     }
+
     GroupMemoryBarrierWithGroupSync();
 }
 
@@ -137,9 +147,9 @@ void SortEventKeys(uint32_t thread) {
         const uint4 commandHead = commandQueue.Load4(address);  // targetTick の下位・上位、sequence、type | size
         const uint64_t targetTick = (uint64_t)commandHead.x | ((uint64_t)commandHead.y << 32);
         if (targetTick > tick) break;
-        if (targetTick == tick) {
+        if (targetTick == tick)
             ApplyCommand(tick, commandHead, address);
-        } else {
+        else {
             DEBUG_ASSERT(false, DebugFormat::ProbeCommandLate, (uint32_t)targetTick, (uint32_t)tick);
             EmitTickEvent(PROBE_EVENT_COMMAND_LATE, commandHead.w & 0xFFFFu);
         }

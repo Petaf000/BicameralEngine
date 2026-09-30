@@ -13,6 +13,7 @@
 #include <system_error>
 #include <vector>
 
+#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/unicode.h"
 
@@ -26,7 +27,7 @@ namespace bicameral {
         // --- コンソール ---
 
         // VT のエスケープシーケンスで色を付ける(Windows 10 以降のコンソールが対応)
-        std::string_view ColorOf(Level level) {
+        string_view ColorOf(Level level) {
             switch (level) {
                 case Level::Trace:
                 case Level::Debug: return "\x1b[90m";    // 灰
@@ -42,28 +43,34 @@ namespace bicameral {
             ConsoleSink() {
                 // 日本語をそのまま出すため、コンソールの出力コードページを UTF-8 にする(終わったら戻す)
                 m_previousCodePage = GetConsoleOutputCP();
-                if (m_previousCodePage != 0 && m_previousCodePage != CP_UTF8) SetConsoleOutputCP(CP_UTF8);
+                if (m_previousCodePage != 0 && m_previousCodePage != CP_UTF8)
+                    SetConsoleOutputCP(CP_UTF8);
 
                 // リダイレクトされている(ランナー・パイプ)ときは GetConsoleMode が失敗する → 色を付けない
                 m_output = GetStdHandle(STD_OUTPUT_HANDLE);
-                if (!GetConsoleMode(m_output, &m_previousMode)) return;
+                if (!GetConsoleMode(m_output, &m_previousMode))
+                    return;
+
                 m_useColor = SetConsoleMode(m_output, m_previousMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
             }
 
             ~ConsoleSink() override {
                 std::fflush(stdout);
-                if (m_useColor) SetConsoleMode(m_output, m_previousMode);
-                if (m_previousCodePage != 0 && m_previousCodePage != CP_UTF8) SetConsoleOutputCP(m_previousCodePage);
+                if (m_useColor)
+                    SetConsoleMode(m_output, m_previousMode);
+
+                if (m_previousCodePage != 0 && m_previousCodePage != CP_UTF8)
+                    SetConsoleOutputCP(m_previousCodePage);
             }
 
             void Write(const LogRecord& record) override {
                 const std::string line = FormatLogLine(record, record.level >= Level::Warning);
-                const std::string_view color = m_useColor ? ColorOf(record.level) : std::string_view{};
-                if (color.empty()) {
+                const string_view color = m_useColor ? ColorOf(record.level) : string_view{};
+                if (color.empty())
                     std::fprintf(stdout, "%s\n", line.c_str());
-                } else {
+                else
                     std::fprintf(stdout, "%.*s%s\x1b[0m\n", static_cast<int>(color.size()), color.data(), line.c_str());
-                }
+
                 // 落ちる直前の行を失わないよう毎行書き出す(フレームごとの大量ログはまだ無い。増えたら見直す)
                 std::fflush(stdout);
             }
@@ -85,11 +92,11 @@ namespace bicameral {
                 std::string line;
                 if (record.level >= Level::Warning) {
                     // VS の出力ウィンドウは "フルパス(行): " で始まる行をダブルクリックでその場所へ飛べる
-                    line = std::format("{}({}): {} {} | {}\n", record.location.file_name(), record.location.line(),
-                                       LevelName(record.level), ChannelName(record.channel), record.message);
-                } else {
+                    line = format("{}({}): {} {} | {}\n", record.location.file_name(), record.location.line(),
+                                  LevelName(record.level), ChannelName(record.channel), record.message);
+                } else
                     line = FormatLogLine(record, false) + '\n';
-                }
+
                 OutputDebugStringW(ToWide(line).c_str());
             }
         };
@@ -110,7 +117,8 @@ namespace bicameral {
 
         // std::error_code の説明を UTF-8 で。MSVC の system_category().message() は ANSI コードページで返すので使わない
         std::string DescribeErrorCode(const std::error_code& error) {
-            if (error.category() != std::system_category()) return error.message();
+            if (error.category() != std::system_category())
+                return error.message();
             return DescribeHresult(HRESULT_FROM_WIN32(static_cast<DWORD>(error.value())));
         }
 
@@ -118,29 +126,32 @@ namespace bicameral {
             const std::time_t now = std::time(nullptr);
             std::tm local{};
             localtime_s(&local, &now);
+
             return local;
         }
 
-        bool IsLogFileName(const std::filesystem::path& path) {
+        bool IsLogFileName(const fs::path& path) {
             const std::wstring name = path.filename().wstring();
             return name.starts_with(LOG_FILE_PREFIX) && name.ends_with(LOG_FILE_EXTENSION);
         }
 
         // 新しいファイルを 1 つ足しても MAX_LOG_FILES 個に収まるように、古いものから消す。
         // 名前に日時が入っているので、名前順 = 古い順。消せなくても続ける(ログが無いよりはまし)
-        void RemoveOldLogFiles(const std::filesystem::path& directory) {
+        void RemoveOldLogFiles(const fs::path& directory) {
             std::error_code error;
-            std::vector<std::filesystem::path> files;
-            for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
-                if (entry.is_regular_file(error) && IsLogFileName(entry.path())) files.push_back(entry.path());
+            std::vector<fs::path> files;
+            for (const auto& entry : fs::directory_iterator(directory, error)) {
+                if (entry.is_regular_file(error) && IsLogFileName(entry.path()))
+                    files.push_back(entry.path());
             }
-            if (files.size() < MAX_LOG_FILES) return;
 
-            std::ranges::sort(files);
+            if (files.size() < MAX_LOG_FILES)
+                return;
+
+            rng::sort(files);
             const size_t removeCount = files.size() - (MAX_LOG_FILES - 1);
-            for (size_t i = 0; i < removeCount; ++i) {
-                std::filesystem::remove(files[i], error);
-            }
+            for (size_t i = 0; i < removeCount; ++i)
+                fs::remove(files[i], error);
         }
 
     }  // namespace
@@ -153,45 +164,53 @@ namespace bicameral {
         return std::make_unique<DebuggerSink>();
     }
 
-    std::expected<std::filesystem::path, std::string> OpenLogFile(Logger& logger,
-                                                                  const std::filesystem::path& directory) {
+    expected<fs::path, std::string> OpenLogFile(Logger& logger, const fs::path& directory) {
         std::error_code error;
-        std::filesystem::create_directories(directory, error);
+        fs::create_directories(directory, error);
         if (error) {
-            return std::unexpected(
-                std::format("ログのフォルダを作れない: {}: {}", ToUtf8(directory.wstring()), DescribeErrorCode(error)));
+            return unexpected(
+                format("ログのフォルダを作れない: {}: {}", ToUtf8(directory.wstring()), DescribeErrorCode(error)));
         }
+
         RemoveOldLogFiles(directory);
 
         // --- ファイルを開く ---
         const std::tm now = LocalNow();
-        const std::wstring fileName =
-            std::format(L"{}{:04}{:02}{:02}-{:02}{:02}{:02}{}", LOG_FILE_PREFIX, now.tm_year + 1900, now.tm_mon + 1,
-                        now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec, LOG_FILE_EXTENSION);
-        std::filesystem::path path = directory / fileName;             // const にしない(return で move させる)
-        std::ofstream stream(path, std::ios::binary | std::ios::app);  // 同じ秒に 2 回起動したら追記になる
-        if (!stream) return std::unexpected(std::format("ログのファイルを開けない: {}", ToUtf8(path.wstring())));
 
-        stream << std::format("# Bicameral Engine log  {:04}-{:02}-{:02} {:02}:{:02}:{:02}\n", now.tm_year + 1900,
-                              now.tm_mon + 1, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec);
+        const std::wstring fileName =
+            format(L"{}{:04}{:02}{:02}-{:02}{:02}{:02}{}", LOG_FILE_PREFIX, now.tm_year + 1900, now.tm_mon + 1,
+                   now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec, LOG_FILE_EXTENSION);
+
+        fs::path path = directory / fileName;                          // const にしない(return で move させる)
+        std::ofstream stream(path, std::ios::binary | std::ios::app);  // 同じ秒に 2 回起動したら追記になる
+        if (!stream)
+            return unexpected(format("ログのファイルを開けない: {}", ToUtf8(path.wstring())));
+
+        stream << format("# Bicameral Engine log  {:04}-{:02}-{:02} {:02}:{:02}:{:02}\n", now.tm_year + 1900,
+                         now.tm_mon + 1, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec);
         stream << "# [経過秒] 重大度 チャンネル | 本文  (ファイル:行)\n";
         logger.AddSink(std::make_unique<FileSink>(std::move(stream)));
+
         return path;
     }
 
-    std::filesystem::path DefaultLogDirectory() {
+    fs::path DefaultLogDirectory() {
         // MAX_PATH を超えるパスもあるので、足りなければ広げて取り直す
         std::wstring buffer(MAX_PATH, L'\0');
         for (;;) {
             const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-            if (length == 0) return std::filesystem::path(L"logs");
+            if (length == 0)
+                return fs::path(L"logs");
+
             if (length < buffer.size()) {
                 buffer.resize(length);
                 break;
             }
+
             buffer.resize(buffer.size() * 2);
         }
-        return std::filesystem::path(buffer).parent_path() / L"logs";
+
+        return fs::path(buffer).parent_path() / L"logs";
     }
 
 }  // namespace bicameral

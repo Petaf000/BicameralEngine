@@ -6,6 +6,8 @@
 #include <cmath>
 #include <numbers>
 
+#include "core/aliases.h"
+
 namespace bicameral::render {
     namespace {
 
@@ -50,6 +52,7 @@ namespace bicameral::render {
             const Vector3 forward{std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw)};
             const Vector3 worldUp{0.0f, -1.0f, 0.0f};
             const Vector3 right = Normalize(Cross(forward, worldUp));
+
             return {.forward = forward, .right = right, .up = Cross(right, forward)};
         }
 
@@ -79,7 +82,9 @@ namespace bicameral::render {
 
     // 注視点の距離で、ドラッグした画素のぶんだけ中身がポインタについてくるように動かす
     void OrbitCamera::Pan(float deltaXPixels, float deltaYPixels, uint32_t viewportHeight) {
-        if (viewportHeight == 0) return;
+        if (viewportHeight == 0)
+            return;
+
         const Axes axes = CameraAxes(m_state);
         const float cellsPerPixel = 2.0f * HalfHeightAtTarget(m_state.distance) / static_cast<float>(viewportHeight);
         m_state.target =
@@ -99,13 +104,16 @@ namespace bicameral::render {
         if (m_state.orthographic) {
             // 注視点の距離の透視と同じ大きさに見える幅
             const float halfHeight = HalfHeightAtTarget(m_state.distance);
+
             return {.position = m_state.target - axes.forward * ORTHOGRAPHIC_BACK_OFF,
                     .forward = axes.forward,
                     .right = axes.right * (halfHeight * aspect),
                     .up = axes.up * halfHeight,
                     .orthographic = true};
         }
+
         const float halfHeight = std::tan(Radians(VERTICAL_FIELD_OF_VIEW_DEGREES) * 0.5f);
+
         return {.position = m_state.target - axes.forward * m_state.distance,
                 .forward = axes.forward,
                 .right = axes.right * (halfHeight * aspect),
@@ -117,17 +125,24 @@ namespace bicameral::render {
         const float u = width > 0 ? 2.0f * pixelX / static_cast<float>(width) - 1.0f : 0.0f;
         const float v = height > 0 ? 1.0f - 2.0f * pixelY / static_cast<float>(height) : 0.0f;
         const Vector3 offset = basis.right * u + basis.up * v;
-        if (basis.orthographic) return {.origin = basis.position + offset, .direction = basis.forward};
+        if (basis.orthographic)
+            return {.origin = basis.position + offset, .direction = basis.forward};
+
         return {.origin = basis.position, .direction = basis.forward + offset};
     }
 
-    std::optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane,
-                                                uint32_t gridSize) {
-        if (axis > 2 || plane >= gridSize) return std::nullopt;
+    optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane, uint32_t gridSize) {
+        if (axis > 2 || plane >= gridSize)
+            return nullopt;
+
         const float along = ray.direction[axis];
-        if (std::abs(along) < PARALLEL_EPSILON) return std::nullopt;
+        if (std::abs(along) < PARALLEL_EPSILON)
+            return nullopt;
+
         const float distance = (static_cast<float>(plane) + 0.5f - ray.origin[axis]) / along;
-        if (distance < 0.0f) return std::nullopt;
+        if (distance < 0.0f)
+            return nullopt;
+
         const Vector3 hit = ray.origin + ray.direction * distance;
 
         // 断面の軸は plane そのもの。他の 2 つの軸は格子の中なら切り捨て
@@ -137,16 +152,24 @@ namespace bicameral::render {
                 cell[index] = plane;
                 continue;
             }
+
             const float value = std::floor(hit[index]);
-            if (!(value >= 0.0f && value < static_cast<float>(gridSize))) return std::nullopt;  // NaN も外
+            if (!(value >= 0.0f && value < static_cast<float>(gridSize)))
+                return nullopt;  // NaN も外
+
             cell[index] = static_cast<uint32_t>(value);
         }
+
         return CellCoordinate{.x = cell[0], .y = cell[1], .z = cell[2]};
     }
 
     CellCoordinate CellOnSlice(uint32_t axis, uint32_t plane, uint32_t u, uint32_t v) {
-        if (axis == 0) return {.x = plane, .y = u, .z = v};
-        if (axis == 1) return {.x = u, .y = plane, .z = v};
+        if (axis == 0)
+            return {.x = plane, .y = u, .z = v};
+
+        if (axis == 1)
+            return {.x = u, .y = plane, .z = v};
+
         return {.x = u, .y = v, .z = plane};
     }
 

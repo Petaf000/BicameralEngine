@@ -70,6 +70,7 @@ Operand MakeOperand(uint64_t seed) {
     operand.recip32 = FxMakeRecipU32((uint32_t)random | 0x10001u);
     operand.recip64 = FxMakeRecipU64(operand.divisor);
     operand.recipSigned = FxMakeRecipS64(-(int64_t)operand.divisor);
+
     return operand;
 }
 
@@ -156,8 +157,8 @@ uint64_t ToBits(Value x) {
 #else
     Value x = (Value)seed;
 #endif
-    for (uint32_t i = 0; i < iterationCount; ++i) {
+    for (uint32_t i = 0; i < iterationCount; ++i)
         [unroll] for (uint32_t j = 0; j < BENCH_UNROLL; ++j) x = Step(x, operand);
-    }
+
     results.Store<uint64_t>(dispatchThreadId.x * 8, ToBits(x));
 }

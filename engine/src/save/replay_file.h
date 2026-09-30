@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "core/aliases.h"
 #include "sim/command.h"
 
 namespace bicameral::save {
@@ -53,11 +54,10 @@ namespace bicameral::save {
     };
 
     // バイト列との変換(ファイルを介さないテスト用にも)
-    [[nodiscard]] std::expected<std::vector<std::byte>, std::string> SerializeReplay(const ReplayFile& replay);
-    [[nodiscard]] std::expected<ReplayFile, std::string> ParseReplay(std::span<const std::byte> bytes);
+    [[nodiscard]] expected<std::vector<std::byte>, std::string> SerializeReplay(const ReplayFile& replay);
+    [[nodiscard]] expected<ReplayFile, std::string> ParseReplay(span<const std::byte> bytes);
 
-    [[nodiscard]] std::expected<void, std::string> WriteReplayFile(const std::filesystem::path& path,
-                                                                   const ReplayFile& replay);
-    [[nodiscard]] std::expected<ReplayFile, std::string> ReadReplayFile(const std::filesystem::path& path);
+    [[nodiscard]] expected<void, std::string> WriteReplayFile(const fs::path& path, const ReplayFile& replay);
+    [[nodiscard]] expected<ReplayFile, std::string> ReadReplayFile(const fs::path& path);
 
 }  // namespace bicameral::save

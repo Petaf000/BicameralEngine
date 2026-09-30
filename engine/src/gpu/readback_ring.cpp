@@ -1,29 +1,33 @@
 // readback_ring.cpp — 待たない読み戻し(T-0004)。使い方は readback_ring.h。
 #include "gpu/readback_ring.h"
 
+#include "core/aliases.h"
+#include "gpu/com_ptr.h"
 #include "gpu/resources.h"
-
-using Microsoft::WRL::ComPtr;
 
 namespace bicameral::gpu {
 
-    std::expected<ReadbackRing, std::string> ReadbackRing::Create(ID3D12Device* device, uint64_t bytes,
-                                                                  uint64_t headerBytes, uint32_t slotCount,
-                                                                  std::wstring_view name) {
+    expected<ReadbackRing, std::string> ReadbackRing::Create(ID3D12Device* device, uint64_t bytes, uint64_t headerBytes,
+                                                             uint32_t slotCount, std::wstring_view name) {
         ReadbackRing ring;
         ring.m_bytes = bytes;
         ring.m_headerBytes = headerBytes;
         ring.m_buffer = CreateBuffer(device, bytes, BufferKind::UnorderedAccess);
         ring.m_zeros = CreateBuffer(device, headerBytes, BufferKind::UnorderedAccess);
-        if (!ring.m_buffer || !ring.m_zeros) return std::unexpected("読み戻しのリングのバッファを作れない");
+        if (!ring.m_buffer || !ring.m_zeros)
+            return unexpected("読み戻しのリングのバッファを作れない");
+
         ring.m_buffer->SetName(std::wstring(name).c_str());
         ring.m_zeros->SetName((std::wstring(name) + L".zeros").c_str());
         for (uint32_t slot = 0; slot < slotCount; ++slot) {
             ComPtr<ID3D12Resource> readback = CreateBuffer(device, bytes, BufferKind::Readback);
-            if (!readback) return std::unexpected("読み戻しのリングの読み戻しのバッファを作れない");
-            readback->SetName(std::format(L"{}.readback{}", name, slot).c_str());
+            if (!readback)
+                return unexpected("読み戻しのリングの読み戻しのバッファを作れない");
+
+            readback->SetName(format(L"{}.readback{}", name, slot).c_str());
             ring.m_readbacks.push_back(std::move(readback));
         }
+
         return ring;
     }
 
@@ -51,7 +55,7 @@ namespace bicameral::gpu {
         list->ResourceBarrier(1, &toCommon);
     }
 
-    bool ReadbackRing::Read(uint32_t slot, std::span<std::byte> destination) const {
+    bool ReadbackRing::Read(uint32_t slot, span<std::byte> destination) const {
         return ReadBuffer(m_readbacks[slot].Get(), destination);
     }
 

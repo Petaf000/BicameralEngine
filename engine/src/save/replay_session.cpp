@@ -6,6 +6,7 @@
 #include <iterator>
 #include <utility>
 
+#include "core/aliases.h"
 #include "core/log.h"
 
 namespace bicameral::save {
@@ -17,7 +18,7 @@ namespace bicameral::save {
 
     // --- 記録 ---
 
-    void ReplayRecorder::AddCommands(std::span<const sim::Command> commands) {
+    void ReplayRecorder::AddCommands(span<const sim::Command> commands) {
         m_commands.insert(m_commands.end(), commands.begin(), commands.end());
     }
 
@@ -29,12 +30,13 @@ namespace bicameral::save {
     ReplayFile ReplayRecorder::Build() const {
         ReplayFile replay{.world = ReplayWorld::Probe, .startTick = 0, .tickHashes = m_hashes};
         const uint64_t lastTick = m_hashes.empty() ? 0 : m_hashes.back().tick;
-        std::ranges::copy_if(m_commands, std::back_inserter(replay.commands),
-                             [&](const sim::Command& command) { return command.targetTick < lastTick; });
+        rng::copy_if(m_commands, std::back_inserter(replay.commands),
+                     [&](const sim::Command& command) { return command.targetTick < lastTick; });
+
         return replay;
     }
 
-    std::expected<void, std::string> ReplayRecorder::Write(const std::filesystem::path& path) const {
+    expected<void, std::string> ReplayRecorder::Write(const fs::path& path) const {
         return WriteReplayFile(path, Build());
     }
 
@@ -42,12 +44,14 @@ namespace bicameral::save {
 
     ReplayPlayer::ReplayPlayer(ReplayFile replay) : m_replay(std::move(replay)) {}
 
-    std::expected<ReplayPlayer, std::string> ReplayPlayer::Load(const std::filesystem::path& path) {
+    expected<ReplayPlayer, std::string> ReplayPlayer::Load(const fs::path& path) {
         auto replay = ReadReplayFile(path);
-        if (!replay) return std::unexpected(replay.error());
-        if (replay->world != ReplayWorld::Probe || replay->startTick != 0 || !replay->initialDelta.empty()) {
-            return std::unexpected("仮の世界は刻み 0 の全部 0 の状態からしか再生できない");
-        }
+        if (!replay)
+            return unexpected(replay.error());
+
+        if (replay->world != ReplayWorld::Probe || replay->startTick != 0 || !replay->initialDelta.empty())
+            return unexpected("仮の世界は刻み 0 の全部 0 の状態からしか再生できない");
+
         return ReplayPlayer(std::move(*replay));
     }
 
@@ -55,17 +59,23 @@ namespace bicameral::save {
         std::vector<sim::Command> commands;
         while (m_nextCommand < m_replay.commands.size() && commands.size() < limit) {
             const sim::Command& command = m_replay.commands[m_nextCommand];
-            if (command.targetTick >= applyTick + LOOKAHEAD_TICKS) break;
+            if (command.targetTick >= applyTick + LOOKAHEAD_TICKS)
+                break;
+
             ++m_nextCommand;
             if (command.targetTick < applyTick) {
                 ++m_lateCommands;
+
                 Log(Channel::Sim, Level::Error,
                     "再生: 刻み {} のコマンド(番号 {})が適用に間に合わなかった(次の適用は刻み {})", command.targetTick,
                     command.sequence, applyTick);
+
                 continue;
             }
+
             commands.push_back(command);
         }
+
         return commands;
     }
 
@@ -77,16 +87,21 @@ namespace bicameral::save {
             ++m_mismatches;
             ++m_nextHash;
         }
-        if (m_nextHash == expected.size() || expected[m_nextHash].tick != tick) return;  // ファイルが間引いた刻み
-        if (expected[m_nextHash].hash == hash) {
+
+        if (m_nextHash == expected.size() || expected[m_nextHash].tick != tick)
+            return;  // ファイルが間引いた刻み
+
+        if (expected[m_nextHash].hash == hash)
             ++m_matches;
-        } else {
+        else {
             if (m_mismatches < MAX_LOGGED_MISMATCHES) {
                 Log(Channel::Sim, Level::Error, "再生: S({}) = {:016x}(記録は {:016x})", tick, hash,
                     expected[m_nextHash].hash);
             }
+
             ++m_mismatches;
         }
+
         ++m_nextHash;
     }
 

@@ -52,19 +52,20 @@ uint32_t HashEntryAddress(uint64_t stateTick) {
 // 活性の一覧に 1 ブロック足す(parity = 刻みの偶奇)。容量は probe_sim.hlsli の約束で足りる(超えたら assert)
 void AppendActiveBlock(uint32_t parity, uint32_t block) {
     uint32_t slot;
-    if (parity == 0) {
+    if (parity == 0)
         activeList0.InterlockedAdd(PROBE_ACTIVE_LIST_COUNT * 4, 1, slot);
-    } else {
+    else
         activeList1.InterlockedAdd(PROBE_ACTIVE_LIST_COUNT * 4, 1, slot);
-    }
+
     DEBUG_ASSERT(slot < PROBE_ACTIVE_LIST_CAPACITY, DebugFormat::ProbeActiveListFull, slot);
-    if (slot >= PROBE_ACTIVE_LIST_CAPACITY) return;
+    if (slot >= PROBE_ACTIVE_LIST_CAPACITY)
+        return;
+
     const uint32_t address = PROBE_ACTIVE_LIST_HEADER_BYTES + slot * 4;
-    if (parity == 0) {
+    if (parity == 0)
         activeList0.Store(address, block);
-    } else {
+    else
         activeList1.Store(address, block);
-    }
 }
 
 #endif  // BICAMERAL_PROBE_BINDINGS_HLSLI

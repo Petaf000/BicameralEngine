@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/device.h"
@@ -63,23 +64,30 @@ namespace {
         const auto place = [&](uint32_t index) {
             return index * spacing + spacing / 2;
         };
+
         for (uint32_t sequence = 0; sequence < count; ++sequence) {
             const uint32_t x = sequence % pointsPerAxis;
             const uint32_t y = (sequence / pointsPerAxis) % pointsPerAxis;
             const uint32_t z = sequence / (pointsPerAxis * pointsPerAxis);
             commands.push_back(MakePokeCommand(0, sequence, place(x), place(y), place(z)));
         }
+
         return commands;
     }
 
     void AddSample(ScenarioResult& result, uint32_t blocks, double microseconds) {
-        if (blocks == 0) return;
+        if (blocks == 0)
+            return;
+
         for (size_t index = 0; index < BUCKET_LIMITS.size(); ++index) {
-            if (blocks > BUCKET_LIMITS[index]) continue;
+            if (blocks > BUCKET_LIMITS[index])
+                continue;
+
             Bucket& bucket = result.buckets[index];
             ++bucket.samples;
             bucket.blocks += blocks;
             bucket.microseconds += microseconds;
+
             return;
         }
     }
@@ -93,13 +101,15 @@ namespace {
             const auto unitMicroseconds = [&](uint32_t unit) {
                 return static_cast<double>(readback.unitGpuTicks[firstUnit + unit]) * microsecondsPerTick;
             };
+
             AddSample(result, state.scheduledBlocks, unitMicroseconds(PROBE_UNIT_CONDUCT));
-            for (uint32_t unit = 0; unit < unitsPerTick; ++unit) {
+            for (uint32_t unit = 0; unit < unitsPerTick; ++unit)
                 result.unitMicroseconds[unit] += unitMicroseconds(unit);
-            }
+
             result.maxBlocks = std::max(result.maxBlocks, state.scheduledBlocks);
             result.heatConserved = result.heatConserved && state.heat == expectedHeat;
-            if (state.scheduledBlocks == 0 && result.quietTick == 0) result.quietTick = state.tick;
+            if (state.scheduledBlocks == 0 && result.quietTick == 0)
+                result.quietTick = state.tick;
         }
     }
 
@@ -107,7 +117,9 @@ namespace {
         ScenarioResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"ConductBench");
         auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
-        if (!queue || !simulation) return result;
+        if (!queue || !simulation)
+            return result;
+
         const double microsecondsPerTick = 1'000'000.0 / static_cast<double>(queue->TimestampFrequency());
         const std::vector<ProbeCommand> pokes = MakePokes(scenario.pointsPerAxis);
         const uint64_t expectedHeat = uint64_t{PROBE_POKE_AMOUNT} * pokes.size();
@@ -115,20 +127,27 @@ namespace {
 
         for (uint64_t tick = 0; tick < scenario.maxTicks && result.quietTick == 0; tick += TICKS_PER_FRAME) {
             const auto slot = static_cast<uint32_t>((tick / TICKS_PER_FRAME) % ProbeSim::FRAME_SLOT_COUNT);
-            const std::span<const ProbeCommand> commands =
-                tick == 0 ? std::span<const ProbeCommand>(pokes) : std::span<const ProbeCommand>();
+            const span<const ProbeCommand> commands =
+                tick == 0 ? span<const ProbeCommand>(pokes) : span<const ProbeCommand>();
+
             ID3D12CommandList* list = simulation->RecordFrame(
                 slot,
                 {.firstTick = tick, .firstUnit = 0, .unitCount = TICKS_PER_FRAME * unitsPerTick, .commands = commands});
-            if (list == nullptr || !queue->WaitCpu(queue->Submit(list))) return result;
+
+            if (list == nullptr || !queue->WaitCpu(queue->Submit(list)))
+                return result;
 
             const ProbeFrameReadback readback = simulation->ReadFrame(slot);
-            if (readback.hashes.size() != TICKS_PER_FRAME) return result;
+            if (readback.hashes.size() != TICKS_PER_FRAME)
+                return result;
+
             AccumulateFrame(result, readback, unitsPerTick, microsecondsPerTick, expectedHeat);
             result.ticks = tick + TICKS_PER_FRAME;
         }
+
         Log(Channel::Sim, Level::Info, "伝導の裏のメモリ: {} バイト", simulation->ConductBackingMemoryBytes());
         result.ok = true;
+
         return result;
     }
 
@@ -137,22 +156,28 @@ namespace {
             scenario.name, result.ticks,
             result.quietTick == 0 ? std::string("(止まらない)") : std::to_string(result.quietTick), result.maxBlocks,
             PROBE_BLOCK_COUNT, result.heatConserved ? "OK" : "NG");
+
         const double ticks = static_cast<double>(std::max<uint64_t>(result.ticks, 1));
+
         Log(Channel::Sim, Level::Info, "{}: 単位の平均 µs/刻み: 適用 {:.1f}  伝導 {:.1f}  検査と出力 {:.1f}",
             scenario.name, result.unitMicroseconds[PROBE_UNIT_APPLY] / ticks,
             result.unitMicroseconds[PROBE_UNIT_CONDUCT] / ticks,
             result.unitMicroseconds[PROBE_FIXED_UNITS_PER_TICK - 1] / ticks);
+
         uint32_t lower = 1;
+
         for (size_t index = 0; index < BUCKET_LIMITS.size(); ++index) {
             const Bucket& bucket = result.buckets[index];
             if (bucket.samples > 0) {
                 const auto samples = static_cast<double>(bucket.samples);
                 const double averageBlocks = static_cast<double>(bucket.blocks) / samples;
                 const double averageMicroseconds = bucket.microseconds / samples;
+
                 Log(Channel::Sim, Level::Info, "| {} | {}〜{} | {} | {:.0f} | {:.1f} | {:.1f} |", scenario.name, lower,
                     BUCKET_LIMITS[index], bucket.samples, averageBlocks, averageMicroseconds,
                     averageMicroseconds * 1000.0 / averageBlocks);
             }
+
             lower = BUCKET_LIMITS[index] + 1;
         }
     }
@@ -160,16 +185,19 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const auto options = test::ParseGpuTestOptions(std::span(argv, static_cast<size_t>(argc)));
+    const auto options = test::ParseGpuTestOptions(span(argv, static_cast<size_t>(argc)));
     if (!options) {
         Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp]");
         bicameral::SingletonFinalizer::Finalize();
+
         return 2;
     }
+
     auto device = gpu::Device::Create(options->adapter);
     if (!device) {
         Log(Channel::Gpu, Level::Error, "{}", device.error());
         bicameral::SingletonFinalizer::Finalize();
+
         return 1;
     }
 
@@ -177,15 +205,20 @@ int main(int argc, char** argv) {
         "| 規模 | 計算したブロック | 刻みの数 | 平均ブロック | 伝導 µs/刻み | ns/ブロック |");
     Log(Channel::Sim, Level::Info, "|---|---|---|---|---|---|");
     bool passed = true;
+
     for (const Scenario& scenario : SCENARIOS) {
         const ScenarioResult result = RunScenario(device->Get(), scenario);
-        if (!result.ok) Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
+        if (!result.ok)
+            Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
+
         Report(scenario, result);
         passed = passed && result.ok && result.heatConserved;
     }
+
     passed = passed && test::PassesValidation(*device, "gpu_conduct_bench");
     Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_conduct_bench({}): {}",
         gpu::AdapterKindName(options->adapter), passed ? "OK" : "FAILED");
     bicameral::SingletonFinalizer::Finalize();
+
     return passed ? 0 : 1;
 }

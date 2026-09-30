@@ -13,15 +13,16 @@
 #include <string_view>
 #include <vector>
 
+#include "core/aliases.h"
 #include "platform/input.h"
 
 namespace bicameral {
 
     class Window {
     public:
-        [[nodiscard]] static std::expected<std::unique_ptr<Window>, std::string> Create(std::wstring_view title,
-                                                                                        uint32_t clientWidth,
-                                                                                        uint32_t clientHeight);
+        [[nodiscard]] static expected<std::unique_ptr<Window>, std::string> Create(std::wstring_view title,
+                                                                                   uint32_t clientWidth,
+                                                                                   uint32_t clientHeight);
         ~Window();
         Window(const Window&) = delete;
         Window& operator=(const Window&) = delete;

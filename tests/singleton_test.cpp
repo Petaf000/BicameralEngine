@@ -12,6 +12,7 @@ namespace {
     struct First {
         ~First() { destroyedLog += 'A'; }
     };
+
     struct Second {
         ~Second() { destroyedLog += 'B'; }
     };
@@ -19,7 +20,9 @@ namespace {
     int failureCount = 0;
 
     void Expect(bool condition, const char* text, int line) {
-        if (condition) return;
+        if (condition)
+            return;
+
         std::printf("FAILED line %d: %s\n", line, text);
         ++failureCount;
     }
@@ -54,6 +57,8 @@ int main() {
     SingletonFinalizer::Finalize();
     EXPECT(destroyedLog == "AA");
 
-    if (failureCount == 0) std::printf("singleton ok\n");
+    if (failureCount == 0)
+        std::printf("singleton ok\n");
+
     return failureCount == 0 ? 0 : 1;
 }

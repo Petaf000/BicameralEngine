@@ -3,11 +3,11 @@
 
 #include <array>
 
+#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
+#include "gpu/com_ptr.h"
 #include "gpu/resources.h"
-
-using Microsoft::WRL::ComPtr;
 
 namespace bicameral::render {
     namespace {
@@ -18,14 +18,19 @@ namespace bicameral::render {
 
     }  // namespace
 
-    std::expected<ProbeView, std::string> ProbeView::Create(ID3D12Device* device, DXGI_FORMAT renderTargetFormat) {
+    expected<ProbeView, std::string> ProbeView::Create(ID3D12Device* device, DXGI_FORMAT renderTargetFormat) {
         ProbeView view;
         view.m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
-        if (!view.m_rootSignature) return std::unexpected("描画のルート署名を作れない");
+        if (!view.m_rootSignature)
+            return unexpected("描画のルート署名を作れない");
+
         const auto vertexShader = gpu::LoadShader("render/probe_view_vs.cso");
         const auto pixelShader = gpu::LoadShader("render/probe_view_ps.cso");
-        if (!vertexShader) return std::unexpected(vertexShader.error());
-        if (!pixelShader) return std::unexpected(pixelShader.error());
+        if (!vertexShader)
+            return unexpected(vertexShader.error());
+
+        if (!pixelShader)
+            return unexpected(pixelShader.error());
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{
             .pRootSignature = view.m_rootSignature.Get(),
@@ -39,11 +44,14 @@ namespace bicameral::render {
             .NumRenderTargets = 1,
             .SampleDesc = {.Count = 1},
         };
+
         desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         desc.DepthStencilState.DepthEnable = FALSE;  // 深度バッファは使わない
         desc.RTVFormats[0] = renderTargetFormat;
         const HRESULT result = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&view.m_pipeline));
-        if (FAILED(result)) return std::unexpected("描画のパイプラインを作れない: " + DescribeHresult(result));
+        if (FAILED(result))
+            return unexpected("描画のパイプラインを作れない: " + DescribeHresult(result));
+
         return view;
     }
 

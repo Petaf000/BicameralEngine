@@ -52,10 +52,13 @@ namespace bicameral {
     public:
         static T& GetInstance() {
             // 作成済みなら鍵を取らずに返す(ログのように頻繁に呼ばれるため)
-            if (T* instance = s_instance.load(std::memory_order_acquire)) return *instance;
+            if (T* instance = s_instance.load(std::memory_order_acquire))
+                return *instance;
 
             std::scoped_lock lock(s_mutex);
-            if (s_instance.load(std::memory_order_relaxed) == nullptr) Create();
+            if (s_instance.load(std::memory_order_relaxed) == nullptr)
+                Create();
+
             return *s_instance.load(std::memory_order_relaxed);
         }
 

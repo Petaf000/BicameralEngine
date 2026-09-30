@@ -5,16 +5,16 @@
 // debug layer の d3d12SDKLayers.dll は Agility SDK のもの(exe の横の D3D12\。engine/CMakeLists.txt がコピーする)。
 #include "gpu/device.h"
 
+#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
-
-using Microsoft::WRL::ComPtr;
+#include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
     namespace {
 
-        using DeviceResult = std::expected<ComPtr<ID3D12Device5>, std::string>;
+        using DeviceResult = expected<ComPtr<ID3D12Device5>, std::string>;
 
         // WARP は版によって FL 12_2 に届かない(Windows 11 build 26200 の WARP は 12_1。2026-09-30 の --caps)。
         // Work Graphs と SM 6.8 は FL と別に問い合わせる機能なので、WARP は作れる一番低い FL で作る
@@ -36,34 +36,43 @@ namespace bicameral::gpu {
                 shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_8) {
                 missing += " SM6.8";
             }
+
             // NOLINTNEXTLINE(bugprone-invalid-enum-default-initialization) 0 で埋めて渡す(caps.cpp と同じ)
             D3D12_FEATURE_DATA_D3D12_OPTIONS21 options21{};
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options21, sizeof(options21))) ||
                 options21.WorkGraphsTier == D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED) {
                 missing += " WorkGraphs";
             }
+
             D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1{};
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1))) ||
                 !options1.Int64ShaderOps) {
                 missing += " Int64ShaderOps";
             }
+
             return missing;
         }
 
         // ソフトウェアでなく、FL 12_2 のデバイスを作れて最低機の機能がそろうならデバイスを返す(だめなら nullptr)
         ComPtr<ID3D12Device5> TryCreateHardwareDevice(IDXGIAdapter1* adapter) {
             DXGI_ADAPTER_DESC1 desc{};
-            if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) return nullptr;
+            if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0)
+                return nullptr;
+
             ComPtr<ID3D12Device5> device;
-            if (FAILED(D3D12CreateDevice(adapter, HARDWARE_FEATURE_LEVEL, IID_PPV_ARGS(&device)))) return nullptr;
+            if (FAILED(D3D12CreateDevice(adapter, HARDWARE_FEATURE_LEVEL, IID_PPV_ARGS(&device))))
+                return nullptr;
+
             const std::string missing = FindMissingFeatures(device.Get());
             if (!missing.empty()) {
                 Log(Channel::Gpu, Level::Warning, "アダプタ {} は使わない(足りない機能:{})", ToUtf8(desc.Description),
                     missing);
                 return nullptr;
             }
+
             Log(Channel::Gpu, Level::Info, "アダプタ: {}  LUID {:08x}:{:08x}", ToUtf8(desc.Description),
                 static_cast<unsigned long>(desc.AdapterLuid.HighPart), desc.AdapterLuid.LowPart);
+
             return device;
         }
 
@@ -71,9 +80,12 @@ namespace bicameral::gpu {
         bool AdapterOwnsMonitor(IDXGIAdapter1* adapter, HMONITOR monitor) {
             for (UINT outputIndex = 0;; ++outputIndex) {
                 ComPtr<IDXGIOutput> output;
-                if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) return false;
+                if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND)
+                    return false;
+
                 DXGI_OUTPUT_DESC outputDesc{};
-                if (SUCCEEDED(output->GetDesc(&outputDesc)) && outputDesc.Monitor == monitor) return true;
+                if (SUCCEEDED(output->GetDesc(&outputDesc)) && outputDesc.Monitor == monitor)
+                    return true;
             }
         }
 
@@ -85,32 +97,47 @@ namespace bicameral::gpu {
                                                         IID_PPV_ARGS(&adapter)) == DXGI_ERROR_NOT_FOUND) {
                     return nullptr;
                 }
-                if (monitor != nullptr && !AdapterOwnsMonitor(adapter.Get(), monitor)) continue;
-                if (ComPtr<ID3D12Device5> device = TryCreateHardwareDevice(adapter.Get())) return device;
+
+                if (monitor != nullptr && !AdapterOwnsMonitor(adapter.Get(), monitor))
+                    continue;
+
+                if (ComPtr<ID3D12Device5> device = TryCreateHardwareDevice(adapter.Get()))
+                    return device;
             }
         }
 
         // 窓の画面を持つアダプタ → 無ければ(使えなければ)全部を高性能の順に
         DeviceResult CreateHardwareDevice(IDXGIFactory6* factory, HMONITOR presentMonitor) {
             if (presentMonitor != nullptr) {
-                if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, presentMonitor)) return device;
+                if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, presentMonitor))
+                    return device;
+
                 Log(Channel::Gpu, Level::Warning, "窓の画面を持つアダプタが使えないので、高性能の順で選ぶ");
             }
-            if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, nullptr)) return device;
-            return std::unexpected("最低機の条件(FL 12_2・SM 6.8・Work Graphs・Int64ShaderOps)を満たすアダプタが無い");
+
+            if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, nullptr))
+                return device;
+
+            return unexpected("最低機の条件(FL 12_2・SM 6.8・Work Graphs・Int64ShaderOps)を満たすアダプタが無い");
         }
 
         DeviceResult CreateWarpDevice(IDXGIFactory6* factory) {
             ComPtr<IDXGIAdapter1> adapter;
             HRESULT result = factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
-            if (FAILED(result)) return std::unexpected("WARP のアダプタを取れない: " + DescribeHresult(result));
+            if (FAILED(result))
+                return unexpected("WARP のアダプタを取れない: " + DescribeHresult(result));
 
             ComPtr<ID3D12Device5> device;
             result = D3D12CreateDevice(adapter.Get(), WARP_FEATURE_LEVEL, IID_PPV_ARGS(&device));
-            if (FAILED(result)) return std::unexpected("WARP のデバイスを作れない: " + DescribeHresult(result));
+            if (FAILED(result))
+                return unexpected("WARP のデバイスを作れない: " + DescribeHresult(result));
+
             const std::string missing = FindMissingFeatures(device.Get());
-            if (!missing.empty()) return std::unexpected("WARP に足りない機能:" + missing);
+            if (!missing.empty())
+                return unexpected("WARP に足りない機能:" + missing);
+
             Log(Channel::Gpu, Level::Info, "アダプタ: WARP");
+
             return device;
         }
 
@@ -123,20 +150,20 @@ namespace bicameral::gpu {
                 if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
                     debug->EnableDebugLayer();
                     debug->SetEnableGPUBasedValidation(options.gpuBasedValidation ? TRUE : FALSE);
-                } else {
+                } else
                     Log(Channel::Gpu, Level::Warning, "debug layer を使えない(D3D12\\d3d12SDKLayers.dll が無い?)");
-                }
             }
+
             if (options.dred) {
                 ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
                 if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
                     dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                     dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                     dred->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-                } else {
+                } else
                     Log(Channel::Gpu, Level::Warning, "DRED の設定を取れない");
-                }
             }
+
             Log(Channel::Gpu, Level::Info, "検証: debug layer {}・GPU-based validation {}・DRED {}",
                 options.debugLayer || options.gpuBasedValidation ? "on" : "off",
                 options.gpuBasedValidation ? "on" : "off", options.dred ? "on" : "off");
@@ -177,7 +204,7 @@ namespace bicameral::gpu {
                 case D3D12_AUTO_BREADCRUMB_OP_BEGIN_COMMAND_LIST: return "BeginCommandList";
                 case D3D12_AUTO_BREADCRUMB_OP_DISPATCHGRAPH: return "DispatchGraph";
                 case D3D12_AUTO_BREADCRUMB_OP_SETPROGRAM: return "SetProgram";
-                default: return std::format("op {}", static_cast<int>(op));
+                default: return format("op {}", static_cast<int>(op));
             }
         }
 
@@ -188,24 +215,27 @@ namespace bicameral::gpu {
         // 1 本のコマンドリストの記録: どこまで終わったか、止まった所の前後に何があったか
         void LogBreadcrumbNode(const D3D12_AUTO_BREADCRUMB_NODE1& node) {
             const uint32_t completed = node.pLastBreadcrumbValue != nullptr ? *node.pLastBreadcrumbValue : 0;
-            const std::string where = std::format("リスト {}(キュー {})", DebugNameOf(node.pCommandListDebugNameW),
-                                                  DebugNameOf(node.pCommandQueueDebugNameW));
+            const std::string where = format("リスト {}(キュー {})", DebugNameOf(node.pCommandListDebugNameW),
+                                             DebugNameOf(node.pCommandQueueDebugNameW));
+
             if (completed >= node.BreadcrumbCount) {
                 Log(Channel::Gpu, Level::Info, "DRED: {}: {} 個のコマンドを全部終えている", where,
                     node.BreadcrumbCount);
                 return;
             }
+
             Log(Channel::Gpu, Level::Error, "DRED: {}: {} 個中 {} 個まで終えた。次のコマンドで止まった", where,
                 node.BreadcrumbCount, completed);
             const uint32_t first = completed > BREADCRUMB_CONTEXT_BEFORE ? completed - BREADCRUMB_CONTEXT_BEFORE : 0;
             const uint32_t last = std::min(node.BreadcrumbCount, completed + BREADCRUMB_CONTEXT_AFTER + 1);
+
             for (uint32_t index = first; index < last; ++index) {
                 Log(Channel::Gpu, Level::Error, "DRED:   {} [{}] {}", index == completed ? "→" : " ", index,
                     BreadcrumbOpName(node.pCommandHistory[index]));
             }
         }
 
-        void LogAllocations(std::string_view title, const D3D12_DRED_ALLOCATION_NODE1* node) {
+        void LogAllocations(string_view title, const D3D12_DRED_ALLOCATION_NODE1* node) {
             for (int count = 0; node != nullptr && count < MAX_LOGGED_ALLOCATIONS; node = node->pNext, ++count) {
                 Log(Channel::Gpu, Level::Error, "DRED:   {}: {}(種類 {})", title, DebugNameOf(node->ObjectNameW),
                     static_cast<int>(node->AllocationType));
@@ -228,20 +258,25 @@ namespace bicameral::gpu {
 
     // --- Device ---
 
-    std::expected<Device, std::string> Device::Create(AdapterKind kind, const DeviceOptions& options) {
+    expected<Device, std::string> Device::Create(AdapterKind kind, const DeviceOptions& options) {
         EnableDebugFeatures(options);
         ComPtr<IDXGIFactory6> factory;
         const HRESULT result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
-        if (FAILED(result)) return std::unexpected("DXGI のファクトリを作れない: " + DescribeHresult(result));
+        if (FAILED(result))
+            return unexpected("DXGI のファクトリを作れない: " + DescribeHresult(result));
+
         DeviceResult created = kind == AdapterKind::Warp ? CreateWarpDevice(factory.Get())
                                                          : CreateHardwareDevice(factory.Get(), options.presentMonitor);
-        if (!created) return std::unexpected(created.error());
+        if (!created)
+            return unexpected(created.error());
 
         Device device;
         device.m_factory = std::move(factory);
         device.m_device = std::move(*created);
         device.m_options = options;
-        if (options.debugLayer || options.gpuBasedValidation) device.m_messageSink = AttachMessageSink(device.Get());
+        if (options.debugLayer || options.gpuBasedValidation)
+            device.m_messageSink = AttachMessageSink(device.Get());
+
         return device;
     }
 
@@ -251,24 +286,31 @@ namespace bicameral::gpu {
             Log(Channel::Gpu, Level::Warning, "ID3D12InfoQueue1 が無いので、debug layer の報告はログに出ない");
             return sink;  // 数は 0 のまま
         }
+
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, sink->infoQueue->RegisterMessageCallback(
                                                   &Device::OnDebugMessage, D3D12_MESSAGE_CALLBACK_FLAG_NONE, sink.get(),
                                                   &sink->callbackCookie))) {
             sink->infoQueue.Reset();
         }
+
         return sink;
     }
 
     Device::MessageSink::~MessageSink() {
-        if (infoQueue) infoQueue->UnregisterMessageCallback(callbackCookie);
+        if (infoQueue)
+            infoQueue->UnregisterMessageCallback(callbackCookie);
     }
 
     void __stdcall Device::OnDebugMessage(D3D12_MESSAGE_CATEGORY /*category*/, D3D12_MESSAGE_SEVERITY severity,
                                           D3D12_MESSAGE_ID id, LPCSTR description, void* context) {
         auto* sink = static_cast<MessageSink*>(context);
         const Level level = LevelOfSeverity(severity);
-        if (level == Level::Error) sink->errorCount.fetch_add(1, std::memory_order_relaxed);
-        if (level == Level::Warning) sink->warningCount.fetch_add(1, std::memory_order_relaxed);
+        if (level == Level::Error)
+            sink->errorCount.fetch_add(1, std::memory_order_relaxed);
+
+        if (level == Level::Warning)
+            sink->warningCount.fetch_add(1, std::memory_order_relaxed);
+
         Log(Channel::Gpu, level, "D3D12 [{}] {}", static_cast<int>(id), description != nullptr ? description : "");
     }
 
@@ -287,7 +329,9 @@ namespace bicameral::gpu {
         Log(Channel::Gpu, Level::Error, "デバイスが失われた: {}", DescribeHresult(device->GetDeviceRemovedReason()));
 
         ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
-        if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) return report;
+        if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))))
+            return report;
+
         D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs{};
         const HRESULT breadcrumbResult = dred->GetAutoBreadcrumbsOutput1(&breadcrumbs);
         if (FAILED(breadcrumbResult)) {
@@ -295,6 +339,7 @@ namespace bicameral::gpu {
                 DescribeHresult(breadcrumbResult));
             return report;
         }
+
         report.dredAvailable = true;
         for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs.pHeadAutoBreadcrumbNode; node != nullptr;
              node = node->pNext) {
@@ -309,6 +354,7 @@ namespace bicameral::gpu {
             LogAllocations("そこにあるもの", pageFault.pHeadExistingAllocationNode);
             LogAllocations("最近解放したもの", pageFault.pHeadRecentFreedAllocationNode);
         }
+
         return report;
     }
 

@@ -15,6 +15,9 @@
 #include <memory>
 #include <string>
 
+#include "core/aliases.h"
+#include "gpu/com_ptr.h"
+
 namespace bicameral::gpu {
 
     enum class AdapterKind : uint8_t {
@@ -40,7 +43,7 @@ namespace bicameral::gpu {
     class Device {
     public:
         // 失敗の理由は文字列で返す(Error として出すか、テストの失敗にするかは呼ぶ側が決める)
-        [[nodiscard]] static std::expected<Device, std::string> Create(
+        [[nodiscard]] static expected<Device, std::string> Create(
             AdapterKind kind, const DeviceOptions& options = DefaultDeviceOptions());
 
         [[nodiscard]] ID3D12Device5* Get() const { return m_device.Get(); }
@@ -56,7 +59,7 @@ namespace bicameral::gpu {
         struct MessageSink {
             std::atomic<uint32_t> errorCount = 0;
             std::atomic<uint32_t> warningCount = 0;
-            Microsoft::WRL::ComPtr<ID3D12InfoQueue1> infoQueue;
+            ComPtr<ID3D12InfoQueue1> infoQueue;
             DWORD callbackCookie = 0;
             ~MessageSink();
         };
@@ -68,8 +71,8 @@ namespace bicameral::gpu {
                                              D3D12_MESSAGE_ID id, LPCSTR description, void* context);
         [[nodiscard]] static std::unique_ptr<MessageSink> AttachMessageSink(ID3D12Device5* device);
 
-        Microsoft::WRL::ComPtr<IDXGIFactory6> m_factory;
-        Microsoft::WRL::ComPtr<ID3D12Device5> m_device;
+        ComPtr<IDXGIFactory6> m_factory;
+        ComPtr<ID3D12Device5> m_device;
         DeviceOptions m_options;
         std::unique_ptr<MessageSink> m_messageSink;  // debug layer が無効なら空
     };

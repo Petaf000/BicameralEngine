@@ -5,15 +5,16 @@
 //
 // ctest には登録しない(時間がかかり、結果は機械しだいで合否が無い)。走らせ方: `job.py run -Preset release -Exe gpu_fixed_bench`。
 // 引数は gpu_test_options.h(--warp・--queue)。WARP での時間は GPU の目安にならない。
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
+#include "gpu/com_ptr.h"
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
 #include "gpu/resources.h"
 #include "gpu_test_options.h"
 
 using namespace bicameral;
-using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -75,29 +76,34 @@ namespace {
         double ticksPerMillisecond = 0;
     };
 
-    std::expected<BenchContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
+    expected<BenchContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
         BenchContext context{.device = device, .queue = &queue};
         context.rootSignature = gpu::CreateRootSignature(device, {.uavCount = 1, .rootConstantCount = 1});
         context.results = gpu::CreateBuffer(device, uint64_t{THREAD_COUNT} * 8, gpu::BufferKind::UnorderedAccess);
         context.timestampReadback = gpu::CreateBuffer(device, 2 * sizeof(uint64_t), gpu::BufferKind::Readback);
         const D3D12_QUERY_HEAP_DESC heapDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2};
+
         if (!context.rootSignature || !context.results || !context.timestampReadback ||
             FAILED(device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&context.queryHeap)))) {
-            return std::unexpected("ルート署名・バッファ・クエリのヒープを作れない");
+            return unexpected("ルート署名・バッファ・クエリのヒープを作れない");
         }
+
         uint64_t frequency = 0;
-        if (FAILED(queue.Native()->GetTimestampFrequency(&frequency))) {
-            return std::unexpected("タイムスタンプの周波数を得られない");
-        }
+        if (FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
+            return unexpected("タイムスタンプの周波数を得られない");
+
         context.ticksPerMillisecond = static_cast<double>(frequency) / 1000.0;
+
         return context;
     }
 
     // iterationCount 回の反復を 1 回走らせ、かかった時間(ms)を返す
-    std::expected<double, std::string> RunOnce(const BenchContext& context, ID3D12PipelineState* pipeline,
-                                               uint32_t iterationCount) {
+    expected<double, std::string> RunOnce(const BenchContext& context, ID3D12PipelineState* pipeline,
+                                          uint32_t iterationCount) {
         ID3D12GraphicsCommandList10* list = context.queue->Begin();
-        if (list == nullptr) return std::unexpected("コマンドリストを始められない");
+        if (list == nullptr)
+            return unexpected("コマンドリストを始められない");
+
         list->SetComputeRootSignature(context.rootSignature.Get());
         list->SetPipelineState(pipeline);
         list->SetComputeRootUnorderedAccessView(0, context.results->GetGPUVirtualAddress());
@@ -107,12 +113,13 @@ namespace {
         list->EndQuery(context.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
         list->ResolveQueryData(context.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
                                context.timestampReadback.Get(), 0);
-        if (!context.queue->ExecuteAndWait()) return std::unexpected("GPU での実行に失敗");
+        if (!context.queue->ExecuteAndWait())
+            return unexpected("GPU での実行に失敗");
 
         uint64_t timestamps[2] = {};
-        if (!gpu::ReadBuffer(context.timestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
-            return std::unexpected("タイムスタンプを読み戻せない");
-        }
+        if (!gpu::ReadBuffer(context.timestampReadback.Get(), std::as_writable_bytes(span(timestamps))))
+            return unexpected("タイムスタンプを読み戻せない");
+
         return static_cast<double>(timestamps[1] - timestamps[0]) / context.ticksPerMillisecond;
     }
 
@@ -125,79 +132,101 @@ namespace {
         double milliseconds = 0;
     };
 
-    std::expected<Measurement, std::string> Measure(const BenchContext& context, const BenchOperation& operation) {
+    expected<Measurement, std::string> Measure(const BenchContext& context, const BenchOperation& operation) {
         const auto bytecode = gpu::LoadShader(std::string("bench/fixed_bench_") + operation.name + ".cso");
-        if (!bytecode) return std::unexpected(bytecode.error());
+        if (!bytecode)
+            return unexpected(bytecode.error());
+
         const ComPtr<ID3D12PipelineState> pipeline =
             gpu::CreateComputePipeline(context.device, context.rootSignature.Get(), *bytecode);
-        if (!pipeline) return std::unexpected("パイプラインを作れない");
+        if (!pipeline)
+            return unexpected("パイプラインを作れない");
 
         uint32_t iterationCount = 4;
         for (;;) {  // 反復回数を目標の時間に近づける(最初の 1 回はウォームアップも兼ねる)
             const auto time = RunOnce(context, pipeline.Get(), iterationCount);
-            if (!time) return std::unexpected(time.error());
-            if (*time >= TARGET_MILLISECONDS * 0.5 || iterationCount >= (1u << 24)) break;
+            if (!time)
+                return unexpected(time.error());
+
+            if (*time >= TARGET_MILLISECONDS * 0.5 || iterationCount >= (1u << 24))
+                break;
+
             const double scale = *time <= 0.01 ? 64.0 : std::min(64.0, TARGET_MILLISECONDS / *time);
             iterationCount = static_cast<uint32_t>(std::max(2.0, scale) * iterationCount);
         }
+
         std::vector<double> times;
         for (int repeat = 0; repeat < REPEAT_COUNT; ++repeat) {
             const auto time = RunOnce(context, pipeline.Get(), iterationCount);
-            if (!time) return std::unexpected(time.error());
+            if (!time)
+                return unexpected(time.error());
+
             times.push_back(*time);
         }
-        std::ranges::sort(times);
+
+        rng::sort(times);
         const double median = times[times.size() / 2];
         const double steps = double{THREAD_COUNT} * iterationCount * UNROLL;
+
         return Measurement{
             .nanosecondsPerStep = median * 1.0e6 / steps, .iterationCount = iterationCount, .milliseconds = median};
     }
 
     // --- 表にする ---
 
-    void Report(std::span<const Measurement> measurements) {
-        auto find = [&](std::string_view name) {
+    void Report(span<const Measurement> measurements) {
+        auto find = [&](string_view name) {
             for (size_t index = 0; index < std::size(BENCH_OPERATIONS); ++index) {
-                if (name == BENCH_OPERATIONS[index].name) return measurements[index].nanosecondsPerStep;
+                if (name == BENCH_OPERATIONS[index].name)
+                    return measurements[index].nanosecondsPerStep;
             }
+
             return 0.0;
         };
+
         const double base32 = find("base32");
         const double base64 = find("base64");
         const double floatMultiply = find("fmul");
         Log(Channel::Gpu, Level::Info,
             "| 演算 | 1 回(ps、GPU 全体) | 混ぜる分を引いた費用(ps) | fmul の何回分 | 反復 | 時間(ms) |");
         Log(Channel::Gpu, Level::Info, "|---|---|---|---|---|---|");
+
         for (size_t index = 0; index < std::size(BENCH_OPERATIONS); ++index) {
             const BenchOperation& operation = BENCH_OPERATIONS[index];
             const Measurement& measurement = measurements[index];
             const double base = operation.width == 32 ? base32 : operation.width == 64 ? base64 : 0.0;
             const bool isBase = index < 2;
             const double net = isBase ? measurement.nanosecondsPerStep : measurement.nanosecondsPerStep - base;
+
             Log(Channel::Gpu, Level::Info, "| {} {} | {:.2f} | {:.2f} | {:.1f} | {} | {:.1f} |", operation.name,
                 operation.description, measurement.nanosecondsPerStep * 1000, net * 1000, net / floatMultiply,
                 measurement.iterationCount, measurement.milliseconds);
         }
     }
 
-    int Run(std::span<char*> arguments) {
+    int Run(span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error, "使い方: gpu_fixed_bench [--warp] [--queue direct|compute]");
             return 2;
         }
+
         const auto device = gpu::Device::Create(options->adapter);
         if (!device) {
             Log(Channel::Gpu, Level::Error, "gpu_fixed_bench: {}", device.error());
             return 1;
         }
+
         auto queue = gpu::ImmediateQueue::Create(device->Get(), options->queueType);
-        if (!queue) return 1;
+        if (!queue)
+            return 1;
+
         const auto context = CreateContext(device->Get(), *queue);
         if (!context) {
             Log(Channel::Gpu, Level::Error, "gpu_fixed_bench: {}", context.error());
             return 1;
         }
+
         Log(Channel::Gpu, Level::Info, "gpu_fixed_bench: adapter {}, queue {}, {} スレッド × 展開 {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType), THREAD_COUNT, UNROLL);
 
@@ -208,16 +237,20 @@ namespace {
                 Log(Channel::Gpu, Level::Error, "{}: {}", operation.name, measurement.error());
                 return 1;
             }
+
             measurements.push_back(*measurement);
         }
+
         Report(measurements);
+
         return 0;
     }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(span(argv, static_cast<size_t>(argc)));
     SingletonFinalizer::Finalize();  // ログを閉じる
+
     return exitCode;
 }

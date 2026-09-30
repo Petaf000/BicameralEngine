@@ -8,6 +8,7 @@
 #include <array>
 #include <type_traits>
 
+#include "core/aliases.h"
 #include "core/unicode.h"
 
 static_assert(std::is_same_v<HRESULT, bicameral::HResult>, "HResult は HRESULT と同じ型でなければならない");
@@ -17,7 +18,7 @@ namespace bicameral {
 
         struct NamedResult {
             HRESULT code;
-            std::string_view name;
+            string_view name;
         };
 
 #define BICAMERAL_NAMED_RESULT(code) \
@@ -54,10 +55,12 @@ namespace bicameral {
         };
 #undef BICAMERAL_NAMED_RESULT
 
-        std::string_view NameOf(HRESULT result) {
+        string_view NameOf(HRESULT result) {
             for (const NamedResult& named : NAMED_RESULTS) {
-                if (named.code == result) return named.name;
+                if (named.code == result)
+                    return named.name;
             }
+
             return {};
         }
 
@@ -68,36 +71,40 @@ namespace bicameral {
                 FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
             const DWORD length = FormatMessageW(flags, nullptr, static_cast<DWORD>(result), 0,
                                                 reinterpret_cast<wchar_t*>(&buffer), 0, nullptr);
-            if (length == 0 || buffer == nullptr) return {};
+            if (length == 0 || buffer == nullptr)
+                return {};
 
             std::wstring_view text(buffer, length);
-            while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' ')) {
+            while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n' || text.back() == L' '))
                 text.remove_suffix(1);
-            }
+
             std::string message = ToUtf8(text);
             LocalFree(buffer);
+
             return message;
         }
 
     }  // namespace
 
     std::string DescribeHresult(HResult result) {
-        const std::string_view name = NameOf(result);
+        const string_view name = NameOf(result);
         const std::string message = SystemMessageOf(result);
-        std::string text = name.empty() ? std::format("0x{:08X}", static_cast<unsigned long>(result))
-                                        : std::format("{} (0x{:08X})", name, static_cast<unsigned long>(result));
-        if (!message.empty()) text += ": " + message;
+        std::string text = name.empty() ? format("0x{:08X}", static_cast<unsigned long>(result))
+                                        : format("{} (0x{:08X})", name, static_cast<unsigned long>(result));
+        if (!message.empty())
+            text += ": " + message;
+
         return text;
     }
 
-    bool CheckHresult(HResult result, Channel channel, std::string_view expression,
-                      const std::source_location& location) {
-        if (SUCCEEDED(result)) return true;
+    bool CheckHresult(HResult result, Channel channel, string_view expression, const std::source_location& location) {
+        if (SUCCEEDED(result))
+            return true;
+
         Logger& logger = GetLogger();
-        if (logger.IsEnabled(Level::Error)) {
-            logger.Write(channel, Level::Error, std::format("{} が失敗: {}", expression, DescribeHresult(result)),
-                         location);
-        }
+        if (logger.IsEnabled(Level::Error))
+            logger.Write(channel, Level::Error, format("{} が失敗: {}", expression, DescribeHresult(result)), location);
+
         return false;
     }
 

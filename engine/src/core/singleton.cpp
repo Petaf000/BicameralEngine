@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <ranges>
 
+#include "core/aliases.h"
+
 namespace bicameral {
 
     namespace {
@@ -29,20 +31,23 @@ namespace bicameral {
             std::scoped_lock lock(s_mutex);
             entries.swap(s_finalizers);
         }
-        for (const Entry& entry : entries | std::views::reverse) {
+
+        for (const Entry& entry : entries | views::reverse)
             entry.finalize();
-        }
     }
 
     void SingletonFinalizer::FinalizeType(std::type_index type) {
         FinalizerFunc finalize = nullptr;
         {
             std::scoped_lock lock(s_mutex);
-            auto found = std::ranges::find(s_finalizers, type, &Entry::type);
-            if (found == s_finalizers.end()) return;
+            auto found = rng::find(s_finalizers, type, &Entry::type);
+            if (found == s_finalizers.end())
+                return;
+
             finalize = found->finalize;
             s_finalizers.erase(found);
         }
+
         finalize();
     }
 

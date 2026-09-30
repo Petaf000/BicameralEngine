@@ -33,6 +33,7 @@ namespace bicameral::render {
         std::array<float, 4> right{};
         std::array<float, 4> up{};
     };
+
     static_assert(sizeof(ProbeViewConstants) == 96, "probe_view.hlsl の読み方と合わせる");
 
 }  // namespace bicameral::render

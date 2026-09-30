@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/log_sinks.h"
@@ -23,7 +24,9 @@ namespace {
     int failureCount = 0;
 
     void Expect(bool condition, const char* text, int line) {
-        if (condition) return;
+        if (condition)
+            return;
+
         std::printf("FAILED line %d: %s\n", line, text);
         ++failureCount;
     }
@@ -54,8 +57,8 @@ namespace {
         return result;
     }
 
-    bool Contains(std::string_view text, std::string_view part) {
-        return text.find(part) != std::string_view::npos;
+    bool Contains(string_view text, string_view part) {
+        return text.find(part) != string_view::npos;
     }
 
 }  // namespace
@@ -70,7 +73,9 @@ void TestFormatAndLocation(Logger& logger) {
     const unsigned expectedLine = __LINE__ - 1;
 
     EXPECT(captured.size() == 1);
-    if (captured.empty()) return;
+    if (captured.empty())
+        return;
+
     EXPECT(captured[0].message == "x=1 y=a");
     EXPECT(captured[0].channel == Channel::Reaction);
     EXPECT(captured[0].level == Level::Info);
@@ -87,6 +92,7 @@ void TestFormatLogLine() {
         .location = std::source_location::current(),
         .elapsedSeconds = 1.5,
     };
+
     EXPECT(FormatLogLine(record, false) == "[    1.500] W gpu       | m");
     EXPECT(Contains(FormatLogLine(record, true), "  (log_test.cpp:"));
     EXPECT(ChannelName(Channel::WorkGraph) == "workgraph");
@@ -105,7 +111,9 @@ void TestLevelFilter(Logger& logger) {
     logger.SetMinLevel(Level::Trace);
 
     EXPECT(captured.size() == 1);
-    if (captured.empty()) return;
+    if (captured.empty())
+        return;
+
     EXPECT(captured[0].message == "残る");
 }
 
@@ -119,7 +127,9 @@ void TestHresult() {
     const unsigned expectedLine = __LINE__ - 1;
     EXPECT(!succeeded);
     EXPECT(captured.size() == 1);
-    if (captured.empty()) return;
+    if (captured.empty())
+        return;
+
     EXPECT(captured[0].level == Level::Error);
     EXPECT(captured[0].channel == Channel::Gpu);
     EXPECT(Contains(captured[0].message, "ReturnResult(E_INVALIDARG) が失敗"));
@@ -131,17 +141,18 @@ void TestHresult() {
 }
 
 // --- ファイルへの出力と、古いファイルの削除 ---
-void TestFileSink(Logger& logger, const std::filesystem::path& directory) {
-    std::filesystem::remove_all(directory);
-    std::filesystem::create_directories(directory);
-    for (int i = 0; i < 25; ++i) {  // 名前順で今の日時より古くなる偽のログ
-        std::ofstream(directory / std::format("bicameral-00000000-0000{:02}.log", i)) << "old\n";
-    }
+void TestFileSink(Logger& logger, const fs::path& directory) {
+    fs::remove_all(directory);
+    fs::create_directories(directory);
+    for (int i = 0; i < 25; ++i)  // 名前順で今の日時より古くなる偽のログ
+        std::ofstream(directory / format("bicameral-00000000-0000{:02}.log", i)) << "old\n";
     std::ofstream(directory / "other.txt") << "消されない\n";
 
     const auto path = OpenLogFile(logger, directory);
     EXPECT(path.has_value());
-    if (!path) return;
+    if (!path)
+        return;
+
     Log(Channel::Tool, Level::Info, "ファイルへ 日本語");
     logger.Flush();
 
@@ -150,11 +161,13 @@ void TestFileSink(Logger& logger, const std::filesystem::path& directory) {
     EXPECT(Contains(content.str(), "I tool      | ファイルへ 日本語  (log_test.cpp:"));
 
     size_t logFileCount = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-        if (entry.path().extension() == ".log") ++logFileCount;
+    for (const auto& entry : fs::directory_iterator(directory)) {
+        if (entry.path().extension() == ".log")
+            ++logFileCount;
     }
+
     EXPECT(logFileCount == 20);  // 古い 19 個 + 新しい 1 個
-    EXPECT(std::filesystem::exists(directory / "other.txt"));
+    EXPECT(fs::exists(directory / "other.txt"));
 }
 
 int main() {
@@ -168,11 +181,13 @@ int main() {
     TestHresult();
     EXPECT(ToWide(ToUtf8(L"反応の連鎖")) == L"反応の連鎖");
 
-    const std::filesystem::path directory = std::filesystem::temp_directory_path() / "bicameral_log_test";
+    const fs::path directory = fs::temp_directory_path() / "bicameral_log_test";
     TestFileSink(logger, directory);
     SingletonFinalizer::Finalize();  // ファイルを閉じてから消す
-    std::filesystem::remove_all(directory);
+    fs::remove_all(directory);
 
-    if (failureCount == 0) std::printf("log ok\n");
+    if (failureCount == 0)
+        std::printf("log ok\n");
+
     return failureCount == 0 ? 0 : 1;
 }

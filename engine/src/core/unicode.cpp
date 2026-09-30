@@ -5,23 +5,31 @@
 
 #include <windows.h>
 
+#include "core/aliases.h"
+
 namespace bicameral {
 
     std::string ToUtf8(std::wstring_view text) {
-        if (text.empty()) return {};
+        if (text.empty())
+            return {};
+
         const int length = static_cast<int>(text.size());
         const int sizeBytes = WideCharToMultiByte(CP_UTF8, 0, text.data(), length, nullptr, 0, nullptr, nullptr);
         std::string result(static_cast<size_t>(sizeBytes), '\0');
         WideCharToMultiByte(CP_UTF8, 0, text.data(), length, result.data(), sizeBytes, nullptr, nullptr);
+
         return result;
     }
 
-    std::wstring ToWide(std::string_view text) {
-        if (text.empty()) return {};
+    std::wstring ToWide(string_view text) {
+        if (text.empty())
+            return {};
+
         const int length = static_cast<int>(text.size());
         const int count = MultiByteToWideChar(CP_UTF8, 0, text.data(), length, nullptr, 0);
         std::wstring result(static_cast<size_t>(count), L'\0');
         MultiByteToWideChar(CP_UTF8, 0, text.data(), length, result.data(), count);
+
         return result;
     }
 

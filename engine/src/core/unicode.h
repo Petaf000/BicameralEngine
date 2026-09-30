@@ -7,12 +7,14 @@
 #include <string>
 #include <string_view>
 
+#include "core/aliases.h"
+
 namespace bicameral {
 
     // UTF-16 → UTF-8。不正なサロゲートは U+FFFD に置き換わる
     std::string ToUtf8(std::wstring_view text);
 
     // UTF-8 → UTF-16。不正なバイト列は U+FFFD に置き換わる
-    std::wstring ToWide(std::string_view text);
+    std::wstring ToWide(string_view text);
 
 }  // namespace bicameral

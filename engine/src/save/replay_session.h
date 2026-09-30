@@ -15,18 +15,19 @@
 #include <string>
 #include <vector>
 
+#include "core/aliases.h"
 #include "save/replay_file.h"
 
 namespace bicameral::save {
 
     class ReplayRecorder {
     public:
-        void AddCommands(std::span<const sim::Command> commands);
+        void AddCommands(span<const sim::Command> commands);
         void AddHash(uint64_t tick, uint64_t hash);
 
         // 記録を再生ファイルの形にする(仮の世界。刻み 0 の全部 0 の状態から)
         [[nodiscard]] ReplayFile Build() const;
-        [[nodiscard]] std::expected<void, std::string> Write(const std::filesystem::path& path) const;
+        [[nodiscard]] expected<void, std::string> Write(const fs::path& path) const;
 
     private:
         std::vector<sim::Command> m_commands;
@@ -40,7 +41,7 @@ namespace bicameral::save {
         explicit ReplayPlayer(ReplayFile replay);
 
         // 仮の世界の再生ファイルを読む(刻み 0 の全部 0 の状態から始まるものだけ)
-        [[nodiscard]] static std::expected<ReplayPlayer, std::string> Load(const std::filesystem::path& path);
+        [[nodiscard]] static expected<ReplayPlayer, std::string> Load(const fs::path& path);
 
         // このフレームに GPU のキューへ足すコマンド(targetTick < applyTick + LOOKAHEAD_TICKS のものを、最大 limit 個)。
         // applyTick = まだ記録していない最初の適用の刻み。それより前のコマンドは間に合わないので捨てて失敗に数える

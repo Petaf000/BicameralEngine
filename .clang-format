@@ -12,8 +12,12 @@ FixNamespaceComments: true
 PointerAlignment: Left
 DerivePointerAlignment: false
 
-# 1 行の if は { } を省いて同じ行に書いてよい(if (x == nullptr) return;)。ループと else 付きは改行する
-AllowShortIfStatementsOnASingleLine: WithoutElse
+# 中身が 1 行の if・else・ループは { } を省き、改行して字下げする(同じ行には書かない)。
+#   if (x == nullptr)
+#       return;
+# { } を外すのは手で行う(RemoveBracesLLVM は入れ子の if を 1 文と見て外してしまい、.clang-tidy の
+# readability-braces-around-statements と食い違うので使わない)。中身が複数行に渡るなら { } を付ける。
+AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortBlocksOnASingleLine: Never
 AllowShortFunctionsOnASingleLine: Inline

@@ -2,12 +2,13 @@
 # VS 2026 の「Clang-Tidy」コード分析がこれを読む。PC では job.py tidy、CI では build ジョブが tools/tidy/run_clang_tidy.py で強制する(T-0011)。
 # shaders/ の共通のヘッダ(.hlsli)は HLSL でもコンパイルするので、auto と指示付き初期化子の検査は run_clang_tidy.py が外す。
 # bugprone-random-generator-seed は外す: 決まった種で毎回同じ列を出すのがこのプロジェクトの方針(決定性、ADR-0008)。
+# readability-braces-around-statements は使わない: if / else の連鎖で 1 行の分岐だけ { } を省く書き方(docs/style.md、
+# 2026-09-30 ユーザー決定)を、連鎖のどれかに { } があれば全部に求めるこの検査は許さないため。{ } の付け方は手で守る。
 Checks: >
   -*,
   readability-identifier-naming,
   readability-else-after-return,
   readability-function-size,
-  readability-braces-around-statements,
   modernize-use-nullptr,
   modernize-use-override,
   modernize-use-using,
@@ -55,7 +56,6 @@ CheckOptions:
   # 長さを渡している Win32 の文字コード変換は、data() が 0 終端でなくてよい
   - { key: bugprone-suspicious-stringview-data-usage.AllowedCallees, value: 'WideCharToMultiByte;MultiByteToWideChar' }
   # --- 1 関数の大きさの目安(超えたら分ける)---
-  - { key: readability-function-size.LineThreshold,                value: 60 }
+  # 目安は空行を除いて 50 行。この検査は空行も数えるので、処理の区切りの空行(docs/style.md)のぶん多めにしている
+  - { key: readability-function-size.LineThreshold,                value: 70 }
   - { key: readability-function-size.NestingThreshold,             value: 3 }
-  # 1 行の if の { } 省略は許す(2 行以上に渡るなら { } を付ける)
-  - { key: readability-braces-around-statements.ShortStatementLines, value: 1 }

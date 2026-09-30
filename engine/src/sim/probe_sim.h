@@ -31,6 +31,8 @@
 #include <vector>
 
 #include "common/probe_sim.hlsli"
+#include "core/aliases.h"
+#include "gpu/com_ptr.h"
 #include "gpu/debug_ring.h"
 #include "gpu/readback_ring.h"
 #include "gpu/work_graph.h"
@@ -89,7 +91,7 @@ namespace bicameral::sim {
         uint32_t unitCount = 0;         // 投げる単位の数(0〜MAX_UNITS_PER_FRAME。0 なら抽出だけ)
         bool extract = false;           // 単位の後ろで、刻みの境界の状態を抽出へ写すか
         uint32_t extractionTarget = 0;  // 抽出の書き先(0〜PROBE_EXTRACTION_COUNT-1)
-        std::span<const ProbeCommand>
+        span<const ProbeCommand>
             commands;  // GPU のキューへ足す新しいコマンド(最大 PROBE_MAX_COMMANDS。約束はファイルの先頭)
     };
 
@@ -108,9 +110,9 @@ namespace bicameral::sim {
         static constexpr uint32_t MAX_UNITS_PER_FRAME = 256;
 
         // listType: フレームのリストを投げるキューの種類(シミュは compute。06 §4)
-        [[nodiscard]] static std::expected<ProbeSim, std::string> Create(ID3D12Device5* device,
-                                                                         D3D12_COMMAND_LIST_TYPE listType,
-                                                                         const ProbeSimOptions& options = {});
+        [[nodiscard]] static expected<ProbeSim, std::string> Create(ID3D12Device5* device,
+                                                                    D3D12_COMMAND_LIST_TYPE listType,
+                                                                    const ProbeSimOptions& options = {});
 
         // 1 刻みの単位の数(適用・伝導・ハッシュ + 重さの単位)
         [[nodiscard]] uint32_t UnitsPerTick() const { return PROBE_FIXED_UNITS_PER_TICK + BusyUnitCount(); }
@@ -145,12 +147,12 @@ namespace bicameral::sim {
 
     private:
         struct FrameSlot {
-            Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
-            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList10> list;  // 毎フレーム記録し直す
-            Microsoft::WRL::ComPtr<ID3D12Resource> input;              // アップロード(PROBE_INPUT_BYTES)
-            std::byte* mappedInput = nullptr;                          // Map したまま
-            Microsoft::WRL::ComPtr<ID3D12Resource> timestampReadback;  // (MAX_UNITS_PER_FRAME + 2) × 8 バイト
-            Microsoft::WRL::ComPtr<ID3D12Resource> hashReadback;       // PROBE_HASH_BYTES
+            ComPtr<ID3D12CommandAllocator> allocator;
+            ComPtr<ID3D12GraphicsCommandList10> list;  // 毎フレーム記録し直す
+            ComPtr<ID3D12Resource> input;              // アップロード(PROBE_INPUT_BYTES)
+            std::byte* mappedInput = nullptr;          // Map したまま
+            ComPtr<ID3D12Resource> timestampReadback;  // (MAX_UNITS_PER_FRAME + 2) × 8 バイト
+            ComPtr<ID3D12Resource> hashReadback;       // PROBE_HASH_BYTES
             // 最後に記録した範囲(ReadFrame が、どの刻みのハッシュとどの単位の時間かを知るため)
             uint64_t firstTick = 0;
             uint32_t firstUnit = 0;
@@ -173,7 +175,7 @@ namespace bicameral::sim {
         [[nodiscard]] bool ValidateCommands(const ProbeFrameInput& input) const;
         void WriteInput(FrameSlot& frame, const ProbeFrameInput& input) const;
         void RecordEnqueue(ID3D12GraphicsCommandList10* list, uint32_t commandCount) const;
-        void TrackCommands(std::span<const ProbeCommand> commands, uint64_t nextApplyTick);
+        void TrackCommands(span<const ProbeCommand> commands, uint64_t nextApplyTick);
         void BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void BindRootViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit);
@@ -185,30 +187,30 @@ namespace bicameral::sim {
         [[nodiscard]] std::vector<ProbeTickHash> ReadHashes(const FrameSlot& frame) const;
 
         ProbeSimOptions m_options;
-        Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSignature;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_enqueuePipeline;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_applyPipeline;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_busyPipeline;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_extractPipeline;
+        ComPtr<ID3D12RootSignature> m_rootSignature;
+        ComPtr<ID3D12PipelineState> m_enqueuePipeline;
+        ComPtr<ID3D12PipelineState> m_applyPipeline;
+        ComPtr<ID3D12PipelineState> m_busyPipeline;
+        ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
+        ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
+        ComPtr<ID3D12PipelineState> m_extractPipeline;
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導(shaders/sim/probe_conduct.hlsl)
         uint32_t m_conductEntrypoint = 0;                // WakeBlocks の入口の番号
         bool m_conductInitialized = false;               // 裏のメモリを初期化するリストを記録したか(最初の 1 回だけ)
 
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_world;  // 2 世代 × PROBE_CELL_COUNT × uint32
-        std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_busySink;
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_commandQueue;  // GPU のコマンドキュー(PROBE_COMMAND_QUEUE_BYTES)
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_tickEvents;  // 刻みの中のイベントの一時置き場(PROBE_TICK_EVENT_BYTES)
+        ComPtr<ID3D12Resource> m_world;  // 2 世代 × PROBE_CELL_COUNT × uint32
+        std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
+        ComPtr<ID3D12Resource> m_busySink;
+        ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
+        ComPtr<ID3D12Resource> m_commandQueue;  // GPU のコマンドキュー(PROBE_COMMAND_QUEUE_BYTES)
+        ComPtr<ID3D12Resource> m_tickEvents;    // 刻みの中のイベントの一時置き場(PROBE_TICK_EVENT_BYTES)
         // 活性の一覧(刻みの偶奇で 2 組。PROBE_ACTIVE_LIST_BYTES)。フレームの中では UAV、伝導の間だけ入力の組を GPU の入力の状態にする
-        std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 2> m_activeLists;
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_blockSchedule;  // 予定の印(PROBE_SCHEDULE_BYTES)
+        std::array<ComPtr<ID3D12Resource>, 2> m_activeLists;
+        ComPtr<ID3D12Resource> m_blockSchedule;  // 予定の印(PROBE_SCHEDULE_BYTES)
         gpu::ReadbackRing m_events;
         gpu::DebugRing m_debugRing;
-        gpu::WorkGraphStats m_graphStats;                      // 伝導のグラフのノードのカウンタ(T-0008)
-        Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestamps;  // slot ごとに MAX_UNITS_PER_FRAME + 2
+        gpu::WorkGraphStats m_graphStats;      // 伝導のグラフのノードのカウンタ(T-0008)
+        ComPtr<ID3D12QueryHeap> m_timestamps;  // slot ごとに MAX_UNITS_PER_FRAME + 2
         std::array<FrameSlot, FRAME_SLOT_COUNT> m_slots;
 
         // --- GPU のコマンドキューの CPU 側の控え(足すのは CPU だけなので、末尾と待っている数を CPU が知っている)---
@@ -216,6 +218,7 @@ namespace bicameral::sim {
             uint64_t targetTick = 0;
             uint32_t count = 0;
         };
+
         uint32_t m_commandTail = 0;             // 足した総数(GPU の末尾と同じ。2^32 で一周)
         uint32_t m_queuedCommandCount = 0;      // まだ適用の単位を記録していないコマンドの数
         std::vector<QueuedTick> m_queuedTicks;  // その内訳(targetTick の昇順)
@@ -232,10 +235,10 @@ namespace bicameral::sim {
         ProbeReference();
 
         // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導)
-        void Advance(uint64_t tick, std::span<const ProbeCommand> commands);
+        void Advance(uint64_t tick, span<const ProbeCommand> commands);
 
         // 刻み tick の始めの状態 S(tick)(= tick 回進めた後)
-        [[nodiscard]] std::span<const uint32_t> State(uint64_t tick) const;
+        [[nodiscard]] span<const uint32_t> State(uint64_t tick) const;
 
         // 最後の Advance で GPU が伝導を計算するはずのブロックの数
         [[nodiscard]] uint32_t ScheduledBlocks() const { return m_scheduledBlocks; }
@@ -247,9 +250,9 @@ namespace bicameral::sim {
     };
 
     // 状態のハッシュ = Σ ProbeCellHash(セルの番号, 値)(mod 2^64)。GPU のハッシュの単位と同じ値になる
-    [[nodiscard]] uint64_t ProbeStateHash(std::span<const uint32_t> cells);
+    [[nodiscard]] uint64_t ProbeStateHash(span<const uint32_t> cells);
 
     // 熱の合計(Σ 値。GPU の表の熱の合計と同じ値になる)
-    [[nodiscard]] uint64_t ProbeHeatSum(std::span<const uint32_t> cells);
+    [[nodiscard]] uint64_t ProbeHeatSum(span<const uint32_t> cells);
 
 }  // namespace bicameral::sim

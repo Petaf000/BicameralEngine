@@ -28,6 +28,7 @@
 #include <optional>
 
 #include "common/probe_sim.hlsli"
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/log_sinks.h"
 #include "core/singleton.h"
@@ -42,57 +43,73 @@ namespace {
     struct Options {
         bool runCaps = false;
         frame::FrameLoopOptions frameLoop;
-        std::filesystem::path logDirectory;  // 空なら DefaultLogDirectory()
+        fs::path logDirectory;  // 空なら DefaultLogDirectory()
         Level logLevel = Level::Info;
         bool hasLogLevel = false;
     };
 
     // --- コマンドライン ---
 
-    // 10 進の整数。範囲外・数でなければ std::nullopt
-    std::optional<uint32_t> ParseCount(std::wstring_view text, uint32_t maximum) {
+    // 10 進の整数。範囲外・数でなければ nullopt
+    optional<uint32_t> ParseCount(std::wstring_view text, uint32_t maximum) {
         uint32_t value = 0;
         const std::string utf8 = ToUtf8(text);
         const auto [end, error] = std::from_chars(utf8.data(), utf8.data() + utf8.size(), value);
-        if (error != std::errc{} || end != utf8.data() + utf8.size() || value > maximum) return std::nullopt;
+        if (error != std::errc{} || end != utf8.data() + utf8.size() || value > maximum)
+            return nullopt;
+
         return value;
     }
 
     // "yaw,pitch,距離"(小数でよい)。距離は正
-    std::optional<render::OrbitCameraState> ParseCamera(std::wstring_view text) {
+    optional<render::OrbitCameraState> ParseCamera(std::wstring_view text) {
         const std::string utf8 = ToUtf8(text);
         std::array<float, 3> values{};
         const char* cursor = utf8.data();
         const char* end = utf8.data() + utf8.size();
+
         for (size_t index = 0; index < values.size(); ++index) {
             const auto [next, error] = std::from_chars(cursor, end, values[index]);
-            if (error != std::errc{}) return std::nullopt;
+            if (error != std::errc{})
+                return nullopt;
             const bool last = index + 1 == values.size();
-            if (last ? next != end : (next == end || *next != ',')) return std::nullopt;
+            if (last ? next != end : (next == end || *next != ','))
+                return nullopt;
+
             cursor = next + 1;
         }
-        if (!(values[2] > 0.0f)) return std::nullopt;
+
+        if (!(values[2] > 0.0f))
+            return nullopt;
+
         render::OrbitCameraState camera;
         camera.yawDegrees = values[0];
         camera.pitchDegrees = values[1];
         camera.distance = values[2];
+
         return camera;
     }
 
     // 表示の引数(--view・--camera・--screenshot)
-    std::expected<void, std::string> ParseViewOption(std::wstring_view argument, std::wstring_view text,
-                                                     frame::FrameLoopOptions& loop) {
+    expected<void, std::string> ParseViewOption(std::wstring_view argument, std::wstring_view text,
+                                                frame::FrameLoopOptions& loop) {
         if (argument == L"--screenshot") {
             loop.screenshotPath = text;
             return {};
         }
+
         if (argument == L"--view") {
-            if (render::ParseDebugViewMode(ToUtf8(text), loop.view.mode)) return {};
-            return std::unexpected(std::format("--view の値が不正: {}(volume・mip・slice)", ToUtf8(text)));
+            if (render::ParseDebugViewMode(ToUtf8(text), loop.view.mode))
+                return {};
+            return unexpected(format("--view の値が不正: {}(volume・mip・slice)", ToUtf8(text)));
         }
+
         const auto camera = ParseCamera(text);
-        if (!camera) return std::unexpected(std::format("--camera の値が不正: {}(例: 35,25,150)", ToUtf8(text)));
+        if (!camera)
+            return unexpected(format("--camera の値が不正: {}(例: 35,25,150)", ToUtf8(text)));
+
         loop.camera = *camera;
+
         return {};
     }
 
@@ -101,103 +118,121 @@ namespace {
     constexpr uint32_t MAX_TARGET_FPS = 1000;
 
     // フレームのループの値つきの引数(--frames・--latency・--target-fps・--sim-load・--sim-split)
-    std::expected<void, std::string> ParseFrameLoopCount(std::wstring_view argument, std::wstring_view text,
-                                                         frame::FrameLoopOptions& loop) {
+    expected<void, std::string> ParseFrameLoopCount(std::wstring_view argument, std::wstring_view text,
+                                                    frame::FrameLoopOptions& loop) {
         const uint32_t maximum = argument == L"--latency"      ? 3u
                                  : argument == L"--target-fps" ? MAX_TARGET_FPS
                                  : argument == L"--sim-load"   ? sim::PROBE_BUSY_ITERATIONS_LIMIT
                                  : argument == L"--sim-split"  ? sim::PROBE_MAX_BUSY_PIECES
                                                                : UINT32_MAX;
         const auto value = ParseCount(text, maximum);
+
         if (!value || (argument == L"--latency" && *value < 2) || (argument == L"--sim-split" && *value == 0) ||
             (argument == L"--target-fps" && *value < MIN_TARGET_FPS)) {
-            return std::unexpected(std::format("{} の値が不正: {}", ToUtf8(argument), ToUtf8(text)));
+            return unexpected(format("{} の値が不正: {}", ToUtf8(argument), ToUtf8(text)));
         }
-        if (argument == L"--frames") loop.frameLimit = *value;
-        if (argument == L"--latency") loop.maxFrameLatency = *value;
-        if (argument == L"--target-fps") loop.targetFps = *value;
-        if (argument == L"--sim-load") loop.simLoad = *value;
-        if (argument == L"--sim-split") loop.simSplit = *value;
+
+        if (argument == L"--frames")
+            loop.frameLimit = *value;
+
+        if (argument == L"--latency")
+            loop.maxFrameLatency = *value;
+
+        if (argument == L"--target-fps")
+            loop.targetFps = *value;
+
+        if (argument == L"--sim-load")
+            loop.simLoad = *value;
+
+        if (argument == L"--sim-split")
+            loop.simSplit = *value;
+
         return {};
     }
 
     // フレームのループの値なしの引数。当てはまらなければ false
     bool ParseFrameLoopFlag(std::wstring_view argument, frame::FrameLoopOptions& loop) {
-        if (argument == L"--no-vsync") {
+        if (argument == L"--no-vsync")
             loop.vsync = false;
-        } else if (argument == L"--auto-click") {
+        else if (argument == L"--auto-click")
             loop.autoClick = true;
-        } else if (argument == L"--warp") {
+        else if (argument == L"--warp")
             loop.adapter = gpu::AdapterKind::Warp;
-        } else if (argument == L"--render-normal") {
+        else if (argument == L"--render-normal")
             loop.renderHighPriority = false;
-        } else {
+        else
             return false;
-        }
+
         return true;
     }
 
-    std::expected<Options, std::string> ParseOptions(std::span<wchar_t*> arguments) {
+    expected<Options, std::string> ParseOptions(span<wchar_t*> arguments) {
         Options options;
         for (size_t i = 1; i < arguments.size(); ++i) {
             const std::wstring_view argument = arguments[i];
             const bool hasValue = i + 1 < arguments.size();
-            if (argument == L"--caps") {
+            if (argument == L"--caps")
                 options.runCaps = true;
-            } else if (ParseFrameLoopFlag(argument, options.frameLoop)) {
+            else if (ParseFrameLoopFlag(argument, options.frameLoop))
                 continue;
-            } else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--target-fps" ||
-                        argument == L"--sim-load" || argument == L"--sim-split") &&
-                       hasValue) {
+            else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--target-fps" ||
+                      argument == L"--sim-load" || argument == L"--sim-split") &&
+                     hasValue) {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
-                if (!parsed) return std::unexpected(parsed.error());
+                if (!parsed)
+                    return unexpected(parsed.error());
             } else if ((argument == L"--view" || argument == L"--camera" || argument == L"--screenshot") && hasValue) {
                 const auto parsed = ParseViewOption(argument, arguments[++i], options.frameLoop);
-                if (!parsed) return std::unexpected(parsed.error());
-            } else if (argument == L"--record" && hasValue) {
+                if (!parsed)
+                    return unexpected(parsed.error());
+            } else if (argument == L"--record" && hasValue)
                 options.frameLoop.recordPath = arguments[++i];
-            } else if (argument == L"--replay" && hasValue) {
+            else if (argument == L"--replay" && hasValue)
                 options.frameLoop.replayPath = arguments[++i];
-            } else if (argument == L"--log-dir" && hasValue) {
+            else if (argument == L"--log-dir" && hasValue)
                 options.logDirectory = arguments[++i];
-            } else if (argument == L"--log-level" && hasValue) {
+            else if (argument == L"--log-level" && hasValue) {
                 const std::string name = ToUtf8(arguments[++i]);
                 options.hasLogLevel = ParseLevel(name, options.logLevel);
-                if (!options.hasLogLevel) return std::unexpected(std::format("知らないログの重大度: {}", name));
-            } else {
-                return std::unexpected(std::format("知らない引数: {}", ToUtf8(argument)));
-            }
+                if (!options.hasLogLevel)
+                    return unexpected(format("知らないログの重大度: {}", name));
+            } else
+                return unexpected(format("知らない引数: {}", ToUtf8(argument)));
         }
+
         return options;
     }
 
     // --- 本体 ---
 
-    int Run(std::span<wchar_t*> arguments) {
+    int Run(span<wchar_t*> arguments) {
         const auto options = ParseOptions(arguments);
         Logger& logger = GetLogger();
         if (!options) {
             Log(Channel::Core, Level::Error, "{}(使い方は main.cpp の先頭)", options.error());
             return 2;
         }
-        if (options->hasLogLevel) logger.SetMinLevel(options->logLevel);
 
-        const std::filesystem::path logDirectory =
-            options->logDirectory.empty() ? DefaultLogDirectory() : options->logDirectory;
-        if (const auto logFile = OpenLogFile(logger, logDirectory)) {
+        if (options->hasLogLevel)
+            logger.SetMinLevel(options->logLevel);
+
+        const fs::path logDirectory = options->logDirectory.empty() ? DefaultLogDirectory() : options->logDirectory;
+        if (const auto logFile = OpenLogFile(logger, logDirectory))
             Log(Channel::Core, Level::Info, "Bicameral Engine  ログ: {}", ToUtf8(logFile->wstring()));
-        } else {
+        else
             Log(Channel::Core, Level::Warning, "ログのファイルなしで続ける: {}", logFile.error());
-        }
 
-        if (options->runCaps) return RunCapsProbe();
+        if (options->runCaps)
+            return RunCapsProbe();
+
         return frame::RunFrameLoop(options->frameLoop);
     }
 
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(span(argv, static_cast<size_t>(argc)));
     bicameral::SingletonFinalizer::Finalize();  // ログは最初に作られるので最後に壊れる(作った順の逆)
+
     return exitCode;
 }

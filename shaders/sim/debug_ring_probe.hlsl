@@ -11,7 +11,9 @@ cbuffer ProbeConstants : register(b0) {
 
 [numthreads(64, 1, 1)] void Main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t thread = dispatchThreadId.x;
-    if (thread >= printThreadCount) return;
+    if (thread >= printThreadCount)
+        return;
+
     const int32_t negative = -(int32_t)thread - 1;
     const uint64_t large = ((uint64_t)thread << 40) | 0xABCDu;
     const int64_t signed64 = -((int64_t)thread << 33) - 7;

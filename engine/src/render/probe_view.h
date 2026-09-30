@@ -11,6 +11,8 @@
 #include <expected>
 #include <string>
 
+#include "core/aliases.h"
+#include "gpu/com_ptr.h"
 #include "render/probe_view_constants.h"
 
 namespace bicameral::render {
@@ -31,8 +33,8 @@ namespace bicameral::render {
 
     class ProbeView {
     public:
-        [[nodiscard]] static std::expected<ProbeView, std::string> Create(ID3D12Device* device,
-                                                                          DXGI_FORMAT renderTargetFormat);
+        [[nodiscard]] static expected<ProbeView, std::string> Create(ID3D12Device* device,
+                                                                     DXGI_FORMAT renderTargetFormat);
 
         // PRESENT → RENDER_TARGET → 描く → PRESENT を記録する
         void Record(ID3D12GraphicsCommandList* list, const ProbeViewTarget& target,
@@ -41,8 +43,8 @@ namespace bicameral::render {
     private:
         ProbeView() = default;
 
-        Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSignature;
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_pipeline;
+        ComPtr<ID3D12RootSignature> m_rootSignature;
+        ComPtr<ID3D12PipelineState> m_pipeline;
     };
 
 }  // namespace bicameral::render

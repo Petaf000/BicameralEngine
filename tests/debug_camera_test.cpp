@@ -8,6 +8,7 @@
 #include <optional>
 #include <vector>
 
+#include "core/aliases.h"
 #include "core/singleton.h"
 #include "render/debug_camera.h"
 #include "render/debug_view_controller.h"
@@ -24,7 +25,9 @@ namespace {
     int failureCount = 0;
 
     void Expect(bool condition, const char* text, int line) {
-        if (condition) return;
+        if (condition)
+            return;
+
         std::printf("FAILED line %d: %s\n", line, text);
         ++failureCount;
     }
@@ -41,14 +44,18 @@ namespace {
     };
 
     // 世界の点 → 画面の画素(RayThroughPixel の逆。right・up・forward は直交している)。カメラの後ろ・画面の外なら無し
-    std::optional<Pixel> Project(const CameraBasis& basis, Vector3 point) {
+    optional<Pixel> Project(const CameraBasis& basis, Vector3 point) {
         const Vector3 offset = point - basis.position;
         const float depth = Dot(offset, basis.forward);
-        if (depth <= 0.0f) return std::nullopt;
+        if (depth <= 0.0f)
+            return nullopt;
+
         const float scale = basis.orthographic ? 1.0f : depth;
         const float u = Dot(offset, basis.right) / Dot(basis.right, basis.right) / scale;
         const float v = Dot(offset, basis.up) / Dot(basis.up, basis.up) / scale;
-        if (std::abs(u) >= 1.0f || std::abs(v) >= 1.0f) return std::nullopt;
+        if (std::abs(u) >= 1.0f || std::abs(v) >= 1.0f)
+            return nullopt;
+
         return Pixel{.x = (u + 1.0f) * 0.5f * WIDTH, .y = (1.0f - v) * 0.5f * HEIGHT};
     }
 
@@ -66,6 +73,7 @@ namespace {
         const auto pick = [&](float x, float y) {
             return PickSliceCell(RayThroughPixel(basis, x, y, WIDTH, HEIGHT), 2, 32, GRID_SIZE);
         };
+
         const auto center = pick(WIDTH * 0.5f + 0.5f, HEIGHT * 0.5f + 0.5f);
         EXPECT(center && *center == (CellCoordinate{.x = 32, .y = 32, .z = 32}));
         const auto right = pick(WIDTH * 0.5f + 100.0f, HEIGHT * 0.5f);
@@ -88,13 +96,17 @@ namespace {
             for (uint32_t v = 0; v < GRID_SIZE; ++v) {
                 const CellCoordinate cell = CellOnSlice(axis, 20, u, v);
                 const auto pixel = Project(basis, CellCenter(cell));
-                if (!pixel) continue;
+                if (!pixel)
+                    continue;
+
                 ++result.checked;
                 const auto picked =
                     PickSliceCell(RayThroughPixel(basis, pixel->x, pixel->y, WIDTH, HEIGHT), axis, 20, GRID_SIZE);
-                if (picked && *picked == cell) ++result.matched;
+                if (picked && *picked == cell)
+                    ++result.matched;
             }
         }
+
         return result;
     }
 
@@ -104,6 +116,7 @@ namespace {
             uint32_t axis;
             OrbitCameraState camera;
         };
+
         const std::vector<Case> cases = {
             {.axis = 2, .camera = {.yawDegrees = 0.0f, .pitchDegrees = 0.0f, .distance = 80.0f}},
             {.axis = 2, .camera = {.yawDegrees = 25.0f, .pitchDegrees = 20.0f, .distance = 120.0f}},
@@ -114,6 +127,7 @@ namespace {
             {.axis = 1,
              .camera = {.yawDegrees = 35.0f, .pitchDegrees = -60.0f, .distance = 150.0f, .orthographic = true}},
         };
+
         for (const Case& test : cases) {
             const RoundTrip result = PickEverySliceCell(test.axis, test.camera);
             EXPECT(result.checked > GRID_SIZE * GRID_SIZE / 2);  // 断面の半分以上が画面に入る置き方
@@ -163,13 +177,13 @@ namespace {
         const DebugViewSettings& settings = controller.Settings();
         EXPECT(settings.mode == DebugViewMode::Slice && settings.sliceAxis == 0 && settings.slicePosition == 24);
         EXPECT(!settings.showActiveBlocks && !settings.logarithmic);
-        for (int index = 0; index < 10; ++index) {
+        for (int index = 0; index < 10; ++index)
             (void)controller.HandleInput(std::vector{Key('Q', true)}, WIDTH, HEIGHT);
-        }
+
         EXPECT(controller.Settings().slicePosition == 0);
-        for (int index = 0; index < 10; ++index) {
+        for (int index = 0; index < 10; ++index)
             (void)controller.HandleInput(std::vector{Key('E', true)}, WIDTH, HEIGHT);
-        }
+
         EXPECT(controller.Settings().slicePosition == GRID_SIZE - 1);
 
         // z = 32 の断面で真ん中を左クリック → (32, 32, 32) をつつく。右ドラッグは回るだけ(つつかない)
@@ -188,6 +202,7 @@ namespace {
             {.kind = InputKind::ButtonUp, .button = PointerButton::Right, .x = 200, .y = 100},
             {.kind = InputKind::PointerMove, .x = 400, .y = 100},
         };
+
         EXPECT(front.HandleInput(drag, WIDTH, HEIGHT).empty());
         EXPECT(std::abs(front.Camera().State().yawDegrees - -30.0f) <
                1e-3f);  // 100 px × 0.3°(離した後の動きは効かない)
@@ -209,7 +224,10 @@ int main() {
     TestPickMisses();
     TestCameraLimits();
     TestController();
-    if (failureCount == 0) std::printf("debug_camera_test: OK\n");
+    if (failureCount == 0)
+        std::printf("debug_camera_test: OK\n");
+
     SingletonFinalizer::Finalize();
+
     return failureCount == 0 ? 0 : 1;
 }
