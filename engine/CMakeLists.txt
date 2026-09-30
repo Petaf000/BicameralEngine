@@ -40,6 +40,15 @@ if(BICAMERAL_GPU_VALIDATION)
   target_compile_definitions(bicameral_gpu PRIVATE BICAMERAL_GPU_VALIDATION=1)
 endif()
 
+# --- reaction: 反応表のベイクと 1 セルの評価の CPU リファレンス(02。T-0014)。GPU を知らない(CPU だけのテストがある)---
+# 評価の本体は shaders/common/reaction.hlsli(HLSL と共通)。浮動小数点は禁止(engine/src/sim は検査の対象)。
+add_library(bicameral_reaction STATIC
+  src/sim/reaction_table.cpp
+  src/sim/reaction_test_table.cpp
+)
+target_include_directories(bicameral_reaction PUBLIC src)
+target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
+
 # --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
@@ -48,7 +57,7 @@ add_library(bicameral_sim STATIC
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
-target_link_libraries(bicameral_sim PUBLIC bicameral_gpu)
+target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction)
 
 # --- save: セーブ・再生ファイルの読み書き(15。T-0086)。CPU だけ(GPU を知らない。CPU だけのテストがある)---
 # コマンドの形は sim/command.h(ヘッダだけ)を使う。

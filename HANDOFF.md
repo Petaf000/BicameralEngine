@@ -1,38 +1,43 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0088 トレースの範囲を実行中に切り替える — 完了
+最終更新: 2026-10-01 / チケット: T-0014 原理: 化学(1 セルの反応の核)— 完了(ユーザーの指示で区切った)
 
 ## 状態(3 行以内)
-- 連鎖のトレースの範囲を実行中に変えられる(`ProbeSim::SetTraceFilter`、次のフレームから効く。容量は作った時に固定)。窓で T を押すと、
-  最後につついたセルの周り ±8 を次の刻みから 60 刻み追って exe の横の traces/ に木を書く。M1 のデバッグ道具はここまで。
-- 次は T-0014 原理: 化学(チケットを ROADMAP と 02 §3 から作る)。テスト 30/30。
+- 1 セルの反応の核ができた: 試験の表(物質 7・規則 5)を整数でベイクし、`shaders/common/reaction.hlsli` の RxEvaluateCell で評価。
+  元素とエネルギーが 36,000 刻みで完全に保存、取り合い・並び順・遅い反応・吸熱の上限もテスト済み。GPU(HW・WARP)と CPU がビット一致。
+- 量は物質量(1 = 1 µmol。ADR-0012、ユーザー決定)。T-0014 を 2 つに分けた(世界への組み込みは T-0089)。テスト 33/33。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(47 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(61)。
-- `job.py test` → 30/30(分けて走らせる。下の注意)。`gpu_probe_trace`(_warp)に `TestRuntimeRange`(無効 → A → B → 無効で、前後がそれぞれの範囲・CPU の予想と一致)。
-- `job.py run -Preset release -- --frames 200 --auto-click --auto-trace` → 「トレースを始める: セル (21, 42, 32) ±8・刻み [11, 71)」→ bin/traces/trace-t11-cell21_42_32.txt(約 5.5 万件、60 刻み)。
-  debug(debug layer・GBV)でも exit 0。`--trace` と一緒だと T は「集めている途中」で無視される。
-- `job.py run -Preset release -Exe gpu_conduct_bench -- --trace-idle` → 容量を確保して無効でも伝導の費用は同じ(docs/perf.md)。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(51 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(67)。
+- `job.py test` → 33/33(分けて走らせる。下の注意)。新: `reaction`(CPU)・`gpu_reaction` / `gpu_reaction_warp`(4096 セル × 400 刻み、要約 61fce95a6b6c9e01 が CPU と同じ)。
+- `job.py run -Exe reaction_test` → 閉じた木箱 600 K が 10〜30 刻みで燃えて 1718 K、Boudouard が 2000 K → 777 K で止まる様子がログに出る。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- T の半径(±8)と刻みの数(60)は定数(frame_loop.cpp の TRACE_KEY_*)。窓の中で変える手段・画面の表示は無い(ログだけ)。人の手で T を押したのは未確認(--auto-trace だけ)。
-- PIX での Work Graphs の見え方は公開の資料だけで調べた(開発機の PIX では未確認。16 §4)。
-- 段ごとのハッシュ・`--replay --bisect` の引数は無い(16 §3 の「最初の形」まで)。
-- (前から)バッキングメモリの使った量は数えられない。人の手でのマウスとキーの操作は未確認(platform/window.cpp)。基準画像はまだ無い。
-- (前から)ボリューム表示のときシミュの GPU 時間が 0.28 → 0.95 ms/投入に伸びる(描画と重なるため)。伝導の単位の約 40 µs の固定費の内訳は未確認。
-- (前から)伝導の Compute 版との比較(D-302)はしていない。予定の印は下位 32bit(T-0018 で置き換え)。適用の単位は 1 スレッド(06 §3)。セーブは未着手。
-- (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。AMD は未確認。窓の大きさの変更・最小化・DPI は人の手で試していない。
+- イベント(音・光)の出力・Work Graphs の段・伝導との組み合わせは T-0089。成分は 8 個まで(溢れは FX_ASSERT で止める)。
+- 試験の表の熱分解は発熱(値の都合)なので、閉じた木箱は O2 が尽きても熱分解で 1718 K まで上がる。ゲームの中身ではない(T-0002)。
+- 吸熱の上限(熱の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)は陽的な評価の行き過ぎを止める応急の形。R-REACT-1 で見直す。逆反応・平衡は未定(T-0002 / M2)。
+- 反応の段の費用(ms/刻み)は未計測(T-0089 で世界に入れてから)。
+- (前から)PIX での Work Graphs の見え方は未確認。段ごとのハッシュ・`--replay --bisect` は無い。バッキングメモリの使った量は数えられない。
+- (前から)ボリューム表示のときシミュの GPU 時間が伸びる。伝導の Compute 版との比較(D-302)はしていない。セーブは未着手。AMD は未確認。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 範囲は slot ごとのアップロードに書き、変わったフレームだけ見出しへ写す(毎フレームは写さない)。どの範囲で記録したかは slot ごとに覚えて読む。
-- T の範囲は「次に投げるフレームの最初の丸ごとの刻み」(`NextApplyTick`)から。途中まで記録した刻みは前半が欠けるので含めない。
-- GPU の範囲は 1 つなので、集めている途中の T は無視する。トレースは View なので再生中も使える。起動時の `--trace` も範囲の刻みが終わったら書く。
-- ADR は書いていない(道具の実装の詳細。16 §1.3 に書いた)。
+- ADR-0012: セルと物の部品の成分は物質量(uint64、1 = 1 µmol)。質量は導出値。04 §2・units.hlsli・05 §3 を直した。
+- T-0014 を分けた: T-0014 = 1 セルの核(完了)/ T-0089 = 仮の世界に組み込む(ROADMAP・NEXT に追加)。試験の表は「現実に近い小さな表」。
+- 規則 5 本目に Boudouard(吸熱)を足した(吸熱の取り合いを試すため。ユーザーに見せた案は 4 本)。
+- 吸熱の規則が 1 刻みに使える熱は今の熱の 1/8 まで(02 §3.1)。端数はカウンタ型の乱数で確率的に丸める(鍵は規則の名前のハッシュ)。
 
 ## 次にやること
-NEXT.md の先頭(T-0014 原理: 化学。まずチケットを docs/plan/ROADMAP.md と docs/design/02-reaction-system.md §3 から作る)。
+NEXT.md の先頭(T-0089 化学を仮の世界に組み込む。チケット docs/tickets/T-0089-principle-chemistry-world.md の完了条件を詰めてから)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **反応の核**(T-0014、02 §3.1): 評価は `shaders/common/reaction.hlsli`(テンプレートの Table 型で表を読む。C++ は `sim::ReactionTableView`、
+  HLSL は `reaction_cells.hlsl` の `GpuReactionTable`)。ベイクは `sim/reaction_table.cpp`、試験の表は `sim/reaction_test_table.cpp`(ライブラリ bicameral_reaction。GPU を知らない)。
+  表の構造体の大きさは reaction_table.h の static_assert(RxSpecies 24・RxRule 80・RxCell 112 バイト)。HLSL の構造体を変えたら揃える。
+- **HLSL の `?:` は構造体を返せない**(「conditional operator only supports results with numeric scalar...」)。if / else で。
+- **WARP で GPU-based validation を有効にすると、大きなシェーダー(reaction_cells)の計装と JIT が 15 分を超えて終わらない。** gpu_reaction_test は WARP だけ GBV を切る。
+  WARP は最初の Dispatch で JIT に約 8 秒かかる(以後は 20 ms)。
+- 小数点のリテラル(`1e6` も)と `frac`・`floor`・`exp` などの名前はシミュのソースで禁止(浮動小数点の検査)。100 万は `1000000` と書く。
+- release では FX_ASSERT が空になるので、assert の中だけで使う局所変数を作ると C4189(未使用)になる。式を FX_ASSERT の中に書く。
 - **2026-09-30〜10-01 にコーディング規約を変えた(docs/style.md)。** 全コードを書き直し済み(ビルド・tidy 警告なし・テスト 28/28・archmap OK)。
   - 中身が 1 行の if / else / ループは `{}` なしで改行 + 字下げ(同じ行に書かない)。連鎖は分岐ごと(1 行の分岐だけ `{}` なし)。
     clang-format は `{}` を付け外ししない(RemoveBracesLLVM は入れ子の if を 1 文と見て外すので使わない)。

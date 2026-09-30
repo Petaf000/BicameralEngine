@@ -168,6 +168,17 @@ views:
       - { id: probetrace, group: simlib, label: "probe_trace<br/>刻みごとの木・CPU の予想・食い違いの場所",
           code: "engine/src/sim/probe_trace.cpp::FormatProbeTrace", ticket: T-0087, doc: docs/design/16-debug-test.md,
           note: "--trace でファイルへ。FirstDivergentTick → FindCellDivergence(16 §3 の最初の形)" }
+      - { id: reactionhlsl, group: shared, label: "reaction.hlsli<br/>1 セルの反応: 温度・進行度・取り合い・更新",
+          code: "shaders/common/reaction.hlsli::RxEvaluateCell", ticket: T-0014, doc: docs/design/02-reaction-system.md,
+          note: "HLSL と C++ で共通。量は物質量(µmol。ADR-0012)。エネルギーの合計は変えない。端数は確率的に丸める" }
+      - { id: reactiontable, group: simlib, label: "BakeReactionTable<br/>定義 → 整数の表(元素の釣り合いの検査)",
+          code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014, doc: docs/design/02-reaction-system.md,
+          note: "Arrhenius を温度 1 K ごとの表に(整数の ln・exp。R7)。試験の表は reaction_test_table(物質 7・規則 5)" }
+      - { id: reactiontest, group: tests, label: "reaction_test<br/>ベイクの検査・保存則・取り合い・並び・遅い反応",
+          code: "tests/reaction_test.cpp::TestClosedCellBurn", ticket: T-0014 }
+      - { id: gpureactiontest, group: tests, label: "gpu_reaction_test<br/>セル 4096 × 400 刻みを GPU と CPU で比べる",
+          code: "tests/gpu_reaction_test.cpp::CompareSegment", ticket: T-0014,
+          note: "shaders/sim/reaction_cells.hlsl(1 スレッド = 1 セル)。WARP は GBV を切る(計装が終わらない)" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -217,6 +228,12 @@ views:
       - [gpudevice, log, "debug layer の報告"]
       - [immediate, dred, "デバイスが失われたら"]
       - [fixed, debugringhlsl, "FX_ASSERT"]
+      - [reactionhlsl, fixed]
+      - [reactiontable, fixed, "ベイクも整数(R7)"]
+      - [reactiontable, reactionhlsl, "RxSpecies・RxRule・速度の表"]
+      - [reactiontest, reactiontable]
+      - [gpureactiontest, reactionhlsl, "GPU(.cso)と CPU で同じ関数"]
+      - [gpureactiontest, immediate, "compute キュー"]
       - [debugringhlsl, debugring, "読み戻し(フレームの終わり)"]
       - [debugring, log, "Channel::Gpu / WorkGraph"]
       - [ringtest, debugring]
@@ -292,7 +309,9 @@ views:
       - { id: transport, group: sim, label: "3 輸送(熱・気体・水・魔素)<br/>測って安い方(D-302)",
           ticket: T-0005, code: "shaders/common/probe_sim.hlsli::ProbeConductValue", doc: docs/design/07-transport.md,
           note: "M1 はクリックした点から熱が伝わるだけ(材質 1 つ・断熱の箱。Work Graph の版だけ。Compute との比較は輸送の本物の段で)" }
-      - { id: react, group: sim, status: planned, label: "4 反応<br/>Work Graphs", doc: docs/design/02-reaction-system.md }
+      - { id: react, group: sim, label: "4 反応<br/>1 セルの評価(Work Graphs への組み込みは T-0089)",
+          code: "shaders/common/reaction.hlsli::RxEvaluateCell", ticket: T-0014, doc: docs/design/02-reaction-system.md,
+          note: "T-0014 は核(試験の表・CPU とビット一致)。仮の世界の段にするのは T-0089" }
       - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
           doc: docs/design/08-bodies-physics.md, note: "研究 R-PHYS" }
       - { id: creatures, group: sim, status: planned, label: "6 生き物", doc: docs/design/09-creatures-animation.md }
@@ -338,8 +357,9 @@ views:
     nodes:
       - { id: luau, group: tool, status: planned, label: "反応則・生き物・進行を書く<br/>(Luau)",
           doc: docs/design/13-scripting-game-model.md }
-      - { id: bake, group: tool, status: planned, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
-          doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)" }
+      - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
+          code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014,
+          doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。今は C++ に手で書いた定義から(Luau は M2)" }
       - { id: table, group: rt, status: planned, label: "反応表・物質の表<br/>(版つきのバイナリ)", ticket: T-0002 }
       - { id: gen, group: rt, status: planned, label: "決定的な生成(シード)+ 差分", doc: docs/design/05-world-data.md }
       - { id: vram, group: rt, status: planned, label: "多重解像度の疎な木<br/>(VRAM 常駐の世界)",

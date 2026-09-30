@@ -22,6 +22,10 @@ add_executable(replay_file_test replay_file_test.cpp)
 target_link_libraries(replay_file_test PRIVATE bicameral_save)
 add_test(NAME replay_file COMMAND replay_file_test)
 
+add_executable(reaction_test reaction_test.cpp)
+target_link_libraries(reaction_test PRIVATE bicameral_reaction bicameral_core)
+add_test(NAME reaction COMMAND reaction_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
@@ -47,6 +51,11 @@ endfunction()
 bicameral_add_gpu_test(gpu_fixed_test)
 bicameral_add_gpu_test_case(gpu_fixed gpu_fixed_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_fixed_warp gpu_fixed_test warp --warp --queue compute)
+
+bicameral_add_gpu_test(gpu_reaction_test)
+target_link_libraries(gpu_reaction_test PRIVATE bicameral_reaction)
+bicameral_add_gpu_test_case(gpu_reaction gpu_reaction_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --queue compute)
 
 # 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
 # 走らせ方: job.py run -Preset release -Exe gpu_fixed_bench
