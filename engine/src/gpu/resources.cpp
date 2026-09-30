@@ -65,7 +65,7 @@ namespace bicameral::gpu {
         return buffer;
     }
 
-    bool ReadBuffer(ID3D12Resource* readback, span<std::byte> destination) {
+    bool ReadBuffer(ID3D12Resource* readback, std::span<std::byte> destination) {
         const D3D12_RANGE readRange{.Begin = 0, .End = destination.size()};
         void* mapped = nullptr;
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, readback->Map(0, &readRange, &mapped)))
@@ -147,7 +147,7 @@ namespace bicameral::gpu {
         ComPtr<ID3DBlob> blob;
         ComPtr<ID3DBlob> error;
         if (FAILED(D3D12SerializeVersionedRootSignature(&desc, &blob, &error))) {
-            const string_view message = error ? static_cast<const char*>(error->GetBufferPointer()) : "";
+            const std::string_view message = error ? static_cast<const char*>(error->GetBufferPointer()) : "";
             Log(Channel::Gpu, Level::Error, "ルート署名をシリアライズできない: {}", message);
 
             return nullptr;
@@ -164,7 +164,7 @@ namespace bicameral::gpu {
     }
 
     ComPtr<ID3D12PipelineState> CreateComputePipeline(ID3D12Device* device, ID3D12RootSignature* rootSignature,
-                                                      span<const std::byte> bytecode) {
+                                                      std::span<const std::byte> bytecode) {
         const D3D12_COMPUTE_PIPELINE_STATE_DESC desc{
             .pRootSignature = rootSignature,
             .CS = {.pShaderBytecode = bytecode.data(), .BytecodeLength = bytecode.size()},
@@ -179,17 +179,17 @@ namespace bicameral::gpu {
 
     // --- シェーダーのファイル ---
 
-    expected<std::vector<std::byte>, std::string> LoadShader(string_view relativePath) {
+    std::expected<std::vector<std::byte>, std::string> LoadShader(std::string_view relativePath) {
         const fs::path path = ExecutableDirectory() / "shaders" / ToWide(relativePath);
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file)
-            return unexpected("シェーダーを開けない: " + ToUtf8(path.wstring()));
+            return std::unexpected("シェーダーを開けない: " + ToUtf8(path.wstring()));
 
         std::vector<std::byte> bytes(static_cast<size_t>(file.tellg()));
         file.seekg(0);
         file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         if (!file)
-            return unexpected("シェーダーを読めない: " + ToUtf8(path.wstring()));
+            return std::unexpected("シェーダーを読めない: " + ToUtf8(path.wstring()));
 
         return bytes;
     }

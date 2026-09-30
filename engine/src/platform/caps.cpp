@@ -27,12 +27,12 @@ namespace bicameral {
         // D3D_SHADER_MODEL_6_8 = 0x68 → "6.8"
         std::string ShaderModelName(D3D_SHADER_MODEL shaderModel) {
             const int value = static_cast<int>(shaderModel);
-            return format("{}.{}", (value >> 4) & 0xF, value & 0xF);
+            return std::format("{}.{}", (value >> 4) & 0xF, value & 0xF);
         }
 
         // RaytracingTier・MeshShaderTier は 10 倍表記(TIER_1_1 = 11)
         std::string TierName(int tier) {
-            return format("{}.{}", tier / 10, tier % 10);
+            return std::format("{}.{}", tier / 10, tier % 10);
         }
 
         // どの D3D12Core.dll が読み込まれたかを表示する。
@@ -102,8 +102,8 @@ namespace bicameral {
             // 0 で埋めて渡し、CheckFeatureSupport が書き込む(Tier の enum に 0 の値が無いのは SDK の定義による)
             // NOLINTNEXTLINE(bugprone-invalid-enum-default-initialization)
             D3D12_FEATURE_DATA_D3D12_OPTIONS21 options21{};
-            const HRESULT result =
-                device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options21, sizeof(options21));
+            const HRESULT result = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options21,
+                                                               sizeof(options21));
 
             if (FAILED(result)) {
                 Log(Channel::Platform, Level::Warning,
@@ -220,8 +220,9 @@ namespace bicameral {
             ++found;
         }
 
+        // WARP の前に、どのランタイムかを出しておく
         if (found == 0)
-            ReportRuntime();  // WARP の前に、どのランタイムかを出しておく
+            ReportRuntime();
 
         ReportWarp(factory.Get());
         if (found == 0) {

@@ -10,8 +10,6 @@
 #include <cstdint>
 #include <optional>
 
-#include "core/aliases.h"
-
 namespace bicameral::render {
 
     struct Vector3 {
@@ -87,8 +85,8 @@ namespace bicameral::render {
 
     // 断面(軸 axis = 0/1/2 の座標が plane のセルの面。面の真ん中 plane + 0.5 で交わりを取る)のうち、光線が当たるセル。
     // 面と平行・カメラの後ろ・格子の外なら無し
-    [[nodiscard]] optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane,
-                                                         uint32_t gridSize);
+    [[nodiscard]] std::optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane,
+                                                              uint32_t gridSize);
 
     // 断面の上の (u, v) のセル(u, v は軸 axis 以外の 2 つの軸を x → y → z の順に)
     [[nodiscard]] CellCoordinate CellOnSlice(uint32_t axis, uint32_t plane, uint32_t u, uint32_t v);

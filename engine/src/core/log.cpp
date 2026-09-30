@@ -12,15 +12,15 @@
 namespace bicameral {
     namespace {
 
-        constexpr std::array<string_view, static_cast<size_t>(Channel::Count)> CHANNEL_NAMES = {
+        constexpr std::array<std::string_view, static_cast<size_t>(Channel::Count)> CHANNEL_NAMES = {
             "core", "platform", "gpu", "workgraph", "sim", "reaction", "physics", "render", "audio", "tool",
         };
 
-        constexpr std::array<string_view, 6> LEVEL_NAMES = {
+        constexpr std::array<std::string_view, 6> LEVEL_NAMES = {
             "trace", "debug", "info", "warning", "error", "fatal",
         };
 
-        constexpr string_view LEVEL_LETTERS = "TDIWEF";
+        constexpr std::string_view LEVEL_LETTERS = "TDIWEF";
 
 #ifdef NDEBUG
         constexpr Level DEFAULT_MIN_LEVEL = Level::Info;
@@ -32,7 +32,7 @@ namespace bicameral {
 
     // --- 名前 ---
 
-    string_view ChannelName(Channel channel) {
+    std::string_view ChannelName(Channel channel) {
         const auto index = static_cast<size_t>(channel);
         if (index >= CHANNEL_NAMES.size())
             return "?";
@@ -40,7 +40,7 @@ namespace bicameral {
         return CHANNEL_NAMES[index];
     }
 
-    string_view LevelName(Level level) {
+    std::string_view LevelName(Level level) {
         const auto index = static_cast<size_t>(level);
         if (index >= LEVEL_NAMES.size())
             return "?";
@@ -56,7 +56,7 @@ namespace bicameral {
         return LEVEL_LETTERS[index];
     }
 
-    bool ParseLevel(string_view text, Level& level) {
+    bool ParseLevel(std::string_view text, Level& level) {
         for (size_t i = 0; i < LEVEL_NAMES.size(); ++i) {
             if (LEVEL_NAMES[i] != text)
                 continue;
@@ -71,15 +71,15 @@ namespace bicameral {
 
     // --- 整形 ---
 
-    string_view FileNameOnly(string_view path) {
+    std::string_view FileNameOnly(std::string_view path) {
         const size_t slash = path.find_last_of("/\\");
-        return slash == string_view::npos ? path : path.substr(slash + 1);
+        return slash == std::string_view::npos ? path : path.substr(slash + 1);
     }
 
     std::string FormatLogLine(const LogRecord& record, bool withLocation) {
         // チャンネル名の幅は最長の "workgraph" に合わせる(縦にそろうと目で追いやすい)
-        std::string line = format("[{:9.3f}] {} {:<9} | {}", record.elapsedSeconds, LevelLetter(record.level),
-                                  ChannelName(record.channel), record.message);
+        std::string line = std::format("[{:9.3f}] {} {:<9} | {}", record.elapsedSeconds, LevelLetter(record.level),
+                                       ChannelName(record.channel), record.message);
 
         if (withLocation) {
             std::format_to(std::back_inserter(line), "  ({}:{})", FileNameOnly(record.location.file_name()),
@@ -113,7 +113,7 @@ namespace bicameral {
         m_sinks.clear();
     }
 
-    void Logger::Write(Channel channel, Level level, string_view message, const std::source_location& location) {
+    void Logger::Write(Channel channel, Level level, std::string_view message, const std::source_location& location) {
         const chr::duration<double> elapsed = chr::steady_clock::now() - m_startTime;
         const LogRecord record{
             .channel = channel,

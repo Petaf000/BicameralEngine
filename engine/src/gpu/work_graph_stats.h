@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "common/work_graph_stats.hlsli"
-#include "core/aliases.h"
 #include "gpu/readback_ring.h"
 
 namespace bicameral::gpu {
@@ -28,8 +27,8 @@ namespace bicameral::gpu {
     struct GraphNodeLimits {
         std::string name;
         uint32_t maxOutputRecords = 0;  // 1 回の起動で出せる数(宣言した MaxRecords の合計。0 = 出さない)
-        uint32_t warnOutputRecords =
-            0;  // 1 回の起動の要求がこれ以上なら「上限に近い」(0 = 見ない。出す数が構造で決まるノード)
+        // 1 回の起動の要求がこれ以上なら「上限に近い」(0 = 見ない。出す数が構造で決まるノード)
+        uint32_t warnOutputRecords = 0;
         uint32_t maxRecursionDepth = 0;  // NodeMaxRecursionDepth(0 = 再帰しない)
     };
 
@@ -48,19 +47,26 @@ namespace bicameral::gpu {
     // --- 読み戻したもの ---
 
     struct GraphNodeCounters {
-        uint32_t launches = 0;
-        uint32_t inputRecords = 0;
-        uint32_t outputRecords = 0;
-        uint32_t refusedOutputs = 0;
-        uint32_t peakRequestedOutputs = 0;
-        uint32_t deepestRecursion = 0;
-        uint32_t refusedRecursions = 0;
+        // --- 数(足す)---
+        uint32_t launches = 0;       // 起動
+        uint32_t inputRecords = 0;   // 入力のレコード
+        uint32_t outputRecords = 0;  // 出力のレコード
+
+        // --- 出力の上限 ---
+        uint32_t refusedOutputs = 0;        // 上限を超えるので止めた出力
+        uint32_t peakRequestedOutputs = 0;  // 1 回の起動で求めた出力の最大
+
+        // --- 再帰の上限 ---
+        uint32_t deepestRecursion = 0;   // 再帰の深さの最大
+        uint32_t refusedRecursions = 0;  // 上限の深さで止めた再帰
+
         friend bool operator==(const GraphNodeCounters&, const GraphNodeCounters&) = default;
     };
 
     struct GraphStatsSnapshot {
         std::vector<GraphNodeCounters> nodes;  // layout.nodes と同じ数・順
         std::vector<uint32_t> gaugePeaks;      // layout.gauges と同じ数・順
+
         friend bool operator==(const GraphStatsSnapshot&, const GraphStatsSnapshot&) = default;
     };
 
@@ -97,8 +103,9 @@ namespace bicameral::gpu {
         // 同じ Warning(種類 × 番号)をもう一度ログに出すのは、この回数の Report() の後(毎フレームの Warning でログを埋めない)
         static constexpr uint64_t WARNING_REPEAT_REPORTS = 600;
 
-        [[nodiscard]] static expected<WorkGraphStats, std::string> Create(ID3D12Device* device, GraphStatsLayout layout,
-                                                                          uint32_t slotCount = 1);
+        [[nodiscard]] static std::expected<WorkGraphStats, std::string> Create(ID3D12Device* device,
+                                                                               GraphStatsLayout layout,
+                                                                               uint32_t slotCount = 1);
 
         // ルートの UAV(u1 space1)に渡すアドレス
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS GpuAddress() const { return m_ring.GpuAddress(); }
@@ -111,7 +118,7 @@ namespace bicameral::gpu {
         void RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot = 0) const;
 
         // slot のリストを GPU が終えた後に呼ぶ
-        [[nodiscard]] expected<GraphStatsSnapshot, std::string> Read(uint32_t slot = 0) const;
+        [[nodiscard]] std::expected<GraphStatsSnapshot, std::string> Read(uint32_t slot = 0) const;
 
         // 要約を Trace で、見つかった上限を Warning でログへ(同じものは WARNING_REPEAT_REPORTS 回に 1 回)。見つかったものを全部返す
         std::vector<GraphFinding> Report(const GraphStatsSnapshot& snapshot);
@@ -122,8 +129,8 @@ namespace bicameral::gpu {
         ReadbackRing m_ring;
         GraphStatsLayout m_layout;
         uint64_t m_reportCount = 0;
-        std::vector<uint64_t>
-            m_lastWarnedReport;  // (種類 × 番号)ごとに、最後にログに出した Report の番号 + 1(0 = まだ)
+        // (種類 × 番号)ごとに、最後にログに出した Report の番号 + 1(0 = まだ)
+        std::vector<uint64_t> m_lastWarnedReport;
     };
 
 }  // namespace bicameral::gpu

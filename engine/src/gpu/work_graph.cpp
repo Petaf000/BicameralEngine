@@ -4,7 +4,6 @@
 //   → SetProgram(最初は INITIALIZE)→ DispatchGraph
 #include "gpu/work_graph.h"
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
@@ -15,7 +14,7 @@ namespace bicameral::gpu {
     namespace {
 
         ComPtr<ID3D12StateObject> CreateStateObject(ID3D12Device5* device, ID3D12RootSignature* globalRootSignature,
-                                                    span<const std::byte> library, const std::wstring& name) {
+                                                    std::span<const std::byte> library, const std::wstring& name) {
             CD3DX12_STATE_OBJECT_DESC desc(D3D12_STATE_OBJECT_TYPE_EXECUTABLE);
             const CD3DX12_SHADER_BYTECODE bytecode(library.data(), library.size());
             desc.CreateSubobject<CD3DX12_DXIL_LIBRARY_SUBOBJECT>()->SetDXILLibrary(&bytecode);
@@ -33,17 +32,19 @@ namespace bicameral::gpu {
 
     }  // namespace
 
-    expected<WorkGraph, std::string> WorkGraph::Create(ID3D12Device5* device, ID3D12RootSignature* globalRootSignature,
-                                                       span<const std::byte> library, std::wstring_view programName) {
+    std::expected<WorkGraph, std::string> WorkGraph::Create(ID3D12Device5* device,
+                                                            ID3D12RootSignature* globalRootSignature,
+                                                            std::span<const std::byte> library,
+                                                            std::wstring_view programName) {
         const std::wstring name(programName);
         WorkGraph graph;
         graph.m_stateObject = CreateStateObject(device, globalRootSignature, library, name);
         if (!graph.m_stateObject)
-            return unexpected("ワークグラフの状態オブジェクトを作れない");
+            return std::unexpected("ワークグラフの状態オブジェクトを作れない");
 
         ComPtr<ID3D12StateObjectProperties1> stateProperties;
         if (FAILED(graph.m_stateObject.As(&stateProperties)) || FAILED(graph.m_stateObject.As(&graph.m_properties)))
-            return unexpected("状態オブジェクトから Work Graphs のプロパティを取れない(ランタイムが古い)");
+            return std::unexpected("状態オブジェクトから Work Graphs のプロパティを取れない(ランタイムが古い)");
 
         graph.m_programIdentifier = stateProperties->GetProgramIdentifier(name.c_str());
         graph.m_graphIndex = graph.m_properties->GetWorkGraphIndex(name.c_str());
@@ -56,7 +57,7 @@ namespace bicameral::gpu {
         if (graph.m_backingMemoryBytes > 0) {
             graph.m_backingMemory = CreateBuffer(device, graph.m_backingMemoryBytes, BufferKind::UnorderedAccess);
             if (!graph.m_backingMemory)
-                return unexpected("ワークグラフの裏のメモリを確保できない");
+                return std::unexpected("ワークグラフの裏のメモリを確保できない");
         }
 
         Log(Channel::WorkGraph, Level::Info, "ワークグラフ {}: 裏のメモリ {} バイト(最小 {})", ToUtf8(name),

@@ -1,6 +1,6 @@
 # コーディング規約(C++ / HLSL)
 
-2026-09-29 にユーザーが決めた流儀(T-0006)。2026-09-30 に変更: { } なしの if は改行して字下げ・標準ライブラリと ComPtr の短い名前・処理の区切りの空行。見た目は `.clang-format`、名前は `.clang-tidy` が機械的に確かめる。
+2026-09-29 にユーザーが決めた流儀(T-0006)。2026-09-30〜10-01 に変更: { } なしの if は改行して字下げ・入れ子の名前空間と ComPtr の短い名前・処理の区切りの空行・宣言を折り返さない・構造体の欄をまとまりに分ける。見た目は `.clang-format`、名前は `.clang-tidy` が機械的に確かめる。
 ここに無いことが出てきたら、ユーザーに聞いてから足す。
 
 ## 見た目(clang-format が揃える)
@@ -31,6 +31,13 @@
 - `{ }` を付けるもの: 中身が 2 行以上(入れ子の if や、折り返した 1 文も 2 行と数える)・中身にコメントがある・
   条件が複数行に渡る(条件の続きと中身の字下げが同じで見分けにくいため)。
 - clang-format は同じ行の if を改行するだけで、`{ }` の付け外しはしない(手で守る。.clang-format・.clang-tidy の注記)。
+- **宣言・代入は `=` の直後で改行しない。** 長いときは右辺の引数の中で折り返す(clang-format の PenaltyBreakAssignment)。
+- **行末のコメントで 1 行に収まらないときは、コメントを上の行に書く**(コメントのせいで宣言が 2 行に割れないように):
+  ```cpp
+  // 1 セルの長さあたりの濃さ(最大の熱で。熱の 3 乗で薄くし、奥の熱い所が透けて見えるように)
+  static const float VOLUME_DENSITY = 0.25;
+  ```
+- `// clang-format off` の範囲(HLSL のノードの属性)も、同じ見た目(if の改行・`{ }`・空行)に手で揃える。
 - 日本語のコメントは自動で折り返さない(自分で切れ目を選んで改行する)。
 
 ## 名前
@@ -70,25 +77,42 @@
 - 3 行以上のまとまりの後に続く `{ }` 付きの if・ループの前。
 - 意味の違う処理の境目(準備 → 記録 → 投入 → 後片付け など)。同じことの繰り返し(構造体の欄を足す・同じ検査を並べる)は続けてよい。
 
+## 構造体・クラスの宣言
+- 欄(メンバー変数)とメソッドの宣言は、意味のまとまりごとに空行で分け、まとまりの頭に `// --- 〇〇 ---` を付ける:
+  ```hlsl
+  struct ViewConstants {
+      // --- 何をどこに描くか ---
+      uint32_t extraction;  // 読む抽出(0〜2)
+      float2 viewport;      // 描く大きさ(画素)
+      uint32_t flags;       // VIEW_FLAG_* の組み合わせ
+
+      // --- 表示の仕方 ---
+      uint32_t mode;           // VIEW_MODE_*
+      uint32_t sliceAxis;      // 断面の軸(0 = x・1 = y・2 = z)
+      uint32_t slicePosition;  // 断面のセルの番号(クリックがつつく面)
+      ...
+  };
+  ```
+- 名前だけで意味や単位が分からない欄には、行末に短いコメント(何か・単位・範囲)。
+- GPU と共有する並び(定数バッファ・ファイルの見出し)は並べ替えない。空行とコメントだけ足す。
+  クラスの欄を並べ替えるときは、コンストラクタの初期化の順も同じにする(破棄の順も変わるので、GPU の物の前後に注意)。
+
 ## 短い名前(長い修飾を書かない)
-- 標準ライブラリは `engine/src/core/aliases.h`(namespace bicameral の中)の短い名前で書く。使うファイルは `"core/aliases.h"` を include する。
+- 標準ライブラリの**入れ子の名前空間**は `engine/src/core/aliases.h`(namespace bicameral の中)の別名で書く。使うファイルは `"core/aliases.h"` を include する。
 
   | 書く | 元の名前 |
   |---|---|
   | `fs::` | `std::filesystem::` |
   | `rng::` / `views::` | `std::ranges::` / `std::views::` |
   | `chr::` | `std::chrono::` |
-  | `optional` `nullopt` `expected` `unexpected` `span` `string_view` `format` | `std::` を付けたもの |
 
-  ここに無い std の名前(`std::vector`・`std::string` など)は `std::` を付ける。何でも短くすると、どこから来た名前か分からなくなるため。
-  あちこちで使うものが出てきたら、ユーザーに聞いて aliases.h に足す。
+- std 直下の名前(`std::optional`・`std::span`・`std::format`・`std::vector` など)は **`std::` を付けて書く**(2026-10-01 ユーザー)。
 - COM のポインタは `ComPtr`(`engine/src/gpu/com_ptr.h`)。`Microsoft::WRL::ComPtr` と書かない。GPU を知らない所(core・bicameral_view)では読まない。
 - ほかの長い名前空間(`bicameral::save::` など)は、**そのファイルの中だけ**で短くする。.cpp なら
   `using namespace bicameral;` + `using save::ReplayFile;` や `namespace save = bicameral::save;`。
   ヘッダでは `using namespace` を書かない(読んだファイル全部に広がる)。
 - `using namespace std;` は使わない(windows.h の `byte` などとぶつかる)。
-- 別名と同じ名前の変数・引数を作らない(`format` という引数があると `format(...)` がその引数を指す)。書式の文字列の引数は `pattern`。
-- namespace bicameral の外(`std::formatter` の特殊化の中など)では別名が見えないので `std::` を付ける。
+- namespace bicameral の外(`std::formatter` の特殊化の中など)では別名が見えないので、元の名前で書く。
 
 ## 分け方・つなぎ方
 - 機能ごとに `engine/src/<subsystem>/` に分ける。サブシステムどうしは小さなインターフェース(ヘッダの関数・構造体)だけで

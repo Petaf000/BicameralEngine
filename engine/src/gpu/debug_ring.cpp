@@ -1,6 +1,6 @@
 // debug_ring.cpp — シェーダーの printf / assert のリングを読み戻してログに出す(T-0003、docs/design/16-debug-test.md §1)。
 // レコードのレイアウトは shaders/common/debug_ring.hlsli、書式の一覧は shaders/common/debug_formats.hlsli。
-// 書式は format の書式だが、引数の型(符号の有無・32 / 64bit)は実行時に分かるので、DebugArgument の formatter が
+// 書式は std::format の書式だが、引数の型(符号の有無・32 / 64bit)は実行時に分かるので、DebugArgument の formatter が
 // 書式の指定({:#x} など)を覚えておき、値を本来の型に戻してから当てはめる。
 #include "gpu/debug_ring.h"
 
@@ -64,14 +64,13 @@ namespace bicameral::gpu {
 
         struct DebugFormatEntry {
             Channel channel;
-            string_view where;
-            string_view text;
+            std::string_view where;
+            std::string_view text;
         };
 
         constexpr DebugFormatEntry DEBUG_FORMATS[] = {
 #define DEBUG_FORMAT(name, channel, where, text) {Channel::channel, where, text},
 #include "common/debug_formats.hlsli"
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 #undef DEBUG_FORMAT
         };
@@ -85,13 +84,13 @@ namespace bicameral::gpu {
         std::string RawArguments(const DebugArguments& arguments, uint32_t argCount) {
             std::string text;
             for (uint32_t index = 0; index < argCount; ++index)
-                text += format("{}{}", index == 0 ? "" : ", ", arguments[index]);
+                text += std::format("{}{}", index == 0 ? "" : ", ", arguments[index]);
 
             return "[" + text + "]";
         }
 
         // シェーダーが書いた数だけの引数で当てはめる(書式より少なければ format_error。多いのは構わない)
-        std::string VFormatArguments(string_view pattern, const DebugArguments& a, uint32_t argCount) {
+        std::string VFormatArguments(std::string_view pattern, const DebugArguments& a, uint32_t argCount) {
             switch (argCount) {
                 case 0: return std::vformat(pattern, std::make_format_args());
                 case 1: return std::vformat(pattern, std::make_format_args(a[0]));
@@ -103,12 +102,12 @@ namespace bicameral::gpu {
             }
         }
 
-        std::string FormatArguments(string_view pattern, const DebugArguments& arguments, uint32_t argCount) {
+        std::string FormatArguments(std::string_view pattern, const DebugArguments& arguments, uint32_t argCount) {
             try {
                 return VFormatArguments(pattern, arguments, argCount);
             } catch (const std::format_error& error) {
-                return format("(書式 \"{}\" に当てはまらない: {}) {}", pattern, error.what(),
-                              RawArguments(arguments, argCount));
+                return std::format("(書式 \"{}\" に当てはまらない: {}) {}", pattern, error.what(),
+                                   RawArguments(arguments, argCount));
             }
         }
 
@@ -137,7 +136,7 @@ namespace bicameral::gpu {
 
     // --- 1 レコードを読む ---
 
-    DebugMessage DecodeDebugRecord(span<const uint32_t, DEBUG_RECORD_WORDS> record) {
+    DebugMessage DecodeDebugRecord(std::span<const uint32_t, DEBUG_RECORD_WORDS> record) {
         DebugMessage message;
         const uint32_t formatIndex = record[0];
         const uint32_t argCount = std::min((record[1] >> 4) & 0xFu, DEBUG_RECORD_MAX_ARGS);
@@ -154,7 +153,7 @@ namespace bicameral::gpu {
 
         if (formatIndex >= std::size(DEBUG_FORMATS)) {
             message.where = "?";
-            message.text = format("(知らない書式の番号 {}) {}", formatIndex, RawArguments(arguments, argCount));
+            message.text = std::format("(知らない書式の番号 {}) {}", formatIndex, RawArguments(arguments, argCount));
 
             return message;
         }
@@ -170,10 +169,10 @@ namespace bicameral::gpu {
 
     // --- DebugRing ---
 
-    expected<DebugRing, std::string> DebugRing::Create(ID3D12Device* device, uint32_t slotCount) {
+    std::expected<DebugRing, std::string> DebugRing::Create(ID3D12Device* device, uint32_t slotCount) {
         auto ring = ReadbackRing::Create(device, DEBUG_RING_BYTES, DEBUG_RING_HEADER_BYTES, slotCount, L"DebugRing");
         if (!ring)
-            return unexpected("デバッグのリングを作れない: " + ring.error());
+            return std::unexpected("デバッグのリングを作れない: " + ring.error());
 
         return DebugRing(std::move(*ring));
     }
@@ -190,18 +189,18 @@ namespace bicameral::gpu {
         DebugRingContents contents;
         // 見出しを先に読み、書かれた分だけを読む(ふつうは 0 件。毎フレーム 256 KiB を写さない)
         uint32_t requested = 0;
-        if (!m_ring.Read(slot, std::as_writable_bytes(span(&requested, 1))))
+        if (!m_ring.Read(slot, std::as_writable_bytes(std::span(&requested, 1))))
             return contents;
 
         contents.requestedCount = requested;
         const uint32_t storedCount = std::min(contents.requestedCount, DEBUG_RING_CAPACITY);
         std::vector<uint32_t> words((DEBUG_RING_HEADER_BYTES + storedCount * DEBUG_RECORD_BYTES) / 4);
-        if (storedCount > 0 && !m_ring.Read(slot, std::as_writable_bytes(span(words))))
+        if (storedCount > 0 && !m_ring.Read(slot, std::as_writable_bytes(std::span(words))))
             return contents;
 
         contents.droppedCount = contents.requestedCount - storedCount;
         contents.messages.reserve(storedCount);
-        const span<const uint32_t> records = span(words).subspan(DEBUG_RING_HEADER_BYTES / 4);
+        const std::span<const uint32_t> records = std::span(words).subspan(DEBUG_RING_HEADER_BYTES / 4);
 
         for (uint32_t index = 0; index < storedCount; ++index) {
             const auto record = records.subspan(size_t{index} * DEBUG_RECORD_WORDS).first<DEBUG_RECORD_WORDS>();

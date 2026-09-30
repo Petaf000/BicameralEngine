@@ -27,7 +27,7 @@ namespace bicameral {
         // --- コンソール ---
 
         // VT のエスケープシーケンスで色を付ける(Windows 10 以降のコンソールが対応)
-        string_view ColorOf(Level level) {
+        std::string_view ColorOf(Level level) {
             switch (level) {
                 case Level::Trace:
                 case Level::Debug: return "\x1b[90m";    // 灰
@@ -65,7 +65,7 @@ namespace bicameral {
 
             void Write(const LogRecord& record) override {
                 const std::string line = FormatLogLine(record, record.level >= Level::Warning);
-                const string_view color = m_useColor ? ColorOf(record.level) : string_view{};
+                const std::string_view color = m_useColor ? ColorOf(record.level) : std::string_view{};
                 if (color.empty())
                     std::fprintf(stdout, "%s\n", line.c_str());
                 else
@@ -92,8 +92,8 @@ namespace bicameral {
                 std::string line;
                 if (record.level >= Level::Warning) {
                     // VS の出力ウィンドウは "フルパス(行): " で始まる行をダブルクリックでその場所へ飛べる
-                    line = format("{}({}): {} {} | {}\n", record.location.file_name(), record.location.line(),
-                                  LevelName(record.level), ChannelName(record.channel), record.message);
+                    line = std::format("{}({}): {} {} | {}\n", record.location.file_name(), record.location.line(),
+                                       LevelName(record.level), ChannelName(record.channel), record.message);
                 } else
                     line = FormatLogLine(record, false) + '\n';
 
@@ -164,12 +164,12 @@ namespace bicameral {
         return std::make_unique<DebuggerSink>();
     }
 
-    expected<fs::path, std::string> OpenLogFile(Logger& logger, const fs::path& directory) {
+    std::expected<fs::path, std::string> OpenLogFile(Logger& logger, const fs::path& directory) {
         std::error_code error;
         fs::create_directories(directory, error);
         if (error) {
-            return unexpected(
-                format("ログのフォルダを作れない: {}: {}", ToUtf8(directory.wstring()), DescribeErrorCode(error)));
+            return std::unexpected(
+                std::format("ログのフォルダを作れない: {}: {}", ToUtf8(directory.wstring()), DescribeErrorCode(error)));
         }
 
         RemoveOldLogFiles(directory);
@@ -177,17 +177,17 @@ namespace bicameral {
         // --- ファイルを開く ---
         const std::tm now = LocalNow();
 
-        const std::wstring fileName =
-            format(L"{}{:04}{:02}{:02}-{:02}{:02}{:02}{}", LOG_FILE_PREFIX, now.tm_year + 1900, now.tm_mon + 1,
-                   now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec, LOG_FILE_EXTENSION);
+        const std::wstring fileName = std::format(L"{}{:04}{:02}{:02}-{:02}{:02}{:02}{}", LOG_FILE_PREFIX,
+                                                  now.tm_year + 1900, now.tm_mon + 1, now.tm_mday, now.tm_hour,
+                                                  now.tm_min, now.tm_sec, LOG_FILE_EXTENSION);
 
         fs::path path = directory / fileName;                          // const にしない(return で move させる)
         std::ofstream stream(path, std::ios::binary | std::ios::app);  // 同じ秒に 2 回起動したら追記になる
         if (!stream)
-            return unexpected(format("ログのファイルを開けない: {}", ToUtf8(path.wstring())));
+            return std::unexpected(std::format("ログのファイルを開けない: {}", ToUtf8(path.wstring())));
 
-        stream << format("# Bicameral Engine log  {:04}-{:02}-{:02} {:02}:{:02}:{:02}\n", now.tm_year + 1900,
-                         now.tm_mon + 1, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec);
+        stream << std::format("# Bicameral Engine log  {:04}-{:02}-{:02} {:02}:{:02}:{:02}\n", now.tm_year + 1900,
+                              now.tm_mon + 1, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec);
         stream << "# [経過秒] 重大度 チャンネル | 本文  (ファイル:行)\n";
         logger.AddSink(std::make_unique<FileSink>(std::move(stream)));
 

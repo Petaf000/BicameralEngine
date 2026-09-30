@@ -5,7 +5,6 @@
 // debug layer の d3d12SDKLayers.dll は Agility SDK のもの(exe の横の D3D12\。engine/CMakeLists.txt がコピーする)。
 #include "gpu/device.h"
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
@@ -14,7 +13,7 @@
 namespace bicameral::gpu {
     namespace {
 
-        using DeviceResult = expected<ComPtr<ID3D12Device5>, std::string>;
+        using DeviceResult = std::expected<ComPtr<ID3D12Device5>, std::string>;
 
         // WARP は版によって FL 12_2 に届かない(Windows 11 build 26200 の WARP は 12_1。2026-09-30 の --caps)。
         // Work Graphs と SM 6.8 は FL と別に問い合わせる機能なので、WARP は作れる一番低い FL で作る
@@ -118,23 +117,23 @@ namespace bicameral::gpu {
             if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, nullptr))
                 return device;
 
-            return unexpected("最低機の条件(FL 12_2・SM 6.8・Work Graphs・Int64ShaderOps)を満たすアダプタが無い");
+            return std::unexpected("最低機の条件(FL 12_2・SM 6.8・Work Graphs・Int64ShaderOps)を満たすアダプタが無い");
         }
 
         DeviceResult CreateWarpDevice(IDXGIFactory6* factory) {
             ComPtr<IDXGIAdapter1> adapter;
             HRESULT result = factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
             if (FAILED(result))
-                return unexpected("WARP のアダプタを取れない: " + DescribeHresult(result));
+                return std::unexpected("WARP のアダプタを取れない: " + DescribeHresult(result));
 
             ComPtr<ID3D12Device5> device;
             result = D3D12CreateDevice(adapter.Get(), WARP_FEATURE_LEVEL, IID_PPV_ARGS(&device));
             if (FAILED(result))
-                return unexpected("WARP のデバイスを作れない: " + DescribeHresult(result));
+                return std::unexpected("WARP のデバイスを作れない: " + DescribeHresult(result));
 
             const std::string missing = FindMissingFeatures(device.Get());
             if (!missing.empty())
-                return unexpected("WARP に足りない機能:" + missing);
+                return std::unexpected("WARP に足りない機能:" + missing);
 
             Log(Channel::Gpu, Level::Info, "アダプタ: WARP");
 
@@ -204,7 +203,7 @@ namespace bicameral::gpu {
                 case D3D12_AUTO_BREADCRUMB_OP_BEGIN_COMMAND_LIST: return "BeginCommandList";
                 case D3D12_AUTO_BREADCRUMB_OP_DISPATCHGRAPH: return "DispatchGraph";
                 case D3D12_AUTO_BREADCRUMB_OP_SETPROGRAM: return "SetProgram";
-                default: return format("op {}", static_cast<int>(op));
+                default: return std::format("op {}", static_cast<int>(op));
             }
         }
 
@@ -215,8 +214,8 @@ namespace bicameral::gpu {
         // 1 本のコマンドリストの記録: どこまで終わったか、止まった所の前後に何があったか
         void LogBreadcrumbNode(const D3D12_AUTO_BREADCRUMB_NODE1& node) {
             const uint32_t completed = node.pLastBreadcrumbValue != nullptr ? *node.pLastBreadcrumbValue : 0;
-            const std::string where = format("リスト {}(キュー {})", DebugNameOf(node.pCommandListDebugNameW),
-                                             DebugNameOf(node.pCommandQueueDebugNameW));
+            const std::string where = std::format("リスト {}(キュー {})", DebugNameOf(node.pCommandListDebugNameW),
+                                                  DebugNameOf(node.pCommandQueueDebugNameW));
 
             if (completed >= node.BreadcrumbCount) {
                 Log(Channel::Gpu, Level::Info, "DRED: {}: {} 個のコマンドを全部終えている", where,
@@ -235,7 +234,7 @@ namespace bicameral::gpu {
             }
         }
 
-        void LogAllocations(string_view title, const D3D12_DRED_ALLOCATION_NODE1* node) {
+        void LogAllocations(std::string_view title, const D3D12_DRED_ALLOCATION_NODE1* node) {
             for (int count = 0; node != nullptr && count < MAX_LOGGED_ALLOCATIONS; node = node->pNext, ++count) {
                 Log(Channel::Gpu, Level::Error, "DRED:   {}: {}(種類 {})", title, DebugNameOf(node->ObjectNameW),
                     static_cast<int>(node->AllocationType));
@@ -258,17 +257,17 @@ namespace bicameral::gpu {
 
     // --- Device ---
 
-    expected<Device, std::string> Device::Create(AdapterKind kind, const DeviceOptions& options) {
+    std::expected<Device, std::string> Device::Create(AdapterKind kind, const DeviceOptions& options) {
         EnableDebugFeatures(options);
         ComPtr<IDXGIFactory6> factory;
         const HRESULT result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
         if (FAILED(result))
-            return unexpected("DXGI のファクトリを作れない: " + DescribeHresult(result));
+            return std::unexpected("DXGI のファクトリを作れない: " + DescribeHresult(result));
 
         DeviceResult created = kind == AdapterKind::Warp ? CreateWarpDevice(factory.Get())
                                                          : CreateHardwareDevice(factory.Get(), options.presentMonitor);
         if (!created)
-            return unexpected(created.error());
+            return std::unexpected(created.error());
 
         Device device;
         device.m_factory = std::move(factory);

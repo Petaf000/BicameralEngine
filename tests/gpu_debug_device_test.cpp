@@ -3,7 +3,6 @@
 //   1. わざと誤った呼び出し(幅 0 のバッファを作る)をして、debug layer のエラーが 1 件以上数えられるか
 //   2. コマンドを 1 本走らせてから ID3D12Device5::RemoveDevice でデバイスを失わせ、LogDeviceRemoved() が DRED の記録を読めるか
 // どちらもわざとエラーを起こすので、ログの Error は期待どおり。引数は gpu_test_options.h。
-#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/com_ptr.h"
@@ -48,10 +47,10 @@ namespace {
 
     bool TestDeviceRemoved(const gpu::Device& device, D3D12_COMMAND_LIST_TYPE queueType) {
         auto queue = gpu::ImmediateQueue::Create(device.Get(), queueType);
-        const ComPtr<ID3D12Resource> source =
-            gpu::CreateBuffer(device.Get(), BUFFER_BYTES, gpu::BufferKind::UnorderedAccess);
-        const ComPtr<ID3D12Resource> readback =
-            gpu::CreateBuffer(device.Get(), BUFFER_BYTES, gpu::BufferKind::Readback);
+        const ComPtr<ID3D12Resource> source = gpu::CreateBuffer(device.Get(), BUFFER_BYTES,
+                                                                gpu::BufferKind::UnorderedAccess);
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device.Get(), BUFFER_BYTES,
+                                                                  gpu::BufferKind::Readback);
         if (!queue || !source || !readback)
             return false;
 
@@ -71,7 +70,7 @@ namespace {
         return report.dredAvailable;
     }
 
-    int Run(span<char*> arguments) {
+    int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error, "使い方: gpu_debug_device_test [--warp] [--queue direct|compute]");
@@ -105,7 +104,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int exitCode = Run(span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
     SingletonFinalizer::Finalize();  // ログを閉じる
 
     return exitCode;

@@ -62,11 +62,11 @@ groupshared uint32_t g_blockChanged;
 
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める
 // clang-format off
-
 // 一覧の 1 件 → そのブロックと 6 面の隣(格子の中)のうち、まだ予定していないものを ConductBlock へ(最大 7 件)
 [Shader("node")]
 [NodeLaunch("thread")]
 [NodeIsProgramEntry]
+
 void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
                 [MaxRecords(7)] [NodeId("ConductBlock")] NodeOutput<BlockRecord> conductOutput) {
     const uint64_t tick = CurrentTick();
@@ -83,14 +83,17 @@ void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
     [unroll] for (uint32_t index = 0; index < PROBE_WAKE_MAX_RECORDS; ++index) {
         const int3 neighbor = center + FaceOffset(index);
         const bool inside = valid && all(neighbor >= 0) && all(neighbor < (int)PROBE_BLOCKS_PER_AXIS);
-        const uint32_t target =
-            inside ? ProbeBlockIndex((uint32_t)neighbor.x, (uint32_t)neighbor.y, (uint32_t)neighbor.z) : 0;
+        const uint3 neighborBlock = (uint3)neighbor;  // 外なら使わない(負の値が大きな数になるだけ)
+        const uint32_t target = inside ? ProbeBlockIndex(neighborBlock.x, neighborBlock.y, neighborBlock.z) : 0;
         const bool take = inside && TrySchedule(target, tick);
         ThreadNodeOutputRecords<BlockRecord> record = conductOutput.GetThreadNodeOutputRecords(take ? 1 : 0);
-        if (take) record.Get().block = target;
+        if (take)
+            record.Get().block = target;
+
         record.OutputComplete();
         emitted += take ? 1 : 0;
     }
+
     WgCountOutputs(PROBE_STATS_NODE_WAKE, emitted, emitted);  // 出す数は構造で 7 まで(上限を越えようがない)
 }
 
@@ -99,6 +102,7 @@ void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
 [NumThreads(PROBE_BLOCK_SIZE, PROBE_BLOCK_SIZE, PROBE_BLOCK_SIZE)]
+
 void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadId : SV_GroupThreadID,
                   uint32_t groupIndex : SV_GroupIndex) {
     const uint64_t tick = CurrentTick();
@@ -112,21 +116,26 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
         g_blockChanged = 0;
         WgCountLaunch(PROBE_STATS_NODE_CONDUCT, 1);
     }
+
     GroupMemoryBarrierWithGroupSync();
 
     // --- 伝導(前の世代の自分と 6 面の隣から)---
     const uint32_t self = world[current + cellIndex];
-    const uint32_t value = ProbeConductValue(self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self),
-                                             NeighborOrSelf(current, cell, int3(1, 0, 0), self),
-                                             NeighborOrSelf(current, cell, int3(0, -1, 0), self),
-                                             NeighborOrSelf(current, cell, int3(0, 1, 0), self),
-                                             NeighborOrSelf(current, cell, int3(0, 0, -1), self),
-                                             NeighborOrSelf(current, cell, int3(0, 0, 1), self));
+
+    const uint32_t value = ProbeConductValue(
+        self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self), NeighborOrSelf(current, cell, int3(1, 0, 0), self),
+        NeighborOrSelf(current, cell, int3(0, -1, 0), self), NeighborOrSelf(current, cell, int3(0, 1, 0), self),
+        NeighborOrSelf(current, cell, int3(0, 0, -1), self), NeighborOrSelf(current, cell, int3(0, 0, 1), self));
+
     world[next + cellIndex] = value;
 
     // --- 変わったか(ブロックの中で 1 つでも)---
-    if (WaveActiveAnyTrue(value != self) && WaveIsFirstLane()) InterlockedOr(g_blockChanged, 1);
+    if (WaveActiveAnyTrue(value != self) && WaveIsFirstLane())
+        InterlockedOr(g_blockChanged, 1);
+
     GroupMemoryBarrierWithGroupSync();
-    if (groupIndex == 0 && g_blockChanged != 0) AppendActiveBlock((uint32_t)((tick + 1) & 1), block);
+    if (groupIndex == 0 && g_blockChanged != 0)
+        AppendActiveBlock((uint32_t)((tick + 1) & 1), block);
 }
+
 // clang-format on

@@ -85,7 +85,7 @@ namespace bicameral::sim {
         };
 
         ComPtr<ID3D12PipelineState> LoadComputePipeline(ID3D12Device* device, ID3D12RootSignature* rootSignature,
-                                                        string_view shaderPath) {
+                                                        std::string_view shaderPath) {
             const auto bytecode = gpu::LoadShader(shaderPath);
             if (!bytecode) {
                 Log(Channel::Sim, Level::Error, "{}", bytecode.error());
@@ -120,36 +120,36 @@ namespace bicameral::sim {
 
     // --- 作る ---
 
-    expected<ProbeSim, std::string> ProbeSim::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType,
-                                                     const ProbeSimOptions& options) {
+    std::expected<ProbeSim, std::string> ProbeSim::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType,
+                                                          const ProbeSimOptions& options) {
         if (options.busyPieces == 0 || options.busyPieces > PROBE_MAX_BUSY_PIECES ||
             options.busyIterations > PROBE_BUSY_ITERATIONS_LIMIT) {
-            return unexpected(
-                format("重さの試験の値が範囲外: 繰り返し {} 分ける数 {}", options.busyIterations, options.busyPieces));
+            return std::unexpected(std::format("重さの試験の値が範囲外: 繰り返し {} 分ける数 {}",
+                                               options.busyIterations, options.busyPieces));
         }
 
         auto events = gpu::ReadbackRing::Create(device, PROBE_EVENT_BYTES, PROBE_EVENT_HEADER_BYTES, FRAME_SLOT_COUNT,
                                                 L"ProbeSim.events");
         if (!events)
-            return unexpected(events.error());
+            return std::unexpected(events.error());
 
         auto debugRing = gpu::DebugRing::Create(device, FRAME_SLOT_COUNT);
         if (!debugRing)
-            return unexpected(debugRing.error());
+            return std::unexpected(debugRing.error());
 
         auto graphStats = gpu::WorkGraphStats::Create(device, MakeConductStatsLayout(), FRAME_SLOT_COUNT);
         if (!graphStats)
-            return unexpected(graphStats.error());
+            return std::unexpected(graphStats.error());
 
         ProbeSim sim(options, std::move(*events), std::move(*debugRing), std::move(*graphStats));
         if (!sim.CreatePipelines(device))
-            return unexpected("仮の刻みのパイプラインを作れない");
+            return std::unexpected("仮の刻みのパイプラインを作れない");
 
         if (!sim.CreateBuffers(device))
-            return unexpected("仮の刻みのバッファを作れない");
+            return std::unexpected("仮の刻みのバッファを作れない");
 
         if (!sim.CreateFrameSlots(device, listType))
-            return unexpected("仮の刻みのフレームの枠を作れない");
+            return std::unexpected("仮の刻みのフレームの枠を作れない");
 
         return sim;
     }
@@ -204,12 +204,12 @@ namespace bicameral::sim {
         m_blockSchedule->SetName(L"ProbeSim.blockSchedule");  // 作った時は 0(まだ予定していない)
         // 活性の一覧: 作った時は 0(空。見出しは刻みの適用の単位が毎刻み書く)
         for (uint32_t parity = 0; parity < 2; ++parity) {
-            m_activeLists[parity] =
-                gpu::CreateBuffer(device, PROBE_ACTIVE_LIST_BYTES, gpu::BufferKind::UnorderedAccess);
+            m_activeLists[parity] = gpu::CreateBuffer(device, PROBE_ACTIVE_LIST_BYTES,
+                                                      gpu::BufferKind::UnorderedAccess);
             if (!m_activeLists[parity])
                 return false;
 
-            m_activeLists[parity]->SetName(format(L"ProbeSim.activeList{}", parity).c_str());
+            m_activeLists[parity]->SetName(std::format(L"ProbeSim.activeList{}", parity).c_str());
         }
 
         m_world->SetName(L"ProbeSim.world");
@@ -223,7 +223,7 @@ namespace bicameral::sim {
             if (!m_extractions[index])
                 return false;
 
-            m_extractions[index]->SetName(format(L"ProbeSim.extraction{}", index).c_str());
+            m_extractions[index]->SetName(std::format(L"ProbeSim.extraction{}", index).c_str());
         }
 
         const D3D12_QUERY_HEAP_DESC queryDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
@@ -242,8 +242,8 @@ namespace bicameral::sim {
             }
 
             frame.input = gpu::CreateBuffer(device, PROBE_INPUT_BYTES, gpu::BufferKind::Upload);
-            frame.timestampReadback =
-                gpu::CreateBuffer(device, uint64_t{TIMESTAMPS_PER_SLOT} * 8, gpu::BufferKind::Readback);
+            frame.timestampReadback = gpu::CreateBuffer(device, uint64_t{TIMESTAMPS_PER_SLOT} * 8,
+                                                        gpu::BufferKind::Readback);
             frame.hashReadback = gpu::CreateBuffer(device, PROBE_HASH_BYTES, gpu::BufferKind::Readback);
             if (!frame.input || !frame.timestampReadback || !frame.hashReadback)
                 return false;
@@ -303,9 +303,12 @@ namespace bicameral::sim {
     // 見出し(probe_sim.hlsli の PROBE_HEADER_*)とコマンド
     void ProbeSim::WriteInput(FrameSlot& frame, const ProbeFrameInput& input) const {
         const auto commandCount = static_cast<uint32_t>(input.commands.size());
+
         // 重さは 1 個あたりの回数にする(分けても 1 刻みの合計がほぼ同じになるように)
-        const uint32_t busyPerPiece =
-            m_options.busyIterations == 0 ? 0 : std::max(1u, m_options.busyIterations / m_options.busyPieces);
+        const uint32_t busyPerPiece = m_options.busyIterations == 0
+                                          ? 0
+                                          : std::max(1u, m_options.busyIterations / m_options.busyPieces);
+
         const D3D12_GPU_VIRTUAL_ADDRESS list0 = m_activeLists[0]->GetGPUVirtualAddress();
         const D3D12_GPU_VIRTUAL_ADDRESS list1 = m_activeLists[1]->GetGPUVirtualAddress();
 
@@ -345,8 +348,8 @@ namespace bicameral::sim {
         m_events.RecordBegin(list);
         m_debugRing.RecordBegin(list);
         m_graphStats.RecordBegin(list);
-        const D3D12_RESOURCE_BARRIER hashesToUav =
-            gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const D3D12_RESOURCE_BARRIER hashesToUav = gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &hashesToUav);
         // 活性の一覧はフレームの中では UAV(伝導の間だけ入力の組を GPU の入力の状態に)。フレームの終わりに COMMON へ戻す
         RecordActiveListStates(list, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -402,7 +405,7 @@ namespace bicameral::sim {
     }
 
     // CPU 側の控え: 足したコマンドを数え、このフレームで適用の単位を記録した刻み(nextApplyTick より前)の分を取り出し済みにする
-    void ProbeSim::TrackCommands(span<const ProbeCommand> commands, uint64_t nextApplyTick) {
+    void ProbeSim::TrackCommands(std::span<const ProbeCommand> commands, uint64_t nextApplyTick) {
         for (const ProbeCommand& command : commands) {
             if (m_queuedTicks.empty() || m_queuedTicks.back().targetTick != command.targetTick)
                 m_queuedTicks.push_back({.targetTick = command.targetTick});
@@ -417,8 +420,8 @@ namespace bicameral::sim {
             m_lastEnqueued = commands.back();
         }
 
-        const auto applied =
-            rng::find_if(m_queuedTicks, [&](const QueuedTick& queued) { return queued.targetTick >= nextApplyTick; });
+        const auto applied = rng::find_if(m_queuedTicks,
+                                          [&](const QueuedTick& queued) { return queued.targetTick >= nextApplyTick; });
         for (auto queued = m_queuedTicks.begin(); queued != applied; ++queued)
             m_queuedCommandCount -= queued->count;
 
@@ -515,15 +518,15 @@ namespace bicameral::sim {
 
         if (hasHash) {
             gpu::RecordCopyToReadback(list, m_hashes.Get(), m_slots[slot].hashReadback.Get());
-            const D3D12_RESOURCE_BARRIER toCommon =
-                gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            const D3D12_RESOURCE_BARRIER toCommon = gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                                    D3D12_RESOURCE_STATE_COMMON);
             list->ResourceBarrier(1, &toCommon);
 
             return;
         }
 
-        const D3D12_RESOURCE_BARRIER toCommon =
-            gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        const D3D12_RESOURCE_BARRIER toCommon = gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                                D3D12_RESOURCE_STATE_COMMON);
         list->ResourceBarrier(1, &toCommon);
     }
 
@@ -535,16 +538,16 @@ namespace bicameral::sim {
 
         // イベント: 見出しを先に読み、書かれた分だけを読む(並びは GPU が刻みの最後に並べた (刻み, 種類, 場所) の順)
         EventRingHeader header;
-        const bool headerRead = m_events.Read(slot, std::as_writable_bytes(span(&header, 1)));
+        const bool headerRead = m_events.Read(slot, std::as_writable_bytes(std::span(&header, 1)));
         const uint32_t stored = std::min(header.requested, PROBE_EVENT_CAPACITY);
         std::vector<uint32_t> words(PROBE_EVENT_HEADER_BYTES / 4 + size_t{stored} * PROBE_EVENT_WORDS);
 
-        if (headerRead && (stored == 0 || m_events.Read(slot, std::as_writable_bytes(span(words))))) {
+        if (headerRead && (stored == 0 || m_events.Read(slot, std::as_writable_bytes(std::span(words))))) {
             result.droppedEventCount = header.requested - stored + header.tickDropped;
             result.events.reserve(stored);
             for (uint32_t index = 0; index < stored; ++index) {
-                const uint32_t* record =
-                    words.data() + PROBE_EVENT_HEADER_BYTES / 4 + size_t{index} * PROBE_EVENT_WORDS;
+                const uint32_t* record = words.data() + PROBE_EVENT_HEADER_BYTES / 4 +
+                                         size_t{index} * PROBE_EVENT_WORDS;
                 result.events.push_back(
                     {.tick = record[0] | (uint64_t{record[1]} << 32), .type = record[2], .place = record[3]});
             }
@@ -552,7 +555,7 @@ namespace bicameral::sim {
 
         // タイムスタンプ: [0] 始め、[1 + i] 単位 i の終わり、[1 + 数] 全体の終わり
         std::vector<uint64_t> timestamps(size_t{frame.unitCount} + 2);
-        if (gpu::ReadBuffer(frame.timestampReadback.Get(), std::as_writable_bytes(span(timestamps)))) {
+        if (gpu::ReadBuffer(frame.timestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
             result.gpuBeginTimestamp = timestamps.front();
             result.gpuEndTimestamp = timestamps.back();
             result.unitGpuTicks.reserve(frame.unitCount);
@@ -584,13 +587,13 @@ namespace bicameral::sim {
         std::vector<ProbeTickHash> hashes;
         const uint64_t unitsBefore = frame.firstUnit;
         const uint64_t unitsTotal = unitsBefore + frame.unitCount;
-        const uint64_t completedTicks =
-            unitsTotal / UnitsPerTick();  // firstTick から数えて終えた刻み(途中から始めた刻みを含む)
+        // firstTick から数えて終えた刻み(途中から始めた刻みを含む)
+        const uint64_t completedTicks = unitsTotal / UnitsPerTick();
         if (completedTicks == 0)
             return hashes;
 
         std::vector<uint32_t> table(PROBE_HASH_BYTES / 4);
-        if (!gpu::ReadBuffer(frame.hashReadback.Get(), std::as_writable_bytes(span(table))))
+        if (!gpu::ReadBuffer(frame.hashReadback.Get(), std::as_writable_bytes(std::span(table))))
             return hashes;
 
         hashes.reserve(completedTicks);
@@ -652,7 +655,7 @@ namespace bicameral::sim {
         }
 
         // seeds(ブロックごとの 0/1)のブロックと 6 面の隣の数(GPU の WakeBlocks が予定する数)
-        uint32_t CountScheduledBlocks(span<const uint8_t> seeds) {
+        uint32_t CountScheduledBlocks(std::span<const uint8_t> seeds) {
             std::vector<uint8_t> scheduled(PROBE_BLOCK_COUNT, 0);
             for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
                 if (seeds[block] != 0)
@@ -663,7 +666,7 @@ namespace bicameral::sim {
         }
 
         // 刻み tick のつつきを current に適用し、つついたブロックに印を付ける(GPU と同じく並びの順に)
-        void ApplyPokes(uint32_t* current, uint64_t tick, span<const ProbeCommand> commands,
+        void ApplyPokes(uint32_t* current, uint64_t tick, std::span<const ProbeCommand> commands,
                         std::vector<uint8_t>& seeds) {
             for (const ProbeCommand& command : commands) {
                 if (command.targetTick != tick || command.type != PROBE_COMMAND_TYPE_POKE)
@@ -699,7 +702,7 @@ namespace bicameral::sim {
     ProbeReference::ProbeReference()
         : m_cells(size_t{PROBE_CELL_COUNT} * 2, 0), m_changedBlocks(PROBE_BLOCK_COUNT, 0) {}
 
-    void ProbeReference::Advance(uint64_t tick, span<const ProbeCommand> commands) {
+    void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands) {
         uint32_t* current = m_cells.data() + static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
         uint32_t* next = m_cells.data() + static_cast<size_t>((tick + 1) & 1) * PROBE_CELL_COUNT;
 
@@ -712,11 +715,11 @@ namespace bicameral::sim {
         ConductAllCells(current, next, m_changedBlocks);
     }
 
-    span<const uint32_t> ProbeReference::State(uint64_t tick) const {
-        return span(m_cells).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
+    std::span<const uint32_t> ProbeReference::State(uint64_t tick) const {
+        return std::span(m_cells).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
     }
 
-    uint64_t ProbeStateHash(span<const uint32_t> cells) {
+    uint64_t ProbeStateHash(std::span<const uint32_t> cells) {
         uint64_t hash = 0;
         for (uint32_t index = 0; index < cells.size(); ++index)
             hash += ProbeCellHash(index, cells[index]);
@@ -724,7 +727,7 @@ namespace bicameral::sim {
         return hash;
     }
 
-    uint64_t ProbeHeatSum(span<const uint32_t> cells) {
+    uint64_t ProbeHeatSum(std::span<const uint32_t> cells) {
         uint64_t heat = 0;
         for (const uint32_t value : cells)
             heat += value;

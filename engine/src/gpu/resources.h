@@ -11,7 +11,6 @@
 #include <string_view>
 #include <vector>
 
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
@@ -48,13 +47,13 @@ namespace bicameral::gpu {
 
     [[nodiscard]] ComPtr<ID3D12PipelineState> CreateComputePipeline(ID3D12Device* device,
                                                                     ID3D12RootSignature* rootSignature,
-                                                                    span<const std::byte> bytecode);
+                                                                    std::span<const std::byte> bytecode);
 
     // exe の横の shaders/<relativePath> を読む。relativePath の例: "sim/fixed_selftest.cso"
-    [[nodiscard]] expected<std::vector<std::byte>, std::string> LoadShader(string_view relativePath);
+    [[nodiscard]] std::expected<std::vector<std::byte>, std::string> LoadShader(std::string_view relativePath);
 
     // 読み戻しのバッファの先頭から destination の大きさだけ写す
-    [[nodiscard]] bool ReadBuffer(ID3D12Resource* readback, span<std::byte> destination);
+    [[nodiscard]] bool ReadBuffer(ID3D12Resource* readback, std::span<std::byte> destination);
 
     // リソース全体の状態の遷移
     [[nodiscard]] D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,

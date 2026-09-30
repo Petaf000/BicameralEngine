@@ -11,7 +11,6 @@
 #include <string>
 #include <vector>
 
-#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/device.h"
@@ -49,10 +48,14 @@ namespace {
 
     struct ScenarioResult {
         bool ok = false;
+
+        // --- 広がり方 ---
         uint64_t ticks = 0;
         uint64_t quietTick = 0;  // 計算したブロックが 0 になった最初の刻み(0 なら止まらなかった)
         uint32_t maxBlocks = 0;
         bool heatConserved = true;
+
+        // --- 時間(計算したブロックの数の範囲ごと・単位ごと)---
         std::array<Bucket, BUCKET_LIMITS.size()> buckets{};
         std::array<double, PROBE_FIXED_UNITS_PER_TICK> unitMicroseconds{};  // 単位ごとの合計(適用・伝導・検査と出力)
     };
@@ -127,8 +130,8 @@ namespace {
 
         for (uint64_t tick = 0; tick < scenario.maxTicks && result.quietTick == 0; tick += TICKS_PER_FRAME) {
             const auto slot = static_cast<uint32_t>((tick / TICKS_PER_FRAME) % ProbeSim::FRAME_SLOT_COUNT);
-            const span<const ProbeCommand> commands =
-                tick == 0 ? span<const ProbeCommand>(pokes) : span<const ProbeCommand>();
+            const std::span<const ProbeCommand> commands = tick == 0 ? std::span<const ProbeCommand>(pokes)
+                                                                     : std::span<const ProbeCommand>();
 
             ID3D12CommandList* list = simulation->RecordFrame(
                 slot,
@@ -185,7 +188,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const auto options = test::ParseGpuTestOptions(span(argv, static_cast<size_t>(argc)));
+    const auto options = test::ParseGpuTestOptions(std::span(argv, static_cast<size_t>(argc)));
     if (!options) {
         Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp]");
         bicameral::SingletonFinalizer::Finalize();

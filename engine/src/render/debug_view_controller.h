@@ -13,7 +13,6 @@
 #include <string_view>
 #include <vector>
 
-#include "core/aliases.h"
 #include "platform/input.h"
 #include "render/debug_camera.h"
 #include "render/probe_view_constants.h"
@@ -33,7 +32,7 @@ namespace bicameral::render {
         DebugViewController(uint32_t gridSize, const DebugViewSettings& settings, const OrbitCameraState& camera);
 
         // 入力を振り分け、つつくセル(左クリックの光線が断面に当たった所。古い順)を返す。width・height は描く大きさ(px)
-        [[nodiscard]] std::vector<CellCoordinate> HandleInput(span<const InputEvent> events, uint32_t width,
+        [[nodiscard]] std::vector<CellCoordinate> HandleInput(std::span<const InputEvent> events, uint32_t width,
                                                               uint32_t height);
 
         [[nodiscard]] ProbeViewConstants Constants(uint32_t extractionIndex, uint32_t width, uint32_t height) const;
@@ -46,16 +45,18 @@ namespace bicameral::render {
                            std::vector<CellCoordinate>& pokes);
         void HandleKey(const InputEvent& event);
 
-        uint32_t m_gridSize;
+        uint32_t m_gridSize;  // 格子の 1 辺のセルの数
         DebugViewSettings m_settings;
         OrbitCamera m_camera;
+
+        // --- ドラッグ中の状態 ---
         bool m_rotating = false;
         bool m_panning = false;
-        int32_t m_lastX = 0;
+        int32_t m_lastX = 0;  // 前のポインタの位置(画素)
         int32_t m_lastY = 0;
     };
 
     // 表示の名前(--view の値。volume・mip・slice)→ 表示。知らない名前なら false
-    [[nodiscard]] bool ParseDebugViewMode(string_view name, DebugViewMode& mode);
+    [[nodiscard]] bool ParseDebugViewMode(std::string_view name, DebugViewMode& mode);
 
 }  // namespace bicameral::render

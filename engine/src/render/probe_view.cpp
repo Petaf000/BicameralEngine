@@ -3,7 +3,6 @@
 
 #include <array>
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "gpu/com_ptr.h"
@@ -18,19 +17,19 @@ namespace bicameral::render {
 
     }  // namespace
 
-    expected<ProbeView, std::string> ProbeView::Create(ID3D12Device* device, DXGI_FORMAT renderTargetFormat) {
+    std::expected<ProbeView, std::string> ProbeView::Create(ID3D12Device* device, DXGI_FORMAT renderTargetFormat) {
         ProbeView view;
         view.m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
         if (!view.m_rootSignature)
-            return unexpected("描画のルート署名を作れない");
+            return std::unexpected("描画のルート署名を作れない");
 
         const auto vertexShader = gpu::LoadShader("render/probe_view_vs.cso");
         const auto pixelShader = gpu::LoadShader("render/probe_view_ps.cso");
         if (!vertexShader)
-            return unexpected(vertexShader.error());
+            return std::unexpected(vertexShader.error());
 
         if (!pixelShader)
-            return unexpected(pixelShader.error());
+            return std::unexpected(pixelShader.error());
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{
             .pRootSignature = view.m_rootSignature.Get(),
@@ -50,15 +49,15 @@ namespace bicameral::render {
         desc.RTVFormats[0] = renderTargetFormat;
         const HRESULT result = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&view.m_pipeline));
         if (FAILED(result))
-            return unexpected("描画のパイプラインを作れない: " + DescribeHresult(result));
+            return std::unexpected("描画のパイプラインを作れない: " + DescribeHresult(result));
 
         return view;
     }
 
     void ProbeView::Record(ID3D12GraphicsCommandList* list, const ProbeViewTarget& target,
                            const ProbeViewInputs& inputs) const {
-        const D3D12_RESOURCE_BARRIER toRenderTarget =
-            gpu::Transition(target.backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const D3D12_RESOURCE_BARRIER toRenderTarget = gpu::Transition(target.backBuffer, D3D12_RESOURCE_STATE_PRESENT,
+                                                                      D3D12_RESOURCE_STATE_RENDER_TARGET);
         list->ResourceBarrier(1, &toRenderTarget);
 
         // --- 描く ---
@@ -79,8 +78,8 @@ namespace bicameral::render {
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->DrawInstanced(3, 1, 0, 0);
 
-        const D3D12_RESOURCE_BARRIER toPresent =
-            gpu::Transition(target.backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        const D3D12_RESOURCE_BARRIER toPresent = gpu::Transition(target.backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                                 D3D12_RESOURCE_STATE_PRESENT);
         list->ResourceBarrier(1, &toPresent);
     }
 

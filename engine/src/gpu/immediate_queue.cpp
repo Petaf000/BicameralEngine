@@ -2,7 +2,6 @@
 // 待つのは ID3D12Fence::SetEventOnCompletion にイベントを渡さない形(終わるまで呼んだスレッドを止める)。
 #include "gpu/immediate_queue.h"
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "gpu/com_ptr.h"
@@ -10,7 +9,8 @@
 
 namespace bicameral::gpu {
 
-    expected<ImmediateQueue, std::string> ImmediateQueue::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE type) {
+    std::expected<ImmediateQueue, std::string> ImmediateQueue::Create(ID3D12Device5* device,
+                                                                      D3D12_COMMAND_LIST_TYPE type) {
         ImmediateQueue queue;
         const D3D12_COMMAND_QUEUE_DESC queueDesc{.Type = type};
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue.m_queue))) ||
@@ -19,7 +19,7 @@ namespace bicameral::gpu {
                                                                          IID_PPV_ARGS(&queue.m_list))) ||
             !BICAMERAL_CHECK_HR(Channel::Gpu,
                                 device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&queue.m_fence)))) {
-            return unexpected("キュー・コマンドリスト・フェンスを作れない");
+            return std::unexpected("キュー・コマンドリスト・フェンスを作れない");
         }
 
         // DRED と debug layer の報告に出る名前
@@ -40,8 +40,9 @@ namespace bicameral::gpu {
     }
 
     bool ImmediateQueue::ExecuteAndWait() {
+        // 記録の誤りはここで分かる
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, m_list->Close()))
-            return false;  // 記録の誤りはここで分かる
+            return false;
 
         ID3D12CommandList* lists[] = {m_list.Get()};
         m_queue->ExecuteCommandLists(1, lists);

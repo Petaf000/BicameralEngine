@@ -92,35 +92,46 @@ namespace bicameral::frame {
 
         // 計測(1 秒ごとにログへ。最後に全体の要約)
         struct Stats {
+            // --- CPU のフレーム ---
             uint64_t frames = 0;
             double cpuMilliseconds = 0.0;
             double cpuMaxMilliseconds = 0.0;
             double presentMilliseconds = 0.0;  // cpuMilliseconds のうち Present の中にいた時間
-            uint64_t ticks = 0;                // 終わった刻み(読み戻したハッシュの数)
+            uint64_t cpuWaits = 0;             // 描画の枠を使い回す前に CPU が GPU を待った回数(0 のはず)
+
+            // --- シミュ ---
+            uint64_t ticks = 0;  // 終わった刻み(読み戻したハッシュの数)
             uint64_t simSubmissions = 0;
             uint64_t units = 0;
+            uint64_t events = 0;
+            uint64_t skippedSubmissions = 0;  // シミュの枠が空いていないので投げなかったフレーム
+            uint64_t skippedExtractions = 0;  // 抽出の 3 組の約束で写さなかったフレーム
+
+            // --- GPU の時間 ---
             double simGpuMilliseconds = 0.0;  // シミュのリスト全体(抽出と読み戻しを含む)
             uint64_t simSubmissionsMeasured = 0;
             double renderGpuMilliseconds = 0.0;
             uint64_t renderFramesMeasured = 0;
-            uint64_t cpuWaits = 0;            // 描画の枠を使い回す前に CPU が GPU を待った回数(0 のはず)
-            uint64_t skippedSubmissions = 0;  // シミュの枠が空いていないので投げなかったフレーム
-            uint64_t skippedExtractions = 0;  // 抽出の 3 組の約束で写さなかったフレーム
-            uint64_t events = 0;
-            gpu::GraphStatsSnapshot conductGraph;  // 伝導のグラフのノードのカウンタ(足したもの・最大。T-0008)
+
+            // 伝導のグラフのノードのカウンタ(足したもの・最大。T-0008)
+            gpu::GraphStatsSnapshot conductGraph;
         };
 
         // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
         struct FrameLoopParts {
+            // --- 窓と GPU ---
             std::unique_ptr<Window> window;
             gpu::Device device;
             gpu::Queue direct;
             gpu::Queue compute;
             gpu::SwapChain swapChain;
+
+            // --- シミュと表示 ---
             sim::ProbeSim simulation;
             render::ProbeView view;
-            std::vector<save::ReplayPlayer>
-                replay;  // --replay のときだけ 1 つ(optional は tidy の警告が多いので使わない)
+
+            // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
+            std::vector<save::ReplayPlayer> replay;
         };
 
         class FrameLoop {
@@ -134,8 +145,8 @@ namespace bicameral::frame {
                   m_swapChain(std::move(parts.swapChain)),
                   m_sim(std::move(parts.simulation)),
                   m_view(std::move(parts.view)),
-                  m_replay(std::move(parts.replay)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
+                  m_replay(std::move(parts.replay)),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -145,69 +156,88 @@ namespace bicameral::frame {
             [[nodiscard]] int Run();
 
         private:
+            // --- 描画 ---
             bool RecordRenderLists();
             bool HandleResize();
+            void SubmitRender();
+            [[nodiscard]] bool SubmitScreenshot();
+            [[nodiscard]] bool WriteScreenshot();
 
+            // --- シミュの読み戻し ---
             void CollectSimSubmissions();
             void ReportSimReadback(const sim::ProbeFrameReadback& readback);
             void ReportEvents(const sim::ProbeFrameReadback& readback);
             void CollectFrameSlot(uint32_t slotIndex);
+
+            // --- コマンド(クリックと再生)---
             void QueueClicks();
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
-            void SubmitRender();
-            [[nodiscard]] bool SubmitScreenshot();
-            [[nodiscard]] bool WriteScreenshot();
+
+            // --- フレームの流れ ---
             bool RunFrame(Clock::time_point frameStart);
             int Finish(bool failed, Clock::time_point start);
-
             [[nodiscard]] bool IsDeviceLost() const;
-            void LogStats(const Stats& stats, Clock::duration elapsed, string_view label) const;
+
+            // --- 計測 ---
+            void LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const;
             void AddStats(const Stats& frame);
 
+            // --- 窓と GPU ---
             FrameLoopOptions m_options;
             std::unique_ptr<Window> m_window;
             gpu::Device m_device;
             gpu::Queue m_direct;
             gpu::Queue m_compute;
             gpu::SwapChain m_swapChain;
+
+            // --- シミュと表示 ---
             sim::ProbeSim m_sim;
             render::ProbeView m_view;
-            std::vector<save::ReplayPlayer> m_replay;  // 再生中なら 1 つ
-            save::ReplayRecorder m_recorder;           // --record のときだけ使う
             render::DebugViewController m_viewController;
+
+            // --- 記録・再生・画面の保存 ---
+            std::vector<save::ReplayPlayer> m_replay;             // 再生中なら 1 つ
+            save::ReplayRecorder m_recorder;                      // --record のときだけ使う
             std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で最後のフレームを写したら 1 つ
+
+            // --- 描画の枠 ---
             std::array<FrameSlot, FRAME_SLOT_COUNT> m_frames;
             ComPtr<ID3D12QueryHeap> m_renderTimestamps;
             ComPtr<ID3D12Resource> m_renderTimestampReadback;
+            uint64_t m_frameNumber = 0;  // 描いたフレームの数
 
+            // --- シミュの投入と抽出 ---
             SimScheduler m_scheduler;
             std::array<SimSubmission, SIM_SLOT_COUNT> m_simSubmissions;
             uint64_t m_simSubmissionCount = 0;
             uint64_t m_lastExtraction = 0;  // 最後に投げた抽出の番号
             CompletedExtraction m_completedExtraction;
+
             // 抽出の組ごとに、最後にそれを読んだ描画のフェンスの値
             std::array<uint64_t, sim::PROBE_EXTRACTION_COUNT> m_lastRenderReading{};
             sim::ProbeTickHash m_latestHash;  // 最後に読み戻した刻みの状態のハッシュ
+
+            // --- コマンド ---
             std::vector<sim::ProbeCommand> m_pendingCommands;
             std::vector<PendingClick> m_clicks;
             uint32_t m_nextSequence = 0;
-            uint64_t m_frameNumber = 0;  // 描いたフレームの数
+
+            // --- 計測 ---
             uint64_t m_computeFrequency = 0;
             uint64_t m_directFrequency = 0;
-
             Stats m_interval;  // この 1 秒
             Stats m_total;     // 全体
         };
 
         // --- 作る ---
 
-        expected<std::unique_ptr<Window>, std::string> CreateWindowForLoop() {
+        std::expected<std::unique_ptr<Window>, std::string> CreateWindowForLoop() {
             auto window = Window::Create(L"Bicameral Engine", INITIAL_CLIENT_WIDTH, INITIAL_CLIENT_HEIGHT);
             if (!window)
-                return unexpected(window.error());
+                return std::unexpected(window.error());
 
             (*window)->PumpMessages();
             (void)(*window)->TakeResized();  // 最初の WM_SIZE。スワップチェインはこの大きさで作る
@@ -215,16 +245,16 @@ namespace bicameral::frame {
             return window;
         }
 
-        expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
+        std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
             auto window = CreateWindowForLoop();
             if (!window)
-                return unexpected(window.error());
+                return std::unexpected(window.error());
 
             gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
             deviceOptions.presentMonitor = MonitorFromWindow((*window)->Handle(), MONITOR_DEFAULTTONEAREST);
             auto device = gpu::Device::Create(options.adapter, deviceOptions);
             if (!device)
-                return unexpected(device.error());
+                return std::unexpected(device.error());
 
             ID3D12Device5* native = device->Get();
 
@@ -235,29 +265,29 @@ namespace bicameral::frame {
 
             auto compute = gpu::Queue::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"Sim");
             if (!direct || !compute)
-                return unexpected("キューを作れない");
+                return std::unexpected("キューを作れない");
 
             auto swapChain = gpu::SwapChain::Create(native, device->Factory(), direct->Native(), (*window)->Handle(),
                                                     options.maxFrameLatency);
             if (!swapChain)
-                return unexpected(swapChain.error());
+                return std::unexpected(swapChain.error());
 
-            auto simulation =
-                sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                      {.busyIterations = options.simLoad, .busyPieces = options.simSplit});
+            auto simulation = sim::ProbeSim::Create(
+                native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                {.busyIterations = options.simLoad, .busyPieces = options.simSplit});
 
             if (!simulation)
-                return unexpected(simulation.error());
+                return std::unexpected(simulation.error());
 
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view)
-                return unexpected(view.error());
+                return std::unexpected(view.error());
 
             std::vector<save::ReplayPlayer> replay;
             if (!options.replayPath.empty()) {
                 auto player = save::ReplayPlayer::Load(options.replayPath);
                 if (!player)
-                    return unexpected(player.error());
+                    return std::unexpected(player.error());
 
                 replay.push_back(std::move(*player));
             }
@@ -381,8 +411,8 @@ namespace bicameral::frame {
             }
 
             gpu::AccumulateGraphStats(m_interval.conductGraph, readback.graphStats);
-            m_interval.simGpuMilliseconds +=
-                TimestampMilliseconds(readback.gpuBeginTimestamp, readback.gpuEndTimestamp, m_computeFrequency);
+            m_interval.simGpuMilliseconds += TimestampMilliseconds(readback.gpuBeginTimestamp, readback.gpuEndTimestamp,
+                                                                   m_computeFrequency);
             ++m_interval.simSubmissionsMeasured;
             m_interval.ticks += readback.hashes.size();
             if (!readback.hashes.empty())
@@ -443,10 +473,10 @@ namespace bicameral::frame {
             }
 
             std::array<uint64_t, size_t{FRAME_SLOT_COUNT} * TIMESTAMPS_PER_FRAME> timestamps{};
-            if (gpu::ReadBuffer(m_renderTimestampReadback.Get(), std::as_writable_bytes(span(timestamps)))) {
+            if (gpu::ReadBuffer(m_renderTimestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
                 const size_t first = size_t{slotIndex} * TIMESTAMPS_PER_FRAME;
-                const double milliseconds =
-                    TimestampMilliseconds(timestamps[first], timestamps[first + 1], m_directFrequency);
+                const double milliseconds = TimestampMilliseconds(timestamps[first], timestamps[first + 1],
+                                                                  m_directFrequency);
                 m_scheduler.ReportRenderTime(milliseconds);
                 m_interval.renderGpuMilliseconds += milliseconds;
                 ++m_interval.renderFramesMeasured;
@@ -460,11 +490,12 @@ namespace bicameral::frame {
         // 窓の入力: カメラと表示は再生中も動かせる。つつき(左クリックが断面に当たったセル)と自動のクリックはコマンドに
         void FrameLoop::QueueClicks() {
             const std::vector<InputEvent> events = m_window->TakeInputEvents();
-            std::vector<render::CellCoordinate> cells =
-                m_viewController.HandleInput(events, m_swapChain.Width(), m_swapChain.Height());
+            std::vector<render::CellCoordinate> cells = m_viewController.HandleInput(events, m_swapChain.Width(),
+                                                                                     m_swapChain.Height());
 
+            // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
             if (!m_replay.empty())
-                return;  // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
+                return;
 
             if (m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0) {
                 // z = PROBE_VIEW_Z の面の決まった場所を順に押す(人がいない確認用。表示やカメラに依らない)
@@ -646,7 +677,7 @@ namespace bicameral::frame {
             gpu::AccumulateGraphStats(m_total.conductGraph, frame.conductGraph);
         }
 
-        void FrameLoop::LogStats(const Stats& stats, Clock::duration elapsed, string_view label) const {
+        void FrameLoop::LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const {
             const double seconds = chr::duration<double>(elapsed).count();
             if (seconds <= 0.0 || stats.frames == 0)
                 return;
@@ -734,8 +765,9 @@ namespace bicameral::frame {
                 if (m_options.frameLimit > 0 && m_frameNumber >= m_options.frameLimit)
                     break;
 
+                // 最後のハッシュまで確かめた
                 if (!m_replay.empty() && m_replay.front().Finished())
-                    break;  // 最後のハッシュまで確かめた
+                    break;
 
                 if (m_window->TakeResized() && !HandleResize())
                     return Finish(true, start);

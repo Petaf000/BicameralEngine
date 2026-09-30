@@ -22,12 +22,12 @@ namespace bicameral::save {
 
     class ReplayRecorder {
     public:
-        void AddCommands(span<const sim::Command> commands);
+        void AddCommands(std::span<const sim::Command> commands);
         void AddHash(uint64_t tick, uint64_t hash);
 
         // 記録を再生ファイルの形にする(仮の世界。刻み 0 の全部 0 の状態から)
         [[nodiscard]] ReplayFile Build() const;
-        [[nodiscard]] expected<void, std::string> Write(const fs::path& path) const;
+        [[nodiscard]] std::expected<void, std::string> Write(const fs::path& path) const;
 
     private:
         std::vector<sim::Command> m_commands;
@@ -41,7 +41,7 @@ namespace bicameral::save {
         explicit ReplayPlayer(ReplayFile replay);
 
         // 仮の世界の再生ファイルを読む(刻み 0 の全部 0 の状態から始まるものだけ)
-        [[nodiscard]] static expected<ReplayPlayer, std::string> Load(const fs::path& path);
+        [[nodiscard]] static std::expected<ReplayPlayer, std::string> Load(const fs::path& path);
 
         // このフレームに GPU のキューへ足すコマンド(targetTick < applyTick + LOOKAHEAD_TICKS のものを、最大 limit 個)。
         // applyTick = まだ記録していない最初の適用の刻み。それより前のコマンドは間に合わないので捨てて失敗に数える
@@ -50,11 +50,15 @@ namespace bicameral::save {
         // 読み戻した S(tick) のハッシュを、ファイルにあれば突き合わせる(ファイルは間引いてあってよい)
         void CheckHash(uint64_t tick, uint64_t hash);
 
+        // --- 結果 ---
         [[nodiscard]] bool Finished() const { return m_nextHash == m_replay.tickHashes.size(); }
         [[nodiscard]] bool Passed() const { return Finished() && m_mismatches == 0 && m_lateCommands == 0; }
+
         [[nodiscard]] uint64_t Matches() const { return m_matches; }
         [[nodiscard]] uint64_t Mismatches() const { return m_mismatches; }
         [[nodiscard]] uint64_t LateCommands() const { return m_lateCommands; }
+
+        // --- ファイルの中身 ---
         [[nodiscard]] size_t HashCount() const { return m_replay.tickHashes.size(); }
         [[nodiscard]] size_t CommandCount() const { return m_replay.commands.size(); }
         [[nodiscard]] uint64_t LastTick() const {
@@ -63,8 +67,12 @@ namespace bicameral::save {
 
     private:
         ReplayFile m_replay;
-        size_t m_nextCommand = 0;
-        size_t m_nextHash = 0;
+
+        // --- どこまで進んだか ---
+        size_t m_nextCommand = 0;  // 次に足すコマンド
+        size_t m_nextHash = 0;     // 次に突き合わせるハッシュ
+
+        // --- 数えたもの ---
         uint64_t m_matches = 0;
         uint64_t m_mismatches = 0;
         uint64_t m_lateCommands = 0;

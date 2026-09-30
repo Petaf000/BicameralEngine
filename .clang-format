@@ -3,6 +3,7 @@
 BasedOnStyle: Google
 Standard: Latest
 ColumnLimit: 120               # 日本語コメントは 1 文字 2 桁で数えられるので広め
+PenaltyBreakAssignment: 1000       # 宣言・代入は = の直後で改行しない(右辺の引数の中で折り返す)
 IndentWidth: 4
 ContinuationIndentWidth: 4
 AccessModifierOffset: -4       # public: / private: は行頭

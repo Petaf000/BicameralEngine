@@ -5,8 +5,6 @@
 
 #include <windows.h>
 
-#include "core/aliases.h"
-
 namespace bicameral {
 
     std::string ToUtf8(std::wstring_view text) {
@@ -21,7 +19,7 @@ namespace bicameral {
         return result;
     }
 
-    std::wstring ToWide(string_view text) {
+    std::wstring ToWide(std::string_view text) {
         if (text.empty())
             return {};
 

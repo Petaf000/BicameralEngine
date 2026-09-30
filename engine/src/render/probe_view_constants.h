@@ -18,16 +18,21 @@ namespace bicameral::render {
     inline constexpr uint32_t VIEW_FLAG_ACTIVE_BLOCKS = 1u << 0;  // 活性なブロックを重ねる
     inline constexpr uint32_t VIEW_FLAG_LOGARITHMIC = 1u << 1;    // 色は対数(無ければ線形)
 
+    // 並びは probe_view.hlsl の LoadConstants と同じにする(16 バイトずつ読む)
     struct ProbeViewConstants {
+        // --- 何をどこに描くか ---
         uint32_t extractionIndex = 0;  // 読む抽出(0〜2)
-        uint32_t width = 0;            // 描く大きさ(px)
+        uint32_t width = 0;            // 描く大きさ(画素)
         uint32_t height = 0;
-        uint32_t flags = 0;
-        uint32_t mode = 0;  // DebugViewMode
-        uint32_t sliceAxis = 2;
-        uint32_t slicePosition = 0;
-        uint32_t orthographic = 0;
-        // カメラ(render/debug_camera.h の CameraBasis。w は使わない)
+        uint32_t flags = 0;  // VIEW_FLAG_* の組み合わせ
+
+        // --- 表示の仕方 ---
+        uint32_t mode = 0;           // DebugViewMode
+        uint32_t sliceAxis = 2;      // 断面の軸(0 = x・1 = y・2 = z)
+        uint32_t slicePosition = 0;  // 断面のセルの番号(クリックがつつく面)
+
+        // --- カメラ(render/debug_camera.h の CameraBasis。w は使わない)---
+        uint32_t orthographic = 0;  // 平行投影なら 1(0 なら透視)
         std::array<float, 4> position{};
         std::array<float, 4> forward{};
         std::array<float, 4> right{};

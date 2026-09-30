@@ -18,20 +18,23 @@ namespace bicameral::render {
     class ScreenshotCapture {
     public:
         // backBuffer と同じ大きさの読み戻しのバッファと、写すためのコマンドリストを作る
-        [[nodiscard]] static expected<ScreenshotCapture, std::string> Create(ID3D12Device* device,
-                                                                             ID3D12Resource* backBuffer);
+        [[nodiscard]] static std::expected<ScreenshotCapture, std::string> Create(ID3D12Device* device,
+                                                                                  ID3D12Resource* backBuffer);
 
         // PRESENT のバックバッファを写すリストを記録して返す(Present の前に direct キューへ投げる)
         [[nodiscard]] ID3D12CommandList* Record(ID3D12Resource* backBuffer);
 
         // 写したリストを GPU が終えた後に呼ぶ(RGBA8 → BMP の BGRA)
-        [[nodiscard]] expected<void, std::string> WriteBmp(const fs::path& path) const;
+        [[nodiscard]] std::expected<void, std::string> WriteBmp(const fs::path& path) const;
 
     private:
         ScreenshotCapture() = default;
 
+        // --- 写すリスト ---
         ComPtr<ID3D12CommandAllocator> m_allocator;
         ComPtr<ID3D12GraphicsCommandList> m_list;
+
+        // --- 写し先と、その並び ---
         ComPtr<ID3D12Resource> m_readback;
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_footprint{};
         uint32_t m_width = 0;

@@ -95,8 +95,8 @@ PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_CAPACITY = 1024;  // 2 の冪(番号を
 PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_HEADER_BYTES = 16;
 PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_TAIL = 0;  // 見出しの語の位置(× 4 バイト)
 PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_HEAD = 1;
-PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_BYTES =
-    PROBE_COMMAND_QUEUE_HEADER_BYTES + PROBE_COMMAND_QUEUE_CAPACITY * PROBE_COMMAND_BYTES;
+PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_BYTES = PROBE_COMMAND_QUEUE_HEADER_BYTES +
+                                                 PROBE_COMMAND_QUEUE_CAPACITY * PROBE_COMMAND_BYTES;
 
 // --- フレームの入力(アップロードのバッファ。CPU がフレームの枠ごとに書く)のレイアウト ---
 // [0]    見出し: このフレームにキューへ足すコマンドの数、重さの試験の 1 個あたりの繰り返し回数、足す場所(キューの末尾)、
@@ -136,8 +136,8 @@ PROBE_CONST uint32_t PROBE_STATS_NODE_WAKE = 0;            // WakeBlocks
 PROBE_CONST uint32_t PROBE_STATS_NODE_CONDUCT = 1;         // ConductBlock
 PROBE_CONST uint32_t PROBE_STATS_GAUGE_ACTIVE_LIST = 0;    // 刻みの活性の一覧の長さ(容量 PROBE_ACTIVE_LIST_CAPACITY)
 PROBE_CONST uint32_t PROBE_STATS_GAUGE_COMMAND_QUEUE = 1;  // 適用の時にキューで待っていたコマンドの数
-PROBE_CONST uint32_t PROBE_WAKE_MAX_RECORDS =
-    7;  // WakeBlocks の MaxRecords(自分と 6 面の隣。probe_conduct.hlsl の属性と同じ)
+// WakeBlocks の MaxRecords(自分と 6 面の隣。probe_conduct.hlsl の属性と同じ)
+PROBE_CONST uint32_t PROBE_WAKE_MAX_RECORDS = 7;
 
 // 重さの試験(--sim-load)の繰り返しの上限(1 刻みの合計。--sim-split で分けたときは 1 個あたりがこれを分けた数で割ったもの)。
 // これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない
@@ -152,8 +152,8 @@ PROBE_CONST uint32_t PROBE_MAX_BUSY_PIECES = 64;  // 1 刻みの重さを分け�
 PROBE_CONST uint32_t PROBE_TICK_EVENT_CAPACITY = 256;  // 並べる 1 グループのスレッド数と同じ(2 の冪。bitonic sort)
 PROBE_CONST uint32_t PROBE_TICK_EVENT_HEADER_BYTES = 16;
 PROBE_CONST uint32_t PROBE_TICK_EVENT_RECORD_BYTES = 8;
-PROBE_CONST uint32_t PROBE_TICK_EVENT_BYTES =
-    PROBE_TICK_EVENT_HEADER_BYTES + PROBE_TICK_EVENT_CAPACITY * PROBE_TICK_EVENT_RECORD_BYTES;
+PROBE_CONST uint32_t PROBE_TICK_EVENT_BYTES = PROBE_TICK_EVENT_HEADER_BYTES +
+                                              PROBE_TICK_EVENT_CAPACITY * PROBE_TICK_EVENT_RECORD_BYTES;
 // リング: 見出し 16 バイト([0] 書こうとした数 [1] 一時置き場で落とした数)+ 16 バイトのレコード × PROBE_EVENT_CAPACITY
 // レコード: [0] 刻みの下位 [1] 刻みの上位 [2] 種類 [3] 場所
 // 落とした数 = (書こうとした数 − 容量)+ 一時置き場で落とした数。溢れたときにどれが残るかは決めない(数えるだけ。イベントは View に渡すだけで世界の結果に入らない)
@@ -164,8 +164,8 @@ PROBE_CONST uint32_t PROBE_EVENT_BYTES = PROBE_EVENT_HEADER_BYTES + PROBE_EVENT_
 PROBE_CONST uint32_t PROBE_EVENT_HEADER_REQUESTED = 0;  // 見出しの語の位置(× 4 バイト)
 PROBE_CONST uint32_t PROBE_EVENT_HEADER_TICK_DROPPED = 1;
 PROBE_CONST uint32_t PROBE_EVENT_POKE_APPLIED = 1;  // 場所: x | y << 8 | z << 16(ProbePokePlace)
-PROBE_CONST uint32_t PROBE_EVENT_COMMAND_LATE =
-    2;  // 刻みを過ぎてから届いたコマンド(CPU の約束違反。捨てた)。場所: コマンドの種類
+// 刻みを過ぎてから届いたコマンド(CPU の約束違反。捨てた)。場所: コマンドの種類
+PROBE_CONST uint32_t PROBE_EVENT_COMMAND_LATE = 2;
 
 // --- 刻みごとの状態のハッシュ(GPU → CPU。06 §2 段 9)---
 // 表: PROBE_HASH_CAPACITY 個 × 32 バイト([0,1] 刻み [2,3] ハッシュ [4,5] 熱の合計 [6] その状態を作った刻みで予定したブロックの数 [7] 0)。

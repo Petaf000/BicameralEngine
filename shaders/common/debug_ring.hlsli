@@ -165,8 +165,8 @@ void DebugEmitAt(uint32_t kind, uint32_t sourceLine, DebugFormat format, A0 a0, 
 
 template <typename A0, typename A1, typename A2, typename A3>
 void DebugEmitAt(uint32_t kind, uint32_t sourceLine, DebugFormat format, A0 a0, A1 a1, A2 a2, A3 a3) {
-    const uint32_t kinds =
-        DebugArgKind(a0) | (DebugArgKind(a1) << 2) | (DebugArgKind(a2) << 4) | (DebugArgKind(a3) << 6);
+    const uint32_t kinds = DebugArgKind(a0) | (DebugArgKind(a1) << 2) | (DebugArgKind(a2) << 4) |
+                           (DebugArgKind(a3) << 6);
     DebugWrite(kind, sourceLine, format, 4, kinds, uint4(DebugArgWords(a0), DebugArgWords(a1)),
                uint4(DebugArgWords(a2), DebugArgWords(a3)), uint4(0, 0, 0, 0));
 }

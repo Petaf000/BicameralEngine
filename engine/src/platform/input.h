@@ -21,12 +21,16 @@ namespace bicameral {
 
     struct InputEvent {
         InputKind kind = InputKind::PointerMove;
+
+        // --- ポインタ ---
         PointerButton button = PointerButton::Left;
-        int32_t x = 0;
+        int32_t x = 0;  // 窓の中の位置(画素)
         int32_t y = 0;
         int32_t wheelSteps = 0;
+
+        // --- キー ---
         uint32_t key = 0;
-        bool shift = false;  // キーのときだけ: Shift を押しながら
+        bool shift = false;  // Shift を押しながら
     };
 
 }  // namespace bicameral

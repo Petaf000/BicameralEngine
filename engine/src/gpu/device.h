@@ -15,7 +15,6 @@
 #include <memory>
 #include <string>
 
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
@@ -43,7 +42,7 @@ namespace bicameral::gpu {
     class Device {
     public:
         // 失敗の理由は文字列で返す(Error として出すか、テストの失敗にするかは呼ぶ側が決める)
-        [[nodiscard]] static expected<Device, std::string> Create(
+        [[nodiscard]] static std::expected<Device, std::string> Create(
             AdapterKind kind, const DeviceOptions& options = DefaultDeviceOptions());
 
         [[nodiscard]] ID3D12Device5* Get() const { return m_device.Get(); }
@@ -59,8 +58,11 @@ namespace bicameral::gpu {
         struct MessageSink {
             std::atomic<uint32_t> errorCount = 0;
             std::atomic<uint32_t> warningCount = 0;
+
+            // コールバックの登録(破棄で外す)
             ComPtr<ID3D12InfoQueue1> infoQueue;
             DWORD callbackCookie = 0;
+
             ~MessageSink();
         };
 

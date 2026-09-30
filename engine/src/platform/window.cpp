@@ -4,7 +4,6 @@
 
 #include <utility>
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 
@@ -30,12 +29,12 @@ namespace bicameral {
 
     }  // namespace
 
-    expected<std::unique_ptr<Window>, std::string> Window::Create(std::wstring_view title, uint32_t clientWidth,
-                                                                  uint32_t clientHeight) {
+    std::expected<std::unique_ptr<Window>, std::string> Window::Create(std::wstring_view title, uint32_t clientWidth,
+                                                                       uint32_t clientHeight) {
         // 高 DPI の画面でぼやけないように、モニターごとの DPI を自分で扱うと宣言する(最初の窓より前)
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         if (!RegisterWindowClass(&Window::WindowProcedure))
-            return unexpected("窓のクラスを登録できない: " + DescribeHresult(HRESULT_FROM_WIN32(GetLastError())));
+            return std::unexpected("窓のクラスを登録できない: " + DescribeHresult(HRESULT_FROM_WIN32(GetLastError())));
 
         // 指定はクライアント領域の大きさ。枠の分を足して窓の大きさにする
         RECT rect{
@@ -50,7 +49,7 @@ namespace bicameral {
                                             nullptr, GetModuleHandleW(nullptr), window.get());
 
         if (handle == nullptr)
-            return unexpected("窓を作れない: " + DescribeHresult(HRESULT_FROM_WIN32(GetLastError())));
+            return std::unexpected("窓を作れない: " + DescribeHresult(HRESULT_FROM_WIN32(GetLastError())));
 
         ShowWindow(handle, SW_SHOWNORMAL);
 

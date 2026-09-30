@@ -8,7 +8,6 @@
 #include <optional>
 #include <vector>
 
-#include "core/aliases.h"
 #include "core/singleton.h"
 #include "render/debug_camera.h"
 #include "render/debug_view_controller.h"
@@ -44,17 +43,17 @@ namespace {
     };
 
     // 世界の点 → 画面の画素(RayThroughPixel の逆。right・up・forward は直交している)。カメラの後ろ・画面の外なら無し
-    optional<Pixel> Project(const CameraBasis& basis, Vector3 point) {
+    std::optional<Pixel> Project(const CameraBasis& basis, Vector3 point) {
         const Vector3 offset = point - basis.position;
         const float depth = Dot(offset, basis.forward);
         if (depth <= 0.0f)
-            return nullopt;
+            return std::nullopt;
 
         const float scale = basis.orthographic ? 1.0f : depth;
         const float u = Dot(offset, basis.right) / Dot(basis.right, basis.right) / scale;
         const float v = Dot(offset, basis.up) / Dot(basis.up, basis.up) / scale;
         if (std::abs(u) >= 1.0f || std::abs(v) >= 1.0f)
-            return nullopt;
+            return std::nullopt;
 
         return Pixel{.x = (u + 1.0f) * 0.5f * WIDTH, .y = (1.0f - v) * 0.5f * HEIGHT};
     }
@@ -100,8 +99,8 @@ namespace {
                     continue;
 
                 ++result.checked;
-                const auto picked =
-                    PickSliceCell(RayThroughPixel(basis, pixel->x, pixel->y, WIDTH, HEIGHT), axis, 20, GRID_SIZE);
+                const auto picked = PickSliceCell(RayThroughPixel(basis, pixel->x, pixel->y, WIDTH, HEIGHT), axis, 20,
+                                                  GRID_SIZE);
                 if (picked && *picked == cell)
                     ++result.matched;
             }
@@ -204,8 +203,8 @@ namespace {
         };
 
         EXPECT(front.HandleInput(drag, WIDTH, HEIGHT).empty());
-        EXPECT(std::abs(front.Camera().State().yawDegrees - -30.0f) <
-               1e-3f);  // 100 px × 0.3°(離した後の動きは効かない)
+        // 100 px × 0.3°(離した後の動きは効かない)
+        EXPECT(std::abs(front.Camera().State().yawDegrees - -30.0f) < 1e-3f);
 
         const ProbeViewConstants constants = front.Constants(2, WIDTH, HEIGHT);
         EXPECT(constants.extractionIndex == 2 && constants.width == WIDTH && constants.sliceAxis == 2);

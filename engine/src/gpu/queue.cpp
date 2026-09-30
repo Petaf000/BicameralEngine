@@ -1,24 +1,23 @@
 // queue.cpp — コマンドキューとフェンス(T-0004)。使い方は queue.h。
 #include "gpu/queue.h"
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
 
-    expected<Queue, std::string> Queue::Create(ID3D12Device* device, D3D12_COMMAND_LIST_TYPE type,
-                                               std::wstring_view name, D3D12_COMMAND_QUEUE_PRIORITY priority) {
+    std::expected<Queue, std::string> Queue::Create(ID3D12Device* device, D3D12_COMMAND_LIST_TYPE type,
+                                                    std::wstring_view name, D3D12_COMMAND_QUEUE_PRIORITY priority) {
         Queue queue;
         const D3D12_COMMAND_QUEUE_DESC desc{.Type = type, .Priority = priority};
         HRESULT result = device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue.m_queue));
         if (FAILED(result))
-            return unexpected("コマンドキューを作れない: " + DescribeHresult(result));
+            return std::unexpected("コマンドキューを作れない: " + DescribeHresult(result));
 
         result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&queue.m_fence));
         if (FAILED(result))
-            return unexpected("フェンスを作れない: " + DescribeHresult(result));
+            return std::unexpected("フェンスを作れない: " + DescribeHresult(result));
 
         queue.m_queue->SetName(std::wstring(name).c_str());
         queue.m_fence->SetName((std::wstring(name) + L".fence").c_str());
@@ -26,7 +25,7 @@ namespace bicameral::gpu {
         return queue;
     }
 
-    uint64_t Queue::Submit(span<ID3D12CommandList* const> lists) {
+    uint64_t Queue::Submit(std::span<ID3D12CommandList* const> lists) {
         if (!lists.empty())
             m_queue->ExecuteCommandLists(static_cast<UINT>(lists.size()), lists.data());
 

@@ -62,8 +62,9 @@ namespace bicameral::frame {
 
         while (count < m_settings.maxUnitsPerFrame) {
             const bool startsTick = m_cursor.unit == 0;
+            // 現実の時間より先へは進めない
             if (startsTick && m_pendingTicks < 1.0)
-                break;  // 現実の時間より先へは進めない
+                break;
 
             const double estimate = EstimateMilliseconds(m_cursor.unit, budget);
             if (count > 0 && used + estimate > budget)

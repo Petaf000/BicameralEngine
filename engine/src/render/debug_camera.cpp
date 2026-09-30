@@ -6,8 +6,6 @@
 #include <cmath>
 #include <numbers>
 
-#include "core/aliases.h"
-
 namespace bicameral::render {
     namespace {
 
@@ -87,8 +85,8 @@ namespace bicameral::render {
 
         const Axes axes = CameraAxes(m_state);
         const float cellsPerPixel = 2.0f * HalfHeightAtTarget(m_state.distance) / static_cast<float>(viewportHeight);
-        m_state.target =
-            m_state.target - axes.right * (deltaXPixels * cellsPerPixel) + axes.up * (deltaYPixels * cellsPerPixel);
+        m_state.target = m_state.target - axes.right * (deltaXPixels * cellsPerPixel) +
+                         axes.up * (deltaYPixels * cellsPerPixel);
     }
 
     void OrbitCamera::Zoom(int32_t wheelSteps) {
@@ -131,17 +129,18 @@ namespace bicameral::render {
         return {.origin = basis.position, .direction = basis.forward + offset};
     }
 
-    optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane, uint32_t gridSize) {
+    std::optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane,
+                                                uint32_t gridSize) {
         if (axis > 2 || plane >= gridSize)
-            return nullopt;
+            return std::nullopt;
 
         const float along = ray.direction[axis];
         if (std::abs(along) < PARALLEL_EPSILON)
-            return nullopt;
+            return std::nullopt;
 
         const float distance = (static_cast<float>(plane) + 0.5f - ray.origin[axis]) / along;
         if (distance < 0.0f)
-            return nullopt;
+            return std::nullopt;
 
         const Vector3 hit = ray.origin + ray.direction * distance;
 
@@ -154,8 +153,9 @@ namespace bicameral::render {
             }
 
             const float value = std::floor(hit[index]);
+            // NaN も外
             if (!(value >= 0.0f && value < static_cast<float>(gridSize)))
-                return nullopt;  // NaN も外
+                return std::nullopt;
 
             cell[index] = static_cast<uint32_t>(value);
         }

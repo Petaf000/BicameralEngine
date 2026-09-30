@@ -21,7 +21,6 @@
 #include <vector>
 
 #include "common/debug_ring.hlsli"
-#include "core/aliases.h"
 #include "core/log.h"
 #include "gpu/readback_ring.h"
 
@@ -31,14 +30,16 @@ namespace bicameral::gpu {
     struct DebugMessage {
         DebugFormat format = DebugFormat::Count;  // 知らない番号なら Count
         bool isAssert = false;
-        uint32_t line = 0;               // シェーダーのソースの行(__LINE__)
+        uint32_t line = 0;  // シェーダーのソースの行(__LINE__)
+
+        // --- 書式の一覧から ---
         Channel channel = Channel::Gpu;  // 書式の一覧のチャンネル
-        string_view where;               // 書式の一覧の「場所」(ファイル名かノード名)
+        std::string_view where;          // 書式の一覧の「場所」(ファイル名かノード名)
         std::string text;                // 書式に引数を当てはめたもの
     };
 
     // 1 レコード(16 語)を読む。知らない書式の番号や、書式と引数が合わないときも、生の値を並べた文字列にする
-    [[nodiscard]] DebugMessage DecodeDebugRecord(span<const uint32_t, DEBUG_RECORD_WORDS> record);
+    [[nodiscard]] DebugMessage DecodeDebugRecord(std::span<const uint32_t, DEBUG_RECORD_WORDS> record);
 
     struct DebugRingContents {
         uint32_t requestedCount = 0;         // シェーダーが書こうとした数
@@ -52,7 +53,7 @@ namespace bicameral::gpu {
         // 1 回の Drain() でログに出す行の数の既定。残りは件数だけ出す(リングは毎フレーム数千件になりうる)
         static constexpr uint32_t DEFAULT_MAX_LOGGED_MESSAGES = 32;
 
-        [[nodiscard]] static expected<DebugRing, std::string> Create(ID3D12Device* device, uint32_t slotCount = 1);
+        [[nodiscard]] static std::expected<DebugRing, std::string> Create(ID3D12Device* device, uint32_t slotCount = 1);
 
         // ルートの UAV(u0 space1)に渡すアドレス
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS GpuAddress() const { return m_ring.GpuAddress(); }

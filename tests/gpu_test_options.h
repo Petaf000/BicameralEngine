@@ -8,7 +8,6 @@
 #include <span>
 #include <string_view>
 
-#include "core/aliases.h"
 #include "core/log.h"
 #include "gpu/device.h"
 
@@ -23,30 +22,30 @@ namespace bicameral::test {
         return type == D3D12_COMMAND_LIST_TYPE_DIRECT ? "direct" : "compute";
     }
 
-    // 知らない引数があれば nullopt(呼ぶ側が使い方を出して終える)
-    inline optional<GpuTestOptions> ParseGpuTestOptions(span<char*> arguments) {
+    // 知らない引数があれば std::nullopt(呼ぶ側が使い方を出して終える)
+    inline std::optional<GpuTestOptions> ParseGpuTestOptions(std::span<char*> arguments) {
         GpuTestOptions options;
         for (size_t index = 1; index < arguments.size(); ++index) {
-            const string_view argument = arguments[index];
+            const std::string_view argument = arguments[index];
             const bool hasValue = index + 1 < arguments.size();
             if (argument == "--warp")
                 options.adapter = gpu::AdapterKind::Warp;
             else if (argument == "--queue" && hasValue) {
-                const string_view queue = arguments[++index];
+                const std::string_view queue = arguments[++index];
                 if (queue != "direct" && queue != "compute")
-                    return nullopt;
+                    return std::nullopt;
 
-                options.queueType =
-                    queue == "direct" ? D3D12_COMMAND_LIST_TYPE_DIRECT : D3D12_COMMAND_LIST_TYPE_COMPUTE;
+                options.queueType = queue == "direct" ? D3D12_COMMAND_LIST_TYPE_DIRECT
+                                                      : D3D12_COMMAND_LIST_TYPE_COMPUTE;
             } else
-                return nullopt;
+                return std::nullopt;
         }
 
         return options;
     }
 
     // debug layer(debug プリセットで有効。T-0003)がエラーを報告していたら false。テストの最後に呼び、false なら失敗にする
-    inline bool PassesValidation(const gpu::Device& device, string_view testName) {
+    inline bool PassesValidation(const gpu::Device& device, std::string_view testName) {
         const uint32_t errorCount = device.ValidationErrorCount();
         if (errorCount == 0)
             return true;

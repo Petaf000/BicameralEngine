@@ -97,7 +97,7 @@ namespace {
         std::vector<std::byte> truncated = *bytes;
         truncated.pop_back();
         EXPECT(!save::ParseReplay(truncated).has_value());
-        EXPECT(!save::ParseReplay(span(*bytes).first(10)).has_value());
+        EXPECT(!save::ParseReplay(std::span(*bytes).first(10)).has_value());
 
         std::vector<std::byte> hugeCount = *bytes;
         const uint64_t huge = ~0ull;

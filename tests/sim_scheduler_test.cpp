@@ -9,8 +9,6 @@
 #include <span>
 #include <vector>
 
-#include "core/aliases.h"
-
 namespace {
 
     using namespace bicameral;
@@ -35,7 +33,7 @@ namespace {
     };
 
     // frames 回、seconds ずつ時間を進め、毎フレーム TakeUnits して、その単位の時間(unitMilliseconds)を報告する
-    RunTotals RunFrames(SimScheduler& scheduler, int frames, double seconds, span<const double> unitMilliseconds,
+    RunTotals RunFrames(SimScheduler& scheduler, int frames, double seconds, std::span<const double> unitMilliseconds,
                         double renderMilliseconds = 2.0, double speedScale = 1.0) {
         RunTotals totals;
         const uint64_t firstTick = scheduler.Cursor().tick;
@@ -142,8 +140,9 @@ namespace {
         for (uint32_t unit = 0; unit < 2; ++unit)
             scheduler.ReportUnitTime(unit, 0.1);
 
+        // 1.25 刻みずつ → 12.5(上限 8 を超えた分は捨てる)
         for (int frame = 0; frame < 10; ++frame)
-            scheduler.AddRealTime(1.0 / 48.0);  // 1.25 刻みずつ → 12.5(上限 8 を超えた分は捨てる)
+            scheduler.AddRealTime(1.0 / 48.0);
 
         EXPECT(scheduler.PendingTicks() < 9.0);
         EXPECT(scheduler.TakeUnits() == 16);  // 8 刻み分(残りは捨てた)

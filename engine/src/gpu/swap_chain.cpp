@@ -1,7 +1,6 @@
 // swap_chain.cpp — フリップモデルの待てるスワップチェイン(T-0004)。使い方は swap_chain.h。
 #include "gpu/swap_chain.h"
 
-#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "gpu/com_ptr.h"
@@ -20,9 +19,9 @@ namespace bicameral::gpu {
 
     }  // namespace
 
-    expected<SwapChain, std::string> SwapChain::Create(ID3D12Device* device, IDXGIFactory6* factory,
-                                                       ID3D12CommandQueue* directQueue, HWND window,
-                                                       uint32_t maxFrameLatency) {
+    std::expected<SwapChain, std::string> SwapChain::Create(ID3D12Device* device, IDXGIFactory6* factory,
+                                                            ID3D12CommandQueue* directQueue, HWND window,
+                                                            uint32_t maxFrameLatency) {
         SwapChain swapChain;
         swapChain.m_tearingSupported = IsTearingSupported(factory);
         const DXGI_SWAP_CHAIN_DESC1 desc{
@@ -41,16 +40,16 @@ namespace bicameral::gpu {
         ComPtr<IDXGISwapChain1> swapChain1;
         HRESULT result = factory->CreateSwapChainForHwnd(directQueue, window, &desc, nullptr, nullptr, &swapChain1);
         if (FAILED(result))
-            return unexpected("スワップチェインを作れない: " + DescribeHresult(result));
+            return std::unexpected("スワップチェインを作れない: " + DescribeHresult(result));
 
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);  // 全画面の切り替えは自分でやる(今は無し)
         result = swapChain1.As(&swapChain.m_swapChain);
         if (FAILED(result))
-            return unexpected("IDXGISwapChain3 が無い: " + DescribeHresult(result));
+            return std::unexpected("IDXGISwapChain3 が無い: " + DescribeHresult(result));
 
         result = swapChain.m_swapChain->SetMaximumFrameLatency(maxFrameLatency);
         if (FAILED(result))
-            return unexpected("先行するフレームの数を設定できない: " + DescribeHresult(result));
+            return std::unexpected("先行するフレームの数を設定できない: " + DescribeHresult(result));
 
         swapChain.m_frameLatencyWaitable.reset(swapChain.m_swapChain->GetFrameLatencyWaitableObject());
 
@@ -58,11 +57,11 @@ namespace bicameral::gpu {
                                                   .NumDescriptors = BUFFER_COUNT};
         result = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&swapChain.m_rtvHeap));
         if (FAILED(result))
-            return unexpected("RTV のヒープを作れない: " + DescribeHresult(result));
+            return std::unexpected("RTV のヒープを作れない: " + DescribeHresult(result));
 
         swapChain.m_rtvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         if (!swapChain.AcquireBuffers(device))
-            return unexpected("バックバッファを取れない");
+            return std::unexpected("バックバッファを取れない");
 
         Log(Channel::Gpu, Level::Info, "スワップチェイン: {}×{}  {} 枚  先行 {} フレーム  tearing {}",
             swapChain.m_width, swapChain.m_height, BUFFER_COUNT, maxFrameLatency,
@@ -82,7 +81,7 @@ namespace bicameral::gpu {
             if (!BICAMERAL_CHECK_HR(Channel::Gpu, m_swapChain->GetBuffer(index, IID_PPV_ARGS(&m_buffers[index]))))
                 return false;
 
-            m_buffers[index]->SetName(format(L"BackBuffer{}", index).c_str());
+            m_buffers[index]->SetName(std::format(L"BackBuffer{}", index).c_str());
             device->CreateRenderTargetView(m_buffers[index].Get(), nullptr, RenderTargetView(index));
         }
 

@@ -42,11 +42,14 @@ namespace bicameral::save {
     };
 
     struct ReplayFile {
+        // --- どの世界の、どの状態から始まるか ---
         ReplayWorld world = ReplayWorld::Probe;
-        uint64_t tableVersion = 0;               // 反応表などの版(パッケージの一覧のハッシュ。13 §2)。仮の世界は 0
-        uint64_t seed = 0;                       // 世界の生成のシード(D-312)
-        uint64_t startTick = 0;                  // 初期状態の刻み
-        std::vector<std::byte> initialDelta;     // シードからの差分(05 §6)。仮の世界は空
+        uint64_t tableVersion = 0;            // 反応表などの版(パッケージの一覧のハッシュ。13 §2)。仮の世界は 0
+        uint64_t seed = 0;                    // 世界の生成のシード(D-312)
+        uint64_t startTick = 0;               // 初期状態の刻み
+        std::vector<std::byte> initialDelta;  // シードからの差分(05 §6)。仮の世界は空
+
+        // --- 進め方と検査 ---
         std::vector<sim::Command> commands;      // (targetTick, sequence) の昇順
         std::vector<ReplayTickHash> tickHashes;  // 刻みの昇順
 
@@ -54,10 +57,10 @@ namespace bicameral::save {
     };
 
     // バイト列との変換(ファイルを介さないテスト用にも)
-    [[nodiscard]] expected<std::vector<std::byte>, std::string> SerializeReplay(const ReplayFile& replay);
-    [[nodiscard]] expected<ReplayFile, std::string> ParseReplay(span<const std::byte> bytes);
+    [[nodiscard]] std::expected<std::vector<std::byte>, std::string> SerializeReplay(const ReplayFile& replay);
+    [[nodiscard]] std::expected<ReplayFile, std::string> ParseReplay(std::span<const std::byte> bytes);
 
-    [[nodiscard]] expected<void, std::string> WriteReplayFile(const fs::path& path, const ReplayFile& replay);
-    [[nodiscard]] expected<ReplayFile, std::string> ReadReplayFile(const fs::path& path);
+    [[nodiscard]] std::expected<void, std::string> WriteReplayFile(const fs::path& path, const ReplayFile& replay);
+    [[nodiscard]] std::expected<ReplayFile, std::string> ReadReplayFile(const fs::path& path);
 
 }  // namespace bicameral::save

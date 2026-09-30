@@ -12,7 +12,6 @@
 #include <array>
 #include <vector>
 
-#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/com_ptr.h"
@@ -44,7 +43,7 @@ namespace {
     struct Failures {
         int count = 0;
 
-        void Check(bool condition, string_view what) {
+        void Check(bool condition, std::string_view what) {
             if (condition)
                 return;
 
@@ -149,8 +148,8 @@ namespace {
             fan.peakRequestedOutputs = std::max(fan.peakRequestedOutputs, record.fanRequest);
             expected.nodes[NODE_LEAF].launches += granted;
             expected.nodes[NODE_LEAF].inputRecords += granted;
-            expected.gaugePeaks[GAUGE_FAN_REQUEST] =
-                std::max(expected.gaugePeaks[GAUGE_FAN_REQUEST], record.fanRequest);
+            expected.gaugePeaks[GAUGE_FAN_REQUEST] = std::max(expected.gaugePeaks[GAUGE_FAN_REQUEST],
+                                                              record.fanRequest);
 
             const uint32_t depth = std::min(record.chainRequest, CHAIN_MAX_DEPTH);
             gpu::GraphNodeCounters& chain = expected.nodes[NODE_CHAIN];
@@ -199,26 +198,26 @@ namespace {
         bool initialized = false;
     };
 
-    expected<ProbeContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
+    std::expected<ProbeContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
         const auto library = gpu::LoadShader("sim/work_graph_limits_probe.cso");
         if (!library)
-            return unexpected(library.error());
+            return std::unexpected(library.error());
 
         ComPtr<ID3D12RootSignature> rootSignature = gpu::CreateRootSignature(device, GRAPH_LAYOUT);
         if (!rootSignature)
-            return unexpected("ルート署名を作れない");
+            return std::unexpected("ルート署名を作れない");
 
         auto graph = gpu::WorkGraph::Create(device, rootSignature.Get(), *library, L"WorkGraphLimitsProbe");
         if (!graph)
-            return unexpected(graph.error());
+            return std::unexpected(graph.error());
 
         auto stats = gpu::WorkGraphStats::Create(device, MakeLayout());
         if (!stats)
-            return unexpected(stats.error());
+            return std::unexpected(stats.error());
 
         auto ring = gpu::DebugRing::Create(device);
         if (!ring)
-            return unexpected(ring.error());
+            return std::unexpected(ring.error());
 
         return ProbeContext{.queue = &queue,
                             .rootSignature = std::move(rootSignature),
@@ -232,14 +231,14 @@ namespace {
         gpu::DebugRingContents messages;
     };
 
-    expected<RunOutput, std::string> RunScenario(ProbeContext& context, const Scenario& scenario) {
+    std::expected<RunOutput, std::string> RunScenario(ProbeContext& context, const Scenario& scenario) {
         const uint32_t entrypoint = context.graph.EntrypointIndex(L"Spawn");
         if (entrypoint == UINT32_MAX)
-            return unexpected("入口のノード Spawn が無い");
+            return std::unexpected("入口のノード Spawn が無い");
 
         ID3D12GraphicsCommandList10* list = context.queue->Begin();
         if (list == nullptr)
-            return unexpected("コマンドリストを始められない");
+            return std::unexpected("コマンドリストを始められない");
 
         context.ring.RecordBegin(list);
         context.stats.RecordBegin(list);
@@ -253,11 +252,11 @@ namespace {
         context.stats.RecordReadbackAndReset(list);
         context.ring.RecordReadbackAndReset(list);
         if (!context.queue->ExecuteAndWait())
-            return unexpected("GPU での実行に失敗");
+            return std::unexpected("GPU での実行に失敗");
 
         auto stats = context.stats.Read();
         if (!stats)
-            return unexpected(stats.error());
+            return std::unexpected(stats.error());
 
         return RunOutput{.stats = std::move(*stats), .messages = context.ring.Drain()};
     }
@@ -282,8 +281,8 @@ namespace {
     // 止めたときの printf: 場所がノード名で、行が付き、チャンネルが WorkGraph
     void CheckPrints(const Scenario& scenario, const gpu::DebugRingContents& messages, Failures& failures) {
         failures.Check(messages.messages.size() == scenario.expectedPrints && messages.assertCount == 0,
-                       format("{}: ノードの printf の数 {}(期待 {})", scenario.name, messages.messages.size(),
-                              scenario.expectedPrints));
+                       std::format("{}: ノードの printf の数 {}(期待 {})", scenario.name, messages.messages.size(),
+                                   scenario.expectedPrints));
 
         for (const gpu::DebugMessage& message : messages.messages) {
             Log(Channel::WorkGraph, Level::Info, "  printf: {}:{} {}", message.where, message.line, message.text);
@@ -297,11 +296,11 @@ namespace {
                                message.text == "レコード 3: 深さ 8 で再帰の上限(自分へ出さない)";
 
             failures.Check((fan || chain) && message.line > 0 && message.channel == Channel::WorkGraph,
-                           format("{}: printf の中身と場所 → {}", scenario.name, message.text));
+                           std::format("{}: printf の中身と場所 → {}", scenario.name, message.text));
         }
     }
 
-    expected<void, std::string> RunGpuTests(ProbeContext& context, Failures& failures) {
+    std::expected<void, std::string> RunGpuTests(ProbeContext& context, Failures& failures) {
         // 「越える」の後にもう一度「ふつう」: 前の分が残っていないか
         std::vector<Scenario> scenarios = MakeScenarios();
         scenarios.push_back(scenarios.front());
@@ -309,7 +308,7 @@ namespace {
         for (const Scenario& scenario : scenarios) {
             const auto output = RunScenario(context, scenario);
             if (!output)
-                return unexpected(output.error());
+                return std::unexpected(output.error());
 
             const gpu::GraphStatsSnapshot expected = ExpectedStats(scenario.records);
             Log(Channel::WorkGraph, Level::Info, "{}: {}", scenario.name,
@@ -318,13 +317,13 @@ namespace {
             if (!match)
                 LogMismatch(context.stats.Layout(), output->stats, expected);
 
-            failures.Check(match, format("{}: カウンタが CPU の予想と一致", scenario.name));
+            failures.Check(match, std::format("{}: カウンタが CPU の予想と一致", scenario.name));
             // Report は Warning をログへ出す(わざと)。見つかったものは毎回全部返る
             const std::vector<gpu::GraphFinding> findings = context.stats.Report(output->stats);
 
             failures.Check(Kinds(findings) == scenario.expectedFindings,
-                           format("{}: 上限の検出({} 件、期待 {} 件)", scenario.name, findings.size(),
-                                  scenario.expectedFindings.size()));
+                           std::format("{}: 上限の検出({} 件、期待 {} 件)", scenario.name, findings.size(),
+                                       scenario.expectedFindings.size()));
 
             CheckPrints(scenario, output->messages, failures);
         }
@@ -332,7 +331,7 @@ namespace {
         return {};
     }
 
-    int Run(span<char*> arguments) {
+    int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error, "使い方: gpu_work_graph_stats_test [--warp] [--queue direct|compute]");
@@ -353,8 +352,8 @@ namespace {
         }
 
         auto queue = gpu::ImmediateQueue::Create(device->Get(), options->queueType);
-        auto context = queue ? CreateContext(device->Get(), *queue) : unexpected(queue.error());
-        const auto result = context ? RunGpuTests(*context, failures) : unexpected(context.error());
+        auto context = queue ? CreateContext(device->Get(), *queue) : std::unexpected(queue.error());
+        const auto result = context ? RunGpuTests(*context, failures) : std::unexpected(context.error());
 
         if (!result) {
             Log(Channel::WorkGraph, Level::Error, "gpu_work_graph_stats_test: FAILED ({})", result.error());
@@ -377,7 +376,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int exitCode = Run(span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
     SingletonFinalizer::Finalize();  // ログを閉じる
 
     return exitCode;

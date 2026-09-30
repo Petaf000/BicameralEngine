@@ -23,17 +23,23 @@ namespace bicameral::save {
         constexpr uint64_t MAX_FILE_BYTES = uint64_t{1} << 30;
 
         // ファイルの先頭 64 バイト(replay_file.h の表)
+        // ファイルの先頭 64 バイト(並びは replay_file.h の先頭の表)
         struct Header {
-            std::array<char, 4> magic = MAGIC;
-            uint32_t formatVersion = REPLAY_FORMAT_VERSION;
-            uint32_t world = 0;
-            uint32_t reserved = 0;
-            uint64_t tableVersion = 0;
-            uint64_t seed = 0;
-            uint64_t startTick = 0;
-            uint64_t deltaBytes = 0;
-            uint64_t commandCount = 0;
-            uint64_t hashCount = 0;
+            // --- 形の確認 ---
+            std::array<char, 4> magic = MAGIC;               // "BCRP"
+            uint32_t formatVersion = REPLAY_FORMAT_VERSION;  // 形式の版
+
+            // --- どの世界の、どの状態から始まるか ---
+            uint32_t world = 0;         // ReplayWorld
+            uint32_t reserved = 0;      // 0(後ろの u64 を 8 バイトの境界に揃える)
+            uint64_t tableVersion = 0;  // 反応表などの版
+            uint64_t seed = 0;          // 世界の生成のシード
+            uint64_t startTick = 0;     // 初期状態の刻み
+
+            // --- 後ろに続くものの大きさ ---
+            uint64_t deltaBytes = 0;    // 初期状態の差分のバイト数
+            uint64_t commandCount = 0;  // コマンドの数
+            uint64_t hashCount = 0;     // ハッシュの数
         };
 
         static_assert(sizeof(Header) == HEADER_BYTES);
@@ -43,10 +49,10 @@ namespace bicameral::save {
         }
 
         // 見出しの数から全体の大きさ(桁あふれしないように、上限で先に切る)
-        expected<uint64_t, std::string> ExpectedBytes(const Header& header) {
+        std::expected<uint64_t, std::string> ExpectedBytes(const Header& header) {
             if (header.deltaBytes > MAX_FILE_BYTES || header.commandCount > MAX_FILE_BYTES / sim::COMMAND_BYTES ||
                 header.hashCount > MAX_FILE_BYTES / HASH_BYTES) {
-                return unexpected("再生ファイルの見出しの数が大きすぎる");
+                return std::unexpected("再生ファイルの見出しの数が大きすぎる");
             }
 
             return HEADER_BYTES + AlignUp(header.deltaBytes) + header.commandCount * sim::COMMAND_BYTES +
@@ -54,21 +60,21 @@ namespace bicameral::save {
         }
 
         // 並びの約束: コマンドは (targetTick, sequence) の昇順、ハッシュは刻みの昇順。どちらも初期状態の刻みから
-        expected<void, std::string> CheckOrder(const ReplayFile& replay) {
+        std::expected<void, std::string> CheckOrder(const ReplayFile& replay) {
             for (size_t index = 0; index < replay.commands.size(); ++index) {
                 const sim::Command& command = replay.commands[index];
                 if (command.targetTick < replay.startTick) {
-                    return unexpected(format("コマンド {} の刻み {} が初期状態の刻み {} より前", index,
-                                             command.targetTick, replay.startTick));
+                    return std::unexpected(std::format("コマンド {} の刻み {} が初期状態の刻み {} より前", index,
+                                                       command.targetTick, replay.startTick));
                 }
 
                 if (index > 0 && !sim::CommandPrecedes(replay.commands[index - 1], command))
-                    return unexpected(format("コマンド {} が (刻み, 番号) の昇順になっていない", index));
+                    return std::unexpected(std::format("コマンド {} が (刻み, 番号) の昇順になっていない", index));
             }
 
             for (size_t index = 1; index < replay.tickHashes.size(); ++index) {
                 if (replay.tickHashes[index - 1].tick >= replay.tickHashes[index].tick)
-                    return unexpected(format("ハッシュ {} が刻みの昇順になっていない", index));
+                    return std::unexpected(std::format("ハッシュ {} が刻みの昇順になっていない", index));
             }
 
             return {};
@@ -79,13 +85,13 @@ namespace bicameral::save {
             return ToUtf8(path.wstring());
         }
 
-        void Append(std::vector<std::byte>& bytes, span<const std::byte> source) {
+        void Append(std::vector<std::byte>& bytes, std::span<const std::byte> source) {
             bytes.insert(bytes.end(), source.begin(), source.end());
         }
 
         // offset から values の大きさだけ写す(大きさは呼ぶ前に確かめてある)
         template <typename T>
-        void CopyOut(span<const std::byte> bytes, uint64_t offset, span<T> values) {
+        void CopyOut(std::span<const std::byte> bytes, uint64_t offset, std::span<T> values) {
             if (values.empty())
                 return;
 
@@ -96,9 +102,9 @@ namespace bicameral::save {
 
     // --- 書く ---
 
-    expected<std::vector<std::byte>, std::string> SerializeReplay(const ReplayFile& replay) {
+    std::expected<std::vector<std::byte>, std::string> SerializeReplay(const ReplayFile& replay) {
         if (auto order = CheckOrder(replay); !order)
-            return unexpected(order.error());
+            return std::unexpected(order.error());
 
         const Header header{.world = static_cast<uint32_t>(replay.world),
                             .tableVersion = replay.tableVersion,
@@ -110,61 +116,62 @@ namespace bicameral::save {
 
         const auto total = ExpectedBytes(header);
         if (!total)
-            return unexpected(total.error());
+            return std::unexpected(total.error());
 
         std::vector<std::byte> bytes;
         bytes.reserve(*total);
-        Append(bytes, std::as_bytes(span(&header, 1)));
+        Append(bytes, std::as_bytes(std::span(&header, 1)));
         Append(bytes, replay.initialDelta);
         bytes.resize(HEADER_BYTES + AlignUp(replay.initialDelta.size()), std::byte{0});
-        Append(bytes, std::as_bytes(span(replay.commands)));
+        Append(bytes, std::as_bytes(std::span(replay.commands)));
 
         for (const ReplayTickHash& entry : replay.tickHashes) {
             const std::array<uint64_t, 2> words = {entry.tick, entry.hash};
-            Append(bytes, std::as_bytes(span(words)));
+            Append(bytes, std::as_bytes(std::span(words)));
         }
 
         return bytes;
     }
 
-    expected<void, std::string> WriteReplayFile(const fs::path& path, const ReplayFile& replay) {
+    std::expected<void, std::string> WriteReplayFile(const fs::path& path, const ReplayFile& replay) {
         const auto bytes = SerializeReplay(replay);
         if (!bytes)
-            return unexpected(bytes.error());
+            return std::unexpected(bytes.error());
 
         std::ofstream file(path, std::ios::binary | std::ios::trunc);
         file.write(reinterpret_cast<const char*>(bytes->data()), static_cast<std::streamsize>(bytes->size()));
         if (!file)
-            return unexpected(format("再生ファイルを書けない: {}", PathText(path)));
+            return std::unexpected(std::format("再生ファイルを書けない: {}", PathText(path)));
 
         return {};
     }
 
     // --- 読む ---
 
-    expected<ReplayFile, std::string> ParseReplay(span<const std::byte> bytes) {
+    std::expected<ReplayFile, std::string> ParseReplay(std::span<const std::byte> bytes) {
         Header header;
         if (bytes.size() < HEADER_BYTES)
-            return unexpected("再生ファイルが見出しより短い");
+            return std::unexpected("再生ファイルが見出しより短い");
 
         std::memcpy(&header, bytes.data(), HEADER_BYTES);
         if (header.magic != MAGIC)
-            return unexpected("再生ファイルではない(先頭が BCRP でない)");
+            return std::unexpected("再生ファイルではない(先頭が BCRP でない)");
 
         if (header.formatVersion != REPLAY_FORMAT_VERSION) {
-            return unexpected(format("再生ファイルの形式の版 {} は読めない(読めるのは {})", header.formatVersion,
-                                     REPLAY_FORMAT_VERSION));
+            return std::unexpected(std::format("再生ファイルの形式の版 {} は読めない(読めるのは {})",
+                                               header.formatVersion, REPLAY_FORMAT_VERSION));
         }
 
         if (header.world != static_cast<uint32_t>(ReplayWorld::Probe))
-            return unexpected(format("知らない世界の種類 {}", header.world));
+            return std::unexpected(std::format("知らない世界の種類 {}", header.world));
 
         const auto total = ExpectedBytes(header);
         if (!total)
-            return unexpected(total.error());
+            return std::unexpected(total.error());
 
         if (*total != bytes.size())
-            return unexpected(format("再生ファイルの大きさが合わない: 見出しから {} 実際 {}", *total, bytes.size()));
+            return std::unexpected(
+                std::format("再生ファイルの大きさが合わない: 見出しから {} 実際 {}", *total, bytes.size()));
 
         ReplayFile replay{.world = static_cast<ReplayWorld>(header.world),
                           .tableVersion = header.tableVersion,
@@ -175,35 +182,35 @@ namespace bicameral::save {
         replay.commands.resize(header.commandCount);
         std::vector<std::array<uint64_t, 2>> hashes(header.hashCount);
         uint64_t offset = HEADER_BYTES;
-        CopyOut(bytes, offset, span(replay.initialDelta));
+        CopyOut(bytes, offset, std::span(replay.initialDelta));
         offset += AlignUp(header.deltaBytes);
-        CopyOut(bytes, offset, span(replay.commands));
+        CopyOut(bytes, offset, std::span(replay.commands));
         offset += header.commandCount * sim::COMMAND_BYTES;
-        CopyOut(bytes, offset, span(hashes));
+        CopyOut(bytes, offset, std::span(hashes));
         replay.tickHashes.reserve(hashes.size());
         for (const auto& [tick, hash] : hashes)
             replay.tickHashes.push_back({.tick = tick, .hash = hash});
 
         if (auto order = CheckOrder(replay); !order)
-            return unexpected(order.error());
+            return std::unexpected(order.error());
 
         return replay;
     }
 
-    expected<ReplayFile, std::string> ReadReplayFile(const fs::path& path) {
+    std::expected<ReplayFile, std::string> ReadReplayFile(const fs::path& path) {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file)
-            return unexpected(format("再生ファイルを開けない: {}", PathText(path)));
+            return std::unexpected(std::format("再生ファイルを開けない: {}", PathText(path)));
 
         const std::streamoff size = file.tellg();
         if (size < 0 || static_cast<uint64_t>(size) > MAX_FILE_BYTES)
-            return unexpected(format("再生ファイルの大きさが扱えない: {}", PathText(path)));
+            return std::unexpected(std::format("再生ファイルの大きさが扱えない: {}", PathText(path)));
 
         std::vector<std::byte> bytes(static_cast<size_t>(size));
         file.seekg(0);
         file.read(reinterpret_cast<char*>(bytes.data()), size);
         if (!file)
-            return unexpected(format("再生ファイルを読めない: {}", PathText(path)));
+            return std::unexpected(std::format("再生ファイルを読めない: {}", PathText(path)));
 
         return ParseReplay(bytes);
     }

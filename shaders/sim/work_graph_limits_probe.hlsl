@@ -44,6 +44,7 @@ struct ChainRecord {
 [Shader("node")]
 [NodeLaunch("thread")]
 [NodeIsProgramEntry]
+
 void Spawn(ThreadNodeInputRecord<SpawnRecord> input,
            [MaxRecords(1)] [NodeId("Fan")] NodeOutput<FanRecord> fanOutput,
            [MaxRecords(1)] [NodeId("Chain")] NodeOutput<ChainRecord> chainOutput) {
@@ -64,6 +65,7 @@ void Spawn(ThreadNodeInputRecord<SpawnRecord> input,
 
 [Shader("node")]
 [NodeLaunch("thread")]
+
 void Fan(ThreadNodeInputRecord<FanRecord> input,
          [MaxRecords(FAN_MAX_RECORDS)] [NodeId("Leaf")] NodeOutput<LeafRecord> leafOutput) {
     const FanRecord fan = input.Get();
@@ -72,10 +74,13 @@ void Fan(ThreadNodeInputRecord<FanRecord> input,
 
     // --- 上限の手前で止める(越えた分は出さない。CPU が Warning を出す)---
     const uint32_t granted = WgGrantOutputs(NODE_FAN, fan.request, FAN_MAX_RECORDS);
-    if (granted < fan.request) DEBUG_PRINT(DebugFormat::WgLimitsFanRefused, fan.id, fan.request, (uint32_t)FAN_MAX_RECORDS);
+    if (granted < fan.request)
+        DEBUG_PRINT(DebugFormat::WgLimitsFanRefused, fan.id, fan.request, (uint32_t)FAN_MAX_RECORDS);
 
     ThreadNodeOutputRecords<LeafRecord> leaves = leafOutput.GetThreadNodeOutputRecords(granted);
-    for (uint32_t index = 0; index < granted; ++index) leaves.Get(index).id = fan.id;
+    for (uint32_t index = 0; index < granted; ++index)
+        leaves.Get(index).id = fan.id;
+
     leaves.OutputComplete();
 }
 
@@ -88,6 +93,7 @@ void Leaf(ThreadNodeInputRecord<LeafRecord> input) {
 [Shader("node")]
 [NodeLaunch("thread")]
 [NodeMaxRecursionDepth(CHAIN_MAX_DEPTH)]
+
 void Chain(ThreadNodeInputRecord<ChainRecord> input,
            [MaxRecords(1)] [NodeId("Chain")] NodeOutput<ChainRecord> chainOutput) {
     const ChainRecord chain = input.Get();
@@ -97,7 +103,9 @@ void Chain(ThreadNodeInputRecord<ChainRecord> input,
     const uint32_t remainingLevels = GetRemainingRecursionLevels();
     const bool wants = chain.remaining > 0;
     const bool recurse = WgTryRecurse(NODE_CHAIN, remainingLevels, CHAIN_MAX_DEPTH, wants);
-    if (wants && !recurse) DEBUG_PRINT(DebugFormat::WgLimitsChainRefused, chain.id, (uint32_t)CHAIN_MAX_DEPTH - remainingLevels);
+    if (wants && !recurse)
+        DEBUG_PRINT(DebugFormat::WgLimitsChainRefused, chain.id, (uint32_t)CHAIN_MAX_DEPTH - remainingLevels);
+
     WgCountOutputs(NODE_CHAIN, recurse ? 1u : 0u, recurse ? 1u : 0u);
 
     ThreadNodeOutputRecords<ChainRecord> next = chainOutput.GetThreadNodeOutputRecords(recurse ? 1 : 0);
@@ -105,6 +113,8 @@ void Chain(ThreadNodeInputRecord<ChainRecord> input,
         next.Get().id = chain.id;
         next.Get().remaining = chain.remaining - 1;
     }
+
     next.OutputComplete();
 }
+
 // clang-format on

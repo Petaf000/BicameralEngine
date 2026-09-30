@@ -12,36 +12,57 @@ StructuredBuffer<uint32_t> extraction1 : register(t1);
 StructuredBuffer<uint32_t> extraction2 : register(t2);
 ByteAddressBuffer frame : register(t3);  // ProbeViewConstants(96 バイト)
 
+// --- 表示の仕方と重ね書き(render/probe_view_constants.h の DebugViewMode・VIEW_FLAG_*)---
 static const uint32_t VIEW_MODE_VOLUME = 0;
 static const uint32_t VIEW_MODE_MAXIMUM = 1;
 static const uint32_t VIEW_MODE_SLICE = 2;
+
 static const uint32_t VIEW_FLAG_ACTIVE_BLOCKS = 1;
 static const uint32_t VIEW_FLAG_LOGARITHMIC = 2;
 
+// --- 色 ---
 static const float3 BACKGROUND = float3(0.02, 0.02, 0.03);
 static const float3 FRAME_COLOR = float3(0.35, 0.37, 0.45);
 static const float3 SLICE_FRAME_COLOR = float3(0.95, 0.8, 0.25);
 static const float3 ACTIVE_COLOR = float3(0.15, 0.75, 0.95);
-static const float3 COLD_SLICE_COLOR = float3(0.05, 0.06, 0.1);  // 断面の熱の無いセル(面の広がりが見えるように)
-static const float VOLUME_DENSITY =
-    0.25;  // 1 セルの長さあたりの濃さ(最大の熱で。熱の 3 乗で薄くし、奥の熱い所が透けて見えるように)
-static const float ACTIVE_DENSITY = 0.012;  // 活性なブロックの薄い色(1 セルの長さあたり)
-static const float OPAQUE_ENOUGH = 0.995;
-static const float LINE_WIDTH_PIXELS = 1.2;
-static const uint32_t MAX_STEPS = PROBE_GRID_SIZE * 3 + 4;  // 格子を斜めに抜けるときのセルの数の上限
 
+// 断面の熱の無いセル(面の広がりが見えるように)
+static const float3 COLD_SLICE_COLOR = float3(0.05, 0.06, 0.1);
+
+// --- 光線の進め方 ---
+// 1 セルの長さあたりの濃さ(最大の熱で。熱の 3 乗で薄くし、奥の熱い所が透けて見えるように)
+static const float VOLUME_DENSITY = 0.25;
+
+// 活性なブロックの薄い色(1 セルの長さあたり)
+static const float ACTIVE_DENSITY = 0.012;
+
+// ここまで不透明になったら、奥は見えないので打ち切る
+static const float OPAQUE_ENOUGH = 0.995;
+
+// 格子の枠の線の太さ(画素)
+static const float LINE_WIDTH_PIXELS = 1.2;
+
+// 格子を斜めに抜けるときのセルの数の上限
+static const uint32_t MAX_STEPS = PROBE_GRID_SIZE * 3 + 4;
+
+// フレームの定数(render/probe_view_constants.h の ProbeViewConstants と同じ並び。96 バイト)
 struct ViewConstants {
-    uint32_t extraction;
-    float2 viewport;
-    uint32_t flags;
-    uint32_t mode;
-    uint32_t sliceAxis;
-    uint32_t slicePosition;
-    bool orthographic;
-    float3 position;
-    float3 forward;
-    float3 right;
-    float3 up;
+    // --- 何をどこに描くか ---
+    uint32_t extraction;  // 読む抽出(0〜2)
+    float2 viewport;      // 描く大きさ(画素)
+    uint32_t flags;       // VIEW_FLAG_* の組み合わせ
+
+    // --- 表示の仕方 ---
+    uint32_t mode;           // VIEW_MODE_*
+    uint32_t sliceAxis;      // 断面の軸(0 = x・1 = y・2 = z)
+    uint32_t slicePosition;  // 断面のセルの番号(クリックがつつく面)
+
+    // --- カメラ(render/debug_camera.h の CameraBasis と同じ式)---
+    bool orthographic;  // 平行投影か(false なら透視)
+    float3 position;    // 目の位置(セル)
+    float3 forward;     // 見ている向き
+    float3 right;       // 画面の半分の幅の分(透視は向きの傾き、平行は世界の長さ)
+    float3 up;          // 画面の半分の高さの分
 };
 
 ViewConstants LoadConstants() {
@@ -134,8 +155,8 @@ float2 IntersectGrid(Ray ray) {
 // 箱の面の上の点が、辺(2 つの軸で端)の近くか
 bool OnGridEdge(float3 location, float width) {
     const float3 distance = min(location, (float)PROBE_GRID_SIZE - location);
-    const uint32_t nearCount =
-        (distance.x < width ? 1 : 0) + (distance.y < width ? 1 : 0) + (distance.z < width ? 1 : 0);
+    const uint32_t nearCount = (distance.x < width ? 1 : 0) + (distance.y < width ? 1 : 0) +
+                               (distance.z < width ? 1 : 0);
 
     return nearCount >= 2;
 }
@@ -171,13 +192,13 @@ March MarchGrid(ViewConstants constants, Ray ray, float2 range) {
         const float segment = max(tNext - t, 0.0) * directionLength;
         const uint3 current = (uint3)cell;
         const float amount = Normalized(LoadCell(constants.extraction, current), constants.flags);
-        const bool active =
-            (constants.flags & VIEW_FLAG_ACTIVE_BLOCKS) != 0 && IsBlockActive(constants.extraction, current);
+        const bool active = (constants.flags & VIEW_FLAG_ACTIVE_BLOCKS) != 0 &&
+                            IsBlockActive(constants.extraction, current);
 
         march.maximum = max(march.maximum, amount);
         march.activeLength += active ? segment : 0.0;
-        const float alpha =
-            1.0 - exp(-(amount * amount * amount * VOLUME_DENSITY + (active ? ACTIVE_DENSITY : 0.0)) * segment);
+        const float alpha = 1.0 - exp(-(amount * amount * amount * VOLUME_DENSITY + (active ? ACTIVE_DENSITY : 0.0)) *
+                                      segment);
         const float3 emitted = amount > 0.0 ? HeatColor(amount) * 1.5 : ACTIVE_COLOR;
         march.color += (1.0 - march.opacity) * alpha * emitted;
         march.opacity += (1.0 - march.opacity) * alpha;
@@ -307,8 +328,8 @@ float4 PSMain(VertexOutput input) : SV_Target {
     const bool frontEdge = OnGridEdge(enter, LINE_WIDTH_PIXELS * PixelSize(constants, range.x));
     const bool backEdge = OnGridEdge(exit, LINE_WIDTH_PIXELS * PixelSize(constants, range.y));
     const SliceHit slice = IntersectSlice(constants, ray);
-    const bool sliceFrame =
-        slice.hit && OnSliceFrame(constants, slice.location, LINE_WIDTH_PIXELS * PixelSize(constants, slice.t));
+    const bool sliceFrame = slice.hit &&
+                            OnSliceFrame(constants, slice.location, LINE_WIDTH_PIXELS * PixelSize(constants, slice.t));
 
     // 断面の表示: 断面だけを不透明に(枠は上に)
     if (constants.mode == VIEW_MODE_SLICE) {

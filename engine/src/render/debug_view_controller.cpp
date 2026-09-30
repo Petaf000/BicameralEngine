@@ -5,7 +5,6 @@
 #include <array>
 #include <format>
 
-#include "core/aliases.h"
 #include "core/log.h"
 
 namespace bicameral::render {
@@ -13,7 +12,7 @@ namespace bicameral::render {
 
         constexpr uint32_t SLICE_FAST_STEP = 8;  // Shift を押しながら断面を動かす幅
 
-        string_view ModeName(DebugViewMode mode) {
+        std::string_view ModeName(DebugViewMode mode) {
             switch (mode) {
                 case DebugViewMode::Volume: return "ボリューム";
                 case DebugViewMode::MaximumProjection: return "最大値の投影";
@@ -38,7 +37,7 @@ namespace bicameral::render {
         m_settings.slicePosition = std::min(m_settings.slicePosition, gridSize - 1);
     }
 
-    std::vector<CellCoordinate> DebugViewController::HandleInput(span<const InputEvent> events, uint32_t width,
+    std::vector<CellCoordinate> DebugViewController::HandleInput(std::span<const InputEvent> events, uint32_t width,
                                                                  uint32_t height) {
         std::vector<CellCoordinate> pokes;
         for (const InputEvent& event : events) {
@@ -145,12 +144,12 @@ namespace bicameral::render {
     }
 
     std::string DebugViewController::Describe() const {
-        return format("{}  断面 {} = {}  活性なブロック {}  色 {}", ModeName(m_settings.mode),
-                      AXIS_NAMES[m_settings.sliceAxis], m_settings.slicePosition,
-                      m_settings.showActiveBlocks ? "あり" : "なし", m_settings.logarithmic ? "対数" : "線形");
+        return std::format("{}  断面 {} = {}  活性なブロック {}  色 {}", ModeName(m_settings.mode),
+                           AXIS_NAMES[m_settings.sliceAxis], m_settings.slicePosition,
+                           m_settings.showActiveBlocks ? "あり" : "なし", m_settings.logarithmic ? "対数" : "線形");
     }
 
-    bool ParseDebugViewMode(string_view name, DebugViewMode& mode) {
+    bool ParseDebugViewMode(std::string_view name, DebugViewMode& mode) {
         if (name == "volume")
             mode = DebugViewMode::Volume;
         else if (name == "mip")

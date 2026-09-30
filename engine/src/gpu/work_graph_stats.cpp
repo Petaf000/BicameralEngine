@@ -5,7 +5,6 @@
 #include <format>
 #include <span>
 
-#include "core/aliases.h"
 #include "core/log.h"
 
 namespace bicameral::gpu {
@@ -14,8 +13,8 @@ namespace bicameral::gpu {
         constexpr uint32_t KIND_COUNT = static_cast<uint32_t>(GraphFindingKind::Count);
         constexpr uint32_t FINDING_SLOTS_PER_KIND = std::max(WG_STATS_MAX_NODES, WG_STATS_MAX_GAUGES);
 
-        GraphNodeCounters ReadNode(span<const uint32_t> words, uint32_t node) {
-            const span<const uint32_t> entry = words.subspan(size_t{node} * WG_NODE_WORDS, WG_NODE_WORDS);
+        GraphNodeCounters ReadNode(std::span<const uint32_t> words, uint32_t node) {
+            const std::span<const uint32_t> entry = words.subspan(size_t{node} * WG_NODE_WORDS, WG_NODE_WORDS);
             return {.launches = entry[WG_NODE_LAUNCHES],
                     .inputRecords = entry[WG_NODE_INPUT_RECORDS],
                     .outputRecords = entry[WG_NODE_OUTPUT_RECORDS],
@@ -32,28 +31,29 @@ namespace bicameral::gpu {
             if (counters.refusedOutputs > 0) {
                 findings.push_back({.kind = GraphFindingKind::OutputsRefused,
                                     .index = index,
-                                    .text = format("ノード {}: 出力の上限 {} を超える要求を {} 件止めた"
-                                                   "(1 回の起動の要求の最大 {})",
-                                                   limits.name, limits.maxOutputRecords, counters.refusedOutputs,
-                                                   counters.peakRequestedOutputs)});
+                                    .text = std::format("ノード {}: 出力の上限 {} を超える要求を {} 件止めた"
+                                                        "(1 回の起動の要求の最大 {})",
+                                                        limits.name, limits.maxOutputRecords, counters.refusedOutputs,
+                                                        counters.peakRequestedOutputs)});
             } else if (limits.warnOutputRecords > 0 && counters.peakRequestedOutputs >= limits.warnOutputRecords) {
-                findings.push_back({.kind = GraphFindingKind::OutputsNearLimit,
-                                    .index = index,
-                                    .text = format("ノード {}: 1 回の起動の出力の要求 {} が上限 {} に近い", limits.name,
-                                                   counters.peakRequestedOutputs, limits.maxOutputRecords)});
+                findings.push_back(
+                    {.kind = GraphFindingKind::OutputsNearLimit,
+                     .index = index,
+                     .text = std::format("ノード {}: 1 回の起動の出力の要求 {} が上限 {} に近い", limits.name,
+                                         counters.peakRequestedOutputs, limits.maxOutputRecords)});
             }
 
             if (counters.refusedRecursions > 0) {
                 findings.push_back({.kind = GraphFindingKind::RecursionRefused,
                                     .index = index,
-                                    .text = format("ノード {}: 再帰の深さの上限 {} で {} 回止めた", limits.name,
-                                                   limits.maxRecursionDepth, counters.refusedRecursions)});
+                                    .text = std::format("ノード {}: 再帰の深さの上限 {} で {} 回止めた", limits.name,
+                                                        limits.maxRecursionDepth, counters.refusedRecursions)});
             } else if (limits.maxRecursionDepth > 0 && counters.deepestRecursion > 0 &&
                        uint64_t{counters.deepestRecursion} * 4 >= uint64_t{limits.maxRecursionDepth} * 3) {
                 findings.push_back({.kind = GraphFindingKind::RecursionNearLimit,
                                     .index = index,
-                                    .text = format("ノード {}: 再帰の深さ {} が上限 {} に近い", limits.name,
-                                                   counters.deepestRecursion, limits.maxRecursionDepth)});
+                                    .text = std::format("ノード {}: 再帰の深さ {} が上限 {} に近い", limits.name,
+                                                        counters.deepestRecursion, limits.maxRecursionDepth)});
             }
         }
 
@@ -65,13 +65,13 @@ namespace bicameral::gpu {
             if (peak > limits.capacity) {
                 findings.push_back({.kind = GraphFindingKind::GaugeOverCapacity,
                                     .index = index,
-                                    .text = format("{}: 容量 {} を超えて {} まで使おうとした(溢れた分は落ちた)",
-                                                   limits.name, limits.capacity, peak)});
+                                    .text = std::format("{}: 容量 {} を超えて {} まで使おうとした(溢れた分は落ちた)",
+                                                        limits.name, limits.capacity, peak)});
             } else if (uint64_t{peak} * 100 >= uint64_t{limits.capacity} * limits.warnPercent) {
-                findings.push_back(
-                    {.kind = GraphFindingKind::GaugeNearCapacity,
-                     .index = index,
-                     .text = format("{}: 使った量の最大 {} が容量 {} に近い", limits.name, peak, limits.capacity)});
+                findings.push_back({.kind = GraphFindingKind::GaugeNearCapacity,
+                                    .index = index,
+                                    .text = std::format("{}: 使った量の最大 {} が容量 {} に近い", limits.name, peak,
+                                                        limits.capacity)});
             }
         }
 
@@ -80,8 +80,9 @@ namespace bicameral::gpu {
     // --- 要約 ---
 
     void AccumulateGraphStats(GraphStatsSnapshot& total, const GraphStatsSnapshot& frame) {
+        // 読めなかったフレーム
         if (frame.nodes.empty() && frame.gaugePeaks.empty())
-            return;  // 読めなかったフレーム
+            return;
 
         if (total.nodes.size() != frame.nodes.size() || total.gaugePeaks.size() != frame.gaugePeaks.size()) {
             total = frame;
@@ -109,23 +110,23 @@ namespace bicameral::gpu {
         const char* separator = " ";
         for (size_t index = 0; index < layout.nodes.size() && index < snapshot.nodes.size(); ++index) {
             const GraphNodeCounters& node = snapshot.nodes[index];
-            text += format("{}{} 起動 {}・入力 {}・出力 {}", separator, layout.nodes[index].name, node.launches,
-                           node.inputRecords, node.outputRecords);
+            text += std::format("{}{} 起動 {}・入力 {}・出力 {}", separator, layout.nodes[index].name, node.launches,
+                                node.inputRecords, node.outputRecords);
             if (node.refusedOutputs > 0)
-                text += format("・止めた出力 {}", node.refusedOutputs);
+                text += std::format("・止めた出力 {}", node.refusedOutputs);
 
             if (layout.nodes[index].maxRecursionDepth > 0)
-                text += format("・深さ {}/{}", node.deepestRecursion, layout.nodes[index].maxRecursionDepth);
+                text += std::format("・深さ {}/{}", node.deepestRecursion, layout.nodes[index].maxRecursionDepth);
 
             if (node.refusedRecursions > 0)
-                text += format("・止めた再帰 {}", node.refusedRecursions);
+                text += std::format("・止めた再帰 {}", node.refusedRecursions);
 
             separator = " | ";
         }
 
         for (size_t index = 0; index < layout.gauges.size() && index < snapshot.gaugePeaks.size(); ++index) {
-            text += format("{}{} 最大 {}/{}", separator, layout.gauges[index].name, snapshot.gaugePeaks[index],
-                           layout.gauges[index].capacity);
+            text += std::format("{}{} 最大 {}/{}", separator, layout.gauges[index].name, snapshot.gaugePeaks[index],
+                                layout.gauges[index].capacity);
             separator = " | ";
         }
 
@@ -150,18 +151,18 @@ namespace bicameral::gpu {
           m_layout(std::move(layout)),
           m_lastWarnedReport(size_t{KIND_COUNT} * FINDING_SLOTS_PER_KIND, 0) {}
 
-    expected<WorkGraphStats, std::string> WorkGraphStats::Create(ID3D12Device* device, GraphStatsLayout layout,
-                                                                 uint32_t slotCount) {
+    std::expected<WorkGraphStats, std::string> WorkGraphStats::Create(ID3D12Device* device, GraphStatsLayout layout,
+                                                                      uint32_t slotCount) {
         if (layout.nodes.size() > WG_STATS_MAX_NODES || layout.gauges.size() > WG_STATS_MAX_GAUGES) {
-            return unexpected(format("{}: ノード {} 個・計器 {} 個は多すぎる(最大 {}・{})", layout.name,
-                                     layout.nodes.size(), layout.gauges.size(), WG_STATS_MAX_NODES,
-                                     WG_STATS_MAX_GAUGES));
+            return std::unexpected(std::format("{}: ノード {} 個・計器 {} 個は多すぎる(最大 {}・{})", layout.name,
+                                               layout.nodes.size(), layout.gauges.size(), WG_STATS_MAX_NODES,
+                                               WG_STATS_MAX_GAUGES));
         }
 
         // 見出し = 全体(読み戻すたびに全部を 0 に戻す)
         auto ring = ReadbackRing::Create(device, WG_STATS_BYTES, WG_STATS_BYTES, slotCount, L"WorkGraphStats");
         if (!ring)
-            return unexpected("Work Graphs のカウンタを作れない: " + ring.error());
+            return std::unexpected("Work Graphs のカウンタを作れない: " + ring.error());
 
         return WorkGraphStats(std::move(*ring), std::move(layout));
     }
@@ -174,18 +175,18 @@ namespace bicameral::gpu {
         m_ring.RecordReadbackAndReset(list, slot);
     }
 
-    expected<GraphStatsSnapshot, std::string> WorkGraphStats::Read(uint32_t slot) const {
+    std::expected<GraphStatsSnapshot, std::string> WorkGraphStats::Read(uint32_t slot) const {
         std::vector<uint32_t> words(WG_STATS_WORDS);
-        if (!m_ring.Read(slot, std::as_writable_bytes(span(words))))
-            return unexpected(format("{}: カウンタを読み戻せない(slot {})", m_layout.name, slot));
+        if (!m_ring.Read(slot, std::as_writable_bytes(std::span(words))))
+            return std::unexpected(std::format("{}: カウンタを読み戻せない(slot {})", m_layout.name, slot));
 
         GraphStatsSnapshot snapshot;
         snapshot.nodes.reserve(m_layout.nodes.size());
         for (uint32_t node = 0; node < m_layout.nodes.size(); ++node)
             snapshot.nodes.push_back(ReadNode(words, node));
 
-        const span<const uint32_t> gauges =
-            span(words).subspan(size_t{WG_STATS_MAX_NODES} * WG_NODE_WORDS, WG_STATS_MAX_GAUGES);
+        const std::span<const uint32_t> gauges = std::span(words).subspan(size_t{WG_STATS_MAX_NODES} * WG_NODE_WORDS,
+                                                                          WG_STATS_MAX_GAUGES);
         snapshot.gaugePeaks.assign(gauges.begin(), gauges.begin() + static_cast<ptrdiff_t>(m_layout.gauges.size()));
 
         return snapshot;

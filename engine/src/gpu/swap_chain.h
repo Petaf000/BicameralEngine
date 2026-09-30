@@ -12,7 +12,6 @@
 #include <memory>
 #include <string>
 
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
@@ -22,9 +21,9 @@ namespace bicameral::gpu {
         static constexpr uint32_t BUFFER_COUNT = 3;
         static constexpr DXGI_FORMAT FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-        [[nodiscard]] static expected<SwapChain, std::string> Create(ID3D12Device* device, IDXGIFactory6* factory,
-                                                                     ID3D12CommandQueue* directQueue, HWND window,
-                                                                     uint32_t maxFrameLatency);
+        [[nodiscard]] static std::expected<SwapChain, std::string> Create(ID3D12Device* device, IDXGIFactory6* factory,
+                                                                          ID3D12CommandQueue* directQueue, HWND window,
+                                                                          uint32_t maxFrameLatency);
 
         // 次のフレームを始めてよいまで待つ(最大 timeoutMs)。待ちきれなければ false(そのフレームも進めてよい)
         bool WaitForFrame(uint32_t timeoutMs) const;
@@ -46,16 +45,20 @@ namespace bicameral::gpu {
 
         bool AcquireBuffers(ID3D12Device* device);
 
-        ComPtr<IDXGISwapChain3> m_swapChain;
-        ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
-        std::array<ComPtr<ID3D12Resource>, BUFFER_COUNT> m_buffers;
         struct HandleCloser {
             void operator()(HANDLE handle) const { CloseHandle(handle); }
         };
 
-        std::unique_ptr<void, HandleCloser>
-            m_frameLatencyWaitable;  // 使い終わったら閉じる(GetFrameLatencyWaitableObject)
+        // --- バックバッファ ---
+        ComPtr<IDXGISwapChain3> m_swapChain;
+        ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
+        std::array<ComPtr<ID3D12Resource>, BUFFER_COUNT> m_buffers;
         uint32_t m_rtvStride = 0;
+
+        // 使い終わったら閉じる(GetFrameLatencyWaitableObject)
+        std::unique_ptr<void, HandleCloser> m_frameLatencyWaitable;
+
+        // --- 大きさと機能 ---
         uint32_t m_width = 0;
         uint32_t m_height = 0;
         bool m_tearingSupported = false;

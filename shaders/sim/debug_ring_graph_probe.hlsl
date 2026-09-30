@@ -22,6 +22,7 @@ struct LeafRecord {
 [NodeIsProgramEntry]
 [NodeDispatchGrid(ROOT_GROUP_COUNT, 1, 1)]
 [NumThreads(64, 1, 1)]
+
 void Root(DispatchNodeInputRecord<RootRecord> input, uint32_t dispatchThreadId : SV_DispatchThreadID,
           [MaxRecords(64)] [NodeId("Leaf")] NodeOutput<LeafRecord> leafOutput) {
     ThreadNodeOutputRecords<LeafRecord> record = leafOutput.GetThreadNodeOutputRecords(1);
@@ -34,4 +35,5 @@ void Root(DispatchNodeInputRecord<RootRecord> input, uint32_t dispatchThreadId :
 void Leaf(ThreadNodeInputRecord<LeafRecord> input) {
     DEBUG_PRINT(DebugFormat::DebugRingGraphLeaf, input.Get().value);
 }
+
 // clang-format on

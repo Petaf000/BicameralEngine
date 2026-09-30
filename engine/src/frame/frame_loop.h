@@ -22,17 +22,24 @@
 namespace bicameral::frame {
 
     struct FrameLoopOptions {
-        uint32_t frameLimit = 0;          // 0 なら窓を閉じるまで。自動の確認(job.py run)では有限にする
-        bool vsync = true;                // false なら待たずに Present(対応していれば tearing)
-        uint32_t maxFrameLatency = 2;     // CPU が GPU より先に進めるフレームの数(2〜3)
-        uint32_t targetFps = 60;          // 重いときに描画が保つ fps(ADR-0011。30 以上)
-        uint32_t simLoad = 0;             // 重さの試験: 1 刻みに足す繰り返し(0 なら無し)
-        uint32_t simSplit = 1;            // 重さの試験を何個の単位に分けるか(R-LOOP-2)
-        bool renderHighPriority = true;   // 描画のキューの優先度を HIGH にする
-        bool autoClick = false;           // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
-        fs::path recordPath;              // 空でなければ、終わるときに再生ファイルを書く
-        fs::path replayPath;              // 空でなければ、この再生ファイルのコマンドで進めてハッシュを突き合わせる
-        fs::path screenshotPath;          // 空でなければ、最後のフレーム(frameLimit)を BMP に書く
+        // --- フレームの進め方 ---
+        uint32_t frameLimit = 0;         // 0 なら窓を閉じるまで。自動の確認(job.py run)では有限にする
+        bool vsync = true;               // false なら待たずに Present(対応していれば tearing)
+        uint32_t maxFrameLatency = 2;    // CPU が GPU より先に進めるフレームの数(2〜3)
+        uint32_t targetFps = 60;         // 重いときに描画が保つ fps(ADR-0011。30 以上)
+        bool renderHighPriority = true;  // 描画のキューの優先度を HIGH にする
+
+        // --- 重さの試験(R-LOOP-2)---
+        uint32_t simLoad = 0;   // 1 刻みに足す繰り返し(0 なら無し)
+        uint32_t simSplit = 1;  // 何個の単位に分けるか
+
+        // --- 入力・記録・再生 ---
+        bool autoClick = false;   // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
+        fs::path recordPath;      // 空でなければ、終わるときに再生ファイルを書く
+        fs::path replayPath;      // 空でなければ、この再生ファイルのコマンドで進めてハッシュを突き合わせる
+        fs::path screenshotPath;  // 空でなければ、最後のフレーム(frameLimit)を BMP に書く
+
+        // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)
         render::OrbitCameraState camera;  // 最初のカメラ
         gpu::AdapterKind adapter = gpu::AdapterKind::Hardware;

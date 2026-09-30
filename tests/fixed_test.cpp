@@ -167,8 +167,8 @@ static void TestDivide(std::mt19937_64& random) {
         const bool negative = (random() & 1) != 0;
         uint64_t remainder = 0;
         const uint64_t high = shift == 0 ? 0 : static_cast<uint64_t>(a) >> (64 - shift);
-        const uint64_t expected =
-            ReferenceDivide128(high, static_cast<uint64_t>(a) << shift, static_cast<uint64_t>(b), &remainder);
+        const uint64_t expected = ReferenceDivide128(high, static_cast<uint64_t>(a) << shift, static_cast<uint64_t>(b),
+                                                     &remainder);
         const int64_t result = FxDivShiftS64(negative ? -a : a, b, shift);
         EXPECT(result == (negative ? -static_cast<int64_t>(expected) : static_cast<int64_t>(expected)));
     }
@@ -206,8 +206,8 @@ static void TestLogExp(std::mt19937_64& random) {
     for (int i = 0; i < RANDOM_CASES; ++i) {
         const uint64_t value = SpreadBits(random) | 1;
         const double exactLog2 = std::log2(static_cast<double>(value));
-        maxLog2Error =
-            std::fmax(maxLog2Error, std::fabs(static_cast<double>(FxLog2U64(value)) - exactLog2 * TWO_POW_32));
+        maxLog2Error = std::fmax(maxLog2Error,
+                                 std::fabs(static_cast<double>(FxLog2U64(value)) - exactLog2 * TWO_POW_32));
         maxLnError = std::fmax(maxLnError, std::fabs(static_cast<double>(FxLnU64(value)) -
                                                      std::log(static_cast<double>(value)) * TWO_POW_32));
     }
@@ -220,15 +220,15 @@ static void TestLogExp(std::mt19937_64& random) {
         const double xReal = static_cast<double>(x) / TWO_POW_32;
         const auto outBits2 = static_cast<uint32_t>(61 - static_cast<int>(std::floor(xReal)));
         const double exact2 = std::exp2(xReal + outBits2);
-        maxExp2Relative =
-            std::fmax(maxExp2Relative, std::fabs(static_cast<double>(FxExp2Q32(x, outBits2)) - exact2) / exact2);
+        maxExp2Relative = std::fmax(maxExp2Relative,
+                                    std::fabs(static_cast<double>(FxExp2Q32(x, outBits2)) - exact2) / exact2);
         const int64_t xNatural = x / 2;
         const double xNaturalReal = static_cast<double>(xNatural) / TWO_POW_32;
-        const auto outBitsE =
-            static_cast<uint32_t>(61 - static_cast<int>(std::floor(xNaturalReal * 1.4426950408889634)));
+        const auto outBitsE = static_cast<uint32_t>(61 -
+                                                    static_cast<int>(std::floor(xNaturalReal * 1.4426950408889634)));
         const double exactE = std::exp(xNaturalReal) * std::exp2(static_cast<double>(outBitsE));
-        maxExpRelative =
-            std::fmax(maxExpRelative, std::fabs(static_cast<double>(FxExpQ32(xNatural, outBitsE)) - exactE) / exactE);
+        maxExpRelative = std::fmax(maxExpRelative,
+                                   std::fabs(static_cast<double>(FxExpQ32(xNatural, outBitsE)) - exactE) / exactE);
     }
 
     std::printf("log2: max error %.2f (2^-32)  ln: max error %.2f (2^-32)\n", maxLog2Error, maxLnError);

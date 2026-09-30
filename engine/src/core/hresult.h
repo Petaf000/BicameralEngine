@@ -13,7 +13,6 @@
 #include <string>
 #include <string_view>
 
-#include "core/aliases.h"
 #include "core/log.h"
 
 namespace bicameral {
@@ -24,7 +23,7 @@ namespace bicameral {
     [[nodiscard]] std::string DescribeHresult(HResult result);
 
     // 成功なら true。失敗なら Level::Error でログを出して false。場所は呼んだ所になる
-    [[nodiscard]] bool CheckHresult(HResult result, Channel channel, string_view expression,
+    [[nodiscard]] bool CheckHresult(HResult result, Channel channel, std::string_view expression,
                                     const std::source_location& location = std::source_location::current());
 
 }  // namespace bicameral

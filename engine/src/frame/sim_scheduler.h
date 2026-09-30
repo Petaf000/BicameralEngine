@@ -17,13 +17,18 @@
 namespace bicameral::frame {
 
     struct SimSchedulerSettings {
-        double ticksPerSecond = 60.0;        // 世界時間 1 秒 = 60 刻み(06 §1)
-        double targetFps = 60.0;             // 重いときに描画が保つ fps(ADR-0011。30 未満は呼ぶ側が拒否する)
+        // --- 速さ ---
+        double ticksPerSecond = 60.0;  // 世界時間 1 秒 = 60 刻み(06 §1)
+        double targetFps = 60.0;       // 重いときに描画が保つ fps(ADR-0011。30 未満は呼ぶ側が拒否する)
+
+        // --- 1 フレームの予算 ---
         double marginMilliseconds = 1.0;     // 予算から引く余裕(見積もりの外れ・フレームの切れ目の隙間)
         double minBudgetMilliseconds = 0.5;  // 描画が重すぎても、これだけはシミュに回す
-        double maxBacklogTicks = 8.0;        // 未処理の刻みの上限(約 133 ms 分)。超えた分は捨てる(世界が遅くなる)
         double smoothing = 0.1;              // 計測の平均の重み(指数移動平均)
-        uint32_t maxUnitsPerFrame = 256;     // 1 フレームのリストに積める単位の上限(タイムスタンプの数)
+
+        // --- 上限 ---
+        double maxBacklogTicks = 8.0;     // 未処理の刻みの上限(約 133 ms 分)。超えた分は捨てる(世界が遅くなる)
+        uint32_t maxUnitsPerFrame = 256;  // 1 フレームのリストに積める単位の上限(タイムスタンプの数)
     };
 
     // 次に投げる単位の場所
@@ -53,6 +58,8 @@ namespace bicameral::frame {
 
         [[nodiscard]] SimCursor Cursor() const { return m_cursor; }
         [[nodiscard]] uint32_t UnitsPerTick() const { return m_unitsPerTick; }
+
+        // --- 見積もり(ログと確認用)---
         [[nodiscard]] double BudgetMilliseconds() const;
         [[nodiscard]] double UnitMilliseconds(uint32_t unit) const { return m_unitMilliseconds[unit]; }  // 0 = 未計測
         [[nodiscard]] double RenderMilliseconds() const { return m_renderMilliseconds; }
@@ -64,9 +71,13 @@ namespace bicameral::frame {
 
         SimSchedulerSettings m_settings;
         uint32_t m_unitsPerTick = 1;
+
+        // --- 進み ---
         SimCursor m_cursor;
         double m_pendingTicks = 0.0;
         uint64_t m_droppedTicks = 0;
+
+        // --- 計測の平均 ---
         double m_renderMilliseconds = 0.0;
         std::vector<double> m_unitMilliseconds;  // 刻みの中の単位ごとの GPU 時間の平均
     };

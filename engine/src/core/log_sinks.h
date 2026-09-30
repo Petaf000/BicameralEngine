@@ -22,7 +22,7 @@ namespace bicameral {
 
     // directory に bicameral-YYYYMMDD-HHMMSS.log を作ってファイルのシンクを logger に足す。成功ならファイルのパス。
     // 古いログは新しい方から MAX_LOG_FILES 個だけ残して消す
-    expected<fs::path, std::string> OpenLogFile(Logger& logger, const fs::path& directory);
+    std::expected<fs::path, std::string> OpenLogFile(Logger& logger, const fs::path& directory);
 
     // 既定のログの置き場所: exe の横の logs/(ADR-0006。PC 固有のパスを埋め込まない)
     fs::path DefaultLogDirectory();

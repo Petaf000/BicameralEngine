@@ -57,8 +57,8 @@ namespace {
         return result;
     }
 
-    bool Contains(string_view text, string_view part) {
-        return text.find(part) != string_view::npos;
+    bool Contains(std::string_view text, std::string_view part) {
+        return text.find(part) != std::string_view::npos;
     }
 
 }  // namespace
@@ -145,7 +145,7 @@ void TestFileSink(Logger& logger, const fs::path& directory) {
     fs::remove_all(directory);
     fs::create_directories(directory);
     for (int i = 0; i < 25; ++i)  // 名前順で今の日時より古くなる偽のログ
-        std::ofstream(directory / format("bicameral-00000000-0000{:02}.log", i)) << "old\n";
+        std::ofstream(directory / std::format("bicameral-00000000-0000{:02}.log", i)) << "old\n";
     std::ofstream(directory / "other.txt") << "消されない\n";
 
     const auto path = OpenLogFile(logger, directory);

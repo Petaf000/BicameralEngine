@@ -76,7 +76,7 @@ namespace {
         double ticksPerMillisecond = 0;
     };
 
-    expected<BenchContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
+    std::expected<BenchContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
         BenchContext context{.device = device, .queue = &queue};
         context.rootSignature = gpu::CreateRootSignature(device, {.uavCount = 1, .rootConstantCount = 1});
         context.results = gpu::CreateBuffer(device, uint64_t{THREAD_COUNT} * 8, gpu::BufferKind::UnorderedAccess);
@@ -85,12 +85,12 @@ namespace {
 
         if (!context.rootSignature || !context.results || !context.timestampReadback ||
             FAILED(device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&context.queryHeap)))) {
-            return unexpected("ルート署名・バッファ・クエリのヒープを作れない");
+            return std::unexpected("ルート署名・バッファ・クエリのヒープを作れない");
         }
 
         uint64_t frequency = 0;
         if (FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
-            return unexpected("タイムスタンプの周波数を得られない");
+            return std::unexpected("タイムスタンプの周波数を得られない");
 
         context.ticksPerMillisecond = static_cast<double>(frequency) / 1000.0;
 
@@ -98,11 +98,11 @@ namespace {
     }
 
     // iterationCount 回の反復を 1 回走らせ、かかった時間(ms)を返す
-    expected<double, std::string> RunOnce(const BenchContext& context, ID3D12PipelineState* pipeline,
-                                          uint32_t iterationCount) {
+    std::expected<double, std::string> RunOnce(const BenchContext& context, ID3D12PipelineState* pipeline,
+                                               uint32_t iterationCount) {
         ID3D12GraphicsCommandList10* list = context.queue->Begin();
         if (list == nullptr)
-            return unexpected("コマンドリストを始められない");
+            return std::unexpected("コマンドリストを始められない");
 
         list->SetComputeRootSignature(context.rootSignature.Get());
         list->SetPipelineState(pipeline);
@@ -114,11 +114,11 @@ namespace {
         list->ResolveQueryData(context.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
                                context.timestampReadback.Get(), 0);
         if (!context.queue->ExecuteAndWait())
-            return unexpected("GPU での実行に失敗");
+            return std::unexpected("GPU での実行に失敗");
 
         uint64_t timestamps[2] = {};
-        if (!gpu::ReadBuffer(context.timestampReadback.Get(), std::as_writable_bytes(span(timestamps))))
-            return unexpected("タイムスタンプを読み戻せない");
+        if (!gpu::ReadBuffer(context.timestampReadback.Get(), std::as_writable_bytes(std::span(timestamps))))
+            return std::unexpected("タイムスタンプを読み戻せない");
 
         return static_cast<double>(timestamps[1] - timestamps[0]) / context.ticksPerMillisecond;
     }
@@ -126,27 +126,27 @@ namespace {
     // --- 1 つの演算を測る: 反復回数を目標の時間に合わせてから、REPEAT_COUNT 回の中央値 ---
 
     struct Measurement {
-        double nanosecondsPerStep =
-            0;  // GPU 全体で 1 ステップ(演算 + 混ぜる)を処理するのにかかる時間(スループットの逆数)
+        // GPU 全体で 1 ステップ(演算 + 混ぜる)を処理するのにかかる時間(スループットの逆数)
+        double nanosecondsPerStep = 0;
         uint32_t iterationCount = 0;
         double milliseconds = 0;
     };
 
-    expected<Measurement, std::string> Measure(const BenchContext& context, const BenchOperation& operation) {
+    std::expected<Measurement, std::string> Measure(const BenchContext& context, const BenchOperation& operation) {
         const auto bytecode = gpu::LoadShader(std::string("bench/fixed_bench_") + operation.name + ".cso");
         if (!bytecode)
-            return unexpected(bytecode.error());
+            return std::unexpected(bytecode.error());
 
-        const ComPtr<ID3D12PipelineState> pipeline =
-            gpu::CreateComputePipeline(context.device, context.rootSignature.Get(), *bytecode);
+        const ComPtr<ID3D12PipelineState> pipeline = gpu::CreateComputePipeline(context.device,
+                                                                                context.rootSignature.Get(), *bytecode);
         if (!pipeline)
-            return unexpected("パイプラインを作れない");
+            return std::unexpected("パイプラインを作れない");
 
         uint32_t iterationCount = 4;
         for (;;) {  // 反復回数を目標の時間に近づける(最初の 1 回はウォームアップも兼ねる)
             const auto time = RunOnce(context, pipeline.Get(), iterationCount);
             if (!time)
-                return unexpected(time.error());
+                return std::unexpected(time.error());
 
             if (*time >= TARGET_MILLISECONDS * 0.5 || iterationCount >= (1u << 24))
                 break;
@@ -159,7 +159,7 @@ namespace {
         for (int repeat = 0; repeat < REPEAT_COUNT; ++repeat) {
             const auto time = RunOnce(context, pipeline.Get(), iterationCount);
             if (!time)
-                return unexpected(time.error());
+                return std::unexpected(time.error());
 
             times.push_back(*time);
         }
@@ -174,8 +174,8 @@ namespace {
 
     // --- 表にする ---
 
-    void Report(span<const Measurement> measurements) {
-        auto find = [&](string_view name) {
+    void Report(std::span<const Measurement> measurements) {
+        auto find = [&](std::string_view name) {
             for (size_t index = 0; index < std::size(BENCH_OPERATIONS); ++index) {
                 if (name == BENCH_OPERATIONS[index].name)
                     return measurements[index].nanosecondsPerStep;
@@ -204,7 +204,7 @@ namespace {
         }
     }
 
-    int Run(span<char*> arguments) {
+    int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error, "使い方: gpu_fixed_bench [--warp] [--queue direct|compute]");
@@ -249,7 +249,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int exitCode = Run(span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
     SingletonFinalizer::Finalize();  // ログを閉じる
 
     return exitCode;

@@ -31,7 +31,6 @@
 #include <vector>
 
 #include "common/probe_sim.hlsli"
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 #include "gpu/debug_ring.h"
 #include "gpu/readback_ring.h"
@@ -72,33 +71,41 @@ namespace bicameral::sim {
     };
 
     struct ProbeFrameReadback {
-        std::vector<ProbeEvent> events;      // (刻み, 種類, 場所) の順(刻みの最後に GPU が並べる。分け方に依存しない)
-        uint32_t droppedEventCount = 0;      // 容量を超えて書けなかった数(刻みの一時置き場 + リング)
-        std::vector<ProbeTickHash> hashes;   // このフレームで終えた刻みの状態(刻みの順)
+        // --- 世界の結果 ---
+        std::vector<ProbeEvent> events;     // (刻み, 種類, 場所) の順(刻みの最後に GPU が並べる。分け方に依存しない)
+        uint32_t droppedEventCount = 0;     // 容量を超えて書けなかった数(刻みの一時置き場 + リング)
+        std::vector<ProbeTickHash> hashes;  // このフレームで終えた刻みの状態(刻みの順)
+
+        // --- GPU の時間 ---
         std::vector<uint64_t> unitGpuTicks;  // 投げた i 番目の単位の GPU 時間(タイムスタンプの刻み)
         uint32_t firstUnit = 0;              // unitGpuTicks[0] の単位の、刻みの中の番号
         uint64_t gpuBeginTimestamp = 0;      // リスト全体(抽出と読み戻しを含む)の始めと終わり
         uint64_t gpuEndTimestamp = 0;
+
+        // --- デバッグ ---
         uint32_t debugAssertCount = 0;  // シェーダーの assert の数(中身はログに出る)
-        gpu::GraphStatsSnapshot
-            graphStats;                  // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
+
+        // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
+        gpu::GraphStatsSnapshot graphStats;
         uint32_t graphFindingCount = 0;  // 上限に当たった・近づいたものの数(中身は Warning でログに出る)
     };
 
     struct ProbeFrameInput {
-        uint64_t firstTick = 0;         // 最初の単位の刻み
-        uint32_t firstUnit = 0;         // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
-        uint32_t unitCount = 0;         // 投げる単位の数(0〜MAX_UNITS_PER_FRAME。0 なら抽出だけ)
+        uint64_t firstTick = 0;  // 最初の単位の刻み
+        uint32_t firstUnit = 0;  // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
+        uint32_t unitCount = 0;  // 投げる単位の数(0〜MAX_UNITS_PER_FRAME。0 なら抽出だけ)
+
         bool extract = false;           // 単位の後ろで、刻みの境界の状態を抽出へ写すか
         uint32_t extractionTarget = 0;  // 抽出の書き先(0〜PROBE_EXTRACTION_COUNT-1)
-        span<const ProbeCommand>
-            commands;  // GPU のキューへ足す新しいコマンド(最大 PROBE_MAX_COMMANDS。約束はファイルの先頭)
+
+        // GPU のキューへ足す新しいコマンド(最大 PROBE_MAX_COMMANDS。約束はファイルの先頭)
+        std::span<const ProbeCommand> commands;
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
     struct ProbeSimOptions {
-        uint32_t busyIterations =
-            0;  // 1 刻みに足す繰り返しの合計(0 なら重さの単位は無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
+        // 1 刻みに足す繰り返しの合計(0 なら重さの単位は無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
+        uint32_t busyIterations = 0;
         uint32_t busyPieces = 1;  // それを何個の単位に分けるか(1〜PROBE_MAX_BUSY_PIECES)
     };
 
@@ -110,9 +117,9 @@ namespace bicameral::sim {
         static constexpr uint32_t MAX_UNITS_PER_FRAME = 256;
 
         // listType: フレームのリストを投げるキューの種類(シミュは compute。06 §4)
-        [[nodiscard]] static expected<ProbeSim, std::string> Create(ID3D12Device5* device,
-                                                                    D3D12_COMMAND_LIST_TYPE listType,
-                                                                    const ProbeSimOptions& options = {});
+        [[nodiscard]] static std::expected<ProbeSim, std::string> Create(ID3D12Device5* device,
+                                                                         D3D12_COMMAND_LIST_TYPE listType,
+                                                                         const ProbeSimOptions& options = {});
 
         // 1 刻みの単位の数(適用・伝導・ハッシュ + 重さの単位)
         [[nodiscard]] uint32_t UnitsPerTick() const { return PROBE_FIXED_UNITS_PER_TICK + BusyUnitCount(); }
@@ -147,12 +154,18 @@ namespace bicameral::sim {
 
     private:
         struct FrameSlot {
+            // --- 記録 ---
             ComPtr<ID3D12CommandAllocator> allocator;
             ComPtr<ID3D12GraphicsCommandList10> list;  // 毎フレーム記録し直す
-            ComPtr<ID3D12Resource> input;              // アップロード(PROBE_INPUT_BYTES)
-            std::byte* mappedInput = nullptr;          // Map したまま
+
+            // --- 入力 ---
+            ComPtr<ID3D12Resource> input;      // アップロード(PROBE_INPUT_BYTES)
+            std::byte* mappedInput = nullptr;  // Map したまま
+
+            // --- 読み戻し ---
             ComPtr<ID3D12Resource> timestampReadback;  // (MAX_UNITS_PER_FRAME + 2) × 8 バイト
             ComPtr<ID3D12Resource> hashReadback;       // PROBE_HASH_BYTES
+
             // 最後に記録した範囲(ReadFrame が、どの刻みのハッシュとどの単位の時間かを知るため)
             uint64_t firstTick = 0;
             uint32_t firstUnit = 0;
@@ -167,15 +180,21 @@ namespace bicameral::sim {
               m_graphStats(std::move(graphStats)) {}
 
         [[nodiscard]] uint32_t BusyUnitCount() const { return m_options.busyIterations > 0 ? m_options.busyPieces : 0; }
+
+        // --- 作る ---
         [[nodiscard]] bool CreatePipelines(ID3D12Device5* device);
         [[nodiscard]] bool CreateConductGraph(ID3D12Device5* device);
         [[nodiscard]] bool CreateBuffers(ID3D12Device5* device);
         [[nodiscard]] bool CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
+
+        // --- 入力とコマンド ---
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
         [[nodiscard]] bool ValidateCommands(const ProbeFrameInput& input) const;
         void WriteInput(FrameSlot& frame, const ProbeFrameInput& input) const;
         void RecordEnqueue(ID3D12GraphicsCommandList10* list, uint32_t commandCount) const;
-        void TrackCommands(span<const ProbeCommand> commands, uint64_t nextApplyTick);
+        void TrackCommands(std::span<const ProbeCommand> commands, uint64_t nextApplyTick);
+
+        // --- 単位の記録 ---
         void BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void BindRootViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit);
@@ -183,10 +202,14 @@ namespace bicameral::sim {
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
         void RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const;
+
+        // --- 読み戻し ---
         void RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const;
         [[nodiscard]] std::vector<ProbeTickHash> ReadHashes(const FrameSlot& frame) const;
 
         ProbeSimOptions m_options;
+
+        // --- パイプライン ---
         ComPtr<ID3D12RootSignature> m_rootSignature;
         ComPtr<ID3D12PipelineState> m_enqueuePipeline;
         ComPtr<ID3D12PipelineState> m_applyPipeline;
@@ -194,19 +217,27 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
         ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
         ComPtr<ID3D12PipelineState> m_extractPipeline;
+
+        // --- 伝導の Work Graph ---
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導(shaders/sim/probe_conduct.hlsl)
         uint32_t m_conductEntrypoint = 0;                // WakeBlocks の入口の番号
         bool m_conductInitialized = false;               // 裏のメモリを初期化するリストを記録したか(最初の 1 回だけ)
 
+        // --- 世界と抽出 ---
         ComPtr<ID3D12Resource> m_world;  // 2 世代 × PROBE_CELL_COUNT × uint32
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
         ComPtr<ID3D12Resource> m_busySink;
+
+        // --- 刻みの道具(表・キュー・イベント・活性)---
         ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
         ComPtr<ID3D12Resource> m_commandQueue;  // GPU のコマンドキュー(PROBE_COMMAND_QUEUE_BYTES)
         ComPtr<ID3D12Resource> m_tickEvents;    // 刻みの中のイベントの一時置き場(PROBE_TICK_EVENT_BYTES)
+
         // 活性の一覧(刻みの偶奇で 2 組。PROBE_ACTIVE_LIST_BYTES)。フレームの中では UAV、伝導の間だけ入力の組を GPU の入力の状態にする
         std::array<ComPtr<ID3D12Resource>, 2> m_activeLists;
         ComPtr<ID3D12Resource> m_blockSchedule;  // 予定の印(PROBE_SCHEDULE_BYTES)
+
+        // --- 読み戻しとフレームの枠 ---
         gpu::ReadbackRing m_events;
         gpu::DebugRing m_debugRing;
         gpu::WorkGraphStats m_graphStats;      // 伝導のグラフのノードのカウンタ(T-0008)
@@ -235,10 +266,10 @@ namespace bicameral::sim {
         ProbeReference();
 
         // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導)
-        void Advance(uint64_t tick, span<const ProbeCommand> commands);
+        void Advance(uint64_t tick, std::span<const ProbeCommand> commands);
 
         // 刻み tick の始めの状態 S(tick)(= tick 回進めた後)
-        [[nodiscard]] span<const uint32_t> State(uint64_t tick) const;
+        [[nodiscard]] std::span<const uint32_t> State(uint64_t tick) const;
 
         // 最後の Advance で GPU が伝導を計算するはずのブロックの数
         [[nodiscard]] uint32_t ScheduledBlocks() const { return m_scheduledBlocks; }
@@ -250,9 +281,9 @@ namespace bicameral::sim {
     };
 
     // 状態のハッシュ = Σ ProbeCellHash(セルの番号, 値)(mod 2^64)。GPU のハッシュの単位と同じ値になる
-    [[nodiscard]] uint64_t ProbeStateHash(span<const uint32_t> cells);
+    [[nodiscard]] uint64_t ProbeStateHash(std::span<const uint32_t> cells);
 
     // 熱の合計(Σ 値。GPU の表の熱の合計と同じ値になる)
-    [[nodiscard]] uint64_t ProbeHeatSum(span<const uint32_t> cells);
+    [[nodiscard]] uint64_t ProbeHeatSum(std::span<const uint32_t> cells);
 
 }  // namespace bicameral::sim

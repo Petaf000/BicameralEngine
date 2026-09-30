@@ -16,17 +16,16 @@
 #include <string>
 #include <string_view>
 
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
 
     class WorkGraph {
     public:
-        [[nodiscard]] static expected<WorkGraph, std::string> Create(ID3D12Device5* device,
-                                                                     ID3D12RootSignature* globalRootSignature,
-                                                                     span<const std::byte> library,
-                                                                     std::wstring_view programName);
+        [[nodiscard]] static std::expected<WorkGraph, std::string> Create(ID3D12Device5* device,
+                                                                          ID3D12RootSignature* globalRootSignature,
+                                                                          std::span<const std::byte> library,
+                                                                          std::wstring_view programName);
 
         // 入口のノードの番号。名前が無ければ UINT32_MAX
         [[nodiscard]] uint32_t EntrypointIndex(std::wstring_view nodeName) const;
@@ -48,11 +47,14 @@ namespace bicameral::gpu {
     private:
         WorkGraph() = default;
 
+        // --- プログラム ---
         ComPtr<ID3D12StateObject> m_stateObject;
         ComPtr<ID3D12WorkGraphProperties> m_properties;
-        ComPtr<ID3D12Resource> m_backingMemory;
         D3D12_PROGRAM_IDENTIFIER m_programIdentifier{};
         uint32_t m_graphIndex = 0;
+
+        // --- 裏のメモリ(ドライバが決める大きさ)---
+        ComPtr<ID3D12Resource> m_backingMemory;
         uint64_t m_backingMemoryBytes = 0;
     };
 

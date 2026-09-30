@@ -111,26 +111,27 @@ void SortEventKeys(uint32_t thread) {
 
 // clang-format は属性つき([numthreads])の入口が続くと並べ崩すので、ここから下(入口だけ)は整形を止める
 // clang-format off
-
 // --- フレームの始め: 新しいコマンドをキューの末尾へ(1 スレッド = 1 コマンド)---
 // 足す場所(末尾)は CPU が見出しで渡す(足すのは CPU だけなので CPU が知っている)。容量を超えないことも CPU が守る
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void EnqueueCommands(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t commandIndex = dispatchThreadId.x;
     const uint32_t count = HeaderWord(PROBE_HEADER_COMMAND_COUNT);
     const uint32_t base = HeaderWord(PROBE_HEADER_ENQUEUE_BASE);
+
     if (commandIndex == 0) {
         const uint32_t head = commandQueue.Load(PROBE_COMMAND_QUEUE_HEAD * 4);
         DEBUG_ASSERT(base + count - head <= PROBE_COMMAND_QUEUE_CAPACITY, DebugFormat::ProbeCommandQueueFull,
                      base + count - head);
         commandQueue.Store(PROBE_COMMAND_QUEUE_TAIL * 4, base + count);
     }
-    if (commandIndex >= count) return;
+
+    if (commandIndex >= count)
+        return;
 
     const uint32_t source = PROBE_INPUT_COMMANDS_OFFSET + commandIndex * PROBE_COMMAND_BYTES;
     const uint32_t destination = QueueRecordAddress(base + commandIndex);
-    for (uint32_t offset = 0; offset < PROBE_COMMAND_BYTES; offset += 16) {
+    for (uint32_t offset = 0; offset < PROBE_COMMAND_BYTES; offset += 16)
         commandQueue.Store4(destination + offset, input.Load4(source + offset));
-    }
 }
 
 // --- [0] コマンドの適用: 1 スレッドがキューの先頭から番号順に(06 §3「同じ刻みの中は sequence の順」)---
@@ -142,19 +143,24 @@ void SortEventKeys(uint32_t thread) {
     const uint32_t tail = commandQueue.Load(PROBE_COMMAND_QUEUE_TAIL * 4);
     uint32_t head = commandQueue.Load(PROBE_COMMAND_QUEUE_HEAD * 4);
     WgGaugePeak(PROBE_STATS_GAUGE_COMMAND_QUEUE, tail - head);  // 待っている数(T-0008)
+
     for (uint32_t visited = 0; visited < PROBE_COMMAND_QUEUE_CAPACITY && head != tail; ++visited) {
         const uint32_t address = QueueRecordAddress(head);
         const uint4 commandHead = commandQueue.Load4(address);  // targetTick の下位・上位、sequence、type | size
         const uint64_t targetTick = (uint64_t)commandHead.x | ((uint64_t)commandHead.y << 32);
-        if (targetTick > tick) break;
+        if (targetTick > tick)
+            break;
+
         if (targetTick == tick)
             ApplyCommand(tick, commandHead, address);
         else {
             DEBUG_ASSERT(false, DebugFormat::ProbeCommandLate, (uint32_t)targetTick, (uint32_t)tick);
             EmitTickEvent(PROBE_EVENT_COMMAND_LATE, commandHead.w & 0xFFFFu);
         }
+
         ++head;
     }
+
     commandQueue.Store(PROBE_COMMAND_QUEUE_HEAD * 4, head);
 
     // この刻みの活性の一覧はここで出来上がる(前の刻みの伝導 + この刻みのつつき)。長さの最大を計器へ(T-0008)
@@ -170,12 +176,14 @@ void SortEventKeys(uint32_t thread) {
 // 実際の刻みを分けて投げるときと同じく、前が終わるまで次は始められない)。見出しの繰り返し回数は 1 個あたり
 [numthreads(PROBE_GROUP_SIZE, PROBE_GROUP_SIZE, 1)] void Busy(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t iterations = HeaderWord(PROBE_HEADER_BUSY_ITERATIONS);
-    if (iterations == 0) return;
+    if (iterations == 0)
+        return;
+
     const uint32_t cellIndex = dispatchThreadId.y * PROBE_GRID_SIZE + dispatchThreadId.x;  // 捨て場は 1 つの面の大きさ
     uint32_t hash = busySink[cellIndex] ^ cellIndex;
-    for (uint32_t i = 0; i < iterations; ++i) {
+    for (uint32_t i = 0; i < iterations; ++i)
         hash = hash * 1664525u + 1013904223u;
-    }
+
     busySink[cellIndex] = hash;
 }
 
@@ -189,6 +197,7 @@ void SortEventKeys(uint32_t thread) {
     const uint32_t value = inside ? world[GenerationBase(stateTick) + cellIndex] : 0;
     const uint64_t hashSum = WaveActiveSum(inside ? ProbeCellHash(cellIndex, value) : 0);
     const uint64_t heatSum = WaveActiveSum((uint64_t)value);
+
     if (WaveIsFirstLane()) {
         const uint32_t entry = HashEntryAddress(stateTick);
         uint64_t original;
@@ -212,13 +221,18 @@ void SortEventKeys(uint32_t thread) {
         events.InterlockedAdd(PROBE_EVENT_HEADER_REQUESTED * 4, stored, base);
         g_ringBase = base;
         uint32_t previous;
-        if (requested > stored) events.InterlockedAdd(PROBE_EVENT_HEADER_TICK_DROPPED * 4, requested - stored, previous);
+        if (requested > stored)
+            events.InterlockedAdd(PROBE_EVENT_HEADER_TICK_DROPPED * 4, requested - stored, previous);
+
         tickEvents.Store(0, 0);
     }
+
     GroupMemoryBarrierWithGroupSync();
 
     const uint32_t slot = g_ringBase + thread;
-    if (thread >= stored || slot >= PROBE_EVENT_CAPACITY) return;
+    if (thread >= stored || slot >= PROBE_EVENT_CAPACITY)
+        return;
+
     const uint64_t tick = CurrentTick();
     const uint64_t key = g_eventKeys[thread];
     events.Store4(PROBE_EVENT_HEADER_BYTES + slot * PROBE_EVENT_WORDS * 4,
@@ -229,20 +243,23 @@ void SortEventKeys(uint32_t thread) {
 // 活性の印: 予定の印(最後に計算した刻み + 1)が「この刻み」か「この刻み + 1」= 前の刻みか、途中まで進んだこの刻みで計算した。
 // 刻みの境界(単位 0)で写すなら前の刻みの分だけになり、ハッシュの表の「計算したブロックの数」と同じ数になる。
 void StoreExtraction(uint32_t index, uint32_t value) {
-    if (argument == 0) {
+    if (argument == 0)
         extraction0[index] = value;
-    } else if (argument == 1) {
+    else if (argument == 1)
         extraction1[index] = value;
-    } else {
+    else
         extraction2[index] = value;
-    }
 }
 
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void Extract(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t cellIndex = dispatchThreadId.x;
-    if (cellIndex >= PROBE_CELL_COUNT) return;
+    if (cellIndex >= PROBE_CELL_COUNT)
+        return;
+
     StoreExtraction(cellIndex, world[GenerationBase(CurrentTick()) + cellIndex]);
-    if (cellIndex >= PROBE_BLOCK_COUNT) return;
+    if (cellIndex >= PROBE_BLOCK_COUNT)
+        return;
+
     const uint32_t mark = blockSchedule[cellIndex];
     const uint32_t tickLow32 = (uint32_t)CurrentTick();
     const bool computed = mark != 0 && (mark == tickLow32 || mark == tickLow32 + 1);

@@ -16,7 +16,6 @@
 #include <string_view>
 #include <vector>
 
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
@@ -24,9 +23,9 @@ namespace bicameral::gpu {
     class ReadbackRing {
     public:
         // bytes: バッファ全体の大きさ。headerBytes: 見出しの大きさ(RecordReadbackAndReset がここだけ 0 に戻す)
-        [[nodiscard]] static expected<ReadbackRing, std::string> Create(ID3D12Device* device, uint64_t bytes,
-                                                                        uint64_t headerBytes, uint32_t slotCount,
-                                                                        std::wstring_view name);
+        [[nodiscard]] static std::expected<ReadbackRing, std::string> Create(ID3D12Device* device, uint64_t bytes,
+                                                                             uint64_t headerBytes, uint32_t slotCount,
+                                                                             std::wstring_view name);
 
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS GpuAddress() const { return m_buffer->GetGPUVirtualAddress(); }
         [[nodiscard]] uint32_t SlotCount() const { return static_cast<uint32_t>(m_readbacks.size()); }
@@ -39,7 +38,7 @@ namespace bicameral::gpu {
         void RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot) const;
 
         // slot のリストを GPU が終えた後に呼ぶ。先頭から destination の大きさだけ写す
-        [[nodiscard]] bool Read(uint32_t slot, span<std::byte> destination) const;
+        [[nodiscard]] bool Read(uint32_t slot, std::span<std::byte> destination) const;
 
     private:
         ReadbackRing() = default;

@@ -10,15 +10,14 @@
 #include <expected>
 #include <string>
 
-#include "core/aliases.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
 
     class ImmediateQueue {
     public:
-        [[nodiscard]] static expected<ImmediateQueue, std::string> Create(ID3D12Device5* device,
-                                                                          D3D12_COMMAND_LIST_TYPE type);
+        [[nodiscard]] static std::expected<ImmediateQueue, std::string> Create(ID3D12Device5* device,
+                                                                               D3D12_COMMAND_LIST_TYPE type);
 
         // 記録を始める(前の記録は捨てる)。失敗なら nullptr
         [[nodiscard]] ID3D12GraphicsCommandList10* Begin();

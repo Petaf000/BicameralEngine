@@ -36,7 +36,7 @@ namespace {
     struct Failures {
         int count = 0;
 
-        void Check(bool condition, string_view what) {
+        void Check(bool condition, std::string_view what) {
             if (condition)
                 return;
 
@@ -51,7 +51,7 @@ namespace {
         const uint64_t large = (uint64_t{thread} << 40) | 0xABCDu;
         const int64_t signed64 = -(static_cast<int64_t>(thread) << 33) - 7;
 
-        return format("thread={} negative={} large={:#x} signed64={}", thread, negative, large, signed64);
+        return std::format("thread={} negative={} large={:#x} signed64={}", thread, negative, large, signed64);
     }
 
     // --- 1. デコード(GPU なし)---
@@ -83,12 +83,12 @@ namespace {
 
     void TestDecode(Failures& failures) {
         // GPU は 32bit の符号つきの値を 64bit に符号を広げて書く(debug_ring.hlsli の DebugArgWords)
-        const auto probe =
-            MakeRecord(static_cast<uint32_t>(DebugFormat::DebugRingProbe), DEBUG_KIND_PRINT,
-                       {{.bits = 3, .kind = DEBUG_ARG_U32},
-                        {.bits = static_cast<uint64_t>(int64_t{-4}), .kind = DEBUG_ARG_I32},
-                        {.bits = (uint64_t{3} << 40) | 0xABCDu, .kind = DEBUG_ARG_U64},
-                        {.bits = static_cast<uint64_t>(-(int64_t{3} << 33) - 7), .kind = DEBUG_ARG_I64}});
+        const auto probe = MakeRecord(
+            static_cast<uint32_t>(DebugFormat::DebugRingProbe), DEBUG_KIND_PRINT,
+            {{.bits = 3, .kind = DEBUG_ARG_U32},
+             {.bits = static_cast<uint64_t>(int64_t{-4}), .kind = DEBUG_ARG_I32},
+             {.bits = (uint64_t{3} << 40) | 0xABCDu, .kind = DEBUG_ARG_U64},
+             {.bits = static_cast<uint64_t>(-(int64_t{3} << 33) - 7), .kind = DEBUG_ARG_I64}});
 
         const gpu::DebugMessage message = gpu::DecodeDebugRecord(probe);
         failures.Check(message.text == ExpectedProbeText(3), "デコード: 型ごとの引数と {:#x} → " + message.text);
@@ -122,32 +122,32 @@ namespace {
         gpu::DebugRing ring;
     };
 
-    expected<ProbeContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
+    std::expected<ProbeContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
         const auto computeShader = gpu::LoadShader("sim/debug_ring_probe.cso");
         const auto graphLibrary = gpu::LoadShader("sim/debug_ring_graph_probe.cso");
         if (!computeShader)
-            return unexpected(computeShader.error());
+            return std::unexpected(computeShader.error());
 
         if (!graphLibrary)
-            return unexpected(graphLibrary.error());
+            return std::unexpected(graphLibrary.error());
 
         ComPtr<ID3D12RootSignature> computeRootSignature = gpu::CreateRootSignature(device, COMPUTE_LAYOUT);
         ComPtr<ID3D12RootSignature> graphRootSignature = gpu::CreateRootSignature(device, GRAPH_LAYOUT);
         if (!computeRootSignature || !graphRootSignature)
-            return unexpected("ルート署名を作れない");
+            return std::unexpected("ルート署名を作れない");
 
-        ComPtr<ID3D12PipelineState> computePipeline =
-            gpu::CreateComputePipeline(device, computeRootSignature.Get(), *computeShader);
+        ComPtr<ID3D12PipelineState> computePipeline = gpu::CreateComputePipeline(device, computeRootSignature.Get(),
+                                                                                 *computeShader);
         if (!computePipeline)
-            return unexpected("パイプラインを作れない");
+            return std::unexpected("パイプラインを作れない");
 
         auto graph = gpu::WorkGraph::Create(device, graphRootSignature.Get(), *graphLibrary, L"DebugRingProbe");
         if (!graph)
-            return unexpected(graph.error());
+            return std::unexpected(graph.error());
 
         auto ring = gpu::DebugRing::Create(device);
         if (!ring)
-            return unexpected(ring.error());
+            return std::unexpected(ring.error());
 
         return ProbeContext{.queue = &queue,
                             .computeRootSignature = std::move(computeRootSignature),
@@ -159,10 +159,10 @@ namespace {
 
     // --- 2〜4. compute から ---
 
-    expected<gpu::DebugRingContents, std::string> RunCompute(ProbeContext& context, uint32_t printThreadCount) {
+    std::expected<gpu::DebugRingContents, std::string> RunCompute(ProbeContext& context, uint32_t printThreadCount) {
         ID3D12GraphicsCommandList10* list = context.queue->Begin();
         if (list == nullptr)
-            return unexpected("コマンドリストを始められない");
+            return std::unexpected("コマンドリストを始められない");
 
         context.ring.RecordBegin(list);
         list->SetComputeRootSignature(context.computeRootSignature.Get());
@@ -172,7 +172,7 @@ namespace {
         list->Dispatch((printThreadCount + THREADS_PER_GROUP - 1) / THREADS_PER_GROUP, 1, 1);
         context.ring.RecordReadbackAndReset(list);
         if (!context.queue->ExecuteAndWait())
-            return unexpected("GPU での実行に失敗");
+            return std::unexpected("GPU での実行に失敗");
 
         return context.ring.Drain(MAX_LOGGED_MESSAGES);
     }
@@ -198,7 +198,7 @@ namespace {
                 ++assertCount;
 
                 failures.Check(message.format == DebugFormat::DebugRingProbeAssert &&
-                                   message.text == format("thread={} で assert", ASSERT_THREAD),
+                                   message.text == std::format("thread={} で assert", ASSERT_THREAD),
                                "assert の中身 → " + message.text);
 
                 continue;
@@ -218,14 +218,14 @@ namespace {
 
     // --- 5. Work Graphs のノードから ---
 
-    expected<gpu::DebugRingContents, std::string> RunGraph(ProbeContext& context) {
+    std::expected<gpu::DebugRingContents, std::string> RunGraph(ProbeContext& context) {
         const uint32_t entrypoint = context.graph.EntrypointIndex(L"Root");
         if (entrypoint == UINT32_MAX)
-            return unexpected("入口のノード Root が無い");
+            return std::unexpected("入口のノード Root が無い");
 
         ID3D12GraphicsCommandList10* list = context.queue->Begin();
         if (list == nullptr)
-            return unexpected("コマンドリストを始められない");
+            return std::unexpected("コマンドリストを始められない");
 
         context.ring.RecordBegin(list);
         list->SetComputeRootSignature(context.graphRootSignature.Get());
@@ -235,7 +235,7 @@ namespace {
         gpu::WorkGraph::DispatchFromCpu(list, entrypoint, &rootRecord, 1, sizeof(rootRecord));
         context.ring.RecordReadbackAndReset(list);
         if (!context.queue->ExecuteAndWait())
-            return unexpected("GPU での実行に失敗");
+            return std::unexpected("GPU での実行に失敗");
 
         return context.ring.Drain(MAX_LOGGED_MESSAGES);
     }
@@ -257,7 +257,7 @@ namespace {
 
         std::vector<std::string> expected;
         for (uint32_t value = 1; value <= GRAPH_LEAF_COUNT; ++value)
-            expected.push_back(format("value={}", value));
+            expected.push_back(std::format("value={}", value));
 
         rng::sort(texts);
         rng::sort(expected);
@@ -266,11 +266,11 @@ namespace {
 
     // --- 全体 ---
 
-    expected<void, std::string> RunGpuTests(ProbeContext& context, Failures& failures) {
+    std::expected<void, std::string> RunGpuTests(ProbeContext& context, Failures& failures) {
         for (const uint32_t printThreadCount : {PROBE_THREAD_COUNT, OVERFLOW_THREAD_COUNT, PROBE_THREAD_COUNT}) {
             const auto contents = RunCompute(context, printThreadCount);
             if (!contents)
-                return unexpected(contents.error());
+                return std::unexpected(contents.error());
 
             CheckComputeCounts(*contents, printThreadCount, failures);
             if (contents->droppedCount == 0)
@@ -279,14 +279,14 @@ namespace {
 
         const auto graphContents = RunGraph(context);
         if (!graphContents)
-            return unexpected(graphContents.error());
+            return std::unexpected(graphContents.error());
 
         CheckGraphMessages(*graphContents, failures);
 
         return {};
     }
 
-    int Run(span<char*> arguments) {
+    int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error, "使い方: gpu_debug_ring_test [--warp] [--queue direct|compute]");
@@ -306,8 +306,8 @@ namespace {
         }
 
         auto queue = gpu::ImmediateQueue::Create(device->Get(), options->queueType);
-        auto context = queue ? CreateContext(device->Get(), *queue) : unexpected(queue.error());
-        const auto result = context ? RunGpuTests(*context, failures) : unexpected(context.error());
+        auto context = queue ? CreateContext(device->Get(), *queue) : std::unexpected(queue.error());
+        const auto result = context ? RunGpuTests(*context, failures) : std::unexpected(context.error());
 
         if (!result) {
             Log(Channel::Gpu, Level::Error, "gpu_debug_ring_test: FAILED ({})", result.error());
@@ -330,7 +330,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int exitCode = Run(span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
     SingletonFinalizer::Finalize();  // ログを閉じる
 
     return exitCode;
