@@ -5,18 +5,22 @@
 // 結果は Markdown の表の行としてログに出す(docs/perf.md に貼る)。熱の合計がつつきの分から変わっていたら失敗(長い刻みでの保存則の確認)。
 //
 // ctest には登録しない(時間がかかり、時間は機械しだい)。走らせ方: `job.py run -Preset release -Exe gpu_conduct_bench`。
-// 引数は gpu_test_options.h(--warp)。WARP での時間は GPU の目安にならない。
+// 引数は gpu_test_options.h(--warp)と、--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)。
+// WARP での時間は GPU の目安にならない。
 #include <algorithm>
 #include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/device.h"
 #include "gpu/queue.h"
 #include "gpu_test_options.h"
 #include "sim/probe_sim.h"
+#include "sim/probe_trace.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -24,6 +28,8 @@ using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
 namespace {
 
     constexpr uint32_t TICKS_PER_FRAME = 16;
+    constexpr uint32_t
+        TRACE_CAPACITY = 1u << 20;  // --trace: 1 フレーム(16 刻み)に書ける記録(16 MiB。全部のブロックが活性でも足りる)
 
     struct Scenario {
         const char* name;
@@ -116,10 +122,10 @@ namespace {
         }
     }
 
-    ScenarioResult RunScenario(ID3D12Device5* device, const Scenario& scenario) {
+    ScenarioResult RunScenario(ID3D12Device5* device, const Scenario& scenario, const gpu::GraphTraceFilter& trace) {
         ScenarioResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"ConductBench");
-        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, {.trace = trace});
         if (!queue || !simulation)
             return result;
 
@@ -141,7 +147,7 @@ namespace {
                 return result;
 
             const ProbeFrameReadback readback = simulation->ReadFrame(slot);
-            if (readback.hashes.size() != TICKS_PER_FRAME)
+            if (readback.hashes.size() != TICKS_PER_FRAME || readback.droppedTraceCount > 0)
                 return result;
 
             AccumulateFrame(result, readback, unitsPerTick, microsecondsPerTick, expectedHeat);
@@ -188,9 +194,23 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const auto options = test::ParseGpuTestOptions(std::span(argv, static_cast<size_t>(argc)));
+    // --trace だけはこのベンチの引数(残りは gpu_test_options.h)
+    std::vector<char*> arguments(argv, argv + argc);
+    const auto traceArgument = rng::find_if(
+        arguments, [](const char* argument) { return std::string_view(argument) == "--trace"; });
+    const bool traced = traceArgument != arguments.end();
+    if (traced)
+        arguments.erase(traceArgument);
+
+    const gpu::GraphTraceFilter trace = traced
+                                            ? ProbeTraceFilterForCells(
+                                                  0, UINT64_MAX, {0, 0, 0},
+                                                  {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE}, TRACE_CAPACITY)
+                                            : gpu::GraphTraceFilter{};
+
+    const auto options = test::ParseGpuTestOptions(std::span(arguments));
     if (!options) {
-        Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp]");
+        Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp] [--trace]");
         bicameral::SingletonFinalizer::Finalize();
 
         return 2;
@@ -204,13 +224,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    Log(Channel::Sim, Level::Info, "連鎖のトレース: {}", traced ? "全部を記録する" : "無効");
     Log(Channel::Sim, Level::Info,
         "| 規模 | 計算したブロック | 刻みの数 | 平均ブロック | 伝導 µs/刻み | ns/ブロック |");
     Log(Channel::Sim, Level::Info, "|---|---|---|---|---|---|");
     bool passed = true;
 
     for (const Scenario& scenario : SCENARIOS) {
-        const ScenarioResult result = RunScenario(device->Get(), scenario);
+        const ScenarioResult result = RunScenario(device->Get(), scenario, trace);
         if (!result.ok)
             Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
 

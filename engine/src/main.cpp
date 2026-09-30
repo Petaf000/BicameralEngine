@@ -16,6 +16,9 @@
 //   --view <volume|mip|slice>        最初のデバッグ表示(既定 volume。窓では 1・2・3 で切り替え。render/debug_view_controller.h)
 //   --camera <yaw>,<pitch>,<距離>    最初のカメラ(度・度・セル。既定 35,25,150。0,0,80 で z = 32 の面を正面から)
 //   --screenshot <path>              最後のフレームを BMP に書く(--frames と一緒に使う。render/screenshot.h)
+//   --trace <path>                   伝導の連鎖のトレースを刻みごとの木にして、終わるときに書く(sim/probe_trace.h。T-0087)
+//   --trace-ticks <始め>:<終わり>    トレースする刻み [始め, 終わり)(既定: 全部)
+//   --trace-cells <x,y,z>:<x,y,z>    トレースするセルの箱 [最小, 最大)(既定: 全部。そのセルを含むブロックを記録する)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -35,6 +38,7 @@
 #include "core/unicode.h"
 #include "frame/frame_loop.h"
 #include "platform/caps.h"
+#include "sim/probe_trace.h"
 
 namespace {
 
@@ -46,7 +50,14 @@ namespace {
         fs::path logDirectory;  // 空なら DefaultLogDirectory()
         Level logLevel = Level::Info;
         bool hasLogLevel = false;
+
+        // --- 連鎖のトレースの範囲(--trace-ticks・--trace-cells。ParseOptions の最後に frameLoop.trace にする)---
+        std::array<uint64_t, 2> traceTicks = {0, UINT64_MAX};
+        std::array<uint64_t, 6> traceCells = {
+            0, 0, 0, sim::PROBE_GRID_SIZE, sim::PROBE_GRID_SIZE, sim::PROBE_GRID_SIZE};
     };
+
+    constexpr uint32_t TRACE_CAPACITY_PER_FRAME = 1u << 16;  // 1 フレームに GPU が書ける記録(1 MiB)
 
     // --- コマンドライン ---
 
@@ -59,6 +70,67 @@ namespace {
             return std::nullopt;
 
         return value;
+    }
+
+    // "a:b" や "x,y,z:x,y,z" のような 10 進の整数の並び(区切りは , か :)。数が N 個でなければ std::nullopt
+    template <size_t N>
+    std::optional<std::array<uint64_t, N>> ParseNumbers(std::wstring_view text) {
+        const std::string utf8 = ToUtf8(text);
+        std::array<uint64_t, N> values{};
+        const char* cursor = utf8.data();
+        const char* end = utf8.data() + utf8.size();
+
+        for (size_t index = 0; index < N; ++index) {
+            const auto [next, error] = std::from_chars(cursor, end, values[index]);
+            if (error != std::errc{})
+                return std::nullopt;
+
+            const bool last = index + 1 == N;
+            if (last ? next != end : (next == end || (*next != ',' && *next != ':')))
+                return std::nullopt;
+
+            cursor = next + 1;
+        }
+
+        return values;
+    }
+
+    // トレースの範囲の引数(--trace-ticks・--trace-cells)
+    std::expected<void, std::string> ParseTraceRange(std::wstring_view argument, std::wstring_view text,
+                                                     Options& options) {
+        if (argument == L"--trace-ticks") {
+            const auto ticks = ParseNumbers<2>(text);
+            if (!ticks || (*ticks)[0] >= (*ticks)[1])
+                return std::unexpected(std::format("--trace-ticks の値が不正: {}(例: 10:20)", ToUtf8(text)));
+
+            options.traceTicks = *ticks;
+
+            return {};
+        }
+
+        const auto cells = ParseNumbers<6>(text);
+        const bool ordered = cells && (*cells)[0] < (*cells)[3] && (*cells)[1] < (*cells)[4] &&
+                             (*cells)[2] < (*cells)[5];
+        if (!ordered)
+            return std::unexpected(std::format("--trace-cells の値が不正: {}(例: 0,0,28:64,64,36)", ToUtf8(text)));
+
+        options.traceCells = *cells;
+
+        return {};
+    }
+
+    // --trace のときだけ、範囲をフレームのループのトレースの範囲にする(セルの箱 → ブロックの座標の箱)
+    void ApplyTraceRange(Options& options) {
+        if (options.frameLoop.tracePath.empty())
+            return;
+
+        const auto cell = [&options](size_t index) {
+            return static_cast<uint32_t>(std::min<uint64_t>(options.traceCells[index], sim::PROBE_GRID_SIZE));
+        };
+
+        options.frameLoop.trace = sim::ProbeTraceFilterForCells(options.traceTicks[0], options.traceTicks[1],
+                                                                {cell(0), cell(1), cell(2)},
+                                                                {cell(3), cell(4), cell(5)}, TRACE_CAPACITY_PER_FRAME);
     }
 
     // "yaw,pitch,距離"(小数でよい)。距離は正
@@ -185,7 +257,13 @@ namespace {
                 const auto parsed = ParseViewOption(argument, arguments[++i], options.frameLoop);
                 if (!parsed)
                     return std::unexpected(parsed.error());
-            } else if (argument == L"--record" && hasValue)
+            } else if ((argument == L"--trace-ticks" || argument == L"--trace-cells") && hasValue) {
+                const auto parsed = ParseTraceRange(argument, arguments[++i], options);
+                if (!parsed)
+                    return std::unexpected(parsed.error());
+            } else if (argument == L"--trace" && hasValue)
+                options.frameLoop.tracePath = arguments[++i];
+            else if (argument == L"--record" && hasValue)
                 options.frameLoop.recordPath = arguments[++i];
             else if (argument == L"--replay" && hasValue)
                 options.frameLoop.replayPath = arguments[++i];
@@ -199,6 +277,8 @@ namespace {
             } else
                 return std::unexpected(std::format("知らない引数: {}", ToUtf8(argument)));
         }
+
+        ApplyTraceRange(options);
 
         return options;
     }

@@ -2,6 +2,7 @@
 #include "gpu/resources.h"
 
 #include "common/debug_ring.hlsli"
+#include "common/graph_trace.hlsli"
 #include "common/work_graph_stats.hlsli"
 #include "core/aliases.h"
 #include "core/hresult.h"
@@ -116,7 +117,7 @@ namespace bicameral::gpu {
         };
 
         std::vector<D3D12_ROOT_PARAMETER1> parameters;
-        parameters.reserve(layout.uavCount + layout.srvCount + 3);
+        parameters.reserve(layout.uavCount + layout.srvCount + 4);
         for (uint32_t index = 0; index < layout.uavCount; ++index)
             parameters.push_back(rootUav(index, 0));
 
@@ -132,6 +133,9 @@ namespace bicameral::gpu {
 
         if (layout.graphStats)
             parameters.push_back(rootUav(WG_STATS_REGISTER, WG_STATS_REGISTER_SPACE));
+
+        if (layout.graphTrace)
+            parameters.push_back(rootUav(GT_REGISTER, GT_REGISTER_SPACE));
 
         for (uint32_t index = 0; index < layout.srvCount; ++index) {
             parameters.push_back({.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV,

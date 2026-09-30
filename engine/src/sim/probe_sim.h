@@ -33,6 +33,7 @@
 #include "common/probe_sim.hlsli"
 #include "gpu/com_ptr.h"
 #include "gpu/debug_ring.h"
+#include "gpu/graph_trace.h"
 #include "gpu/readback_ring.h"
 #include "gpu/work_graph.h"
 #include "gpu/work_graph_stats.h"
@@ -88,6 +89,10 @@ namespace bicameral::sim {
         // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
         gpu::GraphStatsSnapshot graphStats;
         uint32_t graphFindingCount = 0;  // 上限に当たった・近づいたものの数(中身は Warning でログに出る)
+
+        // 伝導の連鎖のトレース(範囲を有効にしたときだけ。atomic の順。T-0087。組み立ては sim/probe_trace.h)
+        std::vector<gpu::GraphTraceRecord> trace;
+        uint32_t droppedTraceCount = 0;  // 容量を越えて書けなかった数(> 0 ならトレースは欠けている)
     };
 
     struct ProbeFrameInput {
@@ -107,6 +112,9 @@ namespace bicameral::sim {
         // 1 刻みに足す繰り返しの合計(0 なら重さの単位は無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
         uint32_t busyIterations = 0;
         uint32_t busyPieces = 1;  // それを何個の単位に分けるか(1〜PROBE_MAX_BUSY_PIECES)
+
+        // 伝導の連鎖のトレースの範囲(既定は無効。場所の箱はブロックの座標。セルからは ProbeTraceFilterForCells。T-0087)
+        gpu::GraphTraceFilter trace;
     };
 
     // --- GPU で走らせる ---
@@ -173,11 +181,12 @@ namespace bicameral::sim {
         };
 
         ProbeSim(const ProbeSimOptions& options, gpu::ReadbackRing&& events, gpu::DebugRing&& debugRing,
-                 gpu::WorkGraphStats&& graphStats)
+                 gpu::WorkGraphStats&& graphStats, gpu::GraphTrace&& graphTrace)
             : m_options(options),
               m_events(std::move(events)),
               m_debugRing(std::move(debugRing)),
-              m_graphStats(std::move(graphStats)) {}
+              m_graphStats(std::move(graphStats)),
+              m_graphTrace(std::move(graphTrace)) {}
 
         [[nodiscard]] uint32_t BusyUnitCount() const { return m_options.busyIterations > 0 ? m_options.busyPieces : 0; }
 
@@ -241,6 +250,7 @@ namespace bicameral::sim {
         gpu::ReadbackRing m_events;
         gpu::DebugRing m_debugRing;
         gpu::WorkGraphStats m_graphStats;      // 伝導のグラフのノードのカウンタ(T-0008)
+        gpu::GraphTrace m_graphTrace;          // 伝導の連鎖のトレース(T-0087)
         ComPtr<ID3D12QueryHeap> m_timestamps;  // slot ごとに MAX_UNITS_PER_FRAME + 2
         std::array<FrameSlot, FRAME_SLOT_COUNT> m_slots;
 
@@ -273,6 +283,9 @@ namespace bicameral::sim {
 
         // 最後の Advance で GPU が伝導を計算するはずのブロックの数
         [[nodiscard]] uint32_t ScheduledBlocks() const { return m_scheduledBlocks; }
+
+        // 最後の Advance で値が変わったブロック(PROBE_BLOCK_COUNT 個の 0/1。次の刻みの予定の種。トレースの予想に使う。sim/probe_trace.h)
+        [[nodiscard]] std::span<const uint8_t> ChangedBlocks() const { return m_changedBlocks; }
 
     private:
         std::vector<uint32_t> m_cells;         // 2 世代 × PROBE_CELL_COUNT(GPU と同じ並び)

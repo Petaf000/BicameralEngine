@@ -18,6 +18,7 @@ target_include_directories(bicameral_fixed INTERFACE ${PROJECT_SOURCE_DIR}/shade
 add_library(bicameral_gpu STATIC
   src/gpu/debug_ring.cpp
   src/gpu/device.cpp
+  src/gpu/graph_trace.cpp
   src/gpu/immediate_queue.cpp
   src/gpu/queue.cpp
   src/gpu/readback_ring.cpp
@@ -30,7 +31,7 @@ target_include_directories(bicameral_gpu PUBLIC src)
 target_precompile_headers(bicameral_gpu PRIVATE src/pch.h)
 target_link_libraries(bicameral_gpu PUBLIC
   bicameral_core
-  bicameral_fixed  # shaders/common/debug_ring.hlsli・work_graph_stats.hlsli(デバッグのリング・Work Graphs のカウンタのレイアウト)
+  bicameral_fixed  # shaders/common/debug_ring.hlsli・work_graph_stats.hlsli・graph_trace.hlsli(デバッグのリング・カウンタ・トレースのレイアウト)
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   d3d12 dxgi)
 # debug プリセット: デバイスを作るとき debug layer・GPU-based validation・DRED を既定で有効にする(gpu/device.cpp、T-0003)
@@ -42,6 +43,7 @@ endif()
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
   src/sim/probe_sim.cpp
+  src/sim/probe_trace.cpp
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)

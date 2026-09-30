@@ -11,17 +11,13 @@
 // ノードの実行の順番は決まらないが、各ブロックは自分のセルにだけ書き、予定と一覧は順番に依存しない(印は同じ値の上書き、一覧は順不同で
 // 次の刻みの予定にだけ使う)ので、結果は決定的(04 R1〜R8)。整数だけ(D-205)。
 // ノードごとの起動・レコードの数は common/work_graph_stats.hlsli で数える(T-0008。CPU がフレームごとにログへ)。
+// 連鎖のトレース(T-0087): 範囲が有効なら、WakeBlocks は「起こそうとした隣」を全部、ConductBlock は「計算した・変わったか」を書く
+// (common/graph_trace.hlsli。種類は probe_sim.hlsli の PROBE_TRACE_*。木に組むのは CPU の sim/probe_trace)。
 #include "sim/probe_bindings.hlsli"
 
 struct BlockRecord {
     uint32_t block;  // ブロックの番号(ProbeBlockIndex)
 };
-
-// ブロックの座標(ProbeBlockIndex の逆)
-uint3 BlockCoordinates(uint32_t block) {
-    return uint3(block % PROBE_BLOCKS_PER_AXIS, (block / PROBE_BLOCKS_PER_AXIS) % PROBE_BLOCKS_PER_AXIS,
-                 block / (PROBE_BLOCKS_PER_AXIS * PROBE_BLOCKS_PER_AXIS));
-}
 
 // この刻みでまだ予定していなければ予定する(印を「刻み + 1」にする。同じ刻みに何度来ても、最初の 1 回だけ true)。
 // 予定した数は S(t + 1) の表の欄に数える(CPU のリファレンスが同じ数を予想する)
@@ -56,6 +52,39 @@ int3 FaceOffset(uint32_t index) {
     const int32_t step = ((index - 1) & 1) != 0 ? 1 : -1;
 
     return int3(axis == 0 ? step : 0, axis == 1 ? step : 0, axis == 2 ? step : 0);
+}
+
+// 格子の中の隣(index 番目。0 = 自分)なら true と番号
+bool NeighborBlock(int3 center, uint32_t index, out uint32_t target) {
+    const int3 neighbor = center + FaceOffset(index);
+    target = 0;
+    if (any(neighbor < 0) || any(neighbor >= (int)PROBE_BLOCKS_PER_AXIS))
+        return false;
+
+    target = ProbeBlockIndex((uint32_t)neighbor.x, (uint32_t)neighbor.y, (uint32_t)neighbor.z);
+
+    return true;
+}
+
+// 連鎖のトレース: 一覧の 1 件 block が起こそうとした隣(格子の中を全部)を書く。どちらかが範囲の箱に入るものだけ。
+// ウェーブの全部のレーンが呼ぶ(GtReserve)。書かないレーンは valid = false
+void TraceWakes(uint64_t tick, bool valid, uint32_t block, int3 center) {
+    const bool sourceWanted = valid && TraceWantsBlock(block);
+    uint32_t wantedMask = 0;
+    [unroll] for (uint32_t index = 0; index < PROBE_WAKE_MAX_RECORDS; ++index) {
+        uint32_t target;
+        const bool inside = valid && NeighborBlock(center, index, target);
+        if (inside && (sourceWanted || TraceWantsBlock(target)))
+            wantedMask |= 1u << index;
+    }
+
+    uint32_t slot = GtReserve(countbits(wantedMask));
+    [unroll] for (uint32_t index = 0; index < PROBE_WAKE_MAX_RECORDS; ++index) {
+        uint32_t target;
+        NeighborBlock(center, index, target);
+        if ((wantedMask & (1u << index)) != 0)
+            GtStore(slot++, tick, PROBE_TRACE_WAKE, block, target);
+    }
 }
 
 groupshared uint32_t g_blockChanged;
@@ -95,6 +124,10 @@ void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
     }
 
     WgCountOutputs(PROBE_STATS_NODE_WAKE, emitted, emitted);  // 出す数は構造で 7 まで(上限を越えようがない)
+
+    // 範囲の刻みはディスパッチの中で同じ(ルート定数と見出し)なので、ここの分岐はウェーブで一様
+    if (GtWantsTick(tick))
+        TraceWakes(tick, valid, block, center);
 }
 
 // 1 ブロック(4³ セル)の伝導。値が変わったら、次の刻みの一覧へ
@@ -134,8 +167,14 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
         InterlockedOr(g_blockChanged, 1);
 
     GroupMemoryBarrierWithGroupSync();
-    if (groupIndex == 0 && g_blockChanged != 0)
+    if (groupIndex != 0)
+        return;
+
+    if (g_blockChanged != 0)
         AppendActiveBlock((uint32_t)((tick + 1) & 1), block);
+
+    if (GtWantsTick(tick) && TraceWantsBlock(block))
+        GtRecord(tick, PROBE_TRACE_CONDUCT, block, g_blockChanged != 0 ? 1 : 0);
 }
 
 // clang-format on

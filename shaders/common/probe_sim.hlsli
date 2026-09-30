@@ -139,6 +139,13 @@ PROBE_CONST uint32_t PROBE_STATS_GAUGE_COMMAND_QUEUE = 1;  // 適用の時にキ
 // WakeBlocks の MaxRecords(自分と 6 面の隣。probe_conduct.hlsl の属性と同じ)
 PROBE_CONST uint32_t PROBE_WAKE_MAX_RECORDS = 7;
 
+// --- 連鎖のトレース(common/graph_trace.hlsli。T-0087)の記録の種類。場所の単位はブロックの座標。木に組むのは sim/probe_trace ---
+// 書くのは順番に依存しない事実だけ。「どの起こしが先に予定したか」は毎回変わるので書かない(親は CPU が決まった規則で選ぶ)
+PROBE_CONST uint32_t PROBE_TRACE_POKE = 1;  // 適用がつついた。主 = ブロック、従 = セルの番号(ProbeCellIndex)
+PROBE_CONST uint32_t
+    PROBE_TRACE_WAKE = 2;  // WakeBlocks が起こそうとした。主 = 一覧のブロック、従 = 自分か 6 面の隣(格子の中を全部)
+PROBE_CONST uint32_t PROBE_TRACE_CONDUCT = 3;  // ConductBlock が計算した。主 = ブロック、従 = 値が 1 つでも変わったら 1
+
 // 重さの試験(--sim-load)の繰り返しの上限(1 刻みの合計。--sim-split で分けたときは 1 個あたりがこれを分けた数で割ったもの)。
 // これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない
 PROBE_CONST uint32_t PROBE_BUSY_ITERATIONS_LIMIT = 1u << 24;

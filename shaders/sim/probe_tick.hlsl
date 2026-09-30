@@ -39,8 +39,13 @@ void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
 
     const uint32_t index = GenerationBase(tick) + ProbeCellIndex(cell.x, cell.y, cell.z);
     world[index] = ProbeAddHeat(world[index], PROBE_POKE_AMOUNT);
-    AppendActiveBlock((uint32_t)(tick & 1), ProbeBlockOfCell(cell.x, cell.y, cell.z));
+    const uint32_t block = ProbeBlockOfCell(cell.x, cell.y, cell.z);
+    AppendActiveBlock((uint32_t)(tick & 1), block);
     EmitTickEvent(PROBE_EVENT_POKE_APPLIED, ProbePokePlace(cell.x, cell.y, cell.z));
+
+    // 連鎖のトレースの根(T-0087。sim/probe_trace が木に組む)
+    if (GtWantsTick(tick) && TraceWantsBlock(block))
+        GtRecord(tick, PROBE_TRACE_POKE, block, ProbeCellIndex(cell.x, cell.y, cell.z));
 }
 
 // 活性の一覧の見出し(D3D12_NODE_GPU_INPUT)の、数以外(入口・レコードのアドレス・間隔)を書く。アドレスは CPU が入力の見出しで渡す

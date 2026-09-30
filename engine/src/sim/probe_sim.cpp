@@ -16,11 +16,12 @@ namespace bicameral::sim {
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
         //   u0 世界・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
         //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印 → b0 単位の定数 → デバッグのリング
-        //   → Work Graphs のカウンタ(u1 space1。T-0008)→ t0 フレームの入力
+        //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 12,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
+                                                       .graphTrace = true,
                                                        .srvCount = 1};
 
         constexpr uint32_t UAV_WORLD = 0;
@@ -141,7 +142,12 @@ namespace bicameral::sim {
         if (!graphStats)
             return std::unexpected(graphStats.error());
 
-        ProbeSim sim(options, std::move(*events), std::move(*debugRing), std::move(*graphStats));
+        auto graphTrace = gpu::GraphTrace::Create(device, options.trace, FRAME_SLOT_COUNT);
+        if (!graphTrace)
+            return std::unexpected(graphTrace.error());
+
+        ProbeSim sim(options, std::move(*events), std::move(*debugRing), std::move(*graphStats),
+                     std::move(*graphTrace));
         if (!sim.CreatePipelines(device))
             return std::unexpected("仮の刻みのパイプラインを作れない");
 
@@ -348,6 +354,7 @@ namespace bicameral::sim {
         m_events.RecordBegin(list);
         m_debugRing.RecordBegin(list);
         m_graphStats.RecordBegin(list);
+        m_graphTrace.RecordBegin(list);
         const D3D12_RESOURCE_BARRIER hashesToUav = gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON,
                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &hashesToUav);
@@ -449,6 +456,7 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(UAV_BLOCK_SCHEDULE, m_blockSchedule->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
+        list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_INPUT), input->GetGPUVirtualAddress());
     }
 
@@ -510,11 +518,12 @@ namespace bicameral::sim {
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
     }
 
-    // イベント・デバッグの出力・ノードのカウンタ・(ハッシュの単位があれば)ハッシュの表を、slot の読み戻しのバッファへ
+    // イベント・デバッグの出力・ノードのカウンタ・連鎖のトレース・(ハッシュの単位があれば)ハッシュの表を、slot の読み戻しのバッファへ
     void ProbeSim::RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const {
         m_events.RecordReadbackAndReset(list, slot);
         m_debugRing.RecordReadbackAndReset(list, slot);
         m_graphStats.RecordReadbackAndReset(list, slot);
+        m_graphTrace.RecordReadbackAndReset(list, slot);
 
         if (hasHash) {
             gpu::RecordCopyToReadback(list, m_hashes.Get(), m_slots[slot].hashReadback.Get());
@@ -578,6 +587,14 @@ namespace bicameral::sim {
             result.graphStats = std::move(*graphStats);
         } else
             Log(Channel::WorkGraph, Level::Warning, "{}", graphStats.error());
+
+        // 連鎖のトレース(範囲が無効なら空)
+        auto trace = m_graphTrace.Read(slot);
+        if (trace) {
+            result.trace = std::move(trace->records);
+            result.droppedTraceCount = trace->droppedCount;
+        } else
+            Log(Channel::WorkGraph, Level::Warning, "{}", trace.error());
 
         return result;
     }

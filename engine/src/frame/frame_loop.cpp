@@ -31,6 +31,7 @@
 #include "render/screenshot.h"
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
+#include "sim/probe_trace.h"
 
 namespace bicameral::frame {
     namespace {
@@ -47,6 +48,7 @@ namespace bicameral::frame {
         constexpr uint32_t AUTO_CLICK_INTERVAL_FRAMES = 20;
         constexpr auto STATS_INTERVAL = chr::seconds(1);
         constexpr auto MINIMIZED_SLEEP = chr::milliseconds(16);
+        constexpr size_t MAX_TRACE_RECORDS = size_t{1} << 22;  // --trace で集める記録の上限(1 件 24 バイト。約 100 MB)
 
         double Milliseconds(Clock::duration duration) {
             return chr::duration<double, std::milli>(duration).count();
@@ -174,6 +176,7 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             [[nodiscard]] bool FinishReplay();
+            [[nodiscard]] bool WriteTrace();
             bool SubmitSim();
 
             // --- フレームの流れ ---
@@ -202,6 +205,8 @@ namespace bicameral::frame {
             std::vector<save::ReplayPlayer> m_replay;             // 再生中なら 1 つ
             save::ReplayRecorder m_recorder;                      // --record のときだけ使う
             std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で最後のフレームを写したら 1 つ
+            std::vector<gpu::GraphTraceRecord> m_trace;           // --trace のとき集めた記録(順不同)
+            uint64_t m_droppedTraceCount = 0;                     // GPU の容量・ここの上限で落とした数
 
             // --- 描画の枠 ---
             std::array<FrameSlot, FRAME_SLOT_COUNT> m_frames;
@@ -274,7 +279,7 @@ namespace bicameral::frame {
 
             auto simulation = sim::ProbeSim::Create(
                 native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                {.busyIterations = options.simLoad, .busyPieces = options.simSplit});
+                {.busyIterations = options.simLoad, .busyPieces = options.simSplit, .trace = options.trace});
 
             if (!simulation)
                 return std::unexpected(simulation.error());
@@ -427,6 +432,14 @@ namespace bicameral::frame {
             }
 
             ReportEvents(readback);
+
+            // 連鎖のトレース(--trace)。集めすぎないように上限で止めて、落とした数に数える
+            m_droppedTraceCount += readback.droppedTraceCount;
+            const size_t room = MAX_TRACE_RECORDS - std::min(m_trace.size(), MAX_TRACE_RECORDS);
+            const size_t taken = std::min(room, readback.trace.size());
+            m_trace.insert(m_trace.end(), readback.trace.begin(),
+                           readback.trace.begin() + static_cast<ptrdiff_t>(taken));
+            m_droppedTraceCount += readback.trace.size() - taken;
         }
 
         // つつきが適用されたことをログへ(クリックから CPU に戻るまでの時間つき)。イベントは (刻み, 種類, 場所) の順に届く
@@ -821,6 +834,8 @@ namespace bicameral::frame {
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");
             const bool replayPassed = FinishReplay();
+            if (!WriteTrace())
+                return 1;
 
             if (m_device.ValidationErrorCount() > 0) {
                 Log(Channel::Gpu, Level::Error, "debug layer のエラーが {} 件", m_device.ValidationErrorCount());
@@ -828,6 +843,27 @@ namespace bicameral::frame {
             }
 
             return replayPassed ? 0 : 1;
+        }
+
+        // --trace: 集めたトレースを刻みごとの木にして書く(sim/probe_trace.h)
+        bool FrameLoop::WriteTrace() {
+            if (m_options.tracePath.empty())
+                return true;
+
+            const size_t recordCount = m_trace.size();
+            const auto written = sim::WriteProbeTraceFile(m_options.tracePath, std::move(m_trace), m_options.trace,
+                                                          m_droppedTraceCount);
+            if (!written) {
+                Log(Channel::Sim, Level::Error, "{}: {}", written.error(), ToUtf8(m_options.tracePath.wstring()));
+                return false;
+            }
+
+            Log(Channel::Sim, m_droppedTraceCount > 0 ? Level::Warning : Level::Info, "トレース: {}(記録 {} 件{})",
+                ToUtf8(m_options.tracePath.wstring()), recordCount,
+                m_droppedTraceCount > 0 ? std::format("、落とした {} 件。範囲を狭めると欠けない", m_droppedTraceCount)
+                                        : std::string());
+
+            return true;
         }
 
         // 記録を書き、再生の結果を出す。記録を書けない・再生が合わない(終わっていない)なら false

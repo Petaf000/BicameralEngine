@@ -17,6 +17,7 @@
 
 #include "core/aliases.h"
 #include "gpu/device.h"
+#include "gpu/graph_trace.h"
 #include "render/debug_view_controller.h"
 
 namespace bicameral::frame {
@@ -38,6 +39,11 @@ namespace bicameral::frame {
         fs::path recordPath;      // 空でなければ、終わるときに再生ファイルを書く
         fs::path replayPath;      // 空でなければ、この再生ファイルのコマンドで進めてハッシュを突き合わせる
         fs::path screenshotPath;  // 空でなければ、最後のフレーム(frameLimit)を BMP に書く
+
+        // --- 連鎖のトレース(T-0087)---
+        fs::path tracePath;  // 空でなければ、終わるときに伝導の連鎖のトレースを刻みごとの木にして書く
+        gpu::GraphTraceFilter
+            trace;  // その範囲(場所の箱はブロックの座標。main が --trace-ticks・--trace-cells から作る)
 
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)

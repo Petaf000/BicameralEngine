@@ -1,39 +1,36 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0008 Work Graphs のデバッグ(カウンタと上限の検出)— 完了。その後、コーディング規約を変更して全コードを書き直した(チケット外)
+最終更新: 2026-10-01 / チケット: T-0087 Work Graphs の連鎖のトレースと決定性 — 完了
 
 ## 状態(3 行以内)
-- Work Graphs のノードごとのカウンタ(起動・入出力のレコード・再帰の深さ・止めた数・容量の計器)が GPU で数えられ、毎フレーム読み戻して
-  要約(Trace、1 秒ごとの合計は Info)と上限の Warning がログに出る。上限の手前でノードが止めて数える(`WgGrantOutputs`・`WgTryRecurse`)。
-- T-0008 は 2 つに分けた。次は T-0087(トレース・2 回走らせて一致・CPU リファレンスとの最初の食い違い・PIX)。テスト 28/28。
+- 伝導の連鎖を「つつき → 起こす → 計算した(変わったか)」の記録として GPU で書き、CPU で刻みごとの木にできる(`--trace`)。
+  同じ入力で 2 回・分け方を変えても一致、CPU リファレンスの予想とも一致。ずれたら最初の刻み・ブロック・セルが出る。M1 のデバッグ道具はここまで。
+- 次は T-0014 原理: 化学(チケットのファイルはまだ無い。ROADMAP の表から作る)。テスト 30/30。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(42 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(56)。
-- `job.py test` → 28/28。新しい `gpu_work_graph_stats`(_warp): shaders/sim/work_graph_limits_probe.hlsl で ふつう・近い・越える・64 レコード・
-  もう一度ふつう。カウンタが CPU の予想と一致、検出の種類、止めたときのノードの printf(`work_graph_limits_probe/Fan:75` など)。
-  `gpu_probe_sim` は伝導のカウンタ = CPU の「計算するブロックの数」の合計、分け方によらず同じ(ハードウェアと WARP で同じ数)。
-- `job.py run -Preset release -- --frames 400 --auto-click` → 1 秒ごとに `I workgraph | 1 秒: 伝導(ProbeConduct): WakeBlocks 起動 … | ConductBlock … |
-  活性の一覧 最大 …/5121 | コマンドキュー 最大 …/1024`。毎フレームの行は `--log-level trace`。
-- 費用: 伝導 +0〜3 µs/刻み(揺れの内)・適用 +0.4 µs(docs/perf.md)。Release でも有効のまま。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(45 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(60)。
+- `job.py test` → 30/30(分けて走らせる。下の注意)。新しい `gpu_probe_trace`(_warp): 2 回・ばらばらの分け方でトレースが同じ、CPU の予想と一致、
+  狭い範囲(刻み [2, 8)・セル [0, 12)³)、容量 8 で溢れて数える、わざとずらして「S(10)・ブロック 1928 (8, 8, 7)・セル (33, 32, 31)」とトレースの「刻み 9 つつき」。
+- `job.py run -Preset release -- --frames 200 --auto-click --trace probe_trace.txt --trace-ticks 0:60 --trace-cells 0,0,30:64,64,34`
+  → bin/probe_trace.txt に刻みごとの木(記録 約 8 万件)。
+- `job.py run -Preset release -Exe gpu_conduct_bench -- --trace` → トレースの費用(docs/perf.md。無効なら 0、全部で +4〜8 µs/刻み)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- バッキングメモリの使った量は数えられない(仕様に手段が無い)。作った時の大きさだけログに出る。再帰 8 段の試験のグラフは HW で 1.4 MB。
-- (前から)人の手でのマウスとキーの操作は未確認(platform/window.cpp)。画像の比較(基準画像)はまだ無い。
-- (前から)ボリューム表示のときシミュの GPU 時間が 0.28 → 0.95 ms/投入に伸びる(描画と重なるため。世界の速さは変わらない)。
-- (前から)伝導の単位の約 40 µs の固定費の内訳は未確認。WARP の 2 つの癖は回避しただけ(06 §2「実装(T-0005)」)。
-- (前から)伝導の Compute 版との比較(D-302)はしていない。予定の印は下位 32bit(T-0018 で置き換え)。
-- (前から)適用の単位は 1 スレッド・イベントの一時置き場 256・並べ替えは 1 グループ(06 §3)。セーブは未着手(15 §1)。
+- PIX での Work Graphs の見え方は公開の資料だけで調べた(開発機の PIX では未確認。16 §4)。
+- 段ごとのハッシュ・`--replay --bisect` の引数は無い(16 §3 の「最初の形」まで。食い違いの場所はテストの中で走らせ直して探す)。
+- (前から)バッキングメモリの使った量は数えられない。人の手でのマウスとキーの操作は未確認(platform/window.cpp)。基準画像はまだ無い。
+- (前から)ボリューム表示のときシミュの GPU 時間が 0.28 → 0.95 ms/投入に伸びる(描画と重なるため)。伝導の単位の約 40 µs の固定費の内訳は未確認。
+- (前から)伝導の Compute 版との比較(D-302)はしていない。予定の印は下位 32bit(T-0018 で置き換え)。適用の単位は 1 スレッド(06 §3)。セーブは未着手。
 - (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。AMD は未確認。窓の大きさの変更・最小化・DPI は人の手で試していない。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- T-0008 を機能で分けた(カウンタ・上限・printf の場所 = T-0008 / トレース・決定性・突き合わせ・PIX = T-0087)。
-- カウンタは Release でも有効(上限の手前で止めるのは結果の正しさの一部)。デバッグのリングは今まで通り Debug だけ。
-- 毎フレームの要約は Trace(Debug だと 1 秒 164 行)。1 秒ごとの合計を Info。同じ Warning は 600 回の報告に 1 回。
-- 「近い」の基準: 出力は `warnOutputRecords`(構造で決まるノードは見ない)・再帰は宣言の 3/4・計器は `warnPercent`(既定 75%、活性の一覧は 100%)。
-- ADR は書いていない(道具の実装の詳細。16 §1.2 に書いた)。
+- トレースに書くのは順番に依存しない事実だけ(起こそうとした隣は全部書き、誰が先に予定したかは書かない)。木の親は「番号の一番小さい根」。
+- 範囲(刻み・場所の箱・容量)は作った時に決める(途中で変えない)。無効なら容量 0 で、シェーダーは見出しの 1 語を読むだけ。Release でも使える。
+- 全部を記録しても +10〜17% なので、打ち切り条件(2 倍)の「サンプリング」「debug だけ」にはしない。
+- ADR は書いていない(道具の実装の詳細。16 §1.3 に書いた)。
 
 ## 次にやること
-NEXT.md の先頭(T-0087 Work Graphs の連鎖のトレースと決定性。docs/tickets/T-0087-work-graph-trace.md の完了条件から)。
+NEXT.md の先頭(T-0014 原理: 化学。ROADMAP の表と 02 §3 からチケットを作る)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **2026-09-30〜10-01 にコーディング規約を変えた(docs/style.md)。** 全コードを書き直し済み(ビルド・tidy 警告なし・テスト 28/28・archmap OK)。
@@ -117,3 +114,10 @@ NEXT.md の先頭(T-0087 Work Graphs の連鎖のトレースと決定性。docs
 - ウェーブの関数(WaveActiveSum など)はスレッド起動のノードの中でも動く(HW・WARP で確認)。
 - **windows.h の `near`・`far` はマクロ**。変数名に使うと意味の分からない構文エラーになる。
 - job.py の build の要約に `add_custom_command(TARGET main POST_BUILD` が出るのは、vcpkg の使い方の表示(構成し直した時)。エラーではない。
+- **連鎖のトレース**(T-0087、16 §1.3): ルート署名に `.graphTrace = true`(u2 space1。`GraphTraceIndex()`、SRV の番号がさらに 1 つずれる)。
+  `gpu::GraphTrace::Create(device, filter, slotCount)` → `RecordBegin`(最初だけ範囲を写すので非 const)→ `SetComputeRootUnorderedAccessView(layout.GraphTraceIndex(), trace.GpuAddress())`
+  → 書く → `RecordReadbackAndReset(list, slot)` → `Read(slot)` → `gpu::SortGraphTrace`。HLSL の `GtReserve` はウェーブの全部のレーンが呼ぶ(書かないレーンは 0 件)。
+  伝導の記録の種類は probe_sim.hlsli の `PROBE_TRACE_*`、CPU の予想は sim/probe_trace の `AppendExpectedProbeTrace`(範囲の判定を GPU と同じにする)。
+- `std::map` を持つ構造体を値で返すと clang-tidy の bugprone-exception-escape(ムーブが noexcept でない)。呼ぶ側の物に書く形にした(probe_trace.cpp の BuildTickTree)。
+- python の `"""` の中に C++ の `"\n"` を書くと本物の改行になる(heredoc の python で編集するとき)。`<<'EOF'` の cat で書くか、`\\n` にする。
+- gpu_conduct_bench は `--trace` を自分で取り除いてから gpu_test_options.h に渡す(知らない引数で止まるので)。

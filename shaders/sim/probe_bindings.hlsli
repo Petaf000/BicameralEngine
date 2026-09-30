@@ -5,6 +5,7 @@
 #define BICAMERAL_PROBE_BINDINGS_HLSLI
 
 #include "common/debug_ring.hlsli"
+#include "common/graph_trace.hlsli"  // u2 space1(連鎖のトレース。T-0087)
 #include "common/probe_sim.hlsli"
 #include "common/work_graph_stats.hlsli"  // u1 space1(ノードのカウンタ。T-0008)
 
@@ -47,6 +48,17 @@ uint32_t GenerationBase(uint64_t tick) {
 // 状態 S(stateTick) のハッシュの表の欄の場所(容量は 2 の冪なので、下位 32bit の剰余と同じ)
 uint32_t HashEntryAddress(uint64_t stateTick) {
     return ((uint32_t)stateTick & (PROBE_HASH_CAPACITY - 1)) * PROBE_HASH_ENTRY_BYTES;
+}
+
+// ブロックの座標(ProbeBlockIndex の逆)
+uint3 BlockCoordinates(uint32_t block) {
+    return uint3(block % PROBE_BLOCKS_PER_AXIS, (block / PROBE_BLOCKS_PER_AXIS) % PROBE_BLOCKS_PER_AXIS,
+                 block / (PROBE_BLOCKS_PER_AXIS * PROBE_BLOCKS_PER_AXIS));
+}
+
+// 連鎖のトレースの範囲の箱にブロックが入るか(場所の単位はブロックの座標)
+bool TraceWantsBlock(uint32_t block) {
+    return GtWantsPlace(BlockCoordinates(block));
 }
 
 // 活性の一覧に 1 ブロック足す(parity = 刻みの偶奇)。容量は probe_sim.hlsli の約束で足りる(超えたら assert)

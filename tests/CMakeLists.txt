@@ -71,6 +71,11 @@ bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
 bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
+# 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
+bicameral_add_gpu_test(gpu_probe_trace_test)
+target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --warp)
 
 # 伝導の Work Graph の時間を伝播の規模ごとに測る(T-0005。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_conduct_bench

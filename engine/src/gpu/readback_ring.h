@@ -30,6 +30,9 @@ namespace bicameral::gpu {
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS GpuAddress() const { return m_buffer->GetGPUVirtualAddress(); }
         [[nodiscard]] uint32_t SlotCount() const { return static_cast<uint32_t>(m_readbacks.size()); }
         [[nodiscard]] uint64_t Bytes() const { return m_bytes; }
+        [[nodiscard]] ID3D12Resource* Buffer() const {
+            return m_buffer.Get();
+        }  // シェーダーが書くバッファ(見出しの一部を別に書く人向け)
 
         // シェーダーが書く前に: COMMON → UNORDERED_ACCESS
         void RecordBegin(ID3D12GraphicsCommandList* list) const;
