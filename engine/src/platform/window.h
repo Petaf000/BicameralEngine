@@ -1,6 +1,6 @@
 // window.h — ゲームの窓と、窓に届いた入力(T-0004)。
 //
-// データの流れ: OS のメッセージ → WndProc → 入力のイベントを溜める → フレームのループが TakePointerEvents() で受け取り、
+// データの流れ: OS のメッセージ → WndProc → 入力のイベント(platform/input.h)を溜める → フレームのループが TakeInputEvents() で受け取り、
 // 世界に届けるものはコマンドにする(06 §3)。窓は世界の状態を知らない(CPU は View と Controller。D-107)。
 // PumpMessages() は待たない(PeekMessage)。フレームの歩調はスワップチェインの待ち(gpu/swap_chain.h)が決める。
 // WndProc が this を使うので、Window は動かさない(Create は unique_ptr で返す)。
@@ -13,13 +13,9 @@
 #include <string_view>
 #include <vector>
 
-namespace bicameral {
+#include "platform/input.h"
 
-    // クリック(押した瞬間)。位置はクライアント領域の物理ピクセル
-    struct PointerEvent {
-        int32_t x = 0;
-        int32_t y = 0;
-    };
+namespace bicameral {
 
     class Window {
     public:
@@ -43,21 +39,25 @@ namespace bicameral {
         // 前に呼んでから大きさが変わったか(呼ぶと false に戻る)
         [[nodiscard]] bool TakeResized();
 
-        // 前に呼んでからのクリック(古い順)
-        [[nodiscard]] std::vector<PointerEvent> TakePointerEvents();
+        // 前に呼んでからの入力(古い順)
+        [[nodiscard]] std::vector<InputEvent> TakeInputEvents();
 
     private:
         Window() = default;
 
         static LRESULT CALLBACK WindowProcedure(HWND handle, UINT message, WPARAM wParam, LPARAM lParam);
         LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
+        void AddButton(InputKind kind, PointerButton button, LPARAM lParam);
+        void AddWheel(WPARAM wParam);
 
         HWND m_handle = nullptr;
         uint32_t m_clientWidth = 0;
         uint32_t m_clientHeight = 0;
         bool m_resized = false;
         bool m_closed = false;
-        std::vector<PointerEvent> m_pointerEvents;
+        std::vector<InputEvent> m_inputEvents;
+        int32_t m_wheelRemainder = 0;  // WHEEL_DELTA に満たないホイールの端数
+        uint32_t m_heldButtons = 0;    // 押している PointerButton のビット(離すまで SetCapture する)
     };
 
 }  // namespace bicameral

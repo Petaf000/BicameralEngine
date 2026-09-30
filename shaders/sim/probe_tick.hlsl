@@ -5,7 +5,7 @@
 //   → EnqueueCommands が GPU のコマンドキュー(commandQueue)の末尾に足す(コマンドは自分の刻みの適用の単位まで、ここで待つ)
 //   → そのフレームに投げる単位を順に(単位ごとに刻みの番号をルート定数に埋め込む。刻みはフレームをまたいでよい。ADR-0011)
 //      適用(ApplyCommands)→ 伝導(Work Graph。sim/probe_conduct.hlsl)→ 重さ × k → 検査と出力(HashCells、FlushEvents)→ 次の刻み …
-//   → (刻みの境界の状態があれば)Extract が z = PROBE_VIEW_Z の面を抽出の 3 組のどれかに写す(描画が読む)
+//   → (刻みの境界の状態があれば)Extract が全部のセルと活性の印を抽出の 3 組のどれかに写す(描画が読む。T-0015)
 //   → イベントとハッシュの表を CPU へ読み戻す(CPU は待たずに数フレーム後に読む。06 §3)
 // 入口ごとに別の .cso にする(shaders/CMakeLists.txt)。整数だけ(D-205)。バッファの結び方は sim/probe_bindings.hlsli。
 #include "sim/probe_bindings.hlsli"
@@ -209,18 +209,28 @@ void SortEventKeys(uint32_t thread) {
                   uint4((uint32_t)tick, (uint32_t)(tick >> 32), (uint32_t)(key >> 32), (uint32_t)key));
 }
 
-// --- 描画用の抽出: 刻み(ルート定数)の始めの状態の z = PROBE_VIEW_Z の面を、抽出の 3 組のうち argument の組へ写す ---
-[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void Extract(uint3 dispatchThreadId : SV_DispatchThreadID) {
-    const uint32_t cellIndex = dispatchThreadId.x;  // 面の中の番号(x + y × 1 辺)
-    if (cellIndex >= PROBE_SLICE_CELL_COUNT) return;
-    const uint32_t value = world[GenerationBase(CurrentTick()) + PROBE_VIEW_Z * PROBE_SLICE_CELL_COUNT + cellIndex];
+// --- 描画用の抽出: 刻み(ルート定数)の始めの状態の全部のセルと、ブロックごとの活性の印を、抽出の 3 組のうち argument の組へ写す ---
+// 活性の印: 予定の印(最後に計算した刻み + 1)が「この刻み」か「この刻み + 1」= 前の刻みか、途中まで進んだこの刻みで計算した。
+// 刻みの境界(単位 0)で写すなら前の刻みの分だけになり、ハッシュの表の「計算したブロックの数」と同じ数になる。
+void StoreExtraction(uint32_t index, uint32_t value) {
     if (argument == 0) {
-        extraction0[cellIndex] = value;
+        extraction0[index] = value;
     } else if (argument == 1) {
-        extraction1[cellIndex] = value;
+        extraction1[index] = value;
     } else {
-        extraction2[cellIndex] = value;
+        extraction2[index] = value;
     }
+}
+
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void Extract(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t cellIndex = dispatchThreadId.x;
+    if (cellIndex >= PROBE_CELL_COUNT) return;
+    StoreExtraction(cellIndex, world[GenerationBase(CurrentTick()) + cellIndex]);
+    if (cellIndex >= PROBE_BLOCK_COUNT) return;
+    const uint32_t mark = blockSchedule[cellIndex];
+    const uint32_t tickLow32 = (uint32_t)CurrentTick();
+    const bool computed = mark != 0 && (mark == tickLow32 || mark == tickLow32 + 1);
+    StoreExtraction(PROBE_EXTRACTION_BLOCK_OFFSET + cellIndex, computed ? 1 : 0);
 }
 
 // clang-format on

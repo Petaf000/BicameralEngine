@@ -49,9 +49,8 @@ PROBE_NAMESPACE_BEGIN
 // --- 世界の大きさ(3D。T-0005)---
 PROBE_CONST uint32_t PROBE_GRID_SIZE = 64;  // 1 辺のセルの数(x・y・z。場所の 1 軸は 8bit に収める)
 PROBE_CONST uint32_t PROBE_CELL_COUNT = PROBE_GRID_SIZE * PROBE_GRID_SIZE * PROBE_GRID_SIZE;
-PROBE_CONST uint32_t PROBE_SLICE_CELL_COUNT = PROBE_GRID_SIZE * PROBE_GRID_SIZE;  // 描画用の抽出(z = PROBE_VIEW_Z の面)
-PROBE_CONST uint32_t PROBE_VIEW_Z =
-    PROBE_GRID_SIZE / 2;                    // 窓のクリックがつつく面、描画が見せる面(ボリューム表示は T-0015)
+PROBE_CONST uint32_t PROBE_SLICE_CELL_COUNT = PROBE_GRID_SIZE * PROBE_GRID_SIZE;  // 1 つの面(z が同じ)のセルの数
+PROBE_CONST uint32_t PROBE_VIEW_Z = PROBE_GRID_SIZE / 2;  // 既定の断面・自動のクリックがつつく面(描画は立体。T-0015)
 PROBE_CONST uint32_t PROBE_BLOCK_SIZE = 4;  // 活性の単位のブロック(4³ セル = 伝導の 1 グループ 64 スレッド)
 PROBE_CONST uint32_t PROBE_BLOCKS_PER_AXIS = PROBE_GRID_SIZE / PROBE_BLOCK_SIZE;
 PROBE_CONST uint32_t PROBE_BLOCK_COUNT = PROBE_BLOCKS_PER_AXIS * PROBE_BLOCKS_PER_AXIS * PROBE_BLOCKS_PER_AXIS;
@@ -65,6 +64,10 @@ PROBE_CONST uint32_t PROBE_CONDUCT_SHIFT = 3;       // 面の流れ = |差| >> 3
 // 抽出は 1 フレームに 1 回まで、投げた単位の後ろで刻みの境界の状態を写す。描画は終わっている最新を読む。
 // 抽出 n は組 n % 3 に書き、終わっている抽出が n − 2 以上のときだけ投げる(frame/frame_loop.cpp)→ 描画が読む組と重ならない
 PROBE_CONST uint32_t PROBE_EXTRACTION_COUNT = 3;
+// 抽出の中身(uint32 の並び。T-0015): [0, セルの数) 刻みの境界の状態の全部のセル(世界と同じ並び)
+//   → [セルの数, + ブロックの数) ブロックごとの活性の印(1 = 境界の前の刻みで伝導を計算した。刻みの途中の抽出ではその刻みの分も)
+PROBE_CONST uint32_t PROBE_EXTRACTION_BLOCK_OFFSET = PROBE_CELL_COUNT;
+PROBE_CONST uint32_t PROBE_EXTRACTION_WORDS = PROBE_CELL_COUNT + PROBE_BLOCK_COUNT;
 
 // --- 1 刻みの単位(06 §4・ADR-0011)---
 PROBE_CONST uint32_t PROBE_UNIT_APPLY = 0;

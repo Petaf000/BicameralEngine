@@ -14,6 +14,10 @@ add_executable(sim_scheduler_test sim_scheduler_test.cpp)
 target_link_libraries(sim_scheduler_test PRIVATE bicameral_frame)
 add_test(NAME sim_scheduler COMMAND sim_scheduler_test)
 
+add_executable(debug_camera_test debug_camera_test.cpp)
+target_link_libraries(debug_camera_test PRIVATE bicameral_view)
+add_test(NAME debug_camera COMMAND debug_camera_test)
+
 add_executable(replay_file_test replay_file_test.cpp)
 target_link_libraries(replay_file_test PRIVATE bicameral_save)
 add_test(NAME replay_file COMMAND replay_file_test)

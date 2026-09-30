@@ -61,6 +61,14 @@ add_library(bicameral_frame STATIC
 )
 target_include_directories(bicameral_frame PUBLIC src)
 
+# --- view: デバッグ表示の操作とカメラ(D3D12 を知らない。CPU だけのテストがある。T-0015)---
+add_library(bicameral_view STATIC
+  src/render/debug_camera.cpp
+  src/render/debug_view_controller.cpp
+)
+target_include_directories(bicameral_view PUBLIC src)
+target_link_libraries(bicameral_view PUBLIC bicameral_core)
+
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp
@@ -69,6 +77,7 @@ add_executable(bicameral
   src/platform/caps.cpp
   src/platform/window.cpp
   src/render/probe_view.cpp
+  src/render/screenshot.cpp
 )
 target_include_directories(bicameral PRIVATE src)
 target_precompile_headers(bicameral PRIVATE src/pch.h)  # 重い外部ヘッダをまとめる(docs/style.md)
@@ -78,6 +87,7 @@ target_link_libraries(bicameral PRIVATE
   bicameral_sim
   bicameral_frame
   bicameral_save
+  bicameral_view
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility
   d3d12 dxgi)

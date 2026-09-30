@@ -71,8 +71,40 @@ namespace bicameral {
         return std::exchange(m_resized, false);
     }
 
-    std::vector<PointerEvent> Window::TakePointerEvents() {
-        return std::exchange(m_pointerEvents, {});
+    std::vector<InputEvent> Window::TakeInputEvents() {
+        return std::exchange(m_inputEvents, {});
+    }
+
+    // --- 入力 ---
+
+    namespace {
+
+        // 位置は符号つきの 16bit(捕まえている間は窓の外 = 負にもなる。windowsx.h の GET_X_LPARAM と同じ)
+        InputEvent PointerAt(InputKind kind, LPARAM lParam) {
+            return {.kind = kind, .x = static_cast<int16_t>(LOWORD(lParam)), .y = static_cast<int16_t>(HIWORD(lParam))};
+        }
+
+    }  // namespace
+
+    // ボタンを押している間はポインタを捕まえる(窓の外へドラッグしても離したことが届くように)
+    void Window::AddButton(InputKind kind, PointerButton button, LPARAM lParam) {
+        InputEvent event = PointerAt(kind, lParam);
+        event.button = button;
+        m_inputEvents.push_back(event);
+        const uint32_t bit = 1u << static_cast<uint32_t>(button);
+        const bool wasHeld = m_heldButtons != 0;
+        m_heldButtons = kind == InputKind::ButtonDown ? m_heldButtons | bit : m_heldButtons & ~bit;
+        if (!wasHeld && m_heldButtons != 0) SetCapture(m_handle);
+        if (wasHeld && m_heldButtons == 0) ReleaseCapture();
+    }
+
+    // WHEEL_DELTA(120)ごとに 1 刻み。高分解能のホイールの端数は溜めておく
+    void Window::AddWheel(WPARAM wParam) {
+        m_wheelRemainder += GET_WHEEL_DELTA_WPARAM(wParam);
+        const int32_t steps = m_wheelRemainder / WHEEL_DELTA;
+        if (steps == 0) return;
+        m_wheelRemainder -= steps * WHEEL_DELTA;
+        m_inputEvents.push_back({.kind = InputKind::Wheel, .wheelSteps = steps});
     }
 
     // --- メッセージ ---
@@ -100,10 +132,20 @@ namespace bicameral {
                 m_clientHeight = HIWORD(lParam);
                 m_resized = true;
                 return 0;
-            case WM_LBUTTONDOWN:
-                m_pointerEvents.push_back(
-                    {.x = static_cast<int16_t>(LOWORD(lParam)), .y = static_cast<int16_t>(HIWORD(lParam))});
+            case WM_LBUTTONDOWN: AddButton(InputKind::ButtonDown, PointerButton::Left, lParam); return 0;
+            case WM_LBUTTONUP: AddButton(InputKind::ButtonUp, PointerButton::Left, lParam); return 0;
+            case WM_RBUTTONDOWN: AddButton(InputKind::ButtonDown, PointerButton::Right, lParam); return 0;
+            case WM_RBUTTONUP: AddButton(InputKind::ButtonUp, PointerButton::Right, lParam); return 0;
+            case WM_MBUTTONDOWN: AddButton(InputKind::ButtonDown, PointerButton::Middle, lParam); return 0;
+            case WM_MBUTTONUP: AddButton(InputKind::ButtonUp, PointerButton::Middle, lParam); return 0;
+            case WM_MOUSEMOVE: m_inputEvents.push_back(PointerAt(InputKind::PointerMove, lParam)); return 0;
+            case WM_MOUSEWHEEL: AddWheel(wParam); return 0;
+            case WM_KEYDOWN:
+                m_inputEvents.push_back({.kind = InputKind::KeyDown,
+                                         .key = static_cast<uint32_t>(wParam),
+                                         .shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0});
                 return 0;
+            case WM_CAPTURECHANGED: m_heldButtons = 0; return 0;  // 別の窓に取られた(離したことは届かない)
             case WM_DPICHANGED: {
                 // 新しい DPI で OS が勧める位置と大きさにする(クライアント領域の物理ピクセルが変わり、WM_SIZE が来る)
                 // NOLINTNEXTLINE(performance-no-int-to-ptr) WM_DPICHANGED は LPARAM に RECT のポインタを入れる

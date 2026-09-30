@@ -13,6 +13,9 @@
 //   --record <path>                  窓の操作(コマンド)と刻みごとのハッシュを再生ファイルに書く(終わるとき。save/replay_file)
 //   --replay <path>                  再生ファイルのコマンドで世界を進め、刻みごとのハッシュを突き合わせる。
 //                                    最後のハッシュまで確かめたら終わる(全部一致で 0、違えば 1)。窓のクリックは無視する
+//   --view <volume|mip|slice>        最初のデバッグ表示(既定 volume。窓では 1・2・3 で切り替え。render/debug_view_controller.h)
+//   --camera <yaw>,<pitch>,<距離>    最初のカメラ(度・度・セル。既定 35,25,150。0,0,80 で z = 32 の面を正面から)
+//   --screenshot <path>              最後のフレームを BMP に書く(--frames と一緒に使う。render/screenshot.h)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -20,6 +23,7 @@
 //
 // 引数は wmain で UTF-16 のまま受け取る(main の char** は ANSI コードページなので日本語のパスが壊れる)。
 // 終わるときは必ず SingletonFinalizer::Finalize() を通す(ログを最後に閉じ、ファイルへ書き出すため)。
+#include <array>
 #include <charconv>
 #include <optional>
 
@@ -52,6 +56,44 @@ namespace {
         const auto [end, error] = std::from_chars(utf8.data(), utf8.data() + utf8.size(), value);
         if (error != std::errc{} || end != utf8.data() + utf8.size() || value > maximum) return std::nullopt;
         return value;
+    }
+
+    // "yaw,pitch,距離"(小数でよい)。距離は正
+    std::optional<render::OrbitCameraState> ParseCamera(std::wstring_view text) {
+        const std::string utf8 = ToUtf8(text);
+        std::array<float, 3> values{};
+        const char* cursor = utf8.data();
+        const char* end = utf8.data() + utf8.size();
+        for (size_t index = 0; index < values.size(); ++index) {
+            const auto [next, error] = std::from_chars(cursor, end, values[index]);
+            if (error != std::errc{}) return std::nullopt;
+            const bool last = index + 1 == values.size();
+            if (last ? next != end : (next == end || *next != ',')) return std::nullopt;
+            cursor = next + 1;
+        }
+        if (!(values[2] > 0.0f)) return std::nullopt;
+        render::OrbitCameraState camera;
+        camera.yawDegrees = values[0];
+        camera.pitchDegrees = values[1];
+        camera.distance = values[2];
+        return camera;
+    }
+
+    // 表示の引数(--view・--camera・--screenshot)
+    std::expected<void, std::string> ParseViewOption(std::wstring_view argument, std::wstring_view text,
+                                                     frame::FrameLoopOptions& loop) {
+        if (argument == L"--screenshot") {
+            loop.screenshotPath = text;
+            return {};
+        }
+        if (argument == L"--view") {
+            if (render::ParseDebugViewMode(ToUtf8(text), loop.view.mode)) return {};
+            return std::unexpected(std::format("--view の値が不正: {}(volume・mip・slice)", ToUtf8(text)));
+        }
+        const auto camera = ParseCamera(text);
+        if (!camera) return std::unexpected(std::format("--camera の値が不正: {}(例: 35,25,150)", ToUtf8(text)));
+        loop.camera = *camera;
+        return {};
     }
 
     // 目標 fps の範囲(ADR-0011: 30 より下げない)
@@ -108,6 +150,9 @@ namespace {
                         argument == L"--sim-load" || argument == L"--sim-split") &&
                        hasValue) {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
+                if (!parsed) return std::unexpected(parsed.error());
+            } else if ((argument == L"--view" || argument == L"--camera" || argument == L"--screenshot") && hasValue) {
+                const auto parsed = ParseViewOption(argument, arguments[++i], options.frameLoop);
                 if (!parsed) return std::unexpected(parsed.error());
             } else if (argument == L"--record" && hasValue) {
                 options.frameLoop.recordPath = arguments[++i];

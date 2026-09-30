@@ -1,37 +1,40 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0005 クリックから Work Graphs で自動伝播 — 完了
+最終更新: 2026-09-30 / チケット: T-0015 デバッグ表示とカメラ — 完了
 
 ## 状態(3 行以内)
-- 仮の世界は 64³ の整数の熱(4³ ブロック 4096 個)。1 刻み = 適用 → 伝導(Work Graph を 1 回。入力は GPU が作る活性の一覧)→ 重さ × k → 検査と出力。
-  クリックは z = 32 の面をつつき、熱が広がっている所のブロックだけが計算される(1 点なら約 1270 刻みで計算 0 に)。窓は z = 32 の面を対数の色で描く。
-- 次は T-0015(デバッグ表示とカメラ。チケットのファイルはまだ無い)。テスト 25/25。
+- 仮の世界(64³ の整数の熱。伝導は Work Graph で活性なブロックだけ)を、窓の中で立体のまま見られる: 吸収と発光・最大値の投影・断面の 3 通り、
+  格子を回るカメラ、左クリックは光線が断面に当たったセルをつつく。抽出は全部のセル + ブロックの活性の印。
+- 次は T-0008(Work Graphs のデバッグ。チケットのファイルはある)。テスト 26/26。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(36 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(50)。
-- `job.py test` → 25/25。`-Filter gpu_probe_sim -Show` で分け方 5 通りの S(40) = 6fed9c32c4da7356 がハードウェア・WARP とも CPU と一致
-  (刻みごとのハッシュ・熱の合計・計算したブロックの数まで)。熱の合計はつつきの分だけ変わる。溢れ・記録 → 再生も。
-- `job.py run -Preset release -Exe gpu_conduct_bench` → 規模ごとの伝導の時間(docs/perf.md。約 40 µs の固定費 + 15 ns/ブロック、裏のメモリ 139,912 B)。
-- `job.py run -Preset release -- --frames 600 --auto-click` → 164.6 fps・世界 59.8 刻み/秒。ログの 1 秒ごとの行に熱の合計と伝導したブロックの数。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(40 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(53)。
+- `job.py test` → 26/26。`gpu_probe_sim` は最後の抽出のセルのハッシュと活性の印の数も CPU と一致(ハードウェア・WARP)。`debug_camera` は GPU なしで
+  画素 → 断面のセルの往復(3 軸・透視/平行)・キーの振り分け・ドラッグ。
+- `job.py run -Preset release -- --frames 200 --auto-click --view <volume|mip|slice> --screenshot shot.bmp` → out/build/release/bin/shot.bmp。
+  device_bash の python3 に PIL があるので PNG に直して device_stage_files → Read で絵を見られる。
+- 描画 GPU(1280×720): ボリューム 0.56・最大値 0.42・断面 0.06 ms/フレーム、164 fps(docs/perf.md)。
+- 操作(14 §2「実装(T-0015)」): 右ドラッグ 回る / 中ドラッグ 平行移動 / ホイール 寄る / 1・2・3 表示 / X・Y・Z 断面の軸 / Q・E 断面(Shift で 8)/
+  B 活性なブロック / L 対数・線形 / O 透視・平行 / R カメラを戻す。設定を変えるとログに 1 行。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 伝導の単位の約 40 µs の固定費の内訳(DispatchGraph の起動・SetProgram・遷移のバリア)は未確認。局所の刻みの細分(06 §1)で 1 刻みに何回も起動すると効く。
-- WARP の 2 つの癖は回避しただけで原因は未確認(06 §2「実装(T-0005)」): レコード 0 件の GPU の入力で固まる / 局所の配列から一括で出すと予定がずれる。
-- 伝導の Compute 版との比較(D-302)はしていない(輸送の本物の段で)。材質は 1 つ・流れ = |差| >> 3 の仮の規則(07 §1 の本物は材質の熱伝導率・SI)。
-- 予定の印は「刻み + 1」の下位 32bit(2^32 刻みで一周して 1 刻みだけ取りこぼしうる)。本物の活性の整理(T-0018)で置き換える。
+- **人の手でのマウスとキーの操作は未確認**(platform/window.cpp の WM_* → InputEvent の所。単体テストはイベントから先だけ)。SetCapture でドラッグが窓の外へ出ても離したことが届く想定。
+- 画像の比較(基準画像との許容差つきの比較。10「テスト」)はまだ無い。`--screenshot` は撮るだけ。
+- ボリューム表示のときシミュの GPU 時間(タイムスタンプ)が 0.28 → 0.95 ms/投入に伸びる(描画と GPU の上で重なるため。世界の速さは変わらない)。
+- (前から)伝導の単位の約 40 µs の固定費の内訳は未確認。WARP の 2 つの癖は回避しただけ(06 §2「実装(T-0005)」)。
+- (前から)伝導の Compute 版との比較(D-302)はしていない。予定の印は下位 32bit(T-0018 で置き換え)。
 - (前から)適用の単位は 1 スレッド・イベントの一時置き場 256・並べ替えは 1 グループ(06 §3)。セーブは未着手(15 §1)。
-- (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。GPU の中で compute と描画が重なるか・AMD は未確認。
-- (前から)窓の大きさの変更・最小化・DPI は人の手で試していない。DRED の表示は本物のハングで未確認。
+- (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。AMD は未確認。窓の大きさの変更・最小化・DPI は人の手で試していない。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 活性の単位は 4³ のブロック。刻み t で計算する = 刻み t − 1 で変わった・刻み t につつかれたブロック + 6 面の隣(06 §2 実装)。
-  CPU リファレンスは全セルを計算し、GPU とのビット一致で活性の取り方の正しさも確かめる。
-- Work Graph の入力は GPU のメモリ(`D3D12_DISPATCH_MODE_NODE_GPU_INPUT`)。一覧の見出し = `D3D12_NODE_GPU_INPUT`、数は atomic で足す。刻みの偶奇で 2 組。
-- つつきは熱を足す(PROBE_POKE_AMOUNT = 2^24、上限 2^30 で飽和)。格子の外は断熱。ハッシュの表の欄は 32 バイト(ハッシュ・熱の合計・計算したブロックの数)。
-- ADR は書いていない(06 §2 の実装の詳細。本物の活性の整理と輸送の形は T-0018・輸送のチケットで決める)。
+- 抽出 = 刻みの境界の状態の全部のセル + ブロックごとの活性の印(予定の印が「その刻み」か「+1」= 前の刻みか、途中まで進んだその刻みで計算した)。
+  境界で写せば、ハッシュの表の「計算したブロックの数」と同じ数になる。
+- カメラは格子の周りを回る(回る軸は −y。既定 35°・25°・距離 150)。カメラと表示の設定は View の状態で、コマンドにも再生ファイルにも入れない。
+- 自動のクリックは表示やカメラに依らず、z = PROBE_VIEW_Z の面の決まったセルを押す(再生の試験が表示に左右されないように)。
+- 画面の文字・カーソルの下の値・時間の操作は入れていない(14 §2 の別のパネル)。ADR は書いていない(道具の実装の詳細)。
 
 ## 次にやること
-NEXT.md の先頭(T-0015 デバッグ表示とカメラ。ROADMAP の表からチケットのファイルを作る)。
+NEXT.md の先頭(T-0008 Work Graphs のデバッグ。docs/tickets/T-0008-work-graph-debug.md の完了条件から)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **同じコマンドリストを、キューのフェンスが前の実行を越える前に投げ直さない**(debug layer [553]。debug layer はその実行を捨て、release は黙って走る)。
@@ -66,6 +69,11 @@ NEXT.md の先頭(T-0015 デバッグ表示とカメラ。ROADMAP の表から�
   fixed.hlsli を使うシミュのシェーダーは Debug で FX_ASSERT がリングを使うので、必ずリングを結ぶ(結ばないと PSO / 実行が壊れる)。
 - 書式を足すときは shaders/common/debug_formats.hlsli に `DEBUG_FORMAT(名前, チャンネル, 場所, 書式)` を 1 行。HLSL では `DebugFormat::名前`。
 - **HLSL で `line` は予約語**(ジオメトリシェーダーの修飾子)。変数名に使うと「modifiers must appear before type」になる。
+- **HLSL で `point` も予約語**(`line` と同じくジオメトリシェーダーの修飾子)。変数名に使うと「modifiers must appear before type」。
+- デバッグ表示の定数は engine/src/render/probe_view_constants.h(96 バイト)と shaders/render/probe_view.hlsl の LoadConstants を揃える。
+  光線の式は debug_camera.cpp の RayThroughPixel と probe_view.hlsl の MakeRay で同じにする(ずれるとクリックした所と見えている所が合わない)。
+- `render/debug_camera`・`render/debug_view_controller` は bicameral_view(D3D12 を知らない)。D3D12 の型を持ち込まない(debug_camera_test が GPU なしで動くように)。
+- 抽出の大きさを変えたら gpu_probe_sim_test の ReadExtraction も変える(PROBE_EXTRACTION_WORDS)。
 - debug layer は、デバイスを作った後に有効にするとデバイスが失われる。`gpu::Device::Create` は必ず最初のデバイスより前に設定する(1 プロセス 1 回の想定)。
 - `DebugRing` と `ReadbackRing` の読み戻しは枠(slot)ごと。`Create(device, slotCount)` → `RecordReadbackAndReset(list, slot)` → その枠のリストが終わってから `Drain(max, slot)` / `Read(slot, ...)`。
 - **フレームのループ(frame/frame_loop.cpp)**: 抽出の 3 組の約束はファイルの先頭に書いた(抽出 n は、終わっている抽出が n − 2 以上のときだけ)。

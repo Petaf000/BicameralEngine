@@ -46,13 +46,22 @@ views:
       - { id: frameloop, group: framelib, label: "RunFrameLoop()<br/>待ち → 読み戻し → 入力 → シミュ → 描画 → Present",
           code: "engine/src/frame/frame_loop.cpp::RunFrameLoop", ticket: T-0004, doc: docs/design/06-simulation-loop.md,
           note: "1 フレームに予算ぶんの単位だけ投げ、後ろに描画(ADR-0011)。抽出は 3 組、描画は終わっている最新を読む" }
-      - { id: window, group: framelib, label: "Window<br/>Win32 の窓・クリック・DPI",
+      - { id: window, group: framelib, label: "Window<br/>Win32 の窓・入力(ボタン・ドラッグ・ホイール・キー)・DPI",
           code: "engine/src/platform/window.cpp::Window::Create", ticket: T-0004 }
+      - { id: viewcontroller, group: framelib, label: "DebugViewController<br/>入力 → カメラ・表示の切り替え・つつくセル",
+          code: "engine/src/render/debug_view_controller.cpp::DebugViewController::HandleInput", ticket: T-0015,
+          doc: docs/design/14-editor-tools.md, note: "カメラと表示は View の状態で、世界には入らない(D-107)。つつきだけがコマンドになる" }
+      - { id: debugcamera, group: framelib, label: "OrbitCamera・PickSliceCell<br/>格子を回るカメラ・光線が断面に当たるセル",
+          code: "engine/src/render/debug_camera.cpp::PickSliceCell", ticket: T-0015,
+          note: "描画(probe_view.hlsl)と同じ式で光線を作る。debug_camera_test で画素 → セルの往復を確かめる" }
+      - { id: screenshot, group: framelib, label: "ScreenshotCapture<br/>最後のフレームを BMP に(--screenshot)",
+          code: "engine/src/render/screenshot.cpp::ScreenshotCapture::Record", ticket: T-0015 }
       - { id: scheduler, group: framelib, label: "SimScheduler<br/>1 フレームに投げる単位の数(予算・単位の GPU 時間)",
           code: "engine/src/frame/sim_scheduler.cpp::SimScheduler::TakeUnits", ticket: T-0012, doc: docs/decisions/ADR-0011-sim-frame-budget.md,
           note: "予算 = 1000 / 目標 fps − 描画 − 余裕。刻みはフレームをまたぐ。追いつけない分は捨てる(D-202)。sim_scheduler_test" }
-      - { id: probeview, group: framelib, label: "ProbeView<br/>画面いっぱいの三角形で抽出を描く",
-          code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0004 }
+      - { id: probeview, group: framelib, label: "ProbeView<br/>抽出の格子を光線で辿る(ボリューム・最大値・断面)",
+          code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0015, doc: docs/design/14-editor-tools.md,
+          note: "画面いっぱいの三角形 1 枚。重ね書き: 格子の枠・断面の枠・活性なブロック・色の凡例" }
       - { id: queue, group: gpulib, label: "Queue<br/>キュー + フェンス(Submit・GpuWait・待たずに見る)",
           code: "engine/src/gpu/queue.cpp::Queue::Submit", ticket: T-0004 }
       - { id: swapchain, group: gpulib, label: "SwapChain<br/>フリップ・3 枚・待てる(先行 2〜3)",
@@ -187,7 +196,10 @@ views:
       - [ringtest, debugring]
       - [ringtest, workgraph, "ノードから print"]
       - [main, frameloop, "引数なし"]
-      - [frameloop, window, "クリック"]
+      - [frameloop, window, "入力"]
+      - [frameloop, viewcontroller, "入力・描画の定数"]
+      - [viewcontroller, debugcamera]
+      - [frameloop, screenshot, "--screenshot"]
       - [frameloop, scheduler, "単位の数"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
@@ -249,7 +261,7 @@ views:
       - { id: ring, group: sim, label: "GPU → CPU の待たないリング<br/>イベント・スナップショット・デバッグ",
           ticket: T-0004, code: "engine/src/gpu/readback_ring.cpp::ReadbackRing::RecordReadbackAndReset" }
       - { id: extract, group: view, status: planned, label: "描画用の抽出(3 組)", doc: docs/design/10-rendering.md,
-          note: "T-0004 の仮の世界では 3 組で描画がシミュを待たないことを確かめた" }
+          note: "T-0004 の仮の世界では 3 組で描画がシミュを待たないことを確かめた。T-0015 で全部のセル + ブロックの活性の印に" }
       - { id: draw, group: view, status: planned, label: "Visibility Buffer・PBR・ReSTIR", doc: docs/design/10-rendering.md }
       - { id: math, group: sim, label: "整数の数学ライブラリ<br/>(全部の段が使う)", code: "shaders/common/fixed.hlsli::FxMulU64Full",
           ticket: T-0010 }

@@ -37,7 +37,7 @@ namespace bicameral::sim {
         constexpr uint32_t SLICE_BYTES = PROBE_SLICE_CELL_COUNT * 4;
         constexpr uint32_t BUSY_GROUPS = PROBE_GRID_SIZE / PROBE_GROUP_SIZE;
         constexpr uint32_t LINEAR_CELL_GROUPS = PROBE_CELL_COUNT / PROBE_LINEAR_GROUP_SIZE;
-        constexpr uint32_t LINEAR_SLICE_GROUPS = PROBE_SLICE_CELL_COUNT / PROBE_LINEAR_GROUP_SIZE;
+        constexpr uint32_t EXTRACTION_BYTES = PROBE_EXTRACTION_WORDS * 4;
 
         // 活性の一覧の見出しは D3D12_NODE_GPU_INPUT そのもの(DispatchGraph が GPU のメモリから読む。probe_sim.hlsli)
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, EntrypointIndex) == size_t{PROBE_ACTIVE_LIST_ENTRYPOINT} * 4);
@@ -166,7 +166,7 @@ namespace bicameral::sim {
         m_commandQueue->SetName(L"ProbeSim.commandQueue");  // 作った時は 0(末尾 = 先頭 = 0 の空のキュー)
         m_tickEvents->SetName(L"ProbeSim.tickEvents");
         for (uint32_t index = 0; index < PROBE_EXTRACTION_COUNT; ++index) {
-            m_extractions[index] = gpu::CreateBuffer(device, SLICE_BYTES, gpu::BufferKind::UnorderedAccess);
+            m_extractions[index] = gpu::CreateBuffer(device, EXTRACTION_BYTES, gpu::BufferKind::UnorderedAccess);
             if (!m_extractions[index]) return false;
             m_extractions[index]->SetName(std::format(L"ProbeSim.extraction{}", index).c_str());
         }
@@ -418,7 +418,7 @@ namespace bicameral::sim {
     void ProbeSim::RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const {
         SetUnitConstants(list, tick, target);
         list->SetPipelineState(m_extractPipeline.Get());
-        list->Dispatch(LINEAR_SLICE_GROUPS, 1, 1);
+        list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
     }
 
     // イベント・デバッグの出力・(ハッシュの単位があれば)ハッシュの表を、slot の読み戻しのバッファへ
@@ -610,10 +610,6 @@ namespace bicameral::sim {
             heat += value;
         }
         return heat;
-    }
-
-    std::span<const uint32_t> ProbeViewSlice(std::span<const uint32_t> cells) {
-        return cells.subspan(size_t{PROBE_VIEW_Z} * PROBE_SLICE_CELL_COUNT, PROBE_SLICE_CELL_COUNT);
     }
 
 }  // namespace bicameral::sim

@@ -128,7 +128,8 @@ namespace bicameral::sim {
         // slot のリストを GPU が終えた後に呼ぶ(待たない。終わったかどうかは呼ぶ側がフェンスで見る)
         [[nodiscard]] ProbeFrameReadback ReadFrame(uint32_t slot) const;
 
-        // 描画用の抽出(0〜PROBE_EXTRACTION_COUNT-1。z = PROBE_VIEW_Z の面、PROBE_SLICE_CELL_COUNT 個)。描画は読むだけ
+        // 描画用の抽出(0〜PROBE_EXTRACTION_COUNT-1。全部のセル + ブロックの活性の印、PROBE_EXTRACTION_WORDS 個。
+        // 並びは probe_sim.hlsli)。描画は読むだけ
         [[nodiscard]] ID3D12Resource* Extraction(uint32_t target) const { return m_extractions[target].Get(); }
 
         // 伝導の Work Graph の裏のメモリ(ドライバが決める。docs/perf.md に残す)
@@ -237,8 +238,5 @@ namespace bicameral::sim {
 
     // 熱の合計(Σ 値。GPU の表の熱の合計と同じ値になる)
     [[nodiscard]] uint64_t ProbeHeatSum(std::span<const uint32_t> cells);
-
-    // 状態の z = PROBE_VIEW_Z の面(描画用の抽出と同じ並び)
-    [[nodiscard]] std::span<const uint32_t> ProbeViewSlice(std::span<const uint32_t> cells);
 
 }  // namespace bicameral::sim

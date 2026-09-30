@@ -110,10 +110,9 @@ namespace {
         return commands;
     }
 
-    // CPU リファレンスの S(0)〜S(TOTAL_TICKS) の要約([t] が S(t))と、最後の状態の描画用の面のハッシュ
+    // CPU リファレンスの S(0)〜S(TOTAL_TICKS) の要約([t] が S(t))
     struct Reference {
         std::vector<ProbeTickHash> ticks;
-        uint64_t sliceHash = 0;
         bool heatConserved = true;  // 熱の合計が、つつきで足した分だけ変わった(伝導では変わらない)
     };
 
@@ -134,7 +133,6 @@ namespace {
             const uint64_t added = static_cast<uint64_t>(pokes) * PROBE_POKE_AMOUNT;
             result.heatConserved = result.heatConserved && result.ticks.back().heat == result.ticks[tick].heat + added;
         }
-        result.sliceHash = ProbeStateHash(ProbeViewSlice(reference.State(TOTAL_TICKS)));
         return result;
     }
 
@@ -177,22 +175,23 @@ namespace {
     struct RunResult {
         bool ok = false;
         std::vector<ProbeTickHash> hashes;
-        uint64_t extractionHash = 0;
+        uint64_t extractionHash = 0;          // 抽出のセルの部分のハッシュ
+        uint32_t extractionActiveBlocks = 0;  // 抽出の活性の印の数
         std::vector<ProbeEvent> events;
         uint32_t droppedEventCount = 0;
         std::vector<ProbeCommand> enqueued;  // 足したコマンド(足した順)
     };
 
-    // 抽出(COMMON。z = PROBE_VIEW_Z の面)を読み戻す
+    // 抽出(COMMON。全部のセル + ブロックの活性の印)を読み戻す
     std::vector<uint32_t> ReadExtraction(ID3D12Device5* device, ID3D12Resource* extraction) {
-        std::vector<uint32_t> cells(PROBE_SLICE_CELL_COUNT);
+        std::vector<uint32_t> cells(PROBE_EXTRACTION_WORDS);
         auto queue = gpu::ImmediateQueue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
         const ComPtr<ID3D12Resource> readback =
-            gpu::CreateBuffer(device, uint64_t{PROBE_SLICE_CELL_COUNT} * 4, gpu::BufferKind::Readback);
+            gpu::CreateBuffer(device, uint64_t{PROBE_EXTRACTION_WORDS} * 4, gpu::BufferKind::Readback);
         if (!queue || !readback) return {};
         ID3D12GraphicsCommandList10* list = queue->Begin();
         if (list == nullptr) return {};
-        list->CopyBufferRegion(readback.Get(), 0, extraction, 0, uint64_t{PROBE_SLICE_CELL_COUNT} * 4);
+        list->CopyBufferRegion(readback.Get(), 0, extraction, 0, uint64_t{PROBE_EXTRACTION_WORDS} * 4);
         if (!queue->ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(cells)))) {
             return {};
         }
@@ -240,8 +239,11 @@ namespace {
             unitPosition += plan.unitsPerFrame[frame];
         }
         const std::vector<uint32_t> cells = ReadExtraction(device, simulation->Extraction(extractionTarget));
-        if (cells.size() != PROBE_SLICE_CELL_COUNT) return result;
-        result.extractionHash = ProbeStateHash(cells);
+        if (cells.size() != PROBE_EXTRACTION_WORDS) return result;
+        const std::span<const uint32_t> extracted(cells);
+        result.extractionHash = ProbeStateHash(extracted.first(PROBE_CELL_COUNT));
+        result.extractionActiveBlocks =
+            static_cast<uint32_t>(std::ranges::count(extracted.subspan(PROBE_EXTRACTION_BLOCK_OFFSET), 1u));
         result.ok = unitPosition == TOTAL_TICKS * unitsPerTick;
         return result;
     }
@@ -338,8 +340,10 @@ namespace {
                            std::format("{}: コマンドを全部、刻みに間に合うように足した", plan.name));
             failures.Check(HashesMatch(result.hashes, expected),
                            std::format("{}: 刻みごとのハッシュが CPU と一致", plan.name));
-            failures.Check(result.extractionHash == expected.sliceHash,
-                           std::format("{}: 最後の抽出が CPU と一致", plan.name));
+            failures.Check(result.extractionHash == expected.ticks.back().hash,
+                           std::format("{}: 最後の抽出(全部のセル)が CPU と一致", plan.name));
+            failures.Check(result.extractionActiveBlocks == expected.ticks.back().scheduledBlocks,
+                           std::format("{}: 抽出の活性の印の数が、最後の刻みで計算したブロックの数と一致", plan.name));
             failures.Check(result.events == expectedEvents && result.droppedEventCount == 0,
                            std::format("{}: イベントが (刻み, 種類, 場所) の順に全部戻る", plan.name));
         }

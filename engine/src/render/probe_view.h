@@ -1,24 +1,19 @@
-// probe_view.h — T-0004 の仮の世界(sim/probe_sim)を描く(shaders/render/probe_view.hlsl)。
+// probe_view.h — 仮の世界(sim/probe_sim の 64³ の熱)のデバッグ表示を描く(shaders/render/probe_view.hlsl。T-0004・T-0015)。
 //
-// データの流れ: シミュの抽出(3 組。compute キューが書く)+ フレームの定数(CPU がフレームごとに書く: どちらの抽出を読むか・大きさ)
-//   → 画面いっぱいの三角形 1 枚 → バックバッファ。
+// データの流れ: シミュの抽出(3 組。compute キューが書く。全部のセル + ブロックの活性の印)
+//   + フレームの定数(CPU がフレームごとに書く: どの抽出を読むか・大きさ・表示・カメラ。render/probe_view_constants.h)
+//   → 画面いっぱいの三角形 1 枚(画素ごとに格子を光線で辿る)→ バックバッファ。
 // Record() はフレームのループ(frame/frame_loop)がバックバッファごとに 1 度だけ呼び、そのリストを毎フレーム使い回す。
-// 本物の描画(10-rendering.md)は M7 から。これはフレームの形を確かめるための仮のもの。
+// 本物の描画(10-rendering.md)は M7 から。これは原理の確認(M1)の間、世界の中を見るための道具。
 #pragma once
 
 #include <cstdint>
 #include <expected>
 #include <string>
 
-namespace bicameral::render {
+#include "render/probe_view_constants.h"
 
-    // フレームの定数(アップロードのバッファ。probe_view.hlsl の frame と同じ並び)
-    struct ProbeViewConstants {
-        uint32_t extractionIndex = 0;  // 読む抽出(0〜2)
-        uint32_t width = 0;            // 描く大きさ(px)
-        uint32_t height = 0;
-        uint32_t reserved = 0;
-    };
+namespace bicameral::render {
 
     struct ProbeViewTarget {
         ID3D12Resource* backBuffer = nullptr;

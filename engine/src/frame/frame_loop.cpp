@@ -3,7 +3,7 @@
 // 1 フレームの流れ(CPU):
 //   窓のメッセージ → スワップチェインの待ち(歩調)→ 経過時間を SimScheduler へ
 //   → 終わったシミュのリストの読み戻し(フェンスが進んだ分だけ。待たない。単位の GPU 時間・ハッシュ・イベント)
-//   → クリック(再生なら再生ファイル)をコマンドに → 予算ぶんの単位と、GPU のキューへ足すコマンドを記録して compute キューへ(ADR-0011)
+//   → 窓の入力をカメラ・表示とクリックに分け(render/debug_view_controller)、クリック(再生なら再生ファイル)をコマンドに → 予算ぶんの単位と、GPU のキューへ足すコマンドを記録して compute キューへ(ADR-0011)
 //   → 描画を direct キューへ(終わっている最新の抽出を見せる。シミュを待たない)→ Present
 //
 // 抽出の 3 組の約束(06 §4): 抽出は 1 フレームに 1 回まで、そのフレームに投げた単位の後ろで刻みの境界の状態を写す。
@@ -24,7 +24,9 @@
 #include "gpu/resources.h"
 #include "gpu/swap_chain.h"
 #include "platform/window.h"
+#include "render/debug_view_controller.h"
 #include "render/probe_view.h"
+#include "render/screenshot.h"
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
 
@@ -82,8 +84,7 @@ namespace bicameral::frame {
         };
 
         struct PendingClick {
-            uint32_t x = 0;
-            uint32_t y = 0;
+            render::CellCoordinate cell;
             uint64_t tick = UINT64_MAX;  // 載せた刻み(まだなら UINT64_MAX)
             Clock::time_point time;
         };
@@ -132,6 +133,7 @@ namespace bicameral::frame {
                   m_sim(std::move(parts.simulation)),
                   m_view(std::move(parts.view)),
                   m_replay(std::move(parts.replay)),
+                  m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -154,6 +156,8 @@ namespace bicameral::frame {
             [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
             void SubmitRender();
+            [[nodiscard]] bool SubmitScreenshot();
+            [[nodiscard]] bool WriteScreenshot();
             bool RunFrame(Clock::time_point frameStart);
             int Finish(bool failed, Clock::time_point start);
 
@@ -171,6 +175,8 @@ namespace bicameral::frame {
             render::ProbeView m_view;
             std::vector<save::ReplayPlayer> m_replay;  // 再生中なら 1 つ
             save::ReplayRecorder m_recorder;           // --record のときだけ使う
+            render::DebugViewController m_viewController;
+            std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で最後のフレームを写したら 1 つ
             std::array<FrameSlot, FRAME_SLOT_COUNT> m_frames;
             ComPtr<ID3D12QueryHeap> m_renderTimestamps;
             ComPtr<ID3D12Resource> m_renderTimestampReadback;
@@ -352,13 +358,14 @@ namespace bicameral::frame {
                         event.place, event.tick);
                     continue;
                 }
+                const render::CellCoordinate cell{.x = event.PokeX(), .y = event.PokeY(), .z = event.PokeZ()};
                 const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
-                    return pending.tick == event.tick && pending.x == event.PokeX() && pending.y == event.PokeY();
+                    return pending.tick == event.tick && pending.cell == cell;
                 });
                 const double latency = click != m_clicks.end() ? Milliseconds(now - click->time) : 0.0;
                 Log(Channel::Sim, Level::Info,
-                    "つつき ({}, {}) を刻み {} で適用(クリックから CPU に戻るまで {:.1f} ms)", event.PokeX(),
-                    event.PokeY(), event.tick, latency);
+                    "つつき ({}, {}, {}) を刻み {} で適用(クリックから CPU に戻るまで {:.1f} ms)", cell.x, cell.y,
+                    cell.z, event.tick, latency);
                 if (click != m_clicks.end()) m_clicks.erase(click);
             }
             if (readback.droppedEventCount > 0) {
@@ -389,30 +396,23 @@ namespace bicameral::frame {
 
         // --- 入力 → コマンド ---
 
+        // 窓の入力: カメラと表示は再生中も動かせる。つつき(左クリックが断面に当たったセル)と自動のクリックはコマンドに
         void FrameLoop::QueueClicks() {
-            std::vector<PointerEvent> pointers = m_window->TakePointerEvents();
-            if (!m_replay.empty()) return;  // 再生中は窓の操作を入れない(世界は再生ファイルのコマンドだけで進む)
-            // probe_view.hlsl と同じ置き方: 正方形の格子を短い辺に合わせて真ん中に
-            const auto width = static_cast<int32_t>(m_swapChain.Width());
-            const auto height = static_cast<int32_t>(m_swapChain.Height());
-            const int32_t side = std::min(width, height);
-            const int32_t originX = (width - side) / 2;
-            const int32_t originY = (height - side) / 2;
-            if (side <= 0) return;
+            const std::vector<InputEvent> events = m_window->TakeInputEvents();
+            std::vector<render::CellCoordinate> cells =
+                m_viewController.HandleInput(events, m_swapChain.Width(), m_swapChain.Height());
+            if (!m_replay.empty()) return;  // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
             if (m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0) {
-                // 格子の上の決まった場所を順に押す(人がいない確認用)
-                const auto step = static_cast<int32_t>(m_frameNumber / AUTO_CLICK_INTERVAL_FRAMES);
-                pointers.push_back(
-                    {.x = originX + (step * 37 % 16 + 1) * side / 18, .y = originY + (step * 11 % 16 + 1) * side / 18});
+                // z = PROBE_VIEW_Z の面の決まった場所を順に押す(人がいない確認用。表示やカメラに依らない)
+                const auto step = static_cast<uint32_t>(m_frameNumber / AUTO_CLICK_INTERVAL_FRAMES);
+                const uint32_t u = (step * 37 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
+                const uint32_t v = (step * 11 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
+                cells.push_back(render::CellOnSlice(2, sim::PROBE_VIEW_Z, u, v));
             }
-            for (const PointerEvent& pointer : pointers) {
-                const int32_t localX = pointer.x - originX;
-                const int32_t localY = pointer.y - originY;
-                if (localX < 0 || localY < 0 || localX >= side || localY >= side) continue;
-                const auto cellX = static_cast<uint32_t>(int64_t{localX} * sim::PROBE_GRID_SIZE / side);
-                const auto cellY = static_cast<uint32_t>(int64_t{localY} * sim::PROBE_GRID_SIZE / side);
-                m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cellX, cellY, sim::PROBE_VIEW_Z));
-                m_clicks.push_back({.x = cellX, .y = cellY, .time = Clock::now()});
+            const auto now = Clock::now();
+            for (const render::CellCoordinate& cell : cells) {
+                m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cell.x, cell.y, cell.z));
+                m_clicks.push_back({.cell = cell, .time = now});
             }
         }
 
@@ -437,9 +437,10 @@ namespace bicameral::frame {
                                     m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(count));
             for (sim::ProbeCommand& command : commands) {
                 command.targetTick = applyTick;
+                const render::CellCoordinate cell{
+                    .x = command.payload[0], .y = command.payload[1], .z = command.payload[2]};
                 const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
-                    return pending.tick == UINT64_MAX && pending.x == command.payload[0] &&
-                           pending.y == command.payload[1];
+                    return pending.tick == UINT64_MAX && pending.cell == cell;
                 });
                 if (click != m_clicks.end()) click->tick = applyTick;
             }
@@ -492,11 +493,38 @@ namespace bicameral::frame {
 
             // 見せる抽出: CPU から見て終わっている最新(シミュを待たない。抽出の 3 組の約束。ファイルの先頭)
             const auto extraction = static_cast<uint32_t>(m_completedExtraction.number % sim::PROBE_EXTRACTION_COUNT);
-            *slot.mappedConstants = {
-                .extractionIndex = extraction, .width = m_swapChain.Width(), .height = m_swapChain.Height()};
+            *slot.mappedConstants = m_viewController.Constants(extraction, m_swapChain.Width(), m_swapChain.Height());
             m_direct.GpuWait(m_compute, m_completedExtraction.fence);
             slot.renderFence = m_direct.Submit(slot.list.Get());
             m_lastRenderReading[extraction] = slot.renderFence;
+        }
+
+        // --screenshot: 最後のフレームの描画の後・Present の前に、バックバッファを読み戻しへ写す
+        bool FrameLoop::SubmitScreenshot() {
+            if (m_options.screenshotPath.empty() || m_frameNumber + 1 != m_options.frameLimit) return true;
+            ID3D12Resource* backBuffer = m_swapChain.BackBuffer(m_swapChain.CurrentIndex());
+            auto capture = render::ScreenshotCapture::Create(m_device.Get(), backBuffer);
+            if (!capture) {
+                Log(Channel::Render, Level::Error, "画像を写せない: {}", capture.error());
+                return false;
+            }
+            m_screenshot.push_back(std::move(*capture));
+            ID3D12CommandList* list = m_screenshot.front().Record(backBuffer);
+            if (list == nullptr) return false;
+            m_direct.Submit(list);
+            return true;
+        }
+
+        // 写した画像をファイルへ(GPU を待った後)。写していなければ何もしない
+        bool FrameLoop::WriteScreenshot() {
+            if (m_screenshot.empty()) return true;
+            const auto written = m_screenshot.front().WriteBmp(m_options.screenshotPath);
+            if (!written) {
+                Log(Channel::Render, Level::Error, "画像を書けない: {}", written.error());
+                return false;
+            }
+            Log(Channel::Render, Level::Info, "画像: {}", ToUtf8(m_options.screenshotPath.wstring()));
+            return true;
         }
 
         bool FrameLoop::IsDeviceLost() const {
@@ -555,6 +583,7 @@ namespace bicameral::frame {
             QueueClicks();
             if (!SubmitSim()) return false;
             SubmitRender();
+            if (!SubmitScreenshot()) return false;
             const auto presentStart = Clock::now();
             const bool presented = m_swapChain.Present(m_options.vsync);
             m_interval.presentMilliseconds += Milliseconds(Clock::now() - presentStart);
@@ -575,6 +604,12 @@ namespace bicameral::frame {
                 m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.targetFps, m_options.simLoad,
                 m_options.simSplit, m_sim.UnitsPerTick(), m_options.renderHighPriority ? "HIGH" : "NORMAL",
                 m_options.autoClick ? "あり" : "なし");
+            const render::OrbitCameraState& camera = m_viewController.Camera().State();
+            Log(Channel::Render, Level::Info, "表示: {}  カメラ 向き {:.0f}° 上下 {:.0f}° 距離 {:.0f}",
+                m_viewController.Describe(), camera.yawDegrees, camera.pitchDegrees, camera.distance);
+            if (!m_options.screenshotPath.empty() && m_options.frameLimit == 0) {
+                Log(Channel::Render, Level::Warning, "--screenshot は --frames と一緒に使う(最後のフレームを写す)");
+            }
             if (!m_replay.empty()) {
                 Log(Channel::Sim, Level::Info, "再生: {}(コマンド {} 個、ハッシュ {} 個、刻み {} まで)",
                     ToUtf8(m_options.replayPath.wstring()), m_replay.front().CommandCount(),
@@ -621,6 +656,7 @@ namespace bicameral::frame {
             }
             m_direct.Flush();  // Present の分も待つ(バックバッファを解放する前に)
             m_compute.Flush();
+            if (!WriteScreenshot()) return 1;
             CollectSimSubmissions();
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");

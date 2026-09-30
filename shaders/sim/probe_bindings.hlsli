@@ -8,10 +8,9 @@
 #include "common/probe_sim.hlsli"
 
 // --- バッファ(ROOT_LAYOUT の順)---
-RWStructuredBuffer<uint32_t> world : register(u0);  // 2 世代 × PROBE_CELL_COUNT
-RWByteAddressBuffer events : register(u1);          // イベントのリング: 見出し + レコード(probe_sim.hlsli)
-RWStructuredBuffer<uint32_t> extraction0
-    : register(u2);  // 描画用の抽出(3 組 × 1 つの面。描画は完成済みの最新を読む。06 §4)
+RWStructuredBuffer<uint32_t> world : register(u0);        // 2 世代 × PROBE_CELL_COUNT
+RWByteAddressBuffer events : register(u1);                // イベントのリング: 見出し + レコード(probe_sim.hlsli)
+RWStructuredBuffer<uint32_t> extraction0 : register(u2);  // 描画用の抽出(3 組。中身は probe_sim.hlsli。06 §4)
 RWStructuredBuffer<uint32_t> extraction1 : register(u3);
 RWStructuredBuffer<uint32_t> busySink : register(u4);  // 重さの試験の計算結果の捨て場(誰も読まない)
 RWStructuredBuffer<uint32_t> extraction2 : register(u5);
