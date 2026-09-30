@@ -23,7 +23,8 @@ GPU の中だけで走り切る世界を、症状から原因に辿れるよう�
   - バインドは u0 space1 のルートの UAV(`gpu::RootSignatureLayout::debugRing`)。容量 4096 件 / フレーム(256 KiB)。
     溢れたら書かずに数える(落とした数 = 要求の数 − 容量)。
   - CPU: `RecordBegin` → 書く → `RecordReadbackAndReset`(読み戻し + 見出しを 0 に戻す)→ 待つ → `Drain`(assert を先に、
-    既定 32 行までログへ。残りは件数だけ)。読み戻しのバッファは 1 つなので、フレームを重ねるときはフレームごとに持たせる(T-0004)。
+    既定 32 行までログへ。残りは件数だけ)。読み戻しのバッファは枠(slot)ごと(`gpu::ReadbackRing`。T-0004)。
+    フレームを重ねるときは slot = バッチの番号 % 枠の数にし、その枠のリストが終わってから `Drain(max, slot)` する。
   - 有効になるのは Debug のシミュのシェーダーだけ(shaders/CMakeLists.txt が `-DBICAMERAL_GPU_DEBUG=1` を付ける)。
     それ以外では何もしない(リングも宣言しない)。`FX_ASSERT`(fixed.hlsli)もここへつないだ。bench には付けない。
 - **検証**(`engine/src/gpu/device.{h,cpp}` の `gpu::Device`):

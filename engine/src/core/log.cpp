@@ -12,7 +12,7 @@ namespace bicameral {
     namespace {
 
         constexpr std::array<std::string_view, static_cast<size_t>(Channel::Count)> CHANNEL_NAMES = {
-            "core", "platform", "gpu", "workgraph", "reaction", "physics", "render", "audio", "tool",
+            "core", "platform", "gpu", "workgraph", "sim", "reaction", "physics", "render", "audio", "tool",
         };
 
         constexpr std::array<std::string_view, 6> LEVEL_NAMES = {

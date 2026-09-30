@@ -1,30 +1,34 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0003 GPU デバッグ基盤 — 完了
+最終更新: 2026-09-30 / チケット: T-0004 窓とフレームループ — 完了
 
 ## 状態(3 行以内)
-- シェーダー(compute と Work Graphs のノード)から書ける printf / assert のリングを作った(`DEBUG_PRINT` / `DEBUG_ASSERT`、書式は CPU 側の一覧)。FX_ASSERT もつないだ。
-- `gpu::Device` が debug プリセットで debug layer・GBV・DRED を有効にし、debug layer の報告をログへ流して数える。GPU のテストはエラー 0 件も確かめる。
-- テスト 19/19(debug / release、ハードウェアと WARP)。設計は 16 §1.1。
+- `bicameral`(引数なし)で窓が開き、compute キューの仮の刻み(クリックした所が熱くなって広がる 128² の世界)と direct キューの描画が、フェンスだけで並んで回る。
+- リストは作るときに 1 度だけ記録して使い回す。GPU → CPU は待たない読み戻し(イベント・デバッグ・タイムスタンプ)。刻みの数はタイムスタンプから決め、重いと世界が遅くなる。
+- テスト 22/22(debug / release、ハードウェアと WARP)。設計は 06 §4・§4.1、計測は docs/perf.md。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(22 ファイル)。
-- `job.py test` → 19/19。`-Filter gpu_debug -Show` でリングの行(`GPU print debug_ring_probe/Main:18 ...`)と DRED の記録が見える。
-- `job.py run -Preset release -Exe gpu_fixed_bench` → 29 演算の表(bench のシェーダーはリング無し)。
-- `python3 tools/archmap/archmap.py --check` → OK(リンク 25 個)。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(32 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(39)。
+- `job.py test` → 22/22。`-Filter gpu_probe_sim -Show` で「8 ずつ / 1 ずつ / ばらばら」の要約が CPU(cc28719c179eb6ea)と一致。
+- `job.py run -Preset release -- --frames 600 --auto-click` → 窓が開き、1 秒ごとに fps・CPU・世界の刻み/秒・GPU 時間のログ、つつきのイベント(クリックから CPU に戻るまで 7〜24 ms)。
+  引数: `--frames n` `--no-vsync` `--latency 2|3` `--sim-load n`(重さの試験)`--auto-click` `--warp`(main.cpp の先頭)。人が窓をクリックしても同じ。
+- `--caps` はアダプタごとに PCI の ID と画面を出す。
 
-## 壊れている/未確認のもの
-- DRED の「止まったコマンド」表示は本物のハング(TDR)で未確認(RemoveDevice では終わったリストの記録が残らない。16 §4)。
-- 04 §6 の NVIDIA(SASS)は T-0016、RDNA3(ISA)は AMD 機(D-207)で。
-- ベンチは GPU のクロックを固定していない(2 回の実行の差は数 %)。
+## 壊れている/未確認のもの(ファイル:行 と症状)
+- R-LOOP-2(06 研究): 1 刻みの Dispatch が 25 ms 以上だと、描画はシミュを待っていないのに fps がシミュのバッチの速さまで落ちる。原因は未確認。BACKLOG に案(T-0012 で刻みを分けて投げる)。
+- vsync ありで Present の中に平均 1 ms(BACKLOG。害は無い)。
+- 窓の大きさの変更・最小化・DPI の変更はコード上は扱っているが、人の手で試していない(自動の確認は大きさを変えない)。
+- DRED の「止まったコマンド」表示は本物のハング(TDR)で未確認(16 §4)。SASS / RDNA3 の命令数は T-0016 / AMD 機。
 
-## このチャットで決めたこと
-- リングのバインドは u0 space1 のルートの UAV で固定(space0 はシェーダーが自由に使う)。容量 4096 件 / フレーム。有効なのは Debug のシミュのシェーダーだけ。
-- 書式の文字列は GPU に置かない(番号 + 整数の引数)。場所は書式の一覧に、刻み・セル・レコードの ID は引数で(T-0008 もこの形)。
-- ADR にはしていない(16 §1.1 に書いた。方針の変更ではなく実装の詳細)。
+## このチャットで決めたこと(ADR にしたなら番号)
+- **D-423**(DECISIONS.md): 過去の自作コード(DX12 / ReSTIR DI など)は一切流用しない。描画もほかも着手時点のモダンな手法を調べて一から設計する。T-0004 の流用の項目は削除。
+- 描画用の抽出は 3 組(06 §4 を 2 組から改めた)。描画は終わっている最新を読み、シミュのバッチは 2 つまで重ねる。
+- 刻みの数はリストの選び方で(刻みの数ごとに記録)。ExecuteIndirect の数での切り替えは遅かった(perf.md)。
+- アダプタは窓の画面を持つものを優先(`DeviceOptions::presentMonitor`)。描画のキューは優先度 HIGH。
+- ADR は書いていない(06 §4.1 に書いた。方針の変更ではなく実装の詳細。3 組の件は 06 本文を直した)。
 
 ## 次にやること
-NEXT.md の先頭(T-0004 窓とフレームループ)。
+NEXT.md の先頭(T-0012 刻みのループ)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **GPU のテストを足すとき**: tests/CMakeLists.txt の `bicameral_add_gpu_test(<名前>)` と `bicameral_add_gpu_test_case(<テスト名> <exe> <gpu|warp> <引数>)`。
@@ -57,4 +61,11 @@ NEXT.md の先頭(T-0004 窓とフレームループ)。
 - 書式を足すときは shaders/common/debug_formats.hlsli に `DEBUG_FORMAT(名前, チャンネル, 場所, 書式)` を 1 行。HLSL では `DebugFormat::名前`。
 - **HLSL で `line` は予約語**(ジオメトリシェーダーの修飾子)。変数名に使うと「modifiers must appear before type」になる。
 - debug layer は、デバイスを作った後に有効にするとデバイスが失われる。`gpu::Device::Create` は必ず最初のデバイスより前に設定する(1 プロセス 1 回の想定)。
-- `DebugRing` の読み戻しのバッファは 1 つ。フレームを重ねる(T-0004)ときはフレームごとに持たせる。
+- `DebugRing` と `ReadbackRing` の読み戻しは枠(slot)ごと。`Create(device, slotCount)` → `RecordReadbackAndReset(list, slot)` → その枠のリストが終わってから `Drain(max, slot)` / `Read(slot, ...)`。
+- **フレームのループ(frame/frame_loop.cpp)**: 抽出の組・バッチの枠・描画の枠の約束はファイルの先頭に書いた。シミュのバッチを増やす・重ねる数を変えるときは
+  「抽出の組の数 = 重ねるバッチの数 + 1」を守る(破ると描画とシミュが同じ抽出を同時に使う)。
+- **バックバッファを作り直す前・終わる前は `Queue::Flush()`**(最後の Submit の値を待つだけだと、その後ろの Present がまだ走っていて debug layer が CORRUPTION を出す)。
+- 仮の刻み(sim/probe_sim・shaders/sim/probe_tick.hlsl・shaders/common/probe_sim.hlsli)は T-0012 で本物の刻みに置き換える前提の使い捨て。形(64 バイトのコマンド・枠ごとの入力・イベントのリング)は本物にも使う。
+- `job.py run` は窓を開く(ユーザーの画面に出る)。自動の確認は `--frames n --auto-click` で終わらせる。
+- clang-tidy: `std::optional` のメンバーは unchecked-optional-access で大量に警告が出る。作れたものだけを受け取る形(ProbeSim・FrameLoopParts)にする。
+- HLSL の `[numthreads(...)] void Name(` は archmap が定義として見つけない。map.yaml ではその .hlsl の普通の関数を指す。

@@ -1,5 +1,5 @@
 // device.cpp — D3D12 のデバイスを作る(T-0013)と、検証・デバイス喪失の記録(T-0003、docs/design/16-debug-test.md §1)。
-// アダプタの選び方は caps.cpp の列挙と同じ(ソフトウェアのアダプタを除く)。
+// アダプタの選び方: ソフトウェアのアダプタを除き、描画する画面を持つアダプタ → 高性能の順(T-0004。device.h の presentMonitor)。
 // 最低機の条件(D-210・D-211・ADR-0009)を満たさないデバイスは使わない: SM 6.8・Work Graphs 1.0・Int64ShaderOps。
 // raw / structured バッファへの 64bit atomic は SM 6.6 以上で必須なので、SM 6.8 の確認に含まれる。
 // debug layer の d3d12SDKLayers.dll は Agility SDK のもの(exe の横の D3D12\。engine/CMakeLists.txt がコピーする)。
@@ -50,27 +50,53 @@ namespace bicameral::gpu {
             return missing;
         }
 
-        DeviceResult CreateHardwareDevice(IDXGIFactory6* factory) {
+        // ソフトウェアでなく、FL 12_2 のデバイスを作れて最低機の機能がそろうならデバイスを返す(だめなら nullptr)
+        ComPtr<ID3D12Device5> TryCreateHardwareDevice(IDXGIAdapter1* adapter) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) return nullptr;
+            ComPtr<ID3D12Device5> device;
+            if (FAILED(D3D12CreateDevice(adapter, HARDWARE_FEATURE_LEVEL, IID_PPV_ARGS(&device)))) return nullptr;
+            const std::string missing = FindMissingFeatures(device.Get());
+            if (!missing.empty()) {
+                Log(Channel::Gpu, Level::Warning, "アダプタ {} は使わない(足りない機能:{})", ToUtf8(desc.Description),
+                    missing);
+                return nullptr;
+            }
+            Log(Channel::Gpu, Level::Info, "アダプタ: {}  LUID {:08x}:{:08x}", ToUtf8(desc.Description),
+                static_cast<unsigned long>(desc.AdapterLuid.HighPart), desc.AdapterLuid.LowPart);
+            return device;
+        }
+
+        // アダプタが monitor をつないでいるか(画面の一覧に含むか)
+        bool AdapterOwnsMonitor(IDXGIAdapter1* adapter, HMONITOR monitor) {
+            for (UINT outputIndex = 0;; ++outputIndex) {
+                ComPtr<IDXGIOutput> output;
+                if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) return false;
+                DXGI_OUTPUT_DESC outputDesc{};
+                if (SUCCEEDED(output->GetDesc(&outputDesc)) && outputDesc.Monitor == monitor) return true;
+            }
+        }
+
+        // 高性能の順に見て、最初に条件を満たすアダプタでデバイスを作る。monitor が nullptr でなければ、その画面を持つものだけ
+        ComPtr<ID3D12Device5> CreateFirstHardwareDevice(IDXGIFactory6* factory, HMONITOR monitor) {
             for (UINT index = 0;; ++index) {
                 ComPtr<IDXGIAdapter1> adapter;
                 if (factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
                                                         IID_PPV_ARGS(&adapter)) == DXGI_ERROR_NOT_FOUND) {
-                    break;
+                    return nullptr;
                 }
-                DXGI_ADAPTER_DESC1 desc{};
-                if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) continue;
-
-                ComPtr<ID3D12Device5> device;
-                if (FAILED(D3D12CreateDevice(adapter.Get(), HARDWARE_FEATURE_LEVEL, IID_PPV_ARGS(&device)))) continue;
-                const std::string missing = FindMissingFeatures(device.Get());
-                if (!missing.empty()) {
-                    Log(Channel::Gpu, Level::Warning, "アダプタ {} は使わない(足りない機能:{})",
-                        ToUtf8(desc.Description), missing);
-                    continue;
-                }
-                Log(Channel::Gpu, Level::Info, "アダプタ: {}", ToUtf8(desc.Description));
-                return device;
+                if (monitor != nullptr && !AdapterOwnsMonitor(adapter.Get(), monitor)) continue;
+                if (ComPtr<ID3D12Device5> device = TryCreateHardwareDevice(adapter.Get())) return device;
             }
+        }
+
+        // 窓の画面を持つアダプタ → 無ければ(使えなければ)全部を高性能の順に
+        DeviceResult CreateHardwareDevice(IDXGIFactory6* factory, HMONITOR presentMonitor) {
+            if (presentMonitor != nullptr) {
+                if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, presentMonitor)) return device;
+                Log(Channel::Gpu, Level::Warning, "窓の画面を持つアダプタが使えないので、高性能の順で選ぶ");
+            }
+            if (ComPtr<ID3D12Device5> device = CreateFirstHardwareDevice(factory, nullptr)) return device;
             return std::unexpected("最低機の条件(FL 12_2・SM 6.8・Work Graphs・Int64ShaderOps)を満たすアダプタが無い");
         }
 
@@ -207,11 +233,12 @@ namespace bicameral::gpu {
         ComPtr<IDXGIFactory6> factory;
         const HRESULT result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
         if (FAILED(result)) return std::unexpected("DXGI のファクトリを作れない: " + DescribeHresult(result));
-        DeviceResult created =
-            kind == AdapterKind::Warp ? CreateWarpDevice(factory.Get()) : CreateHardwareDevice(factory.Get());
+        DeviceResult created = kind == AdapterKind::Warp ? CreateWarpDevice(factory.Get())
+                                                         : CreateHardwareDevice(factory.Get(), options.presentMonitor);
         if (!created) return std::unexpected(created.error());
 
         Device device;
+        device.m_factory = std::move(factory);
         device.m_device = std::move(*created);
         device.m_options = options;
         if (options.debugLayer || options.gpuBasedValidation) device.m_messageSink = AttachMessageSink(device.Get());

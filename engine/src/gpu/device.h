@@ -18,7 +18,7 @@
 namespace bicameral::gpu {
 
     enum class AdapterKind : uint8_t {
-        Hardware,  // 高性能の順に並べて最初の、FL 12_2 のデバイスを作れるアダプタ
+        Hardware,  // 描画する画面を持つアダプタ → 無ければ高性能の順に並べて最初の、条件を満たすアダプタ
         Warp,      // ソフトウェアの D3D12(OS の d3d10warp.dll)
     };
 
@@ -28,6 +28,10 @@ namespace bicameral::gpu {
         bool debugLayer = false;          // D3D12 の debug layer。報告をログへ流す
         bool gpuBasedValidation = false;  // GPU で走る検証(遅い)。debugLayer が要る
         bool dred = false;                // デバイス喪失の記録(自動のブレッドクラム・ページフォールト)
+        // 描画する画面(窓がある画面。MonitorFromWindow)。この画面をつないでいるアダプタを優先する。
+        // 同じ GPU が別の LUID で 2 回列挙されることがあり(片方は画面を持たない)、画面を持たない方で描くと
+        // Present のたびにアダプタをまたぐ写しが入るため(T-0004)。nullptr なら高性能の順だけで選ぶ(テスト)
+        HMONITOR presentMonitor = nullptr;
     };
 
     // ビルドの既定: BICAMERAL_GPU_VALIDATION(debug プリセット)なら全部有効、それ以外は全部無効
@@ -40,6 +44,7 @@ namespace bicameral::gpu {
             AdapterKind kind, const DeviceOptions& options = DefaultDeviceOptions());
 
         [[nodiscard]] ID3D12Device5* Get() const { return m_device.Get(); }
+        [[nodiscard]] IDXGIFactory6* Factory() const { return m_factory.Get(); }  // スワップチェインを作るとき
         [[nodiscard]] const DeviceOptions& Options() const { return m_options; }
 
         // debug layer が出したエラー(ERROR と CORRUPTION)と警告の数。debug layer が無効なら常に 0
@@ -63,6 +68,7 @@ namespace bicameral::gpu {
                                              D3D12_MESSAGE_ID id, LPCSTR description, void* context);
         [[nodiscard]] static std::unique_ptr<MessageSink> AttachMessageSink(ID3D12Device5* device);
 
+        Microsoft::WRL::ComPtr<IDXGIFactory6> m_factory;
         Microsoft::WRL::ComPtr<ID3D12Device5> m_device;
         DeviceOptions m_options;
         std::unique_ptr<MessageSink> m_messageSink;  // debug layer が無効なら空

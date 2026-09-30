@@ -1,17 +1,28 @@
 // Bicameral Engine — ランタイムの入口。
 //
-// 今はコマンドラインの振り分けだけ。窓・スワップチェイン・フレームループは T-0004 以降。
+// 引数が無ければ窓を開いてフレームのループを回す(frame/frame_loop.h。T-0004)。
 //   bicameral --caps                 GPU の対応状況を表示して終了
+//   --frames <n>                     n フレームで終える(自動の確認用。既定は窓を閉じるまで)
+//   --no-vsync                       垂直同期を待たずに Present する
+//   --latency <2|3>                  CPU が GPU より先に進めるフレームの数(既定 2)
+//   --sim-load <n>                   重さの試験: 刻みに結果に入らない計算を n 回足す(世界が遅くなるのを見る。D-202)
+//   --auto-click                     決まった場所を自動でクリックする(人がいない確認でイベントの流れを通す)
+//   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
 //                                    これより軽いログを捨てる(既定: Debug ビルドは debug、Release は info)
 //
 // 引数は wmain で UTF-16 のまま受け取る(main の char** は ANSI コードページなので日本語のパスが壊れる)。
 // 終わるときは必ず SingletonFinalizer::Finalize() を通す(ログを最後に閉じ、ファイルへ書き出すため)。
+#include <charconv>
+#include <optional>
+
+#include "common/probe_sim.hlsli"
 #include "core/log.h"
 #include "core/log_sinks.h"
 #include "core/singleton.h"
 #include "core/unicode.h"
+#include "frame/frame_loop.h"
 #include "platform/caps.h"
 
 namespace {
@@ -20,12 +31,52 @@ namespace {
 
     struct Options {
         bool runCaps = false;
+        frame::FrameLoopOptions frameLoop;
         std::filesystem::path logDirectory;  // 空なら DefaultLogDirectory()
         Level logLevel = Level::Info;
         bool hasLogLevel = false;
     };
 
     // --- コマンドライン ---
+
+    // 10 進の整数。範囲外・数でなければ std::nullopt
+    std::optional<uint32_t> ParseCount(std::wstring_view text, uint32_t maximum) {
+        uint32_t value = 0;
+        const std::string utf8 = ToUtf8(text);
+        const auto [end, error] = std::from_chars(utf8.data(), utf8.data() + utf8.size(), value);
+        if (error != std::errc{} || end != utf8.data() + utf8.size() || value > maximum) return std::nullopt;
+        return value;
+    }
+
+    // フレームのループの値つきの引数(--frames・--latency・--sim-load)
+    std::expected<void, std::string> ParseFrameLoopCount(std::wstring_view argument, std::wstring_view text,
+                                                         frame::FrameLoopOptions& loop) {
+        const uint32_t maximum = argument == L"--latency"    ? 3u
+                                 : argument == L"--sim-load" ? sim::PROBE_BUSY_ITERATIONS_LIMIT
+                                                             : UINT32_MAX;
+        const auto value = ParseCount(text, maximum);
+        if (!value || (argument == L"--latency" && *value < 2)) {
+            return std::unexpected(std::format("{} の値が不正: {}", ToUtf8(argument), ToUtf8(text)));
+        }
+        if (argument == L"--frames") loop.frameLimit = *value;
+        if (argument == L"--latency") loop.maxFrameLatency = *value;
+        if (argument == L"--sim-load") loop.simLoad = *value;
+        return {};
+    }
+
+    // フレームのループの値なしの引数。当てはまらなければ false
+    bool ParseFrameLoopFlag(std::wstring_view argument, frame::FrameLoopOptions& loop) {
+        if (argument == L"--no-vsync") {
+            loop.vsync = false;
+        } else if (argument == L"--auto-click") {
+            loop.autoClick = true;
+        } else if (argument == L"--warp") {
+            loop.adapter = gpu::AdapterKind::Warp;
+        } else {
+            return false;
+        }
+        return true;
+    }
 
     std::expected<Options, std::string> ParseOptions(std::span<wchar_t*> arguments) {
         Options options;
@@ -34,6 +85,11 @@ namespace {
             const bool hasValue = i + 1 < arguments.size();
             if (argument == L"--caps") {
                 options.runCaps = true;
+            } else if (ParseFrameLoopFlag(argument, options.frameLoop)) {
+                continue;
+            } else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--sim-load") && hasValue) {
+                const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
+                if (!parsed) return std::unexpected(parsed.error());
             } else if (argument == L"--log-dir" && hasValue) {
                 options.logDirectory = arguments[++i];
             } else if (argument == L"--log-level" && hasValue) {
@@ -67,8 +123,7 @@ namespace {
         }
 
         if (options->runCaps) return RunCapsProbe();
-        Log(Channel::Core, Level::Info, "まだ骨組みだけ。--caps を試す");
-        return 0;
+        return frame::RunFrameLoop(options->frameLoop);
     }
 
 }  // namespace

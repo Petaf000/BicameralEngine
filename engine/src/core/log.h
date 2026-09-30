@@ -39,6 +39,7 @@ namespace bicameral {
         Platform,   // 窓・入力・OS・アダプタの列挙
         Gpu,        // デバイス・キュー・リソース・同期
         WorkGraph,  // Work Graphs の構築と投入
+        Sim,        // 刻みのループ・コマンド・GPU からのイベント(06)
         Reaction,   // 反応の連鎖
         Physics,    // AVBD
         Render,     // 描画

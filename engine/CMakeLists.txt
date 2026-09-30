@@ -19,7 +19,10 @@ add_library(bicameral_gpu STATIC
   src/gpu/debug_ring.cpp
   src/gpu/device.cpp
   src/gpu/immediate_queue.cpp
+  src/gpu/queue.cpp
+  src/gpu/readback_ring.cpp
   src/gpu/resources.cpp
+  src/gpu/swap_chain.cpp
   src/gpu/work_graph.cpp
 )
 target_include_directories(bicameral_gpu PUBLIC src)
@@ -34,16 +37,37 @@ if(BICAMERAL_GPU_VALIDATION)
   target_compile_definitions(bicameral_gpu PRIVATE BICAMERAL_GPU_VALIDATION=1)
 endif()
 
+# --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
+# 今は T-0004 の仮の刻みだけ(本物の刻みのループは T-0012)。
+add_library(bicameral_sim STATIC
+  src/sim/probe_sim.cpp
+)
+target_include_directories(bicameral_sim PUBLIC src)
+target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
+target_link_libraries(bicameral_sim PUBLIC bicameral_gpu)
+
+# --- frame: フレームの歩調の計算(GPU を知らない。CPU だけのテストがある)---
+add_library(bicameral_frame STATIC
+  src/frame/tick_pacer.cpp
+)
+target_include_directories(bicameral_frame PUBLIC src)
+
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp
+  src/frame/frame_loop.cpp
   src/platform/agility_sdk.cpp
   src/platform/caps.cpp
+  src/platform/window.cpp
+  src/render/probe_view.cpp
 )
 target_include_directories(bicameral PRIVATE src)
 target_precompile_headers(bicameral PRIVATE src/pch.h)  # 重い外部ヘッダをまとめる(docs/style.md)
 target_link_libraries(bicameral PRIVATE
   bicameral_core
+  bicameral_gpu
+  bicameral_sim
+  bicameral_frame
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility
   d3d12 dxgi)

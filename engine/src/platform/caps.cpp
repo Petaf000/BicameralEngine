@@ -136,6 +136,23 @@ namespace bicameral {
             Log(Channel::Platform, Level::Warning, "WARP: デバイスを作れない");
         }
 
+        // 同じ GPU が別の LUID で 2 回列挙される件(T-0004)を調べるための表示: PCI の ID と、つながっている画面
+        void ReportAdapterIdentity(IDXGIAdapter1* adapter, const DXGI_ADAPTER_DESC1& desc) {
+            Log(Channel::Platform, Level::Info, "  PCI vendor {:04x} device {:04x} subsys {:08x} rev {:x}",
+                desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision);
+            UINT outputCount = 0;
+            for (UINT outputIndex = 0;; ++outputIndex) {
+                ComPtr<IDXGIOutput> output;
+                if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+                DXGI_OUTPUT_DESC outputDesc{};
+                if (FAILED(output->GetDesc(&outputDesc))) continue;
+                const RECT& area = outputDesc.DesktopCoordinates;
+                Log(Channel::Platform, Level::Info, "  画面 {}: {}  ({},{})-({},{})", outputIndex,
+                    ToUtf8(outputDesc.DeviceName), area.left, area.top, area.right, area.bottom);
+                ++outputCount;
+            }
+            if (outputCount == 0) Log(Channel::Platform, Level::Info, "  画面: なし");
+        }
     }  // namespace
 
     int RunCapsProbe() {
@@ -161,6 +178,7 @@ namespace bicameral {
             Log(Channel::Platform, Level::Info, "Adapter {}: {}  VRAM {} MB  LUID {:08x}:{:08x}  flags 0x{:x}", index,
                 ToUtf8(desc.Description), desc.DedicatedVideoMemory >> 20,
                 static_cast<unsigned long>(desc.AdapterLuid.HighPart), desc.AdapterLuid.LowPart, desc.Flags);
+            ReportAdapterIdentity(adapter.Get(), desc);
 
             // FL 12_2 に届かない GPU は対象外なだけ(エラーではない)
             ComPtr<ID3D12Device> device;

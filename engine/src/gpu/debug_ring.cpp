@@ -130,15 +130,6 @@ namespace bicameral::gpu {
             }
         }
 
-        D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
-                                          D3D12_RESOURCE_STATES after) {
-            return {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-                    .Transition = {.pResource = resource,
-                                   .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                                   .StateBefore = before,
-                                   .StateAfter = after}};
-        }
-
     }  // namespace
 
     // --- 1 レコードを読む ---
@@ -173,49 +164,29 @@ namespace bicameral::gpu {
 
     // --- DebugRing ---
 
-    std::expected<DebugRing, std::string> DebugRing::Create(ID3D12Device* device) {
-        DebugRing ring;
-        ring.m_ring = CreateBuffer(device, DEBUG_RING_BYTES, BufferKind::UnorderedAccess);
-        ring.m_zeros = CreateBuffer(device, DEBUG_RING_HEADER_BYTES, BufferKind::UnorderedAccess);
-        ring.m_readback = CreateBuffer(device, DEBUG_RING_BYTES, BufferKind::Readback);
-        if (!ring.m_ring || !ring.m_zeros || !ring.m_readback) return std::unexpected("デバッグのリングを作れない");
-        ring.m_ring->SetName(L"DebugRing");
-        ring.m_zeros->SetName(L"DebugRing.zeros");
-        ring.m_readback->SetName(L"DebugRing.readback");
-        return ring;
+    std::expected<DebugRing, std::string> DebugRing::Create(ID3D12Device* device, uint32_t slotCount) {
+        auto ring = ReadbackRing::Create(device, DEBUG_RING_BYTES, DEBUG_RING_HEADER_BYTES, slotCount, L"DebugRing");
+        if (!ring) return std::unexpected("デバッグのリングを作れない: " + ring.error());
+        return DebugRing(std::move(*ring));
     }
 
     void DebugRing::RecordBegin(ID3D12GraphicsCommandList* list) const {
-        const D3D12_RESOURCE_BARRIER barrier =
-            Transition(m_ring.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        list->ResourceBarrier(1, &barrier);
+        m_ring.RecordBegin(list);
     }
 
-    void DebugRing::RecordReadbackAndReset(ID3D12GraphicsCommandList* list) const {
-        ID3D12Resource* ring = m_ring.Get();
-        const D3D12_RESOURCE_BARRIER toCopySource =
-            Transition(ring, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list->ResourceBarrier(1, &toCopySource);
-        list->CopyBufferRegion(m_readback.Get(), 0, ring, 0, DEBUG_RING_BYTES);
-
-        const D3D12_RESOURCE_BARRIER toCopyDest =
-            Transition(ring, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        list->ResourceBarrier(1, &toCopyDest);
-        list->CopyBufferRegion(ring, 0, m_zeros.Get(), 0, DEBUG_RING_HEADER_BYTES);  // 書こうとした数を 0 に
-
-        // COMMON に戻す: 次のリストが同じ ExecuteCommandLists の中でも RecordBegin() から始められるように
-        const D3D12_RESOURCE_BARRIER toCommon =
-            Transition(ring, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
-        list->ResourceBarrier(1, &toCommon);
+    void DebugRing::RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot) const {
+        m_ring.RecordReadbackAndReset(list, slot);
     }
 
-    DebugRingContents DebugRing::Drain(uint32_t maxLoggedMessages) const {
+    DebugRingContents DebugRing::Drain(uint32_t maxLoggedMessages, uint32_t slot) const {
         DebugRingContents contents;
-        std::vector<uint32_t> words(DEBUG_RING_BYTES / 4);
-        if (!ReadBuffer(m_readback.Get(), std::as_writable_bytes(std::span(words)))) return contents;
-
-        contents.requestedCount = words[0];
+        // 見出しを先に読み、書かれた分だけを読む(ふつうは 0 件。毎フレーム 256 KiB を写さない)
+        uint32_t requested = 0;
+        if (!m_ring.Read(slot, std::as_writable_bytes(std::span(&requested, 1)))) return contents;
+        contents.requestedCount = requested;
         const uint32_t storedCount = std::min(contents.requestedCount, DEBUG_RING_CAPACITY);
+        std::vector<uint32_t> words((DEBUG_RING_HEADER_BYTES + storedCount * DEBUG_RECORD_BYTES) / 4);
+        if (storedCount > 0 && !m_ring.Read(slot, std::as_writable_bytes(std::span(words)))) return contents;
         contents.droppedCount = contents.requestedCount - storedCount;
         contents.messages.reserve(storedCount);
         const std::span<const uint32_t> records = std::span(words).subspan(DEBUG_RING_HEADER_BYTES / 4);

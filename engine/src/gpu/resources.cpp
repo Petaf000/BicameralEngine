@@ -30,7 +30,10 @@ namespace bicameral::gpu {
 
     ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t sizeBytes, BufferKind kind) {
         const bool isReadback = kind == BufferKind::Readback;
-        const D3D12_HEAP_PROPERTIES heap{.Type = isReadback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT};
+        const bool isUpload = kind == BufferKind::Upload;
+        const D3D12_HEAP_PROPERTIES heap{.Type = isReadback ? D3D12_HEAP_TYPE_READBACK
+                                                 : isUpload ? D3D12_HEAP_TYPE_UPLOAD
+                                                            : D3D12_HEAP_TYPE_DEFAULT};
         const D3D12_RESOURCE_DESC desc{
             .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Width = sizeBytes,
@@ -40,9 +43,11 @@ namespace bicameral::gpu {
             .Format = DXGI_FORMAT_UNKNOWN,
             .SampleDesc = {.Count = 1},
             .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            .Flags = isReadback ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            .Flags = isReadback || isUpload ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         };
-        const D3D12_RESOURCE_STATES state = isReadback ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
+        const D3D12_RESOURCE_STATES state = isReadback ? D3D12_RESOURCE_STATE_COPY_DEST
+                                            : isUpload ? D3D12_RESOURCE_STATE_GENERIC_READ
+                                                       : D3D12_RESOURCE_STATE_COMMON;
         ComPtr<ID3D12Resource> buffer;
         if (!BICAMERAL_CHECK_HR(Channel::Gpu, device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state,
                                                                               nullptr, IID_PPV_ARGS(&buffer)))) {
@@ -59,6 +64,19 @@ namespace bicameral::gpu {
         const D3D12_RANGE writtenRange{};  // CPU は書いていない
         readback->Unmap(0, &writtenRange);
         return true;
+    }
+
+    D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                                      D3D12_RESOURCE_STATES after) {
+        return {.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Transition = {.pResource = resource,
+                               .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                               .StateBefore = before,
+                               .StateAfter = after}};
+    }
+
+    D3D12_RESOURCE_BARRIER UavBarrier(ID3D12Resource* resource) {
+        return {.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV, .UAV = {.pResource = resource}};
     }
 
     void RecordCopyToReadback(ID3D12GraphicsCommandList* list, ID3D12Resource* source, ID3D12Resource* readback) {
@@ -84,7 +102,7 @@ namespace bicameral::gpu {
                                          .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL};
         };
         std::vector<D3D12_ROOT_PARAMETER1> parameters;
-        parameters.reserve(layout.uavCount + 2);
+        parameters.reserve(layout.uavCount + layout.srvCount + 2);
         for (uint32_t index = 0; index < layout.uavCount; ++index) {
             parameters.push_back(rootUav(index, 0));
         }
@@ -95,6 +113,13 @@ namespace bicameral::gpu {
                  .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
         }
         if (layout.debugRing) parameters.push_back(rootUav(0, DEBUG_RING_REGISTER_SPACE));
+        for (uint32_t index = 0; index < layout.srvCount; ++index) {
+            parameters.push_back({.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV,
+                                  .Descriptor = {.ShaderRegister = index,
+                                                 .RegisterSpace = 0,
+                                                 .Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE},
+                                  .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
+        }
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc{.Version = D3D_ROOT_SIGNATURE_VERSION_1_1};
         desc.Desc_1_1 = {.NumParameters = static_cast<UINT>(parameters.size()), .pParameters = parameters.data()};
 

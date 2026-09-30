@@ -97,6 +97,12 @@ bicameral_add_shader(sim/fixed_selftest.hlsl PROFILE cs_6_8 ENTRY Main)  # 整�
 bicameral_add_shader(sim/work_graph_probe.hlsl PROFILE lib_6_8)  # Work Graphs が動くかの確認(T-0013)
 bicameral_add_shader(sim/debug_ring_probe.hlsl PROFILE cs_6_8 ENTRY Main)  # デバッグのリングの確認(T-0003)
 bicameral_add_shader(sim/debug_ring_graph_probe.hlsl PROFILE lib_6_8)    # 同じく Work Graphs のノードから(T-0003)
+# T-0004 の仮の刻み(フレームループの確認。本物の刻みは T-0012)。入口ごとに別の .cso
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY ApplyCommands NAME probe_tick_apply)
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Diffuse NAME probe_tick_diffuse)
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Extract NAME probe_tick_extract)
+bicameral_add_shader(render/probe_view.hlsl PROFILE vs_6_8 ENTRY VSMain NAME probe_view_vs)
+bicameral_add_shader(render/probe_view.hlsl PROFILE ps_6_8 ENTRY PSMain NAME probe_view_ps)
 
 # 整数のルーチンの費用のマイクロベンチ(T-0010、04 §6)。1 つのソースを計測する演算ごとにコンパイルする。
 # 一覧は tests/gpu_fixed_bench.cpp の BENCH_OPERATIONS と同じ順・同じ名前にする(番号 = BENCH_OP)。

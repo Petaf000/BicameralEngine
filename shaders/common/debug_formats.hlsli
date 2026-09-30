@@ -17,3 +17,6 @@ DEBUG_FORMAT(FxAssert, Gpu, "fixed.hlsli", "FX_ASSERT に失敗(桁あふれ・�
 DEBUG_FORMAT(DebugRingProbe, Gpu, "debug_ring_probe/Main", "thread={} negative={} large={:#x} signed64={}")
 DEBUG_FORMAT(DebugRingProbeAssert, Gpu, "debug_ring_probe/Main", "thread={} で assert")
 DEBUG_FORMAT(DebugRingGraphLeaf, WorkGraph, "debug_ring_graph_probe/Leaf", "value={}")
+
+// --- T-0004 の仮の刻み(shaders/sim/probe_tick.hlsl)---
+DEBUG_FORMAT(ProbePokeOutOfRange, Sim, "probe_tick/ApplyCommands", "つつくセル ({}, {}) が格子の外")

@@ -25,11 +25,15 @@ views:
       シミュの整数の数学ライブラリ(T-0010。GPU と CPU が同じソースで計算する)と、
       シミュに浮動小数点が入ったらビルドを落とす検査(T-0011)と、
       GPU の小さな道具(デバイス・1 回投げて待つキュー・Work Graph)で自己テストと最小のグラフを GPU / WARP で走らせるテスト(T-0013)と、
-      シェーダーの printf / assert のリング・debug layer / GBV / DRED(T-0003)。
+      シェーダーの printf / assert のリング・debug layer / GBV / DRED(T-0003)と、
+      窓とフレームのループ(T-0004): compute キューの仮の刻みと direct キューの描画をフェンスだけで並べ、
+      記録済みのリストを使い回し、GPU → CPU は待たない読み戻し、刻みの数はタイムスタンプで決める。
       Agility SDK は exe が 2 つの値をエクスポートすることで、OS の d3d12.dll に読み込ませる。
     direction: TD
     groups:
       - { id: exe, label: "bicameral.exe" }
+      - { id: framelib, label: "フレームのループ(T-0004)" }
+      - { id: simlib, label: "sim(仮の刻み。本物は T-0012)" }
       - { id: corelib, label: "core(どこからでも使う部品)" }
       - { id: gpulib, label: "gpu(D3D12 の小さな道具)" }
       - { id: shared, label: "shaders/common(HLSL と C++ で共通)" }
@@ -38,6 +42,33 @@ views:
       - { id: os, label: "OS / ドライバ" }
     nodes:
       - { id: main, group: exe, label: "wmain()<br/>コマンドラインの振り分け", code: "engine/src/main.cpp::wmain" }
+      - { id: frameloop, group: framelib, label: "RunFrameLoop()<br/>待ち → 読み戻し → 入力 → シミュ → 描画 → Present",
+          code: "engine/src/frame/frame_loop.cpp::RunFrameLoop", ticket: T-0004, doc: docs/design/06-simulation-loop.md,
+          note: "抽出は 3 組。描画は終わっている最新を読み、シミュを待たない。バッチは 2 つまで重ねる" }
+      - { id: window, group: framelib, label: "Window<br/>Win32 の窓・クリック・DPI",
+          code: "engine/src/platform/window.cpp::Window::Create", ticket: T-0004 }
+      - { id: pacer, group: framelib, label: "TickPacer<br/>1 フレームの刻みの数(経過時間・GPU の時間)",
+          code: "engine/src/frame/tick_pacer.cpp::TickPacer::TakeTicks", ticket: T-0004,
+          note: "追いつけない分は捨てる → 世界が遅くなる(D-202)。tick_pacer_test" }
+      - { id: probeview, group: framelib, label: "ProbeView<br/>画面いっぱいの三角形で抽出を描く",
+          code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0004 }
+      - { id: queue, group: gpulib, label: "Queue<br/>キュー + フェンス(Submit・GpuWait・待たずに見る)",
+          code: "engine/src/gpu/queue.cpp::Queue::Submit", ticket: T-0004 }
+      - { id: swapchain, group: gpulib, label: "SwapChain<br/>フリップ・3 枚・待てる(先行 2〜3)",
+          code: "engine/src/gpu/swap_chain.cpp::SwapChain::Create", ticket: T-0004 }
+      - { id: readbackring, group: gpulib, label: "ReadbackRing<br/>追記バッファを枠ごとの読み戻しへ(待たない)",
+          code: "engine/src/gpu/readback_ring.cpp::ReadbackRing::RecordReadbackAndReset", ticket: T-0004,
+          doc: docs/design/06-simulation-loop.md }
+      - { id: probesim, group: simlib, label: "ProbeSim<br/>刻みの数ごとに記録したバッチのリスト",
+          code: "engine/src/sim/probe_sim.cpp::ProbeSim::PrepareBatch", ticket: T-0004,
+          note: "コマンド(64 バイト)→ つつき → 拡散 → 抽出。イベントとタイムスタンプを読み戻す" }
+      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>ApplyCommands / Diffuse / Extract",
+          code: "shaders/sim/probe_tick.hlsl::GenerationBase", ticket: T-0004 }
+      - { id: probereference, group: simlib, label: "ProbeReference<br/>CPU リファレンス(probe_sim.hlsli を共有)",
+          code: "engine/src/sim/probe_sim.cpp::ProbeReference::Advance", ticket: T-0004 }
+      - { id: probesimtest, group: tests, label: "gpu_probe_sim_test<br/>分け方を変えても CPU とビット一致",
+          code: "tests/gpu_probe_sim_test.cpp::RunSplit", ticket: T-0004,
+          note: "8 ずつ / 1 ずつ / ばらばら × ハードウェア / WARP。イベントの数と場所も" }
       - { id: caps, group: exe, label: "RunCapsProbe()<br/>アダプタを列挙して機能を問い合わせる",
           code: "engine/src/platform/caps.cpp::RunCapsProbe", ticket: T-0001 }
       - { id: runtime, group: exe, label: "ReportRuntime()<br/>どの D3D12Core.dll が読まれたか",
@@ -136,6 +167,20 @@ views:
       - [debugring, log, "Channel::Gpu / WorkGraph"]
       - [ringtest, debugring]
       - [ringtest, workgraph, "ノードから print"]
+      - [main, frameloop, "引数なし"]
+      - [frameloop, window, "クリック"]
+      - [frameloop, pacer, "刻みの数"]
+      - [frameloop, probesim, "バッチ(compute キュー)"]
+      - [frameloop, probeview, "記録済みのリスト(direct キュー)"]
+      - [frameloop, queue, "Submit・GpuWait"]
+      - [frameloop, swapchain, "WaitForFrame・Present"]
+      - [probesim, probetick, ".cso"]
+      - [probesim, readbackring, "イベント"]
+      - [probesim, debugring, "枠ごとの読み戻し"]
+      - [debugring, readbackring]
+      - [probesimtest, probesim]
+      - [probesimtest, probereference, "要約を比べる"]
+      - [readbackring, frameloop, "数フレーム後に読む", async]
 
   # ---------------------------------------------------------------------------------------------
   - id: frame
@@ -150,9 +195,10 @@ views:
       - { id: sim, label: "GPU の 1 刻み(compute キュー。docs/design/06 §2 の段)" }
       - { id: view, label: "GPU の描画(direct キュー)" }
     nodes:
-      - { id: input, group: cpu, status: planned, label: "入力 → コマンド<br/>(適用する刻みつき)", ticket: T-0004,
-          doc: docs/design/06-simulation-loop.md }
-      - { id: present, group: cpu, status: planned, label: "Present", ticket: T-0004 }
+      - { id: input, group: cpu, label: "入力 → コマンド<br/>(適用する刻みつき)", ticket: T-0004,
+          code: "engine/src/frame/frame_loop.cpp::FrameLoop::QueueClicks", doc: docs/design/06-simulation-loop.md }
+      - { id: present, group: cpu, label: "Present", ticket: T-0004,
+          code: "engine/src/frame/frame_loop.cpp::FrameLoop::RunFrame" }
       - { id: audio, group: cpu, status: planned, label: "音・UI<br/>(リングを 1〜3 フレーム遅れで読む)",
           doc: docs/design/11-audio.md }
       - { id: command, group: sim, status: planned, label: "1 コマンド適用<br/>Compute", doc: docs/design/06-simulation-loop.md }
@@ -167,9 +213,10 @@ views:
       - { id: coarse, group: sim, status: planned, label: "8 粗い層(60 刻みに 1 回)", doc: docs/design/05-world-data.md }
       - { id: check, group: sim, status: planned, label: "9 検査と出力<br/>保存則・状態のハッシュ・リング",
           doc: docs/design/16-debug-test.md }
-      - { id: ring, group: sim, status: planned, label: "GPU → CPU の待たないリング<br/>イベント・スナップショット・デバッグ",
-          ticket: T-0003 }
-      - { id: extract, group: view, status: planned, label: "描画用の抽出(2 組)", doc: docs/design/10-rendering.md }
+      - { id: ring, group: sim, label: "GPU → CPU の待たないリング<br/>イベント・スナップショット・デバッグ",
+          ticket: T-0004, code: "engine/src/gpu/readback_ring.cpp::ReadbackRing::RecordReadbackAndReset" }
+      - { id: extract, group: view, status: planned, label: "描画用の抽出(3 組)", doc: docs/design/10-rendering.md,
+          note: "T-0004 の仮の世界では 3 組で描画がシミュを待たないことを確かめた" }
       - { id: draw, group: view, status: planned, label: "Visibility Buffer・PBR・ReSTIR", doc: docs/design/10-rendering.md }
       - { id: math, group: sim, label: "整数の数学ライブラリ<br/>(全部の段が使う)", code: "shaders/common/fixed.hlsli::FxMulU64Full",
           ticket: T-0010 }

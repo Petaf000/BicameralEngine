@@ -10,6 +10,10 @@ add_executable(log_test log_test.cpp)
 target_link_libraries(log_test PRIVATE bicameral_core)
 add_test(NAME log COMMAND log_test)
 
+add_executable(tick_pacer_test tick_pacer_test.cpp)
+target_link_libraries(tick_pacer_test PRIVATE bicameral_frame)
+add_test(NAME tick_pacer COMMAND tick_pacer_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
@@ -49,6 +53,10 @@ bicameral_add_gpu_test_case(gpu_work_graph_warp_compute gpu_work_graph_test warp
 bicameral_add_gpu_test(gpu_debug_ring_test)
 bicameral_add_gpu_test_case(gpu_debug_ring gpu_debug_ring_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_ring_warp gpu_debug_ring_test warp --warp --queue compute)
+bicameral_add_gpu_test(gpu_probe_sim_test)  # T-0004 の仮の刻み: 分け方を変えても CPU とビット一致
+target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
 bicameral_add_gpu_test(gpu_debug_device_test)
 bicameral_add_gpu_test_case(gpu_debug_device gpu_debug_device_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_device_warp gpu_debug_device_test warp --warp --queue compute)
