@@ -2,7 +2,7 @@
 //
 // データの流れ(engine/src/sim/probe_sim.cpp が記録するバッチのリスト):
 //   CPU がアップロードのバッファ(batch)に見出しとコマンドを書き、刻みの数 n 用に記録したリストを投げる
-//   → 刻み k = 0..n-1 ごとに ApplyCommands → Diffuse(k はリストに埋め込んだルート定数)
+//   → 刻み k = 0..n-1 ごとに ApplyCommands → Diffuse → Busy × 分けた数(k はリストに埋め込んだルート定数)
 //   → Extract が最後の世代を抽出(描画が読む 3 組のどれか)に写す
 //   → つつきを適用したことを events に追記(CPU は待たずに数フレーム後に読む。06 §3)
 // 入口ごとに別の .cso にする(shaders/CMakeLists.txt)。整数だけ(D-205)。
@@ -71,20 +71,9 @@ uint32_t GenerationBase(uint64_t tick) {
     }
 }
 
-// --- (2) 拡散: 1 スレッド = 1 セル(gather。前の世代を読み、次の世代に書く)---
+    // --- (2) 拡散: 1 スレッド = 1 セル(gather。前の世代を読み、次の世代に書く)---
 
-// 重さの試験(--sim-load): 結果に入らない計算を足して刻みを重くする。結果は誰も読まない捨て場へ
-void BusyWork(uint32_t cellIndex, uint32_t value) {
-    const uint32_t iterations = HeaderWord(PROBE_HEADER_BUSY_ITERATIONS);
-    if (iterations == 0) return;
-    uint32_t hash = value ^ cellIndex;
-    for (uint32_t i = 0; i < iterations; ++i) {
-        hash = hash * 1664525u + 1013904223u;
-    }
-    busySink[cellIndex] = hash;
-}
-
-[numthreads(PROBE_GROUP_SIZE, PROBE_GROUP_SIZE, 1)] void Diffuse(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    [numthreads(PROBE_GROUP_SIZE, PROBE_GROUP_SIZE, 1)] void Diffuse(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t x = dispatchThreadId.x;
     const uint32_t y = dispatchThreadId.y;
     const uint64_t tick = CurrentTick();
@@ -99,7 +88,21 @@ void BusyWork(uint32_t cellIndex, uint32_t value) {
     const uint32_t down = y + 1 < PROBE_GRID_SIZE ? world[current + cellIndex + PROBE_GRID_SIZE] : 0;
     const uint32_t value = ProbeDiffuseValue(self, left, right, up, down);
     world[next + cellIndex] = value;
-    BusyWork(cellIndex, value);
+}
+
+// --- (3) 重さの試験(--sim-load・--sim-split。R-LOOP-2、T-0085)---
+// 結果に入らない計算で刻みを重くする。1 刻みの重さを何個の Dispatch に分けて投げるかを試すため、前の Dispatch の結果
+// (捨て場)から続けて計算する(分けた分だけ順につながる。実際の刻みを分けて投げるときと同じく、前が終わるまで次は始められない)。
+// 見出しの繰り返し回数は 1 個あたり(0 なら何もしない)。捨て場は誰も読まない
+[numthreads(PROBE_GROUP_SIZE, PROBE_GROUP_SIZE, 1)] void Busy(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t iterations = HeaderWord(PROBE_HEADER_BUSY_ITERATIONS);
+    if (iterations == 0) return;
+    const uint32_t cellIndex = ProbeCellIndex(dispatchThreadId.x, dispatchThreadId.y);
+    uint32_t hash = busySink[cellIndex] ^ cellIndex;
+    for (uint32_t i = 0; i < iterations; ++i) {
+        hash = hash * 1664525u + 1013904223u;
+    }
+    busySink[cellIndex] = hash;
 }
 
     // --- 描画用の抽出: バッチの最後の状態を、抽出の 3 組のうち見出しが指す組へ写す ---

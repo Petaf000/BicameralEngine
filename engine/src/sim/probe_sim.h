@@ -7,6 +7,8 @@
 //      docs/perf.md 2026-09-30 T-0004)
 //   - バッチの入力・読み戻しはバッチの枠(slot)ごとに持つ。slot のリストが GPU で終わるまで、その slot には書かない。
 //   - GPU → CPU は待たない読み戻し(gpu/readback_ring): つつきを適用したイベント・デバッグの出力・タイムスタンプ。
+//   - 重さの試験(R-LOOP-2、T-0085): 1 刻みに結果に入らない重さを足し、それを何個の Dispatch に分けるか・
+//     バッチのリストの中に置くか別々の投入にするかを選べる(ProbeSimOptions)。
 //
 // 使い方:
 //   auto sim = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
@@ -60,10 +62,16 @@ namespace bicameral::sim {
 
     struct ProbeBatchInput {
         uint64_t firstTick = 0;
-        uint32_t tickCount = 0;                  // 1〜PROBE_MAX_TICKS_PER_BATCH
-        uint32_t extractionTarget = 0;           // 最後の状態を写す抽出(0〜PROBE_EXTRACTION_COUNT-1)
-        uint32_t busyIterations = 0;             // 重さの試験(0 なら無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
+        uint32_t tickCount = 0;         // 1〜PROBE_MAX_TICKS_PER_BATCH
+        uint32_t extractionTarget = 0;  // 最後の状態を写す抽出(0〜PROBE_EXTRACTION_COUNT-1)
+        uint32_t busyIterations = 0;    // 重さの試験の 1 刻みの合計(0 なら無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
         std::span<const ProbeCommand> commands;  // 最大 PROBE_MAX_COMMANDS
+    };
+
+    // 重さの試験の分け方(R-LOOP-2、T-0085)。世界の結果には入らない
+    struct ProbeSimOptions {
+        uint32_t busyPieces = 1;             // 1 刻みの重さを何個の Dispatch に分けるか(1〜PROBE_MAX_BUSY_PIECES)
+        bool busyInSeparateSubmits = false;  // true: 1 個ずつ別の投入(ExecuteCommandLists)。false: バッチのリストの中
     };
 
     // --- GPU で走らせる ---
@@ -74,11 +82,22 @@ namespace bicameral::sim {
 
         // listType: バッチのリストを投げるキューの種類(シミュは compute。06 §4)
         [[nodiscard]] static std::expected<ProbeSim, std::string> Create(ID3D12Device5* device,
-                                                                         D3D12_COMMAND_LIST_TYPE listType);
+                                                                         D3D12_COMMAND_LIST_TYPE listType,
+                                                                         const ProbeSimOptions& options = {});
 
         // slot のアップロードのバッファに入力を書き、記録済みのリストを返す。
         // 呼ぶ側の約束: slot の前のバッチを GPU が終えている。入力が範囲外なら nullptr(理由はログ)
         [[nodiscard]] ID3D12CommandList* PrepareBatch(uint32_t slot, const ProbeBatchInput& input);
+
+        // 重さを別々の投入にするとき(options.busyInSeparateSubmits): PrepareBatch の後、バッチのリストより前に
+        // BusyPieceList(slot, i) を i = 0..(刻みの数 × BusyPieceCount() − 1) の順に、フェンスを進めずに投げる。
+        // 1 本ずつ別のリスト(同じリストは、キューのフェンスが前の実行を越えるまで投げ直せない。debug layer の [553])。
+        // i = 0 のリストがバッチの始めのタイムスタンプを書く(バッチの GPU 時間に重さを含めるため)
+        [[nodiscard]] bool BusyInSeparateSubmits() const { return m_options.busyInSeparateSubmits; }
+        [[nodiscard]] uint32_t BusyPieceCount() const { return m_options.busyPieces; }
+        [[nodiscard]] ID3D12CommandList* BusyPieceList(uint32_t slot, uint32_t index) const {
+            return m_slots[slot].busyLists[index].Get();
+        }
 
         // slot のバッチを GPU が終えた後に呼ぶ(待たない。終わったかどうかは呼ぶ側がフェンスで見る)
         [[nodiscard]] ProbeBatchReadback ReadBatch(uint32_t slot) const;
@@ -87,27 +106,36 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12Resource* Extraction(uint32_t target) const { return m_extractions[target].Get(); }
 
     private:
-        ProbeSim(gpu::ReadbackRing&& events, gpu::DebugRing&& debugRing)
-            : m_events(std::move(events)), m_debugRing(std::move(debugRing)) {}
+        ProbeSim(const ProbeSimOptions& options, gpu::ReadbackRing&& events, gpu::DebugRing&& debugRing)
+            : m_options(options), m_events(std::move(events)), m_debugRing(std::move(debugRing)) {}
 
         [[nodiscard]] bool CreatePipelines(ID3D12Device5* device);
         [[nodiscard]] bool CreateBuffers(ID3D12Device5* device);
         [[nodiscard]] bool RecordBatchLists(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
         [[nodiscard]] bool RecordBatchList(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType, uint32_t slot,
                                            uint32_t tickCount);
+        [[nodiscard]] bool RecordBusyPieceLists(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType, uint32_t slot);
+        [[nodiscard]] bool RecordBusyPieceList(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType, uint32_t slot,
+                                               uint32_t index);
+        void BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
+        void RecordBusyPieces(ID3D12GraphicsCommandList10* list, uint32_t pieceCount) const;
 
         struct BatchSlot {
             Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
             // 刻みの数 n のリストが lists[n - 1]。作るときに 1 度だけ記録する
             std::array<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList10>, PROBE_MAX_TICKS_PER_BATCH> lists;
+            // 重さを別々の投入にするときの 1 個分 × (刻みの数の上限 × 分けた数)。[0] はバッチの始めのタイムスタンプも書く
+            std::vector<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList10>> busyLists;
             Microsoft::WRL::ComPtr<ID3D12Resource> input;  // アップロード(PROBE_BATCH_BYTES)
             std::byte* mappedInput = nullptr;              // Map したまま
         };
 
+        ProbeSimOptions m_options;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSignature;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_applyPipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_diffusePipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_extractPipeline;
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_busyPipeline;
 
         Microsoft::WRL::ComPtr<ID3D12Resource> m_world;  // 2 世代 × PROBE_CELL_COUNT × uint32
         std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;

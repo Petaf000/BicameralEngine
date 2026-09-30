@@ -6,6 +6,10 @@
 //   --no-vsync                       垂直同期を待たずに Present する
 //   --latency <2|3>                  CPU が GPU より先に進めるフレームの数(既定 2)
 //   --sim-load <n>                   重さの試験: 刻みに結果に入らない計算を n 回足す(世界が遅くなるのを見る。D-202)
+//   --sim-split <k>                  重さの試験を k 個の Dispatch に分ける(R-LOOP-2、T-0085。既定 1)
+//   --split-submit                   分けた 1 個ずつを別の投入(ExecuteCommandLists)にする(既定: バッチのリストの中)
+//   --pieces-per-frame <p>           --split-submit のとき、1 フレームに投げる個数(0 = バッチごとに全部)
+//   --render-normal                  描画のキューの優先度を NORMAL にする(既定 HIGH。比較用)
 //   --auto-click                     決まった場所を自動でクリックする(人がいない確認でイベントの流れを通す)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
@@ -48,19 +52,23 @@ namespace {
         return value;
     }
 
-    // フレームのループの値つきの引数(--frames・--latency・--sim-load)
+    // フレームのループの値つきの引数(--frames・--latency・--sim-load・--sim-split)
     std::expected<void, std::string> ParseFrameLoopCount(std::wstring_view argument, std::wstring_view text,
                                                          frame::FrameLoopOptions& loop) {
-        const uint32_t maximum = argument == L"--latency"    ? 3u
-                                 : argument == L"--sim-load" ? sim::PROBE_BUSY_ITERATIONS_LIMIT
-                                                             : UINT32_MAX;
+        const uint32_t maximum = argument == L"--latency"            ? 3u
+                                 : argument == L"--sim-load"         ? sim::PROBE_BUSY_ITERATIONS_LIMIT
+                                 : argument == L"--sim-split"        ? sim::PROBE_MAX_BUSY_PIECES
+                                 : argument == L"--pieces-per-frame" ? sim::PROBE_MAX_BUSY_PIECES
+                                                                     : UINT32_MAX;
         const auto value = ParseCount(text, maximum);
-        if (!value || (argument == L"--latency" && *value < 2)) {
+        if (!value || (argument == L"--latency" && *value < 2) || (argument == L"--sim-split" && *value == 0)) {
             return std::unexpected(std::format("{} の値が不正: {}", ToUtf8(argument), ToUtf8(text)));
         }
         if (argument == L"--frames") loop.frameLimit = *value;
         if (argument == L"--latency") loop.maxFrameLatency = *value;
         if (argument == L"--sim-load") loop.simLoad = *value;
+        if (argument == L"--sim-split") loop.simSplit = *value;
+        if (argument == L"--pieces-per-frame") loop.piecesPerFrame = *value;
         return {};
     }
 
@@ -72,6 +80,10 @@ namespace {
             loop.autoClick = true;
         } else if (argument == L"--warp") {
             loop.adapter = gpu::AdapterKind::Warp;
+        } else if (argument == L"--split-submit") {
+            loop.splitSubmit = true;
+        } else if (argument == L"--render-normal") {
+            loop.renderHighPriority = false;
         } else {
             return false;
         }
@@ -87,7 +99,9 @@ namespace {
                 options.runCaps = true;
             } else if (ParseFrameLoopFlag(argument, options.frameLoop)) {
                 continue;
-            } else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--sim-load") && hasValue) {
+            } else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--sim-load" ||
+                        argument == L"--sim-split" || argument == L"--pieces-per-frame") &&
+                       hasValue) {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
                 if (!parsed) return std::unexpected(parsed.error());
             } else if (argument == L"--log-dir" && hasValue) {

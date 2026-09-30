@@ -15,11 +15,15 @@
 namespace bicameral::frame {
 
     struct FrameLoopOptions {
-        uint32_t frameLimit = 0;       // 0 なら窓を閉じるまで。自動の確認(job.py run)では有限にする
-        bool vsync = true;             // false なら待たずに Present(対応していれば tearing)
-        uint32_t maxFrameLatency = 2;  // CPU が GPU より先に進めるフレームの数(2〜3)
-        uint32_t simLoad = 0;          // 重さの試験: 刻みの拡散に足す繰り返し(0 なら無し)
-        bool autoClick = false;        // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
+        uint32_t frameLimit = 0;         // 0 なら窓を閉じるまで。自動の確認(job.py run)では有限にする
+        bool vsync = true;               // false なら待たずに Present(対応していれば tearing)
+        uint32_t maxFrameLatency = 2;    // CPU が GPU より先に進めるフレームの数(2〜3)
+        uint32_t simLoad = 0;            // 重さの試験: 1 刻みに足す繰り返し(0 なら無し)
+        uint32_t simSplit = 1;           // 重さの試験を何個の Dispatch に分けるか(R-LOOP-2、T-0085)
+        bool splitSubmit = false;        // true なら分けた 1 個ずつを別の投入にする(false: バッチのリストの中)
+        uint32_t piecesPerFrame = 0;     // splitSubmit のとき: 1 フレームに投げる個数(0 ならバッチごとに全部)
+        bool renderHighPriority = true;  // 描画のキューの優先度を HIGH にする
+        bool autoClick = false;          // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
         gpu::AdapterKind adapter = gpu::AdapterKind::Hardware;
     };
 

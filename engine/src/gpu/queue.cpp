@@ -28,6 +28,10 @@ namespace bicameral::gpu {
         return m_lastSubmitted;
     }
 
+    void Queue::Execute(ID3D12CommandList* list) const {
+        m_queue->ExecuteCommandLists(1, &list);
+    }
+
     void Queue::GpuWait(const Queue& other, uint64_t value) const {
         if (value == 0) return;
         (void)BICAMERAL_CHECK_HR(Channel::Gpu, m_queue->Wait(other.m_fence.Get(), value));

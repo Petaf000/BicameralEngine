@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0004 窓とフレームループ — 完了
+最終更新: 2026-09-30 / チケット: T-0085 R-LOOP-2 重いシミュと描画の並走 — 完了
 
 ## 状態(3 行以内)
-- `bicameral`(引数なし)で窓が開き、compute キューの仮の刻み(クリックした所が熱くなって広がる 128² の世界)と direct キューの描画が、フェンスだけで並んで回る。
-- リストは作るときに 1 度だけ記録して使い回す。GPU → CPU は待たない読み戻し(イベント・デバッグ・タイムスタンプ)。刻みの数はタイムスタンプから決め、重いと世界が遅くなる。
-- テスト 22/22(debug / release、ハードウェアと WARP)。設計は 06 §4・§4.1、計測は docs/perf.md。
+- `bicameral`(引数なし)で窓が開き、compute の仮の刻み(128² の拡散)と direct の描画がフェンスだけで並んで回る(T-0004)。
+- R-LOOP-2 の原因が分かった: この GPU では**描画は compute に先に積まれた仕事が終わるまで始まらない**。CPU が 1 フレームに予算ぶんだけ投げれば描画は戻る。
+  方針は ADR-0011(予算 = 目標のフレーム時間 − 描画、目標 fps は設定で既定 60、刻みはフレームをまたいでよい)。測定は docs/perf.md、設計は 06 §4・§4.2。テスト 22/22。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(32 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(39)。
@@ -13,14 +13,22 @@
 - `job.py run -Preset release -- --frames 600 --auto-click` → 窓が開き、1 秒ごとに fps・CPU・世界の刻み/秒・GPU 時間のログ、つつきのイベント(クリックから CPU に戻るまで 7〜24 ms)。
   引数: `--frames n` `--no-vsync` `--latency 2|3` `--sim-load n`(重さの試験)`--auto-click` `--warp`(main.cpp の先頭)。人が窓をクリックしても同じ。
 - `--caps` はアダプタごとに PCI の ID と画面を出す。
+- R-LOOP-2 の試験の口(T-0085): `--sim-load n --sim-split k [--split-submit [--pieces-per-frame p]] [--render-normal]`。
+  例 `job.py run -Preset release -- --frames 300 --sim-load 5200000 --sim-split 16 --split-submit --pieces-per-frame 4` → 約 164 fps・世界 41 刻み/秒
+  (5.2M ≈ 22.5 ms/刻み、1M ≈ 4.8 ms)。分けない `--sim-load 5200000` だと 45 fps。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- R-LOOP-2(06 研究): 1 刻みの Dispatch が 25 ms 以上だと、描画はシミュを待っていないのに fps がシミュのバッチの速さまで落ちる。原因は未確認。BACKLOG に案(T-0012 で刻みを分けて投げる)。
+- 今のフレームのループ(frame_loop.cpp)はまだ T-0004 の形(バッチを 2 つまで重ねる)。重いと描画が落ちるのはそのまま。T-0012 で ADR-0011 の形に置き換える。
+- 未確認: 予算ぶんを 1 本のリストにまとめて 1 回で投げても同じか / GPU 側で未来の描画のフェンスを compute に待たせる形(誤った実装で固まった)/ compute と描画が GPU の中で少しでも重なるか / AMD。
 - vsync ありで Present の中に平均 1 ms(BACKLOG。害は無い)。
 - 窓の大きさの変更・最小化・DPI の変更はコード上は扱っているが、人の手で試していない(自動の確認は大きさを変えない)。
 - DRED の「止まったコマンド」表示は本物のハング(TDR)で未確認(16 §4)。SASS / RDNA3 の命令数は T-0016 / AMD 機。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- **ADR-0011**(T-0085): シミュは 1 フレームの予算ぶんずつ投げる。予算 = 目標のフレーム時間 − 描画の GPU 時間 − 余裕、目標 fps は設定で既定 60(30 より下げない)。
+- T-0012 から R-LOOP-2 を T-0085 として分けた(ROADMAP・BACKLOG に記録)。
+- 仮の刻みの重さは Diffuse から別の入口 `Busy`(probe_tick_busy.cso)に移した(分けて投げる試験のため。世界の結果は変わらない)。
+以下は T-0004 のもの:
 - **D-423**(DECISIONS.md): 過去の自作コード(DX12 / ReSTIR DI など)は一切流用しない。描画もほかも着手時点のモダンな手法を調べて一から設計する。T-0004 の流用の項目は削除。
 - 描画用の抽出は 3 組(06 §4 を 2 組から改めた)。描画は終わっている最新を読み、シミュのバッチは 2 つまで重ねる。
 - 刻みの数はリストの選び方で(刻みの数ごとに記録)。ExecuteIndirect の数での切り替えは遅かった(perf.md)。
@@ -28,9 +36,12 @@
 - ADR は書いていない(06 §4.1 に書いた。方針の変更ではなく実装の詳細。3 組の件は 06 本文を直した)。
 
 ## 次にやること
-NEXT.md の先頭(T-0012 刻みのループ)。
+NEXT.md の先頭(T-0012 刻みのループ。投げ方は ADR-0011)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **同じコマンドリストを、キューのフェンスが前の実行を越える前に投げ直さない**(debug layer [553]。debug layer はその実行を捨て、release は黙って走る)。
+  1 バッチの中で何回も投げるものは、回数分の別のリストを記録する(probe_sim の busyLists)。`gpu::Queue::Execute` はフェンスを進めずに投げる。
+- `job.py run` で窓のループが固まると、run の timeout(600 秒)まで runner が塞がる。試すときは `job.py run --timeout 60 -Preset ...` にする。
 - **GPU のテストを足すとき**: tests/CMakeLists.txt の `bicameral_add_gpu_test(<名前>)` と `bicameral_add_gpu_test_case(<テスト名> <exe> <gpu|warp> <引数>)`。
   exe は bin/ に出て、bin/D3D12(Agility SDK)と bin/shaders をそのまま使う(agility_sdk.cpp を exe ごとに入れている)。
 - テストの出力は printf ではなく Log(日本語をそのまま出せる)。終わりに `SingletonFinalizer::Finalize()`。

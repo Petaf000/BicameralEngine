@@ -64,8 +64,9 @@ PROBE_CONST uint32_t PROBE_HEADER_TICK_COUNT = 2;
 PROBE_CONST uint32_t PROBE_HEADER_COMMAND_COUNT = 3;
 PROBE_CONST uint32_t PROBE_HEADER_EXTRACTION_TARGET = 4;
 PROBE_CONST uint32_t PROBE_HEADER_BUSY_ITERATIONS = 5;
-// 重さの試験(--sim-load)の繰り返しの上限。これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない
+// 重さの試験(--sim-load)の繰り返しの上限(1 刻みの合計。--sim-split で分けたときは 1 個あたりがこれを分けた数で割ったもの)。これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない
 PROBE_CONST uint32_t PROBE_BUSY_ITERATIONS_LIMIT = 1u << 24;
+PROBE_CONST uint32_t PROBE_MAX_BUSY_PIECES = 64;  // 1 刻みの重さを分けて投げる数の上限(--sim-split)
 
 // --- イベント(GPU → CPU。readback_ring の追記バッファ)---
 // 見出し 16 バイト([0] 書こうとした数)+ 16 バイトのレコード × PROBE_EVENT_CAPACITY

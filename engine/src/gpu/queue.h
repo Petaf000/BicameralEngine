@@ -29,6 +29,9 @@ namespace bicameral::gpu {
         uint64_t Submit(std::span<ID3D12CommandList* const> lists);
         uint64_t Submit(ID3D12CommandList* list) { return Submit(std::span(&list, 1)); }
 
+        // フェンスを進めずに投げる(1 つの仕事を何回かの投入に分けるとき。最後の 1 回を Submit にすれば、その値で全部の終わりが分かる)
+        void Execute(ID3D12CommandList* list) const;
+
         // このキューは other のフェンスが value になるまで先へ進まない(GPU の上で待つ。CPU は待たない)
         void GpuWait(const Queue& other, uint64_t value) const;
 

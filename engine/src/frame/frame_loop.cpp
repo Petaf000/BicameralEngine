@@ -69,6 +69,15 @@ namespace bicameral::frame {
             bool read = true;
         };
 
+        // 重さの試験を別々の投入にして、何フレームかに分けて投げている途中のバッチ(R-LOOP-2、T-0085)。list が nullptr なら無し
+        struct PendingBatch {
+            ID3D12CommandList* list = nullptr;
+            uint32_t slot = 0;
+            uint32_t extractionTarget = 0;
+            uint32_t piecesLeft = 0;  // まだ投げていない重さの個数
+            uint32_t piecesDone = 0;
+        };
+
         struct PendingClick {
             uint32_t x = 0;
             uint32_t y = 0;
@@ -131,6 +140,7 @@ namespace bicameral::frame {
             void QueueClicks();
             size_t AssignCommandTicks();
             void SubmitSimBatch();
+            void AdvancePendingBatch();
             void SubmitRender();
             bool RunFrame(Clock::time_point frameStart);
             int Finish(bool failed, Clock::time_point start);
@@ -155,6 +165,7 @@ namespace bicameral::frame {
             std::array<BatchRecord, BATCH_SLOT_COUNT> m_batches;
             uint64_t m_nextTick = 0;
             uint64_t m_lastDisplayedBatch = 0;
+            PendingBatch m_pending;  // 重さを別々の投入にして、何フレームかに分けて投げている途中のバッチ(R-LOOP-2)
             // 抽出の組ごとに、最後にそれを読んだ描画のフェンスの値
             std::array<uint64_t, sim::PROBE_EXTRACTION_COUNT> m_lastRenderReading{};
             std::vector<sim::ProbeCommand> m_pendingCommands;
@@ -188,14 +199,17 @@ namespace bicameral::frame {
             ID3D12Device5* native = device->Get();
 
             // 描画のキューは優先度を上げる: 重いシミュと並んでも描画が先に進みやすい(06 §4・R-LOOP-2。docs/perf.md)
-            auto direct = gpu::Queue::Create(native, D3D12_COMMAND_LIST_TYPE_DIRECT, L"Render",
-                                             D3D12_COMMAND_QUEUE_PRIORITY_HIGH);
+            auto direct = gpu::Queue::Create(
+                native, D3D12_COMMAND_LIST_TYPE_DIRECT, L"Render",
+                options.renderHighPriority ? D3D12_COMMAND_QUEUE_PRIORITY_HIGH : D3D12_COMMAND_QUEUE_PRIORITY_NORMAL);
             auto compute = gpu::Queue::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"Sim");
             if (!direct || !compute) return std::unexpected("キューを作れない");
             auto swapChain = gpu::SwapChain::Create(native, device->Factory(), direct->Native(), (*window)->Handle(),
                                                     options.maxFrameLatency);
             if (!swapChain) return std::unexpected(swapChain.error());
-            auto simulation = sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+            auto simulation =
+                sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                      {.busyPieces = options.simSplit, .busyInSeparateSubmits = options.splitSubmit});
             if (!simulation) return std::unexpected(simulation.error());
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view) return std::unexpected(view.error());
@@ -372,6 +386,10 @@ namespace bicameral::frame {
         // --- 投げる ---
 
         void FrameLoop::SubmitSimBatch() {
+            if (m_pending.list != nullptr) {
+                AdvancePendingBatch();
+                return;
+            }
             const uint64_t submitted = m_compute.LastSubmitted();
             // 2 つまで重ねる(GPU が次のバッチをすぐ始められるように)。それ以上は投げない(抽出の 3 組の約束。ファイルの先頭)
             if (submitted - m_compute.CompletedValue() >= 2) {
@@ -396,13 +414,39 @@ namespace bicameral::frame {
             m_pendingCommands.erase(m_pendingCommands.begin(),
                                     m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(commandCount));
 
-            // 抽出 extractionTarget を描画が読み終えるまで、GPU の上で待ってから走る
-            m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
-            m_compute.Submit(list);
             m_batches[slot] = {.number = number, .firstTick = m_nextTick, .tickCount = tickCount, .read = false};
             m_nextTick += tickCount;
             m_interval.ticks += tickCount;
             ++m_interval.batches;
+
+            if (m_sim.BusyInSeparateSubmits()) {
+                m_pending = {.list = list,
+                             .slot = slot,
+                             .extractionTarget = extractionTarget,
+                             .piecesLeft = tickCount * m_sim.BusyPieceCount()};
+                AdvancePendingBatch();
+                return;
+            }
+            // 抽出 extractionTarget を描画が読み終えるまで、GPU の上で待ってから走る
+            m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
+            m_compute.Submit(list);
+        }
+
+        // 重さの試験を別々の投入にするとき(R-LOOP-2、T-0085): 重さの 1 個ずつを、フェンスを進めずに投げる。
+        // --pieces-per-frame p なら 1 フレームに p 個まで(残りは次のフレーム)。compute のキューがフレームごとに空になり、
+        // その後ろに投げる描画が間に入れる。全部投げたらバッチのリスト(フェンスを進める)を投げる
+        void FrameLoop::AdvancePendingBatch() {
+            const uint32_t perFrame = m_options.piecesPerFrame;
+            const uint32_t count = perFrame == 0 ? m_pending.piecesLeft : std::min(perFrame, m_pending.piecesLeft);
+            for (uint32_t piece = 0; piece < count; ++piece) {
+                m_compute.Execute(m_sim.BusyPieceList(m_pending.slot, m_pending.piecesDone));
+                ++m_pending.piecesDone;
+                --m_pending.piecesLeft;
+            }
+            if (m_pending.piecesLeft > 0) return;
+            m_compute.GpuWait(m_direct, m_lastRenderReading[m_pending.extractionTarget]);
+            m_compute.Submit(m_pending.list);
+            m_pending = {};
         }
 
         void FrameLoop::SubmitRender() {
@@ -488,9 +532,13 @@ namespace bicameral::frame {
         }
 
         int FrameLoop::Run() {
-            Log(Channel::Core, Level::Info, "フレームのループを始める(vsync {}  先行 {}  重さ {}  自動クリック {})",
-                m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.simLoad,
-                m_options.autoClick ? "あり" : "なし");
+            Log(Channel::Core, Level::Info,
+                "フレームのループを始める(vsync {}  先行 {}  重さ {}(分けて {} 個・{})  描画の優先度 {}  自動クリック "
+                "{})",
+                m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.simLoad, m_options.simSplit,
+                m_options.splitSubmit ? std::format("別々の投入・1 フレームに {} 個", m_options.piecesPerFrame)
+                                      : std::string("リストの中"),
+                m_options.renderHighPriority ? "HIGH" : "NORMAL", m_options.autoClick ? "あり" : "なし");
             const auto start = Clock::now();
             auto lastFrame = start;
             auto intervalStart = start;
