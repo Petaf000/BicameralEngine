@@ -4,6 +4,7 @@
 //   窓のメッセージ → スワップチェインの待ち(歩調)→ 経過時間を SimScheduler へ
 //   → 終わったシミュのリストの読み戻し(フェンスが進んだ分だけ。待たない。単位の GPU 時間・ハッシュ・イベント)
 //   → 窓の入力をカメラ・表示とクリックに分け(render/debug_view_controller)、クリック(再生なら再生ファイル)をコマンドに → 予算ぶんの単位と、GPU のキューへ足すコマンドを記録して compute キューへ(ADR-0011)
+//     (T が押されていたら、そのフレームから連鎖のトレースの範囲を変える。frame/trace_capture.h。T-0088)
 //   → 描画を direct キューへ(終わっている最新の抽出を見せる。シミュを待たない)→ Present
 //
 // 抽出の 3 組の約束(06 §4): 抽出は 1 フレームに 1 回まで、そのフレームに投げた単位の後ろで刻みの境界の状態を写す。
@@ -21,6 +22,7 @@
 #include "core/log.h"
 #include "core/unicode.h"
 #include "frame/sim_scheduler.h"
+#include "frame/trace_capture.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
 #include "gpu/resources.h"
@@ -48,7 +50,11 @@ namespace bicameral::frame {
         constexpr uint32_t AUTO_CLICK_INTERVAL_FRAMES = 20;
         constexpr auto STATS_INTERVAL = chr::seconds(1);
         constexpr auto MINIMIZED_SLEEP = chr::milliseconds(16);
-        constexpr size_t MAX_TRACE_RECORDS = size_t{1} << 22;  // --trace で集める記録の上限(1 件 24 バイト。約 100 MB)
+
+        // --- 窓の T で始める連鎖のトレース(T-0088)---
+        constexpr uint64_t TRACE_KEY_TICKS = 60;        // 次の刻みから何刻み
+        constexpr uint32_t TRACE_KEY_RADIUS_CELLS = 8;  // 最後につついたセルの周り ±何セル
+        constexpr uint64_t AUTO_TRACE_FRAME = 30;       // --auto-trace が T を押すフレーム
 
         double Milliseconds(Clock::duration duration) {
             return chr::duration<double, std::milli>(duration).count();
@@ -152,7 +158,11 @@ namespace bicameral::frame {
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
-                  m_directFrequency(m_direct.TimestampFrequency()) {}
+                  m_directFrequency(m_direct.TimestampFrequency()) {
+                // --trace: 起動時の範囲(ProbeSim を作った時に GPU へ渡した)を集める
+                if (!options.tracePath.empty())
+                    m_traceCapture.emplace_back(options.tracePath, options.trace);
+            }
 
             [[nodiscard]] bool CreateFrameSlots();
             [[nodiscard]] int Run();
@@ -176,8 +186,13 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             [[nodiscard]] bool FinishReplay();
-            [[nodiscard]] bool WriteTrace();
             bool SubmitSim();
+
+            // --- 連鎖のトレース(--trace・T。frame/trace_capture.h)---
+            void RequestTrace();
+            void StartRequestedTrace(SimCursor start);
+            void CollectTrace(const sim::ProbeFrameReadback& readback);
+            [[nodiscard]] bool FinishTrace();
 
             // --- フレームの流れ ---
             bool RunFrame(Clock::time_point frameStart);
@@ -205,8 +220,14 @@ namespace bicameral::frame {
             std::vector<save::ReplayPlayer> m_replay;             // 再生中なら 1 つ
             save::ReplayRecorder m_recorder;                      // --record のときだけ使う
             std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で最後のフレームを写したら 1 つ
-            std::vector<gpu::GraphTraceRecord> m_trace;           // --trace のとき集めた記録(順不同)
-            uint64_t m_droppedTraceCount = 0;                     // GPU の容量・ここの上限で落とした数
+
+            // --- 連鎖のトレース ---
+            std::vector<TraceCapture> m_traceCapture;  // 集めているトレース(0 か 1 つ。GPU の範囲は 1 つだけなので)
+            bool m_traceRequested = false;             // T が押された(次に投げるフレームから始める)
+            bool m_traceWriteFailed = false;           // 途中で書けなかった(終わるときに失敗にする)
+            render::CellCoordinate m_lastPokedCell{.x = sim::PROBE_GRID_SIZE / 2,
+                                                   .y = sim::PROBE_GRID_SIZE / 2,
+                                                   .z = sim::PROBE_GRID_SIZE / 2};  // T の中心(まだなら格子の真ん中)
 
             // --- 描画の枠 ---
             std::array<FrameSlot, FRAME_SLOT_COUNT> m_frames;
@@ -277,9 +298,11 @@ namespace bicameral::frame {
             if (!swapChain)
                 return std::unexpected(swapChain.error());
 
-            auto simulation = sim::ProbeSim::Create(
-                native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                {.busyIterations = options.simLoad, .busyPieces = options.simSplit, .trace = options.trace});
+            auto simulation = sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                                    {.busyIterations = options.simLoad,
+                                                     .busyPieces = options.simSplit,
+                                                     .trace = options.trace,
+                                                     .traceCapacity = TRACE_CAPACITY_PER_FRAME});
 
             if (!simulation)
                 return std::unexpected(simulation.error());
@@ -432,14 +455,7 @@ namespace bicameral::frame {
             }
 
             ReportEvents(readback);
-
-            // 連鎖のトレース(--trace)。集めすぎないように上限で止めて、落とした数に数える
-            m_droppedTraceCount += readback.droppedTraceCount;
-            const size_t room = MAX_TRACE_RECORDS - std::min(m_trace.size(), MAX_TRACE_RECORDS);
-            const size_t taken = std::min(room, readback.trace.size());
-            m_trace.insert(m_trace.end(), readback.trace.begin(),
-                           readback.trace.begin() + static_cast<ptrdiff_t>(taken));
-            m_droppedTraceCount += readback.trace.size() - taken;
+            CollectTrace(readback);
         }
 
         // つつきが適用されたことをログへ(クリックから CPU に戻るまでの時間つき)。イベントは (刻み, 種類, 場所) の順に届く
@@ -502,9 +518,16 @@ namespace bicameral::frame {
 
         // 窓の入力: カメラと表示は再生中も動かせる。つつき(左クリックが断面に当たったセル)と自動のクリックはコマンドに
         void FrameLoop::QueueClicks() {
-            const std::vector<InputEvent> events = m_window->TakeInputEvents();
+            std::vector<InputEvent> events = m_window->TakeInputEvents();
+            if (m_options.autoTrace && m_frameNumber == AUTO_TRACE_FRAME)
+                events.push_back({.kind = InputKind::KeyDown, .key = 'T'});  // 人がいない確認で T の流れを通す
+
             std::vector<render::CellCoordinate> cells = m_viewController.HandleInput(events, m_swapChain.Width(),
                                                                                      m_swapChain.Height());
+
+            // トレースは世界に入らない(View)ので、再生中も使える
+            if (m_viewController.TakeTraceRequest())
+                RequestTrace();
 
             // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
             if (!m_replay.empty())
@@ -522,6 +545,7 @@ namespace bicameral::frame {
             for (const render::CellCoordinate& cell : cells) {
                 m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cell.x, cell.y, cell.z));
                 m_clicks.push_back({.cell = cell, .time = now});
+                m_lastPokedCell = cell;
             }
         }
 
@@ -582,6 +606,7 @@ namespace bicameral::frame {
                 return true;
 
             const std::vector<sim::ProbeCommand> commands = TakeCommands(start);
+            StartRequestedTrace(start);
             const uint64_t extraction = m_lastExtraction + 1;
             const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
             if (!extract)
@@ -834,7 +859,7 @@ namespace bicameral::frame {
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");
             const bool replayPassed = FinishReplay();
-            if (!WriteTrace())
+            if (!FinishTrace())
                 return 1;
 
             if (m_device.ValidationErrorCount() > 0) {
@@ -845,25 +870,80 @@ namespace bicameral::frame {
             return replayPassed ? 0 : 1;
         }
 
-        // --trace: 集めたトレースを刻みごとの木にして書く(sim/probe_trace.h)
-        bool FrameLoop::WriteTrace() {
-            if (m_options.tracePath.empty())
-                return true;
+        // --- 連鎖のトレース ---
 
-            const size_t recordCount = m_trace.size();
-            const auto written = sim::WriteProbeTraceFile(m_options.tracePath, std::move(m_trace), m_options.trace,
-                                                          m_droppedTraceCount);
-            if (!written) {
-                Log(Channel::Sim, Level::Error, "{}: {}", written.error(), ToUtf8(m_options.tracePath.wstring()));
-                return false;
+        // T が押された: 次に投げるフレームから始める。集めている途中なら無視する(GPU の範囲は 1 つだけ)
+        void FrameLoop::RequestTrace() {
+            if (!m_traceCapture.empty()) {
+                Log(Channel::Sim, Level::Warning, "トレースを集めている途中なので T を無視した({})",
+                    ToUtf8(m_traceCapture.front().Path().wstring()));
+                return;
             }
 
-            Log(Channel::Sim, m_droppedTraceCount > 0 ? Level::Warning : Level::Info, "トレース: {}(記録 {} 件{})",
-                ToUtf8(m_options.tracePath.wstring()), recordCount,
-                m_droppedTraceCount > 0 ? std::format("、落とした {} 件。範囲を狭めると欠けない", m_droppedTraceCount)
-                                        : std::string());
+            m_traceRequested = true;
+        }
 
-            return true;
+        // 最後につついたセルの周り ±TRACE_KEY_RADIUS_CELLS を、このフレームの最初の丸ごとの刻みから TRACE_KEY_TICKS 刻み。
+        // 刻みの途中から始めると、その刻みの前半(記録済みの単位)が欠けるので、まだ適用を記録していない最初の刻みから
+        void FrameLoop::StartRequestedTrace(SimCursor start) {
+            if (!m_traceRequested)
+                return;
+
+            m_traceRequested = false;
+            const uint64_t tickBegin = sim::ProbeSim::NextApplyTick(start.tick, start.unit);
+            const render::CellCoordinate center = m_lastPokedCell;
+            const auto below = [](uint32_t cell) {
+                return cell - std::min(cell, TRACE_KEY_RADIUS_CELLS);
+            };
+            const std::array<uint32_t, 3> cellMin = {below(center.x), below(center.y), below(center.z)};
+            const std::array<uint32_t, 3> cellMax = {
+                center.x + TRACE_KEY_RADIUS_CELLS + 1, center.y + TRACE_KEY_RADIUS_CELLS + 1,
+                center.z + TRACE_KEY_RADIUS_CELLS + 1};  // 格子の外は切り詰められる
+
+            const gpu::GraphTraceFilter filter = sim::ProbeTraceFilterForCells(
+                tickBegin, tickBegin + TRACE_KEY_TICKS, cellMin, cellMax, TRACE_CAPACITY_PER_FRAME);
+            const fs::path path = m_options.traceDirectory /
+                                  std::format(L"trace-t{}-cell{}_{}_{}.txt", tickBegin, center.x, center.y, center.z);
+
+            m_sim.SetTraceFilter(filter);
+            m_traceCapture.emplace_back(path, filter);
+            Log(Channel::Sim, Level::Info, "トレースを始める: セル ({}, {}, {}) ±{}・刻み [{}, {}) → {}", center.x,
+                center.y, center.z, TRACE_KEY_RADIUS_CELLS, tickBegin, tickBegin + TRACE_KEY_TICKS,
+                ToUtf8(path.wstring()));
+        }
+
+        // 読み戻した記録を足す。範囲の刻みを全部読んだら書いて、GPU の範囲を無効に戻す(使っていない間の費用は 0。docs/perf.md)
+        void FrameLoop::CollectTrace(const sim::ProbeFrameReadback& readback) {
+            if (m_traceCapture.empty())
+                return;
+
+            TraceCapture& capture = m_traceCapture.front();
+            capture.Add(readback.trace, readback.droppedTraceCount);
+            if (!capture.IsComplete(m_latestHash.tick))
+                return;
+
+            const auto written = capture.Write();
+            if (!written) {
+                Log(Channel::Sim, Level::Error, "{}", written.error());
+                m_traceWriteFailed = true;
+            }
+
+            m_traceCapture.clear();
+            m_sim.SetTraceFilter({});
+        }
+
+        // 終わるときに、集めている途中のトレース(--trace の終わりの無い範囲・終わっていない T)を書く
+        bool FrameLoop::FinishTrace() {
+            if (!m_traceCapture.empty()) {
+                const auto written = m_traceCapture.front().Write();
+                m_traceCapture.clear();
+                if (!written) {
+                    Log(Channel::Sim, Level::Error, "{}", written.error());
+                    return false;
+                }
+            }
+
+            return !m_traceWriteFailed;
         }
 
         // 記録を書き、再生の結果を出す。記録を書けない・再生が合わない(終わっていない)なら false

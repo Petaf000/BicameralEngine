@@ -3,7 +3,8 @@
 // データの流れ: platform/window の入力のイベント → HandleInput → カメラと表示の設定(View の状態。世界には入らない)
 //   + つつくセル(フレームのループがコマンドにする。06 §3)→ Constants() が描画の定数(render/probe_view_constants.h)を作る。
 // 操作: 左クリック = つつく / 右ドラッグ = 回る / 中ドラッグ = 平行移動 / ホイール = 寄る / 1・2・3 = 表示 / X・Y・Z = 断面の軸 /
-//   Q・E = 断面を動かす(Shift で 8) / B = 活性なブロック / L = 対数・線形 / O = 透視・平行 / R = カメラを戻す。
+//   Q・E = 断面を動かす(Shift で 8) / B = 活性なブロック / L = 対数・線形 / O = 透視・平行 / R = カメラを戻す /
+//   T = 連鎖のトレースを頼む(どこを何刻みかはフレームのループが決める。T-0088)。
 // 設定が変わったらログに出す(画面に文字はまだ無い。12 §5)。
 #pragma once
 
@@ -40,6 +41,9 @@ namespace bicameral::render {
         [[nodiscard]] const OrbitCamera& Camera() const { return m_camera; }
         [[nodiscard]] std::string Describe() const;  // 今の設定を 1 行で(ログ用)
 
+        // 前に呼んでから T が押されたか(押されていたら true を返して忘れる)
+        [[nodiscard]] bool TakeTraceRequest();
+
     private:
         void HandlePointer(const InputEvent& event, uint32_t width, uint32_t height,
                            std::vector<CellCoordinate>& pokes);
@@ -54,6 +58,8 @@ namespace bicameral::render {
         bool m_panning = false;
         int32_t m_lastX = 0;  // 前のポインタの位置(画素)
         int32_t m_lastY = 0;
+
+        bool m_traceRequested = false;  // T が押された(TakeTraceRequest で取る)
     };
 
     // 表示の名前(--view の値。volume・mip・slice)→ 表示。知らない名前なら false

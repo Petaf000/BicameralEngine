@@ -37,8 +37,9 @@ namespace bicameral::gpu {
         // シェーダーが書く前に: COMMON → UNORDERED_ACCESS
         void RecordBegin(ID3D12GraphicsCommandList* list) const;
 
-        // シェーダーが書いた後に: 読み戻しのバッファ[slot] へ写し、見出しを 0 に戻し、COMMON に戻す
-        void RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot) const;
+        // シェーダーが書いた後に: 読み戻しのバッファ[slot] へ先頭から copyBytes(既定は全体)だけ写し、見出しを 0 に戻し、COMMON に戻す
+        void RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot,
+                                    uint64_t copyBytes = UINT64_MAX) const;
 
         // slot のリストを GPU が終えた後に呼ぶ。先頭から destination の大きさだけ写す
         [[nodiscard]] bool Read(uint32_t slot, std::span<std::byte> destination) const;

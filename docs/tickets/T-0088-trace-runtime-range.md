@@ -1,6 +1,6 @@
 # T-0088 連鎖のトレースの範囲を実行中に切り替える
 
-- Status: Todo
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - マイルストーン: M1(T-0087 から。2026-10-01 ユーザー決定: (a) T-0014 の前に入れる)
@@ -21,9 +21,15 @@
 - `--trace` の起動時の範囲はそのまま残す(自動の確認用)。
 
 ## 完了条件
-- [ ] 実行中に範囲を変えると、次のフレームから新しい範囲だけが記録される(テスト: 途中で範囲を変えて、前後の記録がそれぞれの範囲に入る。CPU の予想と一致)
-- [ ] 範囲が無効のときの費用が変わらない(docs/perf.md)
-- [ ] 窓でキーを押すと、選んだセルの周りの N 刻みの木がファイルに出る(`job.py run --auto-click` の自動の確認でも通る形)
-- [ ] 16 §1.3・map.yaml を直す
+- [x] 実行中に範囲を変えると、次のフレームから新しい範囲だけが記録される(テスト: 途中で範囲を変えて、前後の記録がそれぞれの範囲に入る。CPU の予想と一致)
+- [x] 範囲が無効のときの費用が変わらない(docs/perf.md)
+- [x] 窓でキーを押すと、選んだセルの周りの N 刻みの木がファイルに出る(`job.py run --auto-click` の自動の確認でも通る形)
+- [x] 16 §1.3・map.yaml を直す
 
 ## 作業ログ
+- 2026-10-01: `gpu::GraphTrace` の容量を作った時に固定し、範囲を `SetFilter` で実行中に変えられるようにした(slot ごとのアップロードに書いて、変わったフレームだけ見出しへ写す。
+  slot ごとに記録した時の範囲を覚え、無効のフレームは見出し 64 バイトだけ読み戻す。`ReadbackRing::RecordReadbackAndReset` に写す大きさ)。ProbeSim は `traceCapacity`・`SetTraceFilter`。
+- テスト `TestRuntimeRange`(無効 → A → B → 無効。前後がそれぞれの範囲に入り CPU の予想と一致。HW・WARP)。`gpu_conduct_bench --trace-idle` で無効のときの費用が同じ(docs/perf.md)。
+- 窓の T(`DebugViewController::TakeTraceRequest`)→ 最後につついたセルの周り ±8・次の丸ごとの刻みから 60 刻み → `frame/trace_capture` が集めて
+  `--trace-dir`(既定 exe の横の traces/)へ。`--auto-trace` で自動の確認(release・debug layer とも exit 0)。`core/paths`(ExecutableDirectory)を足した。
+- 半径・刻みの数は定数(frame_loop.cpp の TRACE_KEY_*)。引数にはしていない(要るなら BACKLOG)。

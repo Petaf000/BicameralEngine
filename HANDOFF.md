@@ -1,36 +1,36 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0087 Work Graphs の連鎖のトレースと決定性 — 完了
+最終更新: 2026-10-01 / チケット: T-0088 トレースの範囲を実行中に切り替える — 完了
 
 ## 状態(3 行以内)
-- 伝導の連鎖を「つつき → 起こす → 計算した(変わったか)」の記録として GPU で書き、CPU で刻みごとの木にできる(`--trace`)。
-  同じ入力で 2 回・分け方を変えても一致、CPU リファレンスの予想とも一致。ずれたら最初の刻み・ブロック・セルが出る。M1 のデバッグ道具はここまで。
-- 次は T-0088(トレースの範囲を実行中に切り替える。2026-10-01 ユーザー決定で T-0014 の前に入れた)。テスト 30/30。
+- 連鎖のトレースの範囲を実行中に変えられる(`ProbeSim::SetTraceFilter`、次のフレームから効く。容量は作った時に固定)。窓で T を押すと、
+  最後につついたセルの周り ±8 を次の刻みから 60 刻み追って exe の横の traces/ に木を書く。M1 のデバッグ道具はここまで。
+- 次は T-0014 原理: 化学(チケットを ROADMAP と 02 §3 から作る)。テスト 30/30。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(45 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(60)。
-- `job.py test` → 30/30(分けて走らせる。下の注意)。新しい `gpu_probe_trace`(_warp): 2 回・ばらばらの分け方でトレースが同じ、CPU の予想と一致、
-  狭い範囲(刻み [2, 8)・セル [0, 12)³)、容量 8 で溢れて数える、わざとずらして「S(10)・ブロック 1928 (8, 8, 7)・セル (33, 32, 31)」とトレースの「刻み 9 つつき」。
-- `job.py run -Preset release -- --frames 200 --auto-click --trace probe_trace.txt --trace-ticks 0:60 --trace-cells 0,0,30:64,64,34`
-  → bin/probe_trace.txt に刻みごとの木(記録 約 8 万件)。
-- `job.py run -Preset release -Exe gpu_conduct_bench -- --trace` → トレースの費用(docs/perf.md。無効なら 0、全部で +4〜8 µs/刻み)。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(47 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(61)。
+- `job.py test` → 30/30(分けて走らせる。下の注意)。`gpu_probe_trace`(_warp)に `TestRuntimeRange`(無効 → A → B → 無効で、前後がそれぞれの範囲・CPU の予想と一致)。
+- `job.py run -Preset release -- --frames 200 --auto-click --auto-trace` → 「トレースを始める: セル (21, 42, 32) ±8・刻み [11, 71)」→ bin/traces/trace-t11-cell21_42_32.txt(約 5.5 万件、60 刻み)。
+  debug(debug layer・GBV)でも exit 0。`--trace` と一緒だと T は「集めている途中」で無視される。
+- `job.py run -Preset release -Exe gpu_conduct_bench -- --trace-idle` → 容量を確保して無効でも伝導の費用は同じ(docs/perf.md)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
+- T の半径(±8)と刻みの数(60)は定数(frame_loop.cpp の TRACE_KEY_*)。窓の中で変える手段・画面の表示は無い(ログだけ)。人の手で T を押したのは未確認(--auto-trace だけ)。
 - PIX での Work Graphs の見え方は公開の資料だけで調べた(開発機の PIX では未確認。16 §4)。
-- 段ごとのハッシュ・`--replay --bisect` の引数は無い(16 §3 の「最初の形」まで。食い違いの場所はテストの中で走らせ直して探す)。
+- 段ごとのハッシュ・`--replay --bisect` の引数は無い(16 §3 の「最初の形」まで)。
 - (前から)バッキングメモリの使った量は数えられない。人の手でのマウスとキーの操作は未確認(platform/window.cpp)。基準画像はまだ無い。
 - (前から)ボリューム表示のときシミュの GPU 時間が 0.28 → 0.95 ms/投入に伸びる(描画と重なるため)。伝導の単位の約 40 µs の固定費の内訳は未確認。
 - (前から)伝導の Compute 版との比較(D-302)はしていない。予定の印は下位 32bit(T-0018 で置き換え)。適用の単位は 1 スレッド(06 §3)。セーブは未着手。
 - (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。AMD は未確認。窓の大きさの変更・最小化・DPI は人の手で試していない。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- トレースに書くのは順番に依存しない事実だけ(起こそうとした隣は全部書き、誰が先に予定したかは書かない)。木の親は「番号の一番小さい根」。
-- 範囲(刻み・場所の箱・容量)は作った時に決める(途中で変えない)→ 範囲だけは実行中に変えられるようにする(T-0088、ユーザー決定)。容量は固定のまま。無効なら容量 0 で、シェーダーは見出しの 1 語を読むだけ。Release でも使える。
-- 全部を記録しても +10〜17% なので、打ち切り条件(2 倍)の「サンプリング」「debug だけ」にはしない。
+- 範囲は slot ごとのアップロードに書き、変わったフレームだけ見出しへ写す(毎フレームは写さない)。どの範囲で記録したかは slot ごとに覚えて読む。
+- T の範囲は「次に投げるフレームの最初の丸ごとの刻み」(`NextApplyTick`)から。途中まで記録した刻みは前半が欠けるので含めない。
+- GPU の範囲は 1 つなので、集めている途中の T は無視する。トレースは View なので再生中も使える。起動時の `--trace` も範囲の刻みが終わったら書く。
 - ADR は書いていない(道具の実装の詳細。16 §1.3 に書いた)。
 
 ## 次にやること
-NEXT.md の先頭(T-0088。docs/tickets/T-0088-trace-runtime-range.md の完了条件から)。その後 T-0014 原理: 化学。
+NEXT.md の先頭(T-0014 原理: 化学。まずチケットを docs/plan/ROADMAP.md と docs/design/02-reaction-system.md §3 から作る)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **2026-09-30〜10-01 にコーディング規約を変えた(docs/style.md)。** 全コードを書き直し済み(ビルド・tidy 警告なし・テスト 28/28・archmap OK)。
@@ -121,3 +121,9 @@ NEXT.md の先頭(T-0088。docs/tickets/T-0088-trace-runtime-range.md の完了�
 - `std::map` を持つ構造体を値で返すと clang-tidy の bugprone-exception-escape(ムーブが noexcept でない)。呼ぶ側の物に書く形にした(probe_trace.cpp の BuildTickTree)。
 - python の `"""` の中に C++ の `"\n"` を書くと本物の改行になる(heredoc の python で編集するとき)。`<<'EOF'` の cat で書くか、`\\n` にする。
 - gpu_conduct_bench は `--trace` を自分で取り除いてから gpu_test_options.h に渡す(知らない引数で止まるので)。
+- **トレースの範囲を変えるとき**(T-0088): `GraphTrace::SetFilter` / `ProbeSim::SetTraceFilter` は次の `RecordBegin(list, slot)` から効く。
+  容量は `Create` の capacity(`ProbeSimOptions::traceCapacity`)までに切り詰める。ランタイムは `frame::TRACE_CAPACITY_PER_FRAME`(65,536)をいつも確保。
+  `RecordBegin` に slot を渡す(slot ごとのアップロードと、読むときの範囲)。
+- exe の横のフォルダは `core/paths.h` の `ExecutableDirectory()`(ログ・シェーダー・トレースの既定の置き場所)。
+- 一度だけ debug のリンクが `LNK1236: corrupt or invalid COFF sections`(graph_trace.cpp.obj)で落ち、もう一度 build したら通った(release と続けて投げた直後)。
+

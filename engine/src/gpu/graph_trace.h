@@ -1,13 +1,14 @@
-// graph_trace.h — Work Graphs の連鎖のトレース(shaders/common/graph_trace.hlsli)を CPU 側で持つ(T-0087、16 §1.3)。
+// graph_trace.h — Work Graphs の連鎖のトレース(shaders/common/graph_trace.hlsli)を CPU 側で持つ(T-0087・T-0088、16 §1.3)。
 //
-// データの流れ: 作った時に範囲(刻み・場所の箱)を決める → 最初の RecordBegin() がそれを GPU のバッファの見出しへ写す
+// データの流れ: 範囲(刻み・場所の箱)を SetFilter で決める(作った時の範囲が最初)→ 次の RecordBegin() がそれを GPU のバッファの見出しへ写す
 //   → ノードが GtRecord などで記録を追記する → RecordReadbackAndReset() が slot の読み戻しのバッファへ写して数を 0 に戻す
 //   → その slot のリストが終わった後に Read() → 記録の列(atomic の順。比べる前に SortGraphTrace で並べる)。
-// 記録の種類・主・従の意味は使う側が決める(伝導は sim/probe_trace.h)。範囲を無効にして作ると容量 0(見出しだけ)になり、
-// シェーダーは見出しの 1 語を読むだけで何も書かない。
+// 記録の種類・主・従の意味は使う側が決める(伝導は sim/probe_trace.h)。
+// 容量(1 フレームに書ける記録の数 = バッファの大きさ)は作った時に決め、変えない。範囲は実行中に何度でも変えられる(T-0088)。
+// 範囲が無効のフレームは、シェーダーが見出しの 1 語を読むだけで何も書かず、読み戻しも見出し(64 バイト)だけ。
 //
 // 1 本のコマンドリストの中での使い方:
-//   trace.RecordBegin(list);                                                     // (最初だけ範囲を写す)COMMON → UAV
+//   trace.RecordBegin(list, slot);                                              // (範囲が変わっていれば写す)COMMON → UAV
 //   list->SetComputeRootUnorderedAccessView(layout.GraphTraceIndex(), trace.GpuAddress());
 //   ... DispatchGraph / Dispatch ...
 //   trace.RecordReadbackAndReset(list, slot);
@@ -16,6 +17,7 @@
 
 #include <array>
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <limits>
@@ -32,7 +34,7 @@ namespace bicameral::gpu {
     // 記録する範囲。刻みは [tickBegin, tickEnd)、場所は箱 [boxMin, boxMax)(場所の単位は使う側が決める)
     struct GraphTraceFilter {
         bool enabled = false;
-        uint32_t capacity = 0;  // 1 フレームに書ける記録の数(有効なときだけ使う)
+        uint32_t capacity = 0;  // 1 フレームに書ける記録の数(有効なときだけ使う。GraphTrace の容量までに切り詰める)
 
         // --- 範囲 ---
         uint64_t tickBegin = 0;
@@ -62,32 +64,51 @@ namespace bicameral::gpu {
 
     class GraphTrace {
     public:
+        // filter: 最初の範囲。capacity: 1 フレームに書ける記録の上限(バッファの大きさ)。
+        // 容量は max(capacity, 有効なら filter.capacity)。実行中に範囲を変えるなら、使いそうな上限ぶんを capacity に渡す
         [[nodiscard]] static std::expected<GraphTrace, std::string> Create(ID3D12Device* device,
                                                                            const GraphTraceFilter& filter,
-                                                                           uint32_t slotCount = 1);
+                                                                           uint32_t slotCount = 1,
+                                                                           uint32_t capacity = 0);
 
         // ルートの UAV(u2 space1)に渡すアドレス
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS GpuAddress() const { return m_ring.GpuAddress(); }
-        [[nodiscard]] const GraphTraceFilter& Filter() const { return m_filter; }
+        [[nodiscard]] const GraphTraceFilter& Filter() const { return m_filter; }  // 次の RecordBegin から使う範囲
         [[nodiscard]] bool Enabled() const { return m_filter.enabled; }
+        [[nodiscard]] uint32_t Capacity() const { return m_capacity; }
 
-        // シェーダーが書く前に: (最初の 1 回だけ範囲を見出しへ写す)COMMON → UNORDERED_ACCESS
-        void RecordBegin(ID3D12GraphicsCommandList* list);
+        // 範囲を変える。次の RecordBegin で GPU へ写し、そのリストから効く(容量は Capacity() までに切り詰める)
+        void SetFilter(const GraphTraceFilter& filter);
 
-        // 書いた後に: slot の読み戻しのバッファへ写し、書こうとした数を 0 に戻す(範囲は残す)。最後は COMMON に戻す
+        // シェーダーが書く前に: (範囲が変わっていれば見出しへ写す)COMMON → UNORDERED_ACCESS。slot は RecordReadbackAndReset と同じ
+        void RecordBegin(ID3D12GraphicsCommandList* list, uint32_t slot = 0);
+
+        // 書いた後に: slot の読み戻しのバッファへ写し(範囲が無効なら見出しだけ)、書こうとした数を 0 に戻す(範囲は残す)。
+        // 最後は COMMON に戻す
         void RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot = 0) const;
 
-        // slot のリストを GPU が終えた後に呼ぶ
+        // slot のリストを GPU が終えた後に呼ぶ(そのリストを記録した時の範囲で読む)
         [[nodiscard]] std::expected<GraphTraceFrame, std::string> Read(uint32_t slot = 0) const;
 
     private:
-        GraphTrace(ReadbackRing&& ring, ComPtr<ID3D12Resource> filterUpload, const GraphTraceFilter& filter)
-            : m_ring(std::move(ring)), m_filterUpload(std::move(filterUpload)), m_filter(filter) {}
+        GraphTrace(ReadbackRing&& ring, ComPtr<ID3D12Resource> filterUpload, std::byte* filterMapped, uint32_t capacity,
+                   uint32_t slotCount)
+            : m_ring(std::move(ring)),
+              m_filterUpload(std::move(filterUpload)),
+              m_filterMapped(filterMapped),
+              m_capacity(capacity),
+              m_slotFilters(slotCount) {}
 
+        // --- GPU ---
         ReadbackRing m_ring;
-        ComPtr<ID3D12Resource> m_filterUpload;  // 範囲の写し元(GT_FILTER_BYTES。作った時に書いたまま)
-        GraphTraceFilter m_filter;
-        bool m_filterWritten = false;  // 範囲を GPU のバッファへ写すコマンドを記録したか
+        ComPtr<ID3D12Resource> m_filterUpload;  // 範囲の写し元(slot ごとに GT_FILTER_BYTES。Map したまま)
+        std::byte* m_filterMapped = nullptr;
+        uint32_t m_capacity = 0;  // 1 フレームに書ける記録の数(作った時に決める)
+
+        // --- 範囲 ---
+        GraphTraceFilter m_filter;                    // 次の RecordBegin から使う範囲(容量は切り詰め済み)
+        bool m_filterDirty = true;                    // m_filter をまだ GPU のバッファへ写していない
+        std::vector<GraphTraceFilter> m_slotFilters;  // slot のリストを記録した時の範囲(Read と読み戻しの大きさ)
     };
 
 }  // namespace bicameral::gpu

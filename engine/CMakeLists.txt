@@ -3,6 +3,7 @@ add_library(bicameral_core STATIC
   src/core/hresult.cpp
   src/core/log.cpp
   src/core/log_sinks.cpp
+  src/core/paths.cpp
   src/core/singleton.cpp
   src/core/unicode.cpp
 )
@@ -76,6 +77,7 @@ target_link_libraries(bicameral_view PUBLIC bicameral_core)
 add_executable(bicameral
   src/main.cpp
   src/frame/frame_loop.cpp
+  src/frame/trace_capture.cpp
   src/platform/agility_sdk.cpp
   src/platform/caps.cpp
   src/platform/window.cpp

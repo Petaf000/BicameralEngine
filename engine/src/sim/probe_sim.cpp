@@ -142,7 +142,7 @@ namespace bicameral::sim {
         if (!graphStats)
             return std::unexpected(graphStats.error());
 
-        auto graphTrace = gpu::GraphTrace::Create(device, options.trace, FRAME_SLOT_COUNT);
+        auto graphTrace = gpu::GraphTrace::Create(device, options.trace, FRAME_SLOT_COUNT, options.traceCapacity);
         if (!graphTrace)
             return std::unexpected(graphTrace.error());
 
@@ -354,7 +354,7 @@ namespace bicameral::sim {
         m_events.RecordBegin(list);
         m_debugRing.RecordBegin(list);
         m_graphStats.RecordBegin(list);
-        m_graphTrace.RecordBegin(list);
+        m_graphTrace.RecordBegin(list, slot);
         const D3D12_RESOURCE_BARRIER hashesToUav = gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON,
                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &hashesToUav);

@@ -113,8 +113,12 @@ namespace bicameral::sim {
         uint32_t busyIterations = 0;
         uint32_t busyPieces = 1;  // それを何個の単位に分けるか(1〜PROBE_MAX_BUSY_PIECES)
 
-        // 伝導の連鎖のトレースの範囲(既定は無効。場所の箱はブロックの座標。セルからは ProbeTraceFilterForCells。T-0087)
+        // 伝導の連鎖のトレースの最初の範囲(既定は無効。場所の箱はブロックの座標。セルからは ProbeTraceFilterForCells。T-0087)
         gpu::GraphTraceFilter trace;
+
+        // トレースの容量(1 フレームに書ける記録の上限)。実行中に SetTraceFilter で範囲を変えるなら上限ぶんを渡す(T-0088)。
+        // 0 なら trace.capacity だけ
+        uint32_t traceCapacity = 0;
     };
 
     // --- GPU で走らせる ---
@@ -149,6 +153,10 @@ namespace bicameral::sim {
         // slot のリストを GPU が終えた後に呼ぶ(待たない。終わったかどうかは呼ぶ側がフェンスで見る)。
         // ノードのカウンタの要約と上限の Warning もここでログへ出す(同じ Warning を繰り返しすぎないように状態を持つので const でない)
         [[nodiscard]] ProbeFrameReadback ReadFrame(uint32_t slot);
+
+        // 伝導の連鎖のトレースの範囲を変える。次に記録するフレームから効く(容量は作った時の容量までに切り詰める。T-0088)
+        void SetTraceFilter(const gpu::GraphTraceFilter& filter) { m_graphTrace.SetFilter(filter); }
+        [[nodiscard]] const gpu::GraphTraceFilter& TraceFilter() const { return m_graphTrace.Filter(); }
 
         // 伝導のグラフのカウンタの名前と上限(フレームのループが要約をまとめて出すときに使う)
         [[nodiscard]] const gpu::GraphStatsLayout& ConductStatsLayout() const { return m_graphStats.Layout(); }

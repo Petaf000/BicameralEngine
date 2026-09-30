@@ -8,7 +8,8 @@
 //   - GPU → CPU は待たない読み戻し(イベント・刻みごとの状態のハッシュ・デバッグの出力・タイムスタンプ)。フェンスが進んでいた分だけ読む。
 //   - 窓の操作はコマンド(適用する刻みつき)になり、GPU のコマンドキューで自分の刻みまで待つ(06 §3)。
 //     --record でコマンドの列と刻みごとのハッシュを再生ファイルに書き、--replay でそれを流して同じハッシュ列になるかを確かめる(15 §2)。
-// 窓の入力は render/debug_view_controller がカメラ・表示の切り替え・つつくセルに振り分ける(T-0015)。カメラは世界に入らない。
+// 窓の入力は render/debug_view_controller がカメラ・表示の切り替え・つつくセル・トレースの依頼(T)に振り分ける(T-0015・T-0088)。
+// カメラとトレースは世界に入らない。
 // 今の世界は仮のもの(sim/probe_sim。クリックした所が熱くなって広がる)。中身は T-0005 以降で本物に。
 #pragma once
 
@@ -21,6 +22,9 @@
 #include "render/debug_view_controller.h"
 
 namespace bicameral::frame {
+
+    // 連鎖のトレースの容量(1 フレームに GPU が書ける記録。1 MiB)。範囲を実行中に変えるので、いつも確保しておく(T-0088)
+    inline constexpr uint32_t TRACE_CAPACITY_PER_FRAME = 1u << 16;
 
     struct FrameLoopOptions {
         // --- フレームの進め方 ---
@@ -40,10 +44,13 @@ namespace bicameral::frame {
         fs::path replayPath;      // 空でなければ、この再生ファイルのコマンドで進めてハッシュを突き合わせる
         fs::path screenshotPath;  // 空でなければ、最後のフレーム(frameLimit)を BMP に書く
 
-        // --- 連鎖のトレース(T-0087)---
-        fs::path tracePath;  // 空でなければ、終わるときに伝導の連鎖のトレースを刻みごとの木にして書く
+        // --- 連鎖のトレース(T-0087・T-0088。frame/trace_capture.h)---
+        // 空でなければ、起動時から trace の範囲を集め、範囲の刻みが終わったら(終わりが無ければ終わるときに)刻みごとの木にして書く
+        fs::path tracePath;
         gpu::GraphTraceFilter
-            trace;  // その範囲(場所の箱はブロックの座標。main が --trace-ticks・--trace-cells から作る)
+            trace;                // その範囲(場所の箱はブロックの座標。main が --trace-ticks・--trace-cells から作る)
+        fs::path traceDirectory;  // 窓の T で集めたトレースを書くフォルダ(main の既定は exe の横の traces/)
+        bool autoTrace = false;   // 決まったフレームで T を押す(人がいない確認で T の流れを通す)
 
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)

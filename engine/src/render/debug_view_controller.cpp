@@ -106,6 +106,7 @@ namespace bicameral::render {
                 m_camera.Reset();
                 Log(Channel::Render, Level::Info, "カメラを戻した");
                 return;
+            case 'T': m_traceRequested = true; return;
             default: return;
         }
 
@@ -116,6 +117,13 @@ namespace bicameral::render {
 
         if (changed)
             Log(Channel::Render, Level::Info, "表示: {}", Describe());
+    }
+
+    bool DebugViewController::TakeTraceRequest() {
+        const bool requested = m_traceRequested;
+        m_traceRequested = false;
+
+        return requested;
     }
 
     // --- 描画へ ---

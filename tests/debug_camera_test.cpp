@@ -185,6 +185,12 @@ namespace {
 
         EXPECT(controller.Settings().slicePosition == GRID_SIZE - 1);
 
+        // T はトレースを頼むだけ(表示は変えない)。取ったら忘れる
+        EXPECT(!controller.TakeTraceRequest());
+        EXPECT(controller.HandleInput(std::vector{Key('T')}, WIDTH, HEIGHT).empty());
+        EXPECT(controller.TakeTraceRequest() && !controller.TakeTraceRequest());
+        EXPECT(controller.Settings().slicePosition == GRID_SIZE - 1);
+
         // z = 32 の断面で真ん中を左クリック → (32, 32, 32) をつつく。右ドラッグは回るだけ(つつかない)
         (void)controller.HandleInput(std::vector{Key('Z'), Key('Q', true), Key('Q', true), Key('Q', true)}, WIDTH,
                                      HEIGHT);

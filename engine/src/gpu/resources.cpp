@@ -7,28 +7,11 @@
 #include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
+#include "core/paths.h"
 #include "core/unicode.h"
 #include "gpu/com_ptr.h"
 
 namespace bicameral::gpu {
-    namespace {
-
-        fs::path ExecutableDirectory() {
-            std::wstring path(MAX_PATH, L'\0');
-            for (;;) {
-                const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-                if (length < path.size()) {
-                    path.resize(length);
-                    break;
-                }
-
-                path.resize(path.size() * 2);  // 長いパスでは切り詰められるので広げて取り直す
-            }
-
-            return fs::path(path).parent_path();
-        }
-
-    }  // namespace
 
     // --- バッファ ---
 

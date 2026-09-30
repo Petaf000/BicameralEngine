@@ -1,9 +1,10 @@
-// gpu_probe_trace_test.cpp — 伝導の連鎖のトレース(T-0087、16 §1.3・§3)を確かめる。
+// gpu_probe_trace_test.cpp — 伝導の連鎖のトレース(T-0087・T-0088、16 §1.3・§3)を確かめる。
 //
 // 確かめること:
 //   - 同じ入力で 2 回走らせても、フレームへの分け方を変えても、並べたトレースが同じ(atomic の順によらない。ADR-0003)
 //   - GPU のトレース(重なりを除いたもの)が CPU リファレンスの予想(sim/probe_trace の AppendExpectedProbeTrace)と一致する。
 //     範囲(刻み・セルの箱)を狭めても一致する。容量を越えたら落とした数が出る
+//   - 実行中に範囲を変えると、次のフレームから新しい範囲だけが記録される(前後の記録がそれぞれの範囲に入り、CPU の予想と一致。T-0088)
 //   - 刻みごとの木としてファイルに書け、つつき(同じセルに 2 回 = 一覧に 2 度)と「前の刻みで変わった」根が読める
 //   - わざと CPU リファレンスのつつきを 1 セルずらすと、ハッシュ列から最初に食い違った状態の刻みが、その刻みの GPU と CPU の
 //     全部のセルから最初のブロックとセルが、トレースからずれの元の刻み(つつき)が出る
@@ -120,6 +121,12 @@ namespace {
 
     // --- GPU ---
 
+    // フレーム frame を記録する前に、トレースの範囲を filter に変える(T-0088)
+    struct FilterChange {
+        size_t frame = 0;
+        GraphTraceFilter filter;
+    };
+
     struct GpuRun {
         bool ok = false;
         std::vector<ProbeTickHash> hashes;
@@ -148,12 +155,14 @@ namespace {
         return cells;
     }
 
-    // unitsPerFrame の分け方で走らせる(コマンドは最初のフレームで全部足す。キューの中で自分の刻みまで待つ)
+    // unitsPerFrame の分け方で走らせる(コマンドは最初のフレームで全部足す。キューの中で自分の刻みまで待つ)。
+    // changes があれば、そのフレームの前で範囲を変える(容量は TRACE_CAPACITY まで)
     GpuRun RunGpu(ID3D12Device5* device, const GraphTraceFilter& filter, std::span<const uint32_t> unitsPerFrame,
-                  std::span<const ProbeCommand> commands) {
+                  std::span<const ProbeCommand> commands, std::span<const FilterChange> changes = {}) {
         GpuRun result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"TraceTestSim");
-        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, {.trace = filter});
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                           {.trace = filter, .traceCapacity = changes.empty() ? 0 : TRACE_CAPACITY});
         if (!queue || !simulation) {
             Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
                 simulation ? "" : simulation.error());
@@ -164,6 +173,11 @@ namespace {
         uint64_t unitPosition = 0;
         uint32_t extractionTarget = 0;
         for (size_t frame = 0; frame < unitsPerFrame.size(); ++frame) {
+            for (const FilterChange& change : changes) {
+                if (change.frame == frame)
+                    simulation->SetTraceFilter(change.filter);
+            }
+
             const auto slot = static_cast<uint32_t>(frame % ProbeSim::FRAME_SLOT_COUNT);
             extractionTarget = static_cast<uint32_t>(frame % PROBE_EXTRACTION_COUNT);
             ID3D12CommandList* list = simulation->RecordFrame(
@@ -295,6 +309,69 @@ namespace {
                        "容量を越えたら 1 フレーム 8 件だけ書き、落とした数を数える");
     }
 
+    // 実行中に範囲を変える(T-0088): 無効で始め、フレーム 2 で A、フレーム 6 で B、フレーム 12 で無効に戻す(1 フレーム = 1 刻み)。
+    // B は刻みを [0, 無限) にしておき、フレーム 6 より前の刻みが記録されない(次のフレームから効く)ことも見る
+    void TestRuntimeRange(ID3D12Device5* device, Failures& failures) {
+        constexpr uint64_t TICKS = 14;
+        const std::vector<ProbeCommand> commands = MakeCommands(false);
+        const GraphTraceFilter rangeA = ProbeTraceFilterForCells(2, 6, {0, 0, 0}, {12, 12, 12}, TRACE_CAPACITY);
+        const GraphTraceFilter rangeB = ProbeTraceFilterForCells(0, UINT64_MAX, {28, 28, 28}, {40, 40, 40},
+                                                                 TRACE_CAPACITY);
+        const std::array<FilterChange, 3> changes = {{
+            {.frame = 2, .filter = rangeA},
+            {.frame = 6, .filter = rangeB},
+            {.frame = 12, .filter = GraphTraceFilter{}},
+        }};
+
+        const GpuRun run = RunGpu(device, GraphTraceFilter{}, TickFrames(TICKS), commands, changes);
+
+        // --- CPU の予想: A の刻み [2, 6) と、B を効いていた刻み [6, 12) に絞ったもの ---
+        GraphTraceFilter effectiveB = rangeB;
+        effectiveB.tickBegin = 6;
+        effectiveB.tickEnd = 12;
+        CpuRun expected = RunReference(commands, rangeA, TICKS);
+        const CpuRun expectedB = RunReference(commands, effectiveB, TICKS);
+        expected.trace.insert(expected.trace.end(), expectedB.trace.begin(), expectedB.trace.end());
+        expected.trace = UniqueProbeTrace(std::move(expected.trace));
+
+        // --- 前後の記録がそれぞれの範囲に入る ---
+        const auto inBox = [](const GraphTraceFilter& filter, uint32_t block) {
+            const std::array<uint32_t, 3> place = {block % PROBE_BLOCKS_PER_AXIS,
+                                                   block / PROBE_BLOCKS_PER_AXIS % PROBE_BLOCKS_PER_AXIS,
+                                                   block / (PROBE_BLOCKS_PER_AXIS * PROBE_BLOCKS_PER_AXIS)};
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                if (place[axis] < filter.boxMin[axis] || place[axis] >= filter.boxMax[axis])
+                    return false;
+            }
+
+            return true;
+        };
+
+        size_t countA = 0;
+        size_t countB = 0;
+        bool placed = true;
+        for (const GraphTraceRecord& record : run.trace) {
+            const bool isA = record.tick >= 2 && record.tick < 6;
+            const bool isB = record.tick >= 6 && record.tick < 12;
+            countA += isA ? 1 : 0;
+            countB += isB ? 1 : 0;
+            if (record.kind == PROBE_TRACE_WAKE || record.kind == PROBE_TRACE_POKE)
+                continue;  // 起こすは主か従のどちらかが箱に入ればよい・つつきの主は格子の外もありうるので、計算したで見る
+
+            placed = placed && (isA || isB) && inBox(isA ? rangeA : rangeB, record.subject);
+        }
+
+        Log(Channel::Sim, Level::Info,
+            "実行中の切り替え: A(刻み [2, 6)・ブロック [0, 3)³){} 件・B(刻み [6, 12)・ブロック [7, 10)³){} 件・全部 {} "
+            "件",
+            countA, countB, run.trace.size());
+        failures.Check(
+            run.ok && countA > 0 && countB > 0 && countA + countB == run.trace.size() && run.droppedTraceCount == 0,
+            "実行中の切り替え: 範囲 A と B の刻みだけが記録され、切り替えより前・無効にした後は記録されない");
+        failures.Check(placed, "実行中の切り替え: 計算したブロックがそれぞれの範囲の箱に入る");
+        failures.Check(TraceMatchesReference(run, expected), "実行中の切り替え: CPU リファレンスの予想と一致");
+    }
+
     // わざと CPU リファレンスのつつきを 1 セルずらす → 最初の刻み・ブロック・セル
     void TestDivergence(ID3D12Device5* device, Failures& failures) {
         const std::vector<ProbeCommand> gpuCommands = MakeCommands(false);
@@ -354,6 +431,7 @@ int main(int argc, char** argv) {
     Failures failures;
     TestDeterminism(device->Get(), failures);
     TestFilters(device->Get(), failures);
+    TestRuntimeRange(device->Get(), failures);
     TestDivergence(device->Get(), failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_trace_test");

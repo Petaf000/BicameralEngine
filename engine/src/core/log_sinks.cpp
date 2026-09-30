@@ -15,6 +15,7 @@
 
 #include "core/aliases.h"
 #include "core/hresult.h"
+#include "core/paths.h"
 #include "core/unicode.h"
 
 namespace bicameral {
@@ -195,22 +196,7 @@ namespace bicameral {
     }
 
     fs::path DefaultLogDirectory() {
-        // MAX_PATH を超えるパスもあるので、足りなければ広げて取り直す
-        std::wstring buffer(MAX_PATH, L'\0');
-        for (;;) {
-            const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-            if (length == 0)
-                return fs::path(L"logs");
-
-            if (length < buffer.size()) {
-                buffer.resize(length);
-                break;
-            }
-
-            buffer.resize(buffer.size() * 2);
-        }
-
-        return fs::path(buffer).parent_path() / L"logs";
+        return ExecutableDirectory() / L"logs";
     }
 
 }  // namespace bicameral

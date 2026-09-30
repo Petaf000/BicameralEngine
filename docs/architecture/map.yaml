@@ -50,7 +50,7 @@ views:
           note: "1 フレームに予算ぶんの単位だけ投げ、後ろに描画(ADR-0011)。抽出は 3 組、描画は終わっている最新を読む" }
       - { id: window, group: framelib, label: "Window<br/>Win32 の窓・入力(ボタン・ドラッグ・ホイール・キー)・DPI",
           code: "engine/src/platform/window.cpp::Window::Create", ticket: T-0004 }
-      - { id: viewcontroller, group: framelib, label: "DebugViewController<br/>入力 → カメラ・表示の切り替え・つつくセル",
+      - { id: viewcontroller, group: framelib, label: "DebugViewController<br/>入力 → カメラ・表示の切り替え・つつくセル・T",
           code: "engine/src/render/debug_view_controller.cpp::DebugViewController::HandleInput", ticket: T-0015,
           doc: docs/design/14-editor-tools.md, note: "カメラと表示は View の状態で、世界には入らない(D-107)。つつきだけがコマンドになる" }
       - { id: debugcamera, group: framelib, label: "OrbitCamera・PickSliceCell<br/>格子を回るカメラ・光線が断面に当たるセル",
@@ -161,13 +161,16 @@ views:
           note: "カウンタが CPU の予想と一致・止めた数・Warning・ノードの printf の場所" }
       - { id: graphtrace, group: gpulib, label: "GraphTrace<br/>連鎖のトレースの範囲を書き、記録を読み戻す",
           code: "engine/src/gpu/graph_trace.cpp::GraphTrace::Read", ticket: T-0087, doc: docs/design/16-debug-test.md,
-          note: "範囲(刻み・場所の箱)は作った時に決め、最初の RecordBegin で GPU へ。無効なら容量 0" }
+          note: "容量は作った時に固定。範囲(刻み・場所の箱)は SetFilter で実行中に変え、次の RecordBegin で GPU へ(T-0088)。無効のフレームは見出しだけ読み戻す" }
       - { id: graphtracehlsl, group: shared, label: "graph_trace.hlsli<br/>範囲の中だけ 16 バイトの記録を追記",
           code: "shaders/common/graph_trace.hlsli::GtReserve", ticket: T-0087,
           note: "u2 space1。順番に依存しない事実だけ書く(親は CPU が決まった規則で選ぶ)" }
       - { id: probetrace, group: simlib, label: "probe_trace<br/>刻みごとの木・CPU の予想・食い違いの場所",
           code: "engine/src/sim/probe_trace.cpp::FormatProbeTrace", ticket: T-0087, doc: docs/design/16-debug-test.md,
           note: "--trace でファイルへ。FirstDivergentTick → FindCellDivergence(16 §3 の最初の形)" }
+      - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
+          code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
+          note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
       - { id: tracetest, group: tests, label: "gpu_probe_trace_test<br/>2 回・分け方で同じ、CPU と一致、わざとずらす",
           code: "tests/gpu_probe_trace_test.cpp::TestDivergence", ticket: T-0087,
           note: "ずらしたつつきから、最初の刻み S(10)・ブロック・セルとトレースの刻み 9 が出る" }
@@ -229,7 +232,7 @@ views:
       - [viewcontroller, debugcamera]
       - [frameloop, screenshot, "--screenshot"]
       - [frameloop, scheduler, "単位の数"]
-      - [frameloop, probesim, "予算ぶんの単位(compute キュー)"]
+      - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]
       - [frameloop, probeview, "記録済みのリスト(direct キュー)"]
@@ -245,7 +248,8 @@ views:
       - [graphtracehlsl, graphtrace, "読み戻し(フレームの終わり)"]
       - [graphtrace, readbackring]
       - [probesim, graphtrace, "枠ごとの読み戻し"]
-      - [frameloop, probetrace, "--trace"]
+      - [frameloop, tracecapture, "--trace・T"]
+      - [tracecapture, probetrace, "木にして書く"]
       - [probetrace, probereference, "予想"]
       - [tracetest, probesim]
       - [tracetest, probetrace, "並べて比べる・食い違いの場所"]

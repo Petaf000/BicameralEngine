@@ -1,6 +1,8 @@
 // readback_ring.cpp — 待たない読み戻し(T-0004)。使い方は readback_ring.h。
 #include "gpu/readback_ring.h"
 
+#include <algorithm>
+
 #include "gpu/com_ptr.h"
 #include "gpu/resources.h"
 
@@ -37,12 +39,13 @@ namespace bicameral::gpu {
         list->ResourceBarrier(1, &barrier);
     }
 
-    void ReadbackRing::RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot) const {
+    void ReadbackRing::RecordReadbackAndReset(ID3D12GraphicsCommandList* list, uint32_t slot,
+                                              uint64_t copyBytes) const {
         ID3D12Resource* buffer = m_buffer.Get();
         const D3D12_RESOURCE_BARRIER toCopySource = Transition(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                                D3D12_RESOURCE_STATE_COPY_SOURCE);
         list->ResourceBarrier(1, &toCopySource);
-        list->CopyBufferRegion(m_readbacks[slot].Get(), 0, buffer, 0, m_bytes);
+        list->CopyBufferRegion(m_readbacks[slot].Get(), 0, buffer, 0, std::min(copyBytes, m_bytes));
 
         const D3D12_RESOURCE_BARRIER toCopyDest = Transition(buffer, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                              D3D12_RESOURCE_STATE_COPY_DEST);

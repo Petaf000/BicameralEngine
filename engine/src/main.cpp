@@ -19,6 +19,8 @@
 //   --trace <path>                   伝導の連鎖のトレースを刻みごとの木にして、終わるときに書く(sim/probe_trace.h。T-0087)
 //   --trace-ticks <始め>:<終わり>    トレースする刻み [始め, 終わり)(既定: 全部)
 //   --trace-cells <x,y,z>:<x,y,z>    トレースするセルの箱 [最小, 最大)(既定: 全部。そのセルを含むブロックを記録する)
+//   --trace-dir <path>               窓の T で集めたトレースを書くフォルダ(既定: exe の横の traces/。T-0088)
+//   --auto-trace                     30 フレーム目に T を押す(人がいない確認で T の流れを通す。--auto-click と一緒に)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -34,6 +36,7 @@
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/log_sinks.h"
+#include "core/paths.h"
 #include "core/singleton.h"
 #include "core/unicode.h"
 #include "frame/frame_loop.h"
@@ -56,8 +59,6 @@ namespace {
         std::array<uint64_t, 6> traceCells = {
             0, 0, 0, sim::PROBE_GRID_SIZE, sim::PROBE_GRID_SIZE, sim::PROBE_GRID_SIZE};
     };
-
-    constexpr uint32_t TRACE_CAPACITY_PER_FRAME = 1u << 16;  // 1 フレームに GPU が書ける記録(1 MiB)
 
     // --- コマンドライン ---
 
@@ -128,9 +129,9 @@ namespace {
             return static_cast<uint32_t>(std::min<uint64_t>(options.traceCells[index], sim::PROBE_GRID_SIZE));
         };
 
-        options.frameLoop.trace = sim::ProbeTraceFilterForCells(options.traceTicks[0], options.traceTicks[1],
-                                                                {cell(0), cell(1), cell(2)},
-                                                                {cell(3), cell(4), cell(5)}, TRACE_CAPACITY_PER_FRAME);
+        options.frameLoop.trace = sim::ProbeTraceFilterForCells(
+            options.traceTicks[0], options.traceTicks[1], {cell(0), cell(1), cell(2)}, {cell(3), cell(4), cell(5)},
+            frame::TRACE_CAPACITY_PER_FRAME);
     }
 
     // "yaw,pitch,距離"(小数でよい)。距離は正
@@ -228,6 +229,8 @@ namespace {
             loop.vsync = false;
         else if (argument == L"--auto-click")
             loop.autoClick = true;
+        else if (argument == L"--auto-trace")
+            loop.autoTrace = true;
         else if (argument == L"--warp")
             loop.adapter = gpu::AdapterKind::Warp;
         else if (argument == L"--render-normal")
@@ -263,6 +266,8 @@ namespace {
                     return std::unexpected(parsed.error());
             } else if (argument == L"--trace" && hasValue)
                 options.frameLoop.tracePath = arguments[++i];
+            else if (argument == L"--trace-dir" && hasValue)
+                options.frameLoop.traceDirectory = arguments[++i];
             else if (argument == L"--record" && hasValue)
                 options.frameLoop.recordPath = arguments[++i];
             else if (argument == L"--replay" && hasValue)
@@ -279,6 +284,8 @@ namespace {
         }
 
         ApplyTraceRange(options);
+        if (options.frameLoop.traceDirectory.empty())
+            options.frameLoop.traceDirectory = ExecutableDirectory() / L"traces";
 
         return options;
     }

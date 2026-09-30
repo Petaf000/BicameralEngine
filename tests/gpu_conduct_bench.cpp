@@ -5,7 +5,8 @@
 // 結果は Markdown の表の行としてログに出す(docs/perf.md に貼る)。熱の合計がつつきの分から変わっていたら失敗(長い刻みでの保存則の確認)。
 //
 // ctest には登録しない(時間がかかり、時間は機械しだい)。走らせ方: `job.py run -Preset release -Exe gpu_conduct_bench`。
-// 引数は gpu_test_options.h(--warp)と、--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)。
+// 引数は gpu_test_options.h(--warp)と、--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)か
+// --trace-idle(容量は確保して範囲は無効。実行中に範囲を変えられるようにしたときの、使っていない間の費用。T-0088)。
 // WARP での時間は GPU の目安にならない。
 #include <algorithm>
 #include <array>
@@ -122,10 +123,12 @@ namespace {
         }
     }
 
-    ScenarioResult RunScenario(ID3D12Device5* device, const Scenario& scenario, const gpu::GraphTraceFilter& trace) {
+    ScenarioResult RunScenario(ID3D12Device5* device, const Scenario& scenario, const gpu::GraphTraceFilter& trace,
+                               uint32_t traceCapacity) {
         ScenarioResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"ConductBench");
-        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, {.trace = trace});
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                           {.trace = trace, .traceCapacity = traceCapacity});
         if (!queue || !simulation)
             return result;
 
@@ -194,13 +197,21 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // --trace だけはこのベンチの引数(残りは gpu_test_options.h)
+    // --trace・--trace-idle だけはこのベンチの引数(残りは gpu_test_options.h)
     std::vector<char*> arguments(argv, argv + argc);
-    const auto traceArgument = rng::find_if(
-        arguments, [](const char* argument) { return std::string_view(argument) == "--trace"; });
-    const bool traced = traceArgument != arguments.end();
-    if (traced)
-        arguments.erase(traceArgument);
+    const auto takeArgument = [&arguments](std::string_view name) {
+        const auto found = rng::find_if(arguments, [name](const char* argument) { return argument == name; });
+        if (found == arguments.end())
+            return false;
+
+        arguments.erase(found);
+
+        return true;
+    };
+
+    const bool traced = takeArgument("--trace");
+    const bool idle = takeArgument("--trace-idle");
+    const uint32_t traceCapacity = idle ? TRACE_CAPACITY : 0;
 
     const gpu::GraphTraceFilter trace = traced
                                             ? ProbeTraceFilterForCells(
@@ -210,7 +221,7 @@ int main(int argc, char** argv) {
 
     const auto options = test::ParseGpuTestOptions(std::span(arguments));
     if (!options) {
-        Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp] [--trace]");
+        Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp] [--trace | --trace-idle]");
         bicameral::SingletonFinalizer::Finalize();
 
         return 2;
@@ -224,14 +235,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Log(Channel::Sim, Level::Info, "連鎖のトレース: {}", traced ? "全部を記録する" : "無効");
+    Log(Channel::Sim, Level::Info, "連鎖のトレース: {}",
+        traced ? "全部を記録する" : (idle ? "容量だけ確保して無効(T-0088)" : "無効"));
     Log(Channel::Sim, Level::Info,
         "| 規模 | 計算したブロック | 刻みの数 | 平均ブロック | 伝導 µs/刻み | ns/ブロック |");
     Log(Channel::Sim, Level::Info, "|---|---|---|---|---|---|");
     bool passed = true;
 
     for (const Scenario& scenario : SCENARIOS) {
-        const ScenarioResult result = RunScenario(device->Get(), scenario, trace);
+        const ScenarioResult result = RunScenario(device->Get(), scenario, trace, traceCapacity);
         if (!result.ok)
             Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
 
