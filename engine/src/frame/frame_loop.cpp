@@ -1,15 +1,16 @@
-// frame_loop.cpp — 窓・2 つのキュー・記録済みのリスト・待たない読み戻しでフレームを回す(T-0004)。考え方は frame_loop.h。
+// frame_loop.cpp — 窓・2 つのキュー・予算ぶんのシミュ・待たない読み戻しでフレームを回す(T-0004・T-0012)。考え方は frame_loop.h。
 //
 // 1 フレームの流れ(CPU):
-//   窓のメッセージ → スワップチェインの待ち(歩調)→ 経過時間を TickPacer へ
-//   → 終わったバッチ・フレームの読み戻し(フェンスが進んだ分だけ。待たない)
-//   → クリックをコマンドに → シミュのバッチを compute キューへ(描画が読み終えるまで GPU の上で待たせる)
-//   → 描画を direct キューへ(終わっている最新のバッチを見せる。シミュを待たない)→ Present
+//   窓のメッセージ → スワップチェインの待ち(歩調)→ 経過時間を SimScheduler へ
+//   → 終わったシミュのリストの読み戻し(フェンスが進んだ分だけ。待たない。単位の GPU 時間・ハッシュ・イベント)
+//   → クリックをコマンドに → 予算ぶんの単位を記録して compute キューへ(ADR-0011)
+//   → 描画を direct キューへ(終わっている最新の抽出を見せる。シミュを待たない)→ Present
 //
-// 抽出の 3 組の約束(06 §4): バッチ b は抽出 b % 3 に書く。描画は「見せるバッチ」d(CPU から見て終わっている最新)の
-//   抽出 d % 3 を読む。次に抽出 d % 3 に書くのはバッチ d + 3 で、それは描画のフェンスを GPU の上で待ってから走る
-//   (m_lastRenderReading)。バッチは 2 つまでしか重ねないので、終わっている最新 d ≥ 最後に投げたバッチ − 2
-//   → d + 3 はまだ投げていない(必ずこの待ちを通る)。描画がシミュを待つことは無い(D-201)。
+// 抽出の 3 組の約束(06 §4): 抽出は 1 フレームに 1 回まで、そのフレームに投げた単位の後ろで刻みの境界の状態を写す。
+//   抽出 n は組 n % 3 に書き、CPU から見て終わっている抽出が n − 2 以上のときだけ投げる(でなければそのフレームは写さない)。
+//   描画は終わっている最新の抽出 d(≥ n − 2、< n)を読むので、書いている組と重ならない。
+//   さらに抽出 n の前に、組 n % 3 を最後に読んだ描画のフェンスを compute キューに GPU の上で待たせる(m_lastRenderReading)。
+//   描画がシミュを待つことは無い(D-201)。
 #include "frame/frame_loop.h"
 
 #include <chrono>
@@ -17,7 +18,7 @@
 #include <thread>
 
 #include "core/log.h"
-#include "frame/tick_pacer.h"
+#include "frame/sim_scheduler.h"
 #include "gpu/queue.h"
 #include "gpu/resources.h"
 #include "gpu/swap_chain.h"
@@ -33,7 +34,7 @@ namespace bicameral::frame {
         using Clock = std::chrono::steady_clock;
 
         constexpr uint32_t FRAME_SLOT_COUNT = gpu::SwapChain::BUFFER_COUNT;
-        constexpr uint32_t BATCH_SLOT_COUNT = sim::ProbeSim::BATCH_SLOT_COUNT;
+        constexpr uint32_t SIM_SLOT_COUNT = sim::ProbeSim::FRAME_SLOT_COUNT;
         constexpr uint32_t INITIAL_CLIENT_WIDTH = 1280;
         constexpr uint32_t INITIAL_CLIENT_HEIGHT = 720;
         constexpr uint32_t FRAME_WAIT_TIMEOUT_MS = 100;
@@ -47,9 +48,13 @@ namespace bicameral::frame {
             return std::chrono::duration<double, std::milli>(duration).count();
         }
 
+        double TimestampMilliseconds(uint64_t ticks, uint64_t frequency) {
+            if (frequency == 0) return 0.0;
+            return static_cast<double>(ticks) * 1000.0 / static_cast<double>(frequency);
+        }
+
         double TimestampMilliseconds(uint64_t begin, uint64_t end, uint64_t frequency) {
-            if (frequency == 0 || end < begin) return 0.0;
-            return static_cast<double>(end - begin) * 1000.0 / static_cast<double>(frequency);
+            return end < begin ? 0.0 : TimestampMilliseconds(end - begin, frequency);
         }
 
         // 描画のフレームごとに持つもの(バックバッファの番号 = スワップチェインの CurrentIndex)
@@ -61,27 +66,23 @@ namespace bicameral::frame {
             uint64_t renderFence = 0;  // このリストを最後に投げた direct のフェンスの値(0 = まだ)
         };
 
-        // 投げたバッチ(バッチの枠ごと)。フェンスが number に届いたら読む
-        struct BatchRecord {
-            uint64_t number = 0;  // compute のフェンスの値 = バッチの通し番号(1 から)
-            uint64_t firstTick = 0;
-            uint32_t tickCount = 0;
+        // 投げたシミュのリスト(ProbeSim のフレームの枠ごと)。フェンスが fence に届いたら読む
+        struct SimSubmission {
+            uint64_t fence = 0;       // compute のフェンスの値
+            uint64_t extraction = 0;  // このリストが書いた抽出の番号(0 = 写していない)
             bool read = true;
         };
 
-        // 重さの試験を別々の投入にして、何フレームかに分けて投げている途中のバッチ(R-LOOP-2、T-0085)。list が nullptr なら無し
-        struct PendingBatch {
-            ID3D12CommandList* list = nullptr;
-            uint32_t slot = 0;
-            uint32_t extractionTarget = 0;
-            uint32_t piecesLeft = 0;  // まだ投げていない重さの個数
-            uint32_t piecesDone = 0;
+        // 描画が見せる抽出(CPU から見て終わっている最新)
+        struct CompletedExtraction {
+            uint64_t number = 0;  // 0 = まだ無い(組 0 は 0 のまま)
+            uint64_t fence = 0;   // それを書いたシミュのリストの compute のフェンスの値
         };
 
         struct PendingClick {
             uint32_t x = 0;
             uint32_t y = 0;
-            uint64_t tick = UINT64_MAX;  // 載せたバッチの刻み(まだなら UINT64_MAX)
+            uint64_t tick = UINT64_MAX;  // 載せた刻み(まだなら UINT64_MAX)
             Clock::time_point time;
         };
 
@@ -91,14 +92,16 @@ namespace bicameral::frame {
             double cpuMilliseconds = 0.0;
             double cpuMaxMilliseconds = 0.0;
             double presentMilliseconds = 0.0;  // cpuMilliseconds のうち Present の中にいた時間
-            uint64_t ticks = 0;
-            uint64_t batches = 0;
-            double simGpuMilliseconds = 0.0;
-            uint64_t simBatchesMeasured = 0;
+            uint64_t ticks = 0;                // 終わった刻み(読み戻したハッシュの数)
+            uint64_t simSubmissions = 0;
+            uint64_t units = 0;
+            double simGpuMilliseconds = 0.0;  // シミュのリスト全体(抽出と読み戻しを含む)
+            uint64_t simSubmissionsMeasured = 0;
             double renderGpuMilliseconds = 0.0;
             uint64_t renderFramesMeasured = 0;
-            uint64_t cpuWaits = 0;        // 描画の枠を使い回す前に CPU が GPU を待った回数(0 のはず)
-            uint64_t skippedBatches = 0;  // シミュが終わっていないので投げなかったフレーム
+            uint64_t cpuWaits = 0;            // 描画の枠を使い回す前に CPU が GPU を待った回数(0 のはず)
+            uint64_t skippedSubmissions = 0;  // シミュの枠が空いていないので投げなかったフレーム
+            uint64_t skippedExtractions = 0;  // 抽出の 3 組の約束で写さなかったフレーム
             uint64_t events = 0;
         };
 
@@ -124,6 +127,8 @@ namespace bicameral::frame {
                   m_swapChain(std::move(parts.swapChain)),
                   m_sim(std::move(parts.simulation)),
                   m_view(std::move(parts.view)),
+                  m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
+                                                     .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
                   m_directFrequency(m_direct.TimestampFrequency()) {}
 
@@ -134,13 +139,13 @@ namespace bicameral::frame {
             bool RecordRenderLists();
             bool HandleResize();
 
-            void CollectBatches();
-            void ReportEvents(const sim::ProbeBatchReadback& readback);
+            void CollectSimSubmissions();
+            void ReportSimReadback(const sim::ProbeFrameReadback& readback);
+            void ReportEvents(const sim::ProbeFrameReadback& readback);
             void CollectFrameSlot(uint32_t slotIndex);
             void QueueClicks();
-            size_t AssignCommandTicks();
-            void SubmitSimBatch();
-            void AdvancePendingBatch();
+            size_t AssignCommandTicks(SimCursor start, uint32_t unitCount);
+            bool SubmitSim();
             void SubmitRender();
             bool RunFrame(Clock::time_point frameStart);
             int Finish(bool failed, Clock::time_point start);
@@ -161,13 +166,14 @@ namespace bicameral::frame {
             ComPtr<ID3D12QueryHeap> m_renderTimestamps;
             ComPtr<ID3D12Resource> m_renderTimestampReadback;
 
-            TickPacer m_pacer;
-            std::array<BatchRecord, BATCH_SLOT_COUNT> m_batches;
-            uint64_t m_nextTick = 0;
-            uint64_t m_lastDisplayedBatch = 0;
-            PendingBatch m_pending;  // 重さを別々の投入にして、何フレームかに分けて投げている途中のバッチ(R-LOOP-2)
+            SimScheduler m_scheduler;
+            std::array<SimSubmission, SIM_SLOT_COUNT> m_simSubmissions;
+            uint64_t m_simSubmissionCount = 0;
+            uint64_t m_lastExtraction = 0;  // 最後に投げた抽出の番号
+            CompletedExtraction m_completedExtraction;
             // 抽出の組ごとに、最後にそれを読んだ描画のフェンスの値
             std::array<uint64_t, sim::PROBE_EXTRACTION_COUNT> m_lastRenderReading{};
+            sim::ProbeTickHash m_latestHash;  // 最後に読み戻した刻みの状態のハッシュ
             std::vector<sim::ProbeCommand> m_pendingCommands;
             std::vector<PendingClick> m_clicks;
             uint32_t m_nextSequence = 0;
@@ -198,7 +204,7 @@ namespace bicameral::frame {
             if (!device) return std::unexpected(device.error());
             ID3D12Device5* native = device->Get();
 
-            // 描画のキューは優先度を上げる: 重いシミュと並んでも描画が先に進みやすい(06 §4・R-LOOP-2。docs/perf.md)
+            // 描画のキューは優先度を上げる(効果は無かったが害も無い。R-LOOP-2。docs/perf.md)
             auto direct = gpu::Queue::Create(
                 native, D3D12_COMMAND_LIST_TYPE_DIRECT, L"Render",
                 options.renderHighPriority ? D3D12_COMMAND_QUEUE_PRIORITY_HIGH : D3D12_COMMAND_QUEUE_PRIORITY_NORMAL);
@@ -209,7 +215,7 @@ namespace bicameral::frame {
             if (!swapChain) return std::unexpected(swapChain.error());
             auto simulation =
                 sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                      {.busyPieces = options.simSplit, .busyInSeparateSubmits = options.splitSubmit});
+                                      {.busyIterations = options.simLoad, .busyPieces = options.simSplit});
             if (!simulation) return std::unexpected(simulation.error());
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view) return std::unexpected(view.error());
@@ -277,7 +283,7 @@ namespace bicameral::frame {
             if (m_window->IsMinimized()) return true;
             // バックバッファを使うリストを GPU が全部終えてから(ここだけ CPU が待つ。Present の分も待つ)
             if (!m_direct.Flush() || !m_compute.Flush()) return false;
-            CollectBatches();
+            CollectSimSubmissions();
             for (uint32_t index = 0; index < FRAME_SLOT_COUNT; ++index) {
                 CollectFrameSlot(index);
             }
@@ -288,23 +294,36 @@ namespace bicameral::frame {
 
         // --- 読み戻し(待たない)---
 
-        void FrameLoop::CollectBatches() {
-            for (uint32_t slot = 0; slot < BATCH_SLOT_COUNT; ++slot) {
-                BatchRecord& batch = m_batches[slot];
-                if (batch.read || !m_compute.IsComplete(batch.number)) continue;
-                batch.read = true;
-                const sim::ProbeBatchReadback readback = m_sim.ReadBatch(slot);
-                const double gpuMilliseconds =
-                    TimestampMilliseconds(readback.gpuBeginTimestamp, readback.gpuEndTimestamp, m_computeFrequency);
-                m_pacer.ReportGpuTime(gpuMilliseconds, batch.tickCount);
-                m_interval.simGpuMilliseconds += gpuMilliseconds;
-                ++m_interval.simBatchesMeasured;
-                ReportEvents(readback);
+        void FrameLoop::CollectSimSubmissions() {
+            for (uint32_t slot = 0; slot < SIM_SLOT_COUNT; ++slot) {
+                SimSubmission& submission = m_simSubmissions[slot];
+                if (submission.read || !m_compute.IsComplete(submission.fence)) continue;
+                submission.read = true;
+                ReportSimReadback(m_sim.ReadFrame(slot));
+                if (submission.extraction > m_completedExtraction.number) {
+                    m_completedExtraction = {.number = submission.extraction, .fence = submission.fence};
+                }
             }
         }
 
+        // 単位ごとの GPU 時間を SimScheduler へ。終えた刻みのハッシュとイベント
+        void FrameLoop::ReportSimReadback(const sim::ProbeFrameReadback& readback) {
+            const uint32_t unitsPerTick = m_sim.UnitsPerTick();
+            for (size_t index = 0; index < readback.unitGpuTicks.size(); ++index) {
+                const auto unit = static_cast<uint32_t>((readback.firstUnit + index) % unitsPerTick);
+                m_scheduler.ReportUnitTime(unit,
+                                           TimestampMilliseconds(readback.unitGpuTicks[index], m_computeFrequency));
+            }
+            m_interval.simGpuMilliseconds +=
+                TimestampMilliseconds(readback.gpuBeginTimestamp, readback.gpuEndTimestamp, m_computeFrequency);
+            ++m_interval.simSubmissionsMeasured;
+            m_interval.ticks += readback.hashes.size();
+            if (!readback.hashes.empty()) m_latestHash = readback.hashes.back();
+            ReportEvents(readback);
+        }
+
         // つつきが適用されたことをログへ(クリックから CPU に戻るまでの時間つき)
-        void FrameLoop::ReportEvents(const sim::ProbeBatchReadback& readback) {
+        void FrameLoop::ReportEvents(const sim::ProbeFrameReadback& readback) {
             const auto now = Clock::now();
             for (const sim::ProbeEvent& event : readback.events) {
                 ++m_interval.events;
@@ -334,8 +353,10 @@ namespace bicameral::frame {
             std::array<uint64_t, size_t{FRAME_SLOT_COUNT} * TIMESTAMPS_PER_FRAME> timestamps{};
             if (gpu::ReadBuffer(m_renderTimestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
                 const size_t first = size_t{slotIndex} * TIMESTAMPS_PER_FRAME;
-                m_interval.renderGpuMilliseconds +=
+                const double milliseconds =
                     TimestampMilliseconds(timestamps[first], timestamps[first + 1], m_directFrequency);
+                m_scheduler.ReportRenderTime(milliseconds);
+                m_interval.renderGpuMilliseconds += milliseconds;
                 ++m_interval.renderFramesMeasured;
             }
             slot.renderFence = 0;
@@ -369,84 +390,65 @@ namespace bicameral::frame {
             }
         }
 
-        // 次のバッチの最初の刻みを、載せるコマンドに付ける(載せきれない分は次のバッチへ)。載せる数を返す
-        size_t FrameLoop::AssignCommandTicks() {
+        // このフレームに投げる単位の中で最初に来る「適用の単位」の刻みを、載せるコマンドに付ける。
+        // 適用の単位が無ければ載せない(次のフレームへ)。載せきれない分も次へ。載せる数を返す
+        size_t FrameLoop::AssignCommandTicks(SimCursor start, uint32_t unitCount) {
+            const uint32_t unitsToNextTick = start.unit == 0 ? 0 : m_sim.UnitsPerTick() - start.unit;
+            if (unitsToNextTick >= unitCount) return 0;
+            const uint64_t applyTick = start.unit == 0 ? start.tick : start.tick + 1;
+
             const size_t commandCount = std::min<size_t>(m_pendingCommands.size(), sim::PROBE_MAX_COMMANDS);
             for (sim::ProbeCommand& command : std::span(m_pendingCommands).first(commandCount)) {
-                command.targetTick = m_nextTick;
+                command.targetTick = applyTick;
                 const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
                     return pending.tick == UINT64_MAX && pending.x == command.payload[0] &&
                            pending.y == command.payload[1];
                 });
-                if (click != m_clicks.end()) click->tick = m_nextTick;
+                if (click != m_clicks.end()) click->tick = applyTick;
             }
             return commandCount;
         }
 
         // --- 投げる ---
 
-        void FrameLoop::SubmitSimBatch() {
-            if (m_pending.list != nullptr) {
-                AdvancePendingBatch();
-                return;
+        // 予算ぶんの単位を記録して compute キューへ(ADR-0011)。記録に失敗したら false(直せない誤り)
+        bool FrameLoop::SubmitSim() {
+            const auto slot = static_cast<uint32_t>(m_simSubmissionCount % SIM_SLOT_COUNT);
+            SimSubmission& submission = m_simSubmissions[slot];
+            if (!submission.read) {  // その枠のリストがまだ GPU にある(読めていない)
+                ++m_interval.skippedSubmissions;
+                return true;
             }
-            const uint64_t submitted = m_compute.LastSubmitted();
-            // 2 つまで重ねる(GPU が次のバッチをすぐ始められるように)。それ以上は投げない(抽出の 3 組の約束。ファイルの先頭)
-            if (submitted - m_compute.CompletedValue() >= 2) {
-                ++m_interval.skippedBatches;
-                return;
-            }
-            const uint64_t number = submitted + 1;
-            const auto slot = static_cast<uint32_t>(number % BATCH_SLOT_COUNT);
-            if (!m_batches[slot].read) return;  // その枠の前のバッチを読めていない(起きないはず)
-            const uint32_t tickCount = m_pacer.TakeTicks();
-            if (tickCount == 0) return;
+            const SimCursor start = m_scheduler.Cursor();
+            const uint32_t unitCount = m_scheduler.TakeUnits();
+            if (unitCount == 0) return true;
 
-            const size_t commandCount = AssignCommandTicks();
-            const auto extractionTarget = static_cast<uint32_t>(number % sim::PROBE_EXTRACTION_COUNT);
+            const size_t commandCount = AssignCommandTicks(start, unitCount);
+            const uint64_t extraction = m_lastExtraction + 1;
+            const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
+            if (!extract) ++m_interval.skippedExtractions;
+            const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
             ID3D12CommandList* list =
-                m_sim.PrepareBatch(slot, {.firstTick = m_nextTick,
-                                          .tickCount = tickCount,
-                                          .extractionTarget = extractionTarget,
-                                          .busyIterations = m_options.simLoad,
-                                          .commands = std::span(m_pendingCommands).first(commandCount)});
-            if (list == nullptr) return;
+                m_sim.RecordFrame(slot, {.firstTick = start.tick,
+                                         .firstUnit = start.unit,
+                                         .unitCount = unitCount,
+                                         .extract = extract,
+                                         .extractionTarget = extractionTarget,
+                                         .commands = std::span(m_pendingCommands).first(commandCount)});
+            if (list == nullptr) return false;
             m_pendingCommands.erase(m_pendingCommands.begin(),
                                     m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(commandCount));
 
-            m_batches[slot] = {.number = number, .firstTick = m_nextTick, .tickCount = tickCount, .read = false};
-            m_nextTick += tickCount;
-            m_interval.ticks += tickCount;
-            ++m_interval.batches;
-
-            if (m_sim.BusyInSeparateSubmits()) {
-                m_pending = {.list = list,
-                             .slot = slot,
-                             .extractionTarget = extractionTarget,
-                             .piecesLeft = tickCount * m_sim.BusyPieceCount()};
-                AdvancePendingBatch();
-                return;
+            if (extract) {
+                // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
+                m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
+                m_lastExtraction = extraction;
             }
-            // 抽出 extractionTarget を描画が読み終えるまで、GPU の上で待ってから走る
-            m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
-            m_compute.Submit(list);
-        }
-
-        // 重さの試験を別々の投入にするとき(R-LOOP-2、T-0085): 重さの 1 個ずつを、フェンスを進めずに投げる。
-        // --pieces-per-frame p なら 1 フレームに p 個まで(残りは次のフレーム)。compute のキューがフレームごとに空になり、
-        // その後ろに投げる描画が間に入れる。全部投げたらバッチのリスト(フェンスを進める)を投げる
-        void FrameLoop::AdvancePendingBatch() {
-            const uint32_t perFrame = m_options.piecesPerFrame;
-            const uint32_t count = perFrame == 0 ? m_pending.piecesLeft : std::min(perFrame, m_pending.piecesLeft);
-            for (uint32_t piece = 0; piece < count; ++piece) {
-                m_compute.Execute(m_sim.BusyPieceList(m_pending.slot, m_pending.piecesDone));
-                ++m_pending.piecesDone;
-                --m_pending.piecesLeft;
-            }
-            if (m_pending.piecesLeft > 0) return;
-            m_compute.GpuWait(m_direct, m_lastRenderReading[m_pending.extractionTarget]);
-            m_compute.Submit(m_pending.list);
-            m_pending = {};
+            submission = {.fence = m_compute.Submit(list), .extraction = extract ? extraction : 0, .read = false};
+            ++m_simSubmissionCount;
+            ++m_interval.simSubmissions;
+            m_interval.units += unitCount;
+            return true;
         }
 
         void FrameLoop::SubmitRender() {
@@ -454,14 +456,11 @@ namespace bicameral::frame {
             CollectFrameSlot(index);
             FrameSlot& slot = m_frames[index];
 
-            // 見せるバッチ: CPU から見て終わっている最新(シミュを待たない。抽出の 3 組の約束。ファイルの先頭)
-            const uint64_t displayed = std::max(m_lastDisplayedBatch, m_compute.CompletedValue());
-            m_lastDisplayedBatch = displayed;
-            const auto extraction = static_cast<uint32_t>(displayed % sim::PROBE_EXTRACTION_COUNT);
-
+            // 見せる抽出: CPU から見て終わっている最新(シミュを待たない。抽出の 3 組の約束。ファイルの先頭)
+            const auto extraction = static_cast<uint32_t>(m_completedExtraction.number % sim::PROBE_EXTRACTION_COUNT);
             *slot.mappedConstants = {
                 .extractionIndex = extraction, .width = m_swapChain.Width(), .height = m_swapChain.Height()};
-            m_direct.GpuWait(m_compute, displayed);
+            m_direct.GpuWait(m_compute, m_completedExtraction.fence);
             slot.renderFence = m_direct.Submit(slot.list.Get());
             m_lastRenderReading[extraction] = slot.renderFence;
         }
@@ -479,13 +478,15 @@ namespace bicameral::frame {
             m_total.cpuMaxMilliseconds = std::max(m_total.cpuMaxMilliseconds, frame.cpuMaxMilliseconds);
             m_total.presentMilliseconds += frame.presentMilliseconds;
             m_total.ticks += frame.ticks;
-            m_total.batches += frame.batches;
+            m_total.simSubmissions += frame.simSubmissions;
+            m_total.units += frame.units;
             m_total.simGpuMilliseconds += frame.simGpuMilliseconds;
-            m_total.simBatchesMeasured += frame.simBatchesMeasured;
+            m_total.simSubmissionsMeasured += frame.simSubmissionsMeasured;
             m_total.renderGpuMilliseconds += frame.renderGpuMilliseconds;
             m_total.renderFramesMeasured += frame.renderFramesMeasured;
             m_total.cpuWaits += frame.cpuWaits;
-            m_total.skippedBatches += frame.skippedBatches;
+            m_total.skippedSubmissions += frame.skippedSubmissions;
+            m_total.skippedExtractions += frame.skippedExtractions;
             m_total.events += frame.events;
         }
 
@@ -499,24 +500,25 @@ namespace bicameral::frame {
                 return static_cast<double>(count) / seconds;
             };
             Log(Channel::Core, Level::Info,
-                "{}: {:.1f} fps  CPU {:.3f} ms/フレーム(うち Present {:.3f}、最大 {:.3f})  "
-                "世界 {:.1f} 刻み/秒({:.2f} 刻み/バッチ)  シミュ GPU {:.3f} ms/バッチ  描画 GPU {:.3f} ms/フレーム  "
-                "捨てた刻み {}  見送り {}  CPU の待ち {}  イベント {}",
+                "{}: {:.1f} fps  CPU {:.3f} ms/フレーム(うち Present {:.3f}、最大 {:.3f})  世界 {:.1f} 刻み/秒  "
+                "シミュ {:.1f} 単位/投入・GPU {:.3f} ms/投入(予算 {:.2f})  描画 GPU {:.3f} ms/フレーム  "
+                "捨てた刻み {}  見送り {}(抽出 {})  CPU の待ち {}  イベント {}  状態 S({}) = {:016x}",
                 label, perSecond(stats.frames), average(stats.cpuMilliseconds, stats.frames),
                 average(stats.presentMilliseconds, stats.frames), stats.cpuMaxMilliseconds, perSecond(stats.ticks),
-                average(static_cast<double>(stats.ticks), stats.batches),
-                average(stats.simGpuMilliseconds, stats.simBatchesMeasured),
-                average(stats.renderGpuMilliseconds, stats.renderFramesMeasured), m_pacer.DroppedTicks(),
-                stats.skippedBatches, stats.cpuWaits, stats.events);
+                average(static_cast<double>(stats.units), stats.simSubmissions),
+                average(stats.simGpuMilliseconds, stats.simSubmissionsMeasured), m_scheduler.BudgetMilliseconds(),
+                average(stats.renderGpuMilliseconds, stats.renderFramesMeasured), m_scheduler.DroppedTicks(),
+                stats.skippedSubmissions, stats.skippedExtractions, stats.cpuWaits, stats.events, m_latestHash.tick,
+                m_latestHash.hash);
         }
 
         // --- ループ ---
 
         // 1 フレーム分(歩調の待ちの後)。デバイスの喪失や Present の失敗なら false
         bool FrameLoop::RunFrame(Clock::time_point frameStart) {
-            CollectBatches();
+            CollectSimSubmissions();
             QueueClicks();
-            SubmitSimBatch();
+            if (!SubmitSim()) return false;
             SubmitRender();
             const auto presentStart = Clock::now();
             const bool presented = m_swapChain.Present(m_options.vsync);
@@ -533,12 +535,11 @@ namespace bicameral::frame {
 
         int FrameLoop::Run() {
             Log(Channel::Core, Level::Info,
-                "フレームのループを始める(vsync {}  先行 {}  重さ {}(分けて {} 個・{})  描画の優先度 {}  自動クリック "
-                "{})",
-                m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.simLoad, m_options.simSplit,
-                m_options.splitSubmit ? std::format("別々の投入・1 フレームに {} 個", m_options.piecesPerFrame)
-                                      : std::string("リストの中"),
-                m_options.renderHighPriority ? "HIGH" : "NORMAL", m_options.autoClick ? "あり" : "なし");
+                "フレームのループを始める(vsync {}  先行 {}  目標 {} fps  重さ {}(分けて {} 個。1 刻み {} 単位)  "
+                "描画の優先度 {}  自動クリック {})",
+                m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.targetFps, m_options.simLoad,
+                m_options.simSplit, m_sim.UnitsPerTick(), m_options.renderHighPriority ? "HIGH" : "NORMAL",
+                m_options.autoClick ? "あり" : "なし");
             const auto start = Clock::now();
             auto lastFrame = start;
             auto intervalStart = start;
@@ -553,7 +554,7 @@ namespace bicameral::frame {
 
                 m_swapChain.WaitForFrame(FRAME_WAIT_TIMEOUT_MS);  // フレームの歩調(CPU が GPU より先に行き過ぎない)
                 const auto frameStart = Clock::now();
-                m_pacer.AddRealTime(std::chrono::duration<double>(frameStart - lastFrame).count());
+                m_scheduler.AddRealTime(std::chrono::duration<double>(frameStart - lastFrame).count());
                 lastFrame = frameStart;
                 if (!RunFrame(frameStart)) return Finish(true, start);
                 if (frameStart - intervalStart < STATS_INTERVAL) continue;
@@ -579,7 +580,7 @@ namespace bicameral::frame {
             }
             m_direct.Flush();  // Present の分も待つ(バックバッファを解放する前に)
             m_compute.Flush();
-            CollectBatches();
+            CollectSimSubmissions();
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");
             if (m_device.ValidationErrorCount() > 0) {

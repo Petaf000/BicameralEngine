@@ -44,12 +44,12 @@ views:
       - { id: main, group: exe, label: "wmain()<br/>コマンドラインの振り分け", code: "engine/src/main.cpp::wmain" }
       - { id: frameloop, group: framelib, label: "RunFrameLoop()<br/>待ち → 読み戻し → 入力 → シミュ → 描画 → Present",
           code: "engine/src/frame/frame_loop.cpp::RunFrameLoop", ticket: T-0004, doc: docs/design/06-simulation-loop.md,
-          note: "抽出は 3 組。描画は終わっている最新を読み、シミュを待たない。バッチは 2 つまで重ねる" }
+          note: "1 フレームに予算ぶんの単位だけ投げ、後ろに描画(ADR-0011)。抽出は 3 組、描画は終わっている最新を読む" }
       - { id: window, group: framelib, label: "Window<br/>Win32 の窓・クリック・DPI",
           code: "engine/src/platform/window.cpp::Window::Create", ticket: T-0004 }
-      - { id: pacer, group: framelib, label: "TickPacer<br/>1 フレームの刻みの数(経過時間・GPU の時間)",
-          code: "engine/src/frame/tick_pacer.cpp::TickPacer::TakeTicks", ticket: T-0004,
-          note: "追いつけない分は捨てる → 世界が遅くなる(D-202)。tick_pacer_test" }
+      - { id: scheduler, group: framelib, label: "SimScheduler<br/>1 フレームに投げる単位の数(予算・単位の GPU 時間)",
+          code: "engine/src/frame/sim_scheduler.cpp::SimScheduler::TakeUnits", ticket: T-0012, doc: docs/decisions/ADR-0011-sim-frame-budget.md,
+          note: "予算 = 1000 / 目標 fps − 描画 − 余裕。刻みはフレームをまたぐ。追いつけない分は捨てる(D-202)。sim_scheduler_test" }
       - { id: probeview, group: framelib, label: "ProbeView<br/>画面いっぱいの三角形で抽出を描く",
           code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0004 }
       - { id: queue, group: gpulib, label: "Queue<br/>キュー + フェンス(Submit・GpuWait・待たずに見る)",
@@ -59,16 +59,16 @@ views:
       - { id: readbackring, group: gpulib, label: "ReadbackRing<br/>追記バッファを枠ごとの読み戻しへ(待たない)",
           code: "engine/src/gpu/readback_ring.cpp::ReadbackRing::RecordReadbackAndReset", ticket: T-0004,
           doc: docs/design/06-simulation-loop.md }
-      - { id: probesim, group: simlib, label: "ProbeSim<br/>刻みの数ごとに記録したバッチのリスト",
-          code: "engine/src/sim/probe_sim.cpp::ProbeSim::PrepareBatch", ticket: T-0004,
-          note: "コマンド(64 バイト)→ つつき → 拡散 → 抽出。イベントとタイムスタンプを読み戻す" }
-      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>ApplyCommands / Diffuse / Extract",
-          code: "shaders/sim/probe_tick.hlsl::GenerationBase", ticket: T-0004 }
+      - { id: probesim, group: simlib, label: "ProbeSim<br/>1 刻み = 単位の列。フレームの枠ごとのリストに毎フレーム記録",
+          code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordFrame", ticket: T-0012,
+          note: "適用 → 拡散 → 重さ × k → ハッシュ。単位ごとのタイムスタンプ・刻みごとのハッシュ・イベントを読み戻す" }
+      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>ApplyCommands / Diffuse / Busy / HashBegin / HashCells / Extract",
+          code: "shaders/sim/probe_tick.hlsl::GenerationBase", ticket: T-0012 }
       - { id: probereference, group: simlib, label: "ProbeReference<br/>CPU リファレンス(probe_sim.hlsli を共有)",
           code: "engine/src/sim/probe_sim.cpp::ProbeReference::Advance", ticket: T-0004 }
       - { id: probesimtest, group: tests, label: "gpu_probe_sim_test<br/>分け方を変えても CPU とビット一致",
-          code: "tests/gpu_probe_sim_test.cpp::RunSplit", ticket: T-0004,
-          note: "8 ずつ / 1 ずつ / ばらばら × ハードウェア / WARP。イベントの数と場所も" }
+          code: "tests/gpu_probe_sim_test.cpp::RunPlan", ticket: T-0012,
+          note: "単位の分け方 5 通り × ハードウェア / WARP で、刻みごとのハッシュ列・最後の抽出・イベントが CPU と一致" }
       - { id: caps, group: exe, label: "RunCapsProbe()<br/>アダプタを列挙して機能を問い合わせる",
           code: "engine/src/platform/caps.cpp::RunCapsProbe", ticket: T-0001 }
       - { id: runtime, group: exe, label: "ReportRuntime()<br/>どの D3D12Core.dll が読まれたか",
@@ -169,8 +169,8 @@ views:
       - [ringtest, workgraph, "ノードから print"]
       - [main, frameloop, "引数なし"]
       - [frameloop, window, "クリック"]
-      - [frameloop, pacer, "刻みの数"]
-      - [frameloop, probesim, "バッチ(compute キュー)"]
+      - [frameloop, scheduler, "単位の数"]
+      - [frameloop, probesim, "予算ぶんの単位(compute キュー)"]
       - [frameloop, probeview, "記録済みのリスト(direct キュー)"]
       - [frameloop, queue, "Submit・GpuWait"]
       - [frameloop, swapchain, "WaitForFrame・Present"]

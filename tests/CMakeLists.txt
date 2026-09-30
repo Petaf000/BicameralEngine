@@ -10,9 +10,9 @@ add_executable(log_test log_test.cpp)
 target_link_libraries(log_test PRIVATE bicameral_core)
 add_test(NAME log COMMAND log_test)
 
-add_executable(tick_pacer_test tick_pacer_test.cpp)
-target_link_libraries(tick_pacer_test PRIVATE bicameral_frame)
-add_test(NAME tick_pacer COMMAND tick_pacer_test)
+add_executable(sim_scheduler_test sim_scheduler_test.cpp)
+target_link_libraries(sim_scheduler_test PRIVATE bicameral_frame)
+add_test(NAME sim_scheduler COMMAND sim_scheduler_test)
 
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)

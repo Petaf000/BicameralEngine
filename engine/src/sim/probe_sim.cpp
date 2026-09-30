@@ -1,4 +1,4 @@
-// probe_sim.cpp — T-0004 の仮の刻みを GPU で走らせる(記録済みのバッチのリスト)と、その CPU リファレンス。
+// probe_sim.cpp — 仮の刻みを単位の列として GPU で走らせる(フレームの枠ごとのリストに毎フレーム記録)と、その CPU リファレンス。
 // 使い方とデータの流れは probe_sim.h、規則は shaders/common/probe_sim.hlsli。
 #include "sim/probe_sim.h"
 
@@ -10,22 +10,24 @@ using Microsoft::WRL::ComPtr;
 namespace bicameral::sim {
     namespace {
 
-        // ルート署名: u0 世界・u1 イベント・u2/u3/u5 抽出・u4 重さの捨て場 → b0 刻みの枠 → デバッグのリング → t0 バッチの入力
+        // ルート署名: u0 世界・u1 イベント・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表 → b0 単位の定数
+        //            → デバッグのリング → t0 フレームの入力
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 6, .rootConstantCount = 1, .debugRing = true, .srvCount = 1};
+            .uavCount = 7, .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 1};
         constexpr uint32_t UAV_WORLD = 0;
         constexpr uint32_t UAV_EVENTS = 1;
         constexpr uint32_t UAV_EXTRACTION0 = 2;
         constexpr uint32_t UAV_EXTRACTION1 = 3;
         constexpr uint32_t UAV_BUSY_SINK = 4;
         constexpr uint32_t UAV_EXTRACTION2 = 5;
-        constexpr uint32_t SRV_BATCH = 0;
+        constexpr uint32_t UAV_HASHES = 6;
+        constexpr uint32_t SRV_INPUT = 0;
 
-        constexpr uint32_t TIMESTAMPS_PER_SLOT = 2;
+        constexpr uint32_t TIMESTAMPS_PER_SLOT = ProbeSim::MAX_UNITS_PER_FRAME + 2;  // 始め・単位ごと・終わり
         constexpr uint32_t CELL_BYTES = PROBE_CELL_COUNT * 4;
         constexpr uint32_t DIFFUSE_GROUPS = PROBE_GRID_SIZE / PROBE_GROUP_SIZE;
-        constexpr uint32_t EXTRACT_GROUPS = PROBE_CELL_COUNT / PROBE_COMMAND_GROUP_SIZE;
-        constexpr uint32_t APPLY_GROUPS = PROBE_MAX_COMMANDS / PROBE_COMMAND_GROUP_SIZE;
+        constexpr uint32_t LINEAR_CELL_GROUPS = PROBE_CELL_COUNT / PROBE_LINEAR_GROUP_SIZE;
+        constexpr uint32_t APPLY_GROUPS = PROBE_MAX_COMMANDS / PROBE_LINEAR_GROUP_SIZE;
         constexpr uint32_t MAX_LOGGED_DEBUG_MESSAGES = 8;
 
         template <typename T>
@@ -41,6 +43,14 @@ namespace bicameral::sim {
                 return nullptr;
             }
             return gpu::CreateComputePipeline(device, rootSignature, *bytecode);
+        }
+
+        // 単位の定数(b0): 刻みの下位・上位・引数
+        void SetUnitConstants(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t argument) {
+            const std::array<uint32_t, PROBE_ROOT_CONSTANT_COUNT> constants = {
+                static_cast<uint32_t>(tick), static_cast<uint32_t>(tick >> 32), argument};
+            list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), PROBE_ROOT_CONSTANT_COUNT,
+                                               constants.data(), 0);
         }
 
     }  // namespace
@@ -59,130 +69,153 @@ namespace bicameral::sim {
 
     std::expected<ProbeSim, std::string> ProbeSim::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType,
                                                           const ProbeSimOptions& options) {
-        if (options.busyPieces == 0 || options.busyPieces > PROBE_MAX_BUSY_PIECES) {
-            return std::unexpected(std::format("重さを分ける数が範囲外: {}", options.busyPieces));
+        if (options.busyPieces == 0 || options.busyPieces > PROBE_MAX_BUSY_PIECES ||
+            options.busyIterations > PROBE_BUSY_ITERATIONS_LIMIT) {
+            return std::unexpected(std::format("重さの試験の値が範囲外: 繰り返し {} 分ける数 {}",
+                                               options.busyIterations, options.busyPieces));
         }
-        auto events = gpu::ReadbackRing::Create(device, PROBE_EVENT_BYTES, PROBE_EVENT_HEADER_BYTES, BATCH_SLOT_COUNT,
+        auto events = gpu::ReadbackRing::Create(device, PROBE_EVENT_BYTES, PROBE_EVENT_HEADER_BYTES, FRAME_SLOT_COUNT,
                                                 L"ProbeSim.events");
         if (!events) return std::unexpected(events.error());
-        auto debugRing = gpu::DebugRing::Create(device, BATCH_SLOT_COUNT);
+        auto debugRing = gpu::DebugRing::Create(device, FRAME_SLOT_COUNT);
         if (!debugRing) return std::unexpected(debugRing.error());
 
         ProbeSim sim(options, std::move(*events), std::move(*debugRing));
         if (!sim.CreatePipelines(device)) return std::unexpected("仮の刻みのパイプラインを作れない");
         if (!sim.CreateBuffers(device)) return std::unexpected("仮の刻みのバッファを作れない");
-        if (!sim.RecordBatchLists(device, listType)) return std::unexpected("仮の刻みのリストを記録できない");
+        if (!sim.CreateFrameSlots(device, listType)) return std::unexpected("仮の刻みのフレームの枠を作れない");
         return sim;
-    }
-
-    // バッチの枠ごと・刻みの数ごとにリストを記録する
-    bool ProbeSim::RecordBatchLists(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType) {
-        for (uint32_t slot = 0; slot < BATCH_SLOT_COUNT; ++slot) {
-            if (FAILED(device->CreateCommandAllocator(listType, IID_PPV_ARGS(&m_slots[slot].allocator)))) return false;
-            for (uint32_t tickCount = 1; tickCount <= PROBE_MAX_TICKS_PER_BATCH; ++tickCount) {
-                if (!RecordBatchList(device, listType, slot, tickCount)) return false;
-            }
-            if (m_options.busyInSeparateSubmits && !RecordBusyPieceLists(device, listType, slot)) return false;
-        }
-        return true;
-    }
-
-    // 重さを別々の投入にするときの 1 個分のリストを、1 バッチで投げうる数(刻みの数の上限 × 分けた数)だけ記録する
-    bool ProbeSim::RecordBusyPieceLists(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType, uint32_t slot) {
-        m_slots[slot].busyLists.resize(size_t{PROBE_MAX_TICKS_PER_BATCH} * m_options.busyPieces);
-        for (uint32_t index = 0; index < m_slots[slot].busyLists.size(); ++index) {
-            if (!RecordBusyPieceList(device, listType, slot, index)) return false;
-        }
-        return true;
     }
 
     bool ProbeSim::CreatePipelines(ID3D12Device5* device) {
         m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
         if (!m_rootSignature) return false;
-        m_applyPipeline = LoadComputePipeline(device, m_rootSignature.Get(), "sim/probe_tick_apply.cso");
-        m_diffusePipeline = LoadComputePipeline(device, m_rootSignature.Get(), "sim/probe_tick_diffuse.cso");
-        m_extractPipeline = LoadComputePipeline(device, m_rootSignature.Get(), "sim/probe_tick_extract.cso");
-        m_busyPipeline = LoadComputePipeline(device, m_rootSignature.Get(), "sim/probe_tick_busy.cso");
-        return m_applyPipeline && m_diffusePipeline && m_extractPipeline && m_busyPipeline;
+        ID3D12RootSignature* root = m_rootSignature.Get();
+        m_applyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_apply.cso");
+        m_diffusePipeline = LoadComputePipeline(device, root, "sim/probe_tick_diffuse.cso");
+        m_busyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_busy.cso");
+        m_hashBeginPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_begin.cso");
+        m_hashCellsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_cells.cso");
+        m_extractPipeline = LoadComputePipeline(device, root, "sim/probe_tick_extract.cso");
+        return m_applyPipeline && m_diffusePipeline && m_busyPipeline && m_hashBeginPipeline && m_hashCellsPipeline &&
+               m_extractPipeline;
     }
 
     bool ProbeSim::CreateBuffers(ID3D12Device5* device) {
         m_world = gpu::CreateBuffer(device, uint64_t{CELL_BYTES} * 2, gpu::BufferKind::UnorderedAccess);
         m_busySink = gpu::CreateBuffer(device, CELL_BYTES, gpu::BufferKind::UnorderedAccess);
-        for (auto& extraction : m_extractions) {
-            extraction = gpu::CreateBuffer(device, CELL_BYTES, gpu::BufferKind::UnorderedAccess);
-            if (!extraction) return false;
-        }
-        if (!m_world || !m_busySink) return false;
+        m_hashes = gpu::CreateBuffer(device, PROBE_HASH_BYTES, gpu::BufferKind::UnorderedAccess);
+        if (!m_world || !m_busySink || !m_hashes) return false;
         m_world->SetName(L"ProbeSim.world");
         m_busySink->SetName(L"ProbeSim.busySink");
+        m_hashes->SetName(L"ProbeSim.hashes");
         for (uint32_t index = 0; index < PROBE_EXTRACTION_COUNT; ++index) {
+            m_extractions[index] = gpu::CreateBuffer(device, CELL_BYTES, gpu::BufferKind::UnorderedAccess);
+            if (!m_extractions[index]) return false;
             m_extractions[index]->SetName(std::format(L"ProbeSim.extraction{}", index).c_str());
         }
-
         const D3D12_QUERY_HEAP_DESC queryDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
-                                              .Count = BATCH_SLOT_COUNT * TIMESTAMPS_PER_SLOT};
-        if (FAILED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_timestamps)))) return false;
-        m_timestampReadback =
-            gpu::CreateBuffer(device, uint64_t{BATCH_SLOT_COUNT} * TIMESTAMPS_PER_SLOT * 8, gpu::BufferKind::Readback);
-        if (!m_timestampReadback) return false;
+                                              .Count = FRAME_SLOT_COUNT * TIMESTAMPS_PER_SLOT};
+        return SUCCEEDED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_timestamps)));
+    }
 
-        for (BatchSlot& slot : m_slots) {
-            slot.input = gpu::CreateBuffer(device, PROBE_BATCH_BYTES, gpu::BufferKind::Upload);
-            if (!slot.input) return false;
+    // フレームの枠ごとに: リスト(毎フレーム記録し直す)・入力のアップロード・読み戻し
+    bool ProbeSim::CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType) {
+        for (FrameSlot& frame : m_slots) {
+            if (FAILED(device->CreateCommandAllocator(listType, IID_PPV_ARGS(&frame.allocator))) ||
+                FAILED(
+                    device->CreateCommandList1(0, listType, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(&frame.list)))) {
+                return false;
+            }
+            frame.input = gpu::CreateBuffer(device, PROBE_INPUT_BYTES, gpu::BufferKind::Upload);
+            frame.timestampReadback =
+                gpu::CreateBuffer(device, uint64_t{TIMESTAMPS_PER_SLOT} * 8, gpu::BufferKind::Readback);
+            frame.hashReadback = gpu::CreateBuffer(device, PROBE_HASH_BYTES, gpu::BufferKind::Readback);
+            if (!frame.input || !frame.timestampReadback || !frame.hashReadback) return false;
             void* mapped = nullptr;
             const D3D12_RANGE noRead{};
-            if (FAILED(slot.input->Map(0, &noRead, &mapped))) return false;
-            slot.mappedInput = static_cast<std::byte*>(mapped);
+            if (FAILED(frame.input->Map(0, &noRead, &mapped))) return false;
+            frame.mappedInput = static_cast<std::byte*>(mapped);
         }
         return true;
     }
 
-    // --- バッチのリストを 1 度だけ記録する ---
+    // --- フレームごとに記録する ---
 
-    bool ProbeSim::RecordBatchList(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType, uint32_t slot,
-                                   uint32_t tickCount) {
-        BatchSlot& batch = m_slots[slot];
-        ComPtr<ID3D12GraphicsCommandList10>& recorded = batch.lists[tickCount - 1];
-        if (FAILED(device->CreateCommandList(0, listType, batch.allocator.Get(), nullptr, IID_PPV_ARGS(&recorded)))) {
-            return false;
+    bool ProbeSim::ValidateInput(uint32_t slot, const ProbeFrameInput& input) const {
+        const bool valid = slot < FRAME_SLOT_COUNT && input.firstUnit < UnitsPerTick() &&
+                           input.unitCount <= MAX_UNITS_PER_FRAME && input.commands.size() <= PROBE_MAX_COMMANDS &&
+                           input.extractionTarget < PROBE_EXTRACTION_COUNT;
+        if (!valid) {
+            Log(Channel::Sim, Level::Error, "フレームの入力が範囲外: slot {} 単位 {}+{} コマンド {} 抽出 {}", slot,
+                input.firstUnit, input.unitCount, input.commands.size(), input.extractionTarget);
         }
-        ID3D12GraphicsCommandList10* list = recorded.Get();
-        const uint32_t firstQuery = slot * TIMESTAMPS_PER_SLOT;
-        // 重さを別々の投入にするときは、先に投げる重さの最初の 1 本が始めのタイムスタンプを書く
-        if (!m_options.busyInSeparateSubmits) {
-            list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
-        }
-
-        BindRootArguments(list, batch.input.Get());
-        m_events.RecordBegin(list);
-        m_debugRing.RecordBegin(list);
-
-        // --- 刻み k = 0..tickCount-1(k はルート定数。コマンドの適用は最大の数だけ起動し、余ったスレッドは何もしない)---
-        const D3D12_RESOURCE_BARRIER worldBarrier = gpu::UavBarrier(m_world.Get());
-        for (uint32_t tickSlot = 0; tickSlot < tickCount; ++tickSlot) {
-            list->SetComputeRoot32BitConstant(ROOT_LAYOUT.RootConstantIndex(), tickSlot, 0);
-            list->SetPipelineState(m_applyPipeline.Get());
-            list->Dispatch(APPLY_GROUPS, 1, 1);
-            list->ResourceBarrier(1, &worldBarrier);
-            list->SetPipelineState(m_diffusePipeline.Get());
-            list->Dispatch(DIFFUSE_GROUPS, DIFFUSE_GROUPS, 1);
-            list->ResourceBarrier(1, &worldBarrier);
-            if (!m_options.busyInSeparateSubmits) RecordBusyPieces(list, m_options.busyPieces);
-        }
-
-        // --- 描画用の抽出と、CPU への読み戻し ---
-        list->SetPipelineState(m_extractPipeline.Get());
-        list->Dispatch(EXTRACT_GROUPS, 1, 1);
-        m_events.RecordReadbackAndReset(list, slot);
-        m_debugRing.RecordReadbackAndReset(list, slot);
-        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery + 1);
-        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery, TIMESTAMPS_PER_SLOT,
-                               m_timestampReadback.Get(), uint64_t{firstQuery} * 8);
-        return SUCCEEDED(list->Close());
+        return valid;
     }
 
-    // ルートの引数: u0 世界・u1 イベント・u2/u3/u5 抽出・u4 重さの捨て場・デバッグのリング・t0 バッチの入力
+    // 見出し(probe_sim.hlsli の PROBE_HEADER_*)とコマンド
+    void ProbeSim::WriteInput(FrameSlot& frame, const ProbeFrameInput& input) const {
+        const auto commandCount = static_cast<uint32_t>(input.commands.size());
+        // 重さは 1 個あたりの回数にする(分けても 1 刻みの合計がほぼ同じになるように)
+        const uint32_t busyPerPiece =
+            m_options.busyIterations == 0 ? 0 : std::max(1u, m_options.busyIterations / m_options.busyPieces);
+        const std::array<uint32_t, 2> header = {commandCount, busyPerPiece};
+        WriteAt(frame.mappedInput, PROBE_INPUT_HEADER_OFFSET, header);
+        if (commandCount > 0) {
+            std::memcpy(frame.mappedInput + PROBE_INPUT_COMMANDS_OFFSET, input.commands.data(),
+                        input.commands.size_bytes());
+        }
+    }
+
+    ID3D12CommandList* ProbeSim::RecordFrame(uint32_t slot, const ProbeFrameInput& input) {
+        if (!ValidateInput(slot, input)) return nullptr;
+        FrameSlot& frame = m_slots[slot];
+        WriteInput(frame, input);
+        if (FAILED(frame.allocator->Reset()) || FAILED(frame.list->Reset(frame.allocator.Get(), nullptr))) {
+            Log(Channel::Sim, Level::Error, "フレームのリストを記録し直せない(slot {})", slot);
+            return nullptr;
+        }
+        ID3D12GraphicsCommandList10* list = frame.list.Get();
+        const uint32_t firstQuery = slot * TIMESTAMPS_PER_SLOT;
+        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
+
+        BindRootArguments(list, frame.input.Get());
+        m_events.RecordBegin(list);
+        m_debugRing.RecordBegin(list);
+        const D3D12_RESOURCE_BARRIER hashesToUav =
+            gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &hashesToUav);
+
+        // --- 単位を順に。刻みの終わりをまたいだら次の刻みへ(単位ごとに終わりのタイムスタンプ)---
+        uint64_t tick = input.firstTick;
+        uint32_t unit = input.firstUnit;
+        bool hasHash = false;
+        for (uint32_t index = 0; index < input.unitCount; ++index) {
+            RecordUnit(list, tick, unit);
+            list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery + 1 + index);
+            hasHash = hasHash || unit == HashUnit();
+            if (++unit == UnitsPerTick()) {
+                unit = 0;
+                ++tick;
+            }
+        }
+
+        // --- 刻みの境界の状態 S(tick) を抽出へ(刻みの途中で終わっても、途中の刻みは別の世代に書いているので S(tick) は揃っている)---
+        if (input.extract) RecordExtract(list, tick, input.extractionTarget);
+        RecordReadbacks(list, slot, hasHash);
+        const uint32_t lastQuery = firstQuery + 1 + input.unitCount;
+        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, lastQuery);
+        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery, input.unitCount + 2,
+                               frame.timestampReadback.Get(), 0);
+        if (FAILED(list->Close())) return nullptr;
+
+        frame.firstTick = input.firstTick;
+        frame.firstUnit = input.firstUnit;
+        frame.unitCount = input.unitCount;
+        return list;
+    }
+
+    // ルートの引数: u0 世界・u1 イベント・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュ・デバッグのリング・t0 フレームの入力
     void ProbeSim::BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const {
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetComputeRootUnorderedAccessView(UAV_WORLD, m_world->GetGPUVirtualAddress());
@@ -191,70 +224,64 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(UAV_EXTRACTION1, m_extractions[1]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_EXTRACTION2, m_extractions[2]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_BUSY_SINK, m_busySink->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_HASHES, m_hashes->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
-        list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_BATCH), input->GetGPUVirtualAddress());
+        list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_INPUT), input->GetGPUVirtualAddress());
     }
 
-    // 重さの試験を pieceCount 個の Dispatch に分けて積む。1 個ずつ前の結果から続けるので、間に捨て場の UAV バリア
-    void ProbeSim::RecordBusyPieces(ID3D12GraphicsCommandList10* list, uint32_t pieceCount) const {
-        const D3D12_RESOURCE_BARRIER sinkBarrier = gpu::UavBarrier(m_busySink.Get());
-        list->SetPipelineState(m_busyPipeline.Get());
-        for (uint32_t piece = 0; piece < pieceCount; ++piece) {
+    // 1 つの単位(probe_sim.hlsli の単位の表)。最後に UAV バリアで、次の単位が結果を読めるようにする
+    void ProbeSim::RecordUnit(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t unit) const {
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        SetUnitConstants(list, tick, 0);
+        if (unit == PROBE_UNIT_APPLY) {
+            // コマンドの適用は最大の数だけ起動し、余ったスレッドは何もしない
+            list->SetPipelineState(m_applyPipeline.Get());
+            list->Dispatch(APPLY_GROUPS, 1, 1);
+        } else if (unit == PROBE_UNIT_DIFFUSE) {
+            list->SetPipelineState(m_diffusePipeline.Get());
             list->Dispatch(DIFFUSE_GROUPS, DIFFUSE_GROUPS, 1);
-            list->ResourceBarrier(1, &sinkBarrier);
+        } else if (unit == HashUnit()) {
+            list->SetPipelineState(m_hashBeginPipeline.Get());
+            list->Dispatch(1, 1, 1);
+            list->ResourceBarrier(1, &allUavs);
+            list->SetPipelineState(m_hashCellsPipeline.Get());
+            list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
+        } else {
+            list->SetPipelineState(m_busyPipeline.Get());
+            list->Dispatch(DIFFUSE_GROUPS, DIFFUSE_GROUPS, 1);
         }
+        list->ResourceBarrier(1, &allUavs);
     }
 
-    // 重さを別々の投入にするときの 1 個分のリスト(R-LOOP-2、T-0085)。index 0 はバッチの始めのタイムスタンプも書く
-    bool ProbeSim::RecordBusyPieceList(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType, uint32_t slot,
-                                       uint32_t index) {
-        BatchSlot& batch = m_slots[slot];
-        ComPtr<ID3D12GraphicsCommandList10>& recorded = batch.busyLists[index];
-        if (FAILED(device->CreateCommandList(0, listType, batch.allocator.Get(), nullptr, IID_PPV_ARGS(&recorded)))) {
-            return false;
-        }
-        ID3D12GraphicsCommandList10* list = recorded.Get();
-        if (index == 0) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * TIMESTAMPS_PER_SLOT);
-        BindRootArguments(list, batch.input.Get());
-        RecordBusyPieces(list, 1);
-        return SUCCEEDED(list->Close());
+    void ProbeSim::RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const {
+        SetUnitConstants(list, tick, target);
+        list->SetPipelineState(m_extractPipeline.Get());
+        list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
     }
 
-    // --- バッチごと ---
-
-    ID3D12CommandList* ProbeSim::PrepareBatch(uint32_t slot, const ProbeBatchInput& input) {
-        if (slot >= BATCH_SLOT_COUNT || input.tickCount == 0 || input.tickCount > PROBE_MAX_TICKS_PER_BATCH ||
-            input.commands.size() > PROBE_MAX_COMMANDS || input.extractionTarget >= PROBE_EXTRACTION_COUNT ||
-            input.busyIterations > PROBE_BUSY_ITERATIONS_LIMIT) {
-            Log(Channel::Sim, Level::Error, "バッチの入力が範囲外: slot {} 刻み {} コマンド {} 抽出 {} 重さ {}", slot,
-                input.tickCount, input.commands.size(), input.extractionTarget, input.busyIterations);
-            return nullptr;
+    // イベント・デバッグの出力・(ハッシュの単位があれば)ハッシュの表を、slot の読み戻しのバッファへ
+    void ProbeSim::RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const {
+        m_events.RecordReadbackAndReset(list, slot);
+        m_debugRing.RecordReadbackAndReset(list, slot);
+        if (hasHash) {
+            gpu::RecordCopyToReadback(list, m_hashes.Get(), m_slots[slot].hashReadback.Get());
+            const D3D12_RESOURCE_BARRIER toCommon =
+                gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            list->ResourceBarrier(1, &toCommon);
+            return;
         }
-        std::byte* base = m_slots[slot].mappedInput;
-        const auto commandCount = static_cast<uint32_t>(input.commands.size());
-
-        // 見出し(probe_sim.hlsli の PROBE_HEADER_*)
-        // 重さは 1 個あたりの回数にする(分けても 1 刻みの合計がほぼ同じになるように)
-        const uint32_t busyPerPiece =
-            input.busyIterations == 0 ? 0 : std::max(1u, input.busyIterations / m_options.busyPieces);
-        const std::array<uint32_t, 6> header = {static_cast<uint32_t>(input.firstTick),
-                                                static_cast<uint32_t>(input.firstTick >> 32),
-                                                input.tickCount,
-                                                commandCount,
-                                                input.extractionTarget,
-                                                busyPerPiece};
-        WriteAt(base, PROBE_BATCH_HEADER_OFFSET, header);
-
-        if (commandCount > 0) {
-            std::memcpy(base + PROBE_BATCH_COMMANDS_OFFSET, input.commands.data(), input.commands.size_bytes());
-        }
-        return m_slots[slot].lists[input.tickCount - 1].Get();
+        const D3D12_RESOURCE_BARRIER toCommon =
+            gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        list->ResourceBarrier(1, &toCommon);
     }
 
-    ProbeBatchReadback ProbeSim::ReadBatch(uint32_t slot) const {
-        ProbeBatchReadback result;
+    // --- 読み戻し ---
 
-        // 見出しを先に読み、書かれた分だけを読む
+    ProbeFrameReadback ProbeSim::ReadFrame(uint32_t slot) const {
+        ProbeFrameReadback result;
+        const FrameSlot& frame = m_slots[slot];
+
+        // イベント: 見出しを先に読み、書かれた分だけを読む
         uint32_t requested = 0;
         const bool headerRead = m_events.Read(slot, std::as_writable_bytes(std::span(&requested, 1)));
         const uint32_t stored = std::min(requested, PROBE_EVENT_CAPACITY);
@@ -272,13 +299,47 @@ namespace bicameral::sim {
             }
         }
 
-        std::array<uint64_t, size_t{TIMESTAMPS_PER_SLOT} * BATCH_SLOT_COUNT> timestamps{};
-        if (gpu::ReadBuffer(m_timestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
-            result.gpuBeginTimestamp = timestamps[size_t{slot} * TIMESTAMPS_PER_SLOT];
-            result.gpuEndTimestamp = timestamps[size_t{slot} * TIMESTAMPS_PER_SLOT + 1];
+        // タイムスタンプ: [0] 始め、[1 + i] 単位 i の終わり、[1 + 数] 全体の終わり
+        std::vector<uint64_t> timestamps(size_t{frame.unitCount} + 2);
+        if (gpu::ReadBuffer(frame.timestampReadback.Get(), std::as_writable_bytes(std::span(timestamps)))) {
+            result.gpuBeginTimestamp = timestamps.front();
+            result.gpuEndTimestamp = timestamps.back();
+            result.unitGpuTicks.reserve(frame.unitCount);
+            for (uint32_t index = 0; index < frame.unitCount; ++index) {
+                const uint64_t begin = timestamps[index];
+                const uint64_t end = timestamps[size_t{index} + 1];
+                result.unitGpuTicks.push_back(end >= begin ? end - begin : 0);
+            }
         }
+        result.firstUnit = frame.firstUnit;
+        result.hashes = ReadHashes(frame);
         result.debugAssertCount = m_debugRing.Drain(MAX_LOGGED_DEBUG_MESSAGES, slot).assertCount;
         return result;
+    }
+
+    // このフレームで終えた刻み t ごとに、表の (t + 1) 番目の S(t + 1) のハッシュ
+    std::vector<ProbeTickHash> ProbeSim::ReadHashes(const FrameSlot& frame) const {
+        std::vector<ProbeTickHash> hashes;
+        const uint64_t unitsBefore = frame.firstUnit;
+        const uint64_t unitsTotal = unitsBefore + frame.unitCount;
+        const uint64_t completedTicks =
+            unitsTotal / UnitsPerTick();  // firstTick から数えて終えた刻み(途中から始めた刻みを含む)
+        if (completedTicks == 0) return hashes;
+
+        std::vector<uint32_t> table(PROBE_HASH_BYTES / 4);
+        if (!gpu::ReadBuffer(frame.hashReadback.Get(), std::as_writable_bytes(std::span(table)))) return hashes;
+        hashes.reserve(completedTicks);
+        for (uint64_t offset = 1; offset <= completedTicks; ++offset) {
+            const uint64_t stateTick = frame.firstTick + offset;
+            const uint32_t* entry = table.data() + (stateTick % PROBE_HASH_CAPACITY) * (PROBE_HASH_ENTRY_BYTES / 4);
+            const uint64_t storedTick = entry[0] | (uint64_t{entry[1]} << 32);
+            if (storedTick != stateTick) {
+                Log(Channel::Sim, Level::Error, "ハッシュの表の刻みが合わない: 期待 {} 実際 {}", stateTick, storedTick);
+                continue;
+            }
+            hashes.push_back({.tick = stateTick, .hash = entry[2] | (uint64_t{entry[3]} << 32)});
+        }
+        return hashes;
     }
 
     // --- CPU リファレンス ---
@@ -316,13 +377,10 @@ namespace bicameral::sim {
         return std::span(m_cells).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
     }
 
-    uint64_t HashCells(std::span<const uint32_t> cells) {
-        uint64_t hash = 0xcbf29ce484222325ull;
-        for (const uint32_t cell : cells) {
-            for (uint32_t shift = 0; shift < 32; shift += 8) {
-                hash ^= (cell >> shift) & 0xFFu;
-                hash *= 0x100000001b3ull;
-            }
+    uint64_t ProbeStateHash(std::span<const uint32_t> cells) {
+        uint64_t hash = 0;
+        for (uint32_t index = 0; index < cells.size(); ++index) {
+            hash += ProbeCellHash(index, cells[index]);
         }
         return hash;
     }

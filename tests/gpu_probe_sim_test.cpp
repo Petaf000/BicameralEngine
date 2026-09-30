@@ -1,8 +1,9 @@
-// gpu_probe_sim_test.cpp — T-0004 の仮の刻み(sim/probe_sim)を GPU で走らせ、CPU リファレンスとビット一致するかを確かめる。
+// gpu_probe_sim_test.cpp — 仮の刻み(sim/probe_sim)を単位の列として GPU で走らせ、CPU リファレンスとビット一致するかを確かめる(T-0004・T-0012)。
 //
 // 確かめること(06「テスト」の 1 つ目の形):
-//   - 同じ刻みの数とコマンドなら、バッチへの分け方(1 刻みずつ / 8 刻みずつ / ばらばら)を変えても、最後の状態が CPU と一致する
-//   - 記録済みのリストを使い回し、刻みの数を ExecuteIndirect の数だけで変えても正しい(使わない枠は何もしない)
+//   - 同じ刻みの数とコマンドなら、フレームへの単位の分け方(1 刻みずつ / 8 刻みずつ / 1 単位ずつ / 刻みの途中で切るばらばら /
+//     重さの単位を足して分ける)を変えても、GPU が刻みごとに取った状態のハッシュ列が、CPU リファレンスのハッシュ列と一致する
+//   - 最後の抽出(描画が読むもの)が、最後の刻みの状態と一致する
 //   - つつきのイベントが、適用した刻みと場所で戻ってくる(数も合う)
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ(シミュは compute キュー。06 §4)。
@@ -27,6 +28,8 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
     constexpr uint64_t TOTAL_TICKS = 40;
+    constexpr uint32_t TEST_BUSY_ITERATIONS = 64;  // 重さの単位を入れる分け方で(結果に入らないことを確かめる)
+    constexpr uint32_t TEST_BUSY_PIECES = 3;
 
     // 刻み・場所。同じ刻みの同じセル(順番に依存しないか)と、格子の端・角も入れる
     struct PokeSpec {
@@ -64,17 +67,39 @@ namespace {
         return commands;
     }
 
-    uint64_t ReferenceHash(std::span<const sim::ProbeCommand> commands) {
+    // CPU リファレンスの S(1)〜S(TOTAL_TICKS) のハッシュ([t] が S(t)。[0] は S(0))
+    std::vector<uint64_t> ReferenceHashes(std::span<const sim::ProbeCommand> commands) {
         sim::ProbeReference reference;
+        std::vector<uint64_t> hashes = {sim::ProbeStateHash(reference.State(0))};
         for (uint64_t tick = 0; tick < TOTAL_TICKS; ++tick) {
             reference.Advance(tick, commands);
+            hashes.push_back(sim::ProbeStateHash(reference.State(tick + 1)));
         }
-        return sim::HashCells(reference.State(TOTAL_TICKS));
+        return hashes;
     }
+
+    // 分け方: 1 フレームに投げる単位の数の列。pattern を繰り返して合計 total にする(最後は切る)
+    std::vector<uint32_t> RepeatPattern(std::span<const uint32_t> pattern, uint32_t total) {
+        std::vector<uint32_t> sizes;
+        uint32_t sum = 0;
+        for (size_t index = 0; sum < total; ++index) {
+            const uint32_t size = std::min(pattern[index % pattern.size()], total - sum);
+            sizes.push_back(size);
+            sum += size;
+        }
+        return sizes;
+    }
+
+    struct Plan {
+        const char* name;
+        sim::ProbeSimOptions options;
+        std::vector<uint32_t> unitsPerFrame;
+    };
 
     struct RunResult {
         bool ok = false;
-        uint64_t hash = 0;
+        std::vector<sim::ProbeTickHash> hashes;
+        uint64_t extractionHash = 0;
         uint32_t eventCount = 0;
         bool eventsMatch = true;
     };
@@ -95,65 +120,103 @@ namespace {
         return cells;
     }
 
-    // 1 つのバッチのイベントが、コマンドの刻み・場所・バッチの範囲に合うか
-    bool EventsMatch(const sim::ProbeBatchReadback& readback, std::span<const sim::ProbeCommand> commands,
-                     uint64_t firstTick, uint32_t tickCount) {
+    // 刻み [firstTick, lastTick] を触るフレームのコマンド(適用の単位が targetTick で選ぶ)
+    std::vector<sim::ProbeCommand> CommandsInRange(std::span<const sim::ProbeCommand> commands, uint64_t firstTick,
+                                                   uint64_t lastTick) {
+        std::vector<sim::ProbeCommand> selected;
+        std::ranges::copy_if(commands, std::back_inserter(selected), [&](const sim::ProbeCommand& command) {
+            return command.targetTick >= firstTick && command.targetTick <= lastTick;
+        });
+        return selected;
+    }
+
+    // 1 フレームのイベントが、コマンドの刻み・場所・フレームの刻みの範囲に合うか
+    bool EventsMatch(const sim::ProbeFrameReadback& readback, std::span<const sim::ProbeCommand> commands,
+                     uint64_t firstTick, uint64_t lastTick) {
         return std::ranges::all_of(readback.events, [&](const sim::ProbeEvent& event) {
             const bool known = std::ranges::any_of(commands, [&](const sim::ProbeCommand& command) {
                 return command.targetTick == event.tick && command.payload[0] == event.x &&
                        command.payload[1] == event.y && event.type == PROBE_EVENT_POKE_APPLIED;
             });
-            return known && event.tick >= firstTick && event.tick < firstTick + tickCount;
+            return known && event.tick >= firstTick && event.tick <= lastTick;
         });
     }
 
-    std::vector<sim::ProbeCommand> CommandsInRange(std::span<const sim::ProbeCommand> commands, uint64_t firstTick,
-                                                   uint32_t tickCount) {
-        std::vector<sim::ProbeCommand> selected;
-        std::ranges::copy_if(commands, std::back_inserter(selected), [&](const sim::ProbeCommand& command) {
-            return command.targetTick >= firstTick && command.targetTick < firstTick + tickCount;
-        });
-        return selected;
-    }
-
-    // 刻みを batchSizes の分け方でバッチにして走らせる(バッチの枠を順に使い回す)
-    RunResult RunSplit(ID3D12Device5* device, std::span<const uint32_t> batchSizes,
-                       std::span<const sim::ProbeCommand> commands) {
+    // 単位を plan の分け方でフレームにして走らせる(フレームの枠を順に使い回す。毎フレーム抽出する)
+    RunResult RunPlan(ID3D12Device5* device, const Plan& plan, std::span<const sim::ProbeCommand> commands) {
         RunResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"TestSim");
-        auto simulation = sim::ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+        auto simulation = sim::ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, plan.options);
         if (!queue || !simulation) {
             Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
                 simulation ? "" : simulation.error());
             return result;
         }
 
-        uint64_t tick = 0;
-        uint64_t batchNumber = 0;
-        for (const uint32_t size : batchSizes) {
-            ++batchNumber;
-            const auto slot = static_cast<uint32_t>(batchNumber % sim::ProbeSim::BATCH_SLOT_COUNT);
-            const std::vector<sim::ProbeCommand> batchCommands = CommandsInRange(commands, tick, size);
+        const uint32_t unitsPerTick = simulation->UnitsPerTick();
+        uint64_t unitPosition = 0;  // 通しの単位の番号(刻み × 1 刻みの単位の数 + 刻みの中の番号)
+        uint32_t extractionTarget = 0;
+        for (size_t frame = 0; frame < plan.unitsPerFrame.size(); ++frame) {
+            const uint32_t unitCount = plan.unitsPerFrame[frame];
+            const uint64_t firstTick = unitPosition / unitsPerTick;
+            const uint64_t lastTick = (unitPosition + unitCount - 1) / unitsPerTick;
+            const auto slot = static_cast<uint32_t>(frame % sim::ProbeSim::FRAME_SLOT_COUNT);
+            extractionTarget = static_cast<uint32_t>(frame % PROBE_EXTRACTION_COUNT);
+            const std::vector<sim::ProbeCommand> frameCommands = CommandsInRange(commands, firstTick, lastTick);
             ID3D12CommandList* list =
-                simulation->PrepareBatch(slot, {.firstTick = tick,
-                                                .tickCount = size,
-                                                .extractionTarget = uint32_t(batchNumber % PROBE_EXTRACTION_COUNT),
-                                                .commands = batchCommands});
+                simulation->RecordFrame(slot, {.firstTick = firstTick,
+                                               .firstUnit = static_cast<uint32_t>(unitPosition % unitsPerTick),
+                                               .unitCount = unitCount,
+                                               .extract = true,
+                                               .extractionTarget = extractionTarget,
+                                               .commands = frameCommands});
             if (list == nullptr) return result;
             // テストは 1 つずつ終わりを待つ(フレームのループは待たない。frame/frame_loop.cpp)
             if (!queue->WaitCpu(queue->Submit(list))) return result;
 
-            const sim::ProbeBatchReadback readback = simulation->ReadBatch(slot);
+            const sim::ProbeFrameReadback readback = simulation->ReadFrame(slot);
+            result.hashes.insert(result.hashes.end(), readback.hashes.begin(), readback.hashes.end());
             result.eventCount += static_cast<uint32_t>(readback.events.size());
-            result.eventsMatch = result.eventsMatch && EventsMatch(readback, commands, tick, size);
-            tick += size;
+            result.eventsMatch = result.eventsMatch && EventsMatch(readback, commands, firstTick, lastTick);
+            unitPosition += unitCount;
         }
-        const std::vector<uint32_t> cells =
-            ReadExtraction(device, simulation->Extraction(static_cast<uint32_t>(batchNumber % PROBE_EXTRACTION_COUNT)));
+        const std::vector<uint32_t> cells = ReadExtraction(device, simulation->Extraction(extractionTarget));
         if (cells.size() != PROBE_CELL_COUNT) return result;
-        result.hash = sim::HashCells(cells);
-        result.ok = true;
+        result.extractionHash = sim::ProbeStateHash(cells);
+        result.ok = unitPosition == TOTAL_TICKS * unitsPerTick;
         return result;
+    }
+
+    // GPU のハッシュ列が S(1)〜S(TOTAL_TICKS) の順に並び、CPU と一致するか
+    bool HashesMatch(std::span<const sim::ProbeTickHash> hashes, std::span<const uint64_t> expected) {
+        if (hashes.size() != TOTAL_TICKS) return false;
+        for (size_t index = 0; index < hashes.size(); ++index) {
+            if (hashes[index].tick != index + 1 || hashes[index].hash != expected[index + 1]) {
+                Log(Channel::Sim, Level::Error, "  S({}) = {:016x}(CPU S({}) = {:016x})", hashes[index].tick,
+                    hashes[index].hash, index + 1, expected[index + 1]);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::vector<Plan> MakePlans() {
+        const uint32_t plainUnits = PROBE_FIXED_UNITS_PER_TICK;
+        const uint32_t busyUnits = PROBE_FIXED_UNITS_PER_TICK + TEST_BUSY_PIECES;
+        const auto plainTotal = static_cast<uint32_t>(TOTAL_TICKS * plainUnits);
+        const auto busyTotal = static_cast<uint32_t>(TOTAL_TICKS * busyUnits);
+        const sim::ProbeSimOptions busy{.busyIterations = TEST_BUSY_ITERATIONS, .busyPieces = TEST_BUSY_PIECES};
+        const std::array<uint32_t, 7> mixed = {1, 2, 5, 4, 7, 11, 3};  // 刻みの途中で切れる
+        const std::array<uint32_t, 4> mixedBusy = {5, 7, 2, 13};
+        return {
+            {.name = "1 刻みずつ", .options = {}, .unitsPerFrame = std::vector<uint32_t>(TOTAL_TICKS, plainUnits)},
+            {.name = "8 刻みずつ",
+             .options = {},
+             .unitsPerFrame = std::vector<uint32_t>(TOTAL_TICKS / 8, plainUnits * 8)},
+            {.name = "1 単位ずつ", .options = {}, .unitsPerFrame = std::vector<uint32_t>(plainTotal, 1)},
+            {.name = "ばらばら", .options = {}, .unitsPerFrame = RepeatPattern(mixed, plainTotal)},
+            {.name = "重さを分けてばらばら", .options = busy, .unitsPerFrame = RepeatPattern(mixedBusy, busyTotal)},
+        };
     }
 
 }  // namespace
@@ -174,23 +237,21 @@ int main(int argc, char** argv) {
 
     Failures failures;
     const std::vector<sim::ProbeCommand> commands = MakeCommands();
-    const uint64_t expected = ReferenceHash(commands);
-    Log(Channel::Sim, Level::Info, "CPU リファレンス: 刻み {} の後の要約 {:016x}", TOTAL_TICKS, expected);
+    const std::vector<uint64_t> expected = ReferenceHashes(commands);
+    Log(Channel::Sim, Level::Info, "CPU リファレンス: S({}) = {:016x}", TOTAL_TICKS, expected.back());
 
-    // 分け方: 8 ずつ / 1 ずつ / ばらばら(合計はどれも 40)
-    const std::vector<uint32_t> byEight(TOTAL_TICKS / 8, 8);
-    const std::vector<uint32_t> byOne(TOTAL_TICKS, 1);
-    const std::vector<uint32_t> mixed = {3, 5, 7, 1, 8, 2, 6, 8};
-    for (const auto& [name, sizes] : {std::pair{"8 ずつ", std::span<const uint32_t>(byEight)},
-                                      std::pair{"1 ずつ", std::span<const uint32_t>(byOne)},
-                                      std::pair{"ばらばら", std::span<const uint32_t>(mixed)}}) {
-        const RunResult result = RunSplit(device->Get(), sizes, commands);
-        Log(Channel::Sim, Level::Info, "GPU({}、{} バッチ): 要約 {:016x}  イベント {}", name, sizes.size(), result.hash,
-            result.eventCount);
-        failures.Check(result.ok, std::format("{}: 走らせられた", name));
-        failures.Check(result.hash == expected, std::format("{}: CPU と一致", name));
-        failures.Check(result.eventCount == POKES.size(), std::format("{}: イベントの数 {}", name, result.eventCount));
-        failures.Check(result.eventsMatch, std::format("{}: イベントの刻みと場所", name));
+    for (const Plan& plan : MakePlans()) {
+        const RunResult result = RunPlan(device->Get(), plan, commands);
+        Log(Channel::Sim, Level::Info, "GPU({}、{} フレーム): S({}) = {:016x}  抽出 {:016x}  イベント {}", plan.name,
+            plan.unitsPerFrame.size(), result.hashes.empty() ? 0 : result.hashes.back().tick,
+            result.hashes.empty() ? 0 : result.hashes.back().hash, result.extractionHash, result.eventCount);
+        failures.Check(result.ok, std::format("{}: 走らせられた", plan.name));
+        failures.Check(HashesMatch(result.hashes, expected),
+                       std::format("{}: 刻みごとのハッシュが CPU と一致", plan.name));
+        failures.Check(result.extractionHash == expected.back(), std::format("{}: 最後の抽出が CPU と一致", plan.name));
+        failures.Check(result.eventCount == POKES.size(),
+                       std::format("{}: イベントの数 {}", plan.name, result.eventCount));
+        failures.Check(result.eventsMatch, std::format("{}: イベントの刻みと場所", plan.name));
     }
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");

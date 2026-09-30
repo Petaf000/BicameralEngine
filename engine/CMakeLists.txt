@@ -38,7 +38,7 @@ if(BICAMERAL_GPU_VALIDATION)
 endif()
 
 # --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
-# 今は T-0004 の仮の刻みだけ(本物の刻みのループは T-0012)。
+# 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
   src/sim/probe_sim.cpp
 )
@@ -48,7 +48,7 @@ target_link_libraries(bicameral_sim PUBLIC bicameral_gpu)
 
 # --- frame: フレームの歩調の計算(GPU を知らない。CPU だけのテストがある)---
 add_library(bicameral_frame STATIC
-  src/frame/tick_pacer.cpp
+  src/frame/sim_scheduler.cpp
 )
 target_include_directories(bicameral_frame PUBLIC src)
 
