@@ -1,4 +1,4 @@
-// probe_sim.h — 仮の刻み(shaders/common/probe_sim.hlsli)を「単位」の列として GPU で走らせる道具と、その CPU リファレンス(T-0004・T-0012)。
+// probe_sim.h — 仮の刻み(shaders/common/probe_sim.hlsli)を「単位」の列として GPU で走らせる道具と、その CPU リファレンス(T-0004・T-0012・T-0086)。
 //
 // 刻みのループの形(06 §4・ADR-0011)を確かめる。中身(拡散)は T-0005 以降で本物の段に置き換える:
 //   - 1 刻み = 決まった数の単位(適用 → 拡散 → 重さ × k → ハッシュ)。フレームの切れ目はどの単位の間にも来てよい(刻みはフレームをまたぐ)。
@@ -6,12 +6,15 @@
 //     同じリストは前の実行が終わるまで投げ直せない(debug layer [553])ので、使い回す記録済みのリストではなく毎フレーム記録する。
 //     CPU が書くのはコマンドの並び・ルート定数・Dispatch だけ(世界の状態には触れない。D-107)。
 //   - 単位ごとのタイムスタンプを取り、CPU は単位の GPU 時間から次のフレームに投げる数を決める(frame/sim_scheduler)。
-//   - 刻みの最後の単位が状態のハッシュを GPU で取る(06 §2 段 9)。フレームの終わりに CPU へ読み戻す(待たない)。
+//   - 刻みの最後の単位が状態のハッシュを GPU で取り、刻みの中のイベントを並べてリングへ写す(06 §2 段 9)。フレームの終わりに CPU へ読み戻す(待たない)。
+//   - コマンドはフレームのリストの先頭で GPU のコマンドキューへ足す。コマンドは自分の刻みの適用の単位まで GPU で待つ(06 §3)。
+//     CPU の約束: 足すコマンドは (targetTick, sequence) の昇順で、targetTick はまだ記録していない最初の適用の刻み(NextApplyTick)以上、
+//     数は FreeCommandSlots() 以下(RecordFrame が確かめる)。
 //   - 抽出(描画が読む)は、投げた単位の後ろで、刻みの境界の状態を写す(1 フレームに 1 回まで)。
 //
 // 使い方:
 //   auto sim = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, {.busyIterations = n, .busyPieces = k});
-//   ID3D12CommandList* list = sim->RecordFrame(slot, {.firstTick = t, .firstUnit = u, .unitCount = c, ...});
+//   ID3D12CommandList* list = sim->RecordFrame(slot, {.firstTick = t, .firstUnit = u, .unitCount = c, .commands = 新しいコマンド, ...});
 //   computeQueue.Submit(list) → フェンスが進んだら sim->ReadFrame(slot)
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
@@ -26,18 +29,13 @@
 #include "common/probe_sim.hlsli"
 #include "gpu/debug_ring.h"
 #include "gpu/readback_ring.h"
+#include "sim/command.h"
 
 namespace bicameral::sim {
 
-    // --- コマンド(06 §3 の 64 バイト)---
+    // --- コマンド(06 §3 の 64 バイト。sim/command.h)---
 
-    struct ProbeCommand {
-        uint64_t targetTick = 0;  // 適用する刻み
-        uint32_t sequence = 0;    // 同じ刻みの中の順番(つつきは max なので順番に依存しないが、形は本物と同じにする)
-        uint16_t type = 0;
-        uint16_t size = 0;                   // payload の使っているバイト数
-        std::array<uint32_t, 12> payload{};  // 48 バイト
-    };
+    using ProbeCommand = Command;
     static_assert(sizeof(ProbeCommand) == PROBE_COMMAND_BYTES);
 
     [[nodiscard]] ProbeCommand MakePokeCommand(uint64_t targetTick, uint32_t sequence, uint32_t x, uint32_t y);
@@ -46,9 +44,12 @@ namespace bicameral::sim {
 
     struct ProbeEvent {
         uint64_t tick = 0;
-        uint32_t type = 0;  // PROBE_EVENT_POKE_APPLIED
-        uint32_t x = 0;
-        uint32_t y = 0;
+        uint32_t type = 0;   // PROBE_EVENT_*
+        uint32_t place = 0;  // つつき: x | y << 16(ProbePokePlace)。遅れたコマンド: コマンドの種類
+
+        [[nodiscard]] uint32_t PokeX() const { return place & 0xFFFFu; }
+        [[nodiscard]] uint32_t PokeY() const { return place >> 16; }
+        friend bool operator==(const ProbeEvent&, const ProbeEvent&) = default;
     };
 
     // 刻み tick の始めの状態 S(tick) のハッシュ(ProbeStateHash)
@@ -58,8 +59,8 @@ namespace bicameral::sim {
     };
 
     struct ProbeFrameReadback {
-        std::vector<ProbeEvent> events;      // 並びは GPU が空きを取った順(毎回同じとは限らない。表示にだけ使う)
-        uint32_t droppedEventCount = 0;      // 容量を超えて書けなかった数
+        std::vector<ProbeEvent> events;      // (刻み, 種類, 場所) の順(刻みの最後に GPU が並べる。分け方に依存しない)
+        uint32_t droppedEventCount = 0;      // 容量を超えて書けなかった数(刻みの一時置き場 + リング)
         std::vector<ProbeTickHash> hashes;   // このフレームで終えた刻みの状態(刻みの順)
         std::vector<uint64_t> unitGpuTicks;  // 投げた i 番目の単位の GPU 時間(タイムスタンプの刻み)
         uint32_t firstUnit = 0;              // unitGpuTicks[0] の単位の、刻みの中の番号
@@ -69,12 +70,13 @@ namespace bicameral::sim {
     };
 
     struct ProbeFrameInput {
-        uint64_t firstTick = 0;                  // 最初の単位の刻み
-        uint32_t firstUnit = 0;                  // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
-        uint32_t unitCount = 0;                  // 投げる単位の数(0〜MAX_UNITS_PER_FRAME。0 なら抽出だけ)
-        bool extract = false;                    // 単位の後ろで、刻みの境界の状態を抽出へ写すか
-        uint32_t extractionTarget = 0;           // 抽出の書き先(0〜PROBE_EXTRACTION_COUNT-1)
-        std::span<const ProbeCommand> commands;  // 最大 PROBE_MAX_COMMANDS。適用の単位が targetTick で選ぶ
+        uint64_t firstTick = 0;         // 最初の単位の刻み
+        uint32_t firstUnit = 0;         // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
+        uint32_t unitCount = 0;         // 投げる単位の数(0〜MAX_UNITS_PER_FRAME。0 なら抽出だけ)
+        bool extract = false;           // 単位の後ろで、刻みの境界の状態を抽出へ写すか
+        uint32_t extractionTarget = 0;  // 抽出の書き先(0〜PROBE_EXTRACTION_COUNT-1)
+        std::span<const ProbeCommand>
+            commands;  // GPU のキューへ足す新しいコマンド(最大 PROBE_MAX_COMMANDS。約束はファイルの先頭)
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
@@ -99,6 +101,15 @@ namespace bicameral::sim {
         // 1 刻みの単位の数(適用・拡散・ハッシュ + 重さの単位)
         [[nodiscard]] uint32_t UnitsPerTick() const { return PROBE_FIXED_UNITS_PER_TICK + BusyUnitCount(); }
         [[nodiscard]] uint32_t HashUnit() const { return UnitsPerTick() - 1; }
+
+        // 次に記録する単位が (tick, unit) のとき、まだ記録していない最初の適用の単位の刻み。
+        // そのフレームに足すコマンドの targetTick はこれ以上でなければならない(でなければ適用に間に合わない)
+        [[nodiscard]] static uint64_t NextApplyTick(uint64_t tick, uint32_t unit) {
+            return unit == 0 ? tick : tick + 1;
+        }
+
+        // GPU のコマンドキューの空き(記録した適用の単位で取り出される分を引いた、次のフレームに足せる数)
+        [[nodiscard]] uint32_t FreeCommandSlots() const { return PROBE_COMMAND_QUEUE_CAPACITY - m_queuedCommandCount; }
 
         // slot のアップロードのバッファに入力を書き、slot のリストに単位を記録して返す。
         // 呼ぶ側の約束: slot の前のリストを GPU が終えている。入力が範囲外・記録の失敗なら nullptr(理由はログ)
@@ -132,7 +143,10 @@ namespace bicameral::sim {
         [[nodiscard]] bool CreateBuffers(ID3D12Device5* device);
         [[nodiscard]] bool CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
+        [[nodiscard]] bool ValidateCommands(const ProbeFrameInput& input) const;
         void WriteInput(FrameSlot& frame, const ProbeFrameInput& input) const;
+        void RecordEnqueue(ID3D12GraphicsCommandList10* list, uint32_t commandCount) const;
+        void TrackCommands(std::span<const ProbeCommand> commands, uint64_t nextApplyTick);
         void BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void RecordUnit(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t unit) const;
         void RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const;
@@ -141,21 +155,36 @@ namespace bicameral::sim {
 
         ProbeSimOptions m_options;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSignature;
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_enqueuePipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_applyPipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_diffusePipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_busyPipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_hashBeginPipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
         Microsoft::WRL::ComPtr<ID3D12PipelineState> m_extractPipeline;
 
         Microsoft::WRL::ComPtr<ID3D12Resource> m_world;  // 2 世代 × PROBE_CELL_COUNT × uint32
         std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
         Microsoft::WRL::ComPtr<ID3D12Resource> m_busySink;
-        Microsoft::WRL::ComPtr<ID3D12Resource> m_hashes;  // ハッシュの表(PROBE_HASH_BYTES)
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_commandQueue;  // GPU のコマンドキュー(PROBE_COMMAND_QUEUE_BYTES)
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_tickEvents;  // 刻みの中のイベントの一時置き場(PROBE_TICK_EVENT_BYTES)
         gpu::ReadbackRing m_events;
         gpu::DebugRing m_debugRing;
         Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestamps;  // slot ごとに MAX_UNITS_PER_FRAME + 2
         std::array<FrameSlot, FRAME_SLOT_COUNT> m_slots;
+
+        // --- GPU のコマンドキューの CPU 側の控え(足すのは CPU だけなので、末尾と待っている数を CPU が知っている)---
+        struct QueuedTick {
+            uint64_t targetTick = 0;
+            uint32_t count = 0;
+        };
+        uint32_t m_commandTail = 0;             // 足した総数(GPU の末尾と同じ。2^32 で一周)
+        uint32_t m_queuedCommandCount = 0;      // まだ適用の単位を記録していないコマンドの数
+        std::vector<QueuedTick> m_queuedTicks;  // その内訳(targetTick の昇順)
+        bool m_hasEnqueued = false;
+        ProbeCommand m_lastEnqueued;  // 最後に足したコマンド(並びの確認)
     };
 
     // --- CPU リファレンス(GPU とビット一致するはずのもの。D-307・CLAUDE.md 原則 4)---
@@ -164,7 +193,7 @@ namespace bicameral::sim {
     public:
         ProbeReference();
 
-        // 刻み tick を 1 つ進める(targetTick == tick のコマンドを適用 → 拡散)
+        // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 拡散)
         void Advance(uint64_t tick, std::span<const ProbeCommand> commands);
 
         // 刻み tick の始めの状態 S(tick)(= tick 回進めた後)

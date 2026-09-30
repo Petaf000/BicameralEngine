@@ -20,3 +20,5 @@ DEBUG_FORMAT(DebugRingGraphLeaf, WorkGraph, "debug_ring_graph_probe/Leaf", "valu
 
 // --- T-0004 の仮の刻み(shaders/sim/probe_tick.hlsl)---
 DEBUG_FORMAT(ProbePokeOutOfRange, Sim, "probe_tick/ApplyCommands", "つつくセル ({}, {}) が格子の外")
+DEBUG_FORMAT(ProbeCommandLate, Sim, "probe_tick/ApplyCommands", "刻み {} のコマンドが刻み {} の適用に遅れて届いた(捨てた)")
+DEBUG_FORMAT(ProbeCommandQueueFull, Sim, "probe_tick/EnqueueCommands", "コマンドキューが溢れる(待っている数 {})")

@@ -1,39 +1,39 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0012 刻みのループ(予算ぶんの単位・状態のハッシュ)— 完了
+最終更新: 2026-09-30 / チケット: T-0086 コマンドキュー・並べたイベント・再生ファイルの骨組み — 完了
 
 ## 状態(3 行以内)
-- `bicameral`(引数なし)で窓が開き、1 刻み = 単位の列(適用 → 拡散 → 重さ × k → ハッシュ)を、毎フレーム予算ぶんだけ compute に投げ、その後ろに描画を投げる(ADR-0011)。
-  刻みはフレームをまたぐ。単位の数は `frame::SimScheduler`(TickPacer を置き換え)、刻みごとの状態のハッシュを GPU で取って CPU へ返す。
-- 元の T-0012 は分けた。次は T-0086(コマンドキュー・並べたイベント・再生ファイル)。テスト 22/22。
+- `bicameral`(引数なし)で窓が開き、1 刻み = 単位の列(適用 → 拡散 → 重さ × k → 検査と出力)を毎フレーム予算ぶん compute に投げる(ADR-0011)。
+  コマンドは GPU のキュー(環状 1024)で自分の刻みまで待ち、イベントは刻みの終わりに (刻み, 種類, 場所) で並べてリングへ。`--record` / `--replay` で再生ファイル。
+- 次は T-0005(クリックから Work Graphs で自動伝播)。テスト 25/25。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(32 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(39)。
-- `job.py test` → 22/22。`-Filter gpu_probe_sim -Show` で分け方 5 通りの S(40) = 2523aed9e332cfa6 が CPU と一致(刻みごとのハッシュ列・最後の抽出・イベント 7)。
-- `job.py run -Preset release -- --frames 600 --auto-click` → 165 fps・世界 60 刻み/秒。1 秒ごとのログに fps・単位/投入・シミュ GPU・予算・状態 S(t) のハッシュ。
-  引数: `--frames n` `--no-vsync` `--latency 2|3` `--target-fps f`(30〜1000、既定 60)`--sim-load n --sim-split k`(重さの試験を k 単位に)`--render-normal` `--auto-click` `--warp`(main.cpp の先頭)。
-  例 `--sim-load 5200000 --sim-split 16` → 70.6 fps・世界 42.8(最大の 96%)。`--target-fps 165` → 165 fps・29.5(docs/perf.md)。
-- `--caps` はアダプタごとに PCI の ID と画面を出す。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(35 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(46)。
+- `job.py test` → 25/25。`-Filter gpu_probe_sim -Show` で分け方 5 通りの S(40) = ca7bda63a1d7d6b4 が CPU と一致・イベント 8 個が並んで戻る・溢れ(256 + 落とした 44)・
+  記録 → 別の分け方で再生して 40 刻み全部一致。`replay_file`(CPU)。`window_replay_record` → `window_replay_play`(窓を 2 回開く。ラベル gpu)。
+- `job.py run -Preset release -- --frames 600 --auto-click --record x.bcreplay` → 165 fps・世界 59.7、`-- --replay x.bcreplay --sim-load 5200000 --sim-split 16` →
+  68.5 fps・ハッシュ 217 個全部一致(相対パスは bin/ から。docs/perf.md)。
+  引数: `--frames n` `--no-vsync` `--latency 2|3` `--target-fps f` `--sim-load n --sim-split k` `--render-normal` `--auto-click` `--record p` `--replay p` `--warp`(main.cpp の先頭)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- コマンドは「このフレームに入る最初の適用の単位の刻み」に付けて、そのフレームの入力で渡す(frame_loop.cpp の AssignCommandTicks)。本物のコマンドキュー(GPU 側で刻みまで待つ)と
-  イベントの並べ替え・再生ファイルは T-0086。
-- 1 単位が予算より重いと、そのフレームだけ描画が遅れる(分けない `--sim-load 5200000` で重いフレームは 22 ms)。本物の段は単位を 1〜3 ms に分ける(Work Graphs はレコード数の上限。06 §4.2)。
+- 適用の単位は 1 スレッドでキューを順に読む(probe_tick.hlsl の ApplyCommands)。本物のコマンドが増えて重くなったら種類ごとに分ける(06 §3 実装)。
+- イベントの一時置き場は 1 刻み 256 個・並べ替えは 1 グループの bitonic sort。本物の反応の段では足りないので、大きくして基数ソートに(06 §3)。
+- 再生ファイルのハッシュは全部の刻みを持つ(間引きは読む側だけ対応)。セーブ(差分の書き出し)は未着手(15 §1)。
+- 1 単位が予算より重いと、そのフレームだけ描画が遅れる(T-0012 から。本物の段は単位を 1〜3 ms に分ける。06 §4.2)。
 - 未確認: GPU 側で未来の描画のフェンスを compute に待たせる形 / compute と描画が GPU の中で少しでも重なるか / AMD。
-- vsync ありで Present の中に平均 1 ms(BACKLOG。害は無い)。
-- 窓の大きさの変更・最小化・DPI の変更はコード上は扱っているが、人の手で試していない(自動の確認は大きさを変えない)。
+- vsync ありで Present の中に平均 1 ms(BACKLOG。害は無い)。窓の大きさの変更・最小化・DPI は人の手で試していない。
 - DRED の「止まったコマンド」表示は本物のハング(TDR)で未確認(16 §4)。SASS / RDNA3 の命令数は T-0016 / AMD 機。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- T-0012 を分けた: T-0012(刻みのループ・ハッシュ)と T-0086(コマンドキュー・並べたイベント・再生ファイルの骨組み)。ROADMAP・NEXT に記録。
-- シミュのリストはフレームの枠(4)ごとに毎フレーム記録する(同じリストを前の実行が終わる前に投げ直せないため。記録済みのリストの使い回しはやめた)。06 §4.1。
-- 予算ぶんを 1 本のリストで 1 回投げる形で足りる(06 §4.2 の未確認を測って解消)。
-- 状態のハッシュ = Σ Mix64(セルの番号, 値) mod 2^64(順番に依存しない和。GPU は wave の和 + 64bit atomic)。表 256 個、S(t) は t % 256 番目。
-- 未処理の刻みの上限は 8(約 133 ms。超えた分は捨てる)。まだ測っていない単位は予算いっぱいと見なす。
-- ADR は書いていない(ADR-0011 の実装の詳細。06 §4.1 に書いた)。
+- コマンドの適用する刻み = まだ記録していない最初の適用の単位の刻み(`ProbeSim::NextApplyTick`)。フレームに適用の単位が無くても GPU のキューで待つ。
+- キューに足すのは CPU だけ → 末尾・空きは CPU が控え、足す場所を入力の見出しで渡す(GPU で atomic を使わない)。約束違反は RecordFrame が拒否、GPU は遅れたものを捨ててイベントで知らせる。
+- 適用は 1 スレッドで (targetTick, sequence) の順(順番に効くコマンドも決定的)。イベントの溢れでどれが残るかは決めない(数えるだけ。View 用なので)。
+- コマンドの形は `sim/command.h` の `Command`(`ProbeCommand` はその別名)。再生ファイルは `engine/src/save/`(新しいライブラリ bicameral_save。CPU だけ)。
+- 再生ファイルの形式の版 1(15 §2.1)。記録は最後にハッシュを読み戻した刻みまでに適用されるコマンドだけを書く。再生は 8 刻み先まで先に足す。
+- ADR は書いていない(06 §3・15 §2 の実装の詳細)。
 
 ## 次にやること
-NEXT.md の先頭(T-0086 コマンドキュー・並べたイベント・再生ファイルの骨組み)。
+NEXT.md の先頭(T-0005 クリックから Work Graphs で自動伝播)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **同じコマンドリストを、キューのフェンスが前の実行を越える前に投げ直さない**(debug layer [553]。debug layer はその実行を捨て、release は黙って走る)。
@@ -82,3 +82,8 @@ NEXT.md の先頭(T-0086 コマンドキュー・並べたイベント・再生�
 - `job.py run` は窓を開く(ユーザーの画面に出る)。自動の確認は `--frames n --auto-click` で終わらせる。
 - clang-tidy: `std::optional` のメンバーは unchecked-optional-access で大量に警告が出る。作れたものだけを受け取る形(ProbeSim・FrameLoopParts)にする。
 - HLSL の `[numthreads(...)] void Name(` は archmap が定義として見つけない。map.yaml ではその .hlsl の普通の関数を指す。
+- **コマンドを足すときの約束**(ProbeSim::RecordFrame が確かめる): (targetTick, sequence) の昇順・targetTick ≥ `NextApplyTick(カーソル)`・数 ≤ `FreeCommandSlots()` かつ 256。
+  CPU の控え(ProbeSim の m_commandTail・m_queuedTicks)は「記録したら GPU で実行される」前提。記録したリストを投げなかった場合は控えがずれる(今は失敗 = 終了なので問題なし)。
+- probe_sim のルート署名は UAV 9 個(u7 コマンドキュー・u8 刻みのイベントの一時置き場)。イベントのリングの見出しは [0] 書こうとした数 [1] 一時置き場で落とした数。
+- `--record` / `--replay` の相対パスは runner の作業フォルダ(bin/)から。ctest の window_replay_* は `out/build/<preset>/tests/window_replay.bcreplay` を使う。
+- 窓の ctest(window_replay_*)は画面に窓が 2 回出る(約 6 秒ずつ)。CI はラベル gpu なので走らない。

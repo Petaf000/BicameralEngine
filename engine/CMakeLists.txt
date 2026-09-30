@@ -46,6 +46,15 @@ target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
 target_link_libraries(bicameral_sim PUBLIC bicameral_gpu)
 
+# --- save: セーブ・再生ファイルの読み書き(15。T-0086)。CPU だけ(GPU を知らない。CPU だけのテストがある)---
+# コマンドの形は sim/command.h(ヘッダだけ)を使う。
+add_library(bicameral_save STATIC
+  src/save/replay_file.cpp
+  src/save/replay_session.cpp
+)
+target_include_directories(bicameral_save PUBLIC src)
+target_link_libraries(bicameral_save PUBLIC bicameral_core)
+
 # --- frame: フレームの歩調の計算(GPU を知らない。CPU だけのテストがある)---
 add_library(bicameral_frame STATIC
   src/frame/sim_scheduler.cpp
@@ -68,6 +77,7 @@ target_link_libraries(bicameral PRIVATE
   bicameral_gpu
   bicameral_sim
   bicameral_frame
+  bicameral_save
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility
   d3d12 dxgi)

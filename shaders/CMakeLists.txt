@@ -97,13 +97,15 @@ bicameral_add_shader(sim/fixed_selftest.hlsl PROFILE cs_6_8 ENTRY Main)  # 整�
 bicameral_add_shader(sim/work_graph_probe.hlsl PROFILE lib_6_8)  # Work Graphs が動くかの確認(T-0013)
 bicameral_add_shader(sim/debug_ring_probe.hlsl PROFILE cs_6_8 ENTRY Main)  # デバッグのリングの確認(T-0003)
 bicameral_add_shader(sim/debug_ring_graph_probe.hlsl PROFILE lib_6_8)    # 同じく Work Graphs のノードから(T-0003)
-# 仮の刻みの単位と抽出(T-0004・T-0012。フレームと刻みのループの確認。中身は T-0005 以降で本物に)。入口ごとに別の .cso
+# 仮の刻みの単位と抽出・コマンドキュー(T-0004・T-0012・T-0086。フレームと刻みのループの確認。中身は T-0005 以降で本物に)。入口ごとに別の .cso
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY EnqueueCommands NAME probe_tick_enqueue)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY ApplyCommands NAME probe_tick_apply)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Diffuse NAME probe_tick_diffuse)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Extract NAME probe_tick_extract)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Busy NAME probe_tick_busy)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY HashBegin NAME probe_tick_hash_begin)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY HashCells NAME probe_tick_hash_cells)
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY FlushEvents NAME probe_tick_flush_events)
 bicameral_add_shader(render/probe_view.hlsl PROFILE vs_6_8 ENTRY VSMain NAME probe_view_vs)
 bicameral_add_shader(render/probe_view.hlsl PROFILE ps_6_8 ENTRY PSMain NAME probe_view_ps)
 

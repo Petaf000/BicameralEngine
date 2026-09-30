@@ -3,7 +3,7 @@
 // 1 フレームの流れ(CPU):
 //   窓のメッセージ → スワップチェインの待ち(歩調)→ 経過時間を SimScheduler へ
 //   → 終わったシミュのリストの読み戻し(フェンスが進んだ分だけ。待たない。単位の GPU 時間・ハッシュ・イベント)
-//   → クリックをコマンドに → 予算ぶんの単位を記録して compute キューへ(ADR-0011)
+//   → クリック(再生なら再生ファイル)をコマンドに → 予算ぶんの単位と、GPU のキューへ足すコマンドを記録して compute キューへ(ADR-0011)
 //   → 描画を direct キューへ(終わっている最新の抽出を見せる。シミュを待たない)→ Present
 //
 // 抽出の 3 組の約束(06 §4): 抽出は 1 フレームに 1 回まで、そのフレームに投げた単位の後ろで刻みの境界の状態を写す。
@@ -18,12 +18,14 @@
 #include <thread>
 
 #include "core/log.h"
+#include "core/unicode.h"
 #include "frame/sim_scheduler.h"
 #include "gpu/queue.h"
 #include "gpu/resources.h"
 #include "gpu/swap_chain.h"
 #include "platform/window.h"
 #include "render/probe_view.h"
+#include "save/replay_session.h"
 #include "sim/probe_sim.h"
 
 using Microsoft::WRL::ComPtr;
@@ -114,6 +116,8 @@ namespace bicameral::frame {
             gpu::SwapChain swapChain;
             sim::ProbeSim simulation;
             render::ProbeView view;
+            std::vector<save::ReplayPlayer>
+                replay;  // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
         };
 
         class FrameLoop {
@@ -127,6 +131,7 @@ namespace bicameral::frame {
                   m_swapChain(std::move(parts.swapChain)),
                   m_sim(std::move(parts.simulation)),
                   m_view(std::move(parts.view)),
+                  m_replay(std::move(parts.replay)),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -144,7 +149,9 @@ namespace bicameral::frame {
             void ReportEvents(const sim::ProbeFrameReadback& readback);
             void CollectFrameSlot(uint32_t slotIndex);
             void QueueClicks();
-            size_t AssignCommandTicks(SimCursor start, uint32_t unitCount);
+            [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
+            [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
+            [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
             void SubmitRender();
             bool RunFrame(Clock::time_point frameStart);
@@ -162,6 +169,8 @@ namespace bicameral::frame {
             gpu::SwapChain m_swapChain;
             sim::ProbeSim m_sim;
             render::ProbeView m_view;
+            std::vector<save::ReplayPlayer> m_replay;  // 再生中なら 1 つ
+            save::ReplayRecorder m_recorder;           // --record のときだけ使う
             std::array<FrameSlot, FRAME_SLOT_COUNT> m_frames;
             ComPtr<ID3D12QueryHeap> m_renderTimestamps;
             ComPtr<ID3D12Resource> m_renderTimestampReadback;
@@ -219,13 +228,20 @@ namespace bicameral::frame {
             if (!simulation) return std::unexpected(simulation.error());
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view) return std::unexpected(view.error());
+            std::vector<save::ReplayPlayer> replay;
+            if (!options.replayPath.empty()) {
+                auto player = save::ReplayPlayer::Load(options.replayPath);
+                if (!player) return std::unexpected(player.error());
+                replay.push_back(std::move(*player));
+            }
             return FrameLoopParts{.window = std::move(*window),
                                   .device = std::move(*device),
                                   .direct = std::move(*direct),
                                   .compute = std::move(*compute),
                                   .swapChain = std::move(*swapChain),
                                   .simulation = std::move(*simulation),
-                                  .view = std::move(*view)};
+                                  .view = std::move(*view),
+                                  .replay = std::move(replay)};
         }
 
         bool FrameLoop::CreateFrameSlots() {
@@ -319,21 +335,30 @@ namespace bicameral::frame {
             ++m_interval.simSubmissionsMeasured;
             m_interval.ticks += readback.hashes.size();
             if (!readback.hashes.empty()) m_latestHash = readback.hashes.back();
+            for (const sim::ProbeTickHash& tickHash : readback.hashes) {
+                if (!m_options.recordPath.empty()) m_recorder.AddHash(tickHash.tick, tickHash.hash);
+                if (!m_replay.empty()) m_replay.front().CheckHash(tickHash.tick, tickHash.hash);
+            }
             ReportEvents(readback);
         }
 
-        // つつきが適用されたことをログへ(クリックから CPU に戻るまでの時間つき)
+        // つつきが適用されたことをログへ(クリックから CPU に戻るまでの時間つき)。イベントは (刻み, 種類, 場所) の順に届く
         void FrameLoop::ReportEvents(const sim::ProbeFrameReadback& readback) {
             const auto now = Clock::now();
             for (const sim::ProbeEvent& event : readback.events) {
                 ++m_interval.events;
+                if (event.type == sim::PROBE_EVENT_COMMAND_LATE) {
+                    Log(Channel::Sim, Level::Warning, "種類 {} のコマンドが刻み {} の適用に遅れて届いた(捨てた)",
+                        event.place, event.tick);
+                    continue;
+                }
                 const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
-                    return pending.tick == event.tick && pending.x == event.x && pending.y == event.y;
+                    return pending.tick == event.tick && pending.x == event.PokeX() && pending.y == event.PokeY();
                 });
                 const double latency = click != m_clicks.end() ? Milliseconds(now - click->time) : 0.0;
                 Log(Channel::Sim, Level::Info,
-                    "つつき ({}, {}) を刻み {} で適用(クリックから CPU に戻るまで {:.1f} ms)", event.x, event.y,
-                    event.tick, latency);
+                    "つつき ({}, {}) を刻み {} で適用(クリックから CPU に戻るまで {:.1f} ms)", event.PokeX(),
+                    event.PokeY(), event.tick, latency);
                 if (click != m_clicks.end()) m_clicks.erase(click);
             }
             if (readback.droppedEventCount > 0) {
@@ -366,6 +391,7 @@ namespace bicameral::frame {
 
         void FrameLoop::QueueClicks() {
             std::vector<PointerEvent> pointers = m_window->TakePointerEvents();
+            if (!m_replay.empty()) return;  // 再生中は窓の操作を入れない(世界は再生ファイルのコマンドだけで進む)
             // probe_view.hlsl と同じ置き方: 正方形の格子を短い辺に合わせて真ん中に
             const auto width = static_cast<int32_t>(m_swapChain.Width());
             const auto height = static_cast<int32_t>(m_swapChain.Height());
@@ -390,15 +416,26 @@ namespace bicameral::frame {
             }
         }
 
-        // このフレームに投げる単位の中で最初に来る「適用の単位」の刻みを、載せるコマンドに付ける。
-        // 適用の単位が無ければ載せない(次のフレームへ)。載せきれない分も次へ。載せる数を返す
-        size_t FrameLoop::AssignCommandTicks(SimCursor start, uint32_t unitCount) {
-            const uint32_t unitsToNextTick = start.unit == 0 ? 0 : m_sim.UnitsPerTick() - start.unit;
-            if (unitsToNextTick >= unitCount) return 0;
-            const uint64_t applyTick = start.unit == 0 ? start.tick : start.tick + 1;
+        // このフレームに GPU のキューへ足すコマンド(クリックか再生ファイルから)。記録するならここで控える。
+        // 適用する刻みは「まだ記録していない最初の適用の単位の刻み」以上(06 §3)。コマンドはそこまで GPU のキューで待つので、
+        // このフレームに適用の単位が無くてもよい。キューの空きを超える分は次のフレームへ
+        std::vector<sim::ProbeCommand> FrameLoop::TakeCommands(SimCursor start) {
+            const uint64_t applyTick = sim::ProbeSim::NextApplyTick(start.tick, start.unit);
+            const uint32_t limit = std::min(m_sim.FreeCommandSlots(), sim::PROBE_MAX_COMMANDS);
+            std::vector<sim::ProbeCommand> commands = m_replay.empty()
+                                                          ? TakeClickCommands(applyTick, limit)
+                                                          : m_replay.front().TakeCommands(applyTick, limit);
+            if (!m_options.recordPath.empty()) m_recorder.AddCommands(commands);
+            return commands;
+        }
 
-            const size_t commandCount = std::min<size_t>(m_pendingCommands.size(), sim::PROBE_MAX_COMMANDS);
-            for (sim::ProbeCommand& command : std::span(m_pendingCommands).first(commandCount)) {
+        std::vector<sim::ProbeCommand> FrameLoop::TakeClickCommands(uint64_t applyTick, uint32_t limit) {
+            const size_t count = std::min<size_t>(m_pendingCommands.size(), limit);
+            std::vector<sim::ProbeCommand> commands(m_pendingCommands.begin(),
+                                                    m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(count));
+            m_pendingCommands.erase(m_pendingCommands.begin(),
+                                    m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(count));
+            for (sim::ProbeCommand& command : commands) {
                 command.targetTick = applyTick;
                 const auto click = std::ranges::find_if(m_clicks, [&](const PendingClick& pending) {
                     return pending.tick == UINT64_MAX && pending.x == command.payload[0] &&
@@ -406,7 +443,7 @@ namespace bicameral::frame {
                 });
                 if (click != m_clicks.end()) click->tick = applyTick;
             }
-            return commandCount;
+            return commands;
         }
 
         // --- 投げる ---
@@ -423,21 +460,18 @@ namespace bicameral::frame {
             const uint32_t unitCount = m_scheduler.TakeUnits();
             if (unitCount == 0) return true;
 
-            const size_t commandCount = AssignCommandTicks(start, unitCount);
+            const std::vector<sim::ProbeCommand> commands = TakeCommands(start);
             const uint64_t extraction = m_lastExtraction + 1;
             const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
             if (!extract) ++m_interval.skippedExtractions;
             const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
-            ID3D12CommandList* list =
-                m_sim.RecordFrame(slot, {.firstTick = start.tick,
-                                         .firstUnit = start.unit,
-                                         .unitCount = unitCount,
-                                         .extract = extract,
-                                         .extractionTarget = extractionTarget,
-                                         .commands = std::span(m_pendingCommands).first(commandCount)});
+            ID3D12CommandList* list = m_sim.RecordFrame(slot, {.firstTick = start.tick,
+                                                               .firstUnit = start.unit,
+                                                               .unitCount = unitCount,
+                                                               .extract = extract,
+                                                               .extractionTarget = extractionTarget,
+                                                               .commands = commands});
             if (list == nullptr) return false;
-            m_pendingCommands.erase(m_pendingCommands.begin(),
-                                    m_pendingCommands.begin() + static_cast<std::ptrdiff_t>(commandCount));
 
             if (extract) {
                 // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
@@ -540,11 +574,17 @@ namespace bicameral::frame {
                 m_options.vsync ? "あり" : "なし", m_options.maxFrameLatency, m_options.targetFps, m_options.simLoad,
                 m_options.simSplit, m_sim.UnitsPerTick(), m_options.renderHighPriority ? "HIGH" : "NORMAL",
                 m_options.autoClick ? "あり" : "なし");
+            if (!m_replay.empty()) {
+                Log(Channel::Sim, Level::Info, "再生: {}(コマンド {} 個、ハッシュ {} 個、刻み {} まで)",
+                    ToUtf8(m_options.replayPath.wstring()), m_replay.front().CommandCount(),
+                    m_replay.front().HashCount(), m_replay.front().LastTick());
+            }
             const auto start = Clock::now();
             auto lastFrame = start;
             auto intervalStart = start;
             while (m_window->PumpMessages()) {
                 if (m_options.frameLimit > 0 && m_frameNumber >= m_options.frameLimit) break;
+                if (!m_replay.empty() && m_replay.front().Finished()) break;  // 最後のハッシュまで確かめた
                 if (m_window->TakeResized() && !HandleResize()) return Finish(true, start);
                 if (m_window->IsMinimized()) {
                     std::this_thread::sleep_for(MINIMIZED_SLEEP);
@@ -583,11 +623,35 @@ namespace bicameral::frame {
             CollectSimSubmissions();
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");
+            const bool replayPassed = FinishReplay();
             if (m_device.ValidationErrorCount() > 0) {
                 Log(Channel::Gpu, Level::Error, "debug layer のエラーが {} 件", m_device.ValidationErrorCount());
                 return 1;
             }
-            return 0;
+            return replayPassed ? 0 : 1;
+        }
+
+        // 記録を書き、再生の結果を出す。記録を書けない・再生が合わない(終わっていない)なら false
+        bool FrameLoop::FinishReplay() {
+            bool passed = true;
+            if (!m_options.recordPath.empty()) {
+                const save::ReplayFile replay = m_recorder.Build();
+                const auto written = save::WriteReplayFile(m_options.recordPath, replay);
+                if (written) {
+                    Log(Channel::Sim, Level::Info, "記録: {}(コマンド {} 個、ハッシュ {} 個)",
+                        ToUtf8(m_options.recordPath.wstring()), replay.commands.size(), replay.tickHashes.size());
+                } else {
+                    Log(Channel::Sim, Level::Error, "記録を書けない: {}", written.error());
+                    passed = false;
+                }
+            }
+            if (m_replay.empty()) return passed;
+            const save::ReplayPlayer& player = m_replay.front();
+            Log(Channel::Sim, player.Passed() ? Level::Info : Level::Error,
+                "再生: {}(ハッシュ 一致 {} / 不一致 {} / 全部 {}、間に合わなかったコマンド {}{})",
+                player.Passed() ? "OK" : "FAILED", player.Matches(), player.Mismatches(), player.HashCount(),
+                player.LateCommands(), player.Finished() ? "" : "、最後まで進む前に終わった");
+            return passed && player.Passed();
         }
 
     }  // namespace

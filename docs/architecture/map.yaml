@@ -33,7 +33,8 @@ views:
     groups:
       - { id: exe, label: "bicameral.exe" }
       - { id: framelib, label: "フレームのループ(T-0004)" }
-      - { id: simlib, label: "sim(仮の刻み。本物は T-0012)" }
+      - { id: simlib, label: "sim(仮の刻み。中身の本物は T-0005 以降)" }
+      - { id: savelib, label: "save(再生ファイル。CPU だけ)" }
       - { id: corelib, label: "core(どこからでも使う部品)" }
       - { id: gpulib, label: "gpu(D3D12 の小さな道具)" }
       - { id: shared, label: "shaders/common(HLSL と C++ で共通)" }
@@ -61,14 +62,26 @@ views:
           doc: docs/design/06-simulation-loop.md }
       - { id: probesim, group: simlib, label: "ProbeSim<br/>1 刻み = 単位の列。フレームの枠ごとのリストに毎フレーム記録",
           code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordFrame", ticket: T-0012,
-          note: "適用 → 拡散 → 重さ × k → ハッシュ。単位ごとのタイムスタンプ・刻みごとのハッシュ・イベントを読み戻す" }
-      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>ApplyCommands / Diffuse / Busy / HashBegin / HashCells / Extract",
+          note: "適用 → 拡散 → 重さ × k → 検査と出力。コマンドは GPU のキューで自分の刻みまで待つ(T-0086)。単位ごとのタイムスタンプ・刻みごとのハッシュ・イベントを読み戻す" }
+      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>EnqueueCommands / ApplyCommands / Diffuse / Busy / HashBegin / HashCells / FlushEvents / Extract",
           code: "shaders/sim/probe_tick.hlsl::GenerationBase", ticket: T-0012 }
+      - { id: commandqueue, group: simlib, label: "GPU のコマンドキュー<br/>(targetTick, sequence) の順。適用の単位が先頭から取る",
+          code: "shaders/sim/probe_tick.hlsl::ApplyCommand", ticket: T-0086, doc: docs/design/06-simulation-loop.md,
+          note: "足すのは CPU だけ(末尾と空きを CPU が控える: ProbeSim::FreeCommandSlots)" }
+      - { id: eventsort, group: simlib, label: "刻みのイベントを並べる<br/>一時置き場 → bitonic sort → リング",
+          code: "shaders/sim/probe_tick.hlsl::SortEventKeys", ticket: T-0086,
+          note: "(刻み, 種類, 場所) の順。溢れたら落とした数を数える" }
+      - { id: replayfile, group: savelib, label: "再生ファイル<br/>形式の版・初期状態・コマンドの列・刻みごとのハッシュ",
+          code: "engine/src/save/replay_file.cpp::SerializeReplay", ticket: T-0086, doc: docs/design/15-save-replay-mods.md,
+          note: "replay_file_test(CPU)" }
+      - { id: replaysession, group: savelib, label: "ReplayRecorder / ReplayPlayer<br/>--record / --replay の帳簿",
+          code: "engine/src/save/replay_session.cpp::ReplayPlayer::TakeCommands", ticket: T-0086,
+          note: "再生は数刻み先まで先にキューへ足し、読み戻したハッシュを突き合わせる" }
       - { id: probereference, group: simlib, label: "ProbeReference<br/>CPU リファレンス(probe_sim.hlsli を共有)",
           code: "engine/src/sim/probe_sim.cpp::ProbeReference::Advance", ticket: T-0004 }
-      - { id: probesimtest, group: tests, label: "gpu_probe_sim_test<br/>分け方を変えても CPU とビット一致",
+      - { id: probesimtest, group: tests, label: "gpu_probe_sim_test<br/>分け方を変えても CPU とビット一致・記録 → 再生",
           code: "tests/gpu_probe_sim_test.cpp::RunPlan", ticket: T-0012,
-          note: "単位の分け方 5 通り × ハードウェア / WARP で、刻みごとのハッシュ列・最後の抽出・イベントが CPU と一致" }
+          note: "単位の分け方 5 通り × ハードウェア / WARP で、刻みごとのハッシュ列・最後の抽出・並んだイベントが CPU と一致。イベントの溢れ。途中で届くコマンドを記録して別の分け方で再生(T-0086)。窓の記録 → 再生は ctest の window_replay_*" }
       - { id: caps, group: exe, label: "RunCapsProbe()<br/>アダプタを列挙して機能を問い合わせる",
           code: "engine/src/platform/caps.cpp::RunCapsProbe", ticket: T-0001 }
       - { id: runtime, group: exe, label: "ReportRuntime()<br/>どの D3D12Core.dll が読まれたか",
@@ -180,6 +193,12 @@ views:
       - [debugring, readbackring]
       - [probesimtest, probesim]
       - [probesimtest, probereference, "要約を比べる"]
+      - [probesimtest, replaysession, "記録 → 書く → 読む → 再生"]
+      - [probetick, commandqueue]
+      - [probetick, eventsort]
+      - [eventsort, readbackring, "刻みの順"]
+      - [frameloop, replaysession, "--record / --replay"]
+      - [replaysession, replayfile]
       - [readbackring, frameloop, "数フレーム後に読む", async]
 
   # ---------------------------------------------------------------------------------------------
@@ -201,7 +220,9 @@ views:
           code: "engine/src/frame/frame_loop.cpp::FrameLoop::RunFrame" }
       - { id: audio, group: cpu, status: planned, label: "音・UI<br/>(リングを 1〜3 フレーム遅れで読む)",
           doc: docs/design/11-audio.md }
-      - { id: command, group: sim, status: planned, label: "1 コマンド適用<br/>Compute", doc: docs/design/06-simulation-loop.md }
+      - { id: command, group: sim, label: "1 コマンド適用<br/>GPU のキューから (刻み, 番号) の順", ticket: T-0086,
+          code: "shaders/sim/probe_tick.hlsl::ApplyCommand", doc: docs/design/06-simulation-loop.md,
+          note: "M1 は仮の世界の「つつき」だけ" }
       - { id: active, group: sim, status: planned, label: "2 活性の整理<br/>Work Graphs", doc: docs/design/05-world-data.md }
       - { id: transport, group: sim, status: planned, label: "3 輸送(熱・気体・水・魔素)<br/>測って安い方(D-302)",
           ticket: T-0005, doc: docs/design/07-transport.md, note: "M1 はクリックした点から熱が伝わるだけ" }
@@ -211,8 +232,9 @@ views:
       - { id: creatures, group: sim, status: planned, label: "6 生き物", doc: docs/design/09-creatures-animation.md }
       - { id: couple, group: sim, status: planned, label: "7 結合(物 ↔ 場)", doc: docs/design/08-bodies-physics.md }
       - { id: coarse, group: sim, status: planned, label: "8 粗い層(60 刻みに 1 回)", doc: docs/design/05-world-data.md }
-      - { id: check, group: sim, status: planned, label: "9 検査と出力<br/>保存則・状態のハッシュ・リング",
-          doc: docs/design/16-debug-test.md }
+      - { id: check, group: sim, label: "9 検査と出力<br/>保存則・状態のハッシュ・イベントを並べてリングへ", ticket: T-0086,
+          code: "shaders/sim/probe_tick.hlsl::SortEventKeys", doc: docs/design/16-debug-test.md,
+          note: "状態のハッシュ(T-0012)とイベントの並べ替え(T-0086)まで。保存則の合計は本物の段から" }
       - { id: ring, group: sim, label: "GPU → CPU の待たないリング<br/>イベント・スナップショット・デバッグ",
           ticket: T-0004, code: "engine/src/gpu/readback_ring.cpp::ReadbackRing::RecordReadbackAndReset" }
       - { id: extract, group: view, status: planned, label: "描画用の抽出(3 組)", doc: docs/design/10-rendering.md,
@@ -257,8 +279,9 @@ views:
       - { id: vram, group: rt, status: planned, label: "多重解像度の疎な木<br/>(VRAM 常駐の世界)",
           doc: docs/design/17-multiresolution.md }
       - { id: magic, group: rt, status: planned, label: "魔法<br/>= 表へのパッチ + 魔素を使う放出", doc: docs/design/02-reaction-system.md }
-      - { id: save, group: tool, status: planned, label: "セーブ・再生ファイル<br/>(差分 + コマンドの列)",
-          doc: docs/design/15-save-replay-mods.md }
+      - { id: save, group: tool, label: "セーブ・再生ファイル<br/>(差分 + コマンドの列)",
+          code: "engine/src/save/replay_file.cpp::SerializeReplay", ticket: T-0086, doc: docs/design/15-save-replay-mods.md,
+          note: "再生ファイルの骨組みは T-0086(仮の世界)。セーブ(差分の書き出し)は後" }
     edges:
       - [luau, bake]
       - [bake, table]

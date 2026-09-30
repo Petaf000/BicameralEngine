@@ -10,10 +10,10 @@ using Microsoft::WRL::ComPtr;
 namespace bicameral::sim {
     namespace {
 
-        // ルート署名: u0 世界・u1 イベント・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表 → b0 単位の定数
-        //            → デバッグのリング → t0 フレームの入力
+        // ルート署名: u0 世界・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
+        //            u8 刻みのイベントの一時置き場 → b0 単位の定数 → デバッグのリング → t0 フレームの入力
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 7, .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 1};
+            .uavCount = 9, .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 1};
         constexpr uint32_t UAV_WORLD = 0;
         constexpr uint32_t UAV_EVENTS = 1;
         constexpr uint32_t UAV_EXTRACTION0 = 2;
@@ -21,19 +21,26 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_BUSY_SINK = 4;
         constexpr uint32_t UAV_EXTRACTION2 = 5;
         constexpr uint32_t UAV_HASHES = 6;
+        constexpr uint32_t UAV_COMMAND_QUEUE = 7;
+        constexpr uint32_t UAV_TICK_EVENTS = 8;
         constexpr uint32_t SRV_INPUT = 0;
 
         constexpr uint32_t TIMESTAMPS_PER_SLOT = ProbeSim::MAX_UNITS_PER_FRAME + 2;  // 始め・単位ごと・終わり
         constexpr uint32_t CELL_BYTES = PROBE_CELL_COUNT * 4;
         constexpr uint32_t DIFFUSE_GROUPS = PROBE_GRID_SIZE / PROBE_GROUP_SIZE;
         constexpr uint32_t LINEAR_CELL_GROUPS = PROBE_CELL_COUNT / PROBE_LINEAR_GROUP_SIZE;
-        constexpr uint32_t APPLY_GROUPS = PROBE_MAX_COMMANDS / PROBE_LINEAR_GROUP_SIZE;
         constexpr uint32_t MAX_LOGGED_DEBUG_MESSAGES = 8;
 
         template <typename T>
         void WriteAt(std::byte* base, uint32_t offset, const T& value) {
             std::memcpy(base + offset, &value, sizeof(T));
         }
+
+        // イベントのリングの見出し(probe_sim.hlsli の PROBE_EVENT_HEADER_*)
+        struct EventRingHeader {
+            uint32_t requested = 0;    // リングに書こうとした数
+            uint32_t tickDropped = 0;  // 刻みの一時置き場で落とした数
+        };
 
         ComPtr<ID3D12PipelineState> LoadComputePipeline(ID3D12Device* device, ID3D12RootSignature* rootSignature,
                                                         std::string_view shaderPath) {
@@ -91,24 +98,30 @@ namespace bicameral::sim {
         m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
         if (!m_rootSignature) return false;
         ID3D12RootSignature* root = m_rootSignature.Get();
+        m_enqueuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_enqueue.cso");
         m_applyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_apply.cso");
         m_diffusePipeline = LoadComputePipeline(device, root, "sim/probe_tick_diffuse.cso");
         m_busyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_busy.cso");
         m_hashBeginPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_begin.cso");
         m_hashCellsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_cells.cso");
+        m_flushEventsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_flush_events.cso");
         m_extractPipeline = LoadComputePipeline(device, root, "sim/probe_tick_extract.cso");
-        return m_applyPipeline && m_diffusePipeline && m_busyPipeline && m_hashBeginPipeline && m_hashCellsPipeline &&
-               m_extractPipeline;
+        return m_enqueuePipeline && m_applyPipeline && m_diffusePipeline && m_busyPipeline && m_hashBeginPipeline &&
+               m_hashCellsPipeline && m_flushEventsPipeline && m_extractPipeline;
     }
 
     bool ProbeSim::CreateBuffers(ID3D12Device5* device) {
         m_world = gpu::CreateBuffer(device, uint64_t{CELL_BYTES} * 2, gpu::BufferKind::UnorderedAccess);
         m_busySink = gpu::CreateBuffer(device, CELL_BYTES, gpu::BufferKind::UnorderedAccess);
         m_hashes = gpu::CreateBuffer(device, PROBE_HASH_BYTES, gpu::BufferKind::UnorderedAccess);
-        if (!m_world || !m_busySink || !m_hashes) return false;
+        m_commandQueue = gpu::CreateBuffer(device, PROBE_COMMAND_QUEUE_BYTES, gpu::BufferKind::UnorderedAccess);
+        m_tickEvents = gpu::CreateBuffer(device, PROBE_TICK_EVENT_BYTES, gpu::BufferKind::UnorderedAccess);
+        if (!m_world || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents) return false;
         m_world->SetName(L"ProbeSim.world");
         m_busySink->SetName(L"ProbeSim.busySink");
         m_hashes->SetName(L"ProbeSim.hashes");
+        m_commandQueue->SetName(L"ProbeSim.commandQueue");  // 作った時は 0(末尾 = 先頭 = 0 の空のキュー)
+        m_tickEvents->SetName(L"ProbeSim.tickEvents");
         for (uint32_t index = 0; index < PROBE_EXTRACTION_COUNT; ++index) {
             m_extractions[index] = gpu::CreateBuffer(device, CELL_BYTES, gpu::BufferKind::UnorderedAccess);
             if (!m_extractions[index]) return false;
@@ -149,8 +162,31 @@ namespace bicameral::sim {
         if (!valid) {
             Log(Channel::Sim, Level::Error, "フレームの入力が範囲外: slot {} 単位 {}+{} コマンド {} 抽出 {}", slot,
                 input.firstUnit, input.unitCount, input.commands.size(), input.extractionTarget);
+            return false;
         }
-        return valid;
+        return ValidateCommands(input);
+    }
+
+    // コマンドの約束(ファイルの先頭): キューの空き・並び・適用に間に合う刻み。破ると GPU で捨てられるか、キューが壊れる
+    bool ProbeSim::ValidateCommands(const ProbeFrameInput& input) const {
+        if (input.commands.size() > FreeCommandSlots()) {
+            Log(Channel::Sim, Level::Error, "コマンドキューの空きが足りない: 足す {} 空き {}", input.commands.size(),
+                FreeCommandSlots());
+            return false;
+        }
+        const uint64_t nextApplyTick = NextApplyTick(input.firstTick, input.firstUnit);
+        const ProbeCommand* previous = m_hasEnqueued ? &m_lastEnqueued : nullptr;
+        for (const ProbeCommand& command : input.commands) {
+            if (command.targetTick < nextApplyTick || (previous != nullptr && !CommandPrecedes(*previous, command))) {
+                Log(Channel::Sim, Level::Error,
+                    "コマンドの刻みか並びが不正: 刻み {} 番号 {}(適用に間に合う最初の刻み {}、前のコマンド {} / {})",
+                    command.targetTick, command.sequence, nextApplyTick, previous != nullptr ? previous->targetTick : 0,
+                    previous != nullptr ? previous->sequence : 0);
+                return false;
+            }
+            previous = &command;
+        }
+        return true;
     }
 
     // 見出し(probe_sim.hlsli の PROBE_HEADER_*)とコマンド
@@ -159,7 +195,7 @@ namespace bicameral::sim {
         // 重さは 1 個あたりの回数にする(分けても 1 刻みの合計がほぼ同じになるように)
         const uint32_t busyPerPiece =
             m_options.busyIterations == 0 ? 0 : std::max(1u, m_options.busyIterations / m_options.busyPieces);
-        const std::array<uint32_t, 2> header = {commandCount, busyPerPiece};
+        const std::array<uint32_t, 3> header = {commandCount, busyPerPiece, m_commandTail};
         WriteAt(frame.mappedInput, PROBE_INPUT_HEADER_OFFSET, header);
         if (commandCount > 0) {
             std::memcpy(frame.mappedInput + PROBE_INPUT_COMMANDS_OFFSET, input.commands.data(),
@@ -185,6 +221,7 @@ namespace bicameral::sim {
         const D3D12_RESOURCE_BARRIER hashesToUav =
             gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &hashesToUav);
+        RecordEnqueue(list, static_cast<uint32_t>(input.commands.size()));
 
         // --- 単位を順に。刻みの終わりをまたいだら次の刻みへ(単位ごとに終わりのタイムスタンプ)---
         uint64_t tick = input.firstTick;
@@ -212,10 +249,44 @@ namespace bicameral::sim {
         frame.firstTick = input.firstTick;
         frame.firstUnit = input.firstUnit;
         frame.unitCount = input.unitCount;
+        TrackCommands(input.commands, NextApplyTick(tick, unit));
         return list;
     }
 
-    // ルートの引数: u0 世界・u1 イベント・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュ・デバッグのリング・t0 フレームの入力
+    // 新しいコマンドを GPU のキューの末尾へ(フレームのリストの先頭。単位より前)
+    void ProbeSim::RecordEnqueue(ID3D12GraphicsCommandList10* list, uint32_t commandCount) const {
+        if (commandCount == 0) return;
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        SetUnitConstants(list, 0, 0);
+        list->SetPipelineState(m_enqueuePipeline.Get());
+        list->Dispatch((commandCount + PROBE_LINEAR_GROUP_SIZE - 1) / PROBE_LINEAR_GROUP_SIZE, 1, 1);
+        list->ResourceBarrier(1, &allUavs);
+    }
+
+    // CPU 側の控え: 足したコマンドを数え、このフレームで適用の単位を記録した刻み(nextApplyTick より前)の分を取り出し済みにする
+    void ProbeSim::TrackCommands(std::span<const ProbeCommand> commands, uint64_t nextApplyTick) {
+        for (const ProbeCommand& command : commands) {
+            if (m_queuedTicks.empty() || m_queuedTicks.back().targetTick != command.targetTick) {
+                m_queuedTicks.push_back({.targetTick = command.targetTick});
+            }
+            ++m_queuedTicks.back().count;
+        }
+        m_queuedCommandCount += static_cast<uint32_t>(commands.size());
+        m_commandTail += static_cast<uint32_t>(commands.size());
+        if (!commands.empty()) {
+            m_hasEnqueued = true;
+            m_lastEnqueued = commands.back();
+        }
+
+        const auto applied = std::ranges::find_if(
+            m_queuedTicks, [&](const QueuedTick& queued) { return queued.targetTick >= nextApplyTick; });
+        for (auto queued = m_queuedTicks.begin(); queued != applied; ++queued) {
+            m_queuedCommandCount -= queued->count;
+        }
+        m_queuedTicks.erase(m_queuedTicks.begin(), applied);
+    }
+
+    // ルートの引数: ROOT_LAYOUT の順(u0〜u8・デバッグのリング・t0 フレームの入力)
     void ProbeSim::BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const {
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetComputeRootUnorderedAccessView(UAV_WORLD, m_world->GetGPUVirtualAddress());
@@ -225,6 +296,8 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(UAV_EXTRACTION2, m_extractions[2]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_BUSY_SINK, m_busySink->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_HASHES, m_hashes->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_COMMAND_QUEUE, m_commandQueue->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_TICK_EVENTS, m_tickEvents->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_INPUT), input->GetGPUVirtualAddress());
     }
@@ -234,9 +307,9 @@ namespace bicameral::sim {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
         SetUnitConstants(list, tick, 0);
         if (unit == PROBE_UNIT_APPLY) {
-            // コマンドの適用は最大の数だけ起動し、余ったスレッドは何もしない
+            // コマンドの適用は 1 スレッドがキューの先頭から番号順に(probe_tick.hlsl)
             list->SetPipelineState(m_applyPipeline.Get());
-            list->Dispatch(APPLY_GROUPS, 1, 1);
+            list->Dispatch(1, 1, 1);
         } else if (unit == PROBE_UNIT_DIFFUSE) {
             list->SetPipelineState(m_diffusePipeline.Get());
             list->Dispatch(DIFFUSE_GROUPS, DIFFUSE_GROUPS, 1);
@@ -246,6 +319,9 @@ namespace bicameral::sim {
             list->ResourceBarrier(1, &allUavs);
             list->SetPipelineState(m_hashCellsPipeline.Get());
             list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
+            // 刻みのイベントを並べてリングへ(ハッシュとは別のバッファなので間のバリアは要らない)
+            list->SetPipelineState(m_flushEventsPipeline.Get());
+            list->Dispatch(1, 1, 1);
         } else {
             list->SetPipelineState(m_busyPipeline.Get());
             list->Dispatch(DIFFUSE_GROUPS, DIFFUSE_GROUPS, 1);
@@ -281,21 +357,19 @@ namespace bicameral::sim {
         ProbeFrameReadback result;
         const FrameSlot& frame = m_slots[slot];
 
-        // イベント: 見出しを先に読み、書かれた分だけを読む
-        uint32_t requested = 0;
-        const bool headerRead = m_events.Read(slot, std::as_writable_bytes(std::span(&requested, 1)));
-        const uint32_t stored = std::min(requested, PROBE_EVENT_CAPACITY);
+        // イベント: 見出しを先に読み、書かれた分だけを読む(並びは GPU が刻みの最後に並べた (刻み, 種類, 場所) の順)
+        EventRingHeader header;
+        const bool headerRead = m_events.Read(slot, std::as_writable_bytes(std::span(&header, 1)));
+        const uint32_t stored = std::min(header.requested, PROBE_EVENT_CAPACITY);
         std::vector<uint32_t> words(PROBE_EVENT_HEADER_BYTES / 4 + size_t{stored} * PROBE_EVENT_WORDS);
         if (headerRead && (stored == 0 || m_events.Read(slot, std::as_writable_bytes(std::span(words))))) {
-            result.droppedEventCount = requested - stored;
+            result.droppedEventCount = header.requested - stored + header.tickDropped;
             result.events.reserve(stored);
             for (uint32_t index = 0; index < stored; ++index) {
                 const uint32_t* record =
                     words.data() + PROBE_EVENT_HEADER_BYTES / 4 + size_t{index} * PROBE_EVENT_WORDS;
-                result.events.push_back({.tick = record[0] | (uint64_t{record[1]} << 32),
-                                         .type = record[2],
-                                         .x = record[3] & 0xFFFFu,
-                                         .y = record[3] >> 16});
+                result.events.push_back(
+                    {.tick = record[0] | (uint64_t{record[1]} << 32), .type = record[2], .place = record[3]});
             }
         }
 
@@ -350,7 +424,7 @@ namespace bicameral::sim {
         const size_t current = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
         const size_t next = static_cast<size_t>((tick + 1) & 1) * PROBE_CELL_COUNT;
 
-        // (1) コマンドの適用(max)
+        // (1) コマンドの適用(max。GPU と同じく並びの順に。つつきは max なので順番に依存しないが、形は本物と同じにする)
         for (const ProbeCommand& command : commands) {
             if (command.targetTick != tick || command.type != PROBE_COMMAND_TYPE_POKE) continue;
             const uint32_t x = command.payload[0];

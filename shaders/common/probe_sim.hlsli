@@ -6,11 +6,14 @@
 // 世界: PROBE_GRID_SIZE × PROBE_GRID_SIZE のセルに uint32 の量(熱のようなもの)。世代同期(ADR-0003)のため 2 世代を持つ。
 //   刻み t の始めの状態 S(t) は世代 (t & 1) にある。
 // 1 刻み t = 単位の列(06 §4・ADR-0011。単位の間は UAV バリア。フレームの切れ目はどの単位の間にも来てよい):
-//   [0] コマンドの適用: targetTick == t の「つつく」コマンドのセルを、世代 (t & 1) の中で max(値, PROBE_POKE_AMOUNT) にする
-//       (max なので同じセルへの複数のコマンドの順番に依存しない。04 R2)
+//   [0] コマンドの適用: GPU のコマンドキューの先頭から targetTick == t のものを番号順に適用する(06 §3。T-0086)。
+//       つつき = 世代 (t & 1) の中でセルを max(値, PROBE_POKE_AMOUNT) にする。適用したらイベントを刻みの一時置き場へ
 //   [1] 拡散: 世代 ((t + 1) & 1) のセル = (自分 × 4 + 上下左右) / 8(格子の外は 0。端から少しずつ抜ける)→ S(t + 1)
 //   [2 .. 2 + k) 重さの試験(--sim-load を k 個に分けたもの。世界の結果に入らない。k = 0 なら無し)
-//   [最後] ハッシュ: S(t + 1) の要約(ProbeStateHash)を、ハッシュの表の (t + 1) % PROBE_HASH_CAPACITY に書く(06 §2 段 9)
+//   [最後] 検査と出力(06 §2 段 9): S(t + 1) の要約(ProbeStateHash)を、ハッシュの表の (t + 1) % PROBE_HASH_CAPACITY に書き、
+//       刻みの一時置き場のイベントをキー(種類・場所)で並べてからリングへ(T-0086)
+// コマンドは各フレームのリストの先頭で GPU のキューに足す(Enqueue。単位ではない)。キューの中で自分の刻みの適用の単位まで待つので、
+// フレームの切れ目と刻みの関係に結果が依存しない。
 // CPU のリファレンス(sim/probe_sim.cpp の ProbeReference)と GPU(shaders/sim/probe_tick.hlsl)は同じ関数を使う。
 #ifndef BICAMERAL_PROBE_SIM_HLSLI
 #define BICAMERAL_PROBE_SIM_HLSLI
@@ -55,35 +58,62 @@ PROBE_CONST uint32_t PROBE_FIXED_UNITS_PER_TICK = 3;  // 適用・拡散・ハ�
 // [0] 刻みの下位 [1] 刻みの上位 [2] 引数(抽出: 書き先の組)
 PROBE_CONST uint32_t PROBE_ROOT_CONSTANT_COUNT = 3;
 
-// --- コマンド(CPU → GPU。06 §3 の 64 バイトの形)---
+// --- コマンド(CPU → GPU。06 §3 の 64 バイトの形。C++ は sim/command.h)---
 // 語: [0] targetTick の下位 [1] targetTick の上位 [2] sequence [3] type(下位 16bit)| size(上位 16bit)[4..15] payload 48 バイト
-PROBE_CONST uint32_t PROBE_MAX_COMMANDS = 256;  // 1 フレームに載せられるコマンドの数
+PROBE_CONST uint32_t PROBE_MAX_COMMANDS = 256;  // 1 フレームに GPU のキューへ足せるコマンドの数
 PROBE_CONST uint32_t PROBE_COMMAND_WORDS = 16;
 PROBE_CONST uint32_t PROBE_COMMAND_BYTES = PROBE_COMMAND_WORDS * 4;
 PROBE_CONST uint32_t PROBE_COMMAND_TYPE_POKE = 1;  // payload: [0] x [1] y
 
+// --- GPU のコマンドキュー(06 §3。T-0086)---
+// 環状のバッファ。見出し 16 バイト([0] 末尾 = 足した総数 [1] 先頭 = 取り出した総数。どちらも 2^32 で一周する)+ コマンド × 容量。
+// CPU だけが足す(末尾を CPU が知っているので、足す場所を入力で渡す)。取り出すのは適用の単位だけ。
+// 並びは (targetTick, sequence) の昇順(CPU が守る)。だから適用の単位は先頭から「targetTick が今の刻み以下」の間だけ読めばよい。
+// 容量を超えないことも CPU が守る(sim/probe_sim の FreeCommandSlots)。
+PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_CAPACITY = 1024;  // 2 の冪(番号を下位ビットで取る)
+PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_HEADER_BYTES = 16;
+PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_TAIL = 0;  // 見出しの語の位置(× 4 バイト)
+PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_HEAD = 1;
+PROBE_CONST uint32_t PROBE_COMMAND_QUEUE_BYTES =
+    PROBE_COMMAND_QUEUE_HEADER_BYTES + PROBE_COMMAND_QUEUE_CAPACITY * PROBE_COMMAND_BYTES;
+
 // --- フレームの入力(アップロードのバッファ。CPU がフレームの枠ごとに書く)のレイアウト ---
-// [0]    見出し: コマンドの数、重さの試験の 1 個あたりの繰り返し回数
-// [256]  コマンド × PROBE_MAX_COMMANDS(このフレームに適用の単位がある刻みの分。シェーダーが targetTick で選ぶ)
+// [0]    見出し: このフレームにキューへ足すコマンドの数、重さの試験の 1 個あたりの繰り返し回数、足す場所(キューの末尾)
+// [256]  コマンド × PROBE_MAX_COMMANDS
 PROBE_CONST uint32_t PROBE_INPUT_HEADER_OFFSET = 0;
 PROBE_CONST uint32_t PROBE_INPUT_COMMANDS_OFFSET = 256;
 PROBE_CONST uint32_t PROBE_INPUT_BYTES = PROBE_INPUT_COMMANDS_OFFSET + PROBE_MAX_COMMANDS * PROBE_COMMAND_BYTES;
 PROBE_CONST uint32_t PROBE_HEADER_COMMAND_COUNT = 0;  // 見出しの語の位置(× 4 バイト)
 PROBE_CONST uint32_t PROBE_HEADER_BUSY_ITERATIONS = 1;
+PROBE_CONST uint32_t PROBE_HEADER_ENQUEUE_BASE = 2;
 
 // 重さの試験(--sim-load)の繰り返しの上限(1 刻みの合計。--sim-split で分けたときは 1 個あたりがこれを分けた数で割ったもの)。
 // これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない
 PROBE_CONST uint32_t PROBE_BUSY_ITERATIONS_LIMIT = 1u << 24;
 PROBE_CONST uint32_t PROBE_MAX_BUSY_PIECES = 64;  // 1 刻みの重さを分ける数の上限(--sim-split)
 
-// --- イベント(GPU → CPU。readback_ring の追記バッファ)---
-// 見出し 16 バイト([0] 書こうとした数)+ 16 バイトのレコード × PROBE_EVENT_CAPACITY
-// レコード: [0] 刻みの下位 [1] 刻みの上位 [2] 種類 [3] 引数(つつき: x | y << 16)
+// --- イベント(GPU → CPU。06 §3・§5。T-0086)---
+// 刻みの中で出たイベントは、まず刻みの一時置き場(順不同。atomic で空きを取る)に入る。刻みの最後の単位がキー(種類・場所)で並べ、
+// リング(readback_ring の追記バッファ。フレームごとに読み戻す)へ刻みの順に写す。だから CPU が読む並びは (刻み, 種類, 場所) の順で、
+// フレームへの分け方にも GPU の中の順番にも依存しない。
+// 一時置き場: 見出し 16 バイト([0] 書こうとした数)+ 8 バイトのレコード([0] 種類 [1] 場所)× PROBE_TICK_EVENT_CAPACITY
+PROBE_CONST uint32_t PROBE_TICK_EVENT_CAPACITY = 256;  // 並べる 1 グループのスレッド数と同じ(2 の冪。bitonic sort)
+PROBE_CONST uint32_t PROBE_TICK_EVENT_HEADER_BYTES = 16;
+PROBE_CONST uint32_t PROBE_TICK_EVENT_RECORD_BYTES = 8;
+PROBE_CONST uint32_t PROBE_TICK_EVENT_BYTES =
+    PROBE_TICK_EVENT_HEADER_BYTES + PROBE_TICK_EVENT_CAPACITY * PROBE_TICK_EVENT_RECORD_BYTES;
+// リング: 見出し 16 バイト([0] 書こうとした数 [1] 一時置き場で落とした数)+ 16 バイトのレコード × PROBE_EVENT_CAPACITY
+// レコード: [0] 刻みの下位 [1] 刻みの上位 [2] 種類 [3] 場所
+// 落とした数 = (書こうとした数 − 容量)+ 一時置き場で落とした数。溢れたときにどれが残るかは決めない(数えるだけ。イベントは View に渡すだけで世界の結果に入らない)
 PROBE_CONST uint32_t PROBE_EVENT_CAPACITY = 1024;
 PROBE_CONST uint32_t PROBE_EVENT_HEADER_BYTES = 16;
 PROBE_CONST uint32_t PROBE_EVENT_WORDS = 4;
 PROBE_CONST uint32_t PROBE_EVENT_BYTES = PROBE_EVENT_HEADER_BYTES + PROBE_EVENT_CAPACITY * PROBE_EVENT_WORDS * 4;
-PROBE_CONST uint32_t PROBE_EVENT_POKE_APPLIED = 1;
+PROBE_CONST uint32_t PROBE_EVENT_HEADER_REQUESTED = 0;  // 見出しの語の位置(× 4 バイト)
+PROBE_CONST uint32_t PROBE_EVENT_HEADER_TICK_DROPPED = 1;
+PROBE_CONST uint32_t PROBE_EVENT_POKE_APPLIED = 1;  // 場所: x | y << 16
+PROBE_CONST uint32_t PROBE_EVENT_COMMAND_LATE =
+    2;  // 刻みを過ぎてから届いたコマンド(CPU の約束違反。捨てた)。場所: コマンドの種類
 
 // --- 刻みごとの状態のハッシュ(GPU → CPU。06 §2 段 9)---
 // 表: PROBE_HASH_CAPACITY 個 × 16 バイト([0] 刻みの下位 [1] 刻みの上位 [2] ハッシュの下位 [3] ハッシュの上位)。
@@ -119,6 +149,16 @@ PROBE_FN uint64_t ProbeMix64(uint64_t value) {
 // GPU が並列に(wave の和 + 64bit の atomic)足しても CPU が順に足しても同じ値になる(04 R2)
 PROBE_FN uint64_t ProbeCellHash(uint32_t cellIndex, uint32_t value) {
     return ProbeMix64(PROBE_U64(cellIndex, value));
+}
+
+// イベントの場所(つつき)
+PROBE_FN uint32_t ProbePokePlace(uint32_t x, uint32_t y) {
+    return x | (y << 16);
+}
+
+// 刻みの中のイベントを並べるキー(種類が上位、場所が下位)。同じ刻みの中ではキーが同じならレコードも同じ
+PROBE_FN uint64_t ProbeEventKey(uint32_t type, uint32_t place) {
+    return PROBE_U64(type, place);
 }
 
 PROBE_NAMESPACE_END

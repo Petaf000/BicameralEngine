@@ -14,6 +14,10 @@ add_executable(sim_scheduler_test sim_scheduler_test.cpp)
 target_link_libraries(sim_scheduler_test PRIVATE bicameral_frame)
 add_test(NAME sim_scheduler COMMAND sim_scheduler_test)
 
+add_executable(replay_file_test replay_file_test.cpp)
+target_link_libraries(replay_file_test PRIVATE bicameral_save)
+add_test(NAME replay_file COMMAND replay_file_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
@@ -53,10 +57,22 @@ bicameral_add_gpu_test_case(gpu_work_graph_warp_compute gpu_work_graph_test warp
 bicameral_add_gpu_test(gpu_debug_ring_test)
 bicameral_add_gpu_test_case(gpu_debug_ring gpu_debug_ring_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_ring_warp gpu_debug_ring_test warp --warp --queue compute)
-bicameral_add_gpu_test(gpu_probe_sim_test)  # T-0004 の仮の刻み: 分け方を変えても CPU とビット一致
-target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim)
+# T-0004・T-0012・T-0086 の仮の刻み: 分け方を変えても CPU とビット一致、イベントの並び、記録 → 再生でハッシュ列が一致
+bicameral_add_gpu_test(gpu_probe_sim_test)
+target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
 bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
+
+# 窓の操作の記録 → 再生(T-0086、06「テスト」の 2 つ目・15 §2)。ランタイム(bicameral)を 2 回走らせる:
+#   1 回目: 自動クリックで窓の操作を入れて記録する。2 回目: 別の分け方(重さを分けた単位・目標 fps)で再生し、刻みごとのハッシュが全部一致すれば 0。
+# 窓を開くのでハードウェアの GPU と画面が要る(ラベル gpu。CI は外す)。
+set(WINDOW_REPLAY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_replay.bcreplay)
+add_test(NAME window_replay_record
+         COMMAND bicameral --frames 300 --auto-click --record ${WINDOW_REPLAY_FILE})
+add_test(NAME window_replay_play
+         COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --sim-load 400000 --sim-split 3 --target-fps 30)
+set_tests_properties(window_replay_record PROPERTIES LABELS gpu FIXTURES_SETUP window_replay TIMEOUT 60)
+set_tests_properties(window_replay_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 120)
 bicameral_add_gpu_test(gpu_debug_device_test)
 bicameral_add_gpu_test_case(gpu_debug_device gpu_debug_device_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_device_warp gpu_debug_device_test warp --warp --queue compute)

@@ -10,6 +10,9 @@
 //   --sim-split <k>                  重さの試験を k 個の単位に分ける(1 フレームに予算ぶんの単位だけ投げる。既定 1)
 //   --render-normal                  描画のキューの優先度を NORMAL にする(既定 HIGH。比較用)
 //   --auto-click                     決まった場所を自動でクリックする(人がいない確認でイベントの流れを通す)
+//   --record <path>                  窓の操作(コマンド)と刻みごとのハッシュを再生ファイルに書く(終わるとき。save/replay_file)
+//   --replay <path>                  再生ファイルのコマンドで世界を進め、刻みごとのハッシュを突き合わせる。
+//                                    最後のハッシュまで確かめたら終わる(全部一致で 0、違えば 1)。窓のクリックは無視する
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -106,6 +109,10 @@ namespace {
                        hasValue) {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
                 if (!parsed) return std::unexpected(parsed.error());
+            } else if (argument == L"--record" && hasValue) {
+                options.frameLoop.recordPath = arguments[++i];
+            } else if (argument == L"--replay" && hasValue) {
+                options.frameLoop.replayPath = arguments[++i];
             } else if (argument == L"--log-dir" && hasValue) {
                 options.logDirectory = arguments[++i];
             } else if (argument == L"--log-level" && hasValue) {
