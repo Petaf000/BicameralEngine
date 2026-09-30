@@ -9,7 +9,8 @@ GPU の中だけで走り切る世界を、症状から原因に辿れるよう�
 - **printf / assert のリング**: シェーダー(Work Graphs のノードも含む)から書ける。書式の ID + 引数(整数)+ 場所(ファイル・行・ノード名・刻み・セル/レコードの ID)。
   CPU が読んで、ログ(ADR-0006)に `Channel::Gpu` / `Channel::WorkGraph` で出す。溢れたら落とした数を数える。
 - **ノードごとのカウンタ**: 起動数・入力レコード数・出力レコード数・最大の深さ。毎フレームの要約をログへ、細かいものはエディタのパネル(14)へ。
-- **上限の検出**: 出力レコード数(仕様の上限: スレッド起動ノードは 8、ブロードキャスト/合体ノードは 256。超えると未定義動作)・深さ(32)・バッキングメモリに近づいたら Warning。超える前にノード側で止めて数える。
+- **上限の検出**: 出力レコード数(仕様の上限: スレッド起動ノードは 8、ブロードキャスト/合体ノードは 256。宣言した MaxRecords を超えると未定義動作)・
+  再帰の深さ(宣言した NodeMaxRecursionDepth。ノードの鎖は 32 まで)に近づいたら Warning。超える前にノード側で止めて数える(§1.2)。
 - **連鎖の記録(トレース)**: 選んだ範囲(セル・刻み)だけ「どのレコードがどのレコードを生んだか」をファイルへ。重すぎたら(伝播の時間が 2 倍を超える)サンプリングかカウンタだけに落とす(旧 T-0008 の打ち切り条件)。
 - **D3D12 の debug layer / GPU-based validation / DRED**: debug プリセットで有効。
 
@@ -35,6 +36,37 @@ GPU の中だけで走り切る世界を、症状から原因に辿れるよう�
     ImmediateQueue が自動で呼ぶ。キューとリストには名前を付ける(DRED の記録に出る)。
 - テスト: `gpu_debug_ring_test`(デコード・compute・溢れ・空に戻るか・ノードから)、`gpu_debug_device_test`
   (わざと誤った呼び出しでエラーが数えられるか・`RemoveDevice` の後に DRED の記録を読めるか)。ハードウェアと WARP の両方。
+
+### 1.2 実装(T-0008、2026-09-30): ノードのカウンタと上限の検出
+- **カウンタ**(`shaders/common/work_graph_stats.hlsli` / `engine/src/gpu/work_graph_stats.{h,cpp}`):
+  - u1 space1 のルートの UAV(`gpu::RootSignatureLayout::graphStats`)。ノード 16 個 × 8 語 + 容量の計器 8 個(544 バイト)。
+    ノードの語: 起動の数(スレッド起動 = スレッド、ブロードキャスト/合体 = グループ)・受け取ったレコード・出したレコード・
+    止めた出力・1 回の起動の要求の最大・再帰した段の最大・止めた再帰。計器は使った量の最大(活性の一覧の長さ・キューで待つ数など)。
+  - シェーダー: `WgCountLaunch(ノード, 入力の数)`・`WgCountOutputs(ノード, 要求, 出した数)`・
+    `WgGrantOutputs(ノード, 要求, MaxRecords)`(切って数える)・`WgTryRecurse(ノード, GetRemainingRecursionLevels(), 宣言の深さ, 出したいか)`・
+    `WgGaugePeak(計器, 値)`。ウェーブで足して(最大を取って)から 1 回だけ atomic。足し算と最大だけなので実行の順番によらず、
+    **同じ入力なら毎回同じ数**(伝導の試験で、フレームの分け方を変えてもノードのカウンタが一致。ハードウェアと WARP でも一致)。
+  - **Release でも有効**(上限の手前で止めるのは結果の正しさの一部。デバッグのリングと違う)。費用: 伝導の単位 +0〜3 µs/刻み
+    (ほぼ揺れの内)・適用の単位 +0.4 µs(docs/perf.md)。
+  - どのノードが何番か・宣言した上限は、グラフを作る側が `gpu::GraphStatsLayout` に書く(HLSL の番号と同じ順。
+    伝導は `probe_sim.hlsli` の `PROBE_STATS_*` と probe_sim.cpp の `MakeConductStatsLayout`)。
+  - CPU: `RecordBegin` → 数える → `RecordReadbackAndReset(list, slot)`(全部を 0 に戻す)→ その枠が終わったら `Read(slot)` → `Report`。
+    ProbeSim は `ReadFrame` の中で読んで報告し、`ProbeFrameReadback::graphStats` に入れる。
+- **ログ**: 毎フレームの 1 行の要約は `Channel::WorkGraph` の Trace(`--log-level trace` で出る。毎フレーム Debug に出すと 1 秒 164 行になるので)。
+  フレームのループは 1 秒ごとと最後に、その間の合計を Info で出す(`1 秒: 伝導(ProbeConduct): WakeBlocks 起動 … | ConductBlock … | 活性の一覧 最大 …/…`)。
+- **上限の検出**(`EvaluateGraphStats`。GPU なしで試せる):
+  - 止めた(結果が変わった): 出力の上限を越える要求・再帰の深さの上限で自分へ出したかった・計器が容量を越えた → Warning。
+  - 近い: 1 回の起動の出力の要求が `warnOutputRecords` 以上(出す数が構造で決まるノードは 0 = 見ない)・再帰の深さが宣言の 3/4 以上・
+    計器が容量の `warnPercent`(既定 75%)以上 → Warning。
+  - 同じ Warning(種類 × 番号)は 600 回の報告に 1 回だけログへ(毎フレーム出続けてログを埋めない)。`Report` は毎回全部を返す。
+- **ノードの printf の場所**: 書式の一覧の「場所」にノード名(`work_graph_limits_probe/Fan`)、行は `__LINE__`、刻み・レコードの ID は引数
+  (伝導の `ProbeBlockOutOfRange` は刻みとブロックの番号)。
+- **バッキングメモリ**は数えられない(仕様にドライバの使った量を知る手段が無い)。作った時に大きさをログに出すだけ。
+  試験のグラフ(再帰 8 段)は RTX 3070 Ti で 1,405,328 B(最小も同じ)・WARP で 17,920 B(最小 224 B)。
+- 試験: `gpu_work_graph_stats_test`(`shaders/sim/work_graph_limits_probe.hlsl`。Spawn → Fan(MaxRecords 4)→ Leaf、Chain(再帰 8 段)。
+  ふつう・近い・越える・64 レコードのばらばら・もう一度ふつう で、カウンタが CPU の予想と一致、検出の種類、止めたときの printf の中身と場所)。
+  `gpu_probe_sim_test` は伝導のカウンタが CPU リファレンスの「計算するブロックの数」の合計と一致し、分け方によらないことを確かめる。
+- 残り(T-0087): 連鎖のトレース・2 回走らせてトレースが一致するテスト・CPU リファレンスとの最初の食い違いの報告・PIX の調査。
 
 ## 2. テストの種類
 | テスト | 内容 | どこで回すか |

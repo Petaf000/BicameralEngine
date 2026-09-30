@@ -24,18 +24,20 @@ namespace bicameral::gpu {
 
     // 「ルートの UAV」とルート定数だけのルート署名の形。記述子のヒープが要らない一番簡単な形。
     // ルートの番号は並び順: u0..u(uavCount-1)(space0)→ b0 のルート定数(あれば)→ デバッグのリング(あれば)
-    //   → t0..t(srvCount-1)(space0。ルートの SRV。T-0004)
+    //   → Work Graphs のカウンタ(あれば)→ t0..t(srvCount-1)(space0。ルートの SRV。T-0004)
     // 見える範囲は全部のステージ(compute でも描画でも同じ形を使う)。
     struct RootSignatureLayout {
         uint32_t uavCount = 0;           // space0 の u0 から
         uint32_t rootConstantCount = 0;  // b0 の 32bit の値の数。0 なら無し
         bool debugRing = false;          // u0 space1 のデバッグのリング(shaders/common/debug_ring.hlsli、T-0003)
-        uint32_t srvCount = 0;           // space0 の t0 から(バッファだけ)
+        bool graphStats = false;  // u1 space1 の Work Graphs のカウンタ(shaders/common/work_graph_stats.hlsli、T-0008)
+        uint32_t srvCount = 0;    // space0 の t0 から(バッファだけ)
 
         [[nodiscard]] uint32_t RootConstantIndex() const { return uavCount; }
         [[nodiscard]] uint32_t DebugRingIndex() const { return uavCount + (rootConstantCount > 0 ? 1 : 0); }
+        [[nodiscard]] uint32_t GraphStatsIndex() const { return DebugRingIndex() + (debugRing ? 1 : 0); }
         [[nodiscard]] uint32_t SrvIndex(uint32_t shaderRegister) const {
-            return DebugRingIndex() + (debugRing ? 1 : 0) + shaderRegister;
+            return GraphStatsIndex() + (graphStats ? 1 : 0) + shaderRegister;
         }
     };
 

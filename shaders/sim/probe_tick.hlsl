@@ -131,6 +131,7 @@ void SortEventKeys(uint32_t thread) {
     BeginTick(tick);
     const uint32_t tail = commandQueue.Load(PROBE_COMMAND_QUEUE_TAIL * 4);
     uint32_t head = commandQueue.Load(PROBE_COMMAND_QUEUE_HEAD * 4);
+    WgGaugePeak(PROBE_STATS_GAUGE_COMMAND_QUEUE, tail - head);  // 待っている数(T-0008)
     for (uint32_t visited = 0; visited < PROBE_COMMAND_QUEUE_CAPACITY && head != tail; ++visited) {
         const uint32_t address = QueueRecordAddress(head);
         const uint4 commandHead = commandQueue.Load4(address);  // targetTick の下位・上位、sequence、type | size
@@ -145,6 +146,11 @@ void SortEventKeys(uint32_t thread) {
         ++head;
     }
     commandQueue.Store(PROBE_COMMAND_QUEUE_HEAD * 4, head);
+
+    // この刻みの活性の一覧はここで出来上がる(前の刻みの伝導 + この刻みのつつき)。長さの最大を計器へ(T-0008)
+    const uint32_t countAddress = PROBE_ACTIVE_LIST_COUNT * 4;
+    WgGaugePeak(PROBE_STATS_GAUGE_ACTIVE_LIST,
+                (tick & 1) == 0 ? activeList0.Load(countAddress) : activeList1.Load(countAddress));
 }
 
 // --- [1] 伝導は Work Graph(sim/probe_conduct.hlsl)---

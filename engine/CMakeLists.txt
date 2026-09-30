@@ -24,12 +24,13 @@ add_library(bicameral_gpu STATIC
   src/gpu/resources.cpp
   src/gpu/swap_chain.cpp
   src/gpu/work_graph.cpp
+  src/gpu/work_graph_stats.cpp
 )
 target_include_directories(bicameral_gpu PUBLIC src)
 target_precompile_headers(bicameral_gpu PRIVATE src/pch.h)
 target_link_libraries(bicameral_gpu PUBLIC
   bicameral_core
-  bicameral_fixed  # shaders/common/debug_ring.hlsli(デバッグのリングのレイアウトと書式の一覧。T-0003)
+  bicameral_fixed  # shaders/common/debug_ring.hlsli・work_graph_stats.hlsli(デバッグのリング・Work Graphs のカウンタのレイアウト)
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   d3d12 dxgi)
 # debug プリセット: デバイスを作るとき debug layer・GPU-based validation・DRED を既定で有効にする(gpu/device.cpp、T-0003)

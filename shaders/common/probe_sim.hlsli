@@ -131,6 +131,14 @@ PROBE_CONST uint32_t PROBE_ACTIVE_LIST_BYTES = PROBE_ACTIVE_LIST_HEADER_BYTES + 
 // (2^32 刻み = 2 年あまり後に一周して、1 刻みだけ予定を取りこぼしうる。本物の活性の整理(T-0018)で置き換える)
 PROBE_CONST uint32_t PROBE_SCHEDULE_BYTES = PROBE_BLOCK_COUNT * 4;
 
+// --- Work Graphs のカウンタ(common/work_graph_stats.hlsli。T-0008)の番号。ProbeSim の GraphStatsLayout(probe_sim.cpp)と同じ順 ---
+PROBE_CONST uint32_t PROBE_STATS_NODE_WAKE = 0;            // WakeBlocks
+PROBE_CONST uint32_t PROBE_STATS_NODE_CONDUCT = 1;         // ConductBlock
+PROBE_CONST uint32_t PROBE_STATS_GAUGE_ACTIVE_LIST = 0;    // 刻みの活性の一覧の長さ(容量 PROBE_ACTIVE_LIST_CAPACITY)
+PROBE_CONST uint32_t PROBE_STATS_GAUGE_COMMAND_QUEUE = 1;  // 適用の時にキューで待っていたコマンドの数
+PROBE_CONST uint32_t PROBE_WAKE_MAX_RECORDS =
+    7;  // WakeBlocks の MaxRecords(自分と 6 面の隣。probe_conduct.hlsl の属性と同じ)
+
 // 重さの試験(--sim-load)の繰り返しの上限(1 刻みの合計。--sim-split で分けたときは 1 個あたりがこれを分けた数で割ったもの)。
 // これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない
 PROBE_CONST uint32_t PROBE_BUSY_ITERATIONS_LIMIT = 1u << 24;

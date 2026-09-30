@@ -34,6 +34,7 @@
 #include "gpu/debug_ring.h"
 #include "gpu/readback_ring.h"
 #include "gpu/work_graph.h"
+#include "gpu/work_graph_stats.h"
 #include "sim/command.h"
 
 namespace bicameral::sim {
@@ -77,6 +78,9 @@ namespace bicameral::sim {
         uint64_t gpuBeginTimestamp = 0;      // リスト全体(抽出と読み戻しを含む)の始めと終わり
         uint64_t gpuEndTimestamp = 0;
         uint32_t debugAssertCount = 0;  // シェーダーの assert の数(中身はログに出る)
+        gpu::GraphStatsSnapshot
+            graphStats;                  // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
+        uint32_t graphFindingCount = 0;  // 上限に当たった・近づいたものの数(中身は Warning でログに出る)
     };
 
     struct ProbeFrameInput {
@@ -125,8 +129,12 @@ namespace bicameral::sim {
         // 呼ぶ側の約束: slot の前のリストを GPU が終えている。入力が範囲外・記録の失敗なら nullptr(理由はログ)
         [[nodiscard]] ID3D12CommandList* RecordFrame(uint32_t slot, const ProbeFrameInput& input);
 
-        // slot のリストを GPU が終えた後に呼ぶ(待たない。終わったかどうかは呼ぶ側がフェンスで見る)
-        [[nodiscard]] ProbeFrameReadback ReadFrame(uint32_t slot) const;
+        // slot のリストを GPU が終えた後に呼ぶ(待たない。終わったかどうかは呼ぶ側がフェンスで見る)。
+        // ノードのカウンタの要約と上限の Warning もここでログへ出す(同じ Warning を繰り返しすぎないように状態を持つので const でない)
+        [[nodiscard]] ProbeFrameReadback ReadFrame(uint32_t slot);
+
+        // 伝導のグラフのカウンタの名前と上限(フレームのループが要約をまとめて出すときに使う)
+        [[nodiscard]] const gpu::GraphStatsLayout& ConductStatsLayout() const { return m_graphStats.Layout(); }
 
         // 描画用の抽出(0〜PROBE_EXTRACTION_COUNT-1。全部のセル + ブロックの活性の印、PROBE_EXTRACTION_WORDS 個。
         // 並びは probe_sim.hlsli)。描画は読むだけ
@@ -149,8 +157,12 @@ namespace bicameral::sim {
             uint32_t unitCount = 0;
         };
 
-        ProbeSim(const ProbeSimOptions& options, gpu::ReadbackRing&& events, gpu::DebugRing&& debugRing)
-            : m_options(options), m_events(std::move(events)), m_debugRing(std::move(debugRing)) {}
+        ProbeSim(const ProbeSimOptions& options, gpu::ReadbackRing&& events, gpu::DebugRing&& debugRing,
+                 gpu::WorkGraphStats&& graphStats)
+            : m_options(options),
+              m_events(std::move(events)),
+              m_debugRing(std::move(debugRing)),
+              m_graphStats(std::move(graphStats)) {}
 
         [[nodiscard]] uint32_t BusyUnitCount() const { return m_options.busyIterations > 0 ? m_options.busyPieces : 0; }
         [[nodiscard]] bool CreatePipelines(ID3D12Device5* device);
@@ -195,6 +207,7 @@ namespace bicameral::sim {
         Microsoft::WRL::ComPtr<ID3D12Resource> m_blockSchedule;  // 予定の印(PROBE_SCHEDULE_BYTES)
         gpu::ReadbackRing m_events;
         gpu::DebugRing m_debugRing;
+        gpu::WorkGraphStats m_graphStats;                      // 伝導のグラフのノードのカウンタ(T-0008)
         Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestamps;  // slot ごとに MAX_UNITS_PER_FRAME + 2
         std::array<FrameSlot, FRAME_SLOT_COUNT> m_slots;
 

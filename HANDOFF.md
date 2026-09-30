@@ -1,40 +1,39 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0015 デバッグ表示とカメラ — 完了
+最終更新: 2026-09-30 / チケット: T-0008 Work Graphs のデバッグ(カウンタと上限の検出)— 完了
 
 ## 状態(3 行以内)
-- 仮の世界(64³ の整数の熱。伝導は Work Graph で活性なブロックだけ)を、窓の中で立体のまま見られる: 吸収と発光・最大値の投影・断面の 3 通り、
-  格子を回るカメラ、左クリックは光線が断面に当たったセルをつつく。抽出は全部のセル + ブロックの活性の印。
-- 次は T-0008(Work Graphs のデバッグ。チケットのファイルはある)。テスト 26/26。
+- Work Graphs のノードごとのカウンタ(起動・入出力のレコード・再帰の深さ・止めた数・容量の計器)が GPU で数えられ、毎フレーム読み戻して
+  要約(Trace、1 秒ごとの合計は Info)と上限の Warning がログに出る。上限の手前でノードが止めて数える(`WgGrantOutputs`・`WgTryRecurse`)。
+- T-0008 は 2 つに分けた。次は T-0087(トレース・2 回走らせて一致・CPU リファレンスとの最初の食い違い・PIX)。テスト 28/28。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(40 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(53)。
-- `job.py test` → 26/26。`gpu_probe_sim` は最後の抽出のセルのハッシュと活性の印の数も CPU と一致(ハードウェア・WARP)。`debug_camera` は GPU なしで
-  画素 → 断面のセルの往復(3 軸・透視/平行)・キーの振り分け・ドラッグ。
-- `job.py run -Preset release -- --frames 200 --auto-click --view <volume|mip|slice> --screenshot shot.bmp` → out/build/release/bin/shot.bmp。
-  device_bash の python3 に PIL があるので PNG に直して device_stage_files → Read で絵を見られる。
-- 描画 GPU(1280×720): ボリューム 0.56・最大値 0.42・断面 0.06 ms/フレーム、164 fps(docs/perf.md)。
-- 操作(14 §2「実装(T-0015)」): 右ドラッグ 回る / 中ドラッグ 平行移動 / ホイール 寄る / 1・2・3 表示 / X・Y・Z 断面の軸 / Q・E 断面(Shift で 8)/
-  B 活性なブロック / L 対数・線形 / O 透視・平行 / R カメラを戻す。設定を変えるとログに 1 行。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(42 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(56)。
+- `job.py test` → 28/28。新しい `gpu_work_graph_stats`(_warp): shaders/sim/work_graph_limits_probe.hlsl で ふつう・近い・越える・64 レコード・
+  もう一度ふつう。カウンタが CPU の予想と一致、検出の種類、止めたときのノードの printf(`work_graph_limits_probe/Fan:75` など)。
+  `gpu_probe_sim` は伝導のカウンタ = CPU の「計算するブロックの数」の合計、分け方によらず同じ(ハードウェアと WARP で同じ数)。
+- `job.py run -Preset release -- --frames 400 --auto-click` → 1 秒ごとに `I workgraph | 1 秒: 伝導(ProbeConduct): WakeBlocks 起動 … | ConductBlock … |
+  活性の一覧 最大 …/5121 | コマンドキュー 最大 …/1024`。毎フレームの行は `--log-level trace`。
+- 費用: 伝導 +0〜3 µs/刻み(揺れの内)・適用 +0.4 µs(docs/perf.md)。Release でも有効のまま。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **人の手でのマウスとキーの操作は未確認**(platform/window.cpp の WM_* → InputEvent の所。単体テストはイベントから先だけ)。SetCapture でドラッグが窓の外へ出ても離したことが届く想定。
-- 画像の比較(基準画像との許容差つきの比較。10「テスト」)はまだ無い。`--screenshot` は撮るだけ。
-- ボリューム表示のときシミュの GPU 時間(タイムスタンプ)が 0.28 → 0.95 ms/投入に伸びる(描画と GPU の上で重なるため。世界の速さは変わらない)。
+- バッキングメモリの使った量は数えられない(仕様に手段が無い)。作った時の大きさだけログに出る。再帰 8 段の試験のグラフは HW で 1.4 MB。
+- (前から)人の手でのマウスとキーの操作は未確認(platform/window.cpp)。画像の比較(基準画像)はまだ無い。
+- (前から)ボリューム表示のときシミュの GPU 時間が 0.28 → 0.95 ms/投入に伸びる(描画と重なるため。世界の速さは変わらない)。
 - (前から)伝導の単位の約 40 µs の固定費の内訳は未確認。WARP の 2 つの癖は回避しただけ(06 §2「実装(T-0005)」)。
 - (前から)伝導の Compute 版との比較(D-302)はしていない。予定の印は下位 32bit(T-0018 で置き換え)。
 - (前から)適用の単位は 1 スレッド・イベントの一時置き場 256・並べ替えは 1 グループ(06 §3)。セーブは未着手(15 §1)。
 - (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。AMD は未確認。窓の大きさの変更・最小化・DPI は人の手で試していない。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 抽出 = 刻みの境界の状態の全部のセル + ブロックごとの活性の印(予定の印が「その刻み」か「+1」= 前の刻みか、途中まで進んだその刻みで計算した)。
-  境界で写せば、ハッシュの表の「計算したブロックの数」と同じ数になる。
-- カメラは格子の周りを回る(回る軸は −y。既定 35°・25°・距離 150)。カメラと表示の設定は View の状態で、コマンドにも再生ファイルにも入れない。
-- 自動のクリックは表示やカメラに依らず、z = PROBE_VIEW_Z の面の決まったセルを押す(再生の試験が表示に左右されないように)。
-- 画面の文字・カーソルの下の値・時間の操作は入れていない(14 §2 の別のパネル)。ADR は書いていない(道具の実装の詳細)。
+- T-0008 を機能で分けた(カウンタ・上限・printf の場所 = T-0008 / トレース・決定性・突き合わせ・PIX = T-0087)。
+- カウンタは Release でも有効(上限の手前で止めるのは結果の正しさの一部)。デバッグのリングは今まで通り Debug だけ。
+- 毎フレームの要約は Trace(Debug だと 1 秒 164 行)。1 秒ごとの合計を Info。同じ Warning は 600 回の報告に 1 回。
+- 「近い」の基準: 出力は `warnOutputRecords`(構造で決まるノードは見ない)・再帰は宣言の 3/4・計器は `warnPercent`(既定 75%、活性の一覧は 100%)。
+- ADR は書いていない(道具の実装の詳細。16 §1.2 に書いた)。
 
 ## 次にやること
-NEXT.md の先頭(T-0008 Work Graphs のデバッグ。docs/tickets/T-0008-work-graph-debug.md の完了条件から)。
+NEXT.md の先頭(T-0087 Work Graphs の連鎖のトレースと決定性。docs/tickets/T-0087-work-graph-trace.md の完了条件から)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **同じコマンドリストを、キューのフェンスが前の実行を越える前に投げ直さない**(debug layer [553]。debug layer はその実行を捨て、release は黙って走る)。
@@ -100,3 +99,10 @@ NEXT.md の先頭(T-0008 Work Graphs のデバッグ。docs/tickets/T-0008-work-
   `timeout 170 python3 ~/job.py test --timeout 160 ...` にする(device_bash は 180 秒で切れ、ジョブは runner で走り続ける)。
 - `--record` / `--replay` の相対パスは runner の作業フォルダ(bin/)から。ctest の window_replay_* は `out/build/<preset>/tests/window_replay.bcreplay` を使う。
 - 窓の ctest(window_replay_*)は画面に窓が 2 回出る(約 6 秒ずつ)。CI はラベル gpu なので走らない。
+- **Work Graphs のカウンタ**(T-0008、16 §1.2): ルート署名に `.graphStats = true`(u1 space1。`GraphStatsIndex()`、SRV の番号が 1 つずれる)。
+  `gpu::WorkGraphStats::Create(device, layout, slotCount)` → `RecordBegin` → `SetComputeRootUnorderedAccessView(layout.GraphStatsIndex(), stats.GpuAddress())`
+  → 数える → `RecordReadbackAndReset(list, slot)` → 終わったら `Read(slot)` → `Report`。HLSL のノード番号と `GraphStatsLayout` の並びを揃える
+  (伝導は probe_sim.hlsli の `PROBE_STATS_*` と probe_sim.cpp の `MakeConductStatsLayout`)。ブロードキャストのノードは `WgCountLaunch` をグループの 1 スレッドだけで呼ぶ。
+- ウェーブの関数(WaveActiveSum など)はスレッド起動のノードの中でも動く(HW・WARP で確認)。
+- **windows.h の `near`・`far` はマクロ**。変数名に使うと意味の分からない構文エラーになる。
+- job.py の build の要約に `add_custom_command(TARGET main POST_BUILD` が出るのは、vcpkg の使い方の表示(構成し直した時)。エラーではない。

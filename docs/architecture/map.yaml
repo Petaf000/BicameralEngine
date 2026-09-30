@@ -26,6 +26,7 @@ views:
       シミュに浮動小数点が入ったらビルドを落とす検査(T-0011)と、
       GPU の小さな道具(デバイス・1 回投げて待つキュー・Work Graph)で自己テストと最小のグラフを GPU / WARP で走らせるテスト(T-0013)と、
       シェーダーの printf / assert のリング・debug layer / GBV / DRED(T-0003)と、
+      Work Graphs のノードごとのカウンタと上限の検出(T-0008)と、
       窓とフレームのループ(T-0004): compute キューの仮の刻みと direct キューの描画をフェンスだけで並べ、
       記録済みのリストを使い回し、GPU → CPU は待たない読み戻し、刻みの数はタイムスタンプで決める。
       Agility SDK は exe が 2 つの値をエクスポートすることで、OS の d3d12.dll に読み込ませる。
@@ -148,6 +149,15 @@ views:
       - { id: ringtest, group: tests, label: "gpu_debug_ring_test / gpu_debug_device_test<br/>リング・debug layer・DRED",
           code: "tests/gpu_debug_ring_test.cpp::RunGpuTests", ticket: T-0003,
           note: "compute とノードからの print、溢れ、空に戻るか。わざと誤った呼び出しとデバイスの喪失" }
+      - { id: graphstats, group: gpulib, label: "WorkGraphStats<br/>ノードのカウンタを読み戻し、要約と上限の Warning",
+          code: "engine/src/gpu/work_graph_stats.cpp::WorkGraphStats::Report", ticket: T-0008, doc: docs/design/16-debug-test.md,
+          note: "起動・入出力のレコードの数・再帰の深さ・容量の計器。同じ Warning は 600 回の報告に 1 回" }
+      - { id: graphstatshlsl, group: shared, label: "work_graph_stats.hlsli<br/>ノードで数え、上限の手前で止める",
+          code: "shaders/common/work_graph_stats.hlsli::WgGrantOutputs", ticket: T-0008,
+          note: "u1 space1。Release でも有効(越えると未定義の動作なので、止めて数える)" }
+      - { id: statstest, group: tests, label: "gpu_work_graph_stats_test<br/>わざと上限に近づけ・越えさせる",
+          code: "tests/gpu_work_graph_stats_test.cpp::RunGpuTests", ticket: T-0008,
+          note: "カウンタが CPU の予想と一致・止めた数・Warning・ノードの printf の場所" }
       - { id: d3d12, group: os, status: external, label: "d3d12.dll(OS)",
           doc: docs/decisions/ADR-0004-agility-sdk-and-dxc.md }
       - { id: core, group: os, status: external, label: "D3D12Core.dll<br/>Agility SDK 1.619",
@@ -195,6 +205,11 @@ views:
       - [debugring, log, "Channel::Gpu / WorkGraph"]
       - [ringtest, debugring]
       - [ringtest, workgraph, "ノードから print"]
+      - [graphstatshlsl, graphstats, "読み戻し(フレームの終わり)"]
+      - [graphstats, log, "要約(Trace)・上限(Warning)"]
+      - [graphstats, readbackring]
+      - [statstest, graphstats]
+      - [statstest, workgraph, "出力の上限・再帰の深さ"]
       - [main, frameloop, "引数なし"]
       - [frameloop, window, "入力"]
       - [frameloop, viewcontroller, "入力・描画の定数"]
@@ -210,6 +225,8 @@ views:
       - [probesim, probetick, ".cso"]
       - [probesim, readbackring, "イベント"]
       - [probesim, debugring, "枠ごとの読み戻し"]
+      - [probesim, graphstats, "枠ごとの読み戻し"]
+      - [probeconduct, graphstatshlsl, "起動・出力の数"]
       - [debugring, readbackring]
       - [probesimtest, probesim]
       - [probesimtest, probereference, "要約を比べる"]

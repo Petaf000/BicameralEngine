@@ -106,6 +106,7 @@ namespace bicameral::frame {
             uint64_t skippedSubmissions = 0;  // シミュの枠が空いていないので投げなかったフレーム
             uint64_t skippedExtractions = 0;  // 抽出の 3 組の約束で写さなかったフレーム
             uint64_t events = 0;
+            gpu::GraphStatsSnapshot conductGraph;  // 伝導のグラフのノードのカウンタ(足したもの・最大。T-0008)
         };
 
         // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
@@ -336,6 +337,7 @@ namespace bicameral::frame {
                 m_scheduler.ReportUnitTime(unit,
                                            TimestampMilliseconds(readback.unitGpuTicks[index], m_computeFrequency));
             }
+            gpu::AccumulateGraphStats(m_interval.conductGraph, readback.graphStats);
             m_interval.simGpuMilliseconds +=
                 TimestampMilliseconds(readback.gpuBeginTimestamp, readback.gpuEndTimestamp, m_computeFrequency);
             ++m_interval.simSubmissionsMeasured;
@@ -550,6 +552,7 @@ namespace bicameral::frame {
             m_total.skippedSubmissions += frame.skippedSubmissions;
             m_total.skippedExtractions += frame.skippedExtractions;
             m_total.events += frame.events;
+            gpu::AccumulateGraphStats(m_total.conductGraph, frame.conductGraph);
         }
 
         void FrameLoop::LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const {
@@ -573,6 +576,10 @@ namespace bicameral::frame {
                 average(stats.renderGpuMilliseconds, stats.renderFramesMeasured), m_scheduler.DroppedTicks(),
                 stats.skippedSubmissions, stats.skippedExtractions, stats.cpuWaits, stats.events, m_latestHash.tick,
                 m_latestHash.hash, m_latestHash.heat, m_latestHash.scheduledBlocks);
+            if (!stats.conductGraph.nodes.empty()) {
+                Log(Channel::WorkGraph, Level::Info, "{}: {}", label,
+                    gpu::FormatGraphStats(m_sim.ConductStatsLayout(), stats.conductGraph));
+            }
         }
 
         // --- ループ ---

@@ -24,4 +24,11 @@ DEBUG_FORMAT(ProbeCommandLate, Sim, "probe_tick/ApplyCommands",
              "刻み {} のコマンドが刻み {} の適用に遅れて届いた(捨てた)")
 DEBUG_FORMAT(ProbeCommandQueueFull, Sim, "probe_tick/EnqueueCommands", "コマンドキューが溢れる(待っている数 {})")
 DEBUG_FORMAT(ProbeActiveListFull, Sim, "probe_bindings/AppendActiveBlock", "活性の一覧が溢れる({} 番目)")
-DEBUG_FORMAT(ProbeBlockOutOfRange, Sim, "probe_conduct/WakeBlocks", "一覧のブロックの番号 {} が範囲外")
+DEBUG_FORMAT(ProbeBlockOutOfRange, WorkGraph, "probe_conduct/WakeBlocks",
+             "刻み {}: レコードのブロックの番号 {} が範囲外")
+
+// --- T-0008 のノードのカウンタと上限の試験(shaders/sim/work_graph_limits_probe.hlsl)---
+DEBUG_FORMAT(WgLimitsFanRefused, WorkGraph, "work_graph_limits_probe/Fan",
+             "レコード {}: 出力を {} 件求めた(上限 {}。越えた分は出さない)")
+DEBUG_FORMAT(WgLimitsChainRefused, WorkGraph, "work_graph_limits_probe/Chain",
+             "レコード {}: 深さ {} で再帰の上限(自分へ出さない)")

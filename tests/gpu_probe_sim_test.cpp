@@ -8,6 +8,8 @@
 //     刻みの途中で切るばらばら / 重さの単位を足して分ける)を変えても、GPU が刻みごとに取った状態のハッシュ列が CPU リファレンスと一致する。
 //     コマンドは数刻み先まで先に GPU のキューへ足す(キューの中で自分の刻みまで待つ。フレームの切れ目と関係なく適用される)
 //   - 最後の抽出(描画が読むもの)が、最後の刻みの状態と一致する
+//   - (T-0008)伝導のグラフのノードのカウンタ: ConductBlock の起動の数 = WakeBlocks の出力の数 = CPU が予想した計算するブロックの数の合計。
+//     分け方を変えてもカウンタは同じ(決定的)。上限に当たったもの・近づいたものは無い
 //   - イベントが (刻み, 種類, 場所) の順に並んで戻る(足した順と違う刻みも入れる)。一時置き場が溢れたら落とした数が合う
 //   - (06「テスト」の 2 つ目・15 §2)窓の操作のようにフレームの途中で届くコマンドを記録し、再生ファイルに書いて読み、
 //     別の分け方で再生して同じハッシュ列になる
@@ -17,6 +19,7 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <ranges>
 #include <vector>
 
@@ -180,6 +183,9 @@ namespace {
         std::vector<ProbeEvent> events;
         uint32_t droppedEventCount = 0;
         std::vector<ProbeCommand> enqueued;  // 足したコマンド(足した順)
+        gpu::GraphStatsSnapshot graphStats;  // 伝導のグラフのノードのカウンタ(全部のフレームの合計)
+        uint32_t graphFindingCount = 0;
+        std::string graphSummary;  // その 1 行の要約
     };
 
     // 抽出(COMMON。全部のセル + ブロックの活性の印)を読み戻す
@@ -235,6 +241,8 @@ namespace {
             result.hashes.insert(result.hashes.end(), readback.hashes.begin(), readback.hashes.end());
             result.events.insert(result.events.end(), readback.events.begin(), readback.events.end());
             result.droppedEventCount += readback.droppedEventCount;
+            gpu::AccumulateGraphStats(result.graphStats, readback.graphStats);
+            result.graphFindingCount += readback.graphFindingCount;
             result.enqueued.insert(result.enqueued.end(), commands.begin(), commands.end());
             unitPosition += plan.unitsPerFrame[frame];
         }
@@ -244,6 +252,7 @@ namespace {
         result.extractionHash = ProbeStateHash(extracted.first(PROBE_CELL_COUNT));
         result.extractionActiveBlocks =
             static_cast<uint32_t>(std::ranges::count(extracted.subspan(PROBE_EXTRACTION_BLOCK_OFFSET), 1u));
+        result.graphSummary = gpu::FormatGraphStats(simulation->ConductStatsLayout(), result.graphStats);
         result.ok = unitPosition == TOTAL_TICKS * unitsPerTick;
         return result;
     }
@@ -276,6 +285,32 @@ namespace {
             }
         }
         return true;
+    }
+
+    // 伝導のグラフのカウンタが CPU の予想と合うか(T-0008)。ConductBlock は 1 レコード = 1 グループ = 計算した 1 ブロック
+    bool GraphStatsMatch(const RunResult& result, const Reference& expected) {
+        if (result.graphStats.nodes.size() != 2 || result.graphStats.gaugePeaks.size() != 2) return false;
+        const gpu::GraphNodeCounters& wake = result.graphStats.nodes[PROBE_STATS_NODE_WAKE];
+        const gpu::GraphNodeCounters& conduct = result.graphStats.nodes[PROBE_STATS_NODE_CONDUCT];
+        uint64_t scheduled = 0;
+        for (size_t index = 1; index < expected.ticks.size(); ++index) {
+            scheduled += expected.ticks[index].scheduledBlocks;
+        }
+        const uint32_t activeListPeak = result.graphStats.gaugePeaks[PROBE_STATS_GAUGE_ACTIVE_LIST];
+        const bool match =
+            conduct.launches == scheduled && conduct.inputRecords == scheduled && wake.outputRecords == scheduled &&
+            wake.launches == wake.inputRecords && wake.launches >= TOTAL_TICKS && wake.refusedOutputs == 0 &&
+            wake.peakRequestedOutputs <= PROBE_WAKE_MAX_RECORDS && conduct.outputRecords == 0 && activeListPeak > 1 &&
+            activeListPeak <= PROBE_ACTIVE_LIST_CAPACITY && result.graphFindingCount == 0;
+        if (!match) {
+            Log(Channel::Sim, Level::Error,
+                "  WakeBlocks 起動 {} 入力 {} 出力 {} 止めた {} 最大 {} / ConductBlock 起動 {} 入力 {} 出力 {}"
+                "(CPU の予想 {})/ 一覧 最大 {} / 見つかった上限 {}",
+                wake.launches, wake.inputRecords, wake.outputRecords, wake.refusedOutputs, wake.peakRequestedOutputs,
+                conduct.launches, conduct.inputRecords, conduct.outputRecords, scheduled, activeListPeak,
+                result.graphFindingCount);
+        }
+        return match;
     }
 
     // --- 分け方 ---
@@ -329,6 +364,7 @@ namespace {
         failures.Check(std::ranges::max(scheduled) < PROBE_BLOCK_COUNT / 2 && std::ranges::min(scheduled) > 0,
                        "CPU リファレンス: 伝導するのは一部のブロックだけ(活性が効く試験になっている)");
 
+        std::optional<gpu::GraphStatsSnapshot> firstGraphStats;
         for (const Plan& plan : MakePlans()) {
             save::ReplayPlayer player = MakePlayer(commands);
             const RunResult result = RunPlan(device, plan, ScheduledSource(player));
@@ -346,6 +382,15 @@ namespace {
                            std::format("{}: 抽出の活性の印の数が、最後の刻みで計算したブロックの数と一致", plan.name));
             failures.Check(result.events == expectedEvents && result.droppedEventCount == 0,
                            std::format("{}: イベントが (刻み, 種類, 場所) の順に全部戻る", plan.name));
+            failures.Check(GraphStatsMatch(result, expected),
+                           std::format("{}: 伝導のグラフのカウンタが CPU の予想と合う", plan.name));
+            if (!firstGraphStats) {
+                firstGraphStats = result.graphStats;
+                Log(Channel::Sim, Level::Info, "  {}", result.graphSummary);
+            }
+            // ノードのカウンタは分け方によらない(計器のコマンドキューは、先に足す数が分け方で変わるので比べない)
+            failures.Check(result.graphStats.nodes == firstGraphStats->nodes,
+                           std::format("{}: 伝導のノードのカウンタが分け方によらず同じ", plan.name));
         }
     }
 

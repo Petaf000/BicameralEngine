@@ -62,6 +62,10 @@ bicameral_add_gpu_test_case(gpu_work_graph_warp_compute gpu_work_graph_test warp
 bicameral_add_gpu_test(gpu_debug_ring_test)
 bicameral_add_gpu_test_case(gpu_debug_ring gpu_debug_ring_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_ring_warp gpu_debug_ring_test warp --warp --queue compute)
+# Work Graphs のノードのカウンタと上限の検出(T-0008): わざと上限に近づけ・越えさせ、止めて数えるか・Warning と printf が出るか
+bicameral_add_gpu_test(gpu_work_graph_stats_test)
+bicameral_add_gpu_test_case(gpu_work_graph_stats gpu_work_graph_stats_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_work_graph_stats_warp gpu_work_graph_stats_test warp --warp --queue compute)
 # T-0004・T-0012・T-0086 の仮の刻み: 分け方を変えても CPU とビット一致、イベントの並び、記録 → 再生でハッシュ列が一致
 bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)

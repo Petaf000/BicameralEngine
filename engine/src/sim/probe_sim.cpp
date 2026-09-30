@@ -15,9 +15,13 @@ namespace bicameral::sim {
 
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
         //   u0 世界・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
-        //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印 → b0 単位の定数 → デバッグのリング → t0 フレームの入力
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 12, .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 1};
+        //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印 → b0 単位の定数 → デバッグのリング
+        //   → Work Graphs のカウンタ(u1 space1。T-0008)→ t0 フレームの入力
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 12,
+                                                       .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
+                                                       .debugRing = true,
+                                                       .graphStats = true,
+                                                       .srvCount = 1};
         constexpr uint32_t UAV_WORLD = 0;
         constexpr uint32_t UAV_EVENTS = 1;
         constexpr uint32_t UAV_EXTRACTION0 = 2;
@@ -48,6 +52,22 @@ namespace bicameral::sim {
                       size_t{PROBE_ACTIVE_LIST_STRIDE} * 4);
         static_assert(sizeof(D3D12_NODE_GPU_INPUT) <= PROBE_ACTIVE_LIST_HEADER_BYTES);
         constexpr uint32_t MAX_LOGGED_DEBUG_MESSAGES = 8;
+
+        // 伝導のグラフのカウンタの番号と上限(probe_sim.hlsli の PROBE_STATS_* と同じ順。T-0008)。
+        // WakeBlocks の出力は構造で 7 まで・ConductBlock は出力しない(一覧へは UAV で足す)ので、出力の「近い」は見ない。
+        // 活性の一覧は全部のブロックが活性でも溢れない大きさなので、満杯のときだけ知らせる
+        gpu::GraphStatsLayout MakeConductStatsLayout() {
+            gpu::GraphStatsLayout layout{.name = "伝導(ProbeConduct)"};
+            layout.nodes.resize(2);
+            layout.nodes[PROBE_STATS_NODE_WAKE] = {.name = "WakeBlocks", .maxOutputRecords = PROBE_WAKE_MAX_RECORDS};
+            layout.nodes[PROBE_STATS_NODE_CONDUCT] = {.name = "ConductBlock"};
+            layout.gauges.resize(2);
+            layout.gauges[PROBE_STATS_GAUGE_ACTIVE_LIST] = {
+                .name = "活性の一覧", .capacity = PROBE_ACTIVE_LIST_CAPACITY, .warnPercent = 100};
+            layout.gauges[PROBE_STATS_GAUGE_COMMAND_QUEUE] = {.name = "コマンドキュー",
+                                                              .capacity = PROBE_COMMAND_QUEUE_CAPACITY};
+            return layout;
+        }
 
         template <typename T>
         void WriteAt(std::byte* base, uint32_t offset, const T& value) {
@@ -105,8 +125,10 @@ namespace bicameral::sim {
         if (!events) return std::unexpected(events.error());
         auto debugRing = gpu::DebugRing::Create(device, FRAME_SLOT_COUNT);
         if (!debugRing) return std::unexpected(debugRing.error());
+        auto graphStats = gpu::WorkGraphStats::Create(device, MakeConductStatsLayout(), FRAME_SLOT_COUNT);
+        if (!graphStats) return std::unexpected(graphStats.error());
 
-        ProbeSim sim(options, std::move(*events), std::move(*debugRing));
+        ProbeSim sim(options, std::move(*events), std::move(*debugRing), std::move(*graphStats));
         if (!sim.CreatePipelines(device)) return std::unexpected("仮の刻みのパイプラインを作れない");
         if (!sim.CreateBuffers(device)) return std::unexpected("仮の刻みのバッファを作れない");
         if (!sim.CreateFrameSlots(device, listType)) return std::unexpected("仮の刻みのフレームの枠を作れない");
@@ -270,6 +292,7 @@ namespace bicameral::sim {
         BindRootArguments(list, frame.input.Get());
         m_events.RecordBegin(list);
         m_debugRing.RecordBegin(list);
+        m_graphStats.RecordBegin(list);
         const D3D12_RESOURCE_BARRIER hashesToUav =
             gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &hashesToUav);
@@ -346,7 +369,7 @@ namespace bicameral::sim {
         BindRootViews(list, input);
     }
 
-    // ルートの引数: ROOT_LAYOUT の順(u0〜u11・デバッグのリング・t0 フレームの入力)
+    // ルートの引数: ROOT_LAYOUT の順(u0〜u11・デバッグのリング・Work Graphs のカウンタ・t0 フレームの入力)
     void ProbeSim::BindRootViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const {
         list->SetComputeRootUnorderedAccessView(UAV_WORLD, m_world->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_EVENTS, m_events.GpuAddress());
@@ -361,6 +384,7 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(UAV_ACTIVE_LIST1, m_activeLists[1]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_BLOCK_SCHEDULE, m_blockSchedule->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
+        list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_INPUT), input->GetGPUVirtualAddress());
     }
 
@@ -421,10 +445,11 @@ namespace bicameral::sim {
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
     }
 
-    // イベント・デバッグの出力・(ハッシュの単位があれば)ハッシュの表を、slot の読み戻しのバッファへ
+    // イベント・デバッグの出力・ノードのカウンタ・(ハッシュの単位があれば)ハッシュの表を、slot の読み戻しのバッファへ
     void ProbeSim::RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const {
         m_events.RecordReadbackAndReset(list, slot);
         m_debugRing.RecordReadbackAndReset(list, slot);
+        m_graphStats.RecordReadbackAndReset(list, slot);
         if (hasHash) {
             gpu::RecordCopyToReadback(list, m_hashes.Get(), m_slots[slot].hashReadback.Get());
             const D3D12_RESOURCE_BARRIER toCommon =
@@ -439,7 +464,7 @@ namespace bicameral::sim {
 
     // --- 読み戻し ---
 
-    ProbeFrameReadback ProbeSim::ReadFrame(uint32_t slot) const {
+    ProbeFrameReadback ProbeSim::ReadFrame(uint32_t slot) {
         ProbeFrameReadback result;
         const FrameSlot& frame = m_slots[slot];
 
@@ -474,6 +499,15 @@ namespace bicameral::sim {
         result.firstUnit = frame.firstUnit;
         result.hashes = ReadHashes(frame);
         result.debugAssertCount = m_debugRing.Drain(MAX_LOGGED_DEBUG_MESSAGES, slot).assertCount;
+
+        // ノードのカウンタ: 要約は Trace、上限に当たった・近づいたものは Warning(gpu/work_graph_stats.h)
+        auto graphStats = m_graphStats.Read(slot);
+        if (graphStats) {
+            result.graphFindingCount = static_cast<uint32_t>(m_graphStats.Report(*graphStats).size());
+            result.graphStats = std::move(*graphStats);
+        } else {
+            Log(Channel::WorkGraph, Level::Warning, "{}", graphStats.error());
+        }
         return result;
     }
 

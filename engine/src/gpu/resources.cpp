@@ -2,6 +2,7 @@
 #include "gpu/resources.h"
 
 #include "common/debug_ring.hlsli"
+#include "common/work_graph_stats.hlsli"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
@@ -102,7 +103,7 @@ namespace bicameral::gpu {
                                          .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL};
         };
         std::vector<D3D12_ROOT_PARAMETER1> parameters;
-        parameters.reserve(layout.uavCount + layout.srvCount + 2);
+        parameters.reserve(layout.uavCount + layout.srvCount + 3);
         for (uint32_t index = 0; index < layout.uavCount; ++index) {
             parameters.push_back(rootUav(index, 0));
         }
@@ -113,6 +114,7 @@ namespace bicameral::gpu {
                  .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL});
         }
         if (layout.debugRing) parameters.push_back(rootUav(0, DEBUG_RING_REGISTER_SPACE));
+        if (layout.graphStats) parameters.push_back(rootUav(WG_STATS_REGISTER, WG_STATS_REGISTER_SPACE));
         for (uint32_t index = 0; index < layout.srvCount; ++index) {
             parameters.push_back({.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV,
                                   .Descriptor = {.ShaderRegister = index,

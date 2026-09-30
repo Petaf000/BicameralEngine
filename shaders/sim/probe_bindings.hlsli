@@ -6,6 +6,7 @@
 
 #include "common/debug_ring.hlsli"
 #include "common/probe_sim.hlsli"
+#include "common/work_graph_stats.hlsli"  // u1 space1(ノードのカウンタ。T-0008)
 
 // --- バッファ(ROOT_LAYOUT の順)---
 RWStructuredBuffer<uint32_t> world : register(u0);        // 2 世代 × PROBE_CELL_COUNT
