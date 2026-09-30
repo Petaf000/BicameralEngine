@@ -1,4 +1,4 @@
-// work_graph.cpp — Work Graph の状態オブジェクト・裏のメモリ・起動(T-0013)。
+// work_graph.cpp — Work Graph の状態オブジェクト・裏のメモリ・起動(T-0013。GPU の入力からの起動は T-0005)。
 // 手順は D3D12 Work Graphs の仕様(DirectX-Specs の "Work Graphs")の「Program setup」の順:
 //   状態オブジェクト(DXIL ライブラリ + グローバルのルート署名 + ワークグラフ)→ 必要な裏のメモリの大きさを聞いて確保
 //   → SetProgram(最初は INITIALIZE)→ DispatchGraph
@@ -87,6 +87,12 @@ namespace bicameral::gpu {
             .pRecords = records,
             .RecordStrideInBytes = recordStrideBytes,
         };
+        list->DispatchGraph(&desc);
+    }
+
+    void WorkGraph::DispatchFromGpu(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS nodeGpuInput) {
+        D3D12_DISPATCH_GRAPH_DESC desc{.Mode = D3D12_DISPATCH_MODE_NODE_GPU_INPUT};
+        desc.NodeGPUInput = nodeGpuInput;
         list->DispatchGraph(&desc);
     }
 

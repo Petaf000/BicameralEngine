@@ -1,6 +1,9 @@
-// gpu_probe_sim_test.cpp — 仮の刻み(sim/probe_sim)を単位の列として GPU で走らせ、CPU リファレンスとビット一致するかを確かめる(T-0004・T-0012・T-0086)。
+// gpu_probe_sim_test.cpp — 仮の刻み(sim/probe_sim)を単位の列として GPU で走らせ、CPU リファレンスとビット一致するかを確かめる
+// (T-0004・T-0012・T-0086・T-0005)。
 //
 // 確かめること:
+//   - (T-0005)伝導は Work Graph が活性のブロックだけを計算し、CPU は全部のセルを計算する。それでも刻みごとのハッシュ・熱の合計が一致し、
+//     GPU が計算したブロックの数が CPU の予想(変わったブロック + つついたブロック + その 6 面の隣)と同じ。熱は伝導で保存される
 //   - (06「テスト」の 1 つ目)同じ刻みの数とコマンドなら、フレームへの単位の分け方(1 刻みずつ / 8 刻みずつ / 1 単位ずつ /
 //     刻みの途中で切るばらばら / 重さの単位を足して分ける)を変えても、GPU が刻みごとに取った状態のハッシュ列が CPU リファレンスと一致する。
 //     コマンドは数刻み先まで先に GPU のキューへ足す(キューの中で自分の刻みまで待つ。フレームの切れ目と関係なく適用される)
@@ -14,6 +17,7 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <ranges>
 #include <vector>
 
 #include "core/log.h"
@@ -38,24 +42,27 @@ namespace {
     constexpr uint32_t OVERFLOW_POKES = 300;  // 刻みの一時置き場(PROBE_TICK_EVENT_CAPACITY)を溢れさせる数
     constexpr uint64_t OVERFLOW_TICK = 3;
 
-    // 刻み・場所。同じ刻みの同じセル(順番に依存しないか)と、格子の端・角、場所の大きい順に足す刻み(21)も入れる
+    // 刻み・場所。同じ刻みの同じセル(順番に依存しないか)と、格子の端・角、ブロックの境目(3 と 4)、
+    // 場所の大きい順に足す刻み(21)も入れる
     struct PokeSpec {
         uint64_t tick;
         uint32_t x;
         uint32_t y;
+        uint32_t z;
     };
+    constexpr uint32_t LAST = PROBE_GRID_SIZE - 1;
     constexpr std::array<PokeSpec, 8> POKES = {{
-        {.tick = 0, .x = 10, .y = 10},
-        {.tick = 0, .x = 10, .y = 10},
-        {.tick = 5, .x = 0, .y = 0},
-        {.tick = 5, .x = PROBE_GRID_SIZE - 1, .y = 64},
-        {.tick = 13, .x = 64, .y = 64},
-        {.tick = 21, .x = 65, .y = 64},
-        {.tick = 21, .x = 3, .y = 2},
-        {.tick = 39, .x = 100, .y = 3},
+        {.tick = 0, .x = 10, .y = 10, .z = 10},
+        {.tick = 0, .x = 10, .y = 10, .z = 10},
+        {.tick = 5, .x = 0, .y = 0, .z = 0},
+        {.tick = 5, .x = LAST, .y = 32, .z = LAST},
+        {.tick = 13, .x = 32, .y = 32, .z = PROBE_VIEW_Z},
+        {.tick = 21, .x = 33, .y = 32, .z = PROBE_VIEW_Z},
+        {.tick = 21, .x = 3, .y = 4, .z = 3},
+        {.tick = 39, .x = 50, .y = 3, .z = 60},
     }};
 
-    // 記録の試験: 窓のクリックのように、フレーム frame に届いて「その時の次の適用の刻み」が付くコマンド
+    // 記録の試験: 窓のクリックのように、フレーム frame に届いて「その時の次の適用の刻み」が付くコマンド(z = PROBE_VIEW_Z の面)
     struct ClickSpec {
         size_t frame;
         uint32_t x;
@@ -65,11 +72,11 @@ namespace {
         {.frame = 0, .x = 10, .y = 10},
         {.frame = 0, .x = 10, .y = 10},
         {.frame = 3, .x = 0, .y = 0},
-        {.frame = 3, .x = PROBE_GRID_SIZE - 1, .y = 64},
-        {.frame = 9, .x = 64, .y = 64},
-        {.frame = 15, .x = 65, .y = 64},
-        {.frame = 15, .x = 3, .y = 2},
-        {.frame = 22, .x = 100, .y = 3},
+        {.frame = 3, .x = LAST, .y = 32},
+        {.frame = 9, .x = 32, .y = 32},
+        {.frame = 15, .x = 33, .y = 32},
+        {.frame = 15, .x = 3, .y = 4},
+        {.frame = 22, .x = 50, .y = 3},
     }};
 
     struct Failures {
@@ -87,7 +94,7 @@ namespace {
         commands.reserve(POKES.size());
         uint32_t sequence = 0;
         for (const PokeSpec& poke : POKES) {
-            commands.push_back(MakePokeCommand(poke.tick, sequence++, poke.x, poke.y));
+            commands.push_back(MakePokeCommand(poke.tick, sequence++, poke.x, poke.y, poke.z));
         }
         return commands;
     }
@@ -98,20 +105,37 @@ namespace {
         commands.reserve(OVERFLOW_POKES);
         for (uint32_t index = 0; index < OVERFLOW_POKES; ++index) {
             commands.push_back(
-                MakePokeCommand(OVERFLOW_TICK, index, index % PROBE_GRID_SIZE, 20 + index / PROBE_GRID_SIZE));
+                MakePokeCommand(OVERFLOW_TICK, index, index % PROBE_GRID_SIZE, 20 + index / PROBE_GRID_SIZE, 5));
         }
         return commands;
     }
 
-    // CPU リファレンスの S(0)〜S(TOTAL_TICKS) のハッシュ([t] が S(t))
-    std::vector<uint64_t> ReferenceHashes(std::span<const ProbeCommand> commands) {
+    // CPU リファレンスの S(0)〜S(TOTAL_TICKS) の要約([t] が S(t))と、最後の状態の描画用の面のハッシュ
+    struct Reference {
+        std::vector<ProbeTickHash> ticks;
+        uint64_t sliceHash = 0;
+        bool heatConserved = true;  // 熱の合計が、つつきで足した分だけ変わった(伝導では変わらない)
+    };
+
+    Reference RunReference(std::span<const ProbeCommand> commands) {
         ProbeReference reference;
-        std::vector<uint64_t> hashes = {ProbeStateHash(reference.State(0))};
+        Reference result;
+        result.ticks.push_back({.tick = 0, .hash = ProbeStateHash(reference.State(0)), .heat = 0});
         for (uint64_t tick = 0; tick < TOTAL_TICKS; ++tick) {
+            // つつきで足す熱(飽和は無い大きさ: 1 セルに 2 回まで)
+            const auto pokes = std::ranges::count_if(
+                commands, [&](const ProbeCommand& command) { return command.targetTick == tick; });
             reference.Advance(tick, commands);
-            hashes.push_back(ProbeStateHash(reference.State(tick + 1)));
+            const std::span<const uint32_t> state = reference.State(tick + 1);
+            result.ticks.push_back({.tick = tick + 1,
+                                    .hash = ProbeStateHash(state),
+                                    .heat = ProbeHeatSum(state),
+                                    .scheduledBlocks = reference.ScheduledBlocks()});
+            const uint64_t added = static_cast<uint64_t>(pokes) * PROBE_POKE_AMOUNT;
+            result.heatConserved = result.heatConserved && result.ticks.back().heat == result.ticks[tick].heat + added;
         }
-        return hashes;
+        result.sliceHash = ProbeStateHash(ProbeViewSlice(reference.State(TOTAL_TICKS)));
+        return result;
     }
 
     // GPU が返すはずのイベント: つつきごとに 1 つを (刻み, 種類, 場所) の順に
@@ -120,7 +144,7 @@ namespace {
         for (const ProbeCommand& command : commands) {
             events.push_back({.tick = command.targetTick,
                               .type = PROBE_EVENT_POKE_APPLIED,
-                              .place = ProbePokePlace(command.payload[0], command.payload[1])});
+                              .place = ProbePokePlace(command.payload[0], command.payload[1], command.payload[2])});
         }
         std::ranges::sort(events, [](const ProbeEvent& a, const ProbeEvent& b) {
             if (a.tick != b.tick) return a.tick < b.tick;
@@ -159,16 +183,16 @@ namespace {
         std::vector<ProbeCommand> enqueued;  // 足したコマンド(足した順)
     };
 
-    // 抽出(COMMON)を読み戻す
+    // 抽出(COMMON。z = PROBE_VIEW_Z の面)を読み戻す
     std::vector<uint32_t> ReadExtraction(ID3D12Device5* device, ID3D12Resource* extraction) {
-        std::vector<uint32_t> cells(PROBE_CELL_COUNT);
+        std::vector<uint32_t> cells(PROBE_SLICE_CELL_COUNT);
         auto queue = gpu::ImmediateQueue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
         const ComPtr<ID3D12Resource> readback =
-            gpu::CreateBuffer(device, uint64_t{PROBE_CELL_COUNT} * 4, gpu::BufferKind::Readback);
+            gpu::CreateBuffer(device, uint64_t{PROBE_SLICE_CELL_COUNT} * 4, gpu::BufferKind::Readback);
         if (!queue || !readback) return {};
         ID3D12GraphicsCommandList10* list = queue->Begin();
         if (list == nullptr) return {};
-        list->CopyBufferRegion(readback.Get(), 0, extraction, 0, uint64_t{PROBE_CELL_COUNT} * 4);
+        list->CopyBufferRegion(readback.Get(), 0, extraction, 0, uint64_t{PROBE_SLICE_CELL_COUNT} * 4);
         if (!queue->ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(cells)))) {
             return {};
         }
@@ -216,7 +240,7 @@ namespace {
             unitPosition += plan.unitsPerFrame[frame];
         }
         const std::vector<uint32_t> cells = ReadExtraction(device, simulation->Extraction(extractionTarget));
-        if (cells.size() != PROBE_CELL_COUNT) return result;
+        if (cells.size() != PROBE_SLICE_CELL_COUNT) return result;
         result.extractionHash = ProbeStateHash(cells);
         result.ok = unitPosition == TOTAL_TICKS * unitsPerTick;
         return result;
@@ -235,13 +259,17 @@ namespace {
         return save::ReplayPlayer(std::move(replay));
     }
 
-    // GPU のハッシュ列が S(1)〜S(TOTAL_TICKS) の順に並び、CPU と一致するか
-    bool HashesMatch(std::span<const ProbeTickHash> hashes, std::span<const uint64_t> expected) {
+    // GPU の要約の列が S(1)〜S(TOTAL_TICKS) の順に並び、CPU と一致するか(ハッシュ・熱の合計・伝導したブロックの数)
+    bool HashesMatch(std::span<const ProbeTickHash> hashes, const Reference& expected) {
         if (hashes.size() != TOTAL_TICKS) return false;
         for (size_t index = 0; index < hashes.size(); ++index) {
-            if (hashes[index].tick != index + 1 || hashes[index].hash != expected[index + 1]) {
-                Log(Channel::Sim, Level::Error, "  S({}) = {:016x}(CPU S({}) = {:016x})", hashes[index].tick,
-                    hashes[index].hash, index + 1, expected[index + 1]);
+            const ProbeTickHash& gpu = hashes[index];
+            const ProbeTickHash& cpu = expected.ticks[index + 1];
+            if (gpu.tick != cpu.tick || gpu.hash != cpu.hash || gpu.heat != cpu.heat ||
+                gpu.scheduledBlocks != cpu.scheduledBlocks) {
+                Log(Channel::Sim, Level::Error,
+                    "  S({}) = {:016x} 熱 {} ブロック {}(CPU S({}) = {:016x} 熱 {} ブロック {})", gpu.tick, gpu.hash,
+                    gpu.heat, gpu.scheduledBlocks, cpu.tick, cpu.hash, cpu.heat, cpu.scheduledBlocks);
                 return false;
             }
         }
@@ -288,9 +316,16 @@ namespace {
     // 分け方を変えても、ハッシュ列・抽出・イベントの並びが同じ(CPU リファレンスと一致)
     void TestFramings(ID3D12Device5* device, Failures& failures) {
         const std::vector<ProbeCommand> commands = MakeCommands();
-        const std::vector<uint64_t> expected = ReferenceHashes(commands);
+        const Reference expected = RunReference(commands);
         const std::vector<ProbeEvent> expectedEvents = ExpectedEvents(commands);
-        Log(Channel::Sim, Level::Info, "CPU リファレンス: S({}) = {:016x}", TOTAL_TICKS, expected.back());
+        const auto scheduled = expected.ticks | std::views::drop(1) |
+                               std::views::transform([](const ProbeTickHash& tick) { return tick.scheduledBlocks; });
+        Log(Channel::Sim, Level::Info, "CPU リファレンス: S({}) = {:016x}  熱 {}  伝導したブロック 最大 {} / {}",
+            TOTAL_TICKS, expected.ticks.back().hash, expected.ticks.back().heat, std::ranges::max(scheduled),
+            PROBE_BLOCK_COUNT);
+        failures.Check(expected.heatConserved, "CPU リファレンス: 熱の合計はつつきの分だけ変わる(伝導で保存)");
+        failures.Check(std::ranges::max(scheduled) < PROBE_BLOCK_COUNT / 2 && std::ranges::min(scheduled) > 0,
+                       "CPU リファレンス: 伝導するのは一部のブロックだけ(活性が効く試験になっている)");
 
         for (const Plan& plan : MakePlans()) {
             save::ReplayPlayer player = MakePlayer(commands);
@@ -303,7 +338,7 @@ namespace {
                            std::format("{}: コマンドを全部、刻みに間に合うように足した", plan.name));
             failures.Check(HashesMatch(result.hashes, expected),
                            std::format("{}: 刻みごとのハッシュが CPU と一致", plan.name));
-            failures.Check(result.extractionHash == expected.back(),
+            failures.Check(result.extractionHash == expected.sliceHash,
                            std::format("{}: 最後の抽出が CPU と一致", plan.name));
             failures.Check(result.events == expectedEvents && result.droppedEventCount == 0,
                            std::format("{}: イベントが (刻み, 種類, 場所) の順に全部戻る", plan.name));
@@ -313,7 +348,7 @@ namespace {
     // 刻みの一時置き場が溢れたら、容量ぶんを並べて返し、残りを落とした数に数える(世界の結果は変わらない)
     void TestEventOverflow(ID3D12Device5* device, Failures& failures) {
         const std::vector<ProbeCommand> commands = MakeOverflowCommands();
-        const std::vector<uint64_t> expected = ReferenceHashes(commands);
+        const Reference expected = RunReference(commands);
         save::ReplayPlayer player = MakePlayer(commands);
         const Plan plan{.name = "溢れ",
                         .options = {},
@@ -334,16 +369,20 @@ namespace {
     }
 
     // 窓のクリックのように途中で届くコマンドを記録 → 再生ファイルに書いて読む → 別の分け方で再生して同じハッシュ列になる
-    void TestRecordAndReplay(ID3D12Device5* device, Failures& failures) {
-        uint32_t sequence = 0;
-        const CommandSource clicks = [&sequence](size_t frame, uint64_t applyTick, uint32_t) {
+    CommandSource ClickSource(uint32_t& sequence) {
+        return [&sequence](size_t frame, uint64_t applyTick, uint32_t) {
             std::vector<ProbeCommand> commands;
-            for (const ClickSpec& click : CLICKS) {
-                if (click.frame == frame) commands.push_back(MakePokeCommand(applyTick, sequence++, click.x, click.y));
+            for (const ClickSpec& click :
+                 CLICKS | std::views::filter([&](const ClickSpec& c) { return c.frame == frame; })) {
+                commands.push_back(MakePokeCommand(applyTick, sequence++, click.x, click.y, PROBE_VIEW_Z));
             }
             return commands;
         };
-        const RunResult recorded = RunPlan(device, MixedPlan(), clicks);
+    }
+
+    void TestRecordAndReplay(ID3D12Device5* device, Failures& failures) {
+        uint32_t sequence = 0;
+        const RunResult recorded = RunPlan(device, MixedPlan(), ClickSource(sequence));
         save::ReplayRecorder recorder;
         recorder.AddCommands(recorded.enqueued);
         for (const ProbeTickHash& tickHash : recorded.hashes) {
@@ -367,7 +406,7 @@ namespace {
             player->Matches(), player->Mismatches(), player->HashCount(), player->LateCommands());
         failures.Check(replayed.ok && player->Passed() && player->HashCount() == TOTAL_TICKS,
                        "再生: 別の分け方で刻みごとのハッシュが記録と全部一致");
-        failures.Check(HashesMatch(replayed.hashes, ReferenceHashes(recorder.Build().commands)),
+        failures.Check(HashesMatch(replayed.hashes, RunReference(recorder.Build().commands)),
                        "再生: 記録したコマンドの CPU リファレンスとも一致");
         failures.Check(replayed.events == recorded.events, "再生: イベントの列も記録と同じ");
     }

@@ -35,6 +35,11 @@ namespace bicameral::gpu {
         static void DispatchFromCpu(ID3D12GraphicsCommandList10* list, uint32_t entrypointIndex, const void* records,
                                     uint32_t recordCount, uint64_t recordStrideBytes);
 
+        // GPU のメモリにある D3D12_NODE_GPU_INPUT(入口・レコードの数・レコードのアドレスと間隔)を実行の時に読んで起動する
+        // (D3D12_DISPATCH_MODE_NODE_GPU_INPUT)。レコードの数を GPU が決められる。nodeGpuInput は 8 バイト境界で、
+        // それとレコードのメモリは NON_PIXEL_SHADER_RESOURCE か COMMON の状態でなければならない(仕様の D3D12_NODE_GPU_INPUT)
+        static void DispatchFromGpu(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS nodeGpuInput);
+
         [[nodiscard]] uint64_t BackingMemoryBytes() const { return m_backingMemoryBytes; }
 
     private:

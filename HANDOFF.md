@@ -1,39 +1,37 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-09-30 / チケット: T-0086 コマンドキュー・並べたイベント・再生ファイルの骨組み — 完了
+最終更新: 2026-09-30 / チケット: T-0005 クリックから Work Graphs で自動伝播 — 完了
 
 ## 状態(3 行以内)
-- `bicameral`(引数なし)で窓が開き、1 刻み = 単位の列(適用 → 拡散 → 重さ × k → 検査と出力)を毎フレーム予算ぶん compute に投げる(ADR-0011)。
-  コマンドは GPU のキュー(環状 1024)で自分の刻みまで待ち、イベントは刻みの終わりに (刻み, 種類, 場所) で並べてリングへ。`--record` / `--replay` で再生ファイル。
-- 次は T-0005(クリックから Work Graphs で自動伝播)。テスト 25/25。
+- 仮の世界は 64³ の整数の熱(4³ ブロック 4096 個)。1 刻み = 適用 → 伝導(Work Graph を 1 回。入力は GPU が作る活性の一覧)→ 重さ × k → 検査と出力。
+  クリックは z = 32 の面をつつき、熱が広がっている所のブロックだけが計算される(1 点なら約 1270 刻みで計算 0 に)。窓は z = 32 の面を対数の色で描く。
+- 次は T-0015(デバッグ表示とカメラ。チケットのファイルはまだ無い)。テスト 25/25。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(35 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(46)。
-- `job.py test` → 25/25。`-Filter gpu_probe_sim -Show` で分け方 5 通りの S(40) = ca7bda63a1d7d6b4 が CPU と一致・イベント 8 個が並んで戻る・溢れ(256 + 落とした 44)・
-  記録 → 別の分け方で再生して 40 刻み全部一致。`replay_file`(CPU)。`window_replay_record` → `window_replay_play`(窓を 2 回開く。ラベル gpu)。
-- `job.py run -Preset release -- --frames 600 --auto-click --record x.bcreplay` → 165 fps・世界 59.7、`-- --replay x.bcreplay --sim-load 5200000 --sim-split 16` →
-  68.5 fps・ハッシュ 217 個全部一致(相対パスは bin/ から。docs/perf.md)。
-  引数: `--frames n` `--no-vsync` `--latency 2|3` `--target-fps f` `--sim-load n --sim-split k` `--render-normal` `--auto-click` `--record p` `--replay p` `--warp`(main.cpp の先頭)。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(36 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(50)。
+- `job.py test` → 25/25。`-Filter gpu_probe_sim -Show` で分け方 5 通りの S(40) = 6fed9c32c4da7356 がハードウェア・WARP とも CPU と一致
+  (刻みごとのハッシュ・熱の合計・計算したブロックの数まで)。熱の合計はつつきの分だけ変わる。溢れ・記録 → 再生も。
+- `job.py run -Preset release -Exe gpu_conduct_bench` → 規模ごとの伝導の時間(docs/perf.md。約 40 µs の固定費 + 15 ns/ブロック、裏のメモリ 139,912 B)。
+- `job.py run -Preset release -- --frames 600 --auto-click` → 164.6 fps・世界 59.8 刻み/秒。ログの 1 秒ごとの行に熱の合計と伝導したブロックの数。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 適用の単位は 1 スレッドでキューを順に読む(probe_tick.hlsl の ApplyCommands)。本物のコマンドが増えて重くなったら種類ごとに分ける(06 §3 実装)。
-- イベントの一時置き場は 1 刻み 256 個・並べ替えは 1 グループの bitonic sort。本物の反応の段では足りないので、大きくして基数ソートに(06 §3)。
-- 再生ファイルのハッシュは全部の刻みを持つ(間引きは読む側だけ対応)。セーブ(差分の書き出し)は未着手(15 §1)。
-- 1 単位が予算より重いと、そのフレームだけ描画が遅れる(T-0012 から。本物の段は単位を 1〜3 ms に分ける。06 §4.2)。
-- 未確認: GPU 側で未来の描画のフェンスを compute に待たせる形 / compute と描画が GPU の中で少しでも重なるか / AMD。
-- vsync ありで Present の中に平均 1 ms(BACKLOG。害は無い)。窓の大きさの変更・最小化・DPI は人の手で試していない。
-- DRED の「止まったコマンド」表示は本物のハング(TDR)で未確認(16 §4)。SASS / RDNA3 の命令数は T-0016 / AMD 機。
+- 伝導の単位の約 40 µs の固定費の内訳(DispatchGraph の起動・SetProgram・遷移のバリア)は未確認。局所の刻みの細分(06 §1)で 1 刻みに何回も起動すると効く。
+- WARP の 2 つの癖は回避しただけで原因は未確認(06 §2「実装(T-0005)」): レコード 0 件の GPU の入力で固まる / 局所の配列から一括で出すと予定がずれる。
+- 伝導の Compute 版との比較(D-302)はしていない(輸送の本物の段で)。材質は 1 つ・流れ = |差| >> 3 の仮の規則(07 §1 の本物は材質の熱伝導率・SI)。
+- 予定の印は「刻み + 1」の下位 32bit(2^32 刻みで一周して 1 刻みだけ取りこぼしうる)。本物の活性の整理(T-0018)で置き換える。
+- (前から)適用の単位は 1 スレッド・イベントの一時置き場 256・並べ替えは 1 グループ(06 §3)。セーブは未着手(15 §1)。
+- (前から)1 単位が予算より重いと、そのフレームだけ描画が遅れる(06 §4.2)。GPU の中で compute と描画が重なるか・AMD は未確認。
+- (前から)窓の大きさの変更・最小化・DPI は人の手で試していない。DRED の表示は本物のハングで未確認。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- コマンドの適用する刻み = まだ記録していない最初の適用の単位の刻み(`ProbeSim::NextApplyTick`)。フレームに適用の単位が無くても GPU のキューで待つ。
-- キューに足すのは CPU だけ → 末尾・空きは CPU が控え、足す場所を入力の見出しで渡す(GPU で atomic を使わない)。約束違反は RecordFrame が拒否、GPU は遅れたものを捨ててイベントで知らせる。
-- 適用は 1 スレッドで (targetTick, sequence) の順(順番に効くコマンドも決定的)。イベントの溢れでどれが残るかは決めない(数えるだけ。View 用なので)。
-- コマンドの形は `sim/command.h` の `Command`(`ProbeCommand` はその別名)。再生ファイルは `engine/src/save/`(新しいライブラリ bicameral_save。CPU だけ)。
-- 再生ファイルの形式の版 1(15 §2.1)。記録は最後にハッシュを読み戻した刻みまでに適用されるコマンドだけを書く。再生は 8 刻み先まで先に足す。
-- ADR は書いていない(06 §3・15 §2 の実装の詳細)。
+- 活性の単位は 4³ のブロック。刻み t で計算する = 刻み t − 1 で変わった・刻み t につつかれたブロック + 6 面の隣(06 §2 実装)。
+  CPU リファレンスは全セルを計算し、GPU とのビット一致で活性の取り方の正しさも確かめる。
+- Work Graph の入力は GPU のメモリ(`D3D12_DISPATCH_MODE_NODE_GPU_INPUT`)。一覧の見出し = `D3D12_NODE_GPU_INPUT`、数は atomic で足す。刻みの偶奇で 2 組。
+- つつきは熱を足す(PROBE_POKE_AMOUNT = 2^24、上限 2^30 で飽和)。格子の外は断熱。ハッシュの表の欄は 32 バイト(ハッシュ・熱の合計・計算したブロックの数)。
+- ADR は書いていない(06 §2 の実装の詳細。本物の活性の整理と輸送の形は T-0018・輸送のチケットで決める)。
 
 ## 次にやること
-NEXT.md の先頭(T-0005 クリックから Work Graphs で自動伝播)。
+NEXT.md の先頭(T-0015 デバッグ表示とカメラ。ROADMAP の表からチケットのファイルを作る)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **同じコマンドリストを、キューのフェンスが前の実行を越える前に投げ直さない**(debug layer [553]。debug layer はその実行を捨て、release は黙って走る)。
@@ -73,8 +71,8 @@ NEXT.md の先頭(T-0005 クリックから Work Graphs で自動伝播)。
 - **フレームのループ(frame/frame_loop.cpp)**: 抽出の 3 組の約束はファイルの先頭に書いた(抽出 n は、終わっている抽出が n − 2 以上のときだけ)。
   抽出の組の数を変えるときはこの条件も変える(破ると描画とシミュが同じ抽出を同時に使う)。
 - **バックバッファを作り直す前・終わる前は `Queue::Flush()`**(最後の Submit の値を待つだけだと、その後ろの Present がまだ走っていて debug layer が CORRUPTION を出す)。
-- 仮の刻み(sim/probe_sim・shaders/sim/probe_tick.hlsl・shaders/common/probe_sim.hlsli)の中身(拡散)は T-0005 以降で本物に置き換える前提。
-  形(単位の列・単位ごとのタイムスタンプ・刻みの最後のハッシュ・64 バイトのコマンド・枠ごとの入力・イベントのリング)は本物にも使う。
+- 仮の刻み(sim/probe_sim・shaders/sim/probe_tick.hlsl・probe_conduct.hlsl・shaders/common/probe_sim.hlsli)の中身(64³ の熱の伝導)は段ごとに本物に置き換える前提。
+  形(単位の列・単位ごとのタイムスタンプ・刻みの最後のハッシュ・64 バイトのコマンド・枠ごとの入力・イベントのリング・GPU の入力の活性の一覧)は本物にも使う。
   単位を足すときは probe_sim.hlsli の単位の表・ProbeSim::RecordUnit・UnitsPerTick を揃える。ハッシュの単位は必ず刻みの最後(次の刻みの適用より前の S(t+1) を取る)。
 - ハッシュの表の読み戻しは、そのフレームにハッシュの単位があるときだけ(無いのに UAV → COPY_SOURCE を入れると状態が合わない)。ProbeSim::RecordReadbacks。
 - HLSL の `[numthreads] void F(...) {}` が続くと clang-format が次の行を字下げして崩す。probe_tick.hlsl は入口の範囲をまとめて `// clang-format off/on` で囲んだ。
@@ -84,6 +82,13 @@ NEXT.md の先頭(T-0005 クリックから Work Graphs で自動伝播)。
 - HLSL の `[numthreads(...)] void Name(` は archmap が定義として見つけない。map.yaml ではその .hlsl の普通の関数を指す。
 - **コマンドを足すときの約束**(ProbeSim::RecordFrame が確かめる): (targetTick, sequence) の昇順・targetTick ≥ `NextApplyTick(カーソル)`・数 ≤ `FreeCommandSlots()` かつ 256。
   CPU の控え(ProbeSim の m_commandTail・m_queuedTicks)は「記録したら GPU で実行される」前提。記録したリストを投げなかった場合は控えがずれる(今は失敗 = 終了なので問題なし)。
-- probe_sim のルート署名は UAV 9 個(u7 コマンドキュー・u8 刻みのイベントの一時置き場)。イベントのリングの見出しは [0] 書こうとした数 [1] 一時置き場で落とした数。
+- probe_sim のルート署名は UAV 12 個(u7 コマンドキュー・u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印)。
+  バッファの結び方は shaders/sim/probe_bindings.hlsli(compute と Work Graph で共有)。イベントのリングの見出しは [0] 書こうとした数 [1] 一時置き場で落とした数。
+- **GPU の入力の DispatchGraph**: 入力(見出しとレコード)は NON_PIXEL_SHADER_RESOURCE か COMMON でなければならない。活性の一覧はフレームの始めに
+  COMMON → UAV、伝導の前後だけ入力の組を UAV ⇄ NON_PIXEL_SHADER_RESOURCE、フレームの終わりに UAV → COMMON(ProbeSim::RecordConduct)。
+  **レコードを 0 件にしない**(WARP が固まる。一覧の先頭は必ず PROBE_NO_BLOCK)。SetProgram の後にルートの引数を結び直している(念のため)。
+- **スレッド起動のノードの出力**: 局所の配列に集めて `GetThreadNodeOutputRecords(n)` で一括に出すと WARP で予定がずれた。展開したループで 0 件か 1 件ずつ出す(probe_conduct.hlsl)。
+- GPU のテストの ctest の TIMEOUT は 300 秒(固まったときに runner を 25 分塞がないため)。`job.py test` を device_bash から呼ぶときは
+  `timeout 170 python3 ~/job.py test --timeout 160 ...` にする(device_bash は 180 秒で切れ、ジョブは runner で走り続ける)。
 - `--record` / `--replay` の相対パスは runner の作業フォルダ(bin/)から。ctest の window_replay_* は `out/build/<preset>/tests/window_replay.bcreplay` を使う。
 - 窓の ctest(window_replay_*)は画面に窓が 2 回出る(約 6 秒ずつ)。CI はラベル gpu なので走らない。

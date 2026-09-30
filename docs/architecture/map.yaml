@@ -62,9 +62,15 @@ views:
           doc: docs/design/06-simulation-loop.md }
       - { id: probesim, group: simlib, label: "ProbeSim<br/>1 刻み = 単位の列。フレームの枠ごとのリストに毎フレーム記録",
           code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordFrame", ticket: T-0012,
-          note: "適用 → 拡散 → 重さ × k → 検査と出力。コマンドは GPU のキューで自分の刻みまで待つ(T-0086)。単位ごとのタイムスタンプ・刻みごとのハッシュ・イベントを読み戻す" }
-      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>EnqueueCommands / ApplyCommands / Diffuse / Busy / HashBegin / HashCells / FlushEvents / Extract",
-          code: "shaders/sim/probe_tick.hlsl::GenerationBase", ticket: T-0012 }
+          note: "適用 → 伝導(Work Graph。T-0005)→ 重さ × k → 検査と出力。コマンドは GPU のキューで自分の刻みまで待つ(T-0086)。単位ごとのタイムスタンプ・刻みごとのハッシュ・熱の合計・計算したブロックの数・イベントを読み戻す" }
+      - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>EnqueueCommands / ApplyCommands / Busy / HashCells / FlushEvents / Extract",
+          code: "shaders/sim/probe_tick.hlsl::BeginTick", ticket: T-0012 }
+      - { id: probeconduct, group: simlib, label: "probe_conduct.hlsl(Work Graph)<br/>WakeBlocks → ConductBlock。熱が広がる所だけ",
+          code: "shaders/sim/probe_conduct.hlsl::TrySchedule", ticket: T-0005, doc: docs/design/06-simulation-loop.md,
+          note: "入力は GPU の活性の一覧(DispatchGraph の GPU の入力)。変わったブロックが次の刻みの一覧へ" }
+      - { id: conductbench, group: tests, label: "gpu_conduct_bench<br/>伝播の規模ごとの伝導の時間",
+          code: "tests/gpu_conduct_bench.cpp::RunScenario", ticket: T-0005,
+          note: "ctest に入れない計測(docs/perf.md)。1 点のつつきが止まるまでと、熱の保存" }
       - { id: commandqueue, group: simlib, label: "GPU のコマンドキュー<br/>(targetTick, sequence) の順。適用の単位が先頭から取る",
           code: "shaders/sim/probe_tick.hlsl::ApplyCommand", ticket: T-0086, doc: docs/design/06-simulation-loop.md,
           note: "足すのは CPU だけ(末尾と空きを CPU が控える: ProbeSim::FreeCommandSlots)" }
@@ -184,6 +190,8 @@ views:
       - [frameloop, window, "クリック"]
       - [frameloop, scheduler, "単位の数"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)"]
+      - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
+      - [conductbench, probesim]
       - [frameloop, probeview, "記録済みのリスト(direct キュー)"]
       - [frameloop, queue, "Submit・GpuWait"]
       - [frameloop, swapchain, "WaitForFrame・Present"]
@@ -223,9 +231,12 @@ views:
       - { id: command, group: sim, label: "1 コマンド適用<br/>GPU のキューから (刻み, 番号) の順", ticket: T-0086,
           code: "shaders/sim/probe_tick.hlsl::ApplyCommand", doc: docs/design/06-simulation-loop.md,
           note: "M1 は仮の世界の「つつき」だけ" }
-      - { id: active, group: sim, status: planned, label: "2 活性の整理<br/>Work Graphs", doc: docs/design/05-world-data.md }
-      - { id: transport, group: sim, status: planned, label: "3 輸送(熱・気体・水・魔素)<br/>測って安い方(D-302)",
-          ticket: T-0005, doc: docs/design/07-transport.md, note: "M1 はクリックした点から熱が伝わるだけ" }
+      - { id: active, group: sim, label: "2 活性の整理<br/>Work Graphs", ticket: T-0005,
+          code: "shaders/sim/probe_conduct.hlsl::TrySchedule", doc: docs/design/05-world-data.md,
+          note: "M1 は仮の世界の 4³ ブロック: 前の刻みで変わったブロック + つつかれたブロック + 6 面の隣。疎な木は T-0018" }
+      - { id: transport, group: sim, label: "3 輸送(熱・気体・水・魔素)<br/>測って安い方(D-302)",
+          ticket: T-0005, code: "shaders/common/probe_sim.hlsli::ProbeConductValue", doc: docs/design/07-transport.md,
+          note: "M1 はクリックした点から熱が伝わるだけ(材質 1 つ・断熱の箱。Work Graph の版だけ。Compute との比較は輸送の本物の段で)" }
       - { id: react, group: sim, status: planned, label: "4 反応<br/>Work Graphs", doc: docs/design/02-reaction-system.md }
       - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
           doc: docs/design/08-bodies-physics.md, note: "研究 R-PHYS" }
@@ -234,7 +245,7 @@ views:
       - { id: coarse, group: sim, status: planned, label: "8 粗い層(60 刻みに 1 回)", doc: docs/design/05-world-data.md }
       - { id: check, group: sim, label: "9 検査と出力<br/>保存則・状態のハッシュ・イベントを並べてリングへ", ticket: T-0086,
           code: "shaders/sim/probe_tick.hlsl::SortEventKeys", doc: docs/design/16-debug-test.md,
-          note: "状態のハッシュ(T-0012)とイベントの並べ替え(T-0086)まで。保存則の合計は本物の段から" }
+          note: "状態のハッシュ(T-0012)・イベントの並べ替え(T-0086)・熱の合計(T-0005)" }
       - { id: ring, group: sim, label: "GPU → CPU の待たないリング<br/>イベント・スナップショット・デバッグ",
           ticket: T-0004, code: "engine/src/gpu/readback_ring.cpp::ReadbackRing::RecordReadbackAndReset" }
       - { id: extract, group: view, status: planned, label: "描画用の抽出(3 組)", doc: docs/design/10-rendering.md,

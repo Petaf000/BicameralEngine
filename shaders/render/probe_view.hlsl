@@ -1,4 +1,4 @@
-// probe_view.hlsl — T-0004 の仮の世界(common/probe_sim.hlsli)を画面いっぱいの三角形 1 枚で描く。
+// probe_view.hlsl — 仮の世界(common/probe_sim.hlsli)の z = PROBE_VIEW_Z の面を、画面いっぱいの三角形 1 枚で描く(T-0004・T-0005)。
 //
 // データの流れ: シミュ(compute キュー)が抽出の 3 組のどれかに書く → 描画(direct キュー)がフェンスを待ってから、
 // フレームの定数(frame。CPU がフレームごとに書く)が指す方を読む(06 §4)。浮動小数点はここ(描画)だけ。
@@ -21,9 +21,9 @@ VertexOutput VSMain(uint vertexId : SV_VertexID) {
     return output;
 }
 
-// 量(0〜PROBE_POKE_AMOUNT)を黒 → 赤 → 黄 → 白に
+// 熱(0〜PROBE_POKE_AMOUNT)を対数で黒 → 赤 → 黄 → 白に(3D で広がると値がすぐ小さくなるので、広がった先まで見えるように)
 float3 HeatColor(uint32_t value) {
-    const float t = sqrt(saturate((float)value / (float)PROBE_POKE_AMOUNT));
+    const float t = saturate(log2((float)value + 1.0) / log2((float)PROBE_POKE_AMOUNT));
     return saturate(float3(t * 3.0, t * 3.0 - 1.0, t * 3.0 - 2.0));
 }
 
@@ -37,7 +37,7 @@ float4 PSMain(VertexOutput input) : SV_Target {
     if (any(local < 0.0) || any(local >= 1.0)) return float4(0.02, 0.02, 0.03, 1);
 
     const uint2 cell = min((uint2)(local * PROBE_GRID_SIZE), PROBE_GRID_SIZE - 1);
-    const uint32_t cellIndex = ProbeCellIndex(cell.x, cell.y);
+    const uint32_t cellIndex = cell.y * PROBE_GRID_SIZE + cell.x;  // 抽出は 1 つの面(x + y × 1 辺)
     const uint32_t value = constants.x == 0   ? extraction0[cellIndex]
                            : constants.x == 1 ? extraction1[cellIndex]
                                               : extraction2[cellIndex];

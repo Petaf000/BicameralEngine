@@ -36,7 +36,8 @@ endfunction()
 # add_gpu_test_case(<テスト名> <exe> <ラベル> <引数...>)
 function(bicameral_add_gpu_test_case testName executable label)
   add_test(NAME ${testName} COMMAND ${executable} ${ARGN})
-  set_tests_properties(${testName} PROPERTIES LABELS ${label})
+  # GPU のテストが固まったとき(Work Graph のハング・WARP)に runner を長く塞がないよう、ctest の既定(1500 秒)より短く切る(T-0005)
+  set_tests_properties(${testName} PROPERTIES LABELS ${label} TIMEOUT 300)
 endfunction()
 
 bicameral_add_gpu_test(gpu_fixed_test)
@@ -62,6 +63,11 @@ bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
 bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
+
+# 伝導の Work Graph の時間を伝播の規模ごとに測る(T-0005。ctest には登録しない。docs/perf.md)。
+# 走らせ方: job.py run -Preset release -Exe gpu_conduct_bench
+bicameral_add_gpu_test(gpu_conduct_bench)
+target_link_libraries(gpu_conduct_bench PRIVATE bicameral_sim)
 
 # 窓の操作の記録 → 再生(T-0086、06「テスト」の 2 つ目・15 §2)。ランタイム(bicameral)を 2 回走らせる:
 #   1 回目: 自動クリックで窓の操作を入れて記録する。2 回目: 別の分け方(重さを分けた単位・目標 fps)で再生し、刻みごとのハッシュが全部一致すれば 0。

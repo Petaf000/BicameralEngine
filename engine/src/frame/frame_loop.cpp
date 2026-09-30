@@ -411,7 +411,7 @@ namespace bicameral::frame {
                 if (localX < 0 || localY < 0 || localX >= side || localY >= side) continue;
                 const auto cellX = static_cast<uint32_t>(int64_t{localX} * sim::PROBE_GRID_SIZE / side);
                 const auto cellY = static_cast<uint32_t>(int64_t{localY} * sim::PROBE_GRID_SIZE / side);
-                m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cellX, cellY));
+                m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cellX, cellY, sim::PROBE_VIEW_Z));
                 m_clicks.push_back({.x = cellX, .y = cellY, .time = Clock::now()});
             }
         }
@@ -536,14 +536,15 @@ namespace bicameral::frame {
             Log(Channel::Core, Level::Info,
                 "{}: {:.1f} fps  CPU {:.3f} ms/フレーム(うち Present {:.3f}、最大 {:.3f})  世界 {:.1f} 刻み/秒  "
                 "シミュ {:.1f} 単位/投入・GPU {:.3f} ms/投入(予算 {:.2f})  描画 GPU {:.3f} ms/フレーム  "
-                "捨てた刻み {}  見送り {}(抽出 {})  CPU の待ち {}  イベント {}  状態 S({}) = {:016x}",
+                "捨てた刻み {}  見送り {}(抽出 {})  CPU の待ち {}  イベント {}  状態 S({}) = {:016x}"
+                "(熱 {}・伝導したブロック {})",
                 label, perSecond(stats.frames), average(stats.cpuMilliseconds, stats.frames),
                 average(stats.presentMilliseconds, stats.frames), stats.cpuMaxMilliseconds, perSecond(stats.ticks),
                 average(static_cast<double>(stats.units), stats.simSubmissions),
                 average(stats.simGpuMilliseconds, stats.simSubmissionsMeasured), m_scheduler.BudgetMilliseconds(),
                 average(stats.renderGpuMilliseconds, stats.renderFramesMeasured), m_scheduler.DroppedTicks(),
                 stats.skippedSubmissions, stats.skippedExtractions, stats.cpuWaits, stats.events, m_latestHash.tick,
-                m_latestHash.hash);
+                m_latestHash.hash, m_latestHash.heat, m_latestHash.scheduledBlocks);
         }
 
         // --- ループ ---
