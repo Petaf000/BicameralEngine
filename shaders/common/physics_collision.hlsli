@@ -1,5 +1,6 @@
 // physics_collision.hlsli — 直方体どうしの接触(整数。08 §2 の 2。T-0016)。手順は試作(tools/physics_lab/box_collision.cpp)と同じ:
 // 分離軸(面 6 本 + 辺の組 9 本)で一番浅く重なる向きを選び、面なら参照面に相手の面を切り抜いて最大 4 点、辺どうしなら最も近い 2 点。
+// 切り抜きが空なら、ほかの軸で作り直す(T-0091)。
 // 同点のときは番号の小さい方(決まった順)。HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。
 //
 // 単位: 位置・半分の辺・分離 2^-20 m / 回転・法線 Q1.30。計算は A の中心からの相対の位置で行う(値を小さく保つ)。
@@ -80,6 +81,21 @@ FX_FN bool PxPrefer(PxAxisCandidate candidate, PxAxisCandidate best) {
 }
 
 // --- 面の接触: 相手の面の 4 頂点を、参照面の 4 辺の平面で切り抜く ---
+// 点の番号(特徴)は、点が乗っている 2 つの境界(相手の面の辺 0〜3・参照面の横の面 4〜7)の組 = 小さい方 × 8 + 大きい方(T-0091)。
+// 元の頂点 k は辺 k−1 と辺 k(辺 k = 頂点 k → k+1)、交点は「切られた辺の境界」と「切った面」。番号は点の位置で一意になる
+FX_FN uint32_t PxClipId(uint32_t boundaryA, uint32_t boundaryB) {
+    return boundaryA < boundaryB ? boundaryA * 8 + boundaryB : boundaryB * 8 + boundaryA;
+}
+
+// 隣り合う 2 点(番号 idA・idB)が共に乗っている境界(2 点を結ぶ辺の境界)
+FX_FN uint32_t PxSharedBoundary(uint32_t idA, uint32_t idB) {
+    const uint32_t firstA = idA >> 3;
+    if (firstA == (idB >> 3) || firstA == (idB & 7u))
+        return firstA;
+
+    return idA & 7u;
+}
+
 struct PxPolygon {
     PxVec3 position[8];
     uint32_t id[8];
@@ -113,10 +129,8 @@ FX_FN PxPolygon PxClipPolygon(PxPolygon polygon, PxVec3 normal, int64_t offset, 
         const PxVec3 step = PxMakeVec3(FxDivS64(delta.x * currentDistance, denominator),
                                        FxDivS64(delta.y * currentDistance, denominator),
                                        FxDivS64(delta.z * currentDistance, denominator));
-        const uint32_t insideId = currentInside ? polygon.id[i] : polygon.id[nextIndex];
-        const uint32_t outsideId = currentInside ? polygon.id[nextIndex] : polygon.id[i];
         result.position[result.count] = PxAdd(current, step);
-        result.id[result.count] = 0x100u | (planeIndex << 8) | ((insideId & 15u) << 4) | (outsideId & 15u);
+        result.id[result.count] = PxClipId(PxSharedBoundary(polygon.id[i], polygon.id[nextIndex]), 4 + planeIndex);
         result.count += 1;
     }
 
@@ -214,7 +228,7 @@ FX_FN PxFace PxFindIncidentFace(PxBox incident, PxVec3 referenceNormal) {
     return face;
 }
 
-// 相手の面の 4 頂点(番号 0〜3 を特徴に使う)
+// 相手の面の 4 頂点(番号は境界の組。PxClipId)
 FX_FN PxPolygon PxFacePolygon(PxBox box, PxFace face) {
     const uint32_t i1 = (face.axis + 1) % 3;
     const uint32_t i2 = (face.axis + 2) % 3;
@@ -230,9 +244,10 @@ FX_FN PxPolygon PxFacePolygon(PxBox box, PxFace face) {
     polygon.position[1] = PxAdd(PxSub(center, e1), e2);
     polygon.position[2] = PxSub(PxSub(center, e1), e2);
     polygon.position[3] = PxSub(PxAdd(center, e1), e2);
-    polygon.id[1] = 1;
-    polygon.id[2] = 2;
-    polygon.id[3] = 3;
+    polygon.id[0] = PxClipId(3, 0);
+    polygon.id[1] = PxClipId(0, 1);
+    polygon.id[2] = PxClipId(1, 2);
+    polygon.id[3] = PxClipId(2, 3);
 
     return polygon;
 }
@@ -340,6 +355,21 @@ FX_FN PxContactGeometry PxMakeEdgeContact(PxBox a, PxBox b, PxAxisCandidate axis
     return contact;
 }
 
+// 接触を作る軸の試す順(attempt 番目): 選んだ軸 → 辺の組 → B の面 → A の面
+FX_FN PxAxisCandidate PxFallbackAxis(uint32_t attempt, PxAxisCandidate best, PxAxisCandidate edge,
+                                     PxAxisCandidate faceB, PxAxisCandidate faceA) {
+    if (attempt == 0)
+        return best;
+
+    if (attempt == 1)
+        return edge;
+
+    if (attempt == 2)
+        return faceB;
+
+    return faceA;
+}
+
 // 離れている距離が margin(2^-20 m)以下なら接触(count > 0)を返す。点は世界の位置
 FX_FN PxContactGeometry PxCollideBoxes(PxBox a, PxBox b, int64_t margin) {
     PxContactGeometry contact;
@@ -389,7 +419,14 @@ FX_FN PxContactGeometry PxCollideBoxes(PxBox a, PxBox b, int64_t margin) {
     if (bestEdge.kind == 2 && PxPrefer(bestEdge, best))
         best = bestEdge;
 
-    contact = best.kind == 2 ? PxMakeEdgeContact(a, b, best) : PxMakeFaceContact(a, b, best, margin);
+    // 選んだ軸で点が無ければ(相手の面が参照面の外にはみ出して切り抜きが空)、ほかの軸で作る: 辺の組 → B の面 → A の面(T-0091)
+    for (uint32_t attempt = 0; attempt < 4 && contact.count == 0; ++attempt) {
+        const PxAxisCandidate axis = PxFallbackAxis(attempt, best, bestEdge, bestFaceB, bestFaceA);
+        if (axis.kind == 2)
+            contact = PxMakeEdgeContact(a, b, axis);
+        else if (axis.kind < 2)
+            contact = PxMakeFaceContact(a, b, axis, margin);
+    }
 
     // 世界の位置に戻す
     for (uint32_t k = 0; k < contact.count; ++k) {

@@ -23,6 +23,11 @@ namespace bicameral::lab {
         result.startPenaltyQ16 = (int64_t)(p.startPenaltyScale * 65536);
         result.collisionMargin = (int64_t)(p.collisionMargin * (1 << 20));
         result.stickThreshold = (int64_t)(p.stickThreshold * 4294967296.0);
+        result.gapSlop = (int64_t)(p.gapSlop * 4294967296.0);
+        result.proximityMatch = (int64_t)(p.proximityMatch * (1 << 20));
+        result.recollideIteration = p.recollideIteration < 0 ? physics::PX_NO_RECOLLIDE
+                                                             : (uint32_t)p.recollideIteration;
+        result.recollideMinMotion = (int64_t)(p.recollideMinMotion * 4294967296.0);
         return result;
     }
 

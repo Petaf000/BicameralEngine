@@ -1,5 +1,5 @@
 // physics_world.h — 整数の AVBD(08 §2。T-0016 研究 R-PHYS-1)の CPU の世界。式は shaders/common/physics_*.hlsli にあり、
-// ここは呼ぶ順番(接触の生成 → λ と硬さの引き継ぎ → 慣性の目標 → 線形化 → 彩色 → 反復 → 速度 → 位置の仕上げ)と、
+// ここは呼ぶ順番(接触の生成 → λ と硬さの引き継ぎ → 慣性の目標 → 線形化 → 彩色 → 反復(途中で接触の探し直し)→ 速度 → 位置の仕上げ)と、
 // 刻みをまたいで残す接触(組ごと・点の特徴ごと)を持つ。T-0090 で GPU に同じ手順を載せ、これをリファレンスにする。
 //
 // データの流れ: PhysicsScene(整数の場面)→ PhysicsWorld → Step() を繰り返す → Bodies()・Stats()・StateHash()
@@ -48,6 +48,7 @@ namespace bicameral::sim {
 
     struct PhysicsContactPoint {
         uint32_t feature = 0;
+        physics::PxVec3 normal{};  // A → B(Q1.30。点ごと。途中で探し直した点は、その姿勢の法線)
         physics::PxVec3 localA{};  // A の局所座標での接触点(2^-20 m)
         physics::PxVec3 localB{};
         std::array<physics::PxRow, 3> rows{};  // 法線・接線 2 本
@@ -59,10 +60,10 @@ namespace bicameral::sim {
         uint32_t bodyB = 0;
         physics::PxVec3 normal{};  // A → B(Q1.30)
         int64_t frictionQ16 = 0;
-        int64_t beta = 0;        // 硬さの増え方(N/m²。組の重い方の質量 × β)
+        int64_t beta = 0;        // 硬さの増え方(N/m²。組の両方に触れている物の中で一番重い質量 × β)
         int64_t minPenalty = 0;  // 組の硬さの下限(2^-8 N/m)
         int64_t maxPenalty = 0;  // 組の硬さの上限(2^-8 N/m)
-        std::array<PhysicsContactPoint, 4> points{};
+        std::array<PhysicsContactPoint, 8> points{};  // 接触の生成で 4 点まで + 途中の探し直しで 4 点まで
         uint32_t count = 0;
     };
 
@@ -104,6 +105,12 @@ namespace bicameral::sim {
         void UpdateContacts();
         void AddManifold(uint32_t a, uint32_t b, const physics::PxContactGeometry& geometry,
                          std::map<std::pair<uint32_t, uint32_t>, PhysicsManifold>& next);
+        void MatchByProximity(const PhysicsBody& bodyA, const PhysicsManifold& old, PhysicsManifold& manifold) const;
+        void UpdateBetas();
+        void RecollideMidStep();
+        void AddRecollidedPoints(PhysicsManifold& manifold);
+        void LinearizePoint(const PhysicsManifold& manifold, PhysicsContactPoint& point) const;
+        [[nodiscard]] int64_t StepMotion(const PhysicsBody& body) const;
         void WarmStart();
         void InitializeBodies();
         void Linearize();

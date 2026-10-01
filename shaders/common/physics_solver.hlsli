@@ -4,6 +4,7 @@
 //
 // 1 刻みの中は「刻みの初めで線形化した接触」で解く: C = C0′ + J·Δx(Δx = 刻みの初めからの変位と回転ベクトル)。
 // C0′ は、法線の行で離れている(C0 > 0、先読みの接触)ときは C0 のまま、それ以外は C0 × (1 − α)。
+// ただし本反復(α = 1)では gapSlop 以下の隙間は触れているとみなす(C0′ = 0。T-0091)。
 #ifndef BICAMERAL_PHYSICS_SOLVER_HLSLI
 #define BICAMERAL_PHYSICS_SOLVER_HLSLI
 
@@ -29,11 +30,19 @@ struct PxParameters {
     int64_t penaltyMax;  // 硬さの上限(2^-8 N/m)
     uint32_t
         penaltyRatioShift;  // 硬さの上限その 2: 組の軽い方(動く物)の M/h² × 2^これ。6×6 の条件数を抑え、整数の解の桁を保証する
-    int64_t betaPerKilogram;  // 硬さの増え方 β(N/m² を 1 kg あたり。組の重い方の質量を掛ける)
+    int64_t betaPerKilogram;  // 硬さの増え方 β(N/m² を 1 kg あたり。組の両方に触れている物の中で一番重い質量を掛ける)
     int64_t startPenaltyQ16;  // 組の硬さの下限 = これ × 組の質量 / h²
     int64_t collisionMargin;  // この距離まで離れていても接触を作る(2^-20 m。これに相対速度 × h を足す)
     int64_t stickThreshold;   // 静止摩擦で接触点を保つ、接線のずれの上限(2^-32 m)
+
+    // --- T-0091 ---
+    int64_t gapSlop;              // 本反復で、これ以下の隙間は触れているとみなす(2^-32 m)
+    int64_t proximityMatch;       // 特徴の番号が合わない点は、これ以内の前の点から λ を引き継ぐ(2^-20 m)
+    uint32_t recollideIteration;  // この反復の前に、今の推定の姿勢で接触を探し直す(PX_NO_RECOLLIDE = しない)
+    int64_t recollideMinMotion;   // 組の 1 刻みの動きがこれを超える時だけ探し直す(2^-32 m)
 };
+
+FX_CONST uint32_t PX_NO_RECOLLIDE = 0xFFFFFFFFu;
 
 FX_FN PxParameters PxDefaultParameters() {
     PxParameters p;
@@ -47,6 +56,10 @@ FX_FN PxParameters PxDefaultParameters() {
     p.startPenaltyQ16 = 65536;
     p.collisionMargin = 31457;    // 3 cm
     p.stickThreshold = 42949673;  // 1 cm
+    p.gapSlop = 4294967;          // 1 mm
+    p.proximityMatch = 20972;     // 2 cm
+    p.recollideIteration = 5;
+    p.recollideMinMotion = 21474836;  // 5 mm
     return p;
 }
 
@@ -89,10 +102,13 @@ FX_FN PxRow PxLinearizeRow(PxRow row, PxVec3 direction, PxVec3 armA, PxVec3 armB
     return row;
 }
 
-// C = C0′ + J·Δx(2^-32 m)。alphaQ16 = α × 2^16(postStabilize の本反復は 1、最後の 1 回は 0)
-FX_FN int64_t PxConstraintValue(PxRow row, bool isNormal, int64_t alphaQ16, PxVec3 deltaLinearA, PxVec3 deltaAngularA,
-                                PxVec3 deltaLinearB, PxVec3 deltaAngularB) {
-    const bool isGap = isNormal && row.c0 > 0;
+// C = C0′ + J·Δx(2^-32 m)。alphaQ16 = α × 2^16(postStabilize の本反復は 1、最後の 1 回は 0)。
+// 本反復は gapSlop 以下の隙間を触れているとみなす: 仕上げ(α = 0)が少し押し出し過ぎて作った隙間に次の刻みで落ちて
+// 速度が出る(毎刻み続いて滑り・崩れになる)のを防ぐ(T-0091)
+FX_FN int64_t PxConstraintValue(PxRow row, bool isNormal, int64_t alphaQ16, int64_t gapSlop, PxVec3 deltaLinearA,
+                                PxVec3 deltaAngularA, PxVec3 deltaLinearB, PxVec3 deltaAngularB) {
+    const int64_t gapThreshold = alphaQ16 == 65536 ? gapSlop : 0;
+    const bool isGap = isNormal && row.c0 > gapThreshold;
     const int64_t initial = isGap ? row.c0 : row.c0 - FxMulShiftS64(row.c0, alphaQ16, 16);
     const int64_t linear = PxDot(row.direction, PxSub(deltaLinearB, deltaLinearA), PX_UNIT_SHIFT);
     const int64_t angular = PxDot(row.angularA, deltaAngularA, PX_UNIT_SHIFT) +

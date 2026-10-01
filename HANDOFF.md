@@ -1,37 +1,38 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0016 原理: 物理(整数の AVBD・CPU)— 完了
+最終更新: 2026-10-01 / チケット: T-0091 衝突の食い込みと摩擦の滑り(研究)— 完了
 
 ## 状態(3 行以内)
-- 整数(64bit 固定小数点)の剛体 AVBD を CPU で作った(shaders/common/physics_*.hlsli + engine/src/sim/physics_world)。double の試作(tools/physics_lab)と同じ振る舞いで、
-  値の幅は最大 49bit。積み木 10 段・質量比 1:100 は基準を満たす。岩の山は発散・貫通なしだが、衝突の食い込み・摩擦の滑りの 2 基準が未達(double でも)→ T-0091。
-- ADR-0014(R-PHYS-1 で確定する案)は Proposed。ユーザーは T-0090 で GPU の費用を測ってから判断する。次は T-0091 → T-0090。
+- 岩の山の 2 つの未達を直した(08 §6「結果(T-0091)」)。原因はバグ 2 つ(切り抜きの特徴の番号の重複・切り抜きが空で接触なし)+ 回る箱の次の角 + 軽い箱が沈む + 仕上げの押し出し過ぎの隙間に落ちる。
+  double の山 種 1〜48 で両方の基準を満たす割合 0/48 → 38/48。整数版にも入れ、physics_test の pile を基準(2 cm・1 cm/s)に戻した。残り(種の約 2 割の止まった後の動き)は BACKLOG。
+- 次は T-0090(物理を GPU に。ADR-0014 の承認はそこで GPU の費用を測ってから)。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(55 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(77)。
-- `job.py test -Filter physics`(debug 約 90 s: 場面は初めの 480 刻みと決定性だけ)/ release: physics_math・physics_{stack,mass_ratio,pile}・
-  physics_*_checked(FX_ASSERT を有効にして全部の刻み。pile 約 32 s)。前からのテストは今回触っていない(GPU のテストは走らせていない)。
-- `job.py run -Preset release -Exe physics_lab -- [--integer] [--scene stack|mass_ratio|pile] [--out d]` → 基準の判定と値の幅。
-  `--trace-penetration 0.02` / `--trace-late-speed 0.01` / `--trace-kick 3` / `--debug-pair a b t0 t1` / `--substeps n --iterations n --beta x --start-penalty x --margin m`。
-  図: bin の下で `python3 tools/physics_lab/plot_lab.py d pile [比べる d]`(Linux 側。matplotlib)。
+- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(55)・`python3 tools/archmap/archmap.py --check` OK(77)。
+- `job.py test -Preset release -Filter physics` → 7/7(pile 49 s・pile_checked 45 s)。`job.py test -Filter physics`(debug、480 刻み)→ 4/4。GPU のテストは今回触っていない。
+- `job.py run -Preset release -Exe physics_lab -- [--integer] --scene all` → 3 場面とも OK。整数の山の最後のハッシュ 422a771e9ae913f7(Linux の g++ でも同じ)。
+  新しい引数: `--recollide n(-1 = しない)` `--recollide-min-motion m` `--slop m` `--proximity m`。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 岩の山(pile): 衝突の瞬間の食い込み 6〜9 cm(基準 2 cm)、最後の 5 s に箱が壁に寄りかかって摩擦の上限で 1〜3 cm/s 滑る(基準 1 cm/s)。
-  tests/physics_test.cpp の pile の判定は今は緩めてある(10 cm・10 cm/s)。T-0091 で基準に戻す。
-- 山はカオスなので、パラメータを少し変えると結果(合否)が変わる。硬さの上限(2^20)を足しただけで整数の山の軌跡が変わった。
-- CPU の整数版は double の約 10 倍遅い(perf.md)。GPU は T-0090(未着手)。Nsight の 2 項目も T-0090 へ移した。
+- 山の種の約 2 割で、止まった後に数 cm/s の動きが残る(2 点で支えた箱がゆっくり回る・摩擦の上限の箱が一度滑る)。種 1 は通る。反復 100 なら出ない(収束の問題)→ BACKLOG(眠り T-0044 の時に)。
+- 整数の CPU の山は 31 → 45 s に遅くなった(探し直しの接触の生成・点が最大 8)。GPU は T-0090。
 - (前から)WARP は仮の世界のグラフで落ちる(ADR-0013)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- T-0016 の範囲(ユーザー): CPU だけ・直方体の解析的な接触・数値の基準 + 軌跡の画像。GPU は T-0090 に分けた。
-- ADR-0014 Proposed: 6×6 は対称な 2 の冪のずらし + Q62 Cholesky、硬さの上限 = 軽い方の M/h² × 2^20、単位は 04 §2 の物理の行。承認は T-0090 の計測の後。
-- 未達の 2 基準は M1 の新チケット T-0091(研究)で、T-0090 の前にやる(ユーザー)。
-- 試作で決めたパラメータ: 反復 10・小刻み 1・γ 0.99・β = 重い方の kg × 10^5・硬さの下限 = 重い方の M/h²・余裕 3 cm + 相対速度 × h・stick 1 cm・摩擦 0.5。
+- 物理の手順に 4 つ足した(double と整数で同じ。08 §6): 反復の 5 回目の前に今の推定の姿勢で接触を探し直す(動き 5 mm 超の組だけ・組は増やさない)/
+  β = βkg × 組に触れている一番重い質量 / 本反復は 1 mm 以下の隙間を触れているとみなす / 特徴の番号が合わない点は 2 cm 以内の前の点から 1 対 1 で引き継ぐ。
+- 接触の点の特徴の番号の作り方を変えた(境界の組。physics_collision.hlsli の PxClipId)。ADR-0014 に値の幅の追記(1bit 増えた所がある程度)。
 
 ## 次にやること
-NEXT.md の先頭(T-0091。チケットに試す候補と再現の方法を書いた)。
+NEXT.md の先頭(T-0090)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **物理の試作を Linux で速く回す**(T-0091): device_bash の Linux に g++ 11 がある。tools/physics_lab の avbd_solver.cpp・box_collision.cpp と
+  engine/src/sim/physics_scene.cpp(整数版なら physics_world.cpp も)を `g++ -O2 -std=c++20 -I tools/physics_lab -I engine/src -I shaders` で、小さな main と一緒にビルドできる
+  (physics_lab.cpp は <format> が g++ 11 に無いので使わない)。double の山 1 種 3 s、2 コアで種 48 個を 80 s。整数版のハッシュは MSVC と一致する。
+  山はカオスなので、基準の判定は種 1 個ではなく種 24〜48 個の割合で比べる(1 個だと ±数個ぶんの揺れで見誤る)。
+- 物理の点は最大 8(生成 4 + 途中の探し直し 4)、法線は点ごと(`PhysicsContactPoint::normal`)。GPU に載せる時は探し直しが反復の途中のパス 1 つになる。
+  探し直しは組を増やさない(増やすと彩色が変わり、同じ色の物が拘束を共有して並列に解けない)。
 - **物理(T-0016)**: 式は shaders/common/physics_math.hlsli(ベクトル・四元数・128bit の平方根・6×6)・physics_collision.hlsli(直方体の接触)・
   physics_solver.hlsli(行・6×6 の組み立て・パラメータ PxDefaultParameters)。呼ぶ順は engine/src/sim/physics_world.cpp。試作 tools/physics_lab は同じ手順の double。
   **試作と整数版は手順を揃えてある**ので、片方を変えたらもう片方も変える(physics_lab の --integer で並べて比べる)。

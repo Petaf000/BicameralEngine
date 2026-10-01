@@ -124,6 +124,9 @@ namespace bicameral::sim {
         // 本反復は α = 1(新しい誤差だけ防ぐ)、最後の 1 回は α = 0(残りの誤差を直す。速度には入れない)
         const uint32_t iterations = m_parameters.iterations;
         for (uint32_t iteration = 0; iteration <= iterations; ++iteration) {
+            if (iteration == m_parameters.recollideIteration)
+                RecollideMidStep();
+
             const int64_t alphaQ16 = iteration < iterations ? ALPHA_ONE_Q16 : 0;
             for (int32_t color = 0; color < m_colorCount; ++color)
                 SolveColor(color, alphaQ16);
@@ -187,6 +190,8 @@ namespace bicameral::sim {
             m_bodyManifolds[manifold.bodyA].emplace_back(&manifold, true);
             m_bodyManifolds[manifold.bodyB].emplace_back(&manifold, false);
         }
+
+        UpdateBetas();
     }
 
     // 接触を作る(前の刻みの同じ組・同じ特徴の点から引き継ぐ)
@@ -198,8 +203,6 @@ namespace bicameral::sim {
         const int64_t pairMassOverH2 = PxMassOverStepSquared(pairMass, m_rate);
 
         PhysicsManifold manifold{.bodyA = a, .bodyB = b, .normal = geometry.normal, .frictionQ16 = m_scene.frictionQ16};
-        manifold.beta = (int64_t)(pairMass / 1000000) * m_parameters.betaPerKilogram +
-                        (int64_t)(pairMass % 1000000) * m_parameters.betaPerKilogram / 1000000;
         manifold.minPenalty = std::max(m_parameters.penaltyMin,
                                        FxMulShiftS64(pairMassOverH2, m_parameters.startPenaltyQ16, 16));
 
@@ -218,6 +221,7 @@ namespace bicameral::sim {
             const PxContactPointGeometry& source = geometry.points[k];
             PhysicsContactPoint point{
                 .feature = source.feature,
+                .normal = geometry.normal,
                 .localA = PxMulMatTransposed(rotationA, PxSub(source.pointA, bodyA.position), PX_UNIT_SHIFT),
                 .localB = PxMulMatTransposed(rotationB, PxSub(source.pointB, bodyB.position), PX_UNIT_SHIFT)};
             for (PxRow& row : point.rows)
@@ -231,8 +235,142 @@ namespace bicameral::sim {
             manifold.points[manifold.count++] = point;
         }
 
+        if (previous != m_manifolds.end())
+            MatchByProximity(bodyA, previous->second, manifold);
+
         m_stats.contactCount += manifold.count;
         next.emplace(std::pair{a, b}, manifold);
+    }
+
+    // 特徴の番号が合わなかった点(切り抜きの境界にかかった頂点・4 点の選び方が変わった)は、
+    // 特徴で使われなかった前の点のうち一番近いもの(proximityMatch 以内・法線が近い)から λ と硬さを引き継ぐ(1 対 1)。
+    // 静止している山で、荷重のかかった点の λ が刻みごとに 0 に戻って揺れ続けるのを防ぐ(T-0091)
+    void PhysicsWorld::MatchByProximity(const PhysicsBody& bodyA, const PhysicsManifold& old,
+                                        PhysicsManifold& manifold) const {
+        constexpr int64_t NORMAL_SIMILARITY = 1020054733;  // 0.95(Q1.30)
+        std::array<bool, 8> usedOld{};
+        std::array<bool, 8> matchedNew{};
+        for (uint32_t k = 0; k < manifold.count; ++k) {
+            for (uint32_t j = 0; j < old.count; ++j) {
+                if (old.points[j].feature != manifold.points[k].feature)
+                    continue;
+
+                usedOld[j] = true;
+                matchedNew[k] = true;
+            }
+        }
+
+        const PxMat3 rotationA = PxRotationMatrix(bodyA.rotation);
+        for (uint32_t k = 0; k < manifold.count; ++k) {
+            if (matchedNew[k])
+                continue;
+
+            PhysicsContactPoint& point = manifold.points[k];
+            const PxVec3 here = PxMulMat(rotationA, point.localA, PX_UNIT_SHIFT);
+            int32_t nearestIndex = -1;
+            int64_t nearest = m_parameters.proximityMatch;
+            for (uint32_t j = 0; j < old.count; ++j) {
+                const PhysicsContactPoint& source = old.points[j];
+                const auto distance = (int64_t)PxLength(PxSub(here, PxMulMat(rotationA, source.localA, PX_UNIT_SHIFT)));
+                const bool similar = PxDot(source.normal, point.normal, PX_UNIT_SHIFT) >= NORMAL_SIMILARITY;
+                if (usedOld[j] || distance >= nearest || !similar)
+                    continue;
+
+                nearest = distance;
+                nearestIndex = (int32_t)j;
+            }
+
+            if (nearestIndex < 0)
+                continue;
+
+            usedOld[nearestIndex] = true;
+            for (uint32_t r = 0; r < 3; ++r) {
+                point.rows[r].lambda = old.points[nearestIndex].rows[r].lambda;
+                point.rows[r].penalty = old.points[nearestIndex].rows[r].penalty;
+            }
+        }
+    }
+
+    // 硬さの増え方 β = βkg × 組の両方に触れている物の中で一番重い質量。
+    // 軽い物どうし・軽い物と地面の組も、上に重い物が載れば速く硬くなる(重い物に押されて潰れるのを少ない反復で止める。T-0091)
+    void PhysicsWorld::UpdateBetas() {
+        const auto massOf = [&](uint32_t index) {
+            return m_bodies[index].IsDynamic() ? m_bodies[index].massMilligrams : (uint64_t)0;
+        };
+        std::vector<uint64_t> touchingMass(m_bodies.size());
+        for (uint32_t i = 0; i < m_bodies.size(); ++i)
+            touchingMass[i] = massOf(i);
+
+        for (const auto& [key, manifold] : m_manifolds) {
+            touchingMass[manifold.bodyA] = std::max(touchingMass[manifold.bodyA], massOf(manifold.bodyB));
+            touchingMass[manifold.bodyB] = std::max(touchingMass[manifold.bodyB], massOf(manifold.bodyA));
+        }
+
+        for (auto& [key, manifold] : m_manifolds) {
+            const uint64_t mass = std::max(touchingMass[manifold.bodyA], touchingMass[manifold.bodyB]);
+            manifold.beta = (int64_t)(mass / 1000000) * m_parameters.betaPerKilogram +
+                            (int64_t)(mass % 1000000) * m_parameters.betaPerKilogram / 1000000;
+        }
+    }
+
+    // 1 刻みの今の動き(2^-32 m): |Δ| + |Δθ| × 外接球の半径
+    int64_t PhysicsWorld::StepMotion(const PhysicsBody& body) const {
+        if (!body.IsDynamic())
+            return 0;
+
+        const auto turn = FxMulShiftS64((int64_t)PxLength(body.deltaAngular), body.boundingRadius, 20);
+        return (int64_t)PxLength(body.deltaLinear) + turn;
+    }
+
+    // 反復の途中で、今の推定の姿勢(刻みの初め + Δ)で接触を探し直し、まだ無い特徴の点を足す(回って当たる角・跳ね返りで当たる面)。
+    // 組は増やさない(彩色が変わるため)。止まっている組(1 刻みの動きが recollideMinMotion 以下)は探さない(静止の釣り合いを崩さない)
+    void PhysicsWorld::RecollideMidStep() {
+        for (auto& [key, manifold] : m_manifolds) {
+            const int64_t motion = StepMotion(m_bodies[manifold.bodyA]) + StepMotion(m_bodies[manifold.bodyB]);
+            if (motion > m_parameters.recollideMinMotion)
+                AddRecollidedPoints(manifold);
+        }
+    }
+
+    // 今の推定の姿勢で接触を作り、まだ無い特徴の点を足す(刻みの初めの姿勢で線形化する。ほかの点と同じ式)
+    void PhysicsWorld::AddRecollidedPoints(PhysicsManifold& manifold) {
+        const int64_t divisor = (int64_t)1 << PX_DELTA_EXTRA_BITS;
+        const auto pose = [&](const PhysicsBody& body) {
+            if (!body.IsDynamic())
+                return ShapeOf(body);
+
+            const PxVec3 step = PxMakeVec3(body.deltaLinear.x / divisor, body.deltaLinear.y / divisor,
+                                           body.deltaLinear.z / divisor);
+            const PxQuat rotation = PxIntegrateRotation(body.startRotation, body.deltaAngular);
+            return PxBox{.center = PxAdd(body.startPosition, step),
+                         .rotation = PxRotationMatrix(rotation),
+                         .halfExtent = body.halfExtent};
+        };
+        const PxBox shapeA = pose(m_bodies[manifold.bodyA]);
+        const PxBox shapeB = pose(m_bodies[manifold.bodyB]);
+        const PxContactGeometry geometry = PxCollideBoxes(shapeA, shapeB, m_parameters.collisionMargin);
+
+        for (uint32_t k = 0; k < geometry.count && manifold.count < manifold.points.size(); ++k) {
+            const PxContactPointGeometry& source = geometry.points[k];
+            const auto first = manifold.points.begin();
+            const bool known = std::any_of(first, first + manifold.count, [&](const PhysicsContactPoint& point) {
+                return point.feature == source.feature;
+            });
+            if (known)
+                continue;
+
+            PhysicsContactPoint point{
+                .feature = source.feature,
+                .normal = geometry.normal,
+                .localA = PxMulMatTransposed(shapeA.rotation, PxSub(source.pointA, shapeA.center), PX_UNIT_SHIFT),
+                .localB = PxMulMatTransposed(shapeB.rotation, PxSub(source.pointB, shapeB.center), PX_UNIT_SHIFT)};
+            for (PxRow& row : point.rows)
+                row.penalty = manifold.minPenalty;
+
+            LinearizePoint(manifold, point);
+            manifold.points[manifold.count++] = point;
+            m_stats.contactCount += 1;
+        }
     }
 
     // λ はそのまま、硬さは γ 倍(組の下限〜上限に収める)
@@ -279,29 +417,30 @@ namespace bicameral::sim {
 
     void PhysicsWorld::Linearize() {
         for (auto& [key, manifold] : m_manifolds) {
-            const PhysicsBody& a = m_bodies[manifold.bodyA];
-            const PhysicsBody& b = m_bodies[manifold.bodyB];
-            const PxMat3 rotationA = PxRotationMatrix(a.startRotation);
-            const PxMat3 rotationB = PxRotationMatrix(b.startRotation);
-            const auto tangents = TangentBasis(manifold.normal);
-            const std::array<PxVec3, 3> basis{manifold.normal, tangents[0], tangents[1]};
-
-            for (uint32_t k = 0; k < manifold.count; ++k) {
-                PhysicsContactPoint& point = manifold.points[k];
-                const PxVec3 armA = PxMulMat(rotationA, point.localA, PX_UNIT_SHIFT);
-                const PxVec3 armB = PxMulMat(rotationB, point.localB, PX_UNIT_SHIFT);
-                const PxVec3 gap = PxSub(PxAdd(b.startPosition, armB), PxAdd(a.startPosition, armA));
-                for (uint32_t row = 0; row < 3; ++row)
-                    point.rows[row] = PxLinearizeRow(point.rows[row], basis[row], armA, armB, gap);
-            }
+            for (uint32_t k = 0; k < manifold.count; ++k)
+                LinearizePoint(manifold, manifold.points[k]);
         }
+    }
+
+    // 刻みの初めの姿勢で 1 点を線形化する(法線は点ごと)
+    void PhysicsWorld::LinearizePoint(const PhysicsManifold& manifold, PhysicsContactPoint& point) const {
+        const PhysicsBody& a = m_bodies[manifold.bodyA];
+        const PhysicsBody& b = m_bodies[manifold.bodyB];
+        const auto tangents = TangentBasis(point.normal);
+        const std::array<PxVec3, 3> basis{point.normal, tangents[0], tangents[1]};
+        const PxVec3 armA = PxMulMat(PxRotationMatrix(a.startRotation), point.localA, PX_UNIT_SHIFT);
+        const PxVec3 armB = PxMulMat(PxRotationMatrix(b.startRotation), point.localB, PX_UNIT_SHIFT);
+        const PxVec3 gap = PxSub(PxAdd(b.startPosition, armB), PxAdd(a.startPosition, armA));
+        for (uint32_t row = 0; row < 3; ++row)
+            point.rows[row] = PxLinearizeRow(point.rows[row], basis[row], armA, armB, gap);
     }
 
     int64_t PhysicsWorld::ConstraintValue(const PhysicsManifold& manifold, const PxRow& row, bool isNormal,
                                           int64_t alphaQ16) const {
         const PhysicsBody& a = m_bodies[manifold.bodyA];
         const PhysicsBody& b = m_bodies[manifold.bodyB];
-        return PxConstraintValue(row, isNormal, alphaQ16, a.deltaLinear, a.deltaAngular, b.deltaLinear, b.deltaAngular);
+        return PxConstraintValue(row, isNormal, alphaQ16, m_parameters.gapSlop, a.deltaLinear, a.deltaAngular,
+                                 b.deltaLinear, b.deltaAngular);
     }
 
     // 拘束でつながる物どうしが違う色になるように塗る(Jones-Plassmann: 番号のハッシュを優先度に。GPU でも同じ色になる)

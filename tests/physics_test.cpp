@@ -325,12 +325,10 @@ namespace {
             Expect(r.maxPenetration < 0.005, "食い込みが 5 mm を超えた");
             Expect(r.topHeight > 1.4, "重い箱が軽い箱に沈んだ");
         } else {
-            // チケットの基準のうち「衝突の瞬間の食い込み < 2 cm」と「最後の 5 s の速さ < 1 cm/s」は、double の試作でも満たせていない
-            // (衝突の食い込みと、壁に寄りかかった箱が摩擦の上限でゆっくり滑る。アルゴリズムの課題で T-0091 で直す)。
-            // ここでは発散・貫通しないことと、止まった後の食い込みを確かめる
+            // 衝突の瞬間の食い込みと最後の 5 s の速さは T-0091 で基準に戻した(種 1。ほかの種での割合は 08 §6)
             Expect(r.maxSpeed < 20, "速さが 20 m/s を超えた(発散)");
-            Expect(r.lateSpeed < 0.1, "最後の 5 s に 10 cm/s 以上で動いている(発散のおそれ)");
-            Expect(r.maxPenetration < 0.1, "食い込みが 10 cm を超えた(貫通のおそれ)");
+            Expect(r.lateSpeed < 0.01, "最後の 5 s に 1 cm/s 以上で動いている(止まらない)");
+            Expect(r.maxPenetration < 0.02, "衝突の瞬間の食い込みが 2 cm を超えた");
             Expect(r.latePenetration < 0.005, "止まった後の食い込みが 5 mm を超えた");
         }
 

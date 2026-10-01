@@ -55,10 +55,28 @@ namespace bicameral::lab {
         }
 
         // --- 面の接触: 相手の面を参照面の 4 辺で切り抜く ---
+        // 切り抜きの点の特徴: 点が乗っている 2 つの境界(相手の面の辺 0〜3・参照面の横の面 4〜7)の組(T-0091)。
+        // 元の頂点 k は辺 k−1 と辺 k(辺 k = 頂点 k → k+1)、交点は「切られた辺の境界」と「切った面」。
+        // 番号は点の位置で一意になる(前は面の番号と頂点の番号のビットが重なり、別の点が同じ番号になっていた)
         struct ClipVertex {
             Vec3 position;
-            uint32_t id = 0;
+            uint32_t first = 0;   // 小さい方の境界
+            uint32_t second = 0;  // 大きい方の境界
+
+            [[nodiscard]] uint32_t Id() const { return first * 8 + second; }
         };
+
+        ClipVertex MakeClipVertex(Vec3 position, uint32_t boundaryA, uint32_t boundaryB) {
+            return {position, std::min(boundaryA, boundaryB), std::max(boundaryA, boundaryB)};
+        }
+
+        // 隣り合う 2 点が共に乗っている境界(2 点を結ぶ辺の境界)
+        uint32_t SharedBoundary(const ClipVertex& a, const ClipVertex& b) {
+            if (a.first == b.first || a.first == b.second)
+                return a.first;
+
+            return a.second;
+        }
 
         std::vector<ClipVertex> ClipPolygon(const std::vector<ClipVertex>& polygon, Vec3 planeNormal,
                                             double planeOffset, uint32_t planeIndex) {
@@ -77,10 +95,8 @@ namespace bicameral::lab {
                     continue;
 
                 const double t = currentDistance / (currentDistance - nextDistance);
-                const ClipVertex& inside = currentDistance <= 0 ? current : next;
-                const ClipVertex& outside = currentDistance <= 0 ? next : current;
-                const uint32_t id = 0x100u | (planeIndex << 8) | ((inside.id & 15u) << 4) | (outside.id & 15u);
-                result.push_back({current.position + (next.position - current.position) * t, id});
+                result.push_back(MakeClipVertex(current.position + (next.position - current.position) * t,
+                                                SharedBoundary(current, next), 4 + planeIndex));
             }
 
             return result;
@@ -166,10 +182,9 @@ namespace bicameral::lab {
                                                               (incidentSign * incident.halfExtent[incidentAxis]);
             const Vec3 e1 = incident.rotation.Column(i1) * incident.halfExtent[i1];
             const Vec3 e2 = incident.rotation.Column(i2) * incident.halfExtent[i2];
-            std::vector<ClipVertex> polygon{{incidentCenter + e1 + e2, 0},
-                                            {incidentCenter - e1 + e2, 1},
-                                            {incidentCenter - e1 - e2, 2},
-                                            {incidentCenter + e1 - e2, 3}};
+            std::vector<ClipVertex> polygon{
+                MakeClipVertex(incidentCenter + e1 + e2, 3, 0), MakeClipVertex(incidentCenter - e1 + e2, 0, 1),
+                MakeClipVertex(incidentCenter - e1 - e2, 1, 2), MakeClipVertex(incidentCenter + e1 - e2, 2, 3)};
 
             // 参照面の 4 辺で切り抜く
             const int r1 = (referenceAxis + 1) % 3;
@@ -196,7 +211,7 @@ namespace bicameral::lab {
                 const Vec3 onReference = vertex.position - referenceNormal * separation;
                 const Vec3 pointA = referenceIsA ? onReference : vertex.position;
                 const Vec3 pointB = referenceIsA ? vertex.position : onReference;
-                points.push_back({pointA, pointB, separation, faceBits | vertex.id});
+                points.push_back({pointA, pointB, separation, faceBits | vertex.Id()});
             }
 
             ReducePoints(contact, points);
@@ -279,14 +294,24 @@ namespace bicameral::lab {
         if (bestEdge.kind == 2 && bestEdge.separation > RELATIVE_TOLERANCE * best.separation + ABSOLUTE_TOLERANCE)
             best = bestEdge;
 
-        contact = {};
-        contact.normal = best.normal;
-        if (best.kind == 2)
-            MakeEdgeContact(a, b, best, contact);
-        else
-            MakeFaceContact(a, b, best, margin, contact);
+        // 選んだ軸で点が無ければ(相手の面が参照面の外にはみ出して切り抜きが空)、ほかの軸で作る: 辺の組 → B の面 → A の面
+        const std::array<AxisCandidate, 4> order{best, bestEdge, bestFaceB, bestFaceA};
+        for (const AxisCandidate& axis : order) {
+            if (axis.kind < 0)
+                continue;
 
-        return contact.count > 0;
+            contact = {};
+            contact.normal = axis.normal;
+            if (axis.kind == 2)
+                MakeEdgeContact(a, b, axis, contact);
+            else
+                MakeFaceContact(a, b, axis, margin, contact);
+
+            if (contact.count > 0)
+                return true;
+        }
+
+        return false;
     }
 
 }  // namespace bicameral::lab

@@ -1,6 +1,7 @@
 // physics_lab.cpp — 物理の試作(double の AVBD)で T-0016 の場面を走らせ、基準を判定して軌跡を書き出す道具。
 // 使い方: physics_lab [--integer] [--scene stack|mass_ratio|pile|all] [--out フォルダ] [--iterations n] [--beta x] [--start-penalty x]
 //                      [--alpha x] [--gamma x] [--margin m] [--no-post-stabilize] [--seed n]
+//                      [--recollide n(-1 = しない)] [--recollide-min-motion m] [--slop m] [--proximity m](T-0091)
 // 書き出し(--out があるとき): <場面>_bodies.csv(0.1 s ごとの位置と向き)・<場面>_stats.csv(刻みごとの量)。
 // 画像にするのは Linux 側の tools/physics_lab/plot_lab.py。
 #include <chrono>
@@ -104,6 +105,14 @@ namespace {
                 options.tracePenetration = std::stod(argv[++i]);
             else if (argument == "--margin")
                 p.collisionMargin = std::stod(argv[++i]);
+            else if (argument == "--recollide")
+                p.recollideIteration = std::stoi(argv[++i]);
+            else if (argument == "--recollide-min-motion")
+                p.recollideMinMotion = std::stod(argv[++i]);
+            else if (argument == "--slop")
+                p.gapSlop = std::stod(argv[++i]);
+            else if (argument == "--proximity")
+                p.proximityMatch = std::stod(argv[++i]);
             else
                 return false;
         }

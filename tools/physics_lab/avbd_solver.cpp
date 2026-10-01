@@ -1,5 +1,7 @@
 // avbd_solver.cpp — 剛体の AVBD の試作(avbd_solver.h)。手順は Giles ら(SIGGRAPH 2025)の AVBD と、その公開の 2D の実装の形に沿う:
 // 接触の生成 → λ と硬さの引き継ぎ → 物の慣性の目標 → [物ごとの 6×6 の解(色の順)→ λ と硬さの更新] × 反復 → 速度 → 位置の仕上げ。
+// T-0091 で足したこと: 反復の途中で今の推定の姿勢で接触を探し直す / 硬さの増え方を組に触れている一番重い物で決める /
+// 本反復は 1 mm 以下の隙間を触れているとみなす / 特徴の番号が合わない点は近くの前の点から λ を引き継ぐ。
 #include "avbd_solver.h"
 
 #include <algorithm>
@@ -101,6 +103,9 @@ namespace bicameral::lab {
         const int iterations = m_parameters.iterations;
         const int total = iterations + (m_parameters.postStabilize ? 1 : 0);
         for (int iteration = 0; iteration < total; ++iteration) {
+            if (iteration == m_parameters.recollideIteration)
+                RecollideMidStep();
+
             double alpha = m_parameters.alpha;
             if (m_parameters.postStabilize)
                 alpha = iteration < iterations ? 1.0 : 0.0;
@@ -196,6 +201,7 @@ namespace bicameral::lab {
                 for (int k = 0; k < geometry.count; ++k) {
                     const ContactPointGeometry& source = geometry.points[k];
                     ContactPoint point{.feature = source.feature,
+                                       .normal = geometry.normal,
                                        .localA = inverseA * (source.pointA - bodyA.position),
                                        .localB = inverseB * (source.pointB - bodyB.position)};
                     point.penalty = {startPenalty, startPenalty, startPenalty};
@@ -227,6 +233,9 @@ namespace bicameral::lab {
                     manifold.points[manifold.count++] = point;
                 }
 
+                if (previous != m_manifolds.end())
+                    MatchByProximity(bodyA, previous->second, manifold);
+
                 m_stats.contactCount += manifold.count;
                 next.emplace(std::pair{a, b}, manifold);
             }
@@ -239,6 +248,122 @@ namespace bicameral::lab {
         for (auto& [key, manifold] : m_manifolds) {
             m_bodyManifolds[manifold.bodyA].emplace_back(&manifold, true);
             m_bodyManifolds[manifold.bodyB].emplace_back(&manifold, false);
+        }
+
+        UpdateBetas();
+    }
+
+    // 特徴の番号が合わなかった点(切り抜きの境界にかかった頂点・4 点の選び方が変わった)は、
+    // 特徴で使われなかった前の点のうち一番近いもの(proximityMatch 以内・法線が近い)から λ と硬さを引き継ぐ(1 対 1)。
+    // 静止している山で、荷重のかかった点の λ が刻みごとに 0 に戻って揺れ続けるのを防ぐ(T-0091)
+    void AvbdSolver::MatchByProximity(const LabBody& bodyA, const Manifold& old, Manifold& manifold) const {
+        std::array<bool, 8> usedOld{};
+        std::array<bool, 8> matchedNew{};
+        for (int k = 0; k < manifold.count; ++k) {
+            for (int j = 0; j < old.count; ++j) {
+                if (old.points[j].feature != manifold.points[k].feature)
+                    continue;
+
+                usedOld[j] = true;
+                matchedNew[k] = true;
+            }
+        }
+
+        const Mat3 rotationA = RotationMatrix(bodyA.rotation);
+        for (int k = 0; k < manifold.count; ++k) {
+            if (matchedNew[k])
+                continue;
+
+            ContactPoint& point = manifold.points[k];
+            const Vec3 here = rotationA * point.localA;
+            int nearestIndex = -1;
+            double nearest = m_parameters.proximityMatch;
+            for (int j = 0; j < old.count; ++j) {
+                const double distance = Length(here - rotationA * old.points[j].localA);
+                if (usedOld[j] || distance >= nearest || Dot(old.points[j].normal, point.normal) < 0.95)
+                    continue;
+
+                nearest = distance;
+                nearestIndex = j;
+            }
+
+            if (nearestIndex < 0)
+                continue;
+
+            usedOld[nearestIndex] = true;
+            point.lambda = old.points[nearestIndex].lambda;
+            point.penalty = old.points[nearestIndex].penalty;
+        }
+    }
+
+    // 硬さの増え方 β = βkg × 組の両方に触れている物の中で一番重い質量。
+    // 軽い物どうし・軽い物と地面の組も、上に重い物が載れば速く硬くなる(重い物に押されて潰れるのを少ない反復で止める。T-0091)
+    void AvbdSolver::UpdateBetas() {
+        std::vector<double> touchingMass(m_bodies.size(), 0);
+        const auto massOf = [&](int index) {
+            return m_bodies[index].IsDynamic() ? m_bodies[index].mass : 0.0;
+        };
+        for (size_t i = 0; i < m_bodies.size(); ++i)
+            touchingMass[i] = massOf((int)i);
+
+        for (const auto& [key, manifold] : m_manifolds) {
+            touchingMass[manifold.bodyA] = std::max(touchingMass[manifold.bodyA], massOf(manifold.bodyB));
+            touchingMass[manifold.bodyB] = std::max(touchingMass[manifold.bodyB], massOf(manifold.bodyA));
+        }
+
+        for (auto& [key, manifold] : m_manifolds) {
+            const double scale = std::max(touchingMass[manifold.bodyA], touchingMass[manifold.bodyB]);
+            manifold.beta = m_parameters.betaPerKilogram * scale;
+        }
+    }
+
+    // 反復の途中で、今の推定の姿勢(刻みの初め + Δ)で接触を探し直し、まだ無い特徴の点を足す(回って当たる角・跳ね返りで当たる面)。
+    // 足した点も刻みの初めの姿勢で線形化する(ほかの点と同じ式)。組は増やさない(彩色が変わるため)。
+    // 止まっている組(1 刻みの動きが recollideMinMotion 以下)は探さない(静止の釣り合いを崩さないため)
+    void AvbdSolver::RecollideMidStep() {
+        const auto motion = [](const LabBody& body) {
+            return body.IsDynamic() ? Length(body.deltaLinear) + Length(body.deltaAngular) * BoundingRadius(body) : 0.0;
+        };
+        const auto pose = [&](const LabBody& body) -> BoxShape {
+            if (!body.IsDynamic())
+                return ShapeOf(body);
+
+            return {body.startPosition + body.deltaLinear,
+                    RotationMatrix(Integrate(body.startRotation, body.deltaAngular)), body.halfExtent};
+        };
+
+        for (auto& [key, manifold] : m_manifolds) {
+            const LabBody& a = m_bodies[manifold.bodyA];
+            const LabBody& b = m_bodies[manifold.bodyB];
+            if (motion(a) + motion(b) <= m_parameters.recollideMinMotion)
+                continue;
+
+            const BoxShape shapeA = pose(a);
+            const BoxShape shapeB = pose(b);
+            ContactGeometry geometry;
+            if (!CollideBoxes(shapeA, shapeB, m_parameters.collisionMargin, geometry))
+                continue;
+
+            const Mat3 inverseA = Transpose(shapeA.rotation);
+            const Mat3 inverseB = Transpose(shapeB.rotation);
+            for (int k = 0; k < geometry.count && manifold.count < (int)manifold.points.size(); ++k) {
+                const ContactPointGeometry& source = geometry.points[k];
+                const auto first = manifold.points.begin();
+                const bool known = std::any_of(first, first + manifold.count, [&](const ContactPoint& point) {
+                    return point.feature == source.feature;
+                });
+                if (known)
+                    continue;
+
+                ContactPoint point{.feature = source.feature,
+                                   .normal = geometry.normal,
+                                   .localA = inverseA * (source.pointA - shapeA.center),
+                                   .localB = inverseB * (source.pointB - shapeB.center)};
+                point.penalty = {manifold.minPenalty, manifold.minPenalty, manifold.minPenalty};
+                LinearizePoint(manifold, point);
+                manifold.points[manifold.count++] = point;
+                ++m_stats.contactCount;
+            }
         }
     }
 
@@ -288,26 +413,26 @@ namespace bicameral::lab {
 
     void AvbdSolver::Linearize() {
         for (auto& [key, manifold] : m_manifolds) {
-            const LabBody& a = m_bodies[manifold.bodyA];
-            const LabBody& b = m_bodies[manifold.bodyB];
-            const Mat3 rotationA = RotationMatrix(a.startRotation);
-            const Mat3 rotationB = RotationMatrix(b.startRotation);
-            const auto tangents = TangentBasis(manifold.normal);
+            for (int k = 0; k < manifold.count; ++k)
+                LinearizePoint(manifold, manifold.points[k]);
+        }
+    }
 
-            for (int k = 0; k < manifold.count; ++k) {
-                ContactPoint& point = manifold.points[k];
-                const Vec3 armA = rotationA * point.localA;
-                const Vec3 armB = rotationB * point.localB;
-                const Vec3 gap = (b.startPosition + armB) - (a.startPosition + armA);
-                point.basis = {manifold.normal, tangents[0], tangents[1]};
+    // 刻みの初めの姿勢で 1 点を線形化する(法線は点ごと)
+    void AvbdSolver::LinearizePoint(const Manifold& manifold, ContactPoint& point) const {
+        const LabBody& a = m_bodies[manifold.bodyA];
+        const LabBody& b = m_bodies[manifold.bodyB];
+        const Vec3 armA = RotationMatrix(a.startRotation) * point.localA;
+        const Vec3 armB = RotationMatrix(b.startRotation) * point.localB;
+        const Vec3 gap = (b.startPosition + armB) - (a.startPosition + armA);
+        const auto tangents = TangentBasis(point.normal);
+        point.basis = {point.normal, tangents[0], tangents[1]};
 
-                for (int row = 0; row < 3; ++row) {
-                    const Vec3 direction = point.basis[row];
-                    point.c0[row] = Dot(direction, gap);
-                    point.angularA[row] = -Cross(armA, direction);
-                    point.angularB[row] = Cross(armB, direction);
-                }
-            }
+        for (int row = 0; row < 3; ++row) {
+            const Vec3 direction = point.basis[row];
+            point.c0[row] = Dot(direction, gap);
+            point.angularA[row] = -Cross(armA, direction);
+            point.angularB[row] = Cross(armB, direction);
         }
     }
 
@@ -318,8 +443,11 @@ namespace bicameral::lab {
         const Vec3 direction = point.basis[row];
 
         // 法線の行で離れている(c0 > 0)ときは、隙間をそのまま使う(先読みの接触。α で消すと、離れた物が触れているように押し合う)。
-        // α で弱めるのは食い込みと接線のずれ(刻みの初めにある誤差)だけ
-        const bool isGap = row == 0 && point.c0[row] > 0;
+        // α で弱めるのは食い込みと接線のずれ(刻みの初めにある誤差)だけ。
+        // 本反復(α = 1)では gapSlop 以下の隙間は触れているとみなす: 仕上げ(α = 0)が少し押し出し過ぎて作った隙間に、
+        // 次の刻みで落ちて速度が出る(毎刻み続いて滑り・崩れになる)のを防ぐ(T-0091)
+        const double gapThreshold = alpha == 1.0 ? m_parameters.gapSlop : 0.0;
+        const bool isGap = row == 0 && point.c0[row] > gapThreshold;
         const double initial = isGap ? point.c0[row] : point.c0[row] * (1 - alpha);
 
         return initial - Dot(direction, a.deltaLinear) + Dot(point.angularA[row], a.deltaAngular) +
@@ -425,7 +553,7 @@ namespace bicameral::lab {
     void AvbdSolver::UpdateDuals(double alpha) {
         const SolverParameters& p = m_parameters;
         for (auto& [key, manifold] : m_manifolds) {
-            const double beta = p.betaPerKilogram * manifold.pairMass;
+            const double beta = manifold.beta;
             for (int k = 0; k < manifold.count; ++k) {
                 ContactPoint& point = manifold.points[k];
                 const double frictionBound = manifold.friction * std::abs(point.lambda[0]);

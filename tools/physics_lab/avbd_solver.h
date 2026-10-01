@@ -27,7 +27,7 @@ namespace bicameral::lab {
         double alpha = 0.99;  // postStabilize でないとき: 刻みの初めの誤差を 1 刻みで直す割合の残り
         double gamma = 0.99;  // 刻みをまたいだ λ と硬さの引き継ぎの割合
         double betaPerKilogram =
-            1e5;  // 硬さの増え方 β(N/m を |C| m あたり。質量 1 kg あたり。組の動く物の重い方の質量を掛ける)
+            1e5;  // 硬さの増え方 β(N/m を |C| m あたり。質量 1 kg あたり。組の両方に触れている物の中で一番重い質量を掛ける)
         double penaltyMin = 1;     // 硬さの下限(N/m)
         double penaltyMax = 1e12;  // 硬さの上限(N/m)
         double
@@ -39,7 +39,13 @@ namespace bicameral::lab {
         // --- 接触 ---
         double collisionMargin = 0.03;  // この距離まで離れていても接触を作る(m。これに相対速度 × h を足す)
         double stickThreshold = 0.01;   // 静止摩擦で接触点を保つ、接線のずれの上限(m)
-        double gravity = 9.80665;       // m/s²(−y 向き)
+        double gapSlop = 0.001;         // 本反復で、これ(m)以下の隙間は触れているとみなす(T-0091)
+        double proximityMatch = 0.02;   // 特徴の番号が合わない点は、これ(m)以内の前の点から λ を引き継ぐ(T-0091)
+
+        // --- 反復の途中で接触を探し直す(T-0091)---
+        int recollideIteration = 5;         // この反復の前に、今の推定の姿勢で接触を探し直す(-1 = しない)
+        double recollideMinMotion = 0.005;  // 組の 1 刻みの動きがこれ(m)を超える時だけ
+        double gravity = 9.80665;           // m/s²(−y 向き)
         double timeStep = 1.0 / 60;
     };
 
@@ -73,6 +79,7 @@ namespace bicameral::lab {
     // 接触点 1 つの 3 行(法線・接線 2 本)
     struct ContactPoint {
         uint32_t feature = 0;
+        Vec3 normal;  // A → B(点ごと。途中で探し直した点は、その姿勢の法線)
         Vec3 localA;  // A の局所座標での接触点
         Vec3 localB;
         std::array<double, 3> lambda{};
@@ -91,10 +98,11 @@ namespace bicameral::lab {
         int bodyB = 0;
         Vec3 normal;  // A → B
         double friction = 0.5;
-        double pairMass = 0;    // 硬さの尺度にする質量(組の動く物の重い方)
-        double minPenalty = 0;  // この組の硬さの下限(N/m)。引き継ぎで減っても、これより下げない
-        double maxPenalty = 0;  // この組の硬さの上限(N/m)
-        std::array<ContactPoint, 4> points{};
+        double pairMass = 0;                   // 硬さの下限の尺度にする質量(組の動く物の重い方)
+        double beta = 0;                       // 硬さの増え方(N/m²。組の両方に触れている物の中で一番重い質量 × βkg)
+        double minPenalty = 0;                 // この組の硬さの下限(N/m)。引き継ぎで減っても、これより下げない
+        double maxPenalty = 0;                 // この組の硬さの上限(N/m)
+        std::array<ContactPoint, 8> points{};  // 接触の生成で 4 点まで + 途中の探し直しで 4 点まで
         int count = 0;
     };
 
@@ -132,6 +140,10 @@ namespace bicameral::lab {
         void Substep();
         void UpdateActivity();
         void UpdateContacts();
+        void MatchByProximity(const LabBody& bodyA, const Manifold& old, Manifold& manifold) const;
+        void UpdateBetas();
+        void RecollideMidStep();
+        void LinearizePoint(const Manifold& manifold, ContactPoint& point) const;
         void WarmStart();
         void InitializeBodies();
         void Linearize();
