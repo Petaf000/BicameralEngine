@@ -49,6 +49,14 @@ add_library(bicameral_reaction STATIC
 target_include_directories(bicameral_reaction PUBLIC src)
 target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 
+# --- physics: 物理の場面の定義と整数のソルバーの CPU 側(08。T-0016)。GPU を知らない。浮動小数点は禁止 ---
+add_library(bicameral_physics STATIC
+  src/sim/physics_scene.cpp
+  src/sim/physics_world.cpp
+)
+target_include_directories(bicameral_physics PUBLIC src)
+target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
+
 # --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC

@@ -34,3 +34,6 @@ add_subdirectory(shaders)
 
 enable_testing()
 add_subdirectory(tests)
+
+# 試作の道具(T-0016 の物理の試作)
+add_subdirectory(tools/physics_lab)

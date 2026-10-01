@@ -30,6 +30,29 @@ add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
 
+# 整数の AVBD(T-0016)。場面のテストは数十秒かかる(debug はもっと)
+add_executable(physics_test physics_test.cpp)
+target_link_libraries(physics_test PRIVATE bicameral_physics bicameral_core)
+add_test(NAME physics_math COMMAND physics_test math)
+foreach(_scene IN ITEMS stack mass_ratio pile)
+  add_test(NAME physics_${_scene} COMMAND physics_test scene ${_scene})
+  set_tests_properties(physics_${_scene} PROPERTIES TIMEOUT 600)
+endforeach()
+# release の速さで FX_ASSERT(桁あふれ・割り算の商の範囲)を有効にして(BICAMERAL_FORCE_ASSERT、fixed.hlsli)、場面を全部の刻み走らせる(R8 の確認)。
+# debug は約 20 倍遅く場面の全部を回せないので、release のときだけ足す
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_executable(physics_checked_test physics_test.cpp
+    ${PROJECT_SOURCE_DIR}/engine/src/sim/physics_scene.cpp
+    ${PROJECT_SOURCE_DIR}/engine/src/sim/physics_world.cpp)
+  target_include_directories(physics_checked_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src)
+  target_link_libraries(physics_checked_test PRIVATE bicameral_fixed bicameral_core)
+  target_compile_definitions(physics_checked_test PRIVATE BICAMERAL_FORCE_ASSERT=1)
+  foreach(_scene IN ITEMS stack mass_ratio pile)
+    add_test(NAME physics_${_scene}_checked COMMAND physics_checked_test scene ${_scene} --full)
+    set_tests_properties(physics_${_scene}_checked PROPERTIES TIMEOUT 600)
+  endforeach()
+endif()
+
 # --- GPU を使うテスト(T-0013)-------------------------------------------------------------------------
 # ラベル gpu: ハードウェアの GPU が要る(CI の Windows の機械には無いので CI は -LE gpu で外す)。
 # ラベル warp: WARP(ソフトウェアの D3D12)で走る。GPU の無い機械でも回る。

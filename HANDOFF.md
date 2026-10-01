@@ -1,39 +1,45 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0089 化学を仮の世界に組み込む — 完了
+最終更新: 2026-10-01 / チケット: T-0016 原理: 物理(整数の AVBD・CPU)— 完了
 
 ## 状態(3 行以内)
-- 仮の世界(64³)が成分 + エネルギー(RxCell)と熱のキャッシュになり、ConductBlock(Work Graphs)が温度の差の伝導 → その場で反応。
-  クリック 1 回で木箱が燃え広がり(壁の 9 割が 49 秒で炭)、全部のセルを計算する CPU とビット一致、36,000 刻みでエネルギーと元素が一致。
-- WARP はこのグラフを作る時点で落ちるので、仮の世界のテストから外した(ADR-0013)。テスト 33/33。M1 の残りは T-0016 物理・T-0017 多重解像度。
+- 整数(64bit 固定小数点)の剛体 AVBD を CPU で作った(shaders/common/physics_*.hlsli + engine/src/sim/physics_world)。double の試作(tools/physics_lab)と同じ振る舞いで、
+  値の幅は最大 49bit。積み木 10 段・質量比 1:100 は基準を満たす。岩の山は発散・貫通なしだが、衝突の食い込み・摩擦の滑りの 2 基準が未達(double でも)→ T-0091。
+- ADR-0014(R-PHYS-1 で確定する案)は Proposed。ユーザーは T-0090 で GPU の費用を測ってから判断する。次は T-0091 → T-0090。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(52 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(70)。
-- `job.py test` → 33/33(分けて走らせる。下の注意)。`gpu_probe_sim`(約 120 s)・`gpu_probe_trace`(約 100 s)・新 `gpu_probe_fire`(3600 刻み、約 40 s)。
-- `job.py run -Preset release -Exe gpu_probe_fire_test` → 36,000 刻み(81 s)。1 秒ごとの燃え方のログ。`--pokes n --solid-percent p --gas-percent p` で値を試せる。
-- `job.py run -Preset release -Exe gpu_conduct_bench` → 伝導と反応の費用(perf.md: 約 100〜120 ns/ブロック、全ブロックで約 430 µs/刻み)。
-- `job.py run -Preset release -- --frames 3000 --auto-click --screenshot x.png` → 最初の自動クリックが木箱の壁 (28, 32, 32) に火をつける。窓の C で色分けの量(温度・O2 の減り・CO2・炭)。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(55 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(77)。
+- `job.py test -Filter physics`(debug 約 90 s: 場面は初めの 480 刻みと決定性だけ)/ release: physics_math・physics_{stack,mass_ratio,pile}・
+  physics_*_checked(FX_ASSERT を有効にして全部の刻み。pile 約 32 s)。前からのテストは今回触っていない(GPU のテストは走らせていない)。
+- `job.py run -Preset release -Exe physics_lab -- [--integer] [--scene stack|mass_ratio|pile] [--out d]` → 基準の判定と値の幅。
+  `--trace-penetration 0.02` / `--trace-late-speed 0.01` / `--trace-kick 3` / `--debug-pair a b t0 t1` / `--substeps n --iterations n --beta x --start-penalty x --margin m`。
+  図: bin の下で `python3 tools/physics_lab/plot_lab.py d pile [比べる d]`(Linux 側。matplotlib)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- WARP: 伝導 + 反応のノードを含む Work Graph を作ると WARP がアクセス違反で落ちる(`bicameral --warp` も)。調べた範囲は ADR-0013。
-- 空気の熱は温度の差の切り捨てを下回るまで長く広がり続け、ブロックの大半が活性のまま(燃えた後は 4096 ブロック全部。約 430〜560 µs/刻み)。
-- 気体は流れない(M3)ので、木のセルは自分の孔の O2 を使い切ると熱分解だけ。燃える熱はほぼ試験の表の熱分解(発熱。値の都合)から。
-- 伝導率の試験の倍率(固体 × 2 万・気体 × 5000)とつつきの 2700 K は M1 の見え方のための値。M3(放射・対流)で見直す(D-425)。
-- debug の CPU リファレンスは 64³ × 40 刻みで約 20 s(gpu_probe_sim は 3 回走らせる)。テストが 180 s に近い。
-- 色分けの C キーは窓で手で確かめていない(スクリーンショットは温度だけ見た)。イベント(音・光)の出力は無い。成分は 8 個まで。
-- (前から)PIX での Work Graphs の見え方は未確認。段ごとのハッシュ・`--replay --bisect` は無い。伝導の Compute 版との比較(D-302)はしていない。セーブは未着手。AMD は未確認。
+- 岩の山(pile): 衝突の瞬間の食い込み 6〜9 cm(基準 2 cm)、最後の 5 s に箱が壁に寄りかかって摩擦の上限で 1〜3 cm/s 滑る(基準 1 cm/s)。
+  tests/physics_test.cpp の pile の判定は今は緩めてある(10 cm・10 cm/s)。T-0091 で基準に戻す。
+- 山はカオスなので、パラメータを少し変えると結果(合否)が変わる。硬さの上限(2^20)を足しただけで整数の山の軌跡が変わった。
+- CPU の整数版は double の約 10 倍遅い(perf.md)。GPU は T-0090(未着手)。Nsight の 2 項目も T-0090 へ移した。
+- (前から)WARP は仮の世界のグラフで落ちる(ADR-0013)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- D-424 遅すぎる反応は 0(1 刻みの期待値 2^-16 µmol 未満。`RX_EXTENT_CUTOFF_FRACTION`)。眠れるかは `RxStepCell` の possible。
-- D-425 試験の表は「リアルっぽいが遅すぎない」値。伝導率に倍率(07 §1.1)。D-426 / ADR-0013 WARP を仮の世界のテストから外す。
-- 伝導と反応は 1 つのノード。面の係数は min(調和平均ではない。07 §1.1)。活性 = 変わったか、まだ進める(06 §2)。
-- つつき = 約 2700 K ぶんの熱(湧き出しとしてハッシュの表の欄に数える)。ハッシュの表の欄は 64 バイト(エネルギーの合計・つつきの分)。
-- 抽出はセルごとに 4 語(温度・O2・CO2・炭)。トレースの計算の記録の従は PROBE_BLOCK_FLAG_*(変わった 1・まだ進める 2)。
+- T-0016 の範囲(ユーザー): CPU だけ・直方体の解析的な接触・数値の基準 + 軌跡の画像。GPU は T-0090 に分けた。
+- ADR-0014 Proposed: 6×6 は対称な 2 の冪のずらし + Q62 Cholesky、硬さの上限 = 軽い方の M/h² × 2^20、単位は 04 §2 の物理の行。承認は T-0090 の計測の後。
+- 未達の 2 基準は M1 の新チケット T-0091(研究)で、T-0090 の前にやる(ユーザー)。
+- 試作で決めたパラメータ: 反復 10・小刻み 1・γ 0.99・β = 重い方の kg × 10^5・硬さの下限 = 重い方の M/h²・余裕 3 cm + 相対速度 × h・stick 1 cm・摩擦 0.5。
 
 ## 次にやること
-NEXT.md の先頭(T-0016 原理: 物理。チケットを作り、R-PHYS-1 の完了条件を詰めてから)。
+NEXT.md の先頭(T-0091。チケットに試す候補と再現の方法を書いた)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **物理(T-0016)**: 式は shaders/common/physics_math.hlsli(ベクトル・四元数・128bit の平方根・6×6)・physics_collision.hlsli(直方体の接触)・
+  physics_solver.hlsli(行・6×6 の組み立て・パラメータ PxDefaultParameters)。呼ぶ順は engine/src/sim/physics_world.cpp。試作 tools/physics_lab は同じ手順の double。
+  **試作と整数版は手順を揃えてある**ので、片方を変えたらもう片方も変える(physics_lab の --integer で並べて比べる)。
+- 物理の名前: 行列の行は `PxMatRow`(`PxRow` は拘束の行の構造体)。0 で埋めるのは `PX_ZERO(型)`(C++ は `型{}`、HLSL は `(型)0`)。
+  HLSL の `half` は型名なので変数名に使えない(浮動小数点の検査が落とす)。`halfAngle` などにする。
+- release で FX_ASSERT を効かせたいときは `BICAMERAL_FORCE_ASSERT=1` を定義する(fixed.hlsli。physics_checked_test がそう)。
+- clang-tidy の NestingThreshold は 3(`{}` の入れ子)。ループを 3 重にするときは内側を `{}` なしにするか関数に分ける。HLSL 共通のファイルでは範囲 for が書けないので、
+  添字を他にも使う形にするか PX_ZERO を使う(modernize-loop-convert が出る)。
 - **仮の世界のセル**(T-0089): `cells`(u0、RxCell × 2 世代)と `thermal`(u12、HcThermalCache × 2 世代)。キャッシュはセルから決まる値という約束
   (ProbeStepCell の近道と、コンダクタンスを成分が変わった時だけ作り直すのがこれに頼る)。セルを書き換えたら必ず `ProbeMakeCache` で作り直す(つつきがそう)。
   反応の表は t1〜t4(既定のヒープ)。初めの世界と表は最初の RecordFrame で写す(`ProbeSim::RecordInitialization`)。

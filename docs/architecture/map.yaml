@@ -37,6 +37,8 @@ views:
       - { id: framelib, label: "フレームのループ(T-0004)" }
       - { id: simlib, label: "sim(仮の刻み。中身の本物は T-0005 以降)" }
       - { id: savelib, label: "save(再生ファイル。CPU だけ)" }
+      - { id: physicslib, label: "physics(整数の AVBD の CPU の世界。T-0016。GPU は T-0090)" }
+      - { id: labtools, label: "試作の道具(tools/。浮動小数点可)" }
       - { id: corelib, label: "core(どこからでも使う部品)" }
       - { id: gpulib, label: "gpu(D3D12 の小さな道具)" }
       - { id: shared, label: "shaders/common(HLSL と C++ で共通)" }
@@ -177,6 +179,24 @@ views:
       - { id: probetrace, group: simlib, label: "probe_trace<br/>刻みごとの木・CPU の予想・食い違いの場所",
           code: "engine/src/sim/probe_trace.cpp::FormatProbeTrace", ticket: T-0087, doc: docs/design/16-debug-test.md,
           note: "--trace でファイルへ。FirstDivergentTick → FindCellDivergence(16 §3 の最初の形)" }
+      - { id: physicsworld, group: physicslib, label: "PhysicsWorld::Step<br/>接触 → 引き継ぎ → 彩色 → 反復 → 速度 → 位置",
+          code: "engine/src/sim/physics_world.cpp::PhysicsWorld::Step", ticket: T-0016, doc: docs/design/08-bodies-physics.md,
+          note: "研究 R-PHYS-1。刻みの初めで線形化した接触を拡張ラグランジュ法で。値の幅は PhysicsStepStats に記録" }
+      - { id: physicsscene, group: physicslib, label: "PhysicsScene<br/>原理の確認の場面(積み木・質量比・岩の山)",
+          code: "engine/src/sim/physics_scene.cpp::MakePileScene", ticket: T-0016 }
+      - { id: physicscollide, group: shared, label: "physics_collision.hlsli<br/>直方体どうしの接触(分離軸・切り抜き・4 点)",
+          code: "shaders/common/physics_collision.hlsli::PxCollideBoxes", ticket: T-0016, doc: docs/design/08-bodies-physics.md }
+      - { id: physicssolverhlsl, group: shared, label: "physics_solver.hlsli<br/>拘束の行・物ごとの 6×6 の組み立て",
+          code: "shaders/common/physics_solver.hlsli::PxConstraintValue", ticket: T-0016, doc: docs/design/08-bodies-physics.md }
+      - { id: physicssolve, group: shared, label: "PxSolveSymmetric6<br/>2 の冪の対称スケーリング + Q62 の Cholesky",
+          code: "shaders/common/physics_math.hlsli::PxSolveSymmetric6", ticket: T-0016, doc: docs/decisions/ADR-0014-integer-avbd.md,
+          note: "対角を [2^60, 2^62) に揃えると |L| ≤ 1 で溢れない。硬さの上限 = 軽い方の M/h² × 2^20 で条件数を抑える" }
+      - { id: physicstest, group: tests, label: "physics_test<br/>平方根・6×6 と double / 場面の基準・決定性",
+          code: "tests/physics_test.cpp::TestScene", ticket: T-0016,
+          note: "release では FX_ASSERT を有効にした checked 版でも全部の刻みを走らせる(桁あふれの確認)" }
+      - { id: physicslab, group: labtools, label: "physics_lab<br/>double の試作と整数を同じ場面で比べる",
+          code: "tools/physics_lab/avbd_solver.cpp::AvbdSolver::Step", ticket: T-0016,
+          note: "--integer で整数。--out で軌跡、plot_lab.py で画像" }
       - { id: reactionhlsl, group: shared, label: "reaction.hlsli<br/>1 セルの反応: 温度・進行度・取り合い・更新",
           code: "shaders/common/reaction.hlsli::RxEvaluateCell", ticket: T-0014, doc: docs/design/02-reaction-system.md,
           note: "HLSL と C++ で共通。量は物質量(µmol。ADR-0012)。エネルギーの合計は変えない。端数は確率的に丸める" }
@@ -241,6 +261,13 @@ views:
       - [reactiontable, fixed, "ベイクも整数(R7)"]
       - [reactiontable, reactionhlsl, "RxSpecies・RxRule・速度の表"]
       - [reactiontest, reactiontable]
+      - [physicsworld, physicscollide, "PxCollideBoxes"]
+      - [physicsworld, physicssolverhlsl, "行・6×6"]
+      - [physicsworld, physicsscene]
+      - [physicssolverhlsl, physicssolve]
+      - [physicssolve, fixed]
+      - [physicstest, physicsworld]
+      - [physicslab, physicsworld, "同じ場面で比べる"]
       - [gpureactiontest, reactionhlsl, "GPU(.cso)と CPU で同じ関数"]
       - [gpureactiontest, immediate, "compute キュー"]
       - [debugringhlsl, debugring, "読み戻し(フレームの終わり)"]
@@ -327,7 +354,7 @@ views:
           code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
           note: "核は T-0014(reaction.hlsli)。T-0089 で仮の世界の段に: 伝導の後にその場で評価。遅すぎる反応は 0 なので、進めないブロックは眠れる" }
       - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
-          doc: docs/design/08-bodies-physics.md, note: "研究 R-PHYS" }
+          doc: docs/design/08-bodies-physics.md, ticket: T-0090, note: "研究 R-PHYS。CPU の世界は T-0016(PhysicsWorld)。GPU に載せるのは T-0090" }
       - { id: creatures, group: sim, status: planned, label: "6 生き物", doc: docs/design/09-creatures-animation.md }
       - { id: couple, group: sim, status: planned, label: "7 結合(物 ↔ 場)", doc: docs/design/08-bodies-physics.md }
       - { id: coarse, group: sim, status: planned, label: "8 粗い層(60 刻みに 1 回)", doc: docs/design/05-world-data.md }

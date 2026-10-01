@@ -19,7 +19,15 @@
 #define FX_NAMESPACE_BEGIN namespace bicameral::fx {
 #define FX_NAMESPACE_END }
 #ifndef FX_ASSERT
+#ifdef BICAMERAL_FORCE_ASSERT
+// release の速さで桁あふれを確かめるテスト(tests/physics_test の checked)用: NDEBUG でも止める
+#include <cstdio>
+#include <cstdlib>
+#define FX_ASSERT(condition) \
+    ((condition) ? (void)0 : (std::fputs("FX_ASSERT: " #condition " (" __FILE__ ")\n", stderr), std::abort()))
+#else
 #define FX_ASSERT(condition) assert(condition)
+#endif
 #endif
 #else
 #include "common/debug_ring.hlsli"
