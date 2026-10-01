@@ -7,10 +7,11 @@
 #include "common/debug_ring.hlsli"
 #include "common/graph_trace.hlsli"  // u2 space1(連鎖のトレース。T-0087)
 #include "common/probe_sim.hlsli"
+#include "common/probe_world.hlsli"
 #include "common/work_graph_stats.hlsli"  // u1 space1(ノードのカウンタ。T-0008)
 
 // --- バッファ(ROOT_LAYOUT の順)---
-RWStructuredBuffer<uint32_t> world : register(u0);        // 2 世代 × PROBE_CELL_COUNT
+RWStructuredBuffer<RxCell> cells : register(u0);          // 2 世代 × PROBE_CELL_COUNT(成分 + エネルギー。T-0089)
 RWByteAddressBuffer events : register(u1);                // イベントのリング: 見出し + レコード(probe_sim.hlsli)
 RWStructuredBuffer<uint32_t> extraction0 : register(u2);  // 描画用の抽出(3 組。中身は probe_sim.hlsli。06 §4)
 RWStructuredBuffer<uint32_t> extraction1 : register(u3);
@@ -22,13 +23,41 @@ RWByteAddressBuffer tickEvents : register(u8);    // 刻みの中のイベント
 RWByteAddressBuffer activeList0 : register(u9);   // 活性の一覧(偶数の刻み)。伝導の間は GPU の入力(読むだけ)の状態
 RWByteAddressBuffer activeList1 : register(u10);  // 活性の一覧(奇数の刻み)
 RWStructuredBuffer<uint32_t> blockSchedule : register(u11);  // ブロックごとの予定の印(最後に予定した刻み + 1)
-ByteAddressBuffer input : register(t0);                      // CPU が書くフレームの入力
+RWStructuredBuffer<HcThermalCache> thermal
+    : register(u12);                     // 2 世代 × PROBE_CELL_COUNT(セルの熱のキャッシュ。cells と同じ並び)
+ByteAddressBuffer input : register(t0);  // CPU が書くフレームの入力
+StructuredBuffer<RxSpecies> reactionSpecies : register(t1);  // 反応の表(ベイクしたもの。sim/reaction_table.h)
+StructuredBuffer<RxRule> reactionRules : register(t2);
+StructuredBuffer<uint32_t> reactionRuleIndex : register(t3);
+ByteAddressBuffer reactionRates : register(t4);
 
 cbuffer UnitConstants : register(b0) {
     uint32_t tickLow;  // この単位の刻み(記録するときに埋め込む)
     uint32_t tickHigh;
     uint32_t argument;  // Extract: 書き先の組
 };
+
+// reaction.hlsli の Table の約束(表の読み方)
+struct ProbeReactionTable {
+    uint32_t unused;
+
+    RxSpecies Species(uint32_t id) { return reactionSpecies[id]; }
+
+    RxRule Rule(uint32_t id) { return reactionRules[id]; }
+
+    uint32_t RuleIndex(uint32_t position) { return reactionRuleIndex[position]; }
+
+    uint64_t Rate(uint32_t rule, uint32_t kelvin) {
+        return reactionRates.Load<uint64_t>((rule * RX_RATE_TABLE_KELVINS + kelvin) * 8);
+    }
+};
+
+ProbeReactionTable ReactionTable() {
+    ProbeReactionTable table;
+    table.unused = 0;
+
+    return table;
+}
 
 // --- 共通 ---
 

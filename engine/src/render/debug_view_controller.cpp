@@ -22,6 +22,17 @@ namespace bicameral::render {
             return "?";
         }
 
+        std::string_view QuantityName(DebugViewQuantity quantity) {
+            switch (quantity) {
+                case DebugViewQuantity::Temperature: return "温度";
+                case DebugViewQuantity::OxygenDepletion: return "O2 の減り";
+                case DebugViewQuantity::CarbonDioxide: return "CO2";
+                case DebugViewQuantity::Carbon: return "炭";
+            }
+
+            return "?";
+        }
+
         constexpr std::array<char, 3> AXIS_NAMES = {'x', 'y', 'z'};
 
         std::array<float, 4> ToFloat4(Vector3 vector) {
@@ -98,6 +109,10 @@ namespace bicameral::render {
             case 'E': m_settings.slicePosition = std::min(m_settings.slicePosition + step, m_gridSize - 1); break;
             case 'B': m_settings.showActiveBlocks = !m_settings.showActiveBlocks; break;
             case 'L': m_settings.logarithmic = !m_settings.logarithmic; break;
+            case 'C':
+                m_settings.quantity = static_cast<DebugViewQuantity>((static_cast<uint32_t>(m_settings.quantity) + 1) %
+                                                                     DEBUG_VIEW_QUANTITY_COUNT);
+                break;
             case 'O':
                 m_camera.ToggleProjection();
                 Log(Channel::Render, Level::Info, "カメラ: {}", m_camera.State().orthographic ? "平行投影" : "透視");
@@ -113,7 +128,7 @@ namespace bicameral::render {
         const bool changed = before.mode != m_settings.mode || before.sliceAxis != m_settings.sliceAxis ||
                              before.slicePosition != m_settings.slicePosition ||
                              before.showActiveBlocks != m_settings.showActiveBlocks ||
-                             before.logarithmic != m_settings.logarithmic;
+                             before.logarithmic != m_settings.logarithmic || before.quantity != m_settings.quantity;
 
         if (changed)
             Log(Channel::Render, Level::Info, "表示: {}", Describe());
@@ -137,6 +152,7 @@ namespace bicameral::render {
         if (m_settings.logarithmic)
             flags |= VIEW_FLAG_LOGARITHMIC;
 
+        flags |= static_cast<uint32_t>(m_settings.quantity) << VIEW_QUANTITY_SHIFT;
         return {.extractionIndex = extractionIndex,
                 .width = width,
                 .height = height,
@@ -152,9 +168,10 @@ namespace bicameral::render {
     }
 
     std::string DebugViewController::Describe() const {
-        return std::format("{}  断面 {} = {}  活性なブロック {}  色 {}", ModeName(m_settings.mode),
+        return std::format("{}  断面 {} = {}  活性なブロック {}  色 {}({})", ModeName(m_settings.mode),
                            AXIS_NAMES[m_settings.sliceAxis], m_settings.slicePosition,
-                           m_settings.showActiveBlocks ? "あり" : "なし", m_settings.logarithmic ? "対数" : "線形");
+                           m_settings.showActiveBlocks ? "あり" : "なし", QuantityName(m_settings.quantity),
+                           m_settings.logarithmic ? "対数" : "線形");
     }
 
     bool ParseDebugViewMode(std::string_view name, DebugViewMode& mode) {

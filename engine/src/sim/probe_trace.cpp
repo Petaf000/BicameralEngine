@@ -75,8 +75,8 @@ namespace bicameral::sim {
             std::map<uint32_t, std::vector<uint32_t>> pokes;  // 根のブロック → つついたセル
             std::map<uint32_t, uint32_t> selfWakes;           // 根のブロック → 自分を起こした数(一覧に入った回数)
             std::set<uint32_t> roots;
-            std::map<uint32_t, uint32_t> parents;  // 起こされたブロック → 親(起こした根のうち一番小さい番号)
-            std::map<uint32_t, bool> conducted;    // 計算したブロック → 値が変わったか
+            std::map<uint32_t, uint32_t> parents;    // 起こされたブロック → 親(起こした根のうち一番小さい番号)
+            std::map<uint32_t, uint32_t> conducted;  // 計算したブロック → 結果(PROBE_BLOCK_FLAG_*)
         };
 
         // (返すと std::map のムーブが noexcept でないので、呼ぶ側の物に書く)
@@ -94,15 +94,16 @@ namespace bicameral::sim {
                     if (!inserted)
                         parent->second = std::min(parent->second, record.subject);
                 } else if (record.kind == PROBE_TRACE_CONDUCT)
-                    tree.conducted[record.subject] = record.object != 0;
+                    tree.conducted[record.subject] = record.object;
             }
         }
 
         std::string FormatChild(const TickTree& tree, uint32_t block) {
             const auto conducted = tree.conducted.find(block);
-            const char* state = conducted == tree.conducted.end() ? "(計算の記録なし)"
-                                : conducted->second               ? "変わった"
-                                                                  : "変わらない";
+            const char* state = conducted == tree.conducted.end()                      ? "(計算の記録なし)"
+                                : (conducted->second & PROBE_BLOCK_FLAG_CHANGED) != 0  ? "変わった"
+                                : (conducted->second & PROBE_BLOCK_FLAG_POSSIBLE) != 0 ? "変わらない・まだ進める"
+                                                                                       : "変わらない";
 
             return std::format("    → {} {} {}\n", block, FormatCoordinates(BlockCoordinates(block)), state);
         }
@@ -115,7 +116,7 @@ namespace bicameral::sim {
                 for (const uint32_t cell : poked->second)
                     origin += " セル " + FormatCoordinates(CellCoordinates(cell));
             } else if (changedBefore.contains(root))
-                origin = std::format("刻み {} で変わった", tick - 1);
+                origin = std::format("刻み {} で変わった(か、まだ進めた)", tick - 1);
             else
                 origin = previousTraced ? "(前の刻みで変わった記録なし。箱の外から)" : "(前の刻みは記録していない)";
 
@@ -129,7 +130,8 @@ namespace bicameral::sim {
 
         std::string FormatTick(uint64_t tick, const TickTree& tree, const std::set<uint32_t>& changedBefore,
                                bool previousTraced, size_t recordCount) {
-            const auto changed = rng::count_if(tree.conducted, [](const auto& entry) { return entry.second; });
+            const auto changed = rng::count_if(
+                tree.conducted, [](const auto& entry) { return (entry.second & PROBE_BLOCK_FLAG_CHANGED) != 0; });
             std::string text = std::format("刻み {}: 根 {}・計算 {} ブロック(変わった {})・記録 {}\n", tick,
                                            tree.roots.size(), tree.conducted.size(), changed, recordCount);
 
@@ -144,7 +146,7 @@ namespace bicameral::sim {
 
             // --- 起こした記録が無いのに計算したもの(範囲の決め方では起きないはず)---
             bool orphanHeader = false;
-            for (const auto& [block, changedFlag] : tree.conducted) {
+            for (const auto& [block, flags] : tree.conducted) {
                 if (tree.parents.contains(block))
                     continue;
 
@@ -159,6 +161,14 @@ namespace bicameral::sim {
         }
 
         // ブロック block の中で食い違うセルの数。最初のもの(ブロックの中の z, y, x の順)を first に
+        // セル index の抽出の語(温度と見る物質 3 つ)が全部同じか
+        bool SameCellWords(std::span<const uint32_t> gpuCells, std::span<const uint32_t> cpuCells, uint32_t index) {
+            const size_t base = size_t{index} * PROBE_EXTRACTION_CELL_WORDS;
+
+            return rng::equal(gpuCells.subspan(base, PROBE_EXTRACTION_CELL_WORDS),
+                              cpuCells.subspan(base, PROBE_EXTRACTION_CELL_WORDS));
+        }
+
         uint32_t CountBlockDifferences(uint32_t block, std::span<const uint32_t> gpuCells,
                                        std::span<const uint32_t> cpuCells, Coordinates& first) {
             constexpr uint32_t CELLS_PER_BLOCK = PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE;
@@ -170,7 +180,7 @@ namespace bicameral::sim {
                                           origin[1] * PROBE_BLOCK_SIZE + (local / PROBE_BLOCK_SIZE) % PROBE_BLOCK_SIZE,
                                           origin[2] * PROBE_BLOCK_SIZE + local / (PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE)};
                 const uint32_t index = ProbeCellIndex(cell[0], cell[1], cell[2]);
-                if (gpuCells[index] == cpuCells[index])
+                if (SameCellWords(gpuCells, cpuCells, index))
                     continue;
 
                 if (differences == 0)
@@ -227,9 +237,9 @@ namespace bicameral::sim {
             text += FormatTick(tick, tree, changedBefore, previousTraced, records.size());
 
             changedBefore.clear();
-            for (const auto& [block, changed] : tree.conducted) {
-                if (changed)
-                    changedBefore.insert(block);
+            for (const auto& [block, flags] : tree.conducted) {
+                if (flags != 0)
+                    changedBefore.insert(block);  // 変わったか、まだ進めた(次の刻みの根)
             }
 
             previousTick = tick;
@@ -270,13 +280,13 @@ namespace bicameral::sim {
     }
 
     void AppendExpectedProbeTrace(const gpu::GraphTraceFilter& filter, uint64_t tick,
-                                  std::span<const ProbeCommand> commands, std::span<const uint8_t> changedBefore,
-                                  std::span<const uint8_t> changedAfter, std::vector<gpu::GraphTraceRecord>& expected) {
+                                  std::span<const ProbeCommand> commands, std::span<const uint8_t> flagsBefore,
+                                  std::span<const uint8_t> flagsAfter, std::vector<gpu::GraphTraceRecord>& expected) {
         if (!WantsTick(filter, tick))
             return;
 
         // --- つつき(適用の単位と同じく、格子の中のものだけ)→ 根になる ---
-        std::vector<uint8_t> seeds(changedBefore.begin(), changedBefore.end());
+        std::vector<uint8_t> seeds(flagsBefore.begin(), flagsBefore.end());
         for (const ProbeCommand& command : commands) {
             const uint32_t x = command.payload[0];
             const uint32_t y = command.payload[1];
@@ -310,7 +320,7 @@ namespace bicameral::sim {
         for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
             if (scheduled[block] != 0 && WantsBlock(filter, block)) {
                 expected.push_back(
-                    {.tick = tick, .kind = PROBE_TRACE_CONDUCT, .subject = block, .object = changedAfter[block]});
+                    {.tick = tick, .kind = PROBE_TRACE_CONDUCT, .subject = block, .object = flagsAfter[block]});
             }
         }
     }
@@ -333,7 +343,7 @@ namespace bicameral::sim {
             if (cpuTick == cpu.end())
                 continue;
 
-            if (cpuTick->hash != gpuTick.hash || cpuTick->heat != gpuTick.heat)
+            if (cpuTick->hash != gpuTick.hash || cpuTick->energy != gpuTick.energy)
                 return gpuTick.tick;
         }
 
@@ -342,7 +352,8 @@ namespace bicameral::sim {
 
     std::optional<ProbeDivergence> FindCellDivergence(uint64_t tick, std::span<const uint32_t> gpuCells,
                                                       std::span<const uint32_t> cpuCells) {
-        if (gpuCells.size() < PROBE_CELL_COUNT || cpuCells.size() < PROBE_CELL_COUNT)
+        constexpr size_t WORDS = size_t{PROBE_CELL_COUNT} * PROBE_EXTRACTION_CELL_WORDS;
+        if (gpuCells.size() < WORDS || cpuCells.size() < WORDS)
             return std::nullopt;
 
         std::optional<ProbeDivergence> divergence;
@@ -363,8 +374,8 @@ namespace bicameral::sim {
                 divergence = ProbeDivergence{.tick = tick,
                                              .block = block,
                                              .cell = first,
-                                             .gpuValue = gpuCells[index],
-                                             .cpuValue = cpuCells[index]};
+                                             .gpuValue = gpuCells[size_t{index} * PROBE_EXTRACTION_CELL_WORDS],
+                                             .cpuValue = cpuCells[size_t{index} * PROBE_EXTRACTION_CELL_WORDS]};
             }
         }
 
@@ -378,7 +389,7 @@ namespace bicameral::sim {
 
     std::string FormatProbeDivergence(const ProbeDivergence& divergence) {
         return std::format(
-            "S({}) で CPU リファレンスと食い違った: 最初のブロック {} {}・セル {} GPU {} CPU {}"
+            "S({}) で CPU リファレンスと食い違った: 最初のブロック {} {}・セル {} 温度 GPU {} CPU {} mK"
             "(食い違ったセル {}・ブロック {})",
             divergence.tick, divergence.block, FormatCoordinates(BlockCoordinates(divergence.block)),
             FormatCoordinates(divergence.cell), divergence.gpuValue, divergence.cpuValue, divergence.differingCells,

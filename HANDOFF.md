@@ -1,35 +1,48 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0014 原理: 化学(1 セルの反応の核)— 完了(ユーザーの指示で区切った)
+最終更新: 2026-10-01 / チケット: T-0089 化学を仮の世界に組み込む — 完了
 
 ## 状態(3 行以内)
-- 1 セルの反応の核ができた: 試験の表(物質 7・規則 5)を整数でベイクし、`shaders/common/reaction.hlsli` の RxEvaluateCell で評価。
-  元素とエネルギーが 36,000 刻みで完全に保存、取り合い・並び順・遅い反応・吸熱の上限もテスト済み。GPU(HW・WARP)と CPU がビット一致。
-- 量は物質量(1 = 1 µmol。ADR-0012、ユーザー決定)。T-0014 を 2 つに分けた(世界への組み込みは T-0089)。テスト 33/33。
+- 仮の世界(64³)が成分 + エネルギー(RxCell)と熱のキャッシュになり、ConductBlock(Work Graphs)が温度の差の伝導 → その場で反応。
+  クリック 1 回で木箱が燃え広がり(壁の 9 割が 49 秒で炭)、全部のセルを計算する CPU とビット一致、36,000 刻みでエネルギーと元素が一致。
+- WARP はこのグラフを作る時点で落ちるので、仮の世界のテストから外した(ADR-0013)。テスト 33/33。M1 の残りは T-0016 物理・T-0017 多重解像度。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(51 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(67)。
-- `job.py test` → 33/33(分けて走らせる。下の注意)。新: `reaction`(CPU)・`gpu_reaction` / `gpu_reaction_warp`(4096 セル × 400 刻み、要約 61fce95a6b6c9e01 が CPU と同じ)。
-- `job.py run -Exe reaction_test` → 閉じた木箱 600 K が 10〜30 刻みで燃えて 1718 K、Boudouard が 2000 K → 777 K で止まる様子がログに出る。
+- `job.py build`(debug / release とも警告なし)・`job.py tidy` → 警告なし(52 ファイル)・`python3 tools/archmap/archmap.py --check` → OK(70)。
+- `job.py test` → 33/33(分けて走らせる。下の注意)。`gpu_probe_sim`(約 120 s)・`gpu_probe_trace`(約 100 s)・新 `gpu_probe_fire`(3600 刻み、約 40 s)。
+- `job.py run -Preset release -Exe gpu_probe_fire_test` → 36,000 刻み(81 s)。1 秒ごとの燃え方のログ。`--pokes n --solid-percent p --gas-percent p` で値を試せる。
+- `job.py run -Preset release -Exe gpu_conduct_bench` → 伝導と反応の費用(perf.md: 約 100〜120 ns/ブロック、全ブロックで約 430 µs/刻み)。
+- `job.py run -Preset release -- --frames 3000 --auto-click --screenshot x.png` → 最初の自動クリックが木箱の壁 (28, 32, 32) に火をつける。窓の C で色分けの量(温度・O2 の減り・CO2・炭)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- イベント(音・光)の出力・Work Graphs の段・伝導との組み合わせは T-0089。成分は 8 個まで(溢れは FX_ASSERT で止める)。
-- 試験の表の熱分解は発熱(値の都合)なので、閉じた木箱は O2 が尽きても熱分解で 1718 K まで上がる。ゲームの中身ではない(T-0002)。
-- 吸熱の上限(熱の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)は陽的な評価の行き過ぎを止める応急の形。R-REACT-1 で見直す。逆反応・平衡は未定(T-0002 / M2)。
-- 反応の段の費用(ms/刻み)は未計測(T-0089 で世界に入れてから)。
-- (前から)PIX での Work Graphs の見え方は未確認。段ごとのハッシュ・`--replay --bisect` は無い。バッキングメモリの使った量は数えられない。
-- (前から)ボリューム表示のときシミュの GPU 時間が伸びる。伝導の Compute 版との比較(D-302)はしていない。セーブは未着手。AMD は未確認。
+- WARP: 伝導 + 反応のノードを含む Work Graph を作ると WARP がアクセス違反で落ちる(`bicameral --warp` も)。調べた範囲は ADR-0013。
+- 空気の熱は温度の差の切り捨てを下回るまで長く広がり続け、ブロックの大半が活性のまま(燃えた後は 4096 ブロック全部。約 430〜560 µs/刻み)。
+- 気体は流れない(M3)ので、木のセルは自分の孔の O2 を使い切ると熱分解だけ。燃える熱はほぼ試験の表の熱分解(発熱。値の都合)から。
+- 伝導率の試験の倍率(固体 × 2 万・気体 × 5000)とつつきの 2700 K は M1 の見え方のための値。M3(放射・対流)で見直す(D-425)。
+- debug の CPU リファレンスは 64³ × 40 刻みで約 20 s(gpu_probe_sim は 3 回走らせる)。テストが 180 s に近い。
+- 色分けの C キーは窓で手で確かめていない(スクリーンショットは温度だけ見た)。イベント(音・光)の出力は無い。成分は 8 個まで。
+- (前から)PIX での Work Graphs の見え方は未確認。段ごとのハッシュ・`--replay --bisect` は無い。伝導の Compute 版との比較(D-302)はしていない。セーブは未着手。AMD は未確認。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- ADR-0012: セルと物の部品の成分は物質量(uint64、1 = 1 µmol)。質量は導出値。04 §2・units.hlsli・05 §3 を直した。
-- T-0014 を分けた: T-0014 = 1 セルの核(完了)/ T-0089 = 仮の世界に組み込む(ROADMAP・NEXT に追加)。試験の表は「現実に近い小さな表」。
-- 規則 5 本目に Boudouard(吸熱)を足した(吸熱の取り合いを試すため。ユーザーに見せた案は 4 本)。
-- 吸熱の規則が 1 刻みに使える熱は今の熱の 1/8 まで(02 §3.1)。端数はカウンタ型の乱数で確率的に丸める(鍵は規則の名前のハッシュ)。
+- D-424 遅すぎる反応は 0(1 刻みの期待値 2^-16 µmol 未満。`RX_EXTENT_CUTOFF_FRACTION`)。眠れるかは `RxStepCell` の possible。
+- D-425 試験の表は「リアルっぽいが遅すぎない」値。伝導率に倍率(07 §1.1)。D-426 / ADR-0013 WARP を仮の世界のテストから外す。
+- 伝導と反応は 1 つのノード。面の係数は min(調和平均ではない。07 §1.1)。活性 = 変わったか、まだ進める(06 §2)。
+- つつき = 約 2700 K ぶんの熱(湧き出しとしてハッシュの表の欄に数える)。ハッシュの表の欄は 64 バイト(エネルギーの合計・つつきの分)。
+- 抽出はセルごとに 4 語(温度・O2・CO2・炭)。トレースの計算の記録の従は PROBE_BLOCK_FLAG_*(変わった 1・まだ進める 2)。
 
 ## 次にやること
-NEXT.md の先頭(T-0089 化学を仮の世界に組み込む。チケット docs/tickets/T-0089-principle-chemistry-world.md の完了条件を詰めてから)。
+NEXT.md の先頭(T-0016 原理: 物理。チケットを作り、R-PHYS-1 の完了条件を詰めてから)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **仮の世界のセル**(T-0089): `cells`(u0、RxCell × 2 世代)と `thermal`(u12、HcThermalCache × 2 世代)。キャッシュはセルから決まる値という約束
+  (ProbeStepCell の近道と、コンダクタンスを成分が変わった時だけ作り直すのがこれに頼る)。セルを書き換えたら必ず `ProbeMakeCache` で作り直す(つつきがそう)。
+  反応の表は t1〜t4(既定のヒープ)。初めの世界と表は最初の RecordFrame で写す(`ProbeSim::RecordInitialization`)。
+- **ProbeSim::Create は反応の表を取る**(`BakeReactionTable(MakeCombustionTestTable())`)。ProbeReference も表を取る。
+- **WARP の Work Graph の JIT は、ノードの関数が少し複雑になると落ちる**(ADR-0013)。compute なら同じコードが動く。
+- 抽出のセルの部分は `PROBE_EXTRACTION_BLOCK_OFFSET`(= セル × 4)語。CPU 側は `MakeProbeExtractionCells` で同じものを作れる。
+- HLSL で `linear` は補間の修飾子(`line`・`point` と同じく変数名に使えない)。
+- `shaders/common/probe_world.hlsli` は C++ では bicameral::sim の中で reaction と fx を using する。
+
 - **反応の核**(T-0014、02 §3.1): 評価は `shaders/common/reaction.hlsli`(テンプレートの Table 型で表を読む。C++ は `sim::ReactionTableView`、
   HLSL は `reaction_cells.hlsl` の `GpuReactionTable`)。ベイクは `sim/reaction_table.cpp`、試験の表は `sim/reaction_test_table.cpp`(ライブラリ bicameral_reaction。GPU を知らない)。
   表の構造体の大きさは reaction_table.h の static_assert(RxSpecies 24・RxRule 80・RxCell 112 バイト)。HLSL の構造体を変えたら揃える。

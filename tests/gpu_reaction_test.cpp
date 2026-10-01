@@ -199,13 +199,9 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_reaction_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        // WARP では GPU-based validation を切る: 大きなシェーダー(128bit の計算を展開した評価)の計装と JIT が 15 分を超えて終わらなかった。
-        // debug layer は残す。ハードウェアでは GBV も有効のまま
-        const bool warp = options->adapter == gpu::AdapterKind::Warp;
-        gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
-        deviceOptions.gpuBasedValidation = deviceOptions.gpuBasedValidation && !warp;
+        // WARP では GPU-based validation を切る(gpu_test_options.h の TestDeviceOptions)
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
-        const auto device = gpu::Device::Create(options->adapter, deviceOptions);
+        const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_reaction_test: FAILED(表かデバイスを作れない)");
             return 1;

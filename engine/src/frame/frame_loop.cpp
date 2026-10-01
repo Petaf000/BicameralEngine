@@ -34,6 +34,8 @@
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
+#include "sim/reaction_table.h"
+#include "sim/reaction_test_table.h"
 
 namespace bicameral::frame {
     namespace {
@@ -298,7 +300,12 @@ namespace bicameral::frame {
             if (!swapChain)
                 return std::unexpected(swapChain.error());
 
-            auto simulation = sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+            // 仮の世界の反応の表は試験の表(T-0089。ゲームの中身は T-0002)
+            const auto reactionTable = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+            if (!reactionTable)
+                return std::unexpected(reactionTable.error());
+
+            auto simulation = sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE, *reactionTable,
                                                     {.busyIterations = options.simLoad,
                                                      .busyPieces = options.simSplit,
                                                      .trace = options.trace,
@@ -534,10 +541,11 @@ namespace bicameral::frame {
                 return;
 
             if (m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0) {
-                // z = PROBE_VIEW_Z の面の決まった場所を順に押す(人がいない確認用。表示やカメラに依らない)
+                // z = PROBE_VIEW_Z の面の決まった場所を順に押す(人がいない確認用。表示やカメラに依らない)。
+                // 最初の 1 回は木箱の壁 (28, 32)(初めの世界。sim/probe_sim.cpp)に火をつける(T-0089)
                 const auto step = static_cast<uint32_t>(m_frameNumber / AUTO_CLICK_INTERVAL_FRAMES);
-                const uint32_t u = (step * 37 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
-                const uint32_t v = (step * 11 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
+                const uint32_t u = step == 0 ? 28 : (step * 37 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
+                const uint32_t v = step == 0 ? 32 : (step * 11 % 16 + 1) * sim::PROBE_GRID_SIZE / 18;
                 cells.push_back(render::CellOnSlice(2, sim::PROBE_VIEW_Z, u, v));
             }
 
@@ -732,14 +740,14 @@ namespace bicameral::frame {
                 "{}: {:.1f} fps  CPU {:.3f} ms/フレーム(うち Present {:.3f}、最大 {:.3f})  世界 {:.1f} 刻み/秒  "
                 "シミュ {:.1f} 単位/投入・GPU {:.3f} ms/投入(予算 {:.2f})  描画 GPU {:.3f} ms/フレーム  "
                 "捨てた刻み {}  見送り {}(抽出 {})  CPU の待ち {}  イベント {}  状態 S({}) = {:016x}"
-                "(熱 {}・伝導したブロック {})",
+                "(エネルギー {} mJ・計算したブロック {})",
                 label, perSecond(stats.frames), average(stats.cpuMilliseconds, stats.frames),
                 average(stats.presentMilliseconds, stats.frames), stats.cpuMaxMilliseconds, perSecond(stats.ticks),
                 average(static_cast<double>(stats.units), stats.simSubmissions),
                 average(stats.simGpuMilliseconds, stats.simSubmissionsMeasured), m_scheduler.BudgetMilliseconds(),
                 average(stats.renderGpuMilliseconds, stats.renderFramesMeasured), m_scheduler.DroppedTicks(),
                 stats.skippedSubmissions, stats.skippedExtractions, stats.cpuWaits, stats.events, m_latestHash.tick,
-                m_latestHash.hash, m_latestHash.heat, m_latestHash.scheduledBlocks);
+                m_latestHash.hash, static_cast<int64_t>(m_latestHash.energy), m_latestHash.scheduledBlocks);
 
             if (!stats.conductGraph.nodes.empty()) {
                 Log(Channel::WorkGraph, Level::Info, "{}: {}", label,

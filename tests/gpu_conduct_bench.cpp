@@ -1,8 +1,9 @@
-// gpu_conduct_bench.cpp — 伝導の Work Graph(shaders/sim/probe_conduct.hlsl)の時間を、伝播の規模(計算したブロックの数)ごとに測る(T-0005)。
-// 仮の刻み(sim/probe_sim)を 1 フレームに 16 刻みずつ走らせ、単位ごとのタイムスタンプから伝導の単位の GPU 時間を、
-// ハッシュの表から計算したブロックの数と熱の合計を取る。規模は最初につつく点の数で変える:
-//   1 点(広がって、熱の差が流れの閾値(8)を下回ると止まる。止まるまでの刻みも測る)/ 8 点 / 64 点(すぐ全部のブロックが活性になる)
-// 結果は Markdown の表の行としてログに出す(docs/perf.md に貼る)。熱の合計がつつきの分から変わっていたら失敗(長い刻みでの保存則の確認)。
+// gpu_conduct_bench.cpp — 伝導と反応の Work Graph(shaders/sim/probe_conduct.hlsl)の時間を、伝播の規模(計算したブロックの数)ごとに測る
+// (T-0005・T-0089)。仮の刻み(sim/probe_sim)を 1 フレームに 16 刻みずつ走らせ、単位ごとのタイムスタンプから伝導と反応の単位の GPU 時間を、
+// ハッシュの表から計算したブロックの数とエネルギーの合計を取る。規模は最初につつく点で変える:
+//   空気の 1 点 / 8 点 / 64 点(空気を温めて、熱の差が流れの切り捨てを下回ると止まる。止まるまでの刻みも測る)/
+//   木箱の壁の 1 点(燃え広がる。反応の費用)
+// 結果は Markdown の表の行としてログに出す(docs/perf.md に貼る)。エネルギーの合計がつつきの分から変わっていたら失敗。
 //
 // ctest には登録しない(時間がかかり、時間は機械しだい)。走らせ方: `job.py run -Preset release -Exe gpu_conduct_bench`。
 // 引数は gpu_test_options.h(--warp)と、--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)か
@@ -22,6 +23,7 @@
 #include "gpu_test_options.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
+#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -34,15 +36,18 @@ namespace {
 
     struct Scenario {
         const char* name;
-        uint32_t pointsPerAxis;  // つつく点は 1 軸にこの数ずつの格子(1 なら真ん中の 1 点)
+        uint32_t pointsPerAxis;  // つつく点は 1 軸にこの数ずつの格子(1 なら真ん中の 1 点)。0 なら木箱の壁の 1 点
         uint64_t maxTicks;       // ここまでに止まらなければ打ち切る
     };
 
-    constexpr std::array<Scenario, 3> SCENARIOS = {{
-        {.name = "1 点", .pointsPerAxis = 1, .maxTicks = 2000},
-        {.name = "8 点", .pointsPerAxis = 2, .maxTicks = 600},
-        {.name = "64 点", .pointsPerAxis = 4, .maxTicks = 300},
+    constexpr std::array<Scenario, 4> SCENARIOS = {{
+        {.name = "空気 1 点", .pointsPerAxis = 1, .maxTicks = 2000},
+        {.name = "空気 8 点", .pointsPerAxis = 2, .maxTicks = 600},
+        {.name = "空気 64 点", .pointsPerAxis = 4, .maxTicks = 300},
+        {.name = "木箱の壁 1 点", .pointsPerAxis = 0, .maxTicks = 3600},
     }};
+
+    constexpr std::array<uint32_t, 3> CRATE_WALL_CELL = {28, 32, 32};  // 木箱の壁(sim/probe_sim.cpp の初めの世界)
 
     // 計算したブロックの数の区切り(この数以下)
     constexpr std::array<uint32_t, 6> BUCKET_LIMITS = {8, 64, 256, 1024, 2048, PROBE_BLOCK_COUNT};
@@ -60,7 +65,7 @@ namespace {
         uint64_t ticks = 0;
         uint64_t quietTick = 0;  // 計算したブロックが 0 になった最初の刻み(0 なら止まらなかった)
         uint32_t maxBlocks = 0;
-        bool heatConserved = true;
+        bool energyConserved = true;
 
         // --- 時間(計算したブロックの数の範囲ごと・単位ごと)---
         std::array<Bucket, BUCKET_LIMITS.size()> buckets{};
@@ -69,6 +74,11 @@ namespace {
 
     std::vector<ProbeCommand> MakePokes(uint32_t pointsPerAxis) {
         std::vector<ProbeCommand> commands;
+        if (pointsPerAxis == 0) {
+            commands.push_back(MakePokeCommand(0, 0, CRATE_WALL_CELL[0], CRATE_WALL_CELL[1], CRATE_WALL_CELL[2]));
+            return commands;
+        }
+
         const uint32_t spacing = PROBE_GRID_SIZE / pointsPerAxis;
         const uint32_t count = pointsPerAxis * pointsPerAxis * pointsPerAxis;
         const auto place = [&](uint32_t index) {
@@ -103,8 +113,9 @@ namespace {
     }
 
     // 1 フレーム(TICKS_PER_FRAME 刻み)の読み戻しを集計に足す
+    // energy: 前の状態のエネルギーの合計(読んだ分だけ進める)
     void AccumulateFrame(ScenarioResult& result, const ProbeFrameReadback& readback, uint32_t unitsPerTick,
-                         double microsecondsPerTick, uint64_t expectedHeat) {
+                         double microsecondsPerTick, uint64_t& energy) {
         for (uint32_t offset = 0; offset < TICKS_PER_FRAME; ++offset) {
             const ProbeTickHash& state = readback.hashes[offset];
             const size_t firstUnit = size_t{offset} * unitsPerTick;
@@ -117,24 +128,25 @@ namespace {
                 result.unitMicroseconds[unit] += unitMicroseconds(unit);
 
             result.maxBlocks = std::max(result.maxBlocks, state.scheduledBlocks);
-            result.heatConserved = result.heatConserved && state.heat == expectedHeat;
+            result.energyConserved = result.energyConserved && state.energy == energy + state.sourceEnergy;
+            energy = state.energy;
             if (state.scheduledBlocks == 0 && result.quietTick == 0)
                 result.quietTick = state.tick;
         }
     }
 
-    ScenarioResult RunScenario(ID3D12Device5* device, const Scenario& scenario, const gpu::GraphTraceFilter& trace,
-                               uint32_t traceCapacity) {
+    ScenarioResult RunScenario(ID3D12Device5* device, const BakedReactionTable& table, const Scenario& scenario,
+                               const gpu::GraphTraceFilter& trace, uint32_t traceCapacity) {
         ScenarioResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"ConductBench");
-        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
                                            {.trace = trace, .traceCapacity = traceCapacity});
         if (!queue || !simulation)
             return result;
 
         const double microsecondsPerTick = 1'000'000.0 / static_cast<double>(queue->TimestampFrequency());
         const std::vector<ProbeCommand> pokes = MakePokes(scenario.pointsPerAxis);
-        const uint64_t expectedHeat = uint64_t{PROBE_POKE_AMOUNT} * pokes.size();
+        uint64_t energy = ProbeEnergySum(MakeProbeInitialWorld(table));
         const uint32_t unitsPerTick = simulation->UnitsPerTick();
 
         for (uint64_t tick = 0; tick < scenario.maxTicks && result.quietTick == 0; tick += TICKS_PER_FRAME) {
@@ -153,7 +165,7 @@ namespace {
             if (readback.hashes.size() != TICKS_PER_FRAME || readback.droppedTraceCount > 0)
                 return result;
 
-            AccumulateFrame(result, readback, unitsPerTick, microsecondsPerTick, expectedHeat);
+            AccumulateFrame(result, readback, unitsPerTick, microsecondsPerTick, energy);
             result.ticks = tick + TICKS_PER_FRAME;
         }
 
@@ -164,14 +176,14 @@ namespace {
     }
 
     void Report(const Scenario& scenario, const ScenarioResult& result) {
-        Log(Channel::Sim, Level::Info, "{}: {} 刻み  止まった刻み {}  計算したブロックの最大 {} / {}  熱の保存 {}",
-            scenario.name, result.ticks,
-            result.quietTick == 0 ? std::string("(止まらない)") : std::to_string(result.quietTick), result.maxBlocks,
-            PROBE_BLOCK_COUNT, result.heatConserved ? "OK" : "NG");
+        Log(Channel::Sim, Level::Info,
+            "{}: {} 刻み  止まった刻み {}  計算したブロックの最大 {} / {}  エネルギーの保存 {}", scenario.name,
+            result.ticks, result.quietTick == 0 ? std::string("(止まらない)") : std::to_string(result.quietTick),
+            result.maxBlocks, PROBE_BLOCK_COUNT, result.energyConserved ? "OK" : "NG");
 
         const double ticks = static_cast<double>(std::max<uint64_t>(result.ticks, 1));
 
-        Log(Channel::Sim, Level::Info, "{}: 単位の平均 µs/刻み: 適用 {:.1f}  伝導 {:.1f}  検査と出力 {:.1f}",
+        Log(Channel::Sim, Level::Info, "{}: 単位の平均 µs/刻み: 適用 {:.1f}  伝導と反応 {:.1f}  検査と出力 {:.1f}",
             scenario.name, result.unitMicroseconds[PROBE_UNIT_APPLY] / ticks,
             result.unitMicroseconds[PROBE_UNIT_CONDUCT] / ticks,
             result.unitMicroseconds[PROBE_FIXED_UNITS_PER_TICK - 1] / ticks);
@@ -227,7 +239,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    auto device = gpu::Device::Create(options->adapter);
+    auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
     if (!device) {
         Log(Channel::Gpu, Level::Error, "{}", device.error());
         bicameral::SingletonFinalizer::Finalize();
@@ -238,17 +250,25 @@ int main(int argc, char** argv) {
     Log(Channel::Sim, Level::Info, "連鎖のトレース: {}",
         traced ? "全部を記録する" : (idle ? "容量だけ確保して無効(T-0088)" : "無効"));
     Log(Channel::Sim, Level::Info,
-        "| 規模 | 計算したブロック | 刻みの数 | 平均ブロック | 伝導 µs/刻み | ns/ブロック |");
+        "| 規模 | 計算したブロック | 刻みの数 | 平均ブロック | 伝導と反応 µs/刻み | ns/ブロック |");
     Log(Channel::Sim, Level::Info, "|---|---|---|---|---|---|");
+    const auto table = BakeReactionTable(MakeCombustionTestTable());
+    if (!table) {
+        Log(Channel::Sim, Level::Error, "試験の反応の表をベイクできない: {}", table.error());
+        bicameral::SingletonFinalizer::Finalize();
+
+        return 1;
+    }
+
     bool passed = true;
 
     for (const Scenario& scenario : SCENARIOS) {
-        const ScenarioResult result = RunScenario(device->Get(), scenario, trace, traceCapacity);
+        const ScenarioResult result = RunScenario(device->Get(), *table, scenario, trace, traceCapacity);
         if (!result.ok)
             Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
 
         Report(scenario, result);
-        passed = passed && result.ok && result.heatConserved;
+        passed = passed && result.ok && result.energyConserved;
     }
 
     passed = passed && test::PassesValidation(*device, "gpu_conduct_bench");

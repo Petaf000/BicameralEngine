@@ -29,6 +29,7 @@
 #include "gpu_test_options.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
+#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -93,28 +94,29 @@ namespace {
     struct CpuRun {
         std::vector<ProbeTickHash> hashes;    // S(1)〜S(ticks)
         std::vector<GraphTraceRecord> trace;  // 予想(並べて重なりなし)
-        std::vector<uint32_t> cells;          // S(ticks) の全部のセル
+        std::vector<uint32_t> cells;          // S(ticks) の全部のセルの抽出の語(温度と見る物質 3 つ)
     };
 
-    CpuRun RunReference(std::span<const ProbeCommand> commands, const GraphTraceFilter& filter, uint64_t ticks) {
-        ProbeReference reference;
+    CpuRun RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands,
+                        const GraphTraceFilter& filter, uint64_t ticks) {
+        ProbeReference reference(table);
         CpuRun result;
         for (uint64_t tick = 0; tick < ticks; ++tick) {
-            const std::vector<uint8_t> changedBefore(reference.ChangedBlocks().begin(),
-                                                     reference.ChangedBlocks().end());
+            const std::vector<uint8_t> flagsBefore(reference.BlockFlags().begin(), reference.BlockFlags().end());
             reference.Advance(tick, commands);
-            AppendExpectedProbeTrace(filter, tick, commands, changedBefore, reference.ChangedBlocks(), result.trace);
+            AppendExpectedProbeTrace(filter, tick, commands, flagsBefore, reference.BlockFlags(), result.trace);
 
-            const std::span<const uint32_t> state = reference.State(tick + 1);
+            const std::span<const reaction::RxCell> state = reference.State(tick + 1);
             result.hashes.push_back({.tick = tick + 1,
                                      .hash = ProbeStateHash(state),
-                                     .heat = ProbeHeatSum(state),
+                                     .energy = ProbeEnergySum(state),
+                                     .sourceEnergy = reference.SourceEnergy(),
                                      .scheduledBlocks = reference.ScheduledBlocks()});
         }
 
         result.trace = UniqueProbeTrace(std::move(result.trace));
-        const std::span<const uint32_t> last = reference.State(ticks);
-        result.cells.assign(last.begin(), last.end());
+        result.cells = MakeProbeExtractionCells(reference.State(ticks), reference.Caches(ticks),
+                                                ProbeViewSpecies(table));
 
         return result;
     }
@@ -132,14 +134,14 @@ namespace {
         std::vector<ProbeTickHash> hashes;
         std::vector<GraphTraceRecord> trace;  // 並べたもの(重なりは残す)
         uint32_t droppedTraceCount = 0;
-        std::vector<uint32_t> cells;  // 最後の抽出のセル(最後のフレームが刻みの境界で終わるとき S(刻みの数))
+        std::vector<uint32_t> cells;  // 最後の抽出のセルの語(最後のフレームが刻みの境界で終わるとき S(刻みの数))
     };
 
-    // 抽出(COMMON)のセルの部分を読み戻す
+    // 抽出(COMMON)のセルの部分(PROBE_EXTRACTION_BLOCK_OFFSET 語)を読み戻す
     std::vector<uint32_t> ReadExtractionCells(ID3D12Device5* device, ID3D12Resource* extraction) {
-        std::vector<uint32_t> cells(PROBE_CELL_COUNT);
+        std::vector<uint32_t> cells(PROBE_EXTRACTION_BLOCK_OFFSET);
         auto queue = gpu::ImmediateQueue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
-        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, uint64_t{PROBE_CELL_COUNT} * 4,
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, uint64_t{PROBE_EXTRACTION_BLOCK_OFFSET} * 4,
                                                                   gpu::BufferKind::Readback);
         if (!queue || !readback)
             return {};
@@ -148,7 +150,7 @@ namespace {
         if (list == nullptr)
             return {};
 
-        list->CopyBufferRegion(readback.Get(), 0, extraction, 0, uint64_t{PROBE_CELL_COUNT} * 4);
+        list->CopyBufferRegion(readback.Get(), 0, extraction, 0, uint64_t{PROBE_EXTRACTION_BLOCK_OFFSET} * 4);
         if (!queue->ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(cells))))
             return {};
 
@@ -157,11 +159,12 @@ namespace {
 
     // unitsPerFrame の分け方で走らせる(コマンドは最初のフレームで全部足す。キューの中で自分の刻みまで待つ)。
     // changes があれば、そのフレームの前で範囲を変える(容量は TRACE_CAPACITY まで)
-    GpuRun RunGpu(ID3D12Device5* device, const GraphTraceFilter& filter, std::span<const uint32_t> unitsPerFrame,
-                  std::span<const ProbeCommand> commands, std::span<const FilterChange> changes = {}) {
+    GpuRun RunGpu(ID3D12Device5* device, const BakedReactionTable& table, const GraphTraceFilter& filter,
+                  std::span<const uint32_t> unitsPerFrame, std::span<const ProbeCommand> commands,
+                  std::span<const FilterChange> changes = {}) {
         GpuRun result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"TraceTestSim");
-        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
                                            {.trace = filter, .traceCapacity = changes.empty() ? 0 : TRACE_CAPACITY});
         if (!queue || !simulation) {
             Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
@@ -200,7 +203,7 @@ namespace {
 
         gpu::SortGraphTrace(result.trace);
         result.cells = ReadExtractionCells(device, simulation->Extraction(extractionTarget));
-        result.ok = unitPosition % unitsPerTick == 0 && result.cells.size() == PROBE_CELL_COUNT;
+        result.ok = unitPosition % unitsPerTick == 0 && result.cells.size() == PROBE_EXTRACTION_BLOCK_OFFSET;
 
         return result;
     }
@@ -247,13 +250,13 @@ namespace {
     // --- 試験 ---
 
     // 同じ入力で 2 回・分け方を変えて、トレースが同じ。CPU リファレンスの予想と一致。木としてファイルに書ける
-    void TestDeterminism(ID3D12Device5* device, Failures& failures) {
+    void TestDeterminism(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
         const std::vector<ProbeCommand> commands = MakeCommands(false);
-        const CpuRun expected = RunReference(commands, WholeFilter(), TOTAL_TICKS);
+        const CpuRun expected = RunReference(table, commands, WholeFilter(), TOTAL_TICKS);
 
-        const GpuRun first = RunGpu(device, WholeFilter(), TickFrames(TOTAL_TICKS), commands);
-        const GpuRun second = RunGpu(device, WholeFilter(), TickFrames(TOTAL_TICKS), commands);
-        const GpuRun mixed = RunGpu(device, WholeFilter(), MixedFrames(), commands);
+        const GpuRun first = RunGpu(device, table, WholeFilter(), TickFrames(TOTAL_TICKS), commands);
+        const GpuRun second = RunGpu(device, table, WholeFilter(), TickFrames(TOTAL_TICKS), commands);
+        const GpuRun mixed = RunGpu(device, table, WholeFilter(), MixedFrames(), commands);
         Log(Channel::Sim, Level::Info,
             "トレース: 1 回目 {} 件・2 回目 {} 件・ばらばら {} 件(CPU の予想 {} 件、重なりなし)", first.trace.size(),
             second.trace.size(), mixed.trace.size(), expected.trace.size());
@@ -285,11 +288,11 @@ namespace {
     }
 
     // 範囲を狭める(刻み・セルの箱)・容量を越える
-    void TestFilters(ID3D12Device5* device, Failures& failures) {
+    void TestFilters(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
         const std::vector<ProbeCommand> commands = MakeCommands(false);
         const GraphTraceFilter narrow = ProbeTraceFilterForCells(2, 8, {0, 0, 0}, {12, 12, 12}, TRACE_CAPACITY);
-        const CpuRun expected = RunReference(commands, narrow, 10);
-        const GpuRun run = RunGpu(device, narrow, TickFrames(10), commands);
+        const CpuRun expected = RunReference(table, commands, narrow, 10);
+        const GpuRun run = RunGpu(device, table, narrow, TickFrames(10), commands);
         const bool inTicks = rng::all_of(
             run.trace, [](const GraphTraceRecord& record) { return record.tick >= 2 && record.tick < 8; });
 
@@ -302,7 +305,7 @@ namespace {
         // 容量 8 件 / フレーム: 書けた分は 8 件まで、残りは落とした数へ
         GraphTraceFilter tiny = WholeFilter();
         tiny.capacity = 8;
-        const GpuRun overflow = RunGpu(device, tiny, TickFrames(2), commands);
+        const GpuRun overflow = RunGpu(device, table, tiny, TickFrames(2), commands);
         Log(Channel::Sim, Level::Info, "容量 8: 書けた {} 件・落とした {} 件", overflow.trace.size(),
             overflow.droppedTraceCount);
         failures.Check(overflow.ok && overflow.trace.size() == 16 && overflow.droppedTraceCount > 0,
@@ -311,7 +314,7 @@ namespace {
 
     // 実行中に範囲を変える(T-0088): 無効で始め、フレーム 2 で A、フレーム 6 で B、フレーム 12 で無効に戻す(1 フレーム = 1 刻み)。
     // B は刻みを [0, 無限) にしておき、フレーム 6 より前の刻みが記録されない(次のフレームから効く)ことも見る
-    void TestRuntimeRange(ID3D12Device5* device, Failures& failures) {
+    void TestRuntimeRange(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
         constexpr uint64_t TICKS = 14;
         const std::vector<ProbeCommand> commands = MakeCommands(false);
         const GraphTraceFilter rangeA = ProbeTraceFilterForCells(2, 6, {0, 0, 0}, {12, 12, 12}, TRACE_CAPACITY);
@@ -323,14 +326,14 @@ namespace {
             {.frame = 12, .filter = GraphTraceFilter{}},
         }};
 
-        const GpuRun run = RunGpu(device, GraphTraceFilter{}, TickFrames(TICKS), commands, changes);
+        const GpuRun run = RunGpu(device, table, GraphTraceFilter{}, TickFrames(TICKS), commands, changes);
 
         // --- CPU の予想: A の刻み [2, 6) と、B を効いていた刻み [6, 12) に絞ったもの ---
         GraphTraceFilter effectiveB = rangeB;
         effectiveB.tickBegin = 6;
         effectiveB.tickEnd = 12;
-        CpuRun expected = RunReference(commands, rangeA, TICKS);
-        const CpuRun expectedB = RunReference(commands, effectiveB, TICKS);
+        CpuRun expected = RunReference(table, commands, rangeA, TICKS);
+        const CpuRun expectedB = RunReference(table, commands, effectiveB, TICKS);
         expected.trace.insert(expected.trace.end(), expectedB.trace.begin(), expectedB.trace.end());
         expected.trace = UniqueProbeTrace(std::move(expected.trace));
 
@@ -373,11 +376,11 @@ namespace {
     }
 
     // わざと CPU リファレンスのつつきを 1 セルずらす → 最初の刻み・ブロック・セル
-    void TestDivergence(ID3D12Device5* device, Failures& failures) {
+    void TestDivergence(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
         const std::vector<ProbeCommand> gpuCommands = MakeCommands(false);
         const std::vector<ProbeCommand> cpuCommands = MakeCommands(true);
-        const CpuRun shifted = RunReference(cpuCommands, WholeFilter(), TOTAL_TICKS);
-        const GpuRun run = RunGpu(device, WholeFilter(), TickFrames(TOTAL_TICKS), gpuCommands);
+        const CpuRun shifted = RunReference(table, cpuCommands, WholeFilter(), TOTAL_TICKS);
+        const GpuRun run = RunGpu(device, table, WholeFilter(), TickFrames(TOTAL_TICKS), gpuCommands);
 
         // (1) ハッシュ列 → 最初に食い違った状態 S(t)
         const auto tick = FirstDivergentTick(run.hashes, shifted.hashes);
@@ -386,18 +389,18 @@ namespace {
             return;
 
         // (2) その刻みまで GPU を走らせ直し(決定的なので同じ)、全部のセルを CPU と比べる → 最初のブロックとセル
-        const GpuRun upTo = RunGpu(device, WholeFilter(), TickFrames(*tick), gpuCommands);
-        const CpuRun cpuUpTo = RunReference(cpuCommands, WholeFilter(), *tick);
+        const GpuRun upTo = RunGpu(device, table, WholeFilter(), TickFrames(*tick), gpuCommands);
+        const CpuRun cpuUpTo = RunReference(table, cpuCommands, WholeFilter(), *tick);
         const auto divergence = FindCellDivergence(*tick, upTo.cells, cpuUpTo.cells);
         if (divergence)
             Log(Channel::Sim, Level::Info, "{}", FormatProbeDivergence(*divergence));
 
         // GPU は (33, 32, 32) の熱が z − 1 の (33, 32, 31) へ流れ、CPU には流れない。ブロック (8, 8, 7) が番号で最初
+        // (どちらも木箱の中の空気。GPU の方が温度が高い)
         const uint32_t expectedBlock = ProbeBlockOfCell(33, 32, 31);
         failures.Check(upTo.ok && divergence.has_value() && divergence->block == expectedBlock &&
                            divergence->cell == std::array<uint32_t, 3>{33, 32, 31} &&
-                           divergence->gpuValue == (PROBE_POKE_AMOUNT >> PROBE_CONDUCT_SHIFT) &&
-                           divergence->cpuValue == 0,
+                           divergence->gpuValue > divergence->cpuValue,
                        "最初に食い違ったブロックとセル(8, 8, 7)の (33, 32, 31)");
 
         // (3) トレース → ずれの元(刻み 9 のつつきのセルが違う)
@@ -420,7 +423,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    auto device = gpu::Device::Create(options->adapter);
+    auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
     if (!device) {
         Log(Channel::Gpu, Level::Error, "{}", device.error());
         bicameral::SingletonFinalizer::Finalize();
@@ -428,11 +431,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const auto table = BakeReactionTable(MakeCombustionTestTable());
+    if (!table) {
+        Log(Channel::Sim, Level::Error, "試験の反応の表をベイクできない: {}", table.error());
+        bicameral::SingletonFinalizer::Finalize();
+
+        return 1;
+    }
+
     Failures failures;
-    TestDeterminism(device->Get(), failures);
-    TestFilters(device->Get(), failures);
-    TestRuntimeRange(device->Get(), failures);
-    TestDivergence(device->Get(), failures);
+    TestDeterminism(device->Get(), *table, failures);
+    TestFilters(device->Get(), *table, failures);
+    TestRuntimeRange(device->Get(), *table, failures);
+    TestDivergence(device->Get(), *table, failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_trace_test");
     const bool passed = failures.count == 0 && passesValidation;

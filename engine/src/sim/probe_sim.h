@@ -1,7 +1,8 @@
 // probe_sim.h — 仮の刻み(shaders/common/probe_sim.hlsli)を「単位」の列として GPU で走らせる道具と、その CPU リファレンス
 // (T-0004・T-0012・T-0086・T-0005)。
 //
-// 刻みのループの形(06 §4・ADR-0011)と、Work Graphs の伝播(T-0005)を確かめる。中身(64³ の格子の熱の伝導)は段ごとに本物に置き換える:
+// 刻みのループの形(06 §4・ADR-0011)と、Work Graphs の伝播(T-0005)を確かめる。中身(64³ のセルの成分 + エネルギー、温度の差の伝導と
+// 反応。T-0089。初めは空気の中の木箱)は段ごとに本物に置き換える:
 //   - 伝導の単位は Work Graph(shaders/sim/probe_conduct.hlsl)。入力は GPU が作る活性の一覧(DispatchGraph の GPU の入力)なので、
 //     どこが活性か・何ブロック計算するかを CPU は知らない(D-107)。熱が広がっている所だけが計算される。
 //   - 1 刻み = 決まった数の単位(適用 → 伝導 → 重さ × k → ハッシュ)。フレームの切れ目はどの単位の間にも来てよい(刻みはフレームをまたぐ)。
@@ -16,7 +17,8 @@
 //   - 抽出(描画が読む)は、投げた単位の後ろで、刻みの境界の状態を写す(1 フレームに 1 回まで)。
 //
 // 使い方:
-//   auto sim = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, {.busyIterations = n, .busyPieces = k});
+//   auto table = BakeReactionTable(MakeCombustionTestTable());
+//   auto sim = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, *table, {.busyIterations = n, .busyPieces = k});
 //   ID3D12CommandList* list = sim->RecordFrame(slot, {.firstTick = t, .firstUnit = u, .unitCount = c, .commands = 新しいコマンド, ...});
 //   computeQueue.Submit(list) → フェンスが進んだら sim->ReadFrame(slot)
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
@@ -31,6 +33,7 @@
 #include <vector>
 
 #include "common/probe_sim.hlsli"
+#include "common/probe_world.hlsli"
 #include "gpu/com_ptr.h"
 #include "gpu/debug_ring.h"
 #include "gpu/graph_trace.h"
@@ -38,6 +41,7 @@
 #include "gpu/work_graph.h"
 #include "gpu/work_graph_stats.h"
 #include "sim/command.h"
+#include "sim/reaction_table.h"
 
 namespace bicameral::sim {
 
@@ -46,7 +50,7 @@ namespace bicameral::sim {
     using ProbeCommand = Command;
     static_assert(sizeof(ProbeCommand) == PROBE_COMMAND_BYTES);
 
-    // セル (x, y, z) に PROBE_POKE_AMOUNT の熱を足す
+    // セル (x, y, z) を約 2700 K 温める熱を足す(PROBE_POKE_HEATING_MILLIKELVIN。明示的な湧き出し)
     [[nodiscard]] ProbeCommand MakePokeCommand(uint64_t targetTick, uint32_t sequence, uint32_t x, uint32_t y,
                                                uint32_t z);
 
@@ -66,9 +70,11 @@ namespace bicameral::sim {
     // 刻み tick の始めの状態 S(tick) の要約(ハッシュの表の欄。probe_sim.hlsli)
     struct ProbeTickHash {
         uint64_t tick = 0;
-        uint64_t hash = 0;             // ProbeStateHash
-        uint64_t heat = 0;             // 熱の合計(ProbeHeatSum。つつき以外で変わらない)
-        uint32_t scheduledBlocks = 0;  // S(tick) を作った刻み(tick − 1)で伝導を計算したブロックの数
+        uint64_t hash = 0;    // ProbeStateHash
+        uint64_t energy = 0;  // エネルギーの合計(ProbeEnergySum。mJ の和の mod 2^64)
+        uint64_t sourceEnergy =
+            0;  // S(tick) を作った刻み(tick − 1)のつつきが足したエネルギー(mJ)。energy(t) = energy(t − 1) + これ
+        uint32_t scheduledBlocks = 0;  // S(tick) を作った刻み(tick − 1)で伝導と反応を計算したブロックの数
     };
 
     struct ProbeFrameReadback {
@@ -129,8 +135,10 @@ namespace bicameral::sim {
         static constexpr uint32_t MAX_UNITS_PER_FRAME = 256;
 
         // listType: フレームのリストを投げるキューの種類(シミュは compute。06 §4)
+        // table: 反応の表(ベイクしたもの)。GPU に写し、初めの世界(MakeProbeInitialWorld)も作る。呼んだ後は持たなくてよい
         [[nodiscard]] static std::expected<ProbeSim, std::string> Create(ID3D12Device5* device,
                                                                          D3D12_COMMAND_LIST_TYPE listType,
+                                                                         const BakedReactionTable& table,
                                                                          const ProbeSimOptions& options = {});
 
         // 1 刻みの単位の数(適用・伝導・ハッシュ + 重さの単位)
@@ -161,9 +169,12 @@ namespace bicameral::sim {
         // 伝導のグラフのカウンタの名前と上限(フレームのループが要約をまとめて出すときに使う)
         [[nodiscard]] const gpu::GraphStatsLayout& ConductStatsLayout() const { return m_graphStats.Layout(); }
 
-        // 描画用の抽出(0〜PROBE_EXTRACTION_COUNT-1。全部のセル + ブロックの活性の印、PROBE_EXTRACTION_WORDS 個。
+        // 描画用の抽出(0〜PROBE_EXTRACTION_COUNT-1。全部のセルの温度と見る物質 3 つの量 + ブロックの活性の印、PROBE_EXTRACTION_WORDS 個。
         // 並びは probe_sim.hlsli)。描画は読むだけ
         [[nodiscard]] ID3D12Resource* Extraction(uint32_t target) const { return m_extractions[target].Get(); }
+
+        // 世界のセル(2 世代 × PROBE_CELL_COUNT × RxCell。S(t) は世代 t & 1)。テストが読み戻すだけ(フレームの間は COMMON)
+        [[nodiscard]] ID3D12Resource* Cells() const { return m_cells.Get(); }
 
         // 伝導の Work Graph の裏のメモリ(ドライバが決める。docs/perf.md に残す)
         [[nodiscard]] uint64_t ConductBackingMemoryBytes() const { return m_conductGraph->BackingMemoryBytes(); }
@@ -202,6 +213,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool CreatePipelines(ID3D12Device5* device);
         [[nodiscard]] bool CreateConductGraph(ID3D12Device5* device);
         [[nodiscard]] bool CreateBuffers(ID3D12Device5* device);
+        [[nodiscard]] bool CreateWorld(ID3D12Device5* device, const BakedReactionTable& table);
+        void RecordInitialization(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] bool CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
 
         // --- 入力とコマンド ---
@@ -241,7 +254,13 @@ namespace bicameral::sim {
         bool m_conductInitialized = false;               // 裏のメモリを初期化するリストを記録したか(最初の 1 回だけ)
 
         // --- 世界と抽出 ---
-        ComPtr<ID3D12Resource> m_world;  // 2 世代 × PROBE_CELL_COUNT × uint32
+        ComPtr<ID3D12Resource> m_cells;    // 2 世代 × PROBE_CELL_COUNT × RxCell
+        ComPtr<ID3D12Resource> m_thermal;  // 2 世代 × PROBE_CELL_COUNT × HcThermalCache
+        // 反応の表(物質・規則・索引・速度。既定のヒープ)と、初めの世界・表のアップロード(最初のフレームで写す。以後は使わない)
+        std::array<ComPtr<ID3D12Resource>, 4> m_reactionTable;
+        std::array<ComPtr<ID3D12Resource>, 6> m_initialUploads;  // 表 4 つ・セル・キャッシュ(1 世代ぶん。2 世代に写す)
+        bool m_initialized = false;
+        std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(O2・CO2・炭)
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
         ComPtr<ID3D12Resource> m_busySink;
 
@@ -275,36 +294,64 @@ namespace bicameral::sim {
         ProbeCommand m_lastEnqueued;  // 最後に足したコマンド(並びの確認)
     };
 
+    // --- 初めの世界(T-0089)---
+
+    // 1 世代ぶんのセル(PROBE_CELL_COUNT 個)。全体が 300 K の空気(N2・O2、1 気圧)、中央に木箱
+    // (8³ セル = 4 m 角、壁の厚さ 1 セル、中は空気。壁のセルは体積の 1 割がセルロースで、残りは孔の中の空気)
+    [[nodiscard]] std::vector<reaction::RxCell> MakeProbeInitialWorld(const BakedReactionTable& table);
+
+    // 抽出に写す物質(O2・CO2・炭の順。描画の色分け)
+    [[nodiscard]] std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table);
+
     // --- CPU リファレンス(GPU とビット一致するはずのもの。D-307・CLAUDE.md 原則 4)---
 
-    // 全部のセルを毎刻み計算する(活性を使わない)。GPU は活性のブロックだけを計算するので、一致すれば活性の取り方も正しい。
-    // 予定のブロックの数は、変わったブロックの記録から GPU と同じ規則(probe_sim.hlsli の「活性」)で予想する
+    // 全部のセルを毎刻み計算する(活性を使わない)。GPU は活性のブロックだけを計算するので、一致すれば活性の取り方も正しい
+    // (眠っているブロックは、計算しても変わらないことが規則で決まっている。probe_sim.hlsli の「活性」)。
+    // 予定のブロックの数は、変わった・まだ進めるブロックの記録から GPU と同じ規則で予想する
     class ProbeReference {
     public:
-        ProbeReference();
+        explicit ProbeReference(const BakedReactionTable& table);
 
-        // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導)
+        // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導と反応)
         void Advance(uint64_t tick, std::span<const ProbeCommand> commands);
 
         // 刻み tick の始めの状態 S(tick)(= tick 回進めた後)
-        [[nodiscard]] std::span<const uint32_t> State(uint64_t tick) const;
+        [[nodiscard]] std::span<const reaction::RxCell> State(uint64_t tick) const;
 
-        // 最後の Advance で GPU が伝導を計算するはずのブロックの数
+        // 同じく、熱のキャッシュ(抽出の温度を作るのに使う)
+        [[nodiscard]] std::span<const reaction::HcThermalCache> Caches(uint64_t tick) const;
+
+        // 最後の Advance のつつきが足したエネルギー(mJ。GPU の表の sourceEnergy と同じ)
+        [[nodiscard]] uint64_t SourceEnergy() const { return m_sourceEnergy; }
+
+        // 最後の Advance で GPU が伝導と反応を計算するはずのブロックの数
         [[nodiscard]] uint32_t ScheduledBlocks() const { return m_scheduledBlocks; }
 
-        // 最後の Advance で値が変わったブロック(PROBE_BLOCK_COUNT 個の 0/1。次の刻みの予定の種。トレースの予想に使う。sim/probe_trace.h)
-        [[nodiscard]] std::span<const uint8_t> ChangedBlocks() const { return m_changedBlocks; }
+        // 最後の Advance の、ブロックごとの結果(PROBE_BLOCK_COUNT 個の PROBE_BLOCK_FLAG_* の組み合わせ。0 でなければ次の刻みの予定の種。
+        // トレースの予想に使う。sim/probe_trace.h)
+        [[nodiscard]] std::span<const uint8_t> BlockFlags() const { return m_blockFlags; }
 
     private:
-        std::vector<uint32_t> m_cells;         // 2 世代 × PROBE_CELL_COUNT(GPU と同じ並び)
-        std::vector<uint8_t> m_changedBlocks;  // 前の刻みで値が変わったブロック(PROBE_BLOCK_COUNT)
+        const BakedReactionTable* m_table;
+        std::vector<reaction::RxCell> m_cells;           // 2 世代 × PROBE_CELL_COUNT(GPU と同じ並び)
+        std::vector<reaction::HcThermalCache> m_caches;  // 同じ並びの熱のキャッシュ
+        std::vector<uint8_t> m_blockFlags;               // 前の刻みのブロックごとの結果(PROBE_BLOCK_COUNT)
+        uint64_t m_sourceEnergy = 0;
         uint32_t m_scheduledBlocks = 0;
     };
 
-    // 状態のハッシュ = Σ ProbeCellHash(セルの番号, 値)(mod 2^64)。GPU のハッシュの単位と同じ値になる
-    [[nodiscard]] uint64_t ProbeStateHash(std::span<const uint32_t> cells);
+    // 状態のハッシュ = Σ ProbeCellHash(セルの番号, セル)(mod 2^64)。GPU のハッシュの単位と同じ値になる
+    [[nodiscard]] uint64_t ProbeStateHash(std::span<const reaction::RxCell> cells);
 
-    // 熱の合計(Σ 値。GPU の表の熱の合計と同じ値になる)
-    [[nodiscard]] uint64_t ProbeHeatSum(std::span<const uint32_t> cells);
+    // エネルギーの合計(Σ mJ の mod 2^64。GPU の表のエネルギーの合計と同じ値になる)
+    [[nodiscard]] uint64_t ProbeEnergySum(std::span<const reaction::RxCell> cells);
+
+    // 抽出のセルの部分(PROBE_CELL_COUNT × PROBE_EXTRACTION_CELL_WORDS 語: 温度と見る物質 3 つ)を CPU で作る。GPU の Extract と同じ値
+    [[nodiscard]] std::vector<uint32_t> MakeProbeExtractionCells(
+        std::span<const reaction::RxCell> cells, std::span<const reaction::HcThermalCache> caches,
+        const std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT>& viewSpecies);
+
+    // 抽出の語の要約(比べるため。順番に依存する FNV 風の混ぜ方)
+    [[nodiscard]] uint64_t ProbeExtractionHash(std::span<const uint32_t> words);
 
 }  // namespace bicameral::sim

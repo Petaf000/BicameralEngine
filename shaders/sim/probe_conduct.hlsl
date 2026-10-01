@@ -1,12 +1,14 @@
-// probe_conduct.hlsl — 仮の刻みの伝導の単位を Work Graph で(T-0005。06 §2 段 2〜3・07 §1)。
-// 「熱が広がっている所だけが次を起動する」伝播の最小形。規則(面の流れ・活性の取り方)は common/probe_sim.hlsli。
+// probe_conduct.hlsl — 仮の刻みの伝導と反応の単位を Work Graph で(T-0005・T-0089。06 §2 段 2〜4・07 §1・02 §3・§6)。
+// 「熱が広がっている所・反応が進んでいる所だけが次を起動する」伝播の最小形。
+// 規則は common/probe_world.hlsli(1 セルの伝導 + 反応)と common/probe_sim.hlsli(活性の取り方)。
 //
 // データの流れ(1 刻み t に DispatchGraph を 1 回。engine/src/sim/probe_sim.cpp の RecordConduct):
 //   活性の一覧 (t & 1)(刻み t − 1 の ConductBlock が足した「変わったブロック」+ 刻み t の適用が足した「つつかれたブロック」)
 //   → DispatchGraph が一覧を GPU のメモリから入力として読む(D3D12_DISPATCH_MODE_NODE_GPU_INPUT。数は GPU が数えたもの。CPU は知らない)
 //   → WakeBlocks(スレッド起動、1 スレッド = 一覧の 1 件): そのブロックと 6 面の隣を、この刻みでまだ予定していなければ予定する
-//   → ConductBlock(1 レコード = 4³ のブロック = 1 グループ): 世代 (t & 1) を読み、世代 ((t + 1) & 1) に書く(gather。ADR-0003)。
-//      値が 1 つでも変わったら、そのブロックを一覧 ((t + 1) & 1) へ → 次の刻みの入力
+//   → ConductBlock(1 レコード = 4³ のブロック = 1 グループ): 世代 (t & 1) のセルと熱のキャッシュを読み、
+//      温度の差で熱を受け渡してから反応を評価し、世代 ((t + 1) & 1) に書く(gather。ADR-0003)。
+//      値が 1 つでも変わったか、まだ進める反応の規則があれば、そのブロックを一覧 ((t + 1) & 1) へ → 次の刻みの入力
 // 1 刻みの中の連鎖の深さは 2 で決まっている(伝播は刻みをまたいで進む。06 §2「深さ 32 まで」に当たらない)。
 // ノードの実行の順番は決まらないが、各ブロックは自分のセルにだけ書き、予定と一覧は順番に依存しない(印は同じ値の上書き、一覧は順不同で
 // 次の刻みの予定にだけ使う)ので、結果は決定的(04 R1〜R8)。整数だけ(D-205)。
@@ -34,13 +36,13 @@ bool TrySchedule(uint32_t block, uint64_t tick) {
     return true;
 }
 
-// 伝導の 1 セルが読む隣(格子の外なら自分 = 断熱)
-uint32_t NeighborOrSelf(uint32_t base, int3 cell, int3 offset, uint32_t self) {
+// 伝導の 1 セルが読む隣の熱のキャッシュ(格子の外なら自分 = 温度の差 0 = 断熱)
+HcThermalCache NeighborOrSelf(uint32_t base, int3 cell, int3 offset, HcThermalCache self) {
     const int3 neighbor = cell + offset;
     if (any(neighbor < 0) || any(neighbor >= (int)PROBE_GRID_SIZE))
         return self;
 
-    return world[base + ProbeCellIndex((uint32_t)neighbor.x, (uint32_t)neighbor.y, (uint32_t)neighbor.z)];
+    return thermal[base + ProbeCellIndex((uint32_t)neighbor.x, (uint32_t)neighbor.y, (uint32_t)neighbor.z)];
 }
 
 // 自分(0)と 6 面の隣(1〜6: −x, +x, −y, +y, −z, +z)
@@ -88,6 +90,7 @@ void TraceWakes(uint64_t tick, bool valid, uint32_t block, int3 center) {
 }
 
 groupshared uint32_t g_blockChanged;
+groupshared uint32_t g_blockPossible;
 
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める
 // clang-format off
@@ -130,7 +133,7 @@ void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
         TraceWakes(tick, valid, block, center);
 }
 
-// 1 ブロック(4³ セル)の伝導。値が変わったら、次の刻みの一覧へ
+// 1 ブロック(4³ セル)の伝導と反応。値が変わったか、まだ進める規則があれば、次の刻みの一覧へ
 [Shader("node")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
@@ -147,34 +150,40 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
 
     if (groupIndex == 0) {
         g_blockChanged = 0;
+        g_blockPossible = 0;
         WgCountLaunch(PROBE_STATS_NODE_CONDUCT, 1);
     }
 
     GroupMemoryBarrierWithGroupSync();
 
-    // --- 伝導(前の世代の自分と 6 面の隣から)---
-    const uint32_t self = world[current + cellIndex];
+    // --- 伝導と反応(前の世代の自分と 6 面の隣から)---
+    const HcThermalCache self = thermal[current + cellIndex];
+    const ProbeCellStep step = ProbeStepCell(
+        ReactionTable(), cells[current + cellIndex], self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self),
+        NeighborOrSelf(current, cell, int3(1, 0, 0), self), NeighborOrSelf(current, cell, int3(0, -1, 0), self),
+        NeighborOrSelf(current, cell, int3(0, 1, 0), self), NeighborOrSelf(current, cell, int3(0, 0, -1), self),
+        NeighborOrSelf(current, cell, int3(0, 0, 1), self), tick, cellIndex);
 
-    const uint32_t value = ProbeConductValue(
-        self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self), NeighborOrSelf(current, cell, int3(1, 0, 0), self),
-        NeighborOrSelf(current, cell, int3(0, -1, 0), self), NeighborOrSelf(current, cell, int3(0, 1, 0), self),
-        NeighborOrSelf(current, cell, int3(0, 0, -1), self), NeighborOrSelf(current, cell, int3(0, 0, 1), self));
+    cells[next + cellIndex] = step.cell;
+    thermal[next + cellIndex] = step.cache;
 
-    world[next + cellIndex] = value;
-
-    // --- 変わったか(ブロックの中で 1 つでも)---
-    if (WaveActiveAnyTrue(value != self) && WaveIsFirstLane())
+    // --- 変わったか・まだ進めるか(ブロックの中で 1 つでも)---
+    if (WaveActiveAnyTrue(step.changed != 0) && WaveIsFirstLane())
         InterlockedOr(g_blockChanged, 1);
+
+    if (WaveActiveAnyTrue(step.possible != 0) && WaveIsFirstLane())
+        InterlockedOr(g_blockPossible, 1);
 
     GroupMemoryBarrierWithGroupSync();
     if (groupIndex != 0)
         return;
 
-    if (g_blockChanged != 0)
+    if (g_blockChanged != 0 || g_blockPossible != 0)
         AppendActiveBlock((uint32_t)((tick + 1) & 1), block);
 
     if (GtWantsTick(tick) && TraceWantsBlock(block))
-        GtRecord(tick, PROBE_TRACE_CONDUCT, block, g_blockChanged != 0 ? 1 : 0);
+        GtRecord(tick, PROBE_TRACE_CONDUCT, block,
+                 (g_blockChanged != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) | (g_blockPossible != 0 ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
 }
 
 // clang-format on

@@ -45,6 +45,12 @@ FX_CONST uint32_t RX_RANDOM_PURPOSE = 0x52780001u;  // 進行度の端数を丸�
 // 温度が下がれば速さも指数的に落ちるので、刻みごとに少しずつ冷えて自然に止まる。R-REACT-1(細分)で見直す
 FX_CONST uint32_t RX_ENDOTHERMIC_HEAT_SHIFT = 3;
 
+// 遅すぎる反応は進まない(T-0089・ユーザー 2026-10-01): 1 刻みの進みの期待値が 2^-16 µmol 未満(端数だけで、この値より小さい)なら 0。
+// 端数を乱数で丸めるので、これが無いと室温の木のごく僅かな酸化のような反応が確率的に起き続け、
+// 「何も変わらなかったブロックを眠らせる」と、全部のセルを計算した場合と結果がずれる。この下限があれば、
+// どの規則も進めない(RxCellStep::possible == 0)セルは、刻みが変わっても(乱数が変わっても)必ず変わらない
+FX_CONST uint64_t RX_EXTENT_CUTOFF_FRACTION = FX_U64(0u, 0x10000u);  // 端数(2^-32 µmol 単位)の下限 = 2^-16 µmol
+
 // 望む進行度の上限。望む量は保存量ではないので飽和させてよく、この後で反応物の量に縮める
 FX_CONST uint64_t RX_EXTENT_SATURATION = FX_U64(0x40000000u, 0u);
 
@@ -60,7 +66,7 @@ struct RxSpecies {
     uint32_t heatCapacity;  // 比熱(mJ/(mol·K))。相ごとの値は M2
     uint32_t ruleBegin;     // 索引(この物質を「ID が最小の反応物」に持つ規則)の始まり
     uint32_t ruleCount;
-    uint32_t padding;
+    uint32_t conductivity;  // 熱伝導率(mW/(m·K))。セルの値は物質量で重み付けた平均(heat_conduction.hlsli。T-0089)
 };
 
 // 反応の規則
@@ -99,6 +105,7 @@ struct RxThermal {
 // 1 刻みで評価する規則の候補と、その進行度(µmol)
 struct RxCandidates {
     uint32_t count;
+    uint32_t possible;  // 進める(望む進行度の期待値が下限以上の)規則が 1 つでもあれば 1。丸めで 0 になった規則も数える
     uint32_t rules[RX_MAX_CANDIDATES];
     uint64_t extents[RX_MAX_CANDIDATES];
 };
@@ -213,11 +220,25 @@ FX_FN int32_t RxRateExponent(uint64_t packed) {
     return (int32_t)(uint32_t)(packed & FX_LOW32_MASK);
 }
 
+// 望む進行度の 1 つの値(丸めた後)と、丸める前の期待値が下限(RX_EXTENT_CUTOFF_FRACTION)以上だったか
+struct RxExtentSample {
+    uint64_t value;
+    uint32_t possible;
+};
+
+FX_FN RxExtentSample RxMakeExtentSample(uint64_t value, bool possible) {
+    RxExtentSample sample;
+    sample.value = value;
+    sample.possible = possible ? 1 : 0;
+
+    return sample;
+}
+
 // 反応物の量の積 × 仮数 × 2^指数 を整数にし、端数(32bit)は乱数 random と比べて丸める(確率的な丸め。R6 の乱数なので決定的)。
-// 1 刻みの進行度が 1 µmol に満たない遅い反応も、平均では正しい速さで進む
-FX_FN uint64_t RxScaleExtent(FxU128 product, uint64_t mantissa, int32_t exponent, uint32_t random) {
+// 1 刻みの進行度が 1 µmol に満たない遅い反応も、平均では正しい速さで進む。ただし 2^-16 µmol 未満の端数だけなら 0(進まない)
+FX_FN RxExtentSample RxScaleExtent(FxU128 product, uint64_t mantissa, int32_t exponent, uint32_t random) {
     if (mantissa == 0 || (product.hi == 0 && product.lo == 0))
-        return 0;
+        return RxMakeExtentSample(0, false);
 
     // --- 積を 64bit に収める(下位を切り捨て、そのぶん指数に足す)---
     int32_t shift = exponent;
@@ -234,30 +255,36 @@ FX_FN uint64_t RxScaleExtent(FxU128 product, uint64_t mantissa, int32_t exponent
     // --- 2^shift 倍が整数になる(端数なし)---
     if (shift >= 0) {
         if (shift >= 62 || scaled.hi != 0 || (scaled.lo >> (uint32_t)(62 - shift)) != 0)
-            return RX_EXTENT_SATURATION;
+            return RxMakeExtentSample(RX_EXTENT_SATURATION, true);
 
-        return scaled.lo << (uint32_t)shift;
+        const uint64_t exact = scaled.lo << (uint32_t)shift;
+
+        return RxMakeExtentSample(exact, exact != 0);
     }
 
     // --- 右へずらす: 整数の部分と、その下の 32bit の端数 ---
     const uint32_t right = (uint32_t)(-shift);
     if (right < 32 && (scaled.hi >> right) != 0)
-        return RX_EXTENT_SATURATION;
+        return RxMakeExtentSample(RX_EXTENT_SATURATION, true);
 
     const uint64_t integerPart = RxShiftRightLow64(scaled, right);
     if (integerPart >= RX_EXTENT_SATURATION)
-        return RX_EXTENT_SATURATION;
+        return RxMakeExtentSample(RX_EXTENT_SATURATION, true);
 
     const uint64_t fraction = right >= 32 ? RxShiftRightLow64(scaled, right - 32) & FX_LOW32_MASK
                                           : (scaled.lo << (32 - right)) & FX_LOW32_MASK;
 
-    return integerPart + ((uint64_t)random < fraction ? (uint64_t)1 : (uint64_t)0);
+    if (integerPart == 0 && fraction < RX_EXTENT_CUTOFF_FRACTION)
+        return RxMakeExtentSample(0, false);
+
+    return RxMakeExtentSample(integerPart + ((uint64_t)random < fraction ? (uint64_t)1 : (uint64_t)0), true);
 }
 
-// 規則 rule をこのセルで評価したときの望む進行度(反応物が 1 つでも無ければ 0)。反応物それぞれの「ある量 ÷ 係数」で先に抑える
+// 規則 rule をこのセルで評価したときの望む進行度(反応物が 1 つでも無ければ 0)。反応物それぞれの「ある量 ÷ 係数」で先に抑える。
+// 進めるか(possible)は、ある量で抑えた結果が 0 なら 0(反応物が係数より少ない規則は、刻みが変わっても進まない)
 template <typename Table>
-FX_FN uint64_t RxDesiredExtent(Table table, RxCell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin,
-                               uint64_t randomSeed) {
+FX_FN RxExtentSample RxDesiredExtent(Table table, RxCell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin,
+                                     uint64_t randomSeed) {
     uint64_t factors[2];
     factors[0] = 1;
     factors[1] = 1;
@@ -266,7 +293,7 @@ FX_FN uint64_t RxDesiredExtent(Table table, RxCell cell, uint32_t ruleId, RxRule
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
         const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
         if (slot == RX_NO_SLOT)
-            return 0;
+            return RxMakeExtentSample(0, false);
 
         const uint64_t amount = cell.amounts[slot];
         const uint64_t limit = amount / (uint64_t)rule.reactantCoefficients[i];
@@ -279,10 +306,11 @@ FX_FN uint64_t RxDesiredExtent(Table table, RxCell cell, uint32_t ruleId, RxRule
 
     const uint64_t packed = table.Rate(ruleId, kelvin);
     const uint32_t random = (uint32_t)(FxHashCombine(randomSeed, rule.key) & FX_LOW32_MASK);
-    const uint64_t desired = RxScaleExtent(FxMulU64Full(factors[0], factors[1]), RxRateMantissa(packed),
-                                           RxRateExponent(packed), random);
+    const RxExtentSample desired = RxScaleExtent(FxMulU64Full(factors[0], factors[1]), RxRateMantissa(packed),
+                                                 RxRateExponent(packed), random);
 
-    return desired < ownLimit ? desired : ownLimit;
+    return RxMakeExtentSample(desired.value < ownLimit ? desired.value : ownLimit,
+                              desired.possible != 0 && ownLimit != 0);
 }
 
 // 候補の規則を集める。規則は「ID が最小の反応物」の索引にだけ入っているので、成分を順に見れば重複なく引ける
@@ -290,6 +318,7 @@ template <typename Table>
 FX_FN RxCandidates RxCollectCandidates(Table table, RxCell cell, uint32_t kelvin, uint64_t randomSeed) {
     RxCandidates candidates;
     candidates.count = 0;
+    candidates.possible = 0;
     for (uint32_t i = 0; i < RX_MAX_CANDIDATES; ++i) {
         candidates.rules[i] = 0;
         candidates.extents[i] = 0;
@@ -299,7 +328,9 @@ FX_FN RxCandidates RxCollectCandidates(Table table, RxCell cell, uint32_t kelvin
         const RxSpecies species = table.Species(cell.species[slot]);
         for (uint32_t j = 0; j < species.ruleCount; ++j) {
             const uint32_t ruleId = table.RuleIndex(species.ruleBegin + j);
-            const uint64_t extent = RxDesiredExtent(table, cell, ruleId, table.Rule(ruleId), kelvin, randomSeed);
+            const RxExtentSample sample = RxDesiredExtent(table, cell, ruleId, table.Rule(ruleId), kelvin, randomSeed);
+            candidates.possible |= sample.possible;
+            const uint64_t extent = sample.value;
             if (extent == 0)
                 continue;
 
@@ -462,19 +493,38 @@ FX_FN uint64_t RxRandomSeed(uint64_t worldSeed, uint64_t tick, uint64_t cellId) 
     return FxHash64(worldSeed, tick, cellId, RX_RANDOM_PURPOSE);
 }
 
+// 1 刻みの結果: 新しいセル、その熱(導出値。反応が無ければ入力の熱のまま)、進める規則があったか(眠れるかの判定。T-0089)
+struct RxCellStep {
+    RxCell cell;
+    RxThermal thermal;
+    uint32_t possible;
+};
+
 template <typename Table>
-FX_FN RxCell RxEvaluateCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
-    const RxThermal thermal = RxComputeThermal(table, cell);
-    const uint32_t kelvin = (uint32_t)thermal.temperature / (uint32_t)MILLIKELVIN_PER_KELVIN;
+FX_FN RxCellStep RxStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
+    RxCellStep step;
+    step.cell = cell;
+    step.thermal = RxComputeThermal(table, cell);
+    step.possible = 0;
+
+    const uint32_t kelvin = (uint32_t)step.thermal.temperature / (uint32_t)MILLIKELVIN_PER_KELVIN;
     const uint32_t tableKelvin = kelvin < RX_RATE_TABLE_KELVINS ? kelvin : RX_RATE_TABLE_KELVINS - 1;
     const RxCandidates candidates = RxCollectCandidates(table, cell, tableKelvin,
                                                         RxRandomSeed(worldSeed, tick, cellId));
+    step.possible = candidates.possible;
     if (candidates.count == 0)
-        return cell;
+        return step;
 
-    const RxCandidates resolved = RxResolveContention(table, cell, thermal, candidates);
+    const RxCandidates resolved = RxResolveContention(table, cell, step.thermal, candidates);
+    step.cell = RxApplyExtents(table, cell, resolved);
+    step.thermal = RxComputeThermal(table, step.cell);
 
-    return RxApplyExtents(table, cell, resolved);
+    return step;
+}
+
+template <typename Table>
+FX_FN RxCell RxEvaluateCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
+    return RxStepCell(table, cell, worldSeed, tick, cellId).cell;
 }
 
 RX_NAMESPACE_END

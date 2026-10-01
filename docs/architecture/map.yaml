@@ -73,12 +73,21 @@ views:
           doc: docs/design/06-simulation-loop.md }
       - { id: probesim, group: simlib, label: "ProbeSim<br/>1 刻み = 単位の列。フレームの枠ごとのリストに毎フレーム記録",
           code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordFrame", ticket: T-0012,
-          note: "適用 → 伝導(Work Graph。T-0005)→ 重さ × k → 検査と出力。コマンドは GPU のキューで自分の刻みまで待つ(T-0086)。単位ごとのタイムスタンプ・刻みごとのハッシュ・熱の合計・計算したブロックの数・イベントを読み戻す" }
+          note: "適用 → 伝導と反応(Work Graph。T-0005・T-0089)→ 重さ × k → 検査と出力。コマンドは GPU のキューで自分の刻みまで待つ(T-0086)。単位ごとのタイムスタンプ・刻みごとのハッシュ・エネルギーの合計とつつきの分・計算したブロックの数・イベントを読み戻す。初めの世界(空気の中の木箱)と反応の表は最初のフレームで写す" }
       - { id: probetick, group: simlib, label: "probe_tick.hlsl<br/>EnqueueCommands / ApplyCommands / Busy / HashCells / FlushEvents / Extract",
           code: "shaders/sim/probe_tick.hlsl::BeginTick", ticket: T-0012 }
-      - { id: probeconduct, group: simlib, label: "probe_conduct.hlsl(Work Graph)<br/>WakeBlocks → ConductBlock。熱が広がる所だけ",
+      - { id: probeconduct, group: simlib, label: "probe_conduct.hlsl(Work Graph)<br/>WakeBlocks → ConductBlock。熱が広がる所・反応が進む所だけ",
           code: "shaders/sim/probe_conduct.hlsl::TrySchedule", ticket: T-0005, doc: docs/design/06-simulation-loop.md,
-          note: "入力は GPU の活性の一覧(DispatchGraph の GPU の入力)。変わったブロックが次の刻みの一覧へ" }
+          note: "入力は GPU の活性の一覧(DispatchGraph の GPU の入力)。ConductBlock が伝導 → 反応(T-0089)。変わったか、まだ進めるブロックが次の刻みの一覧へ。WARP はこのグラフを作れない(ADR-0013)" }
+      - { id: probeworld, group: shared, label: "probe_world.hlsli<br/>1 セルの伝導 + 反応・つつき・ハッシュ",
+          code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
+          note: "GPU(ConductBlock)と CPU リファレンスが同じ関数。熱のキャッシュ(温度・面の係数)はセルから決まる値" }
+      - { id: heatconduction, group: shared, label: "heat_conduction.hlsli<br/>温度の差の面の流れ(min の係数・1/8 の上限)",
+          code: "shaders/common/heat_conduction.hlsli::HcFaceFlow", ticket: T-0089, doc: docs/design/07-transport.md,
+          note: "両側が同じ大きさで逆向きを計算するのでエネルギーは構造的に保存。伝導率は物質の値(試験の表は大きくしてある)" }
+      - { id: firetest, group: tests, label: "gpu_probe_fire_test<br/>木箱に火をつけて 10 分",
+          code: "tests/gpu_probe_fire_test.cpp::RunFire", ticket: T-0089,
+          note: "刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる(1 秒ごとの経過)。ctest は 1 分、10 分は release で" }
       - { id: conductbench, group: tests, label: "gpu_conduct_bench<br/>伝播の規模ごとの伝導の時間",
           code: "tests/gpu_conduct_bench.cpp::RunScenario", ticket: T-0005,
           note: "ctest に入れない計測(docs/perf.md)。1 点のつつきが止まるまでと、熱の保存" }
@@ -98,7 +107,7 @@ views:
           code: "engine/src/sim/probe_sim.cpp::ProbeReference::Advance", ticket: T-0004 }
       - { id: probesimtest, group: tests, label: "gpu_probe_sim_test<br/>分け方を変えても CPU とビット一致・記録 → 再生",
           code: "tests/gpu_probe_sim_test.cpp::RunPlan", ticket: T-0012,
-          note: "単位の分け方 5 通り × ハードウェア / WARP で、刻みごとのハッシュ列・最後の抽出・並んだイベントが CPU と一致。イベントの溢れ。途中で届くコマンドを記録して別の分け方で再生(T-0086)。窓の記録 → 再生は ctest の window_replay_*" }
+          note: "単位の分け方 5 通りで(ハードウェアだけ。ADR-0013)、刻みごとのハッシュ列・最後の抽出・並んだイベントが CPU と一致。木箱の壁をつついて反応させる(T-0089)。イベントの溢れ。途中で届くコマンドを記録して別の分け方で再生(T-0086)。窓の記録 → 再生は ctest の window_replay_*" }
       - { id: caps, group: exe, label: "RunCapsProbe()<br/>アダプタを列挙して機能を問い合わせる",
           code: "engine/src/platform/caps.cpp::RunCapsProbe", ticket: T-0001 }
       - { id: runtime, group: exe, label: "ReportRuntime()<br/>どの D3D12Core.dll が読まれたか",
@@ -273,6 +282,11 @@ views:
       - [debugring, readbackring]
       - [probesimtest, probesim]
       - [probesimtest, probereference, "要約を比べる"]
+      - [firetest, probesim, "36,000 刻み"]
+      - [probeconduct, probeworld, "1 セルの伝導 + 反応"]
+      - [probereference, probeworld, "同じ関数"]
+      - [probeworld, heatconduction]
+      - [probeworld, reactionhlsl, "RxStepCell"]
       - [probesimtest, replaysession, "記録 → 書く → 読む → 再生"]
       - [probetick, commandqueue]
       - [probetick, eventsort]
@@ -307,11 +321,11 @@ views:
           code: "shaders/sim/probe_conduct.hlsl::TrySchedule", doc: docs/design/05-world-data.md,
           note: "M1 は仮の世界の 4³ ブロック: 前の刻みで変わったブロック + つつかれたブロック + 6 面の隣。疎な木は T-0018" }
       - { id: transport, group: sim, label: "3 輸送(熱・気体・水・魔素)<br/>測って安い方(D-302)",
-          ticket: T-0005, code: "shaders/common/probe_sim.hlsli::ProbeConductValue", doc: docs/design/07-transport.md,
-          note: "M1 はクリックした点から熱が伝わるだけ(材質 1 つ・断熱の箱。Work Graph の版だけ。Compute との比較は輸送の本物の段で)" }
-      - { id: react, group: sim, label: "4 反応<br/>1 セルの評価(Work Graphs への組み込みは T-0089)",
-          code: "shaders/common/reaction.hlsli::RxEvaluateCell", ticket: T-0014, doc: docs/design/02-reaction-system.md,
-          note: "T-0014 は核(試験の表・CPU とビット一致)。仮の世界の段にするのは T-0089" }
+          ticket: T-0089, code: "shaders/common/heat_conduction.hlsli::HcFaceFlow", doc: docs/design/07-transport.md,
+          note: "M1 は熱の伝導だけ(温度の差・物質ごとの伝導率・断熱の箱。反応と同じノード。Work Graph の版だけ。Compute との比較は輸送の本物の段で)" }
+      - { id: react, group: sim, label: "4 反応<br/>1 セルの評価(伝導と同じノード)",
+          code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
+          note: "核は T-0014(reaction.hlsli)。T-0089 で仮の世界の段に: 伝導の後にその場で評価。遅すぎる反応は 0 なので、進めないブロックは眠れる" }
       - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
           doc: docs/design/08-bodies-physics.md, note: "研究 R-PHYS" }
       - { id: creatures, group: sim, status: planned, label: "6 生き物", doc: docs/design/09-creatures-animation.md }

@@ -75,16 +75,20 @@ bicameral_add_gpu_test_case(gpu_debug_ring_warp gpu_debug_ring_test warp --warp 
 bicameral_add_gpu_test(gpu_work_graph_stats_test)
 bicameral_add_gpu_test_case(gpu_work_graph_stats gpu_work_graph_stats_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_work_graph_stats_warp gpu_work_graph_stats_test warp --warp --queue compute)
-# T-0004・T-0012・T-0086 の仮の刻み: 分け方を変えても CPU とビット一致、イベントの並び、記録 → 再生でハッシュ列が一致
+# T-0004・T-0012・T-0086・T-0089 の仮の刻み: 分け方を変えても CPU とビット一致、イベントの並び、記録 → 再生でハッシュ列が一致。
+# 仮の世界(伝導 + 反応のノード)のテストは WARP では走らせない: WARP は Work Graph を作る時点で落ちる(ADR-0013)
 bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
-bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
 # 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
 bicameral_add_gpu_test(gpu_probe_trace_test)
 target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu)
-bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --warp)
+# 木箱に火をつける(T-0089): 刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる。
+# ctest(debug・GBV)は 1 分(3600 刻み)。10 分(36,000 刻み)は release で: job.py run -Preset release -Exe gpu_probe_fire_test
+bicameral_add_gpu_test(gpu_probe_fire_test)
+target_link_libraries(gpu_probe_fire_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600)
 
 # 伝導の Work Graph の時間を伝播の規模ごとに測る(T-0005。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_conduct_bench

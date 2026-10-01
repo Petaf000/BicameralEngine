@@ -45,6 +45,16 @@ namespace bicameral::test {
     }
 
     // debug layer(debug プリセットで有効。T-0003)がエラーを報告していたら false。テストの最後に呼び、false なら失敗にする
+    // デバイスの検証の設定。WARP では GPU-based validation を切る: 反応の評価のような大きなシェーダーの計装で、JIT が 15 分を超えて
+    // 終わらなかった(gpu_reaction_test)。debug layer は残す。ハードウェアでは GBV も有効
+    inline gpu::DeviceOptions TestDeviceOptions(const GpuTestOptions& options) {
+        gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
+        deviceOptions.gpuBasedValidation = deviceOptions.gpuBasedValidation &&
+                                           options.adapter != gpu::AdapterKind::Warp;
+
+        return deviceOptions;
+    }
+
     inline bool PassesValidation(const gpu::Device& device, std::string_view testName) {
         const uint32_t errorCount = device.ValidationErrorCount();
         if (errorCount == 0)

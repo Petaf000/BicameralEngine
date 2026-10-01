@@ -88,7 +88,7 @@ namespace bicameral::sim {
                                      .heatCapacity = definition.heatCapacity,
                                      .ruleBegin = 0,
                                      .ruleCount = 0,
-                                     .padding = 0});
+                                     .conductivity = definition.thermalConductivity});
             baked.speciesNames.push_back(definition.name);
             baked.molarMasses.push_back(static_cast<uint32_t>(molarMass));
 
@@ -387,6 +387,11 @@ namespace bicameral::sim {
     RxCell EvaluateReactionCell(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed, uint64_t tick,
                                 uint64_t cellId) {
         return RxEvaluateCell(table.View(), cell, worldSeed, tick, cellId);
+    }
+
+    RxCellStep StepReactionCell(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed, uint64_t tick,
+                                uint64_t cellId) {
+        return RxStepCell(table.View(), cell, worldSeed, tick, cellId);
     }
 
 }  // namespace bicameral::sim

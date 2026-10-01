@@ -3,6 +3,7 @@
 //   - 閉じた 1 セルで燃やして 36,000 刻み(10 分): 元素ごとの数とエネルギーが完全に一致し、熱が負にならない
 //   - 取り合い: O2 が足りない / 吸熱の規則が熱を使い切る場面でも、ある量を超えて使わない
 //   - 規則の並びを入れ替えても結果が同じ / 1 刻みの進行度が 1 未満の遅い反応が、確率的な丸めで期待どおりに進む
+//   - 遅すぎる反応(2^-16 µmol/刻み 未満)は進まず、そのセルは「進める規則が無い」= 刻みが変わっても変わらない(T-0089)
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -236,6 +237,37 @@ namespace {
         Expect(std::abs(reacted - expected) < 5.0 * std::sqrt(expected), "遅い反応が期待どおりに進まない");
     }
 
+    // --- 遅すぎる反応は 0(眠れる。T-0089)---
+
+    // 室温の木箱のセル(セルロース + 空気)は、どの規則も下限未満なので進めず、1000 刻み回しても何も変わらない。
+    // 490 K の熱分解(1 刻み約 0.007 µmol)は、丸めで 0 になった刻みでも「進める」
+    void TestSleepCutoff(const BakedReactionTable& table) {
+        const RxCell cold = MakeReactionCell(table, CrateAir(table, 38600000, 0), 300000);
+        const uint64_t coldHash = HashReactionCell(cold);
+        bool coldQuiet = true;
+        for (uint64_t tick = 0; tick < 1000; ++tick) {
+            const RxCellStep step = StepReactionCell(table, cold, test::REACTION_TEST_SEED, tick, 3);
+            coldQuiet = coldQuiet && step.possible == 0 && HashReactionCell(step.cell) == coldHash;
+        }
+
+        Expect(coldQuiet, "室温の木箱のセルが進める / 変わる");
+
+        const std::vector<SpeciesAmount> amounts = {{.species = table.SpeciesId("cellulose"), .amount = 1000000},
+                                                    {.species = table.SpeciesId("nitrogen"), .amount = 4000000}};
+        const RxCell warm = MakeReactionCell(table, amounts, 490000);
+        uint32_t possibleTicks = 0;
+        uint32_t changedTicks = 0;
+        for (uint64_t tick = 0; tick < 1000; ++tick) {
+            const RxCellStep step = StepReactionCell(table, warm, test::REACTION_TEST_SEED, tick, 7);
+            possibleTicks += step.possible;
+            changedTicks += HashReactionCell(step.cell) != HashReactionCell(warm) ? 1 : 0;
+        }
+
+        Log(Channel::Reaction, Level::Info, "  眠り: 490 K の熱分解は 1000 刻みのうち {} 刻みで進んだ(進める: {})",
+            changedTicks, possibleTicks);
+        Expect(possibleTicks == 1000 && changedTicks > 0 && changedTicks < 1000, "遅い反応が「進める」にならない");
+    }
+
     int Run() {
         TestBakeRejectsBrokenRules();
         const BakedReactionTable table = BakeTestTable();
@@ -245,6 +277,7 @@ namespace {
         TestEndothermicLimit(table);
         TestRuleOrderIndependence(table);
         TestSlowReaction(table);
+        TestSleepCutoff(table);
         Log(Channel::Reaction, Level::Info, "いろいろなセル 4096 × 400 刻みの要約: {:016x}",
             RunVariedCells(table, 4096, 400));
 

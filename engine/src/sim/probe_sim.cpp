@@ -14,17 +14,17 @@ namespace bicameral::sim {
     namespace {
 
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
-        //   u0 世界・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
-        //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印 → b0 単位の定数 → デバッグのリング
-        //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 12,
+        //   u0 セル・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
+        //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ → b0 単位の定数 → デバッグのリング
+        //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 13,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
                                                        .graphTrace = true,
-                                                       .srvCount = 1};
+                                                       .srvCount = 5};
 
-        constexpr uint32_t UAV_WORLD = 0;
+        constexpr uint32_t UAV_CELLS = 0;
         constexpr uint32_t UAV_EVENTS = 1;
         constexpr uint32_t UAV_EXTRACTION0 = 2;
         constexpr uint32_t UAV_EXTRACTION1 = 3;
@@ -36,10 +36,13 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_ACTIVE_LIST0 = 9;
         constexpr uint32_t UAV_ACTIVE_LIST1 = 10;
         constexpr uint32_t UAV_BLOCK_SCHEDULE = 11;
+        constexpr uint32_t UAV_THERMAL = 12;
         constexpr uint32_t SRV_INPUT = 0;
+        constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
 
         constexpr uint32_t TIMESTAMPS_PER_SLOT = ProbeSim::MAX_UNITS_PER_FRAME + 2;  // 始め・単位ごと・終わり
-        constexpr uint32_t CELL_BYTES = PROBE_CELL_COUNT * 4;
+        constexpr uint64_t CELL_BYTES = uint64_t{PROBE_CELL_COUNT} * sizeof(reaction::RxCell);             // 1 世代
+        constexpr uint64_t THERMAL_BYTES = uint64_t{PROBE_CELL_COUNT} * sizeof(reaction::HcThermalCache);  // 1 世代
         constexpr uint32_t SLICE_BYTES = PROBE_SLICE_CELL_COUNT * 4;
         constexpr uint32_t BUSY_GROUPS = PROBE_GRID_SIZE / PROBE_GROUP_SIZE;
         constexpr uint32_t LINEAR_CELL_GROUPS = PROBE_CELL_COUNT / PROBE_LINEAR_GROUP_SIZE;
@@ -77,6 +80,24 @@ namespace bicameral::sim {
         template <typename T>
         void WriteAt(std::byte* base, uint32_t offset, const T& value) {
             std::memcpy(base + offset, &value, sizeof(T));
+        }
+
+        // アップロードのバッファを作って中身を書く(最初のフレームで既定のヒープへ写す元)
+        template <typename T>
+        ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, const std::vector<T>& data,
+                                                  const wchar_t* name) {
+            const auto bytes = std::as_bytes(std::span(data));
+            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
+            void* mapped = nullptr;
+            const D3D12_RANGE noRead{};
+            if (!buffer || FAILED(buffer->Map(0, &noRead, &mapped)))
+                return nullptr;
+
+            std::memcpy(mapped, bytes.data(), bytes.size());
+            buffer->Unmap(0, nullptr);
+            buffer->SetName(name);
+
+            return buffer;
         }
 
         // イベントのリングの見出し(probe_sim.hlsli の PROBE_EVENT_HEADER_*)
@@ -122,6 +143,7 @@ namespace bicameral::sim {
     // --- 作る ---
 
     std::expected<ProbeSim, std::string> ProbeSim::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType,
+                                                          const BakedReactionTable& table,
                                                           const ProbeSimOptions& options) {
         if (options.busyPieces == 0 || options.busyPieces > PROBE_MAX_BUSY_PIECES ||
             options.busyIterations > PROBE_BUSY_ITERATIONS_LIMIT) {
@@ -153,6 +175,9 @@ namespace bicameral::sim {
 
         if (!sim.CreateBuffers(device))
             return std::unexpected("仮の刻みのバッファを作れない");
+
+        if (!sim.CreateWorld(device, table))
+            return std::unexpected("仮の世界(反応の表・初めのセル)を作れない");
 
         if (!sim.CreateFrameSlots(device, listType))
             return std::unexpected("仮の刻みのフレームの枠を作れない");
@@ -198,13 +223,14 @@ namespace bicameral::sim {
     }
 
     bool ProbeSim::CreateBuffers(ID3D12Device5* device) {
-        m_world = gpu::CreateBuffer(device, uint64_t{CELL_BYTES} * 2, gpu::BufferKind::UnorderedAccess);
+        m_cells = gpu::CreateBuffer(device, CELL_BYTES * 2, gpu::BufferKind::UnorderedAccess);
+        m_thermal = gpu::CreateBuffer(device, THERMAL_BYTES * 2, gpu::BufferKind::UnorderedAccess);
         m_busySink = gpu::CreateBuffer(device, SLICE_BYTES, gpu::BufferKind::UnorderedAccess);
         m_hashes = gpu::CreateBuffer(device, PROBE_HASH_BYTES, gpu::BufferKind::UnorderedAccess);
         m_commandQueue = gpu::CreateBuffer(device, PROBE_COMMAND_QUEUE_BYTES, gpu::BufferKind::UnorderedAccess);
         m_tickEvents = gpu::CreateBuffer(device, PROBE_TICK_EVENT_BYTES, gpu::BufferKind::UnorderedAccess);
         m_blockSchedule = gpu::CreateBuffer(device, PROBE_SCHEDULE_BYTES, gpu::BufferKind::UnorderedAccess);
-        if (!m_world || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents || !m_blockSchedule)
+        if (!m_cells || !m_thermal || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents || !m_blockSchedule)
             return false;
 
         m_blockSchedule->SetName(L"ProbeSim.blockSchedule");  // 作った時は 0(まだ予定していない)
@@ -218,7 +244,8 @@ namespace bicameral::sim {
             m_activeLists[parity]->SetName(std::format(L"ProbeSim.activeList{}", parity).c_str());
         }
 
-        m_world->SetName(L"ProbeSim.world");
+        m_cells->SetName(L"ProbeSim.cells");
+        m_thermal->SetName(L"ProbeSim.thermal");
         m_busySink->SetName(L"ProbeSim.busySink");
         m_hashes->SetName(L"ProbeSim.hashes");
         m_commandQueue->SetName(L"ProbeSim.commandQueue");  // 作った時は 0(末尾 = 先頭 = 0 の空のキュー)
@@ -236,6 +263,70 @@ namespace bicameral::sim {
                                               .Count = FRAME_SLOT_COUNT * TIMESTAMPS_PER_SLOT};
 
         return SUCCEEDED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_timestamps)));
+    }
+
+    // 反応の表(既定のヒープ)と、表・初めの世界のアップロード。写すのは最初のフレーム(RecordInitialization)
+    bool ProbeSim::CreateWorld(ID3D12Device5* device, const BakedReactionTable& table) {
+        const std::vector<reaction::RxCell> cells = MakeProbeInitialWorld(table);
+        std::vector<reaction::HcThermalCache> caches;
+        caches.reserve(cells.size());
+        for (const reaction::RxCell& cell : cells)
+            caches.push_back(ProbeMakeCache(table.View(), cell));
+
+        m_initialUploads = {CreateFilledUpload(device, table.species, L"ProbeSim.upload.species"),
+                            CreateFilledUpload(device, table.rules, L"ProbeSim.upload.rules"),
+                            CreateFilledUpload(device, table.ruleIndex, L"ProbeSim.upload.ruleIndex"),
+                            CreateFilledUpload(device, table.rates, L"ProbeSim.upload.rates"),
+                            CreateFilledUpload(device, cells, L"ProbeSim.upload.cells"),
+                            CreateFilledUpload(device, caches, L"ProbeSim.upload.thermal")};
+
+        constexpr std::array<const wchar_t*, 4> TABLE_NAMES = {L"ProbeSim.species", L"ProbeSim.rules",
+                                                               L"ProbeSim.ruleIndex", L"ProbeSim.rates"};
+        for (size_t index = 0; index < m_reactionTable.size(); ++index) {
+            if (!m_initialUploads[index])
+                return false;
+
+            m_reactionTable[index] = gpu::CreateBuffer(device, m_initialUploads[index]->GetDesc().Width,
+                                                       gpu::BufferKind::UnorderedAccess);
+            if (!m_reactionTable[index])
+                return false;
+
+            m_reactionTable[index]->SetName(TABLE_NAMES[index]);
+        }
+
+        m_viewSpecies = ProbeViewSpecies(table);
+
+        return m_initialUploads[4] && m_initialUploads[5];
+    }
+
+    // 最初のフレームの始め: 表と初めの世界(2 世代とも同じ S(0))を既定のヒープへ写す。
+    // 既定のバッファは COMMON なので、写すときに COPY_DEST へ暗黙に昇格する。写した後は使う状態へ明示的に移す
+    // (フレームの終わりに COMMON へ戻る。バッファは ExecuteCommandLists の終わりで COMMON に落ちる)
+    void ProbeSim::RecordInitialization(ID3D12GraphicsCommandList10* list) {
+        for (size_t index = 0; index < m_reactionTable.size(); ++index) {
+            list->CopyBufferRegion(m_reactionTable[index].Get(), 0, m_initialUploads[index].Get(), 0,
+                                   m_initialUploads[index]->GetDesc().Width);
+        }
+
+        for (uint64_t generation = 0; generation < 2; ++generation) {
+            list->CopyBufferRegion(m_cells.Get(), generation * CELL_BYTES, m_initialUploads[4].Get(), 0, CELL_BYTES);
+            list->CopyBufferRegion(m_thermal.Get(), generation * THERMAL_BYTES, m_initialUploads[5].Get(), 0,
+                                   THERMAL_BYTES);
+        }
+
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        barriers.reserve(m_reactionTable.size() + 2);
+        for (const ComPtr<ID3D12Resource>& buffer : m_reactionTable) {
+            barriers.push_back(gpu::Transition(buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+        }
+
+        barriers.push_back(
+            gpu::Transition(m_cells.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+        barriers.push_back(
+            gpu::Transition(m_thermal.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        m_initialized = true;
     }
 
     // フレームの枠ごとに: リスト(毎フレーム記録し直す)・入力のアップロード・読み戻し
@@ -318,14 +409,18 @@ namespace bicameral::sim {
         const D3D12_GPU_VIRTUAL_ADDRESS list0 = m_activeLists[0]->GetGPUVirtualAddress();
         const D3D12_GPU_VIRTUAL_ADDRESS list1 = m_activeLists[1]->GetGPUVirtualAddress();
 
-        const std::array<uint32_t, 8> header = {commandCount,
-                                                busyPerPiece,
-                                                m_commandTail,
-                                                m_conductEntrypoint,
-                                                static_cast<uint32_t>(list0),
-                                                static_cast<uint32_t>(list0 >> 32),
-                                                static_cast<uint32_t>(list1),
-                                                static_cast<uint32_t>(list1 >> 32)};
+        const std::array<uint32_t, PROBE_HEADER_WORDS> header = {commandCount,
+                                                                 busyPerPiece,
+                                                                 m_commandTail,
+                                                                 m_conductEntrypoint,
+                                                                 static_cast<uint32_t>(list0),
+                                                                 static_cast<uint32_t>(list0 >> 32),
+                                                                 static_cast<uint32_t>(list1),
+                                                                 static_cast<uint32_t>(list1 >> 32),
+                                                                 m_viewSpecies[0],
+                                                                 m_viewSpecies[1],
+                                                                 m_viewSpecies[2],
+                                                                 0};
 
         WriteAt(frame.mappedInput, PROBE_INPUT_HEADER_OFFSET, header);
 
@@ -349,6 +444,8 @@ namespace bicameral::sim {
         ID3D12GraphicsCommandList10* list = frame.list.Get();
         const uint32_t firstQuery = slot * TIMESTAMPS_PER_SLOT;
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
+        if (!m_initialized)
+            RecordInitialization(list);
 
         BindRootArguments(list, frame.input.Get());
         m_events.RecordBegin(list);
@@ -440,9 +537,10 @@ namespace bicameral::sim {
         BindRootViews(list, input);
     }
 
-    // ルートの引数: ROOT_LAYOUT の順(u0〜u11・デバッグのリング・Work Graphs のカウンタ・t0 フレームの入力)
+    // ルートの引数: ROOT_LAYOUT の順(u0〜u12・デバッグのリング・Work Graphs のカウンタ・t0 フレームの入力・t1〜t4 反応の表)
     void ProbeSim::BindRootViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const {
-        list->SetComputeRootUnorderedAccessView(UAV_WORLD, m_world->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_CELLS, m_cells->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_THERMAL, m_thermal->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_EVENTS, m_events.GpuAddress());
         list->SetComputeRootUnorderedAccessView(UAV_EXTRACTION0, m_extractions[0]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_EXTRACTION1, m_extractions[1]->GetGPUVirtualAddress());
@@ -458,6 +556,10 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_INPUT), input->GetGPUVirtualAddress());
+        for (uint32_t index = 0; index < m_reactionTable.size(); ++index) {
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_REACTION_FIRST + index),
+                                                   m_reactionTable[index]->GetGPUVirtualAddress());
+        }
     }
 
     // 1 つの単位(probe_sim.hlsli の単位の表)。最後に UAV バリアで、次の単位が結果を読めるようにする
@@ -626,29 +728,83 @@ namespace bicameral::sim {
 
             hashes.push_back({.tick = stateTick,
                               .hash = entry[2] | (uint64_t{entry[3]} << 32),
-                              .heat = entry[4] | (uint64_t{entry[5]} << 32),
+                              .energy = entry[4] | (uint64_t{entry[5]} << 32),
+                              .sourceEnergy = entry[8] | (uint64_t{entry[9]} << 32),
                               .scheduledBlocks = entry[6]});
         }
 
         return hashes;
     }
 
-    // --- CPU リファレンス ---
+    // --- 初めの世界(T-0089)---
 
     namespace {
 
-        // 1 セルの伝導(GPU の ConductBlock と同じ。格子の外の面は自分を渡す = 断熱)
-        uint32_t ReferenceConductCell(const uint32_t* generation, uint32_t x, uint32_t y, uint32_t z) {
-            const uint32_t self = generation[ProbeCellIndex(x, y, z)];
-            const auto at = [&](bool inside, uint32_t nx, uint32_t ny, uint32_t nz) {
-                return inside ? generation[ProbeCellIndex(nx, ny, nz)] : self;
-            };
+        // 1 気圧・300 K の 0.5 m 角(0.125 m³)の空気 = 約 5.08 mol(O2 20.95 %・残りを N2。Ar は無視)
+        constexpr uint64_t AIR_OXYGEN_MICROMOLES = 1063800;
+        constexpr uint64_t AIR_NITROGEN_MICROMOLES = 4014200;
 
-            constexpr uint32_t LAST = PROBE_GRID_SIZE - 1;
+        // 木箱の壁のセル: 体積の 1 割が木(密度 500 kg/m³ のセルロースで約 38.6 mol)、残りは孔の中の空気
+        // (reaction_test.cpp の CrateAir と同じ値)
+        constexpr uint64_t CRATE_CELLULOSE_MICROMOLES = 38600000;
+        constexpr uint64_t CRATE_OXYGEN_MICROMOLES = 983000;
+        constexpr uint64_t CRATE_NITROGEN_MICROMOLES = 3697000;
 
-            return ProbeConductValue(self, at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z), at(y > 0, x, y - 1, z),
-                                     at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1), at(z < LAST, x, y, z + 1));
+        constexpr int32_t INITIAL_TEMPERATURE_MILLIKELVIN = 300000;
+
+        // 木箱: 中央の 8³ セル(4 m 角)、壁の厚さ 1 セル
+        constexpr uint32_t CRATE_SIZE = 8;
+        constexpr uint32_t CRATE_BEGIN = (PROBE_GRID_SIZE - CRATE_SIZE) / 2;
+        constexpr uint32_t CRATE_END = CRATE_BEGIN + CRATE_SIZE;
+
+        bool InCrate(uint32_t value) {
+            return value >= CRATE_BEGIN && value < CRATE_END;
         }
+
+        bool OnCrateWall(uint32_t value) {
+            return value == CRATE_BEGIN || value == CRATE_END - 1;
+        }
+
+        bool IsCrateWall(uint32_t x, uint32_t y, uint32_t z) {
+            return InCrate(x) && InCrate(y) && InCrate(z) && (OnCrateWall(x) || OnCrateWall(y) || OnCrateWall(z));
+        }
+
+    }  // namespace
+
+    std::vector<reaction::RxCell> MakeProbeInitialWorld(const BakedReactionTable& table) {
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        const uint32_t nitrogen = table.SpeciesId("nitrogen");
+        const std::array<SpeciesAmount, 2> air = {
+            SpeciesAmount{.species = oxygen, .amount = AIR_OXYGEN_MICROMOLES},
+            SpeciesAmount{.species = nitrogen, .amount = AIR_NITROGEN_MICROMOLES}};
+        const std::array<SpeciesAmount, 3> wall = {
+            SpeciesAmount{.species = cellulose, .amount = CRATE_CELLULOSE_MICROMOLES},
+            SpeciesAmount{.species = oxygen, .amount = CRATE_OXYGEN_MICROMOLES},
+            SpeciesAmount{.species = nitrogen, .amount = CRATE_NITROGEN_MICROMOLES}};
+
+        const reaction::RxCell airCell = MakeReactionCell(table, air, INITIAL_TEMPERATURE_MILLIKELVIN);
+        const reaction::RxCell wallCell = MakeReactionCell(table, wall, INITIAL_TEMPERATURE_MILLIKELVIN);
+
+        std::vector<reaction::RxCell> cells(PROBE_CELL_COUNT, airCell);
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            const uint32_t x = index % PROBE_GRID_SIZE;
+            const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
+            const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
+            if (IsCrateWall(x, y, z))
+                cells[index] = wallCell;
+        }
+
+        return cells;
+    }
+
+    std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table) {
+        return {table.SpeciesId("oxygen"), table.SpeciesId("carbon_dioxide"), table.SpeciesId("carbon")};
+    }
+
+    // --- CPU リファレンス ---
+
+    namespace {
 
         // ブロック block と 6 面の隣(格子の中)に印を付ける
         void MarkWithNeighbors(std::vector<uint8_t>& scheduled, uint32_t block) {
@@ -682,9 +838,16 @@ namespace bicameral::sim {
             return static_cast<uint32_t>(rng::count(scheduled, uint8_t{1}));
         }
 
-        // 刻み tick のつつきを current に適用し、つついたブロックに印を付ける(GPU と同じく並びの順に)
-        void ApplyPokes(uint32_t* current, uint64_t tick, std::span<const ProbeCommand> commands,
-                        std::vector<uint8_t>& seeds) {
+        // 1 世代のセルとキャッシュ
+        struct ReferenceGeneration {
+            reaction::RxCell* cells;
+            reaction::HcThermalCache* caches;
+        };
+
+        // 刻み tick のつつきを current に適用し、つついたブロックに印を付ける(GPU と同じく並びの順に)。足したエネルギーを返す
+        uint64_t ApplyPokes(const ReactionTableView& table, ReferenceGeneration current, uint64_t tick,
+                            std::span<const ProbeCommand> commands, std::vector<uint8_t>& seeds) {
+            uint64_t source = 0;
             for (const ProbeCommand& command : commands) {
                 if (command.targetTick != tick || command.type != PROBE_COMMAND_TYPE_POKE)
                     continue;
@@ -695,48 +858,80 @@ namespace bicameral::sim {
                 if (x >= PROBE_GRID_SIZE || y >= PROBE_GRID_SIZE || z >= PROBE_GRID_SIZE)
                     continue;
 
-                uint32_t& cell = current[ProbeCellIndex(x, y, z)];
-                cell = ProbeAddHeat(cell, PROBE_POKE_AMOUNT);
+                const uint32_t index = ProbeCellIndex(x, y, z);
+                const int64_t energy = ProbePokeEnergy(table, current.cells[index]);
+                current.cells[index].energy += energy;
+                current.caches[index] = ProbeMakeCache(table, current.cells[index]);
+                source += static_cast<uint64_t>(energy);
                 seeds[ProbeBlockOfCell(x, y, z)] = 1;
             }
+
+            return source;
         }
 
-        // 全部のセルの伝導(gather)。値が変わったブロックに印を付ける
-        void ConductAllCells(const uint32_t* current, uint32_t* next, std::vector<uint8_t>& changedBlocks) {
-            rng::fill(changedBlocks, uint8_t{0});
-            for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
-                const uint32_t x = index % PROBE_GRID_SIZE;
-                const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
-                const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
-                next[index] = ReferenceConductCell(current, x, y, z);
-                if (next[index] != current[index])
-                    changedBlocks[ProbeBlockOfCell(x, y, z)] = 1;
-            }
+        // 1 セルの伝導と反応(GPU の ConductBlock と同じ。格子の外の面は自分を渡す = 断熱)
+        ProbeCellStep ReferenceStepCell(const ReactionTableView& table, ReferenceGeneration current, uint32_t index,
+                                        uint64_t tick) {
+            const uint32_t x = index % PROBE_GRID_SIZE;
+            const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
+            const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
+            const reaction::HcThermalCache self = current.caches[index];
+            const auto at = [&](bool inside, uint32_t nx, uint32_t ny, uint32_t nz) {
+                return inside ? current.caches[ProbeCellIndex(nx, ny, nz)] : self;
+            };
+
+            constexpr uint32_t LAST = PROBE_GRID_SIZE - 1;
+
+            return ProbeStepCell(table, current.cells[index], self, at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z),
+                                 at(y > 0, x, y - 1, z), at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1),
+                                 at(z < LAST, x, y, z + 1), tick, index);
         }
 
     }  // namespace
 
-    ProbeReference::ProbeReference()
-        : m_cells(size_t{PROBE_CELL_COUNT} * 2, 0), m_changedBlocks(PROBE_BLOCK_COUNT, 0) {}
+    ProbeReference::ProbeReference(const BakedReactionTable& table)
+        : m_table(&table), m_blockFlags(PROBE_BLOCK_COUNT, 0) {
+        const std::vector<reaction::RxCell> initial = MakeProbeInitialWorld(table);
+        m_cells.reserve(size_t{PROBE_CELL_COUNT} * 2);
+        m_cells.insert(m_cells.end(), initial.begin(), initial.end());
+        m_cells.insert(m_cells.end(), initial.begin(), initial.end());
 
-    void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands) {
-        uint32_t* current = m_cells.data() + static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
-        uint32_t* next = m_cells.data() + static_cast<size_t>((tick + 1) & 1) * PROBE_CELL_COUNT;
-
-        // (1) コマンドの適用。つついたブロックは、前の刻みで変わったブロックと同じく予定の種になる
-        std::vector<uint8_t> seeds = m_changedBlocks;
-        ApplyPokes(current, tick, commands, seeds);
-        m_scheduledBlocks = CountScheduledBlocks(seeds);
-
-        // (2) 伝導(全部のセル)と、値が変わったブロックの記録(次の刻みの予定の種)
-        ConductAllCells(current, next, m_changedBlocks);
+        m_caches.reserve(m_cells.size());
+        for (const reaction::RxCell& cell : m_cells)
+            m_caches.push_back(ProbeMakeCache(table.View(), cell));
     }
 
-    std::span<const uint32_t> ProbeReference::State(uint64_t tick) const {
+    void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands) {
+        const ReactionTableView table = m_table->View();
+        const size_t currentBase = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
+        const size_t nextBase = static_cast<size_t>((tick + 1) & 1) * PROBE_CELL_COUNT;
+        const ReferenceGeneration current{.cells = m_cells.data() + currentBase,
+                                          .caches = m_caches.data() + currentBase};
+
+        // (1) コマンドの適用。つついたブロックは、前の刻みで変わった・進めたブロックと同じく予定の種になる
+        std::vector<uint8_t> seeds = m_blockFlags;
+        m_sourceEnergy = ApplyPokes(table, current, tick, commands, seeds);
+        m_scheduledBlocks = CountScheduledBlocks(seeds);
+
+        // (2) 伝導と反応(全部のセル)と、変わった・まだ進めるブロックの記録(次の刻みの予定の種)
+        rng::fill(m_blockFlags, uint8_t{0});
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            const ProbeCellStep step = ReferenceStepCell(table, current, index, tick);
+            m_cells[nextBase + index] = step.cell;
+            m_caches[nextBase + index] = step.cache;
+
+            const uint32_t block = ProbeBlockOfCell(
+                index % PROBE_GRID_SIZE, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE, index / PROBE_SLICE_CELL_COUNT);
+            m_blockFlags[block] |= static_cast<uint8_t>((step.changed != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) |
+                                                        (step.possible != 0 ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
+        }
+    }
+
+    std::span<const reaction::RxCell> ProbeReference::State(uint64_t tick) const {
         return std::span(m_cells).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
     }
 
-    uint64_t ProbeStateHash(std::span<const uint32_t> cells) {
+    uint64_t ProbeStateHash(std::span<const reaction::RxCell> cells) {
         uint64_t hash = 0;
         for (uint32_t index = 0; index < cells.size(); ++index)
             hash += ProbeCellHash(index, cells[index]);
@@ -744,12 +939,38 @@ namespace bicameral::sim {
         return hash;
     }
 
-    uint64_t ProbeHeatSum(std::span<const uint32_t> cells) {
-        uint64_t heat = 0;
-        for (const uint32_t value : cells)
-            heat += value;
+    std::span<const reaction::HcThermalCache> ProbeReference::Caches(uint64_t tick) const {
+        return std::span(m_caches).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
+    }
 
-        return heat;
+    std::vector<uint32_t> MakeProbeExtractionCells(std::span<const reaction::RxCell> cells,
+                                                   std::span<const reaction::HcThermalCache> caches,
+                                                   const std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT>& viewSpecies) {
+        std::vector<uint32_t> words;
+        words.reserve(cells.size() * PROBE_EXTRACTION_CELL_WORDS);
+        for (size_t index = 0; index < cells.size(); ++index) {
+            words.push_back(caches[index].temperature);
+            for (const uint32_t species : viewSpecies)
+                words.push_back(ProbeViewAmount(cells[index], species));
+        }
+
+        return words;
+    }
+
+    uint64_t ProbeExtractionHash(std::span<const uint32_t> words) {
+        uint64_t hash = 0;
+        for (const uint32_t word : words)
+            hash = fx::FxHashCombine(hash, word);
+
+        return hash;
+    }
+
+    uint64_t ProbeEnergySum(std::span<const reaction::RxCell> cells) {
+        uint64_t energy = 0;
+        for (const reaction::RxCell& cell : cells)
+            energy += static_cast<uint64_t>(cell.energy);
+
+        return energy;
     }
 
 }  // namespace bicameral::sim

@@ -38,6 +38,7 @@ namespace bicameral::sim {
         std::vector<ElementCount> composition;  // 物質 1 mol あたりの元素の数
         int64_t formationEnthalpy = 0;          // J/mol(298.15 K)
         uint32_t heatCapacity = 0;              // mJ/(mol·K)(一定と置く)
+        uint32_t thermalConductivity = 0;       // mW/(m·K)(一定と置く。T-0089)
     };
 
     struct RuleTerm {
@@ -132,6 +133,10 @@ namespace bicameral::sim {
 
     // CPU リファレンス: 1 セルの 1 刻み(GPU と同じ関数)
     [[nodiscard]] reaction::RxCell EvaluateReactionCell(const BakedReactionTable& table, const reaction::RxCell& cell,
+                                                        uint64_t worldSeed, uint64_t tick, uint64_t cellId);
+
+    // 同じく、熱と「進める規則があったか」も返す(眠れるかの判定。T-0089)
+    [[nodiscard]] reaction::RxCellStep StepReactionCell(const BakedReactionTable& table, const reaction::RxCell& cell,
                                                         uint64_t worldSeed, uint64_t tick, uint64_t cellId);
 
 }  // namespace bicameral::sim

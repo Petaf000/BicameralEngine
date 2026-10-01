@@ -1,4 +1,5 @@
-// probe_view.hlsl — 仮の世界(common/probe_sim.hlsli の 64³ の熱)のデバッグ表示(T-0015。前は z = 32 の面だけ: T-0004・T-0005)。
+// probe_view.hlsl — 仮の世界(common/probe_sim.hlsli の 64³ のセル)のデバッグ表示(T-0015。前は z = 32 の面だけ: T-0004・T-0005)。
+// 色分けする量は 4 通り(T-0089): 温度・O2 の減り・CO2・炭(抽出の 4 語。probe_sim.hlsli)。
 //
 // データの流れ: シミュ(compute キュー)が抽出の 3 組のどれかに全部のセルと活性の印を書く → 描画(direct キュー)がフェンスを待ってから、
 // フレームの定数(frame。CPU がフレームごとに書く。engine/src/render/probe_view_constants.h と同じ並び)が指す組を読む(06 §4)。
@@ -19,6 +20,20 @@ static const uint32_t VIEW_MODE_SLICE = 2;
 
 static const uint32_t VIEW_FLAG_ACTIVE_BLOCKS = 1;
 static const uint32_t VIEW_FLAG_LOGARITHMIC = 2;
+static const uint32_t
+    VIEW_QUANTITY_SHIFT = 8;  // flags のビット 8〜9 = 色分けする量(render/probe_view_constants.h の DebugViewQuantity)
+static const uint32_t VIEW_QUANTITY_TEMPERATURE = 0;
+static const uint32_t VIEW_QUANTITY_OXYGEN_DEPLETION = 1;
+static const uint32_t VIEW_QUANTITY_CARBON_DIOXIDE = 2;
+static const uint32_t VIEW_QUANTITY_CARBON = 3;
+
+// --- 量を 0〜1 にする幅 ---
+static const float AMBIENT_KELVIN = 300.0;    // 温度はこれより上の分
+static const float HOT_KELVIN_SPAN = 1700.0;  // 300 K + 1700 K = 2000 K で 1
+static const float
+    AIR_OXYGEN_MICROMOLES = 1063800.0;  // 空気のセルの O2(sim/probe_sim.cpp の初めの世界)。O2 の減り = これ − O2
+static const float GAS_SPAN_MICROMOLES = 1100000.0;       // CO2 はこれで 1
+static const float CARBON_SPAN_MICROMOLES = 240000000.0;  // 炭は木箱の壁のセルが全部炭になった量(約 2.3e8 µmol)で 1
 
 // --- 色 ---
 static const float3 BACKGROUND = float3(0.02, 0.02, 0.03);
@@ -94,8 +109,8 @@ uint32_t LoadExtraction(uint32_t extraction, uint32_t index) {
     return extraction2[index];
 }
 
-uint32_t LoadCell(uint32_t extraction, uint3 cell) {
-    return LoadExtraction(extraction, ProbeCellIndex(cell.x, cell.y, cell.z));
+uint32_t LoadCellWord(uint32_t extraction, uint3 cell, uint32_t word) {
+    return LoadExtraction(extraction, ProbeCellIndex(cell.x, cell.y, cell.z) * PROBE_EXTRACTION_CELL_WORDS + word);
 }
 
 bool IsBlockActive(uint32_t extraction, uint3 cell) {
@@ -104,11 +119,29 @@ bool IsBlockActive(uint32_t extraction, uint3 cell) {
 
 // --- 色 ---
 
-// 熱を 0〜1 に。対数(3D で広がると値がすぐ小さくなるので、広がった先まで見える)か線形(つつき 1 回分 = 1)
-float Normalized(uint32_t value, uint32_t flags) {
+// 量(幅 span で 1 になる値)を 0〜1 に。対数(広がった先の小さな値まで見える。1/1000 の幅から)か線形
+float Normalized(float value, float span, uint32_t flags) {
+    const float fraction = saturate(value / span);  // HLSL の linear は補間の修飾子
     if ((flags & VIEW_FLAG_LOGARITHMIC) != 0)
-        return saturate(log2((float)value + 1.0) / log2((float)PROBE_POKE_AMOUNT));
-    return saturate((float)value / (float)PROBE_POKE_AMOUNT);
+        return saturate(log2(fraction * 1000.0 + 1.0) / log2(1001.0));
+
+    return fraction;
+}
+
+// セルの色分けする量を 0〜1 に(flags が選ぶ量)
+float CellAmount(ViewConstants constants, uint3 cell) {
+    const uint32_t quantity = (constants.flags >> VIEW_QUANTITY_SHIFT) & 3;
+    const float value = (float)LoadCellWord(constants.extraction, cell, quantity);
+    if (quantity == VIEW_QUANTITY_TEMPERATURE)
+        return Normalized(max(value * 0.001 - AMBIENT_KELVIN, 0.0), HOT_KELVIN_SPAN, constants.flags);
+
+    if (quantity == VIEW_QUANTITY_OXYGEN_DEPLETION)
+        return Normalized(max(AIR_OXYGEN_MICROMOLES - value, 0.0), AIR_OXYGEN_MICROMOLES, constants.flags);
+
+    if (quantity == VIEW_QUANTITY_CARBON_DIOXIDE)
+        return Normalized(value, GAS_SPAN_MICROMOLES, constants.flags);
+
+    return Normalized(value, CARBON_SPAN_MICROMOLES, constants.flags);
 }
 
 // 黒 → 赤 → 黄 → 白
@@ -191,7 +224,7 @@ March MarchGrid(ViewConstants constants, Ray ray, float2 range) {
         const float tNext = min(min(min(tMax.x, tMax.y), tMax.z), range.y);
         const float segment = max(tNext - t, 0.0) * directionLength;
         const uint3 current = (uint3)cell;
-        const float amount = Normalized(LoadCell(constants.extraction, current), constants.flags);
+        const float amount = CellAmount(constants, current);
         const bool active = (constants.flags & VIEW_FLAG_ACTIVE_BLOCKS) != 0 &&
                             IsBlockActive(constants.extraction, current);
 
@@ -252,7 +285,7 @@ SliceHit IntersectSlice(ViewConstants constants, Ray ray) {
 
 float3 SliceColor(ViewConstants constants, float3 location) {
     const uint3 cell = min((uint3)location, PROBE_GRID_SIZE - 1);
-    const float amount = Normalized(LoadCell(constants.extraction, cell), constants.flags);
+    const float amount = CellAmount(constants, cell);
     float3 color = amount > 0.0 ? HeatColor(amount) : COLD_SLICE_COLOR;
     const bool active = (constants.flags & VIEW_FLAG_ACTIVE_BLOCKS) != 0 && IsBlockActive(constants.extraction, cell);
 
@@ -287,7 +320,7 @@ bool Legend(float2 pixel, float2 viewport, uint32_t flags, out float3 color) {
 
     const float2 local = inside / size;
     color = HeatColor(local.x);
-    // 目盛り: 対数なら 2^8 ごと(2^0・2^8・2^16・2^24)、線形なら 1/4 ごと
+    // 目盛り: 対数なら 10 倍ごと(幅の 1/1000・1/100・1/10・1)、線形なら 1/4 ごと
     const float divisions = (flags & VIEW_FLAG_LOGARITHMIC) != 0 ? 3.0 : 4.0;
     const float tickDistancePixels = abs(frac(local.x * divisions + 0.5) - 0.5) / divisions * size.x;
     if (tickDistancePixels < 0.75 && local.y > 0.5)

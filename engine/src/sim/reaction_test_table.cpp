@@ -2,6 +2,12 @@
 // 生成エンタルピー(J/mol、298.15 K)と比熱(mJ/(mol·K))は NIST の値を丸めた。セルロースは C6H10O5 の 1 単位あたり
 // (燃焼熱から逆算した約 −963 kJ/mol)、比熱は約 1.3 J/(g·K)。この値だと熱分解が発熱になる(実際は生成物が複雑でほぼ中立)。
 // 速度: 熱分解は Broido–Shafizadeh の値の桁、ほかは 600〜1000 K で燃え始めるように置いた仮の値。
+// 熱伝導率(T-0089): 現実の値(木 0.12・炭 0.1・気体 0.017〜0.027 W/(m·K))に倍率を掛けた試験の値。
+// 現実の値だと木の中を 0.5 m 伝わるのに数日かかり、空気の伝導はほぼ 0(現実の火は放射と対流で広がる。M3)。
+// 「リアルっぽいが、反応が遅すぎない」ように大きくする(ユーザー 2026-10-01)。M3 で放射と対流が入ったら見直す。
+// 倍率は gpu_probe_fire_test で決めた(1 回のクリックで、木箱の壁の 9 割が約 50 秒で炭になる):
+//   固体 × 20000・気体 × 5000。固体を大きくしすぎる(× 80000)と、熱が燃える前に薄まって火が消える。
+//   倍率を全部同じにすると、燃えたセルの熱が空気へ逃げて広がらない(気体 × 5 万: 火が 1 セルで消える)
 #include "sim/reaction_test_table.h"
 
 namespace bicameral::sim {
@@ -21,6 +27,18 @@ namespace bicameral::sim {
             return {.species = std::string(species), .coefficient = coefficient, .firstOrder = false};
         }
 
+        // 熱伝導率の試験の倍率と、現実の値(mW/(m·K))から試験の値にする
+        constexpr uint32_t TEST_SOLID_CONDUCTIVITY_SCALE = 20000;
+        constexpr uint32_t TEST_GAS_CONDUCTIVITY_SCALE = 5000;
+
+        constexpr uint32_t SolidConductivity(uint32_t realMilliwattsPerMeterKelvin) {
+            return realMilliwattsPerMeterKelvin * TEST_SOLID_CONDUCTIVITY_SCALE;
+        }
+
+        constexpr uint32_t GasConductivity(uint32_t realMilliwattsPerMeterKelvin) {
+            return realMilliwattsPerMeterKelvin * TEST_GAS_CONDUCTIVITY_SCALE;
+        }
+
         std::vector<ElementDefinition> Elements() {
             return {
                 {.name = "C", .atomicMass = 12011},
@@ -35,22 +53,38 @@ namespace bicameral::sim {
                 {.name = "cellulose",
                  .composition = {Atom("C", 6), Atom("H", 10), Atom("O", 5)},
                  .formationEnthalpy = -963000,
-                 .heatCapacity = 211000},
-                {.name = "carbon", .composition = {Atom("C", 1)}, .formationEnthalpy = 0, .heatCapacity = 8520},
-                {.name = "oxygen", .composition = {Atom("O", 2)}, .formationEnthalpy = 0, .heatCapacity = 29378},
-                {.name = "nitrogen", .composition = {Atom("N", 2)}, .formationEnthalpy = 0, .heatCapacity = 29124},
+                 .heatCapacity = 211000,
+                 .thermalConductivity = SolidConductivity(120)},
+                {.name = "carbon",
+                 .composition = {Atom("C", 1)},
+                 .formationEnthalpy = 0,
+                 .heatCapacity = 8520,
+                 .thermalConductivity = SolidConductivity(100)},
+                {.name = "oxygen",
+                 .composition = {Atom("O", 2)},
+                 .formationEnthalpy = 0,
+                 .heatCapacity = 29378,
+                 .thermalConductivity = GasConductivity(27)},
+                {.name = "nitrogen",
+                 .composition = {Atom("N", 2)},
+                 .formationEnthalpy = 0,
+                 .heatCapacity = 29124,
+                 .thermalConductivity = GasConductivity(26)},
                 {.name = "carbon_dioxide",
                  .composition = {Atom("C", 1), Atom("O", 2)},
                  .formationEnthalpy = -393509,
-                 .heatCapacity = 37135},
+                 .heatCapacity = 37135,
+                 .thermalConductivity = GasConductivity(17)},
                 {.name = "carbon_monoxide",
                  .composition = {Atom("C", 1), Atom("O", 1)},
                  .formationEnthalpy = -110527,
-                 .heatCapacity = 29142},
+                 .heatCapacity = 29142,
+                 .thermalConductivity = GasConductivity(25)},
                 {.name = "water_vapor",
                  .composition = {Atom("H", 2), Atom("O", 1)},
                  .formationEnthalpy = -241826,
-                 .heatCapacity = 33580},
+                 .heatCapacity = 33580,
+                 .thermalConductivity = GasConductivity(25)},
             };
         }
 

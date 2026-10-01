@@ -51,10 +51,11 @@ namespace bicameral::sim {
     [[nodiscard]] std::vector<gpu::GraphTraceRecord> UniqueProbeTrace(std::vector<gpu::GraphTraceRecord> records);
 
     // CPU リファレンスが予想する刻み tick の記録(重なりなし)を expected に足す。
-    // changedBefore = 刻み tick − 1 で値が変わったブロック、changedAfter = 刻み tick で変わったブロック(ProbeReference::ChangedBlocks)
+    // flagsBefore = 刻み tick − 1 のブロックごとの結果(0 でなければ一覧に足された)、flagsAfter = 刻み tick の結果(計算の記録の値)。
+    // どちらも ProbeReference::BlockFlags(PROBE_BLOCK_FLAG_* の組み合わせ)
     void AppendExpectedProbeTrace(const gpu::GraphTraceFilter& filter, uint64_t tick,
-                                  std::span<const ProbeCommand> commands, std::span<const uint8_t> changedBefore,
-                                  std::span<const uint8_t> changedAfter, std::vector<gpu::GraphTraceRecord>& expected);
+                                  std::span<const ProbeCommand> commands, std::span<const uint8_t> flagsBefore,
+                                  std::span<const uint8_t> flagsAfter, std::vector<gpu::GraphTraceRecord>& expected);
 
     // 並べた 2 つの列の最初の食い違い(無ければ nullopt)。「刻み t: GPU … / CPU …」の 1 行
     [[nodiscard]] std::optional<std::string> FirstProbeTraceMismatch(std::span<const gpu::GraphTraceRecord> gpu,
@@ -62,7 +63,7 @@ namespace bicameral::sim {
 
     // --- 食い違いの場所(16 §3 の道具の最初の形)---
 
-    // 刻みの順の 2 つの列で、同じ刻みのハッシュ(と熱の合計)が違う最初の状態の刻み(S(t) の t)。無ければ nullopt
+    // 刻みの順の 2 つの列で、同じ刻みのハッシュ(とエネルギーの合計)が違う最初の状態の刻み(S(t) の t)。無ければ nullopt
     [[nodiscard]] std::optional<uint64_t> FirstDivergentTick(std::span<const ProbeTickHash> gpu,
                                                              std::span<const ProbeTickHash> cpu);
 
@@ -72,7 +73,7 @@ namespace bicameral::sim {
         // --- 最初に食い違ったブロック(番号の小さい順)とその中の最初のセル(ブロックの中の z, y, x の順)---
         uint32_t block = 0;
         std::array<uint32_t, 3> cell = {0, 0, 0};
-        uint32_t gpuValue = 0;
+        uint32_t gpuValue = 0;  // そのセルの温度(mK)
         uint32_t cpuValue = 0;
 
         // --- 広がり ---
@@ -80,7 +81,8 @@ namespace bicameral::sim {
         uint32_t differingBlocks = 0;
     };
 
-    // 同じ刻みの全部のセル(PROBE_CELL_COUNT 個)を比べる。全部同じなら nullopt
+    // 同じ刻みの全部のセルの抽出の語(PROBE_CELL_COUNT × PROBE_EXTRACTION_CELL_WORDS 個。温度と見る物質 3 つ。
+    // CPU は MakeProbeExtractionCells)を比べる。全部同じなら nullopt
     [[nodiscard]] std::optional<ProbeDivergence> FindCellDivergence(uint64_t tick, std::span<const uint32_t> gpuCells,
                                                                     std::span<const uint32_t> cpuCells);
 

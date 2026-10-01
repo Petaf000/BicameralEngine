@@ -5,7 +5,7 @@
 //   → EnqueueCommands が GPU のコマンドキュー(commandQueue)の末尾に足す(コマンドは自分の刻みの適用の単位まで、ここで待つ)
 //   → そのフレームに投げる単位を順に(単位ごとに刻みの番号をルート定数に埋め込む。刻みはフレームをまたいでよい。ADR-0011)
 //      適用(ApplyCommands)→ 伝導(Work Graph。sim/probe_conduct.hlsl)→ 重さ × k → 検査と出力(HashCells、FlushEvents)→ 次の刻み …
-//   → (刻みの境界の状態があれば)Extract が全部のセルと活性の印を抽出の 3 組のどれかに写す(描画が読む。T-0015)
+//   → (刻みの境界の状態があれば)Extract が全部のセルの温度と見る物質の量・活性の印を抽出の 3 組のどれかに写す(描画が読む。T-0015)
 //   → イベントとハッシュの表を CPU へ読み戻す(CPU は待たずに数フレーム後に読む。06 §3)
 // 入口ごとに別の .cso にする(shaders/CMakeLists.txt)。整数だけ(D-205)。バッファの結び方は sim/probe_bindings.hlsli。
 #include "sim/probe_bindings.hlsli"
@@ -26,7 +26,8 @@ void EmitTickEvent(uint32_t type, uint32_t place) {
 }
 
 // 1 つのコマンドを適用する(適用の単位の 1 スレッドが番号順に呼ぶ)。commandHead = 語 [0..3]、address = キューの中の場所
-// つつき: 熱を足し、そのブロックを刻み t の活性の一覧へ(伝導の Work Graph が、そのブロックと隣を起こす)
+// つつき: そのセルを約 2700 K 温めるエネルギーを足し(湧き出しとして S(t + 1) の欄に数える)、熱のキャッシュを作り直し、
+// そのブロックを刻み t の活性の一覧へ(伝導の Work Graph が、そのブロックと隣を起こす)
 void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
     if ((commandHead.w & 0xFFFFu) != PROBE_COMMAND_TYPE_POKE)
         return;
@@ -38,7 +39,15 @@ void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
         return;
 
     const uint32_t index = GenerationBase(tick) + ProbeCellIndex(cell.x, cell.y, cell.z);
-    world[index] = ProbeAddHeat(world[index], PROBE_POKE_AMOUNT);
+    RxCell poked = cells[index];
+    const int64_t energy = ProbePokeEnergy(ReactionTable(), poked);
+    poked.energy += energy;
+    cells[index] = poked;
+    thermal[index] = ProbeMakeCache(ReactionTable(), poked);
+
+    uint64_t original;
+    hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SOURCE, (uint64_t)energy, original);
+
     const uint32_t block = ProbeBlockOfCell(cell.x, cell.y, cell.z);
     AppendActiveBlock((uint32_t)(tick & 1), block);
     EmitTickEvent(PROBE_EVENT_POKE_APPLIED, ProbePokePlace(cell.x, cell.y, cell.z));
@@ -86,7 +95,9 @@ void BeginTick(uint64_t tick) {
     const uint64_t stateTick = tick + 1;
     const uint32_t entry = HashEntryAddress(stateTick);
     hashes.Store4(entry, uint4((uint32_t)stateTick, (uint32_t)(stateTick >> 32), 0, 0));
-    hashes.Store4(entry + PROBE_HASH_OFFSET_HEAT, uint4(0, 0, 0, 0));
+    hashes.Store4(entry + PROBE_HASH_OFFSET_ENERGY, uint4(0, 0, 0, 0));
+    hashes.Store4(entry + PROBE_HASH_OFFSET_SOURCE, uint4(0, 0, 0, 0));
+    hashes.Store4(entry + PROBE_HASH_OFFSET_SOURCE + 16, uint4(0, 0, 0, 0));
 }
 
 // --- 刻みの最後にイベントを並べる(bitonic sort。1 グループ = PROBE_TICK_EVENT_CAPACITY スレッド)---
@@ -192,22 +203,29 @@ void SortEventKeys(uint32_t thread) {
     busySink[cellIndex] = hash;
 }
 
-// --- [最後] 検査と出力: S(t + 1) の要約と熱の合計を表の (t + 1) % 容量 番目へ(06 §2 段 9)---
+// --- [最後] 検査と出力: S(t + 1) の要約とエネルギーの合計を表の (t + 1) % 容量 番目へ(06 §2 段 9)---
 // 欄は刻みの適用の単位(BeginTick)が 0 にしてある。1 スレッド = 1 セル。wave の中で和を取り、代表の 1 レーンが 64bit の atomic で足す
 // (和は順番に依存しない。04 R2)
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void HashCells(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t cellIndex = dispatchThreadId.x;
     const uint64_t stateTick = CurrentTick() + 1;
     const bool inside = cellIndex < PROBE_CELL_COUNT;
-    const uint32_t value = inside ? world[GenerationBase(stateTick) + cellIndex] : 0;
-    const uint64_t hashSum = WaveActiveSum(inside ? ProbeCellHash(cellIndex, value) : 0);
-    const uint64_t heatSum = WaveActiveSum((uint64_t)value);
+    uint64_t cellHash = 0;
+    uint64_t energy = 0;
+    if (inside) {
+        const RxCell cell = cells[GenerationBase(stateTick) + cellIndex];
+        cellHash = ProbeCellHash(cellIndex, cell);
+        energy = (uint64_t)cell.energy;  // 負の値も 2 の補数のまま足す(mod 2^64 の和。CPU も同じ)
+    }
+
+    const uint64_t hashSum = WaveActiveSum(cellHash);
+    const uint64_t energySum = WaveActiveSum(energy);
 
     if (WaveIsFirstLane()) {
         const uint32_t entry = HashEntryAddress(stateTick);
         uint64_t original;
         hashes.InterlockedAdd64(entry + PROBE_HASH_OFFSET_HASH, hashSum, original);
-        hashes.InterlockedAdd64(entry + PROBE_HASH_OFFSET_HEAT, heatSum, original);
+        hashes.InterlockedAdd64(entry + PROBE_HASH_OFFSET_ENERGY, energySum, original);
     }
 }
 
@@ -244,7 +262,7 @@ void SortEventKeys(uint32_t thread) {
                   uint4((uint32_t)tick, (uint32_t)(tick >> 32), (uint32_t)(key >> 32), (uint32_t)key));
 }
 
-// --- 描画用の抽出: 刻み(ルート定数)の始めの状態の全部のセルと、ブロックごとの活性の印を、抽出の 3 組のうち argument の組へ写す ---
+// --- 描画用の抽出: 刻み(ルート定数)の始めの状態の全部のセルの温度と見る物質の量、ブロックごとの活性の印を、抽出の 3 組のうち argument の組へ写す ---
 // 活性の印: 予定の印(最後に計算した刻み + 1)が「この刻み」か「この刻み + 1」= 前の刻みか、途中まで進んだこの刻みで計算した。
 // 刻みの境界(単位 0)で写すなら前の刻みの分だけになり、ハッシュの表の「計算したブロックの数」と同じ数になる。
 void StoreExtraction(uint32_t index, uint32_t value) {
@@ -261,7 +279,13 @@ void StoreExtraction(uint32_t index, uint32_t value) {
     if (cellIndex >= PROBE_CELL_COUNT)
         return;
 
-    StoreExtraction(cellIndex, world[GenerationBase(CurrentTick()) + cellIndex]);
+    const uint32_t source = GenerationBase(CurrentTick()) + cellIndex;
+    const RxCell cell = cells[source];
+    const uint32_t base = cellIndex * PROBE_EXTRACTION_CELL_WORDS;
+    StoreExtraction(base, thermal[source].temperature);
+    [unroll] for (uint32_t view = 0; view < PROBE_VIEW_SPECIES_COUNT; ++view)
+        StoreExtraction(base + 1 + view, ProbeViewAmount(cell, HeaderWord(PROBE_HEADER_VIEW_SPECIES + view)));
+
     if (cellIndex >= PROBE_BLOCK_COUNT)
         return;
 
