@@ -87,13 +87,16 @@ bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --qu
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute)
-# WARP は Work Graph を作る所でアクセス違反で落ちる(ADR-0013 と同じ。T-0017)ので、ハードウェアの GPU だけ
+# WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
+bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
 
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
 foreach(_scene IN ITEMS stack mass_ratio pile)
   bicameral_add_gpu_test_case(gpu_physics_${_scene} gpu_physics_test gpu --scene ${_scene})
 endforeach()
+# WARP(NuGet の版。T-0097)でも物理の Work Graph が動き CPU とビット一致する。重いので積み木だけ・120 刻み(PC の debug で 27 s)
+bicameral_add_gpu_test_case(gpu_physics_stack_warp gpu_physics_test warp --warp --scene stack --ticks 120)
 # 採らなかった方(広域の選別を Compute・色ごとの解を Work Graph。T-0092 で測って比べた)も壊れていないこと
 bicameral_add_gpu_test_case(gpu_physics_stack_alternative gpu_physics_test gpu --scene stack --broadphase compute --solver graph)
 
@@ -116,14 +119,18 @@ bicameral_add_gpu_test(gpu_work_graph_stats_test)
 bicameral_add_gpu_test_case(gpu_work_graph_stats gpu_work_graph_stats_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_work_graph_stats_warp gpu_work_graph_stats_test warp --warp --queue compute)
 # T-0004・T-0012・T-0086・T-0089 の仮の刻み: 分け方を変えても CPU とビット一致、イベントの並び、記録 → 再生でハッシュ列が一致。
-# 仮の世界(伝導 + 反応のノード)のテストは WARP では走らせない: WARP は Work Graph を作る時点で落ちる(ADR-0013)
+# 仮の世界(伝導 + 反応のノード)の WARP のテストは、NuGet の WARP 1.0.21 で動くようになった(T-0097。OS の WARP では落ちる。ADR-0013)
 bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
 # 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
 bicameral_add_gpu_test(gpu_probe_trace_test)
 target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --warp)
+# WARP の仮の世界は重い(2026-10-03 の PC の debug で sim 130 s・trace 65 s)。CI の機械(コアが少ない)で 300 s を越えないよう長めに切る
+set_tests_properties(gpu_probe_sim_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)
 # 木箱に火をつける(T-0089): 刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる。
 # ctest(debug・GBV)は 1 分(3600 刻み)。10 分(36,000 刻み)は release で: job.py run -Preset release -Exe gpu_probe_fire_test
 bicameral_add_gpu_test(gpu_probe_fire_test)

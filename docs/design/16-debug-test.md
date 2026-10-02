@@ -134,6 +134,8 @@ GPU の中だけで走り切る世界を、症状から原因に辿れるよう�
   (gpu_fixed_warp・gpu_work_graph_warp_*)が通った。GPU のテストは同じ exe を `--warp` 付きでも登録し、
   ハードウェアが要るもの(ラベル gpu)は CI で外す(`ctest --label-exclude gpu`)。ビット一致と決定性のテストもこの形で CI に入れる。
   WARP での速さは未測定(重いテストを CI に入れる時に測り、盤面の大きさを決める)。
+  → 2026-10-03(T-0097): WARP は OS のものではなく NuGet の版(今は 1.0.21)を exe の横に置いて使う(D-427。OS の WARP は複雑なノードの Work Graph で落ちた。ADR-0013)。
+  PC の debug で仮の世界 130 s・トレース 65 s・多重解像度 12 s・物理の積み木 120 刻み 27 s。ログの「WARP: <場所>(版 …)」でどの WARP かが分かる。
 - ~~GPU-based validation と Work Graphs を組み合わせて動くか~~ → 動く(T-0003、2026-09-30)。debug プリセットの GPU のテスト
   (Work Graph・自己テスト・リング)が、ハードウェア(開発機)と WARP の両方で debug layer のエラー 0 件で通る。
   GBV の分だけ遅い(gpu_fixed の 65536 ケースで約 7 秒)。重くなったら GBV だけ切る(`DeviceOptions`)。

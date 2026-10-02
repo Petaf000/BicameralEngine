@@ -1,6 +1,6 @@
 # ADR-0013 仮の世界(伝導 + 反応の Work Graph)のテストから WARP を外す
 
-- Status: Accepted
+- Status: Superseded(2026-10-03、T-0097: NuGet の WARP 1.0.21 を exe の横に置いて解消。D-427。下の「解消」)
 - 日付: 2026-10-01
 - 決めた人: ユーザー(Claude が 3 案を出した。T-0089)
 
@@ -29,3 +29,13 @@ T-0089 で、仮の世界の伝導と反応を 1 つの Work Graphs のノード
 - tests/CMakeLists.txt から 2 つのテストを外した(理由をコメントに書いた)。窓のアプリを `--warp` で起こすと同じく落ちる。
 - WARP の新しい版(Agility SDK の更新)で直ったかは、`job.py run -Exe gpu_probe_sim_test -- --warp` で確かめられる。直ったら戻す。
 - 2026-10-03(T-0017): 多重解像度の Work Graph(shaders/sim/multires_graph.hlsl)も WARP では作る所で落ちたので、`gpu_multires_warp` も置かない。
+
+## 解消(2026-10-03、T-0097)
+- NuGet の Microsoft.Direct3D.WARP 1.0.21(2026-09-22。README に「制御の流れの変換を作り直した」)の d3d10warp.dll を exe の横に置くと、
+  D3D12 は OS の WARP(10.0.26100.9278)の代わりにこちらを読み込み、仮の世界・多重解像度の Work Graph が作れて CPU リファレンスとビット一致した。
+  落ちた原因が JIT の制御の流れの扱いだったかは未確認(版を替えたら直った、までしか分かっていない)。
+- ルートの CMakeLists.txt が nupkg を版と SHA-256 で固定して取り、engine/CMakeLists.txt が bin/ にコピーする。
+  gpu/device.cpp は読み込んだ d3d10warp.dll の場所と版をログに出し、exe の横の版でなければ Warning を出す。
+- ctest に gpu_probe_sim_warp・gpu_probe_trace_warp・gpu_multires_warp を戻し、gpu_physics_stack_warp(120 刻み)を足した。
+  PC の debug での時間: sim 130 s・trace 65 s・multires 12 s・physics 27 s(sim と trace は CI のために TIMEOUT 900)。
+- 窓のアプリも `--warp` で動く(release で 1.3 fps)。

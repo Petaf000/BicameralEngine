@@ -29,6 +29,28 @@ message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
 # ビルドの中の検査(tools/float_check: シミュの浮動小数点の禁止、04 §4)に使う
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
+# --- WARP(ソフトウェアの D3D12)の版を固定する(T-0097・ADR-0013)---------------------------------------
+# OS の WARP は、Work Graph のノードが少し複雑になると状態オブジェクトを作る所で落ちる(ADR-0013)。
+# NuGet の Microsoft.Direct3D.WARP の d3d10warp.dll を exe の横(bin/)に置くと、D3D12 は OS のものの代わりにこちらを読み込む。
+# 版を上げるときは、版とハッシュ(nupkg の SHA-256)を両方変える。
+set(BICAMERAL_WARP_VERSION 1.0.21)
+set(BICAMERAL_WARP_SHA256 EA44B77EB30EEC14427193E20F40CDB2E4C31ED11AB39CB880538FDF4BAC2681)
+set(BICAMERAL_WARP_DIR ${CMAKE_BINARY_DIR}/_deps/warp-${BICAMERAL_WARP_VERSION})
+set(BICAMERAL_WARP_DLL ${BICAMERAL_WARP_DIR}/build/native/bin/x64/d3d10warp.dll)
+if(NOT EXISTS ${BICAMERAL_WARP_DLL})
+  set(_warpPackage ${BICAMERAL_WARP_DIR}.nupkg)
+  file(DOWNLOAD
+    https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.warp/${BICAMERAL_WARP_VERSION}/microsoft.direct3d.warp.${BICAMERAL_WARP_VERSION}.nupkg
+    ${_warpPackage}
+    EXPECTED_HASH SHA256=${BICAMERAL_WARP_SHA256}
+    TLS_VERIFY ON)
+  file(ARCHIVE_EXTRACT INPUT ${_warpPackage} DESTINATION ${BICAMERAL_WARP_DIR} PATTERNS build/native/bin/x64/d3d10warp.dll)
+  if(NOT EXISTS ${BICAMERAL_WARP_DLL})
+    message(FATAL_ERROR "WARP ${BICAMERAL_WARP_VERSION} の d3d10warp.dll を取り出せない: ${_warpPackage}")
+  endif()
+endif()
+message(STATUS "WARP: ${BICAMERAL_WARP_VERSION}(${BICAMERAL_WARP_DLL})")
+
 add_subdirectory(engine)
 add_subdirectory(shaders)
 

@@ -1,33 +1,34 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0017 原理: 多重解像度 — 完了
+最終更新: 2026-10-03 / チケット: T-0097 新しい WARP を試す — 完了
 
 ## 状態(3 行以内)
-- 多重解像度の原理(R-MULTI 基準 1〜2)を確かめた: k = 0〜9 の入れ子の往復で保存量が全部の刻みでビット一致、観察の影があっても世界のハッシュ列が一致。CPU と GPU(Work Graph の再帰)が毎刻みビット一致。
-- 2026-10-03 ユーザー決定(ADR-0015): 木は比 2 のブロック(17 §1 の食い違いを直した)・粗くした余りは 64bit の端数を疎に持つ。
-- 次は T-0097(新しい WARP を試す。小さい)→ T-0096(窓で 1 点を入れ子に細かくして覗く)。どちらも 2026-10-03 ユーザー決定で M1 に足した。
+- WARP を OS のものから NuGet の Microsoft.Direct3D.WARP 1.0.21(版とハッシュで固定)に替えた。OS の WARP で落ちていた Work Graph(仮の世界・多重解像度)が動き、CPU とビット一致。
+- ADR-0013 を解消(Superseded)・D-427。WARP のテストを ctest に戻し、物理の WARP のテストも足した(CI でも Work Graph の重いテストが WARP で回る)。
+- 次は T-0096(窓で 1 点を入れ子に細かくして覗く。M1 の完了の姿)。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(61)・`python3 tools/archmap/archmap.py --check` OK(87)。
-- `job.py test -Filter "multires"`: multires(CPU。往復・21/24 段・影)と gpu_multires(HW。本物と影を 70 刻み毎刻み比べる)。debug でも通る(GBV あり約 33 s)。
-- `job.py run -Preset release -Exe gpu_multires_test -- --queue compute` が GPU 時間を出す(細かくする 9 段 0.19 ms・粗くする 2.3 ms・影の引き戻し 2.2 ms)。
-- 前のチケットのもの(物理・反応・仮の世界)は触っていない(bicameral_sim に bicameral_multires をリンクしただけ)。
+- `job.py test -Filter warp`(debug 10 件、約 225 s): gpu_multires_warp 12 s・gpu_probe_sim_warp 130 s・gpu_probe_trace_warp 65 s・gpu_physics_stack_warp 27 s ほか。
+- `job.py test -Preset release`: 全 49 件が通る(約 475 s)。
+- WARP で走らせるとログに `WARP: <bin の場所>\d3d10warp.dll(版 1.0.21.0)` が出る。`job.py run -Preset release -- --warp --frames 120` で窓のアプリも動く(1.3 fps)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- WARP の gpu_multires は Work Graph を作る所でアクセス違反(ADR-0013 と同じ)。ctest に置いていない。
-- 粗くする・影の引き戻しが 1 段約 250 µs(1 段 64 スレッドの連鎖。BACKLOG)。影は毎刻みなので観察 1 つで 2.2 ms/刻み。
-- この段階の制限: 段をまたぐ輸送なし(T-0019)・ブロックの枠は呼ぶ側が決める固定・端数の枠は返さない・帳簿なし(T-0018)・影は端数を持たない。
-- (前から)Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる。物理の GPU 版は世界の刻みに未組み込み。PIX・セーブ・AMD は未確認/未着手。
+- CI(GitHub Actions)で新しい WARP のテストが通るかは、push 後の CI の結果で確認する(未確認)。CI の機械は遅いので gpu_probe_sim_warp・gpu_probe_trace_warp は TIMEOUT 900。
+- OS の WARP で落ちた原因が JIT の制御の流れだったかは未確認(版を替えたら直った、まで)。
+- (前から)粗くする・影の引き戻しが 1 段約 250 µs。段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる。物理の GPU 版は世界の刻みに未組み込み。PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- ADR-0015(Accepted): 比 2 のブロック(子ブロックは親の 4³ セルを覆う)・単位はレベル k で 8^-k µmol / 8^-k mJ・粗くした余りは 64bit の端数を疎に持つ
-  (21 段の往復までビット一致。それより深いと落ちる分を帳簿へ = T-0018)。17 §1・§5・04 §2 を直した。
-- WARP の多重解像度のテストは ADR-0013 と同じ理由で置かない(ADR-0013 に追記)。
+- D-427: WARP は NuGet の版を版と SHA-256 で固定して exe の横に置く(今は 1.0.21)。ADR-0013 は Superseded(「解消」の節に経緯)。
+- 物理の WARP のテストは積み木だけ・120 刻み(重いので)。
 
 ## 次にやること
-NEXT.md の先頭(T-0097 新しい WARP → T-0096 窓で覗く → M1 完了 → T-0094)。
+NEXT.md の先頭(T-0096 窓で覗く → M1 完了 → T-0094)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **WARP(T-0097)**: 使うのは exe の横の d3d10warp.dll(NuGet 1.0.21)。版を上げるときはルートの CMakeLists.txt の `BICAMERAL_WARP_VERSION` と `BICAMERAL_WARP_SHA256` を両方変える
+  (取ってくるのは configure の時。`_deps/warp-<版>` が無ければ取る)。ログに Warning「WARP が exe の横の版ではない」が出たら OS の WARP を読んでいる。
+  NuGet の版の一覧には `1.65535.20-preview` もあるが、1.0.21 より古いプレビュー(版の数字が大きいだけ)。
 - **多重解像度(T-0017)**: 式は shaders/common/multires.hlsli(Mr 接頭辞。C++ は bicameral::multires)。CPU リファレンスは engine/src/sim/multires_nest(ライブラリ bicameral_multires)、
   GPU は sim/gpu_multires(Work Graph shaders/sim/multires_graph.hlsl の RefineNode・CoarsenNode・PullBackNode・RemoveShadowNode と Compute の multires_step.hlsl)。
   1 段の操作は CPU と GPU で同じ順(セルを全部書いてから見出し)。端数の枠はスレッド 0 だけが数える欄から取る(鎖が 1 本なので順が決まる)。

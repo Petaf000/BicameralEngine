@@ -34,7 +34,8 @@ target_link_libraries(bicameral_gpu PUBLIC
   bicameral_core
   bicameral_fixed  # shaders/common/debug_ring.hlsli・work_graph_stats.hlsli・graph_trace.hlsli(デバッグのリング・カウンタ・トレースのレイアウト)
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
-  d3d12 dxgi)
+  d3d12 dxgi
+  version)  # 読み込んだ WARP の版を調べる(GetFileVersionInfoW。gpu/device.cpp)
 # debug プリセット: デバイスを作るとき debug layer・GPU-based validation・DRED を既定で有効にする(gpu/device.cpp、T-0003)
 if(BICAMERAL_GPU_VALIDATION)
   target_compile_definitions(bicameral_gpu PRIVATE BICAMERAL_GPU_VALIDATION=1)
@@ -135,6 +136,10 @@ add_custom_command(TARGET bicameral POST_BUILD
           $<TARGET_FILE_DIR:bicameral>/D3D12
   COMMAND_EXPAND_LISTS
   COMMENT "Agility SDK の D3D12Core.dll を bin/D3D12 にコピー")
+# NuGet の WARP(版はルートの CMakeLists.txt で固定。T-0097・ADR-0013)。exe と同じフォルダに置く
+add_custom_command(TARGET bicameral POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BICAMERAL_WARP_DLL} $<TARGET_FILE_DIR:bicameral>
+  COMMENT "WARP ${BICAMERAL_WARP_VERSION} の d3d10warp.dll を bin にコピー")
 if(BICAMERAL_GPU_VALIDATION)
   target_compile_definitions(bicameral PRIVATE BICAMERAL_GPU_VALIDATION=1)
 endif()

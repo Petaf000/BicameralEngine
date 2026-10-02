@@ -5,6 +5,7 @@
 
 // --- Windows / DirectX ---
 #include <windows.h>
+#include <winver.h>  // GetFileVersionInfoW(読み込んだ WARP の版。gpu/device.cpp)
 
 #include <directx/d3d12.h>
 #include <directx/d3d12sdklayers.h>  // debug layer の報告(ID3D12InfoQueue1)と DRED

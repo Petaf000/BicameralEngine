@@ -5,6 +5,7 @@
 // debug layer の d3d12SDKLayers.dll は Agility SDK のもの(exe の横の D3D12\。engine/CMakeLists.txt がコピーする)。
 #include "gpu/device.h"
 
+#include "core/aliases.h"
 #include "core/hresult.h"
 #include "core/log.h"
 #include "core/unicode.h"
@@ -120,6 +121,49 @@ namespace bicameral::gpu {
             return std::unexpected("最低機の条件(FL 12_2・SM 6.8・Work Graphs・Int64ShaderOps)を満たすアダプタが無い");
         }
 
+        // 読み込まれている d3d10warp.dll の場所と版。exe の横の NuGet の版(T-0097)か OS の版かを見分けるため
+        struct WarpModule {
+            std::string description;
+            bool besideExecutable = false;
+        };
+
+        WarpModule DescribeWarpModule() {
+            HMODULE warpModule = GetModuleHandleW(L"d3d10warp.dll");
+            if (warpModule == nullptr)
+                return {.description = "d3d10warp.dll が読み込まれていない"};
+
+            std::wstring warpPath(MAX_PATH * 4, L'\0');
+            warpPath.resize(GetModuleFileNameW(warpModule, warpPath.data(), static_cast<DWORD>(warpPath.size())));
+            std::wstring executablePath(MAX_PATH * 4, L'\0');
+            executablePath.resize(
+                GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size())));
+
+            WarpModule result{
+                .description = ToUtf8(warpPath),
+                .besideExecutable = fs::path(warpPath).parent_path() == fs::path(executablePath).parent_path(),
+            };
+
+            // --- 版(VS_FIXEDFILEINFO の FileVersion)---
+            const DWORD infoSize = GetFileVersionInfoSizeW(warpPath.c_str(), nullptr);
+            std::vector<std::byte> info(infoSize);
+            void* fixedInfoPointer = nullptr;
+            UINT fixedInfoSize = 0;
+            const bool hasVersion = infoSize != 0 && GetFileVersionInfoW(warpPath.c_str(), 0, infoSize, info.data()) &&
+                                    VerQueryValueW(info.data(), L"\\", &fixedInfoPointer, &fixedInfoSize) &&
+                                    fixedInfoSize >= sizeof(VS_FIXEDFILEINFO);
+            if (!hasVersion) {
+                result.description += "(版は不明)";
+                return result;
+            }
+
+            const auto* fixedInfo = static_cast<const VS_FIXEDFILEINFO*>(fixedInfoPointer);
+            result.description += std::format("(版 {}.{}.{}.{})", HIWORD(fixedInfo->dwFileVersionMS),
+                                              LOWORD(fixedInfo->dwFileVersionMS), HIWORD(fixedInfo->dwFileVersionLS),
+                                              LOWORD(fixedInfo->dwFileVersionLS));
+
+            return result;
+        }
+
         DeviceResult CreateWarpDevice(IDXGIFactory6* factory) {
             ComPtr<IDXGIAdapter1> adapter;
             HRESULT result = factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
@@ -136,6 +180,15 @@ namespace bicameral::gpu {
                 return std::unexpected("WARP に足りない機能:" + missing);
 
             Log(Channel::Gpu, Level::Info, "アダプタ: WARP");
+
+            // OS の WARP は Work Graph の複雑なノードで落ちる(ADR-0013)。exe の横の NuGet の版を使っているかを残す
+            const WarpModule warpModule = DescribeWarpModule();
+            if (warpModule.besideExecutable)
+                Log(Channel::Gpu, Level::Info, "WARP: {}", warpModule.description);
+            else
+                Log(Channel::Gpu, Level::Warning,
+                    "WARP が exe の横の版ではない(Work Graph が落ちることがある。ADR-0013): {}",
+                    warpModule.description);
 
             return device;
         }
