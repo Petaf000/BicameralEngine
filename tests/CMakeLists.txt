@@ -85,6 +85,8 @@ target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
 foreach(_scene IN ITEMS stack mass_ratio pile)
   bicameral_add_gpu_test_case(gpu_physics_${_scene} gpu_physics_test gpu --scene ${_scene})
 endforeach()
+# 採らなかった方(広域の選別を Compute・色ごとの解を Work Graph。T-0092 で測って比べた)も壊れていないこと
+bicameral_add_gpu_test_case(gpu_physics_stack_alternative gpu_physics_test gpu --scene stack --broadphase compute --solver graph)
 
 # 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
 # 走らせ方: job.py run -Preset release -Exe gpu_fixed_bench

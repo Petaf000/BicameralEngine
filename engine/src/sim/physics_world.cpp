@@ -105,7 +105,7 @@ namespace bicameral::sim {
                     continue;
 
                 const auto found = m_manifolds.find({a, b});
-                const PhysicsManifold previous = found != m_manifolds.end() ? found->second : PhysicsManifold{};
+                const PxPreviousManifold previous{found != m_manifolds.end() ? found->second : PhysicsManifold{}};
                 const PhysicsManifold manifold = PxBuildManifold(a, b, bodyA, bodyB, geometry, m_scene.frictionQ16,
                                                                  previous, m_parameters, m_rate);
                 m_stats.maxPenetration = std::max(m_stats.maxPenetration, PxMaxPenetration(geometry));

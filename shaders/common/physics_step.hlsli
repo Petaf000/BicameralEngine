@@ -18,6 +18,8 @@ FX_CONST int64_t PX_ALPHA_ONE_Q16 = 65536;
 FX_CONST int64_t PX_NORMAL_SIMILARITY = 1020054733;  // 0.95(Q1.30)
 FX_CONST int32_t PX_NO_COLOR = -1;
 FX_CONST int32_t PX_GPU_MAX_COLORS = 16;  // GPU は色ごとに 1 回ずつ解くパスを固定の数だけ投げる(T-0090)
+// GPU の持ち主の枠の数の上限(Work Graph の広域の選別が出すレコードの数はコンパイル時に決める。T-0092)
+FX_CONST uint32_t PX_GPU_MAX_SLOTS_PER_BODY = 16;
 
 // --- 物 ---------------------------------------------------------------------------------------
 struct PxBody {
@@ -252,21 +254,35 @@ FX_FN PxContactPoint PxMakeContactPoint(PxContactPointGeometry source, PxVec3 no
     return contactPoint;
 }
 
+// --- 前の刻みの組の読み方 --------------------------------------------------------------------------
+// 引き継ぎ(PxBuildManifold・PxInheritFromPrevious・PxMatchByProximity)は前の組を Previous 型で読む: Count() と Point(j)。
+// CPU は局所に持つ組(PxPreviousManifold)、GPU はバッファから点を 1 つずつ読む(physics_bindings.hlsli の GpuPreviousManifold)。
+// GPU で組(3 KB)を 2 つ局所に持つと、Work Graph のノードの中で GPU が固まった(局所の変数が約 5〜6 KB を超えると。T-0092)
+struct PxPreviousManifold {
+    PxManifold manifold;  // count = 0 なら前の組は無い
+
+    uint32_t Count() { return manifold.count; }
+
+    PxContactPoint Point(uint32_t j) { return manifold.points[j]; }
+};
+
 // 前の刻みの同じ特徴の点から λ・硬さ・静止摩擦の接触点を引き継ぐ
-FX_FN PxContactPoint PxInheritFromPrevious(PxContactPoint contactPoint, PxManifold old) {
-    for (uint32_t j = 0; j < old.count; ++j) {
-        if (old.points[j].feature != contactPoint.feature)
+template <typename Previous>
+FX_FN PxContactPoint PxInheritFromPrevious(PxContactPoint contactPoint, Previous old) {
+    for (uint32_t j = 0; j < old.Count(); ++j) {
+        const PxContactPoint oldPoint = old.Point(j);
+        if (oldPoint.feature != contactPoint.feature)
             continue;
 
         for (uint32_t r = 0; r < 3; ++r)
-            contactPoint.rows[r] = old.points[j].rows[r];
+            contactPoint.rows[r] = oldPoint.rows[r];
 
-        contactPoint.stick = old.points[j].stick;
+        contactPoint.stick = oldPoint.stick;
         if (contactPoint.stick == 0)
             continue;
 
-        contactPoint.localA = old.points[j].localA;
-        contactPoint.localB = old.points[j].localB;
+        contactPoint.localA = oldPoint.localA;
+        contactPoint.localB = oldPoint.localB;
     }
 
     return contactPoint;
@@ -275,38 +291,36 @@ FX_FN PxContactPoint PxInheritFromPrevious(PxContactPoint contactPoint, PxManifo
 // 特徴の番号が合わなかった点(切り抜きの境界にかかった頂点・4 点の選び方が変わった)は、
 // 特徴で使われなかった前の点のうち一番近いもの(proximity 以内・法線が近い)から λ と硬さを引き継ぐ(1 対 1)。
 // 静止している山で、荷重のかかった点の λ が刻みごとに 0 に戻って揺れ続けるのを防ぐ(T-0091)
-FX_FN PxManifold PxMatchByProximity(PxQuat rotationA, PxManifold old, PxManifold manifold, int64_t proximity) {
-    bool usedOld[PX_MANIFOLD_POINTS];
-    bool matchedNew[PX_MANIFOLD_POINTS];
-    for (uint32_t i = 0; i < PX_MANIFOLD_POINTS; ++i) {
-        usedOld[i] = false;
-        matchedNew[i] = false;
-    }
-
+template <typename Previous>
+FX_FN PxManifold PxMatchByProximity(PxQuat rotationA, Previous old, PxManifold manifold, int64_t proximity) {
+    // 使った前の点・合った新しい点の印(ビット j / k。点は PX_MANIFOLD_POINTS まで)
+    uint32_t usedOld = 0;
+    uint32_t matchedNew = 0;
     for (uint32_t k = 0; k < manifold.count; ++k) {
-        for (uint32_t j = 0; j < old.count; ++j) {
-            if (old.points[j].feature != manifold.points[k].feature)
+        for (uint32_t j = 0; j < old.Count(); ++j) {
+            if (old.Point(j).feature != manifold.points[k].feature)
                 continue;
 
-            usedOld[j] = true;
-            matchedNew[k] = true;
+            usedOld |= 1u << j;
+            matchedNew |= 1u << k;
         }
     }
 
     const PxMat3 rotation = PxRotationMatrix(rotationA);
     for (uint32_t k = 0; k < manifold.count; ++k) {
-        if (matchedNew[k])
+        if ((matchedNew & (1u << k)) != 0)
             continue;
 
         const PxVec3 here = PxMulMat(rotation, manifold.points[k].localA, PX_UNIT_SHIFT);
         int32_t nearestIndex = -1;
         int64_t nearest = proximity;
-        for (uint32_t j = 0; j < old.count; ++j) {
-            const PxVec3 there = PxMulMat(rotation, old.points[j].localA, PX_UNIT_SHIFT);
+        for (uint32_t j = 0; j < old.Count(); ++j) {
+            const PxContactPoint oldPoint = old.Point(j);
+            const PxVec3 there = PxMulMat(rotation, oldPoint.localA, PX_UNIT_SHIFT);
             const int64_t distance = (int64_t)PxLength(PxSub(here, there));
-            const bool similar = PxDot(old.points[j].normal, manifold.points[k].normal, PX_UNIT_SHIFT) >=
+            const bool similar = PxDot(oldPoint.normal, manifold.points[k].normal, PX_UNIT_SHIFT) >=
                                  PX_NORMAL_SIMILARITY;
-            if (usedOld[j] || distance >= nearest || !similar)
+            if ((usedOld & (1u << j)) != 0 || distance >= nearest || !similar)
                 continue;
 
             nearest = distance;
@@ -316,19 +330,21 @@ FX_FN PxManifold PxMatchByProximity(PxQuat rotationA, PxManifold old, PxManifold
         if (nearestIndex < 0)
             continue;
 
-        usedOld[nearestIndex] = true;
+        usedOld |= 1u << (uint32_t)nearestIndex;
+        const PxContactPoint nearestPoint = old.Point((uint32_t)nearestIndex);
         for (uint32_t r = 0; r < 3; ++r) {
-            manifold.points[k].rows[r].lambda = old.points[nearestIndex].rows[r].lambda;
-            manifold.points[k].rows[r].penalty = old.points[nearestIndex].rows[r].penalty;
+            manifold.points[k].rows[r].lambda = nearestPoint.rows[r].lambda;
+            manifold.points[k].rows[r].penalty = nearestPoint.rows[r].penalty;
         }
     }
 
     return manifold;
 }
 
-// 接触の生成の結果から組を作り、前の刻みの同じ組(無ければ count = 0 のもの)から引き継ぐ。点が無ければ count = 0
+// 接触の生成の結果から組を作り、前の刻みの同じ組(無ければ Count() = 0 のもの)から引き継ぐ。点が無ければ count = 0
+template <typename Previous>
 FX_FN PxManifold PxBuildManifold(uint32_t a, uint32_t b, PxBody bodyA, PxBody bodyB, PxContactGeometry geometry,
-                                 int64_t frictionQ16, PxManifold previous, PxParameters p, int64_t rate) {
+                                 int64_t frictionQ16, Previous previous, PxParameters p, int64_t rate) {
     PxManifold manifold = PxBeginManifold(a, b, bodyA, bodyB, geometry.normal, frictionQ16, p, rate);
     const PxBox shapeA = PxShapeOf(bodyA);
     const PxBox shapeB = PxShapeOf(bodyB);

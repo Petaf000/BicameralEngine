@@ -1,0 +1,368 @@
+// physics_bindings.hlsli — 物理の 1 刻みのシェーダー(physics_step.hlsl の Compute と physics_graph.hlsl の Work Graph)が共有する
+// バッファの結び方・ルート定数・組の置き場所の部品。ルート署名は engine/src/sim/gpu_physics.cpp の ROOT_LAYOUT と同じ順。
+// Work Graph のノードも同じグローバルのルート署名で動く(ノードごとのローカルのルート署名は使わない)。
+//
+// 組の置き場所: 組は「持ち主」の物の枠(1 物 slotsPerBody 個)に、相手の番号の昇順で入る(持ち主 = 片方が動かない物なら動く方、それ以外は小さい番号)。
+// 枠は 2 組あり(currentHalf が今の小刻み、もう片方が前の小刻み)、前の小刻みの同じ組から引き継ぐ。点が 0 の枠は「組が無い」。
+// 動く物は、自分が入っている組の枠の一覧(incident)を持つ。並びは原子的な加算の順で決まらないが、読む側(6×6 の和・彩色の隣)は順番に依存しない。
+// 枠・一覧・色が足りなかったら統計の overflow に印を付ける(テストが落とす。M1 の原理の確認なので数は固定。上限なしは T-0045)。
+#ifndef BICAMERAL_PHYSICS_BINDINGS_HLSLI
+#define BICAMERAL_PHYSICS_BINDINGS_HLSLI
+
+#include "common/physics_step.hlsli"
+
+// 組(PxManifold、3016 バイト)は構造化バッファの要素の上限(2048 バイト)を超えるので、見出しと点に分けて置く
+struct ManifoldHeader {
+    uint32_t bodyA;
+    uint32_t bodyB;
+    uint32_t count;
+    uint32_t unused;
+    PxVec3 normal;
+    int64_t frictionQ16;
+    int64_t beta;
+    int64_t minPenalty;
+    int64_t maxPenalty;
+};
+
+// --- 結び付け(gpu_physics.cpp の GpuPhysicsBinding と同じ順)---
+// u1 組の見出し [2][bodyCount × slotsPerBody] / u2 持ち主の枠の使っている数 [2][bodyCount] /
+// u3 枠の相手の番号(今の小刻み)[bodyCount × slotsPerBody] / u4 物の組の一覧(枠の番号 | 物が A なら INCIDENT_IS_A)[bodyCount × incidentPerBody] /
+// u5 一覧の数 [bodyCount] / u6 β の「触れている質量」(mg)[bodyCount] / u7 彩色の回ごとの色(交互に読み書き)[2][bodyCount] /
+// u8 統計(GpuPhysicsStats)/ u9 組の点 [2][bodyCount × slotsPerBody][PX_MANIFOLD_POINTS] /
+// u10 枠の接触の幾何(Work Graph の NarrowphaseNode → Compute の BuildManifolds。T-0092)[bodyCount × slotsPerBody] /
+// u11 色ごとの Work Graph の GPU の入力(D3D12_NODE_GPU_INPUT × PX_GPU_MAX_COLORS)/ u12 色ごとの物の一覧 [PX_GPU_MAX_COLORS][bodyCount] /
+// t0 パラメータ 1 個 / t1 場面から作った初めの物
+RWStructuredBuffer<PxBody> g_bodies : register(u0);
+RWStructuredBuffer<ManifoldHeader> g_manifolds : register(u1);
+RWStructuredBuffer<uint32_t> g_slotCounts : register(u2);
+RWStructuredBuffer<uint32_t> g_candidates : register(u3);
+RWStructuredBuffer<uint32_t> g_incident : register(u4);
+RWStructuredBuffer<uint32_t> g_incidentCounts : register(u5);
+RWStructuredBuffer<uint64_t> g_touchMass : register(u6);
+RWStructuredBuffer<int32_t> g_colors : register(u7);
+RWByteAddressBuffer g_stats : register(u8);
+RWStructuredBuffer<PxContactPoint> g_points : register(u9);
+RWStructuredBuffer<PxContactGeometry> g_geometry : register(u10);
+RWByteAddressBuffer g_colorInputs : register(u11);
+RWStructuredBuffer<uint32_t> g_colorBodies : register(u12);
+StructuredBuffer<PxParameters> g_parameters : register(t0);
+StructuredBuffer<PxBody> g_initialBodies : register(t1);
+
+cbuffer RootConstants : register(b0) {
+    uint32_t g_bodyCount;
+    uint32_t g_slotsPerBody;
+    uint32_t g_incidentPerBody;
+    uint32_t g_currentHalf;  // 今の小刻みの組の枠(0 / 1)
+    uint32_t g_tickLow;
+    uint32_t g_tickHigh;
+    uint32_t g_frictionQ16;
+    int32_t g_color;        // SolveColor が解く色
+    uint32_t g_alphaQ16;    // 本反復は 65536、最後の 1 回は 0
+    uint32_t g_colorIn;     // ColorRound が読む色の組(0 / 1)。FinishColoring は最後の回の結果の組
+    uint32_t g_resetStats;  // 1 なら BeginSubstep が統計を 0 にする(刻みの最初の小刻み)
+    uint32_t g_solveEntry;  // physics_graph.hlsl の SolveBodyNode の入口の番号(Initialize が色ごとの GPU の入力に書く)
+    uint32_t g_colorBodiesLow;  // u12 の GPU の仮想アドレス
+    uint32_t g_colorBodiesHigh;
+};
+
+// --- 色ごとの GPU の入力(D3D12_NODE_GPU_INPUT: 入口・レコードの数・レコードのアドレスと間隔、24 バイト)---
+static const uint32_t COLOR_INPUT_BYTES = 24;
+static const uint32_t COLOR_RECORD_STRIDE_BYTES = 4;  // レコード = 物の番号 1 つ
+
+// --- 統計の並び(GpuPhysicsStats)---
+static const uint32_t STATS_MAX_PENETRATION = 0;  // uint64
+static const uint32_t STATS_CONTACT_COUNT = 8;
+static const uint32_t STATS_COLOR_COUNT = 12;
+static const uint32_t STATS_SOLVE_FAILURES = 16;
+static const uint32_t STATS_OVERFLOW = 20;
+
+// --- overflow の印 ---
+static const uint32_t OVERFLOW_SLOTS = 1;      // 持ち主の枠が足りない
+static const uint32_t OVERFLOW_INCIDENT = 2;   // 物の組の一覧が足りない
+static const uint32_t OVERFLOW_UNCOLORED = 4;  // 彩色の回数が足りない(塗れなかった物がある)
+static const uint32_t OVERFLOW_COLORS = 8;     // 色の数が PX_GPU_MAX_COLORS を超えた
+
+static const uint32_t INCIDENT_IS_A = 0x80000000u;
+
+// --- 小さな部品 -------------------------------------------------------------------------------
+uint32_t ManifoldIndex(uint32_t manifoldHalf, uint32_t slot) {
+    return manifoldHalf * g_bodyCount * g_slotsPerBody + slot;
+}
+
+uint64_t CurrentTick() {
+    return ((uint64_t)g_tickHigh << 32) | (uint64_t)g_tickLow;
+}
+
+void Flag(uint32_t bit) {
+    g_stats.InterlockedOr(STATS_OVERFLOW, bit);
+}
+
+// 今の小刻みの、点がある組の枠か
+bool IsLiveSlot(uint32_t slot) {
+    if (slot >= g_bodyCount * g_slotsPerBody)
+        return false;
+
+    const uint32_t owner = slot / g_slotsPerBody;
+    const uint32_t k = slot % g_slotsPerBody;
+    if (k >= g_slotCounts[g_currentHalf * g_bodyCount + owner])
+        return false;
+
+    return g_manifolds[ManifoldIndex(g_currentHalf, slot)].count > 0;
+}
+
+uint32_t PointIndex(uint32_t manifoldIndex, uint32_t k) {
+    return manifoldIndex * PX_MANIFOLD_POINTS + k;
+}
+
+PxManifold LoadManifold(uint32_t index) {
+    const ManifoldHeader header = g_manifolds[index];
+    PxManifold manifold = (PxManifold)0;
+    manifold.bodyA = header.bodyA;
+    manifold.bodyB = header.bodyB;
+    manifold.count = header.count;
+    manifold.normal = header.normal;
+    manifold.frictionQ16 = header.frictionQ16;
+    manifold.beta = header.beta;
+    manifold.minPenalty = header.minPenalty;
+    manifold.maxPenalty = header.maxPenalty;
+    for (uint32_t k = 0; k < header.count; ++k)
+        manifold.points[k] = g_points[PointIndex(index, k)];
+
+    return manifold;
+}
+
+void StoreManifold(uint32_t index, PxManifold manifold) {
+    ManifoldHeader header;
+    header.bodyA = manifold.bodyA;
+    header.bodyB = manifold.bodyB;
+    header.count = manifold.count;
+    header.unused = 0;
+    header.normal = manifold.normal;
+    header.frictionQ16 = manifold.frictionQ16;
+    header.beta = manifold.beta;
+    header.minPenalty = manifold.minPenalty;
+    header.maxPenalty = manifold.maxPenalty;
+    g_manifolds[index] = header;
+    for (uint32_t k = 0; k < manifold.count; ++k)
+        g_points[PointIndex(index, k)] = manifold.points[k];
+}
+
+// 前の小刻みの組を、点を 1 つずつバッファから読む形で渡す(PxBuildManifold の Previous。組を局所に写さない)
+struct GpuPreviousManifold {
+    uint32_t index;  // 組の番号(ManifoldIndex)
+    uint32_t count;  // 0 なら前の組は無い
+
+    uint32_t Count() { return count; }
+
+    PxContactPoint Point(uint32_t j) { return g_points[PointIndex(index, j)]; }
+};
+
+// 前の小刻みの同じ組(持ち主の枠を探す。無ければ count = 0)
+GpuPreviousManifold FindPrevious(uint32_t owner, uint32_t a, uint32_t b) {
+    const uint32_t previousHalf = 1 - g_currentHalf;
+    const uint32_t count = g_slotCounts[previousHalf * g_bodyCount + owner];
+    GpuPreviousManifold previous;
+    previous.index = 0;
+    previous.count = 0;
+    for (uint32_t k = 0; k < count; ++k) {
+        const uint32_t index = ManifoldIndex(previousHalf, owner * g_slotsPerBody + k);
+        if (g_manifolds[index].count > 0 && g_manifolds[index].bodyA == a && g_manifolds[index].bodyB == b) {
+            previous.index = index;
+            previous.count = g_manifolds[index].count;
+            return previous;
+        }
+    }
+
+    return previous;
+}
+
+void AddIncident(uint32_t body, uint32_t entry) {
+    uint32_t position = 0;
+    InterlockedAdd(g_incidentCounts[body], 1, position);
+    if (position >= g_incidentPerBody) {
+        Flag(OVERFLOW_INCIDENT);
+        return;
+    }
+
+    g_incident[body * g_incidentPerBody + position] = entry;
+}
+
+uint32_t IncidentCount(uint32_t body) {
+    return min(g_incidentCounts[body], g_incidentPerBody);
+}
+
+// 組の一覧の 1 つの相手(動く物どうしの組だけが彩色の隣)
+uint32_t PartnerOf(uint32_t entry) {
+    const uint32_t index = ManifoldIndex(g_currentHalf, entry & ~INCIDENT_IS_A);
+    return (entry & INCIDENT_IS_A) != 0 ? g_manifolds[index].bodyB : g_manifolds[index].bodyA;
+}
+
+// --- 広域の選別と接触の生成(Compute の Broadphase・Narrowphase と Work Graph の physics_graph.hlsl が共有)-----------------
+// 持ち主 i の、近い相手を番号の昇順に g_candidates へ。枠の数を返す
+uint32_t CollectCandidates(uint32_t i) {
+    const PxParameters p = g_parameters[0];
+    const int64_t rate = PxStepRate(p);
+    const PxBody self = g_bodies[i];
+    uint32_t count = 0;
+    for (uint32_t j = 0; j < g_bodyCount && PxIsDynamic(self) && self.active != 0; ++j) {
+        if (j == i)
+            continue;
+
+        const PxBody other = g_bodies[j];
+        if (PxIsDynamic(other) && j < i)  // この組の持ち主は j
+            continue;
+
+        int64_t margin = 0;
+        if (i < j)
+            margin = PxPairMargin(self, other, p, rate);
+        else
+            margin = PxPairMargin(other, self, p, rate);
+
+        if (margin < 0)
+            continue;
+
+        if (count == g_slotsPerBody) {
+            Flag(OVERFLOW_SLOTS);
+            continue;
+        }
+
+        g_candidates[i * g_slotsPerBody + count] = j;
+        count += 1;
+    }
+
+    return count;
+}
+
+// 枠(相手がいる)の接触の幾何。点が無ければ count = 0
+PxContactGeometry CollideGeometry(uint32_t slot, uint32_t other) {
+    const uint32_t owner = slot / g_slotsPerBody;
+    const PxBody bodyA = g_bodies[min(owner, other)];
+    const PxBody bodyB = g_bodies[max(owner, other)];
+    const PxParameters p = g_parameters[0];
+    const int64_t margin = PxPairMargin(bodyA, bodyB, p, PxStepRate(p));
+
+    return PxCollideBoxes(PxShapeOf(bodyA), PxShapeOf(bodyB), margin);
+}
+
+// 接触の幾何から組を作り、前の小刻みの同じ組から引き継ぐ。統計・β の質量・物の一覧も
+void BuildSlot(uint32_t slot, uint32_t other, PxContactGeometry geometry) {
+    const uint32_t owner = slot / g_slotsPerBody;
+    const uint32_t index = ManifoldIndex(g_currentHalf, slot);
+    if (geometry.count == 0) {
+        g_manifolds[index].count = 0;
+        return;
+    }
+
+    const uint32_t a = min(owner, other);
+    const uint32_t b = max(owner, other);
+    const PxBody bodyA = g_bodies[a];
+    const PxBody bodyB = g_bodies[b];
+    const PxParameters p = g_parameters[0];
+    const PxManifold manifold = PxBuildManifold(a, b, bodyA, bodyB, geometry, (int64_t)g_frictionQ16,
+                                                FindPrevious(owner, a, b), p, PxStepRate(p));
+    StoreManifold(index, manifold);
+    g_stats.InterlockedMax64(STATS_MAX_PENETRATION, (uint64_t)PxMaxPenetration(geometry));
+    g_stats.InterlockedAdd(STATS_CONTACT_COUNT, manifold.count);
+    InterlockedMax(g_touchMass[a], PxTouchMass(bodyB));
+    InterlockedMax(g_touchMass[b], PxTouchMass(bodyA));
+    if (PxIsDynamic(bodyA))
+        AddIncident(a, slot | INCIDENT_IS_A);
+
+    if (PxIsDynamic(bodyB))
+        AddIncident(b, slot);
+}
+
+// --- 1 つの物を 1 グループで解く(1 スレッド = 1 接触点。T-0092。Compute の SolveColor と Work Graph の SolveBodyNode)---------------
+// 1 スレッド = 1 物で順に足す形(T-0090)と同じ結果: 物の 6×6 は点ごとの寄与の整数の和(2^64 を法とする和なので順番に依存しない)。
+// 点ごとの寄与をスレッドで並列に作り、ウェーブと共有メモリで足してから、1 スレッドが慣性の項を足して解く
+static const uint32_t SOLVE_GROUP_THREADS = 64;
+static const uint32_t SOLVE_GROUP_MANIFOLDS = SOLVE_GROUP_THREADS / PX_MANIFOLD_POINTS;  // 1 回にまとめて見る組の数
+static const uint32_t SOLVE_SYSTEM_WORDS = 42;                                           // 6×6 + 6
+
+groupshared uint64_t g_systemSum[SOLVE_SYSTEM_WORDS];
+
+// 物 i の組の一覧の e 番目の組の k 番目の点の 3 行(点が無ければ 0)
+PxBodySystem PointContribution(uint32_t i, PxBody body, uint32_t e, uint32_t k, int64_t alphaQ16, PxParameters p) {
+    const uint32_t entry = g_incident[i * g_incidentPerBody + e];
+    const bool isA = (entry & INCIDENT_IS_A) != 0;
+    const uint32_t index = ManifoldIndex(g_currentHalf, entry & ~INCIDENT_IS_A);
+    PxBodySystem contribution = (PxBodySystem)0;
+    if (k >= g_manifolds[index].count)
+        return contribution;
+
+    const uint32_t partner = isA ? g_manifolds[index].bodyB : g_manifolds[index].bodyA;
+    const PxVec3 partnerLinear = g_bodies[partner].deltaLinear;
+    const PxVec3 partnerAngular = g_bodies[partner].deltaAngular;
+    const PxVec3 linearA = PxSelect(isA, body.deltaLinear, partnerLinear);
+    const PxVec3 angularA = PxSelect(isA, body.deltaAngular, partnerAngular);
+    const PxVec3 linearB = PxSelect(isA, partnerLinear, body.deltaLinear);
+    const PxVec3 angularB = PxSelect(isA, partnerAngular, body.deltaAngular);
+
+    return PxAddPointRows(contribution, g_points[PointIndex(index, k)], g_manifolds[index].frictionQ16, isA, alphaQ16,
+                          p.gapSlop, linearA, angularA, linearB, angularB);
+}
+
+// ウェーブで足し、ウェーブの代表が共有メモリに足す
+void AddToGroupSum(PxBodySystem system) {
+    for (uint32_t v = 0; v < 36; ++v) {
+        const uint64_t sum = WaveActiveSum((uint64_t)system.lhs.m[v]);
+        if (WaveIsFirstLane())
+            InterlockedAdd(g_systemSum[v], sum);
+    }
+
+    for (uint32_t v = 0; v < 6; ++v) {
+        const uint64_t sum = WaveActiveSum((uint64_t)system.rhs.v[v]);
+        if (WaveIsFirstLane())
+            InterlockedAdd(g_systemSum[36 + v], sum);
+    }
+}
+
+// 物 i を 1 グループ(SOLVE_GROUP_THREADS)で解く。グループの全部のスレッドが呼ぶ
+void SolveBodyInGroup(uint32_t i, uint32_t thread) {
+    if (thread < SOLVE_SYSTEM_WORDS)
+        g_systemSum[thread] = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // --- 点ごとの寄与: スレッド t は組 base + t / 8 の点 t % 8 ---
+    const PxParameters p = g_parameters[0];
+    const int64_t alphaQ16 = (int64_t)g_alphaQ16;
+    const PxBody body = g_bodies[i];
+    const uint32_t count = IncidentCount(i);
+    PxBodySystem local = (PxBodySystem)0;
+    for (uint32_t base = 0; base < count; base += SOLVE_GROUP_MANIFOLDS) {
+        const uint32_t e = base + thread / PX_MANIFOLD_POINTS;
+        if (e >= count)
+            continue;
+
+        const PxBodySystem contribution = PointContribution(i, body, e, thread % PX_MANIFOLD_POINTS, alphaQ16, p);
+        for (uint32_t v = 0; v < 36; ++v)
+            local.lhs.m[v] += contribution.lhs.m[v];
+
+        for (uint32_t v = 0; v < 6; ++v)
+            local.rhs.v[v] += contribution.rhs.v[v];
+    }
+
+    AddToGroupSum(local);
+    GroupMemoryBarrierWithGroupSync();
+    if (thread != 0)
+        return;
+
+    // --- 慣性の項 + 点の和を解く(SolveColor と同じ)---
+    PxBodySystem system = PxBeginSystemOf(body);
+    for (uint32_t v = 0; v < 36; ++v)
+        system.lhs.m[v] += (int64_t)g_systemSum[v];
+
+    for (uint32_t v = 0; v < 6; ++v)
+        system.rhs.v[v] += (int64_t)g_systemSum[36 + v];
+
+    const PxSolveResult solved = PxSolveSymmetric6(system.lhs, system.rhs, PX_SOLVE_GAIN_SHIFT);
+    if (!solved.ok)
+        g_stats.InterlockedAdd(STATS_SOLVE_FAILURES, 1);
+
+    const PxBody updated = PxApplySolution(body, solved.x);
+    g_bodies[i].deltaLinear = updated.deltaLinear;
+    g_bodies[i].deltaAngular = updated.deltaAngular;
+}
+
+#endif  // BICAMERAL_PHYSICS_BINDINGS_HLSLI

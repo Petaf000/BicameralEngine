@@ -194,9 +194,12 @@ views:
       - { id: physicsstep, group: shared, label: "physics_step.hlsli<br/>物・組・接触点ごとの手順と構造体(CPU と GPU で共通)",
           code: "shaders/common/physics_step.hlsli::PxBuildManifold", ticket: T-0090, doc: docs/design/08-bodies-physics.md,
           note: "順番に依存しない: 6×6 への足し込みは整数の和、β は最大値、彩色は前の回の色だけを読む" }
-      - { id: gpuphysics, group: simlib, label: "GpuPhysics::RecordStep<br/>Compute のパスの列(広域 → 接触 → 彩色 → 反復 → 仕上げ)",
-          code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordSubstep", ticket: T-0090, doc: docs/design/08-bodies-physics.md,
-          note: "shaders/sim/physics_step.hlsl。組は持ち主の物の枠に。色と彩色の回数は固定の数だけ投げる(T-0092 で詰める)" }
+      - { id: gpuphysics, group: simlib, label: "GpuPhysics::RecordStep<br/>広域 → 接触(Work Graph)→ 彩色 → 反復(Compute)→ 仕上げ",
+          code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordSubstep", ticket: T-0092, doc: docs/decisions/ADR-0002-avbd-execution.md,
+          note: "shaders/sim/physics_step.hlsl。色ごとの解は 1 グループ = 1 物(点ごとの寄与を整数の和で)。WG と Compute は測って選んだ(ADR-0002「計測」)" }
+      - { id: physicsgraph, group: shared, label: "physics_graph.hlsl(Work Graph)<br/>広域の選別 → 接触の幾何 / 色ごとの解(比べた方)",
+          code: "shaders/sim/physics_bindings.hlsli::CollideGeometry", ticket: T-0092, doc: docs/design/08-bodies-physics.md,
+          note: "組(3 KB)をノードの局所に持つと GPU が固まる(約 5〜6 KB 超)ので、組を作るのは Compute の BuildManifolds" }
       - { id: gpuphysicstest, group: tests, label: "gpu_physics_test<br/>3 場面の全部の刻みを GPU と CPU で比べる",
           code: "tests/gpu_physics_test.cpp::RunGpu", ticket: T-0090,
           note: "区間ごとに状態のハッシュと統計。GPU は 2 回走らせて一致も見る。GPU-based validation は切る(計装が終わらない)" }
@@ -279,6 +282,8 @@ views:
       - [physicslab, physicsworld, "同じ場面で比べる"]
       - [physicsworld, physicsstep, "物・組ごとの手順"]
       - [gpuphysics, physicsstep, "同じ関数(.cso)"]
+      - [gpuphysics, physicsgraph, "DispatchGraph"]
+      - [physicsgraph, physicsstep]
       - [physicsstep, physicscollide]
       - [physicsstep, physicssolverhlsl]
       - [gpuphysicstest, gpuphysics]

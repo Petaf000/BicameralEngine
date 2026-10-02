@@ -1,33 +1,45 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-02 / チケット: T-0090 物理を GPU に(Compute で CPU とビット一致)— 完了
+最終更新: 2026-10-02 / チケット: T-0092 物理の Work Graphs 版と計測 — 完了
 
 ## 状態(3 行以内)
-- 整数の AVBD の 1 刻みを GPU の Compute で走らせ、3 場面の全部の刻みで CPU とビット一致・2 回で一致した(08 §6「結果(T-0090)」)。
-  手順は shaders/common/physics_step.hlsli に移し、CPU の PhysicsWorld と GPU(shaders/sim/physics_step.hlsl・sim::GpuPhysics)が同じ関数を呼ぶ。
-- 次は T-0092(Work Graphs 版を作って Compute と測って選ぶ・Nsight。ADR-0014 の承認の材料)。速さは今 1 刻み 2.7〜12 ms(最適化なし)。
+- 物理の GPU を部分ごとに Work Graphs と Compute で作って測り、**広域 → 接触の幾何は Work Graph・色ごとの解は Compute** にした(ADR-0002「計測」)。3 場面とも CPU とビット一致のまま。
+- 色ごとの解を「1 グループ = 1 物・点ごとにスレッド・整数の和」に替えて、1 刻み 山 12.1 → 3.75 ms・積み木 4.6 → 2.6 ms・質量比 2.7 → 1.9 ms。
+- 次は T-0093(Nsight で詰まり方と SASS の命令数)。ADR-0014(整数の AVBD)の承認の材料(GPU の費用)は ADR-0014 の末尾に書いた。ユーザーの判断待ち。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(57)・`python3 tools/archmap/archmap.py --check` OK(81)。
-- `job.py test -Preset release -Filter physics` → physics_* 7 個 + gpu_physics_* 3 個(release は全部の刻み。pile は 100 s ほど)。debug の gpu_physics_* は初めの 120 刻み(各約 65 s)。
-- `job.py run -Preset release -Exe gpu_physics_test -- --scene pile [--ticks n] [--segment n]` → 最後のハッシュ 422a771e9ae913f7(CPU・physics_lab --integer と同じ)。
+- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(57)・`python3 tools/archmap/archmap.py --check` OK(82)。
+- `job.py test -Preset release -Filter physics` → physics_* 7 個 + gpu_physics_* 4 個(stack・mass_ratio・pile と、採らなかった方の stack_alternative)。
+  1 回の device_bash に収まらないので `-Filter "gpu_physics_(stack|mass_ratio)$"`・`gpu_physics_pile`・`gpu_physics_stack_alternative`・`^physics_` に分ける。
+- `job.py run -Preset release -Exe gpu_physics_test -- --scene pile --profile [--broadphase compute|graph] [--solver compute|graph]` → パスごとの GPU 時間(CPU とは比べない)。
 - `job.py run -Preset release -Exe physics_lab -- --integer --scene all` → be4e95c7a2df5e17 / d19d955b5a65c469 / 422a771e9ae913f7(T-0091 から不変)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- WARP の gpu_physics_test はパイプラインの JIT が 160 s で終わらず未確認(ctest に WARP の版は登録していない)。
+- **Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる**(DEVICE_HUNG。仕様の上限かドライバの不具合か未確認。BACKLOG)。
+- WARP の gpu_physics_test は未確認(パイプラインの JIT が終わらない。T-0090 から)。
 - 物理の GPU 版はまだ世界の刻み(ProbeSim・フレームのループ)に組み込んでいない。テストの中だけで動く。
 - (前から)山の種の約 2 割で止まった後の数 cm/s の動き(BACKLOG)。WARP は仮の世界のグラフで落ちる(ADR-0013)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- T-0090 を 2 つに分けた: T-0090 = Compute で CPU とビット一致 / T-0092 = Work Graphs 版・測って選ぶ・Nsight(ROADMAP に追記)。
-- GPU の組の置き場所は「持ち主」の物の枠(片方が動かない物なら動く方、それ以外は小さい番号)。固定の数: 枠 16・一覧 24・彩色 24 回・色 16(足りなければ overflow の印)。
-- PxParameters の欄を 64bit を先に並べ替えた(GPU の構造化バッファと同じ並び。大きさ 96 の static_assert)。
+- ADR-0002 に「計測(T-0092)」を追記: 広域と接触は Work Graph(Compute と同等なので「できる限り WG」)、色ごとの解は Compute(WG は DispatchGraph の固定費 約 13〜20 µs で 1.8 倍遅い)。
+- T-0092 の Nsight の 2 項目を T-0093 に分けた(ROADMAP・NEXT)。
+- BACKLOG に 4 件(島ごとに 1 グループで解く案〔ユーザーの判断待ち〕・空の色を飛ばす・6×6 の分解の並列化・ノードの局所の変数の上限)。
 
 ## 次にやること
-NEXT.md の先頭(T-0092)。
+NEXT.md の先頭(T-0093)。
 
 ## 注意(次の Claude がハマりそうな所)
-- **物理の GPU(T-0090)**: パスは shaders/sim/physics_step.hlsl(入口 12 個 → `physics_<snake>.cso`。shaders/CMakeLists.txt の foreach)、呼ぶ順は gpu_physics.cpp の RecordSubstep
+- **物理の GPU の構成(T-0092)**: 小刻み = BeginSubstep → **Work Graph(physics_graph.hlsl の BroadphaseNode → NarrowphaseNode)** → BuildManifolds(Compute)→ PrepareManifolds →
+  彩色 → 反復(探し直し・**SolveColor = 1 グループ 64 スレッド = 1 物**・UpdateDuals)→ Finish。呼ぶ順は gpu_physics.cpp の RecordSubstep / RecordIterations。
+  バッファとルート定数と共有の関数(CollectCandidates・CollideGeometry・BuildSlot・SolveBodyInGroup・FindPrevious)は shaders/sim/physics_bindings.hlsli(Compute とグラフで共有)。
+  比べた方は `GpuPhysicsOptions{.broadphaseGraph = false}`(Compute の Broadphase・Narrowphase)と `.solver = GpuPhysicsSolver::Graph`(SolveBodyNode。色ごとの物の一覧 u12 と GPU の入力 u11 を FinishColoring が作る)。
+- **Work Graph のノードに大きい局所の変数を置かない**(約 5〜6 KB で GPU が固まる。組 PxManifold は 3 KB)。前の組は `PxBuildManifold` の `Previous` 型で点を 1 つずつ読む(CPU は PxPreviousManifold、GPU は GpuPreviousManifold)。
+  固まった時の切り分けは、ノードの中身を少しずつ足して release で `--ticks 60` を走らせるのが早かった(debug の DRED は DispatchGraph で止まったとしか言わない)。
+- **ブロードキャストのノードの出力は 1 グループ 256 件まで**(超えると CreateStateObject が E_INVALIDARG。広域の選別は 16 スレッド × 枠 16)。
+- 計測の名前の表(gpu_physics.cpp の PASS_NAMES・SHADER_NAMES)は Pass の順。static_assert で数を確かめている(clang-format が並べ直すので、置き換えの編集は崩れやすい)。
+- 物理のルート定数は 14 個(色ごとの GPU の入力のために SolveBodyNode の入口の番号と u12 のアドレスを足した)。UAV は u0〜u12。
+- 色ごとの GPU の入力(u11)と物の一覧(u12)は、反復の間だけ NON_PIXEL_SHADER_RESOURCE(solver = Graph のとき。RecordColorListStates)。
+- **物理の GPU(T-0090)**: パスは shaders/sim/physics_step.hlsl(入口 13 個 → `physics_<snake>.cso`。shaders/CMakeLists.txt の foreach)、呼ぶ順は gpu_physics.cpp の RecordSubstep
   (PhysicsWorld::Substep と同じ順に揃える。片方を変えたらもう片方も)。物・組・点の構造体は physics_step.hlsli で、C++ と HLSL の並びを揃えるため 64bit を 8 の倍数の位置に置き bool を使わない
   (大きさは physics_world.h の static_assert: 物 448・点 368・組 3016・パラメータ 96)。組は構造化バッファの要素の上限 2048 B を超えるので GPU では見出し(u1)と点(u9)に分けている。
 - **gpu_physics_test は GPU-based validation を切っている**(debug の -Od のシェーダーの計装でパイプラインの作成が数分を超えた)。debug layer は有効。

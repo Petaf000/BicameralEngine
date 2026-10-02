@@ -24,3 +24,24 @@ AVBD は化学の結果として「崩れ方」を解く役。化学(状態)→ 
 **できる限り Work Graphs。** 反復回数が決まっていて、Work Graphs でも Compute でも結果が変わらないものは、両方作って測り、安い方を採る。
 AVBD は整数で決定的に解く研究(R-PHYS、08-bodies-physics.md)とあわせて進める。
 
+
+## 計測(T-0092、2026-10-02。RTX 3070 Ti / 32.0.15.9597、release)
+整数の AVBD の 1 刻み(T-0090 の Compute 版、CPU とビット一致)の部分ごとに、Work Graphs 版と Compute 版を作って測った。
+どちらも同じ関数(shaders/common/physics_step.hlsli・shaders/sim/physics_bindings.hlsli)を呼び、3 場面の全部の刻みで CPU とビット一致する(tests/gpu_physics_test)。
+時間はパスごとのタイムスタンプ(`gpu_physics_test --profile`)、1 刻みあたり。
+
+| 部分 | Compute | Work Graphs | 採った方 |
+|---|---|---|---|
+| 広域の選別 → 接触の生成(岩の山) | 0.306 ms(Broadphase 0.138 + Narrowphase 0.168。全部の枠を起動して空なら抜ける) | 0.315 ms(グラフ 0.260 + 組を作る Compute 0.055。相手のいる枠だけを起動) | **Work Graphs**(差は 3% で揺れの内。「できる限り Work Graphs」) |
+| 色ごとの解(岩の山・11 反復 × 16 色) | **2.95 ms**(1 色 1 Dispatch、全部の物を起動して色で弾く) | 5.31 ms(1 色 1 DispatchGraph、その色の物だけを GPU の入力で起動) | **Compute**(1.8 倍速い) |
+| 色ごとの解(質量比・物 1 つ・15 色が空) | **1.46 ms**(8.3 µs/色) | 3.75 ms(21.3 µs/色) | Compute |
+
+- **DispatchGraph 1 回の固定費は約 13〜20 µs**(空の色: Dispatch は 1.5〜3 µs)。色の数 × 反復の数だけ全体の同期が要る部分は、この固定費のぶん Work Graphs が負ける。
+  当初の案(ソルバーの反復は Compute、Work Graphs は何を渡すかを決める側)どおりになった。
+- 色ごとの解は、T-0090 の「1 スレッド = 1 物」から「1 グループ = 1 物、1 スレッド = 1 接触点、物の 6×6 は点ごとの寄与の整数の和(ウェーブと共有メモリで足す)」に替えた。
+  和は 2^64 を法とするので順番に依存せず、CPU とビット一致のまま。岩の山の 1 刻み 12.1 → 3.75 ms(色ごとの解 11.2 → 2.95 ms)。
+- **Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる**(DEVICE_HUNG。局所の配列 640 × 8 B は動き、768 × 8 B で固まる。同じコードは Compute なら動く。
+  RTX 3070 Ti / 32.0.15.9597。仕様の上限か、ドライバの不具合かは未確認)。組(PxManifold、3 KB)を局所に 2 つ持つ「組を作る」処理はノードに入れられないので、
+  グラフは接触の幾何(約 300 B)までにして、組を作るのは Compute の BuildManifolds にした。前の組は局所に写さず、点を 1 つずつバッファから読む(PxPreviousManifold・GpuPreviousManifold)。
+- 比べた方(広域の選別の Compute・色ごとの解の Work Graph)も残し、ctest(gpu_physics_stack_alternative)で壊れていないことを確かめる。
+- 物の数が増えた時(広域の選別を空間ハッシュにする T-0045)に、広域の選別はもう一度測る。

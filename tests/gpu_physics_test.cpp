@@ -3,6 +3,9 @@
 // 区間(--segment 刻み)ごとに GPU の物を全部読み戻し、状態のハッシュと統計(食い込み・接触の数・色の数)を CPU と比べる。
 // GPU はもう 1 回走らせ、区間ごとのハッシュが 1 回目と同じこと(2 回の実行で一致)も確かめる。
 // 引数: gpu_test_options.h(--warp・--queue)と --scene stack|mass_ratio|pile・--ticks n(既定: release は場面の全部、debug は 120)・--segment n(既定 60)
+//   --broadphase compute|graph: 広域の選別 → 接触の幾何を Compute の 2 パスか Work Graph か(既定 graph。T-0092)
+//   --solver compute|graph: 色ごとの解き方を Compute の Dispatch か Work Graph か(既定 compute。T-0092)
+//   --profile: CPU とは比べず、2 回目の実行でパスの種類ごとの GPU 時間(タイムスタンプ)を出す(T-0092)
 #include "sim/gpu_physics.h"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -30,6 +33,9 @@ namespace {
         std::string sceneName = "stack";
         uint64_t tickLimit = DEFAULT_TICK_LIMIT;
         uint64_t segmentTicks = 60;
+        bool profile = false;
+        bool broadphaseGraph = true;
+        sim::GpuPhysicsSolver solver = sim::GpuPhysicsSolver::Compute;
     };
 
     struct GpuRun {
@@ -80,6 +86,28 @@ namespace {
         return {};
     }
 
+    // パスの種類ごとの GPU 時間(1 刻みあたり)
+    void ReportProfile(const sim::GpuPhysics& physics, ID3D12CommandQueue* queue, uint64_t tickCount) {
+        uint64_t frequency = 0;
+        if (FAILED(queue->GetTimestampFrequency(&frequency)) || frequency == 0)
+            return;
+
+        const auto milliseconds = [&](const sim::GpuPhysicsPassTime& pass) {
+            return (double)pass.timestampTicks * 1000.0 / (double)frequency;
+        };
+
+        double total = 0;
+        for (const sim::GpuPhysicsPassTime& pass : physics.ProfileResult())
+            total += milliseconds(pass);
+
+        Log(Channel::Physics, Level::Info, "パスの GPU 時間(1 刻みあたり、合計 {:.3f} ms):", total / (double)tickCount);
+        for (const sim::GpuPhysicsPassTime& pass : physics.ProfileResult()) {
+            Log(Channel::Physics, Level::Info, "  {:<16} {:7.3f} ms  {:6.1f} 回  {:7.2f} µs/回  {:5.1f}%", pass.name,
+                milliseconds(pass) / (double)tickCount, (double)pass.count / (double)tickCount,
+                milliseconds(pass) * 1000.0 / (double)pass.count, milliseconds(pass) * 100.0 / total);
+        }
+    }
+
     struct GpuParts {
         gpu::ImmediateQueue queue;
         sim::GpuPhysics physics;
@@ -88,12 +116,15 @@ namespace {
 
     // パイプラインは 1 回だけ作る(debug のシェーダーはドライバのコンパイルに数十秒かかることがある)
     std::expected<GpuParts, std::string> CreateGpuParts(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
-                                                        const sim::PhysicsScene& scene) {
+                                                        const sim::PhysicsScene& scene,
+                                                        const PhysicsTestOptions& testOptions) {
         auto queue = gpu::ImmediateQueue::Create(device, queueType);
         if (!queue)
             return std::unexpected(queue.error());
 
-        auto physics = sim::GpuPhysics::Create(device, scene, PxDefaultParameters());
+        const sim::GpuPhysicsOptions physicsOptions{.broadphaseGraph = testOptions.broadphaseGraph,
+                                                    .solver = testOptions.solver};
+        auto physics = sim::GpuPhysics::Create(device, scene, PxDefaultParameters(), physicsOptions);
         if (!physics)
             return std::unexpected(physics.error());
 
@@ -135,6 +166,7 @@ namespace {
                 return std::unexpected("GPU での実行に失敗(デバイスが失われた)");
 
             run.gpuMilliseconds += chr::duration<double, std::milli>(chr::steady_clock::now() - started).count();
+            physics.AccumulateProfile();
             const gpu::DebugRingContents debugOutput = debugRing.Drain();
             if (debugOutput.assertCount > 0) {
                 return std::unexpected(
@@ -164,15 +196,32 @@ namespace {
         return run;
     }
 
+    sim::GpuPhysicsSolver ParseSolver(std::string_view name) {
+        return name == "graph" ? sim::GpuPhysicsSolver::Graph : sim::GpuPhysicsSolver::Compute;
+    }
+
     std::optional<PhysicsTestOptions> TakePhysicsOptions(std::vector<char*>& arguments) {
         PhysicsTestOptions options;
-        for (size_t index = 1; index + 1 < arguments.size();) {
+        for (size_t index = 1; index < arguments.size();) {
             const std::string_view name = arguments[index];
+            if (name == "--profile") {
+                options.profile = true;
+                arguments.erase(arguments.begin() + (std::ptrdiff_t)index);
+                continue;
+            }
+
+            if (index + 1 >= arguments.size())
+                break;
+
             const std::string_view value = arguments[index + 1];
             if (name == "--scene")
                 options.sceneName = value;
             else if (name == "--ticks")
                 options.tickLimit = std::stoull(std::string(value));
+            else if (name == "--broadphase")
+                options.broadphaseGraph = value == "graph";
+            else if (name == "--solver")
+                options.solver = ParseSolver(value);
             else if (name == "--segment")
                 options.segmentTicks = std::max<uint64_t>(1, std::stoull(std::string(value)));
             else {
@@ -189,6 +238,23 @@ namespace {
         return options;
     }
 
+    // 2 回目: GPU だけ。区間ごとのハッシュが 1 回目と同じこと(--profile ならパスの時間も取る)
+    std::expected<GpuRun, std::string> RunSecond(GpuParts& parts, ID3D12Device5* device,
+                                                 const PhysicsTestOptions& options, uint64_t tickCount,
+                                                 const GpuRun& first) {
+        if (options.profile && !parts.physics.EnableProfiling(device))
+            return std::unexpected("タイムスタンプのヒープを作れない");
+
+        auto second = RunGpu(parts, options, tickCount, nullptr);
+        if (!second)
+            return std::unexpected(std::format("2 回目の GPU の実行: {}", second.error()));
+
+        if (second->hashes != first.hashes)
+            return std::unexpected("2 回目の GPU の実行が 1 回目と食い違う");
+
+        return second;
+    }
+
     int Run(std::vector<char*> arguments) {
         const auto physicsOptions = TakePhysicsOptions(arguments);
         const auto options = test::ParseGpuTestOptions(std::span(arguments));
@@ -196,15 +262,16 @@ namespace {
             Log(Channel::Physics, Level::Error,
                 "使い方: gpu_physics_test [--warp] [--queue direct|compute] [--scene stack|mass_ratio|pile] [--ticks "
                 "n] "
-                "[--segment n]");
+                "[--segment n] [--broadphase compute|graph] [--solver compute|graph] [--profile]");
             return 2;
         }
 
         const sim::PhysicsScene scene = MakeScene(physicsOptions->sceneName);
         const uint64_t tickCount = std::min(physicsOptions->tickLimit, scene.tickCount);
-        Log(Channel::Physics, Level::Info, "gpu_physics_test: {} を {} 刻み(区間 {})、adapter {}, queue {}", scene.name,
-            tickCount, physicsOptions->segmentTicks, gpu::AdapterKindName(options->adapter),
-            test::QueueTypeName(options->queueType));
+        Log(Channel::Physics, Level::Info,
+            "gpu_physics_test: {} を {} 刻み(区間 {})、adapter {}, queue {}, 広域の選別 {}", scene.name, tickCount,
+            physicsOptions->segmentTicks, gpu::AdapterKindName(options->adapter),
+            test::QueueTypeName(options->queueType), physicsOptions->broadphaseGraph ? "Work Graph" : "Compute");
 
         // GPU-based validation は切る: 物理のシェーダー(-Od の debug)の計装で、パイプラインを作るのが数分を超えて終わらなかった
         // (gpu_reaction_test の WARP と同じ症状)。debug layer は残す
@@ -219,13 +286,13 @@ namespace {
         // --- 1 回目: CPU と比べる ---
         sim::PhysicsWorld world(scene, PxDefaultParameters());
         const auto cpuStarted = chr::steady_clock::now();
-        auto parts = CreateGpuParts(device->Get(), options->queueType, scene);
+        auto parts = CreateGpuParts(device->Get(), options->queueType, scene, *physicsOptions);
         if (!parts) {
             Log(Channel::Physics, Level::Error, "gpu_physics_test: FAILED({})", parts.error());
             return 1;
         }
 
-        const auto first = RunGpu(*parts, *physicsOptions, tickCount, &world);
+        const auto first = RunGpu(*parts, *physicsOptions, tickCount, physicsOptions->profile ? nullptr : &world);
         if (!first) {
             Log(Channel::Physics, Level::Error, "gpu_physics_test: FAILED({})", first.error());
             return 1;
@@ -233,21 +300,23 @@ namespace {
 
         const double totalSeconds = chr::duration<double>(chr::steady_clock::now() - cpuStarted).count();
 
-        // --- 2 回目: GPU だけ。区間ごとのハッシュが同じこと ---
-        const auto second = RunGpu(*parts, *physicsOptions, tickCount, nullptr);
-        if (!second || second->hashes != first->hashes) {
-            Log(Channel::Physics, Level::Error, "gpu_physics_test: FAILED(2 回目の GPU の実行が 1 回目と食い違う{})",
-                second ? "" : std::format(": {}", second.error()));
+        const auto second = RunSecond(*parts, device->Get(), *physicsOptions, tickCount, *first);
+        if (!second) {
+            Log(Channel::Physics, Level::Error, "gpu_physics_test: FAILED({})", second.error());
             return 1;
         }
 
         if (!test::PassesValidation(*device, "gpu_physics_test"))
             return 1;
 
+        if (physicsOptions->profile)
+            ReportProfile(parts->physics, parts->queue.Native(), tickCount);
+
         Log(Channel::Physics, Level::Info,
-            "gpu_physics_test: OK({} を {} 刻みで GPU と CPU がビット一致・2 回の実行で一致。最後のハッシュ {:016x}。"
-            "GPU 1 刻み {:.2f} ms(2 回目、読み戻しを含む)/ 1 回目の合計 {:.1f} s(CPU を含む))",
-            scene.name, tickCount, first->hashes.back(), second->gpuMilliseconds / (double)tickCount, totalSeconds);
+            "gpu_physics_test: OK({} を {} 刻みで {}・2 回の実行で一致。最後のハッシュ {:016x}。"
+            "GPU 1 刻み {:.2f} ms(2 回目、読み戻しを含む)/ 1 回目の合計 {:.1f} s)",
+            scene.name, tickCount, physicsOptions->profile ? "GPU だけ(CPU と比べない)" : "GPU と CPU がビット一致",
+            first->hashes.back(), second->gpuMilliseconds / (double)tickCount, totalSeconds);
 
         return 0;
     }
