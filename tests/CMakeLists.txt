@@ -26,6 +26,10 @@ add_executable(reaction_test reaction_test.cpp)
 target_link_libraries(reaction_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME reaction COMMAND reaction_test)
 
+add_executable(multires_test multires_test.cpp)
+target_link_libraries(multires_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires COMMAND multires_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
@@ -79,6 +83,11 @@ bicameral_add_gpu_test(gpu_reaction_test)
 target_link_libraries(gpu_reaction_test PRIVATE bicameral_reaction)
 bicameral_add_gpu_test_case(gpu_reaction gpu_reaction_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --queue compute)
+
+bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
+target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute)
+# WARP は Work Graph を作る所でアクセス違反で落ちる(ADR-0013 と同じ。T-0017)ので、ハードウェアの GPU だけ
 
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)

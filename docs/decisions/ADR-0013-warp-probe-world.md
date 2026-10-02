@@ -28,3 +28,4 @@ T-0089 で、仮の世界の伝導と反応を 1 つの Work Graphs のノード
 ## 影響
 - tests/CMakeLists.txt から 2 つのテストを外した(理由をコメントに書いた)。窓のアプリを `--warp` で起こすと同じく落ちる。
 - WARP の新しい版(Agility SDK の更新)で直ったかは、`job.py run -Exe gpu_probe_sim_test -- --warp` で確かめられる。直ったら戻す。
+- 2026-10-03(T-0017): 多重解像度の Work Graph(shaders/sim/multires_graph.hlsl)も WARP では作る所で落ちたので、`gpu_multires_warp` も置かない。

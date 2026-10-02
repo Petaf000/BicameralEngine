@@ -1,36 +1,41 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0093 Nsight で物理の詰まり方・SASS の命令数 — 完了
+最終更新: 2026-10-03 / チケット: T-0017 原理: 多重解像度 — 完了
 
 ## 状態(3 行以内)
-- Nsight Graphics の GPU Trace をランナーから(ngfx)動かせるようにし、物理の山は **SM 0.9%・DRAM 1.3% = 演算でも帯域でもなく待ち時間で詰まる**と記録した。
-- 6×6 の解(1 スレッド)が 1 刻み約 2.0 ms(刻みの 56%)、山で使う色は 4〜5(16 のうち 11〜12 が空)。04 §6 の SASS の列(動的な命令数)を埋めた。
-- 次は T-0017(多重解像度)。ADR-0014 は承認済み。物理の詰めは M1 の後に T-0094(島ごと + 空の色)→ T-0095(6×6 を数スレッドで)。
+- 多重解像度の原理(R-MULTI 基準 1〜2)を確かめた: k = 0〜9 の入れ子の往復で保存量が全部の刻みでビット一致、観察の影があっても世界のハッシュ列が一致。CPU と GPU(Work Graph の再帰)が毎刻みビット一致。
+- 2026-10-03 ユーザー決定(ADR-0015): 木は比 2 のブロック(17 §1 の食い違いを直した)・粗くした余りは 64bit の端数を疎に持つ。
+- M1 の表のチケットは全部終わった。M1 の「完了の姿」の「窓で覗ける」に当たるチケットが無いので、次の前にユーザーに確認する。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(57)・`python3 tools/archmap/archmap.py --check` OK(82)。
-- `job.py test -Preset release -Filter "gpu_fixed|gpu_physics_mass_ratio"` 3/3(T-0093 で触ったのはベンチだけ。物理のシェーダーは変えていない)。
-- `job.py run -Preset release -Exe gpu_fixed_bench [-- --only <演算> --iterations n --groups n]`(全部なら表。solve6 = PxSolveSymmetric6 を足した)。
-- SASS の命令数: `python3 tools/fixed_bench/sass_count.py ps1 'out\nsight\bench' <演算 6 個まで> > ~/w/b.ps1` → `job.py raw ~/w/b.ps1` → `sass_count.py report out/nsight/bench`。
-- 物理の GPU の記録: ngfx の `--activity "GPU Trace Profiler" --exe <bin>\gpu_physics_test.exe --args "--scene pile --segment 10" --start-after-submits 30 --limit-to-submits 1
-  --architecture "Ampere GA10x" --metric-set-id 1 --auto-export` → `<out>/BASE/GPUTRACE_FRAME.xls`(タブ区切りの「指標 値」。投入全体の合計で、パスごとには出ない)。
+- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(61)・`python3 tools/archmap/archmap.py --check` OK(87)。
+- `job.py test -Filter "multires"`: multires(CPU。往復・21/24 段・影)と gpu_multires(HW。本物と影を 70 刻み毎刻み比べる)。debug でも通る(GBV あり約 33 s)。
+- `job.py run -Preset release -Exe gpu_multires_test -- --queue compute` が GPU 時間を出す(細かくする 9 段 0.19 ms・粗くする 2.3 ms・影の引き戻し 2.2 ms)。
+- 前のチケットのもの(物理・反応・仮の世界)は触っていない(bicameral_sim に bicameral_multires をリンクしただけ)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- GPU Trace の書き出し(--auto-export)は投入全体の合計だけ。パスごと・ソースの行ごとの内訳は .ngfx-gputrace(独自の圧縮形式)を GUI で開かないと見られない。
-- 静的な SASS は見られていない(GetCachedBlob は圧縮された独自形式。GUI の Shader Pipelines なら見られるはず。未確認)。
-- 空の色の Dispatch 1 回の費用(約 3 µs)は ColorRound からの見積もり(未確認)。
-- (前から)Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる。WARP の gpu_physics_test は未確認。物理の GPU 版は世界の刻みに未組み込み。
-  山の種の約 2 割で止まった後の数 cm/s の動き(BACKLOG)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
+- WARP の gpu_multires は Work Graph を作る所でアクセス違反(ADR-0013 と同じ)。ctest に置いていない。
+- 粗くする・影の引き戻しが 1 段約 250 µs(1 段 64 スレッドの連鎖。BACKLOG)。影は毎刻みなので観察 1 つで 2.2 ms/刻み。
+- この段階の制限: 段をまたぐ輸送なし(T-0019)・ブロックの枠は呼ぶ側が決める固定・端数の枠は返さない・帳簿なし(T-0018)・影は端数を持たない。
+- (前から)Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる。物理の GPU 版は世界の刻みに未組み込み。PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 04 §6「書き方の方針」は変えない(物理は処理量ではなく待ち時間で詰まっているので、逆数・int64 の範囲の見直しではなく、連鎖の中の平方根・128÷64 を減らすか並列にするのが効く)。
-- 2026-10-03 ユーザー決定(判断資料のスライドを見て、全部 Claude のおすすめ): **ADR-0014 を Accepted**。空の色は単独ではやらず T-0094 に含める。
-  6×6 は T-0095(T-0094 の後)で数スレッドに分けて解く。平方根と割り算を減らす変更は T-0095 で足りないときだけ研究として。
+- ADR-0015(Accepted): 比 2 のブロック(子ブロックは親の 4³ セルを覆う)・単位はレベル k で 8^-k µmol / 8^-k mJ・粗くした余りは 64bit の端数を疎に持つ
+  (21 段の往復までビット一致。それより深いと落ちる分を帳簿へ = T-0018)。17 §1・§5・04 §2 を直した。
+- WARP の多重解像度のテストは ADR-0013 と同じ理由で置かない(ADR-0013 に追記)。
 
 ## 次にやること
-NEXT.md の先頭(T-0017 原理: 多重解像度)。
+NEXT.md の先頭。M1 の「窓で覗ける」が要るかをユーザーに聞いてから T-0094(物理: 島ごとに 1 グループで解く)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **多重解像度(T-0017)**: 式は shaders/common/multires.hlsli(Mr 接頭辞。C++ は bicameral::multires)。CPU リファレンスは engine/src/sim/multires_nest(ライブラリ bicameral_multires)、
+  GPU は sim/gpu_multires(Work Graph shaders/sim/multires_graph.hlsl の RefineNode・CoarsenNode・PullBackNode・RemoveShadowNode と Compute の multires_step.hlsl)。
+  1 段の操作は CPU と GPU で同じ順(セルを全部書いてから見出し)。端数の枠はスレッド 0 だけが数える欄から取る(鎖が 1 本なので順が決まる)。
+  次のレベルが前のレベルの書き込みを読むので、ノードの RW バッファは globallycoherent・出力の前に `Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC)`。
+  場面は tests/multires_test_scene.h(根 = 枠 0、本物の鎖 = 枠 1〜9、影の鎖 = 枠 10〜18、点のセル (3,4,5) は 600 K の木箱)。
+- **HLSL で `point` は予約語**(multires.hlsli でも踏んだ。`coordinate` にした)。
+- **GPU の時間は暖機してから測る**: 短い投入ばかりだと GPU のクロックが上がらず、全部が 6〜8 倍に出る(T-0017 で 16 ms → 2.3 ms)。gpu_multires_test は刻みを 400 回投げてから測る。
+- 細かくした子は親と同じ数で始まるので、反応で子どうしが違わないと端数は出ない(900 K の木箱は O2 を使い切って止まり、端数が 0 だった)。
 - **Nsight(T-0093)**: ngfx は `$env:ProgramFiles\NVIDIA Corporation\Nsight Graphics 2025.2.0\host\windows-desktop-nomad-x64\ngfx.exe`。ランナー(非管理者)から動く。
   性能カウンタは NVIDIA コントロールパネルの「すべてのユーザーに GPU パフォーマンスカウンタへのアクセスを許可」(2026-10-03 にユーザーが有効にした)。無いと「GPU Performance Counters Unavailable」。
   ngfx のヘルプ(`--help-all`)は UTF-16 で出る。書き出しの .xls は ASCII のタブ区切り(UTF-16 で読むと化ける)。1 回の記録は 7〜30 秒。

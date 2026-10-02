@@ -49,6 +49,14 @@ add_library(bicameral_reaction STATIC
 target_include_directories(bicameral_reaction PUBLIC src)
 target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 
+# --- multires: 多重解像度の入れ子の細分の CPU リファレンス(17。T-0017)。GPU を知らない。浮動小数点は禁止 ---
+# 細かくする・粗くする・影の引き戻しの本体は shaders/common/multires.hlsli(HLSL と共通)。
+add_library(bicameral_multires STATIC
+  src/sim/multires_nest.cpp
+)
+target_include_directories(bicameral_multires PUBLIC src)
+target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
+
 # --- physics: 物理の場面の定義と整数のソルバーの CPU 側(08。T-0016)。GPU を知らない。浮動小数点は禁止 ---
 add_library(bicameral_physics STATIC
   src/sim/physics_scene.cpp
@@ -60,13 +68,14 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 # --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
+  src/sim/gpu_multires.cpp
   src/sim/gpu_physics.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
-target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction bicameral_physics)
+target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction bicameral_physics bicameral_multires)
 
 # --- save: セーブ・再生ファイルの読み書き(15。T-0086)。CPU だけ(GPU を知らない。CPU だけのテストがある)---
 # コマンドの形は sim/command.h(ヘッダだけ)を使う。
