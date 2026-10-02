@@ -123,7 +123,7 @@ bicameral_add_shader(render/probe_view.hlsl PROFILE ps_6_8 ENTRY PSMain NAME pro
 set(BICAMERAL_BENCH_OPERATIONS
   base32 base64 add32 mul32 div32 add64 mul64 div64 fadd fmul fdiv
   mulshift32 mulshift64 mulfull128 divs64 divshift64 div128 recip32 recip64 recips64 makerecip64
-  sqrt32 sqrt64 exp2 log2 exp ln sincos hash64)
+  sqrt32 sqrt64 exp2 log2 exp ln sincos hash64 solve6)
 set(benchIndex 0)
 foreach(operation IN LISTS BICAMERAL_BENCH_OPERATIONS)
   set(benchFlags "")

@@ -18,7 +18,7 @@ UNROLL = 4
 WIDTH_32 = {"base32", "add32", "mul32", "div32", "mulshift32", "recip32", "sqrt32", "sincos"}
 FLOAT = {"fadd", "fmul", "fdiv"}
 ORDER = ("base32 base64 add32 mul32 div32 add64 mul64 div64 fadd fmul fdiv mulshift32 mulshift64 mulfull128 divs64 "
-         "divshift64 div128 recip32 recip64 recips64 makerecip64 sqrt32 sqrt64 exp2 log2 exp ln sincos hash64").split()
+         "divshift64 div128 recip32 recip64 recips64 makerecip64 sqrt32 sqrt64 exp2 log2 exp ln sincos hash64 solve6").split()
 
 LABEL = re.compile(r"^; <label>:(\d+)")
 BRANCH_TARGET = re.compile(r"label %(\d+)")

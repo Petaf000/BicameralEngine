@@ -5,6 +5,10 @@
 //
 // ctest には登録しない(時間がかかり、結果は機械しだいで合否が無い)。走らせ方: `job.py run -Preset release -Exe gpu_fixed_bench`。
 // 引数は gpu_test_options.h(--warp・--queue)。WARP での時間は GPU の目安にならない。
+// T-0093 で足した引数(Nsight で 1 つの演算だけを記録する・1 本の連鎖の待ち時間を測るため):
+//   --only <名前>      その演算だけ(base32 / base64 / fmul は引き算に要るので、表は出さず時間だけを出す)
+//   --iterations <n>   反復回数を固定する(目標の時間に合わせない)。Nsight の命令数を 1 歩あたりに割るのに使う
+//   --groups <n>       グループの数(既定 4096 ≒ 100 万スレッド)。1 にすると GPU はほぼ空で、1 歩の時間 = 待ち時間
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -55,10 +59,11 @@ namespace {
         {.name = "ln", .description = "FxLnU64", .width = 64},
         {.name = "sincos", .description = "FxSinCosTurn32", .width = 32},
         {.name = "hash64", .description = "FxHash64", .width = 64},
+        {.name = "solve6", .description = "PxSolveSymmetric6(物理の 6×6)", .width = 64},
     };
 
     constexpr uint32_t THREADS_PER_GROUP = 256;  // fixed_bench.hlsl の numthreads
-    constexpr uint32_t GROUP_COUNT = 4096;       // 約 100 万スレッド(GPU を埋める)
+    constexpr uint32_t GROUP_COUNT = 4096;       // 約 100 万スレッド(GPU を埋める)。--groups で変えられる
     constexpr uint32_t THREAD_COUNT = THREADS_PER_GROUP * GROUP_COUNT;
     constexpr uint32_t UNROLL = 4;  // fixed_bench.hlsl の BENCH_UNROLL
     constexpr double TARGET_MILLISECONDS = 40.0;
@@ -74,6 +79,10 @@ namespace {
         ComPtr<ID3D12QueryHeap> queryHeap;
         ComPtr<ID3D12Resource> timestampReadback;
         double ticksPerMillisecond = 0;
+
+        // --- 引数(T-0093)---
+        uint32_t groupCount = GROUP_COUNT;
+        uint32_t fixedIterations = 0;  // 0: 目標の時間に合わせる
     };
 
     std::expected<BenchContext, std::string> CreateContext(ID3D12Device5* device, gpu::ImmediateQueue& queue) {
@@ -109,7 +118,7 @@ namespace {
         list->SetComputeRootUnorderedAccessView(0, context.results->GetGPUVirtualAddress());
         list->SetComputeRoot32BitConstant(1, iterationCount, 0);
         list->EndQuery(context.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
-        list->Dispatch(GROUP_COUNT, 1, 1);
+        list->Dispatch(context.groupCount, 1, 1);
         list->EndQuery(context.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
         list->ResolveQueryData(context.queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
                                context.timestampReadback.Get(), 0);
@@ -142,8 +151,8 @@ namespace {
         if (!pipeline)
             return std::unexpected("パイプラインを作れない");
 
-        uint32_t iterationCount = 4;
-        for (;;) {  // 反復回数を目標の時間に近づける(最初の 1 回はウォームアップも兼ねる)
+        uint32_t iterationCount = context.fixedIterations != 0 ? context.fixedIterations : 4;
+        while (context.fixedIterations == 0) {  // 反復回数を目標の時間に近づける(最初の 1 回はウォームアップも兼ねる)
             const auto time = RunOnce(context, pipeline.Get(), iterationCount);
             if (!time)
                 return std::unexpected(time.error());
@@ -166,7 +175,7 @@ namespace {
 
         rng::sort(times);
         const double median = times[times.size() / 2];
-        const double steps = double{THREAD_COUNT} * iterationCount * UNROLL;
+        const double steps = double{THREADS_PER_GROUP} * context.groupCount * iterationCount * UNROLL;
 
         return Measurement{
             .nanosecondsPerStep = median * 1.0e6 / steps, .iterationCount = iterationCount, .milliseconds = median};
@@ -204,10 +213,67 @@ namespace {
         }
     }
 
-    int Run(std::span<char*> arguments) {
-        const auto options = test::ParseGpuTestOptions(arguments);
+    // --- 引数(T-0093)---
+
+    struct BenchArguments {
+        std::string only;
+        uint32_t iterations = 0;
+        uint32_t groups = GROUP_COUNT;
+    };
+
+    // 自分の引数を取り除いて返す(残りは gpu_test_options.h に渡す)
+    BenchArguments TakeBenchArguments(std::vector<char*>& arguments) {
+        BenchArguments bench;
+        for (size_t index = 1; index + 1 < arguments.size();) {
+            const std::string_view name = arguments[index];
+            const std::string value = arguments[index + 1];
+            if (name == "--only")
+                bench.only = value;
+            else if (name == "--iterations")
+                bench.iterations = (uint32_t)std::stoul(value);
+            else if (name == "--groups")
+                bench.groups = std::clamp<uint32_t>((uint32_t)std::stoul(value), 1, GROUP_COUNT);
+            else {
+                ++index;
+                continue;
+            }
+
+            arguments.erase(arguments.begin() + (std::ptrdiff_t)index, arguments.begin() + (std::ptrdiff_t)index + 2);
+        }
+
+        return bench;
+    }
+
+    // --only の 1 つの演算を測り、時間だけを出す(Nsight で記録するときは 2 回目以降の投入を取る)
+    int RunOnly(const BenchContext& context, std::string_view name) {
+        for (const BenchOperation& operation : BENCH_OPERATIONS) {
+            if (name != operation.name)
+                continue;
+
+            const auto measurement = Measure(context, operation);
+            if (!measurement) {
+                Log(Channel::Gpu, Level::Error, "{}: {}", operation.name, measurement.error());
+                return 1;
+            }
+
+            const double chainNanoseconds = measurement->milliseconds * 1.0e6 / (measurement->iterationCount * UNROLL);
+            Log(Channel::Gpu, Level::Info, "{}: {} グループ × 反復 {} で {:.3f} ms(1 本の連鎖の 1 歩 {:.1f} ns)",
+                operation.name, context.groupCount, measurement->iterationCount, measurement->milliseconds,
+                chainNanoseconds);
+            return 0;
+        }
+
+        Log(Channel::Gpu, Level::Error, "知らない演算: {}", name);
+        return 2;
+    }
+
+    int Run(std::vector<char*> arguments) {
+        const BenchArguments bench = TakeBenchArguments(arguments);
+        const auto options = test::ParseGpuTestOptions(std::span(arguments));
         if (!options) {
-            Log(Channel::Gpu, Level::Error, "使い方: gpu_fixed_bench [--warp] [--queue direct|compute]");
+            Log(Channel::Gpu, Level::Error,
+                "使い方: gpu_fixed_bench [--warp] [--queue direct|compute] [--only <名前>] [--iterations <n>] "
+                "[--groups <n>]");
             return 2;
         }
 
@@ -221,14 +287,20 @@ namespace {
         if (!queue)
             return 1;
 
-        const auto context = CreateContext(device->Get(), *queue);
+        auto context = CreateContext(device->Get(), *queue);
         if (!context) {
             Log(Channel::Gpu, Level::Error, "gpu_fixed_bench: {}", context.error());
             return 1;
         }
 
+        context->groupCount = bench.groups;
+        context->fixedIterations = bench.iterations;
+
         Log(Channel::Gpu, Level::Info, "gpu_fixed_bench: adapter {}, queue {}, {} スレッド × 展開 {}",
-            gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType), THREAD_COUNT, UNROLL);
+            gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType),
+            THREADS_PER_GROUP * context->groupCount, UNROLL);
+        if (!bench.only.empty())
+            return RunOnly(*context, bench.only);
 
         std::vector<Measurement> measurements;
         for (const BenchOperation& operation : BENCH_OPERATIONS) {
@@ -249,7 +321,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
+    const int exitCode = Run(std::vector<char*>(argv, argv + argc));
     SingletonFinalizer::Finalize();  // ログを閉じる
 
     return exitCode;

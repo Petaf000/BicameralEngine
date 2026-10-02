@@ -7,6 +7,7 @@
 // 割り算の結果は小さくなるので、定数の xor で上位のビットを戻す(64bit の割り算は、上位が 0 だと速い道を通る機種がある)。
 // 計測専用なので浮動小数点を使ってよい(shaders/bench/)。シミュのコードからは使わない。
 #include "common/fixed.hlsli"
+#include "common/physics_math.hlsli"
 
 #ifndef BENCH_OP
 #define BENCH_OP 0
@@ -33,7 +34,8 @@ uint64_t Mix64(uint64_t value) {
 // --- 演算の番号(CMake の BICAMERAL_BENCH_OPERATIONS と同じ順)--------------------------------------------
 // 0 base32 / 1 base64 / 2 add32 / 3 mul32 / 4 div32 / 5 add64 / 6 mul64 / 7 div64 / 8 fadd / 9 fmul / 10 fdiv /
 // 11 mulshift32 / 12 mulshift64 / 13 mulfull128 / 14 divs64 / 15 divshift64 / 16 div128 / 17 recip32 / 18 recip64 /
-// 19 recips64 / 20 makerecip64 / 21 sqrt32 / 22 sqrt64 / 23 exp2 / 24 log2 / 25 exp / 26 ln / 27 sincos / 28 hash64
+// 19 recips64 / 20 makerecip64 / 21 sqrt32 / 22 sqrt64 / 23 exp2 / 24 log2 / 25 exp / 26 ln / 27 sincos / 28 hash64 /
+// 29 solve6(物理の 6×6 の連立方程式 PxSolveSymmetric6。T-0093)
 #if BENCH_OP == 0 || (BENCH_OP >= 2 && BENCH_OP <= 4) || BENCH_OP == 11 || BENCH_OP == 17 || BENCH_OP == 21 || \
     BENCH_OP == 27
 #define BENCH_WIDTH 32
@@ -73,6 +75,32 @@ Operand MakeOperand(uint64_t seed) {
 
     return operand;
 }
+
+#if BENCH_OP == 29
+// x から対称正定値の 6×6(対角が優位)と右辺を作って解き、解を 1 つの値に畳む。
+// 対角は 2^40 前後・非対角は ±2^15 で、物理の H(硬さと質量の項)と同じく尺度合わせ → Cholesky → 代入を全部通る
+uint64_t Solve6(uint64_t x) {
+    PxMat6 a;
+    PxVec6 g;
+    for (uint32_t i = 0; i < 6; ++i) {
+        for (uint32_t j = 0; j < 6; ++j) {
+            const uint32_t low = min(i, j);
+            const uint32_t high = max(i, j);
+            const int64_t offDiagonal = (int64_t)((x >> (low * 6 + high)) & 0xFFFFu) - 0x8000;
+            a.m[i * 6 + j] = i == j ? ((int64_t)1 << 40) + (int64_t)((x >> (i * 4)) & 0xFFFFFu) : offDiagonal;
+        }
+
+        g.v[i] = (int64_t)((x >> (i * 8)) & 0xFFFFFFFu) - 0x8000000;
+    }
+
+    const PxSolveResult solved = PxSolveSymmetric6(a, g, 24);
+    uint64_t folded = 0;
+    for (uint32_t k = 0; k < 6; ++k)
+        folded ^= (uint64_t)solved.x.v[k] << (k * 7);
+
+    return folded;
+}
+#endif
 
 // 演算 1 回(混ぜる前)
 Value Operate(Value x, Operand operand) {
@@ -128,6 +156,8 @@ Value Operate(Value x, Operand operand) {
     return (uint32_t)sinCos.sine ^ (uint32_t)sinCos.cosine;
 #elif BENCH_OP == 28
     return FxHash64(x, operand.y, 1, 2);
+#elif BENCH_OP == 29
+    return Solve6(x ^ operand.y);
 #endif
 }
 

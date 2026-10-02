@@ -1,34 +1,41 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-02 / チケット: T-0092 物理の Work Graphs 版と計測 — 完了
+最終更新: 2026-10-03 / チケット: T-0093 Nsight で物理の詰まり方・SASS の命令数 — 完了
 
 ## 状態(3 行以内)
-- 物理の GPU を部分ごとに Work Graphs と Compute で作って測り、**広域 → 接触の幾何は Work Graph・色ごとの解は Compute** にした(ADR-0002「計測」)。3 場面とも CPU とビット一致のまま。
-- 色ごとの解を「1 グループ = 1 物・点ごとにスレッド・整数の和」に替えて、1 刻み 山 12.1 → 3.75 ms・積み木 4.6 → 2.6 ms・質量比 2.7 → 1.9 ms。
-- 次は T-0093(Nsight で詰まり方と SASS の命令数)。ADR-0014(整数の AVBD)の承認の材料(GPU の費用)は ADR-0014 の末尾に書いた。ユーザーの判断待ち。
+- Nsight Graphics の GPU Trace をランナーから(ngfx)動かせるようにし、物理の山は **SM 0.9%・DRAM 1.3% = 演算でも帯域でもなく待ち時間で詰まる**と記録した。
+- 6×6 の解(1 スレッド)が 1 刻み約 2.0 ms(刻みの 56%)、山で使う色は 4〜5(16 のうち 11〜12 が空)。04 §6 の SASS の列(動的な命令数)を埋めた。
+- 次は T-0017(多重解像度)。ADR-0014 の承認と、BACKLOG の物理 2 件(空の色・6×6 を並列に/命令を減らす)はユーザーの判断待ち(材料は 08 §6「結果(T-0093)」)。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(57)・`python3 tools/archmap/archmap.py --check` OK(82)。
-- `job.py test -Preset release -Filter physics` → physics_* 7 個 + gpu_physics_* 4 個(stack・mass_ratio・pile と、採らなかった方の stack_alternative)。
-  1 回の device_bash に収まらないので `-Filter "gpu_physics_(stack|mass_ratio)$"`・`gpu_physics_pile`・`gpu_physics_stack_alternative`・`^physics_` に分ける。
-- `job.py run -Preset release -Exe gpu_physics_test -- --scene pile --profile [--broadphase compute|graph] [--solver compute|graph]` → パスごとの GPU 時間(CPU とは比べない)。
-- `job.py run -Preset release -Exe physics_lab -- --integer --scene all` → be4e95c7a2df5e17 / d19d955b5a65c469 / 422a771e9ae913f7(T-0091 から不変)。
+- `job.py test -Preset release -Filter "gpu_fixed|gpu_physics_mass_ratio"` 3/3(T-0093 で触ったのはベンチだけ。物理のシェーダーは変えていない)。
+- `job.py run -Preset release -Exe gpu_fixed_bench [-- --only <演算> --iterations n --groups n]`(全部なら表。solve6 = PxSolveSymmetric6 を足した)。
+- SASS の命令数: `python3 tools/fixed_bench/sass_count.py ps1 'out\nsight\bench' <演算 6 個まで> > ~/w/b.ps1` → `job.py raw ~/w/b.ps1` → `sass_count.py report out/nsight/bench`。
+- 物理の GPU の記録: ngfx の `--activity "GPU Trace Profiler" --exe <bin>\gpu_physics_test.exe --args "--scene pile --segment 10" --start-after-submits 30 --limit-to-submits 1
+  --architecture "Ampere GA10x" --metric-set-id 1 --auto-export` → `<out>/BASE/GPUTRACE_FRAME.xls`(タブ区切りの「指標 値」。投入全体の合計で、パスごとには出ない)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる**(DEVICE_HUNG。仕様の上限かドライバの不具合か未確認。BACKLOG)。
-- WARP の gpu_physics_test は未確認(パイプラインの JIT が終わらない。T-0090 から)。
-- 物理の GPU 版はまだ世界の刻み(ProbeSim・フレームのループ)に組み込んでいない。テストの中だけで動く。
-- (前から)山の種の約 2 割で止まった後の数 cm/s の動き(BACKLOG)。WARP は仮の世界のグラフで落ちる(ADR-0013)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
+- GPU Trace の書き出し(--auto-export)は投入全体の合計だけ。パスごと・ソースの行ごとの内訳は .ngfx-gputrace(独自の圧縮形式)を GUI で開かないと見られない。
+- 静的な SASS は見られていない(GetCachedBlob は圧縮された独自形式。GUI の Shader Pipelines なら見られるはず。未確認)。
+- 空の色の Dispatch 1 回の費用(約 3 µs)は ColorRound からの見積もり(未確認)。
+- (前から)Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる。WARP の gpu_physics_test は未確認。物理の GPU 版は世界の刻みに未組み込み。
+  山の種の約 2 割で止まった後の数 cm/s の動き(BACKLOG)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- ADR-0002 に「計測(T-0092)」を追記: 広域と接触は Work Graph(Compute と同等なので「できる限り WG」)、色ごとの解は Compute(WG は DispatchGraph の固定費 約 13〜20 µs で 1.8 倍遅い)。
-- T-0092 の Nsight の 2 項目を T-0093 に分けた(ROADMAP・NEXT)。
-- BACKLOG に 4 件(島ごとに 1 グループで解く案〔ユーザーの判断待ち〕・空の色を飛ばす・6×6 の分解の並列化・ノードの局所の変数の上限)。
+- 04 §6「書き方の方針」は変えない(物理は処理量ではなく待ち時間で詰まっているので、逆数・int64 の範囲の見直しではなく、連鎖の中の平方根・128÷64 を減らすか並列にするのが効く)。
+- BACKLOG の物理 2 件に T-0093 の材料を書いた(採るかはユーザー)。ADR は無し。
 
 ## 次にやること
-NEXT.md の先頭(T-0093)。
+NEXT.md の先頭(T-0017 原理: 多重解像度)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **Nsight(T-0093)**: ngfx は `$env:ProgramFiles\NVIDIA Corporation\Nsight Graphics 2025.2.0\host\windows-desktop-nomad-x64\ngfx.exe`。ランナー(非管理者)から動く。
+  性能カウンタは NVIDIA コントロールパネルの「すべてのユーザーに GPU パフォーマンスカウンタへのアクセスを許可」(2026-10-03 にユーザーが有効にした)。無いと「GPU Performance Counters Unavailable」。
+  ngfx のヘルプ(`--help-all`)は UTF-16 で出る。書き出しの .xls は ASCII のタブ区切り(UTF-16 で読むと化ける)。1 回の記録は 7〜30 秒。
+  記録は投入(ExecuteCommandLists)単位で `--start-after-submits`・`--limit-to-submits` で選ぶ(窓の無いテストでも使える)。
+- **診断の作法(T-0093)**: シェーダーの一部の費用は「同じ計算をもう 1 回させて結果を捨てる(使ったことにするため、ありえない値のときだけ統計に足す)」で測った。ハッシュが変わらないことを確かめる。コミットしない。
+- gpu_fixed_bench の `--iterations` を付けると調整なしで 5 回だけ投げる(投入 0〜4)。`--groups 1` は 1 グループ(8 ワープ)で、1 歩の時間 ≈ 1 本の連鎖の待ち時間。
 - **物理の GPU の構成(T-0092)**: 小刻み = BeginSubstep → **Work Graph(physics_graph.hlsl の BroadphaseNode → NarrowphaseNode)** → BuildManifolds(Compute)→ PrepareManifolds →
   彩色 → 反復(探し直し・**SolveColor = 1 グループ 64 スレッド = 1 物**・UpdateDuals)→ Finish。呼ぶ順は gpu_physics.cpp の RecordSubstep / RecordIterations。
   バッファとルート定数と共有の関数(CollectCandidates・CollideGeometry・BuildSlot・SolveBodyInGroup・FindPrevious)は shaders/sim/physics_bindings.hlsli(Compute とグラフで共有)。
