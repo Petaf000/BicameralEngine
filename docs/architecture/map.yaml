@@ -37,7 +37,7 @@ views:
       - { id: framelib, label: "フレームのループ(T-0004)" }
       - { id: simlib, label: "sim(仮の刻み。中身の本物は T-0005 以降)" }
       - { id: savelib, label: "save(再生ファイル。CPU だけ)" }
-      - { id: physicslib, label: "physics(整数の AVBD の CPU の世界。T-0016。GPU は T-0090)" }
+      - { id: physicslib, label: "physics(整数の AVBD の CPU の世界。T-0016。GPU のリファレンス)" }
       - { id: labtools, label: "試作の道具(tools/。浮動小数点可)" }
       - { id: corelib, label: "core(どこからでも使う部品)" }
       - { id: gpulib, label: "gpu(D3D12 の小さな道具)" }
@@ -191,6 +191,15 @@ views:
       - { id: physicssolve, group: shared, label: "PxSolveSymmetric6<br/>2 の冪の対称スケーリング + Q62 の Cholesky",
           code: "shaders/common/physics_math.hlsli::PxSolveSymmetric6", ticket: T-0016, doc: docs/decisions/ADR-0014-integer-avbd.md,
           note: "対角を [2^60, 2^62) に揃えると |L| ≤ 1 で溢れない。硬さの上限 = 軽い方の M/h² × 2^20 で条件数を抑える" }
+      - { id: physicsstep, group: shared, label: "physics_step.hlsli<br/>物・組・接触点ごとの手順と構造体(CPU と GPU で共通)",
+          code: "shaders/common/physics_step.hlsli::PxBuildManifold", ticket: T-0090, doc: docs/design/08-bodies-physics.md,
+          note: "順番に依存しない: 6×6 への足し込みは整数の和、β は最大値、彩色は前の回の色だけを読む" }
+      - { id: gpuphysics, group: simlib, label: "GpuPhysics::RecordStep<br/>Compute のパスの列(広域 → 接触 → 彩色 → 反復 → 仕上げ)",
+          code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordSubstep", ticket: T-0090, doc: docs/design/08-bodies-physics.md,
+          note: "shaders/sim/physics_step.hlsl。組は持ち主の物の枠に。色と彩色の回数は固定の数だけ投げる(T-0092 で詰める)" }
+      - { id: gpuphysicstest, group: tests, label: "gpu_physics_test<br/>3 場面の全部の刻みを GPU と CPU で比べる",
+          code: "tests/gpu_physics_test.cpp::RunGpu", ticket: T-0090,
+          note: "区間ごとに状態のハッシュと統計。GPU は 2 回走らせて一致も見る。GPU-based validation は切る(計装が終わらない)" }
       - { id: physicstest, group: tests, label: "physics_test<br/>平方根・6×6 と double / 場面の基準・決定性",
           code: "tests/physics_test.cpp::TestScene", ticket: T-0016,
           note: "release では FX_ASSERT を有効にした checked 版でも全部の刻みを走らせる(桁あふれの確認)" }
@@ -268,6 +277,12 @@ views:
       - [physicssolve, fixed]
       - [physicstest, physicsworld]
       - [physicslab, physicsworld, "同じ場面で比べる"]
+      - [physicsworld, physicsstep, "物・組ごとの手順"]
+      - [gpuphysics, physicsstep, "同じ関数(.cso)"]
+      - [physicsstep, physicscollide]
+      - [physicsstep, physicssolverhlsl]
+      - [gpuphysicstest, gpuphysics]
+      - [gpuphysicstest, physicsworld, "ビット一致"]
       - [gpureactiontest, reactionhlsl, "GPU(.cso)と CPU で同じ関数"]
       - [gpureactiontest, immediate, "compute キュー"]
       - [debugringhlsl, debugring, "読み戻し(フレームの終わり)"]
@@ -354,7 +369,8 @@ views:
           code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
           note: "核は T-0014(reaction.hlsli)。T-0089 で仮の世界の段に: 伝導の後にその場で評価。遅すぎる反応は 0 なので、進めないブロックは眠れる" }
       - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
-          doc: docs/design/08-bodies-physics.md, ticket: T-0090, note: "研究 R-PHYS。CPU の世界は T-0016(PhysicsWorld)。GPU に載せるのは T-0090" }
+          doc: docs/design/08-bodies-physics.md, ticket: T-0092, code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordStep",
+          note: "研究 R-PHYS。CPU の世界は T-0016(PhysicsWorld)。GPU の Compute は T-0090(CPU とビット一致)。Work Graphs 版と測って選ぶのは T-0092。世界の刻みへの組み込みは未" }
       - { id: creatures, group: sim, status: planned, label: "6 生き物", doc: docs/design/09-creatures-animation.md }
       - { id: couple, group: sim, status: planned, label: "7 結合(物 ↔ 場)", doc: docs/design/08-bodies-physics.md }
       - { id: coarse, group: sim, status: planned, label: "8 粗い層(60 刻みに 1 回)", doc: docs/design/05-world-data.md }

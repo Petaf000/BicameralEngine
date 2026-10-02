@@ -80,6 +80,12 @@ target_link_libraries(gpu_reaction_test PRIVATE bicameral_reaction)
 bicameral_add_gpu_test_case(gpu_reaction gpu_reaction_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --queue compute)
 
+bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
+target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
+foreach(_scene IN ITEMS stack mass_ratio pile)
+  bicameral_add_gpu_test_case(gpu_physics_${_scene} gpu_physics_test gpu --scene ${_scene})
+endforeach()
+
 # 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
 # 走らせ方: job.py run -Preset release -Exe gpu_fixed_bench
 bicameral_add_gpu_test(gpu_fixed_bench)

@@ -67,7 +67,7 @@ FX_FN PxAxisCandidate PxTestAxis(PxBox a, PxBox b, PxVec3 offset, PxVec3 axis, u
     const int64_t distance = PxDot(offset, axis, PX_UNIT_SHIFT);
     PxAxisCandidate candidate;
     candidate.separation = PxAbs(distance) - PxProjectedRadius(a, axis) - PxProjectedRadius(b, axis);
-    candidate.normal = distance < 0 ? PxNegate(axis) : axis;
+    candidate.normal = PxSelect(distance < 0, PxNegate(axis), axis);
     candidate.kind = kind;
     candidate.indexA = indexA;
     candidate.indexB = indexB;
@@ -270,10 +270,16 @@ FX_FN PxPolygon PxClipToReferenceSides(PxPolygon polygon, PxBox reference, uint3
 // 面の接触(a は原点に置いた A、b は A の中心からの相対の B)
 FX_FN PxContactGeometry PxMakeFaceContact(PxBox a, PxBox b, PxAxisCandidate axis, int64_t margin) {
     const bool referenceIsA = axis.kind == 0;
-    const PxBox reference = referenceIsA ? a : b;
-    const PxBox incident = referenceIsA ? b : a;
+    PxBox reference = b;
+    PxBox incident = a;
+    if (referenceIsA) {
+        reference = a;
+        incident = b;
+    }
+
     const uint32_t referenceAxis = referenceIsA ? axis.indexA : axis.indexB;
-    const PxVec3 referenceNormal = referenceIsA ? axis.normal : PxNegate(axis.normal);  // 参照面の外向き(相手の方)
+    const PxVec3 referenceNormal = PxSelect(referenceIsA, axis.normal,
+                                            PxNegate(axis.normal));  // 参照面の外向き(相手の方)
     const PxFace incidentFace = PxFindIncidentFace(incident, referenceNormal);
     const PxPolygon polygon = PxClipToReferenceSides(PxFacePolygon(incident, incidentFace), reference, referenceAxis);
 
@@ -297,8 +303,8 @@ FX_FN PxContactGeometry PxMakeFaceContact(PxBox a, PxBox b, PxAxisCandidate axis
             continue;
 
         const PxVec3 onReference = PxSub(position, PxScale(referenceNormal, separation, PX_UNIT_SHIFT));
-        points[count].pointA = referenceIsA ? onReference : position;
-        points[count].pointB = referenceIsA ? position : onReference;
+        points[count].pointA = PxSelect(referenceIsA, onReference, position);
+        points[count].pointB = PxSelect(referenceIsA, position, onReference);
         points[count].separation = separation;
         points[count].feature = faceBits | polygon.id[v];
         count += 1;

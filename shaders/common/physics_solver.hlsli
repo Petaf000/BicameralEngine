@@ -22,24 +22,28 @@ FX_CONST uint32_t PX_GAP_TO_CONSTRAINT_SHIFT = 18;   // 隙間(2^-20 m)× 方向
 FX_CONST int64_t PX_GRAVITY = 10283018;              // 9.80665 m/s²(2^-20 m/s²)
 
 // --- パラメータ(試作で決めた値。T-0016 のチケット)--------------------------------------------
+// GPU の構造化バッファでも同じ並びになるように、64bit の値を先に、32bit の値を後に置く(T-0090。physics_step.hlsli の約束)
 struct PxParameters {
-    uint32_t iterations;
-    uint32_t substeps;   // 1 刻みを何回に分けるか(分けるたびに接触を作り直す)
-    int64_t gammaQ16;    // 刻みをまたいだ硬さの引き継ぎの割合
-    int64_t penaltyMin;  // 硬さの下限(2^-8 N/m)
-    int64_t penaltyMax;  // 硬さの上限(2^-8 N/m)
-    uint32_t
-        penaltyRatioShift;  // 硬さの上限その 2: 組の軽い方(動く物)の M/h² × 2^これ。6×6 の条件数を抑え、整数の解の桁を保証する
+    // --- 硬さ ---
+    int64_t gammaQ16;         // 刻みをまたいだ硬さの引き継ぎの割合
+    int64_t penaltyMin;       // 硬さの下限(2^-8 N/m)
+    int64_t penaltyMax;       // 硬さの上限(2^-8 N/m)
     int64_t betaPerKilogram;  // 硬さの増え方 β(N/m² を 1 kg あたり。組の両方に触れている物の中で一番重い質量を掛ける)
     int64_t startPenaltyQ16;  // 組の硬さの下限 = これ × 組の質量 / h²
-    int64_t collisionMargin;  // この距離まで離れていても接触を作る(2^-20 m。これに相対速度 × h を足す)
-    int64_t stickThreshold;   // 静止摩擦で接触点を保つ、接線のずれの上限(2^-32 m)
 
-    // --- T-0091 ---
-    int64_t gapSlop;              // 本反復で、これ以下の隙間は触れているとみなす(2^-32 m)
-    int64_t proximityMatch;       // 特徴の番号が合わない点は、これ以内の前の点から λ を引き継ぐ(2^-20 m)
-    uint32_t recollideIteration;  // この反復の前に、今の推定の姿勢で接触を探し直す(PX_NO_RECOLLIDE = しない)
-    int64_t recollideMinMotion;   // 組の 1 刻みの動きがこれを超える時だけ探し直す(2^-32 m)
+    // --- 接触 ---
+    int64_t collisionMargin;     // この距離まで離れていても接触を作る(2^-20 m。これに相対速度 × h を足す)
+    int64_t stickThreshold;      // 静止摩擦で接触点を保つ、接線のずれの上限(2^-32 m)
+    int64_t gapSlop;             // 本反復で、これ以下の隙間は触れているとみなす(2^-32 m。T-0091)
+    int64_t proximityMatch;      // 特徴の番号が合わない点は、これ以内の前の点から λ を引き継ぐ(2^-20 m。T-0091)
+    int64_t recollideMinMotion;  // 組の 1 刻みの動きがこれを超える時だけ探し直す(2^-32 m。T-0091)
+
+    // --- 32bit ---
+    uint32_t iterations;
+    uint32_t substeps;  // 1 刻みを何回に分けるか(分けるたびに接触を作り直す)
+    uint32_t
+        penaltyRatioShift;  // 硬さの上限その 2: 組の軽い方(動く物)の M/h² × 2^これ。6×6 の条件数を抑え、整数の解の桁を保証する
+    uint32_t recollideIteration;  // この反復の前に、今の推定の姿勢で接触を探し直す(PX_NO_RECOLLIDE = しない。T-0091)
 };
 
 FX_CONST uint32_t PX_NO_RECOLLIDE = 0xFFFFFFFFu;
@@ -110,11 +114,11 @@ FX_FN int64_t PxConstraintValue(PxRow row, bool isNormal, int64_t alphaQ16, int6
     const int64_t gapThreshold = alphaQ16 == 65536 ? gapSlop : 0;
     const bool isGap = isNormal && row.c0 > gapThreshold;
     const int64_t initial = isGap ? row.c0 : row.c0 - FxMulShiftS64(row.c0, alphaQ16, 16);
-    const int64_t linear = PxDot(row.direction, PxSub(deltaLinearB, deltaLinearA), PX_UNIT_SHIFT);
-    const int64_t angular = PxDot(row.angularA, deltaAngularA, PX_UNIT_SHIFT) +
-                            PxDot(row.angularB, deltaAngularB, PX_UNIT_SHIFT);
+    const int64_t linearPart = PxDot(row.direction, PxSub(deltaLinearB, deltaLinearA), PX_UNIT_SHIFT);
+    const int64_t angularPart = PxDot(row.angularA, deltaAngularA, PX_UNIT_SHIFT) +
+                                PxDot(row.angularB, deltaAngularB, PX_UNIT_SHIFT);
 
-    return initial + linear + angular;
+    return initial + linearPart + angularPart;
 }
 
 // 力 f = clamp(k C + λ, 下限, 上限)(2^-16 N)
@@ -145,8 +149,11 @@ FX_FN PxBodySystem PxBeginBodySystem(int64_t massOverH2, PxMat3 inertiaWorld, Px
 }
 
 // 拘束の行 1 つ: rhs += J f、lhs += k J Jᵀ。J = (向き(Q30), 角(2^-30 m))
-FX_FN PxBodySystem PxAddRow(PxBodySystem system, PxVec3 linear, PxVec3 angular, int64_t penalty, int64_t force) {
-    int64_t jacobian[6] = {linear.x, linear.y, linear.z, angular.x, angular.y, angular.z};
+// (HLSL では linear が補間の修飾子なので、引数の名前に使えない)
+FX_FN PxBodySystem PxAddRow(PxBodySystem system, PxVec3 linearJacobian, PxVec3 angularJacobian, int64_t penalty,
+                            int64_t force) {
+    int64_t jacobian[6] = {linearJacobian.x,  linearJacobian.y,  linearJacobian.z,
+                           angularJacobian.x, angularJacobian.y, angularJacobian.z};
     for (uint32_t i = 0; i < 6; ++i) {
         system.rhs.v[i] += FxMulShiftS64(jacobian[i], force, PX_UNIT_SHIFT);
         const int64_t scaled = FxMulShiftS64(penalty, jacobian[i], PX_UNIT_SHIFT);

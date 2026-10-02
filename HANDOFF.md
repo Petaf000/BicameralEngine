@@ -1,32 +1,41 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-01 / チケット: T-0091 衝突の食い込みと摩擦の滑り(研究)— 完了
+最終更新: 2026-10-02 / チケット: T-0090 物理を GPU に(Compute で CPU とビット一致)— 完了
 
 ## 状態(3 行以内)
-- 岩の山の 2 つの未達を直した(08 §6「結果(T-0091)」)。原因はバグ 2 つ(切り抜きの特徴の番号の重複・切り抜きが空で接触なし)+ 回る箱の次の角 + 軽い箱が沈む + 仕上げの押し出し過ぎの隙間に落ちる。
-  double の山 種 1〜48 で両方の基準を満たす割合 0/48 → 38/48。整数版にも入れ、physics_test の pile を基準(2 cm・1 cm/s)に戻した。残り(種の約 2 割の止まった後の動き)は BACKLOG。
-- 次は T-0090(物理を GPU に。ADR-0014 の承認はそこで GPU の費用を測ってから)。
+- 整数の AVBD の 1 刻みを GPU の Compute で走らせ、3 場面の全部の刻みで CPU とビット一致・2 回で一致した(08 §6「結果(T-0090)」)。
+  手順は shaders/common/physics_step.hlsli に移し、CPU の PhysicsWorld と GPU(shaders/sim/physics_step.hlsl・sim::GpuPhysics)が同じ関数を呼ぶ。
+- 次は T-0092(Work Graphs 版を作って Compute と測って選ぶ・Nsight。ADR-0014 の承認の材料)。速さは今 1 刻み 2.7〜12 ms(最適化なし)。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(55)・`python3 tools/archmap/archmap.py --check` OK(77)。
-- `job.py test -Preset release -Filter physics` → 7/7(pile 49 s・pile_checked 45 s)。`job.py test -Filter physics`(debug、480 刻み)→ 4/4。GPU のテストは今回触っていない。
-- `job.py run -Preset release -Exe physics_lab -- [--integer] --scene all` → 3 場面とも OK。整数の山の最後のハッシュ 422a771e9ae913f7(Linux の g++ でも同じ)。
-  新しい引数: `--recollide n(-1 = しない)` `--recollide-min-motion m` `--slop m` `--proximity m`。
+- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(57)・`python3 tools/archmap/archmap.py --check` OK(81)。
+- `job.py test -Preset release -Filter physics` → physics_* 7 個 + gpu_physics_* 3 個(release は全部の刻み。pile は 100 s ほど)。debug の gpu_physics_* は初めの 120 刻み(各約 65 s)。
+- `job.py run -Preset release -Exe gpu_physics_test -- --scene pile [--ticks n] [--segment n]` → 最後のハッシュ 422a771e9ae913f7(CPU・physics_lab --integer と同じ)。
+- `job.py run -Preset release -Exe physics_lab -- --integer --scene all` → be4e95c7a2df5e17 / d19d955b5a65c469 / 422a771e9ae913f7(T-0091 から不変)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 山の種の約 2 割で、止まった後に数 cm/s の動きが残る(2 点で支えた箱がゆっくり回る・摩擦の上限の箱が一度滑る)。種 1 は通る。反復 100 なら出ない(収束の問題)→ BACKLOG(眠り T-0044 の時に)。
-- 整数の CPU の山は 31 → 45 s に遅くなった(探し直しの接触の生成・点が最大 8)。GPU は T-0090。
-- (前から)WARP は仮の世界のグラフで落ちる(ADR-0013)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
+- WARP の gpu_physics_test はパイプラインの JIT が 160 s で終わらず未確認(ctest に WARP の版は登録していない)。
+- 物理の GPU 版はまだ世界の刻み(ProbeSim・フレームのループ)に組み込んでいない。テストの中だけで動く。
+- (前から)山の種の約 2 割で止まった後の数 cm/s の動き(BACKLOG)。WARP は仮の世界のグラフで落ちる(ADR-0013)。PIX・`--replay --bisect`・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 物理の手順に 4 つ足した(double と整数で同じ。08 §6): 反復の 5 回目の前に今の推定の姿勢で接触を探し直す(動き 5 mm 超の組だけ・組は増やさない)/
-  β = βkg × 組に触れている一番重い質量 / 本反復は 1 mm 以下の隙間を触れているとみなす / 特徴の番号が合わない点は 2 cm 以内の前の点から 1 対 1 で引き継ぐ。
-- 接触の点の特徴の番号の作り方を変えた(境界の組。physics_collision.hlsli の PxClipId)。ADR-0014 に値の幅の追記(1bit 増えた所がある程度)。
+- T-0090 を 2 つに分けた: T-0090 = Compute で CPU とビット一致 / T-0092 = Work Graphs 版・測って選ぶ・Nsight(ROADMAP に追記)。
+- GPU の組の置き場所は「持ち主」の物の枠(片方が動かない物なら動く方、それ以外は小さい番号)。固定の数: 枠 16・一覧 24・彩色 24 回・色 16(足りなければ overflow の印)。
+- PxParameters の欄を 64bit を先に並べ替えた(GPU の構造化バッファと同じ並び。大きさ 96 の static_assert)。
 
 ## 次にやること
-NEXT.md の先頭(T-0090)。
+NEXT.md の先頭(T-0092)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **物理の GPU(T-0090)**: パスは shaders/sim/physics_step.hlsl(入口 12 個 → `physics_<snake>.cso`。shaders/CMakeLists.txt の foreach)、呼ぶ順は gpu_physics.cpp の RecordSubstep
+  (PhysicsWorld::Substep と同じ順に揃える。片方を変えたらもう片方も)。物・組・点の構造体は physics_step.hlsli で、C++ と HLSL の並びを揃えるため 64bit を 8 の倍数の位置に置き bool を使わない
+  (大きさは physics_world.h の static_assert: 物 448・点 368・組 3016・パラメータ 96)。組は構造化バッファの要素の上限 2048 B を超えるので GPU では見出し(u1)と点(u9)に分けている。
+- **gpu_physics_test は GPU-based validation を切っている**(debug の -Od のシェーダーの計装でパイプラインの作成が数分を超えた)。debug layer は有効。
+  パイプライン 12 個の作成は debug で ctest の下だと約 60 s かかる(job.py run だとドライバのキャッシュで数秒のことがある)。パイプラインは 1 回だけ作って 2 回の実行で使い回している。
+- HLSL で `point`・`half` も変数名に使えない(`point` はジオメトリシェーダーの修飾子、`half` は型。浮動小数点の検査も落とす)。physics_step.hlsli では `contactPoint`。
+- 物理の GPU は区間の数(色・彩色の回数)を読み戻さずに固定の数だけ投げる。統計の overflow(gpu_physics.h)が 0 でなければ結果は信用できない。
+- ランナーが止まっていたら、画面操作で起動できる: エクスプローラーで H:\BicameralEngine\.bicameral-runner\start-runner.cmd をダブルクリック(git 管理外。PowerShell の窓が開く)。
+  エクスプローラーと PowerShell は「見る・左クリック」だけの許可なので、打鍵はできない。Google ドライブの窓が手前に来ると操作が止まるので、それも許可に入れる。
 - **物理の試作を Linux で速く回す**(T-0091): device_bash の Linux に g++ 11 がある。tools/physics_lab の avbd_solver.cpp・box_collision.cpp と
   engine/src/sim/physics_scene.cpp(整数版なら physics_world.cpp も)を `g++ -O2 -std=c++20 -I tools/physics_lab -I engine/src -I shaders` で、小さな main と一緒にビルドできる
   (physics_lab.cpp は <format> が g++ 11 に無いので使わない)。double の山 1 種 3 s、2 コアで種 48 個を 80 s。整数版のハッシュは MSVC と一致する。

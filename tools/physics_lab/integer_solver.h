@@ -83,7 +83,7 @@ namespace bicameral::lab {
                                  (double)source.rotation.z / ONE, (double)source.rotation.w / ONE};
                 body.velocity = vec(source.velocity, METER);
                 body.angularVelocity = vec(source.angularVelocity, METER);
-                body.active = source.active;
+                body.active = source.active != 0;
                 if (!body.IsDynamic() || !body.active)
                     continue;
 

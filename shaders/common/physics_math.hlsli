@@ -107,6 +107,14 @@ FX_FN PxVec3 PxSub(PxVec3 a, PxVec3 b) {
     return PxMakeVec3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
+// cond ? a : b(HLSL の ?: は構造体を返せない)
+FX_FN PxVec3 PxSelect(bool cond, PxVec3 a, PxVec3 b) {
+    if (cond)
+        return a;
+
+    return b;
+}
+
 FX_FN PxVec3 PxNegate(PxVec3 a) {
     return PxMakeVec3(-a.x, -a.y, -a.z);
 }
@@ -181,7 +189,13 @@ struct PxMat3 {
 };
 
 FX_FN PxVec3 PxMatRow(PxMat3 m, uint32_t i) {
-    return i == 0 ? m.row0 : (i == 1 ? m.row1 : m.row2);
+    if (i == 0)
+        return m.row0;
+
+    if (i == 1)
+        return m.row1;
+
+    return m.row2;
 }
 
 FX_FN PxVec3 PxColumn(PxMat3 m, uint32_t j) {

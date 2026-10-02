@@ -1,77 +1,40 @@
-// physics_world.h — 整数の AVBD(08 §2。T-0016 研究 R-PHYS-1)の CPU の世界。式は shaders/common/physics_*.hlsli にあり、
-// ここは呼ぶ順番(接触の生成 → λ と硬さの引き継ぎ → 慣性の目標 → 線形化 → 彩色 → 反復(途中で接触の探し直し)→ 速度 → 位置の仕上げ)と、
-// 刻みをまたいで残す接触(組ごと・点の特徴ごと)を持つ。T-0090 で GPU に同じ手順を載せ、これをリファレンスにする。
+// physics_world.h — 整数の AVBD(08 §2。T-0016 研究 R-PHYS-1)の CPU の世界。GPU(T-0090、shaders/sim/physics_step.hlsl)のリファレンス。
+// 物ごと・組ごと・接触点ごとの手順と構造体は shaders/common/physics_step.hlsli(GPU と共通)にあり、ここは呼ぶ順番
+// (活性 → 接触の生成と引き継ぎ → β → 硬さの引き継ぎ → 物の初期化 → 線形化 → 彩色 → 反復(途中で接触の探し直し)→ 速度 → 位置の仕上げ)と、
+// 刻みをまたいで残す接触(組ごと)を持つ。組は std::map で (小さい番号, 大きい番号) の順に持つ(GPU は持ち主の物の枠。順番に依存しない理由は physics_step.hlsli)。
 //
 // データの流れ: PhysicsScene(整数の場面)→ PhysicsWorld → Step() を繰り返す → Bodies()・Stats()・StateHash()
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <map>
 #include <utility>
 #include <vector>
 
-#include "common/physics_collision.hlsli"
-#include "common/physics_solver.hlsli"
+#include "common/physics_step.hlsli"
 #include "sim/physics_scene.h"
 
 namespace bicameral::sim {
 
-    struct PhysicsBody {
-        // --- 形と質量(0 = 動かない)---
-        physics::PxVec3 halfExtent{};  // 2^-20 m
-        uint64_t massMilligrams = 0;
-        int64_t massOverH2 = 0;           // M/h²(2^-8 N/m)
-        physics::PxVec3 inertiaOverH2{};  // 局所の主慣性モーメント / h²(2^-8 N·m/rad)
-        int64_t boundingRadius = 0;       // 外接球の半径(2^-20 m)
+    using PhysicsBody = physics::PxBody;
+    using PhysicsContactPoint = physics::PxContactPoint;
+    using PhysicsManifold = physics::PxManifold;
 
-        // --- 状態 ---
-        physics::PxVec3 position{};         // 2^-20 m
-        physics::PxQuat rotation{};         // Q1.30
-        physics::PxVec3 velocity{};         // 2^-20 m/s
-        physics::PxVec3 angularVelocity{};  // 2^-20 rad/s
-        physics::PxVec3 previousVelocity{};
-        bool active = false;
+    // HLSL の構造化バッファと同じ並び(physics_step.hlsli の約束。変えたら GPU のテストも確かめる)
+    static_assert(sizeof(PhysicsBody) == 448);
+    static_assert(sizeof(PhysicsContactPoint) == 368);
+    static_assert(sizeof(PhysicsManifold) == 3016);
+    static_assert(sizeof(physics::PxParameters) == 96);
 
-        // --- 刻みの中(2^-32 m・2^-32 rad)---
-        physics::PxVec3 startPosition{};
-        physics::PxQuat startRotation{};
-        physics::PxMat3 inertiaWorld{};  // 回転の I/h²(世界の向き)
-        physics::PxVec3 inertialLinear{};
-        physics::PxVec3 inertialAngular{};
-        physics::PxVec3 deltaLinear{};
-        physics::PxVec3 deltaAngular{};
-        int32_t color = -1;
-
-        [[nodiscard]] bool IsDynamic() const { return massMilligrams > 0; }
-    };
-
-    struct PhysicsContactPoint {
-        uint32_t feature = 0;
-        physics::PxVec3 normal{};  // A → B(Q1.30。点ごと。途中で探し直した点は、その姿勢の法線)
-        physics::PxVec3 localA{};  // A の局所座標での接触点(2^-20 m)
-        physics::PxVec3 localB{};
-        std::array<physics::PxRow, 3> rows{};  // 法線・接線 2 本
-        bool stick = false;
-    };
-
-    struct PhysicsManifold {
-        uint32_t bodyA = 0;
-        uint32_t bodyB = 0;
-        physics::PxVec3 normal{};  // A → B(Q1.30)
-        int64_t frictionQ16 = 0;
-        int64_t beta = 0;        // 硬さの増え方(N/m²。組の両方に触れている物の中で一番重い質量 × β)
-        int64_t minPenalty = 0;  // 組の硬さの下限(2^-8 N/m)
-        int64_t maxPenalty = 0;  // 組の硬さの上限(2^-8 N/m)
-        std::array<PhysicsContactPoint, 8> points{};  // 接触の生成で 4 点まで + 途中の探し直しで 4 点まで
-        uint32_t count = 0;
-    };
+    // 場面の 1 つの物から、刻みを始める前の物を作る
+    [[nodiscard]] PhysicsBody MakePhysicsBody(const PhysicsSceneBody& source, int64_t rate);
 
     // 刻みごとの量と、値の幅の記録(研究 R-PHYS-1: 各量の最大のビット数)
     struct PhysicsStepStats {
         int64_t maxPenetration = 0;  // 刻みの初めの接触の最大の食い込み(2^-20 m)
         uint32_t contactCount = 0;
         uint32_t colorCount = 0;
+        uint32_t colorRounds = 0;    // 彩色の回数(GPU の回数の上限を決める材料)
         uint32_t solveFailures = 0;  // 6×6 の分解で対角が 0 以下になった回数
 
         // --- 最大のビット数(符号を除く)---
@@ -96,21 +59,14 @@ namespace bicameral::sim {
         }
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
 
-        // 全部の物の位置・向き・速度のハッシュ(2 回の実行の一致・T-0090 の GPU との一致に使う)
+        // 全部の物の位置・向き・速度のハッシュ(2 回の実行の一致・GPU との一致に使う)
         [[nodiscard]] uint64_t StateHash() const;
 
     private:
         void Substep();
         void UpdateActivity();
         void UpdateContacts();
-        void AddManifold(uint32_t a, uint32_t b, const physics::PxContactGeometry& geometry,
-                         std::map<std::pair<uint32_t, uint32_t>, PhysicsManifold>& next);
-        void MatchByProximity(const PhysicsBody& bodyA, const PhysicsManifold& old, PhysicsManifold& manifold) const;
         void UpdateBetas();
-        void RecollideMidStep();
-        void AddRecollidedPoints(PhysicsManifold& manifold);
-        void LinearizePoint(const PhysicsManifold& manifold, PhysicsContactPoint& point) const;
-        [[nodiscard]] int64_t StepMotion(const PhysicsBody& body) const;
         void WarmStart();
         void InitializeBodies();
         void Linearize();
@@ -119,20 +75,14 @@ namespace bicameral::sim {
         [[nodiscard]] std::vector<uint32_t> ChooseLocalMaxima(
             const std::vector<std::vector<uint32_t>>& neighbors) const;
         void AssignSmallestColor(uint32_t index, const std::vector<uint32_t>& neighbors);
+        void RecollideMidStep();
         void SolveColor(int32_t color, int64_t alphaQ16);
         void SolveBody(uint32_t index, int64_t alphaQ16);
-        [[nodiscard]] physics::PxBodySystem AddContactRows(physics::PxBodySystem system,
-                                                           const PhysicsManifold& manifold, bool isA,
-                                                           int64_t alphaQ16) const;
         void RecordSystemBits(const physics::PxBodySystem& system);
         void UpdateDuals(int64_t alphaQ16);
-        void UpdatePointDuals(PhysicsContactPoint& point, const PhysicsManifold& manifold, int64_t alphaQ16);
+        void RecordPointBits(const PhysicsContactPoint& point);
         void UpdateVelocities();
         void Finish();
-
-        [[nodiscard]] physics::PxBox ShapeOf(const PhysicsBody& body) const;
-        [[nodiscard]] int64_t ConstraintValue(const PhysicsManifold& manifold, const physics::PxRow& row, bool isNormal,
-                                              int64_t alphaQ16) const;
 
         PhysicsScene m_scene;
         physics::PxParameters m_parameters;

@@ -229,7 +229,7 @@ namespace {
         double speed = 0;
         double energy = 0;
         for (const sim::PhysicsBody& body : world.Bodies()) {
-            if (!body.IsDynamic() || !body.active)
+            if (!physics::PxIsDynamic(body) || body.active == 0)
                 continue;
 
             speed = std::max(speed, SpeedOf(body));
