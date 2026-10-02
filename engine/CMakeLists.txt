@@ -71,6 +71,7 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 add_library(bicameral_sim STATIC
   src/sim/gpu_multires.cpp
   src/sim/gpu_physics.cpp
+  src/sim/probe_peek.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
 )

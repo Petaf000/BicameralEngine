@@ -12,6 +12,11 @@ namespace bicameral::render {
 
         constexpr uint32_t SLICE_FAST_STEP = 8;  // Shift を押しながら断面を動かす幅
 
+        // 覗き窓で潜った段 k のカメラの距離 = これ × 2^-k(セル)。画面の高さに段のブロックが約 2.5 個入る
+        constexpr float PEEK_BASE_DISTANCE = 24.0f;
+        constexpr uint32_t KEY_PAGE_UP = 0x21;    // VK_PRIOR
+        constexpr uint32_t KEY_PAGE_DOWN = 0x22;  // VK_NEXT
+
         std::string_view ModeName(DebugViewMode mode) {
             switch (mode) {
                 case DebugViewMode::Volume: return "ボリューム";
@@ -53,7 +58,7 @@ namespace bicameral::render {
         std::vector<CellCoordinate> pokes;
         for (const InputEvent& event : events) {
             if (event.kind == InputKind::KeyDown)
-                HandleKey(event);
+                HandleKey(event, width, height);
             else if (event.kind == InputKind::Wheel)
                 m_camera.Zoom(event.wheelSteps);
             else
@@ -95,7 +100,12 @@ namespace bicameral::render {
 
     // --- キー ---
 
-    void DebugViewController::HandleKey(const InputEvent& event) {
+    void DebugViewController::HandleKey(const InputEvent& event, uint32_t width, uint32_t height) {
+        if (event.key == 'P' || event.key == KEY_PAGE_UP || event.key == KEY_PAGE_DOWN) {
+            HandlePeekKey(event, width, height);
+            return;
+        }
+
         const DebugViewSettings before = m_settings;
         const uint32_t step = event.shift ? SLICE_FAST_STEP : 1;
         switch (event.key) {
@@ -134,6 +144,77 @@ namespace bicameral::render {
             Log(Channel::Render, Level::Info, "表示: {}", Describe());
     }
 
+    // --- 覗き窓 ---
+
+    // P: 最後のポインタの位置の光線が断面に当たったセルを覗く(Shift + P でやめる)。PageDown・PageUp: 潜る・浮かぶ
+    void DebugViewController::HandlePeekKey(const InputEvent& event, uint32_t width, uint32_t height) {
+        if (event.key == 'P' && event.shift) {
+            m_peekChanged = m_peekChanged || m_peek.peeking;
+            m_peek.peeking = false;
+            Log(Channel::Render, Level::Info, "覗き窓: やめた");
+            return;
+        }
+
+        if (event.key == 'P') {
+            const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(m_lastX) + 0.5f,
+                                                  static_cast<float>(m_lastY) + 0.5f, width, height);
+            const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
+            if (cell)
+                Peek(*cell, m_peek.depth);
+
+            return;
+        }
+
+        if (!m_peek.peeking)
+            return;
+
+        const uint32_t before = m_peek.depth;
+        if (event.key == KEY_PAGE_DOWN)
+            m_peek.depth = std::min(m_peek.depth + 1, PEEK_MAX_DEPTH);
+        else
+            m_peek.depth -= std::min(m_peek.depth, 1u);
+
+        if (m_peek.depth == before)
+            return;
+
+        FocusOnPeek();
+        Log(Channel::Render, Level::Info, "覗き窓: 段 {}(1 セル = {} mm)", m_peek.depth, 500.0 / (1u << m_peek.depth));
+    }
+
+    void DebugViewController::Peek(CellCoordinate cell, uint32_t depth) {
+        m_peekChanged = m_peekChanged || !m_peek.peeking || m_peek.cell != cell;
+        m_peek = {.peeking = true, .cell = cell, .depth = std::min(depth, PEEK_MAX_DEPTH)};
+        FocusOnPeek();
+        Log(Channel::Render, Level::Info, "覗き窓: ({}, {}, {}) を覗く・段 {}", cell.x, cell.y, cell.z, m_peek.depth);
+    }
+
+    // 潜った段 k のブロックの真ん中に寄る(距離 PEEK_BASE_DISTANCE × 2^-k)。段 0 は覗いているセルの真ん中。
+    // 段 k のブロックは、点(セルの真ん中 = c × 2^k + 2^(k-1))を含む 8 の倍数に揃ったブロック
+    // (子の原点 = 2 × (親の原点 + 4 × 八分の一) なので、どの段の原点も 8 の倍数。multires.hlsli の MrChildOrigin・ADR-0015)
+    void DebugViewController::FocusOnPeek() {
+        const uint32_t depth = m_peek.depth;
+        const auto scale = static_cast<float>(1u << depth);
+        const auto center = [depth, scale](uint32_t cell) {
+            if (depth == 0)
+                return static_cast<float>(cell) + 0.5f;
+
+            const uint64_t point = (uint64_t{cell} << depth) + (uint64_t{1} << (depth - 1));
+            const uint64_t blockCenter = (point & ~uint64_t{7}) + 4;
+
+            return static_cast<float>(blockCenter) / scale;
+        };
+
+        m_camera.Focus({center(m_peek.cell.x), center(m_peek.cell.y), center(m_peek.cell.z)},
+                       PEEK_BASE_DISTANCE / scale);
+    }
+
+    bool DebugViewController::TakePeekChange() {
+        const bool changed = m_peekChanged;
+        m_peekChanged = false;
+
+        return changed;
+    }
+
     bool DebugViewController::TakeTraceRequest() {
         const bool requested = m_traceRequested;
         m_traceRequested = false;
@@ -153,6 +234,9 @@ namespace bicameral::render {
             flags |= VIEW_FLAG_LOGARITHMIC;
 
         flags |= static_cast<uint32_t>(m_settings.quantity) << VIEW_QUANTITY_SHIFT;
+        if (m_peek.peeking)
+            flags |= m_peek.depth << VIEW_PEEK_DEPTH_SHIFT;
+
         return {.extractionIndex = extractionIndex,
                 .width = width,
                 .height = height,

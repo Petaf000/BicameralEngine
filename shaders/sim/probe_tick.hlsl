@@ -279,6 +279,10 @@ void StoreExtraction(uint32_t index, uint32_t value) {
     if (cellIndex >= PROBE_CELL_COUNT)
         return;
 
+    // 覗きの欄は段の数 0(覗いていれば sim/probe_peek が後ろで書き直す。T-0096)
+    if (cellIndex == 0)
+        StoreExtraction(PROBE_EXTRACTION_PEEK_OFFSET, 0);
+
     const uint32_t source = GenerationBase(CurrentTick()) + cellIndex;
     const RxCell cell = cells[source];
     const uint32_t base = cellIndex * PROBE_EXTRACTION_CELL_WORDS;

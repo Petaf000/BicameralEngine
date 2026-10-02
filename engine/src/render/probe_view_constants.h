@@ -24,10 +24,12 @@ namespace bicameral::render {
 
     inline constexpr uint32_t DEBUG_VIEW_QUANTITY_COUNT = 4;
 
-    // flags のビット(probe_view.hlsl の VIEW_FLAG_*)。ビット 8〜9 は色分けする量
+    // flags のビット(probe_view.hlsl の VIEW_FLAG_*)。ビット 8〜9 は色分けする量、16〜19 は潜っている段
     inline constexpr uint32_t VIEW_FLAG_ACTIVE_BLOCKS = 1u << 0;  // 活性なブロックを重ねる
     inline constexpr uint32_t VIEW_FLAG_LOGARITHMIC = 1u << 1;    // 色は対数(無ければ線形)
     inline constexpr uint32_t VIEW_QUANTITY_SHIFT = 8;
+    inline constexpr uint32_t
+        VIEW_PEEK_DEPTH_SHIFT = 16;  // ビット 16〜19 = 覗き窓で潜っている段(0 = 潜っていない。T-0096)
 
     // 並びは probe_view.hlsl の LoadConstants と同じにする(16 バイトずつ読む)
     struct ProbeViewConstants {

@@ -116,6 +116,8 @@ endforeach()
 bicameral_add_shader(sim/physics_graph.hlsl PROFILE lib_6_8)  # 物理の広域の選別 → 接触の生成の Work Graph(T-0092)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY Main)  # 多重解像度の入れ子の反応の刻み(T-0017)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8)  # 多重解像度の細かくする・粗くする・影の引き戻し(T-0017)
+bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY MirrorWorld NAME multires_peek_mirror)  # 覗き窓の世界の写し(T-0096)
+bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY ExtractShadow NAME multires_peek_extract)  # 覗き窓の抽出(T-0096)
 bicameral_add_shader(render/probe_view.hlsl PROFILE vs_6_8 ENTRY VSMain NAME probe_view_vs)
 bicameral_add_shader(render/probe_view.hlsl PROFILE ps_6_8 ENTRY PSMain NAME probe_view_ps)
 

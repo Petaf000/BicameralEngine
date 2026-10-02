@@ -54,12 +54,16 @@ namespace bicameral::render {
     class OrbitCamera {
     public:
         static constexpr float VERTICAL_FIELD_OF_VIEW_DEGREES = 45.0f;
+        // 注視点からの距離の幅(セル)。覗き窓の一番細かい段(1 セルの 1/512)まで寄れるように小さく(T-0096)
+        static constexpr float MIN_DISTANCE = 0.001f;
+        static constexpr float MAX_DISTANCE = 2000.0f;
 
         explicit OrbitCamera(const OrbitCameraState& initial = {}) : m_initial(initial), m_state(initial) {}
 
         void Orbit(float deltaXPixels, float deltaYPixels);                         // 回る(右ドラッグ)
         void Pan(float deltaXPixels, float deltaYPixels, uint32_t viewportHeight);  // 平行移動(中ドラッグ)
         void Zoom(int32_t wheelSteps);                                              // 寄る(奥へ回すと近づく)
+        void Focus(Vector3 target, float distance);  // 注視点と距離を決める(向きはそのまま。覗き窓で潜る)
         void ToggleProjection() { m_state.orthographic = !m_state.orthographic; }
         void Reset() { m_state = m_initial; }
 

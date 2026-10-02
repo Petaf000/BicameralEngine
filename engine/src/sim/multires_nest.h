@@ -47,6 +47,11 @@ namespace bicameral::sim {
     void PlaceRootBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
                         int64_t originZ, std::span<const reaction::RxCell> cells);
 
+    // 世界の写し(MR_BLOCK_MIRROR。刻まない・世界のハッシュに入らない)を置く。写し直すときも同じ。cells は MR_BLOCK_CELLS 個。
+    // 木の形をしていない世界(仮の世界の 64³)の 1 ブロックを、影の鎖の根の親にするため(T-0096)
+    void PlaceMirrorBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
+                          int64_t originZ, std::span<const reaction::RxCell> cells);
+
     // parentSlot の、点を含む八分の一を firstChildSlot に細かくし、それを levelCount 段続ける(子の枠は firstChildSlot から順)。
     // kind が MR_BLOCK_REAL なら親を覆う(親のセルは空になる)、MR_BLOCK_SHADOW なら親に触れない
     void RefineChain(MultiresNest& nest, uint32_t parentSlot, uint32_t firstChildSlot, uint32_t levelCount,

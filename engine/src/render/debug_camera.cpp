@@ -11,9 +11,7 @@ namespace bicameral::render {
 
         constexpr float ORBIT_DEGREES_PER_PIXEL = 0.3f;
         constexpr float MAX_PITCH_DEGREES = 89.0f;
-        constexpr float ZOOM_PER_STEP = 0.9f;  // ホイール 1 刻みで距離を 0.9 倍
-        constexpr float MIN_DISTANCE = 4.0f;
-        constexpr float MAX_DISTANCE = 2000.0f;
+        constexpr float ZOOM_PER_STEP = 0.9f;             // ホイール 1 刻みで距離を 0.9 倍
         constexpr float ORTHOGRAPHIC_BACK_OFF = 1000.0f;  // 平行投影の始点を下げる距離(格子の全部が前に来るように)
         constexpr float PARALLEL_EPSILON = 1e-6f;
 
@@ -92,6 +90,11 @@ namespace bicameral::render {
     void OrbitCamera::Zoom(int32_t wheelSteps) {
         m_state.distance *= std::pow(ZOOM_PER_STEP, static_cast<float>(wheelSteps));
         m_state.distance = std::clamp(m_state.distance, MIN_DISTANCE, MAX_DISTANCE);
+    }
+
+    void OrbitCamera::Focus(Vector3 target, float distance) {
+        m_state.target = target;
+        m_state.distance = std::clamp(distance, MIN_DISTANCE, MAX_DISTANCE);
     }
 
     // --- 描画と拾うための形 ---

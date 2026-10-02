@@ -253,13 +253,16 @@ namespace bicameral::sim {
     void PlaceRootBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
                         int64_t originZ, std::span<const RxCell> cells) {
         FX_ASSERT(cells.size() == MR_BLOCK_CELLS);
-        MrBlock block = MrMakeUnusedBlock();
-        block.originX = originX;
-        block.originY = originY;
-        block.originZ = originZ;
-        block.level = level;
+        MrBlock block = MrMakeMirrorBlock(level, originX, originY, originZ);
         block.kind = MR_BLOCK_REAL;
         nest.blocks[slot] = block;
+        std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
+    }
+
+    void PlaceMirrorBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
+                          int64_t originZ, std::span<const RxCell> cells) {
+        FX_ASSERT(cells.size() == MR_BLOCK_CELLS);
+        nest.blocks[slot] = MrMakeMirrorBlock(level, originX, originY, originZ);
         std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
     }
 

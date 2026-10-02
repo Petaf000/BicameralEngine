@@ -310,7 +310,7 @@ namespace {
         const std::span<const uint32_t> extracted(cells);
         result.extractionHash = ProbeExtractionHash(extracted.first(PROBE_EXTRACTION_BLOCK_OFFSET));
         result.extractionActiveBlocks = static_cast<uint32_t>(
-            rng::count(extracted.subspan(PROBE_EXTRACTION_BLOCK_OFFSET), 1u));
+            rng::count(extracted.subspan(PROBE_EXTRACTION_BLOCK_OFFSET, PROBE_BLOCK_COUNT), 1u));
         result.graphSummary = gpu::FormatGraphStats(simulation->ConductStatsLayout(), result.graphStats);
         result.ok = unitPosition == TOTAL_TICKS * unitsPerTick;
 

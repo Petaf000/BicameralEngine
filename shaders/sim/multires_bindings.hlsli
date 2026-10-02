@@ -9,7 +9,7 @@
 
 // --- 結び付け ---
 // u0 ブロックの見出し [枠] / u1 セル [枠 × 512] / u2 端数 [端数の枠 × 512] / u3 数える欄(MR_COUNTER_*)/
-// t0〜t3 反応の表(物質・規則・索引・速度)
+// u4・u5 外のバッファ(覗き窓が使う。shaders/sim/multires_peek.hlsl で宣言する。T-0096)/ t0〜t3 反応の表(物質・規則・索引・速度)
 globallycoherent RWStructuredBuffer<MrBlock> g_blocks : register(u0);
 globallycoherent RWStructuredBuffer<RxCell> g_cells : register(u1);
 globallycoherent RWStructuredBuffer<MrFraction> g_fractions : register(u2);
@@ -33,6 +33,10 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_pointZHigh;
     int32_t g_pointLevel;
     uint32_t g_blockCount;
+    uint32_t g_external0;  // 外のパイプラインの定数(T-0096)
+    uint32_t g_external1;
+    uint32_t g_external2;
+    uint32_t g_external3;
 };
 
 // reaction.hlsli の Table の約束(表の読み方)

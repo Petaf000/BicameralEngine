@@ -77,10 +77,23 @@ PROBE_CONST uint32_t PROBE_EXTRACTION_COUNT = 3;
 // 抽出の中身(uint32 の並び。T-0015・T-0089): [0, セルの数 × 4) 刻みの境界の状態の全部のセル(世界と同じ並び)の 4 語
 //   [0] 温度(mK)[1..3] 見る物質 3 つ(フレームの入力の見出しの PROBE_HEADER_VIEW_SPECIES)の物質量(µmol、uint32 で飽和)
 //   → [セルの数 × 4, + ブロックの数) ブロックごとの活性の印(1 = 境界の前の刻みで計算した。刻みの途中の抽出ではその刻みの分も)
+//   → 覗きの欄(T-0096。sim/probe_peek が抽出の後に書く。覗いていなければ段の数 0 だけを Extract が書く):
+//      見出し [0] 段の数 [1..3] 空き、段 i ごとに [4 + 4i] レベル [5 + 4i .. 7 + 4i] 原点 x・y・z(そのレベルのセルの単位、int32)
+//      → 段 i のセル(ブロックの中の番号順に 512 個)の 4 語(世界のセルと同じ意味)
 PROBE_CONST uint32_t PROBE_EXTRACTION_CELL_WORDS = 4;
 PROBE_CONST uint32_t PROBE_VIEW_SPECIES_COUNT = 3;
 PROBE_CONST uint32_t PROBE_EXTRACTION_BLOCK_OFFSET = PROBE_CELL_COUNT * PROBE_EXTRACTION_CELL_WORDS;
-PROBE_CONST uint32_t PROBE_EXTRACTION_WORDS = PROBE_EXTRACTION_BLOCK_OFFSET + PROBE_BLOCK_COUNT;
+PROBE_CONST uint32_t PROBE_PEEK_MAX_LEVELS = 9;     // 影の鎖の段の数の上限(k = 1〜9。0.5 m → 約 1 mm)
+PROBE_CONST uint32_t PROBE_PEEK_BLOCK_EDGE = 8;     // 段の 1 辺のセルの数(multires.hlsli の MR_BLOCK_EDGE)
+PROBE_CONST uint32_t PROBE_PEEK_BLOCK_CELLS = 512;  // 段のセルの数(multires.hlsli の MR_BLOCK_CELLS)
+PROBE_CONST uint32_t PROBE_PEEK_HEADER_WORDS = 64;
+PROBE_CONST uint32_t PROBE_PEEK_LEVEL_WORDS = 4;  // 段ごとの見出しの語(レベル・原点 3 つ)
+PROBE_CONST uint32_t PROBE_EXTRACTION_PEEK_OFFSET = PROBE_EXTRACTION_BLOCK_OFFSET + PROBE_BLOCK_COUNT;
+PROBE_CONST uint32_t PROBE_EXTRACTION_PEEK_CELL_OFFSET = PROBE_EXTRACTION_PEEK_OFFSET + PROBE_PEEK_HEADER_WORDS;
+PROBE_CONST uint32_t PROBE_EXTRACTION_PEEK_WORDS = PROBE_PEEK_HEADER_WORDS +
+                                                   (PROBE_PEEK_MAX_LEVELS * PROBE_PEEK_BLOCK_CELLS *
+                                                    PROBE_EXTRACTION_CELL_WORDS);
+PROBE_CONST uint32_t PROBE_EXTRACTION_WORDS = PROBE_EXTRACTION_PEEK_OFFSET + PROBE_EXTRACTION_PEEK_WORDS;
 
 // --- 1 刻みの単位(06 §4・ADR-0011)---
 PROBE_CONST uint32_t PROBE_UNIT_APPLY = 0;

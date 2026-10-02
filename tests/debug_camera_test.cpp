@@ -154,7 +154,7 @@ namespace {
         camera.Orbit(0.0f, -20000.0f);
         EXPECT(camera.State().pitchDegrees >= -89.0f);
         camera.Zoom(1000);
-        EXPECT(camera.State().distance >= 4.0f);
+        EXPECT(camera.State().distance >= OrbitCamera::MIN_DISTANCE);
         camera.Zoom(-1000);
         EXPECT(camera.State().distance <= 2000.0f);
         camera.Pan(50.0f, 50.0f, HEIGHT);
@@ -215,6 +215,22 @@ namespace {
         const ProbeViewConstants constants = front.Constants(2, WIDTH, HEIGHT);
         EXPECT(constants.extractionIndex == 2 && constants.width == WIDTH && constants.sliceAxis == 2);
         EXPECT(constants.flags == (VIEW_FLAG_ACTIVE_BLOCKS | VIEW_FLAG_LOGARITHMIC));
+
+        // 覗き窓(T-0096): P はポインタの下の断面のセルを覗く。PageDown で潜るとカメラが寄り、段が flags に入る。Shift + P でやめる
+        const std::vector<InputEvent> peek = {
+            {.kind = InputKind::PointerMove, .x = WIDTH / 2, .y = HEIGHT / 2}, Key('P'), Key(0x22), Key(0x22)};
+        DebugViewController peeker(GRID_SIZE, {.sliceAxis = 2, .slicePosition = 32},
+                                   {.yawDegrees = 0.0f, .pitchDegrees = 0.0f, .distance = 80.0f});
+        EXPECT(peeker.HandleInput(peek, WIDTH, HEIGHT).empty());
+        EXPECT(peeker.TakePeekChange() && !peeker.TakePeekChange());
+        EXPECT(peeker.Peeking().peeking && peeker.Peeking().depth == 2 &&
+               peeker.Peeking().cell == (CellCoordinate{.x = 32, .y = 32, .z = 32}));
+        // 段 2 のブロック: 点 32 × 4 + 2 = 130 → 揃えて 128、真ん中 132 / 4 = 33
+        EXPECT(std::abs(peeker.Camera().State().target.x - 33.0f) < 1e-4f &&
+               std::abs(peeker.Camera().State().distance - 6.0f) < 1e-4f);
+        EXPECT(((peeker.Constants(0, WIDTH, HEIGHT).flags >> VIEW_PEEK_DEPTH_SHIFT) & 15u) == 2);
+        (void)peeker.HandleInput(std::vector{Key('P', true)}, WIDTH, HEIGHT);
+        EXPECT(peeker.TakePeekChange() && !peeker.Peeking().peeking);
 
         DebugViewMode mode = DebugViewMode::Volume;
         EXPECT(ParseDebugViewMode("mip", mode) && mode == DebugViewMode::MaximumProjection);

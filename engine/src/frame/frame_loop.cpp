@@ -32,6 +32,7 @@
 #include "render/probe_view.h"
 #include "render/screenshot.h"
 #include "save/replay_session.h"
+#include "sim/probe_peek.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
 #include "sim/reaction_table.h"
@@ -138,6 +139,7 @@ namespace bicameral::frame {
 
             // --- シミュと表示 ---
             sim::ProbeSim simulation;
+            sim::ProbePeek peek;  // 覗き窓(T-0096)
             render::ProbeView view;
 
             // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
@@ -154,6 +156,7 @@ namespace bicameral::frame {
                   m_compute(std::move(parts.compute)),
                   m_swapChain(std::move(parts.swapChain)),
                   m_sim(std::move(parts.simulation)),
+                  m_peek(std::move(parts.peek)),
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
@@ -164,6 +167,10 @@ namespace bicameral::frame {
                 // --trace: 起動時の範囲(ProbeSim を作った時に GPU へ渡した)を集める
                 if (!options.tracePath.empty())
                     m_traceCapture.emplace_back(options.tracePath, options.trace);
+
+                // --peek: 起動時から覗く
+                if (options.peek)
+                    m_viewController.Peek(options.peekCell, options.peekDepth);
             }
 
             [[nodiscard]] bool CreateFrameSlots();
@@ -185,6 +192,7 @@ namespace bicameral::frame {
 
             // --- コマンド(クリックと再生)---
             void QueueClicks();
+            void ApplyPeekChange();
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             [[nodiscard]] bool FinishReplay();
@@ -215,6 +223,7 @@ namespace bicameral::frame {
 
             // --- シミュと表示 ---
             sim::ProbeSim m_sim;
+            sim::ProbePeek m_peek;
             render::ProbeView m_view;
             render::DebugViewController m_viewController;
 
@@ -314,6 +323,10 @@ namespace bicameral::frame {
             if (!simulation)
                 return std::unexpected(simulation.error());
 
+            auto peek = sim::ProbePeek::Create(native, *reactionTable);
+            if (!peek)
+                return std::unexpected(peek.error());
+
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view)
                 return std::unexpected(view.error());
@@ -333,6 +346,7 @@ namespace bicameral::frame {
                                   .compute = std::move(*compute),
                                   .swapChain = std::move(*swapChain),
                                   .simulation = std::move(*simulation),
+                                  .peek = std::move(*peek),
                                   .view = std::move(*view),
                                   .replay = std::move(replay)};
         }
@@ -423,8 +437,11 @@ namespace bicameral::frame {
 
         // --- 読み戻し(待たない)---
 
+        // 投げた順に読む(枠は投げた順に回るので、次に使う枠がいちばん古い)。枠の番号の順に読むと、2 つが同時に終わっていたとき
+        // 新しい方の刻みのハッシュが先に届き、再生の突き合わせが古い刻みを「戻ってこなかった」と数える(T-0096 で見つけた)
         void FrameLoop::CollectSimSubmissions() {
-            for (uint32_t slot = 0; slot < SIM_SLOT_COUNT; ++slot) {
+            for (uint32_t index = 0; index < SIM_SLOT_COUNT; ++index) {
+                const auto slot = static_cast<uint32_t>((m_simSubmissionCount + index) % SIM_SLOT_COUNT);
                 SimSubmission& submission = m_simSubmissions[slot];
                 if (submission.read || !m_compute.IsComplete(submission.fence))
                     continue;
@@ -532,9 +549,11 @@ namespace bicameral::frame {
             std::vector<render::CellCoordinate> cells = m_viewController.HandleInput(events, m_swapChain.Width(),
                                                                                      m_swapChain.Height());
 
-            // トレースは世界に入らない(View)ので、再生中も使える
+            // トレースと覗き窓は世界に入らない(View)ので、再生中も使える
             if (m_viewController.TakeTraceRequest())
                 RequestTrace();
+
+            ApplyPeekChange();
 
             // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
             if (!m_replay.empty())
@@ -555,6 +574,19 @@ namespace bicameral::frame {
                 m_clicks.push_back({.cell = cell, .time = now});
                 m_lastPokedCell = cell;
             }
+        }
+
+        // 覗く場所が変わったら覗き窓へ(次の抽出から効く。T-0096)
+        void FrameLoop::ApplyPeekChange() {
+            static_assert(render::PEEK_MAX_DEPTH == sim::PEEK_LEVEL_COUNT);
+            if (!m_viewController.TakePeekChange())
+                return;
+
+            const render::PeekView& peek = m_viewController.Peeking();
+            if (peek.peeking)
+                m_peek.Look({.x = peek.cell.x, .y = peek.cell.y, .z = peek.cell.z});
+            else
+                m_peek.Stop();
         }
 
         // このフレームに GPU のキューへ足すコマンド(クリックか再生ファイルから)。記録するならここで控える。
@@ -622,12 +654,16 @@ namespace bicameral::frame {
 
             const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
 
-            ID3D12CommandList* list = m_sim.RecordFrame(slot, {.firstTick = start.tick,
-                                                               .firstUnit = start.unit,
-                                                               .unitCount = unitCount,
-                                                               .extract = extract,
-                                                               .extractionTarget = extractionTarget,
-                                                               .commands = commands});
+            ID3D12CommandList* list = m_sim.RecordFrame(slot,
+                                                        {.firstTick = start.tick,
+                                                         .firstUnit = start.unit,
+                                                         .unitCount = unitCount,
+                                                         .extract = extract,
+                                                         .extractionTarget = extractionTarget,
+                                                         .commands = commands,
+                                                         .afterExtract = [this](auto* simList, const auto& context) {
+                                                             m_peek.RecordAfterExtract(simList, context);
+                                                         }});
 
             if (list == nullptr)
                 return false;

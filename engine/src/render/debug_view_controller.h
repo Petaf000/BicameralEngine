@@ -5,7 +5,8 @@
 // 操作: 左クリック = つつく / 右ドラッグ = 回る / 中ドラッグ = 平行移動 / ホイール = 寄る / 1・2・3 = 表示 / X・Y・Z = 断面の軸 /
 //   Q・E = 断面を動かす(Shift で 8) / B = 活性なブロック / L = 対数・線形 / C = 色分けする量(温度・O2 の減り・CO2・炭)/
 //   O = 透視・平行 / R = カメラを戻す /
-//   T = 連鎖のトレースを頼む(どこを何刻みかはフレームのループが決める。T-0088)。
+//   T = 連鎖のトレースを頼む(どこを何刻みかはフレームのループが決める。T-0088)/
+//   P = カーソルの下の断面のセルを覗く(覗き窓。T-0096)/ Shift + P = やめる / PageDown・PageUp = 潜る・浮かぶ(カメラが点に寄る)。
 // 設定が変わったらログに出す(画面に文字はまだ無い。12 §5)。
 #pragma once
 
@@ -20,6 +21,18 @@
 #include "render/probe_view_constants.h"
 
 namespace bicameral::render {
+
+    // 覗き窓の段の数(sim/probe_peek.h の PEEK_LEVEL_COUNT。frame_loop.cpp が static_assert で揃える)
+    inline constexpr uint32_t PEEK_MAX_DEPTH = 9;
+
+    // 覗き窓(View の状態。世界には入らない。T-0096)
+    struct PeekView {
+        bool peeking = false;
+        CellCoordinate cell;  // 覗いている世界のセル
+        uint32_t depth = 0;   // 潜っている段(0〜PEEK_MAX_DEPTH。カメラの寄り方と枠の色だけ)
+
+        bool operator==(const PeekView&) const = default;
+    };
 
     struct DebugViewSettings {
         DebugViewMode mode = DebugViewMode::Volume;
@@ -46,10 +59,19 @@ namespace bicameral::render {
         // 前に呼んでから T が押されたか(押されていたら true を返して忘れる)
         [[nodiscard]] bool TakeTraceRequest();
 
+        // --- 覗き窓(T-0096)---
+        // cell を覗いて depth まで潜る(--peek。窓では P と PageDown・PageUp)
+        void Peek(CellCoordinate cell, uint32_t depth);
+        [[nodiscard]] const PeekView& Peeking() const { return m_peek; }
+        // 前に呼んでから覗く場所(覗いているか・セル)が変わったか(変わっていたら true を返して忘れる。潜る段だけの変化は入らない)
+        [[nodiscard]] bool TakePeekChange();
+
     private:
         void HandlePointer(const InputEvent& event, uint32_t width, uint32_t height,
                            std::vector<CellCoordinate>& pokes);
-        void HandleKey(const InputEvent& event);
+        void HandleKey(const InputEvent& event, uint32_t width, uint32_t height);
+        void HandlePeekKey(const InputEvent& event, uint32_t width, uint32_t height);
+        void FocusOnPeek();
 
         uint32_t m_gridSize;  // 格子の 1 辺のセルの数
         DebugViewSettings m_settings;
@@ -62,6 +84,9 @@ namespace bicameral::render {
         int32_t m_lastY = 0;
 
         bool m_traceRequested = false;  // T が押された(TakeTraceRequest で取る)
+
+        PeekView m_peek;
+        bool m_peekChanged = false;  // 覗く場所が変わった(TakePeekChange で取る)
     };
 
     // 表示の名前(--view の値。volume・mip・slice)→ 表示。知らない名前なら false

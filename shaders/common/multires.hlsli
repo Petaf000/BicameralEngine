@@ -48,6 +48,7 @@ FX_CONST uint32_t MR_CELL_ID_PURPOSE = 0x4D520001u;  // セルの ID(乱数の�
 FX_CONST uint32_t MR_BLOCK_UNUSED = 0;
 FX_CONST uint32_t MR_BLOCK_REAL = 1;    // 世界の一部(状態・介入による細分。親を覆う)
 FX_CONST uint32_t MR_BLOCK_SHADOW = 2;  // 観察の影(親を覆わない。世界に返さない)
+FX_CONST uint32_t MR_BLOCK_MIRROR = 3;  // 世界の写し(木の外の世界から毎回写す。刻まない・読むだけ。影の根の親。T-0096)
 
 // 数える欄(u2 の uint32 の並び)
 FX_CONST uint32_t MR_COUNTER_FRACTION_BLOCKS = 0;  // 割り当てた端数のブロックの数(次に使う端数の枠)
@@ -128,6 +129,18 @@ FX_FN MrBlock MrMakeUnusedBlock() {
         block.children[i] = MR_NO_BLOCK;
 
     block.padding = 0;
+
+    return block;
+}
+
+// 世界の写しの見出し(セルは呼ぶ側が写す。T-0096)
+FX_FN MrBlock MrMakeMirrorBlock(int32_t level, int64_t originX, int64_t originY, int64_t originZ) {
+    MrBlock block = MrMakeUnusedBlock();
+    block.originX = originX;
+    block.originY = originY;
+    block.originZ = originZ;
+    block.level = level;
+    block.kind = MR_BLOCK_MIRROR;
 
     return block;
 }
@@ -489,9 +502,9 @@ FX_FN RxCell MrStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t t
     return RxEvaluateCell(table, cell, worldSeed, tick, cellId);
 }
 
-// このセルを刻むか: 使っているブロックで、本物の子に覆われていない(影のブロックは中間のセルも刻む)
+// このセルを刻むか: 使っているブロックで、本物の子に覆われていない(影のブロックは中間のセルも刻む。世界の写しは刻まない)
 FX_FN bool MrIsSteppedCell(MrBlock block, uint32_t index) {
-    if (block.kind == MR_BLOCK_UNUSED)
+    if (block.kind == MR_BLOCK_UNUSED || block.kind == MR_BLOCK_MIRROR)
         return false;
 
     if (block.kind == MR_BLOCK_SHADOW)

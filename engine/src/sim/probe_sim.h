@@ -27,6 +27,7 @@
 #include <array>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -101,6 +102,14 @@ namespace bicameral::sim {
         uint32_t droppedTraceCount = 0;  // 容量を越えて書けなかった数(> 0 ならトレースは欠けている)
     };
 
+    // 抽出の後のフック(ProbeFrameInput::afterExtract)に渡すもの(T-0096)
+    struct ProbeExtractContext {
+        uint64_t tick = 0;                        // 抽出した刻みの境界(S(tick)。セルの世代は tick & 1)
+        ID3D12Resource* cells = nullptr;          // 世界のセル(UAV の状態。読むだけ)
+        ID3D12Resource* extraction = nullptr;     // 書き終えた抽出(UAV の状態)
+        D3D12_GPU_VIRTUAL_ADDRESS debugRing = 0;  // シミュのデバッグのリング(FX_ASSERT の出力。ReadFrame でログへ出る)
+    };
+
     struct ProbeFrameInput {
         uint64_t firstTick = 0;  // 最初の単位の刻み
         uint32_t firstUnit = 0;  // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
@@ -111,6 +120,10 @@ namespace bicameral::sim {
 
         // GPU のキューへ足す新しいコマンド(最大 PROBE_MAX_COMMANDS。約束はファイルの先頭)
         std::span<const ProbeCommand> commands;
+
+        // 抽出の後に同じリストへ記録するもの(覗き窓 sim/probe_peek。T-0096)。抽出するフレームだけ呼ぶ。
+        // 約束: 世界のバッファは読むだけ、抽出は覗きの欄だけに書く(世界の結果を変えない。D-403)
+        std::function<void(ID3D12GraphicsCommandList10* list, const ProbeExtractContext& context)> afterExtract;
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
@@ -232,6 +245,7 @@ namespace bicameral::sim {
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
         void RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const;
+        void RecordExtractAndHook(ID3D12GraphicsCommandList10* list, uint64_t tick, const ProbeFrameInput& input);
 
         // --- 読み戻し ---
         void RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const;

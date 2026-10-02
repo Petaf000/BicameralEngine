@@ -52,6 +52,11 @@ namespace bicameral::frame {
         fs::path traceDirectory;  // 窓の T で集めたトレースを書くフォルダ(main の既定は exe の横の traces/)
         bool autoTrace = false;   // 決まったフレームで T を押す(人がいない確認で T の流れを通す)
 
+        // --- 覗き窓(T-0096)---
+        bool peek = false;                // 起動時から peekCell を覗く(窓では P)
+        render::CellCoordinate peekCell;  // 覗く世界のセル
+        uint32_t peekDepth = 0;           // 潜る段(カメラが寄る。0〜9)
+
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)
         render::OrbitCameraState camera;  // 最初のカメラ

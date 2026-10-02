@@ -7,6 +7,8 @@
 //   gpu->RecordRefine(list, ring, ...); gpu->RecordStep(list, ring, seed, tick); gpu->RecordPullBack(list, ring, ...);
 //   gpu->RecordReadback(list);  → 投げて待つ →  gpu->Read(nest);
 // 各操作の後に UAV のバリアを入れる(次の操作は前の書き込みを読む)。
+// 覗き窓(sim/probe_peek。T-0096)は、同じルート署名で自分の Compute(世界の写し・抽出)を起動する: SetExternalViews で u4・u5 に
+// 外のバッファを結び、RecordExternalDispatch で外の定数 4 語つきで投げる。
 #pragma once
 
 #include <array>
@@ -45,6 +47,16 @@ namespace bicameral::sim {
         void RecordPullBack(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                             uint32_t firstShadowSlot, uint32_t levelCount);
 
+        // --- 外のバッファとパイプライン(T-0096)---
+        // u4・u5 に結ぶ外のバッファ。0 なら自分のセルのバッファを代わりに結ぶ(使わないシェーダーは読まない。ルートの引数は全部結ぶ約束)
+        void SetExternalViews(D3D12_GPU_VIRTUAL_ADDRESS first, D3D12_GPU_VIRTUAL_ADDRESS second);
+        // このルート署名で作った Compute のパイプラインを groupCount グループ起動する(外の定数は multires_bindings.hlsli の g_external*)
+        void RecordExternalDispatch(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                    ID3D12PipelineState* pipeline, uint32_t groupCount,
+                                    const std::array<uint32_t, 4>& external);
+        [[nodiscard]] ID3D12RootSignature* RootSignature() const { return m_rootSignature.Get(); }
+        [[nodiscard]] uint32_t BlockCapacity() const { return m_blockCapacity; }
+
         // --- 読み戻し ---
         void RecordReadback(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] bool Read(MultiresNest& nest) const;
@@ -65,6 +77,7 @@ namespace bicameral::sim {
             std::array<uint32_t, 6> point{};  // x・y・z の下位と上位
             int32_t pointLevel = 0;
             uint32_t blockCount = 0;
+            std::array<uint32_t, 4> external{};  // 外のパイプラインの定数(T-0096)
         };
 
         static constexpr uint32_t BUFFER_COUNT = 4;  // 見出し・セル・端数・数える欄
@@ -98,6 +111,7 @@ namespace bicameral::sim {
         std::array<ComPtr<ID3D12Resource>, BUFFER_COUNT> m_uploads;
         std::array<ComPtr<ID3D12Resource>, BUFFER_COUNT> m_readbacks;
         std::array<ComPtr<ID3D12Resource>, TABLE_COUNT> m_tables;
+        std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> m_externalViews{};  // u4・u5(0 なら代わりにセル)
 
         // --- 計測 ---
         ComPtr<ID3D12QueryHeap> m_timestamps;

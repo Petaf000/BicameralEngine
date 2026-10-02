@@ -5,6 +5,8 @@
 // フレームの定数(frame。CPU がフレームごとに書く。engine/src/render/probe_view_constants.h と同じ並び)が指す組を読む(06 §4)。
 // 画面いっぱいの三角形 1 枚で、画素ごとにカメラの光線を作り(engine/src/render/debug_camera.h と同じ式)、格子をセルごとに辿る(DDA)。
 // 表示は 3 通り: 吸収と発光・光線の上の最大値・断面。重ね書き: 格子の枠・断面の枠(クリックがつつく面)・活性なブロック・色の凡例。
+// 覗き窓(T-0096): 抽出の覗きの欄に影の鎖があれば、断面の上では各点で一番細かい段のセルの色を描き(段の枠と、大きく見えるセルの線も)、
+// 立体の表示では段の箱の枠だけを重ねる。潜っている段(flags のビット 16〜19)の枠は明るく。
 // 浮動小数点はここ(描画)だけ。決定性は求めない(10 の目的)。
 #include "common/probe_sim.hlsli"
 
@@ -26,6 +28,7 @@ static const uint32_t VIEW_QUANTITY_TEMPERATURE = 0;
 static const uint32_t VIEW_QUANTITY_OXYGEN_DEPLETION = 1;
 static const uint32_t VIEW_QUANTITY_CARBON_DIOXIDE = 2;
 static const uint32_t VIEW_QUANTITY_CARBON = 3;
+static const uint32_t VIEW_PEEK_DEPTH_SHIFT = 16;  // flags のビット 16〜19 = 潜っている段(0 = 潜っていない。T-0096)
 
 // --- 量を 0〜1 にする幅 ---
 static const float AMBIENT_KELVIN = 300.0;    // 温度はこれより上の分
@@ -40,6 +43,8 @@ static const float3 BACKGROUND = float3(0.02, 0.02, 0.03);
 static const float3 FRAME_COLOR = float3(0.35, 0.37, 0.45);
 static const float3 SLICE_FRAME_COLOR = float3(0.95, 0.8, 0.25);
 static const float3 ACTIVE_COLOR = float3(0.15, 0.75, 0.95);
+static const float3 PEEK_FRAME_COLOR = float3(0.25, 0.8, 0.45);  // 覗きの段の枠
+static const float3 PEEK_DIVE_COLOR = float3(0.6, 1.0, 0.7);     // 潜っている段の枠
 
 // 断面の熱の無いセル(面の広がりが見えるように)
 static const float3 COLD_SLICE_COLOR = float3(0.05, 0.06, 0.1);
@@ -56,6 +61,10 @@ static const float OPAQUE_ENOUGH = 0.995;
 
 // 格子の枠の線の太さ(画素)
 static const float LINE_WIDTH_PIXELS = 1.2;
+
+// 覗きの段のセルの線を描くのは、セルが画面でこの画素数より大きいとき(線の濃さ)
+static const float PEEK_CELL_LINE_MIN_PIXELS = 12.0;
+static const float PEEK_CELL_LINE_SHADE = 0.35;
 
 // 格子を斜めに抜けるときのセルの数の上限
 static const uint32_t MAX_STEPS = PROBE_GRID_SIZE * 3 + 4;
@@ -109,8 +118,9 @@ uint32_t LoadExtraction(uint32_t extraction, uint32_t index) {
     return extraction2[index];
 }
 
-uint32_t LoadCellWord(uint32_t extraction, uint3 cell, uint32_t word) {
-    return LoadExtraction(extraction, ProbeCellIndex(cell.x, cell.y, cell.z) * PROBE_EXTRACTION_CELL_WORDS + word);
+// 世界のセルの 4 語の始まり(覗きの段のセルも同じ 4 語。PeekCellWordBase)
+uint32_t CellWordBase(uint3 cell) {
+    return ProbeCellIndex(cell.x, cell.y, cell.z) * PROBE_EXTRACTION_CELL_WORDS;
 }
 
 bool IsBlockActive(uint32_t extraction, uint3 cell) {
@@ -128,10 +138,11 @@ float Normalized(float value, float span, uint32_t flags) {
     return fraction;
 }
 
-// セルの色分けする量を 0〜1 に(flags が選ぶ量)
-float CellAmount(ViewConstants constants, uint3 cell) {
+// セル(4 語が wordBase から)の色分けする量を 0〜1 に(flags が選ぶ量)。覗きの段のセルは単位が 8^-k だが、
+// 同じ濃度・温度なら同じ数なので(17 §1)同じ幅で塗る
+float WordsAmount(ViewConstants constants, uint32_t wordBase) {
     const uint32_t quantity = (constants.flags >> VIEW_QUANTITY_SHIFT) & 3;
-    const float value = (float)LoadCellWord(constants.extraction, cell, quantity);
+    const float value = (float)LoadExtraction(constants.extraction, wordBase + quantity);
     if (quantity == VIEW_QUANTITY_TEMPERATURE)
         return Normalized(max(value * 0.001 - AMBIENT_KELVIN, 0.0), HOT_KELVIN_SPAN, constants.flags);
 
@@ -142,6 +153,10 @@ float CellAmount(ViewConstants constants, uint3 cell) {
         return Normalized(value, GAS_SPAN_MICROMOLES, constants.flags);
 
     return Normalized(value, CARBON_SPAN_MICROMOLES, constants.flags);
+}
+
+float CellAmount(ViewConstants constants, uint3 cell) {
+    return WordsAmount(constants, CellWordBase(cell));
 }
 
 // 黒 → 赤 → 黄 → 白
@@ -174,11 +189,11 @@ float PixelSize(ViewConstants constants, float t) {
     return constants.orthographic ? scale : scale * t;
 }
 
-// 格子の箱 [0, 1 辺]³ との交わり(入る t・出る t)。当たらなければ enter > exit
-float2 IntersectGrid(Ray ray) {
+// 箱 [boxLow, boxHigh] との交わり(入る t・出る t)。当たらなければ enter > exit
+float2 IntersectBox(Ray ray, float3 boxLow, float3 boxHigh) {
     const float3 inverse = 1.0 / ray.direction;  // 0 の成分は ±inf(比較はそのまま効く)
-    const float3 near = (0.0 - ray.origin) * inverse;
-    const float3 far = ((float)PROBE_GRID_SIZE - ray.origin) * inverse;
+    const float3 near = (boxLow - ray.origin) * inverse;
+    const float3 far = (boxHigh - ray.origin) * inverse;
     const float3 low = min(near, far);
     const float3 high = max(near, far);
 
@@ -186,12 +201,91 @@ float2 IntersectGrid(Ray ray) {
 }
 
 // 箱の面の上の点が、辺(2 つの軸で端)の近くか
-bool OnGridEdge(float3 location, float width) {
-    const float3 distance = min(location, (float)PROBE_GRID_SIZE - location);
+bool OnBoxEdge(float3 location, float3 boxLow, float3 boxHigh, float width) {
+    const float3 distance = min(location - boxLow, boxHigh - location);
     const uint32_t nearCount = (distance.x < width ? 1 : 0) + (distance.y < width ? 1 : 0) +
                                (distance.z < width ? 1 : 0);
 
     return nearCount >= 2;
+}
+
+// 格子の箱 [0, 1 辺]³
+float2 IntersectGrid(Ray ray) {
+    return IntersectBox(ray, 0.0, (float)PROBE_GRID_SIZE);
+}
+
+bool OnGridEdge(float3 location, float width) {
+    return OnBoxEdge(location, 0.0, (float)PROBE_GRID_SIZE, width);
+}
+
+// --- 覗きの段(T-0096。抽出の覗きの欄、並びは probe_sim.hlsli)---
+
+struct PeekLevel {
+    float cellsPerWorld;  // この段のセルの数 / 世界のセル 1 つ(2^レベル)
+    float3 origin;        // 原点(この段のセルの単位)
+    float3 low;           // 箱(世界のセルの単位)
+    float3 high;
+};
+
+uint32_t PeekLevelCount(uint32_t extraction) {
+    return min(LoadExtraction(extraction, PROBE_EXTRACTION_PEEK_OFFSET), PROBE_PEEK_MAX_LEVELS);
+}
+
+PeekLevel LoadPeekLevel(uint32_t extraction, uint32_t index) {
+    const uint32_t header = PROBE_EXTRACTION_PEEK_OFFSET + PROBE_PEEK_LEVEL_WORDS + index * PROBE_PEEK_LEVEL_WORDS;
+    PeekLevel level;
+    level.cellsPerWorld = exp2((float)LoadExtraction(extraction, header));
+    level.origin = float3((float)(int)LoadExtraction(extraction, header + 1),
+                          (float)(int)LoadExtraction(extraction, header + 2),
+                          (float)(int)LoadExtraction(extraction, header + 3));
+    level.low = level.origin / level.cellsPerWorld;
+    level.high = (level.origin + (float)PROBE_PEEK_BLOCK_EDGE) / level.cellsPerWorld;
+
+    return level;
+}
+
+bool InsidePeekLevel(PeekLevel level, float3 location) {
+    return all(location >= level.low) && all(location < level.high);
+}
+
+// 段 index のセル(場所 location を含む)の 4 語の始まり
+uint32_t PeekCellWordBase(PeekLevel level, uint32_t index, float3 location) {
+    const uint3 local = (uint3)clamp(floor(location * level.cellsPerWorld - level.origin), 0.0,
+                                     (float)PROBE_PEEK_BLOCK_EDGE - 1.0);
+    const uint32_t cell = local.x + PROBE_PEEK_BLOCK_EDGE * (local.y + PROBE_PEEK_BLOCK_EDGE * local.z);
+
+    return PROBE_EXTRACTION_PEEK_CELL_OFFSET + (index * PROBE_PEEK_BLOCK_CELLS + cell) * PROBE_EXTRACTION_CELL_WORDS;
+}
+
+// 潜っている段(1〜9。0 なら潜っていない)の枠の色
+float3 PeekFrameColor(ViewConstants constants, PeekLevel level) {
+    const uint32_t depth = (constants.flags >> VIEW_PEEK_DEPTH_SHIFT) & 15;
+    const bool dive = depth != 0 && abs(level.cellsPerWorld - exp2((float)depth)) < 0.5;
+
+    return dive ? PEEK_DIVE_COLOR : PEEK_FRAME_COLOR;
+}
+
+// 光線が当たる段の箱の辺(手前の面)。無ければ false
+bool PeekBoxEdges(ViewConstants constants, Ray ray, out float3 color) {
+    color = 0;
+    const uint32_t count = PeekLevelCount(constants.extraction);
+    bool found = false;
+    for (uint32_t index = 0; index < count; ++index) {
+        const PeekLevel level = LoadPeekLevel(constants.extraction, index);
+        const float2 range = IntersectBox(ray, level.low, level.high);
+        if (range.x >= range.y)
+            continue;
+
+        const float width = LINE_WIDTH_PIXELS * PixelSize(constants, range.x);
+        const float3 enter = ray.origin + ray.direction * range.x;
+        const float3 exit = ray.origin + ray.direction * range.y;
+        if (OnBoxEdge(enter, level.low, level.high, width) || OnBoxEdge(exit, level.low, level.high, width)) {
+            color = PeekFrameColor(constants, level);
+            found = true;
+        }
+    }
+
+    return found;
 }
 
 // --- 格子を辿る ---
@@ -276,17 +370,83 @@ SliceHit IntersectSlice(ViewConstants constants, Ray ray) {
     if (abs(along) < 1e-6)
         return result;
 
-    result.t = ((float)constants.slicePosition + 0.5 - ray.origin[constants.sliceAxis]) / along;
+    const float plane = (float)constants.slicePosition + 0.5;
+    result.t = (plane - ray.origin[constants.sliceAxis]) / along;
     result.location = ray.origin + ray.direction * result.t;
+    // 軸の座標はちょうど面に(覗きの細かい段では面がセルの境目に来るので、丸めの揺れで上下のセルが混ざらないように。
+    // 境目では上のセル = 覗いた点を含むセルを取る)
+    result.location[constants.sliceAxis] = plane;
     result.hit = result.t >= 0.0 && all(result.location >= 0.0) && all(result.location < (float)PROBE_GRID_SIZE);
 
     return result;
 }
 
-float3 SliceColor(ViewConstants constants, float3 location) {
+// 覗きの段のセルの色(一番細かい段から。どの段にも入っていなければ false)。セルが画面で大きければ境目の線も
+bool PeekSliceColor(ViewConstants constants, float3 location, float pixelSize, out float3 color) {
+    color = 0;
+    const uint32_t count = PeekLevelCount(constants.extraction);
+    for (uint32_t step = 0; step < count; ++step) {
+        const uint32_t index = count - 1 - step;
+        const PeekLevel level = LoadPeekLevel(constants.extraction, index);
+        if (!InsidePeekLevel(level, location))
+            continue;
+
+        const float amount = WordsAmount(constants, PeekCellWordBase(level, index, location));
+        color = amount > 0.0 ? HeatColor(amount) : COLD_SLICE_COLOR;
+
+        // --- 段のセルの境目(断面の 2 つの軸)---
+        const float cellPixels = 1.0 / (level.cellsPerWorld * pixelSize);
+        if (cellPixels > PEEK_CELL_LINE_MIN_PIXELS) {
+            const float3 fine = location * level.cellsPerWorld;
+            const float3 edgePixels = abs(fine - round(fine)) * cellPixels;
+            bool onLine = false;
+            [unroll] for (uint32_t axis = 0; axis < 3; ++axis)
+                onLine = onLine || (axis != constants.sliceAxis && edgePixels[axis] < 0.75);
+
+            color *= onLine ? 1.0 - PEEK_CELL_LINE_SHADE : 1.0;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+// 断面の上の覗きの段の枠(段の箱の内側の縁)
+bool OnPeekSliceFrame(ViewConstants constants, float3 location, float width, out float3 color) {
+    color = 0;
+    const uint32_t count = PeekLevelCount(constants.extraction);
+    bool found = false;
+    for (uint32_t index = 0; index < count; ++index) {
+        const PeekLevel level = LoadPeekLevel(constants.extraction, index);
+        if (!InsidePeekLevel(level, location))
+            continue;
+
+        const float3 distance = min(location - level.low, level.high - location);
+        float nearest = 1e30;
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+            if (axis != constants.sliceAxis)
+                nearest = min(nearest, distance[axis]);
+        }
+
+        if (nearest < width) {
+            color = PeekFrameColor(constants, level);
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+// 断面の色(覗きの段があればその色。活性なブロックの薄い色は世界のブロックで、覗きの段の上にも同じく重ねる)
+float3 SliceColor(ViewConstants constants, float3 location, float pixelSize) {
     const uint3 cell = min((uint3)location, PROBE_GRID_SIZE - 1);
-    const float amount = CellAmount(constants, cell);
-    float3 color = amount > 0.0 ? HeatColor(amount) : COLD_SLICE_COLOR;
+    float3 color;
+    if (!PeekSliceColor(constants, location, pixelSize, color)) {
+        const float amount = CellAmount(constants, cell);
+        color = amount > 0.0 ? HeatColor(amount) : COLD_SLICE_COLOR;
+    }
+
     const bool active = (constants.flags & VIEW_FLAG_ACTIVE_BLOCKS) != 0 && IsBlockActive(constants.extraction, cell);
 
     return active ? lerp(color, ACTIVE_COLOR, 0.25) : color;
@@ -366,11 +526,16 @@ float4 PSMain(VertexOutput input) : SV_Target {
 
     // 断面の表示: 断面だけを不透明に(枠は上に)
     if (constants.mode == VIEW_MODE_SLICE) {
+        const float slicePixel = PixelSize(constants, slice.t);
+        float3 peekFrame;
         if (sliceFrame)
             return float4(SLICE_FRAME_COLOR, 1);
 
+        if (slice.hit && OnPeekSliceFrame(constants, slice.location, LINE_WIDTH_PIXELS * slicePixel, peekFrame))
+            return float4(peekFrame, 1);
+
         if (slice.hit)
-            return float4(SliceColor(constants, slice.location), 1);
+            return float4(SliceColor(constants, slice.location, slicePixel), 1);
 
         return float4(frontEdge || backEdge ? FRAME_COLOR : BACKGROUND, 1);
     }
@@ -389,6 +554,11 @@ float4 PSMain(VertexOutput input) : SV_Target {
 
     if (sliceFrame)
         color = lerp(color, SLICE_FRAME_COLOR, 0.8);
+
+    // 覗きの段の箱(立体の表示では枠だけ。中身は断面の表示で)
+    float3 peekEdge;
+    if (PeekBoxEdges(constants, ray, peekEdge))
+        color = peekEdge;
 
     if (frontEdge)
         color = FRAME_COLOR;

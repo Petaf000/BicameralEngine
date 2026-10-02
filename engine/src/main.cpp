@@ -16,6 +16,8 @@
 //   --view <volume|mip|slice>        最初のデバッグ表示(既定 volume。窓では 1・2・3 で切り替え。render/debug_view_controller.h)
 //   --camera <yaw>,<pitch>,<距離>    最初のカメラ(度・度・セル。既定 35,25,150。0,0,80 で z = 32 の面を正面から)
 //   --screenshot <path>              最後のフレームを BMP に書く(--frames と一緒に使う。render/screenshot.h)
+//   --peek <x,y,z>                   起動時からそのセルを覗き窓で覗く(影の鎖 k = 1〜9。窓では P。sim/probe_peek.h。T-0096)
+//   --peek-depth <k>                 覗き窓で潜る段(0〜9。カメラが点に寄る。窓では PageDown・PageUp)
 //   --trace <path>                   伝導の連鎖のトレースを刻みごとの木にして、終わるときに書く(sim/probe_trace.h。T-0087)
 //   --trace-ticks <始め>:<終わり>    トレースする刻み [始め, 終わり)(既定: 全部)
 //   --trace-cells <x,y,z>:<x,y,z>    トレースするセルの箱 [最小, 最大)(既定: 全部。そのセルを含むブロックを記録する)
@@ -163,13 +165,42 @@ namespace {
         return camera;
     }
 
-    // 表示の引数(--view・--camera・--screenshot)
+    // 覗き窓の引数(--peek・--peek-depth)
+    std::expected<void, std::string> ParsePeekOption(std::wstring_view argument, std::wstring_view text,
+                                                     frame::FrameLoopOptions& loop) {
+        if (argument == L"--peek-depth") {
+            const auto depth = ParseCount(text, render::PEEK_MAX_DEPTH);
+            if (!depth)
+                return std::unexpected(
+                    std::format("--peek-depth の値が不正: {}(0〜{})", ToUtf8(text), render::PEEK_MAX_DEPTH));
+
+            loop.peekDepth = *depth;
+
+            return {};
+        }
+
+        const auto cell = ParseNumbers<3>(text);
+        if (!cell || std::ranges::any_of(*cell, [](uint64_t value) { return value >= sim::PROBE_GRID_SIZE; }))
+            return std::unexpected(std::format("--peek の値が不正: {}(例: 28,32,32)", ToUtf8(text)));
+
+        loop.peek = true;
+        loop.peekCell = {.x = static_cast<uint32_t>((*cell)[0]),
+                         .y = static_cast<uint32_t>((*cell)[1]),
+                         .z = static_cast<uint32_t>((*cell)[2])};
+
+        return {};
+    }
+
+    // 表示の引数(--view・--camera・--screenshot・--peek・--peek-depth)
     std::expected<void, std::string> ParseViewOption(std::wstring_view argument, std::wstring_view text,
                                                      frame::FrameLoopOptions& loop) {
         if (argument == L"--screenshot") {
             loop.screenshotPath = text;
             return {};
         }
+
+        if (argument == L"--peek" || argument == L"--peek-depth")
+            return ParsePeekOption(argument, text, loop);
 
         if (argument == L"--view") {
             if (render::ParseDebugViewMode(ToUtf8(text), loop.view.mode))
@@ -256,7 +287,9 @@ namespace {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
                 if (!parsed)
                     return std::unexpected(parsed.error());
-            } else if ((argument == L"--view" || argument == L"--camera" || argument == L"--screenshot") && hasValue) {
+            } else if ((argument == L"--view" || argument == L"--camera" || argument == L"--screenshot" ||
+                        argument == L"--peek" || argument == L"--peek-depth") &&
+                       hasValue) {
                 const auto parsed = ParseViewOption(argument, arguments[++i], options.frameLoop);
                 if (!parsed)
                     return std::unexpected(parsed.error());

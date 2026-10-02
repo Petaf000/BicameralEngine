@@ -1,6 +1,7 @@
 // gpu_multires.cpp — 多重解像度の入れ子の GPU 版(gpu_multires.h)。
 // 細かくする・粗くする・引き戻すは Work Graph の再帰(1 レベル = 1 グループ)、刻むのは Compute(1 スレッド = 1 セル)。
-// 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄、b0、デバッグのリング、t0〜t3 表)。
+// 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ、b0、
+// デバッグのリング、t0〜t3 表)。
 #include "sim/gpu_multires.h"
 
 #include "core/log.h"
@@ -13,9 +14,10 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 12;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
+        constexpr uint32_t EXTERNAL_VIEW_FIRST = 4;  // u4・u5
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 4, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
+            .uavCount = 6, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
         constexpr uint32_t STEP_THREADS_PER_GROUP = 64;  // multires_step.hlsl の numthreads
 
         enum Entry : uint8_t { EntryRefine, EntryCoarsen, EntryPullBack, EntryRemoveShadow };
@@ -176,6 +178,12 @@ namespace bicameral::sim {
         for (uint32_t i = 0; i < BUFFER_COUNT; ++i)
             list->SetComputeRootUnorderedAccessView(i, m_buffers[i]->GetGPUVirtualAddress());
 
+        const D3D12_GPU_VIRTUAL_ADDRESS standIn = m_buffers[1]->GetGPUVirtualAddress();
+        for (uint32_t i = 0; i < m_externalViews.size(); ++i) {
+            const D3D12_GPU_VIRTUAL_ADDRESS view = m_externalViews[i] != 0 ? m_externalViews[i] : standIn;
+            list->SetComputeRootUnorderedAccessView(EXTERNAL_VIEW_FIRST + i, view);
+        }
+
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
         for (uint32_t i = 0; i < TABLE_COUNT; ++i)
@@ -243,6 +251,24 @@ namespace bicameral::sim {
         list->SetPipelineState(m_stepPipeline.Get());
         BindRoot(list, debugRing);
         list->Dispatch(m_blockCapacity * MR_BLOCK_CELLS / STEP_THREADS_PER_GROUP, 1, 1);
+        UavBarrier(list);
+    }
+
+    // --- 外のバッファとパイプライン ---
+
+    void GpuMultires::SetExternalViews(D3D12_GPU_VIRTUAL_ADDRESS first, D3D12_GPU_VIRTUAL_ADDRESS second) {
+        m_externalViews = {first, second};
+    }
+
+    void GpuMultires::RecordExternalDispatch(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                             ID3D12PipelineState* pipeline, uint32_t groupCount,
+                                             const std::array<uint32_t, 4>& external) {
+        m_constants.external = external;
+
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(pipeline);
+        BindRoot(list, debugRing);
+        list->Dispatch(groupCount, 1, 1);
         UavBarrier(list);
     }
 

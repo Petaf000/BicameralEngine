@@ -229,6 +229,11 @@ views:
       - { id: gpumultires, group: simlib, label: "GpuMultires<br/>細分は Work Graph の再帰、刻みは Compute",
           code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordRefine", ticket: T-0017, doc: docs/design/17-multiresolution.md,
           note: "shaders/sim/multires_graph.hlsl(1 レベル = 1 グループ、次のレベルを自分へ)・multires_step.hlsl" }
+      - { id: probepeek, group: simlib, label: "ProbePeek<br/>覗き窓: 世界の写し → 影の鎖 k = 1〜9 → 抽出",
+          code: "engine/src/sim/probe_peek.cpp::ProbePeek::RecordAfterExtract", ticket: T-0096, doc: docs/design/17-multiresolution.md,
+          note: "ProbeSim の抽出の後のフック。世界のバッファは読むだけ(D-403)。shaders/sim/multires_peek.hlsl(MirrorWorld・ExtractShadow)" }
+      - { id: peektest, group: tests, label: "gpu_probe_peek_test<br/>覗く・移る・やめるで CPU とビット一致・ハッシュ列が変わらない",
+          code: "tests/gpu_probe_peek_test.cpp::RunPeek", ticket: T-0096 }
       - { id: multirestest, group: tests, label: "multires_test<br/>k = 0〜9 の往復・21 段・影で世界が変わらない",
           code: "tests/multires_test.cpp::RunRealChain", ticket: T-0017 }
       - { id: gpumultirestest, group: tests, label: "gpu_multires_test<br/>本物の鎖と影の鎖を毎刻み GPU と CPU で比べる",
@@ -309,6 +314,10 @@ views:
       - [multirestest, multiresnest]
       - [gpumultirestest, gpumultires]
       - [gpumultirestest, multiresnest, "毎刻み比べる"]
+      - [probepeek, gpumultires, "同じルート署名に u4・u5 を足して"]
+      - [probesim, probepeek, "抽出の後のフック"]
+      - [viewcontroller, frameloop, "P・PageDown → 覗く場所"]
+      - [peektest, probepeek]
       - [gpureactiontest, immediate, "compute キュー"]
       - [debugringhlsl, debugring, "読み戻し(フレームの終わり)"]
       - [debugring, log, "Channel::Gpu / WorkGraph"]

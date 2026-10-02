@@ -477,7 +477,7 @@ namespace bicameral::sim {
 
         // --- 刻みの境界の状態 S(tick) を抽出へ(刻みの途中で終わっても、途中の刻みは別の世代に書いているので S(tick) は揃っている)---
         if (input.extract)
-            RecordExtract(list, tick, input.extractionTarget);
+            RecordExtractAndHook(list, tick, input);
 
         RecordActiveListStates(list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         RecordReadbacks(list, slot, hasHash);
@@ -494,6 +494,21 @@ namespace bicameral::sim {
         TrackCommands(input.commands, NextApplyTick(tick, unit));
 
         return list;
+    }
+
+    // 抽出と、その後ろのフック(覗き窓。T-0096)。フックは書き終えた抽出を読めるように UAV のバリアの後
+    void ProbeSim::RecordExtractAndHook(ID3D12GraphicsCommandList10* list, uint64_t tick,
+                                        const ProbeFrameInput& input) {
+        RecordExtract(list, tick, input.extractionTarget);
+        if (!input.afterExtract)
+            return;
+
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        list->ResourceBarrier(1, &allUavs);
+        input.afterExtract(list, {.tick = tick,
+                                  .cells = m_cells.Get(),
+                                  .extraction = m_extractions[input.extractionTarget].Get(),
+                                  .debugRing = m_debugRing.GpuAddress()});
     }
 
     // 新しいコマンドを GPU のキューの末尾へ(フレームのリストの先頭。単位より前)

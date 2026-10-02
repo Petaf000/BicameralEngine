@@ -1,31 +1,42 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0097 新しい WARP を試す — 完了
+最終更新: 2026-10-03 / チケット: T-0096 窓で 1 点を入れ子に細かくして覗く — 完了
 
 ## 状態(3 行以内)
-- WARP を OS のものから NuGet の Microsoft.Direct3D.WARP 1.0.21(版とハッシュで固定)に替えた。OS の WARP で落ちていた Work Graph(仮の世界・多重解像度)が動き、CPU とビット一致。
-- ADR-0013 を解消(Superseded)・D-427。WARP のテストを ctest に戻し、物理の WARP のテストも足した(CI でも Work Graph の重いテストが WARP で回る)。
-- 次は T-0096(窓で 1 点を入れ子に細かくして覗く。M1 の完了の姿)。
+- 窓で P を押すと断面のカーソルの下のセルを覗き、影の鎖(k = 1〜9)を毎フレーム刻んで引き戻して描く。PageDown/PageUp で潜る・浮かぶ。
+- 覗いても世界のハッシュ列は覗かない時と一致(window_replay_peek)。影の鎖と抽出は GPU(HW・WARP)と CPU がビット一致(gpu_probe_peek)。
+- M1 のチケットは全部終わった。ただし M1 の完了の姿の「角ばった箱が崩れる」は窓に無い(物理の GPU は世界の刻みに未組み込み)→ M1 を閉じるかはユーザーが決める。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし(61)・`python3 tools/archmap/archmap.py --check` OK(87)。
-- `job.py test -Filter warp`(debug 10 件、約 225 s): gpu_multires_warp 12 s・gpu_probe_sim_warp 130 s・gpu_probe_trace_warp 65 s・gpu_physics_stack_warp 27 s ほか。
-- `job.py test -Preset release`: 全 49 件が通る(約 475 s)。
-- WARP で走らせるとログに `WARP: <bin の場所>\d3d10warp.dll(版 1.0.21.0)` が出る。`job.py run -Preset release -- --warp --frames 120` で窓のアプリも動く(1.3 fps)。
+- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(89)。
+- `job.py test -Filter "gpu_probe_peek"`(debug: HW 53 s・WARP 33 s)。`job.py test -Filter window`(window_replay_peek は覗いて k = 9 まで潜りながら再生、119 / 119 一致)。
+- release で physics 以外の全部のテストが通る(物理は今回触っていないので、時間の都合で途中まで: physics_* 9 件は通った)。
+- `job.py run -Preset release -- --frames 150 --auto-click --peek 28,32,32 --peek-depth 3 --view slice --camera 0,0,80 --screenshot x.bmp` で覗いた断面の絵(bin/ に出る)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- CI(GitHub Actions)で新しい WARP のテストが通るかは、push 後の CI の結果で確認する(未確認)。CI の機械は遅いので gpu_probe_sim_warp・gpu_probe_trace_warp は TIMEOUT 900。
-- OS の WARP で落ちた原因が JIT の制御の流れだったかは未確認(版を替えたら直った、まで)。
-- (前から)粗くする・影の引き戻しが 1 段約 250 µs。段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。Work Graph のノードの局所の変数が約 5〜6 KB を超えると GPU が固まる。物理の GPU 版は世界の刻みに未組み込み。PIX・セーブ・AMD は未確認/未着手。
+- この場面では影の中に細部(子どうしの違い)が生まれない: 燃えた点のセルは 4000 K で反応が反応物で頭打ち、周りは冷たい。段をまたぐ輸送(T-0019)が入るまで、k ≥ 2 は世界のセルの写しが一様に見える。
+- 覗いている間は毎フレーム +2.2 ms(引き戻しの 9 段の連鎖。BACKLOG の待ち時間の件)。
+- (前から)粗くする・影の引き戻しが 1 段約 250 µs。段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。物理の GPU 版は世界の刻みに未組み込み。PIX・セーブ・AMD は未確認/未着手。
+- CI(GitHub Actions)で WARP のテスト(T-0097 の分と gpu_probe_peek_warp)が通るかは push 後の CI で確認する(未確認)。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- D-427: WARP は NuGet の版を版と SHA-256 で固定して exe の横に置く(今は 1.0.21)。ADR-0013 は Superseded(「解消」の節に経緯)。
-- 物理の WARP のテストは積み木だけ・120 刻み(重いので)。
+- 覗き窓の形(T-0096 のチケットの「形」): 世界の写しのブロック(`MR_BLOCK_MIRROR`)を影の鎖の根の親にする・影は抽出ごとに 1 刻み(世界の刻みが進んだときだけ)・
+  抽出の後ろに覗きの欄・ProbeSim の抽出の後のフック・操作は P / Shift + P / PageDown・PageUp。ADR にはしていない(T-0018 の疎な木で作り直す前提の仮の形)。
+- フレームのループはシミュの読み戻しを投げた順に読む(枠の番号の順だと再生の突き合わせが時々落ちた)。
 
 ## 次にやること
-NEXT.md の先頭(T-0096 窓で覗く → M1 完了 → T-0094)。
+NEXT.md の先頭(M1 を閉じるかの判断 → T-0094)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **覗き窓(T-0096)**: sim/probe_peek(ProbePeek・CPU リファレンス ProbePeekReference・状態 PeekState)。GpuMultires のルート署名に u4・u5(外のバッファ)と
+  外の定数 4 語を足し、`SetExternalViews` + `RecordExternalDispatch` で shaders/sim/multires_peek.hlsl(MirrorWorld・ExtractShadow)を投げる。
+  ProbeSim は `ProbeFrameInput::afterExtract` を抽出の後(UAV バリアの後)に呼ぶ。抽出の覗きの欄の並びは probe_sim.hlsli(PROBE_EXTRACTION_PEEK_*)、
+  Extract が段の数 0 を書き、覗き窓が後ろで書き直す。描画は probe_view.hlsl の PeekSliceColor・OnPeekSliceFrame・PeekBoxEdges。
+  潜った段は ProbeViewConstants の flags のビット 16〜19(VIEW_PEEK_DEPTH_SHIFT)。段 k のブロックは「点を含む 8 の倍数に揃ったブロック」(カメラの寄せ先。FocusOnPeek)。
+  断面の位置は軸の座標をちょうど面に置き直している(細かい段では面がセルの境目に来るため)。
+- 別のリストで GpuMultires の入れ子を読み戻すときは注意: `RecordReadback` は UAV → COPY_SOURCE の遷移を書くので、バッファが UAV にいるリストの中で呼ぶ
+  (gpu_probe_peek_test はフックの中で呼んでいる。リストの終わりで COMMON に戻る)。
+- gpu_probe_peek_test の GPU 時間の差は暖機していないので 7 倍に出る。覗きの費用は窓の要約(シミュ GPU ms/投入)で比べる。
 - **WARP(T-0097)**: 使うのは exe の横の d3d10warp.dll(NuGet 1.0.21)。版を上げるときはルートの CMakeLists.txt の `BICAMERAL_WARP_VERSION` と `BICAMERAL_WARP_SHA256` を両方変える
   (取ってくるのは configure の時。`_deps/warp-<版>` が無ければ取る)。ログに Warning「WARP が exe の横の版ではない」が出たら OS の WARP を読んでいる。
   NuGet の版の一覧には `1.65535.20-preview` もあるが、1.0.21 より古いプレビュー(版の数字が大きいだけ)。
