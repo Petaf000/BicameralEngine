@@ -196,7 +196,10 @@ views:
           note: "順番に依存しない: 6×6 への足し込みは整数の和、β は最大値、彩色は前の回の色だけを読む" }
       - { id: gpuphysics, group: simlib, label: "GpuPhysics::RecordStep<br/>広域 → 接触(Work Graph)→ 彩色 → 反復(Compute)→ 仕上げ",
           code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordSubstep", ticket: T-0092, doc: docs/decisions/ADR-0002-avbd-execution.md,
-          note: "shaders/sim/physics_step.hlsl。色ごとの解は 1 グループ = 1 物(点ごとの寄与を整数の和で)。WG と Compute は測って選んだ(ADR-0002「計測」)" }
+          note: "shaders/sim/physics_step.hlsl。色ごとの解は 1 グループ = 1 物(点ごとの寄与を整数の和で)。使わない色は述語で飛ばす(T-0094)。WG と Compute は測って選んだ(ADR-0002「計測」)" }
+      - { id: physicsislands, group: shared, label: "physics_islands.hlsli(島ごとに 1 グループ。比べた方)<br/>島分け → 島の中で彩色と反復",
+          code: "shaders/sim/physics_islands.hlsli::SolveIslandInGroup", ticket: T-0094, doc: docs/design/08-bodies-physics.md,
+          note: "GpuPhysicsOptions::islands(既定 Off)。CPU とビット一致だが、6×6 の 1 スレッドの待ち時間が 1 区画に重なり遅い(山 3.86 → 7.13 ms)。大きな島は全体の方式が述語つきで" }
       - { id: physicsgraph, group: shared, label: "physics_graph.hlsl(Work Graph)<br/>広域の選別 → 接触の幾何 / 色ごとの解(比べた方)",
           code: "shaders/sim/physics_bindings.hlsli::CollideGeometry", ticket: T-0092, doc: docs/design/08-bodies-physics.md,
           note: "組(3 KB)をノードの局所に持つと GPU が固まる(約 5〜6 KB 超)ので、組を作るのは Compute の BuildManifolds" }
@@ -207,7 +210,7 @@ views:
           code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordPhysics", ticket: T-0098, doc: docs/design/08-bodies-physics.md,
           note: "物のハッシュは刻みの最後の単位(StoreBodyHash)、姿勢は抽出の物の欄へ。窓は Shift + 左クリックで押す" }
       - { id: probephysicstest, group: tests, label: "gpu_probe_physics_test<br/>押して崩す積み木が CPU と毎刻みビット一致",
-          code: "tests/gpu_probe_physics_test.cpp::RunGpu", ticket: T-0098,
+          code: "tests/gpu_probe_physics_test.cpp::GpuRun::Execute", ticket: T-0098,
           note: "2 回目は別のキューに雑音を流し、単位を 1 つずつ投げる(組を局所に持つと結果が変わった件の再発の検査)" }
       - { id: gpuphysicstest, group: tests, label: "gpu_physics_test<br/>3 場面の全部の刻みを GPU と CPU で比べる",
           code: "tests/gpu_physics_test.cpp::RunGpu", ticket: T-0090,
@@ -311,6 +314,8 @@ views:
       - [physicsworld, physicsstep, "物・組ごとの手順"]
       - [gpuphysics, physicsstep, "同じ関数(.cso)"]
       - [gpuphysics, physicsgraph, "DispatchGraph"]
+      - [gpuphysics, physicsislands, "島の方式(GpuPhysics::RecordIslandSolve)"]
+      - [physicsislands, physicsstep]
       - [physicsgraph, physicsstep]
       - [physicsstep, physicscollide]
       - [physicsstep, physicssolverhlsl]

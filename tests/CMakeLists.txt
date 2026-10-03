@@ -99,6 +99,14 @@ endforeach()
 bicameral_add_gpu_test_case(gpu_physics_stack_warp gpu_physics_test warp --warp --scene stack --ticks 120)
 # 採らなかった方(広域の選別を Compute・色ごとの解を Work Graph。T-0092 で測って比べた)も壊れていないこと
 bicameral_add_gpu_test_case(gpu_physics_stack_alternative gpu_physics_test gpu --scene stack --broadphase compute --solver graph)
+# 島ごとに 1 グループで解く方式(T-0094)。島分けの印も CPU と比べる。上限 8 の山は大きな島(全体の方式・述語つき)と小さな島が混ざる。
+# 壁(れんが 300 個が 1 つの島)は上限を超えて全体の方式に回る場合と、1 グループで解く場合(上限 300・256 スレッド・1 物 32 スレッド)
+foreach(_scene IN ITEMS stack mass_ratio pile)
+  bicameral_add_gpu_test_case(gpu_physics_${_scene}_islands gpu_physics_test gpu --scene ${_scene} --islands compute)
+endforeach()
+bicameral_add_gpu_test_case(gpu_physics_pile_islands_mixed gpu_physics_test gpu --scene pile --islands compute --island-limit 8)
+bicameral_add_gpu_test_case(gpu_physics_wall_islands_large gpu_physics_test gpu --scene wall --islands compute)
+bicameral_add_gpu_test_case(gpu_physics_wall_islands_group gpu_physics_test gpu --scene wall --islands compute --island-limit 300 --island-lanes 32)
 
 # 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
 # 走らせ方: job.py run -Preset release -Exe gpu_fixed_bench

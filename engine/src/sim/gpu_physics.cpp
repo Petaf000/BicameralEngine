@@ -13,26 +13,30 @@ namespace bicameral::sim {
         using namespace bicameral::physics;
 
         constexpr uint32_t THREADS_PER_GROUP = 64;  // physics_step.hlsl の numthreads
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 14;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
         constexpr uint32_t STATS_BYTES = sizeof(GpuPhysicsStats);
 
-        // u0〜u12 / b0 / デバッグのリング / t0〜t1
+        // u0〜u15 / b0 / デバッグのリング / t0〜t1(ルート署名の大きさ 54 / 64 語)
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 13, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 2};
+            .uavCount = 16, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 2};
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(Pass の順)
-        constexpr std::array<const char*, 13> SHADER_NAMES = {
-            "sim/physics_initialize.cso",      "sim/physics_begin_substep.cso",     "sim/physics_broadphase.cso",
-            "sim/physics_narrowphase.cso",     "sim/physics_prepare_manifolds.cso", "sim/physics_color_round.cso",
-            "sim/physics_finish_coloring.cso", "sim/physics_recollide.cso",         "sim/physics_solve_color.cso",
-            "sim/physics_update_duals.cso",    "sim/physics_update_velocity.cso",   "sim/physics_finish.cso",
-            "sim/physics_build_manifolds.cso"};
+        // (SolveIslands はグループのスレッド数ごとの .cso。SolveIslandsShader)
+        constexpr std::array<const char*, 15> SHADER_NAMES = {
+            "sim/physics_initialize.cso",          "sim/physics_begin_substep.cso",
+            "sim/physics_broadphase.cso",          "sim/physics_narrowphase.cso",
+            "sim/physics_prepare_manifolds.cso",   "sim/physics_color_round.cso",
+            "sim/physics_finish_coloring.cso",     "sim/physics_recollide.cso",
+            "sim/physics_solve_color.cso",         "sim/physics_update_duals.cso",
+            "sim/physics_update_velocity.cso",     "sim/physics_finish.cso",
+            "sim/physics_build_manifolds.cso",     "sim/physics_find_islands.cso",
+            "sim/physics_solve_islands_256_64.cso"};
 
         // 計測の表示名(Pass の順)
-        constexpr std::array<const char*, 15> PASS_NAMES = {
-            "Initialize",     "BeginSubstep",   "Broadphase",     "Narrowphase",     "PrepareManifolds",
-            "ColorRound",     "FinishColoring", "Recollide",      "SolveColor",      "UpdateDuals",
-            "UpdateVelocity", "Finish",         "BuildManifolds", "BroadphaseGraph", "SolveColorGraph"};
+        constexpr std::array<const char*, 17> PASS_NAMES = {
+            "Initialize",     "BeginSubstep", "Broadphase",   "Narrowphase",     "PrepareManifolds", "ColorRound",
+            "FinishColoring", "Recollide",    "SolveColor",   "UpdateDuals",     "UpdateVelocity",   "Finish",
+            "BuildManifolds", "FindIslands",  "SolveIslands", "BroadphaseGraph", "SolveColorGraph"};
 
         constexpr auto COLOR_COUNT = (uint64_t)PX_GPU_MAX_COLORS;
 
@@ -48,6 +52,10 @@ namespace bicameral::sim {
 
         // physics_step.hlsl の ManifoldHeader(組の点を除いた部分)
         constexpr uint64_t MANIFOLD_HEADER_BYTES = 80;
+
+        // physics_bindings.hlsli の島の並び(見出し 4 語 + 物の数ずつの区画 7 つ。T-0094)
+        constexpr uint64_t ISLAND_HEADER_WORDS = 4;
+        constexpr uint64_t ISLAND_REGIONS = 7;
 
         template <typename T>
         ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, std::span<const T> data) {
@@ -97,14 +105,23 @@ namespace bicameral::sim {
         if (!m_rootSignature)
             return std::unexpected("物理のルート署名を作れない");
 
+        const bool islands = m_options.islands != GpuPhysicsIslands::Off;
         for (size_t pass = 0; pass < SHADER_NAMES.size(); ++pass) {
-            const auto bytecode = gpu::LoadShader(SHADER_NAMES[pass]);
+            const bool islandPass = pass == (size_t)Pass::FindIslands || pass == (size_t)Pass::SolveIslands;
+            if (islandPass && !islands)  // 島の方式のパイプラインは使うときだけ作る(SolveIslands は大きい)
+                continue;
+
+            const std::string name = pass == (size_t)Pass::SolveIslands
+                                         ? std::format("sim/physics_solve_islands_{}_{}.cso", m_options.islandThreads,
+                                                       m_options.islandLanes)
+                                         : std::string(SHADER_NAMES[pass]);
+            const auto bytecode = gpu::LoadShader(name);
             if (!bytecode)
                 return std::unexpected(bytecode.error());
 
             m_pipelines[pass] = gpu::CreateComputePipeline(device, m_rootSignature.Get(), *bytecode);
             if (!m_pipelines[pass])
-                return std::unexpected(std::format("パイプラインを作れない: {}", SHADER_NAMES[pass]));
+                return std::unexpected(std::format("パイプラインを作れない: {}", name));
         }
 
         if (m_options.broadphaseGraph || m_options.solver == GpuPhysicsSolver::Graph) {
@@ -133,7 +150,7 @@ namespace bicameral::sim {
     std::expected<void, std::string> GpuPhysics::CreateBuffers(ID3D12Device5* device, const PhysicsScene& scene) {
         const uint64_t n = m_bodyCount;
         const uint64_t slots = n * m_options.slotsPerBody;
-        const std::array<uint64_t, 13> uavBytes = {
+        const std::array<uint64_t, 16> uavBytes = {
             n * sizeof(PhysicsBody),                                       // u0 物
             2 * slots * MANIFOLD_HEADER_BYTES,                             // u1 組の見出し
             2 * n * sizeof(uint32_t),                                      // u2 持ち主の枠の数
@@ -145,8 +162,11 @@ namespace bicameral::sim {
             STATS_BYTES,                                                   // u8 統計
             2 * slots * PX_MANIFOLD_POINTS * sizeof(PhysicsContactPoint),  // u9 組の点
             slots * sizeof(PxContactGeometry),  // u10 接触の幾何(GPU だけが読み書き。HLSL の間隔は C++ の大きさ以下)
-            COLOR_COUNT * sizeof(D3D12_NODE_GPU_INPUT),  // u11 色ごとの GPU の入力
-            COLOR_COUNT * n * sizeof(uint32_t)};         // u12 色ごとの物の一覧
+            COLOR_COUNT * sizeof(D3D12_NODE_GPU_INPUT),                     // u11 色ごとの GPU の入力
+            COLOR_COUNT * n * sizeof(uint32_t),                             // u12 色ごとの物の一覧
+            (ISLAND_HEADER_WORDS + ISLAND_REGIONS * n) * sizeof(uint32_t),  // u13 島(T-0094)
+            sizeof(uint64_t),                                               // u14 大きな島がある(述語)
+            COLOR_COUNT * sizeof(uint64_t)};                                // u15 大きな島の物が使う色(述語)
         for (size_t i = 0; i < uavBytes.size(); ++i) {
             m_uavs[i] = gpu::CreateBuffer(device, uavBytes[i], gpu::BufferKind::UnorderedAccess);
             if (!m_uavs[i])
@@ -167,6 +187,12 @@ namespace bicameral::sim {
         if (!m_srvs[0] || !m_srvs[1] || !m_bodiesReadback || !m_statsReadback)
             return std::unexpected("物理のアップロード・読み戻しのバッファを作れない");
 
+        if (m_options.islands != GpuPhysicsIslands::Off) {
+            m_islandsReadback = gpu::CreateBuffer(device, uavBytes[13], gpu::BufferKind::Readback);
+            if (!m_islandsReadback)
+                return std::unexpected("島の読み戻しのバッファを作れない");
+        }
+
         return {};
     }
 
@@ -180,7 +206,8 @@ namespace bicameral::sim {
                 .frictionQ16 = m_frictionQ16,
                 .solveEntry = m_solveEntry,
                 .colorBodiesLow = (uint32_t)m_uavs[12]->GetGPUVirtualAddress(),
-                .colorBodiesHigh = (uint32_t)(m_uavs[12]->GetGPUVirtualAddress() >> 32)};
+                .colorBodiesHigh = (uint32_t)(m_uavs[12]->GetGPUVirtualAddress() >> 32),
+                .islandBodyLimit = m_options.islandBodyLimit};
     }
 
     // 1 つのパスを投げ、全部の UAV の書き込みを次のパスより前に終わらせる
@@ -358,8 +385,18 @@ namespace bicameral::sim {
         }
 
         RecordPass(list, debugRing, Pass::PrepareManifolds, constants, slotCount);
-        RecordColoring(list, debugRing, constants);
-        RecordIterations(list, debugRing, constants);
+        if (m_options.islands != GpuPhysicsIslands::Off) {
+            RecordIslandSolve(list, debugRing, constants);  // gpu_physics_islands.cpp
+        } else {
+            RecordColoring(list, debugRing, constants);
+            if (SkipsEmptyColors())
+                RecordPredicateStates(list, 15, true);  // FinishColoring が書いた「使う色」を述語に
+
+            RecordIterations(list, debugRing, constants);
+            if (SkipsEmptyColors())
+                RecordPredicateStates(list, 15, false);
+        }
+
         RecordPass(list, debugRing, Pass::Finish, constants, m_bodyCount);
     }
 
@@ -375,25 +412,40 @@ namespace bicameral::sim {
         RecordPass(list, debugRing, Pass::FinishColoring, constants, m_bodyCount);
     }
 
-    // 本反復は α = 1、最後の 1 回は α = 0。途中で接触を探し直し、最後の本反復の後で速度を決める
+    // 本反復は α = 1、最後の 1 回は α = 0。途中で接触を探し直し、最後の本反復の後で速度を決める。
+    // largeOnly(島の方式の大きな島): 組と物のパスは「大きな島がある」(u14)の述語つき。
+    // 色ごとの解は、largeOnly か skipEmptyColors なら「その色を(大きな島の)物が使う」(u15)の述語つき。
+    // 述語をかけるときの色ごとの解は Compute(述語と DispatchGraph は組み合わせない)
     void GpuPhysics::RecordIterations(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                      Constants constants) {
+                                      Constants constants, bool largeOnly) {
         const uint32_t slotCount = m_bodyCount * m_options.slotsPerBody;
         const uint32_t iterations = m_parameters.iterations;
-        const bool graph = m_options.solver == GpuPhysicsSolver::Graph;
+        const bool colorPredicates = largeOnly || SkipsEmptyColors();
+        const bool graph = m_options.solver == GpuPhysicsSolver::Graph && !colorPredicates;
         if (graph)
             RecordColorListStates(list, true);
 
         for (uint32_t iteration = 0; iteration <= iterations; ++iteration) {
-            if (iteration == m_parameters.recollideIteration)
+            if (iteration == m_parameters.recollideIteration) {
+                SetPredicate(list, largeOnly, 14, 0);
                 RecordPass(list, debugRing, Pass::Recollide, constants, slotCount);
+            }
 
             constants.alphaQ16 = iteration < iterations ? (uint32_t)PX_ALPHA_ONE_Q16 : 0;
             for (int32_t color = 0; color < PX_GPU_MAX_COLORS; ++color) {
                 constants.color = color;
-                RecordSolveColor(list, debugRing, constants);
+                SetPredicate(list, colorPredicates, 15, (uint64_t)color * sizeof(uint64_t));
+                if (graph)
+                    RecordSolveColorGraph(list, debugRing, constants, color);
+                else
+                    RecordPass(list, debugRing, Pass::SolveColor, constants,
+                               m_bodyCount * THREADS_PER_GROUP);  // 1 グループ = 1 物
             }
 
+            if (colorPredicates && !largeOnly)
+                list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+
+            SetPredicate(list, largeOnly, 14, 0);
             if (iteration < iterations)
                 RecordPass(list, debugRing, Pass::UpdateDuals, constants, slotCount);
 
@@ -405,19 +457,11 @@ namespace bicameral::sim {
             RecordColorListStates(list, false);
     }
 
-    // 1 つの色の物を解く(解き方は GpuPhysicsOptions::solver)
-    void GpuPhysics::RecordSolveColor(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                      const Constants& constants) {
-        if (m_options.solver == GpuPhysicsSolver::Graph)
-            RecordSolveColorGraph(list, debugRing, constants, constants.color);
-        else
-            RecordPass(list, debugRing, Pass::SolveColor, constants,
-                       m_bodyCount * THREADS_PER_GROUP);  // 1 グループ = 1 物
-    }
-
     void GpuPhysics::RecordReadback(ID3D12GraphicsCommandList10* list) const {
         gpu::RecordCopyToReadback(list, m_uavs[0].Get(), m_bodiesReadback.Get());
         gpu::RecordCopyToReadback(list, m_uavs[8].Get(), m_statsReadback.Get());
+        if (m_islandsReadback)  // 島の方式のときだけ(使っていないと UAV になっていない)
+            gpu::RecordCopyToReadback(list, m_uavs[13].Get(), m_islandsReadback.Get());
         if (m_timestamps && !m_profiledPasses.empty()) {
             list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                    (uint32_t)m_profiledPasses.size() + 1, m_timestampReadback.Get(), 0);

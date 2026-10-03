@@ -48,4 +48,7 @@ namespace bicameral::sim {
     // C 小: 囲い(内側 3 m 四方)の中に大きさ 0.25〜1 m の箱 50 個を 0.25 s ごとに落として山にし、16 s で囲いの壁を 1 枚消して崩す。30 s
     [[nodiscard]] PhysicsScene MakePileScene(uint64_t seed);
 
+    // 大きな島(T-0094): 地面の上にれんが(1 × 0.5 × 1 m・500 kg)を 20 個 × 15 段、段ごとに半分ずらして積んだ壁。300 個が全部つながる。5 s
+    [[nodiscard]] PhysicsScene MakeWallScene();
+
 }  // namespace bicameral::sim

@@ -2,9 +2,14 @@
 // CPU リファレンス(sim::PhysicsWorld)とビット一致することを確かめる(T-0090)。
 // 区間(--segment 刻み)ごとに GPU の物を全部読み戻し、状態のハッシュと統計(食い込み・接触の数・色の数)を CPU と比べる。
 // GPU はもう 1 回走らせ、区間ごとのハッシュが 1 回目と同じこと(2 回の実行で一致)も確かめる。
-// 引数: gpu_test_options.h(--warp・--queue)と --scene stack|mass_ratio|pile・--ticks n(既定: release は場面の全部、debug は 120)・--segment n(既定 60)
+// 引数: gpu_test_options.h(--warp・--queue)と --scene stack|mass_ratio|pile|wall・--ticks n(既定: release は場面の全部、debug は 120)・--segment n(既定 60)
 //   --broadphase compute|graph: 広域の選別 → 接触の幾何を Compute の 2 パスか Work Graph か(既定 graph。T-0092)
 //   --solver compute|graph: 色ごとの解き方を Compute の Dispatch か Work Graph か(既定 compute。T-0092)
+//   --islands off|compute: 島ごとに 1 グループで解く方式(T-0094。既定 off)。compute なら区間ごとに島の印も CPU と比べる
+//   --island-limit n: これより物の多い島は全体の方式(既定 64)・--island-threads n・--island-lanes n: 1 島のグループのスレッド数と
+//   1 物を解くスレッド数(既定 256・64。組み合わせは shaders/CMakeLists.txt の SolveIslands)
+//   --scene wall: 大きな島(れんが 300 個)
+//   --keep-empty-colors: 全体の方式で、使わない色の解も投げる(述語で飛ばさない。T-0094 の比べる用)
 //   --profile: CPU とは比べず、2 回目の実行でパスの種類ごとの GPU 時間(タイムスタンプ)を出す(T-0092)
 #include "sim/gpu_physics.h"
 #include "core/aliases.h"
@@ -36,6 +41,11 @@ namespace {
         bool profile = false;
         bool broadphaseGraph = true;
         sim::GpuPhysicsSolver solver = sim::GpuPhysicsSolver::Compute;
+        sim::GpuPhysicsIslands islands = sim::GpuPhysicsIslands::Off;
+        uint32_t islandLimit = 64;
+        uint32_t islandThreads = 256;
+        uint32_t islandLanes = 64;
+        bool skipEmptyColors = true;
     };
 
     struct GpuRun {
@@ -49,6 +59,9 @@ namespace {
 
         if (name == "pile")
             return sim::MakePileScene(1);
+
+        if (name == "wall")
+            return sim::MakeWallScene();
 
         return sim::MakeStackScene();
     }
@@ -82,6 +95,37 @@ namespace {
                                cpu.maxPenetration, gpu.maxPenetration, cpu.contactCount, gpu.contactCount,
                                cpu.colorCount, gpu.colorCount, cpu.solveFailures, gpu.solveFailures);
         }
+
+        return {};
+    }
+
+    // 島の印(最後の小刻み)を CPU と比べる(島の方式のときだけ。T-0094)。report なら島の数と一番大きい島の物の数もログに
+    std::string CompareIslandLabels(const std::vector<uint32_t>& cpu, const sim::GpuPhysics& physics, bool report) {
+        const std::vector<uint32_t> gpu = physics.ReadIslandLabels();
+        if (gpu.empty())
+            return {};
+
+        if (gpu != cpu) {
+            for (size_t i = 0; i < cpu.size() && i < gpu.size(); ++i) {
+                if (cpu[i] != gpu[i])
+                    return std::format("島の印が食い違う(物 {}: cpu {} / gpu {})", i, cpu[i], gpu[i]);
+            }
+
+            return "島の印の数が食い違う";
+        }
+
+        if (!report)
+            return {};
+
+        std::vector<uint32_t> sizes(cpu.size(), 0);
+        for (uint32_t label : cpu) {
+            if (label != UINT32_MAX)
+                sizes[label] += 1;
+        }
+
+        const auto islandCount = std::ranges::count_if(sizes, [](uint32_t size) { return size > 0; });
+        Log(Channel::Physics, Level::Info, "  島 {} 個・一番大きい島 {} 物(CPU と一致)", islandCount,
+            std::ranges::max(sizes));
 
         return {};
     }
@@ -123,7 +167,12 @@ namespace {
             return std::unexpected(queue.error());
 
         const sim::GpuPhysicsOptions physicsOptions{.broadphaseGraph = testOptions.broadphaseGraph,
-                                                    .solver = testOptions.solver};
+                                                    .solver = testOptions.solver,
+                                                    .skipEmptyColors = testOptions.skipEmptyColors,
+                                                    .islands = testOptions.islands,
+                                                    .islandBodyLimit = testOptions.islandLimit,
+                                                    .islandThreads = testOptions.islandThreads,
+                                                    .islandLanes = testOptions.islandLanes};
         auto physics = sim::GpuPhysics::Create(device, scene, PxDefaultParameters(), physicsOptions);
         if (!physics)
             return std::unexpected(physics.error());
@@ -191,6 +240,10 @@ namespace {
             const std::string statsError = CompareStats(world->Stats(), stats);
             if (!statsError.empty())
                 return std::unexpected(std::format("刻み {}: {}", end, statsError));
+
+            const std::string islandError = CompareIslandLabels(world->IslandLabels(), physics, end == tickCount);
+            if (!islandError.empty())
+                return std::unexpected(std::format("刻み {}: {}", end, islandError));
         }
 
         return run;
@@ -204,8 +257,9 @@ namespace {
         PhysicsTestOptions options;
         for (size_t index = 1; index < arguments.size();) {
             const std::string_view name = arguments[index];
-            if (name == "--profile") {
-                options.profile = true;
+            if (name == "--profile" || name == "--keep-empty-colors") {
+                options.profile = options.profile || name == "--profile";
+                options.skipEmptyColors = options.skipEmptyColors && name != "--keep-empty-colors";
                 arguments.erase(arguments.begin() + (std::ptrdiff_t)index);
                 continue;
             }
@@ -222,6 +276,14 @@ namespace {
                 options.broadphaseGraph = value == "graph";
             else if (name == "--solver")
                 options.solver = ParseSolver(value);
+            else if (name == "--islands")
+                options.islands = value == "compute" ? sim::GpuPhysicsIslands::Compute : sim::GpuPhysicsIslands::Off;
+            else if (name == "--island-limit")
+                options.islandLimit = (uint32_t)std::stoul(std::string(value));
+            else if (name == "--island-threads")
+                options.islandThreads = (uint32_t)std::stoul(std::string(value));
+            else if (name == "--island-lanes")
+                options.islandLanes = (uint32_t)std::stoul(std::string(value));
             else if (name == "--segment")
                 options.segmentTicks = std::max<uint64_t>(1, std::stoull(std::string(value)));
             else {
@@ -232,7 +294,8 @@ namespace {
             arguments.erase(arguments.begin() + (std::ptrdiff_t)index, arguments.begin() + (std::ptrdiff_t)index + 2);
         }
 
-        if (options.sceneName != "stack" && options.sceneName != "mass_ratio" && options.sceneName != "pile")
+        const std::array<std::string_view, 4> scenes = {"stack", "mass_ratio", "pile", "wall"};
+        if (std::ranges::find(scenes, options.sceneName) == scenes.end())
             return std::nullopt;
 
         return options;
@@ -260,18 +323,24 @@ namespace {
         const auto options = test::ParseGpuTestOptions(std::span(arguments));
         if (!physicsOptions || !options) {
             Log(Channel::Physics, Level::Error,
-                "使い方: gpu_physics_test [--warp] [--queue direct|compute] [--scene stack|mass_ratio|pile] [--ticks "
+                "使い方: gpu_physics_test [--warp] [--queue direct|compute] [--scene stack|mass_ratio|pile|wall] "
+                "[--ticks "
                 "n] "
-                "[--segment n] [--broadphase compute|graph] [--solver compute|graph] [--profile]");
+                "[--segment n] [--broadphase compute|graph] [--solver compute|graph] [--islands off|compute] "
+                "[--island-limit n] [--island-threads n] [--island-lanes n] [--keep-empty-colors] [--profile]");
             return 2;
         }
 
         const sim::PhysicsScene scene = MakeScene(physicsOptions->sceneName);
         const uint64_t tickCount = std::min(physicsOptions->tickLimit, scene.tickCount);
         Log(Channel::Physics, Level::Info,
-            "gpu_physics_test: {} を {} 刻み(区間 {})、adapter {}, queue {}, 広域の選別 {}", scene.name, tickCount,
-            physicsOptions->segmentTicks, gpu::AdapterKindName(options->adapter),
-            test::QueueTypeName(options->queueType), physicsOptions->broadphaseGraph ? "Work Graph" : "Compute");
+            "gpu_physics_test: {} を {} 刻み(区間 {})、adapter {}, queue {}, 広域の選別 {}, 島 {}", scene.name,
+            tickCount, physicsOptions->segmentTicks, gpu::AdapterKindName(options->adapter),
+            test::QueueTypeName(options->queueType), physicsOptions->broadphaseGraph ? "Work Graph" : "Compute",
+            physicsOptions->islands == sim::GpuPhysicsIslands::Off
+                ? std::string("なし")
+                : std::format("上限 {} 物・{} スレッド・1 物 {} スレッド", physicsOptions->islandLimit,
+                              physicsOptions->islandThreads, physicsOptions->islandLanes));
 
         // GPU-based validation は切る: 物理のシェーダー(-Od の debug)の計装で、パイプラインを作るのが数分を超えて終わらなかった
         // (gpu_reaction_test の WARP と同じ症状)。debug layer は残す

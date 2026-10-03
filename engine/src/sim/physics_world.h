@@ -65,6 +65,10 @@ namespace bicameral::sim {
         }
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
 
+        // 最後の小刻みの島の印(T-0094): 世界にいる動く物は、動く物どうしの組でつながった物のうち一番小さい番号。ほかは UINT32_MAX。
+        // GPU の島分け(shaders/sim/physics_islands.hlsli の FindIslands)のリファレンス
+        [[nodiscard]] const std::vector<uint32_t>& IslandLabels() const { return m_islandLabels; }
+
         // 全部の物の位置・向き・速度のハッシュ(2 回の実行の一致・GPU との一致に使う)
         [[nodiscard]] uint64_t StateHash() const;
 
@@ -78,6 +82,8 @@ namespace bicameral::sim {
         void Linearize();
         void ColorBodies();
         [[nodiscard]] std::vector<std::vector<uint32_t>> DynamicNeighbors() const;
+        void FindIslands(const std::vector<std::vector<uint32_t>>& neighbors);
+        void LabelIsland(uint32_t root, const std::vector<std::vector<uint32_t>>& neighbors);
         [[nodiscard]] std::vector<uint32_t> ChooseLocalMaxima(
             const std::vector<std::vector<uint32_t>>& neighbors) const;
         void AssignSmallestColor(uint32_t index, const std::vector<uint32_t>& neighbors);
@@ -98,6 +104,7 @@ namespace bicameral::sim {
         std::vector<std::vector<std::pair<const PhysicsManifold*, bool>>>
             m_bodyManifolds;  // 物ごとの接触(true = 物が A)
         int32_t m_colorCount = 0;
+        std::vector<uint32_t> m_islandLabels;
         uint64_t m_tick = 0;
         PhysicsStepStats m_stats;
     };

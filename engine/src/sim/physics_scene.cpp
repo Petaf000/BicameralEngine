@@ -186,4 +186,29 @@ namespace bicameral::sim {
         return scene;
     }
 
+    PhysicsScene MakeWallScene() {
+        // れんが 1 個: 幅 1 m・高さ 0.5 m・奥行き 1 m・500 kg。段ごとに横に半分ずらし、同じ段のれんがの間は 10 cm 空ける
+        // (横どうしは触れず、上下の 2 個ずつと触れて全部が 1 つの島になる)
+        constexpr int64_t COLUMNS = 20;
+        constexpr int64_t ROWS = 15;
+        constexpr int64_t HALF_WIDTH = METER / 2;
+        constexpr int64_t HALF_HEIGHT = METER / 4;
+        constexpr int64_t PITCH = METER + METER / 10;
+
+        PhysicsScene scene{.name = "wall", .tickCount = (uint64_t)5 * TICKS_PER_SECOND};
+        scene.bodies.push_back(MakeGround());
+        for (int64_t row = 0; row < ROWS; ++row) {
+            const int64_t shift = (row % 2) * PITCH / 2;
+            for (int64_t column = 0; column < COLUMNS; ++column) {
+                scene.bodies.push_back({
+                    .halfExtent = {HALF_WIDTH, HALF_HEIGHT, HALF_WIDTH},
+                    .massMilligrams = 500 * MILLIGRAMS_PER_KG,
+                    .position = {(column - COLUMNS / 2) * PITCH + shift, row * 2 * HALF_HEIGHT + HALF_HEIGHT, 0},
+                });
+            }
+        }
+
+        return scene;
+    }
+
 }  // namespace bicameral::sim

@@ -1,7 +1,8 @@
 // physics_step.hlsl — 整数の AVBD の 1 刻み(08 §2。T-0090)を GPU の Compute で走らせるパスの列。入口ごとに 1 つの .cso(shaders/CMakeLists.txt)。
 // 手順は shaders/common/physics_step.hlsli(CPU の engine/src/sim/physics_world.cpp と共通)、呼ぶ順番と結び付けは engine/src/sim/gpu_physics.cpp。
 // バッファと組の置き場所の部品は physics_bindings.hlsli(Work Graph 版の physics_graph.hlsl と共有。T-0092)。
-#include "sim/physics_bindings.hlsli"
+// 島ごとに解く方式(T-0094)では、色ごとの Dispatch の列(全体の方式)は大きな島の物だけを扱い、ほかの島は SolveIslands が 1 グループずつ解く。
+#include "sim/physics_islands.hlsli"
 
 // --- 初め: 場面の物を写し、組の枠を空にする ---------------------------------------------------------
 [numthreads(64, 1, 1)] void Initialize(uint3 id : SV_DispatchThreadID) {
@@ -31,8 +32,13 @@
         g_stats.Store3(STATS_CONTACT_COUNT, uint3(0, 0, 0));  // overflow は残す(テストが最後に見る)
     }
 
-    if (i < PX_GPU_MAX_COLORS)
+    if (i < PX_GPU_MAX_COLORS) {
         g_colorInputs.Store(i * COLOR_INPUT_BYTES + 4, 0);  // 色の物の一覧を空に
+        g_colorPredicates.Store<uint64_t>(i * 8, 0);        // 大きな島の物が使う色(T-0094)
+    }
+
+    if (i == 0)
+        g_islandPredicate.Store<uint64_t>(0, 0);
 
     if (i >= g_bodyCount)
         return;
@@ -107,55 +113,22 @@
     }
 }
 
-// --- 彩色の 1 回(Jones-Plassmann): 前の回の色だけを読み、次の組に書く --------------------------------------
-// まだ色の無い動く物のうち、色の無い隣のどれよりも優先度が高い物に、隣が使っていない一番小さい色を付ける
-bool IsLocalMaximum(uint32_t i, uint32_t inBase) {
-    const uint32_t count = IncidentCount(i);
-    for (uint32_t e = 0; e < count; ++e) {
-        const uint32_t j = PartnerOf(g_incident[i * g_incidentPerBody + e]);
-        if (g_bodies[j].massMilligrams == 0)
-            continue;
-
-        if (g_colors[inBase + j] < 0 && !PxColorPriorityBelow(j, i))
-            return false;
-    }
-
-    return true;
-}
-
-bool IsColorUsedByNeighbor(uint32_t i, uint32_t inBase, int32_t color) {
-    const uint32_t count = IncidentCount(i);
-    for (uint32_t e = 0; e < count; ++e) {
-        const uint32_t j = PartnerOf(g_incident[i * g_incidentPerBody + e]);
-        if (g_bodies[j].massMilligrams != 0 && g_colors[inBase + j] == color)
-            return true;
-    }
-
-    return false;
-}
-
+// --- 彩色の 1 回(Jones-Plassmann): 前の回の色だけを読み、次の組に書く(NextColor は physics_bindings.hlsli)--------------
 [numthreads(64, 1, 1)] void ColorRound(uint3 id : SV_DispatchThreadID) {
     const uint32_t i = id.x;
     if (i >= g_bodyCount)
         return;
 
-    const uint32_t inBase = g_colorIn * g_bodyCount;
-    const uint32_t outBase = (1 - g_colorIn) * g_bodyCount;
-    int32_t color = g_colors[inBase + i];
-    const PxBody body = g_bodies[i];
-    if (color < 0 && PxIsDynamic(body) && body.active != 0 && IsLocalMaximum(i, inBase)) {
-        color = 0;
-        while (IsColorUsedByNeighbor(i, inBase, color))
-            color += 1;
-    }
+    if (!IsGlobalBody(i))  // 島ごとのグループが塗る
+        return;
 
-    g_colors[outBase + i] = color;
+    g_colors[(1 - g_colorIn) * g_bodyCount + i] = NextColor(i, g_colorIn * g_bodyCount);
 }
 
     // 最後の回の色を物に移す。塗れなかった物・色が多すぎるのは印
     [numthreads(64, 1, 1)] void FinishColoring(uint3 id : SV_DispatchThreadID) {
     const uint32_t i = id.x;
-    if (i >= g_bodyCount)
+    if (i >= g_bodyCount || !IsGlobalBody(i))
         return;
 
     const int32_t color = g_colors[g_colorIn * g_bodyCount + i];
@@ -173,6 +146,8 @@ bool IsColorUsedByNeighbor(uint32_t i, uint32_t inBase, int32_t color) {
         return;
     }
 
+    g_colorPredicates.Store<uint64_t>(color * 8, 1);  // この色の Dispatch を飛ばさない(島の方式。T-0094)
+
     // 色ごとの物の一覧(Work Graph で解くとき。並びは原子的な加算の順で決まらないが、同じ色の物は互いに独立)
     uint32_t position = 0;
     g_colorInputs.InterlockedAdd(color * COLOR_INPUT_BYTES + 4, 1, position);
@@ -182,49 +157,15 @@ bool IsColorUsedByNeighbor(uint32_t i, uint32_t inBase, int32_t color) {
 // --- 反復の途中の探し直し(組ごと)----------------------------------------------------------------
 [numthreads(64, 1, 1)] void Recollide(uint3 id : SV_DispatchThreadID) {
     const uint32_t slot = id.x;
-    if (!IsLiveSlot(slot))
-        return;
-
-    // PxRecollideManifold と同じ手順を、組(3 KB)を局所に写さずにバッファの上で(T-0098: 局所に写す形は、
-    // 別のキューの仕事が割り込むと結果が変わった。gpu_probe_physics_test の雑音つきの実行)
-    const uint32_t index = ManifoldIndex(g_currentHalf, slot);
-    const ManifoldHeader header = g_manifolds[index];
-    const PxBody bodyA = g_bodies[header.bodyA];
-    const PxBody bodyB = g_bodies[header.bodyB];
-    const PxParameters p = g_parameters[0];
-    if (PxStepMotion(bodyA) + PxStepMotion(bodyB) <= p.recollideMinMotion)
-        return;
-
-    const PxBox shapeA = PxEstimatedShape(bodyA);
-    const PxBox shapeB = PxEstimatedShape(bodyB);
-    const PxContactGeometry geometry = PxCollideBoxes(shapeA, shapeB, p.collisionMargin);
-    uint32_t count = header.count;
-    for (uint32_t k = 0; k < geometry.count && count < PX_MANIFOLD_POINTS; ++k) {
-        bool known = false;
-        for (uint32_t j = 0; j < count; ++j)
-            known = known || g_points[PointIndex(index, j)].feature == geometry.points[k].feature;
-
-        if (known)
-            continue;
-
-        const PxContactPoint contactPoint = PxMakeContactPoint(geometry.points[k], geometry.normal, shapeA, shapeB,
-                                                               header.minPenalty);
-        g_points[PointIndex(index, count)] = PxLinearizePoint(contactPoint, bodyA, bodyB);
-        count += 1;
-    }
-
-    if (count == header.count)
-        return;
-
-    g_manifolds[index].count = count;
-    g_stats.InterlockedAdd(STATS_CONTACT_COUNT, count - header.count);
+    if (IsLiveSlot(slot) && IsGlobalSlot(slot))
+        RecollideSlot(slot);  // physics_bindings.hlsli
 }
 
     // --- 1 つの色の物を解く(1 グループ = 1 物。同じ色の物は拘束を共有しないので並列に解ける。T-0092)--------------------------------------------------------
     [numthreads(SOLVE_GROUP_THREADS, 1, 1)] void SolveColor(uint3 groupId : SV_GroupID,
                                                             uint32_t thread : SV_GroupIndex) {
     const uint32_t i = groupId.x;
-    if (i >= g_bodyCount || g_bodies[i].color != g_color)  // グループで一様(1 グループ = 1 物)
+    if (i >= g_bodyCount || g_bodies[i].color != g_color || !IsGlobalBody(i))  // グループで一様(1 グループ = 1 物)
         return;
 
     SolveBodyInGroup(i, thread);
@@ -233,33 +174,14 @@ bool IsColorUsedByNeighbor(uint32_t i, uint32_t inBase, int32_t color) {
 // --- λ と硬さの更新(組ごと)-------------------------------------------------------------------------
 [numthreads(64, 1, 1)] void UpdateDuals(uint3 id : SV_DispatchThreadID) {
     const uint32_t slot = id.x;
-    if (!IsLiveSlot(slot))
-        return;
-
-    const PxParameters p = g_parameters[0];
-    const int64_t alphaQ16 = (int64_t)g_alphaQ16;
-    const uint32_t index = ManifoldIndex(g_currentHalf, slot);
-    const uint32_t a = g_manifolds[index].bodyA;
-    const uint32_t b = g_manifolds[index].bodyB;
-    const PxVec3 linearA = g_bodies[a].deltaLinear;
-    const PxVec3 angularA = g_bodies[a].deltaAngular;
-    const PxVec3 linearB = g_bodies[b].deltaLinear;
-    const PxVec3 angularB = g_bodies[b].deltaAngular;
-    const int64_t frictionQ16 = g_manifolds[index].frictionQ16;
-    const int64_t beta = g_manifolds[index].beta;
-    const int64_t maxPenalty = g_manifolds[index].maxPenalty;
-    const uint32_t count = g_manifolds[index].count;
-    for (uint32_t k = 0; k < count; ++k) {
-        g_points[PointIndex(index, k)] = PxUpdatePointDuals(g_points[PointIndex(index, k)], frictionQ16, beta,
-                                                            maxPenalty, alphaQ16, p, linearA, angularA, linearB,
-                                                            angularB);
-    }
+    if (IsLiveSlot(slot) && IsGlobalSlot(slot))
+        UpdateDualsSlot(slot, (int64_t)g_alphaQ16);
 }
 
     // --- 刻みの終わり(物ごと)--------------------------------------------------------------------------
     [numthreads(64, 1, 1)] void UpdateVelocity(uint3 id : SV_DispatchThreadID) {
     const uint32_t i = id.x;
-    if (i >= g_bodyCount)
+    if (i >= g_bodyCount || !IsGlobalBody(i))
         return;
 
     g_bodies[i] = PxUpdateVelocity(g_bodies[i], PxStepRate(g_parameters[0]));
@@ -271,4 +193,19 @@ bool IsColorUsedByNeighbor(uint32_t i, uint32_t inBase, int32_t color) {
         return;
 
     g_bodies[i] = PxFinishBody(g_bodies[i]);
+}
+
+    // --- 島ごとに解く方式(T-0094。physics_islands.hlsli)-----------------------------------------------------
+    // 島分け: 1 グループが、組でつながった動く物の集まりを求め、島の物の並びを作る
+    [numthreads(FIND_ISLANDS_THREADS, 1, 1)] void FindIslands(uint32_t thread : SV_GroupIndex) {
+    FindIslandsInGroup(thread);
+}
+
+// 1 グループ = 1 島: 彩色と反復をグループの中の同期だけで回す。グループの数は物の数(島の数の上限)で、余りはすぐ終わる
+[numthreads(ISLAND_GROUP_THREADS, 1, 1)] void SolveIslands(uint3 groupId : SV_GroupID,
+                                                           uint32_t thread : SV_GroupIndex) {
+    if (groupId.x >= g_islands[ISLAND_HEADER_COUNT])  // グループで一様
+        return;
+
+    SolveIslandInGroup(groupId.x, thread);
 }

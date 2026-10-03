@@ -1,34 +1,44 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0098 物理を仮の世界に組み込む — 完了(M1 の完了の姿がそろった)
+最終更新: 2026-10-03 / チケット: T-0094 物理: 島ごとに 1 グループで解く — 完了(採らない。使わない色を述語で飛ばすのは採った)
 
 ## 状態(3 行以内)
-- 窓の仮の世界に積み木(箱 10 個)が立ち、Shift + 左クリックの光線で押して崩せる。物の 1 刻みは刻みの単位 [2]、物のハッシュは刻みの最後に GPU で。
-- gpu_probe_physics_test で CPU と毎刻みビット一致(HW・WARP・広域 Compute)。窓の記録 → 再生(重さ・分割・覗き)も一致。
-- 物理の GPU のパスで組(3 KB)を局所に持つと、別のキューが割り込んだ時だけ結果がずれた(窓で固まる原因でもあった)→ バッファの上で読み書きする形に直した。
+- 島分け(FindIslands)と 1 グループ = 1 島の解(SolveIslands)を作り、4 場面で CPU とビット一致・島の印も一致。大きな島は今の方式が述語つきで解く。
+- 測ると今の方式より遅い(積み木 2.64 → 2.77・山 3.86 → 7.13・壁 300 個 6.34 → 40.99 ms)ので採らない。`GpuPhysicsOptions::islands` 既定 Off で残した。
+- 使わない色の解を SetPredication で飛ばす(`skipEmptyColors` 既定 On、約 2%)。時間の大半は 6×6 の 1 スレッドの待ち時間 → 次は T-0095。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`python3 tools/archmap/archmap.py --check` OK(92)。
-- `job.py test -Preset release -Filter gpu_probe_physics`(3 件。2 回目の実行は別のキューに雑音を流し、単位を 1 つずつ投げる)。`-Filter window_replay`(3 件)。
-- `job.py run -Preset release -- --frames 600 --auto-click --auto-push --check-physics`: 窓で押し、CPU の物理と物のハッシュを毎刻み突き合わせる(ずれたら Error)。
-- 窓の操作: Shift + 左クリック = 押す(5000 N·s)。`--no-physics` で物理なし、`--physics-compute` で広域を Compute(比べる用)。
+- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(93)。
+- `job.py test -Preset release -Filter gpu_physics`(14 件。島の方式 6 件: `*_islands`・`pile_islands_mixed`〔上限 8 で大きな島と小さな島が混ざる〕・`wall_islands_large`・`wall_islands_group`)。
+  1 回の ctest が 170 s を超えないよう 2〜3 件ずつ走らせる。`-Filter "gpu_probe_physics|window_replay"`・`physics_*`(CPU)も OK。debug でも gpu_physics_stack・pile_islands_mixed が通る(debug layer の警告なし)。
+- 計測: `job.py run -Preset release -Exe gpu_physics_test -- --scene pile --profile [--islands compute --island-threads 256 --island-lanes 32] [--keep-empty-colors]`。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 組を局所に持つと壊れる理由は未確認(BACKLOG)。物理のパスに大きい局所の変数を足さないこと。
-- 窓の物理は 1 刻み約 3.4 ms(積み木、暖機なし)。山(56 個)は重いので M1 では使わない(T-0094・T-0095)。
-- 押すのは 1 本の光線の最初の物だけ・力積は固定。箱と世界のセルのやり取り(燃える・熱)は無い(M6)。
-- (前から)段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。PIX・セーブ・AMD は未確認/未着手。CI の WARP のテストは push 後の CI で確認する。
+- 島の方式の Work Graph 版は作っていない(ADR-0002「計測(T-0094)」に理由)。SolveIslands は物の数ぶんのグループを投げる(壁で島の無いグループ 301 個が 0.6 ms)。
+- 6×6 が 1 区画に重なると 1 色の 1 歩が約 120 µs に延びる理由(区画の発行の取り合い・レジスタ)は未確認。
+- (前から)物理のパスに大きい局所の変数を足さないこと(T-0098)。段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 崩すきっかけはクリックで押すコマンド(ユーザー決定。PROBE_COMMAND_TYPE_PUSH、common/physics_push.hlsli)。
-- 物理の座標 ↔ 格子: 1 セル = 0.5 m、y を裏返す(描画の y が画面の下向きのため。probe_sim.hlsli)。
-- 窓が固まった時に一時「広域を Compute にする」回避をユーザーと決めたが、原因(局所の組)を直した後は Work Graph で固まらないので ADR-0002 の形に戻した。
-- 窓(debug)は物理を入れると GPU-based validation を切る(物理のシェーダーの計装が数分かかる。debug layer は有効)。
+- 島の方式は採らない(T-0094 の約束「速くなれば採る」による。ADR-0002「計測(T-0094)」)。コードは既定 Off で残し、T-0095 の後に測り直す(BACKLOG)。
+  残すか消すかはユーザーに確認中。
+- 使わない色の解を述語で飛ばすのは既定 On(ビット一致・約 2%)。T-0093 の空の色の見積もり(0.3〜0.4 ms)は外れだった。
+- 大きな島の場面として壁(れんが 300 個・`MakeWallScene`)を足した。
 
 ## 次にやること
-NEXT.md の先頭(M1 完了 → T-0094 物理: 島ごとに 1 グループで解く)。
+NEXT.md の先頭(T-0095 物理: 6×6 を数スレッドで解く)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **述語(T-0094)**: `GpuPhysics` の u14(大きな島がある)・u15(色ごとの「使う」、uint64 × 16)は BeginSubstep が UAV で 0 にし、FindIslands・FinishColoring が書き、
+  述語に使う間だけ PREDICATION(gpu_physics.cpp の RecordSubstep・gpu_physics_islands.cpp)。リストの終わりで COMMON に戻り、次のリストの BeginSubstep で UAV に昇格する
+  (だから小刻みの初めに必ず UAV で触ってから PREDICATION に移す)。述語と DispatchGraph は組み合わせない(述語をかける色ごとの解は Compute)。
+  `SetPredication(nullptr, ...)` で戻すのを忘れない(後ろのパスが黙って飛ぶ)。
+- 物理のルート署名は UAV 16 個(u13 島・u14・u15)・ルート定数 16 個(islandMode・islandBodyLimit)で 54 / 64 語。足すときは残りに注意。
+- **島(T-0094)**: shaders/sim/physics_islands.hlsli。全体の方式のパスは `IsGlobalBody`・`IsGlobalSlot`(islandMode = 1 なら大きな島の物だけ)。
+  RecollideSlot・UpdateDualsSlot・NextColor・SolveBodyInSubgroup は physics_bindings.hlsli で全体の方式と共有。SolveIslands の .cso はスレッド数 _ 1 物のスレッド数ごと
+  (shaders/CMakeLists.txt。256_64・256_32・256_16・512_64・1024_64)。**1 物のスレッドが 42 本未満のとき、6×6 の和を 0 にするのは 1 本が複数語**(忘れると 2 回の実行が食い違った)。
+  ウェーブが 1 物のスレッドより広いとウェーブの和が 2 物にまたがるので、その時はスレッドごとに共有メモリへ足す(AddToSum)。
+- CPU の島の印は `PhysicsWorld::IslandLabels`(ColorBodies の中で求める)。gpu_physics_test は島の方式のとき区間ごとに比べる(`GpuPhysics::ReadIslandLabels`。島の方式で 1 刻み以上進めたリストでだけ読み戻す)。
+- 前のコミットで archmap が落ちていた(map.yaml の gpu_probe_physics_test の RunGpu → `GpuRun::Execute` に直した)。
 - **物理の GPU のパスで組(PxManifold 3 KB)を局所の変数に持たない**(T-0098)。持つと、別のキュー(窓の描画)が割り込んだ時だけ結果が時々変わり、
   火(伝導の Work Graph)と重なると GPU が固まった。テスト(描画なし)では出ない。gpu_probe_physics_test の 2 回目が優先度の高い direct のキューで雑音を流して確かめる。
   GPU の BuildSlot・Recollide・PrepareManifolds は CPU の PxBuildManifold・PxRecollideManifold・PxWarmStartManifold と同じ手順をバッファの上で書いた別の実装。片方を変えたらもう片方も。
@@ -70,7 +80,6 @@ NEXT.md の先頭(M1 完了 → T-0094 物理: 島ごとに 1 グループで解
   固まった時の切り分けは、ノードの中身を少しずつ足して release で `--ticks 60` を走らせるのが早かった(debug の DRED は DispatchGraph で止まったとしか言わない)。
 - **ブロードキャストのノードの出力は 1 グループ 256 件まで**(超えると CreateStateObject が E_INVALIDARG。広域の選別は 16 スレッド × 枠 16)。
 - 計測の名前の表(gpu_physics.cpp の PASS_NAMES・SHADER_NAMES)は Pass の順。static_assert で数を確かめている(clang-format が並べ直すので、置き換えの編集は崩れやすい)。
-- 物理のルート定数は 14 個(色ごとの GPU の入力のために SolveBodyNode の入口の番号と u12 のアドレスを足した)。UAV は u0〜u12。
 - 色ごとの GPU の入力(u11)と物の一覧(u12)は、反復の間だけ NON_PIXEL_SHADER_RESOURCE(solver = Graph のとき。RecordColorListStates)。
 - **物理の GPU(T-0090)**: パスは shaders/sim/physics_step.hlsl(入口 13 個 → `physics_<snake>.cso`。shaders/CMakeLists.txt の foreach)、呼ぶ順は gpu_physics.cpp の RecordSubstep
   (PhysicsWorld::Substep と同じ順に揃える。片方を変えたらもう片方も)。物・組・点の構造体は physics_step.hlsli で、C++ と HLSL の並びを揃えるため 64bit を 8 の倍数の位置に置き bool を使わない
