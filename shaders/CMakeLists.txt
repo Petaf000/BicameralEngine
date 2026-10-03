@@ -113,16 +113,6 @@ foreach(_entry IN ITEMS Initialize BeginSubstep Broadphase Narrowphase PrepareMa
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/physics_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME physics_${_snake})
 endforeach()
-# 島ごとに解く方式(T-0094): 島分けと、1 グループ = 1 島の解(グループのスレッド数 _ 1 物を解くスレッド数ごとに。
-# gpu_physics.cpp の GpuPhysicsOptions::islandThreads・islandLanes)
-bicameral_add_shader(sim/physics_step.hlsl PROFILE cs_6_8 ENTRY FindIslands NAME physics_find_islands)
-foreach(_variant IN ITEMS 256_64 256_32 256_16 512_64 1024_64)
-  string(REPLACE "_" ";" _parts "${_variant}")
-  list(GET _parts 0 _threads)
-  list(GET _parts 1 _lanes)
-  bicameral_add_shader(sim/physics_step.hlsl PROFILE cs_6_8 ENTRY SolveIslands NAME physics_solve_islands_${_variant}
-                       DEFINES ISLAND_GROUP_THREADS=${_threads} ISLAND_SOLVE_LANES=${_lanes})
-endforeach()
 bicameral_add_shader(sim/physics_graph.hlsl PROFILE lib_6_8)  # 物理の広域の選別 → 接触の生成の Work Graph(T-0092)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY Main)  # 多重解像度の入れ子の反応の刻み(T-0017)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8)  # 多重解像度の細かくする・粗くする・影の引き戻し(T-0017)

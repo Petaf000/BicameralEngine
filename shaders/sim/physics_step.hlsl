@@ -1,8 +1,7 @@
 // physics_step.hlsl — 整数の AVBD の 1 刻み(08 §2。T-0090)を GPU の Compute で走らせるパスの列。入口ごとに 1 つの .cso(shaders/CMakeLists.txt)。
 // 手順は shaders/common/physics_step.hlsli(CPU の engine/src/sim/physics_world.cpp と共通)、呼ぶ順番と結び付けは engine/src/sim/gpu_physics.cpp。
 // バッファと組の置き場所の部品は physics_bindings.hlsli(Work Graph 版の physics_graph.hlsl と共有。T-0092)。
-// 島ごとに解く方式(T-0094)では、色ごとの Dispatch の列(全体の方式)は大きな島の物だけを扱い、ほかの島は SolveIslands が 1 グループずつ解く。
-#include "sim/physics_islands.hlsli"
+#include "sim/physics_bindings.hlsli"
 
 // --- 初め: 場面の物を写し、組の枠を空にする ---------------------------------------------------------
 [numthreads(64, 1, 1)] void Initialize(uint3 id : SV_DispatchThreadID) {
@@ -34,11 +33,8 @@
 
     if (i < PX_GPU_MAX_COLORS) {
         g_colorInputs.Store(i * COLOR_INPUT_BYTES + 4, 0);  // 色の物の一覧を空に
-        g_colorPredicates.Store<uint64_t>(i * 8, 0);        // 大きな島の物が使う色(T-0094)
+        g_colorPredicates.Store<uint64_t>(i * 8, 0);        // その色の物がいる(T-0094)
     }
-
-    if (i == 0)
-        g_islandPredicate.Store<uint64_t>(0, 0);
 
     if (i >= g_bodyCount)
         return;
@@ -119,16 +115,13 @@
     if (i >= g_bodyCount)
         return;
 
-    if (!IsGlobalBody(i))  // 島ごとのグループが塗る
-        return;
-
     g_colors[(1 - g_colorIn) * g_bodyCount + i] = NextColor(i, g_colorIn * g_bodyCount);
 }
 
     // 最後の回の色を物に移す。塗れなかった物・色が多すぎるのは印
     [numthreads(64, 1, 1)] void FinishColoring(uint3 id : SV_DispatchThreadID) {
     const uint32_t i = id.x;
-    if (i >= g_bodyCount || !IsGlobalBody(i))
+    if (i >= g_bodyCount)
         return;
 
     const int32_t color = g_colors[g_colorIn * g_bodyCount + i];
@@ -146,7 +139,7 @@
         return;
     }
 
-    g_colorPredicates.Store<uint64_t>(color * 8, 1);  // この色の Dispatch を飛ばさない(島の方式。T-0094)
+    g_colorPredicates.Store<uint64_t>(color * 8, 1);  // この色の Dispatch を飛ばさない(述語。T-0094)
 
     // 色ごとの物の一覧(Work Graph で解くとき。並びは原子的な加算の順で決まらないが、同じ色の物は互いに独立)
     uint32_t position = 0;
@@ -157,7 +150,7 @@
 // --- 反復の途中の探し直し(組ごと)----------------------------------------------------------------
 [numthreads(64, 1, 1)] void Recollide(uint3 id : SV_DispatchThreadID) {
     const uint32_t slot = id.x;
-    if (IsLiveSlot(slot) && IsGlobalSlot(slot))
+    if (IsLiveSlot(slot))
         RecollideSlot(slot);  // physics_bindings.hlsli
 }
 
@@ -165,7 +158,7 @@
     [numthreads(SOLVE_GROUP_THREADS, 1, 1)] void SolveColor(uint3 groupId : SV_GroupID,
                                                             uint32_t thread : SV_GroupIndex) {
     const uint32_t i = groupId.x;
-    if (i >= g_bodyCount || g_bodies[i].color != g_color || !IsGlobalBody(i))  // グループで一様(1 グループ = 1 物)
+    if (i >= g_bodyCount || g_bodies[i].color != g_color)  // グループで一様(1 グループ = 1 物)
         return;
 
     SolveBodyInGroup(i, thread);
@@ -174,14 +167,14 @@
 // --- λ と硬さの更新(組ごと)-------------------------------------------------------------------------
 [numthreads(64, 1, 1)] void UpdateDuals(uint3 id : SV_DispatchThreadID) {
     const uint32_t slot = id.x;
-    if (IsLiveSlot(slot) && IsGlobalSlot(slot))
+    if (IsLiveSlot(slot))
         UpdateDualsSlot(slot, (int64_t)g_alphaQ16);
 }
 
     // --- 刻みの終わり(物ごと)--------------------------------------------------------------------------
     [numthreads(64, 1, 1)] void UpdateVelocity(uint3 id : SV_DispatchThreadID) {
     const uint32_t i = id.x;
-    if (i >= g_bodyCount || !IsGlobalBody(i))
+    if (i >= g_bodyCount)
         return;
 
     g_bodies[i] = PxUpdateVelocity(g_bodies[i], PxStepRate(g_parameters[0]));
@@ -193,19 +186,4 @@
         return;
 
     g_bodies[i] = PxFinishBody(g_bodies[i]);
-}
-
-    // --- 島ごとに解く方式(T-0094。physics_islands.hlsli)-----------------------------------------------------
-    // 島分け: 1 グループが、組でつながった動く物の集まりを求め、島の物の並びを作る
-    [numthreads(FIND_ISLANDS_THREADS, 1, 1)] void FindIslands(uint32_t thread : SV_GroupIndex) {
-    FindIslandsInGroup(thread);
-}
-
-// 1 グループ = 1 島: 彩色と反復をグループの中の同期だけで回す。グループの数は物の数(島の数の上限)で、余りはすぐ終わる
-[numthreads(ISLAND_GROUP_THREADS, 1, 1)] void SolveIslands(uint3 groupId : SV_GroupID,
-                                                           uint32_t thread : SV_GroupIndex) {
-    if (groupId.x >= g_islands[ISLAND_HEADER_COUNT])  // グループで一様
-        return;
-
-    SolveIslandInGroup(groupId.x, thread);
 }

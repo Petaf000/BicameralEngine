@@ -23,3 +23,6 @@ CLAUDE.local.md
 # Python
 __pycache__/
 *.pyc
+
+# 消せないファイルの置き場(device_bash は削除できないので移すだけ。ユーザーが手で消す)
+_to_delete/

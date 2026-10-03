@@ -8,8 +8,8 @@
 //     64bit の整数の引き算は 2^64 を法として順番に依存しないので、結果はビット一致する。
 //   - 前進の代入は Cholesky の列と一緒に進める(z_j は L_jj ができた時点で決まる)。後退の代入は右辺のレーンが下から順に。
 // 1 回の解の待ち時間: 割り算 27 → 12 段・平方根 6 段・64bit の積 約 70 → 11 段(T-0093: 1 スレッドで約 42 µs だった)。
-// 使えるのは、ウェーブが 32 レーン以上で、1 物を解くスレッド(SOLVE_LANES)がウェーブの幅の倍数のとき(組の先頭がウェーブの先頭に揃う)。
-// それ以外(WARP の狭いウェーブ・島の方式の 16 本)は、呼ぶ側が 1 スレッドで PxSolveSymmetric6 を解く。
+// 使えるのは、ウェーブが 32 レーン以上で、1 物を解くグループ(64 スレッド)の幅以下のとき(グループの先頭がウェーブの先頭に揃う)。
+// それ以外(WARP の狭いウェーブなど)は、呼ぶ側が 1 スレッドで PxSolveSymmetric6 を解く(physics_bindings.hlsli の CanSolveInWave)。
 #ifndef BICAMERAL_PHYSICS_SOLVE6_WAVE_HLSLI
 #define BICAMERAL_PHYSICS_SOLVE6_WAVE_HLSLI
 

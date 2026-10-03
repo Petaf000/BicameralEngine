@@ -31,8 +31,7 @@ struct ManifoldHeader {
 // u8 統計(GpuPhysicsStats)/ u9 組の点 [2][bodyCount × slotsPerBody][PX_MANIFOLD_POINTS] /
 // u10 枠の接触の幾何(Work Graph の NarrowphaseNode → Compute の BuildManifolds。T-0092)[bodyCount × slotsPerBody] /
 // u11 色ごとの Work Graph の GPU の入力(D3D12_NODE_GPU_INPUT × PX_GPU_MAX_COLORS)/ u12 色ごとの物の一覧 [PX_GPU_MAX_COLORS][bodyCount] /
-// u13 島(physics_islands.hlsli の ISLAND_*。T-0094)/ u14 大きな島がある(uint64。全体の方式のパスの述語)/
-// u15 大きな島の物が使う色(uint64 × PX_GPU_MAX_COLORS。色ごとの解の述語)/
+// u13 色ごとの「その色の物がいる」(uint64 × PX_GPU_MAX_COLORS。色ごとの解の述語。T-0094)/
 // t0 パラメータ 1 個 / t1 場面から作った初めの物
 RWStructuredBuffer<PxBody> g_bodies : register(u0);
 RWStructuredBuffer<ManifoldHeader> g_manifolds : register(u1);
@@ -47,9 +46,7 @@ RWStructuredBuffer<PxContactPoint> g_points : register(u9);
 RWStructuredBuffer<PxContactGeometry> g_geometry : register(u10);
 RWByteAddressBuffer g_colorInputs : register(u11);
 RWStructuredBuffer<uint32_t> g_colorBodies : register(u12);
-RWStructuredBuffer<uint32_t> g_islands : register(u13);
-RWByteAddressBuffer g_islandPredicate : register(u14);
-RWByteAddressBuffer g_colorPredicates : register(u15);
+RWByteAddressBuffer g_colorPredicates : register(u13);
 StructuredBuffer<PxParameters> g_parameters : register(t0);
 StructuredBuffer<PxBody> g_initialBodies : register(t1);
 
@@ -68,8 +65,6 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_solveEntry;  // physics_graph.hlsl の SolveBodyNode の入口の番号(Initialize が色ごとの GPU の入力に書く)
     uint32_t g_colorBodiesLow;  // u12 の GPU の仮想アドレス
     uint32_t g_colorBodiesHigh;
-    uint32_t g_islandMode;       // 0 = 全部を全体の方式で / 1 = 全体の方式のパスは大きな島の物だけ(T-0094)
-    uint32_t g_islandBodyLimit;  // これより物の多い島は全体の方式(大きな島)
 };
 
 // --- 色ごとの GPU の入力(D3D12_NODE_GPU_INPUT: 入口・レコードの数・レコードのアドレスと間隔、24 バイト)---
@@ -119,42 +114,6 @@ bool IsLiveSlot(uint32_t slot) {
 
 uint32_t PointIndex(uint32_t manifoldIndex, uint32_t k) {
     return manifoldIndex * PX_MANIFOLD_POINTS + k;
-}
-
-// --- 島(u13。T-0094)の並び: 見出し 4 語 + 物の数ずつの区画 ---
-// 見出し [0] グループで解く島の数 [1] 大きな島の物の数 [2] 島の物の並びの次の空き [3] 予備。
-// 区画(どれも物の数の長さ): 物ごとの「つながりの印」(島の一番小さい物の番号。島に入らない物は ISLAND_NONE。CPU の PhysicsWorld::IslandLabels と同じ)/
-// 物ごとの島の番号(グループで解く島の番号・ISLAND_LARGE・ISLAND_NONE)/ 印ごとの物の数 / 島ごとの物の並びの始まり / 島ごとの物の数 /
-// 島ごとの物の並び / 島ごとの色の順の物の並び(島の始まりから)
-static const uint32_t ISLAND_HEADER_WORDS = 4;
-static const uint32_t ISLAND_HEADER_COUNT = 0;
-static const uint32_t ISLAND_HEADER_LARGE_BODIES = 1;
-static const uint32_t ISLAND_HEADER_CURSOR = 2;
-
-static const uint32_t ISLAND_LABEL = 0;
-static const uint32_t ISLAND_OF = 1;
-static const uint32_t ISLAND_ROOT_SIZE = 2;
-static const uint32_t ISLAND_START = 3;
-static const uint32_t ISLAND_SIZE = 4;
-static const uint32_t ISLAND_BODIES = 5;
-static const uint32_t ISLAND_COLOR_BODIES = 6;
-static const uint32_t ISLAND_REGIONS = 7;  // gpu_physics.cpp の ISLAND_REGIONS と同じ
-
-static const uint32_t ISLAND_NONE = 0xFFFFFFFFu;   // 島に入らない(動かない物・世界にいない物)
-static const uint32_t ISLAND_LARGE = 0xFFFFFFFEu;  // 大きな島(全体の方式で解く)
-
-uint32_t IslandWord(uint32_t region, uint32_t index) {
-    return ISLAND_HEADER_WORDS + region * g_bodyCount + index;
-}
-
-// 全体の方式のパス(色ごとの Dispatch)が扱う物か。島の方式では大きな島の物だけ(ほかは島ごとのグループが解く)
-bool IsGlobalBody(uint32_t i) {
-    return g_islandMode == 0 || g_islands[IslandWord(ISLAND_OF, i)] == ISLAND_LARGE;
-}
-
-// 枠は持ち主の物と同じ島(持ち主は動く物。両方が動く物なら同じ島)
-bool IsGlobalSlot(uint32_t slot) {
-    return IsGlobalBody(slot / g_slotsPerBody);
 }
 
 // 組(PxManifold、3 KB)を丸ごと局所に持つ関数は置かない: 組を局所に持つ Compute のパスは、別のキューの仕事(窓の描画)が割り込むと
@@ -364,24 +323,12 @@ void BuildSlot(uint32_t slot, uint32_t other, PxContactGeometry geometry) {
 
 // --- 1 つの物を 1 グループで解く(1 スレッド = 1 接触点。T-0092。Compute の SolveColor と Work Graph の SolveBodyNode)---------------
 // 1 スレッド = 1 物で順に足す形(T-0090)と同じ結果: 物の 6×6 は点ごとの寄与の整数の和(2^64 を法とする和なので順番に依存しない)。
-// 点ごとの寄与をスレッドで並列に作り、ウェーブと共有メモリで足してから、1 スレッドが慣性の項を足して解く。
-// 島ごとに解くグループ(physics_islands.hlsli。T-0094)は、グループを SOLVE_GROUP_THREADS ずつの「組」に分け、組ごとに 1 物を解く
+// 点ごとの寄与をスレッドで並列に作り、ウェーブと共有メモリで足してから、ウェーブ(T-0095)か 1 スレッドが解く。
 static const uint32_t SOLVE_GROUP_THREADS = 64;
-static const uint32_t SOLVE_SYSTEM_WORDS = 42;  // 6×6 + 6
+static const uint32_t SOLVE_SYSTEM_WORDS = 42;                                           // 6×6 + 6
+static const uint32_t SOLVE_GROUP_MANIFOLDS = SOLVE_GROUP_THREADS / PX_MANIFOLD_POINTS;  // 1 回にまとめて見る組の数
 
-// 島ごとに解くグループのスレッド数と、1 物を解くスレッド数(SolveIslands の .cso ごとに -D で決める。shaders/CMakeLists.txt)。
-// グループの中で同時に解く物の数 = ISLAND_GROUP_THREADS / SOLVE_LANES(ほかの入口は 64 / 64 = 1)
-#ifndef ISLAND_GROUP_THREADS
-#define ISLAND_GROUP_THREADS 64
-#endif
-#ifndef ISLAND_SOLVE_LANES
-#define ISLAND_SOLVE_LANES 64
-#endif
-static const uint32_t SOLVE_LANES = ISLAND_SOLVE_LANES;
-static const uint32_t SOLVE_GROUP_MANIFOLDS = SOLVE_LANES / PX_MANIFOLD_POINTS;  // 1 回にまとめて見る組の数
-static const uint32_t SOLVE_SUBGROUPS = ISLAND_GROUP_THREADS / SOLVE_LANES;
-
-groupshared uint64_t g_systemSum[SOLVE_SUBGROUPS][SOLVE_SYSTEM_WORDS];
+groupshared uint64_t g_systemSum[SOLVE_SYSTEM_WORDS];
 
 #include "sim/physics_solve6_wave.hlsli"
 
@@ -406,107 +353,98 @@ PxBodySystem PointContribution(uint32_t i, PxBody body, uint32_t e, uint32_t k, 
                           p.gapSlop, linearA, angularA, linearB, angularB);
 }
 
-// 1 つの値を組の和に足す。ウェーブが組の中に収まるなら(ウェーブの幅は 2 の冪なので SOLVE_LANES 以下なら収まる)ウェーブで足して代表が足す。
-// 収まらなければ(ウェーブが 2 つの組にまたがる)スレッドごとに足す
-void AddToSum(uint32_t subgroup, uint32_t word, int64_t value) {
-    if (WaveGetLaneCount() > SOLVE_LANES) {
-        InterlockedAdd(g_systemSum[subgroup][word], (uint64_t)value);
-        return;
-    }
-
+// 1 つの値をグループの和に足す: ウェーブで足して代表が足す(グループは 64 スレッドなので、ウェーブが 2 つのグループにまたがることはない)
+void AddToSum(uint32_t word, int64_t value) {
     const uint64_t sum = WaveActiveSum((uint64_t)value);
     if (WaveIsFirstLane())
-        InterlockedAdd(g_systemSum[subgroup][word], sum);
+        InterlockedAdd(g_systemSum[word], sum);
 }
 
-void AddToGroupSum(PxBodySystem system, uint32_t subgroup) {
+void AddToGroupSum(PxBodySystem system) {
     for (uint32_t v = 0; v < 36; ++v)
-        AddToSum(subgroup, v, system.lhs.m[v]);
+        AddToSum(v, system.lhs.m[v]);
 
     for (uint32_t v = 0; v < 6; ++v)
-        AddToSum(subgroup, 36 + v, system.rhs.v[v]);
+        AddToSum(36 + v, system.rhs.v[v]);
 }
 
-// --- 組の 6×6 の和(共有メモリ)を解く ---
-// ウェーブで解けるのは、ウェーブが 32 レーン以上で組の幅(SOLVE_LANES)以下のとき。そのとき組の先頭はウェーブの先頭に揃い、
-// 組の中の番号 lane = ウェーブの中のレーンの番号(1 次元のグループのスレッドは順にウェーブに入る)
+// --- グループの 6×6 の和(共有メモリ)を解く ---
+// ウェーブで解けるのは、ウェーブが 32 レーン以上でグループの幅(SOLVE_GROUP_THREADS)以下のとき。そのときグループの先頭のウェーブの
+// レーンの番号 = グループの中の番号(1 次元のグループのスレッドは順にウェーブに入る)
 bool CanSolveInWave() {
     const uint32_t width = WaveGetLaneCount();
-    return width >= SOLVE6_MIN_WAVE && width <= SOLVE_LANES;
+    return width >= SOLVE6_MIN_WAVE && width <= SOLVE_GROUP_THREADS;
 }
 
-// 組の先頭のウェーブの全部のレーンが呼ぶ
-PxSolveResult SolveSubgroupSystemInWave(uint32_t subgroup, uint32_t lane) {
+// グループの先頭のウェーブの全部のレーンが呼ぶ
+PxSolveResult SolveGroupSystemInWave(uint32_t lane) {
     const Solve6Element element = MakeSolve6Element(lane);
     const uint32_t word = element.lower ? element.row * 6 + element.column : 36 + element.row;
-    const int64_t value = lane < SOLVE6_USED_LANES ? (int64_t)g_systemSum[subgroup][word] : 0;
+    const int64_t value = lane < SOLVE6_USED_LANES ? (int64_t)g_systemSum[word] : 0;
 
     return SolveSymmetric6InWave(element, value, PX_SOLVE_GAIN_SHIFT);
 }
 
-PxMat6 LoadSubgroupMatrix(uint32_t subgroup) {
+PxMat6 LoadGroupMatrix() {
     PxMat6 matrix;
     for (uint32_t v = 0; v < 36; ++v)
-        matrix.m[v] = (int64_t)g_systemSum[subgroup][v];
+        matrix.m[v] = (int64_t)g_systemSum[v];
 
     return matrix;
 }
 
-PxVec6 LoadSubgroupRhs(uint32_t subgroup) {
+PxVec6 LoadGroupRhs() {
     PxVec6 rhs;
     for (uint32_t v = 0; v < 6; ++v)
-        rhs.v[v] = (int64_t)g_systemSum[subgroup][36 + v];
+        rhs.v[v] = (int64_t)g_systemSum[36 + v];
 
     return rhs;
 }
 
-// 物 i を組 subgroup(SOLVE_LANES 本のスレッド。lane は組の中の番号)で解く。グループの全部のスレッドが呼ぶ
-// (中でグループのバリアを使う)。valid = false の組は何もしない
-void SolveBodyInSubgroup(uint32_t i, uint32_t lane, uint32_t subgroup, bool valid, int64_t alphaQ16) {
-    for (uint32_t word = lane; word < SOLVE_SYSTEM_WORDS; word += SOLVE_LANES)  // 1 物 64 本未満なら 1 本が 2 語以上
-        g_systemSum[subgroup][word] = 0;
+// 物 i を 1 グループ(SOLVE_GROUP_THREADS 本のスレッド。lane はグループの中の番号)で解く。グループの全部のスレッドが呼ぶ
+// (中でグループのバリアを使う)
+void SolveBodyInGroup(uint32_t i, uint32_t lane) {
+    if (lane < SOLVE_SYSTEM_WORDS)
+        g_systemSum[lane] = 0;
 
     GroupMemoryBarrierWithGroupSync();
 
     // --- 点ごとの寄与: スレッド lane は組 base + lane / 8 の点 lane % 8 ---
     // 慣性の項はスレッド 0 が和に入れる(2^64 を法とする和なので、和の後に足す CPU と同じ値)
     const PxParameters p = g_parameters[0];
+    const int64_t alphaQ16 = (int64_t)g_alphaQ16;
+    const PxBody body = g_bodies[i];
     PxBodySystem local = (PxBodySystem)0;
-    if (valid) {
-        const PxBody body = g_bodies[i];
-        if (lane == 0)
-            local = PxBeginSystemOf(body);
+    if (lane == 0)
+        local = PxBeginSystemOf(body);
 
-        const uint32_t count = IncidentCount(i);
-        for (uint32_t base = 0; base < count; base += SOLVE_GROUP_MANIFOLDS) {
-            const uint32_t e = base + lane / PX_MANIFOLD_POINTS;
-            if (e >= count)
-                continue;
+    const uint32_t count = IncidentCount(i);
+    for (uint32_t base = 0; base < count; base += SOLVE_GROUP_MANIFOLDS) {
+        const uint32_t e = base + lane / PX_MANIFOLD_POINTS;
+        if (e >= count)
+            continue;
 
-            const PxBodySystem contribution = PointContribution(i, body, e, lane % PX_MANIFOLD_POINTS, alphaQ16, p);
-            for (uint32_t v = 0; v < 36; ++v)
-                local.lhs.m[v] += contribution.lhs.m[v];
+        const PxBodySystem contribution = PointContribution(i, body, e, lane % PX_MANIFOLD_POINTS, alphaQ16, p);
+        for (uint32_t v = 0; v < 36; ++v)
+            local.lhs.m[v] += contribution.lhs.m[v];
 
-            for (uint32_t v = 0; v < 6; ++v)
-                local.rhs.v[v] += contribution.rhs.v[v];
-        }
+        for (uint32_t v = 0; v < 6; ++v)
+            local.rhs.v[v] += contribution.rhs.v[v];
     }
 
-    AddToGroupSum(local, subgroup);
+    AddToGroupSum(local);
     GroupMemoryBarrierWithGroupSync();
-    if (!valid)
-        return;
 
-    // --- 和を解く: ウェーブで解けるなら組の先頭のウェーブで(T-0095)、解けなければスレッド 0 だけで ---
+    // --- 和を解く: ウェーブで解けるならグループの先頭のウェーブで(T-0095)、解けなければスレッド 0 だけで ---
     const bool inWave = CanSolveInWave();
     if (inWave ? lane >= WaveGetLaneCount() : lane != 0)
         return;
 
     PxSolveResult solved;
     if (inWave)
-        solved = SolveSubgroupSystemInWave(subgroup, lane);
+        solved = SolveGroupSystemInWave(lane);
     else
-        solved = PxSolveSymmetric6(LoadSubgroupMatrix(subgroup), LoadSubgroupRhs(subgroup), PX_SOLVE_GAIN_SHIFT);
+        solved = PxSolveSymmetric6(LoadGroupMatrix(), LoadGroupRhs(), PX_SOLVE_GAIN_SHIFT);
 
     if (lane != 0)
         return;
@@ -514,18 +452,12 @@ void SolveBodyInSubgroup(uint32_t i, uint32_t lane, uint32_t subgroup, bool vali
     if (!solved.ok)
         g_stats.InterlockedAdd(STATS_SOLVE_FAILURES, 1);
 
-    const PxBody body = g_bodies[i];
-    const PxBody updated = PxApplySolution(body, solved.x);
+    const PxBody updated = PxApplySolution(g_bodies[i], solved.x);
     g_bodies[i].deltaLinear = updated.deltaLinear;
     g_bodies[i].deltaAngular = updated.deltaAngular;
 }
 
-// 物 i を 1 グループ(SOLVE_GROUP_THREADS)で解く。グループの全部のスレッドが呼ぶ
-void SolveBodyInGroup(uint32_t i, uint32_t thread) {
-    SolveBodyInSubgroup(i, thread, 0, true, (int64_t)g_alphaQ16);
-}
-
-// --- 組ごと・物ごとの手順(全体の方式のパスと、島ごとのグループ〔physics_islands.hlsli〕が共有)-----------------------
+// --- 組ごと・物ごとの手順 -------------------------------------------------------------------------
 // 反復の途中の探し直し。PxRecollideManifold と同じ手順を、組(3 KB)を局所に写さずにバッファの上で(T-0098: 局所に写す形は、
 // 別のキューの仕事が割り込むと結果が変わった。gpu_probe_physics_test の雑音つきの実行)
 void RecollideSlot(uint32_t slot) {
@@ -583,7 +515,7 @@ void UpdateDualsSlot(uint32_t slot, int64_t alphaQ16) {
     }
 }
 
-// --- 彩色の部品(Jones-Plassmann。全体の方式の ColorRound と島ごとのグループが共有)---
+// --- 彩色の部品(Jones-Plassmann。ColorRound)---
 // まだ色の無い動く物のうち、色の無い隣のどれよりも優先度が高い物に、隣が使っていない一番小さい色を付ける。
 // inBase は前の回の色の組(g_colors の先頭からの位置)
 bool IsLocalMaximum(uint32_t i, uint32_t inBase) {

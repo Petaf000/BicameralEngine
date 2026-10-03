@@ -7,8 +7,7 @@
 //   physics->RecordInitialize(list, debugRingAddress);       // 初めの 1 回
 //   physics->RecordStep(list, debugRingAddress);             // 1 刻み(何刻みでも続けて記録してよい)
 //   physics->RecordReadback(list);  → 投げて待つ →  physics->ReadBodies() / ReadStats()
-// 島ごとに解く方式(T-0094): GpuPhysicsOptions::islands。島分け(FindIslands)の後、物の数が islandBodyLimit 以下の島は 1 グループずつ
-//   (SolveIslands、shaders/sim/physics_islands.hlsli)、それより大きい島は今までの全体の方式のパスが述語つき(大きな島が無ければ飛ばされる)で解く。
+// 使わない色(どの物もその色でない)の解の Dispatch は述語(SetPredication)で飛ばす(T-0094。GpuPhysicsOptions::skipEmptyColors)。
 // 計測(T-0092): EnableProfiling の後は、パスごとにタイムスタンプを打ち、RecordReadback で読み戻しに入れる。
 //   リストが終わってから AccumulateProfile → ProfileResult でパスの種類ごとの GPU 時間。
 // debugRingAddress は debug のビルドでシェーダーの FX_ASSERT が書くデバッグのリング(gpu::DebugRing。必ず結ぶ)。
@@ -33,12 +32,6 @@ namespace bicameral::sim {
         Graph,    // 同じ解き方を、色ごとの物の一覧を入力にした Work Graph で(physics_graph.hlsl の SolveBodyNode)
     };
 
-    // 彩色と反復の回し方(T-0094)
-    enum class GpuPhysicsIslands : uint8_t {
-        Off,      // 全体の方式: 色ごとに全部の物の Dispatch(T-0092)
-        Compute,  // 島ごとに 1 グループ(SolveIslands を物の数ぶんのグループで投げ、島の無いグループはすぐ終わる)
-    };
-
     // 数は固定(M1 の原理の確認。足りなければ GpuPhysicsStats::overflow に印が付く)
     struct GpuPhysicsOptions {
         uint32_t slotsPerBody = 16;     // 持ち主の物 1 つあたりの組の枠(PX_GPU_MAX_SLOTS_PER_BODY まで)
@@ -47,18 +40,10 @@ namespace bicameral::sim {
 
         // 広域の選別 → 接触の幾何を Work Graph(physics_graph.hlsl)で走らせる。false なら Compute の 2 パス(T-0092。ADR-0002「計測」)
         bool broadphaseGraph = true;
-        GpuPhysicsSolver solver = GpuPhysicsSolver::Compute;  // 全体の方式の色ごとの解(島の方式の大きな島は Compute)
+        GpuPhysicsSolver solver = GpuPhysicsSolver::Compute;
 
-        // 全体の方式で、どの物も使わない色の解の Dispatch を述語(SetPredication)で飛ばす(T-0094。solver = Compute のとき)
+        // どの物も使わない色の解の Dispatch を述語(SetPredication)で飛ばす(T-0094。solver = Compute のとき)
         bool skipEmptyColors = true;
-
-        // --- 島ごとに解く方式(T-0094)---
-        GpuPhysicsIslands islands = GpuPhysicsIslands::Off;
-        uint32_t islandBodyLimit = 64;  // これより物の多い島は全体の方式。物の数以上なら全体の方式のパスを記録しない
-        // 1 島のグループのスレッド数と、1 物を解くスレッド数(グループで同時に解く物 = islandThreads / islandLanes)。
-        // 組み合わせは shaders/CMakeLists.txt の SolveIslands の .cso(256_64・256_32・256_16・512_64・1024_64)
-        uint32_t islandThreads = 256;
-        uint32_t islandLanes = 64;
     };
 
     // shaders/sim/physics_step.hlsl の統計の並び(g_stats)
@@ -105,10 +90,6 @@ namespace bicameral::sim {
         void AccumulateProfile();
         [[nodiscard]] std::vector<GpuPhysicsPassTime> ProfileResult() const;
 
-        // 最後の小刻みの島の印(物ごと。島の一番小さい物の番号、島に入らない物は UINT32_MAX)。島の方式のときだけ。
-        // RecordReadback を含むリストが終わってから。PhysicsWorld::IslandLabels と同じになる(T-0094)
-        [[nodiscard]] std::vector<uint32_t> ReadIslandLabels() const;
-
         // 物の状態のハッシュ(PhysicsWorld::StateHash と同じ式)
         [[nodiscard]] static uint64_t StateHash(uint64_t tick, const std::vector<PhysicsBody>& bodies);
 
@@ -128,8 +109,6 @@ namespace bicameral::sim {
             UpdateVelocity,
             Finish,
             BuildManifolds,   // Work Graph の後で組を作る(broadphaseGraph のとき)
-            FindIslands,      // 島分け(T-0094。1 グループ)
-            SolveIslands,     // 1 グループ = 1 島
             BroadphaseGraph,  // Work Graph(Pipeline は無い。m_graph)
             SolveColorGraph,  // Work Graph(GpuPhysicsSolver::Graph)
             Count,
@@ -151,8 +130,6 @@ namespace bicameral::sim {
             uint32_t solveEntry = 0;
             uint32_t colorBodiesLow = 0;
             uint32_t colorBodiesHigh = 0;
-            uint32_t islandMode = 0;
-            uint32_t islandBodyLimit = 0;
         };
 
         [[nodiscard]] std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
@@ -161,12 +138,10 @@ namespace bicameral::sim {
         void RecordColoring(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                             Constants constants);
         void RecordIterations(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                              Constants constants, bool largeOnly = false);
-        void RecordIslandSolve(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                              Constants constants);
+        void RecordSolveColors(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                Constants constants);
-        void RecordPredicateStates(ID3D12GraphicsCommandList10* list, uint32_t uav, bool toPredication) const;
-        void SetPredicate(ID3D12GraphicsCommandList10* list, bool predicated, uint32_t uav, uint64_t offset) const;
-        [[nodiscard]] bool HasLargeIslandPath() const;
+        void RecordColorPredicateStates(ID3D12GraphicsCommandList10* list, bool toPredication) const;
         [[nodiscard]] bool SkipsEmptyColors() const {
             return m_options.skipEmptyColors && m_options.solver == GpuPhysicsSolver::Compute;
         }
@@ -198,11 +173,10 @@ namespace bicameral::sim {
         uint32_t m_solveEntry = 0;
         bool m_graphInitialized = false;                // 裏のメモリを初期化する SetProgram を記録したか
         bool m_graphProgramSet = false;                 // 今のリストの状態がグラフか(Compute のパスが PSO に戻す)
-        std::array<ComPtr<ID3D12Resource>, 16> m_uavs;  // u0〜u15(physics_bindings.hlsli の結び付け)
+        std::array<ComPtr<ID3D12Resource>, 14> m_uavs;  // u0〜u13(physics_bindings.hlsli の結び付け)
         std::array<ComPtr<ID3D12Resource>, 2> m_srvs;   // t0 パラメータ・t1 初めの物
         ComPtr<ID3D12Resource> m_bodiesReadback;
         ComPtr<ID3D12Resource> m_statsReadback;
-        ComPtr<ID3D12Resource> m_islandsReadback;  // 島の方式のときだけ
 
         // --- 計測(T-0092)---
         ComPtr<ID3D12QueryHeap> m_timestamps;  // [0] リストの始め、[1 + n] n 番目のパスの後

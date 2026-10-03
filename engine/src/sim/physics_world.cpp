@@ -163,7 +163,6 @@ namespace bicameral::sim {
     // 拘束でつながる物どうしが違う色になるように塗る(Jones-Plassmann: 番号のハッシュを優先度に。GPU でも同じ色になる)
     void PhysicsWorld::ColorBodies() {
         const std::vector<std::vector<uint32_t>> neighbors = DynamicNeighbors();
-        FindIslands(neighbors);
         m_colorCount = 0;
         uint32_t rounds = 0;
         for (;;) {
@@ -193,34 +192,6 @@ namespace bicameral::sim {
         }
 
         return neighbors;
-    }
-
-    // 島の印: 番号の小さい物から順に、まだ印の無い世界にいる動く物を起点に隣をたどって、起点の番号を付ける
-    // (起点はその島で一番小さい番号になる)。GPU は印を小さい方へ伝えて同じ値を求める(physics_islands.hlsli)
-    void PhysicsWorld::FindIslands(const std::vector<std::vector<uint32_t>>& neighbors) {
-        m_islandLabels.assign(m_bodies.size(), UINT32_MAX);
-        for (uint32_t root = 0; root < m_bodies.size(); ++root) {
-            const bool member = PxIsDynamic(m_bodies[root]) && m_bodies[root].active != 0;
-            if (member && m_islandLabels[root] == UINT32_MAX)
-                LabelIsland(root, neighbors);
-        }
-    }
-
-    // root からつながる物に root の印を付ける
-    void PhysicsWorld::LabelIsland(uint32_t root, const std::vector<std::vector<uint32_t>>& neighbors) {
-        m_islandLabels[root] = root;
-        std::vector<uint32_t> pending{root};
-        while (!pending.empty()) {
-            const uint32_t i = pending.back();
-            pending.pop_back();
-            for (uint32_t j : neighbors[i]) {
-                if (m_islandLabels[j] != UINT32_MAX)
-                    continue;
-
-                m_islandLabels[j] = root;
-                pending.push_back(j);
-            }
-        }
     }
 
     // まだ色の無い物のうち、色の無い隣のどれよりも優先度が高い物(同じ回で選ばれた物どうしは隣り合わない)

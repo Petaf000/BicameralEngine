@@ -197,9 +197,6 @@ views:
       - { id: gpuphysics, group: simlib, label: "GpuPhysics::RecordStep<br/>広域 → 接触(Work Graph)→ 彩色 → 反復(Compute)→ 仕上げ",
           code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordSubstep", ticket: T-0092, doc: docs/decisions/ADR-0002-avbd-execution.md,
           note: "shaders/sim/physics_step.hlsl。色ごとの解は 1 グループ = 1 物(点ごとの寄与を整数の和で)。使わない色は述語で飛ばす(T-0094)。WG と Compute は測って選んだ(ADR-0002「計測」)" }
-      - { id: physicsislands, group: shared, label: "physics_islands.hlsli(島ごとに 1 グループ。比べた方)<br/>島分け → 島の中で彩色と反復",
-          code: "shaders/sim/physics_islands.hlsli::SolveIslandInGroup", ticket: T-0094, doc: docs/design/08-bodies-physics.md,
-          note: "GpuPhysicsOptions::islands(既定 Off)。CPU とビット一致だが、6×6 の 1 スレッドの待ち時間が 1 区画に重なり遅い(山 3.86 → 7.13 ms)。大きな島は全体の方式が述語つきで" }
       - { id: physicsgraph, group: shared, label: "physics_graph.hlsl(Work Graph)<br/>広域の選別 → 接触の幾何 / 色ごとの解(比べた方)",
           code: "shaders/sim/physics_bindings.hlsli::CollideGeometry", ticket: T-0092, doc: docs/design/08-bodies-physics.md,
           note: "組(3 KB)をノードの局所に持つと GPU が固まる(約 5〜6 KB 超)ので、組を作るのは Compute の BuildManifolds" }
@@ -314,8 +311,6 @@ views:
       - [physicsworld, physicsstep, "物・組ごとの手順"]
       - [gpuphysics, physicsstep, "同じ関数(.cso)"]
       - [gpuphysics, physicsgraph, "DispatchGraph"]
-      - [gpuphysics, physicsislands, "島の方式(GpuPhysics::RecordIslandSolve)"]
-      - [physicsislands, physicsstep]
       - [physicsgraph, physicsstep]
       - [physicsstep, physicscollide]
       - [physicsstep, physicssolverhlsl]
