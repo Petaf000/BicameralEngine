@@ -1,33 +1,36 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0094 物理: 島ごとに 1 グループで解く — 完了(採らない。使わない色を述語で飛ばすのは採った)
+最終更新: 2026-10-03 / チケット: T-0095 物理: 6×6 を数スレッドで解く — 完了
 
 ## 状態(3 行以内)
-- 島分け(FindIslands)と 1 グループ = 1 島の解(SolveIslands)を作り、4 場面で CPU とビット一致・島の印も一致。大きな島は今の方式が述語つきで解く。
-- 測ると今の方式より遅い(積み木 2.64 → 2.77・山 3.86 → 7.13・壁 300 個 6.34 → 40.99 ms)ので採らない。`GpuPhysicsOptions::islands` 既定 Off で残した。
-- 使わない色の解を SetPredication で飛ばす(`skipEmptyColors` 既定 On、約 2%)。時間の大半は 6×6 の 1 スレッドの待ち時間 → 次は T-0095。
+- 色ごとの解の 6×6 を 1 ウェーブの 27 レーンで解く形にした(shaders/sim/physics_solve6_wave.hlsli)。全部の場面で CPU とビット一致のまま。
+- 1 刻み 積み木 2.57 → 1.89・山 3.41 → 2.57・壁 6.33 → 4.77 ms(約 25%)。6×6 は 1 回 約 11 → 3.9 µs で、もう刻みの主ではない。
+- M2 に進む(NEXT.md)。島の方式のコード(既定 Off・測り直しても遅い)を残すか消すか、LDLᵀ の研究をやるかはユーザーに確認中(BACKLOG)。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(93)。
-- `job.py test -Preset release -Filter gpu_physics`(14 件。島の方式 6 件: `*_islands`・`pile_islands_mixed`〔上限 8 で大きな島と小さな島が混ざる〕・`wall_islands_large`・`wall_islands_group`)。
-  1 回の ctest が 170 s を超えないよう 2〜3 件ずつ走らせる。`-Filter "gpu_probe_physics|window_replay"`・`physics_*`(CPU)も OK。debug でも gpu_physics_stack・pile_islands_mixed が通る(debug layer の警告なし)。
-- 計測: `job.py run -Preset release -Exe gpu_physics_test -- --scene pile --profile [--islands compute --island-threads 256 --island-lanes 32] [--keep-empty-colors]`。
+- release: gpu_physics_*(14 件。島の方式・`stack_alternative`〔Work Graph の解〕・WARP を含む)・gpu_probe_physics / _compute・physics_*(CPU)・fixed・float_check が通る。
+  1 回の ctest が 170 s を超えないよう 2〜3 件ずつ走らせる。debug の gpu_physics_stack も通る(FX_ASSERT が効いた GPU)。
+- 1 スレッドの経路(ウェーブが使えない時): `gpu_physics_test --scene stack --islands compute --island-lanes 16` で CPU と一致。
+- 計測: `job.py run -Preset release -Exe gpu_physics_test -- --scene pile --profile`(SolveColor の µs/回 を見る)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 島の方式の Work Graph 版は作っていない(ADR-0002「計測(T-0094)」に理由)。SolveIslands は物の数ぶんのグループを投げる(壁で島の無いグループ 301 個が 0.6 ms)。
-- 6×6 が 1 区画に重なると 1 色の 1 歩が約 120 µs に延びる理由(区画の発行の取り合い・レジスタ)は未確認。
-- (前から)物理のパスに大きい局所の変数を足さないこと(T-0098)。段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。PIX・セーブ・AMD は未確認/未着手。
+- WARP で 6×6 がウェーブの経路を通っているか(WARP のウェーブの幅)は未確認(どちらの経路でも同じ値)。AMD(wave64)も未確認。
+- (前から)島の方式の Work Graph 版なし・6×6 が 1 区画に重なる理由は未確認・物理のパスに大きい局所の変数を足さない(T-0098)・段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 島の方式は採らない(T-0094 の約束「速くなれば採る」による。ADR-0002「計測(T-0094)」)。コードは既定 Off で残し、T-0095 の後に測り直す(BACKLOG)。
-  残すか消すかはユーザーに確認中。
-- 使わない色の解を述語で飛ばすのは既定 On(ビット一致・約 2%)。T-0093 の空の色の見積もり(0.3〜0.4 ms)は外れだった。
-- 大きな島の場面として壁(れんが 300 個・`MakeWallScene`)を足した。
+- 6×6 はウェーブで解く(値は変えない工学なので ADR なし。08 §6「結果(T-0095)」)。平方根は floor の値が 1 つに決まるので、ウェーブで 5 ビットずつ決める別の求め方にした。
+- 慣性の項(PxBeginSystemOf)はスレッド 0 が和の前に入れる(2^64 を法とする和なので CPU と同じ値)。
+- LDLᵀ(値が変わる研究)は今はやらない案・島の方式のコードの扱いは、ユーザーの返事待ち(BACKLOG)。
 
 ## 次にやること
-NEXT.md の先頭(T-0095 物理: 6×6 を数スレッドで解く)。
+NEXT.md の先頭(M2: T-0018 多重解像度の疎な木・ブロックプール・活性)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **6×6 のウェーブの解(T-0095)**: shaders/sim/physics_solve6_wave.hlsli。レーン t < 21 が下三角 (r, c)(t = r(r+1)/2 + c)、21〜26 が右辺。CPU の PxSolveSymmetric6 と
+  要素ごとの式を揃えるため、共有の部品(PxDiagonalShift・PxCholeskyRadicand・PxCholeskyRoot・PxRhsTopBit。physics_math.hlsli)を両方が使う。片方を変えたらもう片方も。
+  使う条件は physics_bindings.hlsli の CanSolveInWave(ウェーブ 32 以上かつ SOLVE_LANES 以下)。中は WaveReadLaneAt だけで、ウェーブの全部のレーンが一様に呼ぶこと
+  (途中で return しない)。sim のソースで `round` も変数名に使えない(浮動小数点の検査が落とす。`digit` にした)。
 - **述語(T-0094)**: `GpuPhysics` の u14(大きな島がある)・u15(色ごとの「使う」、uint64 × 16)は BeginSubstep が UAV で 0 にし、FindIslands・FinishColoring が書き、
   述語に使う間だけ PREDICATION(gpu_physics.cpp の RecordSubstep・gpu_physics_islands.cpp)。リストの終わりで COMMON に戻り、次のリストの BeginSubstep で UAV に昇格する
   (だから小刻みの初めに必ず UAV で触ってから PREDICATION に移す)。述語と DispatchGraph は組み合わせない(述語をかける色ごとの解は Compute)。

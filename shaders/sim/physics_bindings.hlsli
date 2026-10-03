@@ -383,6 +383,8 @@ static const uint32_t SOLVE_SUBGROUPS = ISLAND_GROUP_THREADS / SOLVE_LANES;
 
 groupshared uint64_t g_systemSum[SOLVE_SUBGROUPS][SOLVE_SYSTEM_WORDS];
 
+#include "sim/physics_solve6_wave.hlsli"
+
 // 物 i の組の一覧の e 番目の組の k 番目の点の 3 行(点が無ければ 0)
 PxBodySystem PointContribution(uint32_t i, PxBody body, uint32_t e, uint32_t k, int64_t alphaQ16, PxParameters p) {
     const uint32_t entry = g_incident[i * g_incidentPerBody + e];
@@ -425,6 +427,39 @@ void AddToGroupSum(PxBodySystem system, uint32_t subgroup) {
         AddToSum(subgroup, 36 + v, system.rhs.v[v]);
 }
 
+// --- 組の 6×6 の和(共有メモリ)を解く ---
+// ウェーブで解けるのは、ウェーブが 32 レーン以上で組の幅(SOLVE_LANES)以下のとき。そのとき組の先頭はウェーブの先頭に揃い、
+// 組の中の番号 lane = ウェーブの中のレーンの番号(1 次元のグループのスレッドは順にウェーブに入る)
+bool CanSolveInWave() {
+    const uint32_t width = WaveGetLaneCount();
+    return width >= SOLVE6_MIN_WAVE && width <= SOLVE_LANES;
+}
+
+// 組の先頭のウェーブの全部のレーンが呼ぶ
+PxSolveResult SolveSubgroupSystemInWave(uint32_t subgroup, uint32_t lane) {
+    const Solve6Element element = MakeSolve6Element(lane);
+    const uint32_t word = element.lower ? element.row * 6 + element.column : 36 + element.row;
+    const int64_t value = lane < SOLVE6_USED_LANES ? (int64_t)g_systemSum[subgroup][word] : 0;
+
+    return SolveSymmetric6InWave(element, value, PX_SOLVE_GAIN_SHIFT);
+}
+
+PxMat6 LoadSubgroupMatrix(uint32_t subgroup) {
+    PxMat6 matrix;
+    for (uint32_t v = 0; v < 36; ++v)
+        matrix.m[v] = (int64_t)g_systemSum[subgroup][v];
+
+    return matrix;
+}
+
+PxVec6 LoadSubgroupRhs(uint32_t subgroup) {
+    PxVec6 rhs;
+    for (uint32_t v = 0; v < 6; ++v)
+        rhs.v[v] = (int64_t)g_systemSum[subgroup][36 + v];
+
+    return rhs;
+}
+
 // 物 i を組 subgroup(SOLVE_LANES 本のスレッド。lane は組の中の番号)で解く。グループの全部のスレッドが呼ぶ
 // (中でグループのバリアを使う)。valid = false の組は何もしない
 void SolveBodyInSubgroup(uint32_t i, uint32_t lane, uint32_t subgroup, bool valid, int64_t alphaQ16) {
@@ -434,10 +469,14 @@ void SolveBodyInSubgroup(uint32_t i, uint32_t lane, uint32_t subgroup, bool vali
     GroupMemoryBarrierWithGroupSync();
 
     // --- 点ごとの寄与: スレッド lane は組 base + lane / 8 の点 lane % 8 ---
+    // 慣性の項はスレッド 0 が和に入れる(2^64 を法とする和なので、和の後に足す CPU と同じ値)
     const PxParameters p = g_parameters[0];
     PxBodySystem local = (PxBodySystem)0;
     if (valid) {
         const PxBody body = g_bodies[i];
+        if (lane == 0)
+            local = PxBeginSystemOf(body);
+
         const uint32_t count = IncidentCount(i);
         for (uint32_t base = 0; base < count; base += SOLVE_GROUP_MANIFOLDS) {
             const uint32_t e = base + lane / PX_MANIFOLD_POINTS;
@@ -455,22 +494,27 @@ void SolveBodyInSubgroup(uint32_t i, uint32_t lane, uint32_t subgroup, bool vali
 
     AddToGroupSum(local, subgroup);
     GroupMemoryBarrierWithGroupSync();
-    if (!valid || lane != 0)
+    if (!valid)
         return;
 
-    // --- 慣性の項 + 点の和を解く(SolveColor と同じ)---
-    const PxBody body = g_bodies[i];
-    PxBodySystem system = PxBeginSystemOf(body);
-    for (uint32_t v = 0; v < 36; ++v)
-        system.lhs.m[v] += (int64_t)g_systemSum[subgroup][v];
+    // --- 和を解く: ウェーブで解けるなら組の先頭のウェーブで(T-0095)、解けなければスレッド 0 だけで ---
+    const bool inWave = CanSolveInWave();
+    if (inWave ? lane >= WaveGetLaneCount() : lane != 0)
+        return;
 
-    for (uint32_t v = 0; v < 6; ++v)
-        system.rhs.v[v] += (int64_t)g_systemSum[subgroup][36 + v];
+    PxSolveResult solved;
+    if (inWave)
+        solved = SolveSubgroupSystemInWave(subgroup, lane);
+    else
+        solved = PxSolveSymmetric6(LoadSubgroupMatrix(subgroup), LoadSubgroupRhs(subgroup), PX_SOLVE_GAIN_SHIFT);
 
-    const PxSolveResult solved = PxSolveSymmetric6(system.lhs, system.rhs, PX_SOLVE_GAIN_SHIFT);
+    if (lane != 0)
+        return;
+
     if (!solved.ok)
         g_stats.InterlockedAdd(STATS_SOLVE_FAILURES, 1);
 
+    const PxBody body = g_bodies[i];
     const PxBody updated = PxApplySolution(body, solved.x);
     g_bodies[i].deltaLinear = updated.deltaLinear;
     g_bodies[i].deltaAngular = updated.deltaAngular;

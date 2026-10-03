@@ -313,13 +313,18 @@ struct PxScaling {
     int32_t shift[6];
 };
 
+// 対角 1 つぶんのずらしの量(GPU のウェーブで解く形〔shaders/sim/physics_solve6_wave.hlsli〕も使う)
+FX_FN int32_t PxDiagonalShift(int64_t diagonal) {
+    FX_ASSERT(diagonal > 0);
+    const int32_t room = 61 - (int32_t)FxMsbU64((uint64_t)diagonal);
+
+    return room >= 0 ? room / 2 : -((1 - room) / 2);
+}
+
 FX_FN PxScaling PxDiagonalScaling(PxMat6 a) {
     PxScaling scaling;
-    for (uint32_t i = 0; i < 6; ++i) {
-        FX_ASSERT(a.m[i * 6 + i] > 0);
-        const int32_t room = 61 - (int32_t)FxMsbU64((uint64_t)a.m[i * 6 + i]);
-        scaling.shift[i] = room >= 0 ? room / 2 : -((1 - room) / 2);
-    }
+    for (uint32_t i = 0; i < 6; ++i)
+        scaling.shift[i] = PxDiagonalShift(a.m[i * 6 + i]);
 
     return scaling;
 }
@@ -329,6 +334,19 @@ struct PxCholesky6 {
     PxMat6 l;
     bool ok;
 };
+
+// 列 j の対角(下の行の寄与を引いた後)から L_jj = floor(sqrt(対角 × 2^62))(Q62)を作る。対角が 0 以下なら 1 として続ける(呼ぶ側が ok を倒す)。
+// 平方根を取る前の値(< 2^126)は GPU のウェーブで解く形(shaders/sim/physics_solve6_wave.hlsli)も使う
+FX_FN FxU128 PxCholeskyRadicand(int64_t diagonal) {
+    const uint64_t positive = diagonal > 0 ? (uint64_t)diagonal : 1u;
+    const FxU128 shifted = {positive >> 2, positive << 62};
+
+    return shifted;
+}
+
+FX_FN int64_t PxCholeskyRoot(int64_t diagonal) {
+    return (int64_t)PxSqrtU128(PxCholeskyRadicand(diagonal));
+}
 
 FX_FN PxCholesky6 PxFactorScaled6(PxMat6 a, PxScaling scaling) {
     PxCholesky6 result;
@@ -342,9 +360,7 @@ FX_FN PxCholesky6 PxFactorScaled6(PxMat6 a, PxScaling scaling) {
             diagonal -= FxMulShiftS64(a.m[j * 6 + k], a.m[j * 6 + k], 62);
 
         result.ok = result.ok && diagonal > 0;
-        diagonal = diagonal > 0 ? diagonal : 1;
-        const FxU128 shifted = {(uint64_t)diagonal >> 2, (uint64_t)diagonal << 62};
-        const int64_t root = (int64_t)PxSqrtU128(shifted);
+        const int64_t root = PxCholeskyRoot(diagonal);
         a.m[j * 6 + j] = root;
         for (uint32_t i = j + 1; i < 6; ++i) {
             int64_t value = a.m[i * 6 + j];
@@ -391,19 +407,24 @@ FX_FN PxSolveResult PxSubstitute6(PxMat6 l, PxVec6 y) {
     return result;
 }
 
+// 右辺の成分 1 つの、ずらした後の一番上のビット(0 なら PX_SOLVE_NO_RHS)。成分の最大が右辺全体のずらしを決める
+FX_CONST int32_t PX_SOLVE_NO_RHS = -1000;
+
+FX_FN int32_t PxRhsTopBit(int64_t g, int32_t gainShift, int32_t shift) {
+    return g == 0 ? PX_SOLVE_NO_RHS : (int32_t)FxMsbU64(FxAbsU64(g)) + gainShift + shift;
+}
+
 // A X = G × 2^gainShift を解く(A は対称正定値。A と G の単位は呼ぶ側が gainShift で合わせる)
 FX_FN PxSolveResult PxSolveSymmetric6(PxMat6 a, PxVec6 g, int32_t gainShift) {
     const PxScaling scaling = PxDiagonalScaling(a);
     const PxCholesky6 factor = PxFactorScaled6(a, scaling);
 
     // 右辺: G_i × 2^(gainShift + s_i) を、一番大きい成分が 2^PX_SOLVE_RHS_BITS になるようにまとめてずらす
-    int32_t top = -1000;
-    for (uint32_t i = 0; i < 6; ++i) {
-        if (g.v[i] != 0)
-            top = (int32_t)PxMax(top, (int64_t)FxMsbU64(FxAbsU64(g.v[i])) + gainShift + scaling.shift[i]);
-    }
+    int32_t top = PX_SOLVE_NO_RHS;
+    for (uint32_t i = 0; i < 6; ++i)
+        top = (int32_t)PxMax(top, PxRhsTopBit(g.v[i], gainShift, scaling.shift[i]));
 
-    if (top == -1000) {
+    if (top == PX_SOLVE_NO_RHS) {
         PxSolveResult zero;
         zero.x = PX_ZERO(PxVec6);
         zero.maxBits = 0;
