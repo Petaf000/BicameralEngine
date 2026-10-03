@@ -13,7 +13,7 @@
 //   影:         反応の後、影の子 2³ の合計を「親 × 8」に引き戻す(MrPullBackShadow)。影は親を覆わず、世界に書き戻さない(D-403)。
 //
 // 端数(ADR-0015): 2^-64 単位。反応は整数部だけを使い、端数は細かく/粗くする時だけ動く。21 段の往復まではビット一致。
-// それより深くから粗くして落ちた分は数える(帳簿は T-0018)。
+// それより深くから粗くして落ちた分は、世界の帳簿に (レベル, 物質) ごとに足す(T-0018。木の管理は multires_tree.hlsli)。
 #ifndef BICAMERAL_MULTIRES_HLSLI
 #define BICAMERAL_MULTIRES_HLSLI
 
@@ -50,12 +50,23 @@ FX_CONST uint32_t MR_BLOCK_REAL = 1;    // 世界の一部(状態・介入によ
 FX_CONST uint32_t MR_BLOCK_SHADOW = 2;  // 観察の影(親を覆わない。世界に返さない)
 FX_CONST uint32_t MR_BLOCK_MIRROR = 3;  // 世界の写し(木の外の世界から毎回写す。刻まない・読むだけ。影の根の親。T-0096)
 
-// 数える欄(u2 の uint32 の並び)
-FX_CONST uint32_t MR_COUNTER_FRACTION_BLOCKS = 0;  // 割り当てた端数のブロックの数(次に使う端数の枠)
-FX_CONST uint32_t MR_COUNTER_LOST = 1;             // 粗くした時に端数の下から 0 でないビットが落ちた (セル, 成分) の数
-FX_CONST uint32_t MR_COUNTER_OVERFLOW = 2;         // 成分がインラインの数を超えて捨てた数(R-MULTI-4)
-FX_CONST uint32_t MR_COUNTER_SHADOW_CLAMPED = 3;   // 影の引き戻しでエネルギーの余裕が負だった数
-FX_CONST uint32_t MR_COUNTER_COUNT = 4;
+// 数える欄(u3 の uint32 の並び)。空きのスタックの数・墓石の数・要求の数は状態の一部(CPU と GPU で一致する)
+FX_CONST uint32_t MR_COUNTER_FREE_FRACTIONS = 0;  // 端数の枠の空きのスタックの数(上 = 次に取る所。T-0018)
+FX_CONST uint32_t MR_COUNTER_LOST = 1;            // 粗くした時に端数の下から 0 でないビットが落ちた (セル, 成分) の数
+FX_CONST uint32_t MR_COUNTER_OVERFLOW = 2;        // 成分がインラインの数を超えて捨てた数(R-MULTI-4)
+FX_CONST uint32_t MR_COUNTER_SHADOW_CLAMPED = 3;  // 影の引き戻しでエネルギーの余裕が負だった数
+FX_CONST uint32_t MR_COUNTER_FREE_BLOCKS = 4;     // 世界の枠の空きのスタックの数
+FX_CONST uint32_t MR_COUNTER_TOMBSTONES = 5;      // 索引の墓石の数(作り直すと 0)
+FX_CONST uint32_t MR_COUNTER_REBUILD_INDEX = 6;   // この要求の処理の終わりに索引を作り直すなら 1
+FX_CONST uint32_t MR_COUNTER_REQUESTS = 7;        // 要求の一覧の数(処理すると 0)
+FX_CONST uint32_t MR_COUNTER_GRANTED = 8;         // 適用した要求の数(累計)
+FX_CONST uint32_t MR_COUNTER_ALREADY = 9;         // 既にそうなっていた細かくする要求の数(累計)
+FX_CONST uint32_t MR_COUNTER_CONFLICT = 10;       // 同じ刻みの取り合いで後回しにした要求の数(累計)
+FX_CONST uint32_t MR_COUNTER_NO_SPACE = 11;       // 枠が足りず後回しにした要求の数(累計)
+FX_CONST uint32_t MR_COUNTER_INVALID = 12;  // 無効な要求の数(累計。根が無い・ブロックが無い・子がある・根を粗くする)
+FX_CONST uint32_t MR_COUNTER_LEDGER_OUTSIDE = 13;  // 帳簿のレベルの外で落ちた端数の数(帳簿に入らない)
+FX_CONST uint32_t MR_COUNTER_INDEX_FULL = 14;      // 索引に入れられなかった数
+FX_CONST uint32_t MR_COUNTER_COUNT = 16;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -90,11 +101,20 @@ struct MrChildren {
     MrFraction fractions[8];
 };
 
+// 粗くした時に落ちた下位 3bit を覚える成分の数(セルの整数部と端数に入る成分の数まで。超えたら溢れに数える)
+FX_CONST uint32_t MR_MAX_LOST_SPECIES = 2 * RX_MAX_CELL_SPECIES;
+
 struct MrCoarsened {
     RxCell cell;
     MrFraction fraction;
     uint32_t lostCount;      // 端数の下から落ちたビットがあった成分(とエネルギー)の数
     uint32_t overflowCount;  // インラインに入りきらず捨てた成分の数
+
+    // --- 落ちた分(子のレベルの単位 × 2^-64。世界の帳簿へ。T-0018)---
+    uint32_t energyLostBits;
+    uint32_t lostSpeciesCount;
+    uint32_t lostSpecies[MR_MAX_LOST_SPECIES];
+    uint32_t lostBits[MR_MAX_LOST_SPECIES];
 };
 
 // 影の子 2³(引き戻しの入力と出力)
@@ -338,12 +358,35 @@ FX_FN MrCoarsened MrAppendCoarsened(MrCoarsened result, uint32_t species, MrWide
     return result;
 }
 
+// 落ちた下位 3bit を成分ごとに覚える(覚えきれなければ溢れに数える)
+FX_FN MrCoarsened MrRecordLost(MrCoarsened result, uint32_t species, uint32_t lostBits) {
+    if (lostBits == 0)
+        return result;
+
+    if (result.lostSpeciesCount >= MR_MAX_LOST_SPECIES) {
+        result.overflowCount += 1;
+        return result;
+    }
+
+    result.lostSpecies[result.lostSpeciesCount] = species;
+    result.lostBits[result.lostSpeciesCount] = lostBits;
+    result.lostSpeciesCount += 1;
+
+    return result;
+}
+
 // 子 2³ を親のセル 1 つにまとめる。物質量とエネルギーは「整数部 + 端数」の合計の 1/8(単位が 8 倍になるので)。
 // 成分は子の和集合(ID の昇順)。並び順に依存しない(物質ごとに全部の子を同じ順で足す)
 FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
     MrCoarsened result;
     result.lostCount = 0;
     result.overflowCount = 0;
+    result.lostSpeciesCount = 0;
+    // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
+    for (uint32_t i = 0; i < MR_MAX_LOST_SPECIES; ++i) {
+        result.lostSpecies[i] = 0;
+        result.lostBits[i] = 0;
+    }
 
     // --- エネルギー(符号つき)---
     MrWide energy = MrMakeWide();
@@ -358,6 +401,7 @@ FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
     result.fraction = MrMakeEmptyFraction();
     result.fraction.energy = energyShifted.fraction;
     result.lostCount += energyShifted.lostBits != 0 ? 1u : 0u;
+    result.energyLostBits = energyShifted.lostBits;
 
     // --- 成分(子の和集合を ID の昇順に)---
     uint32_t species = 0;
@@ -381,6 +425,7 @@ FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
         const MrWideShifted shifted = MrWideShiftLevel(amount);
         FX_ASSERT((amount.top >> MR_LEVEL_SHIFT) == 0);
         result.lostCount += shifted.lostBits != 0 ? 1u : 0u;
+        result = MrRecordLost(result, species, shifted.lostBits);
 
         result = MrAppendCoarsened(result, species, shifted);
     }

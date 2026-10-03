@@ -1,9 +1,11 @@
-// multires_nest.cpp — 多重解像度の入れ子の細分の CPU リファレンス(multires_nest.h)。
-// 1 段ぶんの操作(RefineLevel・CoarsenLevel・PullBackLevel)は、GPU のノード(shaders/sim/multires_graph.hlsl)の 1 グループと同じ順:
-// セルを全部書いてから見出しを直す。端数の枠は「書く 64 セルのどれかが 0 でない」時だけ取る。
+// multires_nest.cpp — 多重解像度の木の CPU リファレンス(multires_nest.h)のうち、観察の枠(影・写し)・刻み・要約・保存量の合計。
+// 世界の木の管理(索引・空きのスタック・要求・帳簿)は multires_tree.cpp。
+// 1 段ぶんの操作(RefineShadowLevel・PullBackLevel)は、GPU のノード(shaders/sim/multires_graph.hlsl)の 1 グループと同じ順。
 #include "sim/multires_nest.h"
 
 #include <algorithm>
+
+#include "sim/multires_nest_internal.h"
 
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
@@ -12,123 +14,26 @@ namespace bicameral::sim {
 
     namespace {
 
-        RxCell& CellAt(MultiresNest& nest, uint32_t slot, uint32_t index) {
-            return nest.cells[(size_t{slot} * MR_BLOCK_CELLS) + index];
-        }
-
-        const RxCell& CellAt(const MultiresNest& nest, uint32_t slot, uint32_t index) {
-            return nest.cells[(size_t{slot} * MR_BLOCK_CELLS) + index];
-        }
-
-        // 端数(枠が無ければ空)
-        MrFraction FractionAt(const MultiresNest& nest, uint32_t fractionSlot, uint32_t index) {
-            if (fractionSlot == MR_NO_FRACTION)
-                return MrMakeEmptyFraction();
-
-            return nest.fractions[(size_t{fractionSlot} * MR_BLOCK_CELLS) + index];
-        }
-
-        void SetFraction(MultiresNest& nest, uint32_t fractionSlot, uint32_t index, const MrFraction& fraction) {
-            nest.fractions[(size_t{fractionSlot} * MR_BLOCK_CELLS) + index] = fraction;
-        }
-
-        uint32_t AllocateFraction(MultiresNest& nest) {
-            const uint32_t slot = nest.counters[MR_COUNTER_FRACTION_BLOCKS]++;
-            FX_ASSERT(slot < nest.fractions.size() / MR_BLOCK_CELLS);
-
-            return slot;
-        }
+        using nest_detail::CellAt;
+        using nest_detail::FractionAt;
 
         // --- 1 段ぶんの操作 ---
 
-        void RefineLevel(MultiresNest& nest, uint32_t parentSlot, uint32_t childSlot, uint32_t kind,
-                         const MultiresPoint& point) {
-            MrBlock& parent = nest.blocks[parentSlot];
-            const uint32_t octant = MrOctantBitOfPoint(parent.originX, parent.level, point.x, point.level) |
-                                    (MrOctantBitOfPoint(parent.originY, parent.level, point.y, point.level) << 1) |
-                                    (MrOctantBitOfPoint(parent.originZ, parent.level, point.z, point.level) << 2);
+        bool IsObserverSlot(const MultiresNest& nest, uint32_t slot) {
+            return slot >= nest.capacity.worldBlocks && slot < nest.blocks.size();
+        }
 
-            MrBlock child = MrMakeUnusedBlock();
-            child.originX = MrChildOrigin(parent.originX, octant & 1u);
-            child.originY = MrChildOrigin(parent.originY, (octant >> 1) & 1u);
-            child.originZ = MrChildOrigin(parent.originZ, (octant >> 2) & 1u);
-            child.level = parent.level + 1;
-            child.kind = kind;
-            child.parent = parentSlot;
-            child.parentOctant = octant;
+        void RefineShadowLevel(MultiresNest& nest, uint32_t parentSlot, uint32_t childSlot,
+                               const MultiresPoint& point) {
+            FX_ASSERT(IsObserverSlot(nest, childSlot));
+            const MrBlock parent = nest.blocks[parentSlot];
+            const uint32_t octant = MrOctantOfPoint(parent, point.x, point.y, point.z, point.level);
 
-            // --- セル: 子は親と同じ数 ---
+            // --- セル: 子は親と同じ数(影は端数を持たず、親を覆わない)---
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
                 CellAt(nest, childSlot, index) = CellAt(nest, parentSlot, MrParentCellOfChild(octant, index));
 
-            // --- 端数: 本物の子だけ、親の八分の一に 0 でない端数があれば写す(影は端数を持たない)---
-            bool anyFraction = false;
-            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local)
-                anyFraction |= !MrFractionIsZero(FractionAt(nest, parent.fraction, MrOctantCell(octant, local)));
-
-            if (kind == MR_BLOCK_REAL && anyFraction) {
-                child.fraction = AllocateFraction(nest);
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    const MrFraction fraction = FractionAt(nest, parent.fraction, MrParentCellOfChild(octant, index));
-                    SetFraction(nest, child.fraction, index, fraction);
-                }
-            }
-
-            // --- 本物なら親を覆う(覆われた親のセルと端数は空)---
-            if (kind == MR_BLOCK_REAL) {
-                for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
-                    const uint32_t index = MrOctantCell(octant, local);
-                    CellAt(nest, parentSlot, index) = RxMakeEmptyCell(0);
-                    if (parent.fraction != MR_NO_FRACTION)
-                        SetFraction(nest, parent.fraction, index, MrMakeEmptyFraction());
-                }
-
-                parent.children[octant] = childSlot;
-            }
-
-            nest.blocks[childSlot] = child;
-        }
-
-        MrChildren GatherChildren(const MultiresNest& nest, uint32_t childSlot, uint32_t fractionSlot, uint32_t local) {
-            MrChildren children{};
-            for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
-                const uint32_t index = MrChildCell(local, j);
-                children.cells[j] = CellAt(nest, childSlot, index);
-                children.fractions[j] = FractionAt(nest, fractionSlot, index);
-            }
-
-            return children;
-        }
-
-        // 子ブロックを親の八分の一へ粗く戻す。親の枠を返す
-        uint32_t CoarsenLevel(MultiresNest& nest, uint32_t childSlot) {
-            const MrBlock child = nest.blocks[childSlot];
-            FX_ASSERT(child.kind == MR_BLOCK_REAL);
-            MrBlock& parent = nest.blocks[child.parent];
-
-            std::array<MrCoarsened, MR_OCTANT_CELLS> results{};
-            bool anyFraction = false;
-            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
-                results[local] = MrCoarsenCell(GatherChildren(nest, childSlot, child.fraction, local));
-                nest.counters[MR_COUNTER_LOST] += results[local].lostCount;
-                nest.counters[MR_COUNTER_OVERFLOW] += results[local].overflowCount;
-                anyFraction |= !MrFractionIsZero(results[local].fraction);
-            }
-
-            if (anyFraction && parent.fraction == MR_NO_FRACTION)
-                parent.fraction = AllocateFraction(nest);
-
-            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
-                const uint32_t index = MrOctantCell(child.parentOctant, local);
-                CellAt(nest, child.parent, index) = results[local].cell;
-                if (parent.fraction != MR_NO_FRACTION)
-                    SetFraction(nest, parent.fraction, index, results[local].fraction);
-            }
-
-            parent.children[child.parentOctant] = MR_NO_BLOCK;
-            nest.blocks[childSlot] = MrMakeUnusedBlock();
-
-            return child.parent;
+            nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_SHADOW, MR_NO_FRACTION);
         }
 
         void PullBackLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
@@ -213,6 +118,43 @@ namespace bicameral::sim {
             }
         }
 
+        // 帳簿の 1 つの値(レベル level の単位 × 2^-64)を finestLevel の単位に
+        Wide256 LedgerValue(uint64_t value, int32_t level, int32_t finestLevel) {
+            FX_ASSERT(level <= finestLevel);
+
+            return ShiftLeft(Wide256{value, 0, 0, 0}, static_cast<uint32_t>(finestLevel - level) * MR_LEVEL_SHIFT);
+        }
+
+        // 帳簿の 1 つの列(0 = エネルギー、1 + 物質 ID)の量を合計に足す
+        void AddLedgerColumn(ConservedTotals& totals, const BakedReactionTable& table, uint32_t column,
+                             const Wide256& amount) {
+            if (column == 0) {
+                AddTo(totals.energy, amount);
+                return;
+            }
+
+            const uint32_t species = column - 1;
+            const size_t elementCount = totals.elements.size();
+            for (size_t element = 0; element < elementCount; ++element) {
+                const uint32_t atoms = table.speciesElements[(species * elementCount) + element];
+                if (atoms != 0)
+                    AddTo(totals.elements[element], MultiplySmall(amount, atoms));
+            }
+        }
+
+        void AddLedgerTotals(ConservedTotals& totals, const MultiresNest& nest, const BakedReactionTable& table,
+                             int32_t finestLevel) {
+            const uint32_t columns = nest.capacity.ledgerColumns;
+            for (uint32_t row = 0; row < MR_LEDGER_LEVELS; ++row) {
+                const int32_t level = MR_LEDGER_LEVEL_MIN + static_cast<int32_t>(row);
+                for (uint32_t column = 0; column < columns; ++column) {
+                    const uint64_t value = nest.ledger[(size_t{row} * columns) + column];
+                    if (value != 0)
+                        AddLedgerColumn(totals, table, column, LedgerValue(value, level, finestLevel));
+                }
+            }
+        }
+
         uint64_t HashFraction(const MrFraction& fraction) {
             uint64_t hash = FxHashCombine(0, fraction.energy);
             hash = FxHashCombine(hash, fraction.speciesCount);
@@ -241,44 +183,52 @@ namespace bicameral::sim {
 
     }  // namespace
 
-    MultiresNest MakeMultiresNest(uint32_t blockCapacity, uint32_t fractionCapacity) {
+    MultiresNest MakeMultiresNest(const MultiresCapacity& capacity) {
+        FX_ASSERT(capacity.indexEntries == 0 || (capacity.indexEntries & (capacity.indexEntries - 1)) == 0);
+        FX_ASSERT(capacity.ledgerColumns >= 1);
+        const size_t blockCount = size_t{capacity.worldBlocks} + capacity.observerBlocks;
+
         MultiresNest nest;
-        nest.blocks.assign(blockCapacity, MrMakeUnusedBlock());
-        nest.cells.assign(size_t{blockCapacity} * MR_BLOCK_CELLS, RxMakeEmptyCell(0));
-        nest.fractions.assign(size_t{fractionCapacity} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
+        nest.capacity = capacity;
+        nest.blocks.assign(blockCount, MrMakeUnusedBlock());
+        nest.cells.assign(blockCount * MR_BLOCK_CELLS, RxMakeEmptyCell(0));
+        nest.fractions.assign(size_t{capacity.fractions} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
+        nest.ledger.assign(size_t{MR_LEDGER_LEVELS} * capacity.ledgerColumns, 0);
+        nest.index.assign(capacity.indexEntries, MR_INDEX_EMPTY);
+        nest.requests.assign(MR_MAX_REQUESTS, MrMakeRequest(0, 0, 0, 0, 0));
+        nest.states.assign(MR_MAX_REQUESTS, MrMakeRequestState());
+        nest.claims.assign(capacity.worldBlocks, MR_NO_CLAIM);
+
+        // --- 空きのスタック: 上(最後)から 0, 1, 2… と取れるように積む ---
+        nest.freeBlocks.resize(capacity.worldBlocks);
+        for (uint32_t i = 0; i < capacity.worldBlocks; ++i)
+            nest.freeBlocks[i] = capacity.worldBlocks - 1 - i;
+
+        nest.freeFractions.resize(capacity.fractions);
+        for (uint32_t i = 0; i < capacity.fractions; ++i)
+            nest.freeFractions[i] = capacity.fractions - 1 - i;
+
+        nest.counters[MR_COUNTER_FREE_BLOCKS] = capacity.worldBlocks;
+        nest.counters[MR_COUNTER_FREE_FRACTIONS] = capacity.fractions;
 
         return nest;
-    }
-
-    void PlaceRootBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
-                        int64_t originZ, std::span<const RxCell> cells) {
-        FX_ASSERT(cells.size() == MR_BLOCK_CELLS);
-        MrBlock block = MrMakeMirrorBlock(level, originX, originY, originZ);
-        block.kind = MR_BLOCK_REAL;
-        nest.blocks[slot] = block;
-        std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
     }
 
     void PlaceMirrorBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
                           int64_t originZ, std::span<const RxCell> cells) {
         FX_ASSERT(cells.size() == MR_BLOCK_CELLS);
+        FX_ASSERT(IsObserverSlot(nest, slot));
         nest.blocks[slot] = MrMakeMirrorBlock(level, originX, originY, originZ);
         std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
     }
 
-    void RefineChain(MultiresNest& nest, uint32_t parentSlot, uint32_t firstChildSlot, uint32_t levelCount,
-                     uint32_t kind, const MultiresPoint& point) {
+    void RefineShadowChain(MultiresNest& nest, uint32_t parentSlot, uint32_t firstChildSlot, uint32_t levelCount,
+                           const MultiresPoint& point) {
         uint32_t parent = parentSlot;
         for (uint32_t i = 0; i < levelCount; ++i) {
-            RefineLevel(nest, parent, firstChildSlot + i, kind, point);
+            RefineShadowLevel(nest, parent, firstChildSlot + i, point);
             parent = firstChildSlot + i;
         }
-    }
-
-    void CoarsenChain(MultiresNest& nest, uint32_t deepestSlot, uint32_t levelCount) {
-        uint32_t child = deepestSlot;
-        for (uint32_t i = 0; i < levelCount; ++i)
-            child = CoarsenLevel(nest, child);
     }
 
     void RemoveShadowChain(MultiresNest& nest, uint32_t firstSlot, uint32_t levelCount) {
@@ -340,6 +290,15 @@ namespace bicameral::sim {
         for (const MrFraction& fraction : nest.fractions)
             hash = FxHashCombine(hash, HashFraction(fraction));
 
+        for (const uint32_t slot : nest.freeBlocks)
+            hash = FxHashCombine(hash, slot);
+
+        for (const uint32_t slot : nest.freeFractions)
+            hash = FxHashCombine(hash, slot);
+
+        for (const uint64_t value : nest.ledger)
+            hash = FxHashCombine(hash, value);
+
         for (const uint32_t counter : nest.counters)
             hash = FxHashCombine(hash, counter);
 
@@ -365,6 +324,8 @@ namespace bicameral::sim {
                 AddCellTotals(totals, table, CellAt(nest, slot, index), fraction, shiftBits);
             }
         }
+
+        AddLedgerTotals(totals, nest, table, finestLevel);
 
         return totals;
     }

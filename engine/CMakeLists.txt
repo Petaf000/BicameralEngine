@@ -54,6 +54,7 @@ target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 # 細かくする・粗くする・影の引き戻しの本体は shaders/common/multires.hlsli(HLSL と共通)。
 add_library(bicameral_multires STATIC
   src/sim/multires_nest.cpp
+  src/sim/multires_tree.cpp
 )
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)

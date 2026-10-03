@@ -1,32 +1,44 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0099 物理: 島の方式のコードを消す — 完了
+最終更新: 2026-10-04 / チケット: T-0018 多重解像度の疎な木: 索引・ブロックプール・世界の帳簿 — 完了
 
 ## 状態(3 行以内)
-- 島ごとに 1 グループで解く方式(T-0094)のコードを全部消した。残したのは使わない色を述語で飛ばす(u13)だけ。全部の場面で CPU とビット一致のまま。
-- 物理のルート署名は UAV 14 個・ルート定数 14 個(48 / 64 語)。6×6 の和は 1 グループ = 1 物に固定して整理した。
-- 次は M2 の T-0018(多重解像度の疎な木・ブロックプール・活性)。
+- 世界の木は要求(細かくする / 粗くする)だけで変わる。索引(ハッシュ表)・世界の枠と端数の枠の空きのスタック・世界の帳簿ができ、CPU と GPU(HW・WARP)で状態の全部が配列のままビット一致。
+- 24 段の往復で落ちた端数は帳簿へ入り「世界 + 帳簿」が一致。たくさんの要求(取り合い・枠不足・無効・索引の作り直し)の 140 刻みも毎刻み一致。
+- 次は T-0100(木の上の活性・一様なブロック。T-0018 から分けた)。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(92)。
-- release: gpu_physics_*(7 件。stack・mass_ratio・pile・**wall〔120 刻み。新設〕**・stack_warp・stack_alternative)・gpu_probe_physics / _warp / _compute・physics_*(CPU)・fixed・float_check が通る。
-  1 回の ctest が 170 s を超えないよう 2 件ずつ走らせる(stack_alternative は約 100 s、probe_physics_warp は約 157 s なので 1 件ずつ)。debug の gpu_physics_stack も通る。
-- 計測: `job.py run -Preset release -Exe gpu_physics_test -- --scene pile --profile`(SolveColor の µs/回 を見る)。
+- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(94)。
+- multires(debug 約 90 s)・gpu_multires(release 約 46 s・debug 約 217 s〔ctest の 300 s に近い〕・WARP 約 62 s)・gpu_probe_peek(+ warp)・window_replay_peek が通る。
+- 計測: `job.py run -Preset release -Exe gpu_multires_test`(「GPU 時間」の行。要求 0 件 0.053 ms・細かく 9 段 0.24 ms・粗く 1 段 0.29 ms)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **2026-10-03 夜の PC は全体に遅かった**: 山 1 刻み 4.23 ms(変更前の HEAD で測っても同じ。T-0095 の記録は 2.57 ms)。GPU のクロックか裏の負荷か、原因は未確認。比べるときは同じ日に前後を測る(perf.md)。
-- WARP で 6×6 がウェーブの経路を通っているか・AMD(wave64)は未確認(どちらの経路でも同じ値)。
-- (前から)6×6 が 1 区画に重なる理由は未確認・物理のパスに大きい局所の変数を足さない(T-0098)・段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。PIX・セーブ・AMD は未確認/未着手。
+- 粗くするのは 1 刻み 1 段、1 刻みに 1 つの親は 1 つの変更(取り合いは後回し。要求する側が次の刻みに出し直す)。要求の一覧は作る側が決定的な順に並べる約束(GPU で作る側はまだ無い)。
+- 影の鎖は観察の枠を手で決める(観察が増えたら観察の枠もプールにする)。粗くするブロックに影の子がぶら下がっていないかは呼ぶ側の責任。
+- 成分の溢れ(インラインの 8 種を超える)は数えるだけで帳簿に入らない(R-MULTI-4)。帳簿のレベルの外(−16〜63 の外)も数えるだけ。
+- (前から)段をまたぐ輸送なし(T-0019)・PIX・セーブ・AMD は未確認/未着手・WARP で 6×6 がウェーブの経路を通っているか未確認。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 片付けなので ADR なし。ADR-0002「計測(T-0094)」・08 §6「結果(T-0094)」に「消した(T-0099)」と追記。島のコードは git の履歴(6c8dee9 まで)。
-- 壁の場面は島のテストでしか走っていなかったので gpu_physics_wall(--ticks 120、約 56 s)を足した。
-- CPU の `PhysicsWorld::IslandLabels` もテストだけが使っていたので消した。
+- T-0018 を 2 つに分けた: T-0018 = 索引・プール・要求・帳簿 / T-0100 = 活性・一様なブロック(ユーザー決定、ROADMAP)。
+- ADR-0016: 枠の番号も決定的にする(要求の順の累積和で配る)。索引は状態に入れない。速さが気になったら非決定的を考える(ユーザー)。
+- 細部(Claude が決めた。17 §5「木の管理」): 1 刻みに 1 つの親は 1 つの変更・粗くするのは 1 段ずつ・端数の枠は控えめに取って 0 なら返す・観察の枠は世界の枠の後ろ・帳簿は (レベル, 物質) ごと。
 
 ## 次にやること
-NEXT.md の先頭(M2: T-0018 多重解像度の疎な木・ブロックプール・活性)。
+NEXT.md の先頭(M2: T-0100 木の上の活性・一様なブロック)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **多重解像度の木の管理(T-0018)**: 約束は shaders/common/multires_tree.hlsli(要求 MrRequest 40 B・途中の値 MrRequestState・索引の番地・帳簿)。
+  CPU は engine/src/sim/multires_tree.cpp(ProcessRequests = Resolve → Settle → Allocate → Apply → ReleaseAll → RebuildIndex)、
+  GPU は shaders/sim/multires_tree.hlsl の 6 段(.cso は multires_tree_<snake>)と multires_graph.hlsl(RefineNode は手で決めた影の鎖〔request = MR_NO_BLOCK〕と
+  要求の鎖の両方・CoarsenRequestNode)。呼ぶ順は gpu_multires.cpp の RecordProcessRequests。GPU の入力は u13(見出し 2 つ + レコード。割り当ての段が書く。
+  DispatchGraph の間だけ NON_PIXEL_SHADER_RESOURCE。レコード 0 件にしないため何もしないレコードを 1 件)。
+- 多重解像度のルート署名は UAV 14 個(u4・u5 は覗き窓の外のバッファ)・ルート定数 23 個で **61 / 64 語**。足す余地はほぼ無い(足すならバッファをまとめる)。
+- 数える欄は 16 個(MR_COUNTER_*)。旧 MR_COUNTER_FRACTION_BLOCKS は無い(端数の枠の空きの数 MR_COUNTER_FREE_FRACTIONS)。要求の数 MR_COUNTER_REQUESTS は
+  RecordRequests が CopyBufferRegion で書き、解放の段が 0 に戻す(一覧が空の時に送る)。RecordRequests の写しは 1 本のリストで 16 回まで(REQUEST_UPLOAD_SLOTS)。
+- **GPU の時間は、CPU の重い処理の後に測ると暖機しても 4〜6 倍に出る**(GPU が長く空いてクロックが下がる)。gpu_multires_test は計測をたくさんの要求の前に置いた。
+- MultiresNest は MakeMultiresNest(MultiresCapacity) で作る(世界の枠・観察の枠・端数・索引〔2 の冪〕・帳簿の列〔1 + 物質の数〕・根のレベル)。根は PlaceRootBlock(空きから取る)。
+  覗き窓は世界の枠 0(観察の枠だけ)。GPU のバッファは 0 の大きさを作れないので最低 16 B。
+- device_bash から `job.py` を `timeout` で切っても、ランナーのジョブは `--timeout` まで走り続ける。長いテストは `--timeout 290` で投げて、runner/logs/<job>.result.json を待つ。
 - **6×6 のウェーブの解(T-0095)**: shaders/sim/physics_solve6_wave.hlsli。レーン t < 21 が下三角 (r, c)(t = r(r+1)/2 + c)、21〜26 が右辺。CPU の PxSolveSymmetric6 と
   要素ごとの式を揃えるため、共有の部品(PxDiagonalShift・PxCholeskyRadicand・PxCholeskyRoot・PxRhsTopBit。physics_math.hlsli)を両方が使う。片方を変えたらもう片方も。
   使う条件は physics_bindings.hlsli の CanSolveInWave(ウェーブ 32 以上かつ SOLVE_GROUP_THREADS〔64〕以下)。中は WaveReadLaneAt だけで、ウェーブの全部のレーンが一様に呼ぶこと
@@ -61,7 +73,7 @@ NEXT.md の先頭(M2: T-0018 多重解像度の疎な木・ブロックプール
   NuGet の版の一覧には `1.65535.20-preview` もあるが、1.0.21 より古いプレビュー(版の数字が大きいだけ)。
 - **多重解像度(T-0017)**: 式は shaders/common/multires.hlsli(Mr 接頭辞。C++ は bicameral::multires)。CPU リファレンスは engine/src/sim/multires_nest(ライブラリ bicameral_multires)、
   GPU は sim/gpu_multires(Work Graph shaders/sim/multires_graph.hlsl の RefineNode・CoarsenNode・PullBackNode・RemoveShadowNode と Compute の multires_step.hlsl)。
-  1 段の操作は CPU と GPU で同じ順(セルを全部書いてから見出し)。端数の枠はスレッド 0 だけが数える欄から取る(鎖が 1 本なので順が決まる)。
+  1 段の操作は CPU と GPU で同じ順(セルを全部書いてから見出し)。端数の枠は要求ごとに割り当ての段が配る(T-0018。スレッド 0 だけが見出しと返す枠を書く)。
   次のレベルが前のレベルの書き込みを読むので、ノードの RW バッファは globallycoherent・出力の前に `Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC)`。
   場面は tests/multires_test_scene.h(根 = 枠 0、本物の鎖 = 枠 1〜9、影の鎖 = 枠 10〜18、点のセル (3,4,5) は 600 K の木箱)。
 - **HLSL で `point` は予約語**(multires.hlsli でも踏んだ。`coordinate` にした)。

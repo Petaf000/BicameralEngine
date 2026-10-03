@@ -15,6 +15,13 @@ namespace bicameral::sim {
         constexpr uint32_t PEEK_GROUP_THREADS = 64;  // multires_peek.hlsl の numthreads
         constexpr int32_t PEEK_POINT_LEVEL = static_cast<int32_t>(PEEK_LEVEL_COUNT);
 
+        // 覗き窓の入れ子は観察の枠だけ(世界の木を持たない。写しと影の鎖。17 §5)
+        constexpr MultiresCapacity PEEK_CAPACITY = {.worldBlocks = 0,
+                                                    .observerBlocks = PEEK_BLOCK_CAPACITY,
+                                                    .fractions = 1,
+                                                    .indexEntries = 1,
+                                                    .ledgerColumns = 1};
+
         // 点を含む世界の 8³ のブロックの原点(1 軸ぶん。レベル 0 のセル)
         uint32_t BlockOrigin(uint32_t cell) {
             return cell & ~(MR_BLOCK_EDGE - 1);
@@ -73,7 +80,7 @@ namespace bicameral::sim {
     // --- GPU ---
 
     std::expected<ProbePeek, std::string> ProbePeek::Create(ID3D12Device5* device, const BakedReactionTable& table) {
-        auto nest = GpuMultires::Create(device, table, PEEK_BLOCK_CAPACITY, 1);
+        auto nest = GpuMultires::Create(device, table, PEEK_CAPACITY);
         if (!nest)
             return std::unexpected(nest.error());
 
@@ -99,7 +106,7 @@ namespace bicameral::sim {
     void ProbePeek::RecordAfterExtract(ID3D12GraphicsCommandList10* list, const ProbeExtractContext& context) {
         // --- 最初だけ: 空の入れ子(全部の枠が空き)を写す ---
         if (!m_uploaded) {
-            if (!m_nest.RecordUpload(list, MakeMultiresNest(PEEK_BLOCK_CAPACITY, 1)))
+            if (!m_nest.RecordUpload(list, MakeMultiresNest(PEEK_CAPACITY)))
                 return;
 
             m_uploaded = true;
@@ -120,8 +127,8 @@ namespace bicameral::sim {
         }
 
         if (plan.refine) {
-            m_nest.RecordRefine(list, context.debugRing, PEEK_MIRROR_SLOT, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT,
-                                MR_BLOCK_SHADOW, PeekPointOfCell(plan.cell));
+            m_nest.RecordRefineShadow(list, context.debugRing, PEEK_MIRROR_SLOT, PEEK_FIRST_SHADOW_SLOT,
+                                      PEEK_LEVEL_COUNT, PeekPointOfCell(plan.cell));
         }
 
         if (plan.step)
@@ -140,7 +147,7 @@ namespace bicameral::sim {
     // --- CPU リファレンス ---
 
     ProbePeekReference::ProbePeekReference(const BakedReactionTable& table)
-        : m_table(&table), m_viewSpecies(ProbeViewSpecies(table)), m_nest(MakeMultiresNest(PEEK_BLOCK_CAPACITY, 1)) {}
+        : m_table(&table), m_viewSpecies(ProbeViewSpecies(table)), m_nest(MakeMultiresNest(PEEK_CAPACITY)) {}
 
     void ProbePeekReference::Advance(std::span<const RxCell> world, uint64_t tick) {
         FX_ASSERT(world.size() == PROBE_CELL_COUNT);
@@ -163,8 +170,8 @@ namespace bicameral::sim {
         }
 
         if (plan.refine) {
-            RefineChain(m_nest, PEEK_MIRROR_SLOT, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT, MR_BLOCK_SHADOW,
-                        PeekPointOfCell(plan.cell));
+            RefineShadowChain(m_nest, PEEK_MIRROR_SLOT, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT,
+                              PeekPointOfCell(plan.cell));
         }
 
         if (plan.step)

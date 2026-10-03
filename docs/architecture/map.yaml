@@ -232,22 +232,27 @@ views:
       - { id: multireshlsl, group: shared, label: "multires.hlsli<br/>細かくする・粗くする(端数)・影の引き戻し",
           code: "shaders/common/multires.hlsli::MrCoarsenCell", ticket: T-0017, doc: docs/decisions/ADR-0015-multiresolution-tree-and-fraction.md,
           note: "比 2 のブロック(8³、子は親の 1/8)。単位はレベルごとに 1/8。粗くした余りは 64bit の端数(21 段の往復までビット一致)" }
-      - { id: multiresnest, group: simlib, label: "MultiresNest<br/>入れ子の細分の CPU リファレンス",
-          code: "engine/src/sim/multires_nest.cpp::RefineChain", ticket: T-0017, doc: docs/design/17-multiresolution.md,
-          note: "ライブラリ bicameral_multires(GPU を知らない)。保存量の合計は 256bit で最も細かい単位 × 2^-64" }
-      - { id: gpumultires, group: simlib, label: "GpuMultires<br/>細分は Work Graph の再帰、刻みは Compute",
-          code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordRefine", ticket: T-0017, doc: docs/design/17-multiresolution.md,
-          note: "shaders/sim/multires_graph.hlsl(1 レベル = 1 グループ、次のレベルを自分へ)・multires_step.hlsl" }
+      - { id: multiresnest, group: simlib, label: "MultiresNest<br/>多重解像度の木の CPU リファレンス(影・刻み・合計)",
+          code: "engine/src/sim/multires_nest.cpp::RefineShadowChain", ticket: T-0017, doc: docs/design/17-multiresolution.md,
+          note: "ライブラリ bicameral_multires(GPU を知らない)。保存量の合計は 256bit で最も細かい単位 × 2^-64(世界 + 帳簿)" }
+      - { id: multirestree, group: simlib, label: "ProcessRequests<br/>木の管理: 索引・空きのスタック・要求・帳簿",
+          code: "engine/src/sim/multires_tree.cpp::ProcessRequests", ticket: T-0018, doc: docs/decisions/ADR-0016-deterministic-pool-slots.md,
+          note: "解決 → 確定 → 割り当て → 適用 → 解放 → 索引の作り直し。枠の番号は要求の順の累積和で決まる(CPU と GPU で配列のまま一致)" }
+      - { id: multirestreehlsl, group: shared, label: "multires_tree.hlsli<br/>要求・索引の番地・帳簿の約束",
+          code: "shaders/common/multires_tree.hlsli::MrIndexHome", ticket: T-0018, doc: docs/design/17-multiresolution.md }
+      - { id: gpumultires, group: simlib, label: "GpuMultires<br/>木の管理は Compute の段 + Work Graph、刻みは Compute",
+          code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordProcessRequests", ticket: T-0018, doc: docs/design/17-multiresolution.md,
+          note: "shaders/sim/multires_tree.hlsl(段)・multires_graph.hlsl(細かくする鎖の再帰・粗くする要求・影)・multires_step.hlsl" }
       - { id: probepeek, group: simlib, label: "ProbePeek<br/>覗き窓: 世界の写し → 影の鎖 k = 1〜9 → 抽出",
           code: "engine/src/sim/probe_peek.cpp::ProbePeek::RecordAfterExtract", ticket: T-0096, doc: docs/design/17-multiresolution.md,
           note: "ProbeSim の抽出の後のフック。世界のバッファは読むだけ(D-403)。shaders/sim/multires_peek.hlsl(MirrorWorld・ExtractShadow)" }
       - { id: peektest, group: tests, label: "gpu_probe_peek_test<br/>覗く・移る・やめるで CPU とビット一致・ハッシュ列が変わらない",
           code: "tests/gpu_probe_peek_test.cpp::RunPeek", ticket: T-0096 }
-      - { id: multirestest, group: tests, label: "multires_test<br/>k = 0〜9 の往復・21 段・影で世界が変わらない",
+      - { id: multirestest, group: tests, label: "multires_test<br/>k = 0〜9 の往復・24 段と帳簿・影・たくさんの要求",
           code: "tests/multires_test.cpp::RunRealChain", ticket: T-0017 }
-      - { id: gpumultirestest, group: tests, label: "gpu_multires_test<br/>本物の鎖と影の鎖を毎刻み GPU と CPU で比べる",
-          code: "tests/gpu_multires_test.cpp::RunScenario", ticket: T-0017,
-          note: "WARP は Work Graph を作る所で落ちる(ADR-0013 と同じ)ので外した" }
+      - { id: gpumultirestest, group: tests, label: "gpu_multires_test<br/>本物の鎖・影の鎖・たくさんの要求を毎刻み GPU と CPU で比べる",
+          code: "tests/gpu_multires_test.cpp::RunStress", ticket: T-0018,
+          note: "状態の全部が配列のまま一致・GPU の索引で本物のブロックが全部引ける。WARP でも通る(T-0097 の WARP)" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -325,8 +330,13 @@ views:
       - [gpureactiontest, reactionhlsl, "GPU(.cso)と CPU で同じ関数"]
       - [multireshlsl, reactionhlsl, "葉のセルを RxEvaluateCell で刻む"]
       - [multiresnest, multireshlsl]
+      - [multirestree, multirestreehlsl]
+      - [multirestreehlsl, multireshlsl]
+      - [gpumultires, multirestreehlsl, "GPU の段と CPU で同じ関数"]
       - [gpumultires, multireshlsl, "GPU(.cso)と CPU で同じ関数"]
       - [multirestest, multiresnest]
+      - [multirestest, multirestree]
+      - [gpumultirestest, multirestree, "毎刻み比べる"]
       - [gpumultirestest, gpumultires]
       - [gpumultirestest, multiresnest, "毎刻み比べる"]
       - [probepeek, gpumultires, "同じルート署名に u4・u5 を足して"]
