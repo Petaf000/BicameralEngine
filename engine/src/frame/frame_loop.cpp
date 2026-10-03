@@ -15,6 +15,7 @@
 #include "frame/frame_loop.h"
 
 #include <chrono>
+#include <cmath>
 #include <expected>
 #include <thread>
 
@@ -32,6 +33,7 @@
 #include "render/probe_view.h"
 #include "render/screenshot.h"
 #include "save/replay_session.h"
+#include "sim/physics_world.h"
 #include "sim/probe_peek.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
@@ -58,6 +60,10 @@ namespace bicameral::frame {
         constexpr uint64_t TRACE_KEY_TICKS = 60;        // 次の刻みから何刻み
         constexpr uint32_t TRACE_KEY_RADIUS_CELLS = 8;  // 最後につついたセルの周り ±何セル
         constexpr uint64_t AUTO_TRACE_FRAME = 30;       // --auto-trace が T を押すフレーム
+        constexpr uint64_t AUTO_PUSH_FRAME = 60;        // --auto-push が押すフレーム(T-0098)
+
+        // 押す力積(T-0098): 5000 N·s(積み木の 500 kg の箱に 10 m/s)。押された箱はその上の段の摩擦に抗って抜ける
+        constexpr uint32_t PUSH_IMPULSE_MILLINEWTON_SECONDS = 5'000'000;
 
         double Milliseconds(Clock::duration duration) {
             return chr::duration<double, std::milli>(duration).count();
@@ -171,6 +177,12 @@ namespace bicameral::frame {
                 // --peek: 起動時から覗く
                 if (options.peek)
                     m_viewController.Peek(options.peekCell, options.peekDepth);
+
+                // --check-physics: 窓と同じ場面の CPU の物理
+                if (options.physics && options.checkPhysics) {
+                    m_physicsCheck = std::make_unique<sim::PhysicsWorld>(sim::MakeProbeStackScene(),
+                                                                         physics::PxDefaultParameters());
+                }
             }
 
             [[nodiscard]] bool CreateFrameSlots();
@@ -188,11 +200,13 @@ namespace bicameral::frame {
             void CollectSimSubmissions();
             void ReportSimReadback(const sim::ProbeFrameReadback& readback);
             void ReportEvents(const sim::ProbeFrameReadback& readback);
+            void CheckPhysics(const sim::ProbeTickHash& tickHash);
             void CollectFrameSlot(uint32_t slotIndex);
 
             // --- コマンド(クリックと再生)---
             void QueueClicks();
             void ApplyPeekChange();
+            void QueuePushes();
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             [[nodiscard]] bool FinishReplay();
@@ -257,6 +271,11 @@ namespace bicameral::frame {
             std::array<uint64_t, sim::PROBE_EXTRACTION_COUNT> m_lastRenderReading{};
             sim::ProbeTickHash m_latestHash;  // 最後に読み戻した刻みの状態のハッシュ
 
+            // --- CPU の物理との突き合わせ(--check-physics。T-0098)---
+            std::unique_ptr<sim::PhysicsWorld> m_physicsCheck;
+            std::vector<sim::ProbeCommand> m_physicsCheckPushes;  // 投げた押すコマンド(刻みの順)
+            uint64_t m_physicsCheckMismatches = 0;
+
             // --- コマンド ---
             std::vector<sim::ProbeCommand> m_pendingCommands;
             std::vector<PendingClick> m_clicks;
@@ -282,12 +301,39 @@ namespace bicameral::frame {
             return window;
         }
 
+        // デバイスの検証の設定。物理のシェーダーは GPU-based validation の計装が最初の実行で数分かかる(debug。gpu_physics_test と同じ)ので、
+        // 物理を入れるときは切る(debug layer は残す。T-0098)
+        gpu::DeviceOptions LoopDeviceOptions(const FrameLoopOptions& options) {
+            gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
+            if (options.physics && deviceOptions.gpuBasedValidation) {
+                deviceOptions.gpuBasedValidation = false;
+                Log(Channel::Gpu, Level::Info, "物理を入れるので GPU-based validation を切る(--no-physics なら有効)");
+            }
+
+            return deviceOptions;
+        }
+
+        // 仮の世界(物理の場面は積み木。T-0098。ProbeSim は作るときに読むだけ)
+        std::expected<sim::ProbeSim, std::string> CreateSimulation(ID3D12Device5* device,
+                                                                   const FrameLoopOptions& options,
+                                                                   const sim::BakedReactionTable& reactionTable) {
+            const sim::PhysicsScene physicsScene = sim::MakeProbeStackScene();
+
+            return sim::ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, reactionTable,
+                                         {.busyIterations = options.simLoad,
+                                          .busyPieces = options.simSplit,
+                                          .trace = options.trace,
+                                          .traceCapacity = TRACE_CAPACITY_PER_FRAME,
+                                          .physicsScene = options.physics ? &physicsScene : nullptr,
+                                          .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase}});
+        }
+
         std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
             auto window = CreateWindowForLoop();
             if (!window)
                 return std::unexpected(window.error());
 
-            gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
+            gpu::DeviceOptions deviceOptions = LoopDeviceOptions(options);
             deviceOptions.presentMonitor = MonitorFromWindow((*window)->Handle(), MONITOR_DEFAULTTONEAREST);
             auto device = gpu::Device::Create(options.adapter, deviceOptions);
             if (!device)
@@ -314,12 +360,7 @@ namespace bicameral::frame {
             if (!reactionTable)
                 return std::unexpected(reactionTable.error());
 
-            auto simulation = sim::ProbeSim::Create(native, D3D12_COMMAND_LIST_TYPE_COMPUTE, *reactionTable,
-                                                    {.busyIterations = options.simLoad,
-                                                     .busyPieces = options.simSplit,
-                                                     .trace = options.trace,
-                                                     .traceCapacity = TRACE_CAPACITY_PER_FRAME});
-
+            auto simulation = CreateSimulation(native, options, *reactionTable);
             if (!simulation)
                 return std::unexpected(simulation.error());
 
@@ -471,15 +512,54 @@ namespace bicameral::frame {
                 m_latestHash = readback.hashes.back();
 
             for (const sim::ProbeTickHash& tickHash : readback.hashes) {
+                // 再生ファイルにはセルと物を合わせた要約を入れる(T-0098)
                 if (!m_options.recordPath.empty())
-                    m_recorder.AddHash(tickHash.tick, tickHash.hash);
+                    m_recorder.AddHash(tickHash.tick, tickHash.WorldHash());
 
                 if (!m_replay.empty())
-                    m_replay.front().CheckHash(tickHash.tick, tickHash.hash);
+                    m_replay.front().CheckHash(tickHash.tick, tickHash.WorldHash());
+
+                if (m_physicsCheck)
+                    CheckPhysics(tickHash);
             }
 
             ReportEvents(readback);
             CollectTrace(readback);
+        }
+
+        // 押すコマンド(probe_sim.hlsli の PROBE_COMMAND_TYPE_PUSH の payload)を CPU の物理へ
+        void PushFromCommand(sim::PhysicsWorld& world, const sim::ProbeCommand& command) {
+            const auto word64 = [&](size_t index) {
+                return static_cast<int64_t>(uint64_t{command.payload[index]} |
+                                            (uint64_t{command.payload[index + 1]} << 32));
+            };
+            const auto direction = [&](size_t index) {
+                return static_cast<int64_t>(static_cast<int32_t>(command.payload[index]));
+            };
+
+            (void)world.Push(physics::PxMakeVec3(word64(0), word64(2), word64(4)),
+                             physics::PxMakeVec3(direction(6), direction(7), direction(8)), command.payload[9]);
+        }
+
+        // CPU の物理を S(tickHash.tick) まで進めて、物のハッシュを比べる(押すコマンドは同じ刻みの Step の前に)
+        void FrameLoop::CheckPhysics(const sim::ProbeTickHash& tickHash) {
+            while (m_physicsCheck->Tick() < tickHash.tick) {
+                const uint64_t tick = m_physicsCheck->Tick();
+                for (const sim::ProbeCommand& command : m_physicsCheckPushes) {
+                    if (command.targetTick == tick)
+                        PushFromCommand(*m_physicsCheck, command);
+                }
+
+                m_physicsCheck->Step();
+            }
+
+            if (m_physicsCheck->StateHash() == tickHash.bodyHash)
+                return;
+
+            if (m_physicsCheckMismatches++ == 0) {
+                Log(Channel::Sim, Level::Error, "物理の突き合わせ: S({}) の物が CPU と違う(GPU {:016x} CPU {:016x})",
+                    tickHash.tick, tickHash.bodyHash, m_physicsCheck->StateHash());
+            }
         }
 
         // つつきが適用されたことをログへ(クリックから CPU に戻るまでの時間つき)。イベントは (刻み, 種類, 場所) の順に届く
@@ -490,6 +570,15 @@ namespace bicameral::frame {
                 if (event.type == sim::PROBE_EVENT_COMMAND_LATE) {
                     Log(Channel::Sim, Level::Warning, "種類 {} のコマンドが刻み {} の適用に遅れて届いた(捨てた)",
                         event.place, event.tick);
+                    continue;
+                }
+
+                if (event.type == sim::PROBE_EVENT_BODY_PUSHED) {
+                    if (event.place == sim::PROBE_PUSH_NOTHING)
+                        Log(Channel::Sim, Level::Info, "押す: 刻み {} で光線の先に動く物が無かった", event.tick);
+                    else
+                        Log(Channel::Sim, Level::Info, "押す: 刻み {} で物 {} を押した", event.tick, event.place);
+
                     continue;
                 }
 
@@ -568,11 +657,45 @@ namespace bicameral::frame {
                 cells.push_back(render::CellOnSlice(2, sim::PROBE_VIEW_Z, u, v));
             }
 
+            QueuePushes();
+
             const auto now = Clock::now();
             for (const render::CellCoordinate& cell : cells) {
                 m_pendingCommands.push_back(sim::MakePokeCommand(0, m_nextSequence++, cell.x, cell.y, cell.z));
                 m_clicks.push_back({.cell = cell, .time = now});
                 m_lastPokedCell = cell;
+            }
+        }
+
+        // Shift + 左クリックの光線(と --auto-push)を押すコマンドに(T-0098)。光線は格子の座標なので物理の座標へ直す
+        // (probe_sim.hlsli の対応: y を裏返し、1 セル = 0.5 m)。どの物に当たるかは GPU が決める(CPU は物の場所を知らない。D-107)
+        void FrameLoop::QueuePushes() {
+            std::vector<render::CameraRay> rays = m_viewController.TakePushRays();
+            if (m_options.autoPush && m_frameNumber == AUTO_PUSH_FRAME) {
+                // 積み木の 5 段目(物理の座標 x = 10 m・y = 5.5 m・z = 16.25 m。格子の (20, 53, 32.5))を −z の側から
+                rays.push_back({.origin = {20.0f, 53.0f, 0.0f}, .direction = {0.0f, 0.0f, 1.0f}});
+            }
+
+            for (const render::CameraRay& ray : rays) {
+                const float length = std::sqrt((ray.direction.x * ray.direction.x) +
+                                               (ray.direction.y * ray.direction.y) +
+                                               (ray.direction.z * ray.direction.z));
+                if (length <= 0.0f)
+                    continue;
+
+                constexpr auto UNITS_PER_CELL = static_cast<double>(1u << sim::PROBE_PHYSICS_CELL_SHIFT);
+                constexpr auto DIRECTION_ONE = static_cast<double>(1u << 30);
+                const std::array<int64_t, 3> origin = {
+                    std::llround(ray.origin.x * UNITS_PER_CELL),
+                    std::llround((static_cast<double>(sim::PROBE_GRID_SIZE) - ray.origin.y) * UNITS_PER_CELL),
+                    std::llround(ray.origin.z * UNITS_PER_CELL)};
+                const std::array<int32_t, 3> direction = {
+                    static_cast<int32_t>(std::lround(ray.direction.x / length * DIRECTION_ONE)),
+                    static_cast<int32_t>(std::lround(-ray.direction.y / length * DIRECTION_ONE)),
+                    static_cast<int32_t>(std::lround(ray.direction.z / length * DIRECTION_ONE))};
+
+                m_pendingCommands.push_back(
+                    sim::MakePushCommand(0, m_nextSequence++, origin, direction, PUSH_IMPULSE_MILLINEWTON_SECONDS));
             }
         }
 
@@ -603,6 +726,12 @@ namespace bicameral::frame {
             if (!m_options.recordPath.empty())
                 m_recorder.AddCommands(commands);
 
+            if (m_physicsCheck) {
+                rng::copy_if(commands, std::back_inserter(m_physicsCheckPushes), [](const sim::ProbeCommand& command) {
+                    return command.type == sim::PROBE_COMMAND_TYPE_PUSH;
+                });
+            }
+
             return commands;
         }
 
@@ -615,6 +744,9 @@ namespace bicameral::frame {
 
             for (sim::ProbeCommand& command : commands) {
                 command.targetTick = applyTick;
+                if (command.type != sim::PROBE_COMMAND_TYPE_POKE)
+                    continue;  // クリックから戻るまでの時間を測るのはつつきだけ
+
                 const render::CellCoordinate cell{
                     .x = command.payload[0], .y = command.payload[1], .z = command.payload[2]};
                 const auto click = rng::find_if(m_clicks, [&](const PendingClick& pending) {

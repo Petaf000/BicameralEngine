@@ -216,16 +216,15 @@ FX_FN int64_t PxPairMargin(PxBody a, PxBody b, PxParameters p, int64_t rate) {
 
 // 組の見出し(点は無し): 硬さの下限 = 組の重い方の M/h² × startPenalty、
 // 上限 = 組の軽い方(動く物)の M/h² × 2^penaltyRatioShift(その物の 6×6 の条件数がこれで抑えられる)
-FX_FN PxManifold PxBeginManifold(uint32_t a, uint32_t b, PxBody bodyA, PxBody bodyB, PxVec3 normal, int64_t frictionQ16,
-                                 PxParameters p, int64_t rate) {
-    PxManifold manifold = PX_ZERO(PxManifold);
-    manifold.bodyA = a;
-    manifold.bodyB = b;
-    manifold.normal = normal;
-    manifold.frictionQ16 = frictionQ16;
+struct PxPenaltyRange {
+    int64_t low;
+    int64_t high;
+};
 
+FX_FN PxPenaltyRange PxPairPenaltyRange(PxBody bodyA, PxBody bodyB, PxParameters p, int64_t rate) {
     const int64_t pairMassOverH2 = PxMassOverStepSquared(PxMaxU64(bodyA.massMilligrams, bodyB.massMilligrams), rate);
-    manifold.minPenalty = PxMax(p.penaltyMin, FxMulShiftS64(pairMassOverH2, p.startPenaltyQ16, 16));
+    PxPenaltyRange range;
+    range.low = PxMax(p.penaltyMin, FxMulShiftS64(pairMassOverH2, p.startPenaltyQ16, 16));
 
     uint64_t lighterMass = PxMinU64(bodyA.massMilligrams, bodyB.massMilligrams);
     if (!PxIsDynamic(bodyA))
@@ -234,7 +233,22 @@ FX_FN PxManifold PxBeginManifold(uint32_t a, uint32_t b, PxBody bodyA, PxBody bo
         lighterMass = bodyA.massMilligrams;
 
     const int64_t ratioCap = PxMassOverStepSquared(lighterMass, rate) << p.penaltyRatioShift;
-    manifold.maxPenalty = PxMax(manifold.minPenalty, PxMin(p.penaltyMax, ratioCap));
+    range.high = PxMax(range.low, PxMin(p.penaltyMax, ratioCap));
+
+    return range;
+}
+
+FX_FN PxManifold PxBeginManifold(uint32_t a, uint32_t b, PxBody bodyA, PxBody bodyB, PxVec3 normal, int64_t frictionQ16,
+                                 PxParameters p, int64_t rate) {
+    PxManifold manifold = PX_ZERO(PxManifold);
+    manifold.bodyA = a;
+    manifold.bodyB = b;
+    manifold.normal = normal;
+    manifold.frictionQ16 = frictionQ16;
+
+    const PxPenaltyRange range = PxPairPenaltyRange(bodyA, bodyB, p, rate);
+    manifold.minPenalty = range.low;
+    manifold.maxPenalty = range.high;
 
     return manifold;
 }

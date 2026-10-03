@@ -390,7 +390,9 @@ namespace {
 
     const std::array<uint32_t, 7> MIXED_PATTERN = {1, 2, 5, 4, 7, 11, 3};  // 刻みの途中で切れる
     const std::array<uint32_t, 4> MIXED_BUSY_PATTERN = {5, 7, 2, 13};
-    const ProbeSimOptions BUSY_OPTIONS{.busyIterations = TEST_BUSY_ITERATIONS, .busyPieces = TEST_BUSY_PIECES};
+    ProbeSimOptions BusyOptions() {
+        return {.busyIterations = TEST_BUSY_ITERATIONS, .busyPieces = TEST_BUSY_PIECES};
+    }
 
     Plan MixedPlan() {
         return {.name = "ばらばら",
@@ -401,7 +403,7 @@ namespace {
 
     Plan MixedBusyPlan() {
         return {.name = "重さを分けてばらばら",
-                .options = BUSY_OPTIONS,
+                .options = BusyOptions(),
                 .unitsPerFrame = RepeatPattern(
                     MIXED_BUSY_PATTERN,
                     static_cast<uint32_t>(TOTAL_TICKS * (PROBE_FIXED_UNITS_PER_TICK + TEST_BUSY_PIECES)))};

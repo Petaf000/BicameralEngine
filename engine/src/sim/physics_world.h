@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/physics_push.hlsli"
 #include "common/physics_step.hlsli"
 #include "sim/physics_scene.h"
 
@@ -51,6 +52,11 @@ namespace bicameral::sim {
         PhysicsWorld(const PhysicsScene& scene, const physics::PxParameters& parameters);
 
         void Step();
+
+        // 光線(原点 2^-20 m・向き Q1.30 の長さ 1)で押す(T-0098。common/physics_push.hlsli)。刻みと刻みの間に呼ぶ。
+        // 押した物の番号(動く物に当たらなければ UINT32_MAX)
+        uint32_t Push(const physics::PxVec3& origin, const physics::PxVec3& direction,
+                      uint32_t impulseMillinewtonSeconds);
 
         [[nodiscard]] const std::vector<PhysicsBody>& Bodies() const { return m_bodies; }
         [[nodiscard]] const PhysicsStepStats& Stats() const { return m_stats; }

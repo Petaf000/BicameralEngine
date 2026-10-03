@@ -114,38 +114,9 @@ uint32_t PointIndex(uint32_t manifoldIndex, uint32_t k) {
     return manifoldIndex * PX_MANIFOLD_POINTS + k;
 }
 
-PxManifold LoadManifold(uint32_t index) {
-    const ManifoldHeader header = g_manifolds[index];
-    PxManifold manifold = (PxManifold)0;
-    manifold.bodyA = header.bodyA;
-    manifold.bodyB = header.bodyB;
-    manifold.count = header.count;
-    manifold.normal = header.normal;
-    manifold.frictionQ16 = header.frictionQ16;
-    manifold.beta = header.beta;
-    manifold.minPenalty = header.minPenalty;
-    manifold.maxPenalty = header.maxPenalty;
-    for (uint32_t k = 0; k < header.count; ++k)
-        manifold.points[k] = g_points[PointIndex(index, k)];
-
-    return manifold;
-}
-
-void StoreManifold(uint32_t index, PxManifold manifold) {
-    ManifoldHeader header;
-    header.bodyA = manifold.bodyA;
-    header.bodyB = manifold.bodyB;
-    header.count = manifold.count;
-    header.unused = 0;
-    header.normal = manifold.normal;
-    header.frictionQ16 = manifold.frictionQ16;
-    header.beta = manifold.beta;
-    header.minPenalty = manifold.minPenalty;
-    header.maxPenalty = manifold.maxPenalty;
-    g_manifolds[index] = header;
-    for (uint32_t k = 0; k < manifold.count; ++k)
-        g_points[PointIndex(index, k)] = manifold.points[k];
-}
+// 組(PxManifold、3 KB)を丸ごと局所に持つ関数は置かない: 組を局所に持つ Compute のパスは、別のキューの仕事(窓の描画)が割り込むと
+// 結果が時々変わった(T-0098。局所のメモリの扱いが原因と見ているが未確認)。組はバッファの上で点ごとに読み書きする
+// (BuildSlot・Recollide・PrepareManifolds。CPU は PxBuildManifold・PxRecollideManifold・PxWarmStartManifold で同じ手順)
 
 // 前の小刻みの組を、点を 1 つずつバッファから読む形で渡す(PxBuildManifold の Previous。組を局所に写さない)
 struct GpuPreviousManifold {
@@ -244,7 +215,61 @@ PxContactGeometry CollideGeometry(uint32_t slot, uint32_t other) {
     return PxCollideBoxes(PxShapeOf(bodyA), PxShapeOf(bodyB), margin);
 }
 
-// 接触の幾何から組を作り、前の小刻みの同じ組から引き継ぐ。統計・β の質量・物の一覧も
+// PxMatchByProximity と同じ手順を、今の組の点をバッファの上で読み書きして(組を局所に持たない。BuildSlot)。
+// 片方を変えたらもう片方も変える(gpu_physics_test・gpu_probe_physics_test が CPU とのビット一致で確かめる)
+void MatchByProximityInBuffer(uint32_t index, uint32_t count, PxQuat rotationA, GpuPreviousManifold old,
+                              int64_t proximity) {
+    uint32_t usedOld = 0;
+    uint32_t matchedNew = 0;
+    for (uint32_t k = 0; k < count; ++k) {
+        const uint32_t feature = g_points[PointIndex(index, k)].feature;
+        for (uint32_t j = 0; j < old.Count(); ++j) {
+            if (old.Point(j).feature != feature)
+                continue;
+
+            usedOld |= 1u << j;
+            matchedNew |= 1u << k;
+        }
+    }
+
+    const PxMat3 rotation = PxRotationMatrix(rotationA);
+    for (uint32_t k = 0; k < count; ++k) {
+        if ((matchedNew & (1u << k)) != 0)
+            continue;
+
+        PxContactPoint current = g_points[PointIndex(index, k)];
+        const PxVec3 here = PxMulMat(rotation, current.localA, PX_UNIT_SHIFT);
+        int32_t nearestIndex = -1;
+        int64_t nearest = proximity;
+        for (uint32_t j = 0; j < old.Count(); ++j) {
+            const PxContactPoint oldPoint = old.Point(j);
+            const PxVec3 there = PxMulMat(rotation, oldPoint.localA, PX_UNIT_SHIFT);
+            const int64_t distance = (int64_t)PxLength(PxSub(here, there));
+            const bool similar = PxDot(oldPoint.normal, current.normal, PX_UNIT_SHIFT) >= PX_NORMAL_SIMILARITY;
+            if ((usedOld & (1u << j)) != 0 || distance >= nearest || !similar)
+                continue;
+
+            nearest = distance;
+            nearestIndex = (int32_t)j;
+        }
+
+        if (nearestIndex < 0)
+            continue;
+
+        usedOld |= 1u << (uint32_t)nearestIndex;
+        const PxContactPoint nearestPoint = old.Point((uint32_t)nearestIndex);
+        for (uint32_t r = 0; r < 3; ++r) {
+            current.rows[r].lambda = nearestPoint.rows[r].lambda;
+            current.rows[r].penalty = nearestPoint.rows[r].penalty;
+        }
+
+        g_points[PointIndex(index, k)] = current;
+    }
+}
+
+// 接触の幾何から組を作り、前の小刻みの同じ組から引き継ぐ。統計・β の質量・物の一覧も。
+// PxBuildManifold と同じ手順を、組(3 KB)を局所に持たずにバッファの上で(T-0098: 組を局所に持つ Compute のパスは、
+// 別のキューの仕事(描画)が割り込むと結果が時々変わった)
 void BuildSlot(uint32_t slot, uint32_t other, PxContactGeometry geometry) {
     const uint32_t owner = slot / g_slotsPerBody;
     const uint32_t index = ManifoldIndex(g_currentHalf, slot);
@@ -258,11 +283,33 @@ void BuildSlot(uint32_t slot, uint32_t other, PxContactGeometry geometry) {
     const PxBody bodyA = g_bodies[a];
     const PxBody bodyB = g_bodies[b];
     const PxParameters p = g_parameters[0];
-    const PxManifold manifold = PxBuildManifold(a, b, bodyA, bodyB, geometry, (int64_t)g_frictionQ16,
-                                                FindPrevious(owner, a, b), p, PxStepRate(p));
-    StoreManifold(index, manifold);
+    const PxPenaltyRange range = PxPairPenaltyRange(bodyA, bodyB, p, PxStepRate(p));
+
+    ManifoldHeader header;
+    header.bodyA = a;
+    header.bodyB = b;
+    header.count = geometry.count;
+    header.unused = 0;
+    header.normal = geometry.normal;
+    header.frictionQ16 = (int64_t)g_frictionQ16;
+    header.beta = 0;
+    header.minPenalty = range.low;
+    header.maxPenalty = range.high;
+    g_manifolds[index] = header;
+
+    const PxBox shapeA = PxShapeOf(bodyA);
+    const PxBox shapeB = PxShapeOf(bodyB);
+    const GpuPreviousManifold previous = FindPrevious(owner, a, b);
+    for (uint32_t k = 0; k < geometry.count; ++k) {
+        const PxContactPoint contactPoint = PxMakeContactPoint(geometry.points[k], geometry.normal, shapeA, shapeB,
+                                                               range.low);
+        g_points[PointIndex(index, k)] = PxInheritFromPrevious(contactPoint, previous);
+    }
+
+    MatchByProximityInBuffer(index, geometry.count, bodyA.rotation, previous, p.proximityMatch);
+
     g_stats.InterlockedMax64(STATS_MAX_PENETRATION, (uint64_t)PxMaxPenetration(geometry));
-    g_stats.InterlockedAdd(STATS_CONTACT_COUNT, manifold.count);
+    g_stats.InterlockedAdd(STATS_CONTACT_COUNT, geometry.count);
     InterlockedMax(g_touchMass[a], PxTouchMass(bodyB));
     InterlockedMax(g_touchMass[b], PxTouchMass(bodyA));
     if (PxIsDynamic(bodyA))

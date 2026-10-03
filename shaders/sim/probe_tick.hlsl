@@ -8,7 +8,16 @@
 //   → (刻みの境界の状態があれば)Extract が全部のセルの温度と見る物質の量・活性の印を抽出の 3 組のどれかに写す(描画が読む。T-0015)
 //   → イベントとハッシュの表を CPU へ読み戻す(CPU は待たずに数フレーム後に読む。06 §3)
 // 入口ごとに別の .cso にする(shaders/CMakeLists.txt)。整数だけ(D-205)。バッファの結び方は sim/probe_bindings.hlsli。
+#include "common/physics_push.hlsli"
 #include "sim/probe_bindings.hlsli"
+
+// 物理の物(T-0098。sim/gpu_physics の物のバッファ。物の数はフレームの入力の見出し。0 なら結んであるのは仮の置き場で、読まない)。
+// 伝導の Work Graph は使わないので、共有の結び方(probe_bindings.hlsli)ではなくここに置く
+RWStructuredBuffer<PxBody> bodies : register(u13);
+
+uint32_t BodyCount() {
+    return HeaderWord(PROBE_HEADER_BODY_COUNT);
+}
 
 // キューの position 番目(通し番号。2^32 で一周)のコマンドの場所
 uint32_t QueueRecordAddress(uint32_t position) {
@@ -28,8 +37,49 @@ void EmitTickEvent(uint32_t type, uint32_t place) {
 // 1 つのコマンドを適用する(適用の単位の 1 スレッドが番号順に呼ぶ)。commandHead = 語 [0..3]、address = キューの中の場所
 // つつき: そのセルを約 2700 K 温めるエネルギーを足し(湧き出しとして S(t + 1) の欄に数える)、熱のキャッシュを作り直し、
 // そのブロックを刻み t の活性の一覧へ(伝導の Work Graph が、そのブロックと隣を起こす)
+// 押す(T-0098): 光線が最初に入る物を番号の順に探し、動く物なら力積を加える(common/physics_push.hlsli。CPU は PhysicsWorld::Push)
+void ApplyPush(uint32_t address) {
+    const uint4 originLow = commandQueue.Load4(address + 16);  // payload [0..3]
+    const uint4 rest = commandQueue.Load4(address + 32);       // payload [4..7]
+    const uint2 tail = commandQueue.Load2(address + 48);       // payload [8, 9]
+    const PxVec3 origin = PxMakeVec3((int64_t)((uint64_t)originLow.x | ((uint64_t)originLow.y << 32)),
+                                     (int64_t)((uint64_t)originLow.z | ((uint64_t)originLow.w << 32)),
+                                     (int64_t)((uint64_t)rest.x | ((uint64_t)rest.y << 32)));
+    const PxVec3 direction = PxMakeVec3((int32_t)rest.z, (int32_t)rest.w, (int32_t)tail.x);
+    const uint32_t count = BodyCount();
+
+    int64_t best = PX_RAY_MISS;
+    uint32_t hit = PROBE_PUSH_NOTHING;
+    for (uint32_t index = 0; index < count; ++index) {
+        const int64_t distance = PxRayEntryDistance(bodies[index], origin, direction);
+        if (PxRayHitCloser(distance, best)) {
+            best = distance;
+            hit = index;
+        }
+    }
+
+    if (hit != PROBE_PUSH_NOTHING && !PxIsDynamic(bodies[hit]))
+        hit = PROBE_PUSH_NOTHING;  // 動かない物が光線を止めた
+
+    if (hit != PROBE_PUSH_NOTHING) {
+        const PxBody body = bodies[hit];
+        const PxVec3 offset = PxSub(PxRayPoint(origin, direction, best), body.position);
+        const int64_t rate = (int64_t)HeaderWord(PROBE_HEADER_PHYSICS_RATE);
+        bodies[hit] = PxApplyImpulse(body, offset, PxPushImpulse(direction, tail.y), rate);
+    }
+
+    if (count > 0)
+        EmitTickEvent(PROBE_EVENT_BODY_PUSHED, hit);
+}
+
 void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
-    if ((commandHead.w & 0xFFFFu) != PROBE_COMMAND_TYPE_POKE)
+    const uint32_t type = commandHead.w & 0xFFFFu;
+    if (type == PROBE_COMMAND_TYPE_PUSH) {
+        ApplyPush(address);
+        return;
+    }
+
+    if (type != PROBE_COMMAND_TYPE_POKE)
         return;
 
     const uint3 cell = commandQueue.Load3(address + 16);
@@ -229,6 +279,21 @@ void SortEventKeys(uint32_t thread) {
     }
 }
 
+// 物の状態のハッシュ(PhysicsWorld::StateHash と同じ式。物理の刻みは世界の刻みと同じ番号なので、S(t + 1) の物は t + 1 刻み進んだ物)。
+// 順番に依存する混ぜ方なので 1 スレッドが番号の順に。物理なしなら欄は 0 のまま(BeginTick が消してある)
+void StoreBodyHash() {
+    const uint32_t count = BodyCount();
+    if (count == 0)
+        return;
+
+    const uint64_t stateTick = CurrentTick() + 1;
+    uint64_t hash = FxMix64(stateTick);
+    for (uint32_t index = 0; index < count; ++index)
+        hash = PxHashBody(hash, bodies[index]);
+
+    hashes.Store2(HashEntryAddress(stateTick) + PROBE_HASH_OFFSET_BODIES, uint2((uint32_t)hash, (uint32_t)(hash >> 32)));
+}
+
 // 刻みの一時置き場のイベントをキー(種類・場所)で並べ、刻みの順にリングへ写して一時置き場を空にする(06 §3・§5)。
 // 1 グループだけ起動する。リングの空きは代表の 1 スレッドがまとめて取る(刻みのイベントがリングの中で連続する)
 [numthreads(PROBE_TICK_EVENT_CAPACITY, 1, 1)] void FlushEvents(uint3 groupThreadId : SV_GroupThreadID) {
@@ -248,6 +313,7 @@ void SortEventKeys(uint32_t thread) {
             events.InterlockedAdd(PROBE_EVENT_HEADER_TICK_DROPPED * 4, requested - stored, previous);
 
         tickEvents.Store(0, 0);
+        StoreBodyHash();
     }
 
     GroupMemoryBarrierWithGroupSync();
@@ -274,10 +340,38 @@ void StoreExtraction(uint32_t index, uint32_t value) {
         extraction2[index] = value;
 }
 
+// 物の欄(T-0098。並びは probe_sim.hlsli): 物 1 つの姿勢と形と印
+void StoreBodyView(uint32_t index) {
+    const PxBody body = bodies[index];
+    const uint32_t base = PROBE_EXTRACTION_BODY_OFFSET + PROBE_BODY_VIEW_HEADER_WORDS + index * PROBE_BODY_VIEW_WORDS;
+    const int64_t position[3] = {body.position.x, body.position.y, body.position.z};
+    const int64_t rotation[4] = {body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w};
+    const int64_t halfExtent[3] = {body.halfExtent.x, body.halfExtent.y, body.halfExtent.z};
+    [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+        StoreExtraction(base + axis * 2, (uint32_t)position[axis]);
+        StoreExtraction(base + axis * 2 + 1, (uint32_t)((uint64_t)position[axis] >> 32));
+        StoreExtraction(base + 10 + axis, (uint32_t)halfExtent[axis]);
+    }
+
+    [unroll] for (uint32_t component = 0; component < 4; ++component)
+        StoreExtraction(base + 6 + component, (uint32_t)rotation[component]);
+
+    const uint32_t flags = (PxIsDynamic(body) ? PROBE_BODY_VIEW_DYNAMIC : 0) | (body.active != 0 ? PROBE_BODY_VIEW_ACTIVE : 0);
+    StoreExtraction(base + 13, flags);
+}
+
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void Extract(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t cellIndex = dispatchThreadId.x;
     if (cellIndex >= PROBE_CELL_COUNT)
         return;
+
+    // 物の欄(物理なしなら数 0)
+    const uint32_t viewBodies = min(BodyCount(), PROBE_MAX_VIEW_BODIES);
+    if (cellIndex == 0)
+        StoreExtraction(PROBE_EXTRACTION_BODY_OFFSET, viewBodies);
+
+    if (cellIndex < viewBodies)
+        StoreBodyView(cellIndex);
 
     // 覗きの欄は段の数 0(覗いていれば sim/probe_peek が後ろで書き直す。T-0096)
     if (cellIndex == 0)

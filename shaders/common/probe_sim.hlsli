@@ -25,8 +25,10 @@
 //       WakeBlocks(スレッド起動)が一覧のブロックと 6 面の隣を予定し(1 刻みに 1 回だけ)、ConductBlock(1 ブロック = 1 グループ)が
 //       温度の差で熱を受け渡してから、その場で反応を評価し(06 §2 の段 3・4 を 1 つに。反応はセルの中で閉じるので結果は同じ)、
 //       世代 ((t + 1) & 1) に S(t + 1) を書く。値が変わったか、まだ進める規則があるブロックは刻み t + 1 の一覧へ
-//   [2 .. 2 + k) 重さの試験(--sim-load を k 個に分けたもの。世界の結果に入らない。k = 0 なら無し)
-//   [最後] 検査と出力(06 §2 段 9): S(t + 1) の要約(ProbeStateHash)とエネルギーの合計を、ハッシュの表の (t + 1) % PROBE_HASH_CAPACITY に書き、
+//   [2] 物理(入れたときだけ。T-0098): 物の 1 刻み(sim/gpu_physics。広域と接触は Work Graph、色ごとの解は Compute)。
+//       押すコマンドは [0] の適用が速度に入れる(common/physics_push.hlsli)
+//   [.. + k) 重さの試験(--sim-load を k 個に分けたもの。世界の結果に入らない。k = 0 なら無し)
+//   [最後] 検査と出力(06 §2 段 9): S(t + 1) の要約(ProbeStateHash)とエネルギーの合計・物の状態のハッシュを、ハッシュの表の (t + 1) % PROBE_HASH_CAPACITY に書き、
 //       刻みの一時置き場のイベントをキー(種類・場所)で並べてからリングへ(T-0086)
 // コマンドは各フレームのリストの先頭で GPU のキューに足す(Enqueue。単位ではない)。キューの中で自分の刻みの適用の単位まで待つので、
 // フレームの切れ目と刻みの関係に結果が依存しない。
@@ -80,6 +82,9 @@ PROBE_CONST uint32_t PROBE_EXTRACTION_COUNT = 3;
 //   → 覗きの欄(T-0096。sim/probe_peek が抽出の後に書く。覗いていなければ段の数 0 だけを Extract が書く):
 //      見出し [0] 段の数 [1..3] 空き、段 i ごとに [4 + 4i] レベル [5 + 4i .. 7 + 4i] 原点 x・y・z(そのレベルのセルの単位、int32)
 //      → 段 i のセル(ブロックの中の番号順に 512 個)の 4 語(世界のセルと同じ意味)
+//   → 物の欄(T-0098。物理を入れたときだけ中身がある): 見出し [0] 物の数(PROBE_MAX_VIEW_BODIES まで)[1..15] 空き、
+//      物 i ごとに 16 語: [0..5] 重心の x・y・z(int64 の下位・上位。2^-20 m、物理の座標)[6..9] 向き (x, y, z, w)(Q1.30)
+//      [10..12] 半分の辺(2^-20 m)[13] 印(PROBE_BODY_VIEW_DYNAMIC・PROBE_BODY_VIEW_ACTIVE)[14, 15] 空き
 PROBE_CONST uint32_t PROBE_EXTRACTION_CELL_WORDS = 4;
 PROBE_CONST uint32_t PROBE_VIEW_SPECIES_COUNT = 3;
 PROBE_CONST uint32_t PROBE_EXTRACTION_BLOCK_OFFSET = PROBE_CELL_COUNT * PROBE_EXTRACTION_CELL_WORDS;
@@ -93,13 +98,26 @@ PROBE_CONST uint32_t PROBE_EXTRACTION_PEEK_CELL_OFFSET = PROBE_EXTRACTION_PEEK_O
 PROBE_CONST uint32_t PROBE_EXTRACTION_PEEK_WORDS = PROBE_PEEK_HEADER_WORDS +
                                                    (PROBE_PEEK_MAX_LEVELS * PROBE_PEEK_BLOCK_CELLS *
                                                     PROBE_EXTRACTION_CELL_WORDS);
-PROBE_CONST uint32_t PROBE_EXTRACTION_WORDS = PROBE_EXTRACTION_PEEK_OFFSET + PROBE_EXTRACTION_PEEK_WORDS;
+PROBE_CONST uint32_t PROBE_EXTRACTION_BODY_OFFSET = PROBE_EXTRACTION_PEEK_OFFSET + PROBE_EXTRACTION_PEEK_WORDS;
+PROBE_CONST uint32_t PROBE_BODY_VIEW_HEADER_WORDS = 16;
+PROBE_CONST uint32_t PROBE_BODY_VIEW_WORDS = 16;
+PROBE_CONST uint32_t PROBE_MAX_VIEW_BODIES = 64;
+PROBE_CONST uint32_t PROBE_BODY_VIEW_DYNAMIC = 1;  // 物の欄の印: 動く物(地面・壁でない)
+PROBE_CONST uint32_t PROBE_BODY_VIEW_ACTIVE = 2;   // 世界にいる
+PROBE_CONST uint32_t PROBE_EXTRACTION_WORDS = PROBE_EXTRACTION_BODY_OFFSET + PROBE_BODY_VIEW_HEADER_WORDS +
+                                              PROBE_MAX_VIEW_BODIES * PROBE_BODY_VIEW_WORDS;
+
+// --- 物理(T-0098。sim/gpu_physics の整数の AVBD を刻みの単位に入れる)---
+// 物理の座標(2^-20 m、y が上)と格子の座標(セルの番号の空間。描画は y が画面の下向き)の対応:
+//   格子 x = 物理 x / 0.5 m、格子 y = PROBE_GRID_SIZE − 物理 y / 0.5 m、格子 z = 物理 z / 0.5 m。
+//   物理の地面の上の面(y = 0)が格子の底(y = PROBE_GRID_SIZE)。物と世界のセルのやり取り(燃える・熱)は無い(M6)
+PROBE_CONST uint32_t PROBE_PHYSICS_CELL_SHIFT = 19;  // 1 セル = 0.5 m = 2^19 × 2^-20 m
 
 // --- 1 刻みの単位(06 §4・ADR-0011)---
 PROBE_CONST uint32_t PROBE_UNIT_APPLY = 0;
-PROBE_CONST uint32_t PROBE_UNIT_CONDUCT = 1;          // Work Graph(DispatchGraph を 1 回)
-PROBE_CONST uint32_t PROBE_UNIT_BUSY_FIRST = 2;       // 重さの試験の単位はここから k 個。その次がハッシュ
-PROBE_CONST uint32_t PROBE_FIXED_UNITS_PER_TICK = 3;  // 適用・伝導・ハッシュ
+PROBE_CONST uint32_t PROBE_UNIT_CONDUCT = 1;  // Work Graph(DispatchGraph を 1 回)
+PROBE_CONST uint32_t PROBE_UNIT_PHYSICS = 2;  // 物理の 1 刻み(物理を入れたときだけ。T-0098)。重さの試験はその後ろ
+PROBE_CONST uint32_t PROBE_FIXED_UNITS_PER_TICK = 3;  // 適用・伝導・ハッシュ(物理・重さの試験の単位は別に数える)
 
 // --- ルート定数(b0。単位を記録するときに埋め込む)---
 // [0] 刻みの下位 [1] 刻みの上位 [2] 引数(抽出: 書き先の組)
@@ -111,6 +129,9 @@ PROBE_CONST uint32_t PROBE_MAX_COMMANDS = 256;  // 1 フレームに GPU のキ�
 PROBE_CONST uint32_t PROBE_COMMAND_WORDS = 16;
 PROBE_CONST uint32_t PROBE_COMMAND_BYTES = PROBE_COMMAND_WORDS * 4;
 PROBE_CONST uint32_t PROBE_COMMAND_TYPE_POKE = 1;  // payload: [0] x [1] y [2] z
+// 押す(T-0098。common/physics_push.hlsli): payload: [0..5] 光線の原点 x・y・z(int64 の下位・上位。2^-20 m、物理の座標)
+//   [6..8] 光線の向き(長さ 1 の Q1.30、int32)[9] 力積の大きさ(mN·s)。物理を入れていなければ何もしない
+PROBE_CONST uint32_t PROBE_COMMAND_TYPE_PUSH = 2;
 
 // --- GPU のコマンドキュー(06 §3。T-0086)---
 // 環状のバッファ。見出し 16 バイト([0] 末尾 = 足した総数 [1] 先頭 = 取り出した総数。どちらも 2^32 で一周する)+ コマンド × 容量。
@@ -138,7 +159,9 @@ PROBE_CONST uint32_t PROBE_HEADER_ENQUEUE_BASE = 2;
 PROBE_CONST uint32_t PROBE_HEADER_CONDUCT_ENTRYPOINT = 3;
 PROBE_CONST uint32_t PROBE_HEADER_ACTIVE_LIST_ADDRESS = 4;  // 組 p のアドレスの下位・上位は [4 + 2p]・[5 + 2p]
 PROBE_CONST uint32_t PROBE_HEADER_VIEW_SPECIES = 8;         // [8..10]
-PROBE_CONST uint32_t PROBE_HEADER_WORDS = 12;
+PROBE_CONST uint32_t PROBE_HEADER_BODY_COUNT = 11;          // 物理の物の数(0 = 物理なし。T-0098)
+PROBE_CONST uint32_t PROBE_HEADER_PHYSICS_RATE = 12;        // 物理の 1 秒あたりの小刻みの数(押す力積の計算に使う)
+PROBE_CONST uint32_t PROBE_HEADER_WORDS = 13;
 
 // --- 活性のブロックの一覧(06 §2 段 2。T-0005)---
 // 刻みの偶奇で 2 組。組 (t & 1) は、刻み t の伝導の Work Graph へ GPU の入力として渡す「変わった(つつかれた)ブロック」の一覧。
@@ -206,10 +229,14 @@ PROBE_CONST uint32_t PROBE_EVENT_HEADER_TICK_DROPPED = 1;
 PROBE_CONST uint32_t PROBE_EVENT_POKE_APPLIED = 1;  // 場所: x | y << 8 | z << 16(ProbePokePlace)
 // 刻みを過ぎてから届いたコマンド(CPU の約束違反。捨てた)。場所: コマンドの種類
 PROBE_CONST uint32_t PROBE_EVENT_COMMAND_LATE = 2;
+// 押すコマンドを適用した(T-0098)。場所: 押した物の番号(何も押さなかった = PROBE_PUSH_NOTHING)
+PROBE_CONST uint32_t PROBE_EVENT_BODY_PUSHED = 3;
+PROBE_CONST uint32_t PROBE_PUSH_NOTHING = 0xFFFFFFFFu;
 
 // --- 刻みごとの状態のハッシュ(GPU → CPU。06 §2 段 9)---
 // 表: PROBE_HASH_CAPACITY 個 × 32 バイト([0,1] 刻み [2,3] ハッシュ [4,5] エネルギーの合計(mJ、mod 2^64)
-//   [6] その状態を作った刻みで予定したブロックの数 [7] 0)+ 32 バイト([8,9] その状態を作った刻みのつつきが足したエネルギー(mJ)[10..15] 0)。
+//   [6] その状態を作った刻みで予定したブロックの数 [7] 0)+ 32 バイト([8,9] その状態を作った刻みのつつきが足したエネルギー(mJ)
+//   [10,11] 物の状態のハッシュ(物理を入れたとき。PhysicsWorld::StateHash と同じ式。無ければ 0。T-0098)[12..15] 0)。
 // 欄は刻み t の適用の単位が用意し(刻み・0)、適用がつつきのエネルギーを、伝導が予定の数を、刻みの最後の単位がハッシュとエネルギーの合計を足す。
 // 保存則の検査(D-206): エネルギーの合計(t + 1) = エネルギーの合計(t) + つつきのエネルギー(t + 1 の欄)。
 // S(t) のハッシュは (t % PROBE_HASH_CAPACITY) 番目。フレームの終わりに表を丸ごと読み戻し、CPU はそのフレームで終えた刻みの分だけ読む。
@@ -220,6 +247,7 @@ PROBE_CONST uint32_t PROBE_HASH_OFFSET_HASH = 8;  // 欄の中のバイトの位
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_ENERGY = 16;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_SCHEDULED = 24;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_SOURCE = 32;
+PROBE_CONST uint32_t PROBE_HASH_OFFSET_BODIES = 40;
 PROBE_CONST uint32_t PROBE_HASH_BYTES = PROBE_HASH_CAPACITY * PROBE_HASH_ENTRY_BYTES;
 
 // --- 規則(CPU と GPU で同じ)---

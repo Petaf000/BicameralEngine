@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <utility>
 
 #include "core/log.h"
 
@@ -86,11 +87,14 @@ namespace bicameral::render {
         else if (event.button == PointerButton::Middle)
             m_panning = down;
         else if (down) {
-            // 左クリック: 画素の中心を通る光線が断面に当たったセルをつつく
+            // 左クリック: 画素の中心を通る光線が断面に当たったセルをつつく。Shift なら光線のまま物を押す(当たる物は GPU が決める)
             const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(event.x) + 0.5f,
                                                   static_cast<float>(event.y) + 0.5f, width, height);
+            if (event.shift)
+                m_pushRays.push_back(ray);
+
             const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
-            if (cell)
+            if (cell && !event.shift)
                 pokes.push_back(*cell);
         }
 
@@ -220,6 +224,10 @@ namespace bicameral::render {
         m_traceRequested = false;
 
         return requested;
+    }
+
+    std::vector<CameraRay> DebugViewController::TakePushRays() {
+        return std::exchange(m_pushRays, {});
     }
 
     // --- 描画へ ---

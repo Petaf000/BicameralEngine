@@ -90,13 +90,21 @@
     if (!IsLiveSlot(slot))
         return;
 
+    // PxWarmStartManifold → PxLinearizeManifold と同じ手順を、組(3 KB)を局所に写さずに点ごとに(Recollide と同じ理由。T-0098)
     const PxParameters p = g_parameters[0];
     const uint32_t index = ManifoldIndex(g_currentHalf, slot);
-    PxManifold manifold = LoadManifold(index);
-    manifold.beta = PxBetaOf(PxMaxU64(g_touchMass[manifold.bodyA], g_touchMass[manifold.bodyB]), p);
-    manifold = PxWarmStartManifold(manifold, p.gammaQ16);
-    manifold = PxLinearizeManifold(manifold, g_bodies[manifold.bodyA], g_bodies[manifold.bodyB]);
-    StoreManifold(index, manifold);
+    const ManifoldHeader header = g_manifolds[index];
+    const PxBody bodyA = g_bodies[header.bodyA];
+    const PxBody bodyB = g_bodies[header.bodyB];
+    g_manifolds[index].beta = PxBetaOf(PxMaxU64(g_touchMass[header.bodyA], g_touchMass[header.bodyB]), p);
+    for (uint32_t k = 0; k < header.count; ++k) {
+        PxContactPoint contactPoint = g_points[PointIndex(index, k)];
+        for (uint32_t r = 0; r < 3; ++r)
+            contactPoint.rows[r] = PxDecayPenalty(contactPoint.rows[r], p.gammaQ16, header.minPenalty,
+                                                  header.maxPenalty);
+
+        g_points[PointIndex(index, k)] = PxLinearizePoint(contactPoint, bodyA, bodyB);
+    }
 }
 
 // --- 彩色の 1 回(Jones-Plassmann): 前の回の色だけを読み、次の組に書く --------------------------------------
@@ -177,15 +185,39 @@ bool IsColorUsedByNeighbor(uint32_t i, uint32_t inBase, int32_t color) {
     if (!IsLiveSlot(slot))
         return;
 
+    // PxRecollideManifold と同じ手順を、組(3 KB)を局所に写さずにバッファの上で(T-0098: 局所に写す形は、
+    // 別のキューの仕事が割り込むと結果が変わった。gpu_probe_physics_test の雑音つきの実行)
     const uint32_t index = ManifoldIndex(g_currentHalf, slot);
-    PxManifold manifold = LoadManifold(index);
-    const uint32_t before = manifold.count;
-    manifold = PxRecollideManifold(manifold, g_bodies[manifold.bodyA], g_bodies[manifold.bodyB], g_parameters[0]);
-    if (manifold.count == before)
+    const ManifoldHeader header = g_manifolds[index];
+    const PxBody bodyA = g_bodies[header.bodyA];
+    const PxBody bodyB = g_bodies[header.bodyB];
+    const PxParameters p = g_parameters[0];
+    if (PxStepMotion(bodyA) + PxStepMotion(bodyB) <= p.recollideMinMotion)
         return;
 
-    StoreManifold(index, manifold);
-    g_stats.InterlockedAdd(STATS_CONTACT_COUNT, manifold.count - before);
+    const PxBox shapeA = PxEstimatedShape(bodyA);
+    const PxBox shapeB = PxEstimatedShape(bodyB);
+    const PxContactGeometry geometry = PxCollideBoxes(shapeA, shapeB, p.collisionMargin);
+    uint32_t count = header.count;
+    for (uint32_t k = 0; k < geometry.count && count < PX_MANIFOLD_POINTS; ++k) {
+        bool known = false;
+        for (uint32_t j = 0; j < count; ++j)
+            known = known || g_points[PointIndex(index, j)].feature == geometry.points[k].feature;
+
+        if (known)
+            continue;
+
+        const PxContactPoint contactPoint = PxMakeContactPoint(geometry.points[k], geometry.normal, shapeA, shapeB,
+                                                               header.minPenalty);
+        g_points[PointIndex(index, count)] = PxLinearizePoint(contactPoint, bodyA, bodyB);
+        count += 1;
+    }
+
+    if (count == header.count)
+        return;
+
+    g_manifolds[index].count = count;
+    g_stats.InterlockedAdd(STATS_CONTACT_COUNT, count - header.count);
 }
 
     // --- 1 つの色の物を解く(1 グループ = 1 物。同じ色の物は拘束を共有しないので並列に解ける。T-0092)--------------------------------------------------------

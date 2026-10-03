@@ -303,6 +303,28 @@ namespace bicameral::sim {
             body = PxFinishBody(body);
     }
 
+    // 光線が最初に入る物を番号の順に探し、動く物なら入った点に力積を加える(common/physics_push.hlsli。GPU の押すコマンドと同じ手順)
+    uint32_t PhysicsWorld::Push(const PxVec3& origin, const PxVec3& direction, uint32_t impulseMillinewtonSeconds) {
+        int64_t best = PX_RAY_MISS;
+        uint32_t hit = UINT32_MAX;
+        for (uint32_t index = 0; index < m_bodies.size(); ++index) {
+            const int64_t distance = PxRayEntryDistance(m_bodies[index], origin, direction);
+            if (PxRayHitCloser(distance, best)) {
+                best = distance;
+                hit = index;
+            }
+        }
+
+        if (hit == UINT32_MAX || !PxIsDynamic(m_bodies[hit]))
+            return UINT32_MAX;
+
+        PhysicsBody& body = m_bodies[hit];
+        const PxVec3 offset = PxSub(PxRayPoint(origin, direction, best), body.position);
+        body = PxApplyImpulse(body, offset, PxPushImpulse(direction, impulseMillinewtonSeconds), m_rate);
+
+        return hit;
+    }
+
     uint64_t PhysicsWorld::StateHash() const {
         uint64_t hash = FxMix64(m_tick);
         for (const PhysicsBody& body : m_bodies)

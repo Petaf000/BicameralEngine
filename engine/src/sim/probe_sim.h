@@ -42,6 +42,8 @@
 #include "gpu/work_graph.h"
 #include "gpu/work_graph_stats.h"
 #include "sim/command.h"
+#include "sim/gpu_physics.h"
+#include "sim/physics_scene.h"
 #include "sim/reaction_table.h"
 
 namespace bicameral::sim {
@@ -54,6 +56,12 @@ namespace bicameral::sim {
     // セル (x, y, z) を約 2700 K 温める熱を足す(PROBE_POKE_HEATING_MILLIKELVIN。明示的な湧き出し)
     [[nodiscard]] ProbeCommand MakePokeCommand(uint64_t targetTick, uint32_t sequence, uint32_t x, uint32_t y,
                                                uint32_t z);
+
+    // 光線で物を押す(T-0098。PROBE_COMMAND_TYPE_PUSH)。origin は物理の座標(2^-20 m)、direction は長さ 1 の Q1.30、力積は mN·s
+    [[nodiscard]] ProbeCommand MakePushCommand(uint64_t targetTick, uint32_t sequence,
+                                               const std::array<int64_t, 3>& origin,
+                                               const std::array<int32_t, 3>& direction,
+                                               uint32_t impulseMillinewtonSeconds);
 
     // --- GPU から戻ってくるもの ---
 
@@ -76,6 +84,10 @@ namespace bicameral::sim {
         uint64_t sourceEnergy =
             0;  // S(tick) を作った刻み(tick − 1)のつつきが足したエネルギー(mJ)。energy(t) = energy(t − 1) + これ
         uint32_t scheduledBlocks = 0;  // S(tick) を作った刻み(tick − 1)で伝導と反応を計算したブロックの数
+        uint64_t bodyHash = 0;         // 物の状態のハッシュ(PhysicsWorld::StateHash。物理なしなら 0。T-0098)
+
+        // 世界全体の要約(セル + 物。再生ファイルに入れて突き合わせる値)
+        [[nodiscard]] uint64_t WorldHash() const { return hash ^ bodyHash; }
     };
 
     struct ProbeFrameReadback {
@@ -121,6 +133,10 @@ namespace bicameral::sim {
         // GPU のキューへ足す新しいコマンド(最大 PROBE_MAX_COMMANDS。約束はファイルの先頭)
         std::span<const ProbeCommand> commands;
 
+        // 物理の物と統計を、フレームの終わりに読み戻す(テスト用。T-0098)。読み戻しの置き場は 1 つなので、そのリストが終わってから
+        // 次に読み戻すリストを投げるまでに Physics()->ReadBodies() / ReadStats() を呼ぶ。このフレームに単位があること
+        bool readPhysics = false;
+
         // 抽出の後に同じリストへ記録するもの(覗き窓 sim/probe_peek。T-0096)。抽出するフレームだけ呼ぶ。
         // 約束: 世界のバッファは読むだけ、抽出は覗きの欄だけに書く(世界の結果を変えない。D-403)
         std::function<void(ID3D12GraphicsCommandList10* list, const ProbeExtractContext& context)> afterExtract;
@@ -138,6 +154,13 @@ namespace bicameral::sim {
         // トレースの容量(1 フレームに書ける記録の上限)。実行中に SetTraceFilter で範囲を変えるなら上限ぶんを渡す(T-0088)。
         // 0 なら trace.capacity だけ
         uint32_t traceCapacity = 0;
+
+        // 物理の場面(T-0098。nullptr なら物理の単位は無い)。物の 1 刻みを伝導の後ろの単位に入れ、押すコマンドを受け付ける。
+        // 呼んだ後は持たなくてよい
+        const PhysicsScene* physicsScene = nullptr;
+        GpuPhysicsOptions
+            physicsOptions;  // 物理の解き方(既定は T-0092 で測った形: 広域と接触は Work Graph・色ごとの解は Compute)
+        physics::PxParameters physicsParameters = physics::PxDefaultParameters();
     };
 
     // --- GPU で走らせる ---
@@ -155,7 +178,10 @@ namespace bicameral::sim {
                                                                          const ProbeSimOptions& options = {});
 
         // 1 刻みの単位の数(適用・伝導・ハッシュ + 重さの単位)
-        [[nodiscard]] uint32_t UnitsPerTick() const { return PROBE_FIXED_UNITS_PER_TICK + BusyUnitCount(); }
+        [[nodiscard]] uint32_t UnitsPerTick() const {
+            return PROBE_FIXED_UNITS_PER_TICK + PhysicsUnitCount() + BusyUnitCount();
+        }
+
         [[nodiscard]] uint32_t HashUnit() const { return UnitsPerTick() - 1; }
 
         // 次に記録する単位が (tick, unit) のとき、まだ記録していない最初の適用の単位の刻み。
@@ -192,6 +218,9 @@ namespace bicameral::sim {
         // 伝導の Work Graph の裏のメモリ(ドライバが決める。docs/perf.md に残す)
         [[nodiscard]] uint64_t ConductBackingMemoryBytes() const { return m_conductGraph->BackingMemoryBytes(); }
 
+        // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
+        [[nodiscard]] const GpuPhysics* Physics() const { return m_physics.get(); }
+
     private:
         struct FrameSlot {
             // --- 記録 ---
@@ -221,6 +250,7 @@ namespace bicameral::sim {
               m_graphTrace(std::move(graphTrace)) {}
 
         [[nodiscard]] uint32_t BusyUnitCount() const { return m_options.busyIterations > 0 ? m_options.busyPieces : 0; }
+        [[nodiscard]] uint32_t PhysicsUnitCount() const { return m_physics ? 1 : 0; }
 
         // --- 作る ---
         [[nodiscard]] bool CreatePipelines(ID3D12Device5* device);
@@ -229,6 +259,7 @@ namespace bicameral::sim {
         [[nodiscard]] bool CreateWorld(ID3D12Device5* device, const BakedReactionTable& table);
         void RecordInitialization(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] bool CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
+        [[nodiscard]] std::expected<void, std::string> CreatePhysics(ID3D12Device5* device);
 
         // --- 入力とコマンド ---
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
@@ -242,6 +273,8 @@ namespace bicameral::sim {
         void BindRootViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit);
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
+        void RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
+        void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
         void RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const;
@@ -277,6 +310,11 @@ namespace bicameral::sim {
         std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(O2・CO2・炭)
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
         ComPtr<ID3D12Resource> m_busySink;
+
+        // --- 物理(T-0098)---
+        std::unique_ptr<GpuPhysics> m_physics;
+        int64_t m_physicsRate = 0;  // 物理の 1 秒あたりの小刻みの数(押す力積の計算。フレームの入力の見出しで渡す)
+        bool m_physicsInitialized = false;
 
         // --- 刻みの道具(表・キュー・イベント・活性)---
         ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)

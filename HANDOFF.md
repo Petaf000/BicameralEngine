@@ -1,33 +1,41 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-03 / チケット: T-0096 窓で 1 点を入れ子に細かくして覗く — 完了
+最終更新: 2026-10-03 / チケット: T-0098 物理を仮の世界に組み込む — 完了(M1 の完了の姿がそろった)
 
 ## 状態(3 行以内)
-- 窓で P を押すと断面のカーソルの下のセルを覗き、影の鎖(k = 1〜9)を毎フレーム刻んで引き戻して描く。PageDown/PageUp で潜る・浮かぶ。
-- 覗いても世界のハッシュ列は覗かない時と一致(window_replay_peek)。影の鎖と抽出は GPU(HW・WARP)と CPU がビット一致(gpu_probe_peek)。
-- M1 の完了の姿の「角ばった箱が崩れる」が窓に無いので、T-0098(物理を仮の世界に組み込む)を M1 に足した(2026-10-03 ユーザー決定)。
+- 窓の仮の世界に積み木(箱 10 個)が立ち、Shift + 左クリックの光線で押して崩せる。物の 1 刻みは刻みの単位 [2]、物のハッシュは刻みの最後に GPU で。
+- gpu_probe_physics_test で CPU と毎刻みビット一致(HW・WARP・広域 Compute)。窓の記録 → 再生(重さ・分割・覗き)も一致。
+- 物理の GPU のパスで組(3 KB)を局所に持つと、別のキューが割り込んだ時だけ結果がずれた(窓で固まる原因でもあった)→ バッファの上で読み書きする形に直した。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release 警告なし)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(89)。
-- `job.py test -Filter "gpu_probe_peek"`(debug: HW 53 s・WARP 33 s)。`job.py test -Filter window`(window_replay_peek は覗いて k = 9 まで潜りながら再生、119 / 119 一致)。
-- release で physics 以外の全部のテストが通る(物理は今回触っていないので、時間の都合で途中まで: physics_* 9 件は通った)。
-- `job.py run -Preset release -- --frames 150 --auto-click --peek 28,32,32 --peek-depth 3 --view slice --camera 0,0,80 --screenshot x.bmp` で覗いた断面の絵(bin/ に出る)。
+- `job.py build`(debug / release)・`python3 tools/archmap/archmap.py --check` OK(92)。
+- `job.py test -Preset release -Filter gpu_probe_physics`(3 件。2 回目の実行は別のキューに雑音を流し、単位を 1 つずつ投げる)。`-Filter window_replay`(3 件)。
+- `job.py run -Preset release -- --frames 600 --auto-click --auto-push --check-physics`: 窓で押し、CPU の物理と物のハッシュを毎刻み突き合わせる(ずれたら Error)。
+- 窓の操作: Shift + 左クリック = 押す(5000 N·s)。`--no-physics` で物理なし、`--physics-compute` で広域を Compute(比べる用)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- この場面では影の中に細部(子どうしの違い)が生まれない: 燃えた点のセルは 4000 K で反応が反応物で頭打ち、周りは冷たい。段をまたぐ輸送(T-0019)が入るまで、k ≥ 2 は世界のセルの写しが一様に見える。
-- 覗いている間は毎フレーム +2.2 ms(引き戻しの 9 段の連鎖。BACKLOG の待ち時間の件)。
-- (前から)粗くする・影の引き戻しが 1 段約 250 µs。段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。物理の GPU 版は世界の刻みに未組み込み。PIX・セーブ・AMD は未確認/未着手。
-- CI(GitHub Actions)で WARP のテスト(T-0097 の分と gpu_probe_peek_warp)が通るかは push 後の CI で確認する(未確認)。
+- 組を局所に持つと壊れる理由は未確認(BACKLOG)。物理のパスに大きい局所の変数を足さないこと。
+- 窓の物理は 1 刻み約 3.4 ms(積み木、暖機なし)。山(56 個)は重いので M1 では使わない(T-0094・T-0095)。
+- 押すのは 1 本の光線の最初の物だけ・力積は固定。箱と世界のセルのやり取り(燃える・熱)は無い(M6)。
+- (前から)段をまたぐ輸送なし(T-0019)・帳簿なし(T-0018)。PIX・セーブ・AMD は未確認/未着手。CI の WARP のテストは push 後の CI で確認する。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- 覗き窓の形(T-0096 のチケットの「形」): 世界の写しのブロック(`MR_BLOCK_MIRROR`)を影の鎖の根の親にする・影は抽出ごとに 1 刻み(世界の刻みが進んだときだけ)・
-  抽出の後ろに覗きの欄・ProbeSim の抽出の後のフック・操作は P / Shift + P / PageDown・PageUp。ADR にはしていない(T-0018 の疎な木で作り直す前提の仮の形)。
-- フレームのループはシミュの読み戻しを投げた順に読む(枠の番号の順だと再生の突き合わせが時々落ちた)。
+- 崩すきっかけはクリックで押すコマンド(ユーザー決定。PROBE_COMMAND_TYPE_PUSH、common/physics_push.hlsli)。
+- 物理の座標 ↔ 格子: 1 セル = 0.5 m、y を裏返す(描画の y が画面の下向きのため。probe_sim.hlsli)。
+- 窓が固まった時に一時「広域を Compute にする」回避をユーザーと決めたが、原因(局所の組)を直した後は Work Graph で固まらないので ADR-0002 の形に戻した。
+- 窓(debug)は物理を入れると GPU-based validation を切る(物理のシェーダーの計装が数分かかる。debug layer は有効)。
 
 ## 次にやること
-NEXT.md の先頭(T-0098 物理を仮の世界に組み込む → M1 完了 → T-0094)。
+NEXT.md の先頭(M1 完了 → T-0094 物理: 島ごとに 1 グループで解く)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **物理の GPU のパスで組(PxManifold 3 KB)を局所の変数に持たない**(T-0098)。持つと、別のキュー(窓の描画)が割り込んだ時だけ結果が時々変わり、
+  火(伝導の Work Graph)と重なると GPU が固まった。テスト(描画なし)では出ない。gpu_probe_physics_test の 2 回目が優先度の高い direct のキューで雑音を流して確かめる。
+  GPU の BuildSlot・Recollide・PrepareManifolds は CPU の PxBuildManifold・PxRecollideManifold・PxWarmStartManifold と同じ手順をバッファの上で書いた別の実装。片方を変えたらもう片方も。
+- **仮の世界の物理(T-0098)**: ProbeSim の単位 [2] = ProbeSim::RecordPhysics(GpuPhysics::RecordStep の後にルートを結び直す)。物のバッファは仮の刻みの u13
+  (物理なしなら重さの捨て場を仮に結ぶ。物の数はフレームの入力の見出し PROBE_HEADER_BODY_COUNT)。押すは probe_tick.hlsl の ApplyPush、
+  物のハッシュは FlushEvents の中の StoreBodyHash、抽出の物の欄は StoreBodyView。描画は probe_view.hlsl の LoadBodyView・IntersectBodies・BodySliceColor。
+- 窓の debug は物理のパイプラインの作成に約 60 s(window_replay_* の TIMEOUT を 240 にした)。release は初回約 20 s、以後はドライバのキャッシュで約 1 s。
 - **覗き窓(T-0096)**: sim/probe_peek(ProbePeek・CPU リファレンス ProbePeekReference・状態 PeekState)。GpuMultires のルート署名に u4・u5(外のバッファ)と
   外の定数 4 語を足し、`SetExternalViews` + `RecordExternalDispatch` で shaders/sim/multires_peek.hlsl(MirrorWorld・ExtractShadow)を投げる。
   ProbeSim は `ProbeFrameInput::afterExtract` を抽出の後(UAV バリアの後)に呼ぶ。抽出の覗きの欄の並びは probe_sim.hlsli(PROBE_EXTRACTION_PEEK_*)、

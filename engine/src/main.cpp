@@ -10,6 +10,10 @@
 //   --sim-split <k>                  重さの試験を k 個の単位に分ける(1 フレームに予算ぶんの単位だけ投げる。既定 1)
 //   --render-normal                  描画のキューの優先度を NORMAL にする(既定 HIGH。比較用)
 //   --auto-click                     決まった場所を自動でクリックする(人がいない確認でイベントの流れを通す)
+//   --auto-push                      60 フレーム目に積み木の 5 段目を押す(人がいない確認で押すコマンドの流れを通す。T-0098)
+//   --no-physics                     仮の世界に物理(積み木)を入れない(既定は入れる。窓では Shift + 左クリックで押す。T-0098)
+//   --check-physics                  CPU の物理を並べて走らせ、刻みごとの物のハッシュを突き合わせる(調べる用)
+//   --physics-compute                物理の広域の選別を Compute で(既定は Work Graph。比べる用)
 //   --record <path>                  窓の操作(コマンド)と刻みごとのハッシュを再生ファイルに書く(終わるとき。save/replay_file)
 //   --replay <path>                  再生ファイルのコマンドで世界を進め、刻みごとのハッシュを突き合わせる。
 //                                    最後のハッシュまで確かめたら終わる(全部一致で 0、違えば 1)。窓のクリックは無視する
@@ -262,6 +266,14 @@ namespace {
             loop.autoClick = true;
         else if (argument == L"--auto-trace")
             loop.autoTrace = true;
+        else if (argument == L"--auto-push")
+            loop.autoPush = true;
+        else if (argument == L"--no-physics")
+            loop.physics = false;
+        else if (argument == L"--check-physics")
+            loop.checkPhysics = true;
+        else if (argument == L"--physics-compute")
+            loop.physicsComputeBroadphase = true;
         else if (argument == L"--warp")
             loop.adapter = gpu::AdapterKind::Warp;
         else if (argument == L"--render-normal")

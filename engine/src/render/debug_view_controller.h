@@ -2,7 +2,7 @@
 //
 // データの流れ: platform/window の入力のイベント → HandleInput → カメラと表示の設定(View の状態。世界には入らない)
 //   + つつくセル(フレームのループがコマンドにする。06 §3)→ Constants() が描画の定数(render/probe_view_constants.h)を作る。
-// 操作: 左クリック = つつく / 右ドラッグ = 回る / 中ドラッグ = 平行移動 / ホイール = 寄る / 1・2・3 = 表示 / X・Y・Z = 断面の軸 /
+// 操作: 左クリック = つつく / Shift + 左クリック = 光線の先の物を押す(T-0098)/ 右ドラッグ = 回る / 中ドラッグ = 平行移動 / ホイール = 寄る / 1・2・3 = 表示 / X・Y・Z = 断面の軸 /
 //   Q・E = 断面を動かす(Shift で 8) / B = 活性なブロック / L = 対数・線形 / C = 色分けする量(温度・O2 の減り・CO2・炭)/
 //   O = 透視・平行 / R = カメラを戻す /
 //   T = 連鎖のトレースを頼む(どこを何刻みかはフレームのループが決める。T-0088)/
@@ -59,6 +59,9 @@ namespace bicameral::render {
         // 前に呼んでから T が押されたか(押されていたら true を返して忘れる)
         [[nodiscard]] bool TakeTraceRequest();
 
+        // 前に呼んでから Shift + 左クリックした画素の光線(格子の座標。古い順。取ったら忘れる。T-0098)
+        [[nodiscard]] std::vector<CameraRay> TakePushRays();
+
         // --- 覗き窓(T-0096)---
         // cell を覗いて depth まで潜る(--peek。窓では P と PageDown・PageUp)
         void Peek(CellCoordinate cell, uint32_t depth);
@@ -83,7 +86,8 @@ namespace bicameral::render {
         int32_t m_lastX = 0;  // 前のポインタの位置(画素)
         int32_t m_lastY = 0;
 
-        bool m_traceRequested = false;  // T が押された(TakeTraceRequest で取る)
+        bool m_traceRequested = false;      // T が押された(TakeTraceRequest で取る)
+        std::vector<CameraRay> m_pushRays;  // Shift + 左クリックの光線(TakePushRays で取る)
 
         PeekView m_peek;
         bool m_peekChanged = false;  // 覗く場所が変わった(TakePeekChange で取る)

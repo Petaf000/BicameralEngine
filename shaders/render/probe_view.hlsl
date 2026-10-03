@@ -7,6 +7,8 @@
 // 表示は 3 通り: 吸収と発光・光線の上の最大値・断面。重ね書き: 格子の枠・断面の枠(クリックがつつく面)・活性なブロック・色の凡例。
 // 覗き窓(T-0096): 抽出の覗きの欄に影の鎖があれば、断面の上では各点で一番細かい段のセルの色を描き(段の枠と、大きく見えるセルの線も)、
 // 立体の表示では段の箱の枠だけを重ねる。潜っている段(flags のビット 16〜19)の枠は明るく。
+// 物(T-0098): 抽出の物の欄の動く物を、回った箱として描く(立体では不透明な面と辺、断面では切り口)。物理の座標は y が上なので、
+// 格子の座標(y が画面の下向き)へ y を裏返して置く(probe_sim.hlsli の対応)。
 // 浮動小数点はここ(描画)だけ。決定性は求めない(10 の目的)。
 #include "common/probe_sim.hlsli"
 
@@ -45,6 +47,9 @@ static const float3 SLICE_FRAME_COLOR = float3(0.95, 0.8, 0.25);
 static const float3 ACTIVE_COLOR = float3(0.15, 0.75, 0.95);
 static const float3 PEEK_FRAME_COLOR = float3(0.25, 0.8, 0.45);  // 覗きの段の枠
 static const float3 PEEK_DIVE_COLOR = float3(0.6, 1.0, 0.7);     // 潜っている段の枠
+static const float3 BODY_COLOR = float3(0.62, 0.6, 0.56);        // 物の面(熱の色と混ざらない灰色)
+static const float3 BODY_EDGE_COLOR = float3(0.12, 0.12, 0.14);  // 物の辺・切り口の縁
+static const float3 BODY_LIGHT = float3(0.35, -0.8, -0.48);      // 面の明るさの向き(格子の座標。上 = −y)
 
 // 断面の熱の無いセル(面の広がりが見えるように)
 static const float3 COLD_SLICE_COLOR = float3(0.05, 0.06, 0.1);
@@ -288,6 +293,140 @@ bool PeekBoxEdges(ViewConstants constants, Ray ray, out float3 color) {
     return found;
 }
 
+// --- 物(T-0098。抽出の物の欄、並びは probe_sim.hlsli)---
+
+struct BodyView {
+    float3 center;      // 格子の座標
+    float3x3 rotation;  // 局所 → 格子(列が局所の軸)
+    float3 halfExtent;  // セル
+    bool visible;       // 動く物で、世界にいる
+};
+
+float LoadExtractionInt64(uint32_t extraction, uint32_t index) {
+    const uint32_t low = LoadExtraction(extraction, index);
+    const int high = asint(LoadExtraction(extraction, index + 1));
+
+    return (float)high * 4294967296.0 + (float)low;
+}
+
+BodyView LoadBodyView(uint32_t extraction, uint32_t index) {
+    const uint32_t base = PROBE_EXTRACTION_BODY_OFFSET + PROBE_BODY_VIEW_HEADER_WORDS + index * PROBE_BODY_VIEW_WORDS;
+    const float cellsPerUnit = 1.0 / (float)(1u << PROBE_PHYSICS_CELL_SHIFT);
+    const float3 position = float3(LoadExtractionInt64(extraction, base), LoadExtractionInt64(extraction, base + 2),
+                                   LoadExtractionInt64(extraction, base + 4)) *
+                            cellsPerUnit;
+    const float4 q = float4(asint(LoadExtraction(extraction, base + 6)), asint(LoadExtraction(extraction, base + 7)),
+                            asint(LoadExtraction(extraction, base + 8)), asint(LoadExtraction(extraction, base + 9))) /
+                     1073741824.0;
+    const uint32_t flags = LoadExtraction(extraction, base + 13);
+
+    // 物理の回転の行列(行 i・列 j)。y を裏返すので、y の行か列の片方だけに当たる成分の符号を変える
+    float3x3 r = float3x3(1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y - q.w * q.z), 2 * (q.x * q.z + q.w * q.y),
+                          2 * (q.x * q.y + q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z - q.w * q.x),
+                          2 * (q.x * q.z - q.w * q.y), 2 * (q.y * q.z + q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y));
+    r[0][1] = -r[0][1];
+    r[1][0] = -r[1][0];
+    r[1][2] = -r[1][2];
+    r[2][1] = -r[2][1];
+
+    BodyView body;
+    body.center = float3(position.x, (float)PROBE_GRID_SIZE - position.y, position.z);
+    body.rotation = r;
+    body.halfExtent = float3(asint(LoadExtraction(extraction, base + 10)), asint(LoadExtraction(extraction, base + 11)),
+                             asint(LoadExtraction(extraction, base + 12))) *
+                      cellsPerUnit;
+    body.visible = (flags & (PROBE_BODY_VIEW_DYNAMIC | PROBE_BODY_VIEW_ACTIVE)) ==
+                   (PROBE_BODY_VIEW_DYNAMIC | PROBE_BODY_VIEW_ACTIVE);
+
+    return body;
+}
+
+uint32_t BodyViewCount(uint32_t extraction) {
+    return min(LoadExtraction(extraction, PROBE_EXTRACTION_BODY_OFFSET), PROBE_MAX_VIEW_BODIES);
+}
+
+// 格子の点を物の局所座標へ(回転は直交なので逆は転置)
+float3 ToBodyLocal(BodyView body, float3 location) {
+    return mul(location - body.center, body.rotation);
+}
+
+struct BodyHit {
+    bool hit;
+    float t;
+    float3 normal;  // 格子の向き
+    float3 local;   // 当たった点(局所)
+    float3 halfExtent;
+};
+
+// 光線が一番手前で当たる物(局所座標で箱と交わる)
+BodyHit IntersectBodies(ViewConstants constants, Ray ray) {
+    BodyHit best;
+    best.hit = false;
+    best.t = 1e30;
+    best.normal = 0;
+    best.local = 0;
+    best.halfExtent = 0;
+    const uint32_t count = BodyViewCount(constants.extraction);
+    for (uint32_t index = 0; index < count; ++index) {
+        const BodyView body = LoadBodyView(constants.extraction, index);
+        if (!body.visible)
+            continue;
+
+        Ray local;
+        local.origin = ToBodyLocal(body, ray.origin);
+        local.direction = mul(ray.direction, body.rotation);
+        const float3 inverse = 1.0 / local.direction;
+        const float3 near = (-body.halfExtent - local.origin) * inverse;
+        const float3 far = (body.halfExtent - local.origin) * inverse;
+        const float3 low = min(near, far);
+        const float enter = max(max(low.x, low.y), low.z);
+        const float3 high = max(near, far);
+        const float exit = min(min(high.x, high.y), high.z);
+        if (enter > exit || enter <= 0.0 || enter >= best.t)
+            continue;
+
+        // 入った面の軸(一番遅く入った板)と、光線に向かう側の法線
+        const float3 axisMask = float3(low.x == enter, low.y == enter && low.x != enter,
+                                       low.z == enter && low.x != enter && low.y != enter);
+        const float3 localNormal = -sign(local.direction) * axisMask;
+        best.hit = true;
+        best.t = enter;
+        best.normal = mul(body.rotation, localNormal);
+        best.local = local.origin + local.direction * enter;
+        best.halfExtent = body.halfExtent;
+    }
+
+    return best;
+}
+
+// 物の面の色(向きで明るさを変え、辺は暗く)
+float3 BodyFaceColor(ViewConstants constants, BodyHit hit) {
+    const float light = 0.35 + 0.65 * saturate(dot(hit.normal, normalize(BODY_LIGHT)));
+    const float width = LINE_WIDTH_PIXELS * PixelSize(constants, hit.t);
+
+    return OnBoxEdge(hit.local, -hit.halfExtent, hit.halfExtent, width) ? BODY_EDGE_COLOR : BODY_COLOR * light;
+}
+
+// 断面の点が物の中なら、切り口の色(縁は暗く)。どの物にも入っていなければ false
+bool BodySliceColor(ViewConstants constants, float3 location, float width, out float3 color) {
+    color = 0;
+    const uint32_t count = BodyViewCount(constants.extraction);
+    for (uint32_t index = 0; index < count; ++index) {
+        const BodyView body = LoadBodyView(constants.extraction, index);
+        if (!body.visible)
+            continue;
+
+        const float3 inside = body.halfExtent - abs(ToBodyLocal(body, location));
+        if (any(inside < 0.0))
+            continue;
+
+        color = min(min(inside.x, inside.y), inside.z) < width ? BODY_EDGE_COLOR : BODY_COLOR;
+        return true;
+    }
+
+    return false;
+}
+
 // --- 格子を辿る ---
 
 struct March {
@@ -513,8 +652,12 @@ float4 PSMain(VertexOutput input) : SV_Target {
 
     const Ray ray = MakeRay(constants, pixel);
     const float2 range = IntersectGrid(ray);
+    BodyHit body = (BodyHit)0;  // 断面の表示では物は切り口だけ(BodySliceColor)
+    if (constants.mode != VIEW_MODE_SLICE)
+        body = IntersectBodies(constants, ray);
+
     if (range.x >= range.y)
-        return float4(BACKGROUND, 1);
+        return float4(body.hit ? BodyFaceColor(constants, body) : BACKGROUND, 1);
 
     const float3 enter = ray.origin + ray.direction * range.x;
     const float3 exit = ray.origin + ray.direction * range.y;
@@ -534,19 +677,26 @@ float4 PSMain(VertexOutput input) : SV_Target {
         if (slice.hit && OnPeekSliceFrame(constants, slice.location, LINE_WIDTH_PIXELS * slicePixel, peekFrame))
             return float4(peekFrame, 1);
 
+        float3 bodySlice;
+        if (slice.hit && BodySliceColor(constants, slice.location, LINE_WIDTH_PIXELS * slicePixel, bodySlice))
+            return float4(bodySlice, 1);
+
         if (slice.hit)
             return float4(SliceColor(constants, slice.location, slicePixel), 1);
 
         return float4(frontEdge || backEdge ? FRAME_COLOR : BACKGROUND, 1);
     }
 
-    const March march = MarchGrid(constants, ray, range);
+    // 物に当たったら、格子はその手前までだけ辿り、後ろを物の面にする
+    const float2 marchRange = float2(range.x, body.hit ? min(range.y, max(body.t, range.x)) : range.y);
+    const float3 behind = body.hit ? BodyFaceColor(constants, body) : BACKGROUND;
+    const March march = MarchGrid(constants, ray, marchRange);
     float3 color;
     if (constants.mode == VIEW_MODE_MAXIMUM) {
-        color = march.maximum > 0.0 ? HeatColor(march.maximum) : BACKGROUND;
+        color = march.maximum > 0.0 ? HeatColor(march.maximum) : behind;
         color = lerp(color, ACTIVE_COLOR, (1.0 - exp(-march.activeLength * ACTIVE_DENSITY * 2.0)) * 0.5);
     } else
-        color = march.color + (1.0 - march.opacity) * BACKGROUND;
+        color = march.color + (1.0 - march.opacity) * behind;
 
     // 奥の枠は中身の後ろ(暗く)、手前の枠と断面の枠は上に
     if (backEdge)

@@ -132,6 +132,12 @@ bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --war
 # WARP の仮の世界は重い(2026-10-03 の PC の debug で sim 130 s・trace 65 s)。CI の機械(コアが少ない)で 300 s を越えないよう長めに切る
 set_tests_properties(gpu_probe_sim_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)
 # 覗き窓(T-0096): 影の鎖と抽出の覗きの欄が CPU とビット一致・覗いても世界のハッシュ列が変わらない
+bicameral_add_gpu_test(gpu_probe_physics_test)  # 仮の世界の刻みに入れた物理と押すコマンドの GPU と CPU のビット一致(T-0098)
+target_link_libraries(gpu_probe_physics_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_physics gpu_probe_physics_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_physics_warp gpu_probe_physics_test warp --warp --ticks 120)
+bicameral_add_gpu_test_case(gpu_probe_physics_compute gpu_probe_physics_test gpu --broadphase-compute)
+
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu)
@@ -152,15 +158,16 @@ target_link_libraries(gpu_conduct_bench PRIVATE bicameral_sim)
 # 窓を開くのでハードウェアの GPU と画面が要る(ラベル gpu。CI は外す)。
 set(WINDOW_REPLAY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_replay.bcreplay)
 add_test(NAME window_replay_record
-         COMMAND bicameral --frames 300 --auto-click --record ${WINDOW_REPLAY_FILE})
+         COMMAND bicameral --frames 300 --auto-click --auto-push --record ${WINDOW_REPLAY_FILE})
 add_test(NAME window_replay_play
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --sim-load 400000 --sim-split 3 --target-fps 30)
-set_tests_properties(window_replay_record PROPERTIES LABELS gpu FIXTURES_SETUP window_replay TIMEOUT 60)
-set_tests_properties(window_replay_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 120)
+# 物理(T-0098)の積み木を押す。物理のパイプラインの作成が debug で約 1 分かかるので、時間の上限を広げた
+set_tests_properties(window_replay_record PROPERTIES LABELS gpu FIXTURES_SETUP window_replay TIMEOUT 240)
+set_tests_properties(window_replay_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)
-set_tests_properties(window_replay_peek PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 120)
+set_tests_properties(window_replay_peek PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
 bicameral_add_gpu_test(gpu_debug_device_test)
 bicameral_add_gpu_test_case(gpu_debug_device gpu_debug_device_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_device_warp gpu_debug_device_test warp --warp --queue compute)

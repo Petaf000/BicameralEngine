@@ -200,6 +200,15 @@ views:
       - { id: physicsgraph, group: shared, label: "physics_graph.hlsl(Work Graph)<br/>広域の選別 → 接触の幾何 / 色ごとの解(比べた方)",
           code: "shaders/sim/physics_bindings.hlsli::CollideGeometry", ticket: T-0092, doc: docs/design/08-bodies-physics.md,
           note: "組(3 KB)をノードの局所に持つと GPU が固まる(約 5〜6 KB 超)ので、組を作るのは Compute の BuildManifolds" }
+      - { id: physicspush, group: shared, label: "physics_push.hlsli<br/>光線で物を押す(最初に入る物・力積)",
+          code: "shaders/common/physics_push.hlsli::PxApplyImpulse", ticket: T-0098, doc: docs/design/08-bodies-physics.md,
+          note: "CPU は PhysicsWorld::Push、GPU は probe_tick.hlsl の ApplyPush。CPU は物の場所を知らない(D-107)" }
+      - { id: probephysics, group: simlib, label: "ProbeSim::RecordPhysics<br/>物の 1 刻みを仮の世界の単位に(伝導の後ろ)",
+          code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordPhysics", ticket: T-0098, doc: docs/design/08-bodies-physics.md,
+          note: "物のハッシュは刻みの最後の単位(StoreBodyHash)、姿勢は抽出の物の欄へ。窓は Shift + 左クリックで押す" }
+      - { id: probephysicstest, group: tests, label: "gpu_probe_physics_test<br/>押して崩す積み木が CPU と毎刻みビット一致",
+          code: "tests/gpu_probe_physics_test.cpp::RunGpu", ticket: T-0098,
+          note: "2 回目は別のキューに雑音を流し、単位を 1 つずつ投げる(組を局所に持つと結果が変わった件の再発の検査)" }
       - { id: gpuphysicstest, group: tests, label: "gpu_physics_test<br/>3 場面の全部の刻みを GPU と CPU で比べる",
           code: "tests/gpu_physics_test.cpp::RunGpu", ticket: T-0090,
           note: "区間ごとに状態のハッシュと統計。GPU は 2 回走らせて一致も見る。GPU-based validation は切る(計装が終わらない)" }
@@ -307,6 +316,12 @@ views:
       - [physicsstep, physicssolverhlsl]
       - [gpuphysicstest, gpuphysics]
       - [gpuphysicstest, physicsworld, "ビット一致"]
+      - [probesim, probephysics, "単位"]
+      - [probephysics, gpuphysics, "RecordStep"]
+      - [probetick, physicspush, "押すコマンド"]
+      - [physicsworld, physicspush, "Push"]
+      - [probephysicstest, probephysics]
+      - [probephysicstest, physicsworld, "ビット一致"]
       - [gpureactiontest, reactionhlsl, "GPU(.cso)と CPU で同じ関数"]
       - [multireshlsl, reactionhlsl, "葉のセルを RxEvaluateCell で刻む"]
       - [multiresnest, multireshlsl]

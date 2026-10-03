@@ -97,6 +97,7 @@ namespace bicameral {
     void Window::AddButton(InputKind kind, PointerButton button, LPARAM lParam) {
         InputEvent event = PointerAt(kind, lParam);
         event.button = button;
+        event.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;  // Shift + 左クリック = 押す(T-0098)
         m_inputEvents.push_back(event);
         const uint32_t bit = 1u << static_cast<uint32_t>(button);
         const bool wasHeld = m_heldButtons != 0;

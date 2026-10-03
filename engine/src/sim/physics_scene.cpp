@@ -138,6 +138,26 @@ namespace bicameral::sim {
         return scene;
     }
 
+    PhysicsScene MakeProbeStackScene() {
+        // 格子の座標で x = 20・z = 32.5(既定の断面 z = 32 のセルの真ん中)の柱。地面は格子の床を覆う
+        constexpr int64_t TOWER_X = 10 * METER;
+        constexpr int64_t TOWER_Z = 16 * METER + METER / 4;
+
+        PhysicsScene scene{.name = "probe_stack", .tickCount = (uint64_t)60 * TICKS_PER_SECOND};
+        PhysicsSceneBody ground = MakeGround();
+        ground.position = {16 * METER, -METER / 2, 16 * METER};
+        scene.bodies.push_back(ground);
+
+        for (int64_t level = 0; level < 10; ++level) {
+            PhysicsSceneBody cube = MakeMeterCube(500, level * METER);
+            cube.position[0] = TOWER_X;
+            cube.position[2] = TOWER_Z;
+            scene.bodies.push_back(cube);
+        }
+
+        return scene;
+    }
+
     PhysicsScene MakeMassRatioScene() {
         PhysicsScene scene{.name = "mass_ratio", .tickCount = (uint64_t)10 * TICKS_PER_SECOND};
         scene.bodies.push_back(MakeGround());

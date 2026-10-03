@@ -40,6 +40,7 @@ namespace bicameral::frame {
 
         // --- 入力・記録・再生 ---
         bool autoClick = false;   // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
+        bool autoPush = false;    // 決まったフレームで積み木を押す(人がいない確認で押すコマンドの流れを通す。T-0098)
         fs::path recordPath;      // 空でなければ、終わるときに再生ファイルを書く
         fs::path replayPath;      // 空でなければ、この再生ファイルのコマンドで進めてハッシュを突き合わせる
         fs::path screenshotPath;  // 空でなければ、最後のフレーム(frameLimit)を BMP に書く
@@ -56,6 +57,12 @@ namespace bicameral::frame {
         bool peek = false;                // 起動時から peekCell を覗く(窓では P)
         render::CellCoordinate peekCell;  // 覗く世界のセル
         uint32_t peekDepth = 0;           // 潜る段(カメラが寄る。0〜9)
+
+        // --- 物理(T-0098)---
+        bool physics = true;  // 仮の世界に積み木(sim::MakeProbeStackScene)を入れる。Shift + 左クリックで押す
+        // CPU の物理(sim::PhysicsWorld)を並べて走らせ、刻みごとの物のハッシュを突き合わせる(--check-physics。調べる用)
+        bool checkPhysics = false;
+        bool physicsComputeBroadphase = false;  // 広域の選別を Compute で(--physics-compute。比べる用)
 
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)

@@ -76,6 +76,10 @@ namespace bicameral::sim {
         [[nodiscard]] GpuPhysicsStats ReadStats() const;
 
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
+        [[nodiscard]] uint32_t BodyCount() const { return m_bodyCount; }
+
+        // 物のバッファ(PhysicsBody × BodyCount。physics_bindings.hlsli の u0)。仮の世界の刻みが押す・ハッシュ・抽出で読み書きする(T-0098)
+        [[nodiscard]] ID3D12Resource* Bodies() const { return m_uavs[0].Get(); }
 
         // --- 計測(T-0092)---
         [[nodiscard]] bool EnableProfiling(ID3D12Device* device);

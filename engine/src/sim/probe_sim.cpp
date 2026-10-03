@@ -15,9 +15,10 @@ namespace bicameral::sim {
 
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
         //   u0 セル・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
-        //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ → b0 単位の定数 → デバッグのリング
+        //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ・u13 物理の物(T-0098。物理なしなら仮の置き場)
+        //   → b0 単位の定数 → デバッグのリング
         //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 13,
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 14,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
@@ -37,6 +38,7 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_ACTIVE_LIST1 = 10;
         constexpr uint32_t UAV_BLOCK_SCHEDULE = 11;
         constexpr uint32_t UAV_THERMAL = 12;
+        constexpr uint32_t UAV_BODIES = 13;
         constexpr uint32_t SRV_INPUT = 0;
         constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
 
@@ -140,6 +142,25 @@ namespace bicameral::sim {
         return command;
     }
 
+    ProbeCommand MakePushCommand(uint64_t targetTick, uint32_t sequence, const std::array<int64_t, 3>& origin,
+                                 const std::array<int32_t, 3>& direction, uint32_t impulseMillinewtonSeconds) {
+        ProbeCommand command{.targetTick = targetTick,
+                             .sequence = sequence,
+                             .type = static_cast<uint16_t>(PROBE_COMMAND_TYPE_PUSH),
+                             .size = 40};
+
+        for (size_t axis = 0; axis < 3; ++axis) {
+            const auto value = static_cast<uint64_t>(origin[axis]);
+            command.payload[axis * 2] = static_cast<uint32_t>(value);
+            command.payload[(axis * 2) + 1] = static_cast<uint32_t>(value >> 32);
+            command.payload[6 + axis] = static_cast<uint32_t>(direction[axis]);
+        }
+
+        command.payload[9] = impulseMillinewtonSeconds;
+
+        return command;
+    }
+
     // --- 作る ---
 
     std::expected<ProbeSim, std::string> ProbeSim::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType,
@@ -181,6 +202,9 @@ namespace bicameral::sim {
 
         if (!sim.CreateFrameSlots(device, listType))
             return std::unexpected("仮の刻みのフレームの枠を作れない");
+
+        if (auto physics = sim.CreatePhysics(device); !physics)
+            return std::unexpected(physics.error());
 
         return sim;
     }
@@ -263,6 +287,23 @@ namespace bicameral::sim {
                                               .Count = FRAME_SLOT_COUNT * TIMESTAMPS_PER_SLOT};
 
         return SUCCEEDED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_timestamps)));
+    }
+
+    // 物理(T-0098): 場面があれば物の 1 刻みを作る。場面は作った後は持たない
+    std::expected<void, std::string> ProbeSim::CreatePhysics(ID3D12Device5* device) {
+        const PhysicsScene* scene = m_options.physicsScene;
+        m_options.physicsScene = nullptr;
+        if (scene == nullptr)
+            return {};
+
+        auto physics = GpuPhysics::Create(device, *scene, m_options.physicsParameters, m_options.physicsOptions);
+        if (!physics)
+            return std::unexpected("仮の世界の物理を作れない: " + physics.error());
+
+        m_physics = std::make_unique<GpuPhysics>(std::move(*physics));
+        m_physicsRate = physics::PxStepRate(m_options.physicsParameters);
+
+        return {};
     }
 
     // 反応の表(既定のヒープ)と、表・初めの世界のアップロード。写すのは最初のフレーム(RecordInitialization)
@@ -420,7 +461,8 @@ namespace bicameral::sim {
                                                                  m_viewSpecies[0],
                                                                  m_viewSpecies[1],
                                                                  m_viewSpecies[2],
-                                                                 0};
+                                                                 m_physics ? m_physics->BodyCount() : 0,
+                                                                 static_cast<uint32_t>(m_physicsRate)};
 
         WriteAt(frame.mappedInput, PROBE_INPUT_HEADER_OFFSET, header);
 
@@ -452,6 +494,8 @@ namespace bicameral::sim {
         m_debugRing.RecordBegin(list);
         m_graphStats.RecordBegin(list);
         m_graphTrace.RecordBegin(list, slot);
+        RecordPhysicsInitialization(list, frame.input.Get());
+
         const D3D12_RESOURCE_BARRIER hashesToUav = gpu::Transition(m_hashes.Get(), D3D12_RESOURCE_STATE_COMMON,
                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &hashesToUav);
@@ -480,6 +524,9 @@ namespace bicameral::sim {
             RecordExtractAndHook(list, tick, input);
 
         RecordActiveListStates(list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (input.readPhysics && m_physics)
+            m_physics->RecordReadback(list);
+
         RecordReadbacks(list, slot, hasHash);
         const uint32_t lastQuery = firstQuery + 1 + input.unitCount;
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, lastQuery);
@@ -567,6 +614,9 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(UAV_ACTIVE_LIST0, m_activeLists[0]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_ACTIVE_LIST1, m_activeLists[1]->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(UAV_BLOCK_SCHEDULE, m_blockSchedule->GetGPUVirtualAddress());
+        // 物理が無ければ、シェーダーは物の数 0 で読まないので、仮に重さの捨て場を結ぶ
+        list->SetComputeRootUnorderedAccessView(
+            UAV_BODIES, m_physics ? m_physics->Bodies()->GetGPUVirtualAddress() : m_busySink->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
@@ -587,6 +637,8 @@ namespace bicameral::sim {
             list->Dispatch(1, 1, 1);
         } else if (unit == PROBE_UNIT_CONDUCT)
             RecordConduct(list, input, tick);
+        else if (m_physics && unit == PROBE_UNIT_PHYSICS)
+            RecordPhysics(list, input, tick);
         else if (unit == HashUnit()) {
             // 表の欄は適用の単位が用意してある(刻み・0)
             list->SetPipelineState(m_hashCellsPipeline.Get());
@@ -620,6 +672,26 @@ namespace bicameral::sim {
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(activeList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &toUav);
+    }
+
+    // 最初のフレームだけ: 物の初めの状態(物理のルート署名で記録するので、仮の刻みのルートを結び直す)
+    void ProbeSim::RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) {
+        if (!m_physics || m_physicsInitialized)
+            return;
+
+        m_physics->RecordInitialize(list, m_debugRing.GpuAddress());
+        m_physicsInitialized = true;
+        BindRootArguments(list, input);
+    }
+
+    // 物理: 物の 1 刻み(sim/gpu_physics。広域と接触の Work Graph・色ごとの Compute)。物理のルート署名で記録するので、終わったら結び直す。
+    // 物理の刻みは世界の刻みと同じ番号で進む(1 刻みに 1 回、刻みの順に記録する)
+    void ProbeSim::RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) {
+        if (m_physics->Tick() != tick)
+            Log(Channel::Sim, Level::Error, "物理の刻みが世界の刻みとずれた: 物理 {} 世界 {}", m_physics->Tick(), tick);
+
+        m_physics->RecordStep(list, m_debugRing.GpuAddress());
+        BindRootArguments(list, input);
     }
 
     void ProbeSim::RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
@@ -745,7 +817,8 @@ namespace bicameral::sim {
                               .hash = entry[2] | (uint64_t{entry[3]} << 32),
                               .energy = entry[4] | (uint64_t{entry[5]} << 32),
                               .sourceEnergy = entry[8] | (uint64_t{entry[9]} << 32),
-                              .scheduledBlocks = entry[6]});
+                              .scheduledBlocks = entry[6],
+                              .bodyHash = entry[10] | (uint64_t{entry[11]} << 32)});
         }
 
         return hashes;
