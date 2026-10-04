@@ -11,15 +11,14 @@
 - `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(100)。
 - multires_quiet(debug 約 60 s)・gpu_multires_quiet(debug HW 約 60 s)・gpu_multires_quiet_warp(debug 約 30 s)。全部のテストの結果は下の「全部のテスト」。
 - 計測: `job.py run -Preset release -Exe gpu_multires_quiet_test -- --queue compute`(「GPU 時間: 静かな葉を探す段」。枠 640 で 0.0056 ms)。
-- **全部のテスト(2026-10-04、debug)**: 60 のうち 56 が通った。**時間切れ 4 つ(gpu_physics_wall・gpu_probe_sim・gpu_probe_trace・gpu_probe_fire)はこのチケットと無関係**:
-  HW の GPU-based validation で、大きいシェーダーを使うたびに約 155 s 止まる(gpu_probe_sim は 1 回の GPU の実行ごとに約 155 s。結果のハッシュは正しい)。
-  T-0100 の commit に戻して(stash)も同じだった。ドライバは前と同じ 32.0.15.9597。gpu_physics_wall は GBV を切っているのに切れたので、GBV だけでなく PC が遅いのかもしれない。原因は未確認(BACKLOG)。window_replay_* は 127 s(TIMEOUT 240)・gpu_probe_peek(HW)は 358 s で通った(TIMEOUT 600)。
+- **全部のテスト(2026-10-04〜05、debug)**: 60 全部が通る。HW の gpu_probe_sim・trace・peek・fire は `--no-gbv`(GPU-based validation だけ切る。
+  GBV の計装で GPU の実行ごとに約 2 分止まっていた。2026-10-05 ユーザー決定: GBV が要る調べ物の時だけ外す)で ctest 191・149・82・30 s。
+  gpu_physics_wall は debug の CPU リファレンスが約 280 s なので TIMEOUT 600。window_replay_* は約 127 s(TIMEOUT 240)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
 - 反応の核: 進める規則がある(possible = 1)のにセルが変わらないまま種であり続けるセルがある(燃え尽きかけの木箱。BACKLOG。原因は未確認)。粗くするのは「変わったか」で決めるので影響しない。
 - 観察の影の親になっている本物の葉も粗くなる(今の影の親は根か写しだけ。BACKLOG)。
 - (前から)活性の固定費 約 0.1 ms・全部活性だと Compute より遅い・粗くするのは 1 刻み 1 段・段をまたぐ輸送なし(T-0019)・窓は木ではない・PIX・セーブ・AMD は未確認/未着手。
-- **gpu_probe_peek(debug の HW)は約 414 s かかる**(T-0018 の時点から。TIMEOUT 600)。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
 - N は定数 16(ユーザー決定は「定数で後から測って調整」。値は Claude が決めた)。

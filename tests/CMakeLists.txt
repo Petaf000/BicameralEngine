@@ -115,6 +115,8 @@ foreach(_scene IN ITEMS stack mass_ratio pile)
 endforeach()
 # 壁(れんが 300 個が 1 つの島)。CPU リファレンスが重いので 120 刻み(release で約 55 s)
 bicameral_add_gpu_test_case(gpu_physics_wall gpu_physics_test gpu --scene wall --ticks 120)
+# debug は CPU リファレンスだけで約 280 s(2026-10-05)。パイプラインの作成がドライバのキャッシュに無いと +90 s で 300 s を超える
+set_tests_properties(gpu_physics_wall PROPERTIES TIMEOUT 600)
 # WARP(NuGet の版。T-0097)でも物理の Work Graph が動き CPU とビット一致する。重いので積み木だけ・120 刻み(PC の debug で 27 s)
 bicameral_add_gpu_test_case(gpu_physics_stack_warp gpu_physics_test warp --warp --scene stack --ticks 120)
 # 採らなかった方(広域の選別を Compute・色ごとの解を Work Graph。T-0092 で測って比べた)も壊れていないこと
@@ -142,12 +144,14 @@ bicameral_add_gpu_test_case(gpu_work_graph_stats_warp gpu_work_graph_stats_test 
 # 仮の世界(伝導 + 反応のノード)の WARP のテストは、NuGet の WARP 1.0.21 で動くようになった(T-0097。OS の WARP では落ちる。ADR-0013)
 bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
-bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu)
+# HW の 4 つ(sim・trace・peek・fire)は GPU-based validation を切る(--no-gbv。2026-10-05 ユーザー決定): 大きいシェーダーを使うたびに
+# GBV の計装で約 2 分止まり、300 s を超えた。どれも CPU とビット一致を毎回比べる。GBV が要る調べ物の時だけ外して走らせる(BACKLOG)
+bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
 # 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
 bicameral_add_gpu_test(gpu_probe_trace_test)
 target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --warp)
 # WARP の仮の世界は重い(2026-10-03 の PC の debug で sim 130 s・trace 65 s)。CI の機械(コアが少ない)で 300 s を越えないよう長めに切る
 set_tests_properties(gpu_probe_sim_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)
@@ -160,16 +164,13 @@ bicameral_add_gpu_test_case(gpu_probe_physics_compute gpu_probe_physics_test gpu
 
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_peek_warp gpu_probe_peek_test warp --warp)
-# debug の HW は最初の刻みで約 160 s 止まる(GPU-based validation が大きいシェーダーを初めて使う時に計装すると思われる。未確認)。
-# 2 回走らせるので 300 s を超える(T-0018 の時点で既に超えていた。2026-10-04 に確認)
-set_tests_properties(gpu_probe_peek PROPERTIES TIMEOUT 600)
 # 木箱に火をつける(T-0089): 刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる。
 # ctest(debug・GBV)は 1 分(3600 刻み)。10 分(36,000 刻み)は release で: job.py run -Preset release -Exe gpu_probe_fire_test
 bicameral_add_gpu_test(gpu_probe_fire_test)
 target_link_libraries(gpu_probe_fire_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600)
+bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 --no-gbv)
 
 # 伝導の Work Graph の時間を伝播の規模ごとに測る(T-0005。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_conduct_bench
