@@ -43,6 +43,8 @@ FX_CONST uint32_t MR_NO_BLOCK = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_NO_FRACTION = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_NO_SPECIES = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_CELL_ID_PURPOSE = 0x4D520001u;  // セルの ID(乱数の鍵)を作るハッシュの用途
+FX_CONST uint32_t
+    MR_BUSY_POKED = 0xFFFFFFFFu;  // MrBlock::busyTick: 木の変更でつつかれた(種として起こす時に刻みの印にする。T-0101)
 
 // ブロックの種類
 FX_CONST uint32_t MR_BLOCK_UNUSED = 0;
@@ -68,6 +70,8 @@ FX_CONST uint32_t MR_COUNTER_LEDGER_OUTSIDE = 13;  // 帳簿のレベルの外�
 FX_CONST uint32_t MR_COUNTER_INDEX_FULL = 14;      // 索引に入れられなかった数
 FX_CONST uint32_t MR_COUNTER_SCHEDULED = 15;       // 活性で刻んだ世界のブロックの数(累計。T-0100)
 FX_CONST uint32_t MR_COUNTER_WAKE_TOO_DEEP = 16;   // 面の隣を細かい側へたどる再帰の上限で起こせなかった数(累計。T-0100)
+FX_CONST uint32_t MR_COUNTER_QUIET_REQUESTS = 17;  // 静かな葉を粗くする要求を作った数(累計。T-0101)
+FX_CONST uint32_t MR_COUNTER_QUIET_DEFERRED = 18;  // 要求の一覧が一杯で次の刻みへ回した静かな葉の数(累計。T-0101)
 FX_CONST uint32_t MR_COUNTER_COUNT = 20;
 
 // --- 構造体 ------------------------------------------------------------------------------------
@@ -85,7 +89,10 @@ struct MrBlock {
     uint32_t parentOctant;  // 親のどの八分の一を覆うか
     uint32_t fraction;      // 端数のブロックの枠(無ければ MR_NO_FRACTION)
     uint32_t children[8];   // 八分の一ごとの本物の子ブロック(影は入れない)
-    uint32_t activeTick;  // 最後に活性で刻んだ刻みの印(MrActivityMark。T-0100)。世界の要約(HashRealLeaves)には入れない
+    // --- 活性(世界の要約 HashRealLeaves には入れない)---
+    uint32_t activeTick;  // 最後に活性で刻んだ刻みの印(MrActivityMark。T-0100)
+    uint32_t busyTick;  // 最後に変わった刻みの印(MR_BUSY_POKED = 木の変更でつつかれ、まだ刻みの印にしていない。T-0101)
+    uint32_t padding;
 };
 
 // セルの端数(2^-64 単位。物質 ID の昇順、0 は持たない)。エネルギーの端数は符号なし(値 = 整数部 + 端数 · 2^-64、整数部は切り捨て)
@@ -151,6 +158,8 @@ FX_FN MrBlock MrMakeUnusedBlock() {
         block.children[i] = MR_NO_BLOCK;
 
     block.activeTick = 0;
+    block.busyTick = 0;
+    block.padding = 0;
 
     return block;
 }

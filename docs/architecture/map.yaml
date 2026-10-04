@@ -263,6 +263,12 @@ views:
       - { id: gpuactivitytest, group: tests, label: "gpu_multires_activity_test<br/>活性の Work Graph を毎刻み CPU と比べる",
           code: "tests/gpu_multires_activity_test.cpp::RunActivity", ticket: T-0100,
           note: "状態の全部(活性の印も)と次の刻みの種の集合が一致。WARP でも通る" }
+      - { id: multiresquiet, group: simlib, label: "SubmitQuietCoarsenRequests<br/>静かな葉を粗くする要求(枠の順)",
+          code: "engine/src/sim/multires_activity.cpp::SubmitQuietCoarsenRequests", ticket: T-0101, doc: docs/design/17-multiresolution.md,
+          note: "N(MR_QUIET_TICKS)刻みを超えて変わっていない本物の葉。兄弟は八分の一の番号の小さい 1 つだけ。GPU は multires_tree.hlsl の TreeQuiet(1 グループの累積和)" }
+      - { id: quiettest, group: tests, label: "multires_quiet_test / gpu_multires_quiet_test<br/>変わったばかりは粗くしない・燃え尽きたら根まで畳む",
+          code: "tests/multires_quiet_test.cpp::RunQuiet", ticket: T-0101,
+          note: "保存量が毎刻み一致。GPU(HW・WARP)は状態の全部と次の刻みの種が毎刻み CPU と一致" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -356,6 +362,10 @@ views:
       - [activitytest, multiresactivity]
       - [gpuactivitytest, gpumultires]
       - [gpuactivitytest, multiresactivity, "毎刻み比べる"]
+      - [multiresquiet, multiresactivityhlsl, "MrWantsQuietCoarsen(GPU と CPU で同じ関数)"]
+      - [multiresquiet, multirestree, "要求の一覧の後ろに足す"]
+      - [quiettest, multiresquiet]
+      - [quiettest, gpumultires, "毎刻み比べる"]
       - [probesim, probepeek, "抽出の後のフック"]
       - [viewcontroller, frameloop, "P・PageDown → 覗く場所"]
       - [peektest, probepeek]

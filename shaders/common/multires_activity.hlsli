@@ -1,6 +1,7 @@
 // multires_activity.hlsli — 多重解像度の木の上の活性: どのブロックを刻むか・面の隣を起こす(05 §4・06 §2・17 §5「活性」。T-0100)。
 // HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU リファレンス(engine/src/sim/multires_activity.cpp の StepActive)と
-// GPU(shaders/sim/multires_graph.hlsl の ActivitySeedNode・WakeFaceNode・ActivityStepNode)が同じ関数を呼ぶ。
+// GPU(shaders/sim/multires_activity_graph.hlsl の ActivitySeedNode・WakeFaceNode・ActivityStepNode、
+// 静かな葉を粗くする要求は multires_tree.hlsl の TreeQuiet。T-0101)が同じ関数を呼ぶ。
 //
 // 活性の規則(仮の世界の T-0005・T-0089 を木に広げたもの): 刻み t で刻む世界のブロック = 種とその面の隣。
 //   種 = 刻み t − 1 に進める反応の規則があったブロック(D-424: 無ければ刻みが変わっても変わらない)+ 刻み t に木の変更でつつかれたブロック。
@@ -144,6 +145,55 @@ FX_FN MrWake MrWakeAcross(Tree tree, MrBlock block, uint32_t octant, uint32_t fa
         wake.descend = found.children[foundOctant];
 
     return wake;
+}
+
+// --- 静かなブロックを粗くする(T-0101。05 §4)---------------------------------------------------
+// 忙しさの印 busyTick = ブロックが最後に変わった刻みの印。刻んでセルが 1 つでも変わった時(ActivityStepNode)と、木の変更で
+// つつかれた時(要求の処理が MR_BUSY_POKED を書き、種として起こす ActivitySeedNode がその刻みの印にする)に書く
+// (同じ刻みの書き手は同じ値なので順に依存しない)。「進める規則がある」(種になる)とは分ける: 規則が進めると言っても
+// セルが変わらないまま毎刻み種になり続けることがある(燃え尽きかけの木箱。T-0101 で見つけた。17 §5)。
+// 刻み t の要求の処理の前に、印が N(MR_QUIET_TICKS)刻みより古い本物の葉を粗くする要求を、世界の枠の順に作る(TreeQuiet)。
+// 印は 2^32 刻みで一周するので、それより長く静かな葉は忙しく見える(その前に粗くなっている)。
+
+// 粗くするまでに続けて静かでなければならない刻みの数(2026-10-04 ユーザー決定: 定数。測って調整する)
+FX_CONST uint32_t MR_QUIET_TICKS = 16;
+
+// 本物の葉(根でない・本物の子が無い)で、刻み mark(MrActivityMark)までに N 刻みを超えて変わっていない
+FX_FN bool MrIsQuietLeaf(MrBlock block, uint32_t mark) {
+    return block.kind == MR_BLOCK_REAL && block.parent != MR_NO_BLOCK && !MrHasRealChild(block) &&
+           block.busyTick != MR_BUSY_POKED && mark - block.busyTick > MR_QUIET_TICKS;
+}
+
+// 刻んでセルが変わったか(全部の欄をビットで比べる。並びの余りは比べない)
+FX_FN bool MrCellChanged(RxCell before, RxCell after) {
+    bool changed = before.energy != after.energy || before.speciesCount != after.speciesCount;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        changed = changed || before.species[i] != after.species[i] || before.amounts[i] != after.amounts[i];
+
+    return changed;
+}
+
+// 枠 slot を粗くする要求を作るか。静かな葉で、同じ親の八分の一の番号が小さい兄弟に静かな葉が無い
+// (1 刻みに 1 つの親は 1 つの要求しか通らない〔17 §5〕ので、負ける要求で一覧を埋めない)
+template <typename Tree>
+FX_FN bool MrWantsQuietCoarsen(Tree tree, uint32_t slot, uint32_t mark) {
+    const MrBlock block = tree.Block(slot);
+    if (!MrIsQuietLeaf(block, mark))
+        return false;
+
+    const MrBlock parent = tree.Block(block.parent);
+    for (uint32_t octant = 0; octant < block.parentOctant; ++octant) {
+        const uint32_t sibling = parent.children[octant];
+        if (sibling != MR_NO_BLOCK && MrIsQuietLeaf(tree.Block(sibling), mark))
+            return false;
+    }
+
+    return true;
+}
+
+// ブロックを親へ戻す要求
+FX_FN MrRequest MrMakeQuietCoarsenRequest(MrBlock block) {
+    return MrMakeRequest(MR_REQUEST_COARSEN, block.level, block.originX, block.originY, block.originZ);
 }
 
 MR_NAMESPACE_END

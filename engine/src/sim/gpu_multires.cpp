@@ -37,10 +37,19 @@ namespace bicameral::sim {
         enum ActivityEntry : uint8_t { ActivityEntrySeed, ActivityEntryObserver };
 
         // multires_tree.hlsl の段(呼ぶ順)
-        enum TreePass : uint8_t { PassResolve, PassSettle, PassAllocate, PassRelease, PassClearIndex, PassFillIndex };
-        constexpr std::array<const char*, 6> TREE_SHADERS = {
+        enum TreePass : uint8_t {
+            PassResolve,
+            PassSettle,
+            PassAllocate,
+            PassRelease,
+            PassClearIndex,
+            PassFillIndex,
+            PassQuiet,  // 静かな葉を粗くする要求(要求の処理の前。T-0101)
+        };
+        constexpr std::array<const char*, 7> TREE_SHADERS = {
             "sim/multires_tree_resolve.cso", "sim/multires_tree_settle.cso",      "sim/multires_tree_allocate.cso",
-            "sim/multires_tree_release.cso", "sim/multires_tree_clear_index.cso", "sim/multires_tree_fill_index.cso"};
+            "sim/multires_tree_release.cso", "sim/multires_tree_clear_index.cso", "sim/multires_tree_fill_index.cso",
+            "sim/multires_tree_quiet.cso"};
 
         // Work Graph の GPU の入力(multires_bindings.hlsli の MR_GRAPH_INPUT_*)。見出しは D3D12_NODE_GPU_INPUT そのもの
         constexpr uint32_t GRAPH_INPUT_REFINE_HEADER = 0;
@@ -457,6 +466,13 @@ namespace bicameral::sim {
         list->ResourceBarrier(static_cast<UINT>(toUav.size()), toUav.data());
 
         return true;
+    }
+
+    void GpuMultires::RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                          uint64_t tick) {
+        m_constants.tickLow = static_cast<uint32_t>(tick);
+        m_constants.tickHigh = static_cast<uint32_t>(tick >> 32);
+        RecordTreePass(list, debugRing, PassQuiet, 1);
     }
 
     void GpuMultires::RecordProcessRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {

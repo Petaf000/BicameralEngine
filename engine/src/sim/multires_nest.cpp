@@ -285,6 +285,7 @@ namespace bicameral::sim {
         for (const MrBlock& block : nest.blocks) {
             hash = FxHashCombine(hash, HashBlock(block));
             hash = FxHashCombine(hash, block.activeTick);
+            hash = FxHashCombine(hash, block.busyTick);
         }
 
         for (const RxCell& cell : nest.cells)

@@ -1,4 +1,4 @@
-// multires_nest.h — 多重解像度の木の CPU リファレンス(17 §1・§3・§5。T-0017・T-0018・T-0100。ADR-0015・ADR-0016)。
+// multires_nest.h — 多重解像度の木の CPU リファレンス(17 §1・§3・§5。T-0017・T-0018・T-0100・T-0101。ADR-0015・ADR-0016)。
 // ブロックの枠・セル・端数・空きのスタック・索引・世界の帳簿を配列で持ち、GPU(sim/gpu_multires)と同じ順・同じ関数
 // (shaders/common/multires.hlsli・multires_tree.hlsli)で操作する。テストは CPU と GPU の配列をそのまま比べる(索引だけは引いた結果を比べる)。
 //
@@ -119,13 +119,17 @@ namespace bicameral::sim {
     // 進める規則があったブロックを次の種にする。観察の枠は全部刻む。結果のセルは StepNest と同じになる
     void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick);
 
+    // 静かな本物の葉(MR_QUIET_TICKS 刻みを超えて種でも進める規則もない。multires_activity.hlsli)を粗くする要求を、
+    // 一覧の後ろに世界の枠の順で足す(T-0101)。一覧が一杯なら足さずに数える。ProcessRequests の前に、StepActive で刻む木に使う
+    void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick);
+
     // 活性の種の枠の一覧(枠の順)
     [[nodiscard]] std::vector<uint32_t> SeedSlots(const MultiresNest& nest);
 
     // 世界(本物の葉のセルと端数)の要約。影は入らない
     [[nodiscard]] uint64_t HashRealLeaves(const MultiresNest& nest);
 
-    // 状態の全部(見出し〔活性の印も〕・セル・端数・空きのスタック・帳簿・数える欄)の要約。CPU と GPU を比べるため。索引・要求・種は入らない
+    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄)の要約。CPU と GPU を比べるため。索引・要求・種は入らない
     [[nodiscard]] uint64_t HashWholeNest(const MultiresNest& nest);
 
     // 本物の葉のセルと世界の帳簿の、元素の数とエネルギーの合計を finestLevel の単位 × 2^-64 で

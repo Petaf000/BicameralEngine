@@ -2,6 +2,7 @@
 // 入口は 2 つ: ActivitySeedNode(GPU の入力 = この刻みの種の一覧。→ WakeFaceNode〔面を細かい側へたどる再帰〕→ ActivityStepNode)・
 // ObserverStepNode(CPU の入力。観察の枠を全部刻む)。CPU リファレンスは engine/src/sim/multires_activity.cpp の StepActive(同じ関数)。
 // 刻むノードは進める反応の規則があったブロックを次の刻みの種の一覧(u14)へ書き足す。
+// セルが変わったブロックと、つつかれた種には忙しさの印(busyTick)を書く(静かな葉を粗くする要求の元。T-0101)。
 // 木の管理のグラフ(multires_graph.hlsl)と分けたのは、反応の核を含んで大きく(debug の GPU-based validation の計装が数分かかる)、
 // 活性を使わない所(覗き窓・木の管理のテスト)に作らせないため。
 //
@@ -23,6 +24,7 @@ struct MrObserverRecord {
 };
 
 groupshared uint32_t gs_possible;
+groupshared uint32_t gs_changed;
 
 uint32_t CurrentMark() {
     return MrActivityMark(FX_U64(g_tickHigh, g_tickLow));
@@ -31,10 +33,16 @@ uint32_t CurrentMark() {
 // 刻むノードの 1 グループのスレッドの数(1 スレッド 8 セル。512 = 1 スレッド 1 セルとも測ったが差は揺れの中だった。perf.md)
 static const uint32_t ACTIVITY_STEP_THREADS = 64;
 
-// ブロックの刻むセルを 1 刻み。進める規則があったセルが 1 つでもあれば true(グループで一様)
-bool StepBlockCells(uint32_t slot, uint32_t thread) {
-    if (thread == 0)
+// StepBlockCells の結果(グループで一様)
+static const uint32_t STEP_POSSIBLE = 1;  // 進める規則があったセルが 1 つでもある(次の刻みの種)
+static const uint32_t STEP_CHANGED = 2;   // 変わったセルが 1 つでもある(忙しい。T-0101)
+
+// ブロックの刻むセルを 1 刻み
+uint32_t StepBlockCells(uint32_t slot, uint32_t thread) {
+    if (thread == 0) {
         gs_possible = 0;
+        gs_changed = 0;
+    }
 
     GroupMemoryBarrierWithGroupSync();
     const MrBlock block = g_blocks[slot];
@@ -46,15 +54,19 @@ bool StepBlockCells(uint32_t slot, uint32_t thread) {
             continue;
 
         const uint32_t address = CellAddress(slot, index);
-        const RxCellStep step = MrStepCellDetailed(MakeTable(), g_cells[address], seed, tick, block, index);
+        const RxCell before = g_cells[address];
+        const RxCellStep step = MrStepCellDetailed(MakeTable(), before, seed, tick, block, index);
         g_cells[address] = step.cell;
         if (step.possible != 0)
             InterlockedOr(gs_possible, 1u);
+
+        if (MrCellChanged(before, step.cell))
+            InterlockedOr(gs_changed, 1u);
     }
 
     GroupMemoryBarrierWithGroupSync();
 
-    return gs_possible != 0;
+    return (gs_possible != 0 ? STEP_POSSIBLE : 0u) | (gs_changed != 0 ? STEP_CHANGED : 0u);
 }
 
 // clang-format off
@@ -75,9 +87,11 @@ void ActivitySeedNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thre
     MrWake wake;
     wake.schedule = MR_NO_BLOCK;
     wake.descend = MR_NO_BLOCK;
-    if (valid && thread == MR_WAKE_CHECKS)
+    if (valid && thread == MR_WAKE_CHECKS) {
         wake.schedule = slot;
-    else if (valid && thread < MR_WAKE_CHECKS)
+        if (g_blocks[slot].busyTick == MR_BUSY_POKED)
+            g_blocks[slot].busyTick = CurrentMark();  // つつかれた刻みの印にする(T-0101)
+    } else if (valid && thread < MR_WAKE_CHECKS)
         wake = MrWakeAcross(MakeTree(), g_blocks[slot], thread / MR_FACES, face, g_rootLevel);
 
     // --- 出力(全部のスレッドが 0 件か 1 件ずつ)---
@@ -136,7 +150,7 @@ void WakeFaceNode(ThreadNodeInputRecord<MrFaceRecord> input,
     stepOutput.OutputComplete();
 }
 
-// 印を付けた世界のブロックを刻む(1 グループ = 1 ブロック)。進める規則があれば次の刻みの種(u14)へ
+// 印を付けた世界のブロックを刻む(1 グループ = 1 ブロック)。セルが変わったら忙しさの印、進める規則があれば次の刻みの種(u14)へ
 [Shader("node")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
@@ -146,7 +160,14 @@ void ActivityStepNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thre
     if (thread == 0)
         InterlockedAdd(g_counters[MR_COUNTER_SCHEDULED], 1u);
 
-    if (StepBlockCells(slot, thread) && thread == 0)
+    const uint32_t result = StepBlockCells(slot, thread);
+    if (thread != 0)
+        return;
+
+    if ((result & STEP_CHANGED) != 0)
+        g_blocks[slot].busyTick = CurrentMark();  // 変わったので忙しい(T-0101)
+
+    if ((result & STEP_POSSIBLE) != 0)
         AppendActivity(slot);
 }
 

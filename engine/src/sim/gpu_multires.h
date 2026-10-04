@@ -1,7 +1,8 @@
 // gpu_multires.h — 多重解像度の木(sim/multires_nest の CPU リファレンスと同じ形)を GPU に置き、
 // 世界の木の要求の処理(Compute の段 shaders/sim/multires_tree.hlsl + Work Graph shaders/sim/multires_graph.hlsl。T-0018)・
 // 観察の影を作る・引き戻す(Work Graph の再帰)・反応の刻み(Compute。multires_step.hlsl)を記録する(T-0017)。
-// 活性のブロックだけ刻む(Work Graph の ActivitySeedNode → WakeFaceNode → ActivityStepNode。T-0100)もできる。
+// 活性のブロックだけ刻む(Work Graph の ActivitySeedNode → WakeFaceNode → ActivityStepNode。T-0100)と、
+// 静かな葉を粗くする要求を作る(Compute の TreeQuiet。T-0101)もできる。
 // 活性の種の一覧は 2 本を刻みごとに入れ替える(この刻みの種 = GPU の入力、次の刻みの種 = u14 に書き足す)。
 //
 // 使い方(テスト。1 刻み = 要求の処理と影の出来事 → 刻む → 影の引き戻し。CPU の test::StepMultiresScene と同じ順。
@@ -52,6 +53,9 @@ namespace bicameral::sim {
         // 要求の一覧を写す(一覧が空の時に。1 本のリストで REQUEST_UPLOAD_SLOTS 回まで)
         [[nodiscard]] bool RecordRequests(ID3D12GraphicsCommandList10* list,
                                           std::span<const multires::MrRequest> requests);
+        // 静かな本物の葉を粗くする要求を一覧の後ろに足す(SubmitQuietCoarsenRequests と同じ。RecordRequests の後・
+        // RecordProcessRequests の前。tick はこれから処理する刻み。T-0101)
+        void RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
         void RecordProcessRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
         // --- 観察の枠(multires_nest.h の同じ名前の関数と同じ結果)---
@@ -139,7 +143,7 @@ namespace bicameral::sim {
 
         static constexpr uint32_t TABLE_COUNT = 4;  // 物質・規則・索引・速度
         static constexpr uint32_t ACTIVITY_LISTS = 2;
-        static constexpr uint32_t TREE_PASS_COUNT = 6;
+        static constexpr uint32_t TREE_PASS_COUNT = 7;
         static constexpr uint32_t MAX_TIMESTAMPS = 16;
 
         GpuMultires() = default;

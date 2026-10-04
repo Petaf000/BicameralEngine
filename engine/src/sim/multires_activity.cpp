@@ -3,6 +3,8 @@
 // GPU(shaders/sim/multires_graph.hlsl の ActivitySeedNode → WakeFaceNode → ActivityStepNode)は同じことを並列に行う。
 // 印は「この刻みの印と交換して、前と違えば初めて」なので、どの順に起こしても刻むブロックの集合・数える欄・印は同じになる。
 // 面をたどる再帰も、たどる道(どの種のどの面からか)は順に依存しないので、上限で止まった数も同じになる。
+// 刻んでセルが変わったブロックと、木の変更でつつかれたブロックには忙しさの印(busyTick)を書き、印が古い本物の葉を
+// 粗くする要求を作る(SubmitQuietCoarsenRequests。GPU は multires_tree.hlsl の TreeQuiet。T-0101)。
 #include <algorithm>
 
 #include "common/multires_activity.hlsli"
@@ -61,6 +63,9 @@ namespace bicameral::sim {
         void WakeSeed(MultiresNest& nest, uint32_t slot, uint32_t mark) {
             const CpuTree tree{.nest = &nest};
             const MrBlock block = nest.blocks[slot];
+            if (block.busyTick == MR_BUSY_POKED)
+                nest.blocks[slot].busyTick = mark;  // つつかれた刻みの印にする(T-0101)
+
             Schedule(nest, slot, mark);
             for (uint32_t check = 0; check < MR_WAKE_CHECKS; ++check) {
                 const uint32_t face = check % MR_FACES;
@@ -73,22 +78,28 @@ namespace bicameral::sim {
             }
         }
 
-        // 印のあるブロックを刻む。進める規則があったら true
-        bool StepBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot, uint64_t worldSeed,
-                       uint64_t tick) {
+        struct BlockStep {
+            bool possible = false;  // 進める規則があった(次の刻みの種)
+            bool changed = false;   // セルが 1 つでも変わった(忙しい)
+        };
+
+        // 印のあるブロックを刻む
+        BlockStep StepBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot, uint64_t worldSeed,
+                            uint64_t tick) {
             const MrBlock& block = nest.blocks[slot];
-            bool possible = false;
+            BlockStep result;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
 
                 RxCell& cell = CellAt(nest, slot, index);
                 const RxCellStep step = MrStepCellDetailed(view, cell, worldSeed, tick, block, index);
+                result.changed = result.changed || MrCellChanged(cell, step.cell);
+                result.possible = result.possible || step.possible != 0;
                 cell = step.cell;
-                possible = possible || step.possible != 0;
             }
 
-            return possible;
+            return result;
         }
 
     }  // namespace
@@ -105,16 +116,41 @@ namespace bicameral::sim {
 
         std::ranges::fill(nest.seeds, uint8_t{0});
 
-        // --- 印のある世界のブロックを刻み、進める規則があれば次の種に ---
+        // --- 印のある世界のブロックを刻む。セルが変わったら忙しさの印、進める規則があれば次の種に ---
         const ReactionTableView view = table.View();
         for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
-            if (nest.blocks[slot].activeTick == mark && StepBlock(nest, view, slot, worldSeed, tick))
+            if (nest.blocks[slot].activeTick != mark)
+                continue;
+
+            const BlockStep step = StepBlock(nest, view, slot, worldSeed, tick);
+            if (step.changed)
+                nest.blocks[slot].busyTick = mark;
+
+            if (step.possible)
                 nest.seeds[slot] = 1;
         }
 
         // --- 観察の枠は全部刻む(活性に入れない。D-403)---
         for (auto slot = worldBlocks; slot < nest.blocks.size(); ++slot)
             StepBlock(nest, view, slot, worldSeed, tick);
+    }
+
+    void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick) {
+        const CpuTree tree{.nest = &nest};
+        const uint32_t mark = MrActivityMark(tick);
+        uint32_t& count = nest.counters[MR_COUNTER_REQUESTS];
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            if (!MrWantsQuietCoarsen(tree, slot, mark))
+                continue;
+
+            if (count == MR_MAX_REQUESTS) {
+                nest.counters[MR_COUNTER_QUIET_DEFERRED] += 1;
+                continue;
+            }
+
+            nest.requests[count++] = MrMakeQuietCoarsenRequest(nest.blocks[slot]);
+            nest.counters[MR_COUNTER_QUIET_REQUESTS] += 1;
+        }
     }
 
     std::vector<uint32_t> SeedSlots(const MultiresNest& nest) {

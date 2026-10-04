@@ -111,9 +111,9 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     // --- 本物: 索引に入れ、木を変えたブロックをつつく(活性の種。最初の段だけ親も)---
     IndexInsert(childSlot);
     if (record.depth == 0)
-        AppendActivity(record.parentSlot);
+        PokeBlock(record.parentSlot);
 
-    AppendActivity(childSlot);
+    PokeBlock(childSlot);
 }
 
 // 許可した粗くする要求の 1 段(1 スレッド = 親の八分の一のセル t。multires_tree.cpp の ApplyCoarsen)
@@ -191,7 +191,7 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     g_blocks[parentSlot].children[octant] = MR_NO_BLOCK;
     IndexRemove(childSlot);
     g_blocks[childSlot] = MrMakeUnusedBlock();
-    AppendActivity(parentSlot);
+    PokeBlock(parentSlot);
 }
 
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める

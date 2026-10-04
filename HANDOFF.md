@@ -1,36 +1,43 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-04 / チケット: T-0100 木の上の活性: 活性ブロックの一覧・レベルをまたいで隣を起こす — 完了
+最終更新: 2026-10-04 / チケット: T-0101 静かなブロックを粗くする — 完了
 
 ## 状態(3 行以内)
-- 多重解像度の木で、種(前の刻みに進める反応があった・木の変更でつつかれた)とその面の隣(レベルをまたぐ)だけを刻めるようになった(StepActive / RecordStepActive)。
-- 毎刻み、刻んだ集合 = 総当たりの面の隣・全部を刻む StepNest とセルがビット一致・GPU(HW・WARP)は状態の全部と次の種が CPU と一致。
-- 次は T-0101(静かなブロックを粗くする要求を GPU で作る。N 刻み静かなら。2026-10-04 ユーザー決定)。
+- N(MR_QUIET_TICKS = 16)刻み変わっていない本物の葉を、GPU(TreeQuiet)と CPU(SubmitQuietCoarsenRequests)が枠の順に「粗くする要求」にする。
+- 忙しさ = 見出しの busyTick(刻んでセルが変わった・木の変更でつつかれた刻みの印)。CPU と GPU(HW・WARP)が毎刻み状態の全部と次の種まで一致・保存量一致・燃え尽きたら根まで畳まれる。
+- 次は T-0102(一様なブロック: 見出しの枠とセルの頁を別のプールに)。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(98)。
-- multires_activity(debug 約 87 s)・gpu_multires_activity(debug 約 125 s)・gpu_multires_activity_warp(debug 約 106 s)。
-  前からの multires・gpu_multires(debug 約 223 s)・gpu_multires_warp・gpu_probe_peek(+ warp)・window_replay_*(record・play・peek)も通る。
-- **gpu_probe_peek(debug の HW)は約 414 s かかる**(最初の刻みで約 160 s 止まる。T-0018 の commit に戻しても 300 s で落ちたので前から。
-  GPU-based validation が大きいシェーダーを初めて使う時の計装と思われる。未確認)。TIMEOUT を 600 にした。
-- 計測: `job.py run -Preset release -Exe gpu_multires_activity_test`(「GPU 時間」の行。根 512 個: 全部が種 0.6〜1.2 ms・静か 0.08〜0.12 ms・全部を刻む 0.4〜0.5 ms)。
+- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(100)。
+- multires_quiet(debug 約 60 s)・gpu_multires_quiet(debug HW 約 60 s)・gpu_multires_quiet_warp(debug 約 30 s)。全部のテストの結果は下の「全部のテスト」。
+- 計測: `job.py run -Preset release -Exe gpu_multires_quiet_test -- --queue compute`(「GPU 時間: 静かな葉を探す段」。枠 640 で 0.0056 ms)。
+- **全部のテスト(2026-10-04、debug)**: 60 のうち 56 が通った。**時間切れ 4 つ(gpu_physics_wall・gpu_probe_sim・gpu_probe_trace・gpu_probe_fire)はこのチケットと無関係**:
+  HW の GPU-based validation で、大きいシェーダーを使うたびに約 155 s 止まる(gpu_probe_sim は 1 回の GPU の実行ごとに約 155 s。結果のハッシュは正しい)。
+  T-0100 の commit に戻して(stash)も同じだった。ドライバは前と同じ 32.0.15.9597。gpu_physics_wall は GBV を切っているのに切れたので、GBV だけでなく PC が遅いのかもしれない。原因は未確認(BACKLOG)。window_replay_* は 127 s(TIMEOUT 240)・gpu_probe_peek(HW)は 358 s で通った(TIMEOUT 600)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 活性はまだ反応だけ(段をまたぐ輸送 T-0019 が無い)ので、隣を起こしても結果は変わらない。隣の正しさは総当たりとの一致で確かめている。
-- 静かな世界でも約 0.1 ms の固定費・全部が活性だと全部を刻む Compute より遅い(BACKLOG。T-0019 の後に測り直す)。
-- 窓(仮の世界)は木ではないので、活性の木はまだ窓に出ていない。粗くする要求を作る側・一様なブロックは T-0101・T-0102。
-- (前から)粗くするのは 1 刻み 1 段・影の鎖は手で枠を決める・成分の溢れ(R-MULTI-4)・段をまたぐ輸送なし(T-0019)・PIX・セーブ・AMD は未確認/未着手。
+- 反応の核: 進める規則がある(possible = 1)のにセルが変わらないまま種であり続けるセルがある(燃え尽きかけの木箱。BACKLOG。原因は未確認)。粗くするのは「変わったか」で決めるので影響しない。
+- 観察の影の親になっている本物の葉も粗くなる(今の影の親は根か写しだけ。BACKLOG)。
+- (前から)活性の固定費 約 0.1 ms・全部活性だと Compute より遅い・粗くするのは 1 刻み 1 段・段をまたぐ輸送なし(T-0019)・窓は木ではない・PIX・セーブ・AMD は未確認/未着手。
+- **gpu_probe_peek(debug の HW)は約 414 s かかる**(T-0018 の時点から。TIMEOUT 600)。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- T-0100 を 3 つに分けた: T-0100 = 活性の一覧と隣 / T-0101 = 静かなブロックを粗くする(**N 刻み続けて変わらない葉**。N は定数で後から測って調整)/
-  T-0102 = 一様なブロック(**見出しの枠とセルの頁〔512 セル〕を別のプールに**。一様なら頁なしで値 1 つ)。いずれもユーザー決定(ROADMAP)。
-- 細部(Claude が決めた。17 §5「活性」): 面の隣 = 覆われていない八分の一の箱どうしが面で接するブロック・印は見出しの activeTick(世界の要約には入れない)・
-  種の一覧は GPU の入力そのものを 2 本入れ替え・観察の枠は活性に入れず毎刻み全部刻む・活性のグラフは別の state object(使う時だけ作る)。
+- N は定数 16(ユーザー決定は「定数で後から測って調整」。値は Claude が決めた)。
+- 細部(Claude が決めた。17 §5「静かなブロックを粗くする」): 忙しさは「セルが変わった・つつかれた」(種とは分ける)・静かな兄弟は八分の一の番号の小さい 1 つだけ要求・
+  要求の順は外からの要求の後ろに世界の枠の順・一杯なら数えて次の刻みへ。
 
 ## 次にやること
-NEXT.md の先頭(M2: T-0101 静かなブロックを粗くする)。
+NEXT.md の先頭(M2: T-0102 一様なブロック)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **静かなブロックを粗くする(T-0101)**: 規則は shaders/common/multires_activity.hlsli の末尾(MR_QUIET_TICKS・MrIsQuietLeaf・MrWantsQuietCoarsen・MrCellChanged)。
+  CPU は multires_activity.cpp の SubmitQuietCoarsenRequests、GPU は multires_tree.hlsl の TreeQuiet(gpu_multires.cpp の RecordQuietRequests。1 グループ 512 スレッド、InclusiveScan を使い回す)。
+  1 刻みの順: 外からの要求(RecordRequests)→ RecordQuietRequests(tick)→ RecordProcessRequests → RecordStepActive(CPU は tests/multires_quiet_scene.h の BeginQuietTick)。
+  **忙しさの印 busyTick**: つつく所は全部 PokeBlock(CPU は multires_nest_internal.h、GPU は multires_bindings.hlsli。種にして MR_BUSY_POKED を書く)。
+  ActivitySeedNode / WakeSeed が POKED を刻みの印に直し、ActivityStepNode / StepActive がセルが変わった時に刻みの印を書く。木をつつく所を足したら PokeBlock を使う。
+  全部を刻む StepNest だけの木では POKED のまま(粗くならない)。
+- 見出し MrBlock は 88 B(activeTick・busyTick・padding)。HashWholeNest は両方の印を含む。数える欄は 17 QUIET_REQUESTS・18 QUIET_DEFERRED を足した(20 個のまま)。
+- テストの場面の要求の一覧は 1 刻みに 1 つの親を 1 つの要求しか取れない: 同じ根の中を同じ刻みに細かくすると後ろは取り合いで落ちる(場面は空気の点を 1 刻みに 1 つずつ出す)。
 - **木の上の活性(T-0100)**: 規則と面の隣は shaders/common/multires_activity.hlsli(MrWakeAcross・MrNearOctant・MrFindContaining。Tree の約束 = Block・Lookup)。
   CPU は engine/src/sim/multires_activity.cpp(StepActive。種 nest.seeds は世界の枠ごとの 0 / 1)、GPU は shaders/sim/multires_activity_graph.hlsl
   (ActivitySeedNode → WakeFaceNode〔スレッド起動・再帰 MR_MAX_WAKE_DEPTH 28〕→ ActivityStepNode、観察の枠は ObserverStepNode)と gpu_multires.cpp の RecordStepActive。

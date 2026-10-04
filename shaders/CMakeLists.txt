@@ -117,7 +117,7 @@ bicameral_add_shader(sim/physics_graph.hlsl PROFILE lib_6_8)  # 物理の広域�
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY Main)  # 多重解像度の入れ子の反応の刻み(T-0017)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8)  # 多重解像度の細かくする・粗くする・影の引き戻し(T-0017・T-0018)
 bicameral_add_shader(sim/multires_activity_graph.hlsl PROFILE lib_6_8)  # 木の上の活性: 種と面の隣だけ刻む(T-0100)
-foreach(_entry IN ITEMS TreeResolve TreeSettle TreeAllocate TreeRelease TreeClearIndex TreeFillIndex)  # 木の管理の段(T-0018)
+foreach(_entry IN ITEMS TreeResolve TreeSettle TreeAllocate TreeRelease TreeClearIndex TreeFillIndex TreeQuiet)  # 木の管理の段(T-0018・T-0101)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/multires_tree.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME multires_${_snake})

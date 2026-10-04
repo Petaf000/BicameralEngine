@@ -1,5 +1,5 @@
 // multires_tree.hlsl — 多重解像度の世界の木の管理の Compute の段(17 §5「木の管理」。T-0018。ADR-0016)。
-// 1 刻みの要求の処理: TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
+// 1 刻みの要求の処理: (静かな葉を粗くするなら TreeQuiet。T-0101)→ TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
 // → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
 // RecordProcessRequests。CPU リファレンスは engine/src/sim/multires_tree.cpp(同じ関数・同じ順)。
 //
@@ -38,6 +38,36 @@ void InclusiveScan(uint32_t i, uint32_t blockValue, uint32_t fractionValue) {
         gs_fractionScan[i] = fractions;
         GroupMemoryBarrierWithGroupSync();
     }
+}
+
+// --- 0. 静かな葉を粗くする要求(T-0101。1 グループ。multires_activity.hlsli の MrWantsQuietCoarsen)---
+// 外から渡された要求(数は MR_COUNTER_REQUESTS)の後ろに、世界の枠の順に足す。枠を MR_MAX_REQUESTS 個ずつ区切り、区切りの中の位置は累積和で決める。
+// 一覧が一杯なら残りは足さずに数える(次の刻みにまた作られる)
+
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeQuiet(uint32_t i : SV_GroupIndex) {
+    const uint32_t mark = MrActivityMark(FX_U64(g_tickHigh, g_tickLow));
+    const uint32_t base = RequestCount();
+    uint32_t wanted = 0;  // ここまでの区切りで粗くしたい葉の数(グループで一様)
+    for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
+        const uint32_t slot = first + i;
+        const bool wants = slot < g_worldBlocks && MrWantsQuietCoarsen(MakeTree(), slot, mark);
+        InclusiveScan(i, wants ? 1u : 0u, 0u);
+
+        const uint32_t position = base + wanted + gs_blockScan[i] - 1;
+        if (wants && position < MR_MAX_REQUESTS)
+            g_requests[position] = MrMakeQuietCoarsenRequest(g_blocks[slot]);
+
+        wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
+        GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
+    }
+
+    if (i != 0)
+        return;
+
+    const uint32_t added = min(wanted, MR_MAX_REQUESTS - base);
+    g_counters[MR_COUNTER_REQUESTS] = base + added;
+    g_counters[MR_COUNTER_QUIET_REQUESTS] += added;
+    g_counters[MR_COUNTER_QUIET_DEFERRED] += wanted - added;
 }
 
 // --- 1. 解決 ---

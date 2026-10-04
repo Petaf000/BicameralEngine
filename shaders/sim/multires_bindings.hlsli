@@ -205,6 +205,12 @@ void AppendActivity(uint32_t slot) {
     g_activity.InterlockedAdd(MR_ACTIVITY_NUM_RECORDS, 1u);
 }
 
+// 木を変えたブロックをつつく: 活性の種にし、忙しさの印を「つつかれた」にする(T-0100・T-0101。multires_tree.cpp の PokeBlock)
+void PokeBlock(uint32_t slot) {
+    g_blocks[slot].busyTick = MR_BUSY_POKED;
+    AppendActivity(slot);
+}
+
 // この刻みに刻む印を付ける。初めて付けたなら true(1 刻みに 1 回だけ刻む)
 bool ScheduleBlock(uint32_t slot, uint32_t mark) {
     uint32_t previous;

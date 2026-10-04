@@ -29,4 +29,10 @@ namespace bicameral::sim::nest_detail {
         nest.fractions[(size_t{fractionSlot} * multires::MR_BLOCK_CELLS) + index] = fraction;
     }
 
+    // 木を変えたブロックをつつく: 活性の種にし、忙しさの印を「つつかれた」にする(T-0100・T-0101)
+    inline void PokeBlock(MultiresNest& nest, uint32_t slot) {
+        nest.seeds[slot] = 1;
+        nest.blocks[slot].busyTick = multires::MR_BUSY_POKED;
+    }
+
 }  // namespace bicameral::sim::nest_detail
