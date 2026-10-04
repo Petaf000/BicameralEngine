@@ -262,6 +262,12 @@ namespace bicameral::sim {
             parent.children[octant] = childSlot;
             nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_REAL, childFraction);
             IndexInsert(nest, childSlot);
+
+            // --- 木を変えたブロックをつつく(活性の種。最初の段だけ親も。T-0100)---
+            if (depth == 0)
+                nest.seeds[parentSlot] = 1;
+
+            nest.seeds[childSlot] = 1;
         }
 
         void ApplyRefine(MultiresNest& nest, uint32_t i) {
@@ -353,6 +359,7 @@ namespace bicameral::sim {
             parent.children[child.parentOctant] = MR_NO_BLOCK;
             IndexRemove(nest, childSlot);
             nest.blocks[childSlot] = MrMakeUnusedBlock();
+            nest.seeds[child.parent] = 1;
         }
 
         // --- 5. 解放: 返す枠を要求の順に積む・取り合いの印を消す・数える ---
@@ -400,6 +407,7 @@ namespace bicameral::sim {
         nest.blocks[slot] = block;
         std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
         IndexInsert(nest, slot);
+        nest.seeds[slot] = 1;
 
         return slot;
     }

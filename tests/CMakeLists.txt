@@ -30,6 +30,10 @@ add_executable(multires_test multires_test.cpp)
 target_link_libraries(multires_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires COMMAND multires_test)
 
+add_executable(multires_activity_test multires_activity_test.cpp)  # 木の上の活性(T-0100)
+target_link_libraries(multires_activity_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_activity COMMAND multires_activity_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
@@ -90,6 +94,11 @@ bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute)
 # WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
 bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
 
+bicameral_add_gpu_test(gpu_multires_activity_test)  # 木の上の活性の GPU と CPU のビット一致(T-0100)
+target_link_libraries(gpu_multires_activity_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_multires_activity gpu_multires_activity_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_multires_activity_warp gpu_multires_activity_test warp --warp --queue compute)
+
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
 foreach(_scene IN ITEMS stack mass_ratio pile)
@@ -144,6 +153,9 @@ bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu)
 bicameral_add_gpu_test_case(gpu_probe_peek_warp gpu_probe_peek_test warp --warp)
+# debug の HW は最初の刻みで約 160 s 止まる(GPU-based validation が大きいシェーダーを初めて使う時に計装すると思われる。未確認)。
+# 2 回走らせるので 300 s を超える(T-0018 の時点で既に超えていた。2026-10-04 に確認)
+set_tests_properties(gpu_probe_peek PROPERTIES TIMEOUT 600)
 # 木箱に火をつける(T-0089): 刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる。
 # ctest(debug・GBV)は 1 分(3600 刻み)。10 分(36,000 刻み)は release で: job.py run -Preset release -Exe gpu_probe_fire_test
 bicameral_add_gpu_test(gpu_probe_fire_test)

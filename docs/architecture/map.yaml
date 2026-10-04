@@ -240,6 +240,11 @@ views:
           note: "解決 → 確定 → 割り当て → 適用 → 解放 → 索引の作り直し。枠の番号は要求の順の累積和で決まる(CPU と GPU で配列のまま一致)" }
       - { id: multirestreehlsl, group: shared, label: "multires_tree.hlsli<br/>要求・索引の番地・帳簿の約束",
           code: "shaders/common/multires_tree.hlsli::MrIndexHome", ticket: T-0018, doc: docs/design/17-multiresolution.md }
+      - { id: multiresactivity, group: simlib, label: "StepActive<br/>木の上の活性: 種と面の隣だけ刻む",
+          code: "engine/src/sim/multires_activity.cpp::StepActive", ticket: T-0100, doc: docs/design/17-multiresolution.md,
+          note: "種 = 前の刻みに進める反応があった・木の変更でつつかれた。印(activeTick)を付けて刻む。全部を刻む StepNest とビット一致" }
+      - { id: multiresactivityhlsl, group: shared, label: "multires_activity.hlsli<br/>面の隣(粗い側は索引を上へ、細かい側は面を子へ)",
+          code: "shaders/common/multires_activity.hlsli::MrWakeAcross", ticket: T-0100, doc: docs/design/17-multiresolution.md }
       - { id: gpumultires, group: simlib, label: "GpuMultires<br/>木の管理は Compute の段 + Work Graph、刻みは Compute",
           code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordProcessRequests", ticket: T-0018, doc: docs/design/17-multiresolution.md,
           note: "shaders/sim/multires_tree.hlsl(段)・multires_graph.hlsl(細かくする鎖の再帰・粗くする要求・影)・multires_step.hlsl" }
@@ -253,6 +258,11 @@ views:
       - { id: gpumultirestest, group: tests, label: "gpu_multires_test<br/>本物の鎖・影の鎖・たくさんの要求を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_test.cpp::RunStress", ticket: T-0018,
           note: "状態の全部が配列のまま一致・GPU の索引で本物のブロックが全部引ける。WARP でも通る(T-0097 の WARP)" }
+      - { id: activitytest, group: tests, label: "multires_activity_test<br/>刻んだ集合 = 総当たりの面の隣・全部刻むのとビット一致",
+          code: "tests/multires_activity_test.cpp::RunActivity", ticket: T-0100 }
+      - { id: gpuactivitytest, group: tests, label: "gpu_multires_activity_test<br/>活性の Work Graph を毎刻み CPU と比べる",
+          code: "tests/gpu_multires_activity_test.cpp::RunActivity", ticket: T-0100,
+          note: "状態の全部(活性の印も)と次の刻みの種の集合が一致。WARP でも通る" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -340,6 +350,12 @@ views:
       - [gpumultirestest, gpumultires]
       - [gpumultirestest, multiresnest, "毎刻み比べる"]
       - [probepeek, gpumultires, "同じルート署名に u4・u5 を足して"]
+      - [multiresactivity, multiresactivityhlsl]
+      - [multiresactivityhlsl, multirestreehlsl, "索引で引く"]
+      - [gpumultires, multiresactivityhlsl, "ActivitySeedNode・WakeFaceNode(GPU と CPU で同じ関数)"]
+      - [activitytest, multiresactivity]
+      - [gpuactivitytest, gpumultires]
+      - [gpuactivitytest, multiresactivity, "毎刻み比べる"]
       - [probesim, probepeek, "抽出の後のフック"]
       - [viewcontroller, frameloop, "P・PageDown → 覗く場所"]
       - [peektest, probepeek]

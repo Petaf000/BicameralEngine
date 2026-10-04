@@ -198,6 +198,7 @@ namespace bicameral::sim {
         nest.requests.assign(MR_MAX_REQUESTS, MrMakeRequest(0, 0, 0, 0, 0));
         nest.states.assign(MR_MAX_REQUESTS, MrMakeRequestState());
         nest.claims.assign(capacity.worldBlocks, MR_NO_CLAIM);
+        nest.seeds.assign(capacity.worldBlocks, 0);
 
         // --- 空きのスタック: 上(最後)から 0, 1, 2… と取れるように積む ---
         nest.freeBlocks.resize(capacity.worldBlocks);
@@ -281,8 +282,10 @@ namespace bicameral::sim {
 
     uint64_t HashWholeNest(const MultiresNest& nest) {
         uint64_t hash = 0;
-        for (const MrBlock& block : nest.blocks)
+        for (const MrBlock& block : nest.blocks) {
             hash = FxHashCombine(hash, HashBlock(block));
+            hash = FxHashCombine(hash, block.activeTick);
+        }
 
         for (const RxCell& cell : nest.cells)
             hash = FxHashCombine(hash, HashReactionCell(cell));

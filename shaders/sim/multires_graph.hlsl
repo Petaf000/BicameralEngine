@@ -4,6 +4,8 @@
 // CoarsenRequestNode(GPU の入力 = 許可した粗くする要求)・PullBackNode・RemoveShadowNode(CPU の入力)。
 // CPU リファレンスは engine/src/sim/multires_tree.cpp の RefineRequestLevel・ApplyCoarsen と、multires_nest.cpp の RefineShadowLevel・
 // PullBackLevel・RemoveShadowChain(同じ順・同じ関数)。
+// 木を変えたブロック(細かくした親と子・粗くした親)は活性の一覧(u14 = この刻みの種)に足す(つつく。T-0100)。
+// 活性のブロックを刻むグラフは別の multires_activity_graph.hlsl(反応の核を含んで大きいので、使う時だけ作る)。
 //
 // 順番に依存しない理由: 1 刻みに 1 つの親は 1 つの要求だけが触る(取り合いは TreeSettle で決着)ので、グループどうしの書き込みは重ならない。
 // 1 グループの中でスレッドは別々のセルに書き、見出し・返す枠・索引はスレッド 0 だけが書く。数える欄と帳簿は足し算。
@@ -103,8 +105,15 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
         g_blocks[record.parentSlot].children[octant] = childSlot;
 
     g_blocks[childSlot] = MrMakeChildBlock(parent, record.parentSlot, octant, record.kind, childFraction);
-    if (real)
-        IndexInsert(childSlot);
+    if (!real)
+        return;
+
+    // --- 本物: 索引に入れ、木を変えたブロックをつつく(活性の種。最初の段だけ親も)---
+    IndexInsert(childSlot);
+    if (record.depth == 0)
+        AppendActivity(record.parentSlot);
+
+    AppendActivity(childSlot);
 }
 
 // 許可した粗くする要求の 1 段(1 スレッド = 親の八分の一のセル t。multires_tree.cpp の ApplyCoarsen)
@@ -182,6 +191,7 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     g_blocks[parentSlot].children[octant] = MR_NO_BLOCK;
     IndexRemove(childSlot);
     g_blocks[childSlot] = MrMakeUnusedBlock();
+    AppendActivity(parentSlot);
 }
 
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める

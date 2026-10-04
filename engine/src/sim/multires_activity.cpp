@@ -1,0 +1,130 @@
+// multires_activity.cpp — 多重解像度の木の上の活性の CPU リファレンス(multires_nest.h の StepActive。17 §5「活性」。T-0100)。
+// 種(前の刻みに進める反応の規則があった・木の変更でつつかれた)とその面の隣(multires_activity.hlsli)に印を付け、印のあるブロックだけ刻む。
+// GPU(shaders/sim/multires_graph.hlsl の ActivitySeedNode → WakeFaceNode → ActivityStepNode)は同じことを並列に行う。
+// 印は「この刻みの印と交換して、前と違えば初めて」なので、どの順に起こしても刻むブロックの集合・数える欄・印は同じになる。
+// 面をたどる再帰も、たどる道(どの種のどの面からか)は順に依存しないので、上限で止まった数も同じになる。
+#include <algorithm>
+
+#include "common/multires_activity.hlsli"
+#include "sim/multires_nest.h"
+#include "sim/multires_nest_internal.h"
+
+using namespace bicameral::multires;
+using namespace bicameral::reaction;
+
+namespace bicameral::sim {
+
+    namespace {
+
+        using nest_detail::CellAt;
+
+        // multires_activity.hlsli の Tree の約束
+        struct CpuTree {
+            const MultiresNest* nest = nullptr;
+
+            [[nodiscard]] MrBlock Block(uint32_t slot) const { return nest->blocks[slot]; }
+
+            [[nodiscard]] uint32_t Lookup(int32_t level, int64_t originX, int64_t originY, int64_t originZ) const {
+                return LookupBlock(*nest, level, originX, originY, originZ);
+            }
+        };
+
+        // 刻む印を付ける。初めてなら数える
+        void Schedule(MultiresNest& nest, uint32_t slot, uint32_t mark) {
+            MrBlock& block = nest.blocks[slot];
+            if (block.activeTick == mark)
+                return;
+
+            block.activeTick = mark;
+            nest.counters[MR_COUNTER_SCHEDULED] += 1;
+        }
+
+        // 面の向き face に進んで入ったブロック(WakeFaceNode と同じ。remaining は残りの再帰の数)
+        void WakeFace(MultiresNest& nest, uint32_t slot, uint32_t face, uint32_t remaining, uint32_t mark) {
+            const MrBlock block = nest.blocks[slot];
+            bool wakeSelf = false;
+            for (uint32_t i = 0; i < MR_FACE_OCTANTS; ++i) {
+                const uint32_t child = block.children[MrNearOctant(face, i)];
+                if (child == MR_NO_BLOCK)
+                    wakeSelf = true;
+                else if (remaining == 0)
+                    nest.counters[MR_COUNTER_WAKE_TOO_DEEP] += 1;
+                else
+                    WakeFace(nest, child, face, remaining - 1, mark);
+            }
+
+            if (wakeSelf)
+                Schedule(nest, slot, mark);
+        }
+
+        // 種 1 つ: 自分と、(八分の一, 面) ごとの隣(ActivitySeedNode と同じ)
+        void WakeSeed(MultiresNest& nest, uint32_t slot, uint32_t mark) {
+            const CpuTree tree{.nest = &nest};
+            const MrBlock block = nest.blocks[slot];
+            Schedule(nest, slot, mark);
+            for (uint32_t check = 0; check < MR_WAKE_CHECKS; ++check) {
+                const uint32_t face = check % MR_FACES;
+                const MrWake wake = MrWakeAcross(tree, block, check / MR_FACES, face, nest.capacity.rootLevel);
+                if (wake.schedule != MR_NO_BLOCK)
+                    Schedule(nest, wake.schedule, mark);
+
+                if (wake.descend != MR_NO_BLOCK)
+                    WakeFace(nest, wake.descend, face, MR_MAX_WAKE_DEPTH, mark);
+            }
+        }
+
+        // 印のあるブロックを刻む。進める規則があったら true
+        bool StepBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot, uint64_t worldSeed,
+                       uint64_t tick) {
+            const MrBlock& block = nest.blocks[slot];
+            bool possible = false;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (!MrIsSteppedCell(block, index))
+                    continue;
+
+                RxCell& cell = CellAt(nest, slot, index);
+                const RxCellStep step = MrStepCellDetailed(view, cell, worldSeed, tick, block, index);
+                cell = step.cell;
+                possible = possible || step.possible != 0;
+            }
+
+            return possible;
+        }
+
+    }  // namespace
+
+    void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick) {
+        const uint32_t worldBlocks = nest.capacity.worldBlocks;
+        const uint32_t mark = MrActivityMark(tick);
+
+        // --- 種とその面の隣に印を付ける(種は使い切る)---
+        for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
+            if (nest.seeds[slot] != 0 && nest.blocks[slot].kind == MR_BLOCK_REAL)
+                WakeSeed(nest, slot, mark);
+        }
+
+        std::ranges::fill(nest.seeds, uint8_t{0});
+
+        // --- 印のある世界のブロックを刻み、進める規則があれば次の種に ---
+        const ReactionTableView view = table.View();
+        for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
+            if (nest.blocks[slot].activeTick == mark && StepBlock(nest, view, slot, worldSeed, tick))
+                nest.seeds[slot] = 1;
+        }
+
+        // --- 観察の枠は全部刻む(活性に入れない。D-403)---
+        for (auto slot = worldBlocks; slot < nest.blocks.size(); ++slot)
+            StepBlock(nest, view, slot, worldSeed, tick);
+    }
+
+    std::vector<uint32_t> SeedSlots(const MultiresNest& nest) {
+        std::vector<uint32_t> slots;
+        for (uint32_t slot = 0; slot < nest.seeds.size(); ++slot) {
+            if (nest.seeds[slot] != 0)
+                slots.push_back(slot);
+        }
+
+        return slots;
+    }
+
+}  // namespace bicameral::sim

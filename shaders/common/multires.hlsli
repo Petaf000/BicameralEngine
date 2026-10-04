@@ -66,7 +66,9 @@ FX_CONST uint32_t MR_COUNTER_NO_SPACE = 11;       // 枠が足りず後回しに
 FX_CONST uint32_t MR_COUNTER_INVALID = 12;  // 無効な要求の数(累計。根が無い・ブロックが無い・子がある・根を粗くする)
 FX_CONST uint32_t MR_COUNTER_LEDGER_OUTSIDE = 13;  // 帳簿のレベルの外で落ちた端数の数(帳簿に入らない)
 FX_CONST uint32_t MR_COUNTER_INDEX_FULL = 14;      // 索引に入れられなかった数
-FX_CONST uint32_t MR_COUNTER_COUNT = 16;
+FX_CONST uint32_t MR_COUNTER_SCHEDULED = 15;       // 活性で刻んだ世界のブロックの数(累計。T-0100)
+FX_CONST uint32_t MR_COUNTER_WAKE_TOO_DEEP = 16;   // 面の隣を細かい側へたどる再帰の上限で起こせなかった数(累計。T-0100)
+FX_CONST uint32_t MR_COUNTER_COUNT = 20;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -83,7 +85,7 @@ struct MrBlock {
     uint32_t parentOctant;  // 親のどの八分の一を覆うか
     uint32_t fraction;      // 端数のブロックの枠(無ければ MR_NO_FRACTION)
     uint32_t children[8];   // 八分の一ごとの本物の子ブロック(影は入れない)
-    uint32_t padding;
+    uint32_t activeTick;  // 最後に活性で刻んだ刻みの印(MrActivityMark。T-0100)。世界の要約(HashRealLeaves)には入れない
 };
 
 // セルの端数(2^-64 単位。物質 ID の昇順、0 は持たない)。エネルギーの端数は符号なし(値 = 整数部 + 端数 · 2^-64、整数部は切り捨て)
@@ -148,7 +150,7 @@ FX_FN MrBlock MrMakeUnusedBlock() {
     for (uint32_t i = 0; i < 8; ++i)
         block.children[i] = MR_NO_BLOCK;
 
-    block.padding = 0;
+    block.activeTick = 0;
 
     return block;
 }
@@ -538,13 +540,20 @@ FX_FN MrShadowFamily MrPullBackShadow(Table table, RxCell parent, MrShadowFamily
 
 // --- 刻み --------------------------------------------------------------------------------------
 
-// 葉のセル(または影のセル)の 1 刻み。反応の核にセルの ID を (レベル, 世界の座標) から渡す
+// 葉のセル(または影のセル)の 1 刻み。反応の核にセルの ID を (レベル, 世界の座標) から渡す。
+// 進める規則があったか(possible)も返す(活性の種。T-0100)
 template <typename Table>
-FX_FN RxCell MrStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block, uint32_t index) {
+FX_FN RxCellStep MrStepCellDetailed(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block,
+                                    uint32_t index) {
     const uint64_t cellId = MrCellId(block.level, block.originX + (int64_t)MrCellX(index),
                                      block.originY + (int64_t)MrCellY(index), block.originZ + (int64_t)MrCellZ(index));
 
-    return RxEvaluateCell(table, cell, worldSeed, tick, cellId);
+    return RxStepCell(table, cell, worldSeed, tick, cellId);
+}
+
+template <typename Table>
+FX_FN RxCell MrStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block, uint32_t index) {
+    return MrStepCellDetailed(table, cell, worldSeed, tick, block, index).cell;
 }
 
 // このセルを刻むか: 使っているブロックで、本物の子に覆われていない(影のブロックは中間のセルも刻む。世界の写しは刻まない)

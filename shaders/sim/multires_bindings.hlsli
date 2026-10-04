@@ -5,13 +5,14 @@
 #ifndef BICAMERAL_MULTIRES_BINDINGS_HLSLI
 #define BICAMERAL_MULTIRES_BINDINGS_HLSLI
 
-#include "common/multires_tree.hlsli"
+#include "common/multires_activity.hlsli"
 
 // --- 結び付け ---
 // u0 ブロックの見出し [枠] / u1 セル [枠 × 512] / u2 端数 [端数の枠 × 512] / u3 数える欄(MR_COUNTER_*)/
 // u4・u5 外のバッファ(覗き窓が使う。shaders/sim/multires_peek.hlsl で宣言する。T-0096)/
 // u6 世界の枠の空きのスタック / u7 端数の枠の空きのスタック / u8 世界の帳簿 / u9 索引 / u10 要求 / u11 要求の途中の値 /
-// u12 取り合いの印 [世界の枠] / u13 Work Graph の GPU の入力(MR_GRAPH_INPUT_*。T-0018)/ t0〜t3 反応の表(物質・規則・索引・速度)
+// u12 取り合いの印 [世界の枠] / u13 Work Graph の GPU の入力(MR_GRAPH_INPUT_*。T-0018)/
+// u14 書き足す活性の一覧(MR_ACTIVITY_*。要求の処理の間はこの刻みの種、刻む間は次の刻みの種。T-0100)/ t0〜t3 反応の表(物質・規則・索引・速度)
 globallycoherent RWStructuredBuffer<MrBlock> g_blocks : register(u0);
 globallycoherent RWStructuredBuffer<RxCell> g_cells : register(u1);
 globallycoherent RWStructuredBuffer<MrFraction> g_fractions : register(u2);
@@ -24,6 +25,7 @@ RWStructuredBuffer<MrRequest> g_requests : register(u10);
 globallycoherent RWStructuredBuffer<MrRequestState> g_states : register(u11);
 globallycoherent RWStructuredBuffer<uint32_t> g_claims : register(u12);
 RWByteAddressBuffer g_graphInput : register(u13);
+RWByteAddressBuffer g_activity : register(u14);
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<RxRule> g_rules : register(t1);
 StructuredBuffer<uint32_t> g_ruleIndex : register(t2);
@@ -186,6 +188,47 @@ void AddToLedger(int32_t level, uint32_t column, uint32_t lostBits) {
     }
 
     InterlockedAdd(g_ledger[address], (uint64_t)lostBits);
+}
+
+// --- 活性(T-0100)---
+
+// 活性の一覧に枠を足す(順は決定的でなくてよい: 集合として使う)。一杯なら落として数える
+void AppendActivity(uint32_t slot) {
+    uint32_t position;
+    g_activity.InterlockedAdd(MR_ACTIVITY_RESERVED, 1u, position);
+    if (position >= MrActivityCapacity(g_worldBlocks)) {
+        g_activity.InterlockedAdd(MR_ACTIVITY_DROPPED, 1u);
+        return;
+    }
+
+    g_activity.Store(MR_ACTIVITY_RECORDS + (4 * position), slot);
+    g_activity.InterlockedAdd(MR_ACTIVITY_NUM_RECORDS, 1u);
+}
+
+// この刻みに刻む印を付ける。初めて付けたなら true(1 刻みに 1 回だけ刻む)
+bool ScheduleBlock(uint32_t slot, uint32_t mark) {
+    uint32_t previous;
+    InterlockedExchange(g_blocks[slot].activeTick, mark, previous);
+
+    return previous != mark;
+}
+
+// multires_activity.hlsli の Tree の約束
+struct GpuTree {
+    uint32_t unused;
+
+    MrBlock Block(uint32_t slot) { return g_blocks[slot]; }
+
+    uint32_t Lookup(int32_t level, int64_t originX, int64_t originY, int64_t originZ) {
+        return LookupBlock(level, originX, originY, originZ);
+    }
+};
+
+GpuTree MakeTree() {
+    GpuTree tree;
+    tree.unused = 0;
+
+    return tree;
 }
 
 #endif  // BICAMERAL_MULTIRES_BINDINGS_HLSLI

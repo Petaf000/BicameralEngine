@@ -1,39 +1,53 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-04 / チケット: T-0018 多重解像度の疎な木: 索引・ブロックプール・世界の帳簿 — 完了
+最終更新: 2026-10-04 / チケット: T-0100 木の上の活性: 活性ブロックの一覧・レベルをまたいで隣を起こす — 完了
 
 ## 状態(3 行以内)
-- 世界の木は要求(細かくする / 粗くする)だけで変わる。索引(ハッシュ表)・世界の枠と端数の枠の空きのスタック・世界の帳簿ができ、CPU と GPU(HW・WARP)で状態の全部が配列のままビット一致。
-- 24 段の往復で落ちた端数は帳簿へ入り「世界 + 帳簿」が一致。たくさんの要求(取り合い・枠不足・無効・索引の作り直し)の 140 刻みも毎刻み一致。
-- 次は T-0100(木の上の活性・一様なブロック。T-0018 から分けた)。
+- 多重解像度の木で、種(前の刻みに進める反応があった・木の変更でつつかれた)とその面の隣(レベルをまたぐ)だけを刻めるようになった(StepActive / RecordStepActive)。
+- 毎刻み、刻んだ集合 = 総当たりの面の隣・全部を刻む StepNest とセルがビット一致・GPU(HW・WARP)は状態の全部と次の種が CPU と一致。
+- 次は T-0101(静かなブロックを粗くする要求を GPU で作る。N 刻み静かなら。2026-10-04 ユーザー決定)。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(94)。
-- multires(debug 約 90 s)・gpu_multires(release 約 46 s・debug 約 217 s〔ctest の 300 s に近い〕・WARP 約 62 s)・gpu_probe_peek(+ warp)・window_replay_peek が通る。
-- 計測: `job.py run -Preset release -Exe gpu_multires_test`(「GPU 時間」の行。要求 0 件 0.053 ms・細かく 9 段 0.24 ms・粗く 1 段 0.29 ms)。
+- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(98)。
+- multires_activity(debug 約 87 s)・gpu_multires_activity(debug 約 125 s)・gpu_multires_activity_warp(debug 約 106 s)。
+  前からの multires・gpu_multires(debug 約 223 s)・gpu_multires_warp・gpu_probe_peek(+ warp)・window_replay_*(record・play・peek)も通る。
+- **gpu_probe_peek(debug の HW)は約 414 s かかる**(最初の刻みで約 160 s 止まる。T-0018 の commit に戻しても 300 s で落ちたので前から。
+  GPU-based validation が大きいシェーダーを初めて使う時の計装と思われる。未確認)。TIMEOUT を 600 にした。
+- 計測: `job.py run -Preset release -Exe gpu_multires_activity_test`(「GPU 時間」の行。根 512 個: 全部が種 0.6〜1.2 ms・静か 0.08〜0.12 ms・全部を刻む 0.4〜0.5 ms)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 粗くするのは 1 刻み 1 段、1 刻みに 1 つの親は 1 つの変更(取り合いは後回し。要求する側が次の刻みに出し直す)。要求の一覧は作る側が決定的な順に並べる約束(GPU で作る側はまだ無い)。
-- 影の鎖は観察の枠を手で決める(観察が増えたら観察の枠もプールにする)。粗くするブロックに影の子がぶら下がっていないかは呼ぶ側の責任。
-- 成分の溢れ(インラインの 8 種を超える)は数えるだけで帳簿に入らない(R-MULTI-4)。帳簿のレベルの外(−16〜63 の外)も数えるだけ。
-- (前から)段をまたぐ輸送なし(T-0019)・PIX・セーブ・AMD は未確認/未着手・WARP で 6×6 がウェーブの経路を通っているか未確認。
+- 活性はまだ反応だけ(段をまたぐ輸送 T-0019 が無い)ので、隣を起こしても結果は変わらない。隣の正しさは総当たりとの一致で確かめている。
+- 静かな世界でも約 0.1 ms の固定費・全部が活性だと全部を刻む Compute より遅い(BACKLOG。T-0019 の後に測り直す)。
+- 窓(仮の世界)は木ではないので、活性の木はまだ窓に出ていない。粗くする要求を作る側・一様なブロックは T-0101・T-0102。
+- (前から)粗くするのは 1 刻み 1 段・影の鎖は手で枠を決める・成分の溢れ(R-MULTI-4)・段をまたぐ輸送なし(T-0019)・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- T-0018 を 2 つに分けた: T-0018 = 索引・プール・要求・帳簿 / T-0100 = 活性・一様なブロック(ユーザー決定、ROADMAP)。
-- ADR-0016: 枠の番号も決定的にする(要求の順の累積和で配る)。索引は状態に入れない。速さが気になったら非決定的を考える(ユーザー)。
-- 細部(Claude が決めた。17 §5「木の管理」): 1 刻みに 1 つの親は 1 つの変更・粗くするのは 1 段ずつ・端数の枠は控えめに取って 0 なら返す・観察の枠は世界の枠の後ろ・帳簿は (レベル, 物質) ごと。
+- T-0100 を 3 つに分けた: T-0100 = 活性の一覧と隣 / T-0101 = 静かなブロックを粗くする(**N 刻み続けて変わらない葉**。N は定数で後から測って調整)/
+  T-0102 = 一様なブロック(**見出しの枠とセルの頁〔512 セル〕を別のプールに**。一様なら頁なしで値 1 つ)。いずれもユーザー決定(ROADMAP)。
+- 細部(Claude が決めた。17 §5「活性」): 面の隣 = 覆われていない八分の一の箱どうしが面で接するブロック・印は見出しの activeTick(世界の要約には入れない)・
+  種の一覧は GPU の入力そのものを 2 本入れ替え・観察の枠は活性に入れず毎刻み全部刻む・活性のグラフは別の state object(使う時だけ作る)。
 
 ## 次にやること
-NEXT.md の先頭(M2: T-0100 木の上の活性・一様なブロック)。
+NEXT.md の先頭(M2: T-0101 静かなブロックを粗くする)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **木の上の活性(T-0100)**: 規則と面の隣は shaders/common/multires_activity.hlsli(MrWakeAcross・MrNearOctant・MrFindContaining。Tree の約束 = Block・Lookup)。
+  CPU は engine/src/sim/multires_activity.cpp(StepActive。種 nest.seeds は世界の枠ごとの 0 / 1)、GPU は shaders/sim/multires_activity_graph.hlsl
+  (ActivitySeedNode → WakeFaceNode〔スレッド起動・再帰 MR_MAX_WAKE_DEPTH 28〕→ ActivityStepNode、観察の枠は ObserverStepNode)と gpu_multires.cpp の RecordStepActive。
+  **活性のグラフは `GpuMultires::Create(..., {.activity = true})` の時だけ作る**(反応の核を含んで大きく、debug の GPU-based validation で 1 回 2〜3 分。
+  木の管理のグラフに入れたら gpu_probe_peek が 300 s を超えて落ちた)。
+- 種の一覧(u14)は 2 本を刻みごとに入れ替える(m_activityCurrent)。要求の処理はこの刻みの一覧へ(細かくした親と子・粗くした親をつつく)、刻むノードは次の刻みの一覧へ書く。
+  先頭は D3D12_NODE_GPU_INPUT そのもの + 予約の数 + 落とした数、レコード 0 は空(MR_NO_BLOCK)。RecordStep(全部を刻む)だけを使う所では一覧が空にされず、一杯になると落とすだけ(害はない)。
+- **多重解像度のルート署名は UAV 15 個(u14 活性の一覧)・ルート定数 23 個で 63 / 64 語**。もう 1 語しか足せない。足すならバッファをまとめる。
+- 見出しの padding は activeTick になった(刻みの印 = 刻み + 1)。HashWholeNest は印を含み、HashRealLeaves・HashBlock は含まない。数える欄は 20 個(15 刻んだ数・16 再帰の上限で止まった数)。
+- テストの場面は tests/multires_activity_scene.h(根 4×4×4・木箱の周りを T-0018 のたくさんの要求で・影 4 段)。総当たりの面の隣は同じファイルの BruteForceScheduled。
+  CPU のテストの 2 回目は比べる相手と総当たりを省いている(debug で遅いので)。計測は根 8³ で、WARP では測らない(暖機が遅すぎる)。
 - **多重解像度の木の管理(T-0018)**: 約束は shaders/common/multires_tree.hlsli(要求 MrRequest 40 B・途中の値 MrRequestState・索引の番地・帳簿)。
   CPU は engine/src/sim/multires_tree.cpp(ProcessRequests = Resolve → Settle → Allocate → Apply → ReleaseAll → RebuildIndex)、
   GPU は shaders/sim/multires_tree.hlsl の 6 段(.cso は multires_tree_<snake>)と multires_graph.hlsl(RefineNode は手で決めた影の鎖〔request = MR_NO_BLOCK〕と
   要求の鎖の両方・CoarsenRequestNode)。呼ぶ順は gpu_multires.cpp の RecordProcessRequests。GPU の入力は u13(見出し 2 つ + レコード。割り当ての段が書く。
   DispatchGraph の間だけ NON_PIXEL_SHADER_RESOURCE。レコード 0 件にしないため何もしないレコードを 1 件)。
-- 多重解像度のルート署名は UAV 14 個(u4・u5 は覗き窓の外のバッファ)・ルート定数 23 個で **61 / 64 語**。足す余地はほぼ無い(足すならバッファをまとめる)。
-- 数える欄は 16 個(MR_COUNTER_*)。旧 MR_COUNTER_FRACTION_BLOCKS は無い(端数の枠の空きの数 MR_COUNTER_FREE_FRACTIONS)。要求の数 MR_COUNTER_REQUESTS は
+- 数える欄は 20 個(MR_COUNTER_*。T-0100 で 15・16 を足した)。旧 MR_COUNTER_FRACTION_BLOCKS は無い(端数の枠の空きの数 MR_COUNTER_FREE_FRACTIONS)。要求の数 MR_COUNTER_REQUESTS は
   RecordRequests が CopyBufferRegion で書き、解放の段が 0 に戻す(一覧が空の時に送る)。RecordRequests の写しは 1 本のリストで 16 回まで(REQUEST_UPLOAD_SLOTS)。
 - **GPU の時間は、CPU の重い処理の後に測ると暖機しても 4〜6 倍に出る**(GPU が長く空いてクロックが下がる)。gpu_multires_test は計測をたくさんの要求の前に置いた。
 - MultiresNest は MakeMultiresNest(MultiresCapacity) で作る(世界の枠・観察の枠・端数・索引〔2 の冪〕・帳簿の列〔1 + 物質の数〕・根のレベル)。根は PlaceRootBlock(空きから取る)。
