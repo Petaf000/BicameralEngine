@@ -1,6 +1,7 @@
 // gpu_test_options.h — GPU を使うテスト(gpu_*_test.cpp)に共通の引数(T-0013)と、検証の確かめ方(T-0003)。
 //   --warp                  ハードウェアの GPU の代わりに WARP(ソフトウェアの D3D12)で走らせる
 //   --queue direct|compute  コマンドを投げるキュー(既定は compute。シミュは compute キューで走らせる予定: 06 §4)
+//   --no-gbv                GPU-based validation を切る(debug layer は残す。大きいシェーダーの計装の待ちを切り分けるため)
 // 同じテストを引数だけ変えて ctest に複数登録する(tests/CMakeLists.txt)。
 #pragma once
 
@@ -16,6 +17,7 @@ namespace bicameral::test {
     struct GpuTestOptions {
         gpu::AdapterKind adapter = gpu::AdapterKind::Hardware;
         D3D12_COMMAND_LIST_TYPE queueType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        bool noGpuBasedValidation = false;
     };
 
     inline const char* QueueTypeName(D3D12_COMMAND_LIST_TYPE type) {
@@ -30,6 +32,8 @@ namespace bicameral::test {
             const bool hasValue = index + 1 < arguments.size();
             if (argument == "--warp")
                 options.adapter = gpu::AdapterKind::Warp;
+            else if (argument == "--no-gbv")
+                options.noGpuBasedValidation = true;
             else if (argument == "--queue" && hasValue) {
                 const std::string_view queue = arguments[++index];
                 if (queue != "direct" && queue != "compute")
@@ -50,7 +54,7 @@ namespace bicameral::test {
     inline gpu::DeviceOptions TestDeviceOptions(const GpuTestOptions& options) {
         gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
         deviceOptions.gpuBasedValidation = deviceOptions.gpuBasedValidation &&
-                                           options.adapter != gpu::AdapterKind::Warp;
+                                           options.adapter != gpu::AdapterKind::Warp && !options.noGpuBasedValidation;
 
         return deviceOptions;
     }
