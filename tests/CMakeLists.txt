@@ -46,6 +46,10 @@ add_executable(multires_uniform_test multires_uniform_test.cpp)  # 一様なブ�
 target_link_libraries(multires_uniform_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_uniform COMMAND multires_uniform_test)
 
+add_executable(multires_conduction_test multires_conduction_test.cpp)  # 木の上の熱の伝導(T-0019)
+target_link_libraries(multires_conduction_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_conduction COMMAND multires_conduction_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)

@@ -1,36 +1,45 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-05 / チケット: T-0106 取り合いの端数を乱数で丸める — 完了
+最終更新: 2026-10-05 / チケット: T-0019 熱の伝導(3D・レベルをまたぐ)— CPU リファレンス — 完了
 
 ## 状態(3 行以内)
-- 反応物の取り合いで縮めた進行度の端数を、切り捨てではなく決定的な乱数で丸める(reaction.hlsli の RxResolveContention・RxRevokeRoundUps)。
-- 測定: 切り捨てだと 900 K・O2 50 µmol の木箱のセルで CO が 0%、炭の燃焼 86%。丸めにしてから消えていた規則は ±5σ(CO 100.3%)。CPU と GPU(HW・WARP)一致。
-- 次は T-0019(熱の伝導。3D・レベルをまたぐ)。NEXT.md の先頭。
+- 多重解像度の木の上の熱の伝導を CPU で作った(shaders/common/multires_conduction.hlsli・engine/src/sim/multires_conduction.cpp)。`MultiresStepOptions{.conduction = true}` で有効。
+- 違うレベルの面は細かい側が計算し、粗い側は端数で受ける(ADR-0017)。面の隣が総当たりと一致・保存量がビット一致・活性 = 全部。GPU はまだ(既定は切る)。
+- T-0019 を 3 つに分けた: 次は T-0107(GPU)→ T-0108(細かいレベルの刻み)→ T-0104 → T-0105。NEXT.md の先頭。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug)・`python3 tools/archmap/archmap.py --check` OK(103)。
-- **全部のテスト 64 本が通る(2026-10-05、debug)**。足したのは reaction_contention(CPU、約 4 s。規則ごとの期待・切り捨て・丸めの表を出す)。
-  `job.py test` は 3 回に分けた: `-Filter gpu_multires`(約 14 分)/ `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`)と `-Filter reaction`。
-  `--timeout 2400` で裏で投げ、runner/logs/<job>-test.log を grep して待つ。
+- `job.py build`(debug)・`python3 tools/archmap/archmap.py --check` OK(106)。
+- **全部のテスト 65 本が通る(2026-10-05、debug)**・tidy 警告なし。足したのは multires_conduction(CPU、debug で約 3 分。面の隣の総当たり・閉じた箱・鎖・たくさんの要求・計測のログ)。
+  `job.py test` は分けて投げる: `-Filter gpu_multires`(約 14 分)/ `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`)と `-Filter reaction`。
+  `--timeout 2400` で裏で投げ、runner/logs/<job>-test.log を grep して待つ。テストの表示した行は `-Show` で出る。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 取り合いの丸めの残る偏り: 係数の大きい規則(木の燃焼 O2 × 6)は残り(端数の合計)が係数より小さい刻みに丸め上げられず少し遅れる(0.01〜7%。O2 がほぼ尽きた所ほど大きい)。
-  1 刻みの中で上限と期待値の両方を満たす配り方は一般に無い。残った資源は次の刻みに使われる。02 §3.1 に記録。
-- 「一様」はビット単位で同じ。600 K の木箱は O2 が 1 単位残るセルが分かれて畳まれない(BACKLOG に案 3 つ。T-0104 で)。
-- 頁の不足は「その刻みは刻まない」だけ(世界の時間を遅らせる本来の扱いは 05 §8 のメモリの管理で)。
-- 反応の核: 進める規則があるのにセルが変わらないまま種であり続けるセル(BACKLOG。前から)。観察の影の親の本物の葉も粗くなる(BACKLOG。前から)。
-- (前から)活性の固定費 約 0.1 ms・全部活性だと Compute より遅い・粗くするのは 1 刻み 1 段・段をまたぐ輸送なし(T-0019)・窓は木ではない・PIX・セーブ・AMD は未確認/未着手。
+- **GPU は伝導しない**(T-0107)。GPU と比べるテストは全部 conduction = false のまま。
+- 細かいレベルでは面の係数が熱容量の上限(1/8)で止まり、熱の伝わり方が本当より遅い(試験の表で k ≥ 3。現実の値なら空気 k ≥ 9)。T-0108。
+- 伝導で粗い側が取った端数の枠は木の変更でしか返らない。たくさんの要求の場面では 64 枠を使い切った(端数の不足を数える。ADR-0017「影響」。T-0107 で決める)。
+- 熱が通った所は温度差が約 1 mK 未満になるまで流れが 0 にならず、ビット単位で同じに戻らない・静かにならない(鎖の場面で 600 刻みたっても全部が種。頁の中の幅 6 mK)。T-0104・D-430。
+- 影のブロックは自分の中だけ伝導する(外は断熱。親との受け渡しは引き戻し)。
+- (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (Claude が決めた。02 §3.1)規則ごとに 1 つの乱数(望む進行度の丸めと同じハッシュの上位 32bit)を、足りない資源のどれにも使う(丸めは単調なので最小の比を丸めたのと同じ)。
-- (Claude が決めた)丸め上げで足りなくなったら、その資源を使う丸め上げた規則のうち**進行度が最も大きいもの**から戻す(同じなら鍵が小さい)。
-  試算でランダムに戻すと脇の反応が 74% に落ちたため。RxResolveContention は乱数の種を引数に取るようになった。
-- (Claude が決めた)multires_test の「24 段では端数が落ちる」を 50 刻み → 5 刻み(燃えている途中)で確かめる。丸めにしてから 50 刻みでは子が燃え尽きて同じになるため。
+- (Claude が決めた。ADR-0017)違うレベルの面は細かい側だけが計算し、粗い側は整数部 + 端数(2^-64)で受ける。端数の枠は枠の順に配り、無ければ整数の単位の倍数だけ送る。
+  代案(木を 2:1 に保つ・切り捨て・確率的な丸め)を比べた。
+- (Claude が決めた)面の係数のレベルの単位: G の係数 × 4^k、熱容量の上限はそのまま。違うレベルの面の粗い側の上限は × 2^d。
+- (Claude が決めた)1 刻みの順: 変わるか(反応・伝導)→ 頁を枠の順に → 頁が足りないブロックは凍らせる(そのブロックとの面も流れない)→ 端数の枠を枠の順に → 流れ → 足す → 反応。
+- (Claude が決めた)活性の種 = 進める規則があった、または変わったブロック(伝導を有効にした時)。
+- (Claude が決めた)T-0019 を CPU(T-0019)・GPU(T-0107)・細かいレベルの刻み(T-0108)に分けた(CLAUDE.md §3)。
 
 ## 次にやること
-NEXT.md の先頭(T-0019 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0107 → T-0108 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **熱の伝導(T-0019)**: 式は shaders/common/multires_conduction.hlsli(MrFindFaceNeighbor・MrCellThermal・MrSameLevelFlow・MrCrossLevelFlow・MrSplitCrossFlow)。
+  CPU は multires_nest.cpp の nest_detail::StepBlocks(StepNest・StepActive で共有。前の StepPagedBlock / StepBlock を置き換えた)→ multires_conduction.cpp の
+  MarkConductionWants(一様なブロックに MR_PAGE_WANTED・端数の印)→ ExpandWantedPages → ComputeConduction(端数の枠を配る・変化の表)→ 変化を足して反応。
+  GPU に載せる時(T-0107)も同じ順にする。粗いセルの変化は細かい側から足し込む(GPU は 64bit の atomic の足し算。端数の桁上がりも整数なので順に依存しない)。
+- 数える欄は 24 個(23 MR_COUNTER_FRACTION_SHORTAGE)。GPU は 23 を書かない(0 のまま一致)。
+- CpuTree(Tree の約束)は multires_nest_internal.h の nest_detail::CpuTree に移した(活性と伝導が共有)。テストは自分の TestTree を持つ。
+- multires_conduction_test は debug で約 3 分(保存量の 256bit の合計は 4 刻みごと)。たくさんの要求の場面の全部を刻む木が重い。
 - **取り合いの丸め(T-0106)**: reaction.hlsli の RxSumUsage(要求・消費の合計)・RxShrink(切り捨てと丸め)・RxOverdraws・RxRevokeRoundUps・RxResolveContention(..., randomSeed)。
   反応の結果が変わったので、乱数や取り合いの式を変えると reaction_contention_test の表(期待・切り捨て・丸め)で偏りを見られる。sim のソースで `round` も変数名に使えない(`step` にした)。
 - **頁を畳む(T-0103)**: 規則は multires.hlsli の末尾(MrFoldValueCell・MrFoldsCell)と multires_activity.hlsli の MrWantsFoldCheck。CPU は multires_activity.cpp の FoldQuietPages、

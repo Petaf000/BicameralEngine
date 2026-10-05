@@ -82,13 +82,13 @@ namespace bicameral::test {
             sim::RemoveShadowChain(nest, shadowSlot, ACTIVITY_SHADOW_LEVELS);
     }
 
-    // 1 刻みの後半(CPU): 刻む(active なら活性だけ、でなければ全部)→ 影の引き戻し
+    // 1 刻みの後半(CPU): 刻む(active なら活性だけ、でなければ全部。options で熱の伝導も。T-0019)→ 影の引き戻し
     inline void EndActivityTick(sim::MultiresNest& nest, const sim::BakedReactionTable& table, uint64_t tick,
-                                bool active) {
+                                bool active, const sim::MultiresStepOptions& options = {}) {
         if (active)
-            sim::StepActive(nest, table, STRESS_SEED, tick);
+            sim::StepActive(nest, table, STRESS_SEED, tick, options);
         else
-            sim::StepNest(nest, table, STRESS_SEED, tick);
+            sim::StepNest(nest, table, STRESS_SEED, tick, options);
 
         if (ActivityShadowExists(tick))
             sim::PullBackShadowChain(nest, table, nest.capacity.worldBlocks, ACTIVITY_SHADOW_LEVELS);

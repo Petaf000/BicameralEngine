@@ -21,19 +21,9 @@ namespace bicameral::sim {
     namespace {
 
         using nest_detail::CellAt;
+        using nest_detail::CpuTree;
         using nest_detail::FreePageAt;
         using nest_detail::UniformAt;
-
-        // multires_activity.hlsli の Tree の約束
-        struct CpuTree {
-            const MultiresNest* nest = nullptr;
-
-            [[nodiscard]] MrBlock Block(uint32_t slot) const { return nest->blocks[slot]; }
-
-            [[nodiscard]] uint32_t Lookup(int32_t level, int64_t originX, int64_t originY, int64_t originZ) const {
-                return LookupBlock(*nest, level, originX, originY, originZ);
-            }
-        };
 
         // 刻む印を付ける。初めてなら数える
         void Schedule(MultiresNest& nest, uint32_t slot, uint32_t mark) {
@@ -82,33 +72,10 @@ namespace bicameral::sim {
             }
         }
 
-        struct BlockStep {
-            bool possible = false;  // 進める規則があった(次の刻みの種)
-            bool changed = false;   // セルが 1 つでも変わった(忙しい)
-        };
-
-        // 印のあるブロックを刻む
-        BlockStep StepBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot, uint64_t worldSeed,
-                            uint64_t tick) {
-            const MrBlock& block = nest.blocks[slot];
-            BlockStep result;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrIsSteppedCell(block, index))
-                    continue;
-
-                RxCell& cell = CellAt(nest, slot, index);
-                const RxCellStep step = MrStepCellDetailed(view, cell, worldSeed, tick, block, index);
-                result.changed = result.changed || MrCellChanged(cell, step.cell);
-                result.possible = result.possible || step.possible != 0;
-                cell = step.cell;
-            }
-
-            return result;
-        }
-
     }  // namespace
 
-    void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick) {
+    void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
+                    const MultiresStepOptions& options) {
         const uint32_t worldBlocks = nest.capacity.worldBlocks;
         const uint32_t mark = MrActivityMark(tick);
 
@@ -120,35 +87,24 @@ namespace bicameral::sim {
 
         std::ranges::fill(nest.seeds, uint8_t{0});
 
-        // --- 印のある世界のブロックを刻む。セルが変わったら忙しさの印、進める規則があれば次の種に。
-        //     一様なブロックは反応が進む時だけ、後で頁に広げて刻む(T-0102)---
-        const ReactionTableView view = table.View();
-        const auto finishBlock = [&](uint32_t slot, bool expanded) {
-            const BlockStep step = StepBlock(nest, view, slot, worldSeed, tick);
-            if (step.changed || expanded)
-                nest.blocks[slot].busyTick = mark;  // 頁に広げたのも忙しい(畳めるかを N 刻み後に調べる。T-0103)
+        // --- 印のある世界のブロックと、観察の枠の全部(活性に入れない。D-403)を刻む ---
+        std::vector<uint8_t> stepped(nest.blocks.size(), 0);
+        for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot)
+            stepped[slot] = slot >= worldBlocks || nest.blocks[slot].activeTick == mark ? 1 : 0;
 
-            if (step.possible)
-                nest.seeds[slot] = 1;
-        };
+        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
+            nest, table.View(), stepped, worldSeed, tick, options.conduction);
 
+        // --- セルが変わったら忙しさの印(頁に広げたのも忙しい: 畳めるかを N 刻み後に調べる。T-0103)。
+        //     進める規則があった・変わった(伝導。T-0019)なら次の種に ---
         for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
-            MrBlock& block = nest.blocks[slot];
-            if (block.activeTick != mark)
-                continue;
+            const nest_detail::BlockStepResult& result = results[slot];
+            if (result.changed || result.expanded)
+                nest.blocks[slot].busyTick = mark;
 
-            if (!MrIsUniform(block))
-                finishBlock(slot, false);
-            else if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
-                block.page = MR_PAGE_WANTED;
+            if (result.possible || (options.conduction && result.changed))
+                nest.seeds[slot] = 1;
         }
-
-        for (const uint32_t slot : nest_detail::ExpandWantedPages(nest))
-            finishBlock(slot, true);
-
-        // --- 観察の枠は全部刻む(活性に入れない。D-403)---
-        for (auto slot = worldBlocks; slot < nest.blocks.size(); ++slot)
-            StepBlock(nest, view, slot, worldSeed, tick);
     }
 
     void FoldQuietPages(MultiresNest& nest, uint64_t tick) {

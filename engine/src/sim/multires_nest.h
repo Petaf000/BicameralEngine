@@ -64,6 +64,12 @@ namespace bicameral::sim {
         std::vector<uint32_t> claims;                  // 世界の枠ごとの取り合いの印
     };
 
+    // 1 刻みの選択
+    struct MultiresStepOptions {
+        // 熱の伝導(T-0019。multires_conduction.hlsli)。GPU(sim/gpu_multires)はまだ伝導しないので、GPU と比べる刻みでは切る(T-0107 で入れる)
+        bool conduction = false;
+    };
+
     // 保存量の合計(最も細かい単位 × 2^-64。256bit の 2 の補数、下の語から)
     using Wide256 = std::array<uint64_t, 4>;
 
@@ -125,13 +131,16 @@ namespace bicameral::sim {
 
     // --- 刻みと要約 ---
 
-    // 刻むセル(本物の葉と影のセル)の反応を 1 刻み(全部を刻む。活性の正しさを確かめる基準)。
-    // 一様なブロックは反応が進む時だけ、刻んだ後に枠の順で頁に広げて刻む(頁が足りなければ刻まずに数え、種にする。T-0102)
-    void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick);
+    // 刻むセル(本物の葉と影のセル)を 1 刻み(全部を刻む。活性の正しさを確かめる基準)。options.conduction なら熱の伝導の後に反応。
+    // 一様なブロックは変わる(反応が進む・伝導の流れがある)時だけ、枠の順で頁に広げて刻む(頁が足りなければ刻まずに数え、種にする。T-0102)。
+    // 伝導は面の隣を木から探し、レベルの違う面も保存量をビット単位で保って受け渡す(影は自分のブロックの中だけ。T-0019)
+    void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
+                  const MultiresStepOptions& options = {});
 
     // 活性のブロックだけ刻む(T-0100。multires_activity.hlsli): 種とその面の隣に印(activeTick)を付けて刻み、
-    // 進める規則があったブロックを次の種にする。観察の枠は全部刻む。結果のセルは StepNest と同じになる
-    void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick);
+    // 進める規則があった・変わったブロックを次の種にする。観察の枠は全部刻む。結果のセルは StepNest と同じになる
+    void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
+                    const MultiresStepOptions& options = {});
 
     // 頁を持つ世界のブロックで、刻み tick にちょうど静かになり(multires_activity.hlsli の MrWantsFoldCheck)一様なものを、
     // 値 1 つに戻して頁を枠の順に空きのスタックへ返す(T-0103)。SubmitQuietCoarsenRequests の前に、StepActive で刻む木に使う

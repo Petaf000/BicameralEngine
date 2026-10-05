@@ -83,7 +83,9 @@ FX_CONST uint32_t MR_COUNTER_EXPANDED = 20;        // 刻むために一様か�
 FX_CONST uint32_t
     MR_COUNTER_PAGE_SHORTAGE = 21;         // 頁が足りず、その刻みは刻まずに次へ回した一様なブロックの数(累計。T-0102)
 FX_CONST uint32_t MR_COUNTER_FOLDED = 22;  // 静かで一様になった頁を畳んで返した数(累計。T-0103)
-FX_CONST uint32_t MR_COUNTER_COUNT = 23;
+// 端数の枠が足りず、熱の伝導で細かい側から粗い側へ整数の単位の倍数だけ送ったブロックの数(累計。T-0019)
+FX_CONST uint32_t MR_COUNTER_FRACTION_SHORTAGE = 23;
+FX_CONST uint32_t MR_COUNTER_COUNT = 24;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 

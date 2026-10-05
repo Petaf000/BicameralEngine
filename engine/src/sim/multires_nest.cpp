@@ -4,6 +4,7 @@
 #include "sim/multires_nest.h"
 
 #include <algorithm>
+#include <span>
 
 #include "sim/multires_nest_internal.h"
 
@@ -186,21 +187,114 @@ namespace bicameral::sim {
         }
 
         // 刻むセルを 1 刻み(頁を持つブロック)
-        void StepPagedBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot, uint64_t worldSeed,
-                            uint64_t tick) {
-            const MrBlock& block = nest.blocks[slot];
+        // 端数のエネルギー(枠が無ければ 0)
+        uint64_t FractionEnergy(const MultiresNest& nest, uint32_t fractionSlot, uint32_t index) {
+            return FractionAt(nest, fractionSlot, index).energy;
+        }
+
+        // 熱の伝導の変化をセル(と端数)に足す(T-0019)。端数の枠が無いブロックへの変化は整数の単位だけ(multires_conduction.hlsli)
+        void ApplyEnergyDelta(MultiresNest& nest, uint32_t slot, uint32_t index, RxCell& cell,
+                              const MrEnergyDelta& delta) {
+            const uint32_t fractionSlot = nest.blocks[slot].fraction;
+            MrEnergyDelta value = MrMakeEnergyDelta();
+            value.whole = cell.energy;
+            value.fraction = FractionEnergy(nest, fractionSlot, index);
+            value = MrAddEnergyDelta(value, delta);
+
+            cell.energy = value.whole;
+            if (fractionSlot == MR_NO_FRACTION) {
+                FX_ASSERT(value.fraction == 0);
+                return;
+            }
+
+            MrFraction fraction = FractionAt(nest, fractionSlot, index);
+            fraction.energy = value.fraction;
+            nest_detail::SetFraction(nest, fractionSlot, index, fraction);
+        }
+
+        // 頁を持つブロックの刻むセル: 伝導の変化(deltas が空なら無し)を足し、react なら反応を進める
+        nest_detail::BlockStepResult StepPagedBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
+                                                    uint64_t worldSeed, uint64_t tick, bool react,
+                                                    std::span<const MrEnergyDelta> deltas) {
+            const MrBlock block = nest.blocks[slot];
+            nest_detail::BlockStepResult result;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
 
                 RxCell& cell = CellAt(nest, slot, index);
-                cell = MrStepCell(view, cell, worldSeed, tick, block, index);
+                const RxCell before = cell;
+                const uint64_t fractionBefore = FractionEnergy(nest, block.fraction, index);
+
+                // --- 伝導 ---
+                if (!deltas.empty()) {
+                    const MrEnergyDelta& delta = deltas[nest_detail::PageCellAddress(nest, block.page, index)];
+                    if (!MrEnergyDeltaIsZero(delta))
+                        ApplyEnergyDelta(nest, slot, index, cell, delta);
+                }
+
+                // --- 反応 ---
+                if (react) {
+                    const RxCellStep step = MrStepCellDetailed(view, cell, worldSeed, tick, block, index);
+                    result.possible = result.possible || step.possible != 0;
+                    cell = step.cell;
+                }
+
+                result.changed = result.changed || MrCellChanged(before, cell) ||
+                                 FractionEnergy(nest, block.fraction, index) != fractionBefore;
             }
+
+            return result;
         }
 
     }  // namespace
 
     namespace nest_detail {
+
+        std::vector<BlockStepResult> StepBlocks(MultiresNest& nest, const ReactionTableView& view,
+                                                std::span<const uint8_t> stepped, uint64_t worldSeed, uint64_t tick,
+                                                bool conduction) {
+            const auto blockCount = static_cast<uint32_t>(nest.blocks.size());
+            std::vector<BlockStepResult> results(blockCount);
+
+            // --- 一様なブロック: 反応が進む時だけ頁に広げる(T-0102)。伝導の流れがある時も(T-0019)---
+            for (uint32_t slot = 0; slot < blockCount; ++slot) {
+                MrBlock& block = nest.blocks[slot];
+                if (stepped[slot] != 0 && MrIsUniform(block) &&
+                    MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
+                    block.page = MR_PAGE_WANTED;
+            }
+
+            std::vector<uint8_t> wantsFraction;
+            if (conduction)
+                wantsFraction = MarkConductionWants(nest, view, stepped);
+
+            // --- 枠の順に頁を配る。足りなかったブロックはこの刻みは凍らせる(刻まず、面の流れも 0)---
+            std::vector<uint8_t> frozen(blockCount, 0);
+            for (uint32_t slot = 0; slot < blockCount; ++slot)
+                frozen[slot] = nest.blocks[slot].page == MR_PAGE_WANTED ? 1 : 0;
+
+            for (const uint32_t slot : ExpandWantedPages(nest)) {
+                frozen[slot] = 0;
+                results[slot].expanded = true;
+            }
+
+            std::vector<MrEnergyDelta> deltas;
+            if (conduction)
+                deltas = ComputeConduction(nest, view, stepped, frozen, wantsFraction);
+
+            // --- 頁のブロック: 伝導の変化を足してから反応(凍らせたブロックは一様のまま)---
+            for (uint32_t slot = 0; slot < blockCount; ++slot) {
+                if (MrIsUniform(nest.blocks[slot]))
+                    continue;
+
+                const bool expanded = results[slot].expanded;
+                results[slot] = StepPagedBlock(nest, view, slot, worldSeed, tick, stepped[slot] != 0, deltas);
+                results[slot].expanded = expanded;
+            }
+
+            return results;
+        }
 
         std::vector<uint32_t> ExpandWantedPages(MultiresNest& nest) {
             std::vector<uint32_t> expanded;
@@ -305,22 +399,15 @@ namespace bicameral::sim {
         }
     }
 
-    void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick) {
-        const ReactionTableView view = table.View();
+    void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
+                  const MultiresStepOptions& options) {
+        std::vector<uint8_t> stepped(nest.blocks.size(), 0);
         for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
-            MrBlock& block = nest.blocks[slot];
-            if (!MrIsUniform(block)) {
-                StepPagedBlock(nest, view, slot, worldSeed, tick);
-                continue;
-            }
-
-            // --- 一様: 反応が進む時だけ、後で頁に広げて刻む(T-0102)---
-            if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
-                block.page = MR_PAGE_WANTED;
+            const uint32_t kind = nest.blocks[slot].kind;
+            stepped[slot] = kind != MR_BLOCK_UNUSED && kind != MR_BLOCK_MIRROR ? 1 : 0;
         }
 
-        for (const uint32_t slot : nest_detail::ExpandWantedPages(nest))
-            StepPagedBlock(nest, view, slot, worldSeed, tick);
+        nest_detail::StepBlocks(nest, table.View(), stepped, worldSeed, tick, options.conduction);
     }
 
     void PullBackShadowChain(MultiresNest& nest, const BakedReactionTable& table, uint32_t firstShadowSlot,

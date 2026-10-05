@@ -278,6 +278,14 @@ views:
       - { id: uniformtest, group: tests, label: "multires_uniform_test / gpu_multires_uniform_test<br/>一様な根・鎖は頁を使わない・頁の不足・燃え尽きたら畳む",
           code: "tests/multires_uniform_test.cpp::RunUniform", ticket: T-0102,
           note: "1 つずつ刻む素直な答えと論理のセルが一致・保存量一致・燃え尽きた木箱が畳まれて頁が 0 に戻る(T-0103)。GPU(HW・WARP)は状態の全部と種が毎刻み CPU と一致" }
+      - { id: multiresconduction, group: simlib, label: "ComputeConduction<br/>木の上の熱の伝導(違うレベルの面は細かい側が粗い側の端数へ送る)",
+          code: "engine/src/sim/multires_conduction.cpp::ComputeConduction", ticket: T-0019, doc: docs/design/17-multiresolution.md,
+          note: "StepNest / StepActive の options.conduction(GPU はまだ。T-0107)。流れのある一様なブロックを頁に広げ、端数の枠を枠の順に配り、刻みの初めのセルから面の流れを足す(Jacobi 型)" }
+      - { id: multiresconductionhlsl, group: shared, label: "multires_conduction.hlsli<br/>面の隣・レベルの単位の係数・違うレベルの受け渡し",
+          code: "shaders/common/multires_conduction.hlsli::MrSplitCrossFlow", ticket: T-0019, doc: docs/design/17-multiresolution.md }
+      - { id: conductiontest, group: tests, label: "multires_conduction_test<br/>面の隣の総当たり・保存量・活性 = 全部",
+          code: "tests/multires_conduction_test.cpp::CheckChain", ticket: T-0019,
+          note: "閉じた箱・6 段の鎖(端数の枠あり / なし)・たくさんの要求に伝導。面の係数が 1/8 で止まるレベルと、静かになった後に残る頁も測る" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -374,6 +382,11 @@ views:
       - [multiresquiet, multiresactivityhlsl, "MrWantsQuietCoarsen(GPU と CPU で同じ関数)"]
       - [multiresquiet, multirestree, "要求の一覧の後ろに足す"]
       - [quiettest, multiresquiet]
+      - [multiresconduction, multiresconductionhlsl]
+      - [multiresconductionhlsl, multiresactivityhlsl, "MrFindContaining で粗い側を引く"]
+      - [multiresconductionhlsl, multireshlsl, "端数(ADR-0015)で粗い側が受ける"]
+      - [multiresactivity, multiresconduction, "options.conduction"]
+      - [conductiontest, multiresconduction]
       - [quiettest, gpumultires, "毎刻み比べる"]
       - [multiresactivity, multirespages, "反応が進む一様なブロック"]
       - [multirespages, multirestree, "頁の空きのスタック"]
