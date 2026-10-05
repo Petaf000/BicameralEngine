@@ -3,7 +3,8 @@
 // ObserverStepNode(CPU の入力。観察の枠を全部刻む)・ExpandStepNode(GPU の入力 = TreeExpand が頁を配った一様なブロック。T-0102)。
 // 一様なブロックは ActivityStepNode が値 1 つで反応が進むかを調べ、進むなら頁に広げる印を付けるだけ(頁は枠の順に配るので、
 // 順の決まらないこのグラフの中では配らない)。TreeExpand の後、ExpandStepNode が埋めて刻む。CPU リファレンスは engine/src/sim/multires_activity.cpp の StepActive(同じ関数)。
-// 刻むノードは進める反応の規則があったブロックを次の刻みの種の一覧(u14)へ書き足す。
+// 刻むノードは進める反応の規則があったブロックを次の刻みの種の一覧(u13)へ書き足す。
+// 熱の伝導を入れる刻み(T-0107)では、刻むノードは伝導の一覧(MR_GRAPH_INPUT_CONDUCT_*)に足すだけで、刻むのは multires_conduct.hlsl の段。
 // セルが変わったブロックと、つつかれた種には忙しさの印(busyTick)を書く(静かな葉を粗くする要求の元。T-0101)。
 // 木の管理のグラフ(multires_graph.hlsl)と分けたのは、反応の核を含んで大きく(debug の GPU-based validation の計装が数分かかる)、
 // 活性を使わない所(覗き窓・木の管理のテスト)に作らせないため。
@@ -171,7 +172,7 @@ void WakeFaceNode(ThreadNodeInputRecord<MrFaceRecord> input,
     stepOutput.OutputComplete();
 }
 
-// 印を付けた世界のブロックを刻む(1 グループ = 1 ブロック)。セルが変わったら忙しさの印、進める規則があれば次の刻みの種(u14)へ
+// 印を付けた世界のブロックを刻む(1 グループ = 1 ブロック)。セルが変わったら忙しさの印、進める規則があれば次の刻みの種(u13)へ
 [Shader("node")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
@@ -180,6 +181,14 @@ void ActivityStepNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thre
     const uint32_t slot = input.Get().slot;
     if (thread == 0)
         InterlockedAdd(g_counters[MR_COUNTER_SCHEDULED], 1u);
+
+    // --- 伝導を入れる刻み: ここでは刻まず、伝導の一覧に足すだけ(面の流れは刻みの初めのセルから。Compute の段が刻む。T-0107)---
+    if ((g_stepFlags & MR_STEP_CONDUCTION) != 0) {
+        if (thread == 0)
+            ConductAppend(slot);
+
+        return;
+    }
 
     // --- 一様: 反応が進む時だけ頁に広げる印(T-0102。グループで一様な分岐)---
     const MrBlock block = g_blocks[slot];

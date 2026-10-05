@@ -3,7 +3,9 @@
 // 観察の影を作る・引き戻す(Work Graph の再帰)・反応の刻み(Compute。multires_step.hlsl)を記録する(T-0017)。
 // 活性のブロックだけ刻む(Work Graph の ActivitySeedNode → WakeFaceNode → ActivityStepNode。T-0100)と、
 // 静かな葉を粗くする要求を作る(Compute の TreeQuiet。T-0101)・静かで一様になった頁を畳む(TreeFoldCheck → TreeFold。T-0103)もできる。
-// 活性の種の一覧は 2 本を刻みごとに入れ替える(この刻みの種 = GPU の入力、次の刻みの種 = u14 に書き足す)。
+// 活性の種の一覧は 2 本を刻みごとに入れ替える(この刻みの種 = GPU の入力、次の刻みの種 = u13 に書き足す)。
+// 熱の伝導(MultiresStepOptions::conduction。T-0107)は Compute の段 shaders/sim/multires_conduct.hlsl(印 → 頁 → 端数の枠 → 埋める →
+// 面の流れ → 変化を足して反応)。活性の刻みでは Work Graph が刻むブロックを伝導の一覧に足し、段はその一覧のブロックだけを受け持つ。
 //
 // 使い方(テスト。1 刻み = 要求の処理と影の出来事 → 刻む → 影の引き戻し。CPU の test::StepMultiresScene と同じ順。
 // 刻むのは RecordStep〔全部〕か RecordStepActive〔活性だけ。CPU の StepActive〕):
@@ -37,6 +39,11 @@ namespace bicameral::sim {
         // 活性の Work Graph(shaders/sim/multires_activity_graph.hlsl)を作る。RecordStepActive に要る。
         // 反応の核を含んで大きい(debug の GPU-based validation で作るのに数分)ので、使う時だけ
         bool activity = false;
+
+        // 活性の刻みの熱の伝導の段(埋める・流れ・足す)を Work Graph(shaders/sim/multires_conduct_graph.hlsl)で投げる。
+        // 無ければ Compute(全部の枠の数だけグループを投げ、一覧の数を超えたグループは何もしない)。T-0107 で両方を測り、差は揺れの中で
+        // Compute がわずかに安かったので既定は Compute(D-302。docs/perf.md)
+        bool conductionGraph = false;
     };
 
     class GpuMultires {
@@ -68,12 +75,13 @@ namespace bicameral::sim {
                                 const MultiresPoint& point);
         void RecordRemoveShadow(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                 uint32_t firstSlot, uint32_t levelCount);
+        // 全部を刻む(multires_nest.h の StepNest と同じ結果。options.conduction で熱の伝導も。T-0107)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t worldSeed,
-                        uint64_t tick);
+                        uint64_t tick, const MultiresStepOptions& options = {});
         // 活性のブロックだけ刻む(multires_nest.h の StepActive と同じ結果。観察の枠は全部刻む。T-0100)。
         // GpuMultiresOptions::activity で作っていなければ false
         [[nodiscard]] bool RecordStepActive(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                            uint64_t worldSeed, uint64_t tick);
+                                            uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options = {});
         void RecordPullBack(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                             uint32_t firstShadowSlot, uint32_t levelCount);
 
@@ -106,6 +114,9 @@ namespace bicameral::sim {
 
         [[nodiscard]] uint64_t GraphBackingMemoryBytes() const { return m_graph->BackingMemoryBytes(); }
 
+        // 伝導の段を Work Graph で投げるか(計測で切り替える。conductionGraph で作っていなければ true にできず false を返す)
+        [[nodiscard]] bool UseConductionGraph(bool use);
+
     private:
         // multires_bindings.hlsli の RootConstants と同じ並び
         struct RootConstants {
@@ -126,28 +137,31 @@ namespace bicameral::sim {
             uint32_t graphInputLow = 0;
             uint32_t graphInputHigh = 0;
             uint32_t graphEntries = 0;  // 下位 16bit = RefineNode、上位 16bit = CoarsenRequestNode
+
+            // --- 刻み(T-0107)---
+            uint32_t stepFlags = 0;  // STEP_FLAG_*(multires_bindings.hlsli の MR_STEP_*)
         };
 
-        // バッファの並び(u0〜u3、u6〜u13。multires_bindings.hlsli)
+        // バッファの並び(u0〜u3、u6〜u12。multires_bindings.hlsli)
         enum Buffer : uint8_t {
             BufferBlocks,
             BufferCells,
             BufferFractions,
             BufferCounters,
-            BufferFreeBlocks,
+            BufferTreeWords,  // [世界の枠の空き][取り合いの印][索引][世界の頁の空き](T-0107 でまとめた)
             BufferFreeFractions,
             BufferLedger,
-            BufferIndex,
             BufferRequests,
             BufferStates,
-            BufferClaims,
+            BufferConduction,  // 伝導の作業場(T-0107)
             BufferGraphInput,
             BufferCount
         };
 
         static constexpr uint32_t TABLE_COUNT = 4;  // 物質・規則・索引・速度
         static constexpr uint32_t ACTIVITY_LISTS = 2;
-        static constexpr uint32_t TREE_PASS_COUNT = 10;
+        static constexpr uint32_t TREE_PASS_COUNT = 11;
+        static constexpr uint32_t CONDUCT_PASS_COUNT = 5;
         static constexpr uint32_t MAX_TIMESTAMPS = 16;
 
         GpuMultires() = default;
@@ -165,8 +179,15 @@ namespace bicameral::sim {
                             uint32_t groupCount);
         [[nodiscard]] std::array<uint64_t, BufferCount> BufferSizes() const;
         [[nodiscard]] uint64_t PageCount() const;
+        [[nodiscard]] uint64_t ConductRecordsOffset() const;
         [[nodiscard]] std::vector<std::byte> MakeGraphInputImage() const;
         void RecordExpandPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        void RecordConductPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass,
+                               uint32_t groupCount);
+        void RecordConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        void RecordConductionGraph(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        [[nodiscard]] std::expected<void, std::string> CreateConductionGraph(ID3D12Device5* device);
+        [[nodiscard]] std::vector<std::byte> MakeTreeWordsImage(const MultiresNest& nest) const;
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -180,6 +201,11 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_stepPipeline;
         ComPtr<ID3D12PipelineState> m_stepExpandedPipeline;  // 頁に広げたブロックを埋めて刻む(全部を刻む時。T-0102)
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
+        std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
+        std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)
+        bool m_conductGraphInitialized = false;
+        bool m_useConductGraph = false;
+        std::array<uint32_t, 3> m_conductEntries = {UINT32_MAX, UINT32_MAX, UINT32_MAX};  // 埋める・流れ・足す
         std::unique_ptr<gpu::WorkGraph> m_graph;
         bool m_graphInitialized = false;
         std::array<uint32_t, 4> m_entries{};              // 細かくする・粗くする要求・引き戻す・影を捨てる
@@ -203,7 +229,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_activityUpload;    // 最初の一覧 + 空の一覧 2 本
         ComPtr<ID3D12Resource> m_activityReadback;  // 次の刻みの種の一覧
         uint32_t m_activityCurrent = 0;             // この刻みの種の一覧
-        uint32_t m_activityWrite = 0;               // u14 に結ぶ一覧
+        uint32_t m_activityWrite = 0;               // u13 に結ぶ一覧
 
         // --- 計測 ---
         ComPtr<ID3D12QueryHeap> m_timestamps;

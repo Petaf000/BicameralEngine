@@ -113,7 +113,7 @@ MrRequestState ResolveRefine(MrRequest request, MrRequestState state, uint32_t i
     state.target = deepest;
     state.claimSlot = deepest;
     state.levels = min((uint32_t)(request.level - deepestLevel), MR_MAX_CHAIN_LEVELS);
-    InterlockedMin(g_claims[deepest], i);
+    InterlockedMin(g_treeWords[TreeClaimAddress(deepest)], i);
 
     return state;
 }
@@ -129,7 +129,7 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
     const uint32_t parent = g_blocks[slot].parent;
     state.target = slot;
     state.claimSlot = parent;
-    InterlockedMin(g_claims[parent], i);
+    InterlockedMin(g_treeWords[TreeClaimAddress(parent)], i);
 
     return state;
 }
@@ -166,8 +166,8 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
         return;
 
     const bool coarsen = g_requests[i].op == MR_REQUEST_COARSEN;
-    const bool lost = g_claims[state.claimSlot] != i;
-    const bool targetTaken = coarsen && g_claims[state.target] != MR_NO_CLAIM;
+    const bool lost = g_treeWords[TreeClaimAddress(state.claimSlot)] != i;
+    const bool targetTaken = coarsen && g_treeWords[TreeClaimAddress(state.target)] != MR_NO_CLAIM;
     if (lost || targetTaken) {
         state.status = MR_STATUS_CONFLICT;
     } else if (coarsen) {
@@ -301,7 +301,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
     if (i < count) {
         if (state.claimSlot != MR_NO_CLAIM)
-            g_claims[state.claimSlot] = MR_NO_CLAIM;
+            g_treeWords[TreeClaimAddress(state.claimSlot)] = MR_NO_CLAIM;
 
         InterlockedAdd(g_counters[MrStatusCounter(state.status)], 1u);
     }
@@ -311,10 +311,10 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
         g_freeFractions[fractionBase + k] = state.releases[k];
 
     if (blockRelease != 0)
-        g_freeBlocks[topBlocks + gs_blockScan[i] - 1] = state.releaseBlock;
+        g_treeWords[topBlocks + gs_blockScan[i] - 1] = state.releaseBlock;
 
     if (pageRelease != 0)
-        g_freeBlocks[FreePageAddress(topPages + gs_pageScan[i] - 1)] = state.releasePage;
+        g_treeWords[FreePageAddress(topPages + gs_pageScan[i] - 1)] = state.releasePage;
 
     InterlockedMax(gs_grantedBlocks, gs_blockScan[i]);
     InterlockedMax(gs_grantedFractions, gs_fractionScan[i]);
@@ -343,7 +343,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     if (g_counters[MR_COUNTER_REBUILD_INDEX] == 0 || i >= g_indexEntries)
         return;
 
-    g_index[i] = MR_INDEX_EMPTY;
+    g_treeWords[TreeIndexAddress(i)] = MR_INDEX_EMPTY;
 }
 
     [numthreads(TREE_THREADS, 1, 1)] void TreeFillIndex(uint3 dispatchThreadId : SV_DispatchThreadID) {
@@ -357,7 +357,8 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
 // --- 7. 頁に広げる(刻んだ後。1 グループ。T-0102。multires_nest.cpp の ExpandWantedPages)---
 // 刻む段が MR_PAGE_WANTED を付けた世界のブロックに、枠の順で頁の空きのスタックの上から頁を配り、一覧(MR_GRAPH_INPUT_EXPAND_*)に書く。
-// 頁が足りなければ一様に戻して数え、活性の一覧(u14 = 次の刻みの種)に足す。埋めて刻むのは StepExpanded / ExpandStepNode
+// 頁が足りなければ一様に戻して数え、活性の一覧(u13 = 次の刻みの種)に足す。埋めて刻むのは StepExpanded / ExpandStepNode
+// (伝導を入れた刻みでは ConductPrepare が埋め、ConductApply が刻む。配った・凍らせた印を伝導の作業場に書く。T-0107)
 
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeExpand(uint32_t i : SV_GroupIndex) {
     const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
@@ -369,11 +370,13 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
         const uint32_t position = wanted + gs_blockScan[i] - 1;
         if (wants && position < freePages) {
-            g_blocks[slot].page = g_freeBlocks[FreePageAddress(freePages - 1 - position)];
+            g_blocks[slot].page = g_treeWords[FreePageAddress(freePages - 1 - position)];
             g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS + 4 * (position + 1), slot);
+            SetConductMark(slot, CONDUCT_MARK_EXPANDED);
         } else if (wants) {
             g_blocks[slot].page = MR_NO_PAGE;
             AppendActivity(slot);
+            SetConductMark(slot, CONDUCT_MARK_FROZEN);  // 伝導: この刻みは刻まず、面の流れも 0(T-0107)
         }
 
         wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
@@ -389,6 +392,48 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     g_counters[MR_COUNTER_PAGE_SHORTAGE] += wanted - granted;
     g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS, MR_NO_BLOCK);  // レコードを 0 件にしない
     g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_HEADER + 4, granted + 1);
+}
+
+// --- 7b. 伝導の端数の枠を配る(頁を配った後。1 グループ。T-0107。multires_conduction.cpp の AllocateConductionFractions)---
+// 伝導で粗い側に端数が要る(CONDUCT_MARK_FRACTION)・凍らせていない・端数の枠の無い世界のブロックに、枠の順で空きのスタックの上から配る。
+// 足りなければ数える(そのブロックへは整数の単位の倍数だけ送る。ADR-0017)。配った枠を空にするのは ConductPrepare。
+// 伝導の一覧の数を Work Graph の見出し(流れ・足す)にも写す(一覧は印の段で出来上がっている)
+
+// 伝導で端数の枠が要る(印がある・凍らせていない・枠が無い)世界のブロックか
+bool WantsConductionFraction(uint32_t slot) {
+    return slot < g_worldBlocks && HasConductMark(slot, CONDUCT_MARK_FRACTION) &&
+           !HasConductMark(slot, CONDUCT_MARK_FROZEN) && g_blocks[slot].fraction == MR_NO_FRACTION;
+}
+
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeFractions(uint32_t i : SV_GroupIndex) {
+    const uint32_t freeFractions = g_counters[MR_COUNTER_FREE_FRACTIONS];
+    uint32_t wanted = 0;  // ここまでの区切りで端数の枠が要るブロックの数(グループで一様)
+    for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
+        const uint32_t slot = first + i;
+        const bool wants = WantsConductionFraction(slot);
+        InclusiveScan(i, wants ? 1u : 0u, 0u, 0u);
+
+        const uint32_t position = wanted + gs_blockScan[i] - 1;
+        if (wants && position < freeFractions) {
+            g_blocks[slot].fraction = g_freeFractions[freeFractions - 1 - position];
+            SetConductMark(slot, CONDUCT_MARK_GRANTED);
+        }
+
+        wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
+        GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
+    }
+
+    if (i != 0)
+        return;
+
+    const uint32_t granted = min(wanted, freeFractions);
+    g_counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions - granted;
+    g_counters[MR_COUNTER_FRACTION_SHORTAGE] += wanted - granted;
+
+    // --- 伝導の一覧はここで出来上がっている(印の段の後)。Work Graph の見出し(流れ・足す)に数を写す ---
+    const uint32_t records = g_graphInput.Load(MR_GRAPH_INPUT_CONDUCT_HEADER + 4);
+    g_graphInput.Store(MR_GRAPH_INPUT_CONDUCT_FLOWS_HEADER + 4, records);
+    g_graphInput.Store(MR_GRAPH_INPUT_CONDUCT_APPLY_HEADER + 4, records);
 }
 
 // --- 8. 頁を畳む(要求の処理の前。T-0103。multires_activity.cpp の FoldQuietPages)---
@@ -430,16 +475,16 @@ RxCell FoldValue(MrBlock block) {
 
     GroupMemoryBarrierWithGroupSync();
     if (index == 0 && gs_foldMismatch == 0)
-        g_claims[slot] = MR_CLAIM_FOLD;
+        g_treeWords[TreeClaimAddress(slot)] = MR_CLAIM_FOLD;
 }
 
 // 枠 slot を畳む: 一様の値を書き、頁を空きのスタックの position に積み、印を戻す
 void FoldBlock(uint32_t slot, uint32_t position) {
     const MrBlock block = g_blocks[slot];
     g_cells[slot] = FoldValue(block);
-    g_freeBlocks[FreePageAddress(position)] = block.page;
+    g_treeWords[FreePageAddress(position)] = block.page;
     g_blocks[slot].page = MR_NO_PAGE;
-    g_claims[slot] = MR_NO_CLAIM;
+    g_treeWords[TreeClaimAddress(slot)] = MR_NO_CLAIM;
 }
 
 // 調べた頁を枠の順に畳む(1 グループ)
@@ -448,7 +493,7 @@ void FoldBlock(uint32_t slot, uint32_t position) {
     uint32_t folded = 0;  // ここまでの区切りで畳んだ数(グループで一様)
     for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
         const uint32_t slot = first + i;
-        const bool folds = slot < g_worldBlocks && g_claims[slot] == MR_CLAIM_FOLD;
+        const bool folds = slot < g_worldBlocks && g_treeWords[TreeClaimAddress(slot)] == MR_CLAIM_FOLD;
         InclusiveScan(i, folds ? 1u : 0u, 0u, 0u);
 
         if (folds)

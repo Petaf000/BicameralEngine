@@ -1,7 +1,7 @@
 // multires_conduction.hlsli — 多重解像度の木の上の熱の伝導(07 §1・17 §5「熱の伝導」。T-0019)。面の隣を木から探し、
 // レベルの違う面でもエネルギーをビット単位で保存して受け渡す。
 // HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU リファレンスは engine/src/sim/multires_conduction.cpp
-// (GPU は T-0107。同じ関数を呼ぶ)。
+// (GPU は shaders/sim/multires_conduct.hlsli。同じ関数を呼ぶ。T-0107)。
 //
 // データの流れ:
 //   刻みの初めのセル → セルの熱(MrThermal: 温度・コンダクタンス・熱容量の上限)

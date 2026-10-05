@@ -280,12 +280,20 @@ views:
           note: "1 つずつ刻む素直な答えと論理のセルが一致・保存量一致・燃え尽きた木箱が畳まれて頁が 0 に戻る(T-0103)。GPU(HW・WARP)は状態の全部と種が毎刻み CPU と一致" }
       - { id: multiresconduction, group: simlib, label: "ComputeConduction<br/>木の上の熱の伝導(違うレベルの面は細かい側が粗い側の端数へ送る)",
           code: "engine/src/sim/multires_conduction.cpp::ComputeConduction", ticket: T-0019, doc: docs/design/17-multiresolution.md,
-          note: "StepNest / StepActive の options.conduction(GPU はまだ。T-0107)。流れのある一様なブロックを頁に広げ、端数の枠を枠の順に配り、刻みの初めのセルから面の流れを足す(Jacobi 型)" }
+          note: "StepNest / StepActive の options.conduction(GPU は GpuMultires::RecordConduction。T-0107)。流れのある一様なブロックを頁に広げ、端数の枠を枠の順に配り、刻みの初めのセルから面の流れを足す(Jacobi 型)" }
       - { id: multiresconductionhlsl, group: shared, label: "multires_conduction.hlsli<br/>面の隣・レベルの単位の係数・違うレベルの受け渡し",
           code: "shaders/common/multires_conduction.hlsli::MrSplitCrossFlow", ticket: T-0019, doc: docs/design/17-multiresolution.md }
       - { id: conductiontest, group: tests, label: "multires_conduction_test<br/>面の隣の総当たり・保存量・活性 = 全部",
           code: "tests/multires_conduction_test.cpp::CheckChain", ticket: T-0019,
           note: "閉じた箱・6 段の鎖(端数の枠あり / なし)・たくさんの要求に伝導。面の係数が 1/8 で止まるレベルと、静かになった後に残る頁も測る" }
+      - { id: gpuconduction, group: simlib, label: "RecordConduction<br/>熱の伝導の GPU の段(印 → 頁 → 端数の枠 → 流れ → 足して反応)",
+          code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordConduction", ticket: T-0107, doc: docs/design/17-multiresolution.md,
+          note: "Compute の段 shaders/sim/multires_conduct.hlsl(1 グループ = 1 ブロック)。活性の刻みは Work Graph が伝導の一覧に足し、段はその一覧だけ。変化は 64bit の atomic の足し算" }
+      - { id: gpuconductionhlsl, group: shared, label: "multires_conduct.hlsli<br/>1 ブロックの印・流れ・足す(Compute と Work Graph で共有)",
+          code: "shaders/sim/multires_conduct.hlsli::AddCellFlows", ticket: T-0107, doc: docs/design/17-multiresolution.md }
+      - { id: gpuconductiontest, group: tests, label: "gpu_multires_conduction_test<br/>鎖・たくさんの要求の伝導を毎刻み GPU と CPU で比べる",
+          code: "tests/gpu_multires_conduction_test.cpp::RunScene", ticket: T-0107,
+          note: "全部 / 活性(伝導の段が Compute / Work Graph)。HW・WARP。release では Compute と Work Graph の時間も測る(D-302)" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -387,6 +395,10 @@ views:
       - [multiresconductionhlsl, multireshlsl, "端数(ADR-0015)で粗い側が受ける"]
       - [multiresactivity, multiresconduction, "options.conduction"]
       - [conductiontest, multiresconduction]
+      - [gpumultires, gpuconduction, "options.conduction"]
+      - [gpuconduction, gpuconductionhlsl]
+      - [gpuconductionhlsl, multiresconductionhlsl, "CPU と同じ式"]
+      - [gpuconductiontest, gpuconduction]
       - [quiettest, gpumultires, "毎刻み比べる"]
       - [multiresactivity, multirespages, "反応が進む一様なブロック"]
       - [multirespages, multirestree, "頁の空きのスタック"]

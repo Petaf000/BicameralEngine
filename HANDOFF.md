@@ -1,43 +1,57 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-05 / チケット: T-0019 熱の伝導(3D・レベルをまたぐ)— CPU リファレンス — 完了
+最終更新: 2026-10-05 / チケット: T-0107 熱の伝導を GPU に — 完了
 
 ## 状態(3 行以内)
-- 多重解像度の木の上の熱の伝導を CPU で作った(shaders/common/multires_conduction.hlsli・engine/src/sim/multires_conduction.cpp)。`MultiresStepOptions{.conduction = true}` で有効。
-- 違うレベルの面は細かい側が計算し、粗い側は端数で受ける(ADR-0017)。面の隣が総当たりと一致・保存量がビット一致・活性 = 全部。GPU はまだ(既定は切る)。
-- T-0019 を 3 つに分けた: 次は T-0107(GPU)→ T-0108(細かいレベルの刻み)→ T-0104 → T-0105。NEXT.md の先頭。
+- 熱の伝導を GPU に載せた: `RecordStep` / `RecordStepActive` に `MultiresStepOptions{.conduction = true}`。Compute の段 shaders/sim/multires_conduct.hlsl(印 → 頁 → 端数の枠 → 埋める → 流れ → 足して反応)。
+- 鎖・たくさんの要求の場面(全部 / 活性 × 伝導の段 Compute / Work Graph)で状態の全部と次の刻みの種が毎刻み CPU とビット一致(HW・WARP)。既定は Compute(D-302 の計測で差は揺れの中、Compute がわずかに安い)。
+- 端数の枠の容量は ADR-0017 に追記(返すのは T-0104 で「静かになったら帳簿へ」)。次は T-0108(細かいレベルの刻み)。NEXT.md の先頭。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug)・`python3 tools/archmap/archmap.py --check` OK(106)。
-- **全部のテスト 65 本が通る(2026-10-05、debug)**・tidy 警告なし。足したのは multires_conduction(CPU、debug で約 3 分。面の隣の総当たり・閉じた箱・鎖・たくさんの要求・計測のログ)。
-  `job.py test` は分けて投げる: `-Filter gpu_multires`(約 14 分)/ `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`)と `-Filter reaction`。
+- `job.py build`(debug・release)・`python3 tools/archmap/archmap.py --check` OK(109)。
+- 足したテスト gpu_multires_conduction(HW、debug で約 9 分。活性のグラフと伝導のグラフの作成に約 3 分)・gpu_multires_conduction_warp(約 7 分)。TIMEOUT 900。
+  release ではハードウェアだけ Compute と Work Graph の時間を測ってログに出す(debug は測らない)。
+- **全部のテスト 67 本が通る(2026-10-05、debug)**・tidy 警告なし。release でも gpu_multires_conduction(HW・WARP)が通る。
+  `job.py test` は分けて投げる: `-Filter "^gpu_multires(_warp|_activity|_activity_warp|_quiet|_quiet_warp|_uniform|_uniform_warp)?$"`(約 14 分)/ `-Filter gpu_multires_conduction`(約 16 分)/
+  `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`)と `-Filter reaction`。
   `--timeout 2400` で裏で投げ、runner/logs/<job>-test.log を grep して待つ。テストの表示した行は `-Show` で出る。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **GPU は伝導しない**(T-0107)。GPU と比べるテストは全部 conduction = false のまま。
 - 細かいレベルでは面の係数が熱容量の上限(1/8)で止まり、熱の伝わり方が本当より遅い(試験の表で k ≥ 3。現実の値なら空気 k ≥ 9)。T-0108。
-- 伝導で粗い側が取った端数の枠は木の変更でしか返らない。たくさんの要求の場面では 64 枠を使い切った(端数の不足を数える。ADR-0017「影響」。T-0107 で決める)。
-- 熱が通った所は温度差が約 1 mK 未満になるまで流れが 0 にならず、ビット単位で同じに戻らない・静かにならない(鎖の場面で 600 刻みたっても全部が種。頁の中の幅 6 mK)。T-0104・D-430。
+- 伝導で粗い側が取った端数の枠は木の変更でしか返らない。たくさんの要求の場面では 64 枠を使い切る(不足を数える。GPU も同じ)。静かになったら端数のエネルギーを帳簿へ移して返すのは T-0104(ADR-0017 追記)。
+- 熱が通った所は温度差が約 1 mK 未満になるまで流れが 0 にならず、ビット単位で同じに戻らない・静かにならない(T-0104・D-430)。
 - 影のブロックは自分の中だけ伝導する(外は断熱。親との受け渡しは引き戻し)。
+- **release の WARP では、伝導の段の Work Graph 版(multires_conduct_graph.hlsl)の最初の DispatchGraph でデバイスが失われる**(DXGI_ERROR_DRIVER_INTERNAL_ERROR)。
+  debug の WARP とハードウェア(debug・release)では CPU と一致する。WARP の JIT の不具合と推定(未確認。ADR-0013 と同じ種類)。既定の Compute 版は release の WARP でも一致。
+  テストは release の WARP でだけ Work Graph 版を外している(gpu_multires_conduction_test.cpp の RunAll)。
+- 伝導の段の Compute は活性の時も全部の枠の数だけグループを投げる(一覧の数を超えたグループはすぐ抜ける)。世界の枠が数万になったら ExecuteIndirect か Work Graph 版を測り直す。
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (Claude が決めた。ADR-0017)違うレベルの面は細かい側だけが計算し、粗い側は整数部 + 端数(2^-64)で受ける。端数の枠は枠の順に配り、無ければ整数の単位の倍数だけ送る。
-  代案(木を 2:1 に保つ・切り捨て・確率的な丸め)を比べた。
-- (Claude が決めた)面の係数のレベルの単位: G の係数 × 4^k、熱容量の上限はそのまま。違うレベルの面の粗い側の上限は × 2^d。
-- (Claude が決めた)1 刻みの順: 変わるか(反応・伝導)→ 頁を枠の順に → 頁が足りないブロックは凍らせる(そのブロックとの面も流れない)→ 端数の枠を枠の順に → 流れ → 足す → 反応。
-- (Claude が決めた)活性の種 = 進める規則があった、または変わったブロック(伝導を有効にした時)。
-- (Claude が決めた)T-0019 を CPU(T-0019)・GPU(T-0107)・細かいレベルの刻み(T-0108)に分けた(CLAUDE.md §3)。
+- (Claude が決めた)ルート署名を空けるため、uint32 の表(世界の枠の空き・取り合いの印・索引・世界の頁の空き)を u6 の 1 本にまとめた。u11 = 伝導の作業場、u12 = GPU の入力、u13 = 活性の一覧。62 / 64 語。
+- (Claude が決めた)伝導の段は 1 グループ = 1 ブロック。印と変化は伝導の作業場(枠ごとの刻みの印 8 語 + 頁のセルごとの変化 16 B)。印は刻みの印なので消さず、変化は足したら 0 に戻す。
+  粗いセルの変化は 64bit の atomic の足し算 2 回(端数 → 桁上がり → 整数部)。
+- (Claude が決めた)活性の刻みでは、Work Graph の ActivityStepNode が刻まずに伝導の一覧に足し(ルート定数 stepFlags の CONDUCTION)、Compute の段が一覧だけを受け持つ(LISTED)。
+  粗い側の相手は印の段で一覧に入れる(Work Graph 版では流れの段の間、一覧は読むだけなので)。観察の枠は ConductBegin が入れる。
+- (Claude が決めた。D-302)伝導の段(埋める・流れ・足す)は Compute と Work Graph を測り、差は揺れの中で Compute がわずかに安い → 既定は Compute。Work Graph 版は GpuMultiresOptions::conductionGraph で残す。
+- (Claude が決めた。ADR-0017 追記)伝導の端数の枠は今までどおり木の変更でしか返さない。返し方(静かになったら端数のエネルギーを帳簿へ)は T-0104 で、ほぼ同じ頁を畳む判定と一緒に。容量は頁と同じ「世界の容量」。
 
 ## 次にやること
-NEXT.md の先頭(T-0107 → T-0108 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0108 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **熱の伝導の GPU(T-0107)**: 段は shaders/sim/multires_conduct.hlsl(ConductBegin・ConductMark・ConductPrepare・ConductFlows・ConductApply。中身は multires_conduct.hlsli)と
+  multires_tree.hlsl の TreeExpand(配った・凍らせた印)・TreeFractions(端数の枠を枠の順に。伝導の一覧の数を Work Graph の見出しに写す)。呼ぶ順は gpu_multires.cpp の RecordConduction。
+  CPU の StepBlocks と同じ順なので、片方を変えたらもう片方も。印の種類は multires_bindings.hlsli の CONDUCT_MARK_*(刻みの印 = MrActivityMark)。
+- u6 は [世界の枠の空き][取り合いの印][索引][世界の頁の空き](g_treeWords。番地は TreeClaimAddress・TreeIndexAddress・FreePageAddress)。CPU の木では別々の配列のままで、
+  RecordUpload(MakeTreeWordsImage)と Read が詰め替える(取り合いの印は読み戻さない)。
+- GPU の入力(u12)の見出しは 頁に広げる一覧 + 伝導の一覧 3 つ(埋める・流れ・足す。同じレコード)。伝導の一覧のレコードは頁に広げる一覧のレコードの後ろ(ConductRecordsOffset。世界の枠の数で動く)。
+- 同じリストで RecordUpload を 2 回呼ばない(2 回目はバッファが UAV のまま CopyResource になる)。計測で版を並べる時は版ごとに別のリストにした。
 - **熱の伝導(T-0019)**: 式は shaders/common/multires_conduction.hlsli(MrFindFaceNeighbor・MrCellThermal・MrSameLevelFlow・MrCrossLevelFlow・MrSplitCrossFlow)。
   CPU は multires_nest.cpp の nest_detail::StepBlocks(StepNest・StepActive で共有。前の StepPagedBlock / StepBlock を置き換えた)→ multires_conduction.cpp の
   MarkConductionWants(一様なブロックに MR_PAGE_WANTED・端数の印)→ ExpandWantedPages → ComputeConduction(端数の枠を配る・変化の表)→ 変化を足して反応。
-  GPU に載せる時(T-0107)も同じ順にする。粗いセルの変化は細かい側から足し込む(GPU は 64bit の atomic の足し算。端数の桁上がりも整数なので順に依存しない)。
-- 数える欄は 24 個(23 MR_COUNTER_FRACTION_SHORTAGE)。GPU は 23 を書かない(0 のまま一致)。
+  GPU(T-0107)も同じ順。粗いセルの変化は細かい側から足し込む(GPU は 64bit の atomic の足し算。端数の桁上がりも整数なので順に依存しない)。
+- 数える欄は 24 個(23 MR_COUNTER_FRACTION_SHORTAGE。GPU は TreeFractions が書く)。
 - CpuTree(Tree の約束)は multires_nest_internal.h の nest_detail::CpuTree に移した(活性と伝導が共有)。テストは自分の TestTree を持つ。
 - multires_conduction_test は debug で約 3 分(保存量の 256bit の合計は 4 刻みごと)。たくさんの要求の場面の全部を刻む木が重い。
 - **取り合いの丸め(T-0106)**: reaction.hlsli の RxSumUsage(要求・消費の合計)・RxShrink(切り捨てと丸め)・RxOverdraws・RxRevokeRoundUps・RxResolveContention(..., randomSeed)。
@@ -53,9 +67,9 @@ NEXT.md の先頭(T-0107 → T-0108 → T-0104 → T-0105)。ユーザーに判�
   頁のセルの番地は CPU は nest_detail::PageCellAt / CellAt(頁を持つ枠だけ)、GPU は PageCellAddress(page, index) = 枠の数 + page × 512 + index(古い CellAddress は無い)。
   一様の値は nest.cells[枠](GPU は g_cells[枠])。頁の空きのスタックは nest.freeBlocks[世界の枠の数 + i](数は MR_COUNTER_FREE_PAGES = 19)。
   MultiresCapacity に pages(世界の頁の数)を足した。テストの MakeMultiresCapacity は pages = 世界の枠の数(不足しない)。
-- 刻みの順(活性): 活性のグラフ(ActivityStepNode は一様なら印だけ)→ 観察の枠 → RecordExpandPages(TreeExpand → u13 の後ろの一覧 MR_GRAPH_INPUT_EXPAND_* を
+- 刻みの順(活性): 活性のグラフ(ActivityStepNode は一様なら印だけ)→ 観察の枠 → RecordExpandPages(TreeExpand → u12〔T-0107 前は u13〕の後ろの一覧 MR_GRAPH_INPUT_EXPAND_* を
   GPU の入力に ExpandStepNode)。全部を刻む RecordStep は Main → TreeExpand → StepExpanded(世界の枠の数だけグループ)。CPU は StepActive / StepNest の後ろの ExpandWantedPages。
-  u13 の一覧の見出しの入口の番号と番地は RecordUpload が書く(MakeGraphInputImage。TreeExpand は数だけ書く)。数える欄は 22 個(19 頁の空き・20 広げた数・21 頁の不足)。
+  u12 の一覧の見出しの入口の番号と番地は RecordUpload が書く(MakeGraphInputImage。TreeExpand は数だけ書く)。数える欄は 22 個(19 頁の空き・20 広げた数・21 頁の不足)。
 - 累積和 InclusiveScan(multires_tree.hlsl)は 3 本(枠・端数・頁)になった。MrRequestState に pageNeed・pageBase・releasePage を足した。
 - **静かなブロックを粗くする(T-0101)**: 規則は shaders/common/multires_activity.hlsli の末尾(MR_QUIET_TICKS・MrIsQuietLeaf・MrWantsQuietCoarsen・MrCellChanged)。
   CPU は multires_activity.cpp の SubmitQuietCoarsenRequests、GPU は multires_tree.hlsl の TreeQuiet(gpu_multires.cpp の RecordQuietRequests。1 グループ 512 スレッド、InclusiveScan を使い回す)。
@@ -70,16 +84,16 @@ NEXT.md の先頭(T-0107 → T-0108 → T-0104 → T-0105)。ユーザーに判�
   (ActivitySeedNode → WakeFaceNode〔スレッド起動・再帰 MR_MAX_WAKE_DEPTH 28〕→ ActivityStepNode、観察の枠は ObserverStepNode)と gpu_multires.cpp の RecordStepActive。
   **活性のグラフは `GpuMultires::Create(..., {.activity = true})` の時だけ作る**(反応の核を含んで大きく、debug の GPU-based validation で 1 回 2〜3 分。
   木の管理のグラフに入れたら gpu_probe_peek が 300 s を超えて落ちた)。
-- 種の一覧(u14)は 2 本を刻みごとに入れ替える(m_activityCurrent)。要求の処理はこの刻みの一覧へ(細かくした親と子・粗くした親をつつく)、刻むノードは次の刻みの一覧へ書く。
+- 種の一覧(u13。T-0107 前は u14)は 2 本を刻みごとに入れ替える(m_activityCurrent)。要求の処理はこの刻みの一覧へ(細かくした親と子・粗くした親をつつく)、刻むノードは次の刻みの一覧へ書く。
   先頭は D3D12_NODE_GPU_INPUT そのもの + 予約の数 + 落とした数、レコード 0 は空(MR_NO_BLOCK)。RecordStep(全部を刻む)だけを使う所では一覧が空にされず、一杯になると落とすだけ(害はない)。
-- **多重解像度のルート署名は UAV 15 個(u14 活性の一覧)・ルート定数 23 個で 63 / 64 語**。もう 1 語しか足せない。足すならバッファをまとめる。
+- **多重解像度のルート署名は UAV 14 個(u13 活性の一覧)・ルート定数 24 個で 62 / 64 語**(T-0107 で u6 にまとめた)。あと 2 語。
 - 見出しの padding は activeTick になった(刻みの印 = 刻み + 1)。HashWholeNest は印を含み、HashRealLeaves・HashBlock は含まない。数える欄は 20 個(15 刻んだ数・16 再帰の上限で止まった数)。
 - テストの場面は tests/multires_activity_scene.h(根 4×4×4・木箱の周りを T-0018 のたくさんの要求で・影 4 段)。総当たりの面の隣は同じファイルの BruteForceScheduled。
   CPU のテストの 2 回目は比べる相手と総当たりを省いている(debug で遅いので)。計測は根 8³ で、WARP では測らない(暖機が遅すぎる)。
 - **多重解像度の木の管理(T-0018)**: 約束は shaders/common/multires_tree.hlsli(要求 MrRequest 40 B・途中の値 MrRequestState・索引の番地・帳簿)。
   CPU は engine/src/sim/multires_tree.cpp(ProcessRequests = Resolve → Settle → Allocate → Apply → ReleaseAll → RebuildIndex)、
   GPU は shaders/sim/multires_tree.hlsl の 6 段(.cso は multires_tree_<snake>)と multires_graph.hlsl(RefineNode は手で決めた影の鎖〔request = MR_NO_BLOCK〕と
-  要求の鎖の両方・CoarsenRequestNode)。呼ぶ順は gpu_multires.cpp の RecordProcessRequests。GPU の入力は u13(見出し 2 つ + レコード。割り当ての段が書く。
+  要求の鎖の両方・CoarsenRequestNode)。呼ぶ順は gpu_multires.cpp の RecordProcessRequests。GPU の入力は u12(見出し 2 つ + レコード。割り当ての段が書く。
   DispatchGraph の間だけ NON_PIXEL_SHADER_RESOURCE。レコード 0 件にしないため何もしないレコードを 1 件)。
 - 数える欄は 20 個(MR_COUNTER_*。T-0100 で 15・16 を足した)。旧 MR_COUNTER_FRACTION_BLOCKS は無い(端数の枠の空きの数 MR_COUNTER_FREE_FRACTIONS)。要求の数 MR_COUNTER_REQUESTS は
   RecordRequests が CopyBufferRegion で書き、解放の段が 0 に戻す(一覧が空の時に送る)。RecordRequests の写しは 1 本のリストで 16 回まで(REQUEST_UPLOAD_SLOTS)。

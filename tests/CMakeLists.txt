@@ -126,6 +126,12 @@ target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_uniform gpu_multires_uniform_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_multires_uniform_warp gpu_multires_uniform_test warp --warp --queue compute)
 
+bicameral_add_gpu_test(gpu_multires_conduction_test)  # 木の上の熱の伝導の GPU と CPU のビット一致(T-0107)
+target_link_libraries(gpu_multires_conduction_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_multires_conduction gpu_multires_conduction_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_multires_conduction_warp gpu_multires_conduction_test warp --warp --queue compute)
+set_tests_properties(gpu_multires_conduction gpu_multires_conduction_warp PROPERTIES TIMEOUT 900)  # debug で活性のグラフの作成に数分
+
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
 foreach(_scene IN ITEMS stack mass_ratio pile)

@@ -3,8 +3,10 @@
 // (1 レベル = 1 グループ)、刻むのは Compute(1 スレッド = 1 セル)か、活性だけなら Work Graph(1 ブロック = 1 グループ。T-0100)。
 // 一様なブロック(T-0102)は刻む段が頁に広げる印を付け、TreeExpand が枠の順に頁を配り、StepExpanded / ExpandStepNode が埋めて刻む。
 // 静かで一様になった頁は、要求の処理の前に TreeFoldCheck が調べ TreeFold が枠の順に畳む(T-0103)。
+// 熱の伝導(T-0107)は Compute の段(multires_conduct.hlsl)を刻みの中で順に投げる(RecordConduction)。
 // 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ・
-// u6〜u13 木の管理・u14 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
+// u6〜u10 木の管理・u11 伝導の作業場・u12 GPU の入力・u13 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
+// ルート署名は 62 / 64 語(UAV 14 × 2・定数 24・リング 2・表 4 × 2。T-0107 で uint32 の表を u6 にまとめて空けた)。
 #include "sim/gpu_multires.h"
 
 #include "common/multires_activity.hlsli"
@@ -19,10 +21,10 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 23;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 24;
         constexpr uint32_t EXTERNAL_VIEW_FIRST = 4;  // u4・u5
-        constexpr uint32_t UAV_COUNT = 15;           // u0〜u14
-        constexpr uint32_t ACTIVITY_VIEW = 14;       // u14
+        constexpr uint32_t UAV_COUNT = 14;           // u0〜u13
+        constexpr uint32_t ACTIVITY_VIEW = 13;       // u13
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
         constexpr uint32_t STEP_THREADS_PER_GROUP = 64;  // multires_step.hlsl の numthreads
@@ -50,12 +52,33 @@ namespace bicameral::sim {
             PassExpand,     // 一様で反応が進むブロックに頁を配る(刻んだ後。T-0102)
             PassFoldCheck,  // 静かで一様になった頁を調べる(要求の処理の前。T-0103)
             PassFold,       // 調べた頁を枠の順に畳む(T-0103)
+            PassFractions,  // 伝導の端数の枠を枠の順に配る(頁を配った後。T-0107)
         };
-        constexpr std::array<const char*, 10> TREE_SHADERS = {
+        constexpr std::array<const char*, 11> TREE_SHADERS = {
             "sim/multires_tree_resolve.cso", "sim/multires_tree_settle.cso",      "sim/multires_tree_allocate.cso",
             "sim/multires_tree_release.cso", "sim/multires_tree_clear_index.cso", "sim/multires_tree_fill_index.cso",
             "sim/multires_tree_quiet.cso",   "sim/multires_tree_expand.cso",      "sim/multires_tree_fold_check.cso",
-            "sim/multires_tree_fold.cso"};
+            "sim/multires_tree_fold.cso",    "sim/multires_tree_fractions.cso"};
+
+        // multires_conduct.hlsl の段(呼ぶ順。T-0107)
+        enum ConductPass : uint8_t {
+            ConductPassBegin,
+            ConductPassMark,
+            ConductPassPrepare,
+            ConductPassFlows,
+            ConductPassApply
+        };
+        constexpr std::array<const char*, 5> CONDUCT_SHADERS = {
+            "sim/multires_conduct_begin.cso", "sim/multires_conduct_mark.cso", "sim/multires_conduct_prepare.cso",
+            "sim/multires_conduct_flows.cso", "sim/multires_conduct_apply.cso"};
+
+        // ルート定数の stepFlags(multires_bindings.hlsli の MR_STEP_*)
+        constexpr uint32_t STEP_FLAG_CONDUCTION = 1;
+        constexpr uint32_t STEP_FLAG_LISTED = 2;
+
+        // 伝導の作業場(multires_bindings.hlsli の CONDUCT_MARK_WORDS・CONDUCT_DELTA_BYTES)
+        constexpr uint64_t CONDUCT_MARK_BYTES = 8 * sizeof(uint32_t);
+        constexpr uint64_t CONDUCT_DELTA_BYTES = 16;
 
         // Work Graph の GPU の入力(multires_bindings.hlsli の MR_GRAPH_INPUT_*)。見出しは D3D12_NODE_GPU_INPUT そのもの
         constexpr uint32_t GRAPH_INPUT_REFINE_HEADER = 0;
@@ -63,7 +86,10 @@ namespace bicameral::sim {
         constexpr uint32_t REFINE_RECORD_BYTES = 24;
         constexpr uint32_t GRAPH_INPUT_BYTES = 64 + ((REFINE_RECORD_BYTES + 4) * (MR_MAX_REQUESTS + 1));
         constexpr uint32_t GRAPH_INPUT_EXPAND_HEADER = (GRAPH_INPUT_BYTES + 15) & ~15u;  // 頁に広げて刻む一覧(T-0102)
-        constexpr uint32_t GRAPH_INPUT_EXPAND_RECORDS = GRAPH_INPUT_EXPAND_HEADER + 32;
+        // 伝導の一覧の見出し 3 つ(埋める・流れ・足す。同じレコード。T-0107)
+        constexpr std::array<uint32_t, 3> GRAPH_INPUT_CONDUCT_HEADERS = {
+            GRAPH_INPUT_EXPAND_HEADER + 32, GRAPH_INPUT_EXPAND_HEADER + 64, GRAPH_INPUT_EXPAND_HEADER + 96};
+        constexpr uint32_t GRAPH_INPUT_EXPAND_RECORDS = GRAPH_INPUT_EXPAND_HEADER + 128;
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, EntrypointIndex) == 0);
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, NumRecords) == 4);
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, Records) == 8);
@@ -143,6 +169,21 @@ namespace bicameral::sim {
             return true;
         }
 
+        // .cso を読んで Compute のパイプラインを作る
+        std::expected<ComPtr<ID3D12PipelineState>, std::string> LoadComputePipeline(ID3D12Device5* device,
+                                                                                    ID3D12RootSignature* rootSignature,
+                                                                                    const char* path) {
+            const auto bytecode = gpu::LoadShader(path);
+            if (!bytecode)
+                return std::unexpected(bytecode.error());
+
+            ComPtr<ID3D12PipelineState> pipeline = gpu::CreateComputePipeline(device, rootSignature, *bytecode);
+            if (!pipeline)
+                return std::unexpected(std::format("多重解像度のパイプラインを作れない({})", path));
+
+            return pipeline;
+        }
+
         void UavBarrier(ID3D12GraphicsCommandList10* list) {
             const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
             list->ResourceBarrier(1, &barrier);
@@ -177,31 +218,23 @@ namespace bicameral::sim {
         if (!m_rootSignature)
             return std::unexpected("多重解像度のルート署名を作れない");
 
-        const auto step = gpu::LoadShader("sim/multires_step.cso");
-        if (!step)
-            return std::unexpected(step.error());
+        // --- Compute(刻む・頁に広げて刻む・木の管理の段・伝導の段)---
+        auto step = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step.cso");
+        auto stepExpanded = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_expanded.cso");
+        if (!step || !stepExpanded)
+            return std::unexpected(!step ? step.error() : stepExpanded.error());
 
-        m_stepPipeline = gpu::CreateComputePipeline(device, m_rootSignature.Get(), *step);
-        if (!m_stepPipeline)
-            return std::unexpected("多重解像度の刻みのパイプラインを作れない");
+        m_stepPipeline = std::move(*step);
+        m_stepExpandedPipeline = std::move(*stepExpanded);
+        static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT && CONDUCT_SHADERS.size() == CONDUCT_PASS_COUNT);
+        for (uint32_t pass = 0; pass < TREE_PASS_COUNT + CONDUCT_PASS_COUNT; ++pass) {
+            const bool tree = pass < TREE_PASS_COUNT;
+            const char* path = tree ? TREE_SHADERS[pass] : CONDUCT_SHADERS[pass - TREE_PASS_COUNT];
+            auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), path);
+            if (!pipeline)
+                return std::unexpected(pipeline.error());
 
-        const auto stepExpanded = gpu::LoadShader("sim/multires_step_expanded.cso");
-        if (!stepExpanded)
-            return std::unexpected(stepExpanded.error());
-
-        m_stepExpandedPipeline = gpu::CreateComputePipeline(device, m_rootSignature.Get(), *stepExpanded);
-        if (!m_stepExpandedPipeline)
-            return std::unexpected("頁に広げて刻むパイプラインを作れない");
-
-        static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT);
-        for (uint32_t pass = 0; pass < TREE_PASS_COUNT; ++pass) {
-            const auto bytecode = gpu::LoadShader(TREE_SHADERS[pass]);
-            if (!bytecode)
-                return std::unexpected(bytecode.error());
-
-            m_treePipelines[pass] = gpu::CreateComputePipeline(device, m_rootSignature.Get(), *bytecode);
-            if (!m_treePipelines[pass])
-                return std::unexpected(std::format("木の管理のパイプラインを作れない({})", TREE_SHADERS[pass]));
+            (tree ? m_treePipelines[pass] : m_conductPipelines[pass - TREE_PASS_COUNT]) = std::move(*pipeline);
         }
 
         const auto library = gpu::LoadShader("sim/multires_graph.cso");
@@ -219,6 +252,11 @@ namespace bicameral::sim {
             return std::unexpected("multires_graph.cso に入口のノードが足りない");
 
         m_constants.graphEntries = m_entries[EntryRefine] | (m_entries[EntryCoarsenRequest] << 16);
+        if (options.conductionGraph) {
+            if (auto created = CreateConductionGraph(device); !created)
+                return created;
+        }
+
         if (!options.activity)
             return {};
 
@@ -238,6 +276,27 @@ namespace bicameral::sim {
                              m_activityGraph->EntrypointIndex(L"ExpandStepNode")};
         if (std::ranges::contains(m_activityEntries, UINT32_MAX))
             return std::unexpected("multires_activity_graph.cso に入口のノードが足りない");
+
+        return {};
+    }
+
+    std::expected<void, std::string> GpuMultires::CreateConductionGraph(ID3D12Device5* device) {
+        const auto library = gpu::LoadShader("sim/multires_conduct_graph.cso");
+        if (!library)
+            return std::unexpected(library.error());
+
+        auto graph = gpu::WorkGraph::Create(device, m_rootSignature.Get(), *library, L"MultiresConduct");
+        if (!graph)
+            return std::unexpected(graph.error());
+
+        m_conductGraph = std::make_unique<gpu::WorkGraph>(std::move(*graph));
+        m_conductEntries = {m_conductGraph->EntrypointIndex(L"ConductPrepareNode"),
+                            m_conductGraph->EntrypointIndex(L"ConductFlowsNode"),
+                            m_conductGraph->EntrypointIndex(L"ConductApplyNode")};
+        if (std::ranges::contains(m_conductEntries, UINT32_MAX))
+            return std::unexpected("multires_conduct_graph.cso に入口のノードが足りない");
+
+        m_useConductGraph = true;
 
         return {};
     }
@@ -301,15 +360,15 @@ namespace bicameral::sim {
         sizes[BufferCells] = (m_blockCapacity + (PageCount() * MR_BLOCK_CELLS)) * sizeof(RxCell);
         sizes[BufferFractions] = uint64_t{m_capacity.fractions} * MR_BLOCK_CELLS * sizeof(MrFraction);
         sizes[BufferCounters] = uint64_t{MR_COUNTER_COUNT} * sizeof(uint32_t);
-        sizes[BufferFreeBlocks] = (uint64_t{m_capacity.worldBlocks} + m_capacity.pages) * sizeof(uint32_t);
+        sizes[BufferTreeWords] = ((uint64_t{m_capacity.worldBlocks} * 2) + m_capacity.indexEntries + m_capacity.pages) *
+                                 sizeof(uint32_t);
         sizes[BufferFreeFractions] = uint64_t{m_capacity.fractions} * sizeof(uint32_t);
         sizes[BufferLedger] = uint64_t{MR_LEDGER_LEVELS} * m_capacity.ledgerColumns * sizeof(uint64_t);
-        sizes[BufferIndex] = uint64_t{m_capacity.indexEntries} * sizeof(uint32_t);
         sizes[BufferRequests] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequest);
         sizes[BufferStates] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequestState);
-        sizes[BufferClaims] = uint64_t{m_capacity.worldBlocks} * sizeof(uint32_t);
-        sizes[BufferGraphInput] = GRAPH_INPUT_EXPAND_RECORDS +
-                                  ((uint64_t{m_capacity.worldBlocks} + 1) * sizeof(uint32_t));
+        sizes[BufferConduction] = (uint64_t{m_blockCapacity} * CONDUCT_MARK_BYTES) +
+                                  (PageCount() * MR_BLOCK_CELLS * CONDUCT_DELTA_BYTES);
+        sizes[BufferGraphInput] = ConductRecordsOffset() + ((uint64_t{m_blockCapacity} + 1) * sizeof(uint32_t));
 
         return sizes;
     }
@@ -318,19 +377,47 @@ namespace bicameral::sim {
         return uint64_t{m_capacity.observerBlocks} + m_capacity.pages;
     }
 
-    // GPU の入力の最初の中身: 頁に広げて刻む一覧の見出し(入口の番号と番地は変わらない。数は TreeExpand が書く)とレコード 0 だけ。
+    // 伝導の一覧のレコードの位置(multires_bindings.hlsli の ConductRecordsOffset)
+    uint64_t GpuMultires::ConductRecordsOffset() const {
+        return GRAPH_INPUT_EXPAND_RECORDS + ((uint64_t{m_capacity.worldBlocks} + 1) * sizeof(uint32_t));
+    }
+
+    // GPU の入力の最初の中身: 頁に広げて刻む一覧と伝導の一覧の見出し(入口の番号と番地は変わらない。数は GPU が書く)とレコード 0 だけ。
     // ほかは 0(要求の処理が毎回書いてから読む)
     std::vector<std::byte> GpuMultires::MakeGraphInputImage() const {
         std::vector<std::byte> image(BufferSizes()[BufferGraphInput]);
-        const D3D12_NODE_GPU_INPUT header{
-            .EntrypointIndex = m_activityGraph ? m_activityEntries[ActivityEntryExpand] : 0,
-            .NumRecords = 1,
-            .Records = {
-                .StartAddress = m_buffers[BufferGraphInput]->GetGPUVirtualAddress() + GRAPH_INPUT_EXPAND_RECORDS,
-                .StrideInBytes = sizeof(uint32_t)}};
-        std::memcpy(image.data() + GRAPH_INPUT_EXPAND_HEADER, &header, sizeof(header));
-        const uint32_t emptyRecord = MR_NO_BLOCK;
-        std::memcpy(image.data() + GRAPH_INPUT_EXPAND_RECORDS, &emptyRecord, sizeof(emptyRecord));
+        const D3D12_GPU_VIRTUAL_ADDRESS base = m_buffers[BufferGraphInput]->GetGPUVirtualAddress();
+        const auto writeList = [&](uint32_t headerOffset, uint64_t recordsOffset, uint32_t entry) {
+            const D3D12_NODE_GPU_INPUT header{
+                .EntrypointIndex = entry,
+                .NumRecords = 1,
+                .Records = {.StartAddress = base + recordsOffset, .StrideInBytes = sizeof(uint32_t)}};
+            std::memcpy(image.data() + headerOffset, &header, sizeof(header));
+            const uint32_t emptyRecord = MR_NO_BLOCK;
+            std::memcpy(image.data() + recordsOffset, &emptyRecord, sizeof(emptyRecord));
+        };
+
+        writeList(GRAPH_INPUT_EXPAND_HEADER, GRAPH_INPUT_EXPAND_RECORDS,
+                  m_activityGraph ? m_activityEntries[ActivityEntryExpand] : 0);
+        for (uint32_t i = 0; i < GRAPH_INPUT_CONDUCT_HEADERS.size(); ++i)
+            writeList(GRAPH_INPUT_CONDUCT_HEADERS[i], ConductRecordsOffset(), m_conductGraph ? m_conductEntries[i] : 0);
+
+        return image;
+    }
+
+    // u6 の中身: [世界の枠の空き][取り合いの印][索引][世界の頁の空き](CPU の木では別々の配列)
+    std::vector<std::byte> GpuMultires::MakeTreeWordsImage(const MultiresNest& nest) const {
+        const std::span<const uint32_t> freeBlocks = std::span(nest.freeBlocks).first(m_capacity.worldBlocks);
+        const std::span<const uint32_t> freePages = std::span(nest.freeBlocks).subspan(m_capacity.worldBlocks);
+        std::vector<uint32_t> words;
+        words.reserve(BufferSizes()[BufferTreeWords] / sizeof(uint32_t));
+        words.insert(words.end(), freeBlocks.begin(), freeBlocks.end());
+        words.insert(words.end(), nest.claims.begin(), nest.claims.end());
+        words.insert(words.end(), nest.index.begin(), nest.index.end());
+        words.insert(words.end(), freePages.begin(), freePages.end());
+
+        std::vector<std::byte> image(words.size() * sizeof(uint32_t));
+        std::memcpy(image.data(), words.data(), image.size());
 
         return image;
     }
@@ -362,21 +449,28 @@ namespace bicameral::sim {
     bool GpuMultires::RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest) {
         if (nest.blocks.size() != m_blockCapacity || nest.seeds.size() != m_capacity.worldBlocks ||
             nest.cells.size() * sizeof(RxCell) != BufferSizes()[BufferCells] ||
-            nest.freeBlocks.size() * sizeof(uint32_t) != BufferSizes()[BufferFreeBlocks] ||
+            nest.freeBlocks.size() != size_t{m_capacity.worldBlocks} + m_capacity.pages ||
+            nest.claims.size() != m_capacity.worldBlocks ||
             nest.fractions.size() != size_t{m_capacity.fractions} * MR_BLOCK_CELLS ||
             nest.index.size() != m_capacity.indexEntries || nest.ledger.size() != BufferSizes()[BufferLedger] / 8)
             return false;
 
-        // 要求の途中の値と GPU の入力は写さない(0 のまま。毎回の処理が書いてから読む)
-        const std::vector<std::byte> zeros(BufferSizes()[BufferStates]);
+        // 要求の途中の値・伝導の作業場(印と変化は 0 から)・GPU の入力は写さない(毎回の処理が書いてから読む)
+        const std::vector<std::byte> zeros(std::max(BufferSizes()[BufferStates], BufferSizes()[BufferConduction]));
         const std::vector<std::byte> graphInput = MakeGraphInputImage();
+        const std::vector<std::byte> treeWords = MakeTreeWordsImage(nest);
         const std::array<std::span<const std::byte>, BufferCount> sources = {
-            std::as_bytes(std::span(nest.blocks)),     std::as_bytes(std::span(nest.cells)),
-            std::as_bytes(std::span(nest.fractions)),  std::as_bytes(std::span(nest.counters)),
-            std::as_bytes(std::span(nest.freeBlocks)), std::as_bytes(std::span(nest.freeFractions)),
-            std::as_bytes(std::span(nest.ledger)),     std::as_bytes(std::span(nest.index)),
-            std::as_bytes(std::span(nest.requests)),   std::span(zeros).first(BufferSizes()[BufferStates]),
-            std::as_bytes(std::span(nest.claims)),     std::span(graphInput)};
+            std::as_bytes(std::span(nest.blocks)),
+            std::as_bytes(std::span(nest.cells)),
+            std::as_bytes(std::span(nest.fractions)),
+            std::as_bytes(std::span(nest.counters)),
+            std::span(treeWords),
+            std::as_bytes(std::span(nest.freeFractions)),
+            std::as_bytes(std::span(nest.ledger)),
+            std::as_bytes(std::span(nest.requests)),
+            std::span(zeros).first(BufferSizes()[BufferStates]),
+            std::span(zeros).first(BufferSizes()[BufferConduction]),
+            std::span(graphInput)};
         std::array<D3D12_RESOURCE_BARRIER, BufferCount> barriers{};
         for (uint32_t i = 0; i < BufferCount; ++i) {
             if (!WriteUpload(m_uploads[i].Get(), sources[i]))
@@ -424,7 +518,8 @@ namespace bicameral::sim {
 
     void GpuMultires::BindRoot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) const {
         static_assert(sizeof(RootConstants) == ROOT_CONSTANT_COUNT * sizeof(uint32_t));
-        static_assert(BufferCount + 3 == UAV_COUNT);  // u4・u5 は外のバッファ、u14 は活性の一覧
+        static_assert(BufferCount + 3 == UAV_COUNT);  // u4・u5 は外のバッファ、u13 は活性の一覧
+        static_assert((UAV_COUNT * 2) + ROOT_CONSTANT_COUNT + 2 + (TABLE_COUNT * 2) <= 64);  // ルート署名の語
         for (uint32_t i = 0; i < BufferCount; ++i) {
             const uint32_t parameter = i < EXTERNAL_VIEW_FIRST ? i : i + 2;
             list->SetComputeRootUnorderedAccessView(parameter, m_buffers[i]->GetGPUVirtualAddress());
@@ -596,11 +691,12 @@ namespace bicameral::sim {
     }
 
     bool GpuMultires::RecordStepActive(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                       uint64_t worldSeed, uint64_t tick) {
+                                       uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
         if (!m_activityGraph)
             return false;
 
         SetTick(worldSeed, tick);
+        m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
         const uint32_t next = m_activityCurrent ^ 1u;
         ID3D12Resource* input = m_activity[m_activityCurrent].Get();
         ID3D12Resource* output = m_activity[next].Get();
@@ -617,19 +713,28 @@ namespace bicameral::sim {
                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &outputToUav);
 
-        // --- 種 → 面の隣 → 刻む(Work Graph)。観察の枠は全部刻む ---
+        // --- 種 → 面の隣 → 刻む(Work Graph)。観察の枠は全部刻む。伝導を入れるなら、グラフは伝導の一覧に足すだけで、刻むのは伝導の段 ---
         m_activityWrite = next;
+        if (options.conduction)
+            RecordConductPass(list, debugRing, ConductPassBegin, 1);
+
         SetActivityProgram(list);
         BindRoot(list, debugRing);
         gpu::WorkGraph::DispatchFromGpu(list, input->GetGPUVirtualAddress());
         UavBarrier(list);
-        if (m_capacity.observerBlocks > 0) {
-            const ObserverRecord record{.grid = {m_capacity.observerBlocks, 1, 1}, .firstSlot = m_capacity.worldBlocks};
-            gpu::WorkGraph::DispatchFromCpu(list, m_activityEntries[ActivityEntryObserver], &record, 1, sizeof(record));
-            UavBarrier(list);
-        }
+        if (options.conduction) {
+            RecordConduction(list, debugRing);
+        } else {
+            if (m_capacity.observerBlocks > 0) {
+                const ObserverRecord record{.grid = {m_capacity.observerBlocks, 1, 1},
+                                            .firstSlot = m_capacity.worldBlocks};
+                gpu::WorkGraph::DispatchFromCpu(list, m_activityEntries[ActivityEntryObserver], &record, 1,
+                                                sizeof(record));
+                UavBarrier(list);
+            }
 
-        RecordExpandPages(list, debugRing);  // 一様で反応が進むブロック(T-0102)
+            RecordExpandPages(list, debugRing);  // 一様で反応が進むブロック(T-0102)
+        }
 
         const D3D12_RESOURCE_BARRIER inputToUav = gpu::Transition(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -640,8 +745,13 @@ namespace bicameral::sim {
     }
 
     void GpuMultires::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                 uint64_t worldSeed, uint64_t tick) {
+                                 uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
         SetTick(worldSeed, tick);
+        m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
+        if (options.conduction) {
+            RecordConduction(list, debugRing);
+            return;
+        }
 
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(m_stepPipeline.Get());
@@ -654,6 +764,61 @@ namespace bicameral::sim {
         list->SetPipelineState(m_stepExpandedPipeline.Get());
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
         UavBarrier(list);
+    }
+
+    void GpuMultires::RecordConductPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                        uint32_t pass, uint32_t groupCount) {
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_conductPipelines[pass].Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(groupCount, 1, 1);
+        UavBarrier(list);
+    }
+
+    // 熱の伝導を入れた刻みの段(CPU の StepBlocks と同じ順。multires_conduct.hlsli の先頭)。活性(stepFlags の LISTED)なら
+    // 伝導の一覧のブロックだけ(数は GPU が決めるので、全部の枠の数だけグループを投げる。一覧は活性のグラフが作り終えている)
+    void GpuMultires::RecordConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        const uint32_t groups = std::max(1u, m_blockCapacity);
+        RecordConductPass(list, debugRing, ConductPassMark, groups);
+        RecordTreePass(list, debugRing, PassExpand, 1);
+        RecordTreePass(list, debugRing, PassFractions, 1);
+        if (m_useConductGraph && (m_constants.stepFlags & STEP_FLAG_LISTED) != 0) {
+            RecordConductionGraph(list, debugRing);
+            return;
+        }
+
+        RecordConductPass(list, debugRing, ConductPassPrepare, groups);
+        RecordConductPass(list, debugRing, ConductPassFlows, groups);
+        RecordConductPass(list, debugRing, ConductPassApply, groups);
+    }
+
+    // 埋める・流れ・足すを Work Graph で(GPU の入力 = 伝導の一覧。段ごとに見出しが別)
+    void GpuMultires::RecordConductionGraph(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        ID3D12Resource* graphInput = m_buffers[BufferGraphInput].Get();
+        const D3D12_RESOURCE_BARRIER toInput = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &toInput);
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        m_conductGraph->SetProgram(list, !m_conductGraphInitialized);
+        m_conductGraphInitialized = true;
+        BindRoot(list, debugRing);
+        for (const uint32_t header : GRAPH_INPUT_CONDUCT_HEADERS) {
+            gpu::WorkGraph::DispatchFromGpu(list, graphInput->GetGPUVirtualAddress() + header);
+            UavBarrier(list);
+        }
+
+        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &toUav);
+    }
+
+    bool GpuMultires::UseConductionGraph(bool use) {
+        if (use && !m_conductGraph)
+            return false;
+
+        m_useConductGraph = use;
+
+        return true;
     }
 
     void GpuMultires::RecordExpandPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
@@ -697,8 +862,8 @@ namespace bicameral::sim {
     // --- 読み戻しと計測 ---
 
     void GpuMultires::RecordReadback(ID3D12GraphicsCommandList10* list) {
-        // 状態と索引(要求・途中の値・取り合いの印・GPU の入力は読まない)
-        for (uint32_t i = 0; i <= BufferIndex; ++i)
+        // 状態と索引(要求・途中の値・伝導の作業場・GPU の入力は読まない)
+        for (uint32_t i = 0; i <= BufferLedger; ++i)
             gpu::RecordCopyToReadback(list, m_buffers[i].Get(), m_readbacks[i].Get());
 
         gpu::RecordCopyToReadback(list, m_activity[m_activityCurrent].Get(), m_activityReadback.Get());
@@ -713,15 +878,25 @@ namespace bicameral::sim {
         if (nest.blocks.size() != m_blockCapacity || nest.index.size() != m_capacity.indexEntries)
             nest = MakeMultiresNest(m_capacity);
 
-        const std::array<std::span<std::byte>, BufferIndex + 1> destinations = {
-            std::as_writable_bytes(std::span(nest.blocks)),     std::as_writable_bytes(std::span(nest.cells)),
-            std::as_writable_bytes(std::span(nest.fractions)),  std::as_writable_bytes(std::span(nest.counters)),
-            std::as_writable_bytes(std::span(nest.freeBlocks)), std::as_writable_bytes(std::span(nest.freeFractions)),
-            std::as_writable_bytes(std::span(nest.ledger)),     std::as_writable_bytes(std::span(nest.index))};
+        std::vector<uint32_t> treeWords(BufferSizes()[BufferTreeWords] / sizeof(uint32_t));
+        const std::array<std::span<std::byte>, BufferLedger + 1> destinations = {
+            std::as_writable_bytes(std::span(nest.blocks)),    std::as_writable_bytes(std::span(nest.cells)),
+            std::as_writable_bytes(std::span(nest.fractions)), std::as_writable_bytes(std::span(nest.counters)),
+            std::as_writable_bytes(std::span(treeWords)),      std::as_writable_bytes(std::span(nest.freeFractions)),
+            std::as_writable_bytes(std::span(nest.ledger))};
         for (uint32_t i = 0; i < destinations.size(); ++i) {
             if (!gpu::ReadBuffer(m_readbacks[i].Get(), destinations[i]))
                 return false;
         }
+
+        // --- u6 を CPU の配列に分ける(取り合いの印は読まない: 要求の処理の外では全部 MR_NO_CLAIM)---
+        const uint32_t worldBlocks = m_capacity.worldBlocks;
+        const auto words = std::span(treeWords);
+        const auto index = words.subspan(size_t{worldBlocks} * 2, m_capacity.indexEntries);
+        const auto freePages = words.subspan((size_t{worldBlocks} * 2) + m_capacity.indexEntries);
+        std::ranges::copy(words.first(worldBlocks), nest.freeBlocks.begin());
+        std::ranges::copy(freePages, nest.freeBlocks.begin() + worldBlocks);
+        std::ranges::copy(index, nest.index.begin());
 
         return true;
     }

@@ -19,6 +19,7 @@
 #include "core/log.h"
 #include "core/singleton.h"
 #include "multires_activity_scene.h"
+#include "multires_conduction_scene.h"
 #include "sim/multires_nest.h"
 #include "sim/reaction_test_table.h"
 
@@ -41,15 +42,14 @@ namespace {
 
     constexpr MultiresStepOptions CONDUCTION = {.conduction = true};
     constexpr uint64_t TOTALS_EVERY = 4;  // 保存量の合計(256bit。debug で重い)を確かめる刻みの間隔(最後の刻みも)
-    constexpr uint64_t CONDUCTION_SEED = 20261005;
+    using test::CHAIN_LEVELS;
+    using test::CONDUCTION_SEED;
+    using test::MakeChainNest;
 
     // --- 場面の道具 ---
 
     RxCell MakeAir(const BakedReactionTable& table, int32_t millikelvin) {
-        const std::vector<SpeciesAmount> air = {{.species = table.SpeciesId("oxygen"), .amount = 1067000},
-                                                {.species = table.SpeciesId("nitrogen"), .amount = 4013000}};
-
-        return MakeReactionCell(table, air, millikelvin);
+        return test::MakeConductionAir(table, millikelvin);
     }
 
     uint32_t MaxLevel(const MultiresNest& nest) {
@@ -280,33 +280,9 @@ namespace {
             width);
     }
 
-    // --- 鎖の場面: 根 2×2×2(300 K の空気・一様)の真ん中の角のすぐ内側に 6 段の鎖、いちばん細かいブロックは 1500 K ---
+    // --- 鎖の場面(tests/multires_conduction_scene.h)---
 
-    constexpr int32_t CHAIN_LEVELS = 6;
-    constexpr uint32_t CHAIN_ROOTS = 8;
     constexpr uint64_t CHAIN_TICKS = 100;
-    constexpr int64_t CHAIN_CORNER = int64_t{8} << CHAIN_LEVELS;  // 根の角 (8, 8, 8) をレベル 6 の単位で
-
-    MultiresNest MakeChainNest(const BakedReactionTable& table, uint32_t fractions) {
-        MultiresNest nest = MakeMultiresNest(
-            test::MakeMultiresCapacity(table, CHAIN_ROOTS + static_cast<uint32_t>(CHAIN_LEVELS) + 2, 0, fractions));
-        const std::vector<RxCell> air(MR_BLOCK_CELLS, MakeAir(table, 300000));
-        for (uint32_t root = 0; root < CHAIN_ROOTS; ++root)
-            PlaceRootBlock(nest, int64_t{root & 1u} * 8, int64_t{(root >> 1) & 1u} * 8, int64_t{root >> 2} * 8, air);
-
-        const MrRequest request = MrMakeRequest(MR_REQUEST_REFINE, CHAIN_LEVELS, CHAIN_CORNER + 1, CHAIN_CORNER + 2,
-                                                CHAIN_CORNER + 3);
-        SubmitRequests(nest, std::span(&request, 1));
-        ProcessRequests(nest);
-
-        // --- いちばん細かいブロック(一様)の値を熱くして、種にする ---
-        const uint32_t finest = LookupBlock(nest, CHAIN_LEVELS, CHAIN_CORNER, CHAIN_CORNER, CHAIN_CORNER);
-        FX_ASSERT(finest != MR_NO_BLOCK && MrIsUniform(nest.blocks[finest]));
-        nest.cells[finest] = MakeAir(table, 1500000);
-        nest.seeds[finest] = 1;
-
-        return nest;
-    }
 
     // 根(レベル 0)のセルの最高の温度(mK)
     int32_t HottestRootCell(const MultiresNest& nest, const ReactionTableView& view) {

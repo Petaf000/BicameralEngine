@@ -4,7 +4,7 @@
 // CoarsenRequestNode(GPU の入力 = 許可した粗くする要求)・PullBackNode・RemoveShadowNode(CPU の入力)。
 // CPU リファレンスは engine/src/sim/multires_tree.cpp の RefineRequestLevel・ApplyCoarsen と、multires_nest.cpp の RefineShadowLevel・
 // PullBackLevel・RemoveShadowChain(同じ順・同じ関数)。
-// 木を変えたブロック(細かくした親と子・粗くした親)は活性の一覧(u14 = この刻みの種)に足す(つつく。T-0100)。
+// 木を変えたブロック(細かくした親と子・粗くした親)は活性の一覧(u13 = この刻みの種)に足す(つつく。T-0100)。
 // 一様なブロック(T-0102): 一様な親の本物の子は一様(値 1 つ)。一様な親へ粗くして同じ値に戻らなければ、親を頁に広げる。
 // 活性のブロックを刻むグラフは別の multires_activity_graph.hlsl(反応の核を含んで大きいので、使う時だけ作る)。
 //

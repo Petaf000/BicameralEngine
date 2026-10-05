@@ -66,7 +66,7 @@ namespace bicameral::sim {
 
     // 1 刻みの選択
     struct MultiresStepOptions {
-        // 熱の伝導(T-0019。multires_conduction.hlsli)。GPU(sim/gpu_multires)はまだ伝導しないので、GPU と比べる刻みでは切る(T-0107 で入れる)
+        // 熱の伝導(T-0019。multires_conduction.hlsli)。GPU(sim/gpu_multires の RecordStep・RecordStepActive)も同じ結果(T-0107)
         bool conduction = false;
     };
 
