@@ -349,65 +349,157 @@ FX_FN RxCandidates RxCollectCandidates(Table table, RxCell cell, uint32_t kelvin
 
 // --- 取り合いの解決(02 §3 の 3。並び順に依存しない)------------------------------------------------
 
-// extent × available ÷ demand の切り捨て(available < demand のときだけ呼ぶ)
-FX_FN uint64_t RxShrink(uint64_t extent, uint64_t available, uint64_t demand) {
-    return FxDivU128By64(FxMulU64Full(extent, available), demand).quotient;
-}
+// 規則の候補が使う量の合計(反応物は必ずセルにあるので、成分の位置で持つ)と、吸熱の規則が使う熱
+struct RxUsage {
+    uint64_t amounts[RX_MAX_CELL_SPECIES];
+    uint64_t heat;
+};
 
-// 物質ごとに「要求の合計」と「ある量」を比べ、足りない資源を使う規則を min(ある量 ÷ 要求) の比で縮める。
-// 吸熱の規則は熱(の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)も資源として同じく縮める(熱が負にならない)。どの規則も元の進行度に同じ比を掛けるので、並び順は結果に影響しない。
-// 切り捨てなので、縮めた後の消費の合計は必ずある量以下
 template <typename Table>
-FX_FN RxCandidates RxResolveContention(Table table, RxCell cell, RxThermal thermal, RxCandidates candidates) {
-    // --- 要求の合計(反応物は必ずセルにあるので、成分の位置で持つ)---
-    uint64_t demand[RX_MAX_CELL_SPECIES];
+FX_FN RxUsage RxSumUsage(Table table, RxCell cell, RxCandidates candidates) {
+    RxUsage usage;
     // HLSL には範囲 for が無い
     // NOLINTNEXTLINE(modernize-loop-convert)
     for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
-        demand[i] = 0;
+        usage.amounts[i] = 0;
 
-    uint64_t heatDemand = 0;
+    usage.heat = 0;
     for (uint32_t c = 0; c < candidates.count; ++c) {
         const RxRule rule = table.Rule(candidates.rules[c]);
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
             const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
             const uint64_t amount = candidates.extents[c] * (uint64_t)rule.reactantCoefficients[i];
-            FX_ASSERT(demand[slot] + amount >= amount);
-            demand[slot] += amount;
+            FX_ASSERT(usage.amounts[slot] + amount >= amount);
+            usage.amounts[slot] += amount;
         }
 
         if (rule.reactionEnthalpy > 0) {
             const FxU128 heat = FxMulU64Full(candidates.extents[c], (uint64_t)rule.reactionEnthalpy);
-            FX_ASSERT(heat.hi == 0 && heatDemand + heat.lo >= heatDemand);
-            heatDemand += heat.lo;
+            FX_ASSERT(heat.hi == 0 && usage.heat + heat.lo >= usage.heat);
+            usage.heat += heat.lo;
         }
     }
 
-    // --- 縮める(元の進行度から、足りない資源ごとの比の最小)---
-    const uint64_t heatAvailable = thermal.heat > 0 ? (uint64_t)thermal.heat >> RX_ENDOTHERMIC_HEAT_SHIFT : (uint64_t)0;
-    RxCandidates resolved = candidates;
-    for (uint32_t c = 0; c < candidates.count; ++c) {
-        const RxRule rule = table.Rule(candidates.rules[c]);
-        const uint64_t extent = candidates.extents[c];
-        uint64_t result = extent;
-        for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-            const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-            if (demand[slot] <= cell.amounts[slot])
+    return usage;
+}
+
+// 縮めるときの乱数(規則ごと)。望む進行度の丸め(RxDesiredExtent)と同じハッシュの上位 32bit なので、2 つの丸めは独立
+FX_FN uint32_t RxShrinkRandom(uint64_t randomSeed, RxRule rule) {
+    return (uint32_t)(FxHashCombine(randomSeed, rule.key) >> 32);
+}
+
+// extent × available ÷ demand を確率的に丸める(available < demand のときだけ呼ぶ。T-0106・D-431)。
+// 端数 = 余り ÷ demand を乱数 random(2^-32 単位)と比べる: random ÷ 2^32 < 余り ÷ demand ⇔ random × demand < 余り × 2^32。
+// 切り捨てだと、取り合いで 1 刻み 1 未満に縮んだ脇の反応(酸素不足の火の炭の燃焼など)が毎刻み 0 になって消える
+// 縮めた進行度: 切り捨てと、確率的に丸めた値(切り捨てか、その + 1)
+struct RxShrunk {
+    uint64_t truncated;
+    uint64_t rounded;
+};
+
+FX_FN RxShrunk RxShrink(uint64_t extent, uint64_t available, uint64_t demand, uint32_t random) {
+    const FxDivResult divided = FxDivU128By64(FxMulU64Full(extent, available), demand);
+    const FxU128 threshold = FxMulU64Full((uint64_t)random, demand);
+    const uint64_t remainderHigh = divided.remainder >> 32;
+    const uint64_t remainderLow = divided.remainder << 32;
+    const bool roundUp = threshold.hi < remainderHigh || (threshold.hi == remainderHigh && threshold.lo < remainderLow);
+
+    RxShrunk shrunk;
+    shrunk.truncated = divided.quotient;
+    shrunk.rounded = divided.quotient + (roundUp ? (uint64_t)1 : (uint64_t)0);
+
+    return shrunk;
+}
+
+// 規則が、ある量を超えて使われている資源(物質か、吸熱なら熱)を使うか
+FX_FN bool RxOverdraws(RxRule rule, RxCell cell, RxUsage used, uint64_t heatAvailable) {
+    for (uint32_t i = 0; i < rule.reactantCount; ++i) {
+        const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
+        if (used.amounts[slot] > cell.amounts[slot])
+            return true;
+    }
+
+    return rule.reactionEnthalpy > 0 && used.heat > heatAvailable;
+}
+
+// 丸め上げた規則(roundedUp のビット)のせいで足りなくなった資源があれば、その資源を使う丸め上げた規則のうち
+// 進行度が最も大きいもの(同じなら鍵が小さいもの)から 1 つずつ丸め上げを戻す。大きい規則ほど 1 の差の割合が小さいので、
+// 偏りは主な反応に寄せ、脇の反応の期待値は崩さない。切り捨ての値は必ずある量以下なので、全部戻せば必ず足りる
+template <typename Table>
+FX_FN RxCandidates RxRevokeRoundUps(Table table, RxCell cell, RxCandidates resolved, uint32_t roundedUp,
+                                    uint64_t heatAvailable) {
+    RxUsage used = RxSumUsage(table, cell, resolved);
+    for (uint32_t step = 0; step < RX_MAX_CANDIDATES && roundedUp != 0; ++step) {
+        uint32_t pick = RX_NO_SLOT;
+        uint64_t pickKey = 0;
+        for (uint32_t c = 0; c < resolved.count; ++c) {
+            const RxRule rule = table.Rule(resolved.rules[c]);
+            if (((roundedUp >> c) & 1) == 0 || !RxOverdraws(rule, cell, used, heatAvailable))
                 continue;
 
-            const uint64_t shrunk = RxShrink(extent, cell.amounts[slot], demand[slot]);
-            result = shrunk < result ? shrunk : result;
+            const bool larger = pick == RX_NO_SLOT || resolved.extents[c] > resolved.extents[pick] ||
+                                (resolved.extents[c] == resolved.extents[pick] && rule.key < pickKey);
+            if (!larger)
+                continue;
+
+            pick = c;
+            pickKey = rule.key;
         }
 
-        if (rule.reactionEnthalpy > 0 && heatDemand > heatAvailable) {
-            const uint64_t shrunk = RxShrink(extent, heatAvailable, heatDemand);
-            result = shrunk < result ? shrunk : result;
-        }
+        if (pick == RX_NO_SLOT)
+            break;
 
-        resolved.extents[c] = result;
+        resolved.extents[pick] -= 1;
+        roundedUp &= ~(1u << pick);
+        used = RxSumUsage(table, cell, resolved);
     }
 
     return resolved;
+}
+
+// 物質ごとに「要求の合計」と「ある量」を比べ、足りない資源を使う規則を min(ある量 ÷ 要求) の比で縮める。
+// 吸熱の規則は熱(の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)も資源として同じく縮める(熱が負にならない)。どの規則も元の進行度に同じ比を掛けるので、並び順は結果に影響しない。
+// 縮めた値は確率的に丸める(規則ごとに 1 つの乱数を、足りない資源のどれにも使う。丸めは単調なので、資源ごとに丸めた最小 = 比の最小を丸めた値)。
+// 丸め上げで足りなくなった資源があれば RxRevokeRoundUps が戻すので、縮めた後の消費の合計は必ずある量以下
+template <typename Table>
+FX_FN RxCandidates RxResolveContention(Table table, RxCell cell, RxThermal thermal, RxCandidates candidates,
+                                       uint64_t randomSeed) {
+    const RxUsage demand = RxSumUsage(table, cell, candidates);
+    const uint64_t heatAvailable = thermal.heat > 0 ? (uint64_t)thermal.heat >> RX_ENDOTHERMIC_HEAT_SHIFT : (uint64_t)0;
+
+    // --- 縮める(元の進行度から、足りない資源ごとの比の最小)---
+    RxCandidates resolved = candidates;
+    uint32_t roundedUp = 0;
+    for (uint32_t c = 0; c < candidates.count; ++c) {
+        const RxRule rule = table.Rule(candidates.rules[c]);
+        const uint64_t extent = candidates.extents[c];
+        const uint32_t random = RxShrinkRandom(randomSeed, rule);
+        uint64_t result = extent;
+        uint64_t truncated = extent;
+        for (uint32_t i = 0; i < rule.reactantCount; ++i) {
+            const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
+            if (demand.amounts[slot] <= cell.amounts[slot])
+                continue;
+
+            const RxShrunk shrunk = RxShrink(extent, cell.amounts[slot], demand.amounts[slot], random);
+            result = shrunk.rounded < result ? shrunk.rounded : result;
+            truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
+        }
+
+        if (rule.reactionEnthalpy > 0 && demand.heat > heatAvailable) {
+            const RxShrunk shrunk = RxShrink(extent, heatAvailable, demand.heat, random);
+            result = shrunk.rounded < result ? shrunk.rounded : result;
+            truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
+        }
+
+        resolved.extents[c] = result;
+        roundedUp |= result > truncated ? (1u << c) : 0u;
+    }
+
+    if (roundedUp == 0)
+        return resolved;
+
+    return RxRevokeRoundUps(table, cell, resolved, roundedUp, heatAvailable);
 }
 
 // --- 成分を更新する ----------------------------------------------------------------------------
@@ -509,13 +601,13 @@ FX_FN RxCellStep RxStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64
 
     const uint32_t kelvin = (uint32_t)step.thermal.temperature / (uint32_t)MILLIKELVIN_PER_KELVIN;
     const uint32_t tableKelvin = kelvin < RX_RATE_TABLE_KELVINS ? kelvin : RX_RATE_TABLE_KELVINS - 1;
-    const RxCandidates candidates = RxCollectCandidates(table, cell, tableKelvin,
-                                                        RxRandomSeed(worldSeed, tick, cellId));
+    const uint64_t randomSeed = RxRandomSeed(worldSeed, tick, cellId);
+    const RxCandidates candidates = RxCollectCandidates(table, cell, tableKelvin, randomSeed);
     step.possible = candidates.possible;
     if (candidates.count == 0)
         return step;
 
-    const RxCandidates resolved = RxResolveContention(table, cell, step.thermal, candidates);
+    const RxCandidates resolved = RxResolveContention(table, cell, step.thermal, candidates, randomSeed);
     step.cell = RxApplyExtents(table, cell, resolved);
     step.thermal = RxComputeThermal(table, step.cell);
 

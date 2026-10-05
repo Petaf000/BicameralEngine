@@ -219,8 +219,11 @@ namespace {
         Expect(first == second, "本物の鎖: 2 回の実行で全部が一致");
         Log(Channel::Sim, Level::Info, "本物の鎖の要約 {:016x}", first);
 
+        // 子どうしが違うのは燃えている途中(5 刻み)。燃え尽きると子はどれも同じになり(O2 を使い切る。T-0106 の前は
+        // 取り合いの切り捨てで O2 が 0〜1 単位残って子が分かれていた)、端数が出ない
         Expect(RunDeepChain(*table, 21, 50) == 0, "21 段の往復で端数が落ちない");
-        Expect(RunDeepChain(*table, 24, 50) > 0, "24 段では端数が落ちる(64bit の幅)");
+        Expect(RunDeepChain(*table, 21, 5) == 0, "21 段の往復で端数が落ちない(燃えている途中)");
+        Expect(RunDeepChain(*table, 24, 5) > 0, "24 段では端数が落ちる(64bit の幅)");
 
         TestShadowLeavesWorldUnchanged(*table);
 

@@ -1,34 +1,38 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-05 / チケット: T-0103 静かで一様になった頁を畳む — 完了
+最終更新: 2026-10-05 / チケット: T-0106 取り合いの端数を乱数で丸める — 完了
 
 ## 状態(3 行以内)
-- 頁を持つ世界のブロックが「ちょうど静かになった刻み」に一様なら、値 1 つに戻して頁を枠の順に返す(CPU FoldQuietPages、GPU TreeFoldCheck → TreeFold)。
-- 燃え尽きた木箱(900 K)の頁が 0 に戻る・頁が 1 つなら返った頁で 2 つ目が燃える・子に覆われた頁も畳む。CPU と GPU(HW・WARP)が毎刻み一致。
-- 次は T-0106(取り合いの端数を乱数で丸める。小さい)→ T-0019(熱の伝導)。NEXT.md の先頭。10-05 の相談で D-428〜D-431 を決めた(DECISIONS)。
+- 反応物の取り合いで縮めた進行度の端数を、切り捨てではなく決定的な乱数で丸める(reaction.hlsli の RxResolveContention・RxRevokeRoundUps)。
+- 測定: 切り捨てだと 900 K・O2 50 µmol の木箱のセルで CO が 0%、炭の燃焼 86%。丸めにしてから消えていた規則は ±5σ(CO 100.3%)。CPU と GPU(HW・WARP)一致。
+- 次は T-0019(熱の伝導。3D・レベルをまたぐ)。NEXT.md の先頭。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(103)。
-- **全部のテスト 63 本が通る(2026-10-05、debug)**。gpu_multires_uniform は約 160 s(場面と計測が増えた。TIMEOUT 300)。
-  `job.py test` を全部 1 回で投げると 40 分の job の timeout を超えて途中で止まる(今回は 51 本目で切れた)。`-Filter` で 2〜3 回に分ける。
-- 計測: `job.py run -Preset release -Exe gpu_multires_uniform_test -- --queue compute`(「GPU 時間: 頁を配る段 0.0060 ms・頁を畳む 2 段 0.0131 ms」)。
+- `job.py build`(debug)・`python3 tools/archmap/archmap.py --check` OK(103)。
+- **全部のテスト 64 本が通る(2026-10-05、debug)**。足したのは reaction_contention(CPU、約 4 s。規則ごとの期待・切り捨て・丸めの表を出す)。
+  `job.py test` は 3 回に分けた: `-Filter gpu_multires`(約 14 分)/ `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`)と `-Filter reaction`。
+  `--timeout 2400` で裏で投げ、runner/logs/<job>-test.log を grep して待つ。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 「一様」はビット単位で同じ。600 K の木箱は O2 が 1 単位残るセルが分かれて畳まれない(BACKLOG に案 3 つ。未決定)。
+- 取り合いの丸めの残る偏り: 係数の大きい規則(木の燃焼 O2 × 6)は残り(端数の合計)が係数より小さい刻みに丸め上げられず少し遅れる(0.01〜7%。O2 がほぼ尽きた所ほど大きい)。
+  1 刻みの中で上限と期待値の両方を満たす配り方は一般に無い。残った資源は次の刻みに使われる。02 §3.1 に記録。
+- 「一様」はビット単位で同じ。600 K の木箱は O2 が 1 単位残るセルが分かれて畳まれない(BACKLOG に案 3 つ。T-0104 で)。
 - 頁の不足は「その刻みは刻まない」だけ(世界の時間を遅らせる本来の扱いは 05 §8 のメモリの管理で)。
 - 反応の核: 進める規則があるのにセルが変わらないまま種であり続けるセル(BACKLOG。前から)。観察の影の親の本物の葉も粗くなる(BACKLOG。前から)。
 - (前から)活性の固定費 約 0.1 ms・全部活性だと Compute より遅い・粗くするのは 1 刻み 1 段・段をまたぐ輸送なし(T-0019)・窓は木ではない・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (Claude が決めた。17 §5「頁を畳む」)調べるのはちょうど静かになった刻み(mark − busyTick = N + 1。MrWantsFoldCheck)に 1 回だけ。根・子のある親も対象・端数ありは対象外。
-  **頁に広げたのも忙しい**(広げてもセルが変わらないブロックも N 刻み後に畳めるように)。畳んでも忙しさの印は書かない。
-- (Claude が決めた)順は 外からの要求 → 畳む → 静かな葉の要求 → 要求の処理 → 刻む。GPU の調べた結果は取り合いの印 [枠] に MR_CLAIM_FOLD として借りて置く(ルート署名 63 / 64 のまま)。
-- (Claude が決めた)テストの場面の木箱を 600 K → 900 K に(600 K は一様に戻らない)。頁が 1 つの場面の期待は「1 つ目が畳まれた刻みに 2 つ目が頁を得る」に変えた。
+- (Claude が決めた。02 §3.1)規則ごとに 1 つの乱数(望む進行度の丸めと同じハッシュの上位 32bit)を、足りない資源のどれにも使う(丸めは単調なので最小の比を丸めたのと同じ)。
+- (Claude が決めた)丸め上げで足りなくなったら、その資源を使う丸め上げた規則のうち**進行度が最も大きいもの**から戻す(同じなら鍵が小さい)。
+  試算でランダムに戻すと脇の反応が 74% に落ちたため。RxResolveContention は乱数の種を引数に取るようになった。
+- (Claude が決めた)multires_test の「24 段では端数が落ちる」を 50 刻み → 5 刻み(燃えている途中)で確かめる。丸めにしてから 50 刻みでは子が燃え尽きて同じになるため。
 
 ## 次にやること
-NEXT.md の先頭(T-0106 → T-0019 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0019 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **取り合いの丸め(T-0106)**: reaction.hlsli の RxSumUsage(要求・消費の合計)・RxShrink(切り捨てと丸め)・RxOverdraws・RxRevokeRoundUps・RxResolveContention(..., randomSeed)。
+  反応の結果が変わったので、乱数や取り合いの式を変えると reaction_contention_test の表(期待・切り捨て・丸め)で偏りを見られる。sim のソースで `round` も変数名に使えない(`step` にした)。
 - **頁を畳む(T-0103)**: 規則は multires.hlsli の末尾(MrFoldValueCell・MrFoldsCell)と multires_activity.hlsli の MrWantsFoldCheck。CPU は multires_activity.cpp の FoldQuietPages、
   GPU は multires_tree.hlsl の TreeFoldCheck(1 グループ = 世界の枠 1 つ・512 スレッド = セル)→ TreeFold(1 グループの累積和)。gpu_multires.cpp の RecordFoldPages(tick)。
   呼ぶ側の順は FoldQuietPages / RecordFoldPages → SubmitQuietCoarsenRequests / RecordQuietRequests → ProcessRequests(テストの BeginQuietTick・BeginUniformTick・各 GPU テストの RecordTick)。
