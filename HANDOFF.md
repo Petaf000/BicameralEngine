@@ -5,7 +5,7 @@
 ## 状態(3 行以内)
 - 頁を持つ世界のブロックが「ちょうど静かになった刻み」に一様なら、値 1 つに戻して頁を枠の順に返す(CPU FoldQuietPages、GPU TreeFoldCheck → TreeFold)。
 - 燃え尽きた木箱(900 K)の頁が 0 に戻る・頁が 1 つなら返った頁で 2 つ目が燃える・子に覆われた頁も畳む。CPU と GPU(HW・WARP)が毎刻み一致。
-- 次は T-0019(熱の伝導、3D・レベルをまたぐ)。NEXT.md の先頭。
+- 次は T-0106(取り合いの端数を乱数で丸める。小さい)→ T-0019(熱の伝導)。NEXT.md の先頭。10-05 の相談で D-428〜D-431 を決めた(DECISIONS)。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(103)。
@@ -26,7 +26,7 @@
 - (Claude が決めた)テストの場面の木箱を 600 K → 900 K に(600 K は一様に戻らない)。頁が 1 つの場面の期待は「1 つ目が畳まれた刻みに 2 つ目が頁を得る」に変えた。
 
 ## 次にやること
-NEXT.md の先頭(T-0019 熱の伝導。ROADMAP の M2 の表の順)。
+NEXT.md の先頭(T-0106 → T-0019 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **頁を畳む(T-0103)**: 規則は multires.hlsli の末尾(MrFoldValueCell・MrFoldsCell)と multires_activity.hlsli の MrWantsFoldCheck。CPU は multires_activity.cpp の FoldQuietPages、
