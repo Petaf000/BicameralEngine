@@ -5,7 +5,19 @@
 ## 状態(3 行以内)
 - レベルごとの小刻み(Berger–Colella の refluxing の形)を CPU に入れた: `MultiresStepOptions{.conduction, .subcycleBaseLevel, .maxSubcycleGap}`(既定 0 = 分けない = 前と同じ)。
 - 物差し(tests/multires_subcycle_test.cpp): 実効の拡散率 ÷ 本当の値が、分けないとレベル 3 で 0.264・以後 1/4 ずつ → 分けると基準 + 3(レベル 5)まで 0.996。保存量ビット一致・活性 = 全部。
-- 次は T-0109(GPU)。Δk > 3 を本当の速さにするか(方式②)はユーザーの判断待ち(docs/plan/QUESTIONS.md Q1)。
+- 次は T-0109(GPU)。Δk > 3 は D-432 で「①で進め、方式②は研究 T-0110 を並走」に決まった。
+
+## 並走で入ったもの: T-0105 研究 遅い反応(.worktrees/wt2 のブランチ t-0105 から main へ早送りマージ、2026-10-06)
+- 状態: T-0105(研究)は CPU リファレンスまで完了。待ちの丸め(ADR-0018)で、眠らせても全部とビット一致・10 年分が ±5σ。世界はまだ今の丸め。
+- 動いているもの: `job.py build`(debug)・`-Filter reaction` 5 本(reaction・reaction_contention・reaction_wait〔debug 約 32 秒〕・gpu_reaction〔HW・WARP〕)・tidy 警告なし・archmap OK。
+- 壊れている/未確認: GPU で待ちの丸めを動かしていない(HLSL はコンパイルが通るだけ。テンプレートの関数は HLSL でまだ実体化していない)。
+  log2 を 2 回 / 規則の費用は未測定。待ちが約 2^61 刻みを超える引きは「起きない」。
+- 決めたこと: ADR-0018(Claude。D-429 の実装の細部): 進行度 = 整数部 + [t ≥ tc + n]、tc はブロックの最後に変わった刻み、n は幾何分布(乱数は tc で決まる)。
+  速さを変えるもの(魔法のパッチ)は tc を書いてから評価。取り合いの丸めは今のまま。端数・刻みは 64bit。
+- 次: T-0115(世界を切り替える。下の「分けたチケット」)。ROADMAP に T-0115・T-0116 を足す。D-424 の行は T-0115 の完了で「置き換えた」にする。
+- 注意: 新しい待ちの関数は RxStepCell の候補集め・望む進行度を複製している(RxComputeRuleRate は RxDesiredExtent と同じ反応物の読み方)。
+  T-0115 で RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION を消して 1 本にする。全部を刻む StepNest も tc(busyTick)を毎刻み書く必要がある(今は POKED のまま)。
+  試験の表の室温の木箱は木の燃焼が 1 µmol に平均 0.68 年(下限を外すと、室温の木のセルは数か月に 1 回起きる。費用の見積もりに使う)。
 
 ## 動いているもの(確認方法つき)
 - `job.py build`(debug)・`python3 tools/archmap/archmap.py --check` OK(111)。
