@@ -3,6 +3,8 @@
 // いちばん細かいブロック(一様)を 1500 K にして種にする。熱は細かい所から粗い所へ、レベルをまたいで根まで流れる。
 #pragma once
 
+#include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -44,6 +46,59 @@ namespace bicameral::test {
         nest.seeds[finest] = 1;
 
         return nest;
+    }
+
+    // --- 比べる道具(T-0019 のテストから移した。T-0108 のテストも使う)---
+
+    // 世界(本物の葉)のセルの温度の最小と最大(mK)
+    struct TemperatureRange {
+        int32_t low = INT32_MAX;
+        int32_t high = INT32_MIN;
+    };
+
+    inline TemperatureRange RealTemperatures(const sim::MultiresNest& nest, const sim::ReactionTableView& view) {
+        TemperatureRange range;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const multires::MrBlock& block = nest.blocks[slot];
+            if (block.kind != multires::MR_BLOCK_REAL)
+                continue;
+
+            for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+                if (!multires::MrIsSteppedCell(block, index))
+                    continue;
+
+                const int32_t temperature = reaction::RxComputeThermal(view, sim::LoadNestCell(nest, slot, index))
+                                                .temperature;
+                range.low = std::min(range.low, temperature);
+                range.high = std::max(range.high, temperature);
+            }
+        }
+
+        return range;
+    }
+
+    inline uint32_t CountFractionBlocks(const sim::MultiresNest& nest) {
+        uint32_t count = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot)
+            count += nest.blocks[slot].kind == multires::MR_BLOCK_REAL &&
+                             nest.blocks[slot].fraction != multires::MR_NO_FRACTION
+                         ? 1
+                         : 0;
+
+        return count;
+    }
+
+    // 論理のセル・端数・帳簿が一致するか
+    inline bool SameWorld(const sim::MultiresNest& a, const sim::MultiresNest& b) {
+        for (uint32_t slot = 0; slot < a.blocks.size(); ++slot) {
+            for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+                if (sim::HashReactionCell(sim::LoadNestCell(a, slot, index)) !=
+                    sim::HashReactionCell(sim::LoadNestCell(b, slot, index)))
+                    return false;
+            }
+        }
+
+        return sim::HashRealLeaves(a) == sim::HashRealLeaves(b) && a.ledger == b.ledger;
     }
 
     // fractions = 端数の枠の数

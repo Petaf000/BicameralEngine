@@ -86,24 +86,60 @@ namespace bicameral::sim::nest_detail {
     };
 
     // stepped(枠ごとの 0 / 1)のブロックを 1 刻み: 一様なブロックは変わる時だけ頁に広げ(枠の順。足りなければ刻まずに種にする)、
-    // conduction なら熱の伝導の変化を足してから反応を進める。伝導で変化を受け取ったブロックは stepped でなくても変わる。結果は枠ごと
+    // options.conduction なら熱の伝導の変化を足してから反応を進める。伝導で変化を受け取ったブロックは stepped でなくても変わる。結果は枠ごと。
+    // 伝導を小刻みに分ける時(T-0108)、wakeMark が 0 でなければ(活性)、小刻みで変わったブロックの面の隣にその印を付けて
+    // 以後の小刻みから刻む(stepped を書き足す)。0 なら(全部を刻む)起こさない
     std::vector<BlockStepResult> StepBlocks(MultiresNest& nest, const ReactionTableView& view,
-                                            std::span<const uint8_t> stepped, uint64_t worldSeed, uint64_t tick,
-                                            bool conduction);
+                                            std::span<uint8_t> stepped, uint64_t worldSeed, uint64_t tick,
+                                            const MultiresStepOptions& options, uint32_t wakeMark);
 
-    // --- 熱の伝導(multires_conduction.cpp。T-0019)---
+    // 伝導の変化をセル(と端数)に足す。端数の枠が無いブロックへの変化は整数の単位だけ(multires_nest.cpp)
+    void ApplyEnergyDelta(MultiresNest& nest, uint32_t slot, uint32_t index, reaction::RxCell& cell,
+                          const multires::MrEnergyDelta& delta);
 
-    // 刻むブロックのセルの面の流れを調べ、流れのある一様なブロック(自分の面か、細かい側から送られてくる面)に MR_PAGE_WANTED を付ける。
-    // 粗い側で端数が要るブロックの印(枠ごとの 0 / 1)を返す
-    std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, const ReactionTableView& view,
-                                             std::span<const uint8_t> stepped);
+    // 枠 slot の本物のブロックの面の隣(八分の一ごと。細かい側へは面をたどる)に刻む印 mark を付ける(multires_activity.cpp の
+    // 種の起こし方と同じ。忙しさの印は変えない。T-0108 の小刻みで変わったブロックに使う)
+    void WakeAround(MultiresNest& nest, uint32_t slot, uint32_t mark);
+
+    // --- 熱の伝導(multires_conduction.cpp。T-0019・T-0108)---
+
+    // 刻みの初めの論理のセルの熱(初めて読んだ時に作る)。一様なブロックは覆われていないセルが全部同じなので枠ごとに 1 つ
+    // (読むのは刻むセルと、その面の先の覆われていないセルだけ)。頁に広げても論理のセルは変わらないので使い回せる。
+    // 小刻み(T-0108)でセルが変わったブロックは Invalidate で作り直させる
+    class CellThermals {
+    public:
+        CellThermals(const MultiresNest& nest, const ReactionTableView& view);
+
+        [[nodiscard]] multires::MrThermal At(uint32_t slot, uint32_t index);
+        void Invalidate(uint32_t slot);
+
+    private:
+        const MultiresNest* m_nest;
+        ReactionTableView m_view;
+        std::vector<multires::MrThermal> m_values;  // 枠ごとに [セル × 512][一様の値]
+        std::vector<uint8_t> m_known;
+    };
+
+    // 刻むブロック(stepped)のセルの面の流れを調べ、流れのある一様なブロック(自分の面か、細かい側から送られてくる面)に MR_PAGE_WANTED を付ける。
+    // 粗い側で端数が要るブロックの印(枠ごとの 0 / 1)を返す。面の係数は options の小刻みの 1 回分(T-0108)
+    std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellThermals& thermals,
+                                             std::span<const uint8_t> stepped, const MultiresStepOptions& options);
 
     // 端数が要るブロックに端数の枠を枠の順に配り(足りなければ数える)、刻むブロック(凍らせたものを除く)のセルの面の流れを
-    // 頁のセルの添字(PageCellAddress)ごとの変化にして返す。凍らせたブロックとの面は流れない
-    std::vector<multires::MrEnergyDelta> ComputeConduction(MultiresNest& nest, const ReactionTableView& view,
-                                                           std::span<const uint8_t> stepped,
-                                                           std::span<const uint8_t> frozen,
-                                                           std::span<const uint8_t> wantsFraction);
+    // 頁のセルの添字(PageCellAddress)ごとの変化 deltas に足す。凍らせたブロックとの面は流れない
+    void ComputeConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> stepped,
+                           std::span<const uint8_t> frozen, std::span<const uint8_t> wantsFraction,
+                           const MultiresStepOptions& options, std::span<multires::MrEnergyDelta> deltas);
+
+    // 伝導の小刻み(T-0108)を最後の 1 回の手前まで進め、最後の小刻みの変化を返す(呼ぶ側が反応と一緒に足す。分けない時は T-0019 と同じ順)。
+    // 途中で変化を足したブロックは results の changed に、頁に広げたブロックは expanded に書く(multires_conduction.cpp)
+    std::vector<multires::MrEnergyDelta> StepConduction(MultiresNest& nest, const ReactionTableView& view,
+                                                        std::span<uint8_t> stepped, const MultiresStepOptions& options,
+                                                        uint32_t wakeMark, std::span<BlockStepResult> results);
+
+    // 一様で頁に広げたい(MR_PAGE_WANTED)ブロックに頁を配り、足りなかったブロック(この刻み・小刻みは凍らせる)の印を返す。
+    // 広げたブロックは results の expanded に書く(multires_nest.cpp)
+    std::vector<uint8_t> ExpandForStep(MultiresNest& nest, std::span<BlockStepResult> results);
 
     // 木を変えたブロックをつつく: 活性の種にし、忙しさの印を「つつかれた」にする(T-0100・T-0101)
     inline void PokeBlock(MultiresNest& nest, uint32_t slot) {

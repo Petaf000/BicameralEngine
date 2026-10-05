@@ -281,6 +281,11 @@ views:
       - { id: multiresconduction, group: simlib, label: "ComputeConduction<br/>木の上の熱の伝導(違うレベルの面は細かい側が粗い側の端数へ送る)",
           code: "engine/src/sim/multires_conduction.cpp::ComputeConduction", ticket: T-0019, doc: docs/design/17-multiresolution.md,
           note: "StepNest / StepActive の options.conduction(GPU は GpuMultires::RecordConduction。T-0107)。流れのある一様なブロックを頁に広げ、端数の枠を枠の順に配り、刻みの初めのセルから面の流れを足す(Jacobi 型)" }
+      - { id: multiressubcycle, group: simlib, label: "StepConduction<br/>細かいレベルの熱の刻み(レベルごとの小刻み・粗い刻みの終わりに受け渡す)",
+          code: "engine/src/sim/multires_conduction.cpp::StepConduction", ticket: T-0108, doc: docs/design/17-multiresolution.md,
+          note: "options.maxSubcycleGap(既定 0 = 分けない)。レベル k を 1 刻みに 4^σ 回(σ ≤ 3)。粗い側の値は粗い小刻みの初めのまま、細かい側の流れの合計を終わりに 1 回で受ける(Berger–Colella の refluxing)。活性は小刻みで変わったブロックの隣を起こす。GPU は T-0109" }
+      - { id: subcycletest, group: tests, label: "multires_subcycle_test<br/>物差し(レベルごとの実効の拡散率)・分けても保存量と活性 = 全部",
+          code: "tests/multires_subcycle_test.cpp::MeasureStick", ticket: T-0108 }
       - { id: multiresconductionhlsl, group: shared, label: "multires_conduction.hlsli<br/>面の隣・レベルの単位の係数・違うレベルの受け渡し",
           code: "shaders/common/multires_conduction.hlsli::MrSplitCrossFlow", ticket: T-0019, doc: docs/design/17-multiresolution.md }
       - { id: conductiontest, group: tests, label: "multires_conduction_test<br/>面の隣の総当たり・保存量・活性 = 全部",
@@ -395,6 +400,8 @@ views:
       - [multiresconductionhlsl, multireshlsl, "端数(ADR-0015)で粗い側が受ける"]
       - [multiresactivity, multiresconduction, "options.conduction"]
       - [conductiontest, multiresconduction]
+      - [multiressubcycle, multiresconduction, "小刻みごとに"]
+      - [subcycletest, multiressubcycle]
       - [gpumultires, gpuconduction, "options.conduction"]
       - [gpuconduction, gpuconductionhlsl]
       - [gpuconductionhlsl, multiresconductionhlsl, "CPU と同じ式"]

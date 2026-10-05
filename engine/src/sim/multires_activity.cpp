@@ -55,24 +55,28 @@ namespace bicameral::sim {
 
         // 種 1 つ: 自分と、(八分の一, 面) ごとの隣(ActivitySeedNode と同じ)
         void WakeSeed(MultiresNest& nest, uint32_t slot, uint32_t mark) {
-            const CpuTree tree{.nest = &nest};
-            const MrBlock block = nest.blocks[slot];
-            if (block.busyTick == MR_BUSY_POKED)
+            if (nest.blocks[slot].busyTick == MR_BUSY_POKED)
                 nest.blocks[slot].busyTick = mark;  // つつかれた刻みの印にする(T-0101)
 
-            Schedule(nest, slot, mark);
-            for (uint32_t check = 0; check < MR_WAKE_CHECKS; ++check) {
-                const uint32_t face = check % MR_FACES;
-                const MrWake wake = MrWakeAcross(tree, block, check / MR_FACES, face, nest.capacity.rootLevel);
-                if (wake.schedule != MR_NO_BLOCK)
-                    Schedule(nest, wake.schedule, mark);
-
-                if (wake.descend != MR_NO_BLOCK)
-                    WakeFace(nest, wake.descend, face, MR_MAX_WAKE_DEPTH, mark);
-            }
+            nest_detail::WakeAround(nest, slot, mark);
         }
 
     }  // namespace
+
+    void nest_detail::WakeAround(MultiresNest& nest, uint32_t slot, uint32_t mark) {
+        const CpuTree tree{.nest = &nest};
+        const MrBlock block = nest.blocks[slot];
+        Schedule(nest, slot, mark);
+        for (uint32_t check = 0; check < MR_WAKE_CHECKS; ++check) {
+            const uint32_t face = check % MR_FACES;
+            const MrWake wake = MrWakeAcross(tree, block, check / MR_FACES, face, nest.capacity.rootLevel);
+            if (wake.schedule != MR_NO_BLOCK)
+                Schedule(nest, wake.schedule, mark);
+
+            if (wake.descend != MR_NO_BLOCK)
+                WakeFace(nest, wake.descend, face, MR_MAX_WAKE_DEPTH, mark);
+        }
+    }
 
     void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
                     const MultiresStepOptions& options) {
@@ -93,7 +97,7 @@ namespace bicameral::sim {
             stepped[slot] = slot >= worldBlocks || nest.blocks[slot].activeTick == mark ? 1 : 0;
 
         const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
-            nest, table.View(), stepped, worldSeed, tick, options.conduction);
+            nest, table.View(), stepped, worldSeed, tick, options, mark);
 
         // --- セルが変わったら忙しさの印(頁に広げたのも忙しい: 畳めるかを N 刻み後に調べる。T-0103)。
         //     進める規則があった・変わった(伝導。T-0019)なら次の種に ---

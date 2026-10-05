@@ -695,6 +695,7 @@ namespace bicameral::sim {
         if (!m_activityGraph)
             return false;
 
+        FX_ASSERT(options.maxSubcycleGap == 0);  // 伝導の小刻み(T-0108)の GPU は T-0109
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
         const uint32_t next = m_activityCurrent ^ 1u;
@@ -746,6 +747,7 @@ namespace bicameral::sim {
 
     void GpuMultires::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
+        FX_ASSERT(options.maxSubcycleGap == 0);  // 伝導の小刻み(T-0108)の GPU は T-0109
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
         if (options.conduction) {

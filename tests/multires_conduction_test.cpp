@@ -62,51 +62,10 @@ namespace {
         return static_cast<uint32_t>(level);
     }
 
-    // 世界(本物の葉)のセルの温度の最小と最大(mK)
-    struct TemperatureRange {
-        int32_t low = INT32_MAX;
-        int32_t high = INT32_MIN;
-    };
-
-    TemperatureRange RealTemperatures(const MultiresNest& nest, const ReactionTableView& view) {
-        TemperatureRange range;
-        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
-            const MrBlock& block = nest.blocks[slot];
-            if (block.kind != MR_BLOCK_REAL)
-                continue;
-
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrIsSteppedCell(block, index))
-                    continue;
-
-                const int32_t temperature = RxComputeThermal(view, LoadNestCell(nest, slot, index)).temperature;
-                range.low = std::min(range.low, temperature);
-                range.high = std::max(range.high, temperature);
-            }
-        }
-
-        return range;
-    }
-
-    uint32_t CountFractionBlocks(const MultiresNest& nest) {
-        uint32_t count = 0;
-        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot)
-            count += nest.blocks[slot].kind == MR_BLOCK_REAL && nest.blocks[slot].fraction != MR_NO_FRACTION ? 1 : 0;
-
-        return count;
-    }
-
-    // 論理のセル・端数・帳簿が一致するか
-    bool SameWorld(const MultiresNest& a, const MultiresNest& b) {
-        for (uint32_t slot = 0; slot < a.blocks.size(); ++slot) {
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (HashReactionCell(LoadNestCell(a, slot, index)) != HashReactionCell(LoadNestCell(b, slot, index)))
-                    return false;
-            }
-        }
-
-        return HashRealLeaves(a) == HashRealLeaves(b) && a.ledger == b.ledger;
-    }
+    using test::CountFractionBlocks;
+    using test::RealTemperatures;
+    using test::SameWorld;
+    using test::TemperatureRange;
 
     // --- 面の隣(総当たりの幾何)---
 

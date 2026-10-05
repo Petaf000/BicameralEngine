@@ -132,9 +132,14 @@ FX_FN uint64_t MrConductanceLimit(uint32_t conductance, int32_t level) {
     return MrScaleByLevel((uint64_t)conductance * HC_LIMIT_PER_CONDUCTANCE, level);
 }
 
-// 自分のレベルの面の係数の上限
+// 自分のレベルの面の係数の上限。1 刻みを 4^shift 回の小刻みに分けた時の 1 回分(T-0108。下の「細かいレベルの刻み」):
+// コンダクタンスの係数は 4^-shift 倍(= レベル level − shift の面と同じ)、熱容量の上限は小刻みごとに掛ける(自分の値は小刻みごとに変わる)
+FX_FN uint64_t MrSubstepFaceLimit(MrThermal thermal, int32_t level, uint32_t shift) {
+    return MrMin64(MrConductanceLimit(thermal.conductance, level - (int32_t)shift), thermal.capacityLimit);
+}
+
 FX_FN uint64_t MrFaceLimit(MrThermal thermal, int32_t level) {
-    return MrMin64(MrConductanceLimit(thermal.conductance, level), thermal.capacityLimit);
+    return MrSubstepFaceLimit(thermal, level, 0);
 }
 
 FX_FN HcThermalCache MrMakeFlowSide(MrThermal thermal, uint64_t faceLimit) {
@@ -146,18 +151,74 @@ FX_FN HcThermalCache MrMakeFlowSide(MrThermal thermal, uint64_t faceLimit) {
     return side;
 }
 
-// 同じレベル level の面の流れ(自分 → 隣が正、そのレベルの単位)。両側が同じ値を逆向きに出す
-FX_FN int64_t MrSameLevelFlow(MrThermal self, MrThermal neighbor, int32_t level) {
-    return HcFaceFlow(MrMakeFlowSide(self, MrFaceLimit(self, level)),
-                      MrMakeFlowSide(neighbor, MrFaceLimit(neighbor, level)));
+// 同じレベル level の面の小刻み 1 回の流れ(自分 → 隣が正、そのレベルの単位)。両側が同じ値を逆向きに出す
+// (同じレベルなので小刻みの数 4^shift も同じ)
+FX_FN int64_t MrSubstepSameLevelFlow(MrThermal self, MrThermal neighbor, int32_t level, uint32_t shift) {
+    return HcFaceFlow(MrMakeFlowSide(self, MrSubstepFaceLimit(self, level, shift)),
+                      MrMakeFlowSide(neighbor, MrSubstepFaceLimit(neighbor, level, shift)));
 }
 
-// 細かいセル(レベル fineLevel)→ 粗いセル(fineLevel − gap)の面の流れ(細かい単位。細かい → 粗いが正)
-FX_FN int64_t MrCrossLevelFlow(MrThermal fine, MrThermal coarse, int32_t fineLevel, uint32_t gap) {
-    const uint64_t coarseLimit = MrMin64(MrConductanceLimit(coarse.conductance, fineLevel),
-                                         MrSaturatingShiftLeft(coarse.capacityLimit, gap));
+FX_FN int64_t MrSameLevelFlow(MrThermal self, MrThermal neighbor, int32_t level) {
+    return MrSubstepSameLevelFlow(self, neighbor, level, 0);
+}
 
-    return HcFaceFlow(MrMakeFlowSide(fine, MrFaceLimit(fine, fineLevel)), MrMakeFlowSide(coarse, coarseLimit));
+// 細かいセル(レベル fineLevel、小刻み 4^fineShift 回)→ 粗いセル(fineLevel − gap、4^coarseShift 回)の面の、細かい側の小刻み 1 回の流れ
+// (細かい単位。細かい → 粗いが正)。粗い側の値は粗い刻みの初めのまま、細かい側が粗い刻み 1 回の間に 4^(fineShift − coarseShift) 回引くので、
+// 粗い側の熱容量の上限はその回数で割って掛ける(粗いセルの 1 面の重みの和が、粗い刻み 1 回の合計で 1/8 以下のまま。T-0108)
+FX_FN int64_t MrSubstepCrossLevelFlow(MrThermal fine, MrThermal coarse, int32_t fineLevel, uint32_t gap,
+                                      uint32_t fineShift, uint32_t coarseShift) {
+    const uint32_t repeatShift = 2 * (fineShift - coarseShift);
+    const uint64_t coarseLimit = MrMin64(MrConductanceLimit(coarse.conductance, fineLevel - (int32_t)fineShift),
+                                         MrSaturatingShiftLeft(coarse.capacityLimit, gap) >> repeatShift);
+
+    return HcFaceFlow(MrMakeFlowSide(fine, MrSubstepFaceLimit(fine, fineLevel, fineShift)),
+                      MrMakeFlowSide(coarse, coarseLimit));
+}
+
+FX_FN int64_t MrCrossLevelFlow(MrThermal fine, MrThermal coarse, int32_t fineLevel, uint32_t gap) {
+    return MrSubstepCrossLevelFlow(fine, coarse, fineLevel, gap, 0, 0);
+}
+
+// --- 細かいレベルの刻み(T-0108。17 §4「局所の時間刻み」。Berger–Colella 1989 の refluxing の形)---
+// 面の係数がコンダクタンスで決まる間(G の係数 × 4^k < C の上限)は熱の伝わり方が正しいが、それより細かいレベルでは C の上限(1/8)で
+// 頭打ちになり、1 段細かいごとに約 1/4 に遅くなる。そこでレベル k の伝導を 1 刻みに 4^σ 回の小刻みに分ける:
+//   σ(k) = clamp(k − baseLevel, 0, maxGap)。baseLevel = 頭打ちにならない最後のレベル(MrSubcycleBaseLevel)
+// 小刻みの面の係数はレベル k − σ の面と同じになり、k ≤ baseLevel + maxGap まで頭打ちにならない。
+// 1 刻み = 最も細かい小刻み 4^maxGap 回。レベル k の小刻みは 4^(maxGap − σ) 回ごとに始まり、その終わりにだけ値が変わる
+// (流れは小刻みの初めの値から。違うレベルの面は細かい側が小刻みごとに計算し、粗い側は粗い小刻みの終わりに合計を 1 回で受ける)。
+
+// レベル level の 1 刻みの小刻みの数の指数(4^σ 回)
+FX_FN uint32_t MrSubcycleShift(int32_t level, int32_t baseLevel, uint32_t maxGap) {
+    if (level <= baseLevel)
+        return 0;
+
+    const uint32_t gap = (uint32_t)(level - baseLevel);
+
+    return gap < maxGap ? gap : maxGap;
+}
+
+// 小刻みの番号 substep(0 〜 4^maxGap − 1)に、σ = shift のレベルの小刻みが始まるか・終わるか
+FX_FN bool MrSubstepBegins(uint32_t substep, uint32_t shift, uint32_t maxGap) {
+    const uint32_t periodMask = (1u << (2 * (maxGap - shift))) - 1u;
+
+    return (substep & periodMask) == 0;
+}
+
+FX_FN bool MrSubstepEnds(uint32_t substep, uint32_t shift, uint32_t maxGap) {
+    return MrSubstepBegins(substep + 1, shift, maxGap);
+}
+
+// 面の係数がコンダクタンスで決まる(熱容量の上限で頭打ちにならない)最後のレベル。伝導しない(G = 0)なら MR_SUBCYCLE_NO_BOUND
+FX_CONST int32_t MR_SUBCYCLE_LOWEST = -16;
+FX_CONST int32_t MR_SUBCYCLE_NO_BOUND = 64;
+
+FX_FN int32_t MrSubcycleBaseLevel(MrThermal thermal) {
+    for (int32_t level = MR_SUBCYCLE_LOWEST; level < MR_SUBCYCLE_NO_BOUND; ++level) {
+        if (MrConductanceLimit(thermal.conductance, level) >= thermal.capacityLimit)
+            return level - 1;
+    }
+
+    return MR_SUBCYCLE_NO_BOUND;
 }
 
 // 細かい側の流れ flow を、粗い側で表せる分だけ送る(先頭の「データの流れ」)。coarseHasFraction = 粗いブロックに端数の枠がある

@@ -68,7 +68,16 @@ namespace bicameral::sim {
     struct MultiresStepOptions {
         // 熱の伝導(T-0019。multires_conduction.hlsli)。GPU(sim/gpu_multires の RecordStep・RecordStepActive)も同じ結果(T-0107)
         bool conduction = false;
+
+        // --- 細かいレベルの熱の刻み(T-0108。multires_conduction.hlsli の「細かいレベルの刻み」)---
+        // レベル k の伝導を 1 刻みに 4^clamp(k − subcycleBaseLevel, 0, maxSubcycleGap) 回の小刻みに分ける。
+        // subcycleBaseLevel は面の係数が熱容量の上限で頭打ちにならない最後のレベル(MrSubcycleBaseLevel。最も伝わりやすい物質で決める)。
+        // maxSubcycleGap = 0 なら分けない(T-0019 と同じ結果)。上限は 3(64 回。17 §4)。GPU はまだ分けない(T-0109)
+        int32_t subcycleBaseLevel = 0;
+        uint32_t maxSubcycleGap = 0;
     };
+
+    constexpr uint32_t MULTIRES_MAX_SUBCYCLE_GAP = 3;
 
     // 保存量の合計(最も細かい単位 × 2^-64。256bit の 2 の補数、下の語から)
     using Wide256 = std::array<uint64_t, 4>;

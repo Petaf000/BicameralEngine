@@ -50,6 +50,10 @@ add_executable(multires_conduction_test multires_conduction_test.cpp)  # 木の�
 target_link_libraries(multires_conduction_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_conduction COMMAND multires_conduction_test)
 
+add_executable(multires_subcycle_test multires_subcycle_test.cpp)  # 細かいレベルの熱の刻み(T-0108)
+target_link_libraries(multires_subcycle_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_subcycle COMMAND multires_subcycle_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
