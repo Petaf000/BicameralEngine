@@ -221,6 +221,11 @@ views:
       - { id: reactionhlsl, group: shared, label: "reaction.hlsli<br/>1 セルの反応: 温度・進行度・取り合い・更新",
           code: "shaders/common/reaction.hlsli::RxEvaluateCell", ticket: T-0014, doc: docs/design/02-reaction-system.md,
           note: "HLSL と C++ で共通。量は物質量(µmol。ADR-0012)。エネルギーの合計は変えない。端数は確率的に丸める" }
+      - { id: reactionwait, group: shared, label: "待ちの丸め(研究)<br/>遅い反応が次に 1 単位進む刻み",
+          code: "shaders/common/reaction.hlsli::RxStepCellWait", ticket: T-0105, doc: docs/design/02-reaction-system.md,
+          note: "ブロックが最後に変わった刻みから幾何分布の待ち(ADR-0018)。眠らせても全部とビット一致。世界への切り替えは T-0115" }
+      - { id: reactionwaittest, group: tests, label: "reaction_wait_test<br/>待ちの分布・引き直し・眠らせる・何年分",
+          code: "tests/reaction_wait_test.cpp::TestSleepMatchesFull", ticket: T-0105 }
       - { id: reactiontable, group: simlib, label: "BakeReactionTable<br/>定義 → 整数の表(元素の釣り合いの検査)",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014, doc: docs/design/02-reaction-system.md,
           note: "Arrhenius を温度 1 K ごとの表に(整数の ln・exp。R7)。試験の表は reaction_test_table(物質 7・規則 5)" }
@@ -352,6 +357,8 @@ views:
       - [reactiontable, fixed, "ベイクも整数(R7)"]
       - [reactiontable, reactionhlsl, "RxSpecies・RxRule・速度の表"]
       - [reactiontest, reactiontable]
+      - [reactionwait, reactionhlsl, "取り合いと更新は同じ関数"]
+      - [reactionwaittest, reactionwait]
       - [physicsworld, physicscollide, "PxCollideBoxes"]
       - [physicsworld, physicssolverhlsl, "行・6×6"]
       - [physicsworld, physicsscene]

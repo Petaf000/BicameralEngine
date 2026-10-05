@@ -6,6 +6,7 @@
 //   - 場面: 酸素不足の火(炭と木に少しの O2、900〜1500 K)・吸熱の規則が熱を取り合う・いろいろなセル
 //   - どの刻みでも、縮めた後の消費はある量以下(熱は 1/8 まで)
 //   切り捨ての結果(前の実装)もテストの中で計算して並べて出す(どれだけ消えていたかの記録。T-0106 の作業ログ)
+//   酸素不足の火は、望む進行度を待ちの丸め(T-0105。毎刻み変わるセル)で作った場合も同じ基準で確かめる
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -144,9 +145,22 @@ namespace {
         return within && (heatUsed == 0 || heatUsed <= heatAvailable);
     }
 
+    // 望む進行度の丸め方: 刻みの乱数(今の世界)か、待ちの丸め(T-0105。毎刻み変わるセル = 前の刻みに変わったとして評価)
+    enum class Rounding : uint8_t { Tick, Wait };
+
+    RxCandidates CollectCandidates(const BakedReactionTable& table, const RxCell& cell, uint32_t kelvin, uint64_t tick,
+                                   uint64_t cellId, Rounding rounding) {
+        if (rounding == Rounding::Wait)
+            return RxCollectCandidatesWait(table.View(), cell, kelvin,
+                                           RxWaitSeed(test::REACTION_TEST_SEED, tick, cellId), 1)
+                .candidates;
+
+        return RxCollectCandidates(table.View(), cell, kelvin, RxRandomSeed(test::REACTION_TEST_SEED, tick, cellId));
+    }
+
     // セル cell を tickCount 回(刻みだけ変えて)評価し、規則ごとに足す。消費がある量を超えたら false
     bool Sample(const BakedReactionTable& table, const RxCell& cell, uint64_t cellId, uint64_t tickCount,
-                Tallies& tallies) {
+                Tallies& tallies, Rounding rounding = Rounding::Tick) {
         const RxThermal thermal = RxComputeThermal(table.View(), cell);
         const uint32_t kelvin = static_cast<uint32_t>(thermal.temperature) /
                                 static_cast<uint32_t>(MILLIKELVIN_PER_KELVIN);
@@ -154,7 +168,7 @@ namespace {
         bool within = true;
         for (uint64_t tick = 0; tick < tickCount; ++tick) {
             const uint64_t seed = RxRandomSeed(test::REACTION_TEST_SEED, tick, cellId);
-            const RxCandidates candidates = RxCollectCandidates(table.View(), cell, tableKelvin, seed);
+            const RxCandidates candidates = CollectCandidates(table, cell, tableKelvin, tick, cellId, rounding);
             if (candidates.count == 0)
                 continue;
 
@@ -222,7 +236,8 @@ namespace {
         return MakeReactionCell(table, amounts, milliKelvin);
     }
 
-    void TestStarvedFire(const BakedReactionTable& table) {
+    // 酸素不足の火の 9 つの場面を、望む進行度の丸め方 rounding で。消費がある量を超えたら false
+    bool SampleStarvedFires(const BakedReactionTable& table, Rounding rounding) {
         constexpr uint64_t TICKS = 20000;
         constexpr std::array<int32_t, 3> KELVINS = {900, 1200, 1500};
         constexpr std::array<uint64_t, 3> OXYGEN = {50, 2000, 100000};
@@ -232,13 +247,21 @@ namespace {
             for (const uint64_t oxygen : OXYGEN) {
                 Tallies tallies;
                 const RxCell cell = StarvedFire(table, 5000000, oxygen, kelvin * 1000);
-                within = Sample(table, cell, cellId++, TICKS, tallies) && within;
+                within = Sample(table, cell, cellId++, TICKS, tallies, rounding) && within;
                 const double tolerance = oxygen < 100 ? 0.08 : 0.002;
-                Report(table, std::format("酸素不足の火 {} K・O2 {} µmol", kelvin, oxygen), tallies, TICKS, tolerance);
+                const std::string_view suffix = rounding == Rounding::Wait ? "(待ちの丸め)" : "";
+                Report(table, std::format("酸素不足の火 {} K・O2 {} µmol{}", kelvin, oxygen, suffix), tallies, TICKS,
+                       tolerance);
             }
         }
 
-        Expect(within, "酸素不足の火: 縮めた後の消費がある量を超える");
+        return within;
+    }
+
+    void TestStarvedFire(const BakedReactionTable& table) {
+        const bool within = SampleStarvedFires(table, Rounding::Tick);
+        const bool withinWait = SampleStarvedFires(table, Rounding::Wait);
+        Expect(within && withinWait, "酸素不足の火: 縮めた後の消費がある量を超える");
     }
 
     // 吸熱の Boudouard が熱を使い切ろうとし、炭の燃焼が少しの O2 で進む

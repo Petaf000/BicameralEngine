@@ -30,6 +30,10 @@ add_executable(reaction_contention_test reaction_contention_test.cpp)
 target_link_libraries(reaction_contention_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME reaction_contention COMMAND reaction_contention_test)
 
+add_executable(reaction_wait_test reaction_wait_test.cpp)
+target_link_libraries(reaction_wait_test PRIVATE bicameral_reaction bicameral_core)
+add_test(NAME reaction_wait COMMAND reaction_wait_test)
+
 add_executable(multires_test multires_test.cpp)
 target_link_libraries(multires_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires COMMAND multires_test)

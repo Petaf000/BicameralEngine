@@ -394,4 +394,9 @@ namespace bicameral::sim {
         return RxStepCell(table.View(), cell, worldSeed, tick, cellId);
     }
 
+    RxWaitStep StepReactionCellWait(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed,
+                                    uint64_t tick, uint64_t changedTick, uint64_t cellId) {
+        return RxStepCellWait(table.View(), cell, worldSeed, tick, changedTick, cellId);
+    }
+
 }  // namespace bicameral::sim

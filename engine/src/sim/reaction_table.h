@@ -139,4 +139,9 @@ namespace bicameral::sim {
     [[nodiscard]] reaction::RxCellStep StepReactionCell(const BakedReactionTable& table, const reaction::RxCell& cell,
                                                         uint64_t worldSeed, uint64_t tick, uint64_t cellId);
 
+    // 待ちの丸め(T-0105・D-429。研究): changedTick = セルのブロックが最後に変わった刻み。変わらなければ次に評価が要る刻みも返す
+    [[nodiscard]] reaction::RxWaitStep StepReactionCellWait(const BakedReactionTable& table,
+                                                            const reaction::RxCell& cell, uint64_t worldSeed,
+                                                            uint64_t tick, uint64_t changedTick, uint64_t cellId);
+
 }  // namespace bicameral::sim
