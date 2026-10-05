@@ -5,6 +5,7 @@
 // CPU リファレンスは engine/src/sim/multires_tree.cpp の RefineRequestLevel・ApplyCoarsen と、multires_nest.cpp の RefineShadowLevel・
 // PullBackLevel・RemoveShadowChain(同じ順・同じ関数)。
 // 木を変えたブロック(細かくした親と子・粗くした親)は活性の一覧(u14 = この刻みの種)に足す(つつく。T-0100)。
+// 一様なブロック(T-0102): 一様な親の本物の子は一様(値 1 つ)。一様な親へ粗くして同じ値に戻らなければ、親を頁に広げる。
 // 活性のブロックを刻むグラフは別の multires_activity_graph.hlsl(反応の核を含んで大きいので、使う時だけ作る)。
 //
 // 順番に依存しない理由: 1 刻みに 1 つの親は 1 つの要求だけが触る(取り合いは TreeSettle で決着)ので、グループどうしの書き込みは重ならない。
@@ -44,17 +45,20 @@ void ReleaseFraction(uint32_t request, uint32_t fractionSlot) {
 void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool fromRequest = record.request != MR_NO_BLOCK;
     const bool real = record.kind == MR_BLOCK_REAL;
-    MrRequest target = ShadowPoint();  // HLSL の ?: は構造体を返せない
+    const MrBlock parent = g_blocks[record.parentSlot];
+    const bool uniformChild = real && MrIsUniform(parent);  // 一様な親の本物の子は一様(T-0102)
+    MrRequest target = ShadowPoint();                       // HLSL の ?: は構造体を返せない
     uint32_t childSlot = record.childSlot;
+    uint32_t childPage = MrObserverPage(record.childSlot, g_worldBlocks);  // 影はいつも頁を持つ
     uint32_t candidate = MR_NO_FRACTION;
     if (fromRequest) {
         target = g_requests[record.request];
         const MrRequestState state = g_states[record.request];
         childSlot = PoppedBlock(state, record.depth);
+        childPage = uniformChild ? MR_NO_PAGE : PoppedPage(state, record.depth);
         candidate = PoppedFraction(state, record.depth);
     }
 
-    const MrBlock parent = g_blocks[record.parentSlot];
     const uint32_t octant = MrOctantOfPoint(parent, target.x, target.y, target.z, target.level);
 
     // --- 端数: 親の八分の一に 0 でない端数があるか・親の残りに残るか(本物だけ)---
@@ -74,19 +78,25 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     GroupMemoryBarrierWithGroupSync();
     const uint32_t childFraction = gs_octantFraction != 0 ? candidate : MR_NO_FRACTION;
 
-    // --- セルと端数: 子は親と同じ数 ---
+    // --- セルと端数: 子は親と同じ数(一様なら値 1 つ)---
     const uint32_t parentCell = MrParentCellOfChild(octant, t);
-    g_cells[CellAddress(childSlot, t)] = g_cells[CellAddress(record.parentSlot, parentCell)];
-    if (childFraction != MR_NO_FRACTION)
-        g_fractions[CellAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
+    if (!uniformChild)
+        g_cells[PageCellAddress(childPage, t)] = LoadBlockCell(parent, record.parentSlot, parentCell);
+    else if (t == 0)
+        g_cells[childSlot] = g_cells[record.parentSlot];
 
-    // --- 本物なら親を覆う(全部のスレッドが親を読み終えてから)---
+    if (childFraction != MR_NO_FRACTION)
+        g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
+
+    // --- 本物なら親を覆う(全部のスレッドが親を読み終えてから。一様な親は覆われた所を空と読むので書かない)---
     GroupMemoryBarrierWithGroupSync();
     if (real && t < MR_OCTANT_CELLS) {
         const uint32_t index = MrOctantCell(octant, t);
-        g_cells[CellAddress(record.parentSlot, index)] = RxMakeEmptyCell(0);
+        if (!uniformChild)
+            g_cells[PageCellAddress(parent.page, index)] = RxMakeEmptyCell(0);
+
         if (parent.fraction != MR_NO_FRACTION)
-            g_fractions[CellAddress(parent.fraction, index)] = MrMakeEmptyFraction();
+            g_fractions[FractionAddress(parent.fraction, index)] = MrMakeEmptyFraction();
     }
 
     if (t != 0)
@@ -104,7 +114,7 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     if (real)
         g_blocks[record.parentSlot].children[octant] = childSlot;
 
-    g_blocks[childSlot] = MrMakeChildBlock(parent, record.parentSlot, octant, record.kind, childFraction);
+    g_blocks[childSlot] = MrMakeChildBlock(parent, record.parentSlot, octant, record.kind, childFraction, childPage);
     if (!real)
         return;
 
@@ -129,7 +139,7 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     MrChildren children;
     for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
         const uint32_t index = MrChildCell(t, j);
-        children.cells[j] = g_cells[CellAddress(childSlot, index)];
+        children.cells[j] = LoadBlockCell(child, childSlot, index);
         children.fractions[j] = LoadFraction(child.fraction, index);
     }
 
@@ -146,22 +156,28 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     for (uint32_t k = 0; k < result.lostSpeciesCount; ++k)
         AddToLedger(child.level, 1 + result.lostSpecies[k], result.lostBits[k]);
 
-    // --- 親の端数: 枠が無ければ取っておいた枠(八分の一の外を 0 で始める)。残りに 0 でない端数があるか ---
+    // --- 親の端数: 枠が無ければ取っておいた枠(八分の一の外を 0 で始める)。残りに 0 でない端数があるか。
+    //     一様な親が同じ値に戻らなければ頁に広げる(八分の一の外を一様の値で埋める。T-0102)---
     if (t == 0) {
         gs_octantFraction = 0;
         gs_restFraction = 0;
     }
 
     GroupMemoryBarrierWithGroupSync();
+    const bool expandParent = state.pageNeed != 0;
+    const uint32_t parentPage = expandParent ? PoppedPage(state, 0) : parent.page;
     const uint32_t parentFraction = parent.fraction != MR_NO_FRACTION ? parent.fraction : PoppedFraction(state, 0);
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / MR_OCTANT_CELLS; ++k) {
         const uint32_t index = t + (k * MR_OCTANT_CELLS);
         if (MrOctantOfCell(index) == octant)
             continue;
 
+        if (expandParent)
+            g_cells[PageCellAddress(parentPage, index)] = MrUniformCell(parent, g_cells[parentSlot], index);
+
         if (parent.fraction == MR_NO_FRACTION)
-            g_fractions[CellAddress(parentFraction, index)] = MrMakeEmptyFraction();
-        else if (!MrFractionIsZero(g_fractions[CellAddress(parentFraction, index)]))
+            g_fractions[FractionAddress(parentFraction, index)] = MrMakeEmptyFraction();
+        else if (!MrFractionIsZero(g_fractions[FractionAddress(parentFraction, index)]))
             InterlockedOr(gs_restFraction, 1u);
     }
 
@@ -169,8 +185,10 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         InterlockedOr(gs_octantFraction, 1u);
 
     const uint32_t index = MrOctantCell(octant, t);
-    g_cells[CellAddress(parentSlot, index)] = result.cell;
-    g_fractions[CellAddress(parentFraction, index)] = result.fraction;
+    if (expandParent || !MrIsUniform(parent))
+        g_cells[PageCellAddress(parentPage, index)] = result.cell;
+
+    g_fractions[FractionAddress(parentFraction, index)] = result.fraction;
 
     GroupMemoryBarrierWithGroupSync();
     if (t != 0)
@@ -187,6 +205,12 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         ReleaseFraction(request, child.fraction);
 
     g_states[request].releaseBlock = childSlot;
+    if (!MrIsUniform(child))
+        g_states[request].releasePage = child.page;
+
+    if (expandParent)
+        g_blocks[parentSlot].page = parentPage;
+
     g_blocks[parentSlot].fraction = kept;
     g_blocks[parentSlot].children[octant] = MR_NO_BLOCK;
     IndexRemove(childSlot);
@@ -257,19 +281,19 @@ void PullBackNode(DispatchNodeInputRecord<MrChainRecord> input, uint32_t thread 
                   [MaxRecords(1)] [NodeId("PullBackNode")] NodeOutput<MrChainRecord> next) {
     const MrChainRecord record = input.Get();
     const MrBlock shadow = g_blocks[record.slot];
-    const RxCell parent = g_cells[CellAddress(shadow.parent, MrOctantCell(shadow.parentOctant, thread))];
+    const RxCell parent = LoadCell(shadow.parent, MrOctantCell(shadow.parentOctant, thread));
 
     MrShadowFamily family;
     family.clamped = 0;
     for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-        family.cells[j] = g_cells[CellAddress(record.slot, MrChildCell(thread, j))];
+        family.cells[j] = g_cells[PageCellAddress(shadow.page, MrChildCell(thread, j))];
 
     const MrShadowFamily pulled = MrPullBackShadow(MakeTable(), parent, family);
     if (pulled.clamped != 0)
         InterlockedAdd(g_counters[MR_COUNTER_SHADOW_CLAMPED], pulled.clamped);
 
     for (uint32_t k = 0; k < MR_CHILDREN_PER_CELL; ++k)
-        g_cells[CellAddress(record.slot, MrChildCell(thread, k))] = pulled.cells[k];
+        g_cells[PageCellAddress(shadow.page, MrChildCell(thread, k))] = pulled.cells[k];
 
     // --- 次のレベル ---
     Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC);

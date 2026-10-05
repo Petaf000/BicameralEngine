@@ -107,8 +107,8 @@ namespace {
     };
 
     ShadowFamilyCheck CheckShadowFamily(const MultiresNest& nest, uint32_t slot, const RxCell& parent, uint32_t local) {
-        const auto childAt = [&](uint32_t j) -> const RxCell& {
-            return nest.cells[(size_t{slot} * MR_BLOCK_CELLS) + MrChildCell(local, j)];
+        const auto childAt = [&](uint32_t j) {
+            return LoadNestCell(nest, slot, MrChildCell(local, j));
         };
 
         ShadowFamilyCheck check;
@@ -137,9 +137,8 @@ namespace {
             const uint32_t slot = test::MULTIRES_SHADOW_SLOT + level;
             const MrBlock& shadow = nest.blocks[slot];
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
-                const size_t parentAddress = (size_t{shadow.parent} * MR_BLOCK_CELLS) +
-                                             MrOctantCell(shadow.parentOctant, local);
-                const ShadowFamilyCheck check = CheckShadowFamily(nest, slot, nest.cells[parentAddress], local);
+                const RxCell parent = LoadNestCell(nest, shadow.parent, MrOctantCell(shadow.parentOctant, local));
+                const ShadowFamilyCheck check = CheckShadowFamily(nest, slot, parent, local);
                 mismatches += check.sumsMatch ? 0 : 1;
                 detailCells += check.hasDetail ? 1 : 0;
             }

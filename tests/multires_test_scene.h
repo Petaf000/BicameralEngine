@@ -37,6 +37,7 @@ namespace bicameral::test {
         return {.worldBlocks = worldBlocks,
                 .observerBlocks = observerBlocks,
                 .fractions = fractions,
+                .pages = worldBlocks,  // 全部の枠が頁を持っても足りる(頁の不足は起こさない。T-0102)
                 .indexEntries = indexEntries,
                 .ledgerColumns = 1 + static_cast<uint32_t>(table.species.size())};
     }

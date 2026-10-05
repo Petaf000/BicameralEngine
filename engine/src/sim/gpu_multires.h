@@ -57,6 +57,8 @@ namespace bicameral::sim {
         // RecordProcessRequests の前。tick はこれから処理する刻み。T-0101)
         void RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
         void RecordProcessRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 頁を配る段(TreeExpand)だけ(計測用。刻む段が印を付けていなければ何も配らない。T-0102)
+        void RecordExpandPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
         // --- 観察の枠(multires_nest.h の同じ名前の関数と同じ結果)---
         void RecordRefineShadow(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -143,7 +145,7 @@ namespace bicameral::sim {
 
         static constexpr uint32_t TABLE_COUNT = 4;  // 物質・規則・索引・速度
         static constexpr uint32_t ACTIVITY_LISTS = 2;
-        static constexpr uint32_t TREE_PASS_COUNT = 7;
+        static constexpr uint32_t TREE_PASS_COUNT = 8;
         static constexpr uint32_t MAX_TIMESTAMPS = 16;
 
         GpuMultires() = default;
@@ -160,6 +162,9 @@ namespace bicameral::sim {
         void RecordTreePass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass,
                             uint32_t groupCount);
         [[nodiscard]] std::array<uint64_t, BufferCount> BufferSizes() const;
+        [[nodiscard]] uint64_t PageCount() const;
+        [[nodiscard]] std::vector<std::byte> MakeGraphInputImage() const;
+        void RecordExpandPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -171,13 +176,15 @@ namespace bicameral::sim {
         // --- パイプライン ---
         ComPtr<ID3D12RootSignature> m_rootSignature;
         ComPtr<ID3D12PipelineState> m_stepPipeline;
+        ComPtr<ID3D12PipelineState> m_stepExpandedPipeline;  // 頁に広げたブロックを埋めて刻む(全部を刻む時。T-0102)
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::unique_ptr<gpu::WorkGraph> m_graph;
         bool m_graphInitialized = false;
         std::array<uint32_t, 4> m_entries{};              // 細かくする・粗くする要求・引き戻す・影を捨てる
         std::unique_ptr<gpu::WorkGraph> m_activityGraph;  // 無ければ活性を使わない
         bool m_activityGraphInitialized = false;
-        std::array<uint32_t, 2> m_activityEntries = {UINT32_MAX, UINT32_MAX};  // 活性の種・観察の枠を刻む
+        std::array<uint32_t, 3> m_activityEntries = {UINT32_MAX, UINT32_MAX,
+                                                     UINT32_MAX};  // 活性の種・観察の枠を刻む・頁に広げて刻む
         RootConstants m_constants;
 
         // --- バッファ(既定のヒープ・アップロード・読み戻し。並びは Buffer の順)---

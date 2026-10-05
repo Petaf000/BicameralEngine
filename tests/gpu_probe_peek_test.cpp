@@ -127,10 +127,10 @@ namespace {
 
     // 影の鎖の家族(親のセル 1 つの子 2³)のうち、子どうしが同じでないものの数(影の中で細部が動いている。
     // 細かくした直後と、反応の無い所では 0。引き戻しは子の比を保つので、違いは影の刻みの反応(確率的な丸め)から生まれる)
-    bool FamilyHasDetail(const MultiresNest& nest, size_t firstCell, uint32_t local) {
-        const uint64_t eldest = HashReactionCell(nest.cells[firstCell + multires::MrChildCell(local, 0)]);
+    bool FamilyHasDetail(const MultiresNest& nest, uint32_t slot, uint32_t local) {
+        const uint64_t eldest = HashReactionCell(LoadNestCell(nest, slot, multires::MrChildCell(local, 0)));
         for (uint32_t j = 1; j < multires::MR_CHILDREN_PER_CELL; ++j) {
-            if (HashReactionCell(nest.cells[firstCell + multires::MrChildCell(local, j)]) != eldest)
+            if (HashReactionCell(LoadNestCell(nest, slot, multires::MrChildCell(local, j))) != eldest)
                 return true;
         }
 
@@ -140,9 +140,9 @@ namespace {
     uint32_t CountDetailedFamilies(const MultiresNest& nest) {
         uint32_t count = 0;
         for (uint32_t level = 0; level < PEEK_LEVEL_COUNT; ++level) {
-            const size_t firstCell = size_t{PEEK_FIRST_SHADOW_SLOT + level} * multires::MR_BLOCK_CELLS;
+            const uint32_t slot = PEEK_FIRST_SHADOW_SLOT + level;
             for (uint32_t local = 0; local < multires::MR_OCTANT_CELLS; ++local)
-                count += FamilyHasDetail(nest, firstCell, local) ? 1 : 0;
+                count += FamilyHasDetail(nest, slot, local) ? 1 : 0;
         }
 
         return count;

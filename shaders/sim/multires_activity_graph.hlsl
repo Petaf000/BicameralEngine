@@ -1,6 +1,8 @@
 // multires_activity_graph.hlsl — 多重解像度の木の上の活性: 種とその面の隣だけを刻む Work Graph(T-0100。17 §5「活性」)。
-// 入口は 2 つ: ActivitySeedNode(GPU の入力 = この刻みの種の一覧。→ WakeFaceNode〔面を細かい側へたどる再帰〕→ ActivityStepNode)・
-// ObserverStepNode(CPU の入力。観察の枠を全部刻む)。CPU リファレンスは engine/src/sim/multires_activity.cpp の StepActive(同じ関数)。
+// 入口は 3 つ: ActivitySeedNode(GPU の入力 = この刻みの種の一覧。→ WakeFaceNode〔面を細かい側へたどる再帰〕→ ActivityStepNode)・
+// ObserverStepNode(CPU の入力。観察の枠を全部刻む)・ExpandStepNode(GPU の入力 = TreeExpand が頁を配った一様なブロック。T-0102)。
+// 一様なブロックは ActivityStepNode が値 1 つで反応が進むかを調べ、進むなら頁に広げる印を付けるだけ(頁は枠の順に配るので、
+// 順の決まらないこのグラフの中では配らない)。TreeExpand の後、ExpandStepNode が埋めて刻む。CPU リファレンスは engine/src/sim/multires_activity.cpp の StepActive(同じ関数)。
 // 刻むノードは進める反応の規則があったブロックを次の刻みの種の一覧(u14)へ書き足す。
 // セルが変わったブロックと、つつかれた種には忙しさの印(busyTick)を書く(静かな葉を粗くする要求の元。T-0101)。
 // 木の管理のグラフ(multires_graph.hlsl)と分けたのは、反応の核を含んで大きく(debug の GPU-based validation の計装が数分かかる)、
@@ -53,7 +55,7 @@ uint32_t StepBlockCells(uint32_t slot, uint32_t thread) {
         if (!MrIsSteppedCell(block, index))
             continue;
 
-        const uint32_t address = CellAddress(slot, index);
+        const uint32_t address = PageCellAddress(block.page, index);
         const RxCell before = g_cells[address];
         const RxCellStep step = MrStepCellDetailed(MakeTable(), before, seed, tick, block, index);
         g_cells[address] = step.cell;
@@ -67,6 +69,25 @@ uint32_t StepBlockCells(uint32_t slot, uint32_t thread) {
     GroupMemoryBarrierWithGroupSync();
 
     return (gs_possible != 0 ? STEP_POSSIBLE : 0u) | (gs_changed != 0 ? STEP_CHANGED : 0u);
+}
+
+// 刻んだ結果を見出しと種に(スレッド 0)
+void FinishBlock(uint32_t slot, uint32_t result) {
+    if ((result & STEP_CHANGED) != 0)
+        g_blocks[slot].busyTick = CurrentMark();  // 変わったので忙しい(T-0101)
+
+    if ((result & STEP_POSSIBLE) != 0)
+        AppendActivity(slot);
+}
+
+// 頁を配ったばかりの一様なブロックの頁を一様の値で埋める(StepBlockCells と同じスレッドの受け持ちなので、その後に同期は要らない)
+void FillExpandedPage(uint32_t slot, uint32_t thread) {
+    const MrBlock block = g_blocks[slot];
+    const RxCell value = g_cells[slot];
+    for (uint32_t k = 0; k < MR_BLOCK_CELLS / ACTIVITY_STEP_THREADS; ++k) {
+        const uint32_t index = thread + (ACTIVITY_STEP_THREADS * k);
+        g_cells[PageCellAddress(block.page, index)] = MrUniformCell(block, value, index);
+    }
 }
 
 // clang-format off
@@ -160,15 +181,37 @@ void ActivityStepNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thre
     if (thread == 0)
         InterlockedAdd(g_counters[MR_COUNTER_SCHEDULED], 1u);
 
+    // --- 一様: 反応が進む時だけ頁に広げる印(T-0102。グループで一様な分岐)---
+    const MrBlock block = g_blocks[slot];
+    if (MrIsUniform(block)) {
+        const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
+        const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
+        if (thread == 0 && MrUniformWouldChange(MakeTable(), g_cells[slot], seed, tick, block))
+            g_blocks[slot].page = MR_PAGE_WANTED;
+
+        return;
+    }
+
     const uint32_t result = StepBlockCells(slot, thread);
-    if (thread != 0)
+    if (thread == 0)
+        FinishBlock(slot, result);
+}
+
+// TreeExpand が頁を配った一様なブロックを埋めて刻む(1 グループ = 1 ブロック。レコード MR_NO_BLOCK は何もしない。T-0102)
+[Shader("node")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NumThreads(ACTIVITY_STEP_THREADS, 1, 1)]
+[NodeIsProgramEntry]
+void ExpandStepNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thread : SV_GroupIndex) {
+    const uint32_t slot = input.Get().slot;
+    if (slot == MR_NO_BLOCK)
         return;
 
-    if ((result & STEP_CHANGED) != 0)
-        g_blocks[slot].busyTick = CurrentMark();  // 変わったので忙しい(T-0101)
-
-    if ((result & STEP_POSSIBLE) != 0)
-        AppendActivity(slot);
+    FillExpandedPage(slot, thread);
+    const uint32_t result = StepBlockCells(slot, thread);
+    if (thread == 0)
+        FinishBlock(slot, result);
 }
 
 // 観察の枠(影)を全部刻む(1 グループ = 1 枠。活性に入れない。D-403)

@@ -34,15 +34,19 @@ namespace {
         uint64_t digest = 0;
         uint64_t scheduled = 0;      // 刻んだブロックの数(全部の刻みの和)
         uint64_t realBlocks = 0;     // 本物のブロックの数(全部の刻みの和)
+        uint64_t usedPages = 0;      // 使っている世界の頁の数(全部の刻みの和。一様なブロックは頁を持たない。T-0102)
         uint64_t crossLevel = 0;     // 種と違うレベルの面の隣を起こした数(総当たりで数える)
         uint32_t lastScheduled = 0;  // 最後の刻みに刻んだ数
     };
 
-    // 全部のセル(観察の枠も)と、世界の要約・帳簿・端数が一致するか
+    // 全部の枠の論理のセル(観察の枠も。一様か頁かによらない。T-0102)と、世界の要約・帳簿・端数が一致するか
     bool SameCells(const MultiresNest& active, const MultiresNest& full) {
-        for (size_t i = 0; i < active.cells.size(); ++i) {
-            if (HashReactionCell(active.cells[i]) != HashReactionCell(full.cells[i]))
-                return false;
+        for (uint32_t slot = 0; slot < active.blocks.size(); ++slot) {
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (HashReactionCell(LoadNestCell(active, slot, index)) !=
+                    HashReactionCell(LoadNestCell(full, slot, index)))
+                    return false;
+            }
         }
 
         return HashRealLeaves(active) == HashRealLeaves(full) && active.ledger == full.ledger;
@@ -104,6 +108,7 @@ namespace {
             run.lastScheduled = static_cast<uint32_t>(std::ranges::count(scheduled, uint8_t{1}));
             run.scheduled += run.lastScheduled;
             run.realBlocks += CountReal(active);
+            run.usedPages += UsedWorldPages(active);
             if (scheduled != expected && scheduledMismatches == 1)
                 Log(Channel::Sim, Level::Error, "刻み {}: 刻んだ集合が総当たりの面の隣と違う", tick);
 
@@ -141,10 +146,10 @@ namespace {
         }
 
         Log(Channel::Sim, Level::Info,
-            "multires_activity_test: OK({} 刻み・刻んだブロック {} / 本物のブロック {}・最後の刻み {}・"
+            "multires_activity_test: OK({} 刻み・刻んだブロック {} / 本物のブロック {}・頁 {}・最後の刻み {}・"
             "レベルをまたぐ面の隣 {}・要約 {:016x})",
-            test::ACTIVITY_TICKS, first.scheduled, first.realBlocks, first.lastScheduled, first.crossLevel,
-            first.digest);
+            test::ACTIVITY_TICKS, first.scheduled, first.realBlocks, first.usedPages, first.lastScheduled,
+            first.crossLevel, first.digest);
 
         return 0;
     }

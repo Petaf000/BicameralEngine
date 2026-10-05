@@ -5,6 +5,7 @@
 // 面をたどる再帰も、たどる道(どの種のどの面からか)は順に依存しないので、上限で止まった数も同じになる。
 // 刻んでセルが変わったブロックと、木の変更でつつかれたブロックには忙しさの印(busyTick)を書き、印が古い本物の葉を
 // 粗くする要求を作る(SubmitQuietCoarsenRequests。GPU は multires_tree.hlsl の TreeQuiet。T-0101)。
+// 一様なブロック(T-0102)は値 1 つで反応が進むかを調べ、進むなら刻んだ後に枠の順で頁に広げて刻む(GPU は TreeExpand → ExpandStepNode)。
 #include <algorithm>
 
 #include "common/multires_activity.hlsli"
@@ -19,6 +20,7 @@ namespace bicameral::sim {
     namespace {
 
         using nest_detail::CellAt;
+        using nest_detail::UniformAt;
 
         // multires_activity.hlsli の Tree の約束
         struct CpuTree {
@@ -116,19 +118,31 @@ namespace bicameral::sim {
 
         std::ranges::fill(nest.seeds, uint8_t{0});
 
-        // --- 印のある世界のブロックを刻む。セルが変わったら忙しさの印、進める規則があれば次の種に ---
+        // --- 印のある世界のブロックを刻む。セルが変わったら忙しさの印、進める規則があれば次の種に。
+        //     一様なブロックは反応が進む時だけ、後で頁に広げて刻む(T-0102)---
         const ReactionTableView view = table.View();
-        for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
-            if (nest.blocks[slot].activeTick != mark)
-                continue;
-
+        const auto finishBlock = [&](uint32_t slot) {
             const BlockStep step = StepBlock(nest, view, slot, worldSeed, tick);
             if (step.changed)
                 nest.blocks[slot].busyTick = mark;
 
             if (step.possible)
                 nest.seeds[slot] = 1;
+        };
+
+        for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
+            MrBlock& block = nest.blocks[slot];
+            if (block.activeTick != mark)
+                continue;
+
+            if (!MrIsUniform(block))
+                finishBlock(slot);
+            else if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
+                block.page = MR_PAGE_WANTED;
         }
+
+        for (const uint32_t slot : nest_detail::ExpandWantedPages(nest))
+            finishBlock(slot);
 
         // --- 観察の枠は全部刻む(活性に入れない。D-403)---
         for (auto slot = worldBlocks; slot < nest.blocks.size(); ++slot)

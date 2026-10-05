@@ -19,8 +19,11 @@ namespace bicameral::sim {
 
         using nest_detail::CellAt;
         using nest_detail::FractionAt;
+        using nest_detail::FreePageAt;
+        using nest_detail::PageCellAt;
         using nest_detail::PokeBlock;
         using nest_detail::SetFraction;
+        using nest_detail::UniformAt;
 
         // --- 索引 ---
 
@@ -72,6 +75,12 @@ namespace bicameral::sim {
 
         uint32_t PoppedBlock(const MultiresNest& nest, const MrRequestState& state, uint32_t i) {
             return nest.freeBlocks[state.blockBase - 1 - i];
+        }
+
+        uint32_t PoppedPage(MultiresNest& nest, const MrRequestState& state, uint32_t i) {
+            FX_ASSERT(i < state.pageNeed);
+
+            return FreePageAt(nest, state.pageBase - 1 - i);
         }
 
         uint32_t PoppedFraction(const MultiresNest& nest, const MrRequestState& state, uint32_t i) {
@@ -171,11 +180,15 @@ namespace bicameral::sim {
             if (coarsen) {
                 const uint32_t parent = nest.blocks[state.target].parent;
                 state.fractionNeed = nest.blocks[parent].fraction == MR_NO_FRACTION ? 1 : 0;
+                state.pageNeed = MrCoarsenPageNeed(nest.blocks[state.target], UniformAt(nest, state.target),
+                                                   nest.blocks[parent], UniformAt(nest, parent));
                 return;
             }
 
+            // 一様な親の鎖は全部一様(頁なし)、頁を持つ親の鎖は全部頁を持つ(T-0102)
             state.blockNeed = state.levels;
             state.fractionNeed = nest.blocks[state.target].fraction != MR_NO_FRACTION ? state.levels : 0;
+            state.pageNeed = MrIsUniform(nest.blocks[state.target]) ? 0 : state.levels;
         }
 
         // --- 3. 割り当て: 要求の順の累積和が空きの数以下なら許可(許可は一覧の前から続く)---
@@ -183,10 +196,13 @@ namespace bicameral::sim {
         void Allocate(MultiresNest& nest, uint32_t count) {
             const uint32_t freeBlocks = nest.counters[MR_COUNTER_FREE_BLOCKS];
             const uint32_t freeFractions = nest.counters[MR_COUNTER_FREE_FRACTIONS];
+            const uint32_t freePages = nest.counters[MR_COUNTER_FREE_PAGES];
             uint32_t blockSum = 0;
             uint32_t fractionSum = 0;
+            uint32_t pageSum = 0;
             uint32_t grantedBlocks = 0;
             uint32_t grantedFractions = 0;
+            uint32_t grantedPages = 0;
             for (uint32_t i = 0; i < count; ++i) {
                 MrRequestState& state = nest.states[i];
                 if (state.status != MR_STATUS_PENDING)
@@ -194,9 +210,11 @@ namespace bicameral::sim {
 
                 const uint32_t blockBase = freeBlocks - blockSum;
                 const uint32_t fractionBase = freeFractions - fractionSum;
+                const uint32_t pageBase = freePages - pageSum;
                 blockSum += state.blockNeed;
                 fractionSum += state.fractionNeed;
-                if (blockSum > freeBlocks || fractionSum > freeFractions) {
+                pageSum += state.pageNeed;
+                if (blockSum > freeBlocks || fractionSum > freeFractions || pageSum > freePages) {
                     state.status = MR_STATUS_NO_SPACE;
                     continue;
                 }
@@ -204,12 +222,15 @@ namespace bicameral::sim {
                 state.status = MR_STATUS_GRANTED;
                 state.blockBase = blockBase;
                 state.fractionBase = fractionBase;
+                state.pageBase = pageBase;
                 grantedBlocks = blockSum;
                 grantedFractions = fractionSum;
+                grantedPages = pageSum;
             }
 
             nest.counters[MR_COUNTER_FREE_BLOCKS] = freeBlocks - grantedBlocks;
             nest.counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions - grantedFractions;
+            nest.counters[MR_COUNTER_FREE_PAGES] = freePages - grantedPages;
         }
 
         // --- 4. 適用: 細かくする(1 段)---
@@ -221,6 +242,8 @@ namespace bicameral::sim {
             const uint32_t candidate = PoppedFraction(nest, state, depth);
             MrBlock& parent = nest.blocks[parentSlot];
             const uint32_t octant = MrOctantOfPoint(parent, request.x, request.y, request.z, request.level);
+            const bool uniform = MrIsUniform(parent);  // 一様な親の子は一様(T-0102)
+            const uint32_t childPage = uniform ? MR_NO_PAGE : PoppedPage(nest, state, depth);
 
             // --- 端数: 親の八分の一に 0 でない端数があれば、取っておいた枠に写す。親の残り(覆わない所)に 0 でない端数が残るか ---
             bool octantFraction = false;
@@ -235,18 +258,25 @@ namespace bicameral::sim {
             FX_ASSERT(!octantFraction || candidate != MR_NO_FRACTION);
             const uint32_t childFraction = octantFraction ? candidate : MR_NO_FRACTION;
 
-            // --- セルと端数: 子は親と同じ数 ---
+            // --- セルと端数: 子は親と同じ数(一様なら値 1 つ)---
+            if (uniform)
+                UniformAt(nest, childSlot) = UniformAt(nest, parentSlot);
+
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 const uint32_t parentCell = MrParentCellOfChild(octant, index);
-                CellAt(nest, childSlot, index) = CellAt(nest, parentSlot, parentCell);
+                if (!uniform)
+                    PageCellAt(nest, childPage, index) = CellAt(nest, parentSlot, parentCell);
+
                 if (childFraction != MR_NO_FRACTION)
                     SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
             }
 
-            // --- 親を覆う(覆われた親のセルと端数は空)---
+            // --- 親を覆う(覆われた親のセルと端数は空。一様な親は覆われた所を空と読むので書かない)---
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t index = MrOctantCell(octant, local);
-                CellAt(nest, parentSlot, index) = RxMakeEmptyCell(0);
+                if (!uniform)
+                    CellAt(nest, parentSlot, index) = RxMakeEmptyCell(0);
+
                 if (parent.fraction != MR_NO_FRACTION)
                     SetFraction(nest, parent.fraction, index, MrMakeEmptyFraction());
             }
@@ -261,7 +291,8 @@ namespace bicameral::sim {
             }
 
             parent.children[octant] = childSlot;
-            nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_REAL, childFraction);
+            nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_REAL, childFraction,
+                                                      childPage);
             IndexInsert(nest, childSlot);
 
             // --- 木を変えたブロックをつつく(活性の種。最初の段だけ親も。T-0100)---
@@ -285,7 +316,7 @@ namespace bicameral::sim {
             MrChildren children{};
             for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
                 const uint32_t index = MrChildCell(local, j);
-                children.cells[j] = CellAt(nest, childSlot, index);
+                children.cells[j] = LoadNestCell(nest, childSlot, index);
                 children.fractions[j] = FractionAt(nest, fractionSlot, index);
             }
 
@@ -327,6 +358,15 @@ namespace bicameral::sim {
                 octantFraction |= !MrFractionIsZero(results[local].fraction);
             }
 
+            // --- 一様な親: 子が同じ値に戻らなければ頁に広げる(T-0102)---
+            if (state.pageNeed != 0) {
+                const uint32_t page = PoppedPage(nest, state, 0);
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                    PageCellAt(nest, page, index) = MrUniformCell(parent, UniformAt(nest, child.parent), index);
+
+                parent.page = page;
+            }
+
             // --- 親の端数: 枠が無ければ取っておいた枠を全部 0 で始める。残り(八分の一の外)に 0 でない端数があるか ---
             bool restFraction = false;
             const uint32_t newFraction = PoppedFraction(nest, state, 0);
@@ -343,7 +383,9 @@ namespace bicameral::sim {
 
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t index = MrOctantCell(child.parentOctant, local);
-                CellAt(nest, child.parent, index) = results[local].cell;
+                if (!MrIsUniform(parent))
+                    CellAt(nest, child.parent, index) = results[local].cell;
+
                 SetFraction(nest, parent.fraction, index, results[local].fraction);
             }
 
@@ -357,6 +399,9 @@ namespace bicameral::sim {
                 Release(state, child.fraction);
 
             state.releaseBlock = childSlot;
+            if (!MrIsUniform(child))
+                state.releasePage = child.page;
+
             parent.children[child.parentOctant] = MR_NO_BLOCK;
             IndexRemove(nest, childSlot);
             nest.blocks[childSlot] = MrMakeUnusedBlock();
@@ -380,6 +425,9 @@ namespace bicameral::sim {
 
                 if (state.releaseBlock != MR_NO_BLOCK)
                     nest.freeBlocks[nest.counters[MR_COUNTER_FREE_BLOCKS]++] = state.releaseBlock;
+
+                if (state.releasePage != MR_NO_PAGE)
+                    FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = state.releasePage;
             }
 
             // --- 墓石が表の 1/4 を超えたら作り直す ---
@@ -405,8 +453,18 @@ namespace bicameral::sim {
         block.originZ = originZ;
         block.level = nest.capacity.rootLevel;
         block.kind = MR_BLOCK_REAL;
+
+        // --- 全部同じなら一様(頁なし)、でなければ頁を取る(T-0102)---
+        const bool uniform = std::ranges::all_of(cells, [&](const RxCell& cell) { return MrSameCell(cell, cells[0]); });
+        if (uniform) {
+            UniformAt(nest, slot) = cells[0];
+        } else {
+            block.page = nest_detail::PopPage(nest);
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                PageCellAt(nest, block.page, index) = cells[index];
+        }
+
         nest.blocks[slot] = block;
-        std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
         IndexInsert(nest, slot);
         nest_detail::PokeBlock(nest, slot);
 

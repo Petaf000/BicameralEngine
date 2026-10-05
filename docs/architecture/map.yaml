@@ -269,6 +269,12 @@ views:
       - { id: quiettest, group: tests, label: "multires_quiet_test / gpu_multires_quiet_test<br/>変わったばかりは粗くしない・燃え尽きたら根まで畳む",
           code: "tests/multires_quiet_test.cpp::RunQuiet", ticket: T-0101,
           note: "保存量が毎刻み一致。GPU(HW・WARP)は状態の全部と次の刻みの種が毎刻み CPU と一致" }
+      - { id: multirespages, group: simlib, label: "ExpandWantedPages<br/>一様なブロックを頁に広げる(枠の順)",
+          code: "engine/src/sim/multires_nest.cpp::ExpandWantedPages", ticket: T-0102, doc: docs/design/17-multiresolution.md,
+          note: "見出しの枠とセルの頁は別のプール。一様(覆われていないセルが同じ値)は頁なしで値 1 つ。反応が進む時だけ刻んだ後に頁を配る。GPU は multires_tree.hlsl の TreeExpand → ExpandStepNode / StepExpanded" }
+      - { id: uniformtest, group: tests, label: "multires_uniform_test / gpu_multires_uniform_test<br/>一様な根・鎖は頁を使わない・頁の不足",
+          code: "tests/multires_uniform_test.cpp::RunUniform", ticket: T-0102,
+          note: "1 つずつ刻む素直な答えと論理のセルが一致・保存量一致。GPU(HW・WARP)は状態の全部と種が毎刻み CPU と一致" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -366,6 +372,10 @@ views:
       - [multiresquiet, multirestree, "要求の一覧の後ろに足す"]
       - [quiettest, multiresquiet]
       - [quiettest, gpumultires, "毎刻み比べる"]
+      - [multiresactivity, multirespages, "反応が進む一様なブロック"]
+      - [multirespages, multirestree, "頁の空きのスタック"]
+      - [uniformtest, multirespages]
+      - [uniformtest, gpumultires, "毎刻み比べる"]
       - [probesim, probepeek, "抽出の後のフック"]
       - [viewcontroller, frameloop, "P・PageDown → 覗く場所"]
       - [peektest, probepeek]

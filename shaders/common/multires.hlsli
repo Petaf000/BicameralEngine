@@ -12,6 +12,10 @@
 //   粗くする:   子のセル 2³ の (整数部 · 2^64 + 端数) を足して 3bit 右へ → 親の整数部と端数(MrCoarsenCell)。
 //   影:         反応の後、影の子 2³ の合計を「親 × 8」に引き戻す(MrPullBackShadow)。影は親を覆わず、世界に書き戻さない(D-403)。
 //
+// 頁(T-0102): 見出しの枠とセルの頁(512 セル)は別のプール。一様なブロック(覆われていないセルが全部同じ値・覆われたセルは空・端数なし)は
+// 頁を持たず値 1 つ(セルのバッファの先頭の、枠ごとの 1 セル)。セルのバッファの並びは [一様の値 × 枠][頁 × 512 セル]。
+// 観察の枠(影・写し)はいつも頁を持つ(頁の番号 = 枠 − 世界の枠の数。世界の頁はその後ろ)。
+//
 // 端数(ADR-0015): 2^-64 単位。反応は整数部だけを使い、端数は細かく/粗くする時だけ動く。21 段の往復まではビット一致。
 // それより深くから粗くして落ちた分は、世界の帳簿に (レベル, 物質) ごとに足す(T-0018。木の管理は multires_tree.hlsli)。
 #ifndef BICAMERAL_MULTIRES_HLSLI
@@ -45,6 +49,8 @@ FX_CONST uint32_t MR_NO_SPECIES = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_CELL_ID_PURPOSE = 0x4D520001u;  // セルの ID(乱数の鍵)を作るハッシュの用途
 FX_CONST uint32_t
     MR_BUSY_POKED = 0xFFFFFFFFu;  // MrBlock::busyTick: 木の変更でつつかれた(種として起こす時に刻みの印にする。T-0101)
+FX_CONST uint32_t MR_NO_PAGE = 0xFFFFFFFFu;      // MrBlock::page: 頁なし = 一様(値はセルのバッファの先頭。T-0102)
+FX_CONST uint32_t MR_PAGE_WANTED = 0xFFFFFFFEu;  // 一様で、この刻みに反応が進むので頁に広げる(刻みの中だけ。T-0102)
 
 // ブロックの種類
 FX_CONST uint32_t MR_BLOCK_UNUSED = 0;
@@ -72,7 +78,11 @@ FX_CONST uint32_t MR_COUNTER_SCHEDULED = 15;       // 活性で刻んだ世界�
 FX_CONST uint32_t MR_COUNTER_WAKE_TOO_DEEP = 16;   // 面の隣を細かい側へたどる再帰の上限で起こせなかった数(累計。T-0100)
 FX_CONST uint32_t MR_COUNTER_QUIET_REQUESTS = 17;  // 静かな葉を粗くする要求を作った数(累計。T-0101)
 FX_CONST uint32_t MR_COUNTER_QUIET_DEFERRED = 18;  // 要求の一覧が一杯で次の刻みへ回した静かな葉の数(累計。T-0101)
-FX_CONST uint32_t MR_COUNTER_COUNT = 20;
+FX_CONST uint32_t MR_COUNTER_FREE_PAGES = 19;      // 世界の頁の空きのスタックの数(T-0102)
+FX_CONST uint32_t MR_COUNTER_EXPANDED = 20;        // 刻むために一様から頁に広げた数(累計。T-0102)
+FX_CONST uint32_t
+    MR_COUNTER_PAGE_SHORTAGE = 21;  // 頁が足りず、その刻みは刻まずに次へ回した一様なブロックの数(累計。T-0102)
+FX_CONST uint32_t MR_COUNTER_COUNT = 22;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -92,7 +102,9 @@ struct MrBlock {
     // --- 活性(世界の要約 HashRealLeaves には入れない)---
     uint32_t activeTick;  // 最後に活性で刻んだ刻みの印(MrActivityMark。T-0100)
     uint32_t busyTick;  // 最後に変わった刻みの印(MR_BUSY_POKED = 木の変更でつつかれ、まだ刻みの印にしていない。T-0101)
-    uint32_t padding;
+
+    // --- セル(T-0102)---
+    uint32_t page;  // セルの頁(MR_NO_PAGE = 一様、MR_PAGE_WANTED = 一様で頁に広げる途中)
 };
 
 // セルの端数(2^-64 単位。物質 ID の昇順、0 は持たない)。エネルギーの端数は符号なし(値 = 整数部 + 端数 · 2^-64、整数部は切り捨て)
@@ -159,19 +171,25 @@ FX_FN MrBlock MrMakeUnusedBlock() {
 
     block.activeTick = 0;
     block.busyTick = 0;
-    block.padding = 0;
+    block.page = MR_NO_PAGE;
 
     return block;
 }
 
-// 世界の写しの見出し(セルは呼ぶ側が写す。T-0096)
-FX_FN MrBlock MrMakeMirrorBlock(int32_t level, int64_t originX, int64_t originY, int64_t originZ) {
+// 観察の枠の頁(いつも頁を持つ。頁の番号は固定。T-0102)
+FX_FN uint32_t MrObserverPage(uint32_t slot, uint32_t worldBlocks) {
+    return slot - worldBlocks;
+}
+
+// 世界の写しの見出し(セルは呼ぶ側が写す。T-0096)。page は MrObserverPage
+FX_FN MrBlock MrMakeMirrorBlock(int32_t level, int64_t originX, int64_t originY, int64_t originZ, uint32_t page) {
     MrBlock block = MrMakeUnusedBlock();
     block.originX = originX;
     block.originY = originY;
     block.originZ = originZ;
     block.level = level;
     block.kind = MR_BLOCK_MIRROR;
+    block.page = page;
 
     return block;
 }
@@ -574,6 +592,55 @@ FX_FN bool MrIsSteppedCell(MrBlock block, uint32_t index) {
         return true;
 
     return block.children[MrOctantOfCell(index)] == MR_NO_BLOCK;
+}
+
+// --- 一様なブロック(T-0102)----------------------------------------------------------------------
+
+// 2 つのセルがビット単位で同じか(padding は見ない)
+FX_FN bool MrSameCell(RxCell a, RxCell b) {
+    bool same = a.energy == b.energy && a.speciesCount == b.speciesCount;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        same = same && a.species[i] == b.species[i] && a.amounts[i] == b.amounts[i];
+
+    return same;
+}
+
+FX_FN bool MrIsUniform(MrBlock block) {
+    return block.page >= MR_PAGE_WANTED;
+}
+
+// 本物の子に覆われたセルか(覆われたセルは空)
+FX_FN bool MrIsCoveredCell(MrBlock block, uint32_t index) {
+    return block.kind == MR_BLOCK_REAL && block.children[MrOctantOfCell(index)] != MR_NO_BLOCK;
+}
+
+// 一様なブロックのセル index(覆われていれば空、でなければ値 value)。頁に広げる時もこれで埋める
+FX_FN RxCell MrUniformCell(MrBlock block, RxCell value, uint32_t index) {
+    if (MrIsCoveredCell(block, index))
+        return RxMakeEmptyCell(0);
+
+    return value;
+}
+
+// 刻むセルが 1 つでもあるか(MrIsSteppedCell を八分の一ごとに)
+FX_FN bool MrHasSteppedCell(MrBlock block) {
+    bool any = false;
+    for (uint32_t octant = 0; octant < 8; ++octant)
+        any = any ||
+              MrIsSteppedCell(block, MrCellIndex((octant & 1u) * MR_OCTANT_EDGE, ((octant >> 1) & 1u) * MR_OCTANT_EDGE,
+                                                 ((octant >> 2) & 1u) * MR_OCTANT_EDGE));
+
+    return any;
+}
+
+// 一様なブロック(値 value)を刻むと反応が進むか。進まなければ D-424 によりどのセルも変わらない。
+// 「進める規則があるか」(RxCellStep::possible)は乱数によらない(reaction.hlsli の RxDesiredExtent)ので、値 1 つで決まる
+template <typename Table>
+FX_FN bool MrUniformWouldChange(Table table, RxCell value, uint64_t worldSeed, uint64_t tick, MrBlock block) {
+    if (!MrHasSteppedCell(block))
+        return false;
+
+    return MrStepCellDetailed(table, value, worldSeed, tick, block, 0).possible != 0;
 }
 
 MR_NAMESPACE_END

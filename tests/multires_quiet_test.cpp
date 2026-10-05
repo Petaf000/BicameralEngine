@@ -70,9 +70,12 @@ namespace {
     void MarkChanged(const MultiresNest& before, const MultiresNest& after, uint64_t tick,
                      std::vector<uint64_t>& lastChanged) {
         for (uint32_t slot = 0; slot < after.capacity.worldBlocks; ++slot) {
-            const auto first = static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS);
-            const bool cellsChanged = std::memcmp(&before.cells[first], &after.cells[first],
-                                                  sizeof(RxCell) * MR_BLOCK_CELLS) != 0;
+            bool cellsChanged = false;  // 論理のセル(一様か頁かによらない。T-0102)
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                cellsChanged = cellsChanged ||
+                               !MrSameCell(LoadNestCell(before, slot, index), LoadNestCell(after, slot, index));
+            }
+
             if (cellsChanged || !SameStructure(before.blocks[slot], after.blocks[slot]))
                 lastChanged[slot] = tick;
         }

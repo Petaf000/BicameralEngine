@@ -38,6 +38,10 @@ add_executable(multires_quiet_test multires_quiet_test.cpp)  # 静かなブロ�
 target_link_libraries(multires_quiet_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_quiet COMMAND multires_quiet_test)
 
+add_executable(multires_uniform_test multires_uniform_test.cpp)  # 一様なブロック(T-0102)
+target_link_libraries(multires_uniform_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_uniform COMMAND multires_uniform_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)
@@ -95,6 +99,7 @@ bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --qu
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute)
+set_tests_properties(gpu_multires PROPERTIES TIMEOUT 600)  # debug の GPU-based validation で約 270 s(T-0102 で頁を配る段が増えた)
 # WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
 bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
 
@@ -107,6 +112,11 @@ bicameral_add_gpu_test(gpu_multires_quiet_test)  # 静かなブロックを粗�
 target_link_libraries(gpu_multires_quiet_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_quiet gpu_multires_quiet_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_multires_quiet_warp gpu_multires_quiet_test warp --warp --queue compute)
+
+bicameral_add_gpu_test(gpu_multires_uniform_test)  # 一様なブロックの GPU と CPU のビット一致(T-0102)
+target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_multires_uniform gpu_multires_uniform_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_multires_uniform_warp gpu_multires_uniform_test warp --warp --queue compute)
 
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)

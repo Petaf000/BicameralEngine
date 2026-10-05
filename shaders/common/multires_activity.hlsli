@@ -166,11 +166,7 @@ FX_FN bool MrIsQuietLeaf(MrBlock block, uint32_t mark) {
 
 // 刻んでセルが変わったか(全部の欄をビットで比べる。並びの余りは比べない)
 FX_FN bool MrCellChanged(RxCell before, RxCell after) {
-    bool changed = before.energy != after.energy || before.speciesCount != after.speciesCount;
-    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
-        changed = changed || before.species[i] != after.species[i] || before.amounts[i] != after.amounts[i];
-
-    return changed;
+    return !MrSameCell(before, after);
 }
 
 // 枠 slot を粗くする要求を作るか。静かな葉で、同じ親の八分の一の番号が小さい兄弟に静かな葉が無い

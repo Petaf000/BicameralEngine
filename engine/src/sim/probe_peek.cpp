@@ -201,7 +201,7 @@ namespace bicameral::sim {
             words[header + 3] = static_cast<uint32_t>(static_cast<int32_t>(block.originZ));
 
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const RxCell& cell = m_nest.cells[(size_t{slot} * MR_BLOCK_CELLS) + index];
+                const RxCell cell = LoadNestCell(m_nest, slot, index);
                 const uint32_t base = PROBE_PEEK_HEADER_WORDS +
                                       (((level * PROBE_PEEK_BLOCK_CELLS) + index) * PROBE_EXTRACTION_CELL_WORDS);
                 words[base] = ProbeMakeCache(table, cell).temperature;

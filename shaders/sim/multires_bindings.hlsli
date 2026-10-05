@@ -8,9 +8,9 @@
 #include "common/multires_activity.hlsli"
 
 // --- 結び付け ---
-// u0 ブロックの見出し [枠] / u1 セル [枠 × 512] / u2 端数 [端数の枠 × 512] / u3 数える欄(MR_COUNTER_*)/
+// u0 ブロックの見出し [枠] / u1 セル [一様の値 × 枠][頁 × 512](T-0102)/ u2 端数 [端数の枠 × 512] / u3 数える欄(MR_COUNTER_*)/
 // u4・u5 外のバッファ(覗き窓が使う。shaders/sim/multires_peek.hlsl で宣言する。T-0096)/
-// u6 世界の枠の空きのスタック / u7 端数の枠の空きのスタック / u8 世界の帳簿 / u9 索引 / u10 要求 / u11 要求の途中の値 /
+// u6 [世界の枠の空きのスタック][世界の頁の空きのスタック] / u7 端数の枠の空きのスタック / u8 世界の帳簿 / u9 索引 / u10 要求 / u11 要求の途中の値 /
 // u12 取り合いの印 [世界の枠] / u13 Work Graph の GPU の入力(MR_GRAPH_INPUT_*。T-0018)/
 // u14 書き足す活性の一覧(MR_ACTIVITY_*。要求の処理の間はこの刻みの種、刻む間は次の刻みの種。T-0100)/ t0〜t3 反応の表(物質・規則・索引・速度)
 globallycoherent RWStructuredBuffer<MrBlock> g_blocks : register(u0);
@@ -70,6 +70,11 @@ static const uint32_t MR_GRAPH_INPUT_COARSEN_RECORDS = MR_GRAPH_INPUT_REFINE_REC
                                                            (MR_MAX_REQUESTS + 1);  // uint32 × (MR_MAX_REQUESTS + 1)
 static const uint32_t MR_GRAPH_INPUT_BYTES = MR_GRAPH_INPUT_COARSEN_RECORDS + 4 * (MR_MAX_REQUESTS + 1);
 
+// 頁に広げて刻むブロックの一覧(T-0102。TreeExpand が数とレコードを書き、入口の番号と番地は CPU が写しの時に書く)。
+// レコードは uint32 × (世界の枠 + 1)、レコード 0 は空(MR_NO_BLOCK)
+static const uint32_t MR_GRAPH_INPUT_EXPAND_HEADER = (MR_GRAPH_INPUT_BYTES + 15) & ~15u;  // バイト
+static const uint32_t MR_GRAPH_INPUT_EXPAND_RECORDS = MR_GRAPH_INPUT_EXPAND_HEADER + 32;  // バイト
+
 // 細かくするノードの入力(手で決めた影の鎖と、要求の鎖の両方)
 struct MrRefineRecord {
     uint32_t request;  // 要求の番号(MR_NO_BLOCK なら手で決めた影の鎖。枠は childSlot から順)
@@ -102,8 +107,31 @@ GpuReactionTable MakeTable() {
     return table;
 }
 
-uint32_t CellAddress(uint32_t slot, uint32_t index) {
-    return slot * MR_BLOCK_CELLS + index;
+// --- セル(T-0102。u1 = [一様の値 × 枠][頁 × 512])---
+
+uint32_t PageCellAddress(uint32_t page, uint32_t index) {
+    return g_blockCount + page * MR_BLOCK_CELLS + index;
+}
+
+// 枠 slot(見出し block)のセル index。一様なら値か、覆われていれば空(multires_nest.cpp の LoadNestCell)
+RxCell LoadBlockCell(MrBlock block, uint32_t slot, uint32_t index) {
+    if (MrIsUniform(block))
+        return MrUniformCell(block, g_cells[slot], index);
+
+    return g_cells[PageCellAddress(block.page, index)];
+}
+
+RxCell LoadCell(uint32_t slot, uint32_t index) {
+    return LoadBlockCell(g_blocks[slot], slot, index);
+}
+
+// 世界の頁の空きのスタック(u6 の世界の枠の空きのスタックの後ろ)
+uint32_t FreePageAddress(uint32_t position) {
+    return g_worldBlocks + position;
+}
+
+uint32_t FractionAddress(uint32_t fractionSlot, uint32_t index) {
+    return fractionSlot * MR_BLOCK_CELLS + index;
 }
 
 // 端数(枠が無ければ空)
@@ -111,7 +139,7 @@ MrFraction LoadFraction(uint32_t fractionSlot, uint32_t index) {
     if (fractionSlot == MR_NO_FRACTION)
         return MrMakeEmptyFraction();
 
-    return g_fractions[CellAddress(fractionSlot, index)];
+    return g_fractions[FractionAddress(fractionSlot, index)];
 }
 
 // --- 索引(multires_tree.cpp の IndexInsert・IndexRemove・LookupBlock と同じ探査)---
@@ -171,6 +199,10 @@ uint32_t PoppedBlock(MrRequestState state, uint32_t i) {
     return g_freeBlocks[state.blockBase - 1 - i];
 }
 
+uint32_t PoppedPage(MrRequestState state, uint32_t i) {
+    return g_freeBlocks[FreePageAddress(state.pageBase - 1 - i)];
+}
+
 uint32_t PoppedFraction(MrRequestState state, uint32_t i) {
     if (i >= state.fractionNeed)
         return MR_NO_FRACTION;
@@ -188,6 +220,16 @@ void AddToLedger(int32_t level, uint32_t column, uint32_t lostBits) {
     }
 
     InterlockedAdd(g_ledger[address], (uint64_t)lostBits);
+}
+
+// --- 頁に広げて刻むブロックの一覧(T-0102)---
+
+uint32_t ExpandRecordCount() {
+    return g_graphInput.Load(MR_GRAPH_INPUT_EXPAND_HEADER + 4);
+}
+
+uint32_t ExpandRecord(uint32_t record) {
+    return g_graphInput.Load(MR_GRAPH_INPUT_EXPAND_RECORDS + 4 * record);
 }
 
 // --- 活性(T-0100)---

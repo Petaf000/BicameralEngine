@@ -16,6 +16,8 @@ namespace bicameral::sim {
 
         using nest_detail::CellAt;
         using nest_detail::FractionAt;
+        using nest_detail::PageCellAt;
+        using nest_detail::UniformAt;
 
         // --- 1 段ぶんの操作 ---
 
@@ -29,18 +31,20 @@ namespace bicameral::sim {
             const MrBlock parent = nest.blocks[parentSlot];
             const uint32_t octant = MrOctantOfPoint(parent, point.x, point.y, point.z, point.level);
 
-            // --- セル: 子は親と同じ数(影は端数を持たず、親を覆わない)---
+            // --- セル: 子は親と同じ数(影は端数を持たず、親を覆わない。影はいつも頁を持つ)---
+            const uint32_t page = MrObserverPage(childSlot, nest.capacity.worldBlocks);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                CellAt(nest, childSlot, index) = CellAt(nest, parentSlot, MrParentCellOfChild(octant, index));
+                PageCellAt(nest, page, index) = LoadNestCell(nest, parentSlot, MrParentCellOfChild(octant, index));
 
-            nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_SHADOW, MR_NO_FRACTION);
+            nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_SHADOW, MR_NO_FRACTION,
+                                                      page);
         }
 
         void PullBackLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
             const MrBlock shadow = nest.blocks[shadowSlot];
             FX_ASSERT(shadow.kind == MR_BLOCK_SHADOW);
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
-                const RxCell& parentCell = CellAt(nest, shadow.parent, MrOctantCell(shadow.parentOctant, local));
+                const RxCell parentCell = LoadNestCell(nest, shadow.parent, MrOctantCell(shadow.parentOctant, local));
                 MrShadowFamily family{};
                 for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
                     family.cells[j] = CellAt(nest, shadowSlot, MrChildCell(local, j));
@@ -181,17 +185,73 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // 刻むセルを 1 刻み(頁を持つブロック)
+        void StepPagedBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot, uint64_t worldSeed,
+                            uint64_t tick) {
+            const MrBlock& block = nest.blocks[slot];
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (!MrIsSteppedCell(block, index))
+                    continue;
+
+                RxCell& cell = CellAt(nest, slot, index);
+                cell = MrStepCell(view, cell, worldSeed, tick, block, index);
+            }
+        }
+
     }  // namespace
+
+    namespace nest_detail {
+
+        std::vector<uint32_t> ExpandWantedPages(MultiresNest& nest) {
+            std::vector<uint32_t> expanded;
+            for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+                MrBlock& block = nest.blocks[slot];
+                if (block.page != MR_PAGE_WANTED)
+                    continue;
+
+                // --- 頁が足りなければ、この刻みは刻まずに種に残す ---
+                if (nest.counters[MR_COUNTER_FREE_PAGES] == 0) {
+                    block.page = MR_NO_PAGE;
+                    nest.counters[MR_COUNTER_PAGE_SHORTAGE] += 1;
+                    nest.seeds[slot] = 1;
+                    continue;
+                }
+
+                block.page = PopPage(nest);
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                    PageCellAt(nest, block.page, index) = MrUniformCell(block, UniformAt(nest, slot), index);
+
+                nest.counters[MR_COUNTER_EXPANDED] += 1;
+                expanded.push_back(slot);
+            }
+
+            return expanded;
+        }
+
+    }  // namespace nest_detail
+
+    RxCell LoadNestCell(const MultiresNest& nest, uint32_t slot, uint32_t index) {
+        const MrBlock& block = nest.blocks[slot];
+        if (MrIsUniform(block))
+            return MrUniformCell(block, UniformAt(nest, slot), index);
+
+        return nest.cells[nest.blocks.size() + (size_t{block.page} * MR_BLOCK_CELLS) + index];
+    }
+
+    uint32_t UsedWorldPages(const MultiresNest& nest) {
+        return nest.capacity.pages - nest.counters[MR_COUNTER_FREE_PAGES];
+    }
 
     MultiresNest MakeMultiresNest(const MultiresCapacity& capacity) {
         FX_ASSERT(capacity.indexEntries == 0 || (capacity.indexEntries & (capacity.indexEntries - 1)) == 0);
         FX_ASSERT(capacity.ledgerColumns >= 1);
         const size_t blockCount = size_t{capacity.worldBlocks} + capacity.observerBlocks;
+        const size_t pageCount = size_t{capacity.observerBlocks} + capacity.pages;
 
         MultiresNest nest;
         nest.capacity = capacity;
         nest.blocks.assign(blockCount, MrMakeUnusedBlock());
-        nest.cells.assign(blockCount * MR_BLOCK_CELLS, RxMakeEmptyCell(0));
+        nest.cells.assign(blockCount + (pageCount * MR_BLOCK_CELLS), RxMakeEmptyCell(0));
         nest.fractions.assign(size_t{capacity.fractions} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
         nest.ledger.assign(size_t{MR_LEDGER_LEVELS} * capacity.ledgerColumns, 0);
         nest.index.assign(capacity.indexEntries, MR_INDEX_EMPTY);
@@ -200,10 +260,13 @@ namespace bicameral::sim {
         nest.claims.assign(capacity.worldBlocks, MR_NO_CLAIM);
         nest.seeds.assign(capacity.worldBlocks, 0);
 
-        // --- 空きのスタック: 上(最後)から 0, 1, 2… と取れるように積む ---
-        nest.freeBlocks.resize(capacity.worldBlocks);
+        // --- 空きのスタック: 上(最後)から 0, 1, 2… と取れるように積む。世界の頁は観察の枠の頁の後ろの番号 ---
+        nest.freeBlocks.resize(size_t{capacity.worldBlocks} + capacity.pages);
         for (uint32_t i = 0; i < capacity.worldBlocks; ++i)
             nest.freeBlocks[i] = capacity.worldBlocks - 1 - i;
+
+        for (uint32_t i = 0; i < capacity.pages; ++i)
+            nest_detail::FreePageAt(nest, i) = capacity.observerBlocks + capacity.pages - 1 - i;
 
         nest.freeFractions.resize(capacity.fractions);
         for (uint32_t i = 0; i < capacity.fractions; ++i)
@@ -211,6 +274,7 @@ namespace bicameral::sim {
 
         nest.counters[MR_COUNTER_FREE_BLOCKS] = capacity.worldBlocks;
         nest.counters[MR_COUNTER_FREE_FRACTIONS] = capacity.fractions;
+        nest.counters[MR_COUNTER_FREE_PAGES] = capacity.pages;
 
         return nest;
     }
@@ -219,8 +283,10 @@ namespace bicameral::sim {
                           int64_t originZ, std::span<const RxCell> cells) {
         FX_ASSERT(cells.size() == MR_BLOCK_CELLS);
         FX_ASSERT(IsObserverSlot(nest, slot));
-        nest.blocks[slot] = MrMakeMirrorBlock(level, originX, originY, originZ);
-        std::ranges::copy(cells, nest.cells.begin() + static_cast<ptrdiff_t>(size_t{slot} * MR_BLOCK_CELLS));
+        const uint32_t page = MrObserverPage(slot, nest.capacity.worldBlocks);
+        nest.blocks[slot] = MrMakeMirrorBlock(level, originX, originY, originZ, page);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            PageCellAt(nest, page, index) = cells[index];
     }
 
     void RefineShadowChain(MultiresNest& nest, uint32_t parentSlot, uint32_t firstChildSlot, uint32_t levelCount,
@@ -242,15 +308,19 @@ namespace bicameral::sim {
     void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick) {
         const ReactionTableView view = table.View();
         for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
-            const MrBlock& block = nest.blocks[slot];
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrIsSteppedCell(block, index))
-                    continue;
-
-                RxCell& cell = CellAt(nest, slot, index);
-                cell = MrStepCell(view, cell, worldSeed, tick, block, index);
+            MrBlock& block = nest.blocks[slot];
+            if (!MrIsUniform(block)) {
+                StepPagedBlock(nest, view, slot, worldSeed, tick);
+                continue;
             }
+
+            // --- 一様: 反応が進む時だけ、後で頁に広げて刻む(T-0102)---
+            if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
+                block.page = MR_PAGE_WANTED;
         }
+
+        for (const uint32_t slot : nest_detail::ExpandWantedPages(nest))
+            StepPagedBlock(nest, view, slot, worldSeed, tick);
     }
 
     void PullBackShadowChain(MultiresNest& nest, const BakedReactionTable& table, uint32_t firstShadowSlot,
@@ -272,7 +342,7 @@ namespace bicameral::sim {
                 if (!MrIsSteppedCell(block, index))
                     continue;
 
-                hash = FxHashCombine(hash, HashReactionCell(CellAt(nest, slot, index)));
+                hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
                 hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
             }
         }
@@ -286,6 +356,7 @@ namespace bicameral::sim {
             hash = FxHashCombine(hash, HashBlock(block));
             hash = FxHashCombine(hash, block.activeTick);
             hash = FxHashCombine(hash, block.busyTick);
+            hash = FxHashCombine(hash, block.page);
         }
 
         for (const RxCell& cell : nest.cells)
@@ -325,7 +396,7 @@ namespace bicameral::sim {
                     continue;
 
                 const MrFraction fraction = FractionAt(nest, block.fraction, index);
-                AddCellTotals(totals, table, CellAt(nest, slot, index), fraction, shiftBits);
+                AddCellTotals(totals, table, LoadNestCell(nest, slot, index), fraction, shiftBits);
             }
         }
 

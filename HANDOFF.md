@@ -1,34 +1,42 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-04 / チケット: T-0101 静かなブロックを粗くする — 完了
+最終更新: 2026-10-05 / チケット: T-0102 一様なブロック — 完了
 
 ## 状態(3 行以内)
-- N(MR_QUIET_TICKS = 16)刻み変わっていない本物の葉を、GPU(TreeQuiet)と CPU(SubmitQuietCoarsenRequests)が枠の順に「粗くする要求」にする。
-- 忙しさ = 見出しの busyTick(刻んでセルが変わった・木の変更でつつかれた刻みの印)。CPU と GPU(HW・WARP)が毎刻み状態の全部と次の種まで一致・保存量一致・燃え尽きたら根まで畳まれる。
-- 次は T-0102(一様なブロック: 見出しの枠とセルの頁を別のプールに)。
+- 見出しの枠とセルの頁(512 セル)を別のプールにし、一様なブロック(覆われていないセルが同じ値・覆われたセルは空・端数なし)は頁なしで値 1 つ。
+- 根・細かくする・粗くするが一様を保ち、刻んで反応が進む時だけ枠の順に頁を配って広げる(頁が足りなければその刻みは止めて数え、種に残す)。CPU と GPU(HW・WARP)が毎刻み一致。
+- 次は T-0103(静かで一様になった頁を畳む)か T-0019(熱の伝導)。NEXT.md の先頭。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(100)。
-- multires_quiet(debug 約 60 s)・gpu_multires_quiet(debug HW 約 60 s)・gpu_multires_quiet_warp(debug 約 30 s)。全部のテストの結果は下の「全部のテスト」。
-- 計測: `job.py run -Preset release -Exe gpu_multires_quiet_test -- --queue compute`(「GPU 時間: 静かな葉を探す段」。枠 640 で 0.0056 ms)。
-- **全部のテスト(2026-10-04〜05、debug)**: 60 全部が通る。HW の gpu_probe_sim・trace・peek・fire は `--no-gbv`(GPU-based validation だけ切る。
-  GBV の計装で GPU の実行ごとに約 2 分止まっていた。2026-10-05 ユーザー決定: GBV が要る調べ物の時だけ外す)で ctest 191・149・82・30 s。
-  gpu_physics_wall は debug の CPU リファレンスが約 280 s なので TIMEOUT 600。window_replay_* は約 127 s(TIMEOUT 240)。
+- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(102)。
+- multires_uniform(debug 約 9 s)・gpu_multires_uniform(HW 約 115 s)・gpu_multires_uniform_warp(約 10 s)。**全部のテスト(2026-10-05、debug)63 全部が通る**(gpu_multires は約 260 s で TIMEOUT 600 にした。ほかの時間は前と同じ)。
+- 計測: `job.py run -Preset release -Exe gpu_multires_uniform_test -- --queue compute`(「GPU 時間: 頁を配る段」。枠 640 で 0.0060 ms。初回はドライバのキャッシュが無く 5〜10 倍に出る)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 反応の核: 進める規則がある(possible = 1)のにセルが変わらないまま種であり続けるセルがある(燃え尽きかけの木箱。BACKLOG。原因は未確認)。粗くするのは「変わったか」で決めるので影響しない。
-- 観察の影の親になっている本物の葉も粗くなる(今の影の親は根か写しだけ。BACKLOG)。
+- 頁は粗くした子の頁が返るだけで、静かで一様になった頁は畳まない(T-0103)。燃え尽きた木箱の根は頁を持ったまま。
+- 頁の不足は「その刻みは刻まない」だけ(世界の時間を遅らせる本来の扱いは 05 §8 のメモリの管理で)。
+- 反応の核: 進める規則があるのにセルが変わらないまま種であり続けるセル(BACKLOG。前から)。観察の影の親の本物の葉も粗くなる(BACKLOG。前から)。
 - (前から)活性の固定費 約 0.1 ms・全部活性だと Compute より遅い・粗くするのは 1 刻み 1 段・段をまたぐ輸送なし(T-0019)・窓は木ではない・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- N は定数 16(ユーザー決定は「定数で後から測って調整」。値は Claude が決めた)。
-- 細部(Claude が決めた。17 §5「静かなブロックを粗くする」): 忙しさは「セルが変わった・つつかれた」(種とは分ける)・静かな兄弟は八分の一の番号の小さい 1 つだけ要求・
-  要求の順は外からの要求の後ろに世界の枠の順・一杯なら数えて次の刻みへ。
+- (ユーザー決定)T-0102 を 2 つに分けた(畳むは T-0103)。一様 = 覆われていないセルが同じ・覆われたセルは空・端数なし。頁が足りなければその刻みは止めて数える。
+- (Claude が決めた。17 §5「一様なブロック」)セルのバッファは [一様の値 × 枠][頁 × 512]・頁の空きのスタックは世界の枠のスタックの後ろ(ルート署名 63 / 64 語のまま)・
+  観察の枠の頁は固定(枠 − 世界の枠の数)・一様な親の本物の子は一様(鎖は全部一様か全部頁)・粗くして同じ値に戻らなければ親を頁に広げる・
+  刻む段は印 MR_PAGE_WANTED だけ付け、刻んだ後に TreeExpand が枠の順に配る(頁の番号を決定的にするため)。gpu_multires の TIMEOUT を 600 に。
 
 ## 次にやること
-NEXT.md の先頭(M2: T-0102 一様なブロック)。
+NEXT.md の先頭(T-0103 か T-0019。ROADMAP の M2 の表の順)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **一様なブロック(T-0102)**: 規則は shaders/common/multires.hlsli の末尾(MrIsUniform・MrIsCoveredCell・MrUniformCell・MrHasSteppedCell・MrUniformWouldChange・MrSameCell)と
+  multires_tree.hlsli の MrCoarsenKeepsUniform・MrCoarsenPageNeed。**セルを読むときは論理のセル**(CPU は LoadNestCell、GPU は LoadBlockCell / LoadCell)。
+  頁のセルの番地は CPU は nest_detail::PageCellAt / CellAt(頁を持つ枠だけ)、GPU は PageCellAddress(page, index) = 枠の数 + page × 512 + index(古い CellAddress は無い)。
+  一様の値は nest.cells[枠](GPU は g_cells[枠])。頁の空きのスタックは nest.freeBlocks[世界の枠の数 + i](数は MR_COUNTER_FREE_PAGES = 19)。
+  MultiresCapacity に pages(世界の頁の数)を足した。テストの MakeMultiresCapacity は pages = 世界の枠の数(不足しない)。
+- 刻みの順(活性): 活性のグラフ(ActivityStepNode は一様なら印だけ)→ 観察の枠 → RecordExpandPages(TreeExpand → u13 の後ろの一覧 MR_GRAPH_INPUT_EXPAND_* を
+  GPU の入力に ExpandStepNode)。全部を刻む RecordStep は Main → TreeExpand → StepExpanded(世界の枠の数だけグループ)。CPU は StepActive / StepNest の後ろの ExpandWantedPages。
+  u13 の一覧の見出しの入口の番号と番地は RecordUpload が書く(MakeGraphInputImage。TreeExpand は数だけ書く)。数える欄は 22 個(19 頁の空き・20 広げた数・21 頁の不足)。
+- 累積和 InclusiveScan(multires_tree.hlsl)は 3 本(枠・端数・頁)になった。MrRequestState に pageNeed・pageBase・releasePage を足した。
 - **静かなブロックを粗くする(T-0101)**: 規則は shaders/common/multires_activity.hlsli の末尾(MR_QUIET_TICKS・MrIsQuietLeaf・MrWantsQuietCoarsen・MrCellChanged)。
   CPU は multires_activity.cpp の SubmitQuietCoarsenRequests、GPU は multires_tree.hlsl の TreeQuiet(gpu_multires.cpp の RecordQuietRequests。1 グループ 512 スレッド、InclusiveScan を使い回す)。
   1 刻みの順: 外からの要求(RecordRequests)→ RecordQuietRequests(tick)→ RecordProcessRequests → RecordStepActive(CPU は tests/multires_quiet_scene.h の BeginQuietTick)。

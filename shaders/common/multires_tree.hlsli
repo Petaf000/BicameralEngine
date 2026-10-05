@@ -55,14 +55,17 @@ struct MrRequestState {
     uint32_t claimSlot;  // 取り合いの枠(無ければ MR_NO_CLAIM)
     uint32_t levels;     // 作る段の数
 
-    // --- 割り当て(空きのスタックの上から blockBase − 1 − i 番目を i 番目に使う)---
+    // --- 割り当て(空きのスタックの上から blockBase − 1 − i 番目を i 番目に使う。頁も同じ。T-0102)---
     uint32_t blockNeed;
     uint32_t fractionNeed;
+    uint32_t pageNeed;
     uint32_t blockBase;
     uint32_t fractionBase;
+    uint32_t pageBase;
 
     // --- 返す枠 ---
     uint32_t releaseBlock;  // 返すブロックの枠(無ければ MR_NO_BLOCK)
+    uint32_t releasePage;   // 返す頁(無ければ MR_NO_PAGE)
     uint32_t releaseCount;  // 返す端数の枠の数
     uint32_t releases[MR_MAX_RELEASES];
 };
@@ -90,9 +93,12 @@ FX_FN MrRequestState MrMakeRequestState() {
     state.levels = 0;
     state.blockNeed = 0;
     state.fractionNeed = 0;
+    state.pageNeed = 0;
     state.blockBase = 0;
     state.fractionBase = 0;
+    state.pageBase = 0;
     state.releaseBlock = MR_NO_BLOCK;
+    state.releasePage = MR_NO_PAGE;
     state.releaseCount = 0;
     // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
     for (uint32_t i = 0; i < MR_MAX_RELEASES; ++i)
@@ -136,9 +142,9 @@ FX_FN uint32_t MrOctantOfPoint(MrBlock block, int64_t x, int64_t y, int64_t z, i
            (MrOctantBitOfPoint(block.originZ, block.level, z, pointLevel) << 2);
 }
 
-// 細かくした子の見出し(点を含む八分の一)
+// 細かくした子の見出し(点を含む八分の一)。page は子の頁(一様な親の本物の子は MR_NO_PAGE。T-0102)
 FX_FN MrBlock MrMakeChildBlock(MrBlock parent, uint32_t parentSlot, uint32_t octant, uint32_t kind,
-                               uint32_t fractionSlot) {
+                               uint32_t fractionSlot, uint32_t page) {
     MrBlock child = MrMakeUnusedBlock();
     child.originX = MrChildOrigin(parent.originX, octant & 1u);
     child.originY = MrChildOrigin(parent.originY, (octant >> 1) & 1u);
@@ -148,8 +154,37 @@ FX_FN MrBlock MrMakeChildBlock(MrBlock parent, uint32_t parentSlot, uint32_t oct
     child.parent = parentSlot;
     child.parentOctant = octant;
     child.fraction = fractionSlot;
+    child.page = page;
 
     return child;
+}
+
+// --- 一様なブロックと要求(T-0102)---
+
+// 一様な子(値 childValue、端数なし)を一様な親(値 parentValue)へ粗くしても、親が一様のままか。
+// 子 2³ が同じ値なら粗くした値は同じ値に戻るはずだが、表現(成分の並び)まで同じことを確かめる(違えば親を頁に広げる)
+FX_FN bool MrCoarsenKeepsUniform(RxCell childValue, RxCell parentValue) {
+    MrChildren children;
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        children.cells[j] = childValue;
+        children.fractions[j] = MrMakeEmptyFraction();
+    }
+
+    const MrCoarsened result = MrCoarsenCell(children);
+
+    return result.lostCount == 0 && result.overflowCount == 0 && MrFractionIsZero(result.fraction) &&
+           MrSameCell(result.cell, parentValue);
+}
+
+// 粗くする要求で親に要る頁の数(親が一様で、子が一様で同じ値に戻る時だけ 0)
+FX_FN uint32_t MrCoarsenPageNeed(MrBlock child, RxCell childValue, MrBlock parent, RxCell parentValue) {
+    if (!MrIsUniform(parent))
+        return 0;
+
+    if (MrIsUniform(child) && child.fraction == MR_NO_FRACTION && MrCoarsenKeepsUniform(childValue, parentValue))
+        return 0;
+
+    return 1;
 }
 
 FX_FN bool MrHasRealChild(MrBlock block) {

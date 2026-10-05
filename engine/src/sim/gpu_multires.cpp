@@ -1,6 +1,7 @@
 // gpu_multires.cpp — 多重解像度の木の GPU 版(gpu_multires.h)。
 // 要求の処理は Compute の段(multires_tree.hlsl)と Work Graph(細かくする鎖の再帰・粗くする要求)、影を作る・引き戻すは Work Graph の再帰
 // (1 レベル = 1 グループ)、刻むのは Compute(1 スレッド = 1 セル)か、活性だけなら Work Graph(1 ブロック = 1 グループ。T-0100)。
+// 一様なブロック(T-0102)は刻む段が頁に広げる印を付け、TreeExpand が枠の順に頁を配り、StepExpanded / ExpandStepNode が埋めて刻む。
 // 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ・
 // u6〜u13 木の管理・u14 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
 #include "sim/gpu_multires.h"
@@ -34,7 +35,7 @@ namespace bicameral::sim {
         };
 
         // multires_activity_graph.hlsl の入口
-        enum ActivityEntry : uint8_t { ActivityEntrySeed, ActivityEntryObserver };
+        enum ActivityEntry : uint8_t { ActivityEntrySeed, ActivityEntryObserver, ActivityEntryExpand };
 
         // multires_tree.hlsl の段(呼ぶ順)
         enum TreePass : uint8_t {
@@ -44,18 +45,21 @@ namespace bicameral::sim {
             PassRelease,
             PassClearIndex,
             PassFillIndex,
-            PassQuiet,  // 静かな葉を粗くする要求(要求の処理の前。T-0101)
+            PassQuiet,   // 静かな葉を粗くする要求(要求の処理の前。T-0101)
+            PassExpand,  // 一様で反応が進むブロックに頁を配る(刻んだ後。T-0102)
         };
-        constexpr std::array<const char*, 7> TREE_SHADERS = {
+        constexpr std::array<const char*, 8> TREE_SHADERS = {
             "sim/multires_tree_resolve.cso", "sim/multires_tree_settle.cso",      "sim/multires_tree_allocate.cso",
             "sim/multires_tree_release.cso", "sim/multires_tree_clear_index.cso", "sim/multires_tree_fill_index.cso",
-            "sim/multires_tree_quiet.cso"};
+            "sim/multires_tree_quiet.cso",   "sim/multires_tree_expand.cso"};
 
         // Work Graph の GPU の入力(multires_bindings.hlsli の MR_GRAPH_INPUT_*)。見出しは D3D12_NODE_GPU_INPUT そのもの
         constexpr uint32_t GRAPH_INPUT_REFINE_HEADER = 0;
         constexpr uint32_t GRAPH_INPUT_COARSEN_HEADER = 32;
         constexpr uint32_t REFINE_RECORD_BYTES = 24;
         constexpr uint32_t GRAPH_INPUT_BYTES = 64 + ((REFINE_RECORD_BYTES + 4) * (MR_MAX_REQUESTS + 1));
+        constexpr uint32_t GRAPH_INPUT_EXPAND_HEADER = (GRAPH_INPUT_BYTES + 15) & ~15u;  // 頁に広げて刻む一覧(T-0102)
+        constexpr uint32_t GRAPH_INPUT_EXPAND_RECORDS = GRAPH_INPUT_EXPAND_HEADER + 32;
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, EntrypointIndex) == 0);
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, NumRecords) == 4);
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, Records) == 8);
@@ -177,6 +181,14 @@ namespace bicameral::sim {
         if (!m_stepPipeline)
             return std::unexpected("多重解像度の刻みのパイプラインを作れない");
 
+        const auto stepExpanded = gpu::LoadShader("sim/multires_step_expanded.cso");
+        if (!stepExpanded)
+            return std::unexpected(stepExpanded.error());
+
+        m_stepExpandedPipeline = gpu::CreateComputePipeline(device, m_rootSignature.Get(), *stepExpanded);
+        if (!m_stepExpandedPipeline)
+            return std::unexpected("頁に広げて刻むパイプラインを作れない");
+
         for (uint32_t pass = 0; pass < TREE_PASS_COUNT; ++pass) {
             const auto bytecode = gpu::LoadShader(TREE_SHADERS[pass]);
             if (!bytecode)
@@ -217,7 +229,8 @@ namespace bicameral::sim {
 
         m_activityGraph = std::make_unique<gpu::WorkGraph>(std::move(*activityGraph));
         m_activityEntries = {m_activityGraph->EntrypointIndex(L"ActivitySeedNode"),
-                             m_activityGraph->EntrypointIndex(L"ObserverStepNode")};
+                             m_activityGraph->EntrypointIndex(L"ObserverStepNode"),
+                             m_activityGraph->EntrypointIndex(L"ExpandStepNode")};
         if (std::ranges::contains(m_activityEntries, UINT32_MAX))
             return std::unexpected("multires_activity_graph.cso に入口のノードが足りない");
 
@@ -280,19 +293,41 @@ namespace bicameral::sim {
     std::array<uint64_t, GpuMultires::BufferCount> GpuMultires::BufferSizes() const {
         std::array<uint64_t, BufferCount> sizes{};
         sizes[BufferBlocks] = uint64_t{m_blockCapacity} * sizeof(MrBlock);
-        sizes[BufferCells] = uint64_t{m_blockCapacity} * MR_BLOCK_CELLS * sizeof(RxCell);
+        sizes[BufferCells] = (m_blockCapacity + (PageCount() * MR_BLOCK_CELLS)) * sizeof(RxCell);
         sizes[BufferFractions] = uint64_t{m_capacity.fractions} * MR_BLOCK_CELLS * sizeof(MrFraction);
         sizes[BufferCounters] = uint64_t{MR_COUNTER_COUNT} * sizeof(uint32_t);
-        sizes[BufferFreeBlocks] = uint64_t{m_capacity.worldBlocks} * sizeof(uint32_t);
+        sizes[BufferFreeBlocks] = (uint64_t{m_capacity.worldBlocks} + m_capacity.pages) * sizeof(uint32_t);
         sizes[BufferFreeFractions] = uint64_t{m_capacity.fractions} * sizeof(uint32_t);
         sizes[BufferLedger] = uint64_t{MR_LEDGER_LEVELS} * m_capacity.ledgerColumns * sizeof(uint64_t);
         sizes[BufferIndex] = uint64_t{m_capacity.indexEntries} * sizeof(uint32_t);
         sizes[BufferRequests] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequest);
         sizes[BufferStates] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequestState);
         sizes[BufferClaims] = uint64_t{m_capacity.worldBlocks} * sizeof(uint32_t);
-        sizes[BufferGraphInput] = GRAPH_INPUT_BYTES;
+        sizes[BufferGraphInput] = GRAPH_INPUT_EXPAND_RECORDS +
+                                  ((uint64_t{m_capacity.worldBlocks} + 1) * sizeof(uint32_t));
 
         return sizes;
+    }
+
+    uint64_t GpuMultires::PageCount() const {
+        return uint64_t{m_capacity.observerBlocks} + m_capacity.pages;
+    }
+
+    // GPU の入力の最初の中身: 頁に広げて刻む一覧の見出し(入口の番号と番地は変わらない。数は TreeExpand が書く)とレコード 0 だけ。
+    // ほかは 0(要求の処理が毎回書いてから読む)
+    std::vector<std::byte> GpuMultires::MakeGraphInputImage() const {
+        std::vector<std::byte> image(BufferSizes()[BufferGraphInput]);
+        const D3D12_NODE_GPU_INPUT header{
+            .EntrypointIndex = m_activityGraph ? m_activityEntries[ActivityEntryExpand] : 0,
+            .NumRecords = 1,
+            .Records = {
+                .StartAddress = m_buffers[BufferGraphInput]->GetGPUVirtualAddress() + GRAPH_INPUT_EXPAND_RECORDS,
+                .StrideInBytes = sizeof(uint32_t)}};
+        std::memcpy(image.data() + GRAPH_INPUT_EXPAND_HEADER, &header, sizeof(header));
+        const uint32_t emptyRecord = MR_NO_BLOCK;
+        std::memcpy(image.data() + GRAPH_INPUT_EXPAND_RECORDS, &emptyRecord, sizeof(emptyRecord));
+
+        return image;
     }
 
     uint64_t GpuMultires::ActivityBytes() const {
@@ -321,19 +356,22 @@ namespace bicameral::sim {
 
     bool GpuMultires::RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest) {
         if (nest.blocks.size() != m_blockCapacity || nest.seeds.size() != m_capacity.worldBlocks ||
+            nest.cells.size() * sizeof(RxCell) != BufferSizes()[BufferCells] ||
+            nest.freeBlocks.size() * sizeof(uint32_t) != BufferSizes()[BufferFreeBlocks] ||
             nest.fractions.size() != size_t{m_capacity.fractions} * MR_BLOCK_CELLS ||
             nest.index.size() != m_capacity.indexEntries || nest.ledger.size() != BufferSizes()[BufferLedger] / 8)
             return false;
 
         // 要求の途中の値と GPU の入力は写さない(0 のまま。毎回の処理が書いてから読む)
-        const std::vector<std::byte> zeros(std::max(BufferSizes()[BufferStates], uint64_t{GRAPH_INPUT_BYTES}));
+        const std::vector<std::byte> zeros(BufferSizes()[BufferStates]);
+        const std::vector<std::byte> graphInput = MakeGraphInputImage();
         const std::array<std::span<const std::byte>, BufferCount> sources = {
             std::as_bytes(std::span(nest.blocks)),     std::as_bytes(std::span(nest.cells)),
             std::as_bytes(std::span(nest.fractions)),  std::as_bytes(std::span(nest.counters)),
             std::as_bytes(std::span(nest.freeBlocks)), std::as_bytes(std::span(nest.freeFractions)),
             std::as_bytes(std::span(nest.ledger)),     std::as_bytes(std::span(nest.index)),
             std::as_bytes(std::span(nest.requests)),   std::span(zeros).first(BufferSizes()[BufferStates]),
-            std::as_bytes(std::span(nest.claims)),     std::span(zeros).first(GRAPH_INPUT_BYTES)};
+            std::as_bytes(std::span(nest.claims)),     std::span(graphInput)};
         std::array<D3D12_RESOURCE_BARRIER, BufferCount> barriers{};
         for (uint32_t i = 0; i < BufferCount; ++i) {
             if (!WriteUpload(m_uploads[i].Get(), sources[i]))
@@ -578,6 +616,8 @@ namespace bicameral::sim {
             UavBarrier(list);
         }
 
+        RecordExpandPages(list, debugRing);  // 一様で反応が進むブロック(T-0102)
+
         const D3D12_RESOURCE_BARRIER inputToUav = gpu::Transition(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &inputToUav);
@@ -595,6 +635,32 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         list->Dispatch(m_blockCapacity * MR_BLOCK_CELLS / STEP_THREADS_PER_GROUP, 1, 1);
         UavBarrier(list);
+
+        // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる。T-0102)---
+        RecordTreePass(list, debugRing, PassExpand, 1);
+        list->SetPipelineState(m_stepExpandedPipeline.Get());
+        list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
+        UavBarrier(list);
+    }
+
+    void GpuMultires::RecordExpandPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        RecordTreePass(list, debugRing, PassExpand, 1);
+    }
+
+    void GpuMultires::RecordExpandPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        // --- 頁を配る(枠の順)→ 埋めて刻む(Work Graph の GPU の入力)---
+        RecordTreePass(list, debugRing, PassExpand, 1);
+        ID3D12Resource* graphInput = m_buffers[BufferGraphInput].Get();
+        const D3D12_RESOURCE_BARRIER toInput = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &toInput);
+        SetActivityProgram(list);
+        BindRoot(list, debugRing);
+        gpu::WorkGraph::DispatchFromGpu(list, graphInput->GetGPUVirtualAddress() + GRAPH_INPUT_EXPAND_HEADER);
+        UavBarrier(list);
+        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &toUav);
     }
 
     // --- 外のバッファとパイプライン ---

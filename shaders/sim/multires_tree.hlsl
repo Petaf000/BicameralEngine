@@ -1,6 +1,7 @@
 // multires_tree.hlsl — 多重解像度の世界の木の管理の Compute の段(17 §5「木の管理」。T-0018。ADR-0016)。
 // 1 刻みの要求の処理: (静かな葉を粗くするなら TreeQuiet。T-0101)→ TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
-// → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
+// → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。
+// 刻んだ後: TreeExpand(一様で反応が進むブロックに枠の順で頁を配る。T-0102)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
 // RecordProcessRequests。CPU リファレンスは engine/src/sim/multires_tree.cpp(同じ関数・同じ順)。
 //
 // 順番に依存しない理由: 解決と確定は要求ごとに自分の値だけを書き、取り合いは atomic の最小(小さい番号が勝つ)。
@@ -11,8 +12,10 @@ static const uint32_t TREE_THREADS = 64;
 
 groupshared uint32_t gs_blockScan[MR_MAX_REQUESTS];
 groupshared uint32_t gs_fractionScan[MR_MAX_REQUESTS];
+groupshared uint32_t gs_pageScan[MR_MAX_REQUESTS];
 groupshared uint32_t gs_grantedBlocks;
 groupshared uint32_t gs_grantedFractions;
+groupshared uint32_t gs_grantedPages;
 groupshared uint32_t gs_refineCount;
 groupshared uint32_t gs_coarsenCount;
 
@@ -20,22 +23,26 @@ uint32_t RequestCount() {
     return g_counters[MR_COUNTER_REQUESTS];
 }
 
-// 2 つの値の累積和(含む)を 1 グループで。i = スレッドの番号
-void InclusiveScan(uint32_t i, uint32_t blockValue, uint32_t fractionValue) {
+// 3 つの値(枠・端数・頁)の累積和(含む)を 1 グループで。i = スレッドの番号
+void InclusiveScan(uint32_t i, uint32_t blockValue, uint32_t fractionValue, uint32_t pageValue) {
     gs_blockScan[i] = blockValue;
     gs_fractionScan[i] = fractionValue;
+    gs_pageScan[i] = pageValue;
     GroupMemoryBarrierWithGroupSync();
     for (uint32_t offset = 1; offset < MR_MAX_REQUESTS; offset <<= 1) {
         uint32_t blocks = gs_blockScan[i];
         uint32_t fractions = gs_fractionScan[i];
+        uint32_t pages = gs_pageScan[i];
         if (i >= offset) {
             blocks += gs_blockScan[i - offset];
             fractions += gs_fractionScan[i - offset];
+            pages += gs_pageScan[i - offset];
         }
 
         GroupMemoryBarrierWithGroupSync();
         gs_blockScan[i] = blocks;
         gs_fractionScan[i] = fractions;
+        gs_pageScan[i] = pages;
         GroupMemoryBarrierWithGroupSync();
     }
 }
@@ -51,7 +58,7 @@ void InclusiveScan(uint32_t i, uint32_t blockValue, uint32_t fractionValue) {
     for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
         const uint32_t slot = first + i;
         const bool wants = slot < g_worldBlocks && MrWantsQuietCoarsen(MakeTree(), slot, mark);
-        InclusiveScan(i, wants ? 1u : 0u, 0u);
+        InclusiveScan(i, wants ? 1u : 0u, 0u, 0u);
 
         const uint32_t position = base + wanted + gs_blockScan[i] - 1;
         if (wants && position < MR_MAX_REQUESTS)
@@ -165,9 +172,13 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
     } else if (coarsen) {
         const uint32_t parent = g_blocks[state.target].parent;
         state.fractionNeed = g_blocks[parent].fraction == MR_NO_FRACTION ? 1u : 0u;
+        state.pageNeed = MrCoarsenPageNeed(g_blocks[state.target], g_cells[state.target], g_blocks[parent],
+                                           g_cells[parent]);
     } else {
+        // 一様な親の鎖は全部一様(頁なし)、頁を持つ親の鎖は全部頁を持つ(T-0102)
         state.blockNeed = state.levels;
         state.fractionNeed = g_blocks[state.target].fraction != MR_NO_FRACTION ? state.levels : 0u;
+        state.pageNeed = MrIsUniform(g_blocks[state.target]) ? 0u : state.levels;
     }
 
     g_states[i] = state;
@@ -193,6 +204,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     const uint32_t count = RequestCount();
     const uint32_t freeBlocks = g_counters[MR_COUNTER_FREE_BLOCKS];
     const uint32_t freeFractions = g_counters[MR_COUNTER_FREE_FRACTIONS];
+    const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
     MrRequestState state = MrMakeRequestState();
     state.status = MR_STATUS_INVALID;
     if (i < count)
@@ -202,22 +214,26 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     if (i == 0) {
         gs_grantedBlocks = 0;
         gs_grantedFractions = 0;
+        gs_grantedPages = 0;
         gs_refineCount = 0;
         gs_coarsenCount = 0;
     }
 
-    InclusiveScan(i, pending ? state.blockNeed : 0u, pending ? state.fractionNeed : 0u);
+    InclusiveScan(i, pending ? state.blockNeed : 0u, pending ? state.fractionNeed : 0u, pending ? state.pageNeed : 0u);
 
     // --- 許可: 累積和が空きの数以下(許可は一覧の前から続く)---
     const uint32_t blockSum = gs_blockScan[i];
     const uint32_t fractionSum = gs_fractionScan[i];
-    const bool granted = pending && blockSum <= freeBlocks && fractionSum <= freeFractions;
+    const uint32_t pageSum = gs_pageScan[i];
+    const bool granted = pending && blockSum <= freeBlocks && fractionSum <= freeFractions && pageSum <= freePages;
     if (granted) {
         state.status = MR_STATUS_GRANTED;
         state.blockBase = freeBlocks - (blockSum - state.blockNeed);
         state.fractionBase = freeFractions - (fractionSum - state.fractionNeed);
+        state.pageBase = freePages - (pageSum - state.pageNeed);
         InterlockedMax(gs_grantedBlocks, blockSum);
         InterlockedMax(gs_grantedFractions, fractionSum);
+        InterlockedMax(gs_grantedPages, pageSum);
     } else if (pending) {
         state.status = MR_STATUS_NO_SPACE;
     }
@@ -243,6 +259,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
     g_counters[MR_COUNTER_FREE_BLOCKS] = freeBlocks - gs_grantedBlocks;
     g_counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions - gs_grantedFractions;
+    g_counters[MR_COUNTER_FREE_PAGES] = freePages - gs_grantedPages;
 
     // レコードを 0 件にしない(WARP が固まる。何もしないレコードを 1 件)
     if (gs_refineCount == 0)
@@ -263,6 +280,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     const uint32_t count = RequestCount();
     const uint32_t topBlocks = g_counters[MR_COUNTER_FREE_BLOCKS];
     const uint32_t topFractions = g_counters[MR_COUNTER_FREE_FRACTIONS];
+    const uint32_t topPages = g_counters[MR_COUNTER_FREE_PAGES];
     MrRequestState state = MrMakeRequestState();
     state.status = MR_STATUS_INVALID;
     if (i < count)
@@ -271,12 +289,14 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     const bool granted = i < count && state.status == MR_STATUS_GRANTED;
     const uint32_t blockRelease = granted && state.releaseBlock != MR_NO_BLOCK ? 1u : 0u;
     const uint32_t fractionRelease = granted ? state.releaseCount : 0u;
+    const uint32_t pageRelease = granted && state.releasePage != MR_NO_PAGE ? 1u : 0u;
     if (i == 0) {
         gs_grantedBlocks = 0;
         gs_grantedFractions = 0;
+        gs_grantedPages = 0;
     }
 
-    InclusiveScan(i, blockRelease, fractionRelease);
+    InclusiveScan(i, blockRelease, fractionRelease, pageRelease);
 
     if (i < count) {
         if (state.claimSlot != MR_NO_CLAIM)
@@ -292,14 +312,19 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     if (blockRelease != 0)
         g_freeBlocks[topBlocks + gs_blockScan[i] - 1] = state.releaseBlock;
 
+    if (pageRelease != 0)
+        g_freeBlocks[FreePageAddress(topPages + gs_pageScan[i] - 1)] = state.releasePage;
+
     InterlockedMax(gs_grantedBlocks, gs_blockScan[i]);
     InterlockedMax(gs_grantedFractions, gs_fractionScan[i]);
+    InterlockedMax(gs_grantedPages, gs_pageScan[i]);
     GroupMemoryBarrierWithGroupSync();
     if (i != 0)
         return;
 
     g_counters[MR_COUNTER_FREE_BLOCKS] = topBlocks + gs_grantedBlocks;
     g_counters[MR_COUNTER_FREE_FRACTIONS] = topFractions + gs_grantedFractions;
+    g_counters[MR_COUNTER_FREE_PAGES] = topPages + gs_grantedPages;
 
     // --- 墓石が表の 1/4 を超えたら作り直す ---
     const bool rebuild = g_counters[MR_COUNTER_TOMBSTONES] * 4 > g_indexEntries;
@@ -327,4 +352,40 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
     if (g_blocks[slot].kind == MR_BLOCK_REAL)
         IndexInsert(slot);
+}
+
+// --- 7. 頁に広げる(刻んだ後。1 グループ。T-0102。multires_nest.cpp の ExpandWantedPages)---
+// 刻む段が MR_PAGE_WANTED を付けた世界のブロックに、枠の順で頁の空きのスタックの上から頁を配り、一覧(MR_GRAPH_INPUT_EXPAND_*)に書く。
+// 頁が足りなければ一様に戻して数え、活性の一覧(u14 = 次の刻みの種)に足す。埋めて刻むのは StepExpanded / ExpandStepNode
+
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeExpand(uint32_t i : SV_GroupIndex) {
+    const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
+    uint32_t wanted = 0;  // ここまでの区切りで頁に広げたいブロックの数(グループで一様)
+    for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
+        const uint32_t slot = first + i;
+        const bool wants = slot < g_worldBlocks && g_blocks[slot].page == MR_PAGE_WANTED;
+        InclusiveScan(i, wants ? 1u : 0u, 0u, 0u);
+
+        const uint32_t position = wanted + gs_blockScan[i] - 1;
+        if (wants && position < freePages) {
+            g_blocks[slot].page = g_freeBlocks[FreePageAddress(freePages - 1 - position)];
+            g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS + 4 * (position + 1), slot);
+        } else if (wants) {
+            g_blocks[slot].page = MR_NO_PAGE;
+            AppendActivity(slot);
+        }
+
+        wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
+        GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
+    }
+
+    if (i != 0)
+        return;
+
+    const uint32_t granted = min(wanted, freePages);
+    g_counters[MR_COUNTER_FREE_PAGES] = freePages - granted;
+    g_counters[MR_COUNTER_EXPANDED] += granted;
+    g_counters[MR_COUNTER_PAGE_SHORTAGE] += wanted - granted;
+    g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS, MR_NO_BLOCK);  // レコードを 0 件にしない
+    g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_HEADER + 4, granted + 1);
 }

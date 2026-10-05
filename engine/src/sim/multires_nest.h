@@ -5,6 +5,8 @@
 // 枠の範囲: 世界の枠 [0, worldBlocks) は木の管理(要求)が空きのスタックから取る。観察の枠 [worldBlocks, +observerBlocks)
 // (影・世界の写し)は呼ぶ側が直接決める(覗いても世界の枠の番号が変わらない)。
 // 世界の木を変えるのは要求だけ(SubmitRequests → ProcessRequests)。根は最初に PlaceRootBlock で置く。
+// セル(T-0102): 見出しの枠とセルの頁は別のプール。一様なブロックは頁を持たず値 1 つ(multires.hlsli の先頭)。
+// セルを読むときは LoadNestCell(一様でも頁でも同じ「論理のセル」)を使う。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #pragma once
 
@@ -30,6 +32,7 @@ namespace bicameral::sim {
         uint32_t worldBlocks = 0;     // 世界の枠の数
         uint32_t observerBlocks = 0;  // 観察の枠の数
         uint32_t fractions = 0;       // 端数の枠の数
+        uint32_t pages = 0;           // 世界の頁の数(観察の枠の頁は別に観察の枠の数だけ。T-0102)
         uint32_t indexEntries = 0;    // 索引の大きさ(2 の冪。世界の枠の 2 倍以上を勧める)
         uint32_t ledgerColumns = 1;   // 帳簿の列(1 + 物質の数)
         int32_t rootLevel = 0;        // 根のレベル
@@ -39,10 +42,11 @@ namespace bicameral::sim {
         MultiresCapacity capacity;
 
         // --- 状態(CPU と GPU で配列のまま一致する)---
-        std::vector<multires::MrBlock> blocks;        // 世界の枠 + 観察の枠
-        std::vector<reaction::RxCell> cells;          // 枠 × MR_BLOCK_CELLS
+        std::vector<multires::MrBlock> blocks;  // 世界の枠 + 観察の枠
+        std::vector<reaction::RxCell> cells;  // [一様の値 × 枠][頁 × MR_BLOCK_CELLS](頁 = 観察の枠の数 + pages。T-0102)
         std::vector<multires::MrFraction> fractions;  // 端数の枠 × MR_BLOCK_CELLS
-        std::vector<uint32_t> freeBlocks;             // 世界の枠の空きのスタック(数は counters[MR_COUNTER_FREE_BLOCKS])
+        // [世界の枠の空きのスタック(数は counters[MR_COUNTER_FREE_BLOCKS])][世界の頁の空きのスタック(MR_COUNTER_FREE_PAGES)]
+        std::vector<uint32_t> freeBlocks;
         std::vector<uint32_t> freeFractions;  // 端数の枠の空きのスタック(数は counters[MR_COUNTER_FREE_FRACTIONS])
         std::vector<uint64_t> ledger;         // 世界の帳簿 [MR_LEDGER_LEVELS × ledgerColumns]
         std::array<uint32_t, multires::MR_COUNTER_COUNT> counters{};
@@ -72,9 +76,18 @@ namespace bicameral::sim {
 
     [[nodiscard]] MultiresNest MakeMultiresNest(const MultiresCapacity& capacity);
 
+    // --- セル(T-0102)---
+
+    // 枠 slot のセル index(一様なら値か、覆われていれば空。頁なら頁のセル)
+    [[nodiscard]] reaction::RxCell LoadNestCell(const MultiresNest& nest, uint32_t slot, uint32_t index);
+
+    // 使っている世界の頁の数(観察の枠の頁は数えない)
+    [[nodiscard]] uint32_t UsedWorldPages(const MultiresNest& nest);
+
     // --- 世界の木 ---
 
-    // 根(本物、親なし。レベルは capacity.rootLevel)を空きのスタックから取った枠に置き、索引に入れる。cells は MR_BLOCK_CELLS 個。枠を返す
+    // 根(本物、親なし。レベルは capacity.rootLevel)を空きのスタックから取った枠に置き、索引に入れる。cells は MR_BLOCK_CELLS 個。
+    // 全部同じなら一様(頁なし)、でなければ頁を取る(T-0102)。枠を返す
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
                             std::span<const reaction::RxCell> cells);
 
@@ -112,7 +125,8 @@ namespace bicameral::sim {
 
     // --- 刻みと要約 ---
 
-    // 刻むセル(本物の葉と影のセル)の反応を 1 刻み(全部を刻む。活性の正しさを確かめる基準)
+    // 刻むセル(本物の葉と影のセル)の反応を 1 刻み(全部を刻む。活性の正しさを確かめる基準)。
+    // 一様なブロックは反応が進む時だけ、刻んだ後に枠の順で頁に広げて刻む(頁が足りなければ刻まずに数え、種にする。T-0102)
     void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick);
 
     // 活性のブロックだけ刻む(T-0100。multires_activity.hlsli): 種とその面の隣に印(activeTick)を付けて刻み、
