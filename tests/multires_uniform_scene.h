@@ -1,8 +1,11 @@
-// multires_uniform_scene.h — 一様なブロックのテスト(tests/multires_uniform_test.cpp・gpu_multires_uniform_test.cpp)の場面(T-0102)。
-// 場面: レベル 0 の根 2×2×2 個。枠 0・1 の根は全部が燃え始めの木箱(一様で、反応が進むので最初の刻みに頁に広がる)、
-// 残りは 300 K の空気(一様で反応しない = 頁を持たない)。刻み 0 に空気の根(枠 7)の中の 1 点を UNIFORM_CHAIN_DEPTH 段まで細かくする
-// (一様な親の子は一様なので、鎖は頁を使わない)。粗くするのは静かな葉の要求だけ(T-0101)なので、鎖は N + 1 刻みごとに 1 段ずつ畳まれる。
-// 頁を 1 つにすると、枠 1 の木箱は毎刻み頁が足りず、刻まれずに種に残る(MR_COUNTER_PAGE_SHORTAGE)。
+// multires_uniform_scene.h — 一様なブロックのテスト(tests/multires_uniform_test.cpp・gpu_multires_uniform_test.cpp)の場面(T-0102・T-0103)。
+// 場面: レベル 0 の根 2×2×2 個。枠 0・1 の根は全部が 900 K の木箱(一様で、反応が進むので最初の刻みに頁に広がる。数刻みで燃え尽きて
+// どのセルも同じ値になり、静かになった刻みに畳まれて頁を返す)、残りは 300 K の空気(一様で反応しない = 頁を持たない)。
+// 刻み 0 に空気の根(枠 7)の中の 1 点を UNIFORM_CHAIN_DEPTH 段まで細かくする(一様な親の子は一様なので、鎖は頁を使わない)。
+// 粗くするのは静かな葉の要求だけ(T-0101)なので、鎖は N + 1 刻みごとに 1 段ずつ畳まれる。
+// 頁を 1 つにすると、枠 1 の木箱は枠 0 の木箱が畳まれて頁が返るまで、毎刻み頁が足りずに刻まれず種に残る(MR_COUNTER_PAGE_SHORTAGE)。
+// (600 K の木箱〔T-0102 まで〕は、O2 が 1 単位だけ残って進まないセルとそうでないセルに分かれ、一様に戻らない。BACKLOG の「進める規則が
+// あるのにセルが変わらない」と同じ)
 #pragma once
 
 #include <cstdint>
@@ -23,12 +26,18 @@ namespace bicameral::test {
     constexpr int32_t UNIFORM_CHAIN_DEPTH = 6;
     constexpr uint64_t UNIFORM_TICKS = (UNIFORM_CHAIN_DEPTH + 1) * (multires::MR_QUIET_TICKS + 1) + 4;
 
+    // 900 K の木箱(体積の 1 割がセルロース、残りが空気。燃え尽きるとどのセルも同じ値になる)
     inline reaction::RxCell MakeCrateCell(const sim::BakedReactionTable& table) {
-        return MakeMultiresRootCells(table)[multires::MrCellIndex(3, 4, 5)];
+        const std::vector<sim::SpeciesAmount> crate = {{.species = table.SpeciesId("cellulose"), .amount = 38600000},
+                                                       {.species = table.SpeciesId("oxygen"), .amount = 983000},
+                                                       {.species = table.SpeciesId("nitrogen"), .amount = 3697000}};
+
+        return sim::MakeReactionCell(table, crate, 900000);
     }
 
-    // 根 8 個(枠 r の原点は (r % 2, r / 2 % 2, r / 4) × 8)。pages は世界の頁の数
-    inline sim::MultiresNest MakeUniformNest(const sim::BakedReactionTable& table, uint32_t pages) {
+    // 根 8 個(枠 r の原点は (r % 2, r / 2 % 2, r / 4) × 8。枠 crateRoots より前が木箱)。pages は世界の頁の数
+    inline sim::MultiresNest MakeUniformNest(const sim::BakedReactionTable& table, uint32_t pages,
+                                             uint32_t crateRoots = UNIFORM_CRATE_ROOTS) {
         sim::MultiresCapacity capacity = MakeMultiresCapacity(table, UNIFORM_WORLD_BLOCKS, 0, UNIFORM_FRACTIONS);
         capacity.pages = pages;
         sim::MultiresNest nest = sim::MakeMultiresNest(capacity);
@@ -38,7 +47,7 @@ namespace bicameral::test {
             const int64_t x = root % UNIFORM_ROOT_EDGE;
             const int64_t y = (root / UNIFORM_ROOT_EDGE) % UNIFORM_ROOT_EDGE;
             const int64_t z = root / (UNIFORM_ROOT_EDGE * UNIFORM_ROOT_EDGE);
-            sim::PlaceRootBlock(nest, x * 8, y * 8, z * 8, root < UNIFORM_CRATE_ROOTS ? crate : air);
+            sim::PlaceRootBlock(nest, x * 8, y * 8, z * 8, root < crateRoots ? crate : air);
         }
 
         return nest;
@@ -59,17 +68,19 @@ namespace bicameral::test {
         return {MakeUniformChainRequest(multires::MR_REQUEST_REFINE, UNIFORM_CHAIN_DEPTH)};
     }
 
-    // 1 刻みの前半(CPU): 外からの要求 → 静かな葉を粗くする要求 → 要求の処理。GPU も同じ順。後半は StepActive
+    // 1 刻みの前半(CPU): 外からの要求 → 静かで一様な頁を畳む(T-0103)→ 静かな葉を粗くする要求 → 要求の処理。GPU も同じ順。後半は StepActive
     inline void BeginUniformTick(sim::MultiresNest& nest, uint64_t tick) {
         sim::SubmitRequests(nest, UniformRequestsAt(tick));
+        sim::FoldQuietPages(nest, tick);
         sim::SubmitQuietCoarsenRequests(nest, tick);
         sim::ProcessRequests(nest);
     }
 
     // 粗くした時に一様な親を頁に広げる場面(1 回だけの処理): 鎖を 2 段作り、2 段目の一様の値を変えてから粗くする。
     // energyDelta = 0 なら値が同じなので親は一様のまま。CPU の前半(変える前まで)を作る
-    inline sim::MultiresNest MakeExpandParentNest(const sim::BakedReactionTable& table, int64_t energyDelta) {
-        sim::MultiresNest nest = MakeUniformNest(table, UNIFORM_WORLD_BLOCKS);
+    inline sim::MultiresNest MakeExpandParentNest(const sim::BakedReactionTable& table, int64_t energyDelta,
+                                                  uint32_t crateRoots = UNIFORM_CRATE_ROOTS) {
+        sim::MultiresNest nest = MakeUniformNest(table, UNIFORM_WORLD_BLOCKS, crateRoots);
         const multires::MrRequest refine = MakeUniformChainRequest(multires::MR_REQUEST_REFINE, 2);
         sim::SubmitRequests(nest, std::span(&refine, 1));
         sim::ProcessRequests(nest);
@@ -85,6 +96,30 @@ namespace bicameral::test {
 
     inline multires::MrRequest ExpandParentCoarsenRequest() {
         return MakeUniformChainRequest(multires::MR_REQUEST_COARSEN, 2);
+    }
+
+    // 子に覆われた頁を畳む場面(T-0103。CPU の前半。木箱なし = 根は全部空気): MakeExpandParentNest(値を変えた)の 2 段目を粗くして 1 段目を頁に広げ、
+    // もう一度 2 段目まで細かくする。1 段目は「覆われていないセル = 親の値・覆われたセル = 空」、2 段目は全部が粗くした値で、
+    // どちらも頁を持ったまま一様。つついた刻み 0 から N + 1 刻み目(FOLD_COVERED_TICKS − 1)に両方畳まれる
+    constexpr uint64_t FOLD_COVERED_TICKS = multires::MR_QUIET_TICKS + 2;
+
+    inline sim::MultiresNest MakeFoldCoveredNest(const sim::BakedReactionTable& table) {
+        sim::MultiresNest nest = MakeExpandParentNest(table, 1000, 0);
+        const multires::MrRequest coarsen = ExpandParentCoarsenRequest();
+        sim::SubmitRequests(nest, std::span(&coarsen, 1));
+        sim::ProcessRequests(nest);
+
+        const multires::MrRequest refine = MakeUniformChainRequest(multires::MR_REQUEST_REFINE, 2);
+        sim::SubmitRequests(nest, std::span(&refine, 1));
+        sim::ProcessRequests(nest);
+
+        return nest;
+    }
+
+    // 子に覆われた頁を畳む場面の 1 刻みの前半(粗くする要求は作らない。後半は StepActive)
+    inline void BeginFoldCoveredTick(sim::MultiresNest& nest, uint64_t tick) {
+        sim::FoldQuietPages(nest, tick);
+        sim::ProcessRequests(nest);
     }
 
 }  // namespace bicameral::test

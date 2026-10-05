@@ -1,6 +1,7 @@
 // multires_tree.hlsl — 多重解像度の世界の木の管理の Compute の段(17 §5「木の管理」。T-0018。ADR-0016)。
 // 1 刻みの要求の処理: (静かな葉を粗くするなら TreeQuiet。T-0101)→ TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
 // → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。
+// 要求の処理の前: TreeFoldCheck → TreeFold(静かで一様になった頁を枠の順に畳む。T-0103)。
 // 刻んだ後: TreeExpand(一様で反応が進むブロックに枠の順で頁を配る。T-0102)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
 // RecordProcessRequests。CPU リファレンスは engine/src/sim/multires_tree.cpp(同じ関数・同じ順)。
 //
@@ -388,4 +389,78 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     g_counters[MR_COUNTER_PAGE_SHORTAGE] += wanted - granted;
     g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS, MR_NO_BLOCK);  // レコードを 0 件にしない
     g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_HEADER + 4, granted + 1);
+}
+
+// --- 8. 頁を畳む(要求の処理の前。T-0103。multires_activity.cpp の FoldQuietPages)---
+// TreeFoldCheck(1 グループ = 世界の枠 1 つ、スレッド = セル): ちょうど静かになった頁のブロック(MrWantsFoldCheck)が一様なら、
+// 取り合いの印 [枠] に MR_CLAIM_FOLD を書く(取り合いの印は要求の処理の中でしか使わず、その外では全部 MR_NO_CLAIM なので借りる)。
+// TreeFold(1 グループ)が枠の順に一様の値を書き、頁を空きのスタックに積み、印を MR_NO_CLAIM に戻す(頁の番号を決定的にするため)
+
+static const uint32_t MR_CLAIM_FOLD = 0xFFFFFFFEu;
+
+groupshared uint32_t gs_foldMismatch;
+
+// 畳む時の一様の値(覆われていない最初のセル。全部覆われていれば空)
+RxCell FoldValue(MrBlock block) {
+    const uint32_t valueCell = MrFoldValueCell(block);
+    if (valueCell == MR_BLOCK_CELLS)
+        return RxMakeEmptyCell(0);
+
+    return g_cells[PageCellAddress(block.page, valueCell)];
+}
+
+[numthreads(MR_BLOCK_CELLS, 1, 1)] void TreeFoldCheck(uint32_t index : SV_GroupIndex, uint3 group : SV_GroupID) {
+    const uint32_t slot = group.x;
+    if (slot >= g_worldBlocks)
+        return;
+
+    // --- 調べる刻みか(グループで一様な分岐)---
+    const MrBlock block = g_blocks[slot];
+    if (!MrWantsFoldCheck(block, MrActivityMark(FX_U64(g_tickHigh, g_tickLow))))
+        return;
+
+    if (index == 0)
+        gs_foldMismatch = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // --- セル index が一様の値で畳んだ時と同じか ---
+    if (!MrFoldsCell(block, FoldValue(block), index, g_cells[PageCellAddress(block.page, index)]))
+        InterlockedOr(gs_foldMismatch, 1u);
+
+    GroupMemoryBarrierWithGroupSync();
+    if (index == 0 && gs_foldMismatch == 0)
+        g_claims[slot] = MR_CLAIM_FOLD;
+}
+
+// 枠 slot を畳む: 一様の値を書き、頁を空きのスタックの position に積み、印を戻す
+void FoldBlock(uint32_t slot, uint32_t position) {
+    const MrBlock block = g_blocks[slot];
+    g_cells[slot] = FoldValue(block);
+    g_freeBlocks[FreePageAddress(position)] = block.page;
+    g_blocks[slot].page = MR_NO_PAGE;
+    g_claims[slot] = MR_NO_CLAIM;
+}
+
+// 調べた頁を枠の順に畳む(1 グループ)
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeFold(uint32_t i : SV_GroupIndex) {
+    const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
+    uint32_t folded = 0;  // ここまでの区切りで畳んだ数(グループで一様)
+    for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
+        const uint32_t slot = first + i;
+        const bool folds = slot < g_worldBlocks && g_claims[slot] == MR_CLAIM_FOLD;
+        InclusiveScan(i, folds ? 1u : 0u, 0u, 0u);
+
+        if (folds)
+            FoldBlock(slot, freePages + folded + gs_blockScan[i] - 1);
+
+        folded += gs_blockScan[MR_MAX_REQUESTS - 1];
+        GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
+    }
+
+    if (i != 0)
+        return;
+
+    g_counters[MR_COUNTER_FREE_PAGES] = freePages + folded;
+    g_counters[MR_COUNTER_FOLDED] += folded;
 }

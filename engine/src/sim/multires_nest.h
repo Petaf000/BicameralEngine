@@ -133,6 +133,10 @@ namespace bicameral::sim {
     // 進める規則があったブロックを次の種にする。観察の枠は全部刻む。結果のセルは StepNest と同じになる
     void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick);
 
+    // 頁を持つ世界のブロックで、刻み tick にちょうど静かになり(multires_activity.hlsli の MrWantsFoldCheck)一様なものを、
+    // 値 1 つに戻して頁を枠の順に空きのスタックへ返す(T-0103)。SubmitQuietCoarsenRequests の前に、StepActive で刻む木に使う
+    void FoldQuietPages(MultiresNest& nest, uint64_t tick);
+
     // 静かな本物の葉(MR_QUIET_TICKS 刻みを超えて種でも進める規則もない。multires_activity.hlsli)を粗くする要求を、
     // 一覧の後ろに世界の枠の順で足す(T-0101)。一覧が一杯なら足さずに数える。ProcessRequests の前に、StepActive で刻む木に使う
     void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick);

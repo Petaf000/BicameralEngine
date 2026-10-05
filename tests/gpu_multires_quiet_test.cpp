@@ -30,6 +30,7 @@ namespace {
         if (!gpu.RecordRequests(list, test::QuietRequestsAt(tick)))
             return false;
 
+        gpu.RecordFoldPages(list, ring, tick);
         gpu.RecordQuietRequests(list, ring, tick);
         gpu.RecordProcessRequests(list, ring);
 

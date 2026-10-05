@@ -1,10 +1,14 @@
-// multires_uniform_test.cpp — 一様なブロック(見出しの枠とセルの頁を分け、一様なら値 1 つ)の CPU のテスト(T-0102)。
-// 場面は tests/multires_uniform_scene.h。確かめること:
+// multires_uniform_test.cpp — 一様なブロック(見出しの枠とセルの頁を分け、一様なら値 1 つ。T-0102)と、静かで一様になった頁を畳む(T-0103)
+// CPU のテスト。場面は tests/multires_uniform_scene.h。確かめること:
 //   - 一様な木箱の根は最初の刻みに頁に広がり、各セルを 1 つずつ刻む素直な答え(頁も木も使わない)と毎刻み論理のセルが一致する
+//     (畳んだ後も一致する = 畳んでも論理のセルは変わらない)
 //   - 一様な空気の根の中の鎖は頁を使わず(使っている頁は木箱の 2 つだけ)、静かになると畳まれて根だけに戻る
+//   - 燃え尽きた木箱の根は静かになった刻みに畳まれ、使っている頁の数が最初(0)に戻る(T-0103)
 //   - 「世界 + 帳簿」の保存量が毎刻み最初とビット一致・2 回の実行で全部が一致
-//   - 頁が 1 つなら、2 つ目の木箱は毎刻み頁が足りずに刻まれず、種に残り、値が変わらない(数える欄 MR_COUNTER_PAGE_SHORTAGE)
+//   - 頁が 1 つなら、2 つ目の木箱は 1 つ目が畳まれて頁が返るまで毎刻み頁が足りずに刻まれず、種に残る(MR_COUNTER_PAGE_SHORTAGE)。
+//     頁が返った刻みに頁に広がって燃え、やがて畳まれる
 //   - 一様な親へ値の違う一様な子を粗くすると親が頁に広がり、八分の一は粗くした値・残りは親の値になる。同じ値なら一様のまま
+//   - 子に覆われた頁(覆われていないセルが同じ・覆われたセルは空)も畳まれ、論理のセルは変わらず、頁は枠の順に積まれる(T-0103)
 #include <algorithm>
 #include <cstdint>
 #include <format>
@@ -81,6 +85,17 @@ namespace {
         return count;
     }
 
+    constexpr uint64_t NO_TICK = ~uint64_t{0};
+
+    // 刻み tick の後に、枠 slot が頁を得た刻み・畳まれた刻み(初めての時だけ)を書く
+    void NoteFold(const MultiresNest& nest, uint32_t slot, uint64_t tick, uint64_t& pageTick, uint64_t& foldTick) {
+        const bool paged = !MrIsUniform(nest.blocks[slot]);
+        if (paged && pageTick == NO_TICK)
+            pageTick = tick;
+        else if (!paged && pageTick != NO_TICK && foldTick == NO_TICK)
+            foldTick = tick;
+    }
+
     struct UniformRun {
         uint64_t digest = 0;
         uint32_t denseMismatches = 0;
@@ -92,7 +107,15 @@ namespace {
         uint32_t shortage = 0;
         bool crateChanged = false;    // 枠 0 の木箱が変わった
         bool starvedChanged = false;  // 枠 1 の木箱が変わった
-        bool starvedSeeded = true;    // 枠 1 が毎刻み種に残った
+        bool starvedSeeded = true;    // 枠 1 が頁を得るまで毎刻み種に残った
+
+        // --- 畳む(T-0103)---
+        uint32_t folded = 0;
+        uint32_t finalUsedPages = 0;
+        uint64_t cratePageTick = NO_TICK;    // 枠 0 の木箱が初めて頁を得た刻み
+        uint64_t crateFoldTick = NO_TICK;    // 枠 0 の木箱が畳まれた刻み
+        uint64_t starvedPageTick = NO_TICK;  // 枠 1 の木箱が初めて頁を得た刻み
+        uint64_t starvedFoldTick = NO_TICK;  // 枠 1 の木箱が畳まれた刻み
     };
 
     UniformRun RunUniform(const BakedReactionTable& table, uint32_t pages) {
@@ -112,8 +135,12 @@ namespace {
             run.conservationMismatches += ComputeConservedTotals(nest, table, test::UNIFORM_CHAIN_DEPTH) == initial ? 0
                                                                                                                     : 1;
             run.maxUsedPages = std::max(run.maxUsedPages, UsedWorldPages(nest));
+
             run.maxRealBlocks = std::max(run.maxRealBlocks, CountRealBlocks(nest));
-            run.starvedSeeded = run.starvedSeeded && nest.seeds[1] != 0;
+            NoteFold(nest, 0, tick, run.cratePageTick, run.crateFoldTick);
+            NoteFold(nest, 1, tick, run.starvedPageTick, run.starvedFoldTick);
+            if (run.starvedPageTick == NO_TICK)
+                run.starvedSeeded = run.starvedSeeded && nest.seeds[1] != 0;
         }
 
         run.crateChanged = !MrSameCell(LoadNestCell(nest, 0, 0), crate);
@@ -121,6 +148,8 @@ namespace {
         run.finalRealBlocks = CountRealBlocks(nest);
         run.expanded = nest.counters[MR_COUNTER_EXPANDED];
         run.shortage = nest.counters[MR_COUNTER_PAGE_SHORTAGE];
+        run.folded = nest.counters[MR_COUNTER_FOLDED];
+        run.finalUsedPages = UsedWorldPages(nest);
         run.digest = HashWholeNest(nest);
 
         return run;
@@ -138,21 +167,31 @@ namespace {
         Expect(first.maxRealBlocks == test::UNIFORM_ROOTS + test::UNIFORM_CHAIN_DEPTH, "鎖を最後の段まで作った");
         Expect(first.finalRealBlocks == test::UNIFORM_ROOTS, "静かな鎖が畳まれて根だけに戻った");
         Expect(first.crateChanged && first.starvedChanged && first.shortage == 0, "木箱が両方燃えた・頁の不足なし");
+        Expect(first.folded == test::UNIFORM_CRATE_ROOTS && first.finalUsedPages == 0 &&
+                   first.crateFoldTick != NO_TICK && first.starvedFoldTick != NO_TICK,
+               "燃え尽きた木箱の根が両方畳まれ、使っている頁の数が最初(0)に戻った");
 
         Log(Channel::Sim, Level::Info,
-            "頁が足りる: {} 刻み・広げた頁 {}・使った頁の最大 {}(本物のブロックの最大 {})・要約 {:016x}",
-            test::UNIFORM_TICKS, first.expanded, first.maxUsedPages, first.maxRealBlocks, first.digest);
+            "頁が足りる: {} 刻み・広げた頁 {}・使った頁の最大 {}(本物のブロックの最大 {})・畳んだ頁 {}(刻み {})・"
+            "終わりの頁 {}・要約 {:016x}",
+            test::UNIFORM_TICKS, first.expanded, first.maxUsedPages, first.maxRealBlocks, first.folded,
+            first.crateFoldTick, first.finalUsedPages, first.digest);
     }
 
-    // 頁が 1 つ: 2 つ目の木箱は刻まれずに種に残る
+    // 頁が 1 つ: 2 つ目の木箱は、1 つ目が畳まれて頁が返るまで刻まれずに種に残る
     void CheckShortage(const BakedReactionTable& table) {
         const UniformRun run = RunUniform(table, 1);
-        Expect(run.crateChanged, "頁が 1 つ: 1 つ目の木箱は燃えた");
-        Expect(!run.starvedChanged && run.starvedSeeded, "頁が 1 つ: 2 つ目の木箱は刻まれず、毎刻み種に残った");
-        Expect(run.shortage == test::UNIFORM_TICKS, "頁が 1 つ: 毎刻み頁の不足を数えた");
+        Expect(run.crateChanged && run.crateFoldTick != NO_TICK, "頁が 1 つ: 1 つ目の木箱は燃えて畳まれた");
+        Expect(run.starvedSeeded && run.starvedPageTick == run.crateFoldTick,
+               "頁が 1 つ: 2 つ目の木箱は頁が返るまで毎刻み種に残り、返った刻みに頁を得た");
+        Expect(run.shortage == run.crateFoldTick, "頁が 1 つ: 頁が返るまで毎刻み頁の不足を数えた");
+        Expect(run.starvedChanged && run.starvedFoldTick != NO_TICK && run.finalUsedPages == 0,
+               "頁が 1 つ: 2 つ目の木箱も燃えて畳まれ、頁が空きに戻った");
         Expect(run.conservationMismatches == 0, "頁が 1 つ: 保存量が毎刻み最初とビット一致");
 
-        Log(Channel::Sim, Level::Info, "頁が 1 つ: 頁の不足 {} 回・要約 {:016x}", run.shortage, run.digest);
+        Log(Channel::Sim, Level::Info,
+            "頁が 1 つ: 頁の不足 {} 回・1 つ目が畳まれた刻み {}・2 つ目が畳まれた刻み {}・要約 {:016x}", run.shortage,
+            run.crateFoldTick, run.starvedFoldTick, run.digest);
     }
 
     // 一様な親へ粗くする: 値が違えば親が頁に広がる
@@ -197,6 +236,56 @@ namespace {
         }
     }
 
+    // 子に覆われた頁を畳む(T-0103): 1 段目(子がある)と 2 段目(葉)が同じ刻みに畳まれ、論理のセルは変わらない
+    void CheckFoldCovered(const BakedReactionTable& table) {
+        MultiresNest nest = test::MakeFoldCoveredNest(table);
+
+        // --- 頁を持つ世界のブロック(枠の順)とその頁、全部の論理のセル ---
+        std::vector<uint32_t> pages;
+        bool hasCoveredPage = false;
+        std::vector<RxCell> before;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind == MR_BLOCK_REAL && !MrIsUniform(block)) {
+                pages.push_back(block.page);
+                hasCoveredPage = hasCoveredPage || MrHasRealChild(block);
+            }
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                before.push_back(LoadNestCell(nest, slot, index));
+        }
+
+        // --- つついた刻み 0 から N + 1 刻み目まで ---
+        const uint32_t freeBefore = nest.counters[MR_COUNTER_FREE_PAGES];
+        uint64_t foldTick = NO_TICK;
+        for (uint64_t tick = 0; tick < test::FOLD_COVERED_TICKS; ++tick) {
+            test::BeginFoldCoveredTick(nest, tick);
+            StepActive(nest, table, test::STRESS_SEED, tick);
+            if (foldTick == NO_TICK && nest.counters[MR_COUNTER_FOLDED] != 0)
+                foldTick = tick;
+        }
+
+        bool cellsSame = true;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const RxCell& expected = before[(size_t{slot} * MR_BLOCK_CELLS) + index];
+                cellsSame = cellsSame && MrSameCell(LoadNestCell(nest, slot, index), expected);
+            }
+        }
+
+        bool stackOrder = nest.counters[MR_COUNTER_FREE_PAGES] == freeBefore + pages.size();
+        for (size_t i = 0; i < pages.size() && stackOrder; ++i)
+            stackOrder = nest.freeBlocks[nest.capacity.worldBlocks + freeBefore + i] == pages[i];
+
+        Expect(pages.size() == 2 && hasCoveredPage,
+               "子に覆われた頁を畳む: 場面の確認(頁を持つブロック 2 つ、1 つは子がある)");
+        Expect(nest.counters[MR_COUNTER_FOLDED] == 2 && UsedWorldPages(nest) == 0 &&
+                   foldTick == test::FOLD_COVERED_TICKS - 1,
+               "子に覆われた頁を畳む: 2 つともちょうど静かになった刻みに畳まれた");
+        Expect(cellsSame, "子に覆われた頁を畳む: 論理のセルは変わらない");
+        Expect(stackOrder, "子に覆われた頁を畳む: 頁は枠の順に空きのスタックへ積まれた");
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -207,6 +296,7 @@ namespace {
         CheckAmple(*table);
         CheckShortage(*table);
         CheckExpandParent(*table);
+        CheckFoldCovered(*table);
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_uniform_test: FAILED ({} 件)", failureCount);

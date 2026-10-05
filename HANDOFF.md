@@ -1,33 +1,40 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-05 / チケット: T-0102 一様なブロック — 完了
+最終更新: 2026-10-05 / チケット: T-0103 静かで一様になった頁を畳む — 完了
 
 ## 状態(3 行以内)
-- 見出しの枠とセルの頁(512 セル)を別のプールにし、一様なブロック(覆われていないセルが同じ値・覆われたセルは空・端数なし)は頁なしで値 1 つ。
-- 根・細かくする・粗くするが一様を保ち、刻んで反応が進む時だけ枠の順に頁を配って広げる(頁が足りなければその刻みは止めて数え、種に残す)。CPU と GPU(HW・WARP)が毎刻み一致。
-- 次は T-0103(静かで一様になった頁を畳む)か T-0019(熱の伝導)。NEXT.md の先頭。
+- 頁を持つ世界のブロックが「ちょうど静かになった刻み」に一様なら、値 1 つに戻して頁を枠の順に返す(CPU FoldQuietPages、GPU TreeFoldCheck → TreeFold)。
+- 燃え尽きた木箱(900 K)の頁が 0 に戻る・頁が 1 つなら返った頁で 2 つ目が燃える・子に覆われた頁も畳む。CPU と GPU(HW・WARP)が毎刻み一致。
+- 次は T-0019(熱の伝導、3D・レベルをまたぐ)。NEXT.md の先頭。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(102)。
-- multires_uniform(debug 約 9 s)・gpu_multires_uniform(HW 約 115 s)・gpu_multires_uniform_warp(約 10 s)。**全部のテスト(2026-10-05、debug)63 全部が通る**(gpu_multires は約 260 s で TIMEOUT 600 にした。ほかの時間は前と同じ)。
-- 計測: `job.py run -Preset release -Exe gpu_multires_uniform_test -- --queue compute`(「GPU 時間: 頁を配る段」。枠 640 で 0.0060 ms。初回はドライバのキャッシュが無く 5〜10 倍に出る)。
+- `job.py build`(debug / release)・`job.py tidy` 警告なし・`python3 tools/archmap/archmap.py --check` OK(103)。
+- **全部のテスト 63 本が通る(2026-10-05、debug)**。gpu_multires_uniform は約 160 s(場面と計測が増えた。TIMEOUT 300)。
+  `job.py test` を全部 1 回で投げると 40 分の job の timeout を超えて途中で止まる(今回は 51 本目で切れた)。`-Filter` で 2〜3 回に分ける。
+- 計測: `job.py run -Preset release -Exe gpu_multires_uniform_test -- --queue compute`(「GPU 時間: 頁を配る段 0.0060 ms・頁を畳む 2 段 0.0131 ms」)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- 頁は粗くした子の頁が返るだけで、静かで一様になった頁は畳まない(T-0103)。燃え尽きた木箱の根は頁を持ったまま。
+- 「一様」はビット単位で同じ。600 K の木箱は O2 が 1 単位残るセルが分かれて畳まれない(BACKLOG に案 3 つ。未決定)。
 - 頁の不足は「その刻みは刻まない」だけ(世界の時間を遅らせる本来の扱いは 05 §8 のメモリの管理で)。
 - 反応の核: 進める規則があるのにセルが変わらないまま種であり続けるセル(BACKLOG。前から)。観察の影の親の本物の葉も粗くなる(BACKLOG。前から)。
 - (前から)活性の固定費 約 0.1 ms・全部活性だと Compute より遅い・粗くするのは 1 刻み 1 段・段をまたぐ輸送なし(T-0019)・窓は木ではない・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (ユーザー決定)T-0102 を 2 つに分けた(畳むは T-0103)。一様 = 覆われていないセルが同じ・覆われたセルは空・端数なし。頁が足りなければその刻みは止めて数える。
-- (Claude が決めた。17 §5「一様なブロック」)セルのバッファは [一様の値 × 枠][頁 × 512]・頁の空きのスタックは世界の枠のスタックの後ろ(ルート署名 63 / 64 語のまま)・
-  観察の枠の頁は固定(枠 − 世界の枠の数)・一様な親の本物の子は一様(鎖は全部一様か全部頁)・粗くして同じ値に戻らなければ親を頁に広げる・
-  刻む段は印 MR_PAGE_WANTED だけ付け、刻んだ後に TreeExpand が枠の順に配る(頁の番号を決定的にするため)。gpu_multires の TIMEOUT を 600 に。
+- (Claude が決めた。17 §5「頁を畳む」)調べるのはちょうど静かになった刻み(mark − busyTick = N + 1。MrWantsFoldCheck)に 1 回だけ。根・子のある親も対象・端数ありは対象外。
+  **頁に広げたのも忙しい**(広げてもセルが変わらないブロックも N 刻み後に畳めるように)。畳んでも忙しさの印は書かない。
+- (Claude が決めた)順は 外からの要求 → 畳む → 静かな葉の要求 → 要求の処理 → 刻む。GPU の調べた結果は取り合いの印 [枠] に MR_CLAIM_FOLD として借りて置く(ルート署名 63 / 64 のまま)。
+- (Claude が決めた)テストの場面の木箱を 600 K → 900 K に(600 K は一様に戻らない)。頁が 1 つの場面の期待は「1 つ目が畳まれた刻みに 2 つ目が頁を得る」に変えた。
 
 ## 次にやること
-NEXT.md の先頭(T-0103 か T-0019。ROADMAP の M2 の表の順)。
+NEXT.md の先頭(T-0019 熱の伝導。ROADMAP の M2 の表の順)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **頁を畳む(T-0103)**: 規則は multires.hlsli の末尾(MrFoldValueCell・MrFoldsCell)と multires_activity.hlsli の MrWantsFoldCheck。CPU は multires_activity.cpp の FoldQuietPages、
+  GPU は multires_tree.hlsl の TreeFoldCheck(1 グループ = 世界の枠 1 つ・512 スレッド = セル)→ TreeFold(1 グループの累積和)。gpu_multires.cpp の RecordFoldPages(tick)。
+  呼ぶ側の順は FoldQuietPages / RecordFoldPages → SubmitQuietCoarsenRequests / RecordQuietRequests → ProcessRequests(テストの BeginQuietTick・BeginUniformTick・各 GPU テストの RecordTick)。
+  数える欄は 23 個(22 MR_COUNTER_FOLDED)。木の管理の段は 10 個(TREE_PASS_COUNT。TREE_SHADERS と static_assert)。
+  **取り合いの印(g_claims / nest.claims)は要求の処理の外では全部 MR_NO_CLAIM という約束**を TreeFoldCheck が借りている。要求の処理の外で取り合いの印を使うものを足すなら、畳む段の置き場を変える。
+- HLSL の `[numthreads] void A(...) {}` の直後に `[numthreads] void B(` を置くと clang-format が B を字下げする(TreeFillIndex がそう)。間に普通の関数を置くと直る(TreeFold の前の FoldBlock)。
 - **一様なブロック(T-0102)**: 規則は shaders/common/multires.hlsli の末尾(MrIsUniform・MrIsCoveredCell・MrUniformCell・MrHasSteppedCell・MrUniformWouldChange・MrSameCell)と
   multires_tree.hlsli の MrCoarsenKeepsUniform・MrCoarsenPageNeed。**セルを読むときは論理のセル**(CPU は LoadNestCell、GPU は LoadBlockCell / LoadCell)。
   頁のセルの番地は CPU は nest_detail::PageCellAt / CellAt(頁を持つ枠だけ)、GPU は PageCellAddress(page, index) = 枠の数 + page × 512 + index(古い CellAddress は無い)。

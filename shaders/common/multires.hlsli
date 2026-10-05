@@ -81,8 +81,9 @@ FX_CONST uint32_t MR_COUNTER_QUIET_DEFERRED = 18;  // 要求の一覧が一杯�
 FX_CONST uint32_t MR_COUNTER_FREE_PAGES = 19;      // 世界の頁の空きのスタックの数(T-0102)
 FX_CONST uint32_t MR_COUNTER_EXPANDED = 20;        // 刻むために一様から頁に広げた数(累計。T-0102)
 FX_CONST uint32_t
-    MR_COUNTER_PAGE_SHORTAGE = 21;  // 頁が足りず、その刻みは刻まずに次へ回した一様なブロックの数(累計。T-0102)
-FX_CONST uint32_t MR_COUNTER_COUNT = 22;
+    MR_COUNTER_PAGE_SHORTAGE = 21;         // 頁が足りず、その刻みは刻まずに次へ回した一様なブロックの数(累計。T-0102)
+FX_CONST uint32_t MR_COUNTER_FOLDED = 22;  // 静かで一様になった頁を畳んで返した数(累計。T-0103)
+FX_CONST uint32_t MR_COUNTER_COUNT = 23;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -641,6 +642,26 @@ FX_FN bool MrUniformWouldChange(Table table, RxCell value, uint64_t worldSeed, u
         return false;
 
     return MrStepCellDetailed(table, value, worldSeed, tick, block, 0).possible != 0;
+}
+
+// --- 頁を畳む(T-0103)-----------------------------------------------------------------------------
+// 頁を持つブロックが一様(覆われていないセルが全部同じ・覆われたセルは空・端数なし)なら、値 1 つに戻して頁を返す。
+// 調べる時は multires_activity.hlsli の MrWantsFoldCheck(ちょうど静かになった刻みに 1 回)。
+
+// 畳む時の一様の値を読むセル: 覆われていない最初の八分の一の最初のセル(全部覆われていれば MR_BLOCK_CELLS = 値は空のセル)
+FX_FN uint32_t MrFoldValueCell(MrBlock block) {
+    for (uint32_t octant = 0; octant < 8; ++octant) {
+        if (block.children[octant] == MR_NO_BLOCK)
+            return MrCellIndex((octant & 1u) * MR_OCTANT_EDGE, ((octant >> 1) & 1u) * MR_OCTANT_EDGE,
+                               ((octant >> 2) & 1u) * MR_OCTANT_EDGE);
+    }
+
+    return MR_BLOCK_CELLS;
+}
+
+// 頁のセル index(中身 cell)が、一様の値 value で畳んだ時と同じか(覆われていれば空、でなければ value とビット単位で同じ)
+FX_FN bool MrFoldsCell(MrBlock block, RxCell value, uint32_t index, RxCell cell) {
+    return MrSameCell(cell, MrUniformCell(block, value, index));
 }
 
 MR_NAMESPACE_END

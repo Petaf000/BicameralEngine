@@ -62,9 +62,10 @@ namespace bicameral::test {
         return requests;
     }
 
-    // 1 刻みの前半(CPU): 外からの要求 → 静かな葉を粗くする要求 → 要求の処理。GPU も同じ順
+    // 1 刻みの前半(CPU): 外からの要求 → 静かで一様な頁を畳む → 静かな葉を粗くする要求 → 要求の処理。GPU も同じ順
     inline void BeginQuietTick(sim::MultiresNest& nest, uint64_t tick, std::span<const multires::MrRequest> requests) {
         sim::SubmitRequests(nest, requests);
+        sim::FoldQuietPages(nest, tick);
         sim::SubmitQuietCoarsenRequests(nest, tick);
         sim::ProcessRequests(nest);
     }

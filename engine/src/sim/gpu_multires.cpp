@@ -2,6 +2,7 @@
 // 要求の処理は Compute の段(multires_tree.hlsl)と Work Graph(細かくする鎖の再帰・粗くする要求)、影を作る・引き戻すは Work Graph の再帰
 // (1 レベル = 1 グループ)、刻むのは Compute(1 スレッド = 1 セル)か、活性だけなら Work Graph(1 ブロック = 1 グループ。T-0100)。
 // 一様なブロック(T-0102)は刻む段が頁に広げる印を付け、TreeExpand が枠の順に頁を配り、StepExpanded / ExpandStepNode が埋めて刻む。
+// 静かで一様になった頁は、要求の処理の前に TreeFoldCheck が調べ TreeFold が枠の順に畳む(T-0103)。
 // 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ・
 // u6〜u13 木の管理・u14 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
 #include "sim/gpu_multires.h"
@@ -45,13 +46,16 @@ namespace bicameral::sim {
             PassRelease,
             PassClearIndex,
             PassFillIndex,
-            PassQuiet,   // 静かな葉を粗くする要求(要求の処理の前。T-0101)
-            PassExpand,  // 一様で反応が進むブロックに頁を配る(刻んだ後。T-0102)
+            PassQuiet,      // 静かな葉を粗くする要求(要求の処理の前。T-0101)
+            PassExpand,     // 一様で反応が進むブロックに頁を配る(刻んだ後。T-0102)
+            PassFoldCheck,  // 静かで一様になった頁を調べる(要求の処理の前。T-0103)
+            PassFold,       // 調べた頁を枠の順に畳む(T-0103)
         };
-        constexpr std::array<const char*, 8> TREE_SHADERS = {
+        constexpr std::array<const char*, 10> TREE_SHADERS = {
             "sim/multires_tree_resolve.cso", "sim/multires_tree_settle.cso",      "sim/multires_tree_allocate.cso",
             "sim/multires_tree_release.cso", "sim/multires_tree_clear_index.cso", "sim/multires_tree_fill_index.cso",
-            "sim/multires_tree_quiet.cso",   "sim/multires_tree_expand.cso"};
+            "sim/multires_tree_quiet.cso",   "sim/multires_tree_expand.cso",      "sim/multires_tree_fold_check.cso",
+            "sim/multires_tree_fold.cso"};
 
         // Work Graph の GPU の入力(multires_bindings.hlsli の MR_GRAPH_INPUT_*)。見出しは D3D12_NODE_GPU_INPUT そのもの
         constexpr uint32_t GRAPH_INPUT_REFINE_HEADER = 0;
@@ -189,6 +193,7 @@ namespace bicameral::sim {
         if (!m_stepExpandedPipeline)
             return std::unexpected("頁に広げて刻むパイプラインを作れない");
 
+        static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT);
         for (uint32_t pass = 0; pass < TREE_PASS_COUNT; ++pass) {
             const auto bytecode = gpu::LoadShader(TREE_SHADERS[pass]);
             if (!bytecode)
@@ -504,6 +509,14 @@ namespace bicameral::sim {
         list->ResourceBarrier(static_cast<UINT>(toUav.size()), toUav.data());
 
         return true;
+    }
+
+    void GpuMultires::RecordFoldPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                      uint64_t tick) {
+        m_constants.tickLow = static_cast<uint32_t>(tick);
+        m_constants.tickHigh = static_cast<uint32_t>(tick >> 32);
+        RecordTreePass(list, debugRing, PassFoldCheck, std::max(1u, m_capacity.worldBlocks));
+        RecordTreePass(list, debugRing, PassFold, 1);
     }
 
     void GpuMultires::RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,

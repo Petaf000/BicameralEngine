@@ -164,6 +164,15 @@ FX_FN bool MrIsQuietLeaf(MrBlock block, uint32_t mark) {
            block.busyTick != MR_BUSY_POKED && mark - block.busyTick > MR_QUIET_TICKS;
 }
 
+// 頁を畳めるか調べる刻みか(T-0103。17 §5「頁を畳む」): 世界の本物のブロックで、頁を持ち・端数が無く・つつかれたままでなく、
+// 刻み mark でちょうど静かになった(N 刻みを初めて超えた。MrIsQuietLeaf と同じ N)。葉でなくても(根・子のある親も)調べる。
+// 調べるのはこの 1 回だけ: 頁のセル・子・端数を変える所(刻む・木の変更・頁に広げる)は全部忙しさの印を書くので、
+// 変わった後にはまた N 刻み後に 1 回調べる。静かなまま一様でないブロックを毎刻み調べ直さない
+FX_FN bool MrWantsFoldCheck(MrBlock block, uint32_t mark) {
+    return block.kind == MR_BLOCK_REAL && !MrIsUniform(block) && block.fraction == MR_NO_FRACTION &&
+           block.busyTick != MR_BUSY_POKED && mark - block.busyTick == MR_QUIET_TICKS + 1;
+}
+
 // 刻んでセルが変わったか(全部の欄をビットで比べる。並びの余りは比べない)
 FX_FN bool MrCellChanged(RxCell before, RxCell after) {
     return !MrSameCell(before, after);

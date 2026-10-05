@@ -211,7 +211,7 @@ void ExpandStepNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thread
     FillExpandedPage(slot, thread);
     const uint32_t result = StepBlockCells(slot, thread);
     if (thread == 0)
-        FinishBlock(slot, result);
+        FinishBlock(slot, result | STEP_CHANGED);  // 頁に広げたのも忙しい(畳めるかを N 刻み後に調べる。T-0103)
 }
 
 // 観察の枠(影)を全部刻む(1 グループ = 1 枠。活性に入れない。D-403)

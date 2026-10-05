@@ -6,6 +6,7 @@
 // 刻んでセルが変わったブロックと、木の変更でつつかれたブロックには忙しさの印(busyTick)を書き、印が古い本物の葉を
 // 粗くする要求を作る(SubmitQuietCoarsenRequests。GPU は multires_tree.hlsl の TreeQuiet。T-0101)。
 // 一様なブロック(T-0102)は値 1 つで反応が進むかを調べ、進むなら刻んだ後に枠の順で頁に広げて刻む(GPU は TreeExpand → ExpandStepNode)。
+// 頁を持つブロックがちょうど静かになった刻みに一様なら、値 1 つに戻して枠の順に頁を返す(FoldQuietPages。GPU は TreeFoldCheck → TreeFold。T-0103)。
 #include <algorithm>
 
 #include "common/multires_activity.hlsli"
@@ -20,6 +21,7 @@ namespace bicameral::sim {
     namespace {
 
         using nest_detail::CellAt;
+        using nest_detail::FreePageAt;
         using nest_detail::UniformAt;
 
         // multires_activity.hlsli の Tree の約束
@@ -121,10 +123,10 @@ namespace bicameral::sim {
         // --- 印のある世界のブロックを刻む。セルが変わったら忙しさの印、進める規則があれば次の種に。
         //     一様なブロックは反応が進む時だけ、後で頁に広げて刻む(T-0102)---
         const ReactionTableView view = table.View();
-        const auto finishBlock = [&](uint32_t slot) {
+        const auto finishBlock = [&](uint32_t slot, bool expanded) {
             const BlockStep step = StepBlock(nest, view, slot, worldSeed, tick);
-            if (step.changed)
-                nest.blocks[slot].busyTick = mark;
+            if (step.changed || expanded)
+                nest.blocks[slot].busyTick = mark;  // 頁に広げたのも忙しい(畳めるかを N 刻み後に調べる。T-0103)
 
             if (step.possible)
                 nest.seeds[slot] = 1;
@@ -136,17 +138,42 @@ namespace bicameral::sim {
                 continue;
 
             if (!MrIsUniform(block))
-                finishBlock(slot);
+                finishBlock(slot, false);
             else if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
                 block.page = MR_PAGE_WANTED;
         }
 
         for (const uint32_t slot : nest_detail::ExpandWantedPages(nest))
-            finishBlock(slot);
+            finishBlock(slot, true);
 
         // --- 観察の枠は全部刻む(活性に入れない。D-403)---
         for (auto slot = worldBlocks; slot < nest.blocks.size(); ++slot)
             StepBlock(nest, view, slot, worldSeed, tick);
+    }
+
+    void FoldQuietPages(MultiresNest& nest, uint64_t tick) {
+        const uint32_t mark = MrActivityMark(tick);
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            MrBlock& block = nest.blocks[slot];
+            if (!MrWantsFoldCheck(block, mark))
+                continue;
+
+            // --- 一様か(覆われていないセルが全部同じ・覆われたセルは空)---
+            const uint32_t valueCell = MrFoldValueCell(block);
+            const RxCell value = valueCell < MR_BLOCK_CELLS ? CellAt(nest, slot, valueCell) : RxMakeEmptyCell(0);
+            bool uniform = true;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS && uniform; ++index)
+                uniform = MrFoldsCell(block, value, index, CellAt(nest, slot, index));
+
+            if (!uniform)
+                continue;
+
+            // --- 値 1 つに戻して、頁を空きのスタックに積む(枠の順)---
+            FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = block.page;
+            UniformAt(nest, slot) = value;
+            block.page = MR_NO_PAGE;
+            nest.counters[MR_COUNTER_FOLDED] += 1;
+        }
     }
 
     void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick) {

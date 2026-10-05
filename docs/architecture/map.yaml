@@ -272,9 +272,12 @@ views:
       - { id: multirespages, group: simlib, label: "ExpandWantedPages<br/>一様なブロックを頁に広げる(枠の順)",
           code: "engine/src/sim/multires_nest.cpp::ExpandWantedPages", ticket: T-0102, doc: docs/design/17-multiresolution.md,
           note: "見出しの枠とセルの頁は別のプール。一様(覆われていないセルが同じ値)は頁なしで値 1 つ。反応が進む時だけ刻んだ後に頁を配る。GPU は multires_tree.hlsl の TreeExpand → ExpandStepNode / StepExpanded" }
-      - { id: uniformtest, group: tests, label: "multires_uniform_test / gpu_multires_uniform_test<br/>一様な根・鎖は頁を使わない・頁の不足",
+      - { id: multiresfold, group: simlib, label: "FoldQuietPages<br/>静かで一様になった頁を畳む(枠の順)",
+          code: "engine/src/sim/multires_activity.cpp::FoldQuietPages", ticket: T-0103, doc: docs/design/17-multiresolution.md,
+          note: "ちょうど静かになった刻み(MrWantsFoldCheck)に 1 回だけ一様か調べ、一様なら値 1 つに戻して頁を返す。GPU は multires_tree.hlsl の TreeFoldCheck(1 グループ = 1 枠)→ TreeFold(1 グループの累積和)" }
+      - { id: uniformtest, group: tests, label: "multires_uniform_test / gpu_multires_uniform_test<br/>一様な根・鎖は頁を使わない・頁の不足・燃え尽きたら畳む",
           code: "tests/multires_uniform_test.cpp::RunUniform", ticket: T-0102,
-          note: "1 つずつ刻む素直な答えと論理のセルが一致・保存量一致。GPU(HW・WARP)は状態の全部と種が毎刻み CPU と一致" }
+          note: "1 つずつ刻む素直な答えと論理のセルが一致・保存量一致・燃え尽きた木箱が畳まれて頁が 0 に戻る(T-0103)。GPU(HW・WARP)は状態の全部と種が毎刻み CPU と一致" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -375,6 +378,9 @@ views:
       - [multiresactivity, multirespages, "反応が進む一様なブロック"]
       - [multirespages, multirestree, "頁の空きのスタック"]
       - [uniformtest, multirespages]
+      - [multiresfold, multiresactivityhlsl, "MrWantsFoldCheck(GPU と CPU で同じ関数)"]
+      - [multiresfold, multirestree, "頁の空きのスタックへ返す"]
+      - [uniformtest, multiresfold]
       - [uniformtest, gpumultires, "毎刻み比べる"]
       - [probesim, probepeek, "抽出の後のフック"]
       - [viewcontroller, frameloop, "P・PageDown → 覗く場所"]
