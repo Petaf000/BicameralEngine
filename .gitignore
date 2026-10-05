@@ -26,3 +26,6 @@ __pycache__/
 
 # 消せないファイルの置き場(device_bash は削除できないので移すだけ。ユーザーが手で消す)
 _to_delete/
+
+# 並走用の git worktree(司令塔の自動運転。.worktrees/<名前>/ にランナーごと置く)
+.worktrees/
