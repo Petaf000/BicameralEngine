@@ -22,6 +22,7 @@
 #include "core/singleton.h"
 #include "multires_activity_scene.h"
 #include "multires_conduction_scene.h"
+#include "multires_implicit_scene.h"
 #include "sim/implicit_conduction.h"
 #include "sim/reaction_test_table.h"
 
@@ -29,6 +30,7 @@ using namespace bicameral;
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
 using namespace bicameral::sim;
+using namespace bicameral::test;
 
 namespace {
 
@@ -44,28 +46,6 @@ namespace {
 
     constexpr uint32_t TEMPERATURE_SHIFT = 16;  // ImplicitTemperature は mK × 2^16
     constexpr double TEMPERATURE_SCALE = 65536.0;
-
-    struct Material {
-        uint64_t heatCapacity = 0;
-        uint32_t conductance = 0;
-    };
-
-    Material AirAt(const BakedReactionTable& table, int32_t millikelvin) {
-        const MrThermal thermal = MrCellThermal(table.View(), test::MakeConductionAir(table, millikelvin));
-
-        return {.heatCapacity = 8 * thermal.capacityLimit, .conductance = thermal.conductance};
-    }
-
-    ImplicitCell MakeCell(const Material& material, int32_t level, int64_t x, int64_t y, int64_t z,
-                          int64_t millikelvin) {
-        return {.level = level,
-                .x = x,
-                .y = y,
-                .z = z,
-                .heatCapacity = material.heatCapacity,
-                .conductance = material.conductance,
-                .energy = ImplicitEnergyFor(material.heatCapacity, millikelvin)};
-    }
 
     struct Method {
         std::string_view name;
@@ -169,31 +149,11 @@ namespace {
 
     // --- 物差し ---
 
-    constexpr int64_t STICK_MEAN = 400000;      // mK
-    constexpr int64_t STICK_AMPLITUDE = 40000;  // mK
-    constexpr uint32_t STICK_CROSS = 2;         // y・z のセルの数(3 次元の面と縮約を通す)
-    constexpr double STICK_DECAY = 0.5;         // 解析解で山が exp(−0.5) になるまで刻む
+    constexpr double STICK_DECAY = 0.5;  // 解析解で山が exp(−0.5) になるまで刻む
     constexpr uint64_t STICK_MAX_TICKS = 3000;
     constexpr double STICK_TOLERANCE = 0.05;
     constexpr std::array<int32_t, 8> STICK_GAPS = {0, 1, 2, 3, 4, 5, 6, 8};
     constexpr int32_t SHORT_WAVE_GAP = 6;
-
-    double WaveWeight(int64_t x, uint32_t length) {
-        return std::cos(std::numbers::pi * (static_cast<double>(x) + 0.5) / static_cast<double>(length));
-    }
-
-    std::vector<ImplicitCell> MakeWaveCells(const Material& air, int32_t level, uint32_t length) {
-        std::vector<ImplicitCell> cells;
-        for (uint32_t row = 0; row < STICK_CROSS * STICK_CROSS; ++row) {
-            for (uint32_t x = 0; x < length; ++x) {
-                const double wave = static_cast<double>(STICK_AMPLITUDE) * WaveWeight(x, length);
-                const int64_t temperature = STICK_MEAN + std::llround(wave);
-                cells.push_back(MakeCell(air, level, x, row % STICK_CROSS, row / STICK_CROSS, temperature));
-            }
-        }
-
-        return cells;
-    }
 
     // 余弦の成分の振幅(mK)
     double WaveAmplitude(const ImplicitGrid& grid, uint32_t length) {
@@ -322,36 +282,8 @@ namespace {
     // レベル 基準 + 6 の 8³ セルに細かくする。最も細かい所の −x の面はレベル 基準 のセル (0, 0, 0) に面する(差 6)。
     // 最も細かい所だけ 1500 K、ほかは 300 K。
 
-    constexpr int64_t COMPOSITE_COLD = 300000;
-    constexpr int64_t COMPOSITE_HOT = 1500000;
     constexpr uint64_t COMPOSITE_TICKS = 30;
-    constexpr int32_t COMPOSITE_STEP = 3;  // 細かくする 1 回のレベルの差
-    constexpr int64_t COMPOSITE_EDGE = 8;
     constexpr uint32_t COMPOSITE_NO_LIMIT_SLACK = 1000000;  // mK
-
-    std::vector<ImplicitCell> MakeCompositeCells(const Material& air, int32_t base) {
-        std::vector<ImplicitCell> cells;
-        for (int64_t x : {0, 2, 3})
-            cells.push_back(MakeCell(air, base, x, 0, 0, COMPOSITE_COLD));
-
-        const int32_t middle = base + COMPOSITE_STEP;
-        const int32_t finest = middle + COMPOSITE_STEP;
-        // 8³ の 2 組: レベル middle の (8〜15, 0〜7, 0〜7)(細かくした (8, 3, 3) を除く)と、そこを埋めるレベル finest の 8³
-        constexpr int64_t COUNT = COMPOSITE_EDGE * COMPOSITE_EDGE * COMPOSITE_EDGE;
-        for (int64_t n = 0; n < COUNT; ++n) {
-            const int64_t x = n % COMPOSITE_EDGE;
-            const int64_t y = (n / COMPOSITE_EDGE) % COMPOSITE_EDGE;
-            const int64_t z = n / (COMPOSITE_EDGE * COMPOSITE_EDGE);
-            if (x != 0 || y != 3 || z != 3)
-                cells.push_back(MakeCell(air, middle, COMPOSITE_EDGE + x, y, z, COMPOSITE_COLD));
-
-            const int64_t fineOrigin = 3 * COMPOSITE_EDGE;
-            cells.push_back(MakeCell(air, finest, (COMPOSITE_EDGE * COMPOSITE_EDGE) + x, fineOrigin + y, fineOrigin + z,
-                                     COMPOSITE_HOT));
-        }
-
-        return cells;
-    }
 
     double FinestMean(const ImplicitGrid& grid, int32_t finest) {
         double sum = 0.0;

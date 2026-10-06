@@ -123,6 +123,12 @@ set_tests_properties(gpu_multires PROPERTIES TIMEOUT 600)  # debug の GPU-based
 # WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
 bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
 
+bicameral_add_gpu_test(gpu_multires_implicit_test)  # 細かいレベルの熱の陰解法の GPU と CPU のビット一致(T-0117)
+target_link_libraries(gpu_multires_implicit_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_multires_implicit gpu_multires_implicit_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_multires_implicit_warp gpu_multires_implicit_test warp --warp --queue compute)
+set_tests_properties(gpu_multires_implicit gpu_multires_implicit_warp PROPERTIES TIMEOUT 900)
+
 bicameral_add_gpu_test(gpu_multires_activity_test)  # 木の上の活性の GPU と CPU のビット一致(T-0100)
 target_link_libraries(gpu_multires_activity_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_activity gpu_multires_activity_test gpu --queue compute)

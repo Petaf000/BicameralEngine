@@ -307,6 +307,17 @@ views:
       - { id: gpuconductiontest, group: tests, label: "gpu_multires_conduction_test<br/>鎖・たくさんの要求の伝導を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_conduction_test.cpp::RunScene", ticket: T-0107,
           note: "全部 / 活性(伝導の段が Compute / Work Graph)。HW・WARP。release では Compute と Work Graph の時間も測る(D-302)。--subcycle で小刻み 64 回(T-0109)" }
+      - { id: implicitcpu, group: simlib, label: "StepImplicit<br/>細かいレベルの熱の陰解法の試作(V サイクル・誤差の見込みで止める・安全網)",
+          code: "engine/src/sim/implicit_conduction.cpp::StepImplicit", ticket: T-0110, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
+          note: "方式②の CPU リファレンス(セルの一覧・熱容量一定。木への組み込みは T-0119)。近似解の面の流れで足すので保存はビット単位" }
+      - { id: implicithlsl, group: shared, label: "implicit_conduction.hlsli<br/>陰解法の式(温度・面の流れ・誤差の判定・陽解法の係数)",
+          code: "shaders/common/implicit_conduction.hlsli::ImFaceFlow", ticket: T-0117, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md }
+      - { id: gpuimplicit, group: simlib, label: "GpuImplicit::RecordStep<br/>陰解法の GPU の段(V サイクル × 上限・空で抜ける)",
+          code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordStep", ticket: T-0117, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
+          note: "Compute の段 shaders/sim/implicit_conduct.hlsl(1 スレッド = 1 節)。止めるかは GPU の状態の語で決め、止めた後の段は空で抜ける" }
+      - { id: gpuimplicittest, group: tests, label: "gpu_multires_implicit_test<br/>物差しの山・熱い点を毎刻み GPU と CPU で比べる",
+          code: "tests/gpu_multires_implicit_test.cpp::RunScene", ticket: T-0117,
+          note: "HW・WARP。release の HW では 1 刻み・V 1 回・空の段・鎖の場面の ms を測る" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -418,6 +429,10 @@ views:
       - [gpusubcycle, multiressubcycle, "同じ結果"]
       - [gpuconductionhlsl, multiresconductionhlsl, "CPU と同じ式"]
       - [gpuconductiontest, gpuconduction]
+      - [implicitcpu, implicithlsl]
+      - [gpuimplicit, implicithlsl]
+      - [gpuimplicit, implicitcpu, "同じ結果"]
+      - [gpuimplicittest, gpuimplicit]
       - [quiettest, gpumultires, "毎刻み比べる"]
       - [multiresactivity, multirespages, "反応が進む一様なブロック"]
       - [multirespages, multirestree, "頁の空きのスタック"]

@@ -18,6 +18,7 @@
 #include <optional>
 #include <tuple>
 
+#include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
 
 using namespace bicameral::fx;
@@ -27,15 +28,14 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint32_t WEIGHT_SHIFT = 48;                    // 重みの Q
-        constexpr uint32_t TEMPERATURE_SHIFT = 16;               // 温度の端数(mK × 2^16)
-        constexpr uint32_t FLOW_SHIFT = 32 + TEMPERATURE_SHIFT;  // 係数(2^-32)× 温度(2^-16)→ エネルギー
+        constexpr uint32_t WEIGHT_SHIFT = IM_WEIGHT_SHIFT;  // 式は common/implicit_conduction.hlsli(GPU と共通。T-0117)
+        constexpr uint32_t TEMPERATURE_SHIFT = IM_TEMPERATURE_SHIFT;
         constexpr int64_t HALF_WEIGHT = int64_t{1} << (WEIGHT_SHIFT - 1);
-        constexpr uint32_t ENERGY_BITS_PER_LEVEL = 3;  // 1 段で単位は 8 倍
-        constexpr uint32_t STAGE_RATIO_SHIFT = 16;     // RKL2 の段の数を決める比の Q
+        constexpr uint32_t ENERGY_BITS_PER_LEVEL = IM_ENERGY_BITS_PER_LEVEL;
+        constexpr uint32_t STAGE_RATIO_SHIFT = 16;  // RKL2 の段の数を決める比の Q
         constexpr size_t MAX_GRID_LEVELS = 64;
         constexpr uint8_t COLOR_COUNT = 2;
-        constexpr uint32_t CORRECTION_SCALE_SHIFT = 8;  // ImplicitOptions::correctionScale の Q
+        constexpr uint32_t CORRECTION_SCALE_SHIFT = IM_CORRECTION_SCALE_SHIFT;  // ImplicitOptions::correctionScale の Q
 
         constexpr std::array<std::array<int64_t, 3>, 6> FACE_OFFSETS = {
             {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}};
@@ -127,25 +127,12 @@ namespace bicameral::sim {
             return WideRatio(numerator, denominator, WEIGHT_SHIFT);
         }
 
-        // 負にもなる値を符号と大きさで右へずらす(0 方向に切り捨て。算術シフトの丸めの向きに依存しない)
         int64_t ShiftRightSigned(int64_t value, uint32_t shift) {
-            return FxApplySign(shift >= 64 ? 0 : FxAbsU64(value) >> shift, value < 0);
+            return ImShiftRightSigned(value, shift);
         }
 
-        // 面の流れ(細かい側の単位。細かい → 粗いが正)= 係数 × 温度差 ÷ 2^48
         int64_t FaceFlow(FxU128 coefficient, int64_t difference) {
-            const uint64_t magnitude = FxAbsU64(difference);
-            const FxU128 low = FxMulU64Full(coefficient.lo, magnitude);
-            const FxU128 high = FxMulU64Full(coefficient.hi, magnitude);
-            FX_ASSERT(high.hi == 0);
-
-            // (high · 2^64 + low) >> 48 = (high + low.hi) << 16 + low.lo >> 48
-            const uint64_t upper = high.lo + low.hi;
-            FX_ASSERT(upper >= low.hi && (upper >> (63 - (64 - FLOW_SHIFT))) == 0);
-            const uint64_t flow = (upper << (64 - FLOW_SHIFT)) + (low.lo >> FLOW_SHIFT);
-            FX_ASSERT(flow < (uint64_t{1} << 63));
-
-            return FxApplySign(flow, difference < 0);
+            return ImFaceFlow(coefficient, difference);
         }
 
         // --- 面を探す ---
@@ -415,13 +402,10 @@ namespace bicameral::sim {
         // 流れ F = g ΔT* で足すので、T* の残差は D/C ≈ 4^Δk 倍になって新しい温度に出る(T-0110 の計測)
         bool Converged(const ImplicitGridLevel& cells, const std::vector<int64_t>& rhs,
                        const std::vector<int64_t>& values, uint32_t toleranceMillikelvin, ImplicitCost& cost) {
-            const FxU128 tolerance = Wide(uint64_t{toleranceMillikelvin} << TEMPERATURE_SHIFT);
             bool converged = true;
             for (size_t i = 0; i < values.size(); ++i) {
-                const uint64_t residual = FxAbsU64(Relax(cells, rhs, values, i) - values[i]);
-                const FxU128 amplified = WideShiftLeft(Wide(residual), WEIGHT_SHIFT);
-                const FxU128 allowed = WideMul(tolerance, static_cast<uint64_t>(cells.selfWeights[i]));
-                if (amplified.hi > allowed.hi || (amplified.hi == allowed.hi && amplified.lo > allowed.lo))
+                if (ImExceedsTolerance(Relax(cells, rhs, values, i) - values[i], cells.selfWeights[i],
+                                       toleranceMillikelvin))
                     converged = false;
             }
 
@@ -480,18 +464,8 @@ namespace bicameral::sim {
         // 面を戻すと隣の合計も変わるので、外に出るセルが無くなるまで繰り返す(戻したセルは二度と外に出ない → 必ず終わる)。
         // 1 回ごとに「全部のセルを見てから、全部の面を直す」ので順に依存しない。保存は面ごとに 1 つの値なのでビット単位のまま。
 
-        FxU128 WideMin(FxU128 a, FxU128 b) {
-            return (a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo)) ? a : b;
-        }
-
         int64_t AddClamped(int64_t a, int64_t b) {
-            if (b > 0 && a > INT64_MAX - b)
-                return INT64_MAX;
-
-            if (b < 0 && a < INT64_MIN - b)
-                return INT64_MIN;
-
-            return a + b;
+            return ImAddClamped(a, b);
         }
 
         // 陽解法の面の係数(細かい側の単位)= min(係数, 細かい側の C/8, 粗い側の C/8 × 2^d)(ADR-0017)
@@ -499,10 +473,8 @@ namespace bicameral::sim {
             std::vector<int64_t> flows(grid.faces.size());
             for (size_t f = 0; f < grid.faces.size(); ++f) {
                 const ImplicitFace& face = grid.faces[f];
-                const FxU128 fineLimit = Wide(grid.cells[face.fine].heatCapacity >> ENERGY_BITS_PER_LEVEL);
-                const FxU128 coarseLimit = WideShiftLeft(
-                    Wide(grid.cells[face.coarse].heatCapacity >> ENERGY_BITS_PER_LEVEL), face.gap);
-                const FxU128 coefficient = WideMin(face.coefficient, WideMin(fineLimit, coarseLimit));
+                const FxU128 coefficient = ImExplicitCoefficient(face.coefficient, grid.cells[face.fine].heatCapacity,
+                                                                 grid.cells[face.coarse].heatCapacity, face.gap);
                 flows[f] = FaceFlow(coefficient, start[face.fine] - start[face.coarse]);
             }
 
@@ -550,21 +522,9 @@ namespace bicameral::sim {
             return energies;
         }
 
-        // 範囲を超えた量(mK。大きすぎる時は 2^40 単位で止める)
-        constexpr int64_t EXCESS_CAP = int64_t{1} << 40;
-
         // 範囲(余裕を含まない)を超えた量。中なら 0 以下
         int64_t Overrun(int64_t energy, const Bounds& bounds, size_t i) {
-            return energy > bounds.highest[i] ? energy - bounds.highest[i] : bounds.lowest[i] - energy;
-        }
-
-        int64_t ExcessMillikelvin(int64_t over, uint64_t heatCapacity) {
-            if (over <= 0)
-                return 0;
-
-            const ImplicitCell excess = {.heatCapacity = heatCapacity, .energy = std::min(over, EXCESS_CAP)};
-
-            return ImplicitTemperature(excess) >> TEMPERATURE_SHIFT;
+            return ImOverrun(energy, bounds.lowest[i], bounds.highest[i]);
         }
 
         // 範囲の外に出たセルに印を付ける(新しく付けたら true)。最初の回は範囲を超えた最大も記録する
@@ -574,7 +534,7 @@ namespace bicameral::sim {
             for (size_t i = 0; i < grid.cells.size(); ++i) {
                 const int64_t over = Overrun(energies[i], bounds, i);
                 if (cost.limitRounds == 0) {
-                    const int64_t excess = ExcessMillikelvin(over, grid.cells[i].heatCapacity);
+                    const int64_t excess = ImExcessMillikelvin(over, grid.cells[i].heatCapacity);
                     cost.worstExcessMillikelvin = std::max(cost.worstExcessMillikelvin, excess);
                 }
 
@@ -802,16 +762,11 @@ namespace bicameral::sim {
     }
 
     int64_t ImplicitTemperature(const ImplicitCell& cell) {
-        const uint64_t magnitude = FxAbsU64(cell.energy);
-        const FxU128 numerator = {.hi = magnitude >> (64 - FLOW_SHIFT), .lo = magnitude << FLOW_SHIFT};
-
-        return FxApplySign(FxDivU128By64(numerator, cell.heatCapacity).quotient, cell.energy < 0);
+        return ImTemperature(cell.energy, cell.heatCapacity);
     }
 
     int64_t ImplicitEnergyFor(uint64_t heatCapacity, int64_t millikelvin) {
-        const uint64_t energy = FxShiftRightU128(FxMulU64Full(heatCapacity, FxAbsU64(millikelvin)), 32);
-
-        return FxApplySign(energy, millikelvin < 0);
+        return ImEnergyFor(heatCapacity, millikelvin);
     }
 
     FxU128 ImplicitConservedTotal(const ImplicitGrid& grid) {
