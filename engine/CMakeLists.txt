@@ -56,6 +56,7 @@ add_library(bicameral_multires STATIC
   src/sim/implicit_conduction.cpp
   src/sim/multires_activity.cpp
   src/sim/multires_conduction.cpp
+  src/sim/multires_implicit_conduction.cpp
   src/sim/multires_nest.cpp
   src/sim/multires_tree.cpp
 )

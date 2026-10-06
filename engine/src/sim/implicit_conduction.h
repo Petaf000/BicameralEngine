@@ -34,6 +34,13 @@ namespace bicameral::sim {
         // --- 状態 ---
         int64_t energy = 0;     // そのレベルの単位(8^-k mJ)
         uint64_t fraction = 0;  // 2^-64 単位の端数(違うレベルの面の粗い側が受ける。ADR-0017)
+
+        // --- 木につなぐ時(T-0119。multires_implicit_conduction.cpp)---
+        // 0 以上なら刻みの初めの温度(mK × 2^16)はこの値(エネルギー ÷ 熱容量でなく、木のセルの温度 MrCellThermal から。
+        // 相変化があっても刻みの初めの熱容量で線形にする)。energy はその温度に当たる仮の値で、足した後との差が変化
+        int64_t startTemperature = -1;
+        bool coarseFraction =
+            true;  // 粗い側として端数を受けられるか(端数の枠が無ければ整数の単位の倍数だけ受ける。ADR-0017)
     };
 
     // 面。細かい側 fine が流れを計算する(同じレベルなら gap = 0 で、fine は番号の小さい側)
@@ -109,6 +116,10 @@ namespace bicameral::sim {
     // セルの一覧から面と多重格子の段を作る(セルは重ならないこと。面の隣が無い所は断熱)
     // galerkin: 親どうしの面の係数を子の合計のままにする(既定は ÷ 2 でそのレベルの離散化に合わせる。T-0110 の比べ)
     ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, bool galerkin = false);
+
+    // 面を呼ぶ側が作って渡す(木の隣 MrFindFaceNeighbor から。T-0119)。座標は多重格子の段を作るのに使う(負でもよい)
+    ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces,
+                                   bool galerkin = false);
 
     // 1 刻み進める
     ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options);

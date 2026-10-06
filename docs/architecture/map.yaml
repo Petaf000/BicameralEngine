@@ -310,6 +310,11 @@ views:
       - { id: implicitcpu, group: simlib, label: "StepImplicit<br/>細かいレベルの熱の陰解法の試作(V サイクル・誤差の見込みで止める・安全網)",
           code: "engine/src/sim/implicit_conduction.cpp::StepImplicit", ticket: T-0110, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
           note: "方式②の CPU リファレンス(セルの一覧・熱容量一定。木への組み込みは T-0119)。近似解の面の流れで足すので保存はビット単位" }
+      - { id: implicittree, group: simlib, label: "AddImplicitConduction<br/>細かいレベルの熱の陰解法を木の伝導に(案 a)",
+          code: "engine/src/sim/multires_implicit_conduction.cpp::AddImplicitConduction", ticket: T-0119, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
+          note: "options.implicitConduction(既定 false)。流れを計算する側が基準より細かい(Δk 1〜8)面を陰解法の 1 刻みで解く。境の基準以下のセルは面で分ける。眠っている頁のブロックも入れて活性 = 全部。GPU は T-0127" }
+      - { id: implicittreetest, group: tests, label: "multires_implicit_tree_test<br/>木の物差し・熱い点・鎖・たくさんの要求(保存・活性 = 全部・2 回一致)",
+          code: "tests/multires_implicit_tree_test.cpp::CheckChain", ticket: T-0119 }
       - { id: implicithlsl, group: shared, label: "implicit_conduction.hlsli<br/>陰解法の式(温度・面の流れ・誤差の判定・陽解法の係数)",
           code: "shaders/common/implicit_conduction.hlsli::ImFaceFlow", ticket: T-0117, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md }
       - { id: gpuimplicit, group: simlib, label: "GpuImplicit::RecordStep<br/>陰解法の GPU の段(V サイクル × 上限・空で抜ける)",
@@ -430,6 +435,9 @@ views:
       - [gpuconductionhlsl, multiresconductionhlsl, "CPU と同じ式"]
       - [gpuconductiontest, gpuconduction]
       - [implicitcpu, implicithlsl]
+      - [implicittree, implicitcpu, "StepImplicit"]
+      - [multiressubcycle, implicittree, "最後の小刻みの後"]
+      - [implicittreetest, implicittree]
       - [gpuimplicit, implicithlsl]
       - [gpuimplicit, implicitcpu, "同じ結果"]
       - [gpuimplicittest, gpuimplicit]

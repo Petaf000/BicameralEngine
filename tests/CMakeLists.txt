@@ -62,6 +62,10 @@ add_executable(multires_implicit_test multires_implicit_test.cpp)  # 細かい�
 target_link_libraries(multires_implicit_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_implicit COMMAND multires_implicit_test)
 
+add_executable(multires_implicit_tree_test multires_implicit_tree_test.cpp)  # 細かいレベルの熱の陰解法を木の伝導に(T-0119)
+target_link_libraries(multires_implicit_tree_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_implicit_tree COMMAND multires_implicit_tree_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)

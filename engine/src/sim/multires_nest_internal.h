@@ -142,6 +142,13 @@ namespace bicameral::sim::nest_detail {
                            std::span<const uint8_t> frozen, std::span<const uint8_t> wantsFraction,
                            const MultiresStepOptions& options, std::span<multires::MrEnergyDelta> deltas);
 
+    // 細かいレベルの熱の陰解法(T-0119。multires_implicit_conduction.cpp): 流れを計算する側が基準より細かい面を全部、陰解法の 1 刻みで解き、
+    // 変化を deltas に足す(端数の枠は ComputeConduction が配った後)。陰解法の系に入れるブロックか(陽解法はそのブロックの面を計算しない)
+    [[nodiscard]] bool InImplicitConduction(const MultiresNest& nest, uint32_t slot,
+                                            const MultiresStepOptions& options);
+    void AddImplicitConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
+                               const MultiresStepOptions& options, std::span<multires::MrEnergyDelta> deltas);
+
     // 伝導の小刻み(T-0108)を最後の 1 回の手前まで進め、最後の小刻みの変化を返す(呼ぶ側が反応と一緒に足す。分けない時は T-0019 と同じ順)。
     // 途中で変化を足したブロックは results の changed に、頁に広げたブロックは expanded に書く(multires_conduction.cpp)
     std::vector<multires::MrEnergyDelta> StepConduction(MultiresNest& nest, const ReactionTableView& view,
