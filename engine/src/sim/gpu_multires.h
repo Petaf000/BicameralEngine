@@ -81,11 +81,12 @@ namespace bicameral::sim {
         void RecordRemoveShadow(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                 uint32_t firstSlot, uint32_t levelCount);
         // 全部を刻む(multires_nest.h の StepNest と同じ結果。options.conduction で熱の伝導も。T-0107。細かいレベルの小刻みも。T-0109)。
-        // 反応は既定で待ちの丸め(ADR-0018。T-0121)。熱の伝導を入れるなら今までは options.cutoffRounding が要る(T-0124 で移す)
+        // 反応は既定で待ちの丸め(ADR-0018。T-0121)。熱の伝導を入れるなら今までは options.cutoffRounding が要る(T-0125 で移す)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t worldSeed,
                         uint64_t tick, const MultiresStepOptions& options = {});
         // 活性のブロックだけ刻む(multires_nest.h の StepActive と同じ結果。観察の枠は全部刻む。T-0100)。
-        // GpuMultiresOptions::activity で作っていなければ false。反応はまだ今までの丸めだけ(options.cutoffRounding でなければ false。T-0124)
+        // GpuMultiresOptions::activity で作っていなければ false。反応は待ちの丸めだけ(T-0124)、熱の伝導を入れる刻みは
+        // 今までの丸めだけ(T-0125 で移す)。それ以外の組み合わせ(options.conduction != options.cutoffRounding)は false
         [[nodiscard]] bool RecordStepActive(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                             uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options = {});
         void RecordPullBack(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,

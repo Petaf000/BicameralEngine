@@ -82,6 +82,7 @@ namespace bicameral::sim {
         constexpr uint32_t STEP_FLAG_LISTED = 2;
         constexpr uint32_t STEP_FLAG_SUBSTEP_WAKE = 4;     // 小刻みの終わりに起こす(T-0109)
         constexpr uint32_t STEP_FLAG_CUTOFF_ROUNDING = 8;  // 今までの丸め(伝導の段と覗き窓が移るまで。T-0121)
+        constexpr uint32_t STEP_FLAG_WAKE_SEEDS = 16;      // 起こす段が種の一覧に足す(活性の刻みの待ちの丸め。T-0124)
         constexpr uint32_t STEP_FLAG_BITS = 0xFF;
         constexpr uint32_t STEP_SUBSTEP_SHIFT = 8;
         constexpr uint32_t STEP_GAP_SHIFT = 14;
@@ -747,13 +748,22 @@ namespace bicameral::sim {
         if (!m_activityGraph)
             return false;
 
-        // --- 活性のグラフはまだ今までの丸めだけ(待ちの丸めの分岐を入れるとハードウェアで止まった。T-0124)---
-        if (!options.cutoffRounding)
+        // --- 活性のグラフの反応は待ちの丸めだけ(今までの丸めの反応も入れたノードは RTX 3070 Ti で止まった。T-0124)。
+        //     伝導の段はまだ今までの丸め(T-0125)なので、伝導を入れる刻みだけ今までの丸め ---
+        if (options.conduction != options.cutoffRounding)
             return false;
 
         SetTick(worldSeed, tick);
         m_constants.stepFlags = (options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0) |
                                 RoundingFlags(options);
+
+        // --- 待ちの丸め: 起こす段がつつかれたブロックの印を直し、起こす刻みが来たブロックをこの刻みの種の一覧へ足す(CPU の StepActive の種。
+        //     次の刻みの種は書かない: 刻んだブロックは見出しの wakeTick で起こす。T-0124)---
+        if (!options.cutoffRounding) {
+            m_activityWrite = m_activityCurrent;
+            RecordWake(list, debugRing, STEP_FLAG_WAKE_SEEDS);
+        }
+
         const uint32_t next = m_activityCurrent ^ 1u;
         ID3D12Resource* input = m_activity[m_activityCurrent].Get();
         ID3D12Resource* output = m_activity[next].Get();

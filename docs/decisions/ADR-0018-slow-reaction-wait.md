@@ -61,3 +61,14 @@
 - 活性の刻みは WakeDue が起こす刻みの来た世界の本物のブロックを種の一覧に足す形にする(部品はある。活性のグラフへの組み込みはハードウェアで止まったので T-0124)。
 - WARP は CPU と毎刻みビット一致。ハードウェア(NVIDIA RTX 3070 Ti)では評価したセルの wakeTick の上位 32bit が落ちる(T-0124。原因は未確認)。
 
+## 追記(2026-10-06、T-0124。Claude: ハードウェアの不具合の回避と活性のグラフ)
+- 起こす刻みは `RxWakeTickOf(changedTick, wait) = wait == RX_WAIT_NEVER ? RX_WAIT_NEVER : changedTick + wait`(待ちも印も 2^62 未満なので溢れない。FX_ASSERT)。
+  前の「溢れたら RX_WAIT_NEVER」の飽和する足し算の形は、NVIDIA(RTX 3070 Ti)の release で結果の下位 32bit が 0xFFFFFFFF になった(DXIL は正しく、-Od では一致。
+  ドライバのコンパイラと推定)。**シミュの 64bit の式に「足して溢れたら全部 1」の形を書かない**(04 の R8 とも合う)。
+- 活性のグラフの反応は待ちの丸めだけ(ActivityStepNode・ObserverStepNode は StepBlockWait、ExpandStepNode は StepExpandedWait)。今までの丸めの反応も
+  同じノードに入れると(反応の核が 1 つのノードに 3〜4 か所)HW で DEVICE_HUNG になった(原因は推定: ノードの大きさかスクラッチの量)。
+  今までの丸めは伝導を入れる刻みだけ(グラフは伝導の一覧に足すだけ)で、RecordStepActive は `conduction != cutoffRounding` なら false。
+- 活性の刻みの種は CPU と同じく「つつかれたブロック + 起こす刻みが来たブロック」: 起こす段 WakeDue が種の一覧(この刻みの一覧)に足し、刻むノードは次の種を書かない。
+  種の一覧のレコードの数は 1 + 世界の枠 × 2 + つつく上限(同じ枠が 2 回入りうる。ScheduleBlock が 1 刻みに 1 回にする)。
+- 観察の枠は全部評価する(使っていない枠も。刻むセルが無いので wakeTick = RX_WAIT_NEVER。CPU の StepActive と同じ)。
+

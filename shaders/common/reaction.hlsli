@@ -363,6 +363,7 @@ FX_CONST uint64_t RX_WAIT_NEVER = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
 FX_CONST uint64_t RX_WAIT_SERIES_LIMIT = FX_U64(0x10000000u, 0u);  // 端数(2^-64 単位)がこれ未満(f < 1/16)なら級数
 FX_CONST uint32_t RX_WAIT_SERIES_TERMS = 16;                       // f < 1/16 なら 16 項で 2^-64 まで
 FX_CONST uint32_t RX_WAIT_MAX_NUMERATOR_BITS = 122;                // 割られる数の桁の上限(商 = 待ちは 2^62 未満)
+FX_CONST uint64_t RX_WAIT_TICK_LIMIT = FX_U64(0x40000000u, 0u);    // 待ちと刻みの印の上限 2^62(RxWakeTickOf)
 
 // floor(2^64 ÷ k)(k = 2〜16。級数の 1 ÷ k)
 FX_CONST uint64_t RX_RECIPROCAL_Q64[17] = {0u,
@@ -884,6 +885,17 @@ FX_FN uint64_t RxWaitSeed(uint64_t worldSeed, uint64_t changedTick, uint64_t cel
     return FxHash64(worldSeed, changedTick, cellId, RX_WAIT_PURPOSE);
 }
 
+// changedTick から wait 刻み目の印(wait = RX_WAIT_NEVER なら RX_WAIT_NEVER)。待ちは 2^62 未満(RxWaitTicks の商)、印も 2^62 未満
+// (60 刻み/秒で約 24 億年)なので足しても溢れない(R8: 飽和させない)。
+// 「溢れたら RX_WAIT_NEVER」の飽和する足し算の形(wait >= ~changedTick ? ~0 : 和)は、NVIDIA のドライバ(RTX 3070 Ti)で
+// 結果の下位 32bit が 0xFFFFFFFF になった(T-0124)。比べるのは RX_WAIT_NEVER との一致だけにする
+FX_FN uint64_t RxWakeTickOf(uint64_t changedTick, uint64_t wait) {
+    FX_ASSERT(changedTick < RX_WAIT_TICK_LIMIT);
+    FX_ASSERT(wait == RX_WAIT_NEVER || wait < RX_WAIT_TICK_LIMIT);
+
+    return wait == RX_WAIT_NEVER ? RX_WAIT_NEVER : changedTick + wait;
+}
+
 // 刻み tick のセルを評価する。changedTick = セルのブロックが最後に変わった刻み(tick より前。刻みの初めに読んだ値)。
 // 取り合いの丸めは今までどおり刻みの乱数(取り合うのは進む規則があるセル = 起きているセルだけ)
 template <typename Table>
@@ -901,7 +913,7 @@ FX_FN RxWaitStep RxStepCellWait(Table table, RxCell cell, uint64_t worldSeed, ui
 
     // --- 進む規則が無い: 待ちの最小の刻みまで変わらない ---
     if (collected.candidates.count == 0) {
-        step.wakeTick = collected.wait >= RX_WAIT_NEVER - changedTick ? RX_WAIT_NEVER : changedTick + collected.wait;
+        step.wakeTick = RxWakeTickOf(changedTick, collected.wait);
 
         return step;
     }

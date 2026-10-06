@@ -33,9 +33,10 @@ FX_CONST uint32_t MR_ACTIVITY_RESERVED = 24;    // 次に書く番号(最初 1)
 FX_CONST uint32_t MR_ACTIVITY_DROPPED = 28;     // 一覧が一杯で落とした数(0 でなければ活性の結果は信用できない)
 FX_CONST uint32_t MR_ACTIVITY_RECORDS = 32;
 
-// 一覧のレコードの数(空のレコード + 世界の枠 + 1 刻みにつつかれる数の上限)
+// 一覧のレコードの数(空のレコード + 世界の枠 × 2 + 1 刻みにつつかれる数の上限)。待ちの丸め(T-0124)では刻みの間に入った種と
+// 起こす段(WakeDue)の種で同じ枠が 2 回入りうる(重ねて刻むことはない: ScheduleBlock が 1 刻みに 1 回にする)
 FX_FN uint32_t MrActivityCapacity(uint32_t worldBlocks) {
-    return 1 + worldBlocks + (MR_MAX_REQUESTS * (MR_MAX_CHAIN_LEVELS + 1));
+    return 1 + (worldBlocks * 2) + (MR_MAX_REQUESTS * (MR_MAX_CHAIN_LEVELS + 1));
 }
 
 // 刻み tick に刻んだ印(MrBlock::activeTick。0 は「まだ刻んでいない」。2^32 刻みで一周する)

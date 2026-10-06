@@ -119,7 +119,7 @@ bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --qu
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute)
-set_tests_properties(gpu_multires PROPERTIES TIMEOUT 600)  # debug の GPU-based validation で約 270 s(T-0102 で頁を配る段が増えた)
+set_tests_properties(gpu_multires PROPERTIES TIMEOUT 1200)  # debug の GPU-based validation で、HW も待ちの丸めにしてから 600 s を超えた(T-0124。場面ごとに約 80 s × 8)
 # WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
 bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
 

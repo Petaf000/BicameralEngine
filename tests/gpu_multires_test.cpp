@@ -21,8 +21,7 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // 比べる反応の丸め(T-0121)。ハードウェアでは待ちの丸めの起こす刻み(wakeTick)の上位 32bit が落ちる(WARP と CPU は一致。T-0124)ので、
-    // 直るまでハードウェアは今までの丸めで比べる
+    // 比べる反応の丸め(T-0121)。既定の待ちの丸め(ハードウェアの wakeTick の不具合は T-0124 で直した)。今までの丸めは T-0122 で消す
     sim::MultiresStepOptions& Rounding() {
         static sim::MultiresStepOptions rounding;
         return rounding;
@@ -300,7 +299,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        Rounding() = {.cutoffRounding = options->adapter != gpu::AdapterKind::Warp};
+        Rounding() = {};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {

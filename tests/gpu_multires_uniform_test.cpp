@@ -30,8 +30,7 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // 比べる反応の丸め(T-0121)。活性のグラフはまだ今までの丸め(待ちの丸めの分岐を入れるとハードウェアで止まった。T-0124)なので、
-    // 全部を刻む所も今までの丸めで比べる
+    // 比べる反応の丸め(T-0121)。既定の待ちの丸め(活性のグラフも。T-0124)。今までの丸めは T-0122 で消す
     sim::MultiresStepOptions& Rounding() {
         static sim::MultiresStepOptions rounding;
         return rounding;
@@ -431,7 +430,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_uniform_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        Rounding() = {.cutoffRounding = true};
+        Rounding() = {};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {

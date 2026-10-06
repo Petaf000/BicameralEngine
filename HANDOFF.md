@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-06 / チケット: T-0121 GPU を待ちの丸めに — 一部完了(全部を刻む Compute が WARP で CPU とビット一致。HW の不具合と活性のグラフは T-0124、伝導・畳み・引き戻しは T-0125)
+最終更新: 2026-10-06 / チケット: T-0124 研究: HW で待ちの丸めが合わない・活性のグラフを待ちの丸めに — 完了
 
 ## 状態(3 行以内)
-- GPU の全部を刻む Compute(RecordStep)が既定で待ちの丸め: 起こす段 WakeDue(見出しを全部なめる)→ StepWait → TreeExpand → StepExpandedWaitPass(shaders/sim/multires_step.hlsl・multires_wait_step.hlsli)。
-- WARP は CPU と毎刻みビット一致。**HW(RTX 3070 Ti)は評価したセルの wakeTick の上位 32bit が落ちて合わない**ので、HW のテストは今までの丸めで比べる(T-0124)。
-- 活性のグラフ・伝導の段・覗き窓は今までの丸めのまま(RecordStepActive は待ちの丸めなら false)。次は T-0124。
+- GPU の反応は全部を刻む Compute も活性のグラフも待ちの丸めで、**HW(RTX 3070 Ti)・WARP・CPU が毎刻みビット一致**(gpu_multires・_activity・_quiet・_uniform)。
+- HW の wakeTick の不具合は飽和する足し算の形(reaction.hlsli の RxWakeTickOf に替えた)。活性のグラフの DEVICE_HUNG は反応の核を 1 ノードに 3〜4 か所展開した時に出る(推定)ので、グラフの反応は待ちの丸めだけにした。
+- 伝導を入れる刻み・覗き窓はまだ今までの丸め。次は T-0125(伝導・畳み・引き戻しの tc)。
 
 ## 並走で入ったもの: T-0120 陰解法の GPU の固定費(ブランチ t-0120 を main へマージ、2026-10-06)
 - 状態: T-0120 完了。方式②の GPU 版の固定費を減らした(engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl。ImTail が 13 個目の入口)。
@@ -45,6 +45,12 @@
 - 注意: debug の assert は Windows でダイアログを出してテストが止まる(ランナーの上限 30 分まで固まる。T-0123 でテストの assert を標準エラーに)。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-06、T-0124)**: release で `-Filter "^(gpu_multires(_activity|_quiet|_uniform|_conduction|_near_fold)?(_warp)?|gpu_probe_peek(_warp)?)$"` の 14 本が通過(約 11 分。
+  gpu_multires・活性・静か・一様は HW も WARP も待ちの丸めで比べる。伝導・near_fold・覗き窓は今までの丸め)。debug で `-Filter "^(reaction.*|multires.*|float_check|gpu_multires(_activity)?(_warp)?)$"`: CPU の reaction 3 本・multires 7 本(subcycle 524 s)・gpu_multires_warp・gpu_multires_activity(HW・GBV あり 188 s)・_activity_warp が通過、
+  **gpu_multires(HW・GBV あり)は失敗なしのまま 600 s の上限で切れた**(場面ごとに約 80 s。HW も待ちの丸めにして重くなった)→ TIMEOUT 1200 にした(流し直していない)。
+  GBV なしの debug の HW では gpu_multires・gpu_multires_activity とも待ちの丸めで通る(-Od の確認で流した)。
+  subcycle の GPU(伝導だけ。反応の式を変えていない)と gpu_multires_implicit は流していない。archmap OK。tidy(release)は 1 件: gpu_multires.cpp の CreatePipelines が
+  readability-function-size(このチケットでは触っていない。T-0121 でパイプラインを足した時からと推定。分けるのは次に gpu_multires.cpp を触る時)。
 - **テスト(2026-10-06、T-0121)**: 最初に release の HW で gpu_multires_*(gpu_multires・_implicit・_activity・_quiet・_uniform・_conduction・_subcycle・_near_fold)8 本が通過(T-0115 の 104 バイトの見出しで壊れていない)。
   変更後は release で `-Filter "^(gpu_multires(_activity|_quiet|_uniform|_conduction)?(_warp)?|gpu_probe_peek(_warp)?)$"` の 12 本が通過(約 9 分)。debug・subcycle・near_fold・CPU の multires は流していない(CPU は reaction.hlsli の欄の順を戻しただけで変えていない)。
   gpu_multires_warp は待ちの丸め、HW と活性・静か・一様・伝導・覗き窓は今までの丸めで比べる(各テストの Rounding()。T-0124・T-0125 で外す)。
@@ -68,10 +74,9 @@
   `--timeout 2400` で裏で投げ、runner/logs/<job>.result.json を待つ。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **HW で待ちの丸めが合わない(T-0124)**: gpu_multires_test を待ちの丸めで HW に流すと、評価して変わらなかったブロックの wakeTick が 4294967295(CPU は 929 など)。
-  RxStepCellWait の戻り値の wakeTick が最初のセルから 0x00000000FFFFFFFF。部品(FxLog2U64・FxMulHiU64・FxDivU128By64・RxWaitTicks・RxCollectCandidatesWait)を直接呼ぶと HW と WARP で一致。詳しくは T-0124。
-- **活性のグラフに待ちの丸めの分岐を入れると HW で DEVICE_HUNG**(今までの丸めの刻みでも。WARP は待ちの丸めで一致)。戻した。部品は multires_wait_step.hlsli(StepBlockWait・StepExpandedWait)と WakeDue の種に残した(T-0124)。
-- 待ちの丸めの全部を刻むは重い(セルごとに log2 と 128bit の割り算)。1 本のリストに 400 回積むと TDR になった(計測の暖機は今までの丸めにした)。
+- **HW の Work Graph は反応の核を 1 ノードに 3〜4 か所展開すると DEVICE_HUNG**(T-0124。原因は推定・BACKLOG)。活性のグラフの反応は待ちの丸めだけ(RecordStepActive は `conduction != cutoffRounding` なら false)。
+- 待ちの丸めは重い(セルごとに log2 と 128bit の割り算): 活性の静かな刻みも約 0.4 ms(今までの丸め 0.08 ms。観察の枠の評価と推定)・全部を刻む 0.42 ms(0.026)。
+  1 本のリストに 400 回積むと TDR になった(計測の暖機は 1/10)。→ T-0123。
 - **細かいレベルの熱の小刻みの GPU は Δkmax 3 で 8.4 ms/刻み**(T-0111 で 40 から縮めた。鎖は Δkmax 1・2・3 で 0.55・2.2・8.4 ms)。小刻み 1 回 = 印 25・頁 3・端数 4・埋める 2・流れ 25・
   終わり + 起こすグラフ 53 µs(活性 Compute。一時的にタイムスタンプを打って測った)。段 6 つ + 起こすグラフの固定費 ≈ 50 µs × 64 が床。どうするかは QUESTIONS Q3(判断待ち)。
 - 小刻みの数は呼ぶ側の maxSubcycleGap で決まり、GPU は最大回数を全部積む(空の小刻みも 41〜49 µs。T-0111 で 512 スレッドのグループが空で抜ける分 19 → 41 µs に増えた〔全部を刻む時〕)。ゲームの値は未定(T-0111 の後)。
@@ -91,9 +96,10 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (Claude が決めた。ADR-0018 追記〔T-0121〕・チケット T-0121 の「決めたこと」)GPU も移行の間だけ今までの丸めを stepFlags の MR_STEP_CUTOFF_ROUNDING(= cutoffRounding)で残す。
-  起こす段がつつかれたブロックに直接 busyTick = 印・wakeTick = 印 + 1 を書き、一様なブロックは「起こす刻みが来た か busyTick = 印」で評価する。
-  待ちの丸めで刻むのは 1 グループ = 1 枠(64 スレッド)、wakeTick の最小は 32bit ずつ groupshared に置いてスレッド 0 が順に見る。
+- (Claude が決めた。ADR-0018 追記〔T-0124〕)起こす刻みは RxWakeTickOf(`wait == NEVER ? NEVER : changedTick + wait`。待ちも印も 2^62 未満で FX_ASSERT)。
+  シミュの 64bit の式に飽和する足し算の形を書かない。活性のグラフの反応は待ちの丸めだけ(今までの丸めは伝導を入れる刻みだけ)。種は起こす段 WakeDue が
+  この刻みの一覧に足す(一覧は 1 + 世界の枠 × 2 + つつく上限)。観察の枠は使っていない枠も評価する(CPU と同じ)。
+- (前のチャット T-0121 の決定は ADR-0018 追記〔T-0121〕・チケット T-0121 の「決めたこと」)
 - (Claude が決めた。ADR-0015 追記〔T-0112〕)GPU の畳む段の帳簿の足し算は**繰り上げつきの atomic**(AddLedgerCarrying。atomic の前の値で自分の桁あふれが分かる。
   足した値の和も繰り上がりの回数も順によらないので CPU の枠の順の足し算とビット一致)。端数を帳簿へ移す・平均を書く・余りを足すのは TreeFoldCheck、
   頁と端数の枠を積むのは TreeFold(枠の順の累積和)。印は取り合いの印に MR_CLAIM_FOLD_COPY / WRITTEN / RETURN(下位 3bit)。
@@ -104,12 +110,14 @@
 - (前のチャット T-0104 の決定は ADR-0015 追記と 17 §5 にある)
 
 ## 次にやること
-NEXT.md の先頭(T-0124 → T-0125)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0125 → T-0122 → T-0123)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
-- **GPU の待ちの丸め(T-0121)**: gpu_multires.cpp の RecordStep → RecordStepWait(RecordWake〔WakeDue〕→ m_stepWaitPipeline → PassExpand → m_stepExpandedWaitPipeline)。
+- **GPU の待ちの丸め(T-0121・T-0124)**: gpu_multires.cpp の RecordStep → RecordStepWait(RecordWake〔WakeDue〕→ m_stepWaitPipeline → PassExpand → m_stepExpandedWaitPipeline)。
+  活性は RecordStepActive の初めに RecordWake(STEP_FLAG_WAKE_SEEDS。m_activityWrite = この刻みの一覧)→ グラフ(ActivityStepNode・ObserverStepNode = StepBlockWait、ExpandStepNode = StepExpandedWait)。
   シェーダーは multires_step.hlsl の WakeDue・StepWait・StepExpandedWaitPass と multires_wait_step.hlsli(CPU の StepBlocks と RecordWaitResults の GPU 版)。
-  今までの丸めは stepFlags の MR_STEP_CUTOFF_ROUNDING(RoundingFlags)。テストは各ファイルの Rounding() で丸めを選ぶ。HW の不具合を調べた手順と結果は T-0124 のチケット。
+  今までの丸めは stepFlags の MR_STEP_CUTOFF_ROUNDING(RoundingFlags)。テストは各ファイルの Rounding() で丸めを選ぶ。HW の不具合を調べた手順と結果は T-0124 のチケットの「結論」。
+  **活性のグラフのノードに反応の核(MrStepCell* / RxStepCell*)を足さない**(1 ノード 2 か所まで。3〜4 か所で HW が止まった)。HW を止めうる実験は wt2 のランナーが idle の時に。
   device_bash は 60〜75 秒で切れるので、テストは submit.py で投げて sleep 40 ずつ待つ。
 - **ほぼ同じ頁を畳む GPU(T-0112)**: gpu_multires.cpp の RecordFoldPages(list, ring, tick, tolerance)(許容差なしの版は MrExactFoldTolerance で呼ぶ)。
   multires_tree.hlsl の TreeFoldCheck(端数を帳簿へ → FoldsExactly か FoldsNearly〔CollectFoldCells・CollectFoldSpecies〕)→ TreeFold。groupshared を使うので

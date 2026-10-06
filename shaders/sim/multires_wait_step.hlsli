@@ -1,5 +1,5 @@
 // multires_wait_step.hlsli — 待ちの丸め(ADR-0018)で 1 ブロックを刻む GPU の部品(T-0121)。1 グループ = 1 ブロック(WAIT_STEP_THREADS スレッド、
-// 1 スレッド 8 セル)。全部を刻む Compute(multires_step.hlsl)と活性のグラフ(multires_activity_graph.hlsl)が使う。
+// 1 スレッド 8 セル)。全部を刻む Compute(multires_step.hlsl)と活性のグラフ(multires_activity_graph.hlsl。T-0124)が使う。
 // CPU リファレンスは engine/src/sim/multires_nest.cpp の StepBlocks(一様なブロックの評価・StepPagedBlock)と RecordWaitResults。
 // 見出しの書き方: 変わった・頁に広げた・つつかれた(busyTick = この刻みの印)ブロックは busyTick = 印・wakeTick = 印 + 1、
 // 評価して変わらなければ wakeTick = 刻むセルの次に評価の要る刻みの最小。つつかれたブロックは刻む前に起こす段(WakeDue)が
@@ -25,11 +25,6 @@ struct WaitBlockResult {
     uint32_t changed;   // 刻むセルが 1 つでも変わった(0 か 1)
 };
 
-// 今までの丸めで刻むか(伝導の段と覗き窓が移る間だけ。T-0122・T-0124)
-bool IsCutoffRounding() {
-    return (g_stepFlags & MR_STEP_CUTOFF_ROUNDING) != 0;
-}
-
 // この刻みの印(MrChangeMark。64bit)
 uint64_t CurrentChangeMark() {
     return MrChangeMark(FX_U64(g_tickHigh, g_tickLow));
@@ -37,13 +32,9 @@ uint64_t CurrentChangeMark() {
 
 // --- グループの集計 ---
 
-// 64bit の最小(上位・下位 32bit を別々に選ぶ。HW の wakeTick の不具合〔T-0124〕を調べた時の形。どちらでも結果は同じ)
+// 64bit の最小(HW の wakeTick の不具合の原因は RxStepCellWait の飽和する足し算の形だった。T-0124・reaction.hlsli の RxWakeTickOf)
 uint64_t MinTick(uint64_t a, uint64_t b) {
-    const uint32_t aHigh = (uint32_t)(a >> 32);
-    const uint32_t bHigh = (uint32_t)(b >> 32);
-    const bool aSmaller = aHigh < bHigh || (aHigh == bHigh && (uint32_t)a < (uint32_t)b);
-
-    return FX_U64(aSmaller ? aHigh : bHigh, aSmaller ? (uint32_t)a : (uint32_t)b);
+    return a < b ? a : b;
 }
 
 void BeginWaitReduce(uint32_t thread) {
