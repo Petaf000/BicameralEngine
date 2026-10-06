@@ -24,11 +24,17 @@
 - 決めたこと: ADR-0019(近似解の面の流れ + 誤差の判定で止める V サイクル + 安全網)。①との組み合わせは T-0117 で測ってから。
 - 注意: 回数は場の鋭さで変わる(決定的だが費用が一定でない)。D-432 の M2 は方式①のまま。次は T-0117(GPU)。
 
-## 並走で入ったもの: T-0105 研究 遅い反応(wt2 から main へマージ済み、2026-10-06。T-0115 が終わるまで残す)
-- CPU リファレンスまで完了(待ちの丸め ADR-0018・tests/reaction_wait_test.cpp)。世界はまだ今の丸め。GPU の待ちの丸めは HLSL がコンパイルが通るだけ。
-- `-Filter reaction` 5 本が通る(reaction_wait は debug 約 32 秒)。次は T-0115(世界を切り替える。重ければ T-0116)。D-424 の行は T-0115 の完了で「置き換えた」に。
-- 注意: 待ちの関数は RxStepCell の候補集め・望む進行度を複製している。T-0115 で RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION を消して 1 本にする。
-  全部を刻む StepNest も tc(busyTick)を毎刻み書く必要がある(今は POKED のまま)。室温の木箱の木の燃焼は 1 µmol に平均 0.68 年(費用の見積もりに使う)。
+## 並走で入ったもの: T-0115 世界を待ちの丸めに(CPU。ブランチ t-0115 から main へ早送りマージ、2026-10-06。T-0105 の節を置き換えた)
+- 状態: T-0115 完了(CPU)。多重解像度の CPU は既定で待ちの丸め。GPU・仮の世界・覗き窓はまだ今までの丸め(cutoffRounding)。
+- 動いているもの: `job.py build`(debug)・`-Filter "^multires"`(CPU 7 本)・GPU の warp の比較(gpu_multires_warp・_activity_warp・_uniform_warp・_quiet_warp)・
+  gpu_probe_peek・reaction 5 本・float_check。
+- 壊れている/未確認: HW の gpu_multires_*・gpu_multires_conduction・subcycle は流していない(見出しの並びが変わったので T-0121 の最初に流す)。
+  許容差つきで畳んだ時(FoldQuietPages の T-0104 の道)は tc・wakeTick を書き直していない(値の差は許容差の中だが「古い乱数・新しい f」。
+  GPU の T-0112 と見出しを合わせるため。T-0121 で直す)。影の引き戻し(PullBackShadowChain)も tc を書かない(観察だけ。T-0121)。
+- 決めたこと: 上の「決めたこと」(ADR-0018 追記)。
+- 次: T-0121(GPU と仮の世界を待ちの丸めに・起こす compute・RxStepCell と D-424 の下限を消す・眠っている所の費用を GPU で測る)。
+- 注意: debug の assert は Windows でダイアログを出してテストが止まる(ランナーの上限 30 分まで固まる。最初の版の multires_uniform で 1 回固まった。
+  原因は DenseRoots の tc がつつかれたままの値で RxStepCellWait の FX_ASSERT(changedTick < tick) が落ちたと推定〔未確認。直した版は 8 秒で通る〕)。T-0123 でテストの assert を標準エラーに出して止まらないように。
 
 ## 動いているもの(確認方法つき)
 - **テスト(2026-10-06、T-0112)**: 畳む段(multires_tree.hlsl の TreeFoldCheck・TreeFold)とルート定数(25 個に)を変えた。release で
