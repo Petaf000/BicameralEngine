@@ -215,14 +215,16 @@ namespace bicameral::sim {
             if (!MrWantsFoldCheck(block, mark))
                 continue;
 
-            // --- 全部覆われていれば(覆われていないセルが無い)ビット単位の判定のまま ---
-            if (MrFoldValueCell(block) == MR_BLOCK_CELLS) {
-                const std::optional<RxCell> value = ExactFoldValue(nest, slot);
-                if (value)
-                    FoldPage(nest, slot, *value);
-
+            // --- ビット単位で一様ならそのまま畳む(値が変わらないのでつつかない。T-0125)。全部覆われていれば(覆われていないセルが無い)
+            //     ビット単位の判定だけ ---
+            const std::optional<RxCell> exact = ExactFoldValue(nest, slot);
+            if (exact) {
+                FoldPage(nest, slot, *exact);
                 continue;
             }
+
+            if (MrFoldValueCell(block) == MR_BLOCK_CELLS)
+                continue;
 
             const MrFoldStats stats = CollectFoldStats(nest, view, slot);
             if (!MrFoldStatsWithin(stats, tolerance))
@@ -235,6 +237,9 @@ namespace bicameral::sim {
                 AddFoldRemainder(nest, block.level, 1 + stats.species[i], value.amountRemainders[i]);
 
             FoldPage(nest, slot, value.cell);
+
+            // --- セルの値が変わった(反応の速さ f も変わる)ので、つついて tc を書き直す(古い乱数・新しい f にしない。ADR-0018 追記 T-0125)---
+            nest_detail::PokeBlock(nest, slot);
         }
     }
 

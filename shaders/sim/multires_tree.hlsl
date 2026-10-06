@@ -720,11 +720,12 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
         flags |= MR_CLAIM_FOLD_RETURN;
     }
 
-    // --- 畳めるか(全部覆われているか許容差なしならビット単位、そうでなければほぼ同じ)---
+    // --- 畳めるか: まずビット単位(値が変わらない)。違えば、許容差つきで覆われていないセルがあれば、ほぼ同じか(T-0125。
+    //     FoldsExactly はグループで一様な結果)---
     if (MrWantsFoldCheck(block, mark)) {
-        if (MrIsExactFold(tolerance) || MrFoldValueCell(block) == MR_BLOCK_CELLS)
-            flags |= FoldsExactly(block, index) ? MR_CLAIM_FOLD_COPY : 0u;
-        else
+        if (FoldsExactly(block, index))
+            flags |= MR_CLAIM_FOLD_COPY;
+        else if (!MrIsExactFold(tolerance) && MrFoldValueCell(block) != MR_BLOCK_CELLS)
             flags |= FoldsNearly(slot, block, index, tolerance) ? MR_CLAIM_FOLD_WRITTEN : 0u;
     }
 
@@ -742,7 +743,8 @@ uint32_t FoldClaim(uint32_t slot) {
     return claim != MR_NO_CLAIM && (claim & ~7u) == MR_CLAIM_FOLD_BASE ? claim & 7u : 0u;
 }
 
-// 枠 slot を畳む: 一様の値を書き(COPY の時)、頁を空きのスタックの position に積む
+// 枠 slot を畳む: 一様の値を書き(COPY の時)、頁を空きのスタックの position に積む。ほぼ同じで畳んだ(WRITTEN)なら
+// セルの値が変わった(反応の速さ f も変わる)ので、つついて tc を書き直す(CPU の FoldQuietPages。ADR-0018 追記 T-0125)
 void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
     const MrBlock block = g_blocks[slot];
     if ((claim & MR_CLAIM_FOLD_COPY) != 0)
@@ -750,6 +752,8 @@ void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
 
     g_treeWords[FreePageAddress(position)] = block.page;
     g_blocks[slot].page = MR_NO_PAGE;
+    if ((claim & MR_CLAIM_FOLD_WRITTEN) != 0)
+        PokeBlock(slot);
 }
 
 // 調べた頁を畳み、端数の枠を返す(1 グループ。どちらも枠の順に空きのスタックへ。CPU は枠ごとに「返す → 畳む」)

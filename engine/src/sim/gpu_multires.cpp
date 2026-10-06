@@ -748,21 +748,17 @@ namespace bicameral::sim {
         if (!m_activityGraph)
             return false;
 
-        // --- 活性のグラフの反応は待ちの丸めだけ(今までの丸めの反応も入れたノードは RTX 3070 Ti で止まった。T-0124)。
-        //     伝導の段はまだ今までの丸め(T-0125)なので、伝導を入れる刻みだけ今までの丸め ---
-        if (options.conduction != options.cutoffRounding)
+        // --- 活性のグラフと伝導の段の反応は待ちの丸めだけ(今までの丸めの反応も入れたノードは RTX 3070 Ti で止まった。T-0124・T-0125)---
+        if (options.cutoffRounding)
             return false;
 
         SetTick(worldSeed, tick);
-        m_constants.stepFlags = (options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0) |
-                                RoundingFlags(options);
+        m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
 
-        // --- 待ちの丸め: 起こす段がつつかれたブロックの印を直し、起こす刻みが来たブロックをこの刻みの種の一覧へ足す(CPU の StepActive の種。
+        // --- 起こす段がつつかれたブロックの印を直し、起こす刻みが来たブロックをこの刻みの種の一覧へ足す(CPU の StepActive の種。
         //     次の刻みの種は書かない: 刻んだブロックは見出しの wakeTick で起こす。T-0124)---
-        if (!options.cutoffRounding) {
-            m_activityWrite = m_activityCurrent;
-            RecordWake(list, debugRing, STEP_FLAG_WAKE_SEEDS);
-        }
+        m_activityWrite = m_activityCurrent;
+        RecordWake(list, debugRing, STEP_FLAG_WAKE_SEEDS);
 
         const uint32_t next = m_activityCurrent ^ 1u;
         ID3D12Resource* input = m_activity[m_activityCurrent].Get();
@@ -814,10 +810,11 @@ namespace bicameral::sim {
 
     void GpuMultires::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
-        FX_ASSERT(!options.conduction || options.cutoffRounding);  // 伝導の段はまだ今までの丸め(T-0125)
+        FX_ASSERT(!options.conduction || !options.cutoffRounding);  // 伝導の段は待ちの丸めだけ(T-0125)
         SetTick(worldSeed, tick);
         m_constants.stepFlags = (options.conduction ? STEP_FLAG_CONDUCTION : 0) | RoundingFlags(options);
         if (options.conduction) {
+            RecordWake(list, debugRing, 0);                              // つつかれたブロックの印を直す
             RecordConduction(list, debugRing, options, ACTIVITY_LISTS);  // 全部を刻むので起こさない
             return;
         }

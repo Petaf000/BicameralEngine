@@ -55,6 +55,10 @@ namespace bicameral::sim {
                 for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
                     CellAt(nest, shadowSlot, MrChildCell(local, j)) = pulled.cells[j];
             }
+
+            // --- セルの値が変わりうるので、つついた印にして次の刻みに tc を書き直す(ADR-0018 追記 T-0125)。
+            //     観察の枠は種の一覧に入れない(活性でも全部刻む。D-403)---
+            nest.blocks[shadowSlot].busyTick = MR_BUSY_POKED;
         }
 
         // --- 256bit の足し算(保存量の合計)---

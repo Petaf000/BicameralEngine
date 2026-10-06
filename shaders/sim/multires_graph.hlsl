@@ -295,6 +295,11 @@ void PullBackNode(DispatchNodeInputRecord<MrChainRecord> input, uint32_t thread 
     for (uint32_t k = 0; k < MR_CHILDREN_PER_CELL; ++k)
         g_cells[PageCellAddress(shadow.page, MrChildCell(thread, k))] = pulled.cells[k];
 
+    // --- セルの値が変わりうるので、つついた印にして次の刻みに tc を書き直す(CPU の PullBackLevel。ADR-0018 追記 T-0125。
+    //     観察の枠は種の一覧に入れない)---
+    if (thread == 0)
+        g_blocks[record.slot].busyTick = MR_BUSY_POKED;
+
     // --- 次のレベル ---
     Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC);
     const bool recurse = record.levelsLeft > 1;

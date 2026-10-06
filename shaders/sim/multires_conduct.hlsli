@@ -5,12 +5,15 @@
 //
 // 1 刻みの順(gpu_multires.cpp の RecordConduction。CPU の StepBlocks と同じ):
 //   1. 刻むブロックを決める(全部: 使っている枠 / 活性: Work Graph の ActivityStepNode が伝導の一覧に足す)
-//   2. ConductMarkBlock: 一様で反応が進む・面の流れがある → 頁に広げる印(MR_PAGE_WANTED)。粗い側へ送るなら相手にも頁の印と
-//      端数の印(活性なら相手も伝導の一覧へ)。どれも「端数の枠がある」とした場合の流れで決める
+//   2. ConductMarkBlock: 一様で反応が進む(待ちの丸め。起こす刻みが来た時だけ評価し、変わらなければ起こす刻みを書く)・面の流れがある
+//      → 頁に広げる印(MR_PAGE_WANTED)。粗い側へ送るなら相手にも頁の印と端数の印(活性なら相手も伝導の一覧へ)。
+//      どれも「端数の枠がある」とした場合の流れで決める
 //   3. TreeExpand(頁を枠の順に。足りなければ凍らせる印)→ TreeFractions(端数の枠を枠の順に)(multires_tree.hlsl)
 //   4. ConductPrepareBlock: 配った頁を一様の値で埋め、配った端数の枠を空にする
 //   5. ConductFlowsBlock: 刻むブロックのセルの面の流れを変化に足す(刻みの初めのセルから。Jacobi 型)
-//   6. ConductApplyBlock: 変化を足してから反応。活性なら忙しさの印と次の刻みの種
+//   6. ConductApplyBlock: 変化を足してから反応(待ちの丸め)。見出しの busyTick(tc)・wakeTick を CPU の RecordWaitResults と同じに書く
+// 反応は待ちの丸めだけ(ADR-0018。T-0125)。刻む前に起こす段(multires_step.hlsl の WakeDue)がつつかれたブロックの印を直してある。
+// 次の刻みの種は書かない(変わったブロックは wakeTick = 次の刻みで、起こす段が種にする)。
 // 細かいレベルの刻み(T-0109。CPU の StepConduction): 2〜5 を小刻みごとに繰り返す(小刻みの番号は stepFlags。gpu_multires.cpp の
 // RecordConduction が最大回数 4^maxSubcycleGap を積み、その小刻みに始まるレベルが無ければ段は空で抜ける)。印と流れはその小刻みに
 // 始まるレベルのブロックだけ。最後の小刻みの手前までは、その後に ConductEndBlock(小刻みが終わるレベルに溜めた変化を足す。
@@ -22,6 +25,7 @@
 
 #include "common/multires_conduction.hlsli"
 #include "sim/multires_bindings.hlsli"
+#include "sim/multires_wait_step.hlsli"
 
 // 印・流れ・足して反応の段は 1 スレッド = 1 セル(T-0111)。64 スレッドで 8 セルずつ順に計算すると、小刻み 1 回が 1 ブロックの直列の遅延
 // (約 0.54 ms)で決まっていた。中身の軽い段(埋める・小刻みの終わり)は 64 スレッドのまま(空で抜けるグループを投げる費用がスレッドの数に比例する)
@@ -31,7 +35,9 @@ static const uint32_t CONDUCT_LIGHT_THREADS = 64;
 static const uint32_t CONDUCT_LIGHT_CELLS_PER_THREAD = MR_BLOCK_CELLS / CONDUCT_LIGHT_THREADS;
 
 groupshared uint32_t gs_conductAny;       // 流れ・変化があった(グループの OR)
-groupshared uint32_t gs_conductPossible;  // 進める規則があった(グループの OR)
+groupshared uint32_t gs_conductReacts;    // 一様なブロックの反応でセルが変わる(グループの OR)
+groupshared uint32_t gs_conductWakeHigh;  // 起こす刻みのグループの最小(上位・下位 32bit。GroupMinTick)
+groupshared uint32_t gs_conductWakeLow;
 
 // 自分のブロックのセルの熱と、ブロックの外の面の先(T-0111)。印と流れの段の初めに、セルの熱(MrCellThermal)を 1 セル 1 回、
 // ブロックの面の外の隣(MrFindFaceNeighbor の索引引きとその熱)を面のセル 1 つに 1 回だけ、別々のスレッドで計算し、面ごとの計算はここを読む。
@@ -64,9 +70,34 @@ void OrGroupAny(bool value) {
         InterlockedOr(gs_conductAny, 1u);
 }
 
-void OrGroupPossible(bool value) {
+void OrGroupReacts(bool value) {
     if (WaveActiveAnyTrue(value) && WaveIsFirstLane())
-        InterlockedOr(gs_conductPossible, 1u);
+        InterlockedOr(gs_conductReacts, 1u);
+}
+
+// グループの 64bit の最小(全部のスレッドが呼ぶ。グループで一様な所で)。上位 32bit の最小を取り、その上位を持つスレッドの下位の最小を取る
+// (どちらも順によらない。64bit の atomic とウェーブの演算を避ける。HW の 64bit の不具合は T-0124)
+uint64_t GroupMinTick(uint32_t thread, uint64_t value) {
+    if (thread == 0) {
+        gs_conductWakeHigh = 0xFFFFFFFFu;
+        gs_conductWakeLow = 0xFFFFFFFFu;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t high = (uint32_t)(value >> 32);
+    const uint32_t waveHigh = WaveActiveMin(high);
+    if (WaveIsFirstLane())
+        InterlockedMin(gs_conductWakeHigh, waveHigh);
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t low = high == gs_conductWakeHigh ? (uint32_t)value : 0xFFFFFFFFu;
+    const uint32_t waveLow = WaveActiveMin(low);
+    if (WaveIsFirstLane())
+        InterlockedMin(gs_conductWakeLow, waveLow);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    return FX_U64(gs_conductWakeHigh, gs_conductWakeLow);
 }
 
 bool IsFrozenSlot(uint32_t slot) {
@@ -265,15 +296,49 @@ bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
     return sends || sameLevelOutflow != 0;
 }
 
+// 一様なブロックの刻むセルを待ちの丸めで評価する(CPU の StepBlocks の初めの MrUniformWaitOf。1 スレッド = 1 セル)。
+// 変わるなら gs_conductReacts に OR し、スレッドの受け持つセルの起こす刻みの最小を返す
+uint64_t EvaluateUniformCells(uint32_t slot, MrBlock block, uint32_t thread) {
+    const RxCell value = g_cells[slot];
+    const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
+    const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
+    uint64_t wakeTick = RX_WAIT_NEVER;
+    bool changes = false;
+    for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
+        const uint32_t index = thread + (CONDUCT_THREADS * k);
+        if (!MrIsSteppedCell(block, index))
+            continue;
+
+        const RxWaitStep step = MrStepCellWait(MakeTable(), value, seed, tick, block, index);
+        wakeTick = MinTick(wakeTick, step.wakeTick);
+        changes = changes || !MrSameCell(step.cell, value);
+    }
+
+    OrGroupReacts(changes);
+
+    return wakeTick;
+}
+
+// 一様なブロックの反応を評価するか: 最初の小刻みで、起こす刻みが来た(つつかれた = busyTick がこの刻みの印、も)
+// (CPU は小刻みの前に 1 回。起こす段 WakeDue がつつかれたブロックの wakeTick を印 + 1 にしてあるので busyTick も見る)
+bool EvaluatesUniform(MrBlock block) {
+    const uint64_t mark = CurrentChangeMark();
+
+    return MrIsUniform(block) && CurrentSubstep() == 0 && (block.wakeTick <= mark || block.busyTick == mark);
+}
+
 // 刻むブロック 1 つ: 一様で反応が進むか流れがあれば頁に広げる印(CPU の StepBlocks の最初と MarkBlockWants)。
-// この小刻みに小刻みが始まるレベルのブロックだけ。反応が進むかを見るのは最初の小刻みだけ(CPU は小刻みの前に 1 回。T-0109)
+// この小刻みに小刻みが始まるレベルのブロックだけ。反応を評価するのは最初の小刻みだけ(T-0109)。評価して変わらない一様なブロックは
+// 起こす刻みを書く(CPU の RecordWaitResults。後で頁に広げたら ConductApplyBlock が書き直す)
 void ConductMarkBlock(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
     if (!IsConductStepped(slot, block) || !SubstepBegins(block.level))
         return;
 
-    if (thread == 0)
+    if (thread == 0) {
         gs_conductAny = 0;
+        gs_conductReacts = 0;
+    }
 
     CacheBlockFaces(slot, block, thread);
     GroupMemoryBarrierWithGroupSync();
@@ -286,14 +351,22 @@ void ConductMarkBlock(uint32_t slot, uint32_t thread) {
 
     OrGroupAny(flows);
 
-    GroupMemoryBarrierWithGroupSync();
+    // --- 一様なブロックの反応(グループで一様な分岐)---
+    const bool evaluates = EvaluatesUniform(block);
+    uint64_t wakeTick = RX_WAIT_NEVER;
+    if (evaluates)
+        wakeTick = GroupMinTick(thread, EvaluateUniformCells(slot, block, thread));
+    else
+        GroupMemoryBarrierWithGroupSync();
+
     if (thread != 0 || !MrIsUniform(block))
         return;
 
-    const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
-    const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
-    const bool firstSubstep = CurrentSubstep() == 0;
-    if (gs_conductAny != 0 || (firstSubstep && MrUniformWouldChange(MakeTable(), g_cells[slot], seed, tick, block)))
+    const bool reacts = evaluates && gs_conductReacts != 0;
+    if (evaluates && !reacts)
+        FinishWaitBlock(slot, 0, wakeTick);
+
+    if (gs_conductAny != 0 || reacts)
         g_blocks[slot].page = MR_PAGE_WANTED;
 }
 
@@ -374,10 +447,6 @@ void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
 
 // --- 6. 変化を足して反応 -------------------------------------------------------------------------
 
-// セル 1 つ: 変化を足し(読んだら 0 に戻す)、react なら反応を進める。変わったら STEP_CHANGED・進める規則があれば STEP_POSSIBLE
-static const uint32_t CONDUCT_STEP_POSSIBLE = 1;
-static const uint32_t CONDUCT_STEP_CHANGED = 2;
-
 // セル 1 つに溜めた伝導の変化を足して 0 に戻す(CPU の ApplyEnergyDelta。端数は g_fractions にも書く)。足したら true
 bool ApplyCellDelta(MrBlock block, uint32_t index, inout RxCell cell, inout MrFraction fraction) {
     const uint32_t deltaAddress = ConductDeltaAddress(block.page, index);
@@ -403,7 +472,8 @@ bool ApplyCellDelta(MrBlock block, uint32_t index, inout RxCell cell, inout MrFr
     return true;
 }
 
-uint32_t ApplyCell(uint32_t slot, MrBlock block, uint32_t index, bool react) {
+// セル 1 つ: 変化を足し(読んだら 0 に戻す)、react なら待ちの丸めで反応を進め、起こす刻みを wakeTick の最小に入れる。変わったら true
+bool ApplyCell(MrBlock block, uint32_t index, bool react, inout uint64_t wakeTick) {
     const uint32_t address = PageCellAddress(block.page, index);
     RxCell cell = g_cells[address];
     const RxCell before = cell;
@@ -413,58 +483,50 @@ uint32_t ApplyCell(uint32_t slot, MrBlock block, uint32_t index, bool react) {
     // --- 伝導の変化(最後の小刻みの分)---
     ApplyCellDelta(block, index, cell, fraction);
 
-    // --- 反応 ---
-    uint32_t result = 0;
+    // --- 反応(tc は刻みの初めの見出しの busyTick。CPU の StepPagedBlock)---
     if (react) {
         const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
         const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
-        const RxCellStep step = MrStepCellDetailed(MakeTable(), cell, seed, tick, block, index);
-        result |= step.possible != 0 ? CONDUCT_STEP_POSSIBLE : 0u;
+        const RxWaitStep step = MrStepCellWait(MakeTable(), cell, seed, tick, block, index);
+        wakeTick = MinTick(wakeTick, step.wakeTick);
         cell = step.cell;
     }
 
     g_cells[address] = cell;
-    if (MrCellChanged(before, cell) || fraction.energy != fractionBefore)
-        result |= CONDUCT_STEP_CHANGED;
 
-    return result;
+    return MrCellChanged(before, cell) || fraction.energy != fractionBefore;
 }
 
-// 頁を持つブロック 1 つ(CPU の StepPagedBlock)。活性なら、世界の枠の忙しさの印と次の刻みの種(CPU の StepActive の後ろ)
+// 頁を持つブロック 1 つ(CPU の StepPagedBlock)と、見出しの busyTick・wakeTick(CPU の RecordWaitResults の 1 ブロック分。
+// 観察の枠も)。変わった・どこかの小刻みで変わった・頁を配った(刻みの印だけ見る。T-0109)なら busyTick = この刻みの印・
+// wakeTick = 次の刻み、刻んで変わらなければ wakeTick = 刻むセルの最小
 void ConductApplyBlock(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
     if (MrIsUniform(block))
         return;
 
-    if (thread == 0) {
+    if (thread == 0)
         gs_conductAny = 0;
-        gs_conductPossible = 0;
-    }
 
     GroupMemoryBarrierWithGroupSync();
     const bool react = IsConductStepped(slot, block);
-    uint32_t results = 0;
+    bool changed = false;
+    uint64_t wakeTick = RX_WAIT_NEVER;
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
         if (MrIsSteppedCell(block, index))
-            results |= ApplyCell(slot, block, index, react);
+            changed = ApplyCell(block, index, react, wakeTick) || changed;
     }
 
-    OrGroupAny((results & CONDUCT_STEP_CHANGED) != 0);
-    OrGroupPossible((results & CONDUCT_STEP_POSSIBLE) != 0);
-
-    GroupMemoryBarrierWithGroupSync();
-    if (thread != 0 || !IsListedStep() || slot >= g_worldBlocks)
+    OrGroupAny(changed);
+    const uint64_t blockWakeTick = GroupMinTick(thread, wakeTick);
+    if (thread != 0)
         return;
 
-    // --- 変わった・頁に広げたら忙しい(T-0101・T-0103)。進める規則があった・変わったら次の刻みの種(T-0019)。
-    //     小刻みの終わりに変わった・どこかの小刻みで頁を配ったのも数える(刻みの印だけ見る。T-0109)---
-    const bool changed = gs_conductAny != 0 || HasConductMark(slot, CONDUCT_MARK_CHANGED);
-    if (changed || HasConductMark(slot, CONDUCT_MARK_EXPANDED))
-        g_blocks[slot].busyTick = CurrentStepMark();
-
-    if (changed || gs_conductPossible != 0)
-        AppendSeedOnce(slot);
+    const bool blockChanged = gs_conductAny != 0 || HasConductMark(slot, CONDUCT_MARK_CHANGED) ||
+                              HasConductMark(slot, CONDUCT_MARK_EXPANDED);
+    if (react || blockChanged || block.busyTick == CurrentChangeMark())
+        FinishWaitBlock(slot, blockChanged ? 1u : 0u, blockWakeTick);
 }
 
 // --- 6a. 小刻みの終わり(最後の小刻みの手前まで。T-0109。CPU の ApplyEndingDeltas と WakeChangedBlocks)--------------------
