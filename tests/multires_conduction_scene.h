@@ -1,5 +1,5 @@
 // multires_conduction_scene.h — 木の上の熱の伝導のテスト(tests/multires_conduction_test.cpp・gpu_multires_conduction_test.cpp)の
-// 鎖の場面(T-0019・T-0107)。根 2×2×2(300 K の空気・一様)の真ん中の角のすぐ内側に 6 段の鎖を細かくし、
+// 鎖の場面(T-0019・T-0107)と、細かいレベルの刻みの試験の設定(T-0108・T-0109)。根 2×2×2(300 K の空気・一様)の真ん中の角のすぐ内側に 6 段の鎖を細かくし、
 // いちばん細かいブロック(一様)を 1500 K にして種にする。熱は細かい所から粗い所へ、レベルをまたいで根まで流れる。
 #pragma once
 
@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+#include "common/multires_conduction.hlsli"
 #include "multires_test_scene.h"
 
 namespace bicameral::test {
@@ -105,6 +106,18 @@ namespace bicameral::test {
     inline sim::MultiresNest MakeChainNest(const sim::BakedReactionTable& table, uint32_t fractions) {
         return MakeChainNest(
             table, MakeMultiresCapacity(table, CHAIN_ROOTS + static_cast<uint32_t>(CHAIN_LEVELS) + 2, 0, fractions));
+    }
+
+    // 細かいレベルの熱の刻み(T-0108・T-0109)の試験の設定。基準は試験の表で面の係数が頭打ちにならない最後のレベルの、空気と木箱の
+    // 小さい方(最も伝わりやすい物質で決める。試験の表では 2)
+    inline sim::MultiresStepOptions SubcycleTestOptions(const sim::BakedReactionTable& table, uint32_t maxGap) {
+        const sim::ReactionTableView view = table.View();
+        const multires::MrThermal air = multires::MrCellThermal(view, MakeConductionAir(table, 300000));
+        const multires::MrThermal crate = multires::MrCellThermal(
+            view, MakeMultiresRootCells(table)[multires::MrCellIndex(3, 4, 5)]);
+        const int32_t base = std::min(multires::MrSubcycleBaseLevel(air), multires::MrSubcycleBaseLevel(crate));
+
+        return {.conduction = true, .subcycleBaseLevel = base, .maxSubcycleGap = maxGap};
     }
 
 }  // namespace bicameral::test

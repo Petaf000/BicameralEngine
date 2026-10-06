@@ -43,17 +43,9 @@ namespace {
     constexpr uint32_t MAX_GAP = MULTIRES_MAX_SUBCYCLE_GAP;  // 小刻みは最大 4^3 = 64 回(17 §4)
     constexpr uint64_t TOTALS_EVERY = 4;                     // 保存量の合計(256bit。debug で重い)を確かめる刻みの間隔
 
-    // 試験の表で面の係数が頭打ちにならない最後のレベル(空気と木箱の小さい方。最も伝わりやすい物質で決める)
-    int32_t TestBaseLevel(const BakedReactionTable& table) {
-        const ReactionTableView view = table.View();
-        const MrThermal air = MrCellThermal(view, test::MakeConductionAir(table, 300000));
-        const MrThermal crate = MrCellThermal(view, test::MakeMultiresRootCells(table)[MrCellIndex(3, 4, 5)]);
-
-        return std::min(MrSubcycleBaseLevel(air), MrSubcycleBaseLevel(crate));
-    }
-
+    // 試験の表の小刻みの設定(基準は空気と木箱の小さい方。tests/multires_conduction_scene.h)
     MultiresStepOptions SubcycleOptions(const BakedReactionTable& table, uint32_t maxGap) {
-        return {.conduction = true, .subcycleBaseLevel = TestBaseLevel(table), .maxSubcycleGap = maxGap};
+        return test::SubcycleTestOptions(table, maxGap);
     }
 
     // --- 物差し: 余弦の温度の山の減り方 ---

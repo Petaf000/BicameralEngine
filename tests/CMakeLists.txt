@@ -139,6 +139,9 @@ target_link_libraries(gpu_multires_conduction_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_conduction gpu_multires_conduction_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_multires_conduction_warp gpu_multires_conduction_test warp --warp --queue compute)
 set_tests_properties(gpu_multires_conduction gpu_multires_conduction_warp PROPERTIES TIMEOUT 900)  # debug で活性のグラフの作成に数分
+bicameral_add_gpu_test_case(gpu_multires_subcycle gpu_multires_conduction_test gpu --queue compute --subcycle)  # 細かいレベルの熱の刻み(T-0109)
+bicameral_add_gpu_test_case(gpu_multires_subcycle_warp gpu_multires_conduction_test warp --warp --queue compute --subcycle)
+set_tests_properties(gpu_multires_subcycle gpu_multires_subcycle_warp PROPERTIES TIMEOUT 2400)  # CPU の小刻み 64 回が重い
 
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)

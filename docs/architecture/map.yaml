@@ -288,7 +288,7 @@ views:
           note: "StepNest / StepActive の options.conduction(GPU は GpuMultires::RecordConduction。T-0107)。流れのある一様なブロックを頁に広げ、端数の枠を枠の順に配り、刻みの初めのセルから面の流れを足す(Jacobi 型)" }
       - { id: multiressubcycle, group: simlib, label: "StepConduction<br/>細かいレベルの熱の刻み(レベルごとの小刻み・粗い刻みの終わりに受け渡す)",
           code: "engine/src/sim/multires_conduction.cpp::StepConduction", ticket: T-0108, doc: docs/design/17-multiresolution.md,
-          note: "options.maxSubcycleGap(既定 0 = 分けない)。レベル k を 1 刻みに 4^σ 回(σ ≤ 3)。粗い側の値は粗い小刻みの初めのまま、細かい側の流れの合計を終わりに 1 回で受ける(Berger–Colella の refluxing)。活性は小刻みで変わったブロックの隣を起こす。GPU は T-0109" }
+          note: "options.maxSubcycleGap(既定 0 = 分けない)。レベル k を 1 刻みに 4^σ 回(σ ≤ 3)。粗い側の値は粗い小刻みの初めのまま、細かい側の流れの合計を終わりに 1 回で受ける(Berger–Colella の refluxing)。活性は小刻みで変わったブロックの隣を起こす。GPU は RecordSubstepEnd(T-0109)" }
       - { id: subcycletest, group: tests, label: "multires_subcycle_test<br/>物差し(レベルごとの実効の拡散率)・分けても保存量と活性 = 全部",
           code: "tests/multires_subcycle_test.cpp::MeasureStick", ticket: T-0108 }
       - { id: multiresconductionhlsl, group: shared, label: "multires_conduction.hlsli<br/>面の隣・レベルの単位の係数・違うレベルの受け渡し",
@@ -299,11 +299,14 @@ views:
       - { id: gpuconduction, group: simlib, label: "RecordConduction<br/>熱の伝導の GPU の段(印 → 頁 → 端数の枠 → 流れ → 足して反応)",
           code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordConduction", ticket: T-0107, doc: docs/design/17-multiresolution.md,
           note: "Compute の段 shaders/sim/multires_conduct.hlsl(1 グループ = 1 ブロック)。活性の刻みは Work Graph が伝導の一覧に足し、段はその一覧だけ。変化は 64bit の atomic の足し算" }
+      - { id: gpusubcycle, group: simlib, label: "RecordSubstepEnd<br/>細かいレベルの熱の刻みの GPU(小刻みの終わりに足して隣を起こす)",
+          code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordSubstepEnd", ticket: T-0109, doc: docs/design/17-multiresolution.md,
+          note: "RecordConduction が小刻みを 4^maxSubcycleGap 回積む(印 → 頁 → 端数の枠 → 埋める → 流れ。始まるレベルが無ければ段は空)。小刻みの終わりは ConductEnd が終わるレベルに足し、活性なら変わったブロックの一覧で活性のグラフ(ActivitySeedNode)を投げて面の隣を起こす" }
       - { id: gpuconductionhlsl, group: shared, label: "multires_conduct.hlsli<br/>1 ブロックの印・流れ・足す(Compute と Work Graph で共有)",
           code: "shaders/sim/multires_conduct.hlsli::AddCellFlows", ticket: T-0107, doc: docs/design/17-multiresolution.md }
       - { id: gpuconductiontest, group: tests, label: "gpu_multires_conduction_test<br/>鎖・たくさんの要求の伝導を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_conduction_test.cpp::RunScene", ticket: T-0107,
-          note: "全部 / 活性(伝導の段が Compute / Work Graph)。HW・WARP。release では Compute と Work Graph の時間も測る(D-302)" }
+          note: "全部 / 活性(伝導の段が Compute / Work Graph)。HW・WARP。release では Compute と Work Graph の時間も測る(D-302)。--subcycle で小刻み 64 回(T-0109)" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -411,6 +414,8 @@ views:
       - [subcycletest, multiressubcycle]
       - [gpumultires, gpuconduction, "options.conduction"]
       - [gpuconduction, gpuconductionhlsl]
+      - [gpuconduction, gpusubcycle, "小刻み"]
+      - [gpusubcycle, multiressubcycle, "同じ結果"]
       - [gpuconductionhlsl, multiresconductionhlsl, "CPU と同じ式"]
       - [gpuconductiontest, gpuconduction]
       - [quiettest, gpumultires, "毎刻み比べる"]

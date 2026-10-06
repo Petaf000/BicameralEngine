@@ -124,7 +124,7 @@ foreach(_entry IN ITEMS TreeResolve TreeSettle TreeAllocate TreeRelease TreeClea
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/multires_tree.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME multires_${_snake})
 endforeach()
-foreach(_entry IN ITEMS ConductBegin ConductMark ConductPrepare ConductFlows ConductApply)  # 熱の伝導の段(T-0107)
+foreach(_entry IN ITEMS ConductBegin ConductMark ConductPrepare ConductFlows ConductApply ConductEnd)  # 熱の伝導の段(T-0107・小刻みの終わり T-0109)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/multires_conduct.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME multires_${_snake})

@@ -4,6 +4,8 @@
 // 一様なブロックは ActivityStepNode が値 1 つで反応が進むかを調べ、進むなら頁に広げる印を付けるだけ(頁は枠の順に配るので、
 // 順の決まらないこのグラフの中では配らない)。TreeExpand の後、ExpandStepNode が埋めて刻む。CPU リファレンスは engine/src/sim/multires_activity.cpp の StepActive(同じ関数)。
 // 刻むノードは進める反応の規則があったブロックを次の刻みの種の一覧(u13)へ書き足す。
+// 細かいレベルの熱の刻み(T-0109)では、小刻みの終わりに変わったブロックの一覧を GPU の入力にして ActivitySeedNode をもう一度投げ、
+// 面の隣を起こす(stepFlags の MR_STEP_SUBSTEP_WAKE。CPU の WakeChangedBlocks)。
 // 熱の伝導を入れる刻み(T-0107)では、刻むノードは伝導の一覧(MR_GRAPH_INPUT_CONDUCT_*)に足すだけで、刻むのは multires_conduct.hlsl の段。
 // セルが変わったブロックと、つつかれた種には忙しさの印(busyTick)を書く(静かな葉を粗くする要求の元。T-0101)。
 // 木の管理のグラフ(multires_graph.hlsl)と分けたのは、反応の核を含んで大きく(debug の GPU-based validation の計装が数分かかる)、
@@ -111,7 +113,8 @@ void ActivitySeedNode(DispatchNodeInputRecord<MrSlotRecord> input, uint32_t thre
     wake.descend = MR_NO_BLOCK;
     if (valid && thread == MR_WAKE_CHECKS) {
         wake.schedule = slot;
-        if (g_blocks[slot].busyTick == MR_BUSY_POKED)
+        const bool substepWake = (g_stepFlags & MR_STEP_SUBSTEP_WAKE) != 0;  // 小刻みの終わりに起こす時は直さない(T-0109)
+        if (!substepWake && g_blocks[slot].busyTick == MR_BUSY_POKED)
             g_blocks[slot].busyTick = CurrentMark();  // つつかれた刻みの印にする(T-0101)
     } else if (valid && thread < MR_WAKE_CHECKS)
         wake = MrWakeAcross(MakeTree(), g_blocks[slot], thread / MR_FACES, face, g_rootLevel);

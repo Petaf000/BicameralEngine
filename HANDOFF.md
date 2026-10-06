@@ -1,60 +1,63 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-06 / チケット: T-0108 細かいレベルの熱の刻み — 完了(CPU リファレンスと物差し。GPU は T-0109 に分けた)
+最終更新: 2026-10-06 / チケット: T-0109 細かいレベルの熱の刻みを GPU に — 完了(予算超えの速さは T-0111 に分けた)
 
 ## 状態(3 行以内)
-- レベルごとの小刻み(Berger–Colella の refluxing の形)を CPU に入れた: `MultiresStepOptions{.conduction, .subcycleBaseLevel, .maxSubcycleGap}`(既定 0 = 分けない = 前と同じ)。
-- 物差し(tests/multires_subcycle_test.cpp): 実効の拡散率 ÷ 本当の値が、分けないとレベル 3 で 0.264・以後 1/4 ずつ → 分けると基準 + 3(レベル 5)まで 0.996。保存量ビット一致・活性 = 全部。
-- 次は T-0109(GPU)。Δk > 3 は D-432 で「①で進め、方式②は研究 T-0110 を並走」に決まった。
+- GPU の RecordStep・RecordStepActive が `MultiresStepOptions{.subcycleBaseLevel, .maxSubcycleGap}` を受ける。小刻みごとに段を積み、鎖・たくさんの要求(基準 2・Δkmax 3)で HW・WARP(debug・release)が毎刻み CPU とビット一致。
+- 計測: 空の小刻み 1 回は 19〜44 µs。いちばん細かいレベルが流れる小刻みは 1 回約 0.54 ms(遅延)で、Δkmax 3 の鎖は 34 ms/刻み → 予算超え。上限は下げずに T-0111 で遅延を縮める。
+- 次は T-0111。
 
-## 並走で入ったもの: T-0105 研究 遅い反応(.worktrees/wt2 のブランチ t-0105 から main へ早送りマージ、2026-10-06)
-- 状態: T-0105(研究)は CPU リファレンスまで完了。待ちの丸め(ADR-0018)で、眠らせても全部とビット一致・10 年分が ±5σ。世界はまだ今の丸め。
-- 動いているもの: `job.py build`(debug)・`-Filter reaction` 5 本(reaction・reaction_contention・reaction_wait〔debug 約 32 秒〕・gpu_reaction〔HW・WARP〕)・tidy 警告なし・archmap OK。
-- 壊れている/未確認: GPU で待ちの丸めを動かしていない(HLSL はコンパイルが通るだけ。テンプレートの関数は HLSL でまだ実体化していない)。
-  log2 を 2 回 / 規則の費用は未測定。待ちが約 2^61 刻みを超える引きは「起きない」。
-- 決めたこと: ADR-0018(Claude。D-429 の実装の細部): 進行度 = 整数部 + [t ≥ tc + n]、tc はブロックの最後に変わった刻み、n は幾何分布(乱数は tc で決まる)。
-  速さを変えるもの(魔法のパッチ)は tc を書いてから評価。取り合いの丸めは今のまま。端数・刻みは 64bit。
-- 次: T-0115(世界を切り替える。下の「分けたチケット」)。ROADMAP に T-0115・T-0116 を足す。D-424 の行は T-0115 の完了で「置き換えた」にする。
-- 注意: 新しい待ちの関数は RxStepCell の候補集め・望む進行度を複製している(RxComputeRuleRate は RxDesiredExtent と同じ反応物の読み方)。
-  T-0115 で RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION を消して 1 本にする。全部を刻む StepNest も tc(busyTick)を毎刻み書く必要がある(今は POKED のまま)。
-  試験の表の室温の木箱は木の燃焼が 1 µmol に平均 0.68 年(下限を外すと、室温の木のセルは数か月に 1 回起きる。費用の見積もりに使う)。
+## 並走で入ったもの: T-0105 研究 遅い反応(wt2 から main へマージ済み、2026-10-06。T-0115 が終わるまで残す)
+- CPU リファレンスまで完了(待ちの丸め ADR-0018・tests/reaction_wait_test.cpp)。世界はまだ今の丸め。GPU の待ちの丸めは HLSL がコンパイルが通るだけ。
+- `-Filter reaction` 5 本が通る(reaction_wait は debug 約 32 秒)。次は T-0115(世界を切り替える。重ければ T-0116)。D-424 の行は T-0115 の完了で「置き換えた」に。
+- 注意: 待ちの関数は RxStepCell の候補集め・望む進行度を複製している。T-0115 で RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION を消して 1 本にする。
+  全部を刻む StepNest も tc(busyTick)を毎刻み書く必要がある(今は POKED のまま)。室温の木箱の木の燃焼は 1 µmol に平均 0.68 年(費用の見積もりに使う)。
 
 ## 動いているもの(確認方法つき)
-- `job.py build`(debug)・`python3 tools/archmap/archmap.py --check` OK(111)。
-- 足したテスト multires_subcycle(CPU、debug で約 9 分: 物差し 7 秒・鎖 85 秒・たくさんの要求 8 刻み × 2 回で約 7 分)。
-- **全部のテスト 68 本が通る(2026-10-06、debug)**・tidy 警告なし。
-  `job.py test` は分けて投げる: `-Filter "^gpu_multires(_warp|_activity|_activity_warp|_quiet|_quiet_warp|_uniform|_uniform_warp)?$"`(約 14 分)/ `-Filter gpu_multires_conduction`(約 16 分)/
-  `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`。約 25 分)と `-Filter reaction`。
-  `--timeout 2400` で裏で投げ、runner/logs/<job>-test.log を grep して待つ。テストの表示した行は `-Show` で出る(または out/build/debug/Testing/Temporary/LastTest.log)。
+- `job.py build`(debug・release)・`python3 tools/archmap/archmap.py --check` OK(114)。
+- 足したテスト gpu_multires_subcycle・gpu_multires_subcycle_warp(gpu_multires_conduction_test --subcycle。debug の HW 約 13 分・release の WARP 約 9 分。CPU の小刻み 64 回が重い)。
+- **テスト(2026-10-06、debug)**: 変更が触る所を全部流して 41 本通過(gpu_multires の 8 本・gpu_multires_conduction 2 本・gpu_multires_subcycle 2 本・gpu_probe と window_replay 13 本・
+  multires の CPU・reaction・float_check 16 本)。release でも gpu_multires_conduction・gpu_multires_subcycle(_warp)が通る。多重解像度を使わない 29 本(smoke・fixed・physics など)は
+  今回は流していない(変更が触らない。T-0105 のマージ後の reaction 5 本は最初に通ることを確かめた)。tidy 警告なし。
+  `job.py test` は分けて投げる: `-Filter "^gpu_multires(_warp|_activity|_activity_warp|_quiet|_quiet_warp|_uniform|_uniform_warp)?$"`(約 14 分)/ `-Filter ^gpu_multires_conduction`(約 16 分)/
+  `-Filter gpu_multires_subcycle`(debug で 30 分前後)/ `-Filter "gpu_probe|window_replay"`(約 20 分)/ 残り(`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|gpu_fixed|gpu_physics|gpu_work_graph|gpu_debug|float_check)"`。約 25 分)と `-Filter reaction`。
+  `--timeout 2400` で裏で投げ、runner/logs/<job>.result.json を待つ。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **細かいレベルの熱の刻み(T-0108)は CPU だけ**。GPU の RecordStep / RecordStepActive は maxSubcycleGap = 0 だけ受ける(FX_ASSERT。T-0109)。
-- 基準 + 3 段より細かい所は今までどおり 1 段ごとに約 1/4 遅い(試験の表でレベル 6 以上、現実の空気ならレベル 12 以上)。方式②はユーザーの判断待ち(docs/plan/QUESTIONS.md Q1)。
-- 基準(subcycleBaseLevel)は呼ぶ側が渡す値で、表から自動では決めていない(テストは空気と木箱の MrSubcycleBaseLevel の小さい方 = 2)。ゲームの表を作る時(T-0021)にベイクで決める。
-- 伝導で粗い側が取った端数の枠は木の変更でしか返らない。たくさんの要求の場面では 64 枠を使い切る(不足を数える。GPU も同じ)。静かになったら端数のエネルギーを帳簿へ移して返すのは T-0104(ADR-0017 追記)。
+- **細かいレベルの熱の小刻みの GPU は遅い**: いちばん細かいレベルが流れる小刻みは 1 回約 0.54 ms(ブロックの数によらない)。鎖は Δkmax 1・2・3 で 2.4・8.6・34 ms/刻み(T-0111)。
+  原因の推定(未確認): 伝導の段は 1 グループ 64 スレッドで 512 セル × 面 6 つの MrCellThermal を順に計算する(ConductMark と ConductFlows の両方)。
+- 小刻みの数は呼ぶ側の maxSubcycleGap で決まり、GPU は最大回数を全部積む(空の小刻みも 19〜44 µs)。ゲームの値は未定(T-0111 の後)。
+- 基準 + 3 段より細かい所は今までどおり 1 段ごとに約 1/4 遅い。方式②は研究 T-0110(並走、D-432)。
+- 基準(subcycleBaseLevel)は呼ぶ側が渡す値で、表から自動では決めていない(テストは tests/multires_conduction_scene.h の SubcycleTestOptions = 2)。ゲームの表を作る時(T-0021)にベイクで決める。
+- 伝導で粗い側が取った端数の枠は木の変更でしか返らない(小刻みの場面ではもっと足りなくなる: たくさんの要求で不足 9880)。返すのは T-0104(ADR-0017 追記)。
 - 熱が通った所は温度差が約 1 mK 未満になるまで流れが 0 にならず、ビット単位で同じに戻らない・静かにならない(T-0104・D-430)。
 - 影のブロックは自分の中だけ伝導する(外は断熱。親との受け渡しは引き戻し)。
 - **release の WARP では、伝導の段の Work Graph 版(multires_conduct_graph.hlsl)の最初の DispatchGraph でデバイスが失われる**(DXGI_ERROR_DRIVER_INTERNAL_ERROR)。
   debug の WARP とハードウェア(debug・release)では CPU と一致する。WARP の JIT の不具合と推定(未確認。ADR-0013 と同じ種類)。既定の Compute 版は release の WARP でも一致。
-  テストは release の WARP でだけ Work Graph 版を外している(gpu_multires_conduction_test.cpp の RunAll)。
+  テストは release の WARP でだけ Work Graph 版を外している(gpu_multires_conduction_test.cpp の RunAll。--subcycle も同じ)。
 - 伝導の段の Compute は活性の時も全部の枠の数だけグループを投げる(一覧の数を超えたグループはすぐ抜ける)。世界の枠が数万になったら ExecuteIndirect か Work Graph 版を測り直す。
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (Claude が決めた。ADR-0017 追記)細かいレベルは先行研究の方式①: レベル k を 1 刻みに 4^σ 回、σ = clamp(k − 基準, 0, 3)。基準は「頭打ちにならない最後のレベル」
-  (先行研究の k* から 1 つ下げた。k* で 1 回のままだと k* 自体が 0.264 倍に遅い)。Δkmax = 3 は GPU の費用を測ってから T-0109 で確かめる。
-- (Claude が決めた)物差しの目標: Δk ≤ 3 のレベルで |実効 ÷ 本当 − 1| ≤ 5%(空間の離散化だけで −1.3%)。結果は 0.996。
-- (Claude が決めた)小刻みの順: 小刻みごとに 印 → 頁 → 端数の枠 → 流れ(その小刻みに始まるレベルの刻むブロックだけ)→ 終わるレベルに溜めた変化を足す → 活性なら変わったブロックの隣を起こす。
-  最後の小刻みの変化は反応と一緒に足す(分けない時は T-0019 と同じ順・同じ結果)。反応は 1 刻みに 1 回。
-- (Claude が決めた)粗い側の上限は「細かい側が粗い小刻み 1 回の間に引く回数」で割る(MrSubstepCrossLevelFlow)。鎖で温度が最初の範囲の外に出ないことを確かめた。
-- (Claude が決めた)活性の小刻み: 刻む集合は刻みの中で増えるだけ(変わったブロックの隣に、その刻みの印を付ける。数える欄 MR_COUNTER_SCHEDULED も増える)。
-  起こされたブロックは最後に反応も進める。
-- (Claude が決めた)GPU は T-0109 に分けた(CLAUDE.md §3)。比べるための道具(SameWorld・RealTemperatures・CountFractionBlocks)は tests/multires_conduction_scene.h に移した。
+- (Claude が決めた。ADR-0017 追記)GPU は小刻みごとに段を分けて最大回数積み、始まるレベルが無い段は空で抜ける。段は Compute(D-302: 空の小刻み Compute 44 µs ↔ Work Graph 91 µs)。
+- (Claude が決めた。ADR-0017 追記)Δkmax の上限 3 は下げない。予算超えは遅延が原因で工学で縮められる見込みなので T-0111 に分け、届かなければユーザーに聞く(打ち切り条件をチケットに書いた)。
+- (Claude が決めた)小刻みの番号(6bit)・maxSubcycleGap(2bit)・基準(符号付き 16bit)はルート定数の stepFlags のビット 8〜31 に詰めた(ルート署名の語が残り 2 のため。gpu_multires.cpp の SubcycleFlags)。
+- (Claude が決めた)伝導の作業場の枠ごとの印を 16 語に: 語 kind に刻みの印、語 kind + 8 に小刻みの番号(SetSubstepMark / HasSubstepMark)。端数が要る・凍らせた・配った頁・配った端数の枠は小刻みごと、
+  CHANGED(小刻みの終わりに足した)・SEEDED(種に入れた)・LISTED は刻みごと。忙しさと種は「どこかの小刻みで変わった・頁を配った」も数える。凍らせたブロックの種は 1 刻みに 1 回(AppendSeedOnce)。
+- (Claude が決めた)小刻みの終わりに起こすのは、使い終わった「この刻みの種の一覧」を空にして u13 に結び、ConductEnd に変わった世界の本物のブロックを書かせ、それを GPU の入力に活性のグラフを
+  もう一度投げる(stepFlags の SUBSTEP_WAKE: つつかれた忙しさの印は直さない = CPU の WakeAround と同じ)。
+- (Claude が決めた)テストの Work Graph 版(--subcycle)は、Compute 版の時に刻んだ CPU の結果(ハッシュと種)と比べて CPU を 2 回刻まない(debug で CPU が重い)。
 
 ## 次にやること
-NEXT.md の先頭(T-0109 → T-0104 → T-0105)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0111 → T-0104 → T-0115)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **細かいレベルの熱の刻みの GPU(T-0109)**: gpu_multires.cpp の RecordConduction(小刻みを 4^maxSubcycleGap 回積む)→ RecordConductSubstep(ConductMark → TreeExpand → TreeFractions →
+  ConductPrepare → ConductFlows)→ RecordSubstepEnd(ConductEnd + 活性なら起こすグラフ)→ 最後に ConductApply。段の中で始まる・終わるは multires_conduct.hlsli の SubstepBegins / SubstepEnds
+  (stepFlags から。CurrentSubstep・SubcycleGap・SubcycleBaseLevel)。CPU の StepConduction と同じ順なので片方を変えたらもう片方も。段を足すなら RecordConductStage
+  (Compute / Work Graph を選ぶ)を通す。伝導の Work Graph 版の見出しは 4 つ(GRAPH_INPUT_CONDUCT_HEADERS。u12 の EXPAND_RECORDS は見出しの後ろ 160 バイトに動いた)。
+  伝導の作業場の印は 16 語 / 枠(CONDUCT_MARK_BYTES・CONDUCT_MARK_WORDS)。RecordStepActive は活性のグラフの後すぐにこの刻みの種の一覧を UAV に戻す(起こす一覧に使い回すため)。
+  stepFlags の下位 8bit だけが MR_STEP_* のフラグ(上は小刻みの設定)。
 - **細かいレベルの熱の刻み(T-0108)**: CPU は multires_conduction.cpp の nest_detail::StepConduction(MarkSubstepBlocks → MarkConductionWants → ExpandForStep →
   ComputeConduction → ApplyEndingDeltas → WakeChangedBlocks)。StepBlocks(multires_nest.cpp)が呼び、最後の小刻みの変化を StepPagedBlock で反応と一緒に足す。
   式は multires_conduction.hlsli の MrSubcycleShift・MrSubstepBegins / Ends・MrSubstepSameLevelFlow・MrSubstepCrossLevelFlow・MrSubcycleBaseLevel(古い MrSameLevelFlow などは shift 0 の包み)。

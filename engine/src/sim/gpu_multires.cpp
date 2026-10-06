@@ -3,11 +3,15 @@
 // (1 レベル = 1 グループ)、刻むのは Compute(1 スレッド = 1 セル)か、活性だけなら Work Graph(1 ブロック = 1 グループ。T-0100)。
 // 一様なブロック(T-0102)は刻む段が頁に広げる印を付け、TreeExpand が枠の順に頁を配り、StepExpanded / ExpandStepNode が埋めて刻む。
 // 静かで一様になった頁は、要求の処理の前に TreeFoldCheck が調べ TreeFold が枠の順に畳む(T-0103)。
-// 熱の伝導(T-0107)は Compute の段(multires_conduct.hlsl)を刻みの中で順に投げる(RecordConduction)。
+// 熱の伝導(T-0107)は Compute の段(multires_conduct.hlsl)を刻みの中で順に投げる(RecordConduction)。細かいレベルの小刻み(T-0109)は
+// 小刻みごとに段を積み、小刻みの終わりに変わったブロックの隣を活性のグラフで起こす。
 // 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ・
 // u6〜u10 木の管理・u11 伝導の作業場・u12 GPU の入力・u13 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
 // ルート署名は 62 / 64 語(UAV 14 × 2・定数 24・リング 2・表 4 × 2。T-0107 で uint32 の表を u6 にまとめて空けた)。
 #include "sim/gpu_multires.h"
+
+#include <limits>
+#include <utility>
 
 #include "common/multires_activity.hlsli"
 
@@ -66,18 +70,36 @@ namespace bicameral::sim {
             ConductPassMark,
             ConductPassPrepare,
             ConductPassFlows,
-            ConductPassApply
+            ConductPassApply,
+            ConductPassEnd,  // 小刻みの終わり(T-0109)
         };
-        constexpr std::array<const char*, 5> CONDUCT_SHADERS = {
-            "sim/multires_conduct_begin.cso", "sim/multires_conduct_mark.cso", "sim/multires_conduct_prepare.cso",
-            "sim/multires_conduct_flows.cso", "sim/multires_conduct_apply.cso"};
+        constexpr std::array<const char*, 6> CONDUCT_SHADERS = {
+            "sim/multires_conduct_begin.cso", "sim/multires_conduct_mark.cso",  "sim/multires_conduct_prepare.cso",
+            "sim/multires_conduct_flows.cso", "sim/multires_conduct_apply.cso", "sim/multires_conduct_end.cso"};
 
         // ルート定数の stepFlags(multires_bindings.hlsli の MR_STEP_*)
         constexpr uint32_t STEP_FLAG_CONDUCTION = 1;
         constexpr uint32_t STEP_FLAG_LISTED = 2;
+        constexpr uint32_t STEP_FLAG_SUBSTEP_WAKE = 4;  // 小刻みの終わりに起こす(T-0109)
+        constexpr uint32_t STEP_FLAG_BITS = 0xFF;
+        constexpr uint32_t STEP_SUBSTEP_SHIFT = 8;
+        constexpr uint32_t STEP_GAP_SHIFT = 14;
+        constexpr uint32_t STEP_BASE_SHIFT = 16;
+
+        // stepFlags に小刻みの番号・maxSubcycleGap・subcycleBaseLevel(符号付き 16bit)を詰める(T-0109。multires_bindings.hlsli の
+        // MR_STEP_*_SHIFT。ルート署名の語が残り少ないので定数を足さない)
+        uint32_t SubcycleFlags(uint32_t flags, const MultiresStepOptions& options, uint32_t substep) {
+            FX_ASSERT(options.maxSubcycleGap <= MULTIRES_MAX_SUBCYCLE_GAP);
+            FX_ASSERT(options.subcycleBaseLevel >= std::numeric_limits<int16_t>::min() &&
+                      options.subcycleBaseLevel <= std::numeric_limits<int16_t>::max());
+            const auto base = static_cast<uint16_t>(static_cast<int16_t>(options.subcycleBaseLevel));
+
+            return (flags & STEP_FLAG_BITS) | (substep << STEP_SUBSTEP_SHIFT) |
+                   (options.maxSubcycleGap << STEP_GAP_SHIFT) | (uint32_t{base} << STEP_BASE_SHIFT);
+        }
 
         // 伝導の作業場(multires_bindings.hlsli の CONDUCT_MARK_WORDS・CONDUCT_DELTA_BYTES)
-        constexpr uint64_t CONDUCT_MARK_BYTES = 8 * sizeof(uint32_t);
+        constexpr uint64_t CONDUCT_MARK_BYTES = 16 * sizeof(uint32_t);
         constexpr uint64_t CONDUCT_DELTA_BYTES = 16;
 
         // Work Graph の GPU の入力(multires_bindings.hlsli の MR_GRAPH_INPUT_*)。見出しは D3D12_NODE_GPU_INPUT そのもの
@@ -86,10 +108,11 @@ namespace bicameral::sim {
         constexpr uint32_t REFINE_RECORD_BYTES = 24;
         constexpr uint32_t GRAPH_INPUT_BYTES = 64 + ((REFINE_RECORD_BYTES + 4) * (MR_MAX_REQUESTS + 1));
         constexpr uint32_t GRAPH_INPUT_EXPAND_HEADER = (GRAPH_INPUT_BYTES + 15) & ~15u;  // 頁に広げて刻む一覧(T-0102)
-        // 伝導の一覧の見出し 3 つ(埋める・流れ・足す。同じレコード。T-0107)
-        constexpr std::array<uint32_t, 3> GRAPH_INPUT_CONDUCT_HEADERS = {
-            GRAPH_INPUT_EXPAND_HEADER + 32, GRAPH_INPUT_EXPAND_HEADER + 64, GRAPH_INPUT_EXPAND_HEADER + 96};
-        constexpr uint32_t GRAPH_INPUT_EXPAND_RECORDS = GRAPH_INPUT_EXPAND_HEADER + 128;
+        // 伝導の一覧の見出し 4 つ(埋める・流れ・足す・小刻みの終わり。同じレコード。T-0107・T-0109。ConductPassPrepare からの順)
+        constexpr std::array<uint32_t, 4> GRAPH_INPUT_CONDUCT_HEADERS = {
+            GRAPH_INPUT_EXPAND_HEADER + 32, GRAPH_INPUT_EXPAND_HEADER + 64, GRAPH_INPUT_EXPAND_HEADER + 96,
+            GRAPH_INPUT_EXPAND_HEADER + 128};
+        constexpr uint32_t GRAPH_INPUT_EXPAND_RECORDS = GRAPH_INPUT_EXPAND_HEADER + 160;
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, EntrypointIndex) == 0);
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, NumRecords) == 4);
         static_assert(offsetof(D3D12_NODE_GPU_INPUT, Records) == 8);
@@ -292,7 +315,8 @@ namespace bicameral::sim {
         m_conductGraph = std::make_unique<gpu::WorkGraph>(std::move(*graph));
         m_conductEntries = {m_conductGraph->EntrypointIndex(L"ConductPrepareNode"),
                             m_conductGraph->EntrypointIndex(L"ConductFlowsNode"),
-                            m_conductGraph->EntrypointIndex(L"ConductApplyNode")};
+                            m_conductGraph->EntrypointIndex(L"ConductApplyNode"),
+                            m_conductGraph->EntrypointIndex(L"ConductEndNode")};
         if (std::ranges::contains(m_conductEntries, UINT32_MAX))
             return std::unexpected("multires_conduct_graph.cso に入口のノードが足りない");
 
@@ -695,7 +719,6 @@ namespace bicameral::sim {
         if (!m_activityGraph)
             return false;
 
-        FX_ASSERT(options.maxSubcycleGap == 0);  // 伝導の小刻み(T-0108)の GPU は T-0109
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
         const uint32_t next = m_activityCurrent ^ 1u;
@@ -714,7 +737,8 @@ namespace bicameral::sim {
                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &outputToUav);
 
-        // --- 種 → 面の隣 → 刻む(Work Graph)。観察の枠は全部刻む。伝導を入れるなら、グラフは伝導の一覧に足すだけで、刻むのは伝導の段 ---
+        // --- 種 → 面の隣 → 刻む(Work Graph)。観察の枠は全部刻む。伝導を入れるなら、グラフは伝導の一覧に足すだけで、刻むのは伝導の段
+        //     (使い終わったこの刻みの種の一覧は、小刻みの終わりに起こす一覧に使い回す。T-0109)---
         m_activityWrite = next;
         if (options.conduction)
             RecordConductPass(list, debugRing, ConductPassBegin, 1);
@@ -723,8 +747,11 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         gpu::WorkGraph::DispatchFromGpu(list, input->GetGPUVirtualAddress());
         UavBarrier(list);
+        const D3D12_RESOURCE_BARRIER inputToUav = gpu::Transition(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &inputToUav);
         if (options.conduction) {
-            RecordConduction(list, debugRing);
+            RecordConduction(list, debugRing, options, m_activityCurrent);
         } else {
             if (m_capacity.observerBlocks > 0) {
                 const ObserverRecord record{.grid = {m_capacity.observerBlocks, 1, 1},
@@ -737,9 +764,6 @@ namespace bicameral::sim {
             RecordExpandPages(list, debugRing);  // 一様で反応が進むブロック(T-0102)
         }
 
-        const D3D12_RESOURCE_BARRIER inputToUav = gpu::Transition(input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        list->ResourceBarrier(1, &inputToUav);
         m_activityCurrent = next;
 
         return true;
@@ -747,11 +771,10 @@ namespace bicameral::sim {
 
     void GpuMultires::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
-        FX_ASSERT(options.maxSubcycleGap == 0);  // 伝導の小刻み(T-0108)の GPU は T-0109
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
         if (options.conduction) {
-            RecordConduction(list, debugRing);
+            RecordConduction(list, debugRing, options, ACTIVITY_LISTS);  // 全部を刻むので起こさない
             return;
         }
 
@@ -777,25 +800,85 @@ namespace bicameral::sim {
         UavBarrier(list);
     }
 
-    // 熱の伝導を入れた刻みの段(CPU の StepBlocks と同じ順。multires_conduct.hlsli の先頭)。活性(stepFlags の LISTED)なら
-    // 伝導の一覧のブロックだけ(数は GPU が決めるので、全部の枠の数だけグループを投げる。一覧は活性のグラフが作り終えている)
-    void GpuMultires::RecordConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
-        const uint32_t groups = std::max(1u, m_blockCapacity);
-        RecordConductPass(list, debugRing, ConductPassMark, groups);
+    // 熱の伝導を入れた刻みの段(CPU の StepBlocks・StepConduction と同じ順。multires_conduct.hlsli の先頭)。活性(stepFlags の LISTED)なら
+    // 伝導の一覧のブロックだけ(数は GPU が決めるので、全部の枠の数だけグループを投げる。一覧は活性のグラフが作り終えている)。
+    // 細かいレベルの刻み(T-0109): 小刻みを最大回数 4^maxSubcycleGap ぶん積む(Work Graphs に全体の同期が無いので小刻みごとに段を分ける。
+    // その小刻みに始まるレベルが無ければ段は空で抜ける)。wakeList = 小刻みの終わりに起こす一覧に使う活性の一覧(全部を刻むなら ACTIVITY_LISTS)
+    void GpuMultires::RecordConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       const MultiresStepOptions& options, uint32_t wakeList) {
+        FX_ASSERT(options.maxSubcycleGap <= MULTIRES_MAX_SUBCYCLE_GAP);
+        const uint32_t flags = m_constants.stepFlags;
+        const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
+        for (uint32_t substep = 0; substep < substeps; ++substep) {
+            m_constants.stepFlags = SubcycleFlags(flags, options, substep);
+            RecordConductSubstep(list, debugRing);
+            if (substep + 1 < substeps)
+                RecordSubstepEnd(list, debugRing, wakeList);
+        }
+
+        // --- 最後の小刻みの変化を足して反応 ---
+        RecordConductStage(list, debugRing, ConductPassApply);
+        m_constants.stepFlags = flags;
+    }
+
+    // 小刻み 1 回: 印 → 頁 → 端数の枠 → 埋める → 流れ(その小刻みに始まるレベルのブロックだけ)
+    void GpuMultires::RecordConductSubstep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        RecordConductPass(list, debugRing, ConductPassMark, std::max(1u, m_blockCapacity));
         RecordTreePass(list, debugRing, PassExpand, 1);
         RecordTreePass(list, debugRing, PassFractions, 1);
-        if (m_useConductGraph && (m_constants.stepFlags & STEP_FLAG_LISTED) != 0) {
-            RecordConductionGraph(list, debugRing);
+        RecordConductStage(list, debugRing, ConductPassPrepare);
+        RecordConductStage(list, debugRing, ConductPassFlows);
+    }
+
+    // 小刻みの終わり(T-0109。CPU の ApplyEndingDeltas・WakeChangedBlocks): 終わるレベルに変化を足す(ConductEnd)。活性なら、変わった
+    // ブロックの面の隣を活性のグラフ(ActivitySeedNode → WakeFaceNode → ActivityStepNode)で起こし、初めて印を付けたブロックを伝導の一覧に足す。
+    // 起こす一覧はこの刻みの種の一覧(使い終わっている)を空にして u13 に結び、ConductEnd に書かせる
+    void GpuMultires::RecordSubstepEnd(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       uint32_t wakeList) {
+        if (wakeList >= ACTIVITY_LISTS) {
+            RecordConductStage(list, debugRing, ConductPassEnd);
             return;
         }
 
-        RecordConductPass(list, debugRing, ConductPassPrepare, groups);
-        RecordConductPass(list, debugRing, ConductPassFlows, groups);
-        RecordConductPass(list, debugRing, ConductPassApply, groups);
+        // --- 起こす一覧を空にして u13 に結び、変化を足す ---
+        ID3D12Resource* wake = m_activity[wakeList].Get();
+        const D3D12_RESOURCE_BARRIER toCopy = gpu::Transition(wake, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                              D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &toCopy);
+        list->CopyBufferRegion(wake, 0, m_activityUpload.Get(), uint64_t{wakeList} * ACTIVITY_EMPTY_STRIDE,
+                               ACTIVITY_EMPTY_BYTES);
+        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(wake, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &toUav);
+        const uint32_t write = std::exchange(m_activityWrite, wakeList);
+        RecordConductStage(list, debugRing, ConductPassEnd);
+        m_activityWrite = write;
+
+        // --- 面の隣を起こす(GPU の入力 = 起こす一覧)---
+        const D3D12_RESOURCE_BARRIER toInput = gpu::Transition(wake, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &toInput);
+        const uint32_t flags = std::exchange(m_constants.stepFlags, m_constants.stepFlags | STEP_FLAG_SUBSTEP_WAKE);
+        SetActivityProgram(list);
+        BindRoot(list, debugRing);
+        gpu::WorkGraph::DispatchFromGpu(list, wake->GetGPUVirtualAddress());
+        UavBarrier(list);
+        m_constants.stepFlags = flags;
+        const D3D12_RESOURCE_BARRIER back = gpu::Transition(wake, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &back);
     }
 
-    // 埋める・流れ・足すを Work Graph で(GPU の入力 = 伝導の一覧。段ごとに見出しが別)
-    void GpuMultires::RecordConductionGraph(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+    // 伝導の段 1 つ(埋める・流れ・足す・小刻みの終わり)。活性で Work Graph 版を使うなら GPU の入力 = 伝導の一覧(段ごとに見出しが別)、
+    // ほかは Compute
+    void GpuMultires::RecordConductStage(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                         uint32_t pass) {
+        const bool listed = (m_constants.stepFlags & STEP_FLAG_LISTED) != 0;
+        if (!m_useConductGraph || !listed) {
+            RecordConductPass(list, debugRing, pass, std::max(1u, m_blockCapacity));
+            return;
+        }
+
         ID3D12Resource* graphInput = m_buffers[BufferGraphInput].Get();
         const D3D12_RESOURCE_BARRIER toInput = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -804,11 +887,9 @@ namespace bicameral::sim {
         m_conductGraph->SetProgram(list, !m_conductGraphInitialized);
         m_conductGraphInitialized = true;
         BindRoot(list, debugRing);
-        for (const uint32_t header : GRAPH_INPUT_CONDUCT_HEADERS) {
-            gpu::WorkGraph::DispatchFromGpu(list, graphInput->GetGPUVirtualAddress() + header);
-            UavBarrier(list);
-        }
-
+        const uint32_t header = GRAPH_INPUT_CONDUCT_HEADERS[pass - ConductPassPrepare];
+        gpu::WorkGraph::DispatchFromGpu(list, graphInput->GetGPUVirtualAddress() + header);
+        UavBarrier(list);
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &toUav);

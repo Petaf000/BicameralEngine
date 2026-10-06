@@ -11,6 +11,10 @@
 //   4. ConductPrepareBlock: 配った頁を一様の値で埋め、配った端数の枠を空にする
 //   5. ConductFlowsBlock: 刻むブロックのセルの面の流れを変化に足す(刻みの初めのセルから。Jacobi 型)
 //   6. ConductApplyBlock: 変化を足してから反応。活性なら忙しさの印と次の刻みの種
+// 細かいレベルの刻み(T-0109。CPU の StepConduction): 2〜5 を小刻みごとに繰り返す(小刻みの番号は stepFlags。gpu_multires.cpp の
+// RecordConduction が最大回数 4^maxSubcycleGap を積み、その小刻みに始まるレベルが無ければ段は空で抜ける)。印と流れはその小刻みに
+// 始まるレベルのブロックだけ。最後の小刻みの手前までは、その後に ConductEndBlock(小刻みが終わるレベルに溜めた変化を足す。
+// 活性なら変わったブロックを起こす一覧へ → 活性のグラフの ActivitySeedNode が面の隣を起こす)。最後の小刻みの変化は 6 で反応と一緒に足す。
 // 順番に依存しない理由: 印は同じ値の書き込み、一覧は集合、変化は 64bit の atomic の足し算(2 の補数の 128bit。
 // 端数の桁上がりも整数なので、どの順に足しても同じ)。流れは刻みの初めのセルだけから決まる。
 #ifndef BICAMERAL_MULTIRES_CONDUCT_HLSLI
@@ -40,7 +44,30 @@ bool IsConductStepped(uint32_t slot, MrBlock block) {
 }
 
 bool IsFrozenSlot(uint32_t slot) {
-    return slot < g_worldBlocks && HasConductMark(slot, CONDUCT_MARK_FROZEN);
+    return slot < g_worldBlocks && HasSubstepMark(slot, CONDUCT_MARK_FROZEN);
+}
+
+// --- 細かいレベルの刻み(T-0109。式は multires_conduction.hlsli の MrSubcycleShift・MrSubstepBegins / Ends)---
+
+uint32_t SubcycleGap() {
+    return (g_stepFlags >> MR_STEP_GAP_SHIFT) & 3u;
+}
+
+int32_t SubcycleBaseLevel() {
+    return ((int32_t)g_stepFlags) >> MR_STEP_BASE_SHIFT;  // 符号付きの右シフト(上位 16bit が符号付きの基準)
+}
+
+// レベル level の 1 刻みの小刻みの数の指数(4^σ 回)
+uint32_t LevelSubcycleShift(int32_t level) {
+    return MrSubcycleShift(level, SubcycleBaseLevel(), SubcycleGap());
+}
+
+bool SubstepBegins(int32_t level) {
+    return MrSubstepBegins(CurrentSubstep(), LevelSubcycleShift(level), SubcycleGap());
+}
+
+bool SubstepEnds(int32_t level) {
+    return MrSubstepEnds(CurrentSubstep(), LevelSubcycleShift(level), SubcycleGap());
 }
 
 // ブロックの面に接するセルか(一様なブロックの中のセルどうしは同じ値・粗い側への面はブロックの面にしかない)
@@ -78,7 +105,7 @@ void MarkCoarseTarget(uint32_t coarseSlot, bool wantsFraction) {
         g_blocks[coarseSlot].page = MR_PAGE_WANTED;
 
     if (wantsFraction)
-        SetConductMark(coarseSlot, CONDUCT_MARK_FRACTION);
+        SetSubstepMark(coarseSlot, CONDUCT_MARK_FRACTION);
 
     if (IsListedStep())
         ConductAppend(coarseSlot);
@@ -87,20 +114,23 @@ void MarkCoarseTarget(uint32_t coarseSlot, bool wantsFraction) {
 // セル 1 つの面を調べて印を付ける。流れがあれば true(CPU の CollectCellFaces + MarkCrossSends)
 bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
     const MrThermal self = MrCellThermal(MakeTable(), LoadBlockCell(block, slot, index));
+    const uint32_t shift = LevelSubcycleShift(block.level);
     int64_t sameLevelOutflow = 0;
     bool sends = false;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
         const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
         if (neighbor.kind == MR_NEIGHBOR_SAME) {
-            sameLevelOutflow += MrSameLevelFlow(self, ThermalAt(neighbor.slot, neighbor.index), block.level);
+            sameLevelOutflow += MrSubstepSameLevelFlow(self, ThermalAt(neighbor.slot, neighbor.index), block.level,
+                                                       shift);
             continue;
         }
 
         if (neighbor.kind != MR_NEIGHBOR_COARSER)
             continue;
 
-        const int64_t flow = MrCrossLevelFlow(self, ThermalAt(neighbor.slot, neighbor.index), block.level,
-                                              neighbor.gap);
+        const uint32_t coarseShift = LevelSubcycleShift(g_blocks[neighbor.slot].level);
+        const int64_t flow = MrSubstepCrossLevelFlow(self, ThermalAt(neighbor.slot, neighbor.index), block.level,
+                                                     neighbor.gap, shift, coarseShift);
         if (flow == 0)
             continue;
 
@@ -115,10 +145,11 @@ bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
     return sends || sameLevelOutflow != 0;
 }
 
-// 刻むブロック 1 つ: 一様で反応が進むか流れがあれば頁に広げる印(CPU の StepBlocks の最初と MarkBlockWants)
+// 刻むブロック 1 つ: 一様で反応が進むか流れがあれば頁に広げる印(CPU の StepBlocks の最初と MarkBlockWants)。
+// この小刻みに小刻みが始まるレベルのブロックだけ。反応が進むかを見るのは最初の小刻みだけ(CPU は小刻みの前に 1 回。T-0109)
 void ConductMarkBlock(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
-    if (!IsConductStepped(slot, block))
+    if (!IsConductStepped(slot, block) || !SubstepBegins(block.level))
         return;
 
     if (thread == 0)
@@ -140,7 +171,8 @@ void ConductMarkBlock(uint32_t slot, uint32_t thread) {
 
     const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
-    if (gs_conductAny != 0 || MrUniformWouldChange(MakeTable(), g_cells[slot], seed, tick, block))
+    const bool firstSubstep = CurrentSubstep() == 0;
+    if (gs_conductAny != 0 || (firstSubstep && MrUniformWouldChange(MakeTable(), g_cells[slot], seed, tick, block)))
         g_blocks[slot].page = MR_PAGE_WANTED;
 }
 
@@ -151,8 +183,8 @@ void ConductPrepareBlock(uint32_t slot, uint32_t thread) {
         return;
 
     const MrBlock block = g_blocks[slot];
-    const bool expanded = HasConductMark(slot, CONDUCT_MARK_EXPANDED);
-    const bool granted = HasConductMark(slot, CONDUCT_MARK_GRANTED);
+    const bool expanded = HasSubstepMark(slot, CONDUCT_MARK_EXPANDED);
+    const bool granted = HasSubstepMark(slot, CONDUCT_MARK_GRANTED);
     const RxCell value = g_cells[slot];
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
@@ -169,6 +201,7 @@ void ConductPrepareBlock(uint32_t slot, uint32_t thread) {
 // セル 1 つの面の流れを変化に足す(自分と、粗い側へ送った先。CPU の AddCellFlows)。凍らせたブロックとの面は流れない
 void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
     const MrThermal self = MrCellThermal(MakeTable(), g_cells[PageCellAddress(block.page, index)]);
+    const uint32_t shift = LevelSubcycleShift(block.level);
     int64_t own = 0;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
         const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
@@ -180,15 +213,16 @@ void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
 
         const MrThermal other = ThermalAt(neighbor.slot, neighbor.index);
         if (neighbor.kind == MR_NEIGHBOR_SAME) {
-            own -= MrSameLevelFlow(self, other, block.level);
+            own -= MrSubstepSameLevelFlow(self, other, block.level, shift);
             continue;
         }
 
-        const int64_t flow = MrCrossLevelFlow(self, other, block.level, neighbor.gap);
+        const MrBlock coarse = g_blocks[neighbor.slot];
+        const int64_t flow = MrSubstepCrossLevelFlow(self, other, block.level, neighbor.gap, shift,
+                                                     LevelSubcycleShift(coarse.level));
         if (flow == 0)
             continue;
 
-        const MrBlock coarse = g_blocks[neighbor.slot];
         const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, coarse.fraction != MR_NO_FRACTION);
         if (transfer.fineDelta == 0)
             continue;
@@ -205,7 +239,7 @@ void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
 
 void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
-    if (!IsConductStepped(slot, block) || MrIsUniform(block) || IsFrozenSlot(slot))
+    if (!IsConductStepped(slot, block) || !SubstepBegins(block.level) || MrIsUniform(block) || IsFrozenSlot(slot))
         return;
 
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
@@ -221,6 +255,31 @@ void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
 static const uint32_t CONDUCT_STEP_POSSIBLE = 1;
 static const uint32_t CONDUCT_STEP_CHANGED = 2;
 
+// セル 1 つに溜めた伝導の変化を足して 0 に戻す(CPU の ApplyEnergyDelta。端数は g_fractions にも書く)。足したら true
+bool ApplyCellDelta(MrBlock block, uint32_t index, inout RxCell cell, inout MrFraction fraction) {
+    const uint32_t deltaAddress = ConductDeltaAddress(block.page, index);
+    MrEnergyDelta delta;
+    delta.whole = (int64_t)g_conduction.Load<uint64_t>(deltaAddress);
+    delta.fraction = g_conduction.Load<uint64_t>(deltaAddress + 8);
+    if (MrEnergyDeltaIsZero(delta))
+        return false;
+
+    g_conduction.Store<uint64_t>(deltaAddress, 0);
+    g_conduction.Store<uint64_t>(deltaAddress + 8, 0);
+    MrEnergyDelta value;
+    value.whole = cell.energy;
+    value.fraction = fraction.energy;
+    value = MrAddEnergyDelta(value, delta);
+    cell.energy = value.whole;
+    FX_ASSERT(block.fraction != MR_NO_FRACTION || value.fraction == 0);
+    if (block.fraction != MR_NO_FRACTION) {
+        fraction.energy = value.fraction;
+        g_fractions[FractionAddress(block.fraction, index)] = fraction;
+    }
+
+    return true;
+}
+
 uint32_t ApplyCell(uint32_t slot, MrBlock block, uint32_t index, bool react) {
     const uint32_t address = PageCellAddress(block.page, index);
     RxCell cell = g_cells[address];
@@ -228,25 +287,8 @@ uint32_t ApplyCell(uint32_t slot, MrBlock block, uint32_t index, bool react) {
     MrFraction fraction = LoadFraction(block.fraction, index);
     const uint64_t fractionBefore = fraction.energy;
 
-    // --- 伝導の変化(CPU の ApplyEnergyDelta)---
-    const uint32_t deltaAddress = ConductDeltaAddress(block.page, index);
-    MrEnergyDelta delta;
-    delta.whole = (int64_t)g_conduction.Load<uint64_t>(deltaAddress);
-    delta.fraction = g_conduction.Load<uint64_t>(deltaAddress + 8);
-    if (!MrEnergyDeltaIsZero(delta)) {
-        g_conduction.Store<uint64_t>(deltaAddress, 0);
-        g_conduction.Store<uint64_t>(deltaAddress + 8, 0);
-        MrEnergyDelta value;
-        value.whole = cell.energy;
-        value.fraction = fraction.energy;
-        value = MrAddEnergyDelta(value, delta);
-        cell.energy = value.whole;
-        FX_ASSERT(block.fraction != MR_NO_FRACTION || value.fraction == 0);
-        if (block.fraction != MR_NO_FRACTION) {
-            fraction.energy = value.fraction;
-            g_fractions[FractionAddress(block.fraction, index)] = fraction;
-        }
-    }
+    // --- 伝導の変化(最後の小刻みの分)---
+    ApplyCellDelta(block, index, cell, fraction);
 
     // --- 反応 ---
     uint32_t result = 0;
@@ -295,12 +337,51 @@ void ConductApplyBlock(uint32_t slot, uint32_t thread) {
     if (thread != 0 || !IsListedStep() || slot >= g_worldBlocks)
         return;
 
-    // --- 変わった・頁に広げたら忙しい(T-0101・T-0103)。進める規則があった・変わったら次の刻みの種(T-0019)---
-    const bool changed = gs_conductAny != 0;
+    // --- 変わった・頁に広げたら忙しい(T-0101・T-0103)。進める規則があった・変わったら次の刻みの種(T-0019)。
+    //     小刻みの終わりに変わった・どこかの小刻みで頁を配ったのも数える(刻みの印だけ見る。T-0109)---
+    const bool changed = gs_conductAny != 0 || HasConductMark(slot, CONDUCT_MARK_CHANGED);
     if (changed || HasConductMark(slot, CONDUCT_MARK_EXPANDED))
         g_blocks[slot].busyTick = CurrentStepMark();
 
     if (changed || gs_conductPossible != 0)
+        AppendSeedOnce(slot);
+}
+
+// --- 6a. 小刻みの終わり(最後の小刻みの手前まで。T-0109。CPU の ApplyEndingDeltas と WakeChangedBlocks)--------------------
+
+// 小刻みが終わるレベルの頁のブロックに、溜めた変化を足して 0 に戻す(反応は進めない)。足したら CHANGED の印。活性なら、変わった世界の
+// 本物のブロックを起こす一覧へ(u13 に結んだこの刻みの種の一覧。次に活性のグラフの ActivitySeedNode が面の隣を起こし、
+// 初めて印を付けたブロックを伝導の一覧に足す。gpu_multires.cpp の RecordSubstepEnd)
+void ConductEndBlock(uint32_t slot, uint32_t thread) {
+    const MrBlock block = g_blocks[slot];
+    if (MrIsUniform(block) || !SubstepEnds(block.level))
+        return;
+
+    if (thread == 0)
+        gs_conductAny = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
+        const uint32_t index = thread + (CONDUCT_THREADS * k);
+        if (!MrIsSteppedCell(block, index))
+            continue;
+
+        const uint32_t address = PageCellAddress(block.page, index);
+        RxCell cell = g_cells[address];
+        MrFraction fraction = LoadFraction(block.fraction, index);
+        if (!ApplyCellDelta(block, index, cell, fraction))
+            continue;
+
+        g_cells[address] = cell;
+        InterlockedOr(gs_conductAny, 1u);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (thread != 0 || gs_conductAny == 0)
+        return;
+
+    SetConductMark(slot, CONDUCT_MARK_CHANGED);
+    if (IsListedStep() && slot < g_worldBlocks && block.kind == MR_BLOCK_REAL)
         AppendActivity(slot);
 }
 

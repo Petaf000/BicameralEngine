@@ -358,7 +358,8 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 // --- 7. 頁に広げる(刻んだ後。1 グループ。T-0102。multires_nest.cpp の ExpandWantedPages)---
 // 刻む段が MR_PAGE_WANTED を付けた世界のブロックに、枠の順で頁の空きのスタックの上から頁を配り、一覧(MR_GRAPH_INPUT_EXPAND_*)に書く。
 // 頁が足りなければ一様に戻して数え、活性の一覧(u13 = 次の刻みの種)に足す。埋めて刻むのは StepExpanded / ExpandStepNode
-// (伝導を入れた刻みでは ConductPrepare が埋め、ConductApply が刻む。配った・凍らせた印を伝導の作業場に書く。T-0107)
+// (伝導を入れた刻みでは ConductPrepare が埋め、ConductApply が刻む。配った・凍らせた印を伝導の作業場に書く。T-0107)。
+// 伝導の小刻み(T-0109)では小刻みごとに呼ぶ。印は小刻みごと、種は 1 刻みに 1 回だけ足す(AppendSeedOnce)
 
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeExpand(uint32_t i : SV_GroupIndex) {
     const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
@@ -372,11 +373,11 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
         if (wants && position < freePages) {
             g_blocks[slot].page = g_treeWords[FreePageAddress(freePages - 1 - position)];
             g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS + 4 * (position + 1), slot);
-            SetConductMark(slot, CONDUCT_MARK_EXPANDED);
+            SetSubstepMark(slot, CONDUCT_MARK_EXPANDED);
         } else if (wants) {
             g_blocks[slot].page = MR_NO_PAGE;
-            AppendActivity(slot);
-            SetConductMark(slot, CONDUCT_MARK_FROZEN);  // 伝導: この刻みは刻まず、面の流れも 0(T-0107)
+            AppendSeedOnce(slot);
+            SetSubstepMark(slot, CONDUCT_MARK_FROZEN);  // 伝導: この小刻みは刻まず、面の流れも 0(T-0107)
         }
 
         wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
@@ -397,12 +398,12 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 // --- 7b. 伝導の端数の枠を配る(頁を配った後。1 グループ。T-0107。multires_conduction.cpp の AllocateConductionFractions)---
 // 伝導で粗い側に端数が要る(CONDUCT_MARK_FRACTION)・凍らせていない・端数の枠の無い世界のブロックに、枠の順で空きのスタックの上から配る。
 // 足りなければ数える(そのブロックへは整数の単位の倍数だけ送る。ADR-0017)。配った枠を空にするのは ConductPrepare。
-// 伝導の一覧の数を Work Graph の見出し(流れ・足す)にも写す(一覧は印の段で出来上がっている)
+// 伝導の一覧の数を Work Graph の見出し(流れ・足す・小刻みの終わり)にも写す(一覧は印の段で出来上がっている)。小刻みごとに呼ぶ(T-0109)
 
 // 伝導で端数の枠が要る(印がある・凍らせていない・枠が無い)世界のブロックか
 bool WantsConductionFraction(uint32_t slot) {
-    return slot < g_worldBlocks && HasConductMark(slot, CONDUCT_MARK_FRACTION) &&
-           !HasConductMark(slot, CONDUCT_MARK_FROZEN) && g_blocks[slot].fraction == MR_NO_FRACTION;
+    return slot < g_worldBlocks && HasSubstepMark(slot, CONDUCT_MARK_FRACTION) &&
+           !HasSubstepMark(slot, CONDUCT_MARK_FROZEN) && g_blocks[slot].fraction == MR_NO_FRACTION;
 }
 
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeFractions(uint32_t i : SV_GroupIndex) {
@@ -416,7 +417,7 @@ bool WantsConductionFraction(uint32_t slot) {
         const uint32_t position = wanted + gs_blockScan[i] - 1;
         if (wants && position < freeFractions) {
             g_blocks[slot].fraction = g_freeFractions[freeFractions - 1 - position];
-            SetConductMark(slot, CONDUCT_MARK_GRANTED);
+            SetSubstepMark(slot, CONDUCT_MARK_GRANTED);
         }
 
         wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
@@ -430,10 +431,11 @@ bool WantsConductionFraction(uint32_t slot) {
     g_counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions - granted;
     g_counters[MR_COUNTER_FRACTION_SHORTAGE] += wanted - granted;
 
-    // --- 伝導の一覧はここで出来上がっている(印の段の後)。Work Graph の見出し(流れ・足す)に数を写す ---
+    // --- 伝導の一覧はここで出来上がっている(印の段の後)。Work Graph の見出し(流れ・足す・小刻みの終わり)に数を写す ---
     const uint32_t records = g_graphInput.Load(MR_GRAPH_INPUT_CONDUCT_HEADER + 4);
     g_graphInput.Store(MR_GRAPH_INPUT_CONDUCT_FLOWS_HEADER + 4, records);
     g_graphInput.Store(MR_GRAPH_INPUT_CONDUCT_APPLY_HEADER + 4, records);
+    g_graphInput.Store(MR_GRAPH_INPUT_CONDUCT_END_HEADER + 4, records);
 }
 
 // --- 8. 頁を畳む(要求の処理の前。T-0103。multires_activity.cpp の FoldQuietPages)---

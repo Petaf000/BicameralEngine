@@ -1,6 +1,7 @@
 // multires_conduct.hlsl — 多重解像度の木の上の熱の伝導の Compute の段(T-0107。中身は shaders/sim/multires_conduct.hlsli)。
 // 1 グループ = 1 ブロック。全部を刻む時はグループ g = 枠 g、活性の時はグループ g = 伝導の一覧のレコード g + 1
 // (数は GPU が決めるので、全部の枠の数だけグループを投げ、数を超えたグループは何もしない)。呼ぶ順は gpu_multires.cpp の RecordConduction。
+// ConductEnd は細かいレベルの刻みの小刻みの終わり(T-0109)。
 #include "sim/multires_conduct.hlsli"
 
 // グループ group の受け持つ枠
@@ -60,5 +61,12 @@ void ConductApply(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
     uint32_t slot;
     if (ConductSlotOf(group.x, slot))
         ConductApplyBlock(slot, thread);
+}
+
+[numthreads(CONDUCT_THREADS, 1, 1)]
+void ConductEnd(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
+    uint32_t slot;
+    if (ConductSlotOf(group.x, slot))
+        ConductEndBlock(slot, thread);
 }
 // clang-format on

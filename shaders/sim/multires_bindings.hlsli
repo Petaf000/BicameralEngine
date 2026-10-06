@@ -68,6 +68,18 @@ cbuffer RootConstants : register(b0) {
 // g_stepFlags(gpu_multires.cpp の STEP_FLAG_*)
 static const uint32_t MR_STEP_CONDUCTION = 1;  // 熱の伝導を入れる(活性の刻むノードは刻まずに伝導の一覧に足す)
 static const uint32_t MR_STEP_LISTED = 2;  // 伝導の段は伝導の一覧(MR_GRAPH_INPUT_CONDUCT_*)のブロック。無ければ全部の枠
+// 小刻みの終わりに変わったブロックの隣を起こす(活性のグラフの ActivitySeedNode。忙しさの印は直さない: CPU の WakeAround と同じ。T-0109)
+static const uint32_t MR_STEP_SUBSTEP_WAKE = 4;
+// 細かいレベルの熱の刻み(T-0109。gpu_multires.cpp の SubcycleFlags): ビット 8〜13 = 小刻みの番号・14〜15 = maxSubcycleGap・
+// 16〜31 = subcycleBaseLevel(符号付き 16bit)。ルート署名の語が残り少ないので stepFlags に詰めた
+static const uint32_t MR_STEP_SUBSTEP_SHIFT = 8;
+static const uint32_t MR_STEP_GAP_SHIFT = 14;
+static const uint32_t MR_STEP_BASE_SHIFT = 16;
+
+// この段の小刻みの番号(0 〜 4^maxSubcycleGap − 1)
+uint32_t CurrentSubstep() {
+    return (g_stepFlags >> MR_STEP_SUBSTEP_SHIFT) & 63u;
+}
 
 // --- Work Graph の GPU の入力(u12。見出しは D3D12_NODE_GPU_INPUT そのもの。gpu_multires.cpp の static_assert)---
 static const uint32_t MR_GRAPH_INPUT_REFINE_HEADER = 0;    // バイト
@@ -84,12 +96,14 @@ static const uint32_t MR_GRAPH_INPUT_BYTES = MR_GRAPH_INPUT_COARSEN_RECORDS + 4 
 static const uint32_t MR_GRAPH_INPUT_EXPAND_HEADER = (MR_GRAPH_INPUT_BYTES + 15) & ~15u;  // バイト
 // 伝導の一覧(T-0107。活性の刻みで伝導の段が受け持つブロック。見出しは CPU が写しの時に書き、数は ConductBegin と
 // ConductAppend が書く)。レコードは uint32 × (全部の枠 + 1)、レコード 0 は空。並びは決まらない(集合として使う)。
-// 見出しは 3 つ(同じレコードを指し、入口だけが違う: 埋める・流れ・足す。Work Graph で伝導の段を投げる時。数は TreeFractions が写す)
+// 見出しは 4 つ(同じレコードを指し、入口だけが違う: 埋める・流れ・足す・小刻みの終わり〔T-0109〕。Work Graph で伝導の段を投げる時。
+// 数は TreeFractions が写す)
 static const uint32_t MR_GRAPH_INPUT_CONDUCT_HEADER = MR_GRAPH_INPUT_EXPAND_HEADER +
                                                       32;  // バイト(埋める。数を数える見出し)
 static const uint32_t MR_GRAPH_INPUT_CONDUCT_FLOWS_HEADER = MR_GRAPH_INPUT_CONDUCT_HEADER + 32;
 static const uint32_t MR_GRAPH_INPUT_CONDUCT_APPLY_HEADER = MR_GRAPH_INPUT_CONDUCT_FLOWS_HEADER + 32;
-static const uint32_t MR_GRAPH_INPUT_EXPAND_RECORDS = MR_GRAPH_INPUT_CONDUCT_APPLY_HEADER + 32;  // バイト
+static const uint32_t MR_GRAPH_INPUT_CONDUCT_END_HEADER = MR_GRAPH_INPUT_CONDUCT_APPLY_HEADER + 32;
+static const uint32_t MR_GRAPH_INPUT_EXPAND_RECORDS = MR_GRAPH_INPUT_CONDUCT_END_HEADER + 32;  // バイト
 
 uint32_t ConductRecordsOffset() {
     return MR_GRAPH_INPUT_EXPAND_RECORDS + 4 * (g_worldBlocks + 1);
@@ -297,13 +311,21 @@ bool ScheduleBlock(uint32_t slot, uint32_t mark) {
 // --- 伝導の作業場(u11。T-0107。shaders/sim/multires_conduct.hlsli)---
 // [枠ごとの刻みの印 × CONDUCT_MARK_WORDS 語][頁のセルごとのエネルギーの変化(整数部 int64・端数 uint64)]。
 // 印は「その刻みの印(MrActivityMark)が書いてあれば立っている」なので、刻みごとに消さなくてよい(最初は全部 0)。
-// 変化は ConductFlows が 64bit の atomic で足し、ConductApply が読んで 0 に戻す
-static const uint32_t CONDUCT_MARK_WORDS = 8;
-static const uint32_t CONDUCT_MARK_FRACTION = 0;  // 粗い側で端数の枠が要る(CPU の MarkConductionWants の wantsFraction)
-static const uint32_t CONDUCT_MARK_FROZEN = 1;    // 頁に広げたかったが頁が足りず、この刻みは凍らせた(TreeExpand)
-static const uint32_t CONDUCT_MARK_EXPANDED = 2;  // この刻みに頁を配った(TreeExpand)
+// 小刻み(T-0109)ごとの印は、語 kind に刻みの印、語 kind + CONDUCT_SUBSTEP_WORDS に小刻みの番号を書く(両方が合えば立っている。
+// 刻みの印だけ見れば「この刻みのどこかの小刻みで立った」)。
+// 変化は ConductFlows が 64bit の atomic で足し、ConductEnd(小刻みの終わり)と ConductApply が読んで 0 に戻す
+static const uint32_t CONDUCT_SUBSTEP_WORDS = 8;
+static const uint32_t CONDUCT_MARK_WORDS = 2 * CONDUCT_SUBSTEP_WORDS;
+static const uint32_t
+    CONDUCT_MARK_FRACTION = 0;  // 粗い側で端数の枠が要る(CPU の MarkConductionWants の wantsFraction。小刻みごと)
+static const uint32_t
+    CONDUCT_MARK_FROZEN = 1;  // 頁に広げたかったが頁が足りず、この小刻みは凍らせた(TreeExpand。小刻みごと)
+static const uint32_t CONDUCT_MARK_EXPANDED = 2;  // 頁を配った(TreeExpand。小刻みごと。刻みの印だけ見れば忙しさに使う)
 static const uint32_t CONDUCT_MARK_LISTED = 3;    // 伝導の一覧に入れた(ConductAppend)
-static const uint32_t CONDUCT_MARK_GRANTED = 4;   // この刻みに端数の枠を配った(TreeFractions)
+static const uint32_t CONDUCT_MARK_GRANTED = 4;   // 端数の枠を配った(TreeFractions。小刻みごと)
+static const uint32_t
+    CONDUCT_MARK_CHANGED = 5;  // 小刻みの終わりに変化を足した(ConductEnd。忙しさと次の刻みの種。T-0109)
+static const uint32_t CONDUCT_MARK_SEEDED = 6;  // 次の刻みの種に入れた(AppendSeedOnce。T-0109)
 static const uint32_t CONDUCT_DELTA_BYTES = 16;
 
 uint32_t CurrentStepMark() {
@@ -320,6 +342,25 @@ void SetConductMark(uint32_t slot, uint32_t kind) {
 
 bool HasConductMark(uint32_t slot, uint32_t kind) {
     return g_conduction.Load(ConductMarkAddress(slot, kind)) == CurrentStepMark();
+}
+
+// この小刻みの印(T-0109。同じ段で同じ印を書くのは同じ値なので、2 語の書き込みが混ざっても壊れない)
+void SetSubstepMark(uint32_t slot, uint32_t kind) {
+    SetConductMark(slot, kind);
+    g_conduction.Store(ConductMarkAddress(slot, kind + CONDUCT_SUBSTEP_WORDS), CurrentSubstep());
+}
+
+bool HasSubstepMark(uint32_t slot, uint32_t kind) {
+    return HasConductMark(slot, kind) &&
+           g_conduction.Load(ConductMarkAddress(slot, kind + CONDUCT_SUBSTEP_WORDS)) == CurrentSubstep();
+}
+
+// 次の刻みの種に足す(この刻みに初めてなら。小刻みで同じブロックを何度も凍らせても一覧を溢れさせない。T-0109)
+void AppendSeedOnce(uint32_t slot) {
+    uint32_t previous;
+    g_conduction.InterlockedExchange(ConductMarkAddress(slot, CONDUCT_MARK_SEEDED), CurrentStepMark(), previous);
+    if (previous != CurrentStepMark())
+        AppendActivity(slot);
 }
 
 // 頁 page のセル index の変化の番地(バイト)
