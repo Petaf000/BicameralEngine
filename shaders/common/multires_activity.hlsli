@@ -5,6 +5,8 @@
 //
 // 活性の規則(仮の世界の T-0005・T-0089 を木に広げたもの): 刻み t で刻む世界のブロック = 種とその面の隣。
 //   種 = 刻み t − 1 に進める反応の規則があったブロック(D-424: 無ければ刻みが変わっても変わらない)+ 刻み t に木の変更でつつかれたブロック。
+//   待ちの丸め(ADR-0018。CPU は T-0115、GPU は T-0121)では、種 = 見出しの起こす刻み(wakeTick)が来たブロック + つつかれたブロック
+//   (変わったブロックは次の刻みに起こす)。起こす刻みの前は、刻んでも何も変わらない。
 //   面の隣 = 刻むセルどうしが面で接するブロック。レベルが違ってよい: 粗い側(親の覆われていないセル)は索引を上へ引いて、
 //   細かい側(子孫が覆う面)は面に接する八分の一を子へたどって(再帰)見つける。
 // 木は「ブロックの覆われていない八分の一(4³ セル)」で世界を隙間なく分けるので、隣は「八分の一の箱 × 6 面」ごとに求まる。
@@ -153,13 +155,13 @@ FX_FN MrWake MrWakeAcross(Tree tree, MrBlock block, uint32_t octant, uint32_t fa
 // (同じ刻みの書き手は同じ値なので順に依存しない)。「進める規則がある」(種になる)とは分ける: 規則が進めると言っても
 // セルが変わらないまま毎刻み種になり続けることがある(燃え尽きかけの木箱。T-0101 で見つけた。17 §5)。
 // 刻み t の要求の処理の前に、印が N(MR_QUIET_TICKS)刻みより古い本物の葉を粗くする要求を、世界の枠の順に作る(TreeQuiet)。
-// 印は 2^32 刻みで一周するので、それより長く静かな葉は忙しく見える(その前に粗くなっている)。
+// 印は 64bit(MrChangeMark。T-0115)。GPU はまだ 32bit の刻みの印を書く(2^32 刻みで一周。T-0121 で 64bit に)。
 
 // 粗くするまでに続けて静かでなければならない刻みの数(2026-10-04 ユーザー決定: 定数。測って調整する)
 FX_CONST uint32_t MR_QUIET_TICKS = 16;
 
 // 本物の葉(根でない・本物の子が無い)で、刻み mark(MrActivityMark)までに N 刻みを超えて変わっていない
-FX_FN bool MrIsQuietLeaf(MrBlock block, uint32_t mark) {
+FX_FN bool MrIsQuietLeaf(MrBlock block, uint64_t mark) {
     return block.kind == MR_BLOCK_REAL && block.parent != MR_NO_BLOCK && !MrHasRealChild(block) &&
            block.busyTick != MR_BUSY_POKED && mark - block.busyTick > MR_QUIET_TICKS;
 }
@@ -168,7 +170,7 @@ FX_FN bool MrIsQuietLeaf(MrBlock block, uint32_t mark) {
 // 刻み mark でちょうど静かになった(N 刻みを初めて超えた。MrIsQuietLeaf と同じ N)。葉でなくても(根・子のある親も)調べる。
 // 調べるのはこの 1 回だけ: 頁のセル・子・端数を変える所(刻む・木の変更・頁に広げる)は全部忙しさの印を書くので、
 // 変わった後にはまた N 刻み後に 1 回調べる。静かなまま一様でないブロックを毎刻み調べ直さない
-FX_FN bool MrWantsFoldCheck(MrBlock block, uint32_t mark) {
+FX_FN bool MrWantsFoldCheck(MrBlock block, uint64_t mark) {
     return block.kind == MR_BLOCK_REAL && !MrIsUniform(block) && block.fraction == MR_NO_FRACTION &&
            block.busyTick != MR_BUSY_POKED && mark - block.busyTick == MR_QUIET_TICKS + 1;
 }
@@ -176,7 +178,7 @@ FX_FN bool MrWantsFoldCheck(MrBlock block, uint32_t mark) {
 // 端数の枠を帳簿へ移して返す刻みか(T-0104。ADR-0017 追記): 世界の本物のブロックで、端数の枠を持ち・つつかれたままでなく、
 // 刻み mark でちょうど静かになった(MrWantsFoldCheck と同じ時)。端数はどのセルでも 1 単位未満 = 計器で測れない差なので、
 // 許容差つきで畳む時(MrIsExactFold でない)だけ、許容差の値によらず返す
-FX_FN bool MrWantsFractionReturn(MrBlock block, uint32_t mark) {
+FX_FN bool MrWantsFractionReturn(MrBlock block, uint64_t mark) {
     return block.kind == MR_BLOCK_REAL && block.fraction != MR_NO_FRACTION && block.busyTick != MR_BUSY_POKED &&
            mark - block.busyTick == MR_QUIET_TICKS + 1;
 }
@@ -189,7 +191,7 @@ FX_FN bool MrCellChanged(RxCell before, RxCell after) {
 // 枠 slot を粗くする要求を作るか。静かな葉で、同じ親の八分の一の番号が小さい兄弟に静かな葉が無い
 // (1 刻みに 1 つの親は 1 つの要求しか通らない〔17 §5〕ので、負ける要求で一覧を埋めない)
 template <typename Tree>
-FX_FN bool MrWantsQuietCoarsen(Tree tree, uint32_t slot, uint32_t mark) {
+FX_FN bool MrWantsQuietCoarsen(Tree tree, uint32_t slot, uint64_t mark) {
     const MrBlock block = tree.Block(slot);
     if (!MrIsQuietLeaf(block, mark))
         return false;

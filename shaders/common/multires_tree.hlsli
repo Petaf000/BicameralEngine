@@ -155,6 +155,9 @@ FX_FN MrBlock MrMakeChildBlock(MrBlock parent, uint32_t parentSlot, uint32_t oct
     child.parentOctant = octant;
     child.fraction = fractionSlot;
     child.page = page;
+    // 作った刻みに変わった(影は世界のようにつつかれないので、ここで。待ちの丸めの tc。T-0115)。本物の子は呼ぶ側がつつく
+    if (kind == MR_BLOCK_SHADOW)
+        child.busyTick = MR_BUSY_POKED;
 
     return child;
 }

@@ -8,6 +8,8 @@
 // 一様なブロック(T-0102)は値 1 つで反応が進むかを調べ、進むなら刻んだ後に枠の順で頁に広げて刻む(GPU は TreeExpand → ExpandStepNode)。
 // 頁を持つブロックがちょうど静かになった刻みに一様なら、値 1 つに戻して枠の順に頁を返す(FoldQuietPages。GPU は TreeFoldCheck → TreeFold。T-0103)。
 // 許容差を渡すと、ほぼ同じ頁も平均の値で畳み、切り捨ての余りを帳簿へ移す(T-0104。GPU も同じ段で。T-0112)。
+// 反応の丸めは既定で待ちの丸め(ADR-0018。T-0115): 種 = 見出しを全部なめて起こす刻み(wakeTick)が来たブロック + つつかれたブロック。
+// 刻んだ後に変わったブロックは忙しさの印(= tc)を書いて次の刻みに起こし、評価して変わらなければ次に評価の要る刻みを書く(RecordWaitResults)。
 #include <algorithm>
 #include <optional>
 
@@ -114,9 +116,10 @@ namespace bicameral::sim {
                 Schedule(nest, slot, mark);
         }
 
-        // 種 1 つ: 自分と、(八分の一, 面) ごとの隣(ActivitySeedNode と同じ)
-        void WakeSeed(MultiresNest& nest, uint32_t slot, uint32_t mark) {
-            if (nest.blocks[slot].busyTick == MR_BUSY_POKED)
+        // 種 1 つ: 自分と、(八分の一, 面) ごとの隣(ActivitySeedNode と同じ)。今までの丸めなら、つつかれた印をこの刻みの印にする
+        // (待ちの丸めは刻む前に ResolvePokes が「この刻みの直前」の印にする。T-0115)
+        void WakeSeed(MultiresNest& nest, uint32_t slot, uint32_t mark, bool cutoffRounding) {
+            if (cutoffRounding && nest.blocks[slot].busyTick == MR_BUSY_POKED)
                 nest.blocks[slot].busyTick = mark;  // つつかれた刻みの印にする(T-0101)
 
             nest_detail::WakeAround(nest, slot, mark);
@@ -144,10 +147,14 @@ namespace bicameral::sim {
         const uint32_t worldBlocks = nest.capacity.worldBlocks;
         const uint32_t mark = MrActivityMark(tick);
 
-        // --- 種とその面の隣に印を付ける(種は使い切る)---
+        // --- 種とその面の隣に印を付ける(種は使い切る)。待ちの丸めは見出しを全部なめ、起こす刻みが来たブロックも種に(T-0115)---
+        const bool cutoff = options.cutoffRounding;
+        const uint64_t changeMark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
-            if (nest.seeds[slot] != 0 && nest.blocks[slot].kind == MR_BLOCK_REAL)
-                WakeSeed(nest, slot, mark);
+            const MrBlock& block = nest.blocks[slot];
+            const bool due = !cutoff && block.wakeTick <= changeMark;
+            if ((nest.seeds[slot] != 0 || due) && block.kind == MR_BLOCK_REAL)
+                WakeSeed(nest, slot, mark, cutoff);
         }
 
         std::ranges::fill(nest.seeds, uint8_t{0});
@@ -159,6 +166,12 @@ namespace bicameral::sim {
 
         const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
             nest, table.View(), stepped, worldSeed, tick, options, mark);
+
+        // --- 待ちの丸め: 変わったブロックは忙しさの印(= tc)を書いて次の刻みに起こし、評価したブロックは起こす刻みを書く ---
+        if (!cutoff) {
+            nest_detail::RecordWaitResults(nest, results, tick);
+            return;
+        }
 
         // --- セルが変わったら忙しさの印(頁に広げたのも忙しい: 畳めるかを N 刻み後に調べる。T-0103)。
         //     進める規則があった・変わった(伝導。T-0019)なら次の種に ---
@@ -173,7 +186,7 @@ namespace bicameral::sim {
     }
 
     void FoldQuietPages(MultiresNest& nest, uint64_t tick) {
-        const uint32_t mark = MrActivityMark(tick);
+        const uint64_t mark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             if (!MrWantsFoldCheck(nest.blocks[slot], mark))
                 continue;
@@ -192,7 +205,7 @@ namespace bicameral::sim {
         }
 
         const ReactionTableView view = table.View();
-        const uint32_t mark = MrActivityMark(tick);
+        const uint64_t mark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             // --- ちょうど静かになったら、端数の枠を帳簿へ移して返す(畳めるかはその後で調べる)---
             if (MrWantsFractionReturn(nest.blocks[slot], mark))
@@ -241,7 +254,7 @@ namespace bicameral::sim {
 
     void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick) {
         const CpuTree tree{.nest = &nest};
-        const uint32_t mark = MrActivityMark(tick);
+        const uint64_t mark = MrChangeMark(tick);
         uint32_t& count = nest.counters[MR_COUNTER_REQUESTS];
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             if (!MrWantsQuietCoarsen(tree, slot, mark))
@@ -255,6 +268,17 @@ namespace bicameral::sim {
             nest.requests[count++] = MrMakeQuietCoarsenRequest(nest.blocks[slot]);
             nest.counters[MR_COUNTER_QUIET_REQUESTS] += 1;
         }
+    }
+
+    std::vector<uint32_t> WaitSeedSlots(const MultiresNest& nest, uint64_t tick) {
+        std::vector<uint32_t> slots;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind == MR_BLOCK_REAL && (nest.seeds[slot] != 0 || block.wakeTick <= MrChangeMark(tick)))
+                slots.push_back(slot);
+        }
+
+        return slots;
     }
 
     std::vector<uint32_t> SeedSlots(const MultiresNest& nest) {

@@ -21,6 +21,9 @@ using namespace bicameral::reaction;
 
 namespace {
 
+    // GPU はまだ今までの丸め(RxStepCell・D-424 の下限)なので、比べる CPU リファレンスもそちらで刻む(T-0115。T-0121 で消す)
+    constexpr sim::MultiresStepOptions GPU_ROUNDING = {.cutoffRounding = true};
+
     // 計測の前に刻みを何回投げるか(短い仕事の間は GPU のクロックが上がらず、時間が 6〜8 倍に出る)
     constexpr uint32_t WARMUP_STEPS = 400;
 
@@ -158,7 +161,7 @@ namespace {
             if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
                 return std::unexpected(executed.error());
 
-            test::StepMultiresScene(cpu, table, scenario, tick);
+            test::StepMultiresScene(cpu, table, scenario, tick, GPU_ROUNDING);
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(compared.error());
         }
@@ -194,7 +197,7 @@ namespace {
 
             sim::SubmitRequests(cpu, requests);
             sim::ProcessRequests(cpu);
-            sim::StepNest(cpu, table, test::STRESS_SEED, tick);
+            sim::StepNest(cpu, table, test::STRESS_SEED, tick, GPU_ROUNDING);
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(compared.error());
         }

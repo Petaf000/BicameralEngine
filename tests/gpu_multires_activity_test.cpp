@@ -20,6 +20,9 @@ using namespace bicameral::reaction;
 
 namespace {
 
+    // GPU はまだ今までの丸め(RxStepCell・D-424 の下限)なので、比べる CPU リファレンスもそちらで刻む(T-0115。T-0121 で消す)
+    constexpr sim::MultiresStepOptions GPU_ROUNDING = {.cutoffRounding = true};
+
     constexpr uint32_t WARMUP_STEPS = 400;     // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_ROOT_EDGE = 8;  // 計測の世界は根 8³ = 512 個(32m 角)
 
@@ -131,7 +134,7 @@ namespace {
                 return std::unexpected(std::format("刻み {}: {}", tick, executed.error()));
 
             test::BeginActivityTick(cpu, tick, requests);
-            test::EndActivityTick(cpu, table, tick, true);
+            test::EndActivityTick(cpu, table, tick, true, GPU_ROUNDING);
 
             // --- 状態の全部と次の刻みの種 ---
             if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read)) {

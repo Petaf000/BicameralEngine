@@ -105,7 +105,8 @@ namespace bicameral::test {
 
     // 1 刻み(CPU リファレンス): 要求の処理と影の出来事 → 反応 → 影の引き戻し。GPU(sim::GpuMultires)も同じ順に記録する
     inline void StepMultiresScene(sim::MultiresNest& nest, const sim::BakedReactionTable& table,
-                                  MultiresScenario scenario, uint64_t tick) {
+                                  MultiresScenario scenario, uint64_t tick,
+                                  const sim::MultiresStepOptions& options = {}) {
         const sim::MultiresPoint point = MakeMultiresPoint(MULTIRES_LEVELS);
         sim::SubmitRequests(nest, MultiresRequestsAt(scenario, tick));
         sim::ProcessRequests(nest);
@@ -114,7 +115,7 @@ namespace bicameral::test {
         else if (tick == MULTIRES_COARSEN_TICK && scenario == MultiresScenario::Shadow)
             sim::RemoveShadowChain(nest, MULTIRES_SHADOW_SLOT, MULTIRES_LEVELS);
 
-        sim::StepNest(nest, table, MULTIRES_TEST_SEED, tick);
+        sim::StepNest(nest, table, MULTIRES_TEST_SEED, tick, options);
         if (MultiresShadowExists(scenario, tick))
             sim::PullBackShadowChain(nest, table, MULTIRES_SHADOW_SLOT, MULTIRES_LEVELS);
     }

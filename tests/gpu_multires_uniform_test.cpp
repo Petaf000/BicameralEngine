@@ -30,6 +30,9 @@ using namespace bicameral::reaction;
 
 namespace {
 
+    // GPU はまだ今までの丸め(RxStepCell・D-424 の下限)なので、比べる CPU リファレンスもそちらで刻む(T-0115。T-0121 で消す)
+    constexpr sim::MultiresStepOptions GPU_ROUNDING = {.cutoffRounding = true};
+
     constexpr uint32_t WARMUP_STEPS = 400;     // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_ROOT_EDGE = 8;  // 計測の世界は根 8³ = 512 個
     constexpr uint32_t MEASURE_REPEATS = 8;
@@ -135,7 +138,7 @@ namespace {
                 return std::unexpected(std::format("刻み {}: {}", tick, executed.error()));
 
             test::BeginUniformTick(cpu, table, tick, tolerance);
-            sim::StepActive(cpu, table, test::STRESS_SEED, tick);
+            sim::StepActive(cpu, table, test::STRESS_SEED, tick, GPU_ROUNDING);
 
             const std::string where = std::format("頁 {}・許容差 {} mK・刻み {}", pages, tolerance.temperatureMk, tick);
             if (auto compared = CompareWhole(cpu, read, where); !compared)
@@ -216,7 +219,7 @@ namespace {
             return std::unexpected(executed.error());
 
         for (uint64_t tick = 0; tick < FULL_STEP_TICKS; ++tick)
-            sim::StepNest(cpu, table, test::STRESS_SEED, tick);
+            sim::StepNest(cpu, table, test::STRESS_SEED, tick, GPU_ROUNDING);
 
         if (cpu.counters[MR_COUNTER_EXPANDED] != 1 || cpu.counters[MR_COUNTER_PAGE_SHORTAGE] != FULL_STEP_TICKS)
             return std::unexpected("場面の確認: 全部を刻む時に頁に広げた数・頁の不足の数が期待と違う");
@@ -250,7 +253,7 @@ namespace {
                 return std::unexpected(std::format("子に覆われた頁・刻み {}: {}", tick, executed.error()));
 
             test::BeginFoldCoveredTick(cpu, tick);
-            sim::StepActive(cpu, table, test::STRESS_SEED, tick);
+            sim::StepActive(cpu, table, test::STRESS_SEED, tick, GPU_ROUNDING);
             if (auto compared = CompareWhole(cpu, read, std::format("子に覆われた頁・刻み {}", tick)); !compared)
                 return std::unexpected(compared.error());
         }

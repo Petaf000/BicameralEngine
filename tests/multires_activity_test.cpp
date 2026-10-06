@@ -32,11 +32,12 @@ namespace {
 
     struct ActivityRun {
         uint64_t digest = 0;
-        uint64_t scheduled = 0;      // 刻んだブロックの数(全部の刻みの和)
-        uint64_t realBlocks = 0;     // 本物のブロックの数(全部の刻みの和)
-        uint64_t usedPages = 0;      // 使っている世界の頁の数(全部の刻みの和。一様なブロックは頁を持たない。T-0102)
-        uint64_t crossLevel = 0;     // 種と違うレベルの面の隣を起こした数(総当たりで数える)
-        uint32_t lastScheduled = 0;  // 最後の刻みに刻んだ数
+        uint64_t scheduled = 0;         // 刻んだブロックの数(全部の刻みの和)
+        uint64_t realBlocks = 0;        // 本物のブロックの数(全部の刻みの和)
+        uint64_t usedPages = 0;         // 使っている世界の頁の数(全部の刻みの和。一様なブロックは頁を持たない。T-0102)
+        uint64_t crossLevel = 0;        // 種と違うレベルの面の隣を起こした数(総当たりで数える)
+        uint32_t lastScheduled = 0;     // 最後の刻みに刻んだ数
+        uint32_t scheduledCounter = 0;  // 数える欄の刻んだ数(比べる相手を刻まない 2 回目でも数える)
     };
 
     // 全部の枠の論理のセル(観察の枠も。一様か頁かによらない。T-0102)と、世界の要約・帳簿・端数が一致するか
@@ -76,8 +77,9 @@ namespace {
         return count;
     }
 
-    // check = false なら活性だけ刻む(2 回目の決定性の確認。debug で遅いので比べる相手と総当たりを省く)
-    ActivityRun RunActivity(const BakedReactionTable& table, bool check) {
+    // check = false なら活性だけ刻む(2 回目の決定性の確認。debug で遅いので比べる相手と総当たりを省く)。
+    // options は check = false の時だけ(今までの丸めと刻んだ数を比べる。T-0115)
+    ActivityRun RunActivity(const BakedReactionTable& table, bool check, const MultiresStepOptions& options = {}) {
         MultiresNest active = test::MakeActivityNest(table);
         MultiresNest full = test::MakeActivityNest(table);
         ActivityRun run;
@@ -87,14 +89,14 @@ namespace {
             const std::vector<MrRequest> requests = test::MakeStressRequests(active, tick);
             test::BeginActivityTick(active, tick, requests);
             if (!check) {
-                test::EndActivityTick(active, table, tick, true);
+                test::EndActivityTick(active, table, tick, true, options);
                 continue;
             }
 
             test::BeginActivityTick(full, tick, requests);
 
             // --- 種(要求の処理でつつかれた分も入る)と、総当たりの答え ---
-            const std::vector<uint32_t> seeds = SeedSlots(active);
+            const std::vector<uint32_t> seeds = WaitSeedSlots(active, tick);
             const std::vector<uint8_t> expected = test::BruteForceScheduled(active, seeds);
             if (tick % 8 == 0)
                 run.crossLevel += CountCrossLevel(active, seeds);
@@ -117,6 +119,7 @@ namespace {
         }
 
         run.digest = HashWholeNest(active);
+        run.scheduledCounter = active.counters[MR_COUNTER_SCHEDULED];
         if (!check)
             return run;
 
@@ -139,6 +142,7 @@ namespace {
         const ActivityRun first = RunActivity(*table, true);
         const ActivityRun second = RunActivity(*table, false);
         Expect(first.digest == second.digest, "2 回の実行で全部が一致");
+        const ActivityRun cutoff = RunActivity(*table, false, {.cutoffRounding = true});
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_activity_test: FAILED ({} 件)", failureCount);
@@ -147,9 +151,9 @@ namespace {
 
         Log(Channel::Sim, Level::Info,
             "multires_activity_test: OK({} 刻み・刻んだブロック {} / 本物のブロック {}・頁 {}・最後の刻み {}・"
-            "レベルをまたぐ面の隣 {}・要約 {:016x})",
+            "レベルをまたぐ面の隣 {}・要約 {:016x}・今までの丸め〔D-424 の下限〕なら刻んだブロック {})",
             test::ACTIVITY_TICKS, first.scheduled, first.realBlocks, first.usedPages, first.lastScheduled,
-            first.crossLevel, first.digest);
+            first.crossLevel, first.digest, cutoff.scheduledCounter);
 
         return 0;
     }

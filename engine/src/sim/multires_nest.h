@@ -75,6 +75,11 @@ namespace bicameral::sim {
         // maxSubcycleGap = 0 なら分けない(T-0019 と同じ結果)。上限は 3(64 回。17 §4)。GPU も同じ結果(T-0109)
         int32_t subcycleBaseLevel = 0;
         uint32_t maxSubcycleGap = 0;
+
+        // --- 反応の丸め(T-0115。ADR-0018)---
+        // false(既定): 待ちの丸め(reaction.hlsli の RxStepCellWait。D-429)。見出しの busyTick = tc、wakeTick = 次に評価の要る刻みの印。
+        // true: 今までの丸め(RxStepCell と D-424 の下限)。GPU はまだこちらなので、GPU と比べるテストだけが使う(T-0121 で消す)
+        bool cutoffRounding = false;
     };
 
     constexpr uint32_t MULTIRES_MAX_SUBCYCLE_GAP = 3;
@@ -147,7 +152,9 @@ namespace bicameral::sim {
                   const MultiresStepOptions& options = {});
 
     // 活性のブロックだけ刻む(T-0100。multires_activity.hlsli): 種とその面の隣に印(activeTick)を付けて刻み、
-    // 進める規則があった・変わったブロックを次の種にする。観察の枠は全部刻む。結果のセルは StepNest と同じになる
+    // 進める規則があった・変わったブロックを次の種にする。観察の枠は全部刻む。結果のセルは StepNest と同じになる。
+    // 待ちの丸め(T-0115)では、種 = 見出しを全部なめて起こす刻み(wakeTick)が来たブロック + つつかれたブロック。
+    // 変わったブロックは次の刻みに起こす(伝導の面の隣も起こすため)
     void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
                     const MultiresStepOptions& options = {});
 
@@ -173,6 +180,9 @@ namespace bicameral::sim {
 
     // 活性の種の枠の一覧(枠の順)
     [[nodiscard]] std::vector<uint32_t> SeedSlots(const MultiresNest& nest);
+
+    // 待ちの丸め(T-0115)で刻み tick の種になる世界の本物のブロックの枠の一覧(枠の順): 種の印があるか、起こす刻み(wakeTick)が来た
+    [[nodiscard]] std::vector<uint32_t> WaitSeedSlots(const MultiresNest& nest, uint64_t tick);
 
     // 世界(本物の葉のセルと端数)の要約。影は入らない
     [[nodiscard]] uint64_t HashRealLeaves(const MultiresNest& nest);

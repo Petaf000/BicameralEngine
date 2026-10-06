@@ -193,11 +193,13 @@ namespace bicameral::sim {
         }
 
         // 頁を持つブロックの刻むセル: 伝導の変化(deltas が空なら無し)を足し、react なら反応を進める
+        // (待ちの丸めなら、変わらなかったセルの次に評価の要る刻みの最小も求める。T-0115)
         nest_detail::BlockStepResult StepPagedBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
                                                     uint64_t worldSeed, uint64_t tick, bool react,
-                                                    std::span<const MrEnergyDelta> deltas) {
+                                                    std::span<const MrEnergyDelta> deltas, bool cutoffRounding) {
             const MrBlock block = nest.blocks[slot];
             nest_detail::BlockStepResult result;
+            result.evaluated = react && !cutoffRounding;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
@@ -214,9 +216,13 @@ namespace bicameral::sim {
                 }
 
                 // --- 反応 ---
-                if (react) {
+                if (react && cutoffRounding) {
                     const RxCellStep step = MrStepCellDetailed(view, cell, worldSeed, tick, block, index);
                     result.possible = result.possible || step.possible != 0;
+                    cell = step.cell;
+                } else if (react) {
+                    const RxWaitStep step = MrStepCellWait(view, cell, worldSeed, tick, block, index);
+                    result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     cell = step.cell;
                 }
 
@@ -270,12 +276,34 @@ namespace bicameral::sim {
             const auto blockCount = static_cast<uint32_t>(nest.blocks.size());
             std::vector<BlockStepResult> results(blockCount);
 
+            if (!options.cutoffRounding)
+                ResolvePokes(nest, tick);
+
             // --- 一様なブロック: 反応が進む時だけ頁に広げる(T-0102)。伝導の流れがある時も(T-0019)---
             for (uint32_t slot = 0; slot < blockCount; ++slot) {
                 MrBlock& block = nest.blocks[slot];
-                if (stepped[slot] != 0 && MrIsUniform(block) &&
-                    MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
+                if (stepped[slot] == 0 || !MrIsUniform(block))
+                    continue;
+
+                if (options.cutoffRounding) {
+                    if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
+                        block.page = MR_PAGE_WANTED;
+
+                    continue;
+                }
+
+                // --- 待ちの丸め(T-0115): 起こす刻みが来た時だけ評価する(その前はどのセルも変わらない)---
+                if (MrChangeMark(tick) < block.wakeTick)
+                    continue;
+
+                const MrUniformWait wait = MrUniformWaitOf(view, UniformAt(nest, slot), worldSeed, tick, block);
+                if (wait.changed != 0) {
                     block.page = MR_PAGE_WANTED;
+                    continue;
+                }
+
+                results[slot].evaluated = true;
+                results[slot].wakeTick = wait.wakeTick;
             }
 
             // --- 伝導(小刻みに分けるなら最後の 1 回の手前まで。T-0108)。枠の順に頁を配り、足りなかったブロックはその回は凍らせる
@@ -292,12 +320,39 @@ namespace bicameral::sim {
                     continue;
 
                 const BlockStepResult earlier = results[slot];
-                results[slot] = StepPagedBlock(nest, view, slot, worldSeed, tick, stepped[slot] != 0, deltas);
+                results[slot] = StepPagedBlock(nest, view, slot, worldSeed, tick, stepped[slot] != 0, deltas,
+                                               options.cutoffRounding);
                 results[slot].expanded = earlier.expanded;
                 results[slot].changed = results[slot].changed || earlier.changed;
             }
 
             return results;
+        }
+
+        void ResolvePokes(MultiresNest& nest, uint64_t tick) {
+            for (MrBlock& block : nest.blocks) {
+                if (block.busyTick != MR_BUSY_POKED)
+                    continue;
+
+                // つつかれた刻みの印(静かさの判定は今までどおり)。評価は「刻みの直前に変わった」として(MrStepCellWait)
+                block.busyTick = MrChangeMark(tick);
+                block.wakeTick = 0;
+            }
+        }
+
+        void RecordWaitResults(MultiresNest& nest, std::span<const BlockStepResult> results, uint64_t tick) {
+            const uint64_t mark = MrChangeMark(tick);
+            for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+                const BlockStepResult& result = results[slot];
+                MrBlock& block = nest.blocks[slot];
+                if (result.changed || result.expanded || block.busyTick == mark) {
+                    // 変わった・つつかれた: 次の刻みは新しい tc で引き直すので、評価が要る(伝導の面の隣も起こす)
+                    block.busyTick = mark;
+                    block.wakeTick = mark + 1;
+                } else if (result.evaluated) {
+                    block.wakeTick = result.wakeTick;
+                }
+            }
         }
 
         std::vector<uint32_t> ExpandWantedPages(MultiresNest& nest) {
@@ -411,7 +466,10 @@ namespace bicameral::sim {
             stepped[slot] = kind != MR_BLOCK_UNUSED && kind != MR_BLOCK_MIRROR ? 1 : 0;
         }
 
-        nest_detail::StepBlocks(nest, table.View(), stepped, worldSeed, tick, options, 0);
+        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(nest, table.View(), stepped,
+                                                                                          worldSeed, tick, options, 0);
+        if (!options.cutoffRounding)
+            nest_detail::RecordWaitResults(nest, results, tick);
     }
 
     void PullBackShadowChain(MultiresNest& nest, const BakedReactionTable& table, uint32_t firstShadowSlot,
@@ -447,6 +505,7 @@ namespace bicameral::sim {
             hash = FxHashCombine(hash, HashBlock(block));
             hash = FxHashCombine(hash, block.activeTick);
             hash = FxHashCombine(hash, block.busyTick);
+            hash = FxHashCombine(hash, block.wakeTick);
             hash = FxHashCombine(hash, block.page);
         }
 

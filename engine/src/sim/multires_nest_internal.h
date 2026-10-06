@@ -83,7 +83,18 @@ namespace bicameral::sim::nest_detail {
         bool changed = false;   // セル(か端数)が 1 つでも変わった
         bool possible = false;  // 進める反応の規則があった
         bool expanded = false;  // この刻みに一様から頁に広げた
+
+        // --- 待ちの丸め(T-0115)---
+        bool evaluated = false;                       // 反応を評価した(wakeTick を求め直した)
+        uint64_t wakeTick = reaction::RX_WAIT_NEVER;  // 評価したセルの次に評価の要る刻みの印の最小
     };
+
+    // 待ちの丸め(T-0115): 刻む前に、つつかれたままのブロックを「刻み tick の直前に変わった」印にし、すぐ評価する(StepNest と StepActive で同じ)
+    void ResolvePokes(MultiresNest& nest, uint64_t tick);
+
+    // 待ちの丸め(T-0115): 刻んだ結果を見出しに書く。変わった・頁に広げたブロックは busyTick = この刻みの印・次の刻みに評価、
+    // 評価して変わらなければ wakeTick = 求めた最小(StepNest と StepActive で同じ)
+    void RecordWaitResults(MultiresNest& nest, std::span<const BlockStepResult> results, uint64_t tick);
 
     // stepped(枠ごとの 0 / 1)のブロックを 1 刻み: 一様なブロックは変わる時だけ頁に広げ(枠の順。足りなければ刻まずに種にする)、
     // options.conduction なら熱の伝導の変化を足してから反応を進める。伝導で変化を受け取ったブロックは stepped でなくても変わる。結果は枠ごと。

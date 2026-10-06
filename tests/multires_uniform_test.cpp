@@ -46,15 +46,18 @@ namespace {
 
     constexpr uint32_t DENSE_ROOTS = test::UNIFORM_CHAIN_ROOT;  // 木を変えない根(枠 0〜6)
 
-    // 素直な答え: 木を変えない根のセルを全部、1 つずつ刻む
+    // 素直な答え: 木を変えない根のセルを全部、1 つずつ刻む(待ちの丸め。ブロックの tc = 最後に変わった刻みの印は自分で持つ。T-0115)
     struct DenseRoots {
-        std::vector<RxCell> cells;  // DENSE_ROOTS × 512
+        std::vector<RxCell> cells;           // DENSE_ROOTS × 512
+        std::vector<uint64_t> changedMarks;  // 根ごとの tc
 
         static DenseRoots From(const MultiresNest& nest) {
             DenseRoots dense;
             for (uint32_t slot = 0; slot < DENSE_ROOTS; ++slot) {
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
                     dense.cells.push_back(LoadNestCell(nest, slot, index));
+
+                dense.changedMarks.push_back(nest.blocks[slot].busyTick);
             }
 
             return dense;
@@ -62,10 +65,21 @@ namespace {
 
         void Step(const MultiresNest& nest, const ReactionTableView& view, uint64_t tick) {
             for (uint32_t slot = 0; slot < DENSE_ROOTS; ++slot) {
+                if (changedMarks[slot] == MR_BUSY_POKED)
+                    changedMarks[slot] = MrChangeMark(tick);  // StepActive の ResolvePokes と同じ
+
+                MrBlock block = nest.blocks[slot];
+                block.busyTick = changedMarks[slot];
+                bool changed = false;
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     RxCell& cell = cells[(size_t{slot} * MR_BLOCK_CELLS) + index];
-                    cell = MrStepCell(view, cell, test::STRESS_SEED, tick, nest.blocks[slot], index);
+                    const RxCell before = cell;
+                    cell = MrStepCellWait(view, cell, test::STRESS_SEED, tick, block, index).cell;
+                    changed = changed || !MrSameCell(before, cell);
                 }
+
+                if (changed)
+                    changedMarks[slot] = MrChangeMark(tick);
             }
         }
 

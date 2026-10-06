@@ -30,7 +30,7 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    constexpr sim::MultiresStepOptions CONDUCTION = {.conduction = true};
+    constexpr sim::MultiresStepOptions CONDUCTION = {.conduction = true, .cutoffRounding = true};
     constexpr uint64_t CHAIN_TICKS = 80;
     constexpr uint64_t STRESS_ACTIVE_TICKS = 30;
     constexpr uint64_t STRESS_FULL_TICKS = 12;
@@ -382,7 +382,8 @@ namespace {
                     SceneRun{.name = "たくさんの要求(全部)", .stress = true, .ticks = STRESS_FULL_TICKS}};
         }
 
-        const sim::MultiresStepOptions split = test::SubcycleTestOptions(table, sim::MULTIRES_MAX_SUBCYCLE_GAP);
+        sim::MultiresStepOptions split = test::SubcycleTestOptions(table, sim::MULTIRES_MAX_SUBCYCLE_GAP);
+        split.cutoffRounding = true;  // GPU はまだ今までの丸め(T-0121)
         return {
             SceneRun{.name = "小刻みの鎖(活性・Compute)", .active = true, .ticks = SUBCYCLE_CHAIN_TICKS, .step = split},
             SceneRun{.name = "小刻みの鎖(活性・Work Graph)",

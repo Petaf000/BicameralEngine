@@ -47,8 +47,8 @@ FX_CONST uint32_t MR_NO_BLOCK = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_NO_FRACTION = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_NO_SPECIES = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_CELL_ID_PURPOSE = 0x4D520001u;  // セルの ID(乱数の鍵)を作るハッシュの用途
-FX_CONST uint32_t
-    MR_BUSY_POKED = 0xFFFFFFFFu;  // MrBlock::busyTick: 木の変更でつつかれた(種として起こす時に刻みの印にする。T-0101)
+// MrBlock::busyTick: 木の変更でつつかれた(刻む時に刻みの印にする。T-0101)
+FX_CONST uint64_t MR_BUSY_POKED = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
 FX_CONST uint32_t MR_NO_PAGE = 0xFFFFFFFFu;      // MrBlock::page: 頁なし = 一様(値はセルのバッファの先頭。T-0102)
 FX_CONST uint32_t MR_PAGE_WANTED = 0xFFFFFFFEu;  // 一様で、この刻みに反応が進むので頁に広げる(刻みの中だけ。T-0102)
 
@@ -104,10 +104,14 @@ struct MrBlock {
     uint32_t children[8];   // 八分の一ごとの本物の子ブロック(影は入れない)
     // --- 活性(世界の要約 HashRealLeaves には入れない)---
     uint32_t activeTick;  // 最後に活性で刻んだ刻みの印(MrActivityMark。T-0100)
-    uint32_t busyTick;  // 最後に変わった刻みの印(MR_BUSY_POKED = 木の変更でつつかれ、まだ刻みの印にしていない。T-0101)
+    // 最後に変わった刻みの印(MrChangeMark。64bit。ADR-0018 の tc。MR_BUSY_POKED = 木の変更でつつかれ、まだ刻みの印にしていない。T-0101・T-0115)
+    uint64_t busyTick;
+    // 次に反応の評価が要る刻みの印(待ちの丸め。セルの RxWaitStep::wakeTick の最小。0 = まだ求めていない = すぐ。T-0115)
+    uint64_t wakeTick;
 
     // --- セル(T-0102)---
-    uint32_t page;  // セルの頁(MR_NO_PAGE = 一様、MR_PAGE_WANTED = 一様で頁に広げる途中)
+    uint32_t page;     // セルの頁(MR_NO_PAGE = 一様、MR_PAGE_WANTED = 一様で頁に広げる途中)
+    uint32_t padding;  // 8 バイトの倍数にそろえる(CPU と GPU で同じ並び)
 };
 
 // セルの端数(2^-64 単位。物質 ID の昇順、0 は持たない)。エネルギーの端数は符号なし(値 = 整数部 + 端数 · 2^-64、整数部は切り捨て)
@@ -174,7 +178,9 @@ FX_FN MrBlock MrMakeUnusedBlock() {
 
     block.activeTick = 0;
     block.busyTick = 0;
+    block.wakeTick = 0;
     block.page = MR_NO_PAGE;
+    block.padding = 0;
 
     return block;
 }
@@ -586,6 +592,26 @@ FX_FN RxCell MrStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t t
     return MrStepCellDetailed(table, cell, worldSeed, tick, block, index).cell;
 }
 
+// 刻み tick の印(MrBlock::busyTick・wakeTick。64bit なので一周しない。0 = 刻み 0 より前 = 初めの状態。T-0115)
+FX_FN uint64_t MrChangeMark(uint64_t tick) {
+    return tick + 1;
+}
+
+// 待ちの丸め(ADR-0018。T-0115)の葉のセル(または影のセル)の 1 刻み。刻みと tc は印で渡す: tc = busyTick(ブロックが最後に
+// 変わった刻みの印。刻みの初めに読んだ値。つつかれたままの MR_BUSY_POKED は呼ぶ側が先にこの刻みの印にしておく)。返す wakeTick も印。
+// この刻みにつつかれた(busyTick = この刻みの印)ブロックは「刻みの直前に変わった」として評価する(この刻みにも確率 f で進む)。
+// 次の刻みからは tc = この刻みの印で引き直すので、呼ぶ側はつつかれたブロックを次の刻みにまた評価する(記憶が無いので偏らない)
+template <typename Table>
+FX_FN RxWaitStep MrStepCellWait(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block,
+                                uint32_t index) {
+    const uint64_t cellId = MrCellId(block.level, block.originX + (int64_t)MrCellX(index),
+                                     block.originY + (int64_t)MrCellY(index), block.originZ + (int64_t)MrCellZ(index));
+    const uint64_t mark = MrChangeMark(tick);
+    const uint64_t changedMark = block.busyTick < mark ? block.busyTick : mark - 1;
+
+    return RxStepCellWait(table, cell, worldSeed, mark, changedMark, cellId);
+}
+
 // このセルを刻むか: 使っているブロックで、本物の子に覆われていない(影のブロックは中間のセルも刻む。世界の写しは刻まない)
 FX_FN bool MrIsSteppedCell(MrBlock block, uint32_t index) {
     if (block.kind == MR_BLOCK_UNUSED || block.kind == MR_BLOCK_MIRROR)
@@ -644,6 +670,35 @@ FX_FN bool MrUniformWouldChange(Table table, RxCell value, uint64_t worldSeed, u
         return false;
 
     return MrStepCellDetailed(table, value, worldSeed, tick, block, 0).possible != 0;
+}
+
+// 一様なブロック(値 value)を待ちの丸めで評価した結果(T-0115)
+struct MrUniformWait {
+    uint32_t changed;   // 刻むセルが 1 つでも変わる(頁に広げて刻む)
+    uint64_t wakeTick;  // 変わらなければ、次に評価の要る刻みの印(刻むセルの最小。無ければ RX_WAIT_NEVER)
+};
+
+// 一様なブロックを刻み tick に待ちの丸めで評価する。待ちはセルの ID ごとに違うので、値が同じでも刻むセルを 1 つずつ見る
+// (評価するのは起こす刻み ≤ tick の時だけ。普通は変わる最初のセルで抜ける)
+template <typename Table>
+FX_FN MrUniformWait MrUniformWaitOf(Table table, RxCell value, uint64_t worldSeed, uint64_t tick, MrBlock block) {
+    MrUniformWait result;
+    result.changed = 0;
+    result.wakeTick = RX_WAIT_NEVER;
+    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+        if (!MrIsSteppedCell(block, index))
+            continue;
+
+        const RxWaitStep step = MrStepCellWait(table, value, worldSeed, tick, block, index);
+        if (!MrSameCell(step.cell, value)) {
+            result.changed = 1;
+            return result;
+        }
+
+        result.wakeTick = step.wakeTick < result.wakeTick ? step.wakeTick : result.wakeTick;
+    }
+
+    return result;
 }
 
 // --- 頁を畳む(T-0103)-----------------------------------------------------------------------------

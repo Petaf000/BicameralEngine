@@ -174,8 +174,9 @@ namespace bicameral::sim {
                               PeekPointOfCell(plan.cell));
         }
 
+        // 仮の世界と GPU の覗き窓はまだ今までの丸め(RxStepCell)なので、同じ丸めで刻む(T-0115。T-0121 で待ちの丸めに)
         if (plan.step)
-            StepNest(m_nest, *m_table, ProbeWorldSeed(), tick);
+            StepNest(m_nest, *m_table, ProbeWorldSeed(), tick, {.cutoffRounding = true});
 
         if (plan.pullBack)
             PullBackShadowChain(m_nest, *m_table, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT);

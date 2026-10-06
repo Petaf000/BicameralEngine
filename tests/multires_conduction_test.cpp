@@ -486,9 +486,9 @@ namespace {
                 "{}〜{} mK",
                 settings.tolerance.temperatureMk, settings.tolerance.amountShift, settings.options.maxSubcycleGap,
                 tick + 1, realBlocks, UsedWorldPages(nest), spread.quietBlocks, CountFractionBlocks(nest),
-                SeedSlots(nest).size(), nest.counters[MR_COUNTER_FOLDED], spread.temperature, spread.energy,
-                spread.amountShift, maxChange, spread.within[0], spread.within[1], spread.within[2], spread.within[3],
-                world.low, world.high);
+                WaitSeedSlots(nest, tick + 1).size(), nest.counters[MR_COUNTER_FOLDED], spread.temperature,
+                spread.energy, spread.amountShift, maxChange, spread.within[0], spread.within[1], spread.within[2],
+                spread.within[3], world.low, world.high);
             maxChange = 0;
         }
 
