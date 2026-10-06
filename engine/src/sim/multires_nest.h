@@ -155,6 +155,17 @@ namespace bicameral::sim {
     // 値 1 つに戻して頁を枠の順に空きのスタックへ返す(T-0103)。SubmitQuietCoarsenRequests の前に、StepActive で刻む木に使う
     void FoldQuietPages(MultiresNest& nest, uint64_t tick);
 
+    // ほぼ同じ頁も畳む(T-0104。D-428。17 §5「ほぼ同じ頁を畳む」): 調べる時は上と同じ。覆われていないセルの差が tolerance の中なら
+    // 平均の値 1 つに戻し、切り捨てで余った単位(セルの数未満)を世界の帳簿へ移す(合計はビット一致)。
+    // 同じ時に、端数の枠を持つブロックは端数を全部帳簿へ移して枠を返す(1 単位未満 = 計器で測れない差。ADR-0017 追記)。
+    // tolerance が MrExactFoldTolerance なら上と同じ結果(ビット単位で同じ時だけ畳む・端数は返さない)。GPU は未対応(T-0112)
+    void FoldQuietPages(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
+                        const multires::MrFoldTolerance& tolerance);
+
+    // 頁を持つブロックの覆われていないセルの集計(T-0104。畳む判定と計測に使う)
+    [[nodiscard]] multires::MrFoldStats CollectFoldStats(const MultiresNest& nest, const ReactionTableView& table,
+                                                         uint32_t slot);
+
     // 静かな本物の葉(MR_QUIET_TICKS 刻みを超えて種でも進める規則もない。multires_activity.hlsli)を粗くする要求を、
     // 一覧の後ろに世界の枠の順で足す(T-0101)。一覧が一杯なら足さずに数える。ProcessRequests の前に、StepActive で刻む木に使う
     void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick);

@@ -666,6 +666,209 @@ FX_FN bool MrFoldsCell(MrBlock block, RxCell value, uint32_t index, RxCell cell)
     return MrSameCell(cell, MrUniformCell(block, value, index));
 }
 
+// --- ほぼ同じ頁を畳む(T-0104。D-428)--------------------------------------------------------------
+// 覆われていないセルの差が許容差(ゲーム内の計器で測れない差)の中なら、平均の値 1 つに戻す。合計はビット一致: 平均の切り捨てで
+// 余った単位(物質ごと・エネルギー。セルの数未満)は世界の帳簿へ(multires_activity.cpp の AddFoldRemainder)。許容差の値は未定
+// (docs/plan/QUESTIONS.md Q4)。完全に同じ(MrIsExactFold)なら T-0103 のビット単位の判定(MrFoldsCell)のまま。
+// 集計(MrFoldStats)は最小・最大・和と、物質 ID の昇順に並べた成分だけなので、セルを足す順によらない。
+
+FX_CONST uint32_t MR_FOLD_EXACT_SHIFT = 64;
+
+struct MrFoldTolerance {
+    uint32_t temperatureMk;  // セルの温度の幅(最大 − 最小)の上限
+    uint32_t
+        amountShift;  // 物質ごとの量の幅の上限 = 成分の合計が最大のセルの合計 >> amountShift(MR_FOLD_EXACT_SHIFT 以上は 0)
+};
+
+FX_FN MrFoldTolerance MrExactFoldTolerance() {
+    MrFoldTolerance tolerance;
+    tolerance.temperatureMk = 0;
+    tolerance.amountShift = MR_FOLD_EXACT_SHIFT;
+
+    return tolerance;
+}
+
+FX_FN bool MrIsExactFold(MrFoldTolerance tolerance) {
+    return tolerance.temperatureMk == 0 && tolerance.amountShift >= MR_FOLD_EXACT_SHIFT;
+}
+
+struct MrFoldStats {
+    // --- セル ---
+    uint32_t cellCount;
+    uint32_t tooManySpecies;  // 合わせた成分が RX_MAX_CELL_SPECIES を超えた(畳まない)
+    int32_t lowTemperature;   // mK
+    int32_t highTemperature;
+    uint64_t highTotal;  // セルの成分の物質量の合計の最大
+    MrWide energy;       // エネルギーの和(上の 2 語。下の語は使わない)
+
+    // --- 成分(物質 ID の昇順)---
+    uint32_t speciesCount;
+    uint32_t species[RX_MAX_CELL_SPECIES];
+    uint32_t present[RX_MAX_CELL_SPECIES];  // その物質を持つセルの数
+    uint64_t lowAmount[RX_MAX_CELL_SPECIES];
+    uint64_t highAmount[RX_MAX_CELL_SPECIES];
+    uint64_t sumHigh[RX_MAX_CELL_SPECIES];
+    uint64_t sumLow[RX_MAX_CELL_SPECIES];
+};
+
+FX_FN MrFoldStats MrMakeFoldStats() {
+    MrFoldStats stats;
+    stats.cellCount = 0;
+    stats.tooManySpecies = 0;
+    stats.lowTemperature = 2147483647;
+    stats.highTemperature = -2147483647 - 1;
+    stats.highTotal = 0;
+    stats.energy = MrMakeWide();
+    stats.speciesCount = 0;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        stats.species[i] = 0;
+        stats.present[i] = 0;
+        stats.lowAmount[i] = 0;
+        stats.highAmount[i] = 0;
+        stats.sumHigh[i] = 0;
+        stats.sumLow[i] = 0;
+    }
+
+    return stats;
+}
+
+// 成分の位置(物質 ID の昇順に並べた時に入る位置)
+FX_FN uint32_t MrFoldSpeciesPosition(MrFoldStats stats, uint32_t speciesId) {
+    uint32_t position = 0;
+    while (position < stats.speciesCount && stats.species[position] < speciesId)
+        position += 1;
+
+    return position;
+}
+
+// 成分が無ければ ID の順の位置に空けて差し込む(一杯なら tooManySpecies)
+FX_FN MrFoldStats MrFoldInsertSpecies(MrFoldStats stats, uint32_t speciesId) {
+    const uint32_t position = MrFoldSpeciesPosition(stats, speciesId);
+    if (position < stats.speciesCount && stats.species[position] == speciesId)
+        return stats;
+
+    if (stats.speciesCount >= RX_MAX_CELL_SPECIES) {
+        stats.tooManySpecies = 1;
+        return stats;
+    }
+
+    for (uint32_t i = stats.speciesCount; i > position; --i) {
+        stats.species[i] = stats.species[i - 1];
+        stats.present[i] = stats.present[i - 1];
+        stats.lowAmount[i] = stats.lowAmount[i - 1];
+        stats.highAmount[i] = stats.highAmount[i - 1];
+        stats.sumHigh[i] = stats.sumHigh[i - 1];
+        stats.sumLow[i] = stats.sumLow[i - 1];
+    }
+
+    stats.species[position] = speciesId;
+    stats.present[position] = 0;
+    stats.lowAmount[position] = 0;
+    stats.highAmount[position] = 0;
+    stats.sumHigh[position] = 0;
+    stats.sumLow[position] = 0;
+    stats.speciesCount += 1;
+
+    return stats;
+}
+
+// 覆われていないセル 1 つ(温度は RxComputeThermal の値)を足す
+FX_FN MrFoldStats MrAddFoldCell(MrFoldStats stats, RxCell cell, int32_t temperature) {
+    stats.cellCount += 1;
+    stats.lowTemperature = temperature < stats.lowTemperature ? temperature : stats.lowTemperature;
+    stats.highTemperature = temperature > stats.highTemperature ? temperature : stats.highTemperature;
+    stats.energy = MrWideAdd(stats.energy, (uint64_t)cell.energy, cell.energy < 0, 0);
+
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+        const uint64_t amount = cell.amounts[i];
+        total = total + amount < total ? FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu) : total + amount;
+        stats = MrFoldInsertSpecies(stats, cell.species[i]);
+        const uint32_t position = MrFoldSpeciesPosition(stats, cell.species[i]);
+        if (position >= stats.speciesCount || stats.species[position] != cell.species[i])
+            continue;
+
+        const bool first = stats.present[position] == 0;
+        stats.present[position] += 1;
+        stats.lowAmount[position] = first || amount < stats.lowAmount[position] ? amount : stats.lowAmount[position];
+        stats.highAmount[position] = amount > stats.highAmount[position] ? amount : stats.highAmount[position];
+        stats.sumLow[position] += amount;
+        stats.sumHigh[position] += stats.sumLow[position] < amount ? 1u : 0u;
+    }
+
+    stats.highTotal = total > stats.highTotal ? total : stats.highTotal;
+
+    return stats;
+}
+
+// 集めたセルの差が許容差の中か(成分が無いセルの量は 0)
+FX_FN bool MrFoldStatsWithin(MrFoldStats stats, MrFoldTolerance tolerance) {
+    if (stats.cellCount == 0 || stats.tooManySpecies != 0)
+        return false;
+
+    if ((uint32_t)(stats.highTemperature - stats.lowTemperature) > tolerance.temperatureMk)
+        return false;
+
+    const uint64_t amountLimit = tolerance.amountShift >= MR_FOLD_EXACT_SHIFT
+                                     ? 0
+                                     : stats.highTotal >> tolerance.amountShift;
+    bool within = true;
+    for (uint32_t i = 0; i < stats.speciesCount; ++i) {
+        const uint64_t low = stats.present[i] < stats.cellCount ? 0 : stats.lowAmount[i];
+        within = within && stats.highAmount[i] - low <= amountLimit;
+    }
+
+    return within;
+}
+
+// 平均の値と、切り捨てで余った単位(セルの数未満。帳簿へ。並びは stats.species と同じ)
+struct MrFoldValue {
+    RxCell cell;
+    uint64_t energyRemainder;
+    uint64_t amountRemainders[RX_MAX_CELL_SPECIES];
+};
+
+// エネルギーの和(符号つき 128bit)を床の割り算する。余りは 0 以上
+FX_FN FxDivResult MrFloorDivideEnergy(MrWide energy, uint64_t divisor) {
+    if ((int64_t)energy.top >= 0) {
+        FxU128 numerator = {energy.top, energy.hi};
+        return FxDivU128By64(numerator, divisor);
+    }
+
+    // --- 負: 大きさ M = −和 を切り上げで割り、商を負にする(余り = 商 × n − M = n − 1 − (M + n − 1) の余り)---
+    const uint64_t low = ~energy.hi + 1u;
+    const uint64_t high = ~energy.top + (energy.hi == 0 ? 1u : 0u);
+    const uint64_t raisedLow = low + (divisor - 1u);
+    FxU128 raised = {high + (raisedLow < low ? 1u : 0u), raisedLow};
+    const FxDivResult magnitude = FxDivU128By64(raised, divisor);
+
+    FxDivResult result;
+    result.quotient = (uint64_t)(-(int64_t)magnitude.quotient);
+    result.remainder = divisor - 1u - magnitude.remainder;
+
+    return result;
+}
+
+FX_FN MrFoldValue MrFoldStatsValue(MrFoldStats stats) {
+    MrFoldValue value;
+    const uint64_t cells = stats.cellCount;
+    const FxDivResult energy = MrFloorDivideEnergy(stats.energy, cells);
+    value.cell = RxMakeEmptyCell((int64_t)energy.quotient);
+    value.energyRemainder = energy.remainder;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        value.amountRemainders[i] = 0;
+        if (i >= stats.speciesCount)
+            continue;
+
+        FxU128 sum = {stats.sumHigh[i], stats.sumLow[i]};
+        const FxDivResult amount = FxDivU128By64(sum, cells);
+        value.cell = RxAddSpecies(value.cell, stats.species[i], amount.quotient);
+        value.amountRemainders[i] = amount.remainder;
+    }
+
+    return value;
+}
+
 MR_NAMESPACE_END
 
 #endif  // BICAMERAL_MULTIRES_HLSLI

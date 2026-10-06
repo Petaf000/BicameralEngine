@@ -7,9 +7,11 @@
 //     保存量が最初とビット一致(4 刻みごと)、活性だけ刻んでも全部刻んだ時とビット一致。端数の枠が無いと整数の単位の倍数だけ送る(数える)
 //   - たくさんの要求の場面(深さ 26 段まで細かく/粗く・木箱が燃える・影)に伝導を入れても、活性 = 全部・保存量が一致・2 回の実行で一致
 // 計測(ログ): 面の係数が熱容量の上限(1/8)で止まるレベル(T-0108 の材料)・静かになった後に残る頁と温度の幅(T-0104 の材料)。
+// --residue: 鎖の場面を 4000 刻み進めて頁の残り方を測る(許容差なし・Δkmax 3・許容差 10 / 100 mK。T-0104)。
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <span>
 #include <string_view>
@@ -362,79 +364,162 @@ namespace {
             CapacityBoundLevel(crate, 20000));
     }
 
-    // 頁を持つ本物のブロックの数と、ブロックの中の温度・エネルギーの幅の最大
+    // 頁を持つ本物のブロックの数と、ブロックの中の温度・エネルギー・物質量の幅、許容差ごとに「ほぼ同じ」のブロックの数(T-0104)
+    constexpr std::array<uint32_t, 4> RESIDUE_TOLERANCES_MK = {1, 10, 100, 1000};
+    constexpr uint32_t RESIDUE_AMOUNT_SHIFT = 20;  // 物質量の幅 ≤ セルの合計の約 100 万分の 1
+
     struct PageSpread {
         uint32_t pagedBlocks = 0;
-        int32_t temperature = 0;  // mK
-        int64_t energy = 0;       // そのレベルの単位
+        uint32_t quietBlocks = 0;                    // 頁を持ち、忙しさの印が N 刻みより古い
+        int32_t temperature = 0;                     // mK
+        int64_t energy = 0;                          // そのレベルの単位
+        uint32_t amountShift = MR_FOLD_EXACT_SHIFT;  // 物質量の幅 ≤ 合計 >> amountShift を満たす最大(幅が 0 なら 64)
+        std::array<uint32_t, RESIDUE_TOLERANCES_MK.size()> within{};
     };
 
-    PageSpread MeasurePageSpread(const MultiresNest& nest, const ReactionTableView& view) {
+    // 物質量の幅が合計の何分の 1 か(幅 ≤ 合計 >> shift を満たす最大の shift)
+    uint32_t AmountSpreadShift(const MrFoldStats& stats) {
+        uint32_t shift = MR_FOLD_EXACT_SHIFT;
+        for (uint32_t i = 0; i < stats.speciesCount; ++i) {
+            const uint64_t low = stats.present[i] < stats.cellCount ? 0 : stats.lowAmount[i];
+            const uint64_t spread = stats.highAmount[i] - low;
+            while (shift > 0 && spread > (shift >= MR_FOLD_EXACT_SHIFT ? 0 : stats.highTotal >> shift))
+                --shift;
+        }
+
+        return shift;
+    }
+
+    PageSpread MeasurePageSpread(const MultiresNest& nest, const ReactionTableView& view, uint64_t tick) {
         PageSpread spread;
+        const uint32_t mark = MrActivityMark(tick);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             const MrBlock& block = nest.blocks[slot];
-            if (block.kind != MR_BLOCK_REAL || MrIsUniform(block))
+            if (block.kind != MR_BLOCK_REAL || MrIsUniform(block) || MrFoldValueCell(block) == MR_BLOCK_CELLS)
                 continue;
 
-            TemperatureRange temperatures;
+            const MrFoldStats stats = CollectFoldStats(nest, view, slot);
             int64_t lowEnergy = INT64_MAX;
             int64_t highEnergy = INT64_MIN;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrIsSteppedCell(block, index))
+                if (MrIsCoveredCell(block, index))
                     continue;
 
                 const RxCell cell = LoadNestCell(nest, slot, index);
-                const int32_t temperature = RxComputeThermal(view, cell).temperature;
-                temperatures.low = std::min(temperatures.low, temperature);
-                temperatures.high = std::max(temperatures.high, temperature);
                 lowEnergy = std::min(lowEnergy, cell.energy);
                 highEnergy = std::max(highEnergy, cell.energy);
             }
 
             spread.pagedBlocks += 1;
-            spread.temperature = std::max(spread.temperature, temperatures.high - temperatures.low);
+            spread.quietBlocks += block.busyTick != MR_BUSY_POKED && mark - block.busyTick > MR_QUIET_TICKS ? 1 : 0;
+            spread.temperature = std::max(spread.temperature, stats.highTemperature - stats.lowTemperature);
             spread.energy = std::max(spread.energy, highEnergy - lowEnergy);
+            spread.amountShift = std::min(spread.amountShift, AmountSpreadShift(stats));
+            for (size_t t = 0; t < RESIDUE_TOLERANCES_MK.size(); ++t) {
+                const MrFoldTolerance tolerance = {.temperatureMk = RESIDUE_TOLERANCES_MK[t],
+                                                   .amountShift = RESIDUE_AMOUNT_SHIFT};
+                spread.within[t] += MrFoldStatsWithin(stats, tolerance) ? 1 : 0;
+            }
         }
 
         return spread;
     }
 
-    // 鎖の場面を、頁を畳む・静かな葉を粗くするも入れて進め、静かになった後に残る頁と頁の中の幅を測る(T-0104 の材料)
-    void MeasurePageResidue(const BakedReactionTable& table) {
-        constexpr uint64_t RESIDUE_TICKS = 600;
-        constexpr uint64_t REPORT_EVERY = 200;
+    // 頁を持つブロックの覆われていないセルの温度(枠 × 512。頁なしは 0)。1 刻みの温度の変化の最大を測るため
+    std::vector<int32_t> PagedTemperatures(const MultiresNest& nest, const ReactionTableView& view) {
+        std::vector<int32_t> temperatures(size_t{nest.capacity.worldBlocks} * MR_BLOCK_CELLS, 0);
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL || MrIsUniform(block))
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (!MrIsCoveredCell(block, index))
+                    temperatures[(size_t{slot} * MR_BLOCK_CELLS) + index] = RxComputeThermal(
+                                                                                view, LoadNestCell(nest, slot, index))
+                                                                                .temperature;
+            }
+        }
+
+        return temperatures;
+    }
+
+    struct ResidueSettings {
+        uint64_t ticks = 600;
+        uint64_t reportEvery = 200;
+        MrFoldTolerance tolerance = MrExactFoldTolerance();
+        MultiresStepOptions options = CONDUCTION;
+    };
+
+    // 鎖の場面を、頁を畳む・静かな葉を粗くするも入れて進め、残る頁と頁の中の幅を測る(T-0104 の材料)。
+    // 許容差を渡すと、ほぼ同じ頁も畳む(FoldQuietPages の許容差つき)。保存量が最初とビット一致することを確かめる
+    void MeasurePageResidue(const BakedReactionTable& table, const ResidueSettings& settings) {
         MultiresNest nest = MakeChainNest(table, 16);
         const ReactionTableView view = table.View();
         const ConservedTotals initial = ComputeConservedTotals(nest, table, CHAIN_LEVELS);
-        for (uint64_t tick = 0; tick < RESIDUE_TICKS; ++tick) {
-            FoldQuietPages(nest, tick);
+        int32_t maxChange = 0;  // 頁を持つブロックの 1 刻みの温度の変化の最大(報告の間隔の中)
+        for (uint64_t tick = 0; tick < settings.ticks; ++tick) {
+            FoldQuietPages(nest, table, tick, settings.tolerance);
             SubmitQuietCoarsenRequests(nest, tick);
             ProcessRequests(nest);
-            StepActive(nest, table, CONDUCTION_SEED, tick, CONDUCTION);
-            if (tick % REPORT_EVERY != REPORT_EVERY - 1)
+            const std::vector<int32_t> before = PagedTemperatures(nest, view);
+            StepActive(nest, table, CONDUCTION_SEED, tick, settings.options);
+            const std::vector<int32_t> after = PagedTemperatures(nest, view);
+            for (size_t i = 0; i < before.size(); ++i) {
+                if (before[i] != 0 && after[i] != 0)
+                    maxChange = std::max(maxChange, std::abs(after[i] - before[i]));
+            }
+
+            if (tick % settings.reportEvery != settings.reportEvery - 1)
                 continue;
 
             uint32_t realBlocks = 0;
             for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot)
                 realBlocks += nest.blocks[slot].kind == MR_BLOCK_REAL ? 1 : 0;
 
-            const PageSpread spread = MeasurePageSpread(nest, view);
+            const PageSpread spread = MeasurePageSpread(nest, view, tick + 1);
+            const TemperatureRange world = RealTemperatures(nest, view);
             Log(Channel::Sim, Level::Info,
-                "頁の残り方: 刻み {}・本物のブロック {}・頁 {}・端数のブロック {}・種 {}・頁の中の幅 最大 {} mK / {} "
-                "単位",
-                tick + 1, realBlocks, UsedWorldPages(nest), CountFractionBlocks(nest), SeedSlots(nest).size(),
-                spread.temperature, spread.energy);
+                "頁の残り方(許容差 {} mK・量 >> {}・Δkmax {}): 刻み {}・本物 {}・頁 {}(静か {})・端数 {}・種 "
+                "{}・畳んだ {}・"
+                "幅 {} mK / {} 単位 / 量 >> {}・1 刻みの変化 最大 {} mK・ほぼ同じ(1/10/100/1000 mK){}/{}/{}/{}・世界 "
+                "{}〜{} mK",
+                settings.tolerance.temperatureMk, settings.tolerance.amountShift, settings.options.maxSubcycleGap,
+                tick + 1, realBlocks, UsedWorldPages(nest), spread.quietBlocks, CountFractionBlocks(nest),
+                SeedSlots(nest).size(), nest.counters[MR_COUNTER_FOLDED], spread.temperature, spread.energy,
+                spread.amountShift, maxChange, spread.within[0], spread.within[1], spread.within[2], spread.within[3],
+                world.low, world.high);
+            maxChange = 0;
         }
 
         Expect(ComputeConservedTotals(nest, table, CHAIN_LEVELS) == initial,
-               "頁の残り方: 畳む・粗くするを入れても保存量が最初とビット一致");
+               "頁の残り方: 畳む(許容差つき)・粗くするを入れても保存量が最初とビット一致");
     }
 
-    int Run() {
+    // 長い計測(--residue。release で: job.py run -Preset release -Exe multires_conduction_test -- --residue)
+    void MeasureResidueLong(const BakedReactionTable& table) {
+        constexpr uint64_t LONG_TICKS = 4000;
+        constexpr uint64_t LONG_REPORT = 500;
+        const MultiresStepOptions subcycle = test::SubcycleTestOptions(table, 3);
+        MeasurePageResidue(table, {.ticks = LONG_TICKS, .reportEvery = LONG_REPORT});
+        MeasurePageResidue(table, {.ticks = LONG_TICKS, .reportEvery = LONG_REPORT, .options = subcycle});
+        for (const uint32_t millikelvin : {10u, 100u}) {
+            const MrFoldTolerance tolerance = {.temperatureMk = millikelvin, .amountShift = RESIDUE_AMOUNT_SHIFT};
+            MeasurePageResidue(
+                table, {.ticks = LONG_TICKS, .reportEvery = LONG_REPORT, .tolerance = tolerance, .options = subcycle});
+        }
+    }
+
+    int Run(std::span<char*> arguments) {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
             Log(Channel::Sim, Level::Error, "multires_conduction_test: FAILED(表を作れない)");
             return 1;
+        }
+
+        if (arguments.size() > 1 && std::string_view(arguments[1]) == "--residue") {
+            MeasureResidueLong(*table);
+            return failureCount == 0 ? 0 : 1;
         }
 
         CheckNeighbors(*table);
@@ -443,7 +528,7 @@ namespace {
         CheckChain(*table, 0);
         CheckStress(*table);
         LogCapacityBound(*table);
-        MeasurePageResidue(*table);
+        MeasurePageResidue(*table, {});
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_conduction_test: FAILED ({} 件)", failureCount);
@@ -457,8 +542,8 @@ namespace {
 
 }  // namespace
 
-int main() {
-    const int exitCode = Run();
+int main(int argc, char** argv) {
+    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
     SingletonFinalizer::Finalize();
 
     return exitCode;

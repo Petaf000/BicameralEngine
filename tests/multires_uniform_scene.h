@@ -27,22 +27,23 @@ namespace bicameral::test {
     constexpr uint64_t UNIFORM_TICKS = (UNIFORM_CHAIN_DEPTH + 1) * (multires::MR_QUIET_TICKS + 1) + 4;
 
     // 900 K の木箱(体積の 1 割がセルロース、残りが空気。燃え尽きるとどのセルも同じ値になる)
-    inline reaction::RxCell MakeCrateCell(const sim::BakedReactionTable& table) {
+    inline reaction::RxCell MakeCrateCell(const sim::BakedReactionTable& table, int32_t millikelvin = 900000) {
         const std::vector<sim::SpeciesAmount> crate = {{.species = table.SpeciesId("cellulose"), .amount = 38600000},
                                                        {.species = table.SpeciesId("oxygen"), .amount = 983000},
                                                        {.species = table.SpeciesId("nitrogen"), .amount = 3697000}};
 
-        return sim::MakeReactionCell(table, crate, 900000);
+        return sim::MakeReactionCell(table, crate, millikelvin);
     }
 
-    // 根 8 個(枠 r の原点は (r % 2, r / 2 % 2, r / 4) × 8。枠 crateRoots より前が木箱)。pages は世界の頁の数
+    // 根 8 個(枠 r の原点は (r % 2, r / 2 % 2, r / 4) × 8。枠 crateRoots より前が木箱〔crateMillikelvin〕)。pages は世界の頁の数
     inline sim::MultiresNest MakeUniformNest(const sim::BakedReactionTable& table, uint32_t pages,
-                                             uint32_t crateRoots = UNIFORM_CRATE_ROOTS) {
+                                             uint32_t crateRoots = UNIFORM_CRATE_ROOTS,
+                                             int32_t crateMillikelvin = 900000) {
         sim::MultiresCapacity capacity = MakeMultiresCapacity(table, UNIFORM_WORLD_BLOCKS, 0, UNIFORM_FRACTIONS);
         capacity.pages = pages;
         sim::MultiresNest nest = sim::MakeMultiresNest(capacity);
         const std::vector<reaction::RxCell> air(multires::MR_BLOCK_CELLS, MakeAirCell(table));
-        const std::vector<reaction::RxCell> crate(multires::MR_BLOCK_CELLS, MakeCrateCell(table));
+        const std::vector<reaction::RxCell> crate(multires::MR_BLOCK_CELLS, MakeCrateCell(table, crateMillikelvin));
         for (uint32_t root = 0; root < UNIFORM_ROOTS; ++root) {
             const int64_t x = root % UNIFORM_ROOT_EDGE;
             const int64_t y = (root / UNIFORM_ROOT_EDGE) % UNIFORM_ROOT_EDGE;

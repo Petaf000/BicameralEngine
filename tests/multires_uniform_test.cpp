@@ -9,12 +9,16 @@
 //     頁が返った刻みに頁に広がって燃え、やがて畳まれる
 //   - 一様な親へ値の違う一様な子を粗くすると親が頁に広がり、八分の一は粗くした値・残りは親の値になる。同じ値なら一様のまま
 //   - 子に覆われた頁(覆われていないセルが同じ・覆われたセルは空)も畳まれ、論理のセルは変わらず、頁は枠の順に積まれる(T-0103)
+//   - 600 K の木箱は燃え尽きてビット単位で一様に戻り畳まれる(T-0106 の後)。許容差つきでも結果は全部同じ(T-0104)
+//   - ほぼ同じ頁(T-0104): 計器で測れない差の頁は平均の切り捨てで畳み、余りと端数の枠の端数を帳簿へ移して保存量がビット一致。
+//     許容差を超える頁は畳まない。許容差なしなら今までどおり(畳まない・端数の枠を返さない)
 #include <algorithm>
 #include <cstdint>
 #include <format>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/log.h"
@@ -286,6 +290,167 @@ namespace {
         Expect(stackOrder, "子に覆われた頁を畳む: 頁は枠の順に空きのスタックへ積まれた");
     }
 
+    // --- ほぼ同じ頁を畳む(T-0104)---
+    // 600 K の木箱(O2 が 1 単位だけ残るセルと残らないセルに分かれ、ビット単位では一様に戻らない。17 §5「頁を畳む」)を、
+    // 許容差なしと許容差つきで進める。許容差つきでも「世界 + 帳簿」の保存量は毎刻みビット一致(余りは帳簿へ)
+    struct NearFoldRun {
+        uint32_t conservationMismatches = 0;
+        uint32_t folded = 0;
+        uint32_t finalUsedPages = 0;
+        uint64_t crateFoldTick = NO_TICK;
+        uint64_t cratePageTick = NO_TICK;
+        uint32_t quietTicks = 0;  // 枠 0 の木箱が頁を持ち、静か(忙しさの印が N 刻みより古い)だった刻みの数
+        uint64_t digest = 0;
+    };
+
+    constexpr uint64_t NEAR_FOLD_TICKS = 300;
+    constexpr int32_t NEAR_FOLD_CRATE_MK = 600000;
+
+    NearFoldRun RunNearFold(const BakedReactionTable& table, const MrFoldTolerance& tolerance) {
+        MultiresNest nest = test::MakeUniformNest(table, test::UNIFORM_WORLD_BLOCKS, test::UNIFORM_CRATE_ROOTS,
+                                                  NEAR_FOLD_CRATE_MK);
+        const ConservedTotals initial = ComputeConservedTotals(nest, table, test::UNIFORM_CHAIN_DEPTH);
+        NearFoldRun run;
+        for (uint64_t tick = 0; tick < NEAR_FOLD_TICKS; ++tick) {
+            SubmitRequests(nest, test::UniformRequestsAt(tick));
+            FoldQuietPages(nest, table, tick, tolerance);
+            SubmitQuietCoarsenRequests(nest, tick);
+            ProcessRequests(nest);
+            StepActive(nest, table, test::STRESS_SEED, tick);
+
+            const MrBlock& crate = nest.blocks[0];
+            run.quietTicks += !MrIsUniform(crate) && crate.busyTick != MR_BUSY_POKED &&
+                                      MrActivityMark(tick + 1) - crate.busyTick > MR_QUIET_TICKS
+                                  ? 1
+                                  : 0;
+            NoteFold(nest, 0, tick, run.cratePageTick, run.crateFoldTick);
+            if (tick % 8 == 7 || tick + 1 == NEAR_FOLD_TICKS)
+                run.conservationMismatches += ComputeConservedTotals(nest, table, test::UNIFORM_CHAIN_DEPTH) == initial
+                                                  ? 0
+                                                  : 1;
+        }
+
+        run.folded = nest.counters[MR_COUNTER_FOLDED];
+        run.finalUsedPages = UsedWorldPages(nest);
+        run.digest = HashWholeNest(nest);
+
+        return run;
+    }
+
+    void CheckNearFold(const BakedReactionTable& table) {
+        const NearFoldRun exact = RunNearFold(table, MrExactFoldTolerance());
+        const MrFoldTolerance tolerance = {.temperatureMk = 100, .amountShift = 20};
+        const NearFoldRun near = RunNearFold(table, tolerance);
+        Expect(exact.conservationMismatches == 0, "600 K の木箱(許容差なし): 保存量が最初とビット一致");
+        Expect(near.conservationMismatches == 0,
+               "600 K の木箱(許容差つき): 余りを帳簿へ移しても保存量が最初とビット一致");
+        Expect(exact.folded == test::UNIFORM_CRATE_ROOTS && exact.finalUsedPages == 0,
+               "600 K の木箱: 燃え尽きてビット単位で一様に戻り、両方畳まれた(T-0106 の後)");
+        Expect(near.digest == exact.digest,
+               "600 K の木箱: ほぼ同じで畳む頁が無ければ、許容差つきでも許容差なしと全部が一致");
+
+        for (const auto& [name, run] : {std::pair{"許容差なし", exact}, std::pair{"許容差 100 mK・量 >> 20", near}})
+            Log(Channel::Sim, Level::Info,
+                "600 K の木箱({}): {} 刻み・畳んだ頁 {}・最後の頁 {}・枠 0 が頁を得た刻み {}・畳まれた刻み "
+                "{}・静かだった刻み {}",
+                name, NEAR_FOLD_TICKS, run.folded, run.finalUsedPages, static_cast<int64_t>(run.cratePageTick),
+                static_cast<int64_t>(run.crateFoldTick), run.quietTicks);
+    }
+
+    // 根 3 つ(どれも頁を持つ): 枠 0 = 空気のセルのエネルギーと O2 が数単位ずつ違う(計器で測れない差)/ 枠 1 = 枠 0 の 1 セルだけ 2 K 熱い /
+    // 枠 2 = 枠 0 と同じセルで、端数の枠を持つ。刻み NEAR_UNIT_TICK にちょうど静かになるよう忙しさの印を置き、1 回だけ畳む
+    constexpr uint64_t NEAR_UNIT_TICK = 40;
+
+    struct NearFoldUnit {
+        MultiresNest nest;
+        std::vector<RxCell> nearCells;
+    };
+
+    NearFoldUnit MakeNearFoldUnit(const BakedReactionTable& table) {
+        NearFoldUnit unit{.nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 4, 0, 4))};
+        const RxCell air = test::MakeAirCell(table);
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        unit.nearCells.assign(MR_BLOCK_CELLS, air);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; index += 7) {
+            unit.nearCells[index].energy += index % 300;
+            unit.nearCells[index] = RxAddSpecies(unit.nearCells[index], oxygen, index % 4);
+        }
+
+        std::vector<RxCell> hot = unit.nearCells;
+        const uint64_t heatCapacity = RxComputeThermal(table.View(), air).heatCapacity;  // nJ/K
+        hot[100].energy += static_cast<int64_t>((2 * heatCapacity / 1000000) + 1);
+        for (uint32_t root = 0; root < 3; ++root)
+            PlaceRootBlock(unit.nest, int64_t{root} * 8, 0, 0, root == 1 ? hot : unit.nearCells);
+
+        // --- 枠 2 に端数の枠(エネルギーと O2 の端数を数セルに)---
+        MrBlock& owner = unit.nest.blocks[2];
+        owner.fraction = unit.nest.freeFractions[--unit.nest.counters[MR_COUNTER_FREE_FRACTIONS]];
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            MrFraction fraction = MrMakeEmptyFraction();
+            if (index % 5 == 0) {
+                fraction.energy = 0xC000000000000000ull;
+                fraction.speciesCount = 1;
+                fraction.species[0] = oxygen;
+                fraction.amounts[0] = 0x9000000000000000ull + index;
+            }
+
+            unit.nest.fractions[(size_t{owner.fraction} * MR_BLOCK_CELLS) + index] = fraction;
+        }
+
+        for (uint32_t root = 0; root < 3; ++root)
+            unit.nest.blocks[root].busyTick = MrActivityMark(NEAR_UNIT_TICK) - (MR_QUIET_TICKS + 1);
+
+        return unit;
+    }
+
+    void CheckNearFoldUnit(const BakedReactionTable& table) {
+        const MrFoldTolerance tolerance = {.temperatureMk = 100, .amountShift = 20};
+        NearFoldUnit exact = MakeNearFoldUnit(table);
+        NearFoldUnit near = MakeNearFoldUnit(table);
+        const ConservedTotals before = ComputeConservedTotals(near.nest, table, 0);
+        const uint32_t freeFractions = near.nest.counters[MR_COUNTER_FREE_FRACTIONS];
+        FoldQuietPages(exact.nest, table, NEAR_UNIT_TICK, MrExactFoldTolerance());
+        FoldQuietPages(near.nest, table, NEAR_UNIT_TICK, tolerance);
+
+        Expect(!MrIsUniform(exact.nest.blocks[0]) && !MrIsUniform(exact.nest.blocks[1]) &&
+                   !MrIsUniform(exact.nest.blocks[2]) && exact.nest.blocks[2].fraction != MR_NO_FRACTION,
+               "ほぼ同じ頁(許容差なし): どれも畳まず、端数の枠も返さない");
+        Expect(ComputeConservedTotals(near.nest, table, 0) == before,
+               "ほぼ同じ頁(許容差つき): 畳んで余りと端数を帳簿へ移しても保存量がビット一致");
+        Expect(
+            MrIsUniform(near.nest.blocks[0]) && !MrIsUniform(near.nest.blocks[1]) && MrIsUniform(near.nest.blocks[2]),
+            "ほぼ同じ頁(許容差つき): 計器で測れない差の枠 0・2 は畳み、2 K 熱いセルのある枠 1 は畳まない");
+        Expect(near.nest.blocks[2].fraction == MR_NO_FRACTION &&
+                   near.nest.counters[MR_COUNTER_FREE_FRACTIONS] == freeFractions + 1,
+               "ほぼ同じ頁(許容差つき): ちょうど静かになった端数の枠を返した");
+
+        // --- 畳んだ値 = 平均の切り捨て ---
+        int64_t energySum = 0;
+        uint64_t oxygenSum = 0;
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        for (const RxCell& cell : near.nearCells) {
+            energySum += cell.energy;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                oxygenSum += cell.species[i] == oxygen ? cell.amounts[i] : 0;
+        }
+
+        const RxCell folded = LoadNestCell(near.nest, 0, 0);
+        uint64_t foldedOxygen = 0;
+        for (uint32_t i = 0; i < folded.speciesCount; ++i)
+            foldedOxygen += folded.species[i] == oxygen ? folded.amounts[i] : 0;
+
+        Expect(folded.energy == energySum / MR_BLOCK_CELLS && foldedOxygen == oxygenSum / MR_BLOCK_CELLS,
+               "ほぼ同じ頁(許容差つき): 畳んだ値はエネルギーと O2 の平均の切り捨て");
+
+        // --- 負のエネルギーの床の割り算(-11 ÷ 2 = -6 余り 1)---
+        MrWide negative = MrMakeWide();
+        negative = MrWideAdd(negative, static_cast<uint64_t>(int64_t{-5}), true, 0);
+        negative = MrWideAdd(negative, static_cast<uint64_t>(int64_t{-6}), true, 0);
+        const fx::FxDivResult division = MrFloorDivideEnergy(negative, 2);
+        Expect(static_cast<int64_t>(division.quotient) == -6 && division.remainder == 1,
+               "負のエネルギーの和の床の割り算と余り");
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -297,6 +462,8 @@ namespace {
         CheckShortage(*table);
         CheckExpandParent(*table);
         CheckFoldCovered(*table);
+        CheckNearFold(*table);
+        CheckNearFoldUnit(*table);
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_uniform_test: FAILED ({} 件)", failureCount);

@@ -173,6 +173,14 @@ FX_FN bool MrWantsFoldCheck(MrBlock block, uint32_t mark) {
            block.busyTick != MR_BUSY_POKED && mark - block.busyTick == MR_QUIET_TICKS + 1;
 }
 
+// 端数の枠を帳簿へ移して返す刻みか(T-0104。ADR-0017 追記): 世界の本物のブロックで、端数の枠を持ち・つつかれたままでなく、
+// 刻み mark でちょうど静かになった(MrWantsFoldCheck と同じ時)。端数はどのセルでも 1 単位未満 = 計器で測れない差なので、
+// 許容差つきで畳む時(MrIsExactFold でない)だけ、許容差の値によらず返す
+FX_FN bool MrWantsFractionReturn(MrBlock block, uint32_t mark) {
+    return block.kind == MR_BLOCK_REAL && block.fraction != MR_NO_FRACTION && block.busyTick != MR_BUSY_POKED &&
+           mark - block.busyTick == MR_QUIET_TICKS + 1;
+}
+
 // 刻んでセルが変わったか(全部の欄をビットで比べる。並びの余りは比べない)
 FX_FN bool MrCellChanged(RxCell before, RxCell after) {
     return !MrSameCell(before, after);

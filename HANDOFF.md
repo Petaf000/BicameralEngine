@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-06 / チケット: T-0111 細かいレベルの熱の小刻みの GPU を速くする — 完了(打ち切り。Δkmax は QUESTIONS Q3 で判断待ち)
+最終更新: 2026-10-06 / チケット: T-0104 ほぼ同じセルの頁を畳む — 完了(CPU リファレンスと計測。GPU は T-0112、粗くする判定は T-0113。許容差の値は QUESTIONS Q4 で判断待ち)
 
 ## 状態(3 行以内)
-- 伝導の重い段(印・流れ・足して反応)を 1 グループ 512 スレッド = 1 スレッド 1 セルにし、印と流れの段の初めにセルの熱とブロックの外の面の隣を 1 回だけ計算して groupshared に置いた。CPU とのビット一致はそのまま。
-- Δkmax 3 の鎖は 40 → 8.4 ms/刻み(活性 Compute)。小刻み 1 回に段 6 つ + 起こすグラフ ≈ 50 µs の固定費 × 64 が床で 5 ms に届かず、打ち切り → docs/plan/QUESTIONS.md Q3(おすすめ A: Δkmax 3 のまま重い間は世界が少し遅くなるのを許す)。
-- 次は T-0104(Q3 に依存しない)。
+- 頁の残り方を測った: 熱が通った所は約 2000〜2500 刻みで流れが止まるが、温度が同じ(幅 0 mK)でもエネルギーが数百単位違い、ビット単位では永久に畳めない(+ 端数の枠も持ち続ける)。
+- 許容差つきの FoldQuietPages(CPU)を作った: 静かになった時に端数の枠の端数を帳簿へ移して返し、計器で測れない差なら平均の切り捨てで畳む(余りは帳簿へ)。保存量はビット一致。許容差なしなら今まで通り。
+- 次は T-0112(GPU)。許容差の値は Q4(おすすめ A = 1 mK・濃度 2^-20)。T-0112・T-0113 は値が決まる前に進められる。
 
 ## 並走で入ったもの: T-0110 研究 陰解法の熱(ブランチ t-0110 から main へ早送りマージ、2026-10-06)
 - 状態: T-0110(研究)完了。方式②の CPU 試作 engine/src/sim/implicit_conduction.*(木にはつないでいない)・テスト tests/multires_implicit_test.cpp(debug で約 1〜3 分)。
@@ -21,6 +21,9 @@
   全部を刻む StepNest も tc(busyTick)を毎刻み書く必要がある(今は POKED のまま)。室温の木箱の木の燃焼は 1 µmol に平均 0.68 年(費用の見積もりに使う)。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-06、T-0104)**: CPU の多重解像度だけ変えた(GPU のシェーダーは multires.hlsli・multires_activity.hlsli に関数を足しただけで、呼ぶ所は無い)。
+  debug で `-Filter "^multires"` 7 本(途中の版)と `^multires_(uniform|conduction|quiet|activity)$` 4 本(最後の版)が通過。release の `multires_conduction_test --residue`(約 90 秒)も保存量一致。
+  GPU のテスト(gpu_multires_*)は流していない(GPU の道は変えていない。release と debug のビルドで全部のシェーダーがコンパイルされることは確かめた)。
 - `job.py build`(debug・release)・`python3 tools/archmap/archmap.py --check` OK(114)。
 - 足したテスト gpu_multires_subcycle・gpu_multires_subcycle_warp(gpu_multires_conduction_test --subcycle。debug の HW 約 13 分・release の WARP 約 9 分。CPU の小刻み 64 回が重い)。
 - **テスト(2026-10-06、T-0111)**: 伝導の段のシェーダーと計測の引数だけ変えたので、伝導を使うテストに絞った: release で gpu_multires_conduction(_warp)・gpu_multires_subcycle(_warp)の 4 本、
@@ -38,8 +41,10 @@
 - 小刻みの数は呼ぶ側の maxSubcycleGap で決まり、GPU は最大回数を全部積む(空の小刻みも 41〜49 µs。T-0111 で 512 スレッドのグループが空で抜ける分 19 → 41 µs に増えた〔全部を刻む時〕)。ゲームの値は未定(T-0111 の後)。
 - 基準 + 3 段より細かい所は今までどおり 1 段ごとに約 1/4 遅い。方式②は研究 T-0110(並走、D-432)。
 - 基準(subcycleBaseLevel)は呼ぶ側が渡す値で、表から自動では決めていない(テストは tests/multires_conduction_scene.h の SubcycleTestOptions = 2)。ゲームの表を作る時(T-0021)にベイクで決める。
-- 伝導で粗い側が取った端数の枠は木の変更でしか返らない(小刻みの場面ではもっと足りなくなる: たくさんの要求で不足 9880)。返すのは T-0104(ADR-0017 追記)。
-- 熱が通った所は温度差が約 1 mK 未満になるまで流れが 0 にならず、ビット単位で同じに戻らない・静かにならない(T-0104・D-430)。
+- 伝導で粗い側が取った端数の枠は、許容差つきの FoldQuietPages(CPU だけ)なら静かになった時に返る。GPU と許容差なしの時は木の変更でしか返らない(たくさんの要求の小刻みで不足 9880)。GPU は T-0112。
+- 熱が通った所は温度差が約 1 mK 未満で流れが止まって静かになるが、ビット単位で同じに戻らない(許容差つきなら畳める。CPU だけ)。
+- **静かな葉を粗くするのは、まだ不均一でも粗くする**(D-430 に反する。T-0113)。
+- release のビルドで implicit_conduction.cpp(158) に C4189('added' が未使用。T-0110 の FX_ASSERT の中だけで使う変数)。並走の T-0117 の範囲なので触っていない。
 - 影のブロックは自分の中だけ伝導する(外は断熱。親との受け渡しは引き戻し)。
 - **release の WARP では、伝導の段の Work Graph 版(multires_conduct_graph.hlsl)の最初の DispatchGraph でデバイスが失われる**(DXGI_ERROR_DRIVER_INTERNAL_ERROR)。
   debug の WARP とハードウェア(debug・release)では CPU と一致する。WARP の JIT の不具合と推定(未確認。ADR-0013 と同じ種類)。既定の Compute 版は release の WARP でも一致。
@@ -48,17 +53,22 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
-- (Claude が決めた。ADR-0017 追記)印・流れ・足して反応の段は 1 グループ 512 スレッド(CONDUCT_THREADS)、埋める・小刻みの終わりは 64 スレッド(CONDUCT_LIGHT_THREADS。空で抜けるグループの費用がスレッドの数に比例するため)。
-- (Claude が決めた)印と流れの段の初めに、自分のブロックの刻むセルの熱(gs_thermals)と、ブロックの外を向く面の隣(gs_haloNeighbors = MrFindFaceNeighbor の結果・gs_haloThermals = その熱。
-  番号 = 面 × 64 + 面の上の位置。HaloEntry / HaloCell)を CacheBlockFaces で 1 回だけ計算する。面ごとの計算は ConductFaceNeighbor・NeighborThermal で読む。groupshared は 20 KB。
-- (Claude が決めた)groupshared の OR はウェーブで 1 回にまとめる(OrGroupAny / OrGroupPossible。速さは変わらなかったが残した)。
-- (Claude が決めた)打ち切り: 鎖では毎回の小刻みでいちばん細かいレベルが流れて変わるので、③ 起こし直しを減らす・④ 空の小刻みを積まない、は 5 ms に届かせる力が無い(全部を刻む版で起こすグラフ無しでも 5.4 ms)。
-  Q3 を書いて止めた。gpu_multires_conduction_test に --measure-only(release の HW で計測だけして抜ける)を足した。
+- (Claude が決めた。ADR-0015 追記〔T-0104〕)ほぼ同じ頁は平均の**切り捨て**で畳み、余り(セルの数未満の単位)は帳簿へ(3 段粗い段に余り × 2^55、桁あふれは 1 段粗い段の 2^61 に繰り上げ)。
+  許容差つきの時は、端数の枠を持つブロックがちょうど静かになった刻みに端数を全部帳簿の同じ段へ移して枠を返す(伝導の枠も粗くした時の枠も)。順は世界の枠の順に「返す → 畳む」。
+- (Claude が決めた)許容差 MrFoldTolerance = 温度の幅の上限 mK + 物質ごとの量の幅 ≤ 成分の合計が最大のセルの合計 >> amountShift。完全に同じ(0 mK・shift 64)は T-0103 のビット単位の判定のまま。
+- (Claude が決めた)「静か」の定義(セルがビット単位で N 刻み変わらない)は変えない: 測ると熱の流れは 1 mK 未満で止まるので、熱の場面はいずれ静かになる。
+- (Claude が決めた。T-0113 の案)静かな所を粗くする判定は、粗くして混ざる 2×2×2 の組ごとの差を見る(細い線が残る)。
+- 許容差の値はユーザーに聞いた(QUESTIONS Q4)。
 
 ## 次にやること
-NEXT.md の先頭(T-0104 → T-0115)。QUESTIONS Q3(Δkmax)はユーザーの判断待ち(T-0104・T-0115 は依存しない)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0112 → T-0113 → T-0115)。QUESTIONS Q3(Δkmax)・Q4(計器の細かさ = 許容差)はユーザーの判断待ち(T-0112・T-0113・T-0115 は依存しない)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **ほぼ同じ頁を畳む(T-0104)**: CPU は multires_activity.cpp の FoldQuietPages(nest, table, tick, tolerance)(許容差なしなら古い FoldQuietPages(nest, tick) を呼ぶ)。
+  式は multires.hlsli の末尾(MrFoldTolerance・MrFoldStats・MrAddFoldCell・MrFoldStatsWithin・MrFloorDivideEnergy・MrFoldStatsValue)と multires_activity.hlsli の MrWantsFractionReturn。
+  帳簿へは AddLedgerBits(繰り上げつき)・AddFoldRemainder・ReturnFractionsToLedger。GPU(T-0112)は TreeFoldCheck → TreeFold に同じ順で(帳簿の足し算は 1 グループで順に)。
+  計測は `job.py run -Preset release -Exe multires_conduction_test -- --residue`(約 90 秒)。テストの場面を使うもの(BeginUniformTick など)はまだ許容差なしの FoldQuietPages。
+  map.yaml の multiresfold は FoldPage を指す(FoldQuietPages が 2 つあり archmap が引けないため)。
 - **伝導の段のスレッド(T-0111)**: multires_conduct.hlsli の CONDUCT_THREADS = 512(印・流れ・足して反応・ConductBegin)と CONDUCT_LIGHT_THREADS = 64(埋める・小刻みの終わり。
   multires_conduct.hlsl と multires_conduct_graph.hlsl の numthreads も合わせる)。印と流れは CacheBlockFaces → GroupMemoryBarrierWithGroupSync の後に面ごとの計算(早く抜けるのはグループで揃う条件だけ)。
   段の初めから終わりまでセルも木も変わらない前提で groupshared を使っている。段の中でセルや木を書き換えるものを足すなら、この前提を見直す。
