@@ -7,6 +7,17 @@
 - WARP は CPU と毎刻みビット一致。**HW(RTX 3070 Ti)は評価したセルの wakeTick の上位 32bit が落ちて合わない**ので、HW のテストは今までの丸めで比べる(T-0124)。
 - 活性のグラフ・伝導の段・覗き窓は今までの丸めのまま(RecordStepActive は待ちの丸めなら false)。次は T-0124。
 
+## 並走で入ったもの: T-0120 陰解法の GPU の固定費(ブランチ t-0120 を main へマージ、2026-10-06)
+- 状態: T-0120 完了。方式②の GPU 版の固定費を減らした(engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl。ImTail が 13 個目の入口)。
+- 動いているもの: `-Filter "^(multires_implicit|gpu_multires_implicit(_warp)?)$"` が debug・release で通る。計測は
+  `job.py run -Preset release -Exe gpu_multires_implicit_test -- --queue compute --measure-only`。
+- 壊れているもの: なし。
+- 決めたこと(Claude・実装の細部): ADR-0019 追記(長い行をグループで・小さい段から下を ImTail の 1 Dispatch・境 16 / 1024)。
+- 判断待ち: なし(Q3・Q5 は D-434・D-436 に決まった)。
+- 注意: ImTail は 1 グループ(= 1 つの SM)で回すので、大きすぎる段を入れると重くなる(2048 節で逆転)。木につないだ後(T-0119)は段の大きさが変わるので測り直す。
+  空の回の 1 Dispatch あたりの費用(約 1 µs。バリア)は減っていない。さらに減らすなら: 止める判定と CycleEnd を 1 Dispatch に(最後のグループが判定)・Work Graphs。
+- 注意: wt2 の out/build/profile/bin は計測の比べ用に写した main の版(git 管理外。消してよい)。
+
 ## 並走で入ったもの: T-0117 陰解法を GPU に(ブランチ t-0117 から main へ早送りマージ、2026-10-06)
 - 状態: T-0117 完了。方式②の GPU 版 engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl(試作のセルの一覧のまま。木にはつないでいない)。
   式は shaders/common/implicit_conduction.hlsli(CPU の implicit_conduction.cpp も同じ関数を呼ぶ)。
@@ -14,7 +25,7 @@
   release の HW では計測もする(`job.py run -Preset release -Exe gpu_multires_implicit_test -- --queue compute --measure-only`)。tidy(release)警告なし・archmap OK。
 - 壊れているもの: なし。
 - 決めたこと: ADR-0019 追記(GPU の形・案 a〔基準より細かい所は全部②〕を仮に・述語で空の回を飛ばす)。
-- 判断待ち: 鋭い熱で上限に当たる時 (A) 解き切る / (B) 打ち切る(おすすめ A。このチケットの「判断待ち」)。QUESTIONS Q3 には「案 a なら鎖で約 1.9 ms(見込み)」が材料になる。
+- 判断待ち: (D-436 で「解き切る」に決まった)。
 - 注意: ②の鎖の費用は一部を取り出した見積もり(外は断熱)。本物は T-0119。費用は Dispatch の待ちと長い行(1 節の隣 100 個以上)で決まる → T-0120。
 
 ## 並走で入ったもの: T-0110 研究 陰解法の熱(ブランチ t-0110 から main へ早送りマージ、2026-10-06)
@@ -93,7 +104,7 @@
 - (前のチャット T-0104 の決定は ADR-0015 追記と 17 §5 にある)
 
 ## 次にやること
-NEXT.md の先頭(T-0124 → T-0125)。QUESTIONS Q3・Q4 はユーザーの判断待ち(T-0124・T-0125 は依存しない)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0124 → T-0125)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
 - **GPU の待ちの丸め(T-0121)**: gpu_multires.cpp の RecordStep → RecordStepWait(RecordWake〔WakeDue〕→ m_stepWaitPipeline → PassExpand → m_stepExpandedWaitPipeline)。
