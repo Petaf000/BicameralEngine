@@ -130,7 +130,7 @@ namespace bicameral::sim {
         const uint64_t cellGroups = (uint64_t{limits.cells} + SCAN_THREADS - 1) / SCAN_THREADS;
         const uint64_t workWords = HEADER_WORDS + (2 * mapWords) + capacity.worldBlocks + 1 + (ENTRY_WORDS * entries) +
                                    (uint64_t{CELL_WORDS} * limits.cells) + 1 + (2 * (entryGroups + 1)) +
-                                   (cellGroups + 1) + (2 * 2 * entries);
+                                   (cellGroups + 1) + (uint64_t{4} * entries);
         result.m_workBytes = workWords * sizeof(uint32_t);
         result.m_systemBytes = result.ListsOffset() + (uint64_t{2} * MR_FACES * limits.unknowns * sizeof(uint32_t));
 

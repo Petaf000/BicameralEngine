@@ -456,6 +456,18 @@ namespace {
         return MeasurePasses(context, *multires, *build, scene, tick);
     }
 
+    // 場面ごとに測るか確かめる(最初に失敗した場面で止める)
+    template <typename Action>
+    std::expected<void, std::string> ForScenes(const Context& context, const std::vector<BuildScene>& scenes,
+                                               const Action& action) {
+        for (const BuildScene& scene : scenes) {
+            if (auto done = action(context, scene); !done)
+                return std::unexpected(std::format("{}: {}", scene.name, done.error()));
+        }
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureOnly = false;
@@ -495,23 +507,18 @@ namespace {
 
         if (RELEASE && options->adapter != gpu::AdapterKind::Warp &&
             SUCCEEDED(queue->Native()->GetTimestampFrequency(&context.frequency))) {
-            for (const BuildScene& scene : scenes) {
-                if (auto measured = MeasureScene(context, scene); !measured) {
-                    Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_build_test: FAILED(計測 {}: {})", scene.name,
-                        measured.error());
-                    return 1;
-                }
+            if (auto measured = ForScenes(context, scenes, MeasureScene); !measured) {
+                Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_build_test: FAILED(計測: {})", measured.error());
+                return 1;
             }
         }
 
         if (measureOnly)
             return 0;
 
-        for (const BuildScene& scene : scenes) {
-            if (auto checked = CheckScene(context, scene); !checked) {
-                Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_build_test: FAILED ({})", checked.error());
-                return 1;
-            }
+        if (auto checked = ForScenes(context, scenes, CheckScene); !checked) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_build_test: FAILED ({})", checked.error());
+            return 1;
         }
 
         if (!test::PassesValidation(*device, "gpu_multires_implicit_build_test"))
