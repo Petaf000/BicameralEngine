@@ -312,7 +312,7 @@ views:
           note: "方式②の CPU リファレンス(セルの一覧・熱容量一定。木への組み込みは T-0119)。近似解の面の流れで足すので保存はビット単位" }
       - { id: implicittree, group: simlib, label: "AddImplicitConduction<br/>細かいレベルの熱の陰解法を木の伝導に(案 a)",
           code: "engine/src/sim/multires_implicit_conduction.cpp::AddImplicitConduction", ticket: T-0119, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
-          note: "options.implicitConduction(既定 false)。流れを計算する側が基準より細かい(Δk 1〜8)面を陰解法の 1 刻みで解く。境の基準以下のセルは面で分ける。眠っている頁のブロックも入れて活性 = 全部。GPU は T-0127" }
+          note: "options.implicitConduction(既定 false)。流れを計算する側が基準より細かい(Δk 1〜8)面を陰解法の 1 刻みで解く。境の基準以下のセルは面で分ける。眠っている頁のブロックも入れて活性 = 全部。captureImplicitGrid で系を写せる(GPU と比べる。T-0127)。系を GPU で作るのは T-0129、GPU の伝導の段から呼ぶのは T-0132" }
       - { id: implicittreetest, group: tests, label: "multires_implicit_tree_test<br/>木の物差し・熱い点・鎖・たくさんの要求(保存・活性 = 全部・2 回一致)",
           code: "tests/multires_implicit_tree_test.cpp::CheckChain", ticket: T-0119 }
       - { id: implicithlsl, group: shared, label: "implicit_conduction.hlsli<br/>陰解法の式(温度・面の流れ・誤差の判定・陽解法の係数)",
@@ -323,6 +323,9 @@ views:
       - { id: gpuimplicittest, group: tests, label: "gpu_multires_implicit_test<br/>物差しの山・熱い点を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_implicit_test.cpp::RunScene", ticket: T-0117,
           note: "HW・WARP。release の HW では 1 刻み・V 1 回・空の段・鎖の場面の ms を測る" }
+      - { id: gpuimplicittreetest, group: tests, label: "gpu_multires_implicit_tree_test<br/>木の本物の系(熱い点・鎖・たくさんの要求)を GPU で解いて CPU と比べる",
+          code: "tests/gpu_multires_implicit_tree_test.cpp::RunScene", ticket: T-0127,
+          note: "系は CPU の木が作ったもの(MultiresNest::captureImplicitGrid)。HW・WARP。release の HW では刻みごとの ms・V の上限・ImTail の境を比べる" }
       - { id: tracecapture, group: framelib, label: "TraceCapture<br/>1 回ぶんのトレースを集めてファイルへ",
           code: "engine/src/frame/trace_capture.cpp::TraceCapture::Write", ticket: T-0088, doc: docs/design/16-debug-test.md,
           note: "--trace(起動時の範囲)と窓の T(最後につついたセルの周り ±8 を 60 刻み。exe の横の traces/)。範囲の刻みを読み終えたら書く" }
@@ -441,6 +444,8 @@ views:
       - [gpuimplicit, implicithlsl]
       - [gpuimplicit, implicitcpu, "同じ結果"]
       - [gpuimplicittest, gpuimplicit]
+      - [gpuimplicittreetest, gpuimplicit]
+      - [gpuimplicittreetest, implicittree]
       - [quiettest, gpumultires, "毎刻み比べる"]
       - [multiresactivity, multirespages, "反応が進む一様なブロック"]
       - [multirespages, multirestree, "頁の空きのスタック"]

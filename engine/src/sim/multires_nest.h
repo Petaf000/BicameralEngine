@@ -69,6 +69,10 @@ namespace bicameral::sim {
         uint32_t implicitCells = 0;  // 陰解法の系に入れたセルの数(境のセルを含む)
         std::vector<std::array<uint32_t, 2>>
             implicitLevels;  // 多重格子の段ごとの [節の数, 1 節の隣の最大](GPU の分け方を見る)
+
+        // true なら、陰解法を入れた刻みの系(解く前の形)を implicitGrid に写す(GPU の GpuImplicit と比べる試験・計測用。T-0127)
+        bool captureImplicitGrid = false;
+        ImplicitGrid implicitGrid;
     };
 
     // 1 刻みの選択
@@ -85,7 +89,7 @@ namespace bicameral::sim {
 
         // --- 細かいレベルの熱の陰解法(方式②。T-0119。ADR-0019・D-434 の案 a)---
         // true なら、流れを計算する側(細かい側)のレベルが subcycleBaseLevel より細かい面を、陰解法の 1 刻みで解く
-        // (multires_implicit_conduction.cpp)。maxSubcycleGap は 0 のこと(方式①と②は混ぜない)。GPU はまだ(T-0127)
+        // (multires_implicit_conduction.cpp)。maxSubcycleGap は 0 のこと(方式①と②は混ぜない)。GPU の伝導の段はまだ(解く段は T-0127、系を作るのは T-0129、呼ぶのは T-0132)
         bool implicitConduction = false;
         // V サイクルの上限。新しい温度の誤差の見込みが 1 mK 以下になったら止める(ADR-0019)。D-436(鋭い熱でも解き切る)なので
         // 上限は「届かない時の安全のため」だけの大きさにする(当たったら安全網が陽解法の流れに戻す)

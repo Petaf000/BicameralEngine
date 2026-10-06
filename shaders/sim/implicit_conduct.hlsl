@@ -180,7 +180,8 @@ bool CyclesDone() {
         return;
 
     const ImGpuCell entry = g_cells[cell];
-    const int64_t start = ImTemperature(entry.energy, entry.heatCapacity);
+    const int64_t start = entry.startTemperature >= 0 ? entry.startTemperature
+                                                      : ImTemperature(entry.energy, entry.heatCapacity);
     g_work[Start(cell)] = start;
     g_work[ValueA(cell)] = start;
     g_work[ValueB(cell)] = start;
@@ -456,14 +457,15 @@ int64_t EnergyAfter(uint32_t cell) {
         const uint32_t item = g_lists[k];
         const uint32_t index = item >> 1;
         const int64_t flow = g_work[Flow(index)];
-        const uint32_t gap = g_faces[index].gap;
+        const ImGpuFace face = g_faces[index];
+        const uint32_t gap = face.gap;
         const bool coarseSide = (item & 1u) != 0;
         if (gap == 0) {
             sum.whole += coarseSide ? flow : -flow;
             continue;
         }
 
-        const MrCrossTransfer transfer = MrSplitCrossFlow(flow, gap, true);
+        const MrCrossTransfer transfer = MrSplitCrossFlow(flow, gap, face.coarseFraction != 0);
         if (coarseSide)
             sum = MrAddEnergyDelta(sum, transfer.coarseDelta);
         else

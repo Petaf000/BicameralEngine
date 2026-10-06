@@ -37,11 +37,6 @@ namespace bicameral::sim {
         // 隣がこれより多い節は 1 グループ = 1 節で足す(T-0120。熱い点では違うレベルの面の粗い側で 127 個)
         constexpr uint32_t LONG_ROW_LINKS = 16;
 
-        // 節の数がこれ以下で、隣が TAIL_MAX_LINKS 以下の段から下は、1 グループ(implicit_conduct.hlsl の IM_TAIL_THREADS)で
-        // V サイクルを回す(T-0120)。ImTail は 1 スレッドで隣を回すので、長い行のある段は入れない。
-        // 2048 にすると鎖(レベル 3〜6)が 1 刻み 1.64 → 1.97 ms と重くなった(1 グループに仕事が寄りすぎる。docs/perf.md)
-        constexpr uint32_t TAIL_MAX_NODES = 1024;
-        constexpr uint32_t TAIL_MAX_LINKS = 2 * LONG_ROW_LINKS;
         constexpr uint32_t SWEEP_BITS = 8;
 
         constexpr uint32_t UAV_COUNT = 10;
@@ -92,6 +87,7 @@ namespace bicameral::sim {
                 cells[i] = {.energy = cell.energy,
                             .fraction = cell.fraction,
                             .heatCapacity = cell.heatCapacity,
+                            .startTemperature = cell.startTemperature,
                             .faceStart = faceStarts[i],
                             .faceEnd = faceStarts[i + 1]};
             }
@@ -213,15 +209,18 @@ namespace bicameral::sim {
             return {shortCount, static_cast<uint32_t>(order.size() - start) - shortCount};
         }
 
-        // ImTail が受け持つ最初の段: そこから最も粗い段まで、どの段も節が TAIL_MAX_NODES 以下で隣が TAIL_MAX_LINKS 以下。
-        // そういう段が無くても最も粗い段は受け持つ(最も粗い段の掃き出しを 1 Dispatch に)
-        uint32_t TailDepth(const NodeShape& shape, const std::vector<uint32_t>& levelOffsets) {
+        // ImTail が受け持つ最初の段: そこから最も粗い段まで、どの段も節が tailMaxNodes 以下で隣が tailMaxLinks 以下。
+        // そういう段が無くても、最も粗い段の節が coarsestTailMaxNodes 以下なら受け持つ(最も粗い段の掃き出しを 1 Dispatch に)。
+        // 受け持たない時は段の数を返す(最も粗い段も掃き出しの Dispatch で回す)
+        uint32_t FindTailDepth(const NodeShape& shape, const std::vector<uint32_t>& levelOffsets,
+                               const GpuImplicitTuning& tuning) {
             const auto smallLevel = [&](uint32_t depth) {
                 uint32_t most = 0;
                 for (uint32_t node = levelOffsets[depth]; node < levelOffsets[depth + 1]; ++node)
                     most = std::max(most, shape.Links(node));
 
-                return levelOffsets[depth + 1] - levelOffsets[depth] <= TAIL_MAX_NODES && most <= TAIL_MAX_LINKS;
+                return levelOffsets[depth + 1] - levelOffsets[depth] <= tuning.tailMaxNodes &&
+                       most <= tuning.tailMaxLinks;
             };
 
             const auto levelCount = static_cast<uint32_t>(levelOffsets.size() - 1);
@@ -229,16 +228,23 @@ namespace bicameral::sim {
             while (depth > 0 && smallLevel(depth - 1))
                 --depth;
 
-            return std::min(depth, levelCount - 1);
+            if (depth < levelCount)
+                return depth;
+
+            const uint32_t coarsestNodes = levelOffsets[levelCount] - levelOffsets[levelCount - 1];
+
+            return coarsestNodes <= tuning.coarsestTailMaxNodes ? levelCount - 1 : levelCount;
         }
 
     }  // namespace
 
-    std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const ImplicitGrid& grid) {
+    std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const ImplicitGrid& grid,
+                                                                const GpuImplicitTuning& tuning) {
         if (grid.levels.empty() || grid.cells.empty())
             return std::unexpected("陰解法の段が無い");
 
         GpuImplicit result;
+        result.m_tuning = tuning;
         result.MakeImages(grid);
         if (auto pipelines = result.CreatePipelines(device); !pipelines)
             return std::unexpected(pipelines.error());
@@ -270,7 +276,8 @@ namespace bicameral::sim {
                         .coefficientLow = face.coefficient.lo,
                         .fine = face.fine,
                         .coarse = face.coarse,
-                        .gap = face.gap};
+                        .gap = face.gap,
+                        .coarseFraction = grid.cells[face.coarse].coarseFraction ? 1u : 0u};
         }
 
         if (lists.empty())
@@ -326,7 +333,7 @@ namespace bicameral::sim {
         // --- ImTail: 段ごとの節の始まりと、受け持つ最初の段 ---
         m_constants.tailStart = static_cast<uint32_t>(order.size());
         order.insert(order.end(), m_levelOffsets.begin(), m_levelOffsets.end());
-        m_tailDepth = TailDepth(shape, m_levelOffsets);
+        m_tailDepth = FindTailDepth(shape, m_levelOffsets, m_tuning);
         m_constants.tailDepth = m_tailDepth;
         m_constants.levelTotal = levelCount;
 
@@ -386,6 +393,7 @@ namespace bicameral::sim {
         for (size_t i = 0; i < cells.size(); ++i) {
             cells[i].energy = grid.cells[i].energy;
             cells[i].fraction = grid.cells[i].fraction;
+            cells[i].startTemperature = grid.cells[i].startTemperature;
         }
 
         m_images[BufferCells] = ToBytes(cells);
@@ -441,6 +449,11 @@ namespace bicameral::sim {
             m_constants.sweeps = options.preSmooth | (options.postSmooth << SWEEP_BITS) |
                                  (options.coarsestSweeps << (2 * SWEEP_BITS));
             Dispatch(list, PassTail, 1);
+            return;
+        }
+
+        if (depth + 1 == LevelCount()) {
+            RecordSmooth(list, depth, options.coarsestSweeps);
             return;
         }
 
@@ -531,7 +544,11 @@ namespace bicameral::sim {
     uint32_t GpuImplicit::DispatchesPerCycle(const ImplicitOptions& options) const {
         const uint32_t smoothing = COLOR_COUNT * (options.preSmooth + options.postSmooth);
 
-        return (m_tailDepth * (smoothing + 2)) + 1 + (options.toleranceMillikelvin != 0 ? 2 : 1);
+        const uint32_t judge = options.toleranceMillikelvin != 0 ? 2 : 1;
+        if (m_tailDepth >= LevelCount())
+            return ((LevelCount() - 1) * (smoothing + 2)) + (COLOR_COUNT * options.coarsestSweeps) + judge;
+
+        return (m_tailDepth * (smoothing + 2)) + 1 + judge;
     }
 
     void GpuImplicit::RecordTimestamp(ID3D12GraphicsCommandList* list, uint32_t index) {

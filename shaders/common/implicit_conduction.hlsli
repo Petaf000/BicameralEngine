@@ -27,7 +27,9 @@ struct ImGpuCell {
     int64_t energy;         // そのレベルの単位
     uint64_t fraction;      // 2^-64 単位の端数(違うレベルの面の粗い側が受ける)
     uint64_t heatCapacity;  // C(一定。試作の約束)
-    uint32_t faceStart;     // 面の一覧(g_lists の番地。番号 × 2 + 粗い側なら 1。面の番号の昇順 = CPU の足す順)
+    int64_t
+        startTemperature;  // 0 以上なら刻みの初めの温度(mK × 2^16。木につなぐ時は MrCellThermal から。T-0119・T-0127)
+    uint32_t faceStart;    // 面の一覧(g_lists の番地。番号 × 2 + 粗い側なら 1。面の番号の昇順 = CPU の足す順)
     uint32_t faceEnd;
 };
 
@@ -37,7 +39,7 @@ struct ImGpuFace {
     uint32_t fine;
     uint32_t coarse;
     uint32_t gap;
-    uint32_t padding;
+    uint32_t coarseFraction;  // 粗い側が端数を受けられるか(0 なら整数の単位の倍数だけ。ADR-0017。T-0127)
 };
 
 // 多重格子の節(全部の段を 1 本に並べた番号。段 0 = セル)

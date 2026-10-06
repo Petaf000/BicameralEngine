@@ -192,12 +192,16 @@ namespace bicameral::sim {
             nest.implicitCost = {};
             nest.implicitCells = 0;
             nest.implicitLevels.clear();
+            nest.implicitGrid = {};
             ImplicitSystem system = MakeSystem(nest, thermals, frozen, options);
             if (system.faces.empty())
                 return;
 
             // --- 1 刻み解いて、足した後と仮のエネルギーの差を変化の表へ ---
             ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces));
+            if (nest.captureImplicitGrid)
+                nest.implicitGrid = grid;
+
             nest.implicitCost = StepImplicit(grid, MakeImplicitOptions(options));
             nest.implicitCells = static_cast<uint32_t>(grid.cells.size());
             RecordLevels(nest, grid);
