@@ -45,7 +45,7 @@ namespace bicameral::sim {
         // --- 128bit の小さな道具(係数・対角。負にならない)---
 
         FxU128 Wide(uint64_t value) {
-            return {0, value};
+            return {.hi = 0, .lo = value};
         }
 
         bool IsZero(FxU128 value) {
@@ -53,7 +53,7 @@ namespace bicameral::sim {
         }
 
         FxU128 WideAdd(FxU128 a, FxU128 b) {
-            FxU128 sum = {a.hi + b.hi, a.lo + b.lo};
+            FxU128 sum = {.hi = a.hi + b.hi, .lo = a.lo + b.lo};
             if (sum.lo < a.lo)
                 sum.hi += 1;
 
@@ -72,7 +72,7 @@ namespace bicameral::sim {
             if (shift >= 64)
                 return Wide(value.hi >> (shift - 64));
 
-            return {value.hi >> shift, (value.lo >> shift) | (value.hi << (64 - shift))};
+            return {.hi = value.hi >> shift, .lo = (value.lo >> shift) | (value.hi << (64 - shift))};
         }
 
         // 桁あふれは R8 の assert
@@ -83,19 +83,19 @@ namespace bicameral::sim {
             FX_ASSERT(shift < 128);
             if (shift >= 64) {
                 FX_ASSERT(value.hi == 0 && (shift == 64 || (value.lo >> (128 - shift)) == 0));
-                return {value.lo << (shift - 64), 0};
+                return {.hi = value.lo << (shift - 64), .lo = 0};
             }
 
             FX_ASSERT((value.hi >> (64 - shift)) == 0);
 
-            return {(value.hi << shift) | (value.lo >> (64 - shift)), value.lo << shift};
+            return {.hi = (value.hi << shift) | (value.lo >> (64 - shift)), .lo = value.lo << shift};
         }
 
         FxU128 WideMul(FxU128 a, uint64_t b) {
             const FxU128 low = FxMulU64Full(a.lo, b);
             const FxU128 high = FxMulU64Full(a.hi, b);
             FX_ASSERT(high.hi == 0);
-            const FxU128 product = {low.hi + high.lo, low.lo};
+            const FxU128 product = {.hi = low.hi + high.lo, .lo = low.lo};
             FX_ASSERT(product.hi >= low.hi);
 
             return product;
@@ -173,7 +173,7 @@ namespace bicameral::sim {
             for (int32_t gap = 0; gap <= level; ++gap) {
                 const auto found = index.find(CellKey{level - gap, x >> gap, y >> gap, z >> gap});
                 if (found != index.end())
-                    return Containing{found->second, static_cast<uint32_t>(gap)};
+                    return Containing{.index = found->second, .gap = static_cast<uint32_t>(gap)};
             }
 
             return std::nullopt;
@@ -227,7 +227,7 @@ namespace bicameral::sim {
                 return;
             }
 
-            row.push_back({neighbor, coefficient});
+            row.push_back({.neighbor = neighbor, .coefficient = coefficient});
         }
 
         void PushNode(ImplicitGridLevel& level, const CellKey& key, FxU128 capacity) {
@@ -271,9 +271,10 @@ namespace bicameral::sim {
 
             Rows rows(grid.cells.size());
             for (const ImplicitFace& face : grid.faces) {
-                rows[face.fine].push_back({face.coarse, face.coefficient});
+                rows[face.fine].push_back({.neighbor = face.coarse, .coefficient = face.coefficient});
                 rows[face.coarse].push_back(
-                    {face.fine, WideShiftRight(face.coefficient, ENERGY_BITS_PER_LEVEL * face.gap)});
+                    {.neighbor = face.fine,
+                     .coefficient = WideShiftRight(face.coefficient, ENERGY_BITS_PER_LEVEL * face.gap)});
             }
 
             FinishLevel(level, rows);
@@ -351,25 +352,29 @@ namespace bicameral::sim {
             return sum;
         }
 
+        // 1 色ぶん: 全部の節を掃き出しの初めの値から計算してから書く
+        void SweepColor(const ImplicitGridLevel& level, const std::vector<int64_t>& rhs, uint8_t color,
+                        std::vector<int64_t>& values, std::vector<int64_t>& next) {
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (level.colors[i] == color)
+                    next[i] = Relax(level, rhs, values, i);
+            }
+
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (level.colors[i] == color)
+                    values[i] = next[i];
+            }
+        }
+
         // 赤黒の掃き出し。同じ色の隣(違うレベルの面ではありうる)は掃き出しの初めの値を読む(順に依存しない)
         void Smooth(const ImplicitGridLevel& level, const std::vector<int64_t>& rhs, std::vector<int64_t>& values,
                     uint32_t sweeps, ImplicitCost& cost) {
             std::vector<int64_t> next(values.size());
             for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
-                for (uint8_t color = 0; color < COLOR_COUNT; ++color) {
-                    for (size_t i = 0; i < values.size(); ++i) {
-                        if (level.colors[i] == color)
-                            next[i] = Relax(level, rhs, values, i);
-                    }
+                for (uint8_t color = 0; color < COLOR_COUNT; ++color)
+                    SweepColor(level, rhs, color, values, next);
 
-                    for (size_t i = 0; i < values.size(); ++i) {
-                        if (level.colors[i] == color)
-                            values[i] = next[i];
-                    }
-
-                    cost.passes += 1;
-                }
-
+                cost.passes += COLOR_COUNT;
                 cost.cellUpdates += values.size();
             }
         }
@@ -562,29 +567,35 @@ namespace bicameral::sim {
             return ImplicitTemperature(excess) >> TEMPERATURE_SHIFT;
         }
 
+        // 範囲の外に出たセルに印を付ける(新しく付けたら true)。最初の回は範囲を超えた最大も記録する
+        bool MarkOutside(const ImplicitGrid& grid, const Bounds& bounds, const std::vector<int64_t>& energies,
+                         std::vector<uint8_t>& limited, ImplicitCost& cost) {
+            bool changed = false;
+            for (size_t i = 0; i < grid.cells.size(); ++i) {
+                const int64_t over = Overrun(energies[i], bounds, i);
+                if (cost.limitRounds == 0) {
+                    const int64_t excess = ExcessMillikelvin(over, grid.cells[i].heatCapacity);
+                    cost.worstExcessMillikelvin = std::max(cost.worstExcessMillikelvin, excess);
+                }
+
+                if (limited[i] != 0 || over <= bounds.slack[i])
+                    continue;
+
+                limited[i] = 1;
+                changed = true;
+                cost.limitedCells += 1;
+            }
+
+            return changed;
+        }
+
         void LimitFlows(const ImplicitGrid& grid, const std::vector<int64_t>& start, int64_t slackMillikelvin,
                         std::vector<int64_t>& flows, ImplicitCost& cost) {
             const Bounds bounds = MakeBounds(grid, start, slackMillikelvin);
             std::vector<int64_t> explicitFlows;
             std::vector<uint8_t> limited(grid.cells.size(), 0);
             while (true) {
-                const std::vector<int64_t> energies = EnergiesAfter(grid, flows);
-                bool changed = false;
-                for (size_t i = 0; i < grid.cells.size(); ++i) {
-                    const int64_t over = Overrun(energies[i], bounds, i);
-                    if (cost.limitRounds == 0) {
-                        const int64_t excess = ExcessMillikelvin(over, grid.cells[i].heatCapacity);
-                        cost.worstExcessMillikelvin = std::max(cost.worstExcessMillikelvin, excess);
-                    }
-
-                    if (limited[i] != 0 || over <= bounds.slack[i])
-                        continue;
-
-                    limited[i] = 1;
-                    changed = true;
-                    cost.limitedCells += 1;
-                }
-
+                const bool changed = MarkOutside(grid, bounds, EnergiesAfter(grid, flows), limited, cost);
                 cost.passes += 1;
                 if (!changed)
                     return;
@@ -615,9 +626,9 @@ namespace bicameral::sim {
         // b_j = (j² + j − 2) / (2j(j + 1))(j < 2 は 1/3)
         Rational Rkl2B(uint64_t j) {
             if (j < 2)
-                return {1, 3};
+                return {.numerator = 1, .denominator = 3};
 
-            return {(j * j) + j - 2, 2 * j * (j + 1)};
+            return {.numerator = (j * j) + j - 2, .denominator = 2 * j * (j + 1)};
         }
 
         struct Rkl2Stage {
@@ -792,7 +803,7 @@ namespace bicameral::sim {
 
     int64_t ImplicitTemperature(const ImplicitCell& cell) {
         const uint64_t magnitude = FxAbsU64(cell.energy);
-        const FxU128 numerator = {magnitude >> (64 - FLOW_SHIFT), magnitude << FLOW_SHIFT};
+        const FxU128 numerator = {.hi = magnitude >> (64 - FLOW_SHIFT), .lo = magnitude << FLOW_SHIFT};
 
         return FxApplySign(FxDivU128By64(numerator, cell.heatCapacity).quotient, cell.energy < 0);
     }
@@ -814,11 +825,11 @@ namespace bicameral::sim {
             const auto shift = static_cast<uint32_t>(finest - cell.level) * ENERGY_BITS_PER_LEVEL;
             FX_ASSERT(shift < 64);
             const auto whole = static_cast<uint64_t>(cell.energy);
-            const FxU128 value = shift == 0 ? FxU128{whole, cell.fraction}
-                                            : FxU128{(whole << shift) | (cell.fraction >> (64 - shift)),
-                                                     cell.fraction << shift};
-            const FxU128 sum = {total.hi + value.hi, total.lo + value.lo};
-            total = {sum.hi + (sum.lo < total.lo ? 1u : 0u), sum.lo};
+            const FxU128 value = shift == 0 ? FxU128{.hi = whole, .lo = cell.fraction}
+                                            : FxU128{.hi = (whole << shift) | (cell.fraction >> (64 - shift)),
+                                                     .lo = cell.fraction << shift};
+            const FxU128 sum = {.hi = total.hi + value.hi, .lo = total.lo + value.lo};
+            total = {.hi = sum.hi + (sum.lo < total.lo ? 1u : 0u), .lo = sum.lo};
         }
 
         return total;

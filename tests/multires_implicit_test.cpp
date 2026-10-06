@@ -53,7 +53,7 @@ namespace {
     Material AirAt(const BakedReactionTable& table, int32_t millikelvin) {
         const MrThermal thermal = MrCellThermal(table.View(), test::MakeConductionAir(table, millikelvin));
 
-        return {8 * thermal.capacityLimit, thermal.conductance};
+        return {.heatCapacity = 8 * thermal.capacityLimit, .conductance = thermal.conductance};
     }
 
     ImplicitCell MakeCell(const Material& material, int32_t level, int64_t x, int64_t y, int64_t z,
@@ -78,17 +78,17 @@ namespace {
     constexpr uint32_t ADAPTIVE_MAX_CYCLES = 16;
 
     const std::array<Method, 7> METHODS = {{
-        {"赤黒 8 回", {.method = ImplicitMethod::RedBlack, .sweeps = 8}, 8},
-        {"赤黒 32 回", {.method = ImplicitMethod::RedBlack, .sweeps = 32}, 8},
-        {"V 1 回", {.method = ImplicitMethod::Multigrid, .cycles = 1}, 8},
-        {"V 2 回", {.method = ImplicitMethod::Multigrid, .cycles = 2}, 8},
-        {"V 8 回", {.method = ImplicitMethod::Multigrid, .cycles = 8}, 8},
-        {"V 適応(誤差 1 mK・上限 16 回)",
-         {.method = ImplicitMethod::Multigrid,
-          .cycles = ADAPTIVE_MAX_CYCLES,
-          .toleranceMillikelvin = ADAPTIVE_TOLERANCE},
-         8},
-        {"RKL2", {.method = ImplicitMethod::Rkl2}, 6},
+        {.name = "赤黒 8 回", .options = {.method = ImplicitMethod::RedBlack, .sweeps = 8}, .highestGap = 8},
+        {.name = "赤黒 32 回", .options = {.method = ImplicitMethod::RedBlack, .sweeps = 32}, .highestGap = 8},
+        {.name = "V 1 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 1}, .highestGap = 8},
+        {.name = "V 2 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 2}, .highestGap = 8},
+        {.name = "V 8 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 8}, .highestGap = 8},
+        {.name = "V 適応(誤差 1 mK・上限 16 回)",
+         .options = {.method = ImplicitMethod::Multigrid,
+                     .cycles = ADAPTIVE_MAX_CYCLES,
+                     .toleranceMillikelvin = ADAPTIVE_TOLERANCE},
+         .highestGap = 8},
+        {.name = "RKL2", .options = {.method = ImplicitMethod::Rkl2}, .highestGap = 6},
     }};
 
     constexpr size_t CHOSEN_METHOD = 5;  // 合格の基準を課す方式(V 適応)
@@ -96,21 +96,28 @@ namespace {
 
     // 違うレベルの場面で安全網を外して収束の具合を見る組み合わせ(記録だけ)
     const std::array<Method, 9> COMPOSITE_PROBES = {{
-        {"V 2 回", {.method = ImplicitMethod::Multigrid, .cycles = 2}, 0},
-        {"V 4 回", {.method = ImplicitMethod::Multigrid, .cycles = 4}, 0},
-        {"V 8 回", {.method = ImplicitMethod::Multigrid, .cycles = 8}, 0},
-        {"V 12 回", {.method = ImplicitMethod::Multigrid, .cycles = 12}, 0},
-        {"V 4 回・直し 0.75 倍", {.method = ImplicitMethod::Multigrid, .cycles = 4, .correctionScale = 192}, 0},
-        {"V 4 回・Galerkin", {.method = ImplicitMethod::Multigrid, .cycles = 4}, 0, true},
-        {"V(3,3) 8 回", {.method = ImplicitMethod::Multigrid, .cycles = 8, .preSmooth = 3, .postSmooth = 3}, 0},
-        {"V(3,3) 適応(誤差 1 mK・上限 16 回)",
-         {.method = ImplicitMethod::Multigrid,
-          .cycles = ADAPTIVE_MAX_CYCLES,
-          .toleranceMillikelvin = ADAPTIVE_TOLERANCE,
-          .preSmooth = 3,
-          .postSmooth = 3},
-         0},
-        {"RKL2", {.method = ImplicitMethod::Rkl2}, 0},
+        {.name = "V 2 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 2}, .highestGap = 0},
+        {.name = "V 4 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 4}, .highestGap = 0},
+        {.name = "V 8 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 8}, .highestGap = 0},
+        {.name = "V 12 回", .options = {.method = ImplicitMethod::Multigrid, .cycles = 12}, .highestGap = 0},
+        {.name = "V 4 回・直し 0.75 倍",
+         .options = {.method = ImplicitMethod::Multigrid, .cycles = 4, .correctionScale = 192},
+         .highestGap = 0},
+        {.name = "V 4 回・Galerkin",
+         .options = {.method = ImplicitMethod::Multigrid, .cycles = 4},
+         .highestGap = 0,
+         .galerkin = true},
+        {.name = "V(3,3) 8 回",
+         .options = {.method = ImplicitMethod::Multigrid, .cycles = 8, .preSmooth = 3, .postSmooth = 3},
+         .highestGap = 0},
+        {.name = "V(3,3) 適応(誤差 1 mK・上限 16 回)",
+         .options = {.method = ImplicitMethod::Multigrid,
+                     .cycles = ADAPTIVE_MAX_CYCLES,
+                     .toleranceMillikelvin = ADAPTIVE_TOLERANCE,
+                     .preSmooth = 3,
+                     .postSmooth = 3},
+         .highestGap = 0},
+        {.name = "RKL2", .options = {.method = ImplicitMethod::Rkl2}, .highestGap = 0},
     }};
 
     // --- 刻んで見張る(保存・行き過ぎ・費用)---
@@ -177,13 +184,11 @@ namespace {
 
     std::vector<ImplicitCell> MakeWaveCells(const Material& air, int32_t level, uint32_t length) {
         std::vector<ImplicitCell> cells;
-        for (uint32_t z = 0; z < STICK_CROSS; ++z) {
-            for (uint32_t y = 0; y < STICK_CROSS; ++y) {
-                for (uint32_t x = 0; x < length; ++x) {
-                    const double wave = static_cast<double>(STICK_AMPLITUDE) * WaveWeight(x, length);
-                    const int64_t temperature = STICK_MEAN + std::llround(wave);
-                    cells.push_back(MakeCell(air, level, x, y, z, temperature));
-                }
+        for (uint32_t row = 0; row < STICK_CROSS * STICK_CROSS; ++row) {
+            for (uint32_t x = 0; x < length; ++x) {
+                const double wave = static_cast<double>(STICK_AMPLITUDE) * WaveWeight(x, length);
+                const int64_t temperature = STICK_MEAN + std::llround(wave);
+                cells.push_back(MakeCell(air, level, x, row % STICK_CROSS, row / STICK_CROSS, temperature));
             }
         }
 
@@ -235,7 +240,7 @@ namespace {
     }
 
     void LogStick(const Method& method, int32_t gap, int32_t level, uint32_t length, const StickResult& result) {
-        const double cells = static_cast<double>(length * STICK_CROSS * STICK_CROSS);
+        const auto cells = static_cast<double>(length * STICK_CROSS * STICK_CROSS);
         Log(Channel::Sim, Level::Info,
             "物差し: Δk {}(レベル {}・山 {} セル){}: 実効 ÷ 本当 = {:.4f}({} 刻み)・多重格子 {} 段・RKL2 {} 段・"
             "1 刻みに 1 セルを {:.1f} 回・直列 {} 段・V 最大 {} 回・安全網 {} セル(超えた最大 {} mK)・行き過ぎ "
@@ -331,17 +336,18 @@ namespace {
 
         const int32_t middle = base + COMPOSITE_STEP;
         const int32_t finest = middle + COMPOSITE_STEP;
-        for (int64_t z = 0; z < COMPOSITE_EDGE; ++z) {
-            for (int64_t y = 0; y < COMPOSITE_EDGE; ++y) {
-                for (int64_t x = COMPOSITE_EDGE; x < 2 * COMPOSITE_EDGE; ++x) {
-                    if (x != COMPOSITE_EDGE || y != 3 || z != 3)
-                        cells.push_back(MakeCell(air, middle, x, y, z, COMPOSITE_COLD));
+        // 8³ の 2 組: レベル middle の (8〜15, 0〜7, 0〜7)(細かくした (8, 3, 3) を除く)と、そこを埋めるレベル finest の 8³
+        constexpr int64_t COUNT = COMPOSITE_EDGE * COMPOSITE_EDGE * COMPOSITE_EDGE;
+        for (int64_t n = 0; n < COUNT; ++n) {
+            const int64_t x = n % COMPOSITE_EDGE;
+            const int64_t y = (n / COMPOSITE_EDGE) % COMPOSITE_EDGE;
+            const int64_t z = n / (COMPOSITE_EDGE * COMPOSITE_EDGE);
+            if (x != 0 || y != 3 || z != 3)
+                cells.push_back(MakeCell(air, middle, COMPOSITE_EDGE + x, y, z, COMPOSITE_COLD));
 
-                    const int64_t fineX = (COMPOSITE_EDGE * COMPOSITE_EDGE) + x - COMPOSITE_EDGE;
-                    cells.push_back(MakeCell(air, finest, fineX, (3 * COMPOSITE_EDGE) + y, (3 * COMPOSITE_EDGE) + z,
-                                             COMPOSITE_HOT));
-                }
-            }
+            const int64_t fineOrigin = 3 * COMPOSITE_EDGE;
+            cells.push_back(MakeCell(air, finest, (COMPOSITE_EDGE * COMPOSITE_EDGE) + x, fineOrigin + y, fineOrigin + z,
+                                     COMPOSITE_HOT));
         }
 
         return cells;
