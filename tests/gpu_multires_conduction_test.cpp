@@ -10,7 +10,7 @@
 // --subcycle: 細かいレベルの熱の刻み(T-0109。MultiresStepOptions の subcycleBaseLevel・maxSubcycleGap = 3 で小刻み 64 回)で同じ場面を
 // 刻む(刻みの数は CPU が重いので減らす)。Work Graph 版は、Compute 版の時に刻んだ CPU の結果(ハッシュと種)と比べて CPU を 2 回刻まない。
 // 計測は、根 8³ の世界(全部が基準以下のレベル = 小刻み 63 回が空。空の段の費用)を分けない・64 回で、鎖(レベル 0〜6)を Δkmax 0〜3 で比べる。
-// 引数は gpu_test_options.h と --subcycle。
+// 引数は gpu_test_options.h と --subcycle・--measure-only(計測だけで抜ける。T-0111)。
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -499,15 +499,18 @@ namespace {
     struct RunOptions {
         test::GpuTestOptions gpu;
         bool subcycle = false;
+        bool measureOnly = false;  // 計測だけ(比べる実行を省く。T-0111 で段を詰める時の繰り返し用)
     };
 
-    // gpu_test_options.h の引数と --subcycle
+    // gpu_test_options.h の引数と --subcycle・--measure-only
     std::optional<RunOptions> ParseRunOptions(std::span<char*> arguments) {
         std::vector<char*> rest;
         RunOptions options;
         for (char* argument : arguments) {
             if (std::string_view(argument) == "--subcycle")
                 options.subcycle = true;
+            else if (std::string_view(argument) == "--measure-only")
+                options.measureOnly = true;
             else
                 rest.push_back(argument);
         }
@@ -541,7 +544,7 @@ namespace {
         const auto options = ParseRunOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_multires_conduction_test [--warp] [--queue direct|compute] [--subcycle]");
+                "使い方: gpu_multires_conduction_test [--warp] [--queue direct|compute] [--subcycle] [--measure-only]");
             return 2;
         }
 
@@ -574,6 +577,9 @@ namespace {
                 return 1;
             }
         }
+
+        if (options->measureOnly)
+            return 0;
 
         if (auto result = RunAll(device->Get(), *queue, *ring, *table, !(RELEASE && warp), options->subcycle);
             !result) {

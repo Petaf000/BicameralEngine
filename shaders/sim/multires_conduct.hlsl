@@ -42,7 +42,7 @@ void ConductMark(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
         ConductMarkBlock(slot, thread);
 }
 
-[numthreads(CONDUCT_THREADS, 1, 1)]
+[numthreads(CONDUCT_LIGHT_THREADS, 1, 1)]
 void ConductPrepare(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
     uint32_t slot;
     if (ConductSlotOf(group.x, slot))
@@ -63,7 +63,7 @@ void ConductApply(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
         ConductApplyBlock(slot, thread);
 }
 
-[numthreads(CONDUCT_THREADS, 1, 1)]
+[numthreads(CONDUCT_LIGHT_THREADS, 1, 1)]
 void ConductEnd(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
     uint32_t slot;
     if (ConductSlotOf(group.x, slot))

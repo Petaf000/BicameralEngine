@@ -23,11 +23,26 @@
 #include "common/multires_conduction.hlsli"
 #include "sim/multires_bindings.hlsli"
 
-static const uint32_t CONDUCT_THREADS = 64;
+// 印・流れ・足して反応の段は 1 スレッド = 1 セル(T-0111)。64 スレッドで 8 セルずつ順に計算すると、小刻み 1 回が 1 ブロックの直列の遅延
+// (約 0.54 ms)で決まっていた。中身の軽い段(埋める・小刻みの終わり)は 64 スレッドのまま(空で抜けるグループを投げる費用がスレッドの数に比例する)
+static const uint32_t CONDUCT_THREADS = MR_BLOCK_CELLS;
 static const uint32_t CONDUCT_CELLS_PER_THREAD = MR_BLOCK_CELLS / CONDUCT_THREADS;
+static const uint32_t CONDUCT_LIGHT_THREADS = 64;
+static const uint32_t CONDUCT_LIGHT_CELLS_PER_THREAD = MR_BLOCK_CELLS / CONDUCT_LIGHT_THREADS;
 
 groupshared uint32_t gs_conductAny;       // 流れ・変化があった(グループの OR)
 groupshared uint32_t gs_conductPossible;  // 進める規則があった(グループの OR)
+
+// 自分のブロックのセルの熱と、ブロックの外の面の先(T-0111)。印と流れの段の初めに、セルの熱(MrCellThermal)を 1 セル 1 回、
+// ブロックの面の外の隣(MrFindFaceNeighbor の索引引きとその熱)を面のセル 1 つに 1 回だけ、別々のスレッドで計算し、面ごとの計算はここを読む。
+// 段の間はセルも木も変わらないので、毎回計算するのと同じ値。熱は x 温度・y コンダクタンス・zw 熱容量の上限の下位・上位、
+// 外の隣は x kind・y 枠・z セル・w レベルの差。外の隣の番号 = 面 × 64 + 面の上の位置(HaloEntry)
+static const uint32_t CONDUCT_FACE_CELLS = MR_BLOCK_EDGE * MR_BLOCK_EDGE;
+static const uint32_t CONDUCT_HALO_CELLS = MR_FACES * CONDUCT_FACE_CELLS;
+
+groupshared uint4 gs_thermals[MR_BLOCK_CELLS];
+groupshared uint4 gs_haloNeighbors[CONDUCT_HALO_CELLS];
+groupshared uint4 gs_haloThermals[CONDUCT_HALO_CELLS];
 
 // --- 小さな関数 --------------------------------------------------------------------------------
 
@@ -41,6 +56,17 @@ bool IsConductStepped(uint32_t slot, MrBlock block) {
         return slot >= g_worldBlocks || block.activeTick == CurrentStepMark();
 
     return block.kind != MR_BLOCK_UNUSED && block.kind != MR_BLOCK_MIRROR;
+}
+
+// グループの OR に足す。ウェーブで 1 回にまとめる(512 スレッドが同じ groupshared の語に atomic を打つと直列になる。T-0111)
+void OrGroupAny(bool value) {
+    if (WaveActiveAnyTrue(value) && WaveIsFirstLane())
+        InterlockedOr(gs_conductAny, 1u);
+}
+
+void OrGroupPossible(bool value) {
+    if (WaveActiveAnyTrue(value) && WaveIsFirstLane())
+        InterlockedOr(gs_conductPossible, 1u);
 }
 
 bool IsFrozenSlot(uint32_t slot) {
@@ -84,6 +110,100 @@ MrThermal ThermalAt(uint32_t slot, uint32_t index) {
     return MrCellThermal(MakeTable(), LoadCell(slot, index));
 }
 
+// --- 自分のブロックのセルの熱(T-0111)---
+
+uint4 PackThermal(MrThermal thermal) {
+    return uint4(thermal.temperature, thermal.conductance, (uint32_t)thermal.capacityLimit,
+                 (uint32_t)(thermal.capacityLimit >> 32));
+}
+
+MrThermal UnpackThermal(uint4 packed) {
+    MrThermal thermal;
+    thermal.temperature = packed.x;
+    thermal.conductance = packed.y;
+    thermal.capacityLimit = FX_U64(packed.w, packed.z);
+
+    return thermal;
+}
+
+// セル index の面 face がブロックの外を向くか
+bool FaceLeavesBlock(uint32_t index, uint32_t face) {
+    const uint32_t axis = face >> 1;
+    const uint32_t along = axis == 0 ? MrCellX(index) : (axis == 1 ? MrCellY(index) : MrCellZ(index));
+
+    return (face & 1u) != 0 ? along == MR_BLOCK_EDGE - 1 : along == 0;
+}
+
+// ブロックの外を向く面(セル index・面 face)の外の隣の番号
+uint32_t HaloEntry(uint32_t index, uint32_t face) {
+    const uint32_t axis = face >> 1;
+    const uint32_t u = axis == 0 ? MrCellY(index) : MrCellX(index);
+    const uint32_t v = axis == 2 ? MrCellY(index) : MrCellZ(index);
+
+    return face * CONDUCT_FACE_CELLS + v * MR_BLOCK_EDGE + u;
+}
+
+// 外の隣の番号 entry の、面に接するセル(HaloEntry の逆)
+uint32_t HaloCell(uint32_t entry) {
+    const uint32_t face = entry / CONDUCT_FACE_CELLS;
+    const uint32_t u = entry % MR_BLOCK_EDGE;
+    const uint32_t v = (entry % CONDUCT_FACE_CELLS) / MR_BLOCK_EDGE;
+    const uint32_t along = (face & 1u) != 0 ? MR_BLOCK_EDGE - 1 : 0;
+    const uint32_t axis = face >> 1;
+    if (axis == 0)
+        return MrCellIndex(along, u, v);
+
+    if (axis == 1)
+        return MrCellIndex(u, along, v);
+
+    return MrCellIndex(u, v, along);
+}
+
+// 刻むセルの熱を gs_thermals に、刻むセルの外を向く面の隣とその熱を gs_halo* に書く(グループの全部のスレッドが呼び、
+// 後で GroupMemoryBarrierWithGroupSync)。外の隣の熱は流れのある隣(同じレベル・粗い)だけ
+void CacheBlockFaces(uint32_t slot, MrBlock block, uint32_t thread) {
+    for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
+        const uint32_t index = thread + (CONDUCT_THREADS * k);
+        if (MrIsSteppedCell(block, index))
+            gs_thermals[index] = PackThermal(MrCellThermal(MakeTable(), LoadBlockCell(block, slot, index)));
+    }
+
+    for (uint32_t entry = thread; entry < CONDUCT_HALO_CELLS; entry += CONDUCT_THREADS) {
+        const uint32_t index = HaloCell(entry);
+        if (!MrIsSteppedCell(block, index))
+            continue;
+
+        const uint32_t face = entry / CONDUCT_FACE_CELLS;
+        const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+        gs_haloNeighbors[entry] = uint4(neighbor.kind, neighbor.slot, neighbor.index, neighbor.gap);
+        if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_COARSER)
+            gs_haloThermals[entry] = PackThermal(ThermalAt(neighbor.slot, neighbor.index));
+    }
+}
+
+MrThermal CachedThermal(uint32_t index) {
+    return UnpackThermal(gs_thermals[index]);
+}
+
+// 刻むセル index の面 face の先(CacheBlockFaces の後。外を向く面は gs_haloNeighbors、中は MrFindFaceNeighbor の中の枝)
+MrFaceNeighbor ConductFaceNeighbor(uint32_t slot, MrBlock block, uint32_t index, uint32_t face) {
+    if (!FaceLeavesBlock(index, face))
+        return MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+
+    const uint4 packed = gs_haloNeighbors[HaloEntry(index, face)];
+
+    return MrMakeFaceNeighbor(packed.x, packed.y, packed.z, packed.w);
+}
+
+// 面の先のセルの熱(流れのある隣だけ。同じブロックなら gs_thermals〔同じブロックの隣は刻むセル。覆われたセルは子の側を指す〕、
+// 外なら gs_haloThermals)
+MrThermal NeighborThermal(uint32_t index, uint32_t face, MrFaceNeighbor neighbor) {
+    if (FaceLeavesBlock(index, face))
+        return UnpackThermal(gs_haloThermals[HaloEntry(index, face)]);
+
+    return CachedThermal(neighbor.index);
+}
+
 // 頁のセルの変化に足す(整数部と端数を 64bit の atomic で。端数の桁上がりは整数部へ)
 void AddConductDelta(uint32_t page, uint32_t index, MrEnergyDelta delta) {
     if (MrEnergyDeltaIsZero(delta))
@@ -113,14 +233,14 @@ void MarkCoarseTarget(uint32_t coarseSlot, bool wantsFraction) {
 
 // セル 1 つの面を調べて印を付ける。流れがあれば true(CPU の CollectCellFaces + MarkCrossSends)
 bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
-    const MrThermal self = MrCellThermal(MakeTable(), LoadBlockCell(block, slot, index));
+    const MrThermal self = CachedThermal(index);
     const uint32_t shift = LevelSubcycleShift(block.level);
     int64_t sameLevelOutflow = 0;
     bool sends = false;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
-        const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+        const MrFaceNeighbor neighbor = ConductFaceNeighbor(slot, block, index, face);
         if (neighbor.kind == MR_NEIGHBOR_SAME) {
-            sameLevelOutflow += MrSubstepSameLevelFlow(self, ThermalAt(neighbor.slot, neighbor.index), block.level,
+            sameLevelOutflow += MrSubstepSameLevelFlow(self, NeighborThermal(index, face, neighbor), block.level,
                                                        shift);
             continue;
         }
@@ -129,7 +249,7 @@ bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
             continue;
 
         const uint32_t coarseShift = LevelSubcycleShift(g_blocks[neighbor.slot].level);
-        const int64_t flow = MrSubstepCrossLevelFlow(self, ThermalAt(neighbor.slot, neighbor.index), block.level,
+        const int64_t flow = MrSubstepCrossLevelFlow(self, NeighborThermal(index, face, neighbor), block.level,
                                                      neighbor.gap, shift, coarseShift);
         if (flow == 0)
             continue;
@@ -155,15 +275,16 @@ void ConductMarkBlock(uint32_t slot, uint32_t thread) {
     if (thread == 0)
         gs_conductAny = 0;
 
+    CacheBlockFaces(slot, block, thread);
     GroupMemoryBarrierWithGroupSync();
+    bool flows = false;
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
-        if (!OnBlockSurface(index) || !MrIsSteppedCell(block, index))
-            continue;
-
-        if (MarkCell(slot, block, index))
-            InterlockedOr(gs_conductAny, 1u);
+        if (OnBlockSurface(index) && MrIsSteppedCell(block, index) && MarkCell(slot, block, index))
+            flows = true;
     }
+
+    OrGroupAny(flows);
 
     GroupMemoryBarrierWithGroupSync();
     if (thread != 0 || !MrIsUniform(block))
@@ -186,8 +307,8 @@ void ConductPrepareBlock(uint32_t slot, uint32_t thread) {
     const bool expanded = HasSubstepMark(slot, CONDUCT_MARK_EXPANDED);
     const bool granted = HasSubstepMark(slot, CONDUCT_MARK_GRANTED);
     const RxCell value = g_cells[slot];
-    for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
-        const uint32_t index = thread + (CONDUCT_THREADS * k);
+    for (uint32_t k = 0; k < CONDUCT_LIGHT_CELLS_PER_THREAD; ++k) {
+        const uint32_t index = thread + (CONDUCT_LIGHT_THREADS * k);
         if (expanded)
             g_cells[PageCellAddress(block.page, index)] = MrUniformCell(block, value, index);
 
@@ -200,18 +321,18 @@ void ConductPrepareBlock(uint32_t slot, uint32_t thread) {
 
 // セル 1 つの面の流れを変化に足す(自分と、粗い側へ送った先。CPU の AddCellFlows)。凍らせたブロックとの面は流れない
 void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
-    const MrThermal self = MrCellThermal(MakeTable(), g_cells[PageCellAddress(block.page, index)]);
+    const MrThermal self = CachedThermal(index);
     const uint32_t shift = LevelSubcycleShift(block.level);
     int64_t own = 0;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
-        const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+        const MrFaceNeighbor neighbor = ConductFaceNeighbor(slot, block, index, face);
         if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
             continue;
 
         if (IsFrozenSlot(neighbor.slot))
             continue;
 
-        const MrThermal other = ThermalAt(neighbor.slot, neighbor.index);
+        const MrThermal other = NeighborThermal(index, face, neighbor);
         if (neighbor.kind == MR_NEIGHBOR_SAME) {
             own -= MrSubstepSameLevelFlow(self, other, block.level, shift);
             continue;
@@ -242,6 +363,8 @@ void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
     if (!IsConductStepped(slot, block) || !SubstepBegins(block.level) || MrIsUniform(block) || IsFrozenSlot(slot))
         return;
 
+    CacheBlockFaces(slot, block, thread);
+    GroupMemoryBarrierWithGroupSync();
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
         if (MrIsSteppedCell(block, index))
@@ -320,18 +443,15 @@ void ConductApplyBlock(uint32_t slot, uint32_t thread) {
 
     GroupMemoryBarrierWithGroupSync();
     const bool react = IsConductStepped(slot, block);
+    uint32_t results = 0;
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
-        if (!MrIsSteppedCell(block, index))
-            continue;
-
-        const uint32_t result = ApplyCell(slot, block, index, react);
-        if ((result & CONDUCT_STEP_CHANGED) != 0)
-            InterlockedOr(gs_conductAny, 1u);
-
-        if ((result & CONDUCT_STEP_POSSIBLE) != 0)
-            InterlockedOr(gs_conductPossible, 1u);
+        if (MrIsSteppedCell(block, index))
+            results |= ApplyCell(slot, block, index, react);
     }
+
+    OrGroupAny((results & CONDUCT_STEP_CHANGED) != 0);
+    OrGroupPossible((results & CONDUCT_STEP_POSSIBLE) != 0);
 
     GroupMemoryBarrierWithGroupSync();
     if (thread != 0 || !IsListedStep() || slot >= g_worldBlocks)
@@ -361,8 +481,9 @@ void ConductEndBlock(uint32_t slot, uint32_t thread) {
         gs_conductAny = 0;
 
     GroupMemoryBarrierWithGroupSync();
-    for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
-        const uint32_t index = thread + (CONDUCT_THREADS * k);
+    bool changed = false;
+    for (uint32_t k = 0; k < CONDUCT_LIGHT_CELLS_PER_THREAD; ++k) {
+        const uint32_t index = thread + (CONDUCT_LIGHT_THREADS * k);
         if (!MrIsSteppedCell(block, index))
             continue;
 
@@ -373,8 +494,10 @@ void ConductEndBlock(uint32_t slot, uint32_t thread) {
             continue;
 
         g_cells[address] = cell;
-        InterlockedOr(gs_conductAny, 1u);
+        changed = true;
     }
+
+    OrGroupAny(changed);
 
     GroupMemoryBarrierWithGroupSync();
     if (thread != 0 || gs_conductAny == 0)

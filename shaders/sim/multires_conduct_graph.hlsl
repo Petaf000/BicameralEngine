@@ -14,7 +14,7 @@ struct MrConductRecord {
 [Shader("node")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
-[NumThreads(CONDUCT_THREADS, 1, 1)]
+[NumThreads(CONDUCT_LIGHT_THREADS, 1, 1)]
 [NodeIsProgramEntry]
 void ConductPrepareNode(DispatchNodeInputRecord<MrConductRecord> input, uint32_t thread : SV_GroupIndex) {
     const uint32_t slot = input.Get().slot;
@@ -48,7 +48,7 @@ void ConductApplyNode(DispatchNodeInputRecord<MrConductRecord> input, uint32_t t
 [Shader("node")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
-[NumThreads(CONDUCT_THREADS, 1, 1)]
+[NumThreads(CONDUCT_LIGHT_THREADS, 1, 1)]
 [NodeIsProgramEntry]
 void ConductEndNode(DispatchNodeInputRecord<MrConductRecord> input, uint32_t thread : SV_GroupIndex) {
     const uint32_t slot = input.Get().slot;
