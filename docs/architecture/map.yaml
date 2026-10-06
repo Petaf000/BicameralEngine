@@ -320,6 +320,12 @@ views:
       - { id: gpuimplicit, group: simlib, label: "GpuImplicit::RecordStep<br/>陰解法の GPU の段(V サイクル × 上限・空で抜ける)",
           code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordStep", ticket: T-0117, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
           note: "Compute の段 shaders/sim/implicit_conduct.hlsl(1 スレッド = 1 節。隣が多い節は 1 グループで足し、小さい段から下は ImTail の 1 Dispatch〔T-0120〕)。止めるかは GPU の状態の語で決め、止めた後の段は述語で飛ばす" }
+      - { id: gpuimplicitbuild, group: simlib, label: "GpuImplicitBuild::RecordBuild<br/>陰解法の系(未知数・境のセル・面)を GPU の木から作る",
+          code: "engine/src/sim/gpu_implicit_build.cpp::GpuImplicitBuild::RecordBuild", ticket: T-0129, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
+          note: "Compute の段 shaders/sim/implicit_build.hlsl(GpuMultires のルート署名 + 外のバッファ)。番号は CPU の MakeSystem と同じ(接頭和と atomic の最小)。多重格子の段・重みは T-0134" }
+      - { id: gpuimplicitbuildtest, group: tests, label: "gpu_multires_implicit_build_test<br/>GPU で作った系と解いた結果を CPU と比べる",
+          code: "tests/gpu_multires_implicit_build_test.cpp::CheckTick", ticket: T-0129,
+          note: "木は MultiresNest::captureImplicitNest の写し。HW・WARP。release の HW では系を作る段の ms と段ごとの内訳を測る" }
       - { id: gpuimplicittest, group: tests, label: "gpu_multires_implicit_test<br/>物差しの山・熱い点を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_implicit_test.cpp::RunScene", ticket: T-0117,
           note: "HW・WARP。release の HW では 1 刻み・V 1 回・空の段・鎖の場面の ms を測る" }
@@ -446,6 +452,9 @@ views:
       - [gpuimplicittest, gpuimplicit]
       - [gpuimplicittreetest, gpuimplicit]
       - [gpuimplicittreetest, implicittree]
+      - [gpuimplicitbuild, gpuimplicit, "セル・面を写す"]
+      - [gpuimplicitbuild, implicittree, "同じ番号"]
+      - [gpuimplicitbuildtest, gpuimplicitbuild]
       - [quiettest, gpumultires, "毎刻み比べる"]
       - [multiresactivity, multirespages, "反応が進む一様なブロック"]
       - [multirespages, multirestree, "頁の空きのスタック"]

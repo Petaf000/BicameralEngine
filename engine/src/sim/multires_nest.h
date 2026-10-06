@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -73,6 +74,11 @@ namespace bicameral::sim {
         // true なら、陰解法を入れた刻みの系(解く前の形)を implicitGrid に写す(GPU の GpuImplicit と比べる試験・計測用。T-0127)
         bool captureImplicitGrid = false;
         ImplicitGrid implicitGrid;
+        // true なら、陰解法の系を作る時の木(陽解法の流れの後・変化を足す前)と凍った枠を写す(GPU で系を作る GpuImplicitBuild と
+        // 比べる試験用。T-0129)。写しの中の写しは空
+        bool captureImplicitNest = false;
+        std::shared_ptr<const MultiresNest> implicitNest;
+        std::vector<uint8_t> implicitFrozen;
     };
 
     // 1 刻みの選択
