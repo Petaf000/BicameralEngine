@@ -58,6 +58,10 @@ add_executable(multires_subcycle_test multires_subcycle_test.cpp)  # 細かい�
 target_link_libraries(multires_subcycle_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_subcycle COMMAND multires_subcycle_test)
 
+add_executable(multires_implicit_test multires_implicit_test.cpp)  # 細かいレベルの熱の陰解法の試作(T-0110 研究)
+target_link_libraries(multires_implicit_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_implicit COMMAND multires_implicit_test)
+
 add_executable(fixed_test fixed_test.cpp)
 target_link_libraries(fixed_test PRIVATE bicameral_fixed)
 add_test(NAME fixed COMMAND fixed_test)

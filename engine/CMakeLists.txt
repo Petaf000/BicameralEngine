@@ -53,6 +53,7 @@ target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 # --- multires: 多重解像度の入れ子の細分の CPU リファレンス(17。T-0017)。GPU を知らない。浮動小数点は禁止 ---
 # 細かくする・粗くする・影の引き戻しの本体は shaders/common/multires.hlsli(HLSL と共通)。
 add_library(bicameral_multires STATIC
+  src/sim/implicit_conduction.cpp
   src/sim/multires_activity.cpp
   src/sim/multires_conduction.cpp
   src/sim/multires_nest.cpp
