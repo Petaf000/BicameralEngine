@@ -1,7 +1,7 @@
 // multires_tree.hlsl — 多重解像度の世界の木の管理の Compute の段(17 §5「木の管理」。T-0018。ADR-0016)。
 // 1 刻みの要求の処理: (静かな葉を粗くするなら TreeQuiet。T-0101)→ TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
 // → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。
-// 要求の処理の前: TreeFoldCheck → TreeFold(静かで一様になった頁を枠の順に畳む。T-0103)。
+// 要求の処理の前: TreeFoldCheck → TreeFold(静かで一様・ほぼ同じになった頁を枠の順に畳む・端数の枠を返す。T-0103・T-0112)。
 // 刻んだ後: TreeExpand(一様で反応が進むブロックに枠の順で頁を配る。T-0102)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
 // RecordProcessRequests。CPU リファレンスは engine/src/sim/multires_tree.cpp(同じ関数・同じ順)。
 //
@@ -438,12 +438,18 @@ bool WantsConductionFraction(uint32_t slot) {
     g_graphInput.Store(MR_GRAPH_INPUT_CONDUCT_END_HEADER + 4, records);
 }
 
-// --- 8. 頁を畳む(要求の処理の前。T-0103。multires_activity.cpp の FoldQuietPages)---
-// TreeFoldCheck(1 グループ = 世界の枠 1 つ、スレッド = セル): ちょうど静かになった頁のブロック(MrWantsFoldCheck)が一様なら、
-// 取り合いの印 [枠] に MR_CLAIM_FOLD を書く(取り合いの印は要求の処理の中でしか使わず、その外では全部 MR_NO_CLAIM なので借りる)。
-// TreeFold(1 グループ)が枠の順に一様の値を書き、頁を空きのスタックに積み、印を MR_NO_CLAIM に戻す(頁の番号を決定的にするため)
+// --- 8. 頁を畳む(要求の処理の前。T-0103・T-0112。multires_activity.cpp の FoldQuietPages)---
+// TreeFoldCheck(1 グループ = 世界の枠 1 つ、スレッド = セル): ちょうど静かになったブロックを調べ、取り合いの印 [枠] に
+// 「畳む・返す」の印(MR_CLAIM_FOLD_* の組み合わせ)を書く(取り合いの印は要求の処理の中でしか使わず、その外では全部 MR_NO_CLAIM なので借りる)。
+//   - 許容差つき(MrIsExactFold でない)なら、端数の枠を持つブロックの端数を全部帳簿の同じ段へ移す(枠を返すのは TreeFold)
+//   - 一様(全部覆われている・許容差なし)ならビット単位の判定(T-0103)。ほぼ同じなら平均の値を一様の値に書き、切り捨ての余りを帳簿へ(T-0104)
+// TreeFold(1 グループ)が枠の順に頁と端数の枠を空きのスタックに積み、印を MR_NO_CLAIM に戻す(番号を決定的にするため)。
+// 帳簿は繰り上げつきの atomic の足し算(AddLedgerCarrying)。足した値の和も繰り上がりの回数も順によらないので、CPU の枠の順の足し算とビット一致する
 
-static const uint32_t MR_CLAIM_FOLD = 0xFFFFFFFEu;
+static const uint32_t MR_CLAIM_FOLD_BASE = 0xFFFFFFF0u;  // 下位 3bit が印(MR_NO_CLAIM = 0xFFFFFFFF とは重ならない)
+static const uint32_t MR_CLAIM_FOLD_COPY = 1;            // 畳む: 一様の値は頁の値のセル(FoldValue)
+static const uint32_t MR_CLAIM_FOLD_WRITTEN = 2;         // 畳む: 一様の値は TreeFoldCheck が書いた(平均)
+static const uint32_t MR_CLAIM_FOLD_RETURN = 4;          // 端数の枠を返す(端数は TreeFoldCheck が帳簿へ移した)
 
 groupshared uint32_t gs_foldMismatch;
 
@@ -456,52 +462,322 @@ RxCell FoldValue(MrBlock block) {
     return g_cells[PageCellAddress(block.page, valueCell)];
 }
 
+// 帳簿の段 ledgerLevel に bits(その段の単位 × 2^-64)を足す。桁あふれ(= 1 段粗い段の 2^61)は粗い段へ繰り上げる
+// (multires_activity.cpp の AddLedgerBits と同じ結果。atomic の前の値で自分の足し算の桁あふれが分かる)
+void AddLedgerCarrying(int32_t ledgerLevel, uint32_t column, uint64_t bits) {
+    for (; bits != 0; --ledgerLevel) {
+        const uint32_t address = MrLedgerAddress(ledgerLevel, column, g_ledgerColumns);
+        if (address == MR_NO_BLOCK) {
+            InterlockedAdd(g_counters[MR_COUNTER_LEDGER_OUTSIDE], 1u);
+            return;
+        }
+
+        uint64_t before = 0;
+        InterlockedAdd(g_ledger[address], bits, before);
+        bits = before + bits < bits ? FX_U64(1u << 29, 0u) : 0;
+    }
+}
+
+// 端数の枠のセル index の端数を帳簿の同じ段へ(ReturnFractionsToLedger の 1 セル分)
+void ReturnFractionCell(MrBlock block, uint32_t index) {
+    const MrFraction fraction = g_fractions[FractionAddress(block.fraction, index)];
+    AddLedgerCarrying(block.level, 0, fraction.energy);
+    for (uint32_t i = 0; i < fraction.speciesCount; ++i)
+        AddLedgerCarrying(block.level, 1 + fraction.species[i], fraction.amounts[i]);
+}
+
+// ビット単位で一様か(全部のスレッドが呼ぶ。グループで一様な結果)
+bool FoldsExactly(MrBlock block, uint32_t index) {
+    if (index == 0)
+        gs_foldMismatch = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    if (!MrFoldsCell(block, FoldValue(block), index, g_cells[PageCellAddress(block.page, index)]))
+        InterlockedOr(gs_foldMismatch, 1u);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    return gs_foldMismatch == 0;
+}
+
+// --- ほぼ同じかの集計(T-0112): CollectFoldStats と同じ MrFoldStats を、セル = スレッドの並列で作る ---
+// 1 スレッドで 512 セルを MrAddFoldCell で足すと、大きい MrFoldStats を何度も写して数 ms かかった。集計は最小・最大・和だけで
+// セルの順によらないので、ウェーブで縮約し、ウェーブの部分(受け取った順の番号に置く。順によらない)をスレッド 0 が合わせる。
+// 和は 64bit を上下 32bit に分けて足す(ウェーブ 1 つ・512 セルでも桁あふれしない)ので、128bit の和が CPU とビット一致する。
+// 成分は「自分のセルの、前に選んだ ID より大きい最小の ID」の最小を繰り返して ID の昇順に集める(9 個目があれば合わせた成分が多すぎる)
+
+static const uint32_t FOLD_MAX_WAVES = MR_BLOCK_CELLS / 4;  // ウェーブは 4 レーン以上(D3D12)
+static const uint32_t FOLD_NO_SPECIES = 0xFFFFFFFFu;
+
+groupshared uint32_t gs_foldWaves;  // 書いたウェーブの部分の数
+groupshared uint32_t gs_foldNextSpecies;
+groupshared uint32_t gs_foldCount[FOLD_MAX_WAVES];
+groupshared int32_t gs_foldLowTemperature[FOLD_MAX_WAVES];
+groupshared int32_t gs_foldHighTemperature[FOLD_MAX_WAVES];
+groupshared uint64_t gs_foldLow[FOLD_MAX_WAVES];
+groupshared uint64_t gs_foldHigh[FOLD_MAX_WAVES];
+groupshared uint64_t gs_foldSumLow[FOLD_MAX_WAVES];   // 下位 32bit の和
+groupshared uint64_t gs_foldSumHigh[FOLD_MAX_WAVES];  // 上位 32bit の和(エネルギーは符号つき)
+
+// ウェーブの部分を書く番号(ウェーブの最初のレーンだけが呼ぶ)
+uint32_t TakeFoldWave() {
+    uint32_t wave = 0;
+    InterlockedAdd(gs_foldWaves, 1u, wave);
+
+    return wave;
+}
+
+// 上位 32bit の和(符号つき)× 2^32 + 下位 32bit の和 を 128bit の (上, 下) にする
+MrWide CombineFoldSum(int64_t high, uint64_t low) {
+    MrWide sum = MrMakeWide();
+    const uint64_t shifted = (uint64_t)high << 32;
+    sum.hi = shifted + low;
+    sum.top = (uint64_t)(high >> 32) + (sum.hi < low ? 1u : 0u);
+
+    return sum;
+}
+
+// セルの成分のうち、物質 after より大きい最小の ID(after = FOLD_NO_SPECIES なら最小。無ければ FOLD_NO_SPECIES)
+uint32_t NextCellSpecies(RxCell cell, uint32_t after) {
+    uint32_t next = FOLD_NO_SPECIES;
+    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+        const uint32_t id = cell.species[i];
+        if ((after == FOLD_NO_SPECIES || id > after) && id < next)
+            next = id;
+    }
+
+    return next;
+}
+
+// セルの物質 id の量(無ければ 0 で present = false)
+uint64_t CellSpeciesAmount(RxCell cell, uint32_t id, out bool present) {
+    present = false;
+    uint64_t amount = 0;
+    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+        if (cell.species[i] == id) {
+            present = true;
+            amount = cell.amounts[i];
+        }
+    }
+
+    return amount;
+}
+
+// セルの数・温度・成分の合計の最大・エネルギーの和(スレッド 0 の stats に)
+MrFoldStats CollectFoldCells(uint32_t index, RxCell cell, bool uncovered) {
+    const int32_t temperature = uncovered ? RxComputeThermal(MakeTable(), cell).temperature : 0;
+    uint64_t total = 0;
+    for (uint32_t i = 0; uncovered && i < cell.speciesCount; ++i)
+        total = total + cell.amounts[i] < total ? FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu) : total + cell.amounts[i];
+
+    const int64_t energy = uncovered ? cell.energy : 0;
+    if (index == 0)
+        gs_foldWaves = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t count = WaveActiveCountBits(uncovered);
+    const int32_t lowTemperature = WaveActiveMin(uncovered ? temperature : 2147483647);
+    const int32_t highTemperature = WaveActiveMax(uncovered ? temperature : -2147483647 - 1);
+    const uint64_t highTotal = WaveActiveMax(total);
+    const uint64_t energyLow = WaveActiveSum((uint64_t)energy & FX_LOW32_MASK);
+    const int64_t energyHigh = WaveActiveSum(energy >> 32);
+    if (WaveIsFirstLane()) {
+        const uint32_t wave = TakeFoldWave();
+        gs_foldCount[wave] = count;
+        gs_foldLowTemperature[wave] = lowTemperature;
+        gs_foldHighTemperature[wave] = highTemperature;
+        gs_foldHigh[wave] = highTotal;
+        gs_foldSumLow[wave] = energyLow;
+        gs_foldSumHigh[wave] = (uint64_t)energyHigh;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    MrFoldStats stats = MrMakeFoldStats();
+    if (index != 0)
+        return stats;
+
+    uint64_t sumLow = 0;
+    int64_t sumHigh = 0;
+    for (uint32_t wave = 0; wave < gs_foldWaves; ++wave) {
+        stats.cellCount += gs_foldCount[wave];
+        stats.lowTemperature = min(stats.lowTemperature, gs_foldLowTemperature[wave]);
+        stats.highTemperature = max(stats.highTemperature, gs_foldHighTemperature[wave]);
+        stats.highTotal = max(stats.highTotal, gs_foldHigh[wave]);
+        sumLow += gs_foldSumLow[wave];
+        sumHigh += (int64_t)gs_foldSumHigh[wave];
+    }
+
+    stats.energy = CombineFoldSum(sumHigh, sumLow);
+
+    return stats;
+}
+
+// 成分 position(物質 id)のセルの数・最小・最大・128bit の和を stats に(スレッド 0 だけ)
+MrFoldStats CollectFoldSpecies(MrFoldStats stats, uint32_t index, RxCell cell, bool uncovered, uint32_t position,
+                               uint32_t id) {
+    bool present = false;
+    const uint64_t amount = uncovered ? CellSpeciesAmount(cell, id, present) : 0;
+    if (index == 0)
+        gs_foldWaves = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t count = WaveActiveCountBits(present);
+    const uint64_t low = WaveActiveMin(present ? amount : FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu));
+    const uint64_t high = WaveActiveMax(amount);
+    const uint64_t sumLow = WaveActiveSum(amount & FX_LOW32_MASK);
+    const uint64_t sumHigh = WaveActiveSum(amount >> 32);
+    if (WaveIsFirstLane()) {
+        const uint32_t wave = TakeFoldWave();
+        gs_foldCount[wave] = count;
+        gs_foldLow[wave] = low;
+        gs_foldHigh[wave] = high;
+        gs_foldSumLow[wave] = sumLow;
+        gs_foldSumHigh[wave] = sumHigh;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (index != 0)
+        return stats;
+
+    uint64_t totalLow = 0;
+    uint64_t totalHigh = 0;
+    stats.species[position] = id;
+    stats.lowAmount[position] = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
+    for (uint32_t wave = 0; wave < gs_foldWaves; ++wave) {
+        stats.present[position] += gs_foldCount[wave];
+        stats.lowAmount[position] = min(stats.lowAmount[position], gs_foldLow[wave]);
+        stats.highAmount[position] = max(stats.highAmount[position], gs_foldHigh[wave]);
+        totalLow += gs_foldSumLow[wave];
+        totalHigh += gs_foldSumHigh[wave];
+    }
+
+    const MrWide sum = CombineFoldSum((int64_t)totalHigh, totalLow);
+    stats.sumLow[position] = sum.hi;
+    stats.sumHigh[position] = sum.top;
+
+    return stats;
+}
+
+// ほぼ同じなら(スレッド 0 だけが返す値を使う)平均の値を一様の値に書き、切り捨ての余りを帳簿へ(CollectFoldStats → MrFoldStatsValue)
+bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance tolerance) {
+    const bool uncovered = !MrIsCoveredCell(block, index);
+    const RxCell cell = g_cells[PageCellAddress(block.page, index)];
+    MrFoldStats stats = CollectFoldCells(index, cell, uncovered);
+
+    // --- 成分を ID の昇順に 1 つずつ(グループで一様なループ)---
+    uint32_t last = FOLD_NO_SPECIES;
+    for (uint32_t position = 0; position <= RX_MAX_CELL_SPECIES; ++position) {
+        if (index == 0)
+            gs_foldNextSpecies = FOLD_NO_SPECIES;
+
+        GroupMemoryBarrierWithGroupSync();
+        const uint32_t mine = uncovered ? NextCellSpecies(cell, last) : FOLD_NO_SPECIES;
+        if (mine != FOLD_NO_SPECIES)
+            InterlockedMin(gs_foldNextSpecies, mine);
+
+        GroupMemoryBarrierWithGroupSync();
+        const uint32_t next = gs_foldNextSpecies;
+        GroupMemoryBarrierWithGroupSync();  // 次の回が書き直す前に、全部が読み終える
+        if (next == FOLD_NO_SPECIES)
+            break;
+
+        if (position == RX_MAX_CELL_SPECIES) {
+            stats.tooManySpecies = 1;
+            break;
+        }
+
+        stats = CollectFoldSpecies(stats, index, cell, uncovered, position, next);
+        stats.speciesCount = position + 1;
+        last = next;
+    }
+
+    if (index != 0 || !MrFoldStatsWithin(stats, tolerance))
+        return false;
+
+    const MrFoldValue value = MrFoldStatsValue(stats);
+    AddLedgerCarrying(block.level - 3, 0, value.energyRemainder << 55u);
+    for (uint32_t i = 0; i < stats.speciesCount; ++i)
+        AddLedgerCarrying(block.level - 3, 1 + stats.species[i], value.amountRemainders[i] << 55u);
+
+    g_cells[slot] = value.cell;
+
+    return true;
+}
+
 [numthreads(MR_BLOCK_CELLS, 1, 1)] void TreeFoldCheck(uint32_t index : SV_GroupIndex, uint3 group : SV_GroupID) {
     const uint32_t slot = group.x;
     if (slot >= g_worldBlocks)
         return;
 
-    // --- 調べる刻みか(グループで一様な分岐)---
-    const MrBlock block = g_blocks[slot];
-    if (!MrWantsFoldCheck(block, MrActivityMark(FX_U64(g_tickHigh, g_tickLow))))
-        return;
+    // --- ちょうど静かになったら、端数の枠の端数を帳簿へ(許容差つきの時だけ。グループで一様な分岐)---
+    const uint32_t mark = MrActivityMark(FX_U64(g_tickHigh, g_tickLow));
+    const MrFoldTolerance tolerance = MrUnpackFoldTolerance(g_foldTolerance);
+    MrBlock block = g_blocks[slot];
+    uint32_t flags = 0;
+    if (!MrIsExactFold(tolerance) && MrWantsFractionReturn(block, mark)) {
+        ReturnFractionCell(block, index);
+        block.fraction = MR_NO_FRACTION;
+        flags |= MR_CLAIM_FOLD_RETURN;
+    }
 
-    if (index == 0)
-        gs_foldMismatch = 0;
+    // --- 畳めるか(全部覆われているか許容差なしならビット単位、そうでなければほぼ同じ)---
+    if (MrWantsFoldCheck(block, mark)) {
+        if (MrIsExactFold(tolerance) || MrFoldValueCell(block) == MR_BLOCK_CELLS)
+            flags |= FoldsExactly(block, index) ? MR_CLAIM_FOLD_COPY : 0u;
+        else
+            flags |= FoldsNearly(slot, block, index, tolerance) ? MR_CLAIM_FOLD_WRITTEN : 0u;
+    }
 
-    GroupMemoryBarrierWithGroupSync();
-
-    // --- セル index が一様の値で畳んだ時と同じか ---
-    if (!MrFoldsCell(block, FoldValue(block), index, g_cells[PageCellAddress(block.page, index)]))
-        InterlockedOr(gs_foldMismatch, 1u);
-
-    GroupMemoryBarrierWithGroupSync();
-    if (index == 0 && gs_foldMismatch == 0)
-        g_treeWords[TreeClaimAddress(slot)] = MR_CLAIM_FOLD;
+    if (index == 0 && flags != 0)
+        g_treeWords[TreeClaimAddress(slot)] = MR_CLAIM_FOLD_BASE | flags;
 }
 
-// 枠 slot を畳む: 一様の値を書き、頁を空きのスタックの position に積み、印を戻す
-void FoldBlock(uint32_t slot, uint32_t position) {
+// 取り合いの印 [枠] の畳む・返すの印(無ければ 0)
+uint32_t FoldClaim(uint32_t slot) {
+    if (slot >= g_worldBlocks)
+        return 0;
+
+    const uint32_t claim = g_treeWords[TreeClaimAddress(slot)];
+
+    return claim != MR_NO_CLAIM && (claim & ~7u) == MR_CLAIM_FOLD_BASE ? claim & 7u : 0u;
+}
+
+// 枠 slot を畳む: 一様の値を書き(COPY の時)、頁を空きのスタックの position に積む
+void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
     const MrBlock block = g_blocks[slot];
-    g_cells[slot] = FoldValue(block);
+    if ((claim & MR_CLAIM_FOLD_COPY) != 0)
+        g_cells[slot] = FoldValue(block);
+
     g_treeWords[FreePageAddress(position)] = block.page;
     g_blocks[slot].page = MR_NO_PAGE;
-    g_treeWords[TreeClaimAddress(slot)] = MR_NO_CLAIM;
 }
 
-// 調べた頁を枠の順に畳む(1 グループ)
+// 調べた頁を畳み、端数の枠を返す(1 グループ。どちらも枠の順に空きのスタックへ。CPU は枠ごとに「返す → 畳む」)
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeFold(uint32_t i : SV_GroupIndex) {
     const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
-    uint32_t folded = 0;  // ここまでの区切りで畳んだ数(グループで一様)
+    const uint32_t freeFractions = g_counters[MR_COUNTER_FREE_FRACTIONS];
+    uint32_t folded = 0;    // ここまでの区切りで畳んだ数(グループで一様)
+    uint32_t returned = 0;  // ここまでの区切りで返した端数の枠の数
     for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
         const uint32_t slot = first + i;
-        const bool folds = slot < g_worldBlocks && g_treeWords[TreeClaimAddress(slot)] == MR_CLAIM_FOLD;
-        InclusiveScan(i, folds ? 1u : 0u, 0u, 0u);
+        const uint32_t claim = FoldClaim(slot);
+        const bool folds = (claim & (MR_CLAIM_FOLD_COPY | MR_CLAIM_FOLD_WRITTEN)) != 0;
+        const bool returns = (claim & MR_CLAIM_FOLD_RETURN) != 0;
+        InclusiveScan(i, folds ? 1u : 0u, returns ? 1u : 0u, 0u);
+
+        if (returns) {
+            g_freeFractions[freeFractions + returned + gs_fractionScan[i] - 1] = g_blocks[slot].fraction;
+            g_blocks[slot].fraction = MR_NO_FRACTION;
+        }
 
         if (folds)
-            FoldBlock(slot, freePages + folded + gs_blockScan[i] - 1);
+            FoldBlock(slot, claim, freePages + folded + gs_blockScan[i] - 1);
+
+        if (claim != 0)
+            g_treeWords[TreeClaimAddress(slot)] = MR_NO_CLAIM;
 
         folded += gs_blockScan[MR_MAX_REQUESTS - 1];
+        returned += gs_fractionScan[MR_MAX_REQUESTS - 1];
         GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
     }
 
@@ -509,5 +785,6 @@ void FoldBlock(uint32_t slot, uint32_t position) {
         return;
 
     g_counters[MR_COUNTER_FREE_PAGES] = freePages + folded;
+    g_counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions + returned;
     g_counters[MR_COUNTER_FOLDED] += folded;
 }

@@ -357,60 +357,14 @@ namespace {
                 static_cast<int64_t>(run.crateFoldTick), run.quietTicks);
     }
 
-    // 根 3 つ(どれも頁を持つ): 枠 0 = 空気のセルのエネルギーと O2 が数単位ずつ違う(計器で測れない差)/ 枠 1 = 枠 0 の 1 セルだけ 2 K 熱い /
-    // 枠 2 = 枠 0 と同じセルで、端数の枠を持つ。刻み NEAR_UNIT_TICK にちょうど静かになるよう忙しさの印を置き、1 回だけ畳む
-    constexpr uint64_t NEAR_UNIT_TICK = 40;
-
-    struct NearFoldUnit {
-        MultiresNest nest;
-        std::vector<RxCell> nearCells;
-    };
-
-    NearFoldUnit MakeNearFoldUnit(const BakedReactionTable& table) {
-        NearFoldUnit unit{.nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 4, 0, 4))};
-        const RxCell air = test::MakeAirCell(table);
-        const uint32_t oxygen = table.SpeciesId("oxygen");
-        unit.nearCells.assign(MR_BLOCK_CELLS, air);
-        for (uint32_t index = 0; index < MR_BLOCK_CELLS; index += 7) {
-            unit.nearCells[index].energy += index % 300;
-            unit.nearCells[index] = RxAddSpecies(unit.nearCells[index], oxygen, index % 4);
-        }
-
-        std::vector<RxCell> hot = unit.nearCells;
-        const uint64_t heatCapacity = RxComputeThermal(table.View(), air).heatCapacity;  // nJ/K
-        hot[100].energy += static_cast<int64_t>((2 * heatCapacity / 1000000) + 1);
-        for (uint32_t root = 0; root < 3; ++root)
-            PlaceRootBlock(unit.nest, int64_t{root} * 8, 0, 0, root == 1 ? hot : unit.nearCells);
-
-        // --- 枠 2 に端数の枠(エネルギーと O2 の端数を数セルに)---
-        MrBlock& owner = unit.nest.blocks[2];
-        owner.fraction = unit.nest.freeFractions[--unit.nest.counters[MR_COUNTER_FREE_FRACTIONS]];
-        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-            MrFraction fraction = MrMakeEmptyFraction();
-            if (index % 5 == 0) {
-                fraction.energy = 0xC000000000000000ull;
-                fraction.speciesCount = 1;
-                fraction.species[0] = oxygen;
-                fraction.amounts[0] = 0x9000000000000000ull + index;
-            }
-
-            unit.nest.fractions[(size_t{owner.fraction} * MR_BLOCK_CELLS) + index] = fraction;
-        }
-
-        for (uint32_t root = 0; root < 3; ++root)
-            unit.nest.blocks[root].busyTick = MrActivityMark(NEAR_UNIT_TICK) - (MR_QUIET_TICKS + 1);
-
-        return unit;
-    }
-
     void CheckNearFoldUnit(const BakedReactionTable& table) {
-        const MrFoldTolerance tolerance = {.temperatureMk = 100, .amountShift = 20};
-        NearFoldUnit exact = MakeNearFoldUnit(table);
-        NearFoldUnit near = MakeNearFoldUnit(table);
+        const MrFoldTolerance tolerance = test::NEAR_UNIT_TOLERANCE;
+        test::NearFoldUnit exact = test::MakeNearFoldUnit(table);
+        test::NearFoldUnit near = test::MakeNearFoldUnit(table);
         const ConservedTotals before = ComputeConservedTotals(near.nest, table, 0);
         const uint32_t freeFractions = near.nest.counters[MR_COUNTER_FREE_FRACTIONS];
-        FoldQuietPages(exact.nest, table, NEAR_UNIT_TICK, MrExactFoldTolerance());
-        FoldQuietPages(near.nest, table, NEAR_UNIT_TICK, tolerance);
+        FoldQuietPages(exact.nest, table, test::NEAR_UNIT_TICK, MrExactFoldTolerance());
+        FoldQuietPages(near.nest, table, test::NEAR_UNIT_TICK, tolerance);
 
         Expect(!MrIsUniform(exact.nest.blocks[0]) && !MrIsUniform(exact.nest.blocks[1]) &&
                    !MrIsUniform(exact.nest.blocks[2]) && exact.nest.blocks[2].fraction != MR_NO_FRACTION,

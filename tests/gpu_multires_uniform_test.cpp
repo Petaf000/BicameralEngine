@@ -6,6 +6,8 @@
 //   3. 一様な親へ値の違う一様な子を粗くする(親を頁に広げる)・同じ値の子を粗くする(一様のまま): 処理の後の状態の全部を比べる
 //   4. 全部を刻む(RecordStep。StepExpanded)を数刻み: 状態の全部を比べる
 //   5. 子に覆われた頁を畳む: 毎刻み状態の全部を比べる
+//   6. 許容差つきで畳む(T-0112): 1 の場面を許容差つきで毎刻み(鎖の端数の枠が静かになって帳簿へ返る)・ほぼ同じ頁を 1 回だけ畳む場面
+//      (multires_uniform_scene.h の MakeNearFoldUnit。平均で畳む・2 K 熱いセルは畳まない・端数の枠を返す)を許容差なし・つきで
 // 時間は別に、暖機してから根 8³ 個の世界で「頁を配る段」と「頁を畳む 2 段」だけを測る。引数は gpu_test_options.h。
 #include <array>
 #include <cstring>
@@ -34,11 +36,11 @@ namespace {
     constexpr uint64_t FULL_STEP_TICKS = 6;  // 4. 全部を刻む刻みの数
 
     bool RecordTick(ID3D12GraphicsCommandList10* list, sim::GpuMultires& gpu, D3D12_GPU_VIRTUAL_ADDRESS ring,
-                    uint64_t tick) {
+                    uint64_t tick, const MrFoldTolerance& tolerance) {
         if (!gpu.RecordRequests(list, test::UniformRequestsAt(tick)))
             return false;
 
-        gpu.RecordFoldPages(list, ring, tick);
+        gpu.RecordFoldPages(list, ring, tick, tolerance);
         gpu.RecordQuietRequests(list, ring, tick);
         gpu.RecordProcessRequests(list, ring);
 
@@ -112,10 +114,10 @@ namespace {
         return std::unexpected(std::format("{} で CPU と GPU が食い違う", where));
     }
 
-    // 1・2: 活性で刻む場面を毎刻み比べる
+    // 1・2・6: 活性で刻む場面を毎刻み比べる
     std::expected<uint64_t, std::string> RunActive(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                    gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                   uint32_t pages) {
+                                                   uint32_t pages, const MrFoldTolerance& tolerance) {
         sim::MultiresNest cpu = test::MakeUniformNest(table, pages);
         auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.activity = true});
         if (!gpu)
@@ -127,15 +129,15 @@ namespace {
                 if (tick == 0 && !gpu->RecordUpload(list, cpu))
                     return false;
 
-                return RecordTick(list, *gpu, ring.GpuAddress(), tick);
+                return RecordTick(list, *gpu, ring.GpuAddress(), tick, tolerance);
             };
             if (auto executed = Execute(queue, ring, *gpu, read, record); !executed)
                 return std::unexpected(std::format("刻み {}: {}", tick, executed.error()));
 
-            test::BeginUniformTick(cpu, tick);
+            test::BeginUniformTick(cpu, table, tick, tolerance);
             sim::StepActive(cpu, table, test::STRESS_SEED, tick);
 
-            const std::string where = std::format("頁 {}・刻み {}", pages, tick);
+            const std::string where = std::format("頁 {}・許容差 {} mK・刻み {}", pages, tolerance.temperatureMk, tick);
             if (auto compared = CompareWhole(cpu, read, where); !compared)
                 return std::unexpected(compared.error());
 
@@ -259,6 +261,54 @@ namespace {
         return {};
     }
 
+    // 6: ほぼ同じ頁を 1 回だけ畳む(許容差なしなら何も畳まず・返さない)。measure なら、何もしない畳む段で暖機してから
+    // 畳む 2 段の GPU 時間を測って返す(ほぼ同じ頁 2 つの集計と端数の枠 1 つを返す分。暖機の段は刻みが違うので何もしない)
+    std::expected<double, std::string> RunNearFoldUnit(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                       gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                       const MrFoldTolerance& tolerance, bool measure) {
+        test::NearFoldUnit cpu = test::MakeNearFoldUnit(table);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.nest.capacity);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read;
+        const auto record = [&](ID3D12GraphicsCommandList10* list) {
+            if (!gpu->RecordUpload(list, cpu.nest))
+                return false;
+
+            for (uint32_t i = 0; measure && i < WARMUP_STEPS; ++i)
+                gpu->RecordFoldPages(list, ring.GpuAddress(), test::NEAR_UNIT_TICK + 1 + i, tolerance);
+
+            gpu->RecordTimestamp(list, 0);
+            gpu->RecordFoldPages(list, ring.GpuAddress(), test::NEAR_UNIT_TICK, tolerance);
+            gpu->RecordTimestamp(list, 1);
+
+            return true;
+        };
+        if (auto executed = Execute(queue, ring, *gpu, read, record); !executed)
+            return std::unexpected(std::format("ほぼ同じ頁: {}", executed.error()));
+
+        sim::FoldQuietPages(cpu.nest, table, test::NEAR_UNIT_TICK, tolerance);
+        const std::string where = std::format("ほぼ同じ頁(許容差 {} mK)", tolerance.temperatureMk);
+        if (auto compared = CompareWhole(cpu.nest, read, where); !compared)
+            return std::unexpected(compared.error());
+
+        // --- 場面の確認: 許容差つきなら枠 0・2 を畳み、枠 2 の端数の枠を返す。なしなら何もしない ---
+        const bool nearFold = !MrIsExactFold(tolerance);
+        const auto& blocks = cpu.nest.blocks;
+        if (MrIsUniform(blocks[0]) != nearFold || MrIsUniform(blocks[1]) || MrIsUniform(blocks[2]) != nearFold ||
+            (blocks[2].fraction == MR_NO_FRACTION) != nearFold)
+            return std::unexpected(std::format("{}: 場面の確認: 畳んだ・返したブロックが期待と違う", where));
+
+        uint64_t frequency = 0;
+        const std::vector<uint64_t> stamps = gpu->ReadTimestamps(2);
+        if (!measure || FAILED(queue.Native()->GetTimestampFrequency(&frequency)) || stamps.size() < 2 ||
+            frequency == 0)
+            return 0.0;
+
+        return static_cast<double>(stamps[1] - stamps[0]) * 1000.0 / static_cast<double>(frequency);
+    }
+
     // 段 1 つ(根 8³ 個 + 空きの枠 128。頁に広げたい・畳みたいブロックは無いので全部の枠を見るだけ)の平均の GPU 時間
     template <typename Pass>
     std::expected<double, std::string> Measure(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
@@ -323,17 +373,33 @@ namespace {
         return PassTimes{.expandMs = *expandMs, .foldMs = *foldMs};
     }
 
-    // 1〜5 を順に走らせ、最初の失敗を返す。成功なら 1・2 の最後の要約
+    // 1〜6 を順に走らせ、最初の失敗を返す。成功なら 1・2 の最後の要約。measure なら 6 のほぼ同じ頁を畳む 2 段の GPU 時間を nearFoldMs に
     std::expected<std::array<uint64_t, 2>, std::string> RunScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                                   gpu::DebugRing& ring,
-                                                                  const sim::BakedReactionTable& table) {
-        const auto ample = RunActive(device, queue, ring, table, test::UNIFORM_WORLD_BLOCKS);
+                                                                  const sim::BakedReactionTable& table, bool measure,
+                                                                  double& nearFoldMs) {
+        const MrFoldTolerance exact = MrExactFoldTolerance();
+        const auto ample = RunActive(device, queue, ring, table, test::UNIFORM_WORLD_BLOCKS, exact);
         if (!ample)
             return std::unexpected(ample.error());
 
-        const auto scarce = RunActive(device, queue, ring, table, 1);
+        const auto scarce = RunActive(device, queue, ring, table, 1, exact);
         if (!scarce)
             return std::unexpected(scarce.error());
+
+        // --- 6. 許容差つき ---
+        const auto nearAmple = RunActive(device, queue, ring, table, test::UNIFORM_WORLD_BLOCKS,
+                                         test::NEAR_UNIT_TOLERANCE);
+        if (!nearAmple)
+            return std::unexpected(nearAmple.error());
+
+        for (const MrFoldTolerance& tolerance : {exact, test::NEAR_UNIT_TOLERANCE}) {
+            const auto unit = RunNearFoldUnit(device, queue, ring, table, tolerance, measure);
+            if (!unit)
+                return std::unexpected(unit.error());
+
+            nearFoldMs = *unit;
+        }
 
         for (const int64_t delta : {int64_t{0}, int64_t{1000}}) {
             if (auto expanded = RunExpandParent(device, queue, ring, table, delta); !expanded)
@@ -376,7 +442,8 @@ namespace {
         const bool measure = options->adapter != gpu::AdapterKind::Warp;
         const auto times = measure ? MeasurePasses(device->Get(), *queue, *ring, *table)
                                    : std::expected<PassTimes, std::string>(PassTimes{});
-        const auto digests = RunScenes(device->Get(), *queue, *ring, *table);
+        double nearFoldMs = 0.0;
+        const auto digests = RunScenes(device->Get(), *queue, *ring, *table, measure, nearFoldMs);
         if (!digests) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_uniform_test: FAILED ({})", digests.error());
             return 1;
@@ -393,11 +460,15 @@ namespace {
         if (measure) {
             Log(Channel::Gpu, Level::Info, "GPU 時間: 頁を配る段 {:.4f} ms・頁を畳む 2 段 {:.4f} ms(世界の枠 {})",
                 times->expandMs, times->foldMs, (MEASURE_ROOT_EDGE * MEASURE_ROOT_EDGE * MEASURE_ROOT_EDGE) + 128);
+            Log(Channel::Gpu, Level::Info,
+                "GPU 時間: ほぼ同じ頁 2 つを畳み端数の枠 1 つを返す 2 段 {:.4f} ms(許容差つき・世界の枠 4・暖機の後 1 "
+                "回)",
+                nearFoldMs);
         }
 
         Log(Channel::Gpu, Level::Info,
             "gpu_multires_uniform_test: OK({} 刻みで頁が足りる・1 つの両方で GPU と CPU がビット一致・種も一致・"
-            "一様な親へ粗くする・全部を刻む・子に覆われた頁を畳むも一致。要約 {:016x} / {:016x})",
+            "一様な親へ粗くする・全部を刻む・子に覆われた頁を畳む・許容差つきで畳むも一致。要約 {:016x} / {:016x})",
             test::UNIFORM_TICKS, (*digests)[0], (*digests)[1]);
 
         return 0;

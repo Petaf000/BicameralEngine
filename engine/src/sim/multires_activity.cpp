@@ -7,7 +7,7 @@
 // 粗くする要求を作る(SubmitQuietCoarsenRequests。GPU は multires_tree.hlsl の TreeQuiet。T-0101)。
 // 一様なブロック(T-0102)は値 1 つで反応が進むかを調べ、進むなら刻んだ後に枠の順で頁に広げて刻む(GPU は TreeExpand → ExpandStepNode)。
 // 頁を持つブロックがちょうど静かになった刻みに一様なら、値 1 つに戻して枠の順に頁を返す(FoldQuietPages。GPU は TreeFoldCheck → TreeFold。T-0103)。
-// 許容差を渡すと、ほぼ同じ頁も平均の値で畳み、切り捨ての余りを帳簿へ移す(T-0104。CPU だけ。GPU は T-0112)。
+// 許容差を渡すと、ほぼ同じ頁も平均の値で畳み、切り捨ての余りを帳簿へ移す(T-0104。GPU も同じ段で。T-0112)。
 #include <algorithm>
 #include <optional>
 

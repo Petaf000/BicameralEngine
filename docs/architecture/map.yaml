@@ -279,7 +279,7 @@ views:
           note: "見出しの枠とセルの頁は別のプール。一様(覆われていないセルが同じ値)は頁なしで値 1 つ。反応が進む時だけ刻んだ後に頁を配る。GPU は multires_tree.hlsl の TreeExpand → ExpandStepNode / StepExpanded" }
       - { id: multiresfold, group: simlib, label: "FoldQuietPages<br/>静かで一様(かほぼ同じ)になった頁を畳む(枠の順)",
           code: "engine/src/sim/multires_activity.cpp::FoldPage", ticket: T-0103, doc: docs/design/17-multiresolution.md,
-          note: "ちょうど静かになった刻み(MrWantsFoldCheck)に 1 回だけ一様か調べ、一様なら値 1 つに戻して頁を返す。GPU は multires_tree.hlsl の TreeFoldCheck(1 グループ = 1 枠)→ TreeFold(1 グループの累積和)。許容差つき(T-0104。CPU だけ、GPU は T-0112)は計器で測れない差なら平均の切り捨てで畳み、余りと静かになった端数の枠の端数を帳簿へ(MrFoldStats・AddLedgerBits)" }
+          note: "ちょうど静かになった刻み(MrWantsFoldCheck)に 1 回だけ一様か調べ、一様なら値 1 つに戻して頁を返す。GPU は multires_tree.hlsl の TreeFoldCheck(1 グループ = 1 枠)→ TreeFold(1 グループの累積和)。許容差つき(T-0104・GPU は T-0112)は計器で測れない差なら平均の切り捨てで畳み、余りと静かになった端数の枠の端数を帳簿へ(MrFoldStats・CPU は AddLedgerBits、GPU は繰り上げつきの atomic の AddLedgerCarrying)" }
       - { id: uniformtest, group: tests, label: "multires_uniform_test / gpu_multires_uniform_test<br/>一様な根・鎖は頁を使わない・頁の不足・燃え尽きたら畳む",
           code: "tests/multires_uniform_test.cpp::RunUniform", ticket: T-0102,
           note: "1 つずつ刻む素直な答えと論理のセルが一致・保存量一致・燃え尽きた木箱が畳まれて頁が 0 に戻る(T-0103)。GPU(HW・WARP)は状態の全部と種が毎刻み CPU と一致" }

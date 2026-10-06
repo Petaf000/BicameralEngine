@@ -25,7 +25,7 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 24;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 25;
         constexpr uint32_t EXTERNAL_VIEW_FIRST = 4;  // u4・u5
         constexpr uint32_t UAV_COUNT = 14;           // u0〜u13
         constexpr uint32_t ACTIVITY_VIEW = 13;       // u13
@@ -632,6 +632,12 @@ namespace bicameral::sim {
 
     void GpuMultires::RecordFoldPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                       uint64_t tick) {
+        RecordFoldPages(list, debugRing, tick, MrExactFoldTolerance());
+    }
+
+    void GpuMultires::RecordFoldPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                      uint64_t tick, const MrFoldTolerance& tolerance) {
+        m_constants.foldTolerance = MrPackFoldTolerance(tolerance);
         m_constants.tickLow = static_cast<uint32_t>(tick);
         m_constants.tickHigh = static_cast<uint32_t>(tick >> 32);
         RecordTreePass(list, debugRing, PassFoldCheck, std::max(1u, m_capacity.worldBlocks));

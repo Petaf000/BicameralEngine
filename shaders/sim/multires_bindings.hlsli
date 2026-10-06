@@ -63,6 +63,9 @@ cbuffer RootConstants : register(b0) {
 
     // --- 刻み(T-0107)---
     uint32_t g_stepFlags;  // MR_STEP_*
+
+    // --- 頁を畳む(T-0112)---
+    uint32_t g_foldTolerance;  // MrPackFoldTolerance(0 = 完全に同じ)
 };
 
 // g_stepFlags(gpu_multires.cpp の STEP_FLAG_*)

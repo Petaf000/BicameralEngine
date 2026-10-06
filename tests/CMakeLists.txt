@@ -143,6 +143,7 @@ bicameral_add_gpu_test(gpu_multires_uniform_test)  # 一様なブロックの GP
 target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_uniform gpu_multires_uniform_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_multires_uniform_warp gpu_multires_uniform_test warp --warp --queue compute)
+set_tests_properties(gpu_multires_uniform gpu_multires_uniform_warp PROPERTIES TIMEOUT 900)  # debug で活性のグラフの作成(場面ごとに 1 回)が数分
 
 bicameral_add_gpu_test(gpu_multires_conduction_test)  # 木の上の熱の伝導の GPU と CPU のビット一致(T-0107)
 target_link_libraries(gpu_multires_conduction_test PRIVATE bicameral_sim)
@@ -152,6 +153,9 @@ set_tests_properties(gpu_multires_conduction gpu_multires_conduction_warp PROPER
 bicameral_add_gpu_test_case(gpu_multires_subcycle gpu_multires_conduction_test gpu --queue compute --subcycle)  # 細かいレベルの熱の刻み(T-0109)
 bicameral_add_gpu_test_case(gpu_multires_subcycle_warp gpu_multires_conduction_test warp --warp --queue compute --subcycle)
 set_tests_properties(gpu_multires_subcycle gpu_multires_subcycle_warp PROPERTIES TIMEOUT 2400)  # CPU の小刻み 64 回が重い
+bicameral_add_gpu_test_case(gpu_multires_near_fold gpu_multires_conduction_test gpu --queue compute --near-fold)  # 許容差つきで畳む(T-0112)
+bicameral_add_gpu_test_case(gpu_multires_near_fold_warp gpu_multires_conduction_test warp --warp --queue compute --near-fold)
+set_tests_properties(gpu_multires_near_fold gpu_multires_near_fold_warp PROPERTIES TIMEOUT 2400)  # 静かになるまで約 2000 刻み
 
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)

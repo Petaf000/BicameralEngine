@@ -10,7 +10,9 @@
 // --subcycle: 細かいレベルの熱の刻み(T-0109。MultiresStepOptions の subcycleBaseLevel・maxSubcycleGap = 3 で小刻み 64 回)で同じ場面を
 // 刻む(刻みの数は CPU が重いので減らす)。Work Graph 版は、Compute 版の時に刻んだ CPU の結果(ハッシュと種)と比べて CPU を 2 回刻まない。
 // 計測は、根 8³ の世界(全部が基準以下のレベル = 小刻み 63 回が空。空の段の費用)を分けない・64 回で、鎖(レベル 0〜6)を Δkmax 0〜3 で比べる。
-// 引数は gpu_test_options.h と --subcycle・--measure-only(計測だけで抜ける。T-0111)。
+// --near-fold: 鎖を、許容差つきで頁を畳む(端数の枠を返す)・静かな葉を粗くするも入れて、頁が全部畳まれるまで毎刻み比べる(T-0112。
+// CPU は multires_conduction_test の --residue と同じ順。熱が止まって静かになるまで約 2000 刻みかかる)。
+// 引数は gpu_test_options.h と --subcycle・--measure-only(計測だけで抜ける。T-0111)・--near-fold。
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -288,6 +290,79 @@ namespace {
         return sim::HashWholeNest(last);
     }
 
+    // --- 許容差つきで畳む鎖(T-0112。--near-fold)---
+    constexpr uint64_t NEAR_FOLD_MAX_TICKS = 4000;
+    constexpr uint64_t NEAR_FOLD_EXTRA_TICKS = 16;  // 頁が全部畳まれた後も刻む数(畳んだ後に何も起きないこと)
+    constexpr MrFoldTolerance NEAR_FOLD_TOLERANCE = {.temperatureMk = 100, .amountShift = 20};
+
+    // 1 刻みの GPU(CPU の NearFoldTick と同じ順)
+    bool RecordNearFoldTick(ID3D12GraphicsCommandList10* list, sim::GpuMultires& gpu, D3D12_GPU_VIRTUAL_ADDRESS ring,
+                            uint64_t tick) {
+        if (!gpu.RecordRequests(list, {}))
+            return false;
+
+        gpu.RecordFoldPages(list, ring, tick, NEAR_FOLD_TOLERANCE);
+        gpu.RecordQuietRequests(list, ring, tick);
+        gpu.RecordProcessRequests(list, ring);
+
+        return gpu.RecordStepActive(list, ring, test::CONDUCTION_SEED, tick, CONDUCTION);
+    }
+
+    // 1 刻みの CPU。畳む段で返した端数の枠の数を返す
+    uint32_t NearFoldTick(sim::MultiresNest& nest, const sim::BakedReactionTable& table, uint64_t tick) {
+        const uint32_t fractionBlocks = test::CountFractionBlocks(nest);
+        sim::FoldQuietPages(nest, table, tick, NEAR_FOLD_TOLERANCE);
+        const uint32_t returned = fractionBlocks - test::CountFractionBlocks(nest);
+        sim::SubmitQuietCoarsenRequests(nest, tick);
+        sim::ProcessRequests(nest);
+        sim::StepActive(nest, table, test::CONDUCTION_SEED, tick, CONDUCTION);
+
+        return returned;
+    }
+
+    std::expected<void, std::string> RunNearFoldChain(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                      gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeChainNest(table, 16);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.activity = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const SceneRun run{.name = "許容差つきで畳む鎖", .active = true};
+        sim::MultiresNest read;
+        uint32_t returned = 0;
+        uint64_t foldedTick = NEAR_FOLD_MAX_TICKS;  // 頁が全部畳まれた刻み
+        uint64_t tick = 0;
+        for (; tick < NEAR_FOLD_MAX_TICKS && tick < foldedTick + NEAR_FOLD_EXTRA_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordNearFoldTick(list, *gpu, ring.GpuAddress(), tick);
+            };
+            if (auto executed = Execute(queue, ring, *gpu, read, record); !executed)
+                return std::unexpected(std::format("{} 刻み {}: {}", run.name, tick, executed.error()));
+
+            returned += NearFoldTick(cpu, table, tick);
+            if (auto compared = Compare(cpu, read, *gpu, run, tick); !compared)
+                return std::unexpected(std::format("{} 刻み {}: {}", run.name, tick, compared.error()));
+
+            if (foldedTick == NEAR_FOLD_MAX_TICKS && cpu.counters[MR_COUNTER_FOLDED] > 0 &&
+                sim::UsedWorldPages(cpu) == 0)
+                foldedTick = tick;
+        }
+
+        Log(Channel::Gpu, Level::Info,
+            "{}: {} 刻み一致(許容差 {} mK・量 >> {}。畳んだ頁 {}・頁が全部畳まれた刻み {}・返した端数の枠 {}・"
+            "端数の枠の残り {}・端数の枠を持つブロック {})",
+            run.name, tick, NEAR_FOLD_TOLERANCE.temperatureMk, NEAR_FOLD_TOLERANCE.amountShift,
+            cpu.counters[MR_COUNTER_FOLDED], static_cast<int64_t>(foldedTick), returned,
+            cpu.counters[MR_COUNTER_FREE_FRACTIONS], test::CountFractionBlocks(cpu));
+        if (foldedTick == NEAR_FOLD_MAX_TICKS || returned == 0)
+            return std::unexpected("場面の確認: 頁が全部畳まれる・端数の枠を返す、になっていない");
+
+        return {};
+    }
+
     // 版の並び(活性の場面は伝導の段が Compute の版〔偶数番〕と Work Graph の版〔奇数番〕を並べる。subcycle なら Work Graph 版は
     // Compute 版の CPU の結果と比べる)
     std::array<SceneRun, 6> MakeRuns(const sim::BakedReactionTable& table, bool subcycle) {
@@ -500,6 +575,7 @@ namespace {
         test::GpuTestOptions gpu;
         bool subcycle = false;
         bool measureOnly = false;  // 計測だけ(比べる実行を省く。T-0111 で段を詰める時の繰り返し用)
+        bool nearFold = false;     // 許容差つきで畳む鎖だけ(T-0112)
     };
 
     // gpu_test_options.h の引数と --subcycle・--measure-only
@@ -511,6 +587,8 @@ namespace {
                 options.subcycle = true;
             else if (std::string_view(argument) == "--measure-only")
                 options.measureOnly = true;
+            else if (std::string_view(argument) == "--near-fold")
+                options.nearFold = true;
             else
                 rest.push_back(argument);
         }
@@ -544,7 +622,8 @@ namespace {
         const auto options = ParseRunOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_multires_conduction_test [--warp] [--queue direct|compute] [--subcycle] [--measure-only]");
+                "使い方: gpu_multires_conduction_test [--warp] [--queue direct|compute] [--subcycle] [--measure-only] "
+                "[--near-fold]");
             return 2;
         }
 
@@ -563,6 +642,21 @@ namespace {
         if (!queue || !ring) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_conduction_test: FAILED(キューかデバッグのリングを作れない)");
             return 1;
+        }
+
+        if (options->nearFold) {
+            if (auto result = RunNearFoldChain(device->Get(), *queue, *ring, *table); !result) {
+                Log(Channel::Gpu, Level::Error, "gpu_multires_conduction_test: FAILED ({})", result.error());
+                return 1;
+            }
+
+            if (!test::PassesValidation(*device, "gpu_multires_conduction_test"))
+                return 1;
+
+            Log(Channel::Gpu, Level::Info,
+                "gpu_multires_conduction_test: OK(許容差つきで畳む鎖の GPU と CPU が毎刻みビット一致)");
+
+            return 0;
         }
 
 #ifdef NDEBUG

@@ -77,6 +77,15 @@ namespace bicameral::test {
         sim::ProcessRequests(nest);
     }
 
+    // 許容差つきで畳む版(ほぼ同じ頁も畳み、ちょうど静かになった端数の枠を返す。T-0104・T-0112)
+    inline void BeginUniformTick(sim::MultiresNest& nest, const sim::BakedReactionTable& table, uint64_t tick,
+                                 const multires::MrFoldTolerance& tolerance) {
+        sim::SubmitRequests(nest, UniformRequestsAt(tick));
+        sim::FoldQuietPages(nest, table, tick, tolerance);
+        sim::SubmitQuietCoarsenRequests(nest, tick);
+        sim::ProcessRequests(nest);
+    }
+
     // 粗くした時に一様な親を頁に広げる場面(1 回だけの処理): 鎖を 2 段作り、2 段目の一様の値を変えてから粗くする。
     // energyDelta = 0 なら値が同じなので親は一様のまま。CPU の前半(変える前まで)を作る
     inline sim::MultiresNest MakeExpandParentNest(const sim::BakedReactionTable& table, int64_t energyDelta,
@@ -121,6 +130,54 @@ namespace bicameral::test {
     inline void BeginFoldCoveredTick(sim::MultiresNest& nest, uint64_t tick) {
         sim::FoldQuietPages(nest, tick);
         sim::ProcessRequests(nest);
+    }
+
+    // --- ほぼ同じ頁を畳む(T-0104・T-0112。multires_uniform_test.cpp の CheckNearFoldUnit・gpu_multires_uniform_test.cpp)---
+    // 根 3 つ(どれも頁を持つ): 枠 0 = 空気のセルのエネルギーと O2 が数単位ずつ違う(計器で測れない差)/ 枠 1 = 枠 0 の 1 セルだけ 2 K 熱い /
+    // 枠 2 = 枠 0 と同じセルで、端数の枠を持つ。刻み NEAR_UNIT_TICK にちょうど静かになるよう忙しさの印を置き、1 回だけ畳む
+    constexpr uint64_t NEAR_UNIT_TICK = 40;
+    constexpr multires::MrFoldTolerance NEAR_UNIT_TOLERANCE = {.temperatureMk = 100, .amountShift = 20};
+
+    struct NearFoldUnit {
+        sim::MultiresNest nest;
+        std::vector<reaction::RxCell> nearCells;
+    };
+
+    inline NearFoldUnit MakeNearFoldUnit(const sim::BakedReactionTable& table) {
+        NearFoldUnit unit{.nest = sim::MakeMultiresNest(MakeMultiresCapacity(table, 4, 0, 4))};
+        const reaction::RxCell air = MakeAirCell(table);
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        unit.nearCells.assign(multires::MR_BLOCK_CELLS, air);
+        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; index += 7) {
+            unit.nearCells[index].energy += index % 300;
+            unit.nearCells[index] = reaction::RxAddSpecies(unit.nearCells[index], oxygen, index % 4);
+        }
+
+        std::vector<reaction::RxCell> hot = unit.nearCells;
+        const uint64_t heatCapacity = reaction::RxComputeThermal(table.View(), air).heatCapacity;  // nJ/K
+        hot[100].energy += static_cast<int64_t>((2 * heatCapacity / 1000000) + 1);
+        for (uint32_t root = 0; root < 3; ++root)
+            sim::PlaceRootBlock(unit.nest, int64_t{root} * 8, 0, 0, root == 1 ? hot : unit.nearCells);
+
+        // --- 枠 2 に端数の枠(エネルギーと O2 の端数を数セルに)---
+        multires::MrBlock& owner = unit.nest.blocks[2];
+        owner.fraction = unit.nest.freeFractions[--unit.nest.counters[multires::MR_COUNTER_FREE_FRACTIONS]];
+        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+            multires::MrFraction fraction = multires::MrMakeEmptyFraction();
+            if (index % 5 == 0) {
+                fraction.energy = 0xC000000000000000ull;
+                fraction.speciesCount = 1;
+                fraction.species[0] = oxygen;
+                fraction.amounts[0] = 0x9000000000000000ull + index;
+            }
+
+            unit.nest.fractions[(size_t{owner.fraction} * multires::MR_BLOCK_CELLS) + index] = fraction;
+        }
+
+        for (uint32_t root = 0; root < 3; ++root)
+            unit.nest.blocks[root].busyTick = multires::MrActivityMark(NEAR_UNIT_TICK) - (multires::MR_QUIET_TICKS + 1);
+
+        return unit;
     }
 
 }  // namespace bicameral::test

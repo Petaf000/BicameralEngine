@@ -64,6 +64,9 @@ namespace bicameral::sim {
                                           std::span<const multires::MrRequest> requests);
         // 静かで一様になった頁を枠の順に畳む(FoldQuietPages と同じ。RecordQuietRequests の前。tick はこれから処理する刻み。T-0103)
         void RecordFoldPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
+        // 許容差つき(FoldQuietPages の許容差つきと同じ。ちょうど静かになった端数の枠を帳簿へ移して返し、ほぼ同じ頁も平均で畳む。T-0112)
+        void RecordFoldPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                             const multires::MrFoldTolerance& tolerance);
         // 静かな本物の葉を粗くする要求を一覧の後ろに足す(SubmitQuietCoarsenRequests と同じ。RecordRequests の後・
         // RecordProcessRequests の前。tick はこれから処理する刻み。T-0101)
         void RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
@@ -142,6 +145,9 @@ namespace bicameral::sim {
 
             // --- 刻み(T-0107)---
             uint32_t stepFlags = 0;  // STEP_FLAG_*(multires_bindings.hlsli の MR_STEP_*)
+
+            // --- 頁を畳む(T-0112)---
+            uint32_t foldTolerance = 0;  // MrPackFoldTolerance(0 = 完全に同じ)
         };
 
         // バッファの並び(u0〜u3、u6〜u12。multires_bindings.hlsli)

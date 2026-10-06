@@ -692,6 +692,26 @@ FX_FN bool MrIsExactFold(MrFoldTolerance tolerance) {
     return tolerance.temperatureMk == 0 && tolerance.amountShift >= MR_FOLD_EXACT_SHIFT;
 }
 
+// GPU のルート定数 1 語に詰めた許容差(T-0112。ルート署名の語が残り少ないため): 下位 25bit = 温度の幅 mK(約 33 K まで)、
+// 上位 7bit = MR_FOLD_EXACT_SHIFT − amountShift(0 なら量はビット単位)。0 は完全に同じ(MrExactFoldTolerance)
+FX_CONST uint32_t MR_FOLD_TEMPERATURE_BITS = 25;
+FX_CONST uint32_t MR_FOLD_TEMPERATURE_MASK = (1u << MR_FOLD_TEMPERATURE_BITS) - 1u;
+
+FX_FN uint32_t MrPackFoldTolerance(MrFoldTolerance tolerance) {
+    FX_ASSERT(tolerance.temperatureMk <= MR_FOLD_TEMPERATURE_MASK);
+    const uint32_t shift = tolerance.amountShift < MR_FOLD_EXACT_SHIFT ? tolerance.amountShift : MR_FOLD_EXACT_SHIFT;
+
+    return ((MR_FOLD_EXACT_SHIFT - shift) << MR_FOLD_TEMPERATURE_BITS) | tolerance.temperatureMk;
+}
+
+FX_FN MrFoldTolerance MrUnpackFoldTolerance(uint32_t packed) {
+    MrFoldTolerance tolerance;
+    tolerance.temperatureMk = packed & MR_FOLD_TEMPERATURE_MASK;
+    tolerance.amountShift = MR_FOLD_EXACT_SHIFT - (packed >> MR_FOLD_TEMPERATURE_BITS);
+
+    return tolerance;
+}
+
 struct MrFoldStats {
     // --- セル ---
     uint32_t cellCount;
