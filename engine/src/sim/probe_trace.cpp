@@ -102,7 +102,7 @@ namespace bicameral::sim {
             const auto conducted = tree.conducted.find(block);
             const char* state = conducted == tree.conducted.end()                      ? "(計算の記録なし)"
                                 : (conducted->second & PROBE_BLOCK_FLAG_CHANGED) != 0  ? "変わった"
-                                : (conducted->second & PROBE_BLOCK_FLAG_POSSIBLE) != 0 ? "変わらない・まだ進める"
+                                : (conducted->second & PROBE_BLOCK_FLAG_POSSIBLE) != 0 ? "変わらない・次の刻みも計算"
                                                                                        : "変わらない";
 
             return std::format("    → {} {} {}\n", block, FormatCoordinates(BlockCoordinates(block)), state);

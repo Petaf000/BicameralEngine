@@ -3,7 +3,9 @@
 //
 // データの流れ(1 セル・刻み t):
 //   S(t) の自分のセルと、自分と 6 面の隣の熱のキャッシュ → 面の流れの和をエネルギーから引く(伝導。heat_conduction.hlsli)
-//   → そのセルで反応を評価(reaction.hlsli の RxStepCell)→ S(t + 1) のセルとキャッシュ、変わったか、まだ進める規則があるか
+//   → そのセルで反応を評価(reaction.hlsli の RxStepCellWait。待ちの丸め。ADR-0018・T-0122)
+//   → S(t + 1) のセルとキャッシュ、変わったか、次に評価の要る刻みの印(wakeTick)
+// 刻みと「ブロックが最後に変わった刻み」(tc)は印で渡す(印 = 刻み + 1。0 = 初めの状態 = 刻み 0 の前に変わった。multires.hlsli の MrChangeMark と同じ)。
 // キャッシュ(温度・コンダクタンス・面の係数の上限)はセルから決まる値。コンダクタンスは成分が変わった刻み(反応の候補があった刻み)だけ作り直す。
 #ifndef BICAMERAL_PROBE_WORLD_HLSLI
 #define BICAMERAL_PROBE_WORLD_HLSLI
@@ -28,8 +30,9 @@ PROBE_WORLD_NAMESPACE_BEGIN
 struct ProbeCellStep {
     RxCell cell;
     HcThermalCache cache;
-    uint32_t changed;   // S(t + 1) のセルが S(t) と違えば 1
-    uint32_t possible;  // まだ進める規則があれば 1(次の刻みも計算する)
+    uint32_t changed;  // S(t + 1) のセルが S(t) と違えば 1
+    uint64_t
+        wakeTick;  // 変わらなければ、次に評価の要る刻みの印(進める規則があれば次の刻みの印。進めないなら RX_WAIT_NEVER)
 };
 
 // 反応の乱数の世界のシード
@@ -67,11 +70,18 @@ FX_FN HcThermalCache ProbeMakeCache(Table table, RxCell cell) {
     return HcMakeCache(RxComputeThermal(table, cell), HcCellConductance(table, cell));
 }
 
-// 伝導と反応(06 §2 の段 3・4)。neighbors は −x, +x, −y, +y, −z, +z の順のキャッシュ(格子の外は自分 = 断熱)
+// 刻み tick の印(ブロックが最後に変わった刻み・次に評価の要る刻みに使う。64bit なので一周しない)
+FX_FN uint64_t ProbeChangeMark(uint64_t tick) {
+    return tick + 1;
+}
+
+// 伝導と反応(06 §2 の段 3・4)。neighbors は −x, +x, −y, +y, −z, +z の順のキャッシュ(格子の外は自分 = 断熱)。
+// changedMark = セルのブロックが最後に変わった刻みの印(刻み tick の印より小さい。刻みの初めに読んだ値)
 template <typename Table>
 FX_FN ProbeCellStep ProbeStepCell(Table table, RxCell cell, HcThermalCache self, HcThermalCache minusX,
                                   HcThermalCache plusX, HcThermalCache minusY, HcThermalCache plusY,
-                                  HcThermalCache minusZ, HcThermalCache plusZ, uint64_t tick, uint32_t cellIndex) {
+                                  HcThermalCache minusZ, HcThermalCache plusZ, uint64_t tick, uint64_t changedMark,
+                                  uint32_t cellIndex) {
     // --- 伝導: 面の流れの和(自分 → 隣が正)を引く ---
     const int64_t outflow = HcFaceFlow(self, minusX) + HcFaceFlow(self, plusX) + HcFaceFlow(self, minusY) +
                             HcFaceFlow(self, plusY) + HcFaceFlow(self, minusZ) + HcFaceFlow(self, plusZ);
@@ -87,14 +97,15 @@ FX_FN ProbeCellStep ProbeStepCell(Table table, RxCell cell, HcThermalCache self,
         result.cell = cell;
         result.cache = self;
         result.changed = 0;
-        result.possible = 0;
+        result.wakeTick = RX_WAIT_NEVER;
 
         return result;
     }
     // --- 反応(セルの中で閉じる)---
-    const RxCellStep step = RxStepCell(table, conducted, ProbeWorldSeed(), tick, cellIndex);
+    const RxWaitStep step = RxStepCellWait(table, conducted, ProbeWorldSeed(), ProbeChangeMark(tick), changedMark,
+                                           cellIndex);
     result.cell = step.cell;
-    result.possible = step.possible;
+    result.wakeTick = step.wakeTick;
     result.changed = ProbeSameCell(step.cell, cell) ? 0 : 1;
 
     // 反応で成分が変わったときだけコンダクタンスを作り直す(割り算を減らす。HLSL の ?: は両辺を評価しうるので if で)

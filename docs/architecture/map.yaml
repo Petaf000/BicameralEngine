@@ -80,7 +80,7 @@ views:
           code: "shaders/sim/probe_tick.hlsl::BeginTick", ticket: T-0012 }
       - { id: probeconduct, group: simlib, label: "probe_conduct.hlsl(Work Graph)<br/>WakeBlocks → ConductBlock。熱が広がる所・反応が進む所だけ",
           code: "shaders/sim/probe_conduct.hlsl::TrySchedule", ticket: T-0005, doc: docs/design/06-simulation-loop.md,
-          note: "入力は GPU の活性の一覧(DispatchGraph の GPU の入力)。ConductBlock が伝導 → 反応(T-0089)。変わったか、まだ進めるブロックが次の刻みの一覧へ。WARP はこのグラフを作れない(ADR-0013)" }
+          note: "入力は GPU の活性の一覧(DispatchGraph の GPU の入力)。ConductBlock が伝導 → 反応(T-0089。待ちの丸めは T-0122)。変わったか、次の刻みに評価の要るブロックが次の刻みの一覧へ、ほかは起こす刻みを書いて眠り、適用の単位の WakeDueBlocks が起こす" }
       - { id: probeworld, group: shared, label: "probe_world.hlsli<br/>1 セルの伝導 + 反応・つつき・ハッシュ",
           code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
           note: "GPU(ConductBlock)と CPU リファレンスが同じ関数。熱のキャッシュ(温度・面の係数)はセルから決まる値" }
@@ -501,7 +501,7 @@ views:
       - [probeconduct, probeworld, "1 セルの伝導 + 反応"]
       - [probereference, probeworld, "同じ関数"]
       - [probeworld, heatconduction]
-      - [probeworld, reactionhlsl, "RxStepCell"]
+      - [probeworld, reactionhlsl, "RxStepCellWait"]
       - [probesimtest, replaysession, "記録 → 書く → 読む → 再生"]
       - [probetick, commandqueue]
       - [probetick, eventsort]
@@ -540,7 +540,7 @@ views:
           note: "M1 は熱の伝導だけ(温度の差・物質ごとの伝導率・断熱の箱。反応と同じノード。Work Graph の版だけ。Compute との比較は輸送の本物の段で)" }
       - { id: react, group: sim, label: "4 反応<br/>1 セルの評価(伝導と同じノード)",
           code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
-          note: "核は T-0014(reaction.hlsli)。T-0089 で仮の世界の段に: 伝導の後にその場で評価。遅すぎる反応は 0 なので、進めないブロックは眠れる" }
+          note: "核は T-0014(reaction.hlsli)。T-0089 で仮の世界の段に: 伝導の後にその場で評価。待ちの丸め(ADR-0018・T-0122): 変わらないブロックは次に評価の要る刻みまで眠る(遅い反応もその刻みに起きる)" }
       - { id: physics, group: sim, status: research, label: "5 物理(整数の AVBD)<br/>接触生成 → ソルバー",
           doc: docs/design/08-bodies-physics.md, ticket: T-0092, code: "engine/src/sim/gpu_physics.cpp::GpuPhysics::RecordStep",
           note: "研究 R-PHYS。CPU の世界は T-0016(PhysicsWorld)。GPU の Compute は T-0090(CPU とビット一致)。Work Graphs 版と測って選ぶのは T-0092。世界の刻みへの組み込みは未" }

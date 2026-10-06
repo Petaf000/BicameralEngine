@@ -3,12 +3,14 @@
 // 規則は common/probe_world.hlsli(1 セルの伝導 + 反応)と common/probe_sim.hlsli(活性の取り方)。
 //
 // データの流れ(1 刻み t に DispatchGraph を 1 回。engine/src/sim/probe_sim.cpp の RecordConduct):
-//   活性の一覧 (t & 1)(刻み t − 1 の ConductBlock が足した「変わったブロック」+ 刻み t の適用が足した「つつかれたブロック」)
+//   活性の一覧 (t & 1)(刻み t − 1 の ConductBlock が足した「変わった・次の刻みに評価の要るブロック」+ 刻み t の適用が足した「つつかれたブロック」
+//   + 適用の単位の WakeDueBlocks が足した「次に評価の要る刻みが来たブロック」。待ちの丸め。ADR-0018・T-0122)
 //   → DispatchGraph が一覧を GPU のメモリから入力として読む(D3D12_DISPATCH_MODE_NODE_GPU_INPUT。数は GPU が数えたもの。CPU は知らない)
 //   → WakeBlocks(スレッド起動、1 スレッド = 一覧の 1 件): そのブロックと 6 面の隣を、この刻みでまだ予定していなければ予定する
 //   → ConductBlock(1 レコード = 4³ のブロック = 1 グループ): 世代 (t & 1) のセルと熱のキャッシュを読み、
 //      温度の差で熱を受け渡してから反応を評価し、世代 ((t + 1) & 1) に書く(gather。ADR-0003)。
-//      値が 1 つでも変わったか、まだ進める反応の規則があれば、そのブロックを一覧 ((t + 1) & 1) へ → 次の刻みの入力
+//      値が 1 つでも変わったか、次の刻みに評価が要れば、そのブロックを一覧 ((t + 1) & 1) へ → 次の刻みの入力。
+//      そうでなければ、次に評価の要る刻みの印(セルの最小)を書いて眠らせる(WakeDueBlocks がその刻みに起こす)
 // 1 刻みの中の連鎖の深さは 2 で決まっている(伝播は刻みをまたいで進む。06 §2「深さ 32 まで」に当たらない)。
 // ノードの実行の順番は決まらないが、各ブロックは自分のセルにだけ書き、予定と一覧は順番に依存しない(印は同じ値の上書き、一覧は順不同で
 // 次の刻みの予定にだけ使う)ので、結果は決定的(04 R1〜R8)。整数だけ(D-205)。
@@ -90,7 +92,33 @@ void TraceWakes(uint64_t tick, bool valid, uint32_t block, int3 center) {
 }
 
 groupshared uint32_t g_blockChanged;
-groupshared uint32_t g_blockPossible;
+groupshared uint32_t g_wakeHigh;  // 次に評価の要る刻みの印のブロックの最小(上位・下位 32bit。BlockMinTick)
+groupshared uint32_t g_wakeLow;
+
+// ブロックの 64bit の最小(全部のスレッドが呼ぶ)。上位 32bit の最小を取り、その上位を持つスレッドの下位の最小を取る
+// (どちらも順によらない。64bit の atomic とウェーブの演算を避ける。HW の 64bit の不具合は T-0124。multires_conduct.hlsli の GroupMinTick と同じ形)
+uint64_t BlockMinTick(uint32_t groupIndex, uint64_t value) {
+    if (groupIndex == 0) {
+        g_wakeHigh = 0xFFFFFFFFu;
+        g_wakeLow = 0xFFFFFFFFu;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t high = (uint32_t)(value >> 32);
+    const uint32_t waveHigh = WaveActiveMin(high);
+    if (WaveIsFirstLane())
+        InterlockedMin(g_wakeHigh, waveHigh);
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t low = high == g_wakeHigh ? (uint32_t)value : 0xFFFFFFFFu;
+    const uint32_t waveLow = WaveActiveMin(low);
+    if (WaveIsFirstLane())
+        InterlockedMin(g_wakeLow, waveLow);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    return ((uint64_t)g_wakeHigh << 32) | (uint64_t)g_wakeLow;
+}
 
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める
 // clang-format off
@@ -133,7 +161,7 @@ void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
         TraceWakes(tick, valid, block, center);
 }
 
-// 1 ブロック(4³ セル)の伝導と反応。値が変わったか、まだ進める規則があれば、次の刻みの一覧へ
+// 1 ブロック(4³ セル)の伝導と反応。値が変わったか、次の刻みに評価が要れば、次の刻みの一覧へ。そうでなければ起こす刻みを書く
 [Shader("node")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
@@ -150,11 +178,13 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
 
     if (groupIndex == 0) {
         g_blockChanged = 0;
-        g_blockPossible = 0;
         WgCountLaunch(PROBE_STATS_NODE_CONDUCT, 1);
     }
 
     GroupMemoryBarrierWithGroupSync();
+
+    // ブロックが最後に変わった刻みの印(刻みの初めの値。書くのはこのグループだけで、読んだ後のバリアの後に書く)
+    const uint64_t changedMark = LoadBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block);
 
     // --- 伝導と反応(前の世代の自分と 6 面の隣から)---
     const HcThermalCache self = thermal[current + cellIndex];
@@ -162,28 +192,33 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
         ReactionTable(), cells[current + cellIndex], self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self),
         NeighborOrSelf(current, cell, int3(1, 0, 0), self), NeighborOrSelf(current, cell, int3(0, -1, 0), self),
         NeighborOrSelf(current, cell, int3(0, 1, 0), self), NeighborOrSelf(current, cell, int3(0, 0, -1), self),
-        NeighborOrSelf(current, cell, int3(0, 0, 1), self), tick, cellIndex);
+        NeighborOrSelf(current, cell, int3(0, 0, 1), self), tick, changedMark, cellIndex);
 
     cells[next + cellIndex] = step.cell;
     thermal[next + cellIndex] = step.cache;
 
-    // --- 変わったか・まだ進めるか(ブロックの中で 1 つでも)---
+    // --- 変わったか(ブロックの中で 1 つでも)・次に評価の要る刻み(セルの最小)---
     if (WaveActiveAnyTrue(step.changed != 0) && WaveIsFirstLane())
         InterlockedOr(g_blockChanged, 1);
 
-    if (WaveActiveAnyTrue(step.possible != 0) && WaveIsFirstLane())
-        InterlockedOr(g_blockPossible, 1);
-
-    GroupMemoryBarrierWithGroupSync();
+    const uint64_t wakeTick = BlockMinTick(groupIndex, step.wakeTick);  // 中のバリアで g_blockChanged も出来上がる
     if (groupIndex != 0)
         return;
 
-    if (g_blockChanged != 0 || g_blockPossible != 0)
+    const uint64_t nextMark = ProbeChangeMark(tick + 1);
+    const bool changed = g_blockChanged != 0;
+    const bool possible = wakeTick <= nextMark;
+    if (changed)
+        StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block, ProbeChangeMark(tick));
+
+    // 次の刻みの一覧に足すブロックは、起こす刻みを「無い」にする(WakeDueBlocks と重ならない。次の刻みに計算して書き直す)
+    StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, block, changed || possible ? RX_WAIT_NEVER : wakeTick);
+    if (changed || possible)
         AppendActiveBlock((uint32_t)((tick + 1) & 1), block);
 
     if (GtWantsTick(tick) && TraceWantsBlock(block))
         GtRecord(tick, PROBE_TRACE_CONDUCT, block,
-                 (g_blockChanged != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) | (g_blockPossible != 0 ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
+                 (changed ? PROBE_BLOCK_FLAG_CHANGED : 0) | (possible ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
 }
 
 // clang-format on

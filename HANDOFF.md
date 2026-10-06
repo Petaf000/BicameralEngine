@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-06 / チケット: T-0125 GPU の伝導の段・畳み・影の引き戻しの tc を待ちの丸めに — 完了
+最終更新: 2026-10-06 / チケット: T-0122 仮の世界と覗き窓を待ちの丸めに — 完了(古いコードを消すのは T-0130 に分けた)
 
 ## 状態(3 行以内)
-- GPU の反応は伝導を入れる刻みも含めて全部待ちの丸め(伝導の段に今までの丸めは残していない)。HW(RTX 3070 Ti)・WARP・CPU が毎刻みビット一致
-  (gpu_multires_conduction・_subcycle・_near_fold も)。今までの丸めが残るのは覗き窓(probe_peek。CPU・GPU とも伝導なしの全部を刻む)だけ。
-- 許容差つきで畳んだブロックはつつき、影を引き戻したら影の busyTick = POKED にして、次の刻みに tc を書き直す(CPU・GPU)。次は T-0122。
+- 世界のどこも待ちの丸め(D-429。D-424 は置き換えた): 仮の世界(ProbeStepCell・ConductBlock)はブロックごとの tc と起こす刻みを持ち、適用の単位の後の
+  WakeDueBlocks が起こす刻みの来たブロックを一覧に足す。覗き窓の入れ子も待ちの丸め。HW・WARP・CPU が毎刻みビット一致。
+- 今までの丸めのコード(cutoffRounding・RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION)は誰も使わないまま残っている → T-0130 で消す。
 
 ## 並走で入ったもの: T-0127 木の陰解法を GPU で解く(ブランチ t-0127 から main へ早送りマージ、2026-10-06)
 - 状態: T-0127 完了(範囲を絞った)。木の本物の陰解法の系(T-0119 の CPU が作る)を GPU の GpuImplicit で解いて CPU と毎刻みビット一致
@@ -60,16 +60,12 @@
 - 決めたこと: ADR-0019(近似解の面の流れ + 誤差の判定で止める V サイクル + 安全網)。①との組み合わせは T-0117 で測ってから。
 - 注意: 回数は場の鋭さで変わる(決定的だが費用が一定でない)。D-432 の M2 は方式①のまま。次は T-0117(GPU)。
 
-## 並走で入ったもの: T-0115 世界を待ちの丸めに(CPU。ブランチ t-0115 から main へ早送りマージ、2026-10-06。T-0105 の節を置き換えた)
-- 状態: T-0115 完了(CPU)。多重解像度の CPU は既定で待ちの丸め。GPU は T-0121 で全部を刻む Compute だけ待ちの丸め(WARP で一致)。活性のグラフは T-0124、伝導の段は T-0125 で待ちの丸め。仮の世界・覗き窓は今までの丸め(cutoffRounding。T-0122)。
-- 動いているもの: `-Filter "^multires"`(CPU 7 本)・reaction 5 本・float_check。GPU は下の T-0121。
-- 壊れている/未確認: (T-0121 で確かめた)HW の gpu_multires_* 8 本は T-0115 の見出しの並びのまま通る。
-  (T-0125 で済み)許容差つきで畳んだ時と影の引き戻しで tc を書き直す(つつく)。
-- 決めたこと: ADR-0018 追記(T-0115・T-0121)。
-- 次: T-0124(HW の不具合と活性のグラフ)→ T-0125(伝導・畳み・引き戻し)→ T-0122(仮の世界・古い丸めを消す)→ T-0123。
-- 注意: debug の assert は Windows でダイアログを出してテストが止まる(ランナーの上限 30 分まで固まる。T-0123 でテストの assert を標準エラーに)。
-
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-06、T-0122)**: release で `-Filter "gpu_probe|window_replay"` の 13 本(gpu_probe_sim・_trace・_physics・_physics_compute・_peek の HW と WARP・gpu_probe_fire・window_replay 3 本。約 11 分)、
+  足した試験の後に `-Filter "^gpu_probe_sim(_warp)?$"` が通過。debug で `-Filter "^gpu_probe_(sim|trace|peek)_warp$"`(約 8 分。sim_warp 312 s)が通過。
+  仮の世界と覗き窓のファイルだけ変えたので、多重解像度・反応の CPU のテストと gpu_multires_* は流していない(共有の reaction.hlsli・multires の関数は変えていない)。
+  gpu_probe_sim の「遅い反応」: 一様な木の壁の世界を、待ちで起きるブロックが刻み 2〜39 に 4 つ以上ある最も低い温度(探して 340 K)にし、7 ブロックが待ちの来た刻みに起きて CPU と毎刻み一致。
+  計測は docs/perf.md(T-0122。木箱 3600 刻みの平均 214.6 µs/刻み)。archmap OK。
 - **テスト(2026-10-06、T-0125)**: release で `-Filter "^gpu_multires_(conduction|near_fold)(_warp)?$"`(4 本・約 4 分)と
   `-Filter "^(gpu_multires(_activity|_quiet|_uniform|_subcycle)?(_warp)?|gpu_probe_peek(_warp)?|multires.*|reaction.*|float_check)$"`(23 本・約 23 分。subcycle_warp 448 s)が
   通過(multires_uniform だけ落ちた → 畳みをまずビット単位にして直し、`^(multires|multires_(uniform|conduction|quiet|activity)|gpu_multires_(uniform|near_fold|quiet)(_warp)?)$` の 11 本を流し直して通過)。
@@ -127,6 +123,11 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。ADR-0018 追記〔T-0122〕)仮の世界の tc と起こす刻みはブロック(4³)ごとの 64bit の印(ProbeChangeMark = 刻み + 1)を予定の印のバッファ(u11)の後ろに
+  (ルート署名は変えない)。つつきは tc = 印 − 1。計算したブロックは、変わったら tc = 印、変わったか次の刻みに評価が要れば次の一覧へ(起こす刻み = RX_WAIT_NEVER で
+  WakeDueBlocks と重ならない)、ほかは起こす刻み(セルの最小)を書く。初めの起こす刻みは CPU が作って写す(ProbeInitialBlockWakes: 刻み 0 を tc = 0 で計算してみる)。
+  PROBE_BLOCK_FLAG_POSSIBLE は「次の刻みに評価が要る」に変えた。試験用に ProbeSimOptions::initialWorld・ProbeReference の初めの世界を足した。
+- (Claude が決めた。2 時間の約束)今までの丸めのコードを消す所を T-0130 に分けた(テストの書き直しと release の全部の流し直しで 2 時間を超えるため)。
 - (Claude が決めた。ADR-0018 追記〔T-0125〕)GPU の伝導の段は待ちの丸めだけ(今までの丸めの反応を残さない。1 ノードの反応の核を増やさない)。
   伝導を入れる全部を刻む刻みも先に起こす段 WakeDue。一様なブロックの評価は最初の小刻みの印の段(ConductMarkBlock)、頁のブロックの見出しは
   ConductApplyBlock が CPU の RecordWaitResults と同じに書く(観察の枠も)。64bit の最小は GroupMinTick(上位 → 下位の 32bit 2 回)。次の刻みの種は書かない。
@@ -145,9 +146,16 @@
 - (前のチャット T-0104 の決定は ADR-0015 追記と 17 §5 にある)
 
 ## 次にやること
-NEXT.md の先頭(T-0122 → T-0123)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0130 → T-0123)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **仮の世界の待ちの丸め(T-0122)**: probe_conduct.hlsl の ConductBlock(BlockMinTick で起こす刻みの最小 → tc・起こす刻みを書く)と probe_tick.hlsl の
+  ApplyCommand(つつきの tc)・WakeDueBlocks(probe_sim.cpp の RecordUnit が適用の後に投げる)。印の場所は probe_sim.hlsli の PROBE_SCHEDULE_CHANGED_WORD・_WAKE_WORD。
+  CPU は probe_sim.cpp の ProbeReference::Advance(全部を計算し、ブロックの待ちの最小 ≤ 次の刻みの印を POSSIBLE に)と ProbeInitialBlockWakes。
+  元のテストの世界(木箱と空気)は熱が広がり続けて、1500 刻みでも待ちで起きるブロックが 0 だった。起こす道は gpu_probe_sim の TestSlowWake だけが通る。
+- **T-0130 でやること**: multires_nest の cutoffRounding の道(StepBlocks の evaluated・WakeSeed の cutoff)・gpu_multires の RoundingFlags と Main・StepExpanded の
+  パイプライン(multires_step.hlsl)・MR_STEP_CUTOFF_ROUNDING・reaction.hlsli の RxStepCell 系・reaction_table の EvaluateReactionCell・StepReactionCell・
+  reaction_cells.hlsl(gpu_reaction)・tests(reaction・reaction_contention・multires_activity の比べ・gpu_multires_activity / _conduction の計測の今までの丸め)・map.yaml。
 - **伝導の段の待ちの丸め(T-0125)**: multires_conduct.hlsli の ConductMarkBlock(最初の小刻みに一様なブロックを EvaluatesUniform → EvaluateUniformCells →
   GroupMinTick → FinishWaitBlock か頁の印)と ConductApplyBlock(ApplyCell が MrStepCellWait、最後に FinishWaitBlock)。multires_wait_step.hlsli を含めて
   CurrentChangeMark・MinTick・FinishWaitBlock を使い回す。GroupMinTick は 1 回の段で 1 回だけ呼ぶ(2 回続けるとスレッド 0 の初期化と読みが競合する)。

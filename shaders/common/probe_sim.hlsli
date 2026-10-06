@@ -11,10 +11,10 @@
 //   変わるのはつつき(明示的な湧き出し。刻みごとに数える。D-206)だけ。元素の数は反応でも保存される。
 //   初めの状態(空気の中の木箱)は CPU が作って最初のフレームで写す(sim/probe_sim.cpp の MakeProbeInitialWorld)。
 // 活性(06 §2 段 2): セルを PROBE_BLOCK_SIZE³ のブロックにまとめ、刻み t で計算するのは
-//   「刻み t − 1 で値が変わったブロック・刻み t につつかれたブロック」と、その 6 面の隣だけ(= 予定したブロック)。
-//   「刻み t − 1 でまだ進める反応の規則があったブロック」(反応は乱数で端数を丸めるので、変わらなかった刻みの次も進みうる)。
-//   それ以外のブロックは、自分と隣の値が前の刻みから変わっておらず、どの規則も進めない(遅すぎる反応は 0。reaction.hlsli の
-//   RX_EXTENT_CUTOFF_FRACTION)ので、計算しても結果が変わらない(だから計算しなくてよい)。
+//   「刻み t − 1 で値が変わったブロック・刻み t につつかれたブロック・次に評価の要る刻みが t のブロック」と、その 6 面の隣だけ(= 予定したブロック)。
+//   反応は待ちの丸め(ADR-0018・D-429。T-0122): ブロックが最後に変わった刻み tc から幾何分布の待ちで「次に 1 単位進む刻み」が決まるので、
+//   変わらなかったブロックは「次に評価の要る刻み」(セルの最小)まで眠らせる(遅い反応も、その刻みに起きる)。
+//   それ以外のブロックは、自分と隣の値が前の刻みから変わっておらず、待ちもまだ来ないので、計算しても結果が変わらない(だから計算しなくてよい)。
 //   予定していないブロックは 2 世代とも S(t) と同じ値を持つ(変わった刻みの次の刻みは必ず予定されるので)。
 //   → CPU のリファレンスは全部のセルを毎刻み計算し、GPU の結果とビット一致する(活性の取り方が正しいことの試験になる)。
 // 1 刻み t = 単位の列(06 §4・ADR-0011。単位の間は UAV バリア。フレームの切れ目はどの単位の間にも来てよい):
@@ -170,7 +170,8 @@ PROBE_CONST uint32_t PROBE_HEADER_WORDS = 13;
 // その後にブロックの番号(uint32)の列。同じブロックが 2 度入ってもよい(予定するときに 1 刻み 1 回にまとめる)。
 // 先頭の 1 件は必ず PROBE_NO_BLOCK(何もしない)にして、レコードの数を 0 にしない
 // (WARP は GPU の入力のレコードが 0 件の DispatchGraph で固まった。T-0005。ハードウェアの GPU は 0 件でも動く)。
-// 容量: 伝導は 1 刻みに 1 ブロック 1 回なので「変わった」はブロックの数まで、つつきはキューの容量まで、+ 先頭の 1 件
+// 容量: 伝導は 1 刻みに 1 ブロック 1 回なので「変わった・次の刻みに起こす」はブロックの数まで(起こす刻みの来たブロックは、
+// 前の刻みに一覧へ足したブロックと重ならない。probe_tick.hlsl の WakeDueBlocks)、つつきはキューの容量まで、+ 先頭の 1 件
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_ENTRYPOINT = 0;  // 見出しの語の位置(× 4 バイト)
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_COUNT = 1;
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_ADDRESS = 2;
@@ -181,7 +182,12 @@ PROBE_CONST uint32_t PROBE_NO_BLOCK = 0xFFFFFFFFu;  // 一覧の先頭の「何�
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_BYTES = PROBE_ACTIVE_LIST_HEADER_BYTES + PROBE_ACTIVE_LIST_CAPACITY * 4;
 // 予定の印: ブロックごとに「最後に予定した刻み + 1」の下位 32bit(0 = まだ無い)。刻みごとに消さなくてよい
 // (2^32 刻み = 2 年あまり後に一周して、1 刻みだけ予定を取りこぼしうる。本物の活性の整理(T-0018)で置き換える)
-PROBE_CONST uint32_t PROBE_SCHEDULE_BYTES = PROBE_BLOCK_COUNT * 4;
+// その後ろに、ブロックごとの待ちの丸めの印(ADR-0018。T-0122)を 64bit(下位・上位の 2 語)ずつ:
+//   [PROBE_BLOCK_COUNT, 3 × PROBE_BLOCK_COUNT)  ブロックが最後に変わった刻みの印(tc。初めは 0。つつきは「刻みの直前に変わった」= 刻み t)
+//   [3 × PROBE_BLOCK_COUNT, 5 × PROBE_BLOCK_COUNT)  次に評価の要る刻みの印(一覧に足したブロックは RX_WAIT_NEVER。初めは CPU が作る。sim/probe_sim の ProbeInitialBlockWakes)
+PROBE_CONST uint32_t PROBE_SCHEDULE_CHANGED_WORD = PROBE_BLOCK_COUNT;
+PROBE_CONST uint32_t PROBE_SCHEDULE_WAKE_WORD = PROBE_BLOCK_COUNT * 3;
+PROBE_CONST uint32_t PROBE_SCHEDULE_BYTES = PROBE_BLOCK_COUNT * 5 * 4;
 
 // --- Work Graphs のカウンタ(common/work_graph_stats.hlsli。T-0008)の番号。ProbeSim の GraphStatsLayout(probe_sim.cpp)と同じ順 ---
 PROBE_CONST uint32_t PROBE_STATS_NODE_WAKE = 0;            // WakeBlocks
@@ -199,8 +205,9 @@ PROBE_CONST uint32_t
 PROBE_CONST uint32_t
     PROBE_TRACE_CONDUCT = 3;  // ConductBlock が計算した。主 = ブロック、従 = PROBE_BLOCK_FLAG_* の組み合わせ
 // 計算したブロックの結果(トレースの従・CPU リファレンスの BlockFlags)。どちらかがあれば次の刻みの一覧に入る
-PROBE_CONST uint32_t PROBE_BLOCK_FLAG_CHANGED = 1;   // 値が 1 つでも変わった
-PROBE_CONST uint32_t PROBE_BLOCK_FLAG_POSSIBLE = 2;  // まだ進める反応の規則があった(T-0089)
+PROBE_CONST uint32_t PROBE_BLOCK_FLAG_CHANGED = 1;  // 値が 1 つでも変わった
+PROBE_CONST uint32_t
+    PROBE_BLOCK_FLAG_POSSIBLE = 2;  // 次の刻みに評価が要る(待ちの最小が次の刻みの印以下。T-0089・T-0122)
 
 // 重さの試験(--sim-load)の繰り返しの上限(1 刻みの合計。--sim-split で分けたときは 1 個あたりがこれを分けた数で割ったもの)。
 // これ以上の値は CPU が送らないので、シェーダーの「使わない分岐」は決して通らない

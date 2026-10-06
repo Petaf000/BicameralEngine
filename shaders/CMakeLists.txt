@@ -100,6 +100,7 @@ bicameral_add_shader(sim/debug_ring_graph_probe.hlsl PROFILE lib_6_8)    # 同�
 # 仮の刻みの単位と抽出・コマンドキュー(T-0004・T-0012・T-0086。フレームと刻みのループの確認。中身は T-0005 以降で本物に)。入口ごとに別の .cso
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY EnqueueCommands NAME probe_tick_enqueue)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY ApplyCommands NAME probe_tick_apply)
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY WakeDueBlocks NAME probe_tick_wake_due)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Extract NAME probe_tick_extract)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Busy NAME probe_tick_busy)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY HashCells NAME probe_tick_hash_cells)

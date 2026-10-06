@@ -90,6 +90,19 @@ bool TraceWantsBlock(uint32_t block) {
     return GtWantsPlace(BlockCoordinates(block));
 }
 
+// ブロックごとの 64bit の印(待ちの丸め。firstWord = PROBE_SCHEDULE_CHANGED_WORD か PROBE_SCHEDULE_WAKE_WORD。probe_sim.hlsli)
+uint64_t LoadBlockMark(uint32_t firstWord, uint32_t block) {
+    const uint32_t word = firstWord + block * 2;
+
+    return (uint64_t)blockSchedule[word] | ((uint64_t)blockSchedule[word + 1] << 32);
+}
+
+void StoreBlockMark(uint32_t firstWord, uint32_t block, uint64_t mark) {
+    const uint32_t word = firstWord + block * 2;
+    blockSchedule[word] = (uint32_t)mark;
+    blockSchedule[word + 1] = (uint32_t)(mark >> 32);
+}
+
 // 活性の一覧に 1 ブロック足す(parity = 刻みの偶奇)。容量は probe_sim.hlsli の約束で足りる(超えたら assert)
 void AppendActiveBlock(uint32_t parity, uint32_t block) {
     uint32_t slot;

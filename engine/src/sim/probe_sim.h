@@ -161,6 +161,9 @@ namespace bicameral::sim {
         GpuPhysicsOptions
             physicsOptions;  // 物理の解き方(既定は T-0092 で測った形: 広域と接触は Work Graph・色ごとの解は Compute)
         physics::PxParameters physicsParameters = physics::PxDefaultParameters();
+
+        // 初めの世界(PROBE_CELL_COUNT 個。空なら MakeProbeInitialWorld。試験用。T-0122)。作る時だけ読む(呼んだ後は持たなくてよい)
+        std::span<const reaction::RxCell> initialWorld;
     };
 
     // --- GPU で走らせる ---
@@ -256,7 +259,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool CreatePipelines(ID3D12Device5* device);
         [[nodiscard]] bool CreateConductGraph(ID3D12Device5* device);
         [[nodiscard]] bool CreateBuffers(ID3D12Device5* device);
-        [[nodiscard]] bool CreateWorld(ID3D12Device5* device, const BakedReactionTable& table);
+        [[nodiscard]] bool CreateWorld(ID3D12Device5* device, const BakedReactionTable& table,
+                                       std::span<const reaction::RxCell> initialWorld);
         void RecordInitialization(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] bool CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
         [[nodiscard]] std::expected<void, std::string> CreatePhysics(ID3D12Device5* device);
@@ -290,6 +294,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         ComPtr<ID3D12PipelineState> m_enqueuePipeline;
         ComPtr<ID3D12PipelineState> m_applyPipeline;
+        ComPtr<ID3D12PipelineState> m_wakeDuePipeline;  // 起こす刻みの来たブロックを一覧へ(待ちの丸め。T-0122)
         ComPtr<ID3D12PipelineState> m_busyPipeline;
         ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
         ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
@@ -305,7 +310,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_thermal;  // 2 世代 × PROBE_CELL_COUNT × HcThermalCache
         // 反応の表(物質・規則・索引・速度。既定のヒープ)と、初めの世界・表のアップロード(最初のフレームで写す。以後は使わない)
         std::array<ComPtr<ID3D12Resource>, 4> m_reactionTable;
-        std::array<ComPtr<ID3D12Resource>, 6> m_initialUploads;  // 表 4 つ・セル・キャッシュ(1 世代ぶん。2 世代に写す)
+        // 表 4 つ・セル・キャッシュ(1 世代ぶん。2 世代に写す)・予定の印(初めの起こす刻みの印。ProbeInitialScheduleWords)
+        std::array<ComPtr<ID3D12Resource>, 7> m_initialUploads;
         bool m_initialized = false;
         std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(O2・CO2・炭)
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
@@ -362,7 +368,8 @@ namespace bicameral::sim {
     // 予定のブロックの数は、変わった・まだ進めるブロックの記録から GPU と同じ規則で予想する
     class ProbeReference {
     public:
-        explicit ProbeReference(const BakedReactionTable& table);
+        // initialWorld が空なら MakeProbeInitialWorld(ProbeSimOptions::initialWorld と同じ)
+        explicit ProbeReference(const BakedReactionTable& table, std::span<const reaction::RxCell> initialWorld = {});
 
         // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導と反応)
         void Advance(uint64_t tick, std::span<const ProbeCommand> commands);
@@ -379,6 +386,9 @@ namespace bicameral::sim {
         // 最後の Advance で GPU が伝導と反応を計算するはずのブロックの数
         [[nodiscard]] uint32_t ScheduledBlocks() const { return m_scheduledBlocks; }
 
+        // 最後の Advance で、待ちが来て起きたブロック(前の刻みに計算しなかったのに評価が要る。GPU の WakeDueBlocks が一覧に足す数)
+        [[nodiscard]] uint32_t WokenBlocks() const { return m_wokenBlocks; }
+
         // 最後の Advance の、ブロックごとの結果(PROBE_BLOCK_COUNT 個の PROBE_BLOCK_FLAG_* の組み合わせ。0 でなければ次の刻みの予定の種。
         // トレースの予想に使う。sim/probe_trace.h)
         [[nodiscard]] std::span<const uint8_t> BlockFlags() const { return m_blockFlags; }
@@ -388,9 +398,21 @@ namespace bicameral::sim {
         std::vector<reaction::RxCell> m_cells;           // 2 世代 × PROBE_CELL_COUNT(GPU と同じ並び)
         std::vector<reaction::HcThermalCache> m_caches;  // 同じ並びの熱のキャッシュ
         std::vector<uint8_t> m_blockFlags;               // 前の刻みのブロックごとの結果(PROBE_BLOCK_COUNT)
+        std::vector<uint64_t> m_changedMarks;  // ブロックが最後に変わった刻みの印(tc。待ちの丸め。PROBE_BLOCK_COUNT)
+        std::vector<uint8_t> m_scheduled;      // 最後の Advance で予定したブロック(PROBE_BLOCK_COUNT)
         uint64_t m_sourceEnergy = 0;
         uint32_t m_scheduledBlocks = 0;
+        uint32_t m_wokenBlocks = 0;
     };
+
+    // ブロックごとの初めの起こす刻みの印(待ちの丸め。ADR-0018・T-0122): 刻み 0 を tc = 0 で計算してみて、変わるブロックは刻み 0 の印、
+    // 変わらないブロックはセルの次に評価の要る刻みの最小(刻み 0 を計算しなくても同じ結果になる)
+    [[nodiscard]] std::vector<uint64_t> ProbeInitialBlockWakes(const BakedReactionTable& table,
+                                                               std::span<const reaction::RxCell> cells);
+
+    // 予定の印のバッファ(PROBE_SCHEDULE_BYTES)の初めの中身: 予定と tc は 0、起こす刻みは ProbeInitialBlockWakes
+    [[nodiscard]] std::vector<uint32_t> ProbeInitialScheduleWords(const BakedReactionTable& table,
+                                                                  std::span<const reaction::RxCell> cells);
 
     // 状態のハッシュ = Σ ProbeCellHash(セルの番号, セル)(mod 2^64)。GPU のハッシュの単位と同じ値になる
     [[nodiscard]] uint64_t ProbeStateHash(std::span<const reaction::RxCell> cells);

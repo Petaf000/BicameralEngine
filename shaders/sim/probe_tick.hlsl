@@ -98,7 +98,9 @@ void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
     uint64_t original;
     hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SOURCE, (uint64_t)energy, original);
 
+    // つついたブロックは「刻みの直前に変わった」(tc = 刻み t の印 − 1。待ちの丸め。ADR-0018・T-0122)
     const uint32_t block = ProbeBlockOfCell(cell.x, cell.y, cell.z);
+    StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block, ProbeChangeMark(tick) - 1);
     AppendActiveBlock((uint32_t)(tick & 1), block);
     EmitTickEvent(PROBE_EVENT_POKE_APPLIED, ProbePokePlace(cell.x, cell.y, cell.z));
 
@@ -233,6 +235,19 @@ void SortEventKeys(uint32_t thread) {
     const uint32_t countAddress = PROBE_ACTIVE_LIST_COUNT * 4;
     WgGaugePeak(PROBE_STATS_GAUGE_ACTIVE_LIST,
                 (tick & 1) == 0 ? activeList0.Load(countAddress) : activeList1.Load(countAddress));
+}
+
+// --- [0] の続き: 次に評価の要る刻みが来たブロックを、この刻みの一覧へ(1 スレッド = 1 ブロック。待ちの丸め。ADR-0018・T-0122)---
+// 起こす刻みの印はブロックを計算した ConductBlock が書く(次の刻みの一覧に足したブロックは RX_WAIT_NEVER なので、ここで重ならない)。
+// 一覧の中の順は結果に効かない(予定は 1 刻みに 1 回にまとめる)
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void WakeDueBlocks(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t block = dispatchThreadId.x;
+    if (block >= PROBE_BLOCK_COUNT)
+        return;
+
+    const uint64_t tick = CurrentTick();
+    if (LoadBlockMark(PROBE_SCHEDULE_WAKE_WORD, block) <= ProbeChangeMark(tick))
+        AppendActiveBlock((uint32_t)(tick & 1), block);
 }
 
 // --- [1] 伝導は Work Graph(sim/probe_conduct.hlsl)---

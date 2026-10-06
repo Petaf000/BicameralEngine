@@ -129,6 +129,7 @@ namespace {
         bool energyConserved = true;    // エネルギーの合計が、つつきで足した分だけ変わった(伝導と反応では変わらない)
         bool elementsConserved = true;  // 元素ごとの数が S(0) と同じ
         bool reacted = false;           // 反応が起きた(炭ができた)
+        uint64_t wokenBlocks = 0;       // 待ちが来て起きたブロックの合計(GPU の WakeDueBlocks。待ちの丸め。T-0122)
     };
 
     // 全部のセルの元素ごとの数
@@ -143,8 +144,9 @@ namespace {
         return total;
     }
 
-    Reference RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands) {
-        ProbeReference reference(table);
+    Reference RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands,
+                           std::span<const reaction::RxCell> world = {}) {
+        ProbeReference reference(table, world);
         Reference result;
         result.ticks.push_back(
             {.tick = 0, .hash = ProbeStateHash(reference.State(0)), .energy = ProbeEnergySum(reference.State(0))});
@@ -159,6 +161,7 @@ namespace {
                                     .sourceEnergy = reference.SourceEnergy(),
                                     .scheduledBlocks = reference.ScheduledBlocks()});
 
+            result.wokenBlocks += reference.WokenBlocks();
             result.energyConserved = result.energyConserved &&
                                      result.ticks.back().energy == result.ticks[tick].energy + reference.SourceEnergy();
         }
@@ -435,9 +438,9 @@ namespace {
                                views::transform([](const ProbeTickHash& tick) { return tick.scheduledBlocks; });
 
         Log(Channel::Sim, Level::Info,
-            "CPU リファレンス: S({}) = {:016x}  エネルギー {} mJ  計算したブロック 最大 {} / {}", TOTAL_TICKS,
-            expected.ticks.back().hash, static_cast<int64_t>(expected.ticks.back().energy), rng::max(scheduled),
-            PROBE_BLOCK_COUNT);
+            "CPU リファレンス: S({}) = {:016x}  エネルギー {} mJ  計算したブロック 最大 {} / {}  待ちが来て起きた {}",
+            TOTAL_TICKS, expected.ticks.back().hash, static_cast<int64_t>(expected.ticks.back().energy),
+            rng::max(scheduled), PROBE_BLOCK_COUNT, expected.wokenBlocks);
 
         failures.Check(expected.energyConserved,
                        "CPU リファレンス: エネルギーの合計はつつきの分だけ変わる(伝導と反応で保存)");
@@ -548,6 +551,64 @@ namespace {
         failures.Check(replayed.events == recorded.events, "再生: イベントの列も記録と同じ");
     }
 
+    // --- 待ちの丸め(T-0122): 眠っているブロックが、遅い反応の待ちが来た刻みに起きる ---
+
+    // 一様な木の壁のセル(木・O2・N2)の世界。全部同じセルなので熱は流れない
+    std::vector<reaction::RxCell> MakeUniformWallWorld(const BakedReactionTable& table,
+                                                       int32_t temperatureMillikelvin) {
+        const std::array<SpeciesAmount, 3> wall = {
+            SpeciesAmount{.species = table.SpeciesId("cellulose"), .amount = 38600000},
+            SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = 983000},
+            SpeciesAmount{.species = table.SpeciesId("nitrogen"), .amount = 3697000}};
+
+        return std::vector<reaction::RxCell>(PROBE_CELL_COUNT, MakeReactionCell(table, wall, temperatureMillikelvin));
+    }
+
+    // 刻み 2〜TOTAL_TICKS − 1 に待ちが来て起きるブロックが SLOW_WAKE_MIN_BLOCKS 個以上ある、最も低い温度(300 K から 10 K ずつ)
+    constexpr int64_t SLOW_WAKE_MIN_BLOCKS = 4;
+
+    std::optional<int32_t> FindSlowWakeTemperature(const BakedReactionTable& table) {
+        for (int32_t kelvin = 300; kelvin <= 1500; kelvin += 10) {
+            const int32_t millikelvin = kelvin * 1000;
+            const std::vector<uint64_t> wakes = ProbeInitialBlockWakes(table, MakeUniformWallWorld(table, millikelvin));
+            const auto due = rng::count_if(wakes, [](uint64_t wake) {
+                return wake >= ProbeChangeMark(2) && wake <= ProbeChangeMark(TOTAL_TICKS - 1);
+            });
+            if (due >= SLOW_WAKE_MIN_BLOCKS)
+                return millikelvin;
+        }
+
+        return std::nullopt;
+    }
+
+    // 遅い反応だけが起きる世界を GPU で 1 刻みずつ走らせ、毎刻み CPU と一致する(待ちが来て起きたブロックが 1 つ以上ある)
+    void TestSlowWake(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
+        const std::optional<int32_t> temperature = FindSlowWakeTemperature(table);
+        failures.Check(temperature.has_value(), "待ちの丸め: 遅い反応が数十刻みで起きる温度がある");
+        if (!temperature)
+            return;
+
+        const std::vector<reaction::RxCell> world = MakeUniformWallWorld(table, *temperature);
+        const Reference expected = RunReference(table, {}, world);
+        const Plan plan{.name = "遅い反応",
+                        .options = {.initialWorld = world},
+                        .unitsPerFrame = std::vector<uint32_t>(TOTAL_TICKS, PROBE_FIXED_UNITS_PER_TICK)};
+        const RunResult result = RunPlan(device, table, plan,
+                                         [](size_t, uint64_t, uint32_t) { return std::vector<ProbeCommand>{}; });
+
+        Log(Channel::Sim, Level::Info, "遅い反応({} K): S({}) = {:016x}  待ちが来て起きた {}  GPU S({}) = {:016x}",
+            *temperature / 1000, TOTAL_TICKS, expected.ticks.back().hash, expected.wokenBlocks,
+            result.hashes.empty() ? 0 : result.hashes.back().tick,
+            result.hashes.empty() ? 0 : result.hashes.back().hash);
+
+        failures.Check(expected.wokenBlocks > 0, "待ちの丸め: 眠っていたブロックが待ちの来た刻みに起きた(CPU)");
+        failures.Check(expected.energyConserved && expected.elementsConserved,
+                       "待ちの丸め: エネルギーと元素の数が保存される(CPU)");
+        failures.Check(result.ok && HashesMatch(result.hashes, expected),
+                       "待ちの丸め: 刻みごとのハッシュと計算したブロックの数が CPU と一致");
+        failures.Check(result.extractionHash == expected.extractionHash, "待ちの丸め: 最後の抽出が CPU と一致");
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -579,6 +640,7 @@ int main(int argc, char** argv) {
     TestFramings(device->Get(), *table, failures);
     TestEventOverflow(device->Get(), *table, failures);
     TestRecordAndReplay(device->Get(), *table, failures);
+    TestSlowWake(device->Get(), *table, failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");
     const bool passed = failures.count == 0 && passesValidation;

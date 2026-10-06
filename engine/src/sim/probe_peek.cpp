@@ -132,8 +132,7 @@ namespace bicameral::sim {
         }
 
         if (plan.step)
-            m_nest.RecordStep(list, context.debugRing, ProbeWorldSeed(), context.tick,
-                              {.cutoffRounding = true});  // T-0122 で消す
+            m_nest.RecordStep(list, context.debugRing, ProbeWorldSeed(), context.tick);
 
         if (plan.pullBack)
             m_nest.RecordPullBack(list, context.debugRing, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT);
@@ -175,9 +174,9 @@ namespace bicameral::sim {
                               PeekPointOfCell(plan.cell));
         }
 
-        // 仮の世界と GPU の覗き窓はまだ今までの丸め(RxStepCell)なので、同じ丸めで刻む(T-0115。T-0122 で待ちの丸めに)
+        // 反応は待ちの丸め(ADR-0018。仮の世界と同じ。T-0122)
         if (plan.step)
-            StepNest(m_nest, *m_table, ProbeWorldSeed(), tick, {.cutoffRounding = true});
+            StepNest(m_nest, *m_table, ProbeWorldSeed(), tick);
 
         if (plan.pullBack)
             PullBackShadowChain(m_nest, *m_table, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT);

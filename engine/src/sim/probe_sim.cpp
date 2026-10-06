@@ -48,6 +48,7 @@ namespace bicameral::sim {
         constexpr uint32_t SLICE_BYTES = PROBE_SLICE_CELL_COUNT * 4;
         constexpr uint32_t BUSY_GROUPS = PROBE_GRID_SIZE / PROBE_GROUP_SIZE;
         constexpr uint32_t LINEAR_CELL_GROUPS = PROBE_CELL_COUNT / PROBE_LINEAR_GROUP_SIZE;
+        constexpr uint32_t BLOCK_GROUPS = (PROBE_BLOCK_COUNT + PROBE_LINEAR_GROUP_SIZE - 1) / PROBE_LINEAR_GROUP_SIZE;
         constexpr uint32_t EXTRACTION_BYTES = PROBE_EXTRACTION_WORDS * 4;
 
         // 活性の一覧の見出しは D3D12_NODE_GPU_INPUT そのもの(DispatchGraph が GPU のメモリから読む。probe_sim.hlsli)
@@ -197,7 +198,9 @@ namespace bicameral::sim {
         if (!sim.CreateBuffers(device))
             return std::unexpected("仮の刻みのバッファを作れない");
 
-        if (!sim.CreateWorld(device, table))
+        // 初めの世界は作る時だけ使う(呼んだ側が持つ)
+        sim.m_options.initialWorld = {};
+        if (!sim.CreateWorld(device, table, options.initialWorld))
             return std::unexpected("仮の世界(反応の表・初めのセル)を作れない");
 
         if (!sim.CreateFrameSlots(device, listType))
@@ -217,13 +220,14 @@ namespace bicameral::sim {
         ID3D12RootSignature* root = m_rootSignature.Get();
         m_enqueuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_enqueue.cso");
         m_applyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_apply.cso");
+        m_wakeDuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_wake_due.cso");
         m_busyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_busy.cso");
         m_hashCellsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_cells.cso");
         m_flushEventsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_flush_events.cso");
         m_extractPipeline = LoadComputePipeline(device, root, "sim/probe_tick_extract.cso");
 
-        return m_enqueuePipeline && m_applyPipeline && m_busyPipeline && m_hashCellsPipeline && m_flushEventsPipeline &&
-               m_extractPipeline && CreateConductGraph(device);
+        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_busyPipeline && m_hashCellsPipeline &&
+               m_flushEventsPipeline && m_extractPipeline && CreateConductGraph(device);
     }
 
     // 伝導の Work Graph(WakeBlocks → ConductBlock)。compute と同じルート署名をグローバルのルート署名にする
@@ -257,7 +261,8 @@ namespace bicameral::sim {
         if (!m_cells || !m_thermal || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents || !m_blockSchedule)
             return false;
 
-        m_blockSchedule->SetName(L"ProbeSim.blockSchedule");  // 作った時は 0(まだ予定していない)
+        m_blockSchedule->SetName(
+            L"ProbeSim.blockSchedule");  // 最初のフレームで初めの中身を写す(ProbeInitialScheduleWords)
         // 活性の一覧: 作った時は 0(空。見出しは刻みの適用の単位が毎刻み書く)
         for (uint32_t parity = 0; parity < 2; ++parity) {
             m_activeLists[parity] = gpu::CreateBuffer(device, PROBE_ACTIVE_LIST_BYTES,
@@ -307,19 +312,26 @@ namespace bicameral::sim {
     }
 
     // 反応の表(既定のヒープ)と、表・初めの世界のアップロード。写すのは最初のフレーム(RecordInitialization)
-    bool ProbeSim::CreateWorld(ID3D12Device5* device, const BakedReactionTable& table) {
-        const std::vector<reaction::RxCell> cells = MakeProbeInitialWorld(table);
+    bool ProbeSim::CreateWorld(ID3D12Device5* device, const BakedReactionTable& table,
+                               std::span<const reaction::RxCell> initialWorld) {
+        FX_ASSERT(initialWorld.empty() || initialWorld.size() == PROBE_CELL_COUNT);
+        const std::vector<reaction::RxCell> cells = initialWorld.empty()
+                                                        ? MakeProbeInitialWorld(table)
+                                                        : std::vector<reaction::RxCell>(initialWorld.begin(),
+                                                                                        initialWorld.end());
         std::vector<reaction::HcThermalCache> caches;
         caches.reserve(cells.size());
         for (const reaction::RxCell& cell : cells)
             caches.push_back(ProbeMakeCache(table.View(), cell));
 
-        m_initialUploads = {CreateFilledUpload(device, table.species, L"ProbeSim.upload.species"),
-                            CreateFilledUpload(device, table.rules, L"ProbeSim.upload.rules"),
-                            CreateFilledUpload(device, table.ruleIndex, L"ProbeSim.upload.ruleIndex"),
-                            CreateFilledUpload(device, table.rates, L"ProbeSim.upload.rates"),
-                            CreateFilledUpload(device, cells, L"ProbeSim.upload.cells"),
-                            CreateFilledUpload(device, caches, L"ProbeSim.upload.thermal")};
+        m_initialUploads = {
+            CreateFilledUpload(device, table.species, L"ProbeSim.upload.species"),
+            CreateFilledUpload(device, table.rules, L"ProbeSim.upload.rules"),
+            CreateFilledUpload(device, table.ruleIndex, L"ProbeSim.upload.ruleIndex"),
+            CreateFilledUpload(device, table.rates, L"ProbeSim.upload.rates"),
+            CreateFilledUpload(device, cells, L"ProbeSim.upload.cells"),
+            CreateFilledUpload(device, caches, L"ProbeSim.upload.thermal"),
+            CreateFilledUpload(device, ProbeInitialScheduleWords(table, cells), L"ProbeSim.upload.blockSchedule")};
 
         constexpr std::array<const wchar_t*, 4> TABLE_NAMES = {L"ProbeSim.species", L"ProbeSim.rules",
                                                                L"ProbeSim.ruleIndex", L"ProbeSim.rates"};
@@ -337,7 +349,7 @@ namespace bicameral::sim {
 
         m_viewSpecies = ProbeViewSpecies(table);
 
-        return m_initialUploads[4] && m_initialUploads[5];
+        return m_initialUploads[4] && m_initialUploads[5] && m_initialUploads[6];
     }
 
     // 最初のフレームの始め: 表と初めの世界(2 世代とも同じ S(0))を既定のヒープへ写す。
@@ -355,8 +367,10 @@ namespace bicameral::sim {
                                    THERMAL_BYTES);
         }
 
+        list->CopyBufferRegion(m_blockSchedule.Get(), 0, m_initialUploads[6].Get(), 0, PROBE_SCHEDULE_BYTES);
+
         std::vector<D3D12_RESOURCE_BARRIER> barriers;
-        barriers.reserve(m_reactionTable.size() + 2);
+        barriers.reserve(m_reactionTable.size() + 3);
         for (const ComPtr<ID3D12Resource>& buffer : m_reactionTable) {
             barriers.push_back(gpu::Transition(buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
@@ -366,6 +380,8 @@ namespace bicameral::sim {
             gpu::Transition(m_cells.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
         barriers.push_back(
             gpu::Transition(m_thermal.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+        barriers.push_back(gpu::Transition(m_blockSchedule.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         m_initialized = true;
     }
@@ -635,6 +651,11 @@ namespace bicameral::sim {
             // コマンドの適用は 1 スレッドがキューの先頭から番号順に(probe_tick.hlsl)。刻みの一覧と表の欄の用意も
             list->SetPipelineState(m_applyPipeline.Get());
             list->Dispatch(1, 1, 1);
+
+            // 起こす刻みの来たブロックを同じ一覧へ(適用が一覧の見出しを整えた後。待ちの丸め。T-0122)
+            list->ResourceBarrier(1, &allUavs);
+            list->SetPipelineState(m_wakeDuePipeline.Get());
+            list->Dispatch(BLOCK_GROUPS, 1, 1);
         } else if (unit == PROBE_UNIT_CONDUCT)
             RecordConduct(list, input, tick);
         else if (m_physics && unit == PROBE_UNIT_PHYSICS)
@@ -915,15 +936,26 @@ namespace bicameral::sim {
             }
         }
 
-        // seeds(ブロックごとの 0/1)のブロックと 6 面の隣の数(GPU の WakeBlocks が予定する数)
-        uint32_t CountScheduledBlocks(std::span<const uint8_t> seeds) {
+        // seeds(ブロックごとの 0/1)のブロックと 6 面の隣(GPU の WakeBlocks が予定するブロック)
+        std::vector<uint8_t> ScheduleBlocks(std::span<const uint8_t> seeds) {
             std::vector<uint8_t> scheduled(PROBE_BLOCK_COUNT, 0);
             for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
                 if (seeds[block] != 0)
                     MarkWithNeighbors(scheduled, block);
             }
 
-            return static_cast<uint32_t>(rng::count(scheduled, uint8_t{1}));
+            return scheduled;
+        }
+
+        // 前の刻みに計算しなかった(GPU では眠っていた)のに、この刻みに評価が要るブロック = GPU の WakeDueBlocks が起こすブロックの数
+        uint32_t CountWokenBlocks(std::span<const uint8_t> flags, std::span<const uint8_t> previousScheduled) {
+            uint32_t woken = 0;
+            for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
+                if ((flags[block] & PROBE_BLOCK_FLAG_POSSIBLE) != 0 && previousScheduled[block] == 0)
+                    ++woken;
+            }
+
+            return woken;
         }
 
         // 1 世代のセルとキャッシュ
@@ -932,9 +964,11 @@ namespace bicameral::sim {
             reaction::HcThermalCache* caches;
         };
 
-        // 刻み tick のつつきを current に適用し、つついたブロックに印を付ける(GPU と同じく並びの順に)。足したエネルギーを返す
+        // 刻み tick のつつきを current に適用し、つついたブロックに印を付ける(GPU と同じく並びの順に)。足したエネルギーを返す。
+        // つついたブロックは「刻みの直前に変わった」(tc = 刻み tick の印 − 1。probe_tick.hlsl の ApplyCommand と同じ)
         uint64_t ApplyPokes(const ReactionTableView& table, ReferenceGeneration current, uint64_t tick,
-                            std::span<const ProbeCommand> commands, std::vector<uint8_t>& seeds) {
+                            std::span<const ProbeCommand> commands, std::vector<uint8_t>& seeds,
+                            std::vector<uint64_t>& changedMarks) {
             uint64_t source = 0;
             for (const ProbeCommand& command : commands) {
                 if (command.targetTick != tick || command.type != PROBE_COMMAND_TYPE_POKE)
@@ -952,6 +986,7 @@ namespace bicameral::sim {
                 current.caches[index] = ProbeMakeCache(table, current.cells[index]);
                 source += static_cast<uint64_t>(energy);
                 seeds[ProbeBlockOfCell(x, y, z)] = 1;
+                changedMarks[ProbeBlockOfCell(x, y, z)] = ProbeChangeMark(tick) - 1;
             }
 
             return source;
@@ -959,7 +994,7 @@ namespace bicameral::sim {
 
         // 1 セルの伝導と反応(GPU の ConductBlock と同じ。格子の外の面は自分を渡す = 断熱)
         ProbeCellStep ReferenceStepCell(const ReactionTableView& table, ReferenceGeneration current, uint32_t index,
-                                        uint64_t tick) {
+                                        uint64_t tick, uint64_t changedMark) {
             const uint32_t x = index % PROBE_GRID_SIZE;
             const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
             const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
@@ -972,14 +1007,71 @@ namespace bicameral::sim {
 
             return ProbeStepCell(table, current.cells[index], self, at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z),
                                  at(y > 0, x, y - 1, z), at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1),
-                                 at(z < LAST, x, y, z + 1), tick, index);
+                                 at(z < LAST, x, y, z + 1), tick, changedMark, index);
+        }
+
+        uint32_t BlockOfCellIndex(uint32_t index) {
+            return ProbeBlockOfCell(index % PROBE_GRID_SIZE, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE,
+                                    index / PROBE_SLICE_CELL_COUNT);
         }
 
     }  // namespace
 
-    ProbeReference::ProbeReference(const BakedReactionTable& table)
-        : m_table(&table), m_blockFlags(PROBE_BLOCK_COUNT, 0) {
-        const std::vector<reaction::RxCell> initial = MakeProbeInitialWorld(table);
+    std::vector<uint64_t> ProbeInitialBlockWakes(const BakedReactionTable& table,
+                                                 std::span<const reaction::RxCell> cells) {
+        FX_ASSERT(cells.size() == PROBE_CELL_COUNT);
+
+        // 刻み 0 を tc = 0 で全部計算してみる(結果は捨てる)。変わるセルがあるブロックは刻み 0 に計算が要る(印 = 刻み 0 の印)。
+        // 変わらないブロックは、刻み 0 を計算しなくても同じなので、セルが返す次に評価の要る刻みの最小
+        const ReactionTableView view = table.View();
+        std::vector<reaction::RxCell> trialCells(cells.begin(), cells.end());
+        std::vector<reaction::HcThermalCache> caches;
+        caches.reserve(cells.size());
+        for (const reaction::RxCell& cell : cells)
+            caches.push_back(ProbeMakeCache(view, cell));
+
+        const ReferenceGeneration initial{.cells = trialCells.data(), .caches = caches.data()};
+        std::vector<uint64_t> wakes(PROBE_BLOCK_COUNT, reaction::RX_WAIT_NEVER);
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            const ProbeCellStep step = ReferenceStepCell(view, initial, index, 0, 0);
+            uint64_t& wake = wakes[BlockOfCellIndex(index)];
+            wake = std::min(wake, step.changed != 0 ? ProbeChangeMark(0) : step.wakeTick);
+        }
+
+        return wakes;
+    }
+
+    std::vector<uint32_t> ProbeInitialScheduleWords(const BakedReactionTable& table,
+                                                    std::span<const reaction::RxCell> cells) {
+        std::vector<uint32_t> words(PROBE_SCHEDULE_BYTES / 4, 0);
+        const std::vector<uint64_t> wakes = ProbeInitialBlockWakes(table, cells);
+        for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
+            const uint32_t word = PROBE_SCHEDULE_WAKE_WORD + (block * 2);
+            words[word] = static_cast<uint32_t>(wakes[block]);
+            words[word + 1] = static_cast<uint32_t>(wakes[block] >> 32);
+        }
+
+        return words;
+    }
+
+    ProbeReference::ProbeReference(const BakedReactionTable& table, std::span<const reaction::RxCell> initialWorld)
+        : m_table(&table),
+          m_blockFlags(PROBE_BLOCK_COUNT, 0),
+          m_changedMarks(PROBE_BLOCK_COUNT, 0),
+          m_scheduled(PROBE_BLOCK_COUNT, 0) {
+        FX_ASSERT(initialWorld.empty() || initialWorld.size() == PROBE_CELL_COUNT);
+        const std::vector<reaction::RxCell> initial = initialWorld.empty()
+                                                          ? MakeProbeInitialWorld(table)
+                                                          : std::vector<reaction::RxCell>(initialWorld.begin(),
+                                                                                          initialWorld.end());
+
+        // 刻み 0 の予定の種: 初めの起こす刻みが刻み 0 の印以下のブロック(GPU の WakeDueBlocks と同じ)
+        const std::vector<uint64_t> wakes = ProbeInitialBlockWakes(table, initial);
+        for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
+            if (wakes[block] <= ProbeChangeMark(0))
+                m_blockFlags[block] = static_cast<uint8_t>(PROBE_BLOCK_FLAG_POSSIBLE);
+        }
+
         m_cells.reserve(size_t{PROBE_CELL_COUNT} * 2);
         m_cells.insert(m_cells.end(), initial.begin(), initial.end());
         m_cells.insert(m_cells.end(), initial.begin(), initial.end());
@@ -996,22 +1088,34 @@ namespace bicameral::sim {
         const ReferenceGeneration current{.cells = m_cells.data() + currentBase,
                                           .caches = m_caches.data() + currentBase};
 
-        // (1) コマンドの適用。つついたブロックは、前の刻みで変わった・進めたブロックと同じく予定の種になる
+        // (1) コマンドの適用。つついたブロックは、前の刻みで変わった・次の刻みに評価の要るブロックと同じく予定の種になる
         std::vector<uint8_t> seeds = m_blockFlags;
-        m_sourceEnergy = ApplyPokes(table, current, tick, commands, seeds);
-        m_scheduledBlocks = CountScheduledBlocks(seeds);
+        m_sourceEnergy = ApplyPokes(table, current, tick, commands, seeds, m_changedMarks);
+        m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
+        m_scheduled = ScheduleBlocks(seeds);
+        m_scheduledBlocks = static_cast<uint32_t>(rng::count(m_scheduled, uint8_t{1}));
 
-        // (2) 伝導と反応(全部のセル)と、変わった・まだ進めるブロックの記録(次の刻みの予定の種)
-        rng::fill(m_blockFlags, uint8_t{0});
+        // (2) 伝導と反応(全部のセル。tc は刻みの初めの値)と、ブロックごとの変わったか・次に評価の要る刻みの最小
+        std::vector<uint8_t> changed(PROBE_BLOCK_COUNT, 0);
+        std::vector<uint64_t> wakes(PROBE_BLOCK_COUNT, reaction::RX_WAIT_NEVER);
         for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
-            const ProbeCellStep step = ReferenceStepCell(table, current, index, tick);
+            const uint32_t block = BlockOfCellIndex(index);
+            const ProbeCellStep step = ReferenceStepCell(table, current, index, tick, m_changedMarks[block]);
             m_cells[nextBase + index] = step.cell;
             m_caches[nextBase + index] = step.cache;
 
-            const uint32_t block = ProbeBlockOfCell(
-                index % PROBE_GRID_SIZE, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE, index / PROBE_SLICE_CELL_COUNT);
-            m_blockFlags[block] |= static_cast<uint8_t>((step.changed != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) |
-                                                        (step.possible != 0 ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
+            changed[block] |= static_cast<uint8_t>(step.changed);
+            wakes[block] = std::min(wakes[block], step.wakeTick);
+        }
+
+        // (3) 次の刻みの予定の種(GPU の ConductBlock と同じ。眠っているブロックの起こす刻みは、計算し直しても同じ値になる)
+        for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
+            if (changed[block] != 0)
+                m_changedMarks[block] = ProbeChangeMark(tick);
+
+            const bool possible = wakes[block] <= ProbeChangeMark(tick + 1);
+            m_blockFlags[block] = static_cast<uint8_t>((changed[block] != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) |
+                                                       (possible ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
         }
     }
 
