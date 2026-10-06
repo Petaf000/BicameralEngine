@@ -47,7 +47,7 @@
 ## 動いているもの(確認方法つき)
 - **テスト(2026-10-06、T-0124)**: release で `-Filter "^(gpu_multires(_activity|_quiet|_uniform|_conduction|_near_fold)?(_warp)?|gpu_probe_peek(_warp)?)$"` の 14 本が通過(約 11 分。
   gpu_multires・活性・静か・一様は HW も WARP も待ちの丸めで比べる。伝導・near_fold・覗き窓は今までの丸め)。debug で `-Filter "^(reaction.*|multires.*|float_check|gpu_multires(_activity)?(_warp)?)$"`: CPU の reaction 3 本・multires 7 本(subcycle 524 s)・gpu_multires_warp・gpu_multires_activity(HW・GBV あり 188 s)・_activity_warp が通過、
-  **gpu_multires(HW・GBV あり)は失敗なしのまま 600 s の上限で切れた**(場面ごとに約 80 s。HW も待ちの丸めにして重くなった)→ TIMEOUT 1200 にした(流し直していない)。
+  **gpu_multires(HW・GBV あり)は失敗なしのまま 600 s の上限で切れた**(場面ごとに約 80 s。HW も待ちの丸めにして重くなった)→ TIMEOUT 1200 にして流し直し、通過(538 s)。
   GBV なしの debug の HW では gpu_multires・gpu_multires_activity とも待ちの丸めで通る(-Od の確認で流した)。
   subcycle の GPU(伝導だけ。反応の式を変えていない)と gpu_multires_implicit は流していない。archmap OK。tidy(release)は 1 件: gpu_multires.cpp の CreatePipelines が
   readability-function-size(このチケットでは触っていない。T-0121 でパイプラインを足した時からと推定。分けるのは次に gpu_multires.cpp を触る時)。
