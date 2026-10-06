@@ -19,8 +19,12 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // GPU はまだ今までの丸め(RxStepCell・D-424 の下限)なので、比べる CPU リファレンスもそちらで刻む(T-0115。T-0121 で消す)
-    constexpr sim::MultiresStepOptions GPU_ROUNDING = {.cutoffRounding = true};
+    // 比べる反応の丸め(T-0121)。活性のグラフはまだ今までの丸め(待ちの丸めの分岐を入れるとハードウェアで止まった。T-0124)なので、
+    // 全部を刻む所も今までの丸めで比べる
+    sim::MultiresStepOptions& Rounding() {
+        static sim::MultiresStepOptions rounding;
+        return rounding;
+    }
 
     constexpr uint32_t WARMUP_STEPS = 400;     // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_ROOT_EDGE = 8;  // 計測の世界は根 8³ = 512 個
@@ -37,7 +41,7 @@ namespace {
         gpu.RecordQuietRequests(list, ring, tick);
         gpu.RecordProcessRequests(list, ring);
 
-        return gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick);
+        return gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick, Rounding());
     }
 
     // 刻み [first, end) を 1 本のリストに
@@ -126,7 +130,7 @@ namespace {
                 return std::unexpected(std::format("刻み {}: {}", tick, executed.error()));
 
             test::BeginQuietTick(cpu, tick, test::QuietRequestsAt(tick));
-            sim::StepActive(cpu, table, test::STRESS_SEED, tick, GPU_ROUNDING);
+            sim::StepActive(cpu, table, test::STRESS_SEED, tick, Rounding());
 
             // --- 状態の全部と次の刻みの種 ---
             if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read)) {
@@ -189,7 +193,7 @@ namespace {
         const auto record = [&](ID3D12GraphicsCommandList10* list) {
             uploaded = gpu->RecordUpload(list, initial);
             for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
-                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, i);
+                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, i, Rounding());
 
             gpu->RecordTimestamp(list, 0);
             for (uint32_t i = 0; i < MEASURE_REPEATS; ++i)
@@ -225,6 +229,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_quiet_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
+        Rounding() = {.cutoffRounding = true};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {

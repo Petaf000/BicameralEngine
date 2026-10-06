@@ -73,6 +73,11 @@ static const uint32_t MR_STEP_CONDUCTION = 1;  // 熱の伝導を入れる(活�
 static const uint32_t MR_STEP_LISTED = 2;  // 伝導の段は伝導の一覧(MR_GRAPH_INPUT_CONDUCT_*)のブロック。無ければ全部の枠
 // 小刻みの終わりに変わったブロックの隣を起こす(活性のグラフの ActivitySeedNode。忙しさの印は直さない: CPU の WakeAround と同じ。T-0109)
 static const uint32_t MR_STEP_SUBSTEP_WAKE = 4;
+// 今までの丸め(RxStepCell。D-424 の下限)で刻む。無ければ待ちの丸め(ADR-0018。T-0121)。伝導の段と覗き窓が移る間だけ(T-0122・T-0124)
+static const uint32_t MR_STEP_CUTOFF_ROUNDING = 8;
+// 起こす段(multires_step.hlsl の WakeDue)が、起こす刻みの来た世界の本物のブロックを活性の種の一覧(u13)へ足す
+// (活性の刻みの待ちの丸め。活性のグラフに待ちの丸めを入れるとハードウェアで止まったので、まだ使わない。T-0124)
+static const uint32_t MR_STEP_WAKE_SEEDS = 16;
 // 細かいレベルの熱の刻み(T-0109。gpu_multires.cpp の SubcycleFlags): ビット 8〜13 = 小刻みの番号・14〜15 = maxSubcycleGap・
 // 16〜31 = subcycleBaseLevel(符号付き 16bit)。ルート署名の語が残り少ないので stepFlags に詰めた
 static const uint32_t MR_STEP_SUBSTEP_SHIFT = 8;

@@ -21,8 +21,12 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // GPU はまだ今までの丸め(RxStepCell・D-424 の下限)なので、比べる CPU リファレンスもそちらで刻む(T-0115。T-0121 で消す)
-    constexpr sim::MultiresStepOptions GPU_ROUNDING = {.cutoffRounding = true};
+    // 比べる反応の丸め(T-0121)。ハードウェアでは待ちの丸めの起こす刻み(wakeTick)の上位 32bit が落ちる(WARP と CPU は一致。T-0124)ので、
+    // 直るまでハードウェアは今までの丸めで比べる
+    sim::MultiresStepOptions& Rounding() {
+        static sim::MultiresStepOptions rounding;
+        return rounding;
+    }
 
     // 計測の前に刻みを何回投げるか(短い仕事の間は GPU のクロックが上がらず、時間が 6〜8 倍に出る)
     constexpr uint32_t WARMUP_STEPS = 400;
@@ -56,7 +60,7 @@ namespace {
             gpu.RecordRemoveShadow(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
         }
 
-        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, tick);
+        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, tick, Rounding());
         if (test::MultiresShadowExists(scenario, tick))
             gpu.RecordPullBack(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
 
@@ -69,8 +73,10 @@ namespace {
             const MrBlock& a = cpu.blocks[slot];
             const MrBlock& b = gpu.blocks[slot];
             if (std::memcmp(&a, &b, sizeof(MrBlock)) != 0)
-                Log(Channel::Sim, Level::Error, "刻み {}: 枠 {} の見出しが違う(種類 cpu {} / gpu {})", tick, slot,
-                    a.kind, b.kind);
+                Log(Channel::Sim, Level::Error,
+                    "刻み {}: 枠 {} の見出しが違う(種類 cpu {} / gpu {}・頁 {} / {}・busyTick {} / {}・wakeTick {} / "
+                    "{})",
+                    tick, slot, a.kind, b.kind, a.page, b.page, a.busyTick, b.busyTick, a.wakeTick, b.wakeTick);
         }
 
         for (size_t i = 0; i < cpu.cells.size(); ++i) {
@@ -161,7 +167,7 @@ namespace {
             if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
                 return std::unexpected(executed.error());
 
-            test::StepMultiresScene(cpu, table, scenario, tick, GPU_ROUNDING);
+            test::StepMultiresScene(cpu, table, scenario, tick, Rounding());
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(compared.error());
         }
@@ -188,7 +194,7 @@ namespace {
                     return false;
 
                 gpu->RecordProcessRequests(list, ring.GpuAddress());
-                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, tick);
+                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, tick, Rounding());
 
                 return true;
             };
@@ -197,7 +203,7 @@ namespace {
 
             sim::SubmitRequests(cpu, requests);
             sim::ProcessRequests(cpu);
-            sim::StepNest(cpu, table, test::STRESS_SEED, tick, GPU_ROUNDING);
+            sim::StepNest(cpu, table, test::STRESS_SEED, tick, Rounding());
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(compared.error());
         }
@@ -230,7 +236,7 @@ namespace {
         }
 
         gpu.RecordTimestamp(list, 1);
-        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, WARMUP_STEPS);
+        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, WARMUP_STEPS, Rounding());
         if (!real)
             gpu.RecordPullBack(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
 
@@ -266,7 +272,7 @@ namespace {
 
         const D3D12_GPU_VIRTUAL_ADDRESS ringAddress = ring.GpuAddress();
         for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
-            gpu->RecordStep(list, ringAddress, test::MULTIRES_TEST_SEED, i);
+            gpu->RecordStep(list, ringAddress, test::MULTIRES_TEST_SEED, i, Rounding());
 
         bool recorded = true;
         RecordChainEvents(list, *gpu, ringAddress, scenario == test::MultiresScenario::Real, recorded);
@@ -294,6 +300,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
+        Rounding() = {.cutoffRounding = options->adapter != gpu::AdapterKind::Warp};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {

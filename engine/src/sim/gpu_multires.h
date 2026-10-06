@@ -80,11 +80,12 @@ namespace bicameral::sim {
                                 const MultiresPoint& point);
         void RecordRemoveShadow(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                 uint32_t firstSlot, uint32_t levelCount);
-        // 全部を刻む(multires_nest.h の StepNest と同じ結果。options.conduction で熱の伝導も。T-0107。細かいレベルの小刻みも。T-0109)
+        // 全部を刻む(multires_nest.h の StepNest と同じ結果。options.conduction で熱の伝導も。T-0107。細かいレベルの小刻みも。T-0109)。
+        // 反応は既定で待ちの丸め(ADR-0018。T-0121)。熱の伝導を入れるなら今までは options.cutoffRounding が要る(T-0124 で移す)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t worldSeed,
                         uint64_t tick, const MultiresStepOptions& options = {});
         // 活性のブロックだけ刻む(multires_nest.h の StepActive と同じ結果。観察の枠は全部刻む。T-0100)。
-        // GpuMultiresOptions::activity で作っていなければ false
+        // GpuMultiresOptions::activity で作っていなければ false。反応はまだ今までの丸めだけ(options.cutoffRounding でなければ false。T-0124)
         [[nodiscard]] bool RecordStepActive(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                             uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options = {});
         void RecordPullBack(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -190,6 +191,9 @@ namespace bicameral::sim {
         [[nodiscard]] uint64_t ConductRecordsOffset() const;
         [[nodiscard]] std::vector<std::byte> MakeGraphInputImage() const;
         void RecordExpandPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 待ちの丸め(T-0121): 起こす段(extraFlags に STEP_FLAG_WAKE_SEEDS なら種の一覧〔m_activityWrite〕に足す)・全部を刻む
+        void RecordWake(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t extraFlags);
+        void RecordStepWait(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordConductPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass,
                                uint32_t groupCount);
         void RecordConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -212,6 +216,10 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         ComPtr<ID3D12PipelineState> m_stepPipeline;
         ComPtr<ID3D12PipelineState> m_stepExpandedPipeline;  // 頁に広げたブロックを埋めて刻む(全部を刻む時。T-0102)
+        // --- 待ちの丸め(T-0121)---
+        ComPtr<ID3D12PipelineState> m_wakePipeline;              // 起こす段: 見出しを全部なめる
+        ComPtr<ID3D12PipelineState> m_stepWaitPipeline;          // 全部の枠を刻む(1 グループ = 1 枠)
+        ComPtr<ID3D12PipelineState> m_stepExpandedWaitPipeline;  // 頁に広げたブロックを埋めて刻む
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

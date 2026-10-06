@@ -80,11 +80,20 @@ namespace bicameral::sim {
         // ルート定数の stepFlags(multires_bindings.hlsli の MR_STEP_*)
         constexpr uint32_t STEP_FLAG_CONDUCTION = 1;
         constexpr uint32_t STEP_FLAG_LISTED = 2;
-        constexpr uint32_t STEP_FLAG_SUBSTEP_WAKE = 4;  // 小刻みの終わりに起こす(T-0109)
+        constexpr uint32_t STEP_FLAG_SUBSTEP_WAKE = 4;     // 小刻みの終わりに起こす(T-0109)
+        constexpr uint32_t STEP_FLAG_CUTOFF_ROUNDING = 8;  // 今までの丸め(伝導の段と覗き窓が移るまで。T-0121)
         constexpr uint32_t STEP_FLAG_BITS = 0xFF;
         constexpr uint32_t STEP_SUBSTEP_SHIFT = 8;
         constexpr uint32_t STEP_GAP_SHIFT = 14;
         constexpr uint32_t STEP_BASE_SHIFT = 16;
+
+        // 反応の丸めの stepFlags(T-0121)
+        uint32_t RoundingFlags(const MultiresStepOptions& options) {
+            return options.cutoffRounding ? STEP_FLAG_CUTOFF_ROUNDING : 0;
+        }
+
+        // 起こす段(multires_step.hlsl の WakeDue)の 1 グループのスレッドの数
+        constexpr uint32_t WAKE_THREADS = 64;
 
         // stepFlags に小刻みの番号・maxSubcycleGap・subcycleBaseLevel(符号付き 16bit)を詰める(T-0109。multires_bindings.hlsli の
         // MR_STEP_*_SHIFT。ルート署名の語が残り少ないので定数を足さない)
@@ -249,6 +258,19 @@ namespace bicameral::sim {
 
         m_stepPipeline = std::move(*step);
         m_stepExpandedPipeline = std::move(*stepExpanded);
+
+        // --- 待ちの丸め(起こす段・刻む・頁に広げて刻む。T-0121)---
+        auto wake = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wake.cso");
+        auto stepWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wait.cso");
+        auto expandedWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_expanded_wait.cso");
+        for (const auto* loaded : {&wake, &stepWait, &expandedWait}) {
+            if (!*loaded)
+                return std::unexpected(loaded->error());
+        }
+
+        m_wakePipeline = std::move(*wake);
+        m_stepWaitPipeline = std::move(*stepWait);
+        m_stepExpandedWaitPipeline = std::move(*expandedWait);
         static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT && CONDUCT_SHADERS.size() == CONDUCT_PASS_COUNT);
         for (uint32_t pass = 0; pass < TREE_PASS_COUNT + CONDUCT_PASS_COUNT; ++pass) {
             const bool tree = pass < TREE_PASS_COUNT;
@@ -725,8 +747,13 @@ namespace bicameral::sim {
         if (!m_activityGraph)
             return false;
 
+        // --- 活性のグラフはまだ今までの丸めだけ(待ちの丸めの分岐を入れるとハードウェアで止まった。T-0124)---
+        if (!options.cutoffRounding)
+            return false;
+
         SetTick(worldSeed, tick);
-        m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
+        m_constants.stepFlags = (options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0) |
+                                RoundingFlags(options);
         const uint32_t next = m_activityCurrent ^ 1u;
         ID3D12Resource* input = m_activity[m_activityCurrent].Get();
         ID3D12Resource* output = m_activity[next].Get();
@@ -777,10 +804,16 @@ namespace bicameral::sim {
 
     void GpuMultires::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
+        FX_ASSERT(!options.conduction || options.cutoffRounding);  // 伝導の段はまだ今までの丸め(T-0125)
         SetTick(worldSeed, tick);
-        m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
+        m_constants.stepFlags = (options.conduction ? STEP_FLAG_CONDUCTION : 0) | RoundingFlags(options);
         if (options.conduction) {
             RecordConduction(list, debugRing, options, ACTIVITY_LISTS);  // 全部を刻むので起こさない
+            return;
+        }
+
+        if (!options.cutoffRounding) {
+            RecordStepWait(list, debugRing);
             return;
         }
 
@@ -793,6 +826,32 @@ namespace bicameral::sim {
         // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる。T-0102)---
         RecordTreePass(list, debugRing, PassExpand, 1);
         list->SetPipelineState(m_stepExpandedPipeline.Get());
+        list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
+        UavBarrier(list);
+    }
+
+    void GpuMultires::RecordWake(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                 uint32_t extraFlags) {
+        const uint32_t flags = std::exchange(m_constants.stepFlags, m_constants.stepFlags | extraFlags);
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_wakePipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(GroupsFor(m_blockCapacity, WAKE_THREADS), 1, 1);
+        UavBarrier(list);
+        m_constants.stepFlags = flags;
+    }
+
+    void GpuMultires::RecordStepWait(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        // --- 起こす段(つつかれたブロックの印を直す)→ 全部の枠を刻む ---
+        RecordWake(list, debugRing, 0);
+        list->SetPipelineState(m_stepWaitPipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
+        UavBarrier(list);
+
+        // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる)---
+        RecordTreePass(list, debugRing, PassExpand, 1);
+        list->SetPipelineState(m_stepExpandedWaitPipeline.Get());
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
         UavBarrier(list);
     }

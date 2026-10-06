@@ -53,3 +53,11 @@
 - 一様なブロックは wakeTick が来た時だけ、刻むセルを 1 つずつ評価する(待ちはセルの ID ごとに違うので値 1 つでは決まらない)。1 つでも変われば頁に広げる。
 - 移行の間、MultiresStepOptions::cutoffRounding で今までの丸めを残す(GPU と仮の世界がまだ今までの丸め。T-0121 で消す)。
 - 残り(T-0121): 許容差つきで畳んだ時と影の引き戻しで tc を書き直す(値が変わるので)。
+
+## 追記(2026-10-06、T-0121。Claude: GPU の細部)
+- GPU にも移行の間だけ今までの丸めを残す(stepFlags の MR_STEP_CUTOFF_ROUNDING = MultiresStepOptions::cutoffRounding。ルート定数は足さない)。
+- 全部を刻む GPU は 起こす段(WakeDue。1 スレッド = 1 枠で見出しを全部なめ、つつかれたブロックに busyTick = 印・wakeTick = 印 + 1)→ StepWait(1 グループ = 1 枠)→
+  TreeExpand → StepExpandedWaitPass。一様なブロックは「起こす刻みが来た か busyTick = 印」の時だけ評価する(CPU は ResolvePokes で wakeTick = 0 にするので同じ)。
+- 活性の刻みは WakeDue が起こす刻みの来た世界の本物のブロックを種の一覧に足す形にする(部品はある。活性のグラフへの組み込みはハードウェアで止まったので T-0124)。
+- WARP は CPU と毎刻みビット一致。ハードウェア(NVIDIA RTX 3070 Ti)では評価したセルの wakeTick の上位 32bit が落ちる(T-0124。原因は未確認)。
+

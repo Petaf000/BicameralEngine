@@ -464,8 +464,8 @@ namespace {
                               uint32_t variant) {
         constexpr uint64_t FIRST_TICK = 10000;
         bool recorded = gpu.RecordUpload(list, initial) && gpu.UseConductionGraph(variant == 1);
-        for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
-            gpu.RecordStep(list, ring, test::STRESS_SEED, i);
+        for (uint32_t i = 0; i < WARMUP_STEPS; ++i)  // 暖機は今までの丸め(待ちの丸めは重く TDR になる。T-0125)
+            gpu.RecordStep(list, ring, test::STRESS_SEED, i, {.cutoffRounding = true});
 
         for (uint32_t i = 0; i <= MEASURE_TICKS; ++i) {
             if (i <= 1)
