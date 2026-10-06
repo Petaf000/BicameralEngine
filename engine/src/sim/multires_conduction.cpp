@@ -14,6 +14,8 @@
 // 小刻みでは、その回に小刻みが始まるレベルのブロックだけが流れを計算し、変化は表に溜めて、そのレベルの小刻みの終わりに足す
 // (粗い側の値は粗い小刻みの初めのまま。細かい側が送った流れの合計を粗い側が 1 回で受ける = Berger–Colella の refluxing の形)。
 // 活性(StepActive)では、小刻みで変わったブロックの面の隣を起こし、以後の小刻みから刻む(流れのある面は両側とも刻む、を小刻みでも保つ)。
+// 細かいレベルの熱の陰解法(T-0119。options.implicitConduction): 基準より細かい本物のブロックの面はここでは計算せず、最後に
+// AddImplicitConduction(multires_implicit_conduction.cpp)が陰解法の 1 刻みで解いて変化の表に足す(印と頁・端数の枠はここと同じ)。
 #include <algorithm>
 #include <array>
 
@@ -286,7 +288,8 @@ namespace bicameral::sim {
             // --- 刻む頁のブロック(凍らせたものを除く)のセルの面の流れ ---
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
                 const MrBlock& block = nest.blocks[slot];
-                if (!IsSteppedSlot(stepped, slot) || IsFrozen(frozen, slot) || MrIsUniform(block))
+                if (!IsSteppedSlot(stepped, slot) || IsFrozen(frozen, slot) || MrIsUniform(block) ||
+                    InImplicitConduction(nest, slot, options))
                     continue;
 
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
@@ -300,6 +303,7 @@ namespace bicameral::sim {
                                                   std::span<uint8_t> stepped, const MultiresStepOptions& options,
                                                   uint32_t wakeMark, std::span<BlockStepResult> results) {
             FX_ASSERT(options.maxSubcycleGap <= MULTIRES_MAX_SUBCYCLE_GAP);
+            FX_ASSERT(!options.implicitConduction || options.maxSubcycleGap == 0);
             const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
             CellThermals thermals(nest, view);
             std::vector<MrEnergyDelta> deltas(nest.cells.size(), MrMakeEnergyDelta());
@@ -310,8 +314,12 @@ namespace bicameral::sim {
                 const std::vector<uint8_t> wantsFraction = MarkConductionWants(nest, thermals, active, options);
                 const std::vector<uint8_t> frozen = ExpandForStep(nest, results);
                 ComputeConduction(nest, thermals, active, frozen, wantsFraction, options, deltas);
-                if (substep + 1 == substeps)
+                if (substep + 1 == substeps) {
+                    if (options.implicitConduction)
+                        AddImplicitConduction(nest, thermals, frozen, options, deltas);
+
                     return deltas;
+                }
 
                 // --- 小刻みが終わるレベルに変化を足す。変わったブロックの隣を起こす(活性)---
                 const std::vector<uint32_t> changed = ApplyEndingDeltas(nest, thermals, substep, options, deltas);

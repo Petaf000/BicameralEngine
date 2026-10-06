@@ -420,7 +420,8 @@ namespace bicameral::sim {
         std::vector<int64_t> Temperatures(const ImplicitGrid& grid) {
             std::vector<int64_t> temperatures(grid.cells.size());
             for (size_t i = 0; i < grid.cells.size(); ++i)
-                temperatures[i] = ImplicitTemperature(grid.cells[i]);
+                temperatures[i] = grid.cells[i].startTemperature >= 0 ? grid.cells[i].startTemperature
+                                                                      : ImplicitTemperature(grid.cells[i]);
 
             return temperatures;
         }
@@ -447,7 +448,7 @@ namespace bicameral::sim {
                     continue;
                 }
 
-                const MrCrossTransfer transfer = MrSplitCrossFlow(flows[f], face.gap, true);
+                const MrCrossTransfer transfer = MrSplitCrossFlow(flows[f], face.gap, coarse.coarseFraction);
                 const MrEnergyDelta sum = MrAddEnergyDelta({.whole = coarse.energy, .fraction = coarse.fraction},
                                                            transfer.coarseDelta);
                 fine.energy += transfer.fineDelta;
@@ -711,6 +712,14 @@ namespace bicameral::sim {
         ImplicitGrid grid;
         grid.cells = std::move(cells);
         FindFaces(grid);
+
+        return BuildImplicitGrid(std::move(grid.cells), std::move(grid.faces), galerkin);
+    }
+
+    ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces, bool galerkin) {
+        ImplicitGrid grid;
+        grid.cells = std::move(cells);
+        grid.faces = std::move(faces);
         grid.levels.push_back(MakeCellLevel(grid));
         while (grid.levels.size() < MAX_GRID_LEVELS && NeedsCoarser(grid.levels.back())) {
             ImplicitGridLevel coarser = Coarsen(grid.levels.back(), galerkin);

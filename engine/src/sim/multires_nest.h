@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "common/multires_tree.hlsli"
+#include "sim/implicit_conduction.h"
 #include "sim/reaction_table.h"
 
 namespace bicameral::sim {
@@ -62,6 +63,12 @@ namespace bicameral::sim {
         std::vector<multires::MrRequest> requests;     // MR_MAX_REQUESTS 個
         std::vector<multires::MrRequestState> states;  // MR_MAX_REQUESTS 個
         std::vector<uint32_t> claims;                  // 世界の枠ごとの取り合いの印
+
+        // --- 最後の刻みの陰解法の費用(T-0119。状態に入らない。計測用)---
+        ImplicitCost implicitCost;
+        uint32_t implicitCells = 0;  // 陰解法の系に入れたセルの数(境のセルを含む)
+        std::vector<std::array<uint32_t, 2>>
+            implicitLevels;  // 多重格子の段ごとの [節の数, 1 節の隣の最大](GPU の分け方を見る)
     };
 
     // 1 刻みの選択
@@ -75,6 +82,17 @@ namespace bicameral::sim {
         // maxSubcycleGap = 0 なら分けない(T-0019 と同じ結果)。上限は 3(64 回。17 §4)。GPU も同じ結果(T-0109)
         int32_t subcycleBaseLevel = 0;
         uint32_t maxSubcycleGap = 0;
+
+        // --- 細かいレベルの熱の陰解法(方式②。T-0119。ADR-0019・D-434 の案 a)---
+        // true なら、流れを計算する側(細かい側)のレベルが subcycleBaseLevel より細かい面を、陰解法の 1 刻みで解く
+        // (multires_implicit_conduction.cpp)。maxSubcycleGap は 0 のこと(方式①と②は混ぜない)。GPU はまだ(T-0127)
+        bool implicitConduction = false;
+        // V サイクルの上限。新しい温度の誤差の見込みが 1 mK 以下になったら止める(ADR-0019)。D-436(鋭い熱でも解き切る)なので
+        // 上限は「届かない時の安全のため」だけの大きさにする(当たったら安全網が陽解法の流れに戻す)
+        uint32_t implicitMaxCycles = 64;
+        // 陰解法にする最も細かいレベル = subcycleBaseLevel + implicitMaxGap。それより細かい所は陽解法のまま(頭打ちで遅い)。
+        // 温度の端数(mK × 2^16)の精度で、面の流れの誤差は約 4^Δk × 2^-16 mK になり、Δk 8 を超えると 1 mK の判定に届かない(T-0119)
+        uint32_t implicitMaxGap = 8;
 
         // --- 反応の丸め(T-0115。ADR-0018)---
         // false(既定): 待ちの丸め(reaction.hlsli の RxStepCellWait。D-429)。見出しの busyTick = tc、wakeTick = 次に評価の要る刻みの印。
