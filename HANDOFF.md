@@ -7,6 +7,18 @@
 - HW の wakeTick の不具合は飽和する足し算の形(reaction.hlsli の RxWakeTickOf に替えた)。活性のグラフの DEVICE_HUNG は反応の核を 1 ノードに 3〜4 か所展開した時に出る(推定)ので、グラフの反応は待ちの丸めだけにした。
 - 伝導を入れる刻み・覗き窓はまだ今までの丸め。次は T-0125(伝導・畳み・引き戻しの tc)。
 
+## 並走で入ったもの: T-0119 陰解法を木の伝導に(CPU。ブランチ t-0119 を main へマージ、2026-10-06)
+- 状態: T-0119 完了(CPU)。options.implicitConduction(既定 false)で、基準より細かい(Δk 1〜8)本物のブロックの面を陰解法で解く
+  (engine/src/sim/multires_implicit_conduction.cpp)。GPU はまだ(T-0127)。影のブロックは陽解法のまま(T-0128)。
+- 動いているもの: `-Filter "^multires_implicit_tree$"`(release 約 20 秒)。計測は `job.py run -Preset release -Exe multires_implicit_tree_test`。
+  今までの CPU のテスト(multires 9 本・reaction 3 本)と gpu_multires_implicit_warp・gpu_multires_conduction_warp も通る。
+- 壊れているもの: なし。
+- 決めたこと: ADR-0019 追記(T-0119: 面を流れを計算する側のレベルで分ける・境のセル・眠っている頁のブロックも系に・Δk ≤ 8)。
+- 判断待ち: (1) 1 刻みより速く落ち着く細かいむら(おすすめ A このまま)/ (2) 基準 + 8 段より細かい所の熱(おすすめ A このまま)。このチケットの「判断待ち」。
+- 注意: 陰解法を入れた刻みは、眠っている頁のブロックも系に入る(活性 = 全部のため)。静かな頁が多い世界では系が大きくなる(費用は V 1 回ぶん。
+  収束済みなら判定で止まる)。GPU でこれが重ければ、T-0127 で「温度差が無い連結成分を除く」などを考える。
+  MultiresNest に計測用の欄(implicitCost・implicitCells・implicitLevels。状態に入らない)を足した。
+
 ## 並走で入ったもの: T-0120 陰解法の GPU の固定費(ブランチ t-0120 を main へマージ、2026-10-06)
 - 状態: T-0120 完了。方式②の GPU 版の固定費を減らした(engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl。ImTail が 13 個目の入口)。
 - 動いているもの: `-Filter "^(multires_implicit|gpu_multires_implicit(_warp)?)$"` が debug・release で通る。計測は
