@@ -72,6 +72,7 @@ namespace bicameral::sim {
             BufferState,
             BufferWide,
             BufferPredicate,
+            BufferOrder,
             BufferCount
         };
 
@@ -88,6 +89,7 @@ namespace bicameral::sim {
             PassLimitEnd,
             PassLimitFaces,
             PassApply,
+            PassTail,
             PassCount
         };
 
@@ -102,6 +104,20 @@ namespace bicameral::sim {
             uint32_t tolerance = 0;
             uint32_t slack = 0;
             int32_t correctionScale = 0;
+            uint32_t orderStart = 0;
+            uint32_t shortCount = 0;
+            uint32_t longCount = 0;
+            uint32_t tailStart = 0;
+            uint32_t tailDepth = 0;
+            uint32_t levelTotal = 0;
+            uint32_t sweeps = 0;
+        };
+
+        // 節の並び(u9)の 1 区間: 1 スレッドで足す節 shortCount 個 → グループで足す節 longCount 個(T-0120)
+        struct OrderRange {
+            uint32_t start = 0;
+            uint32_t shortCount = 0;
+            uint32_t longCount = 0;
         };
 
         GpuImplicit() = default;
@@ -109,7 +125,9 @@ namespace bicameral::sim {
         std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
         std::expected<void, std::string> CreateBuffers(ID3D12Device5* device);
         void MakeImages(const ImplicitGrid& grid);
+        void MakeOrders(const std::vector<std::byte>& nodeImage, const std::vector<std::byte>& listImage);
         void Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t threads);
+        void DispatchOrdered(ID3D12GraphicsCommandList* list, Pass pass, const OrderRange& range);
         void RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t sweeps);
         void RecordVCycle(ID3D12GraphicsCommandList* list, uint32_t depth, const ImplicitOptions& options);
         void BeginSkippable(ID3D12GraphicsCommandList* list, uint32_t word);
@@ -119,7 +137,12 @@ namespace bicameral::sim {
         uint32_t m_cellCount = 0;
         uint32_t m_faceCount = 0;
         uint32_t m_nodeTotal = 0;
-        std::vector<uint32_t> m_levelOffsets;                      // 段ごとの節の始まり(段の数 + 1)
+        std::vector<uint32_t> m_levelOffsets;  // 段ごとの節の始まり(段の数 + 1)
+        std::vector<std::array<OrderRange, 2>>
+            m_smoothOrders;                        // 段・色ごと: 掃き出しの並び(グループで足すのはその色の長い節だけ)
+        OrderRange m_convergedOrder;               // 止める判定(段 0 = セル)の並び
+        std::vector<OrderRange> m_restrictOrders;  // 段ごと: 縮約の親の並び(段 0 は使わない)
+        uint32_t m_tailDepth = 0;                  // ここから最も粗い段までは ImTail の 1 グループで回す(T-0120)
         std::array<std::vector<std::byte>, BufferCount> m_images;  // 写す中身(セルは RecordUpload で作り直す)
         Constants m_constants;
         bool m_predication = true;

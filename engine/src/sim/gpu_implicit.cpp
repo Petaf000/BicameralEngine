@@ -1,6 +1,7 @@
 // gpu_implicit.cpp — 細かいレベルの熱の陰解法の GPU 版(T-0117)。何をするかは gpu_implicit.h、段の中身は shaders/sim/implicit_conduct.hlsl。
 // 段の順は CPU の StepImplicit と同じ: 温度 → V サイクル(VCycle の再帰と同じ順に Smooth・Restrict・Prolong)× 上限 → 面の流れ → 安全網 → 足す。
 // 段と段の間は全体の UAV のバリア(次の段は前の段の書き込みを読む)。
+// 固定費を減らす形(T-0120): 隣が多い節は 1 グループで足す(節の並び u9)・小さい段から下の V サイクルは ImTail の 1 Dispatch。
 #include "sim/gpu_implicit.h"
 
 #include <algorithm>
@@ -33,17 +34,29 @@ namespace bicameral::sim {
         constexpr uint32_t PREDICATE_LIMIT = 1;   // 安全網を止めた
         constexpr uint32_t PREDICATE_WORDS = 2;
 
-        constexpr uint32_t UAV_COUNT = 9;
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 9;
+        // 隣がこれより多い節は 1 グループ = 1 節で足す(T-0120。熱い点では違うレベルの面の粗い側で 127 個)
+        constexpr uint32_t LONG_ROW_LINKS = 16;
+
+        // 節の数がこれ以下で、隣が TAIL_MAX_LINKS 以下の段から下は、1 グループ(implicit_conduct.hlsl の IM_TAIL_THREADS)で
+        // V サイクルを回す(T-0120)。ImTail は 1 スレッドで隣を回すので、長い行のある段は入れない。
+        // 2048 にすると鎖(レベル 3〜6)が 1 刻み 1.64 → 1.97 ms と重くなった(1 グループに仕事が寄りすぎる。docs/perf.md)
+        constexpr uint32_t TAIL_MAX_NODES = 1024;
+        constexpr uint32_t TAIL_MAX_LINKS = 2 * LONG_ROW_LINKS;
+        constexpr uint32_t SWEEP_BITS = 8;
+
+        constexpr uint32_t UAV_COUNT = 10;
+
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true};
 
         // implicit_conduct.hlsl の入口(Pass の順)
-        constexpr std::array<const char*, 12> SHADERS = {
+        constexpr std::array<const char*, 13> SHADERS = {
             "sim/implicit_begin.cso",     "sim/implicit_start.cso",       "sim/implicit_smooth.cso",
             "sim/implicit_restrict.cso",  "sim/implicit_prolong.cso",     "sim/implicit_converged.cso",
             "sim/implicit_cycle_end.cso", "sim/implicit_flows.cso",       "sim/implicit_mark.cso",
-            "sim/implicit_limit_end.cso", "sim/implicit_limit_faces.cso", "sim/implicit_apply.cso"};
+            "sim/implicit_limit_end.cso", "sim/implicit_limit_faces.cso", "sim/implicit_apply.cso",
+            "sim/implicit_tail.cso"};
 
         template <typename T>
         std::vector<std::byte> ToBytes(const std::vector<T>& values) {
@@ -154,6 +167,71 @@ namespace bicameral::sim {
             return {.nodes = std::move(nodes), .links = std::move(links)};
         }
 
+        // 節の並びを作る時に見る段の形(写す前の節と番号の一覧)
+        struct NodeShape {
+            std::vector<ImGpuNode> nodes;
+            std::vector<uint32_t> lists;
+
+            NodeShape(const std::vector<std::byte>& nodeImage, const std::vector<std::byte>& listImage)
+                : nodes(nodeImage.size() / sizeof(ImGpuNode)), lists(listImage.size() / sizeof(uint32_t)) {
+                std::memcpy(nodes.data(), nodeImage.data(), nodes.size() * sizeof(ImGpuNode));
+                std::memcpy(lists.data(), listImage.data(), lists.size() * sizeof(uint32_t));
+            }
+
+            [[nodiscard]] uint32_t Links(uint32_t node) const { return nodes[node].linkEnd - nodes[node].linkStart; }
+
+            // 掃き出しの色 color で計算する節なら隣の数、写すだけなら 0
+            [[nodiscard]] uint32_t ColorLinks(uint32_t node, uint32_t color) const {
+                return nodes[node].color == color ? Links(node) : 0;
+            }
+
+            [[nodiscard]] uint32_t MostChildLinks(uint32_t node) const {
+                uint32_t most = 0;
+                for (uint32_t k = nodes[node].childStart; k < nodes[node].childEnd; ++k)
+                    most = std::max(most, Links(lists[k]));
+
+                return most;
+            }
+        };
+
+        // 節 begin〜end を order に足す: weight が LONG_ROW_LINKS 以下の節 → 超える節(どちらも番号の昇順)。足した数 {前, 後ろ}
+        template <typename Weight>
+        std::pair<uint32_t, uint32_t> AppendOrder(std::vector<uint32_t>& order, uint32_t begin, uint32_t end,
+                                                  const Weight& weight) {
+            const size_t start = order.size();
+            for (uint32_t node = begin; node < end; ++node) {
+                if (weight(node) <= LONG_ROW_LINKS)
+                    order.push_back(node);
+            }
+
+            const auto shortCount = static_cast<uint32_t>(order.size() - start);
+            for (uint32_t node = begin; node < end; ++node) {
+                if (weight(node) > LONG_ROW_LINKS)
+                    order.push_back(node);
+            }
+
+            return {shortCount, static_cast<uint32_t>(order.size() - start) - shortCount};
+        }
+
+        // ImTail が受け持つ最初の段: そこから最も粗い段まで、どの段も節が TAIL_MAX_NODES 以下で隣が TAIL_MAX_LINKS 以下。
+        // そういう段が無くても最も粗い段は受け持つ(最も粗い段の掃き出しを 1 Dispatch に)
+        uint32_t TailDepth(const NodeShape& shape, const std::vector<uint32_t>& levelOffsets) {
+            const auto smallLevel = [&](uint32_t depth) {
+                uint32_t most = 0;
+                for (uint32_t node = levelOffsets[depth]; node < levelOffsets[depth + 1]; ++node)
+                    most = std::max(most, shape.Links(node));
+
+                return levelOffsets[depth + 1] - levelOffsets[depth] <= TAIL_MAX_NODES && most <= TAIL_MAX_LINKS;
+            };
+
+            const auto levelCount = static_cast<uint32_t>(levelOffsets.size() - 1);
+            uint32_t depth = levelCount;
+            while (depth > 0 && smallLevel(depth - 1))
+                --depth;
+
+            return std::min(depth, levelCount - 1);
+        }
+
     }  // namespace
 
     std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const ImplicitGrid& grid) {
@@ -210,10 +288,49 @@ namespace bicameral::sim {
         m_images[BufferState].resize((size_t{STATE_WORDS} + m_cellCount) * 4);
         m_images[BufferWide].resize(size_t{WIDE_WORDS} * 8);
         m_images[BufferPredicate].resize(size_t{PREDICATE_WORDS} * 8);
+        MakeOrders(m_images[BufferNodes], m_images[BufferLists]);
 
         m_constants.nodeTotal = m_nodeTotal;
         m_constants.cellCount = m_cellCount;
         m_constants.faceCount = m_faceCount;
+    }
+
+    // 隣を足す段の節の並び(段ごと): 隣が少ない節を前に、多い節を後ろに(どちらも番号の昇順)。
+    // 掃き出しは色ごとに、その色の節の隣の数で分ける(ほかの色の節は写すだけなので 1 スレッドで)。
+    // 縮約は子の隣の数の最大で分ける(1 スレッドの子の回しが長い行に止められないように)
+    void GpuImplicit::MakeOrders(const std::vector<std::byte>& nodeImage, const std::vector<std::byte>& listImage) {
+        const NodeShape shape(nodeImage, listImage);
+        std::vector<uint32_t> order;
+        const auto append = [&](uint32_t depth, auto&& weight) {
+            const auto start = static_cast<uint32_t>(order.size());
+            const auto [shortCount, longCount] = AppendOrder(order, m_levelOffsets[depth], m_levelOffsets[depth + 1],
+                                                             weight);
+            return OrderRange{.start = start, .shortCount = shortCount, .longCount = longCount};
+        };
+
+        const auto levelCount = static_cast<uint32_t>(m_levelOffsets.size() - 1);
+        m_smoothOrders.clear();
+        m_restrictOrders.assign(1, OrderRange{});
+        for (uint32_t depth = 0; depth < levelCount; ++depth) {
+            std::array<OrderRange, COLOR_COUNT> colors{};
+            for (uint32_t color = 0; color < COLOR_COUNT; ++color)
+                colors[color] = append(depth, [&](uint32_t node) { return shape.ColorLinks(node, color); });
+
+            m_smoothOrders.push_back(colors);
+        }
+
+        m_convergedOrder = append(0, [&](uint32_t node) { return shape.Links(node); });
+        for (uint32_t depth = 1; depth < levelCount; ++depth)
+            m_restrictOrders.push_back(append(depth, [&](uint32_t node) { return shape.MostChildLinks(node); }));
+
+        // --- ImTail: 段ごとの節の始まりと、受け持つ最初の段 ---
+        m_constants.tailStart = static_cast<uint32_t>(order.size());
+        order.insert(order.end(), m_levelOffsets.begin(), m_levelOffsets.end());
+        m_tailDepth = TailDepth(shape, m_levelOffsets);
+        m_constants.tailDepth = m_tailDepth;
+        m_constants.levelTotal = levelCount;
+
+        m_images[BufferOrder] = ToBytes(order);
     }
 
     std::expected<void, std::string> GpuImplicit::CreatePipelines(ID3D12Device5* device) {
@@ -296,31 +413,40 @@ namespace bicameral::sim {
         GlobalUavBarrier(list);
     }
 
+    // 節の並びの区間を回す段: 1 スレッドで足す節のグループ + グループで足す節 1 つに 1 グループ
+    void GpuImplicit::DispatchOrdered(ID3D12GraphicsCommandList* list, Pass pass, const OrderRange& range) {
+        m_constants.orderStart = range.start;
+        m_constants.shortCount = range.shortCount;
+        m_constants.longCount = range.longCount;
+        const uint32_t groups = ((range.shortCount + THREADS - 1) / THREADS) + range.longCount;
+        list->SetPipelineState(m_pipelines[pass].Get());
+        list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
+        list->Dispatch(std::max<uint32_t>(1, groups), 1, 1);
+        GlobalUavBarrier(list);
+    }
+
     // 赤黒の掃き出し sweeps 回(1 回 = 色 0〜1。CPU の Smooth)
     void GpuImplicit::RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t sweeps) {
-        m_constants.levelOffset = m_levelOffsets[depth];
-        m_constants.levelCount = m_levelOffsets[depth + 1] - m_levelOffsets[depth];
         for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
             for (uint32_t color = 0; color < COLOR_COUNT; ++color) {
                 m_constants.color = color;
-                Dispatch(list, PassSmooth, m_constants.levelCount);
+                DispatchOrdered(list, PassSmooth, m_smoothOrders[depth][color]);
             }
         }
     }
 
     // CPU の VCycle と同じ再帰
     void GpuImplicit::RecordVCycle(ID3D12GraphicsCommandList* list, uint32_t depth, const ImplicitOptions& options) {
-        const auto levelCount = static_cast<uint32_t>(m_levelOffsets.size() - 1);
-        if (depth + 1 == levelCount) {
-            RecordSmooth(list, depth, options.coarsestSweeps);
+        if (depth == m_tailDepth) {
+            m_constants.sweeps = options.preSmooth | (options.postSmooth << SWEEP_BITS) |
+                                 (options.coarsestSweeps << (2 * SWEEP_BITS));
+            Dispatch(list, PassTail, 1);
             return;
         }
 
         RecordSmooth(list, depth, options.preSmooth);
 
-        m_constants.levelOffset = m_levelOffsets[depth + 1];
-        m_constants.levelCount = m_levelOffsets[depth + 2] - m_levelOffsets[depth + 1];
-        Dispatch(list, PassRestrict, m_constants.levelCount);
+        DispatchOrdered(list, PassRestrict, m_restrictOrders[depth + 1]);
 
         RecordVCycle(list, depth + 1, options);
 
@@ -377,7 +503,7 @@ namespace bicameral::sim {
 
             RecordVCycle(list, 0, options);
             if (options.toleranceMillikelvin != 0)
-                Dispatch(list, PassConverged, m_cellCount);
+                DispatchOrdered(list, PassConverged, m_convergedOrder);
 
             Dispatch(list, PassCycleEnd, 1);
             if (skippable)
@@ -403,11 +529,9 @@ namespace bicameral::sim {
     }
 
     uint32_t GpuImplicit::DispatchesPerCycle(const ImplicitOptions& options) const {
-        const auto levelCount = static_cast<uint32_t>(m_levelOffsets.size() - 1);
         const uint32_t smoothing = COLOR_COUNT * (options.preSmooth + options.postSmooth);
 
-        return ((levelCount - 1) * (smoothing + 2)) + (COLOR_COUNT * options.coarsestSweeps) +
-               (options.toleranceMillikelvin != 0 ? 2 : 1);
+        return (m_tailDepth * (smoothing + 2)) + 1 + (options.toleranceMillikelvin != 0 ? 2 : 1);
     }
 
     void GpuImplicit::RecordTimestamp(ID3D12GraphicsCommandList* list, uint32_t index) {
