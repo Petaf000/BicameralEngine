@@ -7,6 +7,16 @@
 - 許容差つきの FoldQuietPages(CPU)を作った: 静かになった時に端数の枠の端数を帳簿へ移して返し、計器で測れない差なら平均の切り捨てで畳む(余りは帳簿へ)。保存量はビット一致。許容差なしなら今まで通り。
 - 次は T-0112(GPU)。許容差の値は Q4(おすすめ A = 1 mK・濃度 2^-20)。T-0112・T-0113 は値が決まる前に進められる。
 
+## 並走で入ったもの: T-0117 陰解法を GPU に(ブランチ t-0117 から main へ早送りマージ、2026-10-06)
+- 状態: T-0117 完了。方式②の GPU 版 engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl(試作のセルの一覧のまま。木にはつないでいない)。
+  式は shaders/common/implicit_conduction.hlsli(CPU の implicit_conduction.cpp も同じ関数を呼ぶ)。
+- 動いているもの: `-Filter "^(multires_implicit|gpu_multires_implicit(_warp)?)$"` が debug・release で通る(gpu_multires_implicit は debug の HW 約 35 秒・WARP 約 9 秒)。
+  release の HW では計測もする(`job.py run -Preset release -Exe gpu_multires_implicit_test -- --queue compute --measure-only`)。tidy(release)警告なし・archmap OK。
+- 壊れているもの: なし。
+- 決めたこと: ADR-0019 追記(GPU の形・案 a〔基準より細かい所は全部②〕を仮に・述語で空の回を飛ばす)。
+- 判断待ち: 鋭い熱で上限に当たる時 (A) 解き切る / (B) 打ち切る(おすすめ A。このチケットの「判断待ち」)。QUESTIONS Q3 には「案 a なら鎖で約 1.9 ms(見込み)」が材料になる。
+- 注意: ②の鎖の費用は一部を取り出した見積もり(外は断熱)。本物は T-0119。費用は Dispatch の待ちと長い行(1 節の隣 100 個以上)で決まる → T-0120。
+
 ## 並走で入ったもの: T-0110 研究 陰解法の熱(ブランチ t-0110 から main へ早送りマージ、2026-10-06)
 - 状態: T-0110(研究)完了。方式②の CPU 試作 engine/src/sim/implicit_conduction.*(木にはつないでいない)・テスト tests/multires_implicit_test.cpp(debug で約 1〜3 分)。
 - 動いているもの: 物差し Δk 0〜8・熱い点の場面で、選んだ形(V 適応 1 mK・上限 16)が ±5%・保存ビット一致・行き過ぎなし・2 回一致。
