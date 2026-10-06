@@ -164,6 +164,17 @@ namespace bicameral::sim {
             }
         }
 
+        // 系を作る時の木を写す(試験用。T-0129)
+        void CaptureNest(MultiresNest& nest, std::span<const uint8_t> frozen) {
+            nest.implicitNest.reset();
+            auto copy = std::make_shared<MultiresNest>(nest);
+            copy->captureImplicitNest = false;
+            copy->implicitFrozen.clear();
+            copy->implicitGrid = {};
+            nest.implicitNest = std::move(copy);
+            nest.implicitFrozen.assign(frozen.begin(), frozen.end());
+        }
+
         // 選んだ形(ADR-0019): V(2,2)・新しい温度の誤差の見込み 1 mK で止める
         ImplicitOptions MakeImplicitOptions(const MultiresStepOptions& options) {
             ImplicitOptions implicit;
@@ -193,9 +204,13 @@ namespace bicameral::sim {
             nest.implicitCells = 0;
             nest.implicitLevels.clear();
             nest.implicitGrid = {};
+            nest.implicitNest.reset();
             ImplicitSystem system = MakeSystem(nest, thermals, frozen, options);
             if (system.faces.empty())
                 return;
+
+            if (nest.captureImplicitNest)
+                CaptureNest(nest, frozen);
 
             // --- 1 刻み解いて、足した後と仮のエネルギーの差を変化の表へ ---
             ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces));

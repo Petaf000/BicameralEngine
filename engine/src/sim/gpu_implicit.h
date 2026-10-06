@@ -1,7 +1,7 @@
 // gpu_implicit.h — 細かいレベルの熱の陰解法(方式②。ADR-0019)の GPU 版(T-0117)。CPU リファレンス sim/implicit_conduction の
 // StepImplicit(多重格子の V サイクル・誤差の見込みで止める・安全網)と毎刻みビット一致する Compute の段(shaders/sim/implicit_conduct.hlsl)を記録する。
 // 試作の約束は CPU と同じ(セルの一覧・熱容量一定)。木につないだ系(T-0119 の multires_implicit_conduction が作る、刻みの初めの温度と
-// 粗い側の端数の枠つきのセル)もそのまま解ける(T-0127)。系を GPU で作って伝導の段から呼ぶのはまだ(T-0129・T-0132)。
+// 粗い側の端数の枠つきのセル)もそのまま解ける(T-0127)。系のセル・面・面の一覧は GPU で作れる(GpuImplicitBuild。T-0129)。伝導の段から呼ぶのはまだ(T-0132)。
 // 多重格子の段の形(節・隣・重み・親子)は CPU の BuildImplicitGrid が作ったものを写す(ベイク。刻みの間は変わらない)。
 //
 // 使い方(テスト):
@@ -57,6 +57,11 @@ namespace bicameral::sim {
 
         // セル(エネルギー・端数)と段の形を写す。grid は Create と同じ形であること
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList* list, const ImplicitGrid& grid);
+
+        // GPU が作った系(GpuImplicitBuild。T-0129)のセル・面・セルの面の一覧を写す(RecordUpload の後。source は COPY_SOURCE の状態で、
+        // 並びはこの系と同じ: セル × セルの数・面 × 面の数・面の一覧 × 2 × 面の数)。段の形は Create の grid のまま
+        void RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
+                              uint64_t facesOffset, uint64_t listsOffset);
 
         // 1 刻み。options.method は Multigrid だけ(赤黒・RKL2 は CPU の比べる相手で、GPU には載せない)
         [[nodiscard]] bool RecordStep(ID3D12GraphicsCommandList* list, uint64_t debugRing,

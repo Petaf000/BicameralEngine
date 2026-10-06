@@ -7,6 +7,19 @@
   WakeDueBlocks が起こす刻みの来たブロックを一覧に足す。覗き窓の入れ子も待ちの丸め。HW・WARP・CPU が毎刻みビット一致。
 - 今までの丸めのコード(cutoffRounding・RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION)は誰も使わないまま残っている → T-0130 で消す。
 
+## 並走で入ったもの: T-0129 陰解法の系を GPU で組み立てる(一部。ブランチ t-0129 を main へマージ、2026-10-06)
+- 状態: T-0129 完了(範囲を絞った)。陰解法の系のうち未知数・境のセル・面・セルの面の一覧を GPU の木から作り(GpuImplicitBuild・implicit_build.hlsl)、
+  CPU の系と番号まで毎刻みビット一致・それを GpuImplicit で解いた結果も一致(熱い点・鎖・たくさんの要求)。多重格子の段・重み・節の並び・間接の Dispatch は T-0134。
+- 動いているもの: `-Filter "^gpu_multires_implicit_build(_warp)?$"`(release の HW 約 80 秒〔計測込み〕・WARP 約 35 秒 / debug の HW 約 6.5 分・WARP 約 1.5 分)。
+  計測は `job.py run -Preset release -Exe gpu_multires_implicit_build_test -- --queue compute --measure-only`。multires_implicit(_tree)・
+  gpu_multires_implicit_warp・gpu_multires_implicit_tree_warp も通る。
+- 壊れているもの: なし。
+- 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0129: 番号は CPU と同じ・境のセルは最初の候補の atomic の最小・接頭和は 3 段・一覧は値ごとの順位で置き直す)。
+- 判断待ち: なし。
+- 注意: 系を作る段は 0.22〜0.56 ms(16 Dispatch の直列の遅延が主。docs/perf.md)。凍った枠(頁の不足)を見る形(useFrozenMarks)は試験の場面に無いので未確認(T-0132 で)。
+  GpuImplicit はまだ CPU の系の数で Create する(上限からにするのは T-0134)。MultiresNest::captureImplicitNest(既定 false)は試験用。
+- 注意: tidy(release)はこのチケットのファイルの指摘を直した(gpu_multires.cpp:248 の CreatePipelines の readability-function-size は main から。触っていない)。
+
 ## 並走で入ったもの: T-0127 木の陰解法を GPU で解く(ブランチ t-0127 から main へ早送りマージ、2026-10-06)
 - 状態: T-0127 完了(範囲を絞った)。木の本物の陰解法の系(T-0119 の CPU が作る)を GPU の GpuImplicit で解いて CPU と毎刻みビット一致
   (熱い点・鎖・たくさんの要求)。系を GPU で作るのは T-0129、GPU の伝導の段から呼ぶのは T-0132、V の上限まで積んだ空の回の費用は T-0133。

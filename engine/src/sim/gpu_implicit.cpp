@@ -414,6 +414,31 @@ namespace bicameral::sim {
         return true;
     }
 
+    void GpuImplicit::RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
+                                       uint64_t facesOffset, uint64_t listsOffset) {
+        constexpr std::array<Buffer, 3> TARGETS = {BufferCells, BufferFaces, BufferLists};
+        const std::array<uint64_t, 3> offsets = {cellsOffset, facesOffset, listsOffset};
+        const std::array<uint64_t, 3> sizes = {uint64_t{m_cellCount} * sizeof(ImGpuCell),
+                                               uint64_t{m_faceCount} * sizeof(ImGpuFace),
+                                               uint64_t{2} * m_faceCount * sizeof(uint32_t)};
+
+        std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
+        for (size_t i = 0; i < TARGETS.size(); ++i) {
+            barriers[i] = gpu::Transition(m_buffers[TARGETS[i]].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                          D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        for (size_t i = 0; i < TARGETS.size(); ++i) {
+            if (sizes[i] != 0)
+                list->CopyBufferRegion(m_buffers[TARGETS[i]].Get(), 0, source, offsets[i], sizes[i]);
+
+            std::swap(barriers[i].Transition.StateBefore, barriers[i].Transition.StateAfter);
+        }
+
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    }
+
     void GpuImplicit::Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t threads) {
         list->SetPipelineState(m_pipelines[pass].Get());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
