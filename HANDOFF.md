@@ -7,6 +7,19 @@
   (gpu_multires_conduction・_subcycle・_near_fold も)。今までの丸めが残るのは覗き窓(probe_peek。CPU・GPU とも伝導なしの全部を刻む)だけ。
 - 許容差つきで畳んだブロックはつつき、影を引き戻したら影の busyTick = POKED にして、次の刻みに tc を書き直す(CPU・GPU)。次は T-0122。
 
+## 並走で入ったもの: T-0127 木の陰解法を GPU で解く(ブランチ t-0127 から main へ早送りマージ、2026-10-06)
+- 状態: T-0127 完了(範囲を絞った)。木の本物の陰解法の系(T-0119 の CPU が作る)を GPU の GpuImplicit で解いて CPU と毎刻みビット一致
+  (熱い点・鎖・たくさんの要求)。系を GPU で作るのは T-0129、GPU の伝導の段から呼ぶのは T-0132、V の上限まで積んだ空の回の費用は T-0133。
+- 動いているもの: `-Filter "^gpu_multires_implicit_tree(_warp)?$"`(release の HW 約 3 分〔計測込み〕・WARP 約 2 分 / debug の HW 約 9〜15 分・WARP 約 5 分。
+  刻みごとに GpuImplicit を Create するので debug の GPU-based validation で重い)。計測は
+  `job.py run -Preset release -Exe gpu_multires_implicit_tree_test -- --queue compute --measure-only`。gpu_multires_implicit(_warp)・multires_implicit(_tree) も通る。
+- 壊れているもの: なし。
+- 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0127: GPU の段に刻みの初めの温度と粗い側の端数の枠・ImTail の境は 1024 / 32 のまま・最も粗い段は節 1024 以下の時だけ ImTail)。
+- 判断待ち: なし。
+- 注意: 計測(② だけ。上限 64 / 16): 鎖の後の刻み 2.91 / 1.48 ms・初めの 12 刻み 2.98 / 1.84 ms・熱い点 0.36〜0.49 / 0.23〜0.35 ms・たくさんの要求 10〜13 / 7.4〜9 ms。
+  T-0119 の見込み(後 0.7〜1.3 ms)より重い。理由は境のセルの長い行と V の上限 64 の空の回(T-0133)。MultiresNest::captureImplicitGrid(既定 false)は試験・計測用。
+- 注意: tidy(release)はこのチケットのファイルに警告なし。gpu_multires.cpp:248 の CreatePipelines に readability-function-size が 1 件出る(main から。触っていない)。
+
 ## 並走で入ったもの: T-0119 陰解法を木の伝導に(CPU。ブランチ t-0119 を main へマージ、2026-10-06)
 - 状態: T-0119 完了(CPU)。options.implicitConduction(既定 false)で、基準より細かい(Δk 1〜8)本物のブロックの面を陰解法で解く
   (engine/src/sim/multires_implicit_conduction.cpp)。GPU はまだ(T-0127)。影のブロックは陽解法のまま(T-0128)。
