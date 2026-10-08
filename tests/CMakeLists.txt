@@ -22,6 +22,10 @@ add_executable(replay_file_test replay_file_test.cpp)
 target_link_libraries(replay_file_test PRIVATE bicameral_save)
 add_test(NAME replay_file COMMAND replay_file_test)
 
+add_executable(luau_sandbox_test luau_sandbox_test.cpp)  # Luau の殻(T-0020)
+target_link_libraries(luau_sandbox_test PRIVATE bicameral_script)
+add_test(NAME luau_sandbox COMMAND luau_sandbox_test)
+
 add_executable(reaction_test reaction_test.cpp)
 target_link_libraries(reaction_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME reaction COMMAND reaction_test)

@@ -3,7 +3,9 @@ cmake_minimum_required(VERSION 3.25)
 # vcpkg のキャッシュはリポジトリの out/vcpkg に置く(CMakePresets.json の environment)。
 # 既定の %LOCALAPPDATA% はユーザー名が日本語+空白だと vcpkg が扱えない。
 # vcpkg はこれらのフォルダが存在することを要求し、project() の中で走るので、その前に作る。
-foreach(_d IN ITEMS registries archives downloads)
+# git-config: パッチを当てる port(luau など)の git が、日本語のユーザー名の %USERPROFILE%\.config\git\config を
+# 化けた名前で開こうとして落ちるので、git の設定の場所を ASCII のフォルダに向ける(CMakePresets.json の XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。T-0020)。
+foreach(_d IN ITEMS registries archives downloads git-config)
   file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/out/vcpkg/${_d}")
 endforeach()
 
@@ -26,6 +28,7 @@ find_package(directx-headers CONFIG REQUIRED)    # d3d12.h など(Agility SDK �
 find_package(directx12-agility CONFIG REQUIRED)  # D3D12Core.dll / d3d12SDKLayers.dll(ADR-0004)
 find_package(directx-dxc CONFIG REQUIRED)        # シェーダーコンパイラ。DIRECTX_DXC_TOOL に dxc.exe の場所が入る
 message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
+find_package(unofficial-luau CONFIG REQUIRED)    # Luau(エディタ・ツール・ゲームのオーサリングのスクリプト。CPU だけ。13・T-0020)
 # ビルドの中の検査(tools/float_check: シミュの浮動小数点の禁止、04 §4)に使う
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
