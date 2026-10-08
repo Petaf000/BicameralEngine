@@ -4,9 +4,12 @@
 //   → ホストの関数を登録 → luaL_sandbox(グローバルと標準ライブラリを読み取り専用に)。
 // 実行の順番: math の種を戻す → コンパイル(luau_compile)→ 自分用のスレッド(luaL_sandboxthread)で読み込み → lua_pcall → 戻り値を文字列に。
 // 上限: 安全点ごとに Interrupt が数え、超えたら error を投げる。確保は Allocate が数え、超えたら確保に失敗する(Luau がメモリの error にする)。
+// require(T-0138): RunOptions::modules がある Run だけ、そのスレッドのグローバルに置く。モジュールは自分用の環境(読むときは Run のグローバルへ
+//   抜ける表)で 1 回だけ走り、戻り値を Run の間だけキャッシュする。名前からファイルへの解決は呼び手(パッケージ)が決める。
 // Luau のヘッダは小さいので pch.h に入れず、ここだけで include する(Luau を知るのはこのファイルだけ)。
 #include "script/luau_sandbox.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <format>
 #include <string>
@@ -21,7 +24,7 @@ namespace bicameral::script {
 
     namespace {
 
-        // --- 見せる標準ライブラリ(13 §2。os・debug は開かない。require は T-0138 のパッケージで足す)---
+        // --- 見せる標準ライブラリ(13 §2。os・debug は開かない。require は RunOptions::modules がある Run だけ。T-0138)---
         struct LibraryEntry {
             const char* name;
             lua_CFunction open;
@@ -68,6 +71,90 @@ namespace bicameral::script {
                 }
                 default: return std::string("<") + luaL_typename(state, index) + ">";
             }
+        }
+
+        // --- Luau の値 → ScriptValue(表は中まで。鍵は数か文字列。関数などは持てない)---
+        constexpr size_t MAX_VALUE_DEPTH = 64;
+
+        std::expected<ScriptValue, std::string> ReadValue(lua_State* state, int index, std::vector<const void*>& path);
+
+        std::expected<ScriptValue, std::string> ReadKey(lua_State* state, int index) {
+            if (lua_type(state, index) == LUA_TSTRING) {
+                size_t length = 0;
+                const char* text = lua_tolstring(state, index, &length);
+
+                return ScriptValue::MakeString(std::string(text, length));
+            }
+
+            if (lua_type(state, index) == LUA_TNUMBER)
+                return ScriptValue::MakeNumber(lua_tonumber(state, index));  // NaN は Luau の表の鍵になれない
+
+            return std::unexpected(
+                std::format("表の鍵にできるのは数と文字列だけ({} があった)", luaL_typename(state, index)));
+        }
+
+        std::expected<ScriptValue, std::string> ReadTable(lua_State* state, int index, std::vector<const void*>& path) {
+            const void* identity = lua_topointer(state, index);
+            if (path.size() >= MAX_VALUE_DEPTH)
+                return std::unexpected(std::format("表が深すぎる({} 段まで)", MAX_VALUE_DEPTH));
+            if (std::ranges::find(path, identity) != path.end())
+                return std::unexpected("表が自分自身を含んでいる(循環)");
+            if (!lua_checkstack(state, 3))
+                return std::unexpected("Luau のスタックが足りない");
+
+            path.push_back(identity);
+            std::vector<ScriptField> fields;
+
+            // lua_next の順番はアドレスと挿入の履歴で決まるので、集めてから並べ直す(MakeTable)
+            lua_pushnil(state);
+            while (lua_next(state, index) != 0) {
+                auto key = ReadKey(state, -2);
+                auto value = key ? ReadValue(state, lua_gettop(state), path)
+                                 : std::expected<ScriptValue, std::string>{};
+                if (!key || !value) {
+                    lua_pop(state, 2);
+                    path.pop_back();
+
+                    return std::unexpected(!key ? key.error() : value.error());
+                }
+
+                fields.push_back(ScriptField{.key = std::move(*key), .value = std::move(*value)});
+                lua_pop(state, 1);
+            }
+
+            path.pop_back();
+
+            return ScriptValue::MakeTable(std::move(fields));
+        }
+
+        std::expected<ScriptValue, std::string> ReadValue(lua_State* state, int index, std::vector<const void*>& path) {
+            switch (lua_type(state, index)) {
+                case LUA_TNIL: return ScriptValue{};
+                case LUA_TBOOLEAN: return ScriptValue::MakeBoolean(lua_toboolean(state, index) != 0);
+                case LUA_TSTRING: return ReadKey(state, index);
+                case LUA_TTABLE: return ReadTable(state, index, path);
+                case LUA_TNUMBER: {
+                    const double number = lua_tonumber(state, index);
+                    if (number != number)
+                        return std::unexpected("NaN は表にできない(ビット列が機種で変わる)");
+
+                    return ScriptValue::MakeNumber(number);
+                }
+                default:
+                    return std::unexpected(
+                        std::format("{} は表にできない(数・文字列・真偽・表だけ)", luaL_typename(state, index)));
+            }
+        }
+
+        // --- コンパイル(luau_compile は文法の誤りもバイトコードに入れて返し、luau_load が失敗する)---
+        using Bytecode = std::unique_ptr<char, decltype(&std::free)>;
+
+        Bytecode Compile(std::string_view source, size_t& bytecodeSize) {
+            lua_CompileOptions options{};
+            options.optimizationLevel = 1;
+            options.debugLevel = 1;  // エラーに行番号を付ける
+
+            return Bytecode(luau_compile(source.data(), source.size(), &options, &bytecodeSize), &std::free);
         }
 
         ScriptErrorKind ClassifyError(int status, bool safepointExceeded, bool memoryExceeded) {
@@ -185,7 +272,8 @@ namespace bicameral::script {
         lua_pop(m_state, 1);  // math
     }
 
-    std::expected<RunResult, ScriptError> LuauSandbox::Run(std::string_view chunkName, std::string_view source) {
+    std::expected<RunResult, ScriptError> LuauSandbox::Run(std::string_view chunkName, std::string_view source,
+                                                           const RunOptions& options) {
         if (!m_sealed)
             return std::unexpected(ScriptError{.kind = ScriptErrorKind::Usage, .message = "Seal の前に Run した"});
 
@@ -197,14 +285,8 @@ namespace bicameral::script {
         ReseedRandom();
         m_safepointCount = 0;
 
-        // --- コンパイル ---
-        lua_CompileOptions options{};
-        options.optimizationLevel = 1;
-        options.debugLevel = 1;  // エラーに行番号を付ける
-
         size_t bytecodeSize = 0;
-        std::unique_ptr<char, decltype(&std::free)> bytecode(
-            luau_compile(source.data(), source.size(), &options, &bytecodeSize), &std::free);
+        const Bytecode bytecode = Compile(source, bytecodeSize);
         if (!bytecode)
             return std::unexpected(
                 ScriptError{.kind = ScriptErrorKind::Memory, .message = "コンパイルの結果を確保できない"});
@@ -212,40 +294,185 @@ namespace bicameral::script {
         // --- 自分用のスレッドで読み込む(グローバルへの書き込みはこのスレッドの表に入り、ほかの Run と混ざらない)---
         lua_State* thread = lua_newthread(m_state);  // m_state のスタックに積まれ、終わるまで GC から守られる
         luaL_sandboxthread(thread);
+        BeginModules(thread, options.modules);
 
+        auto result = RunThread(thread, chunkName, bytecode.get(), bytecodeSize, options);
+
+        EndModules();
+        lua_pop(m_state, 1);  // スレッド
+
+        // 上限で止まった時のごみをすぐ片付ける(Luau は確保の失敗で GC を走らせないので、次の Run が巻き添えで止まらないように)
+        if (!result && result.error().kind == ScriptErrorKind::Memory)
+            lua_gc(m_state, LUA_GCCOLLECT, 0);
+
+        return result;
+    }
+
+    std::expected<RunResult, ScriptError> LuauSandbox::RunThread(lua_State* thread, std::string_view chunkName,
+                                                                 const char* bytecode, size_t bytecodeSize,
+                                                                 const RunOptions& options) {
         const std::string luauChunkName = "=" + std::string(chunkName);
-        if (luau_load(thread, luauChunkName.c_str(), bytecode.get(), bytecodeSize, 0) != LUA_OK) {
-            ScriptError error{.kind = ScriptErrorKind::Compile, .message = ValueToText(thread, -1)};
-            lua_pop(m_state, 1);
+        if (luau_load(thread, luauChunkName.c_str(), bytecode, bytecodeSize, 0) != LUA_OK)
+            return std::unexpected(ScriptError{.kind = ScriptErrorKind::Compile, .message = ValueToText(thread, -1)});
 
-            return std::unexpected(std::move(error));
-        }
-
-        // --- 走らせる ---
         const int status = lua_pcall(thread, 0, LUA_MULTRET, 0);
         if (status != LUA_OK) {
-            ScriptError error{.kind = ClassifyError(status, m_safepointExceeded, m_memoryExceeded),
-                              .message = ValueToText(thread, -1)};
-            lua_pop(m_state, 1);
+            const ScriptErrorKind kind = ClassifyError(status, m_safepointExceeded, m_memoryExceeded);
 
-            // 上限で止まった時のごみをすぐ片付ける(Luau は確保の失敗で GC を走らせないので、次の Run が巻き添えで止まらないように)
-            if (error.kind == ScriptErrorKind::Memory)
-                lua_gc(m_state, LUA_GCCOLLECT, 0);
-
-            return std::unexpected(std::move(error));
+            return std::unexpected(ScriptError{.kind = kind, .message = ValueToText(thread, -1)});
         }
 
-        // --- 戻り値 ---
+        return CollectResults(thread, chunkName, options);
+    }
+
+    std::expected<RunResult, ScriptError> LuauSandbox::CollectResults(lua_State* thread, std::string_view chunkName,
+                                                                      const RunOptions& options) {
         RunResult result;
         result.safepointCount = m_safepointCount;
 
         const int returnCount = lua_gettop(thread);
-        for (int index = 1; index <= returnCount; ++index)
+        for (int index = 1; index <= returnCount; ++index) {
             result.returns.push_back(ValueToText(thread, index));
+            if (!options.captureValues)
+                continue;
 
-        lua_pop(m_state, 1);  // スレッド
+            std::vector<const void*> path;
+            auto value = ReadValue(thread, index, path);
+            if (!value) {
+                std::string message = std::format("{}: 戻り値 {}: {}", chunkName, index, value.error());
+
+                return std::unexpected(ScriptError{.kind = ScriptErrorKind::Runtime, .message = std::move(message)});
+            }
+
+            result.values.push_back(std::move(*value));
+        }
 
         return result;
+    }
+
+    // --- require(T-0138。RunOptions::modules がある Run の間だけ)---
+
+    void LuauSandbox::BeginModules(lua_State* thread, const ModuleResolver* modules) {
+        m_modules = modules;
+        m_moduleLoading.clear();
+        if (!modules)
+            return;
+
+        lua_newtable(m_state);
+        m_moduleCacheRef = lua_ref(m_state, -1);
+        lua_pop(m_state, 1);
+
+        // Run のスレッドのグローバル(書き込める自分用の表)にだけ置く。殻のグローバルには無いまま
+        lua_pushcfunction(thread, &LuauSandbox::Require, "require");
+        lua_setglobal(thread, "require");
+    }
+
+    void LuauSandbox::EndModules() {
+        if (m_moduleCacheRef != 0)
+            lua_unref(m_state, m_moduleCacheRef);
+
+        m_moduleCacheRef = 0;
+        m_modules = nullptr;
+        m_moduleLoading.clear();
+    }
+
+    int LuauSandbox::Require(lua_State* state) {
+        const char* name = luaL_checkstring(state, 1);
+        auto* self = static_cast<LuauSandbox*>(lua_callbacks(state)->userdata);
+
+        // C++ のものを片付けてから error を投げる
+        bool failed = false;
+        {
+            auto loaded = self->LoadModule(state, name);
+            if (!loaded) {
+                lua_pushlstring(state, loaded.error().data(), loaded.error().size());
+                failed = true;
+            }
+        }
+
+        if (failed)
+            lua_error(state);
+
+        return 1;
+    }
+
+    std::expected<void, std::string> LuauSandbox::LoadModule(lua_State* state, std::string_view name) {
+        if (!m_modules)
+            return std::unexpected("require はパッケージの中だけで使える");
+
+        auto file = (*m_modules)(name);
+        if (!file)
+            return std::unexpected(std::format("require(\"{}\"): {}", name, file.error()));
+
+        // --- 読み込み済みならキャッシュから ---
+        lua_getref(state, m_moduleCacheRef);  // [cache]
+        lua_getfield(state, -1, file->chunkName.c_str());
+        if (!lua_isnil(state, -1)) {
+            lua_remove(state, -2);
+
+            return {};
+        }
+
+        lua_pop(state, 1);  // [cache]
+        if (std::ranges::find(m_moduleLoading, file->chunkName) != m_moduleLoading.end()) {
+            lua_pop(state, 1);
+            std::string chain;
+            for (const std::string& loading : m_moduleLoading)
+                chain += loading + " → ";
+
+            return std::unexpected(std::format("require の循環: {}{}", chain, file->chunkName));
+        }
+
+        return RunModule(state, file->chunkName, file->source);
+    }
+
+    std::expected<void, std::string> LuauSandbox::RunModule(lua_State* state, const std::string& chunkName,
+                                                            std::string_view source) {
+        // スタック: [cache] → 成功なら [モジュールの戻り値]
+        size_t bytecodeSize = 0;
+        const Bytecode bytecode = Compile(source, bytecodeSize);
+        if (!bytecode) {
+            lua_pop(state, 1);
+
+            return std::unexpected("コンパイルの結果を確保できない");
+        }
+
+        // --- モジュール用の環境: 書き込みはここに入り、読むときは Run のグローバルへ抜ける ---
+        lua_newtable(state);  // [cache, env]
+        lua_newtable(state);  // [cache, env, meta]
+        lua_pushvalue(state, LUA_GLOBALSINDEX);
+        lua_setfield(state, -2, "__index");
+        lua_setreadonly(state, -1, true);
+        lua_setmetatable(state, -2);
+
+        const std::string luauChunkName = "=" + chunkName;
+        if (luau_load(state, luauChunkName.c_str(), bytecode.get(), bytecodeSize, lua_gettop(state)) != LUA_OK) {
+            std::string message = ValueToText(state, -1);
+            lua_pop(state, 3);
+
+            return std::unexpected(std::move(message));
+        }
+
+        lua_remove(state, -2);  // [cache, function]
+
+        // --- 走らせる(失敗しても読み込み中の印を外せるよう pcall で)---
+        m_moduleLoading.push_back(chunkName);
+        const int status = lua_pcall(state, 0, 1, 0);  // [cache, result | error]
+        m_moduleLoading.pop_back();
+
+        if (status != LUA_OK || lua_isnil(state, -1)) {
+            std::string message = status != LUA_OK ? ValueToText(state, -1)
+                                                   : std::format("{}: モジュールは nil 以外の値を 1 つ返す", chunkName);
+            lua_pop(state, 2);
+
+            return std::unexpected(std::move(message));
+        }
+
+        lua_pushvalue(state, -1);                    // [cache, result, result]
+        lua_setfield(state, -3, chunkName.c_str());  // cache[chunkName] = result
+        lua_remove(state, -2);                       // [result]
+
+        return {};
     }
 
     // --- Luau から呼ばれるもの ---
