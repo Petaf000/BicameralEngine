@@ -41,7 +41,15 @@ CPU の BuildImplicitGrid と番号まで同じにして、GpuImplicit にその
 - 試験用: MakeGpuImplicitLevelImages(CPU の系を GpuImplicit の並びに。gpu_implicit.cpp の MakeNodes を使う)。
 
 ## 結果(2026-10-09、release、RTX 3070 Ti。多重格子の段を作る段だけ。暖機 20 回の後 5 回の最小)
-(下の「計測」に記入)
+| 場面(セル・節・段の数) | 多重格子の段(上限 64 = 948 Dispatch) | 上限 = 段の数 | 系を作る段(T-0129) |
+|---|---|---|---|
+| 熱い点(512・585・4 段) | 2.38 ms | 0.47 ms(48 Dispatch) | 0.27 ms |
+| 鎖(1907・5055・5 段) | 1.55 ms | 0.48 ms(63 Dispatch) | 0.14 ms |
+| たくさんの要求(20996・100723・8 段) | 2.67 ms | 2.08 ms(108 Dispatch) | 0.21 ms |
+- 本体・wt3・wt4 のランナーが idle の時に測った(並走の負荷ありの 1 回目は 2.6〜3.2 / 0.6〜2.0 ms)。
+- 上限 64 の差(1〜2 ms)は述語で飛ばした空の回の Dispatch とバリア(1 Dispatch 約 2 µs)。T-0127 の解く段(鎖 1.48〜2.91 ms)と同じくらい重いので、
+  T-0135 で減らす(回を束ねて飛ばす・間接の Dispatch・形が変わらない刻みは作り直さない)。たくさんの要求の上限 = 段の数でも 2.08 ms あるのは
+  節 10 万の段ごとの直列(1 回 14 段)と 1 スレッドの接頭和の段・Sort の長い行の数え上げ(段ごとの内訳は未計測。T-0135 で測る)。
 
 ## 判断待ち
 - なし(番号の付け方・段の作り方・上限は実装の細部。遊びへの影響なし。費用は T-0135 で減らす工学)。
@@ -63,12 +71,12 @@ CPU の BuildImplicitGrid と番号まで同じにして、GpuImplicit にその
 - 状態: T-0134 完了(範囲を絞った)。陰解法の多重格子の段(節・隣・重み・親子・子の一覧)を GPU で作り(GpuImplicitLevels・implicit_levels.hlsl)、
   CPU の BuildImplicitGrid と番号まで毎刻みビット一致・それを GpuImplicit に写して解いた結果も一致(熱い点・鎖・たくさんの要求)。段の数は GPU が値で決める。
   節の並び・ImTail・間接の Dispatch・GpuImplicit の大きさを上限から決めるのは T-0135。
-- 動いているもの: `-Filter "^gpu_multires_implicit_build(_warp)?$"`(release の HW 約 90 秒〔計測込み〕・WARP 約 50 秒 / debug の WARP 約 1.6 分・HW は下の作業ログ)。
+- 動いているもの: `-Filter "^gpu_multires_implicit_build(_warp)?$"`(release の HW・WARP 合わせて約 2.3 分〔計測込み〕/ debug の WARP 約 1.6 分・HW 約 7 分)。
   計測は `job.py run -Preset release -Exe gpu_multires_implicit_build_test -- --queue compute --measure-only`。
 - 壊れているもの: なし。
 - 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0134: 親と行の番号は鍵の表の atomic の最小 + 接頭和 + 順位・係数は 128bit の繰り上げつき atomic・
   段の数は回ごとの述語・自分のルート署名)。
 - 判断待ち: なし。
-- 注意: 多重格子の段を作る費用は上限 64 で 2.6〜3.2 ms(空の回 948 Dispatch の固定費が主)・上限 = 段の数で 0.6〜2.0 ms と重い(T-0135 で減らす)。
+- 注意: 多重格子の段を作る費用は上限 64 で 1.6〜2.7 ms(空の回 948 Dispatch の固定費が主)・上限 = 段の数で 0.5〜2.1 ms と重い(T-0135 で減らす。docs/perf.md)。
   GpuImplicitLevels の RecordCopyTo・RecordReadback は RecordBuild と同じコマンドリストで呼ぶ(バッファは COMMON から UAV に昇格させて使うため)。
   GpuImplicit はまだ CPU の系で Create する(節の並び・ImTail も CPU から)。implicit_build.hlsl の作業場の後ろにセルの座標(CellKeyWord)を足した。
