@@ -5,7 +5,7 @@
 // 刻み、見出しの busyTick・wakeTick を書く。次の刻みの種は書かない(種はつつかれたブロックと、起こす段 WakeDue が足す起こす刻みの来たブロック)。
 // 一様なブロックは起こす刻みが来た時だけ評価し、変わるなら頁に広げる印を付けるだけ(頁は枠の順に配るので、順の決まらないこのグラフの中では
 // 配らない)。TreeExpand の後、ExpandStepNode が埋めて刻む。CPU リファレンスは engine/src/sim/multires_activity.cpp の StepActive(同じ関数)。
-// 今までの丸め(cutoffRounding)の反応はこのグラフに入れない: 反応の核を 3〜4 か所に展開したノードは RTX 3070 Ti で DEVICE_HUNG になった(T-0124)。
+// ノードに反応の核を足さない(1 ノード 2 か所まで): 反応の核を 3〜4 か所に展開したノードは RTX 3070 Ti で DEVICE_HUNG になった(T-0124)。
 // 細かいレベルの熱の刻み(T-0109)では、小刻みの終わりに変わったブロックの一覧を GPU の入力にして ActivitySeedNode をもう一度投げ、
 // 面の隣を起こす(stepFlags の MR_STEP_SUBSTEP_WAKE。CPU の WakeChangedBlocks)。
 // 熱の伝導を入れる刻み(T-0107)では、刻むノードは伝導の一覧(MR_GRAPH_INPUT_CONDUCT_*)に足すだけで、刻むのは multires_conduct.hlsl の段。

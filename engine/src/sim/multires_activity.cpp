@@ -116,15 +116,6 @@ namespace bicameral::sim {
                 Schedule(nest, slot, mark);
         }
 
-        // 種 1 つ: 自分と、(八分の一, 面) ごとの隣(ActivitySeedNode と同じ)。今までの丸めなら、つつかれた印をこの刻みの印にする
-        // (待ちの丸めは刻む前に ResolvePokes が「この刻みの直前」の印にする。T-0115)
-        void WakeSeed(MultiresNest& nest, uint32_t slot, uint32_t mark, bool cutoffRounding) {
-            if (cutoffRounding && nest.blocks[slot].busyTick == MR_BUSY_POKED)
-                nest.blocks[slot].busyTick = mark;  // つつかれた刻みの印にする(T-0101)
-
-            nest_detail::WakeAround(nest, slot, mark);
-        }
-
     }  // namespace
 
     void nest_detail::WakeAround(MultiresNest& nest, uint32_t slot, uint32_t mark) {
@@ -147,14 +138,14 @@ namespace bicameral::sim {
         const uint32_t worldBlocks = nest.capacity.worldBlocks;
         const uint32_t mark = MrActivityMark(tick);
 
-        // --- 種とその面の隣に印を付ける(種は使い切る)。待ちの丸めは見出しを全部なめ、起こす刻みが来たブロックも種に(T-0115)---
-        const bool cutoff = options.cutoffRounding;
+        // --- 種とその面の隣に印を付ける(種は使い切る)。見出しを全部なめ、起こす刻みが来たブロックも種に(待ちの丸め。T-0115)。
+        //     つつかれた印は刻む前に ResolvePokes が「この刻みの直前」の印にする ---
         const uint64_t changeMark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
             const MrBlock& block = nest.blocks[slot];
-            const bool due = !cutoff && block.wakeTick <= changeMark;
+            const bool due = block.wakeTick <= changeMark;
             if ((nest.seeds[slot] != 0 || due) && block.kind == MR_BLOCK_REAL)
-                WakeSeed(nest, slot, mark, cutoff);
+                nest_detail::WakeAround(nest, slot, mark);
         }
 
         std::ranges::fill(nest.seeds, uint8_t{0});
@@ -168,21 +159,7 @@ namespace bicameral::sim {
             nest, table.View(), stepped, worldSeed, tick, options, mark);
 
         // --- 待ちの丸め: 変わったブロックは忙しさの印(= tc)を書いて次の刻みに起こし、評価したブロックは起こす刻みを書く ---
-        if (!cutoff) {
-            nest_detail::RecordWaitResults(nest, results, tick);
-            return;
-        }
-
-        // --- セルが変わったら忙しさの印(頁に広げたのも忙しい: 畳めるかを N 刻み後に調べる。T-0103)。
-        //     進める規則があった・変わった(伝導。T-0019)なら次の種に ---
-        for (uint32_t slot = 0; slot < worldBlocks; ++slot) {
-            const nest_detail::BlockStepResult& result = results[slot];
-            if (result.changed || result.expanded)
-                nest.blocks[slot].busyTick = mark;
-
-            if (result.possible || (options.conduction && result.changed))
-                nest.seeds[slot] = 1;
-        }
+        nest_detail::RecordWaitResults(nest, results, tick);
     }
 
     void FoldQuietPages(MultiresNest& nest, uint64_t tick) {

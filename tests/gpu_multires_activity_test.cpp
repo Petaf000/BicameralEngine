@@ -20,13 +20,9 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // 比べる反応の丸め(T-0121)。既定の待ちの丸め(活性のグラフも。T-0124)。今までの丸めは T-0122 で消す
-    sim::MultiresStepOptions& Rounding() {
-        static sim::MultiresStepOptions rounding;
-        return rounding;
-    }
-
-    constexpr uint32_t WARMUP_STEPS = 400;     // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)
+    // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)。待ちの丸めの全部を刻むは重い(セルごとに log2 と 128bit の割り算)ので、
+    // 1 本のリストの暖機は少なく(400 回で TDR になった。T-0121)
+    constexpr uint32_t WARMUP_STEPS = 40;
     constexpr uint32_t MEASURE_ROOT_EDGE = 8;  // 計測の世界は根 8³ = 512 個(32m 角)
 
     struct ActivityTiming {
@@ -52,7 +48,7 @@ namespace {
             gpu.RecordRemoveShadow(list, ring, shadowSlot, test::ACTIVITY_SHADOW_LEVELS);
         }
 
-        if (!gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick, Rounding()))
+        if (!gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick))
             return false;
 
         if (test::ActivityShadowExists(tick))
@@ -139,7 +135,7 @@ namespace {
                 return std::unexpected(std::format("刻み {}: {}", tick, executed.error()));
 
             test::BeginActivityTick(cpu, tick, requests);
-            test::EndActivityTick(cpu, table, tick, true, Rounding());
+            test::EndActivityTick(cpu, table, tick, true);
 
             // --- 状態の全部と次の刻みの種 ---
             if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read)) {
@@ -173,35 +169,31 @@ namespace {
     }
 
     // 1 本のリストで: 全部を刻む暖機(種はそのまま)→ 0 → 活性(全部の根が種)→ 1 → 活性(静か)× 8 → 2 → 全部を刻む × 8 → 3。
-    // rounding で反応の丸めを選ぶ(待ちの丸めの眠っている所の費用を今までの丸めと比べる。T-0121)
     std::expected<ActivityTiming, std::string> Measure(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                       gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                       const sim::MultiresStepOptions& rounding) {
+                                                       gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
         const sim::MultiresNest initial = test::MakeActivityNest(table, MEASURE_ROOT_EDGE);
         auto gpu = sim::GpuMultires::Create(device, table, initial.capacity, {.activity = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        // 待ちの丸めの全部を刻むは重い(セルごとに log2 と 128bit の割り算)ので、1 本のリストの暖機を減らす(400 回で TDR になった。T-0121)
-        const uint32_t warmupSteps = rounding.cutoffRounding ? WARMUP_STEPS : WARMUP_STEPS / 10;
         constexpr uint64_t FIRST_TICK = 10000;
         constexpr uint32_t REPEATS = 8;
         sim::MultiresNest read;
         bool uploaded = true;
         const auto record = [&](ID3D12GraphicsCommandList10* list) {
             uploaded = gpu->RecordUpload(list, initial);
-            for (uint32_t i = 0; i < warmupSteps; ++i)
-                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, i, rounding);
+            for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
+                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, i);
 
             gpu->RecordTimestamp(list, 0);
-            bool recorded = gpu->RecordStepActive(list, ring.GpuAddress(), test::STRESS_SEED, FIRST_TICK, rounding);
+            bool recorded = gpu->RecordStepActive(list, ring.GpuAddress(), test::STRESS_SEED, FIRST_TICK);
             gpu->RecordTimestamp(list, 1);
             for (uint32_t i = 1; i <= REPEATS; ++i)
-                recorded &= gpu->RecordStepActive(list, ring.GpuAddress(), test::STRESS_SEED, FIRST_TICK + i, rounding);
+                recorded &= gpu->RecordStepActive(list, ring.GpuAddress(), test::STRESS_SEED, FIRST_TICK + i);
 
             gpu->RecordTimestamp(list, 2);
             for (uint32_t i = 1; i <= REPEATS; ++i)
-                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, FIRST_TICK + REPEATS + i, rounding);
+                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, FIRST_TICK + REPEATS + i);
 
             gpu->RecordTimestamp(list, 3);
 
@@ -246,7 +238,6 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_activity_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        Rounding() = {};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
@@ -263,7 +254,7 @@ namespace {
 
         // 計測は CPU の重い比べる実行の前に(GPU が長く空くとクロックが下がる)。WARP では測らない(大きい世界の暖機が遅すぎる)
         const bool measure = options->adapter != gpu::AdapterKind::Warp;
-        const auto timing = measure ? Measure(device->Get(), *queue, *ring, *table, Rounding())
+        const auto timing = measure ? Measure(device->Get(), *queue, *ring, *table)
                                     : std::expected<ActivityTiming, std::string>(ActivityTiming{});
         const auto first = RunActivity(device->Get(), *queue, *ring, *table);
         const auto second = RunActivity(device->Get(), *queue, *ring, *table);
@@ -289,7 +280,7 @@ namespace {
         }
 
         if (measure)
-            LogTiming(Rounding().cutoffRounding ? "今までの丸め" : "待ちの丸め", *timing);
+            LogTiming("待ちの丸め", *timing);
 
         Log(Channel::Gpu, Level::Info,
             "gpu_multires_activity_test: OK({} 刻みで GPU と CPU がビット一致・次の刻みの種も一致。要約 {:016x})",

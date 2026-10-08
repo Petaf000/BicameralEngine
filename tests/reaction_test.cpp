@@ -2,8 +2,9 @@
 //   - ベイクの検査が壊れた規則を必ず落とす / 反応熱と速度の表が定義どおり(double の参照値と比べる。double はテストだけ)
 //   - 閉じた 1 セルで燃やして 36,000 刻み(10 分): 元素ごとの数とエネルギーが完全に一致し、熱が負にならない
 //   - 取り合い: O2 が足りない / 吸熱の規則が熱を使い切る場面でも、ある量を超えて使わない
-//   - 規則の並びを入れ替えても結果が同じ / 1 刻みの進行度が 1 未満の遅い反応が、確率的な丸めで期待どおりに進む
-//   - 遅すぎる反応(2^-16 µmol/刻み 未満)は進まず、そのセルは「進める規則が無い」= 刻みが変わっても変わらない(T-0089)
+//   - 規則の並びを入れ替えても結果が同じ / 1 刻みの進行度が 1 未満の遅い反応が、待ちの丸めで期待どおりに進む
+//   セルは 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める(初めの状態 = 刻み 0 に変わった。刻みは 1 から)。
+//   待ちの丸めそのものの試験は reaction_wait_test。今までの丸めと D-424 の下限の試験は T-0130 で消した
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -105,6 +106,14 @@ namespace {
         Expect(maxRelativeError < 1e-8, "速度の表が double の値からずれている");
     }
 
+    // 1 セルだけのブロックを刻み 1 から tickCount 刻み進める(初めの状態 = 刻み 0 に変わった)
+    RxCell Advance(const BakedReactionTable& table, const RxCell& cell, uint32_t tickCount, uint64_t cellId) {
+        const RxLoneCell lone = AdvanceLoneReactionCell(table, RxMakeLoneCell(cell, 0), test::REACTION_TEST_SEED, 1,
+                                                        tickCount, cellId);
+
+        return lone.cell;
+    }
+
     // --- 保存則 ---
 
     struct Conservation {
@@ -117,11 +126,13 @@ namespace {
                          std::span<const uint64_t> checkpoints) {
         const Conservation initial{.elements = CountElements(table, cell), .energy = cell.energy};
         bool conserved = true;
+        RxLoneCell lone = RxMakeLoneCell(cell, 0);
         for (uint64_t tick = 0; tick < count; ++tick) {
             if (std::ranges::find(checkpoints, tick) != checkpoints.end())
                 Log(Channel::Reaction, Level::Info, "  {} 刻み {:>6}: {}", label, tick, DescribeCell(table, cell));
 
-            cell = EvaluateReactionCell(table, cell, test::REACTION_TEST_SEED, tick, 0);
+            lone = AdvanceLoneReactionCell(table, lone, test::REACTION_TEST_SEED, tick + 1, 1, 0);
+            cell = lone.cell;
             const RxThermal thermal = RxComputeThermal(table.View(), cell);
             conserved = conserved && CountElements(table, cell) == initial.elements && cell.energy == initial.energy &&
                         thermal.heat >= 0;
@@ -159,7 +170,7 @@ namespace {
     void TestOxygenContention(const BakedReactionTable& table) {
         const auto amounts = CrateAir(table, 38600000, 50000000);
         const RxCell cell = MakeReactionCell(table, amounts, 1500000);
-        const RxCell next = EvaluateReactionCell(table, cell, test::REACTION_TEST_SEED, 0, 0);
+        const RxCell next = Advance(table, cell, 1, 0);
         const uint32_t oxygen = RxFindSlot(next, table.SpeciesId("oxygen"));
         const uint64_t left = oxygen == RX_NO_SLOT ? 0 : next.amounts[oxygen];
         Log(Channel::Reaction, Level::Info, "  O2 の取り合い: 983000 → {} µmol / {}", left, DescribeCell(table, next));
@@ -179,8 +190,7 @@ namespace {
         const RxCell cooled = RunConserving(table, cell, 600, "吸熱 2000 K", CHECKPOINTS);
         const RxThermal before = RxComputeThermal(table.View(), cell);
         const RxThermal after = RxComputeThermal(table.View(), cooled);
-        const RxThermal firstTick = RxComputeThermal(table.View(),
-                                                     EvaluateReactionCell(table, cell, test::REACTION_TEST_SEED, 0, 0));
+        const RxThermal firstTick = RxComputeThermal(table.View(), Advance(table, cell, 1, 0));
         Expect(after.temperature < before.temperature, "吸熱で温度が下がらない");
         Expect(firstTick.heat >= before.heat - (before.heat >> RX_ENDOTHERMIC_HEAT_SHIFT),
                "吸熱で 1 刻みに熱の 1/8 より多く使う");
@@ -189,13 +199,10 @@ namespace {
 
     // --- 並び順 ---
 
-    uint64_t RunVariedCells(const BakedReactionTable& table, uint32_t cellCount, uint64_t tickCount) {
+    uint64_t RunVariedCells(const BakedReactionTable& table, uint32_t cellCount, uint32_t tickCount) {
         uint64_t digest = 0;
         for (uint32_t index = 0; index < cellCount; ++index) {
-            RxCell cell = test::MakeVariedReactionCell(table, index);
-            for (uint64_t tick = 0; tick < tickCount; ++tick)
-                cell = EvaluateReactionCell(table, cell, test::REACTION_TEST_SEED, tick, index);
-
+            const RxCell cell = Advance(table, test::MakeVariedReactionCell(table, index), tickCount, index);
             digest = fx::FxHashCombine(digest, HashReactionCell(cell));
         }
 
@@ -218,16 +225,14 @@ namespace {
 
     // --- 遅い反応 ---
 
-    // 490 K の熱分解は 1 刻みの進行度が 1 µmol 未満。確率的な丸めで、36,000 刻みの合計が期待値の ±5σ に入る
+    // 490 K の熱分解は 1 刻みの進行度が 1 µmol 未満。待ちの丸めで、36,000 刻みの合計が期待値の ±5σ に入る
     void TestSlowReaction(const BakedReactionTable& table) {
         const uint32_t cellulose = table.SpeciesId("cellulose");
         const std::vector<SpeciesAmount> amounts = {{.species = cellulose, .amount = 1000000},
                                                     {.species = table.SpeciesId("nitrogen"), .amount = 4000000}};
-        RxCell cell = MakeReactionCell(table, amounts, 490000);
         const double perTick = RateValue(table.View().Rate(RuleId(table, "cellulose_pyrolysis"), 490)) * 1e6;
-        constexpr uint64_t TICKS = 36000;
-        for (uint64_t tick = 0; tick < TICKS; ++tick)
-            cell = EvaluateReactionCell(table, cell, test::REACTION_TEST_SEED, tick, 7);
+        constexpr uint32_t TICKS = 36000;
+        const RxCell cell = Advance(table, MakeReactionCell(table, amounts, 490000), TICKS, 7);
 
         const auto reacted = static_cast<double>(1000000 - cell.amounts[RxFindSlot(cell, cellulose)]);
         const double expected = perTick * TICKS;
@@ -235,37 +240,6 @@ namespace {
             perTick, TICKS, expected, reacted);
         Expect(perTick < 1.0 && perTick > 0.001, "遅い反応の試験の温度が合っていない");
         Expect(std::abs(reacted - expected) < 5.0 * std::sqrt(expected), "遅い反応が期待どおりに進まない");
-    }
-
-    // --- 遅すぎる反応は 0(眠れる。T-0089)---
-
-    // 室温の木箱のセル(セルロース + 空気)は、どの規則も下限未満なので進めず、1000 刻み回しても何も変わらない。
-    // 490 K の熱分解(1 刻み約 0.007 µmol)は、丸めで 0 になった刻みでも「進める」
-    void TestSleepCutoff(const BakedReactionTable& table) {
-        const RxCell cold = MakeReactionCell(table, CrateAir(table, 38600000, 0), 300000);
-        const uint64_t coldHash = HashReactionCell(cold);
-        bool coldQuiet = true;
-        for (uint64_t tick = 0; tick < 1000; ++tick) {
-            const RxCellStep step = StepReactionCell(table, cold, test::REACTION_TEST_SEED, tick, 3);
-            coldQuiet = coldQuiet && step.possible == 0 && HashReactionCell(step.cell) == coldHash;
-        }
-
-        Expect(coldQuiet, "室温の木箱のセルが進める / 変わる");
-
-        const std::vector<SpeciesAmount> amounts = {{.species = table.SpeciesId("cellulose"), .amount = 1000000},
-                                                    {.species = table.SpeciesId("nitrogen"), .amount = 4000000}};
-        const RxCell warm = MakeReactionCell(table, amounts, 490000);
-        uint32_t possibleTicks = 0;
-        uint32_t changedTicks = 0;
-        for (uint64_t tick = 0; tick < 1000; ++tick) {
-            const RxCellStep step = StepReactionCell(table, warm, test::REACTION_TEST_SEED, tick, 7);
-            possibleTicks += step.possible;
-            changedTicks += HashReactionCell(step.cell) != HashReactionCell(warm) ? 1 : 0;
-        }
-
-        Log(Channel::Reaction, Level::Info, "  眠り: 490 K の熱分解は 1000 刻みのうち {} 刻みで進んだ(進める: {})",
-            changedTicks, possibleTicks);
-        Expect(possibleTicks == 1000 && changedTicks > 0 && changedTicks < 1000, "遅い反応が「進める」にならない");
     }
 
     int Run() {
@@ -277,7 +251,6 @@ namespace {
         TestEndothermicLimit(table);
         TestRuleOrderIndependence(table);
         TestSlowReaction(table);
-        TestSleepCutoff(table);
         Log(Channel::Reaction, Level::Info, "いろいろなセル 4096 × 400 刻みの要約: {:016x}",
             RunVariedCells(table, 4096, 400));
 

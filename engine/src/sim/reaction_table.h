@@ -3,7 +3,7 @@
 // データの流れ:
 //   ReactionTableDefinition(元素・物質・規則。SI の値。今は C++ に手で書く: sim/reaction_test_table、M2 から Luau)
 //   → BakeReactionTable(整数の数学ライブラリだけで計算する。R7)→ BakedReactionTable(RxSpecies・RxRule・索引・速度の表)
-//   → ReactionTableView(CPU の RxEvaluateCell 用)/ そのままバッファに載せて GPU へ(shaders/sim/reaction_cells.hlsl)
+//   → ReactionTableView(CPU の RxStepCellWait 用)/ そのままバッファに載せて GPU へ(shaders/sim/reaction_cells.hlsl)
 //
 // ベイクの検査(02 §2): 元素の釣り合いが崩れた規則・知らない元素と物質・係数や次数の誤り・名前の重なりはエラーにする。
 // 反応熱は生成エンタルピーの差から自動で決まる(手で書かない)ので、エネルギーの釣り合いは構造的に守られる。
@@ -73,7 +73,7 @@ namespace bicameral::sim {
     static_assert(sizeof(reaction::RxRule) == 80);
     static_assert(sizeof(reaction::RxCell) == 112);
 
-    // CPU の RxEvaluateCell に渡す表の読み方(reaction.hlsli の Table の約束)
+    // CPU の RxStepCellWait に渡す表の読み方(reaction.hlsli の Table の約束)
     struct ReactionTableView {
         std::span<const reaction::RxSpecies> species;
         std::span<const reaction::RxRule> rules;
@@ -131,17 +131,15 @@ namespace bicameral::sim {
     // セルの中身のハッシュ(エネルギーと成分。比べるため)
     [[nodiscard]] uint64_t HashReactionCell(const reaction::RxCell& cell);
 
-    // CPU リファレンス: 1 セルの 1 刻み(GPU と同じ関数)
-    [[nodiscard]] reaction::RxCell EvaluateReactionCell(const BakedReactionTable& table, const reaction::RxCell& cell,
-                                                        uint64_t worldSeed, uint64_t tick, uint64_t cellId);
-
-    // 同じく、熱と「進める規則があったか」も返す(眠れるかの判定。T-0089)
-    [[nodiscard]] reaction::RxCellStep StepReactionCell(const BakedReactionTable& table, const reaction::RxCell& cell,
-                                                        uint64_t worldSeed, uint64_t tick, uint64_t cellId);
-
-    // 待ちの丸め(T-0105・D-429。研究): changedTick = セルのブロックが最後に変わった刻み。変わらなければ次に評価が要る刻みも返す
+    // CPU リファレンス: 1 セルの 1 刻み(待ちの丸め。T-0105・D-429)。changedTick = セルのブロックが最後に変わった刻み。
+    // 変わらなければ次に評価が要る刻みも返す
     [[nodiscard]] reaction::RxWaitStep StepReactionCellWait(const BakedReactionTable& table,
                                                             const reaction::RxCell& cell, uint64_t worldSeed,
                                                             uint64_t tick, uint64_t changedTick, uint64_t cellId);
+
+    // CPU リファレンス: 1 セルだけのブロックを tickBegin から tickCount 刻み進める(shaders/sim/reaction_cells.hlsl と同じ関数。T-0130)
+    [[nodiscard]] reaction::RxLoneCell AdvanceLoneReactionCell(const BakedReactionTable& table,
+                                                               const reaction::RxLoneCell& lone, uint64_t worldSeed,
+                                                               uint64_t tickBegin, uint32_t tickCount, uint64_t cellId);
 
 }  // namespace bicameral::sim

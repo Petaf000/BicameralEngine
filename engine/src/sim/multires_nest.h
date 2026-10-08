@@ -103,11 +103,6 @@ namespace bicameral::sim {
         // 陰解法にする最も細かいレベル = subcycleBaseLevel + implicitMaxGap。それより細かい所は陽解法のまま(頭打ちで遅い)。
         // 温度の端数(mK × 2^16)の精度で、面の流れの誤差は約 4^Δk × 2^-16 mK になり、Δk 8 を超えると 1 mK の判定に届かない(T-0119)
         uint32_t implicitMaxGap = 8;
-
-        // --- 反応の丸め(T-0115。ADR-0018)---
-        // false(既定): 待ちの丸め(reaction.hlsli の RxStepCellWait。D-429)。見出しの busyTick = tc、wakeTick = 次に評価の要る刻みの印。
-        // true: 今までの丸め(RxStepCell と D-424 の下限)。GPU はまだこちらなので、GPU と比べるテストだけが使う(T-0121 で消す)
-        bool cutoffRounding = false;
     };
 
     constexpr uint32_t MULTIRES_MAX_SUBCYCLE_GAP = 3;

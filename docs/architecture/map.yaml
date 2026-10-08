@@ -219,11 +219,11 @@ views:
           code: "tools/physics_lab/avbd_solver.cpp::AvbdSolver::Step", ticket: T-0016,
           note: "--integer で整数。--out で軌跡、plot_lab.py で画像" }
       - { id: reactionhlsl, group: shared, label: "reaction.hlsli<br/>1 セルの反応: 温度・進行度・取り合い・更新",
-          code: "shaders/common/reaction.hlsli::RxEvaluateCell", ticket: T-0014, doc: docs/design/02-reaction-system.md,
-          note: "HLSL と C++ で共通。量は物質量(µmol。ADR-0012)。エネルギーの合計は変えない。端数は確率的に丸める" }
-      - { id: reactionwait, group: shared, label: "待ちの丸め(研究)<br/>遅い反応が次に 1 単位進む刻み",
+          code: "shaders/common/reaction.hlsli::RxResolveContention", ticket: T-0014, doc: docs/design/02-reaction-system.md,
+          note: "HLSL と C++ で共通。量は物質量(µmol。ADR-0012)。エネルギーの合計は変えない。端数は待ちで丸める(ADR-0018)" }
+      - { id: reactionwait, group: shared, label: "待ちの丸め<br/>遅い反応が次に 1 単位進む刻み",
           code: "shaders/common/reaction.hlsli::RxStepCellWait", ticket: T-0105, doc: docs/design/02-reaction-system.md,
-          note: "ブロックが最後に変わった刻みから幾何分布の待ち(ADR-0018)。眠らせても全部とビット一致。世界への切り替えは T-0115" }
+          note: "ブロックが最後に変わった刻みから幾何分布の待ち(ADR-0018)。眠らせても全部とビット一致。今までの丸めは T-0130 で消した" }
       - { id: reactionwaittest, group: tests, label: "reaction_wait_test<br/>待ちの分布・引き直し・眠らせる・何年分",
           code: "tests/reaction_wait_test.cpp::TestSleepMatchesFull", ticket: T-0105 }
       - { id: reactiontable, group: simlib, label: "BakeReactionTable<br/>定義 → 整数の表(元素の釣り合いの検査)",
@@ -276,7 +276,7 @@ views:
           note: "保存量が毎刻み一致。GPU(HW・WARP)は状態の全部と次の刻みの種が毎刻み CPU と一致" }
       - { id: multirespages, group: simlib, label: "ExpandWantedPages<br/>一様なブロックを頁に広げる(枠の順)",
           code: "engine/src/sim/multires_nest.cpp::ExpandWantedPages", ticket: T-0102, doc: docs/design/17-multiresolution.md,
-          note: "見出しの枠とセルの頁は別のプール。一様(覆われていないセルが同じ値)は頁なしで値 1 つ。反応が進む時だけ刻んだ後に頁を配る。GPU は multires_tree.hlsl の TreeExpand → ExpandStepNode / StepExpanded" }
+          note: "見出しの枠とセルの頁は別のプール。一様(覆われていないセルが同じ値)は頁なしで値 1 つ。反応が進む時だけ刻んだ後に頁を配る。GPU は multires_tree.hlsl の TreeExpand → ExpandStepNode / StepExpandedWaitPass" }
       - { id: multiresfold, group: simlib, label: "FoldQuietPages<br/>静かで一様(かほぼ同じ)になった頁を畳む(枠の順)",
           code: "engine/src/sim/multires_activity.cpp::FoldPage", ticket: T-0103, doc: docs/design/17-multiresolution.md,
           note: "ちょうど静かになった刻み(MrWantsFoldCheck)に 1 回だけ一様か調べ、一様なら値 1 つに戻して頁を返す。GPU は multires_tree.hlsl の TreeFoldCheck(1 グループ = 1 枠)→ TreeFold(1 グループの累積和)。許容差つき(T-0104・GPU は T-0112)は計器で測れない差なら平均の切り捨てで畳み、余りと静かになった端数の枠の端数を帳簿へ(MrFoldStats・CPU は AddLedgerBits、GPU は繰り上げつきの atomic の AddLedgerCarrying)" }
@@ -409,7 +409,7 @@ views:
       - [probephysicstest, probephysics]
       - [probephysicstest, physicsworld, "ビット一致"]
       - [gpureactiontest, reactionhlsl, "GPU(.cso)と CPU で同じ関数"]
-      - [multireshlsl, reactionhlsl, "葉のセルを RxEvaluateCell で刻む"]
+      - [multireshlsl, reactionwait, "葉のセルを RxStepCellWait で刻む"]
       - [multiresnest, multireshlsl]
       - [multirestree, multirestreehlsl]
       - [multirestreehlsl, multireshlsl]

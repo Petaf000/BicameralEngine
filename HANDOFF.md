@@ -1,11 +1,10 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-06 / チケット: T-0122 仮の世界と覗き窓を待ちの丸めに — 完了(古いコードを消すのは T-0130 に分けた)
+最終更新: 2026-10-09 / チケット: T-0130 今までの丸めのコードを消す — 完了
 
 ## 状態(3 行以内)
-- 世界のどこも待ちの丸め(D-429。D-424 は置き換えた): 仮の世界(ProbeStepCell・ConductBlock)はブロックごとの tc と起こす刻みを持ち、適用の単位の後の
-  WakeDueBlocks が起こす刻みの来たブロックを一覧に足す。覗き窓の入れ子も待ちの丸め。HW・WARP・CPU が毎刻みビット一致。
-- 今までの丸めのコード(cutoffRounding・RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION)は誰も使わないまま残っている → T-0130 で消す。
+- 今までの丸め(D-424 の下限と毎刻みの乱数の丸め)のコードを消した。反応はどこも待ちの丸め(RxStepCellWait。D-429・ADR-0018)だけ。
+- 1 セルの反応の試験(reaction・gpu_reaction)は 1 セルだけのブロック(RxAdvanceLoneCell)で進める。T-0122 と T-0129 を合わせた main + この変更で release の全部のテストが通過。
 
 ## 並走で入ったもの: T-0129 陰解法の系を GPU で組み立てる(一部。ブランチ t-0129 を main へマージ、2026-10-06)
 - 状態: T-0129 完了(範囲を絞った)。陰解法の系のうち未知数・境のセル・面・セルの面の一覧を GPU の木から作り(GpuImplicitBuild・implicit_build.hlsl)、
@@ -74,6 +73,12 @@
 - 注意: 回数は場の鋭さで変わる(決定的だが費用が一定でない)。D-432 の M2 は方式①のまま。次は T-0117(GPU)。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0130)**: release の全部のテスト 84 本を 3 回に分けて通過(T-0122 と T-0129 を合わせた main + この変更。直したものなし):
+  `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check)"`(31 本・約 4 分)/
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe)|window_replay)"`(33 本・約 20 分)/ `-Filter "^gpu_multires"`(20 本・約 40 分。
+  並走の負荷で implicit_tree 343 s・uniform 270 s・subcycle_warp 425 s)。gpu_multires_*・gpu_probe_*・gpu_reaction は HW も WARP も CPU と毎刻みビット一致。
+  tidy(release)警告なし(CreatePipelines の readability-function-size も、古いパイプラインを消して消えた)。archmap OK(123)。
+  debug で `-Filter "^(reaction|reaction_contention|reaction_wait|gpu_reaction_warp|gpu_reaction|multires_activity|gpu_multires_warp)$"` の 7 本が通過(約 4 分。FX_ASSERT あり)。
 - **テスト(2026-10-06、T-0122)**: release で `-Filter "gpu_probe|window_replay"` の 13 本(gpu_probe_sim・_trace・_physics・_physics_compute・_peek の HW と WARP・gpu_probe_fire・window_replay 3 本。約 11 分)、
   足した試験の後に `-Filter "^gpu_probe_sim(_warp)?$"` が通過。debug で `-Filter "^gpu_probe_(sim|trace|peek)_warp$"`(約 8 分。sim_warp 312 s)が通過。
   仮の世界と覗き窓のファイルだけ変えたので、多重解像度・反応の CPU のテストと gpu_multires_* は流していない(共有の reaction.hlsli・multires の関数は変えていない)。
@@ -114,7 +119,7 @@
   `--timeout 2400` で裏で投げ、runner/logs/<job>.result.json を待つ。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **HW の Work Graph は反応の核を 1 ノードに 3〜4 か所展開すると DEVICE_HUNG**(T-0124。原因は推定・BACKLOG)。活性のグラフと伝導の段の反応は待ちの丸めだけ(RecordStepActive は cutoffRounding なら false、RecordStep は伝導 + cutoffRounding を FX_ASSERT で断る)。
+- **HW の Work Graph は反応の核を 1 ノードに 3〜4 か所展開すると DEVICE_HUNG**(T-0124。原因は推定・BACKLOG)。反応はどこも待ちの丸めだけ(今までの丸めは T-0130 で消した)。
 - 待ちの丸めは重い(セルごとに log2 と 128bit の割り算): 活性の静かな刻みも約 0.4 ms(今までの丸め 0.08 ms。観察の枠の評価と推定)・全部を刻む 0.42 ms(0.026)。
   1 本のリストに 400 回積むと TDR になった(計測の暖機は 1/10)。→ T-0123。
 - **細かいレベルの熱の小刻みの GPU は Δkmax 3 で 8.4 ms/刻み**(T-0111 で 40 から縮めた。鎖は Δkmax 1・2・3 で 0.55・2.2・8.4 ms)。小刻み 1 回 = 印 25・頁 3・端数 4・埋める 2・流れ 25・
@@ -136,6 +141,9 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。ADR-0018 追記〔T-0130〕)1 セルの反応の試験は 1 セルだけのブロック(セル + changedTick)を待ちの丸めで進める。GPU の試験は区間の初めに
+  「直前の刻みに変わった」とみなす(セルごとの changedTick をバッファに持たない。待ちは記憶が無いので偏らない)。MrSameCell は RxSameCell を呼ぶ。
+  D-424 の「進まない」を確かめる試験(TestSleepCutoff)と、取り合いの試験の「刻みの乱数の丸め」の版は消した(待ちの丸めの版だけ残す)。
 - (Claude が決めた。ADR-0018 追記〔T-0122〕)仮の世界の tc と起こす刻みはブロック(4³)ごとの 64bit の印(ProbeChangeMark = 刻み + 1)を予定の印のバッファ(u11)の後ろに
   (ルート署名は変えない)。つつきは tc = 印 − 1。計算したブロックは、変わったら tc = 印、変わったか次の刻みに評価が要れば次の一覧へ(起こす刻み = RX_WAIT_NEVER で
   WakeDueBlocks と重ならない)、ほかは起こす刻み(セルの最小)を書く。初めの起こす刻みは CPU が作って写す(ProbeInitialBlockWakes: 刻み 0 を tc = 0 で計算してみる)。
@@ -166,9 +174,10 @@ NEXT.md の先頭(T-0130 → T-0123)。判断待ちは無し(D-433〜D-436)。�
   ApplyCommand(つつきの tc)・WakeDueBlocks(probe_sim.cpp の RecordUnit が適用の後に投げる)。印の場所は probe_sim.hlsli の PROBE_SCHEDULE_CHANGED_WORD・_WAKE_WORD。
   CPU は probe_sim.cpp の ProbeReference::Advance(全部を計算し、ブロックの待ちの最小 ≤ 次の刻みの印を POSSIBLE に)と ProbeInitialBlockWakes。
   元のテストの世界(木箱と空気)は熱が広がり続けて、1500 刻みでも待ちで起きるブロックが 0 だった。起こす道は gpu_probe_sim の TestSlowWake だけが通る。
-- **T-0130 でやること**: multires_nest の cutoffRounding の道(StepBlocks の evaluated・WakeSeed の cutoff)・gpu_multires の RoundingFlags と Main・StepExpanded の
-  パイプライン(multires_step.hlsl)・MR_STEP_CUTOFF_ROUNDING・reaction.hlsli の RxStepCell 系・reaction_table の EvaluateReactionCell・StepReactionCell・
-  reaction_cells.hlsl(gpu_reaction)・tests(reaction・reaction_contention・multires_activity の比べ・gpu_multires_activity / _conduction の計測の今までの丸め)・map.yaml。
+- **1 セルの反応の試験(T-0130)**: reaction.hlsli の RxLoneCell・RxAdvanceLoneCell(C++ は reaction_table の AdvanceLoneReactionCell)。changedTick は「刻み」の単位
+  (多重解像度は印 = 刻み + 1 を渡す。MrStepCellWait)。gpu_reaction は区間(50 刻み)の初めに「直前の刻みに変わった」とみなす(刻みは 1 から)ので、
+  区間の切り方を変えると CPU 側(CompareSegment)も合わせる。reaction_test の「いろいろなセル」の要約と gpu_reaction の要約はもう同じにならない。
+  stepFlags の 8 は空き(MR_STEP_CUTOFF_ROUNDING を消した)。計測の暖機(gpu_multires_conduction・_activity)は待ちの丸めで 40 回(400 回は TDR)。
 - **伝導の段の待ちの丸め(T-0125)**: multires_conduct.hlsli の ConductMarkBlock(最初の小刻みに一様なブロックを EvaluatesUniform → EvaluateUniformCells →
   GroupMinTick → FinishWaitBlock か頁の印)と ConductApplyBlock(ApplyCell が MrStepCellWait、最後に FinishWaitBlock)。multires_wait_step.hlsli を含めて
   CurrentChangeMark・MinTick・FinishWaitBlock を使い回す。GroupMinTick は 1 回の段で 1 回だけ呼ぶ(2 回続けるとスレッド 0 の初期化と読みが競合する)。
@@ -176,7 +185,7 @@ NEXT.md の先頭(T-0130 → T-0123)。判断待ちは無し(D-433〜D-436)。�
 - **GPU の待ちの丸め(T-0121・T-0124)**: gpu_multires.cpp の RecordStep → RecordStepWait(RecordWake〔WakeDue〕→ m_stepWaitPipeline → PassExpand → m_stepExpandedWaitPipeline)。
   活性は RecordStepActive の初めに RecordWake(STEP_FLAG_WAKE_SEEDS。m_activityWrite = この刻みの一覧)→ グラフ(ActivityStepNode・ObserverStepNode = StepBlockWait、ExpandStepNode = StepExpandedWait)。
   シェーダーは multires_step.hlsl の WakeDue・StepWait・StepExpandedWaitPass と multires_wait_step.hlsli(CPU の StepBlocks と RecordWaitResults の GPU 版)。
-  今までの丸めは stepFlags の MR_STEP_CUTOFF_ROUNDING(RoundingFlags)。テストは各ファイルの Rounding() で丸めを選ぶ。HW の不具合を調べた手順と結果は T-0124 のチケットの「結論」。
+  HW の不具合を調べた手順と結果は T-0124 のチケットの「結論」。
   **活性のグラフのノードに反応の核(MrStepCell* / RxStepCell*)を足さない**(1 ノード 2 か所まで。3〜4 か所で HW が止まった)。HW を止めうる実験は wt2 のランナーが idle の時に。
   device_bash は 60〜75 秒で切れるので、テストは submit.py で投げて sleep 40 ずつ待つ。
 - **ほぼ同じ頁を畳む GPU(T-0112)**: gpu_multires.cpp の RecordFoldPages(list, ring, tick, tolerance)(許容差なしの版は MrExactFoldTolerance で呼ぶ)。

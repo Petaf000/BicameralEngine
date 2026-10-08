@@ -1,7 +1,9 @@
 // reaction_cells.hlsl — 1 セルの反応の評価(shaders/common/reaction.hlsli)を GPU で走らせる compute シェーダー(T-0014)。
 // 1 スレッド = 1 セル。セルどうしは独立(隣へは書かない。02 §3 の 4)なので、スレッドの中で tickCount 刻みをまとめて進める。
+// 各セルを 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める。区間の初めに「直前の刻みに変わった」とみなす
+// (つつかれたのと同じ。待ちは記憶が無いので引き直しても偏らない)。T-0130 で今までの丸めから移した。
 // 表(物質・規則・索引・速度)はベイクしたものをそのまま t0〜t3 に、セルは u0。最初の区間だけ初めのセル(t4)から読む。
-// CPU リファレンス(sim::EvaluateReactionCell)とビット一致することを tests/gpu_reaction_test.cpp が確かめる。
+// CPU リファレンス(sim::AdvanceLoneReactionCell)とビット一致することを tests/gpu_reaction_test.cpp が確かめる。
 // 世界(Work Graphs の段)への組み込みは T-0089。
 #include "common/reaction.hlsli"
 
@@ -16,7 +18,7 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_cellCount;
     uint32_t g_tickCount;
     uint32_t g_tickBeginLow;
-    uint32_t g_tickBeginHigh;
+    uint32_t g_tickBeginHigh;  // 区間の初めの刻み(1 以上)
     uint32_t g_seedLow;
     uint32_t g_seedHigh;
     uint32_t g_fromInitial;  // 1 なら初めのセル(t4)から読む
@@ -53,8 +55,8 @@ struct GpuReactionTable {
 
     const uint64_t tickBegin = FX_U64(g_tickBeginHigh, g_tickBeginLow);
     const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
-    for (uint32_t i = 0; i < g_tickCount; ++i)
-        cell = RxEvaluateCell(table, cell, seed, tickBegin + i, index);
+    const RxLoneCell lone = RxAdvanceLoneCell(table, RxMakeLoneCell(cell, tickBegin - 1), seed, tickBegin, g_tickCount,
+                                              index);
 
-    g_cells[index] = cell;
+    g_cells[index] = lone.cell;
 }

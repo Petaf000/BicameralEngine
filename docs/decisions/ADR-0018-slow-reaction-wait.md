@@ -99,3 +99,8 @@
   (眠っているブロックを計算し直しても待ちの最小は同じ値なので、GPU の起こす刻みと一致する)。
 - 覗き窓(probe_peek)の入れ子も待ちの丸め(StepNest・RecordStep の既定)。これで世界のどこも D-424 の下限を使わない(D-424 は置き換えた)。
   今までの丸めのコード(cutoffRounding・RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION)を消すのは T-0130。
+- (追記 T-0130)今までの丸めのコードを消した: MultiresStepOptions::cutoffRounding と CPU・GPU のその道(multires_step.hlsl の Main・StepExpanded・
+  MR_STEP_CUTOFF_ROUNDING)・RxStepCell・RxEvaluateCell・RxCollectCandidates・RxDesiredExtent・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION・MrStepCell(Detailed)・
+  MrUniformWouldChange。1 セルの反応の試験(reaction・gpu_reaction)は、セルを 1 セルだけのブロックとして待ちの丸めで進める
+  (RxAdvanceLoneCell。changedTick = セルが最後に変わった刻み。GPU の試験は区間の初めに「直前の刻みに変わった」とみなす。待ちは記憶が無いので偏らない)。
+  取り合いの丸めの乱数(RxShrinkRandom。種と規則の鍵のハッシュの上位 32bit)は変えていない。

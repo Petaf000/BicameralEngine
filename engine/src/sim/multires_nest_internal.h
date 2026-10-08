@@ -81,7 +81,6 @@ namespace bicameral::sim::nest_detail {
 
     struct BlockStepResult {
         bool changed = false;   // セル(か端数)が 1 つでも変わった
-        bool possible = false;  // 進める反応の規則があった
         bool expanded = false;  // この刻みに一様から頁に広げた
 
         // --- 待ちの丸め(T-0115)---

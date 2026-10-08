@@ -196,14 +196,14 @@ namespace bicameral::sim {
             return FractionAt(nest, fractionSlot, index).energy;
         }
 
-        // 頁を持つブロックの刻むセル: 伝導の変化(deltas が空なら無し)を足し、react なら反応を進める
-        // (待ちの丸めなら、変わらなかったセルの次に評価の要る刻みの最小も求める。T-0115)
+        // 頁を持つブロックの刻むセル: 伝導の変化(deltas が空なら無し)を足し、react なら反応を待ちの丸めで進める
+        // (変わらなかったセルの次に評価の要る刻みの最小も求める。T-0115)
         nest_detail::BlockStepResult StepPagedBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
                                                     uint64_t worldSeed, uint64_t tick, bool react,
-                                                    std::span<const MrEnergyDelta> deltas, bool cutoffRounding) {
+                                                    std::span<const MrEnergyDelta> deltas) {
             const MrBlock block = nest.blocks[slot];
             nest_detail::BlockStepResult result;
-            result.evaluated = react && !cutoffRounding;
+            result.evaluated = react;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
@@ -220,11 +220,7 @@ namespace bicameral::sim {
                 }
 
                 // --- 反応 ---
-                if (react && cutoffRounding) {
-                    const RxCellStep step = MrStepCellDetailed(view, cell, worldSeed, tick, block, index);
-                    result.possible = result.possible || step.possible != 0;
-                    cell = step.cell;
-                } else if (react) {
+                if (react) {
                     const RxWaitStep step = MrStepCellWait(view, cell, worldSeed, tick, block, index);
                     result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     cell = step.cell;
@@ -280,21 +276,13 @@ namespace bicameral::sim {
             const auto blockCount = static_cast<uint32_t>(nest.blocks.size());
             std::vector<BlockStepResult> results(blockCount);
 
-            if (!options.cutoffRounding)
-                ResolvePokes(nest, tick);
+            ResolvePokes(nest, tick);
 
             // --- 一様なブロック: 反応が進む時だけ頁に広げる(T-0102)。伝導の流れがある時も(T-0019)---
             for (uint32_t slot = 0; slot < blockCount; ++slot) {
                 MrBlock& block = nest.blocks[slot];
                 if (stepped[slot] == 0 || !MrIsUniform(block))
                     continue;
-
-                if (options.cutoffRounding) {
-                    if (MrUniformWouldChange(view, UniformAt(nest, slot), worldSeed, tick, block))
-                        block.page = MR_PAGE_WANTED;
-
-                    continue;
-                }
 
                 // --- 待ちの丸め(T-0115): 起こす刻みが来た時だけ評価する(その前はどのセルも変わらない)---
                 if (MrChangeMark(tick) < block.wakeTick)
@@ -324,8 +312,7 @@ namespace bicameral::sim {
                     continue;
 
                 const BlockStepResult earlier = results[slot];
-                results[slot] = StepPagedBlock(nest, view, slot, worldSeed, tick, stepped[slot] != 0, deltas,
-                                               options.cutoffRounding);
+                results[slot] = StepPagedBlock(nest, view, slot, worldSeed, tick, stepped[slot] != 0, deltas);
                 results[slot].expanded = earlier.expanded;
                 results[slot].changed = results[slot].changed || earlier.changed;
             }
@@ -472,8 +459,7 @@ namespace bicameral::sim {
 
         const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(nest, table.View(), stepped,
                                                                                           worldSeed, tick, options, 0);
-        if (!options.cutoffRounding)
-            nest_detail::RecordWaitResults(nest, results, tick);
+        nest_detail::RecordWaitResults(nest, results, tick);
     }
 
     void PullBackShadowChain(MultiresNest& nest, const BakedReactionTable& table, uint32_t firstShadowSlot,

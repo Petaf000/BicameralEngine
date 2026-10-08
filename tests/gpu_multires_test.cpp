@@ -21,12 +21,6 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // 比べる反応の丸め(T-0121)。既定の待ちの丸め(ハードウェアの wakeTick の不具合は T-0124 で直した)。今までの丸めは T-0122 で消す
-    sim::MultiresStepOptions& Rounding() {
-        static sim::MultiresStepOptions rounding;
-        return rounding;
-    }
-
     // 計測の前に刻みを何回投げるか(短い仕事の間は GPU のクロックが上がらず、時間が 6〜8 倍に出る)
     constexpr uint32_t WARMUP_STEPS = 400;
 
@@ -59,7 +53,7 @@ namespace {
             gpu.RecordRemoveShadow(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
         }
 
-        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, tick, Rounding());
+        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, tick);
         if (test::MultiresShadowExists(scenario, tick))
             gpu.RecordPullBack(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
 
@@ -166,7 +160,7 @@ namespace {
             if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
                 return std::unexpected(executed.error());
 
-            test::StepMultiresScene(cpu, table, scenario, tick, Rounding());
+            test::StepMultiresScene(cpu, table, scenario, tick);
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(compared.error());
         }
@@ -193,7 +187,7 @@ namespace {
                     return false;
 
                 gpu->RecordProcessRequests(list, ring.GpuAddress());
-                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, tick, Rounding());
+                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, tick);
 
                 return true;
             };
@@ -202,7 +196,7 @@ namespace {
 
             sim::SubmitRequests(cpu, requests);
             sim::ProcessRequests(cpu);
-            sim::StepNest(cpu, table, test::STRESS_SEED, tick, Rounding());
+            sim::StepNest(cpu, table, test::STRESS_SEED, tick);
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(compared.error());
         }
@@ -235,7 +229,7 @@ namespace {
         }
 
         gpu.RecordTimestamp(list, 1);
-        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, WARMUP_STEPS, Rounding());
+        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, WARMUP_STEPS);
         if (!real)
             gpu.RecordPullBack(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
 
@@ -271,7 +265,7 @@ namespace {
 
         const D3D12_GPU_VIRTUAL_ADDRESS ringAddress = ring.GpuAddress();
         for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
-            gpu->RecordStep(list, ringAddress, test::MULTIRES_TEST_SEED, i, Rounding());
+            gpu->RecordStep(list, ringAddress, test::MULTIRES_TEST_SEED, i);
 
         bool recorded = true;
         RecordChainEvents(list, *gpu, ringAddress, scenario == test::MultiresScenario::Real, recorded);
@@ -299,7 +293,6 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        Rounding() = {};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {

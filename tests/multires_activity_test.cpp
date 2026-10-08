@@ -77,9 +77,8 @@ namespace {
         return count;
     }
 
-    // check = false なら活性だけ刻む(2 回目の決定性の確認。debug で遅いので比べる相手と総当たりを省く)。
-    // options は check = false の時だけ(今までの丸めと刻んだ数を比べる。T-0115)
-    ActivityRun RunActivity(const BakedReactionTable& table, bool check, const MultiresStepOptions& options = {}) {
+    // check = false なら活性だけ刻む(2 回目の決定性の確認。debug で遅いので比べる相手と総当たりを省く)
+    ActivityRun RunActivity(const BakedReactionTable& table, bool check) {
         MultiresNest active = test::MakeActivityNest(table);
         MultiresNest full = test::MakeActivityNest(table);
         ActivityRun run;
@@ -89,7 +88,7 @@ namespace {
             const std::vector<MrRequest> requests = test::MakeStressRequests(active, tick);
             test::BeginActivityTick(active, tick, requests);
             if (!check) {
-                test::EndActivityTick(active, table, tick, true, options);
+                test::EndActivityTick(active, table, tick, true);
                 continue;
             }
 
@@ -142,7 +141,6 @@ namespace {
         const ActivityRun first = RunActivity(*table, true);
         const ActivityRun second = RunActivity(*table, false);
         Expect(first.digest == second.digest, "2 回の実行で全部が一致");
-        const ActivityRun cutoff = RunActivity(*table, false, {.cutoffRounding = true});
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_activity_test: FAILED ({} 件)", failureCount);
@@ -151,9 +149,9 @@ namespace {
 
         Log(Channel::Sim, Level::Info,
             "multires_activity_test: OK({} 刻み・刻んだブロック {} / 本物のブロック {}・頁 {}・最後の刻み {}・"
-            "レベルをまたぐ面の隣 {}・要約 {:016x}・今までの丸め〔D-424 の下限〕なら刻んだブロック {})",
+            "レベルをまたぐ面の隣 {}・要約 {:016x})",
             test::ACTIVITY_TICKS, first.scheduled, first.realBlocks, first.usedPages, first.lastScheduled,
-            first.crossLevel, first.digest, cutoff.scheduledCounter);
+            first.crossLevel, first.digest);
 
         return 0;
     }

@@ -115,8 +115,6 @@ foreach(_entry IN ITEMS Initialize BeginSubstep Broadphase Narrowphase PrepareMa
   bicameral_add_shader(sim/physics_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME physics_${_snake})
 endforeach()
 bicameral_add_shader(sim/physics_graph.hlsl PROFILE lib_6_8)  # 物理の広域の選別 → 接触の生成の Work Graph(T-0092)
-bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY Main)  # 多重解像度の入れ子の反応の刻み(T-0017)
-bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepExpanded NAME multires_step_expanded)  # 頁に広げて刻む(T-0102)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WakeDue NAME multires_step_wake)  # 起こす段: 見出しを全部なめる(T-0121)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepWait NAME multires_step_wait)  # 待ちの丸めで全部を刻む(T-0121)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepExpandedWaitPass NAME multires_step_expanded_wait)  # 待ちの丸めで頁に広げて刻む(T-0121)

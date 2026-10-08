@@ -4,7 +4,7 @@
 //
 // データの流れ:
 //   ベイクした表(engine/src/sim/reaction_table.cpp の BakeReactionTable: 物質・規則・索引・速度の表)
-//   + セル(成分 = 物質 ID の昇順に並べた物質量、エネルギー)→ RxEvaluateCell → 次の刻みのセル
+//   + セル(成分 = 物質 ID の昇順に並べた物質量、エネルギー)→ RxStepCellWait(待ちの丸め。ADR-0018)→ 次の刻みのセル
 //
 // 保存則(D-206・04 R2):
 //   - 元素: 反応物と生成物は「係数 × 進行度」で整数のまま増減する(ADR-0012)。ベイクが元素の釣り合いを確かめるので、元素の数は完全に保存される。
@@ -38,18 +38,12 @@ FX_CONST uint32_t RX_MAX_PRODUCTS = 3;
 FX_CONST uint32_t RX_MAX_CANDIDATES = 16;        // 1 セルで同時に評価する規則の数の上限
 FX_CONST uint32_t RX_RATE_TABLE_KELVINS = 4096;  // 速度の表は 0〜4095 K を 1 K ごと。それより熱いと 4095 K の値
 FX_CONST uint32_t RX_NO_SLOT = 0xFFFFFFFFu;
-FX_CONST uint32_t RX_RANDOM_PURPOSE = 0x52780001u;  // 進行度の端数を丸める乱数の用途(FxHash64)
+FX_CONST uint32_t RX_RANDOM_PURPOSE = 0x52780001u;  // 取り合いの丸めの乱数の用途(FxHash64)
 
 // 吸熱の規則が 1 刻みに使える熱は、今の熱の 2^-RX_ENDOTHERMIC_HEAT_SHIFT まで(温度が 1 刻みで 1/8 より下がらない)。
 // 1 刻みに 1 回の評価(陽的)だと、速い吸熱の反応は始めの温度の速さで進み続け、1 刻みで 0 K まで冷えてしまう(T-0014 で確認)。
 // 温度が下がれば速さも指数的に落ちるので、刻みごとに少しずつ冷えて自然に止まる。R-REACT-1(細分)で見直す
 FX_CONST uint32_t RX_ENDOTHERMIC_HEAT_SHIFT = 3;
-
-// 遅すぎる反応は進まない(T-0089・ユーザー 2026-10-01): 1 刻みの進みの期待値が 2^-16 µmol 未満(端数だけで、この値より小さい)なら 0。
-// 端数を乱数で丸めるので、これが無いと室温の木のごく僅かな酸化のような反応が確率的に起き続け、
-// 「何も変わらなかったブロックを眠らせる」と、全部のセルを計算した場合と結果がずれる。この下限があれば、
-// どの規則も進めない(RxCellStep::possible == 0)セルは、刻みが変わっても(乱数が変わっても)必ず変わらない
-FX_CONST uint64_t RX_EXTENT_CUTOFF_FRACTION = FX_U64(0u, 0x10000u);  // 端数(2^-32 µmol 単位)の下限 = 2^-16 µmol
 
 // 望む進行度の上限。望む量は保存量ではないので飽和させてよく、この後で反応物の量に縮める
 FX_CONST uint64_t RX_EXTENT_SATURATION = FX_U64(0x40000000u, 0u);
@@ -105,7 +99,6 @@ struct RxThermal {
 // 1 刻みで評価する規則の候補と、その進行度(µmol)
 struct RxCandidates {
     uint32_t count;
-    uint32_t possible;  // 進める(望む進行度の期待値が下限以上の)規則が 1 つでもあれば 1。丸めで 0 になった規則も数える
     uint32_t rules[RX_MAX_CANDIDATES];
     uint64_t extents[RX_MAX_CANDIDATES];
 };
@@ -220,139 +213,12 @@ FX_FN int32_t RxRateExponent(uint64_t packed) {
     return (int32_t)(uint32_t)(packed & FX_LOW32_MASK);
 }
 
-// 望む進行度の 1 つの値(丸めた後)と、丸める前の期待値が下限(RX_EXTENT_CUTOFF_FRACTION)以上だったか
-struct RxExtentSample {
-    uint64_t value;
-    uint32_t possible;
-};
-
-FX_FN RxExtentSample RxMakeExtentSample(uint64_t value, bool possible) {
-    RxExtentSample sample;
-    sample.value = value;
-    sample.possible = possible ? 1 : 0;
-
-    return sample;
-}
-
-// 反応物の量の積 × 仮数 × 2^指数 を整数にし、端数(32bit)は乱数 random と比べて丸める(確率的な丸め。R6 の乱数なので決定的)。
-// 1 刻みの進行度が 1 µmol に満たない遅い反応も、平均では正しい速さで進む。ただし 2^-16 µmol 未満の端数だけなら 0(進まない)
-FX_FN RxExtentSample RxScaleExtent(FxU128 product, uint64_t mantissa, int32_t exponent, uint32_t random) {
-    if (mantissa == 0 || (product.hi == 0 && product.lo == 0))
-        return RxMakeExtentSample(0, false);
-
-    // --- 積を 64bit に収める(下位を切り捨て、そのぶん指数に足す)---
-    int32_t shift = exponent;
-    uint64_t value = product.lo;
-    if (product.hi != 0) {
-        const uint32_t dropped = FxMsbU64(product.hi) + 1;
-        value = RxShiftRightLow64(product, dropped);
-        shift += (int32_t)dropped;
-    }
-
-    // scaled < 2^96
-    const FxU128 scaled = FxMulU64Full(value, mantissa);
-
-    // --- 2^shift 倍が整数になる(端数なし)---
-    if (shift >= 0) {
-        if (shift >= 62 || scaled.hi != 0 || (scaled.lo >> (uint32_t)(62 - shift)) != 0)
-            return RxMakeExtentSample(RX_EXTENT_SATURATION, true);
-
-        const uint64_t exact = scaled.lo << (uint32_t)shift;
-
-        return RxMakeExtentSample(exact, exact != 0);
-    }
-
-    // --- 右へずらす: 整数の部分と、その下の 32bit の端数 ---
-    const uint32_t right = (uint32_t)(-shift);
-    if (right < 32 && (scaled.hi >> right) != 0)
-        return RxMakeExtentSample(RX_EXTENT_SATURATION, true);
-
-    const uint64_t integerPart = RxShiftRightLow64(scaled, right);
-    if (integerPart >= RX_EXTENT_SATURATION)
-        return RxMakeExtentSample(RX_EXTENT_SATURATION, true);
-
-    const uint64_t fraction = right >= 32 ? RxShiftRightLow64(scaled, right - 32) & FX_LOW32_MASK
-                                          : (scaled.lo << (32 - right)) & FX_LOW32_MASK;
-
-    if (integerPart == 0 && fraction < RX_EXTENT_CUTOFF_FRACTION)
-        return RxMakeExtentSample(0, false);
-
-    return RxMakeExtentSample(integerPart + ((uint64_t)random < fraction ? (uint64_t)1 : (uint64_t)0), true);
-}
-
-// 規則 rule をこのセルで評価したときの望む進行度(反応物が 1 つでも無ければ 0)。反応物それぞれの「ある量 ÷ 係数」で先に抑える。
-// 進めるか(possible)は、ある量で抑えた結果が 0 なら 0(反応物が係数より少ない規則は、刻みが変わっても進まない)
-template <typename Table>
-FX_FN RxExtentSample RxDesiredExtent(Table table, RxCell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin,
-                                     uint64_t randomSeed) {
-    uint64_t factors[2];
-    factors[0] = 1;
-    factors[1] = 1;
-    uint32_t factorCount = 0;
-    uint64_t ownLimit = RX_EXTENT_SATURATION;
-    for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-        const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-        if (slot == RX_NO_SLOT)
-            return RxMakeExtentSample(0, false);
-
-        const uint64_t amount = cell.amounts[slot];
-        const uint64_t limit = amount / (uint64_t)rule.reactantCoefficients[i];
-        ownLimit = limit < ownLimit ? limit : ownLimit;
-        if (((rule.firstOrderMask >> i) & 1) != 0 && factorCount < 2) {
-            factors[factorCount] = amount;
-            factorCount += 1;
-        }
-    }
-
-    const uint64_t packed = table.Rate(ruleId, kelvin);
-    const uint32_t random = (uint32_t)(FxHashCombine(randomSeed, rule.key) & FX_LOW32_MASK);
-    const RxExtentSample desired = RxScaleExtent(FxMulU64Full(factors[0], factors[1]), RxRateMantissa(packed),
-                                                 RxRateExponent(packed), random);
-
-    return RxMakeExtentSample(desired.value < ownLimit ? desired.value : ownLimit,
-                              desired.possible != 0 && ownLimit != 0);
-}
-
-// 候補の規則を集める。規則は「ID が最小の反応物」の索引にだけ入っているので、成分を順に見れば重複なく引ける
-template <typename Table>
-FX_FN RxCandidates RxCollectCandidates(Table table, RxCell cell, uint32_t kelvin, uint64_t randomSeed) {
-    RxCandidates candidates;
-    candidates.count = 0;
-    candidates.possible = 0;
-    for (uint32_t i = 0; i < RX_MAX_CANDIDATES; ++i) {
-        candidates.rules[i] = 0;
-        candidates.extents[i] = 0;
-    }
-
-    for (uint32_t slot = 0; slot < cell.speciesCount; ++slot) {
-        const RxSpecies species = table.Species(cell.species[slot]);
-        for (uint32_t j = 0; j < species.ruleCount; ++j) {
-            const uint32_t ruleId = table.RuleIndex(species.ruleBegin + j);
-            const RxExtentSample sample = RxDesiredExtent(table, cell, ruleId, table.Rule(ruleId), kelvin, randomSeed);
-            candidates.possible |= sample.possible;
-            const uint64_t extent = sample.value;
-            if (extent == 0)
-                continue;
-
-            FX_ASSERT(candidates.count < RX_MAX_CANDIDATES);
-            if (candidates.count >= RX_MAX_CANDIDATES)
-                return candidates;
-
-            candidates.rules[candidates.count] = ruleId;
-            candidates.extents[candidates.count] = extent;
-            candidates.count += 1;
-        }
-    }
-
-    return candidates;
-}
-
 // --- 待ちの丸め: 遅い反応は「次に 1 単位進む刻み」を決める(T-0105・D-429。研究)-----------------------
-// 上の丸め(毎刻みの乱数と端数を比べる)は、次に当たる刻みを閉じた式で求められないので、眠らせたまま起こす刻みを決められない。
+// 今までの丸め(毎刻みの乱数と端数を比べる。T-0130 で消した)は、次に当たる刻みを閉じた式で求められないので、眠らせたまま起こす刻みを決められない。
 // 待ちの丸めは、ブロックが最後に変わった刻み changedTick からの待ち n を幾何分布で引く: 進行度 = 整数部 + [刻み ≥ changedTick + n]。
 //   - n は P(n = k) = (1 − f)^(k−1) f(f = 1 刻みの進みの端数)。乱数は (世界のシード, changedTick, セル, 規則の鍵) だけで決まり、刻みに依らない。
 //   - 幾何分布は記憶が無いので、ブロックが変わるたびに引き直しても平均の速さは偏らない(Gillespie 1977 の 1 単位ずつの確率過程と同じ)。
-//     毎刻み変わるセルでは n ≤ 1 ⇔ 確率 f で、上の丸めと同じ分布になる。
+//     毎刻み変わるセルでは n ≤ 1 ⇔ 確率 f で、今までの丸めと同じ分布になる。
 //   - 速さ f はセルと規則の表だけで決まるので、ブロックが変わらない間は変わらない(魔法のパッチは「変わった」とみなして引き直す。ADR-0018)。
 //   - 眠ったブロックを changedTick + n(セル・規則の最小)に起こせば、全部を計算した場合とビット一致する。D-424 の下限は要らない。
 // n = max(1, ceil(log2 U ÷ log2(1 − f)))、U = (乱数 | 1) ÷ 2^64。log2 は整数(FxLog2U64。R7)。f が 1/16 未満の時は log2(1 − f) を
@@ -398,7 +264,7 @@ FX_FN RxRate RxMakeRate(uint64_t integerPart, uint64_t fraction) {
     return rate;
 }
 
-// 反応物の量の積 × 仮数 × 2^指数 を、整数部と 64bit の端数に分ける(RxScaleExtent と同じ桁の扱い。下限は無い)
+// 反応物の量の積 × 仮数 × 2^指数 を、整数部と 64bit の端数に分ける(下限は無い。端数は待ちで丸める)
 FX_FN RxRate RxSplitRate(FxU128 product, uint64_t mantissa, int32_t exponent) {
     if (mantissa == 0 || (product.hi == 0 && product.lo == 0))
         return RxMakeRate(0, 0);
@@ -555,7 +421,7 @@ FX_FN RxWaitSample RxDesiredExtentWait(Table table, RxCell cell, uint32_t ruleId
     return sample;
 }
 
-// 待ちの丸めで候補を集める(RxCollectCandidates と同じ順)。wait は進めない規則も含めた待ちの最小
+// 待ちの丸めで候補を集める。規則は「ID が最小の反応物」の索引にだけ入っているので、成分を順に見れば重複なく引ける。wait は進めない規則も含めた待ちの最小
 struct RxWaitCandidates {
     RxCandidates candidates;
     uint64_t wait;
@@ -567,7 +433,6 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, RxCell cell, uint32_
     RxWaitCandidates result;
     result.wait = RX_WAIT_NEVER;
     result.candidates.count = 0;
-    result.candidates.possible = 0;
     for (uint32_t i = 0; i < RX_MAX_CANDIDATES; ++i) {
         result.candidates.rules[i] = 0;
         result.candidates.extents[i] = 0;
@@ -592,8 +457,6 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, RxCell cell, uint32_
             result.candidates.count += 1;
         }
     }
-
-    result.candidates.possible = result.wait != RX_WAIT_NEVER ? 1 : 0;
 
     return result;
 }
@@ -634,7 +497,7 @@ FX_FN RxUsage RxSumUsage(Table table, RxCell cell, RxCandidates candidates) {
     return usage;
 }
 
-// 縮めるときの乱数(規則ごと)。望む進行度の丸め(RxDesiredExtent)と同じハッシュの上位 32bit なので、2 つの丸めは独立
+// 縮めるときの乱数(規則ごと)。取り合いの種と規則の鍵のハッシュの上位 32bit(下位 32bit は今までの丸め〔T-0130 で消した〕が使っていた)
 FX_FN uint32_t RxShrinkRandom(uint64_t randomSeed, RxRule rule) {
     return (uint32_t)(FxHashCombine(randomSeed, rule.key) >> 32);
 }
@@ -829,48 +692,12 @@ FX_FN RxCell RxApplyExtents(Table table, RxCell cell, RxCandidates resolved) {
     return result;
 }
 
-// --- 1 セルの 1 刻み(02 §3)-------------------------------------------------------------------
+// --- 1 セルの 1 刻み(02 §3。待ちの丸め。T-0105・D-429)-------------------------------------------------------------------
 
-// 乱数の種は (世界のシード, 刻み, セルの ID) から作る(R6)。規則ごとの乱数は、これに規則の鍵を混ぜる
+// 取り合いの丸めの乱数の種は (世界のシード, 刻み, セルの ID) から作る(R6)。規則ごとの乱数は、これに規則の鍵を混ぜる
 FX_FN uint64_t RxRandomSeed(uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
     return FxHash64(worldSeed, tick, cellId, RX_RANDOM_PURPOSE);
 }
-
-// 1 刻みの結果: 新しいセル、その熱(導出値。反応が無ければ入力の熱のまま)、進める規則があったか(眠れるかの判定。T-0089)
-struct RxCellStep {
-    RxCell cell;
-    RxThermal thermal;
-    uint32_t possible;
-};
-
-template <typename Table>
-FX_FN RxCellStep RxStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
-    RxCellStep step;
-    step.cell = cell;
-    step.thermal = RxComputeThermal(table, cell);
-    step.possible = 0;
-
-    const uint32_t kelvin = (uint32_t)step.thermal.temperature / (uint32_t)MILLIKELVIN_PER_KELVIN;
-    const uint32_t tableKelvin = kelvin < RX_RATE_TABLE_KELVINS ? kelvin : RX_RATE_TABLE_KELVINS - 1;
-    const uint64_t randomSeed = RxRandomSeed(worldSeed, tick, cellId);
-    const RxCandidates candidates = RxCollectCandidates(table, cell, tableKelvin, randomSeed);
-    step.possible = candidates.possible;
-    if (candidates.count == 0)
-        return step;
-
-    const RxCandidates resolved = RxResolveContention(table, cell, step.thermal, candidates, randomSeed);
-    step.cell = RxApplyExtents(table, cell, resolved);
-    step.thermal = RxComputeThermal(table, step.cell);
-
-    return step;
-}
-
-template <typename Table>
-FX_FN RxCell RxEvaluateCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
-    return RxStepCell(table, cell, worldSeed, tick, cellId).cell;
-}
-
-// --- 1 セルの 1 刻み(待ちの丸め。T-0105・D-429。研究)-----------------------------------------------
 
 // 1 刻みの結果: 新しいセル、その熱、変わらなければ次に評価が要る刻み(wakeTick。進めないなら RX_WAIT_NEVER)。
 // 刻み tick ≤ t < wakeTick の間にこのセルを評価しても(ブロックが変わらなければ)何も変わらないので、眠らせてよい
@@ -926,6 +753,47 @@ FX_FN RxWaitStep RxStepCellWait(Table table, RxCell cell, uint64_t worldSeed, ui
     step.wakeTick = tick + 1;
 
     return step;
+}
+
+// --- 1 セルだけのブロック(反応の試験の CPU リファレンスと shaders/sim/reaction_cells.hlsl。T-0130)-----------------
+
+// 1 セルだけのブロック: セルと、それが最後に変わった刻み(待ちの丸めの changedTick)
+struct RxLoneCell {
+    RxCell cell;
+    uint64_t changedTick;
+};
+
+FX_FN RxLoneCell RxMakeLoneCell(RxCell cell, uint64_t changedTick) {
+    RxLoneCell lone;
+    lone.cell = cell;
+    lone.changedTick = changedTick;
+
+    return lone;
+}
+
+// 2 つのセルがビット単位で同じか(padding は見ない)
+FX_FN bool RxSameCell(RxCell a, RxCell b) {
+    bool same = a.energy == b.energy && a.speciesCount == b.speciesCount;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        same = same && a.species[i] == b.species[i] && a.amounts[i] == b.amounts[i];
+
+    return same;
+}
+
+// 刻み tickBegin から tickCount 刻み、待ちの丸めで進める(tickBegin > changedTick)。セルが変わった刻みを changedTick にする
+template <typename Table>
+FX_FN RxLoneCell RxAdvanceLoneCell(Table table, RxLoneCell lone, uint64_t worldSeed, uint64_t tickBegin,
+                                   uint32_t tickCount, uint64_t cellId) {
+    for (uint32_t i = 0; i < tickCount; ++i) {
+        const uint64_t tick = tickBegin + i;
+        const RxWaitStep step = RxStepCellWait(table, lone.cell, worldSeed, tick, lone.changedTick, cellId);
+        if (!RxSameCell(step.cell, lone.cell))
+            lone.changedTick = tick;
+
+        lone.cell = step.cell;
+    }
+
+    return lone;
 }
 
 RX_NAMESPACE_END

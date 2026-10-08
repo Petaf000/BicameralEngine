@@ -1,6 +1,6 @@
 // gpu_reaction_test.cpp — 1 セルの反応の評価を GPU(shaders/sim/reaction_cells.hlsl)で走らせ、CPU リファレンスとビット一致を確かめる(T-0014)。
 // いろいろな成分と温度のセル 4096 個(tests/reaction_test_cells.h。reaction_test と同じ列)を 50 刻みずつ 8 区間進め、
-// 区間ごとに全部のセルを読み戻して CPU と比べる。最後の要約は reaction_test の「いろいろなセル」の要約と同じになる。
+// 区間ごとに全部のセルを読み戻して CPU と比べる。反応は待ちの丸め(1 セルだけのブロック。区間の初めに変わったとみなす。T-0130)。
 // 引数は gpu_test_options.h。
 #include "core/aliases.h"
 #include "core/log.h"
@@ -25,6 +25,11 @@ namespace {
     constexpr uint32_t TICKS_PER_SEGMENT = 50;
     constexpr uint32_t SEGMENT_COUNT = 8;
     constexpr int MAX_REPORTED_MISMATCHES = 5;
+
+    // 区間の初めの刻み(待ちの丸めは「直前の刻みに変わった」から始めるので 1 から)
+    uint64_t SegmentTickBegin(uint32_t segment) {
+        return 1 + (uint64_t{segment} * TICKS_PER_SEGMENT);
+    }
 
     // u0 セル / b0 定数 7 個 / デバッグのリング / t0〜t4 表と初めのセル
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
@@ -91,7 +96,7 @@ namespace {
         if (list == nullptr)
             return std::unexpected("コマンドリストを始められない");
 
-        const uint64_t tickBegin = uint64_t{segment} * TICKS_PER_SEGMENT;
+        const uint64_t tickBegin = SegmentTickBegin(segment);
         const std::array<uint32_t, 7> constants = {cellCount,
                                                    TICKS_PER_SEGMENT,
                                                    static_cast<uint32_t>(tickBegin),
@@ -129,11 +134,12 @@ namespace {
     int CompareSegment(const sim::BakedReactionTable& table, std::vector<RxCell>& cpuCells,
                        std::span<const RxCell> gpuCells, uint32_t segment) {
         int mismatchCount = 0;
+        const uint64_t tickBegin = SegmentTickBegin(segment);
         for (uint32_t index = 0; index < cpuCells.size(); ++index) {
-            const uint64_t tickBegin = uint64_t{segment} * TICKS_PER_SEGMENT;
-            for (uint64_t tick = tickBegin; tick < tickBegin + TICKS_PER_SEGMENT; ++tick)
-                cpuCells[index] = sim::EvaluateReactionCell(table, cpuCells[index], test::REACTION_TEST_SEED, tick,
-                                                            index);
+            const RxLoneCell lone = sim::AdvanceLoneReactionCell(table, RxMakeLoneCell(cpuCells[index], tickBegin - 1),
+                                                                 test::REACTION_TEST_SEED, tickBegin, TICKS_PER_SEGMENT,
+                                                                 index);
+            cpuCells[index] = lone.cell;
 
             const uint64_t cpuHash = sim::HashReactionCell(cpuCells[index]);
             const uint64_t gpuHash = sim::HashReactionCell(gpuCells[index]);
@@ -180,7 +186,7 @@ namespace {
             const int mismatches = CompareSegment(table, cpuCells, *gpuCells, segment);
             if (mismatches != 0)
                 return std::unexpected(std::format("区間 {}(刻み {}〜)で {} セルが食い違う", segment,
-                                                   segment * TICKS_PER_SEGMENT, mismatches));
+                                                   SegmentTickBegin(segment), mismatches));
         }
 
         uint64_t digest = 0;

@@ -34,7 +34,8 @@ namespace {
     constexpr uint64_t CHAIN_TICKS = 80;
     constexpr uint64_t STRESS_ACTIVE_TICKS = 30;
     constexpr uint64_t STRESS_FULL_TICKS = 12;
-    constexpr uint32_t WARMUP_STEPS = 400;     // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)
+    // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)。待ちの丸めの全部を刻むは重く、1 本のリストに 400 回で TDR になった(T-0121)
+    constexpr uint32_t WARMUP_STEPS = 40;
     constexpr uint32_t MEASURE_ROOT_EDGE = 8;  // 計測の世界は根 8³ = 512 個(32m 角)
     constexpr uint32_t MEASURE_TICKS = 8;      // 最初の刻み(全部の根が種)の後に測る刻みの数
 
@@ -463,8 +464,8 @@ namespace {
                               uint32_t variant) {
         constexpr uint64_t FIRST_TICK = 10000;
         bool recorded = gpu.RecordUpload(list, initial) && gpu.UseConductionGraph(variant == 1);
-        for (uint32_t i = 0; i < WARMUP_STEPS; ++i)  // 暖機は今までの丸め(待ちの丸めは重く TDR になる。T-0125)
-            gpu.RecordStep(list, ring, test::STRESS_SEED, i, {.cutoffRounding = true});
+        for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
+            gpu.RecordStep(list, ring, test::STRESS_SEED, i);
 
         for (uint32_t i = 0; i <= MEASURE_TICKS; ++i) {
             if (i <= 1)

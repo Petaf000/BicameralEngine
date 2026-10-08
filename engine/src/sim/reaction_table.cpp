@@ -384,14 +384,9 @@ namespace bicameral::sim {
         return hash;
     }
 
-    RxCell EvaluateReactionCell(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed, uint64_t tick,
-                                uint64_t cellId) {
-        return RxEvaluateCell(table.View(), cell, worldSeed, tick, cellId);
-    }
-
-    RxCellStep StepReactionCell(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed, uint64_t tick,
-                                uint64_t cellId) {
-        return RxStepCell(table.View(), cell, worldSeed, tick, cellId);
+    RxLoneCell AdvanceLoneReactionCell(const BakedReactionTable& table, const RxLoneCell& lone, uint64_t worldSeed,
+                                       uint64_t tickBegin, uint32_t tickCount, uint64_t cellId) {
+        return RxAdvanceLoneCell(table.View(), lone, worldSeed, tickBegin, tickCount, cellId);
     }
 
     RxWaitStep StepReactionCellWait(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed,

@@ -19,12 +19,6 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    // 比べる反応の丸め(T-0121)。既定の待ちの丸め(活性のグラフも。T-0124)。今までの丸めは T-0122 で消す
-    sim::MultiresStepOptions& Rounding() {
-        static sim::MultiresStepOptions rounding;
-        return rounding;
-    }
-
     constexpr uint32_t WARMUP_STEPS = 400;     // 計測の前に刻みを何回投げるか(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_ROOT_EDGE = 8;  // 計測の世界は根 8³ = 512 個
     constexpr uint32_t MEASURE_REPEATS = 8;
@@ -40,7 +34,7 @@ namespace {
         gpu.RecordQuietRequests(list, ring, tick);
         gpu.RecordProcessRequests(list, ring);
 
-        return gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick, Rounding());
+        return gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick);
     }
 
     // 刻み [first, end) を 1 本のリストに
@@ -129,7 +123,7 @@ namespace {
                 return std::unexpected(std::format("刻み {}: {}", tick, executed.error()));
 
             test::BeginQuietTick(cpu, tick, test::QuietRequestsAt(tick));
-            sim::StepActive(cpu, table, test::STRESS_SEED, tick, Rounding());
+            sim::StepActive(cpu, table, test::STRESS_SEED, tick);
 
             // --- 状態の全部と次の刻みの種 ---
             if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read)) {
@@ -192,7 +186,7 @@ namespace {
         const auto record = [&](ID3D12GraphicsCommandList10* list) {
             uploaded = gpu->RecordUpload(list, initial);
             for (uint32_t i = 0; i < WARMUP_STEPS; ++i)
-                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, i, Rounding());
+                gpu->RecordStep(list, ring.GpuAddress(), test::STRESS_SEED, i);
 
             gpu->RecordTimestamp(list, 0);
             for (uint32_t i = 0; i < MEASURE_REPEATS; ++i)
@@ -228,7 +222,6 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_quiet_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        Rounding() = {};
         const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {

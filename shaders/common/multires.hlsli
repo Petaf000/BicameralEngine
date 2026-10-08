@@ -576,22 +576,6 @@ FX_FN MrShadowFamily MrPullBackShadow(Table table, RxCell parent, MrShadowFamily
 
 // --- 刻み --------------------------------------------------------------------------------------
 
-// 葉のセル(または影のセル)の 1 刻み。反応の核にセルの ID を (レベル, 世界の座標) から渡す。
-// 進める規則があったか(possible)も返す(活性の種。T-0100)
-template <typename Table>
-FX_FN RxCellStep MrStepCellDetailed(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block,
-                                    uint32_t index) {
-    const uint64_t cellId = MrCellId(block.level, block.originX + (int64_t)MrCellX(index),
-                                     block.originY + (int64_t)MrCellY(index), block.originZ + (int64_t)MrCellZ(index));
-
-    return RxStepCell(table, cell, worldSeed, tick, cellId);
-}
-
-template <typename Table>
-FX_FN RxCell MrStepCell(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block, uint32_t index) {
-    return MrStepCellDetailed(table, cell, worldSeed, tick, block, index).cell;
-}
-
 // 刻み tick の印(MrBlock::busyTick・wakeTick。64bit なので一周しない。0 = 刻み 0 より前 = 初めの状態。T-0115)
 FX_FN uint64_t MrChangeMark(uint64_t tick) {
     return tick + 1;
@@ -627,11 +611,7 @@ FX_FN bool MrIsSteppedCell(MrBlock block, uint32_t index) {
 
 // 2 つのセルがビット単位で同じか(padding は見ない)
 FX_FN bool MrSameCell(RxCell a, RxCell b) {
-    bool same = a.energy == b.energy && a.speciesCount == b.speciesCount;
-    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
-        same = same && a.species[i] == b.species[i] && a.amounts[i] == b.amounts[i];
-
-    return same;
+    return RxSameCell(a, b);
 }
 
 FX_FN bool MrIsUniform(MrBlock block) {
@@ -660,16 +640,6 @@ FX_FN bool MrHasSteppedCell(MrBlock block) {
                                                  ((octant >> 2) & 1u) * MR_OCTANT_EDGE));
 
     return any;
-}
-
-// 一様なブロック(値 value)を刻むと反応が進むか。進まなければ D-424 によりどのセルも変わらない。
-// 「進める規則があるか」(RxCellStep::possible)は乱数によらない(reaction.hlsli の RxDesiredExtent)ので、値 1 つで決まる
-template <typename Table>
-FX_FN bool MrUniformWouldChange(Table table, RxCell value, uint64_t worldSeed, uint64_t tick, MrBlock block) {
-    if (!MrHasSteppedCell(block))
-        return false;
-
-    return MrStepCellDetailed(table, value, worldSeed, tick, block, 0).possible != 0;
 }
 
 // 一様なブロック(値 value)を待ちの丸めで評価した結果(T-0115)
