@@ -594,8 +594,9 @@ views:
       - { id: tool, label: "エディタ・ツール(CPU を好きなだけ使う)" }
       - { id: rt, label: "ランタイム(GPU)" }
     nodes:
-      - { id: luau, group: tool, status: planned, label: "反応則・生き物・進行を書く<br/>(Luau)",
-          doc: docs/design/13-scripting-game-model.md }
+      - { id: luau, group: tool, label: "反応則・生き物・進行を書く<br/>(Luau の殻)",
+          code: "engine/src/script/luau_sandbox.cpp::LuauSandbox::Run", ticket: T-0020, doc: docs/design/13-scripting-game-model.md,
+          note: "許したものだけ見せる殻・安全点とメモリの上限・実行ごとに種を戻す(ADR-0030。luau_sandbox_test)。パッケージは T-0138、ホットリロードは T-0139、ベイクへのつなぎは T-0021" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014,
           doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。今は C++ に手で書いた定義から(Luau は M2)" }
