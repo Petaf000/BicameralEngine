@@ -5,7 +5,7 @@
 //   - 面 = 未知数 u の 6 面を u・面の順に(同じレベルの面は番号の小さい側だけ)。番号は「面の候補 u × 6 + 面」ごとの有無の接頭和
 //   - 境のセル = 未知数でない面の先。番号は CPU が初めて出会う順 = その先を指す最初の面の候補(atomic の最小)の接頭和 + 未知数の数
 //   - セルの面の一覧 = 面の番号 × 2(+ 粗い側なら 1)を面の番号の昇順に(atomic で置いてから、セルごとに並べ直す)
-// 多重格子の段・重み・節の並びはまだ CPU(BuildImplicitGrid)が作る(T-0134)。
+// 多重格子の段と重みは implicit_levels.hlsl(T-0134)。セルの座標を作業場に残す(CellKeyWord)。
 // ルート署名は多重解像度のもの(multires_bindings.hlsli。sim/gpu_multires.cpp)。外のバッファ u4 = 作業場、u5 = 系(gpu_implicit_build.cpp の並び)。
 // 定数: g_external0 = 基準のレベル(符号付き 16bit)| implicitMaxGap << 16 | 凍った印を見る << 24、g_external1 = 未知数の上限、g_external2 = セルの上限。
 // 段の順(どの段も前の段の書き込みを読む。段の間は UAV のバリア): Clear → CountBlocks → ScanBlocks → NumberUnknowns → FaceEntries
@@ -125,6 +125,11 @@ uint32_t RawListWord(uint32_t position) {
 
 uint32_t ListCellWord(uint32_t position) {
     return RawListWord(12 * MaxUnknowns()) + position;
+}
+
+// セルの座標(8 語 / セル: レベル・x・y・z〔int64 は下位 → 上位〕・空き)。多重格子の段を作る段が読む(implicit_levels.hlsl。T-0134)
+uint32_t CellKeyWord(uint32_t cell) {
+    return ListCellWord(12 * MaxUnknowns()) + 8 * cell;
 }
 
 uint32_t LoadWord(uint32_t word) {
@@ -461,6 +466,18 @@ uint32_t EntryCount() {
     cell.faceEnd = 0;
     g_system.Store<ImGpuCell>(CellByte(cellId), cell);
     StoreWord(CellCountWord(cellId), 0);
+
+    // --- 座標(CPU の AddCell と同じ: ブロックの原点 + セルの位置)---
+    const uint32_t address = LoadWord(CellAddressWord(cellId));
+    const MrBlock block = g_blocks[address / MR_BLOCK_CELLS];
+    const uint32_t index = address % MR_BLOCK_CELLS;
+    const int64_t x = block.originX + (int64_t)MrCellX(index);
+    const int64_t y = block.originY + (int64_t)MrCellY(index);
+    const int64_t z = block.originZ + (int64_t)MrCellZ(index);
+    g_build.Store4(CellKeyWord(cellId) * 4,
+                   uint4((uint32_t)block.level, (uint32_t)x, (uint32_t)((uint64_t)x >> 32), (uint32_t)y));
+    g_build.Store4((CellKeyWord(cellId) + 4) * 4,
+                   uint4((uint32_t)((uint64_t)y >> 32), (uint32_t)z, (uint32_t)((uint64_t)z >> 32), 0u));
 }
 
     // --- Faces: 面(係数 = min(G) × G の係数 × 4^kf。CPU の FaceCoefficient)。セルごとの面の数を数える(1 スレッド = 1 候補)---

@@ -106,6 +106,63 @@ FX_FN FxU128 ImWideMul(FxU128 a, uint64_t b) {
     return product;
 }
 
+FX_FN bool ImWideIsZero(FxU128 value) {
+    return value.hi == 0 && value.lo == 0;
+}
+
+// a + b(桁あふれは assert)
+FX_FN FxU128 ImWideAdd(FxU128 a, FxU128 b) {
+    FxU128 sum = {a.hi + b.hi, a.lo + b.lo};
+    if (sum.lo < a.lo)
+        sum.hi += 1;
+
+    FX_ASSERT(sum.hi >= a.hi);
+
+    return sum;
+}
+
+FX_FN FxU128 ImWideShiftRight(FxU128 value, uint32_t shift) {
+    if (shift == 0)
+        return value;
+
+    if (shift >= 128)
+        return ImWide((uint64_t)0);
+
+    if (shift >= 64)
+        return ImWide(value.hi >> (shift - 64));
+
+    FxU128 result = {value.hi >> shift, (value.lo >> shift) | (value.hi << (64 - shift))};
+
+    return result;
+}
+
+FX_FN uint32_t ImWideMsb(FxU128 value) {
+    return value.hi != 0 ? 64 + FxMsbU64(value.hi) : FxMsbU64(value.lo);
+}
+
+// numerator ÷ denominator を Q fractionBits で(商は 2^63 未満であること)。分母が 63bit を超える時は両方の下位を落とす
+// (重みの近似が少し粗くなるだけ。保存には効かない)。多重格子の段の重み(CPU の BuildImplicitGrid と GPU の implicit_levels.hlsl。T-0134)
+FX_FN int64_t ImWideRatio(FxU128 numerator, FxU128 denominator, uint32_t fractionBits) {
+    FX_ASSERT(!ImWideIsZero(denominator));
+    if (ImWideIsZero(numerator))
+        return 0;
+
+    const uint32_t msb = ImWideMsb(denominator);
+    const uint32_t drop = msb > 62 ? msb - 62 : 0;
+    const uint64_t divisor = ImWideShiftRight(denominator, drop).lo;
+    const FxU128 scaled = ImWideShiftLeft(ImWideShiftRight(numerator, drop), fractionBits);
+    FX_ASSERT(scaled.hi < divisor);
+    const uint64_t quotient = FxDivU128By64(scaled, divisor).quotient;
+    FX_ASSERT(quotient < ((uint64_t)1 << 63));
+
+    return (int64_t)quotient;
+}
+
+// 多重格子の重み(Q48)
+FX_FN int64_t ImWeight(FxU128 numerator, FxU128 denominator) {
+    return ImWideRatio(numerator, denominator, IM_WEIGHT_SHIFT);
+}
+
 // --- 式 ----------------------------------------------------------------------------------------
 
 // 重み × 値(Q48)

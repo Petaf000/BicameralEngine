@@ -2,10 +2,11 @@
 // (sim::GpuImplicitBuild。T-0129)、CPU の系(multires_implicit_conduction.cpp の MakeSystem)と毎刻みビット一致するか、
 // その系を GPU の GpuImplicit で解いた結果が CPU の StepImplicit とビット一致するかを確かめる。
 // 系を作る時の木は CPU の木の写し(MultiresNest::captureImplicitNest。陽解法の流れの後・変化を足す前)を GpuMultires に写して使う。
-// 多重格子の段・重み・節の並びはまだ CPU が作る(T-0134)ので、GpuImplicit の段の形は CPU の系から作り、セル・面・面の一覧だけを
-// GPU が作ったもので上書きする(CPU から写すセルのエネルギーと刻みの初めの温度は 0 にして、GPU が作った値で解いたことを確かめる)。
+// 多重格子の段と重みも GPU で作り(sim::GpuImplicitLevels。T-0134)、CPU の BuildImplicitGrid を GpuImplicit の並びにしたものと番号までビット一致するかを
+// 確かめる。節の並び・ImTail の境はまだ CPU の系から作る(T-0135)ので、GpuImplicit の形は CPU の系から作り、セル・面・面の一覧・節・隣・子の一覧を
+// GPU が作ったもので上書きする(CPU から写すセルのエネルギー・刻みの初めの温度・段の重みは 0 にして、GPU が作った値で解いたことを確かめる)。
 // 場面(gpu_multires_implicit_tree_test と同じ): 熱い点・鎖・たくさんの要求。
-// 計測(release のハードウェアだけ。--measure-only なら計測だけ): 系を作る段の ms(暖機の後、同じ木で REPEATS 回作った最小)。
+// 計測(release のハードウェアだけ。--measure-only なら計測だけ): 系を作る段と多重格子の段を作る段の ms(暖機の後、同じ木で REPEATS 回作った最小)。
 #include <algorithm>
 #include <cstdint>
 #include <expected>
@@ -14,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/log.h"
@@ -26,6 +28,7 @@
 #include "multires_conduction_scene.h"
 #include "sim/gpu_implicit.h"
 #include "sim/gpu_implicit_build.h"
+#include "sim/gpu_implicit_levels.h"
 #include "sim/gpu_multires.h"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_nest.h"
@@ -47,6 +50,7 @@ namespace {
     constexpr uint64_t STRESS_TICKS = 4;
     constexpr uint32_t WARMUP_BUILDS = 20;
     constexpr uint32_t REPEATS = 5;
+    constexpr uint32_t MAX_LEVELS = 64;  // CPU の BuildImplicitGrid の MAX_GRID_LEVELS
 
     // --- 場面: 刻みごとの系(解く前)と、それを作った時の木 ---
 
@@ -239,6 +243,55 @@ namespace {
         return {};
     }
 
+    bool SameNode(const ImGpuNode& a, const ImGpuNode& b) {
+        return a.selfWeight == b.selfWeight && a.restrictWeight == b.restrictWeight && a.linkStart == b.linkStart &&
+               a.linkEnd == b.linkEnd && a.parent == b.parent && a.color == b.color && a.childStart == b.childStart &&
+               a.childEnd == b.childEnd;
+    }
+
+    std::expected<void, std::string> CompareLevels(const sim::GpuImplicitLevelImages& expected,
+                                                   const sim::GpuImplicitLevelSystem& gpu) {
+        if (gpu.overflow)
+            return std::unexpected("GPU の多重格子の段が上限を超えた");
+
+        const sim::GpuImplicitLevelImages& images = gpu.images;
+        if (images.levelOffsets != expected.levelOffsets) {
+            return std::unexpected(std::format("段の形が違う: 段の数 {} / {}・節 {} / {}",
+                                               expected.levelOffsets.size() - 1, images.levelOffsets.size() - 1,
+                                               expected.levelOffsets.back(),
+                                               images.levelOffsets.empty() ? 0 : images.levelOffsets.back()));
+        }
+
+        for (size_t i = 0; i < expected.nodes.size(); ++i) {
+            const ImGpuNode& a = expected.nodes[i];
+            const ImGpuNode& b = images.nodes[i];
+            if (!SameNode(a, b)) {
+                return std::unexpected(std::format(
+                    "節 {} が違う: 自分の重み {} / {}・縮約 {} / {}・隣 [{}, {}) / [{}, {})・親 {} / {}・子 [{}, {}) / "
+                    "[{}, {})",
+                    i, a.selfWeight, b.selfWeight, a.restrictWeight, b.restrictWeight, a.linkStart, a.linkEnd,
+                    b.linkStart, b.linkEnd, a.parent, b.parent, a.childStart, a.childEnd, b.childStart, b.childEnd));
+            }
+        }
+
+        if (images.links.size() != expected.links.size())
+            return std::unexpected(std::format("隣の数が違う: {} / {}", expected.links.size(), images.links.size()));
+
+        for (size_t k = 0; k < expected.links.size(); ++k) {
+            const ImGpuLink& a = expected.links[k];
+            const ImGpuLink& b = images.links[k];
+            if (a.weight != b.weight || a.neighbor != b.neighbor) {
+                return std::unexpected(std::format("隣 {} が違う: 重み {} / {}・先 {} / {}", k, a.weight, b.weight,
+                                                   a.neighbor, b.neighbor));
+            }
+        }
+
+        if (images.children != expected.children)
+            return std::unexpected("子の一覧が違う");
+
+        return {};
+    }
+
     // --- GPU ---
 
     struct Context {
@@ -282,7 +335,20 @@ namespace {
         return limits;
     }
 
-    // CPU から写すセルのエネルギー・刻みの初めの温度を 0 に(GPU が作った値で上書きされたことを確かめる)
+    // 多重格子の段の上限(場面の CPU の系の最大。段の数は CPU の MAX_GRID_LEVELS と同じ 64 か、計測で比べる値)
+    sim::GpuImplicitLevelLimits LevelLimits(const BuildScene& scene, uint32_t levels) {
+        sim::GpuImplicitLevelLimits limits{.nodes = 1, .links = 1, .levels = levels};
+        for (const BuildTick& tick : scene.ticks) {
+            const sim::GpuImplicitLevelImages images = sim::MakeGpuImplicitLevelImages(tick.grid);
+            limits.nodes = std::max(
+                {limits.nodes, images.levelOffsets.back(), static_cast<uint32_t>(tick.grid.cells.size())});
+            limits.links = std::max(limits.links, static_cast<uint32_t>(images.links.size()));
+        }
+
+        return limits;
+    }
+
+    // CPU から写すセルのエネルギー・刻みの初めの温度と段の重みを 0 に(GPU が作った値で上書きされたことを確かめる)
     sim::ImplicitGrid Blank(const sim::ImplicitGrid& grid) {
         sim::ImplicitGrid blank = grid;
         for (sim::ImplicitCell& cell : blank.cells) {
@@ -290,21 +356,27 @@ namespace {
             cell.startTemperature = 0;
         }
 
+        for (sim::ImplicitGridLevel& level : blank.levels) {
+            std::ranges::fill(level.selfWeights, 0);
+            std::ranges::fill(level.weights, 0);
+            std::ranges::fill(level.restrictWeights, 0);
+        }
+
         return blank;
     }
 
     // 1 刻み: 木を写して系を作り、読み戻して CPU と比べ、GpuImplicit へ写して解いて CPU と比べる
     std::expected<void, std::string> CheckTick(const Context& context, sim::GpuMultires& multires,
-                                               sim::GpuImplicitBuild& build, const BuildScene& scene,
-                                               const BuildTick& tick) {
+                                               sim::GpuImplicitBuild& build, sim::GpuImplicitLevels& levels,
+                                               const BuildScene& scene, const BuildTick& tick) {
         if (std::ranges::any_of(tick.frozen, [](uint8_t frozen) { return frozen != 0; }))
             return std::unexpected("凍った枠がある刻み(この試験は凍った印を GPU に写さない)");
 
-        auto implicit = sim::GpuImplicit::Create(context.device, tick.grid);
+        const sim::ImplicitGrid blank = Blank(tick.grid);
+        auto implicit = sim::GpuImplicit::Create(context.device, blank);
         if (!implicit)
             return std::unexpected(implicit.error());
 
-        const sim::ImplicitGrid blank = Blank(tick.grid);
         const sim::ImplicitOptions solveOptions = SolveOptions(scene.options);
         const auto record = [&](ID3D12GraphicsCommandList10* list) {
             const D3D12_GPU_VIRTUAL_ADDRESS ring = context.ring->GpuAddress();
@@ -312,11 +384,14 @@ namespace {
                 return false;
 
             build.RecordBuild(list, ring, multires, scene.options);
+            levels.RecordBuild(list, ring, build);
             build.RecordReadback(list);
+            levels.RecordReadback(list);
             if (!implicit->RecordUpload(list, blank))
                 return false;
 
             build.RecordCopyTo(list, *implicit);
+            levels.RecordCopyTo(list, *implicit);
             if (!implicit->RecordStep(list, ring, solveOptions))
                 return false;
 
@@ -331,6 +406,13 @@ namespace {
             return std::unexpected(system.error());
 
         if (auto same = CompareSystem(ExpectedSystem(tick.grid), *system); !same)
+            return same;
+
+        auto levelSystem = levels.Read();
+        if (!levelSystem)
+            return std::unexpected(levelSystem.error());
+
+        if (auto same = CompareLevels(sim::MakeGpuImplicitLevelImages(tick.grid), *levelSystem); !same)
             return same;
 
         sim::ImplicitGrid cpu = tick.grid;
@@ -360,13 +442,19 @@ namespace {
         if (!build)
             return std::unexpected(build.error());
 
+        auto levels = sim::GpuImplicitLevels::Create(context.device, *build, LevelLimits(scene, MAX_LEVELS));
+        if (!levels)
+            return std::unexpected(levels.error());
+
         for (size_t i = 0; i < scene.ticks.size(); ++i) {
-            if (auto checked = CheckTick(context, *multires, *build, scene, scene.ticks[i]); !checked)
+            if (auto checked = CheckTick(context, *multires, *build, *levels, scene, scene.ticks[i]); !checked)
                 return std::unexpected(std::format("{} 刻み {}: {}", scene.name, i, checked.error()));
         }
 
-        Log(Channel::Gpu, Level::Info, "  {}: {} 刻みの系(最後 {} セル・{} 面)が CPU とビット一致・解いた結果も一致",
-            scene.name, scene.ticks.size(), scene.ticks.back().grid.cells.size(), scene.ticks.back().grid.faces.size());
+        Log(Channel::Gpu, Level::Info,
+            "  {}: {} 刻みの系(最後 {} セル・{} 面・多重格子 {} 段)と段・重みが CPU とビット一致・解いた結果も一致",
+            scene.name, scene.ticks.size(), scene.ticks.back().grid.cells.size(), scene.ticks.back().grid.faces.size(),
+            scene.ticks.back().grid.levels.size());
 
         return {};
     }
@@ -411,7 +499,63 @@ namespace {
         return {};
     }
 
-    // 系を作る段の ms: 最後の刻みの木で、暖機の後 REPEATS 回作った最小
+    // 系を作る段と多重格子の段を作る段の ms: 最後の刻みの木で、暖機の後 REPEATS 回作った最小。段の数の上限 levels(回は levels − 1 回積む)
+    std::expected<std::pair<double, double>, std::string> MeasureBuild(const Context& context,
+                                                                       sim::GpuMultires& multires,
+                                                                       sim::GpuImplicitBuild& build,
+                                                                       const BuildScene& scene, uint32_t levelLimit) {
+        const BuildTick& tick = scene.ticks.back();
+        auto levels = sim::GpuImplicitLevels::Create(context.device, build, LevelLimits(scene, levelLimit));
+        if (!levels)
+            return std::unexpected(levels.error());
+
+        double bestSystem = 0.0;
+        double bestLevels = 0.0;
+        for (uint32_t repeat = 0; repeat < REPEATS; ++repeat) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                const D3D12_GPU_VIRTUAL_ADDRESS ring = context.ring->GpuAddress();
+                if (!multires.RecordUpload(list, *tick.nest))
+                    return false;
+
+                for (uint32_t i = 0; i < WARMUP_BUILDS; ++i) {
+                    build.RecordBuild(list, ring, multires, scene.options);
+                    levels->RecordBuild(list, ring, build);
+                }
+
+                levels->RecordTimestamp(list, 0);
+                build.RecordBuild(list, ring, multires, scene.options);
+                levels->RecordTimestamp(list, 1);
+                levels->RecordBuild(list, ring, build);
+                levels->RecordTimestamp(list, 2);
+                levels->RecordReadback(list);
+                return true;
+            };
+            if (auto executed = Execute(context, record); !executed)
+                return std::unexpected(executed.error());
+
+            const std::vector<uint64_t> stamps = levels->ReadTimestamps(3);
+            if (stamps.size() != 3)
+                return std::unexpected("タイムスタンプを読めない");
+
+            const auto toMilliseconds = [&](uint64_t ticks) {
+                return static_cast<double>(ticks) * 1000.0 / static_cast<double>(context.frequency);
+            };
+            const double system = toMilliseconds(stamps[1] - stamps[0]);
+            const double levelsMs = toMilliseconds(stamps[2] - stamps[1]);
+            bestSystem = repeat == 0 ? system : std::min(bestSystem, system);
+            bestLevels = repeat == 0 ? levelsMs : std::min(bestLevels, levelsMs);
+        }
+
+        auto read = levels->Read();
+        if (!read || read->overflow || read->images.levelOffsets.size() != tick.grid.levels.size() + 1)
+            return std::unexpected("計測の段の数が CPU と違う");
+
+        Log(Channel::Gpu, Level::Info, "    段の上限 {}(Dispatch {}): 多重格子の段 {:.3f} ms", levelLimit,
+            levels->DispatchCount(), bestLevels);
+
+        return std::pair{bestSystem, bestLevels};
+    }
+
     std::expected<void, std::string> MeasureScene(const Context& context, const BuildScene& scene) {
         auto multires = MakeMultires(context, scene);
         if (!multires)
@@ -422,36 +566,18 @@ namespace {
         if (!build)
             return std::unexpected(build.error());
 
-        double best = 0.0;
-        for (uint32_t repeat = 0; repeat < REPEATS; ++repeat) {
-            const auto record = [&](ID3D12GraphicsCommandList10* list) {
-                const D3D12_GPU_VIRTUAL_ADDRESS ring = context.ring->GpuAddress();
-                if (!multires->RecordUpload(list, *tick.nest))
-                    return false;
+        const auto levelCount = static_cast<uint32_t>(tick.grid.levels.size());
+        auto full = MeasureBuild(context, *multires, *build, scene, MAX_LEVELS);
+        auto tight = MeasureBuild(context, *multires, *build, scene, levelCount);
+        if (!full || !tight)
+            return std::unexpected(!full ? full.error() : tight.error());
 
-                for (uint32_t i = 0; i < WARMUP_BUILDS; ++i)
-                    build->RecordBuild(list, ring, *multires, scene.options);
-
-                build->RecordTimestamp(list, 0);
-                build->RecordBuild(list, ring, *multires, scene.options);
-                build->RecordTimestamp(list, 1);
-                build->RecordReadback(list);
-                return true;
-            };
-            if (auto executed = Execute(context, record); !executed)
-                return executed;
-
-            const std::vector<uint64_t> stamps = build->ReadTimestamps(2);
-            if (stamps.size() != 2)
-                return std::unexpected("タイムスタンプを読めない");
-
-            const double milliseconds = static_cast<double>(stamps[1] - stamps[0]) * 1000.0 /
-                                        static_cast<double>(context.frequency);
-            best = repeat == 0 ? milliseconds : std::min(best, milliseconds);
-        }
-
-        Log(Channel::Gpu, Level::Info, "  計測 {}: 系を作る段 {:.3f} ms(セル {}・面 {}・世界の枠 {})", scene.name, best,
-            tick.grid.cells.size(), tick.grid.faces.size(), tick.nest->capacity.worldBlocks);
+        Log(Channel::Gpu, Level::Info,
+            "  計測 {}: 系を作る段 {:.3f} ms・多重格子の段 {:.3f} ms(上限 64)/ {:.3f} ms(上限 = 段の数 {})(セル {}・面 "
+            "{}・節 {}・世界の枠 {})",
+            scene.name, full->first, full->second, tight->second, levelCount, tick.grid.cells.size(),
+            tick.grid.faces.size(), sim::MakeGpuImplicitLevelImages(tick.grid).levelOffsets.back(),
+            tick.nest->capacity.worldBlocks);
 
         return MeasurePasses(context, *multires, *build, scene, tick);
     }

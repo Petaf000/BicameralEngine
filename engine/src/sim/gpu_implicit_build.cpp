@@ -25,6 +25,7 @@ namespace bicameral::sim {
         constexpr uint32_t HEADER_OVERFLOW = 3;
         constexpr uint32_t ENTRY_WORDS = 4;      // 面の候補ごと: 先・印・面の番号・境のセルの番号
         constexpr uint32_t CELL_WORDS = 3;       // セルごと: 番地・面の数・面の一覧の始まり
+        constexpr uint32_t KEY_WORDS = 8;        // セルごとの座標(implicit_build.hlsl の CellKeyWord。T-0134)
         constexpr uint32_t SCAN_THREADS = 1024;  // implicit_build.hlsl の SCAN_THREADS(接頭和の 1 グループ)
         constexpr uint32_t FROZEN_MARKS_BIT = 1u << 24;
 
@@ -130,7 +131,7 @@ namespace bicameral::sim {
         const uint64_t cellGroups = (uint64_t{limits.cells} + SCAN_THREADS - 1) / SCAN_THREADS;
         const uint64_t workWords = HEADER_WORDS + (2 * mapWords) + capacity.worldBlocks + 1 + (ENTRY_WORDS * entries) +
                                    (uint64_t{CELL_WORDS} * limits.cells) + 1 + (2 * (entryGroups + 1)) +
-                                   (cellGroups + 1) + (uint64_t{4} * entries);
+                                   (cellGroups + 1) + (uint64_t{4} * entries) + (uint64_t{KEY_WORDS} * limits.cells);
         result.m_workBytes = workWords * sizeof(uint32_t);
         result.m_systemBytes = result.ListsOffset() + (uint64_t{2} * MR_FACES * limits.unknowns * sizeof(uint32_t));
 
@@ -163,6 +164,23 @@ namespace bicameral::sim {
             return std::unexpected("タイムスタンプのヒープを作れない");
 
         return result;
+    }
+
+    // 作業場の語の番号(implicit_build.hlsl の ListCellWord(0)・CellKeyWord(0) と同じ式)
+    uint32_t GpuImplicitBuild::ListCellsWord() const {
+        const uint64_t mapWords = uint64_t{m_worldBlocks} * MR_BLOCK_CELLS;
+        const uint64_t entries = uint64_t{MR_FACES} * m_limits.unknowns;
+        const uint64_t entryGroups = (entries + SCAN_THREADS - 1) / SCAN_THREADS;
+        const uint64_t cellGroups = (uint64_t{m_limits.cells} + SCAN_THREADS - 1) / SCAN_THREADS;
+        const uint64_t words = HEADER_WORDS + (2 * mapWords) + m_worldBlocks + 1 + (ENTRY_WORDS * entries) +
+                               (uint64_t{CELL_WORDS} * m_limits.cells) + 1 + (2 * (entryGroups + 1)) +
+                               (cellGroups + 1) + (uint64_t{2} * entries);
+
+        return static_cast<uint32_t>(words);
+    }
+
+    uint32_t GpuImplicitBuild::CellKeysWord() const {
+        return ListCellsWord() + (2 * MR_FACES * m_limits.unknowns);
     }
 
     uint64_t GpuImplicitBuild::FacesOffset() const {

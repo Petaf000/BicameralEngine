@@ -2,7 +2,8 @@
 // StepImplicit(多重格子の V サイクル・誤差の見込みで止める・安全網)と毎刻みビット一致する Compute の段(shaders/sim/implicit_conduct.hlsl)を記録する。
 // 試作の約束は CPU と同じ(セルの一覧・熱容量一定)。木につないだ系(T-0119 の multires_implicit_conduction が作る、刻みの初めの温度と
 // 粗い側の端数の枠つきのセル)もそのまま解ける(T-0127)。系のセル・面・面の一覧は GPU で作れる(GpuImplicitBuild。T-0129)。伝導の段から呼ぶのはまだ(T-0132)。
-// 多重格子の段の形(節・隣・重み・親子)は CPU の BuildImplicitGrid が作ったものを写す(ベイク。刻みの間は変わらない)。
+// 多重格子の段の形(節・隣・重み・親子)は CPU の BuildImplicitGrid が作ったものを写す(ベイク。刻みの間は変わらない)。GPU で作った段(GpuImplicitLevels。T-0134)の
+// 中身で上書きできる(RecordCopyLevels。節の並び・ImTail の境は Create の grid から。上限から作るのは T-0135)。
 //
 // 使い方(テスト):
 //   auto gpu = GpuImplicit::Create(device, grid);
@@ -62,6 +63,11 @@ namespace bicameral::sim {
         // 並びはこの系と同じ: セル × セルの数・面 × 面の数・面の一覧 × 2 × 面の数)。段の形は Create の grid のまま
         void RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
                               uint64_t facesOffset, uint64_t listsOffset);
+
+        // GPU が作った多重格子の段(GpuImplicitLevels。T-0134)の節・隣・子の一覧を写す(RecordUpload の後。source はどれも COPY_SOURCE の状態で、
+        // 並びはこの系と同じ: 節 × 節の数・隣 × 隣の数・子の一覧 × 最も粗い段より前の節の数〔面の一覧の後ろへ〕)。節の並び・ImTail は Create の grid のまま
+        void RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* nodes, ID3D12Resource* links,
+                              ID3D12Resource* children);
 
         // 1 刻み。options.method は Multigrid だけ(赤黒・RKL2 は CPU の比べる相手で、GPU には載せない)
         [[nodiscard]] bool RecordStep(ID3D12GraphicsCommandList* list, uint64_t debugRing,
@@ -161,6 +167,7 @@ namespace bicameral::sim {
         uint32_t m_cellCount = 0;
         uint32_t m_faceCount = 0;
         uint32_t m_nodeTotal = 0;
+        uint32_t m_linkTotal = 0;
         std::vector<uint32_t> m_levelOffsets;  // 段ごとの節の始まり(段の数 + 1)
         std::vector<std::array<OrderRange, 2>>
             m_smoothOrders;                        // 段・色ごと: 掃き出しの並び(グループで足すのはその色の長い節だけ)

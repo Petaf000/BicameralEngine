@@ -12,6 +12,7 @@
 
 #include "common/implicit_conduction.hlsli"
 #include "gpu/resources.h"
+#include "sim/gpu_implicit_levels.h"
 
 using namespace bicameral::fx;
 using namespace bicameral::multires;
@@ -268,6 +269,7 @@ namespace bicameral::sim {
         // --- セルの面の一覧と、節の子の一覧(番号の一覧は 1 本: 面 → 子)---
         auto [lists, faceStarts] = MakeCellFaces(grid);
         auto [nodes, links] = MakeNodes(grid, m_levelOffsets, lists);
+        m_linkTotal = static_cast<uint32_t>(links.size());
 
         std::vector<ImGpuFace> faces(m_faceCount);
         for (size_t f = 0; f < faces.size(); ++f) {
@@ -437,6 +439,49 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    }
+
+    void GpuImplicit::RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* nodes, ID3D12Resource* links,
+                                       ID3D12Resource* children) {
+        constexpr std::array<Buffer, 3> TARGETS = {BufferNodes, BufferLinks, BufferLists};
+        const std::array<ID3D12Resource*, 3> sources = {nodes, links, children};
+        const uint32_t childCount = m_levelOffsets[m_levelOffsets.size() - 2];  // 最も粗い段より前の節(どれも親が 1 つ)
+        const std::array<uint64_t, 3> targetOffsets = {0, 0, uint64_t{2} * m_faceCount * sizeof(uint32_t)};
+        const std::array<uint64_t, 3> sizes = {uint64_t{m_nodeTotal} * sizeof(ImGpuNode),
+                                               uint64_t{m_linkTotal} * sizeof(ImGpuLink),
+                                               uint64_t{childCount} * sizeof(uint32_t)};
+
+        std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
+        for (size_t i = 0; i < TARGETS.size(); ++i) {
+            barriers[i] = gpu::Transition(m_buffers[TARGETS[i]].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                          D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        for (size_t i = 0; i < TARGETS.size(); ++i) {
+            if (sizes[i] != 0)
+                list->CopyBufferRegion(m_buffers[TARGETS[i]].Get(), targetOffsets[i], sources[i], 0, sizes[i]);
+
+            std::swap(barriers[i].Transition.StateBefore, barriers[i].Transition.StateAfter);
+        }
+
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    }
+
+    // 比べる用の段の形の像(GpuImplicit が Create で写すものと同じ。T-0134)
+    GpuImplicitLevelImages MakeGpuImplicitLevelImages(const ImplicitGrid& grid) {
+        GpuImplicitLevelImages images;
+        images.levelOffsets.assign(1, 0);
+        for (const ImplicitGridLevel& level : grid.levels)
+            images.levelOffsets.push_back(images.levelOffsets.back() + static_cast<uint32_t>(level.levels.size()));
+
+        auto [lists, faceStarts] = MakeCellFaces(grid);
+        auto [nodes, links] = MakeNodes(grid, images.levelOffsets, lists);
+        images.nodes = std::move(nodes);
+        images.links = std::move(links);
+        images.children.assign(lists.begin() + static_cast<std::ptrdiff_t>(2 * grid.faces.size()), lists.end());
+
+        return images;
     }
 
     void GpuImplicit::Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t threads) {

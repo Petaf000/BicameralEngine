@@ -2,13 +2,13 @@
 // 作るもの: 未知数(基準より細かい本物のブロックのセル)・境のセル・面(係数・粗い側の端数の枠)・セルの面の一覧。
 // 番号の付け方は CPU リファレンス(multires_implicit_conduction.cpp の MakeSystem と gpu_implicit.cpp の MakeCellFaces)と同じなので、
 // 作った系は GpuImplicit の同じバッファの並びにそのまま写せる(RecordCopyTo)。段の中身は shaders/sim/implicit_build.hlsl。
-// 多重格子の段・重み・節の並びはまだ CPU の BuildImplicitGrid が作る(T-0134)。GPU の伝導の段から呼ぶのは T-0132。
+// 多重格子の段と重みは GpuImplicitLevels(T-0134)がこの系から作る。GPU の伝導の段から呼ぶのは T-0132。
 //
 // 使い方(テスト):
 //   auto build = GpuImplicitBuild::Create(device, multires, nest.capacity, limits);
 //   multires.RecordUpload(list, nest);                  // 系を作る時の木(陰解法を入れる刻みの、陽解法の流れの後)
 //   build->RecordBuild(list, ring, multires, options);  → build->RecordReadback(list) / build->RecordCopyTo(list, implicit)
-// GpuMultires のルート署名で投げる(外のバッファ u4・u5 を自分の作業場と系に結ぶ)。Dispatch の数は上限から決める(間接の引数は T-0134)。
+// GpuMultires のルート署名で投げる(外のバッファ u4・u5 を自分の作業場と系に結ぶ)。Dispatch の数は上限から決める(間接の引数は T-0135)。
 #pragma once
 
 #include <array>
@@ -69,11 +69,17 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<GpuImplicitSystem, std::string> Read() const;
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
-    private:
-        GpuImplicitBuild() = default;
-
+        // --- 多重格子の段を作る段(GpuImplicitLevels。T-0134)が読むもの ---
+        [[nodiscard]] const GpuImplicitBuildLimits& Limits() const { return m_limits; }
+        [[nodiscard]] ID3D12Resource* WorkBuffer() const { return m_work.Get(); }
+        [[nodiscard]] ID3D12Resource* SystemBuffer() const { return m_system.Get(); }
         [[nodiscard]] uint64_t FacesOffset() const;
         [[nodiscard]] uint64_t ListsOffset() const;
+        [[nodiscard]] uint32_t ListCellsWord() const;  // 作業場の「面の一覧の位置のセル」の始まり(語)
+        [[nodiscard]] uint32_t CellKeysWord() const;   // 作業場のセルの座標の始まり(語。8 語 / セル)
+
+    private:
+        GpuImplicitBuild() = default;
 
         GpuImplicitBuildLimits m_limits;
         uint32_t m_worldBlocks = 0;

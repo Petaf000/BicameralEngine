@@ -49,30 +49,15 @@ namespace bicameral::sim {
         }
 
         bool IsZero(FxU128 value) {
-            return value.hi == 0 && value.lo == 0;
+            return ImWideIsZero(value);
         }
 
         FxU128 WideAdd(FxU128 a, FxU128 b) {
-            FxU128 sum = {.hi = a.hi + b.hi, .lo = a.lo + b.lo};
-            if (sum.lo < a.lo)
-                sum.hi += 1;
-
-            FX_ASSERT(sum.hi >= a.hi);
-
-            return sum;
+            return ImWideAdd(a, b);
         }
 
         FxU128 WideShiftRight(FxU128 value, uint32_t shift) {
-            if (shift == 0)
-                return value;
-
-            if (shift >= 128)
-                return Wide(0);
-
-            if (shift >= 64)
-                return Wide(value.hi >> (shift - 64));
-
-            return {.hi = value.hi >> shift, .lo = (value.lo >> shift) | (value.hi << (64 - shift))};
+            return ImWideShiftRight(value, shift);
         }
 
         // 桁あふれは R8 の assert
@@ -101,30 +86,9 @@ namespace bicameral::sim {
             return product;
         }
 
-        uint32_t WideMsb(FxU128 value) {
-            return value.hi != 0 ? 64 + FxMsbU64(value.hi) : FxMsbU64(value.lo);
-        }
-
-        // numerator ÷ denominator を Q fractionBits で(商は 2^63 未満であること)。分母が 63bit を超える時は両方の下位を落とす
-        // (重みの近似が少し粗くなるだけ。保存には効かない)
-        int64_t WideRatio(FxU128 numerator, FxU128 denominator, uint32_t fractionBits) {
-            FX_ASSERT(!IsZero(denominator));
-            if (IsZero(numerator))
-                return 0;
-
-            const uint32_t msb = WideMsb(denominator);
-            const uint32_t drop = msb > 62 ? msb - 62 : 0;
-            const uint64_t divisor = WideShiftRight(denominator, drop).lo;
-            const FxU128 scaled = WideShiftLeft(WideShiftRight(numerator, drop), fractionBits);
-            FX_ASSERT(scaled.hi < divisor);
-            const uint64_t quotient = FxDivU128By64(scaled, divisor).quotient;
-            FX_ASSERT(quotient < (uint64_t{1} << 63));
-
-            return static_cast<int64_t>(quotient);
-        }
-
+        // 式は common/implicit_conduction.hlsli(GPU の段の組み立てと共通。T-0134)
         int64_t Weight(FxU128 numerator, FxU128 denominator) {
-            return WideRatio(numerator, denominator, WEIGHT_SHIFT);
+            return ImWeight(numerator, denominator);
         }
 
         int64_t ShiftRightSigned(int64_t value, uint32_t shift) {
@@ -640,7 +604,7 @@ namespace bicameral::sim {
                 for (uint32_t k = cells.rowStarts[i]; k < cells.rowStarts[i + 1]; ++k)
                     sum = WideAdd(sum, cells.coefficients[k]);
 
-                worst = std::max(worst, WideRatio(sum, cells.capacities[i], STAGE_RATIO_SHIFT));
+                worst = std::max(worst, ImWideRatio(sum, cells.capacities[i], STAGE_RATIO_SHIFT));
             }
 
             uint64_t s = 2;
