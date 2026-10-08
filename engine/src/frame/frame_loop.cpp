@@ -3,9 +3,11 @@
 // 1 フレームの流れ(CPU):
 //   窓のメッセージ → スワップチェインの待ち(歩調)→ 経過時間を SimScheduler へ
 //   → 終わったシミュのリストの読み戻し(フェンスが進んだ分だけ。待たない。単位の GPU 時間・ハッシュ・イベント)
-//   → 窓の入力をカメラ・表示とクリックに分け(render/debug_view_controller)、クリック(再生なら再生ファイル)をコマンドに → 予算ぶんの単位と、GPU のキューへ足すコマンドを記録して compute キューへ(ADR-0011)
+//   → 窓の入力をカメラ・表示とクリックに分け(render/debug_view_controller。--editor なら ImGui が使っている入力は渡さない)、クリック(再生なら再生ファイル)をコマンドに → 予算ぶんの単位と、GPU のキューへ足すコマンドを記録して compute キューへ(ADR-0011)
 //     (T が押されていたら、そのフレームから連鎖のトレースの範囲を変える。frame/trace_capture.h。T-0088)
-//   → 描画を direct キューへ(終わっている最新の抽出を見せる。シミュを待たない)→ Present
+//   → 描画を direct キューへ(終わっている最新の抽出を見せる。シミュを待たない)
+//   → --editor ならパネル(editor/editor_overlay)を作って重ね、押された時間の操作を TimeControl へ(次のフレームから効く)→ Present
+// 時間の操作(止める・1 刻み・速さ。editor/time_control)は「現実の時間から始めてよい刻みの数」だけを変え、世界には入らない(ADR-0035)。
 //
 // 抽出の 3 組の約束(06 §4): 抽出は 1 フレームに 1 回まで、そのフレームに投げた単位の後ろで刻みの境界の状態を写す。
 //   抽出 n は組 n % 3 に書き、CPU から見て終わっている抽出が n − 2 以上のときだけ投げる(でなければそのフレームは写さない)。
@@ -22,6 +24,8 @@
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/unicode.h"
+#include "editor/editor_overlay.h"
+#include "editor/time_control.h"
 #include "frame/sim_scheduler.h"
 #include "frame/trace_capture.h"
 #include "gpu/com_ptr.h"
@@ -61,6 +65,36 @@ namespace bicameral::frame {
         constexpr uint32_t TRACE_KEY_RADIUS_CELLS = 8;  // 最後につついたセルの周り ±何セル
         constexpr uint64_t AUTO_TRACE_FRAME = 30;       // --auto-trace が T を押すフレーム
         constexpr uint64_t AUTO_PUSH_FRAME = 60;        // --auto-push が押すフレーム(T-0098)
+
+        // --auto-time(T-0023): 止める → 止まったかを確かめる → 1 刻みを 3 回 → 3 刻みだけ進んだかを確かめる → 速さを変えて動かす
+        constexpr uint64_t AUTO_TIME_PAUSE_FRAME = 20;
+        constexpr uint64_t AUTO_TIME_HOLD_FRAME = 36;  // 止まった刻みを控える(始めていた刻みが終わるのを待ってから)
+        constexpr uint64_t AUTO_TIME_HOLD_CHECK_FRAME = 44;
+        constexpr std::array<uint64_t, 3> AUTO_TIME_STEP_FRAMES = {45, 50, 55};
+        constexpr uint64_t AUTO_TIME_STEP_CHECK_FRAME = 64;
+        constexpr uint64_t AUTO_TIME_FASTER_FRAME = 65;
+        constexpr uint64_t AUTO_TIME_RESUME_FRAME = 70;
+        constexpr uint64_t AUTO_TIME_SLOWER_FRAME = 100;
+        constexpr uint64_t AUTO_TIME_NORMAL_FRAME = 130;
+
+        editor::TimeRequest AutoTimeRequest(uint64_t frame) {
+            if (frame == AUTO_TIME_PAUSE_FRAME || frame == AUTO_TIME_RESUME_FRAME)
+                return {.togglePause = true};
+
+            if (rng::contains(AUTO_TIME_STEP_FRAMES, frame))
+                return {.stepTicks = 1};
+
+            if (frame == AUTO_TIME_FASTER_FRAME)
+                return {.speedSteps = 1};
+
+            if (frame == AUTO_TIME_SLOWER_FRAME)
+                return {.speedSteps = -2};
+
+            if (frame == AUTO_TIME_NORMAL_FRAME)
+                return {.resetSpeed = true};
+
+            return {};
+        }
 
         // 押す力積(T-0098): 5000 N·s(積み木の 500 kg の箱に 10 m/s)。押された箱はその上の段の摩擦に抗って抜ける
         constexpr uint32_t PUSH_IMPULSE_MILLINEWTON_SECONDS = 5'000'000;
@@ -186,6 +220,7 @@ namespace bicameral::frame {
             }
 
             [[nodiscard]] bool CreateFrameSlots();
+            [[nodiscard]] bool CreateEditor();
             [[nodiscard]] int Run();
 
         private:
@@ -222,6 +257,14 @@ namespace bicameral::frame {
             bool RunFrame(Clock::time_point frameStart);
             int Finish(bool failed, Clock::time_point start);
             [[nodiscard]] bool IsDeviceLost() const;
+
+            // --- エディタと時間の操作(T-0023)---
+            void BuildEditor();
+            [[nodiscard]] bool SubmitEditor();
+            void ApplyTimeRequest(const editor::TimeRequest& request);
+            void CheckAutoTime();
+            void FilterEditorInput(std::vector<InputEvent>& events) const;
+            [[nodiscard]] editor::EditorStatus MakeEditorStatus() const;
 
             // --- 計測 ---
             void LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const;
@@ -281,11 +324,19 @@ namespace bicameral::frame {
             std::vector<PendingClick> m_clicks;
             uint32_t m_nextSequence = 0;
 
+            // --- エディタと時間の操作(T-0023)---
+            editor::TimeControl m_timeControl;
+            std::unique_ptr<editor::EditorOverlay> m_editor;  // --editor のときだけ(窓より先に壊す)
+            SimCursor m_autoTimeHold;                         // --auto-time: 止めた後に控えたカーソル
+            bool m_autoTimeFailed = false;
+
             // --- 計測 ---
             uint64_t m_computeFrequency = 0;
             uint64_t m_directFrequency = 0;
-            Stats m_interval;  // この 1 秒
-            Stats m_total;     // 全体
+            Stats m_interval;      // この 1 秒
+            Stats m_lastInterval;  // 前の 1 秒(エディタの表示)
+            double m_lastIntervalSeconds = 0.0;
+            Stats m_total;  // 全体
         };
 
         // --- 作る ---
@@ -632,6 +683,7 @@ namespace bicameral::frame {
         // 窓の入力: カメラと表示は再生中も動かせる。つつき(左クリックが断面に当たったセル)と自動のクリックはコマンドに
         void FrameLoop::QueueClicks() {
             std::vector<InputEvent> events = m_window->TakeInputEvents();
+            FilterEditorInput(events);
             if (m_options.autoTrace && m_frameNumber == AUTO_TRACE_FRAME)
                 events.push_back({.kind = InputKind::KeyDown, .key = 'T'});  // 人がいない確認で T の流れを通す
 
@@ -870,6 +922,127 @@ namespace bicameral::frame {
                    FAILED(m_device.Get()->GetDeviceRemovedReason());
         }
 
+        // --- エディタと時間の操作(T-0023)---
+
+        bool FrameLoop::CreateEditor() {
+            if (!m_options.editor)
+                return true;
+
+            auto overlay = editor::EditorOverlay::Create(*m_window, m_device.Get(), m_direct, gpu::SwapChain::FORMAT,
+                                                         FRAME_SLOT_COUNT);
+            if (!overlay) {
+                Log(Channel::Render, Level::Error, "エディタの殻を作れない: {}", overlay.error());
+                return false;
+            }
+
+            m_editor = std::move(*overlay);
+
+            return true;
+        }
+
+        // ImGui のパネルの上の入力はカメラとつつきに渡さない。離す・動かすは渡す(パネルの外で始めたドラッグを終わらせるため)
+        void FrameLoop::FilterEditorInput(std::vector<InputEvent>& events) const {
+            if (!m_editor)
+                return;
+
+            const bool pointer = m_editor->WantsPointer();
+            const bool keyboard = m_editor->WantsKeyboard();
+            std::erase_if(events, [&](const InputEvent& event) {
+                if (event.kind == InputKind::KeyDown)
+                    return keyboard;
+
+                return pointer && (event.kind == InputKind::ButtonDown || event.kind == InputKind::Wheel);
+            });
+        }
+
+        // パネルを作り、押された時間の操作を受ける(--auto-time の操作もここで入れる)
+        void FrameLoop::BuildEditor() {
+            editor::TimeRequest request;
+            if (m_editor)
+                request = m_editor->Build(MakeEditorStatus(), m_timeControl);
+
+            if (m_options.autoTime) {
+                CheckAutoTime();
+                const editor::TimeRequest automatic = AutoTimeRequest(m_frameNumber);
+                if (automatic.Any())
+                    request = automatic;
+            }
+
+            ApplyTimeRequest(request);
+        }
+
+        bool FrameLoop::SubmitEditor() {
+            if (!m_editor)
+                return true;
+
+            const uint32_t index = m_swapChain.CurrentIndex();
+
+            return m_editor->Submit(m_direct, m_swapChain.BackBuffer(index), m_swapChain.RenderTargetView(index));
+        }
+
+        void FrameLoop::ApplyTimeRequest(const editor::TimeRequest& request) {
+            if (!request.Any())
+                return;
+
+            m_timeControl.Apply(request, m_scheduler);
+            const SimCursor cursor = m_scheduler.Cursor();
+            Log(Channel::Sim, Level::Info, "時間の操作: {}  速さ ×{:g}  刻み {}(単位 {})  1 刻みずつ {}",
+                m_timeControl.Paused() ? "止めている" : "動いている", m_timeControl.Speed(), cursor.tick, cursor.unit,
+                m_timeControl.SteppedTicks());
+        }
+
+        // --auto-time: 止めている間は刻みが進まず、1 刻みを 3 回押したらちょうど 3 刻み進んだか
+        void FrameLoop::CheckAutoTime() {
+            const SimCursor cursor = m_scheduler.Cursor();
+            if (m_frameNumber == AUTO_TIME_HOLD_FRAME)
+                m_autoTimeHold = cursor;
+
+            const bool holdBroken = m_frameNumber == AUTO_TIME_HOLD_CHECK_FRAME &&
+                                    (cursor != m_autoTimeHold || cursor.unit != 0);
+            const SimCursor stepped{.tick = m_autoTimeHold.tick + AUTO_TIME_STEP_FRAMES.size(), .unit = 0};
+            const bool stepBroken = m_frameNumber == AUTO_TIME_STEP_CHECK_FRAME && cursor != stepped;
+            if (!holdBroken && !stepBroken)
+                return;
+
+            m_autoTimeFailed = true;
+            Log(Channel::Sim, Level::Error, "--auto-time: フレーム {} で刻み {}(単位 {})。期待は刻み {}(単位 0)",
+                m_frameNumber, cursor.tick, cursor.unit, holdBroken ? m_autoTimeHold.tick : stepped.tick);
+        }
+
+        editor::EditorStatus FrameLoop::MakeEditorStatus() const {
+            const SimCursor cursor = m_scheduler.Cursor();
+            const double seconds = m_lastIntervalSeconds;
+            const auto perSecond = [&](uint64_t count) {
+                return seconds > 0.0 ? static_cast<double>(count) / seconds : 0.0;
+            };
+
+            const auto average = [](double sum, uint64_t count) {
+                return count > 0 ? sum / static_cast<double>(count) : 0.0;
+            };
+
+            const Stats& last = m_lastInterval;
+
+            return {.tick = cursor.tick,
+                    .unit = cursor.unit,
+                    .unitsPerTick = m_scheduler.UnitsPerTick(),
+                    .pendingTicks = m_scheduler.PendingTicks(),
+                    .droppedTicks = m_scheduler.DroppedTicks(),
+                    .hashedTick = m_latestHash.tick,
+                    .worldHash = m_latestHash.WorldHash(),
+                    .energyMillijoules = m_latestHash.energy,
+                    .scheduledBlocks = m_latestHash.scheduledBlocks,
+                    .framesPerSecond = perSecond(last.frames),
+                    .ticksPerSecond = perSecond(last.ticks),
+                    .cpuMilliseconds = average(last.cpuMilliseconds, last.frames),
+                    .simGpuMilliseconds = average(last.simGpuMilliseconds, last.simSubmissionsMeasured),
+                    .renderGpuMilliseconds = average(last.renderGpuMilliseconds, last.renderFramesMeasured),
+                    .budgetMilliseconds = m_scheduler.BudgetMilliseconds(),
+                    .view = m_viewController.Describe(),
+                    .replaying = !m_replay.empty(),
+                    .recording = !m_options.recordPath.empty(),
+                    .waitingCommands = m_pendingCommands.size()};
+        }
+
         // --- 計測 ---
 
         void FrameLoop::AddStats(const Stats& frame) {
@@ -933,7 +1106,8 @@ namespace bicameral::frame {
                 return false;
 
             SubmitRender();
-            if (!SubmitScreenshot())
+            BuildEditor();
+            if (!SubmitEditor() || !SubmitScreenshot())
                 return false;
 
             const auto presentStart = Clock::now();
@@ -994,7 +1168,7 @@ namespace bicameral::frame {
 
                 m_swapChain.WaitForFrame(FRAME_WAIT_TIMEOUT_MS);  // フレームの歩調(CPU が GPU より先に行き過ぎない)
                 const auto frameStart = Clock::now();
-                m_scheduler.AddRealTime(chr::duration<double>(frameStart - lastFrame).count());
+                m_timeControl.AdvanceRealTime(chr::duration<double>(frameStart - lastFrame).count(), m_scheduler);
                 lastFrame = frameStart;
                 if (!RunFrame(frameStart))
                     return Finish(true, start);
@@ -1004,6 +1178,8 @@ namespace bicameral::frame {
 
                 LogStats(m_interval, frameStart - intervalStart, "1 秒");
                 AddStats(m_interval);
+                m_lastInterval = m_interval;
+                m_lastIntervalSeconds = chr::duration<double>(frameStart - intervalStart).count();
                 m_interval = {};
                 intervalStart = frameStart;
             }
@@ -1042,6 +1218,9 @@ namespace bicameral::frame {
                 Log(Channel::Gpu, Level::Error, "debug layer のエラーが {} 件", m_device.ValidationErrorCount());
                 return 1;
             }
+
+            if (m_autoTimeFailed)
+                return 1;
 
             return replayPassed ? 0 : 1;
         }
@@ -1164,6 +1343,9 @@ namespace bicameral::frame {
             Log(Channel::Gpu, Level::Error, "描画のフレームの枠を作れない");
             return 1;
         }
+
+        if (!loop.CreateEditor())
+            return 1;
 
         return loop.Run();
     }

@@ -63,6 +63,13 @@ views:
       - { id: scheduler, group: framelib, label: "SimScheduler<br/>1 フレームに投げる単位の数(予算・単位の GPU 時間)",
           code: "engine/src/frame/sim_scheduler.cpp::SimScheduler::TakeUnits", ticket: T-0012, doc: docs/decisions/ADR-0011-sim-frame-budget.md,
           note: "予算 = 1000 / 目標 fps − 描画 − 余裕。刻みはフレームをまたぐ。追いつけない分は捨てる(D-202)。sim_scheduler_test" }
+      - { id: editoroverlay, group: framelib, label: "EditorOverlay<br/>ImGui のパネル(時間の操作・状態の表示。--editor)",
+          code: "engine/src/editor/editor_overlay.cpp::EditorOverlay::Build", ticket: T-0023, doc: docs/design/14-editor-tools.md,
+          note: "描画の後・Present の前に重ねる。パネルの上の入力はカメラとつつきに渡さない。世界には触れない(D-107)" }
+      - { id: timecontrol, group: framelib, label: "TimeControl<br/>止める・1 刻み進める・速さ",
+          code: "engine/src/editor/time_control.cpp::TimeControl::Apply", ticket: T-0023,
+          doc: docs/decisions/ADR-0035-time-control-outside-world.md,
+          note: "始めてよい刻みの数だけを変える。世界のコマンドに入らず、再生のハッシュ列は変わらない。time_control_test" }
       - { id: probeview, group: framelib, label: "ProbeView<br/>抽出の格子を光線で辿る(ボリューム・最大値・断面)",
           code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0015, doc: docs/design/14-editor-tools.md,
           note: "画面いっぱいの三角形 1 枚。重ね書き: 格子の枠・断面の枠・活性なブロック・色の凡例" }
@@ -482,6 +489,9 @@ views:
       - [viewcontroller, debugcamera]
       - [frameloop, screenshot, "--screenshot"]
       - [frameloop, scheduler, "単位の数"]
+      - [frameloop, editoroverlay, "状態 → パネル"]
+      - [editoroverlay, timecontrol, "止める・1 刻み・速さ"]
+      - [timecontrol, scheduler, "始めてよい刻み"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]

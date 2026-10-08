@@ -14,6 +14,10 @@ add_executable(sim_scheduler_test sim_scheduler_test.cpp)
 target_link_libraries(sim_scheduler_test PRIVATE bicameral_frame)
 add_test(NAME sim_scheduler COMMAND sim_scheduler_test)
 
+add_executable(time_control_test time_control_test.cpp)
+target_link_libraries(time_control_test PRIVATE bicameral_editor)
+add_test(NAME time_control COMMAND time_control_test)
+
 add_executable(debug_camera_test debug_camera_test.cpp)
 target_link_libraries(debug_camera_test PRIVATE bicameral_view)
 add_test(NAME debug_camera COMMAND debug_camera_test)
@@ -251,6 +255,11 @@ add_test(NAME window_replay_play
 # 物理(T-0098)の積み木を押す。物理のパイプラインの作成が debug で約 1 分かかるので、時間の上限を広げた
 set_tests_properties(window_replay_record PROPERTIES LABELS gpu FIXTURES_SETUP window_replay TIMEOUT 240)
 set_tests_properties(window_replay_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
+# エディタの殻(T-0023): パネルを重ね、決まったフレームで止める・1 刻みずつ・速さを変えながら再生しても、ハッシュ列が同じ(ADR-0035)。
+# 止まった・ちょうど 1 刻みずつ進んだかは --auto-time が確かめる(違えば 1)
+add_test(NAME window_replay_editor
+         COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-time)
+set_tests_properties(window_replay_editor PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)

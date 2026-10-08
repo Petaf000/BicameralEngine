@@ -142,6 +142,9 @@ namespace bicameral {
 
     LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         const HWND handle = m_handle;  // WM_NCDESTROY で m_handle を空にした後も DefWindowProcW に渡す
+        if (m_messageHook && handle != nullptr && m_messageHook(handle, message, wParam, lParam))
+            return 1;
+
         switch (message) {
             case WM_SIZE:
                 m_clientWidth = LOWORD(lParam);

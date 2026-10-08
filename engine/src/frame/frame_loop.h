@@ -64,6 +64,11 @@ namespace bicameral::frame {
         bool checkPhysics = false;
         bool physicsComputeBroadphase = false;  // 広域の選別を Compute で(--physics-compute。比べる用)
 
+        // --- エディタ(T-0023。editor/)---
+        bool editor = false;  // 窓に ImGui のパネル(時間の操作・状態の表示)を重ねる(--editor)
+        bool autoTime =
+            false;  // 決まったフレームで止める・1 刻み・速さを操作し、止まったか・1 刻みずつ進んだかを確かめる(--auto-time)
+
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)
         render::OrbitCameraState camera;  // 最初のカメラ

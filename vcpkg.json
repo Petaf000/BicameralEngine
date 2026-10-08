@@ -6,6 +6,10 @@
   "dependencies": [
     "directx-headers",
     "directx12-agility",
-    "directx-dxc"
+    "directx-dxc",
+    {
+      "name": "imgui",
+      "features": [ "dx12-binding", "win32-binding" ]
+    }
   ]
 }

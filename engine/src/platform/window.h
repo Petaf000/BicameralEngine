@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -43,6 +44,11 @@ namespace bicameral {
         // 前に呼んでからの入力(古い順)
         [[nodiscard]] std::vector<InputEvent> TakeInputEvents();
 
+        // 窓のメッセージを先に見る関数(エディタの ImGui。T-0023)。true を返したメッセージは窓では扱わない。
+        // 入力のイベントはそれでも溜める(どれを世界やカメラに渡すかは、受け取る側が ImGui の WantCapture* で決める)
+        using MessageHook = std::function<bool(HWND handle, UINT message, WPARAM wParam, LPARAM lParam)>;
+        void SetMessageHook(MessageHook hook) { m_messageHook = std::move(hook); }
+
     private:
         Window() = default;
 
@@ -55,6 +61,7 @@ namespace bicameral {
         void AddWheel(WPARAM wParam);
 
         HWND m_handle = nullptr;
+        MessageHook m_messageHook;
 
         // --- 大きさと状態 ---
         uint32_t m_clientWidth = 0;
