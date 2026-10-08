@@ -2,10 +2,13 @@
 #include "render/screenshot.h"
 
 #include <array>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 #include <vector>
 
 #include "core/aliases.h"
+#include "core/unicode.h"
 #include "gpu/resources.h"
 
 namespace bicameral::render {
@@ -117,9 +120,14 @@ namespace bicameral::render {
         const D3D12_RANGE noWrite{};
         m_readback->Unmap(0, &noWrite);
 
+        // 置き場所のフォルダが無ければ作る(テストはビルドのフォルダの images/ に書く。T-0025)
+        std::error_code error;
+        if (path.has_parent_path())
+            fs::create_directories(path.parent_path(), error);
+
         std::ofstream stream(path, std::ios::binary);
         if (!stream)
-            return std::unexpected("画像のファイルを開けない");
+            return std::unexpected("画像のファイルを開けない: " + ToUtf8(path.wstring()));
 
         stream.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
         if (!stream)

@@ -124,8 +124,9 @@ namespace bicameral::frame {
 
         // 投げたシミュのリスト(ProbeSim のフレームの枠ごと)。フェンスが fence に届いたら読む
         struct SimSubmission {
-            uint64_t fence = 0;       // compute のフェンスの値
-            uint64_t extraction = 0;  // このリストが書いた抽出の番号(0 = 写していない)
+            uint64_t fence = 0;           // compute のフェンスの値
+            uint64_t extraction = 0;      // このリストが書いた抽出の番号(0 = 写していない)
+            uint64_t extractionTick = 0;  // その抽出が写した状態の刻み(S(この刻み))
             bool read = true;
         };
 
@@ -133,6 +134,7 @@ namespace bicameral::frame {
         struct CompletedExtraction {
             uint64_t number = 0;  // 0 = まだ無い(組 0 は 0 のまま)
             uint64_t fence = 0;   // それを書いたシミュのリストの compute のフェンスの値
+            uint64_t tick = 0;    // 写した状態の刻み(S(この刻み))
         };
 
         struct PendingClick {
@@ -204,6 +206,10 @@ namespace bicameral::frame {
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
                   m_directFrequency(m_direct.TimestampFrequency()) {
+                // --screenshot-tick: その刻みの始めで世界を止める(写すのは S(その刻み)。T-0025)
+                if (options.screenshotTick)
+                    m_scheduler.SetStopTick(*options.screenshotTick);
+
                 // --trace: 起動時の範囲(ProbeSim を作った時に GPU へ渡した)を集める
                 if (!options.tracePath.empty())
                     m_traceCapture.emplace_back(options.tracePath, options.trace);
@@ -228,8 +234,10 @@ namespace bicameral::frame {
             bool RecordRenderLists();
             bool HandleResize();
             void SubmitRender();
+            [[nodiscard]] bool WantsScreenshot() const;
             [[nodiscard]] bool SubmitScreenshot();
             [[nodiscard]] bool WriteScreenshot();
+            [[nodiscard]] bool NeedsStopExtraction() const;
 
             // --- シミュの読み戻し ---
             void CollectSimSubmissions();
@@ -287,7 +295,7 @@ namespace bicameral::frame {
             // --- 記録・再生・画面の保存 ---
             std::vector<save::ReplayPlayer> m_replay;             // 再生中なら 1 つ
             save::ReplayRecorder m_recorder;                      // --record のときだけ使う
-            std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で最後のフレームを写したら 1 つ
+            std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で写したら 1 つ
 
             // --- 連鎖のトレース ---
             std::vector<TraceCapture> m_traceCapture;  // 集めているトレース(0 か 1 つ。GPU の範囲は 1 つだけなので)
@@ -307,7 +315,8 @@ namespace bicameral::frame {
             SimScheduler m_scheduler;
             std::array<SimSubmission, SIM_SLOT_COUNT> m_simSubmissions;
             uint64_t m_simSubmissionCount = 0;
-            uint64_t m_lastExtraction = 0;  // 最後に投げた抽出の番号
+            uint64_t m_lastExtraction = 0;               // 最後に投げた抽出の番号
+            uint64_t m_lastExtractionTick = UINT64_MAX;  // 最後に投げた抽出が写す状態の刻み(まだなら UINT64_MAX)
             CompletedExtraction m_completedExtraction;
 
             // 抽出の組ごとに、最後にそれを読んだ描画のフェンスの値
@@ -540,8 +549,10 @@ namespace bicameral::frame {
 
                 submission.read = true;
                 ReportSimReadback(m_sim.ReadFrame(slot));
-                if (submission.extraction > m_completedExtraction.number)
-                    m_completedExtraction = {.number = submission.extraction, .fence = submission.fence};
+                if (submission.extraction > m_completedExtraction.number) {
+                    m_completedExtraction = {
+                        .number = submission.extraction, .fence = submission.fence, .tick = submission.extractionTick};
+                }
             }
         }
 
@@ -700,7 +711,9 @@ namespace bicameral::frame {
             if (!m_replay.empty())
                 return;
 
-            if (m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0) {
+            const bool autoClick = m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0;
+            const bool autoIgnite = m_options.autoIgnite && m_frameNumber == 0;  // 下の最初の 1 回と同じ場所
+            if (autoClick || autoIgnite) {
                 // z = PROBE_VIEW_Z の面の決まった場所を順に押す(人がいない確認用。表示やカメラに依らない)。
                 // 最初の 1 回は木箱の壁 (28, 32)(初めの世界。sim/probe_sim.cpp)に火をつける(T-0089)
                 const auto step = static_cast<uint32_t>(m_frameNumber / AUTO_CLICK_INTERVAL_FRAMES);
@@ -826,15 +839,23 @@ namespace bicameral::frame {
 
             const SimCursor start = m_scheduler.Cursor();
             const uint32_t unitCount = m_scheduler.TakeUnits();
-            if (unitCount == 0)
+            // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)なら、抽出だけのリストを投げる
+            const bool extractOnly = unitCount == 0 && NeedsStopExtraction();
+            if (unitCount == 0 && !extractOnly)
                 return true;
+
+            const uint64_t extraction = m_lastExtraction + 1;
+            const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
+            if (extractOnly && !extract)
+                return true;  // 描画が抽出を読み終えるのを待つ(次のフレームでもう一度)
+
+            if (!extract)
+                ++m_interval.skippedExtractions;
 
             const std::vector<sim::ProbeCommand> commands = TakeCommands(start);
             StartRequestedTrace(start);
-            const uint64_t extraction = m_lastExtraction + 1;
-            const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
-            if (!extract)
-                ++m_interval.skippedExtractions;
+            // 抽出は S(終わった後のカーソルの刻み)。刻みの途中で終わったら、その刻みの始めの状態(ProbeSim::RecordFrame)
+            const uint64_t extractionTick = m_scheduler.Cursor().tick;
 
             const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
 
@@ -856,9 +877,13 @@ namespace bicameral::frame {
                 // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
                 m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
                 m_lastExtraction = extraction;
+                m_lastExtractionTick = extractionTick;
             }
 
-            submission = {.fence = m_compute.Submit(list), .extraction = extract ? extraction : 0, .read = false};
+            submission = {.fence = m_compute.Submit(list),
+                          .extraction = extract ? extraction : 0,
+                          .extractionTick = extractionTick,
+                          .read = false};
             ++m_simSubmissionCount;
             ++m_interval.simSubmissions;
             m_interval.units += unitCount;
@@ -879,9 +904,28 @@ namespace bicameral::frame {
             m_lastRenderReading[extraction] = slot.renderFence;
         }
 
-        // --screenshot: 最後のフレームの描画の後・Present の前に、バックバッファを読み戻しへ写す
+        // 止まる刻み(--screenshot-tick)に着いたが、その状態 S(刻み) をまだ抽出していない
+        bool FrameLoop::NeedsStopExtraction() const {
+            return m_options.screenshotTick && m_scheduler.ReachedStopTick() &&
+                   m_lastExtractionTick != m_scheduler.Cursor().tick;
+        }
+
+        // このフレームを写すか。--screenshot-tick なら、止まる刻みの状態 S(刻み) をこのフレームの描画が見せている時(T-0025)。
+        // そうでなければ最後のフレーム(--frames。シミュの進み方は実行ごとに違うので、写る刻みは決まらない)
+        bool FrameLoop::WantsScreenshot() const {
+            if (m_options.screenshotPath.empty() || !m_screenshot.empty())
+                return false;
+
+            if (!m_options.screenshotTick)
+                return m_frameNumber + 1 == m_options.frameLimit;
+
+            return m_scheduler.ReachedStopTick() && m_completedExtraction.number > 0 &&
+                   m_completedExtraction.tick == *m_options.screenshotTick;
+        }
+
+        // --screenshot: 写すフレームの描画の後・Present の前に、バックバッファを読み戻しへ写す
         bool FrameLoop::SubmitScreenshot() {
-            if (m_options.screenshotPath.empty() || m_frameNumber + 1 != m_options.frameLimit)
+            if (!WantsScreenshot())
                 return true;
 
             ID3D12Resource* backBuffer = m_swapChain.BackBuffer(m_swapChain.CurrentIndex());
@@ -912,7 +956,8 @@ namespace bicameral::frame {
                 return false;
             }
 
-            Log(Channel::Render, Level::Info, "画像: {}", ToUtf8(m_options.screenshotPath.wstring()));
+            Log(Channel::Render, Level::Info, "画像: {}{}", ToUtf8(m_options.screenshotPath.wstring()),
+                m_options.screenshotTick ? std::format("(S({}))", *m_options.screenshotTick) : "");
 
             return true;
         }
@@ -1136,8 +1181,8 @@ namespace bicameral::frame {
             const render::OrbitCameraState& camera = m_viewController.Camera().State();
             Log(Channel::Render, Level::Info, "表示: {}  カメラ 向き {:.0f}° 上下 {:.0f}° 距離 {:.0f}",
                 m_viewController.Describe(), camera.yawDegrees, camera.pitchDegrees, camera.distance);
-            if (!m_options.screenshotPath.empty() && m_options.frameLimit == 0)
-                Log(Channel::Render, Level::Warning, "--screenshot は --frames と一緒に使う(最後のフレームを写す)");
+            if (!m_options.screenshotPath.empty() && m_options.frameLimit == 0 && !m_options.screenshotTick)
+                Log(Channel::Render, Level::Warning, "--screenshot は --frames か --screenshot-tick と一緒に使う");
 
             if (!m_replay.empty()) {
                 Log(Channel::Sim, Level::Info, "再生: {}(コマンド {} 個、ハッシュ {} 個、刻み {} まで)",
@@ -1153,8 +1198,12 @@ namespace bicameral::frame {
                 if (m_options.frameLimit > 0 && m_frameNumber >= m_options.frameLimit)
                     break;
 
-                // 最後のハッシュまで確かめた
-                if (!m_replay.empty() && m_replay.front().Finished())
+                // --screenshot-tick: 止まる刻みの画面を写した
+                if (m_options.screenshotTick && !m_screenshot.empty())
+                    break;
+
+                // 最後のハッシュまで確かめた(--screenshot-tick なら写すまで続ける)
+                if (!m_replay.empty() && m_replay.front().Finished() && !m_options.screenshotTick)
                     break;
 
                 if (m_window->TakeResized() && !HandleResize())
@@ -1206,6 +1255,14 @@ namespace bicameral::frame {
             m_compute.Flush();
             if (!WriteScreenshot())
                 return 1;
+
+            if (m_options.screenshotTick && !m_options.screenshotPath.empty() && m_screenshot.empty()) {
+                Log(Channel::Render, Level::Error,
+                    "--screenshot-tick: 刻み {} の画面を写せなかった(--frames {} のうちに届かなかった)",
+                    *m_options.screenshotTick, m_options.frameLimit);
+
+                return 1;
+            }
 
             CollectSimSubmissions();
             AddStats(m_interval);

@@ -268,6 +268,28 @@ set_tests_properties(window_replay_editor PROPERTIES LABELS gpu FIXTURES_REQUIRE
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)
 set_tests_properties(window_replay_peek PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
+
+# 画像の比較(T-0025、16 §5): 決まった刻みの始めで世界を止め、S(その刻み) を描いた画面を基準の画像(tests/images/)と比べる。
+# 写す(ランタイム)→ 比べる(tools/image_compare)の 2 つのテスト。実際の画像と差の画像はビルドのフォルダの images/ に出る。
+# 基準の作り方・置き換え方は 16 §5。窓を開くのでラベル gpu(CI は外す)。--frames は刻みに届かなかった時の上限
+set(IMAGE_ACTUAL_DIR ${CMAKE_CURRENT_BINARY_DIR}/images)
+set(IMAGE_BASELINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/images)
+set(IMAGE_COMPARE ${PROJECT_SOURCE_DIR}/tools/image_compare/image_compare.py)
+function(bicameral_add_image_test name tick)
+  add_test(NAME image_${name}_capture
+           COMMAND bicameral --frames 3000 --screenshot-tick ${tick} --screenshot ${IMAGE_ACTUAL_DIR}/${name}.bmp ${ARGN})
+  add_test(NAME image_${name}
+           COMMAND ${Python3_EXECUTABLE} ${IMAGE_COMPARE} compare ${IMAGE_ACTUAL_DIR}/${name}.bmp
+                   ${IMAGE_BASELINE_DIR}/${name}.png --diff ${IMAGE_ACTUAL_DIR}/${name}.diff.png)
+  set_tests_properties(image_${name}_capture PROPERTIES LABELS gpu FIXTURES_SETUP image_${name} TIMEOUT 300)
+  set_tests_properties(image_${name} PROPERTIES LABELS gpu FIXTURES_REQUIRED image_${name} TIMEOUT 120)
+endfunction()
+# 木箱の壁に火をつけた(--auto-ignite。最初の刻みに載るので毎回同じ世界)4 秒後を、斜めから(体積)と、z = 32 の面を正面から(断面)。
+# debug では 1 つ約 2 分(ほとんどがパイプラインの作成。--no-physics は GPU-based validation が入って逆に約 3 分になる)
+bicameral_add_image_test(probe_volume 240 --auto-ignite --view volume)
+bicameral_add_image_test(probe_slice 240 --auto-ignite --view slice --camera 0,0,80)
+# 比べ方そのもの(読み書き・許容・差の画像)の試験。GPU 無し(CI でも回る)
+add_test(NAME image_compare_selftest COMMAND ${Python3_EXECUTABLE} ${IMAGE_COMPARE} selftest)
 bicameral_add_gpu_test(gpu_debug_device_test)
 bicameral_add_gpu_test_case(gpu_debug_device gpu_debug_device_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_debug_device_warp gpu_debug_device_test warp --warp --queue compute)

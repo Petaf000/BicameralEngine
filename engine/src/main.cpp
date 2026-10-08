@@ -11,6 +11,8 @@
 //   --render-normal                  描画のキューの優先度を NORMAL にする(既定 HIGH。比較用)
 //   --auto-click                     決まった場所を自動でクリックする(人がいない確認でイベントの流れを通す)
 //   --auto-push                      60 フレーム目に積み木の 5 段目を押す(人がいない確認で押すコマンドの流れを通す。T-0098)
+//   --auto-ignite                    最初のフレームに木箱の壁に 1 回だけ火をつける(最初の刻みに載るので、どの実行でも同じ世界。
+//                                    --screenshot-tick の画像の比較用。T-0025)
 //   --no-physics                     仮の世界に物理(積み木)を入れない(既定は入れる。窓では Shift + 左クリックで押す。T-0098)
 //   --check-physics                  CPU の物理を並べて走らせ、刻みごとの物のハッシュを突き合わせる(調べる用)
 //   --physics-compute                物理の広域の選別を Compute で(既定は Work Graph。比べる用)
@@ -20,6 +22,8 @@
 //   --view <volume|mip|slice>        最初のデバッグ表示(既定 volume。窓では 1・2・3 で切り替え。render/debug_view_controller.h)
 //   --camera <yaw>,<pitch>,<距離>    最初のカメラ(度・度・セル。既定 35,25,150。0,0,80 で z = 32 の面を正面から)
 //   --screenshot <path>              最後のフレームを BMP に書く(--frames と一緒に使う。render/screenshot.h)
+//   --screenshot-tick <t>            刻み t の始めで世界を止め、S(t) を描いた画面を --screenshot に書いて終える(決まった画面。
+//                                    画像の比較用。--frames はそこまでの上限。tools/image_compare。T-0025)
 //   --peek <x,y,z>                   起動時からそのセルを覗き窓で覗く(影の鎖 k = 1〜9。窓では P。sim/probe_peek.h。T-0096)
 //   --peek-depth <k>                 覗き窓で潜る段(0〜9。カメラが点に寄る。窓では PageDown・PageUp)
 //   --trace <path>                   伝導の連鎖のトレースを刻みごとの木にして、終わるときに書く(sim/probe_trace.h。T-0087)
@@ -227,7 +231,7 @@ namespace {
     constexpr uint32_t MIN_TARGET_FPS = 30;
     constexpr uint32_t MAX_TARGET_FPS = 1000;
 
-    // フレームのループの値つきの引数(--frames・--latency・--target-fps・--sim-load・--sim-split)
+    // フレームのループの値つきの引数(--frames・--latency・--target-fps・--sim-load・--sim-split・--screenshot-tick)
     std::expected<void, std::string> ParseFrameLoopCount(std::wstring_view argument, std::wstring_view text,
                                                          frame::FrameLoopOptions& loop) {
         const uint32_t maximum = argument == L"--latency"      ? 3u
@@ -257,6 +261,9 @@ namespace {
         if (argument == L"--sim-split")
             loop.simSplit = *value;
 
+        if (argument == L"--screenshot-tick")
+            loop.screenshotTick = *value;
+
         return {};
     }
 
@@ -270,6 +277,8 @@ namespace {
             loop.autoTrace = true;
         else if (argument == L"--auto-push")
             loop.autoPush = true;
+        else if (argument == L"--auto-ignite")
+            loop.autoIgnite = true;
         else if (argument == L"--no-physics")
             loop.physics = false;
         else if (argument == L"--check-physics")
@@ -304,7 +313,7 @@ namespace {
             else if (ParseFrameLoopFlag(argument, options.frameLoop))
                 continue;
             else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--target-fps" ||
-                      argument == L"--sim-load" || argument == L"--sim-split") &&
+                      argument == L"--sim-load" || argument == L"--sim-split" || argument == L"--screenshot-tick") &&
                      hasValue) {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
                 if (!parsed)
