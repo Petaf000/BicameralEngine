@@ -46,6 +46,12 @@ namespace bicameral::frame {
         // 現実の経過時間を足す。speedScale はゲーム側の指定の速さ(スローの演出。1 = 等速。D-409)
         void AddRealTime(double seconds, double speedScale = 1.0);
 
+        // 時間の操作(エディタ。T-0023): 未処理の刻みを捨てる(止める)・決まった数の刻みを足す(1 刻み進める)。
+        // 刻みの途中で止めても、始めた刻みは最後の単位まで進む(TakeUnits は刻みの始めでしか止まらない)。
+        // どちらも「いつ投げるか」だけを変え、世界の結果は変えない(06 §1)
+        void ClearBacklog() { m_pendingTicks = 0.0; }
+        void AddTicks(uint32_t ticks) { m_pendingTicks += static_cast<double>(ticks); }
+
         // 終わった単位の GPU の時間(数フレーム遅れで届く)。unit は刻みの中の番号
         void ReportUnitTime(uint32_t unit, double gpuMilliseconds);
 

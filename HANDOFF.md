@@ -6,6 +6,43 @@
 - 今までの丸め(D-424 の下限と毎刻みの乱数の丸め)のコードを消した。反応はどこも待ちの丸め(RxStepCellWait。D-429・ADR-0018)だけ。
 - 1 セルの反応の試験(reaction・gpu_reaction)は 1 セルだけのブロック(RxAdvanceLoneCell)で進める。T-0122 と T-0129 を合わせた main + この変更で release の全部のテストが通過。
 
+## 並走で入ったもの: T-0134 陰解法の多重格子を GPU で(一部。2026-10-09)
+- 状態: T-0134 完了(範囲を絞った)。陰解法の多重格子の段(節・隣・重み・親子・子の一覧)を GPU で作り(GpuImplicitLevels・implicit_levels.hlsl)、
+  CPU の BuildImplicitGrid と番号まで毎刻みビット一致・それを GpuImplicit に写して解いた結果も一致(熱い点・鎖・たくさんの要求)。段の数は GPU が値で決める。
+  節の並び・ImTail・間接の Dispatch・GpuImplicit の大きさを上限から決めるのは T-0135。
+- 動いているもの: `-Filter "^gpu_multires_implicit_build(_warp)?$"`(release の HW・WARP 合わせて約 2.3 分〔計測込み〕/ debug の WARP 約 1.6 分・HW 約 7 分)。
+  計測は `job.py run -Preset release -Exe gpu_multires_implicit_build_test -- --queue compute --measure-only`。
+- 壊れているもの: なし。
+- 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0134: 親と行の番号は鍵の表の atomic の最小 + 接頭和 + 順位・係数は 128bit の繰り上げつき atomic・
+  段の数は回ごとの述語・自分のルート署名)。
+- 判断待ち: なし。
+- 注意: 多重格子の段を作る費用は上限 64 で 1.6〜2.7 ms(空の回 948 Dispatch の固定費が主)・上限 = 段の数で 0.5〜2.1 ms と重い(T-0135 で減らす。docs/perf.md)。
+  GpuImplicitLevels の RecordCopyTo・RecordReadback は RecordBuild と同じコマンドリストで呼ぶ(バッファは COMMON から UAV に昇格させて使うため)。
+  GpuImplicit はまだ CPU の系で Create する(節の並び・ImTail も CPU から)。implicit_build.hlsl の作業場の後ろにセルの座標(CellKeyWord)を足した。
+
+## 並走で入ったもの: T-0020 Luau の殻(2026-10-09)
+- 動いているもの: Luau の殻(CPU だけ)。debug ビルドで luau_sandbox_test が通る。まだどこからも使っていない(エディタ T-0023・ベイク T-0021 から使う)。
+- 壊れているもの: なし。
+- 決めたこと: ADR-0030(vcpkg の port・許可の一覧・安全点とメモリの上限・実行ごとの種・アドレス順の pairs をベイクに使わない規則)。
+- 注意:
+  - vcpkg.json に `luau` が入った。CMakePresets.json の環境に `XDG_CONFIG_HOME`・`GIT_CONFIG_GLOBAL` が入った(port のビルドの git だけのため。git-config フォルダは CMake が作る)。
+  - Luau のヘッダ(lua.h など)は小さいので pch.h に入れていない。bicameral_script が PUBLIC で Luau.VM をつなぐので、ホスト関数を書く側は lua.h を include できる。
+  - ログは Channel::Tool に出す(Script のチャンネルは足していない。並走中の log.cpp の衝突を避けた。要るなら後で足す)。
+- 次: T-0138(パッケージ)→ T-0021(反応表のベイクを Luau から)→ T-0139(ホットリロード。エディタの殻 T-0023 の後)。
+
+
+## 並走で入ったもの: T-0023 エディタの殻(2026-10-09)
+- 動いているもの: `bicameral --editor`(パネル「時間」「状態」)。`--auto-time` は人がいない確認用。既定(--editor なし)の動きは今までと同じ。
+- 壊れているもの: なし。
+- 注意:
+  - ImGui のヘッダは pch.h に入れていない(pch.h は ImGui をリンクしないライブラリとテストでも使う)。ImGui を使うのは editor_overlay.cpp だけ。
+    ImGui の DX12 backend の `#include <d3d12.h>` は、pch の `<directx/d3d12.h>` と同じ include guard で飛ばされる。
+  - ImGui の DX12 backend はフォントの画像の転送に direct キューを使い、その場で待つ(最初のフレームと新しい字が出た時だけ)。
+  - 窓の配置は保存しない(io.IniFilename = nullptr)。
+  - 4 つのランナーが同じ GPU を使っている間は、デバッグ版の最初のフレームが 2〜4 分かかることがある(--editor の有無に依らない。他の作業ツリーの GPU テストと重なった時)。
+- 次: T-0142 実験室パネル(下)。
+
+
 ## 並走で入ったもの: T-0129 陰解法の系を GPU で組み立てる(一部。ブランチ t-0129 を main へマージ、2026-10-06)
 - 状態: T-0129 完了(範囲を絞った)。陰解法の系のうち未知数・境のセル・面・セルの面の一覧を GPU の木から作り(GpuImplicitBuild・implicit_build.hlsl)、
   CPU の系と番号まで毎刻みビット一致・それを GpuImplicit で解いた結果も一致(熱い点・鎖・たくさんの要求)。多重格子の段・重み・節の並び・間接の Dispatch は T-0134。

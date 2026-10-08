@@ -7,6 +7,10 @@
     "directx-headers",
     "directx12-agility",
     "directx-dxc",
-    "luau"
+    "luau",
+    {
+      "name": "imgui",
+      "features": [ "dx12-binding", "win32-binding" ]
+    }
   ]
 }

@@ -27,6 +27,8 @@
 //   --trace-cells <x,y,z>:<x,y,z>    トレースするセルの箱 [最小, 最大)(既定: 全部。そのセルを含むブロックを記録する)
 //   --trace-dir <path>               窓の T で集めたトレースを書くフォルダ(既定: exe の横の traces/。T-0088)
 //   --auto-trace                     30 フレーム目に T を押す(人がいない確認で T の流れを通す。--auto-click と一緒に)
+//   --editor                         エディタの殻(ImGui の時間の操作・状態の表示。Space = 止める・N = 1 刻み)を重ねる(T-0023)
+//   --auto-time                      決まったフレームで止める・1 刻み・速さを操作し、止まった・1 刻みずつ進んだかを確かめる(T-0023)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -278,6 +280,14 @@ namespace {
             loop.adapter = gpu::AdapterKind::Warp;
         else if (argument == L"--render-normal")
             loop.renderHighPriority = false;
+        else if (argument == L"--editor")
+            loop.editor = true;
+        else if (argument == L"--auto-time")
+            loop.autoTime = true;
+        else if (argument == L"--editor")
+            loop.editor = true;
+        else if (argument == L"--auto-time")
+            loop.autoTime = true;
         else
             return false;
 

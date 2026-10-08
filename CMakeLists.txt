@@ -27,6 +27,7 @@ endif()
 find_package(directx-headers CONFIG REQUIRED)    # d3d12.h など(Agility SDK と同じ版)
 find_package(directx12-agility CONFIG REQUIRED)  # D3D12Core.dll / d3d12SDKLayers.dll(ADR-0004)
 find_package(directx-dxc CONFIG REQUIRED)        # シェーダーコンパイラ。DIRECTX_DXC_TOOL に dxc.exe の場所が入る
+find_package(imgui CONFIG REQUIRED)              # エディタの殻のパネル(Dear ImGui。Win32 と DX12 の backend。T-0023)
 message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
 find_package(unofficial-luau CONFIG REQUIRED)    # Luau(エディタ・ツール・ゲームのオーサリングのスクリプト。CPU だけ。13・T-0020)
 # ビルドの中の検査(tools/float_check: シミュの浮動小数点の禁止、04 §4)に使う

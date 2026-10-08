@@ -118,9 +118,18 @@ add_library(bicameral_view STATIC
 target_include_directories(bicameral_view PUBLIC src)
 target_link_libraries(bicameral_view PUBLIC bicameral_core)
 
+# --- editor: エディタの時間の操作(GPU を知らない。CPU だけのテストがある。T-0023)---
+# ImGui のパネル(src/editor/editor_overlay.cpp)は D3D12 を使うのでランタイムの方に入れる
+add_library(bicameral_editor STATIC
+  src/editor/time_control.cpp
+)
+target_include_directories(bicameral_editor PUBLIC src)
+target_link_libraries(bicameral_editor PUBLIC bicameral_frame)
+
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp
+  src/editor/editor_overlay.cpp
   src/frame/frame_loop.cpp
   src/frame/trace_capture.cpp
   src/platform/agility_sdk.cpp
@@ -138,6 +147,8 @@ target_link_libraries(bicameral PRIVATE
   bicameral_frame
   bicameral_save
   bicameral_view
+  bicameral_editor
+  imgui::imgui
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility
   d3d12 dxgi)
