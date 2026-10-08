@@ -66,6 +66,8 @@ CPU の BuildImplicitGrid と番号まで同じにして、GpuImplicit にその
   全部は 2 時間に入らないと判断し、段・重み・値で決まる段の数に絞った(節の並び・ImTail・間接の Dispatch・上限から Create は T-0135)。
   親と行の番号は「鍵の表の atomic の最小 + 接頭和 + 一覧の中の順位」で CPU の初めて出会う順を再現し、行の係数は 128bit の繰り上げつき atomic で足した。
   最初のビルド(HLSL の構造体の三項演算子・float 検査の `round` という名前を直した後)で debug の WARP・release の HW・WARP がビット一致。
+  debug の HW も通過(約 7 分)。main(T-0130)へ rebase した後、release で gpu_multires_implicit_build(_warp)・multires_implicit(_tree)・
+  gpu_multires_implicit_warp の 5 本が通過。tidy は時間の約束で流していない(マージ前に司令塔か T-0135 で)。
 
 ## 引き継ぎメモ(HANDOFF に載せるもの。司令塔がマージ後に反映)
 - 状態: T-0134 完了(範囲を絞った)。陰解法の多重格子の段(節・隣・重み・親子・子の一覧)を GPU で作り(GpuImplicitLevels・implicit_levels.hlsl)、
