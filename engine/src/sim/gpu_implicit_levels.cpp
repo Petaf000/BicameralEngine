@@ -22,7 +22,7 @@ namespace bicameral::sim {
         constexpr uint32_t THREADS = 64;         // implicit_levels.hlsl の LV_THREADS
         constexpr uint32_t SCAN_THREADS = 1024;  // implicit_levels.hlsl の LV_SCAN_THREADS
         constexpr uint32_t UAV_COUNT = 7;
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 12;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 13;
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true};
 
@@ -62,6 +62,7 @@ namespace bicameral::sim {
             PassCoarseNodes,
             PassFinish,
             PassRoundEnd,
+            PassTail,
             PassTotal
         };
 
@@ -82,7 +83,8 @@ namespace bicameral::sim {
                                                                         "add_coefficients",
                                                                         "coarse_nodes",
                                                                         "finish",
-                                                                        "round_end"};
+                                                                        "round_end",
+                                                                        "tail"};
 
         // 回の中の段(述語で飛ばす。RoundEnd は述語の外)
         constexpr std::array<Pass, 14> ROUND_PASSES = {PassNodeHash,
@@ -160,6 +162,8 @@ namespace bicameral::sim {
         constants.listCellsWord = build.ListCellsWord();
         constants.facesByte = static_cast<uint32_t>(build.FacesOffset());
         constants.listsByte = static_cast<uint32_t>(build.ListsOffset());
+        constants.tailMaxNodes = limits.tailMaxNodes;
+        result.m_dispatchRounds = std::min(limits.dispatchRounds, limits.levels - 1);
 
         // --- 作業場: 見出し・節・隣・仮の子の一覧・2 つの表・接頭和のグループの和(implicit_levels.hlsl の番地の関数)---
         const uint64_t words = HEADER_WORDS + (uint64_t{NODE_WORDS} * limits.nodes) +
@@ -269,13 +273,14 @@ namespace bicameral::sim {
         groups[PassCoarseNodes] = Groups(cells);
         groups[PassFinish] = Groups(both);
         groups[PassRoundEnd] = 1;
+        groups[PassTail] = 1;
 
-        // --- 段 0 → 回 d(段 d を縮約して段 d + 1)× 上限 ---
+        // --- 段 0 → 回 d(段 d を縮約して段 d + 1)を Dispatch で m_dispatchRounds 回 → 残りは LvTail(T-0135)---
         m_constants.depth = 0;
         for (const Pass pass : {PassClear, PassCells, PassCellLinks})
             Dispatch(list, pass, groups[pass]);
 
-        for (uint32_t coarsening = 0; coarsening + 1 < m_constants.maxLevels; ++coarsening) {
+        for (uint32_t coarsening = 0; coarsening < m_dispatchRounds; ++coarsening) {
             m_constants.depth = coarsening;
             BeginSkippable(list, coarsening);
             for (const Pass pass : ROUND_PASSES)
@@ -284,10 +289,17 @@ namespace bicameral::sim {
             EndSkippable(list);
             Dispatch(list, PassRoundEnd, groups[PassRoundEnd]);
         }
+
+        if (UsesTail())
+            Dispatch(list, PassTail, groups[PassTail]);
+    }
+
+    bool GpuImplicitLevels::UsesTail() const {
+        return m_dispatchRounds + 1 < m_constants.maxLevels || m_constants.tailMaxNodes != 0;
     }
 
     uint32_t GpuImplicitLevels::DispatchCount() const {
-        return 3 + ((m_constants.maxLevels - 1) * static_cast<uint32_t>(ROUND_PASSES.size() + 1));
+        return 3 + (UsesTail() ? 1 : 0) + (m_dispatchRounds * static_cast<uint32_t>(ROUND_PASSES.size() + 1));
     }
 
     void GpuImplicitLevels::RecordCopyTo(ID3D12GraphicsCommandList* list, GpuImplicit& implicit) {

@@ -2,8 +2,9 @@
 // 入力は GpuImplicitBuild(T-0129)が作った系(セル・面・セルの面の一覧)とセルの座標。CPU リファレンスは implicit_conduction.cpp の
 // BuildImplicitGrid(段 0 = セル → 最も細かいレベルの節を親のセルへ縮約 → 重み〔128bit の割り算〕→ 重み < 1/2 の節がある間は次の段)。
 // 作るもの(節 ImGpuNode・隣 ImGpuLink・子の一覧)は GpuImplicit の段の形と同じ並び・同じ番号なので、そのまま写して解ける(RecordCopyTo)。
-// 段の数は値で決まる: 回は上限(limits.levels − 1 回)だけ積み、要らない回は述語(SetPredication)で飛ばす。段の中身は shaders/sim/implicit_levels.hlsl。
-// 節の並び(長い行・色ごと)・ImTail の境・間接の Dispatch・GpuImplicit の大きさを上限から決めるのは T-0135(今は CPU の系の形で Create する)。
+// 段の数は値で決まる: 回は limits.dispatchRounds 回だけ Dispatch で積み、要らない回は述語(SetPredication)で飛ばす。小さい段の回と残りの回は
+// 1 グループの LvTail が最後まで回す(T-0135)。段の中身は shaders/sim/implicit_levels.hlsl。
+// 節の並び(長い行・色ごと)・ImTail の境・間接の Dispatch・GpuImplicit の大きさを上限から決めるのは T-0136(今は CPU の系の形で Create する)。
 //
 // 使い方(テスト):
 //   auto levels = GpuImplicitLevels::Create(device, build, limits);
@@ -26,7 +27,14 @@ namespace bicameral::sim {
     struct GpuImplicitLevelLimits {
         uint32_t nodes = 0;    // 全部の段の節
         uint32_t links = 0;    // 全部の段の隣
-        uint32_t levels = 64;  // 段の数(CPU の MAX_GRID_LEVELS。回はこれ − 1 回積む)
+        uint32_t levels = 64;  // 段の数(CPU の MAX_GRID_LEVELS。回はこれ − 1 回まで)
+
+        // --- 回の積み方(T-0135。計測で選ぶ。docs/perf.md)---
+        // Dispatch で積む回の数。残りの回と、細かい段の節が tailMaxNodes 以下の回は 1 グループの LvTail が最後まで回す
+        // (段ごとの Dispatch とバリアが要らない)。既定(dispatchRounds ≥ levels − 1・tailMaxNodes = 0)は T-0134 と同じ積み方で、LvTail を積まない。
+        // LvTail は HW で CPU とビット一致するが、WARP で落ちる(デバイスが失われる。T-0135)ので、WARP で直すまで(T-0147)既定にしない
+        uint32_t dispatchRounds = 63;
+        uint32_t tailMaxNodes = 0;
     };
 
     // GpuImplicit の段の形の像(CPU の ImplicitGrid から。比べる用。gpu_implicit.cpp の MakeNodes と同じ)
@@ -85,13 +93,16 @@ namespace bicameral::sim {
             uint32_t listCellsWord = 0;
             uint32_t facesByte = 0;
             uint32_t listsByte = 0;
+            uint32_t tailMaxNodes = 0;
         };
 
         void Dispatch(ID3D12GraphicsCommandList* list, uint32_t pass, uint32_t groups);
+        [[nodiscard]] bool UsesTail() const;  // LvTail を積むか(Dispatch で積まない回があるか、小さい段を任せるか)
         void BeginSkippable(ID3D12GraphicsCommandList* list, uint32_t coarsening);
         void EndSkippable(ID3D12GraphicsCommandList* list);
 
         Constants m_constants;
+        uint32_t m_dispatchRounds = 0;  // Dispatch で積む回の数(残りは LvTail)
         uint64_t m_workBytes = 0;
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
