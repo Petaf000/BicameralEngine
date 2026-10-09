@@ -39,6 +39,8 @@
 //   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。既定: exe の横の data/packages。
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
+//   --auto-reload                    --packages の写しの反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻みで終える
+//                                    (--editor と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0195)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -309,6 +311,8 @@ namespace {
             loop.autoRewind = true;
         else if (argument == L"--auto-lab")
             loop.autoLab = true;
+        else if (argument == L"--auto-reload")
+            loop.autoReload = true;
         else
             return false;
 

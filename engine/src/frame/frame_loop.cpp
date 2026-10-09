@@ -15,6 +15,7 @@
 //   さらに抽出 n の前に、組 n % 3 を最後に読んだ描画のフェンスを compute キューに GPU の上で待たせる(m_lastRenderReading)。
 //   描画がシミュを待つことは無い(D-201)。
 #include "frame/frame_loop.h"
+#include "frame/auto_reload.h"
 
 #include <chrono>
 #include <cmath>
@@ -302,6 +303,7 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeLiveCommands(uint64_t applyTick, uint64_t endApplyTick,
                                                                           uint32_t limit);
             void CheckAutoRewind();
+            [[nodiscard]] bool CreateAutoReload();
 
             // --- 計測 ---
             void LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const;
@@ -371,6 +373,7 @@ namespace bicameral::frame {
             std::unique_ptr<editor::EditorOverlay> m_editor;  // --editor のときだけ(窓より先に壊す)
             SimCursor m_autoTimeHold;                         // --auto-time: 止めた後に控えたカーソル
             bool m_autoTimeFailed = false;
+            std::optional<AutoReload> m_autoReload;  // --auto-reload(T-0195)
 
             // --- 巻き戻し(T-0143)---
             uint32_t m_savePointCount = 0;
@@ -964,6 +967,12 @@ namespace bicameral::frame {
             }
 
             m_frameTableSwaps = std::move(*swaps);
+
+            // 覗き窓も同じ表へ(世界がその刻みを過ぎた境界を抽出する時に替える。T-0194)
+            for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
+                if (swap.table != nullptr)
+                    m_peek.QueueTableSwap(swap.tick, *swap.table);
+            }
         }
 
         std::vector<sim::ProbeCommand> FrameLoop::TakeClickCommands(uint64_t applyTick, uint32_t limit) {
@@ -1153,6 +1162,9 @@ namespace bicameral::frame {
         // --- エディタと時間の操作(T-0023)---
 
         bool FrameLoop::CreateEditor() {
+            if (m_options.autoReload && !CreateAutoReload())
+                return false;
+
             if (!m_options.editor)
                 return true;
 
@@ -1188,8 +1200,15 @@ namespace bicameral::frame {
         // パネルを作り、押された時間の操作を受ける(--auto-time の操作もここで入れる)
         void FrameLoop::BuildEditor() {
             editor::TimeRequest request;
-            if (m_editor)
+            if (m_editor) {
+                // 実験室は世界と同じ表(差し替えたら箱も替える。T-0194)
+                if (const auto loaded = m_tableReload.Find(m_tableReload.AppliedVersion()); loaded != nullptr) {
+                    m_editor->Lab().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
+                                             loaded->tableVersion);
+                }
+
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
+            }
 
             if (m_options.autoTime) {
                 CheckAutoTime();
@@ -1457,6 +1476,25 @@ namespace bicameral::frame {
             return commands;
         }
 
+        // --auto-reload(T-0195): ファイルを見るのは --editor の生の操作だけ。書き換えるのは --packages で渡した写し
+        bool FrameLoop::CreateAutoReload() {
+            if (!m_options.editor || !m_options.replayPath.empty() || m_options.packageRoot.empty()) {
+                Log(Channel::Tool, Level::Error,
+                    "--auto-reload は --editor と --packages <写したフォルダ> と一緒に使う(--replay とは使えない)");
+                return false;
+            }
+
+            auto autoReload = AutoReload::Create(m_options.packageRoot);
+            if (!autoReload) {
+                Log(Channel::Tool, Level::Error, "{}", autoReload.error());
+                return false;
+            }
+
+            m_autoReload.emplace(std::move(*autoReload));
+
+            return true;
+        }
+
         // --auto-rewind: 保存点が 2 つできたら、古い方へ 1 回だけ戻す
         void FrameLoop::CheckAutoRewind() {
             if (!m_options.autoRewind || m_rewindCount > 0 || m_rewindRequest != UINT64_MAX)
@@ -1527,6 +1565,9 @@ namespace bicameral::frame {
             CollectSimSubmissions();
             QueueClicks();
             m_tableReload.Poll(m_frameNumber);
+            if (m_autoReload)
+                m_autoReload->Update(m_scheduler.Cursor().tick, m_tableReload);
+
             if (!SubmitSim())
                 return false;
 
@@ -1580,6 +1621,10 @@ namespace bicameral::frame {
 
                 // --screenshot-tick: 止まる刻みの画面を写した
                 if (m_options.screenshotTick && !m_screenshot.empty())
+                    break;
+
+                // --auto-reload: 差し替えて流し終えた・失敗した
+                if (m_autoReload && (m_autoReload->Done() || m_autoReload->Failed()))
                     break;
 
                 // 最後のハッシュまで確かめた(--screenshot-tick なら写すまで続ける)
@@ -1661,6 +1706,12 @@ namespace bicameral::frame {
 
             if (m_options.autoLab && (!m_editor || m_editor->Lab().AutoFailed())) {
                 Log(Channel::Sim, Level::Error, "--auto-lab: 実験室の確かめが通らなかった(--editor が要る)");
+                return 1;
+            }
+
+            if (m_options.autoReload && (!m_autoReload || !m_autoReload->Done())) {
+                Log(Channel::Tool, Level::Error, "--auto-reload: ホットリロードの確かめが通らなかった({})",
+                    m_autoReload ? m_autoReload->Failure() : "始められない");
                 return 1;
             }
 

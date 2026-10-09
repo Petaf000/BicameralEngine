@@ -31,7 +31,8 @@ namespace bicameral::sim {
 
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---
         constexpr std::array<char, 4> RECORDING_MAGIC = {'B', 'L', 'A', 'B'};
-        constexpr uint32_t RECORDING_VERSION = 1;
+        constexpr uint32_t RECORDING_VERSION = 2;           // 2: 表の版を足した(T-0194)
+        constexpr uint32_t RECORDING_VERSION_NO_TABLE = 1;  // 読める古い版(表の版が無い)
 
         void SetPayload(Command& command, uint32_t word, uint32_t value) {
             command.payload[word] = value;
@@ -256,6 +257,7 @@ namespace bicameral::sim {
         Append(bytes, RECORDING_MAGIC);
         Append(bytes, RECORDING_VERSION);
         Append(bytes, LAB_WORLD_SEED);
+        Append(bytes, recording.tableVersion);
         Append(bytes, recording.tickCount);
         Append(bytes, static_cast<uint64_t>(recording.commands.size()));
         Append(bytes, static_cast<uint64_t>(recording.hashes.size()));
@@ -278,11 +280,16 @@ namespace bicameral::sim {
         if (!Take(bytes, magic) || magic != RECORDING_MAGIC)
             return std::unexpected("実験の記録ではない");
 
-        if (!Take(bytes, version) || version != RECORDING_VERSION)
+        if (!Take(bytes, version) || (version != RECORDING_VERSION && version != RECORDING_VERSION_NO_TABLE))
             return std::unexpected(std::format("記録の版 {} は読めない", version));
 
-        if (!Take(bytes, seed) || seed != LAB_WORLD_SEED || !Take(bytes, recording.tickCount) ||
-            !Take(bytes, commandCount) || !Take(bytes, hashCount))
+        if (!Take(bytes, seed) || seed != LAB_WORLD_SEED)
+            return std::unexpected("記録の見出しが壊れている");
+
+        if (version == RECORDING_VERSION && !Take(bytes, recording.tableVersion))
+            return std::unexpected("記録の見出しが壊れている");
+
+        if (!Take(bytes, recording.tickCount) || !Take(bytes, commandCount) || !Take(bytes, hashCount))
             return std::unexpected("記録の見出しが壊れている");
 
         if (bytes.size() != (commandCount * COMMAND_BYTES) + (hashCount * sizeof(uint64_t)) ||

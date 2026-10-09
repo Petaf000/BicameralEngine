@@ -154,15 +154,24 @@ namespace {
         EXPECT(TotalOf(first, carbonDioxide) > 0);
 
         // --- 記録の読み書き ---
-        const LabRecording recording{.tickCount = RUN_TICKS, .commands = commands, .hashes = hashes};
+        const LabRecording recording{
+            .tableVersion = 0x0123456789ABCDEFULL, .tickCount = RUN_TICKS, .commands = commands, .hashes = hashes};
         std::vector<std::byte> bytes = SerializeLabRecording(recording);
         const auto parsed = ParseLabRecording(bytes);
         EXPECT(parsed.has_value());
         if (parsed) {
+            EXPECT(parsed->tableVersion == recording.tableVersion);
             EXPECT(parsed->tickCount == RUN_TICKS);
             EXPECT(parsed->commands == commands);
             EXPECT(parsed->hashes == hashes);
         }
+
+        // 版 1(T-0142。表の版が無い): 見出しの 16 バイト(印・版・種)の後ろの 8 バイトが無い形も読める(表の版は 0)
+        std::vector<std::byte> oldBytes(bytes.begin(), bytes.begin() + 16);
+        oldBytes.insert(oldBytes.end(), bytes.begin() + 24, bytes.end());
+        oldBytes[4] = std::byte{1};
+        const auto parsedOld = ParseLabRecording(oldBytes);
+        EXPECT(parsedOld.has_value() && parsedOld->tableVersion == 0 && parsedOld->hashes == hashes);
 
         bytes[0] = std::byte{'X'};
         EXPECT(!ParseLabRecording(bytes).has_value());

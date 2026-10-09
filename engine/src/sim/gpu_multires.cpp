@@ -1138,6 +1138,27 @@ namespace bicameral::sim {
 
     // --- 外のバッファとパイプライン ---
 
+    // 反応表の差し替え(T-0194): 表はアップロードのヒープにあり、BindRoot が記録のたびに結ぶので、持ち替えるだけで次のリストから効く
+    std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> GpuMultires::ReplaceTable(
+        const BakedReactionTable& table) {
+        ComPtr<ID3D12Device> device;
+        if (!m_tables[0] || FAILED(m_tables[0]->GetDevice(IID_PPV_ARGS(&device))))
+            return std::unexpected("反応の表のバッファが無い");
+
+        std::array<ComPtr<ID3D12Resource>, TABLE_COUNT> tables = {
+            CreateFilledUpload(device.Get(), std::span(table.species)),
+            CreateFilledUpload(device.Get(), std::span(table.rules)),
+            CreateFilledUpload(device.Get(), std::span(table.ruleIndex)),
+            CreateFilledUpload(device.Get(), std::span(table.rates))};
+        if (!std::ranges::all_of(tables, [](const auto& buffer) { return buffer != nullptr; }))
+            return std::unexpected("差し替える反応の表のバッファを作れない");
+
+        std::vector<ComPtr<ID3D12Resource>> retired(m_tables.begin(), m_tables.end());
+        m_tables = std::move(tables);
+
+        return retired;
+    }
+
     void GpuMultires::SetExternalViews(D3D12_GPU_VIRTUAL_ADDRESS first, D3D12_GPU_VIRTUAL_ADDRESS second) {
         m_externalViews = {first, second};
     }

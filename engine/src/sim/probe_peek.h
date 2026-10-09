@@ -10,6 +10,9 @@
 // 影の時間: 抽出は 1 フレームに 1 回までなので、世界が 1 フレームに何刻み進んでも影は 1 刻み(器具の中の時間はゆっくりでよい。17 §4)。
 //
 // 覗く場所は CPU が決める View の状態(D-107 の Controller。世界には入らない)。CPU リファレンスは ProbePeekReference(同じ順・同じ関数)。
+// 反応表の差し替え(ホットリロード。T-0194・ADR-0047): 世界が刻み s の始めに表を替えたら、QueueTableSwap(s, 表) で知らせる。
+// 覗き窓は s より後の境界(S(t)、t > s)を初めて抽出する時に表を替え、影の鎖を捨てて今の世界の写しから作り直す
+// (前の表で作った影の待ちの予定と熱を持ち越さない。ADR-0018 の「表を変えるものは『変わった』にしてから評価する」を、作り直しで満たす)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #pragma once
 
@@ -58,6 +61,9 @@ namespace bicameral::sim {
 
         void Stop() { m_hasRequest = false; }
 
+        // 反応表が変わった: 次の Plan で影の鎖を捨てて作り直す(T-0194)
+        void TableChanged() { m_tableChanged = true; }
+
         [[nodiscard]] bool IsLooking() const { return m_hasRequest; }
         [[nodiscard]] PeekCell Requested() const { return m_requested; }
 
@@ -76,6 +82,7 @@ namespace bicameral::sim {
     private:
         PeekCell m_requested;
         bool m_hasRequest = false;
+        bool m_tableChanged = false;
 
         // --- 影の鎖の今 ---
         PeekCell m_active;
@@ -94,6 +101,11 @@ namespace bicameral::sim {
         [[nodiscard]] bool IsLooking() const { return m_state.IsLooking(); }
         [[nodiscard]] PeekCell Requested() const { return m_state.Requested(); }
 
+        // 世界が刻み tick の始めに table へ替えた(T-0194)。表は写して持つ(呼んだ後は持たなくてよい)
+        void QueueTableSwap(uint64_t tick, const BakedReactionTable& table) {
+            m_pendingTables.push_back({tick, table});
+        }
+
         // ProbeFrameInput::afterExtract から呼ぶ(シミュのフレームのリストの抽出の後ろ)
         void RecordAfterExtract(ID3D12GraphicsCommandList10* list, const ProbeExtractContext& context);
 
@@ -102,10 +114,18 @@ namespace bicameral::sim {
         [[nodiscard]] bool Read(MultiresNest& nest) const { return m_nest.Read(nest); }
 
     private:
+        struct PendingTable {
+            uint64_t tick = 0;
+            BakedReactionTable table;
+        };
+
         ProbePeek(GpuMultires&& nest, const std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT>& viewSpecies)
             : m_nest(std::move(nest)), m_viewSpecies(viewSpecies) {}
 
+        void ApplyDueTables(const ProbeExtractContext& context);
+
         GpuMultires m_nest;
+        std::vector<PendingTable> m_pendingTables;  // 世界が替えた、まだ覗き窓が替えていない表(刻みの順)
         ComPtr<ID3D12PipelineState> m_mirrorPipeline;
         ComPtr<ID3D12PipelineState> m_extractPipeline;
         std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};
@@ -121,6 +141,11 @@ namespace bicameral::sim {
         void Look(PeekCell cell) { m_state.Look(cell); }
         void Stop() { m_state.Stop(); }
 
+        // ProbePeek::QueueTableSwap と同じ(table は呼ぶ側が持ち続ける)
+        void QueueTableSwap(uint64_t tick, const BakedReactionTable& table) {
+            m_pendingTables.push_back({tick, &table});
+        }
+
         // 抽出 1 回ぶん。world は S(tick) の 1 世代(PROBE_CELL_COUNT 個)
         void Advance(std::span<const reaction::RxCell> world, uint64_t tick);
 
@@ -130,7 +155,13 @@ namespace bicameral::sim {
         [[nodiscard]] std::vector<uint32_t> Extraction() const;
 
     private:
+        struct PendingTable {
+            uint64_t tick = 0;
+            const BakedReactionTable* table = nullptr;
+        };
+
         const BakedReactionTable* m_table;
+        std::vector<PendingTable> m_pendingTables;
         std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};
         MultiresNest m_nest;
         PeekState m_state;

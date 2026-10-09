@@ -127,6 +127,9 @@ namespace bicameral::sim {
         ID3D12Resource* cells = nullptr;          // 世界のセル(UAV の状態。読むだけ)
         ID3D12Resource* extraction = nullptr;     // 書き終えた抽出(UAV の状態)
         D3D12_GPU_VIRTUAL_ADDRESS debugRing = 0;  // シミュのデバッグのリング(FX_ASSERT の出力。ReadFrame でログへ出る)
+        // このリストを GPU が終えるまで持つもの(覗き窓が差し替えた前の反応表など。T-0194)。GPU のキューは順に終わるので、
+        // 前のリストが読んだバッファもここへ入れてよい
+        std::vector<ComPtr<ID3D12Resource>>* keepAlive = nullptr;
     };
 
     // 保存点を使わない(ProbeFrameInput::saveTo・restoreFrom の既定)
@@ -337,7 +340,8 @@ namespace bicameral::sim {
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
         void RecordExtract(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t target) const;
-        void RecordExtractAndHook(ID3D12GraphicsCommandList10* list, uint64_t tick, const ProbeFrameInput& input);
+        void RecordExtractAndHook(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint64_t tick,
+                                  const ProbeFrameInput& input);
 
         // --- 読み戻し ---
         void RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const;

@@ -162,6 +162,7 @@ add_executable(bicameral
   src/editor/editor_overlay.cpp
   src/editor/graph_panel.cpp
   src/editor/lab_panel.cpp
+  src/frame/auto_reload.cpp
   src/frame/frame_loop.cpp
   src/frame/table_hot_reload.cpp
   src/frame/trace_capture.cpp

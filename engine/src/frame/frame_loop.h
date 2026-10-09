@@ -82,6 +82,9 @@ namespace bicameral::frame {
 
         bool
             autoLab = false;  // 実験室で木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--auto-lab。T-0142)
+        // パッケージ(--packages の写し)の反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻み流して終える(--auto-reload。
+        // --editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。frame/auto_reload。T-0195)
+        bool autoReload = false;
 
         // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
         uint32_t savePoints = AUTO_SAVE_POINTS;  // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)
