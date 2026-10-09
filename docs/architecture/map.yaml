@@ -634,10 +634,14 @@ views:
       - { id: rxread, group: tool, label: "反応表を読む<br/>(elements・species・reactions → 定義)",
           code: "engine/src/script/reaction_package.cpp::ReadReactionTableDefinition", ticket: T-0021,
           doc: docs/design/02-reaction-system.md,
-          note: "値は整数だけ・単位は欄の名前・A は 10 進の文字列でも・知らない欄は誤り(ADR-0032)。試験の表は tests/packages/combustion_test(reaction_package_test)" }
+          note: "値は整数だけ・単位は欄の名前・A は 10 進の文字列でも・知らない欄は誤り(ADR-0032)。試験の表は data/packages/combustion_test(reaction_package_test)" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0021,
           doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。名前のバイト順で ID を振る(並びに依らない。ADR-0032)。文献の反応熱の食い違いは警告。C++ の試験の表と Luau の試験の表がビットで同じ" }
+      - { id: rtload, group: rt, label: "起動時に表を読む<br/>(exe の横の data/packages → ベイク → GPU)",
+          code: "engine/src/script/reaction_table_loader.cpp::LoadReactionTable", ticket: T-0157,
+          doc: docs/design/02-reaction-system.md,
+          note: "ゲーム本体・エディタ・テストの入り口(ADR-0033)。読めない・検査で落ちたら窓を開く前に止まる。今の場面は C++ の表と毎刻みビットで同じ(reaction_package_scene)" }
       - { id: table, group: rt, status: planned, label: "反応表・物質の表<br/>(版つきのバイナリ)", ticket: T-0002 }
       - { id: gen, group: rt, status: planned, label: "決定的な生成(シード)+ 差分", doc: docs/design/05-world-data.md }
       - { id: vram, group: rt, status: planned, label: "多重解像度の疎な木<br/>(VRAM 常駐の世界)",
@@ -651,6 +655,8 @@ views:
       - [packages, rxread, "分類 → 鍵 → 値"]
       - [rxread, bake, "定義"]
       - [bake, table]
+      - [rtload, packages, "起動時"]
+      - [rtload, vram, "表を GPU へ"]
       - [table, vram]
       - [gen, vram]
       - [magic, vram, "触媒・阻害・転換・増幅"]

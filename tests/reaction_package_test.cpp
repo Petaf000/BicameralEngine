@@ -1,20 +1,26 @@
 // reaction_package_test.cpp — Luau の反応表 → 定義 → ベイク(T-0021、script/reaction_package・sim/reaction_table)を CPU だけで確かめる。
-// 見るもの: 試験のパッケージ(tests/packages/combustion_test)をベイクすると、C++ の試験の表(MakeCombustionTestTable)と
+// 見るもの: 試験のパッケージ(data/packages/combustion_test)をベイクすると、C++ の試験の表(MakeCombustionTestTable)と
 //           GPU に載せる配列がビットで同じ / 定義の並び・A の書き方に依らない / 形の誤り(欄の綴り・小数・範囲)と
 //           中身の誤り(元素の釣り合い・知らない物質)を落とす / 文献の反応熱の食い違いは警告 / Mod が物質と規則を足せる /
 //           10 進の数の読み方。
+//           (T-0157)ランタイムの入り口 LoadReactionTable: exe の横の data/packages(ビルドが写したもの)から C++ の表とビットで同じ表を作る /
+//           フォルダが無い・ゲーム本体が無い・ゲーム本体が読めない・Mod が形や検査で落ちる → 失敗(起動を止める)/
+//           Luau として読めない Mod だけは除いて続け、rejected に残す。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/reaction_package.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <map>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "script/luau_sandbox.h"
+#include "script/reaction_table_loader.h"
 #include "sim/reaction_test_table.h"
 
 namespace {
@@ -40,7 +46,7 @@ namespace {
     constexpr std::string_view BASE_PACKAGE = "combustion_test";
 
     std::vector<PackageSource> BasePackages() {
-        const fs::path folder = fs::path(BICAMERAL_TEST_PACKAGES_DIR) / BASE_PACKAGE;
+        const fs::path folder = fs::path(BICAMERAL_DATA_PACKAGES_DIR) / BASE_PACKAGE;
         auto package = ReadPackageFolder(folder);
         if (!package) {
             std::printf("試験のパッケージを読めない: %s\n", package.error().c_str());
@@ -298,6 +304,94 @@ namespace {
             EXPECT(!ParseDecimal(broken).has_value());
     }
 
+    // --- ランタイムの入り口(T-0157)---
+
+    void TestLoaderReadsShippedTable() {
+        const auto loaded = LoadReactionTable({});
+        const auto cpp = BakeReactionTable(MakeCombustionTestTable());
+        if (!loaded || !cpp) {
+            std::printf("FAILED: data/packages を読めない: %s\n", loaded ? "" : loaded.error().c_str());
+            ++failureCount;
+
+            return;
+        }
+
+        EXPECT(SameTable(loaded->table, *cpp));
+        EXPECT(loaded->packageRoot == DefaultPackageRoot());
+        EXPECT(loaded->loadOrder == std::vector<std::string>{std::string(BASE_PACKAGE)});
+        EXPECT(loaded->rejected.empty() && loaded->overrides.empty() && !loaded->modifiedWorld);
+        EXPECT(loaded->tableVersion != 0);
+        std::printf("ランタイムの表: %s(版 %016llx。C++ の表とビットで同じ)\n",
+                    reinterpret_cast<const char*>(loaded->packageRoot.generic_u8string().c_str()),
+                    static_cast<unsigned long long>(loaded->tableVersion));
+    }
+
+    // ディスクにパッケージを書く(files: 相対パス → ソース)
+    void WritePackage(const fs::path& folder, const std::map<std::string, std::string>& files) {
+        fs::create_directories(folder);
+        for (const auto& [path, source] : files)
+            std::ofstream(folder / path, std::ios::binary) << source;
+    }
+
+    // ゲーム本体(data/packages/combustion_test の写し)+ Mod を root に置く
+    void WriteBaseAndMod(const fs::path& root, std::string_view mod, std::string init) {
+        fs::create_directories(root);
+        fs::copy(fs::path(BICAMERAL_DATA_PACKAGES_DIR) / BASE_PACKAGE, root / BASE_PACKAGE,
+                 fs::copy_options::recursive);
+        WritePackage(root / mod, {{"package.luau", "return { format = 1, depends = { \"combustion_test\" } }"},
+                                  {"init.luau", std::move(init)}});
+    }
+
+    void ExpectLoadFails(std::string_view label, const fs::path& root, std::string_view part) {
+        const auto loaded = LoadReactionTable({.packageRoot = root});
+        if (loaded) {
+            std::printf("FAILED: %.*s で止まらない\n", static_cast<int>(label.size()), label.data());
+            ++failureCount;
+
+            return;
+        }
+
+        std::printf("  %.*s → %s\n", static_cast<int>(label.size()), label.data(), loaded.error().c_str());
+        EXPECT(Contains(loaded.error(), part));
+        EXPECT(Contains(loaded.error(), "反応表のパッケージ"));
+    }
+
+    void TestLoaderFailures() {
+        const fs::path root = fs::temp_directory_path() / "bicameral_reaction_table_loader_test";
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+
+        ExpectLoadFails("フォルダが無い", root / "missing", "読めない");
+
+        fs::create_directories(root / "empty");
+        ExpectLoadFails("ゲーム本体が無い", root / "empty", "見つからない");
+
+        WritePackage(root / "syntax" / BASE_PACKAGE,
+                     {{"package.luau", "return { format = 1 }"}, {"init.luau", "return {"}});
+        ExpectLoadFails("ゲーム本体が Luau として読めない", root / "syntax",
+                        "ゲーム本体のパッケージ combustion_test を読めない");
+
+        const std::string shapeError =
+            "return { species = { hydrogen = { composition = { H = 2 }, formation_enthalpy_j_per_mol = 0, "
+            "heat_capacity_mj_per_mol_k = 28.836, thermal_conductivity_mw_per_m_k = 900000 } } }";
+        WriteBaseAndMod(root / "shape", "broken_shape", shapeError);
+        ExpectLoadFails("Mod の形の誤り", root / "shape", "整数");
+
+        const std::string unbalanced = "return { species = { " + std::string(HYDROGEN) + " }, reactions = { " +
+                                       WaterGas("carbon_monoxide = 1, hydrogen = 2", "") + " } }";
+        WriteBaseAndMod(root / "balance", "broken_balance", unbalanced);
+        ExpectLoadFails("Mod が元素の釣り合いの検査で落ちる", root / "balance", "ベイクの検査で落ちた");
+
+        // Luau として読めない Mod は除いて続ける(ADR-0031 の 3)。表はゲーム本体だけのもの
+        WriteBaseAndMod(root / "skip", "broken_syntax", "return {");
+        const auto skipped = LoadReactionTable({.packageRoot = root / "skip"});
+        const auto cpp = BakeReactionTable(MakeCombustionTestTable());
+        EXPECT(skipped && cpp && SameTable(skipped->table, *cpp));
+        EXPECT(skipped && skipped->rejected.size() == 1 && skipped->rejected.front().package == "broken_syntax");
+
+        fs::remove_all(root, ignored);
+    }
+
 }  // namespace
 
 int main() {
@@ -307,6 +401,8 @@ int main() {
     TestModAddsSpeciesAndRule();
     TestDeclaredEnthalpyWarning();
     TestParseDecimal();
+    TestLoaderReadsShippedTable();
+    TestLoaderFailures();
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
 

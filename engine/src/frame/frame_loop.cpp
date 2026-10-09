@@ -38,12 +38,12 @@
 #include "render/probe_view.h"
 #include "render/screenshot.h"
 #include "save/replay_session.h"
+#include "script/reaction_table_loader.h"
 #include "sim/physics_world.h"
 #include "sim/probe_peek.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
 #include "sim/reaction_table.h"
-#include "sim/reaction_test_table.h"
 
 namespace bicameral::frame {
     namespace {
@@ -413,7 +413,40 @@ namespace bicameral::frame {
                                           .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase}});
         }
 
+        // 世界の反応表: データのフォルダのパッケージ(既定は exe の横の data/packages)からベイクする(T-0157・ADR-0033)。
+        // 読めない・形の誤り・検査で落ちたら、窓を開く前に起動を止める(半端な表で世界を動かさない)。
+        // Mod が読めなかったとき・文献の反応熱と食い違うときは、警告をログに出して続ける(ADR-0031 の 3・02 §2 の 2)
+        std::expected<sim::BakedReactionTable, std::string> LoadWorldReactionTable(const FrameLoopOptions& options) {
+            const auto start = chr::steady_clock::now();
+            auto loaded = script::LoadReactionTable({.packageRoot = options.packageRoot});
+            if (!loaded)
+                return std::unexpected(loaded.error());
+
+            const auto elapsedMs = chr::duration_cast<chr::milliseconds>(chr::steady_clock::now() - start).count();
+
+            std::string packages;
+            for (const std::string& name : loaded->loadOrder)
+                packages += (packages.empty() ? "" : "・") + name;
+
+            Log(Channel::Sim, Level::Info, "反応表: パッケージ {}(物質 {}・規則 {}・版 {:016x}{}・読んでベイク {} ms)",
+                packages, loaded->table.species.size() - 1, loaded->table.rules.size(), loaded->tableVersion,
+                loaded->modifiedWorld ? "・改造された世界" : "", elapsedMs);
+
+            for (const script::PackageRejection& rejection : loaded->rejected)
+                Log(Channel::Sim, Level::Warning, "パッケージ {} を読まなかった: {}", rejection.package,
+                    rejection.reason);
+
+            for (const std::string& warning : loaded->table.warnings)
+                Log(Channel::Sim, Level::Warning, "反応表: {}", warning);
+
+            return std::move(loaded->table);
+        }
+
         std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
+            const auto reactionTable = LoadWorldReactionTable(options);
+            if (!reactionTable)
+                return std::unexpected(reactionTable.error());
+
             auto window = CreateWindowForLoop();
             if (!window)
                 return std::unexpected(window.error());
@@ -439,11 +472,6 @@ namespace bicameral::frame {
                                                     options.maxFrameLatency);
             if (!swapChain)
                 return std::unexpected(swapChain.error());
-
-            // 仮の世界の反応の表は試験の表(T-0089。ゲームの中身は T-0002)
-            const auto reactionTable = sim::BakeReactionTable(sim::MakeCombustionTestTable());
-            if (!reactionTable)
-                return std::unexpected(reactionTable.error());
 
             auto simulation = CreateSimulation(native, options, *reactionTable);
             if (!simulation)

@@ -85,6 +85,10 @@ namespace bicameral::frame {
         uint64_t saveIntervalTicks = 120;        // 何刻みごとに写すか(その倍数の刻みの境界で写す)
         bool autoRewind = false;  // 保存点が 2 つできたら古い方へ 1 回戻す(人がいない確認。--auto-rewind)
 
+        // --- 世界のデータ(T-0157・ADR-0033)---
+        // 反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ)。空なら exe の横の data/packages(--packages)
+        fs::path packageRoot;
+
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)
         render::OrbitCameraState camera;  // 最初のカメラ
