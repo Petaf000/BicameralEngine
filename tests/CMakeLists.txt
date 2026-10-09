@@ -236,6 +236,13 @@ bicameral_add_gpu_test_case(gpu_probe_physics gpu_probe_physics_test gpu)
 bicameral_add_gpu_test_case(gpu_probe_physics_warp gpu_probe_physics_test warp --warp --ticks 120)
 bicameral_add_gpu_test_case(gpu_probe_physics_compute gpu_probe_physics_test gpu --broadphase-compute)
 
+# 巻き戻し(T-0143): 保存点へ写して戻し、コマンドを足し直すと最初から流した時と同じハッシュ列
+bicameral_add_gpu_test(gpu_probe_rewind_test)
+target_link_libraries(gpu_probe_rewind_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_rewind gpu_probe_rewind_test gpu)
+# 物理のパイプラインの作成が、ほかの作業ツリーと GPU を分けている間は debug で 4 分を超えることがある
+set_tests_properties(gpu_probe_rewind PROPERTIES TIMEOUT 900)
+
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu --no-gbv)
@@ -267,6 +274,11 @@ set_tests_properties(window_replay_play PROPERTIES LABELS gpu FIXTURES_REQUIRED 
 add_test(NAME window_replay_editor
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-time)
 set_tests_properties(window_replay_editor PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
+# 巻き戻し(T-0143): 40 刻みごとに保存点へ写しながら再生し、保存点が 2 つできたら古い方へ戻して再生し直しても、
+# 戻した後のハッシュ列が記録と同じ(保存点 + 再生。ADR-0036)。戻せなかったら 1
+add_test(NAME window_replay_rewind
+         COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-rewind --save-interval 40)
+set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)

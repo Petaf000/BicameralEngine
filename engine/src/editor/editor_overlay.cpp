@@ -5,6 +5,7 @@
 // 同じ include guard で飛ばされる。
 #include "editor/editor_overlay.h"
 
+#include <algorithm>
 #include <format>
 
 #include <imgui.h>
@@ -46,7 +47,8 @@ namespace bicameral::editor {
             return {.togglePause = a.togglePause != b.togglePause,
                     .stepTicks = a.stepTicks + b.stepTicks,
                     .speedSteps = a.speedSteps + b.speedSteps,
-                    .resetSpeed = a.resetSpeed || b.resetSpeed};
+                    .resetSpeed = a.resetSpeed || b.resetSpeed,
+                    .rewindTick = std::min(a.rewindTick, b.rewindTick)};
         }
 
     }  // namespace
@@ -217,6 +219,7 @@ namespace bicameral::editor {
         const TimeRequest keys = TakeShortcuts(time);
         const TimeRequest buttons = BuildTimePanel(status, time);
         BuildStatusPanel(status);
+        BuildGraphPanel(status.graph);
 
         ImGui::Render();
 
@@ -267,9 +270,42 @@ namespace bicameral::editor {
             Line(std::format("止めている: 刻み {} の残りを進めている", status.tick));
 
         Line(std::format("1 刻みずつ進めた: {} 刻み", time.SteppedTicks()));
+        request.rewindTick = BuildRewind(status);
         ImGui::End();
 
         return request;
+    }
+
+    // 巻き戻し(保存点 + 再生。T-0143・ADR-0036): 押した保存点の刻み(押さなければ UINT64_MAX)
+    uint64_t EditorOverlay::BuildRewind(const EditorStatus& status) const {
+        ImGui::SeparatorText("巻き戻す(保存点 + 再生)");
+        if (!status.rewindUnavailable.empty()) {
+            ImGui::TextDisabled("%s", status.rewindUnavailable.c_str());
+            return UINT64_MAX;
+        }
+
+        if (status.savePointTicks.empty()) {
+            ImGui::TextDisabled("保存点はまだ無い(%llu 刻みごとに写す)",
+                                static_cast<unsigned long long>(status.saveIntervalTicks));
+            return UINT64_MAX;
+        }
+
+        uint64_t rewindTick = UINT64_MAX;
+        // 1 つ前 = 今の刻みより前の最新の保存点
+        const auto previous = std::find_if(status.savePointTicks.rbegin(), status.savePointTicks.rend(),
+                                           [&](uint64_t tick) { return tick < status.tick; });
+        ImGui::BeginDisabled(previous == status.savePointTicks.rend());
+        if (ImGui::Button("1 つ前の保存点へ") && previous != status.savePointTicks.rend())
+            rewindTick = *previous;
+
+        ImGui::EndDisabled();
+        for (const uint64_t tick : status.savePointTicks) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton(std::format("{}##save", tick).c_str()))
+                rewindTick = tick;
+        }
+
+        return rewindTick;
     }
 
     void EditorOverlay::BuildStatusPanel(const EditorStatus& status) const {

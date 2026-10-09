@@ -56,6 +56,12 @@ namespace bicameral::frame {
         void SetStopTick(uint64_t tick) { m_stopTick = tick; }
         [[nodiscard]] bool ReachedStopTick() const { return m_cursor.tick >= m_stopTick && m_cursor.unit == 0; }
 
+        // 巻き戻し(T-0143): 刻みの番号が ticks の倍数の境界で、そのフレームの単位を切る(次のフレームがその境界から始まり、
+        // 先頭で保存点へ写せる)。0 なら切らない。世界の結果は変えない
+        void SetBreakInterval(uint64_t ticks) { m_breakInterval = ticks; }
+        // カーソルを刻み tick の境界へ戻す(保存点へ戻した後。未処理の刻みはそのまま)
+        void Rewind(uint64_t tick) { m_cursor = {.tick = tick, .unit = 0}; }
+
         // 終わった単位の GPU の時間(数フレーム遅れで届く)。unit は刻みの中の番号
         void ReportUnitTime(uint32_t unit, double gpuMilliseconds);
 
@@ -85,6 +91,7 @@ namespace bicameral::frame {
         // --- 進み ---
         SimCursor m_cursor;
         uint64_t m_stopTick = UINT64_MAX;  // この刻みより先を始めない(既定: 止まらない)
+        uint64_t m_breakInterval = 0;      // この倍数の刻みの境界でフレームを切る(0 = 切らない)
         double m_pendingTicks = 0.0;
         uint64_t m_droppedTicks = 0;
 

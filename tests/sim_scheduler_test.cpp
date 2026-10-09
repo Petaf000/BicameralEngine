@@ -167,6 +167,25 @@ namespace {
         EXPECT(scheduler.ReachedStopTick());
     }
 
+    // 保存点の境界(巻き戻し。T-0143): 倍数の刻みの境界でフレームを切り、次のフレームはその境界から始まる。戻すとカーソルが境界へ
+    void TestBreakIntervalAndRewind() {
+        SimScheduler scheduler(3);
+        for (uint32_t unit = 0; unit < 3; ++unit)
+            scheduler.ReportUnitTime(unit, 0.1);
+
+        scheduler.SetBreakInterval(4);
+        scheduler.AddTicks(10);
+        EXPECT(scheduler.TakeUnits() == 12);  // 刻み 0〜3(刻み 4 の境界で切る。刻み 0 の境界では切らない)
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 4, .unit = 0}));
+        EXPECT(scheduler.TakeUnits() == 12);  // 刻み 4 の境界から始まり、刻み 8 の境界で切る
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 8, .unit = 0}));
+
+        scheduler.Rewind(4);
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 4, .unit = 0}));
+        EXPECT(scheduler.TakeUnits() == 6);  // 未処理の刻みは残っている分(10 − 8 = 2 刻み)だけ
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 6, .unit = 0}));
+    }
+
 }  // namespace
 
 int main() {
@@ -177,6 +196,7 @@ int main() {
     TestUnmeasuredIsCautious();
     TestCatchUpLimit();
     TestStopTick();
+    TestBreakIntervalAndRewind();
     if (failureCount == 0)
         std::printf("sim_scheduler_test: OK\n");
 

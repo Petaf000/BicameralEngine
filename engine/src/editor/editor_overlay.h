@@ -17,6 +17,7 @@
 #include <string_view>
 #include <vector>
 
+#include "editor/graph_panel.h"
 #include "editor/time_control.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
@@ -57,6 +58,14 @@ namespace bicameral::editor {
         bool replaying = false;
         bool recording = false;
         size_t waitingCommands = 0;  // まだ GPU に渡していないコマンド(止めている間のつつきはここで待つ)
+
+        // --- 巻き戻し(T-0143)---
+        std::vector<uint64_t> savePointTicks;  // 戻れる保存点の刻み(昇順)
+        uint64_t saveIntervalTicks = 0;        // 何刻みごとに写すか
+        std::string rewindUnavailable;         // 空でなければ巻き戻せない理由
+
+        // --- Work Graphs と性能(直近 1 秒。T-0143)---
+        GraphPanelStatus graph;
     };
 
     class EditorOverlay {
@@ -99,6 +108,7 @@ namespace bicameral::editor {
 
         // --- パネル ---
         [[nodiscard]] TimeRequest BuildTimePanel(const EditorStatus& status, const TimeControl& time) const;
+        [[nodiscard]] uint64_t BuildRewind(const EditorStatus& status) const;
         void BuildStatusPanel(const EditorStatus& status) const;
         [[nodiscard]] TimeRequest TakeShortcuts(const TimeControl& time) const;
 

@@ -122,6 +122,9 @@ namespace bicameral::sim {
         D3D12_GPU_VIRTUAL_ADDRESS debugRing = 0;  // シミュのデバッグのリング(FX_ASSERT の出力。ReadFrame でログへ出る)
     };
 
+    // 保存点を使わない(ProbeFrameInput::saveTo・restoreFrom の既定)
+    inline constexpr uint32_t NO_SAVE_POINT = UINT32_MAX;
+
     struct ProbeFrameInput {
         uint64_t firstTick = 0;  // 最初の単位の刻み
         uint32_t firstUnit = 0;  // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
@@ -140,6 +143,13 @@ namespace bicameral::sim {
         // 抽出の後に同じリストへ記録するもの(覗き窓 sim/probe_peek。T-0096)。抽出するフレームだけ呼ぶ。
         // 約束: 世界のバッファは読むだけ、抽出は覗きの欄だけに書く(世界の結果を変えない。D-403)
         std::function<void(ID3D12GraphicsCommandList10* list, const ProbeExtractContext& context)> afterExtract;
+
+        // --- 巻き戻し(T-0143。sim/probe_save_point.cpp)。どちらも刻みの境界から始まるフレーム(firstUnit == 0)だけ・同時には使えない ---
+        // 単位の前に、S(firstTick) をこの番号の保存点へ写す(GPU → GPU。CreateSavePoints の後)
+        uint32_t saveTo = NO_SAVE_POINT;
+        // 単位の前に、世界をこの番号の保存点の状態へ戻す(firstTick は保存点の刻み)。GPU のキューで待っていたコマンドは捨てる
+        // (呼ぶ側が firstTick 以降のコマンドを、このフレームの commands から足し直す)
+        uint32_t restoreFrom = NO_SAVE_POINT;
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
@@ -224,6 +234,24 @@ namespace bicameral::sim {
         // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
         [[nodiscard]] const GpuPhysics* Physics() const { return m_physics.get(); }
 
+        // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036。sim/probe_save_point.cpp)---
+        // 保存点(刻みの境界の状態の写し。VRAM に置く)を count 個作る。作り直すと前の保存点は消える
+        [[nodiscard]] bool CreateSavePoints(ID3D12Device5* device, uint32_t count);
+        [[nodiscard]] uint32_t SavePointCount() const { return static_cast<uint32_t>(m_savePoints.size()); }
+        // その保存点が持つ状態の刻み(まだ写していなければ UINT64_MAX)。写すリストを記録した時に決まる(GPU が終えたかは呼ぶ側がフェンスで見る)
+        [[nodiscard]] uint64_t SavePointTick(uint32_t index) const {
+            return index < m_savePoints.size() ? m_savePoints[index].tick : UINT64_MAX;
+        }
+        // tick より後の刻みの保存点を空にする(巻き戻した後、その先の流れが変わりうるので)
+        void DiscardSavePointsAfter(uint64_t tick) {
+            for (SavePoint& savePoint : m_savePoints) {
+                if (savePoint.tick != UINT64_MAX && savePoint.tick > tick)
+                    savePoint.tick = UINT64_MAX;
+            }
+        }
+        // 保存点 1 つの大きさ(docs/perf.md)
+        [[nodiscard]] uint64_t SavePointBytes() const;
+
     private:
         struct FrameSlot {
             // --- 記録 ---
@@ -286,6 +314,28 @@ namespace bicameral::sim {
 
         // --- 読み戻し ---
         void RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const;
+
+        // --- 巻き戻し(sim/probe_save_point.cpp)---
+        // 保存点に写す世界の部分。generationBytes > 0 のもの(セル・熱)は S(tick) の世代だけを写し、戻すときは 2 世代に写す
+        // (予定していないブロックは 2 世代とも S(t) と同じ値。予定したブロックは刻み t がもう一方の世代を全部書き直す。probe_sim.hlsli)
+        struct StateRegion {
+            ID3D12Resource* resource = nullptr;
+            uint64_t offset = 0;
+            uint64_t bytes = 0;
+            uint64_t generationBytes = 0;
+        };
+
+        struct SavePoint {
+            uint64_t tick = UINT64_MAX;                   // UINT64_MAX = 空
+            std::vector<ComPtr<ID3D12Resource>> buffers;  // StateRegions の順
+            GpuPhysicsCursor physics;
+        };
+
+        [[nodiscard]] std::vector<StateRegion> StateRegions(uint64_t tick) const;
+        [[nodiscard]] bool ValidateSavePoints(const ProbeFrameInput& input) const;
+        void RecordSave(ID3D12GraphicsCommandList10* list, uint32_t index, uint64_t tick);
+        void RecordRestore(ID3D12GraphicsCommandList10* list, uint32_t index);
+        void ResetCommandMirror();
         [[nodiscard]] std::vector<ProbeTickHash> ReadHashes(const FrameSlot& frame) const;
 
         ProbeSimOptions m_options;
@@ -338,6 +388,10 @@ namespace bicameral::sim {
         gpu::GraphTrace m_graphTrace;          // 伝導の連鎖のトレース(T-0087)
         ComPtr<ID3D12QueryHeap> m_timestamps;  // slot ごとに MAX_UNITS_PER_FRAME + 2
         std::array<FrameSlot, FRAME_SLOT_COUNT> m_slots;
+
+        // --- 巻き戻し(T-0143)---
+        std::vector<SavePoint> m_savePoints;
+        ComPtr<ID3D12Resource> m_zeroQueueHeader;  // 0 の 16 バイト(戻すときにコマンドキューを空にする)
 
         // --- GPU のコマンドキューの CPU 側の控え(足すのは CPU だけなので、末尾と待っている数を CPU が知っている)---
         struct QueuedTick {

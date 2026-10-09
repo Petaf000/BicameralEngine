@@ -25,8 +25,12 @@ namespace bicameral::editor {
         uint32_t stepTicks = 0;    // 止めている間に進める刻みの数(動いている間は無視)
         int32_t speedSteps = 0;    // 速さの段を上げる(+)/ 下げる(−)
         bool resetSpeed = false;   // 等速に戻す(speedSteps より先に効く)
+        // この刻みの保存点へ巻き戻す(UINT64_MAX = しない。T-0143)。TimeControl は見ない(フレームのループが保存点から戻す)
+        uint64_t rewindTick = UINT64_MAX;
 
-        [[nodiscard]] bool Any() const { return togglePause || stepTicks > 0 || speedSteps != 0 || resetSpeed; }
+        [[nodiscard]] bool Any() const {
+            return togglePause || stepTicks > 0 || speedSteps != 0 || resetSpeed || rewindTick != UINT64_MAX;
+        }
     };
 
     class TimeControl {
