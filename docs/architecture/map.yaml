@@ -658,6 +658,10 @@ views:
       - { id: packages, group: tool, label: "パッケージ<br/>(1 フォルダ = 1 つ・依存の順・表を合わせる)",
           code: "engine/src/script/luau_package.cpp::LoadPackages", ticket: T-0138, doc: docs/design/13-scripting-game-model.md,
           note: "require はパッケージの中だけ。合わせ方は追加だけ / 印つきの上書き / 上書き(Q8 未回答・仮で C)。表の版 = 中身のハッシュ(ADR-0031。luau_package_test)" }
+      - { id: typecheck, group: tool, label: "読む前の型検査<br/>(Luau.Analysis・型の定義)",
+          code: "engine/src/script/luau_type_check.cpp::LuauTypeChecker::CheckPackage", ticket: T-0140,
+          doc: docs/design/13-scripting-game-model.md,
+          note: "data/types/bicameral.d.luau の型で、全部のファイルを strict で検査し、返す表は欄ごとに突き合わせる。誤りは「ファイル:行:列: 何が違うか」。誤りのあるパッケージは読まない(ADR-0046。luau_type_check_test)" }
       - { id: rxread, group: tool, label: "反応表を読む<br/>(elements・species・reactions → 定義)",
           code: "engine/src/script/reaction_package.cpp::ReadReactionTableDefinition", ticket: T-0021,
           doc: docs/design/02-reaction-system.md,
@@ -679,6 +683,7 @@ views:
           note: "再生ファイルの骨組みは T-0086(仮の世界)。セーブ(差分の書き出し)は後" }
     edges:
       - [luau, packages]
+      - [packages, typecheck, "読む前に"]
       - [packages, rxread, "分類 → 鍵 → 値"]
       - [rxread, bake, "定義"]
       - [bake, table]

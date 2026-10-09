@@ -8,6 +8,7 @@
 
 #include "core/paths.h"
 #include "script/luau_sandbox.h"
+#include "script/luau_type_check.h"
 #include "script/reaction_package.h"
 
 namespace bicameral::script {
@@ -34,17 +35,25 @@ namespace bicameral::script {
             return std::unexpected(std::format("ゲーム本体のパッケージ {} が見つからない", basePackage));
         }
 
-        // パッケージ群を殻で読んで合わせる(ホストの関数は無い。反応表は値だけ)
+        // パッケージ群を型検査してから殻で読んで合わせる(ホストの関数は無い。反応表は値だけ)
         std::expected<PackageSetResult, std::string> LoadPackageSet(std::span<const PackageSource> packages,
                                                                     const ReactionTableSource& source) {
+            const fs::path definitions = source.typeDefinitions.empty() ? DefaultTypeDefinitionsPath()
+                                                                        : source.typeDefinitions;
+            auto checker = CreateTypeCheckerFromFile(definitions);
+            if (!checker)
+                return std::unexpected(checker.error());
+
             auto sandbox = LuauSandbox::Create(SandboxLimits{});
             if (!sandbox)
                 return std::unexpected(sandbox.error());
 
             (*sandbox)->Seal();
 
-            return LoadPackages(**sandbox, packages,
-                                PackageLoadOptions{.mergeMode = source.mergeMode, .basePackage = source.basePackage});
+            return LoadPackages(
+                **sandbox, packages,
+                PackageLoadOptions{
+                    .mergeMode = source.mergeMode, .basePackage = source.basePackage, .typeChecker = checker->get()});
         }
 
     }  // namespace
