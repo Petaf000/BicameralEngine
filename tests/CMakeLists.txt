@@ -351,6 +351,24 @@ add_test(NAME window_replay_no_packages
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
 set_tests_properties(window_replay_no_packages PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*再生: OK")
+# ホットリロード(T-0139・T-0194・T-0195): パッケージの写しの反応表を窓の中で壊す → 古い表のまま → 速度を直す → 刻みの境界で
+# 差し替わる、を火をつけた木箱の壁を覗きながら記録する(--auto-reload が確かめ、通らなければ 1)。再生は写しのフォルダが無くても
+# 再生ファイルの表だけで、同じ刻みに差し替えて同じハッシュ列になる(覗き窓も同じ表へ替わる)
+set(WINDOW_HOT_RELOAD_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/hot_reload_packages)
+set(WINDOW_HOT_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_hot_reload.bcreplay)
+add_test(NAME window_hot_reload_copy
+         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_HOT_RELOAD_PACKAGES})
+add_test(NAME window_hot_reload_record
+         COMMAND bicameral --editor --auto-reload --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
+                 --peek 28,32,32 --peek-depth 9 --frames 3000 --record ${WINDOW_HOT_RELOAD_FILE})
+add_test(NAME window_hot_reload_play
+         COMMAND bicameral --replay ${WINDOW_HOT_RELOAD_FILE} --peek 28,32,32 --peek-depth 9
+                 --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
+set_tests_properties(window_hot_reload_copy PROPERTIES FIXTURES_SETUP window_hot_reload_packages)
+set_tests_properties(window_hot_reload_record PROPERTIES LABELS gpu TIMEOUT 600
+  FIXTURES_REQUIRED window_hot_reload_packages FIXTURES_SETUP window_hot_reload)
+set_tests_properties(window_hot_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_hot_reload
+  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ へ差し替える.*再生: OK")
 
 # 画像の比較(T-0025、16 §5): 決まった刻みの始めで世界を止め、S(その刻み) を描いた画面を基準の画像(tests/images/)と比べる。
 # 写す(ランタイム)→ 比べる(tools/image_compare)の 2 つのテスト。実際の画像と差の画像はビルドのフォルダの images/ に出る。
