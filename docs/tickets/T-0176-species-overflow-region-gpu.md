@@ -1,6 +1,6 @@
 # T-0176 成分の二段を GPU に: 頁ごとの溢れ領域と同じ刻みのやり直し(T-0163 から分けた。T-0175 の後)
 
-- Status: Todo(T-0175 の後)
+- Status: Done(2026-10-09。一部: 全部を刻む Compute〔伝導なし〕の溢れまで。残りは T-0211〔やり直し・VRAM・伝導・要求の処理・覗き窓〕・T-0212〔活性のグラフ〕)
 - 種類: 工学 + 測定
 - 設計: 02 §3・17(R-MULTI-4)。関係: T-0175・T-0163・T-0022(事前調査)・T-0124(ノードに核を足さない)・D-401・D-428
 
@@ -17,3 +17,13 @@
 - 空気だけのセルの VRAM と ns/セルが今以下(docs/perf.md。今は RxCell 112 B × 512 = 56 KiB/頁)
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-09(作業役): 最初に t-0179・t-0170 を合わせた main を release・debug でビルド(警告なし)し、1 つ目の束 47 本が通過(直したものなし)。
+  GpuMultiresOptions::wideCells で u6 の後ろに頁ごとの溢れ(2 面を入れ替える。shaders/common/multires_wide.hlsli)・全部を刻む Compute の変種
+  multires_step_wide_*(MR_WIDE_CELLS。shaders/sim/multires_wide_step.hlsli: 8 種に収まるセルはインラインの核、溢れるセルだけ RxGpuWideCell で
+  数える → プレフィックス和 → 刻み直す)・写す/読み戻す(OverflowFits・AppendOverflowImage・ReadOverflow)。ルート定数 26(64 / 64 語)。ADR-0052。
+  gpu_multires_test の RunLimitsStepWide(上限の場面を溢れの世界で 12 刻み: 待たせた 0・最大 9 種)が HW・WARP で CPU と毎刻みビット一致。
+  2 時間の約束のため、やり直し・VRAM の使い回し・伝導・要求の処理・覗き窓は T-0211、活性のグラフは T-0212 に分けた。既定の世界のシェーダーと VRAM は変えていない。
+
+## 分けたもの
+- T-0211: GPU の溢れの残り(足りない時に同じ刻みでやり直す・使う分だけの VRAM・伝導・要求の処理〔粗くする和集合・細かくする・影・畳む〕・覗き窓)
+- T-0212: 活性のグラフの刻みで溢れを使う(ノードに核を足さない約束の中で)

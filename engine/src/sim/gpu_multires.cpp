@@ -7,13 +7,15 @@
 // 小刻みごとに段を積み、小刻みの終わりに変わったブロックの隣を活性のグラフで起こす。
 // 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ・
 // u6〜u10 木の管理・u11 伝導の作業場・u12 GPU の入力・u13 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
-// ルート署名は 62 / 64 語(UAV 14 × 2・定数 24・リング 2・表 4 × 2。T-0107 で uint32 の表を u6 にまとめて空けた)。
+// ルート署名は 64 / 64 語(UAV 14 × 2・定数 26・リング 2・表 4 × 2。T-0107 で uint32 の表を u6 にまとめて空けた。最後の 1 語は
+// 成分の二段の溢れの始まり〔T-0176〕。溢れは新しい UAV を足さず u6 の後ろに置く)。
 #include "sim/gpu_multires.h"
 
 #include <limits>
 #include <utility>
 
 #include "common/multires_activity.hlsli"
+#include "common/multires_wide.hlsli"
 
 #include "core/log.h"
 #include "gpu/resources.h"
@@ -26,7 +28,7 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 25;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 26;
         constexpr uint32_t EXTERNAL_VIEW_FIRST = 4;  // u4・u5
         constexpr uint32_t UAV_COUNT = 14;           // u0〜u13
         constexpr uint32_t ACTIVITY_VIEW = 13;       // u13
@@ -246,6 +248,8 @@ namespace bicameral::sim {
         result.m_constants.worldBlocks = capacity.worldBlocks;
         result.m_constants.indexEntries = capacity.indexEntries;
         result.m_constants.ledgerColumns = capacity.ledgerColumns;
+        result.m_wideCells = options.wideCells;
+        result.m_constants.overflowBase = result.OverflowBaseWord();
 
         if (auto pipelines = result.CreatePipelines(device, options); !pipelines)
             return std::unexpected(pipelines.error());
@@ -299,6 +303,17 @@ namespace bicameral::sim {
         m_wakePipeline = std::move(*wake);
         m_stepWaitPipeline = std::move(*stepWait);
         m_stepExpandedWaitPipeline = std::move(*expandedWait);
+        if (options.wideCells) {
+            auto wideWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_wait.cso");
+            auto wideExpanded = LoadComputePipeline(device, m_rootSignature.Get(),
+                                                    "sim/multires_step_wide_expanded_wait.cso");
+            if (!wideWait || !wideExpanded)
+                return std::unexpected(!wideWait ? wideWait.error() : wideExpanded.error());
+
+            m_stepWideWaitPipeline = std::move(*wideWait);
+            m_stepWideExpandedWaitPipeline = std::move(*wideExpanded);
+        }
+
         static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT && CONDUCT_SHADERS.size() == CONDUCT_PASS_COUNT);
         for (uint32_t pass = 0; pass < TREE_PASS_COUNT + CONDUCT_PASS_COUNT; ++pass) {
             const bool tree = pass < TREE_PASS_COUNT;
@@ -434,8 +449,8 @@ namespace bicameral::sim {
         sizes[BufferCells] = (m_blockCapacity + (PageCount() * MR_BLOCK_CELLS)) * sizeof(RxCell);
         sizes[BufferFractions] = uint64_t{m_capacity.fractions} * MR_BLOCK_CELLS * sizeof(MrFraction);
         sizes[BufferCounters] = uint64_t{MR_COUNTER_COUNT} * sizeof(uint32_t);
-        sizes[BufferTreeWords] = ((uint64_t{m_capacity.worldBlocks} * 2) + m_capacity.indexEntries + m_capacity.pages) *
-                                 sizeof(uint32_t);
+        const uint64_t overflowWords = m_wideCells ? PageCount() * MR_WIDE_PAGE_WORDS : 0;
+        sizes[BufferTreeWords] = (uint64_t{OverflowBaseWord()} + overflowWords) * sizeof(uint32_t);
         sizes[BufferFreeFractions] = uint64_t{m_capacity.fractions} * sizeof(uint32_t);
         sizes[BufferLedger] = uint64_t{MR_LEDGER_LEVELS} * m_capacity.ledgerColumns * sizeof(uint64_t);
         sizes[BufferRequests] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequest);
@@ -489,11 +504,93 @@ namespace bicameral::sim {
         words.insert(words.end(), nest.claims.begin(), nest.claims.end());
         words.insert(words.end(), nest.index.begin(), nest.index.end());
         words.insert(words.end(), freePages.begin(), freePages.end());
+        AppendOverflowImage(nest, words);
 
         std::vector<std::byte> image(words.size() * sizeof(uint32_t));
         std::memcpy(image.data(), words.data(), image.size());
 
         return image;
+    }
+
+    // --- 成分の二段(T-0176。shaders/common/multires_wide.hlsli の並び)---
+
+    // u6 の溢れの領域の始まり: [世界の枠の空き][取り合いの印][索引][世界の頁の空き] の後ろ
+    uint32_t GpuMultires::OverflowBaseWord() const {
+        return (m_capacity.worldBlocks * 2) + m_capacity.indexEntries + m_capacity.pages;
+    }
+
+    // CPU の溢れを GPU に写せるか(頁の溢れの枠・1 セルの成分の数に入る。端数の溢れはまだ持てない)
+    bool GpuMultires::OverflowFits(const MultiresNest& nest) const {
+        if (!nest.wideCells)
+            return true;
+
+        if (!m_wideCells || nest.cellOverflow.size() != PageCount())
+            return false;
+
+        for (uint32_t fractionSlot = 0; fractionSlot < m_capacity.fractions; ++fractionSlot) {
+            if (FractionHasOverflow(nest, fractionSlot))
+                return false;
+        }
+
+        constexpr uint32_t MOST_TAIL = RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES;
+        for (const MultiresOverflowArea& area : nest.cellOverflow) {
+            if (area.offsets[MR_BLOCK_CELLS] > MR_WIDE_PAGE_ENTRIES)
+                return false;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (area.offsets[index + 1] - area.offsets[index] > MOST_TAIL)
+                    return false;
+            }
+        }
+
+        return true;
+    }
+
+    // 頁ごとの溢れの像(今の面 0 = CPU の溢れ、面 1 = 0)
+    void GpuMultires::AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const {
+        if (!m_wideCells)
+            return;
+
+        const size_t first = words.size();
+        words.resize(first + (PageCount() * MR_WIDE_PAGE_WORDS), 0);
+        if (!nest.wideCells)
+            return;
+
+        for (uint32_t page = 0; page < PageCount(); ++page) {
+            const MultiresOverflowArea& area = nest.cellOverflow[page];
+            const size_t side = first + MrWideSideWord(0, page, 0);
+            std::ranges::copy(area.offsets, words.begin() + static_cast<ptrdiff_t>(side));
+            for (uint32_t entry = 0; entry < area.offsets[MR_BLOCK_CELLS]; ++entry) {
+                const size_t word = side + MrWideEntryWord(entry);
+                words[word] = area.species[entry];
+                words[word + 1] = static_cast<uint32_t>(area.amounts[entry]);
+                words[word + 2] = static_cast<uint32_t>(area.amounts[entry] >> 32);
+            }
+        }
+    }
+
+    // 読み戻した u6 の溢れ(今の面)を CPU の溢れにする(並びは同じ: セルの番号の順に詰める)
+    void GpuMultires::ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const {
+        nest.wideCells = false;
+        if (!m_wideCells)
+            return;
+
+        EnableWideCells(nest);
+        const uint32_t base = OverflowBaseWord();
+        for (uint32_t page = 0; page < PageCount(); ++page) {
+            const uint32_t current = words[MrWidePageWord(base, page)];
+            const auto side = words.subspan(MrWideSideWord(base, page, current), MR_WIDE_SIDE_WORDS);
+            MultiresOverflowArea& area = nest.cellOverflow[page];
+            std::ranges::copy(side.first(MR_BLOCK_CELLS + 1), area.offsets.begin());
+            const uint32_t count = area.offsets[MR_BLOCK_CELLS];
+            area.species.resize(count);
+            area.amounts.resize(count);
+            for (uint32_t entry = 0; entry < count; ++entry) {
+                const uint32_t word = MrWideEntryWord(entry);
+                area.species[entry] = side[word];
+                area.amounts[entry] = (uint64_t{side[word + 2]} << 32) | side[word + 1];
+            }
+        }
     }
 
     uint64_t GpuMultires::ActivityBytes() const {
@@ -528,6 +625,12 @@ namespace bicameral::sim {
             nest.fractions.size() != size_t{m_capacity.fractions} * MR_BLOCK_CELLS ||
             nest.index.size() != m_capacity.indexEntries || nest.ledger.size() != BufferSizes()[BufferLedger] / 8)
             return false;
+
+        if (!OverflowFits(nest)) {
+            Log(Channel::Gpu, Level::Error,
+                "成分の溢れを GPU に写せない(溢れを使う世界か、頁の溢れの枠・1 セルの成分の数を超える。T-0176)");
+            return false;
+        }
 
         // 要求の途中の値・伝導の作業場(印と変化は 0 から)・GPU の入力は写さない(毎回の処理が書いてから読む)
         const std::vector<std::byte> zeros(std::max(BufferSizes()[BufferStates], BufferSizes()[BufferConduction]));
@@ -779,8 +882,8 @@ namespace bicameral::sim {
 
     bool GpuMultires::RecordStepActive(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                        uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
-        if (!m_activityGraph)
-            return false;
+        if (!m_activityGraph || m_wideCells)
+            return false;  // 活性のグラフはまだ溢れを読まない(T-0212)
 
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
@@ -842,6 +945,7 @@ namespace bicameral::sim {
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
+        FX_ASSERT(!m_wideCells || !options.conduction);  // 伝導の段はまだ溢れを読まない(T-0211)
         if (options.conduction) {
             RecordWake(list, debugRing, 0);                              // つつかれたブロックの印を直す
             RecordConduction(list, debugRing, options, ACTIVITY_LISTS);  // 全部を刻むので起こさない
@@ -865,14 +969,14 @@ namespace bicameral::sim {
     void GpuMultires::RecordStepWait(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         // --- 起こす段(つつかれたブロックの印を直す)→ 全部の枠を刻む ---
         RecordWake(list, debugRing, 0);
-        list->SetPipelineState(m_stepWaitPipeline.Get());
+        list->SetPipelineState(m_wideCells ? m_stepWideWaitPipeline.Get() : m_stepWaitPipeline.Get());
         BindRoot(list, debugRing);
         list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
 
         // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる)---
         RecordTreePass(list, debugRing, PassExpand, 1);
-        list->SetPipelineState(m_stepExpandedWaitPipeline.Get());
+        list->SetPipelineState(m_wideCells ? m_stepWideExpandedWaitPipeline.Get() : m_stepExpandedWaitPipeline.Get());
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
         UavBarrier(list);
     }
@@ -1084,10 +1188,11 @@ namespace bicameral::sim {
         const uint32_t worldBlocks = m_capacity.worldBlocks;
         const auto words = std::span(treeWords);
         const auto index = words.subspan(size_t{worldBlocks} * 2, m_capacity.indexEntries);
-        const auto freePages = words.subspan((size_t{worldBlocks} * 2) + m_capacity.indexEntries);
+        const auto freePages = words.subspan((size_t{worldBlocks} * 2) + m_capacity.indexEntries, m_capacity.pages);
         std::ranges::copy(words.first(worldBlocks), nest.freeBlocks.begin());
         std::ranges::copy(freePages, nest.freeBlocks.begin() + worldBlocks);
         std::ranges::copy(index, nest.index.begin());
+        ReadOverflow(words, nest);
 
         return true;
     }

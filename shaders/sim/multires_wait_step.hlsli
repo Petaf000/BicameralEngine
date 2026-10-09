@@ -100,6 +100,19 @@ WaitBlockResult StepPagedWait(uint32_t slot, uint32_t thread) {
     return EndWaitReduce(thread, wakeTick);
 }
 
+#ifdef MR_WIDE_CELLS
+#include "sim/multires_wide_step.hlsli"
+#endif
+
+// 頁を持つブロックを刻む(溢れを使う変種〔MR_WIDE_CELLS。T-0176〕は StepPagedWaitWide)
+WaitBlockResult StepPagedWaitShaped(uint32_t slot, uint32_t thread) {
+#ifdef MR_WIDE_CELLS
+    return StepPagedWaitWide(slot, thread);
+#else
+    return StepPagedWait(slot, thread);
+#endif
+}
+
 // 一様なブロックを待ちの丸めで評価する(CPU の MrUniformWaitOf を 64 スレッドで。変わるかは OR、変わらなければ最小)
 WaitBlockResult EvaluateUniformWait(uint32_t slot, uint32_t thread) {
     BeginWaitReduce(thread);
@@ -147,7 +160,7 @@ void StepBlockWait(uint32_t slot, uint32_t thread) {
         return;
 
     if (!MrIsUniform(block)) {
-        const WaitBlockResult result = StepPagedWait(slot, thread);
+        const WaitBlockResult result = StepPagedWaitShaped(slot, thread);
         if (thread == 0)
             FinishWaitBlock(slot, result.changed, result.wakeTick);
 
@@ -173,7 +186,11 @@ void StepExpandedWait(uint32_t slot, uint32_t thread) {
         g_cells[PageCellAddress(block.page, index)] = MrUniformCell(block, value, index);
     }
 
-    StepPagedWait(slot, thread);  // 同じスレッドが同じセルを受け持つので、埋めた後に同期は要らない
+#ifdef MR_WIDE_CELLS
+    ClearWidePage(block.page, thread);  // 前に使った頁の溢れを読まない
+#endif
+
+    StepPagedWaitShaped(slot, thread);  // 同じスレッドが同じセルを受け持つので、埋めた後に同期は要らない
     if (thread == 0)
         FinishWaitBlock(slot, 1, RX_WAIT_NEVER);
 }

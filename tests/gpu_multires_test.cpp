@@ -245,6 +245,64 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // 本物の葉のセルの成分の最大(溢れを含む)
+    uint32_t MostLeafSpecies(const sim::MultiresNest& nest) {
+        uint32_t most = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (MrIsSteppedCell(block, index))
+                    most = std::max(most, sim::LoadWideNestCell(nest, slot, index).speciesCount);
+            }
+        }
+
+        return most;
+    }
+
+    // 成分の二段(T-0176): 上限に当たる場面を溢れを使う世界で刻む。9 種目の生成物を待たせず、CPU の上限なしの世界と毎刻みビット一致
+    std::expected<RunResult, std::string> RunLimitsStepWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                            gpu::DebugRing& ring,
+                                                            const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(false);
+        sim::MultiresNest read;
+        uint32_t most = 0;
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::LIMITS_STEP_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::StepNest(cpu, table, test::LIMITS_STEP_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(std::format("溢れ: {}", compared.error()));
+
+            most = std::max(most, MostLeafSpecies(read));
+        }
+
+        if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || most <= RX_MAX_CELL_SPECIES)
+            return std::unexpected("溢れ: 9 種目の生成物を待たせた・作っていない");
+
+        Log(Channel::Gpu, Level::Info, "溢れを使う世界の刻み: 待たせた {}・選んだ {}・最大の成分 {}(CPU と GPU で同じ)",
+            cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], cpu.counters[MR_COUNTER_LIMIT_CANDIDATES], most);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // たくさんの要求(取り合い・枠が足りない・無効・索引の作り直し・帳簿)。要求は CPU の木から作る(GPU の木と同じ)
     std::expected<RunResult, std::string> RunStress(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
@@ -402,8 +460,9 @@ namespace {
         const auto coarsenFull = RunCoarsenFull(device->Get(), *queue, *ring, *limitsTable);
         const auto limitsStep = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, false);
         const auto limitsConduct = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, true);
-        for (const auto* result :
-             {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct}) {
+        const auto limitsWide = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable);
+        for (const auto* result : {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep,
+                                   &limitsConduct, &limitsWide}) {
             if (*result)
                 continue;
 

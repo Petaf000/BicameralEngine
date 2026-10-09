@@ -67,6 +67,11 @@ cbuffer RootConstants : register(b0) {
 
     // --- 頁を畳む(T-0112)---
     uint32_t g_foldTolerance;  // MrPackFoldTolerance(0 = 完全に同じ)
+
+#ifdef MR_WIDE_CELLS
+    // --- 成分の二段(T-0176。溢れを使う変種 multires_step_wide_* だけが宣言する。ルート署名の最後の 1 語)---
+    uint32_t g_overflowBase;  // u6 の溢れの領域の始まり(語。shaders/common/multires_wide.hlsli)
+#endif
 };
 
 // g_stepFlags(gpu_multires.cpp の STEP_FLAG_*)

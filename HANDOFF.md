@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0187 多重解像度の世界(CPU)のセルに溢れ — 完了(影の引き戻し・畳む・覗き窓の溢れは T-0199 に分けた)
+最終更新: 2026-10-09 / チケット: T-0176 成分の二段を GPU に — 一部完了(全部を刻む Compute〔伝導なし〕まで。残りは T-0211・T-0212)
 
 ## 状態(3 行以内)
-- CPU の多重解像度の世界は `EnableWideCells(nest)` で「インライン 8 + 頁ごと・端数の枠ごとの溢れ」(MultiresOverflowArea。セルの番号の順に詰める)を持つ。既定は使わない(GPU と比べるテストは今のまま)。
-- 溢れを使う世界は 9 種目の生成物を待たせず(待たせた 0・最大 9 種)、8 種ずつ違う子を粗くするのも断らない(親のセル 16 種)。保存は毎刻みビット単位。上限に当たらない本物の鎖は使わない世界と毎刻みビット一致。
-- t-0139・t-0178・t-0184 を合わせた main は release の 2 束(46 本・41 本)が通過(直したものなし)。gpu_multires の束は変更の後に流した(結果は「動いているもの」)。次は T-0176(GPU)か T-0199。
+- GPU の多重解像度の世界も `GpuMultiresOptions::wideCells` で「インライン 8 + 頁ごとの溢れ(u6 の後ろ・2 面を入れ替える)」を持ち、全部を刻む Compute(伝導なし)が 9 種目の生成物を待たせずに作る(CPU の EnableWideCells の世界と HW・WARP で毎刻みビット一致。ADR-0052)。既定の世界のシェーダー・VRAM は今のまま。
+- 溢れを使う GPU の世界は伝導・要求の処理・活性のグラフ・覗き窓をまだ使えない(T-0211・T-0212)。頁の溢れ 1024 成分・1 セル 24 種を超えると待たせる(当座)。
+- t-0179・t-0170 を合わせた main は release の 1 つ目の束 47 本が通過(直したものなし)。2・3 つ目の束 64 本は変更の後のビルドで流して通過(合わせた状態も壊れていない)。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。T-0154・T-0132 済み。T-0178・T-0179 済み。次は T-0147・T-0137)**: T-0179 で段を作る回と V サイクルを前の刻みから選ぶ(GpuImplicitLevels::RoundsFrom・GpuImplicitRecordShape::dispatchCycles・g_wholeTail)。**HW では LvTail を積み、WARP では積まない**(gpu::IsSoftwareDevice。T-0147 が直ったら分岐を消す)。V の回数が前の刻みの 1.5 倍(+2)を超えて急に増えた刻みは超えた回が 1 グループで遅い(たくさんの要求で 1 回約 5 ms。値は同じ)。 T-0178 で系に入るブロックを枠の順に選び、入らないブロックはその刻みだけ陽解法(MultiresStepOptions::implicitLimits・implicitOverflow。仮で A)。GPU の EnableImplicitConduction は上限の全部の欄が要る(0 なら失敗)。伝導の作業場の印の空き語はもう無い。 T-0132 で伝導の段から陰解法を呼ぶ(MultiresStepOptions::implicitConduction が GPU でも効く。AddConductDelta は multires_bindings.hlsli・stepFlags のビット 3・5〜7・implicitMaxGap は 1〜8)。系が上限(GpuMultiresImplicitLimits)を超えると CPU と合わない(T-0178)。 T-0154 で記録の形を前の刻みの GPU の数から選ぶ(GpuImplicit::ShapeFrom・IM_PLAN_WANTED_TAIL。T-0132 でも使う)。 T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
@@ -25,6 +25,13 @@
 - **気体(T-0026 G1・T-0184 G2 済み → T-0185〔ブランチ t-0185 で作業中。main に未マージ。GPU の gas_step.hlsl・gpu_gas.* が CPU と 1〜2 刻みで食い違う〕・T-0208〜T-0210・T-0186)**: G2 で成分の MUSCL(既定 MC)と移す物質量の乱数の丸め(07 §2.2・ADR-0043 §6・§7)。1 セルの物質量は 2^31 µmol 未満(assert)。 1 レベルの CPU リファレンス engine/src/sim/gas_reference.*(ライブラリ bicameral_gas)・tests/gas_reference_test.cpp(debug 74 秒)。07 §2.1・ADR-0043(Proposed)。c̃ 30 m/s は仮(Q11)。05 のセルの形はまだ変えていない(G3)。tidy の新しいファイルの約 20 件は G2 の初めに直す。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0176)**: 最初に t-0179・t-0170 を合わせた main(変更前)を release・debug でビルド(警告なし)し、release で
+  `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 47 本が通過(約 7 分。直したものなし)。
+  変更の後: release・debug のビルドは警告なし。release の `-Filter "^gpu_multires(_warp)?$"` が通過(HW 132 s・WARP 37 s。足した RunLimitsStepWide: 上限の場面を溢れの世界で 12 刻み、
+  待たせた 0・選んだ 8448・最大 9 種で CPU と毎刻みビット一致)。2・3 つ目の束(合わせた状態の確かめを兼ねる)は
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab|multires)|window_)"` を 1 回で投げ、64 本が通過(直したものなし・流し直しなし。
+  ほかの 3 つの作業ツリーのテストと重なり約 95 分。implicit_conduction が約 20 分)。合わせて release 111 本 + 先の gpu_multires(_warp)。
+  debug の GPU のテスト・tidy は流していない。archmap OK(142)。計測はしていない(既定の世界はシェーダーを変えていない。溢れの世界の ns/セル は T-0211)。
 - **テスト(2026-10-09、T-0187)**: 最初に t-0139・t-0178・t-0184 を合わせた main(変更前)を release で
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 46 本(約 6 分)・
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_)"` 41 本(約 25 分)が通過(直したものなし・流し直しなし)。release のビルドは警告なし(前からの C4189 だけ)。
@@ -118,6 +125,9 @@
   `--timeout 2400` で裏で投げ、runner/logs/<job>.result.json を待つ。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
+- **GPU の溢れ(T-0176)**: wideCells の GpuMultires は RecordStep(伝導なし)だけが溢れを読み書きする。伝導ありの RecordStep は FX_ASSERT、RecordStepActive は false を返す。
+  要求の処理(粗くする・細かくする・影・畳む)・覗き窓は溢れを知らない(使うと溢れが食い違う。T-0211)。頁の溢れが 1 面 1024 成分を超えるブロックは溢れるセルを待たせ、
+  1 セル 24 種を超える生成物も待たせる(どちらも MR_COUNTER_LIMIT_PRODUCTS に数え、CPU の上限なしの世界と食い違う。この場面のテストはまだ無い)。
 - **上限の当座のふるまい(T-0022。仮 = QUESTIONS Q19)**: (CPU の多重解像度の世界は EnableWideCells で ①③ が起きない。T-0187。既定は使わない)8 種のセルで 9 種目を作る反応は枠が空くまで進まない・17 本以上は平均 16/N の速さ・入りきらない子は細かいまま。
   多重解像度の世界の刻みでは MR_COUNTER_LIMIT_PRODUCTS・_CANDIDATES に数える(T-0163)。仮の世界ではまだ数えていない(T-0177)。ほかに数えているのは 1 セルの反応の GPU
   (reaction_cells.hlsl の u1)と、粗くするのを断った数(MR_COUNTER_COARSEN_FULL)。粗くする要求の解決(TreeResolve)は 1 スレッドで 64 セルを MrCoarsenCell するので、要求 1 件ごとに重い(未計測)。
@@ -144,6 +154,13 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。T-0176・ADR-0052)GPU の溢れは「インライン 8 の核で先に刻み、溢れるセル(溢れを持つ・9 種目を待たせた)だけ上限なしの形 RxGpuWideCell で
+  数える → セルの番号の順のプレフィックス和(スレッド 0)→ 刻み直して書く」。頁ごとに 2 面を持ち、今の面を読んでもう片方へ書き、全部書いてから入れ替える。
+  置き場所は u6 の後ろ(UAV を足せないため)、始まりはルート定数の最後の 1 語 g_overflowBase(MR_WIDE_CELLS の変種だけが宣言。ルート署名 64 / 64 語)。
+- (Claude が決めた。T-0176)当座の上限は 1 セル RX_GPU_WIDE_SPECIES = 24 種・頁の溢れ 1 面 MR_WIDE_PAGE_ENTRIES = 1024 成分(shaders/common/multires_wide.hlsli。1 頁 約 28 KiB を先に取る)。
+  溢れを使う世界だけの変種 multires_step_wide_wait・_expanded_wait(既定の世界は今のシェーダーのまま)。頁に広げたばかりのブロックは今の面を空にしてから刻む。
+- (Claude が決めた。2 時間の約束)残りは T-0211(足りない時のやり直し・使う分だけの VRAM・伝導・要求の処理・覗き窓)と T-0212(活性のグラフ)に分けた。
+- (Claude が決めた。T-0176)float の検査は変数名 `half` も浮動小数点の型として弾く → 溢れの面は side と呼ぶ。
 - (Claude が決めた。T-0187)溢れの持ち方は「頁ごと(と端数の枠ごと)の領域に、セルの番号の順に詰める」(MultiresOverflowArea の offsets はプレフィックス和)。
   インラインには ID の小さい方から 8 個、溢れはその続き。1 セルを書くたびに頁の中を詰め直す(並びは内容だけで決まる。GPU の T-0176 のグループ内のプレフィックス和と同じ並び)。
   インラインの RxCell・MrFraction は今のまま有効なセル(8 種まで)なので、溢れを知らないコード(GPU・一様の値・畳む判定)はそのまま読める。02 §3 に追記。
@@ -209,6 +226,9 @@
 NEXT.md の先頭。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **GPU の溢れ(T-0176)**: 溢れの並びは shaders/common/multires_wide.hlsli(C++ と HLSL で共有)。読むのは今の面(頁の先頭の語)。GPU のセルの溢れを読む段を足す時は
+  `MR_WIDE_CELLS` の変種を作り(g_overflowBase は変種だけが宣言する。既定のシェーダーの cbuffer を大きくすると implicit_build・lab_box のルート署名と合わなくなる)、
+  RecordXxx で m_wideCells の時にその変種を選ぶ。ルート署名はもう 1 語も空いていない。
 - **世界のセルの溢れ(T-0187)**: 溢れを使う世界(nest.wideCells)で頁のセル・端数を書く所は StoreWidePageCell・StoreWideFraction を使う(nest.cells に直接書くと溢れと食い違う。
   LoadWideNestCell の FX_ASSERT が「溢れがあるならインラインは 8 種」を確かめる)。頁・端数の枠を空きに返す所は ClearPageOverflow・ClearFractionOverflow。
   新しく頁を返す道を足したら、溢れを空にするか、溢れのある頁を返さないこと(次に使う所に古い溢れが残る)。

@@ -48,6 +48,11 @@ namespace bicameral::sim {
         // 無ければ Compute(全部の枠の数だけグループを投げ、一覧の数を超えたグループは何もしない)。T-0107 で両方を測り、差は揺れの中で
         // Compute がわずかに安かったので既定は Compute(D-302。docs/perf.md)
         bool conductionGraph = false;
+
+        // 成分の二段(T-0176。CPU の EnableWideCells の世界と同じ): セルは「インライン 8 + 頁ごとの溢れ」で、全部を刻む Compute
+        // (RecordStep の伝導なし)が 9 種目以上の生成物を待たせずに作る。溢れは u6 の後ろに頁ごとに取る(shaders/common/multires_wide.hlsli。
+        // 1 頁 約 28 KiB)。まだ伝導・要求の処理・活性のグラフ・覗き窓は溢れを読まない(T-0211・T-0212)ので、使えるのは伝導なしの全部の刻みだけ
+        bool wideCells = false;
     };
 
     class GpuMultiresImplicit;
@@ -174,6 +179,9 @@ namespace bicameral::sim {
 
             // --- 頁を畳む(T-0112)---
             uint32_t foldTolerance = 0;  // MrPackFoldTolerance(0 = 完全に同じ)
+
+            // --- 成分の二段(T-0176。溢れを使う変種だけが読む)---
+            uint32_t overflowBase = 0;  // u6 の溢れの領域の始まり(語)
         };
 
         // バッファの並び(u0〜u3、u6〜u12。multires_bindings.hlsli)
@@ -232,6 +240,11 @@ namespace bicameral::sim {
                                       const MultiresStepOptions& options);
         [[nodiscard]] std::expected<void, std::string> CreateConductionGraph(ID3D12Device5* device);
         [[nodiscard]] std::vector<std::byte> MakeTreeWordsImage(const MultiresNest& nest) const;
+        // 成分の二段(T-0176): u6 の溢れの領域の始まり(語)・CPU の溢れを写せるか・写す像・読み戻した像から CPU の溢れを作る
+        [[nodiscard]] uint32_t OverflowBaseWord() const;
+        [[nodiscard]] bool OverflowFits(const MultiresNest& nest) const;
+        void AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const;
+        void ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const;
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -246,6 +259,10 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_wakePipeline;              // 起こす段: 見出しを全部なめる
         ComPtr<ID3D12PipelineState> m_stepWaitPipeline;          // 全部の枠を刻む(1 グループ = 1 枠)
         ComPtr<ID3D12PipelineState> m_stepExpandedWaitPipeline;  // 頁に広げたブロックを埋めて刻む
+        // --- 成分の二段(T-0176。GpuMultiresOptions::wideCells の時だけ作る)---
+        bool m_wideCells = false;
+        ComPtr<ID3D12PipelineState> m_stepWideWaitPipeline;
+        ComPtr<ID3D12PipelineState> m_stepWideExpandedWaitPipeline;
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

@@ -119,6 +119,8 @@ bicameral_add_shader(sim/physics_graph.hlsl PROFILE lib_6_8)  # 物理の広域�
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WakeDue NAME multires_step_wake)  # 起こす段: 見出しを全部なめる(T-0121)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepWait NAME multires_step_wait)  # 待ちの丸めで全部を刻む(T-0121)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepExpandedWaitPass NAME multires_step_expanded_wait)  # 待ちの丸めで頁に広げて刻む(T-0121)
+bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepWait NAME multires_step_wide_wait DEFINES MR_WIDE_CELLS=1)  # 溢れを使う世界を全部刻む(T-0176)
+bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepExpandedWaitPass NAME multires_step_wide_expanded_wait DEFINES MR_WIDE_CELLS=1)  # 溢れを使う世界の頁に広げて刻む(T-0176)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8)  # 多重解像度の細かくする・粗くする・影の引き戻し(T-0017・T-0018)
 bicameral_add_shader(sim/multires_activity_graph.hlsl PROFILE lib_6_8)  # 木の上の活性: 種と面の隣だけ刻む(T-0100)
 bicameral_add_shader(sim/multires_conduct_graph.hlsl PROFILE lib_6_8)  # 熱の伝導の段の Work Graph 版(T-0107。D-302 で比べる)
