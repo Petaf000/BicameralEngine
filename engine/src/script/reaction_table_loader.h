@@ -1,6 +1,7 @@
 // reaction_table_loader.h — ランタイム(ゲーム本体・エディタ)とテストが、データのフォルダのパッケージから反応表を作る(T-0157・ADR-0033)。
 //
-// データの流れ: <exe の横>/data/packages(ビルドがリポジトリの data/packages を写す)→ ReadPackageRoot → LoadPackages(殻)
+// データの流れ: <exe の横>/data/packages(ビルドがリポジトリの data/packages を写す)→ ReadPackageRoot
+//   → LoadPackages(走らせる前に data/types の型の定義で型検査〔T-0140〕→ 殻)
 //   → ReadReactionTableDefinition → sim::BakeReactionTable(元素とエネルギーの検査)→ LoadedReactionTable → GPU へ上げる(呼び手)。
 // 失敗(フォルダが無い・ゲーム本体のパッケージが読めない・形の誤り・検査で落ちる)は全部 error で返す。呼び手は起動を止める
 // (半端な表で世界を動かさない。D-428)。ゲーム本体以外のパッケージ(Mod)が読めなかったときは、それを除いた表で続け、
@@ -27,6 +28,7 @@ namespace bicameral::script {
         fs::path packageRoot;  // 直下のフォルダが 1 つずつパッケージ(空なら DefaultPackageRoot)
         std::string basePackage{DEFAULT_BASE_PACKAGE};  // ゲーム本体。読めなければ失敗
         MergeMode mergeMode = MergeMode::AddOnly;       // 表の合わせ方(仮で案 C の既定。QUESTIONS Q8)
+        fs::path typeDefinitions;  // 型検査に使う型の定義(T-0140。空なら DefaultTypeDefinitionsPath。読めなければ失敗)
     };
 
     struct LoadedReactionTable {

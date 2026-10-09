@@ -311,12 +311,32 @@ namespace bicameral::script {
         }
 
         // 1 つのパッケージを読んで合わせる。読まなかったら理由
+        // 型検査の誤りを結果に足し、パッケージを読まない理由を返す(誤りが無ければ空)
+        std::string TypeCheckReason(std::vector<TypeDiagnostic>&& diagnostics, PackageSetResult& result) {
+            if (diagnostics.empty())
+                return {};
+
+            std::string reason = "型検査: " + SummarizeDiagnostics(diagnostics);
+            result.typeDiagnostics.insert(result.typeDiagnostics.end(), std::make_move_iterator(diagnostics.begin()),
+                                          std::make_move_iterator(diagnostics.end()));
+
+            return reason;
+        }
+
         std::string LoadOne(LuauSandbox& sandbox, const PackageSource& package, const Manifest& manifest,
                             const std::set<std::string>& loaded, const PackageLoadOptions& options,
                             PackageSetResult& result) {
             for (const std::string& depend : manifest.depends) {
                 if (!loaded.contains(depend))
                     return std::format("依存するパッケージ '{}' を読まなかった", depend);
+            }
+
+            // --- 走らせる前に型検査(T-0140)---
+            if (options.typeChecker != nullptr) {
+                std::string reason = TypeCheckReason(options.typeChecker->CheckPackage(package, manifest.entry),
+                                                     result);
+                if (!reason.empty())
+                    return reason;
             }
 
             auto contribution = RunEntry(sandbox, package, manifest);
@@ -349,6 +369,10 @@ namespace bicameral::script {
     }
 
     // --- ディスクから読む ---
+
+    std::expected<std::string, std::string> PackageModulePath(std::string_view name) {
+        return ModulePath(name);
+    }
 
     std::expected<PackageSource, std::string> ReadPackageFolder(const fs::path& folder) {
         std::error_code error;
@@ -424,6 +448,14 @@ namespace bicameral::script {
         // --- マニフェスト(名前の順)---
         std::map<std::string, OrderNode> nodes;
         for (const auto& [name, package] : byName) {
+            if (options.typeChecker != nullptr && IsValidPackageName(name)) {
+                std::string reason = TypeCheckReason(options.typeChecker->CheckManifest(*package), result);
+                if (!reason.empty()) {
+                    result.rejected.push_back(PackageRejection{.package = name, .reason = std::move(reason)});
+                    continue;
+                }
+            }
+
             auto manifest = IsValidPackageName(name)
                                 ? ReadManifest(sandbox, *package, options)
                                 : std::expected<Manifest, std::string>(std::unexpect,
