@@ -236,12 +236,16 @@ namespace bicameral::sim {
     }
 
     void GpuImplicitBuild::RecordCopyTo(ID3D12GraphicsCommandList* list, GpuImplicit& implicit) {
-        D3D12_RESOURCE_BARRIER barrier = gpu::Transition(m_system.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-        list->ResourceBarrier(1, &barrier);
-        implicit.RecordCopySystem(list, m_system.Get(), 0, FacesOffset(), ListsOffset());
-        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        list->ResourceBarrier(1, &barrier);
+        std::array<D3D12_RESOURCE_BARRIER, 2> barriers = {
+            gpu::Transition(m_system.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+            gpu::Transition(m_work.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)};
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        implicit.RecordCopySystem(list, m_system.Get(), 0, FacesOffset(), ListsOffset(), m_work.Get(),
+                                  uint64_t{HEADER_FACES} * sizeof(uint32_t));
+        for (D3D12_RESOURCE_BARRIER& barrier : barriers)
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
     }
 
     uint32_t GpuImplicitBuild::StageCount() {

@@ -369,23 +369,6 @@ namespace {
         return limits;
     }
 
-    // CPU から写すセルのエネルギー・刻みの初めの温度と段の重みを 0 に(GPU が作った値で上書きされたことを確かめる)
-    sim::ImplicitGrid Blank(const sim::ImplicitGrid& grid) {
-        sim::ImplicitGrid blank = grid;
-        for (sim::ImplicitCell& cell : blank.cells) {
-            cell.energy = 0;
-            cell.startTemperature = 0;
-        }
-
-        for (sim::ImplicitGridLevel& level : blank.levels) {
-            std::ranges::fill(level.selfWeights, 0);
-            std::ranges::fill(level.weights, 0);
-            std::ranges::fill(level.restrictWeights, 0);
-        }
-
-        return blank;
-    }
-
     // 1 刻み: 木を写して系を作り、読み戻して CPU と比べ、GpuImplicit へ写して解いて CPU と比べる
     std::expected<void, std::string> CheckTick(const Context& context, sim::GpuMultires& multires,
                                                sim::GpuImplicitBuild& build, sim::GpuImplicitLevels& levels,
@@ -393,8 +376,14 @@ namespace {
         if (std::ranges::any_of(tick.frozen, [](uint8_t frozen) { return frozen != 0; }))
             return std::unexpected("凍った枠がある刻み(この試験は凍った印を GPU に写さない)");
 
-        const sim::ImplicitGrid blank = Blank(tick.grid);
-        auto implicit = sim::GpuImplicit::Create(context.device, blank);
+        // GpuImplicit は CPU の系を知らない: 大きさは上限(この系より大きい)から、段の形・数は GPU が写したものから(T-0136)
+        const sim::GpuImplicitLimits fitted = sim::GpuImplicit::LimitsOf(tick.grid);
+        const sim::GpuImplicitLimits limits{.cells = (fitted.cells * 2) + 16,
+                                            .faces = (fitted.faces * 2) + 16,
+                                            .nodes = (fitted.nodes * 2) + 16,
+                                            .links = (fitted.links * 2) + 16,
+                                            .levels = MAX_LEVELS};
+        auto implicit = sim::GpuImplicit::Create(context.device, limits);
         if (!implicit)
             return std::unexpected(implicit.error());
 
@@ -408,9 +397,7 @@ namespace {
             levels.RecordBuild(list, ring, build);
             build.RecordReadback(list);
             levels.RecordReadback(list);
-            if (!implicit->RecordUpload(list, blank))
-                return false;
-
+            implicit->RecordReset(list);
             build.RecordCopyTo(list, *implicit);
             levels.RecordCopyTo(list, *implicit);
             if (!implicit->RecordStep(list, ring, solveOptions))

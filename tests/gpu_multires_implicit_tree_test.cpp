@@ -191,8 +191,8 @@ namespace {
         Solved solved{.grid = grid,
                       .cost = {},
                       .stepMs = 0.0,
-                      .tailDepth = gpu->TailDepth(),
-                      .levelCount = gpu->LevelCount(),
+                      .tailDepth = 0,
+                      .levelCount = 0,
                       .dispatchesPerCycle = gpu->DispatchesPerCycle(options)};
         if (setup.frequency != 0) {
             const auto warm = [&](ID3D12GraphicsCommandList10* list) {
@@ -229,6 +229,10 @@ namespace {
                                         static_cast<double>(setup.frequency);
             solved.stepMs = repeat == 0 ? milliseconds : std::min(solved.stepMs, milliseconds);
         }
+
+        // 段の数と ImTail の境は GPU が決める(T-0136)
+        solved.tailDepth = solved.cost.tailDepth;
+        solved.levelCount = solved.cost.levelCount;
 
         return solved;
     }

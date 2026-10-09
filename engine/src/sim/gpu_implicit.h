@@ -2,13 +2,16 @@
 // StepImplicit(多重格子の V サイクル・誤差の見込みで止める・安全網)と毎刻みビット一致する Compute の段(shaders/sim/implicit_conduct.hlsl)を記録する。
 // 試作の約束は CPU と同じ(セルの一覧・熱容量一定)。木につないだ系(T-0119 の multires_implicit_conduction が作る、刻みの初めの温度と
 // 粗い側の端数の枠つきのセル)もそのまま解ける(T-0127)。系のセル・面・面の一覧は GPU で作れる(GpuImplicitBuild。T-0129)。伝導の段から呼ぶのはまだ(T-0132)。
-// 多重格子の段の形(節・隣・重み・親子)は CPU の BuildImplicitGrid が作ったものを写す(ベイク。刻みの間は変わらない)。GPU で作った段(GpuImplicitLevels。T-0134)の
-// 中身で上書きできる(RecordCopyLevels。節の並び・ImTail の境は Create の grid から。上限から作るのは T-0135)。
+// 多重格子の段の形(節・隣・重み・親子)は CPU の BuildImplicitGrid が作ったものを写す(RecordUpload)か、GPU で作った段
+// (GpuImplicitLevels。T-0134)を写す(RecordCopyLevels。段の数・節の始まりと数の表も写す)。
+// 大きさは上限(GpuImplicitLimits)で決め、段の形・数は GPU のバッファ(計画 u9)から読む(T-0136): 刻みの初めに ImPlanLevels・ImPlanArgs が
+// 長い行の節の一覧・ImTail の境・間接の Dispatch の引数を作り、V サイクルは記録の上限の段(GpuImplicitTuning::dispatchLevels)まで
+// ExecuteIndirect で積む(その段が無い・下りが止まった段より下なら引数が 0 グループ)。CPU は段の数も ImTail の境も知らない。
 //
 // 使い方(テスト):
-//   auto gpu = GpuImplicit::Create(device, grid);
-//   gpu->RecordUpload(list, grid);                         // 最初だけ(セルのエネルギーと段の形)
-//   gpu->RecordStep(list, ring, options);                  // 1 刻み。何回でも積める
+//   auto gpu = GpuImplicit::Create(device, limits);         // または Create(device, grid)(上限 = その系の大きさ)
+//   gpu->RecordUpload(list, grid);                          // CPU の系を写す。GPU の系なら RecordReset → RecordCopySystem・RecordCopyLevels
+//   gpu->RecordStep(list, ring, options);                   // 1 刻み。何回でも積める
 //   gpu->RecordReadback(list);  → 投げて待つ →  gpu->Read(grid, cost);
 // V サイクルの回数と安全網の回数は GPU が決める。記録は上限(options.cycles・maxLimitRounds)の回数だけ積み、要らない回は
 // 述語(SetPredication。GPU が書いた「止めた」の語)で Dispatch ごと飛ばす。
@@ -17,6 +20,7 @@
 #include <array>
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -32,6 +36,19 @@ namespace bicameral::sim {
         uint32_t limitRounds = 0;            // 安全網を繰り返した回数
         int64_t worstExcessMillikelvin = 0;  // 安全網の前に範囲を超えた最大
         bool limitFinished = false;          // 安全網が記録した回数の中で止まった(false なら maxLimitRounds が足りない)
+
+        // --- GPU が決めた段の形(計測の表に使う。T-0136)---
+        uint32_t levelCount = 0;  // 段の数
+        uint32_t tailDepth = 0;   // ImTail が受け持つ最初の段(段の数なら受け持たない)
+    };
+
+    // 大きさの上限(バッファの大きさ。T-0136)。写す系と段はこれに収まること
+    struct GpuImplicitLimits {
+        uint32_t cells = 0;
+        uint32_t faces = 0;
+        uint32_t nodes = 0;    // 全部の段の節
+        uint32_t links = 0;    // 全部の段の隣
+        uint32_t levels = 64;  // 段の数(CPU の MAX_GRID_LEVELS)
     };
 
     // 段の分け方の調整(計測で選ぶ。既定は T-0120 の値、T-0127 で木につないだ場面で測り直した。docs/perf.md)
@@ -45,6 +62,9 @@ namespace bicameral::sim {
         // 木のたくさんの要求の場面の最も粗い段(3396 節・隣 64)を ImTail に入れると 1 刻み 9.4 ms、入れないと 8.1 ms(T-0127。docs/perf.md)。
         // 試作の熱い点(最も粗い段が小さく隣が多い)は ImTail の方が軽かった(T-0120)
         uint32_t coarsestTailMaxNodes = 1024;
+        // 段ごとの Dispatch(ExecuteIndirect)を積む段の数(T-0136)。段の数と ImTail の境は GPU が決めるので、記録はこの段まで積み、
+        // 要らない段は 0 グループの Dispatch になる(バリアは残る)。下りがこれより深くなる系は、ここから下を ImTail が受け持つ(値は同じ・遅くなりうる)
+        uint32_t dispatchLevels = 8;
     };
 
     class GpuImplicit {
@@ -53,21 +73,33 @@ namespace bicameral::sim {
         static constexpr uint32_t DEFAULT_MAX_LIMIT_ROUNDS = 16;
 
         [[nodiscard]] static std::expected<GpuImplicit, std::string> Create(ID3D12Device5* device,
+                                                                            const GpuImplicitLimits& limits,
+                                                                            const GpuImplicitTuning& tuning = {});
+
+        // 上限 = grid の大きさ(段ごとの Dispatch は grid の段の数まで)
+        [[nodiscard]] static std::expected<GpuImplicit, std::string> Create(ID3D12Device5* device,
                                                                             const ImplicitGrid& grid,
                                                                             const GpuImplicitTuning& tuning = {});
 
-        // セル(エネルギー・端数)と段の形を写す。grid は Create と同じ形であること
+        [[nodiscard]] static GpuImplicitLimits LimitsOf(const ImplicitGrid& grid);
+
+        // CPU の系(セル・面・段の形と段の表)を写す。grid は上限に収まること
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList* list, const ImplicitGrid& grid);
 
-        // GPU が作った系(GpuImplicitBuild。T-0129)のセル・面・セルの面の一覧を写す(RecordUpload の後。source は COPY_SOURCE の状態で、
-        // 並びはこの系と同じ: セル × セルの数・面 × 面の数・面の一覧 × 2 × 面の数)。段の形は Create の grid のまま
-        void RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
-                              uint64_t facesOffset, uint64_t listsOffset);
+        // GPU の系を写す前に、バッファを UAV にする(中身は RecordCopySystem・RecordCopyLevels が写す)
+        void RecordReset(ID3D12GraphicsCommandList* list);
 
-        // GPU が作った多重格子の段(GpuImplicitLevels。T-0134)の節・隣・子の一覧を写す(RecordUpload の後。source はどれも COPY_SOURCE の状態で、
-        // 並びはこの系と同じ: 節 × 節の数・隣 × 隣の数・子の一覧 × 最も粗い段より前の節の数〔面の一覧の後ろへ〕)。節の並び・ImTail は Create の grid のまま
-        void RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* nodes, ID3D12Resource* links,
-                              ID3D12Resource* children);
+        // GPU が作った系(GpuImplicitBuild。T-0129)のセル・面・セルの面の一覧と面の数を写す(RecordUpload か RecordReset の後。
+        // source・header は COPY_SOURCE の状態で、並びはこの系と同じ: セル・面・面の一覧〔面の数 × 2〕。面の数は header の faceCountOffset の 1 語)。
+        // 上限の大きさ(source の終わりまで)を写す
+        void RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
+                              uint64_t facesOffset, uint64_t listsOffset, ID3D12Resource* header,
+                              uint64_t faceCountOffset);
+
+        // GPU が作った多重格子の段(GpuImplicitLevels。T-0134)の段の表(header の先頭。implicit_levels.hlsl の見出し)・節・隣・子の一覧を写す
+        // (RecordUpload か RecordReset の後。どれも COPY_SOURCE の状態で、並びはこの系と同じ)
+        void RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* header, ID3D12Resource* nodes,
+                              ID3D12Resource* links, ID3D12Resource* children);
 
         // 1 刻み。options.method は Multigrid だけ(赤黒・RKL2 は CPU の比べる相手で、GPU には載せない)
         [[nodiscard]] bool RecordStep(ID3D12GraphicsCommandList* list, uint64_t debugRing,
@@ -81,12 +113,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool Read(ImplicitGrid& grid, GpuImplicitCost& cost) const;
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
-        // 1 刻みに積む Dispatch の数(計測の表に使う)
+        // V サイクル 1 回に積む Dispatch の数(0 グループのものも含む。計測の表に使う)
         [[nodiscard]] uint32_t DispatchesPerCycle(const ImplicitOptions& options) const;
-
-        // ImTail が受け持つ最初の段と段の数(計測の表に使う)
-        [[nodiscard]] uint32_t TailDepth() const { return m_tailDepth; }
-        [[nodiscard]] uint32_t LevelCount() const { return static_cast<uint32_t>(m_levelOffsets.size() - 1); }
 
         // 要らない回を述語で飛ばすか(既定 true。false なら段が空で抜けるだけ。計測で比べる用)
         void UsePredication(bool use) { m_predication = use; }
@@ -102,7 +130,8 @@ namespace bicameral::sim {
             BufferState,
             BufferWide,
             BufferPredicate,
-            BufferOrder,
+            BufferPlan,
+            BufferArgs,
             BufferCount
         };
 
@@ -120,73 +149,70 @@ namespace bicameral::sim {
             PassLimitFaces,
             PassApply,
             PassTail,
+            PassPlanLevels,
+            PassPlanArgs,
             PassCount
         };
 
         // implicit_conduct.hlsl の cbuffer ImConstants と同じ並び
         struct Constants {
-            uint32_t nodeTotal = 0;
-            uint32_t cellCount = 0;
-            uint32_t faceCount = 0;
-            uint32_t levelOffset = 0;
-            uint32_t levelCount = 0;
+            uint32_t maxNodes = 0;
+            uint32_t maxCells = 0;
+            uint32_t maxFaces = 0;
+            uint32_t depth = 0;
+            uint32_t dispatchLevels = 0;
             uint32_t color = 0;
             uint32_t tolerance = 0;
             uint32_t slack = 0;
             int32_t correctionScale = 0;
-            uint32_t orderStart = 0;
-            uint32_t shortCount = 0;
-            uint32_t longCount = 0;
-            uint32_t tailStart = 0;
-            uint32_t tailDepth = 0;
-            uint32_t levelTotal = 0;
+            uint32_t tailMaxNodes = 0;
+            uint32_t tailMaxLinks = 0;
+            uint32_t coarsestTailMaxNodes = 0;
+            uint32_t maxLevels = 0;
+            uint32_t unused0 = 0;
+            uint32_t unused1 = 0;
             uint32_t sweeps = 0;
         };
 
-        // 節の並び(u9)の 1 区間: 1 スレッドで足す節 shortCount 個 → グループで足す節 longCount 個(T-0120)
-        struct OrderRange {
-            uint32_t start = 0;
-            uint32_t shortCount = 0;
-            uint32_t longCount = 0;
+        // 写す 1 つ(RecordCopies。大きさは写す先と source の残りで切る)
+        struct CopyRegion {
+            Buffer target = BufferCells;
+            uint64_t targetOffset = 0;
+            ID3D12Resource* source = nullptr;
+            uint64_t sourceOffset = 0;
+            uint64_t bytes = 0;
         };
 
         GpuImplicit() = default;
 
         std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
         std::expected<void, std::string> CreateBuffers(ID3D12Device5* device);
-        void MakeImages(const ImplicitGrid& grid);
-        void MakeOrders(const std::vector<std::byte>& nodeImage, const std::vector<std::byte>& listImage);
-        void Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t threads);
-        void DispatchOrdered(ID3D12GraphicsCommandList* list, Pass pass, const OrderRange& range);
-        void RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t sweeps);
-        void RecordVCycle(ID3D12GraphicsCommandList* list, uint32_t depth, const ImplicitOptions& options);
+        [[nodiscard]] uint64_t BufferBytes(Buffer buffer) const;
+        void Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t groups);
+        void DispatchIndirect(ID3D12GraphicsCommandList* list, Pass pass, uint32_t slot);
+        void RecordPlan(ID3D12GraphicsCommandList* list);
+        void RecordCopies(ID3D12GraphicsCommandList* list, std::span<const CopyRegion> regions);
+        void RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t slot, uint32_t sweeps);
+        void RecordVCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options);
         void BeginSkippable(ID3D12GraphicsCommandList* list, uint32_t word);
         void EndSkippable(ID3D12GraphicsCommandList* list);
 
-        // --- 形(Create の grid から)---
-        uint32_t m_cellCount = 0;
-        uint32_t m_faceCount = 0;
-        uint32_t m_nodeTotal = 0;
-        uint32_t m_linkTotal = 0;
-        std::vector<uint32_t> m_levelOffsets;  // 段ごとの節の始まり(段の数 + 1)
-        std::vector<std::array<OrderRange, 2>>
-            m_smoothOrders;                        // 段・色ごと: 掃き出しの並び(グループで足すのはその色の長い節だけ)
-        OrderRange m_convergedOrder;               // 止める判定(段 0 = セル)の並び
-        std::vector<OrderRange> m_restrictOrders;  // 段ごと: 縮約の親の並び(段 0 は使わない)
-        uint32_t m_tailDepth = 0;
-        GpuImplicitTuning m_tuning;  // ここから最も粗い段までは ImTail の 1 グループで回す(T-0120)
-        std::array<std::vector<std::byte>, BufferCount> m_images;  // 写す中身(セルは RecordUpload で作り直す)
+        // --- 上限 ---
+        GpuImplicitLimits m_limits;
+        GpuImplicitTuning m_tuning;
         Constants m_constants;
         bool m_predication = true;
 
         // --- GPU ---
         ComPtr<ID3D12RootSignature> m_rootSignature;
+        ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // ExecuteIndirect の Dispatch だけの引数
         std::array<ComPtr<ID3D12PipelineState>, PassCount> m_pipelines;
         std::array<ComPtr<ID3D12Resource>, BufferCount> m_buffers;
         std::array<ComPtr<ID3D12Resource>, BufferCount> m_uploads;
         ComPtr<ID3D12Resource> m_cellsReadback;
         ComPtr<ID3D12Resource> m_stateReadback;
         ComPtr<ID3D12Resource> m_wideReadback;
+        ComPtr<ID3D12Resource> m_planReadback;  // 計画の見出し(段の数・ImTail の境)
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
         uint32_t m_timestampCount = 0;

@@ -60,6 +60,46 @@ struct ImGpuLink {
     uint32_t padding;
 };
 
+// --- V サイクルの計画(GpuImplicit の u9。T-0136)の番地(語)---------------------------------------------
+// 段の形は GPU のバッファにある: [0, IM_PLAN_SHAPE_WORDS) は implicit_levels.hlsl の見出しと同じ並び(GpuImplicitLevels が写す。
+// CPU の系なら RecordUpload が書く): [0] 段の数・[16 + 段] 節の始まり(全体の番号)・[16 + 72 + 段] 節の数。面の数は GpuImplicitBuild の見出しから。
+// ImPlanLevels・ImPlanArgs が段ごとの長い行の節の一覧・ImTail の境・間接の Dispatch の引数(u10)をそこから作る。
+FX_CONST uint32_t IM_PLAN_LEVEL_COUNT = 0;
+FX_CONST uint32_t IM_PLAN_DEPTH_BASE = 16;
+FX_CONST uint32_t IM_PLAN_DEPTH_STRIDE = 72;
+FX_CONST uint32_t
+    IM_PLAN_NODE_OFFSET = 0;  // 段の表の種類(implicit_levels.hlsl の LV_NODE_OFFSET・LV_NODE_COUNT と同じ)
+FX_CONST uint32_t IM_PLAN_NODE_COUNT = 1;
+FX_CONST uint32_t IM_PLAN_SHAPE_WORDS = IM_PLAN_DEPTH_BASE +
+                                        (8 * IM_PLAN_DEPTH_STRIDE);  // = implicit_levels.hlsl の LV_HEADER_WORDS
+FX_CONST uint32_t IM_PLAN_FACES = IM_PLAN_SHAPE_WORDS;               // 面の数
+FX_CONST uint32_t IM_PLAN_TAIL = IM_PLAN_SHAPE_WORDS + 1;      // ImTail が受け持つ最初の段(段の数なら受け持たない)
+FX_CONST uint32_t IM_PLAN_TERMINAL = IM_PLAN_SHAPE_WORDS + 2;  // 下りが止まる段(ImTail の段か、最も粗い段)
+FX_CONST uint32_t IM_PLAN_HEADER_WORDS = IM_PLAN_SHAPE_WORDS + 8;
+// 段ごとの表(IM_PLAN_LEVEL_WORDS 語ずつ): 長い行の節の数 [色 0・色 1・縮約]・隣の数の最大
+FX_CONST uint32_t IM_PLAN_LONG_RESTRICT = 2;
+FX_CONST uint32_t IM_PLAN_MOST_LINKS = 3;
+FX_CONST uint32_t IM_PLAN_LEVEL_WORDS = 4;
+FX_CONST uint32_t IM_PLAN_MAX_LEVELS = IM_PLAN_DEPTH_STRIDE;
+FX_CONST uint32_t IM_PLAN_LEVELS_BASE = IM_PLAN_HEADER_WORDS;
+// その後ろ: 節の印 × 節の上限(bit 0: 隣が IM_LONG_ROW_LINKS より多い・bit 1: 子の隣の最大がそれより多い)→ 長い行の節の一覧
+// (段 d の種類 k は 3 × 節の始まり + k × 節の数 から。節の番号の昇順)
+FX_CONST uint32_t IM_PLAN_FLAGS_BASE = IM_PLAN_LEVELS_BASE + (IM_PLAN_LEVEL_WORDS * IM_PLAN_MAX_LEVELS);
+FX_CONST uint32_t IM_LONG_ROW_LINKS = 16;  // 隣がこれより多い節は 1 グループ = 1 節で足す(T-0120)
+
+// 間接の Dispatch の引数(u10。3 語ずつ)の番号。段 d の分は IM_SLOT_DEPTH_BASE + d × IM_SLOT_DEPTH_STRIDE から
+FX_CONST uint32_t IM_SLOT_CELLS = 0;
+FX_CONST uint32_t IM_SLOT_FACES = 1;
+FX_CONST uint32_t IM_SLOT_CONVERGED = 2;
+FX_CONST uint32_t IM_SLOT_TAIL = 3;
+FX_CONST uint32_t IM_SLOT_COARSEST = 4;  // + 色: ImTail を使わない時の最も粗い段の掃き出し
+FX_CONST uint32_t IM_SLOT_DEPTH_BASE = 6;
+FX_CONST uint32_t IM_SLOT_SMOOTH = 0;    // + 色
+FX_CONST uint32_t IM_SLOT_RESTRICT = 2;  // 段 d + 1 へ縮約
+FX_CONST uint32_t IM_SLOT_PROLONG = 3;
+FX_CONST uint32_t IM_SLOT_DEPTH_STRIDE = 4;
+FX_CONST uint32_t IM_TERMINAL_DEPTH = 0xFFFFFFFFu;  // ImSmooth の段: 計画の IM_PLAN_TERMINAL
+
 // --- 128bit の小さな道具(負にならない値)-------------------------------------------------------
 FX_FN FxU128 ImWide(uint64_t value) {
     FxU128 result = {(uint64_t)0, value};

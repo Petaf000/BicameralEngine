@@ -4,7 +4,7 @@
 // 作るもの(節 ImGpuNode・隣 ImGpuLink・子の一覧)は GpuImplicit の段の形と同じ並び・同じ番号なので、そのまま写して解ける(RecordCopyTo)。
 // 段の数は値で決まる: 回は limits.dispatchRounds 回だけ Dispatch で積み、要らない回は述語(SetPredication)で飛ばす。小さい段の回と残りの回は
 // 1 グループの LvTail が最後まで回す(T-0135)。段の中身は shaders/sim/implicit_levels.hlsl。
-// 節の並び(長い行・色ごと)・ImTail の境・間接の Dispatch・GpuImplicit の大きさを上限から決めるのは T-0136(今は CPU の系の形で Create する)。
+// 見出し(段の数・段ごとの節の始まりと数)も GpuImplicit の計画へ写し、GpuImplicit はそこから V サイクルの形を決める(T-0136)。
 //
 // 使い方(テスト):
 //   auto levels = GpuImplicitLevels::Create(device, build, limits);
