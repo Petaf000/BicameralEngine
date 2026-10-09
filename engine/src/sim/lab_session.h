@@ -24,10 +24,17 @@ namespace bicameral::sim {
 
     class LabSession {
     public:
-        // table は写して持つ(呼ぶ側の表が消えてもよい)
+        // table は写して持つ(呼ぶ側の表が消えてもよい)。tableVersion は記録に残す表の版(0 = 分からない)
         [[nodiscard]] static std::expected<LabSession, std::string> Create(ID3D12Device5* device,
                                                                            D3D12_COMMAND_LIST_TYPE queueType,
-                                                                           const BakedReactionTable& table);
+                                                                           const BakedReactionTable& table,
+                                                                           uint64_t tableVersion = 0);
+
+        // 反応表を替える(ホットリロード。T-0194): 今までの操作(コマンドの列)を初めの箱から新しい表で同じ刻みまで流し直す。
+        // 置いてまだ刻んでいない操作は残る。記録は新しい表の 1 本になる(1 つの実験 = 1 つの表。ADR-0037 の補足)。
+        // table の物質の一覧は今の表と同じこと(script::CheckHotReloadCompatible。違うと材料とセルの意味が変わる)
+        [[nodiscard]] std::expected<void, std::string> ChangeTable(const BakedReactionTable& table,
+                                                                   uint64_t tableVersion);
 
         // --- 置く(次の刻み NextTick() のコマンドにする。1 刻みに LAB_MAX_COMMANDS_PER_TICK まで)---
         bool Place(LabCellPosition cell, std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin);
@@ -39,7 +46,8 @@ namespace bicameral::sim {
         // 初めの箱(300 K の空気)に戻し、記録を空にする
         [[nodiscard]] std::expected<void, std::string> Reset();
 
-        // 初めの箱から記録のコマンドを流し直す(記録の刻みの数まで)。記録のハッシュと違った最初の刻みは ReplayDivergence()
+        // 初めの箱から記録のコマンドを流し直す(記録の刻みの数まで)。記録のハッシュと違った最初の刻みは ReplayDivergence()。
+        // 記録の表の版が今の表と違えば流さずにエラー(どちらかが 0 なら確かめない)
         [[nodiscard]] std::expected<void, std::string> Replay(const LabRecording& recording);
 
         // --- 見る ---
@@ -47,6 +55,7 @@ namespace bicameral::sim {
         [[nodiscard]] const MultiresNest& Cpu() const { return m_cpu; }
         [[nodiscard]] const MultiresNest& Gpu() const { return m_read; }
         [[nodiscard]] const BakedReactionTable& Table() const { return m_table; }
+        [[nodiscard]] uint64_t TableVersion() const { return m_tableVersion; }
         [[nodiscard]] const std::optional<LabMismatch>& Mismatch() const { return m_mismatch; }
         [[nodiscard]] std::optional<uint64_t> ReplayDivergence() const { return m_replayDivergence; }
         [[nodiscard]] bool Replaying() const { return m_replayEnd > m_tick; }
@@ -61,6 +70,7 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> StepOne();
 
         BakedReactionTable m_table;
+        uint64_t m_tableVersion = 0;
         gpu::ImmediateQueue m_queue;
         gpu::DebugRing m_ring;
         GpuLabBox m_box;

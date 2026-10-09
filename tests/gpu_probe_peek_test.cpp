@@ -6,10 +6,12 @@
 //   - 覗きながら走らせた世界の刻みごとのハッシュ列が、覗かずに走らせたものと一致(D-403)
 //   - 影の鎖が 9 段ある。子どうしが違う家族の数(影の中で細部が動いたか)はログに出すだけ: この場面の点のセルは 4000 K で
 //     反応が反応物の量で頭打ちになり(確率的な丸めの差が出ない)、周りは冷たくて反応しないので 0 になる(細部の動きは T-0017 の 600 K で確認済み)
+//   - 反応表の差し替え(T-0194): 刻みの途中で世界と覗き窓の表を替えても、毎フレーム CPU とビット一致し、替えない時と違う世界になる
 //   - debug layer のエラーとシェーダーの assert が 0 件
 // 引数: gpu_test_options.h(--warp は NuGet の WARP。T-0097)
 #include <algorithm>
 #include <format>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -60,6 +62,31 @@ namespace {
         {.ticks = 3},
         {.ticks = 3},
     }};
+
+    // 反応表の差し替え(T-0194): フレーム 4(刻み 3・4)の刻み 4 の始めに、木の燃焼を 100 倍速く・窒素の熱容量を 1 割大きくした表へ
+    // (gpu_probe_sim_test の差し替えと同じ形。熱容量が変わるので全部のセルの温度が変わる)
+    constexpr uint32_t SWAP_FRAME = 4;
+    constexpr uint64_t SWAP_TICK = 4;
+    constexpr uint64_t SWAP_VERSION = 0x5157A9ULL;  // 印の版(試験の中だけ)
+
+    std::optional<BakedReactionTable> MakeSwappedTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        for (RuleDefinition& rule : definition.rules) {
+            if (rule.name == "cellulose_combustion")
+                rule.rate.preExponentialMantissa *= 100;
+        }
+
+        for (SpeciesDefinition& species : definition.species) {
+            if (species.name == "nitrogen")
+                species.heatCapacity += species.heatCapacity / 10;
+        }
+
+        auto baked = BakeReactionTable(definition);
+        if (!baked)
+            return std::nullopt;
+
+        return std::move(*baked);
+    }
 
     struct Failures {
         int count = 0;
@@ -157,6 +184,7 @@ namespace {
         uint32_t detailedFamilies = 0;          // 子どうしが違う家族の数の最大
         uint32_t debugAssertCount = 0;
         std::array<uint32_t, multires::MR_COUNTER_COUNT> counters{};
+        uint64_t lastNestHash = 0;  // 最後のフレームの GPU の入れ子
     };
 
     struct GpuPeekSide {
@@ -183,6 +211,7 @@ namespace {
         const uint32_t detailed = peeking ? CountDetailedFamilies(gpuNest) : 0;
         run.detailedFamilies = std::max(run.detailedFamilies, detailed);
         run.counters = gpuNest.counters;
+        run.lastNestHash = HashWholeNest(gpuNest);
         Log(Channel::Sim, Level::Info,
             "  フレーム {:>2}: 刻み {:>2}  段 {}  入れ子 {:016x}  CPU と {}{}  細部のある家族 {}", frame, tick,
             gpuExtraction[0], HashWholeNest(gpuNest), sameNest ? "一致" : "不一致",
@@ -198,7 +227,9 @@ namespace {
                                         usPerTimestamp);
     }
 
-    PeekRun RunPeek(ID3D12Device5* device, const BakedReactionTable& table, bool peek) {
+    // swapped があれば、刻み SWAP_TICK の始めに世界と覗き窓の表をそれへ替える(T-0194)
+    PeekRun RunPeek(ID3D12Device5* device, const BakedReactionTable& table, bool peek,
+                    const BakedReactionTable* swapped = nullptr) {
         PeekRun run;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"PeekTestSim");
         auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table);
@@ -213,6 +244,8 @@ namespace {
         ProbePeekReference cpuPeek(table);
         const std::array<ProbeCommand, 1> ignition = {
             MakePokeCommand(0, 0, IGNITION_CELL.x, IGNITION_CELL.y, IGNITION_CELL.z)};
+        const std::array<ProbeCommand, 1> tableMark = {MakeTableCommand(SWAP_TICK, 1, SWAP_VERSION)};
+        const std::array<ProbeTableSwap, 1> tableSwaps = {ProbeTableSwap{.tick = SWAP_TICK, .table = swapped}};
         const uint32_t unitsPerTick = simulation->UnitsPerTick();
         const double usPerTimestamp = 1'000'000.0 / static_cast<double>(queue->TimestampFrequency());
         uint64_t tick = 0;
@@ -230,6 +263,12 @@ namespace {
             if (peek)
                 ApplyAction(plan.action, &*gpuPeek, &cpuPeek);
 
+            const bool swapping = swapped != nullptr && frame == SWAP_FRAME;
+            if (swapping) {
+                gpuPeek->QueueTableSwap(SWAP_TICK, *swapped);
+                cpuPeek.QueueTableSwap(SWAP_TICK, *swapped);
+            }
+
             // --- GPU: 世界を進めて抽出 → 覗き窓 → 入れ子を読み戻す(同じリスト)---
             ProbeFrameInput input{
                 .firstTick = tick,
@@ -240,6 +279,11 @@ namespace {
             if (peek)
                 input.afterExtract = peekHook;
 
+            if (swapping) {
+                input.commands = tableMark;
+                input.tableSwaps = tableSwaps;
+            }
+
             ID3D12CommandList* list = simulation->RecordFrame(slot, input);
             if (list == nullptr || !queue->WaitCpu(queue->Submit(list)))
                 return run;
@@ -247,9 +291,15 @@ namespace {
             AccumulateReadback(run, simulation->ReadFrame(slot), usPerTimestamp);
 
             // --- CPU: 同じ刻みだけ進めて、同じ境界で覗く ---
-            for (uint32_t i = 0; i < plan.ticks; ++i, ++tick)
+            for (uint32_t i = 0; i < plan.ticks; ++i, ++tick) {
+                if (swapping && tick == SWAP_TICK) {
+                    reference.Advance(tick, tableMark, swapped);
+                    continue;
+                }
+
                 reference.Advance(
                     tick, tick == 0 ? std::span<const ProbeCommand>(ignition) : std::span<const ProbeCommand>());
+            }
 
             if (!peek)
                 continue;
@@ -292,6 +342,9 @@ int main(int argc, char** argv) {
         IGNITION_CELL.y, IGNITION_CELL.z, FRAMES.size());
     const PeekRun peeked = RunPeek(device->Get(), *table, true);
     const PeekRun plain = RunPeek(device->Get(), *table, false);
+    const std::optional<BakedReactionTable> swappedTable = MakeSwappedTable();
+    Log(Channel::Sim, Level::Info, "反応表を刻み {} の始めに替えて、覗きながら(T-0194)", SWAP_TICK);
+    const PeekRun swapped = swappedTable ? RunPeek(device->Get(), *table, true, &*swappedTable) : PeekRun{};
 
     // 覗いて刻んだフレーム(段が 9 で、細かくした直後でない)の、覗かない時との GPU 時間の差の平均(入れ子の読み戻しを含む)
     double extraMicroseconds = 0.0;
@@ -323,6 +376,11 @@ int main(int argc, char** argv) {
     failures.Check(sameHashes, "覗いても世界の刻みごとのハッシュ列が覗かない時と同じ");
     failures.Check(peeked.peekedFrames >= 9, std::format("段が 9 あったフレームが 9 以上({})", peeked.peekedFrames));
     failures.Check(peeked.debugAssertCount == 0 && plain.debugAssertCount == 0, "シェーダーの assert が 0 件");
+    failures.Check(swapped.ok && swapped.mismatchedFrames == 0 && swapped.debugAssertCount == 0,
+                   "表の差し替え: 毎フレーム、覗き窓の入れ子と抽出が CPU とビット一致");
+    failures.Check(swapped.ok && swapped.lastNestHash != peeked.lastNestHash &&
+                       swapped.hashes.back().hash != peeked.hashes.back().hash,
+                   "表の差し替え: 世界も覗き窓も替えない時と違う");
 
     const bool passed = failures.count == 0 && test::PassesValidation(*device, "gpu_probe_peek_test");
     Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_probe_peek_test({}): {}",

@@ -7,7 +7,7 @@
 namespace bicameral::sim {
 
     std::expected<LabSession, std::string> LabSession::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
-                                                              const BakedReactionTable& table) {
+                                                              const BakedReactionTable& table, uint64_t tableVersion) {
         auto queue = gpu::ImmediateQueue::Create(device, queueType);
         if (!queue)
             return std::unexpected(queue.error());
@@ -20,7 +20,10 @@ namespace bicameral::sim {
         if (!box)
             return std::unexpected(box.error());
 
-        return LabSession(table, std::move(*queue), std::move(*ring), std::move(*box));
+        LabSession session(table, std::move(*queue), std::move(*ring), std::move(*box));
+        session.m_tableVersion = tableVersion;
+
+        return session;
     }
 
     LabSession::LabSession(BakedReactionTable table, gpu::ImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box)
@@ -147,6 +150,12 @@ namespace bicameral::sim {
     }
 
     std::expected<void, std::string> LabSession::Replay(const LabRecording& recording) {
+        if (recording.tableVersion != 0 && m_tableVersion != 0 && recording.tableVersion != m_tableVersion) {
+            return std::unexpected(
+                std::format("記録の反応表(版 {:016x})と今の表(版 {:016x})が違う。記録した時の表で再生する",
+                            recording.tableVersion, m_tableVersion));
+        }
+
         if (auto reset = Reset(); !reset)
             return reset;
 
@@ -160,7 +169,39 @@ namespace bicameral::sim {
     }
 
     LabRecording LabSession::Recording() const {
-        return {.tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
+        return {.tableVersion = m_tableVersion, .tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
+    }
+
+    // --- 反応表の差し替え(T-0194)---
+
+    std::expected<void, std::string> LabSession::ChangeTable(const BakedReactionTable& table, uint64_t tableVersion) {
+        // 箱のキューは刻みごとに待っていて空なので、前の表のバッファはすぐ捨ててよい
+        if (auto retired = m_box.ReplaceTable(table); !retired)
+            return std::unexpected(retired.error());
+
+        m_table = table;
+        m_tableVersion = tableVersion;
+
+        // --- 今までの操作を、初めの箱から新しい表で同じ刻みまで(置いてまだ刻んでいない操作は後で戻す。
+        //     再生の途中なら、残りの記録のコマンドも続けて流れる。記録のハッシュとはもう比べない)---
+        const uint64_t tickCount = m_tick;
+        std::vector<Command> history = std::move(m_history);
+        history.insert(history.end(), m_scheduled.begin(), m_scheduled.end());
+        std::vector<Command> pending = std::move(m_pending);
+        if (auto reset = Reset(); !reset)
+            return reset;
+
+        m_scheduled = std::move(history);
+        for (const Command& command : m_scheduled)
+            m_sequence = std::max(m_sequence, command.sequence + 1);
+
+        auto stepped = Step(static_cast<uint32_t>(tickCount));
+        for (const Command& command : pending)
+            m_sequence = std::max(m_sequence, command.sequence + 1);
+
+        m_pending = std::move(pending);
+
+        return stepped;
     }
 
 }  // namespace bicameral::sim

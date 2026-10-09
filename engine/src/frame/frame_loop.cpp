@@ -964,6 +964,12 @@ namespace bicameral::frame {
             }
 
             m_frameTableSwaps = std::move(*swaps);
+
+            // 覗き窓も同じ表へ(世界がその刻みを過ぎた境界を抽出する時に替える。T-0194)
+            for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
+                if (swap.table != nullptr)
+                    m_peek.QueueTableSwap(swap.tick, *swap.table);
+            }
         }
 
         std::vector<sim::ProbeCommand> FrameLoop::TakeClickCommands(uint64_t applyTick, uint32_t limit) {
@@ -1188,8 +1194,15 @@ namespace bicameral::frame {
         // パネルを作り、押された時間の操作を受ける(--auto-time の操作もここで入れる)
         void FrameLoop::BuildEditor() {
             editor::TimeRequest request;
-            if (m_editor)
+            if (m_editor) {
+                // 実験室は世界と同じ表(差し替えたら箱も替える。T-0194)
+                if (const auto loaded = m_tableReload.Find(m_tableReload.AppliedVersion()); loaded != nullptr) {
+                    m_editor->Lab().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
+                                             loaded->tableVersion);
+                }
+
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
+            }
 
             if (m_options.autoTime) {
                 CheckAutoTime();

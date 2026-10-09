@@ -9,7 +9,6 @@
 #include <imgui.h>
 
 #include "core/log.h"
-#include "sim/reaction_test_table.h"
 
 namespace bicameral::editor {
 
@@ -48,19 +47,38 @@ namespace bicameral::editor {
             static_cast<void>(device->QueryInterface(IID_PPV_ARGS(&m_device)));
     }
 
+    void LabPanel::UseTable(std::shared_ptr<const sim::BakedReactionTable> table, uint64_t version) {
+        if (table == nullptr || (m_table != nullptr && version == m_tableVersion))
+            return;
+
+        m_table = std::move(table);
+        m_tableVersion = version;
+        if (!m_session)
+            return;
+
+        // --- 箱があれば、新しい表で同じ操作を流し直す ---
+        const uint64_t tick = m_session->NextTick();
+        Report(m_session->ChangeTable(*m_table, m_tableVersion));
+        m_materials = sim::MakeLabMaterials(m_session->Table());
+        m_tableChanges += 1;
+        m_message = std::format("反応表が版 {:016x} に替わった。置いた操作を初めから新しい表で流し直した(刻み {} まで)",
+                                m_tableVersion, tick);
+        Log(Channel::Sim, Level::Info, "実験室: {}", m_message);
+    }
+
     bool LabPanel::CreateSession() {
-        const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
-        if (!table) {
-            m_error = table.error();
+        if (m_table == nullptr) {
+            m_error = "反応表がまだ無い";
             return false;
         }
 
+        const sim::BakedReactionTable& table = *m_table;
         if (!m_device) {
             m_error = "ID3D12Device5 が無い";
             return false;
         }
 
-        auto session = sim::LabSession::Create(m_device.Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, *table);
+        auto session = sim::LabSession::Create(m_device.Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, table, m_tableVersion);
         if (!session) {
             m_error = session.error();
             return false;
@@ -98,7 +116,7 @@ namespace bicameral::editor {
         if (!m_session) {
             ImGui::TextUnformatted(
                 "小さな箱(8³ セル・0.5 m 角・300 K の空気)に物を置いて反応を試し、\n"
-                "GPU と CPU リファレンスを刻みごとに比べる(試験の表: 燃焼・熱分解)");
+                "GPU と CPU リファレンスを刻みごとに比べる(反応表は世界と同じ)");
             if (ImGui::Button("箱を作る"))
                 static_cast<void>(CreateSession());
 
@@ -123,6 +141,8 @@ namespace bicameral::editor {
     void LabPanel::BuildStatus() {
         ImGui::Text("次の刻み %llu ・ 置いて待っているコマンド %zu",
                     static_cast<unsigned long long>(m_session->NextTick()), m_session->PendingCommands());
+        ImGui::Text("反応表 版 %016llx(世界と同じ。替わった回数 %u)",
+                    static_cast<unsigned long long>(m_session->TableVersion()), m_tableChanges);
         if (const auto& mismatch = m_session->Mismatch(); mismatch) {
             ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, "GPU と CPU が食い違った: %s", mismatch->what.c_str());
             if (mismatch->cell != lab::LAB_NO_CELL) {

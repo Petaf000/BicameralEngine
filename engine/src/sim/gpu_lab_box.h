@@ -12,6 +12,7 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "gpu/com_ptr.h"
 #include "sim/command.h"
@@ -31,6 +32,12 @@ namespace bicameral::sim {
         // 刻み tick: コマンド(LAB_MAX_COMMANDS_PER_TICK まで。(targetTick, sequence) の昇順)を当てて、1 刻み
         [[nodiscard]] bool RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                       uint64_t tick, std::span<const Command> commands);
+
+        // 反応表を替える(T-0194。GpuMultires::ReplaceTable。返す前の表は、それを読んだリストが終わるまで呼ぶ側が持つ)
+        [[nodiscard]] std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> ReplaceTable(
+            const BakedReactionTable& table) {
+            return m_nest.ReplaceTable(table);
+        }
 
         void RecordReadback(ID3D12GraphicsCommandList10* list) { m_nest.RecordReadback(list); }
         [[nodiscard]] bool Read(MultiresNest& nest) const { return m_nest.Read(nest); }

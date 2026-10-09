@@ -113,6 +113,13 @@ namespace bicameral::sim {
                                     ID3D12PipelineState* pipeline, uint32_t groupCount,
                                     const std::array<uint32_t, 4>& external);
         [[nodiscard]] ID3D12RootSignature* RootSignature() const { return m_rootSignature.Get(); }
+
+        // --- 反応表の差し替え(T-0194。ADR-0047 の続き)---
+        // 次に記録するリストから table を使う(新しいアップロードのバッファに写し、ルートの結び先を替える)。物質の一覧は今の表と同じこと
+        // (セルの物質 ID の意味が変わらない。script::CheckHotReloadCompatible)。返すのは前の表のバッファで、それを読んだリストが
+        // GPU で終わるまで呼ぶ側が持つ。作れなければ今の表のまま空を返す
+        [[nodiscard]] std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> ReplaceTable(
+            const BakedReactionTable& table);
         [[nodiscard]] uint32_t BlockCapacity() const { return m_blockCapacity; }
 
         static constexpr uint32_t REQUEST_UPLOAD_SLOTS = 16;

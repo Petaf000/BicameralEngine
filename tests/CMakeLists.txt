@@ -305,6 +305,8 @@ bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_peek_warp gpu_probe_peek_test warp --warp)
+# 3 回走らせる(覗く・覗かない・表の差し替え。T-0194)。debug で Multires のグラフの作成が並走中は 1 回数分
+set_tests_properties(gpu_probe_peek gpu_probe_peek_warp PROPERTIES TIMEOUT 900)
 # 木箱に火をつける(T-0089): 刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる。
 # ctest(debug・GBV)は 1 分(3600 刻み)。10 分(36,000 刻み)は release で: job.py run -Preset release -Exe gpu_probe_fire_test
 bicameral_add_gpu_test(gpu_probe_fire_test)

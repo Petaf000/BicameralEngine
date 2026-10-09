@@ -101,7 +101,9 @@ namespace bicameral::sim {
 
     // --- 実験の記録(コマンドの列 + 刻みごとの状態のハッシュ)---
 
+    // 版 2(T-0194)から、実験に使った反応表の版(script::TableVersion)を持つ。0 = 分からない(版 1 の記録・試験の表)
     struct LabRecording {
+        uint64_t tableVersion = 0;
         uint64_t tickCount = 0;         // 流した刻みの数(刻み 0 〜 tickCount − 1)
         std::vector<Command> commands;  // (targetTick, sequence) の昇順
         std::vector<uint64_t> hashes;   // 刻み t を終えた状態の HashWholeNest(CPU)。tickCount 個

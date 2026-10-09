@@ -2,7 +2,11 @@
 // (shaders/sim/multires_peek.hlsl)を足して記録する。CPU リファレンスは同じ順で sim/multires_nest の関数を呼ぶ。
 #include "sim/probe_peek.h"
 
+#include <algorithm>
+
 #include "common/probe_world.hlsli"
+#include "core/aliases.h"
+#include "core/log.h"
 #include "gpu/resources.h"
 
 using namespace bicameral::multires;
@@ -47,11 +51,13 @@ namespace bicameral::sim {
     PeekState::Plan PeekState::NextPlan(uint64_t tick) {
         Plan plan;
 
-        // --- やめた・移った: 前の影の鎖を捨てる ---
-        if (m_hasActive && (!m_hasRequest || m_active != m_requested)) {
+        // --- やめた・移った・表が変わった: 前の影の鎖を捨てる ---
+        if (m_hasActive && (!m_hasRequest || m_active != m_requested || m_tableChanged)) {
             plan.removeShadow = true;
             m_hasActive = false;
         }
+
+        m_tableChanged = false;
 
         if (!m_hasRequest)
             return plan;
@@ -113,6 +119,7 @@ namespace bicameral::sim {
         }
 
         m_nest.SetExternalViews(context.cells->GetGPUVirtualAddress(), context.extraction->GetGPUVirtualAddress());
+        ApplyDueTables(context);
 
         const PeekState::Plan plan = m_state.NextPlan(context.tick);
         if (plan.removeShadow)
@@ -144,6 +151,27 @@ namespace bicameral::sim {
                                       PEEK_LEVEL_COUNT * MR_BLOCK_CELLS / PEEK_GROUP_THREADS, extractConstants);
     }
 
+    // 世界が抽出した境界より前に替えた表を当てる(いちばん新しいものだけが残る)。前の表のバッファは、それを読んだ前のリストが
+    // 終わるまで持つ(このリストの keepAlive。キューは順に終わる)
+    void ProbePeek::ApplyDueTables(const ProbeExtractContext& context) {
+        rng::stable_sort(m_pendingTables, {}, &PendingTable::tick);
+        while (!m_pendingTables.empty() && m_pendingTables.front().tick < context.tick) {
+            const PendingTable& pending = m_pendingTables.front();
+            auto retired = m_nest.ReplaceTable(pending.table);
+            if (retired && context.keepAlive != nullptr)
+                context.keepAlive->insert(context.keepAlive->end(), retired->begin(), retired->end());
+
+            if (retired) {
+                m_viewSpecies = ProbeViewSpecies(pending.table);
+                m_state.TableChanged();
+            } else {
+                Log(Channel::Sim, Level::Error, "覗き窓の反応表を替えられない: {}", retired.error());
+            }
+
+            m_pendingTables.erase(m_pendingTables.begin());
+        }
+    }
+
     // --- CPU リファレンス ---
 
     ProbePeekReference::ProbePeekReference(const BakedReactionTable& table)
@@ -151,6 +179,16 @@ namespace bicameral::sim {
 
     void ProbePeekReference::Advance(std::span<const RxCell> world, uint64_t tick) {
         FX_ASSERT(world.size() == PROBE_CELL_COUNT);
+
+        // --- ProbePeek::ApplyDueTables と同じ ---
+        rng::stable_sort(m_pendingTables, {}, &PendingTable::tick);
+        while (!m_pendingTables.empty() && m_pendingTables.front().tick < tick) {
+            m_table = m_pendingTables.front().table;
+            m_viewSpecies = ProbeViewSpecies(*m_table);
+            m_state.TableChanged();
+            m_pendingTables.erase(m_pendingTables.begin());
+        }
+
         const PeekState::Plan plan = m_state.NextPlan(tick);
         if (plan.removeShadow)
             RemoveShadowChain(m_nest, PEEK_FIRST_SHADOW_SLOT, PEEK_LEVEL_COUNT);
