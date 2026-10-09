@@ -32,7 +32,10 @@
 - 2026-10-09(作業役・wt3・ブランチ t-0194): GpuMultires に表の持ち替えを足し、覗き窓は「表が替わったら影を作り直す」、実験室は
   「操作を初めから新しい表で流し直す」にした(ADR-0054)。実験室は世界の表を使う(T-0172 の内容)。debug のビルドは警告なし。
   debug で `^(reaction_hot_reload|lab_box|gpu_lab_box|window_lab|window_hot_reload_*)$` が通過。gpu_probe_peek は 3 回目(差し替え)の
-  Multires のグラフの作成が並走の負荷で 170 秒かかり 300 秒の上限を超えた(覗く・覗かないの 2 回は CPU と一致)→ TIMEOUT 900 にして流し直した(下の結果)。
+  Multires のグラフの作成が並走の負荷で 170 秒かかり 300 秒の上限を超えた(覗く・覗かないの 2 回は CPU と一致)→ TIMEOUT 900 にして流し直した: debug の gpu_probe_peek が 118 秒で通過。
+  release のビルドは警告なし。release で `^(lab_box|gpu_lab_box|gpu_probe_peek|gpu_probe_sim|window_replay_record|window_replay_peek|
+  window_replay_no_packages|window_hot_reload_copy|window_hot_reload_record|window_hot_reload_play)$` の 10 本が通過。
+  main(66bab6b)は動いておらず、rebase は何もしなかった。tidy・ほかの GPU のテストは流していない。かかった時間 約 1 時間 50 分(T-0195 と合わせて)。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - 動いているもの: `--editor` で反応表を保存すると、世界・覗き窓(P)・実験室が同じ表になる。実験室は箱があれば同じ操作を新しい表で流し直す

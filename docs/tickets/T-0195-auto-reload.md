@@ -25,7 +25,7 @@
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-09(作業役・wt3・ブランチ t-0194): AutoReload を足し、ctest を 3 本足した。debug で window_hot_reload_copy・_record(104 秒)・
-  _play(121 秒)が 1 回目で通過。
+  _play(121 秒)が 1 回目で通過。release でも 3 本が通過(_record 38 秒・_play 51 秒)。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - 動いているもの: `bicameral --editor --auto-reload --packages <写し> --record <file>`。確認: `-Filter "^window_hot_reload"`(3 本・約 4 分)。
