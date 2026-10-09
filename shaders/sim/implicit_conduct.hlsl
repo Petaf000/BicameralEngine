@@ -11,6 +11,7 @@
 // 長い行の節(隣が多い節。違うレベルの面の粗い側・粗い段)を 1 グループ = 1 節で、隣をグループのスレッドで分けて足す(T-0120)。
 // 整数の和なので足す順によらず同じ値(04 R1)。段の形・長い行の節の一覧・Dispatch の大きさは GPU のバッファ(u9・u10)から読む(T-0136)。
 // 定数の段(g_depth)は記録の上限(g_dispatchLevels)まで積み、その段が無い・下りが止まった段より下なら Dispatch の引数が 0 になる。
+// 記録の形(段ごとに積む段の数・最も粗い段の掃き出し)は刻みごとに CPU が選ぶ(GpuImplicitRecordShape。T-0154)。形を変えても値は同じで、費用だけが変わる。
 #include "common/implicit_conduction.hlsli"
 
 // --- 結び付け(gpu_implicit.cpp の ROOT_LAYOUT と同じ順)---
@@ -47,7 +48,8 @@ cbuffer ImConstants : register(b0) {
     uint32_t g_tailMaxLinks;
     uint32_t g_coarsestTailMaxNodes;
     uint32_t g_maxLevels;  // 段の上限(ImPlanLevels のグループの数)
-    uint32_t g_unused0;
+    uint32_t
+        g_coarsestDispatch;  // 0 なら最も粗い段の掃き出しの Dispatch を積んでいない(いつも ImTail が受け持つ。T-0154)
     uint32_t g_unused1;
     uint32_t g_sweeps;  // 掃き出しの回数: 前 | 後 << 8 | 最も粗い段 << 16
 };
@@ -649,13 +651,22 @@ bool SmallLevel(uint32_t depth) {
 }
 
 // ImTail が受け持つ最初の段: そこから最も粗い段まで、どの段も節が tailMaxNodes 以下で隣が tailMaxLinks 以下。無くても最も粗い段の節が
-// coarsestTailMaxNodes 以下ならその段から(T-0120)。段ごとの Dispatch を積んだ段(g_dispatchLevels)より深くは下りない(そこから先は ImTail)
-uint32_t PlanTailDepth(uint32_t levels) {
+// coarsestTailMaxNodes 以下ならその段から(T-0120)。記録の形で切る前の値
+uint32_t WantedTailDepth(uint32_t levels) {
     uint32_t tail = levels;
     while (tail > 0 && SmallLevel(tail - 1))
         --tail;
 
     if (tail == levels && NodeCount(levels - 1) <= g_coarsestTailMaxNodes)
+        tail = levels - 1;
+
+    return tail;
+}
+
+// 記録の形で切る: 最も粗い段の掃き出しを積んでいなければ ImTail が最も粗い段を受け持ち、積んだ段より深くは下りない(T-0154。値は同じ)
+uint32_t PlanTailDepth(uint32_t levels, uint32_t wanted) {
+    uint32_t tail = wanted;
+    if (g_coarsestDispatch == 0 && tail == levels)
         tail = levels - 1;
 
     if (min(tail, levels - 1) >= g_dispatchLevels)
@@ -667,11 +678,13 @@ uint32_t PlanTailDepth(uint32_t levels) {
 // 1 スレッド: ImTail の境と、記録した全部の間接の Dispatch の引数(要らない段は 0 グループ)
 [numthreads(1, 1, 1)] void ImPlanArgs() {
     const uint32_t levels = LevelCount();
-    const uint32_t tail = levels == 0 ? 0 : PlanTailDepth(levels);
+    const uint32_t wanted = levels == 0 ? 0 : WantedTailDepth(levels);
+    const uint32_t tail = levels == 0 ? 0 : PlanTailDepth(levels, wanted);
     const uint32_t terminal = levels == 0 ? 0 : min(tail, levels - 1);
     const bool useTail = tail < levels;
     g_plan[IM_PLAN_TAIL] = tail;
     g_plan[IM_PLAN_TERMINAL] = terminal;
+    g_plan[IM_PLAN_WANTED_TAIL] = wanted;
 
     WriteArgs(IM_SLOT_CELLS, ShortGroups(CellCount()));
     WriteArgs(IM_SLOT_FACES, ShortGroups(FaceCount()));
