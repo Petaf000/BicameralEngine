@@ -54,9 +54,11 @@ namespace bicameral::sim {
 
         // 枠 slot のセル index の 6 面。細かい側の面(相手が計算する)・外(断熱)・凍らせたブロックとの面は流れない
         CellFaces CollectCellFaces(const MultiresNest& nest, CellThermals& thermals, uint32_t slot, uint32_t index,
-                                   std::span<const uint8_t> frozen, const MultiresStepOptions& options) {
+                                   std::span<const uint8_t> frozen, std::span<const uint8_t> implicitBlocks,
+                                   const MultiresStepOptions& options) {
             const CpuTree tree{.nest = &nest};
             const MrBlock& block = nest.blocks[slot];
+            const bool joinsImplicit = slot < nest.capacity.worldBlocks && block.kind == MR_BLOCK_REAL;
             const MrThermal self = thermals.At(slot, index);
             const uint32_t shift = SubcycleShift(options, block.level);
 
@@ -68,6 +70,11 @@ namespace bicameral::sim {
                     continue;
 
                 if (IsFrozen(frozen, neighbor.slot))
+                    continue;
+
+                // 陰解法で解くブロックとの同じレベルの面は、こちらのセルが境のセルとして陰解法の系で受ける(T-0178。上限で選ばれなかった側)
+                if (neighbor.kind == MR_NEIGHBOR_SAME && joinsImplicit &&
+                    nest_detail::IsImplicitBlock(implicitBlocks, neighbor.slot))
                     continue;
 
                 const MrThermal other = thermals.At(neighbor.slot, neighbor.index);
@@ -134,7 +141,7 @@ namespace bicameral::sim {
                 if (!MrIsSteppedCell(nest.blocks[slot], index) || (uniform && !OnBlockSurface(index)))
                     continue;
 
-                const CellFaces faces = CollectCellFaces(nest, thermals, slot, index, {}, options);
+                const CellFaces faces = CollectCellFaces(nest, thermals, slot, index, {}, {}, options);
                 const bool sends = MarkCrossSends(nest, faces, wantsFraction);
                 flows = flows || sends || faces.sameLevelOutflow != 0;
             }
@@ -165,9 +172,9 @@ namespace bicameral::sim {
 
         // セル 1 つの面の流れを変化の表に足す(自分と、粗い側へ送った先)
         void AddCellFlows(const MultiresNest& nest, CellThermals& thermals, uint32_t slot, uint32_t index,
-                          std::span<const uint8_t> frozen, const MultiresStepOptions& options,
-                          std::span<MrEnergyDelta> deltas) {
-            const CellFaces faces = CollectCellFaces(nest, thermals, slot, index, frozen, options);
+                          std::span<const uint8_t> frozen, std::span<const uint8_t> implicitBlocks,
+                          const MultiresStepOptions& options, std::span<MrEnergyDelta> deltas) {
+            const CellFaces faces = CollectCellFaces(nest, thermals, slot, index, frozen, implicitBlocks, options);
             MrEnergyDelta own = MrMakeEnergyDelta();
             own.whole = -faces.sameLevelOutflow;
             for (uint32_t i = 0; i < faces.crossCount; ++i) {
@@ -282,19 +289,20 @@ namespace bicameral::sim {
 
         void ComputeConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> stepped,
                                std::span<const uint8_t> frozen, std::span<const uint8_t> wantsFraction,
-                               const MultiresStepOptions& options, std::span<MrEnergyDelta> deltas) {
+                               std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
+                               std::span<MrEnergyDelta> deltas) {
             AllocateConductionFractions(nest, frozen, wantsFraction);
 
             // --- 刻む頁のブロック(凍らせたものを除く)のセルの面の流れ ---
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
                 const MrBlock& block = nest.blocks[slot];
                 if (!IsSteppedSlot(stepped, slot) || IsFrozen(frozen, slot) || MrIsUniform(block) ||
-                    InImplicitConduction(nest, slot, options))
+                    IsImplicitBlock(implicitBlocks, slot))
                     continue;
 
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     if (MrIsSteppedCell(block, index))
-                        AddCellFlows(nest, thermals, slot, index, frozen, options, deltas);
+                        AddCellFlows(nest, thermals, slot, index, frozen, implicitBlocks, options, deltas);
                 }
             }
         }
@@ -313,10 +321,11 @@ namespace bicameral::sim {
                 MarkSubstepBlocks(nest, stepped, substep, options, active);
                 const std::vector<uint8_t> wantsFraction = MarkConductionWants(nest, thermals, active, options);
                 const std::vector<uint8_t> frozen = ExpandForStep(nest, results);
-                ComputeConduction(nest, thermals, active, frozen, wantsFraction, options, deltas);
+                const std::vector<uint8_t> implicitBlocks = MarkImplicitBlocks(nest, thermals, frozen, options);
+                ComputeConduction(nest, thermals, active, frozen, wantsFraction, implicitBlocks, options, deltas);
                 if (substep + 1 == substeps) {
                     if (options.implicitConduction)
-                        AddImplicitConduction(nest, thermals, frozen, options, deltas);
+                        AddImplicitConduction(nest, thermals, frozen, implicitBlocks, options, deltas);
 
                     return deltas;
                 }

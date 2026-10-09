@@ -53,8 +53,14 @@ namespace bicameral::sim {
 
         // 系を作る。木は multires のバッファ(呼ぶ側が写すか刻んである)。凍った印(TreeExpand が付ける)を見るのは useFrozenMarks の時だけ
         // (見る時は multires の刻みの印〔SetTick〕がその刻みのものであること。T-0132)
+        // afterAdmit: 同じ刻みに RecordAdmit を投げてある(Clear〜ScanBlocks を飛ばす。useFrozenMarks の時だけ)
         void RecordBuild(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
-                         const MultiresStepOptions& options, bool useFrozenMarks = false);
+                         const MultiresStepOptions& options, bool useFrozenMarks = false, bool afterAdmit = false);
+
+        // 伝導の段の流れの前(T-0178): Clear → CountBlocks → ScanBlocks で、系に入れるブロックを枠の順に上限(作った時の limits =
+        // 予算)の中まで選び、陰解法の印を付ける。凍った印を見る。同じ刻みの後で RecordBuild(…, true, true)
+        void RecordAdmit(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
+                         const MultiresStepOptions& options);
 
         // GpuImplicit が解いたセル(solvedCells = GpuImplicit::CellsBuffer。UAV の状態)の「足した後 − 刻みの初め」を multires の伝導の
         // 変化の表へ足し、活性の刻みならそのブロックを伝導の一覧へ(T-0132。RecordBuild と同じ刻みの印・定数で、伝導の段の流れの後に)
@@ -86,6 +92,10 @@ namespace bicameral::sim {
     private:
         GpuImplicitBuild() = default;
 
+        // implicit_build.hlsl の段 [firstPass, endPass) を投げる
+        void RecordPasses(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
+                          const MultiresStepOptions& options, bool useFrozenMarks, uint32_t firstPass,
+                          uint32_t endPass);
         [[nodiscard]] std::array<uint32_t, 4> ExternalConstants(const MultiresStepOptions& options,
                                                                 bool useFrozenMarks) const;
 

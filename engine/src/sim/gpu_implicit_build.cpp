@@ -201,7 +201,21 @@ namespace bicameral::sim {
     }
 
     void GpuImplicitBuild::RecordBuild(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                       GpuMultires& multires, const MultiresStepOptions& options, bool useFrozenMarks) {
+                                       GpuMultires& multires, const MultiresStepOptions& options, bool useFrozenMarks,
+                                       bool afterAdmit) {
+        FX_ASSERT(!afterAdmit || useFrozenMarks);
+        RecordPasses(list, debugRing, multires, options, useFrozenMarks, afterAdmit ? PassNumberUnknowns : PassClear,
+                     PassCount);
+    }
+
+    void GpuImplicitBuild::RecordAdmit(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       GpuMultires& multires, const MultiresStepOptions& options) {
+        RecordPasses(list, debugRing, multires, options, true, PassClear, PassNumberUnknowns);
+    }
+
+    void GpuImplicitBuild::RecordPasses(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                        GpuMultires& multires, const MultiresStepOptions& options, bool useFrozenMarks,
+                                        uint32_t firstPass, uint32_t endPass) {
         const std::array<uint32_t, 4> external = ExternalConstants(options, useFrozenMarks);
 
         // --- 段ごとのグループの数(数は GPU が決めるので上限から。超えたグループは何もしない)---
@@ -228,14 +242,14 @@ namespace bicameral::sim {
                                                         Groups(2 * entries)};
 
         multires.SetExternalViews(m_work->GetGPUVirtualAddress(), m_system->GetGPUVirtualAddress());
-        for (uint32_t pass = 0; pass < PassCount; ++pass) {
+        for (uint32_t pass = firstPass; pass < endPass; ++pass) {
             if (m_stampPasses)
                 RecordTimestamp(list, pass);
 
             multires.RecordExternalDispatch(list, debugRing, m_pipelines[pass].Get(), groups[pass], external);
         }
 
-        if (m_stampPasses)
+        if (m_stampPasses && endPass == PassCount)
             RecordTimestamp(list, PassCount);
 
         multires.SetExternalViews(0, 0);

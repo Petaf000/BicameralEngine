@@ -363,7 +363,9 @@ namespace {
             const sim::GpuImplicitLevelImages images = sim::MakeGpuImplicitLevelImages(tick.grid);
             limits.nodes = std::max(
                 {limits.nodes, images.levelOffsets.back(), static_cast<uint32_t>(tick.grid.cells.size())});
-            limits.links = std::max(limits.links, static_cast<uint32_t>(images.links.size()));
+            // 隣は「今までの和 + 最後の段の隣」で次の段を見込む(T-0178)ので、最も大きい段 0(面 × 2)の分を足しておく
+            limits.links = std::max(limits.links,
+                                    static_cast<uint32_t>(images.links.size() + (2 * tick.grid.faces.size())));
         }
 
         return limits;

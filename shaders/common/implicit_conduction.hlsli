@@ -21,6 +21,15 @@ FX_CONST uint32_t IM_CORRECTION_SCALE_SHIFT = 8;               // 多重格子�
 FX_CONST int64_t IM_EXCESS_CAP = (int64_t)FX_U64(0x100u, 0u);  // 範囲を超えた量の記録の上限(2^40)
 FX_CONST int64_t IM_INT64_MAX = (int64_t)FX_U64(0x7FFFFFFFu, 0xFFFFFFFFu);
 FX_CONST int64_t IM_INT64_MIN = (int64_t)FX_U64(0x80000000u, 0u);
+FX_CONST uint32_t IM_BLOCK_SURFACE_FACES = 384;  // ブロックの外へ出る面の数(6 面 × 8 × 8)
+
+// 系に入れるブロック 1 つが増やしうるセルの数の上限(T-0178。CPU の MarkImplicitBlocks と GPU の BuildScanBlocks):
+// 未知数 + 境のセル。境のセルはブロックの外のセルで、ブロックの外へ出る面からしか届かないので、面の数(未知数 × 6 と 384 の小さい方)を超えない
+FX_FN uint32_t ImBlockCellBound(uint32_t unknowns) {
+    const uint32_t faces = unknowns * 6u;
+
+    return unknowns + (faces < IM_BLOCK_SURFACE_FACES ? faces : IM_BLOCK_SURFACE_FACES);
+}
 
 // --- GPU のバッファの形(C++ と同じ並び。64bit の欄を先に置き、大きさは 8 の倍数)-----------------------------
 struct ImGpuCell {

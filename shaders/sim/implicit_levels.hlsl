@@ -518,10 +518,11 @@ void RoundParentScanGroups() {
     if (coarseCount == fineCount)
         return;
 
-    if (offset + coarseCount > g_maxNodes) {
-        MarkOverflow();
+    // 上限に入らない段は作らずに止める(T-0178。CPU の BuildImplicitGrid の limits と同じ判定。次の段の隣は段 d の隣より多くならないので、
+    // 隣は段 d の数で見込む。段 0 は系を作る段が予算の中に収める)
+    const uint32_t links = LinkOffset(s_depth) + 2 * LinkCount(s_depth);
+    if (offset + coarseCount > g_maxNodes || links > g_maxLinks)
         return;
-    }
 
     Store(DepthWord(LV_NODE_OFFSET, s_depth + 1), offset);
     Store(DepthWord(LV_NODE_COUNT, s_depth + 1), coarseCount);

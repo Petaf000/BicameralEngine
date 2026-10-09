@@ -892,7 +892,7 @@ namespace bicameral::sim {
         const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
         for (uint32_t substep = 0; substep < substeps; ++substep) {
             m_constants.stepFlags = SubcycleFlags(flags, options, substep);
-            RecordConductSubstep(list, debugRing);
+            RecordConductSubstep(list, debugRing, options);
             if (substep + 1 < substeps)
                 RecordSubstepEnd(list, debugRing, wakeList);
         }
@@ -918,12 +918,16 @@ namespace bicameral::sim {
         m_implicit->Record(list, debugRing, *this, options);
     }
 
-    // 小刻み 1 回: 印 → 頁 → 端数の枠 → 埋める → 流れ(その小刻みに始まるレベルのブロックだけ)
-    void GpuMultires::RecordConductSubstep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+    // 小刻み 1 回: 印 → 頁 → 端数の枠 → 埋める →(陰解法の刻みなら系に入れるブロックを選ぶ。T-0178)→ 流れ(その小刻みに始まるレベルのブロックだけ)
+    void GpuMultires::RecordConductSubstep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                           const MultiresStepOptions& options) {
         RecordConductPass(list, debugRing, ConductPassMark, std::max(1u, m_blockCapacity));
         RecordTreePass(list, debugRing, PassExpand, 1);
         RecordTreePass(list, debugRing, PassFractions, 1);
         RecordConductStage(list, debugRing, ConductPassPrepare);
+        if ((m_constants.stepFlags & STEP_FLAG_IMPLICIT) != 0 && m_implicit != nullptr)
+            m_implicit->RecordAdmit(list, debugRing, *this, options);
+
         RecordConductStage(list, debugRing, ConductPassFlows);
     }
 

@@ -137,16 +137,25 @@ namespace bicameral::sim::nest_detail {
 
     // 端数が要るブロックに端数の枠を枠の順に配り(足りなければ数える)、刻むブロック(凍らせたものを除く)のセルの面の流れを
     // 頁のセルの添字(PageCellAddress)ごとの変化 deltas に足す。凍らせたブロックとの面は流れない
+    // implicitBlocks = MarkImplicitBlocks の印(陰解法で解くブロックは流れを計算せず、それと同じレベルの面も計算しない。T-0178)
     void ComputeConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> stepped,
                            std::span<const uint8_t> frozen, std::span<const uint8_t> wantsFraction,
-                           const MultiresStepOptions& options, std::span<multires::MrEnergyDelta> deltas);
+                           std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
+                           std::span<multires::MrEnergyDelta> deltas);
 
     // 細かいレベルの熱の陰解法(T-0119。multires_implicit_conduction.cpp): 流れを計算する側が基準より細かい面を全部、陰解法の 1 刻みで解き、
     // 変化を deltas に足す(端数の枠は ComputeConduction が配った後)。陰解法の系に入れるブロックか(陽解法はそのブロックの面を計算しない)
     [[nodiscard]] bool InImplicitConduction(const MultiresNest& nest, uint32_t slot,
                                             const MultiresStepOptions& options);
+    // この刻みに陰解法の系に入れるブロックの印(枠ごとの 0 / 1。T-0178): 入れられる(頁があり凍っていない)基準より細かいブロックを
+    // 枠の順に、系の大きさが options.implicitLimits の予算に入る所まで。入らなかったブロックはこの刻み陽解法(Q22 の案 A)
+    [[nodiscard]] std::vector<uint8_t> MarkImplicitBlocks(MultiresNest& nest, CellThermals& thermals,
+                                                          std::span<const uint8_t> frozen,
+                                                          const MultiresStepOptions& options);
+    [[nodiscard]] bool IsImplicitBlock(std::span<const uint8_t> implicitBlocks, uint32_t slot);
     void AddImplicitConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
-                               const MultiresStepOptions& options, std::span<multires::MrEnergyDelta> deltas);
+                               std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
+                               std::span<multires::MrEnergyDelta> deltas);
 
     // 伝導の小刻み(T-0108)を最後の 1 回の手前まで進め、最後の小刻みの変化を返す(呼ぶ側が反応と一緒に足す。分けない時は T-0019 と同じ順)。
     // 途中で変化を足したブロックは results の changed に、頁に広げたブロックは expanded に書く(multires_conduction.cpp)

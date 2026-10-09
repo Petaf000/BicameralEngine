@@ -17,6 +17,12 @@
 //     (たくさんの要求の場面の深さ 26 段で、毎刻み 64 回・14 万セル。T-0119 の計測)。そこの陽解法の面は、陰解法の系のセルにも
 //     刻みの初めの温度から流れを足す(境の面の逆向き)
 //   - 影のブロック(覗き窓)は陽解法のまま(中間のセルも刻むので、多重格子の親と重なる。T-0128)
+//   - 系の大きさの上限(T-0178。options.implicitLimits。GPU では VRAM に先に取る大きさ): 流れの段の前に MarkImplicitBlocks が、
+//     入れられるブロックを枠の順に「未知数・セルの上限の見込み(ImBlockCellBound)の和」が予算(MakeMultiresImplicitBudget)に入る所まで選ぶ。
+//     選ばれなかったブロックはその刻みだけ陽解法(頭打ち)のまま(QUESTIONS Q22 の案 A。仮〔ユーザー未確認〕)。選ばれたブロックとの
+//     同じレベルの面は、選ばれなかった側が境のセルとしてこの系で受ける(陽解法の側は計算しない。multires_conduction.cpp の CollectCellFaces)。
+//     粗い側・細かい側の面は、今までの境のセル・Δk > implicitMaxGap と同じ形。多重格子の 2 段目からの節・隣が上限に入らなければ、
+//     その段を作らずに縮約を止める(BuildImplicitGrid の limits。反復は遅くなりうるが、保存と安全網は同じ)
 //   - 保存は面ごとに 1 つの値(ADR-0017 の形)なのでビット単位。端数の枠が無い粗い側へは整数の単位の倍数だけ送る
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
@@ -131,13 +137,13 @@ namespace bicameral::sim {
             }
         }
 
-        // 系を作る: まず未知数のセルを枠の順に全部足し(番号を先に決める)、次にその面と境のセル
+        // 系を作る: まず未知数のセル(MarkImplicitBlocks が選んだブロック)を枠の順に全部足し(番号を先に決める)、次にその面と境のセル
         ImplicitSystem MakeSystem(const MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
-                                  const MultiresStepOptions& options) {
+                                  std::span<const uint8_t> implicitBlocks) {
             ImplicitSystem system;
             system.ids.assign(nest.blocks.size() * MR_BLOCK_CELLS, NOT_IN_SYSTEM);
             for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
-                if (!CanJoin(nest, frozen, slot) || !nest_detail::InImplicitConduction(nest, slot, options))
+                if (!CanJoin(nest, frozen, slot) || !nest_detail::IsImplicitBlock(implicitBlocks, slot))
                     continue;
 
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
@@ -175,6 +181,17 @@ namespace bicameral::sim {
             nest.implicitFrozen.assign(frozen.begin(), frozen.end());
         }
 
+        // ブロックの未知数のセルの数(刻むセルで熱容量のあるもの。AddCell が足すものと同じ)
+        uint32_t CountUnknowns(const MultiresNest& nest, CellThermals& thermals, uint32_t slot) {
+            uint32_t count = 0;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (MrIsSteppedCell(nest.blocks[slot], index) && thermals.At(slot, index).capacityLimit != 0)
+                    ++count;
+            }
+
+            return count;
+        }
+
         // 選んだ形(ADR-0019): V(2,2)・新しい温度の誤差の見込み 1 mK で止める
         ImplicitOptions MakeImplicitOptions(const MultiresStepOptions& options) {
             ImplicitOptions implicit;
@@ -198,14 +215,49 @@ namespace bicameral::sim {
                    block.level > options.subcycleBaseLevel && block.level <= finest;
         }
 
+        bool IsImplicitBlock(std::span<const uint8_t> implicitBlocks, uint32_t slot) {
+            return slot < implicitBlocks.size() && implicitBlocks[slot] != 0;
+        }
+
+        std::vector<uint8_t> MarkImplicitBlocks(MultiresNest& nest, CellThermals& thermals,
+                                                std::span<const uint8_t> frozen, const MultiresStepOptions& options) {
+            std::vector<uint8_t> marks(nest.blocks.size(), 0);
+            nest.implicitDeferredBlocks = 0;
+            if (!options.implicitConduction)
+                return marks;
+
+            // --- 枠の順に、和が予算に入る所まで(超えたブロックから後は全部陽解法。GPU は同じ和を接頭和で)---
+            FX_ASSERT(options.implicitOverflow == ImplicitOverflow::Explicit);  // B・C は未実装(Q22)
+            const MultiresImplicitBudget budget = MakeMultiresImplicitBudget(options.implicitLimits);
+            uint64_t unknowns = 0;
+            uint64_t cells = 0;
+            for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+                if (!CanJoin(nest, frozen, slot) || !InImplicitConduction(nest, slot, options))
+                    continue;
+
+                const uint32_t count = CountUnknowns(nest, thermals, slot);
+                unknowns += count;
+                cells += ImBlockCellBound(count);
+                if (unknowns > budget.unknowns || cells > budget.cells) {
+                    nest.implicitDeferredBlocks += 1;
+                    continue;
+                }
+
+                marks[slot] = 1;
+            }
+
+            return marks;
+        }
+
         void AddImplicitConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
-                                   const MultiresStepOptions& options, std::span<MrEnergyDelta> deltas) {
+                                   std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
+                                   std::span<MrEnergyDelta> deltas) {
             nest.implicitCost = {};
             nest.implicitCells = 0;
             nest.implicitLevels.clear();
             nest.implicitGrid = {};
             nest.implicitNest.reset();
-            ImplicitSystem system = MakeSystem(nest, thermals, frozen, options);
+            ImplicitSystem system = MakeSystem(nest, thermals, frozen, implicitBlocks);
             if (system.faces.empty())
                 return;
 
@@ -213,7 +265,9 @@ namespace bicameral::sim {
                 CaptureNest(nest, frozen);
 
             // --- 1 刻み解いて、足した後と仮のエネルギーの差を変化の表へ ---
-            ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces));
+            const ImplicitGridLimits gridLimits{.nodes = options.implicitLimits.nodes,
+                                                .links = options.implicitLimits.links};
+            ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces), false, gridLimits);
             if (nest.captureImplicitGrid)
                 nest.implicitGrid = grid;
 

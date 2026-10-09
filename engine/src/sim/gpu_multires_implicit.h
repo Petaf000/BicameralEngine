@@ -6,6 +6,9 @@
 // CPU は系の大きさも段の数も知らない(大きさは上限から。T-0136)。記録の形(GpuImplicitRecordShape)は前の刻みの数から選ぶ(T-0154。
 // 数は遅れて読んだものでよい: 形は費用だけを変え、解いた値は同じ)。
 // 使い方: multires->EnableImplicitConduction(device, limits) の後、MultiresStepOptions::implicitConduction の刻みを RecordStep・RecordStepActive で。
+// 上限(GpuMultiresImplicitLimits = MultiresImplicitLimits。T-0178): 流れの段の前に RecordAdmit が、系に入れるブロックを枠の順に予算
+// (MakeMultiresImplicitBudget)の中まで選ぶ。入らないブロックはその刻み陽解法のまま(Q22 の案 A。仮)。多重格子の 2 段目からが上限に
+// 入らなければ縮約を止める。CPU と比べる時は options.implicitLimits に同じ上限を入れる(CPU の MarkImplicitBlocks・BuildImplicitGrid)。
 #pragma once
 
 #include <cstdint>
@@ -18,21 +21,17 @@
 
 namespace bicameral::sim {
 
-    // 陰解法の系の大きさの上限(バッファの大きさ。超えた刻みは CPU と合わなくなる。系を作る段の overflow が立つ)
-    struct GpuMultiresImplicitLimits {
-        uint32_t unknowns = 0;  // 未知数のセル(面は 6 倍まで)
-        uint32_t cells = 0;     // 未知数 + 境のセル
-        uint32_t nodes = 0;     // 多重格子の全部の段の節(段 0 = セルを含む)
-        uint32_t links = 0;     // 多重格子の全部の段の隣
-    };
-
     class GpuMultiresImplicit {
     public:
         [[nodiscard]] static std::expected<GpuMultiresImplicit, std::string> Create(
             ID3D12Device5* device, const GpuMultires& multires, const MultiresCapacity& capacity,
             const GpuMultiresImplicitLimits& limits);
 
-        // 1 刻みの陰解法(GpuMultires の伝導の段から。刻みの印と stepFlags は multires に置いたまま)
+        // 系に入れるブロックを選んで陰解法の印を付ける(T-0178。GpuMultires の伝導の段の流れの前。頁と端数の枠を配った後)
+        void RecordAdmit(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
+                         const MultiresStepOptions& options);
+
+        // 1 刻みの陰解法(GpuMultires の伝導の段から。RecordAdmit の後。刻みの印と stepFlags は multires に置いたまま)
         void Record(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
                     const MultiresStepOptions& options);
 
