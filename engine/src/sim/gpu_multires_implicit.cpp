@@ -4,11 +4,16 @@
 
 #include <utility>
 
+#include "gpu/device.h"
+
 using namespace bicameral::multires;
 
 namespace bicameral::sim {
 
     namespace {
+
+        // 多重格子の段で、細かい段の節がこれ以下の回は 1 グループの LvTail で回す(T-0135 の計測: 熱い点 1.94 → 0.19 ms。docs/perf.md)
+        constexpr uint32_t LEVEL_TAIL_MAX_NODES = 256;
 
         // 木の陰解法と同じ選択(multires_implicit_conduction.cpp の MakeImplicitOptions。ADR-0019): V(2,2)・新しい温度の誤差の見込み 1 mK で止める
         ImplicitOptions TreeImplicitOptions(const MultiresStepOptions& options) {
@@ -35,10 +40,13 @@ namespace bicameral::sim {
         if (!build)
             return std::unexpected(build.error());
 
-        // 多重格子の段は既定の積み方(全部 Dispatch。LvTail は release の WARP でデバイスが失われる。T-0147)
+        // 多重格子の段: ハードウェアでは小さい段の回(節 ≤ LEVEL_TAIL_MAX_NODES)と積んだ回の後の残りを LvTail で(T-0135 のおすすめ・T-0179)。
+        // ソフトウェアのアダプタ(WARP)は LvTail でデバイスが失われる(T-0147)ので既定の積み方(全部 Dispatch)。作る段はどちらも同じ
         GpuImplicitLevelLimits levelLimits;
         levelLimits.nodes = limits.nodes;
         levelLimits.links = limits.links;
+        if (!gpu::IsSoftwareDevice(device))
+            levelLimits.tailMaxNodes = LEVEL_TAIL_MAX_NODES;
         auto levels = GpuImplicitLevels::Create(device, *build, levelLimits);
         if (!levels)
             return std::unexpected(levels.error());
@@ -66,7 +74,13 @@ namespace bicameral::sim {
         // --- 記録の形は前の刻みの数から(初めの刻みは上限まで積む)---
         GpuImplicitCost previous;
         const bool known = m_recorded && m_implicit.ReadCost(previous);
-        const GpuImplicitRecordShape shape = known ? GpuImplicit::ShapeFrom(previous) : GpuImplicitRecordShape{};
+        // 多重格子の段を Dispatch で積む回も前の刻みの段の数から(T-0179)
+        GpuImplicitRecordShape shape = known ? GpuImplicit::ShapeFrom(previous) : GpuImplicitRecordShape{};
+        uint32_t levelRounds = known ? GpuImplicitLevels::RoundsFrom(previous) : GpuImplicitLevels::ALL_ROUNDS;
+        if (m_forceCheapest) {
+            shape.dispatchCycles = 1;
+            levelRounds = 0;
+        }
 
         // --- 系を作る(凍った印を見る)→ 多重格子の段 → 写す ---
         const auto stamp = [&](uint32_t phase) {
@@ -76,7 +90,7 @@ namespace bicameral::sim {
         stamp(0);
         m_build.RecordBuild(list, debugRing, multires, options, true, true);
         stamp(1);
-        m_levels.RecordBuild(list, debugRing, m_build);
+        m_levels.RecordBuild(list, debugRing, m_build, levelRounds);
         m_implicit.RecordReset(list);
         m_build.RecordCopyTo(list, m_implicit);
         m_levels.RecordCopyTo(list, m_implicit);

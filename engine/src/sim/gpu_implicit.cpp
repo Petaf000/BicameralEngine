@@ -236,7 +236,14 @@ namespace bicameral::sim {
         const uint32_t levels = std::max(previous.levelCount, 1u);
         const uint32_t terminal = std::min(previous.wantedTailDepth, levels - 1);
 
-        return {.dispatchLevels = terminal + 1, .coarsestDispatch = previous.wantedTailDepth >= previous.levelCount};
+        // V サイクルは前の刻みの回数 + 余裕(半分か CYCLE_MARGIN の大きい方)まで段ごとに積む。回が急に増えた刻みだけ、余裕の後の回が
+        // 1 グループで遅い(たくさんの要求の全部 ImTail は 1 回約 5 ms。T-0154)
+        const uint32_t cycles = std::max(previous.cycles, 1u);
+        const uint32_t dispatchCycles = cycles + std::max(cycles / 2, CYCLE_MARGIN);
+
+        return {.dispatchLevels = terminal + 1,
+                .coarsestDispatch = previous.wantedTailDepth >= previous.levelCount,
+                .dispatchCycles = dispatchCycles};
     }
 
     // バッファの大きさ(上限から。空にならないように 1 つ分は持つ)
@@ -605,6 +612,8 @@ namespace bicameral::sim {
                              (options.coarsestSweeps << (2 * SWEEP_BITS));
 
         // --- 計画 → 温度・範囲 → V サイクル × 上限(止めた後の回は述語で飛ばす)---
+        // dispatchCycles 回の後は ImTail が段 0 から V サイクル全体を回す安い回(T-0179。止めた後の回の段ごとのバリアを減らす)
+        const uint32_t dispatchCycles = shape.dispatchCycles == 0 ? options.cycles : std::max(shape.dispatchCycles, 1u);
         RecordPlan(list);
         Dispatch(list, PassBegin, 1);
         DispatchIndirect(list, PassStart, IM_SLOT_CELLS);
@@ -613,7 +622,10 @@ namespace bicameral::sim {
             if (skippable)
                 BeginSkippable(list, PREDICATE_CYCLES);
 
-            RecordVCycle(list, options);
+            if (cycle < dispatchCycles)
+                RecordVCycle(list, options);
+            else
+                RecordWholeTailCycle(list);
 
             if (options.toleranceMillikelvin != 0)
                 DispatchIndirect(list, PassConverged, IM_SLOT_CONVERGED);
@@ -643,6 +655,12 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &barrier);
 
         return true;
+    }
+
+    void GpuImplicit::RecordWholeTailCycle(ID3D12GraphicsCommandList* list) {
+        m_constants.wholeTail = 1;
+        Dispatch(list, PassTail, 1);
+        m_constants.wholeTail = 0;
     }
 
     uint32_t GpuImplicit::DispatchesPerCycle(const ImplicitOptions& options) const {

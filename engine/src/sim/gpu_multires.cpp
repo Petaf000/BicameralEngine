@@ -276,6 +276,11 @@ namespace bicameral::sim {
             m_implicit->StampPhases(stamp);
     }
 
+    void GpuMultires::ForceImplicitCheapest(bool force) {
+        if (m_implicit != nullptr)
+            m_implicit->ForceCheapest(force);
+    }
+
     std::expected<void, std::string> GpuMultires::CreatePipelines(ID3D12Device5* device,
                                                                   const GpuMultiresOptions& options) {
         m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);

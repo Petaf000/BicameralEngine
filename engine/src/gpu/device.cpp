@@ -374,6 +374,24 @@ namespace bicameral::gpu {
         return m_messageSink ? m_messageSink->warningCount.load(std::memory_order_relaxed) : 0;
     }
 
+    // --- アダプタの種類 ---
+
+    bool IsSoftwareDevice(ID3D12Device* device) {
+        ComPtr<IDXGIFactory4> factory;
+        if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))))
+            return true;
+
+        ComPtr<IDXGIAdapter1> adapter;
+        if (FAILED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter))))
+            return true;
+
+        DXGI_ADAPTER_DESC1 desc{};
+        if (FAILED(adapter->GetDesc1(&desc)))
+            return true;
+
+        return (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+    }
+
     // --- デバイスの喪失 ---
 
     DeviceRemovedReport LogDeviceRemoved(ID3D12Device* device) {
