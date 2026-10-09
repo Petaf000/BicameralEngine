@@ -36,7 +36,11 @@
   RefreshTable)と CPU リファレンス、フレームのループ(--editor で見る・再生は印から探す・差し替えたら保存点を捨てる)、パネルの表示を書いた。
   debug のビルドは警告なし。最初の reaction_hot_reload_test は、試験の中の fs::copy(親のフォルダが無い)が例外 → debug の abort の窓で
   止まり、ランナーの上限 30 分を使い切った(直して、テストに TIMEOUT 300 を付けた)。
-  テストの結果は下の「引き継ぎメモ」。
+  main(a4dc488。T-0175 入り)へ rebase(衝突なし)した後、release のビルドは新しい警告なし(implicit_conduction.cpp の C4189 だけ・前から)。
+  release で `-Filter "^(reaction_hot_reload|reaction_package|gpu_probe_sim|gpu_probe_sim_warp)$"`: reaction_package・reaction_hot_reload・
+  gpu_probe_sim(HW。表の差し替えを含め 70 秒)が通過。gpu_probe_sim_warp はこの時点で走っていた(結果は runner/logs/20261009-075137-test)。
+  debug の gpu_probe_sim は差し替えの前から 300 秒の上限を超えていた(TIMEOUT 900 にした)。tidy・窓のテスト・ほかの GPU のテストは流していない
+  (ProbeSim の既定の道は、差し替えの無いフレームでは変わらない)。かかった時間 約 2 時間(うち 30 分はテストの止まり)。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - 動いているもの: `bicameral --editor` で data/packages(か `--packages`)の .luau を保存すると、約 0.25 秒ごとの確認で読み直し、
