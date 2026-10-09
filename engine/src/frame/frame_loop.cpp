@@ -1257,8 +1257,9 @@ namespace bicameral::frame {
 
             m_extractAfterRewind = true;
             ++m_rewindCount;
-            Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {}(単位 {})→ 保存点の刻み {}。足し直すコマンド {}",
-                from.tick, from.unit, tick, m_rewindFeed.size());
+            Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {}(単位 {})→ 保存点の刻み {}。足し直すコマンド: {}",
+                from.tick, from.unit, tick,
+                m_replay.empty() ? std::format("{} 個", m_rewindFeed.size()) : std::string("再生ファイルから"));
 
             return index;
         }

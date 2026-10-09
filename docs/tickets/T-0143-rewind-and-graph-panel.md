@@ -17,7 +17,7 @@
 - [x] gpu_probe_rewind: 刻み 20・60・100 で写しながら進み、20 へ戻す → 100 へ戻す → 全部の刻みのハッシュが基準と一致。足し直さないと違う
 - [x] エディタ: 「時間」のパネルに保存点の一覧と「1 つ前の保存点へ」。SimScheduler が保存点の境界でフレームを切る。`--save-points`・`--save-interval`・`--auto-rewind`
 - [x] 再生ファイルの再生中に戻すと ReplayPlayer::Rewind(ハッシュをもう一度突き合わせる)。窓の操作のときは足したコマンドの控えから足し直す
-- [ ] ctest window_replay_rewind(再生中に戻してもハッシュ列が記録と一致)… 作業ログ参照
+- [x] ctest window_replay_rewind(再生中に刻み 81 → 40 へ戻しても、ハッシュ 164 回の突き合わせが全部一致)
 - [x] 「Work Graphs と性能」のパネル(editor/graph_panel): 単位ごとの GPU 時間(ms/刻み)・伝導のグラフのノードごとの起動・入力・出力/刻み・上限の余裕・計器・上限の警告
 - [x] sim_scheduler_test に保存点の境界と Rewind
 - [x] ADR-0036・14 §2・map.yaml
@@ -28,6 +28,9 @@
   gpu_probe_rewind は単独では 106 秒で通過(保存点 1 つ 33.2 MiB。写す・戻すフレームの単位以外の GPU 時間は平均 39 µs、暖機なし・debug)。
 - フレームのループ: 保存点の境界で TakeUnits が切る → 次のフレームの先頭で写す。戻すときは compute キューを待ち、読み戻しを全部読んでから戻す。
   性能のパネルは EditorStatus::graph(直近 1 秒の Stats から)。
+- テスト: gpu_probe_rewind(198 秒。他の作業ツリーと GPU を分けている間)・window_replay_record・_editor・_rewind・sim_scheduler・time_control・replay_file が通過。
+  1 回目は他のランナーと重なって物理のパイプラインの作成に 4 分かかり、gpu_probe_rewind(既定 300 秒)と window_replay_record(240 秒)が時間切れ → gpu_probe_rewind の上限を 900 秒に。
+  性能の計測(docs/perf.md)は、他の作業ツリーのランナーが動き続けていて idle の時が無かったので取っていない(上の 39 µs・33.2 MiB は参考値)。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 動いているもの: `bicameral --editor`(パネル「時間」に巻き戻し、「Work Graphs と性能」)。保存点は --editor のときだけ既定 6 個 × 120 刻み(約 200 MiB の VRAM)。
@@ -40,7 +43,8 @@
 - 次: 下の「分けたもの」。
 
 ## 分けたもの
-- (無し。window_replay_rewind が時間切れで確かめられなかった場合は、司令塔が GPU の空いている時に流す)
+- 無し(範囲は全部できた)。今後の候補(ROADMAP に足すかは司令塔とユーザー): 多重解像度の世界の差分の保存点(変わったブロックだけ写す)・
+  巻き戻しの「分岐」(判断待ち 1 の B)。
 
 ## 判断待ち
 1. **巻き戻した後、先の操作(戻した刻みより後のつつき・押す)をどうするか**(仮で A に決めて実装した。ユーザー未確認。後から B を足せる)
