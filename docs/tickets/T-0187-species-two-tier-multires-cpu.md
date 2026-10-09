@@ -32,6 +32,7 @@ T-0175 で反応の核はセルの形(RxCell = インライン 8 / RxWideCell = 
   RefineRequestLevel・ApplyCoarsen・RefineShadowLevel・HashRealLeaves・HashWholeNest・ComputeConservedTotals が溢れを読む。溢れのある頁・端数の枠は畳まない。
   multires_test に TestCoarsenFullWide(断った 0・親のセル 16 種・刻んで 17 種)・TestLimitsStepWide(待たせた 0・最大 9 種)・TestWideMatchesInline(本物の鎖が毎刻みビット一致)。保存は毎刻みビット単位。
   2 時間の約束のため、影の引き戻し・畳む・静かな葉の許容差の判定・覗き窓・実験室の溢れは T-0199 に分けた。
+  変更後: release の multires.*・reaction.* など 16 本、debug の multires・reaction、release の gpu_multires(_conduction)(_implicit(_tree))(_warp) 8 本が通過(溢れを使わない世界は GPU と今のまま一致)。
 
 ## 分けたもの
 - T-0199: 溢れを使う多重解像度の世界(CPU)の残り(影の引き戻し・溢れのある頁を畳む・端数を帳簿へ返す・静かな葉の許容差・覗き窓・実験室)

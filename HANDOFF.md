@@ -29,7 +29,8 @@
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 46 本(約 6 分)・
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_)"` 41 本(約 25 分)が通過(直したものなし・流し直しなし)。release のビルドは警告なし(前からの C4189 だけ)。
   変更後の release: `-Filter "^(multires.*|reaction.*|float_check|lab_box)$"` 16 本が通過(multires は試験の期待を 1 回直した: 刻み 0 の 2 つの粗くする要求は同じ親を取り合うので、
-  溢れを使う世界でも適用は 3)。debug: ビルド(警告なし)・`-Filter "^(multires|reaction)$"` が通過(FX_ASSERT あり。multires 145 秒)。release の `-Filter "^gpu_multires(_conduction)?(_implicit(_tree)?)?(_warp)?$"`(t-0178 が求めた束 + 伝導。テンプレートにした MrCellThermal を使う)は下の作業ログ・コミットを参照(このコミットの時点では流している途中)
+  溢れを使う世界でも適用は 3)。debug: ビルド(警告なし)・`-Filter "^(multires|reaction)$"` が通過(FX_ASSERT あり。multires 145 秒)。release の `-Filter "^gpu_multires(_conduction)?(_implicit(_tree)?)?(_warp)?$"`(t-0178 が求めた束 + 伝導。テンプレートにした MrCellThermal を使う)8 本が通過(約 30 分。implicit_tree 688 s)。
+  ほかの gpu_multires_*(activity・quiet・uniform・subcycle・near_fold・implicit_build など)・gpu_probe_peek は変更の後に流していない(呼ぶ関数をテンプレートにしただけで GPU のコードの結果は同じ見込み)。tidy は流していない
   足したテスト: multires_test の TestCoarsenFullWide(粗くして 12 刻み伝導ありで刻む)・TestLimitsStepWide(伝導なし・あり)・TestWideMatchesInline(本物の鎖を 2 つの世界で毎刻み比べる)。archmap OK(142)。
 - **テスト(2026-10-09、T-0175)**: 最初に t-0132・t-0026・t-0140 を合わせた main(変更前)を release で
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 45 本(約 7 分)・
