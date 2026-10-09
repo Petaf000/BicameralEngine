@@ -216,6 +216,17 @@ views:
           note: "煙のにじみを約 1/6 に(広がりの増え方)。端数は (シード, 小刻み, 面, 用途) の乱数で丸め、微量の成分も動く(R6・D-428)。ADR-0043 §6" }
       - { id: gastest, group: tests, label: "gas_reference_test<br/>保存・静止大気・熱い泡・風で煙<br/>煙のにじみ・微量の成分",
           code: "tests/gas_reference_test.cpp::TestClosedBoxConservation", ticket: T-0026 }
+      - { id: gpugas, group: simlib, label: "GpuGas::RecordStep<br/>気体 G3a: 1 レベルの箱を GPU の Compute で<br/>1 小刻み = 面の段 4 つ・セルの段 5 つ",
+          code: "engine/src/sim/gpu_gas.cpp::GpuGas::RecordStep", ticket: T-0185, doc: docs/design/07-transport.md,
+          note: "CPU は面ごとに両側へ足し引き、GPU はセルが自分の 6 面を集める(整数なので同じ値)。箱の外との出入りは帳簿へ 64bit の原子的な足し算" }
+      - { id: gasstephlsl, group: simlib, label: "gas_step.hlsl<br/>gas_reference の各段を同じ式で写した 9 つの入口",
+          code: "shaders/sim/gas_step.hlsl::MovedAmountQ32", ticket: T-0185, doc: docs/design/07-transport.md,
+          note: "64bit の「0 で止める引き算」(a > b ? a − b : 0)を書かない(NVIDIA の実機で誤る。T-0124・T-0185)" }
+      - { id: gasgpuhlsli, group: shared, label: "gas_gpu.hlsli<br/>気体の GPU の置き場所の形(パラメータ・セル・面・帳簿)",
+          code: "shaders/common/gas_gpu.hlsli::GasGpuFace", ticket: T-0185 }
+      - { id: gpugastest, group: tests, label: "gpu_gas_test<br/>9 場面を毎刻み CPU と比べる・G1・G2 の条件を GPU で",
+          code: "tests/gpu_gas_test.cpp::RunScene", ticket: T-0185,
+          note: "--dump で HW と WARP の面の中身を書き出して diff できる(食い違いの切り分け)" }
       - { id: physicsscene, group: physicslib, label: "PhysicsScene<br/>原理の確認の場面(積み木・質量比・岩の山)",
           code: "engine/src/sim/physics_scene.cpp::MakePileScene", ticket: T-0016 }
       - { id: physicscollide, group: shared, label: "physics_collision.hlsli<br/>直方体どうしの接触(分離軸・切り抜き・4 点)",
@@ -435,6 +446,11 @@ views:
       - [physicsworld, physicsscene]
       - [gastest, gasreference]
       - [gasreference, gasmoved]
+      - [gpugas, gasstephlsl, "9 段 × 小刻み"]
+      - [gasstephlsl, gasgpuhlsli]
+      - [gpugas, gasgpuhlsli]
+      - [gpugastest, gpugas]
+      - [gpugastest, gasreference, "毎刻みのハッシュと帳簿"]
       - [physicssolverhlsl, physicssolve]
       - [physicssolve, fixed]
       - [physicstest, physicsworld]

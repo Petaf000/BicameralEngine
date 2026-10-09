@@ -4,6 +4,8 @@
 // 微量の成分(乱数の丸め)・minmod と切り捨て。刻みごとに GPU のセルと帳簿を読み戻し、CPU の状態のハッシュと帳簿を比べる。
 // 引数: gpu_test_options.h(--warp・--queue)と
 //   --scene <名前>: 1 つの場面だけ(既定は全部)
+//   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
+//     HW と WARP で書き出して diff すると、どの面のどの欄が違うかが分かる。T-0185)
 //   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120)
 #include "sim/gpu_gas.h"
 #include "core/aliases.h"
@@ -31,7 +33,10 @@ namespace {
     constexpr int64_t METER_PER_SECOND = (int64_t)1 << 20;
     constexpr int64_t ROUGH_CELL_MASS = 150000;  // mg
 
+    uint32_t passLimit = 9;         // --passes(調べる用。小刻みの段をここまでで止める)
     uint32_t substepsOverride = 0;  // --substeps(食い違いを小刻み 1 つで探す時)
+    // --dump <ファイル>(調べる用): 最初の刻みの後の面・セルごとの合計・セルを 1 行 1 語でファイルへ(HW と WARP の出力を diff する)
+    std::string dumpPath;
 
     GasConfig MakeAirConfig(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ) {
         GasConfig config;
@@ -219,6 +224,28 @@ namespace {
         return "セルは同じ(帳簿が違う)";
     }
 
+    // 最初の刻みの後の GPU の中身を 1 行 1 語で(行頭に face/sum/cell と番号・語の番号)
+    void DumpFirstTick(const GpuGas& gas, const std::vector<GasCell>& cells) {
+        std::vector<uint64_t> faceWords;
+        std::vector<uint64_t> sumWords;
+        if (!gas.ReadDebug(faceWords, sumWords))
+            return;
+
+        std::ofstream out(dumpPath);
+        constexpr size_t FACE_WORDS = 13;  // GasGpuFace(gas_gpu.hlsli)の 104 バイト
+        constexpr size_t SUM_WORDS = 5;    // GasGpuCellSums の 40 バイト
+        for (size_t i = 0; i < faceWords.size(); ++i)
+            out << std::format("face {} {} {}\n", i / FACE_WORDS, i % FACE_WORDS, (int64_t)faceWords[i]);
+
+        for (size_t i = 0; i < sumWords.size(); ++i)
+            out << std::format("sum {} {} {}\n", i / SUM_WORDS, i % SUM_WORDS, sumWords[i]);
+
+        for (size_t i = 0; i < cells.size(); ++i)
+            out << std::format("cell {} {} {} {} {} {} {} {} {}\n", i, cells[i].amounts[0], cells[i].amounts[1],
+                               cells[i].amounts[2], cells[i].amounts[3], cells[i].energy, cells[i].momentum[0],
+                               cells[i].momentum[1], cells[i].momentum[2]);
+    }
+
     struct GpuParts {
         gpu::ImmediateQueue queue;
         gpu::DebugRing debugRing;
@@ -230,6 +257,7 @@ namespace {
         if (!gas)
             return std::unexpected(gas.error());
 
+        gas->SetDebugPassLimit(passLimit);
         GasBox cpu = scene.box;
         GasBox gpuState = scene.box;
         for (uint64_t tick = 0; tick < scene.ticks; ++tick) {
@@ -243,6 +271,9 @@ namespace {
 
             gas->RecordStep(list, parts.debugRing.GpuAddress());
             gas->RecordReadback(list);
+            if (tick == 0 && !dumpPath.empty())
+                gas->RecordDebugReadback(list);
+
             parts.debugRing.RecordReadbackAndReset(list);
             if (!parts.queue.ExecuteAndWait())
                 return std::unexpected("GPU での実行に失敗(デバイスが失われた)");
@@ -254,6 +285,9 @@ namespace {
 
             if (!gas->Read(gpuState.cells, gpuState.ledger))
                 return std::unexpected("読み戻せない");
+
+            if (tick == 0 && !dumpPath.empty())
+                DumpFirstTick(*gas, gpuState.cells);
 
             gpuState.tick = tick + 1;
             StepGas(cpu);
@@ -468,6 +502,10 @@ namespace {
                 options.size = (uint32_t)std::stoul(arguments[++index]);
             else if (argument == "--substeps" && hasValue)
                 substepsOverride = (uint32_t)std::stoul(arguments[++index]);
+            else if (argument == "--passes" && hasValue)
+                passLimit = (uint32_t)std::stoul(arguments[++index]);
+            else if (argument == "--dump" && hasValue)
+                dumpPath = arguments[++index];
             else if (argument == "--ticks" && hasValue)
                 options.ticks = std::stoull(arguments[++index]);
             else
@@ -483,8 +521,8 @@ namespace {
         const auto options = test::ParseGpuTestOptions(std::span(arguments));
         if (!gasOptions || !options) {
             Log(Channel::Sim, Level::Error,
-                "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前] [--profile [--size n] [--ticks "
-                "n]]");
+                "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前] [--substeps n] [--passes n] "
+                "[--dump ファイル] [--profile [--size n] [--ticks n]]");
             return 2;
         }
 

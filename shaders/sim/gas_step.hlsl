@@ -77,17 +77,6 @@ GasSide PickSide(bool condition, GasSide whenTrue, GasSide whenFalse) {
     return whenFalse;
 }
 
-// 運動量の軸 axis の成分(構造体の中の配列を実行時の番号で引かない。DXC の -Od で成分を取り違えた〔T-0185〕)
-int64_t MomentumAlong(GasGpuCell cell, uint32_t axis) {
-    if (axis == 0)
-        return cell.momentum[0];
-
-    if (axis == 1)
-        return cell.momentum[1];
-
-    return cell.momentum[2];
-}
-
 int64_t MinS64(int64_t a, int64_t b) {
     return a < b ? a : b;
 }
@@ -397,8 +386,8 @@ void LedgerAdd(uint32_t offset, int64_t value) {
 
     int64_t flow = 0;
     if (sides.left.kind != SIDE_WALL && sides.right.kind != SIDE_WALL) {
-        const int64_t momentumSum = MomentumAlong(ForcedSideCell(sides.left), sides.axis) +
-                                    MomentumAlong(ForcedSideCell(sides.right), sides.axis);
+        const int64_t momentumSum = ForcedSideCell(sides.left).momentum[sides.axis] +
+                                    ForcedSideCell(sides.right).momentum[sides.axis];
         const int64_t central = FxMulShiftS64(momentumSum, (int64_t)GAS_P.centralFlow, 52);
         const int64_t diffusion = FxMulShiftS64(DrivingPressure(sides), (int64_t)GAS_P.pressureFlow, 40);
         flow = central + diffusion;
@@ -470,6 +459,9 @@ int64_t HalfSlope(GasFaceSides sides, int64_t flow, uint64_t fraction, uint32_t 
     return FxMulShiftS64(slope, (int64_t)(ONE_Q32 - fraction), 33);
 }
 
+// 引く側は「0 で止める引き算」(a > b ? a − b : 0)の形を書かない: NVIDIA のドライバ(RTX 3070 Ti)が 64bit のこの形を誤って下ろし、
+// 上位 32bit がでたらめな値になった(debug の DXIL。WARP は一致。T-0124 の飽和する足し算と同じ類い。T-0185)。
+// 符号付きの差を出してから 0 以下を 0 にする(同じ値: moved < 2^63・correction < 2^63。物質量 < 2^31 と割合 ≤ 2^32 から)
 uint64_t MovedAmountQ32(GasFaceSides sides, GasGpuCell source, int64_t flow, uint64_t fraction, uint32_t s) {
     const uint64_t moved = source.amounts[s] * fraction;
     if (GAS_P.reconstruction == GAS_GPU_RECONSTRUCTION_UPWIND)
@@ -481,7 +473,11 @@ uint64_t MovedAmountQ32(GasFaceSides sides, GasGpuCell source, int64_t flow, uin
     if (halfSlope >= 0)
         return moved + correction;
 
-    return moved > correction ? moved - correction : 0;
+    const int64_t remaining = (int64_t)moved - (int64_t)correction;
+    if (remaining <= 0)
+        return 0;
+
+    return (uint64_t)remaining;
 }
 
 uint64_t RoundAmount(uint64_t amountQ32, uint64_t hash) {
@@ -520,11 +516,7 @@ uint64_t RoundAmount(uint64_t amountQ32, uint64_t hash) {
         }
     }
 
-    // 構造体を丸ごと書き戻さず欄ごとに書く(丸ごとの書き戻しで成分の欄が食い違った。T-0185 で調べ中)
-    g_faces[faceId].fraction = face.fraction;
-    [unroll] for (uint32_t write = 0; write < GAS_GPU_MAX_SPECIES; ++write) {
-        g_faces[faceId].moved[write] = face.moved[write];
-    }
+    g_faces[faceId] = face;
 }
 
     // --- 段 7: 成分ごとの移す量の合計(セル。gas_reference.cpp の LimitMovedAmounts の 1 回目の走査)---
@@ -620,15 +612,7 @@ int64_t MovedEnergy(GasGpuCell source, GasGpuCell moved) {
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis)
         face.movedMomentum[axis] = FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
 
-    // 構造体を丸ごと書き戻さず欄ごとに書く(丸ごとの書き戻しで成分の欄が食い違った。T-0185 で調べ中)
-    [unroll] for (uint32_t write = 0; write < GAS_GPU_MAX_SPECIES; ++write) {
-        g_faces[faceId].moved[write] = face.moved[write];
-    }
-
-    g_faces[faceId].movedEnergy = face.movedEnergy;
-    g_faces[faceId].movedMomentum[0] = face.movedMomentum[0];
-    g_faces[faceId].movedMomentum[1] = face.movedMomentum[1];
-    g_faces[faceId].movedMomentum[2] = face.movedMomentum[2];
+    g_faces[faceId] = face;
 
     // --- 帳簿(開いた境界の外から入る物は正、出る物は負)---
     if (donor.kind == SIDE_CELL && receiver.kind == SIDE_CELL)

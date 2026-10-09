@@ -1,9 +1,9 @@
 # T-0185 気体 G3: 多重解像度と GPU
 
-- Status: In Progress(第 1 段 (a)「1 レベルの気体を GPU〔Compute〕に載せて CPU とビット一致」の途中。(b)〜(d) は T-0208〜T-0210 に分けた)
+- Status: Done((a)「1 レベルの気体を GPU〔Compute〕に載せて CPU とビット一致」まで。残りは idle の時の計測を docs/perf.md に載せることだけ。(b)〜(d) は T-0208〜T-0210 に分けた)
 - 種類: 工学
 - PC: 必須
-- 見積もり: (a) チャット 1 回分 + 残りの食い違いの修正(下の「引き継ぎメモ」)
+- 見積もり: (a) チャット 1 回分 + 食い違いの修正(作業役 2 体。2 体目は約 1.5 時間)
 - マイルストーン: M3 (docs/plan/ROADMAP.md)
 - 設計: docs/design/07-transport.md §2.3(この段で足す)・§2.1・§2.2 / 決定: ADR-0043(Proposed)・ADR-0017・D-302・原則 4
 - 関係: T-0026(G1)・T-0184(G2)・T-0186(G4 結合)・T-0208〜T-0210(このチケットから分けた)
@@ -19,10 +19,12 @@ G1・G2 の気体(gas_reference)を GPU に載せ、CPU リファレンスと HW
 
 ## 完了条件(チェックできる形で)
 - [x] GPU の段(`shaders/sim/gas_step.hlsl`・`shaders/common/gas_gpu.hlsli`・`engine/src/sim/gpu_gas.{h,cpp}`)と試験(`tests/gpu_gas_test.cpp`。ctest gpu_gas・gpu_gas_warp)
-- [ ] 毎刻み CPU とビット一致(HW): 9 場面(closed・periodic・single_layer・static・bubble・wind_mc・wind_upwind・wind_minmod_floor・trace)。**static だけ通過、残りは成分の物質量が食い違う(下)**
-- [ ] 同じく WARP
-- [ ] G1・G2 の合格の条件を GPU の結果で(保存・静止大気・熱い泡・風で煙・MC のにじみ・微量の成分。試験の CheckScene に書いた)
-- [ ] 計測(1 刻みの GPU 時間。`gpu_gas_test --profile --size 32`)を docs/perf.md に
+- [x] 毎刻み CPU とビット一致(HW): 9 場面(closed・periodic・single_layer・static・bubble・wind_mc・wind_upwind・wind_minmod_floor・trace)。debug・release
+- [x] 同じく WARP(debug・release)
+- [x] G1・G2 の合格の条件を GPU の結果で(保存・静止大気・熱い泡・風で煙・MC のにじみ・微量の成分。試験の CheckScene に書いた)
+- [ ] 計測(1 刻みの GPU 時間。`gpu_gas_test --profile --size 32`)を docs/perf.md に → **負荷ありの値だけ取った(下)**。perf.md には、本体・wt2・wt3 のランナーが idle の時に取り直して載せる(司令塔か次の作業役)
+  - 2026-10-09・release・RTX 3070 Ti・**本体と wt2 のランナーが試験中の負荷あり**: 32³ = 32768 セル・小刻み 4(36 段)・120 刻みのタイムスタンプの平均で 1 刻み 1.51〜1.54 ms
+    (ビルド後の 1 回目〔1.51〜1.54〕を捨てた 2 回目: 1.565・1.541・1.507 ms)。1 段あたり約 42 µs で、段の数(Dispatch とバリア)に縛られている見込み(未確認。T-0210 で WG と比べる)
 
 ## メモ・参考
 - 1 小刻み = 9 段(面の段 4 つ・セルの段 5 つ)。CPU は面ごとに両側へ足し引きする(散らす形)、GPU はセルが自分の 6 面を集める(集める形)。整数の足し引きなので同じ値。
@@ -38,15 +40,20 @@ G1・G2 の気体(gas_reference)を GPU に載せ、CPU リファレンスと HW
   試験は 9 場面を毎刻み読み戻して CPU の状態のハッシュと帳簿を比べ、終わりに G1・G2 の合格の条件を GPU の結果で確かめる(食い違っても残りの場面を回す)。
 - 結果(HW・debug): static(300 刻み)はビット一致。ほかは 1〜2 刻みで**成分のどれか 1 つの物質量だけ**が食い違う(運動量・質量の流れは一致。closed は O2 が動かない、
   periodic・single_layer は N2 が多すぎる)。構造体の中の配列を実行時の番号で引かない形([unroll]・MomentumAlong)にしても同じ。面の構造体を丸ごと書き戻さず欄ごとに書く形を試している所で区切った。
+- 2026-10-09(作業役 2・wt4): **原因は NVIDIA のドライバの誤り**(シェーダーの論理ではない)。WARP では debug のまま 9 場面とも一致していた。試験に `--dump`(最初の刻みの後の面・
+  セルごとの合計・セルを 1 行 1 語で書き出す)と `--passes n`(小刻みの段をそこで止める)を足し、HW と WARP の出力を diff して、GasFaceMoved の MovedAmountQ32 の
+  `moved > correction ? moved - correction : 0`(64bit の「0 で止める引き算」)だけが HW で上位 32bit がでたらめ(0x15570580)になると突き止めた(勾配・補正の値は一致)。
+  符号付きの差を出して 0 以下を 0 にする形に替えて、HW・WARP・debug・release で 9 場面とも毎刻みビット一致。前の作業役の回避(MomentumAlong・欄ごとの書き戻し)は
+  原因でなかったので元の素直な形に戻した(戻しても一致)。図(map.yaml)に GpuGas・gas_step・gas_gpu・gpu_gas_test を足した。
 
 ## 引き継ぎメモ
-- **残りの食い違い**: 割合(fraction)と運動量は一致し、成分の物質量(とそれに比例するエネルギー)だけが違う → 面の moved[4] の計算(GasFaceMoved)・抑える段(GasFaceFinal)・
-  当てる段(GasTransfer・ApplyMoved)のどこか。次に試す順: (1) 試験に `--substeps 1 --scene closed` で 1 小刻みにして、GPU の面のバッファ(u3)も読み戻して CPU の
-  ComputeMovedAmounts の値と面ごとに比べる(GpuGas に面の読み戻しを足す)→ どの段で食い違うか分かる。(2) moved を面の構造体から外し、別の uint64 のバッファ(面 × 4)にする。
-  (3) DXC の -Od で構造体の配列の欄の書き込みを取り違えていないか、release でも同じかを見る。
-- 走らせ方: `job.py run -Exe gpu_gas_test -- --scene closed --substeps 1`(場面の名前は MakeScenes)。ctest は gpu_gas(HW)・gpu_gas_warp。計測は `-- --profile --size 32 --ticks 120`。
+- **HW の 64bit の落とし穴(T-0124 に続いて 2 つ目)**: `a > b ? a - b : 0`(0 で止める引き算)を 64bit で書くと、NVIDIA のドライバ(RTX 3070 Ti)が誤って下ろす。
+  T-0124 の「溢れたら全部 1」の足し算と同じ類い。シェーダーでは符号付きの差 → `if (差 <= 0) return 0;` の形にする(gas_step.hlsl の MovedAmountQ32 の注記)。
+  2026-10-09 に shaders/ 全体を `? x - y : 0` の形で探し、ほかには無かった。T-0209・T-0210 で GPU に載せる時も同じ形を書かない(04 の R の表に足すかは司令塔が判断)。
+- **切り分けの道具**: `gpu_gas_test --scene <名前> --substeps 1 [--passes n] --dump <ファイル>` を HW と `--warp` で走らせて diff すると、どの面(番号 = セル × 6 + 軸 × 2 + 端)の
+  どの語(面は 13 語: 0 力積・1〜2 重さ・3 流れ・4 割合・5〜8 移す成分・9 エネルギー・10〜12 運動量)が違うかが出る。WARP が CPU と合うなら HW のドライバを疑う。
+- 走らせ方: ctest は gpu_gas(HW)・gpu_gas_warp。計測は `job.py run -Exe gpu_gas_test -- --profile --size 32 --ticks 120`。
 - clang-format は `[unroll] for (...) 文;` を 1 行にまとめるので、その所は `{}` を付けた。
-- 図(map.yaml)にはまだ足していない(T-0185 の完了の時に GpuGas と gas_step の段を足す)。tidy もまだ。
 
 ## 判断待ち
 - なし(Q11〔音速を落とすか〕は T-0026 のまま未回答。c̃ 30 m/s の仮のまま GPU に載せた)。

@@ -40,6 +40,11 @@ namespace bicameral::sim {
 
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
 
+        // --- 調べる用(HW と WARP の食い違いの切り分け。T-0185)。面(u3)とセルごとの合計(u4)を 64bit の語の並びで読み戻す ---
+        void RecordDebugReadback(ID3D12GraphicsCommandList10* list) const;
+        void SetDebugPassLimit(uint32_t passCount) { m_debugPassLimit = passCount; }  // 小刻みの段をここまでで止める
+        [[nodiscard]] bool ReadDebug(std::vector<uint64_t>& faceWords, std::vector<uint64_t>& sumWords) const;
+
         // --- 計測(タイムスタンプ 2 つの差。単位はキューの GetTimestampFrequency)---
         [[nodiscard]] bool EnableTiming(ID3D12Device* device);
         void RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t slot) const;  // slot 0 = 始め、1 = 終わり
@@ -79,6 +84,7 @@ namespace bicameral::sim {
         uint32_t m_cellCount = 0;
         uint32_t m_substeps = 0;
         uint64_t m_tick = 0;
+        uint32_t m_debugPassLimit = 9;
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
@@ -88,6 +94,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_ledgerUpload;         // 初めの帳簿
         ComPtr<ID3D12Resource> m_cellReadback;
         ComPtr<ID3D12Resource> m_ledgerReadback;
+        ComPtr<ID3D12Resource> m_faceReadback;  // 調べる用
+        ComPtr<ID3D12Resource> m_sumReadback;
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
     };

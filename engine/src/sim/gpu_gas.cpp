@@ -136,7 +136,7 @@ namespace bicameral::sim {
         if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) > MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
 
-        // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(構造体の中の配列を実行時の番号で引かないため)。使わない欄は 0 の前提
+        // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提
         for (const GasCell& cell : box.cells) {
             for (uint32_t s = box.config.speciesCount; s < GAS_MAX_SPECIES; ++s) {
                 if (cell.amounts[s] != 0)
@@ -190,6 +190,8 @@ namespace bicameral::sim {
         const std::array<GasGpuParameters, 1> parameters = {MakeParameters(box)};
         std::vector<GasGpuDerived> referenceDerived;
         std::vector<GasGpuCell> ghost;
+        referenceDerived.reserve(box.referenceDerived.size());
+        ghost.reserve(box.ghost.size());
         for (const GasDerived& layer : box.referenceDerived)
             referenceDerived.push_back(ToGpuDerived(layer));
 
@@ -211,8 +213,10 @@ namespace bicameral::sim {
         m_ledgerUpload = CreateUploadBuffer(device, std::span<const GasLedger>(ledger));
         m_cellReadback = gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback);
         m_ledgerReadback = gpu::CreateBuffer(device, GAS_GPU_LEDGER_BYTES, gpu::BufferKind::Readback);
+        m_faceReadback = gpu::CreateBuffer(device, uavBytes[3], gpu::BufferKind::Readback);
+        m_sumReadback = gpu::CreateBuffer(device, uavBytes[4], gpu::BufferKind::Readback);
         if (!m_srvs[0] || !m_srvs[1] || !m_srvs[2] || !m_cellUpload || !m_ledgerUpload || !m_cellReadback ||
-            !m_ledgerReadback)
+            !m_ledgerReadback || !m_faceReadback || !m_sumReadback)
             return std::unexpected("気体のアップロード・読み戻しのバッファを作れない");
 
         return {};
@@ -256,7 +260,7 @@ namespace bicameral::sim {
                                       .roundingTickHigh = (uint32_t)(roundingTick >> 32),
                                       .cellCount = m_cellCount,
                                       .unused = 0};
-            for (size_t pass = 0; pass < (size_t)Pass::Count; ++pass)
+            for (size_t pass = 0; pass < std::min((size_t)m_debugPassLimit, (size_t)Pass::Count); ++pass)
                 RecordPass(list, debugRing, (Pass)pass, constants);
         }
 
@@ -282,6 +286,21 @@ namespace bicameral::sim {
             cells.push_back(FromGpuCell(cell));
 
         return true;
+    }
+
+    // --- 調べる用 ---
+
+    void GpuGas::RecordDebugReadback(ID3D12GraphicsCommandList10* list) const {
+        gpu::RecordCopyToReadback(list, m_uavs[3].Get(), m_faceReadback.Get());
+        gpu::RecordCopyToReadback(list, m_uavs[4].Get(), m_sumReadback.Get());
+    }
+
+    bool GpuGas::ReadDebug(std::vector<uint64_t>& faceWords, std::vector<uint64_t>& sumWords) const {
+        faceWords.assign((size_t)m_cellCount * GAS_GPU_FACES_PER_CELL * sizeof(GasGpuFace) / sizeof(uint64_t), 0);
+        sumWords.assign((size_t)m_cellCount * sizeof(GasGpuCellSums) / sizeof(uint64_t), 0);
+
+        return gpu::ReadBuffer(m_faceReadback.Get(), std::as_writable_bytes(std::span(faceWords))) &&
+               gpu::ReadBuffer(m_sumReadback.Get(), std::as_writable_bytes(std::span(sumWords)));
     }
 
     // --- 計測 ---
