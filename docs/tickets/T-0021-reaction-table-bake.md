@@ -35,7 +35,9 @@ Luau のパッケージで書いた反応表を、CPU のベイクで GPU 用の
 - 2026-10-09(1 チャット目・並走の作業ツリー wt3・ブランチ t-0021): Luau の反応表を定義に読む reaction_package(整数だけ・単位は欄の名前・
   A は 10 進の文字列・知らない欄は誤り)と、試験の表のパッケージ tests/packages/combustion_test を書いた。ベイクを名前のバイト順で ID を振る形にし
   (並びに依らない。A も正規化)、文献の反応熱の警告を足した(ADR-0032)。reaction_package_test で C++ の試験の表とビットで同じ・誤りを落とす・Mod が足せる。
-  ID が変わったので release の全部のテストを流した(CPU 44 本・GPU 50 本。結果は引き継ぎメモ)。
+  ID が変わったので release の全部のテストを流した: CPU 44 本は全部通過(690 秒)。GPU は 41 / 50 本まで全部通過したところで 3000 秒で切れ
+  (同じ GPU を 4 つのランナーで使っていて遅い)、残り(gpu_probe_trace_warp・probe_physics・probe_peek・probe_fire・debug_device の 9 本)を別に流して全部通過(GPU 50 本すべて通過)。
+  debug: reaction_package・reaction・luau_package・luau_sandbox が通過。main は動いていなかったので rebase は不要だった。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - 動いているもの: `-Filter "^reaction_package$"`(debug で 0.7 秒)。CPU だけ。ランタイム(frame_loop)と GPU のテストは今まで通り C++ の試験の表を使う
