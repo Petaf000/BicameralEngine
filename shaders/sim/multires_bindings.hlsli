@@ -6,6 +6,7 @@
 #define BICAMERAL_MULTIRES_BINDINGS_HLSLI
 
 #include "common/multires_activity.hlsli"
+#include "common/multires_conduction.hlsli"
 
 // --- 結び付け ---
 // u0 ブロックの見出し [枠] / u1 セル [一様の値 × 枠][頁 × 512](T-0102)/ u2 端数 [端数の枠 × 512] / u3 数える欄(MR_COUNTER_*)/
@@ -77,6 +78,10 @@ static const uint32_t MR_STEP_SUBSTEP_WAKE = 4;
 // 起こす段(multires_step.hlsl の WakeDue)が、起こす刻みの来た世界の本物のブロックを活性の種の一覧(u13)へ足す
 // (活性の刻みの待ちの丸め。活性のグラフに待ちの丸めを入れるとハードウェアで止まったので、まだ使わない。T-0124)
 static const uint32_t MR_STEP_WAKE_SEEDS = 16;
+// 細かいレベルの熱の陰解法(T-0132。MultiresStepOptions::implicitConduction。gpu_multires.cpp の SubcycleFlags): ビット 3 = 入れる、
+// ビット 5〜7 = implicitMaxGap − 1(1〜8)。陰解法の刻みは小刻みに分けない(maxSubcycleGap = 0)ので、小刻みの番号は使わない
+static const uint32_t MR_STEP_IMPLICIT = 8;
+static const uint32_t MR_STEP_IMPLICIT_GAP_SHIFT = 5;
 // 細かいレベルの熱の刻み(T-0109。gpu_multires.cpp の SubcycleFlags): ビット 8〜13 = 小刻みの番号・14〜15 = maxSubcycleGap・
 // 16〜31 = subcycleBaseLevel(符号付き 16bit)。ルート署名の語が残り少ないので stepFlags に詰めた
 static const uint32_t MR_STEP_SUBSTEP_SHIFT = 8;
@@ -86,6 +91,15 @@ static const uint32_t MR_STEP_BASE_SHIFT = 16;
 // この段の小刻みの番号(0 〜 4^maxSubcycleGap − 1)
 uint32_t CurrentSubstep() {
     return (g_stepFlags >> MR_STEP_SUBSTEP_SHIFT) & 63u;
+}
+
+// 陰解法を入れる刻みか・陰解法にする最も細かいレベルの差(T-0132)
+bool ImplicitStep() {
+    return (g_stepFlags & MR_STEP_IMPLICIT) != 0;
+}
+
+uint32_t ImplicitMaxGap() {
+    return ((g_stepFlags >> MR_STEP_IMPLICIT_GAP_SHIFT) & 7u) + 1;
 }
 
 // --- Work Graph の GPU の入力(u12。見出しは D3D12_NODE_GPU_INPUT そのもの。gpu_multires.cpp の static_assert)---
@@ -373,6 +387,19 @@ void AppendSeedOnce(uint32_t slot) {
 // 頁 page のセル index の変化の番地(バイト)
 uint32_t ConductDeltaAddress(uint32_t page, uint32_t index) {
     return g_blockCount * CONDUCT_MARK_WORDS * 4 + (page * MR_BLOCK_CELLS + index) * CONDUCT_DELTA_BYTES;
+}
+
+// 頁のセルの変化に足す(整数部と端数を 64bit の atomic で。端数の桁上がりは整数部へ。伝導の流れの段と陰解法の段〔T-0132〕が使う)
+void AddConductDelta(uint32_t page, uint32_t index, MrEnergyDelta delta) {
+    if (MrEnergyDeltaIsZero(delta))
+        return;
+
+    const uint32_t address = ConductDeltaAddress(page, index);
+    uint64_t fractionBefore = 0;
+    g_conduction.InterlockedAdd64(address + 8, delta.fraction, fractionBefore);
+    const int64_t carry = fractionBefore + delta.fraction < delta.fraction ? 1 : 0;
+    uint64_t wholeBefore = 0;
+    g_conduction.InterlockedAdd64(address, (uint64_t)(delta.whole + carry), wholeBefore);
 }
 
 // 伝導の一覧に枠を足す(この刻みに初めてなら。順は決まらない: 集合として使う)

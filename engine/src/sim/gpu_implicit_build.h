@@ -2,7 +2,7 @@
 // 作るもの: 未知数(基準より細かい本物のブロックのセル)・境のセル・面(係数・粗い側の端数の枠)・セルの面の一覧。
 // 番号の付け方は CPU リファレンス(multires_implicit_conduction.cpp の MakeSystem と gpu_implicit.cpp の MakeCellFaces)と同じなので、
 // 作った系は GpuImplicit の同じバッファの並びにそのまま写せる(RecordCopyTo)。段の中身は shaders/sim/implicit_build.hlsl。
-// 多重格子の段と重みは GpuImplicitLevels(T-0134)がこの系から作る。GPU の伝導の段から呼ぶのは T-0132。
+// 多重格子の段と重みは GpuImplicitLevels(T-0134)がこの系から作る。GPU の伝導の段から呼ぶ形は GpuMultiresImplicit(T-0132)。
 //
 // 使い方(テスト):
 //   auto build = GpuImplicitBuild::Create(device, multires, nest.capacity, limits);
@@ -56,6 +56,11 @@ namespace bicameral::sim {
         void RecordBuild(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
                          const MultiresStepOptions& options, bool useFrozenMarks = false);
 
+        // GpuImplicit が解いたセル(solvedCells = GpuImplicit::CellsBuffer。UAV の状態)の「足した後 − 刻みの初め」を multires の伝導の
+        // 変化の表へ足し、活性の刻みならそのブロックを伝導の一覧へ(T-0132。RecordBuild と同じ刻みの印・定数で、伝導の段の流れの後に)
+        void RecordApply(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
+                         const MultiresStepOptions& options, ID3D12Resource* solvedCells);
+
         // 作った系を GpuImplicit のセル・面・面の一覧へ写す(GpuImplicit の RecordUpload の後。数は GpuImplicit を作った系と同じこと)
         void RecordCopyTo(ID3D12GraphicsCommandList* list, GpuImplicit& implicit);
 
@@ -81,12 +86,16 @@ namespace bicameral::sim {
     private:
         GpuImplicitBuild() = default;
 
+        [[nodiscard]] std::array<uint32_t, 4> ExternalConstants(const MultiresStepOptions& options,
+                                                                bool useFrozenMarks) const;
+
         GpuImplicitBuildLimits m_limits;
         uint32_t m_worldBlocks = 0;
         uint64_t m_workBytes = 0;
         uint64_t m_systemBytes = 0;
 
         std::vector<ComPtr<ID3D12PipelineState>> m_pipelines;  // implicit_build.hlsl の段の順
+        ComPtr<ID3D12PipelineState> m_applyPipeline;           // 解いた変化を伝導の表へ(BuildApply。T-0132)
         ComPtr<ID3D12Resource> m_work;                         // u4 作業場
         ComPtr<ID3D12Resource> m_system;                       // u5 系
         ComPtr<ID3D12Resource> m_workReadback;

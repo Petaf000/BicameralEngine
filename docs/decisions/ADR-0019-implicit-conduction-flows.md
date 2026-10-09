@@ -145,3 +145,21 @@
   たくさんの要求を全部 ImTail で回すと 1 刻み 9.7 → 71 ms。全部 ImTail の系ではもともと同じ数なので要らない)・
   (c) Work Graphs で V サイクルを回す(赤黒の掃き出しの間に全体の待ちが要り、Work Graphs には無い。最後のグループが次を起こす形は書き直しが大きい)。
   数は docs/tickets/T-0154-implicit-empty-dispatch.md。
+
+## 追記(2026-10-09、T-0132: GPU の伝導の段から呼ぶ。決めた人: Claude〔実装の細部〕)
+- **呼ぶ所**: GpuMultires::RecordConduction の最後の小刻みの流れの後・ConductApply の前(CPU の StepConduction が ComputeConduction の後に
+  AddImplicitConduction を呼ぶのと同じ所)。陰解法の段は GpuMultiresImplicit(sim/gpu_multires_implicit。GpuMultires::EnableImplicitConduction
+  で上限から作り GpuMultires が持つ): GpuImplicitBuild(凍った印を見る)→ GpuImplicitLevels(既定の積み方。LvTail は T-0147 まで使わない)→
+  GpuImplicit(RecordReset → 系と段を写す → RecordStep)→ GpuImplicitBuild::RecordApply → GpuImplicit::RecordRelease。CPU の系は一度も写さない。
+- **流れの段で飛ばすブロック**: CPU の InImplicitConduction と同じ判定を multires_conduct.hlsli の InImplicitConduction で。印は stepFlags に詰める
+  (ビット 3 = 陰解法・ビット 5〜7 = implicitMaxGap − 1。ルート署名は 63 / 64 語で、定数を足さない)。そのため **GPU の implicitMaxGap は 1〜8**
+  (既定 8。9 以上は FX_ASSERT。Δk 8 より細かい所はもともと陽解法のまま〔T-0119〕なので遊びは変わらない)。印の段(ConductMark)は飛ばさない(CPU と同じ)。
+- **解いた変化を足す**: implicit_build.hlsl の BuildApply(1 スレッド = 系のセル 1 つ。u5 だけ GpuImplicit のセルのバッファに結ぶ)が
+  「解いた後 − 刻みの初め」(刻みの初めは BuildCells と同じ式で熱容量と刻みの初めの温度から作り直す)と端数を伝導の変化の表へ 64bit の atomic で足す
+  (AddConductDelta を multires_bindings.hlsli へ移して共有)。CPU は頁のブロックを全部 StepPagedBlock に通すので、活性の刻みでは変わったセルの
+  ブロックを伝導の一覧へ足す(眠っているブロックも ConductApply が足す。刻む印は付けないので反応は進めない = CPU の react = false と同じ)。
+- **伝導の段の Work Graph 版**(conductionGraph): 一覧の数は TreeFractions が見出しへ写した後なので、陰解法の刻みの足す段(ConductApply)だけ Compute で投げる。
+- **同じリストに何刻みも積む**: GpuImplicit の RecordReset はバッファが COMMON の前提なので、刻みの終わりに RecordRelease で COMMON に戻す。
+  記録の形は前の刻みの数(RecordCostReadback で読み戻した、遅れたものでよい)から ShapeFrom(T-0154)。
+- **上限を超えた刻み**(系の未知数・セル・節・隣が GpuMultiresImplicitLimits を超える): 今は CPU と合わなくなる(系を作る段の overflow が立つだけ)。
+  頁・端数の枠のように「足りなければ凍らせる」形にするかは判断が要る(T-0132 のチケットの「判断待ち」)。

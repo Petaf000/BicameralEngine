@@ -136,7 +136,7 @@ foreach(_entry IN ITEMS Begin Start Smooth Restrict Prolong Converged CycleEnd F
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/implicit_conduct.hlsl PROFILE cs_6_8 ENTRY Im${_entry} NAME implicit_${_snake})
 endforeach()
-foreach(_entry IN ITEMS Clear CountBlocks ScanBlocks NumberUnknowns FaceEntries ScanEntriesLocal ScanEntriesGroups ScanEntriesAdd Boundary Cells Faces ScanCellsLocal ScanCellsGroups ScanCellsAdd FillLists SortLists)  # 陰解法の系を GPU で作る段(T-0129)
+foreach(_entry IN ITEMS Clear CountBlocks ScanBlocks NumberUnknowns FaceEntries ScanEntriesLocal ScanEntriesGroups ScanEntriesAdd Boundary Cells Faces ScanCellsLocal ScanCellsGroups ScanCellsAdd FillLists SortLists Apply)  # 陰解法の系を GPU で作る段(T-0129・解いた変化を伝導の表へ足す Apply は T-0132)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/implicit_build.hlsl PROFILE cs_6_8 ENTRY Build${_entry} NAME implicit_build_${_snake})

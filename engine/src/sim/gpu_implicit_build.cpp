@@ -148,6 +148,15 @@ namespace bicameral::sim {
             result.m_pipelines.push_back(std::move(pipeline));
         }
 
+        // --- 解いた変化を伝導の表へ足す段(T-0132。段の順〔PASS_NAMES〕には入れない)---
+        const auto applyBytecode = gpu::LoadShader(ShaderFile("Apply"));
+        if (!applyBytecode)
+            return std::unexpected(applyBytecode.error());
+
+        result.m_applyPipeline = gpu::CreateComputePipeline(device, multires.RootSignature(), *applyBytecode);
+        if (!result.m_applyPipeline)
+            return std::unexpected("解いた変化を足す段のパイプラインを作れない");
+
         result.m_work = gpu::CreateBuffer(device, result.m_workBytes, gpu::BufferKind::UnorderedAccess);
         result.m_system = gpu::CreateBuffer(device, result.m_systemBytes, gpu::BufferKind::UnorderedAccess);
         result.m_workReadback = gpu::CreateBuffer(device, uint64_t{HEADER_WORDS} * 4, gpu::BufferKind::Readback);
@@ -193,10 +202,7 @@ namespace bicameral::sim {
 
     void GpuImplicitBuild::RecordBuild(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                        GpuMultires& multires, const MultiresStepOptions& options, bool useFrozenMarks) {
-        const auto base = static_cast<uint16_t>(static_cast<int16_t>(options.subcycleBaseLevel));
-        const uint32_t packed = uint32_t{base} | (std::min(options.implicitMaxGap, 255u) << 16) |
-                                (useFrozenMarks ? FROZEN_MARKS_BIT : 0u);
-        const std::array<uint32_t, 4> external = {packed, m_limits.unknowns, m_limits.cells, 0};
+        const std::array<uint32_t, 4> external = ExternalConstants(options, useFrozenMarks);
 
         // --- 段ごとのグループの数(数は GPU が決めるので上限から。超えたグループは何もしない)---
         const uint64_t mapWords = uint64_t{m_worldBlocks} * MR_BLOCK_CELLS;
@@ -232,6 +238,25 @@ namespace bicameral::sim {
         if (m_stampPasses)
             RecordTimestamp(list, PassCount);
 
+        multires.SetExternalViews(0, 0);
+    }
+
+    // RecordBuild と同じ定数(基準のレベル・implicitMaxGap・凍った印を見るか | 未知数の上限 | セルの上限)
+    std::array<uint32_t, 4> GpuImplicitBuild::ExternalConstants(const MultiresStepOptions& options,
+                                                                bool useFrozenMarks) const {
+        const auto base = static_cast<uint16_t>(static_cast<int16_t>(options.subcycleBaseLevel));
+        const uint32_t packed = uint32_t{base} | (std::min(options.implicitMaxGap, 255u) << 16) |
+                                (useFrozenMarks ? FROZEN_MARKS_BIT : 0u);
+
+        return {packed, m_limits.unknowns, m_limits.cells, 0};
+    }
+
+    void GpuImplicitBuild::RecordApply(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       GpuMultires& multires, const MultiresStepOptions& options,
+                                       ID3D12Resource* solvedCells) {
+        multires.SetExternalViews(m_work->GetGPUVirtualAddress(), solvedCells->GetGPUVirtualAddress());
+        multires.RecordExternalDispatch(list, debugRing, m_applyPipeline.Get(), Groups(m_limits.cells),
+                                        ExternalConstants(options, true));
         multires.SetExternalViews(0, 0);
     }
 

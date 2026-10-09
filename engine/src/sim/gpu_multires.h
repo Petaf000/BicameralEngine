@@ -8,6 +8,8 @@
 // 面の流れ → 変化を足して反応)。活性の刻みでは Work Graph が刻むブロックを伝導の一覧に足し、段はその一覧のブロックだけを受け持つ。
 // 細かいレベルの小刻み(subcycleBaseLevel・maxSubcycleGap。T-0109)は、印 〜 流れを小刻みごとに積み、小刻みの終わりに変化を足して
 // (ConductEnd)変わったブロックの隣を活性のグラフで起こす。
+// 細かいレベルの熱の陰解法(MultiresStepOptions::implicitConduction。T-0132)は、流れの段が基準より細かいブロックを飛ばし、流れの後に
+// 陰解法の段(sim/gpu_multires_implicit。EnableImplicitConduction で作る)が系を作って解き、変化を伝導の表へ足す(ConductApply が足す)。
 //
 // 使い方(テスト。1 刻み = 要求の処理と影の出来事 → 刻む → 影の引き戻し。CPU の test::StepMultiresScene と同じ順。
 // 刻むのは RecordStep〔全部〕か RecordStepActive〔活性だけ。CPU の StepActive〕):
@@ -48,8 +50,17 @@ namespace bicameral::sim {
         bool conductionGraph = false;
     };
 
+    class GpuMultiresImplicit;
+    struct GpuMultiresImplicitLimits;
+
     class GpuMultires {
     public:
+        GpuMultires(GpuMultires&& other) noexcept;
+        GpuMultires& operator=(GpuMultires&& other) noexcept;
+        GpuMultires(const GpuMultires&) = delete;
+        GpuMultires& operator=(const GpuMultires&) = delete;
+        ~GpuMultires();
+
         [[nodiscard]] static std::expected<GpuMultires, std::string> Create(ID3D12Device5* device,
                                                                             const BakedReactionTable& table,
                                                                             const MultiresCapacity& capacity,
@@ -125,6 +136,15 @@ namespace bicameral::sim {
 
         // 伝導の段を Work Graph で投げるか(計測で切り替える。conductionGraph で作っていなければ true にできず false を返す)
         [[nodiscard]] bool UseConductionGraph(bool use);
+
+        // --- 細かいレベルの熱の陰解法(MultiresStepOptions::implicitConduction。T-0132)---
+        // 陰解法の段(系を作る・多重格子・解く・変化を足す)を上限の大きさで作る。implicitConduction の刻みの前に 1 回
+        [[nodiscard]] std::expected<void, std::string> EnableImplicitConduction(
+            ID3D12Device5* device, const GpuMultiresImplicitLimits& limits);
+        // 計測用: 陰解法の段の境にタイムスタンプを打つ(GpuMultiresImplicit::StampPhases)
+        void StampImplicitPhases(bool stamp);
+        // 陰解法の段(無ければ nullptr。最後に読み戻せた刻みの数を読む用)
+        [[nodiscard]] const GpuMultiresImplicit* ImplicitConduction() const { return m_implicit.get(); }
 
     private:
         // multires_bindings.hlsli の RootConstants と同じ並び
@@ -205,6 +225,8 @@ namespace bicameral::sim {
         void RecordSubstepEnd(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                               uint32_t wakeList);
         void RecordConductStage(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass);
+        void RecordImplicitConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                      const MultiresStepOptions& options);
         [[nodiscard]] std::expected<void, std::string> CreateConductionGraph(ID3D12Device5* device);
         [[nodiscard]] std::vector<std::byte> MakeTreeWordsImage(const MultiresNest& nest) const;
         [[nodiscard]] uint64_t ActivityBytes() const;
@@ -252,6 +274,9 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_activityReadback;  // 次の刻みの種の一覧
         uint32_t m_activityCurrent = 0;             // この刻みの種の一覧
         uint32_t m_activityWrite = 0;               // u13 に結ぶ一覧
+
+        // --- 細かいレベルの熱の陰解法(T-0132。EnableImplicitConduction で作る)---
+        std::unique_ptr<GpuMultiresImplicit> m_implicit;
 
         // --- 計測 ---
         ComPtr<ID3D12QueryHeap> m_timestamps;

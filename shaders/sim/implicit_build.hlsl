@@ -10,6 +10,7 @@
 // 定数: g_external0 = 基準のレベル(符号付き 16bit)| implicitMaxGap << 16 | 凍った印を見る << 24、g_external1 = 未知数の上限、g_external2 = セルの上限。
 // 段の順(どの段も前の段の書き込みを読む。段の間は UAV のバリア): Clear → CountBlocks → ScanBlocks → NumberUnknowns → FaceEntries
 //   → ScanEntries(Local → Groups → Add)→ Boundary → Cells → Faces → ScanCells(Local → Groups → Add)→ FillLists → SortLists
+// 伝導の段から呼ぶ時(T-0132)は、GpuImplicit が解いた後に Apply が解いた変化を伝導の変化の表(u11)へ足す。
 #include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
 #include "sim/multires_bindings.hlsli"
@@ -608,4 +609,28 @@ void PlaceInList(uint32_t cellId, uint32_t value) {
     }
 
     g_system.Store(ListByte(rank), value);
+}
+
+// --- Apply(T-0132。系を作る段の後、GpuImplicit が解いた後に 1 回): 解いたセルの「足した後 − 刻みの初め」を伝導の変化の表へ足す
+//     (CPU の AddImplicitConduction の後半)。この段だけ u5 = GpuImplicit のセルのバッファ(並びは系のセルと同じ ImGpuCell)。
+//     刻みの初めのエネルギーは BuildCells と同じ式(熱容量と刻みの初めの温度から)で作り直す。活性の刻みでは、変わったセルのブロックを
+//     伝導の一覧に足す(眠っているブロックにも足す。CPU は頁のブロックを全部 StepPagedBlock に通す。足すのは ConductApply)---
+[numthreads(BUILD_THREADS, 1, 1)] void BuildApply(uint3 dispatch : SV_DispatchThreadID) {
+    const uint32_t cellId = dispatch.x;
+    if (cellId >= LoadWord(HEADER_CELLS))
+        return;
+
+    const ImGpuCell cell = g_system.Load<ImGpuCell>(CellByte(cellId));
+    const int64_t startEnergy = ImEnergyFor(cell.heatCapacity, cell.startTemperature >> IM_TEMPERATURE_SHIFT);
+    MrEnergyDelta change = MrMakeEnergyDelta();
+    change.whole = cell.energy - startEnergy;
+    change.fraction = cell.fraction;
+    if (MrEnergyDeltaIsZero(change))
+        return;
+
+    const uint32_t address = LoadWord(CellAddressWord(cellId));
+    const uint32_t slot = address / MR_BLOCK_CELLS;
+    AddConductDelta(g_blocks[slot].page, address % MR_BLOCK_CELLS, change);
+    if ((g_stepFlags & MR_STEP_LISTED) != 0)
+        ConductAppend(slot);
 }
