@@ -6,7 +6,8 @@
 //   フレームのループ → EditorStatus(読み戻した刻み・ハッシュ・重さ。読むだけ)→ Build がパネルを作る
 //   → 押されたボタンは TimeRequest(editor/time_control)で返す。世界には触れない(CPU は View と Controller。D-107)。
 //   → Submit がシーンの描画の後・Present の前に、バックバッファへパネルを重ねるリストを direct キューへ投げる。
-// エディタは CPU を好きなだけ使ってよい(ADR-0001)。世界を変える操作は、ここからもコマンド(sim/command.h)として渡す(今はまだ無い)。
+// エディタは CPU を好きなだけ使ってよい(ADR-0001)。世界を変える操作は、ここからもコマンド(sim/command.h)として渡す
+// (実験室〔editor/lab_panel〕の箱に物を置く操作もコマンド。T-0142)。
 #pragma once
 
 #include <array>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "editor/graph_panel.h"
+#include "editor/lab_panel.h"
 #include "editor/time_control.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
@@ -92,6 +94,9 @@ namespace bicameral::editor {
         [[nodiscard]] bool Submit(gpu::Queue& direct, ID3D12Resource* backBuffer,
                                   D3D12_CPU_DESCRIPTOR_HANDLE renderTargetView);
 
+        // 実験室のパネル(T-0142)
+        [[nodiscard]] LabPanel& Lab() { return *m_lab; }
+
     private:
         EditorOverlay(Window& window, uint32_t frameCount);
 
@@ -119,6 +124,7 @@ namespace bicameral::editor {
         };
 
         Window& m_window;
+        std::unique_ptr<LabPanel> m_lab;
         bool m_contextCreated = false;
         bool m_win32Initialized = false;
         bool m_dx12Initialized = false;

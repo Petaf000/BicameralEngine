@@ -54,6 +54,7 @@ target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 # 細かくする・粗くする・影の引き戻しの本体は shaders/common/multires.hlsli(HLSL と共通)。
 add_library(bicameral_multires STATIC
   src/sim/implicit_conduction.cpp
+  src/sim/lab_box.cpp
   src/sim/multires_activity.cpp
   src/sim/multires_conduction.cpp
   src/sim/multires_implicit_conduction.cpp
@@ -74,11 +75,13 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 # --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
+  src/sim/gpu_lab_box.cpp
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp
   src/sim/gpu_implicit_build.cpp
   src/sim/gpu_implicit_levels.cpp
   src/sim/gpu_physics.cpp
+  src/sim/lab_session.cpp
   src/sim/probe_peek.cpp
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
@@ -142,6 +145,7 @@ add_executable(bicameral
   src/main.cpp
   src/editor/editor_overlay.cpp
   src/editor/graph_panel.cpp
+  src/editor/lab_panel.cpp
   src/frame/frame_loop.cpp
   src/frame/trace_capture.cpp
   src/platform/agility_sdk.cpp

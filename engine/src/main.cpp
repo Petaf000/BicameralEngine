@@ -36,6 +36,7 @@
 //   --save-points <n>                巻き戻しの保存点の数(--editor の既定は 6。0 なら巻き戻さない。1 つ約 33 MiB の VRAM。T-0143)
 //   --save-interval <t>              保存点へ写す間隔(刻み。既定 120)
 //   --auto-rewind                    保存点が 2 つできたら、古い方へ 1 回巻き戻す(人がいない確認。--replay と一緒にハッシュ列を確かめる)
+//   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -304,6 +305,8 @@ namespace {
             loop.autoTime = true;
         else if (argument == L"--auto-rewind")
             loop.autoRewind = true;
+        else if (argument == L"--auto-lab")
+            loop.autoLab = true;
         else
             return false;
 

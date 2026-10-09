@@ -1,0 +1,88 @@
+// lab_session.h — 実験室(14 §2・T-0142)の 1 回の実験: 同じ箱を GPU(sim/gpu_lab_box)と CPU リファレンス(sim/lab_box の StepLabBox)で
+// 並べて刻み、刻みごとに状態の全部を比べる。食い違ったら最初の刻みとセルを残して止まる。エディタのパネル(editor/lab_panel)とテストが使う。
+//
+// データの流れ:
+//   パネルの「置く」「温度」→ Place・SetTemperature(次の刻みのコマンドにする。CPU は箱に触れない)
+//   → Step(n): 刻みごとに 1 本のリスト(コマンドを当てる → 刻む → 読み戻す)を自分のキューに投げて待つ → CPU も同じ刻み → 比べる
+//   → Recording()(コマンドの列 + ハッシュの列)を保存 → Replay で初めの箱から流し直し、ハッシュの列が記録と同じかも確かめる。
+// 箱は小さい(512 セル)ので、1 刻みずつ待つ(エディタの道具。ゲームの世界のフレームの歩調〔ADR-0011〕とは別のキュー)。
+#pragma once
+
+#include <cstdint>
+#include <expected>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "gpu/debug_ring.h"
+#include "gpu/immediate_queue.h"
+#include "sim/gpu_lab_box.h"
+#include "sim/lab_box.h"
+
+namespace bicameral::sim {
+
+    class LabSession {
+    public:
+        // table は写して持つ(呼ぶ側の表が消えてもよい)
+        [[nodiscard]] static std::expected<LabSession, std::string> Create(ID3D12Device5* device,
+                                                                           D3D12_COMMAND_LIST_TYPE queueType,
+                                                                           const BakedReactionTable& table);
+
+        // --- 置く(次の刻み NextTick() のコマンドにする。1 刻みに LAB_MAX_COMMANDS_PER_TICK まで)---
+        bool Place(LabCellPosition cell, std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin);
+        bool SetTemperature(LabCellPosition cell, uint32_t temperatureMilliKelvin);
+
+        // tickCount 刻み進める。食い違ったらその刻みで止まり(Mismatch())、以後は Reset まで進めない。GPU の失敗はエラー
+        [[nodiscard]] std::expected<void, std::string> Step(uint32_t tickCount);
+
+        // 初めの箱(300 K の空気)に戻し、記録を空にする
+        [[nodiscard]] std::expected<void, std::string> Reset();
+
+        // 初めの箱から記録のコマンドを流し直す(記録の刻みの数まで)。記録のハッシュと違った最初の刻みは ReplayDivergence()
+        [[nodiscard]] std::expected<void, std::string> Replay(const LabRecording& recording);
+
+        // --- 見る ---
+        [[nodiscard]] uint64_t NextTick() const { return m_tick; }
+        [[nodiscard]] const MultiresNest& Cpu() const { return m_cpu; }
+        [[nodiscard]] const MultiresNest& Gpu() const { return m_read; }
+        [[nodiscard]] const BakedReactionTable& Table() const { return m_table; }
+        [[nodiscard]] const std::optional<LabMismatch>& Mismatch() const { return m_mismatch; }
+        [[nodiscard]] std::optional<uint64_t> ReplayDivergence() const { return m_replayDivergence; }
+        [[nodiscard]] bool Replaying() const { return m_replayEnd > m_tick; }
+        [[nodiscard]] size_t PendingCommands() const { return m_pending.size(); }
+        [[nodiscard]] LabRecording Recording() const;
+
+    private:
+        LabSession(BakedReactionTable table, gpu::ImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box);
+
+        bool Queue(const Command& command);
+        [[nodiscard]] std::vector<Command> TakeCommands(uint64_t tick);
+        [[nodiscard]] std::expected<void, std::string> StepOne();
+
+        BakedReactionTable m_table;
+        gpu::ImmediateQueue m_queue;
+        gpu::DebugRing m_ring;
+        GpuLabBox m_box;
+
+        // --- 箱 ---
+        MultiresNest m_cpu;   // CPU リファレンス
+        MultiresNest m_read;  // GPU から読み戻した箱
+        bool m_uploaded = false;
+        uint64_t m_tick = 0;  // 次に刻む刻み
+        uint32_t m_sequence = 0;
+
+        // --- コマンド ---
+        std::vector<Command> m_pending;    // 置いたが、まだ刻んでいない
+        std::vector<Command> m_scheduled;  // 再生中の記録のうち、まだ刻んでいない
+        std::vector<Command> m_history;    // 刻んだ(記録に入る)
+
+        // --- 比べた結果 ---
+        std::vector<uint64_t> m_hashes;  // 刻みごとの CPU の HashWholeNest
+        std::optional<LabMismatch> m_mismatch;
+        std::vector<uint64_t> m_replayHashes;
+        uint64_t m_replayEnd = 0;
+        std::optional<uint64_t> m_replayDivergence;
+    };
+
+}  // namespace bicameral::sim

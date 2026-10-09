@@ -1,4 +1,4 @@
-// multires_nest_internal.h — multires_nest.cpp・multires_tree.cpp・multires_activity.cpp・multires_conduction.cpp が共有する、配列の読み書きと 1 刻みの小さな道具(外からは使わない)。
+// multires_nest_internal.h — multires_nest.cpp・multires_tree.cpp・multires_activity.cpp・multires_conduction.cpp・lab_box.cpp が共有する、配列の読み書きと 1 刻みの小さな道具(bicameral_multires の外からは使わない)。
 #pragma once
 
 #include <cstddef>

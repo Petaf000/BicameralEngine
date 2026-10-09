@@ -80,6 +80,9 @@ namespace bicameral::frame {
         bool autoTime =
             false;  // 決まったフレームで止める・1 刻み・速さを操作し、止まったか・1 刻みずつ進んだかを確かめる(--auto-time)
 
+        bool
+            autoLab = false;  // 実験室で木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--auto-lab。T-0142)
+
         // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
         uint32_t savePoints = AUTO_SAVE_POINTS;  // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)
         uint64_t saveIntervalTicks = 120;        // 何刻みごとに写すか(その倍数の刻みの境界で写す)

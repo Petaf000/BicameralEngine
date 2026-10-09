@@ -148,6 +148,7 @@ foreach(_entry IN ITEMS Clear Cells CellLinks NodeHash NodeFirst ParentScanLocal
 endforeach()
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY MirrorWorld NAME multires_peek_mirror)  # 覗き窓の世界の写し(T-0096)
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY ExtractShadow NAME multires_peek_extract)  # 覗き窓の抽出(T-0096)
+bicameral_add_shader(sim/lab_box.hlsl PROFILE cs_6_8 ENTRY ApplyLabCommands NAME lab_box_apply)  # 実験室の箱のコマンドを当てる(T-0142)
 bicameral_add_shader(render/probe_view.hlsl PROFILE vs_6_8 ENTRY VSMain NAME probe_view_vs)
 bicameral_add_shader(render/probe_view.hlsl PROFILE ps_6_8 ENTRY PSMain NAME probe_view_ps)
 
