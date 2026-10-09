@@ -7,7 +7,7 @@
 - log2・割り算を要る時だけにする形は CPU の答えは同じだが GPU の仮の世界で 8〜12% 遅く、採らなかった(ADR-0018 追記)。T-0134・T-0020・T-0023 を合わせた main は release の全部 87 本が通過。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
-- **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134。次は T-0135)**:
+- **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕。次は T-0136・T-0147・T-0137)**:
   CPU の方式②(engine/src/sim/implicit_conduction.*・multires_implicit_conduction.cpp。options.implicitConduction 既定 false)と GPU の解く側
   (gpu_implicit.*・implicit_conduct.hlsl)・系を作る側(gpu_implicit_build.*・implicit_build.hlsl)・多重格子の段(gpu_implicit_levels.*・implicit_levels.hlsl)。
   どれも CPU と番号まで毎刻みビット一致。決めたことは ADR-0019 の追記。動かし方: `-Filter "^(multires_implicit(_tree)?|gpu_multires_implicit(_tree|_build)?(_warp)?)$"`、
@@ -15,11 +15,11 @@
   注意: GpuImplicit はまだ CPU の系で Create する(節の並び・ImTail も CPU から。T-0135)。GpuImplicitLevels の RecordCopyTo・RecordReadback は RecordBuild と同じリストで。
   多重格子の段の費用は上限 64 で 1.6〜2.7 ms(空の回 948 Dispatch の固定費。T-0135)。判断待ち(T-0119): 1 刻みより速く落ち着く細かいむら・基準 + 8 段より細かい所(どちらもおすすめ A このまま)。
   release の WARP でも C4189(implicit_conduction.cpp の 'added'。FX_ASSERT の中だけで使う)が出る(wt2 の範囲なので触っていない)。
-- **Luau(wt3。T-0020 済み → T-0138)**: 殻(CPU だけ。engine/src/script/luau_sandbox.*)。ADR-0030。vcpkg.json に luau、CMakePresets.json の環境に XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。
+- **Luau(wt3。T-0020・T-0138 済み → T-0021・T-0140・T-0139)**: パッケージ(engine/src/script/luau_package.*・script_value.*。ADR-0031・13 §2.2・15 §4。合わせ方は仮で C〔QUESTIONS Q8〕)。 殻(CPU だけ。engine/src/script/luau_sandbox.*)。ADR-0030。vcpkg.json に luau、CMakePresets.json の環境に XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。
   Luau のヘッダは pch.h に入れていない。ログは Channel::Tool。次: T-0138 → T-0021 → T-0139。
 - **エディタの殻(T-0023 済み → T-0142)**: `bicameral --editor`(パネル「時間」「状態」。--auto-time は人がいない確認用)。ImGui は editor_overlay.cpp だけ(pch.h に入れない)。
   時間の操作は世界に入らない(ADR-0035)。4 つのランナーが同じ GPU を使っている間は debug 版の最初のフレームが 2〜4 分かかることがある。
-- **スクリーンショット(wt4。T-0025)**: 作業中。
+- **スクリーンショット(T-0025 済み)**: `--screenshot-tick t`(刻み t で世界を止めて写す)・`--auto-ignite`・tools/image_compare/image_compare.py(8/255 を超える画素が 0.1% 超で失敗)・基準 tests/images/*.png・置き換え方は 16 §5。画像のテストは debug で 1 本約 2 分。
 
 ## 動いているもの(確認方法つき)
 - **テスト(2026-10-09、T-0123)**: 最初に T-0134・T-0020・T-0023 を合わせた main(変更前)で release の全部 87 本を 3 回に分けて通過
