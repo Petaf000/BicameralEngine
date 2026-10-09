@@ -149,6 +149,24 @@ namespace {
         EXPECT(scheduler.TakeUnits() == 0);
     }
 
+    // 止まる刻み(--screenshot-tick。T-0025): その刻みの始めで止まり、時間が余っても先へ行かない。刻みの途中からでも最後の単位までは進む
+    void TestStopTick() {
+        SimScheduler scheduler(3);
+        for (uint32_t unit = 0; unit < 3; ++unit)
+            scheduler.ReportUnitTime(unit, 0.1);
+
+        scheduler.SetStopTick(2);
+        EXPECT(!scheduler.ReachedStopTick());
+        scheduler.AddRealTime(5.0 / 60.0);
+        EXPECT(scheduler.TakeUnits() == 6);  // 刻み 0 と 1 だけ
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 2, .unit = 0}));
+        EXPECT(scheduler.ReachedStopTick());
+
+        scheduler.AddRealTime(1.0 / 60.0);
+        EXPECT(scheduler.TakeUnits() == 0);
+        EXPECT(scheduler.ReachedStopTick());
+    }
+
 }  // namespace
 
 int main() {
@@ -158,6 +176,7 @@ int main() {
     TestUnitHeavierThanBudget();
     TestUnmeasuredIsCautious();
     TestCatchUpLimit();
+    TestStopTick();
     if (failureCount == 0)
         std::printf("sim_scheduler_test: OK\n");
 

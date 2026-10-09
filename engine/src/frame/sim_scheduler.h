@@ -52,6 +52,10 @@ namespace bicameral::frame {
         void ClearBacklog() { m_pendingTicks = 0.0; }
         void AddTicks(uint32_t ticks) { m_pendingTicks += static_cast<double>(ticks); }
 
+        // この刻みの始めで止まる(これより先の刻みを始めない。--screenshot-tick。T-0025)。世界の結果は変えない
+        void SetStopTick(uint64_t tick) { m_stopTick = tick; }
+        [[nodiscard]] bool ReachedStopTick() const { return m_cursor.tick >= m_stopTick && m_cursor.unit == 0; }
+
         // 終わった単位の GPU の時間(数フレーム遅れで届く)。unit は刻みの中の番号
         void ReportUnitTime(uint32_t unit, double gpuMilliseconds);
 
@@ -80,6 +84,7 @@ namespace bicameral::frame {
 
         // --- 進み ---
         SimCursor m_cursor;
+        uint64_t m_stopTick = UINT64_MAX;  // この刻みより先を始めない(既定: 止まらない)
         double m_pendingTicks = 0.0;
         uint64_t m_droppedTicks = 0;
 

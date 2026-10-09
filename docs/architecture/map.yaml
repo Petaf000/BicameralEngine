@@ -58,8 +58,12 @@ views:
       - { id: debugcamera, group: framelib, label: "OrbitCamera・PickSliceCell<br/>格子を回るカメラ・光線が断面に当たるセル",
           code: "engine/src/render/debug_camera.cpp::PickSliceCell", ticket: T-0015,
           note: "描画(probe_view.hlsl)と同じ式で光線を作る。debug_camera_test で画素 → セルの往復を確かめる" }
-      - { id: screenshot, group: framelib, label: "ScreenshotCapture<br/>最後のフレームを BMP に(--screenshot)",
-          code: "engine/src/render/screenshot.cpp::ScreenshotCapture::Record", ticket: T-0015 }
+      - { id: screenshot, group: framelib, label: "ScreenshotCapture<br/>最後のフレームか刻み t の画面を BMP に(--screenshot)",
+          code: "engine/src/render/screenshot.cpp::ScreenshotCapture::Record", ticket: T-0015,
+          note: "--screenshot-tick t: 刻み t の始めで止め、S(t) を描いたフレームを写す(T-0025。16 §5)" }
+      - { id: imagecompare, group: framelib, label: "image_compare.py<br/>基準の画像(tests/images)と許容差で比べる・差の画像",
+          code: "tools/image_compare/image_compare.py::compare", ticket: T-0025, doc: docs/design/16-debug-test.md,
+          note: "色の差 > 8 の画素が 0.1 % を超えたら失敗。ctest image_*(gpu)・image_compare_selftest(CI)" }
       - { id: scheduler, group: framelib, label: "SimScheduler<br/>1 フレームに投げる単位の数(予算・単位の GPU 時間)",
           code: "engine/src/frame/sim_scheduler.cpp::SimScheduler::TakeUnits", ticket: T-0012, doc: docs/decisions/ADR-0011-sim-frame-budget.md,
           note: "予算 = 1000 / 目標 fps − 描画 − 余裕。刻みはフレームをまたぐ。追いつけない分は捨てる(D-202)。sim_scheduler_test" }
@@ -495,6 +499,7 @@ views:
       - [frameloop, viewcontroller, "入力・描画の定数"]
       - [viewcontroller, debugcamera]
       - [frameloop, screenshot, "--screenshot"]
+      - [screenshot, imagecompare, "BMP(ctest)"]
       - [frameloop, scheduler, "単位の数"]
       - [frameloop, editoroverlay, "状態 → パネル"]
       - [editoroverlay, timecontrol, "止める・1 刻み・速さ"]

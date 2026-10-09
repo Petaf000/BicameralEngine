@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 
 #include "core/aliases.h"
 #include "gpu/device.h"
@@ -39,11 +40,16 @@ namespace bicameral::frame {
         uint32_t simSplit = 1;  // 何個の単位に分けるか
 
         // --- 入力・記録・再生 ---
-        bool autoClick = false;   // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
-        bool autoPush = false;    // 決まったフレームで積み木を押す(人がいない確認で押すコマンドの流れを通す。T-0098)
+        bool autoClick = false;  // 自動でクリックを入れる(人がいない自動の確認でイベントの流れを通す)
+        bool autoPush = false;   // 決まったフレームで積み木を押す(人がいない確認で押すコマンドの流れを通す。T-0098)
+        // 最初のフレームに 1 回だけ木箱の壁に火をつける。最初に投げる刻み(0)に載るので、どの実行でも世界が同じ(T-0025)
+        bool autoIgnite = false;
         fs::path recordPath;      // 空でなければ、終わるときに再生ファイルを書く
         fs::path replayPath;      // 空でなければ、この再生ファイルのコマンドで進めてハッシュを突き合わせる
-        fs::path screenshotPath;  // 空でなければ、最後のフレーム(frameLimit)を BMP に書く
+        fs::path screenshotPath;  // 空でなければ、最後のフレーム(frameLimit)か screenshotTick の画面を BMP に書く
+        // あれば、その刻みの始めで世界を止め、S(その刻み) を描いたフレームを写して終える(決まった画面。画像の比較。T-0025)。
+        // frameLimit はそこまでの上限になる(届かなければ失敗)
+        std::optional<uint64_t> screenshotTick;
 
         // --- 連鎖のトレース(T-0087・T-0088。frame/trace_capture.h)---
         // 空でなければ、起動時から trace の範囲を集め、範囲の刻みが終わったら(終わりが無ければ終わるときに)刻みごとの木にして書く

@@ -66,6 +66,10 @@ namespace bicameral::frame {
             if (startsTick && m_pendingTicks < 1.0)
                 break;
 
+            // 止まる刻みに着いた(--screenshot-tick)
+            if (startsTick && m_cursor.tick >= m_stopTick)
+                break;
+
             const double estimate = EstimateMilliseconds(m_cursor.unit, budget);
             if (count > 0 && used + estimate > budget)
                 break;
