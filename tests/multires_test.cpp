@@ -239,8 +239,36 @@ namespace {
                "入りきらない子は残り、入りきる子は無くなる");
     }
 
+    // 世界の刻みで上限に当たる(T-0163): 待たせる・選ぶを毎刻み数え、元素とエネルギーは毎刻み同じ
+    void TestLimitsStep(bool conduction) {
+        const auto table = BakeReactionTable(test::MakeLimitsTestTable());
+        if (!table) {
+            Expect(false, "上限の試験の表をベイクできる");
+            return;
+        }
+
+        MultiresNest nest = test::MakeCoarsenFullNest(*table);
+        const ConservedTotals initial = ComputeConservedTotals(nest, *table, 1);
+        bool conserved = true;
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            StepNest(nest, *table, test::LIMITS_STEP_SEED, tick, test::LimitsStepOptions(conduction));
+            conserved = conserved && ComputeConservedTotals(nest, *table, 1) == initial;
+        }
+
+        const uint32_t held = nest.counters[MR_COUNTER_LIMIT_PRODUCTS];
+        const uint32_t limited = nest.counters[MR_COUNTER_LIMIT_CANDIDATES];
+        Log(Channel::Sim, Level::Info,
+            "世界の刻みで上限に当たる(伝導 {}): 待たせた (セル, 刻み) {}・選んだ (セル, 刻み) {}",
+            conduction ? "あり" : "なし", held, limited);
+        Expect(conserved, "上限に当たる世界の刻み: 元素とエネルギーが毎刻み同じ");
+        Expect(held > 0, "上限に当たる世界の刻み: 9 種目の生成物を待たせた刻みを数える");
+        Expect(limited > 0, "上限に当たる世界の刻み: 進む規則を選んだ刻みを数える");
+    }
+
     int Run() {
         TestCoarsenFull();
+        TestLimitsStep(false);
+        TestLimitsStep(true);
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
             Log(Channel::Sim, Level::Error, "試験の表をベイクできない: {}", table.error());

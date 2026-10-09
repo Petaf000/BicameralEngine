@@ -472,8 +472,9 @@ bool ApplyCellDelta(MrBlock block, uint32_t index, inout RxCell cell, inout MrFr
     return true;
 }
 
-// セル 1 つ: 変化を足し(読んだら 0 に戻す)、react なら待ちの丸めで反応を進め、起こす刻みを wakeTick の最小に入れる。変わったら true
-bool ApplyCell(MrBlock block, uint32_t index, bool react, inout uint64_t wakeTick) {
+// セル 1 つ: 変化を足し(読んだら 0 に戻す)、react なら待ちの丸めで反応を進め、起こす刻みを wakeTick の最小に入れる
+// (上限に当たった印は tally に足す。T-0163)。変わったら true
+bool ApplyCell(MrBlock block, uint32_t index, bool react, inout uint64_t wakeTick, inout MrLimitTally tally) {
     const uint32_t address = PageCellAddress(block.page, index);
     RxCell cell = g_cells[address];
     const RxCell before = cell;
@@ -490,6 +491,7 @@ bool ApplyCell(MrBlock block, uint32_t index, bool react, inout uint64_t wakeTic
         const RxWaitStep step = MrStepCellWait(MakeTable(), cell, seed, tick, block, index);
         wakeTick = MinTick(wakeTick, step.wakeTick);
         cell = step.cell;
+        tally = MrAddLimits(tally, step.limits);
     }
 
     g_cells[address] = cell;
@@ -512,12 +514,14 @@ void ConductApplyBlock(uint32_t slot, uint32_t thread) {
     const bool react = IsConductStepped(slot, block);
     bool changed = false;
     uint64_t wakeTick = RX_WAIT_NEVER;
+    MrLimitTally tally = MrMakeLimitTally();
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
         if (MrIsSteppedCell(block, index))
-            changed = ApplyCell(block, index, react, wakeTick) || changed;
+            changed = ApplyCell(block, index, react, wakeTick, tally) || changed;
     }
 
+    CountLimits(tally);
     OrGroupAny(changed);
     const uint64_t blockWakeTick = GroupMinTick(thread, wakeTick);
     if (thread != 0)

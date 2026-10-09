@@ -61,15 +61,25 @@ WaitBlockResult EndWaitReduce(uint32_t thread, uint64_t wakeTick) {
     return result;
 }
 
+// スレッドで足した上限の印を数える器に足す(T-0163。0 の時は atomic を使わない。足す順に依らない)
+void CountLimits(MrLimitTally tally) {
+    if (tally.productsHeld != 0)
+        InterlockedAdd(g_counters[MR_COUNTER_LIMIT_PRODUCTS], tally.productsHeld);
+
+    if (tally.candidatesLimited != 0)
+        InterlockedAdd(g_counters[MR_COUNTER_LIMIT_CANDIDATES], tally.candidatesLimited);
+}
+
 // --- 刻む ---
 
-// 頁を持つブロックの刻むセルを待ちの丸めで 1 刻み(CPU の StepPagedBlock の反応)
+// 頁を持つブロックの刻むセルを待ちの丸めで 1 刻み(CPU の StepPagedBlock の反応。上限に当たった印も数える。T-0163)
 WaitBlockResult StepPagedWait(uint32_t slot, uint32_t thread) {
     BeginWaitReduce(thread);
     const MrBlock block = g_blocks[slot];
     const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     uint64_t wakeTick = RX_WAIT_NEVER;
+    MrLimitTally tally = MrMakeLimitTally();
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / WAIT_STEP_THREADS; ++k) {
         const uint32_t index = thread + (WAIT_STEP_THREADS * k);
         if (!MrIsSteppedCell(block, index))
@@ -80,9 +90,12 @@ WaitBlockResult StepPagedWait(uint32_t slot, uint32_t thread) {
         const RxWaitStep step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
         g_cells[address] = step.cell;
         wakeTick = MinTick(wakeTick, step.wakeTick);
+        tally = MrAddLimits(tally, step.limits);
         if (MrCellChanged(before, step.cell))
             InterlockedOr(gs_waitChanged, 1u);
     }
+
+    CountLimits(tally);
 
     return EndWaitReduce(thread, wakeTick);
 }

@@ -1,10 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0022 反応の評価の最初の段(上限を超えた時に黙って捨てる 3 か所を塞ぐ)— 完了(残りは T-0163・T-0164)
+最終更新: 2026-10-09 / チケット: T-0163 成分の数と候補の数の分布・世界の刻みで上限の印を数える — 完了(二段の成分は T-0175・T-0176、仮の世界は T-0177 に分けた)
 
 ## 状態(3 行以内)
-- 上限(1 セル 8 種・同時に進む規則 16)に当たっても保存を破らない: 9 種目の生成物を作る規則は待たせる・17 本以上は刻みごとに乱数で 16 本を選ぶ・入りきらない子は粗くしない(当座のふるまいは仮 = QUESTIONS Q19)。
-- CPU と HW・WARP が 3 つの場面で毎刻みビット一致・保存もビット一致。t-0136・t-0021・t-0143 を合わせた main は release の全部 96 本が通過(直したものなし)。
+- 多重解像度の世界の刻みで、反応の上限に当たった (セル, 刻み) を数える(MR_COUNTER_LIMIT_PRODUCTS・_CANDIDATES)。CPU と HW・WARP で毎刻み同じ数(状態の要約に入る)。
+- 分布: 燃える木箱(物質 8・規則 5)は最大 6 種・進む規則は最大 4。試験の表では K を決められないので 8 のまま(打ち切り条件)。上限の当座のふるまいは仮のまま(Q19)。
+- t-0154・t-0157・t-0142 を合わせた main は release の全部 104 本が通過(直したものなし。gpu_multires の 20 本はこの変更を入れた後に流した)。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。T-0154 済み。次は T-0147・T-0137・T-0132)**: T-0154 で記録の形を前の刻みの GPU の数から選ぶ(GpuImplicit::ShapeFrom・IM_PLAN_WANTED_TAIL。T-0132 でも使う)。 T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
@@ -22,6 +23,14 @@
 - **スクリーンショット(T-0025 済み)**: `--screenshot-tick t`(刻み t で世界を止めて写す)・`--auto-ignite`・tools/image_compare/image_compare.py(8/255 を超える画素が 0.1% 超で失敗)・基準 tests/images/*.png・置き換え方は 16 §5。画像のテストは debug で 1 本約 2 分。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0163)**: 最初に t-0154・t-0157・t-0142 を合わせた main(変更前)を release で
+  `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab)"` 43 本(約 6 分)・
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_replay)"` 40 本(約 26 分)が通過(直したものなし。失敗・流し直しなし)。
+  時間の約束のため `^gpu_multires`(20 本)と `^window_lab$` は変更を入れた後に流した: `-Filter "^gpu_multires"` 20 本が通過(約 55 分。並走の負荷で implicit_tree 720 s・subcycle_warp 421 s。足した RunLimitsStep は gpu_multires・_warp の中)、
+  `-Filter "^(multires|reaction|reaction_package_scene|window_lab|lab_box|gpu_lab_box(_warp)?|gpu_probe_peek(_warp)?|gpu_reaction_limits(_warp)?)$"` 11 本が通過(約 2 分)。
+  合わせて 104 本。release・debug のビルドは警告なし(前からの implicit_conduction.cpp の C4189 だけ)。tidy は流していない。archmap OK(135)。
+  足したテスト: multires_test の TestLimitsStep(伝導なし・あり。上限の場面を 12 刻み: 待たせた 8448・選んだ 8448 (セル, 刻み)、保存は毎刻み同じ)・
+  gpu_multires_test の RunLimitsStep(同じ場面を HW・WARP で。数える器も毎刻み CPU と同じ)。分布の測り方: `job.py run -Preset release -Exe reaction_package_scene_test -- --distribution 600 10`(約 1 分)。
 - **テスト(2026-10-09、T-0022)**: 最初に t-0136・t-0021・t-0143 を合わせた main(変更前)で release の全部 96 本を 3 回に分けて通過(直したものなし。失敗も流し直しも無し)
   (`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image)"` 40 本・約 5 分 /
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe)|window_replay)"` 36 本・約 22 分 / `-Filter "^gpu_multires"` 20 本・約 41 分)。
@@ -92,8 +101,8 @@
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
 - **上限の当座のふるまい(T-0022。仮 = QUESTIONS Q19)**: 8 種のセルで 9 種目を作る反応は枠が空くまで進まない・17 本以上は平均 16/N の速さ・入りきらない子は細かいまま。
-  世界の刻み(多重解像度・仮の世界)では印(RxWaitStep::limits)は立つが、まだ数えていない(T-0163)。数えているのは 1 セルの反応の GPU(reaction_cells.hlsl の u1)と、
-  粗くするのを断った数(MR_COUNTER_COARSEN_FULL)。粗くする要求の解決(TreeResolve)は 1 スレッドで 64 セルを MrCoarsenCell するので、要求 1 件ごとに重い(未計測)。
+  多重解像度の世界の刻みでは MR_COUNTER_LIMIT_PRODUCTS・_CANDIDATES に数える(T-0163)。仮の世界ではまだ数えていない(T-0177)。ほかに数えているのは 1 セルの反応の GPU
+  (reaction_cells.hlsl の u1)と、粗くするのを断った数(MR_COUNTER_COARSEN_FULL)。粗くする要求の解決(TreeResolve)は 1 スレッドで 64 セルを MrCoarsenCell するので、要求 1 件ごとに重い(未計測)。
 - **HW の Work Graph は反応の核を 1 ノードに 3〜4 か所展開すると DEVICE_HUNG**(T-0124。原因は推定・BACKLOG)。反応はどこも待ちの丸めだけ(今までの丸めは T-0130 で消した)。
 - 待ちの丸めの 1 回の評価は重い(セルの規則ごとに log2 2 回と 128bit の割り算)。GPU は眠っているブロックを評価しないので費用は起きている所だけ(T-0123)。
   CPU の StepNest・StepActive(確かめる側)は全部を評価するので、debug の CPU のテストは T-0115 の前より遅いまま(multires_conduction・subcycle)。
@@ -117,6 +126,11 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。T-0163)数える単位は「上限に当たった (セル, 刻み)」の数。頁のセルを刻んだ時だけ数え、一様なブロックの試しの評価(MrUniformWaitOf・
+  EvaluateUniformWait・EvaluateUniformCells)は数えない(変わるなら頁に広げて刻み直す所で数える)。GPU は眠っているブロックを評価しないが、眠っているブロックは
+  進む規則が無い(offered = 0)ので印が立たず、CPU が全部を評価しても同じ数になる。GPU はスレッドで足してから 0 でない時だけ InterlockedAdd(MrLimitTally・CountLimits)。
+- (Claude が決めた。T-0163)K(インラインの成分の数)は 8 のまま(打ち切り条件。試験の表は物質 8 しかない)。二段の成分は CPU(T-0175)と GPU(T-0176)に分けた。
+- (Claude が決めた。T-0163)時間の約束(2 時間)のため、合わせた状態の gpu_multires の 20 本と window_lab は、変更を入れた後のビルドで流した(この変更は数える器を足すだけ)。
 - (Claude が決めた。T-0022)① 生成物を全部足して入りきらなければ、元のセルに無い物質を作る規則を全部進行度 0 にしてやり直す(RxApplyExtentsHeld。
   残りの生成物はどれも元のセルにある物質なので必ず入る)。待たせた規則の取り合いの分け前はほかに回さない(取り合いを解き直さない = 核を大きくしない)。
 - (Claude が決めた。T-0022)② 優先度 = FxHashCombine(RxSelectSeed(世界, 刻み, セル), 規則の鍵)。小さい 16 個を 1 回の走査で残す(一杯の時は最も後の 1 つと比べて置き換える。
@@ -162,6 +176,9 @@
 NEXT.md の先頭。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **上限の印の数える器(T-0163)**: MR_COUNTER_LIMIT_*(multires.hlsli)は CPU の StepPagedBlock と GPU の StepPagedWait・ConductApplyBlock(ApplyCell)の 3 か所。
+  反応を刻む段を足す時はここにも足す(数える器は HashWholeNest に入るので、忘れると gpu_multires_* が食い違って教える)。
+  分布の測定は reaction_package_scene_test の --distribution(進む規則の数は伝導の前のセルで数えた近似。ProbeReference::ChangedMarks を読む)。
 - **静かな葉を粗くする判定(T-0113)**: multires_activity.hlsli の MrNeedsQuietCheck・MrIsCoarsenableQuietLeaf・MrCoarsenGroupWithin(Cells の約束: Cell(index)・Temperature(cell))。
   CPU は multires_activity.cpp の CheckQuietLeaves(SubmitQuietRequests の初め)、GPU は multires_tree.hlsl の TreeQuietCheck(PassQuietCheck。木の段は 12 個)。
   quietCheck は busyTick が変わると自動で古くなる(書き手を増やしても消す必要はない)。セルを書き換える段を足す時に busyTick を書き忘れると、古い判定のまま粗くなる。

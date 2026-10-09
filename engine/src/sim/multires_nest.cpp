@@ -197,13 +197,14 @@ namespace bicameral::sim {
         }
 
         // 頁を持つブロックの刻むセル: 伝導の変化(deltas が空なら無し)を足し、react なら反応を待ちの丸めで進める
-        // (変わらなかったセルの次に評価の要る刻みの最小も求める。T-0115)
+        // (変わらなかったセルの次に評価の要る刻みの最小も求める。T-0115。上限に当たった印を数える器に足す。T-0163)
         nest_detail::BlockStepResult StepPagedBlock(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
                                                     uint64_t worldSeed, uint64_t tick, bool react,
                                                     std::span<const MrEnergyDelta> deltas) {
             const MrBlock block = nest.blocks[slot];
             nest_detail::BlockStepResult result;
             result.evaluated = react;
+            MrLimitTally tally = MrMakeLimitTally();
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
@@ -224,11 +225,16 @@ namespace bicameral::sim {
                     const RxWaitStep step = MrStepCellWait(view, cell, worldSeed, tick, block, index);
                     result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     cell = step.cell;
+                    tally = MrAddLimits(tally, step.limits);
                 }
 
                 result.changed = result.changed || MrCellChanged(before, cell) ||
                                  FractionEnergy(nest, block.fraction, index) != fractionBefore;
             }
+
+            // --- 上限に当たった印を数える(T-0163。GPU の StepPagedWait・ApplyCell と同じ数)---
+            nest.counters[MR_COUNTER_LIMIT_PRODUCTS] += tally.productsHeld;
+            nest.counters[MR_COUNTER_LIMIT_CANDIDATES] += tally.candidatesLimited;
 
             return result;
         }

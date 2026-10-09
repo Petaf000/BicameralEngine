@@ -207,6 +207,44 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // 世界の刻みで上限に当たる(T-0163)。同じ木を要求なしで刻み、上限の印の数(状態の要約に入る数える器)も毎刻み比べる
+    std::expected<RunResult, std::string> RunLimitsStep(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                        gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                        bool conduction) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
+        sim::MultiresNest read;
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::LIMITS_STEP_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::StepNest(cpu, table, test::LIMITS_STEP_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(compared.error());
+        }
+
+        if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] == 0 || cpu.counters[MR_COUNTER_LIMIT_CANDIDATES] == 0)
+            return std::unexpected("世界の刻みで上限に当たっていない");
+
+        Log(Channel::Gpu, Level::Info, "世界の刻みで上限に当たる(伝導 {}): 待たせた {}・選んだ {}(CPU と GPU で同じ)",
+            conduction ? "あり" : "なし", cpu.counters[MR_COUNTER_LIMIT_PRODUCTS],
+            cpu.counters[MR_COUNTER_LIMIT_CANDIDATES]);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // たくさんの要求(取り合い・枠が足りない・無効・索引の作り直し・帳簿)。要求は CPU の木から作る(GPU の木と同じ)
     std::expected<RunResult, std::string> RunStress(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
@@ -362,7 +400,10 @@ namespace {
         }
 
         const auto coarsenFull = RunCoarsenFull(device->Get(), *queue, *ring, *limitsTable);
-        for (const auto* result : {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull}) {
+        const auto limitsStep = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, false);
+        const auto limitsConduct = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, true);
+        for (const auto* result :
+             {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct}) {
             if (*result)
                 continue;
 

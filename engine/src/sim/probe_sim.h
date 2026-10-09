@@ -447,6 +447,10 @@ namespace bicameral::sim {
         // トレースの予想に使う。sim/probe_trace.h)
         [[nodiscard]] std::span<const uint8_t> BlockFlags() const { return m_blockFlags; }
 
+        // ブロックごとの最後に変わった刻みの印(tc。PROBE_BLOCK_COUNT 個。次の Advance の評価が使う値。成分と候補の数の分布を
+        // 測る時に読む。T-0163)
+        [[nodiscard]] std::span<const uint64_t> ChangedMarks() const { return m_changedMarks; }
+
     private:
         const BakedReactionTable* m_table;
         std::vector<reaction::RxCell> m_cells;           // 2 世代 × PROBE_CELL_COUNT(GPU と同じ並び)

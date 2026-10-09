@@ -88,7 +88,12 @@ FX_CONST uint32_t MR_COUNTER_FOLDED = 22;  // 静かで一様になった頁を�
 FX_CONST uint32_t MR_COUNTER_FRACTION_SHORTAGE = 23;
 // 子の成分の和集合が親のセルのインラインに入りきらないので粗くしなかった要求の数(累計。MR_STATUS_SPECIES_FULL。T-0022)
 FX_CONST uint32_t MR_COUNTER_COARSEN_FULL = 24;
-FX_CONST uint32_t MR_COUNTER_COUNT = 25;
+// 世界の刻みで反応の上限に当たった (セル, 刻み) の数(累計。reaction.hlsli の RxWaitStep::limits。T-0163)。数えるのは頁のセルを
+// 刻んだ時だけ(CPU の StepPagedBlock・GPU の StepPagedWait・伝導の段の ApplyCell)。一様なブロックの試しの評価は数えない
+// (変わるなら頁に広げて刻み直すので、そこで数える)。眠っているブロックは進む規則が無いので印が立たない(GPU が評価を省いても同じ数)
+FX_CONST uint32_t MR_COUNTER_LIMIT_PRODUCTS = 25;    // RX_LIMIT_PRODUCTS: 9 種目の生成物を作る規則を待たせた
+FX_CONST uint32_t MR_COUNTER_LIMIT_CANDIDATES = 26;  // RX_LIMIT_CANDIDATES: 進む規則が多すぎて刻みごとに選んだ
+FX_CONST uint32_t MR_COUNTER_COUNT = 27;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -604,6 +609,28 @@ FX_FN RxWaitStep MrStepCellWait(Table table, RxCell cell, uint64_t worldSeed, ui
     const uint64_t changedMark = block.busyTick < mark ? block.busyTick : mark - 1;
 
     return RxStepCellWait(table, cell, worldSeed, mark, changedMark, cellId);
+}
+
+// 上限の印(RxWaitStep::limits)の、数える器への足し分(T-0163)。CPU は counters[MR_COUNTER_LIMIT_*] に足し、GPU はスレッドで
+// 足してから 0 でない時だけ atomic で足す(足す順に依らない)
+struct MrLimitTally {
+    uint32_t productsHeld;
+    uint32_t candidatesLimited;
+};
+
+FX_FN MrLimitTally MrMakeLimitTally() {
+    MrLimitTally tally;
+    tally.productsHeld = 0;
+    tally.candidatesLimited = 0;
+
+    return tally;
+}
+
+FX_FN MrLimitTally MrAddLimits(MrLimitTally tally, uint32_t limits) {
+    tally.productsHeld += (limits & RX_LIMIT_PRODUCTS) != 0 ? 1u : 0u;
+    tally.candidatesLimited += (limits & RX_LIMIT_CANDIDATES) != 0 ? 1u : 0u;
+
+    return tally;
 }
 
 // このセルを刻むか: 使っているブロックで、本物の子に覆われていない(影のブロックは中間のセルも刻む。世界の写しは刻まない)

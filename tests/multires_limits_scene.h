@@ -3,7 +3,7 @@
 // x の偶奇で交互。レベル 1 の子を 2 つ作り(八分の一 0 と 1)、八分の一 0 の子(豊かな子)は子のセルを x の偶奇で p と q に書き直す
 // (2×2×2 の組ごとに 8 種ずつ違う子が 4 つずつ = 和集合 16 種)。もう 1 つの子は細かくしたまま(組の中は同じ = 入りきる)。
 // 刻み 0 に両方を粗くする要求、刻み 1 に豊かな子をもう一度粗くする要求を出す。豊かな子は 2 回とも断られ(MR_STATUS_SPECIES_FULL)、
-// もう 1 つは粗くなる。刻みは進めない(要求だけ)
+// もう 1 つは粗くなる。刻みは進めない(要求だけ)。同じ木を要求なしで刻むと、世界の刻みで上限に当たる(T-0163。LIMITS_STEP_*)
 #pragma once
 
 #include <cstdint>
@@ -52,6 +52,19 @@ namespace bicameral::test {
         }
 
         return nest;
+    }
+
+    // --- 世界の刻みで上限に当たる場面(T-0163): 同じ木(粗くする要求は出さない)を刻む。根と豊かな子の p のセルは毎刻み
+    //     進む規則が 56 本(RX_LIMIT_CANDIDATES)、q のセルは q08 を使い切るまで q09 を作る規則を待たせる(RX_LIMIT_PRODUCTS)。
+    //     伝導ありとなしの両方で刻み、上限の印の数(MR_COUNTER_LIMIT_*)も CPU と GPU で比べる ---
+    constexpr uint64_t LIMITS_STEP_TICKS = 12;
+    constexpr uint64_t LIMITS_STEP_SEED = 0x6c696d6974730163ull;
+
+    inline sim::MultiresStepOptions LimitsStepOptions(bool conduction) {
+        sim::MultiresStepOptions options;
+        options.conduction = conduction;
+
+        return options;
     }
 
     inline std::vector<multires::MrRequest> CoarsenFullRequestsAt(uint64_t tick) {
