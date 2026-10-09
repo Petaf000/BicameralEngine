@@ -32,7 +32,10 @@
   省ける欄で正しい表も落ちる(実験)ので、欄ごとに降りて葉だけ Luau に確かめさせる形にし(ShapeWalker)、誤りを欄を書いた行に付け替えた。
   LoadPackages(`typeChecker`)と LoadReactionTable(`typeDefinitions`)につないだ。luau_type_check_test(試験の表が通る・誤り 12 通りの場所と種類・
   LoadPackages が読まない・決定性・定義の誤り)。ADR-0046、13 §2.3、map.yaml の typecheck ノード。
-  debug で `^(luau_|reaction_package)` 6 本通過(下の rebase 後の結果も参照)。
+  debug で `^(luau_|reaction_package)` 6 本通過。main は動いていなかったので rebase は「up to date」。release もビルド(新しい警告なし。
+  implicit_conduction.cpp の C4189 は前から・wt2 の範囲)し、`-Filter "^(luau|reaction|image|window_replay)"` 19 本が通過(約 10 分。
+  window_replay_*・image_* は exe が型検査を通ってパッケージの表を使う)。luau_type_check は release で 0.25 秒。tidy は流していない。
+  T-0170(再生ファイルに表の版)は 2 時間の中に収まらないので手を付けていない。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - 動いているもの: ランタイム(`bicameral`)とテストの入り口 LoadReactionTable が、パッケージを走らせる前に型検査する。
