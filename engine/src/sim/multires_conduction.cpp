@@ -264,7 +264,9 @@ namespace bicameral::sim {
             const bool uniform = MrIsUniform(m_nest->blocks[slot]);
             const size_t address = (size_t{slot} * (MR_BLOCK_CELLS + 1)) + (uniform ? MR_BLOCK_CELLS : index);
             if (m_known[address] == 0) {
-                m_values[address] = MrCellThermal(m_view, LoadNestCell(*m_nest, slot, index));
+                // 溢れを使う世界は溢れの成分の熱容量・伝導率も入れる(T-0187)
+                m_values[address] = m_nest->wideCells ? MrCellThermal(m_view, LoadWideNestCell(*m_nest, slot, index))
+                                                      : MrCellThermal(m_view, LoadNestCell(*m_nest, slot, index));
                 m_known[address] = 1;
             }
 

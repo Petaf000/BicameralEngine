@@ -129,7 +129,7 @@ T-0022 で、どれも保存を守る形に直した。上限そのものを無�
   - **A(仮)**: 粗くしない(細かいまま残る)。見た目と反応は正しく、メモリを少し多く使う。
 - おすすめ: 全部 A のまま T-0163(上限を無くす)へ進む。どれも T-0163・T-0164 で消えるふるまいなので、取り消しやすい。
   コード: reaction.hlsli の RX_LIMIT_PRODUCTS・RX_LIMIT_CANDIDATES、multires_tree.hlsli の MR_STATUS_SPECIES_FULL(「仮」と書いてある)。
-  ①② が世界でどれだけ起きたかは数える器 MR_COUNTER_LIMIT_PRODUCTS・MR_COUNTER_LIMIT_CANDIDATES で見られる(T-0163)。①③ は T-0175(核と 1 セル。済み: 上限の無いセル RxWideCell では ① が起きない)・T-0187(多重解像度の世界の CPU)・T-0176(GPU)で無くす。
+  ①② が世界でどれだけ起きたかは数える器 MR_COUNTER_LIMIT_PRODUCTS・MR_COUNTER_LIMIT_CANDIDATES で見られる(T-0163)。①③ は T-0175(核と 1 セル。済み: 上限の無いセル RxWideCell では ① が起きない)・T-0187(多重解像度の世界の CPU。済み: `EnableWideCells` の世界では ①③ が起きない。既定は使わない)・T-0176(GPU)で無くす。
 
 ## Q20 実験室で「置く」は中身の置き換えか足すか(T-0142。**仮で A**)
 

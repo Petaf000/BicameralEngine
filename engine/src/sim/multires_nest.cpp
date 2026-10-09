@@ -32,10 +32,16 @@ namespace bicameral::sim {
             const MrBlock parent = nest.blocks[parentSlot];
             const uint32_t octant = MrOctantOfPoint(parent, point.x, point.y, point.z, point.level);
 
-            // --- セル: 子は親と同じ数(影は端数を持たず、親を覆わない。影はいつも頁を持つ)---
+            // --- セル: 子は親と同じ数(影は端数を持たず、親を覆わない。影はいつも頁を持つ。
+            //     溢れを使う世界は溢れごと写す。T-0187)---
             const uint32_t page = MrObserverPage(childSlot, nest.capacity.worldBlocks);
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                PageCellAt(nest, page, index) = LoadNestCell(nest, parentSlot, MrParentCellOfChild(octant, index));
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const uint32_t parentCell = MrParentCellOfChild(octant, index);
+                if (nest.wideCells)
+                    StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, parentSlot, parentCell));
+                else
+                    PageCellAt(nest, page, index) = LoadNestCell(nest, parentSlot, parentCell);
+            }
 
             nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_SHADOW, MR_NO_FRACTION,
                                                       page);
@@ -44,6 +50,8 @@ namespace bicameral::sim {
         void PullBackLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
             const MrBlock shadow = nest.blocks[shadowSlot];
             FX_ASSERT(shadow.kind == MR_BLOCK_SHADOW);
+            // 溢れのある影・親の引き戻しはまだ(インラインの形で引き戻す。T-0199)
+            FX_ASSERT(!PageHasOverflow(nest, shadow.page));
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const RxCell parentCell = LoadNestCell(nest, shadow.parent, MrOctantCell(shadow.parentOctant, local));
                 MrShadowFamily family{};
@@ -109,8 +117,10 @@ namespace bicameral::sim {
             }
         }
 
-        void AddCellTotals(ConservedTotals& totals, const BakedReactionTable& table, const RxCell& cell,
-                           const MrFraction& fraction, uint32_t shiftBits) {
+        // セルの形 Cell・端数の形 Fraction(インライン / 上限なし。T-0187)
+        template <typename Cell, typename Fraction>
+        void AddCellTotals(ConservedTotals& totals, const BakedReactionTable& table, const Cell& cell,
+                           const Fraction& fraction, uint32_t shiftBits) {
             AddTo(totals.energy,
                   ShiftLeft(MakeWide256(static_cast<uint64_t>(cell.energy), fraction.energy, cell.energy < 0),
                             shiftBits));
@@ -175,6 +185,39 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // 溢れの領域(T-0187。溢れを使う世界だけ要約に入れる)
+        uint64_t HashOverflowArea(uint64_t hash, const MultiresOverflowArea& area) {
+            for (const uint32_t offset : area.offsets)
+                hash = FxHashCombine(hash, offset);
+
+            for (size_t i = 0; i < area.species.size(); ++i) {
+                hash = FxHashCombine(hash, area.species[i]);
+                hash = FxHashCombine(hash, area.amounts[i]);
+            }
+
+            return hash;
+        }
+
+        // セル index の溢れ(セルと端数。無ければ hash のまま)
+        uint64_t HashCellOverflow(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint32_t index) {
+            if (!nest.wideCells)
+                return hash;
+
+            const RxWideCell cell = LoadWideNestCell(nest, slot, index);
+            for (uint32_t i = RX_MAX_CELL_SPECIES; i < cell.speciesCount; ++i) {
+                hash = FxHashCombine(hash, cell.species[i]);
+                hash = FxHashCombine(hash, cell.amounts[i]);
+            }
+
+            const MrWideFraction fraction = LoadWideFraction(nest, nest.blocks[slot].fraction, index);
+            for (uint32_t i = RX_MAX_CELL_SPECIES; i < fraction.speciesCount; ++i) {
+                hash = FxHashCombine(hash, fraction.species[i]);
+                hash = FxHashCombine(hash, fraction.amounts[i]);
+            }
+
+            return hash;
+        }
+
         uint64_t HashBlock(const MrBlock& block) {
             uint64_t hash = FxHashCombine(0, static_cast<uint64_t>(block.originX));
             hash = FxHashCombine(hash, static_cast<uint64_t>(block.originY));
@@ -220,15 +263,23 @@ namespace bicameral::sim {
                         nest_detail::ApplyEnergyDelta(nest, slot, index, cell, delta);
                 }
 
-                // --- 反応 ---
-                if (react) {
+                // --- 反応(溢れを使う世界は上限の無い形で読み書きする。T-0187)---
+                bool wideChanged = false;
+                if (react && nest.wideCells) {
+                    const RxWideCell wide = LoadWideNestCell(nest, slot, index);
+                    const RxWideWaitStep step = MrStepCellWait(view, wide, worldSeed, tick, block, index);
+                    result.wakeTick = std::min(result.wakeTick, step.wakeTick);
+                    tally = MrAddLimits(tally, step.limits);
+                    wideChanged = !RxSameCell(wide, step.cell);
+                    StoreWidePageCell(nest, block.page, index, step.cell);
+                } else if (react) {
                     const RxWaitStep step = MrStepCellWait(view, cell, worldSeed, tick, block, index);
                     result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     cell = step.cell;
                     tally = MrAddLimits(tally, step.limits);
                 }
 
-                result.changed = result.changed || MrCellChanged(before, cell) ||
+                result.changed = result.changed || wideChanged || MrCellChanged(before, cell) ||
                                  FractionEnergy(nest, block.fraction, index) != fractionBefore;
             }
 
@@ -435,6 +486,7 @@ namespace bicameral::sim {
         FX_ASSERT(IsObserverSlot(nest, slot));
         const uint32_t page = MrObserverPage(slot, nest.capacity.worldBlocks);
         nest.blocks[slot] = MrMakeMirrorBlock(level, originX, originY, originZ, page);
+        ClearPageOverflow(nest, page);
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
             PageCellAt(nest, page, index) = cells[index];
     }
@@ -489,6 +541,7 @@ namespace bicameral::sim {
 
                 hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
                 hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
+                hash = HashCellOverflow(hash, nest, slot, index);
             }
         }
 
@@ -524,6 +577,15 @@ namespace bicameral::sim {
         for (const uint32_t counter : nest.counters)
             hash = FxHashCombine(hash, counter);
 
+        // --- 溢れ(T-0187。使う世界だけ。使わない世界の要約は前と同じ)---
+        if (nest.wideCells) {
+            for (const MultiresOverflowArea& area : nest.cellOverflow)
+                hash = HashOverflowArea(hash, area);
+
+            for (const MultiresOverflowArea& area : nest.fractionOverflow)
+                hash = HashOverflowArea(hash, area);
+        }
+
         return hash;
     }
 
@@ -541,6 +603,12 @@ namespace bicameral::sim {
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
+
+                if (nest.wideCells) {
+                    AddCellTotals(totals, table, LoadWideNestCell(nest, slot, index),
+                                  LoadWideFraction(nest, block.fraction, index), shiftBits);
+                    continue;
+                }
 
                 const MrFraction fraction = FractionAt(nest, block.fraction, index);
                 AddCellTotals(totals, table, LoadNestCell(nest, slot, index), fraction, shiftBits);

@@ -6,6 +6,8 @@
 //   - 観察の影の鎖があってもなくても、世界(本物の葉)のハッシュ列が一致。影の子の合計は親 × 8 と一致
 //   - たくさんの要求(取り合い・枠が足りない・無効・索引の作り直し)の場面で、「世界 + 帳簿」・索引・枠の数が毎刻み合う
 //   - 粗くすると成分が入りきらない子(8 種ずつ違う子。tests/multires_limits_scene.h)は粗くせず、元素とエネルギーがビット単位で同じ(T-0022)
+//   - セルの溢れを使う世界(T-0187): 同じ場面で粗くするのを断らず・9 種目の生成物を待たせず、保存はビット単位。
+//     上限に当たらない場面(本物の鎖)は溢れを使わない世界と毎刻みビット一致
 #include <algorithm>
 #include <cstdint>
 #include <string_view>
@@ -265,10 +267,117 @@ namespace {
         Expect(limited > 0, "上限に当たる世界の刻み: 進む規則を選んだ刻みを数える");
     }
 
+    // --- セルの溢れ(T-0187)---
+
+    // 本物の葉のセルの成分の数の最大(溢れを含む)
+    uint32_t MaxLeafSpecies(const MultiresNest& nest) {
+        uint32_t most = 0;
+        for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+            if (nest.blocks[slot].kind != MR_BLOCK_REAL)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (MrIsSteppedCell(nest.blocks[slot], index))
+                    most = std::max(most, LoadWideNestCell(nest, slot, index).speciesCount);
+            }
+        }
+
+        return most;
+    }
+
+    // 入りきらない子も粗くする(断らない)。粗くした後の世界を刻んでも保存はビット単位
+    void TestCoarsenFullWide() {
+        const auto table = BakeReactionTable(test::MakeLimitsTestTable());
+        if (!table) {
+            Expect(false, "上限の試験の表をベイクできる");
+            return;
+        }
+
+        MultiresNest nest = test::MakeCoarsenFullNest(*table);
+        EnableWideCells(nest);
+        const ConservedTotals initial = ComputeConservedTotals(nest, *table, 1);
+        bool conserved = true;
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
+            SubmitRequests(nest, test::CoarsenFullRequestsAt(tick));
+            ProcessRequests(nest);
+            conserved = conserved && ComputeConservedTotals(nest, *table, 1) == initial;
+        }
+
+        const uint32_t coarsenedSpecies = MaxLeafSpecies(nest);
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            StepNest(nest, *table, test::LIMITS_STEP_SEED, tick, test::LimitsStepOptions(true));
+            conserved = conserved && ComputeConservedTotals(nest, *table, 1) == initial;
+        }
+
+        Log(Channel::Sim, Level::Info,
+            "溢れを使う世界で粗くする: 断った {}・適用 {}・粗くした後の最大の成分 {}・刻んだ後 {}",
+            nest.counters[MR_COUNTER_COARSEN_FULL], nest.counters[MR_COUNTER_GRANTED], coarsenedSpecies,
+            MaxLeafSpecies(nest));
+        Expect(conserved, "溢れ: 粗くして刻んでも元素とエネルギーが毎刻み同じ");
+        Expect(nest.counters[MR_COUNTER_COARSEN_FULL] == 0, "溢れ: 入りきらない子を粗くするのを断らない");
+        // 刻み 0 の 2 つの要求は同じ親を取り合うので、先の豊かな子だけが粗くなる(もう 1 つは取り合いで後回し。刻み 1 には要求が無い)
+        Expect(nest.counters[MR_COUNTER_GRANTED] == 3, "溢れ: 入りきらない豊かな子を粗くする");
+        Expect(nest.counters[MR_COUNTER_OVERFLOW] == 0, "溢れ: 粗くする時に成分を捨てない");
+        Expect(coarsenedSpecies == 2 * RX_MAX_CELL_SPECIES, "溢れ: 粗くした親のセルは 16 種(8 種ずつ違う子の和集合)");
+        Expect(LookupBlock(nest, 1, 0, 0, 0) == MR_NO_BLOCK, "溢れ: 豊かな子は無くなる");
+        Expect(nest.counters[MR_COUNTER_LIMIT_PRODUCTS] == 0, "溢れ: 刻んでも 9 種目の生成物を待たせない");
+    }
+
+    // 9 種目の生成物を待たせない(同じ場面を溢れを使う世界で刻む)
+    void TestLimitsStepWide(bool conduction) {
+        const auto table = BakeReactionTable(test::MakeLimitsTestTable());
+        if (!table) {
+            Expect(false, "上限の試験の表をベイクできる");
+            return;
+        }
+
+        MultiresNest nest = test::MakeCoarsenFullNest(*table);
+        EnableWideCells(nest);
+        const ConservedTotals initial = ComputeConservedTotals(nest, *table, 1);
+        bool conserved = true;
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            StepNest(nest, *table, test::LIMITS_STEP_SEED, tick, test::LimitsStepOptions(conduction));
+            conserved = conserved && ComputeConservedTotals(nest, *table, 1) == initial;
+        }
+
+        const uint32_t most = MaxLeafSpecies(nest);
+        Log(Channel::Sim, Level::Info, "溢れを使う世界の刻み(伝導 {}): 待たせた {}・選んだ {}・最大の成分 {}",
+            conduction ? "あり" : "なし", nest.counters[MR_COUNTER_LIMIT_PRODUCTS],
+            nest.counters[MR_COUNTER_LIMIT_CANDIDATES], most);
+        Expect(conserved, "溢れの刻み: 元素とエネルギーが毎刻み同じ");
+        Expect(nest.counters[MR_COUNTER_LIMIT_PRODUCTS] == 0, "溢れの刻み: 9 種目の生成物を待たせない");
+        Expect(most > RX_MAX_CELL_SPECIES, "溢れの刻み: 9 種目の生成物ができる");
+    }
+
+    // 上限に当たらない場面(本物の鎖)は、溢れを使う世界と使わない世界が毎刻みビット一致
+    void TestWideMatchesInline(const BakedReactionTable& table) {
+        MultiresNest narrow = test::MakeMultiresNestForTest(table);
+        MultiresNest wide = test::MakeMultiresNestForTest(table);
+        EnableWideCells(wide);
+        int mismatchedTicks = 0;
+        for (uint64_t tick = 0; tick < test::MULTIRES_END_TICK; ++tick) {
+            test::StepMultiresScene(narrow, table, test::MultiresScenario::Real, tick);
+            test::StepMultiresScene(wide, table, test::MultiresScenario::Real, tick);
+            const auto sameCell = [](const RxCell& a, const RxCell& b) {
+                return RxSameCell(a, b);
+            };
+            const bool same = HashRealLeaves(narrow) == HashRealLeaves(wide) &&
+                              std::ranges::equal(narrow.cells, wide.cells, sameCell) &&
+                              narrow.counters == wide.counters && narrow.ledger == wide.ledger;
+            mismatchedTicks += same ? 0 : 1;
+        }
+
+        Expect(mismatchedTicks == 0, "溢れ: 上限に当たらない場面は溢れを使わない世界と毎刻みビット一致");
+        Expect(MaxLeafSpecies(wide) <= RX_MAX_CELL_SPECIES, "溢れ: 上限に当たらない場面は溢れを使わない");
+    }
+
     int Run() {
         TestCoarsenFull();
         TestLimitsStep(false);
         TestLimitsStep(true);
+        TestCoarsenFullWide();
+        TestLimitsStepWide(false);
+        TestLimitsStepWide(true);
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
             Log(Channel::Sim, Level::Error, "試験の表をベイクできない: {}", table.error());
@@ -287,6 +396,7 @@ namespace {
         Expect(RunDeepChain(*table, 24, 5) > 0, "24 段では端数が落ちる(64bit の幅)");
 
         TestShadowLeavesWorldUnchanged(*table);
+        TestWideMatchesInline(*table);
 
         const uint64_t stressFirst = RunStress(*table);
         Expect(stressFirst == RunStress(*table), "たくさんの要求: 2 回の実行で全部が一致");

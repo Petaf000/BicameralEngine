@@ -115,8 +115,9 @@ FX_FN bool MrEnergyDeltaIsZero(MrEnergyDelta delta) {
 
 // --- セルの熱 ----------------------------------------------------------------------------------
 
-template <typename Table>
-FX_FN MrThermal MrCellThermal(Table table, RxCell cell) {
+// セルの形 Cell のテンプレート(RxCell・C++ の RxWideCell。T-0187)
+template <typename Table, typename Cell>
+FX_FN MrThermal MrCellThermal(Table table, Cell cell) {
     const RxThermal thermal = RxComputeThermal(table, cell);
 
     MrThermal result;

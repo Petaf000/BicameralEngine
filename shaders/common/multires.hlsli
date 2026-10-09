@@ -305,7 +305,9 @@ FX_FN bool MrFractionIsZero(MrFraction fraction) {
     return fraction.energy == 0 && fraction.speciesCount == 0;
 }
 
-FX_FN uint64_t MrFractionOf(MrFraction fraction, uint32_t speciesId) {
+// 端数・セルを読む道具は形(MrFraction・RxCell / C++ の MrWideFraction・RxWideCell)のテンプレート(T-0187)
+template <typename Fraction>
+FX_FN uint64_t MrFractionOf(Fraction fraction, uint32_t speciesId) {
     for (uint32_t i = 0; i < fraction.speciesCount; ++i) {
         if (fraction.species[i] == speciesId)
             return fraction.amounts[i];
@@ -314,7 +316,8 @@ FX_FN uint64_t MrFractionOf(MrFraction fraction, uint32_t speciesId) {
     return 0;
 }
 
-FX_FN uint64_t MrAmountOf(RxCell cell, uint32_t speciesId) {
+template <typename Cell>
+FX_FN uint64_t MrAmountOf(Cell cell, uint32_t speciesId) {
     const uint32_t slot = RxFindSlot(cell, speciesId);
     if (slot == RX_NO_SLOT)
         return 0;
@@ -323,7 +326,8 @@ FX_FN uint64_t MrAmountOf(RxCell cell, uint32_t speciesId) {
 }
 
 // セルと端数の一覧で、after より大きい最小の物質 ID(無ければ MR_NO_SPECIES)。どちらの一覧も ID の昇順
-FX_FN uint32_t MrNextSpecies(RxCell cell, MrFraction fraction, uint32_t after) {
+template <typename Cell, typename Fraction>
+FX_FN uint32_t MrNextSpecies(Cell cell, Fraction fraction, uint32_t after) {
     uint32_t next = MR_NO_SPECIES;
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
         if (cell.species[i] > after && cell.species[i] < next)
@@ -384,9 +388,48 @@ FX_FN MrWideShifted MrWideShiftLevel(MrWide sum) {
 
 // --- 粗くする ----------------------------------------------------------------------------------
 
+// --- 粗くした結果の形ごとの道具(T-0187。核の「セルの形ごとの道具」と同じ考え)---
+// MrCoarsenCellOf は結果の形 Coarsened(cell・fraction・落ちた分の一覧を持つ)と子の形 Children のテンプレート。
+// MrCoarsened(インライン。GPU と今の世界)は入りきらない成分を溢れに数えて捨て、C++ の MrWideCoarsened(sim/multires_wide_cell.h)は伸ばす
+
+// 端数の成分をもう 1 つ増やせるか(MrFraction はインラインの数まで)
+FX_FN bool MrFractionHasRoom(MrFraction fraction) {
+    return fraction.speciesCount < RX_MAX_CELL_SPECIES;
+}
+
+// 書く前に、成分の数 + 1 個ぶんの場所を用意する(MrFraction は初めからあるので、そのまま)
+FX_FN MrFraction MrFractionWithRoom(MrFraction fraction) {
+    return fraction;
+}
+
+// 同じ形の空の端数
+FX_FN MrFraction MrEmptyFractionLike(MrFraction fraction) {
+    RX_UNUSED(fraction);
+
+    return MrMakeEmptyFraction();
+}
+
+// 落ちた下位 3bit の一覧にもう 1 つ書けるか・書く前に場所を用意する
+FX_FN bool MrLostHasRoom(MrCoarsened result) {
+    return result.lostSpeciesCount < MR_MAX_LOST_SPECIES;
+}
+
+FX_FN MrCoarsened MrWithLostRoom(MrCoarsened result) {
+    return result;
+}
+
+// 和集合を求める繰り返しの上限(子の成分の数の合計 + 1 以上。インラインは固定)
+FX_FN uint32_t MrUnionStepLimit(MrChildren children) {
+    RX_UNUSED(children);
+
+    return 2 * RX_MAX_CELL_SPECIES * MR_CHILDREN_PER_CELL;
+}
+
 // 粗くした物質 1 つを親のセル(整数部)と端数に足す(ID の昇順に呼ぶ)。入りきらなければ溢れに数える
-FX_FN MrCoarsened MrAppendCoarsened(MrCoarsened result, uint32_t species, MrWideShifted shifted) {
-    if (shifted.whole != 0 && result.cell.speciesCount < RX_MAX_CELL_SPECIES) {
+template <typename Coarsened>
+FX_FN Coarsened MrAppendCoarsened(Coarsened result, uint32_t species, MrWideShifted shifted) {
+    if (shifted.whole != 0 && RxHasRoomForSpecies(result.cell)) {
+        result.cell = RxCellWithRoom(result.cell);
         result.cell.species[result.cell.speciesCount] = species;
         result.cell.amounts[result.cell.speciesCount] = shifted.whole;
         result.cell.speciesCount += 1;
@@ -394,7 +437,8 @@ FX_FN MrCoarsened MrAppendCoarsened(MrCoarsened result, uint32_t species, MrWide
         result.overflowCount += 1;
     }
 
-    if (shifted.fraction != 0 && result.fraction.speciesCount < RX_MAX_CELL_SPECIES) {
+    if (shifted.fraction != 0 && MrFractionHasRoom(result.fraction)) {
+        result.fraction = MrFractionWithRoom(result.fraction);
         result.fraction.species[result.fraction.speciesCount] = species;
         result.fraction.amounts[result.fraction.speciesCount] = shifted.fraction;
         result.fraction.speciesCount += 1;
@@ -406,15 +450,17 @@ FX_FN MrCoarsened MrAppendCoarsened(MrCoarsened result, uint32_t species, MrWide
 }
 
 // 落ちた下位 3bit を成分ごとに覚える(覚えきれなければ溢れに数える)
-FX_FN MrCoarsened MrRecordLost(MrCoarsened result, uint32_t species, uint32_t lostBits) {
+template <typename Coarsened>
+FX_FN Coarsened MrRecordLost(Coarsened result, uint32_t species, uint32_t lostBits) {
     if (lostBits == 0)
         return result;
 
-    if (result.lostSpeciesCount >= MR_MAX_LOST_SPECIES) {
+    if (!MrLostHasRoom(result)) {
         result.overflowCount += 1;
         return result;
     }
 
+    result = MrWithLostRoom(result);
     result.lostSpecies[result.lostSpeciesCount] = species;
     result.lostBits[result.lostSpeciesCount] = lostBits;
     result.lostSpeciesCount += 1;
@@ -423,18 +469,10 @@ FX_FN MrCoarsened MrRecordLost(MrCoarsened result, uint32_t species, uint32_t lo
 }
 
 // 子 2³ を親のセル 1 つにまとめる。物質量とエネルギーは「整数部 + 端数」の合計の 1/8(単位が 8 倍になるので)。
-// 成分は子の和集合(ID の昇順)。並び順に依存しない(物質ごとに全部の子を同じ順で足す)
-FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
-    MrCoarsened result;
-    result.lostCount = 0;
-    result.overflowCount = 0;
-    result.lostSpeciesCount = 0;
-    // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
-    for (uint32_t i = 0; i < MR_MAX_LOST_SPECIES; ++i) {
-        result.lostSpecies[i] = 0;
-        result.lostBits[i] = 0;
-    }
-
+// 成分は子の和集合(ID の昇順)。並び順に依存しない(物質ごとに全部の子を同じ順で足す)。
+// result は数える欄と落ちた分の一覧が 0 の結果(形を決める。セルと端数はここで空から作る)
+template <typename Children, typename Coarsened>
+FX_FN Coarsened MrCoarsenCellOf(Children children, Coarsened result) {
     // --- エネルギー(符号つき)---
     MrWide energy = MrMakeWide();
     for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
@@ -444,15 +482,16 @@ FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
 
     const MrWideShifted energyShifted = MrWideShiftLevel(energy);
     FX_ASSERT(((int64_t)energy.top >> MR_LEVEL_SHIFT) == ((int64_t)energyShifted.whole < 0 ? -1 : 0));
-    result.cell = RxMakeEmptyCell((int64_t)energyShifted.whole);
-    result.fraction = MrMakeEmptyFraction();
+    result.cell = RxEmptyCellLike(result.cell, (int64_t)energyShifted.whole);
+    result.fraction = MrEmptyFractionLike(result.fraction);
     result.fraction.energy = energyShifted.fraction;
     result.lostCount += energyShifted.lostBits != 0 ? 1u : 0u;
     result.energyLostBits = energyShifted.lostBits;
 
     // --- 成分(子の和集合を ID の昇順に)---
     uint32_t species = 0;
-    for (uint32_t step = 0; step < 2 * RX_MAX_CELL_SPECIES * MR_CHILDREN_PER_CELL; ++step) {
+    const uint32_t stepLimit = MrUnionStepLimit(children);
+    for (uint32_t step = 0; step < stepLimit; ++step) {
         uint32_t next = MR_NO_SPECIES;
         for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
             const uint32_t candidate = MrNextSpecies(children.cells[j], children.fractions[j], species);
@@ -478,6 +517,24 @@ FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
     }
 
     return result;
+}
+
+// インラインの形(GPU と今の世界)
+FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
+    MrCoarsened result;
+    result.cell = RxMakeEmptyCell(0);
+    result.fraction = MrMakeEmptyFraction();
+    result.lostCount = 0;
+    result.overflowCount = 0;
+    result.energyLostBits = 0;
+    result.lostSpeciesCount = 0;
+    // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
+    for (uint32_t i = 0; i < MR_MAX_LOST_SPECIES; ++i) {
+        result.lostSpecies[i] = 0;
+        result.lostBits[i] = 0;
+    }
+
+    return MrCoarsenCellOf(children, result);
 }
 
 // 子 2³ を親のセル 1 つにまとめても、成分(整数部・端数・落ちた下位 3bit)がどれも捨てられずに入りきるか(T-0022。D-428)。
@@ -600,9 +657,10 @@ FX_FN uint64_t MrChangeMark(uint64_t tick) {
 // 変わった刻みの印。刻みの初めに読んだ値。つつかれたままの MR_BUSY_POKED は呼ぶ側が先にこの刻みの印にしておく)。返す wakeTick も印。
 // この刻みにつつかれた(busyTick = この刻みの印)ブロックは「刻みの直前に変わった」として評価する(この刻みにも確率 f で進む)。
 // 次の刻みからは tc = この刻みの印で引き直すので、呼ぶ側はつつかれたブロックを次の刻みにまた評価する(記憶が無いので偏らない)
-template <typename Table>
-FX_FN RxWaitStep MrStepCellWait(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, MrBlock block,
-                                uint32_t index) {
+// セルの形 Cell のテンプレート(RxCell = GPU と今の世界、C++ の RxWideCell = 溢れを持つ世界。T-0187)
+template <typename Table, typename Cell>
+FX_FN RxWaitStepOf<Cell> MrStepCellWait(Table table, Cell cell, uint64_t worldSeed, uint64_t tick, MrBlock block,
+                                        uint32_t index) {
     const uint64_t cellId = MrCellId(block.level, block.originX + (int64_t)MrCellX(index),
                                      block.originY + (int64_t)MrCellY(index), block.originZ + (int64_t)MrCellZ(index));
     const uint64_t mark = MrChangeMark(tick);

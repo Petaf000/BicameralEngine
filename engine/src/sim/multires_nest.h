@@ -18,6 +18,7 @@
 
 #include "common/multires_tree.hlsli"
 #include "sim/implicit_conduction.h"
+#include "sim/multires_wide_cell.h"
 #include "sim/reaction_table.h"
 
 namespace bicameral::sim {
@@ -40,8 +41,23 @@ namespace bicameral::sim {
         int32_t rootLevel = 0;        // 根のレベル
     };
 
+    // 頁(または端数の枠)1 つぶんの溢れ(T-0187): インライン(RX_MAX_CELL_SPECIES 個)に入りきらない成分を、セルの番号の順に詰めて持つ。
+    // セル i の溢れは [offsets[i], offsets[i + 1])。インラインには ID の小さい方から RX_MAX_CELL_SPECIES 個、溢れはその続き(昇順)。
+    // 1 セルを書き直すたびに頁の中をセルの番号の順に詰め直す(GPU の頁ごとの溢れ領域〔グループ内のプレフィックス和。T-0176〕と同じ並び)
+    struct MultiresOverflowArea {
+        std::array<uint32_t, multires::MR_BLOCK_CELLS + 1> offsets{};
+        std::vector<uint32_t> species;
+        std::vector<uint64_t> amounts;
+    };
+
     struct MultiresNest {
         MultiresCapacity capacity;
+
+        // --- セルの溢れ(T-0187。EnableWideCells で使う。既定は使わない = GPU と同じ「インライン 8」で、上限は QUESTIONS Q19 の当座のふるまい)。
+        //     使うと 9 種目の生成物を待たせず・入りきらない子を粗くするのも断らない(CPU だけ。GPU は T-0176)---
+        bool wideCells = false;
+        std::vector<MultiresOverflowArea> cellOverflow;      // 頁ごと(添字 = 頁。観察の枠の頁を含む)
+        std::vector<MultiresOverflowArea> fractionOverflow;  // 端数の枠ごと
 
         // --- 状態(CPU と GPU で配列のまま一致する)---
         std::vector<multires::MrBlock> blocks;  // 世界の枠 + 観察の枠
@@ -164,6 +180,33 @@ namespace bicameral::sim {
 
     // 枠 slot のセル index(一様なら値か、覆われていれば空。頁なら頁のセル)
     [[nodiscard]] reaction::RxCell LoadNestCell(const MultiresNest& nest, uint32_t slot, uint32_t index);
+
+    // --- セルの溢れ(T-0187)---
+
+    // 溢れを使う(作った直後に呼ぶ)。頁と端数の枠ごとの溢れの領域を取る
+    void EnableWideCells(MultiresNest& nest);
+
+    // 枠 slot のセル index を上限の無い形で(溢れを使わない・一様なブロックはインラインのまま)
+    [[nodiscard]] reaction::RxWideCell LoadWideNestCell(const MultiresNest& nest, uint32_t slot, uint32_t index);
+
+    // 端数の枠 fractionSlot のセル index の端数を上限の無い形で(枠が無ければ 0)
+    [[nodiscard]] multires::MrWideFraction LoadWideFraction(const MultiresNest& nest, uint32_t fractionSlot,
+                                                            uint32_t index);
+
+    // 頁 page のセル index に書く(インラインに先頭の RX_MAX_CELL_SPECIES 個、残りを溢れへ。溢れを使わないならインラインに入りきること)
+    void StoreWidePageCell(MultiresNest& nest, uint32_t page, uint32_t index, const reaction::RxWideCell& cell);
+
+    // 端数の枠 fractionSlot のセル index に書く(上と同じ分け方)
+    void StoreWideFraction(MultiresNest& nest, uint32_t fractionSlot, uint32_t index,
+                           const multires::MrWideFraction& fraction);
+
+    // 頁・端数の枠の溢れを空にする(返す時)
+    void ClearPageOverflow(MultiresNest& nest, uint32_t page);
+    void ClearFractionOverflow(MultiresNest& nest, uint32_t fractionSlot);
+
+    // 頁・端数の枠に溢れがあるか(あれば一様・畳む扱いにしない)
+    [[nodiscard]] bool PageHasOverflow(const MultiresNest& nest, uint32_t page);
+    [[nodiscard]] bool FractionHasOverflow(const MultiresNest& nest, uint32_t fractionSlot);
 
     // 使っている世界の頁の数(観察の枠の頁は数えない)
     [[nodiscard]] uint32_t UsedWorldPages(const MultiresNest& nest);

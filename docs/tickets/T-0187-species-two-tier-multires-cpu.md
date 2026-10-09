@@ -1,6 +1,6 @@
 # T-0187 成分の二段: 多重解像度の世界(CPU)のセルに溢れを持たせる(T-0175 から分けた)
 
-- Status: Todo
+- Status: Done(2026-10-09。世界のセルの溢れ・反応・伝導の熱・細かくする・粗くする和集合・影を作る・要約・保存量。影の引き戻し・畳む・覗き窓は T-0199)
 - 種類: 工学
 - 設計: 02 §3・§6・17(R-MULTI-4)。関係: T-0175(核のセルの形・RxWideCell)・T-0176(GPU。この後)・T-0163・T-0022・D-401・D-418・D-428・QUESTIONS Q18・Q19
 
@@ -26,3 +26,12 @@ T-0175 で反応の核はセルの形(RxCell = インライン 8 / RxWideCell = 
 1 チャット(2 時間)。読む所が多いので、溢れれば 1(反応と粗くする)と 1 の残り(畳む・伝導・影)で分ける。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-09(作業役): 最初に t-0139・t-0178・t-0184 を合わせた main を release で 2 束(46 本・41 本)通過(直したものなし)。
+  MultiresNest に溢れ(EnableWideCells・頁ごと / 端数の枠ごとの MultiresOverflowArea。セルの番号の順に詰める)と読み書き(LoadWideNestCell・StoreWidePageCell・LoadWideFraction・StoreWideFraction。
+  engine/src/sim/multires_wide_cell.*)。粗くする和集合を MrCoarsenCellOf(子と結果の形のテンプレート)にし、上限なし版 MrCoarsenWideCell。StepPagedBlock・CellThermals・
+  RefineRequestLevel・ApplyCoarsen・RefineShadowLevel・HashRealLeaves・HashWholeNest・ComputeConservedTotals が溢れを読む。溢れのある頁・端数の枠は畳まない。
+  multires_test に TestCoarsenFullWide(断った 0・親のセル 16 種・刻んで 17 種)・TestLimitsStepWide(待たせた 0・最大 9 種)・TestWideMatchesInline(本物の鎖が毎刻みビット一致)。保存は毎刻みビット単位。
+  2 時間の約束のため、影の引き戻し・畳む・静かな葉の許容差の判定・覗き窓・実験室の溢れは T-0199 に分けた。
+
+## 分けたもの
+- T-0199: 溢れを使う多重解像度の世界(CPU)の残り(影の引き戻し・溢れのある頁を畳む・端数を帳簿へ返す・静かな葉の許容差・覗き窓・実験室)

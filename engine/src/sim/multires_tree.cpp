@@ -6,6 +6,7 @@
 // 枠の番号(ADR-0016): 要求 i は空きのスタックの上から「i より前の許可した要求の数の和」だけ下から順に取る。返すのも要求の順に積む。
 // 索引は開番地法(線形探査)。入れる = 空の所(墓石は使い回さない)、消す = 墓石。表の中の並びは GPU と違ってよい。
 #include <algorithm>
+#include <type_traits>
 
 #include "common/multires_activity.hlsli"
 #include "sim/multires_nest.h"
@@ -141,6 +142,19 @@ namespace bicameral::sim {
             return children;
         }
 
+        // 上限の無い形で集める(溢れを使う世界。T-0187)
+        MrWideChildren GatherWideChildren(const MultiresNest& nest, uint32_t childSlot, uint32_t fractionSlot,
+                                          uint32_t local) {
+            MrWideChildren children;
+            for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+                const uint32_t index = MrChildCell(local, j);
+                children.cells[j] = LoadWideNestCell(nest, childSlot, index);
+                children.fractions[j] = LoadWideFraction(nest, fractionSlot, index);
+            }
+
+            return children;
+        }
+
         // 子のブロック childSlot を親へ粗くしても、親の八分の一の 64 セルのどれも成分が入りきるか(T-0022。multires.hlsli の MrCoarsenFits)
         bool CoarsenFits(const MultiresNest& nest, uint32_t childSlot) {
             const uint32_t fractionSlot = nest.blocks[childSlot].fraction;
@@ -162,8 +176,9 @@ namespace bicameral::sim {
                 return;
             }
 
-            // --- 成分が入りきらなければ粗くしない。静かな葉なら、今の忙しさの印では粗くできないことにする(毎刻み要求し直さない)---
-            if (!CoarsenFits(nest, slot)) {
+            // --- 成分が入りきらなければ粗くしない。静かな葉なら、今の忙しさの印では粗くできないことにする(毎刻み要求し直さない)。
+            //     溢れを使う世界はいつも入りきる(T-0187)---
+            if (!nest.wideCells && !CoarsenFits(nest, slot)) {
                 MrBlock& block = nest.blocks[slot];
                 block.quietCheck = MrQuietCheckStamp(block.busyTick, false);
                 state.status = MR_STATUS_SPECIES_FULL;
@@ -266,6 +281,21 @@ namespace bicameral::sim {
 
         // --- 4. 適用: 細かくする(1 段)---
 
+        // 溢れを使う世界で、親の八分の一のセルと端数を子の頁・端数の枠へ溢れごと写す(T-0187)。
+        // 子の頁と端数の枠は空きから取ったばかり(返す時に溢れを空にしている)
+        void CopyWideToChild(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childPage,
+                             uint32_t childFraction) {
+            const MrBlock& parent = nest.blocks[parentSlot];
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const uint32_t parentCell = MrParentCellOfChild(octant, index);
+                if (!MrIsUniform(parent))
+                    StoreWidePageCell(nest, childPage, index, LoadWideNestCell(nest, parentSlot, parentCell));
+
+                if (childFraction != MR_NO_FRACTION)
+                    StoreWideFraction(nest, childFraction, index, LoadWideFraction(nest, parent.fraction, parentCell));
+            }
+        }
+
         void RefineRequestLevel(MultiresNest& nest, uint32_t i, uint32_t depth, uint32_t parentSlot) {
             const MrRequest& request = nest.requests[i];
             MrRequestState& state = nest.states[i];
@@ -293,23 +323,27 @@ namespace bicameral::sim {
             if (uniform)
                 UniformAt(nest, childSlot) = UniformAt(nest, parentSlot);
 
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const uint32_t parentCell = MrParentCellOfChild(octant, index);
-                if (!uniform)
-                    PageCellAt(nest, childPage, index) = CellAt(nest, parentSlot, parentCell);
+            if (nest.wideCells) {
+                CopyWideToChild(nest, parentSlot, octant, childPage, childFraction);
+            } else {
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    const uint32_t parentCell = MrParentCellOfChild(octant, index);
+                    if (!uniform)
+                        PageCellAt(nest, childPage, index) = CellAt(nest, parentSlot, parentCell);
 
-                if (childFraction != MR_NO_FRACTION)
-                    SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
+                    if (childFraction != MR_NO_FRACTION)
+                        SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
+                }
             }
 
             // --- 親を覆う(覆われた親のセルと端数は空。一様な親は覆われた所を空と読むので書かない)---
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t index = MrOctantCell(octant, local);
                 if (!uniform)
-                    CellAt(nest, parentSlot, index) = RxMakeEmptyCell(0);
+                    StoreWidePageCell(nest, parent.page, index, RxMakeEmptyWideCell(0));
 
                 if (parent.fraction != MR_NO_FRACTION)
-                    SetFraction(nest, parent.fraction, index, MrMakeEmptyFraction());
+                    StoreWideFraction(nest, parent.fraction, index, MrWideFraction{});
             }
 
             // --- 見出し・返す枠・索引 ---
@@ -353,7 +387,9 @@ namespace bicameral::sim {
             nest.ledger[address] += lostBits;
         }
 
-        void RecordCoarsened(MultiresNest& nest, const MrCoarsened& result, int32_t childLevel) {
+        // 結果の形 Coarsened(MrCoarsened・MrWideCoarsened。T-0187)
+        template <typename Coarsened>
+        void RecordCoarsened(MultiresNest& nest, const Coarsened& result, int32_t childLevel) {
             nest.counters[MR_COUNTER_LOST] += result.lostCount;
             nest.counters[MR_COUNTER_OVERFLOW] += result.overflowCount;
             if (result.energyLostBits != 0)
@@ -363,17 +399,27 @@ namespace bicameral::sim {
                 AddToLedger(nest, childLevel, 1 + result.lostSpecies[k], result.lostBits[k]);
         }
 
-        void ApplyCoarsen(MultiresNest& nest, uint32_t i) {
+        // 子 2³ を 1 つに(親の八分の一の 64 セル)。溢れを使う世界は上限の無い形で(T-0187)
+        template <typename Coarsened>
+        Coarsened CoarsenOne(const MultiresNest& nest, uint32_t childSlot, uint32_t fractionSlot, uint32_t local) {
+            if constexpr (std::is_same_v<Coarsened, MrWideCoarsened>)
+                return MrCoarsenWideCell(GatherWideChildren(nest, childSlot, fractionSlot, local));
+            else
+                return MrCoarsenCell(GatherChildren(nest, childSlot, fractionSlot, local));
+        }
+
+        template <typename Coarsened>
+        void ApplyCoarsenOf(MultiresNest& nest, uint32_t i) {
             MrRequestState& state = nest.states[i];
             const uint32_t childSlot = state.target;
             const MrBlock child = nest.blocks[childSlot];
             MrBlock& parent = nest.blocks[child.parent];
 
             // --- 子 2³ を 1 つに(親の八分の一の 64 セル)---
-            std::array<MrCoarsened, MR_OCTANT_CELLS> results{};
+            std::array<Coarsened, MR_OCTANT_CELLS> results{};
             bool octantFraction = false;
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
-                results[local] = MrCoarsenCell(GatherChildren(nest, childSlot, child.fraction, local));
+                results[local] = CoarsenOne<Coarsened>(nest, childSlot, child.fraction, local);
                 RecordCoarsened(nest, results[local], child.level);
                 octantFraction |= !MrFractionIsZero(results[local].fraction);
             }
@@ -403,10 +449,17 @@ namespace bicameral::sim {
 
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t index = MrOctantCell(child.parentOctant, local);
-                if (!MrIsUniform(parent))
-                    CellAt(nest, child.parent, index) = results[local].cell;
+                if constexpr (std::is_same_v<Coarsened, MrWideCoarsened>) {
+                    if (!MrIsUniform(parent))
+                        StoreWidePageCell(nest, parent.page, index, results[local].cell);
 
-                SetFraction(nest, parent.fraction, index, results[local].fraction);
+                    StoreWideFraction(nest, parent.fraction, index, results[local].fraction);
+                } else {
+                    if (!MrIsUniform(parent))
+                        CellAt(nest, child.parent, index) = results[local].cell;
+
+                    SetFraction(nest, parent.fraction, index, results[local].fraction);
+                }
             }
 
             // --- 見出し・返す枠・索引 ---
@@ -415,17 +468,28 @@ namespace bicameral::sim {
                 parent.fraction = MR_NO_FRACTION;
             }
 
-            if (child.fraction != MR_NO_FRACTION)
+            if (child.fraction != MR_NO_FRACTION) {
+                ClearFractionOverflow(nest, child.fraction);
                 Release(state, child.fraction);
+            }
 
             state.releaseBlock = childSlot;
-            if (!MrIsUniform(child))
+            if (!MrIsUniform(child)) {
+                ClearPageOverflow(nest, child.page);
                 state.releasePage = child.page;
+            }
 
             parent.children[child.parentOctant] = MR_NO_BLOCK;
             IndexRemove(nest, childSlot);
             nest.blocks[childSlot] = MrMakeUnusedBlock();
             PokeBlock(nest, child.parent);
+        }
+
+        void ApplyCoarsen(MultiresNest& nest, uint32_t i) {
+            if (nest.wideCells)
+                ApplyCoarsenOf<MrWideCoarsened>(nest, i);
+            else
+                ApplyCoarsenOf<MrCoarsened>(nest, i);
         }
 
         // --- 5. 解放: 返す枠を要求の順に積む・取り合いの印を消す・数える ---

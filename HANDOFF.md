@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0175 成分の二段(CPU リファレンス)— 完了(核と 1 セルまで。多重解像度の世界〔CPU〕は T-0187 に分けた)
+最終更新: 2026-10-09 / チケット: T-0187 多重解像度の世界(CPU)のセルに溢れ — 完了(影の引き戻し・畳む・覗き窓の溢れは T-0199 に分けた)
 
 ## 状態(3 行以内)
-- 反応の核(reaction.hlsli)はセルの形 Cell のテンプレート: RxCell(インライン 8。GPU と今の世界)と RxWideCell(C++ だけ・上限なし。sim/reaction_wide_cell.h)。
-- RxWideCell は 9 種目の生成物を待たずに作り、16 種のセルも 17 種まで進む(保存はビット単位)。8 種以下ならインラインと毎刻みビット一致。GPU のコードは同じ(RxAdded・RxWaitStep は typedef)。
-- t-0132・t-0026・t-0140 を合わせた main は release の全部が通過(直したものなし。gpu_multires の束は変更の後に流した)。次は T-0187(世界の CPU のセルに溢れ)→ T-0176(GPU)。
+- CPU の多重解像度の世界は `EnableWideCells(nest)` で「インライン 8 + 頁ごと・端数の枠ごとの溢れ」(MultiresOverflowArea。セルの番号の順に詰める)を持つ。既定は使わない(GPU と比べるテストは今のまま)。
+- 溢れを使う世界は 9 種目の生成物を待たせず(待たせた 0・最大 9 種)、8 種ずつ違う子を粗くするのも断らない(親のセル 16 種)。保存は毎刻みビット単位。上限に当たらない本物の鎖は使わない世界と毎刻みビット一致。
+- t-0139・t-0178・t-0184 を合わせた main は release の 2 束(46 本・41 本)が通過(直したものなし)。gpu_multires の束は変更の後に流した(結果は「動いているもの」)。次は T-0176(GPU)か T-0199。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。T-0154・T-0132 済み。T-0178 済み。次は T-0179・T-0147・T-0137)**: T-0178 で系に入るブロックを枠の順に選び、入らないブロックはその刻みだけ陽解法(MultiresStepOptions::implicitLimits・implicitOverflow。仮で A)。GPU の EnableImplicitConduction は上限の全部の欄が要る(0 なら失敗)。伝導の作業場の印の空き語はもう無い。 T-0132 で伝導の段から陰解法を呼ぶ(MultiresStepOptions::implicitConduction が GPU でも効く。AddConductDelta は multires_bindings.hlsli・stepFlags のビット 3・5〜7・implicitMaxGap は 1〜8)。系が上限(GpuMultiresImplicitLimits)を超えると CPU と合わない(T-0178)。 T-0154 で記録の形を前の刻みの GPU の数から選ぶ(GpuImplicit::ShapeFrom・IM_PLAN_WANTED_TAIL。T-0132 でも使う)。 T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
@@ -25,6 +25,12 @@
 - **気体(T-0026 G1・T-0184 G2 済み → T-0185・T-0186)**: G2 で成分の MUSCL(既定 MC)と移す物質量の乱数の丸め(07 §2.2・ADR-0043 §6・§7)。1 セルの物質量は 2^31 µmol 未満(assert)。 1 レベルの CPU リファレンス engine/src/sim/gas_reference.*(ライブラリ bicameral_gas)・tests/gas_reference_test.cpp(debug 74 秒)。07 §2.1・ADR-0043(Proposed)。c̃ 30 m/s は仮(Q11)。05 のセルの形はまだ変えていない(G3)。tidy の新しいファイルの約 20 件は G2 の初めに直す。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0187)**: 最初に t-0139・t-0178・t-0184 を合わせた main(変更前)を release で
+  `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 46 本(約 6 分)・
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_)"` 41 本(約 25 分)が通過(直したものなし・流し直しなし)。release のビルドは警告なし(前からの C4189 だけ)。
+  変更後の release: `-Filter "^(multires.*|reaction.*|float_check|lab_box)$"` 16 本が通過(multires は試験の期待を 1 回直した: 刻み 0 の 2 つの粗くする要求は同じ親を取り合うので、
+  溢れを使う世界でも適用は 3)。debug: ビルド(警告なし)・`-Filter "^(multires|reaction)$"` が通過(FX_ASSERT あり。multires 145 秒)。release の `-Filter "^gpu_multires(_conduction)?(_implicit(_tree)?)?(_warp)?$"`(t-0178 が求めた束 + 伝導。テンプレートにした MrCellThermal を使う)は下の作業ログ・コミットを参照(このコミットの時点では流している途中)
+  足したテスト: multires_test の TestCoarsenFullWide(粗くして 12 刻み伝導ありで刻む)・TestLimitsStepWide(伝導なし・あり)・TestWideMatchesInline(本物の鎖を 2 つの世界で毎刻み比べる)。archmap OK(142)。
 - **テスト(2026-10-09、T-0175)**: 最初に t-0132・t-0026・t-0140 を合わせた main(変更前)を release で
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 45 本(約 7 分)・
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_)"` 41 本(約 22 分)が通過(直したものなし・流し直しなし)。release・debug のビルドは警告なし(前からの C4189 だけ)。
@@ -111,7 +117,7 @@
   `--timeout 2400` で裏で投げ、runner/logs/<job>.result.json を待つ。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **上限の当座のふるまい(T-0022。仮 = QUESTIONS Q19)**: 8 種のセルで 9 種目を作る反応は枠が空くまで進まない・17 本以上は平均 16/N の速さ・入りきらない子は細かいまま。
+- **上限の当座のふるまい(T-0022。仮 = QUESTIONS Q19)**: (CPU の多重解像度の世界は EnableWideCells で ①③ が起きない。T-0187。既定は使わない)8 種のセルで 9 種目を作る反応は枠が空くまで進まない・17 本以上は平均 16/N の速さ・入りきらない子は細かいまま。
   多重解像度の世界の刻みでは MR_COUNTER_LIMIT_PRODUCTS・_CANDIDATES に数える(T-0163)。仮の世界ではまだ数えていない(T-0177)。ほかに数えているのは 1 セルの反応の GPU
   (reaction_cells.hlsl の u1)と、粗くするのを断った数(MR_COUNTER_COARSEN_FULL)。粗くする要求の解決(TreeResolve)は 1 スレッドで 64 セルを MrCoarsenCell するので、要求 1 件ごとに重い(未計測)。
 - **HW の Work Graph は反応の核を 1 ノードに 3〜4 か所展開すると DEVICE_HUNG**(T-0124。原因は推定・BACKLOG)。反応はどこも待ちの丸めだけ(今までの丸めは T-0130 で消した)。
@@ -137,6 +143,14 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。T-0187)溢れの持ち方は「頁ごと(と端数の枠ごと)の領域に、セルの番号の順に詰める」(MultiresOverflowArea の offsets はプレフィックス和)。
+  インラインには ID の小さい方から 8 個、溢れはその続き。1 セルを書くたびに頁の中を詰め直す(並びは内容だけで決まる。GPU の T-0176 のグループ内のプレフィックス和と同じ並び)。
+  インラインの RxCell・MrFraction は今のまま有効なセル(8 種まで)なので、溢れを知らないコード(GPU・一様の値・畳む判定)はそのまま読める。02 §3 に追記。
+- (Claude が決めた。T-0187)粗くする和集合は MrCoarsenCellOf(children, 空の結果)= 子の形と結果の形のテンプレート(MrCoarsenCell はインラインの包み)。
+  形ごとの道具は MrFractionHasRoom・MrFractionWithRoom・MrEmptyFractionLike・MrLostHasRoom・MrWithLostRoom・MrUnionStepLimit(上限なし版は sim/multires_wide_cell.h)。
+  MrNextSpecies・MrAmountOf・MrFractionOf・MrStepCellWait・MrCellThermal・HcCellConductance もセルの形のテンプレート(GPU の呼ぶ側は変えていない)。
+- (Claude が決めた。T-0187)設定は世界ごと(MultiresNest::wideCells。EnableWideCells で作った直後に)。溢れのある頁・端数の枠は畳まない・端数を帳簿へ返さない(保存を守る。T-0199 で畳めるようにする)。
+  2 時間の約束のため、影の引き戻し(溢れのある影は FX_ASSERT)・畳む・静かな葉の許容差の判定・覗き窓・実験室は T-0199 に分けた。
 - (Claude が決めた。T-0175)上限なしは「核をセルの形のテンプレートにする」で作った(02 §3 に追記)。形ごとに違うのは RxHasRoomForSpecies・RxCellWithRoom・
   RxEmptyCellLike・RxEmptyUsage の 4 つ(同じ名前の関数を形ごとに。RxWideCell 版は引数依存の名前探索で見つかる)。使う量(RxUsage / RxWideUsage)は
   RxSumUsage(…, RxEmptyUsage(cell)) の引数で型を決める(HLSL に auto・decltype が無いので)。結果の構造体は RxAddedOf<Cell>・RxWaitStepOf<Cell>、
@@ -194,6 +208,9 @@
 NEXT.md の先頭。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **世界のセルの溢れ(T-0187)**: 溢れを使う世界(nest.wideCells)で頁のセル・端数を書く所は StoreWidePageCell・StoreWideFraction を使う(nest.cells に直接書くと溢れと食い違う。
+  LoadWideNestCell の FX_ASSERT が「溢れがあるならインラインは 8 種」を確かめる)。頁・端数の枠を空きに返す所は ClearPageOverflow・ClearFractionOverflow。
+  新しく頁を返す道を足したら、溢れを空にするか、溢れのある頁を返さないこと(次に使う所に古い溢れが残る)。
 - **核のセルの形(T-0175)**: reaction.hlsli の核の関数は `template <typename Table, typename Cell>`。セルの成分を増やす所は RxHasRoomForSpecies で確かめてから
   RxCellWithRoom で場所を用意して書く(RxWideCell は std::vector なので、場所を用意せずに species[speciesCount] へ書くと範囲外)。新しい関数で成分の位置ごとの
   作業場が要る時は RxUsage のように「形ごとの入れ物 + 引数で型を決める」にする(RX_MAX_CELL_SPECIES の配列を核に足すと RxWideCell で溢れる)。

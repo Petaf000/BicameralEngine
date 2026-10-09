@@ -60,6 +60,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_implicit_conduction.cpp
   src/sim/multires_nest.cpp
   src/sim/multires_tree.cpp
+  src/sim/multires_wide_cell.cpp
 )
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)

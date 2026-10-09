@@ -100,6 +100,12 @@
     RxWideCell(C++ だけ。成分の数に上限なし。engine/src/sim/reaction_wide_cell.h)。形ごとに違うのは「成分を増やせるか・場所を用意する・空のセル・使う量の入れ物」
     の 4 つの道具だけで、8 種以下の間はどちらもビット単位で同じ結果。RxWideCell では 9 種目の生成物を待たせない(RX_LIMIT_PRODUCTS が立たない)。
     多重解像度の世界(CPU)の溢れは T-0187、GPU の頁ごとの溢れ領域は T-0176。候補の上限 16 は残る(T-0164)。
+  - (T-0187)多重解像度の世界(CPU)は `EnableWideCells` で「インライン 8(nest.cells・nest.fractions。GPU と同じ並び)+ 頁ごと・端数の枠ごとの溢れ」
+    (MultiresOverflowArea: セルの番号の順に詰め、セル i の溢れは offsets[i]〜offsets[i+1]。GPU の頁ごとの溢れ領域〔グループ内のプレフィックス和〕と同じ並び)。
+    読み書きは LoadWideNestCell・StoreWidePageCell(RxWideCell)と LoadWideFraction・StoreWideFraction(MrWideFraction)。
+    反応・伝導の熱・細かくする・粗くする(和集合は MrCoarsenCellOf〔結果の形と子の形のテンプレート〕)・影を作る・要約・保存量が溢れを読む。
+    9 種目の生成物を待たせず、8 種ずつ違う子を粗くするのも断らない。溢れのある頁・端数の枠は一様・畳む扱いにしない(保存を守る)。
+    既定は使わない(GPU と比べるテストは今のまま)。溢れのある影の引き戻し・畳む・覗き窓は T-0199。
 - **GPU**: `shaders/sim/reaction_cells.hlsl`(1 スレッド = 1 セルの compute)で、4096 セル × 400 刻みが CPU とビット一致(HW・WARP)。
   各セルを 1 セルだけのブロックとして待ちの丸めで進める(`RxAdvanceLoneCell`。50 刻みの区間の初めに「直前の刻みに変わった」とみなす。T-0130)。
   表は Table 型(テンプレート)で渡す: C++ は span、HLSL はバッファを読む構造体。

@@ -41,8 +41,9 @@ struct HcThermalCache {
 };
 
 // セルのコンダクタンス(mW/K)。伝導率を物質量で重み付けた平均(割り算 1 回。成分が変わった刻みだけ)
-template <typename Table>
-FX_FN uint32_t HcCellConductance(Table table, RxCell cell) {
+// セルの形 Cell のテンプレート(RxCell・C++ の RxWideCell。T-0187)
+template <typename Table, typename Cell>
+FX_FN uint32_t HcCellConductance(Table table, Cell cell) {
     FxU128 weighted;
     weighted.hi = 0;
     weighted.lo = 0;

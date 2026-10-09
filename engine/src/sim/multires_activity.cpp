@@ -33,8 +33,12 @@ namespace bicameral::sim {
         // --- 頁を畳む(T-0103・T-0104)---
 
         // ビット単位で一様なら、その値(覆われていないセルが全部同じ・覆われたセルは空)
+        // (溢れのある頁は畳まない。値 1 つはインラインの形なので。T-0187)
         std::optional<RxCell> ExactFoldValue(MultiresNest& nest, uint32_t slot) {
             const MrBlock& block = nest.blocks[slot];
+            if (PageHasOverflow(nest, block.page))
+                return std::nullopt;
+
             const uint32_t valueCell = MrFoldValueCell(block);
             const RxCell value = valueCell < MR_BLOCK_CELLS ? CellAt(nest, slot, valueCell) : RxMakeEmptyCell(0);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
@@ -248,7 +252,9 @@ namespace bicameral::sim {
         const uint64_t mark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             // --- ちょうど静かになったら、端数の枠を帳簿へ移して返す(畳めるかはその後で調べる)---
-            if (MrWantsFractionReturn(nest.blocks[slot], mark))
+            //     (溢れのある端数の枠は返さない。T-0187)
+            if (MrWantsFractionReturn(nest.blocks[slot], mark) &&
+                !FractionHasOverflow(nest, nest.blocks[slot].fraction))
                 ReturnFractionsToLedger(nest, slot);
 
             const MrBlock& block = nest.blocks[slot];
@@ -263,7 +269,7 @@ namespace bicameral::sim {
                 continue;
             }
 
-            if (MrFoldValueCell(block) == MR_BLOCK_CELLS)
+            if (MrFoldValueCell(block) == MR_BLOCK_CELLS || PageHasOverflow(nest, block.page))
                 continue;
 
             const MrFoldStats stats = CollectFoldStats(nest, view, slot);
