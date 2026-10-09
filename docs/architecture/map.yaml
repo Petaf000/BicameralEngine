@@ -618,13 +618,17 @@ views:
     nodes:
       - { id: luau, group: tool, label: "反応則・生き物・進行を書く<br/>(Luau の殻)",
           code: "engine/src/script/luau_sandbox.cpp::LuauSandbox::Run", ticket: T-0020, doc: docs/design/13-scripting-game-model.md,
-          note: "許したものだけ見せる殻・安全点とメモリの上限・実行ごとに種を戻す(ADR-0030。luau_sandbox_test)。ホットリロードは T-0139、ベイクへのつなぎは T-0021" }
+          note: "許したものだけ見せる殻・安全点とメモリの上限・実行ごとに種を戻す(ADR-0030。luau_sandbox_test)。ホットリロードは T-0139" }
       - { id: packages, group: tool, label: "パッケージ<br/>(1 フォルダ = 1 つ・依存の順・表を合わせる)",
           code: "engine/src/script/luau_package.cpp::LoadPackages", ticket: T-0138, doc: docs/design/13-scripting-game-model.md,
           note: "require はパッケージの中だけ。合わせ方は追加だけ / 印つきの上書き / 上書き(Q8 未回答・仮で C)。表の版 = 中身のハッシュ(ADR-0031。luau_package_test)" }
+      - { id: rxread, group: tool, label: "反応表を読む<br/>(elements・species・reactions → 定義)",
+          code: "engine/src/script/reaction_package.cpp::ReadReactionTableDefinition", ticket: T-0021,
+          doc: docs/design/02-reaction-system.md,
+          note: "値は整数だけ・単位は欄の名前・A は 10 進の文字列でも・知らない欄は誤り(ADR-0032)。試験の表は tests/packages/combustion_test(reaction_package_test)" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
-          code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014,
-          doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。今は C++ に手で書いた定義から(Luau は M2)" }
+          code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0021,
+          doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。名前のバイト順で ID を振る(並びに依らない。ADR-0032)。文献の反応熱の食い違いは警告。C++ の試験の表と Luau の試験の表がビットで同じ" }
       - { id: table, group: rt, status: planned, label: "反応表・物質の表<br/>(版つきのバイナリ)", ticket: T-0002 }
       - { id: gen, group: rt, status: planned, label: "決定的な生成(シード)+ 差分", doc: docs/design/05-world-data.md }
       - { id: vram, group: rt, status: planned, label: "多重解像度の疎な木<br/>(VRAM 常駐の世界)",
@@ -635,7 +639,8 @@ views:
           note: "再生ファイルの骨組みは T-0086(仮の世界)。セーブ(差分の書き出し)は後" }
     edges:
       - [luau, packages]
-      - [packages, bake, "分類 → 鍵 → 値"]
+      - [packages, rxread, "分類 → 鍵 → 値"]
+      - [rxread, bake, "定義"]
       - [bake, table]
       - [table, vram]
       - [gen, vram]

@@ -32,6 +32,11 @@ add_test(NAME luau_sandbox COMMAND luau_sandbox_test)
 add_executable(luau_package_test luau_package_test.cpp)  # Luau のパッケージ(T-0138)
 target_link_libraries(luau_package_test PRIVATE bicameral_script)
 add_test(NAME luau_package COMMAND luau_package_test)
+add_executable(reaction_package_test reaction_package_test.cpp)  # Luau の反応表 → ベイク(T-0021)
+target_link_libraries(reaction_package_test PRIVATE bicameral_reaction_script bicameral_core)
+target_compile_definitions(reaction_package_test PRIVATE
+  BICAMERAL_TEST_PACKAGES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/packages")
+add_test(NAME reaction_package COMMAND reaction_package_test)
 
 add_executable(reaction_test reaction_test.cpp)
 target_link_libraries(reaction_test PRIVATE bicameral_reaction bicameral_core)

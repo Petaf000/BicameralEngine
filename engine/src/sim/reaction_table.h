@@ -1,17 +1,22 @@
 // reaction_table.h — 反応表の定義(人が書く値)と、GPU と CPU リファレンスが読む整数の表へのベイク(02 §1〜2。T-0014)。
 //
 // データの流れ:
-//   ReactionTableDefinition(元素・物質・規則。SI の値。今は C++ に手で書く: sim/reaction_test_table、M2 から Luau)
+//   ReactionTableDefinition(元素・物質・規則。SI の値。C++ に手で書く〔sim/reaction_test_table〕か、
+//   Luau のパッケージから読む〔script/reaction_package。T-0021〕)
 //   → BakeReactionTable(整数の数学ライブラリだけで計算する。R7)→ BakedReactionTable(RxSpecies・RxRule・索引・速度の表)
 //   → ReactionTableView(CPU の RxStepCellWait 用)/ そのままバッファに載せて GPU へ(shaders/sim/reaction_cells.hlsl)
 //
 // ベイクの検査(02 §2): 元素の釣り合いが崩れた規則・知らない元素と物質・係数や次数の誤り・名前の重なりはエラーにする。
 // 反応熱は生成エンタルピーの差から自動で決まる(手で書かない)ので、エネルギーの釣り合いは構造的に守られる。
+// 文献の反応熱を書いた規則は、生成エンタルピーの差と比べて食い違えば警告を出す(BakedReactionTable::warnings。02 §2 の 2)。
+// 並びに依らない(T-0021・ADR-0032): 元素・物質・規則・規則の項は名前のバイト順に並べ直してから ID を振る。
+// 定義の並び(C++ の配列の順・Luau の表の順・Mod を入れた順)が違っても、中身が同じなら同じバイト列の表になる。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -59,6 +64,10 @@ namespace bicameral::sim {
         std::vector<RuleTerm> reactants;
         std::vector<RuleTerm> products;
         ArrheniusRate rate;
+
+        // --- 検査だけに使う(表には入らない)---
+        // 文献の反応熱 ΔH(298.15 K、J/mol)。書いたら、生成エンタルピーの差との食い違いを警告する(02 §2 の 2)
+        std::optional<int64_t> declaredReactionEnthalpy;
     };
 
     struct ReactionTableDefinition {
@@ -101,6 +110,7 @@ namespace bicameral::sim {
         std::vector<std::string> ruleNames;     // 添字 = 規則 ID
         std::vector<uint32_t> molarMasses;      // mg/mol。添字 = 物質 ID
         std::vector<uint32_t> speciesElements;  // 物質 ID × 元素の数 + 元素
+        std::vector<std::string> warnings;      // ベイクは通したが、書いた人に見せる食い違い(文献の反応熱など)
 
         [[nodiscard]] ReactionTableView View() const {
             return {.species = species, .rules = rules, .ruleIndex = ruleIndex, .rates = rates};

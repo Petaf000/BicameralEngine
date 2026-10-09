@@ -106,6 +106,14 @@ add_library(bicameral_script STATIC
 target_include_directories(bicameral_script PUBLIC src)
 target_link_libraries(bicameral_script PUBLIC bicameral_core unofficial::luau::Luau.VM unofficial::luau::Luau.Compiler)
 
+# --- reaction_script: Luau のパッケージで書いた反応表を、ベイクに渡す定義に読む(T-0021・ADR-0032)。CPU だけ ---
+# script(パッケージ)と reaction(ベイク)をつなぐ。script は sim を知らないままにするため、別のライブラリにする。
+add_library(bicameral_reaction_script STATIC
+  src/script/reaction_package.cpp
+)
+target_include_directories(bicameral_reaction_script PUBLIC src)
+target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)
+
 # --- frame: フレームの歩調の計算(GPU を知らない。CPU だけのテストがある)---
 add_library(bicameral_frame STATIC
   src/frame/sim_scheduler.cpp
