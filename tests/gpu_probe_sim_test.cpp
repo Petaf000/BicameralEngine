@@ -14,6 +14,8 @@
 //   - イベントが (刻み, 種類, 場所) の順に並んで戻る(足した順と違う刻みも入れる)。一時置き場が溢れたら落とした数が合う
 //   - (06「テスト」の 2 つ目・15 §2)窓の操作のようにフレームの途中で届くコマンドを記録し、再生ファイルに書いて読み、
 //     別の分け方で再生して同じハッシュ列になる
+//   - (T-0139)反応表を刻みの途中で差し替えても(速度と熱容量を変えた表)、差し替えた刻みから CPU リファレンスと毎刻みビット一致する
+//     (分け方を変えても。差し替えの印のコマンドは GPU の適用では何もしない)
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ(シミュは compute キュー。06 §4)。
 #include <algorithm>
@@ -144,8 +146,14 @@ namespace {
         return total;
     }
 
+    // 反応表の差し替え(T-0139): 刻み tick の始めに table へ
+    struct TableSwapPlan {
+        uint64_t tick = 0;
+        const BakedReactionTable* table = nullptr;
+    };
+
     Reference RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands,
-                           std::span<const reaction::RxCell> world = {}) {
+                           std::span<const reaction::RxCell> world = {}, TableSwapPlan swap = {}) {
         ProbeReference reference(table, world);
         Reference result;
         result.ticks.push_back(
@@ -153,7 +161,7 @@ namespace {
 
         const std::vector<uint64_t> initialElements = CountAllElements(table, reference.State(0));
         for (uint64_t tick = 0; tick < TOTAL_TICKS; ++tick) {
-            reference.Advance(tick, commands);
+            reference.Advance(tick, commands, tick == swap.tick ? swap.table : nullptr);
             const std::span<const reaction::RxCell> state = reference.State(tick + 1);
             result.ticks.push_back({.tick = tick + 1,
                                     .hash = ProbeStateHash(state),
@@ -180,6 +188,9 @@ namespace {
     std::vector<ProbeEvent> ExpectedEvents(std::span<const ProbeCommand> commands) {
         std::vector<ProbeEvent> events;
         for (const ProbeCommand& command : commands) {
+            if (command.type != PROBE_COMMAND_TYPE_POKE)
+                continue;  // 表の差し替えの印はイベントを出さない(T-0139)
+
             events.push_back({.tick = command.targetTick,
                               .type = PROBE_EVENT_POKE_APPLIED,
                               .place = ProbePokePlace(command.payload[0], command.payload[1], command.payload[2])});
@@ -258,7 +269,7 @@ namespace {
     // 単位を plan の分け方でフレームにして走らせる(フレームの枠を順に使い回す。毎フレーム抽出する)。
     // コマンドは source がフレームごとに渡す
     RunResult RunPlan(ID3D12Device5* device, const BakedReactionTable& table, const Plan& plan,
-                      const CommandSource& source) {
+                      const CommandSource& source, TableSwapPlan swap = {}) {
         RunResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"TestSim");
         auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table, plan.options);
@@ -283,12 +294,20 @@ namespace {
                 frame, ProbeSim::NextApplyTick(firstTick, firstUnit),
                 std::min(simulation->FreeCommandSlots(), PROBE_MAX_COMMANDS));
 
-            ID3D12CommandList* list = simulation->RecordFrame(slot, {.firstTick = firstTick,
-                                                                     .firstUnit = firstUnit,
-                                                                     .unitCount = plan.unitsPerFrame[frame],
-                                                                     .extract = true,
-                                                                     .extractionTarget = extractionTarget,
-                                                                     .commands = commands});
+            // 差し替える刻みの適用の単位がこのフレームにあれば、表を渡す(T-0139)
+            const uint64_t swapUnit = swap.tick * unitsPerTick;
+            const bool swapHere = swap.table != nullptr && swapUnit >= unitPosition &&
+                                  swapUnit < unitPosition + plan.unitsPerFrame[frame];
+            const ProbeTableSwap swapInput{.tick = swap.tick, .table = swap.table};
+
+            ID3D12CommandList* list = simulation->RecordFrame(
+                slot, {.firstTick = firstTick,
+                       .firstUnit = firstUnit,
+                       .unitCount = plan.unitsPerFrame[frame],
+                       .extract = true,
+                       .extractionTarget = extractionTarget,
+                       .commands = commands,
+                       .tableSwaps = swapHere ? std::span(&swapInput, 1) : std::span<const ProbeTableSwap>()});
 
             if (list == nullptr)
                 return result;
@@ -609,6 +628,76 @@ namespace {
         failures.Check(result.extractionHash == expected.extractionHash, "待ちの丸め: 最後の抽出が CPU と一致");
     }
 
+    // --- 反応表の差し替え(T-0139): 速度と熱容量を変えた表に、刻みの途中で替える ---
+
+    constexpr uint64_t SWAP_TICK = 17;
+
+    // 木の燃焼を 100 倍速く、窒素の熱容量を 1 割大きくした表(物質の一覧は同じ。熱容量が変わるので全部のセルの温度が変わる)
+    std::optional<BakedReactionTable> MakeSwappedTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        for (RuleDefinition& rule : definition.rules) {
+            if (rule.name == "cellulose_combustion")
+                rule.rate.preExponentialMantissa *= 100;
+        }
+
+        for (SpeciesDefinition& species : definition.species) {
+            if (species.name == "nitrogen")
+                species.heatCapacity += species.heatCapacity / 10;
+        }
+
+        auto baked = BakeReactionTable(definition);
+        if (!baked)
+            return std::nullopt;
+
+        return std::move(*baked);
+    }
+
+    void TestTableSwap(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
+        const std::optional<BakedReactionTable> swapped = MakeSwappedTable();
+        failures.Check(
+            swapped.has_value() && swapped->speciesNames == table.speciesNames && swapped->rates != table.rates,
+            "表の差し替え: 差し替える表をベイクできた(物質の一覧は同じ・速度が違う)");
+        if (!swapped)
+            return;
+
+        std::vector<ProbeCommand> commands = MakeCommands();
+        commands.push_back(MakeTableCommand(SWAP_TICK, static_cast<uint32_t>(commands.size()), 0x5157A9ULL));
+        rng::sort(commands, CommandPrecedes);
+
+        const TableSwapPlan swap{.tick = SWAP_TICK, .table = &*swapped};
+        const Reference expected = RunReference(table, commands, {}, swap);
+        const Reference unswapped = RunReference(table, commands);
+        Log(Channel::Sim, Level::Info, "表の差し替え(刻み {}): CPU S({}) = {:016x}(差し替えなし {:016x})", SWAP_TICK,
+            TOTAL_TICKS, expected.ticks.back().hash, unswapped.ticks.back().hash);
+
+        failures.Check(expected.ticks[SWAP_TICK].hash == unswapped.ticks[SWAP_TICK].hash &&
+                           expected.ticks.back().hash != unswapped.ticks.back().hash,
+                       "表の差し替え: 差し替える前は同じ・後は違う世界になる(CPU)");
+        failures.Check(expected.ticks[SWAP_TICK + 1].scheduledBlocks == PROBE_BLOCK_COUNT,
+                       "表の差し替え: 差し替えた刻みに全部のブロックを計算する(CPU)");
+        failures.Check(expected.energyConserved && expected.elementsConserved,
+                       "表の差し替え: エネルギーと元素の数が保存される(CPU)");
+
+        for (const Plan& plan : {MakePlans()[0], MixedPlan()}) {
+            save::ReplayPlayer player = MakePlayer(commands);
+            const RunResult result = RunPlan(device, table, plan, ScheduledSource(player), swap);
+
+            Log(Channel::Sim, Level::Info, "表の差し替え GPU({}): S({}) = {:016x}", plan.name,
+                result.hashes.empty() ? 0 : result.hashes.back().tick,
+                result.hashes.empty() ? 0 : result.hashes.back().hash);
+
+            failures.Check(
+                result.ok && HashesMatch(result.hashes, expected),
+                std::format("表の差し替え {}: 刻みごとのハッシュと計算したブロックの数が CPU と一致", plan.name));
+            failures.Check(result.extractionHash == expected.extractionHash,
+                           std::format("表の差し替え {}: 最後の抽出(温度は新しい表)が CPU と一致", plan.name));
+            failures.Check(result.events == ExpectedEvents(commands) && result.droppedEventCount == 0,
+                           std::format("表の差し替え {}: イベントはつつきの分だけ", plan.name));
+            failures.Check(GraphStatsMatch(result, expected),
+                           std::format("表の差し替え {}: 伝導のグラフのカウンタが CPU の予想と合う", plan.name));
+        }
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -641,6 +730,7 @@ int main(int argc, char** argv) {
     TestEventOverflow(device->Get(), *table, failures);
     TestRecordAndReplay(device->Get(), *table, failures);
     TestSlowWake(device->Get(), *table, failures);
+    TestTableSwap(device->Get(), *table, failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");
     const bool passed = failures.count == 0 && passesValidation;

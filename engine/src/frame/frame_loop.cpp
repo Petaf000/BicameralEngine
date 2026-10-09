@@ -28,6 +28,7 @@
 #include "editor/editor_overlay.h"
 #include "editor/time_control.h"
 #include "frame/sim_scheduler.h"
+#include "frame/table_hot_reload.h"
 #include "frame/trace_capture.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
@@ -190,6 +191,9 @@ namespace bicameral::frame {
 
             // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
             std::vector<save::ReplayPlayer> replay;
+
+            // 起動時に読んだ反応表(ホットリロードの元。T-0139)
+            std::shared_ptr<const script::LoadedReactionTable> reactionTable;
         };
 
         class FrameLoop {
@@ -206,6 +210,8 @@ namespace bicameral::frame {
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
+                  m_tableReload({.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
+                                options.editor && options.replayPath.empty()),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -257,6 +263,7 @@ namespace bicameral::frame {
             void QueuePushes();
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
+            void TakeTableSwaps(SimCursor start, uint32_t limit, std::vector<sim::ProbeCommand>& commands);
             [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
 
@@ -309,8 +316,12 @@ namespace bicameral::frame {
             render::DebugViewController m_viewController;
 
             // --- 記録・再生・画面の保存 ---
-            std::vector<save::ReplayPlayer> m_replay;             // 再生中なら 1 つ
-            save::ReplayRecorder m_recorder;                      // --record のときだけ使う
+            std::vector<save::ReplayPlayer> m_replay;  // 再生中なら 1 つ
+            save::ReplayRecorder m_recorder;           // --record のときだけ使う
+            TableHotReload
+                m_tableReload;  // 反応表のホットリロード(--editor でファイルを見る。再生は印の表を当てる。T-0139)
+            std::vector<sim::ProbeTableSwap> m_frameTableSwaps;   // 次に記録するフレームで当てる差し替え
+            bool m_tableSwapFailed = false;                       // 再生の印の表を持っていない(止まる)
             std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で写したら 1 つ
 
             // --- 連鎖のトレース ---
@@ -416,7 +427,8 @@ namespace bicameral::frame {
         // 世界の反応表: データのフォルダのパッケージ(既定は exe の横の data/packages)からベイクする(T-0157・ADR-0033)。
         // 読めない・形の誤り・検査で落ちたら、窓を開く前に起動を止める(半端な表で世界を動かさない)。
         // Mod が読めなかったとき・文献の反応熱と食い違うときは、警告をログに出して続ける(ADR-0031 の 3・02 §2 の 2)
-        std::expected<sim::BakedReactionTable, std::string> LoadWorldReactionTable(const FrameLoopOptions& options) {
+        std::expected<std::shared_ptr<const script::LoadedReactionTable>, std::string> LoadWorldReactionTable(
+            const FrameLoopOptions& options) {
             const auto start = chr::steady_clock::now();
             auto loaded = script::LoadReactionTable({.packageRoot = options.packageRoot});
             if (!loaded)
@@ -439,7 +451,7 @@ namespace bicameral::frame {
             for (const std::string& warning : loaded->table.warnings)
                 Log(Channel::Sim, Level::Warning, "反応表: {}", warning);
 
-            return std::move(loaded->table);
+            return std::make_shared<const script::LoadedReactionTable>(std::move(*loaded));
         }
 
         std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
@@ -473,11 +485,11 @@ namespace bicameral::frame {
             if (!swapChain)
                 return std::unexpected(swapChain.error());
 
-            auto simulation = CreateSimulation(native, options, *reactionTable);
+            auto simulation = CreateSimulation(native, options, (*reactionTable)->table);
             if (!simulation)
                 return std::unexpected(simulation.error());
 
-            auto peek = sim::ProbePeek::Create(native, *reactionTable);
+            auto peek = sim::ProbePeek::Create(native, (*reactionTable)->table);
             if (!peek)
                 return std::unexpected(peek.error());
 
@@ -502,7 +514,8 @@ namespace bicameral::frame {
                                   .simulation = std::move(*simulation),
                                   .peek = std::move(*peek),
                                   .view = std::move(*view),
-                                  .replay = std::move(replay)};
+                                  .replay = std::move(replay),
+                                  .reactionTable = *reactionTable};
         }
 
         bool FrameLoop::CreateFrameSlots() {
@@ -846,6 +859,7 @@ namespace bicameral::frame {
                                                           ? TakeLiveCommands(applyTick, endApplyTick, limit)
                                                           : m_replay.front().TakeCommands(applyTick, limit);
 
+            TakeTableSwaps(start, limit, commands);
             if (!m_options.recordPath.empty())
                 m_recorder.AddCommands(commands);
 
@@ -856,6 +870,24 @@ namespace bicameral::frame {
             }
 
             return commands;
+        }
+
+        // 反応表の差し替え(T-0139・ADR-0047): 読み直した表を、このフレームの最初の適用の単位の刻みへ(印のコマンドを足すので
+        // 記録にも残る)。再生は印の版の表を探す。当てる差し替えは m_frameTableSwaps(SubmitSim が RecordFrame に渡す)
+        void FrameLoop::TakeTableSwaps(SimCursor start, uint32_t limit, std::vector<sim::ProbeCommand>& commands) {
+            const uint32_t unitsPerTick = m_sim.UnitsPerTick();
+            const uint64_t firstUnit = (start.tick * unitsPerTick) + start.unit;
+            const uint64_t endUnit = (m_scheduler.Cursor().tick * unitsPerTick) + m_scheduler.Cursor().unit;
+            auto swaps = m_tableReload.TakeSwaps(firstUnit, static_cast<uint32_t>(endUnit - firstUnit), unitsPerTick,
+                                                 !m_replay.empty(), commands.size() < limit, m_nextSequence, commands);
+            if (!swaps) {
+                Log(Channel::Sim, Level::Error, "{}", swaps.error());
+                m_tableSwapFailed = true;
+                m_frameTableSwaps.clear();
+                return;
+            }
+
+            m_frameTableSwaps = std::move(*swaps);
         }
 
         std::vector<sim::ProbeCommand> FrameLoop::TakeClickCommands(uint64_t applyTick, uint32_t limit) {
@@ -916,6 +948,9 @@ namespace bicameral::frame {
                 ++m_interval.skippedExtractions;
 
             const std::vector<sim::ProbeCommand> commands = TakeCommands(start);
+            if (m_tableSwapFailed)
+                return false;
+
             StartRequestedTrace(start);
             // 抽出は S(終わった後のカーソルの刻み)。刻みの途中で終わったら、その刻みの始めの状態(ProbeSim::RecordFrame)
             const uint64_t extractionTick = m_scheduler.Cursor().tick;
@@ -932,10 +967,17 @@ namespace bicameral::frame {
                        .afterExtract = [this](auto* simList,
                                               const auto& context) { m_peek.RecordAfterExtract(simList, context); },
                        .saveTo = SaveSlotFor(start, unitCount, restoreFrom),
-                       .restoreFrom = restoreFrom});
+                       .restoreFrom = restoreFrom,
+                       .tableSwaps = m_frameTableSwaps});
 
             if (list == nullptr)
                 return false;
+
+            // 表を差し替えたら、保存点(このフレームの先頭で写したものも)は前の表の世界なので捨てる(戻ると表と食い違う。ADR-0047)
+            if (!m_frameTableSwaps.empty()) {
+                m_sim.DiscardSavePointsAfter(0);
+                m_frameTableSwaps.clear();
+            }
 
             if (extract) {
                 // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
@@ -1160,7 +1202,14 @@ namespace bicameral::frame {
                     .savePointTicks = SavePointTicks(),
                     .saveIntervalTicks = m_options.saveIntervalTicks,
                     .rewindUnavailable = RewindUnavailableReason(),
-                    .graph = MakeGraphPanelStatus()};
+                    .graph = MakeGraphPanelStatus(),
+                    .reactionTable = {.version = m_tableReload.AppliedVersion(),
+                                      .swaps = m_tableReload.AppliedCount(),
+                                      .failures = m_tableReload.FailedCount(),
+                                      .watching = m_tableReload.Watching(),
+                                      .waiting = m_tableReload.Waiting(),
+                                      .lastFailed = m_tableReload.LastFailed(),
+                                      .message = m_tableReload.LastMessage()}};
         }
 
         // 性能のパネル(T-0143): 直近 1 秒の単位ごとの GPU 時間を 1 刻みあたりに、伝導のグラフのカウンタはそのまま
@@ -1401,6 +1450,7 @@ namespace bicameral::frame {
         bool FrameLoop::RunFrame(Clock::time_point frameStart) {
             CollectSimSubmissions();
             QueueClicks();
+            m_tableReload.Poll(m_frameNumber);
             if (!SubmitSim())
                 return false;
 

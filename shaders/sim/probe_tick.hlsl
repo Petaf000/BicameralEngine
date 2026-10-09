@@ -250,6 +250,31 @@ void SortEventKeys(uint32_t thread) {
         AppendActiveBlock((uint32_t)(tick & 1), block);
 }
 
+// --- [0] の続き(反応表を差し替えた刻みだけ。T-0139・ADR-0047): 新しい表で熱のキャッシュを作り直し、全部のブロックを起こす ---
+// CPU が適用の単位の前に新しい表を写してある(コマンドの適用も新しい表で)。1 スレッド = 1 セル(2 世代とも。眠っているブロックは
+// 2 世代が同じセルなので、どちらの世代を読む刻みでも新しい表の温度になる)。表が変わると速さ f も変わるので、全部のブロックを
+// 「刻みの直前に変わった」(tc = 刻み t の印 − 1)にして待ちを引き直させる(ADR-0018 の「表を変えるもの」)。
+// 一覧は空にしてから、起こす刻みを今の印にして WakeDueBlocks に全部のブロックを足させる(重ならない)
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RefreshTable(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t index = dispatchThreadId.x;
+    if (index >= 2 * PROBE_CELL_COUNT)
+        return;
+
+    thermal[index] = ProbeMakeCache(ReactionTable(), cells[index]);
+
+    const uint64_t tick = CurrentTick();
+    if (index == 0 && (tick & 1) == 0)
+        ResetActiveList(activeList0);
+    else if (index == 0)
+        ResetActiveList(activeList1);
+
+    if (index >= PROBE_BLOCK_COUNT)
+        return;
+
+    StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, index, ProbeChangeMark(tick) - 1);
+    StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, index, ProbeChangeMark(tick));
+}
+
 // --- [1] 伝導は Work Graph(sim/probe_conduct.hlsl)---
 
 // --- [2 .. 2 + k) 重さの試験(--sim-load・--sim-split。R-LOOP-2)---

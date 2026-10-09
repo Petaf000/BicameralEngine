@@ -101,6 +101,7 @@ bicameral_add_shader(sim/debug_ring_graph_probe.hlsl PROFILE lib_6_8)    # Âêå„Å
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY EnqueueCommands NAME probe_tick_enqueue)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY ApplyCommands NAME probe_tick_apply)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY WakeDueBlocks NAME probe_tick_wake_due)
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY RefreshTable NAME probe_tick_refresh_table)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Extract NAME probe_tick_extract)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Busy NAME probe_tick_busy)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY HashCells NAME probe_tick_hash_cells)

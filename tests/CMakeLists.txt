@@ -42,6 +42,13 @@ target_compile_definitions(reaction_package_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(reaction_package_test bicameral_data)  # ランタイムの入り口は exe の横の data/packages を読む(T-0157)
 add_test(NAME reaction_package COMMAND reaction_package_test)
+add_executable(reaction_hot_reload_test reaction_hot_reload_test.cpp)  # 反応表のホットリロード(T-0139)
+target_link_libraries(reaction_hot_reload_test PRIVATE bicameral_reaction_script bicameral_core)
+target_compile_definitions(reaction_hot_reload_test PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_dependencies(reaction_hot_reload_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME reaction_hot_reload COMMAND reaction_hot_reload_test)
+set_tests_properties(reaction_hot_reload PROPERTIES TIMEOUT 300)
 # ランタイムが読むパッケージの表で、今の場面(仮の世界の燃焼)が C++ の表とビット単位で同じ結果になる(T-0157。CPU リファレンス)
 add_executable(reaction_package_scene_test reaction_package_scene_test.cpp)
 target_precompile_headers(reaction_package_scene_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
@@ -270,7 +277,7 @@ target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --warp)
 # WARP の仮の世界は重い(2026-10-03 の PC の debug で sim 130 s・trace 65 s)。CI の機械(コアが少ない)で 300 s を越えないよう長めに切る
-set_tests_properties(gpu_probe_sim_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)
+set_tests_properties(gpu_probe_sim gpu_probe_sim_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)  # gpu_probe_sim は debug で 300 秒を超える(T-0139 で表の差し替えを足した)
 # 覗き窓(T-0096): 影の鎖と抽出の覗きの欄が CPU とビット一致・覗いても世界のハッシュ列が変わらない
 bicameral_add_gpu_test(gpu_probe_physics_test)  # 仮の世界の刻みに入れた物理と押すコマンドの GPU と CPU のビット一致(T-0098)
 target_link_libraries(gpu_probe_physics_test PRIVATE bicameral_sim)

@@ -162,6 +162,18 @@ namespace bicameral::sim {
         return command;
     }
 
+    ProbeCommand MakeTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t version) {
+        ProbeCommand command{.targetTick = targetTick,
+                             .sequence = sequence,
+                             .type = static_cast<uint16_t>(PROBE_COMMAND_TYPE_TABLE),
+                             .size = 8};
+
+        command.payload[0] = static_cast<uint32_t>(version);
+        command.payload[1] = static_cast<uint32_t>(version >> 32);
+
+        return command;
+    }
+
     // --- 作る ---
 
     std::expected<ProbeSim, std::string> ProbeSim::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType,
@@ -221,13 +233,14 @@ namespace bicameral::sim {
         m_enqueuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_enqueue.cso");
         m_applyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_apply.cso");
         m_wakeDuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_wake_due.cso");
+        m_refreshTablePipeline = LoadComputePipeline(device, root, "sim/probe_tick_refresh_table.cso");
         m_busyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_busy.cso");
         m_hashCellsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_cells.cso");
         m_flushEventsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_flush_events.cso");
         m_extractPipeline = LoadComputePipeline(device, root, "sim/probe_tick_extract.cso");
 
-        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_busyPipeline && m_hashCellsPipeline &&
-               m_flushEventsPipeline && m_extractPipeline && CreateConductGraph(device);
+        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_refreshTablePipeline && m_busyPipeline &&
+               m_hashCellsPipeline && m_flushEventsPipeline && m_extractPipeline && CreateConductGraph(device);
     }
 
     // 伝導の Work Graph(WakeBlocks → ConductBlock)。compute と同じルート署名をグローバルのルート署名にする
@@ -426,7 +439,24 @@ namespace bicameral::sim {
             return false;
         }
 
-        return ValidateSavePoints(input) && ValidateCommands(input);
+        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input);
+    }
+
+    // 表の差し替えの約束: (tick, 適用の単位) がこのフレームの単位の中にあり、表がある(T-0139)
+    bool ProbeSim::ValidateTableSwap(const ProbeFrameInput& input) const {
+        const uint64_t first = (input.firstTick * UnitsPerTick()) + input.firstUnit;
+        for (const ProbeTableSwap& swap : input.tableSwaps) {
+            const uint64_t swapUnit = swap.tick * UnitsPerTick();
+            if (swap.table != nullptr && swapUnit >= first && swapUnit < first + input.unitCount)
+                continue;
+
+            Log(Channel::Sim, Level::Error,
+                "表の差し替えの刻み {} の適用の単位が、このフレーム(刻み {} の単位 {} から {} 個)に無い", swap.tick,
+                input.firstTick, input.firstUnit, input.unitCount);
+            return false;
+        }
+
+        return true;
     }
 
     // コマンドの約束(ファイルの先頭): キューの空き・並び・適用に間に合う刻み。破ると GPU で捨てられるか、キューが壊れる
@@ -500,6 +530,7 @@ namespace bicameral::sim {
             ResetCommandMirror();
 
         FrameSlot& frame = m_slots[slot];
+        frame.keepAlive.clear();  // この枠の前のリストは GPU が終えている(呼ぶ側の約束)
         WriteInput(frame, input);
         if (FAILED(frame.allocator->Reset()) || FAILED(frame.list->Reset(frame.allocator.Get(), nullptr))) {
             Log(Channel::Sim, Level::Error, "フレームのリストを記録し直せない(slot {})", slot);
@@ -538,7 +569,15 @@ namespace bicameral::sim {
         bool hasHash = false;
 
         for (uint32_t index = 0; index < input.unitCount; ++index) {
-            RecordUnit(list, frame.input.Get(), tick, unit);
+            // 表の差し替え(T-0139): その刻みの適用の単位の前に写す(適用の後の RefreshTable は RecordUnit)
+            const auto swap = rng::find(input.tableSwaps, tick, &ProbeTableSwap::tick);
+            const bool tableSwapped = unit == PROBE_UNIT_APPLY && swap != input.tableSwaps.end();
+            if (tableSwapped && !RecordTableSwap(list, frame, *swap->table)) {
+                Log(Channel::Sim, Level::Error, "反応表の差し替えを記録できない(刻み {})", tick);
+                return nullptr;
+            }
+
+            RecordUnit(list, frame.input.Get(), tick, unit, tableSwapped);
             list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery + 1 + index);
             hasHash = hasHash || unit == HashUnit();
 
@@ -657,13 +696,21 @@ namespace bicameral::sim {
     }
 
     // 1 つの単位(probe_sim.hlsli の単位の表)。最後に UAV バリアで、次の単位が結果を読めるようにする
-    void ProbeSim::RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit) {
+    void ProbeSim::RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit,
+                              bool tableSwapped) {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
         SetUnitConstants(list, tick, 0);
         if (unit == PROBE_UNIT_APPLY) {
             // コマンドの適用は 1 スレッドがキューの先頭から番号順に(probe_tick.hlsl)。刻みの一覧と表の欄の用意も
             list->SetPipelineState(m_applyPipeline.Get());
             list->Dispatch(1, 1, 1);
+
+            // 表を差し替えた刻み: 熱のキャッシュ(2 世代)を新しい表で作り直し、全部のブロックの起こす刻みを今にする(T-0139)
+            if (tableSwapped) {
+                list->ResourceBarrier(1, &allUavs);
+                list->SetPipelineState(m_refreshTablePipeline.Get());
+                list->Dispatch(2 * LINEAR_CELL_GROUPS, 1, 1);
+            }
 
             // 起こす刻みの来たブロックを同じ一覧へ(適用が一覧の見出しを整えた後。待ちの丸め。T-0122)
             list->ResourceBarrier(1, &allUavs);
@@ -686,6 +733,45 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier(1, &allUavs);
+    }
+
+    // 反応表の差し替え(T-0139・ADR-0047): 新しい表を新しい既定のバッファに写し、ルートの結び先を替える。差し替える前の表は
+    // このフレームの前の単位と、まだ GPU にある前のフレームが読むので、このリストが終わるまで持つ(状態を追わないよう、毎回新しく作る)
+    bool ProbeSim::RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                   const BakedReactionTable& table) {
+        ComPtr<ID3D12Device5> device;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        const std::array<ComPtr<ID3D12Resource>, 4> uploads = {
+            CreateFilledUpload(device.Get(), table.species, L"ProbeSim.swap.species"),
+            CreateFilledUpload(device.Get(), table.rules, L"ProbeSim.swap.rules"),
+            CreateFilledUpload(device.Get(), table.ruleIndex, L"ProbeSim.swap.ruleIndex"),
+            CreateFilledUpload(device.Get(), table.rates, L"ProbeSim.swap.rates")};
+
+        std::array<D3D12_RESOURCE_BARRIER, 4> barriers{};
+        for (size_t index = 0; index < m_reactionTable.size(); ++index) {
+            if (!uploads[index])
+                return false;
+
+            const uint64_t bytes = uploads[index]->GetDesc().Width;
+            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device.Get(), bytes, gpu::BufferKind::UnorderedAccess);
+            if (!buffer)
+                return false;
+
+            // 作ったバッファは COMMON(写すときに COPY_DEST へ暗黙に昇格する。RecordInitialization と同じ)
+            list->CopyBufferRegion(buffer.Get(), 0, uploads[index].Get(), 0, bytes);
+            barriers[index] = gpu::Transition(buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            frame.keepAlive.push_back(uploads[index]);
+            frame.keepAlive.push_back(std::move(m_reactionTable[index]));
+            m_reactionTable[index] = std::move(buffer);
+        }
+
+        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        BindRootViews(list, frame.input.Get());
+
+        return true;
     }
 
     // 伝導: 刻み t の活性の一覧を GPU の入力にして DispatchGraph(何ブロック計算するかは GPU だけが知っている)。
@@ -1094,7 +1180,11 @@ namespace bicameral::sim {
             m_caches.push_back(ProbeMakeCache(table.View(), cell));
     }
 
-    void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands) {
+    void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands,
+                                 const BakedReactionTable* newTable) {
+        if (newTable != nullptr)
+            m_table = newTable;
+
         const ReactionTableView table = m_table->View();
         const size_t currentBase = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
         const size_t nextBase = static_cast<size_t>((tick + 1) & 1) * PROBE_CELL_COUNT;
@@ -1104,6 +1194,16 @@ namespace bicameral::sim {
         // (1) コマンドの適用。つついたブロックは、前の刻みで変わった・次の刻みに評価の要るブロックと同じく予定の種になる
         std::vector<uint8_t> seeds = m_blockFlags;
         m_sourceEnergy = ApplyPokes(table, current, tick, commands, seeds, m_changedMarks);
+
+        // 表を差し替えた刻み(GPU の RefreshTable と同じ。T-0139): 2 世代の熱のキャッシュを新しい表で作り直し、
+        // 全部のブロックを「刻みの直前に変わった」にして起こす(速さ f が変わるので待ちを引き直す。ADR-0018)
+        if (newTable != nullptr) {
+            for (size_t index = 0; index < m_cells.size(); ++index)
+                m_caches[index] = ProbeMakeCache(table, m_cells[index]);
+
+            rng::fill(m_changedMarks, ProbeChangeMark(tick) - 1);
+            rng::fill(seeds, uint8_t{1});
+        }
         m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
         m_scheduled = ScheduleBlocks(seeds);
         m_scheduledBlocks = static_cast<uint32_t>(rng::count(m_scheduled, uint8_t{1}));

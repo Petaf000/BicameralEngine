@@ -33,6 +33,17 @@ namespace bicameral {
 namespace bicameral::editor {
 
     // パネルに出す 1 フレームの状態(フレームのループが詰める)
+    // 反応表とホットリロード(T-0139。frame/table_hot_reload)
+    struct ReactionTableStatus {
+        uint64_t version = 0;   // 世界が使っている表の版
+        uint32_t swaps = 0;     // 差し替えた回数
+        uint32_t failures = 0;  // 読み直せなかった回数
+        bool watching = false;  // ファイルを見ている(--editor。再生中は見ない)
+        bool waiting = false;   // 読めた表が刻みの境界を待っている(止めている間など)
+        bool lastFailed = false;
+        std::string message;  // 最後の読み直しの結果(誤りならファイル:行:列: 何が違うか)
+    };
+
     struct EditorStatus {
         // --- 世界の時間 ---
         uint64_t tick = 0;  // 次に投げる単位の刻み(SimScheduler のカーソル)
@@ -68,6 +79,9 @@ namespace bicameral::editor {
 
         // --- Work Graphs と性能(直近 1 秒。T-0143)---
         GraphPanelStatus graph;
+
+        // --- 反応表(T-0139)---
+        ReactionTableStatus reactionTable;
     };
 
     class EditorOverlay {
@@ -115,6 +129,7 @@ namespace bicameral::editor {
         [[nodiscard]] TimeRequest BuildTimePanel(const EditorStatus& status, const TimeControl& time) const;
         [[nodiscard]] uint64_t BuildRewind(const EditorStatus& status) const;
         void BuildStatusPanel(const EditorStatus& status) const;
+        void BuildReactionTable(const ReactionTableStatus& table) const;
         [[nodiscard]] TimeRequest TakeShortcuts(const TimeControl& time) const;
 
         // --- 描画の枠(バックバッファごと)---

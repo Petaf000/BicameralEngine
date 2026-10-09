@@ -53,6 +53,13 @@ namespace bicameral::sim {
     using ProbeCommand = Command;
     static_assert(sizeof(ProbeCommand) == PROBE_COMMAND_BYTES);
 
+    // 反応表の差し替えの印(PROBE_COMMAND_TYPE_TABLE。T-0139・ADR-0047)。GPU の適用は何もせず、記録と再生に「刻み targetTick の始めに
+    // 版 version の表に変わった」を残す。表そのものは同じ刻みの ProbeFrameInput::tableSwap で渡す
+    [[nodiscard]] ProbeCommand MakeTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t version);
+    [[nodiscard]] inline uint64_t TableCommandVersion(const ProbeCommand& command) {
+        return uint64_t{command.payload[0]} | (uint64_t{command.payload[1]} << 32);
+    }
+
     // セル (x, y, z) を約 2700 K 温める熱を足す(PROBE_POKE_HEATING_MILLIKELVIN。明示的な湧き出し)
     [[nodiscard]] ProbeCommand MakePokeCommand(uint64_t targetTick, uint32_t sequence, uint32_t x, uint32_t y,
                                                uint32_t z);
@@ -125,6 +132,16 @@ namespace bicameral::sim {
     // 保存点を使わない(ProbeFrameInput::saveTo・restoreFrom の既定)
     inline constexpr uint32_t NO_SAVE_POINT = UINT32_MAX;
 
+    // 反応表の差し替え(ホットリロード。T-0139・ADR-0047)。刻み tick の適用の単位の前に table を写し(コマンドの適用から新しい表)、
+    // 適用の後に熱のキャッシュを作り直して全部のブロックを起こす(RefreshTable)。呼ぶ側の約束: table の物質の一覧が今の表と同じ
+    // (セルの物質 ID の意味が変わらない。script::CheckHotReloadCompatible)・(tick, 0) の単位がこのフレームにある・同じ刻みに
+    // MakeTableCommand の印を足す(記録と再生のため)。table は RecordFrame の中で写し終わる(呼んだ後は持たなくてよい)。
+    // 1 フレームに幾つあってもよい(刻みの順でなくてよい。同じ刻みに 2 つは不可)
+    struct ProbeTableSwap {
+        uint64_t tick = 0;
+        const BakedReactionTable* table = nullptr;  // nullptr なら差し替えない
+    };
+
     struct ProbeFrameInput {
         uint64_t firstTick = 0;  // 最初の単位の刻み
         uint32_t firstUnit = 0;  // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
@@ -150,6 +167,9 @@ namespace bicameral::sim {
         // 単位の前に、世界をこの番号の保存点の状態へ戻す(firstTick は保存点の刻み)。GPU のキューで待っていたコマンドは捨てる
         // (呼ぶ側が firstTick 以降のコマンドを、このフレームの commands から足し直す)
         uint32_t restoreFrom = NO_SAVE_POINT;
+
+        // --- 反応表の差し替え(T-0139)---
+        std::span<const ProbeTableSwap> tableSwaps;
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
@@ -266,6 +286,9 @@ namespace bicameral::sim {
             ComPtr<ID3D12Resource> timestampReadback;  // (MAX_UNITS_PER_FRAME + 2) × 8 バイト
             ComPtr<ID3D12Resource> hashReadback;       // PROBE_HASH_BYTES
 
+            // 反応表を差し替えたフレームの、表のアップロードと差し替える前の表(このリストを GPU が終えるまで持つ。T-0139)
+            std::vector<ComPtr<ID3D12Resource>> keepAlive;
+
             // 最後に記録した範囲(ReadFrame が、どの刻みのハッシュとどの単位の時間かを知るため)
             uint64_t firstTick = 0;
             uint32_t firstUnit = 0;
@@ -303,7 +326,11 @@ namespace bicameral::sim {
         // --- 単位の記録 ---
         void BindRootArguments(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
         void BindRootViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* input) const;
-        void RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit);
+        void RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit,
+                        bool tableSwapped);
+        [[nodiscard]] bool ValidateTableSwap(const ProbeFrameInput& input) const;
+        [[nodiscard]] bool RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                           const BakedReactionTable& table);
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
@@ -345,6 +372,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_enqueuePipeline;
         ComPtr<ID3D12PipelineState> m_applyPipeline;
         ComPtr<ID3D12PipelineState> m_wakeDuePipeline;  // 起こす刻みの来たブロックを一覧へ(待ちの丸め。T-0122)
+        ComPtr<ID3D12PipelineState>
+            m_refreshTablePipeline;  // 表を差し替えた刻み: 熱のキャッシュと全部のブロックを起こす(T-0139)
         ComPtr<ID3D12PipelineState> m_busyPipeline;
         ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
         ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
@@ -425,8 +454,10 @@ namespace bicameral::sim {
         // initialWorld が空なら MakeProbeInitialWorld(ProbeSimOptions::initialWorld と同じ)
         explicit ProbeReference(const BakedReactionTable& table, std::span<const reaction::RxCell> initialWorld = {});
 
-        // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導と反応)
-        void Advance(uint64_t tick, std::span<const ProbeCommand> commands);
+        // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導と反応)。
+        // newTable があれば、刻みの始めに表をそれに差し替える(GPU の ProbeFrameInput::tableSwap と同じ。呼ぶ側が持ち続ける。T-0139)
+        void Advance(uint64_t tick, std::span<const ProbeCommand> commands,
+                     const BakedReactionTable* newTable = nullptr);
 
         // 刻み tick の始めの状態 S(tick)(= tick 回進めた後)
         [[nodiscard]] std::span<const reaction::RxCell> State(uint64_t tick) const;
