@@ -46,6 +46,8 @@ T-0135 の LvTail(多重格子の段を作る回を 1 グループ 1024 スレ�
   バリアの数・シェーダーの大きさ・1024 スレッド・`s_depth` の静的変数・alloca・早い return(関数の頭の)は原因ではなかった(T-0135 の仮説は外れ)。
   同じ形の本体は 4 つ(RoundNodeHash・RoundNodeFirst・RoundLinkHash・RoundCount)。Dispatch の入口(項目のループがない)は前から WARP で動いていた。
 - **直し方**: 4 つのループを印(done・found)とループの条件で抜ける形に(式も順も同じ)。そのままの -O3 で WARP の全部 LvTail が CPU と毎刻みビット一致(42 秒)。
+- 直した後の HW の費用(`--queue compute --measure-only`、負荷あり。前 → 後、回 8・境 256): 熱い点 0.190 → 0.223 ms(最初の場面は暖機でぶれる)・
+  鎖 0.460 → 0.459・たくさんの要求 2.064 → 2.070 ms。全部 LvTail も 0.093 → 0.120・0.955 → 0.972・19.5 → 19.4 ms。変わらない(perf.md には載せていない)。
 - -O0 で逃げる案も測った(HW・負荷あり。回 8・境 256): 熱い点 0.190 → 0.266 ms・鎖 0.460 → 0.459・たくさんの要求 2.064 → 2.045 ms。原因が分かったので使わない。
 
 ## 何をしたか(形。決めたのは Claude〔実装の細部〕。ADR-0019 の T-0147 の追記)
@@ -67,7 +69,8 @@ T-0135 の LvTail(多重格子の段を作る回を 1 グループ 1024 スレ�
 - 原因(HANDOFF の「注意」に足す): **LvTail のような「1 グループが項目のループで本体を回す」シェーダーの本体では、内側のループを return で抜けない**
   (inline されると内側のループから外のループの次の項目へ直接飛ぶ形になり、release〔-O1 以上〕の WARP の JIT が最初の Dispatch でデバイスを失う。
   -O0・-Od・HW は通る)。抜ける時は印とループの条件で。
-- 動いているもの: release の `-Filter "^gpu_multires_implicit(_conduction|_tree|_build)?(_warp)?$"` 8 本(下の結果)。
+- 動いているもの: release の `-Filter "^gpu_multires_implicit(_conduction|_tree|_build)?(_warp)?$"` 8 本が最初のビルドで通過(HW: implicit 21 s・tree 443 s・
+  build 375 s・conduction 929 s / WARP: implicit 7 s・tree 198 s・build 117 s〔3 つの積み方〕・conduction 760 s〔前 861 s〕。本体・wt3・wt4 のランナーが試験中の負荷あり)。
 - 壊れているもの: なし。debug(HW・WARP)と tidy は未実行(シェーダーと C++ の変更は小さい。C++ はコメント・分岐の削除・試験の形だけ)。
 - 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0147)。HANDOFF の陰解法の節の「WARP は LvTail を積まない」「IsSoftwareDevice の分岐」の記述は消してよい。
 - 判断待ち: なし。
