@@ -20,6 +20,7 @@
 #include <cmath>
 #include <deque>
 #include <expected>
+#include <set>
 #include <thread>
 
 #include "core/aliases.h"
@@ -192,8 +193,9 @@ namespace bicameral::frame {
             // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
             std::vector<save::ReplayPlayer> replay;
 
-            // 起動時に読んだ反応表(ホットリロードの元。T-0139)
+            // 起動時に読んだ反応表(ホットリロードの元。T-0139)と、再生ファイルに残っていた差し替えの表(T-0193)
             std::shared_ptr<const script::LoadedReactionTable> reactionTable;
+            std::vector<std::shared_ptr<const script::LoadedReactionTable>> replayTables;
         };
 
         class FrameLoop {
@@ -216,6 +218,10 @@ namespace bicameral::frame {
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
                   m_directFrequency(m_direct.TimestampFrequency()) {
+                // 再生ファイルの差し替えの表は、再生が印の版から探す(T-0193)
+                for (const auto& table : parts.replayTables)
+                    m_tableReload.AddKnown(table);
+
                 // --screenshot-tick: その刻みの始めで世界を止める(写すのは S(その刻み)。T-0025)
                 if (options.screenshotTick)
                     m_scheduler.SetStopTick(*options.screenshotTick);
@@ -454,10 +460,88 @@ namespace bicameral::frame {
             return std::make_shared<const script::LoadedReactionTable>(std::move(*loaded));
         }
 
+        // 世界の反応表の組: 起動時の表と、再生ファイルの差し替えの表(T-0193)
+        struct WorldReactionTables {
+            std::shared_ptr<const script::LoadedReactionTable> initial;
+            std::vector<std::shared_ptr<const script::LoadedReactionTable>> swaps;
+        };
+
+        // 再生ファイルに残った表の中身から、パッケージのフォルダを読まずに表を作り直す(T-0170・T-0193・ADR-0050)
+        std::expected<WorldReactionTables, std::string> RebuildReplayTables(const save::ReplayFile& replay) {
+            WorldReactionTables tables;
+            for (const save::ReplayTable& stored : replay.tables) {
+                auto rebuilt = script::RebuildReactionTable(stored.content, stored.version);
+                if (!rebuilt)
+                    return std::unexpected(rebuilt.error());
+
+                rebuilt->loadOrder = stored.loadOrder;
+                rebuilt->modifiedWorld = stored.modifiedWorld;
+                auto shared = std::make_shared<const script::LoadedReactionTable>(std::move(*rebuilt));
+                if (stored.version == replay.tableVersion)
+                    tables.initial = std::move(shared);
+                else
+                    tables.swaps.push_back(std::move(shared));
+            }
+
+            std::string packages;
+            for (const std::string& name : tables.initial->loadOrder)
+                packages += (packages.empty() ? "" : "・") + name;
+
+            Log(Channel::Sim, Level::Info,
+                "反応表: 再生ファイルの表を使う(パッケージのフォルダは読まない)。版 {:016x}(パッケージ {}{}・物質 "
+                "{}・規則 {})"
+                "・差し替える表 {} 個",
+                tables.initial->tableVersion, packages, tables.initial->modifiedWorld ? "・改造された世界" : "",
+                tables.initial->table.species.size() - 1, tables.initial->table.rules.size(), tables.swaps.size());
+
+            return tables;
+        }
+
+        // 世界の反応表: 再生ファイルに表の中身があればそれを、無ければパッケージから読む。
+        // 表の中身が無い再生ファイル(古い形式の版 1)は今のパッケージの表で再生する。版が書いてあって違えば止める(T-0170)
+        std::expected<WorldReactionTables, std::string> LoadWorldReactionTables(const FrameLoopOptions& options,
+                                                                                const save::ReplayFile* replay) {
+            if (replay != nullptr && !replay->tables.empty())
+                return RebuildReplayTables(*replay);
+
+            auto loaded = LoadWorldReactionTable(options);
+            if (!loaded)
+                return std::unexpected(loaded.error());
+
+            if (replay == nullptr)
+                return WorldReactionTables{.initial = std::move(*loaded)};
+
+            if (replay->tableVersion == 0) {
+                Log(Channel::Sim, Level::Warning,
+                    "再生ファイルに反応表の版と中身が無い(古い形式)。今のパッケージの表(版 {:016x})で再生する"
+                    "(記録した時と表が違えば、ハッシュが合わない)",
+                    (*loaded)->tableVersion);
+            } else if (replay->tableVersion != (*loaded)->tableVersion) {
+                return std::unexpected(
+                    std::format("再生ファイルの反応表は版 {:016x} だが、今のパッケージの表は版 {:016x}"
+                                "(表の中身が再生ファイルに無いので、記録した表で再生できない)",
+                                replay->tableVersion, (*loaded)->tableVersion));
+            }
+
+            return WorldReactionTables{.initial = std::move(*loaded)};
+        }
+
         std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
-            const auto reactionTable = LoadWorldReactionTable(options);
-            if (!reactionTable)
-                return std::unexpected(reactionTable.error());
+            // --- 再生ファイル(表の中身を持っていれば、パッケージより先に要る)と反応表 ---
+            std::vector<save::ReplayPlayer> replay;
+            if (!options.replayPath.empty()) {
+                auto player = save::ReplayPlayer::Load(options.replayPath);
+                if (!player)
+                    return std::unexpected(player.error());
+
+                replay.push_back(std::move(*player));
+            }
+
+            auto reactionTables = LoadWorldReactionTables(options, replay.empty() ? nullptr : &replay.front().File());
+            if (!reactionTables)
+                return std::unexpected(reactionTables.error());
+
+            const std::shared_ptr<const script::LoadedReactionTable>& reactionTable = reactionTables->initial;
 
             auto window = CreateWindowForLoop();
             if (!window)
@@ -485,26 +569,17 @@ namespace bicameral::frame {
             if (!swapChain)
                 return std::unexpected(swapChain.error());
 
-            auto simulation = CreateSimulation(native, options, (*reactionTable)->table);
+            auto simulation = CreateSimulation(native, options, reactionTable->table);
             if (!simulation)
                 return std::unexpected(simulation.error());
 
-            auto peek = sim::ProbePeek::Create(native, (*reactionTable)->table);
+            auto peek = sim::ProbePeek::Create(native, reactionTable->table);
             if (!peek)
                 return std::unexpected(peek.error());
 
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view)
                 return std::unexpected(view.error());
-
-            std::vector<save::ReplayPlayer> replay;
-            if (!options.replayPath.empty()) {
-                auto player = save::ReplayPlayer::Load(options.replayPath);
-                if (!player)
-                    return std::unexpected(player.error());
-
-                replay.push_back(std::move(*player));
-            }
 
             return FrameLoopParts{.window = std::move(*window),
                                   .device = std::move(*device),
@@ -515,7 +590,8 @@ namespace bicameral::frame {
                                   .peek = std::move(*peek),
                                   .view = std::move(*view),
                                   .replay = std::move(replay),
-                                  .reactionTable = *reactionTable};
+                                  .reactionTable = reactionTable,
+                                  .replayTables = std::move(reactionTables->swaps)};
         }
 
         bool FrameLoop::CreateFrameSlots() {
@@ -1672,15 +1748,42 @@ namespace bicameral::frame {
             return !m_traceWriteFailed;
         }
 
+        // 記録に反応表を残す: 起動時の表と、記録したコマンドの差し替えの印の版の表(版の昇順。T-0170・T-0193・ADR-0050)。
+        // 中身(TableBytes)があるので、再生はパッケージのフォルダが無くても同じ表で世界を進められる
+        void AttachReplayTables(save::ReplayFile& replay, const TableHotReload& tables) {
+            std::set<uint64_t> versions{tables.InitialVersion()};
+            for (const sim::ProbeCommand& command : replay.commands) {
+                if (command.type == sim::PROBE_COMMAND_TYPE_TABLE)
+                    versions.insert(sim::TableCommandVersion(command));
+            }
+
+            replay.tableVersion = tables.InitialVersion();
+            for (const uint64_t version : versions) {
+                const auto table = tables.Find(version);
+                if (!table) {
+                    Log(Channel::Sim, Level::Warning, "記録: 反応表の版 {:016x} の中身を持っていない(再生で止まる)",
+                        version);
+                    continue;
+                }
+
+                replay.tables.push_back({.version = version,
+                                         .loadOrder = table->loadOrder,
+                                         .modifiedWorld = table->modifiedWorld,
+                                         .content = table->tableBytes});
+            }
+        }
+
         // 記録を書き、再生の結果を出す。記録を書けない・再生が合わない(終わっていない)なら false
         bool FrameLoop::FinishReplay() {
             bool passed = true;
             if (!m_options.recordPath.empty()) {
-                const save::ReplayFile replay = m_recorder.Build();
+                save::ReplayFile replay = m_recorder.Build();
+                AttachReplayTables(replay, m_tableReload);
                 const auto written = save::WriteReplayFile(m_options.recordPath, replay);
                 if (written) {
-                    Log(Channel::Sim, Level::Info, "記録: {}(コマンド {} 個、ハッシュ {} 個)",
-                        ToUtf8(m_options.recordPath.wstring()), replay.commands.size(), replay.tickHashes.size());
+                    Log(Channel::Sim, Level::Info, "記録: {}(コマンド {} 個、ハッシュ {} 個、反応表 {} 個)",
+                        ToUtf8(m_options.recordPath.wstring()), replay.commands.size(), replay.tickHashes.size(),
+                        replay.tables.size());
                 } else {
                     Log(Channel::Sim, Level::Error, "記録を書けない: {}", written.error());
                     passed = false;

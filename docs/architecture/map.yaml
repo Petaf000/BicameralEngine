@@ -125,9 +125,9 @@ views:
       - { id: eventsort, group: simlib, label: "刻みのイベントを並べる<br/>一時置き場 → bitonic sort → リング",
           code: "shaders/sim/probe_tick.hlsl::SortEventKeys", ticket: T-0086,
           note: "(刻み, 種類, 場所) の順。溢れたら落とした数を数える" }
-      - { id: replayfile, group: savelib, label: "再生ファイル<br/>形式の版・初期状態・コマンドの列・刻みごとのハッシュ",
+      - { id: replayfile, group: savelib, label: "再生ファイル<br/>形式の版・初期状態・コマンドの列・刻みごとのハッシュ・反応表の中身",
           code: "engine/src/save/replay_file.cpp::SerializeReplay", ticket: T-0086, doc: docs/design/15-save-replay-mods.md,
-          note: "replay_file_test(CPU)" }
+          note: "replay_file_test(CPU)。版 2(T-0170・T-0193・ADR-0050): 使った反応表の版・パッケージの一覧・合わせた表の中身。再生はフォルダ無しで表を作り直す(script::RebuildReactionTable・reaction_replay_table)。版 1 は表の無い形で読む" }
       - { id: replaysession, group: savelib, label: "ReplayRecorder / ReplayPlayer<br/>--record / --replay の帳簿",
           code: "engine/src/save/replay_session.cpp::ReplayPlayer::TakeCommands", ticket: T-0086,
           note: "再生は数刻み先まで先にキューへ足し、読み戻したハッシュを突き合わせる" }

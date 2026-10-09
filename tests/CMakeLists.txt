@@ -55,6 +55,15 @@ target_precompile_headers(reaction_package_scene_test PRIVATE ${PROJECT_SOURCE_D
 target_link_libraries(reaction_package_scene_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
 add_dependencies(reaction_package_scene_test bicameral_data)
 add_test(NAME reaction_package_scene COMMAND reaction_package_scene_test)
+# 再生ファイルに残した反応表だけで、パッケージのフォルダ無しに同じ表で再生でき、ハッシュ列が一致する(T-0170・T-0193。CPU リファレンス)
+add_executable(reaction_replay_table_test reaction_replay_table_test.cpp)
+target_precompile_headers(reaction_replay_table_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(reaction_replay_table_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_save bicameral_core)
+target_compile_definitions(reaction_replay_table_test PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_dependencies(reaction_replay_table_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME reaction_replay_table COMMAND reaction_replay_table_test)
+set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
 # 表が読めない・検査で落ちる時、ランタイムは窓を開く前に止まる(T-0157。GPU を使わない)
 add_test(NAME reaction_package_runtime_stops
          COMMAND bicameral --frames 1 --packages ${CMAKE_CURRENT_SOURCE_DIR}/packages_broken)
@@ -335,6 +344,11 @@ set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中�
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)
 set_tests_properties(window_replay_peek PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
+# 表の中身(T-0170・T-0193): 再生ファイルに残った反応表だけで、パッケージのフォルダが無くても同じハッシュ列で再生できる
+add_test(NAME window_replay_no_packages
+         COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
+set_tests_properties(window_replay_no_packages PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*再生: OK")
 
 # 画像の比較(T-0025、16 §5): 決まった刻みの始めで世界を止め、S(その刻み) を描いた画面を基準の画像(tests/images/)と比べる。
 # 写す(ランタイム)→ 比べる(tools/image_compare)の 2 つのテスト。実際の画像と差の画像はビルドのフォルダの images/ に出る。

@@ -93,7 +93,34 @@ namespace bicameral::script {
                                    .rejected = loaded->rejected,
                                    .overrides = loaded->overrides,
                                    .modifiedWorld = loaded->modifiedWorld,
-                                   .tableVersion = TableVersion(*loaded)};
+                                   .tableVersion = TableVersion(*loaded),
+                                   .tableBytes = TableBytes(*loaded)};
+    }
+
+    std::expected<LoadedReactionTable, std::string> RebuildReactionTable(std::string_view tableBytes,
+                                                                         uint64_t expectedVersion) {
+        const std::string where = std::format("再生ファイルの反応表(版 {:016x})", expectedVersion);
+        if (HashBytes(tableBytes) != expectedVersion)
+            return std::unexpected(std::format("{}: 中身のハッシュが版と合わない(壊れている)", where));
+
+        // --- 中身 → 合わせた表(正準な並びか、版で確かめ直す)→ 定義 → ベイク ---
+        auto parsed = ParseTableBytes(tableBytes);
+        if (!parsed)
+            return std::unexpected(std::format("{}: {}", where, parsed.error()));
+
+        if (TableVersion(*parsed) != expectedVersion)
+            return std::unexpected(std::format("{}: 読んだ表の版が合わない(正準な並びでない)", where));
+
+        const auto definition = ReadReactionTableDefinition(*parsed);
+        if (!definition)
+            return std::unexpected(std::format("{}: {}", where, definition.error()));
+
+        auto baked = sim::BakeReactionTable(*definition);
+        if (!baked)
+            return std::unexpected(std::format("{}: ベイクの検査で落ちた: {}", where, baked.error()));
+
+        return LoadedReactionTable{
+            .table = std::move(*baked), .tableVersion = expectedVersion, .tableBytes = std::string(tableBytes)};
     }
 
 }  // namespace bicameral::script

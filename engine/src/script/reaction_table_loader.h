@@ -6,6 +6,7 @@
 // 失敗(フォルダが無い・ゲーム本体のパッケージが読めない・形の誤り・検査で落ちる)は全部 error で返す。呼び手は起動を止める
 // (半端な表で世界を動かさない。D-428)。ゲーム本体以外のパッケージ(Mod)が読めなかったときは、それを除いた表で続け、
 // 理由を rejected に残す(ADR-0031 の 3)。呼び手がログに出す。
+// 再生ファイルの表は RebuildReactionTable が中身(TableBytes)からフォルダ無しで作り直す(T-0193)。
 // ここは CPU だけ(原則 2: 表は CPU でベイクして GPU へ渡す。起動時に 1 回)。
 #pragma once
 
@@ -39,6 +40,7 @@ namespace bicameral::script {
         std::vector<TableOverride> overrides;    // 上書き(OverrideMarked・Override のとき)
         bool modifiedWorld = false;              // 「改造された世界」の印
         uint64_t tableVersion = 0;               // 合わせた表の版(TableVersion。同じ中身なら同じ値)
+        std::string tableBytes;  // 合わせた表の中身(TableBytes。再生ファイルに残し、フォルダ無しで作り直す。T-0193)
     };
 
     // 既定のパッケージのフォルダ: <exe のフォルダ>/data/packages
@@ -46,5 +48,11 @@ namespace bicameral::script {
 
     // パッケージのフォルダから反応表を読んでベイクする。誤りには「どのフォルダ・どのパッケージ・どの欄か」を付ける
     [[nodiscard]] std::expected<LoadedReactionTable, std::string> LoadReactionTable(const ReactionTableSource& source);
+
+    // 再生ファイルに残した表の中身(TableBytes)から、パッケージのフォルダ無しで同じ表を作り直す(T-0193・ADR-0050)。
+    // 中身のハッシュと、作り直した表の版が expectedVersion と同じでなければ失敗(壊れた・書き換えた中身で世界を動かさない)。
+    // Luau は走らせない(中身は値だけ)。loadOrder・modifiedWorld は呼び手が再生ファイルから埋める
+    [[nodiscard]] std::expected<LoadedReactionTable, std::string> RebuildReactionTable(std::string_view tableBytes,
+                                                                                       uint64_t expectedVersion);
 
 }  // namespace bicameral::script

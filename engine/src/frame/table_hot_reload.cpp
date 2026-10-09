@@ -19,7 +19,7 @@ namespace bicameral::frame {
 
     TableHotReload::TableHotReload(script::ReactionTableSource source,
                                    std::shared_ptr<const script::LoadedReactionTable> initial, bool watch)
-        : m_appliedVersion(initial->tableVersion) {
+        : m_initialVersion(initial->tableVersion), m_appliedVersion(initial->tableVersion) {
         Remember(initial);
         if (watch)
             m_reload.emplace(std::move(source), std::move(initial));
@@ -27,6 +27,12 @@ namespace bicameral::frame {
 
     void TableHotReload::Remember(const std::shared_ptr<const script::LoadedReactionTable>& table) {
         m_known.emplace(table->tableVersion, table);  // 同じ版は同じ法則なので、先に覚えた方のままでよい
+    }
+
+    std::shared_ptr<const script::LoadedReactionTable> TableHotReload::Find(uint64_t version) const {
+        const auto known = m_known.find(version);
+
+        return known == m_known.end() ? nullptr : known->second;
     }
 
     void TableHotReload::Poll(uint64_t frameNumber) {
@@ -64,9 +70,9 @@ namespace bicameral::frame {
             if (known == m_known.end()) {
                 return std::unexpected(
                     std::format("再生ファイルの刻み {} で反応表が版 {:016x} "
-                                "に変わるが、その表を持っていない(起動時の表は版 {:016x}。"
-                                "表の中身を再生ファイルに残すのは T-0193)",
-                                command.targetTick, version, m_appliedVersion));
+                                "に変わるが、その表の中身が再生ファイルに無い(起動時の表は版 {:016x}。"
+                                "表の中身を残さない古い形式〔版 1〕の記録)",
+                                command.targetTick, version, m_initialVersion));
             }
 
             m_scheduled.push_back({.tick = command.targetTick, .table = known->second});

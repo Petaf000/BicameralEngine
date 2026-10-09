@@ -103,6 +103,11 @@ namespace bicameral::script {
     // 表の版(TableBytes のハッシュ)。再生ファイルや発見の共有(D-110・15 §3)で、同じ法則の世界かを見分けるのに使う
     [[nodiscard]] uint64_t TableVersion(const PackageSetResult& result);
 
+    // TableBytes の逆: 合わせた表の中身のバイト列から、表(tables だけ)を作り直す(再生ファイルの表。T-0193・ADR-0050)。
+    // 書いたパッケージは分からないので、どの値も package = REPLAY_TABLE_PACKAGE。壊れていれば理由
+    inline constexpr std::string_view REPLAY_TABLE_PACKAGE = "(再生ファイルの表)";
+    [[nodiscard]] std::expected<PackageSetResult, std::string> ParseTableBytes(std::string_view bytes);
+
     // 名前の規則(パッケージ・分類・require のパスの区切りごと): 英小文字・数字・'_'・'-' だけで 1〜64 文字
     [[nodiscard]] bool IsValidPackageName(std::string_view name);
 
