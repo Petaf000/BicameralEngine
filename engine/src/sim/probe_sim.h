@@ -17,7 +17,7 @@
 //   - 抽出(描画が読む)は、投げた単位の後ろで、刻みの境界の状態を写す(1 フレームに 1 回まで)。
 //
 // 使い方:
-//   auto table = BakeReactionTable(MakeCombustionTestTable());
+//   auto table = BakeReactionTable(MakeCombustionTestTable());  // ランタイムは script::LoadReactionTable(T-0157)
 //   auto sim = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, *table, {.busyIterations = n, .busyPieces = k});
 //   ID3D12CommandList* list = sim->RecordFrame(slot, {.firstTick = t, .firstUnit = u, .unitCount = c, .commands = 新しいコマンド, ...});
 //   computeQueue.Submit(list) → フェンスが進んだら sim->ReadFrame(slot)

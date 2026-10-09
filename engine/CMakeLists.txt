@@ -109,8 +109,10 @@ target_link_libraries(bicameral_script PUBLIC bicameral_core unofficial::luau::L
 
 # --- reaction_script: Luau のパッケージで書いた反応表を、ベイクに渡す定義に読む(T-0021・ADR-0032)。CPU だけ ---
 # script(パッケージ)と reaction(ベイク)をつなぐ。script は sim を知らないままにするため、別のライブラリにする。
+# reaction_table_loader はランタイムとテストがデータのフォルダのパッケージから表を作る入り口(T-0157・ADR-0033)。
 add_library(bicameral_reaction_script STATIC
   src/script/reaction_package.cpp
+  src/script/reaction_table_loader.cpp
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
 target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)
@@ -156,6 +158,7 @@ target_link_libraries(bicameral PRIVATE
   bicameral_core
   bicameral_gpu
   bicameral_sim
+  bicameral_reaction_script
   bicameral_frame
   bicameral_save
   bicameral_view
@@ -164,6 +167,21 @@ target_link_libraries(bicameral PRIVATE
   Microsoft::DirectX-Headers Microsoft::DirectX-Guids
   Microsoft::DirectX12-Agility
   d3d12 dxgi)
+
+# --- ゲームのデータ(T-0157・ADR-0033)----------------------------------------------------------
+# リポジトリの data/(反応表のパッケージ data/packages など)を exe の横の data/ に写す。ランタイムとテストはそこから読む。
+# 消したファイルが残らないように、写す前に bin/data を消す(data/ のファイルが変わった時だけ走る)。
+file(GLOB_RECURSE BICAMERAL_DATA_FILES CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/data/*)
+set(BICAMERAL_DATA_OUT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/data)
+set(BICAMERAL_DATA_STAMP ${CMAKE_CURRENT_BINARY_DIR}/data.stamp)
+add_custom_command(OUTPUT ${BICAMERAL_DATA_STAMP}
+  COMMAND ${CMAKE_COMMAND} -E rm -rf ${BICAMERAL_DATA_OUT}
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data ${BICAMERAL_DATA_OUT}
+  COMMAND ${CMAKE_COMMAND} -E touch ${BICAMERAL_DATA_STAMP}
+  DEPENDS ${BICAMERAL_DATA_FILES}
+  COMMENT "data/ を bin/data に写す")
+add_custom_target(bicameral_data ALL DEPENDS ${BICAMERAL_DATA_STAMP})
+add_dependencies(bicameral bicameral_data)
 
 # --- Agility SDK の配置(ADR-0004)-------------------------------------------------------------
 # exe の横の D3D12\ に D3D12Core.dll を置く。exe は agility_sdk.cpp でその場所と版をエクスポートし、

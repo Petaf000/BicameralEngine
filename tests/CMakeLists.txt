@@ -35,8 +35,20 @@ add_test(NAME luau_package COMMAND luau_package_test)
 add_executable(reaction_package_test reaction_package_test.cpp)  # Luau の反応表 → ベイク(T-0021)
 target_link_libraries(reaction_package_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(reaction_package_test PRIVATE
-  BICAMERAL_TEST_PACKAGES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/packages")
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_dependencies(reaction_package_test bicameral_data)  # ランタイムの入り口は exe の横の data/packages を読む(T-0157)
 add_test(NAME reaction_package COMMAND reaction_package_test)
+# ランタイムが読むパッケージの表で、今の場面(仮の世界の燃焼)が C++ の表とビット単位で同じ結果になる(T-0157。CPU リファレンス)
+add_executable(reaction_package_scene_test reaction_package_scene_test.cpp)
+target_precompile_headers(reaction_package_scene_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(reaction_package_scene_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
+add_dependencies(reaction_package_scene_test bicameral_data)
+add_test(NAME reaction_package_scene COMMAND reaction_package_scene_test)
+# 表が読めない・検査で落ちる時、ランタイムは窓を開く前に止まる(T-0157。GPU を使わない)
+add_test(NAME reaction_package_runtime_stops
+         COMMAND bicameral --frames 1 --packages ${CMAKE_CURRENT_SOURCE_DIR}/packages_broken)
+set_tests_properties(reaction_package_runtime_stops PROPERTIES
+  PASS_REGULAR_EXPRESSION "フレームのループを始められない: 反応表のパッケージ.*ベイクの検査で落ちた" TIMEOUT 60)
 
 add_executable(reaction_test reaction_test.cpp)
 target_link_libraries(reaction_test PRIVATE bicameral_reaction bicameral_core)

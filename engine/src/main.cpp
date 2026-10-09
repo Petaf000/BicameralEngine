@@ -36,6 +36,8 @@
 //   --save-points <n>                巻き戻しの保存点の数(--editor の既定は 6。0 なら巻き戻さない。1 つ約 33 MiB の VRAM。T-0143)
 //   --save-interval <t>              保存点へ写す間隔(刻み。既定 120)
 //   --auto-rewind                    保存点が 2 つできたら、古い方へ 1 回巻き戻す(人がいない確認。--replay と一緒にハッシュ列を確かめる)
+//   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。既定: exe の横の data/packages。
+//                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -344,6 +346,8 @@ namespace {
                 options.frameLoop.recordPath = arguments[++i];
             else if (argument == L"--replay" && hasValue)
                 options.frameLoop.replayPath = arguments[++i];
+            else if (argument == L"--packages" && hasValue)
+                options.frameLoop.packageRoot = arguments[++i];
             else if (argument == L"--log-dir" && hasValue)
                 options.logDirectory = arguments[++i];
             else if (argument == L"--log-level" && hasValue) {
