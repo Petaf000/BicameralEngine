@@ -873,9 +873,9 @@ namespace bicameral::frame {
 
             const SimCursor start = m_scheduler.Cursor();
             const uint32_t unitCount = m_scheduler.TakeUnits();
-            // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)なら、抽出だけのリストを投げる
-            const bool rewoundUnseen = m_extractAfterRewind && m_lastExtractionTick != start.tick;
-            const bool extractOnly = unitCount == 0 && (NeedsStopExtraction() || rewoundUnseen);
+            // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)か、
+            // 止めたまま戻した状態をまだ見せていないなら、抽出だけのリストを投げる
+            const bool extractOnly = unitCount == 0 && (NeedsStopExtraction() || m_extractAfterRewind);
             if (unitCount == 0 && !extractOnly && !restoring)
                 return true;
 
