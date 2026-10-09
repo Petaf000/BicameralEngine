@@ -38,6 +38,19 @@
    保存則の例外(中身として置く「保存則を破る何か」)は `source`(湧き出し)/ `sink`(吸い込み)として明示したものだけ許す。出入りした量は毎刻み集計され、保存則の検査はこれを差し引いて行う。
 4. 速度の表が整数の範囲に収まる(桁あふれしない)。
 
+### 2.1 実装(T-0021。`engine/src/script/reaction_package.cpp`・`engine/src/sim/reaction_table.cpp`・ADR-0032)
+- 流れ: パッケージ(13 §2.2)→ 分類 `elements`・`species`・`reactions` を `ReadReactionTableDefinition` が定義に読む → `BakeReactionTable`。
+  C++ に手で書いた定義(`MakeCombustionTestTable`)も同じベイクを通る。
+- **読むときに落とすもの(形)**: 知らない欄・表でない値・整数でない数(小数・±2^53 の外)・範囲の外(係数 0 など)・A の書き方。
+  値は整数だけで、単位は欄の名前に書く(倍精度の丸めで機械ごとに値が変わる余地を作らない)。A は 10 進の文字列("2.8e19")でも書ける。
+- **ベイクが落とすもの(中身)**: 元素の釣り合い(1)・知らない元素と物質・反応物と生成物の数(1〜3)・次数 1 の反応物の数(1〜2)・名前の重なり・速度の範囲(4)。
+- **エネルギー(2)**: 反応熱は生成エンタルピーの差から自動で決まるので、構造的に保存される。文献の反応熱を書いた規則(`reaction_enthalpy_j_per_mol`)は、
+  生成エンタルピーの差(298.15 K)と 1 kJ/mol より違えば警告(`BakedReactionTable::warnings`)。表は生成エンタルピーの差を使う。
+- **並びに依らない**: 元素・物質・規則・規則の項を名前のバイト順に並べてから ID を振る。A の仮数の末尾の 0 は指数へ移す。
+  同じ中身なら、C++ の配列の順・Luau の表の順・Mod を入れた順に依らず同じバイト列の表になる。
+- 試験の表(公開用。現実の元素と化学だけ): `tests/packages/combustion_test`。ベイクすると C++ の試験の表とビットで同じ(`reaction_package_test`)。
+- 残り: 魔素とその反応(ユーザーの中身待ち)・湧き出しと吸い込み(3。T-0024)・ランタイムがパッケージから表を読む(T-0157)。
+
 ## 3. 1 セルでの評価(06 の段 4)
 1. セルにある物質から、候補の規則を引く(物質 → その物質が反応物になる規則の一覧、の索引をベイクで作る)。反応物が全部そろった規則だけ評価する。
 2. 各規則の「この刻みで進みたい量」(反応の進行度)を、速度の表(温度で引く)と濃度から整数で計算する。
@@ -108,19 +121,26 @@
 ```
 - ノードごとのカウンタ・printf・上限の検出は 16(デバッグ)に従う。
 
-## 7. Luau での書き方(例。記法の細部は 13 で決める)
+## 7. Luau での書き方(T-0021 で決めた形。ADR-0032・`engine/src/script/reaction_package.h`)
+パッケージの entry が「分類 → 鍵 → 値」の表を返す(13 §2.2)。1 つの鍵 = 1 つの元素・物質・規則で、Mod は鍵を足して増やす。
 ```lua
-element "C"   element "O"   element "H"
-species "wood"   { composition = { C = 6, H = 10, O = 5 }, phase = "solid", ... }
-species "oxygen" { composition = { O = 2 }, phase = "gas", ... }
-rule "wood_burns" {
-  reactants = { wood = 1, oxygen = 6 },
-  products  = { co2 = 6, water_vapor = 5 },
-  rate = arrhenius { A = ..., Ea = ... },
-  events = { sound = "crackle", light = "fire" },
+return {
+  elements = { C = { atomic_mass_mg_per_mol = 12011 }, O = { atomic_mass_mg_per_mol = 15999 } },
+  species = {
+    oxygen = { composition = { O = 2 }, formation_enthalpy_j_per_mol = 0,
+               heat_capacity_mj_per_mol_k = 29378, thermal_conductivity_mw_per_m_k = 135000 },
+  },
+  reactions = {
+    carbon_combustion = {
+      reactants = { carbon = 1, oxygen = 1 }, products = { carbon_dioxide = 1 },
+      rate = { a = "3e8", activation_energy_j_per_mol = 160000 },
+      orders = { carbon = 1, oxygen = 1 },        -- 省けば反応物は全部次数 1
+      reaction_enthalpy_j_per_mol = -393500,      -- 省ける。文献の値(食い違えば警告)
+    },
+  },
 }
 ```
-(上は仕組みの例。実際の物質と反応はユーザーが決める)
+相・イベント(音・光)・相変化の欄はまだ無い(相は T-0002 の中身と M2 の相変化で、イベントは M2 以降)。上は試験の表の一部で、実際の物質と反応はユーザーが決める。
 
 ## 8. ゲームとしての基準(ユーザーが決める中身の判断基準。00-vision より)
 1. 予測可能性: 同じ条件で同じ結果(エンジンが保証)

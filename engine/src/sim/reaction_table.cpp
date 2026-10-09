@@ -1,6 +1,7 @@
 // reaction_table.cpp — 反応表のベイク(定義 → 整数の表)と、セルを作る・調べる道具(02 §1〜3。T-0014)。
 // ベイクは整数の数学ライブラリ(shaders/common/fixed.hlsli)だけで計算する。CRT の exp・log を使わないので、
 // どの機械でベイクしても同じ表になる(04 R7。Mod やホットリロードは利用者の機械でベイクされる)。
+// 定義の並びにも依らない(T-0021・ADR-0032): 名前のバイト順に並べ直してから ID を振る。
 #include "sim/reaction_table.h"
 
 #include <algorithm>
@@ -29,6 +30,8 @@ namespace bicameral::sim {
         constexpr int64_t CELL_VOLUME_LOG2 = -3;
         constexpr uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
         constexpr uint64_t FNV_PRIME = 0x100000001b3ULL;
+        // 文献の反応熱と生成エンタルピーの差がこれより大きく違えば警告(文献の値は 0.01〜1 kJ/mol の桁で丸められている)
+        constexpr int64_t DECLARED_ENTHALPY_TOLERANCE_JOULES = 1000;
 
         using NameIndex = std::map<std::string, uint32_t, std::less<>>;
 
@@ -40,6 +43,27 @@ namespace bicameral::sim {
             }
 
             return hash;
+        }
+
+        // --- 並び(T-0021・ADR-0032)---
+
+        // 元素・物質・規則・規則の項を名前のバイト順に並べた写し。ID はこの順で振るので、定義の並びに依らない。
+        // 名前の重なりは並べた後も隣に残り、索引を作るときに誤りになる
+        ReactionTableDefinition CanonicalOrder(const ReactionTableDefinition& definition) {
+            ReactionTableDefinition sorted = definition;
+            const auto byName = [](const auto& left, const auto& right) {
+                return left.name < right.name;
+            };
+            std::ranges::stable_sort(sorted.elements, byName);
+            std::ranges::stable_sort(sorted.species, byName);
+            std::ranges::stable_sort(sorted.rules, byName);
+
+            for (RuleDefinition& rule : sorted.rules) {
+                std::ranges::stable_sort(rule.reactants, {}, &RuleTerm::species);
+                std::ranges::stable_sort(rule.products, {}, &RuleTerm::species);
+            }
+
+            return sorted;
         }
 
         // --- 元素と物質 ---
@@ -219,6 +243,38 @@ namespace bicameral::sim {
             return rule;
         }
 
+        // 文献の反応熱(書いた規則だけ)と、生成エンタルピーの差(298.15 K)を比べる(02 §2 の 2)。食い違えば警告の文を返す。
+        // 表は生成エンタルピーの差を使う(手で書いた値は使わない)ので、食い違いはエネルギーの保存を壊さない
+        std::optional<std::string> CheckDeclaredEnthalpy(const RuleDefinition& rule,
+                                                         const ReactionTableDefinition& definition,
+                                                         const NameIndex& species) {
+            if (!rule.declaredReactionEnthalpy)
+                return std::nullopt;
+
+            // 物質 ID は 1 から(0 は「無し」)。項の物質は BakeRule が確かめ済み
+            const auto formation = [&](const RuleTerm& term) {
+                const SpeciesDefinition& entry = definition.species[species.find(term.species)->second - 1];
+
+                return int64_t{term.coefficient} * entry.formationEnthalpy;
+            };
+
+            int64_t standard = 0;
+            for (const RuleTerm& term : rule.products)
+                standard += formation(term);
+
+            for (const RuleTerm& term : rule.reactants)
+                standard -= formation(term);
+
+            const int64_t difference = *rule.declaredReactionEnthalpy - standard;
+            if (difference >= -DECLARED_ENTHALPY_TOLERANCE_JOULES && difference <= DECLARED_ENTHALPY_TOLERANCE_JOULES)
+                return std::nullopt;
+
+            return std::format(
+                "規則 {}: 書いた反応熱 {} J/mol が生成エンタルピーの差 {} J/mol と {} J/mol 違う"
+                "(表は生成エンタルピーの差を使う)",
+                rule.name, *rule.declaredReactionEnthalpy, standard, difference);
+        }
+
         // --- 速度の表 ---
 
         // 温度 kelvin(K)での 1 刻みあたりの速度の係数を、仮数 32bit × 2^指数 に詰める(0 K は 0)。
@@ -259,10 +315,17 @@ namespace bicameral::sim {
                 activationEnergy > ACTIVATION_ENERGY_MAX)
                 return std::unexpected(std::format("規則 {}: 速度の A が 0 か Ea が範囲の外", definition.name));
 
+            // A の仮数の末尾の 0 を指数へ移す(28e18 と 280e17 が同じ表になる。T-0021)
+            uint64_t mantissa = definition.rate.preExponentialMantissa;
+            int64_t exponent10 = definition.rate.preExponentialExponent10;
+            while (mantissa % 10 == 0) {
+                mantissa /= 10;
+                exponent10 += 1;
+            }
+
             const int64_t ln10 = FxLnU64(10);
             const int64_t ln2 = FxLnU64(2);
-            const int64_t lnPreExponential = FxLnU64(definition.rate.preExponentialMantissa) +
-                                             (int64_t{definition.rate.preExponentialExponent10} * ln10);
+            const int64_t lnPreExponential = FxLnU64(mantissa) + (exponent10 * ln10);
             const int64_t lnPerTick = -FxLnU64(TICKS_PER_SECOND);
             const int64_t lnAmountPerVolume = (-6 * ln10) - (CELL_VOLUME_LOG2 * ln2);
             const int64_t order = std::popcount(rule.firstOrderMask);
@@ -308,17 +371,18 @@ namespace bicameral::sim {
     }
 
     std::expected<BakedReactionTable, std::string> BakeReactionTable(const ReactionTableDefinition& definition) {
+        const ReactionTableDefinition ordered = CanonicalOrder(definition);
         BakedReactionTable baked;
-        const auto elements = IndexElements(definition, baked);
+        const auto elements = IndexElements(ordered, baked);
         if (!elements)
             return std::unexpected(elements.error());
 
-        const auto species = BakeAllSpecies(definition, *elements, baked);
+        const auto species = BakeAllSpecies(ordered, *elements, baked);
         if (!species)
             return std::unexpected(species.error());
 
         NameIndex ruleNames;
-        for (const RuleDefinition& entry : definition.rules) {
+        for (const RuleDefinition& entry : ordered.rules) {
             if (!ruleNames.emplace(entry.name, static_cast<uint32_t>(ruleNames.size())).second)
                 return std::unexpected(std::format("規則 {} が 2 回ある", entry.name));
 
@@ -328,6 +392,9 @@ namespace bicameral::sim {
 
             if (auto rates = BakeRates(entry, *rule, baked); !rates)
                 return std::unexpected(rates.error());
+
+            if (auto warning = CheckDeclaredEnthalpy(entry, ordered, *species))
+                baked.warnings.push_back(*warning);
 
             baked.rules.push_back(*rule);
             baked.ruleNames.push_back(entry.name);
