@@ -75,6 +75,8 @@ FX_CONST uint32_t IM_PLAN_SHAPE_WORDS = IM_PLAN_DEPTH_BASE +
 FX_CONST uint32_t IM_PLAN_FACES = IM_PLAN_SHAPE_WORDS;               // 面の数
 FX_CONST uint32_t IM_PLAN_TAIL = IM_PLAN_SHAPE_WORDS + 1;      // ImTail が受け持つ最初の段(段の数なら受け持たない)
 FX_CONST uint32_t IM_PLAN_TERMINAL = IM_PLAN_SHAPE_WORDS + 2;  // 下りが止まる段(ImTail の段か、最も粗い段)
+// 記録の形(GpuImplicitRecordShape)で切る前の ImTail の境(段の数なら受け持たない)。次の刻みの形を選ぶのに使う(T-0154)
+FX_CONST uint32_t IM_PLAN_WANTED_TAIL = IM_PLAN_SHAPE_WORDS + 3;
 FX_CONST uint32_t IM_PLAN_HEADER_WORDS = IM_PLAN_SHAPE_WORDS + 8;
 // 段ごとの表(IM_PLAN_LEVEL_WORDS 語ずつ): 長い行の節の数 [色 0・色 1・縮約]・隣の数の最大
 FX_CONST uint32_t IM_PLAN_LONG_RESTRICT = 2;

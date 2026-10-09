@@ -8,8 +8,9 @@
 //   - 鎖: レベル 0〜6・いちばん細かいブロックが 1500 K・端数の枠 16(粗い側に端数の枠が無いブロックもある)
 //   - たくさんの要求: 深さ 26 段・木箱が燃える(相変化と反応で熱容量が変わる。Δk ≤ 8 を陰解法)
 // 確かめること: 毎刻み、セルのエネルギー・端数・V サイクルの回数・安全網の数が CPU と一致。CPU が木の中で解いた費用(nest.implicitCost)とも一致。
+// 記録の形(GpuImplicitRecordShape。T-0154)を変えても同じ値: 前の刻みの数から選ぶ形・全部の回を ImTail で回す形・上限まで積む形。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 刻みごとの GPU の ms(同じ系を写し直して REPEATS 回解いた最小)。
-//   V サイクルの上限(木の既定 64 と 16)・ImTail の境(GpuImplicitTuning)を変えて比べる。
+//   V サイクルの上限(木の既定 64 と 16)・記録の形・ImTail の境(GpuImplicitTuning)を変えて比べる。
 #include <algorithm>
 #include <cstdint>
 #include <expected>
@@ -183,17 +184,14 @@ namespace {
     // 系を GPU に写して 1 刻み解く。測る時は暖機の後、同じ系を写し直して repeats 回解き、最小の GPU 時間を取る
     std::expected<Solved, std::string> SolveOnGpu(const SolveSetup& setup, const sim::ImplicitGrid& grid,
                                                   const sim::ImplicitOptions& options,
-                                                  const sim::GpuImplicitTuning& tuning, uint32_t repeats) {
+                                                  const sim::GpuImplicitTuning& tuning,
+                                                  const sim::GpuImplicitRecordShape& shape, uint32_t repeats) {
         auto gpu = sim::GpuImplicit::Create(setup.device, grid, tuning);
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        Solved solved{.grid = grid,
-                      .cost = {},
-                      .stepMs = 0.0,
-                      .tailDepth = 0,
-                      .levelCount = 0,
-                      .dispatchesPerCycle = gpu->DispatchesPerCycle(options)};
+        Solved solved{
+            .grid = grid, .cost = {}, .stepMs = 0.0, .tailDepth = 0, .levelCount = 0, .dispatchesPerCycle = 0};
         if (setup.frequency != 0) {
             const auto warm = [&](ID3D12GraphicsCommandList10* list) {
                 bool recorded = gpu->RecordUpload(list, grid);
@@ -210,7 +208,8 @@ namespace {
             const auto record = [&](ID3D12GraphicsCommandList10* list) {
                 const bool uploaded = gpu->RecordUpload(list, grid);
                 gpu->RecordTimestamp(list, 0);
-                const bool stepped = uploaded && gpu->RecordStep(list, setup.ring->GpuAddress(), options);
+                const bool stepped = uploaded && gpu->RecordStep(list, setup.ring->GpuAddress(), options,
+                                                                 sim::GpuImplicit::DEFAULT_MAX_LIMIT_ROUNDS, shape);
                 gpu->RecordTimestamp(list, 1);
 
                 return stepped;
@@ -233,6 +232,7 @@ namespace {
         // 段の数と ImTail の境は GPU が決める(T-0136)
         solved.tailDepth = solved.cost.tailDepth;
         solved.levelCount = solved.cost.levelCount;
+        solved.dispatchesPerCycle = gpu->DispatchesPerCycle(options);
 
         return solved;
     }
@@ -274,10 +274,28 @@ namespace {
         return {};
     }
 
+    // 記録の形(T-0154。どれでも値は同じ)
+    enum class ShapeMode : uint8_t {
+        Full,      // 既定: 上限の段まで・全部の回を段ごとに積む(T-0136 の形)
+        Adaptive,  // 前の刻みの GPU の数から(GpuImplicit::ShapeFrom)。初めの刻みは Full
+        AllTail,   // 段ごとに積まない: ImTail が段 0 から全部
+    };
+
+    sim::GpuImplicitRecordShape ShapeOf(ShapeMode mode, const std::vector<Solved>& previous) {
+        switch (mode) {
+            case ShapeMode::Adaptive:
+                return previous.empty() ? sim::GpuImplicitRecordShape{}
+                                        : sim::GpuImplicit::ShapeFrom(previous.back().cost);
+            case ShapeMode::AllTail: return {.dispatchLevels = 1, .coarsestDispatch = false};
+            default: return {};
+        }
+    }
+
     // 刻みごとに CPU で解き直し(木の中の費用と一致)、GPU で解いて比べる。測る時は刻みごとの ms を返す
     std::expected<std::vector<Solved>, std::string> RunScene(const SolveSetup& setup, const TreeScene& scene,
                                                              const sim::ImplicitOptions& options,
-                                                             const sim::GpuImplicitTuning& tuning, uint32_t repeats) {
+                                                             const sim::GpuImplicitTuning& tuning, uint32_t repeats,
+                                                             ShapeMode mode) {
         std::vector<Solved> results;
         for (size_t tick = 0; tick < scene.ticks.size(); ++tick) {
             sim::ImplicitGrid cpu = scene.ticks[tick].grid;
@@ -287,7 +305,8 @@ namespace {
                     return std::unexpected(std::format("{} 刻み {}: {}", scene.name, tick, same.error()));
             }
 
-            auto solved = SolveOnGpu(setup, scene.ticks[tick].grid, options, tuning, repeats);
+            const sim::GpuImplicitRecordShape shape = ShapeOf(mode, results);
+            auto solved = SolveOnGpu(setup, scene.ticks[tick].grid, options, tuning, shape, repeats);
             if (!solved)
                 return std::unexpected(std::format("{} 刻み {}: {}", scene.name, tick, solved.error()));
 
@@ -342,11 +361,17 @@ namespace {
 
             const bool last = s + 1 == scenes.size();
             if (last && RELEASE) {
-                if (auto other = RunScene(setup, scene, scene.options, COARSEST_TAIL, 1); !other)
+                if (auto other = RunScene(setup, scene, scene.options, COARSEST_TAIL, 1, ShapeMode::Full); !other)
                     return std::unexpected(std::format("最も粗い段を ImTail で回す形: {}", other.error()));
             }
 
-            const auto results = RunScene(setup, scene, scene.options, {}, 1);
+            // 記録の形を変えても同じ値か(T-0154)。debug の WARP では 1 グループで 2 万セルを回すと長いので、たくさんの要求は release だけ
+            if (!last || RELEASE) {
+                if (auto other = RunScene(setup, scene, scene.options, {}, 1, ShapeMode::AllTail); !other)
+                    return std::unexpected(std::format("全部の回を ImTail で回す形: {}", other.error()));
+            }
+
+            const auto results = RunScene(setup, scene, scene.options, {}, 1, ShapeMode::Adaptive);
             if (!results)
                 return std::unexpected(results.error());
 
@@ -387,13 +412,22 @@ namespace {
     struct MeasureCase {
         uint32_t maxCycles = 0;
         sim::GpuImplicitTuning tuning;
+        ShapeMode shape = ShapeMode::Full;
     };
+
+    std::string_view ShapeName(ShapeMode mode) {
+        switch (mode) {
+            case ShapeMode::Adaptive: return "前の刻みから";
+            case ShapeMode::AllTail: return "全部 ImTail";
+            default: return "上限まで";
+        }
+    }
 
     std::expected<void, std::string> MeasureScene(const SolveSetup& setup, const TreeScene& scene,
                                                   const MeasureCase& measure) {
         sim::ImplicitOptions options = scene.options;
         options.cycles = measure.maxCycles;
-        const auto results = RunScene(setup, scene, options, measure.tuning, REPEATS);
+        const auto results = RunScene(setup, scene, options, measure.tuning, REPEATS, measure.shape);
         if (!results)
             return std::unexpected(results.error());
 
@@ -401,24 +435,25 @@ namespace {
         const size_t early = std::min<size_t>(all.size(), CHAIN_EARLY_TICKS);
         const Solved& last = all.back();
         Log(Channel::Sim, Level::Info,
-            "計測 {}(上限 {}・ImTail 節 {} 隣 {} → 段 {} / {}・V 1 回 {} Dispatch)ms/刻み(V): 初めの {} 刻みの平均 "
-            "{:.3f}・"
-            "後の平均 {:.3f} / {}",
-            scene.name, measure.maxCycles, measure.tuning.tailMaxNodes, measure.tuning.tailMaxLinks, last.tailDepth,
-            last.levelCount, last.dispatchesPerCycle, early, Mean(all.first(early)), Mean(all.subspan(early)),
-            Series(all));
+            "計測 {}(上限 {}・ImTail 節 {} 隣 {}・記録 {} → 段 {} / {}・最後の V 1 回 {} Dispatch)ms/刻み(V): "
+            "初めの {} 刻みの平均 {:.3f}・後の平均 {:.3f} / {}",
+            scene.name, measure.maxCycles, measure.tuning.tailMaxNodes, measure.tuning.tailMaxLinks,
+            ShapeName(measure.shape), last.tailDepth, last.levelCount, last.dispatchesPerCycle, early,
+            Mean(all.first(early)), Mean(all.subspan(early)), Series(all));
 
         return {};
     }
 
     std::expected<void, std::string> MeasureAll(const SolveSetup& setup, const std::vector<TreeScene>& scenes) {
+        // 記録の形の前後(T-0154)を先に。ImTail の境の比べは前の刻みからの形で
         const std::vector<MeasureCase> cases = {
-            {.maxCycles = 64, .tuning = {}},
-            {.maxCycles = 16, .tuning = {}},
-            {.maxCycles = 16, .tuning = {.tailMaxNodes = 1024, .tailMaxLinks = 128}},
-            {.maxCycles = 16, .tuning = {.tailMaxNodes = 2048, .tailMaxLinks = 256}},
-            {.maxCycles = 16, .tuning = COARSEST_TAIL},
-            {.maxCycles = 16, .tuning = {.tailMaxNodes = 256, .tailMaxLinks = 32}},
+            {.maxCycles = 16, .tuning = {}, .shape = ShapeMode::Full},
+            {.maxCycles = 16, .tuning = {}, .shape = ShapeMode::Adaptive},
+            {.maxCycles = 64, .tuning = {}, .shape = ShapeMode::Full},
+            {.maxCycles = 64, .tuning = {}, .shape = ShapeMode::Adaptive},
+            {.maxCycles = 16, .tuning = {}, .shape = ShapeMode::AllTail},
+            {.maxCycles = 16, .tuning = {.tailMaxNodes = 1024, .tailMaxLinks = 128}, .shape = ShapeMode::Adaptive},
+            {.maxCycles = 16, .tuning = COARSEST_TAIL, .shape = ShapeMode::Adaptive},
         };
         for (const MeasureCase& measure : cases) {
             for (const TreeScene& scene : scenes) {

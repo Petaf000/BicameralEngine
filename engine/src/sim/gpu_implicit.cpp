@@ -4,6 +4,7 @@
 // 固定費を減らす形(T-0120): 隣が多い節は 1 グループで足す・小さい段から下の V サイクルは ImTail の 1 Dispatch。
 // 段の形は GPU のバッファから(T-0136): 長い行の節の一覧・ImTail の境・Dispatch の大きさは刻みの初めに GPU が作り(ImPlanLevels・ImPlanArgs)、
 // V サイクルは記録の上限の段まで ExecuteIndirect で積む。大きさは上限(GpuImplicitLimits)から。
+// 記録の形は刻みごとに選べる(T-0154): 積む段の数と最も粗い段の掃き出しを積むか。空の Dispatch とバリアを減らす。
 #include "sim/gpu_implicit.h"
 
 #include <algorithm>
@@ -197,6 +198,7 @@ namespace bicameral::sim {
                               .tailMaxLinks = tuning.tailMaxLinks,
                               .coarsestTailMaxNodes = tuning.coarsestTailMaxNodes,
                               .maxLevels = limits.levels};
+        result.m_maxDispatchLevels = result.m_constants.dispatchLevels;
         if (auto pipelines = result.CreatePipelines(device); !pipelines)
             return std::unexpected(pipelines.error());
 
@@ -228,6 +230,15 @@ namespace bicameral::sim {
         return limits;
     }
 
+    // 前の刻みで下りが止まった段(ImTail の境か最も粗い段)まで段ごとに積めば、同じ形の刻みは空の段を積まない。
+    // 形が深くなった刻みは、その分を ImTail が回す(値は同じ。その刻みだけ遅い。次の刻みで形が追いつく)
+    GpuImplicitRecordShape GpuImplicit::ShapeFrom(const GpuImplicitCost& previous) {
+        const uint32_t levels = std::max(previous.levelCount, 1u);
+        const uint32_t terminal = std::min(previous.wantedTailDepth, levels - 1);
+
+        return {.dispatchLevels = terminal + 1, .coarsestDispatch = previous.wantedTailDepth >= previous.levelCount};
+    }
+
     // バッファの大きさ(上限から。空にならないように 1 つ分は持つ)
     uint64_t GpuImplicit::BufferBytes(Buffer buffer) const {
         const uint64_t nodes = m_limits.nodes;
@@ -245,7 +256,7 @@ namespace bicameral::sim {
             case BufferPredicate: return uint64_t{PREDICATE_WORDS} * sizeof(uint64_t);
             case BufferPlan: return (IM_PLAN_FLAGS_BASE + (4 * nodes)) * sizeof(uint32_t);
             case BufferArgs:
-                return uint64_t{IM_SLOT_DEPTH_BASE + (IM_SLOT_DEPTH_STRIDE * m_constants.dispatchLevels)} * ARGS_BYTES;
+                return uint64_t{IM_SLOT_DEPTH_BASE + (IM_SLOT_DEPTH_STRIDE * m_maxDispatchLevels)} * ARGS_BYTES;
             default: return 0;
         }
     }
@@ -539,7 +550,8 @@ namespace bicameral::sim {
         }
 
         DispatchIndirect(list, PassTail, IM_SLOT_TAIL);
-        RecordSmooth(list, IM_TERMINAL_DEPTH, IM_SLOT_COARSEST, options.coarsestSweeps);
+        if (m_constants.coarsestDispatch != 0)
+            RecordSmooth(list, IM_TERMINAL_DEPTH, IM_SLOT_COARSEST, options.coarsestSweeps);
 
         for (uint32_t depth = levels - 1; depth-- > 0;) {
             const uint32_t slot = DepthSlot(depth);
@@ -572,9 +584,14 @@ namespace bicameral::sim {
     }
 
     bool GpuImplicit::RecordStep(ID3D12GraphicsCommandList* list, uint64_t debugRing, const ImplicitOptions& options,
-                                 uint32_t maxLimitRounds) {
+                                 uint32_t maxLimitRounds, const GpuImplicitRecordShape& shape) {
         if (options.method != ImplicitMethod::Multigrid)
             return false;
+
+        // 記録の形(T-0154)。計画(ImPlanArgs)も同じ段の数で ImTail の境を切る
+        const uint32_t requested = shape.dispatchLevels == 0 ? m_maxDispatchLevels : shape.dispatchLevels;
+        m_constants.dispatchLevels = std::clamp(requested, 1u, m_maxDispatchLevels);
+        m_constants.coarsestDispatch = shape.coarsestDispatch ? 1 : 0;
 
         list->SetComputeRootSignature(m_rootSignature.Get());
         for (uint32_t i = 0; i < BufferCount; ++i)
@@ -597,6 +614,7 @@ namespace bicameral::sim {
                 BeginSkippable(list, PREDICATE_CYCLES);
 
             RecordVCycle(list, options);
+
             if (options.toleranceMillikelvin != 0)
                 DispatchIndirect(list, PassConverged, IM_SLOT_CONVERGED);
 
@@ -631,7 +649,9 @@ namespace bicameral::sim {
         const uint32_t perLevel = (COLOR_COUNT * (options.preSmooth + options.postSmooth)) + 2;
         const uint32_t judge = options.toleranceMillikelvin != 0 ? 2 : 1;
 
-        return ((m_constants.dispatchLevels - 1) * perLevel) + 1 + (COLOR_COUNT * options.coarsestSweeps) + judge;
+        const uint32_t coarsest = m_constants.coarsestDispatch != 0 ? COLOR_COUNT * options.coarsestSweeps : 0;
+
+        return ((m_constants.dispatchLevels - 1) * perLevel) + 1 + coarsest + judge;
     }
 
     void GpuImplicit::RecordTimestamp(ID3D12GraphicsCommandList* list, uint32_t index) {
@@ -685,7 +705,8 @@ namespace bicameral::sim {
                 .worstExcessMillikelvin = wide[WIDE_WORST_EXCESS],
                 .limitFinished = state[STATE_LIMIT_DONE] != 0,
                 .levelCount = plan[IM_PLAN_LEVEL_COUNT],
-                .tailDepth = plan[IM_PLAN_TAIL]};
+                .tailDepth = plan[IM_PLAN_TAIL],
+                .wantedTailDepth = plan[IM_PLAN_WANTED_TAIL]};
 
         return true;
     }

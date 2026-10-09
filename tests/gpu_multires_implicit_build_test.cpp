@@ -369,10 +369,13 @@ namespace {
         return limits;
     }
 
-    // 1 刻み: 木を写して系を作り、読み戻して CPU と比べ、GpuImplicit へ写して解いて CPU と比べる
+    // 1 刻み: 木を写して系を作り、読み戻して CPU と比べ、GpuImplicit へ写して解いて CPU と比べる。
+    // 記録の形は recordShape(T-0154。前の刻みの数から選ぶ)。GPU の数を solvedCost に返す
     std::expected<void, std::string> CheckTick(const Context& context, sim::GpuMultires& multires,
                                                sim::GpuImplicitBuild& build, sim::GpuImplicitLevels& levels,
-                                               const BuildScene& scene, const BuildTick& tick) {
+                                               const BuildScene& scene, const BuildTick& tick,
+                                               const sim::GpuImplicitRecordShape& recordShape,
+                                               sim::GpuImplicitCost& solvedCost) {
         if (std::ranges::any_of(tick.frozen, [](uint8_t frozen) { return frozen != 0; }))
             return std::unexpected("凍った枠がある刻み(この試験は凍った印を GPU に写さない)");
 
@@ -400,7 +403,8 @@ namespace {
             implicit->RecordReset(list);
             build.RecordCopyTo(list, *implicit);
             levels.RecordCopyTo(list, *implicit);
-            if (!implicit->RecordStep(list, ring, solveOptions))
+            if (!implicit->RecordStep(list, ring, solveOptions, sim::GpuImplicit::DEFAULT_MAX_LIMIT_ROUNDS,
+                                      recordShape))
                 return false;
 
             implicit->RecordReadback(list);
@@ -430,6 +434,7 @@ namespace {
         if (!implicit->Read(gpu, gpuCost))
             return std::unexpected("解いた結果を読み戻せない");
 
+        solvedCost = gpuCost;
         return CompareSolved(cpu, cpuCost, gpu, gpuCost);
     }
 
@@ -458,8 +463,14 @@ namespace {
             if (!levels)
                 return std::unexpected(levels.error());
 
+            // 解く側の記録の形は前の刻みの GPU の数から(T-0154。初めの刻みは上限まで)
+            sim::GpuImplicitCost previous;
             for (size_t i = 0; i < scene.ticks.size(); ++i) {
-                if (auto checked = CheckTick(context, *multires, *build, *levels, scene, scene.ticks[i]); !checked) {
+                const sim::GpuImplicitRecordShape recordShape = i == 0 ? sim::GpuImplicitRecordShape{}
+                                                                       : sim::GpuImplicit::ShapeFrom(previous);
+                if (auto checked = CheckTick(context, *multires, *build, *levels, scene, scene.ticks[i], recordShape,
+                                             previous);
+                    !checked) {
                     return std::unexpected(std::format("{} 刻み {}(Dispatch の回 {}): {}", scene.name, i,
                                                        shape.dispatchRounds, checked.error()));
                 }
