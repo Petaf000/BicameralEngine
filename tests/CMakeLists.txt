@@ -62,6 +62,10 @@ add_executable(reaction_wait_test reaction_wait_test.cpp)
 target_link_libraries(reaction_wait_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME reaction_wait COMMAND reaction_wait_test)
 
+add_executable(gas_reference_test gas_reference_test.cpp)  # 気体の流れの CPU リファレンス G1(T-0026)
+target_link_libraries(gas_reference_test PRIVATE bicameral_gas bicameral_core)
+add_test(NAME gas_reference COMMAND gas_reference_test)
+
 add_executable(multires_test multires_test.cpp)
 target_link_libraries(multires_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires COMMAND multires_test)

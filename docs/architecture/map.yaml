@@ -208,6 +208,11 @@ views:
       - { id: physicsworld, group: physicslib, label: "PhysicsWorld::Step<br/>接触 → 引き継ぎ → 彩色 → 反復 → 速度 → 位置",
           code: "engine/src/sim/physics_world.cpp::PhysicsWorld::Step", ticket: T-0016, doc: docs/design/08-bodies-physics.md,
           note: "研究 R-PHYS-1。刻みの初めで線形化した接触を拡張ラグランジュ法で。値の幅は PhysicsStepStats に記録" }
+      - { id: gasreference, group: simlib, label: "StepGas<br/>気体の流れの CPU リファレンス G1(1 レベル)<br/>力 → 流れ → 風上の割合で移す",
+          code: "engine/src/sim/gas_reference.cpp::StepGas", ticket: T-0026, doc: docs/design/07-transport.md,
+          note: "圧縮性の有限体積・音速を落とした c̃(Q11 は仮で C)・基準の静水圧との差・前進・後退の順。ADR-0043" }
+      - { id: gastest, group: tests, label: "gas_reference_test<br/>保存・静止大気・熱い泡・風で煙",
+          code: "tests/gas_reference_test.cpp::TestClosedBoxConservation", ticket: T-0026 }
       - { id: physicsscene, group: physicslib, label: "PhysicsScene<br/>原理の確認の場面(積み木・質量比・岩の山)",
           code: "engine/src/sim/physics_scene.cpp::MakePileScene", ticket: T-0016 }
       - { id: physicscollide, group: shared, label: "physics_collision.hlsli<br/>直方体どうしの接触(分離軸・切り抜き・4 点)",
@@ -419,6 +424,7 @@ views:
       - [physicsworld, physicscollide, "PxCollideBoxes"]
       - [physicsworld, physicssolverhlsl, "行・6×6"]
       - [physicsworld, physicsscene]
+      - [gastest, gasreference]
       - [physicssolverhlsl, physicssolve]
       - [physicssolve, fixed]
       - [physicstest, physicsworld]
