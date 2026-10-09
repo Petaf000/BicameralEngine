@@ -8,6 +8,7 @@
 // 決定性: 同じ殻の設定・同じソース・同じ実行の順番なら、同じ結果になる(math.random は実行ごとに決まった種から。13 §2・ADR-0030)。
 //   ただし表を「関数や表をキーにして」pairs で回す順番はアドレスで決まるので、ベイクの結果にその順番を使わない(13 §2)。
 // データの流れ: エディタ・ツール → Create → RegisterFunction(何個でも)→ Seal → Run(ソースごと)→ 戻り値の文字列・ホスト関数の副作用。
+//   パッケージ(luau_package.*。T-0138)は Run に RunOptions を渡す: require をそのパッケージの中だけで見せ、戻り値を ScriptValue で受け取る。
 // ここは CPU だけ(GPU もシミュの状態も知らない。原則 1・2)。シミュに効かせるときは、ホスト関数が表やコマンドを作る(13 §1)。
 #pragma once
 
@@ -18,6 +19,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "script/script_value.h"
 
 struct lua_State;
 
@@ -53,9 +56,26 @@ namespace bicameral::script {
         std::string message;  // "chunk:行: 内容" の形(Luau の書式)
     };
 
+    // require で読むモジュール(パッケージの中のファイル。T-0138)
+    struct ModuleFile {
+        std::string chunkName;  // エラーに出る名前で、同じ Run の中でのキャッシュの鍵(例 "core/sub/util.luau")
+        std::string source;
+    };
+
+    // require("名前") の名前をファイルにする。無い・許さない名前なら理由を返す(呼んだスクリプトに error として届く)
+    using ModuleResolver = std::function<std::expected<ModuleFile, std::string>(std::string_view name)>;
+
+    // Run の追加の指定(既定は T-0020 の殻のまま: require なし・戻り値は文字列だけ)
+    struct RunOptions {
+        const ModuleResolver*
+            modules = nullptr;       // あれば、この Run の中だけ require が見える。1 つのモジュールは 1 回だけ走る
+        bool captureValues = false;  // 戻り値を ScriptValue でも返す(表は中まで。関数などは error)
+    };
+
     // 1 回の Run の結果
     struct RunResult {
         std::vector<std::string> returns;  // チャンクが return した値を tostring したもの
+        std::vector<ScriptValue> values;   // captureValues のときだけ: 戻り値の木
         uint64_t safepointCount = 0;       // 使った安全点の数(重さの目安・決定性の検査)
     };
 
@@ -79,7 +99,8 @@ namespace bicameral::script {
         // --- 実行(Seal の後)---
 
         // ソースをコンパイルして、新しいスレッド(グローバルは書き込める自分用の表。ほかの Run と混ざらない)で最後まで走らせる
-        [[nodiscard]] std::expected<RunResult, ScriptError> Run(std::string_view chunkName, std::string_view source);
+        [[nodiscard]] std::expected<RunResult, ScriptError> Run(std::string_view chunkName, std::string_view source,
+                                                                const RunOptions& options = {});
 
         // --- 状態 ---
         [[nodiscard]] bool IsSealed() const { return m_sealed; }
@@ -97,6 +118,20 @@ namespace bicameral::script {
         static void* Allocate(void* userData, void* pointer, size_t oldSize, size_t newSize);
         static void Interrupt(lua_State* state, int gc);
         static int Print(lua_State* state);
+        static int Require(lua_State* state);
+
+        [[nodiscard]] std::expected<RunResult, ScriptError> RunThread(lua_State* thread, std::string_view chunkName,
+                                                                      const char* bytecode, size_t bytecodeSize,
+                                                                      const RunOptions& options);
+        [[nodiscard]] std::expected<RunResult, ScriptError> CollectResults(lua_State* thread,
+                                                                           std::string_view chunkName,
+                                                                           const RunOptions& options);
+
+        void BeginModules(lua_State* thread, const ModuleResolver* modules);
+        void EndModules();
+        [[nodiscard]] std::expected<void, std::string> LoadModule(lua_State* state, std::string_view name);
+        [[nodiscard]] std::expected<void, std::string> RunModule(lua_State* state, const std::string& chunkName,
+                                                                 std::string_view source);
 
         SandboxLimits m_limits;
         lua_State* m_state = nullptr;
@@ -108,6 +143,11 @@ namespace bicameral::script {
         bool m_safepointExceeded = false;
         bool m_memoryExceeded = false;
         std::string m_currentChunk;  // print の行き先に渡す名前
+
+        // --- require(Run の間だけ)---
+        const ModuleResolver* m_modules = nullptr;
+        int m_moduleCacheRef = 0;                  // chunkName → モジュールの戻り値 の表(Luau の registry)
+        std::vector<std::string> m_moduleLoading;  // 読み込み中の chunkName(循環を見つける)
     };
 
 }  // namespace bicameral::script

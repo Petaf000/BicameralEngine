@@ -96,10 +96,12 @@ add_library(bicameral_save STATIC
 target_include_directories(bicameral_save PUBLIC src)
 target_link_libraries(bicameral_save PUBLIC bicameral_core)
 
-# --- script: Luau の殻(サンドボックス・上限・決定性。13 §2・T-0020・ADR-0030)。CPU だけ(GPU もシミュの状態も知らない)---
+# --- script: Luau の殻(サンドボックス・上限・決定性。13 §2・T-0020・ADR-0030)とパッケージ(T-0138・ADR-0031)。CPU だけ(GPU もシミュの状態も知らない)---
 # エディタ・ツール・ゲームのオーサリングが使う。Luau の C API(lua.h)はホスト関数を書く側も使うので PUBLIC で渡す。
 add_library(bicameral_script STATIC
   src/script/luau_sandbox.cpp
+  src/script/luau_package.cpp
+  src/script/script_value.cpp
 )
 target_include_directories(bicameral_script PUBLIC src)
 target_link_libraries(bicameral_script PUBLIC bicameral_core unofficial::luau::Luau.VM unofficial::luau::Luau.Compiler)

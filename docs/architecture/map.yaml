@@ -613,7 +613,10 @@ views:
     nodes:
       - { id: luau, group: tool, label: "反応則・生き物・進行を書く<br/>(Luau の殻)",
           code: "engine/src/script/luau_sandbox.cpp::LuauSandbox::Run", ticket: T-0020, doc: docs/design/13-scripting-game-model.md,
-          note: "許したものだけ見せる殻・安全点とメモリの上限・実行ごとに種を戻す(ADR-0030。luau_sandbox_test)。パッケージは T-0138、ホットリロードは T-0139、ベイクへのつなぎは T-0021" }
+          note: "許したものだけ見せる殻・安全点とメモリの上限・実行ごとに種を戻す(ADR-0030。luau_sandbox_test)。ホットリロードは T-0139、ベイクへのつなぎは T-0021" }
+      - { id: packages, group: tool, label: "パッケージ<br/>(1 フォルダ = 1 つ・依存の順・表を合わせる)",
+          code: "engine/src/script/luau_package.cpp::LoadPackages", ticket: T-0138, doc: docs/design/13-scripting-game-model.md,
+          note: "require はパッケージの中だけ。合わせ方は追加だけ / 印つきの上書き / 上書き(Q8 未回答・仮で C)。表の版 = 中身のハッシュ(ADR-0031。luau_package_test)" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014,
           doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。今は C++ に手で書いた定義から(Luau は M2)" }
@@ -626,7 +629,8 @@ views:
           code: "engine/src/save/replay_file.cpp::SerializeReplay", ticket: T-0086, doc: docs/design/15-save-replay-mods.md,
           note: "再生ファイルの骨組みは T-0086(仮の世界)。セーブ(差分の書き出し)は後" }
     edges:
-      - [luau, bake]
+      - [luau, packages]
+      - [packages, bake, "分類 → 鍵 → 値"]
       - [bake, table]
       - [table, vram]
       - [gen, vram]
