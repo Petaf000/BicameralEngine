@@ -1,9 +1,11 @@
-// gas_reference.cpp — 気体の流れの CPU リファレンス G1(gas_reference.h・07 §2.1・ADR-0043)。
+// gas_reference.cpp — 気体の流れの CPU リファレンス G1・G2(gas_reference.h・07 §2.1・§2.2・ADR-0043)。
 // 1 小刻み = (1) セルから導く値(質量・温度・圧力)→ (2) 面の力(圧力の力積・重さ)を当てる → (3) 力を当てた後の運動量で
-// 面の質量の流れを出し、風上のセルごとに出ていく割合を合計 1 までに抑える → (4) 面ごとに風上の中身を同じ割合で移す。
+// 面の質量の流れを出し、風上のセルごとに出ていく割合を合計 1 までに抑える → (4) 面ごとに移す成分の物質量を決める
+// (MUSCL で面へ延ばした割合・乱数の丸め。G2)→ 風上のセルごとに合計が中身を超えないよう抑える → (5) 移す。
 // どの段も前の段の結果を読み、次の配列へ整数の足し引きだけで書く(順番に依存しない。04 R2・R3)。
 #include "sim/gas_reference.h"
 
+#include <algorithm>
 #include <cassert>
 #include <limits>
 
@@ -26,9 +28,16 @@ namespace bicameral::sim {
         constexpr uint64_t GRAVITY_MICROMETER_PER_SECOND2 = 9806650;
         constexpr uint64_t MICRO = 1000000;
         constexpr uint64_t ONE_Q32 = (uint64_t)1 << 32;
+        constexpr uint64_t LOW_32_BITS = ONE_Q32 - 1;
+
+        // 1 セルの物質量の上限(µmol)。移す物質量を Q32 の 64bit で計算するため(0.125 m³ に 2147 mol = 大気の約 400 倍)
+        constexpr uint64_t MAX_CELL_AMOUNT = (uint64_t)1 << 31;
+
+        // 丸めの乱数の用途(FxHash64。R6)
+        constexpr uint32_t GAS_ROUNDING_PURPOSE = 0x47610001u;
 
         // 面の片側(箱の中のセル・開いた境界の外・壁)
-        enum class SideKind : uint32_t {
+        enum class SideKind : uint8_t {
             Cell,
             Ghost,
             Wall,
@@ -40,9 +49,12 @@ namespace bicameral::sim {
         };
 
         struct GasFace {
-            FaceSide left;   // 軸のマイナス側
-            FaceSide right;  // 軸のプラス側
+            FaceSide left;        // 軸のマイナス側
+            FaceSide right;       // 軸のプラス側
+            FaceSide leftOuter;   // left のさらにマイナス側(MUSCL の勾配)
+            FaceSide rightOuter;  // right のさらにプラス側
             uint32_t axis = 0;
+            uint32_t id = 0;        // 面の番号(乱数の丸めの ID。並べた順ではなく場所から決める。R6)
             int64_t flow = 0;       // 質量の流れ(mg/小刻み。左 → 右が正)
             int64_t impulse = 0;    // 面の圧力の力積(左のセルから引き、右のセルへ足す)
             uint64_t fraction = 0;  // 風上の中身のうち移す割合(Q32)
@@ -50,6 +62,9 @@ namespace bicameral::sim {
             // --- 重さ(縦の面だけ。基準との質量の差 × g を面の両側の半分ずつのセルで受ける)---
             int64_t weightLeft = 0;  // 左のセルの運動量 z から引く力積
             int64_t weightRight = 0;
+
+            // --- 移す成分の物質量(µmol。MUSCL と乱数の丸めの後、風上のセルごとに中身を超えないよう抑えた値)---
+            std::array<uint64_t, GAS_MAX_SPECIES> moved = {};
         };
 
         uint64_t MulShiftU64(uint64_t a, uint64_t b, uint32_t shift) {
@@ -113,9 +128,13 @@ namespace bicameral::sim {
 
         // 質量・温度・本物の圧力(p̃ は基準が要るので呼ぶ側で)
         GasDerived DeriveRaw(const GasConfig& config, const GasCoefficients& coefficients, const GasCell& cell) {
+            const uint64_t amount = TotalAmount(config, cell);
+            assert(amount < MAX_CELL_AMOUNT);
+
             GasDerived derived;
             derived.mass = CellMass(config, coefficients, cell);
             derived.inverseMass = derived.mass == 0 ? 0 : std::numeric_limits<uint64_t>::max() / derived.mass;
+            derived.inverseAmount = amount == 0 ? 0 : std::numeric_limits<uint64_t>::max() / amount;
             derived.temperature = CellTemperature(config, cell);
             derived.pressure = CellPressure(config, cell, derived.temperature);
 
@@ -128,63 +147,63 @@ namespace bicameral::sim {
             return axis == 0 ? config.sizeX : (axis == 1 ? config.sizeY : config.sizeZ);
         }
 
-        // セル(x, y, z)の軸 axis の隣(delta = ±1)の番号。箱の外なら -1 は返さず呼ぶ側で境界を見る
-        uint32_t Neighbor(const GasBox& box, uint32_t x, uint32_t y, uint32_t z, uint32_t axis, uint32_t coordinate) {
-            if (axis == 0)
-                return box.Index(coordinate, y, z);
-
-            if (axis == 1)
-                return box.Index(x, coordinate, z);
-
-            return box.Index(x, y, coordinate);
-        }
-
         FaceSide BoundarySide(GasBoundary boundary, uint32_t z) {
             if (boundary == GasBoundary::Open)
-                return {SideKind::Ghost, z};
+                return {.kind = SideKind::Ghost, .index = z};
 
-            return {SideKind::Wall, 0};
+            return {.kind = SideKind::Wall, .index = 0};
+        }
+
+        std::array<uint32_t, GAS_AXES> CellCoordinate(const GasBox& box, uint32_t index) {
+            const uint32_t sizeX = box.config.sizeX;
+            const uint32_t sizeY = box.config.sizeY;
+
+            return {index % sizeX, (index / sizeX) % sizeY, index / (sizeX * sizeY)};
+        }
+
+        // セル cell から軸 axis の座標を coordinate(箱の外なら −1 や size)に替えた所の側。周期的なら反対側へ回し、それ以外の外は境界
+        FaceSide SideAt(const GasBox& box, std::array<uint32_t, GAS_AXES> cell, uint32_t axis, int64_t coordinate) {
+            const int64_t size = AxisSize(box.config, axis);
+            const GasBoundary boundary = box.config.boundary[axis];
+            if (coordinate < 0 || coordinate >= size) {
+                if (boundary != GasBoundary::Periodic)
+                    return BoundarySide(boundary, cell[2]);
+
+                coordinate = ((coordinate % size) + size) % size;
+            }
+
+            cell[axis] = (uint32_t)coordinate;
+            return {.kind = SideKind::Cell, .index = box.Index(cell[0], cell[1], cell[2])};
+        }
+
+        // セル cell の軸 axis のマイナス側の面(high なら端のセルのプラス側の境界の面)。両側と、その外側の隣(MUSCL の勾配)
+        GasFace MakeFace(const GasBox& box, std::array<uint32_t, GAS_AXES> cell, uint32_t axis, bool high) {
+            const int64_t left = high ? (int64_t)cell[axis] : (int64_t)cell[axis] - 1;
+            GasFace face;
+            face.axis = axis;
+            face.leftOuter = SideAt(box, cell, axis, left - 1);
+            face.left = SideAt(box, cell, axis, left);
+            face.right = SideAt(box, cell, axis, left + 1);
+            face.rightOuter = SideAt(box, cell, axis, left + 2);
+            face.id = ((box.Index(cell[0], cell[1], cell[2]) * GAS_AXES) + axis) * 2 + (high ? 1 : 0);
+
+            return face;
         }
 
         // 面の一覧: どの面も 1 回だけ(セルのマイナス側の面 + 端のセルのプラス側の境界の面)
         std::vector<GasFace> EnumerateFaces(const GasBox& box) {
             const GasConfig& config = box.config;
             std::vector<GasFace> faces;
-            faces.reserve(box.cells.size() * GAS_AXES + 64);
+            faces.reserve((box.cells.size() * GAS_AXES) + 64);
 
-            for (uint32_t z = 0; z < config.sizeZ; ++z) {
-                for (uint32_t y = 0; y < config.sizeY; ++y) {
-                    for (uint32_t x = 0; x < config.sizeX; ++x) {
-                        const uint32_t self = box.Index(x, y, z);
-                        const std::array<uint32_t, GAS_AXES> coordinate = {x, y, z};
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                const std::array<uint32_t, GAS_AXES> cell = CellCoordinate(box, index);
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                    faces.push_back(MakeFace(box, cell, axis, false));
 
-                        for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
-                            const uint32_t size = AxisSize(config, axis);
-                            const uint32_t i = coordinate[axis];
-                            const GasBoundary boundary = config.boundary[axis];
-                            GasFace face;
-                            face.axis = axis;
-                            face.right = {SideKind::Cell, self};
-
-                            if (i > 0)
-                                face.left = {SideKind::Cell, Neighbor(box, x, y, z, axis, i - 1)};
-                            else if (boundary == GasBoundary::Periodic)
-                                face.left = {SideKind::Cell, Neighbor(box, x, y, z, axis, size - 1)};
-                            else
-                                face.left = BoundarySide(boundary, z);
-
-                            faces.push_back(face);
-
-                            if (i + 1 < size || boundary == GasBoundary::Periodic)
-                                continue;
-
-                            GasFace high;
-                            high.axis = axis;
-                            high.left = {SideKind::Cell, self};
-                            high.right = BoundarySide(boundary, z);
-                            faces.push_back(high);
-                        }
-                    }
+                    const bool lastCell = cell[axis] + 1 == AxisSize(config, axis);
+                    if (lastCell && config.boundary[axis] != GasBoundary::Periodic)
+                        faces.push_back(MakeFace(box, cell, axis, true));
                 }
             }
 
@@ -234,7 +253,7 @@ namespace bicameral::sim {
             if (face.axis != 2 || !box.config.gravity)
                 return;
 
-            const int64_t coefficient = (int64_t)box.coefficients.gravityImpulse;
+            const auto coefficient = (int64_t)box.coefficients.gravityImpulse;
             if (face.left.kind == SideKind::Wall) {
                 face.weightRight = fx::FxMulShiftS64(Excess(box, derived, face.right), coefficient, 17);
                 return;
@@ -306,7 +325,7 @@ namespace bicameral::sim {
         // a ÷ b を最も近い整数に(ちょうど半分は 0 から遠い側へ)。b > 0
         int64_t DivideNearest(int64_t a, uint64_t b) {
             const uint64_t magnitude = fx::FxAbsU64(a);
-            const fx::FxU128 product = {0, magnitude};
+            const fx::FxU128 product = {.hi = 0, .lo = magnitude};
             const fx::FxDivResult result = fx::FxDivU128By64(product, b);
             const uint64_t quotient = result.quotient + (result.remainder * 2 >= b ? 1 : 0);
 
@@ -344,9 +363,7 @@ namespace bicameral::sim {
             const uint32_t speciesCount = box.config.speciesCount;
 
             GasCell moved;
-            for (uint32_t s = 0; s < speciesCount; ++s)
-                moved.amounts[s] = MulShiftU64(source.amounts[s], face.fraction, 32);
-
+            moved.amounts = face.moved;
             moved.energy = MovedEnergy(box.config, source, moved);
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                 moved.momentum[axis] = fx::FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
@@ -437,19 +454,138 @@ namespace bicameral::sim {
             }
         }
 
-        void Substep(GasBox& box, const std::vector<GasFace>& layout) {
-            const GasConfig& config = box.config;
+        // --- 移す成分の物質量(G2。07 §2.2)---
 
-            // --- (1) 導く値 ---
-            std::vector<GasDerived> derived(box.cells.size());
-            for (uint32_t z = 0; z < config.sizeZ; ++z) {
-                for (uint32_t y = 0; y < config.sizeY; ++y) {
-                    for (uint32_t x = 0; x < config.sizeX; ++x) {
-                        const uint32_t index = box.Index(x, y, z);
-                        derived[index] = DeriveGasCell(box, box.cells[index], z);
-                    }
+        // 制限した勾配(a = 風上 − その外側、b = 風下 − 風上)。符号が違うか 0 なら 0(山と谷では延ばさず、新しい山と谷を作らない)。
+        // minmod は絶対値の小さい方、MC(monotonized central)は minmod(2a, 2b, (a + b) ÷ 2)。どちらも TVD(07 §2.2)
+        int64_t LimitedSlope(GasReconstruction reconstruction, int64_t a, int64_t b) {
+            if (a == 0 || b == 0 || (a > 0) != (b > 0))
+                return 0;
+
+            const int64_t sign = a > 0 ? 1 : -1;
+            const int64_t smaller = std::min(a * sign, b * sign);
+            if (reconstruction == GasReconstruction::Minmod)
+                return smaller * sign;
+
+            const int64_t central = ((a * sign) + (b * sign)) / 2;
+            return std::min(2 * smaller, central) * sign;
+        }
+
+        // 側の成分 s の割合(Q32。物質量 ÷ 全物質量。割り算は導く値の逆数 1 つ。ADR-0010)
+        int64_t SpeciesRatio(const GasBox& box, const std::vector<GasCell>& cells,
+                             const std::vector<GasDerived>& derived, FaceSide side, uint32_t s) {
+            const uint64_t inverseAmount = SideDerived(box, derived, side).inverseAmount;
+
+            return (int64_t)MulShiftU64(SideCell(box, cells, side).amounts[s], inverseAmount, 32);
+        }
+
+        // 風上のセルの割合から面へ延ばす差 ½(1 − ν)σ(Q32)。σ = 制限した勾配、ν = 出ていく割合。
+        // (1 − ν)は小刻みの間に面を通る塊の平均にするため(van Leer の 1 段の MUSCL。ν ≤ 1 で新しい山と谷を作らない)。
+        // 風上が開いた境界の外(一様)か、外側が壁なら 0(1 次の風上)
+        int64_t HalfSlope(const GasBox& box, const std::vector<GasCell>& cells, const std::vector<GasDerived>& derived,
+                          const GasFace& face, uint32_t s) {
+            const bool forward = face.flow > 0;
+            const FaceSide outer = forward ? face.leftOuter : face.rightOuter;
+            const FaceSide donor = forward ? face.left : face.right;
+            const FaceSide receiver = forward ? face.right : face.left;
+            if (donor.kind != SideKind::Cell || outer.kind == SideKind::Wall || receiver.kind == SideKind::Wall)
+                return 0;
+
+            const int64_t donorRatio = SpeciesRatio(box, cells, derived, donor, s);
+            const int64_t slope = LimitedSlope(box.config.reconstruction,
+                                               donorRatio - SpeciesRatio(box, cells, derived, outer, s),
+                                               SpeciesRatio(box, cells, derived, receiver, s) - donorRatio);
+
+            return fx::FxMulShiftS64(slope, (int64_t)(ONE_Q32 - face.fraction), 33);
+        }
+
+        // 面で移す成分 s の物質量(Q32 の µmol)= 割合 × 風上の物質量 + 延ばした差 × 割合 × 風上の全物質量。
+        // 延ばした割合は制限で風上の 0〜2 倍に収まるので負にならない(丸めの分は 0 で止める)
+        uint64_t MovedAmountQ32(const GasBox& box, const std::vector<GasCell>& cells,
+                                const std::vector<GasDerived>& derived, const GasFace& face, uint32_t s) {
+            const GasCell& source = SideCell(box, cells, face.flow > 0 ? face.left : face.right);
+            const uint64_t moved = source.amounts[s] * face.fraction;
+            if (box.config.reconstruction == GasReconstruction::Upwind)
+                return moved;
+
+            const int64_t halfSlope = HalfSlope(box, cells, derived, face, s);
+            const uint64_t total = TotalAmount(box.config, source) * face.fraction;
+            const uint64_t correction = MulShiftU64(total, fx::FxAbsU64(halfSlope), 32);
+            if (halfSlope >= 0)
+                return moved + correction;
+
+            return moved > correction ? moved - correction : 0;
+        }
+
+        // Q32 の物質量を整数へ。端数は決定的な乱数と比べて丸める(期待値が端数どおり。切り捨てだと割合 × 物質量 < 1 の微量の成分が
+        // 永久に動かない〔D-428 の嘘〕。R6・D-431 と同じ考え)。乱数の丸めを切った設定なら切り捨て(G1)
+        uint64_t RoundAmount(const GasBox& box, uint64_t amountQ32, uint64_t hash) {
+            const uint64_t whole = amountQ32 >> 32;
+            if (!box.config.stochasticRounding)
+                return whole;
+
+            return whole + ((hash >> 32) < (amountQ32 & LOW_32_BITS) ? 1 : 0);
+        }
+
+        // 面ごとに移す成分の物質量。乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途)+ 成分(R6。並べた順に依存しない)
+        void ComputeMovedAmounts(const GasBox& box, const std::vector<GasCell>& cells,
+                                 const std::vector<GasDerived>& derived, uint64_t roundingTick,
+                                 std::vector<GasFace>& faces) {
+            for (GasFace& face : faces) {
+                if (face.fraction == 0)
+                    continue;
+
+                const uint64_t faceHash = fx::FxHash64(box.config.randomSeed, roundingTick, face.id,
+                                                       GAS_ROUNDING_PURPOSE);
+                for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
+                    const uint64_t amountQ32 = MovedAmountQ32(box, cells, derived, face, s);
+                    face.moved[s] = RoundAmount(box, amountQ32, fx::FxHashCombine(faceHash, s));
                 }
             }
+        }
+
+        // 風上のセルごとに、成分ごとの移す物質量の合計が中身を超えたら比例して縮める(切り捨て)。
+        // 延ばした割合(風上の最大 2 倍)と丸め上げで、出ていく割合の合計が 1 に近いセルでは超えうる
+        void LimitMovedAmounts(const GasBox& box, const std::vector<GasCell>& cells, std::vector<GasFace>& faces) {
+            const uint32_t speciesCount = box.config.speciesCount;
+            std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> outgoing(box.cells.size());
+            for (const GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                for (uint32_t s = 0; s < speciesCount; ++s)
+                    outgoing[donor.index][s] += face.moved[s];
+            }
+
+            for (GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const GasCell& source = cells[donor.index];
+                for (uint32_t s = 0; s < speciesCount; ++s) {
+                    const uint64_t total = outgoing[donor.index][s];
+                    if (total <= source.amounts[s])
+                        continue;
+
+                    face.moved[s] = fx::FxDivU128By64(fx::FxMulU64Full(face.moved[s], source.amounts[s]), total)
+                                        .quotient;
+                }
+            }
+        }
+
+        std::vector<GasDerived> DeriveAll(const GasBox& box) {
+            std::vector<GasDerived> derived(box.cells.size());
+            for (uint32_t index = 0; index < box.cells.size(); ++index)
+                derived[index] = DeriveGasCell(box, box.cells[index], CellLayer(box, index));
+
+            return derived;
+        }
+
+        void Substep(GasBox& box, const std::vector<GasFace>& layout, uint64_t roundingTick) {
+            // --- (1) 導く値 ---
+            const std::vector<GasDerived> derived = DeriveAll(box);
 
             // --- (2) 面の力(圧力の力積・重さ)を先に当てる ---
             std::vector<GasFace> faces = layout;
@@ -468,7 +604,11 @@ namespace bicameral::sim {
 
             LimitOutflow(box, derived, faces);
 
-            // --- (4) 風上の中身(力を当てた後)を移す ---
+            // --- (4) 移す成分の物質量(MUSCL で面へ延ばした割合・乱数の丸め。G2)---
+            ComputeMovedAmounts(box, forced, derived, roundingTick, faces);
+            LimitMovedAmounts(box, forced, faces);
+
+            // --- (5) 風上の中身(力を当てた後)を移す ---
             std::vector<GasCell> next = forced;
             for (const GasFace& face : faces)
                 Transfer(box, forced, next, face);
@@ -555,7 +695,7 @@ namespace bicameral::sim {
             box.referenceDerived.push_back(DeriveRaw(config, box.coefficients, layer));
 
             GasCell ghost = layer;
-            const int64_t mass = (int64_t)box.referenceDerived.back().mass;
+            const auto mass = (int64_t)box.referenceDerived.back().mass;
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                 ghost.momentum[axis] = mass * config.windVelocity[axis];
 
@@ -608,7 +748,7 @@ namespace bicameral::sim {
     void StepGas(GasBox& box) {
         const std::vector<GasFace> layout = EnumerateFaces(box);
         for (uint32_t substep = 0; substep < box.config.substeps; ++substep)
-            Substep(box, layout);
+            Substep(box, layout, (box.tick * box.config.substeps) + substep);
 
         ++box.tick;
     }

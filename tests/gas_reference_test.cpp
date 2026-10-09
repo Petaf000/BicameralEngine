@@ -1,9 +1,12 @@
-// gas_reference_test.cpp — 気体の流れの CPU リファレンス G1(sim/gas_reference。T-0026・07 §2.1)を CPU だけで確かめる。合格の条件:
+// gas_reference_test.cpp — 気体の流れの CPU リファレンス G1・G2(sim/gas_reference。T-0026・T-0184・07 §2.1・§2.2)を CPU だけで確かめる。合格の条件:
 //   閉じた箱で成分・エネルギーがビット一致で一定、運動量は「初め + 帳簿(壁と重力の力積)」とビット一致・周期的な箱(重力なし)で運動量がビット一致で一定・
 //   静止大気が 10^4 刻み後も速度 1 単位(2^-20 m/s)以内・熱い泡が上がる・風で煙が流れる・同じ入力なら同じハッシュ。
+//   G2: MUSCL で煙のにじみ(風に沿った広がり)が 1 次の風上より狭く、煙の割合が初めの最大を超えない(振動なし)・
+//   微量の成分(1 セル 5 µmol)が風で流れる(切り捨てでは動かない)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。測った値も表示する(07 §2.1 に書いた数字の出どころ)。
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -33,6 +36,7 @@ namespace {
     constexpr uint32_t AIR_TEMPERATURE = 293150;                   // mK
     constexpr uint64_t SURFACE_PRESSURE = 101325ull * 1000000ull;  // µPa
     constexpr int64_t METER_PER_SECOND = (int64_t)1 << 20;         // 速度の単位
+    constexpr int64_t ROUGH_CELL_MASS = 150000;  // 地面の近くの 1 セルの空気の質量(mg。運動量を速さから作る目安)
 
     GasConfig MakeAirConfig(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ) {
         GasConfig config;
@@ -40,9 +44,9 @@ namespace {
         config.sizeY = sizeY;
         config.sizeZ = sizeZ;
         config.speciesCount = 3;
-        config.species[0] = {28013, 29124, 0};  // N2
-        config.species[1] = {31999, 29378, 0};  // O2
-        config.species[2] = {28013, 29124, 0};  // 煙の印
+        config.species[0] = {.molarMass = 28013, .heatCapacity = 29124, .formationEnergy = 0};  // N2
+        config.species[1] = {.molarMass = 31999, .heatCapacity = 29378, .formationEnergy = 0};  // O2
+        config.species[2] = {.molarMass = 28013, .heatCapacity = 29124, .formationEnergy = 0};  // 煙の印
 
         return config;
     }
@@ -80,6 +84,14 @@ namespace {
         return speed;
     }
 
+    uint32_t CellX(const GasBox& box, uint32_t index) {
+        return index % box.config.sizeX;
+    }
+
+    uint32_t CellZ(const GasBox& box, uint32_t index) {
+        return index / (box.config.sizeX * box.config.sizeY);
+    }
+
     void Run(GasBox& box, uint64_t ticks) {
         for (uint64_t tick = 0; tick < ticks; ++tick)
             StepGas(box);
@@ -93,8 +105,8 @@ namespace {
         AddSmoke(box, box.Index(5, 5, 5));
 
         GasCell& moving = box.cells[box.Index(2, 6, 4)];
-        moving.momentum[0] = 150000 * 2 * METER_PER_SECOND;
-        moving.momentum[2] = -150000 * METER_PER_SECOND;
+        moving.momentum[0] = ROUGH_CELL_MASS * 2 * METER_PER_SECOND;
+        moving.momentum[2] = -ROUGH_CELL_MASS * METER_PER_SECOND;
 
         return box;
     }
@@ -133,8 +145,9 @@ namespace {
         std::fill(reference.begin() + 1, reference.end(), reference.front());
         GasBox box = MakeGasBox(config, reference);
         Heat(box, box.Index(1, 2, 1), AIR_TEMPERATURE + 80000);
-        box.cells[box.Index(5, 5, 2)].momentum = {150000 * 3 * METER_PER_SECOND, -150000 * METER_PER_SECOND,
-                                                  150000 * 2 * METER_PER_SECOND};
+        box.cells[box.Index(5, 5, 2)].momentum = {ROUGH_CELL_MASS * 3 * METER_PER_SECOND,
+                                                  -ROUGH_CELL_MASS * METER_PER_SECOND,
+                                                  ROUGH_CELL_MASS * 2 * METER_PER_SECOND};
         AddSmoke(box, box.Index(6, 1, 0));
 
         const GasTotals before = SumGas(box);
@@ -190,22 +203,29 @@ namespace {
     int64_t HeatCentroidZ(const GasBox& box) {
         int64_t weighted = 0;
         int64_t total = 0;
-        for (uint32_t z = 0; z < box.config.sizeZ; ++z) {
-            const int64_t reference = box.referenceDerived[z].temperature;
-            for (uint32_t y = 0; y < box.config.sizeY; ++y) {
-                for (uint32_t x = 0; x < box.config.sizeX; ++x) {
-                    const int64_t excess = (int64_t)DeriveGasCell(box, box.cells[box.Index(x, y, z)], z).temperature -
-                                           reference;
-                    if (excess <= 0)
-                        continue;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const uint32_t z = CellZ(box, index);
+            const int64_t excess = (int64_t)DeriveGasCell(box, box.cells[index], z).temperature -
+                                   (int64_t)box.referenceDerived[z].temperature;
+            if (excess <= 0)
+                continue;
 
-                    weighted += excess * z;
-                    total += excess;
-                }
-            }
+            weighted += excess * z;
+            total += excess;
         }
 
         return total == 0 ? 0 : weighted * 1000 / total;
+    }
+
+    // 半径 1.5 セル(0.75 m)の球(中心 (5, 5, 4))を +30 K
+    void HeatBubble(GasBox& box) {
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const int32_t dx = (int32_t)CellX(box, index) - 5;
+            const int32_t dy = (int32_t)((index / box.config.sizeX) % box.config.sizeY) - 5;
+            const int32_t dz = (int32_t)CellZ(box, index) - 4;
+            if (dx * dx + dy * dy + dz * dz <= 2)
+                Heat(box, index, AIR_TEMPERATURE + 30000);
+        }
     }
 
     // --- 熱い泡が上がる ---
@@ -214,19 +234,7 @@ namespace {
         config.soundSpeedMmPerS = soundSpeedMmPerS;
         config.substeps = substeps;
         GasBox box = MakeAirBox(config);
-
-        // 半径 1.5 セル(0.75 m)の球を +30 K
-        for (uint32_t z = 2; z <= 6; ++z) {
-            for (uint32_t y = 3; y <= 7; ++y) {
-                for (uint32_t x = 3; x <= 7; ++x) {
-                    const int32_t dx = (int32_t)x - 5;
-                    const int32_t dy = (int32_t)y - 5;
-                    const int32_t dz = (int32_t)z - 4;
-                    if (dx * dx + dy * dy + dz * dz <= 2)
-                        Heat(box, box.Index(x, y, z), AIR_TEMPERATURE + 30000);
-                }
-            }
-        }
+        HeatBubble(box);
 
         const GasTotals before = SumGas(box);
         const int64_t start = HeatCentroidZ(box);
@@ -246,14 +254,10 @@ namespace {
     int64_t SmokeCentroidX(const GasBox& box) {
         uint64_t total = 0;
         uint64_t weighted = 0;
-        for (uint32_t z = 0; z < box.config.sizeZ; ++z) {
-            for (uint32_t y = 0; y < box.config.sizeY; ++y) {
-                for (uint32_t x = 0; x < box.config.sizeX; ++x) {
-                    const uint64_t smoke = box.cells[box.Index(x, y, z)].amounts[SPECIES_SMOKE];
-                    weighted += smoke * x;
-                    total += smoke;
-                }
-            }
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const uint64_t smoke = box.cells[index].amounts[SPECIES_SMOKE];
+            weighted += smoke * CellX(box, index);
+            total += smoke;
         }
 
         return total == 0 ? 0 : (int64_t)(weighted * 1000 / total);
@@ -289,6 +293,115 @@ namespace {
                velocity <= 2 * METER_PER_SECOND + 2 * METER_PER_SECOND / 1000);
     }
 
+    // --- G2: 煙のにじみ(MUSCL)と微量の成分(乱数の丸め)。T-0184・07 §2.2 ---
+
+    // x は開いた境界で風 2 m/s、y は周期的、z は壁の箱
+    GasBox MakeWindBox(uint32_t sizeX, GasReconstruction reconstruction, bool stochasticRounding) {
+        GasConfig config = MakeAirConfig(sizeX, 4, 6);
+        config.boundary = {GasBoundary::Open, GasBoundary::Periodic, GasBoundary::Wall};
+        config.windVelocity = {(int32_t)(2 * METER_PER_SECOND), 0, 0};
+        config.reconstruction = reconstruction;
+        config.stochasticRounding = stochasticRounding;
+
+        return MakeAirBox(config);
+    }
+
+    struct SmokeProfile {
+        double centroid = 0;  // セル
+        double spread = 0;    // 風に沿った標準偏差(セル)
+        double maxRatio = 0;  // セルの煙の割合(煙 ÷ 全物質量)の最大
+    };
+
+    SmokeProfile MeasureSmoke(const GasBox& box) {
+        double total = 0;
+        double first = 0;
+        double second = 0;
+        SmokeProfile profile;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const GasCell& cell = box.cells[index];
+            const auto smoke = (double)cell.amounts[SPECIES_SMOKE];
+            const double x = CellX(box, index);
+            total += smoke;
+            first += smoke * x;
+            second += smoke * x * x;
+
+            const auto amount = (double)(cell.amounts[0] + cell.amounts[1] + cell.amounts[2]);
+            profile.maxRatio = std::max(profile.maxRatio, smoke / amount);
+        }
+
+        profile.centroid = first / total;
+        profile.spread = std::sqrt(std::max(0.0, (second / total) - (profile.centroid * profile.centroid)));
+
+        return profile;
+    }
+
+    // 4 セルの幅の煙(全部の y・z = 2〜3)を 3 秒流し、風に沿った広がりを測る。広がりを返す
+    double SmokeSpreadAfterWind(GasReconstruction reconstruction, const char* name) {
+        GasBox box = MakeWindBox(48, reconstruction, true);
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const uint32_t x = CellX(box, index);
+            const uint32_t z = CellZ(box, index);
+            if (x >= 4 && x <= 7 && z >= 2 && z <= 3)
+                AddSmoke(box, index);
+        }
+
+        const uint64_t smokeBefore = SumGas(box).amounts[SPECIES_SMOKE];
+        const SmokeProfile start = MeasureSmoke(box);
+        Run(box, 60);
+        const SmokeProfile oneSecond = MeasureSmoke(box);
+        Run(box, 120);
+        const SmokeProfile threeSeconds = MeasureSmoke(box);
+        std::printf(
+            "smoke %s: spread %.3f -> %.3f (1 s) -> %.3f (3 s) cells, centroid %.3f -> %.3f, "
+            "max ratio %.4f -> %.4f\n",
+            name, start.spread, oneSecond.spread, threeSeconds.spread, start.centroid, threeSeconds.centroid,
+            start.maxRatio, threeSeconds.maxRatio);
+
+        EXPECT(SumGas(box).amounts[SPECIES_SMOKE] == smokeBefore);  // まだ出口に届かない
+        // 3 秒で 6 m(12 セル)流れ、煙の割合は初めの最大を超えない(新しい山を作らない = 振動なし。R-TRANS-2)
+        const double shift = threeSeconds.centroid - start.centroid;
+        EXPECT(shift >= 11.0 && shift <= 13.0);
+        EXPECT(threeSeconds.maxRatio <= start.maxRatio * 1.0001);
+
+        return threeSeconds.spread;
+    }
+
+    void TestMusclNarrowsSmoke() {
+        const double upwind = SmokeSpreadAfterWind(GasReconstruction::Upwind, "upwind");
+        const double minmod = SmokeSpreadAfterWind(GasReconstruction::Minmod, "minmod");
+        const double central = SmokeSpreadAfterWind(GasReconstruction::MonotonizedCentral, "MC");
+        EXPECT(minmod < upwind);
+        EXPECT(central <= upwind * 0.6);  // 測った値は 07 §2.2
+    }
+
+    // 1 セルに 5 µmol の微量の成分(全部の y・x = 4・z = 2〜3)を 1 秒流す。割合 × 物質量 は 1 小刻みに約 0.08 µmol で、
+    // 切り捨てでは永久に 0(D-428 の嘘)。乱数の丸めなら期待値どおり風で流れる。重心の移動(1/1000 セル)を返す
+    int64_t TraceShiftAfterWind(bool stochasticRounding) {
+        GasBox box = MakeWindBox(32, GasReconstruction::MonotonizedCentral, stochasticRounding);
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const uint32_t z = CellZ(box, index);
+            if (CellX(box, index) == 4 && z >= 2 && z <= 3)
+                box.cells[index].amounts[SPECIES_SMOKE] = 5;
+        }
+
+        const uint64_t traceBefore = SumGas(box).amounts[SPECIES_SMOKE];
+        const int64_t start = SmokeCentroidX(box);
+        Run(box, 60);
+        const int64_t shift = SmokeCentroidX(box) - start;
+        std::printf("trace 5 umol/cell (%s rounding): centroid shift %lld (1/1000 cell) after 1 s (wind: +4000)\n",
+                    stochasticRounding ? "stochastic" : "floor", (long long)shift);
+        EXPECT(SumGas(box).amounts[SPECIES_SMOKE] == traceBefore);
+
+        return shift;
+    }
+
+    void TestTraceSpeciesMoves() {
+        const int64_t truncated = TraceShiftAfterWind(false);
+        const int64_t stochastic = TraceShiftAfterWind(true);
+        EXPECT(truncated == 0);  // G1 の切り捨ての嘘を再現できていること(測り方の確認)
+        EXPECT(stochastic >= 3000 && stochastic <= 5000);
+    }
+
 }  // namespace
 
 int main() {
@@ -299,6 +412,8 @@ int main() {
     TestHotBubbleRises(30000, 4);
     TestHotBubbleRises(60000, 8);  // c̃ は設定で変えられる(本物の音速の小刻みへ切り替える時の形)
     TestWindCarriesSmoke();
+    TestMusclNarrowsSmoke();
+    TestTraceSpeciesMoves();
 
     if (failureCount != 0) {
         std::printf("gas_reference_test: %d failure(s)\n", failureCount);

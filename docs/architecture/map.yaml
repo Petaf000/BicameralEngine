@@ -211,7 +211,10 @@ views:
       - { id: gasreference, group: simlib, label: "StepGas<br/>気体の流れの CPU リファレンス G1(1 レベル)<br/>力 → 流れ → 風上の割合で移す",
           code: "engine/src/sim/gas_reference.cpp::StepGas", ticket: T-0026, doc: docs/design/07-transport.md,
           note: "圧縮性の有限体積・音速を落とした c̃(Q11 は仮で C)・基準の静水圧との差・前進・後退の順。ADR-0043" }
-      - { id: gastest, group: tests, label: "gas_reference_test<br/>保存・静止大気・熱い泡・風で煙",
+      - { id: gasmoved, group: simlib, label: "ComputeMovedAmounts<br/>気体 G2: 移す成分の物質量<br/>MUSCL(MC の制限)+ 乱数の丸め",
+          code: "engine/src/sim/gas_reference.cpp::ComputeMovedAmounts", ticket: T-0184, doc: docs/design/07-transport.md,
+          note: "煙のにじみを約 1/6 に(広がりの増え方)。端数は (シード, 小刻み, 面, 用途) の乱数で丸め、微量の成分も動く(R6・D-428)。ADR-0043 §6" }
+      - { id: gastest, group: tests, label: "gas_reference_test<br/>保存・静止大気・熱い泡・風で煙<br/>煙のにじみ・微量の成分",
           code: "tests/gas_reference_test.cpp::TestClosedBoxConservation", ticket: T-0026 }
       - { id: physicsscene, group: physicslib, label: "PhysicsScene<br/>原理の確認の場面(積み木・質量比・岩の山)",
           code: "engine/src/sim/physics_scene.cpp::MakePileScene", ticket: T-0016 }
@@ -431,6 +434,7 @@ views:
       - [physicsworld, physicssolverhlsl, "行・6×6"]
       - [physicsworld, physicsscene]
       - [gastest, gasreference]
+      - [gasreference, gasmoved]
       - [physicssolverhlsl, physicssolve]
       - [physicssolve, fixed]
       - [physicstest, physicsworld]
