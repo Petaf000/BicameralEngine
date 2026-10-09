@@ -309,7 +309,7 @@ namespace bicameral::editor {
     }
 
     void EditorOverlay::BuildStatusPanel(const EditorStatus& status) const {
-        ImGui::SetNextWindowPos({PANEL_MARGIN_PIXELS, 170.0f}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos({PANEL_MARGIN_PIXELS, 240.0f}, ImGuiCond_FirstUseEver);
         ImGui::Begin("状態", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
         // --- 世界(読み戻しは数フレーム遅れる)---

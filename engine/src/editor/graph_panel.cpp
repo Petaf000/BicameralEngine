@@ -12,8 +12,8 @@
 namespace bicameral::editor {
     namespace {
 
-        constexpr float PANEL_X_PIXELS = 12.0f;
-        constexpr float PANEL_Y_PIXELS = 420.0f;
+        constexpr float PANEL_X_PIXELS = 430.0f;  // 「時間」「状態」の右
+        constexpr float PANEL_Y_PIXELS = 12.0f;
         constexpr ImVec4 WARNING_COLOR = {1.0f, 0.55f, 0.35f, 1.0f};
 
         void Cell(std::string_view text) {
