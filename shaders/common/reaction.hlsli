@@ -13,6 +13,12 @@
 // 表の読み方は呼ぶ側が Table 型で渡す(C++ は配列の span、HLSL はバッファを読む構造体)。Table に要るメソッド:
 //   RxSpecies Species(uint32_t id) / RxRule Rule(uint32_t id) / uint32_t RuleIndex(uint32_t position) /
 //   uint64_t Rate(uint32_t rule, uint32_t kelvin)
+//
+// セルの形も呼ぶ側が Cell 型で渡す(T-0175。成分の二段の CPU リファレンス):
+//   - RxCell: 成分はインラインの RX_MAX_CELL_SPECIES 個まで(GPU と、今の多重解像度の世界)。超える生成物は待たせる(RX_LIMIT_PRODUCTS)
+//   - RxWideCell(C++ だけ。engine/src/sim/reaction_wide_cell.h): 成分の数に上限が無い。生成物は待たずに足す
+//   核は成分を species[i]・amounts[i]・speciesCount で読み、形ごとに違う所は下の「セルの形ごとの道具」(同じ名前の関数を形ごとに用意)を通す。
+//   成分が RX_MAX_CELL_SPECIES 以下の間は、どちらの形でもビット単位で同じ結果になる
 #ifndef BICAMERAL_REACTION_HLSLI
 #define BICAMERAL_REACTION_HLSLI
 
@@ -32,7 +38,8 @@
 RX_NAMESPACE_BEGIN
 
 // --- 大きさ ------------------------------------------------------------------------------------
-FX_CONST uint32_t RX_MAX_CELL_SPECIES = 8;  // セルの成分のインラインの数(溢れの領域は T-0022 の続き / R-MULTI-4)
+FX_CONST uint32_t
+    RX_MAX_CELL_SPECIES = 8;  // セルの成分のインラインの数(溢れは RxWideCell〔CPU。T-0175〕・GPU は T-0176 / R-MULTI-4)
 FX_CONST uint32_t RX_MAX_REACTANTS = 3;
 FX_CONST uint32_t RX_MAX_PRODUCTS = 3;
 FX_CONST uint32_t RX_MAX_CANDIDATES = 16;  // 1 セルで同時に進める規則の数(超えたら刻みごとに選ぶ。RX_LIMIT_CANDIDATES)
@@ -43,7 +50,8 @@ FX_CONST uint32_t RX_SELECT_PURPOSE = 0x52780003u;  // 候補が上限を超え�
 
 // 上限に当たった印(RxWaitStep::limits のビット。T-0022 の最初の段。D-401・D-428・04 R8: 黙って捨てない)。
 // どちらも保存則は守る(元素・エネルギーはビット単位で変わらない)。上限そのものを無くすのは T-0022 の続き(成分の溢れの領域・候補の引き方)。
-//   RX_LIMIT_PRODUCTS: 生成物を全部足すと成分がインラインの数を超えるので、セルに無い物質を作る規則をこの刻みは進めなかった(待たせた)
+//   RX_LIMIT_PRODUCTS: 生成物を全部足すと成分がインラインの数を超えるので、セルに無い物質を作る規則をこの刻みは進めなかった(待たせた)。
+//                      上限の無いセルの形(RxWideCell。T-0175)では立たない
 //   RX_LIMIT_CANDIDATES: 進む規則が RX_MAX_CANDIDATES を超えたので、刻みごとの乱数で RX_MAX_CANDIDATES 個を選んで進めた
 //                        (選ばれなかった規則はこの刻みは進まない。並びや ID に偏らない)
 // 仮(ユーザー未確認。QUESTIONS Q19): 上限に当たった時のふるまい
@@ -128,8 +136,35 @@ FX_FN RxCell RxMakeEmptyCell(int64_t energy) {
     return cell;
 }
 
+// --- セルの形ごとの道具(T-0175。RxWideCell の版は engine/src/sim/reaction_wide_cell.h に同じ名前で)---
+// 核は Cell 型の引数からこれらを呼ぶ。RxCell の版はインラインの数で止まり、何も伸ばさない(GPU のコードは前と同じ)
+
+#ifdef __cplusplus
+#define RX_UNUSED(x) (void)(x)
+#else
+#define RX_UNUSED(x)
+#endif
+
+// 成分をもう 1 つ増やせるか(RxCell はインラインの数まで)
+FX_FN bool RxHasRoomForSpecies(RxCell cell) {
+    return cell.speciesCount < RX_MAX_CELL_SPECIES;
+}
+
+// 書く前に、成分の数 + 1 個ぶんの場所を用意する(RxCell は初めからインラインの数だけあるので、そのまま)
+FX_FN RxCell RxCellWithRoom(RxCell cell) {
+    return cell;
+}
+
+// 同じ形の空のセル
+FX_FN RxCell RxEmptyCellLike(RxCell cell, int64_t energy) {
+    RX_UNUSED(cell);
+
+    return RxMakeEmptyCell(energy);
+}
+
 // 物質 ID の位置(無ければ RX_NO_SLOT)
-FX_FN uint32_t RxFindSlot(RxCell cell, uint32_t speciesId) {
+template <typename Cell>
+FX_FN uint32_t RxFindSlot(Cell cell, uint32_t speciesId) {
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
         if (cell.species[i] == speciesId)
             return i;
@@ -160,8 +195,8 @@ FX_FN uint64_t RxShiftRightLow64(FxU128 value, uint32_t shift) {
 // --- 熱と温度 ----------------------------------------------------------------------------------
 
 // 化学のエネルギー(µJ)= Σ 物質量 × H0
-template <typename Table>
-FX_FN int64_t RxChemicalEnergy(Table table, RxCell cell) {
+template <typename Table, typename Cell>
+FX_FN int64_t RxChemicalEnergy(Table table, Cell cell) {
     int64_t chemical = 0;
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
         const int64_t term = RxMulS64Checked((int64_t)cell.amounts[i], table.Species(cell.species[i]).h0);
@@ -173,8 +208,8 @@ FX_FN int64_t RxChemicalEnergy(Table table, RxCell cell) {
 }
 
 // 熱容量(nJ/K)= Σ 物質量 × 比熱
-template <typename Table>
-FX_FN uint64_t RxHeatCapacity(Table table, RxCell cell) {
+template <typename Table, typename Cell>
+FX_FN uint64_t RxHeatCapacity(Table table, Cell cell) {
     uint64_t heatCapacity = 0;
     for (uint32_t i = 0; i < cell.speciesCount; ++i)
         heatCapacity += cell.amounts[i] * (uint64_t)table.Species(cell.species[i]).heatCapacity;
@@ -182,8 +217,8 @@ FX_FN uint64_t RxHeatCapacity(Table table, RxCell cell) {
     return heatCapacity;
 }
 
-template <typename Table>
-FX_FN RxThermal RxComputeThermal(Table table, RxCell cell) {
+template <typename Table, typename Cell>
+FX_FN RxThermal RxComputeThermal(Table table, Cell cell) {
     const int64_t chemical = RxChemicalEnergy(table, cell);
     const uint64_t heatCapacity = RxHeatCapacity(table, cell);
 
@@ -375,8 +410,8 @@ struct RxRuleRate {
     uint64_t ownLimit;
 };
 
-template <typename Table>
-FX_FN RxRuleRate RxComputeRuleRate(Table table, RxCell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin) {
+template <typename Table, typename Cell>
+FX_FN RxRuleRate RxComputeRuleRate(Table table, Cell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin) {
     RxRuleRate result;
     result.rate = RxMakeRate(0, 0);
     result.ownLimit = 0;
@@ -413,8 +448,8 @@ struct RxWaitSample {
     uint64_t wait;
 };
 
-template <typename Table>
-FX_FN RxWaitSample RxDesiredExtentWait(Table table, RxCell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin,
+template <typename Table, typename Cell>
+FX_FN RxWaitSample RxDesiredExtentWait(Table table, Cell cell, uint32_t ruleId, RxRule rule, uint32_t kelvin,
                                        uint64_t waitSeed, uint64_t elapsed) {
     const RxRuleRate ruleRate = RxComputeRuleRate(table, cell, ruleId, rule, kelvin);
     RxWaitSample sample;
@@ -474,8 +509,8 @@ FX_FN RxCandidates RxReplaceLastCandidate(Table table, RxCandidates candidates, 
     return candidates;
 }
 
-template <typename Table>
-FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, RxCell cell, uint32_t kelvin, uint64_t waitSeed,
+template <typename Table, typename Cell>
+FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, Cell cell, uint32_t kelvin, uint64_t waitSeed,
                                                uint64_t elapsed, uint64_t selectSeed) {
     RxWaitCandidates result;
     result.wait = RX_WAIT_NEVER;
@@ -513,14 +548,16 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, RxCell cell, uint32_
 
 // --- 取り合いの解決(02 §3 の 3。並び順に依存しない)------------------------------------------------
 
-// 規則の候補が使う量の合計(反応物は必ずセルにあるので、成分の位置で持つ)と、吸熱の規則が使う熱
+// 規則の候補が使う量の合計(反応物は必ずセルにあるので、成分の位置で持つ)と、吸熱の規則が使う熱。
+// セルの形ごとに型が違う(RxWideCell は RxWideUsage)ので、核は RxEmptyUsage(cell) で作ったものを引数で受け取って型を決める
 struct RxUsage {
     uint64_t amounts[RX_MAX_CELL_SPECIES];
     uint64_t heat;
 };
 
-template <typename Table>
-FX_FN RxUsage RxSumUsage(Table table, RxCell cell, RxCandidates candidates) {
+// 0 の使う量(セルの形の道具。RxCell はインラインの数だけ)
+FX_FN RxUsage RxEmptyUsage(RxCell cell) {
+    RX_UNUSED(cell);
     RxUsage usage;
     // HLSL には範囲 for が無い
     // NOLINTNEXTLINE(modernize-loop-convert)
@@ -528,6 +565,13 @@ FX_FN RxUsage RxSumUsage(Table table, RxCell cell, RxCandidates candidates) {
         usage.amounts[i] = 0;
 
     usage.heat = 0;
+
+    return usage;
+}
+
+// 候補が使う量を usage(RxEmptyUsage(cell) の 0 から)に足す
+template <typename Table, typename Cell, typename Usage>
+FX_FN Usage RxSumUsage(Table table, Cell cell, RxCandidates candidates, Usage usage) {
     for (uint32_t c = 0; c < candidates.count; ++c) {
         const RxRule rule = table.Rule(candidates.rules[c]);
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
@@ -576,7 +620,8 @@ FX_FN RxShrunk RxShrink(uint64_t extent, uint64_t available, uint64_t demand, ui
 }
 
 // 規則が、ある量を超えて使われている資源(物質か、吸熱なら熱)を使うか
-FX_FN bool RxOverdraws(RxRule rule, RxCell cell, RxUsage used, uint64_t heatAvailable) {
+template <typename Cell, typename Usage>
+FX_FN bool RxOverdraws(RxRule rule, Cell cell, Usage used, uint64_t heatAvailable) {
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
         const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
         if (used.amounts[slot] > cell.amounts[slot])
@@ -588,11 +633,11 @@ FX_FN bool RxOverdraws(RxRule rule, RxCell cell, RxUsage used, uint64_t heatAvai
 
 // 丸め上げた規則(roundedUp のビット)のせいで足りなくなった資源があれば、その資源を使う丸め上げた規則のうち
 // 進行度が最も大きいもの(同じなら鍵が小さいもの)から 1 つずつ丸め上げを戻す。大きい規則ほど 1 の差の割合が小さいので、
-// 偏りは主な反応に寄せ、脇の反応の期待値は崩さない。切り捨ての値は必ずある量以下なので、全部戻せば必ず足りる
-template <typename Table>
-FX_FN RxCandidates RxRevokeRoundUps(Table table, RxCell cell, RxCandidates resolved, uint32_t roundedUp,
-                                    uint64_t heatAvailable) {
-    RxUsage used = RxSumUsage(table, cell, resolved);
+// 偏りは主な反応に寄せ、脇の反応の期待値は崩さない。切り捨ての値は必ずある量以下なので、全部戻せば必ず足りる。
+// used = resolved の使う量(RxSumUsage。型をセルの形に合わせるため引数で受け取る)
+template <typename Table, typename Cell, typename Usage>
+FX_FN RxCandidates RxRevokeRoundUps(Table table, Cell cell, RxCandidates resolved, uint32_t roundedUp,
+                                    uint64_t heatAvailable, Usage used) {
     for (uint32_t step = 0; step < RX_MAX_CANDIDATES && roundedUp != 0; ++step) {
         uint32_t pick = RX_NO_SLOT;
         uint64_t pickKey = 0;
@@ -615,7 +660,7 @@ FX_FN RxCandidates RxRevokeRoundUps(Table table, RxCell cell, RxCandidates resol
 
         resolved.extents[pick] -= 1;
         roundedUp &= ~(1u << pick);
-        used = RxSumUsage(table, cell, resolved);
+        used = RxSumUsage(table, cell, resolved, RxEmptyUsage(cell));
     }
 
     return resolved;
@@ -625,10 +670,10 @@ FX_FN RxCandidates RxRevokeRoundUps(Table table, RxCell cell, RxCandidates resol
 // 吸熱の規則は熱(の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)も資源として同じく縮める(熱が負にならない)。どの規則も元の進行度に同じ比を掛けるので、並び順は結果に影響しない。
 // 縮めた値は確率的に丸める(規則ごとに 1 つの乱数を、足りない資源のどれにも使う。丸めは単調なので、資源ごとに丸めた最小 = 比の最小を丸めた値)。
 // 丸め上げで足りなくなった資源があれば RxRevokeRoundUps が戻すので、縮めた後の消費の合計は必ずある量以下
-template <typename Table>
-FX_FN RxCandidates RxResolveContention(Table table, RxCell cell, RxThermal thermal, RxCandidates candidates,
-                                       uint64_t randomSeed) {
-    const RxUsage demand = RxSumUsage(table, cell, candidates);
+// demand = 候補の使う量の合計(RxSumUsage。型をセルの形に合わせるため引数で受け取る)
+template <typename Table, typename Cell, typename Usage>
+FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, RxCandidates candidates,
+                                    uint64_t randomSeed, Usage demand) {
     const uint64_t heatAvailable = thermal.heat > 0 ? (uint64_t)thermal.heat >> RX_ENDOTHERMIC_HEAT_SHIFT : (uint64_t)0;
 
     // --- 縮める(元の進行度から、足りない資源ごとの比の最小)---
@@ -663,18 +708,28 @@ FX_FN RxCandidates RxResolveContention(Table table, RxCell cell, RxThermal therm
     if (roundedUp == 0)
         return resolved;
 
-    return RxRevokeRoundUps(table, cell, resolved, roundedUp, heatAvailable);
+    return RxRevokeRoundUps(table, cell, resolved, roundedUp, heatAvailable,
+                            RxSumUsage(table, cell, resolved, RxEmptyUsage(cell)));
+}
+
+template <typename Table, typename Cell>
+FX_FN RxCandidates RxResolveContention(Table table, Cell cell, RxThermal thermal, RxCandidates candidates,
+                                       uint64_t randomSeed) {
+    return RxShrinkToDemand(table, cell, thermal, candidates, randomSeed,
+                            RxSumUsage(table, cell, candidates, RxEmptyUsage(cell)));
 }
 
 // --- 成分を更新する ----------------------------------------------------------------------------
 
 // 物質量が 0 になった成分を消して詰める(並びは保つ)
-FX_FN RxCell RxCompactCell(RxCell cell) {
-    RxCell result = RxMakeEmptyCell(cell.energy);
+template <typename Cell>
+FX_FN Cell RxCompactCell(Cell cell) {
+    Cell result = RxEmptyCellLike(cell, cell.energy);
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
         if (cell.amounts[i] == 0)
             continue;
 
+        result = RxCellWithRoom(result);
         result.species[result.speciesCount] = cell.species[i];
         result.amounts[result.speciesCount] = cell.amounts[i];
         result.speciesCount += 1;
@@ -683,15 +738,19 @@ FX_FN RxCell RxCompactCell(RxCell cell) {
     return result;
 }
 
-// 物質を足した結果。overflowed = 成分がインラインの数を超えるので足せなかった(cell は足す前のまま)
-struct RxAdded {
-    RxCell cell;
+// 物質を足した結果。overflowed = 成分がインラインの数を超えるので足せなかった(cell は足す前のまま。RxWideCell では立たない)
+template <typename Cell>
+struct RxAddedOf {
+    Cell cell;
     uint32_t overflowed;
 };
 
+typedef RxAddedOf<RxCell> RxAdded;
+
 // 物質を足す(無ければ ID の順の位置に差し込む)。入りきらなければ足さずに overflowed を立てる(呼ぶ側が保存を守る)
-FX_FN RxAdded RxTryAddSpecies(RxCell cell, uint32_t speciesId, uint64_t amount) {
-    RxAdded added;
+template <typename Cell>
+FX_FN RxAddedOf<Cell> RxTryAddSpecies(Cell cell, uint32_t speciesId, uint64_t amount) {
+    RxAddedOf<Cell> added;
     added.cell = cell;
     added.overflowed = 0;
     if (amount == 0)
@@ -707,11 +766,12 @@ FX_FN RxAdded RxTryAddSpecies(RxCell cell, uint32_t speciesId, uint64_t amount) 
         return added;
     }
 
-    if (cell.speciesCount >= RX_MAX_CELL_SPECIES) {
+    if (!RxHasRoomForSpecies(cell)) {
         added.overflowed = 1;
         return added;
     }
 
+    added.cell = RxCellWithRoom(cell);
     for (uint32_t i = cell.speciesCount; i > position; --i) {
         added.cell.species[i] = cell.species[i - 1];
         added.cell.amounts[i] = cell.amounts[i - 1];
@@ -726,8 +786,9 @@ FX_FN RxAdded RxTryAddSpecies(RxCell cell, uint32_t speciesId, uint64_t amount) 
 
 // 物質を足す。呼ぶ側が入りきることを保証する所だけで使う(初めのセル・畳んだ値〔成分は 8 つまで〕・影の引き戻し〔親の成分だけ〕)。
 // 反応の生成物は RxApplyExtents が入りきるかを確かめてから足す(T-0022)
-FX_FN RxCell RxAddSpecies(RxCell cell, uint32_t speciesId, uint64_t amount) {
-    const RxAdded added = RxTryAddSpecies(cell, speciesId, amount);
+template <typename Cell>
+FX_FN Cell RxAddSpecies(Cell cell, uint32_t speciesId, uint64_t amount) {
+    const RxAddedOf<Cell> added = RxTryAddSpecies(cell, speciesId, amount);
     FX_ASSERT(added.overflowed == 0);
 
     return added.cell;
@@ -735,8 +796,8 @@ FX_FN RxCell RxAddSpecies(RxCell cell, uint32_t speciesId, uint64_t amount) {
 
 // 決まった進行度で反応物を引き、生成物を足す。エネルギーは変えない(化学のエネルギーが熱に変わるだけ)。
 // 生成物が入りきらなければ overflowed を立てる(その時の cell は使わない。RxApplyExtentsHeld が規則を待たせてやり直す)
-template <typename Table>
-FX_FN RxAdded RxApplyExtentsChecked(Table table, RxCell cell, RxCandidates resolved) {
+template <typename Table, typename Cell>
+FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates resolved) {
     // --- 反応物を引く(差し込みで位置がずれる前に)---
     for (uint32_t c = 0; c < resolved.count; ++c) {
         const RxRule rule = table.Rule(resolved.rules[c]);
@@ -749,14 +810,14 @@ FX_FN RxAdded RxApplyExtentsChecked(Table table, RxCell cell, RxCandidates resol
     }
 
     // --- 生成物を足す ---
-    RxAdded result;
+    RxAddedOf<Cell> result;
     result.cell = RxCompactCell(cell);
     result.overflowed = 0;
     for (uint32_t c = 0; c < resolved.count; ++c) {
         const RxRule rule = table.Rule(resolved.rules[c]);
         for (uint32_t i = 0; i < rule.productCount; ++i) {
             const uint64_t amount = resolved.extents[c] * (uint64_t)rule.productCoefficients[i];
-            const RxAdded added = RxTryAddSpecies(result.cell, rule.products[i], amount);
+            const RxAddedOf<Cell> added = RxTryAddSpecies(result.cell, rule.products[i], amount);
             result.cell = added.cell;
             result.overflowed |= added.overflowed;
         }
@@ -767,8 +828,8 @@ FX_FN RxAdded RxApplyExtentsChecked(Table table, RxCell cell, RxCandidates resol
 
 // セル cell に無い物質を作る規則の進行度を 0 にする(この刻みは進めない)。ほかの規則の生成物はどれも cell にある物質なので、
 // 反応物が使い切られて消えても足し直す位置があり、成分の数は cell の数を超えない(= 必ず入りきる)
-template <typename Table>
-FX_FN RxCandidates RxHoldNewSpeciesRules(Table table, RxCell cell, RxCandidates resolved) {
+template <typename Table, typename Cell>
+FX_FN RxCandidates RxHoldNewSpeciesRules(Table table, Cell cell, RxCandidates resolved) {
     for (uint32_t c = 0; c < resolved.count; ++c) {
         const RxRule rule = table.Rule(resolved.rules[c]);
         bool makesNew = false;
@@ -785,10 +846,10 @@ FX_FN RxCandidates RxHoldNewSpeciesRules(Table table, RxCell cell, RxCandidates 
 // 反応物を引き、生成物を足す。生成物が入りきらなければ、セルに無い物質を作る規則をこの刻みは待たせて(進行度 0)やり直す
 // (T-0022。前は 9 種目の生成物を黙って捨て、反応物は引いてあったので元素とエネルギーの保存が破れた)。
 // 待たせた規則の取り合いの分け前はほかの規則に回さない(使う量が減るだけなので、ある量を超えない)。overflowed = 待たせた
-template <typename Table>
-FX_FN RxAdded RxApplyExtentsHeld(Table table, RxCell cell, RxCandidates resolved) {
+template <typename Table, typename Cell>
+FX_FN RxAddedOf<Cell> RxApplyExtentsHeld(Table table, Cell cell, RxCandidates resolved) {
     RxCandidates applying = resolved;
-    RxAdded applied;
+    RxAddedOf<Cell> applied;
     applied.cell = cell;
     applied.overflowed = 0;
     uint32_t held = 0;
@@ -822,12 +883,15 @@ FX_FN uint64_t RxSelectSeed(uint64_t worldSeed, uint64_t tick, uint64_t cellId) 
 // 1 刻みの結果: 新しいセル、その熱、変わらなければ次に評価が要る刻み(wakeTick。進めないなら RX_WAIT_NEVER)。
 // 刻み tick ≤ t < wakeTick の間にこのセルを評価しても(ブロックが変わらなければ)何も変わらないので、眠らせてよい。
 // limits = 上限に当たった印(RX_LIMIT_*。保存は守った上で、進め方を変えた)
-struct RxWaitStep {
-    RxCell cell;
+template <typename Cell>
+struct RxWaitStepOf {
+    Cell cell;
     RxThermal thermal;
     uint64_t wakeTick;
     uint32_t limits;
 };
+
+typedef RxWaitStepOf<RxCell> RxWaitStep;
 
 // 待ちの乱数の種は (世界のシード, ブロックが最後に変わった刻み, セルの ID) から作る。規則ごとの乱数は、これに規則の鍵を混ぜる
 FX_FN uint64_t RxWaitSeed(uint64_t worldSeed, uint64_t changedTick, uint64_t cellId) {
@@ -847,11 +911,11 @@ FX_FN uint64_t RxWakeTickOf(uint64_t changedTick, uint64_t wait) {
 
 // 刻み tick のセルを評価する。changedTick = セルのブロックが最後に変わった刻み(tick より前。刻みの初めに読んだ値)。
 // 取り合いの丸めは今までどおり刻みの乱数(取り合うのは進む規則があるセル = 起きているセルだけ)
-template <typename Table>
-FX_FN RxWaitStep RxStepCellWait(Table table, RxCell cell, uint64_t worldSeed, uint64_t tick, uint64_t changedTick,
-                                uint64_t cellId) {
+template <typename Table, typename Cell>
+FX_FN RxWaitStepOf<Cell> RxStepCellWait(Table table, Cell cell, uint64_t worldSeed, uint64_t tick, uint64_t changedTick,
+                                        uint64_t cellId) {
     FX_ASSERT(changedTick < tick);
-    RxWaitStep step;
+    RxWaitStepOf<Cell> step;
     step.cell = cell;
     step.thermal = RxComputeThermal(table, cell);
     step.limits = 0;
@@ -873,7 +937,7 @@ FX_FN RxWaitStep RxStepCellWait(Table table, RxCell cell, uint64_t worldSeed, ui
     // --- 進む規則がある: 変わればブロックの changedTick が tick になる。変わらなくても次の刻みにまた評価する ---
     const RxCandidates resolved = RxResolveContention(table, cell, step.thermal, collected.candidates,
                                                       RxRandomSeed(worldSeed, tick, cellId));
-    const RxAdded applied = RxApplyExtentsHeld(table, cell, resolved);
+    const RxAddedOf<Cell> applied = RxApplyExtentsHeld(table, cell, resolved);
     step.cell = applied.cell;
     step.limits |= applied.overflowed != 0 ? RX_LIMIT_PRODUCTS : 0u;
     step.thermal = RxComputeThermal(table, step.cell);

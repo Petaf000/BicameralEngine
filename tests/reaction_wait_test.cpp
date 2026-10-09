@@ -397,8 +397,11 @@ namespace {
                 wokeLate = wokeLate || sleeping.wake[block] <= tick;
             }
 
+            const auto hashCell = [](const RxCell& cell) {
+                return HashReactionCell(cell);
+            };
             const bool equal = full.changed == sleeping.changed &&
-                               std::ranges::equal(full.cells, sleeping.cells, {}, HashReactionCell, HashReactionCell);
+                               std::ranges::equal(full.cells, sleeping.cells, {}, hashCell, hashCell);
             if (!equal && same)
                 firstMismatch = tick;
 

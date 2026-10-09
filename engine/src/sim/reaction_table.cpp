@@ -407,48 +407,81 @@ namespace bicameral::sim {
 
     // --- セル ---
 
+    namespace {
+
+        // 成分を足して温度からエネルギーを決める(Cell = RxCell か RxWideCell。cell は空のセル)
+        template <typename Cell>
+        Cell FillReactionCell(const BakedReactionTable& table, Cell cell, std::span<const SpeciesAmount> amounts,
+                              int32_t temperatureMilliKelvin) {
+            for (const SpeciesAmount& entry : amounts)
+                cell = RxAddSpecies(cell, entry.species, entry.amount);
+
+            // 熱(µJ)= 熱容量(nJ/K)× 温度(mK)÷ 1e6
+            const int64_t chemical = RxChemicalEnergy(table.View(), cell);
+            const uint64_t heatCapacity = RxHeatCapacity(table.View(), cell);
+            const FxU128 product = FxMulU64Full(heatCapacity, static_cast<uint64_t>(temperatureMilliKelvin));
+            const auto heat = static_cast<int64_t>(FxDivU128By64(product, RX_MILLIKELVIN_NUMERATOR).quotient);
+
+            // mJ に切り上げる(C++ の割り算は 0 方向なので、負の数はそのまま切り上げになる)
+            const int64_t total = chemical + heat;
+            const auto perMillijoule = static_cast<int64_t>(RX_MICROJOULES_PER_MILLIJOULE);
+            cell.energy = total >= 0 ? (total + perMillijoule - 1) / perMillijoule : total / perMillijoule;
+
+            return cell;
+        }
+
+        template <typename Cell>
+        std::vector<uint64_t> CountCellElements(const BakedReactionTable& table, const Cell& cell) {
+            const size_t elementCount = table.elementNames.size();
+            std::vector<uint64_t> counts(elementCount, 0);
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                for (size_t element = 0; element < elementCount; ++element) {
+                    const uint32_t perSpecies = table.speciesElements[(cell.species[i] * elementCount) + element];
+                    counts[element] += cell.amounts[i] * perSpecies;
+                }
+            }
+
+            return counts;
+        }
+
+        template <typename Cell>
+        uint64_t HashCell(const Cell& cell) {
+            uint64_t hash = FxHashCombine(0, static_cast<uint64_t>(cell.energy));
+            hash = FxHashCombine(hash, cell.speciesCount);
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                hash = FxHashCombine(hash, cell.species[i]);
+                hash = FxHashCombine(hash, cell.amounts[i]);
+            }
+
+            return hash;
+        }
+
+    }  // namespace
+
     RxCell MakeReactionCell(const BakedReactionTable& table, std::span<const SpeciesAmount> amounts,
                             int32_t temperatureMilliKelvin) {
-        RxCell cell = RxMakeEmptyCell(0);
-        for (const SpeciesAmount& entry : amounts)
-            cell = RxAddSpecies(cell, entry.species, entry.amount);
+        return FillReactionCell(table, RxMakeEmptyCell(0), amounts, temperatureMilliKelvin);
+    }
 
-        // 熱(µJ)= 熱容量(nJ/K)× 温度(mK)÷ 1e6
-        const int64_t chemical = RxChemicalEnergy(table.View(), cell);
-        const uint64_t heatCapacity = RxHeatCapacity(table.View(), cell);
-        const FxU128 product = FxMulU64Full(heatCapacity, static_cast<uint64_t>(temperatureMilliKelvin));
-        const auto heat = static_cast<int64_t>(FxDivU128By64(product, RX_MILLIKELVIN_NUMERATOR).quotient);
-
-        // mJ に切り上げる(C++ の割り算は 0 方向なので、負の数はそのまま切り上げになる)
-        const int64_t total = chemical + heat;
-        const auto perMillijoule = static_cast<int64_t>(RX_MICROJOULES_PER_MILLIJOULE);
-        cell.energy = total >= 0 ? (total + perMillijoule - 1) / perMillijoule : total / perMillijoule;
-
-        return cell;
+    RxWideCell MakeWideReactionCell(const BakedReactionTable& table, std::span<const SpeciesAmount> amounts,
+                                    int32_t temperatureMilliKelvin) {
+        return FillReactionCell(table, RxMakeEmptyWideCell(0), amounts, temperatureMilliKelvin);
     }
 
     std::vector<uint64_t> CountElements(const BakedReactionTable& table, const RxCell& cell) {
-        const size_t elementCount = table.elementNames.size();
-        std::vector<uint64_t> counts(elementCount, 0);
-        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-            for (size_t element = 0; element < elementCount; ++element) {
-                const uint32_t perSpecies = table.speciesElements[(cell.species[i] * elementCount) + element];
-                counts[element] += cell.amounts[i] * perSpecies;
-            }
-        }
+        return CountCellElements(table, cell);
+    }
 
-        return counts;
+    std::vector<uint64_t> CountElements(const BakedReactionTable& table, const RxWideCell& cell) {
+        return CountCellElements(table, cell);
     }
 
     uint64_t HashReactionCell(const RxCell& cell) {
-        uint64_t hash = FxHashCombine(0, static_cast<uint64_t>(cell.energy));
-        hash = FxHashCombine(hash, cell.speciesCount);
-        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-            hash = FxHashCombine(hash, cell.species[i]);
-            hash = FxHashCombine(hash, cell.amounts[i]);
-        }
+        return HashCell(cell);
+    }
 
-        return hash;
+    uint64_t HashReactionCell(const RxWideCell& cell) {
+        return HashCell(cell);
     }
 
     RxLoneCell AdvanceLoneReactionCell(const BakedReactionTable& table, const RxLoneCell& lone, uint64_t worldSeed,
@@ -458,6 +491,11 @@ namespace bicameral::sim {
 
     RxWaitStep StepReactionCellWait(const BakedReactionTable& table, const RxCell& cell, uint64_t worldSeed,
                                     uint64_t tick, uint64_t changedTick, uint64_t cellId) {
+        return RxStepCellWait(table.View(), cell, worldSeed, tick, changedTick, cellId);
+    }
+
+    RxWideWaitStep StepReactionCellWait(const BakedReactionTable& table, const RxWideCell& cell, uint64_t worldSeed,
+                                        uint64_t tick, uint64_t changedTick, uint64_t cellId) {
         return RxStepCellWait(table.View(), cell, worldSeed, tick, changedTick, cellId);
     }
 

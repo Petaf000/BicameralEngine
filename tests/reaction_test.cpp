@@ -5,6 +5,8 @@
 //   - 規則の並びを入れ替えても結果が同じ / 1 刻みの進行度が 1 未満の遅い反応が、待ちの丸めで期待どおりに進む
 //   - 上限に当たる場面(tests/reaction_limits_table.h。T-0022): 9 種目の生成物を作る規則は待ち、進む規則が 17 個以上でも
 //     捨てずに刻みごとに選ぶ。どちらも毎刻み元素とエネルギーがビット単位で保存される
+//   - 成分の数に上限が無いセル(RxWideCell。T-0175): 同じ場面で 9 種目の生成物を待たずに作り、16 種以上のセルも進む(保存はビット単位)。
+//     成分が 8 種以下の間は、インラインのセル(RxCell)と毎刻みビット一致する
 //   セルは 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める(初めの状態 = 刻み 0 に変わった。刻みは 1 から)。
 //   待ちの丸めそのものの試験は reaction_wait_test。今までの丸めと D-424 の下限の試験は T-0130 で消した
 #include <cmath>
@@ -300,8 +302,162 @@ namespace {
         Expect(ninthMade == CELLS / 2, "枠が空いた後に 9 種目の生成物ができない");
     }
 
+    // 1 セルだけのブロックを、上限の無いセルで 1 刻み進める(RxAdvanceLoneCell と同じ: 変わった刻みを changedTick に)
+    struct WideLone {
+        RxWideCell cell;
+        uint64_t changedTick = 0;
+        uint32_t limits = 0;  // この刻みの RX_LIMIT_*
+    };
+
+    WideLone StepWideLone(const BakedReactionTable& table, WideLone lone, uint64_t tick, uint64_t cellId) {
+        const RxWideWaitStep step = StepReactionCellWait(table, lone.cell, test::REACTION_TEST_SEED, tick,
+                                                         lone.changedTick, cellId);
+        if (!RxSameCell(step.cell, lone.cell))
+            lone.changedTick = tick;
+
+        lone.cell = step.cell;
+        lone.limits = step.limits;
+
+        return lone;
+    }
+
+    // 成分が昇順で 0 が無いか(RxWideCell の約束)
+    bool IsOrderedCell(const RxWideCell& cell) {
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            if (cell.amounts[i] == 0 || (i > 0 && cell.species[i - 1] >= cell.species[i]))
+                return false;
+        }
+
+        return true;
+    }
+
+    // 上限の場面を上限の無いセルで: 入りきらないセル(奇数)は 9 種目を待たずに作る。込み合うセル(偶数)は 8 種のままなので
+    // インラインのセルと毎刻みビット一致する(候補の上限 16 はまだある = 選ぶ印は同じに立つ。T-0164)
+    void TestWideLimits() {
+        constexpr uint32_t CELLS = 64;
+        constexpr uint32_t TICKS = 400;
+        const BakedReactionTable table = BakeLimitsTable();
+        const uint32_t ninth = table.SpeciesId(test::LimitsHeldName(9));
+        bool conserved = true;
+        bool ordered = true;
+        bool productsHeld = false;
+        uint32_t crowdSame = 0;
+        uint32_t ninthAtOnce = 0;
+        for (uint32_t index = 0; index < CELLS; ++index) {
+            const RxCell initial = test::MakeLimitsCell(table, index);
+            const std::vector<uint64_t> elements = CountElements(table, initial);
+            RxLoneCell narrow = RxMakeLoneCell(initial, 0);
+            WideLone wide{.cell = RxWidenCell(initial), .changedTick = 0, .limits = 0};
+            bool same = true;
+            uint32_t maxSpecies = 0;
+            for (uint32_t tick = 1; tick <= TICKS; ++tick) {
+                wide = StepWideLone(table, wide, tick, index);
+                conserved = conserved && CountElements(table, wide.cell) == elements &&
+                            wide.cell.energy == initial.energy && RxComputeThermal(table.View(), wide.cell).heat >= 0;
+                ordered = ordered && IsOrderedCell(wide.cell);
+                productsHeld = productsHeld || (wide.limits & RX_LIMIT_PRODUCTS) != 0;
+                maxSpecies = wide.cell.speciesCount > maxSpecies ? wide.cell.speciesCount : maxSpecies;
+                if (index % 2 != 0)
+                    continue;
+
+                narrow = AdvanceLoneReactionCell(table, narrow, test::REACTION_TEST_SEED, tick, 1, index);
+                same = same && RxFitsInline(wide.cell) && RxSameCell(RxNarrowCell(wide.cell), narrow.cell) &&
+                       wide.changedTick == narrow.changedTick && (wide.limits & RX_LIMIT_CANDIDATES) != 0 &&
+                       narrow.candidatesLimitTicks == tick;
+            }
+
+            if (index % 2 == 0) {
+                crowdSame += same ? 1u : 0u;
+                continue;
+            }
+
+            // 9 種目は 1 刻み目から作られ始める(q08 を使い切る前 = 9 種が並ぶ刻みがある)
+            ninthAtOnce += maxSpecies == test::LIMITS_HELD_SPECIES && RxFindSlot(wide.cell, ninth) != RX_NO_SLOT ? 1u
+                                                                                                                 : 0u;
+        }
+
+        Log(Channel::Reaction, Level::Info,
+            "  上限の無いセル: 込み合う {}/{} がインラインと毎刻み一致、入りきらない {}/{} が待たずに 9 種目を作った",
+            crowdSame, CELLS / 2, ninthAtOnce, CELLS / 2);
+        Expect(conserved, "上限の無いセルで元素かエネルギーが保存されない");
+        Expect(ordered, "上限の無いセルの成分が昇順でないか、0 の成分が残った");
+        Expect(!productsHeld, "上限の無いセルで生成物を待たせた(RX_LIMIT_PRODUCTS)");
+        Expect(crowdSame == CELLS / 2, "8 種以下の上限の無いセルが、インラインのセルと毎刻み一致しない");
+        Expect(ninthAtOnce == CELLS / 2, "上限の無いセルで 9 種目の生成物が待たずにできない");
+    }
+
+    // 16 種(p01〜p08 + q01〜q08)を 1 セルに混ぜる: 進んで 17 種になり、保存はビット単位。候補の上限(16)は選んで進める
+    void TestWideCrowdedCell() {
+        constexpr uint32_t CELLS = 16;
+        constexpr uint32_t TICKS = 400;
+        const BakedReactionTable table = BakeLimitsTable();
+        bool conserved = true;
+        bool ordered = true;
+        uint32_t reached = 0;
+        uint64_t changed = 0;
+        for (uint32_t index = 0; index < CELLS; ++index) {
+            std::vector<SpeciesAmount> amounts;
+            for (uint32_t i = 1; i < test::LIMITS_HELD_SPECIES; ++i) {
+                const uint64_t amount = 1000000 +
+                                        fx::FxRandomBelow(fx::FxHash64(test::REACTION_TEST_SEED, index, i, 5), 1000000);
+                amounts.push_back({.species = table.SpeciesId(test::LimitsCrowdName(i)), .amount = amount});
+                amounts.push_back({.species = table.SpeciesId(test::LimitsHeldName(i)), .amount = amount / 2});
+            }
+
+            const RxWideCell initial = MakeWideReactionCell(table, amounts, test::LIMITS_TEMPERATURE_MILLIKELVIN);
+            const std::vector<uint64_t> elements = CountElements(table, initial);
+            WideLone wide{.cell = initial, .changedTick = 0, .limits = 0};
+            uint32_t maxSpecies = 0;
+            for (uint32_t tick = 1; tick <= TICKS; ++tick) {
+                wide = StepWideLone(table, wide, tick, index);
+                conserved = conserved && CountElements(table, wide.cell) == elements &&
+                            wide.cell.energy == initial.energy && RxComputeThermal(table.View(), wide.cell).heat >= 0;
+                ordered = ordered && IsOrderedCell(wide.cell);
+                maxSpecies = wide.cell.speciesCount > maxSpecies ? wide.cell.speciesCount : maxSpecies;
+            }
+
+            reached += initial.speciesCount == 16 && maxSpecies == 17 ? 1u : 0u;
+            changed += wide.changedTick;
+        }
+
+        Log(Channel::Reaction, Level::Info,
+            "  上限の無いセル: 16 種のセル {}/{} が 17 種まで進んだ(最後に変わった刻みの平均 {})", reached, CELLS,
+            changed / CELLS);
+        Expect(conserved, "16 種のセルで元素かエネルギーが保存されない");
+        Expect(ordered, "16 種のセルの成分が昇順でないか、0 の成分が残った");
+        Expect(reached == CELLS, "16 種のセルが 17 種まで進まない");
+    }
+
+    // 試験の表(燃焼)のいろいろなセルを、インラインと上限の無いセルで同じに進める(8 種以下なら毎刻みビット一致)
+    void TestWideMatchesInline(const BakedReactionTable& table) {
+        constexpr uint32_t CELLS = 512;
+        constexpr uint32_t TICKS = 200;
+        uint32_t same = 0;
+        for (uint32_t index = 0; index < CELLS; ++index) {
+            const RxCell initial = test::MakeVariedReactionCell(table, index);
+            RxLoneCell narrow = RxMakeLoneCell(initial, 0);
+            WideLone wide{.cell = RxWidenCell(initial), .changedTick = 0, .limits = 0};
+            bool matches = true;
+            for (uint32_t tick = 1; tick <= TICKS; ++tick) {
+                narrow = AdvanceLoneReactionCell(table, narrow, test::REACTION_TEST_SEED, tick, 1, index);
+                wide = StepWideLone(table, wide, tick, index);
+                matches = matches && RxFitsInline(wide.cell) && RxSameCell(RxNarrowCell(wide.cell), narrow.cell) &&
+                          HashReactionCell(wide.cell) == HashReactionCell(narrow.cell) &&
+                          wide.changedTick == narrow.changedTick;
+            }
+
+            same += matches ? 1u : 0u;
+        }
+
+        Log(Channel::Reaction, Level::Info,
+            "  上限の無いセル: 燃焼のいろいろなセル {}/{} がインラインと {} 刻み毎刻み一致", same, CELLS, TICKS);
+        Expect(same == CELLS, "8 種以下の上限の無いセルが、インラインのセルと毎刻み一致しない(燃焼の表)");
+    }
+
     int Run() {
         TestLimits();
+        TestWideLimits();
+        TestWideCrowdedCell();
         TestBakeRejectsBrokenRules();
         const BakedReactionTable table = BakeTestTable();
         TestBakedValues(table);
@@ -310,6 +466,7 @@ namespace {
         TestEndothermicLimit(table);
         TestRuleOrderIndependence(table);
         TestSlowReaction(table);
+        TestWideMatchesInline(table);
         Log(Channel::Reaction, Level::Info, "いろいろなセル 4096 × 400 刻みの要約: {:016x}",
             RunVariedCells(table, 4096, 400));
 

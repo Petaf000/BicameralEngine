@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "common/reaction.hlsli"
+#include "sim/reaction_wide_cell.h"
 
 namespace bicameral::sim {
 
@@ -135,17 +136,30 @@ namespace bicameral::sim {
                                                     std::span<const SpeciesAmount> amounts,
                                                     int32_t temperatureMilliKelvin);
 
+    // 同じ値の、成分の数に上限が無いセル(T-0175。成分が RX_MAX_CELL_SPECIES を超えてよい)
+    [[nodiscard]] reaction::RxWideCell MakeWideReactionCell(const BakedReactionTable& table,
+                                                            std::span<const SpeciesAmount> amounts,
+                                                            int32_t temperatureMilliKelvin);
+
     // 元素ごとの数(µmol ぶんの原子の数。添字 = 元素)
     [[nodiscard]] std::vector<uint64_t> CountElements(const BakedReactionTable& table, const reaction::RxCell& cell);
+    [[nodiscard]] std::vector<uint64_t> CountElements(const BakedReactionTable& table,
+                                                      const reaction::RxWideCell& cell);
 
-    // セルの中身のハッシュ(エネルギーと成分。比べるため)
+    // セルの中身のハッシュ(エネルギーと成分。比べるため。成分が同じなら RxCell と RxWideCell で同じ値)
     [[nodiscard]] uint64_t HashReactionCell(const reaction::RxCell& cell);
+    [[nodiscard]] uint64_t HashReactionCell(const reaction::RxWideCell& cell);
 
     // CPU リファレンス: 1 セルの 1 刻み(待ちの丸め。T-0105・D-429)。changedTick = セルのブロックが最後に変わった刻み。
     // 変わらなければ次に評価が要る刻みも返す
     [[nodiscard]] reaction::RxWaitStep StepReactionCellWait(const BakedReactionTable& table,
                                                             const reaction::RxCell& cell, uint64_t worldSeed,
                                                             uint64_t tick, uint64_t changedTick, uint64_t cellId);
+
+    // 同じ、成分の数に上限が無いセルの版(T-0175。生成物を待たせない = RX_LIMIT_PRODUCTS は立たない)
+    [[nodiscard]] reaction::RxWideWaitStep StepReactionCellWait(const BakedReactionTable& table,
+                                                                const reaction::RxWideCell& cell, uint64_t worldSeed,
+                                                                uint64_t tick, uint64_t changedTick, uint64_t cellId);
 
     // CPU リファレンス: 1 セルだけのブロックを tickBegin から tickCount 刻み進める(shaders/sim/reaction_cells.hlsl と同じ関数。T-0130)
     [[nodiscard]] reaction::RxLoneCell AdvanceLoneReactionCell(const BakedReactionTable& table,

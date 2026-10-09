@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0163 成分の数と候補の数の分布・世界の刻みで上限の印を数える — 完了(二段の成分は T-0175・T-0176、仮の世界は T-0177 に分けた)
+最終更新: 2026-10-09 / チケット: T-0175 成分の二段(CPU リファレンス)— 完了(核と 1 セルまで。多重解像度の世界〔CPU〕は T-0187 に分けた)
 
 ## 状態(3 行以内)
-- 多重解像度の世界の刻みで、反応の上限に当たった (セル, 刻み) を数える(MR_COUNTER_LIMIT_PRODUCTS・_CANDIDATES)。CPU と HW・WARP で毎刻み同じ数(状態の要約に入る)。
-- 分布: 燃える木箱(物質 8・規則 5)は最大 6 種・進む規則は最大 4。試験の表では K を決められないので 8 のまま(打ち切り条件)。上限の当座のふるまいは仮のまま(Q19)。
-- t-0154・t-0157・t-0142 を合わせた main は release の全部 104 本が通過(直したものなし。gpu_multires の 20 本はこの変更を入れた後に流した)。
+- 反応の核(reaction.hlsli)はセルの形 Cell のテンプレート: RxCell(インライン 8。GPU と今の世界)と RxWideCell(C++ だけ・上限なし。sim/reaction_wide_cell.h)。
+- RxWideCell は 9 種目の生成物を待たずに作り、16 種のセルも 17 種まで進む(保存はビット単位)。8 種以下ならインラインと毎刻みビット一致。GPU のコードは同じ(RxAdded・RxWaitStep は typedef)。
+- t-0132・t-0026・t-0140 を合わせた main は release の全部が通過(直したものなし。gpu_multires の束は変更の後に流した)。次は T-0187(世界の CPU のセルに溢れ)→ T-0176(GPU)。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。T-0154・T-0132 済み。次は T-0179・T-0178・T-0147・T-0137)**: T-0132 で伝導の段から陰解法を呼ぶ(MultiresStepOptions::implicitConduction が GPU でも効く。AddConductDelta は multires_bindings.hlsli・stepFlags のビット 3・5〜7・implicitMaxGap は 1〜8)。系が上限(GpuMultiresImplicitLimits)を超えると CPU と合わない(T-0178)。 T-0154 で記録の形を前の刻みの GPU の数から選ぶ(GpuImplicit::ShapeFrom・IM_PLAN_WANTED_TAIL。T-0132 でも使う)。 T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
@@ -25,6 +25,15 @@
 - **気体(T-0026 G1 済み → T-0184〜T-0186)**: 1 レベルの CPU リファレンス engine/src/sim/gas_reference.*(ライブラリ bicameral_gas)・tests/gas_reference_test.cpp(debug 74 秒)。07 §2.1・ADR-0043(Proposed)。c̃ 30 m/s は仮(Q11)。05 のセルの形はまだ変えていない(G3)。tidy の新しいファイルの約 20 件は G2 の初めに直す。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0175)**: 最初に t-0132・t-0026・t-0140 を合わせた main(変更前)を release で
+  `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 45 本(約 7 分)・
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_)"` 41 本(約 22 分)が通過(直したものなし・流し直しなし)。release・debug のビルドは警告なし(前からの C4189 だけ)。
+  変更後: release のビルドで tests/reaction_wait_test.cpp の `std::ranges::equal(..., HashReactionCell, HashReactionCell)` が多重定義で通らなくなった → ラムダにした。
+  変更後の release: 1 つ目の束 45 本が通過(約 7 分。reaction_test に TestWideLimits・TestWideCrowdedCell・TestWideMatchesInline)・
+  核を使う GPU のテスト `-Filter "^(gpu_reaction(_warp)?|gpu_reaction_limits(_warp)?|gpu_probe_(sim|peek)(_warp)?|gpu_lab_box(_warp)?|window_lab)$"` 11 本が通過(約 7 分)・
+  `-Filter "^gpu_multires"` 22 本が通過(約 49 分。合わせた状態の確かめも兼ねる。implicit_tree 501 s・subcycle_warp 431 s)。合わせて release 108 本。2 つ目の束の残り(gpu_fixed・physics・work_graph・debug・conduct・probe の trace/fire/physics/rewind・window_replay)は核を使わないか
+  仮の世界の同じ核なので変更の後は流していない。
+  debug: ビルド(警告なし)・`-Filter "^reaction$"` が通過(FX_ASSERT あり。約 35 秒)。tidy は流していない。archmap OK(140)。
 - **テスト(2026-10-09、T-0163)**: 最初に t-0154・t-0157・t-0142 を合わせた main(変更前)を release で
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab)"` 43 本(約 6 分)・
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe|lab)|window_replay)"` 40 本(約 26 分)が通過(直したものなし。失敗・流し直しなし)。
@@ -128,6 +137,13 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。T-0175)上限なしは「核をセルの形のテンプレートにする」で作った(02 §3 に追記)。形ごとに違うのは RxHasRoomForSpecies・RxCellWithRoom・
+  RxEmptyCellLike・RxEmptyUsage の 4 つ(同じ名前の関数を形ごとに。RxWideCell 版は引数依存の名前探索で見つかる)。使う量(RxUsage / RxWideUsage)は
+  RxSumUsage(…, RxEmptyUsage(cell)) の引数で型を決める(HLSL に auto・decltype が無いので)。結果の構造体は RxAddedOf<Cell>・RxWaitStepOf<Cell>、
+  RxAdded・RxWaitStep は RxCell の typedef(GPU・多重解像度の呼ぶ側は変えていない)。RxLoneCell はインラインだけ(試験は reaction_test の StepWideLone)。
+- (Claude が決めた。T-0175)「RX_LIMIT_PRODUCTS を CPU では使わない設定」は、セルの形を RxWideCell にすること(RxHasRoomForSpecies が常に真なので待たせる道を通らない)。
+  候補の上限 16(RX_LIMIT_CANDIDATES)は形に依らず残る(T-0164)。HashReactionCell・CountElements・MakeWideReactionCell・StepReactionCellWait に RxWideCell の版。
+- (Claude が決めた。2 時間の約束)多重解像度の世界(MultiresNest のセルに溢れ・粗くする和集合・TestCoarsenFull / TestLimitsStep の上限なし版)は T-0187 に分けた。
 - (Claude が決めた。T-0163)数える単位は「上限に当たった (セル, 刻み)」の数。頁のセルを刻んだ時だけ数え、一様なブロックの試しの評価(MrUniformWaitOf・
   EvaluateUniformWait・EvaluateUniformCells)は数えない(変わるなら頁に広げて刻み直す所で数える)。GPU は眠っているブロックを評価しないが、眠っているブロックは
   進む規則が無い(offered = 0)ので印が立たず、CPU が全部を評価しても同じ数になる。GPU はスレッドで足してから 0 でない時だけ InterlockedAdd(MrLimitTally・CountLimits)。
@@ -178,6 +194,10 @@
 NEXT.md の先頭。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **核のセルの形(T-0175)**: reaction.hlsli の核の関数は `template <typename Table, typename Cell>`。セルの成分を増やす所は RxHasRoomForSpecies で確かめてから
+  RxCellWithRoom で場所を用意して書く(RxWideCell は std::vector なので、場所を用意せずに species[speciesCount] へ書くと範囲外)。新しい関数で成分の位置ごとの
+  作業場が要る時は RxUsage のように「形ごとの入れ物 + 引数で型を決める」にする(RX_MAX_CELL_SPECIES の配列を核に足すと RxWideCell で溢れる)。
+  HashReactionCell・CountElements は多重定義になったので、関数名をそのまま std::ranges の射影に渡せない(ラムダで包む)。
 - **上限の印の数える器(T-0163)**: MR_COUNTER_LIMIT_*(multires.hlsli)は CPU の StepPagedBlock と GPU の StepPagedWait・ConductApplyBlock(ApplyCell)の 3 か所。
   反応を刻む段を足す時はここにも足す(数える器は HashWholeNest に入るので、忘れると gpu_multires_* が食い違って教える)。
   分布の測定は reaction_package_scene_test の --distribution(進む規則の数は伝導の前のセルで数えた近似。ProbeReference::ChangedMarks を読む)。
