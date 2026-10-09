@@ -41,6 +41,11 @@ namespace bicameral::sim {
         constexpr uint32_t MAX_LEVELS = 64;  // DEPTH_STRIDE に収まる段の数
 
         static_assert(sizeof(ImGpuNode) == 40 && sizeof(ImGpuLink) == 16, "implicit_levels.hlsl の並び");
+        // 見出しは GpuImplicit の計画の段の形へそのまま写す(RecordCopyTo。T-0136)
+        static_assert(HEADER_WORDS == IM_PLAN_SHAPE_WORDS && DEPTH_BASE == IM_PLAN_DEPTH_BASE &&
+                          DEPTH_STRIDE == IM_PLAN_DEPTH_STRIDE && LEVEL_COUNT == IM_PLAN_LEVEL_COUNT &&
+                          NODE_OFFSET == IM_PLAN_NODE_OFFSET && NODE_COUNT == IM_PLAN_NODE_COUNT,
+                      "implicit_levels.hlsl の見出しと GpuImplicit の計画の並び");
 
         // implicit_levels.hlsl の入口(段の順。Lv を除いた名前)
         enum Pass : uint8_t {
@@ -303,15 +308,15 @@ namespace bicameral::sim {
     }
 
     void GpuImplicitLevels::RecordCopyTo(ID3D12GraphicsCommandList* list, GpuImplicit& implicit) {
-        const std::array<ID3D12Resource*, 3> sources = {m_nodes.Get(), m_links.Get(), m_children.Get()};
-        std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
+        const std::array<ID3D12Resource*, 4> sources = {m_work.Get(), m_nodes.Get(), m_links.Get(), m_children.Get()};
+        std::array<D3D12_RESOURCE_BARRIER, 4> barriers{};
         for (size_t i = 0; i < sources.size(); ++i) {
             barriers[i] = gpu::Transition(sources[i], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                           D3D12_RESOURCE_STATE_COPY_SOURCE);
         }
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-        implicit.RecordCopyLevels(list, m_nodes.Get(), m_links.Get(), m_children.Get());
+        implicit.RecordCopyLevels(list, m_work.Get(), m_nodes.Get(), m_links.Get(), m_children.Get());
         for (D3D12_RESOURCE_BARRIER& barrier : barriers)
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 

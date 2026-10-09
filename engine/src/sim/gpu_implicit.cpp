@@ -1,7 +1,9 @@
 // gpu_implicit.cpp — 細かいレベルの熱の陰解法の GPU 版(T-0117)。何をするかは gpu_implicit.h、段の中身は shaders/sim/implicit_conduct.hlsl。
 // 段の順は CPU の StepImplicit と同じ: 温度 → V サイクル(VCycle の再帰と同じ順に Smooth・Restrict・Prolong)× 上限 → 面の流れ → 安全網 → 足す。
 // 段と段の間は全体の UAV のバリア(次の段は前の段の書き込みを読む)。
-// 固定費を減らす形(T-0120): 隣が多い節は 1 グループで足す(節の並び u9)・小さい段から下の V サイクルは ImTail の 1 Dispatch。
+// 固定費を減らす形(T-0120): 隣が多い節は 1 グループで足す・小さい段から下の V サイクルは ImTail の 1 Dispatch。
+// 段の形は GPU のバッファから(T-0136): 長い行の節の一覧・ImTail の境・Dispatch の大きさは刻みの初めに GPU が作り(ImPlanLevels・ImPlanArgs)、
+// V サイクルは記録の上限の段まで ExecuteIndirect で積む。大きさは上限(GpuImplicitLimits)から。
 #include "sim/gpu_implicit.h"
 
 #include <algorithm>
@@ -35,24 +37,36 @@ namespace bicameral::sim {
         constexpr uint32_t PREDICATE_LIMIT = 1;   // 安全網を止めた
         constexpr uint32_t PREDICATE_WORDS = 2;
 
-        // 隣がこれより多い節は 1 グループ = 1 節で足す(T-0120。熱い点では違うレベルの面の粗い側で 127 個)
-        constexpr uint32_t LONG_ROW_LINKS = 16;
-
         constexpr uint32_t SWEEP_BITS = 8;
 
-        constexpr uint32_t UAV_COUNT = 10;
+        constexpr uint32_t UAV_COUNT = 11;
+        constexpr uint32_t ARGS_BYTES = 3 * sizeof(uint32_t);  // D3D12_DISPATCH_ARGUMENTS
 
         constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true};
 
         // implicit_conduct.hlsl の入口(Pass の順)
-        constexpr std::array<const char*, 13> SHADERS = {
+        constexpr std::array<const char*, 15> SHADERS = {
             "sim/implicit_begin.cso",     "sim/implicit_start.cso",       "sim/implicit_smooth.cso",
             "sim/implicit_restrict.cso",  "sim/implicit_prolong.cso",     "sim/implicit_converged.cso",
             "sim/implicit_cycle_end.cso", "sim/implicit_flows.cso",       "sim/implicit_mark.cso",
             "sim/implicit_limit_end.cso", "sim/implicit_limit_faces.cso", "sim/implicit_apply.cso",
-            "sim/implicit_tail.cso"};
+            "sim/implicit_tail.cso",      "sim/implicit_plan_levels.cso", "sim/implicit_plan_args.cso"};
+
+        // RecordUpload が CPU の系から写すバッファ(Buffer の順。ほかは刻みの段が初めに書く)
+        constexpr std::array<bool, 11> UPLOADED = {true,  true,  true,  true, true, false,
+                                                   false, false, false, true, false};
+
+        // 計画の段の表の語(implicit_levels.hlsl の見出しと同じ並び)
+        constexpr uint32_t PlanDepthWord(uint32_t kind, uint32_t depth) {
+            return IM_PLAN_DEPTH_BASE + (kind * IM_PLAN_DEPTH_STRIDE) + depth;
+        }
+
+        // 段 depth の間接の引数の始まり
+        constexpr uint32_t DepthSlot(uint32_t depth) {
+            return IM_SLOT_DEPTH_BASE + (depth * IM_SLOT_DEPTH_STRIDE);
+        }
 
         template <typename T>
         std::vector<std::byte> ToBytes(const std::vector<T>& values) {
@@ -164,89 +178,25 @@ namespace bicameral::sim {
             return {.nodes = std::move(nodes), .links = std::move(links)};
         }
 
-        // 節の並びを作る時に見る段の形(写す前の節と番号の一覧)
-        struct NodeShape {
-            std::vector<ImGpuNode> nodes;
-            std::vector<uint32_t> lists;
-
-            NodeShape(const std::vector<std::byte>& nodeImage, const std::vector<std::byte>& listImage)
-                : nodes(nodeImage.size() / sizeof(ImGpuNode)), lists(listImage.size() / sizeof(uint32_t)) {
-                std::memcpy(nodes.data(), nodeImage.data(), nodes.size() * sizeof(ImGpuNode));
-                std::memcpy(lists.data(), listImage.data(), lists.size() * sizeof(uint32_t));
-            }
-
-            [[nodiscard]] uint32_t Links(uint32_t node) const { return nodes[node].linkEnd - nodes[node].linkStart; }
-
-            // 掃き出しの色 color で計算する節なら隣の数、写すだけなら 0
-            [[nodiscard]] uint32_t ColorLinks(uint32_t node, uint32_t color) const {
-                return nodes[node].color == color ? Links(node) : 0;
-            }
-
-            [[nodiscard]] uint32_t MostChildLinks(uint32_t node) const {
-                uint32_t most = 0;
-                for (uint32_t k = nodes[node].childStart; k < nodes[node].childEnd; ++k)
-                    most = std::max(most, Links(lists[k]));
-
-                return most;
-            }
-        };
-
-        // 節 begin〜end を order に足す: weight が LONG_ROW_LINKS 以下の節 → 超える節(どちらも番号の昇順)。足した数 {前, 後ろ}
-        template <typename Weight>
-        std::pair<uint32_t, uint32_t> AppendOrder(std::vector<uint32_t>& order, uint32_t begin, uint32_t end,
-                                                  const Weight& weight) {
-            const size_t start = order.size();
-            for (uint32_t node = begin; node < end; ++node) {
-                if (weight(node) <= LONG_ROW_LINKS)
-                    order.push_back(node);
-            }
-
-            const auto shortCount = static_cast<uint32_t>(order.size() - start);
-            for (uint32_t node = begin; node < end; ++node) {
-                if (weight(node) > LONG_ROW_LINKS)
-                    order.push_back(node);
-            }
-
-            return {shortCount, static_cast<uint32_t>(order.size() - start) - shortCount};
-        }
-
-        // ImTail が受け持つ最初の段: そこから最も粗い段まで、どの段も節が tailMaxNodes 以下で隣が tailMaxLinks 以下。
-        // そういう段が無くても、最も粗い段の節が coarsestTailMaxNodes 以下なら受け持つ(最も粗い段の掃き出しを 1 Dispatch に)。
-        // 受け持たない時は段の数を返す(最も粗い段も掃き出しの Dispatch で回す)
-        uint32_t FindTailDepth(const NodeShape& shape, const std::vector<uint32_t>& levelOffsets,
-                               const GpuImplicitTuning& tuning) {
-            const auto smallLevel = [&](uint32_t depth) {
-                uint32_t most = 0;
-                for (uint32_t node = levelOffsets[depth]; node < levelOffsets[depth + 1]; ++node)
-                    most = std::max(most, shape.Links(node));
-
-                return levelOffsets[depth + 1] - levelOffsets[depth] <= tuning.tailMaxNodes &&
-                       most <= tuning.tailMaxLinks;
-            };
-
-            const auto levelCount = static_cast<uint32_t>(levelOffsets.size() - 1);
-            uint32_t depth = levelCount;
-            while (depth > 0 && smallLevel(depth - 1))
-                --depth;
-
-            if (depth < levelCount)
-                return depth;
-
-            const uint32_t coarsestNodes = levelOffsets[levelCount] - levelOffsets[levelCount - 1];
-
-            return coarsestNodes <= tuning.coarsestTailMaxNodes ? levelCount - 1 : levelCount;
-        }
-
     }  // namespace
 
-    std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const ImplicitGrid& grid,
+    std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const GpuImplicitLimits& limits,
                                                                 const GpuImplicitTuning& tuning) {
-        if (grid.levels.empty() || grid.cells.empty())
-            return std::unexpected("陰解法の段が無い");
+        if (limits.cells == 0 || limits.nodes < limits.cells || limits.levels == 0 ||
+            limits.levels > IM_PLAN_MAX_LEVELS)
+            return std::unexpected("陰解法の上限が正しくない");
 
         GpuImplicit result;
+        result.m_limits = limits;
         result.m_tuning = tuning;
-        result.MakeImages(grid);
+        result.m_constants = {.maxNodes = limits.nodes,
+                              .maxCells = limits.cells,
+                              .maxFaces = limits.faces,
+                              .dispatchLevels = std::clamp<uint32_t>(tuning.dispatchLevels, 1, limits.levels),
+                              .tailMaxNodes = tuning.tailMaxNodes,
+                              .tailMaxLinks = tuning.tailMaxLinks,
+                              .coarsestTailMaxNodes = tuning.coarsestTailMaxNodes,
+                              .maxLevels = limits.levels};
         if (auto pipelines = result.CreatePipelines(device); !pipelines)
             return std::unexpected(pipelines.error());
 
@@ -256,90 +206,48 @@ namespace bicameral::sim {
         return result;
     }
 
-    // 段の形を GPU の並びに: 節は段 0(= セル)から順に全部を 1 本に、隣・親・子は全体の番号に
-    void GpuImplicit::MakeImages(const ImplicitGrid& grid) {
-        m_cellCount = static_cast<uint32_t>(grid.cells.size());
-        m_faceCount = static_cast<uint32_t>(grid.faces.size());
-        m_levelOffsets.assign(1, 0);
-        for (const ImplicitGridLevel& level : grid.levels)
-            m_levelOffsets.push_back(m_levelOffsets.back() + static_cast<uint32_t>(level.levels.size()));
+    std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const ImplicitGrid& grid,
+                                                                const GpuImplicitTuning& tuning) {
+        if (grid.levels.empty() || grid.cells.empty())
+            return std::unexpected("陰解法の段が無い");
 
-        m_nodeTotal = m_levelOffsets.back();
-
-        // --- セルの面の一覧と、節の子の一覧(番号の一覧は 1 本: 面 → 子)---
-        auto [lists, faceStarts] = MakeCellFaces(grid);
-        auto [nodes, links] = MakeNodes(grid, m_levelOffsets, lists);
-        m_linkTotal = static_cast<uint32_t>(links.size());
-
-        std::vector<ImGpuFace> faces(m_faceCount);
-        for (size_t f = 0; f < faces.size(); ++f) {
-            const ImplicitFace& face = grid.faces[f];
-            faces[f] = {.coefficientHigh = face.coefficient.hi,
-                        .coefficientLow = face.coefficient.lo,
-                        .fine = face.fine,
-                        .coarse = face.coarse,
-                        .gap = face.gap,
-                        .coarseFraction = grid.cells[face.coarse].coarseFraction ? 1u : 0u};
-        }
-
-        if (lists.empty())
-            lists.push_back(0);
-
-        if (links.empty())
-            links.push_back({});
-
-        m_images[BufferCells] = ToBytes(MakeCellImage(grid, faceStarts));
-        m_images[BufferFaces] = ToBytes(faces.empty() ? std::vector<ImGpuFace>(1) : faces);
-        m_images[BufferLists] = ToBytes(lists);
-        m_images[BufferNodes] = ToBytes(nodes);
-        m_images[BufferLinks] = ToBytes(links);
-        m_images[BufferWork].resize((size_t{3} * m_nodeTotal + m_cellCount + size_t{2} * m_faceCount + 1) * 8);
-        m_images[BufferState].resize((size_t{STATE_WORDS} + m_cellCount) * 4);
-        m_images[BufferWide].resize(size_t{WIDE_WORDS} * 8);
-        m_images[BufferPredicate].resize(size_t{PREDICATE_WORDS} * 8);
-        MakeOrders(m_images[BufferNodes], m_images[BufferLists]);
-
-        m_constants.nodeTotal = m_nodeTotal;
-        m_constants.cellCount = m_cellCount;
-        m_constants.faceCount = m_faceCount;
+        return Create(device, LimitsOf(grid), tuning);
     }
 
-    // 隣を足す段の節の並び(段ごと): 隣が少ない節を前に、多い節を後ろに(どちらも番号の昇順)。
-    // 掃き出しは色ごとに、その色の節の隣の数で分ける(ほかの色の節は写すだけなので 1 スレッドで)。
-    // 縮約は子の隣の数の最大で分ける(1 スレッドの子の回しが長い行に止められないように)
-    void GpuImplicit::MakeOrders(const std::vector<std::byte>& nodeImage, const std::vector<std::byte>& listImage) {
-        const NodeShape shape(nodeImage, listImage);
-        std::vector<uint32_t> order;
-        const auto append = [&](uint32_t depth, auto&& weight) {
-            const auto start = static_cast<uint32_t>(order.size());
-            const auto [shortCount, longCount] = AppendOrder(order, m_levelOffsets[depth], m_levelOffsets[depth + 1],
-                                                             weight);
-            return OrderRange{.start = start, .shortCount = shortCount, .longCount = longCount};
-        };
-
-        const auto levelCount = static_cast<uint32_t>(m_levelOffsets.size() - 1);
-        m_smoothOrders.clear();
-        m_restrictOrders.assign(1, OrderRange{});
-        for (uint32_t depth = 0; depth < levelCount; ++depth) {
-            std::array<OrderRange, COLOR_COUNT> colors{};
-            for (uint32_t color = 0; color < COLOR_COUNT; ++color)
-                colors[color] = append(depth, [&](uint32_t node) { return shape.ColorLinks(node, color); });
-
-            m_smoothOrders.push_back(colors);
+    GpuImplicitLimits GpuImplicit::LimitsOf(const ImplicitGrid& grid) {
+        GpuImplicitLimits limits{.cells = static_cast<uint32_t>(grid.cells.size()),
+                                 .faces = static_cast<uint32_t>(grid.faces.size()),
+                                 .nodes = 0,
+                                 .links = 0,
+                                 .levels = std::max<uint32_t>(1, static_cast<uint32_t>(grid.levels.size()))};
+        for (const ImplicitGridLevel& level : grid.levels) {
+            limits.nodes += static_cast<uint32_t>(level.levels.size());
+            limits.links += static_cast<uint32_t>(level.neighbors.size());
         }
 
-        m_convergedOrder = append(0, [&](uint32_t node) { return shape.Links(node); });
-        for (uint32_t depth = 1; depth < levelCount; ++depth)
-            m_restrictOrders.push_back(append(depth, [&](uint32_t node) { return shape.MostChildLinks(node); }));
+        return limits;
+    }
 
-        // --- ImTail: 段ごとの節の始まりと、受け持つ最初の段 ---
-        m_constants.tailStart = static_cast<uint32_t>(order.size());
-        order.insert(order.end(), m_levelOffsets.begin(), m_levelOffsets.end());
-        m_tailDepth = FindTailDepth(shape, m_levelOffsets, m_tuning);
-        m_constants.tailDepth = m_tailDepth;
-        m_constants.levelTotal = levelCount;
-
-        m_images[BufferOrder] = ToBytes(order);
+    // バッファの大きさ(上限から。空にならないように 1 つ分は持つ)
+    uint64_t GpuImplicit::BufferBytes(Buffer buffer) const {
+        const uint64_t nodes = m_limits.nodes;
+        const uint64_t cells = m_limits.cells;
+        const uint64_t faces = m_limits.faces;
+        switch (buffer) {
+            case BufferCells: return cells * sizeof(ImGpuCell);
+            case BufferFaces: return std::max<uint64_t>(1, faces) * sizeof(ImGpuFace);
+            case BufferLists: return ((2 * faces) + nodes + 1) * sizeof(uint32_t);
+            case BufferNodes: return nodes * sizeof(ImGpuNode);
+            case BufferLinks: return std::max<uint64_t>(1, m_limits.links) * sizeof(ImGpuLink);
+            case BufferWork: return ((3 * nodes) + cells + (2 * faces) + 1) * sizeof(int64_t);
+            case BufferState: return (STATE_WORDS + cells) * sizeof(uint32_t);
+            case BufferWide: return uint64_t{WIDE_WORDS} * sizeof(int64_t);
+            case BufferPredicate: return uint64_t{PREDICATE_WORDS} * sizeof(uint64_t);
+            case BufferPlan: return (IM_PLAN_FLAGS_BASE + (4 * nodes)) * sizeof(uint32_t);
+            case BufferArgs:
+                return uint64_t{IM_SLOT_DEPTH_BASE + (IM_SLOT_DEPTH_STRIDE * m_constants.dispatchLevels)} * ARGS_BYTES;
+            default: return 0;
+        }
     }
 
     std::expected<void, std::string> GpuImplicit::CreatePipelines(ID3D12Device5* device) {
@@ -357,24 +265,41 @@ namespace bicameral::sim {
                 return std::unexpected(std::format("陰解法のパイプラインを作れない({})", SHADERS[pass]));
         }
 
+        // --- 間接の Dispatch(引数は ImPlanArgs が書く。ルート定数は変えないので署名は要らない)---
+        const D3D12_INDIRECT_ARGUMENT_DESC argument{.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH};
+        const D3D12_COMMAND_SIGNATURE_DESC signature{
+            .ByteStride = ARGS_BYTES, .NumArgumentDescs = 1, .pArgumentDescs = &argument, .NodeMask = 0};
+        if (FAILED(device->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&m_dispatchSignature))))
+            return std::unexpected("陰解法の間接の Dispatch の署名を作れない");
+
         return {};
     }
 
     std::expected<void, std::string> GpuImplicit::CreateBuffers(ID3D12Device5* device) {
         for (uint32_t i = 0; i < BufferCount; ++i) {
-            const uint64_t size = m_images[i].size();
-            m_buffers[i] = gpu::CreateBuffer(device, size, gpu::BufferKind::UnorderedAccess);
-            m_uploads[i] = gpu::CreateBuffer(device, size, gpu::BufferKind::Upload);
-            if (!m_buffers[i] || !m_uploads[i])
+            const auto buffer = static_cast<Buffer>(i);
+            m_buffers[i] = gpu::CreateBuffer(device, BufferBytes(buffer), gpu::BufferKind::UnorderedAccess);
+            if (!m_buffers[i])
                 return std::unexpected("陰解法のバッファを作れない");
+
+            if (!UPLOADED[i])
+                continue;
+
+            const uint64_t uploadBytes = buffer == BufferPlan ? uint64_t{IM_PLAN_HEADER_WORDS} * sizeof(uint32_t)
+                                                              : BufferBytes(buffer);
+            m_uploads[i] = gpu::CreateBuffer(device, uploadBytes, gpu::BufferKind::Upload);
+            if (!m_uploads[i])
+                return std::unexpected("陰解法の写すバッファを作れない");
         }
 
-        m_cellsReadback = gpu::CreateBuffer(device, m_images[BufferCells].size(), gpu::BufferKind::Readback);
-        m_stateReadback = gpu::CreateBuffer(device, m_images[BufferState].size(), gpu::BufferKind::Readback);
-        m_wideReadback = gpu::CreateBuffer(device, m_images[BufferWide].size(), gpu::BufferKind::Readback);
+        m_cellsReadback = gpu::CreateBuffer(device, BufferBytes(BufferCells), gpu::BufferKind::Readback);
+        m_stateReadback = gpu::CreateBuffer(device, BufferBytes(BufferState), gpu::BufferKind::Readback);
+        m_wideReadback = gpu::CreateBuffer(device, BufferBytes(BufferWide), gpu::BufferKind::Readback);
+        m_planReadback = gpu::CreateBuffer(device, uint64_t{IM_PLAN_HEADER_WORDS} * sizeof(uint32_t),
+                                           gpu::BufferKind::Readback);
         m_timestampReadback = gpu::CreateBuffer(device, uint64_t{MAX_TIMESTAMPS} * sizeof(uint64_t),
                                                 gpu::BufferKind::Readback);
-        if (!m_cellsReadback || !m_stateReadback || !m_wideReadback || !m_timestampReadback)
+        if (!m_cellsReadback || !m_stateReadback || !m_wideReadback || !m_planReadback || !m_timestampReadback)
             return std::unexpected("陰解法の読み戻しを作れない");
 
         const D3D12_QUERY_HEAP_DESC queryDesc{
@@ -385,30 +310,65 @@ namespace bicameral::sim {
         return {};
     }
 
+    // CPU の系を GPU の並びに: 節は段 0(= セル)から順に全部を 1 本に、隣・親・子は全体の番号に。
+    // 番号の一覧は面の一覧(面の数 × 2)→ 面の上限 × 2 まで空き → 子の一覧。計画の見出しに段の表と面の数
     bool GpuImplicit::RecordUpload(ID3D12GraphicsCommandList* list, const ImplicitGrid& grid) {
-        if (grid.cells.size() != m_cellCount || grid.faces.size() != m_faceCount)
+        const GpuImplicitLimits need = LimitsOf(grid);
+        if (grid.cells.empty() || need.cells > m_limits.cells || need.faces > m_limits.faces ||
+            need.nodes > m_limits.nodes || need.links > m_limits.links || need.levels > m_limits.levels)
             return false;
 
-        // --- セルのエネルギー・端数だけ作り直す(面の一覧の始まりは同じ)---
-        std::vector<ImGpuCell> cells(m_cellCount);
-        std::memcpy(cells.data(), m_images[BufferCells].data(), m_images[BufferCells].size());
-        for (size_t i = 0; i < cells.size(); ++i) {
-            cells[i].energy = grid.cells[i].energy;
-            cells[i].fraction = grid.cells[i].fraction;
-            cells[i].startTemperature = grid.cells[i].startTemperature;
+        std::vector<uint32_t> levelOffsets(1, 0);
+        for (const ImplicitGridLevel& level : grid.levels)
+            levelOffsets.push_back(levelOffsets.back() + static_cast<uint32_t>(level.levels.size()));
+
+        auto [lists, faceStarts] = MakeCellFaces(grid);
+        auto [nodes, links] = MakeNodes(grid, levelOffsets, lists);
+        lists.insert(lists.begin() + static_cast<std::ptrdiff_t>(2 * grid.faces.size()),
+                     size_t{2} * (m_limits.faces - need.faces), 0u);
+        if (links.empty())
+            links.push_back({});
+
+        std::vector<ImGpuFace> faces(std::max<size_t>(1, grid.faces.size()));
+        for (size_t f = 0; f < grid.faces.size(); ++f) {
+            const ImplicitFace& face = grid.faces[f];
+            faces[f] = {.coefficientHigh = face.coefficient.hi,
+                        .coefficientLow = face.coefficient.lo,
+                        .fine = face.fine,
+                        .coarse = face.coarse,
+                        .gap = face.gap,
+                        .coarseFraction = grid.cells[face.coarse].coarseFraction ? 1u : 0u};
         }
 
-        m_images[BufferCells] = ToBytes(cells);
+        std::vector<uint32_t> plan(IM_PLAN_HEADER_WORDS, 0);
+        plan[IM_PLAN_LEVEL_COUNT] = need.levels;
+        plan[IM_PLAN_FACES] = need.faces;
+        for (uint32_t depth = 0; depth < grid.levels.size(); ++depth) {
+            plan[PlanDepthWord(IM_PLAN_NODE_OFFSET, depth)] = levelOffsets[depth];
+            plan[PlanDepthWord(IM_PLAN_NODE_COUNT, depth)] = levelOffsets[depth + 1] - levelOffsets[depth];
+        }
 
+        std::array<std::vector<std::byte>, BufferCount> images;
+        images[BufferCells] = ToBytes(MakeCellImage(grid, faceStarts));
+        images[BufferFaces] = ToBytes(faces);
+        images[BufferLists] = ToBytes(lists);
+        images[BufferNodes] = ToBytes(nodes);
+        images[BufferLinks] = ToBytes(links);
+        images[BufferPlan] = ToBytes(plan);
+
+        // --- 写すものは COMMON から暗黙に COPY_DEST へ昇格して写し、ほかは COMMON から。どれも UAV へ ---
         std::array<D3D12_RESOURCE_BARRIER, BufferCount> barriers{};
         for (uint32_t i = 0; i < BufferCount; ++i) {
-            if (!WriteUpload(m_uploads[i].Get(), m_images[i]))
+            barriers[i] = gpu::Transition(m_buffers[i].Get(), D3D12_RESOURCE_STATE_COMMON,
+                                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            if (!UPLOADED[i])
+                continue;
+
+            if (!WriteUpload(m_uploads[i].Get(), images[i]))
                 return false;
 
-            // COMMON から暗黙に COPY_DEST へ昇格する。写した後は UAV へ
-            list->CopyResource(m_buffers[i].Get(), m_uploads[i].Get());
-            barriers[i] = gpu::Transition(m_buffers[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->CopyBufferRegion(m_buffers[i].Get(), 0, m_uploads[i].Get(), 0, images[i].size());
+            barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         }
 
         list->ResourceBarrier(BufferCount, barriers.data());
@@ -416,54 +376,101 @@ namespace bicameral::sim {
         return true;
     }
 
-    void GpuImplicit::RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
-                                       uint64_t facesOffset, uint64_t listsOffset) {
-        constexpr std::array<Buffer, 3> TARGETS = {BufferCells, BufferFaces, BufferLists};
-        const std::array<uint64_t, 3> offsets = {cellsOffset, facesOffset, listsOffset};
-        const std::array<uint64_t, 3> sizes = {uint64_t{m_cellCount} * sizeof(ImGpuCell),
-                                               uint64_t{m_faceCount} * sizeof(ImGpuFace),
-                                               uint64_t{2} * m_faceCount * sizeof(uint32_t)};
-
-        std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
-        for (size_t i = 0; i < TARGETS.size(); ++i) {
-            barriers[i] = gpu::Transition(m_buffers[TARGETS[i]].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                          D3D12_RESOURCE_STATE_COPY_DEST);
+    void GpuImplicit::RecordReset(ID3D12GraphicsCommandList* list) {
+        std::array<D3D12_RESOURCE_BARRIER, BufferCount> barriers{};
+        for (uint32_t i = 0; i < BufferCount; ++i) {
+            barriers[i] = gpu::Transition(m_buffers[i].Get(), D3D12_RESOURCE_STATE_COMMON,
+                                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-        for (size_t i = 0; i < TARGETS.size(); ++i) {
-            if (sizes[i] != 0)
-                list->CopyBufferRegion(m_buffers[TARGETS[i]].Get(), 0, source, offsets[i], sizes[i]);
-
-            std::swap(barriers[i].Transition.StateBefore, barriers[i].Transition.StateAfter);
-        }
-
-        list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        list->ResourceBarrier(BufferCount, barriers.data());
     }
 
-    void GpuImplicit::RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* nodes, ID3D12Resource* links,
-                                       ID3D12Resource* children) {
-        constexpr std::array<Buffer, 3> TARGETS = {BufferNodes, BufferLinks, BufferLists};
-        const std::array<ID3D12Resource*, 3> sources = {nodes, links, children};
-        const uint32_t childCount = m_levelOffsets[m_levelOffsets.size() - 2];  // 最も粗い段より前の節(どれも親が 1 つ)
-        const std::array<uint64_t, 3> targetOffsets = {0, 0, uint64_t{2} * m_faceCount * sizeof(uint32_t)};
-        const std::array<uint64_t, 3> sizes = {uint64_t{m_nodeTotal} * sizeof(ImGpuNode),
-                                               uint64_t{m_linkTotal} * sizeof(ImGpuLink),
-                                               uint64_t{childCount} * sizeof(uint32_t)};
+    void GpuImplicit::RecordCopySystem(ID3D12GraphicsCommandList* list, ID3D12Resource* source, uint64_t cellsOffset,
+                                       uint64_t facesOffset, uint64_t listsOffset, ID3D12Resource* header,
+                                       uint64_t faceCountOffset) {
+        const std::array<CopyRegion, 4> regions = {
+            CopyRegion{.target = BufferCells,
+                       .targetOffset = 0,
+                       .source = source,
+                       .sourceOffset = cellsOffset,
+                       .bytes = BufferBytes(BufferCells)},
+            CopyRegion{.target = BufferFaces,
+                       .targetOffset = 0,
+                       .source = source,
+                       .sourceOffset = facesOffset,
+                       .bytes = BufferBytes(BufferFaces)},
+            CopyRegion{.target = BufferLists,
+                       .targetOffset = 0,
+                       .source = source,
+                       .sourceOffset = listsOffset,
+                       .bytes = uint64_t{2} * m_limits.faces * sizeof(uint32_t)},
+            CopyRegion{.target = BufferPlan,
+                       .targetOffset = uint64_t{IM_PLAN_FACES} * sizeof(uint32_t),
+                       .source = header,
+                       .sourceOffset = faceCountOffset,
+                       .bytes = sizeof(uint32_t)}};
+        RecordCopies(list, regions);
+    }
 
-        std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
-        for (size_t i = 0; i < TARGETS.size(); ++i) {
-            barriers[i] = gpu::Transition(m_buffers[TARGETS[i]].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                          D3D12_RESOURCE_STATE_COPY_DEST);
+    void GpuImplicit::RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* header, ID3D12Resource* nodes,
+                                       ID3D12Resource* links, ID3D12Resource* children) {
+        const uint64_t childrenOffset = uint64_t{2} * m_limits.faces * sizeof(uint32_t);
+        const std::array<CopyRegion, 4> regions = {
+            CopyRegion{.target = BufferPlan,
+                       .targetOffset = 0,
+                       .source = header,
+                       .sourceOffset = 0,
+                       .bytes = uint64_t{IM_PLAN_SHAPE_WORDS} * sizeof(uint32_t)},
+            CopyRegion{.target = BufferNodes,
+                       .targetOffset = 0,
+                       .source = nodes,
+                       .sourceOffset = 0,
+                       .bytes = BufferBytes(BufferNodes)},
+            CopyRegion{.target = BufferLinks,
+                       .targetOffset = 0,
+                       .source = links,
+                       .sourceOffset = 0,
+                       .bytes = BufferBytes(BufferLinks)},
+            CopyRegion{.target = BufferLists,
+                       .targetOffset = childrenOffset,
+                       .source = children,
+                       .sourceOffset = 0,
+                       .bytes = BufferBytes(BufferLists) - childrenOffset}};
+        RecordCopies(list, regions);
+    }
+
+    // 写す(大きさは写す先の残りと source の残りの小さい方)。写す先は UAV → COPY_DEST → UAV
+    void GpuImplicit::RecordCopies(ID3D12GraphicsCommandList* list, std::span<const CopyRegion> regions) {
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        for (const CopyRegion& region : regions) {
+            ID3D12Resource* target = m_buffers[region.target].Get();
+            const bool seen = std::ranges::any_of(barriers, [&](const D3D12_RESOURCE_BARRIER& barrier) {
+                return barrier.Transition.pResource == target;
+            });
+            if (!seen) {
+                barriers.push_back(
+                    gpu::Transition(target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST));
+            }
         }
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-        for (size_t i = 0; i < TARGETS.size(); ++i) {
-            if (sizes[i] != 0)
-                list->CopyBufferRegion(m_buffers[TARGETS[i]].Get(), targetOffsets[i], sources[i], 0, sizes[i]);
+        for (const CopyRegion& region : regions) {
+            const uint64_t sourceBytes = region.source->GetDesc().Width;
+            const uint64_t targetBytes = BufferBytes(region.target);
+            if (region.sourceOffset >= sourceBytes || region.targetOffset >= targetBytes)
+                continue;
 
-            std::swap(barriers[i].Transition.StateBefore, barriers[i].Transition.StateAfter);
+            const uint64_t bytes = std::min(
+                {region.bytes, sourceBytes - region.sourceOffset, targetBytes - region.targetOffset});
+            if (bytes != 0) {
+                list->CopyBufferRegion(m_buffers[region.target].Get(), region.targetOffset, region.source,
+                                       region.sourceOffset, bytes);
+            }
         }
+
+        for (D3D12_RESOURCE_BARRIER& barrier : barriers)
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
     }
@@ -484,60 +491,62 @@ namespace bicameral::sim {
         return images;
     }
 
-    void GpuImplicit::Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t threads) {
+    void GpuImplicit::Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t groups) {
         list->SetPipelineState(m_pipelines[pass].Get());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
-        list->Dispatch(std::max<uint32_t>(1, (threads + THREADS - 1) / THREADS), 1, 1);
+        list->Dispatch(groups, 1, 1);
         GlobalUavBarrier(list);
     }
 
-    // 節の並びの区間を回す段: 1 スレッドで足す節のグループ + グループで足す節 1 つに 1 グループ
-    void GpuImplicit::DispatchOrdered(ID3D12GraphicsCommandList* list, Pass pass, const OrderRange& range) {
-        m_constants.orderStart = range.start;
-        m_constants.shortCount = range.shortCount;
-        m_constants.longCount = range.longCount;
-        const uint32_t groups = ((range.shortCount + THREADS - 1) / THREADS) + range.longCount;
+    // 間接の Dispatch: グループの数は計画の引数 slot(ImPlanArgs が書く。その段が要らなければ 0)
+    void GpuImplicit::DispatchIndirect(ID3D12GraphicsCommandList* list, Pass pass, uint32_t slot) {
         list->SetPipelineState(m_pipelines[pass].Get());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
-        list->Dispatch(std::max<uint32_t>(1, groups), 1, 1);
+        list->ExecuteIndirect(m_dispatchSignature.Get(), 1, m_buffers[BufferArgs].Get(), uint64_t{slot} * ARGS_BYTES,
+                              nullptr, 0);
         GlobalUavBarrier(list);
     }
 
-    // 赤黒の掃き出し sweeps 回(1 回 = 色 0〜1。CPU の Smooth)
-    void GpuImplicit::RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t sweeps) {
+    // 段の形から長い行の節の一覧・ImTail の境・間接の引数を作り、引数を INDIRECT_ARGUMENT にする(T-0136)
+    void GpuImplicit::RecordPlan(ID3D12GraphicsCommandList* list) {
+        Dispatch(list, PassPlanLevels, m_constants.maxLevels);
+        Dispatch(list, PassPlanArgs, 1);
+        const D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
+            m_buffers[BufferArgs].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        list->ResourceBarrier(1, &barrier);
+    }
+
+    // 赤黒の掃き出し sweeps 回(1 回 = 色 0〜1。CPU の Smooth)。slot + 色が引数
+    void GpuImplicit::RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t slot, uint32_t sweeps) {
+        m_constants.depth = depth;
         for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
             for (uint32_t color = 0; color < COLOR_COUNT; ++color) {
                 m_constants.color = color;
-                DispatchOrdered(list, PassSmooth, m_smoothOrders[depth][color]);
+                DispatchIndirect(list, PassSmooth, slot + color);
             }
         }
     }
 
-    // CPU の VCycle と同じ再帰
-    void GpuImplicit::RecordVCycle(ID3D12GraphicsCommandList* list, uint32_t depth, const ImplicitOptions& options) {
-        if (depth == m_tailDepth) {
-            m_constants.sweeps = options.preSmooth | (options.postSmooth << SWEEP_BITS) |
-                                 (options.coarsestSweeps << (2 * SWEEP_BITS));
-            Dispatch(list, PassTail, 1);
-            return;
+    // CPU の VCycle の再帰を、記録の上限の段まで開いた形: 下り(前の掃き出し → 縮約)× 段 → 下りが止まる段(ImTail か最も粗い段の掃き出し)
+    // → 上り(直し → 後の掃き出し)× 段。下りが止まる段より下の Dispatch は引数が 0 グループ(ImPlanArgs)
+    void GpuImplicit::RecordVCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options) {
+        const uint32_t levels = m_constants.dispatchLevels;
+        for (uint32_t depth = 0; depth + 1 < levels; ++depth) {
+            const uint32_t slot = DepthSlot(depth);
+            RecordSmooth(list, depth, slot + IM_SLOT_SMOOTH, options.preSmooth);
+            m_constants.depth = depth + 1;
+            DispatchIndirect(list, PassRestrict, slot + IM_SLOT_RESTRICT);
         }
 
-        if (depth + 1 == LevelCount()) {
-            RecordSmooth(list, depth, options.coarsestSweeps);
-            return;
+        DispatchIndirect(list, PassTail, IM_SLOT_TAIL);
+        RecordSmooth(list, IM_TERMINAL_DEPTH, IM_SLOT_COARSEST, options.coarsestSweeps);
+
+        for (uint32_t depth = levels - 1; depth-- > 0;) {
+            const uint32_t slot = DepthSlot(depth);
+            m_constants.depth = depth;
+            DispatchIndirect(list, PassProlong, slot + IM_SLOT_PROLONG);
+            RecordSmooth(list, depth, slot + IM_SLOT_SMOOTH, options.postSmooth);
         }
-
-        RecordSmooth(list, depth, options.preSmooth);
-
-        DispatchOrdered(list, PassRestrict, m_restrictOrders[depth + 1]);
-
-        RecordVCycle(list, depth + 1, options);
-
-        m_constants.levelOffset = m_levelOffsets[depth];
-        m_constants.levelCount = m_levelOffsets[depth + 1] - m_levelOffsets[depth];
-        Dispatch(list, PassProlong, m_constants.levelCount);
-
-        RecordSmooth(list, depth, options.postSmooth);
     }
 
     // ここから EndSkippable までの Dispatch を、述語の語 word が 0 でなければ飛ばす(語は前の段が UAV で書いた。バリアは飛ばない)
@@ -575,18 +584,21 @@ namespace bicameral::sim {
         m_constants.tolerance = options.toleranceMillikelvin;
         m_constants.slack = options.limitSlackMillikelvin;
         m_constants.correctionScale = static_cast<int32_t>(options.correctionScale);
+        m_constants.sweeps = options.preSmooth | (options.postSmooth << SWEEP_BITS) |
+                             (options.coarsestSweeps << (2 * SWEEP_BITS));
 
-        // --- 温度・範囲 → V サイクル × 上限(止めた後の回は述語で飛ばす)---
+        // --- 計画 → 温度・範囲 → V サイクル × 上限(止めた後の回は述語で飛ばす)---
+        RecordPlan(list);
         Dispatch(list, PassBegin, 1);
-        Dispatch(list, PassStart, m_cellCount);
+        DispatchIndirect(list, PassStart, IM_SLOT_CELLS);
         for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
             const bool skippable = cycle != 0 && options.toleranceMillikelvin != 0;
             if (skippable)
                 BeginSkippable(list, PREDICATE_CYCLES);
 
-            RecordVCycle(list, 0, options);
+            RecordVCycle(list, options);
             if (options.toleranceMillikelvin != 0)
-                DispatchOrdered(list, PassConverged, m_convergedOrder);
+                DispatchIndirect(list, PassConverged, IM_SLOT_CONVERGED);
 
             Dispatch(list, PassCycleEnd, 1);
             if (skippable)
@@ -594,31 +606,32 @@ namespace bicameral::sim {
         }
 
         // --- 面の流れ → 安全網(印 → 止めるか → 面を戻す)× (上限 + 1)→ 足す ---
-        Dispatch(list, PassFlows, m_faceCount);
+        DispatchIndirect(list, PassFlows, IM_SLOT_FACES);
         for (uint32_t pass = 0; pass <= maxLimitRounds; ++pass) {
             if (pass != 0)
                 BeginSkippable(list, PREDICATE_LIMIT);
 
-            Dispatch(list, PassMark, m_cellCount);
+            DispatchIndirect(list, PassMark, IM_SLOT_CELLS);
             Dispatch(list, PassLimitEnd, 1);
-            Dispatch(list, PassLimitFaces, m_faceCount);
+            DispatchIndirect(list, PassLimitFaces, IM_SLOT_FACES);
             if (pass != 0)
                 EndSkippable(list);
         }
 
-        Dispatch(list, PassApply, m_cellCount);
+        DispatchIndirect(list, PassApply, IM_SLOT_CELLS);
+
+        const D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
+            m_buffers[BufferArgs].Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &barrier);
 
         return true;
     }
 
     uint32_t GpuImplicit::DispatchesPerCycle(const ImplicitOptions& options) const {
-        const uint32_t smoothing = COLOR_COUNT * (options.preSmooth + options.postSmooth);
-
+        const uint32_t perLevel = (COLOR_COUNT * (options.preSmooth + options.postSmooth)) + 2;
         const uint32_t judge = options.toleranceMillikelvin != 0 ? 2 : 1;
-        if (m_tailDepth >= LevelCount())
-            return ((LevelCount() - 1) * (smoothing + 2)) + (COLOR_COUNT * options.coarsestSweeps) + judge;
 
-        return (m_tailDepth * (smoothing + 2)) + 1 + judge;
+        return ((m_constants.dispatchLevels - 1) * perLevel) + 1 + (COLOR_COUNT * options.coarsestSweeps) + judge;
     }
 
     void GpuImplicit::RecordTimestamp(ID3D12GraphicsCommandList* list, uint32_t index) {
@@ -633,6 +646,14 @@ namespace bicameral::sim {
         gpu::RecordCopyToReadback(list, m_buffers[BufferCells].Get(), m_cellsReadback.Get());
         gpu::RecordCopyToReadback(list, m_buffers[BufferState].Get(), m_stateReadback.Get());
         gpu::RecordCopyToReadback(list, m_buffers[BufferWide].Get(), m_wideReadback.Get());
+
+        D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
+            m_buffers[BufferPlan].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->ResourceBarrier(1, &barrier);
+        list->CopyBufferRegion(m_planReadback.Get(), 0, m_buffers[BufferPlan].Get(), 0,
+                               uint64_t{IM_PLAN_HEADER_WORDS} * sizeof(uint32_t));
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
         if (m_timestampCount > 0) {
             list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, m_timestampCount,
                                    m_timestampReadback.Get(), 0);
@@ -640,15 +661,17 @@ namespace bicameral::sim {
     }
 
     bool GpuImplicit::Read(ImplicitGrid& grid, GpuImplicitCost& cost) const {
-        if (grid.cells.size() != m_cellCount)
+        if (grid.cells.size() > m_limits.cells)
             return false;
 
-        std::vector<ImGpuCell> cells(m_cellCount);
+        std::vector<ImGpuCell> cells(grid.cells.size());
         std::vector<uint32_t> state(STATE_WORDS);
         std::vector<int64_t> wide(WIDE_WORDS);
+        std::vector<uint32_t> plan(IM_PLAN_HEADER_WORDS);
         if (!gpu::ReadBuffer(m_cellsReadback.Get(), std::as_writable_bytes(std::span(cells))) ||
             !gpu::ReadBuffer(m_stateReadback.Get(), std::as_writable_bytes(std::span(state))) ||
-            !gpu::ReadBuffer(m_wideReadback.Get(), std::as_writable_bytes(std::span(wide))))
+            !gpu::ReadBuffer(m_wideReadback.Get(), std::as_writable_bytes(std::span(wide))) ||
+            !gpu::ReadBuffer(m_planReadback.Get(), std::as_writable_bytes(std::span(plan))))
             return false;
 
         for (size_t i = 0; i < cells.size(); ++i) {
@@ -660,7 +683,9 @@ namespace bicameral::sim {
                 .limitedCells = state[STATE_LIMITED_CELLS],
                 .limitRounds = state[STATE_LIMIT_ROUNDS],
                 .worstExcessMillikelvin = wide[WIDE_WORST_EXCESS],
-                .limitFinished = state[STATE_LIMIT_DONE] != 0};
+                .limitFinished = state[STATE_LIMIT_DONE] != 0,
+                .levelCount = plan[IM_PLAN_LEVEL_COUNT],
+                .tailDepth = plan[IM_PLAN_TAIL]};
 
         return true;
     }
