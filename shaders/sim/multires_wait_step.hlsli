@@ -121,10 +121,18 @@ void FinishWaitBlock(uint32_t slot, uint32_t changed, uint64_t wakeTick) {
     g_blocks[slot].wakeTick = wakeTick;
 }
 
-// 刻む印の付いたブロックを 1 刻み(グループで一様な分岐)。一様なブロックは起こす刻みが来た時(つつかれた時も)だけ評価し、
-// 変わるなら頁に広げる印(MR_PAGE_WANTED。頁は TreeExpand が枠の順に配り、埋めて刻むのは StepExpandedWait)
+// 刻む印の付いたブロックを 1 刻み(グループで一様な分岐)。どのブロックも起こす刻みが来た時(つつかれた時も)だけ評価する。
+// 一様なブロックは変わるなら頁に広げる印(MR_PAGE_WANTED。頁は TreeExpand が枠の順に配り、埋めて刻むのは StepExpandedWait)
 void StepBlockWait(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
+
+    // --- 眠っているブロック(起こす刻みがまだ来ず、この刻みにつつかれてもいない)は評価しない(T-0123): 最後に評価してから
+    //     セルも tc も変わっていないので、どのセルを評価しても変わらず、起こす刻みも同じ値になる(ADR-0018)。全部を刻む刻みと
+    //     観察の枠も同じ。CPU の StepNest・StepActive は全部を評価するので、毎刻みのビット一致がこの省略を確かめる ---
+    const uint64_t mark = CurrentChangeMark();
+    if (mark < block.wakeTick && block.busyTick != mark)
+        return;
+
     if (!MrIsUniform(block)) {
         const WaitBlockResult result = StepPagedWait(slot, thread);
         if (thread == 0)
@@ -132,10 +140,6 @@ void StepBlockWait(uint32_t slot, uint32_t thread) {
 
         return;
     }
-
-    const uint64_t mark = CurrentChangeMark();
-    if (mark < block.wakeTick && block.busyTick != mark)
-        return;
 
     const WaitBlockResult result = EvaluateUniformWait(slot, thread);
     if (thread != 0)

@@ -1,115 +1,34 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0130 今までの丸めのコードを消す — 完了
+最終更新: 2026-10-09 / チケット: T-0123 待ちの評価の費用を下げる — 完了
 
 ## 状態(3 行以内)
-- 今までの丸め(D-424 の下限と毎刻みの乱数の丸め)のコードを消した。反応はどこも待ちの丸め(RxStepCellWait。D-429・ADR-0018)だけ。
-- 1 セルの反応の試験(reaction・gpu_reaction)は 1 セルだけのブロック(RxAdvanceLoneCell)で進める。T-0122 と T-0129 を合わせた main + この変更で release の全部のテストが通過。
+- GPU は眠っているブロック(起こす刻みが来ず、つつかれていない)を頁のブロックでも評価しない(StepBlockWait)。全部を刻む GPU 0.054 → 0.011 ms・静かな刻み 0.08 ms(今までの丸めの水準)。
+- log2・割り算を要る時だけにする形は CPU の答えは同じだが GPU の仮の世界で 8〜12% 遅く、採らなかった(ADR-0018 追記)。T-0134・T-0020・T-0023 を合わせた main は release の全部 87 本が通過。
 
-## 並走で入ったもの: T-0134 陰解法の多重格子を GPU で(一部。2026-10-09)
-- 状態: T-0134 完了(範囲を絞った)。陰解法の多重格子の段(節・隣・重み・親子・子の一覧)を GPU で作り(GpuImplicitLevels・implicit_levels.hlsl)、
-  CPU の BuildImplicitGrid と番号まで毎刻みビット一致・それを GpuImplicit に写して解いた結果も一致(熱い点・鎖・たくさんの要求)。段の数は GPU が値で決める。
-  節の並び・ImTail・間接の Dispatch・GpuImplicit の大きさを上限から決めるのは T-0135。
-- 動いているもの: `-Filter "^gpu_multires_implicit_build(_warp)?$"`(release の HW・WARP 合わせて約 2.3 分〔計測込み〕/ debug の WARP 約 1.6 分・HW 約 7 分)。
-  計測は `job.py run -Preset release -Exe gpu_multires_implicit_build_test -- --queue compute --measure-only`。
-- 壊れているもの: なし。
-- 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0134: 親と行の番号は鍵の表の atomic の最小 + 接頭和 + 順位・係数は 128bit の繰り上げつき atomic・
-  段の数は回ごとの述語・自分のルート署名)。
-- 判断待ち: なし。
-- 注意: 多重格子の段を作る費用は上限 64 で 1.6〜2.7 ms(空の回 948 Dispatch の固定費が主)・上限 = 段の数で 0.5〜2.1 ms と重い(T-0135 で減らす。docs/perf.md)。
-  GpuImplicitLevels の RecordCopyTo・RecordReadback は RecordBuild と同じコマンドリストで呼ぶ(バッファは COMMON から UAV に昇格させて使うため)。
-  GpuImplicit はまだ CPU の系で Create する(節の並び・ImTail も CPU から)。implicit_build.hlsl の作業場の後ろにセルの座標(CellKeyWord)を足した。
-
-## 並走で入ったもの: T-0020 Luau の殻(2026-10-09)
-- 動いているもの: Luau の殻(CPU だけ)。debug ビルドで luau_sandbox_test が通る。まだどこからも使っていない(エディタ T-0023・ベイク T-0021 から使う)。
-- 壊れているもの: なし。
-- 決めたこと: ADR-0030(vcpkg の port・許可の一覧・安全点とメモリの上限・実行ごとの種・アドレス順の pairs をベイクに使わない規則)。
-- 注意:
-  - vcpkg.json に `luau` が入った。CMakePresets.json の環境に `XDG_CONFIG_HOME`・`GIT_CONFIG_GLOBAL` が入った(port のビルドの git だけのため。git-config フォルダは CMake が作る)。
-  - Luau のヘッダ(lua.h など)は小さいので pch.h に入れていない。bicameral_script が PUBLIC で Luau.VM をつなぐので、ホスト関数を書く側は lua.h を include できる。
-  - ログは Channel::Tool に出す(Script のチャンネルは足していない。並走中の log.cpp の衝突を避けた。要るなら後で足す)。
-- 次: T-0138(パッケージ)→ T-0021(反応表のベイクを Luau から)→ T-0139(ホットリロード。エディタの殻 T-0023 の後)。
-
-
-## 並走で入ったもの: T-0023 エディタの殻(2026-10-09)
-- 動いているもの: `bicameral --editor`(パネル「時間」「状態」)。`--auto-time` は人がいない確認用。既定(--editor なし)の動きは今までと同じ。
-- 壊れているもの: なし。
-- 注意:
-  - ImGui のヘッダは pch.h に入れていない(pch.h は ImGui をリンクしないライブラリとテストでも使う)。ImGui を使うのは editor_overlay.cpp だけ。
-    ImGui の DX12 backend の `#include <d3d12.h>` は、pch の `<directx/d3d12.h>` と同じ include guard で飛ばされる。
-  - ImGui の DX12 backend はフォントの画像の転送に direct キューを使い、その場で待つ(最初のフレームと新しい字が出た時だけ)。
-  - 窓の配置は保存しない(io.IniFilename = nullptr)。
-  - 4 つのランナーが同じ GPU を使っている間は、デバッグ版の最初のフレームが 2〜4 分かかることがある(--editor の有無に依らない。他の作業ツリーの GPU テストと重なった時)。
-- 次: T-0142 実験室パネル(下)。
-
-
-## 並走で入ったもの: T-0129 陰解法の系を GPU で組み立てる(一部。ブランチ t-0129 を main へマージ、2026-10-06)
-- 状態: T-0129 完了(範囲を絞った)。陰解法の系のうち未知数・境のセル・面・セルの面の一覧を GPU の木から作り(GpuImplicitBuild・implicit_build.hlsl)、
-  CPU の系と番号まで毎刻みビット一致・それを GpuImplicit で解いた結果も一致(熱い点・鎖・たくさんの要求)。多重格子の段・重み・節の並び・間接の Dispatch は T-0134。
-- 動いているもの: `-Filter "^gpu_multires_implicit_build(_warp)?$"`(release の HW 約 80 秒〔計測込み〕・WARP 約 35 秒 / debug の HW 約 6.5 分・WARP 約 1.5 分)。
-  計測は `job.py run -Preset release -Exe gpu_multires_implicit_build_test -- --queue compute --measure-only`。multires_implicit(_tree)・
-  gpu_multires_implicit_warp・gpu_multires_implicit_tree_warp も通る。
-- 壊れているもの: なし。
-- 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0129: 番号は CPU と同じ・境のセルは最初の候補の atomic の最小・接頭和は 3 段・一覧は値ごとの順位で置き直す)。
-- 判断待ち: なし。
-- 注意: 系を作る段は 0.22〜0.56 ms(16 Dispatch の直列の遅延が主。docs/perf.md)。凍った枠(頁の不足)を見る形(useFrozenMarks)は試験の場面に無いので未確認(T-0132 で)。
-  GpuImplicit はまだ CPU の系の数で Create する(上限からにするのは T-0134)。MultiresNest::captureImplicitNest(既定 false)は試験用。
-- 注意: tidy(release)はこのチケットのファイルの指摘を直した(gpu_multires.cpp:248 の CreatePipelines の readability-function-size は main から。触っていない)。
-
-## 並走で入ったもの: T-0127 木の陰解法を GPU で解く(ブランチ t-0127 から main へ早送りマージ、2026-10-06)
-- 状態: T-0127 完了(範囲を絞った)。木の本物の陰解法の系(T-0119 の CPU が作る)を GPU の GpuImplicit で解いて CPU と毎刻みビット一致
-  (熱い点・鎖・たくさんの要求)。系を GPU で作るのは T-0129、GPU の伝導の段から呼ぶのは T-0132、V の上限まで積んだ空の回の費用は T-0133。
-- 動いているもの: `-Filter "^gpu_multires_implicit_tree(_warp)?$"`(release の HW 約 3 分〔計測込み〕・WARP 約 2 分 / debug の HW 約 9〜15 分・WARP 約 5 分。
-  刻みごとに GpuImplicit を Create するので debug の GPU-based validation で重い)。計測は
-  `job.py run -Preset release -Exe gpu_multires_implicit_tree_test -- --queue compute --measure-only`。gpu_multires_implicit(_warp)・multires_implicit(_tree) も通る。
-- 壊れているもの: なし。
-- 決めたこと(Claude・実装の細部): ADR-0019 追記(T-0127: GPU の段に刻みの初めの温度と粗い側の端数の枠・ImTail の境は 1024 / 32 のまま・最も粗い段は節 1024 以下の時だけ ImTail)。
-- 判断待ち: なし。
-- 注意: 計測(② だけ。上限 64 / 16): 鎖の後の刻み 2.91 / 1.48 ms・初めの 12 刻み 2.98 / 1.84 ms・熱い点 0.36〜0.49 / 0.23〜0.35 ms・たくさんの要求 10〜13 / 7.4〜9 ms。
-  T-0119 の見込み(後 0.7〜1.3 ms)より重い。理由は境のセルの長い行と V の上限 64 の空の回(T-0133)。MultiresNest::captureImplicitGrid(既定 false)は試験・計測用。
-- 注意: tidy(release)はこのチケットのファイルに警告なし。gpu_multires.cpp:248 の CreatePipelines に readability-function-size が 1 件出る(main から。触っていない)。
-
-## 並走で入ったもの: T-0119 陰解法を木の伝導に(CPU。ブランチ t-0119 を main へマージ、2026-10-06)
-- 状態: T-0119 完了(CPU)。options.implicitConduction(既定 false)で、基準より細かい(Δk 1〜8)本物のブロックの面を陰解法で解く
-  (engine/src/sim/multires_implicit_conduction.cpp)。GPU はまだ(T-0127)。影のブロックは陽解法のまま(T-0128)。
-- 動いているもの: `-Filter "^multires_implicit_tree$"`(release 約 20 秒)。計測は `job.py run -Preset release -Exe multires_implicit_tree_test`。
-  今までの CPU のテスト(multires 9 本・reaction 3 本)と gpu_multires_implicit_warp・gpu_multires_conduction_warp も通る。
-- 壊れているもの: なし。
-- 決めたこと: ADR-0019 追記(T-0119: 面を流れを計算する側のレベルで分ける・境のセル・眠っている頁のブロックも系に・Δk ≤ 8)。
-- 判断待ち: (1) 1 刻みより速く落ち着く細かいむら(おすすめ A このまま)/ (2) 基準 + 8 段より細かい所の熱(おすすめ A このまま)。このチケットの「判断待ち」。
-- 注意: 陰解法を入れた刻みは、眠っている頁のブロックも系に入る(活性 = 全部のため)。静かな頁が多い世界では系が大きくなる(費用は V 1 回ぶん。
-  収束済みなら判定で止まる)。GPU でこれが重ければ、T-0127 で「温度差が無い連結成分を除く」などを考える。
-  MultiresNest に計測用の欄(implicitCost・implicitCells・implicitLevels。状態に入らない)を足した。
-
-## 並走で入ったもの: T-0120 陰解法の GPU の固定費(ブランチ t-0120 を main へマージ、2026-10-06)
-- 状態: T-0120 完了。方式②の GPU 版の固定費を減らした(engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl。ImTail が 13 個目の入口)。
-- 動いているもの: `-Filter "^(multires_implicit|gpu_multires_implicit(_warp)?)$"` が debug・release で通る。計測は
-  `job.py run -Preset release -Exe gpu_multires_implicit_test -- --queue compute --measure-only`。
-- 壊れているもの: なし。
-- 決めたこと(Claude・実装の細部): ADR-0019 追記(長い行をグループで・小さい段から下を ImTail の 1 Dispatch・境 16 / 1024)。
-- 判断待ち: なし(Q3・Q5 は D-434・D-436 に決まった)。
-- 注意: ImTail は 1 グループ(= 1 つの SM)で回すので、大きすぎる段を入れると重くなる(2048 節で逆転)。木につないだ後(T-0119)は段の大きさが変わるので測り直す。
-  空の回の 1 Dispatch あたりの費用(約 1 µs。バリア)は減っていない。さらに減らすなら: 止める判定と CycleEnd を 1 Dispatch に(最後のグループが判定)・Work Graphs。
-- 注意: wt2 の out/build/profile/bin は計測の比べ用に写した main の版(git 管理外。消してよい)。
-
-## 並走で入ったもの: T-0117 陰解法を GPU に(ブランチ t-0117 から main へ早送りマージ、2026-10-06)
-- 状態: T-0117 完了。方式②の GPU 版 engine/src/sim/gpu_implicit.*・shaders/sim/implicit_conduct.hlsl(試作のセルの一覧のまま。木にはつないでいない)。
-  式は shaders/common/implicit_conduction.hlsli(CPU の implicit_conduction.cpp も同じ関数を呼ぶ)。
-- 動いているもの: `-Filter "^(multires_implicit|gpu_multires_implicit(_warp)?)$"` が debug・release で通る(gpu_multires_implicit は debug の HW 約 35 秒・WARP 約 9 秒)。
-  release の HW では計測もする(`job.py run -Preset release -Exe gpu_multires_implicit_test -- --queue compute --measure-only`)。tidy(release)警告なし・archmap OK。
-- 壊れているもの: なし。
-- 決めたこと: ADR-0019 追記(GPU の形・案 a〔基準より細かい所は全部②〕を仮に・述語で空の回を飛ばす)。
-- 判断待ち: (D-436 で「解き切る」に決まった)。
-- 注意: ②の鎖の費用は一部を取り出した見積もり(外は断熱)。本物は T-0119。費用は Dispatch の待ちと長い行(1 節の隣 100 個以上)で決まる → T-0120。
-
-## 並走で入ったもの: T-0110 研究 陰解法の熱(ブランチ t-0110 から main へ早送りマージ、2026-10-06)
-- 状態: T-0110(研究)完了。方式②の CPU 試作 engine/src/sim/implicit_conduction.*(木にはつないでいない)・テスト tests/multires_implicit_test.cpp(debug で約 1〜3 分)。
-- 動いているもの: 物差し Δk 0〜8・熱い点の場面で、選んだ形(V 適応 1 mK・上限 16)が ±5%・保存ビット一致・行き過ぎなし・2 回一致。
-- 壊れているもの: なし。試作は熱容量一定・頁や活性なし。
-- 決めたこと: ADR-0019(近似解の面の流れ + 誤差の判定で止める V サイクル + 安全網)。①との組み合わせは T-0117 で測ってから。
-- 注意: 回数は場の鋭さで変わる(決定的だが費用が一定でない)。D-432 の M2 は方式①のまま。次は T-0117(GPU)。
+## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
+- **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134。次は T-0135)**:
+  CPU の方式②(engine/src/sim/implicit_conduction.*・multires_implicit_conduction.cpp。options.implicitConduction 既定 false)と GPU の解く側
+  (gpu_implicit.*・implicit_conduct.hlsl)・系を作る側(gpu_implicit_build.*・implicit_build.hlsl)・多重格子の段(gpu_implicit_levels.*・implicit_levels.hlsl)。
+  どれも CPU と番号まで毎刻みビット一致。決めたことは ADR-0019 の追記。動かし方: `-Filter "^(multires_implicit(_tree)?|gpu_multires_implicit(_tree|_build)?(_warp)?)$"`、
+  計測は `job.py run -Preset release -Exe gpu_multires_implicit_build_test -- --queue compute --measure-only`(_tree_test・_test も同じ)。
+  注意: GpuImplicit はまだ CPU の系で Create する(節の並び・ImTail も CPU から。T-0135)。GpuImplicitLevels の RecordCopyTo・RecordReadback は RecordBuild と同じリストで。
+  多重格子の段の費用は上限 64 で 1.6〜2.7 ms(空の回 948 Dispatch の固定費。T-0135)。判断待ち(T-0119): 1 刻みより速く落ち着く細かいむら・基準 + 8 段より細かい所(どちらもおすすめ A このまま)。
+  release の WARP でも C4189(implicit_conduction.cpp の 'added'。FX_ASSERT の中だけで使う)が出る(wt2 の範囲なので触っていない)。
+- **Luau(wt3。T-0020 済み → T-0138)**: 殻(CPU だけ。engine/src/script/luau_sandbox.*)。ADR-0030。vcpkg.json に luau、CMakePresets.json の環境に XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。
+  Luau のヘッダは pch.h に入れていない。ログは Channel::Tool。次: T-0138 → T-0021 → T-0139。
+- **エディタの殻(T-0023 済み → T-0142)**: `bicameral --editor`(パネル「時間」「状態」。--auto-time は人がいない確認用)。ImGui は editor_overlay.cpp だけ(pch.h に入れない)。
+  時間の操作は世界に入らない(ADR-0035)。4 つのランナーが同じ GPU を使っている間は debug 版の最初のフレームが 2〜4 分かかることがある。
+- **スクリーンショット(wt4。T-0025)**: 作業中。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0123)**: 最初に T-0134・T-0020・T-0023 を合わせた main(変更前)で release の全部 87 本を 3 回に分けて通過
+  (`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control)"` 33 本・約 4 分 /
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe)|window_replay)"` 34 本・約 18 分 / `-Filter "^gpu_multires"` 20 本・約 32 分)。
+  2 回目の束で window_replay_peek が 1 回だけ全部のハッシュ不一致で落ちた(S(1) から。ほかの作業ツリーの GPU のテストと重なった時)→ `-Filter "^window_replay"` で流し直して 4 本通過。
+  直したものなし。変更後は release で `-Filter "^(multires_activity|gpu_multires(_activity|_quiet|_uniform|_conduction|_near_fold)?(_warp)?|gpu_probe_(peek|sim)(_warp)?)$"` の 17 本が通過(約 13 分)
+  (GPU の全部を刻む・活性・観察の枠・覗き窓の入れ子が CPU の全部を評価する側と毎刻みビット一致)。debug はビルドだけ。
+  計測は `job.py run -Preset release -Exe gpu_multires_activity_test -- --queue compute` を 2〜3 回続けて(1 回目は時計が低く 5〜8 倍に出る)。
 - **テスト(2026-10-09、T-0130)**: release の全部のテスト 84 本を 3 回に分けて通過(T-0122 と T-0129 を合わせた main + この変更。直したものなし):
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check)"`(31 本・約 4 分)/
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe)|window_replay)"`(33 本・約 20 分)/ `-Filter "^gpu_multires"`(20 本・約 40 分。
@@ -157,8 +76,9 @@
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
 - **HW の Work Graph は反応の核を 1 ノードに 3〜4 か所展開すると DEVICE_HUNG**(T-0124。原因は推定・BACKLOG)。反応はどこも待ちの丸めだけ(今までの丸めは T-0130 で消した)。
-- 待ちの丸めは重い(セルごとに log2 と 128bit の割り算): 活性の静かな刻みも約 0.4 ms(今までの丸め 0.08 ms。観察の枠の評価と推定)・全部を刻む 0.42 ms(0.026)。
-  1 本のリストに 400 回積むと TDR になった(計測の暖機は 1/10)。→ T-0123。
+- 待ちの丸めの 1 回の評価は重い(セルの規則ごとに log2 2 回と 128bit の割り算)。GPU は眠っているブロックを評価しないので費用は起きている所だけ(T-0123)。
+  CPU の StepNest・StepActive(確かめる側)は全部を評価するので、debug の CPU のテストは T-0115 の前より遅いまま(multires_conduction・subcycle)。
+  1 本のリストに 400 回積むと TDR になった(T-0123 の前。計測の暖機は 40 回のまま)。
 - **細かいレベルの熱の小刻みの GPU は Δkmax 3 で 8.4 ms/刻み**(T-0111 で 40 から縮めた。鎖は Δkmax 1・2・3 で 0.55・2.2・8.4 ms)。小刻み 1 回 = 印 25・頁 3・端数 4・埋める 2・流れ 25・
   終わり + 起こすグラフ 53 µs(活性 Compute。一時的にタイムスタンプを打って測った)。段 6 つ + 起こすグラフの固定費 ≈ 50 µs × 64 が床。どうするかは QUESTIONS Q3(判断待ち)。
 - 小刻みの数は呼ぶ側の maxSubcycleGap で決まり、GPU は最大回数を全部積む(空の小刻みも 41〜49 µs。T-0111 で 512 スレッドのグループが空で抜ける分 19 → 41 µs に増えた〔全部を刻む時〕)。ゲームの値は未定(T-0111 の後)。
@@ -178,6 +98,9 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。ADR-0018 追記〔T-0123〕)GPU の StepBlockWait は `印 < wakeTick かつ busyTick ≠ 印` のブロックを頁のブロックでも評価しない
+  (全部を刻む StepWait・ActivityStepNode・ObserverStepNode・覗き窓の入れ子)。CPU は全部を評価したまま(確かめる側)。
+- (Claude が決めた。同上)log2 と割り算を要る時だけにする形は採らない(GPU の仮の世界が 8〜12% 遅くなった。式は今のまま)。
 - (Claude が決めた。ADR-0018 追記〔T-0130〕)1 セルの反応の試験は 1 セルだけのブロック(セル + changedTick)を待ちの丸めで進める。GPU の試験は区間の初めに
   「直前の刻みに変わった」とみなす(セルごとの changedTick をバッファに持たない。待ちは記憶が無いので偏らない)。MrSameCell は RxSameCell を呼ぶ。
   D-424 の「進まない」を確かめる試験(TestSleepCutoff)と、取り合いの試験の「刻みの乱数の丸め」の版は消した(待ちの丸めの版だけ残す)。
@@ -204,9 +127,12 @@
 - (前のチャット T-0104 の決定は ADR-0015 追記と 17 §5 にある)
 
 ## 次にやること
-NEXT.md の先頭(T-0130 → T-0123)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭(T-0113)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **GPU の眠り(T-0123)**: multires_wait_step.hlsli の StepBlockWait の初めで眠っているブロックを飛ばす。これは「ブロックのセル・tc・刻むセルの形を変えるものは
+  必ずつつく(PokeBlock / MR_BUSY_POKED)か busyTick を書く」という約束に頼っている。セルを書き換える段を足す時につつき忘れると、GPU だけ起きずに CPU と食い違う
+  (CPU は全部を評価するので、毎刻みの比べで見つかる)。GPU の計測は同じ exe を続けて 2〜3 回流し、2 回目以降を使う。
 - **仮の世界の待ちの丸め(T-0122)**: probe_conduct.hlsl の ConductBlock(BlockMinTick で起こす刻みの最小 → tc・起こす刻みを書く)と probe_tick.hlsl の
   ApplyCommand(つつきの tc)・WakeDueBlocks(probe_sim.cpp の RecordUnit が適用の後に投げる)。印の場所は probe_sim.hlsli の PROBE_SCHEDULE_CHANGED_WORD・_WAKE_WORD。
   CPU は probe_sim.cpp の ProbeReference::Advance(全部を計算し、ブロックの待ちの最小 ≤ 次の刻みの印を POSSIBLE に)と ProbeInitialBlockWakes。

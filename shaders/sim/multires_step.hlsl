@@ -34,7 +34,7 @@ bool IsSteppedSlot(uint32_t slot) {
     return kind != MR_BLOCK_UNUSED && kind != MR_BLOCK_MIRROR;
 }
 
-// 全部の枠を待ちの丸めで刻む(1 グループ = 1 枠。CPU の StepNest)
+// 全部の枠を待ちの丸めで刻む(1 グループ = 1 枠。CPU の StepNest。眠っているブロックは評価を省く。T-0123)
 [numthreads(WAIT_STEP_THREADS, 1, 1)] void StepWait(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
     const uint32_t slot = group.x;
     if (slot >= g_blockCount)

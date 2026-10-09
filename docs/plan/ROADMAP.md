@@ -103,8 +103,8 @@
 | ~~T-0125~~ | (2026-10-06 完了。伝導の段を待ちの丸めだけに・許容差つきで畳んだらつつく・影を引き戻したら POKED。伝導・小刻み・near_fold が HW・WARP で CPU と毎刻み一致)(T-0121 から分けた)GPU の伝導の段を待ちの丸めに・許容差つきの畳みと影の引き戻しで tc を書き直す(CPU・GPU)。伝導のテストから cutoffRounding を外す | 02 §3・17 |
 | ~~T-0122~~ | (2026-10-06 完了。仮の世界〔ProbeStepCell・ブロックごとの tc と起こす刻み・WakeDueBlocks〕と覗き窓を待ちの丸めに。HW・WARP が CPU と毎刻み一致・遅い反応の世界で眠ったブロックが待ちの来た刻みに起きる。D-424 は置き換えた。古いコードを消すのは T-0130)(T-0115 から分けた)仮の世界(ProbeStepCell・probe_peek)を待ちの丸めに。cutoffRounding・RxStepCell・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION を消す。完了で D-424 を「置き換えた」に | 02 §3 |
 | ~~T-0130~~ | (2026-10-09 完了。今までの丸めのコードを消し、1 セルの反応の試験は 1 セルだけのブロックの待ちの丸めに。release の全部のテストが通過)(T-0122 から分けた。2 時間の約束)今までの丸めのコードを消す: MultiresStepOptions::cutoffRounding と CPU・GPU のその道(multires_step.hlsl の Main・StepExpanded・MR_STEP_CUTOFF_ROUNDING)・RxStepCell・RxEvaluateCell・RxCollectCandidates・RxDesiredExtent・RxScaleExtent・RX_EXTENT_CUTOFF_FRACTION・MrStepCell(Detailed)。reaction・reaction_contention・gpu_reaction のテストを待ちの丸めに(D-424 の「進まない」を確かめる所は消す)。release の全部の GPU・CPU のテストを 2〜3 回に分けて流す | 02 §3 |
-| T-0123 | (T-0115 から分けた)待ちの評価の費用を下げる(log2 2 回と割り算を必要な時だけ。debug の multires_conduction 38→153 s・subcycle 154→564 s) | 02 §3 |
-| T-0116 | (T-0115 の計測で重ければ)起こす仕組みを階層タイマーホイールか木の上の最小値に | 17 |
+| ~~T-0123~~ | (2026-10-09 完了。GPU は眠っているブロックを評価しない〔全部を刻む 0.054 → 0.011 ms・静か 0.08 ms は今までの丸めの水準〕。log2・割り算を要る時だけの形は GPU で 8〜12% 遅くなり採らない。T-0124 の 0.415 ms は時計が下がった値だった)(T-0115 から分けた)待ちの評価の費用を下げる(log2 2 回と割り算を必要な時だけ。debug の multires_conduction 38→153 s・subcycle 154→564 s) | 02 §3 |
+| T-0116 | (T-0115 の計測で重ければ。T-0123 の後の静かな刻みは 0.08 ms で今は要らない)起こす仕組みを階層タイマーホイールか木の上の最小値に | 17 |
 | ~~T-0020~~ | (2026-10-09 殻まで完了: Luau 0.729・読み込みと実行・決まった API だけのサンドボックス・上限・決定性。ADR-0030。残りは T-0138〜T-0140)Luau の組み込み・サンドボックス・パッケージ・ホットリロード | 13 §2 |
 | T-0138 | (T-0020 から分けた)Luau のパッケージ(1 フォルダ = 1 パッケージ・読み込む順番・表の合わせ方・パッケージの中だけの require)。表の上書きの可否は QUESTIONS Q8 | 13 §2 |
 | T-0139 | (T-0020 から分けた)Luau のホットリロード(ファイルの変更 → 読み直し → ベイク → 刻みの境界で適用。T-0021・T-0023 の後) | 13 §2 |

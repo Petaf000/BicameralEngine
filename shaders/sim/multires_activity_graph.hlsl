@@ -166,7 +166,8 @@ void ObserverStepNode(DispatchNodeInputRecord<MrObserverRecord> input, uint3 gro
                       uint32_t thread : SV_GroupIndex) {
     const uint32_t slot = input.Get().firstSlot + group.x;
 
-    // 待ちの丸め: 使っていない観察の枠も評価する(刻むセルが無いので wakeTick = RX_WAIT_NEVER。CPU の StepActive は観察の枠を全部刻む)
+    // 待ちの丸め: 観察の枠も起こす刻みが来た時だけ評価する(T-0123。使っていない枠は刻むセルが無いので wakeTick = RX_WAIT_NEVER になり、
+    // 以後は評価しない。CPU の StepActive は観察の枠を全部刻む)
     StepBlockWait(slot, thread);
 }
 
