@@ -171,5 +171,12 @@ foreach(operation IN LISTS BICAMERAL_BENCH_OPERATIONS)
   math(EXPR benchIndex "${benchIndex} + 1")
 endforeach()
 
+# 気体の流れの 1 小刻みの Compute の段(T-0185 G3 の第 1 段。呼ぶ順は engine/src/sim/gpu_gas.cpp)
+foreach(_entry IN ITEMS GasDerive GasFaceForce GasApplyForce GasFaceFlow GasOutflow GasFaceMoved GasMovedSum GasFaceFinal GasTransfer)
+  string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
+  string(TOLOWER "${_snake}" _snake)
+  bicameral_add_shader(sim/gas_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
+endforeach()
+
 get_property(BICAMERAL_SHADER_OUTPUTS GLOBAL PROPERTY BICAMERAL_SHADER_OUTPUTS)
 add_custom_target(bicameral_shaders ALL DEPENDS ${BICAMERAL_SHADER_OUTPUTS} ${BICAMERAL_FLOAT_SOURCE_STAMP})
