@@ -25,8 +25,13 @@ namespace bicameral::sim {
     std::expected<GpuMultiresImplicit, std::string> GpuMultiresImplicit::Create(
         ID3D12Device5* device, const GpuMultires& multires, const MultiresCapacity& capacity,
         const GpuMultiresImplicitLimits& limits) {
+        if (limits.unknowns == 0 || limits.cells == 0 || limits.nodes == 0 || limits.links == 0)
+            return std::unexpected("陰解法の上限は全部の欄が要る(T-0178)");
+
+        // --- 系を作る段のバッファは予算の大きさ(未知数 ≤ 隣 / 12・セル ≤ 節。段 0 がいつも入る)---
+        const MultiresImplicitBudget budget = MakeMultiresImplicitBudget(limits);
         auto build = GpuImplicitBuild::Create(device, multires, capacity,
-                                              {.unknowns = limits.unknowns, .cells = limits.cells});
+                                              {.unknowns = budget.unknowns, .cells = budget.cells});
         if (!build)
             return std::unexpected(build.error());
 
@@ -38,8 +43,8 @@ namespace bicameral::sim {
         if (!levels)
             return std::unexpected(levels.error());
 
-        const GpuImplicitLimits solveLimits{.cells = limits.cells,
-                                            .faces = MR_FACES * limits.unknowns,
+        const GpuImplicitLimits solveLimits{.cells = budget.cells,
+                                            .faces = MR_FACES * budget.unknowns,
                                             .nodes = limits.nodes,
                                             .links = limits.links,
                                             .levels = levelLimits.levels};
@@ -48,6 +53,12 @@ namespace bicameral::sim {
             return std::unexpected(implicit.error());
 
         return GpuMultiresImplicit(std::move(*build), std::move(*levels), std::move(*implicit));
+    }
+
+    void GpuMultiresImplicit::RecordAdmit(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                          GpuMultires& multires, const MultiresStepOptions& options) {
+        FX_ASSERT(options.implicitOverflow == ImplicitOverflow::Explicit);  // B・C は未実装(Q22)
+        m_build.RecordAdmit(list, debugRing, multires, options);
     }
 
     void GpuMultiresImplicit::Record(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -63,7 +74,7 @@ namespace bicameral::sim {
                 multires.RecordTimestamp(list, PHASE_STAMP_FIRST + phase);
         };
         stamp(0);
-        m_build.RecordBuild(list, debugRing, multires, options, true);
+        m_build.RecordBuild(list, debugRing, multires, options, true, true);
         stamp(1);
         m_levels.RecordBuild(list, debugRing, m_build);
         m_implicit.RecordReset(list);

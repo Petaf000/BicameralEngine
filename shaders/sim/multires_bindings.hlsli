@@ -347,6 +347,8 @@ static const uint32_t CONDUCT_MARK_GRANTED = 4;   // 端数の枠を配った(Tr
 static const uint32_t
     CONDUCT_MARK_CHANGED = 5;  // 小刻みの終わりに変化を足した(ConductEnd。忙しさと次の刻みの種。T-0109)
 static const uint32_t CONDUCT_MARK_SEEDED = 6;  // 次の刻みの種に入れた(AppendSeedOnce。T-0109)
+static const uint32_t CONDUCT_MARK_IMPLICIT =
+    7;  // この刻みは陰解法の系に入れる(implicit_build.hlsl の ScanBlocks が上限の中で選んだ。T-0178)
 static const uint32_t CONDUCT_DELTA_BYTES = 16;
 
 uint32_t CurrentStepMark() {

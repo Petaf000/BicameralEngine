@@ -128,8 +128,9 @@ bool SubstepEnds(int32_t level) {
     return MrSubstepEnds(CurrentSubstep(), LevelSubcycleShift(level), SubcycleGap());
 }
 
-// 陰解法で解くブロックか(T-0132。CPU の nest_detail::InImplicitConduction): 基準より細かく、基準 + implicitMaxGap 以下の世界の本物の
-// ブロック。その面は流れの段で計算せず、陰解法の段(gpu_multires_implicit.cpp)が解いて変化の表に足す
+// 陰解法で解くブロックか(T-0132。CPU の nest_detail::IsImplicitBlock): 基準より細かく、基準 + implicitMaxGap 以下の世界の本物の
+// ブロックのうち、系を作る段(implicit_build.hlsl の ScanBlocks)が上限の中で選んで印を付けたもの(T-0178。印の無いものは陽解法のまま)。
+// その面は流れの段で計算せず、陰解法の段(gpu_multires_implicit.cpp)が解いて変化の表に足す
 bool InImplicitConduction(uint32_t slot, MrBlock block) {
     if (!ImplicitStep())
         return false;
@@ -137,7 +138,7 @@ bool InImplicitConduction(uint32_t slot, MrBlock block) {
     const int32_t finest = SubcycleBaseLevel() + (int32_t)ImplicitMaxGap();
 
     return slot < g_worldBlocks && block.kind == MR_BLOCK_REAL && block.level > SubcycleBaseLevel() &&
-           block.level <= finest;
+           block.level <= finest && HasConductMark(slot, CONDUCT_MARK_IMPLICIT);
 }
 
 // ブロックの面に接するセルか(一様なブロックの中のセルどうしは同じ値・粗い側への面はブロックの面にしかない)
@@ -395,6 +396,7 @@ void ConductPrepareBlock(uint32_t slot, uint32_t thread) {
 // セル 1 つの面の流れを変化に足す(自分と、粗い側へ送った先。CPU の AddCellFlows)。凍らせたブロックとの面は流れない
 void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
     const MrThermal self = CachedThermal(index);
+    const bool joinsImplicit = slot < g_worldBlocks && block.kind == MR_BLOCK_REAL;
     const uint32_t shift = LevelSubcycleShift(block.level);
     int64_t own = 0;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
@@ -403,6 +405,12 @@ void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
             continue;
 
         if (IsFrozenSlot(neighbor.slot))
+            continue;
+
+        // 陰解法で解くブロックとの同じレベルの面は、こちらのセルが境のセルとして陰解法の系で受ける(T-0178。上限で選ばれなかった側。
+        // CPU の CollectCellFaces)
+        if (neighbor.kind == MR_NEIGHBOR_SAME && joinsImplicit &&
+            InImplicitConduction(neighbor.slot, g_blocks[neighbor.slot]))
             continue;
 
         const MrThermal other = NeighborThermal(index, face, neighbor);

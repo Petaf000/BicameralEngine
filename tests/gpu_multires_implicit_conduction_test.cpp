@@ -5,7 +5,9 @@
 // 場面(gpu_multires_implicit_tree_test と同じ): 熱い点(レベル 6 の根の 1 セルだけ 1500 K)・鎖(レベル 0〜6・端数の枠 16)・
 // たくさんの要求(深さ 26 段・木箱が燃える・影・相変化で熱容量が変わる)。どれも全部を刻む(Compute)と活性の刻みの両方。
 // 確かめること: 毎刻み、状態の全部(HashWholeNest)・活性なら次の刻みの種・陰解法の V の回数と安全網の数が CPU と一致。
-// 系の大きさの上限は CPU で先に刻んだ系(captureImplicitGrid)の 2 倍 + 16(GPU は CPU の系を写さない)。
+// 系の大きさの上限は CPU で先に刻んだ系(captureImplicitGrid)の 2 倍 + 16 と、全部のブロックが入る見込み(GPU は CPU の系を写さない)。
+// 上限を超えた刻み(T-0178。Q22 の案 A。仮): 同じ場面を上限を小さくして(ブロックが入らない・多重格子の段が入らない)CPU と GPU に
+// 同じ上限を渡し、毎刻みビット一致と保存量(ComputeConservedTotals)の一致を確かめる。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 1 刻み全体の GPU の ms(陰解法あり / なし。なしは同じ場面を陽解法の
 // 頭打ちで刻む比べる相手)。同じ場面を 2 回流して 2 回目を使う。
 #include <algorithm>
@@ -47,7 +49,20 @@ namespace {
     constexpr uint64_t STRESS_TICKS = 8;
     constexpr uint32_t EARLY_TICKS = 12;  // 計測の「初めの刻み」の数(鎖の熱が強い間)
 
+    constexpr int32_t CONSERVED_LEVEL = 40;  // 保存量を数える単位のレベル(どの場面の最も細かいレベルより細かい)
+
     enum class SceneKind : uint8_t { HotPoint, Chain, Stress };
+
+    // 上限の形(T-0178): 全部入る / ブロックが入らない(未知数の上限を CPU の系の 1/3)/ 多重格子の段が入らない(隣を段 0 の見込みだけ)
+    enum class Squeeze : uint8_t { None, Blocks, Levels };
+
+    const char* SqueezeName(Squeeze squeeze) {
+        switch (squeeze) {
+            case Squeeze::Blocks: return "ブロックが入らない上限";
+            case Squeeze::Levels: return "段が入らない上限";
+            default: return "全部入る上限";
+        }
+    }
 
     struct SceneSpec {
         const char* name = "";
@@ -63,12 +78,16 @@ namespace {
         uint32_t implicitCells = 0;
         uint32_t cycles = 0;
         uint32_t limitedCells = 0;
+        uint32_t deferredBlocks = 0;  // 上限に入らず陽解法のままにしたブロック(T-0178)
+        size_t gridLevels = 0;        // 多重格子の段の数
+        sim::ConservedTotals conserved;
     };
 
     struct CpuRun {
         sim::MultiresNest initial;
         std::vector<TickCheck> ticks;
-        sim::GpuMultiresImplicitLimits limits;
+        sim::GpuMultiresImplicitLimits fitted;  // CPU が刻んだ系の大きさの最大
+        sim::GpuMultiresImplicitLimits limits;  // GPU に渡す上限(上限を渡して刻んだなら同じ値)
     };
 
     struct Context {
@@ -137,11 +156,42 @@ namespace {
         limits.links = std::max(limits.links, fitted.links);
     }
 
-    CpuRun RunCpu(const sim::BakedReactionTable& table, const SceneSpec& scene, bool active) {
-        CpuRun run{.initial = MakeSceneNest(table, scene.kind), .ticks = {}, .limits = {}};
+    // 全部のブロックが入る上限: CPU の系の 2 倍 + 16、セルは見込み(未知数 × 7)、隣は段 0 の見込み(未知数 × 12)まで
+    sim::GpuMultiresImplicitLimits Generous(const sim::GpuMultiresImplicitLimits& fitted) {
+        sim::GpuMultiresImplicitLimits limits;
+        limits.unknowns = (2 * fitted.unknowns) + 16;
+        limits.cells = std::max((2 * fitted.cells) + 16, 7 * limits.unknowns);
+        limits.nodes = std::max((2 * fitted.nodes) + 16, limits.cells);
+        limits.links = std::max((2 * fitted.links) + 16, 12 * limits.unknowns);
+
+        return limits;
+    }
+
+    sim::GpuMultiresImplicitLimits Squeezed(const sim::GpuMultiresImplicitLimits& fitted, Squeeze squeeze) {
+        sim::GpuMultiresImplicitLimits limits = Generous(fitted);
+        if (squeeze == Squeeze::Blocks) {
+            limits.unknowns = std::max(fitted.unknowns / 3, 1u);
+            limits.cells = 7 * limits.unknowns;
+        } else if (squeeze == Squeeze::Levels) {
+            limits.unknowns = fitted.unknowns;
+            limits.cells = 7 * limits.unknowns;
+            limits.nodes = limits.cells;
+            limits.links = 12 * limits.unknowns;
+        }
+
+        return limits;
+    }
+
+    // limits が null なら上限なしで刻み、CPU の系の大きさから GPU の上限(Generous)を決める
+    CpuRun RunCpu(const sim::BakedReactionTable& table, const SceneSpec& scene, bool active,
+                  const sim::GpuMultiresImplicitLimits* limits = nullptr) {
+        CpuRun run{.initial = MakeSceneNest(table, scene.kind), .ticks = {}, .fitted = {}, .limits = {}};
         sim::MultiresNest nest = run.initial;
         nest.captureImplicitGrid = true;
-        const sim::MultiresStepOptions options = ImplicitOptions(table, true);
+        sim::MultiresStepOptions options = ImplicitOptions(table, true);
+        if (limits != nullptr)
+            options.implicitLimits = *limits;
+
         for (uint64_t tick = 0; tick < scene.ticks; ++tick) {
             TickCheck check;
             if (scene.kind == SceneKind::Stress)
@@ -153,16 +203,14 @@ namespace {
             check.implicitCells = nest.implicitCells;
             check.cycles = nest.implicitCost.cycles;
             check.limitedCells = nest.implicitCost.limitedCells;
-            Widen(run.limits, nest.implicitGrid);
+            check.deferredBlocks = nest.implicitDeferredBlocks;
+            check.gridLevels = nest.implicitGrid.levels.size();
+            check.conserved = sim::ComputeConservedTotals(nest, table, CONSERVED_LEVEL);
+            Widen(run.fitted, nest.implicitGrid);
             run.ticks.push_back(std::move(check));
         }
 
-        // --- 上限は 2 倍 + 16(GPU は CPU の系を知らない)---
-        sim::GpuMultiresImplicitLimits& limits = run.limits;
-        limits = {.unknowns = (2 * limits.unknowns) + 16,
-                  .cells = (2 * limits.cells) + 16,
-                  .nodes = (2 * limits.nodes) + 16,
-                  .links = (2 * limits.links) + 16};
+        run.limits = limits != nullptr ? *limits : Generous(run.fitted);
 
         return run;
     }
@@ -229,9 +277,13 @@ namespace {
     }
 
     std::expected<void, std::string> CompareTick(const sim::GpuMultires& gpu, const sim::MultiresNest& read,
-                                                 const TickCheck& check, bool active) {
+                                                 const sim::BakedReactionTable& table, const TickCheck& check,
+                                                 bool active) {
         if (sim::HashWholeNest(read) != check.hash)
             return std::unexpected("CPU と GPU の状態が食い違う");
+
+        if (sim::ComputeConservedTotals(read, table, CONSERVED_LEVEL) != check.conserved)
+            return std::unexpected("CPU と GPU の保存量が食い違う");
 
         if (active) {
             const auto seeds = gpu.ReadSeeds();
@@ -270,14 +322,61 @@ namespace {
         return gpu;
     }
 
-    std::expected<void, std::string> CheckScene(const Context& context, const SceneSpec& scene) {
+    // 上限を小さくした刻みが本当に上限に当たったか(ブロックが入らない形は 1 刻みでも陽解法のブロックがあること。段の形は数だけ記録)
+    std::expected<void, std::string> CheckSqueezed(const CpuRun& full, const CpuRun& run, Squeeze squeeze,
+                                                   uint32_t& deferredTicks, uint32_t& shallowerTicks) {
+        deferredTicks = 0;
+        shallowerTicks = 0;
+        for (size_t tick = 0; tick < run.ticks.size(); ++tick) {
+            deferredTicks += run.ticks[tick].deferredBlocks != 0 ? 1 : 0;
+            shallowerTicks += run.ticks[tick].gridLevels < full.ticks[tick].gridLevels ? 1 : 0;
+        }
+
+        if (squeeze == Squeeze::Blocks && deferredTicks == 0)
+            return std::unexpected("ブロックが入らない上限なのに、陽解法に回したブロックが無い");
+
+        return {};
+    }
+
+    // 保存: 伝導だけの場面(熱い点・鎖)は刻みの初めから毎刻み同じ(上限で陽解法に回しても保存は守る)
+    std::expected<void, std::string> CheckConservation(const sim::BakedReactionTable& table, const SceneSpec& scene,
+                                                       const CpuRun& run) {
+        if (scene.kind == SceneKind::Stress)
+            return {};
+
+        const sim::ConservedTotals initial = sim::ComputeConservedTotals(run.initial, table, CONSERVED_LEVEL);
+        for (size_t tick = 0; tick < run.ticks.size(); ++tick) {
+            if (run.ticks[tick].conserved != initial)
+                return std::unexpected(std::format("刻み {} で保存量が刻みの初めと違う", tick));
+        }
+
+        return {};
+    }
+
+    std::expected<void, std::string> CheckScene(const Context& context, const SceneSpec& scene, Squeeze squeeze) {
         for (const bool active : {false, true}) {
-            const CpuRun run = RunCpu(*context.table, scene, active);
+            CpuRun run = RunCpu(*context.table, scene, active);
+            const CpuRun full = run;
+            uint32_t deferredTicks = 0;
+            uint32_t shallowerTicks = 0;
+            if (squeeze != Squeeze::None) {
+                const sim::GpuMultiresImplicitLimits limits = Squeezed(full.fitted, squeeze);
+                run = RunCpu(*context.table, scene, active, &limits);
+                if (auto squeezed = CheckSqueezed(full, run, squeeze, deferredTicks, shallowerTicks); !squeezed)
+                    return std::unexpected(std::format("{}({}・{}): {}", scene.name, active ? "活性" : "全部",
+                                                       SqueezeName(squeeze), squeezed.error()));
+            }
+
+            if (auto conserved = CheckConservation(*context.table, scene, run); !conserved)
+                return std::unexpected(std::format("{}({}・{}): {}", scene.name, active ? "活性" : "全部",
+                                                   SqueezeName(squeeze), conserved.error()));
+
             auto gpu = MakeGpu(context, run);
             if (!gpu)
                 return std::unexpected(gpu.error());
 
-            const sim::MultiresStepOptions options = ImplicitOptions(*context.table, true);
+            sim::MultiresStepOptions options = ImplicitOptions(*context.table, true);
+            options.implicitLimits = run.limits;
             sim::MultiresNest read;
             uint32_t solved = 0;
             for (uint64_t tick = 0; tick < scene.ticks; ++tick) {
@@ -293,18 +392,20 @@ namespace {
                     return std::unexpected(std::format("{}({}) 刻み {}: {}", scene.name, active ? "活性" : "全部", tick,
                                                        executed.error()));
 
-                if (auto same = CompareTick(*gpu, read, check, active); !same)
-                    return std::unexpected(
-                        std::format("{}({}) 刻み {}: {}", scene.name, active ? "活性" : "全部", tick, same.error()));
+                if (auto same = CompareTick(*gpu, read, *context.table, check, active); !same)
+                    return std::unexpected(std::format("{}({}・{}) 刻み {}: {}", scene.name, active ? "活性" : "全部",
+                                                       SqueezeName(squeeze), tick, same.error()));
 
                 solved += check.implicitCells != 0 ? 1 : 0;
             }
 
             Log(Channel::Gpu, Level::Info,
-                "  {}({}): {} 刻み一致(陰解法を解いた刻み {}・最後の系 {} セル・V {} 回・上限 未知数 {}・セル {}・節 "
-                "{}・隣 {})",
-                scene.name, active ? "活性" : "全部", scene.ticks, solved, run.ticks.back().implicitCells,
-                run.ticks.back().cycles, run.limits.unknowns, run.limits.cells, run.limits.nodes, run.limits.links);
+                "  {}({}・{}): {} 刻み一致(陰解法を解いた刻み {}・最後の系 {} セル・V {} 回・上限 未知数 {}・セル "
+                "{}・節 "
+                "{}・隣 {}・陽解法に回したブロックのある刻み {}・段が浅くなった刻み {})",
+                scene.name, active ? "活性" : "全部", SqueezeName(squeeze), scene.ticks, solved,
+                run.ticks.back().implicitCells, run.ticks.back().cycles, run.limits.unknowns, run.limits.cells,
+                run.limits.nodes, run.limits.links, deferredTicks, shallowerTicks);
         }
 
         return {};
@@ -487,10 +588,13 @@ namespace {
         if (measureOnly)
             return 0;
 
-        for (const SceneSpec& scene : Scenes()) {
-            if (auto checked = CheckScene(context, scene); !checked) {
-                Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_conduction_test: FAILED ({})", checked.error());
-                return 1;
+        for (const Squeeze squeeze : {Squeeze::None, Squeeze::Blocks, Squeeze::Levels}) {
+            for (const SceneSpec& scene : Scenes()) {
+                if (auto checked = CheckScene(context, scene, squeeze); !checked) {
+                    Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_conduction_test: FAILED ({})",
+                        checked.error());
+                    return 1;
+                }
             }
         }
 
@@ -499,7 +603,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info,
             "gpu_multires_implicit_conduction_test: OK(伝導の段から呼ぶ陰解法が全部・活性の刻みで CPU "
-            "と毎刻みビット一致)");
+            "と毎刻みビット一致。上限を超えた刻みも)");
 
         return 0;
     }

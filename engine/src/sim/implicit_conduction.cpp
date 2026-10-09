@@ -680,16 +680,28 @@ namespace bicameral::sim {
         return BuildImplicitGrid(std::move(grid.cells), std::move(grid.faces), galerkin);
     }
 
-    ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces, bool galerkin) {
+    ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces, bool galerkin,
+                                   const ImplicitGridLimits& limits) {
+        const uint64_t maxNodes = limits.nodes == 0 ? UINT64_MAX : limits.nodes;
+        const uint64_t maxLinks = limits.links == 0 ? UINT64_MAX : limits.links;
         ImplicitGrid grid;
         grid.cells = std::move(cells);
         grid.faces = std::move(faces);
         grid.levels.push_back(MakeCellLevel(grid));
+        uint64_t nodes = grid.levels.back().levels.size();
+        uint64_t links = grid.levels.back().neighbors.size();
         while (grid.levels.size() < MAX_GRID_LEVELS && NeedsCoarser(grid.levels.back())) {
             ImplicitGridLevel coarser = Coarsen(grid.levels.back(), galerkin);
             if (coarser.levels.size() == grid.levels.back().levels.size())
                 break;
 
+            // --- 上限に入らない段は作らずに止める(T-0178。次の段の隣は今の段の隣より多くならないので、今の段の数で見込む)---
+            const uint64_t lastLinks = grid.levels.back().neighbors.size();
+            if (nodes + coarser.levels.size() > maxNodes || links + lastLinks > maxLinks)
+                break;
+
+            nodes += coarser.levels.size();
+            links += coarser.neighbors.size();
             grid.levels.push_back(std::move(coarser));
         }
 

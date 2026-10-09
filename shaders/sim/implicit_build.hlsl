@@ -11,6 +11,9 @@
 // 段の順(どの段も前の段の書き込みを読む。段の間は UAV のバリア): Clear → CountBlocks → ScanBlocks → NumberUnknowns → FaceEntries
 //   → ScanEntries(Local → Groups → Add)→ Boundary → Cells → Faces → ScanCells(Local → Groups → Add)→ FillLists → SortLists
 // 伝導の段から呼ぶ時(T-0132)は、GpuImplicit が解いた後に Apply が解いた変化を伝導の変化の表(u11)へ足す。
+// 伝導の段から呼ぶ時(凍った印を見る時)は、Clear → CountBlocks → ScanBlocks を流れの段の前に投げ(GpuImplicitBuild::RecordAdmit。T-0178)、
+// ScanBlocks が系に入れるブロックを枠の順に予算(未知数・セルの上限の見込み)の中まで選んで陰解法の印(CONDUCT_MARK_IMPLICIT)を付ける。
+// 流れの段は印のブロックを飛ばし、印の無いブロックは陽解法のまま(QUESTIONS Q22 の案 A。CPU の MarkImplicitBlocks)。残りの段は流れの後。
 #include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
 #include "sim/multires_bindings.hlsli"
@@ -185,8 +188,14 @@ bool IsUnknownCell(uint32_t slot, MrBlock block, uint32_t index) {
     return MrIsSteppedCell(block, index) && ThermalAt(slot * MR_BLOCK_CELLS + index).capacityLimit != 0;
 }
 
-bool IsUnknownBlock(uint32_t slot, MrBlock block) {
+// 系に入れられる基準より細かいブロック(上限で選ぶ前。CPU の MarkImplicitBlocks の候補)
+bool IsEligibleBlock(uint32_t slot, MrBlock block) {
     return CanJoin(slot) && InImplicit(block);
+}
+
+// 未知数のブロック: 伝導の段から呼ぶ時は ScanBlocks が選んだもの(T-0178)
+bool IsUnknownBlock(uint32_t slot, MrBlock block) {
+    return IsEligibleBlock(slot, block) && (!UseFrozenMarks() || HasConductMark(slot, CONDUCT_MARK_IMPLICIT));
 }
 
 void MarkOverflow() {
@@ -232,7 +241,7 @@ groupshared uint32_t gs_threadCounts[BUILD_THREADS];
 [numthreads(BUILD_THREADS, 1, 1)] void BuildCountBlocks(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
     const uint32_t slot = group.x;
     const MrBlock block = g_blocks[slot];
-    const bool joins = IsUnknownBlock(slot, block);
+    const bool joins = IsEligibleBlock(slot, block);
     uint32_t count = 0;
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / BUILD_THREADS && joins; ++k) {
         if (IsUnknownCell(slot, block, thread.x * (MR_BLOCK_CELLS / BUILD_THREADS) + k))
@@ -249,26 +258,45 @@ groupshared uint32_t gs_threadCounts[BUILD_THREADS];
         StoreWord(BlockOffsetWord(slot), gs_blockCount);
 }
 
-    // --- ScanBlocks: 枠ごとの数の接頭和 → 未知数の始まり(1 グループ)---
+    // --- ScanBlocks: 枠ごとの数の接頭和 → 未知数の始まり(1 グループ)。伝導の段から呼ぶ時(T-0178)は、未知数とセルの上限の見込み
+    //     (ImBlockCellBound)の和が予算(g_external1・2 = MakeMultiresImplicitBudget)に入るブロックに陰解法の印を付ける(CPU の
+    //     MarkImplicitBlocks。和は枠の順に増えるので、入らなくなった所から後は全部入らない)。未知数の数は選んだブロックの和 ---
     [numthreads(SCAN_THREADS, 1, 1)] void BuildScanBlocks(uint3 thread : SV_GroupThreadID) {
     const uint32_t count = g_worldBlocks;
     const uint32_t chunk = ChunkSize(count);
     const uint32_t begin = min(thread.x * chunk, count);
     const uint32_t end = min(begin + chunk, count);
     uint32_t sum = 0;
-    for (uint32_t i = begin; i < end; ++i)
-        sum += LoadWord(BlockOffsetWord(i));
+    uint32_t bound = 0;
+    for (uint32_t i = begin; i < end; ++i) {
+        const uint32_t value = LoadWord(BlockOffsetWord(i));
+        sum += value;
+        bound += ImBlockCellBound(value);
+    }
 
     gs_sums[thread.x] = sum;
-    gs_sumsSecond[thread.x] = 0;
+    gs_sumsSecond[thread.x] = bound;
     ScanGroup(thread.x);
 
+    const bool admits = UseFrozenMarks();
     uint32_t running = gs_sums[thread.x] - sum;
+    uint32_t runningBound = gs_sumsSecond[thread.x] - bound;
     for (uint32_t j = begin; j < end; ++j) {
         const uint32_t value = LoadWord(BlockOffsetWord(j));
         StoreWord(BlockOffsetWord(j), running);
         running += value;
+        runningBound += ImBlockCellBound(value);
+        if (!admits || running > MaxUnknowns() || runningBound > MaxCells())
+            continue;
+
+        if (IsEligibleBlock(j, g_blocks[j]))
+            SetConductMark(j, CONDUCT_MARK_IMPLICIT);
+
+        g_build.InterlockedMax(HEADER_UNKNOWNS * 4, running);
     }
+
+    if (admits)
+        return;
 
     if (thread.x == SCAN_THREADS - 1) {
         StoreWord(BlockOffsetWord(count), gs_sums[thread.x]);

@@ -117,9 +117,16 @@ namespace bicameral::sim {
     // galerkin: 親どうしの面の係数を子の合計のままにする(既定は ÷ 2 でそのレベルの離散化に合わせる。T-0110 の比べ)
     ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, bool galerkin = false);
 
+    // 多重格子の全部の段の節・隣の上限(T-0178。GPU のバッファの大きさ。0 なら上限なし)。次の段を足すと節が上限を超えるか、
+    // 隣が「今までの和 + 最後の段の隣の数」(次の段の隣はそれ以下)で上限を超えるなら、その段を作らずに縮約を止める(implicit_levels.hlsl と同じ判定)
+    struct ImplicitGridLimits {
+        uint32_t nodes = 0;
+        uint32_t links = 0;
+    };
+
     // 面を呼ぶ側が作って渡す(木の隣 MrFindFaceNeighbor から。T-0119)。座標は多重格子の段を作るのに使う(負でもよい)
     ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces,
-                                   bool galerkin = false);
+                                   bool galerkin = false, const ImplicitGridLimits& limits = {});
 
     // 1 刻み進める
     ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options);

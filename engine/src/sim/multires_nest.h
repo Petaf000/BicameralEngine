@@ -67,7 +67,8 @@ namespace bicameral::sim {
 
         // --- 最後の刻みの陰解法の費用(T-0119。状態に入らない。計測用)---
         ImplicitCost implicitCost;
-        uint32_t implicitCells = 0;  // 陰解法の系に入れたセルの数(境のセルを含む)
+        uint32_t implicitCells = 0;           // 陰解法の系に入れたセルの数(境のセルを含む)
+        uint32_t implicitDeferredBlocks = 0;  // 上限に入らずこの刻み陽解法のままにしたブロックの数(T-0178)
         std::vector<std::array<uint32_t, 2>>
             implicitLevels;  // 多重格子の段ごとの [節の数, 1 節の隣の最大](GPU の分け方を見る)
 
@@ -80,6 +81,43 @@ namespace bicameral::sim {
         std::shared_ptr<const MultiresNest> implicitNest;
         std::vector<uint8_t> implicitFrozen;
     };
+
+    // 細かい所の熱の陰解法の系の大きさの上限(T-0178。GPU では VRAM に先に取るバッファの大きさ = GpuMultiresImplicitLimits)。
+    // 欄ごとに 0 なら上限なし(CPU だけ。GPU は全部の欄が要る)。GPU と比べる CPU の刻みには EnableImplicitConduction と同じ値を入れる
+    struct MultiresImplicitLimits {
+        uint32_t unknowns = 0;  // 未知数のセル(面は 6 倍まで)
+        uint32_t cells = 0;     // 未知数 + 境のセル
+        uint32_t nodes = 0;     // 多重格子の全部の段の節(段 0 = セルを含む)
+        uint32_t links = 0;     // 多重格子の全部の段の隣
+    };
+
+    // 陰解法の系が上限に入りきらない刻みの扱い(T-0178。QUESTIONS Q22。仮〔ユーザー未確認〕で A)
+    enum class ImplicitOverflow : uint8_t {
+        Explicit,  // A: 入りきらないブロック(枠の順で上限を超えた所から後)はその刻みだけ陽解法(頭打ち)のまま。熱は流れ、保存も守る
+        Freeze,      // B: その刻み凍らせる(未実装。選べる口だけ。選ぶと A で動く)
+        StopRefine,  // C: 細かくする要求を止める(未実装。選べる口だけ。選ぶと A で動く)
+    };
+
+    // 系に入れるブロックを選ぶ時の予算(T-0178。CPU の MarkImplicitBlocks と GPU の BuildScanBlocks が同じ値を使う):
+    // 未知数 ≤ min(unknowns, links / 12)(段 0 の隣 = 面 × 2 ≤ 未知数 × 12)、セル ≤ min(cells, nodes)(段 0 の節 = セル)。
+    // 多重格子の 2 段目からの節・隣は、入りきらない段を作らずに縮約を止める(BuildImplicitGrid の limits・implicit_levels.hlsl の ParentScanGroups)
+    struct MultiresImplicitBudget {
+        uint32_t unknowns = UINT32_MAX;
+        uint32_t cells = UINT32_MAX;
+    };
+
+    [[nodiscard]] constexpr MultiresImplicitBudget MakeMultiresImplicitBudget(const MultiresImplicitLimits& limits) {
+        const auto bound = [](uint32_t value) {
+            return value == 0 ? UINT32_MAX : value;
+        };
+        constexpr uint32_t LINKS_PER_UNKNOWN = 12;
+
+        const uint32_t byLinks = limits.links == 0 ? UINT32_MAX : limits.links / LINKS_PER_UNKNOWN;
+        const uint32_t unknowns = bound(limits.unknowns) < byLinks ? bound(limits.unknowns) : byLinks;
+        const uint32_t cells = bound(limits.cells) < bound(limits.nodes) ? bound(limits.cells) : bound(limits.nodes);
+
+        return {.unknowns = unknowns, .cells = cells};
+    }
 
     // 1 刻みの選択
     struct MultiresStepOptions {
@@ -103,6 +141,9 @@ namespace bicameral::sim {
         // 陰解法にする最も細かいレベル = subcycleBaseLevel + implicitMaxGap。それより細かい所は陽解法のまま(頭打ちで遅い)。
         // 温度の端数(mK × 2^16)の精度で、面の流れの誤差は約 4^Δk × 2^-16 mK になり、Δk 8 を超えると 1 mK の判定に届かない(T-0119)
         uint32_t implicitMaxGap = 8;
+        // 系の大きさの上限と、入りきらない刻みの扱い(T-0178)。GPU は EnableImplicitConduction の上限を使う(CPU と比べる時は同じ値をここへ)
+        MultiresImplicitLimits implicitLimits;
+        ImplicitOverflow implicitOverflow = ImplicitOverflow::Explicit;
     };
 
     constexpr uint32_t MULTIRES_MAX_SUBCYCLE_GAP = 3;

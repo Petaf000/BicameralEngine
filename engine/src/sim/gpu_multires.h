@@ -51,7 +51,7 @@ namespace bicameral::sim {
     };
 
     class GpuMultiresImplicit;
-    struct GpuMultiresImplicitLimits;
+    using GpuMultiresImplicitLimits = MultiresImplicitLimits;  // 陰解法の系の大きさの上限(VRAM に先に取る。T-0178)
 
     class GpuMultires {
     public:
@@ -221,7 +221,8 @@ namespace bicameral::sim {
                                uint32_t groupCount);
         void RecordConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                               const MultiresStepOptions& options, uint32_t wakeList);
-        void RecordConductSubstep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        void RecordConductSubstep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                  const MultiresStepOptions& options);
         void RecordSubstepEnd(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                               uint32_t wakeList);
         void RecordConductStage(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass);
