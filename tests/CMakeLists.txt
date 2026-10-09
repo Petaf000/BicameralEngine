@@ -82,6 +82,10 @@ add_executable(multires_conduction_test multires_conduction_test.cpp)  # 木の�
 target_link_libraries(multires_conduction_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_conduction COMMAND multires_conduction_test)
 
+add_executable(lab_box_test lab_box_test.cpp)  # 実験室の箱の CPU 側(T-0142)
+target_link_libraries(lab_box_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME lab_box COMMAND lab_box_test)
+
 add_executable(multires_subcycle_test multires_subcycle_test.cpp)  # 細かいレベルの熱の刻み(T-0108)
 target_link_libraries(multires_subcycle_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_subcycle COMMAND multires_subcycle_test)
@@ -201,6 +205,12 @@ bicameral_add_gpu_test_case(gpu_multires_near_fold gpu_multires_conduction_test 
 bicameral_add_gpu_test_case(gpu_multires_near_fold_warp gpu_multires_conduction_test warp --warp --queue compute --near-fold)
 set_tests_properties(gpu_multires_near_fold gpu_multires_near_fold_warp PROPERTIES TIMEOUT 2400)  # 静かになるまで約 2000 刻み
 
+bicameral_add_gpu_test(gpu_lab_box_test)  # 実験室の箱の GPU と CPU のビット一致・記録と再生(T-0142)
+target_link_libraries(gpu_lab_box_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_lab_box gpu_lab_box_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_lab_box_warp gpu_lab_box_test warp --warp --queue compute)
+set_tests_properties(gpu_lab_box gpu_lab_box_warp PROPERTIES TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
+
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
 foreach(_scene IN ITEMS stack mass_ratio pile)
@@ -298,6 +308,9 @@ set_tests_properties(window_replay_editor PROPERTIES LABELS gpu FIXTURES_REQUIRE
 add_test(NAME window_replay_rewind
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-rewind --save-interval 40)
 set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
+# 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
+add_test(NAME window_lab COMMAND bicameral --editor --auto-lab --frames 20)
+set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)

@@ -77,6 +77,14 @@ views:
       - { id: graphpanel, group: framelib, label: "BuildGraphPanel<br/>Work Graphs と性能(単位ごとの GPU 時間・ノードの数と上限)",
           code: "engine/src/editor/graph_panel.cpp::BuildGraphPanel", ticket: T-0143, doc: docs/design/14-editor-tools.md,
           note: "直近 1 秒の読み戻し(単位のタイムスタンプ・T-0008 のカウンタ)を表に。ノードごとの時間は測れない(DispatchGraph の前後だけ)" }
+      - { id: labpanel, group: framelib, label: "LabPanel<br/>実験室: 小さな箱に物と温度を置き GPU と CPU を刻みごとに比べる",
+          code: "engine/src/editor/lab_panel.cpp::LabPanel::Build", ticket: T-0142,
+          doc: docs/decisions/ADR-0037-lab-box.md,
+          note: "置く操作はコマンド(LAB_COMMAND_TYPE_*)。断面の温度・選んだセルの成分を CPU と GPU で並べる。記録の保存と再生。window_lab" }
+      - { id: labsession, group: simlib, label: "LabSession<br/>箱を GPU と CPU リファレンスで並べて刻み、最初に違った刻みとセル",
+          code: "engine/src/sim/lab_session.cpp::LabSession::StepOne", ticket: T-0142,
+          doc: docs/decisions/ADR-0037-lab-box.md,
+          note: "GpuLabBox(lab_box.hlsl でコマンドを当てる → GpuMultires::RecordStep)と StepLabBox(同じ関数 → StepNest)。gpu_lab_box・lab_box" }
       - { id: savepoint, group: simlib, label: "ProbeSim の保存点<br/>S(t) を VRAM に写す・戻す(巻き戻し)",
           code: "engine/src/sim/probe_save_point.cpp::ProbeSim::RecordRestore", ticket: T-0143,
           doc: docs/decisions/ADR-0036-rewind-save-points.md,
@@ -512,6 +520,8 @@ views:
       - [editoroverlay, timecontrol, "止める・1 刻み・速さ"]
       - [timecontrol, scheduler, "始めてよい刻み"]
       - [editoroverlay, graphpanel, "性能の表"]
+      - [editoroverlay, labpanel, "実験室"]
+      - [labpanel, labsession, "置く・刻む・再生"]
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]

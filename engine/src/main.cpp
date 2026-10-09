@@ -38,6 +38,7 @@
 //   --auto-rewind                    保存点が 2 つできたら、古い方へ 1 回巻き戻す(人がいない確認。--replay と一緒にハッシュ列を確かめる)
 //   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。既定: exe の横の data/packages。
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
+//   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -306,6 +307,8 @@ namespace {
             loop.autoTime = true;
         else if (argument == L"--auto-rewind")
             loop.autoRewind = true;
+        else if (argument == L"--auto-lab")
+            loop.autoLab = true;
         else
             return false;
 

@@ -1046,6 +1046,8 @@ namespace bicameral::frame {
             }
 
             m_editor = std::move(*overlay);
+            if (m_options.autoLab)
+                m_editor->Lab().StartAuto();
 
             return true;
         }
@@ -1530,6 +1532,11 @@ namespace bicameral::frame {
 
             if (m_autoTimeFailed)
                 return 1;
+
+            if (m_options.autoLab && (!m_editor || m_editor->Lab().AutoFailed())) {
+                Log(Channel::Sim, Level::Error, "--auto-lab: 実験室の確かめが通らなかった(--editor が要る)");
+                return 1;
+            }
 
             if (m_options.autoRewind && m_rewindCount == 0) {
                 Log(Channel::Sim, Level::Error, "--auto-rewind: 巻き戻せなかった(保存点が 2 つできなかった)");

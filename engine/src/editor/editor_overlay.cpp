@@ -61,6 +61,7 @@ namespace bicameral::editor {
         Window& window, ID3D12Device* device, gpu::Queue& direct, DXGI_FORMAT format, uint32_t frameCount) {
         // NOLINTNEXTLINE(cppcoreguidelines-owning-memory) コンストラクタが private なので make_unique を使えない
         std::unique_ptr<EditorOverlay> overlay(new EditorOverlay(window, frameCount));
+        overlay->m_lab = std::make_unique<LabPanel>(device);
         if (!overlay->CreateGpuObjects(device, frameCount))
             return std::unexpected("エディタの描画のリソースを作れない");
 
@@ -220,6 +221,7 @@ namespace bicameral::editor {
         const TimeRequest buttons = BuildTimePanel(status, time);
         BuildStatusPanel(status);
         BuildGraphPanel(status.graph);
+        m_lab->Build();
 
         ImGui::Render();
 
