@@ -310,6 +310,29 @@ namespace bicameral::editor {
         return rewindTick;
     }
 
+    // 反応表とホットリロード(T-0139): 世界の表の版・差し替えた回数・最後の読み直しの結果(誤りは赤で、ファイル:行:列 から)
+    void EditorOverlay::BuildReactionTable(const ReactionTableStatus& table) const {
+        ImGui::SeparatorText("反応表");
+        Line(std::format("版 {:016x}  差し替え {} 回  読めなかった {} 回", table.version, table.swaps, table.failures));
+        if (!table.watching)
+            ImGui::TextDisabled("ファイルを見ていない(再生中か、--editor でない)");
+        else if (table.waiting)
+            Line("読めた表が刻みの境界を待っている(止めているなら 1 刻み進める)");
+        else
+            ImGui::TextDisabled("パッケージのファイルを見ている(保存すると読み直す)");
+
+        if (table.message.empty())
+            return;
+
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40.0f);
+        if (table.lastFailed)
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "今の表のまま: %s", table.message.c_str());
+        else
+            ImGui::TextWrapped("%s", table.message.c_str());
+
+        ImGui::PopTextWrapPos();
+    }
+
     void EditorOverlay::BuildStatusPanel(const EditorStatus& status) const {
         ImGui::SetNextWindowPos({PANEL_MARGIN_PIXELS, 240.0f}, ImGuiCond_FirstUseEver);
         ImGui::Begin("状態", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
@@ -339,6 +362,7 @@ namespace bicameral::editor {
             Line("記録中");
 
         Line(std::format("GPU に渡す前のコマンド: {}", status.waitingCommands));
+        BuildReactionTable(status.reactionTable);
 
         if (ImGui::CollapsingHeader("操作")) {
             Line("左クリック: つつく(断面)  Shift + 左: 押す");

@@ -132,6 +132,10 @@ PROBE_CONST uint32_t PROBE_COMMAND_TYPE_POKE = 1;  // payload: [0] x [1] y [2] z
 // 押す(T-0098。common/physics_push.hlsli): payload: [0..5] 光線の原点 x・y・z(int64 の下位・上位。2^-20 m、物理の座標)
 //   [6..8] 光線の向き(長さ 1 の Q1.30、int32)[9] 力積の大きさ(mN·s)。物理を入れていなければ何もしない
 PROBE_CONST uint32_t PROBE_COMMAND_TYPE_PUSH = 2;
+// 反応表の差し替え(ホットリロード。T-0139・ADR-0047): payload: [0] 新しい表の版の下位 [1] 上位。
+//   GPU の適用の単位は何もしない(印として記録と再生に残る)。表を写すのと、熱のキャッシュを作り直して全部のブロックを起こすのは、
+//   CPU がその刻みの適用の単位の前後に記録する写しと RefreshTable(sim/probe_sim の ProbeFrameInput::tableSwap)
+PROBE_CONST uint32_t PROBE_COMMAND_TYPE_TABLE = 3;
 
 // --- GPU のコマンドキュー(06 §3。T-0086)---
 // 環状のバッファ。見出し 16 バイト([0] 末尾 = 足した総数 [1] 先頭 = 取り出した総数。どちらも 2^32 で一周する)+ コマンド × 容量。
