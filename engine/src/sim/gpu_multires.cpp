@@ -17,6 +17,7 @@
 
 #include "core/log.h"
 #include "gpu/resources.h"
+#include "sim/gpu_multires_implicit.h"
 
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
@@ -80,8 +81,11 @@ namespace bicameral::sim {
         // ルート定数の stepFlags(multires_bindings.hlsli の MR_STEP_*)
         constexpr uint32_t STEP_FLAG_CONDUCTION = 1;
         constexpr uint32_t STEP_FLAG_LISTED = 2;
-        constexpr uint32_t STEP_FLAG_SUBSTEP_WAKE = 4;  // 小刻みの終わりに起こす(T-0109)
-        constexpr uint32_t STEP_FLAG_WAKE_SEEDS = 16;   // 起こす段が種の一覧に足す(活性の刻みの待ちの丸め。T-0124)
+        constexpr uint32_t STEP_FLAG_SUBSTEP_WAKE = 4;   // 小刻みの終わりに起こす(T-0109)
+        constexpr uint32_t STEP_FLAG_WAKE_SEEDS = 16;    // 起こす段が種の一覧に足す(活性の刻みの待ちの丸め。T-0124)
+        constexpr uint32_t STEP_FLAG_IMPLICIT = 8;       // 細かいレベルの熱の陰解法(T-0132)
+        constexpr uint32_t STEP_IMPLICIT_GAP_SHIFT = 5;  // implicitMaxGap − 1(3bit)
+        constexpr uint32_t MAX_GPU_IMPLICIT_GAP = 8;
         constexpr uint32_t STEP_FLAG_BITS = 0xFF;
         constexpr uint32_t STEP_SUBSTEP_SHIFT = 8;
         constexpr uint32_t STEP_GAP_SHIFT = 14;
@@ -89,6 +93,19 @@ namespace bicameral::sim {
 
         // 起こす段(multires_step.hlsl の WakeDue)の 1 グループのスレッドの数
         constexpr uint32_t WAKE_THREADS = 64;
+
+        // 陰解法の印(T-0132。multires_bindings.hlsli の MR_STEP_IMPLICIT)。陰解法の刻みは小刻みに分けない(CPU の StepConduction と同じ約束)。
+        // implicitMaxGap は 3bit に詰めるので 1〜8 だけ(0 なら陰解法のセルが無いので印を付けない。9 以上は CPU と合わない)
+        uint32_t ImplicitFlags(const MultiresStepOptions& options) {
+            if (!options.implicitConduction || options.implicitMaxGap == 0)
+                return 0;
+
+            FX_ASSERT(options.maxSubcycleGap == 0);
+            FX_ASSERT(options.implicitMaxGap <= MAX_GPU_IMPLICIT_GAP);
+            const uint32_t gap = std::min(options.implicitMaxGap, MAX_GPU_IMPLICIT_GAP);
+
+            return STEP_FLAG_IMPLICIT | ((gap - 1) << STEP_IMPLICIT_GAP_SHIFT);
+        }
 
         // stepFlags に小刻みの番号・maxSubcycleGap・subcycleBaseLevel(符号付き 16bit)を詰める(T-0109。multires_bindings.hlsli の
         // MR_STEP_*_SHIFT。ルート署名の語が残り少ないので定数を足さない)
@@ -98,7 +115,7 @@ namespace bicameral::sim {
                       options.subcycleBaseLevel <= std::numeric_limits<int16_t>::max());
             const auto base = static_cast<uint16_t>(static_cast<int16_t>(options.subcycleBaseLevel));
 
-            return (flags & STEP_FLAG_BITS) | (substep << STEP_SUBSTEP_SHIFT) |
+            return (flags & STEP_FLAG_BITS) | ImplicitFlags(options) | (substep << STEP_SUBSTEP_SHIFT) |
                    (options.maxSubcycleGap << STEP_GAP_SHIFT) | (uint32_t{base} << STEP_BASE_SHIFT);
         }
 
@@ -237,6 +254,26 @@ namespace bicameral::sim {
             return std::unexpected(buffers.error());
 
         return result;
+    }
+
+    GpuMultires::GpuMultires(GpuMultires&& other) noexcept = default;
+    GpuMultires& GpuMultires::operator=(GpuMultires&& other) noexcept = default;
+    GpuMultires::~GpuMultires() = default;
+
+    std::expected<void, std::string> GpuMultires::EnableImplicitConduction(ID3D12Device5* device,
+                                                                           const GpuMultiresImplicitLimits& limits) {
+        auto implicit = GpuMultiresImplicit::Create(device, *this, m_capacity, limits);
+        if (!implicit)
+            return std::unexpected(implicit.error());
+
+        m_implicit = std::make_unique<GpuMultiresImplicit>(std::move(*implicit));
+
+        return {};
+    }
+
+    void GpuMultires::StampImplicitPhases(bool stamp) {
+        if (m_implicit != nullptr)
+            m_implicit->StampPhases(stamp);
     }
 
     std::expected<void, std::string> GpuMultires::CreatePipelines(ID3D12Device5* device,
@@ -860,9 +897,25 @@ namespace bicameral::sim {
                 RecordSubstepEnd(list, debugRing, wakeList);
         }
 
+        // --- 細かいレベルの熱の陰解法(T-0132。最後の小刻みの流れの後。CPU の StepConduction の AddImplicitConduction)---
+        if (options.implicitConduction)
+            RecordImplicitConduction(list, debugRing, options);
+
         // --- 最後の小刻みの変化を足して反応 ---
         RecordConductStage(list, debugRing, ConductPassApply);
         m_constants.stepFlags = flags;
+    }
+
+    // 陰解法の段(sim/gpu_multires_implicit)。刻みの印と stepFlags(最後の小刻み)はこの刻みのまま
+    void GpuMultires::RecordImplicitConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                               const MultiresStepOptions& options) {
+        FX_ASSERT(m_implicit != nullptr);
+        if (m_implicit == nullptr) {
+            Log(Channel::Gpu, Level::Error, "陰解法の段が無い(EnableImplicitConduction を呼んでいない)");
+            return;
+        }
+
+        m_implicit->Record(list, debugRing, *this, options);
     }
 
     // 小刻み 1 回: 印 → 頁 → 端数の枠 → 埋める → 流れ(その小刻みに始まるレベルのブロックだけ)
@@ -917,8 +970,10 @@ namespace bicameral::sim {
     // ほかは Compute
     void GpuMultires::RecordConductStage(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                          uint32_t pass) {
+        // 陰解法の段(T-0132)は流れの後に伝導の一覧を足すが、Work Graph の見出しの数は TreeFractions が写した後なので、足す段は Compute で
         const bool listed = (m_constants.stepFlags & STEP_FLAG_LISTED) != 0;
-        if (!m_useConductGraph || !listed) {
+        const bool implicitApply = pass == ConductPassApply && (m_constants.stepFlags & STEP_FLAG_IMPLICIT) != 0;
+        if (!m_useConductGraph || !listed || implicitApply) {
             RecordConductPass(list, debugRing, pass, std::max(1u, m_blockCapacity));
             return;
         }

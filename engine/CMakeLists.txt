@@ -80,6 +80,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_implicit.cpp
   src/sim/gpu_implicit_build.cpp
   src/sim/gpu_implicit_levels.cpp
+  src/sim/gpu_multires_implicit.cpp
   src/sim/gpu_physics.cpp
   src/sim/lab_session.cpp
   src/sim/probe_peek.cpp

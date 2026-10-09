@@ -662,8 +662,22 @@ namespace bicameral::sim {
         m_timestampCount = std::max(m_timestampCount, index + 1);
     }
 
+    void GpuImplicit::RecordRelease(ID3D12GraphicsCommandList* list) {
+        std::array<D3D12_RESOURCE_BARRIER, BufferCount> barriers{};
+        for (uint32_t i = 0; i < BufferCount; ++i) {
+            barriers[i] = gpu::Transition(m_buffers[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                          D3D12_RESOURCE_STATE_COMMON);
+        }
+
+        list->ResourceBarrier(BufferCount, barriers.data());
+    }
+
     void GpuImplicit::RecordReadback(ID3D12GraphicsCommandList* list) {
         gpu::RecordCopyToReadback(list, m_buffers[BufferCells].Get(), m_cellsReadback.Get());
+        RecordCostReadback(list);
+    }
+
+    void GpuImplicit::RecordCostReadback(ID3D12GraphicsCommandList* list) {
         gpu::RecordCopyToReadback(list, m_buffers[BufferState].Get(), m_stateReadback.Get());
         gpu::RecordCopyToReadback(list, m_buffers[BufferWide].Get(), m_wideReadback.Get());
 
@@ -685,19 +699,25 @@ namespace bicameral::sim {
             return false;
 
         std::vector<ImGpuCell> cells(grid.cells.size());
-        std::vector<uint32_t> state(STATE_WORDS);
-        std::vector<int64_t> wide(WIDE_WORDS);
-        std::vector<uint32_t> plan(IM_PLAN_HEADER_WORDS);
-        if (!gpu::ReadBuffer(m_cellsReadback.Get(), std::as_writable_bytes(std::span(cells))) ||
-            !gpu::ReadBuffer(m_stateReadback.Get(), std::as_writable_bytes(std::span(state))) ||
-            !gpu::ReadBuffer(m_wideReadback.Get(), std::as_writable_bytes(std::span(wide))) ||
-            !gpu::ReadBuffer(m_planReadback.Get(), std::as_writable_bytes(std::span(plan))))
+        if (!gpu::ReadBuffer(m_cellsReadback.Get(), std::as_writable_bytes(std::span(cells))) || !ReadCost(cost))
             return false;
 
         for (size_t i = 0; i < cells.size(); ++i) {
             grid.cells[i].energy = cells[i].energy;
             grid.cells[i].fraction = cells[i].fraction;
         }
+
+        return true;
+    }
+
+    bool GpuImplicit::ReadCost(GpuImplicitCost& cost) const {
+        std::vector<uint32_t> state(STATE_WORDS);
+        std::vector<int64_t> wide(WIDE_WORDS);
+        std::vector<uint32_t> plan(IM_PLAN_HEADER_WORDS);
+        if (!gpu::ReadBuffer(m_stateReadback.Get(), std::as_writable_bytes(std::span(state))) ||
+            !gpu::ReadBuffer(m_wideReadback.Get(), std::as_writable_bytes(std::span(wide))) ||
+            !gpu::ReadBuffer(m_planReadback.Get(), std::as_writable_bytes(std::span(plan))))
+            return false;
 
         cost = {.cycles = state[STATE_CYCLES],
                 .limitedCells = state[STATE_LIMITED_CELLS],

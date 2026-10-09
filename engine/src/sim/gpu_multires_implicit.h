@@ -1,0 +1,59 @@
+// gpu_multires_implicit.h — GPU の伝導の段から細かいレベルの熱の陰解法(方式②。ADR-0019・D-434 案 a)を呼ぶ(T-0132)。
+// CPU リファレンスは multires_implicit_conduction.cpp の AddImplicitConduction(StepConduction の最後の小刻みの流れの後)。
+// データの流れ(1 刻み。GpuMultires::RecordConduction が流れの段の後・ConductApply の前に Record を呼ぶ):
+//   GpuMultires の木(流れの後。凍った印つき)→ GpuImplicitBuild(未知数・境のセル・面・セルの面の一覧)→ GpuImplicitLevels(多重格子の段)
+//   → GpuImplicit(写して 1 刻み解く)→ GpuImplicitBuild::RecordApply(解いた変化を伝導の変化の表へ。活性なら伝導の一覧へ)→ ConductApply が足す
+// CPU は系の大きさも段の数も知らない(大きさは上限から。T-0136)。記録の形(GpuImplicitRecordShape)は前の刻みの数から選ぶ(T-0154。
+// 数は遅れて読んだものでよい: 形は費用だけを変え、解いた値は同じ)。
+// 使い方: multires->EnableImplicitConduction(device, limits) の後、MultiresStepOptions::implicitConduction の刻みを RecordStep・RecordStepActive で。
+#pragma once
+
+#include <cstdint>
+#include <expected>
+#include <string>
+
+#include "sim/gpu_implicit.h"
+#include "sim/gpu_implicit_build.h"
+#include "sim/gpu_implicit_levels.h"
+
+namespace bicameral::sim {
+
+    // 陰解法の系の大きさの上限(バッファの大きさ。超えた刻みは CPU と合わなくなる。系を作る段の overflow が立つ)
+    struct GpuMultiresImplicitLimits {
+        uint32_t unknowns = 0;  // 未知数のセル(面は 6 倍まで)
+        uint32_t cells = 0;     // 未知数 + 境のセル
+        uint32_t nodes = 0;     // 多重格子の全部の段の節(段 0 = セルを含む)
+        uint32_t links = 0;     // 多重格子の全部の段の隣
+    };
+
+    class GpuMultiresImplicit {
+    public:
+        [[nodiscard]] static std::expected<GpuMultiresImplicit, std::string> Create(
+            ID3D12Device5* device, const GpuMultires& multires, const MultiresCapacity& capacity,
+            const GpuMultiresImplicitLimits& limits);
+
+        // 1 刻みの陰解法(GpuMultires の伝導の段から。刻みの印と stepFlags は multires に置いたまま)
+        void Record(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, GpuMultires& multires,
+                    const MultiresStepOptions& options);
+
+        // 計測用: true なら Record が段の境に multires のタイムスタンプを打つ(PHASE_STAMP_FIRST から順に: 系を作る前・段の前・解く前・
+        // 足す前・足した後。読むのは multires.ReadTimestamps)
+        void StampPhases(bool stamp) { m_stampPhases = stamp; }
+        static constexpr uint32_t PHASE_STAMP_FIRST = 2;
+        static constexpr uint32_t PHASE_STAMP_COUNT = 5;
+
+        // 最後に読み戻せた刻みの数(V の回数・安全網・段の形。リストの実行が終わった後に読むとその刻みの値)
+        [[nodiscard]] bool ReadCost(GpuImplicitCost& cost) const { return m_implicit.ReadCost(cost); }
+
+    private:
+        GpuMultiresImplicit(GpuImplicitBuild build, GpuImplicitLevels levels, GpuImplicit implicit)
+            : m_build(std::move(build)), m_levels(std::move(levels)), m_implicit(std::move(implicit)) {}
+
+        GpuImplicitBuild m_build;
+        GpuImplicitLevels m_levels;
+        GpuImplicit m_implicit;
+        bool m_recorded = false;  // 一度でも記録したか(前の刻みの数があるか)
+        bool m_stampPhases = false;
+    };
+
+}  // namespace bicameral::sim

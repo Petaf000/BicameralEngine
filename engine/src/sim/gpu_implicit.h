@@ -1,7 +1,7 @@
 // gpu_implicit.h — 細かいレベルの熱の陰解法(方式②。ADR-0019)の GPU 版(T-0117)。CPU リファレンス sim/implicit_conduction の
 // StepImplicit(多重格子の V サイクル・誤差の見込みで止める・安全網)と毎刻みビット一致する Compute の段(shaders/sim/implicit_conduct.hlsl)を記録する。
 // 試作の約束は CPU と同じ(セルの一覧・熱容量一定)。木につないだ系(T-0119 の multires_implicit_conduction が作る、刻みの初めの温度と
-// 粗い側の端数の枠つきのセル)もそのまま解ける(T-0127)。系のセル・面・面の一覧は GPU で作れる(GpuImplicitBuild。T-0129)。伝導の段から呼ぶのはまだ(T-0132)。
+// 粗い側の端数の枠つきのセル)もそのまま解ける(T-0127)。系のセル・面・面の一覧は GPU で作れる(GpuImplicitBuild。T-0129)。GPU の伝導の段から呼ぶ形は GpuMultiresImplicit(T-0132)。
 // 多重格子の段の形(節・隣・重み・親子)は CPU の BuildImplicitGrid が作ったものを写す(RecordUpload)か、GPU で作った段
 // (GpuImplicitLevels。T-0134)を写す(RecordCopyLevels。段の数・節の始まりと数の表も写す)。
 // 大きさは上限(GpuImplicitLimits)で決め、段の形・数は GPU のバッファ(計画 u9)から読む(T-0136): 刻みの初めに ImPlanLevels・ImPlanArgs が
@@ -123,11 +123,20 @@ namespace bicameral::sim {
                                       uint32_t maxLimitRounds = DEFAULT_MAX_LIMIT_ROUNDS,
                                       const GpuImplicitRecordShape& shape = {});
 
+        // バッファを COMMON に戻す(RecordStep の後。同じリストで次の刻みに RecordReset をもう一度呼ぶため。T-0132)
+        void RecordRelease(ID3D12GraphicsCommandList* list);
+
+        // 解いたセル(ImGpuCell の並び。RecordStep の後は UAV の状態。伝導の段が変化を読む。T-0132)
+        [[nodiscard]] ID3D12Resource* CellsBuffer() const { return m_buffers[BufferCells].Get(); }
+
         void RecordTimestamp(ID3D12GraphicsCommandList* list, uint32_t index);
         void RecordReadback(ID3D12GraphicsCommandList* list);
+        // 数(V の回数・安全網・段の形)だけを読み戻す(セルは写さない。次の刻みの記録の形を選ぶ用。T-0132)
+        void RecordCostReadback(ID3D12GraphicsCommandList* list);
 
         // 読み戻したセルのエネルギー・端数を grid に、最後の刻みの数を cost に
         [[nodiscard]] bool Read(ImplicitGrid& grid, GpuImplicitCost& cost) const;
+        [[nodiscard]] bool ReadCost(GpuImplicitCost& cost) const;
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
         // V サイクル 1 回に積む Dispatch の数(0 グループのものも含む。最後に RecordStep した形で。計測の表に使う)

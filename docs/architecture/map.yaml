@@ -338,7 +338,7 @@ views:
           note: "方式②の CPU リファレンス(セルの一覧・熱容量一定。木への組み込みは T-0119)。近似解の面の流れで足すので保存はビット単位" }
       - { id: implicittree, group: simlib, label: "AddImplicitConduction<br/>細かいレベルの熱の陰解法を木の伝導に(案 a)",
           code: "engine/src/sim/multires_implicit_conduction.cpp::AddImplicitConduction", ticket: T-0119, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
-          note: "options.implicitConduction(既定 false)。流れを計算する側が基準より細かい(Δk 1〜8)面を陰解法の 1 刻みで解く。境の基準以下のセルは面で分ける。眠っている頁のブロックも入れて活性 = 全部。captureImplicitGrid で系を写せる(GPU と比べる。T-0127)。系を GPU で作るのは T-0129、GPU の伝導の段から呼ぶのは T-0132" }
+          note: "options.implicitConduction(既定 false)。流れを計算する側が基準より細かい(Δk 1〜8)面を陰解法の 1 刻みで解く。境の基準以下のセルは面で分ける。眠っている頁のブロックも入れて活性 = 全部。captureImplicitGrid で系を写せる(GPU と比べる。T-0127)。系を GPU で作るのは T-0129、GPU の伝導の段から呼ぶのは GpuMultiresImplicit(T-0132)" }
       - { id: implicittreetest, group: tests, label: "multires_implicit_tree_test<br/>木の物差し・熱い点・鎖・たくさんの要求(保存・活性 = 全部・2 回一致)",
           code: "tests/multires_implicit_tree_test.cpp::CheckChain", ticket: T-0119 }
       - { id: implicithlsl, group: shared, label: "implicit_conduction.hlsli<br/>陰解法の式(温度・面の流れ・誤差の判定・陽解法の係数)",
@@ -355,6 +355,12 @@ views:
       - { id: gpuimplicitbuildtest, group: tests, label: "gpu_multires_implicit_build_test<br/>GPU で作った系と解いた結果を CPU と比べる",
           code: "tests/gpu_multires_implicit_build_test.cpp::CheckTick", ticket: T-0129,
           note: "木は MultiresNest::captureImplicitNest の写し。多重格子の段・重みも比べる(T-0134)。HW・WARP。release の HW では系を作る段・多重格子の段の ms と段ごとの内訳を測る" }
+      - { id: gpumultiresimplicit, group: simlib, label: "GpuMultiresImplicit::Record<br/>GPU の伝導の段から陰解法を呼ぶ(系を作る → 段 → 解く → 変化を足す)",
+          code: "engine/src/sim/gpu_multires_implicit.cpp::GpuMultiresImplicit::Record", ticket: T-0132, doc: docs/decisions/ADR-0019-implicit-conduction-flows.md,
+          note: "GpuMultires::EnableImplicitConduction で作る。RecordConduction の流れの後・ConductApply の前。流れの段は基準より細かいブロックを飛ばす(stepFlags の MR_STEP_IMPLICIT)。解いた変化は BuildApply が伝導の表へ足し、活性なら伝導の一覧へ。記録の形は前の刻みの数から(ShapeFrom)" }
+      - { id: gpuimplicitconductiontest, group: tests, label: "gpu_multires_implicit_conduction_test<br/>熱い点・鎖・たくさんの要求を陰解法つきで全部・活性に刻み毎刻み CPU と比べる",
+          code: "tests/gpu_multires_implicit_conduction_test.cpp::CheckScene", ticket: T-0132,
+          note: "HW・WARP。release の HW では 1 刻み全体の ms(陰解法あり・なし)を測る" }
       - { id: gpuimplicittest, group: tests, label: "gpu_multires_implicit_test<br/>物差しの山・熱い点を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_implicit_test.cpp::RunScene", ticket: T-0117,
           note: "HW・WARP。release の HW では 1 刻み・V 1 回・空の段・鎖の場面の ms を測る" }
@@ -482,6 +488,11 @@ views:
       - [gpuimplicittreetest, gpuimplicit]
       - [gpuimplicittreetest, implicittree]
       - [gpuimplicitbuild, gpuimplicit, "セル・面を写す"]
+      - [gpuconduction, gpumultiresimplicit, "options.implicitConduction"]
+      - [gpumultiresimplicit, gpuimplicitbuild]
+      - [gpumultiresimplicit, gpuimplicitlevels]
+      - [gpumultiresimplicit, gpuimplicit]
+      - [gpuimplicitconductiontest, gpumultiresimplicit]
       - [gpuimplicitbuild, implicittree, "同じ番号"]
       - [gpuimplicitbuildtest, gpuimplicitbuild]
       - [gpuimplicitlevels, gpuimplicitbuild, "系・セルの座標を読む"]

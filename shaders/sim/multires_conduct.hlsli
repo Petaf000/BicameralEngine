@@ -10,7 +10,8 @@
 //      どれも「端数の枠がある」とした場合の流れで決める
 //   3. TreeExpand(頁を枠の順に。足りなければ凍らせる印)→ TreeFractions(端数の枠を枠の順に)(multires_tree.hlsl)
 //   4. ConductPrepareBlock: 配った頁を一様の値で埋め、配った端数の枠を空にする
-//   5. ConductFlowsBlock: 刻むブロックのセルの面の流れを変化に足す(刻みの初めのセルから。Jacobi 型)
+//   5. ConductFlowsBlock: 刻むブロックのセルの面の流れを変化に足す(刻みの初めのセルから。Jacobi 型)。陰解法を入れる刻み(T-0132)は、
+//      基準より細かいブロック(InImplicitConduction)を飛ばし、続けて陰解法の段(gpu_multires_implicit.cpp)が解いた変化を表に足す
 //   6. ConductApplyBlock: 変化を足してから反応(待ちの丸め)。見出しの busyTick(tc)・wakeTick を CPU の RecordWaitResults と同じに書く
 // 反応は待ちの丸めだけ(ADR-0018。T-0125)。刻む前に起こす段(multires_step.hlsl の WakeDue)がつつかれたブロックの印を直してある。
 // 次の刻みの種は書かない(変わったブロックは wakeTick = 次の刻みで、起こす段が種にする)。
@@ -127,6 +128,18 @@ bool SubstepEnds(int32_t level) {
     return MrSubstepEnds(CurrentSubstep(), LevelSubcycleShift(level), SubcycleGap());
 }
 
+// 陰解法で解くブロックか(T-0132。CPU の nest_detail::InImplicitConduction): 基準より細かく、基準 + implicitMaxGap 以下の世界の本物の
+// ブロック。その面は流れの段で計算せず、陰解法の段(gpu_multires_implicit.cpp)が解いて変化の表に足す
+bool InImplicitConduction(uint32_t slot, MrBlock block) {
+    if (!ImplicitStep())
+        return false;
+
+    const int32_t finest = SubcycleBaseLevel() + (int32_t)ImplicitMaxGap();
+
+    return slot < g_worldBlocks && block.kind == MR_BLOCK_REAL && block.level > SubcycleBaseLevel() &&
+           block.level <= finest;
+}
+
 // ブロックの面に接するセルか(一様なブロックの中のセルどうしは同じ値・粗い側への面はブロックの面にしかない)
 bool OnBlockSurface(uint32_t index) {
     const uint32_t last = MR_BLOCK_EDGE - 1;
@@ -233,19 +246,6 @@ MrThermal NeighborThermal(uint32_t index, uint32_t face, MrFaceNeighbor neighbor
         return UnpackThermal(gs_haloThermals[HaloEntry(index, face)]);
 
     return CachedThermal(neighbor.index);
-}
-
-// 頁のセルの変化に足す(整数部と端数を 64bit の atomic で。端数の桁上がりは整数部へ)
-void AddConductDelta(uint32_t page, uint32_t index, MrEnergyDelta delta) {
-    if (MrEnergyDeltaIsZero(delta))
-        return;
-
-    const uint32_t address = ConductDeltaAddress(page, index);
-    uint64_t fractionBefore = 0;
-    g_conduction.InterlockedAdd64(address + 8, delta.fraction, fractionBefore);
-    const int64_t carry = fractionBefore + delta.fraction < delta.fraction ? 1 : 0;
-    uint64_t wholeBefore = 0;
-    g_conduction.InterlockedAdd64(address, (uint64_t)(delta.whole + carry), wholeBefore);
 }
 
 // --- 2. 印 --------------------------------------------------------------------------------------
@@ -433,7 +433,8 @@ void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
 
 void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
-    if (!IsConductStepped(slot, block) || !SubstepBegins(block.level) || MrIsUniform(block) || IsFrozenSlot(slot))
+    if (!IsConductStepped(slot, block) || !SubstepBegins(block.level) || MrIsUniform(block) || IsFrozenSlot(slot) ||
+        InImplicitConduction(slot, block))
         return;
 
     CacheBlockFaces(slot, block, thread);
