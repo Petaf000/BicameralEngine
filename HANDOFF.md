@@ -7,7 +7,7 @@
 - CPU(CheckQuietLeaves)と GPU(TreeQuietCheck → TreeQuiet)が HW・WARP で毎刻み一致。1 セル幅の線は残る。t-0135・t-0138・t-0025 を合わせた main は release の全部 93 本が通過。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
-- **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕。次は T-0136・T-0147・T-0137)**:
+- **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。次は T-0154・T-0147・T-0137)**: T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
   CPU の方式②(engine/src/sim/implicit_conduction.*・multires_implicit_conduction.cpp。options.implicitConduction 既定 false)と GPU の解く側
   (gpu_implicit.*・implicit_conduct.hlsl)・系を作る側(gpu_implicit_build.*・implicit_build.hlsl)・多重格子の段(gpu_implicit_levels.*・implicit_levels.hlsl)。
   どれも CPU と番号まで毎刻みビット一致。決めたことは ADR-0019 の追記。動かし方: `-Filter "^(multires_implicit(_tree)?|gpu_multires_implicit(_tree|_build)?(_warp)?)$"`、
@@ -15,9 +15,9 @@
   注意: GpuImplicit はまだ CPU の系で Create する(節の並び・ImTail も CPU から。T-0135)。GpuImplicitLevels の RecordCopyTo・RecordReadback は RecordBuild と同じリストで。
   多重格子の段の費用は上限 64 で 1.6〜2.7 ms(空の回 948 Dispatch の固定費。T-0135)。判断待ち(T-0119): 1 刻みより速く落ち着く細かいむら・基準 + 8 段より細かい所(どちらもおすすめ A このまま)。
   release の WARP でも C4189(implicit_conduction.cpp の 'added'。FX_ASSERT の中だけで使う)が出る(wt2 の範囲なので触っていない)。
-- **Luau(wt3。T-0020・T-0138 済み → T-0021・T-0140・T-0139)**: パッケージ(engine/src/script/luau_package.*・script_value.*。ADR-0031・13 §2.2・15 §4。合わせ方は仮で C〔QUESTIONS Q8〕)。 殻(CPU だけ。engine/src/script/luau_sandbox.*)。ADR-0030。vcpkg.json に luau、CMakePresets.json の環境に XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。
+- **Luau と反応表(T-0020・T-0138・T-0021〔一部〕済み → T-0157・T-0140・T-0139)**: T-0021 で engine/src/script/reaction_package.*(Luau の elements・species・reactions を整数だけで読む。A は 10 進の文字列でも誤差なし)・ベイクの検査・名前のバイト順の ID(ADR-0032)。試験の表 tests/packages/combustion_test は C++ の表と 2 か所にある(片方を変えたら両方。テストが食い違いを落とす)。 パッケージ(engine/src/script/luau_package.*・script_value.*。ADR-0031・13 §2.2・15 §4。合わせ方は仮で C〔QUESTIONS Q8〕)。 殻(CPU だけ。engine/src/script/luau_sandbox.*)。ADR-0030。vcpkg.json に luau、CMakePresets.json の環境に XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。
   Luau のヘッダは pch.h に入れていない。ログは Channel::Tool。次: T-0138 → T-0021 → T-0139。
-- **エディタの殻(T-0023 済み → T-0142)**: `bicameral --editor`(パネル「時間」「状態」。--auto-time は人がいない確認用)。ImGui は editor_overlay.cpp だけ(pch.h に入れない)。
+- **エディタの殻(T-0023・T-0143 済み → T-0142)**: T-0143 で保存点(sim/probe_save_point.cpp・ADR-0036。GPU → GPU のコピー)+ 巻き戻し(`--save-points`・`--save-interval`・`--auto-rewind`・ReplayPlayer::Rewind)と「Work Graphs と性能」のパネル。記録中・--check-physics・トレース中は巻き戻せない。 `bicameral --editor`(パネル「時間」「状態」。--auto-time は人がいない確認用)。ImGui は editor_overlay.cpp だけ(pch.h に入れない)。
   時間の操作は世界に入らない(ADR-0035)。4 つのランナーが同じ GPU を使っている間は debug 版の最初のフレームが 2〜4 分かかることがある。
 - **スクリーンショット(T-0025 済み)**: `--screenshot-tick t`(刻み t で世界を止めて写す)・`--auto-ignite`・tools/image_compare/image_compare.py(8/255 を超える画素が 0.1% 超で失敗)・基準 tests/images/*.png・置き換え方は 16 §5。画像のテストは debug で 1 本約 2 分。
 
