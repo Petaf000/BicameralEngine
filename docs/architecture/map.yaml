@@ -74,6 +74,13 @@ views:
           code: "engine/src/editor/time_control.cpp::TimeControl::Apply", ticket: T-0023,
           doc: docs/decisions/ADR-0035-time-control-outside-world.md,
           note: "始めてよい刻みの数だけを変える。世界のコマンドに入らず、再生のハッシュ列は変わらない。time_control_test" }
+      - { id: graphpanel, group: framelib, label: "BuildGraphPanel<br/>Work Graphs と性能(単位ごとの GPU 時間・ノードの数と上限)",
+          code: "engine/src/editor/graph_panel.cpp::BuildGraphPanel", ticket: T-0143, doc: docs/design/14-editor-tools.md,
+          note: "直近 1 秒の読み戻し(単位のタイムスタンプ・T-0008 のカウンタ)を表に。ノードごとの時間は測れない(DispatchGraph の前後だけ)" }
+      - { id: savepoint, group: simlib, label: "ProbeSim の保存点<br/>S(t) を VRAM に写す・戻す(巻き戻し)",
+          code: "engine/src/sim/probe_save_point.cpp::ProbeSim::RecordRestore", ticket: T-0143,
+          doc: docs/decisions/ADR-0036-rewind-save-points.md,
+          note: "GPU → GPU のコピー(読み戻しなし)。戻すとコマンドキューを空にし、刻み t 以降のコマンドを足し直す。gpu_probe_rewind・window_replay_rewind" }
       - { id: probeview, group: framelib, label: "ProbeView<br/>抽出の格子を光線で辿る(ボリューム・最大値・断面)",
           code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0015, doc: docs/design/14-editor-tools.md,
           note: "画面いっぱいの三角形 1 枚。重ね書き: 格子の枠・断面の枠・活性なブロック・色の凡例" }
@@ -504,6 +511,8 @@ views:
       - [frameloop, editoroverlay, "状態 → パネル"]
       - [editoroverlay, timecontrol, "止める・1 刻み・速さ"]
       - [timecontrol, scheduler, "始めてよい刻み"]
+      - [editoroverlay, graphpanel, "性能の表"]
+      - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]

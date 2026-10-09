@@ -50,6 +50,10 @@ namespace bicameral::save {
         // 読み戻した S(tick) のハッシュを、ファイルにあれば突き合わせる(ファイルは間引いてあってよい)
         void CheckHash(uint64_t tick, uint64_t hash);
 
+        // 巻き戻し(保存点 + 再生。T-0143): 世界が刻み tick の境界へ戻った。tick 以降のコマンドをもう一度足し、
+        // S(tick + 1) からのハッシュをもう一度突き合わせる(同じコマンドなら同じハッシュになるはず。ADR-0008)
+        void Rewind(uint64_t tick);
+
         // --- 結果 ---
         [[nodiscard]] bool Finished() const { return m_nextHash == m_replay.tickHashes.size(); }
         [[nodiscard]] bool Passed() const { return Finished() && m_mismatches == 0 && m_lateCommands == 0; }

@@ -426,19 +426,22 @@ namespace bicameral::sim {
             return false;
         }
 
-        return ValidateCommands(input);
+        return ValidateSavePoints(input) && ValidateCommands(input);
     }
 
     // コマンドの約束(ファイルの先頭): キューの空き・並び・適用に間に合う刻み。破ると GPU で捨てられるか、キューが壊れる
     bool ProbeSim::ValidateCommands(const ProbeFrameInput& input) const {
-        if (input.commands.size() > FreeCommandSlots()) {
+        // 保存点から戻すフレームは、足す前にキューが空になる(T-0143)
+        const bool restoring = input.restoreFrom != NO_SAVE_POINT;
+        const uint32_t freeSlots = restoring ? PROBE_COMMAND_QUEUE_CAPACITY : FreeCommandSlots();
+        if (input.commands.size() > freeSlots) {
             Log(Channel::Sim, Level::Error, "コマンドキューの空きが足りない: 足す {} 空き {}", input.commands.size(),
-                FreeCommandSlots());
+                freeSlots);
             return false;
         }
 
         const uint64_t nextApplyTick = NextApplyTick(input.firstTick, input.firstUnit);
-        const ProbeCommand* previous = m_hasEnqueued ? &m_lastEnqueued : nullptr;
+        const ProbeCommand* previous = m_hasEnqueued && !restoring ? &m_lastEnqueued : nullptr;
         for (const ProbeCommand& command : input.commands) {
             if (command.targetTick < nextApplyTick || (previous != nullptr && !CommandPrecedes(*previous, command))) {
                 Log(Channel::Sim, Level::Error,
@@ -492,6 +495,10 @@ namespace bicameral::sim {
         if (!ValidateInput(slot, input))
             return nullptr;
 
+        // 保存点から戻すフレームは、コマンドキューが空になってから足す(足す場所を入力に書く前に CPU の控えを空に。T-0143)
+        if (input.restoreFrom != NO_SAVE_POINT)
+            ResetCommandMirror();
+
         FrameSlot& frame = m_slots[slot];
         WriteInput(frame, input);
         if (FAILED(frame.allocator->Reset()) || FAILED(frame.list->Reset(frame.allocator.Get(), nullptr))) {
@@ -504,6 +511,12 @@ namespace bicameral::sim {
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
         if (!m_initialized)
             RecordInitialization(list);
+
+        // 巻き戻し(T-0143): 刻みの境界から始まるフレームの先頭で、保存点へ写すか保存点から戻す(コマンドを足す前)
+        if (input.restoreFrom != NO_SAVE_POINT)
+            RecordRestore(list, input.restoreFrom);
+        else if (input.saveTo != NO_SAVE_POINT)
+            RecordSave(list, input.saveTo, input.firstTick);
 
         BindRootArguments(list, frame.input.Get());
         m_events.RecordBegin(list);

@@ -79,6 +79,16 @@ namespace bicameral::save {
         return commands;
     }
 
+    void ReplayPlayer::Rewind(uint64_t tick) {
+        const auto& commands = m_replay.commands;
+        const auto& hashes = m_replay.tickHashes;
+        m_nextCommand = static_cast<size_t>(
+            rng::find_if(commands, [&](const sim::Command& command) { return command.targetTick >= tick; }) -
+            commands.begin());
+        m_nextHash = static_cast<size_t>(
+            rng::find_if(hashes, [&](const ReplayTickHash& entry) { return entry.tick > tick; }) - hashes.begin());
+    }
+
     void ReplayPlayer::CheckHash(uint64_t tick, uint64_t hash) {
         const auto& expected = m_replay.tickHashes;
         while (m_nextHash < expected.size() && expected[m_nextHash].tick < tick) {

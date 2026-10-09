@@ -33,6 +33,9 @@
 //   --auto-trace                     30 フレーム目に T を押す(人がいない確認で T の流れを通す。--auto-click と一緒に)
 //   --editor                         エディタの殻(ImGui の時間の操作・状態の表示。Space = 止める・N = 1 刻み)を重ねる(T-0023)
 //   --auto-time                      決まったフレームで止める・1 刻み・速さを操作し、止まった・1 刻みずつ進んだかを確かめる(T-0023)
+//   --save-points <n>                巻き戻しの保存点の数(--editor の既定は 6。0 なら巻き戻さない。1 つ約 33 MiB の VRAM。T-0143)
+//   --save-interval <t>              保存点へ写す間隔(刻み。既定 120)
+//   --auto-rewind                    保存点が 2 つできたら、古い方へ 1 回巻き戻す(人がいない確認。--replay と一緒にハッシュ列を確かめる)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -264,6 +267,12 @@ namespace {
         if (argument == L"--screenshot-tick")
             loop.screenshotTick = *value;
 
+        if (argument == L"--save-points")
+            loop.savePoints = *value;
+
+        if (argument == L"--save-interval")
+            loop.saveIntervalTicks = std::max(*value, 1u);
+
         return {};
     }
 
@@ -293,10 +302,8 @@ namespace {
             loop.editor = true;
         else if (argument == L"--auto-time")
             loop.autoTime = true;
-        else if (argument == L"--editor")
-            loop.editor = true;
-        else if (argument == L"--auto-time")
-            loop.autoTime = true;
+        else if (argument == L"--auto-rewind")
+            loop.autoRewind = true;
         else
             return false;
 
@@ -313,7 +320,8 @@ namespace {
             else if (ParseFrameLoopFlag(argument, options.frameLoop))
                 continue;
             else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--target-fps" ||
-                      argument == L"--sim-load" || argument == L"--sim-split" || argument == L"--screenshot-tick") &&
+                      argument == L"--sim-load" || argument == L"--sim-split" || argument == L"--screenshot-tick" ||
+                      argument == L"--save-points" || argument == L"--save-interval") &&
                      hasValue) {
                 const auto parsed = ParseFrameLoopCount(argument, arguments[++i], options.frameLoop);
                 if (!parsed)

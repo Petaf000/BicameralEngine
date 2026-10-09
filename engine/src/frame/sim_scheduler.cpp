@@ -70,6 +70,10 @@ namespace bicameral::frame {
             if (startsTick && m_cursor.tick >= m_stopTick)
                 break;
 
+            // 保存点を写す境界(巻き戻し。次のフレームの先頭で写す)
+            if (startsTick && count > 0 && m_breakInterval > 0 && m_cursor.tick % m_breakInterval == 0)
+                break;
+
             const double estimate = EstimateMilliseconds(m_cursor.unit, budget);
             if (count > 0 && used + estimate > budget)
                 break;

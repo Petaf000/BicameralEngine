@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,12 @@ namespace bicameral::sim {
         uint64_t timestampTicks = 0;
     };
 
+    // 記録の進み(CPU 側の控え)。巻き戻し(T-0143)で保存点と一緒に写し、戻すときに戻す
+    struct GpuPhysicsCursor {
+        uint64_t tick = 0;
+        uint32_t currentHalf = 1;  // 今の小刻みの組の枠
+    };
+
     class GpuPhysics {
     public:
         [[nodiscard]] static std::expected<GpuPhysics, std::string> Create(ID3D12Device5* device,
@@ -84,6 +91,15 @@ namespace bicameral::sim {
 
         // 物のバッファ(PhysicsBody × BodyCount。physics_bindings.hlsli の u0)。仮の世界の刻みが押す・ハッシュ・抽出で読み書きする(T-0098)
         [[nodiscard]] ID3D12Resource* Bodies() const { return m_uavs[0].Get(); }
+
+        // --- 巻き戻し(T-0143。sim/probe_save_point.cpp)---
+        // 刻みをまたいで残る GPU の状態(u0〜u13。一時的なものも含めて全部写す。リストの間は COMMON)
+        [[nodiscard]] std::span<const ComPtr<ID3D12Resource>> StateBuffers() const { return m_uavs; }
+        [[nodiscard]] GpuPhysicsCursor Cursor() const { return {.tick = m_tick, .currentHalf = m_half}; }
+        void SetCursor(const GpuPhysicsCursor& cursor) {
+            m_tick = cursor.tick;
+            m_half = cursor.currentHalf;
+        }
 
         // --- 計測(T-0092)---
         [[nodiscard]] bool EnableProfiling(ID3D12Device* device);

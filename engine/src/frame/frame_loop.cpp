@@ -18,6 +18,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <expected>
 #include <thread>
 
@@ -168,6 +169,9 @@ namespace bicameral::frame {
 
             // 伝導のグラフのノードのカウンタ(足したもの・最大。T-0008)
             gpu::GraphStatsSnapshot conductGraph;
+
+            // 刻みの中の単位ごとの GPU 時間の合計(番号 = 刻みの中の単位。エディタの性能のパネル。T-0143)
+            std::vector<double> unitGpuMilliseconds;
         };
 
         // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
@@ -227,6 +231,7 @@ namespace bicameral::frame {
 
             [[nodiscard]] bool CreateFrameSlots();
             [[nodiscard]] bool CreateEditor();
+            [[nodiscard]] bool CreateSavePoints();
             [[nodiscard]] int Run();
 
         private:
@@ -273,6 +278,17 @@ namespace bicameral::frame {
             void CheckAutoTime();
             void FilterEditorInput(std::vector<InputEvent>& events) const;
             [[nodiscard]] editor::EditorStatus MakeEditorStatus() const;
+            [[nodiscard]] editor::GraphPanelStatus MakeGraphPanelStatus() const;
+
+            // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
+            [[nodiscard]] std::string RewindUnavailableReason() const;
+            [[nodiscard]] std::vector<uint64_t> SavePointTicks() const;
+            void RequestRewind(uint64_t tick);
+            [[nodiscard]] uint32_t PrepareRewind();
+            [[nodiscard]] uint32_t SaveSlotFor(SimCursor start, uint32_t unitCount, uint32_t restoreFrom) const;
+            [[nodiscard]] std::vector<sim::ProbeCommand> TakeLiveCommands(uint64_t applyTick, uint64_t endApplyTick,
+                                                                          uint32_t limit);
+            void CheckAutoRewind();
 
             // --- 計測 ---
             void LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const;
@@ -338,6 +354,15 @@ namespace bicameral::frame {
             std::unique_ptr<editor::EditorOverlay> m_editor;  // --editor のときだけ(窓より先に壊す)
             SimCursor m_autoTimeHold;                         // --auto-time: 止めた後に控えたカーソル
             bool m_autoTimeFailed = false;
+
+            // --- 巻き戻し(T-0143)---
+            uint32_t m_savePointCount = 0;
+            uint64_t m_rewindRequest = UINT64_MAX;  // 次に投げるフレームで戻す保存点の刻み
+            uint32_t m_rewindCount = 0;
+            bool m_extractAfterRewind = false;  // 止めている間に戻したら、戻した状態を抽出だけのリストで見せる
+            // 今の流れで GPU のキューへ足したコマンド(刻みの順。再生ファイルを流していない時)と、巻き戻した後に足し直すコマンド
+            std::vector<sim::ProbeCommand> m_commandHistory;
+            std::deque<sim::ProbeCommand> m_rewindFeed;
 
             // --- 計測 ---
             uint64_t m_computeFrequency = 0;
@@ -559,10 +584,12 @@ namespace bicameral::frame {
         // 単位ごとの GPU 時間を SimScheduler へ。終えた刻みのハッシュとイベント
         void FrameLoop::ReportSimReadback(const sim::ProbeFrameReadback& readback) {
             const uint32_t unitsPerTick = m_sim.UnitsPerTick();
+            m_interval.unitGpuMilliseconds.resize(unitsPerTick);
             for (size_t index = 0; index < readback.unitGpuTicks.size(); ++index) {
                 const auto unit = static_cast<uint32_t>((readback.firstUnit + index) % unitsPerTick);
-                m_scheduler.ReportUnitTime(unit,
-                                           TimestampMilliseconds(readback.unitGpuTicks[index], m_computeFrequency));
+                const double milliseconds = TimestampMilliseconds(readback.unitGpuTicks[index], m_computeFrequency);
+                m_scheduler.ReportUnitTime(unit, milliseconds);
+                m_interval.unitGpuMilliseconds[unit] += milliseconds;
             }
 
             gpu::AccumulateGraphStats(m_interval.conductGraph, readback.graphStats);
@@ -784,8 +811,11 @@ namespace bicameral::frame {
             const uint64_t applyTick = sim::ProbeSim::NextApplyTick(start.tick, start.unit);
             const uint32_t limit = std::min(m_sim.FreeCommandSlots(), sim::PROBE_MAX_COMMANDS);
 
+            // このフレームの単位が記録する最後の適用の次の刻み(巻き戻した後のコマンドは、ここより前の分だけ足す)
+            const uint64_t endApplyTick = sim::ProbeSim::NextApplyTick(m_scheduler.Cursor().tick,
+                                                                       m_scheduler.Cursor().unit);
             std::vector<sim::ProbeCommand> commands = m_replay.empty()
-                                                          ? TakeClickCommands(applyTick, limit)
+                                                          ? TakeLiveCommands(applyTick, endApplyTick, limit)
                                                           : m_replay.front().TakeCommands(applyTick, limit);
 
             if (!m_options.recordPath.empty())
@@ -837,16 +867,21 @@ namespace bicameral::frame {
                 return true;
             }
 
+            // 巻き戻し(T-0143): GPU を待って読み戻しを全部読んでから、カーソルを保存点の刻みへ戻す。このフレームの先頭で世界を戻す
+            const uint32_t restoreFrom = m_rewindRequest != UINT64_MAX ? PrepareRewind() : sim::NO_SAVE_POINT;
+            const bool restoring = restoreFrom != sim::NO_SAVE_POINT;
+
             const SimCursor start = m_scheduler.Cursor();
             const uint32_t unitCount = m_scheduler.TakeUnits();
-            // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)なら、抽出だけのリストを投げる
-            const bool extractOnly = unitCount == 0 && NeedsStopExtraction();
-            if (unitCount == 0 && !extractOnly)
+            // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)か、
+            // 止めたまま戻した状態をまだ見せていないなら、抽出だけのリストを投げる
+            const bool extractOnly = unitCount == 0 && (NeedsStopExtraction() || m_extractAfterRewind);
+            if (unitCount == 0 && !extractOnly && !restoring)
                 return true;
 
             const uint64_t extraction = m_lastExtraction + 1;
             const bool extract = m_completedExtraction.number + 2 >= extraction;  // 抽出の 3 組の約束(ファイルの先頭)
-            if (extractOnly && !extract)
+            if (extractOnly && !extract && !restoring)
                 return true;  // 描画が抽出を読み終えるのを待つ(次のフレームでもう一度)
 
             if (!extract)
@@ -859,16 +894,17 @@ namespace bicameral::frame {
 
             const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
 
-            ID3D12CommandList* list = m_sim.RecordFrame(slot,
-                                                        {.firstTick = start.tick,
-                                                         .firstUnit = start.unit,
-                                                         .unitCount = unitCount,
-                                                         .extract = extract,
-                                                         .extractionTarget = extractionTarget,
-                                                         .commands = commands,
-                                                         .afterExtract = [this](auto* simList, const auto& context) {
-                                                             m_peek.RecordAfterExtract(simList, context);
-                                                         }});
+            ID3D12CommandList* list = m_sim.RecordFrame(
+                slot, {.firstTick = start.tick,
+                       .firstUnit = start.unit,
+                       .unitCount = unitCount,
+                       .extract = extract,
+                       .extractionTarget = extractionTarget,
+                       .commands = commands,
+                       .afterExtract = [this](auto* simList,
+                                              const auto& context) { m_peek.RecordAfterExtract(simList, context); },
+                       .saveTo = SaveSlotFor(start, unitCount, restoreFrom),
+                       .restoreFrom = restoreFrom});
 
             if (list == nullptr)
                 return false;
@@ -878,6 +914,7 @@ namespace bicameral::frame {
                 m_compute.GpuWait(m_direct, m_lastRenderReading[extractionTarget]);
                 m_lastExtraction = extraction;
                 m_lastExtractionTick = extractionTick;
+                m_extractAfterRewind = false;  // 戻した後の流れの状態を見せた
             }
 
             submission = {.fence = m_compute.Submit(list),
@@ -1013,6 +1050,10 @@ namespace bicameral::frame {
                     request = automatic;
             }
 
+            if (request.rewindTick != UINT64_MAX)
+                RequestRewind(request.rewindTick);
+
+            CheckAutoRewind();
             ApplyTimeRequest(request);
         }
 
@@ -1085,7 +1126,190 @@ namespace bicameral::frame {
                     .view = m_viewController.Describe(),
                     .replaying = !m_replay.empty(),
                     .recording = !m_options.recordPath.empty(),
-                    .waitingCommands = m_pendingCommands.size()};
+                    .waitingCommands = m_pendingCommands.size(),
+                    .savePointTicks = SavePointTicks(),
+                    .saveIntervalTicks = m_options.saveIntervalTicks,
+                    .rewindUnavailable = RewindUnavailableReason(),
+                    .graph = MakeGraphPanelStatus()};
+        }
+
+        // 性能のパネル(T-0143): 直近 1 秒の単位ごとの GPU 時間を 1 刻みあたりに、伝導のグラフのカウンタはそのまま
+        editor::GraphPanelStatus FrameLoop::MakeGraphPanelStatus() const {
+            const Stats& last = m_lastInterval;
+            editor::GraphPanelStatus status{
+                .layout = &m_sim.ConductStatsLayout(), .stats = last.conductGraph, .ticks = last.ticks};
+
+            const uint32_t unitsPerTick = m_sim.UnitsPerTick();
+            for (uint32_t unit = 0; unit < last.unitGpuMilliseconds.size(); ++unit) {
+                const double perTick = last.ticks > 0 ? last.unitGpuMilliseconds[unit] / static_cast<double>(last.ticks)
+                                                      : 0.0;
+                const bool physics = m_sim.Physics() != nullptr && unit == sim::PROBE_UNIT_PHYSICS;
+                const char* name = unit == sim::PROBE_UNIT_APPLY     ? "コマンドの適用"
+                                   : unit == sim::PROBE_UNIT_CONDUCT ? "伝導と反応"
+                                   : physics                         ? "物理"
+                                   : unit == unitsPerTick - 1        ? "ハッシュとイベント"
+                                                                     : "重さの試験";
+                status.units.push_back({.name = name,
+                                        .workGraph = unit == sim::PROBE_UNIT_CONDUCT || physics,
+                                        .millisecondsPerTick = perTick});
+            }
+
+            return status;
+        }
+
+        // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
+        // 保存点: saveIntervalTicks の倍数の刻みの境界で、そのフレームの先頭に S(刻み) を VRAM の保存点へ写す(GPU → GPU)。
+        //   SimScheduler がその境界でフレームを切るので、どの境界も必ずどれかのフレームの先頭になる。
+        // 戻す: GPU を待って読み戻しを全部読み、カーソルを保存点の刻みへ。次のリストの先頭で世界を保存点の状態に戻し、
+        //   その刻み以降のコマンド(再生ファイル、なければ今の流れで足したコマンド)を足し直す。同じコマンドなら同じハッシュ列になる。
+        //   戻した後のつつきは、足し直すコマンドに混ぜて刻みの順に足す(先の流れは変わりうるので、戻した刻みより先の保存点は捨てる)。
+
+        bool FrameLoop::CreateSavePoints() {
+            const uint32_t requested = m_options.savePoints == AUTO_SAVE_POINTS
+                                           ? (m_options.editor ? DEFAULT_EDITOR_SAVE_POINTS : 0u)
+                                           : std::min(m_options.savePoints, MAX_SAVE_POINTS);
+            if (requested == 0)
+                return true;
+
+            if (!m_sim.CreateSavePoints(m_device.Get(), requested)) {
+                Log(Channel::Sim, Level::Error, "保存点を作れない({} 個)", requested);
+                return false;
+            }
+
+            m_savePointCount = requested;
+            m_scheduler.SetBreakInterval(m_options.saveIntervalTicks);
+            Log(Channel::Sim, Level::Info, "巻き戻し: 保存点 {} 個 × {:.1f} MiB、{} 刻みごと", requested,
+                static_cast<double>(m_sim.SavePointBytes()) / (1024.0 * 1024.0), m_options.saveIntervalTicks);
+
+            return true;
+        }
+
+        // 巻き戻せない理由(空なら巻き戻せる)。記録と CPU の物理の突き合わせとトレースは、刻みが一度ずつ進む前提なので
+        std::string FrameLoop::RewindUnavailableReason() const {
+            if (m_savePointCount == 0)
+                return "保存点なし(--save-points 0)";
+
+            if (!m_options.recordPath.empty())
+                return "記録中は巻き戻さない";
+
+            if (m_physicsCheck)
+                return "--check-physics の間は巻き戻さない";
+
+            if (!m_traceCapture.empty())
+                return "トレースを集めている間は巻き戻さない";
+
+            return {};
+        }
+
+        std::vector<uint64_t> FrameLoop::SavePointTicks() const {
+            std::vector<uint64_t> ticks;
+            for (uint32_t index = 0; index < m_savePointCount; ++index) {
+                const uint64_t tick = m_sim.SavePointTick(index);
+                if (tick != UINT64_MAX)
+                    ticks.push_back(tick);
+            }
+
+            rng::sort(ticks);
+
+            return ticks;
+        }
+
+        void FrameLoop::RequestRewind(uint64_t tick) {
+            const std::string reason = RewindUnavailableReason();
+            if (!reason.empty() || !rng::contains(SavePointTicks(), tick)) {
+                Log(Channel::Sim, Level::Warning, "刻み {} へ巻き戻せない: {}", tick,
+                    reason.empty() ? "その保存点が無い" : reason);
+                return;
+            }
+
+            m_rewindRequest = tick;
+        }
+
+        // GPU を待ち、読み戻しを全部読んでから、カーソルとコマンドを保存点の刻みへ戻す。戻す保存点の番号を返す
+        uint32_t FrameLoop::PrepareRewind() {
+            const uint64_t tick = std::exchange(m_rewindRequest, UINT64_MAX);
+            if (!m_compute.WaitIdle())
+                return sim::NO_SAVE_POINT;
+
+            CollectSimSubmissions();
+            uint32_t index = sim::NO_SAVE_POINT;
+            for (uint32_t candidate = 0; candidate < m_savePointCount; ++candidate) {
+                if (m_sim.SavePointTick(candidate) == tick)
+                    index = candidate;
+            }
+
+            if (index == sim::NO_SAVE_POINT)
+                return index;
+
+            const SimCursor from = m_scheduler.Cursor();
+            m_scheduler.Rewind(tick);
+            m_sim.DiscardSavePointsAfter(tick);
+            if (!m_replay.empty())
+                m_replay.front().Rewind(tick);
+
+            // 今の流れで足したコマンドのうち、戻した刻み以降のものを足し直す(まだ足していなかった分の後ろに)
+            const auto kept = rng::find_if(
+                m_commandHistory, [&](const sim::ProbeCommand& command) { return command.targetTick >= tick; });
+            std::deque<sim::ProbeCommand> feed(kept, m_commandHistory.end());
+            feed.insert(feed.end(), m_rewindFeed.begin(), m_rewindFeed.end());
+            m_rewindFeed = std::move(feed);
+            m_commandHistory.erase(kept, m_commandHistory.end());
+
+            m_extractAfterRewind = true;
+            ++m_rewindCount;
+            Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {}(単位 {})→ 保存点の刻み {}。足し直すコマンド: {}",
+                from.tick, from.unit, tick,
+                m_replay.empty() ? std::format("{} 個", m_rewindFeed.size()) : std::string("再生ファイルから"));
+
+            return index;
+        }
+
+        // 保存点の刻みの境界から単位を始めるフレームなら、写す保存点の番号(刻み / 間隔 を数で回す)
+        uint32_t FrameLoop::SaveSlotFor(SimCursor start, uint32_t unitCount, uint32_t restoreFrom) const {
+            const uint64_t interval = m_options.saveIntervalTicks;
+            const bool due = m_savePointCount > 0 && restoreFrom == sim::NO_SAVE_POINT && unitCount > 0 &&
+                             start.unit == 0 && start.tick > 0 && start.tick % interval == 0 &&
+                             m_simSubmissionCount > 0;  // 最初のリストは世界を初期化する(写すのはその後)
+            if (!due)
+                return sim::NO_SAVE_POINT;
+
+            return static_cast<uint32_t>((start.tick / interval) % m_savePointCount);
+        }
+
+        // 窓のクリックと、巻き戻した後に足し直すコマンド(endApplyTick より前の分)を、刻み・番号の順に混ぜる
+        std::vector<sim::ProbeCommand> FrameLoop::TakeLiveCommands(uint64_t applyTick, uint64_t endApplyTick,
+                                                                   uint32_t limit) {
+            std::vector<sim::ProbeCommand> commands = TakeClickCommands(applyTick, limit);
+            // クリックを足すなら、同じ刻みの足し直しも一緒に(後のフレームで、番号の小さいものを同じ刻みに足せなくなるので)
+            const uint64_t feedEnd = commands.empty() ? endApplyTick : std::max(endApplyTick, applyTick + 1);
+            while (!m_rewindFeed.empty() && m_rewindFeed.front().targetTick < feedEnd && commands.size() < limit) {
+                const sim::ProbeCommand command = m_rewindFeed.front();
+                m_rewindFeed.pop_front();
+                if (command.targetTick < applyTick) {
+                    Log(Channel::Sim, Level::Error, "巻き戻し: 刻み {} のコマンドが足し直しに間に合わなかった(捨てた)",
+                        command.targetTick);
+                    continue;
+                }
+
+                commands.push_back(command);
+            }
+
+            rng::sort(commands, [](const sim::ProbeCommand& a, const sim::ProbeCommand& b) {
+                return a.targetTick != b.targetTick ? a.targetTick < b.targetTick : a.sequence < b.sequence;
+            });
+            m_commandHistory.insert(m_commandHistory.end(), commands.begin(), commands.end());
+
+            return commands;
+        }
+
+        // --auto-rewind: 保存点が 2 つできたら、古い方へ 1 回だけ戻す
+        void FrameLoop::CheckAutoRewind() {
+            if (!m_options.autoRewind || m_rewindCount > 0 || m_rewindRequest != UINT64_MAX)
+                return;
+
+            const std::vector<uint64_t> ticks = SavePointTicks();
+            if (ticks.size() >= 2)
+                RequestRewind(ticks.front());
         }
 
         // --- 計測 ---
@@ -1279,6 +1503,11 @@ namespace bicameral::frame {
             if (m_autoTimeFailed)
                 return 1;
 
+            if (m_options.autoRewind && m_rewindCount == 0) {
+                Log(Channel::Sim, Level::Error, "--auto-rewind: 巻き戻せなかった(保存点が 2 つできなかった)");
+                return 1;
+            }
+
             return replayPassed ? 0 : 1;
         }
 
@@ -1401,7 +1630,7 @@ namespace bicameral::frame {
             return 1;
         }
 
-        if (!loop.CreateEditor())
+        if (!loop.CreateEditor() || !loop.CreateSavePoints())
             return 1;
 
         return loop.Run();

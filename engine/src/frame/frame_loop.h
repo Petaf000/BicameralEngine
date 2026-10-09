@@ -27,6 +27,11 @@ namespace bicameral::frame {
     // 連鎖のトレースの容量(1 フレームに GPU が書ける記録。1 MiB)。範囲を実行中に変えるので、いつも確保しておく(T-0088)
     inline constexpr uint32_t TRACE_CAPACITY_PER_FRAME = 1u << 16;
 
+    // FrameLoopOptions::savePoints の既定(--editor なら DEFAULT_EDITOR_SAVE_POINTS、でなければ 0)
+    inline constexpr uint32_t AUTO_SAVE_POINTS = UINT32_MAX;
+    inline constexpr uint32_t DEFAULT_EDITOR_SAVE_POINTS = 6;
+    inline constexpr uint32_t MAX_SAVE_POINTS = 64;
+
     struct FrameLoopOptions {
         // --- フレームの進め方 ---
         uint32_t frameLimit = 0;         // 0 なら窓を閉じるまで。自動の確認(job.py run)では有限にする
@@ -74,6 +79,11 @@ namespace bicameral::frame {
         bool editor = false;  // 窓に ImGui のパネル(時間の操作・状態の表示)を重ねる(--editor)
         bool autoTime =
             false;  // 決まったフレームで止める・1 刻み・速さを操作し、止まったか・1 刻みずつ進んだかを確かめる(--auto-time)
+
+        // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
+        uint32_t savePoints = AUTO_SAVE_POINTS;  // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)
+        uint64_t saveIntervalTicks = 120;        // 何刻みごとに写すか(その倍数の刻みの境界で写す)
+        bool autoRewind = false;  // 保存点が 2 つできたら古い方へ 1 回戻す(人がいない確認。--auto-rewind)
 
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)

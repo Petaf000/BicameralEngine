@@ -80,6 +80,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_implicit_levels.cpp
   src/sim/gpu_physics.cpp
   src/sim/probe_peek.cpp
+  src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
 )
@@ -140,6 +141,7 @@ target_link_libraries(bicameral_editor PUBLIC bicameral_frame)
 add_executable(bicameral
   src/main.cpp
   src/editor/editor_overlay.cpp
+  src/editor/graph_panel.cpp
   src/frame/frame_loop.cpp
   src/frame/trace_capture.cpp
   src/platform/agility_sdk.cpp
