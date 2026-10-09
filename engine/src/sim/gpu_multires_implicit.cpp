@@ -4,8 +4,6 @@
 
 #include <utility>
 
-#include "gpu/device.h"
-
 using namespace bicameral::multires;
 
 namespace bicameral::sim {
@@ -40,13 +38,12 @@ namespace bicameral::sim {
         if (!build)
             return std::unexpected(build.error());
 
-        // 多重格子の段: ハードウェアでは小さい段の回(節 ≤ LEVEL_TAIL_MAX_NODES)と積んだ回の後の残りを LvTail で(T-0135 のおすすめ・T-0179)。
-        // ソフトウェアのアダプタ(WARP)は LvTail でデバイスが失われる(T-0147)ので既定の積み方(全部 Dispatch)。作る段はどちらも同じ
+        // 多重格子の段: 小さい段の回(節 ≤ LEVEL_TAIL_MAX_NODES)と積んだ回の後の残りを LvTail で(T-0135 のおすすめ・T-0179。
+        // WARP も同じ。T-0147)。作る段は全部 Dispatch で積む時と番号まで同じ
         GpuImplicitLevelLimits levelLimits;
         levelLimits.nodes = limits.nodes;
         levelLimits.links = limits.links;
-        if (!gpu::IsSoftwareDevice(device))
-            levelLimits.tailMaxNodes = LEVEL_TAIL_MAX_NODES;
+        levelLimits.tailMaxNodes = LEVEL_TAIL_MAX_NODES;
         auto levels = GpuImplicitLevels::Create(device, *build, levelLimits);
         if (!levels)
             return std::unexpected(levels.error());

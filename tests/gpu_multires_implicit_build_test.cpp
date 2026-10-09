@@ -302,8 +302,6 @@ namespace {
         gpu::DebugRing* ring = nullptr;
         const sim::BakedReactionTable* table = nullptr;
         uint64_t frequency = 0;
-        bool warp =
-            false;  // WARP は LvTail のシェーダーで落ちる(T-0135。T-0147 で直す)ので、Dispatch の回だけを確かめる
     };
 
     // 1 本のリストを記録して投げる
@@ -458,9 +456,8 @@ namespace {
             return std::unexpected(build.error());
 
         // 既定の積み方(全部 Dispatch)・大きい段は Dispatch で小さい段は LvTail・全部 LvTail(T-0135)のどれでも CPU と一致すること
-        const std::vector<RoundShape> shapes = context.warp ? std::vector{RoundShape{}}
-                                                            : std::vector{RoundShape{}, TAIL_1024, ALL_TAIL};
-        for (const RoundShape shape : shapes) {
+        // WARP も同じ 3 つ(T-0147。前は LvTail で落ちたので全部 Dispatch だけだった)
+        for (const RoundShape shape : {RoundShape{}, TAIL_1024, ALL_TAIL}) {
             auto levels = sim::GpuImplicitLevels::Create(context.device, *build, LevelLimits(scene, MAX_LEVELS, shape));
             if (!levels)
                 return std::unexpected(levels.error());
@@ -670,12 +667,7 @@ namespace {
             return 1;
         }
 
-        Context context{.device = device->Get(),
-                        .queue = &*queue,
-                        .ring = &*ring,
-                        .table = &*table,
-                        .frequency = 0,
-                        .warp = options->adapter == gpu::AdapterKind::Warp};
+        Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .table = &*table, .frequency = 0};
         const std::vector<BuildScene> scenes = {HotPointScene(*table), ChainScene(*table), StressScene(*table)};
 
         if (RELEASE && options->adapter != gpu::AdapterKind::Warp &&

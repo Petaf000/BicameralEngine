@@ -54,7 +54,7 @@ namespace {
     enum class SceneKind : uint8_t { HotPoint, Chain, Stress };
 
     // 上限の形(T-0178): 全部入る / ブロックが入らない(未知数の上限を CPU の系の 1/3)/ 多重格子の段が入らない(隣を段 0 の見込みだけ)。
-    // Cheapest は全部入る上限のまま、前の刻みによらず一番安い積み方で積む(多重格子の段の回は全部 LvTail〔WARP では上限まで Dispatch〕・
+    // Cheapest は全部入る上限のまま、前の刻みによらず一番安い積み方で積む(多重格子の段の回は全部 LvTail・
     // V は 1 回目の後を全部 ImTail。前の刻みより系が深い・回が多い刻みの道。T-0179)
     enum class Squeeze : uint8_t { None, Blocks, Levels, Cheapest };
 

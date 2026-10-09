@@ -447,21 +447,22 @@ void RoundNodeHash(uint32_t index) {
     const uint32_t offset = NodeOffset(s_depth);
     const LvNode key = ParentKey(offset + local);
     uint32_t slot = HashKey(key) & g_nodeTableMask;
-    for (uint32_t probe = 0; probe <= g_nodeTableMask; ++probe) {
+    bool done = false;  // ループを return で抜けない(LvTail の決まり。T-0147)
+    for (uint32_t probe = 0; probe <= g_nodeTableMask && !done; ++probe) {
         uint32_t previous;
         g_levels.InterlockedCompareExchange(NodeTableWord(slot) * 4, 0u, local + 1, previous);
-        if (previous == 0)
-            return;
-
-        if (SameKey(ParentKey(offset + previous - 1), key)) {
+        if (previous == 0) {
+            done = true;
+        } else if (SameKey(ParentKey(offset + previous - 1), key)) {
             g_levels.InterlockedMin(NodeTableWord(slot) * 4, local + 1);
-            return;
+            done = true;
+        } else {
+            slot = (slot + 1) & g_nodeTableMask;
         }
-
-        slot = (slot + 1) & g_nodeTableMask;
     }
 
-    MarkOverflow();
+    if (!done)
+        MarkOverflow();
 }
 
 // NodeFirst: 自分の鍵の最小の節(初めて出会う節)と表の位置
@@ -473,21 +474,23 @@ void RoundNodeFirst(uint32_t index) {
     const uint32_t offset = NodeOffset(s_depth);
     const LvNode key = ParentKey(offset + local);
     uint32_t slot = HashKey(key) & g_nodeTableMask;
-    for (uint32_t probe = 0; probe <= g_nodeTableMask; ++probe) {
+    bool found = false;
+    for (uint32_t probe = 0; probe <= g_nodeTableMask && !found; ++probe) {
         const uint32_t stored = Load(NodeTableWord(slot));
         if (stored == 0)
             break;
 
-        if (SameKey(ParentKey(offset + stored - 1), key)) {
+        found = SameKey(ParentKey(offset + stored - 1), key);
+        if (found) {
             Store(NodeWord(offset + local, NW_FIRST), stored - 1);
             Store(NodeWord(offset + local, NW_SLOT), slot);
-            return;
         }
 
         slot = (slot + 1) & g_nodeTableMask;
     }
 
-    MarkOverflow();
+    if (!found)
+        MarkOverflow();
 }
 
 // ParentScanLocal: 「初めて出会う節」の印のグループの中の排他的な接頭和
@@ -585,21 +588,22 @@ void RoundLinkHash(uint32_t index) {
         return;
 
     uint32_t slot = HashWords(pair.x, pair.y, 0x5bd1e995u, 0u) & g_linkTableMask;
-    for (uint32_t probe = 0; probe <= g_linkTableMask; ++probe) {
+    bool done = false;
+    for (uint32_t probe = 0; probe <= g_linkTableMask && !done; ++probe) {
         uint32_t previous;
         g_levels.InterlockedCompareExchange(LinkTableWord(slot) * 4, 0u, local + 1, previous);
-        if (previous == 0)
-            return;
-
-        if (all(LinkParents(previous - 1) == pair)) {
+        if (previous == 0) {
+            done = true;
+        } else if (all(LinkParents(previous - 1) == pair)) {
             g_levels.InterlockedMin(LinkTableWord(slot) * 4, local + 1);
-            return;
+            done = true;
+        } else {
+            slot = (slot + 1) & g_linkTableMask;
         }
-
-        slot = (slot + 1) & g_linkTableMask;
     }
 
-    MarkOverflow();
+    if (!done)
+        MarkOverflow();
 }
 
 // Count: 親の子の数(1 スレッド = 細かい段の 1 節)と、親の行の数(初めて出会う組だけ。1 スレッド = 細かい段の 1 隣)
@@ -621,24 +625,25 @@ void RoundCount(uint32_t index) {
     }
 
     uint32_t slot = HashWords(pair.x, pair.y, 0x5bd1e995u, 0u) & g_linkTableMask;
-    for (uint32_t probe = 0; probe <= g_linkTableMask; ++probe) {
+    bool found = false;
+    for (uint32_t probe = 0; probe <= g_linkTableMask && !found; ++probe) {
         const uint32_t stored = Load(LinkTableWord(slot));
         if (stored == 0)
             break;
 
-        if (all(LinkParents(stored - 1) == pair)) {
+        found = all(LinkParents(stored - 1) == pair);
+        if (found) {
             Store(LinkWord(link, LW_FIRST), stored - 1);
             Store(LinkWord(link, LW_SLOT), slot);
             if (stored - 1 == local)
                 g_levels.InterlockedAdd(NodeWord(CoarseNode(pair.x), NW_ROW_COUNT) * 4, 1u);
-
-            return;
         }
 
         slot = (slot + 1) & g_linkTableMask;
     }
 
-    MarkOverflow();
+    if (!found)
+        MarkOverflow();
 }
 
 // RowScanLocal: 親ごとの子の数と行の数のグループの中の排他的な接頭和(1 スレッド = 粗い段の 1 節)
@@ -939,9 +944,12 @@ void RoundFinish(uint32_t index) {
 // 細かい段の節が g_tailMaxNodes 以下になった回から(積んだ Dispatch の回が尽きた時も)、残りの回を 1 グループ(1024 スレッド)が
 // 同じ本体を同じ段の順に回し、段の間はグループのバリア(T-0120 の ImTail と同じ形)。本体も順も同じなので結果は番号まで Dispatch の回と同じ。
 // 大きい段が来ても遅いだけで正しい。
+// 本体の決まり(T-0147): 本体の中のループ(表を探すループ)を return で抜けない。LV_TAIL_EACH の項目のループに inline されると、
+// 内側のループから外のループの次の項目へ直接飛ぶ形(2 段抜け)になり、release(-O1 以上)の WARP の JIT がデバイスを失う
+// (DXGI_ERROR_DEVICE_REMOVED。最初の Dispatch で。-O0・-Od なら通る・HW は通る)。抜ける時は印(done・found)を立ててループの条件で抜ける。
 
 // 本体 Body を 0〜count − 1 についてグループで分けて呼び、全部の書き込みが見えるまで待つ。
-// WARP は分岐の中・早い return の後のバリアで落ちることがあるので、バリアは数の決まった素直なループの外にだけ置き、回を飛ばす時も数を 0 にして同じ道を通る
+// バリアはループの外にだけ置き、回を飛ばす時も数を 0 にして同じ道を通る(T-0135。WARP で落ちた原因はこれではなく本体のループの return だった。T-0147)
 #define LV_TAIL_EACH(count, Body)                                         \
     for (uint32_t item = thread; item < (count); item += LV_SCAN_THREADS) \
         Body(item);                                                       \

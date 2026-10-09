@@ -5,7 +5,7 @@
 // 段の数は値で決まる: 回は limits.dispatchRounds 回だけ Dispatch で積み、要らない回は述語(SetPredication)で飛ばす。小さい段の回と残りの回は
 // 1 グループの LvTail が最後まで回す(T-0135)。段の中身は shaders/sim/implicit_levels.hlsl。
 // LvTail を積む作り方では、刻みごとに Dispatch で積む回の数を前の刻みの段の数から選べる(RoundsFrom。T-0179)。積んだ回より深い系は
-// LvTail が残りを回すので、作る段は番号まで同じ(遅いだけ)。積まない作り方(既定・WARP)では回の数の指定は無視して上限まで積む。
+// LvTail が残りを回すので、作る段は番号まで同じ(遅いだけ)。積まない作り方(この構造体の既定)では回の数の指定は無視して上限まで積む。
 // 見出し(段の数・段ごとの節の始まりと数)も GpuImplicit の計画へ写し、GpuImplicit はそこから V サイクルの形を決める(T-0136)。
 //
 // 使い方(テスト):
@@ -34,7 +34,7 @@ namespace bicameral::sim {
         // --- 回の積み方(T-0135。計測で選ぶ。docs/perf.md)---
         // Dispatch で積む回の数。残りの回と、細かい段の節が tailMaxNodes 以下の回は 1 グループの LvTail が最後まで回す
         // (段ごとの Dispatch とバリアが要らない)。既定(dispatchRounds ≥ levels − 1・tailMaxNodes = 0)は T-0134 と同じ積み方で、LvTail を積まない。
-        // LvTail は HW で CPU とビット一致するが、WARP で落ちる(デバイスが失われる。T-0135)ので、WARP で直すまで(T-0147)既定にしない
+        // LvTail は HW・WARP とも CPU とビット一致(WARP で落ちたのは T-0147 で直した)。GpuMultiresImplicit は小さい段と残りの回を LvTail で積む
         uint32_t dispatchRounds = 63;
         uint32_t tailMaxNodes = 0;
     };
