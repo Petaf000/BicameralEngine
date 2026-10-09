@@ -83,6 +83,7 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 # --- sim: シミュの CPU 側(GPU で走らせる道具と CPU リファレンス)。浮動小数点は禁止(shaders/CMakeLists.txt が検査)---
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
+  src/sim/gpu_gas.cpp
   src/sim/gpu_lab_box.cpp
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp
@@ -98,7 +99,7 @@ add_library(bicameral_sim STATIC
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
-target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction bicameral_physics bicameral_multires)
+target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction bicameral_physics bicameral_multires bicameral_gas)
 
 # --- save: セーブ・再生ファイルの読み書き(15。T-0086)。CPU だけ(GPU を知らない。CPU だけのテストがある)---
 # コマンドの形は sim/command.h(ヘッダだけ)を使う。
