@@ -5,8 +5,8 @@
 //   → 読めたら「当てたい表」として待つ。落ちたら古い表のまま、誤りをエディタに出す(LastMessage)
 //   → TakeSwaps(シミュのリストを記録するフレーム): 適用の単位があるフレームなら、その刻みに差し替えの印のコマンド
 //     (sim::MakeTableCommand。版を持つ)を足し、表を sim::ProbeFrameInput::tableSwaps で渡す
-//   → 記録(--record)はコマンドの列に印が入る。再生(--replay)は印の版の表を、知っている表(起動時の表と読み直した表)から探して
-//     同じ刻みに当てる(持っていなければ止まる。表の中身を再生ファイルに入れるのは T-0193)。
+//   → 記録(--record)はコマンドの列に印が入り、表の中身は再生ファイルに残る(Find で引く。T-0193)。再生(--replay)は印の版の表を、
+//     知っている表(起動時の表・読み直した表・再生ファイルの表〔AddKnown〕)から探して同じ刻みに当てる(持っていなければ止まる)。
 // CPU は表(法則のデータ)をベイクして渡すだけで、世界の状態は GPU が新しい表で作り直す(原則 1・ADR-0047)。
 #pragma once
 
@@ -30,6 +30,13 @@ namespace bicameral::frame {
         // watch: ファイルを見るか(エディタ。再生中は見ない)。initial は起動時に読んだ表
         TableHotReload(script::ReactionTableSource source, std::shared_ptr<const script::LoadedReactionTable> initial,
                        bool watch);
+
+        // 知っている表に足す(再生ファイルに残っていた表。T-0193)
+        void AddKnown(const std::shared_ptr<const script::LoadedReactionTable>& table) { Remember(table); }
+
+        // 版 version の知っている表(無ければ nullptr)と、起動時の表の版(記録に残す。T-0170)
+        [[nodiscard]] std::shared_ptr<const script::LoadedReactionTable> Find(uint64_t version) const;
+        [[nodiscard]] uint64_t InitialVersion() const { return m_initialVersion; }
 
         // 数フレームごとにファイルを見る(読み直しはこのスレッドで同期。エディタのフレームが 1 回止まる)
         void Poll(uint64_t frameNumber);
@@ -67,6 +74,7 @@ namespace bicameral::frame {
         std::vector<std::shared_ptr<const script::LoadedReactionTable>>
             m_inFlight;  // 返した差し替えの表(RecordFrame が写すまで)
 
+        uint64_t m_initialVersion = 0;
         uint64_t m_appliedVersion = 0;
         uint32_t m_appliedCount = 0;
         uint32_t m_failedCount = 0;

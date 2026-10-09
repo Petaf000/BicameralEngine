@@ -7,6 +7,7 @@
 #include "script/luau_package.h"
 
 #include <algorithm>
+#include <charconv>
 #include <format>
 #include <fstream>
 #include <iterator>
@@ -507,6 +508,40 @@ namespace bicameral::script {
 
     uint64_t TableVersion(const PackageSetResult& result) {
         return HashBytes(TableBytes(result));
+    }
+
+    // TableBytes と同じ並び: 見出し("bicameral-tables"・形式の版)→ (分類・鍵の数・(鍵・値)× 数)を終わりまで
+    std::expected<PackageSetResult, std::string> ParseTableBytes(std::string_view bytes) {
+        const auto magic = ReadCanonicalString(bytes);
+        const auto formatVersion = magic ? ReadCanonicalString(bytes) : magic;
+        if (!magic || *magic != "bicameral-tables" || !formatVersion ||
+            *formatVersion != std::to_string(PACKAGE_FORMAT_VERSION))
+            return std::unexpected("表の中身の見出しが違う(合わせた表のバイト列でないか、形式の版が違う)");
+
+        PackageSetResult result;
+        while (!bytes.empty()) {
+            const auto category = ReadCanonicalString(bytes);
+            const auto countText = category ? ReadCanonicalString(bytes) : category;
+            uint64_t count = 0;
+            const bool counted = countText &&
+                                 std::from_chars(countText->data(), countText->data() + countText->size(), count).ec ==
+                                     std::errc{};
+            if (!counted || result.tables.contains(*category))
+                return std::unexpected("表の中身の分類が壊れている");
+
+            auto& entries = result.tables[*category];
+            for (uint64_t index = 0; index < count; ++index) {
+                auto key = ReadCanonicalString(bytes);
+                auto value = key ? ReadCanonicalBytes(bytes) : std::expected<ScriptValue, std::string>{};
+                if (!key || !value)
+                    return std::unexpected(
+                        std::format("表の中身の {} が壊れている: {}", *category, key ? value.error() : key.error()));
+
+                entries[std::move(*key)] = {.value = std::move(*value), .package = std::string(REPLAY_TABLE_PACKAGE)};
+            }
+        }
+
+        return result;
     }
 
 }  // namespace bicameral::script

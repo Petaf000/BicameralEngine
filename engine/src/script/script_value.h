@@ -4,10 +4,11 @@
 //   形: nil・真偽・数(倍精度)・文字列・表(鍵 → 値。鍵は数か文字列で、並べた順に持つ)。関数・userdata・スレッドは持たない。
 //   鍵の順番: 数(小さい順)→ 文字列(バイト順)。Luau の pairs の順番(アドレス・挿入の履歴で変わる)に依らない。
 // データの流れ: LuauSandbox::Run(captureValues)が Luau の戻り値をこれに直す → パッケージの読み込みが合わせる → ベイク(T-0021)へ。
-// AppendCanonicalBytes は同じ木から必ず同じバイト列を作る(決定性の検査と、表の版のハッシュに使う)。
+// AppendCanonicalBytes は同じ木から必ず同じバイト列を作る(決定性の検査と、表の版のハッシュに使う)。ReadCanonicalBytes はその逆(再生ファイル)。
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,6 +58,12 @@ namespace bicameral::script {
     // 同じ木なら同じバイト列(種類の印 + 中身。数はビット列のまま、長さは 4 バイトのリトルエンディアン)
     void AppendCanonicalBytes(const ScriptValue& value, std::string& out);
     void AppendCanonicalString(std::string_view text, std::string& out);
+
+    // AppendCanonicalBytes・AppendCanonicalString の逆(再生ファイルに残した表の中身から、表を作り直す。T-0193・ADR-0050)。
+    // bytes の先頭から 1 つ読み、読んだ分だけ bytes を進める。壊れていれば理由(途中で切れている・知らない種類・NaN・
+    // 表の鍵が数か文字列でない・鍵の並びが正準でない・64 段より深い)
+    [[nodiscard]] std::expected<ScriptValue, std::string> ReadCanonicalBytes(std::string_view& bytes);
+    [[nodiscard]] std::expected<std::string, std::string> ReadCanonicalString(std::string_view& bytes);
 
     // バイト列の FNV-1a(64 ビット)。表の版に使う
     [[nodiscard]] uint64_t HashBytes(std::string_view bytes);
