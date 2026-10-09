@@ -11,7 +11,8 @@
 // 重み(係数 ÷ 対角、Q48)は 128bit の割り算(ImWeight。CPU と同じ関数)。
 // 段の順: Clear → Cells → CellLinks →(回 d = 0, 1, … 上限 − 2: NodeHash → NodeFirst → ParentScanLocal → ParentScanGroups → Parents →
 //   LinkHash → Count → RowScanLocal → RowScanGroups → Place → Sort → AddCoefficients → CoarseNodes → Finish)→ RoundEnd(回ごと。述語の外)
-// 節の並び(長い行・色ごとの並び)・ImTail の境・間接の Dispatch は T-0135(GpuImplicit はまだ CPU の系の形で作る)。
+//   → Tail(T-0135: 細かい段の節が g_tailMaxNodes 以下になった回と、積んだ回の後の残りを 1 グループで最後まで。本体は Dispatch の回と同じ)
+// 節の並び(長い行・色ごとの並び)・ImTail の境・間接の Dispatch は T-0136(GpuImplicit はまだ CPU の系の形で作る)。
 #include "common/implicit_conduction.hlsli"
 
 RWByteAddressBuffer g_system : register(u0);  // implicit_build の系(セル・面・面の一覧。読むだけ)
@@ -29,7 +30,7 @@ cbuffer LvConstants : register(b0) {
     uint32_t g_maxNodes;       // 全部の段の節の上限
     uint32_t g_maxLinks;       // 全部の段の隣の上限
     uint32_t g_levelLinks;     // 1 段の隣の上限(= 2 × 面の上限)
-    uint32_t g_depth;          // この回で縮約する細かい段
+    uint32_t g_roundDepth;     // この回で縮約する細かい段(LvTail は使わない)
     uint32_t g_maxLevels;      // 段の数の上限(CPU の MAX_GRID_LEVELS)
     uint32_t g_nodeTableMask;  // 親の鍵の表の大きさ − 1(2 の冪)
     uint32_t g_linkTableMask;  // (親, 隣の親) の表の大きさ − 1
@@ -37,7 +38,11 @@ cbuffer LvConstants : register(b0) {
     uint32_t g_listCellsWord;  // g_build の面の一覧の位置のセルの始まり(語)
     uint32_t g_facesByte;      // g_system の面の始まり
     uint32_t g_listsByte;      // g_system の面の一覧の始まり
+    uint32_t g_tailMaxNodes;   // 細かい段の節がこれ以下の回は Dispatch で回さず LvTail に任せる(T-0135)
 };
+
+// 今の回で縮約する細かい段(Dispatch の回は g_roundDepth、LvTail は回ごとに進める。スレッドごとの変数)
+static uint32_t s_depth;
 
 static const uint32_t LV_THREADS = 64;
 static const uint32_t LV_SCAN_THREADS = 1024;
@@ -53,6 +58,7 @@ static const uint32_t BUILD_HEADER_CELLS = 4;
 // 見出し: [0] 段の数・[1] 上限を超えた・段ごとの表(LV_DEPTH_STRIDE 語ずつ)
 static const uint32_t LV_LEVEL_COUNT = 0;
 static const uint32_t LV_OVERFLOW = 1;
+static const uint32_t LV_TAIL_FROM = 2;  // LvTail が最初に回す回 + 1(0 なら回さない。T-0135)
 static const uint32_t LV_DEPTH_BASE = 16;
 static const uint32_t LV_DEPTH_STRIDE = 72;
 static const uint32_t LV_NODE_OFFSET = 0;  // 段の節の始まり(全体の番号)
@@ -360,12 +366,19 @@ void ListEntry(uint32_t value, out uint32_t neighbor, out FxU128 coefficient) {
     NoteLevelNode(0, node.level, gpuNode.selfWeight);
 }
 
-    // CellLinks: 段 0 の隣(1 スレッド = 面の一覧の 1 つ)。最後のスレッドの組は回 0 の述語も
-    [numthreads(LV_THREADS, 1, 1)] void LvCellLinks(uint3 dispatch : SV_DispatchThreadID) {
-    if (dispatch.x == 0) {
-        const bool next = Kept(0) && Load(DepthWord(LV_NEEDS, 0)) != 0 && 1 < g_maxLevels;
-        g_predicate[0] = next ? 0 : 1;
-    }
+// 回 depth を回すか(段 depth があり、重み < 1/2 の節があり、段の数が上限より少ない)と、どこで回すか: 細かい段の節が g_tailMaxNodes を
+// 超えれば Dispatch の回(述語 0)、以下なら LvTail(述語 1 で回を飛ばし、LvTail が始める回を書く)。1 スレッド
+void ScheduleRound(uint32_t depth) {
+    const bool run = Kept(depth) && Load(DepthWord(LV_NEEDS, depth)) != 0 && depth + 1 < g_maxLevels;
+    const bool large = NodeCount(depth) > g_tailMaxNodes;
+    Store(LV_TAIL_FROM, run ? depth + 1 : 0);
+    g_predicate[depth] = run && large ? 0 : 1;
+}
+
+// CellLinks: 段 0 の隣(1 スレッド = 面の一覧の 1 つ)。最後のスレッドの組は回 0 の述語も
+[numthreads(LV_THREADS, 1, 1)] void LvCellLinks(uint3 dispatch : SV_DispatchThreadID) {
+    if (dispatch.x == 0)
+        ScheduleRound(0);
 
     const uint32_t k = dispatch.x;
     if (!Kept(0) || k >= LinkCount(0))
@@ -391,7 +404,7 @@ void ListEntry(uint32_t value, out uint32_t neighbor, out FxU128 coefficient) {
 // 細かい段の節 node(全体の番号)の親の鍵(最も細かいレベルなら 1 つ粗いレベルの親のセル、ほかは自分)
 LvNode ParentKey(uint32_t node) {
     LvNode key = LoadNode(node);
-    const int32_t finest = Finest(g_depth);
+    const int32_t finest = Finest(s_depth);
     key.lowered = key.level == finest ? 1u : 0u;
     if (key.lowered != 0) {
         key.level = finest - 1;
@@ -422,16 +435,16 @@ uint32_t HashKey(LvNode key) {
 }
 
 bool InRound(uint32_t local) {
-    return Kept(g_depth) && local < NodeCount(g_depth);
+    return Kept(s_depth) && local < NodeCount(s_depth);
 }
 
 // NodeHash: 親の鍵の表に「その鍵の最小の節の番号 + 1」を入れる(1 スレッド = 細かい段の 1 節)
-[numthreads(LV_THREADS, 1, 1)] void LvNodeHash(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
+void RoundNodeHash(uint32_t index) {
+    const uint32_t local = index;
     if (!InRound(local))
         return;
 
-    const uint32_t offset = NodeOffset(g_depth);
+    const uint32_t offset = NodeOffset(s_depth);
     const LvNode key = ParentKey(offset + local);
     uint32_t slot = HashKey(key) & g_nodeTableMask;
     for (uint32_t probe = 0; probe <= g_nodeTableMask; ++probe) {
@@ -451,13 +464,13 @@ bool InRound(uint32_t local) {
     MarkOverflow();
 }
 
-    // NodeFirst: 自分の鍵の最小の節(初めて出会う節)と表の位置
-    [numthreads(LV_THREADS, 1, 1)] void LvNodeFirst(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
+// NodeFirst: 自分の鍵の最小の節(初めて出会う節)と表の位置
+void RoundNodeFirst(uint32_t index) {
+    const uint32_t local = index;
     if (!InRound(local))
         return;
 
-    const uint32_t offset = NodeOffset(g_depth);
+    const uint32_t offset = NodeOffset(s_depth);
     const LvNode key = ParentKey(offset + local);
     uint32_t slot = HashKey(key) & g_nodeTableMask;
     for (uint32_t probe = 0; probe <= g_nodeTableMask; ++probe) {
@@ -478,30 +491,30 @@ bool InRound(uint32_t local) {
 }
 
 // ParentScanLocal: 「初めて出会う節」の印のグループの中の排他的な接頭和
-[numthreads(LV_SCAN_THREADS, 1, 1)] void LvParentScanLocal(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
-    const uint32_t local = group.x * LV_SCAN_THREADS + thread.x;
+void RoundParentScanLocal(uint32_t group, uint32_t thread) {
+    const uint32_t local = group * LV_SCAN_THREADS + thread;
     const bool inside = InRound(local);
-    const uint32_t node = NodeOffset(g_depth) + local;
+    const uint32_t node = NodeOffset(s_depth) + local;
     const uint32_t first = inside && Load(NodeWord(node, NW_FIRST)) == local ? 1u : 0u;
-    gs_first[thread.x] = first;
-    gs_second[thread.x] = 0;
-    ScanGroup(thread.x);
+    gs_first[thread] = first;
+    gs_second[thread] = 0;
+    ScanGroup(thread);
 
     if (inside)
-        Store(NodeWord(node, NW_SCAN), gs_first[thread.x] - first);
+        Store(NodeWord(node, NW_SCAN), gs_first[thread] - first);
 
-    if (thread.x == LV_SCAN_THREADS - 1)
-        Store(GroupWord(group.x, 0), gs_first[thread.x]);
+    if (thread == LV_SCAN_THREADS - 1)
+        Store(GroupWord(group, 0), gs_first[thread]);
 }
 
-    // ParentScanGroups: 親の数が決まる。減ったら段 d + 1 を置く(減らなければ CPU と同じく段を足さずに終わる。1 スレッド)
-    [numthreads(1, 1, 1)] void LvParentScanGroups() {
-    if (!Kept(g_depth))
+// ParentScanGroups: 親の数が決まる。減ったら段 d + 1 を置く(減らなければ CPU と同じく段を足さずに終わる。1 スレッド)
+void RoundParentScanGroups() {
+    if (!Kept(s_depth))
         return;
 
-    const uint32_t fineCount = NodeCount(g_depth);
+    const uint32_t fineCount = NodeCount(s_depth);
     const uint32_t coarseCount = ScanGroupSums(fineCount).x;
-    const uint32_t offset = NodeOffset(g_depth) + fineCount;
+    const uint32_t offset = NodeOffset(s_depth) + fineCount;
     if (coarseCount == fineCount)
         return;
 
@@ -510,25 +523,25 @@ bool InRound(uint32_t local) {
         return;
     }
 
-    Store(DepthWord(LV_NODE_OFFSET, g_depth + 1), offset);
-    Store(DepthWord(LV_NODE_COUNT, g_depth + 1), coarseCount);
-    Store(DepthWord(LV_KEPT, g_depth + 1), 1);
-    Store(LV_LEVEL_COUNT, g_depth + 2);
+    Store(DepthWord(LV_NODE_OFFSET, s_depth + 1), offset);
+    Store(DepthWord(LV_NODE_COUNT, s_depth + 1), coarseCount);
+    Store(DepthWord(LV_KEPT, s_depth + 1), 1);
+    Store(LV_LEVEL_COUNT, s_depth + 2);
 }
 
 uint32_t CoarseNode(uint32_t parent) {
-    return NodeOffset(g_depth + 1) + parent;
+    return NodeOffset(s_depth + 1) + parent;
 }
 
 // Parents: 親の番号。初めて出会う節が親の節(座標・縮約したか)を置き、数を 0 に。親の鍵の表を空に戻す
-[numthreads(LV_THREADS, 1, 1)] void LvParents(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
-    if (!InRound(local) || !Kept(g_depth + 1))
+void RoundParents(uint32_t index) {
+    const uint32_t local = index;
+    if (!InRound(local) || !Kept(s_depth + 1))
         return;
 
-    const uint32_t node = NodeOffset(g_depth) + local;
+    const uint32_t node = NodeOffset(s_depth) + local;
     const uint32_t first = Load(NodeWord(node, NW_FIRST));
-    const uint32_t firstNode = NodeOffset(g_depth) + first;
+    const uint32_t firstNode = NodeOffset(s_depth) + first;
     const uint32_t parent = Load(NodeWord(firstNode, NW_SCAN)) + Load(GroupWord(first / LV_SCAN_THREADS, 0));
     Store(NodeWord(node, NW_PARENT), parent);
     if (first != local)
@@ -549,20 +562,20 @@ uint32_t CoarseNode(uint32_t parent) {
 }
 
 bool InLinkRound(uint32_t local) {
-    return Kept(g_depth + 1) && local < LinkCount(g_depth);
+    return Kept(s_depth + 1) && local < LinkCount(s_depth);
 }
 
 // 細かい段の隣 local の (親, 隣の親)。同じ親なら NONE
 uint2 LinkParents(uint32_t local) {
-    const uint32_t link = LinkOffset(g_depth) + local;
+    const uint32_t link = LinkOffset(s_depth) + local;
     const uint32_t parent = Load(NodeWord(Load(LinkWord(link, LW_OWNER)), NW_PARENT));
     const uint32_t other = Load(NodeWord(Load(LinkWord(link, LW_NEIGHBOR)), NW_PARENT));
     return parent == other ? uint2(NONE, NONE) : uint2(parent, other);
 }
 
 // LinkHash: (親, 隣の親) の表に「その組の最小の隣の番号 + 1」を入れる(1 スレッド = 細かい段の 1 隣)
-[numthreads(LV_THREADS, 1, 1)] void LvLinkHash(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
+void RoundLinkHash(uint32_t index) {
+    const uint32_t local = index;
     if (!InLinkRound(local))
         return;
 
@@ -588,18 +601,18 @@ uint2 LinkParents(uint32_t local) {
     MarkOverflow();
 }
 
-    // Count: 親の子の数(1 スレッド = 細かい段の 1 節)と、親の行の数(初めて出会う組だけ。1 スレッド = 細かい段の 1 隣)
-    [numthreads(LV_THREADS, 1, 1)] void LvCount(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
-    if (InRound(local) && Kept(g_depth + 1)) {
-        const uint32_t node = NodeOffset(g_depth) + local;
+// Count: 親の子の数(1 スレッド = 細かい段の 1 節)と、親の行の数(初めて出会う組だけ。1 スレッド = 細かい段の 1 隣)
+void RoundCount(uint32_t index) {
+    const uint32_t local = index;
+    if (InRound(local) && Kept(s_depth + 1)) {
+        const uint32_t node = NodeOffset(s_depth) + local;
         g_levels.InterlockedAdd(NodeWord(CoarseNode(Load(NodeWord(node, NW_PARENT))), NW_CHILD_COUNT) * 4, 1u);
     }
 
     if (!InLinkRound(local))
         return;
 
-    const uint32_t link = LinkOffset(g_depth) + local;
+    const uint32_t link = LinkOffset(s_depth) + local;
     const uint2 pair = LinkParents(local);
     if (pair.x == NONE) {
         Store(LinkWord(link, LW_FIRST), NONE);
@@ -628,41 +641,41 @@ uint2 LinkParents(uint32_t local) {
 }
 
 // RowScanLocal: 親ごとの子の数と行の数のグループの中の排他的な接頭和(1 スレッド = 粗い段の 1 節)
-[numthreads(LV_SCAN_THREADS, 1, 1)] void LvRowScanLocal(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
-    const uint32_t parent = group.x * LV_SCAN_THREADS + thread.x;
-    const bool inside = Kept(g_depth + 1) && parent < NodeCount(g_depth + 1);
+void RoundRowScanLocal(uint32_t group, uint32_t thread) {
+    const uint32_t parent = group * LV_SCAN_THREADS + thread;
+    const bool inside = Kept(s_depth + 1) && parent < NodeCount(s_depth + 1);
     const uint32_t node = inside ? CoarseNode(parent) : 0;
     const uint32_t children = inside ? Load(NodeWord(node, NW_CHILD_COUNT)) : 0;
     const uint32_t row = inside ? Load(NodeWord(node, NW_ROW_COUNT)) : 0;
-    gs_first[thread.x] = children;
-    gs_second[thread.x] = row;
-    ScanGroup(thread.x);
+    gs_first[thread] = children;
+    gs_second[thread] = row;
+    ScanGroup(thread);
 
     if (inside) {
-        Store(NodeWord(node, NW_CHILD_START), gs_first[thread.x] - children);
-        Store(NodeWord(node, NW_ROW_START), gs_second[thread.x] - row);
+        Store(NodeWord(node, NW_CHILD_START), gs_first[thread] - children);
+        Store(NodeWord(node, NW_ROW_START), gs_second[thread] - row);
     }
 
-    if (thread.x == LV_SCAN_THREADS - 1) {
-        Store(GroupWord(group.x, 0), gs_first[thread.x]);
-        Store(GroupWord(group.x, 1), gs_second[thread.x]);
+    if (thread == LV_SCAN_THREADS - 1) {
+        Store(GroupWord(group, 0), gs_first[thread]);
+        Store(GroupWord(group, 1), gs_second[thread]);
     }
 }
 
-    // RowScanGroups: 段 d + 1 の隣の数と始まり(1 スレッド)
-    [numthreads(1, 1, 1)] void LvRowScanGroups() {
-    if (!Kept(g_depth + 1))
+// RowScanGroups: 段 d + 1 の隣の数と始まり(1 スレッド)
+void RoundRowScanGroups() {
+    if (!Kept(s_depth + 1))
         return;
 
-    const uint32_t links = ScanGroupSums(NodeCount(g_depth + 1)).y;
-    const uint32_t offset = LinkOffset(g_depth) + LinkCount(g_depth);
+    const uint32_t links = ScanGroupSums(NodeCount(s_depth + 1)).y;
+    const uint32_t offset = LinkOffset(s_depth) + LinkCount(s_depth);
     if (offset + links > g_maxLinks || links > g_levelLinks) {
         MarkOverflow();
         return;
     }
 
-    Store(DepthWord(LV_LINK_OFFSET, g_depth + 1), offset);
-    Store(DepthWord(LV_LINK_COUNT, g_depth + 1), links);
+    Store(DepthWord(LV_LINK_OFFSET, s_depth + 1), offset);
+    Store(DepthWord(LV_LINK_COUNT, s_depth + 1), links);
 }
 
 uint32_t ChildStart(uint32_t parent) {
@@ -674,36 +687,36 @@ uint32_t RowStart(uint32_t parent) {
 }
 
 // Place: 子を親の子の一覧に、初めて出会う組を親の行に仮に置く(置く順は決まらない。次の Sort で番号の順に)
-[numthreads(LV_THREADS, 1, 1)] void LvPlace(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
-    if (InRound(local) && Kept(g_depth + 1)) {
-        const uint32_t parent = Load(NodeWord(NodeOffset(g_depth) + local, NW_PARENT));
+void RoundPlace(uint32_t index) {
+    const uint32_t local = index;
+    if (InRound(local) && Kept(s_depth + 1)) {
+        const uint32_t parent = Load(NodeWord(NodeOffset(s_depth) + local, NW_PARENT));
         uint32_t position;
         g_levels.InterlockedAdd(NodeWord(CoarseNode(parent), NW_CHILD_FILL) * 4, 1u, position);
-        Store(RawChildWord(NodeOffset(g_depth) + ChildStart(parent) + position), local);
+        Store(RawChildWord(NodeOffset(s_depth) + ChildStart(parent) + position), local);
     }
 
     if (!InLinkRound(local))
         return;
 
-    const uint32_t link = LinkOffset(g_depth) + local;
+    const uint32_t link = LinkOffset(s_depth) + local;
     if (Load(LinkWord(link, LW_FIRST)) != local)
         return;
 
     const uint32_t parent = LinkParents(local).x;
     uint32_t position;
     g_levels.InterlockedAdd(NodeWord(CoarseNode(parent), NW_ROW_FILL) * 4, 1u, position);
-    Store(LinkWord(LinkOffset(g_depth + 1) + RowStart(parent) + position, LW_RAW), local);
+    Store(LinkWord(LinkOffset(s_depth + 1) + RowStart(parent) + position, LW_RAW), local);
 }
 
-    // Sort: 仮に置いた子・組を、同じ一覧の中で自分より小さい番号の数の位置へ。組は親の段の隣になる(係数は 0 から足す)
-    [numthreads(LV_THREADS, 1, 1)] void LvSort(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t position = dispatch.x;
-    if (!Kept(g_depth + 1) || Load(LV_OVERFLOW) != 0)
+// Sort: 仮に置いた子・組を、同じ一覧の中で自分より小さい番号の数の位置へ。組は親の段の隣になる(係数は 0 から足す)
+void RoundSort(uint32_t index) {
+    const uint32_t position = index;
+    if (!Kept(s_depth + 1) || Load(LV_OVERFLOW) != 0)
         return;
 
-    const uint32_t fineOffset = NodeOffset(g_depth);
-    if (position < NodeCount(g_depth)) {
+    const uint32_t fineOffset = NodeOffset(s_depth);
+    if (position < NodeCount(s_depth)) {
         const uint32_t child = Load(RawChildWord(fineOffset + position));
         const uint32_t parent = Load(NodeWord(fineOffset + child, NW_PARENT));
         const uint32_t start = fineOffset + ChildStart(parent);
@@ -717,10 +730,10 @@ uint32_t RowStart(uint32_t parent) {
         g_children[rank] = fineOffset + child;
     }
 
-    if (position >= LinkCount(g_depth + 1))
+    if (position >= LinkCount(s_depth + 1))
         return;
 
-    const uint32_t coarseLinks = LinkOffset(g_depth + 1);
+    const uint32_t coarseLinks = LinkOffset(s_depth + 1);
     const uint32_t fine = Load(LinkWord(coarseLinks + position, LW_RAW));
     const uint2 pair = LinkParents(fine);
     const uint32_t start = coarseLinks + RowStart(pair.x);
@@ -731,24 +744,24 @@ uint32_t RowStart(uint32_t parent) {
             ++rank;
     }
 
-    Store(LinkWord(LinkOffset(g_depth) + fine, LW_TARGET), rank);
+    Store(LinkWord(LinkOffset(s_depth) + fine, LW_TARGET), rank);
     StoreCoefficient(rank, ImWide((uint64_t)0));
     Store(LinkWord(rank, LW_OWNER), CoarseNode(pair.x));
     Store(LinkWord(rank, LW_NEIGHBOR), CoarseNode(pair.y));
 }
 
 // AddCoefficients: 細かい隣の係数(縮約した親なら ÷ 8)を親の行の隣へ足す。組の表を空に戻す(1 スレッド = 細かい段の 1 隣)
-[numthreads(LV_THREADS, 1, 1)] void LvAddCoefficients(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t local = dispatch.x;
+void RoundAddCoefficients(uint32_t index) {
+    const uint32_t local = index;
     if (!InLinkRound(local) || Load(LV_OVERFLOW) != 0)
         return;
 
-    const uint32_t link = LinkOffset(g_depth) + local;
+    const uint32_t link = LinkOffset(s_depth) + local;
     const uint32_t first = Load(LinkWord(link, LW_FIRST));
     if (first == NONE)
         return;
 
-    const uint32_t target = Load(LinkWord(LinkOffset(g_depth) + first, LW_TARGET));
+    const uint32_t target = Load(LinkWord(LinkOffset(s_depth) + first, LW_TARGET));
     const uint32_t owner = Load(LinkWord(target, LW_OWNER));
     const uint32_t shift = LoadNode(owner).lowered != 0 ? IM_ENERGY_BITS_PER_LEVEL : 0;
     AddCoefficient(target, ImWideShiftRight(LoadCoefficient(link), shift));
@@ -765,21 +778,21 @@ FxU128 CoarseCoefficient(uint32_t link) {
 }
 
 // CoarseNodes: 親の熱容量(子の和。縮約した親なら ÷ 8)・対角・自分の重み・節(1 スレッド = 粗い段の 1 節)
-[numthreads(LV_THREADS, 1, 1)] void LvCoarseNodes(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t parent = dispatch.x;
-    if (!Kept(g_depth + 1) || parent >= NodeCount(g_depth + 1))
+void RoundCoarseNodes(uint32_t index) {
+    const uint32_t parent = index;
+    if (!Kept(s_depth + 1) || parent >= NodeCount(s_depth + 1))
         return;
 
     const uint32_t node = CoarseNode(parent);
     LvNode coarse = LoadNode(node);
     const uint32_t shift = coarse.lowered != 0 ? IM_ENERGY_BITS_PER_LEVEL : 0;
-    const uint32_t childStart = NodeOffset(g_depth) + ChildStart(parent);
+    const uint32_t childStart = NodeOffset(s_depth) + ChildStart(parent);
     const uint32_t childEnd = childStart + Load(NodeWord(node, NW_CHILD_COUNT));
     FxU128 capacity = ImWide((uint64_t)0);
     for (uint32_t c = childStart; c < childEnd; ++c)
         capacity = ImWideAdd(capacity, ImWideShiftRight(Capacity(LoadNode(g_children[c])), shift));
 
-    const uint32_t linkStart = LinkOffset(g_depth + 1) + RowStart(parent);
+    const uint32_t linkStart = LinkOffset(s_depth + 1) + RowStart(parent);
     const uint32_t linkEnd = linkStart + Load(NodeWord(node, NW_ROW_COUNT));
     FxU128 diagonal = capacity;
     for (uint32_t k = linkStart; k < linkEnd; ++k)
@@ -801,17 +814,16 @@ FxU128 CoarseCoefficient(uint32_t link) {
     gpuNode.childStart = 2 * FaceCount() + childStart;
     gpuNode.childEnd = 2 * FaceCount() + childEnd;
     g_nodes[node] = gpuNode;
-    NoteLevelNode(g_depth + 1, coarse.level, gpuNode.selfWeight);
+    NoteLevelNode(s_depth + 1, coarse.level, gpuNode.selfWeight);
 }
 
-    // Finish: 親の段の隣の係数(÷ 2 の後を書き戻す)と重み(1 スレッド = 粗い段の 1 隣)、細かい段の節の親と縮約の重み(1 スレッド = 細かい段の 1 節)
-    [numthreads(LV_THREADS, 1, 1)] void LvFinish(uint3 dispatch : SV_DispatchThreadID) {
-    const uint32_t index = dispatch.x;
-    if (!Kept(g_depth + 1))
+// Finish: 親の段の隣の係数(÷ 2 の後を書き戻す)と重み(1 スレッド = 粗い段の 1 隣)、細かい段の節の親と縮約の重み(1 スレッド = 細かい段の 1 節)
+void RoundFinish(uint32_t index) {
+    if (!Kept(s_depth + 1))
         return;
 
-    if (index < LinkCount(g_depth + 1)) {
-        const uint32_t link = LinkOffset(g_depth + 1) + index;
+    if (index < LinkCount(s_depth + 1)) {
+        const uint32_t link = LinkOffset(s_depth + 1) + index;
         const FxU128 coefficient = CoarseCoefficient(link);
         const uint32_t owner = Load(LinkWord(link, LW_OWNER));
         StoreCoefficient(link, coefficient);  // 次の回は ÷ 2 の後の係数を縮約する(CPU の coarse.coefficients)
@@ -823,11 +835,11 @@ FxU128 CoarseCoefficient(uint32_t link) {
         g_links[link] = gpuLink;
     }
 
-    if (index >= NodeCount(g_depth))
+    if (index >= NodeCount(s_depth))
         return;
 
     // 縮約の重み = 自分の D(親の単位)÷ 親の D。読むのは CoarseNodes が書いた対角だけ(係数を書き換える上の組とは別の語)
-    const uint32_t node = NodeOffset(g_depth) + index;
+    const uint32_t node = NodeOffset(s_depth) + index;
     const uint32_t parentNode = CoarseNode(Load(NodeWord(node, NW_PARENT)));
     const LvNode parent = LoadNode(parentNode);
     const uint32_t shift = parent.lowered != 0 ? IM_ENERGY_BITS_PER_LEVEL : 0;
@@ -835,12 +847,153 @@ FxU128 CoarseCoefficient(uint32_t link) {
     g_nodes[node].restrictWeight = ImWeight(ImWideShiftRight(Diagonal(LoadNode(node)), shift), Diagonal(parent));
 }
 
-// RoundEnd: 次の回の述語(段 d + 1 があり、重み < 1/2 の節があり、段の数が上限より少ない時だけ回す。述語の外。1 スレッド)
+// --- 入口(Dispatch の回。1 スレッド = 1 つ。本体は上の Round〜)-----------------------------------------------------
+
+[numthreads(LV_THREADS, 1, 1)] void LvNodeHash(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundNodeHash(dispatch.x);
+}
+
+    [numthreads(LV_THREADS, 1, 1)] void LvNodeFirst(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundNodeFirst(dispatch.x);
+}
+
+[numthreads(LV_SCAN_THREADS, 1, 1)] void LvParentScanLocal(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
+    s_depth = g_roundDepth;
+    RoundParentScanLocal(group.x, thread.x);
+}
+
+    [numthreads(1, 1, 1)] void LvParentScanGroups() {
+    s_depth = g_roundDepth;
+    RoundParentScanGroups();
+}
+
+[numthreads(LV_THREADS, 1, 1)] void LvParents(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundParents(dispatch.x);
+}
+
+    [numthreads(LV_THREADS, 1, 1)] void LvLinkHash(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundLinkHash(dispatch.x);
+}
+
+[numthreads(LV_THREADS, 1, 1)] void LvCount(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundCount(dispatch.x);
+}
+
+    [numthreads(LV_SCAN_THREADS, 1, 1)] void LvRowScanLocal(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {
+    s_depth = g_roundDepth;
+    RoundRowScanLocal(group.x, thread.x);
+}
+
+[numthreads(1, 1, 1)] void LvRowScanGroups() {
+    s_depth = g_roundDepth;
+    RoundRowScanGroups();
+}
+
+    [numthreads(LV_THREADS, 1, 1)] void LvPlace(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundPlace(dispatch.x);
+}
+
+[numthreads(LV_THREADS, 1, 1)] void LvSort(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundSort(dispatch.x);
+}
+
+    [numthreads(LV_THREADS, 1, 1)] void LvAddCoefficients(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundAddCoefficients(dispatch.x);
+}
+
+[numthreads(LV_THREADS, 1, 1)] void LvCoarseNodes(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundCoarseNodes(dispatch.x);
+}
+
+    [numthreads(LV_THREADS, 1, 1)] void LvFinish(uint3 dispatch : SV_DispatchThreadID) {
+    s_depth = g_roundDepth;
+    RoundFinish(dispatch.x);
+}
+
+// RoundEnd: 次の回を回すか・どこで回すか(述語の外。1 スレッド)。この回を回さなかった(終わった・LvTail に任せた)なら次の回も飛ばし、
+// LvTail が始める回はそのまま
 [numthreads(1, 1, 1)] void LvRoundEnd() {
-    const uint32_t next = g_depth + 1;
+    const uint32_t next = g_roundDepth + 1;
     if (next >= g_maxLevels)
         return;
 
-    const bool run = Kept(next) && Load(DepthWord(LV_NEEDS, next)) != 0 && next + 1 < g_maxLevels;
-    g_predicate[next] = run ? 0 : 1;
+    if (g_predicate[g_roundDepth] != 0) {
+        g_predicate[next] = 1;
+        return;
+    }
+
+    ScheduleRound(next);
+}
+// --- LvTail: 小さい段からの回を 1 グループで最後まで(T-0135)----------------------------------------------------
+// 回を Dispatch で積むと、述語で飛ばしても段ごとに Dispatch とバリアが残る(上限 64 で 948 Dispatch・1〜2 ms。T-0134)。
+// 細かい段の節が g_tailMaxNodes 以下になった回から(積んだ Dispatch の回が尽きた時も)、残りの回を 1 グループ(1024 スレッド)が
+// 同じ本体を同じ段の順に回し、段の間はグループのバリア(T-0120 の ImTail と同じ形)。本体も順も同じなので結果は番号まで Dispatch の回と同じ。
+// 大きい段が来ても遅いだけで正しい。
+
+// 本体 Body を 0〜count − 1 についてグループで分けて呼び、全部の書き込みが見えるまで待つ。
+// WARP は分岐の中・早い return の後のバリアで落ちることがあるので、バリアは数の決まった素直なループの外にだけ置き、回を飛ばす時も数を 0 にして同じ道を通る
+#define LV_TAIL_EACH(count, Body)                                         \
+    for (uint32_t item = thread; item < (count); item += LV_SCAN_THREADS) \
+        Body(item);                                                       \
+    DeviceMemoryBarrierWithGroupSync()
+
+// 接頭和の本体(グループの中)を塊ごとに、続けて塊の和(1 スレッド)を
+#define LV_TAIL_SCAN(count, Local, Groups)                                                       \
+    for (uint32_t chunk = 0; chunk < ((count) + LV_SCAN_THREADS - 1) / LV_SCAN_THREADS; ++chunk) \
+        Local(chunk, thread);                                                                    \
+    DeviceMemoryBarrierWithGroupSync();                                                          \
+    if (thread == 0)                                                                             \
+        Groups();                                                                                \
+    DeviceMemoryBarrierWithGroupSync()
+
+// 回 s_depth を 1 グループで(Dispatch の回と同じ段の順)。次の回も回すなら true。
+// 段 s_depth + 1 が置かれなかった(節が減らない・上限を超えた)時は、以降の数を 0 にして本体を呼ばない(本体も Kept で抜けるので結果は同じ)
+bool TailRound(uint32_t thread) {
+    const uint32_t nodes = NodeCount(s_depth);
+    const uint32_t links = LinkCount(s_depth);
+    LV_TAIL_EACH(nodes, RoundNodeHash);
+    LV_TAIL_EACH(nodes, RoundNodeFirst);
+    LV_TAIL_SCAN(nodes, RoundParentScanLocal, RoundParentScanGroups);
+
+    // --- 親の番号・行の数 ---
+    const bool placed = Kept(s_depth + 1);
+    const uint32_t fineNodes = placed ? nodes : 0;
+    const uint32_t fineLinks = placed ? links : 0;
+    LV_TAIL_EACH(fineNodes, RoundParents);
+    LV_TAIL_EACH(fineLinks, RoundLinkHash);
+    LV_TAIL_EACH(max(fineNodes, fineLinks), RoundCount);
+    LV_TAIL_SCAN(placed ? NodeCount(s_depth + 1) : 0, RoundRowScanLocal, RoundRowScanGroups);
+
+    // --- 置く・並べる・係数・節・重み ---
+    const bool counted = Kept(s_depth + 1);
+    const uint32_t countedNodes = counted ? nodes : 0;
+    const uint32_t countedLinks = counted ? links : 0;
+    const uint32_t coarseNodes = counted ? NodeCount(s_depth + 1) : 0;
+    const uint32_t coarseLinks = counted ? LinkCount(s_depth + 1) : 0;
+    LV_TAIL_EACH(max(countedNodes, countedLinks), RoundPlace);
+    LV_TAIL_EACH(max(countedNodes, coarseLinks), RoundSort);
+    LV_TAIL_EACH(countedLinks, RoundAddCoefficients);
+    LV_TAIL_EACH(coarseNodes, RoundCoarseNodes);
+    LV_TAIL_EACH(max(countedNodes, coarseLinks), RoundFinish);
+
+    const uint32_t next = s_depth + 1;
+    return Kept(next) && Load(DepthWord(LV_NEEDS, next)) != 0 && next + 1 < g_maxLevels;
+}
+
+[numthreads(LV_SCAN_THREADS, 1, 1)] void LvTail(uint3 thread : SV_GroupThreadID) {
+    const uint32_t from = Load(LV_TAIL_FROM);
+    bool running = from != 0;
+    for (uint32_t depth = running ? from - 1 : 0; running && depth + 1 < g_maxLevels; ++depth) {
+        s_depth = depth;
+        running = TailRound(thread.x);
+    }
 }

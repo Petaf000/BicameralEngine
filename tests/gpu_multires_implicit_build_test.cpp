@@ -3,11 +3,13 @@
 // その系を GPU の GpuImplicit で解いた結果が CPU の StepImplicit とビット一致するかを確かめる。
 // 系を作る時の木は CPU の木の写し(MultiresNest::captureImplicitNest。陽解法の流れの後・変化を足す前)を GpuMultires に写して使う。
 // 多重格子の段と重みも GPU で作り(sim::GpuImplicitLevels。T-0134)、CPU の BuildImplicitGrid を GpuImplicit の並びにしたものと番号までビット一致するかを
-// 確かめる。節の並び・ImTail の境はまだ CPU の系から作る(T-0135)ので、GpuImplicit の形は CPU の系から作り、セル・面・面の一覧・節・隣・子の一覧を
+// 確かめる(回を Dispatch で積む形と、1 グループの LvTail で回す形の両方。T-0135)。節の並び・ImTail の境はまだ CPU の系から作る(T-0136)ので、GpuImplicit の形は CPU の系から作り、セル・面・面の一覧・節・隣・子の一覧を
 // GPU が作ったもので上書きする(CPU から写すセルのエネルギー・刻みの初めの温度・段の重みは 0 にして、GPU が作った値で解いたことを確かめる)。
 // 場面(gpu_multires_implicit_tree_test と同じ): 熱い点・鎖・たくさんの要求。
-// 計測(release のハードウェアだけ。--measure-only なら計測だけ): 系を作る段と多重格子の段を作る段の ms(暖機の後、同じ木で REPEATS 回作った最小)。
+// 計測(release のハードウェアだけ。--measure-only なら計測だけ): 系を作る段と多重格子の段を作る段の ms(暖機の後、同じ木で REPEATS 回作った最小。
+// 多重格子の段は回の積み方〔Dispatch の回の数・LvTail の境〕ごと)。
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -300,6 +302,8 @@ namespace {
         gpu::DebugRing* ring = nullptr;
         const sim::BakedReactionTable* table = nullptr;
         uint64_t frequency = 0;
+        bool warp =
+            false;  // WARP は LvTail のシェーダーで落ちる(T-0135。T-0147 で直す)ので、Dispatch の回だけを確かめる
     };
 
     // 1 本のリストを記録して投げる
@@ -336,8 +340,25 @@ namespace {
     }
 
     // 多重格子の段の上限(場面の CPU の系の最大。段の数は CPU の MAX_GRID_LEVELS と同じ 64 か、計測で比べる値)
-    sim::GpuImplicitLevelLimits LevelLimits(const BuildScene& scene, uint32_t levels) {
-        sim::GpuImplicitLevelLimits limits{.nodes = 1, .links = 1, .levels = levels};
+    // 回の積み方(T-0135): Dispatch で積む回の数と、LvTail に任せる細かい段の節の数
+    struct RoundShape {
+        uint32_t dispatchRounds = sim::GpuImplicitLevelLimits{}.dispatchRounds;
+        uint32_t tailMaxNodes = sim::GpuImplicitLevelLimits{}.tailMaxNodes;
+    };
+
+    // T-0134 の積み方(全部の回を Dispatch で積み、LvTail は使わない。今の既定)
+    constexpr RoundShape ALL_DISPATCHED{.dispatchRounds = MAX_LEVELS - 1, .tailMaxNodes = 0};
+    // 全部の回を LvTail で(大きい段も 1 グループ。正しさを確かめる用)
+    constexpr RoundShape ALL_TAIL{.dispatchRounds = 0, .tailMaxNodes = 0};
+    // 大きい段は Dispatch・節 1024 以下の段からは LvTail(計測で選んだ形。docs/perf.md)
+    constexpr RoundShape TAIL_1024{.dispatchRounds = 8, .tailMaxNodes = 1024};
+
+    sim::GpuImplicitLevelLimits LevelLimits(const BuildScene& scene, uint32_t levels, RoundShape shape = {}) {
+        sim::GpuImplicitLevelLimits limits{.nodes = 1,
+                                           .links = 1,
+                                           .levels = levels,
+                                           .dispatchRounds = shape.dispatchRounds,
+                                           .tailMaxNodes = shape.tailMaxNodes};
         for (const BuildTick& tick : scene.ticks) {
             const sim::GpuImplicitLevelImages images = sim::MakeGpuImplicitLevelImages(tick.grid);
             limits.nodes = std::max(
@@ -442,13 +463,20 @@ namespace {
         if (!build)
             return std::unexpected(build.error());
 
-        auto levels = sim::GpuImplicitLevels::Create(context.device, *build, LevelLimits(scene, MAX_LEVELS));
-        if (!levels)
-            return std::unexpected(levels.error());
+        // 既定の積み方(全部 Dispatch)・大きい段は Dispatch で小さい段は LvTail・全部 LvTail(T-0135)のどれでも CPU と一致すること
+        const std::vector<RoundShape> shapes = context.warp ? std::vector{RoundShape{}}
+                                                            : std::vector{RoundShape{}, TAIL_1024, ALL_TAIL};
+        for (const RoundShape shape : shapes) {
+            auto levels = sim::GpuImplicitLevels::Create(context.device, *build, LevelLimits(scene, MAX_LEVELS, shape));
+            if (!levels)
+                return std::unexpected(levels.error());
 
-        for (size_t i = 0; i < scene.ticks.size(); ++i) {
-            if (auto checked = CheckTick(context, *multires, *build, *levels, scene, scene.ticks[i]); !checked)
-                return std::unexpected(std::format("{} 刻み {}: {}", scene.name, i, checked.error()));
+            for (size_t i = 0; i < scene.ticks.size(); ++i) {
+                if (auto checked = CheckTick(context, *multires, *build, *levels, scene, scene.ticks[i]); !checked) {
+                    return std::unexpected(std::format("{} 刻み {}(Dispatch の回 {}): {}", scene.name, i,
+                                                       shape.dispatchRounds, checked.error()));
+                }
+            }
         }
 
         Log(Channel::Gpu, Level::Info,
@@ -503,9 +531,10 @@ namespace {
     std::expected<std::pair<double, double>, std::string> MeasureBuild(const Context& context,
                                                                        sim::GpuMultires& multires,
                                                                        sim::GpuImplicitBuild& build,
-                                                                       const BuildScene& scene, uint32_t levelLimit) {
+                                                                       const BuildScene& scene, uint32_t levelLimit,
+                                                                       RoundShape shape) {
         const BuildTick& tick = scene.ticks.back();
-        auto levels = sim::GpuImplicitLevels::Create(context.device, build, LevelLimits(scene, levelLimit));
+        auto levels = sim::GpuImplicitLevels::Create(context.device, build, LevelLimits(scene, levelLimit, shape));
         if (!levels)
             return std::unexpected(levels.error());
 
@@ -550,8 +579,9 @@ namespace {
         if (!read || read->overflow || read->images.levelOffsets.size() != tick.grid.levels.size() + 1)
             return std::unexpected("計測の段の数が CPU と違う");
 
-        Log(Channel::Gpu, Level::Info, "    段の上限 {}(Dispatch {}): 多重格子の段 {:.3f} ms", levelLimit,
-            levels->DispatchCount(), bestLevels);
+        Log(Channel::Gpu, Level::Info,
+            "    段の上限 {}・Dispatch の回 {}・LvTail は節 {} 以下(Dispatch {}): 多重格子の段 {:.3f} ms", levelLimit,
+            std::min(shape.dispatchRounds, levelLimit - 1), shape.tailMaxNodes, levels->DispatchCount(), bestLevels);
 
         return std::pair{bestSystem, bestLevels};
     }
@@ -567,10 +597,22 @@ namespace {
             return std::unexpected(build.error());
 
         const auto levelCount = static_cast<uint32_t>(tick.grid.levels.size());
-        auto full = MeasureBuild(context, *multires, *build, scene, MAX_LEVELS);
-        auto tight = MeasureBuild(context, *multires, *build, scene, levelCount);
+        // T-0134 の積み方(上限 64・上限 = 段の数)と、LvTail を使う積み方(T-0135)を比べる
+        auto full = MeasureBuild(context, *multires, *build, scene, MAX_LEVELS, ALL_DISPATCHED);
+        auto tight = MeasureBuild(context, *multires, *build, scene, levelCount, ALL_DISPATCHED);
         if (!full || !tight)
             return std::unexpected(!full ? full.error() : tight.error());
+
+        constexpr std::array<RoundShape, 6> TAIL_SHAPES = {RoundShape{.dispatchRounds = 0, .tailMaxNodes = 0},
+                                                           RoundShape{.dispatchRounds = 4, .tailMaxNodes = 1024},
+                                                           RoundShape{.dispatchRounds = 8, .tailMaxNodes = 1024},
+                                                           RoundShape{.dispatchRounds = 16, .tailMaxNodes = 1024},
+                                                           RoundShape{.dispatchRounds = 8, .tailMaxNodes = 4096},
+                                                           RoundShape{.dispatchRounds = 8, .tailMaxNodes = 256}};
+        for (const RoundShape shape : TAIL_SHAPES) {
+            if (auto measured = MeasureBuild(context, *multires, *build, scene, MAX_LEVELS, shape); !measured)
+                return std::unexpected(measured.error());
+        }
 
         Log(Channel::Gpu, Level::Info,
             "  計測 {}: 系を作る段 {:.3f} ms・多重格子の段 {:.3f} ms(上限 64)/ {:.3f} ms(上限 = 段の数 {})(セル {}・面 "
@@ -628,7 +670,12 @@ namespace {
             return 1;
         }
 
-        Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .table = &*table, .frequency = 0};
+        Context context{.device = device->Get(),
+                        .queue = &*queue,
+                        .ring = &*ring,
+                        .table = &*table,
+                        .frequency = 0,
+                        .warp = options->adapter == gpu::AdapterKind::Warp};
         const std::vector<BuildScene> scenes = {HotPointScene(*table), ChainScene(*table), StressScene(*table)};
 
         if (RELEASE && options->adapter != gpu::AdapterKind::Warp &&

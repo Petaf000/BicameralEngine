@@ -141,7 +141,7 @@ foreach(_entry IN ITEMS Clear CountBlocks ScanBlocks NumberUnknowns FaceEntries 
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/implicit_build.hlsl PROFILE cs_6_8 ENTRY Build${_entry} NAME implicit_build_${_snake})
 endforeach()
-foreach(_entry IN ITEMS Clear Cells CellLinks NodeHash NodeFirst ParentScanLocal ParentScanGroups Parents LinkHash Count RowScanLocal RowScanGroups Place Sort AddCoefficients CoarseNodes Finish RoundEnd)  # 陰解法の多重格子の段を GPU で作る段(T-0134)
+foreach(_entry IN ITEMS Clear Cells CellLinks NodeHash NodeFirst ParentScanLocal ParentScanGroups Parents LinkHash Count RowScanLocal RowScanGroups Place Sort AddCoefficients CoarseNodes Finish RoundEnd Tail)  # 陰解法の多重格子の段を GPU で作る段(T-0134・Tail は T-0135)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/implicit_levels.hlsl PROFILE cs_6_8 ENTRY Lv${_entry} NAME implicit_levels_${_snake})
