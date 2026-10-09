@@ -193,3 +193,15 @@
 - **捨てた形**: (a) 回の上限を CPU が証明できる段の深さ(基準からのレベルの差)から決める(材料が混ざった節の止め方を証明しきれない)・
   (b) 積んだ回を超えたら段を浅く切る(値が CPU と変わる)・(c) ImTail の中で V サイクルを収束まで回す 1 Dispatch(収束の判定を 1 グループで作り直す。
   安い回 3 Dispatch との差は小さいので見送り)。
+
+## 追記(2026-10-09、T-0147: LvTail を WARP でも積む。決めた人: Claude〔実装の細部〕)
+- **原因**: release の WARP で LvTail を積むとデバイスが失われた(最初の Dispatch で DXGI_ERROR_DEVICE_REMOVED。回が 0 で何もしない時も)のは、
+  バリアやシェーダーの大きさではなく、**本体の表を探すループ(RoundNodeHash・RoundNodeFirst・RoundLinkHash・RoundCount)の中の return**。
+  LvTail の項目のループ(LV_TAIL_EACH)に inline されると「内側のループから外のループの次の項目へ直接飛ぶ」形になり、DXC の最適化(-O1 以上)の後の
+  その形を WARP の JIT が扱えない(-O0・-Od の同じソースは通る。HW は通る)。切り分けは T-0147 のチケット(変種のシェーダーを 1 回のビルドで並べた)。
+- **直し方**: 4 つの本体のループを印(done・found)とループの条件で抜ける形にした(式も順も同じなので、Dispatch の回も LvTail も作る段は番号まで同じ)。
+  implicit_levels.hlsl の LvTail の節に「本体のループを return で抜けない」決まりを書いた。
+- **WARP の分岐を消した**: GpuMultiresImplicit は HW も WARP も小さい段の回(節 ≤ 256)と積んだ回の後の残りを LvTail で積む(T-0179 の
+  「WARP では今まで通り」は取り消し)。gpu::IsSoftwareDevice は使う所が無くなったが、WARP で落ちる形を避ける道具として残す。
+- **捨てた形**: LvTail だけ -O0 でコンパイルする(WARP で通り HW の費用もほぼ同じ〔熱い点の回 8・境 256 で 0.19 → 0.27 ms・鎖と
+  たくさんの要求は同じ。負荷あり〕だが、原因を残したまま最適化の段を変えるのは別のシェーダーで同じことが起きた時に分からない)。

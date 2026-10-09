@@ -5,8 +5,7 @@
 //   → GpuImplicit(写して 1 刻み解く)→ GpuImplicitBuild::RecordApply(解いた変化を伝導の変化の表へ。活性なら伝導の一覧へ)→ ConductApply が足す
 // CPU は系の大きさも段の数も知らない(大きさは上限から。T-0136)。記録の形(GpuImplicitRecordShape)は前の刻みの数から選ぶ(T-0154。
 // 数は遅れて読んだものでよい: 形は費用だけを変え、解いた値は同じ)。多重格子の段を Dispatch で積む回の数も前の刻みの段の数から選ぶ
-// (GpuImplicitLevels::RoundsFrom。T-0179。残りの回と小さい段の回は LvTail。LvTail は WARP で落ちる〔T-0147〕ので、ソフトウェアの
-// アダプタでは今まで通り上限まで Dispatch で積む)。V サイクルも前の刻みの回数 + 余裕の回までを段ごとの Dispatch で積み、その後の回は
+// (GpuImplicitLevels::RoundsFrom。T-0179。残りの回と小さい段の回は LvTail。HW も WARP も同じ。T-0147)。V サイクルも前の刻みの回数 + 余裕の回までを段ごとの Dispatch で積み、その後の回は
 // ImTail が段 0 から 1 グループで回す安い回にする(GpuImplicitRecordShape::dispatchCycles。T-0179)。
 // 使い方: multires->EnableImplicitConduction(device, limits) の後、MultiresStepOptions::implicitConduction の刻みを RecordStep・RecordStepActive で。
 // 上限(GpuMultiresImplicitLimits = MultiresImplicitLimits。T-0178): 流れの段の前に RecordAdmit が、系に入れるブロックを枠の順に予算
@@ -44,8 +43,8 @@ namespace bicameral::sim {
         static constexpr uint32_t PHASE_STAMP_FIRST = 2;
         static constexpr uint32_t PHASE_STAMP_COUNT = 5;
 
-        // 試験用: 前の刻みによらず一番安い積み方で積む(T-0179): 多重格子の段の回は全部 LvTail(LvTail を積まない WARP では上限まで
-        // Dispatch のまま)・V サイクルは 1 回目の後を全部 ImTail の安い回。前の刻みより系が深い・回が多い刻みの道を確かめる用
+        // 試験用: 前の刻みによらず一番安い積み方で積む(T-0179): 多重格子の段の回は全部 LvTail・V サイクルは
+        // 1 回目の後を全部 ImTail の安い回。前の刻みより系が深い・回が多い刻みの道を確かめる用
         void ForceCheapest(bool force) { m_forceCheapest = force; }
         [[nodiscard]] bool LevelRoundsSelectable() const { return m_levels.TailAllowed(); }
 

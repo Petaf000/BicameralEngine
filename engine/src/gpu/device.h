@@ -89,7 +89,7 @@ namespace bicameral::gpu {
     // デバイスが失われた理由と、DRED が有効なら最後に走っていたコマンドとページフォールトの場所をログ(Error)に出す
     DeviceRemovedReport LogDeviceRemoved(ID3D12Device* device);
 
-    // device がソフトウェアのアダプタ(WARP)で作られたか。WARP で落ちる形を避ける時に使う(T-0179: LvTail は T-0147 まで WARP で積まない)。
+    // device がソフトウェアのアダプタ(WARP)で作られたか。WARP で落ちる形を避ける時に使う(T-0179 で作った。LvTail の分岐は T-0147 で消した)。
     // アダプタを見つけられなければ true(安全な側)
     [[nodiscard]] bool IsSoftwareDevice(ID3D12Device* device);
 
