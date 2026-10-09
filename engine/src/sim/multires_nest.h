@@ -197,9 +197,14 @@ namespace bicameral::sim {
     [[nodiscard]] multires::MrFoldStats CollectFoldStats(const MultiresNest& nest, const ReactionTableView& table,
                                                          uint32_t slot);
 
-    // 静かな本物の葉(MR_QUIET_TICKS 刻みを超えて種でも進める規則もない。multires_activity.hlsli)を粗くする要求を、
-    // 一覧の後ろに世界の枠の順で足す(T-0101)。一覧が一杯なら足さずに数える。ProcessRequests の前に、StepActive で刻む木に使う
+    // 静かな本物の葉(MR_QUIET_TICKS 刻みを超えて変わっていない。multires_activity.hlsli)を粗くする要求を、
+    // 一覧の後ろに世界の枠の順で足す(T-0101)。一覧が一杯なら足さずに数える。ProcessRequests の前に、StepActive で刻む木に使う。
+    // 粗くするのは、子のセル 2×2×2 の組ごとの差が tolerance の中の葉だけ(D-430・T-0113。MrCoarsenGroupWithin。
+    // 静かになって初めての時に 1 回調べて見出しの quietCheck に置く)。許容差を渡さない版は完全に同じ(組の中がビット単位で同じ)時だけ。
+    // GPU は GpuMultires::RecordQuietRequests(TreeQuietCheck → TreeQuiet)
     void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick);
+    void SubmitQuietCoarsenRequests(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
+                                    const multires::MrFoldTolerance& tolerance);
 
     // 活性の種の枠の一覧(枠の順)
     [[nodiscard]] std::vector<uint32_t> SeedSlots(const MultiresNest& nest);

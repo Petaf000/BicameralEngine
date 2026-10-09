@@ -110,8 +110,9 @@ struct MrBlock {
     uint64_t wakeTick;
 
     // --- セル(T-0102)---
-    uint32_t page;     // セルの頁(MR_NO_PAGE = 一様、MR_PAGE_WANTED = 一様で頁に広げる途中)
-    uint32_t padding;  // 8 バイトの倍数にそろえる(CPU と GPU で同じ並び)
+    uint32_t page;  // セルの頁(MR_NO_PAGE = 一様、MR_PAGE_WANTED = 一様で頁に広げる途中)
+    // 静かな葉を粗くできるかを調べた結果(MrQuietCheckStamp。0 = 調べていない。D-430・T-0113)。世界の要約には入れない
+    uint32_t quietCheck;
 };
 
 // セルの端数(2^-64 単位。物質 ID の昇順、0 は持たない)。エネルギーの端数は符号なし(値 = 整数部 + 端数 · 2^-64、整数部は切り捨て)
@@ -180,7 +181,7 @@ FX_FN MrBlock MrMakeUnusedBlock() {
     block.busyTick = 0;
     block.wakeTick = 0;
     block.page = MR_NO_PAGE;
-    block.padding = 0;
+    block.quietCheck = 0;
 
     return block;
 }

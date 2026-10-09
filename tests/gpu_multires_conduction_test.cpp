@@ -303,7 +303,7 @@ namespace {
             return false;
 
         gpu.RecordFoldPages(list, ring, tick, NEAR_FOLD_TOLERANCE);
-        gpu.RecordQuietRequests(list, ring, tick);
+        gpu.RecordQuietRequests(list, ring, tick, NEAR_FOLD_TOLERANCE);
         gpu.RecordProcessRequests(list, ring);
 
         return gpu.RecordStepActive(list, ring, test::CONDUCTION_SEED, tick, CONDUCTION);
@@ -314,7 +314,7 @@ namespace {
         const uint32_t fractionBlocks = test::CountFractionBlocks(nest);
         sim::FoldQuietPages(nest, table, tick, NEAR_FOLD_TOLERANCE);
         const uint32_t returned = fractionBlocks - test::CountFractionBlocks(nest);
-        sim::SubmitQuietCoarsenRequests(nest, tick);
+        sim::SubmitQuietCoarsenRequests(nest, table, tick, NEAR_FOLD_TOLERANCE);
         sim::ProcessRequests(nest);
         sim::StepActive(nest, table, test::CONDUCTION_SEED, tick, CONDUCTION);
 

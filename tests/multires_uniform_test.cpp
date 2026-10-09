@@ -328,7 +328,7 @@ namespace {
         for (uint64_t tick = 0; tick < NEAR_FOLD_TICKS; ++tick) {
             SubmitRequests(nest, test::UniformRequestsAt(tick));
             FoldQuietPages(nest, table, tick, tolerance);
-            SubmitQuietCoarsenRequests(nest, tick);
+            SubmitQuietCoarsenRequests(nest, table, tick, tolerance);
             ProcessRequests(nest);
             StepActive(nest, table, test::STRESS_SEED, tick);
 

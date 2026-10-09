@@ -1,10 +1,10 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0123 待ちの評価の費用を下げる — 完了
+最終更新: 2026-10-09 / チケット: T-0113 静かな所を粗くするのも許容差の中の時だけ(D-430)— 完了
 
 ## 状態(3 行以内)
-- GPU は眠っているブロック(起こす刻みが来ず、つつかれていない)を頁のブロックでも評価しない(StepBlockWait)。全部を刻む GPU 0.054 → 0.011 ms・静かな刻み 0.08 ms(今までの丸めの水準)。
-- log2・割り算を要る時だけにする形は CPU の答えは同じだが GPU の仮の世界で 8〜12% 遅く、採らなかった(ADR-0018 追記)。T-0134・T-0020・T-0023 を合わせた main は release の全部 87 本が通過。
+- 静かな葉を粗くするのは、子のセル 2×2×2 の組のどれも差が許容差の中の時だけ(許容差なしは組の中がビット単位で同じ時だけ)。忙しさの印ごとに 1 回調べ、見出しの quietCheck(前の padding)に置く。
+- CPU(CheckQuietLeaves)と GPU(TreeQuietCheck → TreeQuiet)が HW・WARP で毎刻み一致。1 セル幅の線は残る。t-0135・t-0138・t-0025 を合わせた main は release の全部 93 本が通過。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕。次は T-0136・T-0147・T-0137)**:
@@ -22,6 +22,12 @@
 - **スクリーンショット(T-0025 済み)**: `--screenshot-tick t`(刻み t で世界を止めて写す)・`--auto-ignite`・tools/image_compare/image_compare.py(8/255 を超える画素が 0.1% 超で失敗)・基準 tests/images/*.png・置き換え方は 16 §5。画像のテストは debug で 1 本約 2 分。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-09、T-0113)**: 最初に t-0135・t-0138・t-0025 を合わせた main(変更前)で release の全部 93 本を 3 回に分けて通過(直したものなし。失敗も流し直しも無し)
+  (`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image)"` 39 本・約 6.5 分 /
+  `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe)|window_replay)"` 34 本・約 18 分 / `-Filter "^gpu_multires"` 20 本・約 40 分)。
+  変更後は release で `-Filter "^(multires|multires_quiet|multires_uniform|multires_activity|multires_conduction|gpu_multires_quiet(_warp)?|gpu_multires_uniform(_warp)?|gpu_multires_near_fold(_warp)?)$"`
+  の 11 本が通過(約 9 分。線の場面: 許容差なしは葉 2 だけ刻み 17、D-435 は葉 1・2 が刻み 17・18 に粗くなり、熱い線・O2 の線は残る)。debug はビルドだけ(release・debug とも警告なし)。
+  tidy は流していない。ほかの gpu_multires_*(subcycle・conduction・activity・implicit)は流していない(静かな葉を粗くする要求を使わない。見出しの欄は名前を変えただけ)。archmap OK(129)。
 - **テスト(2026-10-09、T-0123)**: 最初に T-0134・T-0020・T-0023 を合わせた main(変更前)で release の全部 87 本を 3 回に分けて通過
   (`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control)"` 33 本・約 4 分 /
   `-Filter "^(gpu_(fixed|physics|work_graph|debug|reaction|conduct|probe)|window_replay)"` 34 本・約 18 分 / `-Filter "^gpu_multires"` 20 本・約 32 分)。
@@ -88,7 +94,7 @@
 - 熱が通った所は温度差が約 1 mK 未満で流れが止まって静かになるが、ビット単位で同じに戻らない(許容差つきなら畳める。CPU・GPU)。
 - 畳む 2 段は、畳むものが無い刻みで 0.0131 → 0.0197 ms(世界の枠 640。TreeFoldCheck が大きくなった分)。ほぼ同じ頁 2 つ + 端数の枠 1 つを返す刻みは 0.047 ms
   (docs/perf.md)。たくさんのブロックが同じ刻みに静かになってもグループは並列。重ければ成分の回(グループの同期 約 20 回)をまとめる(未着手)。
-- **静かな葉を粗くするのは、まだ不均一でも粗くする**(D-430 に反する。T-0113)。
+- 許容差なし(MrExactFoldTolerance)で呼ぶと、熱が通った葉は組の中のエネルギーがビット単位で違うので粗くならない(鎖の場面で本物 14・頁 14 のまま。T-0113。ゲームは D-435 の許容差で呼ぶ想定)。
 - release のビルドで implicit_conduction.cpp(158) に C4189('added' が未使用。T-0110 の FX_ASSERT の中だけで使う変数)。並走の T-0117 の範囲なので触っていない。
 - 影のブロックは自分の中だけ伝導する(外は断熱。親との受け渡しは引き戻し)。
 - **release の WARP では、伝導の段の Work Graph 版(multires_conduct_graph.hlsl)の最初の DispatchGraph でデバイスが失われる**(DXGI_ERROR_DRIVER_INTERNAL_ERROR)。
@@ -98,6 +104,12 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- (Claude が決めた。ADR-0015 追記〔T-0113〕)判定は組 64 個ごとに MrCoarsenGroupWithin(許容差つきは畳むのと同じ MrFoldStats を 8 セルに、許容差なしはビット単位)。
+  一様な葉はいつも。端数は比べない。許容差は呼ぶ側が FoldQuietPages と同じ値を渡す(SubmitQuietCoarsenRequests(nest, table, tick, tolerance) / RecordQuietRequests(..., tolerance)。
+  渡さない版は許容差なし)。GPU は g_foldTolerance を共有(ルート署名は変えていない)。
+- (Claude が決めた。同上)調べるのは「静かな葉で quietCheck が今の busyTick の印でない時」(== N + 1 の刻みにしなかった: 呼ぶ側が刻みを飛ばしても抜けない)。
+  quietCheck = busyTick の下位 30bit << 2 | 調べた | 粗くできる。兄弟は粗くできる静かな兄弟にだけ譲る。HashWholeNest に入れた。
+- (前のチャット T-0123 以前の決定は下と各 ADR 追記)
 - (Claude が決めた。ADR-0018 追記〔T-0123〕)GPU の StepBlockWait は `印 < wakeTick かつ busyTick ≠ 印` のブロックを頁のブロックでも評価しない
   (全部を刻む StepWait・ActivityStepNode・ObserverStepNode・覗き窓の入れ子)。CPU は全部を評価したまま(確かめる側)。
 - (Claude が決めた。同上)log2 と割り算を要る時だけにする形は採らない(GPU の仮の世界が 8〜12% 遅くなった。式は今のまま)。
@@ -127,9 +139,13 @@
 - (前のチャット T-0104 の決定は ADR-0015 追記と 17 §5 にある)
 
 ## 次にやること
-NEXT.md の先頭(T-0113)。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
+NEXT.md の先頭。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **静かな葉を粗くする判定(T-0113)**: multires_activity.hlsli の MrNeedsQuietCheck・MrIsCoarsenableQuietLeaf・MrCoarsenGroupWithin(Cells の約束: Cell(index)・Temperature(cell))。
+  CPU は multires_activity.cpp の CheckQuietLeaves(SubmitQuietRequests の初め)、GPU は multires_tree.hlsl の TreeQuietCheck(PassQuietCheck。木の段は 12 個)。
+  quietCheck は busyTick が変わると自動で古くなる(書き手を増やしても消す必要はない)。セルを書き換える段を足す時に busyTick を書き忘れると、古い判定のまま粗くなる。
+  線の場面は tests/multires_quiet_scene.h の MakeLineNest(要求は 1 つの親に 1 回の処理で 1 つなので 1 つずつ処理する)。
 - **GPU の眠り(T-0123)**: multires_wait_step.hlsli の StepBlockWait の初めで眠っているブロックを飛ばす。これは「ブロックのセル・tc・刻むセルの形を変えるものは
   必ずつつく(PokeBlock / MR_BUSY_POKED)か busyTick を書く」という約束に頼っている。セルを書き換える段を足す時につつき忘れると、GPU だけ起きずに CPU と食い違う
   (CPU は全部を評価するので、毎刻みの比べで見つかる)。GPU の計測は同じ exe を続けて 2〜3 回流し、2 回目以降を使う。

@@ -51,17 +51,18 @@ namespace bicameral::sim {
             PassRelease,
             PassClearIndex,
             PassFillIndex,
-            PassQuiet,      // 静かな葉を粗くする要求(要求の処理の前。T-0101)
-            PassExpand,     // 一様で反応が進むブロックに頁を配る(刻んだ後。T-0102)
-            PassFoldCheck,  // 静かで一様になった頁を調べる(要求の処理の前。T-0103)
-            PassFold,       // 調べた頁を枠の順に畳む(T-0103)
-            PassFractions,  // 伝導の端数の枠を枠の順に配る(頁を配った後。T-0107)
+            PassQuiet,       // 静かな葉を粗くする要求(要求の処理の前。T-0101)
+            PassExpand,      // 一様で反応が進むブロックに頁を配る(刻んだ後。T-0102)
+            PassFoldCheck,   // 静かで一様になった頁を調べる(要求の処理の前。T-0103)
+            PassFold,        // 調べた頁を枠の順に畳む(T-0103)
+            PassFractions,   // 伝導の端数の枠を枠の順に配る(頁を配った後。T-0107)
+            PassQuietCheck,  // 静かな葉を粗くできるか調べる(PassQuiet の前。T-0113)
         };
-        constexpr std::array<const char*, 11> TREE_SHADERS = {
+        constexpr std::array<const char*, 12> TREE_SHADERS = {
             "sim/multires_tree_resolve.cso", "sim/multires_tree_settle.cso",      "sim/multires_tree_allocate.cso",
             "sim/multires_tree_release.cso", "sim/multires_tree_clear_index.cso", "sim/multires_tree_fill_index.cso",
             "sim/multires_tree_quiet.cso",   "sim/multires_tree_expand.cso",      "sim/multires_tree_fold_check.cso",
-            "sim/multires_tree_fold.cso",    "sim/multires_tree_fractions.cso"};
+            "sim/multires_tree_fold.cso",    "sim/multires_tree_fractions.cso",   "sim/multires_tree_quiet_check.cso"};
 
         // multires_conduct.hlsl の段(呼ぶ順。T-0107)
         enum ConductPass : uint8_t {
@@ -653,8 +654,15 @@ namespace bicameral::sim {
 
     void GpuMultires::RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                           uint64_t tick) {
+        RecordQuietRequests(list, debugRing, tick, MrExactFoldTolerance());
+    }
+
+    void GpuMultires::RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                          uint64_t tick, const MrFoldTolerance& tolerance) {
+        m_constants.foldTolerance = MrPackFoldTolerance(tolerance);
         m_constants.tickLow = static_cast<uint32_t>(tick);
         m_constants.tickHigh = static_cast<uint32_t>(tick >> 32);
+        RecordTreePass(list, debugRing, PassQuietCheck, std::max(1u, m_capacity.worldBlocks));
         RecordTreePass(list, debugRing, PassQuiet, 1);
     }
 

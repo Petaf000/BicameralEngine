@@ -82,7 +82,7 @@ namespace bicameral::test {
                                  const multires::MrFoldTolerance& tolerance) {
         sim::SubmitRequests(nest, UniformRequestsAt(tick));
         sim::FoldQuietPages(nest, table, tick, tolerance);
-        sim::SubmitQuietCoarsenRequests(nest, tick);
+        sim::SubmitQuietCoarsenRequests(nest, table, tick, tolerance);
         sim::ProcessRequests(nest);
     }
 

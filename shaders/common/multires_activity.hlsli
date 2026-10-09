@@ -189,18 +189,78 @@ FX_FN bool MrCellChanged(RxCell before, RxCell after) {
     return !MrSameCell(before, after);
 }
 
-// 枠 slot を粗くする要求を作るか。静かな葉で、同じ親の八分の一の番号が小さい兄弟に静かな葉が無い
-// (1 刻みに 1 つの親は 1 つの要求しか通らない〔17 §5〕ので、負ける要求で一覧を埋めない)
+// --- 静かな葉を粗くするのは計器で測れない差しか失わない時だけ(D-430・T-0113。17 §5)--------------------------
+// 粗くすると子のセル 2×2×2 の組(親のセル 1 つになる)が 1 つの値に混ざる。失うのは組の中の差だけなので、64 組のどれも
+// 差が許容差(畳むのと同じ MrFoldTolerance。D-435)の中の時だけ粗くする(細く撒いた火薬の線・薄い膜・霜の模様が、置いて待っただけで薄まらない)。
+// 完全に同じ(MrIsExactFold)なら組の中のセルがビット単位で同じ時だけ。端数(セルごとに 1 単位未満)は比べない
+// (MrWantsFractionReturn と同じく計器で測れない差)。一様な葉はいつも粗くできる。
+// 調べるのは静かな葉の忙しさの印ごとに 1 回(毎刻み呼ぶなら、ちょうど静かになった刻み)。結果は見出しの quietCheck に、調べた時の
+// busyTick の下位 30bit と一緒に置く。刻んで変わった・つつかれた(busyTick が変わった)ら、また静かになった時に調べ直す。
+// 静かなまま粗くできない葉の 512 セルを毎刻み読まない。CPU は multires_activity.cpp の CheckQuietLeaves、GPU は multires_tree.hlsl の TreeQuietCheck
+
+FX_CONST uint32_t MR_QUIET_COARSENABLE = 1u;  // quietCheck の bit 0: 粗くできる
+FX_CONST uint32_t MR_QUIET_CHECKED = 2u;      // quietCheck の bit 1: 調べた(0 の見出し = 調べていない と分ける)
+
+FX_FN uint32_t MrQuietCheckStamp(uint64_t busyTick, bool coarsenable) {
+    return ((uint32_t)busyTick << 2) | MR_QUIET_CHECKED | (coarsenable ? MR_QUIET_COARSENABLE : 0u);
+}
+
+// 静かな葉で、今の忙しさの印ではまだ調べていない
+FX_FN bool MrNeedsQuietCheck(MrBlock block, uint64_t mark) {
+    return MrIsQuietLeaf(block, mark) &&
+           (block.quietCheck | MR_QUIET_COARSENABLE) != MrQuietCheckStamp(block.busyTick, true);
+}
+
+// 静かな葉で、今の忙しさの印で調べて粗くできると分かっている
+FX_FN bool MrIsCoarsenableQuietLeaf(MrBlock block, uint64_t mark) {
+    return MrIsQuietLeaf(block, mark) && block.quietCheck == MrQuietCheckStamp(block.busyTick, true);
+}
+
+// 組 group(0〜63。親のセルの八分の一の中の並び x + 4y + 16z)の member 番目(0〜7)の子のセルの番号
+FX_FN uint32_t MrCoarsenGroupCell(uint32_t group, uint32_t member) {
+    const uint32_t x = ((group & 3u) << 1) | (member & 1u);
+    const uint32_t y = (((group >> 2) & 3u) << 1) | ((member >> 1) & 1u);
+    const uint32_t z = ((group >> 4) << 1) | (member >> 2);
+
+    return MrCellIndex(x, y, z);
+}
+
+// 組 group を粗くしても許容差の中か。cells は Cell(index)(頁のセル)と Temperature(cell)(RxComputeThermal の温度 mK)を持つ
+template <typename Cells>
+FX_FN bool MrCoarsenGroupWithin(Cells cells, uint32_t group, MrFoldTolerance tolerance) {
+    // --- 完全に同じ: ビット単位(温度を求めない)---
+    if (MrIsExactFold(tolerance)) {
+        const RxCell first = cells.Cell(MrCoarsenGroupCell(group, 0));
+        bool same = true;
+        for (uint32_t member = 1; member < MR_CHILDREN_PER_CELL; ++member)
+            same = same && MrSameCell(cells.Cell(MrCoarsenGroupCell(group, member)), first);
+
+        return same;
+    }
+
+    // --- 許容差つき: 畳むのと同じ集計(温度の幅・物質ごとの量の幅)---
+    MrFoldStats stats = MrMakeFoldStats();
+    for (uint32_t member = 0; member < MR_CHILDREN_PER_CELL; ++member) {
+        const RxCell cell = cells.Cell(MrCoarsenGroupCell(group, member));
+        stats = MrAddFoldCell(stats, cell, cells.Temperature(cell));
+    }
+
+    return MrFoldStatsWithin(stats, tolerance);
+}
+
+// 枠 slot を粗くする要求を作るか。調べて粗くできると分かっている静かな葉で、同じ親の八分の一の番号が小さい兄弟に
+// 粗くできる静かな葉が無い(1 刻みに 1 つの親は 1 つの要求しか通らない〔17 §5〕ので、負ける要求で一覧を埋めない。
+// 粗くできない兄弟は要求を出さないので譲らない。T-0113)
 template <typename Tree>
 FX_FN bool MrWantsQuietCoarsen(Tree tree, uint32_t slot, uint64_t mark) {
     const MrBlock block = tree.Block(slot);
-    if (!MrIsQuietLeaf(block, mark))
+    if (!MrIsCoarsenableQuietLeaf(block, mark))
         return false;
 
     const MrBlock parent = tree.Block(block.parent);
     for (uint32_t octant = 0; octant < block.parentOctant; ++octant) {
         const uint32_t sibling = parent.children[octant];
-        if (sibling != MR_NO_BLOCK && MrIsQuietLeaf(tree.Block(sibling), mark))
+        if (sibling != MR_NO_BLOCK && MrIsCoarsenableQuietLeaf(tree.Block(sibling), mark))
             return false;
     }
 

@@ -3,7 +3,11 @@
 //   - 粗くしたブロックは、直前の N 刻みに変わっていなかった(テストが毎刻みの写しと比べて自分で数えた刻みで確かめる)
 //   - 「世界 + 帳簿」の保存量が最初とビット一致・索引で本物のブロックが全部引ける
 // 終わりには根だけが残る(燃え尽きると木箱の鎖も畳まれる)。一覧が一杯の刻みには静かな葉が次へ回り、静かな兄弟は 1 つずつ要求を出す。2 回走らせて全部が一致(決定性)。
+// 粗くしたブロックは、子のセル 2×2×2 の組がどれもビット単位で同じだった(許容差なし。D-430・T-0113。テストが自分で組を作って確かめる)。
+// 線の場面(T-0113。multires_quiet_scene.h の MakeLineNest): 1 セル幅の線を置いて待っても、計器で測れる線は消えない(葉が粗くならない)・
+// 組ごとに許容差の中なら今までどおり粗くなる・粗くできない葉が兄弟の要求を塞がない、を許容差なしと D-435 の許容差で確かめる。
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -47,6 +51,7 @@ namespace {
         uint32_t maxRealBlocks = 0;
         uint32_t deferredAtStuff = 0;        // 一覧が一杯の刻みに次へ回した数
         uint32_t siblingsSkipped = 0;        // 一覧を埋めた次の刻みに、兄弟に譲って要求を出さなかった静かな葉の数
+        uint32_t mixedCoarsened = 0;         // 組の中のセルが違うのに粗くした数(T-0113)
         std::vector<uint32_t> realBlocksAt;  // 刻み 20・60・100・150・200 の本物のブロックの数
     };
 
@@ -81,6 +86,21 @@ namespace {
         }
     }
 
+    // 粗くする前のブロックの子のセル 2×2×2 の組が、どれもビット単位で同じか(実装の MrCoarsenGroupWithin を使わない答え)
+    bool GroupsUniform(const MultiresNest& nest, uint32_t slot) {
+        for (uint32_t z = 0; z < MR_BLOCK_EDGE; ++z) {
+            for (uint32_t y = 0; y < MR_BLOCK_EDGE; ++y) {
+                for (uint32_t x = 0; x < MR_BLOCK_EDGE; ++x) {
+                    const RxCell corner = LoadNestCell(nest, slot, MrCellIndex(x & ~1u, y & ~1u, z & ~1u));
+                    if (!MrSameCell(LoadNestCell(nest, slot, MrCellIndex(x, y, z)), corner))
+                        return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     // 粗くしたブロック(本物だった枠が本物でなくなった)は、直前の N 刻みに変わっていなかった
     void CheckCoarsened(const MultiresNest& before, const MultiresNest& after, uint64_t tick,
                         std::span<const uint64_t> lastChanged, QuietRun& run) {
@@ -90,6 +110,7 @@ namespace {
                 continue;
 
             ++run.coarsened;
+            run.mixedCoarsened += GroupsUniform(before, slot) ? 0 : 1;
             const bool quiet = tick - lastChanged[slot] > MR_QUIET_TICKS;
             run.tooEarly += quiet ? 0 : 1;
             if (!quiet)
@@ -112,6 +133,8 @@ namespace {
 
     void CheckRun(const MultiresNest& nest, const QuietRun& run) {
         Expect(run.tooEarly == 0, "変わったばかりのブロックを粗くしない");
+        Expect(run.mixedCoarsened == 0,
+               "許容差なしでは、子のセル 2×2×2 の組がビット単位で同じブロックだけを粗くする(D-430)");
         Expect(run.conservationMismatches == 0, "毎刻み「世界 + 帳簿」が最初とビット一致");
         Expect(run.indexMismatches == 0, "索引で本物のブロックが全部引ける");
         Expect(test::CountRealBlocks(nest) == test::ACTIVITY_ROOTS, "終わりには根だけが残る");
@@ -167,6 +190,58 @@ namespace {
         return run;
     }
 
+    // --- 線の場面(T-0113)---
+
+    struct LineRun {
+        uint64_t digest = 0;
+        uint32_t conservationMismatches = 0;
+        std::array<uint64_t, test::LINE_LEAVES> coarsenedTick{NEVER, NEVER, NEVER, NEVER};
+    };
+
+    LineRun RunLines(const BakedReactionTable& table, const MrFoldTolerance& tolerance) {
+        const bool exact = MrIsExactFold(tolerance);
+        const char* name = exact ? "許容差なし" : "D-435 の許容差";
+        MultiresNest nest = test::MakeLineNest(table);
+        Expect(test::LineNestReady(nest), std::format("線の場面({}): 葉 4 つが頁を持って作れた", name));
+        const uint32_t hotLine = test::FindLineLeaf(nest, 0);
+        const ConservedTotals initial = ComputeConservedTotals(nest, table, 1);
+
+        LineRun run;
+        for (uint64_t tick = 0; tick < test::LINE_TICKS; ++tick) {
+            test::BeginLineTick(nest, table, tick, tolerance);
+            StepActive(nest, table, test::STRESS_SEED, tick);
+            run.conservationMismatches += ComputeConservedTotals(nest, table, 1) == initial ? 0 : 1;
+            for (uint32_t leaf = 0; leaf < test::LINE_LEAVES; ++leaf) {
+                if (run.coarsenedTick[leaf] == NEVER && test::LineLeafCoarsened(nest, leaf))
+                    run.coarsenedTick[leaf] = tick;
+            }
+        }
+
+        // --- 粗くしたのは組ごとに許容差の中の葉だけ。測れる線は残る ---
+        for (uint32_t leaf = 0; leaf < test::LINE_LEAVES; ++leaf) {
+            const bool coarsened = run.coarsenedTick[leaf] != NEVER;
+            Expect(coarsened == test::LineLeafShouldCoarsen(leaf, exact),
+                   std::format("線の場面({}): 葉 {} を{}", name, leaf,
+                               test::LineLeafShouldCoarsen(leaf, exact) ? "粗くする" : "粗くしない"));
+            Expect(!coarsened || run.coarsenedTick[leaf] > MR_QUIET_TICKS,
+                   std::format("線の場面({}): 葉 {} は静かになってから粗くした", name, leaf));
+        }
+
+        const bool lineKept = !test::LineLeafCoarsened(nest, 0) &&
+                              !MrSameCell(LoadNestCell(nest, hotLine, MrCellIndex(5, 3, 3)),
+                                          LoadNestCell(nest, hotLine, MrCellIndex(5, 2, 3)));
+        Expect(lineKept, std::format("線の場面({}): 2 K 熱い線が {} 刻み待っても残る", name, test::LINE_TICKS));
+        Expect(run.conservationMismatches == 0,
+               std::format("線の場面({}): 毎刻み「世界 + 帳簿」が最初とビット一致", name));
+        run.digest = HashWholeNest(nest);
+
+        Log(Channel::Sim, Level::Info, "線の場面({}): 葉 0〜3 を粗くした刻み {} / {} / {} / {}(-1 = 粗くしない)", name,
+            static_cast<int64_t>(run.coarsenedTick[0]), static_cast<int64_t>(run.coarsenedTick[1]),
+            static_cast<int64_t>(run.coarsenedTick[2]), static_cast<int64_t>(run.coarsenedTick[3]));
+
+        return run;
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -177,6 +252,11 @@ namespace {
         const QuietRun first = RunQuiet(*table, true);
         const QuietRun second = RunQuiet(*table, false);
         Expect(first.digest == second.digest, "2 回の実行で全部が一致");
+
+        for (const MrFoldTolerance& tolerance : {MrExactFoldTolerance(), test::LINE_TOLERANCE}) {
+            const LineRun lines = RunLines(*table, tolerance);
+            Expect(lines.digest == RunLines(*table, tolerance).digest, "線の場面: 2 回の実行で全部が一致");
+        }
 
         std::string counts;
         for (const uint32_t count : first.realBlocksAt)

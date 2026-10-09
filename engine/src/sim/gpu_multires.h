@@ -68,8 +68,11 @@ namespace bicameral::sim {
         void RecordFoldPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
                              const multires::MrFoldTolerance& tolerance);
         // 静かな本物の葉を粗くする要求を一覧の後ろに足す(SubmitQuietCoarsenRequests と同じ。RecordRequests の後・
-        // RecordProcessRequests の前。tick はこれから処理する刻み。T-0101)
+        // RecordProcessRequests の前。tick はこれから処理する刻み。T-0101)。粗くするのは子のセル 2×2×2 の組ごとの差が
+        // 許容差の中の葉だけ(TreeQuietCheck。D-430・T-0113)。許容差を渡さない版は完全に同じ時だけ
         void RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
+        void RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                                 const multires::MrFoldTolerance& tolerance);
         void RecordProcessRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         // 頁を配る段(TreeExpand)だけ(計測用。刻む段が印を付けていなければ何も配らない。T-0102)
         void RecordExpandPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
@@ -169,7 +172,7 @@ namespace bicameral::sim {
 
         static constexpr uint32_t TABLE_COUNT = 4;  // 物質・規則・索引・速度
         static constexpr uint32_t ACTIVITY_LISTS = 2;
-        static constexpr uint32_t TREE_PASS_COUNT = 11;
+        static constexpr uint32_t TREE_PASS_COUNT = 12;
         static constexpr uint32_t CONDUCT_PASS_COUNT = 6;
         static constexpr uint32_t MAX_TIMESTAMPS = 16;
 

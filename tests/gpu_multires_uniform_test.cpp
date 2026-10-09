@@ -41,7 +41,7 @@ namespace {
             return false;
 
         gpu.RecordFoldPages(list, ring, tick, tolerance);
-        gpu.RecordQuietRequests(list, ring, tick);
+        gpu.RecordQuietRequests(list, ring, tick, tolerance);
         gpu.RecordProcessRequests(list, ring);
 
         return gpu.RecordStepActive(list, ring, test::STRESS_SEED, tick);

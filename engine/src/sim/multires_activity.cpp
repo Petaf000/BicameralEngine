@@ -4,7 +4,8 @@
 // 印は「この刻みの印と交換して、前と違えば初めて」なので、どの順に起こしても刻むブロックの集合・数える欄・印は同じになる。
 // 面をたどる再帰も、たどる道(どの種のどの面からか)は順に依存しないので、上限で止まった数も同じになる。
 // 刻んでセルが変わったブロックと、木の変更でつつかれたブロックには忙しさの印(busyTick)を書き、印が古い本物の葉を
-// 粗くする要求を作る(SubmitQuietCoarsenRequests。GPU は multires_tree.hlsl の TreeQuiet。T-0101)。
+// 粗くする要求を作る(SubmitQuietCoarsenRequests。GPU は multires_tree.hlsl の TreeQuiet。T-0101)。粗くするのは子のセル 2×2×2 の組ごとの差が
+// 許容差の中の葉だけ(静かになって初めての時に 1 回調べる。CheckQuietLeaves。GPU は TreeQuietCheck。D-430・T-0113)。
 // 一様なブロック(T-0102)は値 1 つで反応が進むかを調べ、進むなら刻んだ後に枠の順で頁に広げて刻む(GPU は TreeExpand → ExpandStepNode)。
 // 頁を持つブロックがちょうど静かになった刻みに一様なら、値 1 つに戻して枠の順に頁を返す(FoldQuietPages。GPU は TreeFoldCheck → TreeFold。T-0103)。
 // 許容差を渡すと、ほぼ同じ頁も平均の値で畳み、切り捨ての余りを帳簿へ移す(T-0104。GPU も同じ段で。T-0112)。
@@ -116,6 +117,68 @@ namespace bicameral::sim {
                 Schedule(nest, slot, mark);
         }
 
+        // --- 静かな葉を粗くできるか(T-0113。D-430)---
+
+        // MrCoarsenGroupWithin の Cells の約束(頁か一様の値のセル・温度)。完全に同じの時は温度を求めないので table は無くてよい
+        struct QuietLeafCells {
+            const MultiresNest* nest = nullptr;
+            const ReactionTableView* table = nullptr;
+            uint32_t slot = 0;
+
+            [[nodiscard]] RxCell Cell(uint32_t index) const { return LoadNestCell(*nest, slot, index); }
+
+            [[nodiscard]] int32_t Temperature(const RxCell& cell) const {
+                return RxComputeThermal(*table, cell).temperature;
+            }
+        };
+
+        // 葉を粗くしても、子のセル 2×2×2 の組のどれも許容差の中か(一様ならいつも)
+        bool LeafCoarsenable(const MultiresNest& nest, const ReactionTableView* table, uint32_t slot,
+                             const MrFoldTolerance& tolerance) {
+            if (MrIsUniform(nest.blocks[slot]))
+                return true;
+
+            const QuietLeafCells cells{.nest = &nest, .table = table, .slot = slot};
+            for (uint32_t group = 0; group < MR_OCTANT_CELLS; ++group) {
+                if (!MrCoarsenGroupWithin(cells, group, tolerance))
+                    return false;
+            }
+
+            return true;
+        }
+
+        // 今の忙しさの印でまだ調べていない静かな葉を調べ、結果を見出しの quietCheck に置く(GPU の TreeQuietCheck。要求を作る前に全部)
+        void CheckQuietLeaves(MultiresNest& nest, const ReactionTableView* table, uint64_t tick,
+                              const MrFoldTolerance& tolerance) {
+            const uint64_t mark = MrChangeMark(tick);
+            for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+                MrBlock& block = nest.blocks[slot];
+                if (MrNeedsQuietCheck(block, mark))
+                    block.quietCheck = MrQuietCheckStamp(block.busyTick, LeafCoarsenable(nest, table, slot, tolerance));
+            }
+        }
+
+        // 静かな葉を調べてから、粗くできる葉の要求を枠の順に足す(table は許容差つきの時だけ要る)
+        void SubmitQuietRequests(MultiresNest& nest, const ReactionTableView* table, uint64_t tick,
+                                 const MrFoldTolerance& tolerance) {
+            CheckQuietLeaves(nest, table, tick, tolerance);
+
+            const CpuTree tree{.nest = &nest};
+            const uint64_t mark = MrChangeMark(tick);
+            uint32_t& count = nest.counters[MR_COUNTER_REQUESTS];
+            for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+                if (!MrWantsQuietCoarsen(tree, slot, mark))
+                    continue;
+
+                if (count == MR_MAX_REQUESTS) {
+                    nest.counters[MR_COUNTER_QUIET_DEFERRED] += 1;
+                    continue;
+                }
+
+                nest.requests[count++] = MrMakeQuietCoarsenRequest(nest.blocks[slot]);
+                nest.counters[MR_COUNTER_QUIET_REQUESTS] += 1;
+            }
+        }
     }  // namespace
 
     void nest_detail::WakeAround(MultiresNest& nest, uint32_t slot, uint32_t mark) {
@@ -235,21 +298,13 @@ namespace bicameral::sim {
     }
 
     void SubmitQuietCoarsenRequests(MultiresNest& nest, uint64_t tick) {
-        const CpuTree tree{.nest = &nest};
-        const uint64_t mark = MrChangeMark(tick);
-        uint32_t& count = nest.counters[MR_COUNTER_REQUESTS];
-        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
-            if (!MrWantsQuietCoarsen(tree, slot, mark))
-                continue;
+        SubmitQuietRequests(nest, nullptr, tick, MrExactFoldTolerance());
+    }
 
-            if (count == MR_MAX_REQUESTS) {
-                nest.counters[MR_COUNTER_QUIET_DEFERRED] += 1;
-                continue;
-            }
-
-            nest.requests[count++] = MrMakeQuietCoarsenRequest(nest.blocks[slot]);
-            nest.counters[MR_COUNTER_QUIET_REQUESTS] += 1;
-        }
+    void SubmitQuietCoarsenRequests(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
+                                    const MrFoldTolerance& tolerance) {
+        const ReactionTableView view = table.View();
+        SubmitQuietRequests(nest, MrIsExactFold(tolerance) ? nullptr : &view, tick, tolerance);
     }
 
     std::vector<uint32_t> WaitSeedSlots(const MultiresNest& nest, uint64_t tick) {

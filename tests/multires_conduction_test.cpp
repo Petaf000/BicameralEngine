@@ -460,7 +460,7 @@ namespace {
         int32_t maxChange = 0;  // 頁を持つブロックの 1 刻みの温度の変化の最大(報告の間隔の中)
         for (uint64_t tick = 0; tick < settings.ticks; ++tick) {
             FoldQuietPages(nest, table, tick, settings.tolerance);
-            SubmitQuietCoarsenRequests(nest, tick);
+            SubmitQuietCoarsenRequests(nest, table, tick, settings.tolerance);
             ProcessRequests(nest);
             const std::vector<int32_t> before = PagedTemperatures(nest, view);
             StepActive(nest, table, CONDUCTION_SEED, tick, settings.options);
@@ -503,7 +503,7 @@ namespace {
         const MultiresStepOptions subcycle = test::SubcycleTestOptions(table, 3);
         MeasurePageResidue(table, {.ticks = LONG_TICKS, .reportEvery = LONG_REPORT});
         MeasurePageResidue(table, {.ticks = LONG_TICKS, .reportEvery = LONG_REPORT, .options = subcycle});
-        for (const uint32_t millikelvin : {10u, 100u}) {
+        for (const uint32_t millikelvin : {1u, 10u, 100u}) {  // 1 mK = D-435(T-0113)
             const MrFoldTolerance tolerance = {.temperatureMk = millikelvin, .amountShift = RESIDUE_AMOUNT_SHIFT};
             MeasurePageResidue(
                 table, {.ticks = LONG_TICKS, .reportEvery = LONG_REPORT, .tolerance = tolerance, .options = subcycle});

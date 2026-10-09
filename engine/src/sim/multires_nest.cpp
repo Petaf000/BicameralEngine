@@ -497,6 +497,7 @@ namespace bicameral::sim {
             hash = FxHashCombine(hash, block.busyTick);
             hash = FxHashCombine(hash, block.wakeTick);
             hash = FxHashCombine(hash, block.page);
+            hash = FxHashCombine(hash, block.quietCheck);
         }
 
         for (const RxCell& cell : nest.cells)

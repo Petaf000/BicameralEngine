@@ -2,6 +2,7 @@
 // CPU リファレンス(sim::SubmitQuietCoarsenRequests)と毎刻みビット一致することを確かめる(T-0101)。場面は tests/multires_quiet_scene.h。
 // 1 回目は毎刻み、状態の全部(見出しの活性と忙しさの印・セル・端数・空きのスタック・帳簿・数える欄)と次の刻みの種の集合を比べる。
 // 2 回目は 15 刻みずつ 1 本のリストで投げ(読み戻しは最後だけ)、最後の要約が 1 回目と一致することを確かめる。
+// 線の場面(T-0113。multires_quiet_scene.h の MakeLineNest。粗くできるかを調べる TreeQuietCheck)も、許容差なしと D-435 の許容差で毎刻み比べる。
 // 時間は別に、暖機してから根 8³ 個の世界で「静かな葉を探す段」だけを測る。引数は gpu_test_options.h。
 #include "core/log.h"
 #include "core/singleton.h"
@@ -149,6 +150,53 @@ namespace {
         return sim::HashWholeNest(cpu);
     }
 
+    // 線の場面(T-0113): 毎刻み CPU と比べ、粗くした葉が CPU の答えどおりか
+    std::expected<uint64_t, std::string> RunLinesCompared(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                          const MrFoldTolerance& tolerance) {
+        sim::MultiresNest cpu = test::MakeLineNest(table);
+        if (!test::LineNestReady(cpu))
+            return std::unexpected("線の場面を作れない");
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.activity = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read;
+        for (uint64_t tick = 0; tick < test::LINE_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (!gpu->RecordRequests(list, {}))
+                    return false;
+
+                gpu->RecordFoldPages(list, ring.GpuAddress(), tick, tolerance);
+                gpu->RecordQuietRequests(list, ring.GpuAddress(), tick, tolerance);
+                gpu->RecordProcessRequests(list, ring.GpuAddress());
+
+                return gpu->RecordStepActive(list, ring.GpuAddress(), test::STRESS_SEED, tick);
+            };
+            if (auto executed = Execute(queue, ring, *gpu, read, record); !executed)
+                return std::unexpected(std::format("線の場面 刻み {}: {}", tick, executed.error()));
+
+            test::BeginLineTick(cpu, table, tick, tolerance);
+            sim::StepActive(cpu, table, test::STRESS_SEED, tick);
+            if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read)) {
+                ReportFirstMismatch(cpu, read, tick);
+                return std::unexpected(std::format("線の場面 刻み {} で CPU と GPU が食い違う", tick));
+            }
+        }
+
+        const bool exact = MrIsExactFold(tolerance);
+        for (uint32_t leaf = 0; leaf < test::LINE_LEAVES; ++leaf) {
+            if (test::LineLeafCoarsened(cpu, leaf) != test::LineLeafShouldCoarsen(leaf, exact))
+                return std::unexpected(std::format("線の場面: 葉 {} の粗くした・しないが期待と違う", leaf));
+        }
+
+        return sim::HashWholeNest(cpu);
+    }
+
     // 2 回目: TICKS_PER_LIST 刻みずつ投げ、最後だけ読む
     std::expected<uint64_t, std::string> RunBatched(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
@@ -242,7 +290,9 @@ namespace {
                                      : std::expected<double, std::string>(0.0);
         const auto first = RunCompared(device->Get(), *queue, *ring, *table);
         const auto second = RunBatched(device->Get(), *queue, *ring, *table);
-        for (const auto* result : {&first, &second}) {
+        const auto exactLines = RunLinesCompared(device->Get(), *queue, *ring, *table, MrExactFoldTolerance());
+        const auto nearLines = RunLinesCompared(device->Get(), *queue, *ring, *table, test::LINE_TOLERANCE);
+        for (const auto* result : {&first, &second, &exactLines, &nearLines}) {
             if (*result)
                 continue;
 
@@ -270,8 +320,9 @@ namespace {
 
         Log(Channel::Gpu, Level::Info,
             "gpu_multires_quiet_test: OK({} 刻みで GPU と CPU "
-            "がビット一致・次の刻みの種も一致・まとめて投げても一致。要約 {:016x})",
-            test::QUIET_TICKS, *first);
+            "がビット一致・次の刻みの種も一致・まとめて投げても一致・線の場面 {} 刻みも許容差なしと D-435 で一致。要約 "
+            "{:016x})",
+            test::QUIET_TICKS, test::LINE_TICKS, *first);
 
         return 0;
     }

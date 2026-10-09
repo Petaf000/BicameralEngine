@@ -78,6 +78,53 @@ void InclusiveScan(uint32_t i, uint32_t blockValue, uint32_t fractionValue, uint
     g_counters[MR_COUNTER_QUIET_DEFERRED] += wanted - added;
 }
 
+// --- 0'. 静かな葉を粗くできるか(T-0113。D-430。TreeQuiet の前。multires_activity.hlsli の MrCoarsenGroupWithin)---
+// 1 グループ = 世界の枠 1 つ、スレッド = 子のセル 2×2×2 の組(64)。今の忙しさの印でまだ調べていない静かな葉だけ
+// (グループで一様な分岐)。組のどれかが許容差を超えたら粗くできない。結果を見出しの quietCheck に(CPU の CheckQuietLeaves)
+
+groupshared uint32_t gs_quietBlocked;  // 許容差を超えた組があった
+
+// MrCoarsenGroupWithin の Cells の約束(頁のセルと温度)
+struct QuietPageCells {
+    uint32_t page;
+
+    RxCell Cell(uint32_t index) { return g_cells[PageCellAddress(page, index)]; }
+
+    int32_t Temperature(RxCell cell) { return RxComputeThermal(MakeTable(), cell).temperature; }
+};
+
+[numthreads(MR_OCTANT_CELLS, 1, 1)] void TreeQuietCheck(uint32_t group : SV_GroupIndex, uint3 id : SV_GroupID) {
+    const uint32_t slot = id.x;
+    if (slot >= g_worldBlocks)
+        return;
+
+    const uint32_t mark = MrActivityMark(FX_U64(g_tickHigh, g_tickLow));
+    const MrBlock block = g_blocks[slot];
+    if (!MrNeedsQuietCheck(block, mark))
+        return;
+
+    // --- 一様な葉はいつも粗くできる ---
+    if (MrIsUniform(block)) {
+        if (group == 0)
+            g_blocks[slot].quietCheck = MrQuietCheckStamp(block.busyTick, true);
+
+        return;
+    }
+
+    if (group == 0)
+        gs_quietBlocked = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    QuietPageCells cells;
+    cells.page = block.page;
+    if (!MrCoarsenGroupWithin(cells, group, MrUnpackFoldTolerance(g_foldTolerance)))
+        InterlockedOr(gs_quietBlocked, 1u);
+
+    GroupMemoryBarrierWithGroupSync();
+    if (group == 0)
+        g_blocks[slot].quietCheck = MrQuietCheckStamp(block.busyTick, gs_quietBlocked == 0);
+}
+
 // --- 1. 解決 ---
 
 MrRequestState ResolveRefine(MrRequest request, MrRequestState state, uint32_t i) {
