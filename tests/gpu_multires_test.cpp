@@ -3,6 +3,7 @@
 // 場面は tests/multires_test_scene.h(本物の鎖・影の鎖・たくさんの要求)。状態の全部(見出し・セル・端数・空きのスタック・帳簿・数える欄)を
 // 毎刻み比べ、GPU の索引で本物のブロックが全部引けることも確かめる。本物の鎖とたくさんの要求は 2 回走らせて一致を確かめる。
 // 時間は別に、1 本のリストで暖機(GPU のクロックを上げる)してから測る(1 刻みの予算に収まるか)。
+// 粗くすると成分が入りきらない場面(tests/multires_limits_scene.h。T-0022)も毎刻み比べる(断った数・見出しの quietCheck も)。
 // 引数は gpu_test_options.h。
 #include "sim/gpu_multires.h"
 #include "core/aliases.h"
@@ -12,6 +13,7 @@
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
+#include "multires_limits_scene.h"
 #include "multires_test_scene.h"
 #include "sim/reaction_test_table.h"
 
@@ -168,6 +170,43 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // 粗くすると成分が入りきらない子(T-0022)。表は上限の試験の表。刻みは進めない(要求だけ)
+    std::expected<RunResult, std::string> RunCoarsenFull(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                         gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read;
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
+            const std::vector<MrRequest> requests = test::CoarsenFullRequestsAt(tick);
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (!gpu->RecordRequests(list, requests))
+                    return false;
+
+                gpu->RecordProcessRequests(list, ring.GpuAddress());
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::SubmitRequests(cpu, requests);
+            sim::ProcessRequests(cpu);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(compared.error());
+        }
+
+        if (cpu.counters[MR_COUNTER_COARSEN_FULL] != 2)
+            return std::unexpected("入りきらない子を粗くする要求を断っていない");
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // たくさんの要求(取り合い・枠が足りない・無効・索引の作り直し・帳簿)。要求は CPU の木から作る(GPU の木と同じ)
     std::expected<RunResult, std::string> RunStress(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
@@ -316,7 +355,14 @@ namespace {
         const auto shadowTiming = MeasureChain(device->Get(), *queue, *ring, *table, MultiresScenario::Shadow);
         const auto stress = RunStress(device->Get(), *queue, *ring, *table);
         const auto stressAgain = RunStress(device->Get(), *queue, *ring, *table);
-        for (const auto* result : {&first, &second, &shadow, &stress, &stressAgain}) {
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        if (!limitsTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
+            return 1;
+        }
+
+        const auto coarsenFull = RunCoarsenFull(device->Get(), *queue, *ring, *limitsTable);
+        for (const auto* result : {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull}) {
             if (*result)
                 continue;
 

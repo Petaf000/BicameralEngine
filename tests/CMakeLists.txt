@@ -135,6 +135,8 @@ bicameral_add_gpu_test(gpu_reaction_test)
 target_link_libraries(gpu_reaction_test PRIVATE bicameral_reaction)
 bicameral_add_gpu_test_case(gpu_reaction gpu_reaction_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_reaction_warp gpu_reaction_test warp --warp --queue compute)
+bicameral_add_gpu_test_case(gpu_reaction_limits gpu_reaction_test gpu --queue compute --limits)  # 上限に当たる場面(T-0022)
+bicameral_add_gpu_test_case(gpu_reaction_limits_warp gpu_reaction_test warp --warp --queue compute --limits)
 
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)

@@ -1,7 +1,9 @@
 // gpu_reaction_test.cpp — 1 セルの反応の評価を GPU(shaders/sim/reaction_cells.hlsl)で走らせ、CPU リファレンスとビット一致を確かめる(T-0014)。
 // いろいろな成分と温度のセル 4096 個(tests/reaction_test_cells.h。reaction_test と同じ列)を 50 刻みずつ 8 区間進め、
 // 区間ごとに全部のセルを読み戻して CPU と比べる。反応は待ちの丸め(1 セルだけのブロック。区間の初めに変わったとみなす。T-0130)。
-// 引数は gpu_test_options.h。
+// --limits: 上限に当たる場面(tests/reaction_limits_table.h。9 種目の生成物・進む規則 56 本。T-0022)を 512 セルで同じく比べ、
+// 上限に当たった刻みの数(u1)も CPU と一致し、元素とエネルギーが初めとビット単位で同じことを確かめる。
+// 引数は gpu_test_options.h と --limits。
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -11,6 +13,7 @@
 #include "gpu/immediate_queue.h"
 #include "gpu/resources.h"
 #include "gpu_test_options.h"
+#include "reaction_limits_table.h"
 #include "reaction_test_cells.h"
 #include "sim/reaction_table.h"
 #include "sim/reaction_test_table.h"
@@ -21,7 +24,9 @@ using namespace bicameral::reaction;
 namespace {
 
     constexpr uint32_t CELL_COUNT = 4096;
-    constexpr uint32_t THREADS_PER_GROUP = 64;  // reaction_cells.hlsl の numthreads
+    constexpr uint32_t LIMITS_CELL_COUNT = 512;  // 込み合うセルは 56 本の規則を毎刻み評価するので CPU が重い
+    constexpr uint32_t LIMIT_COUNTER_COUNT = 2;  // reaction_cells.hlsl の u1
+    constexpr uint32_t THREADS_PER_GROUP = 64;   // reaction_cells.hlsl の numthreads
     constexpr uint32_t TICKS_PER_SEGMENT = 50;
     constexpr uint32_t SEGMENT_COUNT = 8;
     constexpr int MAX_REPORTED_MISMATCHES = 5;
@@ -31,9 +36,15 @@ namespace {
         return 1 + (uint64_t{segment} * TICKS_PER_SEGMENT);
     }
 
-    // u0 セル / b0 定数 7 個 / デバッグのリング / t0〜t4 表と初めのセル
+    // u0 セル・u1 上限の数 / b0 定数 7 個 / デバッグのリング / t0〜t4 表と初めのセル
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 1, .rootConstantCount = 7, .debugRing = true, .srvCount = 5};
+        .uavCount = 2, .rootConstantCount = 7, .debugRing = true, .srvCount = 5};
+
+    // 区間の結果: セルと上限に当たった刻みの数(累計)
+    struct SegmentResult {
+        std::vector<RxCell> cells;
+        std::array<uint32_t, LIMIT_COUNTER_COUNT> limitTicks{};
+    };
 
     struct ReactionPipeline {
         ComPtr<ID3D12RootSignature> rootSignature;
@@ -42,6 +53,8 @@ namespace {
             tables;  // 物質・規則・索引・速度・初めのセル(アップロードのヒープのまま読む)
         ComPtr<ID3D12Resource> cells;
         ComPtr<ID3D12Resource> readback;
+        ComPtr<ID3D12Resource> limitCounters;  // 既定のヒープのバッファは 0 で始まる
+        ComPtr<ID3D12Resource> limitReadback;
     };
 
     template <typename T>
@@ -79,19 +92,22 @@ namespace {
         const uint64_t cellBytes = initialCells.size_bytes();
         result.cells = gpu::CreateBuffer(device, cellBytes, gpu::BufferKind::UnorderedAccess);
         result.readback = gpu::CreateBuffer(device, cellBytes, gpu::BufferKind::Readback);
+        const uint64_t counterBytes = sizeof(uint32_t) * LIMIT_COUNTER_COUNT;
+        result.limitCounters = gpu::CreateBuffer(device, counterBytes, gpu::BufferKind::UnorderedAccess);
+        result.limitReadback = gpu::CreateBuffer(device, counterBytes, gpu::BufferKind::Readback);
         const bool tablesCreated = std::ranges::all_of(result.tables,
                                                        [](const auto& buffer) { return buffer != nullptr; });
-        if (!result.pipeline || !tablesCreated || !result.cells || !result.readback)
+        if (!result.pipeline || !tablesCreated || !result.cells || !result.readback || !result.limitCounters ||
+            !result.limitReadback)
             return std::unexpected("パイプラインかバッファを作れない");
 
         return result;
     }
 
-    // 1 区間(TICKS_PER_SEGMENT 刻み)を GPU で進め、全部のセルを読み戻す
-    std::expected<std::vector<RxCell>, std::string> RunSegment(gpu::ImmediateQueue& queue,
-                                                               const ReactionPipeline& pipeline,
-                                                               gpu::DebugRing& debugRing, uint32_t cellCount,
-                                                               uint32_t segment) {
+    // 1 区間(TICKS_PER_SEGMENT 刻み)を GPU で進め、全部のセルと上限の数を読み戻す
+    std::expected<SegmentResult, std::string> RunSegment(gpu::ImmediateQueue& queue, const ReactionPipeline& pipeline,
+                                                         gpu::DebugRing& debugRing, uint32_t cellCount,
+                                                         uint32_t segment) {
         ID3D12GraphicsCommandList10* list = queue.Begin();
         if (list == nullptr)
             return std::unexpected("コマンドリストを始められない");
@@ -108,6 +124,7 @@ namespace {
         list->SetComputeRootSignature(pipeline.rootSignature.Get());
         list->SetPipelineState(pipeline.pipeline.Get());
         list->SetComputeRootUnorderedAccessView(0, pipeline.cells->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(1, pipeline.limitCounters->GetGPUVirtualAddress());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), 7, constants.data(), 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing.GpuAddress());
         for (uint32_t i = 0; i < pipeline.tables.size(); ++i)
@@ -115,6 +132,7 @@ namespace {
 
         list->Dispatch(cellCount / THREADS_PER_GROUP, 1, 1);
         gpu::RecordCopyToReadback(list, pipeline.cells.Get(), pipeline.readback.Get());
+        gpu::RecordCopyToReadback(list, pipeline.limitCounters.Get(), pipeline.limitReadback.Get());
         debugRing.RecordReadbackAndReset(list);
         if (!queue.ExecuteAndWait())
             return std::unexpected("GPU での実行に失敗");
@@ -123,23 +141,41 @@ namespace {
         if (debugOutput.assertCount > 0)
             return std::unexpected(std::format("GPU の FX_ASSERT が {} 件", debugOutput.assertCount));
 
-        std::vector<RxCell> cells(cellCount);
-        if (!gpu::ReadBuffer(pipeline.readback.Get(), std::as_writable_bytes(std::span(cells))))
+        SegmentResult result;
+        result.cells.resize(cellCount);
+        if (!gpu::ReadBuffer(pipeline.readback.Get(), std::as_writable_bytes(std::span(result.cells))) ||
+            !gpu::ReadBuffer(pipeline.limitReadback.Get(), std::as_writable_bytes(std::span(result.limitTicks))))
             return std::unexpected("読み戻せない");
 
-        return cells;
+        return result;
     }
 
-    // CPU の cells を 1 区間進め、GPU の結果と比べる。食い違ったセルの数を返す
-    int CompareSegment(const sim::BakedReactionTable& table, std::vector<RxCell>& cpuCells,
-                       std::span<const RxCell> gpuCells, uint32_t segment) {
+    // CPU の側の状態: セル・上限に当たった刻みの数(累計)・初めの元素とエネルギー
+    struct CpuState {
+        std::vector<RxCell> cells;
+        std::array<uint32_t, LIMIT_COUNTER_COUNT> limitTicks{};
+        std::vector<std::vector<uint64_t>> elements;
+        std::vector<int64_t> energies;
+    };
+
+    // CPU のセルを 1 区間進め、GPU の結果と比べる。食い違ったセル(保存が破れたセルも)の数を返す
+    int CompareSegment(const sim::BakedReactionTable& table, CpuState& cpu, std::span<const RxCell> gpuCells,
+                       uint32_t segment) {
         int mismatchCount = 0;
         const uint64_t tickBegin = SegmentTickBegin(segment);
+        std::vector<RxCell>& cpuCells = cpu.cells;
         for (uint32_t index = 0; index < cpuCells.size(); ++index) {
             const RxLoneCell lone = sim::AdvanceLoneReactionCell(table, RxMakeLoneCell(cpuCells[index], tickBegin - 1),
                                                                  test::REACTION_TEST_SEED, tickBegin, TICKS_PER_SEGMENT,
                                                                  index);
             cpuCells[index] = lone.cell;
+            cpu.limitTicks[0] += lone.productsHeldTicks;
+            cpu.limitTicks[1] += lone.candidatesLimitTicks;
+            if (sim::CountElements(table, lone.cell) != cpu.elements[index] ||
+                lone.cell.energy != cpu.energies[index]) {
+                Log(Channel::Reaction, Level::Error, "保存が破れた: 区間 {} セル {}", segment, index);
+                ++mismatchCount;
+            }
 
             const uint64_t cpuHash = sim::HashReactionCell(cpuCells[index]);
             const uint64_t gpuHash = sim::HashReactionCell(gpuCells[index]);
@@ -157,10 +193,16 @@ namespace {
     }
 
     std::expected<uint64_t, std::string> RunAndCompare(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
-                                                       const sim::BakedReactionTable& table, uint32_t cellCount) {
-        std::vector<RxCell> cpuCells(cellCount);
-        for (uint32_t index = 0; index < cellCount; ++index)
-            cpuCells[index] = test::MakeVariedReactionCell(table, index);
+                                                       const sim::BakedReactionTable& table, uint32_t cellCount,
+                                                       bool limits) {
+        CpuState cpu;
+        std::vector<RxCell>& cpuCells = cpu.cells;
+        cpuCells.resize(cellCount);
+        for (uint32_t index = 0; index < cellCount; ++index) {
+            cpuCells[index] = limits ? test::MakeLimitsCell(table, index) : test::MakeVariedReactionCell(table, index);
+            cpu.elements.push_back(sim::CountElements(table, cpuCells[index]));
+            cpu.energies.push_back(cpuCells[index].energy);
+        }
 
         auto queue = gpu::ImmediateQueue::Create(device, queueType);
         if (!queue)
@@ -176,18 +218,28 @@ namespace {
 
         for (uint32_t segment = 0; segment < SEGMENT_COUNT; ++segment) {
             const auto started = chr::steady_clock::now();
-            const auto gpuCells = RunSegment(*queue, *pipeline, *debugRing, cellCount, segment);
-            if (!gpuCells)
-                return std::unexpected(gpuCells.error());
+            const auto gpuResult = RunSegment(*queue, *pipeline, *debugRing, cellCount, segment);
+            if (!gpuResult)
+                return std::unexpected(gpuResult.error());
 
             const auto elapsed = chr::duration_cast<chr::milliseconds>(chr::steady_clock::now() - started);
             Log(Channel::Gpu, Level::Info, "  区間 {}: GPU {} ms", segment, elapsed.count());
 
-            const int mismatches = CompareSegment(table, cpuCells, *gpuCells, segment);
+            const int mismatches = CompareSegment(table, cpu, gpuResult->cells, segment);
             if (mismatches != 0)
                 return std::unexpected(std::format("区間 {}(刻み {}〜)で {} セルが食い違う", segment,
                                                    SegmentTickBegin(segment), mismatches));
+
+            if (gpuResult->limitTicks != cpu.limitTicks)
+                return std::unexpected(std::format("区間 {}: 上限に当たった刻みの数が食い違う(cpu {}・{} / gpu {}・{})",
+                                                   segment, cpu.limitTicks[0], cpu.limitTicks[1],
+                                                   gpuResult->limitTicks[0], gpuResult->limitTicks[1]));
         }
+
+        Log(Channel::Gpu, Level::Info, "  上限に当たった刻み: 生成物を待たせた {}・候補が上限を超えた {}",
+            cpu.limitTicks[0], cpu.limitTicks[1]);
+        if (limits && (cpu.limitTicks[0] == 0 || cpu.limitTicks[1] == 0))
+            return std::unexpected("上限の場面なのに上限に当たっていない");
 
         uint64_t digest = 0;
         for (const RxCell& cell : cpuCells)
@@ -197,24 +249,34 @@ namespace {
     }
 
     int Run(std::span<char*> arguments) {
-        const auto options = test::ParseGpuTestOptions(arguments);
+        std::vector<char*> rest;
+        bool limits = false;
+        for (char* argument : arguments) {
+            if (std::string_view(argument) == "--limits")
+                limits = true;
+            else
+                rest.push_back(argument);
+        }
+
+        const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
-            Log(Channel::Gpu, Level::Error, "使い方: gpu_reaction_test [--warp] [--queue direct|compute]");
+            Log(Channel::Gpu, Level::Error, "使い方: gpu_reaction_test [--warp] [--queue direct|compute] [--limits]");
             return 2;
         }
 
         Log(Channel::Gpu, Level::Info, "gpu_reaction_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
         // WARP では GPU-based validation を切る(gpu_test_options.h の TestDeviceOptions)
-        const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+        const auto table = sim::BakeReactionTable(limits ? test::MakeLimitsTestTable()
+                                                         : sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_reaction_test: FAILED(表かデバイスを作れない)");
             return 1;
         }
 
-        const uint32_t cellCount = CELL_COUNT;
-        const auto digest = RunAndCompare(device->Get(), options->queueType, *table, cellCount);
+        const uint32_t cellCount = limits ? LIMITS_CELL_COUNT : CELL_COUNT;
+        const auto digest = RunAndCompare(device->Get(), options->queueType, *table, cellCount, limits);
         if (!digest) {
             Log(Channel::Gpu, Level::Error, "gpu_reaction_test: FAILED ({})", digest.error());
             return 1;

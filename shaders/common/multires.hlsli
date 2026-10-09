@@ -61,7 +61,8 @@ FX_CONST uint32_t MR_BLOCK_MIRROR = 3;  // 世界の写し(木の外の世界か
 // 数える欄(u3 の uint32 の並び)。空きのスタックの数・墓石の数・要求の数は状態の一部(CPU と GPU で一致する)
 FX_CONST uint32_t MR_COUNTER_FREE_FRACTIONS = 0;  // 端数の枠の空きのスタックの数(上 = 次に取る所。T-0018)
 FX_CONST uint32_t MR_COUNTER_LOST = 1;            // 粗くした時に端数の下から 0 でないビットが落ちた (セル, 成分) の数
-FX_CONST uint32_t MR_COUNTER_OVERFLOW = 2;        // 成分がインラインの数を超えて捨てた数(R-MULTI-4)
+// 粗くした時に成分がインラインの数を超えて捨てた数。入りきらない時は粗くしない(MR_COUNTER_COARSEN_FULL。T-0022)ので 0 のまま
+FX_CONST uint32_t MR_COUNTER_OVERFLOW = 2;
 FX_CONST uint32_t MR_COUNTER_SHADOW_CLAMPED = 3;  // 影の引き戻しでエネルギーの余裕が負だった数
 FX_CONST uint32_t MR_COUNTER_FREE_BLOCKS = 4;     // 世界の枠の空きのスタックの数
 FX_CONST uint32_t MR_COUNTER_TOMBSTONES = 5;      // 索引の墓石の数(作り直すと 0)
@@ -85,7 +86,9 @@ FX_CONST uint32_t
 FX_CONST uint32_t MR_COUNTER_FOLDED = 22;  // 静かで一様になった頁を畳んで返した数(累計。T-0103)
 // 端数の枠が足りず、熱の伝導で細かい側から粗い側へ整数の単位の倍数だけ送ったブロックの数(累計。T-0019)
 FX_CONST uint32_t MR_COUNTER_FRACTION_SHORTAGE = 23;
-FX_CONST uint32_t MR_COUNTER_COUNT = 24;
+// 子の成分の和集合が親のセルのインラインに入りきらないので粗くしなかった要求の数(累計。MR_STATUS_SPECIES_FULL。T-0022)
+FX_CONST uint32_t MR_COUNTER_COARSEN_FULL = 24;
+FX_CONST uint32_t MR_COUNTER_COUNT = 25;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -470,6 +473,12 @@ FX_FN MrCoarsened MrCoarsenCell(MrChildren children) {
     }
 
     return result;
+}
+
+// 子 2³ を親のセル 1 つにまとめても、成分(整数部・端数・落ちた下位 3bit)がどれも捨てられずに入りきるか(T-0022。D-428)。
+// 入りきらない(子の和集合が 8 種を超える)のに粗くすると物質が消えて保存が破れるので、粗くする要求を断る(MR_STATUS_SPECIES_FULL)
+FX_FN bool MrCoarsenFits(MrChildren children) {
+    return MrCoarsenCell(children).overflowCount == 0;
 }
 
 // --- 影を親に引き戻す --------------------------------------------------------------------------

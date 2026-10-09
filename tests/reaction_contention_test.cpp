@@ -150,7 +150,9 @@ namespace {
                                    uint64_t cellId) {
         const uint64_t waitSeed = RxWaitSeed(test::REACTION_TEST_SEED, tick, cellId);
 
-        return RxCollectCandidatesWait(table.View(), cell, kelvin, waitSeed, 1).candidates;
+        const uint64_t selectSeed = RxSelectSeed(test::REACTION_TEST_SEED, tick, cellId);
+
+        return RxCollectCandidatesWait(table.View(), cell, kelvin, waitSeed, 1, selectSeed).candidates;
     }
 
     // セル cell を tickCount 回(刻みだけ変えて)評価し、規則ごとに足す。消費がある量を超えたら false

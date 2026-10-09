@@ -3,6 +3,8 @@
 //   - 閉じた 1 セルで燃やして 36,000 刻み(10 分): 元素ごとの数とエネルギーが完全に一致し、熱が負にならない
 //   - 取り合い: O2 が足りない / 吸熱の規則が熱を使い切る場面でも、ある量を超えて使わない
 //   - 規則の並びを入れ替えても結果が同じ / 1 刻みの進行度が 1 未満の遅い反応が、待ちの丸めで期待どおりに進む
+//   - 上限に当たる場面(tests/reaction_limits_table.h。T-0022): 9 種目の生成物を作る規則は待ち、進む規則が 17 個以上でも
+//     捨てずに刻みごとに選ぶ。どちらも毎刻み元素とエネルギーがビット単位で保存される
 //   セルは 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める(初めの状態 = 刻み 0 に変わった。刻みは 1 から)。
 //   待ちの丸めそのものの試験は reaction_wait_test。今までの丸めと D-424 の下限の試験は T-0130 で消した
 #include <cmath>
@@ -14,6 +16,7 @@
 
 #include "core/log.h"
 #include "core/singleton.h"
+#include "reaction_limits_table.h"
 #include "reaction_test_cells.h"
 #include "sim/reaction_table.h"
 #include "sim/reaction_test_table.h"
@@ -242,7 +245,63 @@ namespace {
         Expect(std::abs(reacted - expected) < 5.0 * std::sqrt(expected), "遅い反応が期待どおりに進まない");
     }
 
+    // --- 上限に当たる場面(T-0022 の最初の段)---
+
+    BakedReactionTable BakeLimitsTable() {
+        auto baked = BakeReactionTable(test::MakeLimitsTestTable());
+        if (!baked) {
+            Log(Channel::Reaction, Level::Error, "上限の試験の表をベイクできない: {}", baked.error());
+            std::exit(1);
+        }
+
+        return std::move(*baked);
+    }
+
+    // 込み合うセル(偶数)と入りきらないセル(奇数)を 1 刻みずつ進め、毎刻みの保存と上限の印を確かめる
+    void TestLimits() {
+        constexpr uint32_t CELLS = 64;
+        constexpr uint32_t TICKS = 400;
+        const BakedReactionTable table = BakeLimitsTable();
+        const uint32_t ninth = table.SpeciesId(test::LimitsHeldName(9));
+        const uint32_t freed = table.SpeciesId(test::LimitsHeldName(8));
+        bool conserved = true;
+        uint32_t crowdLimited = 0;
+        uint32_t heldCells = 0;
+        uint32_t ninthMade = 0;
+        uint64_t heldTicks = 0;
+        for (uint32_t index = 0; index < CELLS; ++index) {
+            const RxCell initial = test::MakeLimitsCell(table, index);
+            const std::vector<uint64_t> elements = CountElements(table, initial);
+            RxLoneCell lone = RxMakeLoneCell(initial, 0);
+            for (uint32_t tick = 1; tick <= TICKS; ++tick) {
+                lone = AdvanceLoneReactionCell(table, lone, test::REACTION_TEST_SEED, tick, 1, index);
+                conserved = conserved && CountElements(table, lone.cell) == elements &&
+                            lone.cell.energy == initial.energy && RxComputeThermal(table.View(), lone.cell).heat >= 0;
+            }
+
+            if (index % 2 == 0) {
+                crowdLimited += lone.candidatesLimitTicks == TICKS && lone.cell.speciesCount == 8 ? 1u : 0u;
+                continue;
+            }
+
+            heldCells += lone.productsHeldTicks > 0 && lone.productsHeldTicks < TICKS ? 1u : 0u;
+            ninthMade += RxFindSlot(lone.cell, ninth) != RX_NO_SLOT && RxFindSlot(lone.cell, freed) == RX_NO_SLOT ? 1u
+                                                                                                                  : 0u;
+            heldTicks += lone.productsHeldTicks;
+        }
+
+        Log(Channel::Reaction, Level::Info,
+            "  上限: 込み合う {}/{} が毎刻み選んで進み、入りきらない {}/{} が待った後に 9 種目を作った(待った刻み 平均 "
+            "{})",
+            crowdLimited, CELLS / 2, ninthMade, CELLS / 2, heldTicks / (CELLS / 2));
+        Expect(conserved, "上限に当たる場面で元素かエネルギーが保存されない");
+        Expect(crowdLimited == CELLS / 2, "進む規則が 17 個以上のセルで、毎刻み上限の印が立たない(か成分が消えた)");
+        Expect(heldCells == CELLS / 2, "9 種目の生成物を作る規則が、待ってから進まない");
+        Expect(ninthMade == CELLS / 2, "枠が空いた後に 9 種目の生成物ができない");
+    }
+
     int Run() {
+        TestLimits();
         TestBakeRejectsBrokenRules();
         const BakedReactionTable table = BakeTestTable();
         TestBakedValues(table);

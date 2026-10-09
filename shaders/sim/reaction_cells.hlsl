@@ -3,11 +3,13 @@
 // 各セルを 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める。区間の初めに「直前の刻みに変わった」とみなす
 // (つつかれたのと同じ。待ちは記憶が無いので引き直しても偏らない)。T-0130 で今までの丸めから移した。
 // 表(物質・規則・索引・速度)はベイクしたものをそのまま t0〜t3 に、セルは u0。最初の区間だけ初めのセル(t4)から読む。
+// 上限に当たった刻みの数(RX_LIMIT_PRODUCTS・RX_LIMIT_CANDIDATES。T-0022)は u1 の 2 語に足す(release でも数える)。
 // CPU リファレンス(sim::AdvanceLoneReactionCell)とビット一致することを tests/gpu_reaction_test.cpp が確かめる。
 // 世界(Work Graphs の段)への組み込みは T-0089。
 #include "common/reaction.hlsli"
 
 RWStructuredBuffer<RxCell> g_cells : register(u0);
+RWStructuredBuffer<uint32_t> g_limitCounters : register(u1);  // [0] 生成物を待たせた刻み・[1] 候補が上限を超えた刻み
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<RxRule> g_rules : register(t1);
 StructuredBuffer<uint32_t> g_ruleIndex : register(t2);
@@ -59,4 +61,9 @@ struct GpuReactionTable {
                                               index);
 
     g_cells[index] = lone.cell;
+    if (lone.productsHeldTicks != 0)
+        InterlockedAdd(g_limitCounters[0], lone.productsHeldTicks);
+
+    if (lone.candidatesLimitTicks != 0)
+        InterlockedAdd(g_limitCounters[1], lone.candidatesLimitTicks);
 }

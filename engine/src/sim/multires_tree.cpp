@@ -7,6 +7,7 @@
 // 索引は開番地法(線形探査)。入れる = 空の所(墓石は使い回さない)、消す = 墓石。表の中の並びは GPU と違ってよい。
 #include <algorithm>
 
+#include "common/multires_activity.hlsli"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
 
@@ -129,6 +130,28 @@ namespace bicameral::sim {
             nest.claims[deepest] = std::min(nest.claims[deepest], i);
         }
 
+        MrChildren GatherChildren(const MultiresNest& nest, uint32_t childSlot, uint32_t fractionSlot, uint32_t local) {
+            MrChildren children{};
+            for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+                const uint32_t index = MrChildCell(local, j);
+                children.cells[j] = LoadNestCell(nest, childSlot, index);
+                children.fractions[j] = FractionAt(nest, fractionSlot, index);
+            }
+
+            return children;
+        }
+
+        // 子のブロック childSlot を親へ粗くしても、親の八分の一の 64 セルのどれも成分が入りきるか(T-0022。multires.hlsli の MrCoarsenFits)
+        bool CoarsenFits(const MultiresNest& nest, uint32_t childSlot) {
+            const uint32_t fractionSlot = nest.blocks[childSlot].fraction;
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                if (!MrCoarsenFits(GatherChildren(nest, childSlot, fractionSlot, local)))
+                    return false;
+            }
+
+            return true;
+        }
+
         void ResolveCoarsen(MultiresNest& nest, uint32_t i) {
             const MrRequest& request = nest.requests[i];
             MrRequestState& state = nest.states[i];
@@ -136,6 +159,14 @@ namespace bicameral::sim {
                                               MrBlockOriginOf(request.y), MrBlockOriginOf(request.z));
             if (slot == MR_NO_BLOCK || nest.blocks[slot].parent == MR_NO_BLOCK || MrHasRealChild(nest.blocks[slot])) {
                 state.status = MR_STATUS_INVALID;
+                return;
+            }
+
+            // --- 成分が入りきらなければ粗くしない。静かな葉なら、今の忙しさの印では粗くできないことにする(毎刻み要求し直さない)---
+            if (!CoarsenFits(nest, slot)) {
+                MrBlock& block = nest.blocks[slot];
+                block.quietCheck = MrQuietCheckStamp(block.busyTick, false);
+                state.status = MR_STATUS_SPECIES_FULL;
                 return;
             }
 
@@ -311,17 +342,6 @@ namespace bicameral::sim {
         }
 
         // --- 4. 適用: 粗くする(1 段)---
-
-        MrChildren GatherChildren(const MultiresNest& nest, uint32_t childSlot, uint32_t fractionSlot, uint32_t local) {
-            MrChildren children{};
-            for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
-                const uint32_t index = MrChildCell(local, j);
-                children.cells[j] = LoadNestCell(nest, childSlot, index);
-                children.fractions[j] = FractionAt(nest, fractionSlot, index);
-            }
-
-            return children;
-        }
 
         void AddToLedger(MultiresNest& nest, int32_t level, uint32_t column, uint32_t lostBits) {
             const uint32_t address = MrLedgerAddress(level, column, nest.capacity.ledgerColumns);

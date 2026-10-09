@@ -5,12 +5,14 @@
 //   - 21 段の鎖の往復では端数が落ちない。24 段では落ちる(端数 64bit の幅の確認。ADR-0015)が、「世界 + 帳簿」は一致
 //   - 観察の影の鎖があってもなくても、世界(本物の葉)のハッシュ列が一致。影の子の合計は親 × 8 と一致
 //   - たくさんの要求(取り合い・枠が足りない・無効・索引の作り直し)の場面で、「世界 + 帳簿」・索引・枠の数が毎刻み合う
+//   - 粗くすると成分が入りきらない子(8 種ずつ違う子。tests/multires_limits_scene.h)は粗くせず、元素とエネルギーがビット単位で同じ(T-0022)
 #include <algorithm>
 #include <cstdint>
 #include <string_view>
 
 #include "core/log.h"
 #include "core/singleton.h"
+#include "multires_limits_scene.h"
 #include "multires_test_scene.h"
 #include "sim/multires_nest.h"
 #include "sim/reaction_test_table.h"
@@ -207,7 +209,38 @@ namespace {
         return HashWholeNest(nest);
     }
 
+    // --- 粗くすると成分が入りきらない(T-0022)---
+
+    void TestCoarsenFull() {
+        const auto table = BakeReactionTable(test::MakeLimitsTestTable());
+        if (!table) {
+            Expect(false, "上限の試験の表をベイクできる");
+            return;
+        }
+
+        MultiresNest nest = test::MakeCoarsenFullNest(*table);
+        Expect(nest.counters[MR_COUNTER_GRANTED] == 2, "入りきらない場面: 子を 2 つ作れた");
+        const ConservedTotals initial = ComputeConservedTotals(nest, *table, 1);
+        bool conserved = true;
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
+            SubmitRequests(nest, test::CoarsenFullRequestsAt(tick));
+            ProcessRequests(nest);
+            conserved = conserved && ComputeConservedTotals(nest, *table, 1) == initial;
+        }
+
+        Log(Channel::Sim, Level::Info, "入りきらない子を粗くする: 断った {}・適用 {}・捨てた成分 {}",
+            nest.counters[MR_COUNTER_COARSEN_FULL], nest.counters[MR_COUNTER_GRANTED],
+            nest.counters[MR_COUNTER_OVERFLOW]);
+        Expect(conserved, "入りきらない場面: 元素とエネルギーが毎刻み同じ");
+        Expect(nest.counters[MR_COUNTER_COARSEN_FULL] == 2, "入りきらない子を粗くする要求を 2 回とも断る");
+        Expect(nest.counters[MR_COUNTER_GRANTED] == 3, "入りきる子は粗くする");
+        Expect(nest.counters[MR_COUNTER_OVERFLOW] == 0, "粗くする時に成分を捨てない");
+        Expect(LookupBlock(nest, 1, 0, 0, 0) != MR_NO_BLOCK && LookupBlock(nest, 1, 8, 0, 0) == MR_NO_BLOCK,
+               "入りきらない子は残り、入りきる子は無くなる");
+    }
+
     int Run() {
+        TestCoarsenFull();
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
             Log(Channel::Sim, Level::Error, "試験の表をベイクできない: {}", table.error());

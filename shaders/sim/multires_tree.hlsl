@@ -165,11 +165,37 @@ MrRequestState ResolveRefine(MrRequest request, MrRequestState state, uint32_t i
     return state;
 }
 
+// 子のブロック childSlot を親へ粗くしても、親の八分の一の 64 セルのどれも成分が入りきるか(T-0022。CPU の CoarsenFits。
+// 1 スレッドで 64 セル。粗くする要求は少ないので並べない)
+bool CoarsenFits(uint32_t childSlot) {
+    const MrBlock child = g_blocks[childSlot];
+    bool fits = true;
+    for (uint32_t local = 0; local < MR_OCTANT_CELLS && fits; ++local) {
+        MrChildren children;
+        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+            const uint32_t index = MrChildCell(local, j);
+            children.cells[j] = LoadBlockCell(child, childSlot, index);
+            children.fractions[j] = LoadFraction(child.fraction, index);
+        }
+
+        fits = MrCoarsenFits(children);
+    }
+
+    return fits;
+}
+
 MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t i) {
     const uint32_t slot = LookupBlock(request.level, MrBlockOriginOf(request.x), MrBlockOriginOf(request.y),
                                       MrBlockOriginOf(request.z));
     if (slot == MR_NO_BLOCK || g_blocks[slot].parent == MR_NO_BLOCK || MrHasRealChild(g_blocks[slot])) {
         state.status = MR_STATUS_INVALID;
+        return state;
+    }
+
+    // --- 成分が入りきらなければ粗くしない。静かな葉なら、今の忙しさの印では粗くできないことにする(毎刻み要求し直さない)---
+    if (!CoarsenFits(slot)) {
+        g_blocks[slot].quietCheck = MrQuietCheckStamp(g_blocks[slot].busyTick, false);
+        state.status = MR_STATUS_SPECIES_FULL;
         return state;
     }
 

@@ -1,7 +1,29 @@
-# T-0022 反応の評価(Work Graphs・可変長の成分)
+# T-0022 反応の評価(Work Graphs・可変長の成分)— 最初の段: 上限を超えた時に黙って捨てる 3 か所を塞ぐ
 
-- Status: Todo(2026-10-09 に司令塔が事前調査を置いた。着手はまだ)
+- Status: Review(2026-10-09 作業役。最初の段だけ。残りは T-0163・T-0164 に分けた)
+- 種類: 工学
 - 設計: 02 §3・§6・01・04。関係: T-0021(ベイク)・T-0124(DEVICE_HUNG)・D-302・D-401・D-418・D-428
+
+## このチケットの範囲(2026-10-09 に絞った)
+上限(1 セル 8 種・同時に進む規則 16)を超えた時に黙って捨てて保存が破れる 3 か所を、「捨てない」形(D-428)で塞ぎ、印と数える器を付ける。
+上限そのものを無くす(成分の二段・分布の測定)は T-0163、評価の振り分け(ノード配列・Compute との比較・R-REACT-2)は T-0164。
+
+## 完了条件
+- ① RxAddSpecies の 9 種目の生成物・② RxCollectCandidatesWait の 17 個目以降・③ MrAppendCoarsened の入りきらない成分、のどれも捨てない
+- 3 つの場面(9 種目の生成物・候補 17 以上・8 種ずつ違う子を粗くする)で CPU と HW・WARP が毎刻みビット一致し、元素とエネルギーがビット単位で保存される
+- 上限に当たった印と数(release でも数える)
+
+## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-09(作業役): 最初に t-0136・t-0021・t-0143 を合わせた main を release で全部流して通過(直したものなし)。
+  ① 生成物を全部足して入りきらなければ、セルに無い物質を作る規則をその刻みは待たせてやり直す(RxApplyExtentsHeld。RX_LIMIT_PRODUCTS)。
+  ② 進む規則が 16 を超えたら、刻みとセルごとの乱数の優先度で 16 個を選ぶ(RxReplaceLastCandidate。表の並び・ID に偏らない。RX_LIMIT_CANDIDATES)。
+  ③ 粗くする要求は、親の 64 セルのどれかが入りきらなければ断る(MrCoarsenFits・MR_STATUS_SPECIES_FULL・MR_COUNTER_COARSEN_FULL。静かな葉は今の忙しさの印で「粗くできない」に)。
+  試験: reaction_test の TestLimits・gpu_reaction_limits(_warp)(tests/reaction_limits_table.h)・multires_test の TestCoarsenFull・gpu_multires(_warp)の RunCoarsenFull(tests/multires_limits_scene.h)。
+  当座のふるまいは仮(QUESTIONS Q19)。世界の刻み(多重解像度・仮の世界)で ①② を数える器は T-0163(印 RxWaitStep::limits は全部の呼ぶ所に届いている)。
+
+## 分けたもの
+- T-0163: 成分の数と候補の数の分布を測る(研究)→ 成分の二段(インライン K + 頁の溢れ領域)で上限を無くす。世界の刻みで ①② を数える器
+- T-0164: 評価をノード配列で型ごとに振り分ける・Compute の振り分けと測り比べる(D-302)・R-REACT-2(規則が数千の時の候補の引き方)
 
 ## 事前調査(2026-10-09、調べ役。読むだけ。未確認の数値は「推定」「未確認」)
 

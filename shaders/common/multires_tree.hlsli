@@ -35,6 +35,9 @@ FX_CONST uint32_t MR_STATUS_ALREADY = 2;
 FX_CONST uint32_t MR_STATUS_CONFLICT = 3;
 FX_CONST uint32_t MR_STATUS_NO_SPACE = 4;
 FX_CONST uint32_t MR_STATUS_INVALID = 5;
+// 粗くすると親のセルの成分がインラインに入りきらない(MrCoarsenFits。T-0022)。粗くせず、静かな葉なら今の忙しさの印では「粗くできない」にする。
+// 仮(ユーザー未確認。QUESTIONS Q19): 細かいまま残す(メモリを使う)。上限そのものを無くすのは T-0022 の続き
+FX_CONST uint32_t MR_STATUS_SPECIES_FULL = 6;
 
 // --- 構造体 ------------------------------------------------------------------------------------
 
@@ -220,6 +223,9 @@ FX_FN uint32_t MrStatusCounter(uint32_t status) {
 
     if (status == MR_STATUS_NO_SPACE)
         return MR_COUNTER_NO_SPACE;
+
+    if (status == MR_STATUS_SPECIES_FULL)
+        return MR_COUNTER_COARSEN_FULL;
 
     return MR_COUNTER_INVALID;
 }
