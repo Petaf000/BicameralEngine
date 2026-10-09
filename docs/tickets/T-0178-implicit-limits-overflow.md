@@ -39,6 +39,8 @@
 
 ## 結果(2026-10-09、release、RTX 3070 Ti と WARP)
 - `-Filter "^(multires|multires_implicit(_tree)?|multires_conduction|gpu_multires_implicit_conduction(_warp)?)$"` の 6 本が通過(HW 700 s・WARP 531 s。最初のビルドで通った)。
+- `-Filter "^gpu_multires_(implicit_build|conduction)(_warp)?$"`: conduction の 2 本は通過。implicit_build の 2 本は、試験の隣の上限が CPU の段の和ちょうど
+  (余りなし)だったので、新しい見込み(今までの和 + 段 d の隣)で GPU だけ縮約を止めて落ちた → 試験の上限に段 0 の隣(面 × 2)を足して直した(下の作業ログ)。
 - 上限の形ごとの様子(HW・WARP とも全部・活性の刻みで毎刻み一致・保存量も一致):
   | 場面 | ブロックが入らない上限(未知数 = CPU の系の 1/3) | 段が入らない上限(節 = セルの見込み・隣 = 段 0 の見込み) |
   |---|---|---|
@@ -54,6 +56,9 @@
 - 2026-10-09(作業役、wt2・約 1.3 時間): Q22 を仮で案 A に。流れの段の前に系に入れるブロックを枠の順に予算の中まで選ぶ形(CPU の MarkImplicitBlocks・GPU は
   系を作る段の CountBlocks・ScanBlocks を前へ動かして印を付ける)と、多重格子の段が入らなければ縮約を止める形を入れた。最初のビルドで release の HW・WARP とも
   上限を小さくした 2 つの形(ブロック・段)で CPU と毎刻みビット一致・保存量も一致。T-0179 は時間の約束で手を付けていない。debug・tidy は流していない。
+- 同じ日(続き・約 0.3 時間): 関係する試験を広げたら gpu_multires_implicit_build(_warp)が落ちた(試験の隣の上限が CPU の段の和ちょうどで、新しい見込みでは
+  GPU だけ縮約を止める)。試験の上限に段 0 の隣を足して直した。main は動いていなかったので rebase は何もしない。時間の約束で gpu_multires(_warp)・
+  gpu_multires_implicit(_tree)(_warp)は流していない(マージ前に流すこと)。
 
 ## 引き継ぎメモ(HANDOFF に載せるもの。司令塔がマージ後に反映)
 - 状態: T-0178 完了(Q22 は仮で案 A)。陰解法の系が上限(GpuMultiresImplicitLimits = MultiresImplicitLimits)を超える刻みも CPU と毎刻みビット一致。
