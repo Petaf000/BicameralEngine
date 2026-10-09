@@ -77,6 +77,9 @@ namespace bicameral::sim {
         uint32_t dispatchLevels = 0;
         // 最も粗い段の掃き出しを Dispatch で積むか(ImTail に入らない大きい最も粗い段の時だけ要る)。false なら ImTail が受け持つ
         bool coarsestDispatch = true;
+        // V サイクルを段ごとの Dispatch で積む回の数(0 なら上限 options.cycles まで。1 以上)。これより後の回は ImTail が段 0 から
+        // V サイクル全体を 1 グループで回す安い回(3 Dispatch)にする(T-0179)。値は同じ。大きい系をその回まで回すと遅い(1 グループ)
+        uint32_t dispatchCycles = 0;
     };
 
     class GpuImplicit {
@@ -139,6 +142,9 @@ namespace bicameral::sim {
         [[nodiscard]] bool ReadCost(GpuImplicitCost& cost) const;
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
+        // ShapeFrom が前の刻みの V の回数に足す余裕の最小(T-0179)
+        static constexpr uint32_t CYCLE_MARGIN = 2;
+
         // V サイクル 1 回に積む Dispatch の数(0 グループのものも含む。最後に RecordStep した形で。計測の表に使う)
         [[nodiscard]] uint32_t DispatchesPerCycle(const ImplicitOptions& options) const;
 
@@ -196,7 +202,7 @@ namespace bicameral::sim {
             uint32_t coarsestTailMaxNodes = 0;
             uint32_t maxLevels = 0;
             uint32_t coarsestDispatch = 1;
-            uint32_t unused1 = 0;
+            uint32_t wholeTail = 0;  // 1 なら ImTail が段 0 から V サイクル全体を回す(T-0179)
             uint32_t sweeps = 0;
         };
 
@@ -220,6 +226,7 @@ namespace bicameral::sim {
         void RecordCopies(ID3D12GraphicsCommandList* list, std::span<const CopyRegion> regions);
         void RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t slot, uint32_t sweeps);
         void RecordVCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options);
+        void RecordWholeTailCycle(ID3D12GraphicsCommandList* list);  // ImTail が段 0 から V サイクル全体(T-0179)
         void BeginSkippable(ID3D12GraphicsCommandList* list, uint32_t word);
         void EndSkippable(ID3D12GraphicsCommandList* list);
 

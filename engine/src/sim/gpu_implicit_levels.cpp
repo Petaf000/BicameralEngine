@@ -169,6 +169,7 @@ namespace bicameral::sim {
         constants.listsByte = static_cast<uint32_t>(build.ListsOffset());
         constants.tailMaxNodes = limits.tailMaxNodes;
         result.m_dispatchRounds = std::min(limits.dispatchRounds, limits.levels - 1);
+        result.m_tailAllowed = result.m_dispatchRounds + 1 < limits.levels || limits.tailMaxNodes != 0;
 
         // --- 作業場: 見出し・節・隣・仮の子の一覧・2 つの表・接頭和のグループの和(implicit_levels.hlsl の番地の関数)---
         const uint64_t words = HEADER_WORDS + (uint64_t{NODE_WORDS} * limits.nodes) +
@@ -243,7 +244,7 @@ namespace bicameral::sim {
     }
 
     void GpuImplicitLevels::RecordBuild(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                        const GpuImplicitBuild& build) {
+                                        const GpuImplicitBuild& build, uint32_t dispatchRounds) {
         list->SetComputeRootSignature(m_rootSignature.Get());
         const std::array<ID3D12Resource*, UAV_COUNT> buffers = {
             build.SystemBuffer(), build.WorkBuffer(), m_work.Get(),     m_nodes.Get(),
@@ -280,12 +281,14 @@ namespace bicameral::sim {
         groups[PassRoundEnd] = 1;
         groups[PassTail] = 1;
 
-        // --- 段 0 → 回 d(段 d を縮約して段 d + 1)を Dispatch で m_dispatchRounds 回 → 残りは LvTail(T-0135)---
+        // --- 段 0 → 回 d(段 d を縮約して段 d + 1)を Dispatch で rounds 回 → 残りは LvTail(T-0135・T-0179)---
+        // 最後に積んだ回の RoundEnd(回が 0 なら CellLinks)が LvTail の始める回を書くので、積む回の数によらず作る段は同じ
+        const uint32_t rounds = RecordedRounds(dispatchRounds);
         m_constants.depth = 0;
         for (const Pass pass : {PassClear, PassCells, PassCellLinks})
             Dispatch(list, pass, groups[pass]);
 
-        for (uint32_t coarsening = 0; coarsening < m_dispatchRounds; ++coarsening) {
+        for (uint32_t coarsening = 0; coarsening < rounds; ++coarsening) {
             m_constants.depth = coarsening;
             BeginSkippable(list, coarsening);
             for (const Pass pass : ROUND_PASSES)
@@ -295,16 +298,24 @@ namespace bicameral::sim {
             Dispatch(list, PassRoundEnd, groups[PassRoundEnd]);
         }
 
-        if (UsesTail())
+        if (m_tailAllowed)
             Dispatch(list, PassTail, groups[PassTail]);
     }
 
-    bool GpuImplicitLevels::UsesTail() const {
-        return m_dispatchRounds + 1 < m_constants.maxLevels || m_constants.tailMaxNodes != 0;
+    uint32_t GpuImplicitLevels::RecordedRounds(uint32_t dispatchRounds) const {
+        return m_tailAllowed ? std::min(dispatchRounds, m_dispatchRounds) : m_dispatchRounds;
     }
 
-    uint32_t GpuImplicitLevels::DispatchCount() const {
-        return 3 + (UsesTail() ? 1 : 0) + (m_dispatchRounds * static_cast<uint32_t>(ROUND_PASSES.size() + 1));
+    uint32_t GpuImplicitLevels::RoundsFrom(const GpuImplicitCost& previous) {
+        const uint32_t rounds = previous.levelCount > 0 ? previous.levelCount - 1 : 0;
+
+        return rounds + ROUND_MARGIN;
+    }
+
+    uint32_t GpuImplicitLevels::DispatchCount(uint32_t dispatchRounds) const {
+        const uint32_t rounds = RecordedRounds(dispatchRounds);
+
+        return 3 + (m_tailAllowed ? 1 : 0) + (rounds * static_cast<uint32_t>(ROUND_PASSES.size() + 1));
     }
 
     void GpuImplicitLevels::RecordCopyTo(ID3D12GraphicsCommandList* list, GpuImplicit& implicit) {

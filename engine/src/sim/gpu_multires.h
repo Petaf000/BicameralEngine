@@ -143,6 +143,8 @@ namespace bicameral::sim {
             ID3D12Device5* device, const GpuMultiresImplicitLimits& limits);
         // 計測用: 陰解法の段の境にタイムスタンプを打つ(GpuMultiresImplicit::StampPhases)
         void StampImplicitPhases(bool stamp);
+        // 試験用: 陰解法を前の刻みによらず一番安い積み方で積む(GpuMultiresImplicit::ForceCheapest。T-0179)
+        void ForceImplicitCheapest(bool force);
         // 陰解法の段(無ければ nullptr。最後に読み戻せた刻みの数を読む用)
         [[nodiscard]] const GpuMultiresImplicit* ImplicitConduction() const { return m_implicit.get(); }
 

@@ -4,6 +4,8 @@
 // 作るもの(節 ImGpuNode・隣 ImGpuLink・子の一覧)は GpuImplicit の段の形と同じ並び・同じ番号なので、そのまま写して解ける(RecordCopyTo)。
 // 段の数は値で決まる: 回は limits.dispatchRounds 回だけ Dispatch で積み、要らない回は述語(SetPredication)で飛ばす。小さい段の回と残りの回は
 // 1 グループの LvTail が最後まで回す(T-0135)。段の中身は shaders/sim/implicit_levels.hlsl。
+// LvTail を積む作り方では、刻みごとに Dispatch で積む回の数を前の刻みの段の数から選べる(RoundsFrom。T-0179)。積んだ回より深い系は
+// LvTail が残りを回すので、作る段は番号まで同じ(遅いだけ)。積まない作り方(既定・WARP)では回の数の指定は無視して上限まで積む。
 // 見出し(段の数・段ごとの節の始まりと数)も GpuImplicit の計画へ写し、GpuImplicit はそこから V サイクルの形を決める(T-0136)。
 //
 // 使い方(テスト):
@@ -62,9 +64,20 @@ namespace bicameral::sim {
                                                                                   const GpuImplicitBuild& build,
                                                                                   const GpuImplicitLevelLimits& limits);
 
-        // build が作った系から段を作る(build.RecordBuild の後)
+        static constexpr uint32_t ALL_ROUNDS = UINT32_MAX;
+
+        // build が作った系から段を作る(build.RecordBuild の後)。dispatchRounds は Dispatch で積む回の数の上限(T-0179。
+        // LvTail を積む作り方の時だけ効く。残りの回は LvTail)
         void RecordBuild(ID3D12GraphicsCommandList* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                         const GpuImplicitBuild& build);
+                         const GpuImplicitBuild& build, uint32_t dispatchRounds = ALL_ROUNDS);
+
+        // 前の刻みの段の数から、Dispatch で積む回の数を選ぶ(T-0179)。前の刻みの回 + ROUND_MARGIN 回。系が急に深くなった刻みの
+        // 大きい段を 1 グループの LvTail で回す崖(T-0135: たくさんの要求を全部 LvTail で 19 ms)を、段 2 つ分までは避ける
+        static constexpr uint32_t ROUND_MARGIN = 2;
+        [[nodiscard]] static uint32_t RoundsFrom(const GpuImplicitCost& previous);
+
+        // LvTail を積む作り方か(回の数を刻みごとに選べるか)
+        [[nodiscard]] bool TailAllowed() const { return m_tailAllowed; }
 
         // 作った節・隣・子の一覧を GpuImplicit へ写す(GpuImplicit の RecordUpload の後。形は GpuImplicit を作った系と同じこと)
         void RecordCopyTo(ID3D12GraphicsCommandList* list, GpuImplicit& implicit);
@@ -74,8 +87,8 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<GpuImplicitLevelSystem, std::string> Read() const;
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
-        // 1 回の RecordBuild に積む Dispatch の数(計測の表に使う)
-        [[nodiscard]] uint32_t DispatchCount() const;
+        // 1 回の RecordBuild(dispatchRounds を渡した時)に積む Dispatch の数(計測の表に使う)
+        [[nodiscard]] uint32_t DispatchCount(uint32_t dispatchRounds = ALL_ROUNDS) const;
 
     private:
         GpuImplicitLevels() = default;
@@ -97,12 +110,13 @@ namespace bicameral::sim {
         };
 
         void Dispatch(ID3D12GraphicsCommandList* list, uint32_t pass, uint32_t groups);
-        [[nodiscard]] bool UsesTail() const;  // LvTail を積むか(Dispatch で積まない回があるか、小さい段を任せるか)
+        [[nodiscard]] uint32_t RecordedRounds(uint32_t dispatchRounds) const;  // 実際に Dispatch で積む回の数
         void BeginSkippable(ID3D12GraphicsCommandList* list, uint32_t coarsening);
         void EndSkippable(ID3D12GraphicsCommandList* list);
 
         Constants m_constants;
-        uint32_t m_dispatchRounds = 0;  // Dispatch で積む回の数(残りは LvTail)
+        uint32_t m_dispatchRounds = 0;  // Dispatch で積む回の数の上限(残りは LvTail)
+        bool m_tailAllowed = false;     // LvTail を積む作り方(Dispatch で積まない回があるか、小さい段を任せる)
         uint64_t m_workBytes = 0;
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
