@@ -1,5 +1,6 @@
 // replay_file_test.cpp — save/replay_file(再生ファイルの形。T-0086、15 §2)を CPU だけで確かめる。
 // 書いて読むと同じものに戻ること、壊れたファイル(先頭・版・大きさ・並び)を理由つきで拒否することを見る。
+// 版 2(T-0170・T-0193): 反応表の中身と読んだパッケージの一覧が往復すること・表の壊れ方を拒否すること・版 1 のファイルを表の無い形で読むこと。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "save/replay_file.h"
 
@@ -46,6 +47,18 @@ namespace {
         return replay;
     }
 
+    // 表を 2 つ持つ記録(初期状態の表 + 差し替えた表。版の昇順)
+    ReplayFile MakeReplayWithTables() {
+        ReplayFile replay = MakeReplay();
+        replay.tables = {{.version = replay.tableVersion,
+                          .loadOrder = {"combustion_test", "mod-a"},
+                          .modifiedWorld = true,
+                          .content = "13-bytes-here"},
+                         {.version = 0xFEDC000000000000ull, .content = "x"}};
+
+        return replay;
+    }
+
     // --- 往復 ---
 
     void TestRoundTrip() {
@@ -65,6 +78,25 @@ namespace {
         EXPECT(emptyBytes.has_value() && emptyBytes->size() == 64);
         if (emptyBytes)
             EXPECT(save::ParseReplay(*emptyBytes) == empty);
+    }
+
+    void TestTablesRoundTrip() {
+        const ReplayFile replay = MakeReplayWithTables();
+        const auto bytes = save::SerializeReplay(replay);
+        EXPECT(bytes.has_value());
+        if (!bytes)
+            return;
+
+        // 表 1: 見出し 32 + 名前 (4 + 15) + (4 + 5) = 28 → 32 + 中身 13 → 16。表 2: 見出し 32 + 名前 0 + 中身 1 → 8
+        EXPECT(bytes->size() == 64 + 8 + 3 * 64 + 3 * 16 + (32 + 32 + 16) + (32 + 8));
+        const auto parsed = save::ParseReplay(*bytes);
+        EXPECT(parsed.has_value() && *parsed == replay);
+        if (!parsed)
+            return;
+
+        EXPECT(parsed->FindTable(replay.tableVersion) != nullptr &&
+               parsed->FindTable(replay.tableVersion)->modifiedWorld);
+        EXPECT(parsed->FindTable(0xFEDC000000000000ull) != nullptr && parsed->FindTable(1) == nullptr);
     }
 
     void TestFile() {
@@ -105,6 +137,67 @@ namespace {
         EXPECT(!save::ParseReplay(hugeCount).has_value());
     }
 
+    // 表の壊れ方: 途中で切れる・余りがある・見出しの数が大きすぎる
+    void TestRejectsBrokenTables() {
+        const auto bytes = save::SerializeReplay(MakeReplayWithTables());
+        if (!bytes)
+            return;
+
+        std::vector<std::byte> truncated = *bytes;
+        truncated.resize(truncated.size() - 8);
+        EXPECT(!save::ParseReplay(truncated).has_value());
+
+        std::vector<std::byte> trailing = *bytes;
+        trailing.resize(trailing.size() + 8, std::byte{0});
+        EXPECT(!save::ParseReplay(trailing).has_value());
+
+        std::vector<std::byte> hugeTables = *bytes;
+        const uint32_t huge = ~0u;
+        std::memcpy(hugeTables.data() + 12, &huge, 4);  // 表の数
+        EXPECT(!save::ParseReplay(hugeTables).has_value());
+
+        std::vector<std::byte> hugeContent = *bytes;
+        const uint64_t hugeBytes = ~0ull;
+        std::memcpy(hugeContent.data() + 64 + 8 + 3 * 64 + 3 * 16 + 16, &hugeBytes, 8);  // 表 1 の中身のバイト数
+        EXPECT(!save::ParseReplay(hugeContent).has_value());
+
+        ReplayFile outOfOrder = MakeReplayWithTables();
+        std::swap(outOfOrder.tables[0], outOfOrder.tables[1]);
+        EXPECT(!save::SerializeReplay(outOfOrder).has_value());
+
+        ReplayFile noInitial = MakeReplayWithTables();
+        noInitial.tables.erase(noInitial.tables.begin());  // 初期状態の表が無い
+        EXPECT(!save::SerializeReplay(noInitial).has_value());
+
+        ReplayFile emptyContent = MakeReplayWithTables();
+        emptyContent.tables[1].content.clear();
+        EXPECT(!save::SerializeReplay(emptyContent).has_value());
+    }
+
+    // 古い形式(版 1。T-0086〜T-0139): 見出しの [12] が予約(0)で表が無い。表の無い形として読む(15 §1 の変換)
+    void TestReadsVersion1() {
+        const ReplayFile replay = MakeReplay();
+        auto bytes = save::SerializeReplay(replay);
+        if (!bytes)
+            return;
+
+        const uint32_t version1 = 1;
+        std::memcpy(bytes->data() + 4, &version1, 4);
+        const auto parsed = save::ParseReplay(*bytes);
+        EXPECT(parsed.has_value() && *parsed == replay && parsed->tables.empty());
+
+        // 版 1 の予約の欄が 0 でない・版 0 は読まない
+        std::vector<std::byte> reserved = *bytes;
+        const uint32_t one = 1;
+        std::memcpy(reserved.data() + 12, &one, 4);
+        EXPECT(!save::ParseReplay(reserved).has_value());
+
+        std::vector<std::byte> version0 = *bytes;
+        const uint32_t zero = 0;
+        std::memcpy(version0.data() + 4, &zero, 4);
+        EXPECT(!save::ParseReplay(version0).has_value());
+    }
+
     void TestRejectsBadOrder() {
         ReplayFile commandsOutOfOrder = MakeReplay();
         std::swap(commandsOutOfOrder.commands[0], commandsOutOfOrder.commands[2]);
@@ -127,8 +220,11 @@ namespace {
 
 int main() {
     TestRoundTrip();
+    TestTablesRoundTrip();
     TestFile();
     TestRejectsBrokenBytes();
+    TestRejectsBrokenTables();
+    TestReadsVersion1();
     TestRejectsBadOrder();
     std::printf("replay_file_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
 

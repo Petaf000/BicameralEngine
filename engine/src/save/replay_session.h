@@ -65,6 +65,7 @@ namespace bicameral::save {
         // --- ファイルの中身 ---
         [[nodiscard]] size_t HashCount() const { return m_replay.tickHashes.size(); }
         [[nodiscard]] size_t CommandCount() const { return m_replay.commands.size(); }
+        [[nodiscard]] const ReplayFile& File() const { return m_replay; }
         [[nodiscard]] uint64_t LastTick() const {
             return m_replay.tickHashes.empty() ? 0 : m_replay.tickHashes.back().tick;
         }
