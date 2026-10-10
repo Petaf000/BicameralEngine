@@ -1202,6 +1202,9 @@ namespace bicameral::frame {
             if (m_options.autoLab)
                 m_editor->Lab().StartAuto();
 
+            if (m_options.autoLabCompare)
+                m_editor->Gauge().StartAuto();
+
             if (m_options.autoPlace)
                 m_editor->Brush().StartAuto();
 
@@ -1749,6 +1752,12 @@ namespace bicameral::frame {
 
             if (m_options.autoLab && (!m_editor || m_editor->Lab().AutoFailed())) {
                 Log(Channel::Sim, Level::Error, "--auto-lab: 実験室の確かめが通らなかった(--editor が要る)");
+                return 1;
+            }
+
+            if (m_options.autoLabCompare && (!m_editor || !m_editor->Gauge().AutoPassed())) {
+                Log(Channel::Sim, Level::Error, "--auto-lab-compare: 計器と比べる画面の確かめが通らなかった({})",
+                    m_editor ? m_editor->Gauge().AutoSummary() : "--editor が要る");
                 return 1;
             }
 

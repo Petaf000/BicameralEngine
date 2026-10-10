@@ -9,6 +9,7 @@
 //   印のある刻みは、コマンドを当てる前に GPU と CPU の両方の表を替え、印が箱をつつく。記録は刻み 0 の表の版 + 印の列。
 //   今まで見た表は版ごとに持つので、途中で表を替えた記録もこの実験室の中なら再生できる。記録には表の中身(script::TableBytes)も残り
 //   (T-0217)、別の起動では呼ぶ側が中身から表を作り直して AddTable で渡してから Replay する(editor/lab_panel)。
+// 計器(T-0221): 刻むたびに読み戻した GPU の箱から見るセルと箱全体の値を取る(sim/lab_gauge。世界に何も返さない)。
 // 箱は小さい(512 セル)ので、1 刻みずつ待つ(エディタの道具。ゲームの世界のフレームの歩調〔ADR-0011〕とは別のキュー)。
 #pragma once
 
@@ -24,6 +25,7 @@
 #include "gpu/immediate_queue.h"
 #include "sim/gpu_lab_box.h"
 #include "sim/lab_box.h"
+#include "sim/lab_gauge.h"
 
 namespace bicameral::sim {
 
@@ -85,6 +87,12 @@ namespace bicameral::sim {
         [[nodiscard]] size_t PendingCommands() const { return m_pending.size(); }
         [[nodiscard]] LabRecording Recording() const;
 
+        // --- 計器(T-0221)---
+        // 見るセルを替える(今までの値は捨てる: 前のセルの値と混ぜない)
+        void SetGaugeCell(uint32_t cellIndex);
+        [[nodiscard]] uint32_t GaugeCell() const { return m_gaugeCell; }
+        [[nodiscard]] const std::vector<LabGaugeSample>& Gauge() const { return m_gauge; }
+
     private:
         LabSession(BakedReactionTable table, gpu::ImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box);
 
@@ -94,6 +102,7 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> SwitchTable(uint64_t tableVersion);
         [[nodiscard]] std::expected<void, std::string> ResetTo(uint64_t tableVersion);
         [[nodiscard]] std::expected<void, std::string> StepOne();
+        void RecordGauge(uint64_t tick);
 
         // --- 反応表 ---
         BakedReactionTable m_table;                       // 箱が今使っている表(GPU の箱と同じ)
@@ -125,6 +134,10 @@ namespace bicameral::sim {
         std::vector<uint64_t> m_replayHashes;
         uint64_t m_replayEnd = 0;
         std::optional<uint64_t> m_replayDivergence;
+
+        // --- 計器(読み戻した GPU の箱の値。刻みの順)---
+        uint32_t m_gaugeCell = multires::MrCellIndex(3, 3, 3);
+        std::vector<LabGaugeSample> m_gauge;
     };
 
 }  // namespace bicameral::sim

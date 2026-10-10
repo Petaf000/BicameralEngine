@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "editor/brush_panel.h"
+#include "editor/gauge_panel.h"
 #include "editor/graph_panel.h"
 #include "editor/lab_panel.h"
 #include "editor/reaction_table_panel.h"
@@ -113,6 +114,9 @@ namespace bicameral::editor {
         // 実験室のパネル(T-0142)
         [[nodiscard]] LabPanel& Lab() { return *m_lab; }
 
+        // 計器と比べる画面(T-0221。実験室の箱の値)
+        [[nodiscard]] GaugePanel& Gauge() { return *m_gauge; }
+
         // 反応表のパネル(T-0219)
         [[nodiscard]] ReactionTablePanel& ReactionTable() { return *m_reactionTable; }
 
@@ -148,6 +152,7 @@ namespace bicameral::editor {
 
         Window& m_window;
         std::unique_ptr<LabPanel> m_lab;
+        std::unique_ptr<GaugePanel> m_gauge;
         std::unique_ptr<ReactionTablePanel> m_reactionTable;
         std::unique_ptr<BrushPanel> m_brush;
         bool m_contextCreated = false;

@@ -5,6 +5,8 @@
 // 表の中身(T-0217): 記録の版 4 は使った表の中身を持ち、読み書きで同じ・壊れた中身は断る・版 3 も読める。
 // 範囲と量(T-0220): 範囲のコマンドは直方体のセル全部を 1 セルのコマンドと同じに・箱の外や逆の範囲は当てない・
 // 分圧と質量から µmol への換算(300 K・1 気圧の 1 セルが空気の材料の量と合う)。
+// 計器と比べる段取り(T-0221): 計器の値(置いた量・最高温度)・反応の速さの和が量の差・保存点で切る・A は元の実験と同じ・
+// 条件を 1 つ足した B は保存点の刻みから違う・表を替えた記録は CPU の計器で流さない。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <cstdint>
@@ -16,6 +18,7 @@
 #include <vector>
 
 #include "sim/lab_box.h"
+#include "sim/lab_gauge.h"
 #include "sim/reaction_test_table.h"
 
 namespace {
@@ -357,6 +360,58 @@ namespace {
         EXPECT(!ParseLabRecording(SerializeLabRecording(reversed)).has_value());
     }
 
+    // 計器と比べる段取り(T-0221。CPU だけ。GPU の箱で流すのは window_lab_compare)
+    void TestGauge(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        constexpr uint64_t GAUGE_TICKS = RUN_TICKS;  // 60 刻みではまだ CO2 が出ない(待ちの丸め)
+        constexpr uint64_t SAVE_POINT_TICK = 2;
+        const LabCellPosition cell{.x = 3, .y = 3, .z = 3};
+        const LabRecording recording{.tickCount = GAUGE_TICKS, .commands = MakeFireCommands(materials)};
+        const auto samples = RunLabGaugeOnCpu(recording, table, cell.Index());
+        EXPECT(samples.has_value() && samples->size() == GAUGE_TICKS);
+        if (!samples || samples->size() != GAUGE_TICKS)
+            return;
+
+        // --- 置いた量・火を付けた温度 ---
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
+        const uint64_t wood = FindMaterial(materials, "木")->contents[0].amount;
+        EXPECT(samples->front().cellAmounts[cellulose] == wood);
+        EXPECT(samples->front().boxAmounts[cellulose] == 8 * wood);
+        EXPECT(samples->front().maxTemperatureMilliKelvin < 400000);
+        EXPECT((*samples)[IGNITE_TICK].maxTemperatureMilliKelvin >= 1000000);
+
+        // --- 反応の速さを足すと量の差になる ---
+        int64_t produced = 0;
+        for (size_t i = 0; i < samples->size(); ++i)
+            produced += LabGaugeRate(*samples, i, carbonDioxide, true);
+
+        EXPECT(LabGaugeRate(*samples, 0, carbonDioxide, true) == 0);
+        EXPECT(produced == static_cast<int64_t>(samples->back().boxAmounts[carbonDioxide]) -
+                               static_cast<int64_t>(samples->front().boxAmounts[carbonDioxide]));
+        EXPECT(produced > 0);
+
+        // --- 保存点で切る・A は元の実験と同じ・B(隣の木を熱くする)は保存点の刻みから違う ---
+        const LabRecording cut = CutLabRecording(recording, SAVE_POINT_TICK);
+        EXPECT(cut.tickCount == SAVE_POINT_TICK && cut.commands.size() == 8);
+        const Command change = MakeLabTemperatureCommand(0, 0, {.x = 4, .y = 3, .z = 3}, IGNITE_MILLIKELVIN);
+        const LabComparisonPlan plan = MakeLabComparisonPlan(recording, SAVE_POINT_TICK, 30, change);
+        EXPECT(plan.continued.size() == 1 && plan.change.targetTick == SAVE_POINT_TICK && plan.change.sequence == 9);
+
+        const auto a = RunLabGaugeOnCpu(MakeLabBranchRecording(plan, false), table, cell.Index());
+        const auto b = RunLabGaugeOnCpu(MakeLabBranchRecording(plan, true), table, cell.Index());
+        EXPECT(a.has_value() && b.has_value());
+        if (!a || !b)
+            return;
+
+        EXPECT(a->size() == SAVE_POINT_TICK + 30 && std::ranges::equal(*a, std::span(*samples).first(a->size())));
+        EXPECT(FirstGaugeDifference(*a, *b) == SAVE_POINT_TICK);
+
+        // --- 表を替えた記録は CPU の計器で流さない ---
+        LabRecording marked = recording;
+        marked.commands.push_back(MakeLabTableCommand(5, 100, 7));
+        EXPECT(!RunLabGaugeOnCpu(marked, table, cell.Index()).has_value());
+    }
+
 }  // namespace
 
 int main() {
@@ -374,6 +429,7 @@ int main() {
     TestTableContents();
     TestRegion(*table, materials);
     TestConversions(*table, materials);
+    TestGauge(*table, materials);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

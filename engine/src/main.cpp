@@ -39,6 +39,8 @@
 //   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。既定: exe の横の data/packages。
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
+//   --auto-lab-compare               実験室の計器のグラフが CPU の値と一致し、保存点から条件を 1 つ足した 2 つの実験を比べられるか
+//                                    確かめる(--editor と一緒に。T-0221)
 //   --auto-reload                    --packages の写しの反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻みで終える
 //                                    (--editor と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0195)
 //   --auto-place                     筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずの置くコマンドが全部
@@ -315,6 +317,8 @@ namespace {
             loop.autoRewind = true;
         else if (argument == L"--auto-lab")
             loop.autoLab = true;
+        else if (argument == L"--auto-lab-compare")
+            loop.autoLabCompare = true;
         else if (argument == L"--auto-reload")
             loop.autoReload = true;
         else if (argument == L"--auto-table-edit")

@@ -164,6 +164,8 @@ namespace bicameral::sim {
         if (!m_box.Read(m_read))
             return std::unexpected("箱を読み戻せない");
 
+        RecordGauge(tick);
+
         // --- CPU リファレンス → 比べる ---
         StepLabBox(m_cpu, m_table, tick, commands);
         m_mismatch = FindLabMismatch(m_cpu, m_read, tick);
@@ -212,6 +214,7 @@ namespace bicameral::sim {
         m_replayHashes.clear();
         m_replayEnd = 0;
         m_replayDivergence.reset();
+        m_gauge.clear();
 
         return {};
     }
@@ -336,6 +339,24 @@ namespace bicameral::sim {
         m_pending = std::move(pending);
 
         return stepped;
+    }
+
+    // --- 計器(T-0221)---
+
+    void LabSession::SetGaugeCell(uint32_t cellIndex) {
+        if (cellIndex >= multires::MR_BLOCK_CELLS || cellIndex == m_gaugeCell)
+            return;
+
+        m_gaugeCell = cellIndex;
+        m_gauge.clear();
+    }
+
+    void LabSession::RecordGauge(uint64_t tick) {
+        // 上限を超えたら古い方の 4 分の 1 を捨てる(毎刻み詰め直さない)
+        if (m_gauge.size() >= LAB_GAUGE_MAX_SAMPLES)
+            m_gauge.erase(m_gauge.begin(), m_gauge.begin() + static_cast<std::ptrdiff_t>(LAB_GAUGE_MAX_SAMPLES / 4));
+
+        m_gauge.push_back(SampleLabGauge(m_read, m_table, tick, m_gaugeCell));
     }
 
 }  // namespace bicameral::sim

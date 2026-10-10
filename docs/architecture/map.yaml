@@ -81,6 +81,9 @@ views:
           code: "engine/src/editor/lab_panel.cpp::LabPanel::Build", ticket: T-0142,
           doc: docs/decisions/ADR-0037-lab-box.md,
           note: "置く操作はコマンド(LAB_COMMAND_TYPE_*)。断面の温度・選んだセルの成分を CPU と GPU で並べる。記録の保存と再生。window_lab" }
+      - { id: gaugepanel, group: framelib, label: "GaugePanel<br/>計器と比べる: 実験室の箱の値を時間のグラフで・2 つの実験を重ねる",
+          code: "engine/src/editor/gauge_panel.cpp::GaugePanel::Build", ticket: T-0221, doc: docs/design/14-editor-tools.md,
+          note: "値は読み戻した GPU の箱から(LabSession の計器。見るだけ)。描く時だけ浮動小数点に。window_lab_compare(--auto-lab-compare)" }
       - { id: brushpanel, group: framelib, label: "BrushPanel<br/>筆: 普通の世界に木・炭・空気などを置く・足す",
           code: "engine/src/editor/brush_panel.cpp::BrushPanel::MakeCommand", ticket: T-0222,
           doc: docs/decisions/ADR-0067-place-command.md,
@@ -93,6 +96,9 @@ views:
           code: "engine/src/sim/lab_session.cpp::LabSession::StepOne", ticket: T-0142,
           doc: docs/decisions/ADR-0037-lab-box.md,
           note: "GpuLabBox(lab_box.hlsl でコマンドを当てる → GpuMultires::RecordStep)と StepLabBox(同じ関数 → StepNest)。gpu_lab_box・lab_box" }
+      - { id: labcomparison, group: simlib, label: "RunLabComparison<br/>同じ保存点から A(元の続き)と B(条件を 1 つ足す)を流す",
+          code: "engine/src/sim/lab_comparison.cpp::RunLabComparison", ticket: T-0221, doc: docs/design/14-editor-tools.md,
+          note: "保存点 = 記録を刻み t で切ったもの(sim/lab_gauge の CutLabRecording)。同じ箱で A → B を Replay。lab_box・window_lab_compare" }
       - { id: savepoint, group: simlib, label: "ProbeSim の保存点<br/>S(t) を VRAM に写す・戻す(巻き戻し)",
           code: "engine/src/sim/probe_save_point.cpp::ProbeSim::RecordRestore", ticket: T-0143,
           doc: docs/decisions/ADR-0036-rewind-save-points.md,
@@ -570,6 +576,9 @@ views:
       - [editoroverlay, graphpanel, "性能の表"]
       - [editoroverlay, labpanel, "実験室"]
       - [labpanel, labsession, "置く・刻む・再生"]
+      - [editoroverlay, gaugepanel, "計器と比べる"]
+      - [gaugepanel, labcomparison, "並べて流す"]
+      - [labcomparison, labsession, "保存点から再生"]
       - [editoroverlay, tablepanel, "反応表"]
       - [editoroverlay, brushpanel, "筆"]
       - [brushpanel, commandqueue, "置くコマンド"]

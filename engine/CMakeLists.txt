@@ -56,6 +56,7 @@ target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 add_library(bicameral_multires STATIC
   src/sim/implicit_conduction.cpp
   src/sim/lab_box.cpp
+  src/sim/lab_gauge.cpp
   src/sim/multires_activity.cpp
   src/sim/multires_conduction.cpp
   src/sim/multires_implicit_conduction.cpp
@@ -92,6 +93,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_implicit_levels.cpp
   src/sim/gpu_multires_implicit.cpp
   src/sim/gpu_physics.cpp
+  src/sim/lab_comparison.cpp
   src/sim/lab_session.cpp
   src/sim/probe_peek.cpp
   src/sim/probe_save_point.cpp
@@ -166,6 +168,7 @@ add_executable(bicameral
   src/main.cpp
   src/editor/brush_panel.cpp
   src/editor/editor_overlay.cpp
+  src/editor/gauge_panel.cpp
   src/editor/graph_panel.cpp
   src/editor/lab_panel.cpp
   src/editor/reaction_table_panel.cpp

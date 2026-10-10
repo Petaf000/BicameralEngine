@@ -62,6 +62,15 @@ namespace bicameral::editor {
         void StartAuto() { m_autoPending = true; }
         [[nodiscard]] bool AutoFailed() const { return m_autoFailed; }
 
+        // --- 計器と比べる画面(editor/gauge_panel。T-0221)から使う ---
+        [[nodiscard]] sim::LabSession* Session() { return m_session ? &*m_session : nullptr; }
+        [[nodiscard]] bool EnsureSession() { return m_session.has_value() || CreateSession(); }
+        [[nodiscard]] const std::vector<sim::LabMaterial>& Materials() const { return m_materials; }
+
+        // 今このパネルで組んだ「置く」(temperatureOnly なら「温度だけ」)を 1 つのコマンドに(刻みと番号は使う側が決める)。
+        // 材料が空の「置く」は無し
+        [[nodiscard]] std::optional<sim::Command> ComposedCommand(bool temperatureOnly) const;
+
     private:
         bool CreateSession();
         void RunAuto();
