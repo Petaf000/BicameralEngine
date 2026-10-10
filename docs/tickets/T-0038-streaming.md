@@ -49,3 +49,6 @@
 - タイル割り当ての費用: https://github.com/gpuweb/gpuweb/issues/455 / https://learn.microsoft.com/en-us/windows/win32/direct3d12/volume-tiled-resources
 - Nanite: https://advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf / GVDB: https://diglib.eg.org/handle/10.2312/hpg20161197 / SPGrid: https://pages.cs.wisc.edu/~sifakis/project_pages/SPGrid.html
 - Minecraft: https://minecraft.wiki/w/C-tick / GPU Upload Heaps: https://github.com/microsoft/DirectX-Specs/blob/master/d3d/D3D12GPUUploadHeaps.md
+
+## ユーザーの決定(2026-10-10)
+- D-445: 止めて待つ(先読みで起きにくく)・遠くの細部も 1 秒に 1 回・戦闘機の速さ(速い間は粗い世界)・ファストトラベルあり・VRAM 8 GB は保ち主メモリとディスクは測ってから。

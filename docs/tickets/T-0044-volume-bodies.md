@@ -54,3 +54,6 @@
 - Jolt: https://jrouwe.github.io/JoltPhysics/ / https://raw.githubusercontent.com/jrouwe/JoltPhysics/master/Build/README.md / Rapier: https://rapier.rs/docs/user_guides/templates/determinism/ / Avian: https://docs.rs/avian3d
 - Teardown: https://blog.voxagon.se/2026/03/13/teardown-multiplayer.html / https://80.lv/articles/see-what-s-new-in-teardown-creator-s-custom-voxel-physics-engine/
 - PhysX: https://nvidia-omniverse.github.io/PhysX/physx/5.4.1/docs/GPURigidBodies.html / https://docs.omniverse.nvidia.com/kit/docs/omni_physics/108.0/dev_guide/guides/collision_guide.html
+
+## ユーザーの決定(2026-10-10)
+- D-447: 物ごとの細かさ(基本 6.25 cm)・動く 10,000 / 眠る 100 万・セル未満かつボクセル数個未満は粉・遅い動きは眠らせる(覗いている所は除く)・すぐ起きる・燃えている物は支えが変わったら必ず・重心 1 cm。

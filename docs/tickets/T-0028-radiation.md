@@ -53,3 +53,6 @@
 - Rosseland(Fluent): https://wwwafs.portici.enea.it/project/neptunius/docs/fluent/html/th/node113.htm / P1 と FLD の限界: https://arxiv.org/abs/1802.01128
 - Hybrid characteristics: https://arxiv.org/abs/astro-ph/0505213 / Amanatides と Woo 1987: https://www.eecs.yorku.ca/~amana/research/grid.pdf
 - LPV: https://www.cg.tuwien.ac.at/sites/default/files/talk/3289/Kaplanyan.pdf / WRF radt: https://mailman.ucar.edu/pipermail/wrf-users/2010/001685.html / BotW: https://www.thumbsticks.com/gdc-17-breath-of-the-wild-science-lies
+
+## ユーザーの決定(2026-10-10)
+- D-443: χr 基本(細かく解いた炎は σT⁴)・揺れは計器の精度より小さければ許す・16 m + 遠くは粗い側で・煙が遮るを M3 で・反射と集光は光線の方式で後から。

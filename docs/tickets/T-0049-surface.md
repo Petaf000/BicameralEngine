@@ -51,3 +51,6 @@
 - Occupancy-Based DC: https://arxiv.org/abs/2409.13418 / GPU の等値面(Schmitz ほか): https://diglib.eg.org/items/c94e2e75-fc6a-4c55-8e77-c6ef52460288/full
 - Teardown: https://acko.net/blog/teardown-frame-teardown/ / Aokana: https://arxiv.org/abs/2505.02017v1 / Donkey Kong Bananza(CEDEC 2026): https://dev.classmethod.jp/en/articles/cedec-2026-voxel/
 - Nanite Foliage: https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-foliage / Dreams: https://advances.realtimerendering.com/s2015/AlexEvans_SIGGRAPH-2015-sml.pdf / fast-surface-nets-rs: https://github.com/bonsairobo/fast-surface-nets-rs
+
+## ユーザーの決定(2026-10-10)
+- D-446: BotW + デス・ストランディング 2 の岩のゴツゴツ・近くは形/遠くは模様・切り口は素材で・痩せて割れて落ちる・作り直しは遠くから遅らせる。

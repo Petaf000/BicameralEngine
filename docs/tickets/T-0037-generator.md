@@ -50,3 +50,6 @@
 - No Man's Sky: https://www.gdcvault.com/play/1024265/Continuous-World-Generation-in-No / https://gdcvault.com/play/1024514/Building-Worlds-Using
 - Dwarf Fortress: https://dwarffortresswiki.org/index.php/Layer / https://www.dwarffortresswiki.org/index.php/v0.34:Inorganic_material_definition_token
 - GPU Gems 3 1 章: https://developer.nvidia.com/gpugems/gpugems3/part-i-geometry/chapter-1-generating-complex-procedural-terrains-using-gpu / Wavelet Noise: https://graphics.pixar.com/library/WaveletNoise/paper.pdf
+
+## ユーザーの決定(2026-10-10)
+- D-450: 1 つの固定の世界・ほとんど生成(現実の地質 + 魔素の地質)・自然の変化はゆっくり(待ちの丸め)・近づくと細部を決定的に・一辺 20 km 以上・地下数 km・上空 10 km 以上・1 日 = 現実の約 1 時間・季節あり。

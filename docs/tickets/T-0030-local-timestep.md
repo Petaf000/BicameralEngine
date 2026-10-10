@@ -49,3 +49,6 @@
 - MRI-GARK https://arxiv.org/abs/1808.02759 / https://arxiv.org/abs/1802.04650 / Wicker & Skamarock 2002 https://twister.caps.ou.edu/CFD2023/Wicker_Skamarock2002MWR.pdf
 - DES https://meetings-archive.aps.org/dpp/2005/ro2/13 / Saitoh & Makino https://arxiv.org/abs/0808.0773 / SWIFT https://swift.strw.leidenuniv.nl/docs/TimeStepping/timestep_limiter.html / GADGET-2 https://arxiv.org/abs/astro-ph/0505010
 - PeleLMeX https://joss.theoj.org/papers/10.21105/joss.05450 / Einstein Toolkit https://arxiv.org/abs/2503.09629 / Work Graphs https://devblogs.microsoft.com/directx/d3d12-work-graphs/
+
+## ユーザーの決定(2026-10-10)
+- D-444: 局所の遅れは許さない・覗いている所だけ影を遅くして正しく解く・爆轟の速さを測れる方式(前線の到着時刻の端数)を試算(QUESTIONS Q30)・世界全体のスローはプレイヤーが起こした時だけ。
