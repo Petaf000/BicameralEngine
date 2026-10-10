@@ -60,3 +60,23 @@ uint32_t ExpandRecordOfGroup(uint32_t group) {
 
     StepExpandedWait(ExpandRecord(record), thread);
 }
+#ifdef MR_WIDE_CELLS
+    // --- 溢れを使う世界: 塊が足りなかった頁に塊を配り、同じ刻みのうちに刻み直す(T-0236。multires_wide_step.hlsli)---
+
+    // 塊を配る(1 グループ)
+    [numthreads(WIDE_ALLOCATE_THREADS, 1, 1)] void WideAllocatePass(uint32_t thread : SV_GroupIndex) {
+    WideAllocate(thread);
+}
+
+// 塊が足りなかったブロックを刻み直す(1 グループ = 1 枠)
+[numthreads(WAIT_STEP_THREADS, 1, 1)] void WideRetryPass(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
+    const uint32_t slot = group.x;
+    if (slot >= g_blockCount)
+        return;
+
+    if (!IsSteppedSlot(slot))
+        return;
+
+    WideRetryBlock(slot, thread);
+}
+#endif

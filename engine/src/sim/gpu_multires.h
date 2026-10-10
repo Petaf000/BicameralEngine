@@ -50,10 +50,13 @@ namespace bicameral::sim {
         bool conductionGraph = false;
 
         // 成分の二段(T-0176。CPU の EnableWideCells の世界と同じ): セルは「インライン 8 + 頁ごとの溢れ」で、全部を刻む Compute
-        // (RecordStep の伝導なし)が 9 種目以上の生成物を待たせずに作る。溢れは u6 の後ろに頁ごとに取る(shaders/common/multires_wide.hlsli。
-        // 1 頁 約 28 KiB)。伝導の段(陽解法)も溢れを読む(T-0211)。まだ陰解法・要求の処理・活性のグラフ・覗き窓は溢れを読まない
-        // (T-0211 の残り T-0236〜T-0238・T-0212)ので、使えるのは全部の刻み(伝導あり・なし。陰解法なし)だけ
+        // (RecordStep の伝導なし)が 9 種目以上の生成物を待たせずに作る。溢れは u6 の後ろに、頁ごとの見出し(288 B)と、使う分だけ配る
+        // 4 KiB の塊の置き場に取る(shaders/common/multires_wide.hlsli。T-0236)。伝導の段(陽解法)も溢れを読む(T-0211)。
+        // まだ陰解法・要求の処理・活性のグラフ・覗き窓は溢れを読まない(T-0237・T-0238・T-0212)ので、使えるのは全部の刻み(伝導あり・なし。陰解法なし)だけ
         bool wideCells = false;
+        // 溢れの塊の置き場の塊の数(1 塊 4 KiB。0 = 既定: 頁の数 × 2 と、1 頁の両面を全部の溢れで埋める数の大きい方)。
+        // 尽きた時だけ溢れるセルを待たせて MR_COUNTER_LIMIT_PRODUCTS に数える(T-0236)
+        uint32_t wideChunks = 0;
     };
 
     class GpuMultiresImplicit;
@@ -253,6 +256,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool OverflowFits(const MultiresNest& nest) const;
         void AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const;
         void ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const;
+        // 刻みの段の後: 塊が足りなかった頁に塊を配り、同じ刻みのうちに刻み直す(T-0236)
+        void RecordWideRetry(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -273,6 +278,10 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_stepWideExpandedWaitPipeline;
         // 伝導の段の溢れを使う変種(T-0211)
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductWidePipelines;
+        // 塊が足りなかった頁に塊を配る・刻み直す(T-0236)
+        ComPtr<ID3D12PipelineState> m_wideAllocatePipeline;
+        ComPtr<ID3D12PipelineState> m_wideRetryPipeline;
+        uint32_t m_wideChunks = 0;  // 溢れの塊の置き場の塊の数
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

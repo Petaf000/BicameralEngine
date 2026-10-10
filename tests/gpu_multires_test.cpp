@@ -15,6 +15,7 @@
 #include "gpu_test_options.h"
 #include "multires_limits_scene.h"
 #include "multires_test_scene.h"
+#include "multires_wide_scene.h"
 #include "sim/reaction_test_table.h"
 
 using namespace bicameral;
@@ -307,6 +308,89 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // 頁の溢れが前の当座の枠(1 面 1024 成分。T-0176〜T-0211)より大きくなる(T-0236): 書く面の塊が足りない刻みで塊を配って同じ刻みのうちに
+    // 刻み直し、待たせずに CPU の上限の無い世界と毎刻みビット一致(全部を刻む段・頁に広げて刻む段・伝導の足す段の刻み直し)
+    std::expected<RunResult, std::string> RunWideOverflow(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                          bool conduction) {
+        constexpr uint32_t OLD_PAGE_ENTRIES = 1024;
+        sim::MultiresNest cpu = test::MakeWideOverflowNest(table);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
+        sim::MultiresNest read;
+        uint32_t mostEntries = 0;
+        for (uint64_t tick = 0; tick < test::WIDE_OVERFLOW_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::WIDE_OVERFLOW_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::StepNest(cpu, table, test::WIDE_OVERFLOW_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(
+                    std::format("大きい溢れ(伝導 {}): {}", conduction ? "あり" : "なし", compared.error()));
+
+            for (const sim::MultiresOverflowArea& area : read.cellOverflow)
+                mostEntries = std::max(mostEntries, area.offsets[MR_BLOCK_CELLS]);
+        }
+
+        if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || mostEntries <= OLD_PAGE_ENTRIES)
+            return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分",
+                                               cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], mostEntries));
+
+        Log(Channel::Gpu, Level::Info, "大きい溢れ(伝導 {}): 頁の溢れの最大 {} 成分・待たせた 0(CPU と GPU で同じ)",
+            conduction ? "あり" : "なし", mostEntries);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
+    // 溢れの塊の置き場が尽きた時(T-0236): 配れなかった頁の溢れるセルだけを待たせて MR_COUNTER_LIMIT_PRODUCTS に数え、FX_ASSERT も
+    // 食い違う溢れも出さない(CPU の上限の無い世界とは食い違うので、刻み 0 の数える器だけ見る)
+    std::expected<void, std::string> RunWideOverflowExhausted(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                              gpu::DebugRing& ring,
+                                                              const sim::BakedReactionTable& table) {
+        constexpr uint32_t SMALL_CHUNKS = 8;  // 1 頁の溢れが 1536 成分になると、1 頁の 2 面(6 塊ずつ)も入らない
+        sim::MultiresNest cpu = test::MakeWideOverflowNest(table);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
+                                            {.wideCells = true, .wideChunks = SMALL_CHUNKS});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read;
+        for (uint64_t tick = 0; tick < test::WIDE_OVERFLOW_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::WIDE_OVERFLOW_SEED, tick,
+                                test::LimitsStepOptions(false));
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(std::format("塊の置き場が尽きる: {}", executed.error()));
+        }
+
+        const uint32_t held = read.counters[MR_COUNTER_LIMIT_PRODUCTS];
+        if (held == 0)
+            return std::unexpected("塊の置き場が尽きる: 待たせていない");
+
+        Log(Channel::Gpu, Level::Info, "塊の置き場が尽きる({} 塊): 待たせた {} セル", SMALL_CHUNKS, held);
+
+        return {};
+    }
+
     // たくさんの要求(取り合い・枠が足りない・無効・索引の作り直し・帳簿)。要求は CPU の木から作る(GPU の木と同じ)
     std::expected<RunResult, std::string> RunStress(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
@@ -466,8 +550,22 @@ namespace {
         const auto limitsConduct = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, true);
         const auto limitsWide = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable, false);
         const auto limitsWideConduct = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable, true);
-        for (const auto* result : {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep,
-                                   &limitsConduct, &limitsWide, &limitsWideConduct}) {
+        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
+        if (!wideTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(大きい溢れの試験の表を作れない)");
+            return 1;
+        }
+
+        const auto wideOverflow = RunWideOverflow(device->Get(), *queue, *ring, *wideTable, false);
+        const auto wideOverflowConduct = RunWideOverflow(device->Get(), *queue, *ring, *wideTable, true);
+        if (auto exhausted = RunWideOverflowExhausted(device->Get(), *queue, *ring, *wideTable); !exhausted) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", exhausted.error());
+            return 1;
+        }
+
+        for (const auto* result :
+             {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct, &limitsWide,
+              &limitsWideConduct, &wideOverflow, &wideOverflowConduct}) {
             if (*result)
                 continue;
 
