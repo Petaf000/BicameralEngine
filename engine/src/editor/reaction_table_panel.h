@@ -26,7 +26,7 @@ namespace bicameral::editor {
 
     class ReactionTablePanel {
     public:
-        // 世界が今使っている表(版が変わった時だけ一覧を作り直す)。Build の前に呼ぶ
+        // 世界が今使っている表(版が変わった時だけ一覧を作り直す。作り直すのはパネルを開いている時だけ)。Build の前に呼ぶ
         void UseTable(std::shared_ptr<const script::LoadedReactionTable> table);
 
         // ImGui のフレームの中で呼ぶ。status はホットリロードの結果(状態のパネルと同じもの)
@@ -55,6 +55,9 @@ namespace bicameral::editor {
         void ValueCell(const script::ReactionValue& value);
         [[nodiscard]] bool Matches(const std::string& name, const std::string& extra = {}) const;
 
+        // 一覧(m_document)を今の表から作り直す(古い時だけ)。debug 版では重いので、パネルを開いた時と自動の確認の時だけ呼ぶ
+        void EnsureDocument();
+
         // --- 自動の確認 ---
         void RunAuto(const ReactionTableStatus& status);
         void FailAuto(std::string why);
@@ -62,6 +65,7 @@ namespace bicameral::editor {
         std::shared_ptr<const script::LoadedReactionTable> m_table;
         std::optional<script::ReactionTableDocument> m_document;
         std::string m_documentError;
+        bool m_documentStale = false;  // m_table が替わって、一覧がまだ古い
 
         // --- 操作の状態(View。世界に入らない)---
         std::array<char, 64> m_search{};

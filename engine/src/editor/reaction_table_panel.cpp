@@ -100,6 +100,15 @@ namespace bicameral::editor {
             return;
 
         m_table = std::move(table);
+        m_documentStale = true;
+    }
+
+    // 一覧を作るのはパネルを開いている時だけ(debug 版では重く、窓の最初のフレームで作るとそのフレームで刻みを捨てる)
+    void ReactionTablePanel::EnsureDocument() {
+        if (!m_documentStale || m_table == nullptr)
+            return;
+
+        m_documentStale = false;
         auto document = script::BuildReactionTableDocument(*m_table);
         if (!document) {
             m_document.reset();
@@ -154,12 +163,21 @@ namespace bicameral::editor {
     // --- パネル ---
 
     void ReactionTablePanel::Build(const ReactionTableStatus& status) {
-        if (m_autoStage != AutoStage::Off)
+        if (m_autoStage != AutoStage::Off) {
+            EnsureDocument();
             RunAuto(status);
+        }
 
+        // --- 初めは畳んでおく(開いた時に一覧を作る)---
         ImGui::SetNextWindowPos({420.0f, 12.0f}, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize({620.0f, 520.0f}, ImGuiCond_FirstUseEver);
-        ImGui::Begin("反応表");
+        ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("反応表")) {
+            ImGui::End();
+            return;
+        }
+
+        EnsureDocument();
         BuildHeader(status);
         if (!m_document) {
             ImGui::TextColored(ERROR_COLOR, "一覧を作れない: %s", m_documentError.c_str());
