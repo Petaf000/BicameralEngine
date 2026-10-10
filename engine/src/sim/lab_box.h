@@ -100,7 +100,8 @@ namespace bicameral::sim {
         std::vector<SpeciesAmount> contents;
     };
 
-    // 空気・木(セルロース 1 割 + 孔の空気。仮の世界の木箱の壁と同じ)・木炭・二酸化炭素・窒素。表に無い物質の材料は入らない
+    // 空気・木(セルロース 1 割 + 孔の空気。仮の世界の木箱の壁と同じ)・木炭・二酸化炭素・窒素・魔素(試験。仮の魔素 mana_test。T-0225)。
+    // 表に無い物質の材料は入らない
     [[nodiscard]] std::vector<LabMaterial> MakeLabMaterials(const BakedReactionTable& table);
 
     // --- 箱 ---

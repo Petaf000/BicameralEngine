@@ -9,6 +9,8 @@
 // 物質を足す・消す表(T-0242・ADR-0065): 燃えている箱の表を、水素を足してセルロースを消した表に替える。印の刻みに箱の全部のセルを
 // 名前で付け替え(GPU と CPU が同じ RxRemapCell)、毎刻みビット一致・元素は報告した端数のほか保たれる・別の実験室で記録の表を足すと再生できる・
 // まだ刻んでいない置く操作の材料も新しい ID になる(消えた物質の材料は落ちる)。
+// 仮の魔素(T-0225。試験用の仮の値): 450 K の木は魔素が無いと燃えないが、魔素を混ぜると燃える(魔素を触媒にする規則)。
+// どちらも毎刻みビット一致し、魔素の量は変わらない。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <array>
@@ -36,6 +38,15 @@ namespace {
     constexpr uint32_t SWAP_RUN_TICKS = 100;            // 表を替えてから刻む数
     constexpr uint64_t SPECIES_TABLE_VERSION = 0x4444;  // 物質を足す・消す表(T-0242)
     constexpr uint32_t SPECIES_FIRE_TICKS = 30;         // 物質の一覧を替える前に燃やす刻み
+
+    // --- 仮の魔素の実験(T-0225)---
+    constexpr uint64_t MANA_TABLE_VERSION = 0x4444;
+    constexpr uint32_t MANA_RUN_TICKS = 100;
+    constexpr uint32_t MANA_WARM_MILLIKELVIN = 450000;             // 魔素なしの木の燃焼(約 600 K から)では燃えない温度
+    constexpr uint64_t MANA_WOOD_CELLULOSE_MICROMOLES = 38600000;  // 木(sim::MakeLabMaterials の「木」と同じ量)
+    constexpr uint64_t MANA_WOOD_OXYGEN_MICROMOLES = 983000;
+    constexpr uint64_t MANA_MICROMOLES = 500000;
+    constexpr uint32_t MANA_WOOD_CELLS = 8;
 
     // 木の燃焼を 100 倍速くした表(物質の一覧は同じ。gpu_probe_sim_test の差し替えと同じ形)
     std::expected<sim::BakedReactionTable, std::string> MakeSwappedTable() {
@@ -307,6 +318,71 @@ namespace {
         return {};
     }
 
+    // 450 K の木(セルロースと孔の酸素。withMana なら魔素も)を 8 セル置いて刻み、燃えたセルロースの量(GPU の箱)
+    std::expected<uint64_t, std::string> BurnWarmWood(sim::LabSession& session, bool withMana) {
+        if (auto reset = session.Reset(); !reset)
+            return std::unexpected(reset.error());
+
+        const sim::BakedReactionTable& table = session.Table();
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint32_t manaTest = table.SpeciesId("mana_test");
+        if (cellulose == 0 || manaTest == 0)
+            return std::unexpected("表にセルロースか仮の魔素が無い");
+
+        std::vector<sim::SpeciesAmount> contents = {
+            {.species = cellulose, .amount = MANA_WOOD_CELLULOSE_MICROMOLES},
+            {.species = table.SpeciesId("oxygen"), .amount = MANA_WOOD_OXYGEN_MICROMOLES}};
+        if (withMana)
+            contents.push_back({.species = manaTest, .amount = MANA_MICROMOLES});
+
+        std::ranges::sort(contents, {}, &sim::SpeciesAmount::species);
+        for (uint32_t i = 0; i < MANA_WOOD_CELLS; ++i) {
+            const sim::LabCellPosition cell{.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)};
+            if (!session.Place(cell, contents, MANA_WARM_MILLIKELVIN))
+                return std::unexpected("置けない");
+        }
+
+        if (auto stepped = session.Step(MANA_RUN_TICKS); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(session); !checked)
+            return std::unexpected(checked.error());
+
+        const uint64_t expectedMana = withMana ? MANA_WOOD_CELLS * MANA_MICROMOLES : 0;
+        if (TotalOf(session.Gpu(), manaTest) != expectedMana)
+            return std::unexpected("触媒の魔素の量が変わった");
+
+        const uint64_t placed = MANA_WOOD_CELLS * MANA_WOOD_CELLULOSE_MICROMOLES;
+        const uint64_t left = TotalOf(session.Gpu(), cellulose);
+        if (left > placed)
+            return std::unexpected("セルロースが増えた");
+
+        return placed - left;
+    }
+
+    std::expected<void, std::string> RunMana(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
+                                             const sim::BakedReactionTable& table) {
+        auto session = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "mana");
+        if (!session)
+            return std::unexpected(session.error());
+
+        const auto withMana = BurnWarmWood(*session, true);
+        if (!withMana)
+            return std::unexpected(std::format("魔素あり: {}", withMana.error()));
+
+        const auto withoutMana = BurnWarmWood(*session, false);
+        if (!withoutMana)
+            return std::unexpected(std::format("魔素なし: {}", withoutMana.error()));
+
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: 450 K の木 {} 刻みで燃えたセルロース 魔素あり {}・なし {} µmol", MANA_RUN_TICKS,
+            *withMana, *withoutMana);
+        if (*withMana <= 10 * (*withoutMana + 1))
+            return std::unexpected("魔素を混ぜても木の燃え方が変わらない");
+
+        return {};
+    }
+
     std::expected<void, std::string> RunSpeciesChange(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                                       const sim::BakedReactionTable& first) {
         const auto changed = sim::BakeReactionTable(sim::MakeSpeciesChangedTestTable());
@@ -430,12 +506,17 @@ namespace {
             return 1;
         }
 
+        if (auto result = RunMana(device->Get(), options->queueType, *table); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(仮の魔素: {})", result.error());
+            return 1;
+        }
+
         if (!test::PassesValidation(*device, "gpu_lab_box_test"))
             return 1;
 
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
-            "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致)",
+            "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える)",
             RUN_TICKS);
 
         return 0;

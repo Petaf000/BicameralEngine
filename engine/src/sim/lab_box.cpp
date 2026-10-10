@@ -27,6 +27,8 @@ namespace bicameral::sim {
         constexpr uint64_t PORE_NITROGEN_MICROMOLES = 3697000;
         // 木炭: 体積の 1 割が炭(密度 300 kg/m³ の炭素 = 3.75 kg ≒ 312 mol)、残りは孔の中の空気
         constexpr uint64_t CHARCOAL_CARBON_MICROMOLES = 312000000;
+        // 仮の魔素(T-0225。試験用の仮の値): 空気の 1 割の物質量。筆で「足す」と、そのセルの木や炭に触媒として効く
+        constexpr uint64_t MANA_TEST_MICROMOLES = AIR_TOTAL_MICROMOLES / 10;
 
         constexpr uint32_t COMMAND_WORDS_PER_ENTRY = 3;
 
@@ -243,6 +245,7 @@ namespace bicameral::sim {
         const uint32_t cellulose = table.SpeciesId("cellulose");
         const uint32_t carbon = table.SpeciesId("carbon");
         const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
+        const uint32_t manaTest = table.SpeciesId("mana_test");
 
         std::vector<LabMaterial> materials;
         const auto add = [&](std::string_view name, std::vector<SpeciesAmount> contents) {
@@ -261,6 +264,7 @@ namespace bicameral::sim {
                      {nitrogen, PORE_NITROGEN_MICROMOLES}});
         add("二酸化炭素", {{carbonDioxide, AIR_TOTAL_MICROMOLES}});
         add("窒素", {{nitrogen, AIR_TOTAL_MICROMOLES}});
+        add("魔素(試験)", {{manaTest, MANA_TEST_MICROMOLES}});
 
         return materials;
     }

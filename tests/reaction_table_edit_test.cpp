@@ -166,9 +166,10 @@ return {
     }
 
     void TestDocument(const ReactionTableDocument& document) {
-        EXPECT(document.elements.size() == 4);
-        EXPECT(document.species.size() == 7);
-        EXPECT(document.rules.size() == 5);
+        // 現実の 4 元素・7 物質・5 規則 + 触るための仮の魔素(元素 1・物質 1・規則 2。T-0225)
+        EXPECT(document.elements.size() == 5);
+        EXPECT(document.species.size() == 8);
+        EXPECT(document.rules.size() == 7);
 
         for (const SpeciesRow& row : document.species) {
             EXPECT(!row.formationEnthalpy.file.empty());
@@ -177,6 +178,9 @@ return {
             EXPECT(row.thermalConductivity.file.empty() && !row.thermalConductivity.readOnly.empty());
         }
 
+        bool manaRuleFound = false;
+        int64_t celluloseEnthalpy = 0;
+        int64_t manaEnthalpy = 1;
         for (const RuleRow& row : document.rules) {
             EXPECT(row.elementImbalance.empty());
             EXPECT(!row.preExponential.file.empty() && !row.activationEnergy.file.empty());
@@ -188,7 +192,24 @@ return {
 
             if (row.name == "cellulose_pyrolysis")
                 EXPECT(row.preExponential.text == "2.8e19");
+
+            // 仮の魔素は触媒(両辺に 1 ずつ): 反応熱は魔素の無い木の燃焼と同じで、速度の値は書き戻せる(T-0225)
+            if (row.name == "mana_test_catalyzed_cellulose_combustion") {
+                const size_t arrow = row.equation.find("→");
+                EXPECT(arrow != std::string::npos && row.equation.find("mana_test") < arrow &&
+                       row.equation.find("mana_test", arrow) != std::string::npos);
+                EXPECT(row.activationEnergy.text == "100000");
+                manaRuleFound = true;
+            }
+
+            if (row.name == "cellulose_combustion")
+                celluloseEnthalpy = row.enthalpyJoulesPerMol;
+
+            if (row.name == "mana_test_catalyzed_cellulose_combustion")
+                manaEnthalpy = row.enthalpyJoulesPerMol;
         }
+
+        EXPECT(manaRuleFound && celluloseEnthalpy == manaEnthalpy);
 
         std::printf("  thermal_conductivity → %s\n", document.species.front().thermalConductivity.readOnly.c_str());
     }
