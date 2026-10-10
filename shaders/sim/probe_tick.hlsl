@@ -9,6 +9,7 @@
 //   → イベントとハッシュの表を CPU へ読み戻す(CPU は待たずに数フレーム後に読む。06 §3)
 // 入口ごとに別の .cso にする(shaders/CMakeLists.txt)。整数だけ(D-205)。バッファの結び方は sim/probe_bindings.hlsli。
 #include "common/physics_push.hlsli"
+#include "common/probe_place.hlsli"
 #include "sim/probe_bindings.hlsli"
 
 // 物理の物(T-0098。sim/gpu_physics の物のバッファ。物の数はフレームの入力の見出し。0 なら結んであるのは仮の置き場で、読まない)。
@@ -72,10 +73,72 @@ void ApplyPush(uint32_t address) {
         EmitTickEvent(PROBE_EVENT_BODY_PUSHED, hit);
 }
 
+// 置く(T-0222。common/probe_place.hlsli): 球の中のセルを (z, y, x) の順に置き換える・足す。変わったエネルギーは湧き出しの欄へ。
+// 触ったブロック(球の範囲の箱が重なるブロック全部。CPU も同じ)は「刻みの直前に変わった」にし、起こす刻みを今にする
+// (この後の WakeDueBlocks が一覧へ 1 回だけ足す。ADR-0018)。物質の数は適用の単位の引数(その刻みの表)
+void ApplyPlace(uint64_t tick, uint32_t address) {
+    ProbePlacePayload payload;
+    for (uint32_t word = 0; word < PROBE_PLACE_PAYLOAD_WORDS; ++word)
+        payload.words[word] = commandQueue.Load(address + 16 + (word * 4));
+
+    const ProbePlace place = ProbeDecodePlace(payload, argument);
+    if (place.valid == 0)
+        return;
+
+    // --- セル ---
+    const uint32_t base = GenerationBase(tick);
+    int64_t source = 0;
+    for (uint32_t z = ProbePlaceBegin(place.z, place.radius); z < ProbePlaceEnd(place.z, place.radius); ++z) {
+        for (uint32_t y = ProbePlaceBegin(place.y, place.radius); y < ProbePlaceEnd(place.y, place.radius); ++y) {
+            for (uint32_t x = ProbePlaceBegin(place.x, place.radius); x < ProbePlaceEnd(place.x, place.radius); ++x) {
+                if (!ProbePlaceCovers(place, x, y, z))
+                    continue;
+
+                const uint32_t index = base + ProbeCellIndex(x, y, z);
+                const RxCell before = cells[index];
+                const ProbePlaced placed = ProbePlaceCell(ReactionTable(), before, place);
+                if (placed.applied == 0)
+                    continue;
+
+                source += placed.cell.energy - before.energy;
+                cells[index] = placed.cell;
+                thermal[index] = ProbeMakeCache(ReactionTable(), placed.cell);
+            }
+        }
+    }
+
+    uint64_t original;
+    hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SOURCE, (uint64_t)source, original);
+
+    // --- ブロック ---
+    const uint32_t blockBeginX = ProbePlaceBegin(place.x, place.radius) / PROBE_BLOCK_SIZE;
+    const uint32_t blockBeginY = ProbePlaceBegin(place.y, place.radius) / PROBE_BLOCK_SIZE;
+    const uint32_t blockBeginZ = ProbePlaceBegin(place.z, place.radius) / PROBE_BLOCK_SIZE;
+    const uint32_t blockEndX = (ProbePlaceEnd(place.x, place.radius) - 1) / PROBE_BLOCK_SIZE;
+    const uint32_t blockEndY = (ProbePlaceEnd(place.y, place.radius) - 1) / PROBE_BLOCK_SIZE;
+    const uint32_t blockEndZ = (ProbePlaceEnd(place.z, place.radius) - 1) / PROBE_BLOCK_SIZE;
+    for (uint32_t bz = blockBeginZ; bz <= blockEndZ; ++bz) {
+        for (uint32_t by = blockBeginY; by <= blockEndY; ++by) {
+            for (uint32_t bx = blockBeginX; bx <= blockEndX; ++bx) {
+                const uint32_t block = ProbeBlockIndex(bx, by, bz);
+                StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block, ProbeChangeMark(tick) - 1);
+                StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, block, ProbeChangeMark(tick));
+            }
+        }
+    }
+
+    EmitTickEvent(PROBE_EVENT_PLACE_APPLIED, ProbePokePlace(place.x, place.y, place.z));
+}
+
 void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
     const uint32_t type = commandHead.w & 0xFFFFu;
     if (type == PROBE_COMMAND_TYPE_PUSH) {
         ApplyPush(address);
+        return;
+    }
+
+    if (type == PROBE_COMMAND_TYPE_PLACE) {
+        ApplyPlace(tick, address);
         return;
     }
 

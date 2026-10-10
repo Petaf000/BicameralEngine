@@ -120,7 +120,7 @@ PROBE_CONST uint32_t PROBE_UNIT_PHYSICS = 2;  // 物理の 1 刻み(物理を入
 PROBE_CONST uint32_t PROBE_FIXED_UNITS_PER_TICK = 3;  // 適用・伝導・ハッシュ(物理・重さの試験の単位は別に数える)
 
 // --- ルート定数(b0。単位を記録するときに埋め込む)---
-// [0] 刻みの下位 [1] 刻みの上位 [2] 引数(抽出: 書き先の組)
+// [0] 刻みの下位 [1] 刻みの上位 [2] 引数(抽出: 書き先の組。適用: その刻みの表の物質の数〔置くコマンドの検査。T-0222〕)
 PROBE_CONST uint32_t PROBE_ROOT_CONSTANT_COUNT = 3;
 
 // --- コマンド(CPU → GPU。06 §3 の 64 バイトの形。C++ は sim/command.h)---
@@ -136,6 +136,9 @@ PROBE_CONST uint32_t PROBE_COMMAND_TYPE_PUSH = 2;
 //   GPU の適用の単位は何もしない(印として記録と再生に残る)。表を写すのと、熱のキャッシュを作り直して全部のブロックを起こすのは、
 //   CPU がその刻みの適用の単位の前後に記録する写しと RefreshTable(sim/probe_sim の ProbeFrameInput::tableSwap)
 PROBE_CONST uint32_t PROBE_COMMAND_TYPE_TABLE = 3;
+// 物を置く筆(T-0222・D-449。common/probe_place.hlsli): payload は ProbePlacePayload(中心・半径・置き換えか足すか・温度・物質 3 つまで)。
+//   球の中のセルを置き換える・足す(エディタの明示的な湧き出し。変わったエネルギーは湧き出しの欄へ)。触ったブロックを起こす
+PROBE_CONST uint32_t PROBE_COMMAND_TYPE_PLACE = 4;
 
 // --- GPU のコマンドキュー(06 §3。T-0086)---
 // 環状のバッファ。見出し 16 バイト([0] 末尾 = 足した総数 [1] 先頭 = 取り出した総数。どちらも 2^32 で一周する)+ コマンド × 容量。
@@ -175,13 +178,14 @@ PROBE_CONST uint32_t PROBE_HEADER_WORDS = 13;
 // 先頭の 1 件は必ず PROBE_NO_BLOCK(何もしない)にして、レコードの数を 0 にしない
 // (WARP は GPU の入力のレコードが 0 件の DispatchGraph で固まった。T-0005。ハードウェアの GPU は 0 件でも動く)。
 // 容量: 伝導は 1 刻みに 1 ブロック 1 回なので「変わった・次の刻みに起こす」はブロックの数まで(起こす刻みの来たブロックは、
-// 前の刻みに一覧へ足したブロックと重ならない。probe_tick.hlsl の WakeDueBlocks)、つつきはキューの容量まで、+ 先頭の 1 件
+// 前の刻みに一覧へ足したブロックと重ならない。probe_tick.hlsl の WakeDueBlocks)、つつきはキューの容量まで、+ 先頭の 1 件。
+// 置くコマンド(T-0222)は触ったブロックの起こす刻みを今にするので、前の刻みに足したブロックとも重なりうる(重なりはブロックの数まで)
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_ENTRYPOINT = 0;  // 見出しの語の位置(× 4 バイト)
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_COUNT = 1;
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_ADDRESS = 2;
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_STRIDE = 4;
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_HEADER_BYTES = 32;
-PROBE_CONST uint32_t PROBE_ACTIVE_LIST_CAPACITY = 1 + PROBE_BLOCK_COUNT + PROBE_COMMAND_QUEUE_CAPACITY;
+PROBE_CONST uint32_t PROBE_ACTIVE_LIST_CAPACITY = 1 + (2 * PROBE_BLOCK_COUNT) + PROBE_COMMAND_QUEUE_CAPACITY;
 PROBE_CONST uint32_t PROBE_NO_BLOCK = 0xFFFFFFFFu;  // 一覧の先頭の「何もしない」1 件
 PROBE_CONST uint32_t PROBE_ACTIVE_LIST_BYTES = PROBE_ACTIVE_LIST_HEADER_BYTES + PROBE_ACTIVE_LIST_CAPACITY * 4;
 // 予定の印: ブロックごとに「最後に予定した刻み + 1」の下位 32bit(0 = まだ無い)。刻みごとに消さなくてよい
@@ -243,6 +247,8 @@ PROBE_CONST uint32_t PROBE_EVENT_COMMAND_LATE = 2;
 // 押すコマンドを適用した(T-0098)。場所: 押した物の番号(何も押さなかった = PROBE_PUSH_NOTHING)
 PROBE_CONST uint32_t PROBE_EVENT_BODY_PUSHED = 3;
 PROBE_CONST uint32_t PROBE_PUSH_NOTHING = 0xFFFFFFFFu;
+// 置くコマンドを適用した(T-0222)。場所: 球の中心(ProbePokePlace)。当てられないコマンドは出さない
+PROBE_CONST uint32_t PROBE_EVENT_PLACE_APPLIED = 4;
 
 // --- 刻みごとの状態のハッシュ(GPU → CPU。06 §2 段 9)---
 // 表: PROBE_HASH_CAPACITY 個 × 32 バイト([0,1] 刻み [2,3] ハッシュ [4,5] エネルギーの合計(mJ、mod 2^64)

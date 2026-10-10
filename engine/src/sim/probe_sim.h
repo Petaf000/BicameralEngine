@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "common/probe_place.hlsli"
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
 #include "gpu/com_ptr.h"
@@ -70,6 +71,21 @@ namespace bicameral::sim {
                                                const std::array<int64_t, 3>& origin,
                                                const std::array<int32_t, 3>& direction,
                                                uint32_t impulseMillinewtonSeconds);
+
+    // 物を置く筆(T-0222・D-449。PROBE_COMMAND_TYPE_PLACE。common/probe_place.hlsli)。中心 (x, y, z)・半径(セル)の球の中のセルを、
+    // contents(1 セルあたりの µmol。3 つまで)と温度で置き換える(replace)か、今の中身に足す。当てられない値(格子の外・半径や物質の数が
+    // 上限を超える・表に無い物質)のコマンドは GPU も CPU リファレンスも何もしない
+    struct ProbePlaceShape {
+        uint32_t x = 0;
+        uint32_t y = 0;
+        uint32_t z = 0;
+        uint32_t radius = 0;  // セル。0 = 中心の 1 セル(上限 PROBE_PLACE_MAX_RADIUS)
+        bool replace = true;  // false なら足す
+        uint32_t temperatureMilliKelvin = 300000;
+    };
+
+    [[nodiscard]] ProbeCommand MakePlaceCommand(uint64_t targetTick, uint32_t sequence, const ProbePlaceShape& shape,
+                                                std::span<const SpeciesAmount> contents);
 
     // --- GPU から戻ってくるもの ---
 
@@ -406,6 +422,7 @@ namespace bicameral::sim {
         std::array<ComPtr<ID3D12Resource>, 7> m_initialUploads;
         bool m_initialized = false;
         std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(O2・CO2・炭)
+        uint32_t m_speciesCount = 0;  // 今の表の物質の数(適用の単位の引数。置くコマンドの検査。T-0222)
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
         ComPtr<ID3D12Resource> m_busySink;
 

@@ -41,6 +41,8 @@
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --auto-reload                    --packages の写しの反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻みで終える
 //                                    (--editor と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0195)
+//   --auto-place                     筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずの置くコマンドが全部
+//                                    当たったかを確かめる(--editor と一緒に。T-0222)
 //   --auto-table-edit                反応表のパネルで --packages の写しの木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版で終える
 //                                    (--editor と一緒に。T-0219)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
@@ -317,6 +319,8 @@ namespace {
             loop.autoReload = true;
         else if (argument == L"--auto-table-edit")
             loop.autoTableEdit = true;
+        else if (argument == L"--auto-place")
+            loop.autoPlace = true;
         else
             return false;
 
