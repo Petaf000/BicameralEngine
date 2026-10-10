@@ -36,6 +36,8 @@
 - 同日(rebase の後。main は e2709f1 のままで載せ直しは不要だった): debug の `^(debug_camera|time_control|window_replay_(record|play|editor))$` 5 本が通過
   (窓の入力とフレームのループを触ったので)。release のビルドは警告なし(前からの C4189 だけ)・release の
   `^(brush_stroke|gpu_probe_place(_warp)?|window_place_.*|window_lab|lab_box)$` 7 本が通過。tidy・計測はしていない。archmap OK(153)。
+- 同日: main が 45bf465(T-0239 の debug のシミュのシェーダーを -O3 など)に進んでいたので載せ直した(衝突なし)。debug のビルドは警告なし・
+  `^(brush_stroke|gpu_probe_place(_warp)?|window_place_.*|reaction_replay_table|lab_box|window_lab|window_lab_compare|float_check.*)$` 14 本が通過。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 動いているもの: `bicameral --editor` の「筆(世界に置く)」で、形(球・直方体・円柱〔軸 x / y 縦 / z〕)・材料(表の全物質から 3 つまで・
