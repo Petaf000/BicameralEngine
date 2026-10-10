@@ -79,6 +79,11 @@ namespace bicameral::sim {
         constexpr std::array<const char*, 6> CONDUCT_SHADERS = {
             "sim/multires_conduct_begin.cso", "sim/multires_conduct_mark.cso",  "sim/multires_conduct_prepare.cso",
             "sim/multires_conduct_flows.cso", "sim/multires_conduct_apply.cso", "sim/multires_conduct_end.cso"};
+        // 溢れを使う世界の変種(MR_WIDE_CELLS。T-0211)
+        constexpr std::array<const char*, 6> CONDUCT_WIDE_SHADERS = {
+            "sim/multires_wide_conduct_begin.cso",   "sim/multires_wide_conduct_mark.cso",
+            "sim/multires_wide_conduct_prepare.cso", "sim/multires_wide_conduct_flows.cso",
+            "sim/multires_wide_conduct_apply.cso",   "sim/multires_wide_conduct_end.cso"};
 
         // ルート定数の stepFlags(multires_bindings.hlsli の MR_STEP_*)
         constexpr uint32_t STEP_FLAG_CONDUCTION = 1;
@@ -323,6 +328,15 @@ namespace bicameral::sim {
                 return std::unexpected(pipeline.error());
 
             (tree ? m_treePipelines[pass] : m_conductPipelines[pass - TREE_PASS_COUNT]) = std::move(*pipeline);
+        }
+
+        static_assert(CONDUCT_WIDE_SHADERS.size() == CONDUCT_PASS_COUNT);
+        for (uint32_t pass = 0; options.wideCells && pass < CONDUCT_PASS_COUNT; ++pass) {
+            auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), CONDUCT_WIDE_SHADERS[pass]);
+            if (!pipeline)
+                return std::unexpected(pipeline.error());
+
+            m_conductWidePipelines[pass] = std::move(*pipeline);
         }
 
         const auto library = gpu::LoadShader("sim/multires_graph.cso");
@@ -945,7 +959,7 @@ namespace bicameral::sim {
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
         SetTick(worldSeed, tick);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
-        FX_ASSERT(!m_wideCells || !options.conduction);  // 伝導の段はまだ溢れを読まない(T-0211)
+        FX_ASSERT(!m_wideCells || !options.implicitConduction);  // 陰解法の段はまだ溢れを読まない(T-0211 の残り)
         if (options.conduction) {
             RecordWake(list, debugRing, 0);                              // つつかれたブロックの印を直す
             RecordConduction(list, debugRing, options, ACTIVITY_LISTS);  // 全部を刻むので起こさない
@@ -984,7 +998,7 @@ namespace bicameral::sim {
     void GpuMultires::RecordConductPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                         uint32_t pass, uint32_t groupCount) {
         list->SetComputeRootSignature(m_rootSignature.Get());
-        list->SetPipelineState(m_conductPipelines[pass].Get());
+        list->SetPipelineState(m_wideCells ? m_conductWidePipelines[pass].Get() : m_conductPipelines[pass].Get());
         BindRoot(list, debugRing);
         list->Dispatch(groupCount, 1, 1);
         UavBarrier(list);

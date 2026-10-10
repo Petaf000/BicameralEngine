@@ -51,7 +51,8 @@ namespace bicameral::sim {
 
         // 成分の二段(T-0176。CPU の EnableWideCells の世界と同じ): セルは「インライン 8 + 頁ごとの溢れ」で、全部を刻む Compute
         // (RecordStep の伝導なし)が 9 種目以上の生成物を待たせずに作る。溢れは u6 の後ろに頁ごとに取る(shaders/common/multires_wide.hlsli。
-        // 1 頁 約 28 KiB)。まだ伝導・要求の処理・活性のグラフ・覗き窓は溢れを読まない(T-0211・T-0212)ので、使えるのは伝導なしの全部の刻みだけ
+        // 1 頁 約 28 KiB)。伝導の段(陽解法)も溢れを読む(T-0211)。まだ陰解法・要求の処理・活性のグラフ・覗き窓は溢れを読まない
+        // (T-0211 の残り T-0236〜T-0238・T-0212)ので、使えるのは全部の刻み(伝導あり・なし。陰解法なし)だけ
         bool wideCells = false;
     };
 
@@ -270,6 +271,8 @@ namespace bicameral::sim {
         bool m_wideCells = false;
         ComPtr<ID3D12PipelineState> m_stepWideWaitPipeline;
         ComPtr<ID3D12PipelineState> m_stepWideExpandedWaitPipeline;
+        // 伝導の段の溢れを使う変種(T-0211)
+        std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductWidePipelines;
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

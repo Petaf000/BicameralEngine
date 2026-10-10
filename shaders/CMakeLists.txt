@@ -133,6 +133,7 @@ foreach(_entry IN ITEMS ConductBegin ConductMark ConductPrepare ConductFlows Con
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/multires_conduct.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME multires_${_snake})
+  bicameral_add_shader(sim/multires_conduct.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME multires_wide_${_snake} DEFINES MR_WIDE_CELLS=1)  # 溢れを使う世界の伝導の段(T-0211)
 endforeach()
 foreach(_entry IN ITEMS Begin Start Smooth Restrict Prolong Converged CycleEnd Flows Mark LimitEnd LimitFaces Apply Tail PlanLevels PlanArgs)  # 細かいレベルの熱の陰解法の段(T-0117・Tail は T-0120・Plan は T-0136)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
