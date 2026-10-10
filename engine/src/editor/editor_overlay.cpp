@@ -63,6 +63,7 @@ namespace bicameral::editor {
         std::unique_ptr<EditorOverlay> overlay(new EditorOverlay(window, frameCount));
         overlay->m_lab = std::make_unique<LabPanel>(device);
         overlay->m_reactionTable = std::make_unique<ReactionTablePanel>();
+        overlay->m_brush = std::make_unique<BrushPanel>();
         if (!overlay->CreateGpuObjects(device, frameCount))
             return std::unexpected("エディタの描画のリソースを作れない");
 
@@ -224,6 +225,7 @@ namespace bicameral::editor {
         BuildGraphPanel(status.graph);
         m_lab->Build();
         m_reactionTable->Build(status.reactionTable);
+        m_brush->Build();
 
         ImGui::Render();
 

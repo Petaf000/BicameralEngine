@@ -162,6 +162,33 @@ namespace bicameral::sim {
         return command;
     }
 
+    ProbeCommand MakePlaceCommand(uint64_t targetTick, uint32_t sequence, const ProbePlaceShape& shape,
+                                  std::span<const SpeciesAmount> contents) {
+        ProbeCommand command{.targetTick = targetTick,
+                             .sequence = sequence,
+                             .type = static_cast<uint16_t>(PROBE_COMMAND_TYPE_PLACE),
+                             .size = PROBE_PLACE_PAYLOAD_WORDS * 4};
+
+        // 範囲の外の値は、当てないコマンドになる値にして書く(ProbeDecodePlace が飛ばす)
+        const uint32_t mode = shape.replace ? PROBE_PLACE_MODE_REPLACE : PROBE_PLACE_MODE_ADD;
+        const auto count = static_cast<uint32_t>(contents.size());
+        const bool inside = shape.x < PROBE_GRID_SIZE && shape.y < PROBE_GRID_SIZE && shape.z < PROBE_GRID_SIZE;
+        command.payload[PROBE_PLACE_WORD_CENTER] = inside ? shape.x | (shape.y << 8) | (shape.z << 16) : 0xFF000000u;
+        command.payload[PROBE_PLACE_WORD_SHAPE] = std::min(shape.radius, 0xFFu) | (mode << 8) |
+                                                  (std::min(count, 0xFFu) << 16);
+        command.payload[PROBE_PLACE_WORD_TEMPERATURE] = shape.temperatureMilliKelvin;
+
+        const uint32_t written = std::min(count, PROBE_PLACE_MAX_SPECIES);
+        for (uint32_t i = 0; i < written; ++i) {
+            const uint32_t word = PROBE_PLACE_WORD_ENTRIES + (PROBE_PLACE_WORDS_PER_ENTRY * i);
+            command.payload[word] = contents[i].species;
+            command.payload[word + 1] = static_cast<uint32_t>(contents[i].amount);
+            command.payload[word + 2] = static_cast<uint32_t>(contents[i].amount >> 32);
+        }
+
+        return command;
+    }
+
     ProbeCommand MakeTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t version) {
         ProbeCommand command{.targetTick = targetTick,
                              .sequence = sequence,
@@ -361,6 +388,7 @@ namespace bicameral::sim {
         }
 
         m_viewSpecies = ProbeViewSpecies(table);
+        m_speciesCount = static_cast<uint32_t>(table.species.size());
 
         return m_initialUploads[4] && m_initialUploads[5] && m_initialUploads[6];
     }
@@ -700,7 +728,8 @@ namespace bicameral::sim {
     void ProbeSim::RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit,
                               bool tableSwapped) {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
-        SetUnitConstants(list, tick, 0);
+        SetUnitConstants(list, tick,
+                         unit == PROBE_UNIT_APPLY ? m_speciesCount : 0);  // 適用: 置くコマンドの検査(T-0222)
         if (unit == PROBE_UNIT_APPLY) {
             // コマンドの適用は 1 スレッドがキューの先頭から番号順に(probe_tick.hlsl)。刻みの一覧と表の欄の用意も
             list->SetPipelineState(m_applyPipeline.Get());
@@ -768,6 +797,8 @@ namespace bicameral::sim {
             frame.keepAlive.push_back(std::move(m_reactionTable[index]));
             m_reactionTable[index] = std::move(buffer);
         }
+
+        m_speciesCount = static_cast<uint32_t>(table.species.size());
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         BindRootViews(list, frame.input.Get());
@@ -1064,13 +1095,69 @@ namespace bicameral::sim {
             reaction::HcThermalCache* caches;
         };
 
-        // 刻み tick のつつきを current に適用し、つついたブロックに印を付ける(GPU と同じく並びの順に)。足したエネルギーを返す。
-        // つついたブロックは「刻みの直前に変わった」(tc = 刻み tick の印 − 1。probe_tick.hlsl の ApplyCommand と同じ)
-        uint64_t ApplyPokes(const ReactionTableView& table, ReferenceGeneration current, uint64_t tick,
-                            std::span<const ProbeCommand> commands, std::vector<uint8_t>& seeds,
+        // 置くコマンド(T-0222)を current に当てる(probe_tick.hlsl の ApplyPlace と同じ順と範囲)。変わったエネルギーを返す。
+        // 触ったブロック(球の範囲の箱が重なるブロック全部)は予定の種にし、「刻みの直前に変わった」にする
+        uint64_t ApplyPlace(const ReactionTableView& table, uint32_t speciesCount, ReferenceGeneration current,
+                            uint64_t tick, const ProbeCommand& command, std::vector<uint8_t>& seeds,
+                            std::vector<uint64_t>& changedMarks) {
+            ProbePlacePayload payload{};
+            rng::copy(command.payload, std::begin(payload.words));
+            const ProbePlace place = ProbeDecodePlace(payload, speciesCount);
+            if (place.valid == 0)
+                return 0;
+
+            // --- セル ---
+            int64_t source = 0;
+            for (uint32_t z = ProbePlaceBegin(place.z, place.radius); z < ProbePlaceEnd(place.z, place.radius); ++z) {
+                for (uint32_t y = ProbePlaceBegin(place.y, place.radius); y < ProbePlaceEnd(place.y, place.radius);
+                     ++y) {
+                    for (uint32_t x = ProbePlaceBegin(place.x, place.radius); x < ProbePlaceEnd(place.x, place.radius);
+                         ++x) {
+                        if (!ProbePlaceCovers(place, x, y, z))
+                            continue;
+
+                        const uint32_t index = ProbeCellIndex(x, y, z);
+                        const ProbePlaced placed = ProbePlaceCell(table, current.cells[index], place);
+                        if (placed.applied == 0)
+                            continue;
+
+                        source += placed.cell.energy - current.cells[index].energy;
+                        current.cells[index] = placed.cell;
+                        current.caches[index] = ProbeMakeCache(table, placed.cell);
+                    }
+                }
+            }
+
+            // --- ブロック ---
+            const uint32_t beginX = ProbePlaceBegin(place.x, place.radius) / PROBE_BLOCK_SIZE;
+            const uint32_t beginY = ProbePlaceBegin(place.y, place.radius) / PROBE_BLOCK_SIZE;
+            const uint32_t beginZ = ProbePlaceBegin(place.z, place.radius) / PROBE_BLOCK_SIZE;
+            const uint32_t endX = (ProbePlaceEnd(place.x, place.radius) - 1) / PROBE_BLOCK_SIZE;
+            const uint32_t endY = (ProbePlaceEnd(place.y, place.radius) - 1) / PROBE_BLOCK_SIZE;
+            const uint32_t endZ = (ProbePlaceEnd(place.z, place.radius) - 1) / PROBE_BLOCK_SIZE;
+            for (uint32_t bz = beginZ; bz <= endZ; ++bz) {
+                for (uint32_t by = beginY; by <= endY; ++by) {
+                    for (uint32_t bx = beginX; bx <= endX; ++bx) {
+                        const uint32_t block = ProbeBlockIndex(bx, by, bz);
+                        seeds[block] = 1;
+                        changedMarks[block] = ProbeChangeMark(tick) - 1;
+                    }
+                }
+            }
+
+            return static_cast<uint64_t>(source);
+        }
+
+        // 刻み tick のつつきと置くコマンドを current に適用し、触ったブロックに印を付ける(GPU と同じく並びの順に)。
+        // 足したエネルギーを返す。つついたブロックは「刻みの直前に変わった」(tc = 刻み tick の印 − 1。probe_tick.hlsl の ApplyCommand と同じ)
+        uint64_t ApplyPokes(const ReactionTableView& table, uint32_t speciesCount, ReferenceGeneration current,
+                            uint64_t tick, std::span<const ProbeCommand> commands, std::vector<uint8_t>& seeds,
                             std::vector<uint64_t>& changedMarks) {
             uint64_t source = 0;
             for (const ProbeCommand& command : commands) {
+                if (command.targetTick == tick && command.type == PROBE_COMMAND_TYPE_PLACE)
+                    source += ApplyPlace(table, speciesCount, current, tick, command, seeds, changedMarks);
+
                 if (command.targetTick != tick || command.type != PROBE_COMMAND_TYPE_POKE)
                     continue;
 
@@ -1194,7 +1281,8 @@ namespace bicameral::sim {
 
         // (1) コマンドの適用。つついたブロックは、前の刻みで変わった・次の刻みに評価の要るブロックと同じく予定の種になる
         std::vector<uint8_t> seeds = m_blockFlags;
-        m_sourceEnergy = ApplyPokes(table, current, tick, commands, seeds, m_changedMarks);
+        const auto speciesCount = static_cast<uint32_t>(m_table->species.size());
+        m_sourceEnergy = ApplyPokes(table, speciesCount, current, tick, commands, seeds, m_changedMarks);
 
         // 表を差し替えた刻み(GPU の RefreshTable と同じ。T-0139): 2 世代の熱のキャッシュを新しい表で作り直し、
         // 全部のブロックを「刻みの直前に変わった」にして起こす(速さ f が変わるので待ちを引き直す。ADR-0018)

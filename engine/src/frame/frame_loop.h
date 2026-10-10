@@ -88,6 +88,9 @@ namespace bicameral::frame {
         // 反応表のパネルで木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版に戻って終える(--auto-table-edit。--editor と
         // --packages の写しと一緒に。editor/reaction_table_panel。T-0219)
         bool autoTableEdit = false;
+        // 筆で木を置く・木炭を足す・格子からはみ出す・当たらない値を投げ、木に火を付ける。当たるはずの置くコマンドが全部 GPU で
+        // 当たったかを確かめる(--auto-place。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0222)
+        bool autoPlace = false;
 
         // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
         uint32_t savePoints = AUTO_SAVE_POINTS;  // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)

@@ -163,6 +163,7 @@ target_link_libraries(bicameral_editor PUBLIC bicameral_frame)
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
   src/main.cpp
+  src/editor/brush_panel.cpp
   src/editor/editor_overlay.cpp
   src/editor/graph_panel.cpp
   src/editor/lab_panel.cpp

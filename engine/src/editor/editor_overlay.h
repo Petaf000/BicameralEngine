@@ -18,6 +18,7 @@
 #include <string_view>
 #include <vector>
 
+#include "editor/brush_panel.h"
 #include "editor/graph_panel.h"
 #include "editor/lab_panel.h"
 #include "editor/reaction_table_panel.h"
@@ -115,6 +116,9 @@ namespace bicameral::editor {
         // 反応表のパネル(T-0219)
         [[nodiscard]] ReactionTablePanel& ReactionTable() { return *m_reactionTable; }
 
+        // 世界に物を置く筆(T-0222)
+        [[nodiscard]] BrushPanel& Brush() { return *m_brush; }
+
     private:
         EditorOverlay(Window& window, uint32_t frameCount);
 
@@ -145,6 +149,7 @@ namespace bicameral::editor {
         Window& m_window;
         std::unique_ptr<LabPanel> m_lab;
         std::unique_ptr<ReactionTablePanel> m_reactionTable;
+        std::unique_ptr<BrushPanel> m_brush;
         bool m_contextCreated = false;
         bool m_win32Initialized = false;
         bool m_dx12Initialized = false;

@@ -782,6 +782,16 @@ namespace bicameral::frame {
                     continue;
                 }
 
+                if (event.type == sim::PROBE_EVENT_PLACE_APPLIED) {
+                    if (m_editor)
+                        m_editor->Brush().NotePlaced(event);
+                    else
+                        Log(Channel::Sim, Level::Info, "置く: 刻み {} で ({}, {}, {}) を中心に置いた", event.tick,
+                            event.PokeX(), event.PokeY(), event.PokeZ());
+
+                    continue;
+                }
+
                 if (event.type == sim::PROBE_EVENT_BODY_PUSHED) {
                     if (event.place == sim::PROBE_PUSH_NOTHING)
                         Log(Channel::Sim, Level::Info, "押す: 刻み {} で光線の先に動く物が無かった", event.tick);
@@ -857,6 +867,19 @@ namespace bicameral::frame {
             // 再生中は窓の操作を世界に入れない(世界は再生ファイルのコマンドだけで進む)
             if (!m_replay.empty())
                 return;
+
+            // 筆を持っている間は、左クリックが当たったセルを「置く」コマンドに(T-0222。自動のクリックはつつきのまま)
+            if (m_editor && m_editor->Brush().Holding()) {
+                for (const render::CellCoordinate& cell : cells)
+                    m_pendingCommands.push_back(
+                        m_editor->Brush().MakeCommand(cell.x, cell.y, cell.z, m_nextSequence++));
+
+                cells.clear();
+            }
+
+            if (m_options.autoPlace && m_editor)
+                rng::move(m_editor->Brush().TakeAutoCommands(m_frameNumber, m_nextSequence),
+                          std::back_inserter(m_pendingCommands));
 
             const bool autoClick = m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0;
             const bool autoIgnite = m_options.autoIgnite && m_frameNumber == 0;  // 下の最初の 1 回と同じ場所
@@ -1179,6 +1202,9 @@ namespace bicameral::frame {
             if (m_options.autoLab)
                 m_editor->Lab().StartAuto();
 
+            if (m_options.autoPlace)
+                m_editor->Brush().StartAuto();
+
             // --auto-table-edit(T-0219): 書き換えるのは --packages で渡した写しだけ
             if (m_options.autoTableEdit) {
                 if (!m_options.replayPath.empty() || m_options.packageRoot.empty()) {
@@ -1217,6 +1243,8 @@ namespace bicameral::frame {
                     m_editor->Lab().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
                                              loaded->tableVersion);
                     m_editor->ReactionTable().UseTable(loaded);
+                    m_editor->Brush().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
+                                               loaded->tableVersion);
                 }
 
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
@@ -1724,6 +1752,15 @@ namespace bicameral::frame {
                 Log(Channel::Sim, Level::Error, "--auto-lab: 実験室の確かめが通らなかった(--editor が要る)");
                 return 1;
             }
+
+            if (m_options.autoPlace && (!m_editor || !m_editor->Brush().AutoPassed())) {
+                Log(Channel::Sim, Level::Error, "--auto-place: 筆で置いたコマンドが当たらなかった({})",
+                    m_editor ? m_editor->Brush().AutoSummary() : "--editor が要る");
+                return 1;
+            }
+
+            if (m_options.autoPlace)
+                Log(Channel::Sim, Level::Info, "--auto-place: {}。OK", m_editor->Brush().AutoSummary());
 
             if (m_options.autoReload && (!m_autoReload || !m_autoReload->Done())) {
                 Log(Channel::Tool, Level::Error, "--auto-reload: ホットリロードの確かめが通らなかった({})",

@@ -295,6 +295,11 @@ target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 # GBV の計装で約 2 分止まり、300 s を超えた。どれも CPU とビット一致を毎回比べる。GBV が要る調べ物の時だけ外して走らせる(BACKLOG)
 bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
+# 世界に物を置く筆(T-0222): 置く・足す・はみ出す・当たらない値のコマンドを流して CPU と毎刻みビット一致(分け方を変えても)
+bicameral_add_gpu_test(gpu_probe_place_test)
+target_link_libraries(gpu_probe_place_test PRIVATE bicameral_sim bicameral_save)
+bicameral_add_gpu_test_case(gpu_probe_place gpu_probe_place_test gpu --no-gbv)
+bicameral_add_gpu_test_case(gpu_probe_place_warp gpu_probe_place_test warp --warp)
 # 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
 bicameral_add_gpu_test(gpu_probe_trace_test)
 target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
@@ -357,6 +362,16 @@ set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRE
 # 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
 add_test(NAME window_lab COMMAND bicameral --editor --auto-lab --frames 20)
 set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
+# 世界に物を置く筆(T-0222): パネルの筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずのものが全部 GPU で
+# 当たったか(--auto-place。通らなければ 1)を記録し、別の起動で再生して同じハッシュ列になる(置くコマンドも再生ファイルだけで再現)
+set(WINDOW_PLACE_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place.bcreplay)
+add_test(NAME window_place_record
+         COMMAND bicameral --editor --auto-place --frames 120 --record ${WINDOW_PLACE_FILE})
+add_test(NAME window_place_play COMMAND bicameral --replay ${WINDOW_PLACE_FILE} --target-fps 30)
+set_tests_properties(window_place_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-place: .*OK")
+set_tests_properties(window_place_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_place TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK")
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)
