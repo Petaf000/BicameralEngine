@@ -45,6 +45,7 @@
 #include "sim/gpu_physics.h"
 #include "sim/physics_scene.h"
 #include "sim/reaction_table.h"
+#include "sim/species_remap.h"
 
 namespace bicameral::sim {
 
@@ -135,9 +136,11 @@ namespace bicameral::sim {
     // 保存点を使わない(ProbeFrameInput::saveTo・restoreFrom の既定)
     inline constexpr uint32_t NO_SAVE_POINT = UINT32_MAX;
 
-    // 反応表の差し替え(ホットリロード。T-0139・ADR-0047)。刻み tick の適用の単位の前に table を写し(コマンドの適用から新しい表)、
-    // 適用の後に熱のキャッシュを作り直して全部のブロックを起こす(RefreshTable)。呼ぶ側の約束: table の物質の一覧が今の表と同じ
-    // (セルの物質 ID の意味が変わらない。script::CheckHotReloadCompatible)・(tick, 0) の単位がこのフレームにある・同じ刻みに
+    // 反応表の差し替え(ホットリロード。T-0139・ADR-0047)。物質の一覧が違う表なら、先に 2 世代のセルの物質を名前で付け替える
+    // (T-0223・ADR-0065。sim::BuildSpeciesRemap が通る表であること。抽出の物質もそのフレームから新しい表の ID)。
+    // 刻み tick の適用の単位の前に table を写し(コマンドの適用から新しい表)、
+    // 適用の後に熱のキャッシュを作り直して全部のブロックを起こす(RefreshTable)。呼ぶ側の約束: 今の表から付け替えられる表
+    // (script::CheckHotReloadCompatible が SpeciesChangePolicy::Remap で通る)・(tick, 0) の単位がこのフレームにある・同じ刻みに
     // MakeTableCommand の印を足す(記録と再生のため)。table は RecordFrame の中で写し終わる(呼んだ後は持たなくてよい)。
     // 1 フレームに幾つあってもよい(刻みの順でなくてよい。同じ刻みに 2 つは不可)
     struct ProbeTableSwap {
@@ -334,6 +337,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool ValidateTableSwap(const ProbeFrameInput& input) const;
         [[nodiscard]] bool RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                            const BakedReactionTable& table);
+        [[nodiscard]] bool RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                              const SpeciesRemap& remap);
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
@@ -378,6 +383,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_wakeDuePipeline;  // 起こす刻みの来たブロックを一覧へ(待ちの丸め。T-0122)
         ComPtr<ID3D12PipelineState>
             m_refreshTablePipeline;  // 表を差し替えた刻み: 熱のキャッシュと全部のブロックを起こす(T-0139)
+        ComPtr<ID3D12PipelineState>
+            m_remapSpeciesPipeline;  // 物質の一覧が変わる差し替え: セルの物質を付け替える(T-0223)
         ComPtr<ID3D12PipelineState> m_busyPipeline;
         ComPtr<ID3D12PipelineState> m_hashCellsPipeline;
         ComPtr<ID3D12PipelineState> m_flushEventsPipeline;
@@ -393,6 +400,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_thermal;  // 2 世代 × PROBE_CELL_COUNT × HcThermalCache
         // 反応の表(物質・規則・索引・速度。既定のヒープ)と、初めの世界・表のアップロード(最初のフレームで写す。以後は使わない)
         std::array<ComPtr<ID3D12Resource>, 4> m_reactionTable;
+        ComPtr<ID3D12Resource> m_speciesRemap;  // 最後に使った付け替えの表(t5。無ければ入力を仮に結ぶ。T-0223)
+        BakedReactionTable m_tableCopy;         // GPU が使っている表の写し(付け替えの表を作る。T-0223)
         // 表 4 つ・セル・キャッシュ(1 世代ぶん。2 世代に写す)・予定の印(初めの起こす刻みの印。ProbeInitialScheduleWords)
         std::array<ComPtr<ID3D12Resource>, 7> m_initialUploads;
         bool m_initialized = false;
@@ -459,7 +468,8 @@ namespace bicameral::sim {
         explicit ProbeReference(const BakedReactionTable& table, std::span<const reaction::RxCell> initialWorld = {});
 
         // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導と反応)。
-        // newTable があれば、刻みの始めに表をそれに差し替える(GPU の ProbeFrameInput::tableSwap と同じ。呼ぶ側が持ち続ける。T-0139)
+        // newTable があれば、刻みの始めに表をそれに差し替える(GPU の ProbeFrameInput::tableSwap と同じ。呼ぶ側が持ち続ける。T-0139)。
+        // 物質の一覧が違う表なら、先に 2 世代のセルの物質を名前で付け替える(T-0223・ADR-0065。BuildSpeciesRemap が通る表であること)
         void Advance(uint64_t tick, std::span<const ProbeCommand> commands,
                      const BakedReactionTable* newTable = nullptr);
 
@@ -468,6 +478,9 @@ namespace bicameral::sim {
 
         // 同じく、熱のキャッシュ(抽出の温度を作るのに使う)
         [[nodiscard]] std::span<const reaction::HcThermalCache> Caches(uint64_t tick) const;
+
+        // 最後に物質を付け替えた差し替えで起きたこと(刻みの始めの世代の分。付け替えていなければ 0。T-0223)
+        [[nodiscard]] const SpeciesRemapReport& LastRemapReport() const { return m_remapReport; }
 
         // 最後の Advance のつつきが足したエネルギー(mJ。GPU の表の sourceEnergy と同じ)
         [[nodiscard]] uint64_t SourceEnergy() const { return m_sourceEnergy; }
@@ -496,6 +509,9 @@ namespace bicameral::sim {
         uint64_t m_sourceEnergy = 0;
         uint32_t m_scheduledBlocks = 0;
         uint32_t m_wokenBlocks = 0;
+        SpeciesRemapReport m_remapReport;
+
+        void RemapSpecies(uint64_t tick, const BakedReactionTable& newTable);
     };
 
     // ブロックごとの初めの起こす刻みの印(待ちの丸め。ADR-0018・T-0122): 刻み 0 を tc = 0 で計算してみて、変わるブロックは刻み 0 の印、

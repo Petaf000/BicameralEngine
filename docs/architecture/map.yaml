@@ -698,6 +698,10 @@ views:
           code: "engine/src/script/reaction_hot_reload.cpp::ReactionTableHotReload::Poll", ticket: T-0139,
           doc: docs/design/13-scripting-game-model.md,
           note: "--editor が数フレームごとに指紋を見て読み直す。落ちたら古い表のまま誤りをパネルへ。物質の一覧が同じ時だけ当てる。差し替えは印のコマンド + 表の写し + RefreshTable(ADR-0047。reaction_hot_reload_test・gpu_probe_sim の表の差し替え)。覗き窓は影の鎖を作り直し、実験室は操作を初めから新しい表で流し直す(ADR-0054。gpu_probe_peek・gpu_lab_box)。窓の確認は --auto-reload(window_hot_reload_*。T-0195)" }
+      - { id: speciesremap, group: rt, label: "物質の付け替え<br/>(足す・消す表の差し替え: 名前で ID・消えた物質は元素の単体へ)",
+          code: "engine/src/sim/species_remap.cpp::BuildSpeciesRemap", ticket: T-0223,
+          doc: docs/design/13-scripting-game-model.md,
+          note: "表 2 つだけから決まる(再生は表の中身から作り直す)。セル 1 つは common/species_remap.hlsli の RxRemapCell(CPU と GPU で同じ関数)。原子を保って単体へ・熱を保つ(差はエネルギーの出入り)・単体が無い元素は当てない(ADR-0065。reaction_species_remap)。CPU リファレンスと GPU の世界(probe_tick.hlsl の RemapSpecies。gpu_probe_sim)。覗き窓・実験室・エディタで当てるのは T-0242" }
       - { id: rtload, group: rt, label: "起動時に表を読む<br/>(exe の横の data/packages → ベイク → GPU)",
           code: "engine/src/script/reaction_table_loader.cpp::LoadReactionTable", ticket: T-0157,
           doc: docs/design/02-reaction-system.md,
@@ -720,6 +724,7 @@ views:
       - [rtload, vram, "表を GPU へ"]
       - [hotreload, packages, "変わったら"]
       - [hotreload, vram, "刻みの境界で差し替え"]
+      - [hotreload, speciesremap, "物質の一覧が変わったら"]
       - [table, vram]
       - [gen, vram]
       - [magic, vram, "触媒・阻害・転換・増幅"]

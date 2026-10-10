@@ -24,10 +24,18 @@ namespace bicameral::script {
     // 中身の代わりにその印を混ぜる(読めるようになれば変わる)
     [[nodiscard]] uint64_t DirectoryFingerprint(const fs::path& root);
 
+    // 物質を足す・消す(物質の一覧が変わる)表を当てるか(T-0223・ADR-0065)
+    enum class SpeciesChangePolicy : uint8_t {
+        Reject,  // 当てない(世界の側がまだ付け替えられない: 覗き窓・実験室。T-0242 まで)
+        Remap,  // 名前で付け替えて当てる(sim::BuildSpeciesRemap が通る表なら。世界〔ProbeReference・ProbeSim〕は付け替えられる)
+    };
+
     // 新しい表を今の世界に当てられるか: 物質の一覧(名前・並び = ID・元素の組み立て)が同じなら当てられる。
-    // 違えば、セルの物質 ID の意味が変わるので当てない(足した・消した物質の名前を理由に書く。世界を作り直す道は ADR-0047)
-    [[nodiscard]] std::expected<void, std::string> CheckHotReloadCompatible(const sim::BakedReactionTable& current,
-                                                                            const sim::BakedReactionTable& next);
+    // 違うとき、Reject なら当てない(足した・消した物質の名前を理由に書く)。Remap なら、消す物質を元素に分けて戻せる表なら当てられる
+    // (単体の無い元素を含む物質を消す表は理由を返す。sim/species_remap.h)
+    [[nodiscard]] std::expected<void, std::string> CheckHotReloadCompatible(
+        const sim::BakedReactionTable& current, const sim::BakedReactionTable& next,
+        SpeciesChangePolicy policy = SpeciesChangePolicy::Reject);
 
     enum class HotReloadState : uint8_t {
         Unchanged,  // ファイルが変わっていない(か、変わったが表の版が同じ)
@@ -45,7 +53,9 @@ namespace bicameral::script {
     class ReactionTableHotReload {
     public:
         // current: 今の世界の表(起動時に読んだもの)。指紋はここで取る(作った時の中身を「見た」とする)
-        ReactionTableHotReload(ReactionTableSource source, std::shared_ptr<const LoadedReactionTable> current);
+        // policy: 物質の一覧が変わる表を当てるか(世界の側が付け替えられる時だけ Remap。T-0223)
+        ReactionTableHotReload(ReactionTableSource source, std::shared_ptr<const LoadedReactionTable> current,
+                               SpeciesChangePolicy policy = SpeciesChangePolicy::Reject);
 
         [[nodiscard]] HotReloadResult Poll();
 
@@ -57,6 +67,7 @@ namespace bicameral::script {
 
         ReactionTableSource m_source;
         std::shared_ptr<const LoadedReactionTable> m_current;
+        SpeciesChangePolicy m_policy = SpeciesChangePolicy::Reject;
         uint64_t m_seen = 0;     // 最後に読み直した(か作った時の)指紋
         uint64_t m_pending = 0;  // 変わったのを見た指紋(次の Poll で同じなら読み直す)
     };

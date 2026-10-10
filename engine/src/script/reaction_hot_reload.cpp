@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "script/luau_type_check.h"
+#include "sim/species_remap.h"
 
 namespace bicameral::script {
 
@@ -90,7 +91,17 @@ namespace bicameral::script {
     }
 
     std::expected<void, std::string> CheckHotReloadCompatible(const sim::BakedReactionTable& current,
-                                                              const sim::BakedReactionTable& next) {
+                                                              const sim::BakedReactionTable& next,
+                                                              SpeciesChangePolicy policy) {
+        // 付け替えられる世界: 消す物質を元素に分けて戻せるか(元素の一覧・組み立ての変化も名前で付け替える)
+        if (policy == SpeciesChangePolicy::Remap) {
+            const auto remap = sim::BuildSpeciesRemap(current, next);
+            if (!remap)
+                return std::unexpected(remap.error());
+
+            return {};
+        }
+
         if (current.speciesNames != next.speciesNames) {
             return std::unexpected(
                 std::format("物質の一覧が変わったので今の世界には当てられない(足した: {} / 消した: "
@@ -109,8 +120,9 @@ namespace bicameral::script {
     }
 
     ReactionTableHotReload::ReactionTableHotReload(ReactionTableSource source,
-                                                   std::shared_ptr<const LoadedReactionTable> current)
-        : m_source(std::move(source)), m_current(std::move(current)) {
+                                                   std::shared_ptr<const LoadedReactionTable> current,
+                                                   SpeciesChangePolicy policy)
+        : m_source(std::move(source)), m_current(std::move(current)), m_policy(policy) {
         m_seen = Fingerprint();
         m_pending = m_seen;
     }
@@ -152,7 +164,7 @@ namespace bicameral::script {
         if (loaded->tableVersion == m_current->tableVersion)
             return {};  // コメント・空白・並びだけの変更(同じ法則)
 
-        if (const auto compatible = CheckHotReloadCompatible(m_current->table, loaded->table); !compatible)
+        if (const auto compatible = CheckHotReloadCompatible(m_current->table, loaded->table, m_policy); !compatible)
             return {.state = HotReloadState::Failed, .message = compatible.error()};
 
         std::string message;

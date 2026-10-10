@@ -72,6 +72,12 @@ target_compile_definitions(reaction_replay_table_test PRIVATE
 add_dependencies(reaction_replay_table_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME reaction_replay_table COMMAND reaction_replay_table_test)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
+# 物質を足す・消す表の差し替えで、セルの物質 ID を名前で付け替える(T-0223・ADR-0065。CPU リファレンス。GPU は T-0242)
+add_executable(reaction_species_remap_test reaction_species_remap_test.cpp)
+target_precompile_headers(reaction_species_remap_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(reaction_species_remap_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
+add_test(NAME reaction_species_remap COMMAND reaction_species_remap_test)
+set_tests_properties(reaction_species_remap PROPERTIES TIMEOUT 600)
 # 表が読めない・検査で落ちる時、ランタイムは窓を開く前に止まる(T-0157。GPU を使わない)
 add_test(NAME reaction_package_runtime_stops
          COMMAND bicameral --frames 1 --packages ${CMAKE_CURRENT_SOURCE_DIR}/packages_broken)

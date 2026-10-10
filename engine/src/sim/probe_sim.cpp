@@ -18,12 +18,13 @@ namespace bicameral::sim {
         //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ・u13 物理の物(T-0098。物理なしなら仮の置き場)
         //   → b0 単位の定数 → デバッグのリング
         //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
+        //   ・t5 物質の付け替えの表(T-0223)
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 14,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
                                                        .graphTrace = true,
-                                                       .srvCount = 5};
+                                                       .srvCount = 6};
 
         constexpr uint32_t UAV_CELLS = 0;
         constexpr uint32_t UAV_EVENTS = 1;
@@ -41,6 +42,7 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_BODIES = 13;
         constexpr uint32_t SRV_INPUT = 0;
         constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
+        constexpr uint32_t SRV_SPECIES_REMAP = 5;   // t5 付け替えの表(T-0223)
 
         constexpr uint32_t TIMESTAMPS_PER_SLOT = ProbeSim::MAX_UNITS_PER_FRAME + 2;  // 始め・単位ごと・終わり
         constexpr uint64_t CELL_BYTES = uint64_t{PROBE_CELL_COUNT} * sizeof(reaction::RxCell);             // 1 世代
@@ -234,13 +236,15 @@ namespace bicameral::sim {
         m_applyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_apply.cso");
         m_wakeDuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_wake_due.cso");
         m_refreshTablePipeline = LoadComputePipeline(device, root, "sim/probe_tick_refresh_table.cso");
+        m_remapSpeciesPipeline = LoadComputePipeline(device, root, "sim/probe_tick_remap_species.cso");
         m_busyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_busy.cso");
         m_hashCellsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_hash_cells.cso");
         m_flushEventsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_flush_events.cso");
         m_extractPipeline = LoadComputePipeline(device, root, "sim/probe_tick_extract.cso");
 
-        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_refreshTablePipeline && m_busyPipeline &&
-               m_hashCellsPipeline && m_flushEventsPipeline && m_extractPipeline && CreateConductGraph(device);
+        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_refreshTablePipeline &&
+               m_remapSpeciesPipeline && m_busyPipeline && m_hashCellsPipeline && m_flushEventsPipeline &&
+               m_extractPipeline && CreateConductGraph(device);
     }
 
     // 伝導の Work Graph(WakeBlocks → ConductBlock)。compute と同じルート署名をグローバルのルート署名にする
@@ -361,6 +365,7 @@ namespace bicameral::sim {
         }
 
         m_viewSpecies = ProbeViewSpecies(table);
+        m_tableCopy = table;
 
         return m_initialUploads[4] && m_initialUploads[5] && m_initialUploads[6];
     }
@@ -531,6 +536,10 @@ namespace bicameral::sim {
 
         FrameSlot& frame = m_slots[slot];
         frame.keepAlive.clear();  // この枠の前のリストは GPU が終えている(呼ぶ側の約束)
+
+        // 差し替えがあれば、フレームの終わりの抽出は最後の表の ID で物質を読む(物質の一覧が変わると ID がずれる。T-0223)
+        if (!input.tableSwaps.empty())
+            m_viewSpecies = ProbeViewSpecies(*rng::max(input.tableSwaps, {}, &ProbeTableSwap::tick).table);
         WriteInput(frame, input);
         if (FAILED(frame.allocator->Reset()) || FAILED(frame.list->Reset(frame.allocator.Get(), nullptr))) {
             Log(Channel::Sim, Level::Error, "フレームのリストを記録し直せない(slot {})", slot);
@@ -690,6 +699,10 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_INPUT), input->GetGPUVirtualAddress());
+        // 付け替えの表は差し替えの刻みの段だけが読む。まだ無ければ入力を仮に結ぶ(読まない)
+        list->SetComputeRootShaderResourceView(
+            ROOT_LAYOUT.SrvIndex(SRV_SPECIES_REMAP),
+            m_speciesRemap ? m_speciesRemap->GetGPUVirtualAddress() : input->GetGPUVirtualAddress());
         for (uint32_t index = 0; index < m_reactionTable.size(); ++index) {
             list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(SRV_REACTION_FIRST + index),
                                                    m_reactionTable[index]->GetGPUVirtualAddress());
@@ -740,6 +753,12 @@ namespace bicameral::sim {
     // このフレームの前の単位と、まだ GPU にある前のフレームが読むので、このリストが終わるまで持つ(状態を追わないよう、毎回新しく作る)
     bool ProbeSim::RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                    const BakedReactionTable& table) {
+        const auto remap = BuildSpeciesRemap(m_tableCopy, table);
+        if (!remap) {
+            Log(Channel::Sim, Level::Error, "物質を付け替えられない表: {}", remap.error());
+            return false;
+        }
+
         ComPtr<ID3D12Device5> device;
         if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
@@ -771,6 +790,42 @@ namespace bicameral::sim {
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         BindRootViews(list, frame.input.Get());
+        m_tableCopy = table;
+
+        return remap->identity || RecordSpeciesRemap(list, frame, *remap);
+    }
+
+    // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 付け替えの表を写して t5 に結び、2 世代のセルを付け替える(適用の単位の前)。
+    // 新しい表はもう結んである(RxRemapCell は単体の h0 を新しい表から読む)
+    bool ProbeSim::RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame, const SpeciesRemap& remap) {
+        ComPtr<ID3D12Device5> device;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        const std::vector<uint32_t> words = PackSpeciesRemap(remap);
+        ComPtr<ID3D12Resource> upload = CreateFilledUpload(device.Get(), words, L"ProbeSim.swap.speciesRemap");
+        if (!upload)
+            return false;
+
+        const uint64_t bytes = upload->GetDesc().Width;
+        ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device.Get(), bytes, gpu::BufferKind::UnorderedAccess);
+        if (!buffer)
+            return false;
+
+        list->CopyBufferRegion(buffer.Get(), 0, upload.Get(), 0, bytes);
+        const D3D12_RESOURCE_BARRIER toRead = gpu::Transition(buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &toRead);
+        frame.keepAlive.push_back(std::move(upload));
+        if (m_speciesRemap)
+            frame.keepAlive.push_back(std::move(m_speciesRemap));
+        m_speciesRemap = std::move(buffer);
+        BindRootViews(list, frame.input.Get());
+
+        list->SetPipelineState(m_remapSpeciesPipeline.Get());
+        list->Dispatch(2 * LINEAR_CELL_GROUPS, 1, 1);
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        list->ResourceBarrier(1, &allUavs);
 
         return true;
     }
@@ -1183,8 +1238,10 @@ namespace bicameral::sim {
 
     void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands,
                                  const BakedReactionTable* newTable) {
-        if (newTable != nullptr)
+        if (newTable != nullptr) {
+            RemapSpecies(tick, *newTable);
             m_table = newTable;
+        }
 
         const ReactionTableView table = m_table->View();
         const size_t currentBase = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
@@ -1230,6 +1287,23 @@ namespace bicameral::sim {
             const bool possible = wakes[block] <= ProbeChangeMark(tick + 1);
             m_blockFlags[block] = static_cast<uint8_t>((changed[block] != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) |
                                                        (possible ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
+        }
+    }
+
+    // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 2 世代のセルを名前で付け替える(熱のキャッシュは Advance が新しい表で作り直す)。
+    // 報告は刻み tick の始めの世代(この刻みが進める世代)の分だけ数える
+    void ProbeReference::RemapSpecies(uint64_t tick, const BakedReactionTable& newTable) {
+        m_remapReport = {};
+        const auto remap = BuildSpeciesRemap(*m_table, newTable);
+        FX_ASSERT(remap.has_value());  // 呼ぶ側の約束(script::CheckHotReloadCompatible が通した表)
+        if (!remap || remap->identity)
+            return;
+
+        const size_t currentBase = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
+        for (size_t index = 0; index < m_cells.size(); ++index) {
+            const SpeciesRemapReport report = RemapReactionCell(*remap, newTable, m_cells[index]);
+            if (index >= currentBase && index < currentBase + PROBE_CELL_COUNT)
+                m_remapReport.Add(report);
         }
     }
 
