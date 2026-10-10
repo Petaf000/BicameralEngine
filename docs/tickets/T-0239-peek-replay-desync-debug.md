@@ -1,6 +1,6 @@
 # T-0239 debug で覗き窓を開くと世界(物理)が起動ごとに違う(window_hot_reload_play・window_replay_peek が時々落ちる)
 
-- Status: In Progress(**研究**。2026-10-10 に 1 回目の切り分けまで。原因の仕組みは未確定)
+- Status: Done(2026-10-11。回避: debug でもシミュのシェーダーを -O3 で作る = ADR-0079。ドライバの中の仕組みは未確認のまま)
 - 種類: 研究(決定性の不具合。ADR-0008・CLAUDE.md 原則 3)
 - PC: 必須
 - 見積もり: チャット 1 回分(下の「次に試すこと」)
@@ -40,6 +40,23 @@
 3. 打ち切り: 1・2 で 1 時間たっても仕組みが絞れなければ、debug の窓のテスト(window_hot_reload_play・window_replay_peek)は覗き窓を外すか release だけにして、
    決定性の確かめは release と CPU リファレンスに任せる案を QUESTIONS に出す(ユーザー判断)。
 
+## 結論(2026-10-11)
+- debug でもシミュのシェーダーを -O3 で作る(shaders/CMakeLists.txt の BICAMERAL_DXC_SIM_CONFIG_FLAGS。-Zi・BICAMERAL_GPU_DEBUG=1 は残す。
+  `BICAMERAL_SIM_SHADER_OD=ON` で -Od に戻せる)と、覗き窓つきの再生(`--check-physics`)が **10/10 で一致・GPU の assert 0 件**(-Od では約 12/27 が食い違い)。
+  → 引き金は -Od の重いパイプライン(局所メモリが大きい)と確定。回避を ADR-0079 に残した。T-0098(組を局所に持つ Compute が別のキューの割り込みで
+  時々違う結果)と同じ仲間と見る。ドライバの中の仕組み(スクラッチの作り直しか・割り込みの退避か)は未確認。
+- 物理のシェーダーの読み: 6×6 の解き方(physics_math.hlsli の PxSolveSymmetric6・PxFactorScaled6・PxSubstitute6)・グループで解く形
+  (physics_bindings.hlsli の SolveBodyInGroup・FindPrevious・BuildSlot)に未初期化の読み・処理の順に依る書き方(04 の R1〜R8)は見当たらなかった
+  (全部のシミュのシェーダーを読んだわけではない)。
+- 記録の互換: debug(-O3)の記録を release が、release の記録を debug(-O3)が再生して一致。-Od で記録した古い window_hot_reload.bcreplay は
+  -O3 のどちらで再生しても刻み 4 から食い違う(記録した時にもう壊れていたと見る)。
+- 窓のテスト(debug・-O3): window_hot_reload_play と window_replay_peek を `ctest --repeat until-fail:4` で続けて 4 回ずつ通過。
+- 打ち切りの条件(残りの研究をまた開く時): release で覗き窓つきの再生が食い違ったら、または局所メモリの大きいシミュのシェーダーを足した後に debug で
+  食い違いが戻ったら、Nsight で局所メモリの大きさを見て、その関数を T-0098 の形(バッファの上で読み書き)に直す。1 時間で絞れなければ司令塔に聞く。
+
 ## 作業ログ
 - 2026-10-10(作業役・本体): 切り分け 1 回目。覗き窓の刻みの PSO を設定するだけで物理が壊れうる所まで絞った(上)。直したものは無い。
   一時の切り分けのコード(bin の peek_skip.txt のビットで段を飛ばす・詰め物)は戻した。かかった時間 約 1 時間 50 分(司令塔のジョブ待ちを除く)。
+- 2026-10-11(作業役・本体): debug でもシミュのシェーダーを -O3 で作る形(前の作業役の shaders/CMakeLists.txt の書きかけ)で 10/10 一致・
+  窓の再生のテスト 4 回ずつ通過 → ADR-0079 に回避を書いて閉じた。debug の gpu_multires は DEVICE_HUNG しなくなったが 1200 秒の上限に届いた(T-0263)。
+  かかった時間 約 40 分(ジョブ待ちを除く)。

@@ -187,6 +187,10 @@ namespace bicameral::sim {
         if (!m_box.Read(m_read))
             return std::unexpected("箱を読み戻せない");
 
+        // 物質の一覧が変わった刻みは、それまでの計器の記録を捨てる(記録の添字は前の表の物質 ID で、意味が変わるため)
+        if (boxRemap)
+            m_gauge.clear();
+
         RecordGauge(tick);
 
         // --- CPU リファレンス → 比べる ---

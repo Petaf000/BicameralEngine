@@ -16,6 +16,15 @@ file(GLOB_RECURSE BICAMERAL_SHADER_HEADERS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOU
 
 # Debug では最適化を切り、デバッグ情報を埋め込む(PIX でソースを見るため)。整数の結果は最適化で変わらない(04「未確認」、T-0013 で確かめる)
 set(BICAMERAL_DXC_CONFIG_FLAGS $<$<CONFIG:Debug>:-Od$<SEMICOLON>-Zi$<SEMICOLON>-Qembed_debug>)
+# ただしシミュのシェーダーは Debug でも最適化する(-O3。ADR-0079・T-0239): -Od では局所の配列(6×6 の行列など)がシェーダーの局所メモリに
+# 残り、別の重いパイプライン(-Od の刻み)を同じキューで設定すると、後ろの物理の結果が起動ごとに CPU とずれた。PIX で 1 行ずつ追う時だけ
+# BICAMERAL_SIM_SHADER_OD=ON で -Od に戻す(そのビルドの窓の再生・覗き窓は食い違うことがある)
+option(BICAMERAL_SIM_SHADER_OD "Debug のシミュのシェーダーを -Od で作る(PIX で追う時だけ。T-0239)" OFF)
+if(BICAMERAL_SIM_SHADER_OD)
+  set(BICAMERAL_DXC_SIM_CONFIG_FLAGS ${BICAMERAL_DXC_CONFIG_FLAGS})
+else()
+  set(BICAMERAL_DXC_SIM_CONFIG_FLAGS $<$<CONFIG:Debug>:-O3$<SEMICOLON>-Zi$<SEMICOLON>-Qembed_debug>)
+endif()
 # Debug のシミュのシェーダーだけ、デバッグのリング(common/debug_ring.hlsli、T-0003)の DEBUG_PRINT・DEBUG_ASSERT・FX_ASSERT を有効にする。
 # 計測(bench)は付けない(費用を測るのにデバッグの書き込みが混ざらないように)
 set(BICAMERAL_DXC_SIM_DEBUG_FLAGS $<$<CONFIG:Debug>:-DBICAMERAL_GPU_DEBUG=1>)
@@ -54,8 +63,10 @@ function(bicameral_add_shader source)
   # シミュのシェーダーだけ、コンパイルの直後に DXIL の浮動小数点を検査する(違反なら .cso を消して失敗)
   set(checkCommand "")
   set(kindFlags "")
+  set(configFlags ${BICAMERAL_DXC_CONFIG_FLAGS})
   if(kind STREQUAL "sim")
     set(kindFlags ${BICAMERAL_DXC_SIM_DEBUG_FLAGS})
+    set(configFlags ${BICAMERAL_DXC_SIM_CONFIG_FLAGS})
     set(checkCommand COMMAND ${Python3_EXECUTABLE} ${BICAMERAL_FLOAT_CHECK_DIR}/dxil_float_check.py
                              ${asm} --source ${source} --remove ${cso})
   endif()
@@ -63,7 +74,7 @@ function(bicameral_add_shader source)
   add_custom_command(
     OUTPUT ${cso} ${asm}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${BICAMERAL_SHADER_OUT}/${kind} ${BICAMERAL_SHADER_ASM}/${kind}
-    COMMAND ${DIRECTX_DXC_TOOL} -HV 2021 -T ${arg_PROFILE} ${entryFlags} -WX ${BICAMERAL_DXC_CONFIG_FLAGS} ${kindFlags}
+    COMMAND ${DIRECTX_DXC_TOOL} -HV 2021 -T ${arg_PROFILE} ${entryFlags} -WX ${configFlags} ${kindFlags}
             ${defineFlags} ${arg_FLAGS} -I ${CMAKE_CURRENT_SOURCE_DIR} -Fo ${cso} -Fc ${asm} ${input}
     ${checkCommand}
     DEPENDS ${input} ${BICAMERAL_SHADER_HEADERS} ${BICAMERAL_FLOAT_CHECK_DIR}/dxil_float_check.py
