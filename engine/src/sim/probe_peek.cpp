@@ -151,11 +151,15 @@ namespace bicameral::sim {
                                       PEEK_LEVEL_COUNT * MR_BLOCK_CELLS / PEEK_GROUP_THREADS, extractConstants);
     }
 
-    // 世界が抽出した境界より前に替えた表を当てる(いちばん新しいものだけが残る)。前の表のバッファは、それを読んだ前のリストが
-    // 終わるまで持つ(このリストの keepAlive。キューは順に終わる)
+    // 世界が抽出した境界までに替えた表を当てる(いちばん新しいものだけが残る)。前の表のバッファは、それを読んだ前のリストが
+    // 終わるまで持つ(このリストの keepAlive。キューは順に終わる)。
+    // 刻み s の差し替えは s の適用の単位を記録するフレームにだけ積まれ、GPU の世界はその単位の前に 2 世代のセルを新しい表の ID に
+    // 付け替える。フレームが刻み s の途中で終わると抽出の境界は S(s) だが、その世代はもう新しい ID なので、s == 抽出の刻みでも替える
+    // (前は s < 刻み だけで、物質の一覧が変わる差し替えの窓で、新しい ID の写しを前の表で読んでいた。T-0254)。
+    // CPU リファレンスは刻みの境界だけで抽出し、S(s) はまだ付け替える前なので s < 刻み のまま
     void ProbePeek::ApplyDueTables(const ProbeExtractContext& context) {
         rng::stable_sort(m_pendingTables, {}, &PendingTable::tick);
-        while (!m_pendingTables.empty() && m_pendingTables.front().tick < context.tick) {
+        while (!m_pendingTables.empty() && m_pendingTables.front().tick <= context.tick) {
             const PendingTable& pending = m_pendingTables.front();
             auto retired = m_nest.ReplaceTable(pending.table);
             if (retired && context.keepAlive != nullptr)
