@@ -35,6 +35,8 @@
 - 2026-10-10(作業役 wt2): 付け替えの規則を ADR-0065 に決め、species_remap.{h,cpp}・common/species_remap.hlsli・ProbeReference の付け替え・
   SpeciesChangePolicy・テスト reaction_species_remap を足した。GPU の世界(ルート署名に t5・RemapSpecies の段・抽出の物質の ID)と
   gpu_probe_sim_test の物質を足す・消す差し替えも入れた。覗き窓・実験室・エディタで当てる所は T-0242、通常の起動の監視は T-0243 に分けた。
+  テスト: debug で reaction_species_remap・reaction_hot_reload・reaction_package_scene・float_check_* 8 本と gpu_probe_sim(約 400 秒)が通過。
+  release で警告なし・1 つ目の束 + gpu_probe_(sim|peek|fire|rewind)・window_hot_reload_*・window_lab の 57 本が通過(約 14 分)。WARP の版は流していない。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - `sim::BuildSpeciesRemap` / `sim::RemapReactionCell`(engine/src/sim/species_remap.*。ライブラリ bicameral_reaction)・本体は common/species_remap.hlsli の
