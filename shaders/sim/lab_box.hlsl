@@ -22,6 +22,12 @@ RWStructuredBuffer<uint32_t> g_labCommands : register(u4);  // LabCommand × 数
         for (uint32_t word = 0; word < LAB_COMMAND_WORDS; ++word)
             command.words[word] = g_labCommands[(i * LAB_COMMAND_WORDS) + word];
 
+        // --- 表を替えた印: セルは変えず、箱をつつくだけ(sim/lab_box.cpp の ApplyLabCommands と同じ。T-0218)---
+        if (LabCommandMarksTable(command)) {
+            applied = true;
+            continue;
+        }
+
         const uint32_t cell = LabCommandCell(command, g_external2);
         if (cell == LAB_NO_CELL)
             continue;

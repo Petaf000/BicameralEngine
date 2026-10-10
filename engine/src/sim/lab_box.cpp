@@ -31,8 +31,10 @@ namespace bicameral::sim {
 
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---
         constexpr std::array<char, 4> RECORDING_MAGIC = {'B', 'L', 'A', 'B'};
-        constexpr uint32_t RECORDING_VERSION = 2;           // 2: 表の版を足した(T-0194)
-        constexpr uint32_t RECORDING_VERSION_NO_TABLE = 1;  // 読める古い版(表の版が無い)
+        // 3: コマンドに表を替えた印(LAB_COMMAND_TYPE_TABLE)が入りうる(T-0218。形は 2 と同じ。古い読み手が印を黙って飛ばさないように上げた)
+        constexpr uint32_t RECORDING_VERSION = 3;
+        constexpr uint32_t RECORDING_VERSION_ONE_TABLE = 2;  // 読める古い版(表の版を足した。T-0194)
+        constexpr uint32_t RECORDING_VERSION_NO_TABLE = 1;   // 読める古い版(表の版が無い)
 
         void SetPayload(Command& command, uint32_t word, uint32_t value) {
             command.payload[word] = value;
@@ -108,6 +110,28 @@ namespace bicameral::sim {
     Command MakeLabTemperatureCommand(uint64_t targetTick, uint32_t sequence, LabCellPosition cell,
                                       uint32_t temperatureMilliKelvin) {
         return MakeLabCommand(targetTick, sequence, lab::LAB_COMMAND_TYPE_TEMPERATURE, cell, temperatureMilliKelvin);
+    }
+
+    Command MakeLabTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t tableVersion) {
+        Command command;
+        command.targetTick = targetTick;
+        command.sequence = sequence;
+        command.type = static_cast<uint16_t>(lab::LAB_COMMAND_TYPE_TABLE);
+        SetPayload(command, lab::LAB_PAYLOAD_TABLE_VERSION, static_cast<uint32_t>(tableVersion));
+        SetPayload(command, lab::LAB_PAYLOAD_TABLE_VERSION + 1, static_cast<uint32_t>(tableVersion >> 32));
+        command.size = static_cast<uint16_t>(sizeof(uint32_t) * 2);
+
+        return command;
+    }
+
+    std::optional<uint64_t> LabTableVersionOf(const Command& command) {
+        if (command.type != lab::LAB_COMMAND_TYPE_TABLE)
+            return std::nullopt;
+
+        const uint64_t low = command.payload[lab::LAB_PAYLOAD_TABLE_VERSION];
+        const uint64_t high = command.payload[lab::LAB_PAYLOAD_TABLE_VERSION + 1];
+
+        return low | (high << 32);
     }
 
     lab::LabCommand ToLabCommand(const Command& command) {
@@ -190,6 +214,13 @@ namespace bicameral::sim {
         uint32_t applied = 0;
         for (const Command& command : commands) {
             const lab::LabCommand words = ToLabCommand(command);
+
+            // --- 表を替えた印: セルは変えず、箱をつつくだけ(lab_box.hlsl と同じ。表は呼ぶ側が先に替えている。T-0218)---
+            if (lab::LabCommandMarksTable(words)) {
+                applied += 1;
+                continue;
+            }
+
             const uint32_t cell = lab::LabCommandCell(words, speciesCount);
             if (cell == lab::LAB_NO_CELL)
                 continue;
@@ -280,13 +311,17 @@ namespace bicameral::sim {
         if (!Take(bytes, magic) || magic != RECORDING_MAGIC)
             return std::unexpected("実験の記録ではない");
 
-        if (!Take(bytes, version) || (version != RECORDING_VERSION && version != RECORDING_VERSION_NO_TABLE))
+        const auto knownVersion = [](uint32_t value) {
+            return value == RECORDING_VERSION || value == RECORDING_VERSION_ONE_TABLE ||
+                   value == RECORDING_VERSION_NO_TABLE;
+        };
+        if (!Take(bytes, version) || !knownVersion(version))
             return std::unexpected(std::format("記録の版 {} は読めない", version));
 
         if (!Take(bytes, seed) || seed != LAB_WORLD_SEED)
             return std::unexpected("記録の見出しが壊れている");
 
-        if (version == RECORDING_VERSION && !Take(bytes, recording.tableVersion))
+        if (version != RECORDING_VERSION_NO_TABLE && !Take(bytes, recording.tableVersion))
             return std::unexpected("記録の見出しが壊れている");
 
         if (!Take(bytes, recording.tickCount) || !Take(bytes, commandCount) || !Take(bytes, hashCount))

@@ -1,9 +1,15 @@
 // gpu_lab_box_test.cpp — 実験室(sim/lab_session。T-0142)を GPU で走らせる: 箱の真ん中に木を置き(刻み 0)、1 つに火を付けて
 // (刻み 3)200 刻み、毎刻み GPU と CPU リファレンスの状態の全部がビット一致すること。燃えたこと(GPU の箱でセルロースが減った)。
 // 記録(コマンドの列 + ハッシュの列)を読み書きして初めの箱から流し直すと、同じハッシュの列になること(記録・再生)。
-// 反応表を替える(T-0194): 同じ操作が新しい表で同じ刻みまで流れ直し、毎刻みビット一致・世界が変わる・記録は新しい表の版を持ち、
-// 古い表の記録の再生は断る・新しい記録は再生できる。
+// 反応表を刻みの途中で替える(T-0218・ADR-0055): 次の刻みから新しい表で続き、毎刻みビット一致・替える前の刻みは同じ・替えない時と違う・
+// 記録は刻み 0 の表の版と表の印を持ち、途中で替えた記録も古い表だけの記録も再生できる・持っていない表の記録は断る。
+// 同じ操作を初めの箱から最新の表で流し直す(RerunWithLatestTable。T-0194 の案 A)も毎刻みビット一致。
 // 引数は gpu_test_options.h。
+#include <algorithm>
+#include <format>
+#include <span>
+#include <vector>
+
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/device.h"
@@ -20,6 +26,8 @@ namespace {
     constexpr uint32_t IGNITE_MILLIKELVIN = 1500000;
     constexpr uint64_t FIRST_TABLE_VERSION = 0x1111;  // 試験の中だけの版(TableVersion ではない。違えばよい)
     constexpr uint64_t SWAPPED_TABLE_VERSION = 0x2222;
+    constexpr uint64_t UNKNOWN_TABLE_VERSION = 0x3333;
+    constexpr uint32_t SWAP_RUN_TICKS = 100;  // 表を替えてから刻む数
 
     // 木の燃焼を 100 倍速くした表(物質の一覧は同じ。gpu_probe_sim_test の差し替えと同じ形)
     std::expected<sim::BakedReactionTable, std::string> MakeSwappedTable() {
@@ -109,32 +117,105 @@ namespace {
         return {};
     }
 
-    std::expected<void, std::string> RunTableChange(sim::LabSession& session) {
-        const auto swapped = MakeSwappedTable();
-        if (!swapped)
-            return std::unexpected(swapped.error());
+    // 刻み 0〜RUN_TICKS − 1 を表 FIRST で、コマンドの列(表の印を除く)を CPU だけで流した最後のハッシュ(替えない時の比べる相手)
+    uint64_t CpuHashWithoutSwap(const sim::BakedReactionTable& table, const std::vector<sim::Command>& commands,
+                                uint64_t tickCount) {
+        sim::MultiresNest nest = sim::MakeLabBoxNest(table);
+        for (uint64_t tick = 0; tick < tickCount; ++tick) {
+            std::vector<sim::Command> now;
+            for (const sim::Command& command : commands) {
+                if (command.targetTick == tick && !sim::LabTableVersionOf(command))
+                    now.push_back(command);
+            }
 
+            sim::StepLabBox(nest, table, tick, now);
+        }
+
+        return sim::HashWholeNest(nest);
+    }
+
+    // 刻みの途中で表を替える(T-0218・ADR-0055): 次の刻みから新しい表で続き、毎刻みビット一致・替える前の刻みは同じ・記録の印・再生
+    std::expected<void, std::string> RunMidTableChange(sim::LabSession& session, const sim::BakedReactionTable& first,
+                                                       const sim::BakedReactionTable& swapped) {
         const sim::LabRecording before = session.Recording();
-        if (auto changed = session.ChangeTable(*swapped, SWAPPED_TABLE_VERSION); !changed)
+        if (auto changed = session.ChangeTable(swapped, SWAPPED_TABLE_VERSION); !changed)
             return changed;
+
+        if (!session.TableChangePending() || session.TableVersion() != FIRST_TABLE_VERSION)
+            return std::unexpected("表を替えた印が置かれていない(か、刻む前に替わった)");
+
+        if (auto stepped = session.Step(SWAP_RUN_TICKS); !stepped)
+            return stepped;
 
         if (auto checked = CheckNoMismatch(session); !checked)
             return checked;
 
         const sim::LabRecording after = session.Recording();
+        const uint64_t unswapped = CpuHashWithoutSwap(first, after.commands, after.tickCount);
         Log(Channel::Gpu, Level::Info,
-            "gpu_lab_box_test: 表を替えて {} 刻み流し直した: 最後のハッシュ {:016x} → {:016x}", after.tickCount,
-            before.hashes.back(), after.hashes.back());
-        if (after.tickCount != before.tickCount || after.commands != before.commands)
-            return std::unexpected("流し直した刻みか操作が元と違う");
+            "gpu_lab_box_test: 刻み {} で表を替えて {} 刻み: 最後のハッシュ {:016x}(替えない時 {:016x})",
+            before.tickCount, SWAP_RUN_TICKS, after.hashes.back(), unswapped);
+        const bool samePrefix = std::ranges::equal(std::span(after.hashes).first(before.hashes.size()), before.hashes);
+        const auto marks = std::ranges::count_if(after.commands, [&](const sim::Command& command) {
+            return sim::LabTableVersionOf(command) == SWAPPED_TABLE_VERSION && command.targetTick == before.tickCount;
+        });
+        if (!samePrefix || marks != 1 || after.tableVersion != FIRST_TABLE_VERSION ||
+            session.TableVersion() != SWAPPED_TABLE_VERSION)
+            return std::unexpected("替える前の刻みが変わった・印が無い・記録の刻み 0 の表の版が違う");
 
-        if (after.hashes.back() == before.hashes.back() || after.tableVersion != SWAPPED_TABLE_VERSION)
-            return std::unexpected("表を替えても箱が変わらない(か、記録の表の版が新しくない)");
+        if (after.hashes.back() == unswapped)
+            return std::unexpected("表を替えても箱が変わらない");
 
-        if (session.Replay(before).has_value())
-            return std::unexpected("古い表の記録を新しい表で再生できてしまった");
+        // --- 途中で表を替えた記録をファイルの形を通して再生(両方の表をこの実験室が持っている)---
+        if (auto replayed = RunReplay(session); !replayed)
+            return replayed;
 
-        return RunReplay(session);
+        // --- 替える前の記録(古い表だけ)も再生でき、流し終えると最新の表に戻す印が置かれる ---
+        if (auto replayed = session.Replay(before); !replayed)
+            return replayed;
+
+        if (session.Recording().hashes != before.hashes || session.ReplayDivergence() || !session.TableChangePending())
+            return std::unexpected("古い表の記録の再生が元と違う(か、最新の表に戻す印が無い)");
+
+        // --- 持っていない表の記録は流さずに断る ---
+        sim::LabRecording unknown = before;
+        unknown.tableVersion = UNKNOWN_TABLE_VERSION;
+        if (session.Replay(unknown).has_value())
+            return std::unexpected("持っていない表の記録を再生できてしまった");
+
+        return {};
+    }
+
+    // 案 A(T-0194。RerunWithLatestTable): 同じ操作を初めの箱から最新の表で流し直す
+    std::expected<void, std::string> RunRerun(sim::LabSession& session) {
+        const sim::LabRecording
+            before = session.Recording();  // 古い表だけの記録を再生した後(最新の表に戻す印が待っている)
+        if (auto rerun = session.RerunWithLatestTable(); !rerun)
+            return rerun;
+
+        if (auto checked = CheckNoMismatch(session); !checked)
+            return checked;
+
+        const sim::LabRecording after = session.Recording();
+        if (after.tickCount != before.tickCount || after.commands != before.commands ||
+            after.tableVersion != SWAPPED_TABLE_VERSION || after.hashes.back() == before.hashes.back())
+            return std::unexpected("最新の表で流し直した刻み・操作・表の版が違う(か、箱が変わらない)");
+
+        return {};
+    }
+
+    std::expected<void, std::string> RunTableChange(sim::LabSession& session, const sim::BakedReactionTable& first) {
+        const auto swapped = MakeSwappedTable();
+        if (!swapped)
+            return std::unexpected(swapped.error());
+
+        if (auto result = RunMidTableChange(session, first, *swapped); !result)
+            return std::unexpected(std::format("途中で替える: {}", result.error()));
+
+        if (auto result = RunRerun(session); !result)
+            return std::unexpected(std::format("初めから流し直す: {}", result.error()));
+
+        return {};
     }
 
     int Run(std::span<char*> arguments) {
@@ -167,7 +248,7 @@ namespace {
             return 1;
         }
 
-        if (auto result = RunTableChange(*session); !result) {
+        if (auto result = RunTableChange(*session, *table); !result) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(表の差し替え: {})", result.error());
             return 1;
         }
@@ -177,7 +258,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
-            "刻みビット一致・記録から流し直しても同じ・表を替えても一致)",
+            "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致)",
             RUN_TICKS);
 
         return 0;

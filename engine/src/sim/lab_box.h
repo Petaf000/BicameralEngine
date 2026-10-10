@@ -53,6 +53,13 @@ namespace bicameral::sim {
     [[nodiscard]] Command MakeLabTemperatureCommand(uint64_t targetTick, uint32_t sequence, LabCellPosition cell,
                                                     uint32_t temperatureMilliKelvin);
 
+    // 反応表を替えた印(T-0218・ADR-0055)。刻み targetTick のコマンドを当てる前に、その刻みから表を tableVersion に替える。
+    // 印そのものはセルを変えず、箱をつつく(待ちの予定を新しい表で求め直す)。表の中身は記録に入らない(版だけ。中身は T-0217)
+    [[nodiscard]] Command MakeLabTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t tableVersion);
+
+    // 表を替えた印なら、その表の版
+    [[nodiscard]] std::optional<uint64_t> LabTableVersionOf(const Command& command);
+
     // 64 バイトをそのまま uint32 × 16 で読む(GPU に写す形と同じ)
     [[nodiscard]] lab::LabCommand ToLabCommand(const Command& command);
 
@@ -77,7 +84,7 @@ namespace bicameral::sim {
     [[nodiscard]] reaction::RxCell LabBoxCell(const MultiresNest& nest, uint32_t index);
 
     // CPU リファレンス: 1 刻みのコマンド(並びは (targetTick, sequence) の昇順)を shaders/sim/lab_box.hlsl と同じ順で当てる。
-    // 当てた数を返す(当てられないコマンドは飛ばす)
+    // 当てた数を返す(当てられないコマンドは飛ばす。表を替えた印は箱をつつくので数に入る。表そのものは呼ぶ側が先に替える)
     uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands);
 
     // CPU リファレンスの 1 刻み: コマンドを当てる → StepNest(LAB_STEP_OPTIONS)
@@ -101,9 +108,10 @@ namespace bicameral::sim {
 
     // --- 実験の記録(コマンドの列 + 刻みごとの状態のハッシュ)---
 
-    // 版 2(T-0194)から、実験に使った反応表の版(script::TableVersion)を持つ。0 = 分からない(版 1 の記録・試験の表)
+    // 版 2(T-0194)から、実験に使った反応表の版(script::TableVersion)を持つ。0 = 分からない(版 1 の記録・試験の表)。
+    // 版 3(T-0218)から、刻みの途中で表を替えた所はコマンドの列の印(MakeLabTableCommand)で持つ
     struct LabRecording {
-        uint64_t tableVersion = 0;
+        uint64_t tableVersion = 0;      // 刻み 0 の表の版
         uint64_t tickCount = 0;         // 流した刻みの数(刻み 0 〜 tickCount − 1)
         std::vector<Command> commands;  // (targetTick, sequence) の昇順
         std::vector<uint64_t> hashes;   // 刻み t を終えた状態の HashWholeNest(CPU)。tickCount 個

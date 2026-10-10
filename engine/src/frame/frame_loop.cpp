@@ -1201,7 +1201,7 @@ namespace bicameral::frame {
         void FrameLoop::BuildEditor() {
             editor::TimeRequest request;
             if (m_editor) {
-                // 実験室は世界と同じ表(差し替えたら箱も替える。T-0194)
+                // 実験室は世界と同じ表(差し替えたら次の刻みから箱も替える。T-0194・T-0218)
                 if (const auto loaded = m_tableReload.Find(m_tableReload.AppliedVersion()); loaded != nullptr) {
                     m_editor->Lab().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
                                              loaded->tableVersion);

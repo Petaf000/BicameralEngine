@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-09 / チケット: T-0176 成分の二段を GPU に — 一部完了(全部を刻む Compute〔伝導なし〕まで。残りは T-0211・T-0212)
+最終更新: 2026-10-10 / チケット: T-0218 実験室で刻みの途中に表を替える — 完了
 
 ## 状態(3 行以内)
-- GPU の多重解像度の世界も `GpuMultiresOptions::wideCells` で「インライン 8 + 頁ごとの溢れ(u6 の後ろ・2 面を入れ替える)」を持ち、全部を刻む Compute(伝導なし)が 9 種目の生成物を待たせずに作る(CPU の EnableWideCells の世界と HW・WARP で毎刻みビット一致。ADR-0052)。既定の世界のシェーダー・VRAM は今のまま。
-- 溢れを使う GPU の世界は伝導・要求の処理・活性のグラフ・覗き窓をまだ使えない(T-0211・T-0212)。頁の溢れ 1024 成分・1 セル 24 種を超えると待たせる(当座)。
-- t-0179・t-0170 を合わせた main は release の 1 つ目の束 47 本が通過(直したものなし)。2・3 つ目の束 64 本は変更の後のビルドで流して通過(合わせた状態も壊れていない)。
+- 実験室はホットリロードで表が替わったら、次の刻みから新しい表で続ける(表を替えた印のコマンド LAB_COMMAND_TYPE_TABLE が刻みの始めに GPU と CPU の表を替え、箱をつつく。BLAB 版 3。ADR-0055)。GPU と CPU は毎刻みビット一致。
+- 途中で表を替えた記録は、同じ起動の中なら(実験室が版ごとに表を持つので)再生できる。別の起動で再生するには表の中身を記録に残す T-0217 が要る。初めから流し直す(T-0194 の案 A)はボタン「最新の表で初めから」。
+- t-0147・t-0194・t-0185 を合わせた main(3da81a5 / e35c72d)は release のビルドで警告なし・1 つ目の束 47 本と 3 つのマージが触った 25 本が通過(直したものなし)。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。T-0154・T-0132 済み。T-0178・T-0179 済み。次は T-0147・T-0137)**: T-0179 で段を作る回と V サイクルを前の刻みから選ぶ(GpuImplicitLevels::RoundsFrom・GpuImplicitRecordShape::dispatchCycles・g_wholeTail)。HW と WARP は同じ積み方(T-0147 で WARP の不具合を回避。**1 グループが項目のループで本体を回すシェーダーでは、内側のループを return で抜けない**)。V の回数が前の刻みの 1.5 倍(+2)を超えて急に増えた刻みは超えた回が 1 グループで遅い(たくさんの要求で 1 回約 5 ms。値は同じ)。 T-0178 で系に入るブロックを枠の順に選び、入らないブロックはその刻みだけ陽解法(MultiresStepOptions::implicitLimits・implicitOverflow。仮で A)。GPU の EnableImplicitConduction は上限の全部の欄が要る(0 なら失敗)。伝導の作業場の印の空き語はもう無い。 T-0132 で伝導の段から陰解法を呼ぶ(MultiresStepOptions::implicitConduction が GPU でも効く。AddConductDelta は multires_bindings.hlsli・stepFlags のビット 3・5〜7・implicitMaxGap は 1〜8)。系が上限(GpuMultiresImplicitLimits)を超えると CPU と合わない(T-0178)。 T-0154 で記録の形を前の刻みの GPU の数から選ぶ(GpuImplicit::ShapeFrom・IM_PLAN_WANTED_TAIL。T-0132 でも使う)。 T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
@@ -18,13 +18,19 @@
   release の WARP でも C4189(implicit_conduction.cpp の 'added'。FX_ASSERT の中だけで使う)が出る(wt2 の範囲なので触っていない)。
 - **Luau と反応表(T-0020・T-0138・T-0021〔一部〕・T-0157・T-0140・T-0139・T-0170・T-0193 済み → T-0169・T-0194・T-0195)**: **再生ファイルの形式は版 2**(表ごとに版・パッケージの一覧・改造の印・表の中身〔TableBytes〕。再生は中身だけから RebuildReactionTable。ADR-0050)。 T-0139 でホットリロード(`--editor` だけ・PROBE_COMMAND_TYPE_TABLE・表を差し替えると保存点は全部捨てる・再生ファイルに表の中身があるので、パッケージが無くても再生できる〔T-0193〕。止まるのは版 1 の古い記録だけ。ADR-0047)。 T-0140 で型検査(script::LuauTypeChecker・data/types/bicameral.d.luau)。**読み手(reaction_package.cpp・luau_package.cpp)の欄を変えたら bicameral.d.luau も変える**(変えないと本体のパッケージが落ちて起動が止まる)。 T-0157 で script::LoadReactionTable(engine/src/script/reaction_table_loader.*)を frame_loop が窓の前に呼ぶ。試験の表は data/packages/combustion_test(ビルドで bin/data に写る。`--packages <dir>`)。読めない・検査で落ちたら終了コード 1。gpu_* と multires_* のテストは今も C++ の表(中身はビットで同じ。T-0169)。ADR-0033。 T-0021 で engine/src/script/reaction_package.*(Luau の elements・species・reactions を整数だけで読む。A は 10 進の文字列でも誤差なし)・ベイクの検査・名前のバイト順の ID(ADR-0032)。試験の表(今は data/packages/combustion_test)は C++ の表と 2 か所にある(片方を変えたら両方。テストが食い違いを落とす)。 パッケージ(engine/src/script/luau_package.*・script_value.*。ADR-0031・13 §2.2・15 §4。合わせ方は仮で C〔QUESTIONS Q8〕)。 殻(CPU だけ。engine/src/script/luau_sandbox.*)。ADR-0030。vcpkg.json に luau、CMakePresets.json の環境に XDG_CONFIG_HOME・GIT_CONFIG_GLOBAL。
   Luau のヘッダは pch.h に入れていない。ログは Channel::Tool。次: T-0138 → T-0021 → T-0139。
-- **エディタの殻(T-0023・T-0143・T-0142・T-0194・T-0195 済み → T-0173・T-0217・T-0218)**: T-0194 で覗き窓・実験室もホットリロードの表に追従(ProbeExtractContext に keepAlive・実験室はもう C++ の表を使わない・BLAB 版 2。ADR-0054)。T-0195 の `--auto-reload` が書き換える行は combustion_test/reactions.luau の `rate = { a = "2e10"`(変えたら auto_reload.cpp の RATE_BEFORE も)。 T-0142 で実験室(8³ の閉じた箱・FILL/TEMPERATURE のコマンド〔shaders/common/lab_box.hlsli〕・LabSession が GPU と CPU を刻みごとに比べる・BLAB の記録・`--auto-lab`。ADR-0037)。 T-0143 で保存点(sim/probe_save_point.cpp・ADR-0036。GPU → GPU のコピー)+ 巻き戻し(`--save-points`・`--save-interval`・`--auto-rewind`・ReplayPlayer::Rewind)と「Work Graphs と性能」のパネル。記録中・--check-physics・トレース中は巻き戻せない。 `bicameral --editor`(パネル「時間」「状態」。--auto-time は人がいない確認用)。ImGui は editor_overlay.cpp だけ(pch.h に入れない)。
+- **エディタの殻(T-0023・T-0143・T-0142・T-0194・T-0195・T-0218 済み → T-0173・T-0217・T-0219〜)**: T-0218 で実験室は刻みの途中に表を替える(ChangeTable は次の刻みに印を置くだけ・印は 1 刻みに 1 つ・置く操作は 1 刻みに 63 個まで・Reset は最新の表・ADR-0055)。 T-0194 で覗き窓・実験室もホットリロードの表に追従(ProbeExtractContext に keepAlive・実験室はもう C++ の表を使わない・BLAB 版 2。ADR-0054)。T-0195 の `--auto-reload` が書き換える行は combustion_test/reactions.luau の `rate = { a = "2e10"`(変えたら auto_reload.cpp の RATE_BEFORE も)。 T-0142 で実験室(8³ の閉じた箱・FILL/TEMPERATURE のコマンド〔shaders/common/lab_box.hlsli〕・LabSession が GPU と CPU を刻みごとに比べる・BLAB の記録・`--auto-lab`。ADR-0037)。 T-0143 で保存点(sim/probe_save_point.cpp・ADR-0036。GPU → GPU のコピー)+ 巻き戻し(`--save-points`・`--save-interval`・`--auto-rewind`・ReplayPlayer::Rewind)と「Work Graphs と性能」のパネル。記録中・--check-physics・トレース中は巻き戻せない。 `bicameral --editor`(パネル「時間」「状態」。--auto-time は人がいない確認用)。ImGui は editor_overlay.cpp だけ(pch.h に入れない)。
   時間の操作は世界に入らない(ADR-0035)。4 つのランナーが同じ GPU を使っている間は debug 版の最初のフレームが 2〜4 分かかることがある。
 - **スクリーンショット(T-0025 済み)**: `--screenshot-tick t`(刻み t で世界を止めて写す)・`--auto-ignite`・tools/image_compare/image_compare.py(8/255 を超える画素が 0.1% 超で失敗)・基準 tests/images/*.png・置き換え方は 16 §5。画像のテストは debug で 1 本約 2 分。
 
 - **気体(T-0026 G1・T-0184 G2 済み → T-0185〔(a) 済み: 1 レベルの気体の GPU〔shaders/sim/gas_step.hlsl・shaders/common/gas_gpu.hlsli・engine/src/sim/gpu_gas.*・tests/gpu_gas_test.cpp〔--dump・--passes〕〕が CPU と毎刻みビット一致。**64bit の「0 で止める引き算」(a > b ? a - b : 0)を書かない**〔NVIDIA のドライバが誤って下ろす。符号付きの差 + if で〕〕・T-0208〜T-0210・T-0186)**: G2 で成分の MUSCL(既定 MC)と移す物質量の乱数の丸め(07 §2.2・ADR-0043 §6・§7)。1 セルの物質量は 2^31 µmol 未満(assert)。 1 レベルの CPU リファレンス engine/src/sim/gas_reference.*(ライブラリ bicameral_gas)・tests/gas_reference_test.cpp(debug 74 秒)。07 §2.1・ADR-0043(Proposed)。c̃ 30 m/s は仮(Q11)。05 のセルの形はまだ変えていない(G3)。tidy の新しいファイルの約 20 件は G2 の初めに直す。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-10、T-0218)**: 最初に main(e35c72d。コードは 3da81a5)を release でビルド(警告なし)し、release で 1 つ目の束
+  `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 47 本(約 5 分)と、
+  マージが触ったもの `-Filter "^(gpu_multires_implicit.*|gpu_probe_peek.*|gpu_lab.*|window_lab|window_hot_reload.*|window_replay.*|gpu_gas.*|reaction_hot_reload)$"` 25 本(約 47 分。
+  gpu_multires_implicit_conduction(_warp) が各 11〜12 分・_tree 6 分)が通過(直したものなし。ほかのランナーは idle)。
+  変更の後: release のビルドは警告なし・`-Filter "^(lab_box|gpu_lab_box|gpu_lab_box_warp|window_lab|float_check.*)$"` 9 本が通過。debug のビルド(全部)は警告なし・debug の `^(lab_box|gpu_lab_box|gpu_lab_box_warp|window_lab)$` 4 本が通過(gpu_lab_box 87 秒・window_lab 129 秒)。
+  tidy・ほかの GPU のテスト・計測はしていない(シェーダーは lab_box.hlsl だけ変えた)。archmap OK(146)。
 - **テスト(2026-10-09、T-0176)**: 最初に t-0179・t-0170 を合わせた main(変更前)を release・debug でビルド(警告なし)し、release で
   `-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction|multires|fixed|physics|float_check|luau|time_control|image|lab|gas)"` 47 本が通過(約 7 分。直したものなし)。
   変更の後: release・debug のビルドは警告なし。release の `-Filter "^gpu_multires(_warp)?$"` が通過(HW 132 s・WARP 37 s。足した RunLimitsStepWide: 上限の場面を溢れの世界で 12 刻み、
@@ -154,6 +160,10 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- 2026-10-10(T-0218・ADR-0055。方向は D-439、形は Claude): 実験室の途中の差し替えは「表を替えた印のコマンド」で、印のある刻みはコマンドを当てる前に
+  GPU と CPU の表を替え、印は箱をつつく(入れ子の表に依る状態は wakeTick だけなので RefreshTable の段は作らない)。BLAB 版 3(形は 2 と同じ)。
+  表の中身はメモリだけ(版ごと)・持たない版の記録は流す前に断る・再生の後は最新の表に戻す印・刻む前の替え直しは印 1 つ・版 0 には替えない。
+  ADR-0054 の流し直しは RerunWithLatestTable(ボタン)に残した。`--auto-lab` は火を付けた刻みに同じ中身の別の版(世界の版 ^ 定数)へ替えて通す。
 - 2026-10-10: ユーザーが判断待ち(QUESTIONS Q6〜Q29)と BACKLOG の未決定を全部決め、中身(C1〜C8)の大枠も決めた → DECISIONS D-437〜D-453。ADR-0043 は本物の音速に改める(T-0226)。新しいチケット T-0219〜T-0223・T-0225・T-0226(ROADMAP M2)。中身の詳細(魔素の設定など)は D-006 に従い公開リポジトリには書かず、claude.ai のプロジェクトの文書に置いた。
 - (Claude が決めた。T-0176・ADR-0052)GPU の溢れは「インライン 8 の核で先に刻み、溢れるセル(溢れを持つ・9 種目を待たせた)だけ上限なしの形 RxGpuWideCell で
   数える → セルの番号の順のプレフィックス和(スレッド 0)→ 刻み直して書く」。頁ごとに 2 面を持ち、今の面を読んでもう片方へ書き、全部書いてから入れ替える。

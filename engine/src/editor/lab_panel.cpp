@@ -22,6 +22,8 @@ namespace bicameral::editor {
         constexpr uint32_t AUTO_IGNITE_TICK = 3;
         constexpr uint32_t AUTO_TICKS = 60;
         constexpr uint32_t AUTO_IGNITE_MILLIKELVIN = 1500000;
+        constexpr uint64_t
+            AUTO_SWAP_VERSION_BITS = 0x5A5A'0000'0000'0001ULL;  // 同じ中身の表に付ける別の版(世界の版と違えばよい)
 
         int32_t TemperatureOf(const sim::BakedReactionTable& table, const reaction::RxCell& cell) {
             return reaction::RxComputeThermal(table.View(), cell).temperature;
@@ -56,13 +58,12 @@ namespace bicameral::editor {
         if (!m_session)
             return;
 
-        // --- 箱があれば、新しい表で同じ操作を流し直す ---
-        const uint64_t tick = m_session->NextTick();
+        // --- 箱があれば、次の刻みから新しい表で続ける(T-0218。初めから流し直すのはボタン「最新の表で初めから」)---
         Report(m_session->ChangeTable(*m_table, m_tableVersion));
-        m_materials = sim::MakeLabMaterials(m_session->Table());
+        m_materials = sim::MakeLabMaterials(*m_table);
         m_tableChanges += 1;
-        m_message = std::format("反応表が版 {:016x} に替わった。置いた操作を初めから新しい表で流し直した(刻み {} まで)",
-                                m_tableVersion, tick);
+        m_message = std::format("反応表が版 {:016x} に替わった。次の刻み {} から新しい表で続ける", m_tableVersion,
+                                m_session->NextTick());
         Log(Channel::Sim, Level::Info, "実験室: {}", m_message);
     }
 
@@ -143,6 +144,9 @@ namespace bicameral::editor {
                     static_cast<unsigned long long>(m_session->NextTick()), m_session->PendingCommands());
         ImGui::Text("反応表 版 %016llx(世界と同じ。替わった回数 %u)",
                     static_cast<unsigned long long>(m_session->TableVersion()), m_tableChanges);
+        if (m_session->TableChangePending())
+            ImGui::TextColored({1.0f, 0.85f, 0.3f, 1.0f}, "次の刻みから版 %016llx の表に替わる",
+                               static_cast<unsigned long long>(m_session->LatestTableVersion()));
         if (const auto& mismatch = m_session->Mismatch(); mismatch) {
             ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, "GPU と CPU が食い違った: %s", mismatch->what.c_str());
             if (mismatch->cell != lab::LAB_NO_CELL) {
@@ -204,6 +208,14 @@ namespace bicameral::editor {
             Report(m_session->Reset());
             m_error.clear();
             m_message.clear();
+        }
+
+        // 同じ操作を初めの箱から最新の表で(法則だけ替えて比べる。T-0194 の案 A)
+        ImGui::SameLine();
+        if (ImGui::Button("最新の表で初めから")) {
+            const uint64_t tick = m_session->NextTick();
+            Report(m_session->RerunWithLatestTable());
+            m_message = std::format("置いた操作を初めの箱から最新の表で刻み {} まで流し直した", tick);
         }
     }
 
@@ -340,8 +352,12 @@ namespace bicameral::editor {
             static_cast<void>(m_session->Place({.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)},
                                                wood->contents, 300000));
 
+        // --- 火を付けた刻みに、刻みの途中の表の差し替えも通す(同じ中身を別の版として。T-0218)---
         auto result = m_session->Step(AUTO_IGNITE_TICK);
         static_cast<void>(m_session->SetTemperature({.x = 3, .y = 3, .z = 3}, AUTO_IGNITE_MILLIKELVIN));
+        if (result)
+            result = m_session->ChangeTable(*m_table, m_tableVersion ^ AUTO_SWAP_VERSION_BITS);
+
         if (result)
             result = m_session->Step(AUTO_TICKS - AUTO_IGNITE_TICK);
 
@@ -357,9 +373,17 @@ namespace bicameral::editor {
             return;
         }
 
+        // --- 世界の表の版に戻す(次の刻みから。中身は同じ)---
+        if (auto restored = m_session->ChangeTable(*m_table, m_tableVersion); !restored) {
+            Log(Channel::Sim, Level::Error, "--auto-lab: 表の版を戻せない({})", restored.error());
+            return;
+        }
+
         m_autoFailed = false;
         m_cell = {3, 3, 3};
-        Log(Channel::Sim, Level::Info, "--auto-lab: {} 刻みで GPU と CPU が一致し、記録から再生しても同じ", AUTO_TICKS);
+        Log(Channel::Sim, Level::Info,
+            "--auto-lab: {} 刻みで GPU と CPU が一致し(刻み {} で表を替えた)、記録から再生しても同じ", AUTO_TICKS,
+            AUTO_IGNITE_TICK);
     }
 
 }  // namespace bicameral::editor

@@ -36,12 +36,16 @@ FX_CONST uint32_t LAB_PAYLOAD_BEGIN = 4;
 // 種類(仮の世界の PROBE_COMMAND_TYPE_* と重ならない番号)
 FX_CONST uint32_t LAB_COMMAND_TYPE_FILL = 0x4C01;         // セルの中身を物質(3 つまで)と温度で置き換える
 FX_CONST uint32_t LAB_COMMAND_TYPE_TEMPERATURE = 0x4C02;  // セルの成分はそのまま、温度を決める(熱を足す・引く)
+// 反応表を替えた印(T-0218・ADR-0055)。セルは変えない。CPU はこの刻みのコマンドを当てる前に表を替え、印は箱を「つつく」
+// (待ちの予定を新しい表で求め直す。ADR-0018 の「表を変えるものは『変わった』にしてから評価する」)。payload は表の版
+FX_CONST uint32_t LAB_COMMAND_TYPE_TABLE = 0x4C03;
 
 // payload の語(FILL と TEMPERATURE で共通の先頭 2 語)
 FX_CONST uint32_t LAB_PAYLOAD_CELL = 0;         // セルの番号(MrCellIndex(x, y, z))
 FX_CONST uint32_t LAB_PAYLOAD_TEMPERATURE = 1;  // 温度(mK)
 FX_CONST uint32_t LAB_PAYLOAD_COUNT = 2;        // FILL だけ: 物質の数(0〜LAB_MAX_FILL_SPECIES)
 FX_CONST uint32_t LAB_PAYLOAD_ENTRIES = 3;      // FILL だけ: [物質 ID][量の下位][量の上位](µmol。箱のレベルの単位)× 数
+FX_CONST uint32_t LAB_PAYLOAD_TABLE_VERSION = 0;  // TABLE だけ: 表の版の下位・上位(2 語)
 FX_CONST uint32_t LAB_MAX_FILL_SPECIES = 3;
 FX_CONST uint32_t LAB_NO_CELL = 0xFFFFFFFFu;
 
@@ -58,6 +62,11 @@ FX_FN uint32_t LabCommandType(LabCommand command) {
 
 FX_FN uint32_t LabPayload(LabCommand command, uint32_t word) {
     return command.words[LAB_PAYLOAD_BEGIN + word];
+}
+
+// 表を替えた印か(セルには当たらないが、箱をつつく)
+FX_FN bool LabCommandMarksTable(LabCommand command) {
+    return LabCommandType(command) == LAB_COMMAND_TYPE_TABLE;
 }
 
 // コマンドが当たるセルの番号。当てられないコマンド(知らない種類・箱の外・温度が範囲外・物質の誤り)なら LAB_NO_CELL。

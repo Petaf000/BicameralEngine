@@ -1,11 +1,14 @@
 // lab_box_test.cpp — 実験室の箱の CPU 側(sim/lab_box。T-0142)を CPU だけで確かめる:
 // コマンドで作るセルが MakeReactionCell と同じ・当てられないコマンドは飛ばす・木を置いて火を付けると燃える(セルロースが減り CO2 が出る)・
 // コマンドの無い刻みは元素とエネルギーの合計が変わらない・同じコマンドの列なら同じハッシュの列・記録の読み書き・最初に違ったセルを見つける。
+// 表を替えた印(T-0218): セルを変えずに箱をつつく・途中で表を替えると替えた刻みから先だけ変わる・印の入った記録(版 3)と版 2 の読み書き。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -68,6 +71,17 @@ namespace {
             MakeLabTemperatureCommand(IGNITE_TICK, sequence++, {.x = 3, .y = 3, .z = 3}, IGNITE_MILLIKELVIN));
 
         return commands;
+    }
+
+    // 木の燃焼を 100 倍速くした表(物質の一覧は同じ。gpu_lab_box_test と同じ形)
+    std::expected<BakedReactionTable, std::string> MakeFasterTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        for (RuleDefinition& rule : definition.rules) {
+            if (rule.name == "cellulose_combustion")
+                rule.rate.preExponentialMantissa *= 100;
+        }
+
+        return BakeReactionTable(definition);
     }
 
     std::span<const Command> CommandsOf(const std::vector<Command>& commands, uint64_t tick) {
@@ -190,6 +204,63 @@ namespace {
             std::printf("lab_box_test: 見つけた食い違い: %s\n", mismatch->what.c_str());
     }
 
+    // 表を替えた印(T-0218・ADR-0055)
+    void TestTableMark(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        constexpr uint64_t VERSION = 0x0123456789ABCDEFULL;
+        constexpr uint64_t SWAP_TICK = 100;
+        const auto faster = MakeFasterTable();
+        EXPECT(faster.has_value());
+        if (!faster)
+            return;
+
+        // --- 印は版を持ち、セルを変えずに箱をつつく ---
+        const Command mark = MakeLabTableCommand(SWAP_TICK, 9, VERSION);
+        EXPECT(LabTableVersionOf(mark) == VERSION);
+        EXPECT(!LabTableVersionOf(MakeLabTemperatureCommand(0, 0, {}, 300000)).has_value());
+
+        MultiresNest nest = MakeLabBoxNest(table);
+        const std::vector<reaction::RxCell> cellsBefore = nest.cells;
+        EXPECT(ApplyLabCommands(nest, table, std::span(&mark, 1)) == 1);
+        EXPECT(nest.blocks[LAB_BOX_SLOT].busyTick == multires::MR_BUSY_POKED);
+        const auto sameCell = [](const reaction::RxCell& a, const reaction::RxCell& b) {
+            return reaction::RxSameCell(a, b);
+        };
+        EXPECT(std::ranges::equal(nest.cells, cellsBefore, sameCell));
+
+        // --- 刻み SWAP_TICK の始めに速い表へ: その前は替えない時と同じ、後は違う ---
+        std::vector<Command> commands = MakeFireCommands(materials);
+        commands.push_back(mark);
+        MultiresNest plain = MakeLabBoxNest(table);
+        MultiresNest swapped = MakeLabBoxNest(table);
+        const std::vector<uint64_t> plainHashes = RunFire(table, MakeFireCommands(materials), plain);
+        std::vector<uint64_t> swappedHashes;
+        for (uint64_t tick = 0; tick < RUN_TICKS; ++tick) {
+            const BakedReactionTable& now = tick < SWAP_TICK ? table : *faster;
+            StepLabBox(swapped, now, tick, CommandsOf(commands, tick));
+            swappedHashes.push_back(HashWholeNest(swapped));
+        }
+
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        std::printf("lab_box_test: 刻み %llu で表を替えた: セルロース %llu µmol(替えない時 %llu)\n",
+                    static_cast<unsigned long long>(SWAP_TICK),
+                    static_cast<unsigned long long>(TotalOf(swapped, cellulose)),
+                    static_cast<unsigned long long>(TotalOf(plain, cellulose)));
+        EXPECT(std::ranges::equal(std::span(swappedHashes).first(SWAP_TICK), std::span(plainHashes).first(SWAP_TICK)));
+        EXPECT(swappedHashes[SWAP_TICK] != plainHashes[SWAP_TICK]);
+        EXPECT(TotalOf(swapped, cellulose) < TotalOf(plain, cellulose));
+
+        // --- 印の入った記録(版 3)と、版 2 の見出しの記録 ---
+        const LabRecording recording{
+            .tableVersion = 0x1111, .tickCount = RUN_TICKS, .commands = commands, .hashes = swappedHashes};
+        std::vector<std::byte> bytes = SerializeLabRecording(recording);
+        const auto parsed = ParseLabRecording(bytes);
+        EXPECT(parsed.has_value() && parsed->commands == commands && parsed->tableVersion == 0x1111);
+
+        bytes[4] = std::byte{2};
+        const auto parsedTwo = ParseLabRecording(bytes);
+        EXPECT(parsedTwo.has_value() && parsedTwo->tableVersion == 0x1111);
+    }
+
 }  // namespace
 
 int main() {
@@ -203,6 +274,7 @@ int main() {
     TestMakeCell(*table, materials);
     TestInvalidCommands(*table, materials);
     TestFire(*table, materials);
+    TestTableMark(*table, materials);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

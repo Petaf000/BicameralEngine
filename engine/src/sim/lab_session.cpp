@@ -2,6 +2,7 @@
 #include "sim/lab_session.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <format>
 
 namespace bicameral::sim {
@@ -22,6 +23,9 @@ namespace bicameral::sim {
 
         LabSession session(table, std::move(*queue), std::move(*ring), std::move(*box));
         session.m_tableVersion = tableVersion;
+        session.m_latestVersion = tableVersion;
+        session.m_initialVersion = tableVersion;
+        session.m_tables.emplace(tableVersion, table);
 
         return session;
     }
@@ -31,19 +35,31 @@ namespace bicameral::sim {
           m_queue(std::move(queue)),
           m_ring(std::move(ring)),
           m_box(std::move(box)),
-          m_cpu(MakeLabBoxNest(m_table)),
-          m_read(MakeLabBoxNest(m_table)) {}
+          m_initial(MakeLabBoxNest(m_table)),
+          m_cpu(m_initial),
+          m_read(m_initial) {}
 
     // --- 置く ---
 
+    // 置く操作は 1 刻みに LAB_MAX_COMMANDS_PER_TICK − 1 まで(1 つは表を替えた印のために空けておく)
     bool LabSession::Queue(const Command& command) {
-        if (m_pending.size() >= LAB_MAX_COMMANDS_PER_TICK)
+        const auto placed = std::ranges::count_if(m_pending, [](const Command& c) { return !LabTableVersionOf(c); });
+        if (static_cast<size_t>(placed) + 1 >= LAB_MAX_COMMANDS_PER_TICK)
             return false;
 
         m_pending.push_back(command);
         m_sequence += 1;
 
         return true;
+    }
+
+    void LabSession::DropPendingTableChange() {
+        std::erase_if(m_pending, [](const Command& command) { return LabTableVersionOf(command).has_value(); });
+    }
+
+    bool LabSession::TableChangePending() const {
+        return std::ranges::any_of(m_pending,
+                                   [](const Command& command) { return LabTableVersionOf(command).has_value(); });
     }
 
     bool LabSession::Place(LabCellPosition cell, std::span<const SpeciesAmount> contents,
@@ -72,15 +88,45 @@ namespace bicameral::sim {
         }
 
         std::ranges::sort(commands, CommandPrecedes);
-        if (commands.size() > LAB_MAX_COMMANDS_PER_TICK)
-            commands.resize(LAB_MAX_COMMANDS_PER_TICK);
+
+        // --- 多すぎたら後ろの置く操作から捨てる(表を替えた印は捨てない。GPU の写しの大きさ)---
+        for (size_t i = commands.size(); commands.size() > LAB_MAX_COMMANDS_PER_TICK && i > 0; --i) {
+            if (!LabTableVersionOf(commands[i - 1]))
+                commands.erase(commands.begin() + static_cast<std::ptrdiff_t>(i - 1));
+        }
 
         return commands;
+    }
+
+    // 箱の表を版 tableVersion の表に替える(GPU と CPU の両方。箱のキューは刻みごとに待っていて空なので、前の表のバッファはすぐ捨ててよい)
+    std::expected<void, std::string> LabSession::SwitchTable(uint64_t tableVersion) {
+        if (tableVersion == m_tableVersion)
+            return {};
+
+        const auto found = m_tables.find(tableVersion);
+        if (found == m_tables.end())
+            return std::unexpected(std::format("反応表の版 {:016x} をこの実験室は持っていない", tableVersion));
+
+        if (auto retired = m_box.ReplaceTable(found->second); !retired)
+            return std::unexpected(retired.error());
+
+        m_table = found->second;
+        m_tableVersion = tableVersion;
+
+        return {};
     }
 
     std::expected<void, std::string> LabSession::StepOne() {
         const uint64_t tick = m_tick;
         const std::vector<Command> commands = TakeCommands(tick);
+
+        // --- 表を替えた印: この刻みのコマンドを当てる前に替える(印そのものは箱をつつく。ADR-0055)---
+        for (const Command& command : commands) {
+            if (const auto version = LabTableVersionOf(command); version) {
+                if (auto switched = SwitchTable(*version); !switched)
+                    return switched;
+            }
+        }
 
         // --- GPU: 1 本のリスト(最初だけ初めの箱を写す)---
         ID3D12GraphicsCommandList10* list = m_queue.Begin();
@@ -88,7 +134,7 @@ namespace bicameral::sim {
             return std::unexpected("コマンドリストを始められない");
 
         m_ring.RecordBegin(list);
-        if (!m_uploaded && !m_box.RecordUpload(list, MakeLabBoxNest(m_table)))
+        if (!m_uploaded && !m_box.RecordUpload(list, m_initial))
             return std::unexpected("初めの箱を写せない");
 
         if (!m_box.RecordTick(list, m_ring.GpuAddress(), tick, commands))
@@ -132,8 +178,17 @@ namespace bicameral::sim {
     // --- 戻す・再生 ---
 
     std::expected<void, std::string> LabSession::Reset() {
-        m_cpu = MakeLabBoxNest(m_table);
-        m_read = MakeLabBoxNest(m_table);
+        return ResetTo(m_latestVersion);
+    }
+
+    std::expected<void, std::string> LabSession::ResetTo(uint64_t tableVersion) {
+        if (auto switched = SwitchTable(tableVersion); !switched)
+            return switched;
+
+        m_initialVersion = tableVersion;
+        m_initial = MakeLabBoxNest(m_table);
+        m_cpu = m_initial;
+        m_read = m_initial;
         m_uploaded = false;  // 次の刻みのリストの先頭で、初めの箱を写し直す
         m_tick = 0;
         m_sequence = 0;
@@ -150,13 +205,24 @@ namespace bicameral::sim {
     }
 
     std::expected<void, std::string> LabSession::Replay(const LabRecording& recording) {
-        if (recording.tableVersion != 0 && m_tableVersion != 0 && recording.tableVersion != m_tableVersion) {
-            return std::unexpected(
-                std::format("記録の反応表(版 {:016x})と今の表(版 {:016x})が違う。記録した時の表で再生する",
-                            recording.tableVersion, m_tableVersion));
+        // --- 記録の表(刻み 0 と印)を全部持っているか、流す前に確かめる(途中で止まらないように)---
+        const uint64_t initialVersion = recording.tableVersion != 0 ? recording.tableVersion : m_latestVersion;
+        std::vector<uint64_t> versions = {initialVersion};
+        for (const Command& command : recording.commands) {
+            if (const auto version = LabTableVersionOf(command); version)
+                versions.push_back(*version);
         }
 
-        if (auto reset = Reset(); !reset)
+        for (const uint64_t version : versions) {
+            if (!m_tables.contains(version)) {
+                return std::unexpected(std::format(
+                    "記録の反応表(版 "
+                    "{:016x})をこの実験室は持っていない。記録した時の表で再生する(表の中身を記録に残すのは T-0217)",
+                    version));
+            }
+        }
+
+        if (auto reset = ResetTo(initialVersion); !reset)
             return reset;
 
         m_scheduled = recording.commands;
@@ -165,29 +231,49 @@ namespace bicameral::sim {
         for (const Command& command : recording.commands)
             m_sequence = std::max(m_sequence, command.sequence + 1);  // 再生中に置いたコマンドは記録の後ろに並ぶ
 
-        return Step(static_cast<uint32_t>(recording.tickCount));
+        if (auto stepped = Step(static_cast<uint32_t>(recording.tickCount)); !stepped)
+            return stepped;
+
+        // --- 流し終えたら、次の刻みから最新の表(世界の表)に戻す印 ---
+        if (m_tableVersion != m_latestVersion)
+            m_pending.push_back(MakeLabTableCommand(m_tick, m_sequence++, m_latestVersion));
+
+        return {};
     }
 
     LabRecording LabSession::Recording() const {
-        return {.tableVersion = m_tableVersion, .tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
+        return {.tableVersion = m_initialVersion, .tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
     }
 
-    // --- 反応表の差し替え(T-0194)---
+    // --- 反応表の差し替え(T-0218・ADR-0055)---
 
     std::expected<void, std::string> LabSession::ChangeTable(const BakedReactionTable& table, uint64_t tableVersion) {
-        // 箱のキューは刻みごとに待っていて空なので、前の表のバッファはすぐ捨ててよい
-        if (auto retired = m_box.ReplaceTable(table); !retired)
-            return std::unexpected(retired.error());
+        if (tableVersion == 0)
+            return std::unexpected("版の分からない表(版 0)には替えられない(記録の印が表を指せない)");
 
-        m_table = table;
-        m_tableVersion = tableVersion;
+        m_tables.insert_or_assign(tableVersion, table);
+        m_latestVersion = tableVersion;
 
-        // --- 今までの操作を、初めの箱から新しい表で同じ刻みまで(置いてまだ刻んでいない操作は後で戻す。
+        // --- 次の刻みから替える印(刻む前に替え直したら、印は最後の 1 つ。今の表に戻したなら印は要らない)---
+        DropPendingTableChange();
+        if (tableVersion != m_tableVersion)
+            m_pending.push_back(MakeLabTableCommand(m_tick, m_sequence++, tableVersion));
+
+        return {};
+    }
+
+    std::expected<void, std::string> LabSession::RerunWithLatestTable() {
+        // --- 今までの操作(表の印を除く)を、初めの箱から最新の表で同じ刻みまで(置いてまだ刻んでいない操作は後で戻す。
         //     再生の途中なら、残りの記録のコマンドも続けて流れる。記録のハッシュとはもう比べない)---
+        const auto isTableMark = [](const Command& command) {
+            return LabTableVersionOf(command).has_value();
+        };
         const uint64_t tickCount = m_tick;
         std::vector<Command> history = std::move(m_history);
         history.insert(history.end(), m_scheduled.begin(), m_scheduled.end());
+        std::erase_if(history, isTableMark);
         std::vector<Command> pending = std::move(m_pending);
+        std::erase_if(pending, isTableMark);
         if (auto reset = Reset(); !reset)
             return reset;
 
