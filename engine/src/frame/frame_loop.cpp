@@ -213,9 +213,10 @@ namespace bicameral::frame {
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
-                  // 物質を足す・消す表も名前で付け替えて当てる(TableHotReload の既定。T-0254)
-                  m_tableReload({.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
-                                options.editor && options.replayPath.empty()),
+                  m_tableReload(
+                      {.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
+                      options.editor && options.replayPath.empty(),
+                      options.speciesRemap ? script::SpeciesChangePolicy::Remap : script::SpeciesChangePolicy::Reject),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
