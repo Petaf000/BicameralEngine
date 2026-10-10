@@ -29,7 +29,7 @@ namespace bicameral::sim {
 
         static_assert(sizeof(GasGpuCell) == 64 && sizeof(GasCell) == 64);
         static_assert(sizeof(GasGpuDerived) == 48);
-        static_assert(sizeof(GasGpuFace) == 104);
+        static_assert(sizeof(GasGpuFace) == 112);
         static_assert(sizeof(GasGpuCellSums) == 40);
         static_assert(sizeof(GasGpuParameters) == 176);
         static_assert(sizeof(GasLedger) == GAS_GPU_LEDGER_BYTES);
@@ -40,6 +40,8 @@ namespace bicameral::sim {
         static_assert((uint32_t)GasReconstruction::Upwind == GAS_GPU_RECONSTRUCTION_UPWIND &&
                       (uint32_t)GasReconstruction::Minmod == GAS_GPU_RECONSTRUCTION_MINMOD &&
                       (uint32_t)GasReconstruction::MonotonizedCentral == GAS_GPU_RECONSTRUCTION_MC);
+        static_assert((uint32_t)GasThermodynamics::Isothermal == GAS_GPU_THERMODYNAMICS_ISOTHERMAL &&
+                      (uint32_t)GasThermodynamics::Adiabatic == GAS_GPU_THERMODYNAMICS_ADIABATIC);
 
         GasGpuCell ToGpuCell(const GasCell& cell) {
             GasGpuCell result{};
@@ -103,6 +105,7 @@ namespace bicameral::sim {
             parameters.gravity = config.gravity ? 1 : 0;
             parameters.reconstruction = (uint32_t)config.reconstruction;
             parameters.stochasticRounding = config.stochasticRounding ? 1 : 0;
+            parameters.thermodynamics = (uint32_t)config.thermodynamics;
 
             return parameters;
         }

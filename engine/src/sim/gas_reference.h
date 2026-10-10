@@ -10,11 +10,15 @@
 //   (R6。切り捨てだと微量の成分が動かない。D-428)。どちらも足し引きの形のままなので保存はビット単位のまま
 //   運動量には、面の圧力(両側の平均)の力積を両側へ逆向きに足し引きし、縦の面ごとに重さ −(m − m_基準) g(両側の平均)を足す。
 //   力を先に当て、その運動量で流れを出す(前進・後退の順)。
-//   圧力は理想気体の本物の値 p から、層ごとの基準の静水圧 p_基準 を引いて α = c̃² ÷ c_iso² 倍する(実効の音速を c̃ にする。
-//   既定の c̃ は本物の音速 340 m/s〔D-440・T-0226〕。断熱の仕事〔pdV〕を入れていない等温の気体なので、α ≈ 1.4 で断熱の音速に合わせる)。
+//   圧力は理想気体の本物の値 p から、層ごとの基準の静水圧 p_基準 を引いて α = c̃² ÷ (γ c_iso²) 倍する(実効の音速を c̃ にする。
+//   既定の c̃ は本物の音速 340 m/s〔D-440・T-0226〕。α ≈ 0.98)。
+//   T-0234(断熱。既定): セルのエネルギーは全エネルギー(熱 + 化学 + 運動)。移す塊は風上のエンタルピー(熱 + 押し出す仕事 pV)と
+//   運動エネルギーを運び、上へ動いた塊は重さの仕事 m g Δx を失う(帳簿へ)。温度は全エネルギーから運動エネルギーを引いた熱から。
+//   → 圧縮で温まり膨張で冷え(pdV)、衝撃波・混ざって失った運動エネルギーは熱になる(散逸)。全エネルギーは足し引きの形のまま保存。
+//   等温(T-0226 までの形)も設定で選べる(α = c̃² ÷ c_iso²・運動エネルギーを数えない)。
 //   → 基準の状態(静止大気)では力がちょうど 0 になる(静水圧の釣り合いを離散の式で厳密に。偽の流れが出ない)。
 // 保存: 面の流れも力積も「片方から引いた値をそのまま他方へ足す」だけ(04 R2)。箱の外との出入り(開いた境界・壁の力積・重力)は
-// GasLedger に数える。閉じた箱で成分とエネルギーの合計はビット単位で一定、運動量は「初め + 帳簿」とビット単位で一致する。
+// GasLedger に数える。閉じた箱で成分の合計はビット単位で一定、エネルギー(断熱では重さの仕事を帳簿へ)と運動量は「初め + 帳簿」とビット単位で一致する。
 // 順番: 小刻みの初めの状態だけから全部の面を計算し、整数の足し引きで当てる(Jacobi 型。04 R3)。
 //
 // データの流れ: GasConfig → MakeGasCoefficients → MakeHydrostaticReference(層ごとの基準のセル)→ MakeGasBox
@@ -35,7 +39,7 @@ namespace bicameral::sim {
     // 気体の物質(G1 は自前の小さな表。反応の表 RxSpecies とつなぐのは結合の段)
     struct GasSpecies {
         uint32_t molarMass = 0;       // mg/mol(04 §2)
-        uint32_t heatCapacity = 0;    // mJ/(mol·K)
+        uint32_t heatCapacity = 0;    // mJ/(mol·K)。断熱では定積のモル比熱 c_v(定圧の分 R は押し出す仕事で入る。T-0234)
         int64_t formationEnergy = 0;  // H0(J/mol = µJ/µmol)。セルのエネルギー = 熱 + Σ 物質量 × H0
     };
 
@@ -53,6 +57,12 @@ namespace bicameral::sim {
         MonotonizedCentral,  // MUSCL・MC の制限(既定。にじみの増え方が minmod の約半分。07 §2.2)
     };
 
+    // エネルギーの扱い(T-0234・07 §2.4)
+    enum class GasThermodynamics : uint8_t {
+        Isothermal,  // 等温(T-0226 まで): エネルギーは熱 + 化学、塊は風上の熱だけを運ぶ。圧縮・衝撃波で温まらない
+        Adiabatic,  // 断熱(既定): エネルギーは熱 + 化学 + 運動、塊はエンタルピーと運動エネルギーを運び、重さの仕事を帳簿へ
+    };
+
     struct GasConfig {
         // --- 箱 ---
         uint32_t sizeX = 8;
@@ -68,6 +78,11 @@ namespace bicameral::sim {
         uint32_t substeps = 24;  // 1 刻み(1/60 s)を何回に分けるか。c̃ Δt ÷ Δx = 0.47(安定の限界は約 2/3。T-0226)
         uint32_t soundSpeedMmPerS = 340000;  // 音速 c̃(mm/s)。本物の音速(D-440・ADR-0043)。落とした値も設定で選べる
         bool gravity = true;
+        GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
+
+        // これより熱いセルは実効の音速を c̃ で頭打ちにする(mK。安定の条件を守る。0 = 地面の層の基準の温度〔QUESTIONS Q32 の仮の案 A〕)。
+        // 断熱では衝撃波で温まった気体の力も弱めるので、衝撃波を理論と比べる試験は頭打ちを外す(UINT32_MAX。T-0234)
+        uint32_t soundCapTemperature = 0;
 
         // --- 風(開いた境界の外の速度。2^-20 m/s)---
         std::array<int32_t, GAS_AXES> windVelocity = {0, 0, 0};
@@ -85,7 +100,8 @@ namespace bicameral::sim {
         uint64_t pressureFlow = 0;                                 // (p̃_左 − p̃_右)× これ >> 40 = 質量の流れ(mg/小刻み)
         uint64_t pressureImpulse = 0;  // (p̃_左 + p̃_右)× これ >> 16 = 面の力積(運動量の単位/小刻み)
         uint64_t gravityImpulse = 0;   // (m − m_基準)× これ >> 16 = 重さの力積(運動量の単位/小刻み)
-        uint64_t soundScale = 0;  // α = c̃² ÷ c_iso² の Q32(c_iso² = p ÷ ρ は地面の層の基準から。MakeGasBox が入れる)
+        uint64_t soundScale =
+            0;  // α = c̃² ÷ (γ c_iso²) の Q32(等温は γ = 1。c_iso² = p ÷ ρ・γ は地面の層の基準から。MakeGasBox が入れる)
         uint32_t soundTemperature =
             0;  // 地面の層の基準の温度(mK)。これより熱いセルは α を T_基準 ÷ T 倍して実効の音速を c̃ に抑える
     };
@@ -93,8 +109,8 @@ namespace bicameral::sim {
     // セル(保存量だけ)。単位はレベル 0(04 §2)
     struct GasCell {
         std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};  // µmol
-        int64_t energy = 0;                                  // mJ(熱 + 化学。運動エネルギーは入れない。07 §2.1)
-        std::array<int64_t, GAS_AXES> momentum = {};         // mg·2^-20 m/s
+        int64_t energy = 0;  // mJ(断熱: 熱 + 化学 + 運動〔T-0234〕。等温: 熱 + 化学。07 §2.1・§2.4)
+        std::array<int64_t, GAS_AXES> momentum = {};  // mg·2^-20 m/s
     };
 
     // セルから導く値(小刻みの初めに作る)
@@ -110,7 +126,7 @@ namespace bicameral::sim {
     // 箱の外との出入りの帳簿(外から入った量を正)。閉じた箱の検査はこれを差し引く(07 §4)
     struct GasLedger {
         std::array<int64_t, GAS_MAX_SPECIES> amounts = {};
-        int64_t energy = 0;
+        int64_t energy = 0;  // 開いた境界の出入り + 重さの仕事(断熱。上へ動いた塊が失う m g Δx。T-0234)
         std::array<int64_t, GAS_AXES> momentum = {};
     };
 
@@ -155,6 +171,12 @@ namespace bicameral::sim {
 
     // セルから導く値(層 z の基準を使う)
     [[nodiscard]] GasDerived DeriveGasCell(const GasBox& box, const GasCell& cell, uint32_t z);
+
+    // 運動エネルギー(µJ)= Σ (運動量² >> 41)÷ 質量(断熱のときだけ。等温は 0。T-0234)
+    [[nodiscard]] int64_t GasKineticEnergy(const GasBox& box, const GasCell& cell);
+
+    // 運動量を替え、運動エネルギーの差をエネルギーへ足す(熱を変えずに動かす。断熱のとき)
+    void SetGasMomentum(const GasBox& box, GasCell& cell, const std::array<int64_t, GAS_AXES>& momentum);
 
     // 速度(2^-20 m/s)= 運動量 ÷ 質量
     [[nodiscard]] int64_t GasVelocity(const GasBox& box, const GasCell& cell, uint32_t axis);
