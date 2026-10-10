@@ -56,6 +56,10 @@ namespace bicameral::sim {
         bool Place(LabCellPosition cell, std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin);
         bool SetTemperature(LabCellPosition cell, uint32_t temperatureMilliKelvin);
 
+        // 範囲のセル全部(T-0220。1 つのコマンド)
+        bool PlaceRegion(LabCellRange range, std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin);
+        bool SetTemperatureRegion(LabCellRange range, uint32_t temperatureMilliKelvin);
+
         // tickCount 刻み進める。食い違ったらその刻みで止まり(Mismatch())、以後は Reset まで進めない。GPU の失敗はエラー
         [[nodiscard]] std::expected<void, std::string> Step(uint32_t tickCount);
 

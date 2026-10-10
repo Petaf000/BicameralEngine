@@ -1,5 +1,6 @@
 // lab_panel.h — エディタの「実験室」のパネル(14 §2・T-0142・ADR-0037)。小さな箱(sim/lab_box。8³ セル・4 m 角・300 K の空気)に
 // 物質と温度を置いて反応を試し、GPU と CPU リファレンスを刻みごとに並べて比べる。食い違ったら最初の刻みとセルを出す。
+// 材料は表の全物質から 3 つまで組み、量は mol・g・kPa(1 セルの理想気体の分圧)で、置く範囲は 1 セル・直方体・箱全体(T-0220・D-449)。
 //
 // データの流れ:
 //   パネルの操作(置く・温度・刻む・戻す)→ sim::LabSession(置く操作はコマンド。箱のセルを CPU から書かない。D-107)
@@ -14,6 +15,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -26,6 +28,25 @@
 #include "sim/lab_session.h"
 
 namespace bicameral::editor {
+
+    enum class AmountUnit : uint8_t {
+        Mole,
+        Gram,
+        KiloPascal,  // 1 セル(0.125 m³)を理想気体で満たした分圧(置く温度で µmol に直す)
+    };
+
+    enum class RangeKind : uint8_t {
+        Cell,
+        Box,
+        Whole,
+    };
+
+    // 材料の 1 行(表示の入力。置く時に整数の µmol に直す)
+    struct MaterialRow {
+        int species = 0;  // 物質 ID(0 = なし)
+        double amount = 0.0;
+        AmountUnit unit = AmountUnit::Mole;
+    };
 
     class LabPanel {
     public:
@@ -47,6 +68,12 @@ namespace bicameral::editor {
         [[nodiscard]] std::expected<void, std::string> ReplayInNewSession(const sim::LabRecording& recorded);
 
         void BuildControls();
+        void BuildMaterialRows(uint32_t milliKelvin);
+        void BuildStepControls();
+        void LoadPreset(size_t index);
+        [[nodiscard]] uint64_t RowMicromoles(const MaterialRow& row, uint32_t temperatureMilliKelvin) const;
+        [[nodiscard]] std::vector<sim::SpeciesAmount> ComposedContents(uint32_t temperatureMilliKelvin) const;
+        [[nodiscard]] sim::LabCellRange PlaceRange() const;
         void BuildStatus();
         void BuildSlice();
         void BuildCell() const;
@@ -65,7 +92,11 @@ namespace bicameral::editor {
 
         // --- 操作の状態(View。世界に入らない)---
         std::array<int, 3> m_cell = {3, 3, 3};
-        int m_material = 1;
+        size_t m_preset = 1;  // ひな形(m_materials の添字。初めは木)
+        std::array<MaterialRow, lab::LAB_MAX_FILL_SPECIES> m_rows{};
+        RangeKind m_rangeKind = RangeKind::Cell;
+        std::array<int, 3> m_rangeLow = {0, 0, 0};
+        std::array<int, 3> m_rangeHigh = {7, 7, 7};
         int m_temperatureKelvin = 300;
         bool m_running = false;  // 毎フレーム 1 刻み
         std::string m_recordingPath = "lab_recording.blab";

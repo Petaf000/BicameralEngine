@@ -43,6 +43,28 @@ namespace bicameral::sim {
         [[nodiscard]] uint32_t Index() const { return multires::MrCellIndex(x, y, z); }
     };
 
+    // 直方体の範囲(両端を含む。T-0220)。箱全体は LabWholeBox()
+    struct LabCellRange {
+        LabCellPosition low;
+        LabCellPosition high;
+    };
+
+    [[nodiscard]] constexpr LabCellRange LabWholeBox() {
+        return {.low = {}, .high = {.x = LAB_BOX_EDGE - 1, .y = LAB_BOX_EDGE - 1, .z = LAB_BOX_EDGE - 1}};
+    }
+
+    // --- 量の換算(T-0220。パネルが量・圧力を µmol に直す。整数だけ)---
+
+    inline constexpr uint64_t LAB_MAX_PRESSURE_PASCAL = 100'000'000;  // 100 MPa(これより上は当てない)
+
+    // 1 セル(0.125 m³)を温度 temperature の理想気体で満たして分圧 pressure になる物質量(µmol。切り捨て)。
+    // 圧力・温度が範囲の外(温度 0 か LAB_MAX_TEMPERATURE_MILLIKELVIN より上・圧力が上限より上)なら 0。箱は圧力を状態に持たない(置いた時の量を決めるだけ。07 の気体とは別)
+    [[nodiscard]] uint64_t LabGasMicromoles(uint64_t pressurePascal, uint32_t temperatureMilliKelvin);
+
+    // 質量(mg)を物質量(µmol。切り捨て)に。molarMass = mg/mol(BakedReactionTable::molarMasses)。0 なら 0
+    inline constexpr uint64_t LAB_MAX_MASS_MILLIGRAMS = 1'000'000'000'000;  // 1000 t(これより上は 0)
+    [[nodiscard]] uint64_t LabMassMicromoles(uint64_t milligrams, uint32_t molarMassMilligramsPerMol);
+
     // --- コマンド ---
 
     // セルの中身を物質(LAB_MAX_FILL_SPECIES まで)と温度で置き換える
@@ -52,6 +74,13 @@ namespace bicameral::sim {
     // セルの温度を決める(成分はそのまま)
     [[nodiscard]] Command MakeLabTemperatureCommand(uint64_t targetTick, uint32_t sequence, LabCellPosition cell,
                                                     uint32_t temperatureMilliKelvin);
+
+    // 範囲のセル全部を FILL・TEMPERATURE と同じに(T-0220。範囲が箱の外なら当てないコマンドになる)
+    [[nodiscard]] Command MakeLabFillRegionCommand(uint64_t targetTick, uint32_t sequence, LabCellRange range,
+                                                   std::span<const SpeciesAmount> contents,
+                                                   uint32_t temperatureMilliKelvin);
+    [[nodiscard]] Command MakeLabTemperatureRegionCommand(uint64_t targetTick, uint32_t sequence, LabCellRange range,
+                                                          uint32_t temperatureMilliKelvin);
 
     // 反応表を替えた印(T-0218・ADR-0055)。刻み targetTick のコマンドを当てる前に、その刻みから表を tableVersion に替える。
     // 印そのものはセルを変えず、箱をつつく(待ちの予定を新しい表で求め直す)。印は版だけ。表の中身は記録の tables に残す(T-0217)

@@ -3,6 +3,8 @@
 // コマンドの無い刻みは元素とエネルギーの合計が変わらない・同じコマンドの列なら同じハッシュの列・記録の読み書き・最初に違ったセルを見つける。
 // 表を替えた印(T-0218): セルを変えずに箱をつつく・途中で表を替えると替えた刻みから先だけ変わる・印の入った記録(版 3)と版 2 の読み書き。
 // 表の中身(T-0217): 記録の版 4 は使った表の中身を持ち、読み書きで同じ・壊れた中身は断る・版 3 も読める。
+// 範囲と量(T-0220): 範囲のコマンドは直方体のセル全部を 1 セルのコマンドと同じに・箱の外や逆の範囲は当てない・
+// 分圧と質量から µmol への換算(300 K・1 気圧の 1 セルが空気の材料の量と合う)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <cstdint>
@@ -206,6 +208,63 @@ namespace {
             std::printf("lab_box_test: 見つけた食い違い: %s\n", mismatch->what.c_str());
     }
 
+    // 範囲のコマンド(T-0220): 範囲の中は 1 セルのコマンドを当てたのと同じ・外は変わらない・当てないものは飛ばす
+    void TestRegion(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        const LabMaterial* wood = FindMaterial(materials, "木");
+        const LabCellRange range = {.low = {.x = 1, .y = 2, .z = 3}, .high = {.x = 4, .y = 2, .z = 6}};
+        MultiresNest regionNest = MakeLabBoxNest(table);
+        MultiresNest cellNest = MakeLabBoxNest(table);
+        const std::vector<Command> region = {MakeLabFillRegionCommand(0, 0, range, wood->contents, 450000),
+                                             MakeLabTemperatureRegionCommand(0, 1, LabWholeBox(), 350000)};
+        std::vector<Command> cells;
+        for (uint32_t z = 3; z <= 6; ++z) {
+            for (uint32_t x = 1; x <= 4; ++x)
+                cells.push_back(MakeLabFillCommand(0, 0, {.x = x, .y = 2, .z = z}, wood->contents, 450000));
+        }
+
+        for (uint32_t z = 0; z < LAB_BOX_EDGE; ++z) {
+            for (uint32_t y = 0; y < LAB_BOX_EDGE; ++y) {
+                for (uint32_t x = 0; x < LAB_BOX_EDGE; ++x)
+                    cells.push_back(MakeLabTemperatureCommand(0, 1, {.x = x, .y = y, .z = z}, 350000));
+            }
+        }
+
+        EXPECT(ApplyLabCommands(regionNest, table, region) == 2);
+        ApplyLabCommands(cellNest, table, cells);
+        EXPECT(HashWholeNest(regionNest) == HashWholeNest(cellNest));
+        EXPECT(TotalOf(regionNest, table.SpeciesId("cellulose")) == 16 * wood->contents[0].amount);
+
+        // --- 当てないもの: 箱の外・逆の範囲・熱すぎる ---
+        const std::vector<Command> invalid = {
+            MakeLabFillRegionCommand(0, 0, {.low = {}, .high = {.x = 8, .y = 0, .z = 0}}, wood->contents, 300000),
+            MakeLabFillRegionCommand(0, 1, {.low = {.x = 2}, .high = {.x = 1}}, wood->contents, 300000),
+            MakeLabTemperatureRegionCommand(0, 2, LabWholeBox(), 7000000)};
+        MultiresNest untouched = MakeLabBoxNest(table);
+        const uint64_t before = HashWholeNest(untouched);
+        EXPECT(ApplyLabCommands(untouched, table, invalid) == 0);
+        EXPECT(HashWholeNest(untouched) == before);
+    }
+
+    // 量の換算(T-0220)
+    void TestConversions(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        // 1 気圧・300 K の 1 セル = 約 5.08 mol(空気の材料の合計と 0.1% 以内)
+        const LabMaterial* air = FindMaterial(materials, "空気");
+        const uint64_t airTotal = air->contents[0].amount + air->contents[1].amount;
+        const uint64_t atmosphere = LabGasMicromoles(101325, 300000);
+        std::printf("lab_box_test: 1 気圧・300 K の 1 セル = %llu µmol(空気の材料 %llu)\n",
+                    static_cast<unsigned long long>(atmosphere), static_cast<unsigned long long>(airTotal));
+        EXPECT(atmosphere > airTotal - (airTotal / 1000) && atmosphere < airTotal + (airTotal / 1000));
+        EXPECT(LabGasMicromoles(202650, 600000) == atmosphere);  // 圧力と温度を一緒に 2 倍
+        EXPECT(LabGasMicromoles(101325, 0) == 0 && LabGasMicromoles(LAB_MAX_PRESSURE_PASCAL + 1, 300000) == 0);
+        EXPECT(LabGasMicromoles(LAB_MAX_PRESSURE_PASCAL, 1) > 0);
+
+        // セルロース 162.14 g = 1 mol(物質の分子量は表から)
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint32_t molarMass = table.molarMasses[cellulose];
+        EXPECT(LabMassMicromoles(molarMass, molarMass) == 1000000);
+        EXPECT(LabMassMicromoles(1, 0) == 0 && LabMassMicromoles(LAB_MAX_MASS_MILLIGRAMS + 1, molarMass) == 0);
+    }
+
     // 表を替えた印(T-0218・ADR-0055)
     void TestTableMark(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
         constexpr uint64_t VERSION = 0x0123456789ABCDEFULL;
@@ -313,6 +372,8 @@ int main() {
     TestFire(*table, materials);
     TestTableMark(*table, materials);
     TestTableContents();
+    TestRegion(*table, materials);
+    TestConversions(*table, materials);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

@@ -30,6 +30,12 @@ namespace bicameral::sim {
 
         constexpr uint32_t COMMAND_WORDS_PER_ENTRY = 3;
 
+        // --- 量の換算(T-0220): µmol = p[Pa] × V[m³] × 10^6 ÷ (R[J/(mol·K)] × T[K])
+        //     = p × (0.125 × 10^6 × 10^3 × 10^9) ÷ (R × 10^9 × T[mK])。R = 8.314462618(CODATA 2018 の定義値)---
+        constexpr uint64_t GAS_NUMERATOR_PER_PASCAL = 125'000'000'000'000'000;  // 0.125 m³ × 10^18
+        constexpr uint64_t GAS_CONSTANT_NANO = 8'314'462'618;                   // R × 10^9
+        constexpr uint64_t MICROMOLES_PER_MOLE = 1'000'000;
+
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---
         constexpr std::array<char, 4> RECORDING_MAGIC = {'B', 'L', 'A', 'B'};
         // 4: ハッシュの列の後ろに表の中身(T-0217): 数 u64 → 表ごとに 版 u64・バイト数 u64・バイト(8 バイトの境界まで 0 で埋める)
@@ -56,6 +62,20 @@ namespace bicameral::sim {
             command.size = static_cast<uint16_t>(sizeof(uint32_t) * 2);
 
             return command;
+        }
+
+        // 範囲の語(lab_box.hlsli の LAB_REGION_*)。箱の外の角は箱の外のまま書く(LabRegionCommandValid が当てない)
+        uint32_t RegionWord(LabCellRange range) {
+            const auto corner = [](LabCellPosition cell) {
+                const auto coordinate = [](uint32_t value) {
+                    return std::min(value, lab::LAB_REGION_COORD_MASK);
+                };
+
+                return coordinate(cell.x) | (coordinate(cell.y) << lab::LAB_REGION_COORD_BITS) |
+                       (coordinate(cell.z) << (2 * lab::LAB_REGION_COORD_BITS));
+            };
+
+            return corner(range.low) | (corner(range.high) << lab::LAB_REGION_CORNER_BITS);
         }
 
         template <typename T>
@@ -145,6 +165,24 @@ namespace bicameral::sim {
         return MakeLabCommand(targetTick, sequence, lab::LAB_COMMAND_TYPE_TEMPERATURE, cell, temperatureMilliKelvin);
     }
 
+    Command MakeLabFillRegionCommand(uint64_t targetTick, uint32_t sequence, LabCellRange range,
+                                     std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin) {
+        Command command = MakeLabFillCommand(targetTick, sequence, range.low, contents, temperatureMilliKelvin);
+        command.type = static_cast<uint16_t>(lab::LAB_COMMAND_TYPE_FILL_REGION);
+        SetPayload(command, lab::LAB_PAYLOAD_CELL, RegionWord(range));
+
+        return command;
+    }
+
+    Command MakeLabTemperatureRegionCommand(uint64_t targetTick, uint32_t sequence, LabCellRange range,
+                                            uint32_t temperatureMilliKelvin) {
+        Command command = MakeLabTemperatureCommand(targetTick, sequence, range.low, temperatureMilliKelvin);
+        command.type = static_cast<uint16_t>(lab::LAB_COMMAND_TYPE_TEMPERATURE_REGION);
+        SetPayload(command, lab::LAB_PAYLOAD_CELL, RegionWord(range));
+
+        return command;
+    }
+
     Command MakeLabTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t tableVersion) {
         Command command;
         command.targetTick = targetTick;
@@ -173,6 +211,28 @@ namespace bicameral::sim {
         std::memcpy(&words, &command, sizeof(words));
 
         return words;
+    }
+
+    // --- 量の換算 ---
+
+    uint64_t LabGasMicromoles(uint64_t pressurePascal, uint32_t temperatureMilliKelvin) {
+        const bool outside = temperatureMilliKelvin == 0 ||
+                             temperatureMilliKelvin > lab::LAB_MAX_TEMPERATURE_MILLIKELVIN;
+        if (outside || pressurePascal > LAB_MAX_PRESSURE_PASCAL)
+            return 0;
+
+        // 上限の圧力・1 mK でも商は 2^64 未満(1.25e25 ÷ 8.3e9 ≈ 1.5e15)
+        const fx::FxU128 numerator = fx::FxMulU64Full(pressurePascal, GAS_NUMERATOR_PER_PASCAL);
+        const uint64_t denominator = GAS_CONSTANT_NANO * temperatureMilliKelvin;
+
+        return fx::FxDivU128By64(numerator, denominator).quotient;
+    }
+
+    uint64_t LabMassMicromoles(uint64_t milligrams, uint32_t molarMassMilligramsPerMol) {
+        if (molarMassMilligramsPerMol == 0 || milligrams > LAB_MAX_MASS_MILLIGRAMS)
+            return 0;
+
+        return fx::FxDivU128By64(fx::FxMulU64Full(milligrams, MICROMOLES_PER_MOLE), molarMassMilligramsPerMol).quotient;
     }
 
     // --- 材料 ---
@@ -250,6 +310,22 @@ namespace bicameral::sim {
 
             // --- 表を替えた印: セルは変えず、箱をつつくだけ(lab_box.hlsl と同じ。表は呼ぶ側が先に替えている。T-0218)---
             if (lab::LabCommandMarksTable(words)) {
+                applied += 1;
+                continue;
+            }
+
+            // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(lab_box.hlsl と同じ順)---
+            if (lab::LabRegionCommandValid(words, speciesCount)) {
+                const lab::LabRegion region = lab::LabCommandRegion(words);
+                for (uint32_t z = region.lowZ; z <= region.highZ; ++z) {
+                    for (uint32_t y = region.lowY; y <= region.highY; ++y) {
+                        for (uint32_t x = region.lowX; x <= region.highX; ++x) {
+                            RxCell& target = nest_detail::CellAt(nest, LAB_BOX_SLOT, MrCellIndex(x, y, z));
+                            target = lab::LabApplyCommand(view, target, words);
+                        }
+                    }
+                }
+
                 applied += 1;
                 continue;
             }

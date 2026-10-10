@@ -28,6 +28,22 @@ RWStructuredBuffer<uint32_t> g_labCommands : register(u4);  // LabCommand × 数
             continue;
         }
 
+        // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(sim/lab_box.cpp と同じ順)---
+        if (LabRegionCommandValid(command, g_external2)) {
+            const LabRegion region = LabCommandRegion(command);
+            for (uint32_t z = region.lowZ; z <= region.highZ; ++z) {
+                for (uint32_t y = region.lowY; y <= region.highY; ++y) {
+                    for (uint32_t x = region.lowX; x <= region.highX; ++x) {
+                        const uint32_t address = PageCellAddress(block.page, MrCellIndex(x, y, z));
+                        g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
+                    }
+                }
+            }
+
+            applied = true;
+            continue;
+        }
+
         const uint32_t cell = LabCommandCell(command, g_external2);
         if (cell == LAB_NO_CELL)
             continue;

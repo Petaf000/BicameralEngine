@@ -20,6 +20,10 @@ namespace bicameral::editor {
         constexpr int MAX_KELVIN = static_cast<int>(lab::LAB_MAX_TEMPERATURE_MILLIKELVIN / 1000);
         constexpr float SLICE_CELL_PIXELS = 22.0f;
         constexpr float HOT_KELVIN = 2000.0f;  // 断面の色がいちばん明るくなる温度
+        constexpr double MICROMOLES_PER_MOLE = 1e6;
+        constexpr double MILLIGRAMS_PER_GRAM = 1e3;
+        constexpr double PASCALS_PER_KILOPASCAL = 1e3;
+        constexpr double MAX_AMOUNT_INPUT = 1e9;  // 入力の上限(mol・g・kPa。整数に直す時に溢れないように)
 
         // --auto-lab の実験(tests/gpu_lab_box_test と同じ形を短く)
         constexpr uint32_t AUTO_IGNITE_TICK = 3;
@@ -27,6 +31,9 @@ namespace bicameral::editor {
         constexpr uint32_t AUTO_IGNITE_MILLIKELVIN = 1500000;
         constexpr std::string_view AUTO_SWAP_RULE = "cellulose_combustion";  // 途中で替える表で速くする規則
         constexpr double AUTO_SWAP_ACTIVATION_RATIO = 0.9;                   // その活性化エネルギーの倍率
+        constexpr uint64_t AUTO_OXYGEN_PASCAL = 60000;  // 箱全体を酸素の多い 200 kPa の空気に(T-0220)
+        constexpr uint64_t AUTO_NITROGEN_PASCAL = 140000;
+        constexpr uint32_t AUTO_ROOM_MILLIKELVIN = 300000;
 
         int32_t TemperatureOf(const sim::BakedReactionTable& table, const reaction::RxCell& cell) {
             return reaction::RxComputeThermal(table.View(), cell).temperature;
@@ -143,7 +150,7 @@ namespace bicameral::editor {
 
         m_session.emplace(std::move(*session));
         m_materials = sim::MakeLabMaterials(m_session->Table());
-        m_material = std::min<int>(m_material, static_cast<int>(m_materials.size()) - 1);
+        LoadPreset(m_preset);
         Log(Channel::Sim, Level::Info, "実験室の箱を作った");
 
         return true;
@@ -223,30 +230,155 @@ namespace bicameral::editor {
             ImGui::TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "%s", m_error.c_str());
     }
 
-    void LabPanel::BuildControls() {
-        ImGui::SeparatorText("置く(次の刻みのコマンド)");
-        ImGui::SliderInt3("セル (x, y, z)", m_cell.data(), 0, static_cast<int>(sim::LAB_BOX_EDGE) - 1);
+    // --- 材料を組む(T-0220。表の全物質から 3 つまで・量の単位・温度・置く範囲)---
 
-        const char* preview = m_materials.empty() ? "" : m_materials[static_cast<size_t>(m_material)].name.data();
-        if (ImGui::BeginCombo("材料", preview)) {
+    void LabPanel::LoadPreset(size_t index) {
+        m_rows = {};
+        if (index >= m_materials.size())
+            return;
+
+        const std::vector<sim::SpeciesAmount>& contents = m_materials[index].contents;
+        for (size_t i = 0; i < std::min(contents.size(), m_rows.size()); ++i) {
+            m_rows[i] = {.species = static_cast<int>(contents[i].species),
+                         .amount = static_cast<double>(contents[i].amount) / MICROMOLES_PER_MOLE,
+                         .unit = AmountUnit::Mole};
+        }
+    }
+
+    // 1 行の量を µmol に(表示の入力だけ浮動小数点。コマンドに入るのは整数の µmol)
+    uint64_t LabPanel::RowMicromoles(const MaterialRow& row, uint32_t temperatureMilliKelvin) const {
+        const sim::BakedReactionTable& table = m_session->Table();
+        if (row.species <= 0 || static_cast<size_t>(row.species) >= table.molarMasses.size() || row.amount <= 0.0)
+            return 0;
+
+        const double amount = std::min(row.amount, MAX_AMOUNT_INPUT);
+        switch (row.unit) {
+            case AmountUnit::Mole: return static_cast<uint64_t>(std::llround(amount * MICROMOLES_PER_MOLE));
+            case AmountUnit::Gram:
+                return sim::LabMassMicromoles(static_cast<uint64_t>(std::llround(amount * MILLIGRAMS_PER_GRAM)),
+                                              table.molarMasses[static_cast<size_t>(row.species)]);
+            case AmountUnit::KiloPascal:
+                return sim::LabGasMicromoles(static_cast<uint64_t>(std::llround(amount * PASCALS_PER_KILOPASCAL)),
+                                             temperatureMilliKelvin);
+        }
+
+        return 0;
+    }
+
+    std::vector<sim::SpeciesAmount> LabPanel::ComposedContents(uint32_t temperatureMilliKelvin) const {
+        std::vector<sim::SpeciesAmount> contents;
+        for (const MaterialRow& row : m_rows) {
+            const uint64_t amount = RowMicromoles(row, temperatureMilliKelvin);
+            const auto species = static_cast<uint32_t>(row.species);
+            const bool repeated = std::ranges::any_of(
+                contents, [&](const sim::SpeciesAmount& c) { return c.species == species; });
+            if (amount > 0 && !repeated)
+                contents.push_back({.species = species, .amount = amount});
+        }
+
+        return contents;
+    }
+
+    sim::LabCellRange LabPanel::PlaceRange() const {
+        switch (m_rangeKind) {
+            case RangeKind::Cell: return {.low = PositionOf(m_cell), .high = PositionOf(m_cell)};
+            case RangeKind::Box: return {.low = PositionOf(m_rangeLow), .high = PositionOf(m_rangeHigh)};
+            case RangeKind::Whole: return sim::LabWholeBox();
+        }
+
+        return sim::LabWholeBox();
+    }
+
+    void LabPanel::BuildMaterialRows(uint32_t milliKelvin) {
+        const sim::BakedReactionTable& table = m_session->Table();
+        constexpr std::array<const char*, 3> UNIT_NAMES = {"mol", "g", "kPa(分圧)"};
+        for (size_t i = 0; i < m_rows.size(); ++i) {
+            MaterialRow& row = m_rows[i];
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::SetNextItemWidth(150.0f);
+            const auto speciesIndex = static_cast<size_t>(std::max(row.species, 0));
+            const char* name = row.species > 0 && speciesIndex < table.speciesNames.size()
+                                   ? table.speciesNames[speciesIndex].c_str()
+                                   : "(なし)";
+            if (ImGui::BeginCombo("##species", name)) {
+                if (ImGui::Selectable("(なし)", row.species <= 0))
+                    row.species = 0;
+
+                for (size_t id = 1; id < table.speciesNames.size(); ++id) {
+                    if (ImGui::Selectable(table.speciesNames[id].c_str(), speciesIndex == id))
+                        row.species = static_cast<int>(id);
+                }
+
+                ImGui::EndCombo();
+            }
+
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(110.0f);
+            ImGui::InputDouble("##amount", &row.amount, 0.0, 0.0, "%.4g");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100.0f);
+            int unit = static_cast<int>(row.unit);
+            if (ImGui::Combo("##unit", &unit, UNIT_NAMES.data(), static_cast<int>(UNIT_NAMES.size())))
+                row.unit = static_cast<AmountUnit>(unit);
+
+            ImGui::SameLine();
+            ImGui::Text("= %llu µmol", static_cast<unsigned long long>(RowMicromoles(row, milliKelvin)));
+            ImGui::PopID();
+        }
+    }
+
+    void LabPanel::BuildControls() {
+        ImGui::SeparatorText("材料(表の全物質から 3 つまで。kPa は 1 セル 0.125 m³ の理想気体の分圧)");
+        const char* preview = m_preset < m_materials.size() ? m_materials[m_preset].name.data() : "(読み込む)";
+        ImGui::SetNextItemWidth(150.0f);
+        if (ImGui::BeginCombo("ひな形", preview)) {
             for (size_t i = 0; i < m_materials.size(); ++i) {
-                if (ImGui::Selectable(m_materials[i].name.data(), static_cast<int>(i) == m_material))
-                    m_material = static_cast<int>(i);
+                if (ImGui::Selectable(m_materials[i].name.data(), i == m_preset)) {
+                    m_preset = i;
+                    LoadPreset(i);
+                }
             }
 
             ImGui::EndCombo();
         }
 
-        ImGui::SliderInt("温度 (K)", &m_temperatureKelvin, 0, MAX_KELVIN);
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::InputInt("温度 (K)", &m_temperatureKelvin, 10, 100);
+        m_temperatureKelvin = std::clamp(m_temperatureKelvin, 1, MAX_KELVIN);
         const auto milliKelvin = static_cast<uint32_t>(m_temperatureKelvin) * 1000u;
-        if (ImGui::Button("置く") && !m_materials.empty())
-            static_cast<void>(m_session->Place(PositionOf(m_cell),
-                                               m_materials[static_cast<size_t>(m_material)].contents, milliKelvin));
+        BuildMaterialRows(milliKelvin);
 
+        // --- 置く範囲 ---
+        ImGui::SeparatorText("置く(次の刻みのコマンド)");
+        int rangeKind = static_cast<int>(m_rangeKind);
+        ImGui::RadioButton("1 セル", &rangeKind, static_cast<int>(RangeKind::Cell));
+        ImGui::SameLine();
+        ImGui::RadioButton("直方体", &rangeKind, static_cast<int>(RangeKind::Box));
+        ImGui::SameLine();
+        ImGui::RadioButton("箱全体", &rangeKind, static_cast<int>(RangeKind::Whole));
+        m_rangeKind = static_cast<RangeKind>(rangeKind);
+
+        const int maxCell = static_cast<int>(sim::LAB_BOX_EDGE) - 1;
+        ImGui::SliderInt3("セル (x, y, z)", m_cell.data(), 0, maxCell);
+        if (m_rangeKind == RangeKind::Box) {
+            ImGui::SliderInt3("小さい角", m_rangeLow.data(), 0, maxCell);
+            ImGui::SliderInt3("大きい角", m_rangeHigh.data(), 0, maxCell);
+        }
+
+        const std::vector<sim::SpeciesAmount> contents = ComposedContents(milliKelvin);
+        ImGui::BeginDisabled(contents.empty());
+        if (ImGui::Button("置く"))
+            static_cast<void>(m_session->PlaceRegion(PlaceRange(), contents, milliKelvin));
+
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("温度だけ"))
-            static_cast<void>(m_session->SetTemperature(PositionOf(m_cell), milliKelvin));
+            static_cast<void>(m_session->SetTemperatureRegion(PlaceRange(), milliKelvin));
 
+        BuildStepControls();
+    }
+
+    void LabPanel::BuildStepControls() {
         // --- 刻む ---
         ImGui::SeparatorText("刻む");
         ImGui::BeginDisabled(m_session->Mismatch().has_value());
@@ -406,9 +538,16 @@ namespace bicameral::editor {
         if (wood == m_materials.end())
             return;
 
+        // --- 箱全体を酸素の多い 200 kPa の空気にしてから(範囲のコマンドと分圧の換算。T-0220)、真ん中に木を 8 セル ---
+        const uint64_t nitrogen = sim::LabGasMicromoles(AUTO_NITROGEN_PASCAL, AUTO_ROOM_MILLIKELVIN);
+        const std::array<sim::SpeciesAmount, 2> atmosphere = {
+            sim::SpeciesAmount{.species = m_table->SpeciesId("oxygen"),
+                               .amount = sim::LabGasMicromoles(AUTO_OXYGEN_PASCAL, AUTO_ROOM_MILLIKELVIN)},
+            sim::SpeciesAmount{.species = m_table->SpeciesId("nitrogen"), .amount = nitrogen}};
+        static_cast<void>(m_session->PlaceRegion(sim::LabWholeBox(), atmosphere, AUTO_ROOM_MILLIKELVIN));
         for (uint32_t i = 0; i < 8; ++i)
             static_cast<void>(m_session->Place({.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)},
-                                               wood->contents, 300000));
+                                               wood->contents, AUTO_ROOM_MILLIKELVIN));
 
         // --- 火を付けた刻みに、刻みの途中の表の差し替えも通す(木が速く燃える本物の表。T-0218)---
         const auto swapped = MakeAutoSwappedTable(*m_loaded);
@@ -428,6 +567,16 @@ namespace bicameral::editor {
         if (result && m_session->Mismatch())
             result = std::unexpected(m_session->Mismatch()->what);
 
+        // --- 箱の隅(燃えない窒素)は範囲で置いた量のまま(GPU の箱)---
+        const reaction::RxCell corner = sim::LabBoxCell(m_session->Gpu(), 0);
+        bool cornerFilled = false;
+        for (uint32_t i = 0; i < corner.speciesCount; ++i)
+            cornerFilled = cornerFilled ||
+                           (corner.species[i] == atmosphere[1].species && corner.amounts[i] == nitrogen);
+
+        if (result && !cornerFilled)
+            result = std::unexpected("箱全体に置いた窒素が隅のセルに無い");
+
         if (result)
             result = ReplayInNewSession(m_session->Recording());
 
@@ -439,8 +588,10 @@ namespace bicameral::editor {
         m_autoFailed = false;
         m_cell = {3, 3, 3};
         Log(Channel::Sim, Level::Info,
-            "--auto-lab: {} 刻みで GPU と CPU が一致し(刻み {} で表を替えた)、記録から別の箱で再生しても同じ",
-            AUTO_TICKS, AUTO_IGNITE_TICK);
+            "--auto-lab: 箱全体を 200 kPa の空気(窒素 {} µmol/セル)にして {} 刻みで GPU と CPU が一致し(刻み {} "
+            "で表を替えた)、"
+            "記録から別の箱で再生しても同じ",
+            nitrogen, AUTO_TICKS, AUTO_IGNITE_TICK);
     }
 
     // 別の起動の形: 世界の表だけを持つ新しい箱で、ファイルの形を通した記録を再生する(途中の表は記録の中身から作り直す。T-0217)。

@@ -5,8 +5,10 @@
 // 記録は刻み 0 の表の版と表の印を持ち、途中で替えた記録も古い表だけの記録も再生できる・持っていない表の記録は断る。
 // 同じ操作を初めの箱から最新の表で流し直す(RerunWithLatestTable。T-0194 の案 A)も毎刻みビット一致。
 // 表の中身(T-0217): 記録は使った表の中身を持ち、持っていない表は中身から足せば(AddTable)再生できる。
+// 範囲(T-0220): 初めに箱全体を酸素の多い 200 kPa の空気にする範囲のコマンドと、木の温度を直方体で決めるコマンドも一致する。
 // 引数は gpu_test_options.h。
 #include <algorithm>
+#include <array>
 #include <format>
 #include <span>
 #include <vector>
@@ -66,11 +68,23 @@ namespace {
         if (wood == materials.end())
             return std::unexpected("木の材料が無い");
 
+        // --- 箱全体を酸素の多い 200 kPa の空気に(範囲・分圧の換算。T-0220)---
+        const std::array<sim::SpeciesAmount, 2> atmosphere = {
+            sim::SpeciesAmount{.species = session.Table().SpeciesId("oxygen"),
+                               .amount = sim::LabGasMicromoles(60000, 300000)},
+            sim::SpeciesAmount{.species = session.Table().SpeciesId("nitrogen"),
+                               .amount = sim::LabGasMicromoles(140000, 300000)}};
+        if (!session.PlaceRegion(sim::LabWholeBox(), atmosphere, 300000))
+            return std::unexpected("箱全体に置けない");
+
         for (uint32_t i = 0; i < 8; ++i) {
             const sim::LabCellPosition cell{.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)};
             if (!session.Place(cell, wood->contents, 300000))
                 return std::unexpected("置けない");
         }
+
+        if (!session.SetTemperatureRegion({.low = {.x = 3, .y = 3, .z = 3}, .high = {.x = 4, .y = 4, .z = 4}}, 320000))
+            return std::unexpected("範囲の温度を決められない");
 
         if (auto stepped = session.Step(IGNITE_TICK); !stepped)
             return stepped;
