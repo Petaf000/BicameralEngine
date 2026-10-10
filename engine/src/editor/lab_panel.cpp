@@ -114,6 +114,15 @@ namespace bicameral::editor {
         if (loaded == nullptr || (m_loaded != nullptr && loaded->tableVersion == m_tableVersion))
             return;
 
+        // --- 材料の行の物質 ID を名前で新しい表へ(物質を足す・消す表では ID がずれる。消えた物質の行は空に。T-0242)---
+        if (m_table != nullptr) {
+            for (MaterialRow& row : m_rows) {
+                const auto oldId = static_cast<size_t>(row.species);
+                const bool known = row.species > 0 && oldId < m_table->speciesNames.size();
+                row.species = known ? static_cast<int>(loaded->table.SpeciesId(m_table->speciesNames[oldId])) : 0;
+            }
+        }
+
         m_loaded = std::move(loaded);
         m_table = std::shared_ptr<const sim::BakedReactionTable>(m_loaded, &m_loaded->table);
         m_tableVersion = m_loaded->tableVersion;

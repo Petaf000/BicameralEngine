@@ -6,8 +6,11 @@
 //   → パッケージのフォルダを消す(読めなくなったことも確かめる)
 //   → 再生: 再生ファイルの表の中身だけから表を作り直し(script::RebuildReactionTable)、ReplayPlayer でコマンドを流してハッシュを突き合わせる。
 // ほかに: 作り直した表が元の表とバイトで同じ・差し替えが結果を変えている(試験になっている)・壊れた中身と違う版は拒否する。
+// 物質を足す・消す差し替え(T-0242・ADR-0065): 刻み SPECIES_ADD_TICK にオゾン(O3)を足した表へ替え(後ろの物質の ID がずれる)、
+// 筆でオゾンを置き、刻み SPECIES_REMOVE_TICK にオゾンの無い表へ戻す(オゾンは酸素〔O2〕に分かれる)。再生は表の中身から同じ付け替えを作る。
 // 失敗すると失敗した条件を表示して 1 を返す(ctest が落ちる)。GPU は使わない。
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -21,6 +24,7 @@
 #include "save/replay_session.h"
 #include "script/reaction_table_loader.h"
 #include "sim/probe_sim.h"
+#include "sim/species_remap.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -30,6 +34,20 @@ namespace {
     constexpr std::string_view BASE_PACKAGE = "combustion_test";
     constexpr uint64_t TOTAL_TICKS = 40;
     constexpr uint64_t SWAP_TICK = 12;
+    constexpr uint64_t SPECIES_ADD_TICK = 20;     // オゾンを足した表へ(T-0242)
+    constexpr uint64_t OZONE_PLACE_TICK = 22;     // 筆でオゾンを置く
+    constexpr uint64_t SPECIES_REMOVE_TICK = 30;  // オゾンの無い表へ戻す(オゾンは酸素に分かれる)
+
+    // 試験の表に足すオゾン(species.luau の carbon の前に入れる。値は文献値を丸めた試験の値: 生成エンタルピー +142.7 kJ/mol・
+    // 比熱 39.2 J/(mol·K)。未確認)
+    constexpr std::string_view SPECIES_ANCHOR = "    carbon = {";
+    constexpr std::string_view OZONE_SPECIES =
+        "    ozone = {\n"
+        "        composition = { O = 3 },\n"
+        "        formation_enthalpy_j_per_mol = 142700,\n"
+        "        heat_capacity_mj_per_mol_k = 39200,\n"
+        "        thermal_conductivity_mw_per_m_k = gas(19),\n"
+        "    },\n";
 
     int failureCount = 0;
 
@@ -70,11 +88,21 @@ namespace {
                              "heat_capacity_mj_per_mol_k = 32036");
     }
 
-    // frame_loop の --auto-ignite と同じ木箱の壁に火をつけ、刻み SWAP_TICK の始めに表を差し替える
-    std::vector<ProbeCommand> MakeCommands(uint64_t swapVersion) {
+    // frame_loop の --auto-ignite と同じ木箱の壁に火をつけ、刻み SWAP_TICK の始めに表を差し替える。
+    // オゾンの表(ozone)があれば、物質を足す・置く・消す差し替えも(T-0242)
+    std::vector<ProbeCommand> MakeCommands(uint64_t swapVersion, const script::LoadedReactionTable* ozone = nullptr) {
         std::vector<ProbeCommand> commands = {
             MakePokeCommand(0, 0, 28, 32, PROBE_VIEW_Z), MakePokeCommand(0, 1, 28, 33, PROBE_VIEW_Z),
             MakePokeCommand(7, 2, 28, 32, PROBE_VIEW_Z), MakeTableCommand(SWAP_TICK, 3, swapVersion)};
+        if (ozone != nullptr) {
+            const std::array<SpeciesAmount, 1> contents = {
+                SpeciesAmount{.species = ozone->table.SpeciesId("ozone"), .amount = 50'000'000}};
+            commands.push_back(MakeTableCommand(SPECIES_ADD_TICK, 4, ozone->tableVersion));
+            commands.push_back(
+                MakePlaceCommand(OZONE_PLACE_TICK, 5, {.x = 30, .y = 30, .z = PROBE_VIEW_Z, .radius = 1}, contents));
+            commands.push_back(MakeTableCommand(SPECIES_REMOVE_TICK, 6, swapVersion));
+        }
+
         rng::sort(commands, CommandPrecedes);
 
         return commands;
@@ -126,12 +154,38 @@ namespace {
             return false;
         }
 
+        // --- オゾンを足した表(T-0242)。読んだらオゾンの無い中身に戻す(消す差し替えは swapped に戻す)---
+        const fs::path speciesFile = packages / BASE_PACKAGE / "species.luau";
+        const std::string speciesText = ReadText(speciesFile);
+        EXPECT(ReplaceInFile(speciesFile, SPECIES_ANCHOR, std::string(OZONE_SPECIES) + std::string(SPECIES_ANCHOR)));
+        const auto ozone = script::LoadReactionTable({.packageRoot = packages});
+        std::ofstream(speciesFile, std::ios::binary) << speciesText;
+        EXPECT(ozone.has_value());
+        if (!ozone) {
+            std::printf("  オゾンの表を読めない: %s\n", ozone.error().c_str());
+            return false;
+        }
+
+        EXPECT(ozone->table.SpeciesId("ozone") != 0 && swapped->table.SpeciesId("ozone") == 0 &&
+               ozone->table.SpeciesId("water_vapor") != swapped->table.SpeciesId("water_vapor"));
+        EXPECT(BuildSpeciesRemap(swapped->table, ozone->table).has_value() &&
+               BuildSpeciesRemap(ozone->table, swapped->table).has_value());
+
         EXPECT(swapped->tableVersion != initial->tableVersion && !initial->tableBytes.empty());
         EXPECT(swapped->table.speciesNames == initial->table.speciesNames &&
                swapped->table.rates != initial->table.rates);
 
-        const std::vector<ProbeCommand> commands = MakeCommands(swapped->tableVersion);
-        recorded = Run(initial->table, commands, {{swapped->tableVersion, &swapped->table}});
+        const std::vector<ProbeCommand> commands = MakeCommands(swapped->tableVersion, &*ozone);
+        const TableByVersion tables = {{swapped->tableVersion, &swapped->table}, {ozone->tableVersion, &ozone->table}};
+        recorded = Run(initial->table, commands, tables);
+
+        // オゾンを消す差し替えが結果を変えている(消さずに進めると、消した後のハッシュが違う)
+        std::vector<ProbeCommand> withoutRemove = commands;
+        std::erase_if(withoutRemove, [](const ProbeCommand& command) {
+            return command.type == PROBE_COMMAND_TYPE_TABLE && command.targetTick == SPECIES_REMOVE_TICK;
+        });
+        const std::vector<save::ReplayTickHash> kept = Run(initial->table, withoutRemove, tables);
+        EXPECT(kept[SPECIES_REMOVE_TICK - 1] == recorded[SPECIES_REMOVE_TICK - 1] && kept.back() != recorded.back());
 
         // 差し替えが結果を変えている(差し替えの印を除いて進めると、差し替えの後のハッシュが違う)
         std::vector<ProbeCommand> withoutSwap = commands;
@@ -151,7 +205,7 @@ namespace {
         // frame_loop の AttachReplayTables と同じ: 初期状態の表の版と、表の中身を版の昇順に
         save::ReplayFile replay = recorder.Build();
         replay.tableVersion = initial->tableVersion;
-        replay.tables = {ToReplayTable(*initial), ToReplayTable(*swapped)};
+        replay.tables = {ToReplayTable(*initial), ToReplayTable(*swapped), ToReplayTable(*ozone)};
         rng::sort(replay.tables, {}, &save::ReplayTable::version);
 
         const auto written = save::WriteReplayFile(replayPath, replay);
@@ -169,7 +223,7 @@ namespace {
             return;
 
         const save::ReplayFile& file = player->File();
-        EXPECT(file.tables.size() == 2 && file.FindTable(file.tableVersion) != nullptr);
+        EXPECT(file.tables.size() == 3 && file.FindTable(file.tableVersion) != nullptr);
 
         std::vector<script::LoadedReactionTable> rebuilt;
         TableByVersion tables;

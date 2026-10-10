@@ -23,6 +23,7 @@
 #include "sim/command.h"
 #include "sim/multires_nest.h"
 #include "sim/reaction_table.h"
+#include "sim/species_remap.h"
 
 namespace bicameral::sim {
 
@@ -115,6 +116,15 @@ namespace bicameral::sim {
     // CPU リファレンス: 1 刻みのコマンド(並びは (targetTick, sequence) の昇順)を shaders/sim/lab_box.hlsl と同じ順で当てる。
     // 当てた数を返す(当てられないコマンドは飛ばす。表を替えた印は箱をつつくので数に入る。表そのものは呼ぶ側が先に替える)
     uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands);
+
+    // --- 物質の一覧が変わる表への差し替え(T-0242・ADR-0065)---
+
+    // CPU リファレンス: 箱の全部のセル(MultiresNest::cells。一様の値と頁。空のセルは空のまま)を remap(今の表 → next)で付け替える。
+    // shaders/sim/lab_box.hlsl の RemapLabSpecies と同じ。箱は 1 レベルなので端数の枠と帳簿は使っていない(付け替えない)
+    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next);
+
+    // まだ刻んでいない置く操作(FILL・FILL_REGION)の材料の物質 ID を付け替える(消えた物質の材料は落とす。ほかの種類はそのまま)
+    [[nodiscard]] Command RemapLabCommand(const Command& command, const SpeciesRemap& remap);
 
     // CPU リファレンスの 1 刻み: コマンドを当てる → StepNest(LAB_STEP_OPTIONS)
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,

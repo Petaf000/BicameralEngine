@@ -10,6 +10,9 @@
 //   倍率を全部同じにすると、燃えたセルの熱が空気へ逃げて広がらない(気体 × 5 万: 火が 1 セルで消える)
 #include "sim/reaction_test_table.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace bicameral::sim {
 
     namespace {
@@ -121,6 +124,27 @@ namespace bicameral::sim {
 
     ReactionTableDefinition MakeCombustionTestTable() {
         return {.elements = Elements(), .species = Species(), .rules = Rules()};
+    }
+
+    ReactionTableDefinition MakeSpeciesChangedTestTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.species.push_back({.name = "hydrogen",
+                                      .composition = {{.element = "H", .count = 2}},
+                                      .formationEnthalpy = 0,
+                                      .heatCapacity = 28836,
+                                      .thermalConductivity = 18 * 5000});
+        definition.species.push_back({.name = "ozone",
+                                      .composition = {{.element = "O", .count = 3}},
+                                      .formationEnthalpy = 142700,
+                                      .heatCapacity = 39200,
+                                      .thermalConductivity = 19 * 5000});
+        std::erase_if(definition.species, [](const SpeciesDefinition& species) { return species.name == "cellulose"; });
+        std::erase_if(definition.rules, [](const RuleDefinition& rule) {
+            return std::ranges::any_of(rule.reactants,
+                                       [](const RuleTerm& term) { return term.species == "cellulose"; });
+        });
+
+        return definition;
     }
 
 }  // namespace bicameral::sim

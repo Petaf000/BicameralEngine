@@ -88,8 +88,12 @@ Luau は CPU で動く。GPU の世界に効くものは「表にベイクして
 - セル 1 つの付け替えは shaders/common/species_remap.hlsli の `RxRemapCell`(CPU と GPU で同じ関数)。
 - 世界: CPU リファレンス(`sim::ProbeReference`)と GPU(`sim::ProbeSim`。差し替えの刻みに付け替えの表を t5 に上げ、適用の単位の前に
   probe_tick.hlsl の RemapSpecies)が付け替える(gpu_probe_sim_test で毎刻みビット一致)。
-- 段階: ホットリロードは `script::SpeciesChangePolicy` で、世界の側が付け替えられる時だけ物質の一覧が変わる表を当てる(今の実行時は Reject のまま)。
-  覗き窓・実験室とエディタで当てる所(記録と再生・窓の確認)は T-0242、通常のゲームの起動でもファイルを見る(変わったら改造の印)は T-0243。
+- 段階: ホットリロードは `script::SpeciesChangePolicy` で、世界の側が付け替えられる時だけ物質の一覧が変わる表を当てる。
+  T-0242 からエディタ(`frame::TableHotReload`)は `--species-remap` の時 Remap(既定にするのは窓の世界の assert を直す T-0254): 覗き窓は付け替えた世界の写しから影の鎖を作り直す(見る物質の ID も新しい表)。
+  実験室は印の刻みに箱の全部のセルを付け替える(GPU は shaders/sim/lab_box.hlsl の RemapLabSpecies、CPU は `sim::RemapLabBox`。同じ RxRemapCell)。
+  まだ刻んでいない置く操作(実験室の材料・同じフレームの筆のコマンド)の物質 ID も名前で新しい表へ(消えた物質の材料は落とす)。
+  記録と再生は表の中身から同じ付け替えを作り直す(再生ファイル・BLAB。新しいコマンドの種類は要らない)。
+  通常のゲームの起動でもファイルを見る(変わったら改造の印)は T-0243。
 
 ## 3. 進行(Model)
 - 進行の状態 = GPU の小さなバッファ: フラグ(ビット列)・カウンタ(int32)・発見の記録(何を・いつ・どこで)。

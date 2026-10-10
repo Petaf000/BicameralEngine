@@ -87,6 +87,10 @@ namespace bicameral::sim {
     [[nodiscard]] ProbeCommand MakePlaceCommand(uint64_t targetTick, uint32_t sequence, const ProbePlaceShape& shape,
                                                 std::span<const SpeciesAmount> contents);
 
+    // 置くコマンドの物質 ID を、物質の一覧が変わる表への付け替え remap(sim/species_remap.h)で新しい表の ID にする(T-0242)。
+    // 消えた物質の材料は落とす。置くコマンドでなければそのまま。差し替えと同じフレームに前の表で作った筆のコマンドに使う
+    [[nodiscard]] ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap);
+
     // --- GPU から戻ってくるもの ---
 
     struct ProbeEvent {

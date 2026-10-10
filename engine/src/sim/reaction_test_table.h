@@ -11,4 +11,9 @@ namespace bicameral::sim {
 
     [[nodiscard]] ReactionTableDefinition MakeCombustionTestTable();
 
+    // 物質を足す・消す差し替えの試験用(T-0223・T-0242): 試験の表に水素(H2。水素の単体)とオゾン(O3)を足し、セルロースとそれを使う
+    // 規則を消した表(物質の数が 7 → 8 に変わる)。水素・オゾンの後ろの物質の ID がずれ、セルロースは炭・水素・酸素の単体に分かれる
+    // (ADR-0065)。試験の表そのもの(と Luau の写し)は変えない
+    [[nodiscard]] ReactionTableDefinition MakeSpeciesChangedTestTable();
+
 }  // namespace bicameral::sim

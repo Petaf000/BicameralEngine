@@ -346,6 +346,57 @@ namespace bicameral::sim {
         return applied;
     }
 
+    // --- 物質の付け替え(T-0242)---
+
+    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next) {
+        SpeciesRemapReport report;
+        if (remap.identity)
+            return report;
+
+        for (RxCell& cell : nest.cells)
+            report.Add(RemapReactionCell(remap, next, cell));
+
+        return report;
+    }
+
+    Command RemapLabCommand(const Command& command, const SpeciesRemap& remap) {
+        const bool fills = command.type == lab::LAB_COMMAND_TYPE_FILL ||
+                           command.type == lab::LAB_COMMAND_TYPE_FILL_REGION;
+        if (!fills || remap.identity)
+            return command;
+
+        // --- 材料を読み直して、残る物質だけ新しい ID で書き直す(残る物質どうしの順は変わらない)---
+        const uint32_t count = std::min(command.payload[lab::LAB_PAYLOAD_COUNT], lab::LAB_MAX_FILL_SPECIES);
+        std::vector<SpeciesAmount> contents;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t word = lab::LAB_PAYLOAD_ENTRIES + (COMMAND_WORDS_PER_ENTRY * i);
+            const uint32_t oldId = command.payload[word];
+            const uint32_t newId = oldId < remap.newIds.size() ? remap.newIds[oldId] : 0;
+            if (newId == 0)
+                continue;
+
+            const uint64_t amount = command.payload[word + 1] | (uint64_t{command.payload[word + 2]} << 32);
+            contents.push_back({.species = newId, .amount = amount});
+        }
+
+        Command remapped = command;
+        remapped.payload.fill(0);
+        remapped.payload[lab::LAB_PAYLOAD_CELL] = command.payload[lab::LAB_PAYLOAD_CELL];
+        remapped.payload[lab::LAB_PAYLOAD_TEMPERATURE] = command.payload[lab::LAB_PAYLOAD_TEMPERATURE];
+        remapped.payload[lab::LAB_PAYLOAD_COUNT] = static_cast<uint32_t>(contents.size());
+        for (uint32_t i = 0; i < contents.size(); ++i) {
+            const uint32_t word = lab::LAB_PAYLOAD_ENTRIES + (COMMAND_WORDS_PER_ENTRY * i);
+            remapped.payload[word] = contents[i].species;
+            remapped.payload[word + 1] = static_cast<uint32_t>(contents[i].amount);
+            remapped.payload[word + 2] = static_cast<uint32_t>(contents[i].amount >> 32);
+        }
+
+        remapped.size = static_cast<uint16_t>(sizeof(uint32_t) *
+                                              (lab::LAB_PAYLOAD_ENTRIES + (COMMAND_WORDS_PER_ENTRY * contents.size())));
+
+        return remapped;
+    }
+
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                     std::span<const Command> commands) {
         ApplyLabCommands(nest, table, commands);

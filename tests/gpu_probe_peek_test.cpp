@@ -7,6 +7,8 @@
 //   - 影の鎖が 9 段ある。子どうしが違う家族の数(影の中で細部が動いたか)はログに出すだけ: この場面の点のセルは 4000 K で
 //     反応が反応物の量で頭打ちになり(確率的な丸めの差が出ない)、周りは冷たくて反応しないので 0 になる(細部の動きは T-0017 の 600 K で確認済み)
 //   - 反応表の差し替え(T-0194): 刻みの途中で世界と覗き窓の表を替えても、毎フレーム CPU とビット一致し、替えない時と違う世界になる
+//   - 物質を足す・消す表への差し替え(T-0242・ADR-0065): 世界のセルの物質を名前で付け替えた後も、覗き窓が影の鎖を新しい表で作り直し、
+//     見る物質の ID も新しい表になって、毎フレーム CPU とビット一致する(付け替えた世界の写しから作るので、影の鎖そのものは付け替えない)
 //   - debug layer のエラーとシェーダーの assert が 0 件
 // 引数: gpu_test_options.h(--warp は NuGet の WARP。T-0097)
 #include <algorithm>
@@ -345,6 +347,9 @@ int main(int argc, char** argv) {
     const std::optional<BakedReactionTable> swappedTable = MakeSwappedTable();
     Log(Channel::Sim, Level::Info, "反応表を刻み {} の始めに替えて、覗きながら(T-0194)", SWAP_TICK);
     const PeekRun swapped = swappedTable ? RunPeek(device->Get(), *table, true, &*swappedTable) : PeekRun{};
+    const auto speciesTable = BakeReactionTable(MakeSpeciesChangedTestTable());
+    Log(Channel::Sim, Level::Info, "物質を足す・消す表に刻み {} の始めに替えて、覗きながら(T-0242)", SWAP_TICK);
+    const PeekRun speciesSwapped = speciesTable ? RunPeek(device->Get(), *table, true, &*speciesTable) : PeekRun{};
 
     // 覗いて刻んだフレーム(段が 9 で、細かくした直後でない)の、覗かない時との GPU 時間の差の平均(入れ子の読み戻しを含む)
     double extraMicroseconds = 0.0;
@@ -381,6 +386,11 @@ int main(int argc, char** argv) {
     failures.Check(swapped.ok && swapped.lastNestHash != peeked.lastNestHash &&
                        swapped.hashes.back().hash != peeked.hashes.back().hash,
                    "表の差し替え: 世界も覗き窓も替えない時と違う");
+    failures.Check(speciesSwapped.ok && speciesSwapped.mismatchedFrames == 0 && speciesSwapped.debugAssertCount == 0,
+                   "物質を足す・消す差し替え: 毎フレーム、覗き窓の入れ子と抽出が CPU とビット一致");
+    failures.Check(
+        speciesSwapped.ok && speciesSwapped.lastNestHash != peeked.lastNestHash && speciesSwapped.peekedFrames >= 9,
+        "物質を足す・消す差し替え: 替えた後も覗き続け、替えない時と違う");
 
     const bool passed = failures.count == 0 && test::PassesValidation(*device, "gpu_probe_peek_test");
     Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_probe_peek_test({}): {}",

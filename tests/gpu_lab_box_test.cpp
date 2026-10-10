@@ -6,6 +6,9 @@
 // 同じ操作を初めの箱から最新の表で流し直す(RerunWithLatestTable。T-0194 の案 A)も毎刻みビット一致。
 // 表の中身(T-0217): 記録は使った表の中身を持ち、持っていない表は中身から足せば(AddTable)再生できる。
 // 範囲(T-0220): 初めに箱全体を酸素の多い 200 kPa の空気にする範囲のコマンドと、木の温度を直方体で決めるコマンドも一致する。
+// 物質を足す・消す表(T-0242・ADR-0065): 燃えている箱の表を、水素を足してセルロースを消した表に替える。印の刻みに箱の全部のセルを
+// 名前で付け替え(GPU と CPU が同じ RxRemapCell)、毎刻みビット一致・元素は報告した端数のほか保たれる・別の実験室で記録の表を足すと再生できる・
+// まだ刻んでいない置く操作の材料も新しい ID になる(消えた物質の材料は落ちる)。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <array>
@@ -30,7 +33,9 @@ namespace {
     constexpr uint64_t FIRST_TABLE_VERSION = 0x1111;  // 試験の中だけの版(TableVersion ではない。違えばよい)
     constexpr uint64_t SWAPPED_TABLE_VERSION = 0x2222;
     constexpr uint64_t UNKNOWN_TABLE_VERSION = 0x3333;
-    constexpr uint32_t SWAP_RUN_TICKS = 100;  // 表を替えてから刻む数
+    constexpr uint32_t SWAP_RUN_TICKS = 100;            // 表を替えてから刻む数
+    constexpr uint64_t SPECIES_TABLE_VERSION = 0x4444;  // 物質を足す・消す表(T-0242)
+    constexpr uint32_t SPECIES_FIRE_TICKS = 30;         // 物質の一覧を替える前に燃やす刻み
 
     // 木の燃焼を 100 倍速くした表(物質の一覧は同じ。gpu_probe_sim_test の差し替えと同じ形)
     std::expected<sim::BakedReactionTable, std::string> MakeSwappedTable() {
@@ -250,6 +255,141 @@ namespace {
         return {};
     }
 
+    // --- 物質を足す・消す表(T-0242)---
+
+    // 元素の名前ごとの原子の数(CPU の箱の全部のセル)
+    std::vector<sim::NamedElementCount> CountBoxElements(const sim::LabSession& session) {
+        std::vector<sim::NamedElementCount> totals;
+        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+            for (const sim::NamedElementCount& count :
+                 sim::CountNamedElements(session.Table(), sim::LabBoxCell(session.Cpu(), index))) {
+                const auto found = std::ranges::find(totals, count.element, &sim::NamedElementCount::element);
+                if (found == totals.end())
+                    totals.push_back(count);
+                else
+                    found->atomMicromoles += count.atomMicromoles;
+            }
+        }
+
+        std::ranges::sort(totals, {}, &sim::NamedElementCount::element);
+
+        return totals;
+    }
+
+    uint64_t SumAtoms(std::span<const sim::NamedElementCount> totals) {
+        uint64_t sum = 0;
+        for (const sim::NamedElementCount& count : totals)
+            sum += count.atomMicromoles;
+
+        return sum;
+    }
+
+    // まだ刻んでいない置く操作の材料の付け替え(CPU だけ): [セルロース・酸素・窒素] → [酸素・窒素](新しい ID)
+    std::expected<void, std::string> CheckPendingRemap(const sim::BakedReactionTable& first,
+                                                       const sim::BakedReactionTable& changed) {
+        const auto remap = sim::BuildSpeciesRemap(first, changed);
+        if (!remap)
+            return std::unexpected(remap.error());
+
+        const std::array<sim::SpeciesAmount, 3> contents = {
+            sim::SpeciesAmount{.species = first.SpeciesId("cellulose"), .amount = 100},
+            sim::SpeciesAmount{.species = first.SpeciesId("nitrogen"), .amount = 200},
+            sim::SpeciesAmount{.species = first.SpeciesId("oxygen"), .amount = 0x1'0000'0300}};
+        const sim::Command command = sim::MakeLabFillCommand(5, 0, {.x = 1, .y = 2, .z = 3}, contents, 400000);
+        const sim::Command expected = sim::MakeLabFillCommand(
+            5, 0, {.x = 1, .y = 2, .z = 3},
+            std::array{sim::SpeciesAmount{.species = changed.SpeciesId("nitrogen"), .amount = 200},
+                       sim::SpeciesAmount{.species = changed.SpeciesId("oxygen"), .amount = 0x1'0000'0300}},
+            400000);
+        if (sim::RemapLabCommand(command, *remap) != expected)
+            return std::unexpected("置く操作の材料が新しい表の ID にならない");
+
+        return {};
+    }
+
+    std::expected<void, std::string> RunSpeciesChange(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
+                                                      const sim::BakedReactionTable& first) {
+        const auto changed = sim::BakeReactionTable(sim::MakeSpeciesChangedTestTable());
+        if (!changed)
+            return std::unexpected(changed.error());
+
+        if (auto pending = CheckPendingRemap(first, *changed); !pending)
+            return pending;
+
+        auto session = sim::LabSession::Create(device, queueType, first, FIRST_TABLE_VERSION, "first");
+        if (!session)
+            return std::unexpected(session.error());
+
+        // --- 300 K の空気の箱に木を置いて燃やし、燃えている途中で物質の一覧を替える ---
+        const std::vector<sim::LabMaterial> materials = sim::MakeLabMaterials(first);
+        const auto wood = std::ranges::find_if(materials, [](const sim::LabMaterial& m) { return m.name == "木"; });
+        if (wood == materials.end())
+            return std::unexpected("木の材料が無い");
+
+        for (uint32_t i = 0; i < 8; ++i)
+            static_cast<void>(session->Place({.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)},
+                                             wood->contents, 300000));
+
+        static_cast<void>(session->Step(IGNITE_TICK));
+        static_cast<void>(session->SetTemperature({.x = 3, .y = 3, .z = 3}, IGNITE_MILLIKELVIN));
+        if (auto stepped = session->Step(SPECIES_FIRE_TICKS); !stepped)
+            return stepped;
+
+        const std::vector<sim::NamedElementCount> before = CountBoxElements(*session);
+        if (auto change = session->ChangeTable(*changed, SPECIES_TABLE_VERSION, "species"); !change)
+            return change;
+
+        if (auto stepped = session->Step(1); !stepped)
+            return stepped;
+
+        // --- 印の刻み: 付け替えた(セルロースを分けた)・元素は失った端数のほか保たれる・毎刻み一致 ---
+        const std::vector<sim::NamedElementCount> after = CountBoxElements(*session);
+        const auto& report = session->LastRemapReport();
+        const uint64_t lost = report ? report->remainderAtomMicromoles + report->overflowAtomMicromoles : 0;
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: 物質の一覧を替えた: 分けた物質 {} µmol・失った原子 {} µmol・足したエネルギー {} "
+            "mJ・水素 {} µmol",
+            report ? report->decomposedMicromoles : 0, lost, report ? report->energyDeltaMilliJoules : 0,
+            TotalOf(session->Gpu(), changed->SpeciesId("hydrogen")));
+        if (!report || report->decomposedMicromoles == 0 || session->TableVersion() != SPECIES_TABLE_VERSION)
+            return std::unexpected("物質の付け替えが箱に当たっていない");
+
+        if (SumAtoms(before) != SumAtoms(after) + lost || TotalOf(session->Gpu(), changed->SpeciesId("hydrogen")) == 0)
+            return std::unexpected(std::format("元素が保たれない(前 {} µmol・後 {} µmol・失った {} µmol)",
+                                               SumAtoms(before), SumAtoms(after), lost));
+
+        if (auto stepped = session->Step(SWAP_RUN_TICKS); !stepped)
+            return stepped;
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        // --- 別の実験室(最初の表だけを持つ)で、記録の表を足して再生する(別の起動の形)---
+        const sim::LabRecording recorded = session->Recording();
+        const auto parsed = sim::ParseLabRecording(sim::SerializeLabRecording(recorded));
+        auto other = sim::LabSession::Create(device, queueType, first, FIRST_TABLE_VERSION, "first");
+        if (!parsed || !other)
+            return std::unexpected("記録を読めない・実験室を作れない");
+
+        if (auto added = other->AddTable(*changed, SPECIES_TABLE_VERSION, "species"); !added)
+            return added;
+
+        if (auto replayed = other->Replay(*parsed); !replayed)
+            return replayed;
+
+        if (auto checked = CheckNoMismatch(*other); !checked)
+            return checked;
+
+        if (other->ReplayDivergence() || other->Recording().hashes != recorded.hashes)
+            return std::unexpected("物質の一覧を替えた記録の再生が元と違う");
+
+        // --- 最新の表で初めから流し直す: 古い表で置いた材料(木 = セルロース)は落ちて、毎刻み一致 ---
+        if (auto rerun = session->RerunWithLatestTable(); !rerun)
+            return rerun;
+
+        return CheckNoMismatch(*session);
+    }
+
     int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
@@ -282,6 +422,11 @@ namespace {
 
         if (auto result = RunTableChange(*session, *table); !result) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(表の差し替え: {})", result.error());
+            return 1;
+        }
+
+        if (auto result = RunSpeciesChange(device->Get(), options->queueType, *table); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(物質を足す・消す表: {})", result.error());
             return 1;
         }
 

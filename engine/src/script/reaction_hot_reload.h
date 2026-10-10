@@ -26,8 +26,8 @@ namespace bicameral::script {
 
     // 物質を足す・消す(物質の一覧が変わる)表を当てるか(T-0223・ADR-0065)
     enum class SpeciesChangePolicy : uint8_t {
-        Reject,  // 当てない(世界の側がまだ付け替えられない: 覗き窓・実験室。T-0242 まで)
-        Remap,  // 名前で付け替えて当てる(sim::BuildSpeciesRemap が通る表なら。世界〔ProbeReference・ProbeSim〕は付け替えられる)
+        Reject,  // 当てない(世界の側が付け替えられない時。既定)
+        Remap,  // 名前で付け替えて当てる(sim::BuildSpeciesRemap が通る表なら。世界・覗き窓・実験室〔T-0242〕。エディタは --species-remap の時)
     };
 
     // 新しい表を今の世界に当てられるか: 物質の一覧(名前・並び = ID・元素の組み立て)が同じなら当てられる。

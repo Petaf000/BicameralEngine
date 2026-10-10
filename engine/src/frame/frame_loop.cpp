@@ -213,8 +213,10 @@ namespace bicameral::frame {
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
-                  m_tableReload({.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
-                                options.editor && options.replayPath.empty()),
+                  m_tableReload(
+                      {.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
+                      options.editor && options.replayPath.empty(),
+                      options.speciesRemap ? script::SpeciesChangePolicy::Remap : script::SpeciesChangePolicy::Reject),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -271,6 +273,7 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             void TakeTableSwaps(SimCursor start, uint32_t limit, std::vector<sim::ProbeCommand>& commands);
+            void RemapLivePlaceCommands(uint64_t previousVersion, std::vector<sim::ProbeCommand>& commands);
             [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
 
@@ -980,6 +983,7 @@ namespace bicameral::frame {
             const uint32_t unitsPerTick = m_sim.UnitsPerTick();
             const uint64_t firstUnit = (start.tick * unitsPerTick) + start.unit;
             const uint64_t endUnit = (m_scheduler.Cursor().tick * unitsPerTick) + m_scheduler.Cursor().unit;
+            const uint64_t previousVersion = m_tableReload.AppliedVersion();
             auto swaps = m_tableReload.TakeSwaps(firstUnit, static_cast<uint32_t>(endUnit - firstUnit), unitsPerTick,
                                                  !m_replay.empty(), commands.size() < limit, m_nextSequence, commands);
             if (!swaps) {
@@ -990,11 +994,35 @@ namespace bicameral::frame {
             }
 
             m_frameTableSwaps = std::move(*swaps);
+            if (m_replay.empty())
+                RemapLivePlaceCommands(previousVersion, commands);
 
             // 覗き窓も同じ表へ(世界がその刻みを過ぎた境界を抽出する時に替える。T-0194)
             for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
                 if (swap.table != nullptr)
                     m_peek.QueueTableSwap(swap.tick, *swap.table);
+            }
+        }
+
+        // 物質の一覧が変わる差し替え(T-0242・ADR-0065): このフレームに前の表で作った筆のコマンド(置く。物質 ID を持つ)のうち、
+        // 差し替えの刻み以降に当たるものを名前で新しい表の ID にする(世界は差し替えの刻みの始めにセルを付け替えてからコマンドを当てる)。
+        // 記録はこの後なので、再生ファイルには付け替えた後のコマンドが残る(再生では付け替えない)
+        void FrameLoop::RemapLivePlaceCommands(uint64_t previousVersion, std::vector<sim::ProbeCommand>& commands) {
+            const auto previous = m_tableReload.Find(previousVersion);
+            const sim::BakedReactionTable* from = previous != nullptr ? &previous->table : nullptr;
+            for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
+                if (from == nullptr || swap.table == nullptr)
+                    break;
+
+                const auto remap = sim::BuildSpeciesRemap(*from, *swap.table);
+                if (remap && !remap->identity) {
+                    for (sim::ProbeCommand& command : commands) {
+                        if (command.targetTick >= swap.tick)
+                            command = sim::RemapPlaceCommand(command, *remap);
+                    }
+                }
+
+                from = swap.table;
             }
         }
 
@@ -1526,7 +1554,7 @@ namespace bicameral::frame {
                 return false;
             }
 
-            auto autoReload = AutoReload::Create(m_options.packageRoot);
+            auto autoReload = AutoReload::Create(m_options.packageRoot, m_options.speciesRemap);
             if (!autoReload) {
                 Log(Channel::Tool, Level::Error, "{}", autoReload.error());
                 return false;

@@ -87,6 +87,9 @@ namespace bicameral::frame {
         // パッケージ(--packages の写し)の反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻み流して終える(--auto-reload。
         // --editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。frame/auto_reload。T-0195)
         bool autoReload = false;
+        // エディタのホットリロードで物質を足す・消す表も当てる(名前で付け替える。--species-remap。T-0242)。--auto-reload と一緒なら
+        // 速度の書き換えの後にオゾンを足す・消す段も確かめる。既定にするのは窓の世界の assert を直してから(T-0254)
+        bool speciesRemap = false;
         // 反応表のパネルで木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版に戻って終える(--auto-table-edit。--editor と
         // --packages の写しと一緒に。editor/reaction_table_panel。T-0219)
         bool autoTableEdit = false;
