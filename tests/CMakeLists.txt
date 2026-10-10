@@ -85,6 +85,7 @@ add_test(NAME reaction_wait COMMAND reaction_wait_test)
 add_executable(gas_reference_test gas_reference_test.cpp)  # 気体の流れの CPU リファレンス G1(T-0026)
 target_link_libraries(gas_reference_test PRIVATE bicameral_gas bicameral_core)
 add_test(NAME gas_reference COMMAND gas_reference_test)
+set_tests_properties(gas_reference PROPERTIES TIMEOUT 1800)  # debug で約 12 分(T-0226 で小刻みが 6 倍)
 
 add_executable(multires_test multires_test.cpp)
 target_link_libraries(multires_test PRIVATE bicameral_multires bicameral_core)
