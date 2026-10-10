@@ -191,6 +191,41 @@ namespace bicameral::sim {
         return command;
     }
 
+    ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap) {
+        if (command.type != PROBE_COMMAND_TYPE_PLACE || remap.identity)
+            return command;
+
+        // --- 残る物質の材料だけ、新しい ID で詰め直す(当てられない数のコマンドは当てられないまま)---
+        const uint32_t shape = command.payload[PROBE_PLACE_WORD_SHAPE];
+        const uint32_t count = (shape >> 16) & 0xFFu;
+        if (count > PROBE_PLACE_MAX_SPECIES)
+            return command;
+
+        ProbeCommand remapped = command;
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t from = PROBE_PLACE_WORD_ENTRIES + (PROBE_PLACE_WORDS_PER_ENTRY * i);
+            const uint32_t oldId = command.payload[from];
+            const uint32_t newId = oldId < remap.newIds.size() ? remap.newIds[oldId] : 0;
+            if (newId == 0)
+                continue;
+
+            const uint32_t to = PROBE_PLACE_WORD_ENTRIES + (PROBE_PLACE_WORDS_PER_ENTRY * kept);
+            remapped.payload[to] = newId;
+            remapped.payload[to + 1] = command.payload[from + 1];
+            remapped.payload[to + 2] = command.payload[from + 2];
+            kept += 1;
+        }
+
+        for (uint32_t word = PROBE_PLACE_WORD_ENTRIES + (PROBE_PLACE_WORDS_PER_ENTRY * kept);
+             word < PROBE_PLACE_PAYLOAD_WORDS; ++word)
+            remapped.payload[word] = 0;
+
+        remapped.payload[PROBE_PLACE_WORD_SHAPE] = (shape & 0xFF00FFFFu) | (kept << 16);
+
+        return remapped;
+    }
+
     ProbeCommand MakeTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t version) {
         ProbeCommand command{.targetTick = targetTick,
                              .sequence = sequence,

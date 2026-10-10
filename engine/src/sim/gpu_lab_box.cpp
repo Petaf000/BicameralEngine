@@ -19,8 +19,13 @@ namespace bicameral::sim {
         if (!shader)
             return std::unexpected(shader.error());
 
+        const auto remapShader = gpu::LoadShader("sim/lab_box_remap.cso");
+        if (!remapShader)
+            return std::unexpected(remapShader.error());
+
         result.m_applyPipeline = gpu::CreateComputePipeline(device, result.m_nest.RootSignature(), *shader);
-        if (!result.m_applyPipeline)
+        result.m_remapPipeline = gpu::CreateComputePipeline(device, result.m_nest.RootSignature(), *remapShader);
+        if (!result.m_applyPipeline || !result.m_remapPipeline)
             return std::unexpected("実験室の箱のパイプラインを作れない");
 
         // --- コマンドの列(u4)と写し ---
@@ -72,6 +77,43 @@ namespace bicameral::sim {
         }
 
         m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);
+
+        return true;
+    }
+
+    // 物質の付け替え(T-0242): 付け替えの表を u4 に写し、箱の全部のセルを 1 スレッド 1 セルで付け替える
+    bool GpuLabBox::RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       std::span<const uint32_t> remapWords, uint32_t cellCount) {
+        ComPtr<ID3D12Device> device;
+        if (remapWords.empty() || FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        const uint64_t bytes = remapWords.size_bytes();
+        m_remapUpload = gpu::CreateBuffer(device.Get(), bytes, gpu::BufferKind::Upload);
+        m_remap = gpu::CreateBuffer(device.Get(), bytes, gpu::BufferKind::UnorderedAccess);
+        if (!m_remapUpload || !m_remap)
+            return false;
+
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead{.Begin = 0, .End = 0};
+        if (FAILED(m_remapUpload->Map(0, &noRead, &mapped)))
+            return false;
+
+        std::memcpy(mapped, remapWords.data(), bytes);
+        m_remapUpload->Unmap(0, nullptr);
+
+        // --- 写して u4 に結び、付け替える ---
+        list->CopyBufferRegion(m_remap.Get(), 0, m_remapUpload.Get(), 0, bytes);
+        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(m_remap.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &toUav);
+
+        constexpr uint32_t REMAP_GROUP_THREADS = 64;  // lab_box.hlsl の RemapLabSpecies と同じ
+        const D3D12_GPU_VIRTUAL_ADDRESS remapAddress = m_remap->GetGPUVirtualAddress();
+        m_nest.SetExternalViews(remapAddress, remapAddress);
+        m_nest.RecordExternalDispatch(list, debugRing, m_remapPipeline.Get(),
+                                      (cellCount + REMAP_GROUP_THREADS - 1) / REMAP_GROUP_THREADS,
+                                      {cellCount, 0, 0, 0});
 
         return true;
     }

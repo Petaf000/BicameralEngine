@@ -2,8 +2,12 @@
 #include "sim/lab_session.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <format>
+#include <utility>
+
+#include "core/log.h"
 
 namespace bicameral::sim {
 
@@ -38,6 +42,7 @@ namespace bicameral::sim {
           m_queue(std::move(queue)),
           m_ring(std::move(ring)),
           m_box(std::move(box)),
+          m_ledgerColumns(LabBoxCapacity(m_table).ledgerColumns),
           m_initial(MakeLabBoxNest(m_table)),
           m_cpu(m_initial),
           m_read(m_initial) {}
@@ -111,7 +116,7 @@ namespace bicameral::sim {
     }
 
     // 箱の表を版 tableVersion の表に替える(GPU と CPU の両方。箱のキューは刻みごとに待っていて空なので、前の表のバッファはすぐ捨ててよい)
-    std::expected<void, std::string> LabSession::SwitchTable(uint64_t tableVersion) {
+    std::expected<void, std::string> LabSession::SwitchTable(uint64_t tableVersion, bool remapBox) {
         if (tableVersion == m_tableVersion)
             return {};
 
@@ -119,8 +124,20 @@ namespace bicameral::sim {
         if (found == m_tables.end())
             return std::unexpected(std::format("反応表の版 {:016x} をこの実験室は持っていない", tableVersion));
 
+        // --- 物質の一覧が違えば、名前で付け替える(箱に当てるのは StepOne。ResetTo は新しい表で箱を作り直すので捨てる)---
+        std::expected<SpeciesRemap, std::string> remap = SpeciesRemap{.identity = true};
+        if (remapBox)
+            remap = BuildSpeciesRemap(m_table, found->second);
+
+        if (!remap)
+            return std::unexpected(
+                std::format("反応表の版 {:016x} へ物質を付け替えられない: {}", tableVersion, remap.error()));
+
         if (auto retired = m_box.ReplaceTable(found->second); !retired)
             return std::unexpected(retired.error());
+
+        if (!remap->identity)
+            m_boxRemap = std::move(*remap);
 
         m_table = found->second;
         m_tableVersion = tableVersion;
@@ -135,7 +152,7 @@ namespace bicameral::sim {
         // --- 表を替えた印: この刻みのコマンドを当てる前に替える(印そのものは箱をつつく。ADR-0055)---
         for (const Command& command : commands) {
             if (const auto version = LabTableVersionOf(command); version) {
-                if (auto switched = SwitchTable(*version); !switched)
+                if (auto switched = SwitchTable(*version, true); !switched)
                     return switched;
             }
         }
@@ -148,6 +165,12 @@ namespace bicameral::sim {
         m_ring.RecordBegin(list);
         if (!m_uploaded && !m_box.RecordUpload(list, m_initial))
             return std::unexpected("初めの箱を写せない");
+
+        // --- 物質の一覧が変わった刻み: コマンドの前に箱の全部のセルを付け替える(GPU と CPU が同じ RxRemapCell。T-0242)---
+        std::optional<SpeciesRemap> boxRemap = std::exchange(m_boxRemap, std::nullopt);
+        if (boxRemap && !m_box.RecordSpeciesRemap(list, m_ring.GpuAddress(), PackSpeciesRemap(*boxRemap),
+                                                  static_cast<uint32_t>(m_cpu.cells.size())))
+            return std::unexpected("箱の物質の付け替えを記録できない");
 
         if (!m_box.RecordTick(list, m_ring.GpuAddress(), tick, commands))
             return std::unexpected("刻みを記録できない");
@@ -165,6 +188,15 @@ namespace bicameral::sim {
             return std::unexpected("箱を読み戻せない");
 
         // --- CPU リファレンス → 比べる ---
+        if (boxRemap) {
+            m_lastRemapReport = RemapLabBox(m_cpu, *boxRemap, m_table);
+            Log(Channel::Sim, Level::Info,
+                "実験室: 刻み {} で物質を付け替えた(分けた物質 {} µmol・失った原子 {} + {} µmol・足したエネルギー {} "
+                "mJ)",
+                tick, m_lastRemapReport->decomposedMicromoles, m_lastRemapReport->remainderAtomMicromoles,
+                m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->energyDeltaMilliJoules);
+        }
+
         StepLabBox(m_cpu, m_table, tick, commands);
         m_mismatch = FindLabMismatch(m_cpu, m_read, tick);
 
@@ -194,11 +226,16 @@ namespace bicameral::sim {
     }
 
     std::expected<void, std::string> LabSession::ResetTo(uint64_t tableVersion) {
-        if (auto switched = SwitchTable(tableVersion); !switched)
+        if (auto switched = SwitchTable(tableVersion, false); !switched)
             return switched;
 
+        m_boxRemap.reset();  // 新しい表で箱を作り直すので、付け替えは要らない
+        m_lastRemapReport.reset();
         m_initialVersion = tableVersion;
+        // 箱は 1 レベルで帳簿を使わない(いつも 0)。物質の数の違う表で作り直しても、GPU の箱の大きさ(作った時の列)に合わせる
         m_initial = MakeLabBoxNest(m_table);
+        m_initial.capacity.ledgerColumns = m_ledgerColumns;
+        m_initial.ledger.assign(size_t{multires::MR_LEDGER_LEVELS} * m_ledgerColumns, 0);
         m_cpu = m_initial;
         m_read = m_initial;
         m_uploaded = false;  // 次の刻みのリストの先頭で、初めの箱を写し直す
@@ -234,6 +271,10 @@ namespace bicameral::sim {
             }
         }
 
+        // --- 記録の表から表へ物質を付け替えられるか(T-0242)---
+        if (auto chain = CheckTableChain(versions); !chain)
+            return chain;
+
         if (auto reset = ResetTo(initialVersion); !reset)
             return reset;
 
@@ -246,9 +287,14 @@ namespace bicameral::sim {
         if (auto stepped = Step(static_cast<uint32_t>(recording.tickCount)); !stepped)
             return stepped;
 
-        // --- 流し終えたら、次の刻みから最新の表(世界の表)に戻す印 ---
-        if (m_tableVersion != m_latestVersion)
+        // --- 流し終えたら、次の刻みから最新の表(世界の表)に戻す印。物質を付け替えられない(単体の無い元素の物質を消す)なら
+        //     記録の表のまま(Reset で最新の表の箱から始め直す。T-0242)---
+        const std::array<uint64_t, 2> back = {m_tableVersion, m_latestVersion};
+        if (m_tableVersion != m_latestVersion && CheckTableChain(back))
             m_pending.push_back(MakeLabTableCommand(m_tick, m_sequence++, m_latestVersion));
+        else if (m_tableVersion != m_latestVersion)
+            Log(Channel::Sim, Level::Warning,
+                "実験室: 再生の後、最新の表(版 {:016x})へ物質を付け替えられないので記録の表のまま", m_latestVersion);
 
         return {};
     }
@@ -282,6 +328,21 @@ namespace bicameral::sim {
         if (tableVersion == 0)
             return std::unexpected("版の分からない表(版 0)には替えられない(記録の印が表を指せない)");
 
+        // --- 物質の一覧が違う表: 箱の表から付け替えられるか確かめ、まだ刻んでいない置く操作の材料を新しい ID に(T-0242)---
+        if (const auto box = BuildSpeciesRemap(m_table, table); !box)
+            return std::unexpected(
+                std::format("反応表の版 {:016x} へ物質を付け替えられない: {}", tableVersion, box.error()));
+
+        const auto latest = m_tables.find(m_latestVersion);
+        if (latest != m_tables.end()) {
+            const auto pending = BuildSpeciesRemap(latest->second, table);
+            if (!pending)
+                return std::unexpected(pending.error());
+
+            for (Command& command : m_pending)
+                command = RemapLabCommand(command, *pending);
+        }
+
         m_tables.insert_or_assign(tableVersion, table);
         if (!tableBytes.empty())
             m_tableBytes.insert_or_assign(tableVersion, std::move(tableBytes));
@@ -300,9 +361,6 @@ namespace bicameral::sim {
         if (tableVersion == 0)
             return std::unexpected("版の分からない表(版 0)は足せない");
 
-        if (table.species.size() != m_table.species.size() || table.speciesNames != m_table.speciesNames)
-            return std::unexpected(std::format("記録の反応表(版 {:016x})は物質の一覧が今の表と違う", tableVersion));
-
         m_tables.insert_or_assign(tableVersion, table);
         if (!tableBytes.empty())
             m_tableBytes.insert_or_assign(tableVersion, std::move(tableBytes));
@@ -319,6 +377,27 @@ namespace bicameral::sim {
         const uint64_t tickCount = m_tick;
         std::vector<Command> history = std::move(m_history);
         history.insert(history.end(), m_scheduled.begin(), m_scheduled.end());
+
+        // --- 置いた時の表(刻み 0 の表と印)から最新の表へ、材料の物質 ID を名前で付け替える(T-0242)---
+        const auto latest = m_tables.find(m_latestVersion);
+        uint64_t era = m_initialVersion;
+        for (Command& command : history) {
+            if (const auto version = LabTableVersionOf(command); version) {
+                era = *version;
+                continue;
+            }
+
+            const auto from = m_tables.find(era);
+            if (era == m_latestVersion || from == m_tables.end() || latest == m_tables.end())
+                continue;
+
+            const auto remap = BuildSpeciesRemap(from->second, latest->second);
+            if (!remap)
+                return std::unexpected(std::format("最新の表で流し直せない: {}", remap.error()));
+
+            command = RemapLabCommand(command, *remap);
+        }
+
         std::erase_if(history, isTableMark);
         std::vector<Command> pending = std::move(m_pending);
         std::erase_if(pending, isTableMark);
@@ -336,6 +415,23 @@ namespace bicameral::sim {
         m_pending = std::move(pending);
 
         return stepped;
+    }
+
+    // 表の列(刻み 0 の表 → 印の表 → …)の隣どうしが、物質を名前で付け替えられるか(T-0242。どれも持っていること)
+    std::expected<void, std::string> LabSession::CheckTableChain(std::span<const uint64_t> versions) const {
+        for (size_t i = 1; i < versions.size(); ++i) {
+            const auto from = m_tables.find(versions[i - 1]);
+            const auto to = m_tables.find(versions[i]);
+            if (from == m_tables.end() || to == m_tables.end() || versions[i - 1] == versions[i])
+                continue;
+
+            if (const auto remap = BuildSpeciesRemap(from->second, to->second); !remap) {
+                return std::unexpected(std::format("記録の反応表(版 {:016x} → {:016x})の物質を付け替えられない: {}",
+                                                   versions[i - 1], versions[i], remap.error()));
+            }
+        }
+
+        return {};
     }
 
 }  // namespace bicameral::sim

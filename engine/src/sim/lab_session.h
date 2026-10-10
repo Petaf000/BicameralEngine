@@ -9,6 +9,8 @@
 //   印のある刻みは、コマンドを当てる前に GPU と CPU の両方の表を替え、印が箱をつつく。記録は刻み 0 の表の版 + 印の列。
 //   今まで見た表は版ごとに持つので、途中で表を替えた記録もこの実験室の中なら再生できる。記録には表の中身(script::TableBytes)も残り
 //   (T-0217)、別の起動では呼ぶ側が中身から表を作り直して AddTable で渡してから Replay する(editor/lab_panel)。
+//   物質を足す・消す表(T-0242・ADR-0065): 印のある刻みに、GPU と CPU の箱の全部のセルを名前で付け替える(RemapLabBox。コマンドの前)。
+//   付け替えは表 2 つだけから決まるので、記録は今までどおり印の列と表の中身だけ(再生は同じ付け替えを作り直す)。
 // 箱は小さい(512 セル)ので、1 刻みずつ待つ(エディタの道具。ゲームの世界のフレームの歩調〔ADR-0011〕とは別のキュー)。
 #pragma once
 
@@ -39,17 +41,19 @@ namespace bicameral::sim {
 
         // 反応表を替える(ホットリロード。T-0218・ADR-0055): 次の刻み NextTick() から新しい表で続ける(表を替えた印を置く)。
         // 刻む前にもう一度替えたら、印は最後の表の 1 つだけ(今の表に戻したなら印を消す)。tableVersion は 0 でないこと(記録の印が表を指す)。
-        // table の物質の一覧は今の表と同じこと(script::CheckHotReloadCompatible。違うと材料とセルの意味が変わる)
+        // 物質の一覧が違う表は、今の表から名前で付け替えられること(sim::BuildSpeciesRemap が通る。T-0242)。
+        // まだ刻んでいない置く操作の材料も新しい表の ID に付け替える(消えた物質の材料は落とす)
         [[nodiscard]] std::expected<void, std::string> ChangeTable(const BakedReactionTable& table,
                                                                    uint64_t tableVersion, std::string tableBytes = {});
 
-        // 記録を再生するための表を足す(T-0217。記録の中身から作り直した表。最新の表は変えない)。物質の一覧は今の表と同じこと
+        // 記録を再生するための表を足す(T-0217。記録の中身から作り直した表。最新の表は変えない)。物質の一覧は違ってよい
+        // (表から表へ付け替えられるかは Replay が流す前に確かめる。T-0242)
         [[nodiscard]] std::expected<void, std::string> AddTable(const BakedReactionTable& table, uint64_t tableVersion,
                                                                 std::string tableBytes);
         [[nodiscard]] bool HasTable(uint64_t tableVersion) const { return m_tables.contains(tableVersion); }
 
         // 今までの操作(表を替えた印を除く)を、初めの箱から最新の表で同じ刻みまで流し直す(T-0194 の案 A。同じ置き方で法則だけ比べる)。
-        // 置いてまだ刻んでいない操作は残る
+        // 置いてまだ刻んでいない操作は残る。物質の一覧が違う表で置いた材料は名前で最新の表の ID にする(消えた物質の材料は落とす。T-0242)
         [[nodiscard]] std::expected<void, std::string> RerunWithLatestTable();
 
         // --- 置く(次の刻み NextTick() のコマンドにする。1 刻みに LAB_MAX_COMMANDS_PER_TICK まで)---
@@ -84,6 +88,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool Replaying() const { return m_replayEnd > m_tick; }
         [[nodiscard]] size_t PendingCommands() const { return m_pending.size(); }
         [[nodiscard]] LabRecording Recording() const;
+        // 最後に物質を付け替えた刻みの報告(CPU の箱の全部のセルの合計。T-0242)。付け替えていなければ空
+        [[nodiscard]] const std::optional<SpeciesRemapReport>& LastRemapReport() const { return m_lastRemapReport; }
 
     private:
         LabSession(BakedReactionTable table, gpu::ImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box);
@@ -91,9 +97,11 @@ namespace bicameral::sim {
         bool Queue(const Command& command);
         void DropPendingTableChange();
         [[nodiscard]] std::vector<Command> TakeCommands(uint64_t tick);
-        [[nodiscard]] std::expected<void, std::string> SwitchTable(uint64_t tableVersion);
+        // remapBox: 物質の一覧が違えば次の刻みで箱を付け替える(StepOne の印。ResetTo は箱を作り直すので要らない)
+        [[nodiscard]] std::expected<void, std::string> SwitchTable(uint64_t tableVersion, bool remapBox);
         [[nodiscard]] std::expected<void, std::string> ResetTo(uint64_t tableVersion);
         [[nodiscard]] std::expected<void, std::string> StepOne();
+        [[nodiscard]] std::expected<void, std::string> CheckTableChain(std::span<const uint64_t> versions) const;
 
         // --- 反応表 ---
         BakedReactionTable m_table;                       // 箱が今使っている表(GPU の箱と同じ)
@@ -102,9 +110,13 @@ namespace bicameral::sim {
         uint64_t m_initialVersion = 0;                    // この実験の刻み 0 の表(記録に残す)
         std::map<uint64_t, BakedReactionTable> m_tables;  // 今まで見た表(版ごと。再生で使う)
         std::map<uint64_t, std::string> m_tableBytes;     // その中身(分かるものだけ。記録に残す。T-0217)
+        std::optional<SpeciesRemap> m_boxRemap;           // 次の刻みで箱に当てる付け替え(SwitchTable が作る。T-0242)
+        std::optional<SpeciesRemapReport> m_lastRemapReport;
         gpu::ImmediateQueue m_queue;
         gpu::DebugRing m_ring;
         GpuLabBox m_box;
+        uint32_t
+            m_ledgerColumns = 0;  // GPU の箱を作った時の帳簿の列(物質の数の違う表で作り直す箱もこれに合わせる。T-0242)
 
         // --- 箱 ---
         MultiresNest m_initial;  // 初めの箱(刻み 0 の表で作る。刻み 0 に表を替えても GPU に写すのはこれ)

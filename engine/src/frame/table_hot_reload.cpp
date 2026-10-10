@@ -18,11 +18,12 @@ namespace bicameral::frame {
     }  // namespace
 
     TableHotReload::TableHotReload(script::ReactionTableSource source,
-                                   std::shared_ptr<const script::LoadedReactionTable> initial, bool watch)
+                                   std::shared_ptr<const script::LoadedReactionTable> initial, bool watch,
+                                   script::SpeciesChangePolicy policy)
         : m_initialVersion(initial->tableVersion), m_appliedVersion(initial->tableVersion) {
         Remember(initial);
         if (watch)
-            m_reload.emplace(std::move(source), std::move(initial));
+            m_reload.emplace(std::move(source), std::move(initial), policy);
     }
 
     void TableHotReload::Remember(const std::shared_ptr<const script::LoadedReactionTable>& table) {

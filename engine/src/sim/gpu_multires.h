@@ -124,8 +124,8 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12RootSignature* RootSignature() const { return m_rootSignature.Get(); }
 
         // --- 反応表の差し替え(T-0194。ADR-0047 の続き)---
-        // 次に記録するリストから table を使う(新しいアップロードのバッファに写し、ルートの結び先を替える)。物質の一覧は今の表と同じこと
-        // (セルの物質 ID の意味が変わらない。script::CheckHotReloadCompatible)。返すのは前の表のバッファで、それを読んだリストが
+        // 次に記録するリストから table を使う(新しいアップロードのバッファに写し、ルートの結び先を替える)。物質の一覧が変わる表なら、
+        // セルの付け替えは呼ぶ側(覗き窓は影の鎖を作り直す・実験室は GpuLabBox::RecordSpeciesRemap。T-0242)。返すのは前の表のバッファで、それを読んだリストが
         // GPU で終わるまで呼ぶ側が持つ。作れなければ今の表のまま空を返す
         [[nodiscard]] std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> ReplaceTable(
             const BakedReactionTable& table);

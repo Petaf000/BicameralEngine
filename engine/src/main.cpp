@@ -40,6 +40,7 @@
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --auto-reload                    --packages の写しの反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻みで終える
+//   --species-remap                  エディタのホットリロードで物質を足す・消す表も当てる(T-0242。--auto-reload ならその段も)
 //                                    (--editor と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0195)
 //   --auto-place                     筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずの置くコマンドが全部
 //                                    当たったかを確かめる(--editor と一緒に。T-0222)
@@ -317,6 +318,8 @@ namespace {
             loop.autoLab = true;
         else if (argument == L"--auto-reload")
             loop.autoReload = true;
+        else if (argument == L"--species-remap")
+            loop.speciesRemap = true;
         else if (argument == L"--auto-table-edit")
             loop.autoTableEdit = true;
         else if (argument == L"--auto-place")
