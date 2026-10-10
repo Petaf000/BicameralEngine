@@ -124,6 +124,7 @@
   https://petaf000.github.io/BicameralEngine/ に出す。関数を移す・改名したら map.yaml も直す(CI の `archmap --check` が落ちて教える)。
   新しいサブシステムを作ったら図にノードを足す。確認: `python3 tools/archmap/archmap.py --check`(Linux 側で動く。PyYAML が要る)。
 - CI: GitHub Actions(`.github/workflows/ci.yml`)。Windows でビルド + ctest、図の検査、Pages へのデプロイ。
+  **2026-10-10 から自動実行は止めてある(手動実行のみ。ユーザー決定)。** push しても CI は走らないので、検査はランナーで回す。
 - CI の docs ジョブが整形のずれ(clang-format --dry-run --Werror)も落とす。
 
 ---

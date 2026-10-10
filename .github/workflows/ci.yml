@@ -3,13 +3,11 @@
 #           WARP(ソフトウェアの D3D12)で走る GPU のテスト(ラベル warp)は回す(T-0013)。
 #           ビルドの中でシミュの浮動小数点の検査(tools/float_check)が走る。debug では clang-tidy も(tools/tidy)
 #   docs  : 整形の検査(clang-format)・アーキテクチャ図のリンク切れ検査(archmap --check)→ 図のページ + Doxygen を作る
-#   deploy: main への push のときだけ、docs の成果物を GitHub Pages に出す
+#   deploy: main で手動実行したときだけ、docs の成果物を GitHub Pages に出す
 name: CI
 
+# 2026-10-10 ユーザー決定: 自動実行を止める(失敗メールが多いため)。手動実行(Actions タブの Run workflow)だけ残す。
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -119,7 +117,7 @@ jobs:
 
   deploy:
     name: Deploy to GitHub Pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     needs: docs
     runs-on: ubuntu-26.04
     permissions:
