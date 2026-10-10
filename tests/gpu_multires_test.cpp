@@ -262,17 +262,18 @@ namespace {
         return most;
     }
 
-    // 成分の二段(T-0176): 上限に当たる場面を溢れを使う世界で刻む。9 種目の生成物を待たせず、CPU の上限なしの世界と毎刻みビット一致
+    // 成分の二段(T-0176。伝導あり T-0211): 上限に当たる場面を溢れを使う世界で刻む。9 種目の生成物を待たせず、CPU の上限なしの世界と
+    // 毎刻みビット一致(伝導ありは、溢れを持つセルの熱容量・伝導率と、変化を足した後の反応も比べる)
     std::expected<RunResult, std::string> RunLimitsStepWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                            gpu::DebugRing& ring,
-                                                            const sim::BakedReactionTable& table) {
+                                                            gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                            bool conduction) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
         sim::EnableWideCells(cpu);
         auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        const sim::MultiresStepOptions options = test::LimitsStepOptions(false);
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
         sim::MultiresNest read;
         uint32_t most = 0;
         for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
@@ -289,7 +290,8 @@ namespace {
 
             sim::StepNest(cpu, table, test::LIMITS_STEP_SEED, tick, options);
             if (auto compared = CompareTick(cpu, read, tick); !compared)
-                return std::unexpected(std::format("溢れ: {}", compared.error()));
+                return std::unexpected(
+                    std::format("溢れ(伝導 {}): {}", conduction ? "あり" : "なし", compared.error()));
 
             most = std::max(most, MostLeafSpecies(read));
         }
@@ -297,8 +299,10 @@ namespace {
         if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || most <= RX_MAX_CELL_SPECIES)
             return std::unexpected("溢れ: 9 種目の生成物を待たせた・作っていない");
 
-        Log(Channel::Gpu, Level::Info, "溢れを使う世界の刻み: 待たせた {}・選んだ {}・最大の成分 {}(CPU と GPU で同じ)",
-            cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], cpu.counters[MR_COUNTER_LIMIT_CANDIDATES], most);
+        Log(Channel::Gpu, Level::Info,
+            "溢れを使う世界の刻み(伝導 {}): 待たせた {}・選んだ {}・最大の成分 {}(CPU と GPU で同じ)",
+            conduction ? "あり" : "なし", cpu.counters[MR_COUNTER_LIMIT_PRODUCTS],
+            cpu.counters[MR_COUNTER_LIMIT_CANDIDATES], most);
 
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
@@ -460,9 +464,10 @@ namespace {
         const auto coarsenFull = RunCoarsenFull(device->Get(), *queue, *ring, *limitsTable);
         const auto limitsStep = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, false);
         const auto limitsConduct = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, true);
-        const auto limitsWide = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable);
+        const auto limitsWide = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable, false);
+        const auto limitsWideConduct = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable, true);
         for (const auto* result : {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep,
-                                   &limitsConduct, &limitsWide}) {
+                                   &limitsConduct, &limitsWide, &limitsWideConduct}) {
             if (*result)
                 continue;
 
@@ -472,6 +477,13 @@ namespace {
 
         if (first->digest != second->digest || stress->digest != stressAgain->digest) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(2 回の実行が食い違う)");
+            return 1;
+        }
+
+        // 伝導ありの溢れの世界で伝導が働いている(熱が流れなければ、溢れを持つセルの熱容量・伝導率を比べたことにならない。T-0211)
+        if (limitsWide->digest == limitsWideConduct->digest) {
+            Log(Channel::Gpu, Level::Error,
+                "gpu_multires_test: FAILED(溢れの世界で伝導ありとなしが同じ = 熱が流れていない)");
             return 1;
         }
 

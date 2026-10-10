@@ -140,23 +140,120 @@ void StoreGpuWideCell(RxGpuWideCell cell, uint32_t address, uint32_t page, uint3
     }
 }
 
-// 頁を配ったばかりのブロックの今の面を空にする(前に使った頁の溢れを読まないため。一様の値は溢れを持たない)
-void ClearWidePage(uint32_t page, uint32_t thread) {
+// 頁の今の面を面 0 にして空にする(threads スレッドで分ける。同期は呼ぶ側。一様の値は溢れを持たない)
+void ClearWideSideWords(uint32_t page, uint32_t thread, uint32_t threads) {
     const uint32_t base = MrWideSideWord(g_overflowBase, page, 0);
-    for (uint32_t i = thread; i <= MR_BLOCK_CELLS; i += WAIT_STEP_THREADS)
+    for (uint32_t i = thread; i <= MR_BLOCK_CELLS; i += threads)
         g_treeWords[base + i] = 0;
 
     if (thread == 0)
         g_treeWords[MrWidePageWord(g_overflowBase, page)] = 0;
+}
 
+// 頁を配ったばかりのブロックの今の面を空にする(前に使った頁の溢れを読まないため)
+void ClearWidePage(uint32_t page, uint32_t thread) {
+    ClearWideSideWords(page, thread, WAIT_STEP_THREADS);
     AllMemoryBarrierWithGroupSync();
+}
+
+// 頁のセル index に溢れがあるか(今の面 side。溢れは 8 種のセルにだけある)
+bool WideHasTail(RxCell inlineCell, uint32_t page, uint32_t side, uint32_t index) {
+    if (inlineCell.speciesCount != RX_MAX_CELL_SPECIES)
+        return false;
+
+    const uint2 range = WideRange(page, side, index);
+
+    return range.x != range.y;
+}
+
+// 上限の無い形で刻み直すセルを、もう片方の面の並びが決まった後に刻んで書く(StepPagedWaitWide と伝導の段の ③)。
+// 入らない(fits でない)なら書かずに待たせる。変わったら true
+bool RestepWideCell(MrBlock block, uint32_t index, uint32_t side, bool fits, uint32_t first, inout uint64_t wakeTick,
+                    inout MrLimitTally tally) {
+    const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
+    if (!fits) {
+        wakeTick = MinTick(wakeTick, MrChangeMark(tick) + 1);
+        tally.productsHeld += 1;
+        return false;
+    }
+
+    const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
+    const RxGpuWideCell before = LoadGpuWideCell(g_cells[PageCellAddress(block.page, index)], block.page, side, index);
+    const RxWaitStepOf<RxGpuWideCell> step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
+    wakeTick = MinTick(wakeTick, step.wakeTick);
+    tally = MrAddLimits(tally, step.limits);
+    StoreGpuWideCell(step.cell, PageCellAddress(block.page, index), block.page, 1 - side, first);
+
+    return !SameGpuWideCell(before, step.cell);
 }
 
 // --- 刻む ---
 
-groupshared uint32_t gs_wideOffsets[MR_BLOCK_CELLS];  // ① セルの溢れの数 → ② 新しい面の始まり
-groupshared uint32_t gs_wideAny;                      // 上限の無い形で刻むセルがある
-groupshared uint32_t gs_wideTotal;                    // 新しい面の溢れの数
+groupshared uint32_t gs_wideOffsets[MR_BLOCK_CELLS];     // ① セルの溢れの数 → ② 新しい面の始まり
+groupshared uint32_t gs_wideAny;                         // 上限の無い形で刻むセルがある
+groupshared uint32_t gs_wideTotal;                       // 新しい面の溢れの数
+groupshared uint32_t gs_wideMarks[MR_BLOCK_CELLS / 32];  // ビット = 上限の無い形で刻み直すセル(伝導の段。T-0211)
+
+// ① の初め: 自分の受け持つセルの溢れの数と印を 0 に(threads スレッド。同期は呼ぶ側)
+void BeginWideCells(uint32_t thread, uint32_t threads) {
+    if (thread == 0)
+        gs_wideAny = 0;
+
+    for (uint32_t index = thread; index < MR_BLOCK_CELLS; index += threads)
+        gs_wideOffsets[index] = 0;
+
+    for (uint32_t word = thread; word < MR_BLOCK_CELLS / 32; word += threads)
+        gs_wideMarks[word] = 0;
+}
+
+// ① で上限の無い形に回すセル(inlineCell は伝導の変化を足した後): 刻んだ後の溢れの数を数えて印を付ける(書くのは ③ の RestepWideCell)
+void MarkWideCell(MrBlock block, uint32_t index, uint32_t side, RxCell inlineCell) {
+    const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
+    const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
+    const RxGpuWideCell wide = LoadGpuWideCell(inlineCell, block.page, side, index);
+    gs_wideOffsets[index] = WideTailCount(MrStepCellWait(MakeTable(), wide, seed, tick, block, index).cell);
+    InterlockedOr(gs_wideMarks[index / 32], 1u << (index % 32));
+    gs_wideAny = 1;
+}
+
+bool IsWideMarked(uint32_t index) {
+    return (gs_wideMarks[index / 32] & (1u << (index % 32))) != 0;
+}
+
+// ② セルの番号の順のプレフィックス和(スレッド 0)で新しい面(1 − side)の並びを決め(gs_wideOffsets は溢れの数 → 新しい面の始まり)、
+// 頁の溢れの枠に入るなら始まりを新しい面へ書く。グループの全部のスレッド(threads)が ① の同期の後に呼ぶ。入るなら true
+bool PlanWideSide(uint32_t page, uint32_t side, uint32_t thread, uint32_t threads) {
+    if (thread == 0) {
+        uint32_t total = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const uint32_t count = gs_wideOffsets[index];
+            gs_wideOffsets[index] = total;
+            total += count;
+        }
+
+        gs_wideTotal = total;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (gs_wideTotal > MR_WIDE_PAGE_ENTRIES)
+        return false;
+
+    const uint32_t nextBase = MrWideSideWord(g_overflowBase, page, 1 - side);
+    for (uint32_t index = thread; index < MR_BLOCK_CELLS; index += threads)
+        g_treeWords[nextBase + index] = gs_wideOffsets[index];
+
+    if (thread == 0)
+        g_treeWords[nextBase + MR_BLOCK_CELLS] = gs_wideTotal;
+
+    return true;
+}
+
+// ③ の後: 全部のセルを書いてから面を入れ替える(グループの全部のスレッドが呼ぶ)
+void SwapWideSide(uint32_t page, uint32_t side, bool fits, uint32_t thread) {
+    AllMemoryBarrierWithGroupSync();
+    if (fits && thread == 0)
+        g_treeWords[MrWidePageWord(g_overflowBase, page)] = 1 - side;
+}
 
 // 上限の無い形で読む 1 セル(今の面)
 RxGpuWideCell LoadSteppedWideCell(MrBlock block, uint32_t index, uint32_t side) {
@@ -217,30 +314,7 @@ WaitBlockResult StepPagedWaitWide(uint32_t slot, uint32_t thread) {
     }
 
     // --- ② セルの番号の順のプレフィックス和(新しい面の並び)---
-    if (thread == 0) {
-        uint32_t total = 0;
-        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-            const uint32_t count = gs_wideOffsets[index];
-            gs_wideOffsets[index] = total;
-            total += count;
-        }
-
-        gs_wideTotal = total;
-    }
-
-    GroupMemoryBarrierWithGroupSync();
-    const bool fits = gs_wideTotal <= MR_WIDE_PAGE_ENTRIES;
-    const uint32_t next = 1 - side;
-    const uint32_t nextBase = MrWideSideWord(g_overflowBase, block.page, next);
-    if (fits) {
-        for (uint32_t k = 0; k < MR_BLOCK_CELLS / WAIT_STEP_THREADS; ++k) {
-            const uint32_t index = thread + (WAIT_STEP_THREADS * k);
-            g_treeWords[nextBase + index] = gs_wideOffsets[index];
-        }
-
-        if (thread == 0)
-            g_treeWords[nextBase + MR_BLOCK_CELLS] = gs_wideTotal;
-    }
+    const bool fits = PlanWideSide(block.page, side, thread, WAIT_STEP_THREADS);
 
     // --- ③ 入るなら刻み直して書く(読むのは今の面、書くのはもう片方の面)。入らなければ待たせる ---
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / WAIT_STEP_THREADS; ++k) {
@@ -248,26 +322,12 @@ WaitBlockResult StepPagedWaitWide(uint32_t slot, uint32_t thread) {
             continue;
 
         const uint32_t index = thread + (WAIT_STEP_THREADS * k);
-        if (!fits) {
-            wakeTick = MinTick(wakeTick, MrChangeMark(tick) + 1);
-            tally.productsHeld += 1;
-            continue;
-        }
-
-        const RxGpuWideCell before = LoadSteppedWideCell(block, index, side);
-        const RxWaitStepOf<RxGpuWideCell> step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
-        wakeTick = MinTick(wakeTick, step.wakeTick);
-        tally = MrAddLimits(tally, step.limits);
-        if (!SameGpuWideCell(before, step.cell))
+        if (RestepWideCell(block, index, side, fits, gs_wideOffsets[index], wakeTick, tally))
             InterlockedOr(gs_waitChanged, 1u);
-
-        StoreGpuWideCell(step.cell, PageCellAddress(block.page, index), block.page, next, gs_wideOffsets[index]);
     }
 
     // --- 面を入れ替える(全部のセルを書いた後)---
-    AllMemoryBarrierWithGroupSync();
-    if (fits && thread == 0)
-        g_treeWords[MrWidePageWord(g_overflowBase, block.page)] = next;
+    SwapWideSide(block.page, side, fits, thread);
 
     CountLimits(tally);
 
