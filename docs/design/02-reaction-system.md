@@ -111,6 +111,13 @@
     反応・伝導の熱・細かくする・粗くする(和集合は MrCoarsenCellOf〔結果の形と子の形のテンプレート〕)・影を作る・要約・保存量が溢れを読む。
     9 種目の生成物を待たせず、8 種ずつ違う子を粗くするのも断らない。溢れのある頁・端数の枠は一様・畳む扱いにしない(保存を守る)。
     既定は使わない(GPU と比べるテストは今のまま)。溢れのある影の引き戻し・畳む・覗き窓は T-0199。
+  - (T-0199)溢れを使う世界の残り: 影の引き戻しは MrPullBackShadowOf(セルの形と子 2³ の形のテンプレート。MrWideShadowFamily)。
+    一様なブロックの値 1 つにも溢れ(MultiresNest::uniformOverflow。枠ごと。LoadWideUniform・StoreWideUniform)を持たせ、溢れのある頁も
+    溢れまで同じなら畳む(頁の溢れは空にして返す)。一様の値は溢れごと細かくする・粗くする(MrCoarsenKeepsUniform の溢れ版)・頁に広げる・
+    待ちの丸めで評価する(MrUniformWaitOf を Cell 型に)。ほぼ同じ頁の集計(MrFoldStats)は集計の形のテンプレート(MrWideFoldStats では
+    tooManySpecies が起きない。平均の値は MrFoldStatsValueOf)で、9 種以上の頁も畳める。溢れのある端数の枠も帳簿へ返す。
+    静かな葉の許容差(MrCoarsenGroupWithinOf)も 9 種目からの量を比べる。GPU のシェーダーはインラインの包み(MrPullBackShadow・MrFoldStatsValue・
+    MrCoarsenGroupWithin)で今と同じ結果。覗き窓・実験室は GPU の世界を読むので、GPU の溢れ(T-0237・T-0212)の後(T-0275)。
   - (T-0176・ADR-0052)GPU の多重解像度の世界も `GpuMultiresOptions::wideCells` で同じ「インライン 8 + 頁ごとの溢れ」(u6 の後ろ・頁ごとに 2 面を入れ替える。
     並びは shaders/common/multires_wide.hlsli)。全部を刻む Compute(伝導なし)は 8 種に収まるセルをインラインの核で刻み、溢れるセルだけ上限なしの形
     (RxGpuWideCell・24 種まで)で数える → プレフィックス和 → 刻み直す。CPU の EnableWideCells の世界と HW・WARP で毎刻みビット一致。

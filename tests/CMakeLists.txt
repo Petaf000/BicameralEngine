@@ -104,6 +104,9 @@ set_tests_properties(gas_reference PROPERTIES TIMEOUT 1800)  # debug で約 12 �
 add_executable(multires_test multires_test.cpp)
 target_link_libraries(multires_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires COMMAND multires_test)
+add_executable(multires_wide_test multires_wide_test.cpp)  # 溢れを使う世界の影・畳む・端数・静かな葉(T-0199)
+target_link_libraries(multires_wide_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_wide COMMAND multires_wide_test)
 
 add_executable(multires_activity_test multires_activity_test.cpp)  # 木の上の活性(T-0100)
 target_link_libraries(multires_activity_test PRIVATE bicameral_multires bicameral_core)

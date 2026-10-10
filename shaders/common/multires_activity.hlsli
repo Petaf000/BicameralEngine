@@ -225,27 +225,34 @@ FX_FN uint32_t MrCoarsenGroupCell(uint32_t group, uint32_t member) {
     return MrCellIndex(x, y, z);
 }
 
-// 組 group を粗くしても許容差の中か。cells は Cell(index)(頁のセル)と Temperature(cell)(RxComputeThermal の温度 mK)を持つ
-template <typename Cells>
-FX_FN bool MrCoarsenGroupWithin(Cells cells, uint32_t group, MrFoldTolerance tolerance) {
+// 組 group を粗くしても許容差の中か。cells は Cell(index)(頁のセル)と Temperature(cell)(RxComputeThermal の温度 mK)を持つ。
+// first = 組の 0 番目のセル(cells.Cell(MrCoarsenGroupCell(group, 0)))、stats = 空の集計。セルの形 Cell と集計の形 Stats は
+// 引数で決める(RxCell・MrFoldStats = GPU と今の世界、C++ の RxWideCell・MrWideFoldStats = 溢れを持つ世界。T-0199)
+template <typename Cells, typename Cell, typename Stats>
+FX_FN bool MrCoarsenGroupWithinOf(Cells cells, uint32_t group, MrFoldTolerance tolerance, Cell first, Stats stats) {
     // --- 完全に同じ: ビット単位(温度を求めない)---
     if (MrIsExactFold(tolerance)) {
-        const RxCell first = cells.Cell(MrCoarsenGroupCell(group, 0));
         bool same = true;
         for (uint32_t member = 1; member < MR_CHILDREN_PER_CELL; ++member)
-            same = same && MrSameCell(cells.Cell(MrCoarsenGroupCell(group, member)), first);
+            same = same && RxSameCell(cells.Cell(MrCoarsenGroupCell(group, member)), first);
 
         return same;
     }
 
     // --- 許容差つき: 畳むのと同じ集計(温度の幅・物質ごとの量の幅)---
-    MrFoldStats stats = MrMakeFoldStats();
-    for (uint32_t member = 0; member < MR_CHILDREN_PER_CELL; ++member) {
-        const RxCell cell = cells.Cell(MrCoarsenGroupCell(group, member));
+    stats = MrAddFoldCell(stats, first, cells.Temperature(first));
+    for (uint32_t member = 1; member < MR_CHILDREN_PER_CELL; ++member) {
+        const Cell cell = cells.Cell(MrCoarsenGroupCell(group, member));
         stats = MrAddFoldCell(stats, cell, cells.Temperature(cell));
     }
 
     return MrFoldStatsWithin(stats, tolerance);
+}
+
+// インラインの形(GPU と今の世界)
+template <typename Cells>
+FX_FN bool MrCoarsenGroupWithin(Cells cells, uint32_t group, MrFoldTolerance tolerance) {
+    return MrCoarsenGroupWithinOf(cells, group, tolerance, cells.Cell(MrCoarsenGroupCell(group, 0)), MrMakeFoldStats());
 }
 
 // 枠 slot を粗くする要求を作るか。調べて粗くできると分かっている静かな葉で、同じ親の八分の一の番号が小さい兄弟に

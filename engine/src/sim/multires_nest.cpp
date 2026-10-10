@@ -47,11 +47,27 @@ namespace bicameral::sim {
                                                       page);
         }
 
-        void PullBackLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
+        // 溢れを使う世界の 1 段(上限の無い形で引き戻す。親か影に溢れがあっても成分を落とさない。T-0199)。
+        // 溢れが要らない所はインラインの形と同じ結果(MrPullBackShadowOf は形によらず同じ計算)
+        void PullBackWideLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
             const MrBlock shadow = nest.blocks[shadowSlot];
-            FX_ASSERT(shadow.kind == MR_BLOCK_SHADOW);
-            // 溢れのある影・親の引き戻しはまだ(インラインの形で引き戻す。T-0199)
-            FX_ASSERT(!PageHasOverflow(nest, shadow.page));
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                const RxWideCell parentCell = LoadWideNestCell(nest, shadow.parent,
+                                                               MrOctantCell(shadow.parentOctant, local));
+                MrWideShadowFamily family;
+                for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+                    family.cells[j] = LoadWideNestCell(nest, shadowSlot, MrChildCell(local, j));
+
+                const MrWideShadowFamily pulled = MrPullBackShadowOf(table, parentCell, family);
+                nest.counters[MR_COUNTER_SHADOW_CLAMPED] += pulled.clamped;
+                for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+                    StoreWidePageCell(nest, shadow.page, MrChildCell(local, j), pulled.cells[j]);
+            }
+        }
+
+        // インラインの形の 1 段(GPU の multires_graph.hlsl と同じ)
+        void PullBackInlineLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
+            const MrBlock shadow = nest.blocks[shadowSlot];
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const RxCell parentCell = LoadNestCell(nest, shadow.parent, MrOctantCell(shadow.parentOctant, local));
                 MrShadowFamily family{};
@@ -63,6 +79,14 @@ namespace bicameral::sim {
                 for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
                     CellAt(nest, shadowSlot, MrChildCell(local, j)) = pulled.cells[j];
             }
+        }
+
+        void PullBackLevel(MultiresNest& nest, const ReactionTableView& table, uint32_t shadowSlot) {
+            FX_ASSERT(nest.blocks[shadowSlot].kind == MR_BLOCK_SHADOW);
+            if (nest.wideCells)
+                PullBackWideLevel(nest, table, shadowSlot);
+            else
+                PullBackInlineLevel(nest, table, shadowSlot);
 
             // --- セルの値が変わりうるので、つついた印にして次の刻みに tc を書き直す(ADR-0018 追記 T-0125)。
             //     観察の枠は種の一覧に入れない(活性でも全部刻む。D-403)---
@@ -345,7 +369,13 @@ namespace bicameral::sim {
                 if (MrChangeMark(tick) < block.wakeTick)
                     continue;
 
-                const MrUniformWait wait = MrUniformWaitOf(view, UniformAt(nest, slot), worldSeed, tick, block);
+                // (一様の値に溢れがあれば溢れまで読む。T-0199。溢れの無い一様の値はインラインの形のまま = GPU の溢れの世界と同じ:
+                //  9 種目だけを作る規則はここでは待たせる。上限の無い形で評価するのは CPU と GPU を一緒に直す T-0276)
+                const bool wideValue = nest.wideCells && !nest.uniformOverflow[slot].species.empty();
+                const MrUniformWait wait = wideValue
+                                               ? MrUniformWaitOf(view, LoadWideUniform(nest, slot), worldSeed, tick,
+                                                                 block)
+                                               : MrUniformWaitOf(view, UniformAt(nest, slot), worldSeed, tick, block);
                 if (wait.changed != 0) {
                     block.page = MR_PAGE_WANTED;
                     continue;
@@ -418,9 +448,16 @@ namespace bicameral::sim {
                     continue;
                 }
 
-                block.page = PopPage(nest);
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                    PageCellAt(nest, block.page, index) = MrUniformCell(block, UniformAt(nest, slot), index);
+                // --- 一様の値で埋める(溢れを使う世界は一様の値の溢れごと。返された頁の溢れは空。T-0199)---
+                const uint32_t page = PopPage(nest);
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    if (nest.wideCells)
+                        StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, slot, index));
+                    else
+                        PageCellAt(nest, page, index) = MrUniformCell(block, UniformAt(nest, slot), index);
+                }
+
+                block.page = page;
 
                 nest.counters[MR_COUNTER_EXPANDED] += 1;
                 expanded.push_back(slot);
@@ -584,6 +621,19 @@ namespace bicameral::sim {
 
             for (const MultiresOverflowArea& area : nest.fractionOverflow)
                 hash = HashOverflowArea(hash, area);
+
+            // 一様の値の溢れ(T-0199。使っている一様のブロックだけ。頁を持つ枠・空きの枠に残った古い値は読まないので入れない)
+            for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+                if (!MrIsUniform(nest.blocks[slot]) || nest.blocks[slot].kind == MR_BLOCK_UNUSED)
+                    continue;
+
+                const MultiresUniformOverflow& tail = nest.uniformOverflow[slot];
+                hash = FxHashCombine(hash, tail.species.size());
+                for (size_t i = 0; i < tail.species.size(); ++i) {
+                    hash = FxHashCombine(hash, tail.species[i]);
+                    hash = FxHashCombine(hash, tail.amounts[i]);
+                }
+            }
         }
 
         return hash;

@@ -50,6 +50,13 @@ namespace bicameral::sim {
         std::vector<uint64_t> amounts;
     };
 
+    // 一様なブロックの値 1 つの溢れ(T-0199): インラインの値(nest.cells の先頭の枠ごとの値)の続きの成分(物質 ID の昇順)。
+    // 溢れのある頁を畳むと、値 1 つ + ここに戻す。頁に広げる・粗くする・細かくする時は値ごと(溢れまで)写す
+    struct MultiresUniformOverflow {
+        std::vector<uint32_t> species;
+        std::vector<uint64_t> amounts;
+    };
+
     struct MultiresNest {
         MultiresCapacity capacity;
 
@@ -58,6 +65,8 @@ namespace bicameral::sim {
         bool wideCells = false;
         std::vector<MultiresOverflowArea> cellOverflow;      // 頁ごと(添字 = 頁。観察の枠の頁を含む)
         std::vector<MultiresOverflowArea> fractionOverflow;  // 端数の枠ごと
+        std::vector<MultiresUniformOverflow>
+            uniformOverflow;  // 枠ごと(一様の値の溢れ。一様でない枠では読まない。T-0199)
 
         // --- 状態(CPU と GPU で配列のまま一致する)---
         std::vector<multires::MrBlock> blocks;  // 世界の枠 + 観察の枠
@@ -199,6 +208,12 @@ namespace bicameral::sim {
     // 端数の枠 fractionSlot のセル index に書く(上と同じ分け方)
     void StoreWideFraction(MultiresNest& nest, uint32_t fractionSlot, uint32_t index,
                            const multires::MrWideFraction& fraction);
+
+    // 枠 slot の一様の値を上限の無い形で(溢れを使わない世界はインラインのまま。T-0199)
+    [[nodiscard]] reaction::RxWideCell LoadWideUniform(const MultiresNest& nest, uint32_t slot);
+
+    // 枠 slot の一様の値を書く(インラインに先頭の RX_MAX_CELL_SPECIES 個、残りを一様の値の溢れへ。T-0199)
+    void StoreWideUniform(MultiresNest& nest, uint32_t slot, const reaction::RxWideCell& value);
 
     // 頁・端数の枠の溢れを空にする(返す時)
     void ClearPageOverflow(MultiresNest& nest, uint32_t page);
