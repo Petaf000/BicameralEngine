@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-10 / チケット: 統合(t-0236・t-0223・t-0222 を main へ)— 完了
+最終更新: 2026-10-10 / チケット: 統合(t-0236・t-0223・t-0222 を main へ)— 完了 → T-0239(研究)— 切り分け 1 回目まで
 
 ## 状態(3 行以内)
 - t-0236(GPU の溢れを同じ刻みでやり直す・使う分だけの VRAM)・t-0223(物質を足す・消す付け替え。世界まで)・t-0222(世界に物を置く筆)を main に合わせた(9152562)。probe_sim.cpp の Create のぶつかりは両方の行(m_tableCopy・m_speciesCount)を残した。合わさった ProbeSim(t5 + 入口 RemapSpecies・置くコマンド ApplyPlace・適用の単位のルート定数の物質の数)を読んで確かめた。
 - 進行中: wt2 T-0242(覗き窓・実験室が物質の変わる表に追従)・wt3 T-0221(計器と比べる画面)・wt4 T-0225(仮の魔素)。
-- window_hot_reload_play が debug で時々落ちる件は T-0239(下の「壊れている」)。
+- T-0239: debug で覗き窓を開くと GPU の物理が CPU とずれる(約半分の起動)。覗き窓の刻みの PSO(-Od)を設定するだけで起きうる所まで絞った(未解決。下の「壊れている」)。
 
 ## 並走で入ったもの(続きが終わるまで残す。詳しくは各チケット)
 - **陰解法の熱(wt2。T-0110 → T-0117 → T-0119 → T-0120 → T-0127 → T-0129 → T-0134 → T-0135〔一部〕→ T-0136。T-0154・T-0132 済み。T-0178・T-0179 済み。次は T-0147・T-0137)**: T-0179 で段を作る回と V サイクルを前の刻みから選ぶ(GpuImplicitLevels::RoundsFrom・GpuImplicitRecordShape::dispatchCycles・g_wholeTail)。HW と WARP は同じ積み方(T-0147 で WARP の不具合を回避。**1 グループが項目のループで本体を回すシェーダーでは、内側のループを return で抜けない**)。V の回数が前の刻みの 1.5 倍(+2)を超えて急に増えた刻みは超えた回が 1 グループで遅い(たくさんの要求で 1 回約 5 ms。値は同じ)。 T-0178 で系に入るブロックを枠の順に選び、入らないブロックはその刻みだけ陽解法(MultiresStepOptions::implicitLimits・implicitOverflow。仮で A)。GPU の EnableImplicitConduction は上限の全部の欄が要る(0 なら失敗)。伝導の作業場の印の空き語はもう無い。 T-0132 で伝導の段から陰解法を呼ぶ(MultiresStepOptions::implicitConduction が GPU でも効く。AddConductDelta は multires_bindings.hlsli・stepFlags のビット 3・5〜7・implicitMaxGap は 1〜8)。系が上限(GpuMultiresImplicitLimits)を超えると CPU と合わない(T-0178)。 T-0154 で記録の形を前の刻みの GPU の数から選ぶ(GpuImplicit::ShapeFrom・IM_PLAN_WANTED_TAIL。T-0132 でも使う)。 T-0136 で GpuImplicit は上限(GpuImplicitLimits)から作り、刻みの初めに GPU の ImPlanLevels・ImPlanArgs が節の並び・ImTail の境・ExecuteIndirect の引数を作る(V サイクルは dispatchLevels 既定 8 まで間接で積む。CPU は段の数を持たない)。
@@ -134,7 +134,7 @@
   `--timeout 2400` で裏で投げ、runner/logs/<job>.result.json を待つ。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **window_hot_reload_play が時々落ちる(T-0239)**: 合わせた main(71900ee)の debug で 4 回のうち 3 回。記録側も再生側も刻み 11 からのハッシュが起動ごとに違い、戻らない(ある回の再生の S(11) = 963dba84… が別の回の記録の S(11) と同じ)。どちらにも GPU の FX_ASSERT(fixed.hlsli:156・:68。マージ前の通った回にもあった)。反応表のパネルの一覧を開いた時だけ作るようにしても変わらない。マージ前(972460a)は 3 回とも通過。覗き窓(--peek … --peek-depth 9)の GPU の段を先に疑う。
+- **debug で覗き窓を開くと世界(物理)が起動ごとに違う(T-0239。研究・未解決)**: debug の window_hot_reload_play・window_replay_peek が約半分の起動で落ちる(release は通る)。食い違う刻みでは必ず GPU の物理が CPU とずれる(`--check-physics`)。マージ前からある(マージは覗き窓の道を変えていない)。覗き窓の影を刻む RecordStep を呼ばなければ 0/16、Dispatch 無しで刻みの PSO を設定して BindRoot するだけで 2/12 → -Od の重い PSO を設定すると後ろの物理が壊れるドライバ側の振る舞いと見ている(未確認)。次は debug でもシミュのシェーダーを最適化して確かめる。切り分けの手順と数は docs/tickets/T-0239-peek-replay-desync-debug.md。**FX_ASSERT の「fixed.hlsli:N」はどのファイルの assert でも fixed.hlsli と出る**(行は呼んだ所)。
 - **GPU の溢れ(T-0176・T-0211〔一部〕)**: 溢れの世界(wideCells の GpuMultires)で使えるのは全部を刻む刻み(伝導あり〔陽解法〕・なし)だけ。陰解法は RecordStep の FX_ASSERT で止まる(T-0238)。要求の処理(粗くする・細かくする・影・畳む)・活性のグラフ(RecordStepActive は false)・覗き窓・実験室はまだ溢れを知らない(T-0237・T-0212・T-0238)。溢れの領域は頁ごとの見出し 72 語 + 4 KiB の塊の置き場(空きのスタック。shaders/common/multires_wide.hlsli。T-0236)。書く面の塊が足りないと PlanWideSide が要求と刻み直す印を残し、WideAllocate(1 グループ・頁の番号の順のプレフィックス和で余りを返して配る)と WideRetryBlock(印のセルだけ ①②③ をやり直す)を全部を刻む段・頁に広げて刻む段・伝導の足す段の後に入れた(RecordWideRetry)。置き場が尽きた時だけ待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。VRAM は見出し 288 B/頁 + 置き場(既定は 頁の数 × 2 と 50 の大きい方の塊 × 4 KiB)。ADR-0052 追記 2。残る当座の上限は 1 セル 24 種(超えると待たせる。T-0248)。
   **注意**: 頁を配る道を足したら溢れを空にする(今は StepExpandedWait の ClearWidePage と ConductPrepareBlock の ClearWideSideWords の 2 か所)。伝導の段の溢れの変種は 1 スレッド 1 セルで上限なしの形のセル(約 300 B)を持つので HW ではレジスタが溢れうる(ns/セル は T-0248 で測る)。**刻みの段を足したら、その後に RecordWideRetry を呼ぶ**(要求は段ごとに WideAllocate・WideRetryBlock が消す)。刻み直しは刻みの初めの busyTick で刻む。頁を空きに返しても塊は頁に付いたまま(要求の処理で返すかは T-0237)。
 - **上限の当座のふるまい(T-0022。仮 = QUESTIONS Q19)**: (CPU の多重解像度の世界は EnableWideCells で ①③ が起きない。T-0187。既定は使わない)8 種のセルで 9 種目を作る反応は枠が空くまで進まない・17 本以上は平均 16/N の速さ・入りきらない子は細かいまま。
