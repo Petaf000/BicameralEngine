@@ -41,6 +41,8 @@
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --auto-reload                    --packages の写しの反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻みで終える
 //                                    (--editor と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0195)
+//   --auto-table-edit                反応表のパネルで --packages の写しの木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版で終える
+//                                    (--editor と一緒に。T-0219)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -313,6 +315,8 @@ namespace {
             loop.autoLab = true;
         else if (argument == L"--auto-reload")
             loop.autoReload = true;
+        else if (argument == L"--auto-table-edit")
+            loop.autoTableEdit = true;
         else
             return false;
 

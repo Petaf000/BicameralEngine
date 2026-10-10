@@ -116,6 +116,7 @@ add_library(bicameral_script STATIC
   src/script/luau_sandbox.cpp
   src/script/luau_package.cpp
   src/script/luau_type_check.cpp
+  src/script/luau_literal_edit.cpp
   src/script/script_value.cpp
 )
 target_include_directories(bicameral_script PUBLIC src)
@@ -127,10 +128,12 @@ target_link_libraries(bicameral_script PRIVATE unofficial::luau::Luau.Analysis)
 # script(パッケージ)と reaction(ベイク)をつなぐ。script は sim を知らないままにするため、別のライブラリにする。
 # reaction_table_loader はランタイムとテストがデータのフォルダのパッケージから表を作る入り口(T-0157・ADR-0033)。
 # reaction_hot_reload はエディタがファイルの変更を見て表を読み直す(T-0139・ADR-0047)。
+# reaction_table_edit はエディタの反応表のパネルの一覧・保存則の検査・Luau への書き戻し(T-0219)。
 add_library(bicameral_reaction_script STATIC
   src/script/reaction_package.cpp
   src/script/reaction_table_loader.cpp
   src/script/reaction_hot_reload.cpp
+  src/script/reaction_table_edit.cpp
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
 target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)
@@ -163,6 +166,7 @@ add_executable(bicameral
   src/editor/editor_overlay.cpp
   src/editor/graph_panel.cpp
   src/editor/lab_panel.cpp
+  src/editor/reaction_table_panel.cpp
   src/frame/auto_reload.cpp
   src/frame/frame_loop.cpp
   src/frame/table_hot_reload.cpp
