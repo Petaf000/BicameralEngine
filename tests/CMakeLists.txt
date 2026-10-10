@@ -18,6 +18,10 @@ add_executable(time_control_test time_control_test.cpp)
 target_link_libraries(time_control_test PRIVATE bicameral_editor)
 add_test(NAME time_control COMMAND time_control_test)
 
+add_executable(brush_stroke_test brush_stroke_test.cpp)
+target_link_libraries(brush_stroke_test PRIVATE bicameral_editor)
+add_test(NAME brush_stroke COMMAND brush_stroke_test)
+
 add_executable(debug_camera_test debug_camera_test.cpp)
 target_link_libraries(debug_camera_test PRIVATE bicameral_view)
 add_test(NAME debug_camera COMMAND debug_camera_test)

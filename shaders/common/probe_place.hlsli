@@ -9,6 +9,7 @@
 // 置く・足すのはエディタの明示的な湧き出し(保存則の外。つつきと同じ扱い。D-206)。変わったエネルギーは湧き出しの欄に数える。
 // 置き換え(実験室の「置く」と同じ。D-439)は、セルの中身を選んだ材料にして温度を決める。
 // 足すは、今の中身に材料を足し、足した材料が持ち込むエネルギー(化学 + その温度の熱)を足す(混ざった温度になる)。
+// 形は球・直方体・円柱(T-0245・ADR-0089)。形の欄は T-0222 の記録では 0(= 球)なので、古い記録は同じ意味のまま読める。
 #ifndef BICAMERAL_PROBE_PLACE_HLSLI
 #define BICAMERAL_PROBE_PLACE_HLSLI
 
@@ -28,8 +29,11 @@
 PROBE_PLACE_NAMESPACE_BEGIN
 
 // --- payload の形(sim/command.h の 48 バイト = 12 語)---
-// [0] 中心のセル x | y << 8 | z << 16
-// [1] 半径(セル。0 = 1 セル)| 置き方 << 8 | 物質の数 << 16
+// [0] 中心のセル x | y << 8 | z << 16 | 大きさ 2 << 24(4 ビット)| 大きさ 3 << 28(4 ビット)
+// [1] 大きさ 1(セル。0 = 1 セル)| 置き方 << 8 | 物質の数 << 16 | 形 << 24
+//     球:     大きさ 1 = 半径(大きさ 2・3 は 0)
+//     直方体: 大きさ 1・2・3 = x・y・z の半幅(中心から端のセルまで。0 = 1 セルの厚さ)
+//     円柱:   大きさ 1 = 半径・大きさ 2 = 軸の向きの半幅・大きさ 3 = 軸(0 = x・1 = y・2 = z)
 // [2] 温度(mK)
 // [3..11] [物質 ID][量の下位][量の上位](µmol。1 セルあたり)× 数
 FX_CONST uint32_t PROBE_PLACE_PAYLOAD_WORDS = 12;
@@ -41,6 +45,9 @@ FX_CONST uint32_t PROBE_PLACE_WORDS_PER_ENTRY = 3;
 
 FX_CONST uint32_t PROBE_PLACE_MAX_SPECIES = 3;
 FX_CONST uint32_t PROBE_PLACE_MAX_RADIUS = 8;  // 1 つのコマンドで 17³ セルまで(適用は 1 スレッドなので重さの上限)
+FX_CONST uint32_t PROBE_PLACE_SHAPE_SPHERE = 0;
+FX_CONST uint32_t PROBE_PLACE_SHAPE_BOX = 1;
+FX_CONST uint32_t PROBE_PLACE_SHAPE_CYLINDER = 2;
 FX_CONST uint32_t PROBE_PLACE_MODE_REPLACE = 0;
 FX_CONST uint32_t PROBE_PLACE_MODE_ADD = 1;
 // 1 セルの 1 物質の量の上限(2^36 µmol ≈ 6.9 万 mol。0.5 m 角の木は約 4 億 µmol)。足し続けて桁が溢れないように
@@ -58,12 +65,19 @@ struct ProbePlace {
     uint32_t x;
     uint32_t y;
     uint32_t z;
-    uint32_t radius;
+    uint32_t radius;  // 大きさ 1(球と円柱の半径・直方体の x の半幅)
     uint32_t mode;
     uint32_t count;
     uint32_t temperature;
     uint32_t species[PROBE_PLACE_MAX_SPECIES];
     uint64_t amounts[PROBE_PLACE_MAX_SPECIES];
+
+    // --- 形(T-0245)---
+    uint32_t shape;
+    uint32_t axis;     // 円柱の軸(0 = x・1 = y・2 = z)
+    uint32_t extentX;  // 中心から各軸の端のセルまで(形を囲む箱の半幅)
+    uint32_t extentY;
+    uint32_t extentZ;
 };
 
 // 1 セルに当てた結果(applied = 0 なら cell は元のまま。足すと成分がインラインの数を超えるセルは飛ばす)
@@ -102,6 +116,29 @@ FX_FN ProbePlace ProbeDecodePlace(ProbePlacePayload payload, uint32_t speciesCou
     place.mode = (shape >> 8) & 0xFFu;
     place.count = (shape >> 16) & 0xFFu;
     place.temperature = payload.words[PROBE_PLACE_WORD_TEMPERATURE];
+    place.shape = shape >> 24;
+
+    // --- 形の大きさ(大きさ 2・3 は中心の語の上の 8 ビット)---
+    const uint32_t size2 = (center >> 24) & 0xFu;
+    const uint32_t size3 = center >> 28;
+    place.axis = 0;
+    place.extentX = place.radius;
+    place.extentY = place.radius;
+    place.extentZ = place.radius;
+    bool sizesValid = size2 == 0 && size3 == 0;  // 球
+    if (place.shape == PROBE_PLACE_SHAPE_BOX) {
+        place.extentY = size2;
+        place.extentZ = size3;
+        sizesValid = size2 <= PROBE_PLACE_MAX_RADIUS && size3 <= PROBE_PLACE_MAX_RADIUS;
+    } else if (place.shape == PROBE_PLACE_SHAPE_CYLINDER) {
+        place.axis = size3;
+        place.extentX = size3 == 0 ? size2 : place.radius;
+        place.extentY = size3 == 1 ? size2 : place.radius;
+        place.extentZ = size3 == 2 ? size2 : place.radius;
+        sizesValid = size2 <= PROBE_PLACE_MAX_RADIUS && size3 <= 2;
+    } else if (place.shape != PROBE_PLACE_SHAPE_SPHERE) {
+        sizesValid = false;
+    }
 
     // --- 物質(数が範囲の外なら読まない)---
     const bool countValid = place.count != 0 && place.count <= PROBE_PLACE_MAX_SPECIES;
@@ -116,33 +153,46 @@ FX_FN ProbePlace ProbeDecodePlace(ProbePlacePayload payload, uint32_t speciesCou
     }
 
     // --- 形 ---
-    const bool inside = place.x < PROBE_GRID_SIZE && place.y < PROBE_GRID_SIZE && place.z < PROBE_GRID_SIZE &&
-                        (center >> 24) == 0;
-    const bool shapeValid = place.radius <= PROBE_PLACE_MAX_RADIUS && place.mode <= PROBE_PLACE_MODE_ADD &&
+    const bool inside = place.x < PROBE_GRID_SIZE && place.y < PROBE_GRID_SIZE && place.z < PROBE_GRID_SIZE;
+    const bool shapeValid = place.radius <= PROBE_PLACE_MAX_RADIUS && sizesValid &&
+                            place.mode <= PROBE_PLACE_MODE_ADD &&
                             place.temperature <= PROBE_PLACE_MAX_TEMPERATURE_MILLIKELVIN;
     place.valid = inside && shapeValid && entriesValid ? 1u : 0u;
 
     return place;
 }
 
-// --- 形(球。半径 0 は中心の 1 セル)---
+// --- 形(球・直方体・円柱。大きさ 0 は中心の 1 セルの厚さ)---
 
-// 軸ごとの範囲 [begin, end)(格子の中に切る)
-FX_FN uint32_t ProbePlaceBegin(uint32_t center, uint32_t radius) {
-    return center > radius ? center - radius : 0u;
+// 軸ごとの範囲 [begin, end)(中心 ± extent を格子の中に切る。extent は ProbePlace の extentX・Y・Z)
+FX_FN uint32_t ProbePlaceBegin(uint32_t center, uint32_t extent) {
+    return center > extent ? center - extent : 0u;
 }
 
-FX_FN uint32_t ProbePlaceEnd(uint32_t center, uint32_t radius) {
-    const uint32_t last = center + radius;
+FX_FN uint32_t ProbePlaceEnd(uint32_t center, uint32_t extent) {
+    const uint32_t last = center + extent;
 
     return last < PROBE_GRID_SIZE ? last + 1 : PROBE_GRID_SIZE;
 }
 
-// セル (x, y, z) が球の中か(中心からの距離の 2 乗 ≤ 半径の 2 乗)
+// セル (x, y, z) が形の中か。球: 中心からの距離の 2 乗 ≤ 半径の 2 乗。直方体: 各軸で半幅の中。
+// 円柱: 軸に垂直な 2 方向の距離の 2 乗 ≤ 半径の 2 乗 かつ 軸の向きで半幅の中
 FX_FN bool ProbePlaceCovers(ProbePlace place, uint32_t x, uint32_t y, uint32_t z) {
     const int32_t dx = (int32_t)x - (int32_t)place.x;
     const int32_t dy = (int32_t)y - (int32_t)place.y;
     const int32_t dz = (int32_t)z - (int32_t)place.z;
+    const bool inBox = (uint32_t)(dx * dx) <= place.extentX * place.extentX &&
+                       (uint32_t)(dy * dy) <= place.extentY * place.extentY &&
+                       (uint32_t)(dz * dz) <= place.extentZ * place.extentZ;
+    if (place.shape == PROBE_PLACE_SHAPE_BOX)
+        return inBox;
+
+    if (place.shape == PROBE_PLACE_SHAPE_CYLINDER) {
+        const int32_t across1 = place.axis == 0 ? dy : dx;
+        const int32_t across2 = place.axis == 2 ? dy : dz;
+
+        return inBox && (uint32_t)((across1 * across1) + (across2 * across2)) <= place.radius * place.radius;
+    }
 
     return (uint32_t)((dx * dx) + (dy * dy) + (dz * dz)) <= place.radius * place.radius;
 }

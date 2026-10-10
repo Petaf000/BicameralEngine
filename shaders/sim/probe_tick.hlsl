@@ -73,8 +73,8 @@ void ApplyPush(uint32_t address) {
         EmitTickEvent(PROBE_EVENT_BODY_PUSHED, hit);
 }
 
-// 置く(T-0222。common/probe_place.hlsli): 球の中のセルを (z, y, x) の順に置き換える・足す。変わったエネルギーは湧き出しの欄へ。
-// 触ったブロック(球の範囲の箱が重なるブロック全部。CPU も同じ)は「刻みの直前に変わった」にし、起こす刻みを今にする
+// 置く(T-0222・T-0245。common/probe_place.hlsli): 形(球・直方体・円柱)の中のセルを (z, y, x) の順に置き換える・足す。変わったエネルギーは湧き出しの欄へ。
+// 触ったブロック(形を囲む箱が重なるブロック全部。CPU も同じ)は「刻みの直前に変わった」にし、起こす刻みを今にする
 // (この後の WakeDueBlocks が一覧へ 1 回だけ足す。ADR-0018)。物質の数は適用の単位の引数(その刻みの表)
 void ApplyPlace(uint64_t tick, uint32_t address) {
     ProbePlacePayload payload;
@@ -88,9 +88,9 @@ void ApplyPlace(uint64_t tick, uint32_t address) {
     // --- セル ---
     const uint32_t base = GenerationBase(tick);
     int64_t source = 0;
-    for (uint32_t z = ProbePlaceBegin(place.z, place.radius); z < ProbePlaceEnd(place.z, place.radius); ++z) {
-        for (uint32_t y = ProbePlaceBegin(place.y, place.radius); y < ProbePlaceEnd(place.y, place.radius); ++y) {
-            for (uint32_t x = ProbePlaceBegin(place.x, place.radius); x < ProbePlaceEnd(place.x, place.radius); ++x) {
+    for (uint32_t z = ProbePlaceBegin(place.z, place.extentZ); z < ProbePlaceEnd(place.z, place.extentZ); ++z) {
+        for (uint32_t y = ProbePlaceBegin(place.y, place.extentY); y < ProbePlaceEnd(place.y, place.extentY); ++y) {
+            for (uint32_t x = ProbePlaceBegin(place.x, place.extentX); x < ProbePlaceEnd(place.x, place.extentX); ++x) {
                 if (!ProbePlaceCovers(place, x, y, z))
                     continue;
 
@@ -111,12 +111,12 @@ void ApplyPlace(uint64_t tick, uint32_t address) {
     hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SOURCE, (uint64_t)source, original);
 
     // --- ブロック ---
-    const uint32_t blockBeginX = ProbePlaceBegin(place.x, place.radius) / PROBE_BLOCK_SIZE;
-    const uint32_t blockBeginY = ProbePlaceBegin(place.y, place.radius) / PROBE_BLOCK_SIZE;
-    const uint32_t blockBeginZ = ProbePlaceBegin(place.z, place.radius) / PROBE_BLOCK_SIZE;
-    const uint32_t blockEndX = (ProbePlaceEnd(place.x, place.radius) - 1) / PROBE_BLOCK_SIZE;
-    const uint32_t blockEndY = (ProbePlaceEnd(place.y, place.radius) - 1) / PROBE_BLOCK_SIZE;
-    const uint32_t blockEndZ = (ProbePlaceEnd(place.z, place.radius) - 1) / PROBE_BLOCK_SIZE;
+    const uint32_t blockBeginX = ProbePlaceBegin(place.x, place.extentX) / PROBE_BLOCK_SIZE;
+    const uint32_t blockBeginY = ProbePlaceBegin(place.y, place.extentY) / PROBE_BLOCK_SIZE;
+    const uint32_t blockBeginZ = ProbePlaceBegin(place.z, place.extentZ) / PROBE_BLOCK_SIZE;
+    const uint32_t blockEndX = (ProbePlaceEnd(place.x, place.extentX) - 1) / PROBE_BLOCK_SIZE;
+    const uint32_t blockEndY = (ProbePlaceEnd(place.y, place.extentY) - 1) / PROBE_BLOCK_SIZE;
+    const uint32_t blockEndZ = (ProbePlaceEnd(place.z, place.extentZ) - 1) / PROBE_BLOCK_SIZE;
     for (uint32_t bz = blockBeginZ; bz <= blockEndZ; ++bz) {
         for (uint32_t by = blockBeginY; by <= blockEndY; ++by) {
             for (uint32_t bx = blockBeginX; bx <= blockEndX; ++bx) {

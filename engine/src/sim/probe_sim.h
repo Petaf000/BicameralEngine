@@ -72,7 +72,8 @@ namespace bicameral::sim {
                                                const std::array<int32_t, 3>& direction,
                                                uint32_t impulseMillinewtonSeconds);
 
-    // 物を置く筆(T-0222・D-449。PROBE_COMMAND_TYPE_PLACE。common/probe_place.hlsli)。中心 (x, y, z)・半径(セル)の球の中のセルを、
+    // 物を置く筆(T-0222・D-449。PROBE_COMMAND_TYPE_PLACE。common/probe_place.hlsli)。中心 (x, y, z)・半径(セル)の球
+    // (T-0245 から直方体・円柱も)の中のセルを、
     // contents(1 セルあたりの µmol。3 つまで)と温度で置き換える(replace)か、今の中身に足す。当てられない値(格子の外・半径や物質の数が
     // 上限を超える・表に無い物質)のコマンドは GPU も CPU リファレンスも何もしない
     struct ProbePlaceShape {
@@ -82,6 +83,11 @@ namespace bicameral::sim {
         uint32_t radius = 0;  // セル。0 = 中心の 1 セル(上限 PROBE_PLACE_MAX_RADIUS)
         bool replace = true;  // false なら足す
         uint32_t temperatureMilliKelvin = 300000;
+
+        // --- 球以外の形(T-0245・ADR-0089。common/probe_place.hlsli の語 [0]・[1] の約束)---
+        uint32_t kind = PROBE_PLACE_SHAPE_SPHERE;
+        uint32_t size2 = 0;  // 直方体: y の半幅・円柱: 軸の向きの半幅(球は 0)
+        uint32_t size3 = 0;  // 直方体: z の半幅・円柱: 軸(0 = x・1 = y・2 = z)(球は 0)
     };
 
     [[nodiscard]] ProbeCommand MakePlaceCommand(uint64_t targetTick, uint32_t sequence, const ProbePlaceShape& shape,

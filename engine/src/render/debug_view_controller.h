@@ -43,6 +43,12 @@ namespace bicameral::render {
         DebugViewQuantity quantity = DebugViewQuantity::Temperature;
     };
 
+    // 左ボタンを押したままポインタが通った断面のセル(筆で塗る。T-0245)と、離したか
+    struct PointerDrag {
+        std::vector<CellCoordinate> cells;  // 古い順(続けて同じセルは 1 つ)
+        bool released = false;
+    };
+
     class DebugViewController {
     public:
         DebugViewController(uint32_t gridSize, const DebugViewSettings& settings, const OrbitCameraState& camera);
@@ -62,6 +68,9 @@ namespace bicameral::render {
         // 前に呼んでから Shift + 左クリックした画素の光線(格子の座標。古い順。取ったら忘れる。T-0098)
         [[nodiscard]] std::vector<CameraRay> TakePushRays();
 
+        // 前に呼んでから左ボタンを押したまま通ったセルと、離したか(取ったら忘れる。毎フレーム呼ぶ。T-0245)
+        [[nodiscard]] PointerDrag TakeDrag();
+
         // --- 覗き窓(T-0096)---
         // cell を覗いて depth まで潜る(--peek。窓では P と PageDown・PageUp)
         void Peek(CellCoordinate cell, uint32_t depth);
@@ -72,6 +81,7 @@ namespace bicameral::render {
     private:
         void HandlePointer(const InputEvent& event, uint32_t width, uint32_t height,
                            std::vector<CellCoordinate>& pokes);
+        void AddDragCell(const InputEvent& event, uint32_t width, uint32_t height);
         void HandleKey(const InputEvent& event, uint32_t width, uint32_t height);
         void HandlePeekKey(const InputEvent& event, uint32_t width, uint32_t height);
         void FocusOnPeek();
@@ -88,6 +98,8 @@ namespace bicameral::render {
 
         bool m_traceRequested = false;      // T が押された(TakeTraceRequest で取る)
         std::vector<CameraRay> m_pushRays;  // Shift + 左クリックの光線(TakePushRays で取る)
+        bool m_leftHeld = false;            // Shift なしの左ボタンを押している(筆で塗る)
+        PointerDrag m_drag;                 // TakeDrag で取る
 
         PeekView m_peek;
         bool m_peekChanged = false;  // 覗く場所が変わった(TakePeekChange で取る)

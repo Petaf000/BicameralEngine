@@ -82,6 +82,9 @@ namespace bicameral::render {
 
             if (m_panning)
                 m_camera.Pan(deltaX, deltaY, height);
+
+            if (m_leftHeld)
+                AddDragCell(event, width, height);
         } else if (event.button == PointerButton::Right)
             m_rotating = down;
         else if (event.button == PointerButton::Middle)
@@ -96,10 +99,28 @@ namespace bicameral::render {
             const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
             if (cell && !event.shift)
                 pokes.push_back(*cell);
+
+            m_leftHeld = !event.shift;
+        } else if (m_leftHeld) {  // 左ボタンを離した
+            m_leftHeld = false;
+            m_drag.released = true;
         }
 
         m_lastX = event.x;
         m_lastY = event.y;
+    }
+
+    // 左ボタンを押したまま動いた所の断面のセル(続けて同じセルは足さない)
+    void DebugViewController::AddDragCell(const InputEvent& event, uint32_t width, uint32_t height) {
+        const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(event.x) + 0.5f,
+                                              static_cast<float>(event.y) + 0.5f, width, height);
+        const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
+        if (cell && (m_drag.cells.empty() || m_drag.cells.back() != *cell))
+            m_drag.cells.push_back(*cell);
+    }
+
+    PointerDrag DebugViewController::TakeDrag() {
+        return std::exchange(m_drag, {});
     }
 
     // --- キー ---

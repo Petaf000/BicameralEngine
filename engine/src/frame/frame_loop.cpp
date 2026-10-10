@@ -860,6 +860,7 @@ namespace bicameral::frame {
 
             std::vector<render::CellCoordinate> cells = m_viewController.HandleInput(events, m_swapChain.Width(),
                                                                                      m_swapChain.Height());
+            const render::PointerDrag drag = m_viewController.TakeDrag();  // 筆で塗る(T-0245)
 
             // トレースと覗き窓は世界に入らない(View)ので、再生中も使える
             if (m_viewController.TakeTraceRequest())
@@ -871,17 +872,17 @@ namespace bicameral::frame {
             if (!m_replay.empty())
                 return;
 
-            // 筆を持っている間は、左クリックが当たったセルを「置く」コマンドに(T-0222。自動のクリックはつつきのまま)
+            // 筆を持っている間は、左ボタンを押した・ドラッグしたセルを「置く」コマンドに(T-0222・T-0245。自動のクリックはつつきのまま)
+            const size_t waitingCommands = (sim::PROBE_COMMAND_QUEUE_CAPACITY - m_sim.FreeCommandSlots()) +
+                                           m_pendingCommands.size();
             if (m_editor && m_editor->Brush().Holding()) {
-                for (const render::CellCoordinate& cell : cells)
-                    m_pendingCommands.push_back(
-                        m_editor->Brush().MakeCommand(cell.x, cell.y, cell.z, m_nextSequence++));
-
+                rng::move(m_editor->Brush().Paint(cells, drag.cells, drag.released, waitingCommands, m_nextSequence),
+                          std::back_inserter(m_pendingCommands));
                 cells.clear();
             }
 
             if (m_options.autoPlace && m_editor)
-                rng::move(m_editor->Brush().TakeAutoCommands(m_frameNumber, m_nextSequence),
+                rng::move(m_editor->Brush().TakeAutoCommands(m_frameNumber, waitingCommands, m_nextSequence),
                           std::back_inserter(m_pendingCommands));
 
             const bool autoClick = m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0;
