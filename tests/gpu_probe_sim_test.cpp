@@ -16,6 +16,7 @@
 //     別の分け方で再生して同じハッシュ列になる
 //   - (T-0139)反応表を刻みの途中で差し替えても(速度と熱容量を変えた表)、差し替えた刻みから CPU リファレンスと毎刻みビット一致する
 //     (分け方を変えても。差し替えの印のコマンドは GPU の適用では何もしない)
+//   - (T-0223)物質を足す・消す表(水素を足し、セルロースを消す)に差し替えても、セルの物質の付け替え(RxRemapCell)を含めて毎刻みビット一致する
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ(シミュは compute キュー。06 §4)。
 #include <algorithm>
@@ -38,6 +39,7 @@
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
 #include "sim/reaction_test_table.h"
+#include "sim/species_remap.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -174,12 +176,15 @@ namespace {
                                      result.ticks.back().energy == result.ticks[tick].energy + reference.SourceEnergy();
         }
 
+        // 差し替えた後のセルは新しい表の ID(物質の一覧が変わる差し替え。T-0223)
+        const BakedReactionTable& lastTable = swap.table != nullptr && swap.tick < TOTAL_TICKS ? *swap.table : table;
         const std::span<const reaction::RxCell> last = reference.State(TOTAL_TICKS);
-        result.elementsConserved = CountAllElements(table, last) == initialElements;
-        result.reacted = rng::any_of(
-            last, [&](const reaction::RxCell& cell) { return ProbeViewAmount(cell, table.SpeciesId("carbon")) > 0; });
+        result.elementsConserved = CountAllElements(lastTable, last) == initialElements;
+        result.reacted = rng::any_of(last, [&](const reaction::RxCell& cell) {
+            return ProbeViewAmount(cell, lastTable.SpeciesId("carbon")) > 0;
+        });
         result.extractionHash = ProbeExtractionHash(
-            MakeProbeExtractionCells(last, reference.Caches(TOTAL_TICKS), ProbeViewSpecies(table)));
+            MakeProbeExtractionCells(last, reference.Caches(TOTAL_TICKS), ProbeViewSpecies(lastTable)));
 
         return result;
     }
@@ -698,6 +703,61 @@ namespace {
         }
     }
 
+    // --- 物質を足す・消す差し替え(T-0223・ADR-0065): 水素(H2)を足してセルロースと木の規則を消した表に、刻みの途中で替える ---
+    // 水素の後ろの物質の ID がずれ、木の壁のセルロースは炭・水素・酸素の単体に分かれる。GPU の付け替えの段が CPU と毎刻みビット一致
+
+    std::optional<BakedReactionTable> MakeSpeciesChangedTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.species.push_back({.name = "hydrogen",
+                                      .composition = {{.element = "H", .count = 2}},
+                                      .formationEnthalpy = 0,
+                                      .heatCapacity = 28836,
+                                      .thermalConductivity = 18 * 5000});
+        std::erase_if(definition.species, [](const SpeciesDefinition& species) { return species.name == "cellulose"; });
+        std::erase_if(definition.rules, [](const RuleDefinition& rule) {
+            return rng::any_of(rule.reactants, [](const RuleTerm& term) { return term.species == "cellulose"; });
+        });
+
+        auto baked = BakeReactionTable(definition);
+        if (!baked)
+            return std::nullopt;
+
+        return std::move(*baked);
+    }
+
+    void TestSpeciesSwap(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
+        const std::optional<BakedReactionTable> swapped = MakeSpeciesChangedTable();
+        failures.Check(swapped.has_value() && swapped->speciesNames != table.speciesNames &&
+                           BuildSpeciesRemap(table, *swapped).has_value(),
+                       "物質の付け替え: 差し替える表をベイクでき、付け替えられる(物質の一覧が違う)");
+        if (!swapped)
+            return;
+
+        std::vector<ProbeCommand> commands = MakeCommands();
+        commands.push_back(MakeTableCommand(SWAP_TICK, static_cast<uint32_t>(commands.size()), 0x5BEC1E5ULL));
+        rng::sort(commands, CommandPrecedes);
+
+        const TableSwapPlan swap{.tick = SWAP_TICK, .table = &*swapped};
+        const Reference expected = RunReference(table, commands, {}, swap);
+        failures.Check(expected.ticks[SWAP_TICK + 1].scheduledBlocks == PROBE_BLOCK_COUNT,
+                       "物質の付け替え: 差し替えた刻みに全部のブロックを計算する(CPU)");
+
+        for (const Plan& plan : {MakePlans()[0], MixedPlan()}) {
+            save::ReplayPlayer player = MakePlayer(commands);
+            const RunResult result = RunPlan(device, table, plan, ScheduledSource(player), swap);
+
+            Log(Channel::Sim, Level::Info, "物質の付け替え GPU({}): S({}) = {:016x}", plan.name,
+                result.hashes.empty() ? 0 : result.hashes.back().tick,
+                result.hashes.empty() ? 0 : result.hashes.back().hash);
+
+            failures.Check(
+                result.ok && HashesMatch(result.hashes, expected),
+                std::format("物質の付け替え {}: 刻みごとのハッシュと計算したブロックの数が CPU と一致", plan.name));
+            failures.Check(result.extractionHash == expected.extractionHash,
+                           std::format("物質の付け替え {}: 最後の抽出(新しい表の ID の物質)が CPU と一致", plan.name));
+        }
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -731,6 +791,7 @@ int main(int argc, char** argv) {
     TestRecordAndReplay(device->Get(), *table, failures);
     TestSlowWake(device->Get(), *table, failures);
     TestTableSwap(device->Get(), *table, failures);
+    TestSpeciesSwap(device->Get(), *table, failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");
     const bool passed = failures.count == 0 && passesValidation;

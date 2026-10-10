@@ -8,6 +8,7 @@
 #include "common/graph_trace.hlsli"  // u2 space1(連鎖のトレース。T-0087)
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
+#include "common/species_remap.hlsli"
 #include "common/work_graph_stats.hlsli"  // u1 space1(ノードのカウンタ。T-0008)
 
 // --- バッファ(ROOT_LAYOUT の順)---
@@ -30,6 +31,8 @@ StructuredBuffer<RxSpecies> reactionSpecies : register(t1);  // 反応の表(ベ
 StructuredBuffer<RxRule> reactionRules : register(t2);
 StructuredBuffer<uint32_t> reactionRuleIndex : register(t3);
 ByteAddressBuffer reactionRates : register(t4);
+ByteAddressBuffer speciesRemap
+    : register(t5);  // 物質を足す・消す差し替えの付け替えの表(common/species_remap.hlsli の形。T-0223)
 
 cbuffer UnitConstants : register(b0) {
     uint32_t tickLow;  // この単位の刻み(記録するときに埋め込む)
@@ -57,6 +60,59 @@ ProbeReactionTable ReactionTable() {
     table.unused = 0;
 
     return table;
+}
+
+// common/species_remap.hlsli の Remap の約束(付け替えの表の読み方。見出しの数から各欄の始まりを出す)
+struct ProbeSpeciesRemap {
+    uint32_t speciesCount;
+    uint32_t partCount;
+    uint32_t unitCount;
+
+    uint32_t NewIdOffset() { return (RX_REMAP_HEADER_WORDS + 2 * speciesCount) * 4; }
+
+    uint32_t PartBeginOffset() { return NewIdOffset() + speciesCount * 4; }
+
+    uint32_t PartOffset() { return PartBeginOffset() + (speciesCount + 1) * 4; }
+
+    uint32_t UnitOffset() { return PartOffset() + partCount * 8; }
+
+    uint32_t NewId(uint32_t oldId) { return speciesRemap.Load(NewIdOffset() + oldId * 4); }
+
+    uint32_t PartBegin(uint32_t oldId) { return speciesRemap.Load(PartBeginOffset() + oldId * 4); }
+
+    RxRemapPart Part(uint32_t index) {
+        const uint2 words = speciesRemap.Load2(PartOffset() + index * 8);
+        RxRemapPart part;
+        part.species = words.x;
+        part.atomsPerMol = words.y;
+
+        return part;
+    }
+
+    int64_t RemovedH0(uint32_t oldId) {
+        return (int64_t)speciesRemap.Load<uint64_t>((RX_REMAP_HEADER_WORDS + 2 * oldId) * 4);
+    }
+
+    uint32_t UnitCount() { return unitCount; }
+
+    RxRemapUnit Unit(uint32_t index) {
+        const uint2 words = speciesRemap.Load2(UnitOffset() + index * 8);
+        RxRemapUnit unit;
+        unit.species = words.x;
+        unit.atoms = words.y;
+
+        return unit;
+    }
+};
+
+ProbeSpeciesRemap SpeciesRemap() {
+    const uint3 header = speciesRemap.Load3(0);
+    ProbeSpeciesRemap remap;
+    remap.speciesCount = header.x;
+    remap.partCount = header.y;
+    remap.unitCount = header.z;
+
+    return remap;
 }
 
 // --- 共通 ---

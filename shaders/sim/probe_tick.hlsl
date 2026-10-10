@@ -275,6 +275,17 @@ void SortEventKeys(uint32_t thread) {
     StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, index, ProbeChangeMark(tick));
 }
 
+// --- [0] の前(物質の一覧が変わる表に差し替えた刻みだけ。T-0223・ADR-0065): 2 世代のセルの物質を名前で付け替える ---
+// CPU が新しい表と付け替えの表(t5)を写してから、適用の単位の前に流す(コマンドの適用も新しい ID で)。1 スレッド = 1 セル。
+// 本体は CPU リファレンス(sim::ProbeReference の RemapSpecies)と同じ RxRemapCell
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RemapSpecies(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t index = dispatchThreadId.x;
+    if (index >= 2 * PROBE_CELL_COUNT)
+        return;
+
+    cells[index] = RxRemapCell(SpeciesRemap(), ReactionTable(), cells[index]).cell;
+}
+
 // --- [1] 伝導は Work Graph(sim/probe_conduct.hlsl)---
 
 // --- [2 .. 2 + k) 重さの試験(--sim-load・--sim-split。R-LOOP-2)---
