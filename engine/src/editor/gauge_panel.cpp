@@ -2,6 +2,7 @@
 #include "editor/gauge_panel.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <limits>
 #include <vector>
@@ -128,7 +129,7 @@ namespace bicameral::editor {
                 return;
 
             const float ratio = std::clamp((ImGui::GetIO().MousePos.x - origin.x) / GRAPH_SIZE.x, 0.0f, 1.0f);
-            const auto index = static_cast<size_t>(ratio * static_cast<float>(count - 1) + 0.5f);
+            const auto index = static_cast<size_t>(std::lround(ratio * static_cast<float>(count - 1)));
             std::string text = std::format("刻み {}", firstTick + index);
             if (index < a.size())
                 text += std::format("\nA {:.6g}", a[index]);
@@ -235,8 +236,7 @@ namespace bicameral::editor {
 
         const std::vector<sim::LabGaugeSample>& gauge = session.Gauge();
         const size_t shown = std::min(gauge.size(), static_cast<size_t>(m_windowTicks));
-        const std::span<const sim::LabGaugeSample> recent(gauge.end() - static_cast<std::ptrdiff_t>(shown),
-                                                          gauge.end());
+        const std::span<const sim::LabGaugeSample> recent = std::span(gauge).last(shown);
         const std::vector<float> values = ValuesOf(recent, m_quantity, static_cast<uint32_t>(m_species));
         DrawSeries("##gauge", values, {}, std::nullopt, recent.empty() ? 0 : recent.front().tick);
         if (!values.empty())
@@ -246,7 +246,8 @@ namespace bicameral::editor {
 
     void GaugePanel::BuildCompare(LabPanel& lab, sim::LabSession& session) {
         ImGui::SeparatorText("比べる(同じ保存点から A = 元の実験の続き・B = 条件を 1 つ足す)");
-        const auto nextTick = static_cast<int>(std::min<uint64_t>(session.NextTick(), MAX_COMPARE_TICKS * 10));
+        const auto nextTick = static_cast<int>(
+            std::min<uint64_t>(session.NextTick(), uint64_t{MAX_COMPARE_TICKS} * 10));
         m_savePointTick = std::clamp(m_savePointTick, 0, nextTick);
         ImGui::SetNextItemWidth(220.0f);
         ImGui::SliderInt("保存点の刻み", &m_savePointTick, 0, nextTick);

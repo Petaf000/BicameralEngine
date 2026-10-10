@@ -35,6 +35,8 @@
   debug のビルドは警告なしで 1 回目から通過。lab_box は 60 刻みでは CO2 がまだ出ず(待ちの丸め)1 回落ち → 300 刻みに。
   自動の確認で隣に熱い木を足すと本物の表では 1 刻みで燃え尽きた(セルロース 0 → 1 µmol)ので、冷たい木に替えた。
   lab_box・gpu_lab_box(104 秒)・window_lab(129 秒)・window_lab_compare(116 秒)・float_check 5 本が通過。
+  release のビルドも警告なし・lab_box・window_lab・window_lab_compare が通過。clang-tidy で新しいファイルに出た 3 件(丸め・span・掛け算の型)を直した
+  (tidy の全体は 126 件で、ほかは前からあるもの。lab_session.h の exception-escape は前からの std::map の移動)。かかった時間は約 1.5 時間。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 動いているもの: `bicameral --editor` のパネル「計器と比べる」(初めは畳んである。実験室の箱を作ると中身が出る)。
