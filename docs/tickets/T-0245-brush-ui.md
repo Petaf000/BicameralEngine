@@ -33,6 +33,9 @@
   `^(brush_stroke|gpu_probe_place(_warp)?|window_place_.*|reaction_replay_table|lab_box|window_lab|window_lab_compare)$` 9 本が通過
   (gpu_probe_place 48 秒・_warp 38 秒・window_place_record 98 秒〔ドラッグ 8 + 5 + 5 個〕・play 101 秒・window_lab 127 秒)。
   wt6 の最初のビルドは約 32 分(vcpkg から)。かかった時間は待ちを除いて約 1 時間。
+- 同日(rebase の後。main は e2709f1 のままで載せ直しは不要だった): debug の `^(debug_camera|time_control|window_replay_(record|play|editor))$` 5 本が通過
+  (窓の入力とフレームのループを触ったので)。release のビルドは警告なし(前からの C4189 だけ)・release の
+  `^(brush_stroke|gpu_probe_place(_warp)?|window_place_.*|window_lab|lab_box)$` 7 本が通過。tidy・計測はしていない。archmap OK(153)。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 動いているもの: `bicameral --editor` の「筆(世界に置く)」で、形(球・直方体・円柱〔軸 x / y 縦 / z〕)・材料(表の全物質から 3 つまで・
