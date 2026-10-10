@@ -82,6 +82,8 @@ namespace bicameral::frame {
 
         bool
             autoLab = false;  // 実験室で木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--auto-lab。T-0142)
+        // 実験室の計器のグラフが CPU の値と一致・保存点から条件を 1 つ足した 2 つの実験を比べる(--auto-lab-compare。T-0221)
+        bool autoLabCompare = false;
         // パッケージ(--packages の写し)の反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻み流して終える(--auto-reload。
         // --editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。frame/auto_reload。T-0195)
         bool autoReload = false;

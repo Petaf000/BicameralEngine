@@ -368,6 +368,8 @@ set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRE
 # 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
 add_test(NAME window_lab COMMAND bicameral --editor --auto-lab --frames 20)
 set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
+add_test(NAME window_lab_compare COMMAND bicameral --editor --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
+set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 世界に物を置く筆(T-0222): パネルの筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずのものが全部 GPU で
 # 当たったか(--auto-place。通らなければ 1)を記録し、別の起動で再生して同じハッシュ列になる(置くコマンドも再生ファイルだけで再現)
 set(WINDOW_PLACE_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place.bcreplay)

@@ -62,6 +62,7 @@ namespace bicameral::editor {
         // NOLINTNEXTLINE(cppcoreguidelines-owning-memory) コンストラクタが private なので make_unique を使えない
         std::unique_ptr<EditorOverlay> overlay(new EditorOverlay(window, frameCount));
         overlay->m_lab = std::make_unique<LabPanel>(device);
+        overlay->m_gauge = std::make_unique<GaugePanel>();
         overlay->m_reactionTable = std::make_unique<ReactionTablePanel>();
         overlay->m_brush = std::make_unique<BrushPanel>();
         if (!overlay->CreateGpuObjects(device, frameCount))
@@ -224,6 +225,7 @@ namespace bicameral::editor {
         BuildStatusPanel(status);
         BuildGraphPanel(status.graph);
         m_lab->Build();
+        m_gauge->Build(*m_lab);
         m_reactionTable->Build(status.reactionTable);
         m_brush->Build();
 

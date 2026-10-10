@@ -289,6 +289,18 @@ namespace bicameral::editor {
         return sim::LabWholeBox();
     }
 
+    std::optional<sim::Command> LabPanel::ComposedCommand(bool temperatureOnly) const {
+        const auto milliKelvin = static_cast<uint32_t>(m_temperatureKelvin) * 1000u;
+        if (temperatureOnly)
+            return sim::MakeLabTemperatureRegionCommand(0, 0, PlaceRange(), milliKelvin);
+
+        const std::vector<sim::SpeciesAmount> contents = ComposedContents(milliKelvin);
+        if (contents.empty())
+            return std::nullopt;
+
+        return sim::MakeLabFillRegionCommand(0, 0, PlaceRange(), contents, milliKelvin);
+    }
+
     void LabPanel::BuildMaterialRows(uint32_t milliKelvin) {
         const sim::BakedReactionTable& table = m_session->Table();
         constexpr std::array<const char*, 3> UNIT_NAMES = {"mol", "g", "kPa(分圧)"};
