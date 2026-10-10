@@ -2,6 +2,7 @@
 // (sim/gas_reference の StepGas。G1・G2)と毎刻みビット一致することと、G1・G2 の合格の条件を GPU の結果でも満たすことを確かめる。
 // 場面(gas_reference_test と同じ作り): 閉じた箱の保存・周期的な箱の運動量・静止大気・熱い泡・風で煙(MC と 1 次の風上のにじみの比べ)・
 // 微量の成分(乱数の丸め)・minmod と切り捨て。刻みごとに GPU のセルと帳簿を読み戻し、CPU の状態のハッシュと帳簿を比べる。
+// T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波(等温の理論 404 m/s)・1 セルの 5 倍の圧力(整数の範囲)。
 // 引数: gpu_test_options.h(--warp・--queue)と
 //   --scene <名前>: 1 つの場面だけ(既定は全部)
 //   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
@@ -182,6 +183,37 @@ namespace {
         return scene;
     }
 
+    // --- T-0226: 細い管(x に 640 セル・壁・重力なし)の左半分の圧力を overPercent % 上げた段差を 18 刻み(0.3 秒)放す ---
+    constexpr uint32_t TUBE_LENGTH = 640;
+    constexpr uint64_t TUBE_TICKS = 18;
+
+    Scene MakeTubeScene(const char* name, uint32_t overPercent) {
+        GasConfig config = MakeAirConfig(TUBE_LENGTH, 1, 1);
+        config.gravity = false;
+        GasBox box = MakeAirBox(config);
+        for (uint32_t x = 0; x < TUBE_LENGTH / 2; ++x) {
+            GasCell& cell = box.cells[x];
+            for (uint32_t s = 0; s < config.speciesCount; ++s)
+                cell.amounts[s] += cell.amounts[s] * overPercent / 100;
+
+            cell.energy += cell.energy * overPercent / 100;
+        }
+
+        return {.name = name, .box = box, .ticks = TUBE_TICKS};
+    }
+
+    // 閉じた 12³ の箱の 1 セルだけ 5 倍の物質量(5 倍の圧力。強い圧力の波で整数の範囲と真空のセルを確かめる)
+    Scene MakeBlastScene() {
+        GasBox box = MakeAirBox(MakeAirConfig(12, 12, 12));
+        GasCell& cell = box.cells[box.Index(6, 6, 3)];
+        for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+            cell.amounts[s] *= 5;
+
+        cell.energy *= 5;
+
+        return {.name = "blast", .box = box, .ticks = 30};
+    }
+
     std::vector<Scene> MakeScenes() {
         std::vector<Scene> scenes;
         scenes.push_back(MakeClosedScene());
@@ -193,6 +225,9 @@ namespace {
         scenes.push_back(MakeWindScene("wind_upwind", GasReconstruction::Upwind, true));
         scenes.push_back(MakeWindScene("wind_minmod_floor", GasReconstruction::Minmod, false));
         scenes.push_back(MakeTraceScene());
+        scenes.push_back(MakeTubeScene("sound", 1));
+        scenes.push_back(MakeTubeScene("shock", 100));
+        scenes.push_back(MakeBlastScene());
 
         return scenes;
     }
@@ -357,6 +392,22 @@ namespace {
         return profile;
     }
 
+    // 管の右へ進む波の前線で、圧力の差が段差の真ん中の圧力の半分を横切る位置(セル。線形の内挿)
+    double TubeFront(const GasBox& box) {
+        const auto pressure = [&box](uint32_t x) {
+            return (double)(DeriveGasCell(box, box.cells[x], 0).pressure - box.referenceDerived[0].pressure);
+        };
+
+        const double threshold = pressure(TUBE_LENGTH / 2) / 2;
+        for (uint32_t x = TUBE_LENGTH - 2; x > 0; --x) {
+            const double here = pressure(x);
+            if (here >= threshold)
+                return x + ((here - threshold) / (here - pressure(x + 1)));
+        }
+
+        return 0;
+    }
+
     // 保存: 成分とエネルギーは初め + 帳簿、運動量も初め + 帳簿(閉じた箱なら帳簿の成分とエネルギーは 0)
     std::string CheckConservation(const GasBox& initial, const GasBox& final) {
         const GasTotals before = SumGas(initial);
@@ -410,6 +461,26 @@ namespace {
                 shift, expected);
             if (std::abs(shift - expected) > expected * 0.25)
                 return "風で煙が流れない";
+        }
+
+        // 管の前線の速さ(段差は x = 320 から始まる): 音の波は 340 m/s、圧力 2 倍の段差は等温の衝撃波の理論 404.2 m/s(± 2%)
+        if (scene.name == "sound" || scene.name == "shock") {
+            const double speed = (TubeFront(final) - (TUBE_LENGTH / 2.0)) * 0.5 * 60.0 / (double)TUBE_TICKS;
+            const double expected = scene.name == "sound" ? 340.0 : 404.2;
+            Log(Channel::Sim, Level::Info, "  {}: 前線の速さ {:.1f} m/s(理論 {:.1f})", scene.name, speed, expected);
+            if (std::abs(speed - expected) > expected * 0.02)
+                return "管の波の速さが合わない";
+        }
+
+        if (scene.name == "blast") {
+            uint64_t lightest = UINT64_MAX;
+            for (uint32_t index = 0; index < final.cells.size(); ++index)
+                lightest = std::min(lightest, DeriveGasCell(final, final.cells[index], CellZ(final, index)).mass);
+
+            Log(Channel::Sim, Level::Info, "  blast: 最も軽いセル {} mg・最大の速さ {} (2^-20 m/s)", lightest,
+                MaxSpeed(final));
+            if (lightest < (uint64_t)ROUGH_CELL_MASS / 2)
+                return "強い圧力で真空に近いセルができた";
         }
 
         // MUSCL(MC)のにじみが 1 次の風上の 0.6 倍以下・煙の割合が初めの最大を超えない(G2)
