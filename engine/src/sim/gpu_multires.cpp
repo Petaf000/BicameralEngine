@@ -255,6 +255,11 @@ namespace bicameral::sim {
         result.m_constants.ledgerColumns = capacity.ledgerColumns;
         result.m_wideCells = options.wideCells;
         result.m_constants.overflowBase = result.OverflowBaseWord();
+        if (options.wideCells) {
+            const auto doubled = static_cast<uint32_t>(result.PageCount() * 2);
+            result.m_wideChunks = options.wideChunks != 0 ? options.wideChunks
+                                                          : std::max(doubled, 2 * MR_WIDE_SIDE_CHUNKS);
+        }
 
         if (auto pipelines = result.CreatePipelines(device, options); !pipelines)
             return std::unexpected(pipelines.error());
@@ -312,11 +317,18 @@ namespace bicameral::sim {
             auto wideWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_wait.cso");
             auto wideExpanded = LoadComputePipeline(device, m_rootSignature.Get(),
                                                     "sim/multires_step_wide_expanded_wait.cso");
-            if (!wideWait || !wideExpanded)
-                return std::unexpected(!wideWait ? wideWait.error() : wideExpanded.error());
+            auto wideAllocate = LoadComputePipeline(device, m_rootSignature.Get(),
+                                                    "sim/multires_step_wide_allocate.cso");
+            auto wideRetry = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_retry.cso");
+            for (const auto* loaded : {&wideWait, &wideExpanded, &wideAllocate, &wideRetry}) {
+                if (!*loaded)
+                    return std::unexpected(loaded->error());
+            }
 
             m_stepWideWaitPipeline = std::move(*wideWait);
             m_stepWideExpandedWaitPipeline = std::move(*wideExpanded);
+            m_wideAllocatePipeline = std::move(*wideAllocate);
+            m_wideRetryPipeline = std::move(*wideRetry);
         }
 
         static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT && CONDUCT_SHADERS.size() == CONDUCT_PASS_COUNT);
@@ -463,7 +475,8 @@ namespace bicameral::sim {
         sizes[BufferCells] = (m_blockCapacity + (PageCount() * MR_BLOCK_CELLS)) * sizeof(RxCell);
         sizes[BufferFractions] = uint64_t{m_capacity.fractions} * MR_BLOCK_CELLS * sizeof(MrFraction);
         sizes[BufferCounters] = uint64_t{MR_COUNTER_COUNT} * sizeof(uint32_t);
-        const uint64_t overflowWords = m_wideCells ? PageCount() * MR_WIDE_PAGE_WORDS : 0;
+        const uint64_t overflowWords = m_wideCells ? MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks)
+                                                   : 0;
         sizes[BufferTreeWords] = (uint64_t{OverflowBaseWord()} + overflowWords) * sizeof(uint32_t);
         sizes[BufferFreeFractions] = uint64_t{m_capacity.fractions} * sizeof(uint32_t);
         sizes[BufferLedger] = uint64_t{MR_LEDGER_LEVELS} * m_capacity.ledgerColumns * sizeof(uint64_t);
@@ -533,7 +546,7 @@ namespace bicameral::sim {
         return (m_capacity.worldBlocks * 2) + m_capacity.indexEntries + m_capacity.pages;
     }
 
-    // CPU の溢れを GPU に写せるか(頁の溢れの枠・1 セルの成分の数に入る。端数の溢れはまだ持てない)
+    // CPU の溢れを GPU に写せるか(塊の置き場・1 セルの成分の数に入る。端数の溢れはまだ持てない)
     bool GpuMultires::OverflowFits(const MultiresNest& nest) const {
         if (!nest.wideCells)
             return true;
@@ -547,43 +560,60 @@ namespace bicameral::sim {
         }
 
         constexpr uint32_t MOST_TAIL = RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES;
+        uint64_t chunks = 0;
         for (const MultiresOverflowArea& area : nest.cellOverflow) {
-            if (area.offsets[MR_BLOCK_CELLS] > MR_WIDE_PAGE_ENTRIES)
-                return false;
-
+            chunks += MrWideChunksFor(area.offsets[MR_BLOCK_CELLS]);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (area.offsets[index + 1] - area.offsets[index] > MOST_TAIL)
                     return false;
             }
         }
 
-        return true;
+        return chunks <= m_wideChunks;
     }
 
-    // 頁ごとの溢れの像(今の面 0 = CPU の溢れ、面 1 = 0)
+    // 溢れの領域の像: 頁の今の面 0 = CPU の溢れ(塊は頁の番号の順に 0 から配る)、面 1 は塊なし。空きのスタックは上から若い番号
     void GpuMultires::AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const {
         if (!m_wideCells)
             return;
 
+        const auto pages = static_cast<uint32_t>(PageCount());
         const size_t first = words.size();
-        words.resize(first + (PageCount() * MR_WIDE_PAGE_WORDS), 0);
-        if (!nest.wideCells)
-            return;
-
-        for (uint32_t page = 0; page < PageCount(); ++page) {
+        words.resize(first + MrWideAreaWords(pages, m_wideChunks), 0);
+        const uint32_t pool = MrWidePoolWord(0, pages);
+        uint32_t used = 0;
+        for (uint32_t page = 0; nest.wideCells && page < pages; ++page) {
             const MultiresOverflowArea& area = nest.cellOverflow[page];
-            const size_t side = first + MrWideSideWord(0, page, 0);
+            const uint32_t count = area.offsets[MR_BLOCK_CELLS];
+            const uint32_t chunks = MrWideChunksFor(count);
+            const size_t table = first + MrWideTableWord(0, page, 0);
+            words[table] = chunks;
+            for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                words[table + 1 + chunk] = used + chunk;
+
+            // --- 面の論理の語を塊へ(塊は続いた番号なので、置き場の中でも続いている)---
+            const size_t side = first + MrWideChunkWord(pool, used);
             std::ranges::copy(area.offsets, words.begin() + static_cast<ptrdiff_t>(side));
-            for (uint32_t entry = 0; entry < area.offsets[MR_BLOCK_CELLS]; ++entry) {
+            for (uint32_t entry = 0; entry < count; ++entry) {
                 const size_t word = side + MrWideEntryWord(entry);
                 words[word] = area.species[entry];
                 words[word + 1] = static_cast<uint32_t>(area.amounts[entry]);
                 words[word + 2] = static_cast<uint32_t>(area.amounts[entry] >> 32);
             }
+
+            used += chunks;
         }
+
+        // --- 置き場の見出しと空きのスタック ---
+        FX_ASSERT(used <= m_wideChunks);
+        words[first + pool + MR_WIDE_POOL_CAPACITY] = m_wideChunks;
+        words[first + pool + MR_WIDE_POOL_FREE] = m_wideChunks - used;
+        const size_t stack = first + MrWideStackWord(pool, m_wideChunks);
+        for (uint32_t i = 0; i < m_wideChunks - used; ++i)
+            words[stack + i] = m_wideChunks - 1 - i;
     }
 
-    // 読み戻した u6 の溢れ(今の面)を CPU の溢れにする(並びは同じ: セルの番号の順に詰める)
+    // 読み戻した u6 の溢れ(今の面。塊の表を引く)を CPU の溢れにする(並びは同じ: セルの番号の順に詰める)
     void GpuMultires::ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const {
         nest.wideCells = false;
         if (!m_wideCells)
@@ -591,18 +621,28 @@ namespace bicameral::sim {
 
         EnableWideCells(nest);
         const uint32_t base = OverflowBaseWord();
-        for (uint32_t page = 0; page < PageCount(); ++page) {
-            const uint32_t current = words[MrWidePageWord(base, page)];
-            const auto side = words.subspan(MrWideSideWord(base, page, current), MR_WIDE_SIDE_WORDS);
+        const auto pages = static_cast<uint32_t>(PageCount());
+        const uint32_t pool = MrWidePoolWord(base, pages);
+        for (uint32_t page = 0; page < pages; ++page) {
+            const uint32_t current = words[MrWideHeaderWord(base, page) + MR_WIDE_HEADER_SIDE];
+            const uint32_t table = MrWideTableWord(base, page, current);
+            const auto logical = [&](uint32_t word) {
+                const uint32_t chunk = words[table + 1 + (word / MR_WIDE_CHUNK_WORDS)];
+                return words[MrWideChunkWord(pool, chunk) + (word % MR_WIDE_CHUNK_WORDS)];
+            };
+
             MultiresOverflowArea& area = nest.cellOverflow[page];
-            std::ranges::copy(side.first(MR_BLOCK_CELLS + 1), area.offsets.begin());
+            const bool empty = words[table] == 0;
+            for (uint32_t index = 0; index <= MR_BLOCK_CELLS; ++index)
+                area.offsets[index] = empty ? 0 : logical(index);
+
             const uint32_t count = area.offsets[MR_BLOCK_CELLS];
             area.species.resize(count);
             area.amounts.resize(count);
             for (uint32_t entry = 0; entry < count; ++entry) {
                 const uint32_t word = MrWideEntryWord(entry);
-                area.species[entry] = side[word];
-                area.amounts[entry] = (uint64_t{side[word + 2]} << 32) | side[word + 1];
+                area.species[entry] = logical(word);
+                area.amounts[entry] = (uint64_t{logical(word + 2)} << 32) | logical(word + 1);
             }
         }
     }
@@ -642,7 +682,8 @@ namespace bicameral::sim {
 
         if (!OverflowFits(nest)) {
             Log(Channel::Gpu, Level::Error,
-                "成分の溢れを GPU に写せない(溢れを使う世界か、頁の溢れの枠・1 セルの成分の数を超える。T-0176)");
+                "成分の溢れを GPU に写せない(溢れを使う世界か、溢れの塊の置き場・1 "
+                "セルの成分の数を超える。T-0176・T-0236)");
             return false;
         }
 
@@ -988,10 +1029,29 @@ namespace bicameral::sim {
         list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
 
+        RecordWideRetry(list, debugRing);
+
         // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる)---
         RecordTreePass(list, debugRing, PassExpand, 1);
         list->SetPipelineState(m_wideCells ? m_stepWideExpandedWaitPipeline.Get() : m_stepExpandedWaitPipeline.Get());
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
+        UavBarrier(list);
+        RecordWideRetry(list, debugRing);
+    }
+
+    // 溢れを使う世界の刻みの段の後(T-0236): 書く面の塊が足りなかった頁に塊を枠の順に配り(1 グループ)、そのブロックの溢れるセルだけ
+    // 同じ刻みのうちに刻み直す(1 グループ = 1 枠)。足りない頁が無ければどちらもすぐ抜ける
+    void GpuMultires::RecordWideRetry(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (!m_wideCells)
+            return;
+
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_wideAllocatePipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(1, 1, 1);
+        UavBarrier(list);
+        list->SetPipelineState(m_wideRetryPipeline.Get());
+        list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
     }
 
@@ -1024,8 +1084,9 @@ namespace bicameral::sim {
         if (options.implicitConduction)
             RecordImplicitConduction(list, debugRing, options);
 
-        // --- 最後の小刻みの変化を足して反応 ---
+        // --- 最後の小刻みの変化を足して反応(溢れの塊が足りなかったブロックは同じ刻みのうちに刻み直す。T-0236)---
         RecordConductStage(list, debugRing, ConductPassApply);
+        RecordWideRetry(list, debugRing);
         m_constants.stepFlags = flags;
     }
 

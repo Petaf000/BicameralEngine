@@ -514,14 +514,14 @@ bool DeferWideCell(MrBlock block, uint32_t index, uint32_t side, RxCell cell, Rx
 }
 
 // ②③ ApplyCell が回したセルを、新しい面の並びを決めてから刻み直して書き、面を入れ替える(グループの全部のスレッドが呼ぶ)。
-// 頁の溢れの枠に入らなければ待たせる(MR_COUNTER_LIMIT_PRODUCTS。T-0211 の残り)。変わったら true
+// 書く面の塊が足りなければ書かずに要求を残す(刻み直すのは足す段の後の WideRetryBlock。T-0236)。変わったら true
 bool RestepConductWideCells(MrBlock block, uint32_t thread, inout uint64_t wakeTick, inout MrLimitTally tally) {
     GroupMemoryBarrierWithGroupSync();
     if (gs_wideAny == 0)
         return false;
 
     const uint32_t side = WideCurrentSide(block.page);
-    const bool fits = PlanWideSide(block.page, side, thread, CONDUCT_THREADS);
+    const bool fits = PlanWideSide(block.page, side, thread, CONDUCT_THREADS, block.busyTick);
     bool changed = false;
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
