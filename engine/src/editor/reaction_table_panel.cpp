@@ -94,8 +94,9 @@ namespace bicameral::editor {
     }  // namespace
 
     void ReactionTablePanel::UseTable(std::shared_ptr<const script::LoadedReactionTable> table) {
-        if (table == nullptr || (m_table != nullptr && table->tableVersion == m_table->tableVersion &&
-                                 table->packageRoot == m_table->packageRoot))
+        const bool same = m_table != nullptr && table != nullptr && table->tableVersion == m_table->tableVersion &&
+                          table->packageRoot == m_table->packageRoot;
+        if (table == nullptr || same)
             return;
 
         m_table = std::move(table);
@@ -283,9 +284,10 @@ namespace bicameral::editor {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(rule.name.c_str());
-            if (ImGui::IsItemHovered())
+            if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s%s", rule.equation.c_str(),
                                   rule.elementImbalance.empty() ? "" : "\n元素が釣り合わない");
+            }
 
             ImGui::TableNextColumn();
             ValueCell(rule.preExponential);
@@ -417,9 +419,10 @@ namespace bicameral::editor {
         }
 
         ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("始まる温度 = 速度定数 k = A·exp(−Ea/RT) が %.2g /s になる温度(表示の定義)",
                               START_RATE_PER_SECOND);
+        }
     }
 
     // --- 人がいない確認(--auto-table-edit)---

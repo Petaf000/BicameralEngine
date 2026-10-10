@@ -454,9 +454,10 @@ namespace bicameral::script {
         if (found->Count() == 0)
             return std::unexpected(std::format("{} が見つからない", path));
 
-        if (found->Count() > 1)
+        if (found->Count() > 1) {
             return std::unexpected(
                 std::format("{} が {} か所にある(どれを書き換えるか決まらない)", path, found->Count()));
+        }
 
         if (!found->expressions.empty()) {
             const LuauLiteralSpan& expression = found->expressions.front();

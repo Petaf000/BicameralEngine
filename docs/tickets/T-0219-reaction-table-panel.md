@@ -33,11 +33,17 @@
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-10(作業役・wt2・ブランチ t-0219): luau_literal_edit・reaction_table_edit・reaction_table_panel と `--auto-table-edit` を足した。
-  reaction_table_edit は 1 回目で通過(debug 23 秒)。
+  reaction_table_edit は 1 回目で通過(debug 23 秒)。window_table_edit は 1 回目で通過(debug 87〜108 秒)。
+  `-Filter "^(reaction.*|luau.*|window_hot_reload.*|window_table_edit.*|window_lab)$"` 18 本のうち 17 本が通過。window_hot_reload_play が
+  刻み 17〜24 のハッシュが記録と違って落ちた(差し替えの刻み 45 より前)。流し直しても刻み 8〜11 などで落ちる(2 回とも。原因は未確認)。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - 動いているもの: `bicameral --editor [--packages <dir>]` のパネル「反応表」。確認: `-Filter "^(reaction_table_edit|window_table_edit_copy|window_table_edit)$"`。
-- 壊れているもの: なし。
+- **未確認の失敗**: window_hot_reload_play(T-0195)がこのブランチで 2 回続けて落ちた(再生の刻み 8〜24 のどこかで 4〜8 刻み続けて
+  ハッシュが記録と違い、その後は合う。差し替えより前)。パネルは世界に触れない(ファイルを読むだけ)が、記録の側(--editor)で最初のフレームに
+  一覧を作る(パッケージのフォルダを読む)ので、フレームが 1 回重くなる。仮説: 重いフレームで捨てた刻みのまわりで、記録か再生の
+  ハッシュの読み戻しが別の刻みの値を取る(main にもある時間に依る不具合が出やすくなった)。確かめ方: main で同じ 3 本を流す・
+  frame_loop の BuildEditor の `ReactionTable().UseTable` を外して流す。パネルのせいなら、一覧を作るのをパネルを開いた時だけにする。
 - 注意: --auto-table-edit が書き換えるのは combustion_test の reactions.cellulose_combustion.rate.a(--auto-reload と同じ値。一緒には使わない)。
 
 ## 判断待ち
