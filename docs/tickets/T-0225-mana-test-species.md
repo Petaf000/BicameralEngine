@@ -34,9 +34,18 @@
 - 2026-10-10(作業役・wt4): 表に足した。物質の ID は名前のバイト順なので mana_test は cellulose と nitrogen の間に入り、nitrogen・oxygen・
   water_vapor の ID が 1 ずつずれる(魔素の無い場面の振る舞いは変わらない。ずれても並びの相対順は同じ)。テストに固定のハッシュの期待値は
   無かった(どれも CPU と GPU・C++ と Luau の比較)ので、ハッシュの期待値は直していない。数の期待値だけ直した。
-- 結果は「引き継ぎメモ」に。
+- テスト(debug・HW。4 つのランナーが同じ GPU を使う中): 全体を流して 1 時間の上限で 47 番まで(42 通過・gpu_multires だけ落ちる)、
+  続けて狙いの 9 本(gpu_lab_box・gpu_probe_sim・gpu_probe_place・window_lab・window_place_record / play・window_table_edit_copy / edit 通過)。
+  gpu_lab_box: 450 K の木 100 刻みで燃えたセルロース 魔素あり 1,311,229 µmol(孔の酸素を使い切る量)・なし 250 µmol。`--auto-place`: 投げた 6・当たった 5。
+- **gpu_multires(debug・HW)が 2 回とも約 90 秒で TDR(DXGI_ERROR_DEVICE_HUNG。最初の Real の場面の DispatchGraph)**。同じテストの WARP
+  (gpu_multires_warp。CPU と毎刻みビット一致を確かめる)は通る → 計算の誤り・無限ループではなく、1 回の DispatchGraph が HW の 2 秒の上限を超えた
+  と見ている(この場面は「いろいろな成分のセル」を表の全物質から作るので、物質が 8 つになって 1 セルの成分と候補の規則が増え、debug + GPU の検証 +
+  4 ランナーの取り合いで重くなった。今日の wt4 の debug の通過は 200〜400 秒かかっていた)。release の HW の結果は「引き継ぎメモ」。
 
 ## 引き継ぎメモ
+- **gpu_multires**: release の HW は通る(270 秒)。debug の HW は 2 回とも TDR(上の作業ログ)。WARP は通る。マージ後に GPU が空いている時に
+  debug の HW で流し直して確かめること。それでも TDR なら、debug の Real の場面を軽くする(セルの数か刻みを減らす)か、DispatchGraph を分ける
+  チケットを切る(T-0261 を当てる候補)。
 - 実験室で魔素を木に混ぜるには、材料を「セルロース・酸素・mana_test」の 3 つにする(1 つのコマンドは 3 種まで。木の材料は孔の窒素も持つので 4 種になる)。
   筆は「足す」で木のセルに魔素を混ぜられる。BACKLOG の「実験室で 1 セルに 4 種以上」(T-0220)は、触るだけなら今は要らない(上の回避で足りる)。
 - 物質は 8 つになり、1 セルのインラインの上限 K = 8 と同じ。全部の物質が 1 セルにそろうと、次の新しい物質を作る規則は待つ(RX_LIMIT_PRODUCTS。
