@@ -54,4 +54,13 @@ return {
         heat_capacity_mj_per_mol_k = 33580,
         thermal_conductivity_mw_per_m_k = gas(25),
     },
+    -- 触るための仮の魔素(気体。T-0225・D-449・D-451)。エディタで値を動かして試すための試験用の物質で、ゲームの中身ではない(D-006)。
+    -- 値は動きが見えるだけの仮の値: 生成エンタルピー 0(元素の単体)・比熱は単原子の理想気体の 5/2 R・熱伝導率は気体並み。
+    -- 本当の魔素(性質・反応・湧き出し)は非公開側で決める
+    mana_test = {
+        composition = { mana_test = 1 },
+        formation_enthalpy_j_per_mol = 0,
+        heat_capacity_mj_per_mol_k = 20786,
+        thermal_conductivity_mw_per_m_k = gas(20),
+    },
 }

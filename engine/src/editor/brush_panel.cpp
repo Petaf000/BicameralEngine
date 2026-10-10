@@ -16,8 +16,9 @@ namespace bicameral::editor {
         constexpr int MAX_AMOUNT_PERCENT = 400;
 
         // --- --auto-place の筆の運び(フレーム・材料・中心・半径・置き換えか)---
-        // 木箱の左の空気に木の球を置く → その中心に木炭を足す → 格子の角にはみ出す 1 セル → 格子の端からはみ出す大きな空気の足し
-        // → 半径が上限を超える(当たらない)→ 木の球に火を付ける(つつき)。当たるのは 4 つ
+        // 木箱の左の空気に木の球を置く → その中心に木炭を足す → 木の球に仮の魔素を足す(材料の一覧に魔素がある確認。T-0225)
+        // → 格子の角にはみ出す 1 セル → 格子の端からはみ出す大きな空気の足し → 半径が上限を超える(当たらない)
+        // → 木の球に火を付ける(つつき)。当たるのは 5 つ
         struct AutoStroke {
             uint64_t frame;
             std::string_view material;
@@ -29,7 +30,7 @@ namespace bicameral::editor {
         constexpr uint32_t AUTO_CENTER_Y = 32;
         constexpr uint64_t AUTO_IGNITE_FRAME = 16;
 
-        constexpr std::array<AutoStroke, 5> AUTO_STROKES = {{
+        constexpr std::array<AutoStroke, 6> AUTO_STROKES = {{
             {.frame = 6,
              .material = "木",
              .shape = {.x = AUTO_CENTER_X, .y = AUTO_CENTER_Y, .z = sim::PROBE_VIEW_Z, .radius = 3},
@@ -37,6 +38,10 @@ namespace bicameral::editor {
             {.frame = 8,
              .material = "木炭",
              .shape = {.x = AUTO_CENTER_X, .y = AUTO_CENTER_Y, .z = sim::PROBE_VIEW_Z, .radius = 1, .replace = false},
+             .expectApplied = true},
+            {.frame = 9,
+             .material = "魔素(試験)",
+             .shape = {.x = AUTO_CENTER_X, .y = AUTO_CENTER_Y, .z = sim::PROBE_VIEW_Z, .radius = 2, .replace = false},
              .expectApplied = true},
             {.frame = 10,
              .material = "二酸化炭素",

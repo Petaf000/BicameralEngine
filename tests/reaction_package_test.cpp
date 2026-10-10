@@ -135,7 +135,7 @@ namespace {
         }
 
         EXPECT(SameTable(*luau, *cpp));
-        EXPECT(luau->species.size() == 8 && luau->rules.size() == 5);
+        EXPECT(luau->species.size() == 9 && luau->rules.size() == 7);  // 仮の魔素の物質 1・規則 2 を含む(T-0225)
         EXPECT(luau->rates.size() == luau->rules.size() * reaction::RX_RATE_TABLE_KELVINS);
         PrintWarnings(*luau);
         EXPECT(luau->warnings.empty() && cpp->warnings.empty());  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
@@ -255,7 +255,7 @@ namespace {
         }
 
         PrintWarnings(*baked);
-        EXPECT(baked->species.size() == 9 && baked->rules.size() == 6 && baked->warnings.empty());
+        EXPECT(baked->species.size() == 10 && baked->rules.size() == 8 && baked->warnings.empty());
         EXPECT(baked->SpeciesId("hydrogen") != 0);
         EXPECT(std::ranges::find(baked->ruleNames, "water_gas") != baked->ruleNames.end());
     }

@@ -114,7 +114,8 @@ namespace {
     }
 
     void TestMakeCell(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
-        EXPECT(materials.size() == 5);
+        EXPECT(materials.size() == 6);  // 魔素(試験)を含む(T-0225)
+        EXPECT(FindMaterial(materials, "魔素(試験)") != nullptr);
         for (const LabMaterial& material : materials) {
             for (const uint32_t temperature : {0u, 300000u, 1234567u, 3000000u}) {
                 const Command command = MakeLabFillCommand(0, 0, {.x = 1, .y = 2, .z = 3}, material.contents,
