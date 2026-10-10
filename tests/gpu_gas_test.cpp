@@ -8,7 +8,8 @@
 //   --scene <名前>: 1 つの場面だけ(既定は全部)
 //   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
 //     HW と WARP で書き出して diff すると、どの面のどの欄が違うかが分かる。T-0185)
-//   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120)
+//   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120。
+//              --isothermal で T-0234 の前の等温の形と比べる)
 #include "sim/gpu_gas.h"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -517,8 +518,11 @@ namespace {
     }
 
     // --- 計測: CPU と比べず、大きい箱で 1 刻みの GPU 時間 ---
-    int Profile(ID3D12Device5* device, GpuParts& parts, uint32_t size, uint64_t ticks) {
+    int Profile(ID3D12Device5* device, GpuParts& parts, uint32_t size, uint64_t ticks, bool isothermal) {
         GasConfig config = MakeAirConfig(size, size, size);
+        if (isothermal)
+            config.thermodynamics = GasThermodynamics::Isothermal;  // T-0234 の前の形と比べる
+
         config.boundary = {GasBoundary::Open, GasBoundary::Periodic, GasBoundary::Wall};
         config.windVelocity = {(int32_t)(2 * METER_PER_SECOND), 0, 0};
         GasBox box = MakeAirBox(config);
@@ -558,8 +562,8 @@ namespace {
                 return 1;
 
             const double milliseconds = (double)*elapsed * 1000.0 / (double)frequency / (double)ticks;
-            Log(Channel::Sim, Level::Info, "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・小刻み {}: 1 刻み {:.3f} ms",
-                round, size, box.cells.size(), config.substeps, milliseconds);
+            Log(Channel::Sim, Level::Info, "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・小刻み {}・{}: 1 刻み {:.3f} ms",
+                round, size, box.cells.size(), config.substeps, isothermal ? "等温" : "断熱", milliseconds);
         }
 
         return 0;
@@ -568,6 +572,7 @@ namespace {
     struct GasTestOptions {
         std::string scene;
         bool profile = false;
+        bool isothermal = false;
         uint32_t size = 32;
         uint64_t ticks = 120;
     };
@@ -583,6 +588,8 @@ namespace {
                 options.scene = arguments[++index];
             else if (argument == "--profile")
                 options.profile = true;
+            else if (argument == "--isothermal")
+                options.isothermal = true;
             else if (argument == "--size" && hasValue)
                 options.size = (uint32_t)std::stoul(arguments[++index]);
             else if (argument == "--substeps" && hasValue)
@@ -607,7 +614,7 @@ namespace {
         if (!gasOptions || !options) {
             Log(Channel::Sim, Level::Error,
                 "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前] [--substeps n] [--passes n] "
-                "[--dump ファイル] [--profile [--size n] [--ticks n]]");
+                "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal]]");
             return 2;
         }
 
@@ -626,7 +633,7 @@ namespace {
 
         GpuParts parts{.queue = std::move(*queue), .debugRing = std::move(*debugRing)};
         if (gasOptions->profile)
-            return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks);
+            return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks, gasOptions->isothermal);
 
         std::vector<std::pair<std::string, GasBox>> results;
         uint32_t sceneCount = 0;
