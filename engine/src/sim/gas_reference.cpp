@@ -620,6 +620,10 @@ namespace bicameral::sim {
 
     GasCoefficients MakeGasCoefficients(const GasConfig& config) {
         assert(config.substeps > 0 && config.soundSpeedMmPerS > 0);
+
+        // 安定の条件: ν = c̃ Δt_小刻み ÷ Δx = c̃(mm/s)÷ (30000 × 小刻み)。圧力の拡散(陽解法の 3 次元の拡散)で ν ≤ 約 2/3、
+        // 余裕を見て 0.6 まで(既定の 340 m/s・小刻み 24 で 0.47。T-0226 で 1% の乱れが育つ境を測った: 小刻み 16 で発散・18 で安定)
+        assert((uint64_t)config.soundSpeedMmPerS * 10 <= (uint64_t)config.substeps * 30000 * 6);
         const uint64_t substeps = config.substeps;
         GasCoefficients coefficients;
 
@@ -630,8 +634,10 @@ namespace bicameral::sim {
         // 中心の流れ: F(mg)=(P_左 + P_右)÷ 2 × 2^-20 × Δt ÷ Δx、Δt ÷ Δx = 1 ÷ (30 × 小刻み)(s/m)
         coefficients.centralFlow = ((uint64_t)1 << 31) / (30 * substeps);
 
-        // 圧力の拡散: F(mg)= Δp̃(µPa)× 1e-6 × A × Δt ÷ (2 c̃)× 1e6 = Δp̃ × 25 ÷ (12 × 小刻み × c̃(mm/s))
-        coefficients.pressureFlow = (25 * ((uint64_t)1 << 40)) / (12 * substeps * config.soundSpeedMmPerS);
+        // 圧力の拡散: F(mg)= Δp̃(µPa)× 1e-6 × A × Δt ÷ (4 c̃)× 1e6 = Δp̃ × 25 ÷ (24 × 小刻み × c̃(mm/s))
+        // 素の Rusanov(÷ 2c̃)の半分。÷ 2c̃ だと 3 次元で ν ≤ 1/3(本物の音速で小刻み 34 以上)になり、1% の乱れが
+        // 小刻み 32 でも育った(T-0226)。半分でも音の波の速さ・衝撃波の速さは理論どおり(gas_reference_test の管の試験)
+        coefficients.pressureFlow = (25 * ((uint64_t)1 << 40)) / (24 * substeps * config.soundSpeedMmPerS);
 
         // 面の力積: (p̃_左 + p̃_右)÷ 2 × 1e-6 × A × Δt × 1e6(mg/kg)× 2^20 =(和)× 2^15 ÷ (15 × 小刻み)
         coefficients.pressureImpulse = ((uint64_t)1 << 31) / (15 * substeps);

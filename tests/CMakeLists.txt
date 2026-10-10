@@ -244,7 +244,7 @@ bicameral_add_gpu_test(gpu_gas_test)  # 気体の流れの GPU と CPU の毎刻
 target_link_libraries(gpu_gas_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_gas gpu_gas_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_gas_warp gpu_gas_test warp --warp --queue compute)
-set_tests_properties(gpu_gas gpu_gas_warp PROPERTIES TIMEOUT 900)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い)
+set_tests_properties(gpu_gas gpu_gas_warp PROPERTIES TIMEOUT 1800)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い。T-0226 で小刻みが 6 倍)
 
 bicameral_add_gpu_test(gpu_physics_test)  # 物理の 1 刻みの GPU と CPU のビット一致(T-0090)
 target_link_libraries(gpu_physics_test PRIVATE bicameral_sim)
