@@ -40,7 +40,8 @@
   塊を返すかどうか決める(今は次にその頁を使って刻んだ時に、要らない塊を返す)。
 - VRAM(計算): 前は 1 頁 28 KiB を先に取った。今は見出し 288 B/頁 + 置き場(既定 頁 × 2 塊 × 4 KiB ≒ 8 KiB/頁)。空気だけの頁は塊 0。
 - 計測(ns/セル)はしていない(T-0248)。伝導の段の溢れの変種のレジスタの溢れも未確認。
-- 流したテスト: release の `-Filter "^gpu_multires(_warp)?$"`(HW 約 260 s〔本体のランナーと並走〕・WARP 46 s)。debug の GPU・tidy は流していない。
+- 流したテスト: release の `-Filter "^gpu_multires(_warp)?$"`(HW 409 s〔本体のランナーと並走〕・WARP 64 s)、debug の `^gpu_multires_warp$`(FX_ASSERT あり。175 s)。
+  release・debug のビルドは警告なし。archmap OK(147)。tidy は流していない。
 
 ## 判断待ち
 - なし(実装の細部だけ。ADR-0052 追記 2)
