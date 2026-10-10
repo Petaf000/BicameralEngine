@@ -150,6 +150,10 @@ namespace bicameral::sim {
 
         [[nodiscard]] uint64_t GraphBackingMemoryBytes() const { return m_graph->BackingMemoryBytes(); }
 
+        // 計測(T-0248): 世界のバッファ(Work Graph の作業場を除く)の VRAM のバイト数と、そのうちの溢れの領域
+        [[nodiscard]] uint64_t BufferBytes() const;
+        [[nodiscard]] uint64_t OverflowBytes() const;
+
         // 伝導の段を Work Graph で投げるか(計測で切り替える。conductionGraph で作っていなければ true にできず false を返す)
         [[nodiscard]] bool UseConductionGraph(bool use);
 
