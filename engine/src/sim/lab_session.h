@@ -7,7 +7,8 @@
 //   → Recording()(コマンドの列 + ハッシュの列)を保存 → Replay で初めの箱から流し直し、ハッシュの列が記録と同じかも確かめる。
 // 反応表(T-0218・ADR-0055): ホットリロードで替わったら、次の刻みから新しい表で続ける(表を替えた印のコマンドを置く)。
 //   印のある刻みは、コマンドを当てる前に GPU と CPU の両方の表を替え、印が箱をつつく。記録は刻み 0 の表の版 + 印の列。
-//   今まで見た表は版ごとに持つので、途中で表を替えた記録もこの実験室の中なら再生できる(ファイルに表の中身を残すのは T-0217)。
+//   今まで見た表は版ごとに持つので、途中で表を替えた記録もこの実験室の中なら再生できる。記録には表の中身(script::TableBytes)も残り
+//   (T-0217)、別の起動では呼ぶ側が中身から表を作り直して AddTable で渡してから Replay する(editor/lab_panel)。
 // 箱は小さい(512 セル)ので、1 刻みずつ待つ(エディタの道具。ゲームの世界のフレームの歩調〔ADR-0011〕とは別のキュー)。
 #pragma once
 
@@ -28,17 +29,24 @@ namespace bicameral::sim {
 
     class LabSession {
     public:
-        // table は写して持つ(呼ぶ側の表が消えてもよい)。tableVersion は記録に残す表の版(0 = 分からない)
+        // table は写して持つ(呼ぶ側の表が消えてもよい)。tableVersion は記録に残す表の版(0 = 分からない)。
+        // tableBytes は表の中身(script::TableBytes。記録に残す。空 = 分からない〔試験の表〕。T-0217)
         [[nodiscard]] static std::expected<LabSession, std::string> Create(ID3D12Device5* device,
                                                                            D3D12_COMMAND_LIST_TYPE queueType,
                                                                            const BakedReactionTable& table,
-                                                                           uint64_t tableVersion = 0);
+                                                                           uint64_t tableVersion = 0,
+                                                                           std::string tableBytes = {});
 
         // 反応表を替える(ホットリロード。T-0218・ADR-0055): 次の刻み NextTick() から新しい表で続ける(表を替えた印を置く)。
         // 刻む前にもう一度替えたら、印は最後の表の 1 つだけ(今の表に戻したなら印を消す)。tableVersion は 0 でないこと(記録の印が表を指す)。
         // table の物質の一覧は今の表と同じこと(script::CheckHotReloadCompatible。違うと材料とセルの意味が変わる)
         [[nodiscard]] std::expected<void, std::string> ChangeTable(const BakedReactionTable& table,
-                                                                   uint64_t tableVersion);
+                                                                   uint64_t tableVersion, std::string tableBytes = {});
+
+        // 記録を再生するための表を足す(T-0217。記録の中身から作り直した表。最新の表は変えない)。物質の一覧は今の表と同じこと
+        [[nodiscard]] std::expected<void, std::string> AddTable(const BakedReactionTable& table, uint64_t tableVersion,
+                                                                std::string tableBytes);
+        [[nodiscard]] bool HasTable(uint64_t tableVersion) const { return m_tables.contains(tableVersion); }
 
         // 今までの操作(表を替えた印を除く)を、初めの箱から最新の表で同じ刻みまで流し直す(T-0194 の案 A。同じ置き方で法則だけ比べる)。
         // 置いてまだ刻んでいない操作は残る
@@ -89,6 +97,7 @@ namespace bicameral::sim {
         uint64_t m_latestVersion = 0;                     // 最新の表(世界の表。Create・ChangeTable)
         uint64_t m_initialVersion = 0;                    // この実験の刻み 0 の表(記録に残す)
         std::map<uint64_t, BakedReactionTable> m_tables;  // 今まで見た表(版ごと。再生で使う)
+        std::map<uint64_t, std::string> m_tableBytes;     // その中身(分かるものだけ。記録に残す。T-0217)
         gpu::ImmediateQueue m_queue;
         gpu::DebugRing m_ring;
         GpuLabBox m_box;

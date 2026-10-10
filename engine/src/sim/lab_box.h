@@ -54,7 +54,7 @@ namespace bicameral::sim {
                                                     uint32_t temperatureMilliKelvin);
 
     // 反応表を替えた印(T-0218・ADR-0055)。刻み targetTick のコマンドを当てる前に、その刻みから表を tableVersion に替える。
-    // 印そのものはセルを変えず、箱をつつく(待ちの予定を新しい表で求め直す)。表の中身は記録に入らない(版だけ。中身は T-0217)
+    // 印そのものはセルを変えず、箱をつつく(待ちの予定を新しい表で求め直す)。印は版だけ。表の中身は記録の tables に残す(T-0217)
     [[nodiscard]] Command MakeLabTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t tableVersion);
 
     // 表を替えた印なら、その表の版
@@ -108,13 +108,23 @@ namespace bicameral::sim {
 
     // --- 実験の記録(コマンドの列 + 刻みごとの状態のハッシュ)---
 
+    // 記録に残す反応表の中身(T-0217。再生ファイルの版 2〔ADR-0050〕と同じやり方)。bytes は script::TableBytes のバイト列のまま
+    // (sim は中身を読まない。別の起動で作り直すのは呼ぶ側: script::RebuildReactionTable が版とハッシュを確かめる)
+    struct LabTableContent {
+        uint64_t version = 0;
+        std::string bytes;
+    };
+
     // 版 2(T-0194)から、実験に使った反応表の版(script::TableVersion)を持つ。0 = 分からない(版 1 の記録・試験の表)。
-    // 版 3(T-0218)から、刻みの途中で表を替えた所はコマンドの列の印(MakeLabTableCommand)で持つ
+    // 版 3(T-0218)から、刻みの途中で表を替えた所はコマンドの列の印(MakeLabTableCommand)で持つ。
+    // 版 4(T-0217)から、刻み 0 の表と印の表の中身(tables)を持つ。別の起動でも、途中で表を替えた記録を再生できる
     struct LabRecording {
         uint64_t tableVersion = 0;      // 刻み 0 の表の版
         uint64_t tickCount = 0;         // 流した刻みの数(刻み 0 〜 tickCount − 1)
         std::vector<Command> commands;  // (targetTick, sequence) の昇順
         std::vector<uint64_t> hashes;   // 刻み t を終えた状態の HashWholeNest(CPU)。tickCount 個
+        std::vector<LabTableContent>
+            tables;  // 使った表の中身(版の昇順・重ならない。中身の分からない表〔試験の表など〕は入らない)
     };
 
     [[nodiscard]] std::vector<std::byte> SerializeLabRecording(const LabRecording& recording);

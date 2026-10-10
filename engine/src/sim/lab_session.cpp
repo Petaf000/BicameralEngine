@@ -8,7 +8,8 @@
 namespace bicameral::sim {
 
     std::expected<LabSession, std::string> LabSession::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
-                                                              const BakedReactionTable& table, uint64_t tableVersion) {
+                                                              const BakedReactionTable& table, uint64_t tableVersion,
+                                                              std::string tableBytes) {
         auto queue = gpu::ImmediateQueue::Create(device, queueType);
         if (!queue)
             return std::unexpected(queue.error());
@@ -26,6 +27,8 @@ namespace bicameral::sim {
         session.m_latestVersion = tableVersion;
         session.m_initialVersion = tableVersion;
         session.m_tables.emplace(tableVersion, table);
+        if (!tableBytes.empty())
+            session.m_tableBytes.emplace(tableVersion, std::move(tableBytes));
 
         return session;
     }
@@ -215,10 +218,10 @@ namespace bicameral::sim {
 
         for (const uint64_t version : versions) {
             if (!m_tables.contains(version)) {
-                return std::unexpected(std::format(
-                    "記録の反応表(版 "
-                    "{:016x})をこの実験室は持っていない。記録した時の表で再生する(表の中身を記録に残すのは T-0217)",
-                    version));
+                return std::unexpected(
+                    std::format("記録の反応表(版 {:016x})をこの実験室は持っていない(記録に表の中身が無い。版 3 "
+                                "までの記録は記録した時の表で再生する)",
+                                version));
             }
         }
 
@@ -242,22 +245,58 @@ namespace bicameral::sim {
     }
 
     LabRecording LabSession::Recording() const {
-        return {.tableVersion = m_initialVersion, .tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
+        LabRecording recording = {
+            .tableVersion = m_initialVersion, .tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
+
+        // --- 使った表(刻み 0 と印)の中身。分かるものだけ、版の昇順(T-0217)---
+        std::vector<uint64_t> versions = {m_initialVersion};
+        for (const Command& command : m_history) {
+            if (const auto version = LabTableVersionOf(command); version)
+                versions.push_back(*version);
+        }
+
+        std::ranges::sort(versions);
+        const auto [last, end] = std::ranges::unique(versions);
+        versions.erase(last, end);
+        for (const uint64_t version : versions) {
+            if (const auto found = m_tableBytes.find(version); found != m_tableBytes.end())
+                recording.tables.push_back({.version = version, .bytes = found->second});
+        }
+
+        return recording;
     }
 
     // --- 反応表の差し替え(T-0218・ADR-0055)---
 
-    std::expected<void, std::string> LabSession::ChangeTable(const BakedReactionTable& table, uint64_t tableVersion) {
+    std::expected<void, std::string> LabSession::ChangeTable(const BakedReactionTable& table, uint64_t tableVersion,
+                                                             std::string tableBytes) {
         if (tableVersion == 0)
             return std::unexpected("版の分からない表(版 0)には替えられない(記録の印が表を指せない)");
 
         m_tables.insert_or_assign(tableVersion, table);
+        if (!tableBytes.empty())
+            m_tableBytes.insert_or_assign(tableVersion, std::move(tableBytes));
         m_latestVersion = tableVersion;
 
         // --- 次の刻みから替える印(刻む前に替え直したら、印は最後の 1 つ。今の表に戻したなら印は要らない)---
         DropPendingTableChange();
         if (tableVersion != m_tableVersion)
             m_pending.push_back(MakeLabTableCommand(m_tick, m_sequence++, tableVersion));
+
+        return {};
+    }
+
+    std::expected<void, std::string> LabSession::AddTable(const BakedReactionTable& table, uint64_t tableVersion,
+                                                          std::string tableBytes) {
+        if (tableVersion == 0)
+            return std::unexpected("版の分からない表(版 0)は足せない");
+
+        if (table.species.size() != m_table.species.size() || table.speciesNames != m_table.speciesNames)
+            return std::unexpected(std::format("記録の反応表(版 {:016x})は物質の一覧が今の表と違う", tableVersion));
+
+        m_tables.insert_or_assign(tableVersion, table);
+        if (!tableBytes.empty())
+            m_tableBytes.insert_or_assign(tableVersion, std::move(tableBytes));
 
         return {};
     }

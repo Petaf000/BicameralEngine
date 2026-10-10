@@ -2,13 +2,16 @@
 #include "editor/lab_panel.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <string_view>
 
 #include <imgui.h>
 
 #include "core/log.h"
+#include "script/reaction_package.h"
 
 namespace bicameral::editor {
 
@@ -22,8 +25,8 @@ namespace bicameral::editor {
         constexpr uint32_t AUTO_IGNITE_TICK = 3;
         constexpr uint32_t AUTO_TICKS = 60;
         constexpr uint32_t AUTO_IGNITE_MILLIKELVIN = 1500000;
-        constexpr uint64_t
-            AUTO_SWAP_VERSION_BITS = 0x5A5A'0000'0000'0001ULL;  // 同じ中身の表に付ける別の版(世界の版と違えばよい)
+        constexpr std::string_view AUTO_SWAP_RULE = "cellulose_combustion";  // 途中で替える表で速くする規則
+        constexpr double AUTO_SWAP_ACTIVATION_RATIO = 0.9;                   // その活性化エネルギーの倍率
 
         int32_t TemperatureOf(const sim::BakedReactionTable& table, const reaction::RxCell& cell) {
             return reaction::RxComputeThermal(table.View(), cell).temperature;
@@ -34,6 +37,57 @@ namespace bicameral::editor {
             const float t = std::clamp((static_cast<float>(milliKelvin) / 1000.0f - 300.0f) / (HOT_KELVIN - 300.0f),
                                        0.0f, 1.0f);
             return {0.15f + (0.85f * std::min(1.0f, t * 2.0f)), std::max(0.0f, (t * 2.0f) - 1.0f) * 0.9f, 0.1f, 1.0f};
+        }
+
+        // 記録の表のうち、この箱が持っていないものを中身から作り直して足す(別の起動の記録。T-0217・ADR-0050 と同じ確かめ方)
+        std::expected<void, std::string> AddRecordedTables(sim::LabSession& session,
+                                                           const sim::LabRecording& recording) {
+            for (const sim::LabTableContent& content : recording.tables) {
+                if (session.HasTable(content.version))
+                    continue;
+
+                const auto rebuilt = script::RebuildReactionTable(content.bytes, content.version);
+                if (!rebuilt)
+                    return std::unexpected(
+                        std::format("記録の表(版 {:016x})を作り直せない: {}", content.version, rebuilt.error()));
+
+                if (auto added = session.AddTable(rebuilt->table, content.version, content.bytes); !added)
+                    return added;
+            }
+
+            return {};
+        }
+
+        script::ScriptValue* FieldOf(script::ScriptValue& table, std::string_view key) {
+            const auto found = std::ranges::find_if(table.fields, [&](const script::ScriptField& field) {
+                return field.key.IsString() && field.key.text == key;
+            });
+
+            return found == table.fields.end() ? nullptr : &found->value;
+        }
+
+        // --auto-lab で途中に替える表: 世界の表の中身の木の燃焼の活性化エネルギーを下げた(速く燃える)本物の表(版は中身のハッシュ)
+        std::expected<script::LoadedReactionTable, std::string> MakeAutoSwappedTable(
+            const script::LoadedReactionTable& world) {
+            auto parsed = script::ParseTableBytes(world.tableBytes);
+            if (!parsed)
+                return std::unexpected(parsed.error());
+
+            const auto category = parsed->tables.find(std::string(script::REACTION_RULES_CATEGORY));
+            if (category == parsed->tables.end())
+                return std::unexpected("表に反応の規則が無い");
+
+            const auto rule = category->second.find(std::string(AUTO_SWAP_RULE));
+            if (rule == category->second.end())
+                return std::unexpected(std::format("表に規則 {} が無い", AUTO_SWAP_RULE));
+
+            script::ScriptValue* rate = FieldOf(rule->second.value, "rate");
+            script::ScriptValue* energy = rate != nullptr ? FieldOf(*rate, "activation_energy_j_per_mol") : nullptr;
+            if (energy == nullptr || !energy->IsNumber())
+                return std::unexpected(std::format("規則 {} の活性化エネルギーが読めない", AUTO_SWAP_RULE));
+
+            energy->number = std::floor(energy->number * AUTO_SWAP_ACTIVATION_RATIO);
+            return script::RebuildReactionTable(script::TableBytes(*parsed), script::TableVersion(*parsed));
         }
 
         sim::LabCellPosition PositionOf(const std::array<int, 3>& cell) {
@@ -49,17 +103,18 @@ namespace bicameral::editor {
             static_cast<void>(device->QueryInterface(IID_PPV_ARGS(&m_device)));
     }
 
-    void LabPanel::UseTable(std::shared_ptr<const sim::BakedReactionTable> table, uint64_t version) {
-        if (table == nullptr || (m_table != nullptr && version == m_tableVersion))
+    void LabPanel::UseTable(std::shared_ptr<const script::LoadedReactionTable> loaded) {
+        if (loaded == nullptr || (m_loaded != nullptr && loaded->tableVersion == m_tableVersion))
             return;
 
-        m_table = std::move(table);
-        m_tableVersion = version;
+        m_loaded = std::move(loaded);
+        m_table = std::shared_ptr<const sim::BakedReactionTable>(m_loaded, &m_loaded->table);
+        m_tableVersion = m_loaded->tableVersion;
         if (!m_session)
             return;
 
         // --- 箱があれば、次の刻みから新しい表で続ける(T-0218。初めから流し直すのはボタン「最新の表で初めから」)---
-        Report(m_session->ChangeTable(*m_table, m_tableVersion));
+        Report(m_session->ChangeTable(*m_table, m_tableVersion, m_loaded->tableBytes));
         m_materials = sim::MakeLabMaterials(*m_table);
         m_tableChanges += 1;
         m_message = std::format("反応表が版 {:016x} に替わった。次の刻み {} から新しい表で続ける", m_tableVersion,
@@ -79,7 +134,8 @@ namespace bicameral::editor {
             return false;
         }
 
-        auto session = sim::LabSession::Create(m_device.Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, table, m_tableVersion);
+        auto session = sim::LabSession::Create(m_device.Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, table, m_tableVersion,
+                                               m_loaded->tableBytes);
         if (!session) {
             m_error = session.error();
             return false;
@@ -325,6 +381,8 @@ namespace bicameral::editor {
             const auto recording = sim::ParseLabRecording(std::as_bytes(std::span(chars)));
             if (!recording) {
                 m_message = recording.error();
+            } else if (auto added = AddRecordedTables(*m_session, *recording); !added) {
+                m_message = added.error();
             } else {
                 Report(m_session->Replay(*recording));
                 m_message = std::format("{} 刻みを再生した", recording->tickCount);
@@ -352,38 +410,68 @@ namespace bicameral::editor {
             static_cast<void>(m_session->Place({.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)},
                                                wood->contents, 300000));
 
-        // --- 火を付けた刻みに、刻みの途中の表の差し替えも通す(同じ中身を別の版として。T-0218)---
+        // --- 火を付けた刻みに、刻みの途中の表の差し替えも通す(木が速く燃える本物の表。T-0218)---
+        const auto swapped = MakeAutoSwappedTable(*m_loaded);
+        if (!swapped) {
+            Log(Channel::Sim, Level::Error, "--auto-lab: 途中で替える表を作れない({})", swapped.error());
+            return;
+        }
+
         auto result = m_session->Step(AUTO_IGNITE_TICK);
         static_cast<void>(m_session->SetTemperature({.x = 3, .y = 3, .z = 3}, AUTO_IGNITE_MILLIKELVIN));
         if (result)
-            result = m_session->ChangeTable(*m_table, m_tableVersion ^ AUTO_SWAP_VERSION_BITS);
+            result = m_session->ChangeTable(swapped->table, swapped->tableVersion, swapped->tableBytes);
 
         if (result)
             result = m_session->Step(AUTO_TICKS - AUTO_IGNITE_TICK);
 
-        const sim::LabRecording recorded = m_session->Recording();
-        const auto parsed = sim::ParseLabRecording(sim::SerializeLabRecording(recorded));
-        if (result && parsed)
-            result = m_session->Replay(*parsed);
+        if (result && m_session->Mismatch())
+            result = std::unexpected(m_session->Mismatch()->what);
 
-        if (!result || !parsed || m_session->Mismatch() || m_session->ReplayDivergence() ||
-            m_session->Recording().hashes != recorded.hashes) {
-            Log(Channel::Sim, Level::Error, "--auto-lab: 失敗({})",
-                !result ? result.error() : (m_session->Mismatch() ? m_session->Mismatch()->what : "再生が記録と違う"));
-            return;
-        }
+        if (result)
+            result = ReplayInNewSession(m_session->Recording());
 
-        // --- 世界の表の版に戻す(次の刻みから。中身は同じ)---
-        if (auto restored = m_session->ChangeTable(*m_table, m_tableVersion); !restored) {
-            Log(Channel::Sim, Level::Error, "--auto-lab: 表の版を戻せない({})", restored.error());
+        if (!result) {
+            Log(Channel::Sim, Level::Error, "--auto-lab: 失敗({})", result.error());
             return;
         }
 
         m_autoFailed = false;
         m_cell = {3, 3, 3};
         Log(Channel::Sim, Level::Info,
-            "--auto-lab: {} 刻みで GPU と CPU が一致し(刻み {} で表を替えた)、記録から再生しても同じ", AUTO_TICKS,
-            AUTO_IGNITE_TICK);
+            "--auto-lab: {} 刻みで GPU と CPU が一致し(刻み {} で表を替えた)、記録から別の箱で再生しても同じ",
+            AUTO_TICKS, AUTO_IGNITE_TICK);
+    }
+
+    // 別の起動の形: 世界の表だけを持つ新しい箱で、ファイルの形を通した記録を再生する(途中の表は記録の中身から作り直す。T-0217)。
+    // 通ったら新しい箱をパネルの箱にする(流し終えると世界の表に戻す印が置かれている)
+    std::expected<void, std::string> LabPanel::ReplayInNewSession(const sim::LabRecording& recorded) {
+        const auto parsed = sim::ParseLabRecording(sim::SerializeLabRecording(recorded));
+        if (!parsed)
+            return std::unexpected(parsed.error());
+
+        auto fresh = sim::LabSession::Create(m_device.Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, *m_table, m_tableVersion,
+                                             m_loaded->tableBytes);
+        if (!fresh)
+            return std::unexpected(fresh.error());
+
+        if (fresh->Replay(*parsed).has_value())
+            return std::unexpected("中身を足す前に、持っていない表の記録を再生できてしまった");
+
+        if (auto added = AddRecordedTables(*fresh, *parsed); !added)
+            return added;
+
+        if (auto replayed = fresh->Replay(*parsed); !replayed)
+            return replayed;
+
+        if (fresh->Mismatch())
+            return std::unexpected(fresh->Mismatch()->what);
+
+        if (fresh->ReplayDivergence() || fresh->Recording().hashes != recorded.hashes)
+            return std::unexpected("別の箱での再生が記録と違う");
+
+        m_session.emplace(std::move(*fresh));
+        return {};
     }
 
 }  // namespace bicameral::editor

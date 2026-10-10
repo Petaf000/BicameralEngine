@@ -2,6 +2,7 @@
 // コマンドで作るセルが MakeReactionCell と同じ・当てられないコマンドは飛ばす・木を置いて火を付けると燃える(セルロースが減り CO2 が出る)・
 // コマンドの無い刻みは元素とエネルギーの合計が変わらない・同じコマンドの列なら同じハッシュの列・記録の読み書き・最初に違ったセルを見つける。
 // 表を替えた印(T-0218): セルを変えずに箱をつつく・途中で表を替えると替えた刻みから先だけ変わる・印の入った記録(版 3)と版 2 の読み書き。
+// 表の中身(T-0217): 記録の版 4 は使った表の中身を持ち、読み書きで同じ・壊れた中身は断る・版 3 も読める。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <cstdint>
@@ -180,9 +181,10 @@ namespace {
             EXPECT(parsed->hashes == hashes);
         }
 
-        // 版 1(T-0142。表の版が無い): 見出しの 16 バイト(印・版・種)の後ろの 8 バイトが無い形も読める(表の版は 0)
+        // 版 1(T-0142。表の版が無い): 見出しの 16 バイト(印・版・種)の後ろの 8 バイトが無い形も読める(表の版は 0)。
+        // 版 4 の末尾の表の数(8 バイト。表は無い)は外す
         std::vector<std::byte> oldBytes(bytes.begin(), bytes.begin() + 16);
-        oldBytes.insert(oldBytes.end(), bytes.begin() + 24, bytes.end());
+        oldBytes.insert(oldBytes.end(), bytes.begin() + 24, bytes.end() - 8);
         oldBytes[4] = std::byte{1};
         const auto parsedOld = ParseLabRecording(oldBytes);
         EXPECT(parsedOld.has_value() && parsedOld->tableVersion == 0 && parsedOld->hashes == hashes);
@@ -256,9 +258,44 @@ namespace {
         const auto parsed = ParseLabRecording(bytes);
         EXPECT(parsed.has_value() && parsed->commands == commands && parsed->tableVersion == 0x1111);
 
-        bytes[4] = std::byte{2};
-        const auto parsedTwo = ParseLabRecording(bytes);
+        // 版 3・2 の形(表の中身が無い)も読める(版 4 の末尾の表の数 8 バイトを外す)
+        std::vector<std::byte> oldBytes(bytes.begin(), bytes.end() - 8);
+        oldBytes[4] = std::byte{3};
+        const auto parsedThree = ParseLabRecording(oldBytes);
+        EXPECT(parsedThree.has_value() && parsedThree->commands == commands && parsedThree->tables.empty());
+        oldBytes[4] = std::byte{2};
+        const auto parsedTwo = ParseLabRecording(oldBytes);
         EXPECT(parsedTwo.has_value() && parsedTwo->tableVersion == 0x1111);
+        EXPECT(!ParseLabRecording(std::span(bytes).first(bytes.size() - 8)).has_value());  // 版 4 で表の数が無い
+    }
+
+    // 表の中身(T-0217): 記録の版 4 は使った表の中身(バイト列のまま)を持つ
+    void TestTableContents() {
+        const LabRecording recording{.tableVersion = 0x1111,
+                                     .tickCount = 2,
+                                     .commands = {MakeLabTableCommand(1, 0, 0x2222)},
+                                     .hashes = {7, 8},
+                                     .tables = {{.version = 0x1111, .bytes = "first"},
+                                                {.version = 0x2222, .bytes = std::string("swap\0ped table", 14)}}};
+        std::vector<std::byte> bytes = SerializeLabRecording(recording);
+        EXPECT(bytes.size() % sizeof(uint64_t) == 0);
+        const auto parsed = ParseLabRecording(bytes);
+        EXPECT(parsed.has_value() && parsed->tables.size() == 2);
+        if (parsed && parsed->tables.size() == 2) {
+            EXPECT(parsed->tables[0].version == 0x1111 && parsed->tables[0].bytes == "first");
+            EXPECT(parsed->tables[1].version == 0x2222 && parsed->tables[1].bytes == recording.tables[1].bytes);
+            EXPECT(parsed->commands == recording.commands && parsed->hashes == recording.hashes);
+        }
+
+        // --- 壊れた中身: 末尾が足りない・余る・版の並びが逆 ---
+        EXPECT(!ParseLabRecording(std::span(bytes).first(bytes.size() - 8)).has_value());
+        std::vector<std::byte> longer = bytes;
+        longer.resize(bytes.size() + 8, std::byte{0});
+        EXPECT(!ParseLabRecording(longer).has_value());
+
+        LabRecording reversed = recording;
+        std::ranges::reverse(reversed.tables);
+        EXPECT(!ParseLabRecording(SerializeLabRecording(reversed)).has_value());
     }
 
 }  // namespace
@@ -275,6 +312,7 @@ int main() {
     TestInvalidCommands(*table, materials);
     TestFire(*table, materials);
     TestTableMark(*table, materials);
+    TestTableContents();
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

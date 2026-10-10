@@ -4,6 +4,7 @@
 // 反応表を刻みの途中で替える(T-0218・ADR-0055): 次の刻みから新しい表で続き、毎刻みビット一致・替える前の刻みは同じ・替えない時と違う・
 // 記録は刻み 0 の表の版と表の印を持ち、途中で替えた記録も古い表だけの記録も再生できる・持っていない表の記録は断る。
 // 同じ操作を初めの箱から最新の表で流し直す(RerunWithLatestTable。T-0194 の案 A)も毎刻みビット一致。
+// 表の中身(T-0217): 記録は使った表の中身を持ち、持っていない表は中身から足せば(AddTable)再生できる。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <format>
@@ -138,7 +139,7 @@ namespace {
     std::expected<void, std::string> RunMidTableChange(sim::LabSession& session, const sim::BakedReactionTable& first,
                                                        const sim::BakedReactionTable& swapped) {
         const sim::LabRecording before = session.Recording();
-        if (auto changed = session.ChangeTable(swapped, SWAPPED_TABLE_VERSION); !changed)
+        if (auto changed = session.ChangeTable(swapped, SWAPPED_TABLE_VERSION, "swapped"); !changed)
             return changed;
 
         if (!session.TableChangePending() || session.TableVersion() != FIRST_TABLE_VERSION)
@@ -166,6 +167,13 @@ namespace {
         if (after.hashes.back() == unswapped)
             return std::unexpected("表を替えても箱が変わらない");
 
+        // --- 記録は刻み 0 と印の表の中身を持つ(T-0217)---
+        const bool contents = after.tables.size() == 2 && after.tables[0].version == FIRST_TABLE_VERSION &&
+                              after.tables[0].bytes == "first" && after.tables[1].version == SWAPPED_TABLE_VERSION &&
+                              after.tables[1].bytes == "swapped";
+        if (!contents || before.tables.size() != 1)
+            return std::unexpected("記録に使った表の中身が無い");
+
         // --- 途中で表を替えた記録をファイルの形を通して再生(両方の表をこの実験室が持っている)---
         if (auto replayed = RunReplay(session); !replayed)
             return replayed;
@@ -182,6 +190,16 @@ namespace {
         unknown.tableVersion = UNKNOWN_TABLE_VERSION;
         if (session.Replay(unknown).has_value())
             return std::unexpected("持っていない表の記録を再生できてしまった");
+
+        // --- 記録の中身から表を足せば再生できる(別の起動の形。中身から表を作り直すのは呼ぶ側。T-0217)---
+        if (auto added = session.AddTable(first, UNKNOWN_TABLE_VERSION, "unknown"); !added)
+            return added;
+
+        if (auto replayed = session.Replay(unknown); !replayed)
+            return replayed;
+
+        if (session.Recording().hashes != before.hashes || session.ReplayDivergence())
+            return std::unexpected("足した表で再生した記録が元と違う");
 
         return {};
     }
@@ -232,7 +250,7 @@ namespace {
             return 1;
         }
 
-        auto session = sim::LabSession::Create(device->Get(), options->queueType, *table, FIRST_TABLE_VERSION);
+        auto session = sim::LabSession::Create(device->Get(), options->queueType, *table, FIRST_TABLE_VERSION, "first");
         if (!session) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED({})", session.error());
             return 1;

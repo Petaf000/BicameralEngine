@@ -5,6 +5,7 @@
 #include <array>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <type_traits>
 
 #include "sim/multires_nest_internal.h"
@@ -31,8 +32,10 @@ namespace bicameral::sim {
 
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---
         constexpr std::array<char, 4> RECORDING_MAGIC = {'B', 'L', 'A', 'B'};
-        // 3: コマンドに表を替えた印(LAB_COMMAND_TYPE_TABLE)が入りうる(T-0218。形は 2 と同じ。古い読み手が印を黙って飛ばさないように上げた)
-        constexpr uint32_t RECORDING_VERSION = 3;
+        // 4: ハッシュの列の後ろに表の中身(T-0217): 数 u64 → 表ごとに 版 u64・バイト数 u64・バイト(8 バイトの境界まで 0 で埋める)
+        constexpr uint32_t RECORDING_VERSION = 4;
+        // 読める古い版: コマンドに表を替えた印(LAB_COMMAND_TYPE_TABLE)が入りうる(T-0218。形は 2 と同じ)
+        constexpr uint32_t RECORDING_VERSION_TABLE_MARKS = 3;
         constexpr uint32_t RECORDING_VERSION_ONE_TABLE = 2;  // 読める古い版(表の版を足した。T-0194)
         constexpr uint32_t RECORDING_VERSION_NO_TABLE = 1;   // 読める古い版(表の版が無い)
 
@@ -79,6 +82,36 @@ namespace bicameral::sim {
             bytes = bytes.subspan(sizeof(T));
 
             return true;
+        }
+
+        size_t AlignedSize(size_t size) {
+            constexpr size_t ALIGNMENT = sizeof(uint64_t);
+            return (size + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
+        }
+
+        // 記録の末尾の表の中身(版 4。T-0217)。読み終えて余りがあれば壊れている
+        std::expected<std::vector<LabTableContent>, std::string> TakeTables(std::span<const std::byte> bytes) {
+            uint64_t count = 0;
+            if (!Take(bytes, count) || count > bytes.size())
+                return std::unexpected("記録の表の中身が壊れている");
+
+            std::vector<LabTableContent> tables(count);
+            for (LabTableContent& table : tables) {
+                uint64_t size = 0;
+                if (!Take(bytes, table.version) || !Take(bytes, size) || size > bytes.size() ||
+                    AlignedSize(size) > bytes.size())
+                    return std::unexpected("記録の表の中身が壊れている");
+
+                table.bytes.assign(reinterpret_cast<const char*>(bytes.data()), size);
+                bytes = bytes.subspan(AlignedSize(size));
+            }
+
+            const bool increasing = std::ranges::adjacent_find(tables, std::ranges::greater_equal{},
+                                                               &LabTableContent::version) == tables.end();
+            if (!bytes.empty() || !increasing)
+                return std::unexpected("記録の表の中身が壊れている");
+
+            return tables;
         }
 
     }  // namespace
@@ -298,6 +331,16 @@ namespace bicameral::sim {
         for (const uint64_t hash : recording.hashes)
             Append(bytes, hash);
 
+        // --- 表の中身(T-0217)---
+        Append(bytes, static_cast<uint64_t>(recording.tables.size()));
+        for (const LabTableContent& table : recording.tables) {
+            Append(bytes, table.version);
+            Append(bytes, static_cast<uint64_t>(table.bytes.size()));
+            const auto* begin = reinterpret_cast<const std::byte*>(table.bytes.data());
+            bytes.insert(bytes.end(), begin, begin + table.bytes.size());
+            bytes.resize(AlignedSize(bytes.size()), std::byte{0});
+        }
+
         return bytes;
     }
 
@@ -312,8 +355,8 @@ namespace bicameral::sim {
             return std::unexpected("実験の記録ではない");
 
         const auto knownVersion = [](uint32_t value) {
-            return value == RECORDING_VERSION || value == RECORDING_VERSION_ONE_TABLE ||
-                   value == RECORDING_VERSION_NO_TABLE;
+            return value == RECORDING_VERSION || value == RECORDING_VERSION_TABLE_MARKS ||
+                   value == RECORDING_VERSION_ONE_TABLE || value == RECORDING_VERSION_NO_TABLE;
         };
         if (!Take(bytes, version) || !knownVersion(version))
             return std::unexpected(std::format("記録の版 {} は読めない", version));
@@ -327,8 +370,9 @@ namespace bicameral::sim {
         if (!Take(bytes, recording.tickCount) || !Take(bytes, commandCount) || !Take(bytes, hashCount))
             return std::unexpected("記録の見出しが壊れている");
 
-        if (bytes.size() != (commandCount * COMMAND_BYTES) + (hashCount * sizeof(uint64_t)) ||
-            hashCount != recording.tickCount)
+        const uint64_t listBytes = (commandCount * COMMAND_BYTES) + (hashCount * sizeof(uint64_t));
+        const bool sized = version == RECORDING_VERSION ? bytes.size() >= listBytes : bytes.size() == listBytes;
+        if (commandCount > bytes.size() || hashCount > bytes.size() || !sized || hashCount != recording.tickCount)
             return std::unexpected("記録の大きさが合わない");
 
         recording.commands.resize(commandCount);
@@ -338,6 +382,14 @@ namespace bicameral::sim {
         recording.hashes.resize(hashCount);
         for (uint64_t& hash : recording.hashes)
             (void)Take(bytes, hash);
+
+        if (version == RECORDING_VERSION) {
+            auto tables = TakeTables(bytes);
+            if (!tables)
+                return std::unexpected(tables.error());
+
+            recording.tables = std::move(*tables);
+        }
 
         const bool sorted = std::ranges::is_sorted(recording.commands, CommandPrecedes);
         if (!sorted || (!recording.commands.empty() && recording.commands.back().targetTick >= recording.tickCount))
