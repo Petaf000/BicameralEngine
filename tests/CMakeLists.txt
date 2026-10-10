@@ -49,6 +49,14 @@ target_compile_definitions(reaction_hot_reload_test PRIVATE
 add_dependencies(reaction_hot_reload_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME reaction_hot_reload COMMAND reaction_hot_reload_test)
 set_tests_properties(reaction_hot_reload PROPERTIES TIMEOUT 300)
+# 反応表のパネルの中身(T-0219): Luau のリテラルを探して書き戻す → 読み直すと同じ表(変えた値だけ違う)・保存則の検査
+add_executable(reaction_table_edit_test reaction_table_edit_test.cpp)
+target_link_libraries(reaction_table_edit_test PRIVATE bicameral_reaction_script bicameral_core)
+target_compile_definitions(reaction_table_edit_test PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_dependencies(reaction_table_edit_test bicameral_data)
+add_test(NAME reaction_table_edit COMMAND reaction_table_edit_test)
+set_tests_properties(reaction_table_edit PROPERTIES TIMEOUT 300)
 # ランタイムが読むパッケージの表で、今の場面(仮の世界の燃焼)が C++ の表とビット単位で同じ結果になる(T-0157。CPU リファレンス)
 add_executable(reaction_package_scene_test reaction_package_scene_test.cpp)
 target_precompile_headers(reaction_package_scene_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
@@ -375,6 +383,16 @@ set_tests_properties(window_hot_reload_record PROPERTIES LABELS gpu TIMEOUT 600
   FIXTURES_REQUIRED window_hot_reload_packages FIXTURES_SETUP window_hot_reload)
 set_tests_properties(window_hot_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_hot_reload
   PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ へ差し替える.*再生: OK")
+# 反応表のパネル(T-0219): 写したパッケージの木の燃焼の速さをパネルの書き戻しで変える → ホットリロードで当たる
+# → 元に戻す(ファイルは元の中身)→ 元の版の表に戻って終える(editor/reaction_table_panel。通らなければ終了コード 1)
+set(WINDOW_TABLE_EDIT_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/table_edit_packages)
+add_test(NAME window_table_edit_copy
+         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_TABLE_EDIT_PACKAGES})
+add_test(NAME window_table_edit
+         COMMAND bicameral --editor --auto-table-edit --packages ${WINDOW_TABLE_EDIT_PACKAGES} --frames 3000)
+set_tests_properties(window_table_edit_copy PROPERTIES FIXTURES_SETUP window_table_edit_packages)
+set_tests_properties(window_table_edit PROPERTIES LABELS gpu TIMEOUT 600 FIXTURES_REQUIRED window_table_edit_packages
+  PASS_REGULAR_EXPRESSION "--auto-table-edit: 元の版 [0-9a-f]+ の表に戻った。OK")
 
 # 画像の比較(T-0025、16 §5): 決まった刻みの始めで世界を止め、S(その刻み) を描いた画面を基準の画像(tests/images/)と比べる。
 # 写す(ランタイム)→ 比べる(tools/image_compare)の 2 つのテスト。実際の画像と差の画像はビルドのフォルダの images/ に出る。

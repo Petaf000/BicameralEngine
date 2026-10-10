@@ -81,6 +81,10 @@ views:
           code: "engine/src/editor/lab_panel.cpp::LabPanel::Build", ticket: T-0142,
           doc: docs/decisions/ADR-0037-lab-box.md,
           note: "置く操作はコマンド(LAB_COMMAND_TYPE_*)。断面の温度・選んだセルの成分を CPU と GPU で並べる。記録の保存と再生。window_lab" }
+      - { id: tablepanel, group: framelib, label: "ReactionTablePanel<br/>反応表: 一覧・検索・保存則の検査・値を Luau に書き戻す",
+          code: "engine/src/editor/reaction_table_panel.cpp::ReactionTablePanel::Build", ticket: T-0219,
+          doc: docs/design/14-editor-tools.md,
+          note: "表の中身から一覧(script/reaction_table_edit)。書き戻しはリテラルの字面だけ差し替え(script/luau_literal_edit)→ ホットリロードが当てる。reaction_table_edit・window_table_edit(--auto-table-edit)" }
       - { id: labsession, group: simlib, label: "LabSession<br/>箱を GPU と CPU リファレンスで並べて刻み、最初に違った刻みとセル",
           code: "engine/src/sim/lab_session.cpp::LabSession::StepOne", ticket: T-0142,
           doc: docs/decisions/ADR-0037-lab-box.md,
@@ -559,6 +563,7 @@ views:
       - [editoroverlay, graphpanel, "性能の表"]
       - [editoroverlay, labpanel, "実験室"]
       - [labpanel, labsession, "置く・刻む・再生"]
+      - [editoroverlay, tablepanel, "反応表"]
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]

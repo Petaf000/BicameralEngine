@@ -20,6 +20,7 @@
 
 #include "editor/graph_panel.h"
 #include "editor/lab_panel.h"
+#include "editor/reaction_table_panel.h"
 #include "editor/time_control.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
@@ -111,6 +112,9 @@ namespace bicameral::editor {
         // 実験室のパネル(T-0142)
         [[nodiscard]] LabPanel& Lab() { return *m_lab; }
 
+        // 反応表のパネル(T-0219)
+        [[nodiscard]] ReactionTablePanel& ReactionTable() { return *m_reactionTable; }
+
     private:
         EditorOverlay(Window& window, uint32_t frameCount);
 
@@ -140,6 +144,7 @@ namespace bicameral::editor {
 
         Window& m_window;
         std::unique_ptr<LabPanel> m_lab;
+        std::unique_ptr<ReactionTablePanel> m_reactionTable;
         bool m_contextCreated = false;
         bool m_win32Initialized = false;
         bool m_dx12Initialized = false;

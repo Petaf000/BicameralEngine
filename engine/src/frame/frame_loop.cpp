@@ -1179,6 +1179,17 @@ namespace bicameral::frame {
             if (m_options.autoLab)
                 m_editor->Lab().StartAuto();
 
+            // --auto-table-edit(T-0219): 書き換えるのは --packages で渡した写しだけ
+            if (m_options.autoTableEdit) {
+                if (!m_options.replayPath.empty() || m_options.packageRoot.empty()) {
+                    Log(Channel::Tool, Level::Error,
+                        "--auto-table-edit は --editor と --packages <写したフォルダ> と一緒に使う");
+                    return false;
+                }
+
+                m_editor->ReactionTable().StartAuto();
+            }
+
             return true;
         }
 
@@ -1205,6 +1216,7 @@ namespace bicameral::frame {
                 if (const auto loaded = m_tableReload.Find(m_tableReload.AppliedVersion()); loaded != nullptr) {
                     m_editor->Lab().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
                                              loaded->tableVersion);
+                    m_editor->ReactionTable().UseTable(loaded);
                 }
 
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
@@ -1627,6 +1639,10 @@ namespace bicameral::frame {
                 if (m_autoReload && (m_autoReload->Done() || m_autoReload->Failed()))
                     break;
 
+                // --auto-table-edit: 書き戻して当て、元に戻った・失敗した
+                if (m_options.autoTableEdit && m_editor && m_editor->ReactionTable().AutoFinished())
+                    break;
+
                 // 最後のハッシュまで確かめた(--screenshot-tick なら写すまで続ける)
                 if (!m_replay.empty() && m_replay.front().Finished() && !m_options.screenshotTick)
                     break;
@@ -1712,6 +1728,13 @@ namespace bicameral::frame {
             if (m_options.autoReload && (!m_autoReload || !m_autoReload->Done())) {
                 Log(Channel::Tool, Level::Error, "--auto-reload: ホットリロードの確かめが通らなかった({})",
                     m_autoReload ? m_autoReload->Failure() : "始められない");
+                return 1;
+            }
+
+            if (m_options.autoTableEdit && (!m_editor || !m_editor->ReactionTable().AutoDone())) {
+                Log(Channel::Tool, Level::Error,
+                    "--auto-table-edit: 反応表のパネルの書き戻しの確かめが通らなかった({})",
+                    m_editor ? m_editor->ReactionTable().AutoFailure() : "--editor が要る");
                 return 1;
             }
 
