@@ -45,8 +45,21 @@ assert が出て、release の再生と S(101) から食い違う原因を突き
   25 本が通過。rebase(main 1f3e3b7。文書だけ)の後の debug: reaction_hot_reload・reaction_species_remap・window_place_record/play・
   window_hot_reload_copy/record/play・window_table_edit(_copy)の 9 本が通過(窓の assert 0 件)。
 
+- 2026-10-11(作業役 wt2・載せ直し・約 1 時間 30 分〔テスト待ちが大半〕): `git rebase main`(c4cb51d。T-0243・T-0278 が入った後)。
+  frame_loop.cpp・table_hot_reload.h・main.cpp の衝突を解いた: **通常の起動でもファイルを見る(T-0243)+ 既定は Remap(T-0266)**。
+  D-438 が「通常のゲームの起動でも物質を足す・消す変更も名前で付け替えてその場で当てる」なので、エディタだけでなく通常の起動も Remap に揃えた
+  (ADR-0047 の改訂の「Remap にするのは T-0266 の後」に追記・ADR-0065 の追記・design/13 を直した)。ctest window_hot_reload_game_record に
+  `--species-remap` を足し、通常の起動の付け替え(オゾンを足す・消す)も確かめる。
+  T-0278 の元に戻すとの組み合わせ: 運びは番号(sequence)で見分け、付け替え(RemapPlaceCommand)は番号を変えないので、控え・履歴の付け替えの
+  後も運びを除ける。元に戻すは最後の差し替えより前の保存点へ戻らない(PlanBrushUndo)ので、足し直す控え・履歴はどれも新しい表の ID のまま当たる。
+  release と debug のビルドが通り、`^(window_hot_reload.*|window_place_.*|window_table_edit.*|window_replay_.*|reaction_hot_reload|
+  reaction_species_remap|reaction_replay_table|brush_undo|gpu_probe_(sim|peek))$` の 22 本が release・debug とも通過(release の 1 回目は
+  window_place_play の時間切れと window_replay_peek の不一致〔S(1) から〕が出たが、流し直して 4 本とも通過。6 ランナー並走の重なり。
+  window_place_play の時間切れは本体のランナーでも同じ日に出ている)。
+
 ## 引き継ぎメモ(HANDOFF に載せる状態)
-- エディタのホットリロードは既定で Remap(物質を足す・消す表も当てる)。`--species-remap` は `--auto-reload` のオゾンの段を足すだけ。
+- ホットリロードは既定で Remap(物質を足す・消す表も当てる)。エディタも通常の起動(T-0243 でファイルを見る)も。`--species-remap` は
+  `--auto-reload` のオゾンの段を足すだけ。
 - 生の操作で表を差し替える刻みは、前のフレームまでに足した置くコマンドが全部当たった後(frame_loop の TakeTableSwaps)。
 - debug の窓の世界が正しいかは、debug の記録を release で再生・release の記録を debug で再生すれば分かる(今回のやり方)。
 

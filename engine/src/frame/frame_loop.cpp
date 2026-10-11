@@ -214,8 +214,9 @@ namespace bicameral::frame {
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
+                  // 通常の起動でもファイルを見る(D-438・T-0243)。物質を足す・消す表も当てる(既定の Remap。T-0266)
                   m_tableReload({.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
-                                options.replayPath.empty()),  // 通常の起動でもファイルを見る(D-438・T-0243)。方針は既定の Remap(T-0266)
+                                options.replayPath.empty()),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
