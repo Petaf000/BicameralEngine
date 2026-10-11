@@ -48,6 +48,8 @@
 //                                    (--auto-reload は --editor なしでもよい〔T-0243〕。--record と使い、--replay でハッシュ列を確かめる。T-0195)
 //   --auto-place                     筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずの置くコマンドが全部
 //                                    当たったかを確かめる(--editor と一緒に。T-0222)
+//   --auto-patch                     魔法のパッチのパネルで実験室に止めるパッチを置き、止めた反応が進まない・仮の世界に投げた
+//                                    パッチが足せた / 断られたで戻るかを確かめる(--editor と一緒に。T-0325)
 //   --auto-table-edit                反応表のパネルで --packages の写しの木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版で終える
 //                                    (--editor と一緒に。T-0219)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
@@ -334,6 +336,8 @@ namespace {
             loop.autoTableEdit = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
+        else if (argument == L"--auto-patch")
+            loop.autoPatch = true;
         else
             return false;
 
