@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -71,6 +72,10 @@ namespace bicameral::render {
         // 前に呼んでから左ボタンを押したまま通ったセルと、離したか(取ったら忘れる。毎フレーム呼ぶ。T-0245)
         [[nodiscard]] PointerDrag TakeDrag();
 
+        // 今のカーソル(最後のポインタの画素)の光線が断面に当たるセル(筆の形を描く。T-0279)。ポインタがまだ来ていない・
+        // 断面に当たらない・回している・平行移動している間は無し。今のカメラと断面で毎回拾い直す(キーで断面を動かしても付いてくる)
+        [[nodiscard]] std::optional<CellCoordinate> CursorCell(uint32_t width, uint32_t height) const;
+
         // --- 覗き窓(T-0096)---
         // cell を覗いて depth まで潜る(--peek。窓では P と PageDown・PageUp)
         void Peek(CellCoordinate cell, uint32_t depth);
@@ -95,6 +100,7 @@ namespace bicameral::render {
         bool m_panning = false;
         int32_t m_lastX = 0;  // 前のポインタの位置(画素)
         int32_t m_lastY = 0;
+        bool m_pointerSeen = false;  // ポインタの位置を一度でも受けた(m_lastX・Y が意味を持つ)
 
         bool m_traceRequested = false;      // T が押された(TakeTraceRequest で取る)
         std::vector<CameraRay> m_pushRays;  // Shift + 左クリックの光線(TakePushRays で取る)

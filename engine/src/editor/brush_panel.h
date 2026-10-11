@@ -46,6 +46,11 @@ namespace bicameral::editor {
                                                            std::span<const render::CellCoordinate> dragged,
                                                            bool released, size_t waitingCommands, uint32_t& sequence);
 
+        // cell を中心にした今の筆の形(カーソルの下に形を描く。T-0279・editor/brush_preview。材料は入らない)
+        [[nodiscard]] sim::ProbePlaceShape PreviewShape(const render::CellCoordinate& cell) const {
+            return MakeShape({cell.x, cell.y, cell.z});
+        }
+
         // 置いたことが GPU から戻った(PROBE_EVENT_PLACE_APPLIED)
         void NotePlaced(const sim::ProbeEvent& event);
 

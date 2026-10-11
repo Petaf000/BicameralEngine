@@ -14,11 +14,13 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "editor/brush_panel.h"
+#include "editor/brush_preview.h"
 #include "editor/gauge_panel.h"
 #include "editor/graph_panel.h"
 #include "editor/lab_panel.h"
@@ -86,6 +88,9 @@ namespace bicameral::editor {
 
         // --- 反応表(T-0139)---
         ReactionTableStatus reactionTable;
+
+        // --- 筆の形(カーソルの下。画面の線分。筆を持っていない・カーソルが断面に当たらない・パネルの上なら空。T-0279)---
+        std::vector<BrushPreviewLine> brushPreview;
     };
 
     class EditorOverlay {
@@ -142,6 +147,7 @@ namespace bicameral::editor {
         [[nodiscard]] TimeRequest BuildTimePanel(const EditorStatus& status, const TimeControl& time) const;
         [[nodiscard]] uint64_t BuildRewind(const EditorStatus& status) const;
         void BuildStatusPanel(const EditorStatus& status) const;
+        static void DrawBrushPreview(std::span<const BrushPreviewLine> lines);
         void BuildReactionTable(const ReactionTableStatus& table) const;
         [[nodiscard]] TimeRequest TakeShortcuts(const TimeControl& time) const;
 

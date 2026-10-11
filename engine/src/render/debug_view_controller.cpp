@@ -108,6 +108,16 @@ namespace bicameral::render {
 
         m_lastX = event.x;
         m_lastY = event.y;
+        m_pointerSeen = true;
+    }
+
+    std::optional<CellCoordinate> DebugViewController::CursorCell(uint32_t width, uint32_t height) const {
+        if (!m_pointerSeen || m_rotating || m_panning)
+            return std::nullopt;
+
+        const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(m_lastX) + 0.5f,
+                                              static_cast<float>(m_lastY) + 0.5f, width, height);
+        return PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
     }
 
     // 左ボタンを押したまま動いた所の断面のセル(続けて同じセルは足さない)
