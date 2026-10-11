@@ -28,8 +28,15 @@
   ルート署名の語は増えない)。windows.h の `small` マクロに当たって 1 回直した以外、ビルドは素直に通った(警告 0)。
 - 試験の表は `MakeConversionTestTable`(tests/reaction_test_table.cpp。試験の表に CO2 と同じ元素の仮の物質と C2 の仮の物質を足す。値は仮)。
 
+- 2026-10-12(作業役・wt3。前の作業役がユーザーの中断で止まった所から): 書きかけは無く、実装は 1 コミットに入っていた。main(1f6530c。
+  GPU の順番待ち・T-0169 の試験の表)に rebase(衝突なし)→ ビルド(debug・警告 0)→ 関係するテスト 18 本 OK。
+  実験室の転換の保存点の再生試験を足しかけたが、GPU の順番待ち(約 1 時間)で 2 時間を超えるので戻して T-0378 に分けた。
+
 ## テストの結果
-(下に追記)
+- 2026-10-12(main 1f6530c に rebase 後・debug): CPU 12 本(reaction_package・reaction_hot_reload・reaction_table_edit・reaction_package_scene・
+  reaction_replay_table・reaction_species_remap・reaction_package_runtime_stops・reaction・reaction_contention・reaction_wait・multires・lab_box)
+  と GPU 6 本(gpu_reaction・gpu_lab_box・gpu_lab_box_warp・gpu_probe_sim・gpu_probe_patch・gpu_probe_patch_warp)で 18 / 18 通過。
+  GPU の順番待ちは約 60 分(本体の 40 本・wt6 の後)。
 
 ## 引き継ぎメモ
 - 転換の語は「種類 4・8〜9bit = 生成物の欄・10〜31bit = 物質 ID」。古い記録の効き方(1〜3)はそのまま。
@@ -51,5 +58,8 @@
   - 変える: 生成物が不安定なほど遅くなる、のような法則を入れられるが、反応速度論として作り物になりやすい(D-428)。
 
 ## 分けたもの
+- T-0378 実験室の転換の保存点の再生(gpu_lab_box_test の RunConvert の最後に ReplayPatchRecording(表の差し替え無し。
+  `swap.table != nullptr` の時だけ AddTable にする)を足し、転換の途中の保存点と記録全体を別の箱で再生して毎刻みビット一致・ハッシュ一致)。
+  仮の世界の保存点・巻き戻しは gpu_probe_patch_test で転換込みで確かめ済み。小さい(試験だけ)
 - T-0377 物質を足す・消す反応表の差し替え(ADR-0065・species_remap)で、転換のパッチの物質 ID を付け替える(消えた物質への転換は効かなくする)。
   実験室・仮の世界の付け替えの段で列の語を書き換え、CPU と GPU で毎刻みビット一致 | 02 §5.1・ADR-0095 追記 3
