@@ -89,7 +89,7 @@ Luau は CPU で動く。GPU の世界に効くものは「表にベイクして
 - 世界: CPU リファレンス(`sim::ProbeReference`)と GPU(`sim::ProbeSim`。差し替えの刻みに付け替えの表を t5 に上げ、適用の単位の前に
   probe_tick.hlsl の RemapSpecies)が付け替える(gpu_probe_sim_test で毎刻みビット一致)。
 - 段階: ホットリロードは `script::SpeciesChangePolicy` で、世界の側が付け替えられる時だけ物質の一覧が変わる表を当てる。
-  T-0242 からエディタ(`frame::TableHotReload`)は `--species-remap` の時 Remap(既定にするのは窓の世界の付け替えの後のずれを直す T-0266): 覗き窓は付け替えた世界の写しから影の鎖を作り直す(見る物質の ID も新しい表。刻みの途中で終わったフレームの S(s) は付け替えた後なので、その抽出から新しい表で読む)。
+  ホットリロード(`frame::TableHotReload`。エディタも通常の起動も)は既定で Remap(T-0266・D-438。T-0242 では `--species-remap` の時だけだった。debug の窓のずれは -Od のせいだった。ADR-0079): 覗き窓は付け替えた世界の写しから影の鎖を作り直す(見る物質の ID も新しい表。刻みの途中で終わったフレームの S(s) は付け替えた後なので、その抽出から新しい表で読む)。
   実験室は印の刻みに箱の全部のセルを付け替える(GPU は shaders/sim/lab_box.hlsl の RemapLabSpecies、CPU は `sim::RemapLabBox`。同じ RxRemapCell)。
   まだ刻んでいない置く操作(実験室の材料・同じフレームの筆のコマンド)の物質 ID も名前で新しい表へ(消えた物質の材料は落とす)。
   記録と再生は表の中身から同じ付け替えを作り直す(再生ファイル・BLAB。新しいコマンドの種類は要らない)。

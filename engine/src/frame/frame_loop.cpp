@@ -214,10 +214,8 @@ namespace bicameral::frame {
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
-                  m_tableReload(
-                      {.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
-                      options.replayPath.empty(),  // 通常の起動でもファイルを見る(D-438・T-0243)
-                      options.speciesRemap ? script::SpeciesChangePolicy::Remap : script::SpeciesChangePolicy::Reject),
+                  m_tableReload({.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
+                                options.replayPath.empty()),  // 通常の起動でもファイルを見る(D-438・T-0243)。方針は既定の Remap(T-0266)
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -275,6 +273,7 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             void TakeTableSwaps(SimCursor start, uint32_t limit, std::vector<sim::ProbeCommand>& commands);
             void RemapLivePlaceCommands(uint64_t previousVersion, std::vector<sim::ProbeCommand>& commands);
+            void NoteQueuedPlaces(std::span<const sim::ProbeCommand> commands);
             [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
 
@@ -333,7 +332,10 @@ namespace bicameral::frame {
             save::ReplayRecorder m_recorder;           // --record のときだけ使う
             TableHotReload
                 m_tableReload;  // 反応表のホットリロード(--editor でファイルを見る。再生は印の表を当てる。T-0139)
-            std::vector<sim::ProbeTableSwap> m_frameTableSwaps;   // 次に記録するフレームで当てる差し替え
+            std::vector<sim::ProbeTableSwap> m_frameTableSwaps;  // 次に記録するフレームで当てる差し替え
+            // 前のフレームまでに GPU のキューへ足した生の置くコマンドの最後の刻み + 1(物質 ID を持つ。この刻みより前の差し替えは
+            // そのコマンドを付け替えられないので、ここまで待つ。T-0266)
+            uint64_t m_queuedPlaceTickEnd = 0;
             bool m_tableSwapFailed = false;                       // 再生の印の表を持っていない(止まる)
             std::vector<render::ScreenshotCapture> m_screenshot;  // --screenshot で写したら 1 つ
 
@@ -1000,8 +1002,13 @@ namespace bicameral::frame {
             const uint64_t firstUnit = (start.tick * unitsPerTick) + start.unit;
             const uint64_t endUnit = (m_scheduler.Cursor().tick * unitsPerTick) + m_scheduler.Cursor().unit;
             const uint64_t previousVersion = m_tableReload.AppliedVersion();
+            // 生の操作で待っている表は、前のフレームまでに足した置くコマンド(前の表の ID のまま GPU のキューにある)が全部当たった
+            // 後の刻みにだけ当てる(このフレームのコマンドは RemapLivePlaceCommands が付け替える。T-0266)
+            const bool clearOfQueuedPlaces = sim::ProbeSim::NextApplyTick(start.tick, start.unit) >=
+                                             m_queuedPlaceTickEnd;
             auto swaps = m_tableReload.TakeSwaps(firstUnit, static_cast<uint32_t>(endUnit - firstUnit), unitsPerTick,
-                                                 !m_replay.empty(), commands.size() < limit, m_nextSequence, commands);
+                                                 !m_replay.empty(), commands.size() < limit && clearOfQueuedPlaces,
+                                                 m_nextSequence, commands);
             if (!swaps) {
                 Log(Channel::Sim, Level::Error, "{}", swaps.error());
                 m_tableSwapFailed = true;
@@ -1010,8 +1017,10 @@ namespace bicameral::frame {
             }
 
             m_frameTableSwaps = std::move(*swaps);
-            if (m_replay.empty())
+            if (m_replay.empty()) {
                 RemapLivePlaceCommands(previousVersion, commands);
+                NoteQueuedPlaces(commands);
+            }
 
             // 覗き窓も同じ表へ(世界がその刻みを過ぎた境界を抽出する時に替える。T-0194)
             for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
@@ -1032,13 +1041,26 @@ namespace bicameral::frame {
 
                 const auto remap = sim::BuildSpeciesRemap(*from, *swap.table);
                 if (remap && !remap->identity) {
-                    for (sim::ProbeCommand& command : commands) {
+                    // このフレームのコマンドと、巻き戻しで足し直す控え(まだ足していない分・足した履歴の差し替えの刻み以降)も
+                    // 新しい ID に(履歴は付け替える前の写しを持つ。T-0266)
+                    const auto remapFrom = [&](sim::ProbeCommand& command) {
                         if (command.targetTick >= swap.tick)
                             command = sim::RemapPlaceCommand(command, *remap);
-                    }
+                    };
+                    rng::for_each(commands, remapFrom);
+                    rng::for_each(m_rewindFeed, remapFrom);
+                    rng::for_each(m_commandHistory, remapFrom);
                 }
 
                 from = swap.table;
+            }
+        }
+
+        // GPU のキューへ足した生の置くコマンドの最後の刻みを覚える(TakeTableSwaps が差し替えをそれより後へ回す。T-0266)
+        void FrameLoop::NoteQueuedPlaces(std::span<const sim::ProbeCommand> commands) {
+            for (const sim::ProbeCommand& command : commands) {
+                if (command.type == sim::PROBE_COMMAND_TYPE_PLACE)
+                    m_queuedPlaceTickEnd = std::max(m_queuedPlaceTickEnd, command.targetTick + 1);
             }
         }
 
@@ -1516,6 +1538,7 @@ namespace bicameral::frame {
                 m_scheduler.CatchUpTo(from.tick);  // 筆の元に戻す: 今の刻みまで流し直す(T-0278)
 
             m_sim.DiscardSavePointsAfter(tick);
+            m_queuedPlaceTickEnd = 0;  // 戻すとキューは空になる(足し直す分は、また足す時に数える)
             if (!m_replay.empty())
                 m_replay.front().Rewind(tick);
 
