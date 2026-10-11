@@ -325,6 +325,94 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // --- 溢れを使う世界の細かくする(T-0237): 上限の場面を溢れの世界で刻んで 9 種のセル(溢れ)を作り、刻み REFINE_WIDE_TICK に
+    //     根(頁を持つ)から 2 段の鎖と、豊かな子から 1 段を細かくする。子の頁へ溢れごと写し、覆った親のセルの溢れを除く。
+    //     その後も刻み、CPU の上限なしの世界と毎刻みビット一致 ---
+    constexpr uint64_t REFINE_WIDE_TICK = 6;
+    constexpr uint32_t REFINE_WIDE_WORLD_BLOCKS = 8;
+
+    std::vector<MrRequest> RefineWideRequests() {
+        const sim::MultiresPoint chain = {.x = 3, .y = 21, .z = 5, .level = 2};  // 根の八分の一 2(子が無い)
+        const sim::MultiresPoint rich = {.x = 3, .y = 3, .z = 3, .level = 2};    // 豊かな子(レベル 1)の中
+
+        return {test::MakeMultiresRequest(MR_REQUEST_REFINE, chain, chain.level),
+                test::MakeMultiresRequest(MR_REQUEST_REFINE, rich, rich.level)};
+    }
+
+    // レベル level の本物のブロックのセルの成分の最大(溢れを含む)
+    uint32_t MostSpeciesAtLevel(const sim::MultiresNest& nest, int32_t level) {
+        uint32_t most = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL || block.level != level)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                most = std::max(most, sim::LoadWideNestCell(nest, slot, index).speciesCount);
+        }
+
+        return most;
+    }
+
+    std::expected<RunResult, std::string> RunRefineWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                        gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table, 0, REFINE_WIDE_WORLD_BLOCKS);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(false);
+        const std::vector<MrRequest> requests = RefineWideRequests();
+        const uint32_t grantedBefore = cpu.counters[MR_COUNTER_GRANTED];
+        sim::MultiresNest read;
+        uint32_t refinedSpecies = 0;
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            const bool refine = tick == REFINE_WIDE_TICK;
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (refine) {
+                    if (!gpu->RecordRequests(list, requests))
+                        return false;
+
+                    gpu->RecordProcessRequests(list, ring.GpuAddress());
+                }
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::LIMITS_STEP_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            if (refine) {
+                sim::SubmitRequests(cpu, requests);
+                sim::ProcessRequests(cpu);
+                refinedSpecies = MostSpeciesAtLevel(cpu, 2);
+            }
+
+            sim::StepNest(cpu, table, test::LIMITS_STEP_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(std::format("溢れの世界で細かくする: {}", compared.error()));
+        }
+
+        if (cpu.counters[MR_COUNTER_GRANTED] != grantedBefore + 2)
+            return std::unexpected("溢れの世界で細かくする: 要求を 2 つとも適用していない");
+
+        if (refinedSpecies <= RX_MAX_CELL_SPECIES)
+            return std::unexpected("溢れの世界で細かくする: 細かくした子に溢れが無い(場面が試していない)");
+
+        if (cpu.counters[MR_COUNTER_OVERFLOW] != 0 || cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0)
+            return std::unexpected("溢れの世界で細かくする: 成分を捨てた・待たせた");
+
+        Log(Channel::Gpu, Level::Info, "溢れの世界で細かくする: 子の最大の成分 {}(CPU と GPU で毎刻み同じ)",
+            refinedSpecies);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // 32 種のセルの溢れの塊の置き場(T-0248): 全部の頁の 2 面が 32 種のセルで埋まっても足りる数(既定の数は 1 頁の 2 面分なので、
     // 2 つの根が両方 32 種になる刻みで尽きて待たせる)
     uint32_t WideManyChunks(const sim::MultiresNest& nest) {
@@ -781,6 +869,8 @@ namespace {
                                     [&] { return RunWideOverflow(device, queue, ring, *manyTable, false, true); });
         const auto wideManyConduct = Timed(
             "32 種・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
+        const auto refineWide = Timed("溢れの世界で細かくする",
+                                      [&] { return RunRefineWide(device, queue, ring, *limitsTable); });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
         if (!exhausted) {
@@ -788,8 +878,8 @@ namespace {
             return 1;
         }
 
-        for (const auto* result :
-             {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany, &wideManyConduct}) {
+        for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
+                                   &wideManyConduct, &refineWide}) {
             if (*result)
                 continue;
 
@@ -804,7 +894,8 @@ namespace {
             return 1;
         }
 
-        Log(Channel::Gpu, Level::Info, "溢れの場面: OK(上限・大きい溢れ・32 種で GPU と CPU が毎刻みビット一致)");
+        Log(Channel::Gpu, Level::Info,
+            "溢れの場面: OK(上限・大きい溢れ・32 種・細かくするで GPU と CPU が毎刻みビット一致)");
 
         return 0;
     }

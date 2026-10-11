@@ -23,10 +23,11 @@ namespace bicameral::test {
         return {.x = rich ? 1 : 9, .y = 1, .z = 1, .level = 1};
     }
 
-    // observerBlocks = 観察の枠の数(影を作る試験。multires_wide_test。T-0199)
-    inline sim::MultiresNest MakeCoarsenFullNest(const sim::BakedReactionTable& table, uint32_t observerBlocks = 0) {
+    // observerBlocks = 観察の枠の数(影を作る試験。multires_wide_test。T-0199)・worldBlocks = 世界の枠の数(後で細かくする試験。T-0237)
+    inline sim::MultiresNest MakeCoarsenFullNest(const sim::BakedReactionTable& table, uint32_t observerBlocks = 0,
+                                                 uint32_t worldBlocks = COARSEN_FULL_WORLD_BLOCKS) {
         sim::MultiresNest nest = sim::MakeMultiresNest(
-            MakeMultiresCapacity(table, COARSEN_FULL_WORLD_BLOCKS, observerBlocks, COARSEN_FULL_FRACTIONS));
+            MakeMultiresCapacity(table, worldBlocks, observerBlocks, COARSEN_FULL_FRACTIONS));
         std::vector<reaction::RxCell> rootCells(multires::MR_BLOCK_CELLS);
         for (uint32_t index = 0; index < rootCells.size(); ++index)
             rootCells[index] = MakeLimitsCell(table, index);
