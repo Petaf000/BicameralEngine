@@ -21,7 +21,8 @@
    反応の核に渡す。核は変えない。GPU は u5(外のバッファの枠)を刻みの間だけパッチの列に結ぶ(ルート署名の語は増やさない。
    外のバッファを使う Compute は RecordExternalDispatch で自分のバッファを結ぶ)。
 4. **待ちの引き直し**: 速さが変わる刻み(始まり・終わり)に範囲に重なるブロックをつつく(ADR-0018)。終わった後に列から除く。
-   今は実験室の箱だけ(lab_box.hlsl の ApplyLabPatchBoundaries と CPU の ApplyLabPatchBoundaries)。世界のコマンドの段は T-0287。
+   今は実験室の箱だけ(lab_box.hlsl の ApplyLabPatchBoundaries と CPU の ApplyLabPatchBoundaries。根を並べた箱〔T-0173〕では
+   範囲が重なる根だけ)。世界のコマンドの段・境・世界の保存点は T-0323(T-0287 から分けた)。
 
 ## 代わりに考えたもの
 - 有理数の倍率(仮数に掛けて正規化): 2 の冪より細かく決められるが、端数の丸めが増える。速さの表は対数で 1 K ごとに変わる量なので、

@@ -24,6 +24,7 @@
 #include "core/singleton.h"
 #include "gpu/device.h"
 #include "gpu_test_options.h"
+#include "sim/lab_gauge.h"
 #include "sim/lab_session.h"
 #include "sim/reaction_test_table.h"
 
@@ -624,13 +625,60 @@ namespace {
         .amplified = {.low = {.x = 23, .y = 5, .z = 3}, .high = {.x = 24, .y = 6, .z = 4}},
         .plain = {.low = {.x = 29, .y = 5, .z = 12}, .high = {.x = 30, .y = 6, .z = 13}}};
 
+    // 表を替える刻みを跨ぐパッチ(T-0287): パッチの途中(刻み PATCH_SWAP_TICK)で table に替える。版は試験の中だけ
+    struct PatchSwap {
+        const sim::BakedReactionTable* table = nullptr;
+        uint64_t version = 0;
+    };
+
+    constexpr uint32_t PATCH_SWAP_TICK = 20;
+    constexpr uint64_t PATCH_SAVE_POINT_TICK = 30;      // 保存点(パッチの途中・表を替えた後で切った記録)
+    constexpr uint64_t SHIFTED_TABLE_VERSION = 0x5555;
+
+    // 規則の ID がずれる表: 名前の順で前にある規則(boudouard)を抜く(ベイクは規則を名前の順に並べるので、定義の並びを替えても ID は変わらない)。
+    // 物質は同じ。パッチの規則(燃焼 2 つ)は残り、ID が 1 つずつ前へずれる
+    std::expected<sim::BakedReactionTable, std::string> MakeShiftedTable() {
+        sim::ReactionTableDefinition definition = sim::MakeCombustionTestTable();
+        std::erase_if(definition.rules, [](const sim::RuleDefinition& rule) { return rule.name == "boudouard"; });
+
+        return sim::BakeReactionTable(definition);
+    }
+
+    // 保存点(パッチの途中で切った記録)と記録全体を、別の箱で初めから再生する → 毎刻みビット一致・ハッシュが記録と同じ
+    // (パッチは記録のコマンドで、効いているパッチの語は状態の要約に入る。T-0287)
+    std::expected<void, std::string> ReplayPatchRecording(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
+                                                          const sim::BakedReactionTable& table, const PatchSwap& swap,
+                                                          lab::LabBoxShape shape, const sim::LabRecording& recorded) {
+        auto other = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "patch", shape);
+        if (!other)
+            return std::unexpected(other.error());
+
+        if (auto added = other->AddTable(*swap.table, swap.version, "shifted"); !added)
+            return added;
+
+        const sim::LabRecording savePoint = sim::CutLabRecording(recorded, PATCH_SAVE_POINT_TICK);
+        for (const sim::LabRecording* recording : {&savePoint, &recorded}) {
+            if (auto replayed = other->Replay(*recording); !replayed)
+                return replayed;
+
+            if (auto checked = CheckNoMismatch(*other); !checked)
+                return checked;
+
+            if (other->ReplayDivergence() || other->Recording().hashes != recording->hashes)
+                return std::unexpected(std::format("パッチの記録({} 刻み)の再生が元と違う", recording->tickCount));
+        }
+
+        return {};
+    }
+
     // 450 K の木を 4 か所に置き、2 か所にパッチ(魔素の触媒の規則を止める・魔素なしの燃焼を 2^PATCH_SHIFT 倍)を PATCH_TICKS 刻み。
     // 毎刻み CPU と GPU がビット一致・元素は保存・止めた所は燃えず、終わると燃え始める・速めた所はそのままの所よりずっと燃える
-    // shape = 箱の形(大きい箱では範囲は箱の座標。パッチは範囲が重なる根だけをつつく)
+    // shape = 箱の形(大きい箱では範囲は箱の座標。パッチは範囲が重なる根だけをつつく)。swap.table があれば、パッチの途中で
+    // その表に替え(パッチは名前の鍵で同じ規則に効き続ける)、終わった後で保存点と記録全体を別の箱で再生する(T-0287)
     std::expected<void, std::string> RunPatch(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                               const sim::BakedReactionTable& table,
                                               lab::LabBoxShape shape = sim::LAB_SINGLE_ROOT_SHAPE,
-                                              const PatchGroups& groups = {}) {
+                                              const PatchGroups& groups = {}, const PatchSwap& swap = {}) {
         constexpr uint32_t PATCH_TICKS = 50;
         constexpr int32_t PATCH_SHIFT = 10;
         auto session = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "patch", shape);
@@ -667,7 +715,16 @@ namespace {
             return std::unexpected(stepped.error());
 
         const std::vector<sim::NamedElementCount> elementsBefore = CountBoxElements(*session);
-        if (auto stepped = session->Step(PATCH_TICKS - 1); !stepped)
+        if (swap.table != nullptr) {
+            if (auto stepped = session->Step(PATCH_SWAP_TICK - 1); !stepped)
+                return std::unexpected(stepped.error());
+
+            if (auto changed = session->ChangeTable(*swap.table, swap.version, "shifted"); !changed)
+                return changed;
+
+            if (auto stepped = session->Step(PATCH_TICKS - PATCH_SWAP_TICK); !stepped)
+                return std::unexpected(stepped.error());
+        } else if (auto stepped = session->Step(PATCH_TICKS - 1); !stepped)
             return std::unexpected(stepped.error());
 
         if (auto checked = CheckNoMismatch(*session); !checked)
@@ -708,6 +765,9 @@ namespace {
 
         if (amplifiedDuring <= 10 * (plainDuring + 1))
             return std::unexpected("速めるパッチが効かない");
+
+        if (swap.table != nullptr)
+            return ReplayPatchRecording(device, queueType, table, swap, shape, session->Recording());
 
         return {};
     }
@@ -773,13 +833,31 @@ namespace {
             return 1;
         }
 
+        // --- 表を替える刻みを跨ぐパッチ・保存点(T-0287): 規則の ID がずれる表に途中で替える ---
+        const auto shifted = MakeShiftedTable();
+        const bool moved =
+            shifted && RuleIdOf(*shifted, "cellulose_combustion") != RuleIdOf(*table, "cellulose_combustion") &&
+            RuleIdOf(*shifted, "mana_test_catalyzed_cellulose_combustion") !=
+                RuleIdOf(*table, "mana_test_catalyzed_cellulose_combustion");
+        if (!moved) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(規則の ID がずれる表を作れない)");
+            return 1;
+        }
+
+        const PatchSwap swap = {.table = &*shifted, .version = SHIFTED_TABLE_VERSION};
+        if (auto result = RunPatch(device->Get(), options->queueType, *table, sim::LAB_SINGLE_ROOT_SHAPE, {}, swap);
+            !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(表を替える刻みを跨ぐパッチ: {})", result.error());
+            return 1;
+        }
+
         if (!test::PassesValidation(*device, "gpu_lab_box_test"))
             return 1;
 
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
             "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える・"
-            "根を並べた箱でも一致・魔法のパッチで止める / 速める〔根を並べた箱でも〕)",
+            "根を並べた箱でも一致・魔法のパッチで止める / 速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕)",
             RUN_TICKS);
 
         return 0;

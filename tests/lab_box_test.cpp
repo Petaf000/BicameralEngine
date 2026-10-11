@@ -526,39 +526,52 @@ namespace {
                parsed->tableVersion == 0x1111);
     }
 
-    // 魔法のパッチは規則を名前の鍵で持つ(T-0287): 規則の定義の並びを逆にして焼き直した表でも、同じ名前の規則にだけ効く
+    // 魔法のパッチは規則を名前の鍵で持つ(T-0287): 名前の順で最初の規則を抜いて焼き直した表(ほかの規則の ID が 1 つずつ前へずれる。
+    // ベイクは規則を名前の順に並べるので、定義の並びを替えるだけでは ID は変わらない)でも、同じ名前の規則にだけ効く
     void TestPatchFollowsRuleName(const BakedReactionTable& table) {
         using namespace bicameral::reaction;
 
         ReactionTableDefinition definition = MakeCombustionTestTable();
-        std::ranges::reverse(definition.rules);
-        const auto reversed = BakeReactionTable(definition);
-        EXPECT(reversed.has_value());
-        if (!reversed || table.rules.size() < 2)
+        EXPECT(table.rules.size() >= 3);
+        if (table.rules.size() < 3)
             return;
 
-        // --- 元の表の規則 0 を 2^3 倍するパッチ(刻み 0〜9・セル (0, 0, 0))---
+        const std::string removed = table.ruleNames[0];
+        std::erase_if(definition.rules, [&](const RuleDefinition& rule) { return rule.name == removed; });
+        const auto shifted = BakeReactionTable(definition);
+        EXPECT(shifted.has_value());
+        if (!shifted)
+            return;
+
+        // --- 抜いた規則のパッチは新しい表に足せない(名前の鍵が無い)---
         std::vector<uint32_t> words(MP_LIST_WORDS, 0);
-        const MpPatch patch = MpPatchFromCommand(table.rules[0].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0, 0);
+        const auto ruleCount = static_cast<uint32_t>(shifted->rules.size());
+        const MpPatch removedPatch =
+            MpPatchFromCommand(table.rules[0].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0, 0);
+
+        // --- 元の表の規則 1 を 2^3 倍するパッチ(刻み 0〜9・セル (0, 0, 0))---
+        const MpPatch patch = MpPatchFromCommand(table.rules[1].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0, 0);
         struct List {
             std::span<uint32_t> words;
             [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
             void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
         };
         const List list{.words = words};
-        EXPECT(MpAddPatch(list, reversed->View(), patch, 0, static_cast<uint32_t>(reversed->rules.size())));
+        EXPECT(!MpAddPatch(list, shifted->View(), removedPatch, 0, ruleCount));
+        EXPECT(MpAddPatch(list, shifted->View(), patch, 0, ruleCount));
 
         // --- 新しい表で同じ名前の規則(ID はベイクの並びで決まる)だけが 2^3 倍になる(最も熱い所の速さで比べる)---
-        ReactionTableView view = reversed->View();
+        ReactionTableView view = shifted->View();
         view.magicPatches = words;
         // Rate は HLSL と同じく const でない
         MpPatchedTable<ReactionTableView> patched = MpPatchTable(view, 0, 0, 0, 0, 0);
-        const auto found = std::ranges::find(reversed->ruleNames, table.ruleNames[0]);
-        EXPECT(found != reversed->ruleNames.end());
-        if (found == reversed->ruleNames.end())
+        const auto found = std::ranges::find(shifted->ruleNames, table.ruleNames[1]);
+        EXPECT(found != shifted->ruleNames.end());
+        if (found == shifted->ruleNames.end())
             return;
 
-        const auto same = static_cast<uint32_t>(std::distance(reversed->ruleNames.begin(), found));
+        const auto same = static_cast<uint32_t>(std::distance(shifted->ruleNames.begin(), found));
+        EXPECT(same == 0);  // 元の表では 1(ID がずれても名前の鍵で同じ規則に効く)
         const uint32_t other = same == 0 ? 1 : 0;
         constexpr uint32_t HOTTEST_KELVIN = RX_RATE_TABLE_KELVINS - 1;
         EXPECT(RxRateMantissa(view.Rate(same, HOTTEST_KELVIN)) != 0);
