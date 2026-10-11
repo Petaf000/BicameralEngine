@@ -28,7 +28,7 @@ namespace bicameral::sim {
     // 計器の 1 刻み(刻み tick を終えた箱)
     struct LabGaugeSample {
         uint64_t tick = 0;
-        uint32_t cell = 0;  // 見るセル(MrCellIndex)
+        uint32_t cell = 0;  // 見るセル(lab::LabCellIndex。根 1 つの箱なら MrCellIndex)
 
         // --- 温度(mK)---
         int32_t cellTemperatureMilliKelvin = 0;
@@ -41,9 +41,10 @@ namespace bicameral::sim {
         bool operator==(const LabGaugeSample&) const = default;
     };
 
-    // 箱の状態から計器の値を取る(nest は GPU から読み戻した箱でも CPU リファレンスでも同じ形)
+    // 箱の状態から計器の値を取る(nest は GPU から読み戻した箱でも CPU リファレンスでも同じ形。shape は箱の形。T-0173)
     [[nodiscard]] LabGaugeSample SampleLabGauge(const MultiresNest& nest, const BakedReactionTable& table,
-                                                uint64_t tick, uint32_t cellIndex);
+                                                uint64_t tick, uint32_t cellIndex,
+                                                lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
     // 反応の速さ: 物質 species の、前の刻みからの増え方(µmol/刻み。減れば負)。最初の刻み・物質が範囲の外なら 0。
     // wholeBox = 箱全体の量、でなければ見るセルの量

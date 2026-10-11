@@ -226,10 +226,16 @@ namespace bicameral::editor {
 
     void GaugePanel::BuildGauge(sim::LabSession& session) {
         ImGui::SeparatorText("計器(GPU から読み戻した箱の値。刻みごと)");
-        const int maxCell = static_cast<int>(sim::LAB_BOX_EDGE) - 1;
+        // 箱の形(根を並べた数。T-0173)の中に収める。スライダーの上限はいちばん長い辺
+        const lab::LabBoxShape shape = session.Shape();
+        const std::array<uint32_t, 3> roots = {shape.rootsX, shape.rootsY, shape.rootsZ};
+        const int maxCell = static_cast<int>(sim::LAB_BOX_EDGE * std::ranges::max(roots)) - 1;
         ImGui::SliderInt3("見るセル", m_cell.data(), 0, maxCell);
-        session.SetGaugeCell(multires::MrCellIndex(static_cast<uint32_t>(m_cell[0]), static_cast<uint32_t>(m_cell[1]),
-                                                   static_cast<uint32_t>(m_cell[2])));
+        for (size_t axis = 0; axis < roots.size(); ++axis)
+            m_cell.at(axis) = std::clamp(m_cell.at(axis), 0, static_cast<int>(sim::LAB_BOX_EDGE * roots.at(axis)) - 1);
+
+        session.SetGaugeCell(lab::LabCellIndex(static_cast<uint32_t>(m_cell[0]), static_cast<uint32_t>(m_cell[1]),
+                                               static_cast<uint32_t>(m_cell[2])));
         BuildQuantityControls(session.Table());
         ImGui::SetNextItemWidth(220.0f);
         ImGui::SliderInt("直近の刻み", &m_windowTicks, 10, static_cast<int>(sim::LAB_GAUGE_MAX_SAMPLES));

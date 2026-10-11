@@ -1,4 +1,4 @@
-// gpu_lab_box.h — 実験室の箱(sim/lab_box.h)を GPU で刻む(T-0142)。多重解像度の木(sim/gpu_multires)に根 1 つの箱を置き、
+// gpu_lab_box.h — 実験室の箱(sim/lab_box.h)を GPU で刻む(T-0142)。多重解像度の木(sim/gpu_multires)に根を並べた箱(T-0173)を置き、
 // 刻みの前にコマンド(common/lab_box.hlsli)を shaders/sim/lab_box.hlsl で当ててから RecordStep(反応 + 熱の伝導)。
 // CPU が書くのはコマンドの列の写しとルート定数だけ(箱のセルには触れない。D-107)。初めの箱は RecordUpload で 1 度だけ写す。
 //
@@ -23,8 +23,11 @@ namespace bicameral::sim {
 
     class GpuLabBox {
     public:
-        [[nodiscard]] static std::expected<GpuLabBox, std::string> Create(ID3D12Device5* device,
-                                                                          const BakedReactionTable& table);
+        // shape = 箱の形(根を並べた数。lab::LabShapeValid であること。T-0173)。作った後は変えられない
+        [[nodiscard]] static std::expected<GpuLabBox, std::string> Create(
+            ID3D12Device5* device, const BakedReactionTable& table, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
+
+        [[nodiscard]] lab::LabBoxShape Shape() const { return m_shape; }
 
         // 初めの箱(MakeLabBoxNest)を GPU へ写す
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest);
@@ -66,6 +69,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_commands;       // この刻みのコマンドの列(u4)
         ComPtr<ID3D12Resource> m_commandUpload;  // CPU が書く写し
         uint32_t m_speciesCount = 0;
+        lab::LabBoxShape m_shape = LAB_SINGLE_ROOT_SHAPE;
     };
 
 }  // namespace bicameral::sim

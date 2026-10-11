@@ -4,6 +4,7 @@
 //
 // 1 スレッドだけで列の順((targetTick, sequence) の昇順。CPU が並べて写す)に当てる。同じセルに当たるコマンドの順が結果を決めるので、
 // 並べて走らせない(数は 1 刻みに LAB_MAX_COMMANDS_PER_TICK まで。費用は小さい)。
+// 箱は根を並べたもの(T-0173。根の枠は x → y → z の順に 0 から)。当てたセルを含む根だけをつつく。
 // 物質の一覧が変わる表に替えた刻み(T-0242・ADR-0065)は、コマンドの前に RemapLabSpecies で箱の全部のセルを名前で付け替える
 // (u4 には付け替えの表〔sim::PackSpeciesRemap の語の列〕を結ぶ。CPU リファレンスは sim/lab_box.cpp の RemapLabBox)。
 #include "common/lab_box.hlsli"
@@ -12,53 +13,60 @@
 
 RWStructuredBuffer<uint32_t> g_labCommands : register(u4);  // LabCommand × 数(LAB_COMMAND_WORDS 語ずつ)
 
-// g_external0 = コマンドの数、g_external1 = 箱の枠、g_external2 = 表の物質の数
-[numthreads(1, 1, 1)] void ApplyLabCommands() {
-    const uint32_t slot = g_external1;
-    const MrBlock block = g_blocks[slot];
+// 箱のセル index(LabCellIndex)にコマンドを当てる。根が一様なら当てない(箱の根はいつも頁を持つ: sim/lab_box.cpp の MakeLabBoxNest。
+// CPU の ApplyLabCommands も同じ)。当てたら true
+bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
+    const MrBlock block = g_blocks[LabCellSlot(shape, index)];
     if (MrIsUniform(block))
-        return;  // 箱はいつも頁を持つ(sim/lab_box.cpp の MakeLabBoxNest)。持たなければ当てない(CPU も同じ)
+        return false;
 
-    bool applied = false;
+    const uint32_t address = PageCellAddress(block.page, LabCellLocal(index));
+    g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
+
+    return true;
+}
+
+// g_external0 = コマンドの数、g_external1 = 箱の形(LabPackShape。T-0173)、g_external2 = 表の物質の数
+[numthreads(1, 1, 1)] void ApplyLabCommands() {
+    const LabBoxShape shape = LabUnpackShape(g_external1);
+    uint64_t touched = 0;  // つつく根(LabRootBit)
     for (uint32_t i = 0; i < g_external0; ++i) {
         LabCommand command;
         for (uint32_t word = 0; word < LAB_COMMAND_WORDS; ++word)
             command.words[word] = g_labCommands[(i * LAB_COMMAND_WORDS) + word];
 
-        // --- 表を替えた印: セルは変えず、箱をつつくだけ(sim/lab_box.cpp の ApplyLabCommands と同じ。T-0218)---
+        // --- 表を替えた印: セルは変えず、箱の根を全部つつくだけ(sim/lab_box.cpp の ApplyLabCommands と同じ。T-0218)---
         if (LabCommandMarksTable(command)) {
-            applied = true;
+            touched |= LabAllRoots(shape);
             continue;
         }
 
         // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(sim/lab_box.cpp と同じ順)---
-        if (LabRegionCommandValid(command, g_external2)) {
+        if (LabRegionCommandValid(command, g_external2, shape)) {
             const LabRegion region = LabCommandRegion(command);
             for (uint32_t z = region.lowZ; z <= region.highZ; ++z) {
                 for (uint32_t y = region.lowY; y <= region.highY; ++y) {
                     for (uint32_t x = region.lowX; x <= region.highX; ++x) {
-                        const uint32_t address = PageCellAddress(block.page, MrCellIndex(x, y, z));
-                        g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
+                        const uint32_t index = LabCellIndex(x, y, z);
+                        if (ApplyToCell(shape, index, command))
+                            touched |= LabRootBit(LabCellSlot(shape, index));
                     }
                 }
             }
 
-            applied = true;
             continue;
         }
 
-        const uint32_t cell = LabCommandCell(command, g_external2);
-        if (cell == LAB_NO_CELL)
-            continue;
-
-        const uint32_t address = PageCellAddress(block.page, cell);
-        g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
-        applied = true;
+        const uint32_t cell = LabCommandCell(command, g_external2, shape);
+        if (cell != LAB_NO_CELL && ApplyToCell(shape, cell, command))
+            touched |= LabRootBit(LabCellSlot(shape, cell));
     }
 
-    // --- 変えたブロックは「つつかれた」(次の刻みで変わったとみなして全部のセルを評価し直す。multires_tree.cpp の PokeBlock)---
-    if (applied)
-        g_blocks[slot].busyTick = MR_BUSY_POKED;
+    // --- 変えた根は「つつかれた」(次の刻みで変わったとみなして全部のセルを評価し直す。multires_tree.cpp の PokeBlock)---
+    for (uint32_t slot = 0; slot < LabRootCount(shape); ++slot) {
+        if (((touched >> slot) & 1) != 0)
+            g_blocks[slot].busyTick = MR_BUSY_POKED;
+    }
 }
 
 // --- 物質の付け替え(T-0242・ADR-0065): u4 = 付け替えの表(common/species_remap.hlsli の「GPU のバッファの形」を 32bit の語で)---

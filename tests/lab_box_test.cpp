@@ -51,16 +51,37 @@ namespace {
         return nullptr;
     }
 
-    // 箱の中の物質の合計(µmol)
-    uint64_t TotalOf(const MultiresNest& nest, uint32_t species) {
+    // セルの物質の量(µmol)
+    uint64_t AmountOf(const reaction::RxCell& cell, uint32_t species) {
         uint64_t total = 0;
-        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
-            const reaction::RxCell cell = LabBoxCell(nest, index);
-            for (uint32_t i = 0; i < cell.speciesCount; ++i)
-                total += cell.species[i] == species ? cell.amounts[i] : 0;
+        for (uint32_t i = 0; i < cell.speciesCount; ++i)
+            total += cell.species[i] == species ? cell.amounts[i] : 0;
+
+        return total;
+    }
+
+    // 箱の中の物質の合計(µmol)
+    uint64_t TotalOf(const MultiresNest& nest, uint32_t species, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE) {
+        uint64_t total = 0;
+        const LabCellRange whole = LabWholeBox(shape);
+        for (uint32_t z = 0; z <= whole.high.z; ++z) {
+            for (uint32_t y = 0; y <= whole.high.y; ++y) {
+                for (uint32_t x = 0; x <= whole.high.x; ++x)
+                    total += AmountOf(LabBoxCell(nest, lab::LabCellIndex(x, y, z), shape), species);
+            }
         }
 
         return total;
+    }
+
+    // 版 5 の記録のバイト列から箱の形(種の後ろの 16 バイト。T-0173)を抜いて、版 4 までと同じ並びにする(版の語は呼ぶ側が書く)
+    std::vector<std::byte> WithoutShape(const std::vector<std::byte>& bytes) {
+        constexpr size_t SHAPE_OFFSET = 4 + 4 + 8;
+        constexpr size_t SHAPE_BYTES = 16;
+        std::vector<std::byte> old(bytes.begin(), bytes.begin() + SHAPE_OFFSET);
+        old.insert(old.end(), bytes.begin() + SHAPE_OFFSET + SHAPE_BYTES, bytes.end());
+
+        return old;
     }
 
     // 木を真ん中の 2×2×2 に置き(刻み 0)、刻み IGNITE_TICK に 1 つに火を付ける実験のコマンド
@@ -124,7 +145,7 @@ namespace {
                 const Command command = MakeLabFillCommand(0, 0, {.x = 1, .y = 2, .z = 3}, material.contents,
                                                            temperature);
                 const lab::LabCommand words = ToLabCommand(command);
-                EXPECT(lab::LabCommandCell(words, static_cast<uint32_t>(table.species.size())) ==
+                EXPECT(lab::LabCommandCell(words, static_cast<uint32_t>(table.species.size()), LAB_SINGLE_ROOT_SHAPE) ==
                        multires::MrCellIndex(1, 2, 3));
                 const reaction::RxCell made = lab::LabApplyCommand(table.View(), reaction::RxMakeEmptyCell(0), words);
                 const reaction::RxCell expected = MakeReactionCell(table, material.contents,
@@ -189,8 +210,9 @@ namespace {
 
         // 版 1(T-0142。表の版が無い): 見出しの 16 バイト(印・版・種)の後ろの 8 バイトが無い形も読める(表の版は 0)。
         // 版 4 の末尾の表の数(8 バイト。表は無い)は外す
-        std::vector<std::byte> oldBytes(bytes.begin(), bytes.begin() + 16);
-        oldBytes.insert(oldBytes.end(), bytes.begin() + 24, bytes.end() - 8);
+        const std::vector<std::byte> unshaped = WithoutShape(bytes);
+        std::vector<std::byte> oldBytes(unshaped.begin(), unshaped.begin() + 16);
+        oldBytes.insert(oldBytes.end(), unshaped.begin() + 24, unshaped.end() - 8);
         oldBytes[4] = std::byte{1};
         const auto parsedOld = ParseLabRecording(oldBytes);
         EXPECT(parsedOld.has_value() && parsedOld->tableVersion == 0 && parsedOld->hashes == hashes);
@@ -322,7 +344,8 @@ namespace {
         EXPECT(parsed.has_value() && parsed->commands == commands && parsed->tableVersion == 0x1111);
 
         // 版 3・2 の形(表の中身が無い)も読める(版 4 の末尾の表の数 8 バイトを外す)
-        std::vector<std::byte> oldBytes(bytes.begin(), bytes.end() - 8);
+        const std::vector<std::byte> unshaped = WithoutShape(bytes);
+        std::vector<std::byte> oldBytes(unshaped.begin(), unshaped.end() - 8);
         oldBytes[4] = std::byte{3};
         const auto parsedThree = ParseLabRecording(oldBytes);
         EXPECT(parsedThree.has_value() && parsedThree->commands == commands && parsedThree->tables.empty());
@@ -413,6 +436,96 @@ namespace {
         EXPECT(!RunLabGaugeOnCpu(marked, table, cell.Index()).has_value());
     }
 
+    // 根を並べた箱(T-0173): 根の枠の順・根をまたぐ範囲 = 1 セルずつ・形の外は当てない・根の境を熱が通る・記録の形
+    void TestLargeBox(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        constexpr lab::LabBoxShape SHAPE = {.rootsX = 2, .rootsY = 2, .rootsZ = 2};
+        const LabMaterial* wood = FindMaterial(materials, "木");
+
+        // --- 根 1 つの箱のセルの番号は今までと同じ(古い記録のコマンドがそのまま読める)---
+        EXPECT((LabCellPosition{.x = 7, .y = 5, .z = 3}.Index() == multires::MrCellIndex(7, 5, 3)));
+        EXPECT(LabCellPositionOf(lab::LabCellIndex(9, 17, 31)).x == 9 &&
+               LabCellPositionOf(lab::LabCellIndex(9, 17, 31)).y == 17 &&
+               LabCellPositionOf(lab::LabCellIndex(9, 17, 31)).z == 31);
+
+        // --- 根は x → y → z の順に枠 0 から・どれも頁を持つ・原点 = 根の座標 × 8 ---
+        MultiresNest nest = MakeLabBoxNest(table, SHAPE);
+        EXPECT(nest.capacity.worldBlocks == 8 && nest.capacity.indexEntries == 16);
+        for (uint32_t slot = 0; slot < 8; ++slot) {
+            EXPECT(!multires::MrIsUniform(nest.blocks[slot]));
+            EXPECT(nest.blocks[slot].originX == int64_t{(slot & 1u) * LAB_BOX_EDGE});
+            EXPECT(nest.blocks[slot].originY == int64_t{((slot >> 1) & 1u) * LAB_BOX_EDGE});
+            EXPECT(nest.blocks[slot].originZ == int64_t{(slot >> 2) * LAB_BOX_EDGE});
+        }
+
+        // --- 根をまたぐ範囲 = 1 セルずつ並べたコマンド ---
+        const LabCellRange range = {.low = {.x = 6, .y = 7, .z = 5}, .high = {.x = 9, .y = 8, .z = 10}};
+        MultiresNest regionNest = MakeLabBoxNest(table, SHAPE);
+        MultiresNest cellNest = MakeLabBoxNest(table, SHAPE);
+        const std::vector<Command> region = {MakeLabFillRegionCommand(0, 0, range, wood->contents, 450000)};
+        std::vector<Command> cells;
+        for (uint32_t z = range.low.z; z <= range.high.z; ++z) {
+            for (uint32_t y = range.low.y; y <= range.high.y; ++y) {
+                for (uint32_t x = range.low.x; x <= range.high.x; ++x)
+                    cells.push_back(MakeLabFillCommand(0, 0, {.x = x, .y = y, .z = z}, wood->contents, 450000));
+            }
+        }
+
+        EXPECT(ApplyLabCommands(regionNest, table, region, SHAPE) == 1);
+        EXPECT(ApplyLabCommands(cellNest, table, cells, SHAPE) == cells.size());
+        EXPECT(HashWholeNest(regionNest) == HashWholeNest(cellNest));
+        EXPECT(TotalOf(regionNest, table.SpeciesId("cellulose"), SHAPE) == 48 * wood->contents[0].amount);
+
+        // --- 形の外(x = 16)は当てない・箱全体の範囲は反対の隅の根まで届く ---
+        MultiresNest edge = MakeLabBoxNest(table, SHAPE);
+        const std::vector<Command> outside = {
+            MakeLabFillCommand(0, 0, {.x = 16, .y = 0, .z = 0}, wood->contents, 300000),
+            MakeLabFillRegionCommand(0, 1, {.low = {}, .high = {.x = 16, .y = 0, .z = 0}}, wood->contents, 300000),
+            MakeLabTemperatureRegionCommand(0, 2, LabWholeBox(SHAPE), 350000)};
+        EXPECT(ApplyLabCommands(edge, table, outside, SHAPE) == 1);
+        const reaction::RxCell corner = LabBoxCell(edge, LabWholeBox(SHAPE).high.Index(), SHAPE);
+        EXPECT(reaction::RxComputeThermal(table.View(), corner).temperature >= 350000);
+        EXPECT(TotalOf(edge, table.SpeciesId("cellulose"), SHAPE) == 0);
+
+        // --- 根の境を熱が通る: (7, 3, 3) を熱くすると隣の根の (8, 3, 3) のエネルギーが増える。コマンドの無い刻みは合計が同じ ---
+        MultiresNest heat = MakeLabBoxNest(table, SHAPE);
+        const uint32_t neighbor = LabCellPosition{.x = 8, .y = 3, .z = 3}.Index();
+        const int64_t neighborBefore = LabBoxCell(heat, neighbor, SHAPE).energy;
+        const std::vector<Command> hot = {MakeLabTemperatureCommand(0, 0, {.x = 7, .y = 3, .z = 3}, 1000000)};
+        StepLabBox(heat, table, 0, hot, SHAPE);
+        const ConservedTotals before = ComputeConservedTotals(heat, table, 0);
+        for (uint64_t tick = 1; tick < 40; ++tick)
+            StepLabBox(heat, table, tick, {}, SHAPE);
+
+        EXPECT(ComputeConservedTotals(heat, table, 0) == before);
+        EXPECT(LabBoxCell(heat, neighbor, SHAPE).energy > neighborBefore);
+
+        // --- 記録は箱の形を持つ(版 5)。違う形の箱の再生は LabSession が断る(gpu_lab_box_test)---
+        const LabRecording recording{.shape = SHAPE, .tickCount = 1, .commands = hot, .hashes = {HashWholeNest(heat)}};
+        const auto parsed = ParseLabRecording(SerializeLabRecording(recording));
+        EXPECT(parsed.has_value() && SameLabShape(parsed->shape, SHAPE));
+        LabRecording broken = recording;
+        broken.shape.rootsY = 5;
+        EXPECT(!ParseLabRecording(SerializeLabRecording(broken)).has_value());
+
+        // --- 計器は箱全体を数え、見るセルは根をまたいでも引ける ---
+        const LabGaugeSample sample = SampleLabGauge(regionNest, table, 0, lab::LabCellIndex(9, 8, 10), SHAPE);
+        EXPECT(sample.boxAmounts[table.SpeciesId("cellulose")] == 48 * wood->contents[0].amount);
+        EXPECT(sample.cellAmounts[table.SpeciesId("cellulose")] == wood->contents[0].amount);
+    }
+
+    // 版 4 の記録(箱の形が無い)は根 1 つとして読む
+    void TestVersionFourRecording() {
+        const LabRecording recording{.tableVersion = 0x1111, .tickCount = 1, .hashes = {7}};
+        std::vector<std::byte> bytes = SerializeLabRecording(recording);
+
+        // 版 5 → 4: 種の後ろの形(16 バイト)を抜き、版の語を書き換える
+        bytes = WithoutShape(bytes);
+        bytes[4] = std::byte{4};
+        const auto parsed = ParseLabRecording(bytes);
+        EXPECT(parsed.has_value() && SameLabShape(parsed->shape, LAB_SINGLE_ROOT_SHAPE) &&
+               parsed->tableVersion == 0x1111);
+    }
+
 }  // namespace
 
 int main() {
@@ -431,6 +544,8 @@ int main() {
     TestRegion(*table, materials);
     TestConversions(*table, materials);
     TestGauge(*table, materials);
+    TestLargeBox(*table, materials);
+    TestVersionFourRecording();
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

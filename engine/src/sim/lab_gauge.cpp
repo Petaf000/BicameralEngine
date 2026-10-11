@@ -31,7 +31,7 @@ namespace bicameral::sim {
     // --- 計器 ---
 
     LabGaugeSample SampleLabGauge(const MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
-                                  uint32_t cellIndex) {
+                                  uint32_t cellIndex, lab::LabBoxShape shape) {
         const size_t speciesCount = table.species.size();
         LabGaugeSample sample = {.tick = tick,
                                  .cell = cellIndex,
@@ -39,11 +39,17 @@ namespace bicameral::sim {
                                  .boxAmounts = std::vector<uint64_t>(speciesCount, 0)};
         sample.maxTemperatureMilliKelvin = std::numeric_limits<int32_t>::min();
 
-        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
-            const reaction::RxCell cell = LabBoxCell(nest, index);
+        // --- 根の枠の順 → 根の中の番号の順(根は x → y → z の順に枠 0 から。T-0173)---
+        const uint32_t watchedSlot = lab::LabCellSlot(shape, cellIndex);
+        const uint32_t watchedLocal = lab::LabCellLocal(cellIndex);
+        for (uint32_t ordinal = 0; ordinal < LabBoxCellCount(shape); ++ordinal) {
+            const uint32_t slot = ordinal / multires::MR_BLOCK_CELLS;
+            const uint32_t local = ordinal % multires::MR_BLOCK_CELLS;
+            const bool watched = slot == watchedSlot && local == watchedLocal;
+            const reaction::RxCell cell = LoadNestCell(nest, slot, local);
             const int32_t temperature = reaction::RxComputeThermal(table.View(), cell).temperature;
             sample.maxTemperatureMilliKelvin = std::max(sample.maxTemperatureMilliKelvin, temperature);
-            if (index == cellIndex)
+            if (watched)
                 sample.cellTemperatureMilliKelvin = temperature;
 
             // --- 物質量(表に無い ID は数えない)---
@@ -52,7 +58,7 @@ namespace bicameral::sim {
                     continue;
 
                 sample.boxAmounts[cell.species[i]] += cell.amounts[i];
-                if (index == cellIndex)
+                if (watched)
                     sample.cellAmounts[cell.species[i]] += cell.amounts[i];
             }
         }
@@ -86,12 +92,12 @@ namespace bicameral::sim {
         std::vector<Command> commands = recording.commands;
         std::ranges::sort(commands, CommandPrecedes);
 
-        MultiresNest nest = MakeLabBoxNest(table);
+        MultiresNest nest = MakeLabBoxNest(table, recording.shape);
         std::vector<LabGaugeSample> samples;
         samples.reserve(recording.tickCount);
         for (uint64_t tick = 0; tick < recording.tickCount; ++tick) {
-            StepLabBox(nest, table, tick, CommandsAt(commands, tick));
-            samples.push_back(SampleLabGauge(nest, table, tick, cellIndex));
+            StepLabBox(nest, table, tick, CommandsAt(commands, tick), recording.shape);
+            samples.push_back(SampleLabGauge(nest, table, tick, cellIndex, recording.shape));
         }
 
         return samples;
@@ -101,7 +107,10 @@ namespace bicameral::sim {
 
     LabRecording CutLabRecording(const LabRecording& recording, uint64_t tick) {
         const uint64_t end = std::min(tick, recording.tickCount);
-        LabRecording cut = {.tableVersion = recording.tableVersion, .tickCount = end, .tables = recording.tables};
+        LabRecording cut = {.shape = recording.shape,
+                            .tableVersion = recording.tableVersion,
+                            .tickCount = end,
+                            .tables = recording.tables};
         for (const Command& command : recording.commands) {
             if (command.targetTick < end)
                 cut.commands.push_back(command);

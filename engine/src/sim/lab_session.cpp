@@ -13,7 +13,7 @@ namespace bicameral::sim {
 
     std::expected<LabSession, std::string> LabSession::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                                               const BakedReactionTable& table, uint64_t tableVersion,
-                                                              std::string tableBytes) {
+                                                              std::string tableBytes, lab::LabBoxShape shape) {
         auto queue = gpu::ImmediateQueue::Create(device, queueType);
         if (!queue)
             return std::unexpected(queue.error());
@@ -22,7 +22,7 @@ namespace bicameral::sim {
         if (!ring)
             return std::unexpected(ring.error());
 
-        auto box = GpuLabBox::Create(device, table);
+        auto box = GpuLabBox::Create(device, table, shape);
         if (!box)
             return std::unexpected(box.error());
 
@@ -43,7 +43,7 @@ namespace bicameral::sim {
           m_ring(std::move(ring)),
           m_box(std::move(box)),
           m_ledgerColumns(LabBoxCapacity(m_table).ledgerColumns),
-          m_initial(MakeLabBoxNest(m_table)),
+          m_initial(MakeLabBoxNest(m_table, m_box.Shape())),
           m_cpu(m_initial),
           m_read(m_initial) {}
 
@@ -203,8 +203,8 @@ namespace bicameral::sim {
                 m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->energyDeltaMilliJoules);
         }
 
-        StepLabBox(m_cpu, m_table, tick, commands);
-        m_mismatch = FindLabMismatch(m_cpu, m_read, tick);
+        StepLabBox(m_cpu, m_table, tick, commands, Shape());
+        m_mismatch = FindLabMismatch(m_cpu, m_read, tick, Shape());
 
         m_history.insert(m_history.end(), commands.begin(), commands.end());
         m_hashes.push_back(HashWholeNest(m_cpu));
@@ -239,7 +239,7 @@ namespace bicameral::sim {
         m_lastRemapReport.reset();
         m_initialVersion = tableVersion;
         // 箱は 1 レベルで帳簿を使わない(いつも 0)。物質の数の違う表で作り直しても、GPU の箱の大きさ(作った時の列)に合わせる
-        m_initial = MakeLabBoxNest(m_table);
+        m_initial = MakeLabBoxNest(m_table, Shape());
         m_initial.capacity.ledgerColumns = m_ledgerColumns;
         m_initial.ledger.assign(size_t{multires::MR_LEDGER_LEVELS} * m_ledgerColumns, 0);
         m_cpu = m_initial;
@@ -261,6 +261,13 @@ namespace bicameral::sim {
     }
 
     std::expected<void, std::string> LabSession::Replay(const LabRecording& recording) {
+        // --- 箱の形が同じこと(GPU の箱は作った時の形のまま。T-0173)---
+        if (!SameLabShape(recording.shape, Shape())) {
+            return std::unexpected(std::format("記録の箱の形({}×{}×{})がこの実験室の箱({}×{}×{})と違う",
+                                               recording.shape.rootsX, recording.shape.rootsY, recording.shape.rootsZ,
+                                               Shape().rootsX, Shape().rootsY, Shape().rootsZ));
+        }
+
         // --- 記録の表(刻み 0 と印)を全部持っているか、流す前に確かめる(途中で止まらないように)---
         const uint64_t initialVersion = recording.tableVersion != 0 ? recording.tableVersion : m_latestVersion;
         std::vector<uint64_t> versions = {initialVersion};
@@ -307,8 +314,11 @@ namespace bicameral::sim {
     }
 
     LabRecording LabSession::Recording() const {
-        LabRecording recording = {
-            .tableVersion = m_initialVersion, .tickCount = m_tick, .commands = m_history, .hashes = m_hashes};
+        LabRecording recording = {.shape = Shape(),
+                                  .tableVersion = m_initialVersion,
+                                  .tickCount = m_tick,
+                                  .commands = m_history,
+                                  .hashes = m_hashes};
 
         // --- 使った表(刻み 0 と印)の中身。分かるものだけ、版の昇順(T-0217)---
         std::vector<uint64_t> versions = {m_initialVersion};
@@ -427,7 +437,7 @@ namespace bicameral::sim {
     // --- 計器(T-0221)---
 
     void LabSession::SetGaugeCell(uint32_t cellIndex) {
-        if (cellIndex >= multires::MR_BLOCK_CELLS || cellIndex == m_gaugeCell)
+        if (!lab::LabCellInBox(Shape(), cellIndex) || cellIndex == m_gaugeCell)
             return;
 
         m_gaugeCell = cellIndex;
@@ -439,7 +449,7 @@ namespace bicameral::sim {
         if (m_gauge.size() >= LAB_GAUGE_MAX_SAMPLES)
             m_gauge.erase(m_gauge.begin(), m_gauge.begin() + static_cast<std::ptrdiff_t>(LAB_GAUGE_MAX_SAMPLES / 4));
 
-        m_gauge.push_back(SampleLabGauge(m_read, m_table, tick, m_gaugeCell));
+        m_gauge.push_back(SampleLabGauge(m_read, m_table, tick, m_gaugeCell, Shape()));
     }
 
     // 表の列(刻み 0 の表 → 印の表 → …)の隣どうしが、物質を名前で付け替えられるか(T-0242。どれも持っていること)

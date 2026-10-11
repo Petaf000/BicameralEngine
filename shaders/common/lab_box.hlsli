@@ -6,8 +6,8 @@
 //   エディタの実験室のパネル(CPU の Controller)→ sim::Command(64 バイト。type = LAB_COMMAND_TYPE_*)
 //   → GPU: コマンドの列をバッファへ写し、刻みの前に ApplyLabCommands が箱のセルに当てる → 多重解像度の刻み(反応 + 伝導)
 //   → CPU: 同じ列を同じ順で LabApplyCommand に通す → StepNest(CPU リファレンス)。刻みごとに両方を比べる。
-// 箱は多重解像度の木の本物の根 1 つ(8³ セル、レベル 0 = 0.5 m 角。いつも頁を持つ)。コマンドが変えるのはセル 1 つか、
-// 範囲のコマンド(T-0220)なら直方体のセル全部(同じコマンドを x → y → z の順に 1 セルずつ当てる)。
+// 箱は多重解像度の木の本物の根(8³ セル、レベル 0 = 0.5 m 角。いつも頁を持つ)を x・y・z に並べたもの(T-0173。初めは根 1 つ)。
+// コマンドが変えるのはセル 1 つか、範囲のコマンド(T-0220)なら直方体のセル全部(同じコマンドを x → y → z の順に 1 セルずつ当てる)。
 // セルを置き換える・温度を決めるのは、エディタの明示的な湧き出し(保存則の外。つつきと同じ扱い。D-206)。
 #ifndef BICAMERAL_LAB_BOX_HLSLI
 #define BICAMERAL_LAB_BOX_HLSLI
@@ -64,6 +64,117 @@ FX_CONST uint32_t LAB_MAX_TEMPERATURE_MILLIKELVIN = 6000000;
 struct LabCommand {
     uint32_t words[LAB_COMMAND_WORDS];
 };
+
+// --- 箱の形(T-0173): 根(8³ のブロック)を x・y・z に並べた数 ------------------------------------
+// 根の枠は x → y → z の順に 0 から(sim::MakeLabBoxNest が空きのスタックから順に取る)。根の原点 = 根の座標 × 8(レベル 0 のセル)。
+// 箱のセルの番号: 下位 9 ビット = 根の中のセル(MrCellIndex)、その上に根の x・y・z を 2 ビットずつ。
+// 根 1 つの箱ではセルの番号 = MrCellIndex のまま(T-0142 からの記録・コマンドはそのまま読める)。
+FX_CONST uint32_t LAB_MAX_ROOTS_PER_AXIS = 4;  // 範囲の語の座標が 5 ビット(32 セル = 根 4 つ)
+FX_CONST uint32_t LAB_MAX_ROOTS = 64;
+FX_CONST uint32_t LAB_MAX_BOX_EDGE = 32;  // MR_BLOCK_EDGE × LAB_MAX_ROOTS_PER_AXIS
+FX_CONST uint32_t LAB_ROOT_COORD_BITS = 2;
+FX_CONST uint32_t LAB_ROOT_COORD_MASK = 3u;
+FX_CONST uint32_t LAB_CELL_ROOT_SHIFT = 9;          // MR_BLOCK_CELLS = 2^9
+FX_CONST uint32_t LAB_CELL_INDEX_LIMIT = 1u << 15;  // 9 + 2 × 3 ビット
+FX_CONST uint32_t LAB_SHAPE_FIELD_BITS = 8;         // LabPackShape の 1 軸のビット数
+
+struct LabBoxShape {
+    uint32_t rootsX;
+    uint32_t rootsY;
+    uint32_t rootsZ;
+};
+
+FX_FN LabBoxShape LabMakeShape(uint32_t rootsX, uint32_t rootsY, uint32_t rootsZ) {
+    LabBoxShape shape;
+    shape.rootsX = rootsX;
+    shape.rootsY = rootsY;
+    shape.rootsZ = rootsZ;
+
+    return shape;
+}
+
+// どの軸も 1〜LAB_MAX_ROOTS_PER_AXIS
+FX_FN bool LabShapeValid(LabBoxShape shape) {
+    return shape.rootsX >= 1 && shape.rootsX <= LAB_MAX_ROOTS_PER_AXIS && shape.rootsY >= 1 &&
+           shape.rootsY <= LAB_MAX_ROOTS_PER_AXIS && shape.rootsZ >= 1 && shape.rootsZ <= LAB_MAX_ROOTS_PER_AXIS;
+}
+
+// GPU のルート定数 1 語に詰める(shaders/sim/lab_box.hlsl の g_external1)
+FX_FN uint32_t LabPackShape(LabBoxShape shape) {
+    return shape.rootsX | (shape.rootsY << LAB_SHAPE_FIELD_BITS) | (shape.rootsZ << (2 * LAB_SHAPE_FIELD_BITS));
+}
+
+FX_FN LabBoxShape LabUnpackShape(uint32_t word) {
+    const uint32_t mask = (1u << LAB_SHAPE_FIELD_BITS) - 1;
+    return LabMakeShape(word & mask, (word >> LAB_SHAPE_FIELD_BITS) & mask,
+                        (word >> (2 * LAB_SHAPE_FIELD_BITS)) & mask);
+}
+
+FX_FN uint32_t LabRootCount(LabBoxShape shape) {
+    return shape.rootsX * shape.rootsY * shape.rootsZ;
+}
+
+FX_FN uint32_t LabRootSlot(LabBoxShape shape, uint32_t rootX, uint32_t rootY, uint32_t rootZ) {
+    return rootX + (shape.rootsX * (rootY + (shape.rootsY * rootZ)));
+}
+
+// 箱の座標(0〜LAB_MAX_BOX_EDGE − 1)からセルの番号
+FX_FN uint32_t LabCellIndex(uint32_t x, uint32_t y, uint32_t z) {
+    const uint32_t local = MrCellIndex(x % MR_BLOCK_EDGE, y % MR_BLOCK_EDGE, z % MR_BLOCK_EDGE);
+    const uint32_t roots = (x / MR_BLOCK_EDGE) | ((y / MR_BLOCK_EDGE) << LAB_ROOT_COORD_BITS) |
+                           ((z / MR_BLOCK_EDGE) << (2 * LAB_ROOT_COORD_BITS));
+
+    return local | (roots << LAB_CELL_ROOT_SHIFT);
+}
+
+FX_FN uint32_t LabCellRootX(uint32_t index) {
+    return (index >> LAB_CELL_ROOT_SHIFT) & LAB_ROOT_COORD_MASK;
+}
+
+FX_FN uint32_t LabCellRootY(uint32_t index) {
+    return (index >> (LAB_CELL_ROOT_SHIFT + LAB_ROOT_COORD_BITS)) & LAB_ROOT_COORD_MASK;
+}
+
+FX_FN uint32_t LabCellRootZ(uint32_t index) {
+    return (index >> (LAB_CELL_ROOT_SHIFT + (2 * LAB_ROOT_COORD_BITS))) & LAB_ROOT_COORD_MASK;
+}
+
+FX_FN uint32_t LabCellX(uint32_t index) {
+    return MrCellX(index & (MR_BLOCK_CELLS - 1)) + (MR_BLOCK_EDGE * LabCellRootX(index));
+}
+
+FX_FN uint32_t LabCellY(uint32_t index) {
+    return MrCellY(index & (MR_BLOCK_CELLS - 1)) + (MR_BLOCK_EDGE * LabCellRootY(index));
+}
+
+FX_FN uint32_t LabCellZ(uint32_t index) {
+    return MrCellZ(index & (MR_BLOCK_CELLS - 1)) + (MR_BLOCK_EDGE * LabCellRootZ(index));
+}
+
+// 根の中のセル(MrCellIndex)
+FX_FN uint32_t LabCellLocal(uint32_t index) {
+    return index & (MR_BLOCK_CELLS - 1);
+}
+
+FX_FN bool LabCellInBox(LabBoxShape shape, uint32_t index) {
+    return index < LAB_CELL_INDEX_LIMIT && LabCellRootX(index) < shape.rootsX && LabCellRootY(index) < shape.rootsY &&
+           LabCellRootZ(index) < shape.rootsZ;
+}
+
+// セルを含む根の枠
+FX_FN uint32_t LabCellSlot(LabBoxShape shape, uint32_t index) {
+    return LabRootSlot(shape, LabCellRootX(index), LabCellRootY(index), LabCellRootZ(index));
+}
+
+// つついた根の印(枠 slot のビット。根は LAB_MAX_ROOTS まで)
+FX_FN uint64_t LabRootBit(uint32_t slot) {
+    return ((uint64_t)1) << slot;
+}
+
+FX_FN uint64_t LabAllRoots(LabBoxShape shape) {
+    const uint32_t count = LabRootCount(shape);
+    return count >= LAB_MAX_ROOTS ? ~((uint64_t)0) : LabRootBit(count) - 1;
+}
 
 // 直方体の範囲(両端を含む)
 struct LabRegion {
@@ -123,14 +234,14 @@ FX_FN bool LabContentsValid(LabCommand command, uint32_t speciesCount) {
     return true;
 }
 
-// コマンドが当たるセルの番号。当てられないコマンド(1 セルの種類でない・箱の外・温度が範囲外・物質の誤り)なら LAB_NO_CELL
-FX_FN uint32_t LabCommandCell(LabCommand command, uint32_t speciesCount) {
+// コマンドが当たるセルの番号(LabCellIndex)。当てられないコマンド(1 セルの種類でない・箱の外・温度が範囲外・物質の誤り)なら LAB_NO_CELL
+FX_FN uint32_t LabCommandCell(LabCommand command, uint32_t speciesCount, LabBoxShape shape) {
     const uint32_t type = LabCommandType(command);
     if (type != LAB_COMMAND_TYPE_FILL && type != LAB_COMMAND_TYPE_TEMPERATURE)
         return LAB_NO_CELL;
 
     const uint32_t cell = LabPayload(command, LAB_PAYLOAD_CELL);
-    if (cell >= MR_BLOCK_CELLS || !LabContentsValid(command, speciesCount))
+    if (!LabCellInBox(shape, cell) || !LabContentsValid(command, speciesCount))
         return LAB_NO_CELL;
 
     return cell;
@@ -151,13 +262,14 @@ FX_FN LabRegion LabCommandRegion(LabCommand command) {
 }
 
 // 範囲のコマンドで、当てられるか(範囲が箱の中で小さい角 ≤ 大きい角・温度と中身が当てられる)
-FX_FN bool LabRegionCommandValid(LabCommand command, uint32_t speciesCount) {
+FX_FN bool LabRegionCommandValid(LabCommand command, uint32_t speciesCount, LabBoxShape shape) {
     const uint32_t type = LabCommandType(command);
     if (type != LAB_COMMAND_TYPE_FILL_REGION && type != LAB_COMMAND_TYPE_TEMPERATURE_REGION)
         return false;
 
     const LabRegion region = LabCommandRegion(command);
-    const bool inside = region.highX < MR_BLOCK_EDGE && region.highY < MR_BLOCK_EDGE && region.highZ < MR_BLOCK_EDGE;
+    const bool inside = region.highX < MR_BLOCK_EDGE * shape.rootsX && region.highY < MR_BLOCK_EDGE * shape.rootsY &&
+                        region.highZ < MR_BLOCK_EDGE * shape.rootsZ;
     const bool ordered = region.lowX <= region.highX && region.lowY <= region.highY && region.lowZ <= region.highZ;
 
     return inside && ordered && LabContentsValid(command, speciesCount);

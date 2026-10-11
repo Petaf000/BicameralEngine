@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <format>
 #include <functional>
@@ -40,8 +41,11 @@ namespace bicameral::sim {
 
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---
         constexpr std::array<char, 4> RECORDING_MAGIC = {'B', 'L', 'A', 'B'};
-        // 4: ハッシュの列の後ろに表の中身(T-0217): 数 u64 → 表ごとに 版 u64・バイト数 u64・バイト(8 バイトの境界まで 0 で埋める)
-        constexpr uint32_t RECORDING_VERSION = 4;
+        // 5: 種の後ろに箱の形(T-0173): 根の数 x・y・z(u32 × 3)+ 0(u32)。ほかは 4 と同じ
+        constexpr uint32_t RECORDING_VERSION = 5;
+        // 読める古い版(根 1 つの箱)。4: ハッシュの列の後ろに表の中身(T-0217): 数 u64 → 表ごとに 版 u64・バイト数 u64・
+        // バイト(8 バイトの境界まで 0 で埋める)
+        constexpr uint32_t RECORDING_VERSION_TABLE_BYTES = 4;
         // 読める古い版: コマンドに表を替えた印(LAB_COMMAND_TYPE_TABLE)が入りうる(T-0218。形は 2 と同じ)
         constexpr uint32_t RECORDING_VERSION_TABLE_MARKS = 3;
         constexpr uint32_t RECORDING_VERSION_ONE_TABLE = 2;  // 読める古い版(表の版を足した。T-0194)
@@ -57,9 +61,10 @@ namespace bicameral::sim {
             command.targetTick = targetTick;
             command.sequence = sequence;
             command.type = static_cast<uint16_t>(type);
-            SetPayload(command, lab::LAB_PAYLOAD_CELL,
-                       cell.x < LAB_BOX_EDGE && cell.y < LAB_BOX_EDGE && cell.z < LAB_BOX_EDGE ? cell.Index()
-                                                                                               : lab::LAB_NO_CELL);
+            // 箱の外(どの形の箱にも入らない座標)は LAB_NO_CELL。形より外の根は当てる時に断る(LabCommandCell)
+            const bool inBounds = cell.x < lab::LAB_MAX_BOX_EDGE && cell.y < lab::LAB_MAX_BOX_EDGE &&
+                                  cell.z < lab::LAB_MAX_BOX_EDGE;
+            SetPayload(command, lab::LAB_PAYLOAD_CELL, inBounds ? cell.Index() : lab::LAB_NO_CELL);
             SetPayload(command, lab::LAB_PAYLOAD_TEMPERATURE, temperatureMilliKelvin);
             command.size = static_cast<uint16_t>(sizeof(uint32_t) * 2);
 
@@ -271,62 +276,84 @@ namespace bicameral::sim {
 
     // --- 箱 ---
 
-    MultiresCapacity LabBoxCapacity(const BakedReactionTable& table) {
-        return {.worldBlocks = 1,
+    MultiresCapacity LabBoxCapacity(const BakedReactionTable& table, lab::LabBoxShape shape) {
+        FX_ASSERT(lab::LabShapeValid(shape));
+        const uint32_t roots = lab::LabRootCount(shape);
+
+        return {.worldBlocks = roots,
                 .observerBlocks = 0,
                 .fractions = 1,
-                .pages = 1,
-                .indexEntries = 2,
+                .pages = roots,
+                .indexEntries = std::bit_ceil(2 * roots),
                 .ledgerColumns = 1 + static_cast<uint32_t>(table.species.size()),
                 .rootLevel = 0};
     }
 
-    MultiresNest MakeLabBoxNest(const BakedReactionTable& table) {
+    MultiresNest MakeLabBoxNest(const BakedReactionTable& table, lab::LabBoxShape shape) {
         const std::array<SpeciesAmount, 2> air = {
             SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = AIR_OXYGEN_MICROMOLES},
             SpeciesAmount{.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_MICROMOLES}};
         const RxCell fill = MakeReactionCell(table, air, LAB_INITIAL_TEMPERATURE_MILLIKELVIN);
 
-        // --- 頁を持たせるため、1 つだけ違うセルで根を置き(PlaceRootBlock は全部同じなら一様にする)、すぐ戻す ---
-        MultiresNest nest = MakeMultiresNest(LabBoxCapacity(table));
+        // --- 頁を持たせるため、1 つだけ違うセルで根を置き(PlaceRootBlock は全部同じなら一様にする)、すぐ戻す。
+        //     根は x → y → z の順に置く(空きのスタックから枠 0, 1, 2… が出る = lab::LabRootSlot)---
+        MultiresNest nest = MakeMultiresNest(LabBoxCapacity(table, shape));
         std::vector<RxCell> cells(MR_BLOCK_CELLS, fill);
         cells[0] = RxMakeEmptyCell(0);
-        const uint32_t slot = PlaceRootBlock(nest, 0, 0, 0, cells);
-        FX_ASSERT(slot == LAB_BOX_SLOT && !MrIsUniform(nest.blocks[slot]));
-        nest_detail::CellAt(nest, slot, 0) = fill;
+        for (uint32_t rootZ = 0; rootZ < shape.rootsZ; ++rootZ) {
+            for (uint32_t rootY = 0; rootY < shape.rootsY; ++rootY) {
+                for (uint32_t rootX = 0; rootX < shape.rootsX; ++rootX) {
+                    const uint32_t slot = PlaceRootBlock(nest, int64_t{rootX} * LAB_BOX_EDGE,
+                                                         int64_t{rootY} * LAB_BOX_EDGE, int64_t{rootZ} * LAB_BOX_EDGE,
+                                                         cells);
+                    FX_ASSERT(slot == lab::LabRootSlot(shape, rootX, rootY, rootZ) && !MrIsUniform(nest.blocks[slot]));
+                    nest_detail::CellAt(nest, slot, 0) = fill;
+                }
+            }
+        }
 
         return nest;
     }
 
-    RxCell LabBoxCell(const MultiresNest& nest, uint32_t index) {
-        return LoadNestCell(nest, LAB_BOX_SLOT, index);
+    RxCell LabBoxCell(const MultiresNest& nest, uint32_t index, lab::LabBoxShape shape) {
+        return LoadNestCell(nest, lab::LabCellSlot(shape, index), lab::LabCellLocal(index));
     }
 
-    uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands) {
-        if (MrIsUniform(nest.blocks[LAB_BOX_SLOT]))
-            return 0;  // shaders/sim/lab_box.hlsl と同じ(箱はいつも頁を持つ)
-
+    uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands,
+                              lab::LabBoxShape shape) {
         const ReactionTableView view = table.View();
         const auto speciesCount = static_cast<uint32_t>(table.species.size());
+
+        // --- セル 1 つに当てる(根が一様なら当てない。lab_box.hlsl の ApplyToCell と同じ)---
+        uint64_t touched = 0;  // つつく根(lab::LabRootBit)
+        const auto applyToCell = [&](uint32_t index, const lab::LabCommand& words) {
+            const uint32_t slot = lab::LabCellSlot(shape, index);
+            if (MrIsUniform(nest.blocks[slot]))
+                return;
+
+            RxCell& target = nest_detail::CellAt(nest, slot, lab::LabCellLocal(index));
+            target = lab::LabApplyCommand(view, target, words);
+            touched |= lab::LabRootBit(slot);
+        };
+
         uint32_t applied = 0;
         for (const Command& command : commands) {
             const lab::LabCommand words = ToLabCommand(command);
 
-            // --- 表を替えた印: セルは変えず、箱をつつくだけ(lab_box.hlsl と同じ。表は呼ぶ側が先に替えている。T-0218)---
+            // --- 表を替えた印: セルは変えず、箱の根を全部つつくだけ(lab_box.hlsl と同じ。表は呼ぶ側が先に替えている。T-0218)---
             if (lab::LabCommandMarksTable(words)) {
+                touched |= lab::LabAllRoots(shape);
                 applied += 1;
                 continue;
             }
 
             // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(lab_box.hlsl と同じ順)---
-            if (lab::LabRegionCommandValid(words, speciesCount)) {
+            if (lab::LabRegionCommandValid(words, speciesCount, shape)) {
                 const lab::LabRegion region = lab::LabCommandRegion(words);
                 for (uint32_t z = region.lowZ; z <= region.highZ; ++z) {
                     for (uint32_t y = region.lowY; y <= region.highY; ++y) {
-                        for (uint32_t x = region.lowX; x <= region.highX; ++x) {
-                            RxCell& target = nest_detail::CellAt(nest, LAB_BOX_SLOT, MrCellIndex(x, y, z));
-                            target = lab::LabApplyCommand(view, target, words);
-                        }
+                        for (uint32_t x = region.lowX; x <= region.highX; ++x)
+                            applyToCell(lab::LabCellIndex(x, y, z), words);
                     }
                 }
 
@@ -334,18 +361,19 @@ namespace bicameral::sim {
                 continue;
             }
 
-            const uint32_t cell = lab::LabCommandCell(words, speciesCount);
+            const uint32_t cell = lab::LabCommandCell(words, speciesCount, shape);
             if (cell == lab::LAB_NO_CELL)
                 continue;
 
-            RxCell& target = nest_detail::CellAt(nest, LAB_BOX_SLOT, cell);
-            target = lab::LabApplyCommand(view, target, words);
+            applyToCell(cell, words);
             applied += 1;
         }
 
-        // --- 変えたブロックは「つつかれた」(lab_box.hlsl と同じ。種の印は状態の要約に入らない)---
-        if (applied > 0)
-            nest_detail::PokeBlock(nest, LAB_BOX_SLOT);
+        // --- 変えた根は「つつかれた」(lab_box.hlsl と同じ。種の印は状態の要約に入らない)---
+        for (uint32_t slot = 0; slot < lab::LabRootCount(shape); ++slot) {
+            if (((touched >> slot) & 1) != 0)
+                nest_detail::PokeBlock(nest, slot);
+        }
 
         return applied;
     }
@@ -402,29 +430,39 @@ namespace bicameral::sim {
     }
 
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
-                    std::span<const Command> commands) {
-        ApplyLabCommands(nest, table, commands);
+                    std::span<const Command> commands, lab::LabBoxShape shape) {
+        ApplyLabCommands(nest, table, commands, shape);
         StepNest(nest, table, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);
     }
 
     // --- 比べる ---
 
-    std::optional<LabMismatch> FindLabMismatch(const MultiresNest& cpu, const MultiresNest& gpu, uint64_t tick) {
+    std::optional<LabMismatch> FindLabMismatch(const MultiresNest& cpu, const MultiresNest& gpu, uint64_t tick,
+                                               lab::LabBoxShape shape) {
         if (HashWholeNest(cpu) == HashWholeNest(gpu))
             return std::nullopt;
 
+        // --- 根の枠の順 → 根の中の番号の順 ---
         LabMismatch mismatch{.tick = tick};
-        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-            const RxCell a = LabBoxCell(cpu, index);
-            const RxCell b = LabBoxCell(gpu, index);
+        for (uint32_t ordinal = 0; ordinal < LabBoxCellCount(shape); ++ordinal) {
+            const uint32_t slot = ordinal / MR_BLOCK_CELLS;
+            const uint32_t local = ordinal % MR_BLOCK_CELLS;
+            const RxCell a = LoadNestCell(cpu, slot, local);
+            const RxCell b = LoadNestCell(gpu, slot, local);
             if (RxSameCell(a, b))
                 continue;
 
+            const uint32_t rootX = slot % shape.rootsX;
+            const uint32_t rootY = (slot / shape.rootsX) % shape.rootsY;
+            const uint32_t rootZ = slot / (shape.rootsX * shape.rootsY);
+            const uint32_t index = lab::LabCellIndex(MrCellX(local) + (rootX * LAB_BOX_EDGE),
+                                                     MrCellY(local) + (rootY * LAB_BOX_EDGE),
+                                                     MrCellZ(local) + (rootZ * LAB_BOX_EDGE));
             mismatch.cell = index;
             mismatch.cpu = a;
             mismatch.gpu = b;
-            mismatch.what = std::format("刻み {} のセル ({}, {}, {}) が違う", tick, MrCellX(index), MrCellY(index),
-                                        MrCellZ(index));
+            mismatch.what = std::format("刻み {} のセル ({}, {}, {}) が違う", tick, lab::LabCellX(index),
+                                        lab::LabCellY(index), lab::LabCellZ(index));
             return mismatch;
         }
 
@@ -452,6 +490,10 @@ namespace bicameral::sim {
         Append(bytes, RECORDING_MAGIC);
         Append(bytes, RECORDING_VERSION);
         Append(bytes, LAB_WORLD_SEED);
+        Append(bytes, recording.shape.rootsX);
+        Append(bytes, recording.shape.rootsY);
+        Append(bytes, recording.shape.rootsZ);
+        Append(bytes, uint32_t{0});
         Append(bytes, recording.tableVersion);
         Append(bytes, recording.tickCount);
         Append(bytes, static_cast<uint64_t>(recording.commands.size()));
@@ -486,14 +528,24 @@ namespace bicameral::sim {
             return std::unexpected("実験の記録ではない");
 
         const auto knownVersion = [](uint32_t value) {
-            return value == RECORDING_VERSION || value == RECORDING_VERSION_TABLE_MARKS ||
-                   value == RECORDING_VERSION_ONE_TABLE || value == RECORDING_VERSION_NO_TABLE;
+            return value == RECORDING_VERSION || value == RECORDING_VERSION_TABLE_BYTES ||
+                   value == RECORDING_VERSION_TABLE_MARKS || value == RECORDING_VERSION_ONE_TABLE ||
+                   value == RECORDING_VERSION_NO_TABLE;
         };
         if (!Take(bytes, version) || !knownVersion(version))
             return std::unexpected(std::format("記録の版 {} は読めない", version));
 
         if (!Take(bytes, seed) || seed != LAB_WORLD_SEED)
             return std::unexpected("記録の見出しが壊れている");
+
+        // --- 箱の形(版 5。T-0173)---
+        if (version == RECORDING_VERSION) {
+            uint32_t reserved = 0;
+            if (!Take(bytes, recording.shape.rootsX) || !Take(bytes, recording.shape.rootsY) ||
+                !Take(bytes, recording.shape.rootsZ) || !Take(bytes, reserved) || reserved != 0 ||
+                !lab::LabShapeValid(recording.shape))
+                return std::unexpected("記録の箱の形が壊れている");
+        }
 
         if (version != RECORDING_VERSION_NO_TABLE && !Take(bytes, recording.tableVersion))
             return std::unexpected("記録の見出しが壊れている");
@@ -502,7 +554,8 @@ namespace bicameral::sim {
             return std::unexpected("記録の見出しが壊れている");
 
         const uint64_t listBytes = (commandCount * COMMAND_BYTES) + (hashCount * sizeof(uint64_t));
-        const bool sized = version == RECORDING_VERSION ? bytes.size() >= listBytes : bytes.size() == listBytes;
+        const bool withTables = version == RECORDING_VERSION || version == RECORDING_VERSION_TABLE_BYTES;
+        const bool sized = withTables ? bytes.size() >= listBytes : bytes.size() == listBytes;
         if (commandCount > bytes.size() || hashCount > bytes.size() || !sized || hashCount != recording.tickCount)
             return std::unexpected("記録の大きさが合わない");
 
@@ -514,7 +567,7 @@ namespace bicameral::sim {
         for (uint64_t& hash : recording.hashes)
             (void)Take(bytes, hash);
 
-        if (version == RECORDING_VERSION) {
+        if (withTables) {
             auto tables = TakeTables(bytes);
             if (!tables)
                 return std::unexpected(tables.error());
