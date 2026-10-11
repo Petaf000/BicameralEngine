@@ -86,6 +86,7 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 # 今は T-0004 の仮の刻みを T-0012 の単位の形にしたもの(中身は T-0005 以降で本物に)。
 add_library(bicameral_sim STATIC
   src/sim/gpu_gas.cpp
+  src/sim/gpu_gas_tree.cpp  # 気体の多重解像度の木の GPU(T-0209)
   src/sim/gpu_lab_box.cpp
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp

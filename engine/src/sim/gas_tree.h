@@ -125,4 +125,33 @@ namespace bicameral::sim {
     // 合計(レベル 0 の単位。セルの整数 × 8^-k + 端数)
     [[nodiscard]] GasTreeTotals SumGasTree(const GasTree& tree);
 
+    // --- 面の一覧(GPU 版 GpuGasTree が木を作った時に一度だけ写す。T-0209)---
+
+    // 面の片側の種類(Mixed: MUSCL の外側の隣がレベルの違うセル = 勾配を使わない)
+    enum class GasTreeSideKind : uint8_t {
+        Cell,
+        Ghost,
+        Wall,
+        Mixed,
+    };
+
+    struct GasTreeFaceSide {
+        GasTreeSideKind kind = GasTreeSideKind::Cell;
+        uint32_t index = 0;  // Cell: セルの番号 / Ghost: そのレベルの層 z
+        uint32_t level = 0;
+    };
+
+    // StepGasTree が使う面と同じ一覧・同じ順(同じレベルの面はマイナス側のセルが 1 回、レベルをまたぐ面は細かい側のセルが両向き)
+    struct GasTreeFaceLayout {
+        GasTreeFaceSide left;
+        GasTreeFaceSide right;
+        GasTreeFaceSide leftOuter;
+        GasTreeFaceSide rightOuter;
+        uint32_t axis = 0;
+        uint32_t level = 0;  // 面を計算する単位(細かい側のレベル)
+        uint32_t id = 0;     // 面の番号(そのレベルの座標から。乱数の丸め)
+    };
+
+    [[nodiscard]] std::vector<GasTreeFaceLayout> ListGasTreeFaces(const GasTree& tree);
+
 }  // namespace bicameral::sim
