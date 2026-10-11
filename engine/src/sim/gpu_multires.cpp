@@ -341,6 +341,8 @@ namespace bicameral::sim {
         for (uint32_t pass = 0; pass < TREE_PASS_COUNT + CONDUCT_PASS_COUNT; ++pass) {
             const bool tree = pass < TREE_PASS_COUNT;
             const char* path = tree ? TREE_SHADERS[pass] : CONDUCT_SHADERS[pass - TREE_PASS_COUNT];
+            if (options.wideCells && pass == PassResolve)
+                path = "sim/multires_tree_wide_resolve.cso";  // 粗くする要求を「入りきらない」で断らない(T-0329)
             auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), path);
             if (!pipeline)
                 return std::unexpected(pipeline.error());

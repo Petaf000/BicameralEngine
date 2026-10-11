@@ -196,12 +196,15 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
         return state;
     }
 
-    // --- 成分が入りきらなければ粗くしない。静かな葉なら、今の忙しさの印では粗くできないことにする(毎刻み要求し直さない)---
+    // --- 成分が入りきらなければ粗くしない。静かな葉なら、今の忙しさの印では粗くできないことにする(毎刻み要求し直さない)。
+    //     溢れを使う世界(multires_tree_wide_resolve)はいつも入りきる(CPU の ResolveCoarsen。T-0329)---
+#ifndef MR_WIDE_CELLS
     if (!CoarsenFits(slot)) {
         g_blocks[slot].quietCheck = MrQuietCheckStamp(g_blocks[slot].busyTick, false);
         state.status = MR_STATUS_SPECIES_FULL;
         return state;
     }
+#endif
 
     const uint32_t parent = g_blocks[slot].parent;
     state.target = slot;
@@ -871,10 +874,12 @@ void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
 }
 
 #ifdef MR_WIDE_CELLS
-// --- 溢れを使う世界: 細かくする子の頁に溢れの塊を付ける(T-0237。TreeAllocate の後・Work Graph の前。1 グループ)---
-// 子の頁の面 0 に、親の八分の一のセルの溢れを写す(multires_graph.hlsl の RefineWideTails)ための塊を、許可した要求の順の累積和で
-// 空きのスタックの上から配る(WideAllocate と同じ型)。足りなければその要求には配らない(写す時に数える。置き場が尽きた時だけ)。
-// どの塊を使うかは結果に出ない。頁が前に持っていた面 0 の塊はそのまま使う
+// --- 溢れを使う世界: 細かくする子の頁・粗くする親の新しい面に溢れの塊を付ける(T-0237・T-0329。TreeAllocate の後・Work Graph の前。1 グループ)---
+// 子の頁の面 0 に、親の八分の一のセルの溢れを写す(multires_graph.hlsl の RefineWideTails)ための塊と、粗くする親の頁・端数の枠の
+// 新しい面(WriteCoarsenTails)の塊を、許可した要求の順の累積和で空きのスタックの上から配る(WideAllocate と同じ型)。
+// 足りなければその要求には配らない(写す時に数える。置き場が尽きた時だけ)。どの塊を使うかは結果に出ない。前から持つ塊はそのまま使う。
+// 粗くした溢れの数は粗くするまで分からないので、上限(セルごとに min(RX_GPU_WIDE_SPECIES, 子の成分の和) − インライン)で取る。
+// 頁の余りは WriteCoarsenTails が要求の語で WideAllocate に返させる。端数の枠の余りは付けたまま(T-0347)
 
 static const uint32_t MR_WIDE_RESERVE_NONE = 0;
 
@@ -934,14 +939,102 @@ uint32_t ReserveTailChunks(MrRequest request, MrRequestState state, uint32_t top
     return chunks;
 }
 
-// 要求 i に足す塊の数(子の頁の分、続けて子の端数の枠の分。T-0311)
+// --- 粗くする要求(T-0329)---
+
+// 子のセル index の成分の数(セルと端数の、インライン + 今の面の溢れ)
+uint32_t ChildSpeciesCount(MrBlock child, uint32_t childSlot, uint32_t index) {
+    uint32_t count = LoadBlockCell(child, childSlot, index).speciesCount;
+    if (!MrIsUniform(child)) {
+        const uint2 range = WideRange(child.page, WideCurrentSide(child.page), index);
+        count += range.y - range.x;
+    }
+
+    if (child.fraction != MR_NO_FRACTION) {
+        const uint32_t area = WideFractionArea(child.fraction);
+        const uint2 range = WideRange(area, WideCurrentSide(area), index);
+        count += g_fractions[FractionAddress(child.fraction, index)].speciesCount + (range.y - range.x);
+    }
+
+    return count;
+}
+
+// 粗くした親の八分の一の溢れの数の上限(セルごとに min(RX_GPU_WIDE_SPECIES, 子の成分の和) − インライン)
+uint32_t CoarsenTailBound(MrBlock child, uint32_t childSlot) {
+    uint32_t total = 0;
+    for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+        uint32_t sum = 0;
+        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+            sum += ChildSpeciesCount(child, childSlot, MrChildCell(local, j));
+
+        const uint32_t species = min(sum, RX_GPU_WIDE_SPECIES);
+        total += species > RX_MAX_CELL_SPECIES ? species - RX_MAX_CELL_SPECIES : 0u;
+    }
+
+    return total;
+}
+
+// 領域 area の新しい面(今の面でない方)に、溢れ entries 個の分の塊を足す数(attach なら stack の上から taken 番目より下を付ける)
+uint32_t ReserveSideChunks(uint32_t area, uint32_t entries, bool attach, uint32_t stack, uint32_t freeCount,
+                           uint32_t taken) {
+    const uint32_t need = MrWideChunksFor(entries);
+    const uint32_t table = MrWideTableAt(WideAreaHeader(area), 1 - WideCurrentSide(area));
+    const uint32_t held = g_treeWords[table];
+    if (need <= held)
+        return MR_WIDE_RESERVE_NONE;
+
+    if (attach) {
+        for (uint32_t j = held; j < need; ++j)
+            g_treeWords[table + 1 + j] = g_treeWords[stack + freeCount - 1 - (taken + (j - held))];
+
+        g_treeWords[table] = need;
+    }
+
+    return need - held;
+}
+
+// 溢れの領域 area の今の面の溢れの合計
+uint32_t WideTotal(uint32_t area) {
+    return WideRange(area, WideCurrentSide(area), MR_BLOCK_CELLS - 1).y;
+}
+
+// 粗くする要求に足す塊の数(親の頁の新しい面、続けて親の端数の枠の新しい面。広げた頁・取った端数の枠は残りの溢れが無い)
+uint32_t ReserveCoarsenChunks(MrRequestState state, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
+    const MrBlock child = g_blocks[state.target];
+    const MrBlock parent = g_blocks[child.parent];
+    const uint32_t bound = CoarsenTailBound(child, state.target);
+    if (bound == 0)
+        return MR_WIDE_RESERVE_NONE;
+
+    uint32_t chunks = 0;
+    const bool expand = state.pageNeed != 0;
+    if (expand || !MrIsUniform(parent)) {
+        const uint32_t page = expand ? PoppedPage(state, 0) : parent.page;
+        const uint32_t rest = expand ? 0u : WideTotal(page);
+        chunks += ReserveSideChunks(page, rest + bound, attach, stack, freeCount, taken);
+    }
+
+    const bool kept = parent.fraction != MR_NO_FRACTION;
+    const uint32_t area = WideFractionArea(kept ? parent.fraction : PoppedFraction(state, 0));
+    const uint32_t rest = kept ? WideTotal(area) : 0u;
+    chunks += ReserveSideChunks(area, rest + bound, attach, stack, freeCount, taken + chunks);
+
+    return chunks;
+}
+
+// 要求 i に足す塊の数(細かくする: 子の頁の分、続けて子の端数の枠の分。T-0311。粗くする: 親の新しい面。T-0329)
 uint32_t ReserveRefineChunks(uint32_t i, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
     if (i >= RequestCount())
         return MR_WIDE_RESERVE_NONE;
 
     const MrRequestState state = g_states[i];
     const MrRequest request = g_requests[i];
-    if (state.status != MR_STATUS_GRANTED || request.op != MR_REQUEST_REFINE)
+    if (state.status != MR_STATUS_GRANTED)
+        return MR_WIDE_RESERVE_NONE;
+
+    if (request.op == MR_REQUEST_COARSEN)
+        return ReserveCoarsenChunks(state, attach, stack, freeCount, taken);
+
+    if (request.op != MR_REQUEST_REFINE)
         return MR_WIDE_RESERVE_NONE;
 
     // --- 一様な親の頁は溢れを持たない(GPU の一様の値はインラインだけ)。端数の枠は一様な親でも持てる ---
