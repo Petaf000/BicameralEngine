@@ -22,6 +22,14 @@
 - [ ] 面に沿って塗る → T-0332 に分けた
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-11(作業役・wt6): tests/gpu_place_bench を作って測ると、1 スレッドの適用は 1 セル 3〜4.5 µs(直方体 8³ の足す 64 個で 1.32 s/刻み)。
+  (1)面に沿って塗る〔抽出の後ろで物かどうかを読み戻す道が要る〕より先に、TDR に近い重さを直した: probe_tick.hlsl の ApplyCommands を
+  1 グループ 256 スレッドにし、置くコマンドのセルだけを分けた(ADR-0125)。64 個で 15.4 ms(約 86 倍)。1024 スレッドは同じだった。
+  (1)は T-0332 に分けた(下書きは「分けたもの」)。
+- 同日: release のビルドは警告なし。release の `^(gpu_probe_.*|window_place_.*)$` 15 本が通過(gpu_probe_sim 281 秒・_warp 162 秒・
+  gpu_probe_place 19 秒・_warp 10 秒・window_place_record 52 秒・play 54 秒ほか)。archmap OK(155)。かかった時間は約 1 時間 30 分(待ちを含む)。
+- 同日: debug のビルドは警告なし。debug(GBV)の `^(gpu_probe_place(_warp)?|window_place_.*|gpu_probe_physics)$` 5 本が通過(gpu_probe_place 33 秒・_warp 27 秒・
+  gpu_probe_physics 191 秒・window_place_record 84 秒・play 87 秒)。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 置くコマンドの適用は 1 グループ 256 スレッド(probe_tick.hlsl の PROBE_APPLY_GROUP_SIZE。ADR-0125)。コマンドの順・イベント・トレースの根・
