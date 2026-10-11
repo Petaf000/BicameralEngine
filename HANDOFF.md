@@ -1,11 +1,25 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-11 / チケット: 統合(t-0276・t-0273・t-0278)確かめと記録 完了 → T-0177 完了 → T-0246 完了
+最終更新: 2026-10-11 / チケット: 統合(t-0266・t-0279・t-0290・t-0237・t-0173)確かめと記録 完了 → T-0299 進行中
 
 ## 状態(3 行以内)
-- t-0276・t-0273・t-0278 を main に合わせた(c4cb51d)。t-0273 は tests/gpu_multires_test.cpp で T-0263 の場面の分け方とぶつかり「T-0263 の形(RunChainScenes・RunWideScenes・--part)+ T-0273 の DiagnoseWide と --diagnose-*」に解いた。t-0266(T-0243 とぶつかる → wt2 で載せ直し)・t-0024(HW の試験が落ちる → wt3)はマージしていない。
-- T-0177 完了: 仮の世界でも反応の上限の印を (セル, 刻み) の数で数える(ProbeTickHash::limits。CPU と GPU で毎刻み同じ)。T-0246 完了: 置くコマンドがトレースの根(PROBE_TRACE_PLACE)になり、トレース中に置いても CPU の予想と一致。
-- 進行中: wt2 T-0266 の載せ直しと T-0279・wt3 T-0024・wt4 T-0290・wt5 T-0237・wt6 T-0173。
+- t-0266・t-0279・t-0290・t-0237・t-0173 を main に合わせた(c044ed4。衝突は文書だけ: ADR-0052 の追記 5 が T-0290 と T-0237 で重なり T-0237 を追記 6 に・14-editor-tools.md は両方の節を残した)。t-0024 は t-0173 と実験室で当たるのでマージしていない(wt3 で載せ直し)。
+- 合わせた形の debug・release のビルドは警告なし、release の束 64 本が通過(下の「テスト」)。
+- 進行中: 本体 T-0299・wt2 T-0208・wt3 T-0024 の載せ直しと T-0287・wt4 T-0272・wt5 T-0311・wt6 T-0280。
+
+## 統合で入ったもの(2026-10-11 その 3。詳しくは各チケットの引き継ぎメモ)
+- **T-0266(完了)**: ホットリロードは既定で Remap(物質を足す・消す表もその場で当てる。エディタも通常の起動も。D-438 の文面どおり。ADR-0047 改訂・ADR-0065 追記)。`--species-remap` は `--auto-reload` にオゾンの段を足すだけ。
+  刻みの途中で終わったフレームで足した置くコマンドが前の表の ID で残る穴を塞いだ: 生の操作の差し替えは、前のフレームまでに足した置くコマンドが全部当たった後の刻みへ(frame_loop の TakeTableSwaps・m_queuedPlaceTickEnd。遅れは最大 1 刻み)。
+  T-0254 の残りの症状は -Od(T-0239)が原因で ADR-0079 で解消。ctest window_hot_reload_game_record に --species-remap。通常の起動で物質の足し消しを当てるかは QUESTIONS Q38(参考・取り消しやすい)。
+- **T-0279(完了)**: 筆を持つと、カーソルの下の断面に形が覆うセルの縁(濃い黄色 2 px)と形を囲む箱(薄い白 1 px)。覆う判定は置くコマンドと同じ probe_place.hlsli。ImGui の背景に描く(シミュに入れない。editor/brush_preview・render::ProjectToPixel・DebugViewController::CursorCell)。ctest brush_preview。線の色と太さは仮(editor_overlay.cpp の DrawBrushPreview)。
+- **T-0290(完了・研究)**: 上限 64 は、同じ compute キューで 32 種のセルの場面の後に伝導ありの溢れの場面を流した時だけ刻み 0 で DEVICE_HUNG(7/7。時間切れではない。direct キュー・キューの作り直しでは通る。上限 48 は通り 56 から止まる)。見当: ドライバーが compute キューごとに持つスレッドごとのローカルメモリの扱い(未確認)。上限は 32 のまま。直すのは T-0272 の 1(伝導の段から上限の無い形のセルを無くす)が本命。
+  再現 `job.py run -Preset release -Exe gpu_multires_test -- --queue compute --repeat-wide many,many-conduct 1`(約 5 秒。対照 `--repeat-fresh-queue`・`--queue direct`)。ADR-0052 追記 5。
+- **T-0237(一部完了)**: 溢れを使う世界の「細かくする」が子の頁へ溢れを写す(TreeWideReserve・multires_graph_wide・RefineWideTails・CoverWideTails。塊は木の管理の段で要求の順に配る)・頁を返す・配る時に溢れを空にする。ADR-0052 追記 6。
+  **危険(T-0311・T-0312 まで)**: 溢れを使う世界の GPU で頁を畳む(RecordFoldPages)と溢れを落とす・粗くする要求も子に溢れがあると溢れを落とす(インラインだけ粗くする)・端数は 8 種まで・影を作る・引き戻すは溢れを写さない。置き場が尽きた時は MR_COUNTER_OVERFLOW に数える(CPU と食い違う)。
+- **T-0173(一部完了)**: 実験室の箱は根を x・y・z に 1〜4 本ずつ並べられる(lab::LabBoxShape・LabCellIndex〔根 1 つなら今までと同じ番号〕・BLAB 版 5・ADR-0113)。パネル「実験室」の「箱の大きさ」→「箱を作る」。`--auto-lab` は 2×2×2 の箱も確かめる。
+  注意: 形は作る時に決まる(形の違う記録は LabSession::Replay が断る)・`LabBoxCell(nest, index, shape)` に形を渡し忘れると根 1 つとして読む・大きい箱ほど刻みが重い(4×4×4 は測っていない)。パネルの大きさの選択肢 7 つは仮(lab_panel.cpp の BOX_SHAPES)。残り T-0314(一部を細かくする箱)。
+- **T-0024(マージ待ち。wt3 で載せ直し)**: HW の食い違いの原因は lab_box.hlsl がルートの SRV に GetDimensions を使っていたこと(ルートの SRV / UAV は大きさを持たないので値が未定義。NVIDIA で読めない。CLAUDE.md §4 に注意を足した)。直した。状態のハッシュにパッチ・規則を名前の鍵で持つ(T-0287 の一部)も済み。
+- T-0177・T-0246 は 141ed0e で記録済み(下の節)。
 
 ## 本体で入ったもの(2026-10-11。T-0177・T-0246)
 - **T-0177**: 仮の世界の刻みのハッシュの表の 1 欄(64 B)の語 [12] = 9 種目を待たせたセルの数・[13] = 規則を選んだセルの数(PROBE_HASH_OFFSET_LIMIT_*。適用の単位が 0 にし、ConductBlock の CountLimits がウェーブで数えて足す)。CPU リファレンス(ProbeReference::Limits)は GPU が計算するブロックのセルだけ数える。ProbeTickHash::limits(ProbeLimitCounts)。gpu_probe_sim の TestLimits(上限の試験の表のセルを中央の 8³ に)。
@@ -42,6 +56,7 @@
 - **気体(T-0026 G1・T-0184 G2 済み → T-0185〔(a) 済み: 1 レベルの気体の GPU〔shaders/sim/gas_step.hlsl・shaders/common/gas_gpu.hlsli・engine/src/sim/gpu_gas.*・tests/gpu_gas_test.cpp〔--dump・--passes〕〕が CPU と毎刻みビット一致。**64bit の「0 で止める引き算」(a > b ? a - b : 0)を書かない**〔NVIDIA のドライバが誤って下ろす。符号付きの差 + if で〕〕・T-0208〜T-0210・T-0186)**: G2 で成分の MUSCL(既定 MC)と移す物質量の乱数の丸め(07 §2.2・ADR-0043 §6・§7)。1 セルの物質量は 2^31 µmol 未満(assert)。 1 レベルの CPU リファレンス engine/src/sim/gas_reference.*(ライブラリ bicameral_gas)・tests/gas_reference_test.cpp。07 §2.1・ADR-0043(Accepted。D-440)。 T-0226 で c̃ 30 m/s(仮)→ 340 m/s・小刻み 24・圧力の拡散を ÷4c̃(3 次元の安定の条件は 1 次元の見積もりより厳しかった。ν = c̃Δt÷Δx ≤ 0.6 を MakeGasCoefficients が assert。既定 0.47)。32³ で 9.6 ms/刻み(約 290 ns/セル。セルの数に比例。64³ で 74 ms → T-0233)。音の波 340.7 m/s・等温の衝撃波が出る(pdV が無いので温まらない → T-0234)。熱いセルの音速は 340 m/s で頭打ち(外すと発散。仮で案 A = QUESTIONS Q32)。`--substeps 4` は安定の条件を破る。試験の時間: debug で gas_reference 約 12.5 分・gpu_gas 約 10 分・gpu_gas_warp 約 15 分(TIMEOUT 1800)。05 のセルの形はまだ変えていない(G3)。tidy の新しいファイルの約 20 件は G2 の初めに直す。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-11、統合 t-0266・t-0279・t-0290・t-0237・t-0173〔c044ed4〕)**: debug・release のビルドは警告なし。release の `^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction.*|multires|multires_wide|fixed|physics|float_check.*|luau.*|time_control|lab_box|gas_reference|brush_.*|gpu_multires(_warp|_wide)?|gpu_lab_box(_warp)?|gpu_probe_(sim|peek|place|trace)(_warp)?|window_.*)$` 64 本が通過(約 39 分。gpu_multires 107 秒・_wide 450 秒・gpu_probe_trace 207 秒)。直したもの・流し直しなし。
 - **テスト(2026-10-11、T-0177・T-0246)**: debug・release のビルドは警告なし。release の `^(gpu_probe_(sim|trace|place|fire|rewind|peek)(_warp)?|window_place_.*|window_replay_(record|play|rewind)|float_check.*)$` 20 本が通過(gpu_probe_trace(_warp) は 1 回目に試験のコマンドの並びの誤りで落ち、直して通過)。debug の `^(gpu_probe_(sim|trace|place)|float_check.*)$` 8 本が通過(gpu_probe_sim 515 秒)。`gpu_probe_sim_test` の TestLimits: 40 刻みで待たせた 10240・選んだ 10240(セル, 刻み)。archmap OK(154)。tidy・計測はしていない。
 - **テスト(2026-10-11、統合 t-0276・t-0273・t-0278〔c4cb51d〕)**: debug・release のビルドは警告なし(release は前からの implicit_conduction.cpp の C4189 だけ)。release の `^(multires.*|reaction|lab_box|brush_.*|sim_scheduler|replay_file|time_control|float_check.*|gpu_multires(_warp|_wide|_uniform|_quiet)?|gpu_probe_place(_warp)?|window_place_.*|window_replay_.*)$` 36 本が通過(約 26 分。gpu_multires 306 秒・_wide 354 秒)。debug の `^(multires_wide|brush_undo|window_place_.*)$` 4 本は window_place_play が 240 秒で時間切れ(6 ランナーの負荷)→ 流し直して通過(record 159 秒・play 123 秒)。release の `gpu_multires_test --queue compute --measure-wide` が通った(32 種のセル 528 / 362 ns/セル・1 リスト 18 / 14 刻み)。直したものなし。
 - **テスト(2026-10-11、T-0263・T-0243)**: debug・release のビルドは警告なし。debug: gpu_multires(鎖の場面)404 秒・gpu_multires_wide 345 秒(`--no-gbv`。同じ場面が GBV ありでは 1 つ 210〜290 秒)・gpu_multires_warp 113 秒・window_hot_reload_game_(copy|record|play) が通過。release: `^(gpu_multires(_wide|_warp)?|window_hot_reload.*|reaction_hot_reload|window_replay.*|window_lab|window_table_edit.*)$` 19 本が通過(gpu_multires 105 秒・_wide 213 秒)。archmap OK(153)。tidy は流していない。

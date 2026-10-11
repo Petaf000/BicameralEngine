@@ -112,6 +112,7 @@
 - 新しいサブシステムは engine/src/<subsystem>/ に置き、docs/design/ に設計メモを 1 枚書く。
 - シェーダーは shaders/sim/(シミュ)か shaders/render/(描画)に置き、shaders/CMakeLists.txt の `bicameral_add_shader()` で足す。
   **シミュのコード(shaders/sim・shaders/common・engine/src/sim)に浮動小数点があるとビルドが落ちる**(tools/float_check、04 §4)。
+- **ルートの SRV / UAV に GetDimensions を使わない**(大きさを持たないので値が未定義。NVIDIA で読めない。大きさはルート定数か定数バッファで渡す。T-0024)。
 - **.ps1 は UTF-8(BOM 付き)+ CRLF で保存する。** BOM が無いと Windows PowerShell 5.1 が日本語を CP932 で読み、文字化けや構文エラーになる。
 - 計測値(ms・メモリ)は docs/perf.md に日付と GPU とともに残す(比較できるように)。
 
