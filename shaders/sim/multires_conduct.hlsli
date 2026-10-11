@@ -151,7 +151,29 @@ bool OnBlockSurface(uint32_t index) {
     return x == 0 || x == last || y == 0 || y == last || z == 0 || z == last;
 }
 
-// セルの熱(CPU の CellThermals)。溢れを使う変種(MR_WIDE_CELLS。T-0211)は、溢れを持つセルだけ溢れまで読んだ上限の無い形で
+#ifdef MR_WIDE_CELLS
+// 溢れを持つセルの熱: インライン → 溢れ(今の面 side)の順に 1 成分ずつ読んで足す(T-0272)。上限の無い形のセル(RxGpuWideCell)を
+// 作らないので、1 スレッドのスクラッチが上限(RX_GPU_WIDE_SPECIES)に依らない(512 スレッドの段で上限 56 以上が HW で止まった。T-0290)。
+// 和の式・順は MrCellThermal(上限の無い形)と同じ(MrThermalSums)
+MrThermal WideTailThermal(RxCell inlineCell, uint32_t page, uint32_t side, uint32_t index) {
+    const GpuReactionTable table = MakeTable();
+    MrThermalSums sums = MrMakeThermalSums();
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        sums = MrAddThermalSpecies(table, sums, inlineCell.species[i], inlineCell.amounts[i]);
+
+    const uint2 range = WideRange(page, side, index);
+    for (uint32_t e = range.x; e < range.y; ++e) {
+        const uint32_t word = MrWideEntryWord(e);
+        const uint64_t amount = FX_U64(g_treeWords[WideWord(page, side, word + 2)],
+                                       g_treeWords[WideWord(page, side, word + 1)]);
+        sums = MrAddThermalSpecies(table, sums, g_treeWords[WideWord(page, side, word)], amount);
+    }
+
+    return MrThermalFromSums(inlineCell.energy, sums);
+}
+#endif
+
+// セルの熱(CPU の CellThermals)。溢れを使う変種(MR_WIDE_CELLS。T-0211)は、溢れを持つセルだけ溢れまで足す(WideTailThermal)
 // (8 種以下のセルは同じ成分の並びなので、インラインのまま計算してもビット単位で同じ)
 MrThermal BlockCellThermal(MrBlock block, uint32_t slot, uint32_t index) {
 #ifdef MR_WIDE_CELLS
@@ -159,7 +181,7 @@ MrThermal BlockCellThermal(MrBlock block, uint32_t slot, uint32_t index) {
         const RxCell inlineCell = g_cells[PageCellAddress(block.page, index)];
         const uint32_t side = WideCurrentSide(block.page);
         if (WideHasTail(inlineCell, block.page, side, index))
-            return MrCellThermal(MakeTable(), LoadGpuWideCell(inlineCell, block.page, side, index));
+            return WideTailThermal(inlineCell, block.page, side, index);
     }
 #endif
 
@@ -504,35 +526,28 @@ bool ApplyCellDelta(MrBlock block, uint32_t index, inout RxCell cell, inout MrFr
 }
 
 #ifdef MR_WIDE_CELLS
-// --- 溢れを使う変種(T-0211。multires_wide_step.hlsli の StepPagedWaitWide と同じ ①②③)---
+// --- 溢れを使う変種(T-0211。T-0272 で反応を後の段へ回した)---
+// 溢れを持つセル・9 種目を待たせたセルは、この段では伝導の変化を足したインラインだけ書いて印を付け、反応(StepPagedWaitWide と同じ ①②③)は
+// 足す段の後の WideDeferredPass(1 グループ 64 スレッド = 1 枠。multires_wide_step.hlsli の WideDeferredBlock)が上限の無い形で刻む。
+// 512 スレッドのこの段に上限の無い形のセルを持たせない(上限 56 以上で HW の compute キューが止まった。T-0290・ADR-0052 追記 5)
 
-// ① 上限の無い形に回すセル: 伝導の変化を足したインラインを書き(反応はまだ)、刻んだ後の溢れの数を数える。変わったら true
-bool DeferWideCell(MrBlock block, uint32_t index, uint32_t side, RxCell cell, RxCell before, bool fractionChanged) {
+// 上限の無い形に回すセル: 伝導の変化を足したインラインを書き(反応はまだ)、印を付ける。変わったら true
+bool DeferWideCell(MrBlock block, uint32_t index, RxCell cell, RxCell before, bool fractionChanged) {
     g_cells[PageCellAddress(block.page, index)] = cell;
-    MarkWideCell(block, index, side, cell);
+    InterlockedOr(gs_wideMarks[index / 32], 1u << (index % 32));
+    gs_wideAny = 1;
 
     return MrCellChanged(before, cell) || fractionChanged;
 }
 
-// ②③ ApplyCell が回したセルを、新しい面の並びを決めてから刻み直して書き、面を入れ替える(グループの全部のスレッドが呼ぶ)。
-// 書く面の塊が足りなければ書かずに要求を残す(刻み直すのは足す段の後の WideRetryBlock。T-0236)。変わったら true
-bool RestepConductWideCells(MrBlock block, uint32_t thread, inout uint64_t wakeTick, inout MrLimitTally tally) {
+// 印を付けたセルがあれば、印と刻みの初めの busyTick を見出しに残して WideDeferredPass に回す(グループの全部のスレッドが呼ぶ)。
+// 見出しの busyTick・wakeTick は印のセルを除いてこの段が書き、WideDeferredPass が印のセルの分を合わせる(WideRetryBlock と同じ)
+void DeferConductWideCells(MrBlock block, uint32_t thread) {
     GroupMemoryBarrierWithGroupSync();
     if (gs_wideAny == 0)
-        return false;
+        return;
 
-    const uint32_t side = WideCurrentSide(block.page);
-    const bool fits = PlanWideSide(block.page, side, thread, CONDUCT_THREADS, block.busyTick);
-    bool changed = false;
-    for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
-        const uint32_t index = thread + (CONDUCT_THREADS * k);
-        if (IsWideMarked(index))
-            changed = RestepWideCell(block, index, side, fits, gs_wideOffsets[index], wakeTick, tally) || changed;
-    }
-
-    SwapWideSide(block.page, side, fits, thread);
-
-    return changed;
+    RequestWideDeferred(block.page, block.busyTick, thread, CONDUCT_THREADS);
 }
 #endif
 
@@ -553,16 +568,15 @@ bool ApplyCell(MrBlock block, uint32_t index, bool react, inout uint64_t wakeTic
         const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
         const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
 #ifdef MR_WIDE_CELLS
-        // 溢れを持つセルは変化だけ書き、反応は上限の無い形で刻み直す(RestepConductWideCells。T-0211)
-        const uint32_t side = WideCurrentSide(block.page);
-        if (WideHasTail(cell, block.page, side, index))
-            return DeferWideCell(block, index, side, cell, before, fraction.energy != fractionBefore);
+        // 溢れを持つセルは変化だけ書き、反応は上限の無い形で後の段が刻む(DeferConductWideCells。T-0211・T-0272)
+        if (WideHasTail(cell, block.page, WideCurrentSide(block.page), index))
+            return DeferWideCell(block, index, cell, before, fraction.energy != fractionBefore);
 #endif
         const RxWaitStep step = MrStepCellWait(MakeStepTable(), cell, seed, tick, block, index);
 #ifdef MR_WIDE_CELLS
         // 9 種目の生成物を待たせたセルも(8 種以下の間はインラインの核と上限の無い形がビット単位で同じ。T-0175)
         if ((step.limits & RX_LIMIT_PRODUCTS) != 0)
-            return DeferWideCell(block, index, side, cell, before, fraction.energy != fractionBefore);
+            return DeferWideCell(block, index, cell, before, fraction.energy != fractionBefore);
 #endif
         wakeTick = MinTick(wakeTick, step.wakeTick);
         cell = step.cell;
@@ -601,7 +615,7 @@ void ConductApplyBlock(uint32_t slot, uint32_t thread) {
     }
 
 #ifdef MR_WIDE_CELLS
-    changed = RestepConductWideCells(block, thread, wakeTick, tally) || changed;
+    DeferConductWideCells(block, thread);
 #endif
 
     CountLimits(tally);

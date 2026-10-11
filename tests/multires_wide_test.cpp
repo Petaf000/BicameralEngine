@@ -5,6 +5,7 @@
 //   - ほぼ同じ頁と端数: 12 種のほぼ同じ頁を平均の値で畳み、溢れのある端数の枠を帳簿へ返す。保存は毎刻みビット単位
 //   - 静かな葉: 9 種目からの成分の量の差も許容差で比べる(インラインの 8 種だけ同じでも粗くしない)
 //   - 一様な 8 種の根(T-0276): 9 種目を作る規則だけが進む一様なブロックも、溢れを使う世界は頁に広げて 9 種目を作る
+//   - 熱の和(T-0272): 1 成分ずつ足す形(MrThermalSums。GPU の伝導の段の溢れを持つセル)が上限の無い形の MrCellThermal とビット単位で同じ
 // 表は反応しない 12 種の表(この試験だけのデータ)と、上限の試験の表(tests/reaction_limits_table.h)・燃焼の試験の表。
 #include <algorithm>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "common/multires_activity.hlsli"
+#include "common/multires_conduction.hlsli"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "multires_limits_scene.h"
@@ -366,6 +368,24 @@ namespace {
         }
     }
 
+    // --- 熱の和(T-0272)---
+
+    // 12 種のセルの熱を、成分を 1 つずつ足す形(GPU の WideTailThermal と同じ順: インライン 8 → 溢れ)と上限の無い形で比べる
+    void TestThermalSums(const BakedReactionTable& table) {
+        for (const int32_t temperatureMk : {0, COLD_MILLIKELVIN, HOT_MILLIKELVIN}) {
+            const RxWideCell cell = MakeInertCell(table, temperatureMk, [](uint32_t i) { return uint64_t{i} * 7919; });
+            MrThermalSums sums = MrMakeThermalSums();
+            for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                sums = MrAddThermalSpecies(table.View(), sums, cell.species[i], cell.amounts[i]);
+
+            const MrThermal expected = MrCellThermal(table.View(), cell);
+            const MrThermal summed = MrThermalFromSums(cell.energy, sums);
+            Expect(summed.temperature == expected.temperature && summed.conductance == expected.conductance &&
+                       summed.capacityLimit == expected.capacityLimit,
+                   std::format("熱の和: {} mK の 12 種のセルが上限の無い形と同じ", temperatureMk));
+        }
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -382,6 +402,7 @@ namespace {
         TestFoldWideNear(inert);
         TestQuietWide(inert);
         TestUniformMakesNinth();
+        TestThermalSums(inert);
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_wide_test: FAILED ({} 件)", failureCount);

@@ -217,13 +217,10 @@ FX_FN uint64_t RxHeatCapacity(Table table, Cell cell) {
     return heatCapacity;
 }
 
-template <typename Table, typename Cell>
-FX_FN RxThermal RxComputeThermal(Table table, Cell cell) {
-    const int64_t chemical = RxChemicalEnergy(table, cell);
-    const uint64_t heatCapacity = RxHeatCapacity(table, cell);
-
+// エネルギー(mJ)・化学のエネルギーの和・熱容量の和から熱と温度(RxComputeThermal の後半。溢れを 1 成分ずつ読んで足す GPU の変種も使う。T-0272)
+FX_FN RxThermal RxThermalFromSums(int64_t energy, int64_t chemical, uint64_t heatCapacity) {
     RxThermal thermal;
-    thermal.heat = RxMulS64Checked(cell.energy, (int64_t)RX_MICROJOULES_PER_MILLIJOULE) - chemical;
+    thermal.heat = RxMulS64Checked(energy, (int64_t)RX_MICROJOULES_PER_MILLIJOULE) - chemical;
     thermal.heatCapacity = heatCapacity;
     thermal.temperature = 0;
     FX_ASSERT(thermal.heat >= 0);  // 吸熱の規則は熱を資源として縮めるので、熱は負にならない
@@ -245,6 +242,11 @@ FX_FN RxThermal RxComputeThermal(Table table, Cell cell) {
                                         : (uint64_t)TEMPERATURE_MAX_MILLIKELVIN);
 
     return thermal;
+}
+
+template <typename Table, typename Cell>
+FX_FN RxThermal RxComputeThermal(Table table, Cell cell) {
+    return RxThermalFromSums(cell.energy, RxChemicalEnergy(table, cell), RxHeatCapacity(table, cell));
 }
 
 // --- 速度: 望む進行度 --------------------------------------------------------------------------

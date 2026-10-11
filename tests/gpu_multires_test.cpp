@@ -521,11 +521,15 @@ namespace {
 
     // 32 種のセルの溢れの塊の置き場(T-0248): 全部の頁の 2 面が 32 種のセルで埋まっても足りる数(既定の数は 1 頁の 2 面分なので、
     // 2 つの根が両方 32 種になる刻みで尽きて待たせる)
-    uint32_t WideManyChunks(const sim::MultiresNest& nest) {
-        constexpr uint32_t MANY_TAIL = test::WIDE_MANY_SPECIES - RX_MAX_CELL_SPECIES;
+    // species = 表の物質の数(1 セルの最大)
+    uint32_t WideManyChunks(const sim::MultiresNest& nest, uint32_t species = test::WIDE_MANY_SPECIES) {
+        const uint32_t manyTail = species - RX_MAX_CELL_SPECIES;
 
-        return nest.capacity.pages * 2 * MrWideChunksFor(MR_BLOCK_CELLS * MANY_TAIL);
+        return nest.capacity.pages * 2 * MrWideChunksFor(MR_BLOCK_CELLS * manyTail);
     }
+
+    // 試験の many の場面の表の物質の数(T-0272): GPU の 1 セルの上限まで作る(上限 64 なら 1 セル 33 種以上の場面)
+    constexpr uint32_t WIDE_SCENE_MANY_SPECIES = RX_GPU_WIDE_SPECIES;
 
     // 頁の溢れが前の当座の枠(1 面 1024 成分。T-0176〜T-0211)より大きくなる(T-0236): 書く面の塊が足りない刻みで塊を配って同じ刻みのうちに
     // 刻み直し、待たせずに CPU の上限の無い世界と毎刻みビット一致(全部を刻む段・頁に広げて刻む段・伝導の足す段の刻み直し)。
@@ -537,8 +541,9 @@ namespace {
         sim::MultiresNest cpu = many ? test::MakeWideOverflowNest(table, test::WideManyName)
                                      : test::MakeWideOverflowNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
-                                            {.wideCells = true, .wideChunks = many ? WideManyChunks(cpu) : 0});
+        auto gpu = sim::GpuMultires::Create(
+            device, table, cpu.capacity,
+            {.wideCells = true, .wideChunks = many ? WideManyChunks(cpu, WIDE_SCENE_MANY_SPECIES) : 0});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -574,7 +579,10 @@ namespace {
         }
 
         const uint32_t mostSpecies = RX_MAX_CELL_SPECIES + mostTail;
-        const bool large = many ? mostSpecies > test::WIDE_MANY_OLD_LIMIT : mostEntries > OLD_PAGE_ENTRIES;
+        // many: 前の当座の上限(24 種)と、上限が 32 より上なら 32 種(T-0248 の上限。T-0272)も超える
+        const uint32_t manyBeyond = std::max(test::WIDE_MANY_OLD_LIMIT,
+                                             std::min(WIDE_SCENE_MANY_SPECIES / 2, test::WIDE_MANY_SPECIES));
+        const bool large = many ? mostSpecies > manyBeyond : mostEntries > OLD_PAGE_ENTRIES;
         if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || !large)
             return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分・1 セルの最大 {} 種",
                                                cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], mostEntries, mostSpecies));
@@ -957,7 +965,7 @@ namespace {
     int RunWideScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
         const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
         const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
-        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
+        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable(WIDE_SCENE_MANY_SPECIES));
         if (!limitsTable || !wideTable || !manyTable) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
             return 1;
@@ -1022,7 +1030,8 @@ namespace {
         if (!many && !scene.starts_with("overflow"))
             return std::unexpected(std::format("場面の名前が違う: {}", scene));
 
-        const auto table = sim::BakeReactionTable(many ? test::MakeWideManyTable() : test::MakeWideOverflowTable());
+        const auto table = sim::BakeReactionTable(many ? test::MakeWideManyTable(WIDE_SCENE_MANY_SPECIES)
+                                                       : test::MakeWideOverflowTable());
         return table ? RunWideOverflow(device, queue, ring, *table, conduction, many)
                      : std::unexpected(std::string("表を作れない"));
     }

@@ -79,4 +79,14 @@ uint32_t ExpandRecordOfGroup(uint32_t group) {
 
     WideRetryBlock(slot, thread);
 }
+
+    // 伝導の足す段が回した溢れるセルを刻む(1 グループ = 1 枠。T-0272。印は見出しの要求で分かるので枠を選ばない)
+    [numthreads(WAIT_STEP_THREADS, 1, 1)] void WideDeferredPass(uint3 group : SV_GroupID,
+                                                                uint32_t thread : SV_GroupIndex) {
+    const uint32_t slot = group.x;
+    if (slot >= g_blockCount)
+        return;
+
+    WideDeferredBlock(slot, thread);
+}
 #endif

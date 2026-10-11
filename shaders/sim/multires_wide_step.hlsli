@@ -19,10 +19,10 @@
 #include "common/multires_wide.hlsli"
 #include "sim/multires_wide_access.hlsli"
 
-// --- 上限の無い形のセル(GPU は RX_GPU_WIDE_SPECIES = 32 個まで。reaction.hlsli の「セルの形ごとの道具」の版)---
-// 配列は動的な添字なのでレジスタではなくスクラッチに置かれうる。大きさは溢れの変種の全部の段の費用に効く(T-0248 で 24 → 32。
-// 64 では空気だけの伝導ありの刻みが 9 → 20 ns/セルになり、HW の compute キューで 32 種のセルの後の伝導の段が DEVICE_HUNG〔T-0290〕。速い形と大きいセルの道を
-// 分けて上限を無くすのは T-0272)
+// --- 上限の無い形のセル(GPU は RX_GPU_WIDE_SPECIES = 64 個まで。reaction.hlsli の「セルの形ごとの道具」の版)---
+// 配列は動的な添字なのでレジスタではなくスクラッチに置かれうる。持つのは 64 スレッドの段(全部を刻む・頁に広げて刻む・WideRetry・WideDeferred)だけ。
+// 512 スレッドの伝導の段に持たせると上限 56 以上で HW の compute キューが止まった(T-0290)ので、T-0272 で伝導の段の熱は溢れから直接足し
+// (WideTailThermal)、反応は WideDeferredPass に回した。全部を刻む段から無くすのは T-0326、上限を表の物質の数まで上げるのは T-0327
 
 struct RxGpuWideCell {
     int64_t energy;
@@ -201,17 +201,27 @@ bool IsWideMarked(uint32_t index) {
 }
 
 // 書く面の塊が足りない: 要る塊の数・刻み直すセルの印(gs_wideMarks)・刻みの初めの busyTick を見出しに書く(WideAllocate・WideRetryBlock が読む)
-void RequestWideRetry(uint32_t page, uint32_t side, uint32_t chunks, uint64_t busyTick, uint32_t thread,
-                      uint32_t threads) {
+// 印(gs_wideMarks)・刻みの初めの busyTick・要求の語を見出しに書く(RequestWideRetry・RequestWideDeferred)
+void WriteWideRequest(uint32_t page, uint32_t request, uint64_t busyTick, uint32_t thread, uint32_t threads) {
     for (uint32_t word = thread; word < MR_WIDE_MARK_WORDS; word += threads)
         g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_MARKS + word)] = gs_wideMarks[word];
 
     if (thread != 0)
         return;
 
-    g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_REQUEST)] = MrWideMakeRequest(1 - side, chunks, true);
+    g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_REQUEST)] = request;
     g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_BUSY)] = (uint32_t)busyTick;
     g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_BUSY + 1)] = (uint32_t)(busyTick >> 32);
+}
+
+void RequestWideRetry(uint32_t page, uint32_t side, uint32_t chunks, uint64_t busyTick, uint32_t thread,
+                      uint32_t threads) {
+    WriteWideRequest(page, MrWideMakeRequest(1 - side, chunks, true), busyTick, thread, threads);
+}
+
+// 伝導の段(512 スレッド)が印のセルの反応を WideDeferredPass に回す(T-0272。印のセルは変化を足したインラインだけ書いてある)
+void RequestWideDeferred(uint32_t page, uint64_t busyTick, uint32_t thread, uint32_t threads) {
+    WriteWideRequest(page, MR_WIDE_REQUEST_PRESENT | MR_WIDE_REQUEST_DEFERRED, busyTick, thread, threads);
 }
 
 // ② セルの番号の順のプレフィックス和(スレッド 0)で新しい面(1 − side)の並びを決め(gs_wideOffsets は溢れの数 → 新しい面の始まり)、
@@ -480,8 +490,9 @@ void HoldWideCells(uint32_t thread, inout uint64_t wakeTick, inout MrLimitTally 
     }
 }
 
-// 塊を配れた: 印のセルだけ ①②③ をやり直す(印のセルは刻みの段で書いていない = 刻む前の値〔伝導の段は変化を足した値〕のまま)
-void RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint64_t wakeTick,
+// 印のセルだけ ①②③ を刻む(印のセルは刻みの段で書いていない = 刻む前の値〔伝導の段は変化を足した値〕のまま)。
+// 書く面の塊が足りなければ書かずに要求を残す(PlanWideSide)。入ったら true
+bool RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint64_t wakeTick,
                       inout MrLimitTally tally) {
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / WAIT_STEP_THREADS; ++k) {
         const uint32_t index = thread + (WAIT_STEP_THREADS * k);
@@ -491,7 +502,6 @@ void RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint6
 
     GroupMemoryBarrierWithGroupSync();
     const bool fits = PlanWideSide(block.page, side, thread, WAIT_STEP_THREADS, block.busyTick);
-    FX_ASSERT(fits);
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / WAIT_STEP_THREADS; ++k) {
         const uint32_t index = thread + (WAIT_STEP_THREADS * k);
         if (IsWideMarked(index) && RestepWideCell(block, index, side, fits, gs_wideOffsets[index], wakeTick, tally))
@@ -499,20 +509,13 @@ void RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint6
     }
 
     SwapWideSide(block.page, side, fits, thread);
+
+    return fits;
 }
 
-// 塊が足りなかったブロック(枠 slot。刻む枠)の刻み直し(1 グループ = 1 枠、WAIT_STEP_THREADS スレッド)。見出しは刻みの段が
-// 印のセルを除いて書いてあるので、変わったら busyTick = 印・wakeTick = 印 + 1、変わらなければ wakeTick を印のセルの最小と合わせる
-void WideRetryBlock(uint32_t slot, uint32_t thread) {
-    MrBlock block = g_blocks[slot];
-    if (MrIsUniform(block))
-        return;
-
-    const uint32_t request = g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST)];
-    if ((request & MR_WIDE_REQUEST_RETRY) == 0)
-        return;
-
-    // --- 刻みの初めの busyTick と印を戻す ---
+// 見出しの要求(印・刻みの初めの busyTick)を読み戻す: block.busyTick を刻みの初めの値にし、印を gs_wideMarks へ
+// (グループの全部のスレッドが呼ぶ。終わりに同期)。今の面を返す
+uint32_t BeginWideMarked(inout MrBlock block, uint32_t thread) {
     block.busyTick = FX_U64(g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_BUSY + 1)],
                             g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_BUSY)]);
     const uint32_t side = WideCurrentSide(block.page);
@@ -524,21 +527,12 @@ void WideRetryBlock(uint32_t slot, uint32_t thread) {
 
     GroupMemoryBarrierWithGroupSync();
 
-    // --- 刻み直す(配れなければ待たせる)---
-    uint64_t wakeTick = RX_WAIT_NEVER;
-    MrLimitTally tally = MrMakeLimitTally();
-    if ((request & MR_WIDE_REQUEST_GRANTED) != 0)
-        RestepWideMarked(block, side, thread, wakeTick, tally);
-    else
-        HoldWideCells(thread, wakeTick, tally);
+    return side;
+}
 
-    CountLimits(tally);
-    const WaitBlockResult result = EndWaitReduce(thread, wakeTick);
-    if (thread != 0)
-        return;
-
-    // --- 見出し(要求を消す)---
-    g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST)] = 0;
+// 印のセルを刻んだ後の見出し(スレッド 0)。見出しは刻みの段が印のセルを除いて書いてあるので、変わったら busyTick = 印・
+// wakeTick = 印 + 1、変わらなければ wakeTick を印のセルの最小と合わせる
+void FinishWideMarked(uint32_t slot, WaitBlockResult result) {
     const uint64_t mark = CurrentChangeMark();
     if (result.changed != 0) {
         g_blocks[slot].busyTick = mark;
@@ -547,6 +541,71 @@ void WideRetryBlock(uint32_t slot, uint32_t thread) {
     }
 
     g_blocks[slot].wakeTick = MinTick(g_blocks[slot].wakeTick, result.wakeTick);
+}
+
+// 塊が足りなかったブロック(枠 slot。刻む枠)の刻み直し(1 グループ = 1 枠、WAIT_STEP_THREADS スレッド)
+void WideRetryBlock(uint32_t slot, uint32_t thread) {
+    MrBlock block = g_blocks[slot];
+    if (MrIsUniform(block))
+        return;
+
+    const uint32_t request = g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST)];
+    if ((request & MR_WIDE_REQUEST_RETRY) == 0)
+        return;
+
+    const uint32_t side = BeginWideMarked(block, thread);
+
+    // --- 刻み直す(配れなければ待たせる)---
+    uint64_t wakeTick = RX_WAIT_NEVER;
+    MrLimitTally tally = MrMakeLimitTally();
+    if ((request & MR_WIDE_REQUEST_GRANTED) != 0) {
+        const bool fits = RestepWideMarked(block, side, thread, wakeTick, tally);
+        FX_ASSERT(fits);
+    } else {
+        HoldWideCells(thread, wakeTick, tally);
+    }
+
+    CountLimits(tally);
+    const WaitBlockResult result = EndWaitReduce(thread, wakeTick);
+    if (thread != 0)
+        return;
+
+    // --- 見出し(要求を消す)---
+    g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST)] = 0;
+    FinishWideMarked(slot, result);
+}
+
+// --- 伝導の段が回したセルを刻む(T-0272)---
+// 伝導の足す段(512 スレッド = 1 スレッド 1 セル)は上限の無い形のセルを持たず、溢れを持つセル・9 種目を待たせたセルの反応をここへ回す
+// (RequestWideDeferred)。1 グループ 64 スレッド = 1 枠で、印のセルだけ StepPagedWaitWide と同じ ①②③ を刻む。書く面の塊が足りなければ
+// 要求を書き換えて(RETRY)後の WideAllocate・WideRetryBlock に任せる(前の伝導の段の中の ①②③ と同じ流れ)。
+// 刻む関数・順は前と同じ(セルの番号の順のプレフィックス和)なので、結果はビット単位で同じ
+void WideDeferredBlock(uint32_t slot, uint32_t thread) {
+    MrBlock block = g_blocks[slot];
+    if (MrIsUniform(block))
+        return;
+
+    const uint32_t requestWord = WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST);
+    if ((g_treeWords[requestWord] & MR_WIDE_REQUEST_DEFERRED) == 0)
+        return;
+
+    const uint32_t side = BeginWideMarked(block, thread);
+
+    // --- 要求を消す(② の PlanWideSide が要れば書き直す。全部のスレッドが読み終えた後〔BeginWideMarked の同期〕)---
+    if (thread == 0)
+        g_treeWords[requestWord] = 0;
+
+    // --- ①②③(塊が足りなければ書かずに要求だけ残す)---
+    uint64_t wakeTick = RX_WAIT_NEVER;
+    MrLimitTally tally = MrMakeLimitTally();
+    const bool fits = RestepWideMarked(block, side, thread, wakeTick, tally);
+    if (!fits)
+        return;
+
+    CountLimits(tally);
+    const WaitBlockResult result = EndWaitReduce(thread, wakeTick);
+    if (thread == 0)
+        FinishWideMarked(slot, result);
 }
 
 #endif  // BICAMERAL_MULTIRES_WIDE_STEP_HLSLI
