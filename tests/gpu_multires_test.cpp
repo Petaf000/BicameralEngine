@@ -805,8 +805,9 @@ namespace {
         return nest.capacity.pages * 2 * MrWideChunksFor(MR_BLOCK_CELLS * manyTail);
     }
 
-    // 試験の many の場面の表の物質の数(T-0272): GPU の 1 セルの上限まで作る(上限 64 なら 1 セル 33 種以上の場面)
-    constexpr uint32_t WIDE_SCENE_MANY_SPECIES = RX_GPU_WIDE_SPECIES;
+    // 試験の many の場面の表の物質の数(T-0362): 128 種以上の表(T-0327 で上限 128 にすると HW が止まった)で 1 セル 96 種を超える
+    constexpr uint32_t WIDE_SCENE_MANY_SPECIES = 160;
+    static_assert(WIDE_SCENE_MANY_SPECIES <= RX_GPU_WIDE_SPECIES);
 
     // 頁の溢れが前の当座の枠(1 面 1024 成分。T-0176〜T-0211)より大きくなる(T-0236): 書く面の塊が足りない刻みで塊を配って同じ刻みのうちに
     // 刻み直し、待たせずに CPU の上限の無い世界と毎刻みビット一致(全部を刻む段・頁に広げて刻む段・伝導の足す段の刻み直し)。
@@ -856,12 +857,9 @@ namespace {
         }
 
         const uint32_t mostSpecies = RX_MAX_CELL_SPECIES + mostTail;
-        // many: 前の上限を超える(上限 64 なら 32 種 = T-0248 の上限、64 より上なら 64 種 = T-0272 の上限。T-0327)
-        constexpr uint32_t LIMIT_T0272 = 64;
-        const uint32_t manyBeyond = WIDE_SCENE_MANY_SPECIES > LIMIT_T0272
-                                        ? LIMIT_T0272
-                                        : std::max(test::WIDE_MANY_OLD_LIMIT, WIDE_SCENE_MANY_SPECIES / 2);
-        const bool large = many ? mostSpecies > manyBeyond : mostEntries > OLD_PAGE_ENTRIES;
+        // many: 1 セル 96 種(T-0327 の上限)を超える(作業場の形で刻む。T-0362)
+        constexpr uint32_t MANY_BEYOND = 96;
+        const bool large = many ? mostSpecies > MANY_BEYOND : mostEntries > OLD_PAGE_ENTRIES;
         if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || !large)
             return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分・1 セルの最大 {} 種",
                                                cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], mostEntries, mostSpecies));

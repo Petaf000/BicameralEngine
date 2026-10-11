@@ -295,6 +295,11 @@ namespace bicameral::sim {
             constexpr uint32_t DEFAULT_SIDE_SPECIES = 64;
             const uint32_t sideChunks = MrWideChunksFor(MR_BLOCK_CELLS * (DEFAULT_SIDE_SPECIES - RX_MAX_CELL_SPECIES));
             result.m_wideChunks = options.wideChunks != 0 ? options.wideChunks : std::max(doubled, 2 * sideChunks);
+
+            // 速い形に入らないセルを刻む作業場(T-0362)。表の物質が速い形に収まれば作らない(空気だけの世界の VRAM は変わらない)
+            const auto tableSpecies = static_cast<uint32_t>(table.species.size());
+            if (tableSpecies > RX_GPU_MID_SPECIES)
+                result.m_spaceSpecies = std::min(tableSpecies, RX_GPU_WIDE_SPECIES);
         }
 
         if (auto pipelines = result.CreatePipelines(device, options); !pipelines)
@@ -358,10 +363,11 @@ namespace bicameral::sim {
             auto wideRetry = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_retry.cso");
             auto wideDeferred = LoadComputePipeline(device, m_rootSignature.Get(),
                                                     "sim/multires_step_wide_deferred.cso");
+            auto wideBig = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_big.cso");
             auto wideReserve = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_reserve.cso");
             auto wideTrim = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_trim.cso");
-            for (const auto* loaded :
-                 {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideDeferred, &wideReserve, &wideTrim}) {
+            for (const auto* loaded : {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideDeferred, &wideBig,
+                                       &wideReserve, &wideTrim}) {
                 if (!*loaded)
                     return std::unexpected(loaded->error());
             }
@@ -371,6 +377,7 @@ namespace bicameral::sim {
             m_wideAllocatePipeline = std::move(*wideAllocate);
             m_wideRetryPipeline = std::move(*wideRetry);
             m_wideDeferredPipeline = std::move(*wideDeferred);
+            m_wideBigPipeline = std::move(*wideBig);
             m_treeWideReservePipeline = std::move(*wideReserve);
             m_treeWideTrimPipeline = std::move(*wideTrim);
         }
@@ -558,8 +565,9 @@ namespace bicameral::sim {
         if (!m_wideCells)
             return 0;
 
-        return MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.worldBlocks,
-                               m_capacity.fractions) *
+        return (MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.worldBlocks,
+                                m_capacity.fractions) +
+                MrWideSpaceWords(m_spaceSpecies)) *
                sizeof(uint32_t);
     }
 
@@ -673,7 +681,10 @@ namespace bicameral::sim {
 
         const auto pages = static_cast<uint32_t>(PageCount());
         const size_t first = words.size();
-        words.resize(first + MrWideAreaWords(pages, m_wideChunks, m_capacity.worldBlocks, m_capacity.fractions), 0);
+        // 作業場(T-0362)は刻む段が書いてから読むので 0 のまま
+        words.resize(first + MrWideAreaWords(pages, m_wideChunks, m_capacity.worldBlocks, m_capacity.fractions) +
+                         MrWideSpaceWords(m_spaceSpecies),
+                     0);
         const uint32_t pool = MrWidePoolWord(0, pages);
         uint32_t used = 0;
         const uint32_t areas = nest.wideCells ? OverflowAreaCount() : 0;
@@ -1263,6 +1274,7 @@ namespace bicameral::sim {
         list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
         StampStage(list);
+        RecordWideBig(list, debugRing);
     }
 
     // 溢れを使う世界の刻みの段の後(T-0272・T-0326): 伝導の足す段(512 スレッド)が反応を回した溢れるセルと、全部を刻む段・頁に広げて刻む段が
@@ -1278,6 +1290,27 @@ namespace bicameral::sim {
         list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
         StampStage(list);
+        RecordWideBig(list, debugRing);
+    }
+
+    // WideDeferred・WideRetry の後(T-0362): 速い形(32 種)に入らないセルのあったブロックを、作業場の形で刻む(作業場の分の
+    // MR_WIDE_SPACE_GROUPS グループが枠を順に受け持つ)。表の物質が速い形に収まる世界(作業場なし)は流さない。外の定数に
+    // 作業場の始まりと 1 セルの上限を渡す(このパイプラインは外のバッファを使わない)
+    void GpuMultires::RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (!m_wideCells || m_spaceSpecies == 0)
+            return;
+
+        const auto areaWords = MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.worldBlocks,
+                                               m_capacity.fractions);
+        const std::array<uint32_t, 4> saved = m_constants.external;
+        m_constants.external = {OverflowBaseWord() + static_cast<uint32_t>(areaWords), m_spaceSpecies, 0, 0};
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_wideBigPipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(MR_WIDE_SPACE_GROUPS, 1, 1);
+        UavBarrier(list);
+        StampStage(list);
+        m_constants.external = saved;
     }
 
     void GpuMultires::StampStage(ID3D12GraphicsCommandList10* list) {

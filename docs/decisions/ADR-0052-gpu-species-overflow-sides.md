@@ -270,3 +270,32 @@
   (T-0384 で読む段、T-0312 の残りで畳む)。それまでは「溢れのある一様の値を写した世界を GPU で刻む」と溢れを読まずに刻む(試験は写して読み戻すだけ)。
 - **捨てた案**: 世界の枠ごとに上限の大きさ(88 成分 × 3 語)の固定の場所 — 上限を無くす方向(T-0362)と合わない・使わない枠も 1 KiB を取る。
   見出し 1 語(塊の番号)だけの小さい形 — 領域の道具を全部 2 通りにすることになる。
+
+## 追記 14(2026-10-11、T-0362。決めた人: Claude〔実装の細部。CLAUDE.md §5〕。上限 177 は並びの大きさ〔要求の語の 8 ビット〕から): 速い形に入らないセルは作業場の段が刻む・1 セルの上限を表の物質の数まで
+- **核の成分の道具**: reaction.hlsli の核はセルの成分を RxSpeciesAt・RxAmountAt(読む)、RxWithAmount・RxWithEntry(書いたセルを返す)、
+  RxWritableCell(元を残して書く所の始めの写し。RxApplyExtentsChecked の反応物を引く前)、RxUsageAt・RxWithUsage(使う量)だけで触る。
+  配列を持つ形(RxCell・速い形・C++ の RxWideCell)は汎用のテンプレート(配列をそのまま)、C++ の RxWideCell は写しを避ける参照の多重定義
+  (reaction_wide_cell.h)、GPU の作業場の形は明示的な特殊化。核の式・順は変えていない(結果はビット単位で同じ)。
+- **作業場の形 RxGpuSpaceCell**(multires_wide_step.hlsli。MR_WIDE_BIG_PASS の時だけ): セルは「成分 0 の u6 の語」とレーンの先頭だけを持つ値で、
+  成分は u6 の作業場(溢れの領域の後ろ。[32 グループ × 64 スレッド × レーン]、レーン = [刻む前 A 3c][書く B 3c][使う量 2c]、c = 1 セルの上限)
+  に置く。LoadGpuWideCell は A に読み、RxWritableCell が A → B に写し、RxCompactCell・RxTryAddSpecies は B の同じ場所で詰める・ずらす
+  (書く位置が読む位置を追い越さない)。1 スレッドのスクラッチが上限に依らない。
+- **段**: WideDeferred・WideRetry は速い形だけを持ち、速い形に入らないセルがあれば ③ を書かずに要求に MR_WIDE_REQUEST_BIG(ビット 12)を付けて
+  作業場の段 WideBigPass(multires_step_wide_big。32 グループが枠を g, g + 32, ... と受け持つ)に回す。順は WideDeferred → WideBig → 配る → 刻み直す →
+  WideBig(RecordWideDeferred・RecordWideRetry の後ろ)。作業場の段の ①②③ は回した段と同じ関数(RestepWideMarked)なので結果はビット単位で同じ。
+  核の展開は作業場の段で 速い形・作業場の形の 2 か所、ほかの段は 1 か所(前の 2 か所から減った)。
+- **上限**: 1 セルの成分は表の物質の数まで(c = min(表の物質, RX_GPU_WIDE_SPECIES))。RX_GPU_WIDE_SPECIES は並びの大きさ(面の塊の最大が
+  要求の語の 8 ビットに入る最大)の 177。表の物質が 177 を超えると、178 種目からは今までどおり待たせる(T-0381)。
+  表の物質が速い形(32)に収まる世界は作業場も作業場の段も作らない(空気だけの溢れの世界の VRAM・段は前と同じ)。
+- **確かめた**(HW = RTX 3070 Ti、compute キュー、ほかのランナーの負荷あり): 160 種の表の many の場面で 1 セル 90〜98 種まで毎刻み CPU とビット一致・
+  待たせた 0(上限 128 で止まった T-0327 の型の止まりは起きなかった)。結果は T-0362 の作業ログ。
+- **既定の世界は前と同じ DXIL**: 道具を値を返す関数にすると、結果は同じでも既定の世界のシェーダーの DXIL が増えた(reaction_cells 4765 → 5091 行、
+  multires_step_wait 10601 → 11137 行。書く道具を inout にしても 4990 / 10982 行、読む道具だけでも 4807 / 10527 行)。そこで核は成分を
+  マクロ(RX_SPECIES_AT・RX_AMOUNT_AT・RX_USAGE_AT・RX_SET_ENTRY・RX_ADD_AMOUNT・RX_SUB_AMOUNT・RX_ADD_USAGE・RX_MAKE_WRITABLE)で触り、
+  既定は前と同じ配列の式(`cell.amounts[i] += x` など)に展開する。RX_CELL_ACCESSORS を定義した作業場の段(multires_step_wide_big)だけが
+  上の道具の関数に展開する(C++ の RxWideCell も配列の式のまま。参照の多重定義は要らなくなった)。
+  確かめ方: reaction.hlsli を(推移的に)読む溢れを使わないシェーダー 92 本(build.ninja の dxc の行から)を main と同じ引数でコンパイルし、
+  .cso の MD5 が 92 本とも main(1f6530c)と同じ(T-0362。型は runner/t362/gen.py〔git 管理外〕)。
+- **捨てた案**: 作業場の大きさを枠の数にする(1 グループ = 1 枠のまま)— 枠が多い世界で VRAM が枠 × 64 × 8c 語になる。作業場の形の核を別に書く
+  (特殊化した核)— 核が 2 つになり、wt3 などが核を変えた時に GPU と CPU が食い違う。道具を関数だけにする(値を返す・inout)— 既定の世界の
+  DXIL が変わる(上)。
