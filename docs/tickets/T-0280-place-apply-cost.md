@@ -30,6 +30,7 @@
   gpu_probe_place 19 秒・_warp 10 秒・window_place_record 52 秒・play 54 秒ほか)。archmap OK(155)。かかった時間は約 1 時間 30 分(待ちを含む)。
 - 同日: debug のビルドは警告なし。debug(GBV)の `^(gpu_probe_place(_warp)?|window_place_.*|gpu_probe_physics)$` 5 本が通過(gpu_probe_place 33 秒・_warp 27 秒・
   gpu_probe_physics 191 秒・window_place_record 84 秒・play 87 秒)。
+- 同日: main(f36c6f4。文書だけの統合)へ rebase(衝突なし)。release のビルドが通り、`^(gpu_probe_place(_warp)?|window_place_record)$` 3 本が通過。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 置くコマンドの適用は 1 グループ 256 スレッド(probe_tick.hlsl の PROBE_APPLY_GROUP_SIZE。ADR-0125)。コマンドの順・イベント・トレースの根・
