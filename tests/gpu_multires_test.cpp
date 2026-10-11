@@ -841,7 +841,7 @@ namespace {
             bool wide;
         };
         for (const Case& item : {Case{"空気・既定の世界", false, false}, Case{"空気・溢れの世界", false, true},
-                                 Case{"32 種のセル・溢れの世界", true, true}}) {
+                                 Case{"上限の種のセル・溢れの世界", true, true}}) {
             for (const bool conduction : {false, true}) {
                 const sim::BakedReactionTable& table = item.many ? *manyTable : *airTable;
                 const auto first = MeasureWideCost(device, queue, ring, table, item.many, item.wide, conduction);
@@ -961,7 +961,7 @@ namespace {
         return 0;
     }
 
-    // 溢れを使う世界の場面(上限の場面を溢れで・大きい溢れ・1 セル 32 種・塊の置き場が尽きる)。通らなければ 1
+    // 溢れを使う世界の場面(上限の場面を溢れで・大きい溢れ・1 セル上限〔RX_GPU_WIDE_SPECIES〕の種・塊の置き場が尽きる)。通らなければ 1
     int RunWideScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
         const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
         const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
@@ -979,10 +979,10 @@ namespace {
                                         [&] { return RunWideOverflow(device, queue, ring, *wideTable, false); });
         const auto wideOverflowConduct = Timed("大きい溢れ・伝導",
                                                [&] { return RunWideOverflow(device, queue, ring, *wideTable, true); });
-        const auto wideMany = Timed("32 種",
+        const auto wideMany = Timed("上限の種",
                                     [&] { return RunWideOverflow(device, queue, ring, *manyTable, false, true); });
         const auto wideManyConduct = Timed(
-            "32 種・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
+            "上限の種・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
         const auto refineWide = Timed("溢れの世界で細かくする",
                                       [&] { return RunRefineWide(device, queue, ring, *limitsTable); });
         const auto coarsenWide = Timed("溢れの端数",
@@ -1011,7 +1011,7 @@ namespace {
         }
 
         Log(Channel::Gpu, Level::Info,
-            "溢れの場面: OK(上限・大きい溢れ・32 種・細かくする・溢れの端数で GPU と CPU が毎刻みビット一致)");
+            "溢れの場面: OK(上限・大きい溢れ・1 セル上限の種・細かくする・溢れの端数で GPU と CPU が毎刻みビット一致)");
 
         return 0;
     }
