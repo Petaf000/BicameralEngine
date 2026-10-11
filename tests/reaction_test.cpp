@@ -9,19 +9,22 @@
 //     成分が 8 種以下の間は、インラインのセル(RxCell)と毎刻みビット一致する
 //   セルは 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める(初めの状態 = 刻み 0 に変わった。刻みは 1 から)。
 //   待ちの丸めそのものの試験は reaction_wait_test。今までの丸めと D-424 の下限の試験は T-0130 で消した
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <ranges>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/log.h"
 #include "core/singleton.h"
 #include "reaction_limits_table.h"
 #include "reaction_test_cells.h"
+#include "reaction_test_table.h"
 #include "sim/reaction_table.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::reaction;
@@ -77,15 +80,48 @@ namespace {
             Log(Channel::Reaction, Level::Info, "  {} → {}", label, baked.error());
     }
 
+    // 定義の中の名前の欄(規則・物質は name、項は species)で探す。試験の表の定義はパッケージの鍵の順なので、並びの番号で触らない
+    // (T-0169)。無ければ止まる(試験の表が変わった)
+    template <typename Item, typename Key>
+    Item& Named(std::vector<Item>& items, std::string_view name, Key Item::* key) {
+        const auto found = std::ranges::find(items, name, key);
+        if (found == items.end()) {
+            Log(Channel::Reaction, Level::Error, "試験の表に {} が無い", name);
+            std::exit(1);
+        }
+
+        return *found;
+    }
+
+    RuleDefinition& RuleOf(ReactionTableDefinition& definition, std::string_view name) {
+        return Named(definition.rules, name, &RuleDefinition::name);
+    }
+
+    SpeciesDefinition& SpeciesOf(ReactionTableDefinition& definition, std::string_view name) {
+        return Named(definition.species, name, &SpeciesDefinition::name);
+    }
+
+    RuleTerm& TermOf(std::vector<RuleTerm>& terms, std::string_view species) {
+        return Named(terms, species, &RuleTerm::species);
+    }
+
     void TestBakeRejectsBrokenRules() {
-        ExpectBakeFails("元素の釣り合い", [](auto& d) { d.rules[0].products[0].coefficient = 5; });
-        ExpectBakeFails("知らない物質", [](auto& d) { d.rules[1].reactants[1].species = "ozone"; });
-        ExpectBakeFails("知らない元素", [](auto& d) { d.species[0].composition[0].element = "X"; });
-        ExpectBakeFails("係数 0", [](auto& d) { d.rules[2].reactants[0].coefficient = 0; });
-        ExpectBakeFails("次数 1 の反応物なし", [](auto& d) { d.rules[0].reactants[0].firstOrder = false; });
-        ExpectBakeFails("規則の名前の重なり", [](auto& d) { d.rules[1].name = d.rules[0].name; });
-        ExpectBakeFails("物質の名前の重なり", [](auto& d) { d.species[1].name = d.species[0].name; });
-        ExpectBakeFails("反応物の重なり", [](auto& d) { d.rules[2].reactants[1].species = "carbon"; });
+        ExpectBakeFails("元素の釣り合い",
+                        [](auto& d) { TermOf(RuleOf(d, "cellulose_pyrolysis").products, "carbon").coefficient = 5; });
+        ExpectBakeFails("知らない物質", [](auto& d) {
+            TermOf(RuleOf(d, "cellulose_combustion").reactants, "oxygen").species = "ozone";
+        });
+        ExpectBakeFails("知らない元素", [](auto& d) { SpeciesOf(d, "cellulose").composition[0].element = "X"; });
+        ExpectBakeFails("係数 0",
+                        [](auto& d) { TermOf(RuleOf(d, "carbon_combustion").reactants, "carbon").coefficient = 0; });
+        ExpectBakeFails("次数 1 の反応物なし", [](auto& d) {
+            TermOf(RuleOf(d, "cellulose_pyrolysis").reactants, "cellulose").firstOrder = false;
+        });
+        ExpectBakeFails("規則の名前の重なり",
+                        [](auto& d) { RuleOf(d, "cellulose_combustion").name = "cellulose_pyrolysis"; });
+        ExpectBakeFails("物質の名前の重なり", [](auto& d) { SpeciesOf(d, "carbon").name = "cellulose"; });
+        ExpectBakeFails("反応物の重なり",
+                        [](auto& d) { TermOf(RuleOf(d, "carbon_combustion").reactants, "oxygen").species = "carbon"; });
     }
 
     void TestBakedValues(const BakedReactionTable& table) {

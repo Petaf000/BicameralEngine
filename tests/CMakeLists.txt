@@ -1,4 +1,12 @@
 # テスト。GPU カーネルごとに「CPU リファレンス実装との一致」テストを置く方針(docs/design/02-reaction-system.md)。
+
+# 試験の反応表(T-0169): 中身は data/packages/combustion_test だけに書き、テストはそれを読む(reaction_test_table.h)。
+# 試験の表を使うテストは全部これをリンクする(ファイルの末尾の一覧)
+add_library(bicameral_test_reaction_table STATIC reaction_test_table.cpp)
+target_link_libraries(bicameral_test_reaction_table PUBLIC bicameral_reaction_script bicameral_core)
+target_compile_definitions(bicameral_test_reaction_table PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+
 add_executable(smoke_test smoke_test.cpp)
 add_test(NAME smoke COMMAND smoke_test)
 
@@ -540,3 +548,16 @@ add_test(NAME float_check_source_rejects
 add_test(NAME float_check_source_accepts
          COMMAND ${Python3_EXECUTABLE} ${FLOAT_CHECK_DIR}/source_float_check.py
                  ${FLOAT_CHECK_FIXTURES}/accept_source.hlsli)
+
+# --- 試験の反応表(パッケージ)を使うテスト(T-0169。ファイルの先頭の bicameral_test_reaction_table)---
+foreach(_name IN ITEMS
+    reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
+    reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
+    multires_conduction_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
+    gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
+    gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
+    gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
+    gpu_probe_trace_test gpu_probe_rewind_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
+    gpu_conduct_bench gpu_place_bench)
+  target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
+endforeach()

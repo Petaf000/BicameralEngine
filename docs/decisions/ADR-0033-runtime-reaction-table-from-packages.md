@@ -36,4 +36,18 @@
 ## 影響
 - しやすい: 反応表を Luau で書き換えれば、ビルドし直さずに(ビルドの写しを直せば)ゲームとエディタの世界が変わる。壊れた表は起動時に場所つきで分かる。
 - しにくい: ゲームの exe が Luau を含む(サイズが少し増える)。起動時間にベイクの分が乗る(今の表で release 約 13 ms。並走の負荷ありの目安で正式な計測ではない。ログに出る)。
-- 残り: 再生ファイルに表の版と読んだパッケージを残す(15 §4)・ホットリロード(T-0139)・テストの表もパッケージへ寄せて C++ の表を消す。
+- 残り: 再生ファイルに表の版と読んだパッケージを残す(15 §4)・ホットリロード(T-0139)・~~テストの表もパッケージへ寄せて C++ の表を消す~~(T-0169 で済み。下の追記)。
+
+## 追記(2026-10-11、T-0169。決めた人: Claude〔実装の細部。CLAUDE.md §5〕): 4 を置き換え、C++ の試験の表を消した
+- テストの試験の表は data/packages/combustion_test だけに書く。テストは `tests/reaction_test_table.h` の `sim::MakeCombustionTestTable()`
+  (リポジトリの data/packages/combustion_test を ReadPackageFolder → LoadPackages → ReadReactionTableDefinition で読んだ定義。型検査はしない)を使う。
+  関数の名前は前と同じなので、各テストの差分は include の 1 行(`"sim/reaction_test_table.h"` → `"reaction_test_table.h"`)と、tests/CMakeLists.txt の末尾の
+  一覧(`bicameral_test_reaction_table` をリンクするテスト)だけ。engine/src/sim/reaction_test_table.* は消した(ランタイムはもともと使っていない)。
+- 定義の並びは名前のバイト順(パッケージの鍵の順)で、C++ の表の並びと違う。ベイクは名前の順に並べ直す(ADR-0032)のでベイクした表はビットで同じ。
+  並びの番号で定義を触っていた reaction_test の壊れた表の試験は名前で引く形にした。
+- 試験の中で作る特別な表(上限の表 tests/reaction_limits_table.h・溢れの表・物質を足す・消す表 MakeSpeciesChangedTestTable)は C++ のまま
+  (試験の意図がコードの横に見える方が読みやすい。MakeSpeciesChangedTestTable はパッケージの表に手を加えて作る)。
+- 中身が 2 か所に無くなったので「片方を変えたらもう片方も」の検査(reaction_package の TestSameAsCppTable)は消し、パッケージがベイクできて数が合うことと、
+  exe の横の写しがリポジトリのパッケージとビットで同じことを見る。reaction_package_scene はランタイムの入り口で読んだ表とテストの試験の表で同じ場面を比べる。
+- 代案: テストもランタイムと同じ LoadReactionTable(exe の横の写し)を使う — 定義(ベイクの前)に手を加えるテストが多く、ベイク済みの表しか返さないので採らない。
+  特別な表もパッケージにする — Luau のファイルが試験ごとに増え、試験の意図(上限に当たる形)がコードから離れるので採らない。

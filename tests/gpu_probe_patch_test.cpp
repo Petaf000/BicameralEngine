@@ -24,10 +24,10 @@
 #include "gpu/device.h"
 #include "gpu/queue.h"
 #include "gpu_test_options.h"
+#include "reaction_test_table.h"
 #include "save/replay_file.h"
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli・probe_patch.hlsli の定数

@@ -1,8 +1,8 @@
 // reaction_table.h — 反応表の定義(人が書く値)と、GPU と CPU リファレンスが読む整数の表へのベイク(02 §1〜2。T-0014)。
 //
 // データの流れ:
-//   ReactionTableDefinition(元素・物質・規則。SI の値。C++ に手で書く〔sim/reaction_test_table〕か、
-//   Luau のパッケージから読む〔script/reaction_package。T-0021〕)
+//   ReactionTableDefinition(元素・物質・規則。SI の値。Luau のパッケージから読む〔script/reaction_package。T-0021〕か、
+//   試験の中で C++ に書く〔上限・溢れの試験の表〕。試験の表は data/packages/combustion_test だけ〔T-0169〕)
 //   → BakeReactionTable(整数の数学ライブラリだけで計算する。R7)→ BakedReactionTable(RxSpecies・RxRule・索引・速度の表)
 //   → ReactionTableView(CPU の RxStepCellWait 用)/ そのままバッファに載せて GPU へ(shaders/sim/reaction_cells.hlsl)
 //

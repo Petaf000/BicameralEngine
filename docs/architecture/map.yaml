@@ -309,7 +309,7 @@ views:
           code: "tests/reaction_wait_test.cpp::TestSleepMatchesFull", ticket: T-0105 }
       - { id: reactiontable, group: simlib, label: "BakeReactionTable<br/>定義 → 整数の表(元素の釣り合いの検査)",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014, doc: docs/design/02-reaction-system.md,
-          note: "Arrhenius を温度 1 K ごとの表に(整数の ln・exp。R7)。試験の表は reaction_test_table(物質 7・規則 5)" }
+          note: "Arrhenius を温度 1 K ごとの表に(整数の ln・exp。R7)。試験の表は data/packages/combustion_test(物質 8・規則 7。テストも読む。T-0169)" }
       - { id: reactiontest, group: tests, label: "reaction_test<br/>ベイクの検査・保存則・取り合い・並び・遅い反応",
           code: "tests/reaction_test.cpp::TestClosedCellBurn", ticket: T-0014 }
       - { id: gpureactiontest, group: tests, label: "gpu_reaction_test<br/>セル 4096 × 400 刻みを GPU と CPU で比べる",
@@ -754,7 +754,7 @@ views:
       - { id: rtload, group: rt, label: "起動時に表を読む<br/>(exe の横の data/packages → ベイク → GPU)",
           code: "engine/src/script/reaction_table_loader.cpp::LoadReactionTable", ticket: T-0157,
           doc: docs/design/02-reaction-system.md,
-          note: "ゲーム本体・エディタ・テストの入り口(ADR-0033)。読めない・検査で落ちたら窓を開く前に止まる。今の場面は C++ の表と毎刻みビットで同じ(reaction_package_scene)" }
+          note: "ゲーム本体・エディタ・テストの入り口(ADR-0033)。読めない・検査で落ちたら窓を開く前に止まる。今の場面はテストの試験の表〔tests/reaction_test_table。T-0169〕と毎刻みビットで同じ(reaction_package_scene)" }
       - { id: table, group: rt, status: planned, label: "反応表・物質の表<br/>(版つきのバイナリ)", ticket: T-0002 }
       - { id: gen, group: rt, status: planned, label: "決定的な生成(シード)+ 差分", doc: docs/design/05-world-data.md }
       - { id: vram, group: rt, status: planned, label: "多重解像度の疎な木<br/>(VRAM 常駐の世界)",

@@ -24,8 +24,8 @@
 #include "core/log.h"
 #include "core/singleton.h"
 #include "multires_uniform_scene.h"
+#include "reaction_test_table.h"
 #include "sim/multires_nest.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::multires;

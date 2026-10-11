@@ -21,8 +21,8 @@
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
 #include "multires_uniform_scene.h"
+#include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::multires;

@@ -21,8 +21,8 @@
 #include "core/log.h"
 #include "core/singleton.h"
 #include "reaction_test_cells.h"
+#include "reaction_test_table.h"
 #include "sim/reaction_table.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::reaction;

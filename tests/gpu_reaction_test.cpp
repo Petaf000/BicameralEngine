@@ -15,8 +15,8 @@
 #include "gpu_test_options.h"
 #include "reaction_limits_table.h"
 #include "reaction_test_cells.h"
+#include "reaction_test_table.h"
 #include "sim/reaction_table.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::reaction;

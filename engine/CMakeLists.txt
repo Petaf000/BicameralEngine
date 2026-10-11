@@ -45,7 +45,6 @@ endif()
 # 評価の本体は shaders/common/reaction.hlsli(HLSL と共通)。浮動小数点は禁止(engine/src/sim は検査の対象)。
 add_library(bicameral_reaction STATIC
   src/sim/reaction_table.cpp
-  src/sim/reaction_test_table.cpp
   src/sim/species_remap.cpp  # 物質を足す・消す表の差し替えの付け替え(T-0223・ADR-0065)
 )
 target_include_directories(bicameral_reaction PUBLIC src)

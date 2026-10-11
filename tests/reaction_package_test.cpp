@@ -1,9 +1,9 @@
 // reaction_package_test.cpp — Luau の反応表 → 定義 → ベイク(T-0021、script/reaction_package・sim/reaction_table)を CPU だけで確かめる。
-// 見るもの: 試験のパッケージ(data/packages/combustion_test)をベイクすると、C++ の試験の表(MakeCombustionTestTable)と
-//           GPU に載せる配列がビットで同じ / 定義の並び・A の書き方に依らない / 形の誤り(欄の綴り・小数・範囲)と
+// 見るもの: 試験のパッケージ(data/packages/combustion_test。テストの試験の表 MakeCombustionTestTable もこれを読む。T-0169)が
+//           ベイクできて物質と規則の数が合う / 定義の並び・A の書き方に依らない / 形の誤り(欄の綴り・小数・範囲)と
 //           中身の誤り(元素の釣り合い・知らない物質)を落とす / 文献の反応熱の食い違いは警告 / Mod が物質と規則を足せる /
 //           10 進の数の読み方。
-//           (T-0157)ランタイムの入り口 LoadReactionTable: exe の横の data/packages(ビルドが写したもの)から C++ の表とビットで同じ表を作る /
+//           (T-0157)ランタイムの入り口 LoadReactionTable: exe の横の data/packages(ビルドが写したもの)からリポジトリのパッケージとビットで同じ表を作る /
 //           フォルダが無い・ゲーム本体が無い・ゲーム本体が読めない・Mod が形や検査で落ちる → 失敗(起動を止める)/
 //           Luau として読めない Mod だけは除いて続け、rejected に残す。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
@@ -19,9 +19,9 @@
 #include <utility>
 #include <vector>
 
+#include "reaction_test_table.h"
 #include "script/luau_sandbox.h"
 #include "script/reaction_table_loader.h"
-#include "sim/reaction_test_table.h"
 
 namespace {
 
@@ -121,26 +121,23 @@ namespace {
             std::printf("  警告: %s\n", warning.c_str());
     }
 
-    // --- 試験の表と同じ ---
+    // --- 試験のパッケージ(C++ の写しは T-0169 で消した。中身はパッケージだけ)---
 
-    void TestSameAsCppTable() {
+    void TestShippedPackage() {
         const auto luau = BakePackages(BasePackages());
-        const auto cpp = BakeReactionTable(MakeCombustionTestTable());
-        if (!luau || !cpp) {
-            std::printf("FAILED: ベイクできない: %s / %s\n", luau ? "" : luau.error().c_str(),
-                        cpp ? "" : cpp.error().c_str());
+        if (!luau) {
+            std::printf("FAILED: ベイクできない: %s\n", luau.error().c_str());
             ++failureCount;
 
             return;
         }
 
-        EXPECT(SameTable(*luau, *cpp));
         EXPECT(luau->species.size() == 9 && luau->rules.size() == 7);  // 仮の魔素の物質 1・規則 2 を含む(T-0225)
         EXPECT(luau->rates.size() == luau->rules.size() * reaction::RX_RATE_TABLE_KELVINS);
         PrintWarnings(*luau);
-        EXPECT(luau->warnings.empty() && cpp->warnings.empty());  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
-        std::printf("試験のパッケージ: 物質 %zu・規則 %zu・速度の表 %zu バイト(C++ の表とビットで同じ)\n",
-                    luau->species.size() - 1, luau->rules.size(), luau->rates.size() * sizeof(uint64_t));
+        EXPECT(luau->warnings.empty());  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
+        std::printf("試験のパッケージ: 物質 %zu・規則 %zu・速度の表 %zu バイト\n", luau->species.size() - 1,
+                    luau->rules.size(), luau->rates.size() * sizeof(uint64_t));
     }
 
     // --- 並びと書き方に依らない ---
@@ -308,20 +305,20 @@ namespace {
 
     void TestLoaderReadsShippedTable() {
         const auto loaded = LoadReactionTable({});
-        const auto cpp = BakeReactionTable(MakeCombustionTestTable());
-        if (!loaded || !cpp) {
+        const auto source = BakePackages(BasePackages());
+        if (!loaded || !source) {
             std::printf("FAILED: data/packages を読めない: %s\n", loaded ? "" : loaded.error().c_str());
             ++failureCount;
 
             return;
         }
 
-        EXPECT(SameTable(loaded->table, *cpp));
+        EXPECT(SameTable(loaded->table, *source));
         EXPECT(loaded->packageRoot == DefaultPackageRoot());
         EXPECT(loaded->loadOrder == std::vector<std::string>{std::string(BASE_PACKAGE)});
         EXPECT(loaded->rejected.empty() && loaded->overrides.empty() && !loaded->modifiedWorld);
         EXPECT(loaded->tableVersion != 0);
-        std::printf("ランタイムの表: %s(版 %016llx。C++ の表とビットで同じ)\n",
+        std::printf("ランタイムの表: %s(版 %016llx。リポジトリのパッケージとビットで同じ)\n",
                     reinterpret_cast<const char*>(loaded->packageRoot.generic_u8string().c_str()),
                     static_cast<unsigned long long>(loaded->tableVersion));
     }
@@ -385,8 +382,8 @@ namespace {
         // Luau として読めない Mod は除いて続ける(ADR-0031 の 3)。表はゲーム本体だけのもの
         WriteBaseAndMod(root / "skip", "broken_syntax", "return {");
         const auto skipped = LoadReactionTable({.packageRoot = root / "skip"});
-        const auto cpp = BakeReactionTable(MakeCombustionTestTable());
-        EXPECT(skipped && cpp && SameTable(skipped->table, *cpp));
+        const auto base = BakePackages(BasePackages());
+        EXPECT(skipped && base && SameTable(skipped->table, *base));
         EXPECT(skipped && skipped->rejected.size() == 1 && skipped->rejected.front().package == "broken_syntax");
 
         fs::remove_all(root, ignored);
@@ -395,7 +392,7 @@ namespace {
 }  // namespace
 
 int main() {
-    TestSameAsCppTable();
+    TestShippedPackage();
     TestOrderIndependent();
     TestRejectsBrokenTables();
     TestModAddsSpeciesAndRule();

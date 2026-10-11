@@ -28,9 +28,9 @@
 #include "gpu/queue.h"
 #include "gpu/resources.h"
 #include "gpu_test_options.h"
+#include "reaction_test_table.h"
 #include "sim/probe_sim.h"
 #include "sim/probe_trace.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)

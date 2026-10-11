@@ -21,8 +21,8 @@
 #include "gpu_test_options.h"
 #include "multires_activity_scene.h"
 #include "multires_conduction_scene.h"
+#include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::multires;

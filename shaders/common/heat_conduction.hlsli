@@ -10,7 +10,7 @@
 //   - 1/8 の上限: 6 面の重みの合計が 6/8 < 1 なので、新しい温度は自分と隣の温度の凸結合になり、行き過ぎない(陽解法の安定)。
 //   - 係数は「2^-32 mJ / mK」の整数で持つ(割り算を面ごとに使わない。04 §6・ADR-0010)。
 // コンダクタンス(mW/K)= セルの伝導率(物質量で重み付けた平均、mW/(m·K))× 面積 ÷ 距離(0.25 m² ÷ 0.5 m = 0.5 m)。
-// 伝導率は物質の値。試験の表の値は、放射と対流(M3)が無い間も燃え広がりが見えるよう大きくしてある(reaction_test_table.cpp)。
+// 伝導率は物質の値。試験の表の値は、放射と対流(M3)が無い間も燃え広がりが見えるよう大きくしてある(data/packages/combustion_test/units.luau)。
 #ifndef BICAMERAL_HEAT_CONDUCTION_HLSLI
 #define BICAMERAL_HEAT_CONDUCTION_HLSLI
 

@@ -27,9 +27,9 @@
 #include "core/singleton.h"
 #include "gpu/device.h"
 #include "gpu_test_options.h"
+#include "reaction_test_table.h"
 #include "sim/lab_gauge.h"
 #include "sim/lab_session.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 

@@ -40,20 +40,20 @@
 
 ### 2.1 実装(T-0021。`engine/src/script/reaction_package.cpp`・`engine/src/sim/reaction_table.cpp`・ADR-0032)
 - 流れ: パッケージ(13 §2.2)→ 分類 `elements`・`species`・`reactions` を `ReadReactionTableDefinition` が定義に読む → `BakeReactionTable`。
-  C++ に手で書いた定義(`MakeCombustionTestTable`)も同じベイクを通る。
+  試験の中で C++ に書く特別な表(上限・溢れの表)も同じベイクを通る。
 - **読むときに落とすもの(形)**: 知らない欄・表でない値・整数でない数(小数・±2^53 の外)・範囲の外(係数 0 など)・A の書き方。
   値は整数だけで、単位は欄の名前に書く(倍精度の丸めで機械ごとに値が変わる余地を作らない)。A は 10 進の文字列("2.8e19")でも書ける。
 - **ベイクが落とすもの(中身)**: 元素の釣り合い(1)・知らない元素と物質・反応物と生成物の数(1〜3)・次数 1 の反応物の数(1〜2)・名前の重なり・速度の範囲(4)。
 - **エネルギー(2)**: 反応熱は生成エンタルピーの差から自動で決まるので、構造的に保存される。文献の反応熱を書いた規則(`reaction_enthalpy_j_per_mol`)は、
   生成エンタルピーの差(298.15 K)と 1 kJ/mol より違えば警告(`BakedReactionTable::warnings`)。表は生成エンタルピーの差を使う。
 - **並びに依らない**: 元素・物質・規則・規則の項を名前のバイト順に並べてから ID を振る。A の仮数の末尾の 0 は指数へ移す。
-  同じ中身なら、C++ の配列の順・Luau の表の順・Mod を入れた順に依らず同じバイト列の表になる。
-- 試験の表(公開用。現実の元素と化学 + 触るための仮の魔素〔下〕): `data/packages/combustion_test`。ベイクすると C++ の試験の表とビットで同じ(`reaction_package_test`)。
+  同じ中身なら、定義の配列の順・Luau の表の順・Mod を入れた順に依らず同じバイト列の表になる。
+- 試験の表(公開用。現実の元素と化学 + 触るための仮の魔素〔下〕): `data/packages/combustion_test`。テストもこれを読む(`tests/reaction_test_table.h` の `MakeCombustionTestTable`。C++ の写しは T-0169 で消した。ADR-0033 追記)。
 - **ランタイムが読む表(T-0157・ADR-0033)**: ゲーム本体・エディタは C++ の表ではなく、exe の横の `data/packages`(ビルドがリポジトリの `data/` を写す。
   `--packages <dir>` で変えられる)のパッケージを起動時にベイクして GPU へ上げる(`script::LoadReactionTable`)。ゲーム本体のパッケージは今は `combustion_test`。
   フォルダが無い・ゲーム本体が読めない・形の誤り・ベイクの検査で落ちる → 窓を開く前に起動を止める(半端な表で世界を動かさない)。
   Luau として読めない Mod だけは除いて続け、ログに警告を出す(ADR-0031 の 3)。文献の反応熱の食い違いもログの警告。
-  C++ の試験の表はテストの比較用に残す(`reaction_package_scene` が今の場面を両方で進めて毎刻みビットで同じことを確かめる)。
+  `reaction_package_scene` がランタイムの入り口で読んだ表とテストの試験の表で今の場面を進め、毎刻みビットで同じことを確かめる。
 - **触るための仮の魔素(T-0225・D-449・D-451)**: 試験の表に元素 `mana_test`・気体の物質 `mana_test`・魔素を触媒にする規則 2 本
   (`mana_test_catalyzed_cellulose_combustion`: 魔素があると木が約 400 K から燃える / `mana_test_catalyzed_boudouard`: 魔素があると吸熱の
   Boudouard が低い温度で進む)。名前も値も試験用の仮のもので、ゲームの中身ではない(D-006)。エディタ(反応表のパネル・実験室・筆)で値を

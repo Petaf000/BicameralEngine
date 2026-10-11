@@ -20,9 +20,9 @@
 #include <string_view>
 #include <vector>
 
+#include "reaction_test_table.h"
 #include "sim/lab_box.h"
 #include "sim/lab_gauge.h"
-#include "sim/reaction_test_table.h"
 
 namespace {
 

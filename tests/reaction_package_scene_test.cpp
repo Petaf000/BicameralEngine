@@ -2,7 +2,8 @@
 // 前と同じ結果になるかを CPU リファレンス(sim::ProbeReference。GPU とビット一致を別のテストが確かめている)で確かめる。
 //
 // 見るもの: exe の横の data/packages(ビルドがリポジトリの data/packages を写したもの)を、ランタイムと同じ入り口
-//           (script::LoadReactionTable)で読んだ表と、C++ の試験の表(MakeCombustionTestTable。T-0157 の前にランタイムが使っていた)で、
+//           (script::LoadReactionTable)で読んだ表と、テストが使う試験の表(MakeCombustionTestTable。リポジトリの
+//           data/packages を読む。T-0169)で、
 //   - 仮の世界(空気の中の木箱。frame_loop の --auto-ignite と同じ壁に火をつける)を進め、刻みごとの状態のハッシュ・エネルギーの合計が同じ
 //   - 最後の状態(全部のセルのバイト)と熱のキャッシュ・抽出(描画が読むもの)がバイトで同じ
 //   - 反応が起きている(炭と CO2 ができた。燃える場面を比べている)
@@ -18,9 +19,9 @@
 #include <vector>
 
 #include "core/aliases.h"
+#include "reaction_test_table.h"
 #include "script/reaction_table_loader.h"
 #include "sim/probe_sim.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -61,10 +62,10 @@ namespace {
 
     // --- 同じ場面を 2 つの表で進めて比べる ---
 
-    void TestSameScene(const BakedReactionTable& package, const BakedReactionTable& cpp) {
+    void TestSameScene(const BakedReactionTable& package, const BakedReactionTable& testTable) {
         const std::vector<ProbeCommand> commands = MakeCommands();
         ProbeReference fromPackage(package);
-        ProbeReference fromCpp(cpp);
+        ProbeReference fromTestTable(testTable);
 
         const uint64_t initialHash = ProbeStateHash(
             fromPackage.State(0));  // State は 2 世代を使い回すので、先に取っておく
@@ -72,12 +73,12 @@ namespace {
         for (uint64_t tick = 0; tick <= TOTAL_TICKS; ++tick) {
             if (tick > 0) {
                 fromPackage.Advance(tick - 1, commands);
-                fromCpp.Advance(tick - 1, commands);
+                fromTestTable.Advance(tick - 1, commands);
             }
 
-            const bool same = ProbeStateHash(fromPackage.State(tick)) == ProbeStateHash(fromCpp.State(tick)) &&
-                              ProbeEnergySum(fromPackage.State(tick)) == ProbeEnergySum(fromCpp.State(tick)) &&
-                              fromPackage.ScheduledBlocks() == fromCpp.ScheduledBlocks();
+            const bool same = ProbeStateHash(fromPackage.State(tick)) == ProbeStateHash(fromTestTable.State(tick)) &&
+                              ProbeEnergySum(fromPackage.State(tick)) == ProbeEnergySum(fromTestTable.State(tick)) &&
+                              fromPackage.ScheduledBlocks() == fromTestTable.ScheduledBlocks();
             if (!same && firstDifferentTick == SIZE_MAX)
                 firstDifferentTick = tick;
         }
@@ -89,21 +90,21 @@ namespace {
 
         // --- 最後の状態・熱のキャッシュ・抽出がバイトで同じ ---
         const std::span<const reaction::RxCell> last = fromPackage.State(TOTAL_TICKS);
-        EXPECT(SameBytes(last, fromCpp.State(TOTAL_TICKS)));
-        EXPECT(SameBytes(fromPackage.Caches(TOTAL_TICKS), fromCpp.Caches(TOTAL_TICKS)));
+        EXPECT(SameBytes(last, fromTestTable.State(TOTAL_TICKS)));
+        EXPECT(SameBytes(fromPackage.Caches(TOTAL_TICKS), fromTestTable.Caches(TOTAL_TICKS)));
 
         const std::vector<uint32_t> extraction = MakeProbeExtractionCells(last, fromPackage.Caches(TOTAL_TICKS),
                                                                           ProbeViewSpecies(package));
-        const std::vector<uint32_t> cppExtraction = MakeProbeExtractionCells(
-            fromCpp.State(TOTAL_TICKS), fromCpp.Caches(TOTAL_TICKS), ProbeViewSpecies(cpp));
-        EXPECT(SameBytes(std::span<const uint32_t>(extraction), std::span<const uint32_t>(cppExtraction)));
+        const std::vector<uint32_t> testExtraction = MakeProbeExtractionCells(
+            fromTestTable.State(TOTAL_TICKS), fromTestTable.Caches(TOTAL_TICKS), ProbeViewSpecies(testTable));
+        EXPECT(SameBytes(std::span<const uint32_t>(extraction), std::span<const uint32_t>(testExtraction)));
 
         // --- 燃える場面を比べている(何も起きない世界どうしで一致しても意味がない)---
         EXPECT(HasSpecies(package, last, "carbon"));
         EXPECT(HasSpecies(package, last, "carbon_dioxide"));
         EXPECT(ProbeStateHash(last) != initialHash);
 
-        std::printf("刻み %llu まで: 状態のハッシュ %016llx(パッケージの表と C++ の表で毎刻み同じ)\n",
+        std::printf("刻み %llu まで: 状態のハッシュ %016llx(ランタイムの表とテストの試験の表で毎刻み同じ)\n",
                     static_cast<unsigned long long>(TOTAL_TICKS),
                     static_cast<unsigned long long>(ProbeStateHash(last)));
     }
@@ -200,10 +201,10 @@ int main(int argc, char** argv) {
     const std::span<char*> args(argv, static_cast<size_t>(argc));
     // ランタイム(frame_loop)と同じ入り口・同じ既定のフォルダ
     const auto loaded = script::LoadReactionTable({});
-    const auto cpp = BakeReactionTable(MakeCombustionTestTable());
-    if (!loaded || !cpp) {
+    const auto testTable = BakeReactionTable(MakeCombustionTestTable());
+    if (!loaded || !testTable) {
         std::printf("FAILED: 表を作れない: %s / %s\n", loaded ? "" : loaded.error().c_str(),
-                    cpp ? "" : cpp.error().c_str());
+                    testTable ? "" : testTable.error().c_str());
 
         return 1;
     }
@@ -218,7 +219,7 @@ int main(int argc, char** argv) {
         return MeasureDistribution(loaded->table, ticks, every == 0 ? 1 : every);
     }
 
-    TestSameScene(loaded->table, *cpp);
+    TestSameScene(loaded->table, *testTable);
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);

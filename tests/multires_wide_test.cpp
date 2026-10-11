@@ -20,8 +20,8 @@
 #include "multires_limits_scene.h"
 #include "multires_test_scene.h"
 #include "multires_wide_scene.h"
+#include "reaction_test_table.h"
 #include "sim/multires_nest.h"
-#include "sim/reaction_test_table.h"
 
 using namespace bicameral;
 using namespace bicameral::multires;

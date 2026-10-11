@@ -19,9 +19,9 @@
 #include <vector>
 
 #include "core/aliases.h"
+#include "reaction_test_table.h"
 #include "script/reaction_hot_reload.h"
 #include "sim/probe_sim.h"
-#include "sim/reaction_test_table.h"
 #include "sim/species_remap.h"
 
 using namespace bicameral;
@@ -32,7 +32,7 @@ namespace {
     constexpr uint64_t SWAP_TICK = 4;  // debug の CPU リファレンスは 1 刻み約 5 秒(全部のセルを毎刻み計算する)
     constexpr uint64_t TOTAL_TICKS = 10;
     constexpr int32_t ROOM_MILLIKELVIN = 300000;
-    constexpr uint32_t GAS_CONDUCTIVITY = 18 * 5000;  // 試験の倍率(reaction_test_table.cpp と同じ形)
+    constexpr uint32_t GAS_CONDUCTIVITY = 18 * 5000;  // 試験の倍率(data/packages/combustion_test/units.luau と同じ形)
 
     int failureCount = 0;
 

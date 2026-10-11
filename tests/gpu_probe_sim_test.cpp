@@ -39,9 +39,9 @@
 #include "gpu/resources.h"
 #include "gpu_test_options.h"
 #include "reaction_limits_table.h"
+#include "reaction_test_table.h"
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
-#include "sim/reaction_test_table.h"
 #include "sim/species_remap.h"
 
 using namespace bicameral;
