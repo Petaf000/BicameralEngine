@@ -31,6 +31,8 @@ T-0320 の時間線(いちばん細かい小刻みの列。各 micro ではそ�
   release でも gas_tree・gpu_gas_tree・gpu_gas_tree_warp が通過(9 場面とも一致)。費用は T-0358(負荷ありの値。木の段が超線形に遅いことが分かった → T-0374)。
 - clang-tidy(gpu_gas_tree.cpp・gas_tree.cpp・gpu_gas_tree_test.cpp): 自分の分 0 件(LimitMovedAmounts の大きさの警告は数える所を関数に出して直した。
   fixed.hlsli の designated initializer の警告は前からある)。archmap --check: OK。ADR-0117 追記・07 §2.5・map.yaml。
+- 2026-10-12(Claude・作業役 wt2。中断からの再開): 書きかけは無く、T-0356・T-0358 はコミット済みだった。main(1f6530c。GPU の順番待ち)へ rebase(衝突なし)。
+  debug のビルド(警告 0)・gas_reference・gas_tree・gpu_gas・gpu_gas_warp・gpu_gas_tree・gpu_gas_tree_warp が通過(9 場面とも毎刻みビット一致)。archmap --check: OK。
 
 ## 引き継ぎメモ
 - 使い方は T-0209 と同じ(`GpuGasTree::Create(device, tree)`。tree = `MakeGasTree(..., GasTreeOptions{.subcycleBaseLevel = 0, .maxSubcycleGap = 1})` でもよい)。
