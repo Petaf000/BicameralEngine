@@ -241,6 +241,11 @@ views:
           note: "煙のにじみを約 1/6 に(広がりの増え方)。端数は (シード, 小刻み, 面, 用途) の乱数で丸め、微量の成分も動く(R6・D-428)。ADR-0043 §6" }
       - { id: gastest, group: tests, label: "gas_reference_test<br/>保存・静止大気・熱い泡・風で煙<br/>煙のにじみ・微量の成分",
           code: "tests/gas_reference_test.cpp::TestClosedBoxConservation", ticket: T-0026 }
+      - { id: gastree, group: simlib, label: "StepGasTree<br/>気体の多重解像度の木(CPU)<br/>レベルをまたぐ面は細かい側・粗い側は端数つき",
+          code: "engine/src/sim/gas_tree.cpp::StepGasTree", ticket: T-0208, doc: docs/design/07-transport.md,
+          note: "レベル k の単位 8^-k。物質・運動量・全エネルギーをビット単位で保存。全部レベル 0 なら gas_reference と毎刻みビット一致。ADR-0117" }
+      - { id: gastreetest, group: tests, label: "gas_tree_test<br/>1 レベルとビット一致・2 レベルの保存<br/>静止大気・境を通る圧力の波",
+          code: "tests/gas_tree_test.cpp::TestClosedBoxConservationAcrossLevels", ticket: T-0208 }
       - { id: gpugas, group: simlib, label: "GpuGas::RecordStep<br/>気体 G3a: 1 レベルの箱を GPU の Compute で<br/>1 小刻み = 面の段 4 つ・セルの段 5 つ",
           code: "engine/src/sim/gpu_gas.cpp::GpuGas::RecordStep", ticket: T-0185, doc: docs/design/07-transport.md,
           note: "CPU は面ごとに両側へ足し引き、GPU はセルが自分の 6 面を集める(整数なので同じ値)。箱の外との出入りは帳簿へ 64bit の原子的な足し算" }
@@ -471,6 +476,8 @@ views:
       - [physicsworld, physicsscene]
       - [gastest, gasreference]
       - [gasreference, gasmoved]
+      - [gastree, gasreference, "1 セルの部品"]
+      - [gastreetest, gastree]
       - [gpugas, gasstephlsl, "9 段 × 小刻み"]
       - [gasstephlsl, gasgpuhlsli]
       - [gpugas, gasgpuhlsli]

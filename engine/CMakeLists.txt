@@ -67,9 +67,10 @@ add_library(bicameral_multires STATIC
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
 
-# --- gas: 気体の流れの CPU リファレンス G1(07 §2.1・T-0026・ADR-0043)。1 レベルの箱だけ。GPU を知らない。浮動小数点は禁止 ---
+# --- gas: 気体の流れの CPU リファレンス(1 レベルの箱 G1・G2〔07 §2.1・T-0026・ADR-0043〕と多重解像度の木〔07 §2.5・T-0208・ADR-0117〕)。GPU を知らない。浮動小数点は禁止 ---
 add_library(bicameral_gas STATIC
   src/sim/gas_reference.cpp
+  src/sim/gas_tree.cpp
 )
 target_include_directories(bicameral_gas PUBLIC src)
 target_link_libraries(bicameral_gas PUBLIC bicameral_fixed)

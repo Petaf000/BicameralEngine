@@ -12,42 +12,14 @@
 #include <limits>
 
 #include "common/fixed.hlsli"
+#include "sim/gas_internal.h"
 
 namespace bicameral::sim {
 
-    namespace {
+    // 小刻みの部品(gas_tree.cpp も使う。宣言と定数は gas_internal.h)
+    namespace gas_detail {
 
         namespace fx = bicameral::fx;
-
-        // --- 物理の定数(整数。導き方はコメントに)---
-
-        // 理想気体: p(µPa)= n(µmol)× T(mK)× R ÷ V × 1e-3 = n × T × 0.0665157(R = 8.314462618 J/(mol·K)・V = 0.125 m³)。Q32
-        constexpr uint64_t PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 = 285682760;
-
-        // 層の重さで下がる圧力: m(mg)× 1e-6 × g ÷ A(0.25 m²)= m × 39.2266 µPa(g = 9.80665 m/s²)
-        constexpr uint64_t HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 = 392266;
-
-        constexpr uint64_t GRAVITY_MICROMETER_PER_SECOND2 = 9806650;
-
-        // 重さの仕事: 質量 1 mg が 1 セル(0.5 m)上がる仕事 = 1e-6 kg × g × 0.5 m = 4.903325 µJ(× これ ÷ 1e6)
-        constexpr uint64_t GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 = 4903325;
-
-        // 気体定数 R = 8.314462618 J/(mol·K) = 8314.462618 nJ/(µmol·K)(× これ ÷ 1e6。α の γ を作る)
-        constexpr uint64_t GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6 = 8314462618;
-
-        // 運動量の 2 乗を運動エネルギーへ: ½ m v² = P² × 2^-41 ÷ m(µJ。P は mg·2^-20 m/s、m は mg)
-        constexpr uint32_t KINETIC_SHIFT = 41;
-        constexpr uint64_t MAX_MOMENTUM = (uint64_t)1
-                                          << 52;  // 2 乗を 41 ずらした 3 軸の和が 64bit に収まる(150 g で約 3 万 m/s)
-        constexpr uint64_t MICRO = 1000000;
-        constexpr uint64_t ONE_Q32 = (uint64_t)1 << 32;
-        constexpr uint64_t LOW_32_BITS = ONE_Q32 - 1;
-
-        // 1 セルの物質量の上限(µmol)。移す物質量を Q32 の 64bit で計算するため(0.125 m³ に 2147 mol = 大気の約 400 倍)
-        constexpr uint64_t MAX_CELL_AMOUNT = (uint64_t)1 << 31;
-
-        // 丸めの乱数の用途(FxHash64。R6)
-        constexpr uint32_t GAS_ROUNDING_PURPOSE = 0x47610001u;
 
         // 面の片側(箱の中のセル・開いた境界の外・壁)
         enum class SideKind : uint8_t {
@@ -676,7 +648,9 @@ namespace bicameral::sim {
             box.cells = std::move(next);
         }
 
-    }  // namespace
+    }  // namespace gas_detail
+
+    using namespace gas_detail;  // 下の公開の関数から小刻みの部品を使う
 
     GasCoefficients MakeGasCoefficients(const GasConfig& config) {
         assert(config.substeps > 0 && config.soundSpeedMmPerS > 0);
