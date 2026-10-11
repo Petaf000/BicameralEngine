@@ -29,6 +29,9 @@
   溢れの頁の見出しを引く道具は shaders/sim/multires_wide_access.hlsli に分けた(刻む段と共有)。ADR-0052 追記 5。
   試験: gpu_multires_test の RunRefineWide(上限の場面を溢れの世界で刻み、刻み 6 に根から 2 段の鎖と豊かな子から 1 段を細かくして 12 刻み。子は 9 種)が
   HW・WARP で CPU と毎刻みビット一致・捨てた 0・待たせた 0。既定の世界のシェーダーは #ifdef の外を変えていない。
+  テスト: debug(警告なし)の reaction・multires・multires_wide・_activity・_quiet・_uniform・_conduction・_subcycle・_implicit・_implicit_tree が通過
+  (debug の gpu_multires_warp は 1500 s の枠で打ち切り = 未確認)。main(9392309)へ rebase 後、release(警告なし)の multires_wide・gpu_multires_wide(HW 288 s)・
+  gpu_multires_warp(99 s)が通過。tidy は流していない。
 
 ## 引き継ぎメモ
 - 溢れを使う世界の要求の処理で使えるのは「細かくする(本物の要求)」まで。粗くする要求は、子に溢れがあると溢れを落とす(インラインだけ粗くする。
