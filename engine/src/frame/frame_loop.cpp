@@ -1149,11 +1149,8 @@ namespace bicameral::frame {
             if (list == nullptr)
                 return false;
 
-            // 表を差し替えたら、保存点(このフレームの先頭で写したものも)は前の表の世界なので捨てる(戻ると表と食い違う。ADR-0047)
-            if (!m_frameTableSwaps.empty()) {
-                m_sim.DiscardSavePointsAfter(0);
-                m_frameTableSwaps.clear();
-            }
+            // 表を差し替えたフレームなら、保存点(このフレームの先頭で写したものも)は ProbeSim が全部捨てた(ADR-0047 §6・T-0299)
+            m_frameTableSwaps.clear();
 
             if (extract) {
                 // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
@@ -1525,9 +1522,10 @@ namespace bicameral::frame {
                 return;
             }
 
-            // 記録中は、反応表の差し替えより前へ戻さない(巻き戻しは差し替えの印を足し直さないので、記録から落ちる。T-0278)
-            if (!m_options.recordPath.empty() && m_lastTableSwapTick && *m_lastTableSwapTick >= tick) {
-                Log(Channel::Sim, Level::Warning, "刻み {} へ巻き戻せない: 記録中に刻み {} で反応表を差し替えた", tick,
+            // 反応表の差し替えより前へは戻さない(保存点は世界だけを写すので、戻ると前の表の世界を新しい表で刻む。記録中は差し替えの印も
+            // 記録から落ちる)。差し替えると保存点は全部捨てる(ProbeSim)ので、ここは守り(ADR-0047 §6・T-0278・T-0299)
+            if (m_lastTableSwapTick && *m_lastTableSwapTick >= tick) {
+                Log(Channel::Sim, Level::Warning, "刻み {} へ巻き戻せない: 刻み {} で反応表を差し替えた", tick,
                     *m_lastTableSwapTick);
                 return;
             }
@@ -1686,9 +1684,13 @@ namespace bicameral::frame {
             brush.NoteUndone(firstTick, rewindTick, m_latestHash);
         }
 
-        // --auto-rewind: 保存点が 2 つできたら、古い方へ 1 回だけ戻す
+        // --auto-rewind: 保存点が 2 つできたら、古い方へ 1 回だけ戻す。--auto-reload と一緒なら、最初に表を差し替えた後にできた
+        // 保存点へ(差し替えより前の保存点は捨てられている。戻した後も記録の再生と同じハッシュ列になるか。T-0299)
         void FrameLoop::CheckAutoRewind() {
             if (!m_options.autoRewind || m_rewindCount > 0 || m_rewindRequest != UINT64_MAX)
+                return;
+
+            if (m_autoReload && !m_lastTableSwapTick)
                 return;
 
             const std::vector<uint64_t> ticks = SavePointTicks();

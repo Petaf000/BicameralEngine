@@ -708,6 +708,13 @@ namespace bicameral::sim {
         frame.unitCount = input.unitCount;
         TrackCommands(input.commands, NextApplyTick(tick, unit));
 
+        // 表を差し替えたら、保存点(このフレームの先頭で写したものも)は全部捨てる。保存点は世界だけを写し表を持たないので、
+        // 差し替えより前の保存点へ戻ると、前の表の世界を新しい表で刻むことになる(ADR-0047 §6・T-0299)
+        if (!input.tableSwaps.empty()) {
+            for (SavePoint& savePoint : m_savePoints)
+                savePoint.tick = UINT64_MAX;
+        }
+
         return list;
     }
 

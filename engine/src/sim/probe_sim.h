@@ -216,7 +216,7 @@ namespace bicameral::sim {
         // (呼ぶ側が firstTick 以降のコマンドを、このフレームの commands から足し直す)
         uint32_t restoreFrom = NO_SAVE_POINT;
 
-        // --- 反応表の差し替え(T-0139)---
+        // --- 反応表の差し替え(T-0139)。差し替えたフレームを記録すると、保存点は全部空になる(差し替えより前へは戻らない。T-0299)---
         std::span<const ProbeTableSwap> tableSwaps;
     };
 

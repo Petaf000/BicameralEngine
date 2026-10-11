@@ -7,6 +7,10 @@
 //          (戻すときにキューで待っていたコマンドを捨てられること。戻した後も 60・100 で写し直す)
 //       2. 保存点(刻み 100)へ戻して TICKS まで → 一致(巻き戻した後にもう一度巻き戻す)
 //       3. 保存点(刻み 60)へ戻し、コマンドを足し直さずに進める → 刻み 70 のつつきの後で基準と違う(試験が効いていることの確かめ)
+//   - 反応表の差し替え(T-0299・ADR-0047 §6): 同じコマンドで刻み 40 に木の燃焼の速さを 100 倍にした表へ替える。
+//       基準(差し替えあり)を別の ProbeSim で流し、写しながら 120 刻み進む側は、差し替えより前の保存点(刻み 20)が空になり
+//       (戻そうとすると RecordFrame が断る)、差し替えの後の保存点(刻み 60)へ戻して進めると S(61)〜S(TICKS) が基準と全部一致する
+//       (戻した後の世界 = その時の表で刻んだ世界)。差し替えなしの基準とは違う(差し替えが効いている)
 //   - フレームの単位の数はばらばら(刻みの途中で切れる)。保存点の刻みでだけ、境界で切ってから写す
 //   - シェーダーの assert と debug layer のエラーが 0 件
 // 保存点 1 つの大きさと、写す・戻すフレームの GPU の時間をログに出す(docs/perf.md)。
@@ -41,6 +45,7 @@ namespace {
     constexpr uint64_t DIVERGING_POKE_TICK = 70;  // 足し直さないと違いが出る最初のコマンド(保存点 1 の後)
     constexpr std::array<uint32_t, 5> FRAME_UNITS = {3, 7, 5, 11, 4};
     constexpr uint64_t FAR_TICK = uint64_t{1} << 40;  // 保存点の無い時の「次の境界」
+    constexpr uint64_t SWAP_TICK = 40;                // 反応表を差し替える刻み(保存点 0 と 1 の間。T-0299)
 
     constexpr int64_t METER = int64_t{1} << 20;
     constexpr int32_t UNIT = 1 << 30;                 // Q1.30 の 1
@@ -97,12 +102,18 @@ namespace {
                 uint64_t units = std::min<uint64_t>(FRAME_UNITS[m_frame % FRAME_UNITS.size()], end - m_position);
                 units = std::min(units, NextSaveBoundary(tick, save) * unitsPerTick - m_position);
 
+                const uint64_t swapUnit = m_swap.tick * unitsPerTick;
+                const bool swapHere = m_swap.table != nullptr && swapUnit >= m_position &&
+                                      swapUnit < m_position + units;
+
                 const ProbeFrameInput input{.firstTick = tick,
                                             .firstUnit = unit,
                                             .unitCount = static_cast<uint32_t>(units),
                                             .commands = first ? commands : std::span<const ProbeCommand>(),
                                             .saveTo = saveIndex,
-                                            .restoreFrom = first ? restoreFrom : NO_SAVE_POINT};
+                                            .restoreFrom = first ? restoreFrom : NO_SAVE_POINT,
+                                            .tableSwaps = swapHere ? std::span<const ProbeTableSwap>(&m_swap, 1)
+                                                                   : std::span<const ProbeTableSwap>()};
                 if (!Submit(input, saveIndex != NO_SAVE_POINT || input.restoreFrom != NO_SAVE_POINT))
                     return false;
 
@@ -115,6 +126,9 @@ namespace {
 
         // 保存点へ戻す前に、境界を保存点の刻みに合わせる
         void JumpTo(uint64_t tick) { m_position = tick * m_simulation.UnitsPerTick(); }
+
+        // 刻み swap.tick の適用の単位を投げるフレームで、表を差し替える(T-0299)
+        void SetTableSwap(const ProbeTableSwap& swap) { m_swap = swap; }
 
         // 集めたハッシュを取り出して空にする(刻み → 世界のハッシュ)
         std::map<uint64_t, uint64_t> TakeHashes() { return std::exchange(m_hashes, {}); }
@@ -175,6 +189,7 @@ namespace {
         ProbeSim& m_simulation;
         uint64_t m_position = 0;  // 投げた単位の数(刻み × 単位の数 + 単位)
         uint64_t m_frame = 0;
+        ProbeTableSwap m_swap;  // table が nullptr なら差し替えない
         std::map<uint64_t, uint64_t> m_hashes;
         uint32_t m_debugAssertCount = 0;
         double m_saveRestoreMicroseconds = 0.0;
@@ -222,6 +237,76 @@ namespace {
 
         return Created{.queue = std::make_unique<gpu::Queue>(std::move(*queue)),
                        .simulation = std::make_unique<ProbeSim>(std::move(*simulation))};
+    }
+
+    // 木の燃焼の速さを 100 倍にした表(物質の一覧は同じ。gpu_probe_sim_test の差し替えと同じ作り方)
+    std::optional<BakedReactionTable> MakeSwappedTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        for (RuleDefinition& rule : definition.rules) {
+            if (rule.name == "cellulose_combustion")
+                rule.rate.preExponentialMantissa *= 100;
+        }
+
+        auto baked = BakeReactionTable(definition);
+        if (!baked)
+            return std::nullopt;
+
+        return std::move(*baked);
+    }
+
+    // 反応表の差し替えと巻き戻し(T-0299)。unswapped は差し替えなしの基準
+    void RunTableSwapTest(ID3D12Device5* device, const BakedReactionTable& table, const PhysicsScene& scene,
+                          const std::map<uint64_t, uint64_t>& unswapped, Failures& failures) {
+        const std::optional<BakedReactionTable> swapped = MakeSwappedTable();
+        std::optional<Created> base = Create(device, table, scene, 0);
+        std::optional<Created> rewind = Create(device, table, scene, static_cast<uint32_t>(SAVE_TICKS.size()));
+        failures.Check(swapped && base && rewind, "差し替え: 作れた");
+        if (!swapped || !base || !rewind)
+            return;
+
+        const std::vector<ProbeCommand> commands = MakeCommands();
+        const ProbeTableSwap swap{.tick = SWAP_TICK, .table = &*swapped};
+
+        // --- 基準(差し替えあり)---
+        Driver baseDriver(*base->queue, *base->simulation);
+        baseDriver.SetTableSwap(swap);
+        failures.Check(baseDriver.Advance(TICKS, commands, NO_SAVE_POINT, false), "差し替え: 基準を流せた");
+        const std::map<uint64_t, uint64_t> baseline = baseDriver.TakeHashes();
+        failures.Check(MatchesBaseline(baseline, unswapped, 0, SWAP_TICK - 1, "差し替え: 差し替えの前"),
+                       "差し替え: 差し替えの刻みの前までは、差し替えなしと同じ");
+        failures.Check(
+            baseline.contains(TICKS) && unswapped.contains(TICKS) && baseline.at(TICKS) != unswapped.at(TICKS),
+            "差し替え: 差し替えが効いている(差し替えなしと最後の刻みで違う)");
+
+        // --- 写しながら進む(差し替えより前の保存点は空になる)---
+        Driver driver(*rewind->queue, *rewind->simulation);
+        driver.SetTableSwap(swap);
+        ProbeSim& simulation = *rewind->simulation;
+        failures.Check(driver.Advance(FIRST_LEG_TICKS, commands, NO_SAVE_POINT, true), "差し替え: 写しながら進めた");
+        failures.Check(MatchesBaseline(driver.TakeHashes(), baseline, 0, FIRST_LEG_TICKS, "差し替え: 写しながら"),
+                       "差し替え: 保存点を写しても基準と同じ");
+        Log(Channel::Sim, Level::Info, "差し替え(刻み {})の後の保存点の刻み: {} {} {}(空 = {})", SWAP_TICK,
+            simulation.SavePointTick(0), simulation.SavePointTick(1), simulation.SavePointTick(2), UINT64_MAX);
+        failures.Check(simulation.SavePointTick(0) == UINT64_MAX, "差し替え: 差し替えより前の保存点(刻み 20)は空");
+        failures.Check(simulation.SavePointTick(1) == SAVE_TICKS[1] && simulation.SavePointTick(2) == SAVE_TICKS[2],
+                       "差し替え: 差し替えの後の保存点(刻み 60・100)は残る");
+
+        // --- 差し替えより前へは戻れない(RecordFrame が断る。世界は変わらない)---
+        driver.JumpTo(SAVE_TICKS[0]);
+        Log(Channel::Sim, Level::Info,
+            "差し替え: 刻み 20 の保存点へ戻そうとする(断られるはず。次の行の誤りは期待どおり)");
+        failures.Check(!driver.Advance(TICKS, CommandsFrom(SAVE_TICKS[0]), 0, false),
+                       "差し替え: 差し替えより前の保存点へは戻せない");
+
+        // --- 差し替えの後の保存点へ戻す → その時の表で刻んだ世界と同じ ---
+        driver.JumpTo(SAVE_TICKS[1]);
+        failures.Check(driver.Advance(TICKS, CommandsFrom(SAVE_TICKS[1]), 1, false),
+                       "差し替え: 刻み 60 へ戻して進めた");
+        failures.Check(MatchesBaseline(driver.TakeHashes(), baseline, SAVE_TICKS[1], TICKS, "差し替え: 刻み 60 から"),
+                       "差し替え: 差し替えの後の保存点へ戻した世界が、差し替えた表で最初から流した世界と同じ");
+
+        failures.Check(baseDriver.DebugAssertCount() == 0 && driver.DebugAssertCount() == 0,
+                       "差し替え: シェーダーの assert が 0 件");
     }
 
     int RunTest(ID3D12Device5* device, const BakedReactionTable& table) {
@@ -276,6 +361,7 @@ namespace {
 
         failures.Check(baseDriver.DebugAssertCount() == 0 && driver.DebugAssertCount() == 0,
                        "シェーダーの assert が 0 件");
+        RunTableSwapTest(device, table, scene, baseline, failures);
         Log(Channel::Sim, Level::Info, "写す・戻すフレームの単位以外の GPU 時間: 平均 {:.0f} µs({} フレーム。暖機なし)",
             driver.SaveRestoreMicroseconds() / std::max(1u, driver.SaveRestoreFrames()), driver.SaveRestoreFrames());
 

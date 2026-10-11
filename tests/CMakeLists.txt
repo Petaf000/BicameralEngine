@@ -434,13 +434,15 @@ set_tests_properties(window_hot_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FI
 # 通常のゲームの起動(--editor なし)でもファイルを見る(T-0243・D-438): 写しの表を壊す → 古い表のまま → 速度を直す → 差し替わる。
 # プレイ中に法則が変わった世界は「改造された世界」(D-437)。読み直した表の印は記録の表にも残り、再生の差し替えの行に出る
 # --species-remap: 通常の起動でも物質を足す・消す表を名前で付け替えて当てる(既定の Remap。D-438・T-0266)
+# --auto-rewind: 最初の差し替えの後にできた保存点へ 1 回戻す(差し替えより前の保存点は捨てられている)。記録は戻した刻みで切り詰めて
+# 書き直すので、再生の一致が「戻した後の世界 = その時の表で刻んだ世界」を確かめる(T-0299)
 set(WINDOW_GAME_RELOAD_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/game_reload_packages)
 set(WINDOW_GAME_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_hot_reload_game.bcreplay)
 add_test(NAME window_hot_reload_game_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_GAME_RELOAD_PACKAGES})
 add_test(NAME window_hot_reload_game_record
          COMMAND bicameral --auto-reload --species-remap --auto-ignite --packages ${WINDOW_GAME_RELOAD_PACKAGES} --frames 3000
-                 --record ${WINDOW_GAME_RELOAD_FILE})
+                 --save-points 4 --save-interval 4 --auto-rewind --record ${WINDOW_GAME_RELOAD_FILE})
 add_test(NAME window_hot_reload_game_play
          COMMAND bicameral --replay ${WINDOW_GAME_RELOAD_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
 set_tests_properties(window_hot_reload_game_copy PROPERTIES FIXTURES_SETUP window_hot_reload_game_packages)
