@@ -527,17 +527,22 @@ namespace {
                            .emptyMs = ToMilliseconds(stamps, 3, 4, frequency)};
     }
 
-    // --- 溢れの世界の費用(T-0248。--measure-wide。release のハードウェアで): 1 本のリストで暖機の刻みの後に MEASURE_TICKS 刻みを測り、
-    //     頁のセルの数で割る(ns/セル)。VRAM は世界のバッファの和(BufferBytes。Work Graph の作業場を除く)と溢れの領域 ---
+    // --- 溢れの世界の費用(T-0248。--measure-wide。release のハードウェアで): 暖機の刻みの後に MEASURE_TICKS 刻みを測り(数刻みずつの
+    //     リスト。T-0273)、頁のセルの数で割る(ns/セル)。VRAM は世界のバッファの和(BufferBytes。Work Graph の作業場を除く)と溢れの領域 ---
 
     constexpr uint32_t MEASURE_WARMUP_TICKS = 100;
     constexpr uint32_t MEASURE_TICKS = 50;
+    // 1 本のリストの GPU の時間の目安(T-0273): 32 種のセルの場面は 1 刻み 17〜100 ms(ほかのランナーの負荷で変わる)。150 刻みを 1 本の
+    // リストにすると、ほかのランナーが GPU を使っている時に約 2 秒で TDR(DXGI_ERROR_DEVICE_HUNG)になる。最初の 1 刻みを 1 本で流して
+    // 1 刻みの時間を見積もり、残りはこの時間に収まる刻みずつのリストで投げる(空気の場面は今までどおりほぼ 1 本)
+    constexpr double MEASURE_LIST_BUDGET_MS = 250.0;
 
     struct WideCost {
         double nsPerCell = 0;
         uint64_t bufferBytes = 0;
         uint64_t overflowBytes = 0;
         uint32_t productsHeld = 0;
+        uint32_t ticksPerList = 0;
     };
 
     std::expected<WideCost, std::string> MeasureWideCost(ID3D12Device5* device, gpu::ImmediateQueue& queue,
@@ -549,41 +554,52 @@ namespace {
 
         auto gpu = sim::GpuMultires::Create(device, table, nest.capacity,
                                             {.wideCells = wide, .wideChunks = many ? WideManyChunks(nest) : 0});
-        ID3D12GraphicsCommandList10* list = gpu ? queue.Begin() : nullptr;
-        if (list == nullptr)
+        uint64_t frequency = 0;
+        if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
             return std::unexpected("計測の準備ができない");
 
-        ring.RecordBegin(list);
-        if (!gpu->RecordUpload(list, nest))
-            return std::unexpected("初めの状態を写せない");
-
-        // --- 暖機 → タイムスタンプ 0 → MEASURE_TICKS 刻み → 1 ---
+        // --- 暖機 → MEASURE_TICKS 刻み。MEASURE_LIST_BUDGET_MS に収まる刻みずつのリストで、測る刻みのリストの GPU の時間を足す ---
         const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
         const D3D12_GPU_VIRTUAL_ADDRESS ringAddress = ring.GpuAddress();
-        for (uint32_t tick = 0; tick < MEASURE_WARMUP_TICKS + MEASURE_TICKS; ++tick) {
-            if (tick == MEASURE_WARMUP_TICKS)
-                gpu->RecordTimestamp(list, 0);
-
-            gpu->RecordStep(list, ringAddress, test::WIDE_OVERFLOW_SEED, tick, options);
-        }
-
-        gpu->RecordTimestamp(list, 1);
-        gpu->RecordReadback(list);
-        ring.RecordReadbackAndReset(list);
-        uint64_t frequency = 0;
         sim::MultiresNest read;
-        if (!queue.ExecuteAndWait() || ring.Drain().assertCount > 0 ||
-            FAILED(queue.Native()->GetTimestampFrequency(&frequency)) || !gpu->Read(read)) {
-            return std::unexpected("計測の実行に失敗");
+        double milliseconds = 0;
+        uint32_t ticksPerList = 1;
+        for (uint32_t first = 0; first < MEASURE_WARMUP_TICKS + MEASURE_TICKS;) {
+            const uint32_t last = std::min({first + ticksPerList, MEASURE_WARMUP_TICKS + MEASURE_TICKS,
+                                            first < MEASURE_WARMUP_TICKS ? MEASURE_WARMUP_TICKS : UINT32_MAX});
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (first == 0 && !gpu->RecordUpload(list, nest))
+                    return false;
+
+                gpu->RecordTimestamp(list, 0);
+                for (uint32_t tick = first; tick < last; ++tick)
+                    gpu->RecordStep(list, ringAddress, test::WIDE_OVERFLOW_SEED, tick, options);
+
+                gpu->RecordTimestamp(list, 1);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, first, record); !executed)
+                return std::unexpected(std::format("計測の実行に失敗({})", executed.error()));
+
+            const double listMs = ToMilliseconds(gpu->ReadTimestamps(2), 0, 1, frequency);
+            if (first >= MEASURE_WARMUP_TICKS)
+                milliseconds += listMs;
+
+            if (first == 0)
+                ticksPerList = std::clamp(static_cast<uint32_t>(MEASURE_LIST_BUDGET_MS / std::max(listMs, 0.001)), 1u,
+                                          MEASURE_WARMUP_TICKS + MEASURE_TICKS);
+
+            first = last;
         }
 
-        const double milliseconds = ToMilliseconds(gpu->ReadTimestamps(2), 0, 1, frequency);
         const double cellTicks = static_cast<double>(MEASURE_TICKS) * test::MEASURE_ROOTS * MR_BLOCK_CELLS;
 
         return WideCost{.nsPerCell = milliseconds * 1.0e6 / cellTicks,
                         .bufferBytes = gpu->BufferBytes(),
                         .overflowBytes = gpu->OverflowBytes(),
-                        .productsHeld = read.counters[MR_COUNTER_LIMIT_PRODUCTS]};
+                        .productsHeld = read.counters[MR_COUNTER_LIMIT_PRODUCTS],
+                        .ticksPerList = ticksPerList};
     }
 
     // 場面ごとに 2 回測って 2 回目を出す(1 回目はシェーダーの準備・クロックの立ち上がりを含む)
@@ -610,30 +626,129 @@ namespace {
                 }
 
                 Log(Channel::Gpu, Level::Info,
-                    "計測 {}(伝導 {}・根 {}・{} 刻み): {:.2f} ns/セル(1 回目 {:.2f})・バッファ {} KiB・溢れ {} "
-                    "KiB・待たせた {}",
-                    item.name, conduction ? "あり" : "なし", test::MEASURE_ROOTS, MEASURE_TICKS, cost->nsPerCell,
-                    first->nsPerCell, cost->bufferBytes / 1024, cost->overflowBytes / 1024, cost->productsHeld);
+                    "計測 {}(伝導 {}・根 {}・{} 刻み・1 リスト {} 刻み): {:.2f} ns/セル(1 回目 {:.2f})・バッファ {} "
+                    "KiB・"
+                    "溢れ {} KiB・待たせた {}",
+                    item.name, conduction ? "あり" : "なし", test::MEASURE_ROOTS, MEASURE_TICKS, cost->ticksPerList,
+                    cost->nsPerCell, first->nsPerCell, cost->bufferBytes / 1024, cost->overflowBytes / 1024,
+                    cost->productsHeld);
             }
         }
 
         return 0;
     }
 
+    // --- 溢れの世界の切り分け(T-0273。--diagnose-wide <刻み/リスト> [--diagnose-compare] [--diagnose-conduct]
+    //     [--diagnose-limits]): 計測の場面(MakeMeasureNest の many。limits なら上限の場面)を ticksPerList 刻みずつのリストで流す。
+    //     リストごとに壁時計の時間と、リストの最後の刻みの段ごとの時間(SetStageTimestamps)を出す。compare ならリストの終わりに CPU と比べる ---
+
+    constexpr uint32_t DIAGNOSE_TICKS = 150;
+
+    struct DiagnoseOptions {
+        uint32_t ticksPerList = 1;
+        bool compare = false;
+        bool conduction = false;
+        bool limits = false;  // 上限の場面(RunLimitsStepWide と同じ。表は MakeLimitsTestTable)
+    };
+
+    // 段ごとの時間(ms)を「a/b/c」にし、合計を返す
+    double FormatStages(const std::vector<uint64_t>& stamps, uint64_t frequency, std::string& text) {
+        double total = 0;
+        for (uint32_t i = 1; i < stamps.size(); ++i) {
+            const double milliseconds = ToMilliseconds(stamps, i - 1, i, frequency);
+            total += milliseconds;
+            text += std::format("{}{:.2f}", i == 1 ? "" : "/", milliseconds);
+        }
+
+        return total;
+    }
+
+    std::expected<void, std::string> DiagnoseWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                  gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                  const DiagnoseOptions& diagnose) {
+        sim::MultiresNest cpu = diagnose.limits ? test::MakeCoarsenFullNest(table) : test::MakeMeasureNest(table, true);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(
+            device, table, cpu.capacity, {.wideCells = true, .wideChunks = diagnose.limits ? 0 : WideManyChunks(cpu)});
+        const uint64_t ticks = diagnose.limits ? test::LIMITS_STEP_TICKS : DIAGNOSE_TICKS;
+        const uint64_t worldSeed = diagnose.limits ? test::LIMITS_STEP_SEED : test::WIDE_OVERFLOW_SEED;
+        uint64_t frequency = 0;
+        if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
+            return std::unexpected("切り分けの準備ができない");
+
+        gpu->SetStageTimestamps(true);
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(diagnose.conduction);
+        sim::MultiresNest read;
+        double worstTickMs = 0;
+        for (uint64_t first = 0; first < ticks; first += diagnose.ticksPerList) {
+            const uint64_t last = std::min<uint64_t>(first + diagnose.ticksPerList, ticks);
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (first == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                for (uint64_t tick = first; tick < last; ++tick)
+                    gpu->RecordStep(list, ring.GpuAddress(), worldSeed, tick, options);
+
+                return true;
+            };
+            const auto start = chr::steady_clock::now();
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, first, record); !executed)
+                return std::unexpected(std::format("刻み {}〜{}: {}", first, last - 1, executed.error()));
+
+            // --- リストの時間と、最後の刻みの段ごとの時間 ---
+            const double wallMs = chr::duration<double, std::milli>(chr::steady_clock::now() - start).count();
+            std::string stages;
+            const double tickMs = FormatStages(gpu->ReadTimestamps(gpu->StageTimestampCount()), frequency, stages);
+            worstTickMs = std::max(worstTickMs, tickMs);
+            if (first % 10 == 0 || last == ticks || tickMs > 40.0)
+                Log(Channel::Gpu, Level::Info, "切り分け 刻み {}〜{}: リスト {:.1f} ms・最後の刻み {:.2f} ms(段 {})",
+                    first, last - 1, wallMs, tickMs, stages);
+
+            if (!diagnose.compare)
+                continue;
+
+            for (uint64_t tick = first; tick < last; ++tick)
+                sim::StepNest(cpu, table, worldSeed, tick, options);
+
+            if (auto compared = CompareTick(cpu, read, last - 1); !compared)
+                return std::unexpected(std::format("切り分け: {}", compared.error()));
+        }
+
+        Log(Channel::Gpu, Level::Info,
+            "切り分け(伝導 {}・{} 刻み/リスト・CPU と比べる {}): 通った。1 刻みの最大 {:.2f} ms・待たせた {}",
+            diagnose.conduction ? "あり" : "なし", diagnose.ticksPerList, diagnose.compare ? "はい" : "いいえ",
+            worstTickMs, read.counters[MR_COUNTER_LIMIT_PRODUCTS]);
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureWide = false;
-        for (char* argument : arguments) {
-            if (std::string_view(argument) == "--measure-wide")
+        std::optional<DiagnoseOptions> diagnose;
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            const std::string_view argument = arguments[i];
+            if (argument == "--measure-wide")
                 measureWide = true;
+            else if (argument == "--diagnose-wide" && i + 1 < arguments.size())
+                diagnose = DiagnoseOptions{
+                    .ticksPerList = std::max(1u, static_cast<uint32_t>(std::atoi(arguments[++i])))};
+            else if (argument == "--diagnose-compare" && diagnose)
+                diagnose->compare = true;
+            else if (argument == "--diagnose-conduct" && diagnose)
+                diagnose->conduction = true;
+            else if (argument == "--diagnose-limits" && diagnose)
+                diagnose->limits = true;
             else
-                rest.push_back(argument);
+                rest.push_back(arguments[i]);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide]");
+                "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--diagnose-wide "
+                "<刻み/リスト> "
+                "[--diagnose-compare] [--diagnose-conduct] [--diagnose-limits]]");
             return 2;
         }
 
@@ -655,6 +770,17 @@ namespace {
 
         if (measureWide)
             return RunMeasureWide(device->Get(), *queue, *ring);
+
+        if (diagnose) {
+            const auto manyTable = sim::BakeReactionTable(diagnose->limits ? test::MakeLimitsTestTable()
+                                                                           : test::MakeWideManyTable());
+            const auto diagnosed = manyTable ? DiagnoseWide(device->Get(), *queue, *ring, *manyTable, *diagnose)
+                                             : std::unexpected(std::string("表を作れない"));
+            if (!diagnosed)
+                Log(Channel::Gpu, Level::Error, "切り分け: FAILED {}", diagnosed.error());
+
+            return diagnosed ? 0 : 1;
+        }
 
         using test::MultiresScenario;
         const auto first = RunScenario(device->Get(), *queue, *ring, *table, MultiresScenario::Real);

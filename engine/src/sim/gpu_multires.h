@@ -148,6 +148,11 @@ namespace bicameral::sim {
         void RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t index);
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
+        // --- 段ごとの時間(T-0273。試験の計測だけ): 有効なら RecordStep が初めに 0 番、段(Dispatch とバリア)の後ごとに 1, 2, … 番の
+        //     タイムスタンプを打つ(MAX_TIMESTAMPS まで。打った数は StageTimestampCount)---
+        void SetStageTimestamps(bool enabled) { m_stageTimestamps = enabled; }
+        [[nodiscard]] uint32_t StageTimestampCount() const { return m_stageStamp; }
+
         [[nodiscard]] uint64_t GraphBackingMemoryBytes() const { return m_graph->BackingMemoryBytes(); }
 
         // 計測(T-0248): 世界のバッファ(Work Graph の作業場を除く)の VRAM のバイト数と、そのうちの溢れの領域
@@ -262,6 +267,7 @@ namespace bicameral::sim {
         void ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const;
         // 刻みの段の後: 塊が足りなかった頁に塊を配り、同じ刻みのうちに刻み直す(T-0236)
         void RecordWideRetry(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        void StampStage(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -325,6 +331,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
         uint32_t m_timestampCount = 0;
+        bool m_stageTimestamps = false;
+        uint32_t m_stageStamp = 0;
     };
 
 }  // namespace bicameral::sim
