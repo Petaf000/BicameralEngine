@@ -17,6 +17,8 @@
 //   - (T-0139)反応表を刻みの途中で差し替えても(速度と熱容量を変えた表)、差し替えた刻みから CPU リファレンスと毎刻みビット一致する
 //     (分け方を変えても。差し替えの印のコマンドは GPU の適用では何もしない)
 //   - (T-0223)物質を足す・消す表(水素を足し、セルロースを消す)に差し替えても、セルの物質の付け替え(RxRemapCell)を含めて毎刻みビット一致する
+//   - (T-0177)反応の上限に当たったセルの数(9 種目を待たせた・規則を選んだ)が刻みごとに CPU と同じ。燃える木箱では 0、上限の試験の表
+//     (reaction_limits_table.h)のセルを置いた世界では両方とも 0 でない
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ(シミュは compute キュー。06 §4)。
 #include <algorithm>
@@ -36,6 +38,7 @@
 #include "gpu/queue.h"
 #include "gpu/resources.h"
 #include "gpu_test_options.h"
+#include "reaction_limits_table.h"
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
 #include "sim/reaction_test_table.h"
@@ -169,7 +172,8 @@ namespace {
                                     .hash = ProbeStateHash(state),
                                     .energy = ProbeEnergySum(state),
                                     .sourceEnergy = reference.SourceEnergy(),
-                                    .scheduledBlocks = reference.ScheduledBlocks()});
+                                    .scheduledBlocks = reference.ScheduledBlocks(),
+                                    .limits = reference.Limits()});
 
             result.wokenBlocks += reference.WokenBlocks();
             result.energyConserved = result.energyConserved &&
@@ -358,7 +362,8 @@ namespace {
         return save::ReplayPlayer(std::move(replay));
     }
 
-    // GPU の要約の列が S(1)〜S(TOTAL_TICKS) の順に並び、CPU と一致するか(ハッシュ・エネルギーの合計・つつきの分・計算したブロックの数)
+    // GPU の要約の列が S(1)〜S(TOTAL_TICKS) の順に並び、CPU と一致するか(ハッシュ・エネルギーの合計・つつきの分・計算したブロックの数・
+    // 上限に当たったセルの数)
     bool HashesMatch(std::span<const ProbeTickHash> hashes, const Reference& expected) {
         if (hashes.size() != TOTAL_TICKS)
             return false;
@@ -367,12 +372,15 @@ namespace {
             const ProbeTickHash& gpu = hashes[index];
             const ProbeTickHash& cpu = expected.ticks[index + 1];
             if (gpu.tick != cpu.tick || gpu.hash != cpu.hash || gpu.energy != cpu.energy ||
-                gpu.sourceEnergy != cpu.sourceEnergy || gpu.scheduledBlocks != cpu.scheduledBlocks) {
+                gpu.sourceEnergy != cpu.sourceEnergy || gpu.scheduledBlocks != cpu.scheduledBlocks ||
+                gpu.limits != cpu.limits) {
                 Log(Channel::Sim, Level::Error,
-                    "  S({}) = {:016x} エネルギー {} つつき {} ブロック {}(CPU S({}) = {:016x} エネルギー {} つつき {} "
-                    "ブロック {})",
-                    gpu.tick, gpu.hash, gpu.energy, gpu.sourceEnergy, gpu.scheduledBlocks, cpu.tick, cpu.hash,
-                    cpu.energy, cpu.sourceEnergy, cpu.scheduledBlocks);
+                    "  S({}) = {:016x} エネルギー {} つつき {} ブロック {} 上限 {}/{}(CPU S({}) = {:016x} エネルギー "
+                    "{} "
+                    "つつき {} ブロック {} 上限 {}/{})",
+                    gpu.tick, gpu.hash, gpu.energy, gpu.sourceEnergy, gpu.scheduledBlocks, gpu.limits.productsHeld,
+                    gpu.limits.candidatesLimited, cpu.tick, cpu.hash, cpu.energy, cpu.sourceEnergy, cpu.scheduledBlocks,
+                    cpu.limits.productsHeld, cpu.limits.candidatesLimited);
 
                 return false;
             }
@@ -633,6 +641,68 @@ namespace {
         failures.Check(result.extractionHash == expected.extractionHash, "待ちの丸め: 最後の抽出が CPU と一致");
     }
 
+    // --- 反応の上限の印を数える(T-0177): 上限の試験の表のセルを中央の 8³ に置き、残りは規則の無い物質で埋める ---
+
+    constexpr uint32_t LIMITS_REGION_BEGIN = 28;  // ブロックの境(4 の倍数)から 8 セル = 2³ ブロック
+    constexpr uint32_t LIMITS_REGION_END = 36;
+
+    std::vector<reaction::RxCell> MakeLimitsWorld(const BakedReactionTable& table) {
+        // q09 は反応物に載らない(規則の無い)物質。上限の試験のセルと同じ 300 K なので、反応の熱が出るまで伝導も無い
+        const std::array<SpeciesAmount, 1> filler = {SpeciesAmount{
+            .species = table.SpeciesId(test::LimitsHeldName(test::LIMITS_HELD_SPECIES)), .amount = 1000000}};
+        std::vector<reaction::RxCell> world(PROBE_CELL_COUNT,
+                                            MakeReactionCell(table, filler, test::LIMITS_TEMPERATURE_MILLIKELVIN));
+        const auto inside = [](uint32_t value) {
+            return value >= LIMITS_REGION_BEGIN && value < LIMITS_REGION_END;
+        };
+        for (uint32_t z = 0; z < PROBE_GRID_SIZE; ++z) {
+            for (uint32_t y = 0; y < PROBE_GRID_SIZE; ++y) {
+                for (uint32_t x = 0; x < PROBE_GRID_SIZE; ++x) {
+                    if (!inside(x) || !inside(y) || !inside(z))
+                        continue;
+
+                    const uint32_t index = ProbeCellIndex(x, y, z);
+                    world[index] = test::MakeLimitsCell(table, index);
+                }
+            }
+        }
+
+        return world;
+    }
+
+    // 上限に当たる世界を GPU で 1 刻みずつ走らせ、上限に当たったセルの数が毎刻み CPU と同じ(両方の印が立つ)。
+    // 燃える木箱の場面(TestFramings など)は同じ比べ方で 0 のまま
+    void TestLimits(ID3D12Device5* device, Failures& failures) {
+        const auto table = BakeReactionTable(test::MakeLimitsTestTable());
+        failures.Check(table.has_value(), "上限の印: 試験の表をベイクできる");
+        if (!table)
+            return;
+
+        const std::vector<reaction::RxCell> world = MakeLimitsWorld(*table);
+        const Reference expected = RunReference(*table, {}, world);
+        const Plan plan{.name = "上限の印",
+                        .options = {.initialWorld = world},
+                        .unitsPerFrame = std::vector<uint32_t>(TOTAL_TICKS, PROBE_FIXED_UNITS_PER_TICK)};
+        const RunResult result = RunPlan(device, *table, plan,
+                                         [](size_t, uint64_t, uint32_t) { return std::vector<ProbeCommand>{}; });
+
+        ProbeLimitCounts total;
+        for (const ProbeTickHash& tick : expected.ticks) {
+            total.productsHeld += tick.limits.productsHeld;
+            total.candidatesLimited += tick.limits.candidatesLimited;
+        }
+
+        Log(Channel::Sim, Level::Info, "上限の印: {} 刻みで待たせた {}・選んだ {} (セル, 刻み)(CPU)  S({}) = {:016x}",
+            TOTAL_TICKS, total.productsHeld, total.candidatesLimited, TOTAL_TICKS, expected.ticks.back().hash);
+
+        failures.Check(total.productsHeld > 0 && total.candidatesLimited > 0,
+                       "上限の印: 9 種目を待たせた・規則を選んだ、の両方が立つ(CPU)");
+        failures.Check(expected.energyConserved && expected.elementsConserved,
+                       "上限の印: エネルギーと元素の数が保存される(CPU)");
+        failures.Check(result.ok && HashesMatch(result.hashes, expected),
+                       "上限の印: 刻みごとのハッシュと上限に当たったセルの数が CPU と一致");
+    }
+
     // --- 反応表の差し替え(T-0139): 速度と熱容量を変えた表に、刻みの途中で替える ---
 
     constexpr uint64_t SWAP_TICK = 17;
@@ -792,6 +862,7 @@ int main(int argc, char** argv) {
     TestSlowWake(device->Get(), *table, failures);
     TestTableSwap(device->Get(), *table, failures);
     TestSpeciesSwap(device->Get(), *table, failures);
+    TestLimits(device->Get(), failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");
     const bool passed = failures.count == 0 && passesValidation;

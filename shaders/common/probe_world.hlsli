@@ -33,6 +33,7 @@ struct ProbeCellStep {
     uint32_t changed;  // S(t + 1) のセルが S(t) と違えば 1
     uint64_t
         wakeTick;  // 変わらなければ、次に評価の要る刻みの印(進める規則があれば次の刻みの印。進めないなら RX_WAIT_NEVER)
+    uint32_t limits;  // 反応の上限の印(RxWaitStep::limits。RX_LIMIT_*。T-0177 で刻みごとに数える)
 };
 
 // 反応の乱数の世界のシード
@@ -98,6 +99,7 @@ FX_FN ProbeCellStep ProbeStepCell(Table table, RxCell cell, HcThermalCache self,
         result.cache = self;
         result.changed = 0;
         result.wakeTick = RX_WAIT_NEVER;
+        result.limits = 0;
 
         return result;
     }
@@ -106,6 +108,7 @@ FX_FN ProbeCellStep ProbeStepCell(Table table, RxCell cell, HcThermalCache self,
                                            cellIndex);
     result.cell = step.cell;
     result.wakeTick = step.wakeTick;
+    result.limits = step.limits;
     result.changed = ProbeSameCell(step.cell, cell) ? 0 : 1;
 
     // 反応で成分が変わったときだけコンダクタンスを作り直す(割り算を減らす。HLSL の ?: は両辺を評価しうるので if で)

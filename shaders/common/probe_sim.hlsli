@@ -212,6 +212,8 @@ PROBE_CONST uint32_t
     PROBE_TRACE_WAKE = 2;  // WakeBlocks が起こそうとした。主 = 一覧のブロック、従 = 自分か 6 面の隣(格子の中を全部)
 PROBE_CONST uint32_t
     PROBE_TRACE_CONDUCT = 3;  // ConductBlock が計算した。主 = ブロック、従 = PROBE_BLOCK_FLAG_* の組み合わせ
+// 適用が置いた(T-0246。置くコマンド。T-0222)。主 = 触ったブロック(形を囲む箱が重なるブロック全部)、従 = 形の中心のセルの番号
+PROBE_CONST uint32_t PROBE_TRACE_PLACE = 4;
 // 計算したブロックの結果(トレースの従・CPU リファレンスの BlockFlags)。どちらかがあれば次の刻みの一覧に入る
 PROBE_CONST uint32_t PROBE_BLOCK_FLAG_CHANGED = 1;  // 値が 1 つでも変わった
 PROBE_CONST uint32_t
@@ -253,8 +255,11 @@ PROBE_CONST uint32_t PROBE_EVENT_PLACE_APPLIED = 4;
 // --- 刻みごとの状態のハッシュ(GPU → CPU。06 §2 段 9)---
 // 表: PROBE_HASH_CAPACITY 個 × 32 バイト([0,1] 刻み [2,3] ハッシュ [4,5] エネルギーの合計(mJ、mod 2^64)
 //   [6] その状態を作った刻みで予定したブロックの数 [7] 0)+ 32 バイト([8,9] その状態を作った刻みのつつきが足したエネルギー(mJ)
-//   [10,11] 物の状態のハッシュ(物理を入れたとき。PhysicsWorld::StateHash と同じ式。無ければ 0。T-0098)[12..15] 0)。
-// 欄は刻み t の適用の単位が用意し(刻み・0)、適用がつつきのエネルギーを、伝導が予定の数を、刻みの最後の単位がハッシュとエネルギーの合計を足す。
+//   [10,11] 物の状態のハッシュ(物理を入れたとき。PhysicsWorld::StateHash と同じ式。無ければ 0。T-0098)
+//   [12] 反応の上限で 9 種目の生成物を待たせたセルの数(RX_LIMIT_PRODUCTS)[13] 進む規則が多すぎて選んだセルの数(RX_LIMIT_CANDIDATES)
+//   [14,15] 0。[12]・[13] は (セル, 刻み) の数で、多重解像度の世界の MR_COUNTER_LIMIT_* と同じ考え方(T-0163・T-0177))。
+// 欄は刻み t の適用の単位が用意し(刻み・0)、適用がつつきのエネルギーを、伝導が予定の数と上限の印の数を、刻みの最後の単位がハッシュと
+// エネルギーの合計を足す。
 // 保存則の検査(D-206): エネルギーの合計(t + 1) = エネルギーの合計(t) + つつきのエネルギー(t + 1 の欄)。
 // S(t) のハッシュは (t % PROBE_HASH_CAPACITY) 番目。フレームの終わりに表を丸ごと読み戻し、CPU はそのフレームで終えた刻みの分だけ読む。
 // 1 フレームに積める単位は 256 まで(3 単位/刻みでも 86 刻み)なので、同じフレームの中で番号が重なることはない
@@ -265,6 +270,8 @@ PROBE_CONST uint32_t PROBE_HASH_OFFSET_ENERGY = 16;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_SCHEDULED = 24;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_SOURCE = 32;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_BODIES = 40;
+PROBE_CONST uint32_t PROBE_HASH_OFFSET_LIMIT_PRODUCTS = 48;
+PROBE_CONST uint32_t PROBE_HASH_OFFSET_LIMIT_CANDIDATES = 52;
 PROBE_CONST uint32_t PROBE_HASH_BYTES = PROBE_HASH_CAPACITY * PROBE_HASH_ENTRY_BYTES;
 
 // --- 規則(CPU と GPU で同じ)---

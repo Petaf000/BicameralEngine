@@ -161,6 +161,23 @@ void WakeBlocks(ThreadNodeInputRecord<BlockRecord> input,
         TraceWakes(tick, valid, block, center);
 }
 
+// 反応の上限の印(RxWaitStep::limits)を S(t + 1) の表の欄に (セル, 刻み) の数で足す(T-0177)。ウェーブで数えて 0 でない時だけ
+// atomic で足す(足す順に依らない。CPU リファレンスは計算したブロックのセルだけ数える)。全部のレーンが呼ぶ
+void CountLimits(uint64_t tick, uint32_t limits) {
+    const uint32_t productsHeld = WaveActiveCountBits((limits & RX_LIMIT_PRODUCTS) != 0);
+    const uint32_t candidatesLimited = WaveActiveCountBits((limits & RX_LIMIT_CANDIDATES) != 0);
+    if (!WaveIsFirstLane())
+        return;
+
+    const uint32_t entry = HashEntryAddress(tick + 1);
+    uint32_t previous;
+    if (productsHeld != 0)
+        hashes.InterlockedAdd(entry + PROBE_HASH_OFFSET_LIMIT_PRODUCTS, productsHeld, previous);
+
+    if (candidatesLimited != 0)
+        hashes.InterlockedAdd(entry + PROBE_HASH_OFFSET_LIMIT_CANDIDATES, candidatesLimited, previous);
+}
+
 // 1 ブロック(4³ セル)の伝導と反応。値が変わったか、次の刻みに評価が要れば、次の刻みの一覧へ。そうでなければ起こす刻みを書く
 [Shader("node")]
 [NodeLaunch("broadcasting")]
@@ -200,6 +217,8 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
     // --- 変わったか(ブロックの中で 1 つでも)・次に評価の要る刻み(セルの最小)---
     if (WaveActiveAnyTrue(step.changed != 0) && WaveIsFirstLane())
         InterlockedOr(g_blockChanged, 1);
+
+    CountLimits(tick, step.limits);
 
     const uint64_t wakeTick = BlockMinTick(groupIndex, step.wakeTick);  // 中のバリアで g_blockChanged も出来上がる
     if (groupIndex != 0)

@@ -6,6 +6,7 @@
 //     範囲(刻み・セルの箱)を狭めても一致する。容量を越えたら落とした数が出る
 //   - 実行中に範囲を変えると、次のフレームから新しい範囲だけが記録される(前後の記録がそれぞれの範囲に入り、CPU の予想と一致。T-0088)
 //   - 刻みごとの木としてファイルに書け、つつき(同じセルに 2 回 = 一覧に 2 度)と「前の刻みで変わった」根が読める
+//   - (T-0246)置くコマンドも根になる: 触ったブロックが「置く」の根で、GPU のトレースと CPU の予想が一致する(熱い炭を置いて周りを起こす)
 //   - わざと CPU リファレンスのつつきを 1 セルずらすと、ハッシュ列から最初に食い違った状態の刻みが、その刻みの GPU と CPU の
 //     全部のセルから最初のブロックとセルが、トレースからずれの元の刻み(つつき)が出る
 //   - debug layer のエラーが 0 件
@@ -60,6 +61,13 @@ namespace {
         {.tick = SHIFT_TICK, .cell = SHIFT_CELL_GPU},
     }};
 
+    // 置く(T-0246): 刻み PLACE_TICK に熱い炭の球(半径 2。ブロックの境 (20, 20, 20) をまたいで 8 ブロックを触る)
+    constexpr uint64_t PLACE_TICK = 4;
+    constexpr std::array<uint32_t, 3> PLACE_CENTER = {20, 20, 20};
+    constexpr uint32_t PLACE_RADIUS = 2;
+    constexpr uint64_t PLACE_CARBON_MICROMOLES = 1000000;
+    constexpr uint32_t PLACE_TEMPERATURE_MILLIKELVIN = 1200000;
+
     struct Failures {
         int count = 0;
 
@@ -72,14 +80,38 @@ namespace {
         }
     };
 
-    // shifted なら SHIFT_TICK のつつきを SHIFT_CELL_CPU にする(CPU リファレンスだけに渡す)
-    std::vector<ProbeCommand> MakeCommands(bool shifted) {
+    // 置くコマンド(熱い炭の球)
+    ProbeCommand MakePlace(const BakedReactionTable& table, uint32_t sequence) {
+        const std::array<SpeciesAmount, 1> carbon = {
+            SpeciesAmount{.species = table.SpeciesId("carbon"), .amount = PLACE_CARBON_MICROMOLES}};
+
+        return MakePlaceCommand(PLACE_TICK, sequence,
+                                {.x = PLACE_CENTER[0],
+                                 .y = PLACE_CENTER[1],
+                                 .z = PLACE_CENTER[2],
+                                 .radius = PLACE_RADIUS,
+                                 .temperatureMilliKelvin = PLACE_TEMPERATURE_MILLIKELVIN},
+                                carbon);
+    }
+
+    // shifted なら SHIFT_TICK のつつきを SHIFT_CELL_CPU にする(CPU リファレンスだけに渡す)。置くコマンドを 1 つ足す
+    // (コマンドは刻みの順に並べる。ProbeSim は刻みが戻るコマンドを受け付けない)
+    std::vector<ProbeCommand> MakeCommands(const BakedReactionTable& table, bool shifted) {
         std::vector<ProbeCommand> commands;
         uint32_t sequence = 0;
+        bool placed = false;
         for (const PokeSpec& poke : POKES) {
+            if (!placed && poke.tick > PLACE_TICK) {
+                commands.push_back(MakePlace(table, sequence++));
+                placed = true;
+            }
+
             const std::array<uint32_t, 3> cell = shifted && poke.tick == SHIFT_TICK ? SHIFT_CELL_CPU : poke.cell;
             commands.push_back(MakePokeCommand(poke.tick, sequence++, cell[0], cell[1], cell[2]));
         }
+
+        if (!placed)
+            commands.push_back(MakePlace(table, sequence++));
 
         return commands;
     }
@@ -104,7 +136,8 @@ namespace {
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             const std::vector<uint8_t> flagsBefore(reference.BlockFlags().begin(), reference.BlockFlags().end());
             reference.Advance(tick, commands);
-            AppendExpectedProbeTrace(filter, tick, commands, flagsBefore, reference.BlockFlags(), result.trace);
+            AppendExpectedProbeTrace(filter, tick, commands, static_cast<uint32_t>(table.species.size()), flagsBefore,
+                                     reference.BlockFlags(), result.trace);
 
             const std::span<const reaction::RxCell> state = reference.State(tick + 1);
             result.hashes.push_back({.tick = tick + 1,
@@ -251,7 +284,7 @@ namespace {
 
     // 同じ入力で 2 回・分け方を変えて、トレースが同じ。CPU リファレンスの予想と一致。木としてファイルに書ける
     void TestDeterminism(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
-        const std::vector<ProbeCommand> commands = MakeCommands(false);
+        const std::vector<ProbeCommand> commands = MakeCommands(table, false);
         const CpuRun expected = RunReference(table, commands, WholeFilter(), TOTAL_TICKS);
 
         const GpuRun first = RunGpu(device, table, WholeFilter(), TickFrames(TOTAL_TICKS), commands);
@@ -284,12 +317,19 @@ namespace {
             "木: 刻み 0 の根は同じセルを 2 回つついたブロック 1 つ(一覧に 2 度)");
         failures.Check(text.contains("刻み 0 で変わった") && text.contains("変わらない"),
                        "木: 変わったブロックが次の刻みの根になり、変わらない子も読める");
+
+        // --- 置く(T-0246): 球を囲む箱が重なる 2³ ブロックが、刻み PLACE_TICK の「置く」の根 ---
+        const auto placeRecords = rng::count_if(first.trace, [](const GraphTraceRecord& record) {
+            return record.kind == PROBE_TRACE_PLACE && record.tick == PLACE_TICK;
+        });
+        failures.Check(placeRecords == 8 && text.contains("置く 中心 (20, 20, 20)"),
+                       "置く: 触った 8 ブロックが根になり、木に「置く」と中心が出る");
         fs::remove(path);
     }
 
     // 範囲を狭める(刻み・セルの箱)・容量を越える
     void TestFilters(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
-        const std::vector<ProbeCommand> commands = MakeCommands(false);
+        const std::vector<ProbeCommand> commands = MakeCommands(table, false);
         const GraphTraceFilter narrow = ProbeTraceFilterForCells(2, 8, {0, 0, 0}, {12, 12, 12}, TRACE_CAPACITY);
         const CpuRun expected = RunReference(table, commands, narrow, 10);
         const GpuRun run = RunGpu(device, table, narrow, TickFrames(10), commands);
@@ -316,7 +356,7 @@ namespace {
     // B は刻みを [0, 無限) にしておき、フレーム 6 より前の刻みが記録されない(次のフレームから効く)ことも見る
     void TestRuntimeRange(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
         constexpr uint64_t TICKS = 14;
-        const std::vector<ProbeCommand> commands = MakeCommands(false);
+        const std::vector<ProbeCommand> commands = MakeCommands(table, false);
         const GraphTraceFilter rangeA = ProbeTraceFilterForCells(2, 6, {0, 0, 0}, {12, 12, 12}, TRACE_CAPACITY);
         const GraphTraceFilter rangeB = ProbeTraceFilterForCells(0, UINT64_MAX, {28, 28, 28}, {40, 40, 40},
                                                                  TRACE_CAPACITY);
@@ -377,8 +417,8 @@ namespace {
 
     // わざと CPU リファレンスのつつきを 1 セルずらす → 最初の刻み・ブロック・セル
     void TestDivergence(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
-        const std::vector<ProbeCommand> gpuCommands = MakeCommands(false);
-        const std::vector<ProbeCommand> cpuCommands = MakeCommands(true);
+        const std::vector<ProbeCommand> gpuCommands = MakeCommands(table, false);
+        const std::vector<ProbeCommand> cpuCommands = MakeCommands(table, true);
         const CpuRun shifted = RunReference(table, cpuCommands, WholeFilter(), TOTAL_TICKS);
         const GpuRun run = RunGpu(device, table, WholeFilter(), TickFrames(TOTAL_TICKS), gpuCommands);
 

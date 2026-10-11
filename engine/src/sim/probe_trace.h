@@ -6,8 +6,8 @@
 //   → FormatProbeTrace(刻みごとの木の文字列。ファイルへ)/ UniqueProbeTrace と ExpectedProbeTrace を比べる(CPU リファレンス)
 //   ハッシュの列(ProbeTickHash)→ FirstDivergentTick → その刻みの GPU の状態(抽出)と CPU の状態 → FindCellDivergence
 //
-// 記録の種類は probe_sim.hlsli の PROBE_TRACE_*(つつき・起こす・計算した)。木の組み方:
-//   刻み t の根 = 活性の一覧のブロック(起こすの主)。つつき(刻み t)か、刻み t − 1 で値が変わったブロック
+// 記録の種類は probe_sim.hlsli の PROBE_TRACE_*(つつき・起こす・計算した・置いた)。木の組み方:
+//   刻み t の根 = 活性の一覧のブロック(起こすの主)。つつき・置く(刻み t。T-0246)か、刻み t − 1 で値が変わったブロック
 //   根の子 = 起こされて計算したブロック。複数の根に起こされたブロックの親は「一番小さい番号の根」(GPU で誰が先に予定したかは
 //   毎回変わるので、決まった規則で選ぶ)。値が変わった子は、刻み t + 1 の根になる。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
@@ -51,11 +51,13 @@ namespace bicameral::sim {
     [[nodiscard]] std::vector<gpu::GraphTraceRecord> UniqueProbeTrace(std::vector<gpu::GraphTraceRecord> records);
 
     // CPU リファレンスが予想する刻み tick の記録(重なりなし)を expected に足す。
+    // speciesCount = 刻み tick の表の物質の数(置くコマンドを読むのに使う。T-0246)。
     // flagsBefore = 刻み tick − 1 のブロックごとの結果(0 でなければ一覧に足された)、flagsAfter = 刻み tick の結果(計算の記録の値)。
     // どちらも ProbeReference::BlockFlags(PROBE_BLOCK_FLAG_* の組み合わせ)
     void AppendExpectedProbeTrace(const gpu::GraphTraceFilter& filter, uint64_t tick,
-                                  std::span<const ProbeCommand> commands, std::span<const uint8_t> flagsBefore,
-                                  std::span<const uint8_t> flagsAfter, std::vector<gpu::GraphTraceRecord>& expected);
+                                  std::span<const ProbeCommand> commands, uint32_t speciesCount,
+                                  std::span<const uint8_t> flagsBefore, std::span<const uint8_t> flagsAfter,
+                                  std::vector<gpu::GraphTraceRecord>& expected);
 
     // 並べた 2 つの列の最初の食い違い(無ければ nullopt)。「刻み t: GPU … / CPU …」の 1 行
     [[nodiscard]] std::optional<std::string> FirstProbeTraceMismatch(std::span<const gpu::GraphTraceRecord> gpu,

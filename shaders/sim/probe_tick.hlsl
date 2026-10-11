@@ -123,6 +123,10 @@ void ApplyPlace(uint64_t tick, uint32_t address) {
                 const uint32_t block = ProbeBlockIndex(bx, by, bz);
                 StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block, ProbeChangeMark(tick) - 1);
                 StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, block, ProbeChangeMark(tick));
+
+                // 連鎖のトレースの根(T-0246。つつきと同じく、触ったブロックが根になる。sim/probe_trace が木に組む)
+                if (GtWantsTick(tick) && TraceWantsBlock(block))
+                    GtRecord(tick, PROBE_TRACE_PLACE, block, ProbeCellIndex(place.x, place.y, place.z));
             }
         }
     }

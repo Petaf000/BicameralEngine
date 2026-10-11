@@ -93,6 +93,13 @@ namespace bicameral::sim {
     [[nodiscard]] ProbeCommand MakePlaceCommand(uint64_t targetTick, uint32_t sequence, const ProbePlaceShape& shape,
                                                 std::span<const SpeciesAmount> contents);
 
+    // 置くコマンドの中身を読む(GPU の ApplyPlace と同じ ProbeDecodePlace。speciesCount はその刻みの表の物質の数。当てないコマンドは valid = 0)
+    [[nodiscard]] ProbePlace DecodePlaceCommand(const ProbeCommand& command, uint32_t speciesCount);
+
+    // 置くコマンドが触るブロック(形を囲む箱が重なるブロック全部。z, y, x の順。GPU の ApplyPlace と同じ)。
+    // CPU リファレンスの適用と連鎖のトレースの予想(T-0246)が使う
+    [[nodiscard]] std::vector<uint32_t> ProbePlaceBlocks(const ProbePlace& place);
+
     // 置くコマンドの物質 ID を、物質の一覧が変わる表への付け替え remap(sim/species_remap.h)で新しい表の ID にする(T-0242)。
     // 消えた物質の材料は落とす。置くコマンドでなければそのまま。差し替えと同じフレームに前の表で作った筆のコマンドに使う
     [[nodiscard]] ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap);
@@ -111,6 +118,14 @@ namespace bicameral::sim {
     };
 
     // 刻み tick の始めの状態 S(tick) の要約(ハッシュの表の欄。probe_sim.hlsli)
+    // 1 刻みに反応の上限に当たったセルの数(T-0177。多重解像度の世界の MR_COUNTER_LIMIT_* と同じ考え方。T-0163)
+    struct ProbeLimitCounts {
+        uint32_t productsHeld = 0;       // 9 種目の生成物を作る規則を待たせた(RX_LIMIT_PRODUCTS)
+        uint32_t candidatesLimited = 0;  // 進む規則が多すぎて刻みごとに選んだ(RX_LIMIT_CANDIDATES)
+
+        bool operator==(const ProbeLimitCounts&) const = default;
+    };
+
     struct ProbeTickHash {
         uint64_t tick = 0;
         uint64_t hash = 0;    // ProbeStateHash
@@ -119,6 +134,7 @@ namespace bicameral::sim {
             0;  // S(tick) を作った刻み(tick − 1)のつつきが足したエネルギー(mJ)。energy(t) = energy(t − 1) + これ
         uint32_t scheduledBlocks = 0;  // S(tick) を作った刻み(tick − 1)で伝導と反応を計算したブロックの数
         uint64_t bodyHash = 0;         // 物の状態のハッシュ(PhysicsWorld::StateHash。物理なしなら 0。T-0098)
+        ProbeLimitCounts limits;  // S(tick) を作った刻み(tick − 1)で反応の上限に当たったセルの数(計算したブロックだけ)
 
         // 世界全体の要約(セル + 物。再生ファイルに入れて突き合わせる値)
         [[nodiscard]] uint64_t WorldHash() const { return hash ^ bodyHash; }
@@ -518,6 +534,9 @@ namespace bicameral::sim {
         // 最後の Advance で、待ちが来て起きたブロック(前の刻みに計算しなかったのに評価が要る。GPU の WakeDueBlocks が一覧に足す数)
         [[nodiscard]] uint32_t WokenBlocks() const { return m_wokenBlocks; }
 
+        // 最後の Advance で反応の上限に当たったセルの数(GPU が計算するブロックのセルだけ。GPU の表の limits と同じ。T-0177)
+        [[nodiscard]] ProbeLimitCounts Limits() const { return m_limits; }
+
         // 最後の Advance の、ブロックごとの結果(PROBE_BLOCK_COUNT 個の PROBE_BLOCK_FLAG_* の組み合わせ。0 でなければ次の刻みの予定の種。
         // トレースの予想に使う。sim/probe_trace.h)
         [[nodiscard]] std::span<const uint8_t> BlockFlags() const { return m_blockFlags; }
@@ -536,6 +555,7 @@ namespace bicameral::sim {
         uint64_t m_sourceEnergy = 0;
         uint32_t m_scheduledBlocks = 0;
         uint32_t m_wokenBlocks = 0;
+        ProbeLimitCounts m_limits;
         SpeciesRemapReport m_remapReport;
 
         void RemapSpecies(uint64_t tick, const BakedReactionTable& newTable);

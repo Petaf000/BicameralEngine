@@ -311,7 +311,8 @@ namespace {
                                     .hash = ProbeStateHash(state),
                                     .energy = ProbeEnergySum(state),
                                     .sourceEnergy = reference.SourceEnergy(),
-                                    .scheduledBlocks = reference.ScheduledBlocks()});
+                                    .scheduledBlocks = reference.ScheduledBlocks(),
+                                    .limits = reference.Limits()});
 
             result.energyBalanced = result.energyBalanced &&
                                     result.ticks.back().energy == result.ticks[tick].energy + reference.SourceEnergy();
@@ -385,7 +386,8 @@ namespace {
             const ProbeTickHash& gpu = hashes[index];
             const ProbeTickHash& cpu = expected.ticks[index + 1];
             if (gpu.tick != cpu.tick || gpu.hash != cpu.hash || gpu.energy != cpu.energy ||
-                gpu.sourceEnergy != cpu.sourceEnergy || gpu.scheduledBlocks != cpu.scheduledBlocks) {
+                gpu.sourceEnergy != cpu.sourceEnergy || gpu.scheduledBlocks != cpu.scheduledBlocks ||
+                gpu.limits != cpu.limits) {
                 Log(Channel::Sim, Level::Error,
                     "  S({}) = {:016x} エネルギー {} 湧き出し {} ブロック {}(CPU {:016x} エネルギー {} 湧き出し {} "
                     "ブロック {})",

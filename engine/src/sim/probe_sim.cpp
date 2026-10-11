@@ -193,6 +193,32 @@ namespace bicameral::sim {
         return command;
     }
 
+    ProbePlace DecodePlaceCommand(const ProbeCommand& command, uint32_t speciesCount) {
+        ProbePlacePayload payload{};
+        rng::copy(command.payload, std::begin(payload.words));
+
+        return ProbeDecodePlace(payload, speciesCount);
+    }
+
+    std::vector<uint32_t> ProbePlaceBlocks(const ProbePlace& place) {
+        const uint32_t beginX = ProbePlaceBegin(place.x, place.extentX) / PROBE_BLOCK_SIZE;
+        const uint32_t beginY = ProbePlaceBegin(place.y, place.extentY) / PROBE_BLOCK_SIZE;
+        const uint32_t beginZ = ProbePlaceBegin(place.z, place.extentZ) / PROBE_BLOCK_SIZE;
+        const uint32_t endX = (ProbePlaceEnd(place.x, place.extentX) - 1) / PROBE_BLOCK_SIZE;
+        const uint32_t endY = (ProbePlaceEnd(place.y, place.extentY) - 1) / PROBE_BLOCK_SIZE;
+        const uint32_t endZ = (ProbePlaceEnd(place.z, place.extentZ) - 1) / PROBE_BLOCK_SIZE;
+
+        std::vector<uint32_t> blocks;
+        for (uint32_t bz = beginZ; bz <= endZ; ++bz) {
+            for (uint32_t by = beginY; by <= endY; ++by) {
+                for (uint32_t bx = beginX; bx <= endX; ++bx)
+                    blocks.push_back(ProbeBlockIndex(bx, by, bz));
+            }
+        }
+
+        return blocks;
+    }
+
     ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap) {
         if (command.type != PROBE_COMMAND_TYPE_PLACE || remap.identity)
             return command;
@@ -1062,7 +1088,8 @@ namespace bicameral::sim {
                               .energy = entry[4] | (uint64_t{entry[5]} << 32),
                               .sourceEnergy = entry[8] | (uint64_t{entry[9]} << 32),
                               .scheduledBlocks = entry[6],
-                              .bodyHash = entry[10] | (uint64_t{entry[11]} << 32)});
+                              .bodyHash = entry[10] | (uint64_t{entry[11]} << 32),
+                              .limits = {.productsHeld = entry[12], .candidatesLimited = entry[13]}});
         }
 
         return hashes;
@@ -1192,9 +1219,7 @@ namespace bicameral::sim {
         uint64_t ApplyPlace(const ReactionTableView& table, uint32_t speciesCount, ReferenceGeneration current,
                             uint64_t tick, const ProbeCommand& command, std::vector<uint8_t>& seeds,
                             std::vector<uint64_t>& changedMarks) {
-            ProbePlacePayload payload{};
-            rng::copy(command.payload, std::begin(payload.words));
-            const ProbePlace place = ProbeDecodePlace(payload, speciesCount);
+            const ProbePlace place = DecodePlaceCommand(command, speciesCount);
             if (place.valid == 0)
                 return 0;
 
@@ -1221,20 +1246,9 @@ namespace bicameral::sim {
             }
 
             // --- ブロック ---
-            const uint32_t beginX = ProbePlaceBegin(place.x, place.extentX) / PROBE_BLOCK_SIZE;
-            const uint32_t beginY = ProbePlaceBegin(place.y, place.extentY) / PROBE_BLOCK_SIZE;
-            const uint32_t beginZ = ProbePlaceBegin(place.z, place.extentZ) / PROBE_BLOCK_SIZE;
-            const uint32_t endX = (ProbePlaceEnd(place.x, place.extentX) - 1) / PROBE_BLOCK_SIZE;
-            const uint32_t endY = (ProbePlaceEnd(place.y, place.extentY) - 1) / PROBE_BLOCK_SIZE;
-            const uint32_t endZ = (ProbePlaceEnd(place.z, place.extentZ) - 1) / PROBE_BLOCK_SIZE;
-            for (uint32_t bz = beginZ; bz <= endZ; ++bz) {
-                for (uint32_t by = beginY; by <= endY; ++by) {
-                    for (uint32_t bx = beginX; bx <= endX; ++bx) {
-                        const uint32_t block = ProbeBlockIndex(bx, by, bz);
-                        seeds[block] = 1;
-                        changedMarks[block] = ProbeChangeMark(tick) - 1;
-                    }
-                }
+            for (const uint32_t block : ProbePlaceBlocks(place)) {
+                seeds[block] = 1;
+                changedMarks[block] = ProbeChangeMark(tick) - 1;
             }
 
             return static_cast<uint64_t>(source);
@@ -1287,6 +1301,12 @@ namespace bicameral::sim {
             return ProbeStepCell(table, current.cells[index], self, at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z),
                                  at(y > 0, x, y - 1, z), at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1),
                                  at(z < LAST, x, y, z + 1), tick, changedMark, index);
+        }
+
+        // 上限の印(RxWaitStep::limits)を数える(GPU の ConductBlock の CountLimits と同じ)
+        void AddLimits(ProbeLimitCounts& counts, uint32_t limits) {
+            counts.productsHeld += (limits & reaction::RX_LIMIT_PRODUCTS) != 0 ? 1 : 0;
+            counts.candidatesLimited += (limits & reaction::RX_LIMIT_CANDIDATES) != 0 ? 1 : 0;
         }
 
         uint32_t BlockOfCellIndex(uint32_t index) {
@@ -1392,8 +1412,10 @@ namespace bicameral::sim {
         m_scheduledBlocks = static_cast<uint32_t>(rng::count(m_scheduled, uint8_t{1}));
 
         // (2) 伝導と反応(全部のセル。tc は刻みの初めの値)と、ブロックごとの変わったか・次に評価の要る刻みの最小
+        //     上限の印は GPU が計算するブロックのセルだけ数える(眠っているブロックは GPU が評価しない。T-0177)
         std::vector<uint8_t> changed(PROBE_BLOCK_COUNT, 0);
         std::vector<uint64_t> wakes(PROBE_BLOCK_COUNT, reaction::RX_WAIT_NEVER);
+        m_limits = {};
         for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
             const uint32_t block = BlockOfCellIndex(index);
             const ProbeCellStep step = ReferenceStepCell(table, current, index, tick, m_changedMarks[block]);
@@ -1402,6 +1424,8 @@ namespace bicameral::sim {
 
             changed[block] |= static_cast<uint8_t>(step.changed);
             wakes[block] = std::min(wakes[block], step.wakeTick);
+            if (m_scheduled[block] != 0)
+                AddLimits(m_limits, step.limits);
         }
 
         // (3) 次の刻みの予定の種(GPU の ConductBlock と同じ。眠っているブロックの起こす刻みは、計算し直しても同じ値になる)

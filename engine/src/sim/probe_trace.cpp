@@ -72,8 +72,9 @@ namespace bicameral::sim {
         // --- 木(1 刻みぶん)---
 
         struct TickTree {
-            std::map<uint32_t, std::vector<uint32_t>> pokes;  // 根のブロック → つついたセル
-            std::map<uint32_t, uint32_t> selfWakes;           // 根のブロック → 自分を起こした数(一覧に入った回数)
+            std::map<uint32_t, std::vector<uint32_t>> pokes;   // 根のブロック → つついたセル
+            std::map<uint32_t, std::vector<uint32_t>> places;  // 根のブロック → 置いた形の中心のセル(T-0246)
+            std::map<uint32_t, uint32_t> selfWakes;            // 根のブロック → 自分を起こした数(一覧に入った回数)
             std::set<uint32_t> roots;
             std::map<uint32_t, uint32_t> parents;    // 起こされたブロック → 親(起こした根のうち一番小さい番号)
             std::map<uint32_t, uint32_t> conducted;  // 計算したブロック → 結果(PROBE_BLOCK_FLAG_*)
@@ -84,6 +85,9 @@ namespace bicameral::sim {
             for (const GraphTraceRecord& record : records) {
                 if (record.kind == PROBE_TRACE_POKE) {
                     tree.pokes[record.subject].push_back(record.object);
+                    tree.roots.insert(record.subject);
+                } else if (record.kind == PROBE_TRACE_PLACE) {
+                    tree.places[record.subject].push_back(record.object);
                     tree.roots.insert(record.subject);
                 } else if (record.kind == PROBE_TRACE_WAKE) {
                     tree.roots.insert(record.subject);
@@ -111,13 +115,23 @@ namespace bicameral::sim {
         std::string FormatRoot(const TickTree& tree, uint32_t root, uint64_t tick,
                                const std::set<uint32_t>& changedBefore, bool previousTraced) {
             std::string origin;
-            if (const auto poked = tree.pokes.find(root); poked != tree.pokes.end()) {
+            const auto poked = tree.pokes.find(root);
+            const auto placed = tree.places.find(root);
+            if (poked != tree.pokes.end()) {
                 origin = "つつき";
                 for (const uint32_t cell : poked->second)
                     origin += " セル " + FormatCoordinates(CellCoordinates(cell));
-            } else if (changedBefore.contains(root))
+            }
+
+            if (placed != tree.places.end()) {
+                origin += origin.empty() ? "置く" : "・置く";
+                for (const uint32_t cell : placed->second)
+                    origin += " 中心 " + FormatCoordinates(CellCoordinates(cell));
+            }
+
+            if (origin.empty() && changedBefore.contains(root))
                 origin = std::format("刻み {} で変わった(か、まだ進めた)", tick - 1);
-            else
+            else if (origin.empty())
                 origin = previousTraced ? "(前の刻みで変わった記録なし。箱の外から)" : "(前の刻みは記録していない)";
 
             const auto self = tree.selfWakes.find(root);
@@ -196,9 +210,24 @@ namespace bicameral::sim {
             const char* kind = record.kind == PROBE_TRACE_POKE      ? "つつき"
                                : record.kind == PROBE_TRACE_WAKE    ? "起こす"
                                : record.kind == PROBE_TRACE_CONDUCT ? "計算"
+                               : record.kind == PROBE_TRACE_PLACE   ? "置く"
                                                                     : "?";
 
             return std::format("刻み {} {} 主 {} 従 {}", record.tick, kind, record.subject, record.object);
+        }
+
+        // 置くコマンドの根(probe_tick.hlsl の ApplyPlace と同じブロック。当てないコマンドは何も足さない)
+        void AppendExpectedPlace(const GraphTraceFilter& filter, uint64_t tick, const ProbePlace& place,
+                                 std::vector<uint8_t>& seeds, std::vector<GraphTraceRecord>& expected) {
+            if (place.valid == 0)
+                return;
+
+            const uint32_t center = ProbeCellIndex(place.x, place.y, place.z);
+            for (const uint32_t block : ProbePlaceBlocks(place)) {
+                seeds[block] = 1;
+                if (WantsBlock(filter, block))
+                    expected.push_back({.tick = tick, .kind = PROBE_TRACE_PLACE, .subject = block, .object = center});
+            }
         }
 
     }  // namespace
@@ -280,14 +309,18 @@ namespace bicameral::sim {
     }
 
     void AppendExpectedProbeTrace(const gpu::GraphTraceFilter& filter, uint64_t tick,
-                                  std::span<const ProbeCommand> commands, std::span<const uint8_t> flagsBefore,
-                                  std::span<const uint8_t> flagsAfter, std::vector<gpu::GraphTraceRecord>& expected) {
+                                  std::span<const ProbeCommand> commands, uint32_t speciesCount,
+                                  std::span<const uint8_t> flagsBefore, std::span<const uint8_t> flagsAfter,
+                                  std::vector<gpu::GraphTraceRecord>& expected) {
         if (!WantsTick(filter, tick))
             return;
 
-        // --- つつき(適用の単位と同じく、格子の中のものだけ)→ 根になる ---
+        // --- つつき(適用の単位と同じく、格子の中のものだけ)と置く(当てられるものだけ。触ったブロック全部。T-0246)→ 根になる ---
         std::vector<uint8_t> seeds(flagsBefore.begin(), flagsBefore.end());
         for (const ProbeCommand& command : commands) {
+            if (command.targetTick == tick && command.type == PROBE_COMMAND_TYPE_PLACE)
+                AppendExpectedPlace(filter, tick, DecodePlaceCommand(command, speciesCount), seeds, expected);
+
             const uint32_t x = command.payload[0];
             const uint32_t y = command.payload[1];
             const uint32_t z = command.payload[2];
