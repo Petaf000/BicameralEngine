@@ -18,7 +18,10 @@
 // 伝導の段が止まったのは、512 スレッドの段が上限の無い形のセルを持っていたため〔T-0290〕で、T-0272 で伝導の段から無くした。
 // 上限の大きさの形を持つのは 64 スレッドの WideDeferred・WideRetry だけ〔T-0326〕。128 にすると、その形が 1 度も使われない場面でも HW の
 // compute キューの刻みが終わらなくなった〔T-0327。T-0290 と同じくスレッドごとのスクラッチの大きさが疑わしい〕。見出しの大きさは上限に依らない
-// 〔T-0327。塊の表の続きを最初の塊に置く〕。上限を無くす〔核をセルの形の道具で作業場から読む〕のは T-0362)。
+// 〔T-0327。塊の表の続きを最初の塊に置く〕。
+// T-0362: 速い形(RX_GPU_MID_SPECIES)に入らないセルは、作業場(溢れの領域の後ろ)にセルを置く段(WideBigPass)が刻む。1 スレッドが上限の
+// 大きさの配列を持たないので、1 セルの上限は表の物質の数(RX_GPU_WIDE_SPECIES = 177 まで。要求の語の塊の数の 8 ビットに入る最大)。
+// 表の物質が 177 を超えると、178 種目からの生成物は今までどおり待たせる)。
 #ifndef BICAMERAL_MULTIRES_WIDE_HLSLI
 #define BICAMERAL_MULTIRES_WIDE_HLSLI
 
@@ -26,8 +29,11 @@
 
 MR_NAMESPACE_BEGIN
 
-FX_CONST uint32_t RX_GPU_WIDE_SPECIES = 96;  // GPU の刻みが 1 セルで持てる成分の数(インライン 8 + 溢れ 88。T-0327)
-FX_CONST uint32_t MR_WIDE_ENTRY_WORDS = 3;   // 物質 ID・µmol の下位・上位
+FX_CONST uint32_t RX_GPU_WIDE_SPECIES =
+    177;  // GPU の溢れの形が 1 セルに持てる成分の最大(並びの大きさ。T-0362。刻むのは表の物質の数まで)
+FX_CONST uint32_t
+    RX_GPU_MID_SPECIES = 32;  // 速い形(スレッドが配列で持つ。これを超えるセルは作業場の段。T-0326・T-0362)
+FX_CONST uint32_t MR_WIDE_ENTRY_WORDS = 3;  // 物質 ID・µmol の下位・上位
 // 面の溢れの成分の最大(全部のセルが RX_GPU_WIDE_SPECIES 種)と、面の論理の語の最大
 FX_CONST uint32_t MR_WIDE_SIDE_ENTRIES = MR_BLOCK_CELLS * (RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES);
 FX_CONST uint32_t MR_WIDE_SIDE_WORDS = (MR_BLOCK_CELLS + 1) + (MR_WIDE_ENTRY_WORDS * MR_WIDE_SIDE_ENTRIES);
@@ -57,6 +63,20 @@ FX_CONST uint32_t MR_WIDE_REQUEST_PRESENT = 1u << 31;
 FX_CONST uint32_t MR_WIDE_REQUEST_RETRY = 1u << 9;
 FX_CONST uint32_t MR_WIDE_REQUEST_GRANTED = 1u << 10;
 FX_CONST uint32_t MR_WIDE_REQUEST_DEFERRED = 1u << 11;
+// 12 = 速い形に入らないセルがあるので、作業場の段(WideBigPass)に回した(T-0362。ほかのビットは回した段の要求のまま。作業場の段が消す)
+FX_CONST uint32_t MR_WIDE_REQUEST_BIG = 1u << 12;
+
+// --- 作業場(T-0362。溢れの領域の後ろ。速い形に入らないセルを作業場の段が置く)---
+// [グループ MR_WIDE_SPACE_GROUPS × スレッド MR_WIDE_SPACE_THREADS × レーン]。レーンは 1 セルの成分の上限 c について
+// [刻む前のセル 3c][書くセル 3c][使う量 2c](成分 i は物質 ID・µmol の下位・上位 / 使う量の下位・上位)
+FX_CONST uint32_t MR_WIDE_SPACE_GROUPS = 32;
+FX_CONST uint32_t MR_WIDE_SPACE_THREADS = 64;  // = WAIT_STEP_THREADS(multires_wait_step.hlsli)
+FX_CONST uint32_t MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES = 8;
+
+// 作業場の語の数(capacity = 1 セルの成分の上限。0 なら作業場は無い)
+FX_FN uint64_t MrWideSpaceWords(uint32_t capacity) {
+    return (uint64_t)MR_WIDE_SPACE_GROUPS * MR_WIDE_SPACE_THREADS * MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES * capacity;
+}
 
 FX_FN uint32_t MrWideMakeRequest(uint32_t side, uint32_t chunks, bool retry) {
     return MR_WIDE_REQUEST_PRESENT | (retry ? MR_WIDE_REQUEST_RETRY : 0u) | (side << 8) | chunks;

@@ -5,8 +5,8 @@
 //
 // 1 グループ = 1 ブロック(64 スレッド、1 スレッド 8 セル)。セルどうしは独立なので、成分が 8 種に収まるセルはインラインの核(RxCell)で
 // 刻んでその場で書く(上限に当たらない間は上限なしの形とビット単位で同じ。T-0175)。溢れを持つセル・インラインで 9 種目の生成物を
-// 待たせたセルだけ、上限の無い形で刻み直す(全部を刻む段は速い形 RxGpuMidCell〔32 種〕だけ。入らないセルがあるブロックは
-// WideDeferredPass が速い形・大きい形 RxGpuWideCell〔96 種〕で刻む。T-0326):
+// 待たせたセルだけ、上限の無い形で刻み直す(全部を刻む段・WideDeferred・WideRetry は速い形 RxGpuMidCell〔32 種〕だけ。入らないセルが
+// あるブロックは作業場の段 WideBigPass が速い形・作業場の形 RxGpuSpaceCell〔表の物質の数まで〕で刻む。T-0326・T-0362):
 //   ① 刻んだ後の溢れの数をセルごとに数える(書かない)→ ② セルの番号の順のプレフィックス和(スレッド 0)で並びを決め、
 //   頁の溢れの枠に入るなら ③ もう一度刻んで、インラインを頁へ・溢れをもう片方の面へ書き、面を入れ替える。
 // 書く面の塊が足りなければそのセルは書かずに、頁の見出しに要求(要る塊の数・刻み直すセルの印・刻みの初めの busyTick)を書く。
@@ -20,16 +20,15 @@
 #include "common/multires_wide.hlsli"
 #include "sim/multires_wide_access.hlsli"
 
-// --- 上限の無い形のセル: 速い形(RX_GPU_MID_SPECIES = 32 種)と大きい形(RX_GPU_WIDE_SPECIES = 96 種。T-0327)。reaction.hlsli の「セルの形ごとの道具」の版 ---
-// 配列は動的な添字なのでレジスタではなくスクラッチに置かれうる。持つのは 64 スレッドの段(全部を刻む・頁に広げて刻む・WideRetry・WideDeferred)だけ。
-// 512 スレッドの伝導の段に持たせると上限 56 以上で HW の compute キューが止まった(T-0290)ので、T-0272 で伝導の段の熱は溢れから直接足し
-// (WideTailThermal)、反応は WideDeferredPass に回した。
-// 全部を刻む段・頁に広げて刻む段は速い形だけを持ち、速い形に入らないセル(32 種を超えて読む・生成物で 32 種を超える)が
-// 1 つでもあるブロックは溢れるセルを全部 WideDeferredPass に回す(T-0326。大きい形を持つのは WideDeferred・WideRetry の 2 段だけ)。
+// --- 上限の無い形のセル: 速い形(RX_GPU_MID_SPECIES = 32 種)と作業場の形(T-0362)。reaction.hlsli の「セルの形ごとの道具」の版 ---
+// 速い形の配列は動的な添字なのでレジスタではなくスクラッチに置かれうる。持つのは 64 スレッドの段(全部を刻む・頁に広げて刻む・WideRetry・
+// WideDeferred・WideBigPass)だけ。512 スレッドの伝導の段に持たせると上限 56 以上で HW の compute キューが止まった(T-0290)ので、T-0272 で
+// 伝導の段の熱は溢れから直接足し(WideTailThermal)、反応は WideDeferredPass に回した。上限の大きさの配列を 64 スレッドの段に持たせても
+// 128 種で止まった(T-0327)ので、速い形に入らないセルは作業場の形 RxGpuSpaceCell(成分を u6 の作業場に置き、核は reaction.hlsli の
+// 「成分を読む・書く・写す」道具の特殊化で読み書きする)で作業場の段 WideBigPass だけが刻む(1 スレッドのスクラッチが上限に依らない)。
+// 速い形に入らないセル(32 種を超えて読む・生成物で 32 種を超える)が 1 つでもあるブロックは、溢れるセルを全部後の段へ回す
+// (全部を刻む段 → WideDeferredPass、WideDeferred・WideRetry → WideBigPass。並びはブロックの全部の溢れの数で決まるので一部だけは書けない)。
 // 上限に当たらない間は形の大きさに依らずビット単位で同じ(形の道具が違うのは「成分をもう 1 つ増やせるか」だけ。T-0175 のインラインと同じ)。
-// 上限を無くす(大きいセルを作業場に置く)のは T-0362
-static const uint32_t RX_GPU_MID_SPECIES = 32;
-
 struct RxGpuMidCell {
     int64_t energy;
     uint32_t speciesCount;
@@ -39,18 +38,6 @@ struct RxGpuMidCell {
 
 struct RxGpuMidUsage {
     uint64_t amounts[RX_GPU_MID_SPECIES];
-    uint64_t heat;
-};
-
-struct RxGpuWideCell {
-    int64_t energy;
-    uint32_t speciesCount;
-    uint32_t species[RX_GPU_WIDE_SPECIES];
-    uint64_t amounts[RX_GPU_WIDE_SPECIES];
-};
-
-struct RxGpuWideUsage {
-    uint64_t amounts[RX_GPU_WIDE_SPECIES];
     uint64_t heat;
 };
 
@@ -99,49 +86,139 @@ RxGpuMidCell MidShape() {
     return RxMakeEmptyGpuMidCell(0);
 }
 
-// --- 大きい形の道具 ---
+#ifdef MR_WIDE_BIG_PASS
+// --- 作業場の形(T-0362)---
+// 作業場の段(WideBigPass)だけがコンパイルする。g_external0 = 作業場の始まり(u6 の語)、g_external1 = 1 セルの成分の上限(表の物質の数。
+// RX_GPU_WIDE_SPECIES まで)。並びは shaders/common/multires_wide.hlsli の「作業場」。スレッドのレーンは [刻む前 A][書く B][使う量]。
+// セルは「成分 0 の語」を指す小さな値で、写しても同じ場所を指す。核の中で元のセルを残す所(反応物を引く前)は RxWritableCell が
+// A から B へ写す。RxCompactCell・RxTryAddSpecies は同じ場所で詰める・ずらす(書く位置が読む位置を追い越さない)
 
-RxGpuWideCell RxMakeEmptyGpuWideCell(int64_t energy) {
-    RxGpuWideCell empty;
-    empty.energy = energy;
-    empty.speciesCount = 0;
-    for (uint32_t i = 0; i < RX_GPU_WIDE_SPECIES; ++i) {
-        empty.species[i] = 0;
-        empty.amounts[i] = 0;
-    }
+static uint32_t s_spaceGroup = 0;  // 作業場の段のグループの番号(WideBigPass が初めに書く。スレッドごとの値)
 
-    return empty;
+struct RxGpuSpaceCell {
+    int64_t energy;
+    uint32_t speciesCount;
+    uint32_t word;  // 成分 0 の u6 の語(成分 i は word + 3i: 物質 ID・µmol の下位・上位)
+    uint32_t lane;  // スレッドのレーンの先頭(A = lane、B = lane + 3c、使う量 = lane + 6c)
+};
+
+struct RxGpuSpaceUsage {
+    uint32_t word;  // 成分 i の使う量は word + 2i(下位・上位)
+    uint64_t heat;
+};
+
+uint32_t SpaceCapacity() {
+    return g_external1;
 }
 
-RxGpuWideCell RxEmptyCellLike(RxGpuWideCell cell, int64_t energy) {
-    return RxMakeEmptyGpuWideCell(energy);
+// スレッド thread のレーンの先頭
+uint32_t SpaceLaneWord(uint32_t thread) {
+    const uint32_t laneWords = MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES * SpaceCapacity();
+
+    return g_external0 + (((s_spaceGroup * WAIT_STEP_THREADS) + thread) * laneWords);
 }
 
-uint32_t RxGpuCapacity(RxGpuWideCell cell) {
-    return RX_GPU_WIDE_SPECIES;
+template <>
+uint32_t RxSpeciesAt<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i) {
+    return g_treeWords[cell.word + (MR_WIDE_ENTRY_WORDS * i)];
 }
 
-bool RxHasRoomForSpecies(RxGpuWideCell cell) {
-    return cell.speciesCount < RX_GPU_WIDE_SPECIES;
+template <>
+uint64_t RxAmountAt<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i) {
+    const uint32_t word = cell.word + (MR_WIDE_ENTRY_WORDS * i);
+
+    return FX_U64(g_treeWords[word + 2], g_treeWords[word + 1]);
 }
 
-RxGpuWideCell RxCellWithRoom(RxGpuWideCell cell) {
+template <>
+RxGpuSpaceCell RxWithAmount<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i, uint64_t amount) {
+    const uint32_t word = cell.word + (MR_WIDE_ENTRY_WORDS * i);
+    g_treeWords[word + 1] = (uint32_t)amount;
+    g_treeWords[word + 2] = (uint32_t)(amount >> 32);
+
     return cell;
 }
 
-RxGpuWideUsage RxEmptyUsage(RxGpuWideCell cell) {
-    RxGpuWideUsage usage;
-    for (uint32_t i = 0; i < RX_GPU_WIDE_SPECIES; ++i)
-        usage.amounts[i] = 0;
+template <>
+RxGpuSpaceCell RxWithEntry<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i, uint32_t speciesId, uint64_t amount) {
+    const uint32_t word = cell.word + (MR_WIDE_ENTRY_WORDS * i);
+    g_treeWords[word] = speciesId;
+    g_treeWords[word + 1] = (uint32_t)amount;
+    g_treeWords[word + 2] = (uint32_t)(amount >> 32);
 
-    usage.heat = 0;
+    return cell;
+}
+
+// 刻む前のセル(A)を書くセル(B)へ写す。B を指していればそのまま
+template <>
+RxGpuSpaceCell RxWritableCell<RxGpuSpaceCell>(RxGpuSpaceCell cell) {
+    RxGpuSpaceCell copy = cell;
+    copy.word = cell.lane + (MR_WIDE_ENTRY_WORDS * SpaceCapacity());
+    if (copy.word == cell.word)
+        return copy;
+
+    for (uint32_t w = 0; w < MR_WIDE_ENTRY_WORDS * cell.speciesCount; ++w)
+        g_treeWords[copy.word + w] = g_treeWords[cell.word + w];
+
+    return copy;
+}
+
+template <>
+uint64_t RxUsageAt<RxGpuSpaceUsage>(RxGpuSpaceUsage usage, uint32_t i) {
+    return FX_U64(g_treeWords[usage.word + (2 * i) + 1], g_treeWords[usage.word + (2 * i)]);
+}
+
+template <>
+RxGpuSpaceUsage RxWithUsage<RxGpuSpaceUsage>(RxGpuSpaceUsage usage, uint32_t i, uint64_t amount) {
+    g_treeWords[usage.word + (2 * i)] = (uint32_t)amount;
+    g_treeWords[usage.word + (2 * i) + 1] = (uint32_t)(amount >> 32);
 
     return usage;
 }
 
-RxGpuWideCell BigShape() {
-    return RxMakeEmptyGpuWideCell(0);
+// 同じ形の空のセル: 同じ場所を指す(RxCompactCell が同じ場所で詰める。LoadGpuWideCell は A に読む)
+RxGpuSpaceCell RxEmptyCellLike(RxGpuSpaceCell cell, int64_t energy) {
+    RxGpuSpaceCell empty = cell;
+    empty.energy = energy;
+    empty.speciesCount = 0;
+
+    return empty;
 }
+
+uint32_t RxGpuCapacity(RxGpuSpaceCell cell) {
+    return SpaceCapacity();
+}
+
+bool RxHasRoomForSpecies(RxGpuSpaceCell cell) {
+    return cell.speciesCount < SpaceCapacity();
+}
+
+RxGpuSpaceCell RxCellWithRoom(RxGpuSpaceCell cell) {
+    return cell;
+}
+
+// 0 の使う量(核が添字に使うのは成分の位置 < speciesCount だけなので、そこまで 0 にする)
+RxGpuSpaceUsage RxEmptyUsage(RxGpuSpaceCell cell) {
+    RxGpuSpaceUsage usage;
+    usage.word = cell.lane + (2 * MR_WIDE_ENTRY_WORDS * SpaceCapacity());
+    usage.heat = 0;
+    for (uint32_t w = 0; w < 2 * cell.speciesCount; ++w)
+        g_treeWords[usage.word + w] = 0;
+
+    return usage;
+}
+
+// スレッド thread の作業場の形(A を指す空のセル)
+RxGpuSpaceCell SpaceShape(uint32_t thread) {
+    RxGpuSpaceCell shape;
+    shape.energy = 0;
+    shape.speciesCount = 0;
+    shape.lane = SpaceLaneWord(thread);
+    shape.word = shape.lane;
+
+    return shape;
+}
+#endif
 
 // --- 形に依らない道具 ---
 
@@ -151,7 +228,7 @@ bool SameGpuWideCell(Cell a, Cell b) {
         return false;
 
     for (uint32_t i = 0; i < a.speciesCount; ++i) {
-        if (a.species[i] != b.species[i] || a.amounts[i] != b.amounts[i])
+        if (RxSpeciesAt(a, i) != RxSpeciesAt(b, i) || RxAmountAt(a, i) != RxAmountAt(b, i))
             return false;
     }
 
@@ -173,10 +250,8 @@ template <typename Cell>
 Cell LoadGpuWideCell(Cell shape, RxCell inlineCell, uint32_t page, uint32_t side, uint32_t index) {
     Cell cell = RxEmptyCellLike(shape, inlineCell.energy);
     cell.speciesCount = inlineCell.speciesCount;
-    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
-        cell.species[i] = inlineCell.species[i];
-        cell.amounts[i] = inlineCell.amounts[i];
-    }
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        cell = RxWithEntry(cell, i, inlineCell.species[i], inlineCell.amounts[i]);
 
     if (inlineCell.speciesCount < RX_MAX_CELL_SPECIES)
         return cell;
@@ -185,9 +260,9 @@ Cell LoadGpuWideCell(Cell shape, RxCell inlineCell, uint32_t page, uint32_t side
     FX_ASSERT(range.y - range.x <= RxGpuCapacity(shape) - RX_MAX_CELL_SPECIES);
     for (uint32_t e = range.x; e < range.y; ++e) {
         const uint32_t word = MrWideEntryWord(e);
-        cell.species[cell.speciesCount] = g_treeWords[WideWord(page, side, word)];
-        cell.amounts[cell.speciesCount] = FX_U64(g_treeWords[WideWord(page, side, word + 2)],
-                                                 g_treeWords[WideWord(page, side, word + 1)]);
+        cell = RxWithEntry(
+            cell, cell.speciesCount, g_treeWords[WideWord(page, side, word)],
+            FX_U64(g_treeWords[WideWord(page, side, word + 2)], g_treeWords[WideWord(page, side, word + 1)]));
         cell.speciesCount += 1;
     }
 
@@ -207,17 +282,18 @@ void StoreGpuWideCell(Cell cell, uint32_t address, uint32_t page, uint32_t side,
     narrow.speciesCount = min(cell.speciesCount, RX_MAX_CELL_SPECIES);
     for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
         if (i < narrow.speciesCount) {
-            narrow.species[i] = cell.species[i];
-            narrow.amounts[i] = cell.amounts[i];
+            narrow.species[i] = RxSpeciesAt(cell, i);
+            narrow.amounts[i] = RxAmountAt(cell, i);
         }
     }
 
     g_cells[address] = narrow;
     for (uint32_t i = RX_MAX_CELL_SPECIES; i < cell.speciesCount; ++i) {
         const uint32_t word = MrWideEntryWord(first + i - RX_MAX_CELL_SPECIES);
-        g_treeWords[WideWord(page, side, word)] = cell.species[i];
-        g_treeWords[WideWord(page, side, word + 1)] = (uint32_t)cell.amounts[i];
-        g_treeWords[WideWord(page, side, word + 2)] = (uint32_t)(cell.amounts[i] >> 32);
+        const uint64_t amount = RxAmountAt(cell, i);
+        g_treeWords[WideWord(page, side, word)] = RxSpeciesAt(cell, i);
+        g_treeWords[WideWord(page, side, word + 1)] = (uint32_t)amount;
+        g_treeWords[WideWord(page, side, word + 2)] = (uint32_t)(amount >> 32);
     }
 }
 
@@ -622,7 +698,8 @@ void HoldWideCells(uint32_t thread, inout uint64_t wakeTick, inout MrLimitTally 
 }
 
 // 印のセル 1 つの ①(write = false: 溢れの数を gs_wideOffsets へ)か ③(write = true: 書く)。速い形に入れば速い形で、入らなければ
-// (32 種を超えて読む・生成物で 32 種を超える)大きい形で刻む。① で決めた形は gs_wideBigMarks に残して ③ も同じ形で刻む。③ で変わったら true
+// (32 種を超えて読む・生成物で 32 種を超える)作業場の段では作業場の形で刻み、ほかの段では gs_wideBig を立てるだけ(ブロックを作業場の段へ
+// 回す。T-0362)。① で決めた形は gs_wideBigMarks に残して ③ も同じ形で刻む。③ で変わったら true
 bool StepMarkedWideCell(MrBlock block, uint32_t index, uint32_t side, bool write, inout uint64_t wakeTick,
                         inout MrLimitTally tally) {
     const uint32_t first = write ? gs_wideOffsets[index] : 0u;
@@ -639,8 +716,15 @@ bool StepMarkedWideCell(MrBlock block, uint32_t index, uint32_t side, bool write
             InterlockedOr(gs_wideBigMarks[index / 32], 1u << (index % 32));
     }
 
+#ifdef MR_WIDE_BIG_PASS
     if (!done)
-        step = StepWideCellAs(BigShape(), block, index, side, write, first);
+        step = StepWideCellAs(SpaceShape(index % WAIT_STEP_THREADS), block, index, side, write, first);
+#else
+    if (!done) {
+        gs_wideBig = 1;
+        return false;
+    }
+#endif
 
     if (!write) {
         gs_wideOffsets[index] = step.tail;
@@ -650,16 +734,27 @@ bool StepMarkedWideCell(MrBlock block, uint32_t index, uint32_t side, bool write
     return AddWrittenWideCell(step, wakeTick, tally);
 }
 
+// RestepWideMarked の結果
+static const uint32_t WIDE_RESTEP_DONE = 0;   // 書いた
+static const uint32_t WIDE_RESTEP_SHORT = 1;  // 書く面の塊が足りないので書かずに要求を残した
+static const uint32_t
+    WIDE_RESTEP_BIG = 2;  // 速い形に入らないセルがあるので書かずに作業場の段へ回す(呼ぶ側が要求に印。T-0362)
+
 // 印のセルだけ ①②③ を刻む(印のセルは刻みの段で書いていない = 刻む前の値〔伝導の段は変化を足した値〕のまま)。
-// 書く面の塊が足りなければ書かずに要求を残す(PlanWideSide)。入ったら true。
+// 書く面の塊が足りなければ書かずに要求を残す(PlanWideSide)。
 // ① と ③ は同じ繰り返しの 2 回目([loop])にして、反応の核を形ごとに 1 か所にだけ展開する
-bool RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint64_t wakeTick,
-                      inout MrLimitTally tally) {
+uint32_t RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint64_t wakeTick,
+                          inout MrLimitTally tally) {
     bool fits = true;
+    bool big = false;
     [loop] for (uint32_t phase = 0; phase < 2; ++phase) {
         const bool write = phase == 1;
         if (write) {
             GroupMemoryBarrierWithGroupSync();
+            big = gs_wideBig != 0;  // 作業場の段では立たない
+            if (big)
+                break;
+
             fits = PlanWideSide(block.page, side, thread, WAIT_STEP_THREADS, block.busyTick);
         }
 
@@ -673,9 +768,12 @@ bool RestepWideMarked(MrBlock block, uint32_t side, uint32_t thread, inout uint6
         }
     }
 
+    if (big)
+        return WIDE_RESTEP_BIG;
+
     SwapWideSide(block.page, side, fits, thread);
 
-    return fits;
+    return fits ? WIDE_RESTEP_DONE : WIDE_RESTEP_SHORT;
 }
 
 // 見出しの要求(印・刻みの初めの busyTick)を読み戻す: block.busyTick を刻みの初めの値にし、印を gs_wideMarks へ
@@ -724,8 +822,15 @@ void WideRetryBlock(uint32_t slot, uint32_t thread) {
     uint64_t wakeTick = RX_WAIT_NEVER;
     MrLimitTally tally = MrMakeLimitTally();
     if ((request & MR_WIDE_REQUEST_GRANTED) != 0) {
-        const bool fits = RestepWideMarked(block, side, thread, wakeTick, tally);
-        FX_ASSERT(fits);
+        const uint32_t restep = RestepWideMarked(block, side, thread, wakeTick, tally);
+        if (restep == WIDE_RESTEP_BIG) {
+            if (thread == 0)
+                g_treeWords[WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST)] = request | MR_WIDE_REQUEST_BIG;
+
+            return;
+        }
+
+        FX_ASSERT(restep == WIDE_RESTEP_DONE);
     } else {
         HoldWideCells(thread, wakeTick, tally);
     }
@@ -763,8 +868,11 @@ void WideDeferredBlock(uint32_t slot, uint32_t thread) {
     // --- ①②③(塊が足りなければ書かずに要求だけ残す)---
     uint64_t wakeTick = RX_WAIT_NEVER;
     MrLimitTally tally = MrMakeLimitTally();
-    const bool fits = RestepWideMarked(block, side, thread, wakeTick, tally);
-    if (!fits)
+    const uint32_t restep = RestepWideMarked(block, side, thread, wakeTick, tally);
+    if (restep == WIDE_RESTEP_BIG && thread == 0)
+        g_treeWords[requestWord] = MR_WIDE_REQUEST_PRESENT | MR_WIDE_REQUEST_DEFERRED | MR_WIDE_REQUEST_BIG;
+
+    if (restep != WIDE_RESTEP_DONE)
         return;
 
     CountLimits(tally);
@@ -772,5 +880,45 @@ void WideDeferredBlock(uint32_t slot, uint32_t thread) {
     if (thread == 0)
         FinishWideMarked(slot, result);
 }
+
+#ifdef MR_WIDE_BIG_PASS
+// --- 速い形に入らないセルのあるブロックを作業場の形で刻む(T-0362)---
+// WideDeferred・WideRetry が速い形に入らないセルを見つけたブロック(要求の MR_WIDE_REQUEST_BIG)だけ、回した段と同じ ①②③ を
+// 作業場の形で刻み直す(刻む関数・順は同じなので結果はビット単位で同じ)。回した段の後にすぐ流す(WideDeferred → WideBig → 配る →
+// 刻み直す → WideBig)。WideDeferred から来たブロックの書く面の塊が足りなければ要求を RETRY に書き換え、後の WideRetry・WideBig が刻む
+void WideBigBlock(uint32_t slot, uint32_t thread) {
+    MrBlock block = g_blocks[slot];
+    if (MrIsUniform(block))
+        return;
+
+    const uint32_t requestWord = WideHeaderAt(block.page, MR_WIDE_HEADER_REQUEST);
+    const uint32_t request = g_treeWords[requestWord];
+    if ((request & MR_WIDE_REQUEST_BIG) == 0)
+        return;
+
+    const bool retry = (request & MR_WIDE_REQUEST_DEFERRED) == 0;  // WideRetry から(塊は配ってある)
+    const uint32_t side = BeginWideMarked(block, thread);
+    if (thread == 0 && !retry)
+        g_treeWords[requestWord] = 0;
+
+    uint64_t wakeTick = RX_WAIT_NEVER;
+    MrLimitTally tally = MrMakeLimitTally();
+    const uint32_t restep = RestepWideMarked(block, side, thread, wakeTick, tally);
+    FX_ASSERT(restep != WIDE_RESTEP_BIG);
+    FX_ASSERT(!retry || restep == WIDE_RESTEP_DONE);
+    if (restep != WIDE_RESTEP_DONE)
+        return;
+
+    CountLimits(tally);
+    const WaitBlockResult result = EndWaitReduce(thread, wakeTick);
+    if (thread != 0)
+        return;
+
+    if (retry)
+        g_treeWords[requestWord] = 0;
+
+    FinishWideMarked(slot, result);
+}
+#endif
 
 #endif  // BICAMERAL_MULTIRES_WIDE_STEP_HLSLI

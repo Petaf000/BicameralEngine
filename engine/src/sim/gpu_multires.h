@@ -291,6 +291,7 @@ namespace bicameral::sim {
         // 要求の処理・畳むの後: 端数の枠が要らない塊を置き場へ返す(溢れを使う世界だけ。T-0347)
         void RecordWideTrim(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        void RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
@@ -316,9 +317,12 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_wideAllocatePipeline;
         ComPtr<ID3D12PipelineState> m_wideRetryPipeline;
         ComPtr<ID3D12PipelineState> m_wideDeferredPipeline;
+        ComPtr<ID3D12PipelineState> m_wideBigPipeline;          // 速い形に入らないセルを作業場の形で刻む(T-0362)
         ComPtr<ID3D12PipelineState> m_treeWideReservePipeline;  // 細かくする子の頁に溢れの塊を付ける(T-0237)
         ComPtr<ID3D12PipelineState> m_treeWideTrimPipeline;     // 端数の枠が要らない塊を返す(T-0347)
         uint32_t m_wideChunks = 0;                              // 溢れの塊の置き場の塊の数
+        uint32_t m_spaceSpecies =
+            0;  // 作業場の 1 セルの成分の上限(表の物質の数。速い形に収まる表なら 0 = 作業場なし。T-0362)
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

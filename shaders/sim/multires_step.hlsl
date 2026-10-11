@@ -89,4 +89,15 @@ uint32_t ExpandRecordOfGroup(uint32_t group) {
 
     WideDeferredBlock(slot, thread);
 }
+#ifdef MR_WIDE_BIG_PASS
+// 速い形に入らないセルのあるブロックを作業場の形で刻む(T-0362)。作業場は MR_WIDE_SPACE_GROUPS グループの分だけなので、
+// グループ g が枠 g, g + MR_WIDE_SPACE_GROUPS, ... を順に受け持つ(枠の中身は 1 グループだけが書くので、受け持ちの順は結果に効かない)
+[numthreads(WAIT_STEP_THREADS, 1, 1)] void WideBigPass(uint3 group : SV_GroupID, uint32_t thread : SV_GroupIndex) {
+    s_spaceGroup = group.x;
+    for (uint32_t slot = group.x; slot < g_blockCount; slot += MR_WIDE_SPACE_GROUPS) {
+        GroupMemoryBarrierWithGroupSync();
+        WideBigBlock(slot, thread);
+    }
+}
+#endif
 #endif
