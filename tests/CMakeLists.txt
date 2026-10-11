@@ -395,13 +395,16 @@ set_tests_properties(window_replay_no_packages PROPERTIES LABELS gpu FIXTURES_RE
   PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*再生: OK")
 # ホットリロード(T-0139・T-0194・T-0195): パッケージの写しの反応表を窓の中で壊す → 古い表のまま → 速度を直す → 刻みの境界で
 # 差し替わる、を火をつけた木箱の壁を覗きながら記録する(--auto-reload が確かめ、通らなければ 1)。再生は写しのフォルダが無くても
-# 再生ファイルの表だけで、同じ刻みに差し替えて同じハッシュ列になる(覗き窓も同じ表へ替わる)
+# 再生ファイルの表だけで、同じ刻みに差し替えて同じハッシュ列になる(覗き窓も同じ表へ替わる)。
+# --species-remap: 続けて species.luau にオゾンを足す → 消す(物質の数が変わる差し替え。名前で付け替える。T-0242・T-0254)。再生は差し替え 3 回
 set(WINDOW_HOT_RELOAD_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/hot_reload_packages)
 set(WINDOW_HOT_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_hot_reload.bcreplay)
+# CMake の正規表現は {n} の繰り返しを持たないので、差し替えの行を 3 回並べる
+set(WINDOW_HOT_RELOAD_SWAP "反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ へ差し替える")
 add_test(NAME window_hot_reload_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_HOT_RELOAD_PACKAGES})
 add_test(NAME window_hot_reload_record
-         COMMAND bicameral --editor --auto-reload --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
+         COMMAND bicameral --editor --auto-reload --species-remap --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
                  --peek 28,32,32 --peek-depth 9 --frames 3000 --record ${WINDOW_HOT_RELOAD_FILE})
 add_test(NAME window_hot_reload_play
          COMMAND bicameral --replay ${WINDOW_HOT_RELOAD_FILE} --peek 28,32,32 --peek-depth 9
@@ -410,7 +413,7 @@ set_tests_properties(window_hot_reload_copy PROPERTIES FIXTURES_SETUP window_hot
 set_tests_properties(window_hot_reload_record PROPERTIES LABELS gpu TIMEOUT 600
   FIXTURES_REQUIRED window_hot_reload_packages FIXTURES_SETUP window_hot_reload)
 set_tests_properties(window_hot_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_hot_reload
-  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ へ差し替える.*再生: OK")
+  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*${WINDOW_HOT_RELOAD_SWAP}.*${WINDOW_HOT_RELOAD_SWAP}.*${WINDOW_HOT_RELOAD_SWAP}.*再生: OK")
 # 反応表のパネル(T-0219): 写したパッケージの木の燃焼の速さをパネルの書き戻しで変える → ホットリロードで当たる
 # → 元に戻す(ファイルは元の中身)→ 元の版の表に戻って終える(editor/reaction_table_panel。通らなければ終了コード 1)
 set(WINDOW_TABLE_EDIT_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/table_edit_packages)
