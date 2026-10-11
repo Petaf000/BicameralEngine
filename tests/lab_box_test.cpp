@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <expected>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <string_view>
@@ -773,6 +774,104 @@ namespace {
         TestPatchFollowsRuleName(table);
     }
 
+    // --- 魔法の触媒(T-0288・ADR-0095 追記)。値は試験用の仮のもの(D-006)---
+
+    // 速さの表の値 2 つが近いか: 指数をそろえ(差は 1 まで)、仮数の差が tolerance 以下
+    bool NearRate(uint64_t first, uint64_t second, uint64_t tolerance) {
+        using namespace bicameral::reaction;
+        const int32_t firstExponent = RxRateExponent(first);
+        const int32_t secondExponent = RxRateExponent(second);
+        if (firstExponent > secondExponent + 1 || secondExponent > firstExponent + 1)
+            return false;
+
+        const uint64_t firstMantissa = RxRateMantissa(first) << (firstExponent > secondExponent ? 1 : 0);
+        const uint64_t secondMantissa = RxRateMantissa(second) << (secondExponent > firstExponent ? 1 : 0);
+        const uint64_t difference = firstMantissa > secondMantissa ? firstMantissa - secondMantissa
+                                                                   : secondMantissa - firstMantissa;
+
+        return difference <= tolerance;
+    }
+
+    // 規則 rule の Ea だけを替えてベイクした表(触媒と比べる)
+    std::expected<BakedReactionTable, std::string> BakeWithActivation(std::string_view rule, int64_t activationEnergy) {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        for (RuleDefinition& entry : definition.rules) {
+            if (entry.name == rule)
+                entry.rate.activationEnergy = activationEnergy;
+        }
+
+        return BakeReactionTable(definition);
+    }
+
+    // 触媒は Ea を下げてベイクした表とほぼ同じ速さ(どの温度でも)・倍率は冷たいほど大きい(2^shift 倍と区別できる)・
+    // 下げる量は和で Ea が上限・止めるが勝つ・2^shift 倍と重ねられる
+    void TestMagicCatalyst(const BakedReactionTable& table) {
+        using namespace bicameral::reaction;
+        constexpr uint32_t LOWERED = 30000;      // J/mol(仮)
+        constexpr uint64_t TOLERANCE = 1u << 8;  // 仮数(2^31〜2^32)の差。相対で約 2^-23
+
+        // --- 効き方の語 ---
+        const uint32_t catalyst = MpMakeCatalystEffect(LOWERED);
+        EXPECT(MpEffectKind(catalyst) == MP_KIND_CATALYST && MpEffectCatalystJoulesPerMol(catalyst) == LOWERED);
+        EXPECT(MpEffectValid(MpMakeCatalystEffect(1)) &&
+               MpEffectValid(MpMakeCatalystEffect(MP_MAX_CATALYST_JOULES_PER_MOL)));
+        EXPECT(!MpEffectValid(MpMakeCatalystEffect(0)) && !MpEffectValid(MP_KIND_CATALYST));
+
+        // --- 規則と、Ea を替えてベイクした表(規則は名前の順なので ID は同じ)---
+        const auto found = std::ranges::find(table.ruleNames, "cellulose_combustion");
+        EXPECT(found != table.ruleNames.end());
+        const auto lowered = BakeWithActivation("cellulose_combustion", 150000 - LOWERED);
+        const auto barrierless = BakeWithActivation("cellulose_combustion", 0);
+        EXPECT(lowered.has_value() && barrierless.has_value());
+        if (found == table.ruleNames.end() || !lowered || !barrierless)
+            return;
+
+        const auto rule = static_cast<uint32_t>(std::distance(table.ruleNames.begin(), found));
+        EXPECT(table.rules[rule].activationEnergy == 150000);
+
+        // --- セル (0, 0, 0) を覆うパッチ(effects)を重ねた、温度 kelvin の速さ ---
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        const ReactionTableView view = table.View();
+        const auto ruleCount = static_cast<uint32_t>(table.rules.size());
+        const auto rateWith = [&](std::initializer_list<uint32_t> effects, uint32_t kelvin) {
+            std::vector<uint32_t> words(MP_LIST_WORDS, 0);
+            const List list{.words = words};
+            for (const uint32_t effect : effects) {
+                const MpPatch patch = MpPatchFromCommand(table.rules[rule].key, effect, 10, 0, 0, 0, 0, 0, 0, 0);
+                EXPECT(MpAddPatch(list, view, patch, 0, ruleCount));
+            }
+
+            ReactionTableView patchedView = view;
+            patchedView.magicPatches = words;
+            // Rate は HLSL と同じく const でない
+            MpPatchedTable<ReactionTableView> patched = MpPatchTable(patchedView, 0, 0, 0, 0, 0);
+
+            return patched.Rate(rule, kelvin);
+        };
+
+        for (const uint32_t kelvin : {300u, 450u, 600u, 1200u, RX_RATE_TABLE_KELVINS - 1}) {
+            const uint64_t catalyzed = rateWith({catalyst}, kelvin);
+            EXPECT(NearRate(catalyzed, lowered->View().Rate(rule, kelvin), TOLERANCE));
+            EXPECT(rateWith({MpMakeCatalystEffect(20000), MpMakeCatalystEffect(10000)}, kelvin) == catalyzed);
+            EXPECT(rateWith({catalyst, MpMakeScaleEffect(3)}, kelvin) == MpScaleRate(catalyzed, 3));
+            EXPECT(rateWith({catalyst, MpMakeStopEffect()}, kelvin) == 0);
+
+            // 下げる量の和が Ea を超えても Ea' = 0 で止まる(A より速くならない)
+            const uint32_t most = MpMakeCatalystEffect(MP_MAX_CATALYST_JOULES_PER_MOL);
+            EXPECT(NearRate(rateWith({most, most}, kelvin), barrierless->View().Rate(rule, kelvin), TOLERANCE));
+        }
+
+        // --- 倍率は温度で変わる: 300 K では 600 K のおよそ 2 倍の桁(log2 で 17.4 と 8.7)---
+        const auto gain = [&](uint32_t kelvin) {
+            return RxRateExponent(rateWith({catalyst}, kelvin)) - RxRateExponent(view.Rate(rule, kelvin));
+        };
+        EXPECT(gain(300) >= 16 && gain(300) <= 19 && gain(600) >= 7 && gain(600) <= 10);
+        EXPECT(rateWith({catalyst}, 0) == 0 && MpCatalyzeRate(view.Rate(rule, 450), 0, 450) == view.Rate(rule, 450));
+    }
 }  // namespace
 
 int main() {
@@ -794,6 +893,7 @@ int main() {
     TestLargeBox(*table, materials);
     TestVersionFourRecording();
     TestMagicPatch(*table);
+    TestMagicCatalyst(*table);
     TestRefinedBox(*table, materials);
 
     if (failureCount > 0) {

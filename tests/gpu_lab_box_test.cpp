@@ -769,16 +769,20 @@ namespace {
         return {};
     }
 
-    // 450 K の木を 4 か所に置き、2 か所にパッチ(魔素の触媒の規則を止める・魔素なしの燃焼を 2^PATCH_SHIFT 倍)を PATCH_TICKS 刻み。
+    constexpr int32_t PATCH_SHIFT = 10;
+    constexpr uint32_t PATCH_CATALYST_JOULES_PER_MOL = 30000;  // 触媒(T-0288)。450 K で約 3000 倍(仮)
+
+    // 450 K の木を 4 か所に置き、2 か所にパッチ(魔素の触媒の規則を止める・魔素なしの燃焼を速める〔amplifyEffect。既定は
+    // 2^PATCH_SHIFT 倍。T-0288 で活性化エネルギーを下げる触媒も〕)を PATCH_TICKS 刻み。
     // 毎刻み CPU と GPU がビット一致・元素は保存・止めた所は燃えず、終わると燃え始める・速めた所はそのままの所よりずっと燃える
     // shape = 箱の形(大きい箱では範囲は箱の座標。パッチは範囲が重なる根だけをつつく)。swap.table があれば、パッチの途中で
     // その表に替え(パッチは名前の鍵で同じ規則に効き続ける)、終わった後で保存点と記録全体を別の箱で再生する(T-0287)
     std::expected<void, std::string> RunPatch(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                               const sim::BakedReactionTable& table,
                                               lab::LabBoxShape shape = sim::LAB_SINGLE_ROOT_SHAPE,
-                                              const PatchGroups& groups = {}, const PatchSwap& swap = {}) {
+                                              const PatchGroups& groups = {}, const PatchSwap& swap = {},
+                                              uint32_t amplifyEffect = reaction::MpMakeScaleEffect(PATCH_SHIFT)) {
         constexpr uint32_t PATCH_TICKS = 50;
-        constexpr int32_t PATCH_SHIFT = 10;
         auto session = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "patch", shape);
         if (!session)
             return std::unexpected(session.error());
@@ -804,8 +808,7 @@ namespace {
                             session->PlaceRegion(groups.plain, wood, MANA_WARM_MILLIKELVIN) &&
                             session->ApplyPatch(catalyzedRule, reaction::MpMakeStopEffect(), PATCH_TICKS,
                                                 groups.stopped) &&
-                            session->ApplyPatch(plainRule, reaction::MpMakeScaleEffect(PATCH_SHIFT), PATCH_TICKS,
-                                                groups.amplified);
+                            session->ApplyPatch(plainRule, amplifyEffect, PATCH_TICKS, groups.amplified);
         if (!queued)
             return std::unexpected("置けない・パッチを出せない");
 
@@ -846,8 +849,8 @@ namespace {
         const uint64_t stoppedAfter = burned(groups.stopped);
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: 根 {} つの箱でパッチ {} 刻み 燃えたセルロース 止めた {}(終わった後 {})・触媒のまま {}・"
-            "2^{} 倍 {}・そのまま {} µmol",
-            lab::LabRootCount(shape), PATCH_TICKS, stoppedDuring, stoppedAfter, catalyzedDuring, PATCH_SHIFT,
+            "速めた(効き方 {:#x}){}・そのまま {} µmol",
+            lab::LabRootCount(shape), PATCH_TICKS, stoppedDuring, stoppedAfter, catalyzedDuring, amplifyEffect,
             amplifiedDuring, plainDuring);
         if (CountBoxElements(*session) != elementsBefore)
             return std::unexpected("パッチで元素の数が変わった");
@@ -936,6 +939,16 @@ namespace {
             return 1;
         }
 
+        // --- 活性化エネルギーを下げる触媒(T-0288): 速める所を 2^shift 倍の代わりに触媒で ---
+        const uint32_t catalyst = reaction::MpMakeCatalystEffect(PATCH_CATALYST_JOULES_PER_MOL);
+        if (auto result = RunPatch(device->Get(), options->queueType, *table, sim::LAB_SINGLE_ROOT_SHAPE, {}, {},
+                                   catalyst);
+            !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(活性化エネルギーを下げる触媒: {})",
+                result.error());
+            return 1;
+        }
+
         // --- 表を替える刻みを跨ぐパッチ・保存点(T-0287): 規則の ID がずれる表に途中で替える ---
         const auto shifted = MakeShiftedTable();
         const bool moved = shifted &&
@@ -961,7 +974,7 @@ namespace {
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
             "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える・"
             "根を並べた箱でも一致・魔法のパッチで止める / "
-            "速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕)",
+            "速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕・活性化エネルギーを下げる触媒)",
             RUN_TICKS);
 
         return 0;

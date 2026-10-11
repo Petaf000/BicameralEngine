@@ -117,7 +117,7 @@ namespace bicameral::sim {
 
     // 魔法のパッチ(T-0024・ADR-0095。common/magic_patch.hlsli)を刻み targetTick から durationTicks 刻み足す。
     // 名前の鍵 ruleKey(RxRule::key。表を替えても同じ名前の規則に効く。T-0287)の規則の速さを、
-    // effect(MpMakeScaleEffect(shift) = 2^shift 倍 / MpMakeStopEffect() = 止める)で変える。範囲は箱のセルの座標
+    // effect(MpMakeScaleEffect(shift) = 2^shift 倍 / MpMakeStopEffect() = 止める / MpMakeCatalystEffect(J/mol) = 活性化エネルギーを下げる。T-0288)で変える。範囲は箱のセルの座標
     [[nodiscard]] Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
                                               uint32_t durationTicks, LabCellRange range);
 

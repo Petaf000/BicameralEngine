@@ -7,10 +7,13 @@
 //   MultiresNest::magicPatches。どちらも同じ uint32 の語の並び)に足す → 刻みの反応の評価(MrStepCellWait)が、セルを覆うパッチを
 //   MpPatchTable で表に重ねる(MpPatchedTable の Rate だけが変わる)→ 反応の核(reaction.hlsli)はそのまま。
 //
-// 効き方(今あるもの): 規則 1 つの速さを 2^shift 倍にする(増幅・弱める)/ 止める(阻害)。
+// 効き方(今あるもの): 規則 1 つの速さを 2^shift 倍にする(増幅・弱める)/ 止める(阻害)/ 活性化エネルギーを下げる(触媒。T-0288)。
 //   速さの表の値は「仮数 × 2^指数」なので、指数に shift を足すだけで、どの機械でも同じ整数の結果になる。
+//   触媒は k = A·exp(−(Ea − ΔEa) / RT) = 表の値 × exp(ΔEa / RT)。倍率が温度で変わる(冷たいほど大きく効く)ので、
+//   プレイヤーが温度を変えて測ると「2^shift 倍」(どの温度でも同じ倍率)と区別できる。ΔEa / RT はベイク(reaction_table.cpp の
+//   BakeRate)と同じ整数の計算で、読む温度ごとにその場で求める(表を作り直さない。ADR-0095 追記)。下げる量は規則の Ea が上限(Ea' ≥ 0)。
 //   **保存則は変えない**(D-428・D-419): 変わるのは「1 刻みにどれだけ進みたいか」だけで、進んだ分は反応の核が係数 × 進行度で
-//   成分を動かす(元素の数とエネルギーはビット単位で保存される)。触媒(活性化エネルギーを下げる)・転換・湧き出しと吸い込みは後のチケット。
+//   成分を動かす(元素の数とエネルギーはビット単位で保存される)。転換(生成物の差し替え。T-0359)・湧き出しと吸い込みは後のチケット。
 // 規則は名前の鍵(RxRule::key)で持つ(T-0287): 規則の並びが変わる表の差し替え(T-0218・T-0242)でも、同じ名前の規則に効き続ける。
 // 範囲と期間: 範囲はレベル 0(0.5 m)のセルの単位の直方体(両端を含む)。セルがその直方体と重なれば効く(粗いセルは丸ごと効く)。
 //   期間は [始まりの刻み, 終わりの刻み)。速さが変わる刻み(始まりと終わり)に、範囲に重なるブロックを「つつく」(ADR-0018:
@@ -45,10 +48,13 @@ FX_CONST uint32_t MP_COMMAND_LOW = 4;       // 小さい角 x, y, z
 FX_CONST uint32_t MP_COMMAND_HIGH = 7;      // 大きい角 x, y, z
 FX_CONST uint32_t MP_COMMAND_WORDS = 10;
 
-// 効き方の語: 下位 8bit = 種類、8〜15bit = shift(符号付き 8bit。MP_KIND_SCALE だけ)
-FX_CONST uint32_t MP_KIND_SCALE = 1;       // 速さを 2^shift 倍(増幅・弱める)
-FX_CONST uint32_t MP_KIND_STOP = 2;        // 止める(阻害)
-FX_CONST int32_t MP_MAX_SHIFT = 64;        // |shift| の上限(16 個重ねても指数は int32 に十分収まる)
+// 効き方の語: 下位 8bit = 種類、8〜15bit = shift(符号付き 8bit。MP_KIND_SCALE だけ)、
+// 8〜31bit = 下げる活性化エネルギー(J/mol。符号なし 24bit。MP_KIND_CATALYST だけ)
+FX_CONST uint32_t MP_KIND_SCALE = 1;                           // 速さを 2^shift 倍(増幅・弱める)
+FX_CONST uint32_t MP_KIND_STOP = 2;                            // 止める(阻害)
+FX_CONST uint32_t MP_KIND_CATALYST = 3;                        // 活性化エネルギーを下げる(触媒。T-0288)
+FX_CONST uint32_t MP_MAX_CATALYST_JOULES_PER_MOL = 0xFFFFFFu;  // 1 つのパッチが下げる量の上限(24bit。約 16.8 MJ/mol)
+FX_CONST int32_t MP_MAX_SHIFT = 64;                            // |shift| の上限(16 個重ねても指数は int32 に十分収まる)
 FX_CONST int32_t MP_MAX_LEVEL_SHIFT = 40;  // 範囲の比べ方で使うレベルの差の上限(64bit の座標があふれない)
 
 // パッチ 1 つ
@@ -75,6 +81,11 @@ FX_FN uint32_t MpMakeStopEffect() {
     return MP_KIND_STOP;
 }
 
+// 活性化エネルギーを loweredJoulesPerMol(J/mol。1〜MP_MAX_CATALYST_JOULES_PER_MOL)下げる
+FX_FN uint32_t MpMakeCatalystEffect(uint32_t loweredJoulesPerMol) {
+    return MP_KIND_CATALYST | ((loweredJoulesPerMol & MP_MAX_CATALYST_JOULES_PER_MOL) << 8);
+}
+
 FX_FN uint32_t MpEffectKind(uint32_t effect) {
     return effect & 0xFFu;
 }
@@ -84,11 +95,19 @@ FX_FN int32_t MpEffectShift(uint32_t effect) {
     return ((int32_t)(effect << 16)) >> 24;
 }
 
+// 8〜31bit を下げる活性化エネルギー(J/mol)として読む
+FX_FN uint32_t MpEffectCatalystJoulesPerMol(uint32_t effect) {
+    return effect >> 8;
+}
+
 FX_FN bool MpEffectValid(uint32_t effect) {
+    const uint32_t kind = MpEffectKind(effect);
+    if (kind == MP_KIND_CATALYST)
+        return MpEffectCatalystJoulesPerMol(effect) != 0;
+
     if ((effect >> 16) != 0)
         return false;
 
-    const uint32_t kind = MpEffectKind(effect);
     if (kind == MP_KIND_STOP)
         return (effect >> 8) == 0;
 
@@ -106,6 +125,38 @@ FX_FN uint64_t MpScaleRate(uint64_t packed, int32_t shift) {
     const int32_t exponent = RxRateExponent(packed) + shift;
 
     return (mantissa << 32) | (uint64_t)(uint32_t)exponent;
+}
+
+// 触媒: 速さの表の値(温度 kelvin K)を exp(ΔEa / RT) 倍にする(ΔEa = loweredJoulesPerMol J/mol。規則の Ea 以下に抑えてから渡す)。
+// ΔEa / RT はベイク(reaction_table.cpp の BakeRate)と同じ式(nJ にして Q32 で割り、log2 e を掛ける)。log2 の整数の部分は指数へ、
+// 端数は 2^端数(Q31)を仮数に掛けて 32bit に正規化する(どれも切り捨て。CPU と GPU で同じ整数)。仮数 0・0 K はそのまま
+FX_CONST uint64_t MP_GAS_CONSTANT_NANOJOULES = FX_U64(0x1u, 0xEF94A19Au);  // 8.314462618 J/(mol·K) を nJ で
+FX_CONST uint64_t MP_NANOJOULES_PER_JOULE = 1000000000u;
+
+FX_FN uint64_t MpCatalyzeRate(uint64_t packed, uint32_t loweredJoulesPerMol, uint32_t kelvin) {
+    const uint64_t mantissa = RxRateMantissa(packed);
+    if (mantissa == 0 || loweredJoulesPerMol == 0 || kelvin == 0)
+        return packed;
+
+    // --- log2 の倍率(Q32。0 以上)= ΔEa / RT × log2 e ---
+    const uint64_t lowered = (uint64_t)loweredJoulesPerMol * MP_NANOJOULES_PER_JOULE;  // < 2^62
+    FxU128 numerator;
+    numerator.hi = lowered >> 32;
+    numerator.lo = lowered << 32;
+    const int64_t loweredOverRt = (int64_t)FxDivU128By64(numerator, MP_GAS_CONSTANT_NANOJOULES * (uint64_t)kelvin)
+                                      .quotient;
+    const int64_t log2Factor = FxMulShiftS64(loweredOverRt, (int64_t)FX_LOG2E_Q62, 62);
+
+    // --- 仮数 × 2^端数(Q31)→ 2^31〜2^33 未満。32bit に正規化 ---
+    const uint64_t fractionFactor = FxExp2Q32((int64_t)((uint64_t)log2Factor & FX_LOW32_MASK), 31);
+    uint64_t scaled = (mantissa * fractionFactor) >> 31;
+    int64_t exponent = (int64_t)RxRateExponent(packed) + (log2Factor >> 32);
+    if ((scaled >> 32) != 0) {
+        scaled >>= 1;
+        exponent += 1;
+    }
+
+    return (scaled << 32) | (uint64_t)(uint32_t)(int32_t)exponent;
 }
 
 // --- パッチの検査 ------------------------------------------------------------------------------
@@ -299,11 +350,13 @@ FX_FN uint32_t MpCoveringMask(List list, int32_t level, int64_t x, int64_t y, in
     return mask;
 }
 
-// 覆うパッチ(mask)のうち名前の鍵 ruleKey の規則のものを重ねた速さの表の値。止めるものが 1 つでもあれば 0、ほかは shift の和
+// 覆うパッチ(mask)のうち規則 rule(名前の鍵で比べる)のものを、温度 kelvin の速さの表の値 packed に重ねる。
+// 止めるものが 1 つでもあれば 0。ほかは触媒の下げる量の和(規則の Ea が上限)で exp(ΔEa / RT) 倍してから 2^(shift の和) 倍
 // (重ねる順に依らない)
 template <typename List>
-FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, uint64_t ruleKey, uint64_t packed) {
+FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, RxRule rule, uint32_t kelvin, uint64_t packed) {
     int32_t shift = 0;
+    uint32_t lowered = 0;  // 16 個 × 2^24 未満 = 2^28 未満
     for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
         if (((mask >> i) & 1u) == 0)
             continue;
@@ -311,17 +364,23 @@ FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, uint64_t ruleKey, uint64_
         const uint32_t base = MP_LIST_HEADER_WORDS + (i * MP_PATCH_WORDS);
         const uint64_t key = FX_U64(list.PatchWord(base + MP_WORD_RULE_KEY + 1),
                                     list.PatchWord(base + MP_WORD_RULE_KEY));
-        if (key != ruleKey)
+        if (key != rule.key)
             continue;
 
         const uint32_t effect = list.PatchWord(base + MP_WORD_EFFECT);
-        if (MpEffectKind(effect) == MP_KIND_STOP)
+        const uint32_t kind = MpEffectKind(effect);
+        if (kind == MP_KIND_STOP)
             return 0;
 
-        shift += MpEffectShift(effect);
+        if (kind == MP_KIND_CATALYST)
+            lowered += MpEffectCatalystJoulesPerMol(effect);
+        else
+            shift += MpEffectShift(effect);
     }
 
-    return MpScaleRate(packed, shift);
+    const uint32_t limited = lowered < rule.activationEnergy ? lowered : rule.activationEnergy;
+
+    return MpScaleRate(MpCatalyzeRate(packed, limited, kelvin), shift);
 }
 
 // パッチを重ねた表(reaction.hlsli の Table の約束。Rate だけが変わる)。Table は PatchWord(word) も持つ(パッチの列を読む)
@@ -341,7 +400,7 @@ struct MpPatchedTable {
         if (covering == 0)
             return packed;
 
-        return MpPatchedRate(base, covering, base.Rule(rule).key, packed);
+        return MpPatchedRate(base, covering, base.Rule(rule), kelvin, packed);
     }
 };
 
