@@ -31,11 +31,15 @@ namespace bicameral::sim {
     inline constexpr uint32_t LAB_BOX_SLOT = 0;  // 箱の最初の根の枠(根は x → y → z の順に 0 から。lab::LabRootSlot)
     inline constexpr uint32_t LAB_BOX_EDGE = multires::MR_BLOCK_EDGE;  // 根 1 つの辺のセルの数
 
-    // 箱の形(T-0173): 根を並べた数。根 1 つが T-0142 からの箱(記録の版 4 まで)
-    inline constexpr lab::LabBoxShape LAB_SINGLE_ROOT_SHAPE = {.rootsX = 1, .rootsY = 1, .rootsZ = 1};
+    // 箱の形(T-0173): 根を並べた数。根 1 つが T-0142 からの箱(記録の版 4 まで)。refineBlocks = 細かくする枠の数(T-0314。0 = 細かくできない)
+    inline constexpr lab::LabBoxShape LAB_SINGLE_ROOT_SHAPE = {
+        .rootsX = 1, .rootsY = 1, .rootsZ = 1, .refineBlocks = 0};
+
+    // パネルが作る細かくできる箱の枠の数(T-0314。根 1 つを 2 段全部細かくすると 72 枠)
+    inline constexpr uint32_t LAB_DEFAULT_REFINE_BLOCKS = 128;
 
     [[nodiscard]] constexpr bool SameLabShape(lab::LabBoxShape a, lab::LabBoxShape b) {
-        return a.rootsX == b.rootsX && a.rootsY == b.rootsY && a.rootsZ == b.rootsZ;
+        return a.rootsX == b.rootsX && a.rootsY == b.rootsY && a.rootsZ == b.rootsZ && a.refineBlocks == b.refineBlocks;
     }
 
     // 箱のセルの数(根の数 × 512)
@@ -46,16 +50,18 @@ namespace bicameral::sim {
     inline constexpr uint64_t LAB_WORLD_SEED = 20261009;
     inline constexpr int32_t LAB_INITIAL_TEMPERATURE_MILLIKELVIN = 300000;
 
-    // 箱の刻み: 反応(待ちの丸め)+ 熱の伝導(17 §4。陰解法・小刻みは使わない: 箱は 1 レベルだけ)
+    // 箱の刻み: 反応(待ちの丸め)+ 熱の伝導(17 §4)。陰解法・小刻みは使わない(細かくした箱でも。細かいレベルの面の係数は
+    // 頭打ちで熱が遅い。ADR-0137。仮〔ユーザー未確認〕)
     inline constexpr MultiresStepOptions LAB_STEP_OPTIONS = {.conduction = true};
 
     struct LabCellPosition {
-        uint32_t x = 0;
+        uint32_t x = 0;  // レベル level のセルの座標(箱の座標 × 2^level)
         uint32_t y = 0;
         uint32_t z = 0;
+        uint32_t level = 0;  // 細かくしたセル(T-0314。1〜lab::LAB_MAX_REFINE_LEVELS)。0 = 箱のセル
 
-        // 箱のセルの番号(lab::LabCellIndex。根 1 つの箱なら MrCellIndex と同じ)
-        [[nodiscard]] uint32_t Index() const { return lab::LabCellIndex(x, y, z); }
+        // 1 セルのコマンドのセルの語(lab::LabFineCellWord。レベル 0 なら lab::LabCellIndex = 根 1 つの箱なら MrCellIndex)
+        [[nodiscard]] uint32_t Index() const { return lab::LabFineCellWord(level, x, y, z); }
     };
 
     // 直方体の範囲(両端を含む。T-0220)。箱全体は LabWholeBox()
@@ -115,6 +121,12 @@ namespace bicameral::sim {
     [[nodiscard]] Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
                                               uint32_t durationTicks, LabCellRange range);
 
+    // 箱の range(レベル 0 = 箱のセルの座標)を levels 段(1〜lab::LAB_MAX_REFINE_LEVELS)細かくする(T-0314・ADR-0137)。
+    // セルは変えない。刻み targetTick のほかのコマンドを当てる前に、木の「細かくする」要求(17 §5)で子を作る(LabRefineRounds)。
+    // 細かくした所のセルは同じ濃度・温度のまま(子の量の単位は 8^-k)。枠が足りない所は細かくならない(箱の形の refineBlocks)
+    [[nodiscard]] Command MakeLabRefineCommand(uint64_t targetTick, uint32_t sequence, LabCellRange range,
+                                               uint32_t levels);
+
     // 表を替えた印なら、その表の版
     [[nodiscard]] std::optional<uint64_t> LabTableVersionOf(const Command& command);
 
@@ -165,7 +177,25 @@ namespace bicameral::sim {
     // まだ刻んでいない置く操作(FILL・FILL_REGION)の材料の物質 ID を付け替える(消えた物質の材料は落とす。ほかの種類はそのまま)
     [[nodiscard]] Command RemapLabCommand(const Command& command, const SpeciesRemap& remap);
 
-    // CPU リファレンスの 1 刻み: コマンドを当てる → StepNest(LAB_STEP_OPTIONS)
+    // --- 一部を細かくする(T-0314・ADR-0137)---
+
+    // 1 刻みのコマンドのうち細かくする印(当てられるもの)を、木の要求の組の列に直す。段の浅い方から、段ごとに親の中の位置
+    // (ブロックの座標の偶奇)で 8 組に分け、組の中はブロックの座標(z → y → x)の順・重なりなし。同じ組の要求は親がみな違うので
+    // 取り合わない(17 §5 の取り合いは親ごと)。CPU は組ごとに SubmitRequests → ProcessRequests、GPU(GpuLabBox::RecordTick)は
+    // 組ごとに RecordRequests → RecordProcessRequests。組は 1 刻みに 2 段 × 8 = 16 まで(GpuMultires の要求の写しの枠の数)
+    [[nodiscard]] std::vector<std::vector<multires::MrRequest>> LabRefineRounds(std::span<const Command> commands,
+                                                                                lab::LabBoxShape shape);
+
+    // CPU リファレンス: LabRefineRounds の組を順に通す。組の数を返す
+    uint32_t ApplyLabRefines(MultiresNest& nest, std::span<const Command> commands, lab::LabBoxShape shape);
+
+    // レベル cell.level のセル(覆われていない葉)。そのレベルのブロックが無い・覆われていれば無し
+    [[nodiscard]] std::optional<reaction::RxCell> LabBoxFineCell(const MultiresNest& nest, LabCellPosition cell);
+
+    // 細かくした(レベル 1 以上の本物の)ブロックの数
+    [[nodiscard]] uint32_t LabRefinedBlockCount(const MultiresNest& nest);
+
+    // CPU リファレンスの 1 刻み: 細かくする(ApplyLabRefines)→ パッチの境 → コマンドを当てる → StepNest(LAB_STEP_OPTIONS)
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                     std::span<const Command> commands, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 

@@ -32,7 +32,8 @@ namespace bicameral::sim {
         // 初めの箱(MakeLabBoxNest)を GPU へ写す
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest);
 
-        // 刻み tick: コマンド(LAB_MAX_COMMANDS_PER_TICK まで。(targetTick, sequence) の昇順)を当てて、1 刻み
+        // 刻み tick: コマンド(LAB_MAX_COMMANDS_PER_TICK まで。(targetTick, sequence) の昇順)を当てて、1 刻み。
+        // 細かくする印(T-0314)は先に木の要求の組にして通す(CPU の StepLabBox と同じ順)
         [[nodiscard]] bool RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                       uint64_t tick, std::span<const Command> commands);
 

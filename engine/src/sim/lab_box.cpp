@@ -41,8 +41,11 @@ namespace bicameral::sim {
 
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---
         constexpr std::array<char, 4> RECORDING_MAGIC = {'B', 'L', 'A', 'B'};
-        // 5: 種の後ろに箱の形(T-0173): 根の数 x・y・z(u32 × 3)+ 0(u32)。ほかは 4 と同じ
-        constexpr uint32_t RECORDING_VERSION = 5;
+        // 6: 箱の形の 4 語目が細かくする枠の数(T-0314。lab::LabBoxShape::refineBlocks)。コマンドに細かくする印
+        //    (LAB_COMMAND_TYPE_REFINE)と細かいセルの語が入りうる。ほかは 5 と同じ
+        constexpr uint32_t RECORDING_VERSION = 6;
+        // 読める古い版: 種の後ろに箱の形(T-0173): 根の数 x・y・z(u32 × 3)+ 0(u32)。ほかは 4 と同じ
+        constexpr uint32_t RECORDING_VERSION_SHAPE = 5;
         // 読める古い版(根 1 つの箱)。4: ハッシュの列の後ろに表の中身(T-0217): 数 u64 → 表ごとに 版 u64・バイト数 u64・
         // バイト(8 バイトの境界まで 0 で埋める)
         constexpr uint32_t RECORDING_VERSION_TABLE_BYTES = 4;
@@ -61,9 +64,10 @@ namespace bicameral::sim {
             command.targetTick = targetTick;
             command.sequence = sequence;
             command.type = static_cast<uint16_t>(type);
-            // 箱の外(どの形の箱にも入らない座標)は LAB_NO_CELL。形より外の根は当てる時に断る(LabCommandCell)
-            const bool inBounds = cell.x < lab::LAB_MAX_BOX_EDGE && cell.y < lab::LAB_MAX_BOX_EDGE &&
-                                  cell.z < lab::LAB_MAX_BOX_EDGE;
+            // 箱の外(どの形の箱にも入らない座標・段)は LAB_NO_CELL。形より外の根は当てる時に断る(LabCommandCell)
+            const bool levelValid = cell.level <= lab::LAB_MAX_REFINE_LEVELS;
+            const uint32_t edge = levelValid ? lab::LAB_MAX_BOX_EDGE << cell.level : 0;
+            const bool inBounds = levelValid && cell.x < edge && cell.y < edge && cell.z < edge;
             SetPayload(command, lab::LAB_PAYLOAD_CELL, inBounds ? cell.Index() : lab::LAB_NO_CELL);
             SetPayload(command, lab::LAB_PAYLOAD_TEMPERATURE, temperatureMilliKelvin);
             command.size = static_cast<uint16_t>(sizeof(uint32_t) * 2);
@@ -155,6 +159,36 @@ namespace bicameral::sim {
 
             [[nodiscard]] MrBlock Block(uint32_t slot) const { return blocks[slot]; }
         };
+
+        // common/lab_box.hlsli の Cells の約束(lab_box.hlsl の LabCells と同じ: 一様なブロックには当てない)
+        struct NestCells {
+            MultiresNest* nest;
+            ReactionTableView table;
+
+            [[nodiscard]] bool Apply(uint32_t slot, uint32_t local, const lab::LabCommand& command) const {
+                if (MrIsUniform(nest->blocks[slot]))
+                    return false;
+
+                RxCell& target = nest_detail::CellAt(*nest, slot, local);
+                target = lab::LabApplyCommand(table, target, command);
+
+                return true;
+            }
+        };
+
+        // つついた根(lab::LabRootBit)の木の全部の枠をつつく(lab_box.hlsl の PokeRoots と同じ。T-0314)
+        void PokeRoots(MultiresNest& nest, lab::LabBoxShape shape, uint64_t roots) {
+            for (uint32_t root = 0; root < lab::LabRootCount(shape); ++root) {
+                if (((roots >> root) & 1) == 0)
+                    continue;
+
+                for (uint32_t ordinal = 0; ordinal < lab::LAB_SUBTREE_SLOTS; ++ordinal) {
+                    const uint32_t slot = lab::LabSubtreeSlot(NestBlocks{.blocks = nest.blocks}, root, ordinal);
+                    if (slot != MR_NO_BLOCK)
+                        nest_detail::PokeBlock(nest, slot);
+                }
+            }
+        }
 
     }  // namespace
 
@@ -316,12 +350,15 @@ namespace bicameral::sim {
     MultiresCapacity LabBoxCapacity(const BakedReactionTable& table, lab::LabBoxShape shape) {
         FX_ASSERT(lab::LabShapeValid(shape));
         const uint32_t roots = lab::LabRootCount(shape);
+        const uint32_t blocks = roots + shape.refineBlocks;
+        // 細かくできる箱(T-0314)は、子の端数と、レベルの違う面で粗い側が受ける端数(17 §4)の枠を枠の数だけ足す
+        const uint32_t fractions = shape.refineBlocks == 0 ? 1 : 1 + blocks;
 
-        return {.worldBlocks = roots,
+        return {.worldBlocks = blocks,
                 .observerBlocks = 0,
-                .fractions = 1,
-                .pages = roots,
-                .indexEntries = std::bit_ceil(2 * roots),
+                .fractions = fractions,
+                .pages = blocks,
+                .indexEntries = std::bit_ceil(2 * blocks),
                 .ledgerColumns = 1 + static_cast<uint32_t>(table.species.size()),
                 .rootLevel = 0};
     }
@@ -362,16 +399,11 @@ namespace bicameral::sim {
         const auto speciesCount = static_cast<uint32_t>(table.species.size());
         const auto ruleCount = static_cast<uint32_t>(table.rules.size());
 
-        // --- セル 1 つに当てる(根が一様なら当てない。lab_box.hlsl の ApplyToCell と同じ)---
+        // --- 当てる空間の葉のセル全部に当てる(一様なブロックには当てない。lab_box.hlsl と同じ。T-0314)---
         uint64_t touched = 0;  // つつく根(lab::LabRootBit)
-        const auto applyToCell = [&](uint32_t index, const lab::LabCommand& words) {
-            const uint32_t slot = lab::LabCellSlot(shape, index);
-            if (MrIsUniform(nest.blocks[slot]))
-                return;
-
-            RxCell& target = nest_detail::CellAt(nest, slot, lab::LabCellLocal(index));
-            target = lab::LabApplyCommand(view, target, words);
-            touched |= lab::LabRootBit(slot);
+        const auto applyToTarget = [&](const lab::LabTarget& target, const lab::LabCommand& words) {
+            touched |= lab::LabApplyToTarget(NestBlocks{.blocks = nest.blocks}, NestCells{.nest = &nest, .table = view},
+                                             shape, target, words);
         };
 
         uint32_t applied = 0;
@@ -395,16 +427,9 @@ namespace bicameral::sim {
                 continue;
             }
 
-            // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(lab_box.hlsl と同じ順)---
+            // --- 範囲(T-0220): 範囲の葉のセル全部(細かくした所は細かいセル全部。lab_box.hlsl と同じ順)---
             if (lab::LabRegionCommandValid(words, speciesCount, shape)) {
-                const lab::LabRegion region = lab::LabCommandRegion(words);
-                for (uint32_t z = region.lowZ; z <= region.highZ; ++z) {
-                    for (uint32_t y = region.lowY; y <= region.highY; ++y) {
-                        for (uint32_t x = region.lowX; x <= region.highX; ++x)
-                            applyToCell(lab::LabCellIndex(x, y, z), words);
-                    }
-                }
-
+                applyToTarget(lab::LabRegionTarget(words), words);
                 applied += 1;
                 continue;
             }
@@ -413,15 +438,12 @@ namespace bicameral::sim {
             if (cell == lab::LAB_NO_CELL)
                 continue;
 
-            applyToCell(cell, words);
+            applyToTarget(lab::LabCellTarget(cell), words);
             applied += 1;
         }
 
-        // --- 変えた根は「つつかれた」(lab_box.hlsl と同じ。種の印は状態の要約に入らない)---
-        for (uint32_t slot = 0; slot < lab::LabRootCount(shape); ++slot) {
-            if (((touched >> slot) & 1) != 0)
-                nest_detail::PokeBlock(nest, slot);
-        }
+        // --- 変えた根の木は「つつかれた」(lab_box.hlsl と同じ。種の印は状態の要約に入らない)---
+        PokeRoots(nest, shape, touched);
 
         return applied;
     }
@@ -480,16 +502,120 @@ namespace bicameral::sim {
     bool ApplyLabPatchBoundaries(MultiresNest& nest, uint64_t tick, lab::LabBoxShape shape) {
         const NestPatchList list{.words = nest.magicPatches};
         const uint64_t roots = lab::LabPatchBoundaries(list, NestBlocks{.blocks = nest.blocks}, shape, tick);
-        for (uint32_t slot = 0; slot < lab::LabRootCount(shape); ++slot) {
-            if (((roots >> slot) & 1) != 0)
-                nest_detail::PokeBlock(nest, slot);
-        }
+        PokeRoots(nest, shape, roots);
 
         return roots != 0;
     }
 
+    // --- 一部を細かくする(T-0314・ADR-0137)---
+
+    Command MakeLabRefineCommand(uint64_t targetTick, uint32_t sequence, LabCellRange range, uint32_t levels) {
+        Command command;
+        command.targetTick = targetTick;
+        command.sequence = sequence;
+        command.type = static_cast<uint16_t>(lab::LAB_COMMAND_TYPE_REFINE);
+        SetPayload(command, lab::LAB_PAYLOAD_CELL, RegionWord(range));
+        SetPayload(command, lab::LAB_PAYLOAD_REFINE_LEVELS, levels);
+        command.size = static_cast<uint16_t>(sizeof(uint32_t) * 2);
+
+        return command;
+    }
+
+    std::vector<std::vector<MrRequest>> LabRefineRounds(std::span<const Command> commands, lab::LabBoxShape shape) {
+        std::vector<lab::LabCommand> refines;
+        uint32_t deepest = 0;
+        for (const Command& command : commands) {
+            const lab::LabCommand words = ToLabCommand(command);
+            if (!lab::LabRefineCommandValid(words, shape))
+                continue;
+
+            refines.push_back(words);
+            deepest = std::max(deepest, lab::LabPayload(words, lab::LAB_PAYLOAD_REFINE_LEVELS));
+        }
+
+        // --- 段ごと・親の中の位置(座標の偶奇)ごとに 1 組。同じ組の要求は親がみな違う(取り合わない)---
+        std::vector<std::vector<MrRequest>> rounds;
+        for (uint32_t level = 1; level <= deepest; ++level) {
+            for (uint32_t parity = 0; parity < MR_CHILDREN_PER_CELL; ++parity) {
+                std::vector<std::array<uint32_t, 3>> blocks;  // ブロックの座標(z, y, x。並べる順)
+                for (const lab::LabCommand& words : refines) {
+                    if (lab::LabPayload(words, lab::LAB_PAYLOAD_REFINE_LEVELS) < level)
+                        continue;
+
+                    const lab::LabRegion region = lab::LabCommandRegion(words);
+                    const auto first = [&](uint32_t low) {
+                        return (low << level) / MR_BLOCK_EDGE;
+                    };
+                    const auto last = [&](uint32_t high) {
+                        return (((high + 1) << level) - 1) / MR_BLOCK_EDGE;
+                    };
+                    for (uint32_t z = first(region.lowZ); z <= last(region.highZ); ++z) {
+                        for (uint32_t y = first(region.lowY); y <= last(region.highY); ++y) {
+                            for (uint32_t x = first(region.lowX); x <= last(region.highX); ++x) {
+                                if (((x & 1) | ((y & 1) << 1) | ((z & 1) << 2)) == parity)
+                                    blocks.push_back({z, y, x});
+                            }
+                        }
+                    }
+                }
+
+                std::ranges::sort(blocks);
+                blocks.erase(std::unique(blocks.begin(), blocks.end()), blocks.end());
+                if (blocks.empty())
+                    continue;
+
+                // 1 組の要求は MR_MAX_REQUESTS まで(箱の最大 32³ を 2 段細かくしても 16³ ÷ 8 = 512)
+                FX_ASSERT(blocks.size() <= MR_MAX_REQUESTS);
+                std::vector<MrRequest>& requestGroup = rounds.emplace_back();
+                for (const auto& [z, y, x] : blocks) {
+                    requestGroup.push_back(MrMakeRequest(MR_REQUEST_REFINE, static_cast<int32_t>(level),
+                                                         int64_t{x} * MR_BLOCK_EDGE, int64_t{y} * MR_BLOCK_EDGE,
+                                                         int64_t{z} * MR_BLOCK_EDGE));
+                }
+            }
+        }
+
+        return rounds;
+    }
+
+    uint32_t ApplyLabRefines(MultiresNest& nest, std::span<const Command> commands, lab::LabBoxShape shape) {
+        const std::vector<std::vector<MrRequest>> rounds = LabRefineRounds(commands, shape);
+        for (const std::vector<MrRequest>& requestGroup : rounds) {
+            SubmitRequests(nest, requestGroup);
+            ProcessRequests(nest);
+        }
+
+        return static_cast<uint32_t>(rounds.size());
+    }
+
+    std::optional<RxCell> LabBoxFineCell(const MultiresNest& nest, LabCellPosition cell) {
+        const uint32_t mask = MR_BLOCK_EDGE - 1;
+        const uint32_t slot = LookupBlock(nest, static_cast<int32_t>(cell.level), cell.x & ~mask, cell.y & ~mask,
+                                          cell.z & ~mask);
+        if (slot == MR_NO_BLOCK)
+            return std::nullopt;
+
+        const uint32_t local = MrCellIndex(cell.x & mask, cell.y & mask, cell.z & mask);
+        if (MrIsCoveredCell(nest.blocks[slot], local))
+            return std::nullopt;
+
+        return LoadNestCell(nest, slot, local);
+    }
+
+    uint32_t LabRefinedBlockCount(const MultiresNest& nest) {
+        uint32_t count = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind == MR_BLOCK_REAL && block.level > 0)
+                count += 1;
+        }
+
+        return count;
+    }
+
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                     std::span<const Command> commands, lab::LabBoxShape shape) {
+        ApplyLabRefines(nest, commands, shape);
         ApplyLabPatchBoundaries(nest, tick, shape);
         ApplyLabCommands(nest, table, commands, shape);
         StepNest(nest, table, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);
@@ -526,6 +652,30 @@ namespace bicameral::sim {
             return mismatch;
         }
 
+        // --- 細かくした子(T-0314): 枠の順 → 枠の中の番号の順(どちらも本物のブロックの所だけ)---
+        for (uint32_t slot = lab::LabRootCount(shape); slot < cpu.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = cpu.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL || gpu.blocks[slot].kind != MR_BLOCK_REAL)
+                continue;
+
+            for (uint32_t local = 0; local < MR_BLOCK_CELLS; ++local) {
+                const RxCell a = LoadNestCell(cpu, slot, local);
+                const RxCell b = LoadNestCell(gpu, slot, local);
+                if (RxSameCell(a, b))
+                    continue;
+
+                const auto x = static_cast<uint32_t>(block.originX) + MrCellX(local);
+                const auto y = static_cast<uint32_t>(block.originY) + MrCellY(local);
+                const auto z = static_cast<uint32_t>(block.originZ) + MrCellZ(local);
+                mismatch.cell = lab::LabFineCellWord(static_cast<uint32_t>(block.level), x, y, z);
+                mismatch.cpu = a;
+                mismatch.gpu = b;
+                mismatch.what = std::format("刻み {} のレベル {} のセル ({}, {}, {}) が違う", tick, block.level, x, y,
+                                            z);
+                return mismatch;
+            }
+        }
+
         // --- セルは同じ: 違う欄の名前 ---
         std::string_view field = "その他";
         if (!SameBytes(cpu.blocks, gpu.blocks))
@@ -555,7 +705,7 @@ namespace bicameral::sim {
         Append(bytes, recording.shape.rootsX);
         Append(bytes, recording.shape.rootsY);
         Append(bytes, recording.shape.rootsZ);
-        Append(bytes, uint32_t{0});
+        Append(bytes, recording.shape.refineBlocks);
         Append(bytes, recording.tableVersion);
         Append(bytes, recording.tickCount);
         Append(bytes, static_cast<uint64_t>(recording.commands.size()));
@@ -590,9 +740,9 @@ namespace bicameral::sim {
             return std::unexpected("実験の記録ではない");
 
         const auto knownVersion = [](uint32_t value) {
-            return value == RECORDING_VERSION || value == RECORDING_VERSION_TABLE_BYTES ||
-                   value == RECORDING_VERSION_TABLE_MARKS || value == RECORDING_VERSION_ONE_TABLE ||
-                   value == RECORDING_VERSION_NO_TABLE;
+            return value == RECORDING_VERSION || value == RECORDING_VERSION_SHAPE ||
+                   value == RECORDING_VERSION_TABLE_BYTES || value == RECORDING_VERSION_TABLE_MARKS ||
+                   value == RECORDING_VERSION_ONE_TABLE || value == RECORDING_VERSION_NO_TABLE;
         };
         if (!Take(bytes, version) || !knownVersion(version))
             return std::unexpected(std::format("記録の版 {} は読めない", version));
@@ -600,11 +750,11 @@ namespace bicameral::sim {
         if (!Take(bytes, seed) || seed != LAB_WORLD_SEED)
             return std::unexpected("記録の見出しが壊れている");
 
-        // --- 箱の形(版 5。T-0173)---
-        if (version == RECORDING_VERSION) {
-            uint32_t reserved = 0;
+        // --- 箱の形(版 5。T-0173)・細かくする枠の数(版 6。版 5 は 0。T-0314)---
+        if (version == RECORDING_VERSION || version == RECORDING_VERSION_SHAPE) {
             if (!Take(bytes, recording.shape.rootsX) || !Take(bytes, recording.shape.rootsY) ||
-                !Take(bytes, recording.shape.rootsZ) || !Take(bytes, reserved) || reserved != 0 ||
+                !Take(bytes, recording.shape.rootsZ) || !Take(bytes, recording.shape.refineBlocks) ||
+                (version == RECORDING_VERSION_SHAPE && recording.shape.refineBlocks != 0) ||
                 !lab::LabShapeValid(recording.shape))
                 return std::unexpected("記録の箱の形が壊れている");
         }
@@ -616,7 +766,8 @@ namespace bicameral::sim {
             return std::unexpected("記録の見出しが壊れている");
 
         const uint64_t listBytes = (commandCount * COMMAND_BYTES) + (hashCount * sizeof(uint64_t));
-        const bool withTables = version == RECORDING_VERSION || version == RECORDING_VERSION_TABLE_BYTES;
+        const bool withTables = version == RECORDING_VERSION || version == RECORDING_VERSION_SHAPE ||
+                                version == RECORDING_VERSION_TABLE_BYTES;
         const bool sized = withTables ? bytes.size() >= listBytes : bytes.size() == listBytes;
         if (commandCount > bytes.size() || hashCount > bytes.size() || !sized || hashCount != recording.tickCount)
             return std::unexpected("記録の大きさが合わない");

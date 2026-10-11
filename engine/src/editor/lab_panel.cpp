@@ -31,23 +31,29 @@ namespace bicameral::editor {
         constexpr uint64_t AUTO_OXYGEN_PASCAL = 60000;  // 箱全体を酸素の多い 200 kPa の空気に(T-0220)
         constexpr uint64_t AUTO_NITROGEN_PASCAL = 140000;
         constexpr uint32_t AUTO_ROOM_MILLIKELVIN = 300000;
-        constexpr size_t AUTO_LARGE_SHAPE = 4;  // BOX_SHAPES の 2×2×2(根を並べた箱の確認。T-0173)
+        constexpr size_t AUTO_LARGE_SHAPE = 4;    // BOX_SHAPES の 2×2×2(根を並べた箱の確認。T-0173)
+        constexpr size_t AUTO_REFINED_SHAPE = 7;  // BOX_SHAPES の細かくできる 1×1×1(一部を細かくした箱の確認。T-0314)
 
-        // 箱の大きさの選択肢(根を並べた数。T-0173。1 辺 4 m の根を x・y・z に)
-        constexpr std::array<lab::LabBoxShape, 7> BOX_SHAPES = {
+        // 箱の大きさの選択肢(根を並べた数。T-0173。1 辺 4 m の根を x・y・z に)。後ろの 2 つは細かくできる箱(T-0314)
+        constexpr std::array<lab::LabBoxShape, 9> BOX_SHAPES = {
             lab::LabBoxShape{.rootsX = 1, .rootsY = 1, .rootsZ = 1},
             lab::LabBoxShape{.rootsX = 2, .rootsY = 1, .rootsZ = 1},
             lab::LabBoxShape{.rootsX = 4, .rootsY = 1, .rootsZ = 1},
             lab::LabBoxShape{.rootsX = 2, .rootsY = 2, .rootsZ = 1},
             lab::LabBoxShape{.rootsX = 2, .rootsY = 2, .rootsZ = 2},
             lab::LabBoxShape{.rootsX = 4, .rootsY = 4, .rootsZ = 1},
-            lab::LabBoxShape{.rootsX = 4, .rootsY = 4, .rootsZ = 4}};
+            lab::LabBoxShape{.rootsX = 4, .rootsY = 4, .rootsZ = 4},
+            lab::LabBoxShape{.rootsX = 1, .rootsY = 1, .rootsZ = 1, .refineBlocks = sim::LAB_DEFAULT_REFINE_BLOCKS},
+            lab::LabBoxShape{.rootsX = 2, .rootsY = 2, .rootsZ = 2, .refineBlocks = sim::LAB_DEFAULT_REFINE_BLOCKS}};
 
         std::string ShapeLabel(lab::LabBoxShape shape) {
             constexpr uint32_t ROOT_METERS = 4;
-            return std::format("{}×{}×{} の根({}×{}×{} m・{} セル)", shape.rootsX, shape.rootsY, shape.rootsZ,
+            const std::string refine = shape.refineBlocks == 0
+                                           ? std::string()
+                                           : std::format("・細かくできる〔枠 {}〕", shape.refineBlocks);
+            return std::format("{}×{}×{} の根({}×{}×{} m・{} セル{})", shape.rootsX, shape.rootsY, shape.rootsZ,
                                shape.rootsX * ROOT_METERS, shape.rootsY * ROOT_METERS, shape.rootsZ * ROOT_METERS,
-                               sim::LabBoxCellCount(shape));
+                               sim::LabBoxCellCount(shape), refine);
         }
 
         float SliceCellPixels(lab::LabBoxShape shape) {
@@ -386,6 +392,19 @@ namespace bicameral::editor {
         if (ImGui::Button("温度だけ"))
             static_cast<void>(m_session->SetTemperatureRegion(PlaceRange(), milliKelvin));
 
+        // --- 範囲を細かくする(T-0314。細かくできる箱だけ。細かいセルの断面・計器は T-0350)---
+        ImGui::BeginDisabled(m_session->Shape().refineBlocks == 0);
+        for (uint32_t levels = 1; levels <= lab::LAB_MAX_REFINE_LEVELS; ++levels) {
+            ImGui::SameLine();
+            if (ImGui::Button(std::format("{} 段細かく", levels).c_str()))
+                static_cast<void>(m_session->Refine(PlaceRange(), levels));
+        }
+
+        ImGui::EndDisabled();
+        if (m_session->Shape().refineBlocks != 0)
+            ImGui::TextDisabled("細かくしたブロック %u / 枠 %u", sim::LabRefinedBlockCount(m_session->Gpu()),
+                                m_session->Shape().refineBlocks);
+
         BuildStepControls();
     }
 
@@ -621,8 +640,68 @@ namespace bicameral::editor {
             return;
         }
 
+        // --- 一部を細かくした箱(T-0314)---
+        if (auto refined = RunAutoRefinedBox(wood->contents); !refined) {
+            Log(Channel::Sim, Level::Error, "--auto-lab: 一部を細かくした箱で失敗({})", refined.error());
+            return;
+        }
+
         m_autoFailed = false;
         m_cell = {3, 3, 3};
+    }
+
+    // 一部を細かくした箱(細かくできる根 1 つ): (2..5)³ を 2 段細かくし、細かいセル 2³ に木を置いて 1 つに火を付けて流し、
+    // GPU と CPU が毎刻み一致・細かくしたブロックが 16・細かい所の木が燃えた・記録から同じ形の別の箱で再生しても同じ
+    std::expected<void, std::string> LabPanel::RunAutoRefinedBox(std::span<const sim::SpeciesAmount> wood) {
+        m_shapeChoice = AUTO_REFINED_SHAPE;
+        if (!CreateSession())
+            return std::unexpected(std::format("箱を作れない: {}", m_error));
+
+        static_cast<void>(m_session->Refine({.low = {.x = 2, .y = 2, .z = 2}, .high = {.x = 5, .y = 5, .z = 5}}, 2));
+        auto result = m_session->Step(1);
+        constexpr uint32_t FINE = 8;  // レベル 2 の座標(箱のセル 2 = 0.25 m 角の細かいセルの 8)
+        for (uint32_t i = 0; i < 8; ++i)
+            static_cast<void>(
+                m_session->Place({.x = FINE + (i & 1u), .y = FINE + ((i >> 1) & 1u), .z = FINE + (i >> 2), .level = 2},
+                                 wood, AUTO_ROOM_MILLIKELVIN));
+
+        if (result)
+            result = m_session->Step(AUTO_IGNITE_TICK - 1);
+
+        static_cast<void>(
+            m_session->SetTemperature({.x = FINE, .y = FINE, .z = FINE, .level = 2}, AUTO_IGNITE_MILLIKELVIN));
+        if (result)
+            result = m_session->Step(AUTO_TICKS - AUTO_IGNITE_TICK);
+
+        if (!result)
+            return result;
+
+        if (m_session->Mismatch())
+            return std::unexpected(m_session->Mismatch()->what);
+
+        const uint32_t refined = sim::LabRefinedBlockCount(m_session->Gpu());
+        if (refined != 16)
+            return std::unexpected(std::format("細かくしたブロックが 16 でない({})", refined));
+
+        // --- 火を付けた細かいセルのセルロースが減った(GPU の箱)---
+        const uint32_t cellulose = m_session->Table().SpeciesId("cellulose");
+        const auto lit = sim::LabBoxFineCell(m_session->Gpu(), {.x = FINE, .y = FINE, .z = FINE, .level = 2});
+        uint64_t left = 0;
+        for (uint32_t i = 0; lit && i < lit->speciesCount; ++i)
+            left += lit->species[i] == cellulose ? lit->amounts[i] : 0;
+
+        if (!lit || left >= wood.front().amount)
+            return std::unexpected("細かいセルの木が燃えていない");
+
+        if (auto replayed = ReplayInNewSession(m_session->Recording(), false); !replayed)
+            return replayed;
+
+        Log(Channel::Sim, Level::Info,
+            "--auto-lab: 根の一部を 2 段細かくした箱で {} 刻み GPU と CPU が一致し、細かいセルの木が燃え"
+            "(セルロース {} → {})、記録から同じ形の別の箱で再生しても同じ",
+            AUTO_TICKS, wood.front().amount, left);
+
+        return {};
     }
 
     // 根を並べた箱(2×2×2 の根・16³ セル): 箱全体の空気 → 8 つの根の境に木を 8 セル → 1 つに火を付けて流し、GPU と CPU が毎刻み一致・

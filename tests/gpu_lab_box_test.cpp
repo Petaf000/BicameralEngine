@@ -11,6 +11,9 @@
 // まだ刻んでいない置く操作の材料も新しい ID になる(消えた物質の材料は落ちる)。
 // 仮の魔素(T-0225。試験用の仮の値): 450 K の木は魔素が無いと燃えないが、魔素を混ぜると燃える(魔素を触媒にする規則)。
 // どちらも毎刻みビット一致し、魔素の量は変わらない。
+// 一部を細かくした箱(T-0314・ADR-0137): 根 0 の (2..5)³ を 2 段細かくし、細かいセルに木・箱のセルに炭を置いて細かいセルに火を付ける。
+// 細かくする要求の組(CPU は ProcessRequests・GPU は RecordProcessRequests)から先、毎刻みビット一致・細かい所の木が燃えた・
+// 同じ形の別の箱で再生できる。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <array>
@@ -598,6 +601,101 @@ namespace {
         return {};
     }
 
+    // --- 一部を細かくした箱(T-0314)---
+    constexpr lab::LabBoxShape REFINED_SHAPE = {
+        .rootsX = 2, .rootsY = 1, .rootsZ = 1, .refineBlocks = sim::LAB_DEFAULT_REFINE_BLOCKS};
+    constexpr uint32_t REFINED_RUN_TICKS = 60;
+
+    std::expected<void, std::string> RunRefinedBox(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
+                                                   const sim::BakedReactionTable& table) {
+        auto session = sim::LabSession::Create(device, queueType, table, FIRST_TABLE_VERSION, "first", REFINED_SHAPE);
+        if (!session)
+            return std::unexpected(session.error());
+
+        const std::vector<sim::LabMaterial> materials = sim::MakeLabMaterials(table);
+        const auto find = [&](std::string_view name) {
+            return std::ranges::find_if(materials, [&](const sim::LabMaterial& m) { return m.name == name; });
+        };
+        const auto wood = find("木");
+        const auto charcoal = find("木炭");
+        if (wood == materials.end() || charcoal == materials.end())
+            return std::unexpected("木か木炭の材料が無い");
+
+        // --- 刻み 0: 細かくする → 刻み 1: 細かいセル 2³ に木・粗い葉(レベル 1)と根 1(レベル 0)に炭 ---
+        if (!session->Refine({.low = {.x = 2, .y = 2, .z = 2}, .high = {.x = 5, .y = 5, .z = 5}}, 2))
+            return std::unexpected("細かくできない");
+
+        if (auto stepped = session->Step(1); !stepped)
+            return stepped;
+
+        if (sim::LabRefinedBlockCount(session->Gpu()) != 16)
+            return std::unexpected(
+                std::format("細かくしたブロックが 16 でない({})", sim::LabRefinedBlockCount(session->Gpu())));
+
+        for (uint32_t i = 0; i < 8; ++i) {
+            const sim::LabCellPosition cell{.x = 8 + (i & 1u), .y = 8 + ((i >> 1) & 1u), .z = 8 + (i >> 2), .level = 2};
+            if (!session->Place(cell, wood->contents, 300000))
+                return std::unexpected("細かいセルに置けない");
+        }
+
+        if (!session->Place({.x = 6, .y = 3, .z = 3}, charcoal->contents, 300000) ||
+            !session->Place({.x = 9, .y = 3, .z = 3}, charcoal->contents, 300000))
+            return std::unexpected("箱のセルに置けない");
+
+        if (auto stepped = session->Step(IGNITE_TICK - 1); !stepped)
+            return stepped;
+
+        // --- 細かいセル 1 つに火を付けて流す(毎刻み CPU と比べる)---
+        if (!session->SetTemperature({.x = 8, .y = 8, .z = 8, .level = 2}, IGNITE_MILLIKELVIN))
+            return std::unexpected("温度を決められない");
+
+        if (auto stepped = session->Step(REFINED_RUN_TICKS - IGNITE_TICK); !stepped)
+            return stepped;
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        uint64_t left = 0;
+        for (uint32_t i = 0; i < 8; ++i) {
+            const auto cell = sim::LabBoxFineCell(
+                session->Gpu(), {.x = 8 + (i & 1u), .y = 8 + ((i >> 1) & 1u), .z = 8 + (i >> 2), .level = 2});
+            if (!cell)
+                return std::unexpected("細かいセルが無い");
+
+            for (uint32_t s = 0; s < cell->speciesCount; ++s)
+                left += cell->species[s] == cellulose ? cell->amounts[s] : 0;
+        }
+
+        const uint64_t placed = 8 * wood->contents[0].amount;
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: 2 段細かくした箱で {} 刻み: 細かいセルのセルロース {} → {}(8^-2 µmol。GPU)",
+            REFINED_RUN_TICKS, placed, left);
+        if (left >= placed)
+            return std::unexpected("細かい所の木が燃えていない");
+
+        // --- 同じ形の別の箱で再生(ファイルの形を通す)---
+        const sim::LabRecording recorded = session->Recording();
+        const auto parsed = sim::ParseLabRecording(sim::SerializeLabRecording(recorded));
+        if (!parsed || !sim::SameLabShape(parsed->shape, REFINED_SHAPE))
+            return std::unexpected("記録の箱の形(細かくする枠)が残らない");
+
+        auto other = sim::LabSession::Create(device, queueType, table, FIRST_TABLE_VERSION, "first", REFINED_SHAPE);
+        if (!other)
+            return std::unexpected(other.error());
+
+        if (auto replayed = other->Replay(*parsed); !replayed)
+            return replayed;
+
+        if (auto checked = CheckNoMismatch(*other); !checked)
+            return checked;
+
+        if (other->ReplayDivergence() || other->Recording().hashes != recorded.hashes)
+            return std::unexpected("別の箱での再生が記録と違う");
+
+        return {};
+    }
+
     // --- 魔法のパッチ(T-0024・ADR-0095)。値は試験用の仮のもの(D-006)---
 
     uint32_t RuleIdOf(const sim::BakedReactionTable& table, std::string_view name) {
@@ -632,7 +730,7 @@ namespace {
     };
 
     constexpr uint32_t PATCH_SWAP_TICK = 20;
-    constexpr uint64_t PATCH_SAVE_POINT_TICK = 30;      // 保存点(パッチの途中・表を替えた後で切った記録)
+    constexpr uint64_t PATCH_SAVE_POINT_TICK = 30;  // 保存点(パッチの途中・表を替えた後で切った記録)
     constexpr uint64_t SHIFTED_TABLE_VERSION = 0x5555;
 
     // 規則の ID がずれる表: 名前の順で前にある規則(boudouard)を抜く(ベイクは規則を名前の順に並べるので、定義の並びを替えても ID は変わらない)。
@@ -822,6 +920,11 @@ namespace {
             return 1;
         }
 
+        if (auto result = RunRefinedBox(device->Get(), options->queueType, *table); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(一部を細かくした箱: {})", result.error());
+            return 1;
+        }
+
         if (auto result = RunPatch(device->Get(), options->queueType, *table); !result) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(魔法のパッチ: {})", result.error());
             return 1;
@@ -835,10 +938,10 @@ namespace {
 
         // --- 表を替える刻みを跨ぐパッチ・保存点(T-0287): 規則の ID がずれる表に途中で替える ---
         const auto shifted = MakeShiftedTable();
-        const bool moved =
-            shifted && RuleIdOf(*shifted, "cellulose_combustion") != RuleIdOf(*table, "cellulose_combustion") &&
-            RuleIdOf(*shifted, "mana_test_catalyzed_cellulose_combustion") !=
-                RuleIdOf(*table, "mana_test_catalyzed_cellulose_combustion");
+        const bool moved = shifted &&
+                           RuleIdOf(*shifted, "cellulose_combustion") != RuleIdOf(*table, "cellulose_combustion") &&
+                           RuleIdOf(*shifted, "mana_test_catalyzed_cellulose_combustion") !=
+                               RuleIdOf(*table, "mana_test_catalyzed_cellulose_combustion");
         if (!moved) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(規則の ID がずれる表を作れない)");
             return 1;
@@ -857,7 +960,8 @@ namespace {
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
             "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える・"
-            "根を並べた箱でも一致・魔法のパッチで止める / 速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕)",
+            "根を並べた箱でも一致・魔法のパッチで止める / "
+            "速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕)",
             RUN_TICKS);
 
         return 0;

@@ -70,6 +70,9 @@ namespace bicameral::sim {
         // rule は今の表(Table())の規則の ID。コマンドには名前の鍵で入る(後で表を替えても同じ名前の規則に効く)。表に無い ID なら false
         bool ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range);
 
+        // 箱の範囲を levels 段細かくする(T-0314・MakeLabRefineCommand)。細かくできる箱(形の refineBlocks > 0)でなければ枠が無く細かくならない
+        bool Refine(LabCellRange range, uint32_t levels);
+
         // tickCount 刻み進める。食い違ったらその刻みで止まり(Mismatch())、以後は Reset まで進めない。GPU の失敗はエラー
         [[nodiscard]] std::expected<void, std::string> Step(uint32_t tickCount);
 
