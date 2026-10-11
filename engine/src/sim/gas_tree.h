@@ -8,9 +8,14 @@
 //   密度のような値(流れを出す運動量・基準との質量の差)は数のまま、中身(移す物質量・エネルギー・運動量)は × 8^d で細かい単位に直して使う。
 //   粗い側は細かい単位の増減を、整数部はセルへ・2^-64 単位の端数はセルの端数(GasTreeFraction)へ足す(3d ≤ 64 なら正確。ADR-0015 の端数と同じ形)。
 //   → 細かい側が引いた量 = 粗い側が足した量で、成分・エネルギー・運動量はビット単位で保存される。導く値(温度・圧力)は整数部だけから。
-// いまの制限(T-0208): 隣のレベルの差は 1 まで(2:1。d ≥ 2 は assert)・全部のレベルが同じ小刻み(1 刻み substeps 回。細かいレベルの
-//   安定の条件 ν × 2^k ≤ 0.6 を満たす数にする)・レベルをまたぐ面の成分は 1 次の風上(MUSCL は同じレベルの 3 つ並びだけ)。
-//   レベルごとの 2^σ の小刻みは T-0320。木は作った後に変えない(細かくする・粗くするは T-0210 で 05 のセルに載せる時)。
+// レベルごとの小刻み(T-0320。17 §4・ADR-0117 追記): レベル k は 1 刻みに substeps × 2^σ(k) 回(σ = clamp(k − 基準, 0, Δσmax)。
+//   GasTreeOptions。既定は分けない = 全部のレベルが同じ小刻み = T-0208)。レベル k の小刻みは、いちばん細かい小刻みの通し番号が
+//   2^(σmax − σ) の倍数の時に始まり、その終わりにだけセルの値が変わる(流れは小刻みの初めの値から)。違う小刻みの面は細かい側が細かい
+//   小刻みごとに計算し、粗い側は力積も移した塊も粗い小刻みの終わりに合計を受ける(Berger–Colella の refluxing。時間補間はしない)。
+//   粗い側から細かい面が 2^g 回引く時は、出ていく割合を × 2^g で数えて粗い小刻み 1 回の合計を 1 以下に抑える(熱の C/8 ÷ 引く回数と同じ考え)。
+// いまの制限: 隣のレベルの差は 1 まで(2:1。d ≥ 2 は assert)・レベルをまたぐ面の成分は 1 次の風上(MUSCL は同じレベルの 3 つ並びだけ)・
+//   どのレベルも安定の条件 ν × 2^(k − σ) ≤ 0.6 を満たすこと(MakeGasTree が assert)。
+//   木は作った後に変えない(細かくする・粗くするは T-0210 で 05 のセルに載せる時)。
 // 全部がレベル 0 なら gas_reference と毎刻みビット一致する(面の番号・乱数・式の形が同じ)。
 //
 // データの流れ: GasConfig(レベル 0 の箱の大きさ・境界・物質)+ 細かくする範囲 → MakeGasTree → StepGasTree → SumGasTree・DeriveGasTreeCell。
@@ -32,6 +37,13 @@ namespace bicameral::sim {
         uint32_t level = 1;
         std::array<uint32_t, GAS_AXES> origin = {};
         std::array<uint32_t, GAS_AXES> size = {};
+    };
+
+    // レベルごとの小刻み(T-0320)。σ(k) = clamp(k − subcycleBaseLevel, 0, maxSubcycleGap)。
+    // 既定(maxSubcycleGap = 0)は分けない = 全部のレベルが substeps 回(T-0208 と毎刻みビット一致)。熱の sim::MultiresStepOptions と同じ名前
+    struct GasTreeOptions {
+        uint32_t subcycleBaseLevel = 0;
+        uint32_t maxSubcycleGap = 0;
     };
 
     // whole + fraction × 2^-64(帳簿と合計。レベル 0 の単位)
@@ -59,6 +71,7 @@ namespace bicameral::sim {
     // レベルごとの係数・基準(層 z ごと)・開いた境界の外・座標からセルを引く表
     struct GasTreeLevel {
         std::array<uint32_t, GAS_AXES> size = {};  // レベル 0 の箱の大きさ × 2^k
+        uint32_t subcycleExponent = 0;             // σ: 1 刻みに substeps × 2^σ 回の小刻み(係数はその Δt)
         GasCoefficients coefficients;
         std::vector<GasCell> reference;
         std::vector<GasDerived> referenceDerived;
@@ -77,6 +90,7 @@ namespace bicameral::sim {
     struct GasTree {
         GasConfig config;  // 大きさはレベル 0 の箱
         std::vector<GasTreeLevel> levels;
+        uint32_t maxSubcycleExponent = 0;  // σ の最大(1 刻み = いちばん細かい小刻み substeps × 2^これ 回)
 
         // --- 状態(レベル 0 から順に、各レベルは x が最も速く回る順)---
         std::vector<GasCell> cells;
@@ -100,12 +114,12 @@ namespace bicameral::sim {
     // 全部のセルを層の基準 + 風で埋める
     [[nodiscard]] GasTree MakeGasTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
                                       std::span<const uint32_t> fractionsQ32, uint32_t temperatureMilliKelvin,
-                                      uint64_t surfacePressureMicroPascal);
+                                      uint64_t surfacePressureMicroPascal, const GasTreeOptions& options = {});
 
     // セルから導く値(整数部だけ。そのレベルの層の基準を使う)
     [[nodiscard]] GasDerived DeriveGasTreeCell(const GasTree& tree, uint32_t cellIndex);
 
-    // 1 刻み(substeps 回の小刻み。全部のレベルが同じ小刻み)
+    // 1 刻み(レベル k は substeps × 2^σ(k) 回の小刻み)
     void StepGasTree(GasTree& tree);
 
     // 合計(レベル 0 の単位。セルの整数 × 8^-k + 端数)

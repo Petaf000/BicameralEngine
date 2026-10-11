@@ -2,6 +2,9 @@
 // 小刻みの段は gas_reference.cpp の Substep と同じ(導く値 → 面の力を当てる → 流れと出ていく割合 → 移す成分の物質量 → 移す)。
 // 違うのは面の両側がレベルの違うセルでありうることだけ: 面は細かい側のレベルの単位で計算し、粗い側の中身は × 8^d で細かい単位に直して読み、
 // 粗い側への増減は整数部 + 2^-64 の端数で足す(AddScaled)。どの段も整数の足し引きだけで次の配列へ書く(順番に依存しない。04 R2・R3)。
+// レベルごとの小刻み(T-0320): 1 刻みをいちばん細かい小刻み(通し番号 micro)に分け、各 micro では小刻みを始めるレベルの面だけを計算する(MicroStep)。
+// セルは 3 つの状態を持つ: 小刻みの初めの値(tree.cells。導く値はここから)・力を当てた値(forced。同じ小刻みの面の力積だけ)・次の値
+// (next。forced + 移した塊 + 細かい小刻みの面の力積)。小刻みの終わりに next を tree.cells へ。粗いセルの forced と next は粗い小刻みの間ずっと持つ。
 #include "sim/gas_tree.h"
 
 #include <algorithm>
@@ -58,6 +61,44 @@ namespace bicameral::sim {
             std::vector<GasTreeFraction> fractions;
         };
 
+        // 1 刻みの間の作業の状態(セルごと。値はそのセルの小刻みの初めに作り、小刻みの間は持ち越す)
+        struct TreeWork {
+            std::vector<GasDerived> derived;  // 小刻みの初めの整数部から
+            TreeState forced;                 // 小刻みの初め + 同じ小刻みの面の力積
+            TreeState next;                   // forced + 移した塊 + 細かい小刻みの面の力積
+
+            // --- 粗い小刻み 1 回の間に出した量(細かい面が何度も引くため。T-0320)---
+            std::vector<uint64_t> committedOutflow;                    // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
+            std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> taken;  // 出した物質量(風上のレベル + 1 の単位)
+        };
+
+        // --- レベルごとの小刻み(T-0320)---
+
+        uint32_t Exponent(const GasTree& tree, uint32_t level) {
+            return tree.levels[level].subcycleExponent;
+        }
+
+        // レベル level の小刻みが、いちばん細かい小刻みの通し番号 micro で始まるか・終わるか(長さ 2^(σmax − σ))
+        uint64_t PeriodMask(const GasTree& tree, uint32_t level) {
+            return ((uint64_t)1 << (tree.maxSubcycleExponent - Exponent(tree, level))) - 1;
+        }
+
+        bool Starts(const GasTree& tree, uint32_t level, uint64_t micro) {
+            return (micro & PeriodMask(tree, level)) == 0;
+        }
+
+        bool Ends(const GasTree& tree, uint32_t level, uint64_t micro) {
+            return ((micro + 1) & PeriodMask(tree, level)) == 0;
+        }
+
+        // 乱数の小刻みの通し番号はレベルごと(tick × その小刻みの数 + その中の番号。σ = 0 なら T-0208 と同じ)
+        uint64_t RoundingTick(const GasTree& tree, uint32_t level, uint64_t micro) {
+            const uint32_t exponent = Exponent(tree, level);
+            const uint64_t substeps = (uint64_t)tree.config.substeps << exponent;
+
+            return (tree.tick * substeps) + (micro >> (tree.maxSubcycleExponent - exponent));
+        }
+
         // --- 端数つきの足し算 ---
 
         // whole + fraction × 2^-64 に value × 2^-shift を足す(shift < 64。value は符号つき。128bit の足し算なので順に依存しない)
@@ -112,6 +153,14 @@ namespace bicameral::sim {
         // 側の中身を面の単位へ直すずらし(粗い側は 3d。同じレベル・境界は 0)
         uint32_t ContentShift(const TreeFace& face, const TreeSide& side) {
             return side.kind == SideKind::Cell ? 3 * (face.level - side.level) : 0;
+        }
+
+        // 面の小刻みと側の小刻みの差 g(面は側の小刻み 1 回の間に 2^g 回計算される。同じレベル・境界は 0)
+        uint32_t SubcycleGap(const GasTree& tree, const TreeFace& face, const TreeSide& side) {
+            if (side.kind != SideKind::Cell)
+                return 0;
+
+            return Exponent(tree, face.level) - Exponent(tree, side.level);
         }
 
         // 基準との質量の差(数。密度のような値なのでレベルの単位のまま)。開いた境界の外・壁は 0
@@ -334,23 +383,35 @@ namespace bicameral::sim {
             return gd::MulShiftU64(fx::FxAbsU64(face.flow), inverseMass, 32);
         }
 
-        // 出ていく割合の合計が 1 を超えるセルは比例して縮める(割合はどれも同じ中身に対する値なので、レベルをまたぐ面もそのまま足せる)
-        void LimitOutflow(const GasTree& tree, const std::vector<GasDerived>& derived, std::vector<TreeFace>& faces) {
+        // 出ていく割合の合計が 1 を超えるセルは比例して縮める(割合はどれも同じ中身に対する値なので、レベルをまたぐ面もそのまま足せる)。
+        // 小刻みの細かい面(風上の小刻み 1 回の間に 2^g 回引く)は × 2^g で数え、使える分は 1 − 風上の小刻みの初めに同じ小刻みの面が出した分
+        // → 風上の小刻み 1 回の合計が 1 以下(T-0320。熱の C/8 ÷ 引く回数と同じ考え。全部同じ小刻みなら T-0208 と同じ値)
+        void LimitOutflow(const GasTree& tree, TreeWork& work, std::vector<TreeFace>& faces) {
             std::vector<uint64_t> outflow(tree.cells.size(), 0);
             for (TreeFace& face : faces) {
-                face.fraction = RawFraction(tree, derived, face);
+                face.fraction = RawFraction(tree, work.derived, face);
                 const TreeSide& donor = Donor(face);
                 if (face.fraction != 0 && donor.kind == SideKind::Cell)
-                    outflow[donor.index] += face.fraction;
+                    outflow[donor.index] += face.fraction << SubcycleGap(tree, face, donor);
             }
 
             for (TreeFace& face : faces) {
                 const TreeSide& donor = Donor(face);
-                if (face.fraction == 0 || donor.kind != SideKind::Cell || outflow[donor.index] <= gd::ONE_Q32)
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
                     continue;
 
-                face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, gd::ONE_Q32), outflow[donor.index])
+                const uint64_t available = gd::ONE_Q32 - work.committedOutflow[donor.index];
+                if (outflow[donor.index] <= available)
+                    continue;
+
+                face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, available), outflow[donor.index])
                                     .quotient;
+            }
+
+            for (const TreeFace& face : faces) {
+                const TreeSide& donor = Donor(face);
+                if (face.fraction != 0 && donor.kind == SideKind::Cell && SubcycleGap(tree, face, donor) == 0)
+                    work.committedOutflow[donor.index] += face.fraction;
             }
         }
 
@@ -413,14 +474,14 @@ namespace bicameral::sim {
             return whole + ((hash >> 32) < (amountQ32.lo & gd::LOW_32_BITS) ? 1 : 0);
         }
 
-        // 乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分。レベル 0 は gas_reference と同じ
+        // 乱数は(世界のシード, そのレベルの小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分。レベル 0 は gas_reference と同じ
         void ComputeMovedAmounts(const GasTree& tree, const std::vector<GasCell>& cells,
-                                 const std::vector<GasDerived>& derived, uint64_t roundingTick,
-                                 std::vector<TreeFace>& faces) {
+                                 const std::vector<GasDerived>& derived, uint64_t micro, std::vector<TreeFace>& faces) {
             for (TreeFace& face : faces) {
                 if (face.fraction == 0)
                     continue;
 
+                const uint64_t roundingTick = RoundingTick(tree, face.level, micro);
                 const uint64_t faceHash = fx::FxHash64(tree.config.randomSeed, roundingTick, face.id,
                                                        gd::GAS_ROUNDING_PURPOSE + face.level);
                 for (uint32_t s = 0; s < tree.config.speciesCount; ++s) {
@@ -431,8 +492,10 @@ namespace bicameral::sim {
         }
 
         // 風上のセルごとに、移す物質量の合計が中身を超えたら比例して縮める。合計は風上のレベル + 1 の単位で数える
-        // (同じレベルの面は × 8。比も切り捨ても gas_reference と同じ値になる)
-        void LimitMovedAmounts(const GasTree& tree, const std::vector<GasCell>& cells, std::vector<TreeFace>& faces) {
+        // (同じレベルの面は × 8。比も切り捨ても gas_reference と同じ値になる)。中身からは風上の小刻みの間にもう出した分を引く
+        // (細かい面が何度も引く時。T-0320。割合は LimitOutflow で抑えてあるので、ここに来るのは乱数の丸め上げ・MUSCL の分だけ)
+        void LimitMovedAmounts(const GasTree& tree, TreeWork& work, std::vector<TreeFace>& faces) {
+            const std::vector<GasCell>& cells = work.forced.cells;
             const uint32_t speciesCount = tree.config.speciesCount;
             std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> outgoing(tree.cells.size());
             for (const TreeFace& face : faces) {
@@ -452,12 +515,22 @@ namespace bicameral::sim {
 
                 for (uint32_t s = 0; s < speciesCount; ++s) {
                     const uint64_t total = outgoing[donor.index][s];
-                    const uint64_t content = cells[donor.index].amounts[s] << 3;
+                    const uint64_t content = (cells[donor.index].amounts[s] << 3) - work.taken[donor.index][s];
                     if (total <= content)
                         continue;
 
                     face.moved[s] = fx::FxDivU128By64(fx::FxMulU64Full(face.moved[s], content), total).quotient;
                 }
+            }
+
+            for (const TreeFace& face : faces) {
+                const TreeSide& donor = Donor(face);
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const uint32_t unitShift = 3 - ContentShift(face, donor);
+                for (uint32_t s = 0; s < speciesCount; ++s)
+                    work.taken[donor.index][s] += face.moved[s] << unitShift;
             }
         }
 
@@ -469,14 +542,23 @@ namespace bicameral::sim {
             AddScaled(state.cells[side.index].momentum[axis], state.fractions[side.index].momentum[axis], value, shift);
         }
 
-        void ApplyImpulse(GasTree& tree, TreeState& state, const TreeFace& face) {
+        // 側への力積は、側の小刻みが面と同じなら力を当てた値(forced。その小刻みの流れに効く)へ、側が粗い小刻みなら次の値(next。
+        // 粗い小刻みの終わりに受ける。粗い側の値は小刻みの初めのまま。T-0320)へ。immediatePass で前者・後者を分けて 2 回呼ぶ
+        // (next は forced を写した後に足すため)。帳簿(箱の外の側)は前者の回で
+        void ApplyImpulse(GasTree& tree, TreeWork& work, const TreeFace& face, bool immediatePass) {
+            const bool leftCell = face.left.kind == SideKind::Cell;
+            const bool rightCell = face.right.kind == SideKind::Cell;
+            const bool leftNow = leftCell && (SubcycleGap(tree, face, face.left) == 0) == immediatePass;
+            const bool rightNow = rightCell && (SubcycleGap(tree, face, face.right) == 0) == immediatePass;
+            TreeState& state = immediatePass ? work.forced : work.next;
+
             // --- 重さ(箱の外から働く力なので帳簿へ)---
-            if (face.left.kind == SideKind::Cell && face.weightLeft != 0) {
+            if (leftNow && face.weightLeft != 0) {
                 AddMomentum(state, face.left, 2, -face.weightLeft, face.level);
                 AddLedger(tree.ledger.momentum[2], -face.weightLeft, face.level);
             }
 
-            if (face.right.kind == SideKind::Cell && face.weightRight != 0) {
+            if (rightNow && face.weightRight != 0) {
                 AddMomentum(state, face.right, 2, -face.weightRight, face.level);
                 AddLedger(tree.ledger.momentum[2], -face.weightRight, face.level);
             }
@@ -484,14 +566,14 @@ namespace bicameral::sim {
             if (face.impulse == 0)
                 return;
 
-            if (face.left.kind == SideKind::Cell)
+            if (leftNow)
                 AddMomentum(state, face.left, face.axis, -face.impulse, face.level);
-            else
+            else if (!leftCell && immediatePass)
                 AddLedger(tree.ledger.momentum[face.axis], face.impulse, face.level);
 
-            if (face.right.kind == SideKind::Cell)
+            if (rightNow)
                 AddMomentum(state, face.right, face.axis, face.impulse, face.level);
-            else
+            else if (!rightCell && immediatePass)
                 AddLedger(tree.ledger.momentum[face.axis], -face.impulse, face.level);
         }
 
@@ -572,57 +654,92 @@ namespace bicameral::sim {
             AddParcel(tree, next, receiver, face.level, moved, received, 1);
         }
 
-        std::vector<GasDerived> DeriveAll(const GasTree& tree) {
-            std::vector<GasDerived> derived(tree.cells.size());
-            for (uint32_t index = 0; index < tree.cells.size(); ++index)
-                derived[index] = DeriveGasTreeCell(tree, index);
+        // (1) 小刻みを始めるレベルのセル: 導く値(整数部だけ)・力を当てる前の値・出した量の数える欄
+        void BeginCells(const GasTree& tree, uint64_t micro, TreeWork& work) {
+            for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+                if (!Starts(tree, tree.places[index].level, micro))
+                    continue;
 
-            return derived;
+                work.derived[index] = DeriveGasTreeCell(tree, index);
+                work.forced.cells[index] = tree.cells[index];
+                work.forced.fractions[index] = tree.fractions[index];
+                work.committedOutflow[index] = 0;
+                work.taken[index] = {};
+            }
         }
 
-        void Substep(GasTree& tree, const std::vector<TreeFace>& layout, uint64_t roundingTick) {
-            // --- (1) 導く値(整数部だけ)---
-            const std::vector<GasDerived> derived = DeriveAll(tree);
-
-            // --- (2) 面の力を先に当てる ---
-            std::vector<TreeFace> faces = layout;
+        // (2) 面の力を先に当てる(同じ小刻みの側は forced へ。始めるセルの next は forced の写し。粗い小刻みの側は next へ)
+        void ApplyForces(GasTree& tree, uint64_t micro, std::vector<TreeFace>& faces, TreeWork& work) {
             for (TreeFace& face : faces)
-                ComputeFaceForce(tree, derived, face);
+                ComputeFaceForce(tree, work.derived, face);
 
-            TreeState forced = {.cells = tree.cells, .fractions = tree.fractions};
             for (const TreeFace& face : faces)
-                ApplyImpulse(tree, forced, face);
+                ApplyImpulse(tree, work, face, true);
+
+            for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+                if (!Starts(tree, tree.places[index].level, micro))
+                    continue;
+
+                work.next.cells[index] = work.forced.cells[index];
+                work.next.fractions[index] = work.forced.fractions[index];
+            }
+
+            for (const TreeFace& face : faces)
+                ApplyImpulse(tree, work, face, false);
+        }
+
+        // いちばん細かい小刻み 1 回: 小刻みを始めるレベルの面だけを計算し、小刻みを終えるレベルのセルが次の値を受ける
+        // (全部同じ小刻みなら gas_reference の Substep・T-0208 と同じ段・同じ値)
+        void MicroStep(GasTree& tree, const std::vector<TreeFace>& layout, uint64_t micro, TreeWork& work) {
+            BeginCells(tree, micro, work);
+
+            std::vector<TreeFace> faces;
+            faces.reserve(layout.size());
+            for (const TreeFace& face : layout) {
+                if (Starts(tree, face.level, micro))
+                    faces.push_back(face);
+            }
+
+            ApplyForces(tree, micro, faces, work);
 
             // --- (3) 力を当てた後の運動量で流れ(前進・後退の順)・出ていく割合を抑える ---
             for (TreeFace& face : faces)
-                ComputeFaceFlow(tree, derived, forced.cells, face);
+                ComputeFaceFlow(tree, work.derived, work.forced.cells, face);
 
-            LimitOutflow(tree, derived, faces);
+            LimitOutflow(tree, work, faces);
 
             // --- (4) 移す成分の物質量 ---
-            ComputeMovedAmounts(tree, forced.cells, derived, roundingTick, faces);
-            LimitMovedAmounts(tree, forced.cells, faces);
+            ComputeMovedAmounts(tree, work.forced.cells, work.derived, micro, faces);
+            LimitMovedAmounts(tree, work, faces);
 
             // --- (5) 移す ---
-            TreeState next = forced;
             for (const TreeFace& face : faces)
-                Transfer(tree, forced.cells, derived, next, face);
+                Transfer(tree, work.forced.cells, work.derived, work.next, face);
 
-            tree.cells = std::move(next.cells);
-            tree.fractions = std::move(next.fractions);
+            // --- (6) 小刻みを終えるレベルのセルは次の値を受ける ---
+            for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+                if (!Ends(tree, tree.places[index].level, micro))
+                    continue;
+
+                tree.cells[index] = work.next.cells[index];
+                tree.fractions[index] = work.next.fractions[index];
+            }
         }
 
         // --- 木を作る ---
 
-        // レベル k の係数: 流れ・拡散・力積は × 2^k(面積 ÷ 体積)。ほか(物質の質量・重さの力積・α)はレベル 0 と同じ
-        GasCoefficients MakeLevelCoefficients(const GasConfig& config, const GasCoefficients& base, uint32_t level) {
+        // レベル k の係数: 流れ・拡散・力積は × 2^k(面積 ÷ 体積)。小刻みの数は substeps × 2^σ(T-0320)なので、流れ・拡散・力積・重さの
+        // 力積は × 2^-σ(MakeGasCoefficients と同じ式に小刻みの数を入れる)。ほか(物質の質量・α)はレベル 0 と同じ
+        GasCoefficients MakeLevelCoefficients(const GasConfig& config, const GasCoefficients& base, uint32_t level,
+                                              uint32_t exponent) {
             GasCoefficients coefficients = base;
-            const uint64_t substeps = config.substeps;
+            const uint64_t substeps = (uint64_t)config.substeps << exponent;
             coefficients.centralFlow = ((uint64_t)1 << (31 + level)) / (30 * substeps);
             coefficients.pressureFlow = fx::FxDivU128By64(fx::FxMulU64Full(25, (uint64_t)1 << (40 + level)),
                                                           24 * substeps * config.soundSpeedMmPerS)
                                             .quotient;
             coefficients.pressureImpulse = ((uint64_t)1 << (31 + level)) / (15 * substeps);
+            coefficients.gravityImpulse = (gd::GRAVITY_MICROMETER_PER_SECOND2 << 36) / (60 * substeps * gd::MICRO);
 
             return coefficients;
         }
@@ -663,11 +780,12 @@ namespace bicameral::sim {
         }
 
         GasTreeLevel MakeFinerLevel(const GasConfig& config, const GasTreeLevel& base, uint32_t level,
-                                    std::span<const uint32_t> fractionsQ32, uint32_t temperature,
+                                    uint32_t exponent, std::span<const uint32_t> fractionsQ32, uint32_t temperature,
                                     uint64_t surfacePressure) {
             GasTreeLevel result;
             result.size = {config.sizeX << level, config.sizeY << level, config.sizeZ << level};
-            result.coefficients = MakeLevelCoefficients(config, base.coefficients, level);
+            result.subcycleExponent = exponent;
+            result.coefficients = MakeLevelCoefficients(config, base.coefficients, level, exponent);
             result.reference = MakeLevelReference(config, base.coefficients, level, fractionsQ32, temperature,
                                                   surfacePressure);
             for (const GasCell& layer : result.reference) {
@@ -721,7 +839,7 @@ namespace bicameral::sim {
 
     GasTree MakeGasTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
                         std::span<const uint32_t> fractionsQ32, uint32_t temperatureMilliKelvin,
-                        uint64_t surfacePressureMicroPascal) {
+                        uint64_t surfacePressureMicroPascal, const GasTreeOptions& options) {
         uint32_t maxLevel = 0;
         for (const GasTreeRegion& region : regions) {
             assert(region.origin[0] % 2 == 0 && region.origin[1] % 2 == 0 && region.origin[2] % 2 == 0);
@@ -729,9 +847,16 @@ namespace bicameral::sim {
             maxLevel = std::max(maxLevel, region.level);
         }
 
-        // 安定の条件: いちばん細かいレベルの ν = c̃ Δt ÷ Δx × 2^k ≤ 0.6(全部のレベルが同じ小刻み。T-0208)
+        // 安定の条件: どのレベルも ν = c̃ Δt ÷ Δx × 2^(k − σ) ≤ 0.6(σ はレベルごとの小刻みの指数。T-0320)
         assert(maxLevel <= MAX_TREE_LEVEL);
-        assert(((uint64_t)config.soundSpeedMmPerS * 10 << maxLevel) <= (uint64_t)config.substeps * 30000 * 6);
+        std::vector<uint32_t> exponents(maxLevel + 1, 0);
+        for (uint32_t level = 0; level <= maxLevel; ++level) {
+            if (level > options.subcycleBaseLevel)
+                exponents[level] = std::min(level - options.subcycleBaseLevel, options.maxSubcycleGap);
+
+            assert(((uint64_t)config.soundSpeedMmPerS * 10 << (level - exponents[level])) <=
+                   (uint64_t)config.substeps * 30000 * 6);
+        }
 
         // --- レベル 0 は 1 レベルの箱と同じ(係数・基準・α)---
         // 重さが無ければ基準の層は全部地面の層と同じ(gas_reference_test の周期的な箱と同じ扱い。層ごとの基準の差が偽の力にならない)
@@ -744,6 +869,7 @@ namespace bicameral::sim {
         GasTree tree;
         tree.config = config;
         tree.levels.resize(maxLevel + 1);
+        tree.maxSubcycleExponent = exponents[maxLevel];
         GasTreeLevel& root = tree.levels[0];
         root.size = {config.sizeX, config.sizeY, config.sizeZ};
         root.coefficients = base.coefficients;
@@ -753,8 +879,8 @@ namespace bicameral::sim {
         root.grid.assign(base.cells.size(), 0);
 
         for (uint32_t level = 1; level <= maxLevel; ++level)
-            tree.levels[level] = MakeFinerLevel(config, root, level, fractionsQ32, temperatureMilliKelvin,
-                                                surfacePressureMicroPascal);
+            tree.levels[level] = MakeFinerLevel(config, root, level, exponents[level], fractionsQ32,
+                                                temperatureMilliKelvin, surfacePressureMicroPascal);
 
         // --- 粗いレベルの範囲から順に細かくする ---
         for (uint32_t level = 1; level <= maxLevel; ++level) {
@@ -788,8 +914,18 @@ namespace bicameral::sim {
 
     void StepGasTree(GasTree& tree) {
         const std::vector<TreeFace> layout = EnumerateFaces(tree);
-        for (uint32_t substep = 0; substep < tree.config.substeps; ++substep)
-            Substep(tree, layout, (tree.tick * tree.config.substeps) + substep);
+        const size_t count = tree.cells.size();
+        TreeWork work;
+        work.derived.resize(count);
+        work.forced = {.cells = tree.cells, .fractions = tree.fractions};
+        work.next = work.forced;
+        work.committedOutflow.assign(count, 0);
+        work.taken.assign(count, {});
+
+        // 1 刻み = いちばん細かい小刻み substeps × 2^σmax 回(どのレベルの小刻みもこの中で始まって終わる)
+        const uint64_t micros = (uint64_t)tree.config.substeps << tree.maxSubcycleExponent;
+        for (uint64_t micro = 0; micro < micros; ++micro)
+            MicroStep(tree, layout, micro, work);
 
         ++tree.tick;
     }

@@ -2,6 +2,8 @@
 //   全部がレベル 0 なら 1 レベルの gas_reference と毎刻みビット一致(壁と重さ・開いた境界と風・周期的な箱)・
 //   レベルをまたぐ静止大気(各レベルの基準)が動き出さない・閉じた箱で成分・エネルギー・運動量が毎刻み「初め + 帳簿」とビット一致(端数を含む)・
 //   同じ入力なら同じ状態・圧力の波がレベル 0 → 1 → 0 の境を通る時の反射と通った波の誤差が小さい(全部レベル 0 の管と比べる)。
+//   レベルごとの小刻み(T-0320): 分けなければ T-0208 の実装と毎刻みビット一致(状態の鎖のハッシュ)・分けても(レベル 1 が 2 倍の小刻み)
+//   静止大気が動かない・閉じた箱の保存が毎刻みビット一致・波の反射が T-0208 と同じ程度。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。測った値も表示する(07 §2.5 に書いた数字の出どころ)。
 #include <algorithm>
 #include <array>
@@ -60,8 +62,9 @@ namespace {
         return reference;
     }
 
-    GasTree MakeAirTree(const GasConfig& config, std::span<const GasTreeRegion> regions) {
-        return MakeGasTree(config, regions, AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE);
+    GasTree MakeAirTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
+                        const GasTreeOptions& options = {}) {
+        return MakeGasTree(config, regions, AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE, options);
     }
 
     void Heat(const GasConfig& config, GasCell& cell, uint32_t temperature) {
@@ -152,7 +155,16 @@ namespace {
 
     GasConfig TwoLevelConfig() {
         GasConfig config = MakeAirConfig(8, 4, 8);
-        config.substeps = 48;  // 全部のレベルが同じ小刻み: レベル 1 の ν = 0.47(T-0208。2^σ は T-0320)
+        config.substeps = 48;  // 全部のレベルが同じ小刻み: レベル 1 の ν = 0.47(T-0208)
+        return config;
+    }
+
+    // レベルごとの小刻み(T-0320): レベル 0 は 24 回(ν = 0.47)、レベル 1 は 24 × 2 回(ν = 0.47)
+    constexpr GasTreeOptions SUBCYCLED = {.subcycleBaseLevel = 0, .maxSubcycleGap = 1};
+
+    GasConfig SubcycledConfig() {
+        GasConfig config = MakeAirConfig(8, 4, 8);
+        config.substeps = 24;
         return config;
     }
 
@@ -166,7 +178,25 @@ namespace {
         return largest;
     }
 
+    bool StaysStill(const GasConfig& config, const GasTreeOptions& options, const char* name) {
+        GasTree tree = MakeAirTree(config, MIDDLE_REGION, options);
+        const std::vector<GasCell> before = tree.cells;
+        for (int tick = 0; tick < 20; ++tick)
+            StepGasTree(tree);
+
+        bool unchanged = true;
+        for (size_t i = 0; i < before.size(); ++i)
+            unchanged = unchanged && before[i].amounts == tree.cells[i].amounts &&
+                        before[i].energy == tree.cells[i].energy && before[i].momentum == tree.cells[i].momentum;
+
+        std::printf("static atmosphere across levels (%s): max momentum after 20 ticks = %lld, unchanged = %d\n", name,
+                    (long long)MaxMomentum(tree), unchanged ? 1 : 0);
+        return unchanged;
+    }
+
     void TestStaticAtmosphereAcrossLevels() {
+        EXPECT(StaysStill(SubcycledConfig(), SUBCYCLED, "subcycled"));
+
         GasTree tree = MakeAirTree(TwoLevelConfig(), MIDDLE_REGION);
         const std::vector<GasCell> before = tree.cells;
         for (int tick = 0; tick < 20; ++tick)
@@ -205,9 +235,8 @@ namespace {
         return sum;
     }
 
-    GasTree MakeDisturbedTwoLevelBox() {
-        const GasConfig config = TwoLevelConfig();
-        GasTree tree = MakeAirTree(config, MIDDLE_REGION);
+    GasTree MakeDisturbedTwoLevelBox(const GasConfig& config = TwoLevelConfig(), const GasTreeOptions& options = {}) {
+        GasTree tree = MakeAirTree(config, MIDDLE_REGION, options);
         Heat(config, tree.cells[tree.Find(0, 1, 1, 2)], AIR_TEMPERATURE + 60000);  // 細かい範囲の左の粗いセル
         Heat(config, tree.cells[tree.Find(1, 4, 2, 5)], AIR_TEMPERATURE + 60000);  // 境の細かいセル
         Heat(config, tree.cells[tree.Find(1, 6, 3, 4)], AIR_TEMPERATURE - 20000);
@@ -235,8 +264,8 @@ namespace {
         return count;
     }
 
-    void TestClosedBoxConservationAcrossLevels() {
-        GasTree tree = MakeDisturbedTwoLevelBox();
+    void CheckClosedBoxConservation(const GasConfig& config, const GasTreeOptions& options, const char* name) {
+        GasTree tree = MakeDisturbedTwoLevelBox(config, options);
         const GasTreeTotals before = SumGasTree(tree);
         int brokenTick = -1;
         for (int tick = 0; tick < 30; ++tick) {
@@ -254,15 +283,15 @@ namespace {
         }
 
         std::printf(
-            "closed two-level box: first broken tick = %d (-1 = none in 30), cells with fractions = %u, "
+            "closed two-level box (%s): first broken tick = %d (-1 = none in 30), cells with fractions = %u, "
             "max speed = %.3f m/s\n",
-            brokenTick, CountFractions(tree),
+            name, brokenTick, CountFractions(tree),
             (double)MaxMomentum(tree) / (double)METER_PER_SECOND / (double)ROUGH_CELL_MASS);
         EXPECT(brokenTick < 0);
         EXPECT(CountFractions(tree) > 0);  // レベルをまたぐ面の端数を通った
 
         // 同じ入力なら同じ状態(決定性)
-        GasTree again = MakeDisturbedTwoLevelBox();
+        GasTree again = MakeDisturbedTwoLevelBox(config, options);
         for (int tick = 0; tick < 30; ++tick)
             StepGasTree(again);
 
@@ -274,6 +303,14 @@ namespace {
         EXPECT(same);
     }
 
+    void TestClosedBoxConservationAcrossLevels() {
+        CheckClosedBoxConservation(TwoLevelConfig(), {}, "same substeps");
+
+        const GasTree subcycled = MakeDisturbedTwoLevelBox(SubcycledConfig(), SUBCYCLED);
+        EXPECT(subcycled.maxSubcycleExponent == 1 && subcycled.levels[1].subcycleExponent == 1);
+        CheckClosedBoxConservation(SubcycledConfig(), SUBCYCLED, "subcycled");
+    }
+
     // --- 圧力の波がレベルの境を通る(全部レベル 0 の管と比べた差 = 境が作った反射と通った波の誤差)---
 
     constexpr uint32_t TUBE_LENGTH = 96;
@@ -282,17 +319,17 @@ namespace {
     constexpr uint32_t FINE_BEGIN = 40;  // レベル 0 の x。ここから 16 セルがレベル 1
     constexpr uint32_t FINE_END = 56;
 
-    GasConfig TubeConfig() {
+    GasConfig TubeConfig(uint32_t substeps) {
         GasConfig config = MakeAirConfig(TUBE_LENGTH, 2, 2);
         config.boundary = {GasBoundary::Wall, GasBoundary::Periodic, GasBoundary::Periodic};
         config.gravity = false;
-        config.substeps = 48;
+        config.substeps = substeps;
         return config;
     }
 
     // 右へ進む弱い圧力の山(単純波: δρ/ρ = δ ÷ γ・δT/T = (γ − 1)δ ÷ γ・u = c δ ÷ γ。δ = 1% の余弦の山)
-    GasBox MakePulseTube() {
-        const GasConfig config = TubeConfig();
+    GasBox MakePulseTube(uint32_t substeps) {
+        const GasConfig config = TubeConfig(substeps);
         GasBox box = MakeGasBox(config, AirReference(config));
         const double gamma = 1.4;
         const double sound = 340.0;  // c̃(実効の音速)
@@ -317,8 +354,8 @@ namespace {
     }
 
     // 箱の状態を木へ写す(細かいセルは親の数のまま = 17 §1 の細かくし方)
-    GasTree CopyIntoTree(const GasBox& box, std::span<const GasTreeRegion> regions) {
-        GasTree tree = MakeAirTree(box.config, regions);
+    GasTree CopyIntoTree(const GasBox& box, std::span<const GasTreeRegion> regions, const GasTreeOptions& options) {
+        GasTree tree = MakeAirTree(box.config, regions, options);
         for (uint32_t i = 0; i < tree.cells.size(); ++i) {
             const GasTreePlace& place = tree.places[i];
             const uint32_t shift = place.level;
@@ -329,11 +366,12 @@ namespace {
         return tree;
     }
 
-    void TestPressureWaveCrossesLevels() {
+    // 一様な管(同じレベル 0 の小刻み)と比べる。T-0208(全部 48 回)と T-0320(レベル 0 は 24 回・レベル 1 は 48 回)
+    void MeasurePressureWave(uint32_t substeps, const GasTreeOptions& options, const char* name) {
         const std::array<GasTreeRegion, 1> region = {
             GasTreeRegion{.level = 1, .origin = {FINE_BEGIN * 2, 0, 0}, .size = {(FINE_END - FINE_BEGIN) * 2, 4, 4}}};
-        GasBox box = MakePulseTube();
-        GasTree tree = CopyIntoTree(box, region);
+        GasBox box = MakePulseTube(substeps);
+        GasTree tree = CopyIntoTree(box, region, options);
         const double amplitude = 0.01 * (double)box.referenceDerived[0].pressure;
         const int64_t base = box.referenceDerived[0].pressure;
 
@@ -362,12 +400,79 @@ namespace {
         }
 
         std::printf(
-            "pressure wave through levels 0 -> 1 -> 0 after 5 ticks: reflected = %.4f, transmitted error = %.4f "
+            "pressure wave through levels 0 -> 1 -> 0 after 5 ticks (%s): reflected = %.4f, transmitted error = %.4f "
             "(of the 1%% pulse), peak in the uniform tube = %.4f\n",
-            reflected, transmitted, peak);
+            name, reflected, transmitted, peak);
         EXPECT(peak > 0.5);  // 波は右の粗い所まで届いている
         EXPECT(reflected < 0.05);
         EXPECT(transmitted < 0.10);
+    }
+
+    void TestPressureWaveCrossesLevels() {
+        MeasurePressureWave(48, {}, "same substeps 48");
+        MeasurePressureWave(24, SUBCYCLED, "level 0: 24, level 1: 48");
+    }
+
+    // --- 小刻みを分けない(σ = 0)なら T-0208 と毎刻みビット一致(T-0320)---
+
+    // 状態(セル・端数・帳簿)の FNV-1a を刻みごとに鎖にする(毎刻みの状態が全部同じ時だけ最後の値が同じ)
+    uint64_t HashMix(uint64_t hash, uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            hash ^= (value >> (8 * i)) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+
+        return hash;
+    }
+
+    uint64_t HashQ64(uint64_t hash, const GasQ64& value) {
+        return HashMix(HashMix(hash, (uint64_t)value.whole), value.fraction);
+    }
+
+    uint64_t HashTreeState(uint64_t hash, const GasTree& tree) {
+        for (size_t i = 0; i < tree.cells.size(); ++i) {
+            const GasCell& cell = tree.cells[i];
+            const GasTreeFraction& fraction = tree.fractions[i];
+            for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
+                hash = HashMix(HashMix(hash, cell.amounts[s]), fraction.amounts[s]);
+
+            hash = HashMix(HashMix(hash, (uint64_t)cell.energy), fraction.energy);
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                hash = HashMix(HashMix(hash, (uint64_t)cell.momentum[axis]), fraction.momentum[axis]);
+        }
+
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
+            hash = HashQ64(hash, tree.ledger.amounts[s]);
+
+        hash = HashQ64(hash, tree.ledger.energy);
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            hash = HashQ64(hash, tree.ledger.momentum[axis]);
+
+        return hash;
+    }
+
+    uint64_t HashTicks(GasTree tree, int ticks) {
+        uint64_t hash = 14695981039346656037ull;
+        for (int tick = 0; tick < ticks; ++tick) {
+            StepGasTree(tree);
+            hash = HashTreeState(hash, tree);
+        }
+
+        return hash;
+    }
+
+    // T-0208 の実装(小刻みを分ける前)で測った値(2026-10-11)
+    constexpr uint64_t T0208_CLOSED_BOX_HASH = 0x968f764677303a49ull;
+
+    void TestNoSubcycleMatchesT0208() {
+        const uint64_t closedBox = HashTicks(MakeDisturbedTwoLevelBox(), 12);
+        std::printf("no subcycling: closed two-level box hash chain (12 ticks) = 0x%016llx (T-0208: 0x%016llx)\n",
+                    (unsigned long long)closedBox, (unsigned long long)T0208_CLOSED_BOX_HASH);
+        EXPECT(closedBox == T0208_CLOSED_BOX_HASH);
+
+        // 基準がいちばん細かいレベル以上なら σ = 0(分けない)
+        const GasTreeOptions aboveFinest = {.subcycleBaseLevel = 1, .maxSubcycleGap = 3};
+        EXPECT(HashTicks(MakeDisturbedTwoLevelBox(TwoLevelConfig(), aboveFinest), 12) == T0208_CLOSED_BOX_HASH);
     }
 
 }  // namespace
@@ -377,6 +482,7 @@ int main() {
     TestStaticAtmosphereAcrossLevels();
     TestClosedBoxConservationAcrossLevels();
     TestPressureWaveCrossesLevels();
+    TestNoSubcycleMatchesT0208();
 
     if (failureCount != 0) {
         std::printf("gas_tree_test: %d failure(s)\n", failureCount);
