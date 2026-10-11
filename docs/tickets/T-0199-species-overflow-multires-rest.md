@@ -28,6 +28,8 @@ T-0187 で CPU の多重解像度の世界は `EnableWideCells` で「インラ�
   MrFoldStats の集計を集計の形のテンプレート(MrWideFoldStats は tooManySpecies が起きない。MrFoldStatsValueOf)にし、9 種以上のほぼ同じ頁も畳む。溢れのある端数の枠も帳簿へ返す。
   静かな葉の許容差は MrCoarsenGroupWithinOf(9 種目からの量も比べる)。GPU のシェーダーはインラインの包みで同じ結果。試験 tests/multires_wide_test.cpp(6 場面)。
   テスト(release): multires.*・reaction・reaction_wait・reaction_contention・lab_box の 13 本、gpu_multires・_activity・_quiet・_uniform・_near_fold・_conduction(HW)が通過。
+  main(45bf465)へ rebase 後: release の上の CPU 13 本 + multires_wide + gpu_multires・_quiet・_uniform・_near_fold(17 本)、debug(警告なし)の multires・multires_wide・
+  multires_uniform・multires_activity・multires_quiet が通過。WARP・tidy は流していない。
 
 ## 分けたもの
 - T-0275: 覗き窓・実験室が溢れを読む(どちらも GPU の世界を写す・比べる作りなので、GPU の溢れ〔T-0237・T-0212〕の後)
