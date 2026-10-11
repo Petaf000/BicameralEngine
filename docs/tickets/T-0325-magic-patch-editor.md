@@ -35,6 +35,8 @@
   パネルと同じ道(PlaceInLab)でセルロースを使う規則を箱全体で止めた実験は 308800000 µmol のまま。列を 16 個で一杯にした次の 1 つは断られ、
   箱の列は 16 個。GPU と CPU は毎刻み一致、記録から流し直しても同じ。仮の世界には止める・格子の外にはみ出す触媒・期間 0 を投げ、
   刻み 1 に列の 0 番・1 番に入った・断られた、が GPU から戻った。記録を別の起動で再生して同じハッシュ列。
+- 2026-10-12(作業役・wt6・中断からの再開): 97db9b2 に載せた後の 1 回だけ window_patch_play が 0xcfffffff(起動 11 秒・ログ空)で落ちていた。
+  main(1f6530c。GPU の順番待ち入り)に載せ直してビルド(警告 0)・GPU を 1 本ずつにして流し直し、通過。再現せず(6 ランナーが同時に GPU を使っていた時の負荷と見る。仮説)。
 
 ## テストの結果
 - debug・6 ランナーが同じ GPU を使う中: window_patch_record(100〜106 秒)・window_patch_play(97〜120 秒)通過(3 回)。
@@ -42,6 +44,7 @@
   (window_replay_record は 1 回目に負荷で 240 秒の時間切れ、流し直して 94 秒で通過。エディタを使わない起動の道は変えていない)。
 - clang-tidy(job.py tidy): patch_panel の指摘 0(全体 215 件はすべて前からあるもの。frame_loop の Run・Finish の大きさなど)。
 - main(8cbf977)に載せ直し: 変わらず(main が進んでいない)。
+- main(1f6530c)に載せ直し(衝突なし)・debug・GPU は 1 本ずつ: window_place_record / play・window_patch_record(178 秒)/ play(128 秒)・brush_preview・float_check_source_accepts 通過。
 
 ## 引き継ぎメモ
 - 実験室の「断られた」は、置いた時に CPU リファレンスの列の写しへ同じ関数で足して決める(GPU の実験室は断った数を返さない)。
