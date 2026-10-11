@@ -519,6 +519,86 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // --- GPU で粗くする和集合(T-0329。TestCoarsenFullWide の場面をそのまま): 溢れを使う世界で入りきらない豊かな子を GPU で粗くし
+    //     (子の溢れまで読んで親のセル・端数は 16 種。断らない)、伝導ありで刻む。CPU と毎刻みビット一致・保存がビット一致 ---
+    std::expected<RunResult, std::string> RunCoarsenUnionWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                              gpu::DebugRing& ring,
+                                                              const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        uint64_t frequency = 0;
+        if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
+            return std::unexpected(gpu ? std::string("タイムスタンプの周波数を読めない") : gpu.error());
+
+        gpu->SetStageTimestamps(true);  // 刻み 0(粗くする要求)の段ごとの時間を出す
+        const sim::ConservedTotals initial = sim::ComputeConservedTotals(cpu, table, 1);
+        sim::MultiresNest read;
+        bool conserved = true;
+        std::string stages;
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
+            const std::vector<MrRequest> requests = test::CoarsenFullRequestsAt(tick);
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (!gpu->RecordRequests(list, requests))
+                    return false;
+
+                gpu->RecordProcessRequests(list, ring.GpuAddress());
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::SubmitRequests(cpu, requests);
+            sim::ProcessRequests(cpu);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(std::format("GPU で粗くする: {}", compared.error()));
+
+            // 段の終わりのタイムスタンプ: 解決・確定・割り当て・塊・(Work Graph + 解放)・索引 × 2
+            const std::vector<uint64_t> stamps = gpu->ReadTimestamps(gpu->StageTimestampCount());
+            for (uint32_t i = 1; tick == 0 && i < stamps.size(); ++i)
+                stages += std::format("{}{:.3f}", i == 1 ? "" : "/", ToMilliseconds(stamps, i - 1, i, frequency));
+
+            conserved = conserved && sim::ComputeConservedTotals(cpu, table, 1) == initial;
+        }
+
+        const uint32_t coarsenedSpecies = MostLeafSpecies(cpu);
+        const uint32_t coarsenedFraction = MostFractionSpecies(cpu);
+        if (cpu.counters[MR_COUNTER_COARSEN_FULL] != 0 || coarsenedSpecies != 2 * RX_MAX_CELL_SPECIES ||
+            coarsenedFraction <= RX_MAX_CELL_SPECIES)
+            return std::unexpected("GPU で粗くする: 豊かな子を 16 種の親へ粗くしていない(場面が試していない)");
+
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(true);
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                gpu->RecordStep(list, ring.GpuAddress(), test::LIMITS_STEP_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::StepNest(cpu, table, test::LIMITS_STEP_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(std::format("GPU で粗くした後: {}", compared.error()));
+
+            conserved = conserved && sim::ComputeConservedTotals(cpu, table, 1) == initial;
+        }
+
+        if (!conserved || cpu.counters[MR_COUNTER_OVERFLOW] != 0 || cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0)
+            return std::unexpected("GPU で粗くする: 保存が崩れた・成分を捨てた・待たせた");
+
+        Log(Channel::Gpu, Level::Info,
+            "GPU で粗くする和集合: 親のセルの最大の成分 {}・端数 {}・刻んだ後 {}(CPU と GPU で毎刻み同じ)。"
+            "刻み 0 の段 {} ms(確定/割り当て/塊/Work Graph + 解放/索引/索引)",
+            coarsenedSpecies, coarsenedFraction, MostLeafSpecies(cpu), stages);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // 32 種のセルの溢れの塊の置き場(T-0248): 全部の頁の 2 面が 32 種のセルで埋まっても足りる数(既定の数は 1 頁の 2 面分なので、
     // 2 つの根が両方 32 種になる刻みで尽きて待たせる)
     // species = 表の物質の数(1 セルの最大)
@@ -987,6 +1067,8 @@ namespace {
                                       [&] { return RunRefineWide(device, queue, ring, *limitsTable); });
         const auto coarsenWide = Timed("溢れの端数",
                                        [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
+        const auto coarsenUnion = Timed("GPU で粗くする和集合",
+                                        [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
         if (!exhausted) {
@@ -995,7 +1077,7 @@ namespace {
         }
 
         for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
-                                   &wideManyConduct, &refineWide, &coarsenWide}) {
+                                   &wideManyConduct, &refineWide, &coarsenWide, &coarsenUnion}) {
             if (*result)
                 continue;
 
@@ -1072,8 +1154,31 @@ namespace {
         return 0;
     }
 
+    // 粗くする溢れの場面だけ(--part coarsen。T-0329 の切り分け用。溢れの場面〔wide〕にも入っている)
+    int RunCoarsenScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        if (!limitsTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
+            return 1;
+        }
+
+        const auto coarsenUnion = Timed("GPU で粗くする和集合",
+                                        [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
+        const auto coarsenWide = Timed("溢れの端数",
+                                       [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
+        for (const auto* result : {&coarsenUnion, &coarsenWide}) {
+            if (*result)
+                continue;
+
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
+            return 1;
+        }
+
+        return 0;
+    }
+
     // どの場面を流すか(--part。ctest は debug の 1200 秒の上限に収まるよう 2 本に分ける。T-0263)
-    enum class Part : uint8_t { All, Chains, Wide };
+    enum class Part : uint8_t { All, Chains, Wide, Coarsen };
 
     std::optional<Part> ParsePart(std::string_view text) {
         if (text == "all")
@@ -1082,6 +1187,8 @@ namespace {
             return Part::Chains;
         if (text == "wide")
             return Part::Wide;
+        if (text == "coarsen")
+            return Part::Coarsen;
 
         return std::nullopt;
     }
@@ -1210,7 +1317,7 @@ namespace {
         if (!options || !part) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--part "
-                "all|chains|wide] [--diagnose-wide <刻み/リスト> [--diagnose-compare] [--diagnose-conduct] "
+                "all|chains|wide|coarsen] [--diagnose-wide <刻み/リスト> [--diagnose-compare] [--diagnose-conduct] "
                 "[--diagnose-limits]] [--repeat-wide <場面,...> <回数> [--repeat-fresh-queue] [--repeat-fresh-ring]] "
                 "[--wide-stamps]");
             return 2;
@@ -1251,10 +1358,15 @@ namespace {
             return diagnosed ? 0 : 1;
         }
 
-        if (*part != Part::Wide && RunChainScenes(device->Get(), *queue, *ring, *table) != 0)
+        const bool chains = *part == Part::All || *part == Part::Chains;
+        const bool wide = *part == Part::All || *part == Part::Wide;
+        if (chains && RunChainScenes(device->Get(), *queue, *ring, *table) != 0)
             return 1;
 
-        if (*part != Part::Chains && RunWideScenes(device->Get(), *queue, *ring) != 0)
+        if (wide && RunWideScenes(device->Get(), *queue, *ring) != 0)
+            return 1;
+
+        if (*part == Part::Coarsen && RunCoarsenScenes(device->Get(), *queue, *ring) != 0)
             return 1;
 
         if (!test::PassesValidation(*device, "gpu_multires_test"))

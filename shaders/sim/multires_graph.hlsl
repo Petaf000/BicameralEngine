@@ -236,6 +236,404 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     PokeBlock(childSlot);
 }
 
+#ifdef MR_WIDE_CELLS
+// --- 溢れを使う変種の粗くする和集合(T-0329。CPU は multires_tree.cpp の ApplyCoarsenOf<MrWideCoarsened>)---
+// 子の溢れは置き場から直接引く(上限の無い形のセルを 8 個レジスタに持つと 1 スレッドが数 KiB になり HW で止まる疑い。ADR-0052 追記 5)。
+// 子の形(インライン + 溢れの範囲)と結果の形(インライン + 溢れを書く先)ごとの道具をここに置き、核の MrCoarsenCellOf
+// (multires.hlsli)をそのまま使う(同じ順・同じ和なので、CPU の上限の無い形とビット単位で同じ)。
+// 1 スレッド = 親の八分の一のセル。① 数える(帳簿へ足す)→ ② 親の頁・端数の枠の新しい面の並び(スレッド 0 のプレフィックス和)
+// → ③ もう一度和集合を取って溢れを新しい面へ書く → 面を入れ替える。八分の一の溢れが無ければ面はそのまま(覆った八分の一は溢れが無い)
+
+static const uint32_t COARSEN_COUNT = 0;  // 数えて、落ちた分を帳簿へ
+static const uint32_t COARSEN_WRITE = 1;  // 溢れを書く
+static const uint32_t COARSEN_STARTS = MR_BLOCK_CELLS + 1;
+static const uint32_t COARSEN_PAGE = 0;      // 並びの欄: 親の頁
+static const uint32_t COARSEN_FRACTION = 1;  // 並びの欄: 親の端数の枠
+
+groupshared uint32_t gs_coarsenStarts[2 * COARSEN_STARTS];  // [頁・端数の枠][セル] 溢れの数 → 新しい面の始まり
+groupshared uint32_t gs_coarsenOctant[2];                   // 八分の一の溢れの合計
+
+// 子のセル 1 つ・端数 1 つ(インラインは読む位置だけ持ち、使う時にバッファから読む。今の面の溢れの範囲)。
+// インラインのセルを持つと 1 スレッドが KiB 単位になり、HW の Work Graph が止まった(T-0329)
+struct GpuWideChildCell {
+    int64_t energy;
+    uint32_t address;  // g_cells
+    uint32_t count;    // インラインの成分の数
+    uint32_t area;
+    uint32_t side;
+    uint2 tail;
+};
+
+struct GpuWideChildFraction {
+    uint64_t energy;
+    uint32_t address;  // g_fractions(枠が無ければ count = 0)
+    uint32_t count;
+    uint32_t area;
+    uint32_t side;
+    uint2 tail;
+};
+
+struct GpuWideChildren {
+    GpuWideChildCell cells[MR_CHILDREN_PER_CELL];
+    GpuWideChildFraction fractions[MR_CHILDREN_PER_CELL];
+};
+
+// 粗くした結果(インライン 8 と、溢れの数・書く先。落ちた分は数える時に帳簿へ直に足すので一覧を持たない)
+struct GpuWideCoarsened {
+    RxCell cell;
+    MrFraction fraction;
+    uint32_t lostCount;
+    uint32_t overflowCount;
+    uint32_t energyLostBits;
+
+    // --- 溢れ ---
+    uint32_t mode;
+    int32_t ledgerLevel;
+    uint32_t cellTotal;  // 成分の数(インライン + 溢れ)
+    uint32_t fractionTotal;
+    uint32_t pageArea;  // 書く先(書かないなら MR_NO_PAGE)・面・始まり
+    uint32_t pageSide;
+    uint32_t pageFirst;
+    uint32_t fractionArea;
+    uint32_t fractionSide;
+    uint32_t fractionFirst;
+};
+
+// --- 溢れの成分を読む・書く ---
+
+uint32_t TailSpecies(uint32_t area, uint32_t side, uint32_t entry) {
+    return g_treeWords[WideWord(area, side, MrWideEntryWord(entry))];
+}
+
+uint64_t TailAmount(uint32_t area, uint32_t side, uint32_t entry) {
+    const uint32_t word = MrWideEntryWord(entry);
+
+    return FX_U64(g_treeWords[WideWord(area, side, word + 2)], g_treeWords[WideWord(area, side, word + 1)]);
+}
+
+void WriteTailEntry(uint32_t area, uint32_t side, uint32_t entry, uint32_t species, uint64_t amount) {
+    const uint32_t word = MrWideEntryWord(entry);
+    g_treeWords[WideWord(area, side, word)] = species;
+    g_treeWords[WideWord(area, side, word + 1)] = (uint32_t)amount;
+    g_treeWords[WideWord(area, side, word + 2)] = (uint32_t)(amount >> 32);
+}
+
+// インラインの成分 i(fraction なら g_fractions、でなければ g_cells の address)
+uint32_t InlineSpecies(bool fraction, uint32_t address, uint32_t i) {
+    return fraction ? g_fractions[address].species[i] : g_cells[address].species[i];
+}
+
+uint64_t InlineAmount(bool fraction, uint32_t address, uint32_t i) {
+    return fraction ? g_fractions[address].amounts[i] : g_cells[address].amounts[i];
+}
+
+// インライン count 個と溢れの範囲 tail で、after より大きい最小の物質 ID(並びの順は仮定しない。MrNextSpecies と同じ)
+uint32_t NextPartSpecies(bool fraction, uint32_t address, uint32_t count, uint32_t area, uint32_t side, uint2 tail,
+                         uint32_t after) {
+    uint32_t next = MR_NO_SPECIES;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t species = InlineSpecies(fraction, address, i);
+        if (species > after && species < next)
+            next = species;
+    }
+
+    for (uint32_t entry = tail.x; entry < tail.y; ++entry) {
+        const uint32_t species = TailSpecies(area, side, entry);
+        if (species > after && species < next)
+            next = species;
+    }
+
+    return next;
+}
+
+// インライン count 個と溢れの範囲 tail の物質 speciesId の量(無ければ 0)
+uint64_t PartAmountOf(bool fraction, uint32_t address, uint32_t count, uint32_t area, uint32_t side, uint2 tail,
+                      uint32_t speciesId) {
+    uint64_t amount = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (InlineSpecies(fraction, address, i) == speciesId)
+            amount = InlineAmount(fraction, address, i);
+    }
+
+    for (uint32_t entry = tail.x; entry < tail.y; ++entry) {
+        if (TailSpecies(area, side, entry) == speciesId)
+            amount = TailAmount(area, side, entry);
+    }
+
+    return amount;
+}
+
+// --- 核(MrCoarsenCellOf)が呼ぶ形ごとの道具の版(関数テンプレートの明示的な特殊化。DXC は非テンプレートの多重定義と曖昧にする)---
+
+template <>
+uint32_t MrNextSpecies<GpuWideChildCell, GpuWideChildFraction>(GpuWideChildCell cell, GpuWideChildFraction fraction,
+                                                               uint32_t after) {
+    const uint32_t cellNext = NextPartSpecies(false, cell.address, cell.count, cell.area, cell.side, cell.tail, after);
+    const uint32_t fractionNext = NextPartSpecies(true, fraction.address, fraction.count, fraction.area, fraction.side,
+                                                  fraction.tail, after);
+
+    return min(cellNext, fractionNext);
+}
+
+template <>
+uint64_t MrAmountOf<GpuWideChildCell>(GpuWideChildCell cell, uint32_t speciesId) {
+    return PartAmountOf(false, cell.address, cell.count, cell.area, cell.side, cell.tail, speciesId);
+}
+
+template <>
+uint64_t MrFractionOf<GpuWideChildFraction>(GpuWideChildFraction fraction, uint32_t speciesId) {
+    return PartAmountOf(true, fraction.address, fraction.count, fraction.area, fraction.side, fraction.tail, speciesId);
+}
+
+uint32_t MrUnionStepLimit(GpuWideChildren children) {
+    uint32_t total = 1;
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        total += children.cells[j].count + (children.cells[j].tail.y - children.cells[j].tail.x);
+        total += children.fractions[j].count + (children.fractions[j].tail.y - children.fractions[j].tail.x);
+    }
+
+    return total;
+}
+
+// 落ちた下位 3bit は数える時に帳簿へ直に足す(CPU の RecordCoarsened と同じ欄。足し算なので順に依らない)
+template <>
+GpuWideCoarsened MrRecordLost<GpuWideCoarsened>(GpuWideCoarsened result, uint32_t species, uint32_t lostBits) {
+    if (lostBits != 0 && result.mode == COARSEN_COUNT)
+        AddToLedger(result.ledgerLevel, 1 + species, lostBits);
+
+    return result;
+}
+
+// 粗くした物質 1 つ(ID の昇順): インライン 8 の後は溢れ(書く時だけ書く先へ)
+template <>
+GpuWideCoarsened MrAppendCoarsened<GpuWideCoarsened>(GpuWideCoarsened result, uint32_t species, MrWideShifted shifted) {
+    if (shifted.whole != 0) {
+        if (result.cellTotal < RX_MAX_CELL_SPECIES) {
+            result.cell.species[result.cellTotal] = species;
+            result.cell.amounts[result.cellTotal] = shifted.whole;
+            result.cell.speciesCount += 1;
+        } else if (result.mode == COARSEN_WRITE && result.pageArea != MR_NO_PAGE) {
+            WriteTailEntry(result.pageArea, result.pageSide,
+                           result.pageFirst + (result.cellTotal - RX_MAX_CELL_SPECIES), species, shifted.whole);
+        }
+
+        result.cellTotal += 1;
+    }
+
+    if (shifted.fraction != 0) {
+        if (result.fractionTotal < RX_MAX_CELL_SPECIES) {
+            result.fraction.species[result.fractionTotal] = species;
+            result.fraction.amounts[result.fractionTotal] = shifted.fraction;
+            result.fraction.speciesCount += 1;
+        } else if (result.mode == COARSEN_WRITE && result.fractionArea != MR_NO_PAGE) {
+            WriteTailEntry(result.fractionArea, result.fractionSide,
+                           result.fractionFirst + (result.fractionTotal - RX_MAX_CELL_SPECIES), species,
+                           shifted.fraction);
+        }
+
+        result.fractionTotal += 1;
+    }
+
+    return result;
+}
+
+// --- 粗くする 1 セル ---
+
+// 親の八分の一のセル t の子 2³(粗くする子は本物の子を持たないので、一様なら値のセルをそのまま読む)
+GpuWideChildren GatherWideChildren(MrBlock child, uint32_t childSlot, uint32_t t) {
+    const bool paged = !MrIsUniform(child);
+    const bool fractions = child.fraction != MR_NO_FRACTION;
+    const uint32_t fractionArea = fractions ? WideFractionArea(child.fraction) : 0u;
+    const uint32_t pageSide = paged ? WideCurrentSide(child.page) : 0u;
+    const uint32_t fractionSide = fractions ? WideCurrentSide(fractionArea) : 0u;
+    GpuWideChildren children;
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        const uint32_t index = MrChildCell(t, j);
+        const uint32_t cellAddress = paged ? PageCellAddress(child.page, index) : childSlot;
+        children.cells[j].energy = g_cells[cellAddress].energy;
+        children.cells[j].address = cellAddress;
+        children.cells[j].count = g_cells[cellAddress].speciesCount;
+        children.cells[j].area = child.page;
+        children.cells[j].side = pageSide;
+        children.cells[j].tail = paged ? WideRange(child.page, pageSide, index) : uint2(0, 0);
+
+        const uint32_t fractionAddress = fractions ? FractionAddress(child.fraction, index) : 0u;
+        children.fractions[j].energy = fractions ? g_fractions[fractionAddress].energy : 0u;
+        children.fractions[j].address = fractionAddress;
+        children.fractions[j].count = fractions ? g_fractions[fractionAddress].speciesCount : 0u;
+        children.fractions[j].area = fractionArea;
+        children.fractions[j].side = fractionSide;
+        children.fractions[j].tail = fractions ? WideRange(fractionArea, fractionSide, index) : uint2(0, 0);
+    }
+
+    return children;
+}
+
+// 子 2³ を 1 つに(mode。書くなら書く先は「領域・面・始まり」、書かない領域は MR_NO_PAGE)
+GpuWideCoarsened CoarsenWideCell(MrBlock child, uint32_t childSlot, uint32_t t, uint32_t mode, uint3 page,
+                                 uint3 fraction) {
+    GpuWideCoarsened result;
+    result.cell = RxMakeEmptyCell(0);
+    result.fraction = MrMakeEmptyFraction();
+    result.lostCount = 0;
+    result.overflowCount = 0;
+    result.energyLostBits = 0;
+    result.mode = mode;
+    result.ledgerLevel = child.level;
+    result.cellTotal = 0;
+    result.fractionTotal = 0;
+    result.pageArea = page.x;
+    result.pageSide = page.y;
+    result.pageFirst = page.z;
+    result.fractionArea = fraction.x;
+    result.fractionSide = fraction.y;
+    result.fractionFirst = fraction.z;
+
+    return MrCoarsenCellOf(GatherWideChildren(child, childSlot, t), result);
+}
+
+uint32_t TailCount(uint32_t total) {
+    return total > RX_MAX_CELL_SPECIES ? total - RX_MAX_CELL_SPECIES : 0u;
+}
+
+// --- 親の新しい面 ---
+
+// 領域 area の欄 which に、新しい面の溢れの数を置く(八分の一のセルは粗くした数 own、ほかは今の面の溢れ。keepRest でなければ 0)
+void CountCoarsenArea(uint32_t which, uint32_t area, bool keepRest, uint32_t octant, uint32_t t, uint32_t own) {
+    const uint32_t base = which * COARSEN_STARTS;
+    const uint32_t side = keepRest ? WideCurrentSide(area) : 0u;
+    for (uint32_t k = 0; k < MR_BLOCK_CELLS / MR_OCTANT_CELLS; ++k) {
+        const uint32_t index = t + (k * MR_OCTANT_CELLS);
+        if (MrOctantOfCell(index) == octant)
+            continue;
+
+        const uint2 range = keepRest ? WideRange(area, side, index) : uint2(0, 0);
+        gs_coarsenStarts[base + index] = range.y - range.x;
+    }
+
+    gs_coarsenStarts[base + MrOctantCell(octant, t)] = own;
+}
+
+// 欄 which の数を始まりにする(スレッド 0)。八分の一の合計を gs_coarsenOctant に
+void PrefixCoarsenArea(uint32_t which, uint32_t octant) {
+    const uint32_t base = which * COARSEN_STARTS;
+    uint32_t total = 0;
+    uint32_t octantTotal = 0;
+    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+        const uint32_t count = gs_coarsenStarts[base + index];
+        gs_coarsenStarts[base + index] = total;
+        total += count;
+        octantTotal += MrOctantOfCell(index) == octant ? count : 0u;
+    }
+
+    gs_coarsenStarts[base + MR_BLOCK_CELLS] = total;
+    gs_coarsenOctant[which] = octantTotal;
+}
+
+// 欄 which の新しい面へ書けるか(八分の一に溢れがあり、書く面の塊に入る)。入らなければ書く先は MR_NO_PAGE
+uint32_t CoarsenWriteArea(uint32_t which, uint32_t area) {
+    if (area == MR_NO_PAGE || gs_coarsenOctant[which] == 0)
+        return MR_NO_PAGE;
+
+    const uint32_t need = MrWideChunksFor(gs_coarsenStarts[(which * COARSEN_STARTS) + MR_BLOCK_CELLS]);
+
+    return need <= WideChunkCount(area, 1 - WideCurrentSide(area)) ? area : MR_NO_PAGE;
+}
+
+// 新しい面に始まりの表とほかのセルの溢れを写す(全部のスレッド。八分の一のセルは ③ が書く)
+void CopyCoarsenRest(uint32_t which, uint32_t area, bool keepRest, uint32_t octant, uint32_t t) {
+    const uint32_t base = which * COARSEN_STARTS;
+    const uint32_t side = WideCurrentSide(area);
+    for (uint32_t index = t; index <= MR_BLOCK_CELLS; index += MR_OCTANT_CELLS)
+        g_treeWords[WideWord(area, 1 - side, index)] = gs_coarsenStarts[base + index];
+
+    for (uint32_t k = 0; keepRest && k < MR_BLOCK_CELLS / MR_OCTANT_CELLS; ++k) {
+        const uint32_t index = t + (k * MR_OCTANT_CELLS);
+        if (MrOctantOfCell(index) == octant)
+            continue;
+
+        const uint2 range = WideRange(area, side, index);
+        const uint32_t first = gs_coarsenStarts[base + index];
+        for (uint32_t entry = range.x; entry < range.y; ++entry)
+            CopyWideEntry(area, side, entry, area, 1 - side, first + (entry - range.x));
+    }
+}
+
+// 書かなかった領域: 新しく使う領域(広げた頁・取った端数の枠)は今の面を空に、前からの領域はそのまま(覆った八分の一は溢れが無い)。
+// 八分の一に溢れがあったのに入らなければ捨てて MR_COUNTER_OVERFLOW に数える(置き場が尽きた時だけ。CPU と食い違う)
+void KeepCoarsenArea(uint32_t which, uint32_t area, bool keepRest, uint32_t t, uint32_t own) {
+    if (area == MR_NO_PAGE)
+        return;
+
+    if (!keepRest)
+        ClearWideSideWords(area, t, MR_OCTANT_CELLS);
+
+    if (gs_coarsenOctant[which] != 0 && own != 0)
+        InterlockedAdd(g_counters[MR_COUNTER_OVERFLOW], own);
+}
+
+// 書いた領域の面を入れ替える(スレッド 0。③ の後)。頁の書いた面の塊が余れば WideAllocate に返させる(PlanWideSide と同じ要求の語)
+void SwapCoarsenArea(uint32_t which, uint32_t area, bool page) {
+    const uint32_t side = 1 - WideCurrentSide(area);
+    g_treeWords[WideHeaderAt(area, MR_WIDE_HEADER_SIDE)] = side;
+    const uint32_t need = MrWideChunksFor(gs_coarsenStarts[(which * COARSEN_STARTS) + MR_BLOCK_CELLS]);
+    if (page && need < WideChunkCount(area, side))
+        g_treeWords[WideHeaderAt(area, MR_WIDE_HEADER_REQUEST)] = MrWideMakeRequest(side, need, false);
+}
+
+// 粗くした八分の一の溢れを親の頁(pageArea。頁を持たない一様な親は MR_NO_PAGE)と端数の枠へ書く(全部のスレッドが呼ぶ。終わりに同期)。
+// ownPage・ownFraction = ① で数えた八分の一のセル t の溢れの数(セル・端数)
+void WriteCoarsenTails(MrBlock child, uint32_t childSlot, uint32_t ownPage, uint32_t ownFraction, uint32_t pageArea,
+                       bool keepPage, uint32_t fractionArea, bool keepFraction, uint32_t octant, uint32_t t) {
+    if (pageArea != MR_NO_PAGE)
+        CountCoarsenArea(COARSEN_PAGE, pageArea, keepPage, octant, t, ownPage);
+
+    CountCoarsenArea(COARSEN_FRACTION, fractionArea, keepFraction, octant, t, ownFraction);
+    GroupMemoryBarrierWithGroupSync();
+    if (t == 0) {
+        gs_coarsenOctant[COARSEN_PAGE] = 0;
+        if (pageArea != MR_NO_PAGE)
+            PrefixCoarsenArea(COARSEN_PAGE, octant);
+
+        PrefixCoarsenArea(COARSEN_FRACTION, octant);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t pageWrite = CoarsenWriteArea(COARSEN_PAGE, pageArea);
+    const uint32_t fractionWrite = CoarsenWriteArea(COARSEN_FRACTION, fractionArea);
+    if (pageWrite == MR_NO_PAGE)
+        KeepCoarsenArea(COARSEN_PAGE, pageArea, keepPage, t, ownPage);
+    else
+        CopyCoarsenRest(COARSEN_PAGE, pageArea, keepPage, octant, t);
+
+    if (fractionWrite == MR_NO_PAGE)
+        KeepCoarsenArea(COARSEN_FRACTION, fractionArea, keepFraction, t, ownFraction);
+    else
+        CopyCoarsenRest(COARSEN_FRACTION, fractionArea, keepFraction, octant, t);
+
+    // --- ③ もう一度和集合を取って、八分の一のセルの溢れを新しい面へ ---
+    if (pageWrite != MR_NO_PAGE || fractionWrite != MR_NO_PAGE) {
+        const uint32_t index = MrOctantCell(octant, t);
+        const uint3 page = pageWrite == MR_NO_PAGE
+                               ? uint3(MR_NO_PAGE, 0, 0)
+                               : uint3(pageWrite, 1 - WideCurrentSide(pageWrite), gs_coarsenStarts[index]);
+        const uint3 fraction = fractionWrite == MR_NO_PAGE ? uint3(MR_NO_PAGE, 0, 0)
+                                                           : uint3(fractionWrite, 1 - WideCurrentSide(fractionWrite),
+                                                                   gs_coarsenStarts[COARSEN_STARTS + index]);
+        CoarsenWideCell(child, childSlot, t, COARSEN_WRITE, page, fraction);
+    }
+
+    AllMemoryBarrierWithGroupSync();  // 全部のスレッドが書き終えてから面を入れ替える
+    if (t == 0 && pageWrite != MR_NO_PAGE)
+        SwapCoarsenArea(COARSEN_PAGE, pageWrite, true);
+
+    if (t == 0 && fractionWrite != MR_NO_PAGE)
+        SwapCoarsenArea(COARSEN_FRACTION, fractionWrite, false);
+
+    AllMemoryBarrierWithGroupSync();
+}
+#endif
+
 // 許可した粗くする要求の 1 段(1 スレッド = 親の八分の一のセル t。multires_tree.cpp の ApplyCoarsen)
 void CoarsenRequest(uint32_t request, uint32_t t) {
     const MrRequestState state = g_states[request];
@@ -245,7 +643,11 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     const MrBlock parent = g_blocks[parentSlot];
     const uint32_t octant = child.parentOctant;
 
-    // --- 子 2³ を 1 つに ---
+    // --- 子 2³ を 1 つに(溢れを使う変種は子の溢れまで読む。落ちた成分は数える時に帳簿へ。T-0329)---
+#ifdef MR_WIDE_CELLS
+    const GpuWideCoarsened result = CoarsenWideCell(child, childSlot, t, COARSEN_COUNT, uint3(MR_NO_PAGE, 0, 0),
+                                                    uint3(MR_NO_PAGE, 0, 0));
+#else
     MrChildren children;
     for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
         const uint32_t index = MrChildCell(t, j);
@@ -254,6 +656,7 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     }
 
     const MrCoarsened result = MrCoarsenCell(children);
+#endif
     if (result.lostCount != 0)
         InterlockedAdd(g_counters[MR_COUNTER_LOST], result.lostCount);
 
@@ -263,8 +666,10 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     if (result.energyLostBits != 0)
         AddToLedger(child.level, 0, result.energyLostBits);
 
+#ifndef MR_WIDE_CELLS
     for (uint32_t k = 0; k < result.lostSpeciesCount; ++k)
         AddToLedger(child.level, 1 + result.lostSpecies[k], result.lostBits[k]);
+#endif
 
     // --- 親の端数: 枠が無ければ取っておいた枠(八分の一の外を 0 で始める)。残りに 0 でない端数があるか。
     //     一様な親が同じ値に戻らなければ頁に広げる(八分の一の外を一様の値で埋める。T-0102)---
@@ -303,16 +708,17 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     GroupMemoryBarrierWithGroupSync();
 
 #ifdef MR_WIDE_CELLS
-    // --- 溢れ: 返す子の頁と、広げた親の頁(取ったばかり)の今の面を空にする(CPU の ClearPageOverflow)。
-    //     返す子の端数の枠の溢れも空にする(T-0311。CPU の ClearFractionOverflow)。溢れのある子を粗くする和集合は T-0329 ---
+    // --- 溢れ: 粗くした八分の一の溢れを親の頁と端数の枠の新しい面へ(広げた頁・取った端数の枠は残りの溢れが無い。T-0329)。
+    //     その後で、返す子の頁と端数の枠の今の面を空にする(CPU の ClearPageOverflow・ClearFractionOverflow。T-0311)---
+    const bool parentPaged = expandParent || !MrIsUniform(parent);
+    WriteCoarsenTails(child, childSlot, TailCount(result.cellTotal), TailCount(result.fractionTotal),
+                      parentPaged ? parentPage : MR_NO_PAGE, !expandParent, WideFractionArea(parentFraction),
+                      parent.fraction != MR_NO_FRACTION, octant, t);
     if (!MrIsUniform(child))
         ClearWideSideWords(child.page, t, MR_OCTANT_CELLS);
 
     if (child.fraction != MR_NO_FRACTION)
         ClearWideSideWords(WideFractionArea(child.fraction), t, MR_OCTANT_CELLS);
-
-    if (expandParent)
-        ClearWideSideWords(parentPage, t, MR_OCTANT_CELLS);
 #endif
     if (t != 0)
         return;
