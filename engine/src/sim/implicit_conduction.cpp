@@ -106,7 +106,8 @@ namespace bicameral::sim {
             for (uint32_t i = 0; i < cells.size(); ++i) {
                 const ImplicitCell& cell = cells[i];
                 FX_ASSERT(cell.level >= 0 && cell.x >= 0 && cell.y >= 0 && cell.z >= 0 && cell.heatCapacity != 0);
-                const bool added = index.emplace(CellKey{cell.level, cell.x, cell.y, cell.z}, i).second;
+                [[maybe_unused]] const bool added = index.emplace(CellKey{cell.level, cell.x, cell.y, cell.z}, i)
+                                                        .second;
                 FX_ASSERT(added);
             }
 

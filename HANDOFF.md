@@ -1,11 +1,43 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-11 / チケット: 統合(t-0208・t-0287・t-0280・t-0311・t-0272)確かめと記録 完了 → T-0332 完了
+最終更新: 2026-10-11 / チケット: 統合(t-0320・t-0323・t-0314・t-0329・t-0326)確かめと記録 完了 → T-0169 完了
 
 ## 状態(3 行以内)
-- t-0208・t-0287(t-0024 を含む)・t-0280・t-0311・t-0272 を main に合わせ(b55b5f0)、合わせた形を確かめて記録した(50447cd。push 済み)。
-- T-0332 完了: 筆の「面に沿って」(カーソルの光線が最初に当たる物の手前に置く・ドラッグで面に沿って塗る)。
-- 進行中: wt2 T-0320・wt3 T-0323・wt4 T-0326・wt5 T-0329・wt6 T-0314。
+- t-0320・t-0323・t-0314・t-0329・t-0326 を main に合わせ(245146b)、合わせた形を確かめて記録した。
+- T-0169 完了: テストの試験の表は data/packages/combustion_test を読む(C++ の写し engine/src/sim/reaction_test_table を消した)。
+- 進行中: wt2 T-0209・wt3 T-0288・wt4 T-0327・wt5 T-0347/T-0312・wt6 T-0350。
+
+## 本体で入ったもの(2026-10-11。T-0169)
+- **T-0169 テストの試験の表をパッケージへ**(ADR-0033 追記): tests/reaction_test_table.{h,cpp}(ライブラリ bicameral_test_reaction_table)の `sim::MakeCombustionTestTable()` が
+  リポジトリの data/packages/combustion_test を Luau で読んで定義を返す(名前は前と同じ。`MakeSpeciesChangedTestTable` はそれに手を加える)。engine/src/sim/reaction_test_table.* は消した。
+  **並走の作業ツリーのマージで `#include "sim/reaction_test_table.h"` が出たら `#include "reaction_test_table.h"` に直し、tests/CMakeLists.txt の末尾の一覧に exe を足す。**
+  定義の並びは名前の順(C++ の表と違う。ベイクした表はビットで同じ)。並びの番号で定義を触る試験は名前で引く(reaction_test の TestBakeRejectsBrokenRules を直した)。
+  上限・溢れ・物質を足す消すの特別な表は試験の中の C++ のまま。試験の表の値を変えるのは data/packages/combustion_test だけ。
+
+## 統合で入ったもの(2026-10-11 その 5。詳しくは各チケットの引き継ぎメモ)
+- **合わせた形の確かめ(t-0329 × t-0326)**: t-0329 は multires_graph(CoarsenRequest)・multires_tree(TreeWideReserve・溢れの世界の TreeResolve = multires_tree_wide_resolve)・
+  gpu_multires.cpp の 2 行(解決の段のシェーダーの差し替え)だけ、t-0326 は multires_wide_step.hlsli(速い形・大きい形・WideDeferred/WideRetry)と gpu_multires.cpp の
+  RecordStepWait(全部を刻む段・広げて刻む段の後に WideDeferred → WideRetry)だけを触り、同じ関数を触っていない。粗くした親のセルが 32 種を超えれば次の刻みで
+  速い形に入らず WideDeferred に回る(どちらの前提も崩さない)。ADR-0052 は追記 9 = T-0329・追記 10 = T-0326(T-0326 のチケットの参照も 10 に直した)。
+  gpu_multires_test の場面名は T-0326 の「上限まで」を採った。debug / release のビルドと release のテストの束・`--repeat-wide many,many-conduct,limits,limits-conduct 3` が通った。
+- **T-0320(完了)気体の 2^σ の小刻み**: 細かいレベルほど小刻み 2^σ 倍(既定は分けない = T-0208 と同じ値)。違う小刻みの面は細かい側が計算し、粗い側は粗い小刻みの終わりに
+  まとめて受ける・細かい面が粗いセルから何度も引く時は合計が中身を超えないよう抑える(ADR-0117 追記)。境の反射 1.05% → 2.26%(戻すなら T-0338。急がない)。
+  GPU(T-0209)は「いちばん細かい小刻みの列」で組む(セルごとに forced・next・committedOutflow・taken を粗い小刻みの間持つ)。ゲームの小刻みの設定値は T-0210。
+- **T-0323(一部完了)仮の世界に魔法のパッチ**: PROBE_COMMAND_TYPE_PATCH = 5・shaders/common/probe_patch.hlsli。刻みの初めに始まり・終わりの刻みにパッチの範囲のブロックを起こす。
+  ConductBlock は MpPatchTable で表に重ねる・列 u14・規則の数はルート定数 [3]・状態の要約と保存点に列・断った数はハッシュの表の欄 [14] とイベント PROBE_EVENT_PATCH_APPLIED。
+  ctest gpu_probe_patch(_warp)。注意: 連鎖のトレースの CPU の予想はパッチの境で起こしたブロックを知らない(BACKLOG)。エディタからパッチを出す操作は T-0325。多重解像度の世界は T-0341。
+- **T-0314(一部完了)実験室の箱の一部を細かくする**: LAB_COMMAND_TYPE_REFINE(範囲と 1〜2 段)・箱の形に refineBlocks・BLAB 版 6(版 5 は読める)・細かいセルはレベル k のセルの語で指す
+  (`LabSession::Place({.x, .y, .z, .level})`)・FindLabMismatch が子も比べる。ADR-0137。パネル「実験室」の「…・細かくできる〔枠 128〕」の箱で「1 段 / 2 段細かく」。
+  注意: 細かい所の熱は小刻み・陰解法を使わないので本物より遅い(仮 A = QUESTIONS Q40。おすすめ B = T-0351)・粗くする / 畳むは箱では呼ばない・枠を使い切ると黙って細かくならない・
+  計器と断面は根のセルしか読まない(T-0350)。`--auto-lab` の細かくした箱の確認は窓の中で止まるので呼んでいない(T-0350。RecordProcessRequests を窓の debug layer で初めて使う所を疑う)。
+- **T-0329(一部完了)GPU の粗くする和集合が溢れを読む**: 子と端数の溢れを置き場から直接引いて親の新しい面へ書く・溢れの世界の TreeResolve(multires_tree_wide_resolve)は
+  MR_STATUS_SPECIES_FULL で断らない・TreeWideReserve が上限の数(min(64, 和) − 8)で塊を配る。試験 RunCoarsenUnionWide(`--part coarsen`)。要求 1 件 塊の段 0.42 ms・
+  Work Graph + 解放 0.90 ms。粗くするノードに大きい構造体を足さない(HW で DEVICE_HUNG。ADR-0052 追記 9)。
+- **T-0326(完了)全部を刻む段の速い形**: 全部を刻む段・頁に広げて刻む段は 32 種までの速い形・速い形に入らないセルのブロックは WideDeferred へ・64 種の大きい形は
+  WideDeferred と WideRetry だけ(ADR-0052 追記 10)。32 種のセルの場面 553〜569 / 359〜392 ns/セル(T-0272 の 1920 / 836 から戻った)。大きい形のセルが並ぶ場面は T-0327。
+- **危険(更新)**: 溢れを使う世界の GPU の「粗くする」は溢れを読むようになった(T-0329)。**「畳む」はまだ端数の溢れを落とす**(ReturnFractionCell がインラインだけ)・
+  端数の枠の塊は空きに返しても付いたまま → T-0347(wt5)。影・引き戻す・静かな葉は T-0312。
+- 合わせた時の小さな直し: multires_wide_step.hlsli の WriteWideRequest の古いコメントの行と関数の間の空行・implicit_conduction.cpp の release の警告 C4189(`[[maybe_unused]]`)。
 
 ## 本体で入ったもの(2026-10-11。T-0332)
 - **T-0332 面に沿って置く・塗る**(14 §2「実装(T-0332)」・ADR-0089 追記): 筆のパネル「当て方: 断面 / 面に沿って」。面に沿ってなら左ボタン・ドラッグ・カーソルのセルが、
@@ -36,8 +68,7 @@
 - **T-0280(一部完了)**: 置くコマンドの適用を 1 グループ 256 スレッドに(probe_tick.hlsl の PROBE_APPLY_GROUP_SIZE。ADR-0125。1 セル 3〜4.5 µs → 36〜94 ns・64 個で 1323 → 15.4 ms)。
   計測 `job.py run -Preset release -Exe gpu_place_bench`(ctest に無い)・perf.md。面に沿って塗るは T-0332(本体)。
 - **T-0311(一部完了)端数の枠の溢れ**: 端数の枠に頁と同じ形の溢れ(ADR-0052 追記 7)・試験 RunCoarsenFullWide。溢れの領域は端数の枠の見出しの分(枠 × 192 語)だけ増えた。
-  **危険(T-0329 まで)**: GPU の粗くする要求は今もインラインだけ(子の頁・端数の溢れを落とすか、和集合が 8 種を超えると MR_STATUS_SPECIES_FULL で断る)・
-  畳む時の ReturnFractionCell もインラインだけ・端数の枠が持つ塊は空きに返しても付いたまま。T-0312 の「畳む」と重なる所は T-0329(wt5)で、T-0312 は影・静かな葉。
+  (危険は上の「その 5」の節に更新: 粗くするは T-0329 で溢れを読む。畳む時の端数の溢れ・端数の枠の塊は T-0347)
 - **T-0272(一部完了)**: 伝導の段の溢れの変種は上限の無い形のセルを持たない(WideTailThermal・MrThermalSums・WideDeferredPass。段の順 … → ConductApply → WideDeferred → WideAllocate → WideRetry)。
   **上限を 64 種に(仮・ユーザー未確認 = QUESTIONS Q39・D-448 の追記。戻すのは shaders/common/multires_wide.hlsli の 1 行)**。見出し 384 → 768 B/頁。
   計測: 溢れの世界・空気 1.31 / 7.45 ns/セル、32 種のセルの場面 1920 / 836 ns/セル(2.5〜3 倍遅い → T-0326〔wt4〕)、既定の世界は変わらない。上限を表の物質の数まで = T-0327。

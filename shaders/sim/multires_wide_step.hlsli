@@ -311,6 +311,7 @@ void BeginWideCells(uint32_t thread, uint32_t threads) {
         gs_wideBigMarks[word] = 0;
     }
 }
+
 bool IsWideMarked(uint32_t index) {
     return (gs_wideMarks[index / 32] & (1u << (index % 32))) != 0;
 }
@@ -319,8 +320,8 @@ bool IsWideBig(uint32_t index) {
     return (gs_wideBigMarks[index / 32] & (1u << (index % 32))) != 0;
 }
 
-// 書く面の塊が足りない: 要る塊の数・刻み直すセルの印(gs_wideMarks)・刻みの初めの busyTick を見出しに書く(WideAllocate・WideRetryBlock が読む)
-// 印(gs_wideMarks)・刻みの初めの busyTick・要求の語を見出しに書く(RequestWideRetry・RequestWideDeferred)
+// 刻み直すセルの印(gs_wideMarks)・刻みの初めの busyTick・要求の語を見出しに書く(RequestWideRetry・RequestWideDeferred。
+// WideAllocate・WideRetryBlock・WideDeferredBlock が読む)
 void WriteWideRequest(uint32_t page, uint32_t request, uint64_t busyTick, uint32_t thread, uint32_t threads) {
     for (uint32_t word = thread; word < MR_WIDE_MARK_WORDS; word += threads)
         g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_MARKS + word)] = gs_wideMarks[word];
@@ -386,6 +387,7 @@ void SwapWideSide(uint32_t page, uint32_t side, bool fits, uint32_t thread) {
     if (fits && thread == 0)
         g_treeWords[WideHeaderAt(page, MR_WIDE_HEADER_SIDE)] = 1 - side;
 }
+
 // 頁を持つブロックの刻むセルを待ちの丸めで 1 刻み(StepPagedWait の溢れを使う版)。溢れるセルは速い形で刻み、速い形に入らないセルが
 // あれば溢れるセルを全部(① の印)WideDeferredPass に回す(T-0326。並びはブロックの全部の溢れの数で決まるので、一部だけは書けない)
 WaitBlockResult StepPagedWaitWide(uint32_t slot, uint32_t thread) {
@@ -618,6 +620,7 @@ void HoldWideCells(uint32_t thread, inout uint64_t wakeTick, inout MrLimitTally 
         }
     }
 }
+
 // 印のセル 1 つの ①(write = false: 溢れの数を gs_wideOffsets へ)か ③(write = true: 書く)。速い形に入れば速い形で、入らなければ
 // (32 種を超えて読む・生成物で 32 種を超える)大きい形で刻む。① で決めた形は gs_wideBigMarks に残して ③ も同じ形で刻む。③ で変わったら true
 bool StepMarkedWideCell(MrBlock block, uint32_t index, uint32_t side, bool write, inout uint64_t wakeTick,
