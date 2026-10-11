@@ -6,7 +6,7 @@
 // 1 グループ = 1 ブロック(64 スレッド、1 スレッド 8 セル)。セルどうしは独立なので、成分が 8 種に収まるセルはインラインの核(RxCell)で
 // 刻んでその場で書く(上限に当たらない間は上限なしの形とビット単位で同じ。T-0175)。溢れを持つセル・インラインで 9 種目の生成物を
 // 待たせたセルだけ、上限の無い形で刻み直す(全部を刻む段は速い形 RxGpuMidCell〔32 種〕だけ。入らないセルがあるブロックは
-// WideDeferredPass が速い形・大きい形 RxGpuWideCell〔64 種〕で刻む。T-0326):
+// WideDeferredPass が速い形・大きい形 RxGpuWideCell〔96 種〕で刻む。T-0326):
 //   ① 刻んだ後の溢れの数をセルごとに数える(書かない)→ ② セルの番号の順のプレフィックス和(スレッド 0)で並びを決め、
 //   頁の溢れの枠に入るなら ③ もう一度刻んで、インラインを頁へ・溢れをもう片方の面へ書き、面を入れ替える。
 // 書く面の塊が足りなければそのセルは書かずに、頁の見出しに要求(要る塊の数・刻み直すセルの印・刻みの初めの busyTick)を書く。
@@ -20,14 +20,14 @@
 #include "common/multires_wide.hlsli"
 #include "sim/multires_wide_access.hlsli"
 
-// --- 上限の無い形のセル: 速い形(RX_GPU_MID_SPECIES = 32 種)と大きい形(RX_GPU_WIDE_SPECIES = 64 種)。reaction.hlsli の「セルの形ごとの道具」の版 ---
+// --- 上限の無い形のセル: 速い形(RX_GPU_MID_SPECIES = 32 種)と大きい形(RX_GPU_WIDE_SPECIES = 96 種。T-0327)。reaction.hlsli の「セルの形ごとの道具」の版 ---
 // 配列は動的な添字なのでレジスタではなくスクラッチに置かれうる。持つのは 64 スレッドの段(全部を刻む・頁に広げて刻む・WideRetry・WideDeferred)だけ。
 // 512 スレッドの伝導の段に持たせると上限 56 以上で HW の compute キューが止まった(T-0290)ので、T-0272 で伝導の段の熱は溢れから直接足し
 // (WideTailThermal)、反応は WideDeferredPass に回した。
 // 全部を刻む段・頁に広げて刻む段は速い形だけを持ち、速い形に入らないセル(32 種を超えて読む・生成物で 32 種を超える)が
 // 1 つでもあるブロックは溢れるセルを全部 WideDeferredPass に回す(T-0326。大きい形を持つのは WideDeferred・WideRetry の 2 段だけ)。
 // 上限に当たらない間は形の大きさに依らずビット単位で同じ(形の道具が違うのは「成分をもう 1 つ増やせるか」だけ。T-0175 のインラインと同じ)。
-// 上限を表の物質の数まで上げるのは T-0327
+// 上限を無くす(大きいセルを作業場に置く)のは T-0362
 static const uint32_t RX_GPU_MID_SPECIES = 32;
 
 struct RxGpuMidCell {
@@ -527,7 +527,7 @@ void ReleaseWideChunks(uint32_t page, uint32_t stack, inout uint32_t push) {
         return;
 
     for (uint32_t i = want; i < held; ++i) {
-        g_treeWords[stack + push] = g_treeWords[table + 1 + i];
+        g_treeWords[stack + push] = g_treeWords[WideTableEntryWord(table, i)];
         push += 1;
     }
 
@@ -549,7 +549,7 @@ uint32_t GrantWideChunks(uint32_t page, uint32_t stack, uint32_t freeCount, inou
     const bool granted = taken + count <= freeCount;
     if (granted) {
         for (uint32_t j = 0; j < count; ++j)
-            g_treeWords[table + 1 + held + j] = g_treeWords[stack + freeCount - 1 - (taken + j)];
+            g_treeWords[WideTableEntryWord(table, held + j)] = g_treeWords[stack + freeCount - 1 - (taken + j)];
 
         g_treeWords[table] = want;
         g_treeWords[requestWord] = request | MR_WIDE_REQUEST_GRANTED;

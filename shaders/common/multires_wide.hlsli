@@ -11,9 +11,12 @@
 // 溢れの領域の番号(area)は、頁は頁の番号、端数の枠は「頁の数 + 枠の番号」。
 // 書く面の塊が足りなければ、印(要求)を付けて刻みの後の段(WideAllocate)が枠の順に塊を配り、WideRetry が同じ刻みのうちに
 // 溢れるセルだけ刻み直す(T-0236。置き場が尽きた時だけ待たせて MR_COUNTER_LIMIT_PRODUCTS に数える)。
-// 1 セルが GPU で持てる成分は RX_GPU_WIDE_SPECIES まで(T-0248 で 24 → 32、T-0272 で 64。表の物質が 64 以下なら CPU の上限の無い世界と
-// 食い違わない。超える生成物は待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。32 を超えると HW の compute キューで伝導の段が止まったのは、
-// 512 スレッドの段が上限の無い形のセルを持っていたため〔T-0290〕で、T-0272 で伝導の段から無くした。表の物質の数まで上げるのは T-0327)。
+// 1 セルが GPU で持てる成分は RX_GPU_WIDE_SPECIES まで(T-0248 で 24 → 32、T-0272 で 64、T-0327 で 96。表の物質が 96 以下なら
+// CPU の上限の無い世界と食い違わない。超える生成物は待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。32 を超えると HW の compute キューで
+// 伝導の段が止まったのは、512 スレッドの段が上限の無い形のセルを持っていたため〔T-0290〕で、T-0272 で伝導の段から無くした。
+// 上限の大きさの形を持つのは 64 スレッドの WideDeferred・WideRetry だけ〔T-0326〕。128 にすると、その形が 1 度も使われない場面でも HW の
+// compute キューの刻みが終わらなくなった〔T-0327。T-0290 と同じくスレッドごとのスクラッチの大きさが疑わしい〕。見出しの大きさは上限に依らない
+// 〔T-0327。塊の表の続きを最初の塊に置く〕。上限を無くす〔核をセルの形の道具で作業場から読む〕のは T-0362)。
 #ifndef BICAMERAL_MULTIRES_WIDE_HLSLI
 #define BICAMERAL_MULTIRES_WIDE_HLSLI
 
@@ -21,24 +24,28 @@
 
 MR_NAMESPACE_BEGIN
 
-FX_CONST uint32_t RX_GPU_WIDE_SPECIES = 64;  // GPU の刻みが 1 セルで持てる成分の数(インライン 8 + 溢れ 56)
+FX_CONST uint32_t RX_GPU_WIDE_SPECIES = 96;  // GPU の刻みが 1 セルで持てる成分の数(インライン 8 + 溢れ 88。T-0327)
 FX_CONST uint32_t MR_WIDE_ENTRY_WORDS = 3;   // 物質 ID・µmol の下位・上位
 // 面の溢れの成分の最大(全部のセルが RX_GPU_WIDE_SPECIES 種)と、面の論理の語の最大
 FX_CONST uint32_t MR_WIDE_SIDE_ENTRIES = MR_BLOCK_CELLS * (RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES);
 FX_CONST uint32_t MR_WIDE_SIDE_WORDS = (MR_BLOCK_CELLS + 1) + (MR_WIDE_ENTRY_WORDS * MR_WIDE_SIDE_ENTRIES);
 
 // --- 塊(T-0236)---
-FX_CONST uint32_t MR_WIDE_CHUNK_WORDS = 1024;  // 4 KiB。最初の塊に始まりの表(513 語)と 170 成分
-FX_CONST uint32_t MR_WIDE_SIDE_CHUNKS = (MR_WIDE_SIDE_WORDS + MR_WIDE_CHUNK_WORDS - 1) / MR_WIDE_CHUNK_WORDS;
+FX_CONST uint32_t MR_WIDE_CHUNK_WORDS = 1024;  // 4 KiB。最初の塊に塊の表の続き・始まりの表(513 語)と成分
+// 面の塊の表は [塊の数][最初の塊の番号](見出し)+ 2 番目からの塊の番号(最初の塊の先頭 MR_WIDE_TABLE_SPILL 語)。
+// 見出しの大きさが 1 セルの上限(RX_GPU_WIDE_SPECIES)に依らない(T-0327。前は見出しに表を丸ごと持ち、上限 64 で 192 語 = 768 B/頁)。
+// 面の塊の数の最大 c は、表の続き(c − 1 語)と論理の語が c 塊に入る最小: 1024c ≥ (c − 1) + 論理の語 ⇔ c ≥ (論理の語 − 1) ÷ 1023
+FX_CONST uint32_t MR_WIDE_SIDE_CHUNKS = (MR_WIDE_SIDE_WORDS - 1 + (MR_WIDE_CHUNK_WORDS - 2)) / (MR_WIDE_CHUNK_WORDS - 1);
+FX_CONST uint32_t MR_WIDE_TABLE_SPILL = MR_WIDE_SIDE_CHUNKS - 1;  // 最初の塊の先頭に置く塊の表の続き(語)
 
-// --- 頁の見出し: [今の面][要求][要求した刻みの busyTick の下位・上位][刻み直すセルの印 × 16][面 0 の塊の数・表][面 1 の塊の数・表] ---
+// --- 頁の見出し: [今の面][要求][要求した刻みの busyTick の下位・上位][刻み直すセルの印 × 16][面 0 の塊の数・最初の塊][面 1 の塊の数・最初の塊] ---
 FX_CONST uint32_t MR_WIDE_HEADER_SIDE = 0;
 FX_CONST uint32_t MR_WIDE_HEADER_REQUEST = 1;
 FX_CONST uint32_t MR_WIDE_HEADER_BUSY = 2;
 FX_CONST uint32_t MR_WIDE_HEADER_MARKS = 4;
 FX_CONST uint32_t MR_WIDE_MARK_WORDS = MR_BLOCK_CELLS / 32;
 FX_CONST uint32_t MR_WIDE_HEADER_TABLES = MR_WIDE_HEADER_MARKS + MR_WIDE_MARK_WORDS;
-FX_CONST uint32_t MR_WIDE_TABLE_WORDS = 1 + MR_WIDE_SIDE_CHUNKS;
+FX_CONST uint32_t MR_WIDE_TABLE_WORDS = 2;
 FX_CONST uint32_t MR_WIDE_HEADER_WORDS = MR_WIDE_HEADER_TABLES + (2 * MR_WIDE_TABLE_WORDS);
 
 // 要求の語: 0 = 無し。ビット 0〜7 = 書く面に要る塊の数、8 = 書く面、9 = 刻み直す(足りなかった)、10 = 配れた、
@@ -65,7 +72,7 @@ FX_FN uint32_t MrWideChunksFor(uint32_t entries) {
     if (entries == 0)
         return 0;
 
-    const uint32_t words = (MR_BLOCK_CELLS + 1) + (MR_WIDE_ENTRY_WORDS * entries);
+    const uint32_t words = MR_WIDE_TABLE_SPILL + (MR_BLOCK_CELLS + 1) + (MR_WIDE_ENTRY_WORDS * entries);
 
     return (words + MR_WIDE_CHUNK_WORDS - 1) / MR_WIDE_CHUNK_WORDS;
 }
@@ -80,7 +87,7 @@ FX_FN uint32_t MrWideHeaderWord(uint32_t base, uint32_t page) {
     return base + (page * MR_WIDE_HEADER_WORDS);
 }
 
-// 面 side の塊の表の先頭([塊の数][塊の番号 × MR_WIDE_SIDE_CHUNKS])
+// 面 side の塊の表の先頭([塊の数][最初の塊の番号]。2 番目からの番号は最初の塊の先頭。MrWideTableEntryInChunk)
 FX_FN uint32_t MrWideTableWord(uint32_t base, uint32_t page, uint32_t side) {
     return MrWideHeaderWord(base, page) + MR_WIDE_HEADER_TABLES + (side * MR_WIDE_TABLE_WORDS);
 }
@@ -114,6 +121,16 @@ FX_FN uint32_t MrWideTableAt(uint32_t header, uint32_t side) {
 FX_FN uint64_t MrWideAreaWords(uint32_t pages, uint32_t capacity, uint32_t fractions) {
     return ((uint64_t)pages * MR_WIDE_HEADER_WORDS) + MR_WIDE_POOL_CHUNKS +
            ((uint64_t)capacity * (MR_WIDE_CHUNK_WORDS + 1)) + ((uint64_t)fractions * MR_WIDE_HEADER_WORDS);
+}
+
+// 面の論理の語 word の、塊を並べた中の位置(最初の塊の先頭は塊の表の続き。T-0327)
+FX_FN uint32_t MrWideSideOffset(uint32_t word) {
+    return MR_WIDE_TABLE_SPILL + word;
+}
+
+// 面の塊の表の j 番目(j ≥ 1)の、最初の塊の中の位置
+FX_FN uint32_t MrWideTableEntryInChunk(uint32_t j) {
+    return j - 1;
 }
 
 // 面の成分 entry の先頭(面の論理の語)

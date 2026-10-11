@@ -623,12 +623,17 @@ namespace bicameral::sim {
             const uint32_t header = fraction ? MrWideFractionHeaderWord(pool, m_wideChunks, page - pages)
                                              : MrWideHeaderWord(0, page);
             const size_t table = first + MrWideTableAt(header, 0);
+            const size_t firstChunk = first + MrWideChunkWord(pool, used);
             words[table] = chunks;
-            for (uint32_t chunk = 0; chunk < chunks; ++chunk)
-                words[table + 1 + chunk] = used + chunk;
+            if (chunks == 0)
+                continue;
 
-            // --- 面の論理の語を塊へ(塊は続いた番号なので、置き場の中でも続いている)---
-            const size_t side = first + MrWideChunkWord(pool, used);
+            words[table + 1] = used;
+            for (uint32_t chunk = 1; chunk < chunks; ++chunk)
+                words[firstChunk + MrWideTableEntryInChunk(chunk)] = used + chunk;
+
+            // --- 面の論理の語を塊へ(塊は続いた番号なので、置き場の中でも続いている。最初の塊の先頭は塊の表の続き)---
+            const size_t side = firstChunk + MrWideSideOffset(0);
             std::ranges::copy(area.offsets, words.begin() + static_cast<ptrdiff_t>(side));
             for (uint32_t entry = 0; entry < count; ++entry) {
                 const size_t word = side + MrWideEntryWord(entry);
@@ -666,8 +671,13 @@ namespace bicameral::sim {
             const uint32_t current = words[header + MR_WIDE_HEADER_SIDE];
             const uint32_t table = MrWideTableAt(header, current);
             const auto logical = [&](uint32_t word) {
-                const uint32_t chunk = words[table + 1 + (word / MR_WIDE_CHUNK_WORDS)];
-                return words[MrWideChunkWord(pool, chunk) + (word % MR_WIDE_CHUNK_WORDS)];
+                const uint32_t offset = MrWideSideOffset(word);
+                const uint32_t index = offset / MR_WIDE_CHUNK_WORDS;
+                const uint32_t firstChunk = words[table + 1];
+                const uint32_t chunk = index == 0
+                                           ? firstChunk
+                                           : words[MrWideChunkWord(pool, firstChunk) + MrWideTableEntryInChunk(index)];
+                return words[MrWideChunkWord(pool, chunk) + (offset % MR_WIDE_CHUNK_WORDS)];
             };
 
             MultiresOverflowArea& area = fraction ? nest.fractionOverflow[page - pages] : nest.cellOverflow[page];

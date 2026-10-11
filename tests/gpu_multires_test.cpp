@@ -659,9 +659,11 @@ namespace {
         }
 
         const uint32_t mostSpecies = RX_MAX_CELL_SPECIES + mostTail;
-        // many: 前の当座の上限(24 種)と、上限が 32 より上なら 32 種(T-0248 の上限。T-0272)も超える
-        const uint32_t manyBeyond = std::max(test::WIDE_MANY_OLD_LIMIT,
-                                             std::min(WIDE_SCENE_MANY_SPECIES / 2, test::WIDE_MANY_SPECIES));
+        // many: 前の上限を超える(上限 64 なら 32 種 = T-0248 の上限、64 より上なら 64 種 = T-0272 の上限。T-0327)
+        constexpr uint32_t LIMIT_T0272 = 64;
+        const uint32_t manyBeyond = WIDE_SCENE_MANY_SPECIES > LIMIT_T0272
+                                        ? LIMIT_T0272
+                                        : std::max(test::WIDE_MANY_OLD_LIMIT, WIDE_SCENE_MANY_SPECIES / 2);
         const bool large = many ? mostSpecies > manyBeyond : mostEntries > OLD_PAGE_ENTRIES;
         if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || !large)
             return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分・1 セルの最大 {} 種",
@@ -853,13 +855,15 @@ namespace {
 
     std::expected<WideCost, std::string> MeasureWideCost(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                         bool many, bool wide, bool conduction) {
+                                                         uint32_t manySpecies, bool wide, bool conduction) {
+        const bool many = manySpecies != 0;
         sim::MultiresNest nest = test::MakeMeasureNest(table, many);
         if (wide)
             sim::EnableWideCells(nest);
 
-        auto gpu = sim::GpuMultires::Create(device, table, nest.capacity,
-                                            {.wideCells = wide, .wideChunks = many ? WideManyChunks(nest) : 0});
+        auto gpu = sim::GpuMultires::Create(
+            device, table, nest.capacity,
+            {.wideCells = wide, .wideChunks = many ? WideManyChunks(nest, manySpecies) : 0});
         uint64_t frequency = 0;
         if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
             return std::unexpected("計測の準備ができない");
@@ -908,24 +912,32 @@ namespace {
                         .ticksPerList = ticksPerList};
     }
 
+    // 大きい形のセルが一面に並ぶ計測の場面の表の物質の数(T-0327。T-0326 の申し送り): 1 セル 33〜64 種(速い形に入らない)
+    constexpr uint32_t MEASURE_BIG_SPECIES = 64;
+
     // 場面ごとに 2 回測って 2 回目を出す(1 回目はシェーダーの準備・クロックの立ち上がりを含む)
     int RunMeasureWide(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
         const auto airTable = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
-        if (!airTable || !manyTable)
+        const auto bigTable = sim::BakeReactionTable(test::MakeWideManyTable(MEASURE_BIG_SPECIES));
+        if (!airTable || !manyTable || !bigTable)
             return 1;
 
+        // manySpecies = 成分の多いセルの表の物質の数(0 = 空気)
         struct Case {
             const char* name;
-            bool many;
+            uint32_t manySpecies;
             bool wide;
         };
-        for (const Case& item : {Case{"空気・既定の世界", false, false}, Case{"空気・溢れの世界", false, true},
-                                 Case{"上限の種のセル・溢れの世界", true, true}}) {
+        for (const Case& item : {Case{"空気・既定の世界", 0, false}, Case{"空気・溢れの世界", 0, true},
+                                 Case{"上限の種のセル・溢れの世界", test::WIDE_MANY_SPECIES, true},
+                                 Case{"大きい形のセル・溢れの世界", MEASURE_BIG_SPECIES, true}}) {
             for (const bool conduction : {false, true}) {
-                const sim::BakedReactionTable& table = item.many ? *manyTable : *airTable;
-                const auto first = MeasureWideCost(device, queue, ring, table, item.many, item.wide, conduction);
-                const auto cost = MeasureWideCost(device, queue, ring, table, item.many, item.wide, conduction);
+                const sim::BakedReactionTable& table = item.manySpecies == 0                     ? *airTable
+                                                       : item.manySpecies == MEASURE_BIG_SPECIES ? *bigTable
+                                                                                                 : *manyTable;
+                const auto first = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction);
+                const auto cost = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction);
                 if (!first || !cost) {
                     Log(Channel::Gpu, Level::Error, "計測 {}: {}", item.name, cost ? first.error() : cost.error());
                     return 1;
