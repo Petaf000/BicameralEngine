@@ -173,6 +173,7 @@ target_link_libraries(bicameral_editor PUBLIC bicameral_frame bicameral_view bic
 add_executable(bicameral
   src/main.cpp
   src/editor/brush_panel.cpp
+  src/editor/patch_panel.cpp
   src/editor/editor_overlay.cpp
   src/editor/gauge_panel.cpp
   src/editor/graph_panel.cpp

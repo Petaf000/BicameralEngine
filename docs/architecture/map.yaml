@@ -88,6 +88,9 @@ views:
           code: "engine/src/editor/brush_panel.cpp::BrushPanel::Paint", ticket: T-0245,
           doc: docs/decisions/ADR-0089-brush-shapes-and-painting.md,
           note: "筆を持つと左ボタンのセルが置くコマンド(PROBE_COMMAND_TYPE_PLACE。球・直方体・円柱・置き換えか足す)。材料は表の全物質から(material_rows。実験室と共通)。gpu_probe_place・window_place(--auto-place)" }
+      - { id: patchpanel, group: framelib, label: "PatchPanel<br/>魔法のパッチ: 規則を名前で選び効き方・範囲・期間で置く",
+          code: "engine/src/editor/patch_panel.cpp::PatchPanel::Build", ticket: T-0325, doc: docs/design/14-editor-tools.md,
+          note: "効き方は MP_KIND_* の一覧(PatchKinds)。仮の世界は PROBE_COMMAND_TYPE_PATCH・実験室は LabSession::ApplyPatch。一覧(残りの刻み・断られた数)と範囲の線(描画側)。window_patch(--auto-patch)" }
       - { id: brushstroke, group: framelib, label: "BrushStroke<br/>ドラッグの道を置く中心の列に(間隔・1 フレームの上限)",
           code: "engine/src/editor/brush_stroke.cpp::BrushStroke::Paint", ticket: T-0245,
           doc: docs/decisions/ADR-0089-brush-shapes-and-painting.md,
@@ -621,6 +624,9 @@ views:
       - [editoroverlay, tablepanel, "反応表"]
       - [editoroverlay, brushpanel, "筆"]
       - [brushpanel, commandqueue, "置くコマンド"]
+      - [editoroverlay, patchpanel, "魔法のパッチ"]
+      - [patchpanel, commandqueue, "パッチのコマンド"]
+      - [patchpanel, labsession, "ApplyPatch"]
       - [brushpanel, brushstroke, "ドラッグ"]
       - [brushpanel, brushundo, "元に戻す"]
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
