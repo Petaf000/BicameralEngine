@@ -6,6 +6,7 @@
 // 粗くすると成分が入りきらない場面(tests/multires_limits_scene.h。T-0022)も毎刻み比べる(断った数・見出しの quietCheck も)。
 // 引数は gpu_test_options.h。
 #include "sim/gpu_multires.h"
+#include "common/multires_wide.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -308,22 +309,35 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // 32 種のセルの溢れの塊の置き場(T-0248): 全部の頁の 2 面が 32 種のセルで埋まっても足りる数(既定の数は 1 頁の 2 面分なので、
+    // 2 つの根が両方 32 種になる刻みで尽きて待たせる)
+    uint32_t WideManyChunks(const sim::MultiresNest& nest) {
+        constexpr uint32_t MANY_TAIL = test::WIDE_MANY_SPECIES - RX_MAX_CELL_SPECIES;
+
+        return nest.capacity.pages * 2 * MrWideChunksFor(MR_BLOCK_CELLS * MANY_TAIL);
+    }
+
     // 頁の溢れが前の当座の枠(1 面 1024 成分。T-0176〜T-0211)より大きくなる(T-0236): 書く面の塊が足りない刻みで塊を配って同じ刻みのうちに
-    // 刻み直し、待たせずに CPU の上限の無い世界と毎刻みビット一致(全部を刻む段・頁に広げて刻む段・伝導の足す段の刻み直し)
+    // 刻み直し、待たせずに CPU の上限の無い世界と毎刻みビット一致(全部を刻む段・頁に広げて刻む段・伝導の足す段の刻み直し)。
+    // many(T-0248。表は MakeWideManyTable): 1 セルが前の当座の上限(24 種)を超えても待たせずに毎刻みビット一致
     std::expected<RunResult, std::string> RunWideOverflow(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                           gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                          bool conduction) {
+                                                          bool conduction, bool many = false) {
         constexpr uint32_t OLD_PAGE_ENTRIES = 1024;
-        sim::MultiresNest cpu = test::MakeWideOverflowNest(table);
+        sim::MultiresNest cpu = many ? test::MakeWideOverflowNest(table, test::WideManyName)
+                                     : test::MakeWideOverflowNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
+                                            {.wideCells = true, .wideChunks = many ? WideManyChunks(cpu) : 0});
         if (!gpu)
             return std::unexpected(gpu.error());
 
         const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
         sim::MultiresNest read;
         uint32_t mostEntries = 0;
-        for (uint64_t tick = 0; tick < test::WIDE_OVERFLOW_TICKS; ++tick) {
+        uint32_t mostTail = 0;
+        const uint64_t ticks = many ? test::WIDE_MANY_TICKS : test::WIDE_OVERFLOW_TICKS;
+        for (uint64_t tick = 0; tick < ticks; ++tick) {
             const auto record = [&](ID3D12GraphicsCommandList10* list) {
                 if (tick == 0 && !gpu->RecordUpload(list, cpu))
                     return false;
@@ -340,16 +354,22 @@ namespace {
                 return std::unexpected(
                     std::format("大きい溢れ(伝導 {}): {}", conduction ? "あり" : "なし", compared.error()));
 
-            for (const sim::MultiresOverflowArea& area : read.cellOverflow)
+            for (const sim::MultiresOverflowArea& area : read.cellOverflow) {
                 mostEntries = std::max(mostEntries, area.offsets[MR_BLOCK_CELLS]);
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                    mostTail = std::max(mostTail, area.offsets[index + 1] - area.offsets[index]);
+            }
         }
 
-        if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || mostEntries <= OLD_PAGE_ENTRIES)
-            return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分",
-                                               cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], mostEntries));
+        const uint32_t mostSpecies = RX_MAX_CELL_SPECIES + mostTail;
+        const bool large = many ? mostSpecies > test::WIDE_MANY_OLD_LIMIT : mostEntries > OLD_PAGE_ENTRIES;
+        if (cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0 || !large)
+            return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分・1 セルの最大 {} 種",
+                                               cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], mostEntries, mostSpecies));
 
-        Log(Channel::Gpu, Level::Info, "大きい溢れ(伝導 {}): 頁の溢れの最大 {} 成分・待たせた 0(CPU と GPU で同じ)",
-            conduction ? "あり" : "なし", mostEntries);
+        Log(Channel::Gpu, Level::Info,
+            "大きい溢れ(伝導 {}): 頁の溢れの最大 {} 成分・1 セルの最大 {} 種・待たせた 0(CPU と GPU で同じ)",
+            conduction ? "あり" : "なし", mostEntries, mostSpecies);
 
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
@@ -507,10 +527,113 @@ namespace {
                            .emptyMs = ToMilliseconds(stamps, 3, 4, frequency)};
     }
 
+    // --- 溢れの世界の費用(T-0248。--measure-wide。release のハードウェアで): 1 本のリストで暖機の刻みの後に MEASURE_TICKS 刻みを測り、
+    //     頁のセルの数で割る(ns/セル)。VRAM は世界のバッファの和(BufferBytes。Work Graph の作業場を除く)と溢れの領域 ---
+
+    constexpr uint32_t MEASURE_WARMUP_TICKS = 100;
+    constexpr uint32_t MEASURE_TICKS = 50;
+
+    struct WideCost {
+        double nsPerCell = 0;
+        uint64_t bufferBytes = 0;
+        uint64_t overflowBytes = 0;
+        uint32_t productsHeld = 0;
+    };
+
+    std::expected<WideCost, std::string> MeasureWideCost(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                         gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                         bool many, bool wide, bool conduction) {
+        sim::MultiresNest nest = test::MakeMeasureNest(table, many);
+        if (wide)
+            sim::EnableWideCells(nest);
+
+        auto gpu = sim::GpuMultires::Create(device, table, nest.capacity,
+                                            {.wideCells = wide, .wideChunks = many ? WideManyChunks(nest) : 0});
+        ID3D12GraphicsCommandList10* list = gpu ? queue.Begin() : nullptr;
+        if (list == nullptr)
+            return std::unexpected("計測の準備ができない");
+
+        ring.RecordBegin(list);
+        if (!gpu->RecordUpload(list, nest))
+            return std::unexpected("初めの状態を写せない");
+
+        // --- 暖機 → タイムスタンプ 0 → MEASURE_TICKS 刻み → 1 ---
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
+        const D3D12_GPU_VIRTUAL_ADDRESS ringAddress = ring.GpuAddress();
+        for (uint32_t tick = 0; tick < MEASURE_WARMUP_TICKS + MEASURE_TICKS; ++tick) {
+            if (tick == MEASURE_WARMUP_TICKS)
+                gpu->RecordTimestamp(list, 0);
+
+            gpu->RecordStep(list, ringAddress, test::WIDE_OVERFLOW_SEED, tick, options);
+        }
+
+        gpu->RecordTimestamp(list, 1);
+        gpu->RecordReadback(list);
+        ring.RecordReadbackAndReset(list);
+        uint64_t frequency = 0;
+        sim::MultiresNest read;
+        if (!queue.ExecuteAndWait() || ring.Drain().assertCount > 0 ||
+            FAILED(queue.Native()->GetTimestampFrequency(&frequency)) || !gpu->Read(read)) {
+            return std::unexpected("計測の実行に失敗");
+        }
+
+        const double milliseconds = ToMilliseconds(gpu->ReadTimestamps(2), 0, 1, frequency);
+        const double cellTicks = static_cast<double>(MEASURE_TICKS) * test::MEASURE_ROOTS * MR_BLOCK_CELLS;
+
+        return WideCost{.nsPerCell = milliseconds * 1.0e6 / cellTicks,
+                        .bufferBytes = gpu->BufferBytes(),
+                        .overflowBytes = gpu->OverflowBytes(),
+                        .productsHeld = read.counters[MR_COUNTER_LIMIT_PRODUCTS]};
+    }
+
+    // 場面ごとに 2 回測って 2 回目を出す(1 回目はシェーダーの準備・クロックの立ち上がりを含む)
+    int RunMeasureWide(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto airTable = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
+        if (!airTable || !manyTable)
+            return 1;
+
+        struct Case {
+            const char* name;
+            bool many;
+            bool wide;
+        };
+        for (const Case& item : {Case{"空気・既定の世界", false, false}, Case{"空気・溢れの世界", false, true},
+                                 Case{"32 種のセル・溢れの世界", true, true}}) {
+            for (const bool conduction : {false, true}) {
+                const sim::BakedReactionTable& table = item.many ? *manyTable : *airTable;
+                const auto first = MeasureWideCost(device, queue, ring, table, item.many, item.wide, conduction);
+                const auto cost = MeasureWideCost(device, queue, ring, table, item.many, item.wide, conduction);
+                if (!first || !cost) {
+                    Log(Channel::Gpu, Level::Error, "計測 {}: {}", item.name, cost ? first.error() : cost.error());
+                    return 1;
+                }
+
+                Log(Channel::Gpu, Level::Info,
+                    "計測 {}(伝導 {}・根 {}・{} 刻み): {:.2f} ns/セル(1 回目 {:.2f})・バッファ {} KiB・溢れ {} "
+                    "KiB・待たせた {}",
+                    item.name, conduction ? "あり" : "なし", test::MEASURE_ROOTS, MEASURE_TICKS, cost->nsPerCell,
+                    first->nsPerCell, cost->bufferBytes / 1024, cost->overflowBytes / 1024, cost->productsHeld);
+            }
+        }
+
+        return 0;
+    }
+
     int Run(std::span<char*> arguments) {
-        const auto options = test::ParseGpuTestOptions(arguments);
+        std::vector<char*> rest;
+        bool measureWide = false;
+        for (char* argument : arguments) {
+            if (std::string_view(argument) == "--measure-wide")
+                measureWide = true;
+            else
+                rest.push_back(argument);
+        }
+
+        const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
-            Log(Channel::Gpu, Level::Error, "使い方: gpu_multires_test [--warp] [--queue direct|compute]");
+            Log(Channel::Gpu, Level::Error,
+                "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide]");
             return 2;
         }
 
@@ -529,6 +652,9 @@ namespace {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(キューかデバッグのリングを作れない)");
             return 1;
         }
+
+        if (measureWide)
+            return RunMeasureWide(device->Get(), *queue, *ring);
 
         using test::MultiresScenario;
         const auto first = RunScenario(device->Get(), *queue, *ring, *table, MultiresScenario::Real);
@@ -558,6 +684,14 @@ namespace {
 
         const auto wideOverflow = RunWideOverflow(device->Get(), *queue, *ring, *wideTable, false);
         const auto wideOverflowConduct = RunWideOverflow(device->Get(), *queue, *ring, *wideTable, true);
+        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
+        if (!manyTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(1 セル 25 種以上の試験の表を作れない)");
+            return 1;
+        }
+
+        const auto wideMany = RunWideOverflow(device->Get(), *queue, *ring, *manyTable, false, true);
+        const auto wideManyConduct = RunWideOverflow(device->Get(), *queue, *ring, *manyTable, true, true);
         if (auto exhausted = RunWideOverflowExhausted(device->Get(), *queue, *ring, *wideTable); !exhausted) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", exhausted.error());
             return 1;
@@ -565,7 +699,7 @@ namespace {
 
         for (const auto* result :
              {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct, &limitsWide,
-              &limitsWideConduct, &wideOverflow, &wideOverflowConduct}) {
+              &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany, &wideManyConduct}) {
             if (*result)
                 continue;
 

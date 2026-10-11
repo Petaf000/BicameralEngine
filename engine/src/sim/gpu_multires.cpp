@@ -489,6 +489,21 @@ namespace bicameral::sim {
         return sizes;
     }
 
+    uint64_t GpuMultires::BufferBytes() const {
+        uint64_t total = 0;
+        for (const uint64_t size : BufferSizes())
+            total += size;
+
+        return total;
+    }
+
+    uint64_t GpuMultires::OverflowBytes() const {
+        if (!m_wideCells)
+            return 0;
+
+        return MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks) * sizeof(uint32_t);
+    }
+
     uint64_t GpuMultires::PageCount() const {
         return uint64_t{m_capacity.observerBlocks} + m_capacity.pages;
     }
@@ -559,6 +574,8 @@ namespace bicameral::sim {
                 return false;
         }
 
+        // 要求の語の塊の数は 8 ビット(MrWideMakeRequest)
+        static_assert(MR_WIDE_SIDE_CHUNKS <= 0xffu);
         constexpr uint32_t MOST_TAIL = RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES;
         uint64_t chunks = 0;
         for (const MultiresOverflowArea& area : nest.cellOverflow) {
