@@ -85,7 +85,7 @@ namespace bicameral::frame {
         // 実験室の計器のグラフが CPU の値と一致・保存点から条件を 1 つ足した 2 つの実験を比べる(--auto-lab-compare。T-0221)
         bool autoLabCompare = false;
         // パッケージ(--packages の写し)の反応表を壊す → 古い表のまま → 直す → 差し替わる → 30 刻み流して終える(--auto-reload。
-        // --editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。frame/auto_reload。T-0195)
+        // --editor なしでもよい〔T-0243〕。--record で記録し、別の起動の --replay でハッシュ列を確かめる。frame/auto_reload。T-0195)
         bool autoReload = false;
         // エディタのホットリロードで物質を足す・消す表も当てる(名前で付け替える。--species-remap。T-0242)。--auto-reload と一緒なら
         // 速度の書き換えの後にオゾンを足す・消す段も確かめる。既定にするのは窓の世界の assert を直してから(T-0254)

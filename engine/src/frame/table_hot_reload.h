@@ -8,6 +8,8 @@
 //   → 記録(--record)はコマンドの列に印が入り、表の中身は再生ファイルに残る(Find で引く。T-0193)。再生(--replay)は印の版の表を、
 //     知っている表(起動時の表・読み直した表・再生ファイルの表〔AddKnown〕)から探して同じ刻みに当てる(持っていなければ止まる)。
 // CPU は表(法則のデータ)をベイクして渡すだけで、世界の状態は GPU が新しい表で作り直す(原則 1・ADR-0047)。
+// ファイルは再生でなければ通常のゲームの起動でも見る(D-438・T-0243)。読み直した表は「改造された世界」の印を付けて当てる
+// (プレイ中に法則が変わった世界。D-437)。印は記録の表にも残る。
 #pragma once
 
 #include <cstdint>
@@ -27,7 +29,7 @@ namespace bicameral::frame {
 
     class TableHotReload {
     public:
-        // watch: ファイルを見るか(エディタ。再生中は見ない)。initial は起動時に読んだ表。
+        // watch: ファイルを見るか(再生でなければ通常の起動でも。再生中は見ない)。initial は起動時に読んだ表。
         // policy: 物質を足す・消す表を当てるか(Remap なら世界・覗き窓・実験室が名前で付け替える。T-0242。既定にするのは T-0254)
         TableHotReload(script::ReactionTableSource source, std::shared_ptr<const script::LoadedReactionTable> initial,
                        bool watch, script::SpeciesChangePolicy policy = script::SpeciesChangePolicy::Reject);
@@ -59,6 +61,9 @@ namespace bicameral::frame {
         [[nodiscard]] const std::string& LastMessage() const { return m_lastMessage; }
         [[nodiscard]] bool LastFailed() const { return m_lastFailed; }
 
+        // 世界が「改造された世界」か(起動時の表か、当てた表に印がある。D-437・D-438)
+        [[nodiscard]] bool WorldModified() const { return m_worldModified; }
+
     private:
         struct Scheduled {
             uint64_t tick = 0;
@@ -81,6 +86,7 @@ namespace bicameral::frame {
         uint32_t m_failedCount = 0;
         std::string m_lastMessage;
         bool m_lastFailed = false;
+        bool m_worldModified = false;
     };
 
 }  // namespace bicameral::frame

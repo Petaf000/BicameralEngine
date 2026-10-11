@@ -41,10 +41,11 @@ namespace bicameral::editor {
         uint64_t version = 0;   // 世界が使っている表の版
         uint32_t swaps = 0;     // 差し替えた回数
         uint32_t failures = 0;  // 読み直せなかった回数
-        bool watching = false;  // ファイルを見ている(--editor。再生中は見ない)
+        bool watching = false;  // ファイルを見ている(再生中は見ない)
         bool waiting = false;   // 読めた表が刻みの境界を待っている(止めている間など)
         bool lastFailed = false;
-        std::string message;  // 最後の読み直しの結果(誤りならファイル:行:列: 何が違うか)
+        bool modifiedWorld = false;  // 「改造された世界」(プレイ中に法則が変わった・印付きの Mod。D-437・D-438)
+        std::string message;         // 最後の読み直しの結果(誤りならファイル:行:列: 何が違うか)
     };
 
     struct EditorStatus {

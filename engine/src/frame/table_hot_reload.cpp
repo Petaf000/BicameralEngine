@@ -20,7 +20,9 @@ namespace bicameral::frame {
     TableHotReload::TableHotReload(script::ReactionTableSource source,
                                    std::shared_ptr<const script::LoadedReactionTable> initial, bool watch,
                                    script::SpeciesChangePolicy policy)
-        : m_initialVersion(initial->tableVersion), m_appliedVersion(initial->tableVersion) {
+        : m_initialVersion(initial->tableVersion),
+          m_appliedVersion(initial->tableVersion),
+          m_worldModified(initial->modifiedWorld) {
         Remember(initial);
         if (watch)
             m_reload.emplace(std::move(source), std::move(initial), policy);
@@ -52,8 +54,12 @@ namespace bicameral::frame {
         if (result.state != script::HotReloadState::Reloaded)
             return;
 
-        Remember(result.table);
-        m_waiting = std::move(result.table);
+        // プレイ中に法則が変わった世界は「改造された世界」(D-437・D-438)。読み直した表に印を付けて当てる(記録の表にも残る)。
+        // 起動時と同じ中身に戻した表は版が同じなので、記録には起動時の表(印なし)が残る(世界の印は WorldModified に残る)
+        auto marked = std::make_shared<script::LoadedReactionTable>(*result.table);
+        marked->modifiedWorld = true;
+        Remember(marked);
+        m_waiting = std::move(marked);
         m_lastFailed = false;
         m_lastMessage = std::format("版 {:016x} を読んだ(物質 {}・規則 {})。次の刻みの境界で当てる{}{}",
                                     m_waiting->tableVersion, m_waiting->table.species.size() - 1,
@@ -114,8 +120,9 @@ namespace bicameral::frame {
             swaps.push_back({.tick = it->tick, .table = &it->table->table});
             m_appliedVersion = it->table->tableVersion;
             ++m_appliedCount;
-            Log(Channel::Sim, Level::Info, "反応表を刻み {} の始めに版 {:016x} へ差し替える", it->tick,
-                m_appliedVersion);
+            m_worldModified |= it->table->modifiedWorld;
+            Log(Channel::Sim, Level::Info, "反応表を刻み {} の始めに版 {:016x} へ差し替える{}", it->tick,
+                m_appliedVersion, it->table->modifiedWorld ? "(改造された世界)" : "");
             m_inFlight.push_back(std::move(it->table));
             it = m_scheduled.erase(it);
         }

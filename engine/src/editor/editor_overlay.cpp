@@ -320,8 +320,11 @@ namespace bicameral::editor {
     void EditorOverlay::BuildReactionTable(const ReactionTableStatus& table) const {
         ImGui::SeparatorText("反応表");
         Line(std::format("版 {:016x}  差し替え {} 回  読めなかった {} 回", table.version, table.swaps, table.failures));
+        if (table.modifiedWorld)
+            Line("改造された世界(プレイ中に法則が変わった・印付きの Mod。実績なし・共有に印)");
+
         if (!table.watching)
-            ImGui::TextDisabled("ファイルを見ていない(再生中か、--editor でない)");
+            ImGui::TextDisabled("ファイルを見ていない(再生中)");
         else if (table.waiting)
             Line("読めた表が刻みの境界を待っている(止めているなら 1 刻み進める)");
         else

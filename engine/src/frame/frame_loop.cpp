@@ -215,7 +215,7 @@ namespace bicameral::frame {
                   m_replay(std::move(parts.replay)),
                   m_tableReload(
                       {.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
-                      options.editor && options.replayPath.empty(),
+                      options.replayPath.empty(),  // 通常の起動でもファイルを見る(D-438・T-0243)
                       options.speciesRemap ? script::SpeciesChangePolicy::Remap : script::SpeciesChangePolicy::Reject),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
@@ -1375,6 +1375,7 @@ namespace bicameral::frame {
                                       .watching = m_tableReload.Watching(),
                                       .waiting = m_tableReload.Waiting(),
                                       .lastFailed = m_tableReload.LastFailed(),
+                                      .modifiedWorld = m_tableReload.WorldModified(),
                                       .message = m_tableReload.LastMessage()}};
         }
 
@@ -1547,11 +1548,11 @@ namespace bicameral::frame {
             return commands;
         }
 
-        // --auto-reload(T-0195): ファイルを見るのは --editor の生の操作だけ。書き換えるのは --packages で渡した写し
+        // --auto-reload(T-0195): ファイルを見るのは生の操作だけ(--editor でなくても。T-0243)。書き換えるのは --packages で渡した写し
         bool FrameLoop::CreateAutoReload() {
-            if (!m_options.editor || !m_options.replayPath.empty() || m_options.packageRoot.empty()) {
+            if (!m_options.replayPath.empty() || m_options.packageRoot.empty()) {
                 Log(Channel::Tool, Level::Error,
-                    "--auto-reload は --editor と --packages <写したフォルダ> と一緒に使う(--replay とは使えない)");
+                    "--auto-reload は --packages <写したフォルダ> と一緒に使う(--replay とは使えない)");
                 return false;
             }
 

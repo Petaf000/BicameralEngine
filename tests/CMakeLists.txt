@@ -202,8 +202,12 @@ bicameral_add_gpu_test_case(gpu_reaction_limits_warp gpu_reaction_test warp --wa
 
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute)
-set_tests_properties(gpu_multires PROPERTIES TIMEOUT 1200)  # debug の GPU-based validation で、HW も待ちの丸めにしてから 600 s を超えた(T-0124。場面ごとに約 80 s × 8)
+# HW は鎖の場面(gpu_multires)と溢れの場面(gpu_multires_wide)の 2 本に分ける: debug の GPU-based validation で 1 本では 1200 s に届いた
+# (T-0124・T-0263)。debug は 2 回目の実行と計測も省く(鎖の場面 約 400 s)。溢れの場面は GBV を切る(debug layer と FX_ASSERT は残る):
+# GBV ありの debug では 1 場面 210〜290 s × 7 で 1200 s に入らない・切ると 7 場面で約 80 s(2026-10-11。release は元から GBV なし)
+bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute --part chains)
+bicameral_add_gpu_test_case(gpu_multires_wide gpu_multires_test gpu --queue compute --part wide --no-gbv)
+set_tests_properties(gpu_multires gpu_multires_wide PROPERTIES TIMEOUT 1200)
 # WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
 bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
 
@@ -417,6 +421,22 @@ set_tests_properties(window_hot_reload_record PROPERTIES LABELS gpu TIMEOUT 600
   FIXTURES_REQUIRED window_hot_reload_packages FIXTURES_SETUP window_hot_reload)
 set_tests_properties(window_hot_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_hot_reload
   PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*${WINDOW_HOT_RELOAD_SWAP}.*${WINDOW_HOT_RELOAD_SWAP}.*${WINDOW_HOT_RELOAD_SWAP}.*再生: OK")
+# 通常のゲームの起動(--editor なし)でもファイルを見る(T-0243・D-438): 写しの表を壊す → 古い表のまま → 速度を直す → 差し替わる。
+# プレイ中に法則が変わった世界は「改造された世界」(D-437)。読み直した表の印は記録の表にも残り、再生の差し替えの行に出る
+set(WINDOW_GAME_RELOAD_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/game_reload_packages)
+set(WINDOW_GAME_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_hot_reload_game.bcreplay)
+add_test(NAME window_hot_reload_game_copy
+         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_GAME_RELOAD_PACKAGES})
+add_test(NAME window_hot_reload_game_record
+         COMMAND bicameral --auto-reload --auto-ignite --packages ${WINDOW_GAME_RELOAD_PACKAGES} --frames 3000
+                 --record ${WINDOW_GAME_RELOAD_FILE})
+add_test(NAME window_hot_reload_game_play
+         COMMAND bicameral --replay ${WINDOW_GAME_RELOAD_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
+set_tests_properties(window_hot_reload_game_copy PROPERTIES FIXTURES_SETUP window_hot_reload_game_packages)
+set_tests_properties(window_hot_reload_game_record PROPERTIES LABELS gpu TIMEOUT 600
+  FIXTURES_REQUIRED window_hot_reload_game_packages FIXTURES_SETUP window_hot_reload_game)
+set_tests_properties(window_hot_reload_game_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_hot_reload_game
+  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ へ差し替える\\(改造された世界\\).*再生: OK")
 # 反応表のパネル(T-0219): 写したパッケージの木の燃焼の速さをパネルの書き戻しで変える → ホットリロードで当たる
 # → 元に戻す(ファイルは元の中身)→ 元の版の表に戻って終える(editor/reaction_table_panel。通らなければ終了コード 1)
 set(WINDOW_TABLE_EDIT_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/table_edit_packages)
