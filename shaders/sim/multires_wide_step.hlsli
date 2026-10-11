@@ -87,6 +87,10 @@ RxGpuMidCell MidShape() {
 }
 
 #ifdef MR_WIDE_BIG_PASS
+#ifndef RX_CELL_ACCESSORS
+#error 作業場の段は核の成分の道具(RX_CELL_ACCESSORS。reaction.hlsli)を使う
+#endif
+
 // --- 作業場の形(T-0362)---
 // 作業場の段(WideBigPass)だけがコンパイルする。g_external0 = 作業場の始まり(u6 の語)、g_external1 = 1 セルの成分の上限(表の物質の数。
 // RX_GPU_WIDE_SPECIES まで)。並びは shaders/common/multires_wide.hlsli の「作業場」。スレッドのレーンは [刻む前 A][書く B][使う量]。
@@ -228,7 +232,7 @@ bool SameGpuWideCell(Cell a, Cell b) {
         return false;
 
     for (uint32_t i = 0; i < a.speciesCount; ++i) {
-        if (RxSpeciesAt(a, i) != RxSpeciesAt(b, i) || RxAmountAt(a, i) != RxAmountAt(b, i))
+        if (RX_SPECIES_AT(a, i) != RX_SPECIES_AT(b, i) || RX_AMOUNT_AT(a, i) != RX_AMOUNT_AT(b, i))
             return false;
     }
 
@@ -250,8 +254,9 @@ template <typename Cell>
 Cell LoadGpuWideCell(Cell shape, RxCell inlineCell, uint32_t page, uint32_t side, uint32_t index) {
     Cell cell = RxEmptyCellLike(shape, inlineCell.energy);
     cell.speciesCount = inlineCell.speciesCount;
-    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
-        cell = RxWithEntry(cell, i, inlineCell.species[i], inlineCell.amounts[i]);
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        RX_SET_ENTRY(cell, i, inlineCell.species[i], inlineCell.amounts[i]);
+    }
 
     if (inlineCell.speciesCount < RX_MAX_CELL_SPECIES)
         return cell;
@@ -260,9 +265,9 @@ Cell LoadGpuWideCell(Cell shape, RxCell inlineCell, uint32_t page, uint32_t side
     FX_ASSERT(range.y - range.x <= RxGpuCapacity(shape) - RX_MAX_CELL_SPECIES);
     for (uint32_t e = range.x; e < range.y; ++e) {
         const uint32_t word = MrWideEntryWord(e);
-        cell = RxWithEntry(
-            cell, cell.speciesCount, g_treeWords[WideWord(page, side, word)],
-            FX_U64(g_treeWords[WideWord(page, side, word + 2)], g_treeWords[WideWord(page, side, word + 1)]));
+        const uint64_t amount = FX_U64(g_treeWords[WideWord(page, side, word + 2)],
+                                       g_treeWords[WideWord(page, side, word + 1)]);
+        RX_SET_ENTRY(cell, cell.speciesCount, g_treeWords[WideWord(page, side, word)], amount);
         cell.speciesCount += 1;
     }
 
@@ -282,16 +287,16 @@ void StoreGpuWideCell(Cell cell, uint32_t address, uint32_t page, uint32_t side,
     narrow.speciesCount = min(cell.speciesCount, RX_MAX_CELL_SPECIES);
     for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
         if (i < narrow.speciesCount) {
-            narrow.species[i] = RxSpeciesAt(cell, i);
-            narrow.amounts[i] = RxAmountAt(cell, i);
+            narrow.species[i] = RX_SPECIES_AT(cell, i);
+            narrow.amounts[i] = RX_AMOUNT_AT(cell, i);
         }
     }
 
     g_cells[address] = narrow;
     for (uint32_t i = RX_MAX_CELL_SPECIES; i < cell.speciesCount; ++i) {
         const uint32_t word = MrWideEntryWord(first + i - RX_MAX_CELL_SPECIES);
-        const uint64_t amount = RxAmountAt(cell, i);
-        g_treeWords[WideWord(page, side, word)] = RxSpeciesAt(cell, i);
+        const uint64_t amount = RX_AMOUNT_AT(cell, i);
+        g_treeWords[WideWord(page, side, word)] = RX_SPECIES_AT(cell, i);
         g_treeWords[WideWord(page, side, word + 1)] = (uint32_t)amount;
         g_treeWords[WideWord(page, side, word + 2)] = (uint32_t)(amount >> 32);
     }

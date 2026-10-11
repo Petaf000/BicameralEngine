@@ -162,24 +162,21 @@ FX_FN RxCell RxEmptyCellLike(RxCell cell, int64_t energy) {
     return RxMakeEmptyCell(energy);
 }
 
-// --- 成分を読む・書く・写す(T-0362。核はセルの成分をこれらだけで触る)---
-// 配列を持つ形(RxCell・GPU の速い形・C++ の RxWideCell)は配列をそのまま読み書きする(結果も費用も前と同じ)。GPU の作業場の形
-// (RxGpuSpaceCell。shaders/sim/multires_wide_step.hlsli)は明示的な特殊化で u6 の作業場を読み書きする(1 スレッドが上限の大きさの
+// --- 成分を読む・書く・写す(T-0362。核はセルの成分をこれらのマクロだけで触る)---
+// 既定は配列をそのまま読み書きする(RxCell・GPU の速い形・C++ の RxWideCell)。マクロにしたのは、値を返す関数にすると結果は同じでも
+// 既定の世界のシェーダーの DXIL が増えたから(reaction_cells 4765 → 5091 行。inout でも 4990 行。runner の dxc で比べた。ADR-0052 追記 14)。
+// RX_CELL_ACCESSORS を定義したシェーダー(作業場の段 multires_step_wide_big だけ)は下の道具の関数を通し、GPU の作業場の形
+// (RxGpuSpaceCell。shaders/sim/multires_wide_step.hlsli)が明示的な特殊化で u6 の作業場を読み書きする(1 スレッドが上限の大きさの
 // 配列を持たない)。書く道具は書いたセルを返す(作業場の形は同じ場所を指したまま = 書いたセルと元のセルは同じ中身になる。元を残す
-// 所は RxWritableCell で先に別の場所へ写す)。C++ の RxWideCell は写しを避けるため reaction_wide_cell.h に参照で書く多重定義がある
-#ifdef __cplusplus
-#define RX_IN(T) const T&
-#else
-#define RX_IN(T) T
-#endif
-
+// 所は RX_MAKE_WRITABLE で先に別の場所へ写す)。RX_SET_ENTRY は既定で 2 文になるので、{} の中だけで使う
+#ifdef RX_CELL_ACCESSORS
 template <typename Cell>
-FX_FN uint32_t RxSpeciesAt(RX_IN(Cell) cell, uint32_t i) {
+FX_FN uint32_t RxSpeciesAt(Cell cell, uint32_t i) {
     return cell.species[i];
 }
 
 template <typename Cell>
-FX_FN uint64_t RxAmountAt(RX_IN(Cell) cell, uint32_t i) {
+FX_FN uint64_t RxAmountAt(Cell cell, uint32_t i) {
     return cell.amounts[i];
 }
 
@@ -200,12 +197,12 @@ FX_FN Cell RxWithEntry(Cell cell, uint32_t i, uint32_t speciesId, uint64_t amoun
 
 // 書き換える前の写し(元のセルを残して書く所の始め。配列の形は値の写しなのでそのまま、作業場の形は別の場所へ写す)
 template <typename Cell>
-FX_FN Cell RxWritableCell(RX_IN(Cell) cell) {
+FX_FN Cell RxWritableCell(Cell cell) {
     return cell;
 }
 
 template <typename Usage>
-FX_FN uint64_t RxUsageAt(RX_IN(Usage) usage, uint32_t i) {
+FX_FN uint64_t RxUsageAt(Usage usage, uint32_t i) {
     return usage.amounts[i];
 }
 
@@ -216,11 +213,32 @@ FX_FN Usage RxWithUsage(Usage usage, uint32_t i, uint64_t amount) {
     return usage;
 }
 
+#define RX_SPECIES_AT(cell, i) RxSpeciesAt(cell, i)
+#define RX_AMOUNT_AT(cell, i) RxAmountAt(cell, i)
+#define RX_USAGE_AT(usage, i) RxUsageAt(usage, i)
+#define RX_ADD_AMOUNT(cell, i, amount) cell = RxWithAmount(cell, i, RxAmountAt(cell, i) + (amount))
+#define RX_SUB_AMOUNT(cell, i, amount) cell = RxWithAmount(cell, i, RxAmountAt(cell, i) - (amount))
+#define RX_SET_ENTRY(cell, i, speciesId, amount) cell = RxWithEntry(cell, i, speciesId, amount)
+#define RX_ADD_USAGE(usage, i, amount) usage = RxWithUsage(usage, i, RxUsageAt(usage, i) + (amount))
+#define RX_MAKE_WRITABLE(cell) cell = RxWritableCell(cell)
+#else
+#define RX_SPECIES_AT(cell, i) cell.species[i]
+#define RX_AMOUNT_AT(cell, i) cell.amounts[i]
+#define RX_USAGE_AT(usage, i) usage.amounts[i]
+#define RX_ADD_AMOUNT(cell, i, amount) cell.amounts[i] += amount
+#define RX_SUB_AMOUNT(cell, i, amount) cell.amounts[i] -= amount
+#define RX_SET_ENTRY(cell, i, speciesId, amount) \
+    cell.species[i] = speciesId;                 \
+    cell.amounts[i] = amount
+#define RX_ADD_USAGE(usage, i, amount) usage.amounts[i] += amount
+#define RX_MAKE_WRITABLE(cell)
+#endif
+
 // 物質 ID の位置(無ければ RX_NO_SLOT)
 template <typename Cell>
 FX_FN uint32_t RxFindSlot(Cell cell, uint32_t speciesId) {
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        if (RxSpeciesAt(cell, i) == speciesId)
+        if (RX_SPECIES_AT(cell, i) == speciesId)
             return i;
     }
 
@@ -253,7 +271,7 @@ template <typename Table, typename Cell>
 FX_FN int64_t RxChemicalEnergy(Table table, Cell cell) {
     int64_t chemical = 0;
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        const int64_t term = RxMulS64Checked((int64_t)RxAmountAt(cell, i), table.Species(RxSpeciesAt(cell, i)).h0);
+        const int64_t term = RxMulS64Checked((int64_t)RX_AMOUNT_AT(cell, i), table.Species(RX_SPECIES_AT(cell, i)).h0);
         FX_ASSERT(!FxAddOverflowsS64(chemical, term));
         chemical += term;
     }
@@ -266,7 +284,7 @@ template <typename Table, typename Cell>
 FX_FN uint64_t RxHeatCapacity(Table table, Cell cell) {
     uint64_t heatCapacity = 0;
     for (uint32_t i = 0; i < cell.speciesCount; ++i)
-        heatCapacity += RxAmountAt(cell, i) * (uint64_t)table.Species(RxSpeciesAt(cell, i)).heatCapacity;
+        heatCapacity += RX_AMOUNT_AT(cell, i) * (uint64_t)table.Species(RX_SPECIES_AT(cell, i)).heatCapacity;
 
     return heatCapacity;
 }
@@ -482,7 +500,7 @@ FX_FN RxRuleRate RxComputeRuleRate(Table table, Cell cell, uint32_t ruleId, RxRu
         if (slot == RX_NO_SLOT)
             return result;
 
-        const uint64_t amount = RxAmountAt(cell, slot);
+        const uint64_t amount = RX_AMOUNT_AT(cell, slot);
         const uint64_t limit = amount / (uint64_t)rule.reactantCoefficients[i];
         ownLimit = limit < ownLimit ? limit : ownLimit;
         if (((rule.firstOrderMask >> i) & 1) != 0 && factorCount < 2) {
@@ -578,7 +596,7 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, Cell cell, uint32_t 
     }
 
     for (uint32_t slot = 0; slot < cell.speciesCount; ++slot) {
-        const RxSpecies species = table.Species(RxSpeciesAt(cell, slot));
+        const RxSpecies species = table.Species(RX_SPECIES_AT(cell, slot));
         for (uint32_t j = 0; j < species.ruleCount; ++j) {
             const uint32_t ruleId = table.RuleIndex(species.ruleBegin + j);
             const RxWaitSample sample = RxDesiredExtentWait(table, cell, ruleId, table.Rule(ruleId), kelvin, waitSeed,
@@ -633,8 +651,8 @@ FX_FN Usage RxSumUsage(Table table, Cell cell, RxCandidates candidates, Usage us
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
             const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
             const uint64_t amount = candidates.extents[c] * (uint64_t)rule.reactantCoefficients[i];
-            FX_ASSERT(RxUsageAt(usage, slot) + amount >= amount);
-            usage = RxWithUsage(usage, slot, RxUsageAt(usage, slot) + amount);
+            FX_ASSERT(RX_USAGE_AT(usage, slot) + amount >= amount);
+            RX_ADD_USAGE(usage, slot, amount);
         }
 
         if (rule.reactionEnthalpy > 0) {
@@ -680,7 +698,7 @@ template <typename Cell, typename Usage>
 FX_FN bool RxOverdraws(RxRule rule, Cell cell, Usage used, uint64_t heatAvailable) {
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
         const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-        if (RxUsageAt(used, slot) > RxAmountAt(cell, slot))
+        if (RX_USAGE_AT(used, slot) > RX_AMOUNT_AT(cell, slot))
             return true;
     }
 
@@ -743,10 +761,10 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
         uint64_t truncated = extent;
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
             const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-            if (RxUsageAt(demand, slot) <= RxAmountAt(cell, slot))
+            if (RX_USAGE_AT(demand, slot) <= RX_AMOUNT_AT(cell, slot))
                 continue;
 
-            const RxShrunk shrunk = RxShrink(extent, RxAmountAt(cell, slot), RxUsageAt(demand, slot), random);
+            const RxShrunk shrunk = RxShrink(extent, RX_AMOUNT_AT(cell, slot), RX_USAGE_AT(demand, slot), random);
             result = shrunk.rounded < result ? shrunk.rounded : result;
             truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
         }
@@ -782,11 +800,11 @@ template <typename Cell>
 FX_FN Cell RxCompactCell(Cell cell) {
     Cell result = RxEmptyCellLike(cell, cell.energy);
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        if (RxAmountAt(cell, i) == 0)
+        if (RX_AMOUNT_AT(cell, i) == 0)
             continue;
 
         result = RxCellWithRoom(result);
-        result = RxWithEntry(result, result.speciesCount, RxSpeciesAt(cell, i), RxAmountAt(cell, i));
+        RX_SET_ENTRY(result, result.speciesCount, RX_SPECIES_AT(cell, i), RX_AMOUNT_AT(cell, i));
         result.speciesCount += 1;
     }
 
@@ -812,12 +830,12 @@ FX_FN RxAddedOf<Cell> RxTryAddSpecies(Cell cell, uint32_t speciesId, uint64_t am
         return added;
 
     uint32_t position = 0;
-    while (position < cell.speciesCount && RxSpeciesAt(cell, position) < speciesId)
+    while (position < cell.speciesCount && RX_SPECIES_AT(cell, position) < speciesId)
         position += 1;
 
-    if (position < cell.speciesCount && RxSpeciesAt(cell, position) == speciesId) {
-        FX_ASSERT(RxAmountAt(cell, position) + amount >= amount);
-        added.cell = RxWithAmount(added.cell, position, RxAmountAt(cell, position) + amount);
+    if (position < cell.speciesCount && RX_SPECIES_AT(cell, position) == speciesId) {
+        FX_ASSERT(RX_AMOUNT_AT(cell, position) + amount >= amount);
+        RX_ADD_AMOUNT(added.cell, position, amount);
         return added;
     }
 
@@ -827,10 +845,11 @@ FX_FN RxAddedOf<Cell> RxTryAddSpecies(Cell cell, uint32_t speciesId, uint64_t am
     }
 
     added.cell = RxCellWithRoom(cell);
-    for (uint32_t i = cell.speciesCount; i > position; --i)
-        added.cell = RxWithEntry(added.cell, i, RxSpeciesAt(cell, i - 1), RxAmountAt(cell, i - 1));
+    for (uint32_t i = cell.speciesCount; i > position; --i) {
+        RX_SET_ENTRY(added.cell, i, RX_SPECIES_AT(cell, i - 1), RX_AMOUNT_AT(cell, i - 1));
+    }
 
-    added.cell = RxWithEntry(added.cell, position, speciesId, amount);
+    RX_SET_ENTRY(added.cell, position, speciesId, amount);
     added.cell.speciesCount += 1;
 
     return added;
@@ -851,14 +870,14 @@ FX_FN Cell RxAddSpecies(Cell cell, uint32_t speciesId, uint64_t amount) {
 template <typename Table, typename Cell>
 FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates resolved) {
     // --- 反応物を引く(差し込みで位置がずれる前に。呼ぶ側の cell は残す)---
-    cell = RxWritableCell(cell);
+    RX_MAKE_WRITABLE(cell);
     for (uint32_t c = 0; c < resolved.count; ++c) {
         const RxRule rule = table.Rule(resolved.rules[c]);
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
             const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
             const uint64_t amount = resolved.extents[c] * (uint64_t)rule.reactantCoefficients[i];
-            FX_ASSERT(amount <= RxAmountAt(cell, slot));
-            cell = RxWithAmount(cell, slot, RxAmountAt(cell, slot) - amount);
+            FX_ASSERT(amount <= RX_AMOUNT_AT(cell, slot));
+            RX_SUB_AMOUNT(cell, slot, amount);
         }
     }
 

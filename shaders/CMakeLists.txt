@@ -137,7 +137,7 @@ bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY StepExpandedWai
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideAllocatePass NAME multires_step_wide_allocate DEFINES MR_WIDE_CELLS=1)  # 溢れの塊を配る(T-0236)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideRetryPass NAME multires_step_wide_retry DEFINES MR_WIDE_CELLS=1)  # 塊が足りなかったブロックを刻み直す(T-0236)
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideDeferredPass NAME multires_step_wide_deferred DEFINES MR_WIDE_CELLS=1)  # 伝導の段が回した溢れるセルを刻む(T-0272)
-bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideBigPass NAME multires_step_wide_big DEFINES MR_WIDE_CELLS=1 MR_WIDE_BIG_PASS=1)  # 速い形に入らないセルを作業場の形で刻む(T-0362)
+bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideBigPass NAME multires_step_wide_big DEFINES MR_WIDE_CELLS=1 MR_WIDE_BIG_PASS=1 RX_CELL_ACCESSORS=1)  # 速い形に入らないセルを作業場の形で刻む(T-0362)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8)  # 多重解像度の細かくする・粗くする・影の引き戻し(T-0017・T-0018)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8 NAME multires_graph_wide DEFINES MR_WIDE_CELLS=1)  # 溢れを使う世界の細かくする(子の頁へ溢れを写す。T-0237)
 bicameral_add_shader(sim/multires_activity_graph.hlsl PROFILE lib_6_8)  # 木の上の活性: 種と面の隣だけ刻む(T-0100)

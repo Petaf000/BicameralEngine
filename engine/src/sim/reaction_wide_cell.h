@@ -56,27 +56,6 @@ namespace bicameral::reaction {
         return {.amounts = std::vector<uint64_t>(cell.speciesCount, 0), .heat = 0};
     }
 
-    // 成分を書く道具(reaction.hlsli の RxWithAmount・RxWithEntry・RxWithUsage)の RxWideCell 版: 配列を写さずにその場で書いて同じものを返す
-    // (核は cell = RxWithAmount(cell, ...) と書くので、自分への代入になる。T-0362)
-    inline RxWideCell& RxWithAmount(RxWideCell& cell, uint32_t i, uint64_t amount) {
-        cell.amounts[i] = amount;
-
-        return cell;
-    }
-
-    inline RxWideCell& RxWithEntry(RxWideCell& cell, uint32_t i, uint32_t speciesId, uint64_t amount) {
-        cell.species[i] = speciesId;
-        cell.amounts[i] = amount;
-
-        return cell;
-    }
-
-    inline RxWideUsage& RxWithUsage(RxWideUsage& usage, uint32_t i, uint64_t amount) {
-        usage.amounts[i] = amount;
-
-        return usage;
-    }
-
     // --- 行き来と比べる ---
 
     inline RxWideCell RxMakeEmptyWideCell(int64_t energy) {
