@@ -10,10 +10,12 @@
 //   gas->RecordUpload(list);                      // 最初だけ(tree.cells・fractions・ledger・tick から続ける)
 //   gas->RecordStep(list, debugRingAddress);      // 1 刻み
 //   gas->RecordReadback(list);  → 投げて待つ → gas->Read(cells, fractions, ledger)
+// 計測(T-0358): EnableTiming の後、RecordTimestamp(list, 0) → 刻み → RecordTimestamp(list, 1) → RecordTimingReadback → 待つ → TimingTicks。
 #pragma once
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,15 @@ namespace bicameral::sim {
 
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
         [[nodiscard]] uint32_t FaceCount() const { return m_faceCount; }
+
+        // 1 刻みの段の数(いちばん細かい小刻み substeps × 2^σmax 回 × 9 段)
+        [[nodiscard]] uint32_t PassesPerTick() const { return (m_substeps << m_maxExponent) * (uint32_t)Pass::Count; }
+
+        // --- 計測(タイムスタンプ 2 つの差。単位はキューの GetTimestampFrequency。gpu_gas.h と同じ形)---
+        [[nodiscard]] bool EnableTiming(ID3D12Device* device);
+        void RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t slot) const;  // slot 0 = 始め、1 = 終わり
+        void RecordTimingReadback(ID3D12GraphicsCommandList10* list) const;            // 2 つを打った同じリストで
+        [[nodiscard]] std::optional<uint64_t> TimingTicks() const;
 
     private:
         // shaders/sim/gas_tree_step.hlsl の入口(呼ぶ順。.cso の名前と同じ順)
@@ -90,6 +101,8 @@ namespace bicameral::sim {
             m_srvs;  // t0〜t6(設定・レベル・層の基準・層の外・面の形・セルの場所・セルの面の並び)
         std::array<ComPtr<ID3D12Resource>, 3> m_uploads;    // 初めのセル・端数・帳簿
         std::array<ComPtr<ID3D12Resource>, 3> m_readbacks;  // セル・端数・帳簿
+        ComPtr<ID3D12QueryHeap> m_timestamps;               // 計測(EnableTiming の後だけ)
+        ComPtr<ID3D12Resource> m_timestampReadback;
     };
 
 }  // namespace bicameral::sim

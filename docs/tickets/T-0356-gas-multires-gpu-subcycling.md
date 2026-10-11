@@ -28,6 +28,7 @@ T-0320 の時間線(いちばん細かい小刻みの列。各 micro ではそ�
 - 初めのビルドで通り、HW・WARP とも 9 場面(T-0209 の 5 + subcycled_closed・subcycled_static・subcycled_open_wind・subcycled_fast)が初めから毎刻みビット一致。
   subcycled_fast(粗いセルの列が 1500 m/s で細かい範囲へ)の 4 刻みで CPU の抑えは 割合 1847 回(粗い風上 203・使える分 < 1 が 52)・物質量 837 回(taken を引いた 72)。
 - 試験の時間(debug、6 つのランナーの並走の負荷の下): gpu_gas_tree(HW。GPU-based validation)228 秒・gpu_gas_tree_warp 47 秒・gas_tree 153 秒。
+  release でも gas_tree・gpu_gas_tree・gpu_gas_tree_warp が通過(9 場面とも一致)。費用は T-0358(負荷ありの値。木の段が超線形に遅いことが分かった → T-0374)。
 - clang-tidy(gpu_gas_tree.cpp・gas_tree.cpp・gpu_gas_tree_test.cpp): 自分の分 0 件(LimitMovedAmounts の大きさの警告は数える所を関数に出して直した。
   fixed.hlsli の designated initializer の警告は前からある)。archmap --check: OK。ADR-0117 追記・07 §2.5・map.yaml。
 

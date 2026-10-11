@@ -6,6 +6,9 @@
 // minmod と切り捨て・全部レベル 0 の木(周期的な箱)。分けた形は閉じた箱・静止大気・開いた境界と風と、粗いセルが細かい範囲へ速く流れ込む箱
 // (粗い側から細かい面が何度も引く時の抑え〔committedOutflow・taken〕を通る。CPU の GasTreeStepStats で通ったことも確かめる)。刻みごとに GPU のセル・端数・帳簿(whole + 2^-64)を読み戻して CPU と比べる。
 // 引数: gpu_test_options.h(--warp・--queue)と --scene <名前>(1 つの場面だけ)・--ticks n(場面の刻みの数を替える)
+//   --profile: CPU とは比べず、大きい木(レベル 0 の n³〔--size n、既定 16〕の真ん中 (n/2)³ をレベル 1 に)で 1 刻みの GPU 時間(タイムスタンプ)を測る
+//              (--ticks 既定 20。--subcycled でレベルごとの小刻み〔レベル 0 は 24・レベル 1 は 48〕、無ければ全部 48。
+//              --uniform で細かくしない〔全部レベル 0 の n³〕。T-0358)
 #include "sim/gpu_gas_tree.h"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -342,7 +345,16 @@ namespace {
     struct TreeTestOptions {
         std::string scene;
         uint64_t ticks = 0;  // 0 = 場面の既定
+        bool profile = false;
+        bool subcycled = false;  // 計測: レベルごとの小刻み
+        bool uniform =
+            false;  // 計測: 細かくしない(全部レベル 0 の木。1 レベルの箱の GPU と同じ形の場面で、木の段の形の費用を見る)
+        uint32_t size = 16;  // 計測: レベル 0 の箱の一辺(4 の倍数)
     };
+
+    // --- 計測(T-0358): CPU と比べず、大きい木で 1 刻みの GPU 時間 ---
+    // 閉じた箱(重さあり)の真ん中をレベル 1 に。同じいちばん細かい細かさの一様な箱は gpu_gas_test --profile --size 2n(小刻みはレベル 0 の 2 倍が要る)
+    int Profile(ID3D12Device5* device, GpuParts& parts, const TreeTestOptions& options);
 
     // 自分の引数を取り除いて返す(残りは gpu_test_options.h へ)
     std::optional<TreeTestOptions> TakeTreeOptions(std::vector<char*>& arguments) {
@@ -355,6 +367,14 @@ namespace {
                 options.scene = arguments[++index];
             else if (argument == "--ticks" && hasValue)
                 options.ticks = std::stoull(arguments[++index]);
+            else if (argument == "--size" && hasValue)
+                options.size = (uint32_t)std::stoul(arguments[++index]);
+            else if (argument == "--profile")
+                options.profile = true;
+            else if (argument == "--subcycled")
+                options.subcycled = true;
+            else if (argument == "--uniform")
+                options.uniform = true;
             else
                 rest.push_back(arguments[index]);
         }
@@ -368,7 +388,8 @@ namespace {
         const auto options = test::ParseGpuTestOptions(std::span(arguments));
         if (!treeOptions || !options) {
             Log(Channel::Sim, Level::Error,
-                "使い方: gpu_gas_tree_test [--warp] [--queue direct|compute] [--scene 名前] [--ticks n]");
+                "使い方: gpu_gas_tree_test [--warp] [--queue direct|compute] [--scene 名前] [--ticks n] "
+                "[--profile [--size n] [--subcycled] [--uniform]]");
             return 2;
         }
 
@@ -386,6 +407,9 @@ namespace {
         }
 
         GpuParts parts{.queue = std::move(*queue), .debugRing = std::move(*debugRing)};
+        if (treeOptions->profile)
+            return Profile(device->Get(), parts, *treeOptions);
+
         uint32_t sceneCount = 0;
         uint32_t failureCount = 0;  // 食い違っても残りの場面は走らせる
         for (Scene& scene : MakeScenes()) {
@@ -416,6 +440,68 @@ namespace {
         Log(Channel::Sim, Level::Info, "gpu_gas_tree_test: OK({} 場面・adapter {})", sceneCount,
             gpu::AdapterKindName(options->adapter));
         return sceneCount > 0 ? 0 : 1;
+    }
+
+    int Profile(ID3D12Device5* device, GpuParts& parts, const TreeTestOptions& options) {
+        const uint32_t size = options.size;
+        GasConfig config = MakeAirConfig(size, size, size);
+        if (options.subcycled)
+            config.substeps = 24;
+
+        const std::array<GasTreeRegion, 1> region = {
+            GasTreeRegion{.level = 1, .origin = {size / 2, size / 2, size / 2}, .size = {size, size, size}}};
+        const std::span<const GasTreeRegion> regions = options.uniform ? std::span<const GasTreeRegion>()
+                                                                       : std::span<const GasTreeRegion>(region);
+        GasTree tree = MakeAirTree(config, regions, options.subcycled ? SUBCYCLED : GasTreeOptions{});
+        for (uint32_t index = 0; index < tree.cells.size(); index += 7)
+            AddSmoke(tree.cells[index]);
+
+        for (uint32_t index = 3; index < tree.cells.size(); index += 11)
+            Heat(config, tree.cells[index], AIR_TEMPERATURE + 30000);
+
+        auto gas = GpuGasTree::Create(device, tree);
+        if (!gas || !gas->EnableTiming(device)) {
+            Log(Channel::Sim, Level::Error, "gpu_gas_tree_test: FAILED(計測の準備に失敗)");
+            return 1;
+        }
+
+        uint64_t frequency = 0;
+        parts.queue.Native()->GetTimestampFrequency(&frequency);
+        const uint64_t ticks = options.ticks != 0 ? options.ticks : 20;
+        for (uint32_t round = 0; round < 3; ++round) {  // 1 回目はパイプラインの初回の分を含むので捨てる
+            ID3D12GraphicsCommandList10* list = parts.queue.Begin();
+            parts.debugRing.RecordBegin(list);
+            if (round == 0)
+                gas->RecordUpload(list);
+
+            gas->RecordTimestamp(list, 0);
+            for (uint64_t tick = 0; tick < ticks; ++tick)
+                gas->RecordStep(list, parts.debugRing.GpuAddress());
+
+            gas->RecordTimestamp(list, 1);
+            gas->RecordReadback(list);
+            gas->RecordTimingReadback(list);
+            parts.debugRing.RecordReadbackAndReset(list);
+            if (!parts.queue.ExecuteAndWait()) {
+                Log(Channel::Sim, Level::Error, "gpu_gas_tree_test: FAILED(GPU での実行に失敗)");
+                return 1;
+            }
+
+            (void)parts.debugRing.Drain();
+            const std::optional<uint64_t> elapsed = gas->TimingTicks();
+            if (!elapsed || frequency == 0)
+                return 1;
+
+            const double milliseconds = (double)*elapsed * 1000.0 / (double)frequency / (double)ticks;
+            Log(Channel::Sim, Level::Info,
+                "gpu_gas_tree_test: 計測 {} 回目 レベル 0 {}³{} = {} セル・面 {}・{}・1 刻みの段 "
+                "{}: 1 刻み {:.3f} ms",
+                round, size, options.uniform ? "(細かくしない)" : " の真ん中をレベル 1 に", tree.cells.size(),
+                gas->FaceCount(), options.subcycled ? "小刻み 24 / 48" : "小刻み 48", gas->PassesPerTick(),
+                milliseconds);
+        }
+
+        return 0;
     }
 
 }  // namespace

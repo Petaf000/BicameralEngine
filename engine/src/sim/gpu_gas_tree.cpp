@@ -378,4 +378,34 @@ namespace bicameral::sim {
         return true;
     }
 
+    // --- 計測(gpu_gas.cpp と同じ形。T-0358)---
+
+    bool GpuGasTree::EnableTiming(ID3D12Device* device) {
+        const D3D12_QUERY_HEAP_DESC queryDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2, .NodeMask = 0};
+        if (FAILED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_timestamps))))
+            return false;
+
+        m_timestampReadback = gpu::CreateBuffer(device, 2 * sizeof(uint64_t), gpu::BufferKind::Readback);
+
+        return m_timestampReadback != nullptr;
+    }
+
+    void GpuGasTree::RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t slot) const {
+        if (m_timestamps)
+            list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot);
+    }
+
+    void GpuGasTree::RecordTimingReadback(ID3D12GraphicsCommandList10* list) const {
+        if (m_timestamps)
+            list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, m_timestampReadback.Get(), 0);
+    }
+
+    std::optional<uint64_t> GpuGasTree::TimingTicks() const {
+        std::array<uint64_t, 2> ticks = {};
+        if (!m_timestamps || !gpu::ReadBuffer(m_timestampReadback.Get(), std::as_writable_bytes(std::span(ticks))))
+            return std::nullopt;
+
+        return ticks[1] - ticks[0];
+    }
+
 }  // namespace bicameral::sim
