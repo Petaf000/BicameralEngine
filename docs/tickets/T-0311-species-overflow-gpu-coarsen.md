@@ -36,6 +36,8 @@
   塊は TreeWideReserve が子の頁に続けて配る。粗くする時に返す子の端数の枠は空に。C++ の像(AppendOverflowImage・ReadOverflow・OverflowFits)も端数の溢れを写す・読む。ADR-0052 追記 7。
   試験: gpu_multires_test の RunCoarsenFullWide(溢れの場面に追加。CPU の溢れの世界で豊かな子を粗くし〔端数 16 種〕、GPU に写して伝導ありで 12 刻み、
   刻み 4 に同じ八分の一を細かくし直す〔子の端数 16 種〕)が CPU と毎刻みビット一致・保存がビット一致。既定の世界のシェーダーは #ifdef の外を変えていない。
+  テスト(main c044ed4 の上。rebase は変化なし): release(警告なし)の gpu_multires_wide(HW 665 s / 344 s)・gpu_multires_warp(69 s / 123 s)・gpu_multires(HW)・
+  multires・multires_wide が通過、debug は警告なしでビルド。tidy: 足した関数は既存の場面と同じ readability-function-size だけ(RunCoarsenFullWide を分けた後は流していない)。
 
 ## 引き継ぎメモ
 - GPU で端数の溢れを書くのは: 写す(RecordUpload)・細かくする(子へ写す・親を覆う)・粗くする時に返す子の枠を空にする、だけ。

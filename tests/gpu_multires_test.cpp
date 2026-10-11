@@ -433,16 +433,34 @@ namespace {
         return most;
     }
 
+    // 溢れを使う CPU の世界で豊かな子を粗くした木(TestCoarsenFullWide の前半)
+    sim::MultiresNest MakeCoarsenedWideNest(const sim::BakedReactionTable& table) {
+        sim::MultiresNest nest = test::MakeCoarsenFullNest(table);
+        sim::EnableWideCells(nest);
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
+            sim::SubmitRequests(nest, test::CoarsenFullRequestsAt(tick));
+            sim::ProcessRequests(nest);
+        }
+
+        return nest;
+    }
+
+    // 刻み終えた CPU の世界が場面を試したか(細かくし直した・保存・捨てた 0・待たせた 0)
+    std::expected<void, std::string> CheckCoarsenFullWide(const sim::MultiresNest& cpu, uint32_t grantedBefore,
+                                                          bool conserved) {
+        if (cpu.counters[MR_COUNTER_GRANTED] != grantedBefore + 1)
+            return std::unexpected("溢れの端数: 細かくし直す要求を適用していない");
+
+        if (!conserved || cpu.counters[MR_COUNTER_OVERFLOW] != 0 || cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0)
+            return std::unexpected("溢れの端数: 保存が崩れた・成分を捨てた・待たせた");
+
+        return {};
+    }
+
     std::expected<RunResult, std::string> RunCoarsenFullWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                              gpu::DebugRing& ring,
                                                              const sim::BakedReactionTable& table) {
-        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
-        sim::EnableWideCells(cpu);
-        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
-            sim::SubmitRequests(cpu, test::CoarsenFullRequestsAt(tick));
-            sim::ProcessRequests(cpu);
-        }
-
+        sim::MultiresNest cpu = MakeCoarsenedWideNest(table);
         const uint32_t coarsenedFraction = MostFractionSpecies(cpu);
         if (cpu.counters[MR_COUNTER_COARSEN_FULL] != 0 || coarsenedFraction <= RX_MAX_CELL_SPECIES)
             return std::unexpected("溢れの端数: 豊かな子を粗くしていない・端数に溢れが無い(場面が試していない)");
@@ -491,11 +509,8 @@ namespace {
             conserved = conserved && sim::ComputeConservedTotals(cpu, table, 1) == initial;
         }
 
-        if (cpu.counters[MR_COUNTER_GRANTED] != grantedBefore + 1)
-            return std::unexpected("溢れの端数: 細かくし直す要求を適用していない");
-
-        if (!conserved || cpu.counters[MR_COUNTER_OVERFLOW] != 0 || cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0)
-            return std::unexpected("溢れの端数: 保存が崩れた・成分を捨てた・待たせた");
+        if (auto checked = CheckCoarsenFullWide(cpu, grantedBefore, conserved); !checked)
+            return std::unexpected(checked.error());
 
         Log(Channel::Gpu, Level::Info,
             "溢れの端数: 粗くした端数の最大の成分 {}・細かくし直した後 {}(CPU と GPU で毎刻み同じ)", coarsenedFraction,
