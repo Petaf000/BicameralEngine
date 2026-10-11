@@ -1094,6 +1094,8 @@ namespace bicameral::sim {
         UavBarrier(list);
         StampStage(list);
 
+        // --- 溢れを使う世界: 速い形に入らないセルのあるブロック〔T-0326〕・塊が足りなかったブロック〔T-0236〕を同じ刻みのうちに刻む ---
+        RecordWideDeferred(list, debugRing);
         RecordWideRetry(list, debugRing);
 
         // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる)---
@@ -1102,6 +1104,7 @@ namespace bicameral::sim {
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
         UavBarrier(list);
         StampStage(list);
+        RecordWideDeferred(list, debugRing);
         RecordWideRetry(list, debugRing);
     }
 
@@ -1123,8 +1126,9 @@ namespace bicameral::sim {
         StampStage(list);
     }
 
-    // 溢れを使う世界の伝導の足す段の後(T-0272): 足す段(512 スレッド)が反応を回した溢れるセルを、1 グループ 64 スレッド = 1 枠の段が
-    // 上限の無い形で刻む(512 スレッドの段に上限の無い形のセルを持たせない。T-0290)。回したセルが無い枠はすぐ抜ける
+    // 溢れを使う世界の刻みの段の後(T-0272・T-0326): 伝導の足す段(512 スレッド)が反応を回した溢れるセルと、全部を刻む段・頁に広げて刻む段が
+    // 速い形(32 種)に入らなかったブロックの溢れるセルを、1 グループ 64 スレッド = 1 枠の段が速い形・大きい形で刻む(512 スレッドの段に
+    // 上限の無い形のセルを持たせない〔T-0290〕・全部を刻む段に大きい形を持たせない〔T-0326〕)。回したセルが無い枠はすぐ抜ける
     void GpuMultires::RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         if (!m_wideCells)
             return;

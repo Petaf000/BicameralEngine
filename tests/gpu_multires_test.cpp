@@ -979,10 +979,10 @@ namespace {
                                         [&] { return RunWideOverflow(device, queue, ring, *wideTable, false); });
         const auto wideOverflowConduct = Timed("大きい溢れ・伝導",
                                                [&] { return RunWideOverflow(device, queue, ring, *wideTable, true); });
-        const auto wideMany = Timed("32 種",
+        const auto wideMany = Timed("上限まで(64 種の表)",
                                     [&] { return RunWideOverflow(device, queue, ring, *manyTable, false, true); });
         const auto wideManyConduct = Timed(
-            "32 種・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
+            "上限まで・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
         const auto refineWide = Timed("溢れの世界で細かくする",
                                       [&] { return RunRefineWide(device, queue, ring, *limitsTable); });
         const auto coarsenWide = Timed("溢れの端数",
@@ -1011,7 +1011,8 @@ namespace {
         }
 
         Log(Channel::Gpu, Level::Info,
-            "溢れの場面: OK(上限・大きい溢れ・32 種・細かくする・溢れの端数で GPU と CPU が毎刻みビット一致)");
+            "溢れの場面: OK(上限・大きい溢れ・上限まで〔速い形と大きい形〕・細かくする・溢れの端数で GPU と CPU "
+            "が毎刻みビット一致)");
 
         return 0;
     }
