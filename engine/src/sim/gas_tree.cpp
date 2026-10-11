@@ -70,6 +70,8 @@ namespace bicameral::sim {
             // --- 粗い小刻み 1 回の間に出した量(細かい面が何度も引くため。T-0320)---
             std::vector<uint64_t> committedOutflow;                    // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
             std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> taken;  // 出した物質量(風上のレベル + 1 の単位)
+
+            GasTreeStepStats* stats = nullptr;  // 抑えを通った回数(試験だけ。T-0356)
         };
 
         // --- レベルごとの小刻み(T-0320)---
@@ -383,6 +385,24 @@ namespace bicameral::sim {
             return gd::MulShiftU64(fx::FxAbsU64(face.flow), inverseMass, 32);
         }
 
+        // 抑えを通った回数(試験だけ。T-0356)
+        void NoteOutflowLimit(TreeWork& work, uint32_t gap, uint64_t available) {
+            if (work.stats == nullptr)
+                return;
+
+            ++work.stats->limitedOutflow;
+            work.stats->limitedSubcycledOutflow += gap != 0 ? 1 : 0;
+            work.stats->limitedAfterCommitted += available != gd::ONE_Q32 ? 1 : 0;
+        }
+
+        void NoteAmountLimit(TreeWork& work, uint64_t taken) {
+            if (work.stats == nullptr)
+                return;
+
+            ++work.stats->limitedAmounts;
+            work.stats->limitedAfterTaken += taken != 0 ? 1 : 0;
+        }
+
         // 出ていく割合の合計が 1 を超えるセルは比例して縮める(割合はどれも同じ中身に対する値なので、レベルをまたぐ面もそのまま足せる)。
         // 小刻みの細かい面(風上の小刻み 1 回の間に 2^g 回引く)は × 2^g で数え、使える分は 1 − 風上の小刻みの初めに同じ小刻みの面が出した分
         // → 風上の小刻み 1 回の合計が 1 以下(T-0320。熱の C/8 ÷ 引く回数と同じ考え。全部同じ小刻みなら T-0208 と同じ値)
@@ -403,6 +423,8 @@ namespace bicameral::sim {
                 const uint64_t available = gd::ONE_Q32 - work.committedOutflow[donor.index];
                 if (outflow[donor.index] <= available)
                     continue;
+
+                NoteOutflowLimit(work, SubcycleGap(tree, face, donor), available);
 
                 face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, available), outflow[donor.index])
                                     .quotient;
@@ -518,6 +540,8 @@ namespace bicameral::sim {
                     const uint64_t content = (cells[donor.index].amounts[s] << 3) - work.taken[donor.index][s];
                     if (total <= content)
                         continue;
+
+                    NoteAmountLimit(work, work.taken[donor.index][s]);
 
                     face.moved[s] = fx::FxDivU128By64(fx::FxMulU64Full(face.moved[s], content), total).quotient;
                 }
@@ -912,7 +936,7 @@ namespace bicameral::sim {
         return derived;
     }
 
-    void StepGasTree(GasTree& tree) {
+    void StepGasTree(GasTree& tree, GasTreeStepStats* stats) {
         const std::vector<TreeFace> layout = EnumerateFaces(tree);
         const size_t count = tree.cells.size();
         TreeWork work;
@@ -921,6 +945,7 @@ namespace bicameral::sim {
         work.next = work.forced;
         work.committedOutflow.assign(count, 0);
         work.taken.assign(count, {});
+        work.stats = stats;
 
         // 1 刻み = いちばん細かい小刻み substeps × 2^σmax 回(どのレベルの小刻みもこの中で始まって終わる)
         const uint64_t micros = (uint64_t)tree.config.substeps << tree.maxSubcycleExponent;

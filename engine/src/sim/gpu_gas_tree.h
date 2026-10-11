@@ -1,6 +1,6 @@
-// gpu_gas_tree.h — 気体の多重解像度の木(sim/gas_tree.h。T-0208)の 1 刻みを GPU の Compute で走らせる(T-0209。07 §2.5・ADR-0117)。
-// この段は全部のレベルが同じ小刻み(σ = 0)・隣のレベルの差 1 まで(2:1)の木だけ(2^σ の小刻みは T-0356、木が変わる時の面の一覧は T-0357)。
-// 小刻みごとに 9 段(shaders/sim/gas_tree_step.hlsl)。CPU リファレンス(StepGasTree)とセル・端数・帳簿が毎刻みビット一致することを
+// gpu_gas_tree.h — 気体の多重解像度の木(sim/gas_tree.h。T-0208)の 1 刻みを GPU の Compute で走らせる(T-0209・T-0356。07 §2.5・ADR-0117)。
+// 隣のレベルの差 1 まで(2:1)の木だけ(木が変わる時の面の一覧と d ≥ 2 は T-0357)。レベルごとの 2^σ の小刻み(T-0320 の時間線)も載る(T-0356)。
+// いちばん細かい小刻みごとに 9 段(shaders/sim/gas_tree_step.hlsl)。CPU リファレンス(StepGasTree)とセル・端数・帳簿が毎刻みビット一致することを
 // tests/gpu_gas_tree_test.cpp が確かめる。
 // CPU が書くのは、木を作った時に一度だけの形(面の一覧・セルの場所・レベルごとの係数と層の基準)と初めの状態の写し、ルート定数(小刻みの通し番号)だけ。
 // 木のセル・端数・帳簿は GPU が持つ(D-107)。
@@ -10,10 +10,12 @@
 //   gas->RecordUpload(list);                      // 最初だけ(tree.cells・fractions・ledger・tick から続ける)
 //   gas->RecordStep(list, debugRingAddress);      // 1 刻み
 //   gas->RecordReadback(list);  → 投げて待つ → gas->Read(cells, fractions, ledger)
+// 計測(T-0358): EnableTiming の後、RecordTimestamp(list, 0) → 刻み → RecordTimestamp(list, 1) → RecordTimingReadback → 待つ → TimingTicks。
 #pragma once
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,7 +31,7 @@ namespace bicameral::sim {
         // 初めの状態(Create に渡したセル・端数・帳簿)を GPU へ写す
         void RecordUpload(ID3D12GraphicsCommandList10* list);
 
-        // 1 刻み(config.substeps 回の小刻み × 9 段)
+        // 1 刻み(いちばん細かい小刻み config.substeps × 2^σmax 回 × 9 段)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
         // セル・端数・帳簿を読み戻しへ(同じリストで RecordStep を記録した後に)
@@ -41,6 +43,15 @@ namespace bicameral::sim {
 
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
         [[nodiscard]] uint32_t FaceCount() const { return m_faceCount; }
+
+        // 1 刻みの段の数(いちばん細かい小刻み substeps × 2^σmax 回 × 9 段)
+        [[nodiscard]] uint32_t PassesPerTick() const { return (m_substeps << m_maxExponent) * (uint32_t)Pass::Count; }
+
+        // --- 計測(タイムスタンプ 2 つの差。単位はキューの GetTimestampFrequency。gpu_gas.h と同じ形)---
+        [[nodiscard]] bool EnableTiming(ID3D12Device* device);
+        void RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t slot) const;  // slot 0 = 始め、1 = 終わり
+        void RecordTimingReadback(ID3D12GraphicsCommandList10* list) const;            // 2 つを打った同じリストで
+        [[nodiscard]] std::optional<uint64_t> TimingTicks() const;
 
     private:
         // shaders/sim/gas_tree_step.hlsl の入口(呼ぶ順。.cso の名前と同じ順)
@@ -59,10 +70,14 @@ namespace bicameral::sim {
 
         // b0 のルート定数(gas_tree_step.hlsl の RootConstants と同じ順)
         struct Constants {
-            uint32_t roundingTickLow = 0;
-            uint32_t roundingTickHigh = 0;
+            uint32_t tickLow = 0;
+            uint32_t tickHigh = 0;
+            uint32_t micro = 0;
+            uint32_t substeps = 0;
+            uint32_t maxExponent = 0;
             uint32_t cellCount = 0;
             uint32_t faceCount = 0;
+            uint32_t unused = 0;
         };
 
         GpuGasTree() = default;
@@ -76,15 +91,18 @@ namespace bicameral::sim {
         uint32_t m_cellCount = 0;
         uint32_t m_faceCount = 0;
         uint32_t m_substeps = 0;
+        uint32_t m_maxExponent = 0;  // σmax(1 刻み = いちばん細かい小刻み m_substeps × 2^これ 回)
         uint64_t m_tick = 0;
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
-        std::array<ComPtr<ID3D12Resource>, 8> m_uavs;  // u0〜u7(gas_tree_step.hlsl の結び付け)
+        std::array<ComPtr<ID3D12Resource>, 11> m_uavs;  // u0〜u10(gas_tree_step.hlsl の結び付け)
         std::array<ComPtr<ID3D12Resource>, 7>
             m_srvs;  // t0〜t6(設定・レベル・層の基準・層の外・面の形・セルの場所・セルの面の並び)
         std::array<ComPtr<ID3D12Resource>, 3> m_uploads;    // 初めのセル・端数・帳簿
         std::array<ComPtr<ID3D12Resource>, 3> m_readbacks;  // セル・端数・帳簿
+        ComPtr<ID3D12QueryHeap> m_timestamps;               // 計測(EnableTiming の後だけ)
+        ComPtr<ID3D12Resource> m_timestampReadback;
     };
 
 }  // namespace bicameral::sim
