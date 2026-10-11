@@ -792,7 +792,8 @@ namespace bicameral::sim {
 
             // --- 今の面の溢れの数(始まりの表の終わり。塊を持たない面は 0)---
             const uint32_t table = MrWideTableAt(header, words[header + MR_WIDE_HEADER_SIDE]);
-            const uint32_t last = MR_BLOCK_CELLS;
+            // 論理の語 MR_BLOCK_CELLS(始まりの表の終わり)は最初の塊の表の続きの後ろ(MrWideSideOffset。T-0327)
+            const uint32_t last = MrWideSideOffset(MR_BLOCK_CELLS);
             // 塊の表の j 番目: 0 番目は見出し、1 番目からは最初の塊の先頭(T-0327・ReadOverflow と同じ引き方)
             const uint32_t entry = last / MR_WIDE_CHUNK_WORDS;
             const uint32_t firstChunk = words[table + 1];
