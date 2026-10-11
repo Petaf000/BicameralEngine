@@ -814,6 +814,7 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         list->Dispatch(groupCount, 1, 1);
         UavBarrier(list);
+        StampStage(list);
     }
 
     // --- 世界の木 ---
@@ -1016,6 +1017,8 @@ namespace bicameral::sim {
     void GpuMultires::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                  uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options) {
         SetTick(worldSeed, tick);
+        m_stageStamp = 0;
+        StampStage(list);
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
         FX_ASSERT(!m_wideCells || !options.implicitConduction);  // 陰解法の段はまだ溢れを読まない(T-0211 の残り)
         if (options.conduction) {
@@ -1035,6 +1038,7 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         list->Dispatch(GroupsFor(m_blockCapacity, WAKE_THREADS), 1, 1);
         UavBarrier(list);
+        StampStage(list);
         m_constants.stepFlags = flags;
     }
 
@@ -1045,6 +1049,7 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
+        StampStage(list);
 
         RecordWideRetry(list, debugRing);
 
@@ -1053,6 +1058,7 @@ namespace bicameral::sim {
         list->SetPipelineState(m_wideCells ? m_stepWideExpandedWaitPipeline.Get() : m_stepExpandedWaitPipeline.Get());
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
         UavBarrier(list);
+        StampStage(list);
         RecordWideRetry(list, debugRing);
     }
 
@@ -1067,9 +1073,19 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         list->Dispatch(1, 1, 1);
         UavBarrier(list);
+        StampStage(list);
         list->SetPipelineState(m_wideRetryPipeline.Get());
         list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
         UavBarrier(list);
+        StampStage(list);
+    }
+
+    void GpuMultires::StampStage(ID3D12GraphicsCommandList10* list) {
+        if (!m_stageTimestamps)
+            return;
+
+        RecordTimestamp(list, m_stageStamp);
+        m_stageStamp = std::min(m_stageStamp + 1, MAX_TIMESTAMPS);
     }
 
     void GpuMultires::RecordConductPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -1079,6 +1095,7 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         list->Dispatch(groupCount, 1, 1);
         UavBarrier(list);
+        StampStage(list);
     }
 
     // 熱の伝導を入れた刻みの段(CPU の StepBlocks・StepConduction と同じ順。multires_conduct.hlsli の先頭)。活性(stepFlags の LISTED)なら
