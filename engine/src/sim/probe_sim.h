@@ -166,7 +166,8 @@ namespace bicameral::sim {
 
     // 抽出の後のフック(ProbeFrameInput::afterExtract)に渡すもの(T-0096)
     struct ProbeExtractContext {
-        uint64_t tick = 0;                        // 抽出した刻みの境界(S(tick)。セルの世代は tick & 1)
+        uint64_t tick = 0;  // 抽出した刻みの境界(S(tick)。セルの世代は tick & 1)
+        uint32_t slot = 0;  // フレームの枠(RecordFrame の slot。読み戻しを枠ごとに持つもの〔sim/probe_surface〕が使う)
         ID3D12Resource* cells = nullptr;          // 世界のセル(UAV の状態。読むだけ)
         ID3D12Resource* extraction = nullptr;     // 書き終えた抽出(UAV の状態)
         D3D12_GPU_VIRTUAL_ADDRESS debugRing = 0;  // シミュのデバッグのリング(FX_ASSERT の出力。ReadFrame でログへ出る)

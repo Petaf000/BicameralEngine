@@ -728,6 +728,7 @@ namespace bicameral::sim {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
         list->ResourceBarrier(1, &allUavs);
         input.afterExtract(list, {.tick = tick,
+                                  .slot = static_cast<uint32_t>(&frame - m_slots.data()),
                                   .cells = m_cells.Get(),
                                   .extraction = m_extractions[input.extractionTarget].Get(),
                                   .debugRing = m_debugRing.GpuAddress(),

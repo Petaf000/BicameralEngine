@@ -10,6 +10,8 @@
 //     CPU と一致する。イベントは当たった置くコマンドとつつきの分だけ
 //   - (CPU)球以外の形(直方体・円柱。T-0245)のセルの数・格子の端・当てられない大きさ・T-0222 の記録は球のまま
 //   - (GPU)直方体・円柱を置く・足す・はみ出す、ドラッグで塗る(同じ刻みに重なる球 12 個・間を空けた足す 6 個)も CPU と一致
+//   - (GPU)筆の「面に沿って」の物の印(sim/probe_surface。T-0332): 抽出の後ろで作って読み戻した S(t) の印が、CPU リファレンス
+//     (BuildProbeSurfaceMask)と毎回ビット一致(木箱の壁と置いた木が物になる)
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ。
 #include <algorithm>
@@ -27,6 +29,7 @@
 #include "save/replay_session.h"
 #include "sim/lab_box.h"
 #include "sim/probe_sim.h"
+#include "sim/probe_surface.h"
 #include "sim/reaction_test_table.h"
 
 using namespace bicameral;
@@ -293,9 +296,10 @@ namespace {
     // --- CPU リファレンス ---
 
     struct Reference {
-        std::vector<ProbeTickHash> ticks;  // [t] が S(t)
-        bool energyBalanced = true;        // エネルギーの合計が湧き出しの欄の分だけ変わった
-        bool placedChangedEnergy = false;  // 置く刻みに湧き出しが 0 でなかった
+        std::vector<ProbeTickHash> ticks;             // [t] が S(t)
+        bool energyBalanced = true;                   // エネルギーの合計が湧き出しの欄の分だけ変わった
+        bool placedChangedEnergy = false;             // 置く刻みに湧き出しが 0 でなかった
+        std::vector<std::vector<uint32_t>> surfaces;  // [t] が S(t) の物の印(T-0332)
     };
 
     Reference RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands) {
@@ -303,6 +307,7 @@ namespace {
         Reference result;
         result.ticks.push_back(
             {.tick = 0, .hash = ProbeStateHash(reference.State(0)), .energy = ProbeEnergySum(reference.State(0))});
+        result.surfaces.push_back(BuildProbeSurfaceMask(reference.State(0)));
 
         for (uint64_t tick = 0; tick < TOTAL_TICKS; ++tick) {
             reference.Advance(tick, commands);
@@ -313,6 +318,7 @@ namespace {
                                     .sourceEnergy = reference.SourceEnergy(),
                                     .scheduledBlocks = reference.ScheduledBlocks(),
                                     .limits = reference.Limits()});
+            result.surfaces.push_back(BuildProbeSurfaceMask(state));
 
             result.energyBalanced = result.energyBalanced &&
                                     result.ticks.back().energy == result.ticks[tick].energy + reference.SourceEnergy();
@@ -330,6 +336,10 @@ namespace {
         std::vector<ProbeTickHash> hashes;
         std::vector<ProbeEvent> events;
         uint32_t droppedEventCount = 0;
+        // 抽出の後ろで読み戻した物の印(T-0332)。刻みの境界で終わったフレームの分だけ(刻みの途中で終わると、抽出の
+        // S(t) にはその刻みの適用の単位が当てた置くコマンドが入っていて、CPU リファレンスの S(t) と違う)
+        std::vector<ProbeSurfaceMask> surfaces;
+        size_t boundaryFrames = 0;
     };
 
     // unitsPerFrame の列でフレームにして走らせる(コマンドは再生と同じく ReplayPlayer が数刻み先まで先に足す)
@@ -338,9 +348,10 @@ namespace {
         RunResult result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"TestPlace");
         auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table, {});
-        if (!queue || !simulation) {
-            Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
-                simulation ? "" : simulation.error());
+        auto surface = ProbeSurface::Create(device);
+        if (!queue || !simulation || !surface) {
+            Log(Channel::Sim, Level::Error, "作れない: {}{}{}", queue ? "" : queue.error(),
+                simulation ? "" : simulation.error(), surface ? "" : surface.error());
             return result;
         }
 
@@ -348,6 +359,7 @@ namespace {
         replay.commands.assign(commands.begin(), commands.end());
         save::ReplayPlayer player(std::move(replay));
 
+        surface->SetEnabled(true);
         const uint32_t unitsPerTick = simulation->UnitsPerTick();
         uint64_t unitPosition = 0;
         for (size_t frame = 0; frame < unitsPerFrame.size(); ++frame) {
@@ -358,11 +370,15 @@ namespace {
                 ProbeSim::NextApplyTick(firstTick, firstUnit),
                 std::min(simulation->FreeCommandSlots(), PROBE_MAX_COMMANDS));
 
-            ID3D12CommandList* list = simulation->RecordFrame(slot, {.firstTick = firstTick,
-                                                                     .firstUnit = firstUnit,
-                                                                     .unitCount = unitsPerFrame[frame],
-                                                                     .extract = false,
-                                                                     .commands = frameCommands});
+            ID3D12CommandList* list = simulation->RecordFrame(slot,
+                                                              {.firstTick = firstTick,
+                                                               .firstUnit = firstUnit,
+                                                               .unitCount = unitsPerFrame[frame],
+                                                               .extract = true,
+                                                               .commands = frameCommands,
+                                                               .afterExtract = [&](auto* simList, const auto& context) {
+                                                                   surface->RecordAfterExtract(simList, context);
+                                                               }});
             if (list == nullptr || !queue->WaitCpu(queue->Submit(list)))
                 return result;
 
@@ -370,6 +386,13 @@ namespace {
             result.hashes.insert(result.hashes.end(), readback.hashes.begin(), readback.hashes.end());
             result.events.insert(result.events.end(), readback.events.begin(), readback.events.end());
             result.droppedEventCount += readback.droppedEventCount;
+            const bool boundary = (unitPosition + unitsPerFrame[frame]) % unitsPerTick == 0;
+            auto mask = surface->Read(slot);
+            if (mask && boundary)
+                result.surfaces.push_back(std::move(*mask));
+
+            result.boundaryFrames += boundary ? 1 : 0;
+
             unitPosition += unitsPerFrame[frame];
         }
 
@@ -394,6 +417,22 @@ namespace {
                     gpu.tick, gpu.hash, gpu.energy, gpu.sourceEnergy, gpu.scheduledBlocks, cpu.hash, cpu.energy,
                     cpu.sourceEnergy, cpu.scheduledBlocks);
 
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // 物の印(T-0332): 刻みの境界で終わったフレームごとに 1 つ・S(t) の CPU リファレンスと同じ・物のセルがある
+    bool SurfacesMatch(std::span<const ProbeSurfaceMask> surfaces, const Reference& expected, size_t frames) {
+        if (surfaces.size() != frames)
+            return false;
+
+        for (const ProbeSurfaceMask& mask : surfaces) {
+            if (mask.tick >= expected.surfaces.size() || mask.words != expected.surfaces[mask.tick] ||
+                std::ranges::all_of(mask.words, [](uint32_t word) { return word == 0; })) {
+                Log(Channel::Sim, Level::Error, "  物の印 S({}) が CPU と違う(か空)", mask.tick);
                 return false;
             }
         }
@@ -438,6 +477,8 @@ namespace {
                 std::format("{}: 刻みごとのハッシュ・エネルギー・湧き出し・ブロックの数が CPU と一致", name));
             failures.Check(result.events == expectedEvents && result.droppedEventCount == 0,
                            std::format("{}: イベントは当たる置くコマンドとつつきの分だけ", name));
+            failures.Check(result.boundaryFrames > 0 && SurfacesMatch(result.surfaces, expected, result.boundaryFrames),
+                           std::format("{}: 物の印(T-0332)が毎回 CPU リファレンスとビット一致", name));
         }
     }
 

@@ -118,6 +118,7 @@ bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Extract NAME probe
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Busy NAME probe_tick_busy)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY HashCells NAME probe_tick_hash_cells)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY FlushEvents NAME probe_tick_flush_events)
+bicameral_add_shader(sim/probe_surface.hlsl PROFILE cs_6_8 ENTRY BuildSurfaceMask NAME probe_surface_mask)  # 筆の面に沿って置く物の印(T-0332)
 bicameral_add_shader(sim/probe_conduct.hlsl PROFILE lib_6_8)  # 伝導の Work Graph(T-0005)
 bicameral_add_shader(sim/work_graph_limits_probe.hlsl PROFILE lib_6_8)  # ノードのカウンタと上限の試験(T-0008)
 bicameral_add_shader(sim/reaction_cells.hlsl PROFILE cs_6_8 ENTRY Main)  # 1 セルの反応の評価(T-0014)

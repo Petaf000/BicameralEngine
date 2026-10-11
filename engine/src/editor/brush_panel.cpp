@@ -8,7 +8,9 @@
 
 #include <imgui.h>
 
+#include "common/probe_surface.hlsli"
 #include "core/log.h"
+#include "editor/surface_pick.h"
 
 namespace bicameral::editor {
     namespace {
@@ -79,6 +81,17 @@ namespace bicameral::editor {
         constexpr uint64_t AUTO_UNDO_FRAME = 26;
         constexpr uint32_t AUTO_UNDO_COUNT = 2;
         constexpr uint32_t AUTO_UNDONE_COMMANDS = 18;
+
+        // --- --auto-place の面に沿って塗る(T-0332)---
+        // 2 つ目の元に戻すが済んだ後(残る置いたのは 1 回ずつの 5 つで、木箱の東の壁から離れている)に、+x の側から -x へ向く決まった光線
+        // (画面の画素ではなく格子の座標。カメラに依らない)で、物の印から拾ったセルに木の 1 セル(球・半径 0・置き換え)を z = 30 の
+        // y = 29 で押し、y = 31・34 へドラッグする。拾うのは東の壁 x = 35 の外に接する x = 36(初めの世界の木箱 28〜35。
+        // sim/probe_sim.cpp の MakeProbeInitialWorld)で、(36, 29〜34, 30) に間隔 1 で 6 個が当たる
+        constexpr float AUTO_SURFACE_ORIGIN_X = 60.5f;
+        constexpr uint32_t AUTO_SURFACE_X = 36;
+        constexpr uint32_t AUTO_SURFACE_Z = 30;
+        constexpr std::array<uint32_t, 3> AUTO_SURFACE_Y = {29, 31, 34};
+        constexpr uint32_t AUTO_SURFACE_PAINTED = 6;
 
         constexpr size_t MAX_UNDO_STROKES = 64;  // 控える運び(古いものから忘れる。保存点より古い運びはどうせ戻せない)
 
@@ -281,6 +294,21 @@ namespace bicameral::editor {
         if (ImGui::RadioButton("足す", !m_replace))
             m_replace = false;
 
+        ImGui::SeparatorText("当て方");
+        if (ImGui::RadioButton("断面", !m_onSurface))
+            m_onSurface = false;
+
+        ImGui::SameLine();
+        if (ImGui::RadioButton("面に沿って", m_onSurface))
+            m_onSurface = true;
+
+        if (m_onSurface) {
+            ImGui::TextDisabled(
+                "カーソルの光線が最初に当たる物のセルの手前に置く(物 = 物質量の合計が %llu mol 以上のセル。仮)。",
+                static_cast<unsigned long long>(sim::PROBE_SURFACE_THRESHOLD_MICROMOLES / 1000000));
+            ImGui::TextDisabled("物に当たらなければ断面。ドラッグの間は押した時の面で塗る(数フレーム前の世界)");
+        }
+
         ImGui::TextDisabled("ドラッグの間隔: 置き換え = 半幅ごと・足す = 重ならない間隔(2 × 半幅 + 1)");
         ImGui::TextDisabled("1 フレームに %u 個まで・待っているコマンドが %zu 個を超える間は待つ",
                             BrushStroke::MAX_DABS_PER_FRAME, BrushStroke::MAX_WAITING_COMMANDS);
@@ -368,7 +396,7 @@ namespace bicameral::editor {
     // --- 人がいない確認(--auto-place)---
 
     std::vector<sim::ProbeCommand> BrushPanel::TakeAutoCommands(uint64_t frame, size_t waitingCommands,
-                                                                uint32_t& sequence) {
+                                                                std::span<const uint32_t> surface, uint32_t& sequence) {
         std::vector<sim::ProbeCommand> commands;
         if (!m_autoRunning)
             return commands;
@@ -382,6 +410,7 @@ namespace bicameral::editor {
             commands.push_back(sim::MakePokeCommand(0, sequence++, 44, 20, sim::PROBE_VIEW_Z));
 
         RunAutoUndo(frame);
+        RunAutoSurface(frame, waitingCommands, surface, sequence, commands);
 
         return commands;
     }
@@ -479,13 +508,64 @@ namespace bicameral::editor {
             m_autoUndoRequests);
     }
 
+    // 面に沿って塗る(T-0332): 元に戻すが 2 つとも済み、流し直しが届き、物の印が読み戻されてから 1 回
+    void BrushPanel::RunAutoSurface(uint64_t frame, size_t waitingCommands, std::span<const uint32_t> surface,
+                                    uint32_t& sequence, std::vector<sim::ProbeCommand>& commands) {
+        const bool undone = m_autoUndone == AUTO_UNDO_COUNT && m_undoChecks.size() == AUTO_UNDO_COUNT &&
+                            std::ranges::all_of(m_undoChecks, [](const UndoCheck& check) { return check.observed; });
+        if (m_autoSurfaceDone || !undone || surface.empty())
+            return;
+
+        m_autoSurfaceDone = true;
+        const sim::LabMaterial* wood = FindMaterial("木");
+        if (wood == nullptr)
+            return;
+
+        LoadMaterialRows(*wood, m_rows);
+        m_shape = ShapeKind::Sphere;
+        m_radiusCells = 0;
+        m_replace = true;
+        m_temperatureKelvin = 300;
+
+        // --- 決まった光線で拾う(窓のカーソルと同じ PickSurfaceCell)---
+        std::vector<render::CellCoordinate> cells;
+        for (const uint32_t y : AUTO_SURFACE_Y) {
+            const render::CameraRay ray{.origin = {AUTO_SURFACE_ORIGIN_X, static_cast<float>(y) + 0.5f,
+                                                   static_cast<float>(AUTO_SURFACE_Z) + 0.5f},
+                                        .direction = {-1.0f, 0.0f, 0.0f}};
+            const auto hit = PickSurfaceCell(ray, surface, sim::PROBE_GRID_SIZE);
+            if (!hit)
+                continue;
+
+            const render::CellCoordinate expected{.x = AUTO_SURFACE_X, .y = y, .z = AUTO_SURFACE_Z};
+            m_autoSurfaceMatched += hit->cell == expected && hit->normalAxis == 0 ? 1 : 0;
+            cells.push_back(hit->cell);
+        }
+
+        if (cells.empty())
+            return;
+
+        const std::vector<render::CellCoordinate> pressed = {cells.front()};
+        const std::span<const render::CellCoordinate> dragged = std::span(cells).subspan(1);
+        const std::vector<sim::ProbeCommand> painted = Paint(pressed, dragged, true, waitingCommands, sequence);
+        Log(Channel::Sim, Level::Info, "--auto-place: フレーム {} に面に沿って {} 個(拾った {} / {})", frame,
+            painted.size(), m_autoSurfaceMatched, AUTO_SURFACE_Y.size());
+        m_autoSurfacePainted = static_cast<uint32_t>(painted.size());
+        m_autoExpected += m_autoSurfacePainted;
+        commands.insert(commands.end(), painted.begin(), painted.end());
+    }
+
     bool BrushPanel::AutoPassed() const {
         const bool undone = m_autoUndone == AUTO_UNDO_COUNT && m_autoUndoneCommands == AUTO_UNDONE_COMMANDS &&
                             !m_autoUndoFailed && m_undoChecks.size() == AUTO_UNDO_COUNT &&
                             std::ranges::all_of(m_undoChecks, [](const UndoCheck& check) { return check.changed; });
 
+        const bool surface = m_autoSurfaceMatched == AUTO_SURFACE_Y.size() &&
+                             m_autoSurfacePainted == AUTO_SURFACE_PAINTED;
+
         return m_autoSent == AUTO_STROKES.size() && m_autoPaintSteps == AUTO_PAINT_STEPS &&
-               m_autoPainted == AUTO_PAINTED && undone && m_placedTicks.size() == m_autoExpected - m_autoUndoneCommands;
+               m_autoPainted == AUTO_PAINTED && undone && surface &&
+               m_placedTicks.size() == m_autoExpected - m_autoUndoneCommands;
     }
 
     std::string BrushPanel::AutoSummary() const {
@@ -493,9 +573,10 @@ namespace bicameral::editor {
 
         return std::format(
             "投げた {} / {}・ドラッグ {} 手順で {} 個(はず {})・元に戻した運び {} で {} 個(はず {} で {})・"
-            "戻す前と違う状態になった {} / {}・残って当たった {}(はず {})",
+            "戻す前と違う状態になった {} / {}・面に沿って拾った {} / {} で {} 個(はず {})・残って当たった {}(はず {})",
             m_autoSent, AUTO_STROKES.size(), m_autoPaintSteps, m_autoPainted, AUTO_PAINTED, m_autoUndone,
             m_autoUndoneCommands, AUTO_UNDO_COUNT, AUTO_UNDONE_COMMANDS, changed, m_undoChecks.size(),
+            m_autoSurfaceMatched, AUTO_SURFACE_Y.size(), m_autoSurfacePainted, AUTO_SURFACE_PAINTED,
             m_placedTicks.size(), m_autoExpected - m_autoUndoneCommands);
     }
 

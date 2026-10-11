@@ -96,7 +96,7 @@ namespace bicameral::render {
             if (event.shift)
                 m_pushRays.push_back(ray);
 
-            const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
+            const auto cell = PickCell(ray);
             if (cell && !event.shift)
                 pokes.push_back(*cell);
 
@@ -111,12 +111,29 @@ namespace bicameral::render {
         m_pointerSeen = true;
     }
 
-    std::optional<CellCoordinate> DebugViewController::CursorCell(uint32_t width, uint32_t height) const {
+    std::optional<CameraRay> DebugViewController::CursorRay(uint32_t width, uint32_t height) const {
         if (!m_pointerSeen || m_rotating || m_panning)
             return std::nullopt;
 
-        const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(m_lastX) + 0.5f,
-                                              static_cast<float>(m_lastY) + 0.5f, width, height);
+        return RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(m_lastX) + 0.5f,
+                               static_cast<float>(m_lastY) + 0.5f, width, height);
+    }
+
+    std::optional<CellCoordinate> DebugViewController::CursorCell(uint32_t width, uint32_t height) const {
+        const auto ray = CursorRay(width, height);
+        if (!ray)
+            return std::nullopt;
+
+        return PickCell(*ray);
+    }
+
+    // 拾い方があればそれ(筆の「面に沿って」。T-0332)、拾えなければ断面のセル
+    std::optional<CellCoordinate> DebugViewController::PickCell(const CameraRay& ray) const {
+        if (m_cellPicker) {
+            if (const auto picked = m_cellPicker(ray))
+                return picked;
+        }
+
         return PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
     }
 
@@ -124,7 +141,7 @@ namespace bicameral::render {
     void DebugViewController::AddDragCell(const InputEvent& event, uint32_t width, uint32_t height) {
         const CameraRay ray = RayThroughPixel(m_camera.Basis(width, height), static_cast<float>(event.x) + 0.5f,
                                               static_cast<float>(event.y) + 0.5f, width, height);
-        const auto cell = PickSliceCell(ray, m_settings.sliceAxis, m_settings.slicePosition, m_gridSize);
+        const auto cell = PickCell(ray);
         if (cell && (m_drag.cells.empty() || m_drag.cells.back() != *cell))
             m_drag.cells.push_back(*cell);
     }

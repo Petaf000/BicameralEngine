@@ -40,6 +40,10 @@ namespace bicameral::editor {
         // 筆を持っている(左ボタンがつつきでなく「置く」になる)
         [[nodiscard]] bool Holding() const { return m_holding && m_table != nullptr; }
 
+        // 当て方が「面に沿って」(カーソルの光線が最初に当たる物の手前に置く。T-0332・editor/surface_pick)。
+        // フレームのループは、この間(と --auto-place の間)だけ物の印を読み戻す
+        [[nodiscard]] bool OnSurface() const { return m_onSurface; }
+
         // 1 フレームの左ボタンの入力(押した・押したまま通った・離した断面のセル)を、今の筆の置くコマンドの列にする
         // (targetTick は 0。フレームのループが付ける)。waitingCommands = GPU のキューとフレームのループで待っているコマンドの数
         [[nodiscard]] std::vector<sim::ProbeCommand> Paint(std::span<const render::CellCoordinate> pressed,
@@ -79,8 +83,9 @@ namespace bicameral::editor {
         //     円柱・直方体の運びを 1 つずつ元に戻す(T-0278。記録は元に戻した後の流れ。別の起動の --replay で同じハッシュ列)---
         void StartAuto() { m_autoRunning = true; }
 
-        // フレーム frame に投げる自動のコマンド(sequence は通しで増やす)
+        // フレーム frame に投げる自動のコマンド(sequence は通しで増やす)。surface = 今の物の印(sim/probe_surface。無ければ空)
         [[nodiscard]] std::vector<sim::ProbeCommand> TakeAutoCommands(uint64_t frame, size_t waitingCommands,
+                                                                      std::span<const uint32_t> surface,
                                                                       uint32_t& sequence);
 
         // 当てられるはずの置くコマンドが全部 GPU で当たった(当たらない値のコマンドは当たっていない)
@@ -104,6 +109,8 @@ namespace bicameral::editor {
         void RunAutoPaint(uint64_t frame, size_t waitingCommands, uint32_t& sequence,
                           std::vector<sim::ProbeCommand>& commands);
         void RunAutoUndo(uint64_t frame);
+        void RunAutoSurface(uint64_t frame, size_t waitingCommands, std::span<const uint32_t> surface,
+                            uint32_t& sequence, std::vector<sim::ProbeCommand>& commands);
         void BuildUndo();
         void BeginStroke();
 
@@ -122,7 +129,8 @@ namespace bicameral::editor {
         size_t m_preset = 1;    // ひな形(m_materials の添字。初めは木)
         MaterialRows m_rows{};
         int m_temperatureKelvin = 300;
-        bool m_replace = true;  // 置き換え(実験室の「置く」と同じ。D-439)か、足すか
+        bool m_replace = true;     // 置き換え(実験室の「置く」と同じ。D-439)か、足すか
+        bool m_onSurface = false;  // 当て方: 断面(false)か面に沿って(T-0332)
         BrushStroke m_stroke;
 
         // --- 元に戻す ---
@@ -154,6 +162,9 @@ namespace bicameral::editor {
         uint32_t m_autoUndone = 0;          // 元に戻した運び
         uint32_t m_autoUndoneCommands = 0;  // 元に戻した運びの置くコマンドの数
         bool m_autoUndoFailed = false;
+        uint32_t m_autoSurfacePainted = 0;  // 面に沿ってドラッグで投げた置くコマンドの数(T-0332)
+        uint32_t m_autoSurfaceMatched = 0;  // 光線が木箱の壁の外に接するセルを拾った数
+        bool m_autoSurfaceDone = false;
     };
 
 }  // namespace bicameral::editor

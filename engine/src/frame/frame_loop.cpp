@@ -29,6 +29,7 @@
 #include "core/unicode.h"
 #include "editor/brush_undo.h"
 #include "editor/editor_overlay.h"
+#include "editor/surface_pick.h"
 #include "editor/time_control.h"
 #include "frame/sim_scheduler.h"
 #include "frame/table_hot_reload.h"
@@ -46,6 +47,7 @@
 #include "sim/physics_world.h"
 #include "sim/probe_peek.h"
 #include "sim/probe_sim.h"
+#include "sim/probe_surface.h"
 #include "sim/probe_trace.h"
 #include "sim/reaction_table.h"
 
@@ -189,7 +191,8 @@ namespace bicameral::frame {
 
             // --- シミュと表示 ---
             sim::ProbeSim simulation;
-            sim::ProbePeek peek;  // 覗き窓(T-0096)
+            sim::ProbePeek peek;        // 覗き窓(T-0096)
+            sim::ProbeSurface surface;  // 筆の面に沿って置く物の印(T-0332)
             render::ProbeView view;
 
             // --replay のときだけ 1 つ(std::optional は tidy の警告が多いので使わない)
@@ -211,6 +214,7 @@ namespace bicameral::frame {
                   m_swapChain(std::move(parts.swapChain)),
                   m_sim(std::move(parts.simulation)),
                   m_peek(std::move(parts.peek)),
+                  m_surface(std::move(parts.surface)),
                   m_view(std::move(parts.view)),
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
@@ -268,6 +272,7 @@ namespace bicameral::frame {
 
             // --- コマンド(クリックと再生)---
             void QueueClicks();
+            void UpdateSurfacePicker();
             void ApplyPeekChange();
             void QueuePushes();
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
@@ -326,8 +331,13 @@ namespace bicameral::frame {
             // --- シミュと表示 ---
             sim::ProbeSim m_sim;
             sim::ProbePeek m_peek;
+            sim::ProbeSurface m_surface;
             render::ProbeView m_view;
             render::DebugViewController m_viewController;
+            // 筆の「面に沿って」(T-0332): 最後に読み戻した物の印と、光線を通す印(運びの途中は押した時のまま)
+            std::vector<uint32_t> m_latestSurface;
+            std::vector<uint32_t> m_pickSurface;
+            bool m_surfaceChanged = false;
 
             // --- 記録・再生・画面の保存 ---
             std::vector<save::ReplayPlayer> m_replay;  // 再生中なら 1 つ
@@ -591,6 +601,10 @@ namespace bicameral::frame {
             if (!peek)
                 return std::unexpected(peek.error());
 
+            auto surface = sim::ProbeSurface::Create(native);
+            if (!surface)
+                return std::unexpected(surface.error());
+
             auto view = render::ProbeView::Create(native, gpu::SwapChain::FORMAT);
             if (!view)
                 return std::unexpected(view.error());
@@ -602,6 +616,7 @@ namespace bicameral::frame {
                                   .swapChain = std::move(*swapChain),
                                   .simulation = std::move(*simulation),
                                   .peek = std::move(*peek),
+                                  .surface = std::move(*surface),
                                   .view = std::move(*view),
                                   .replay = std::move(replay),
                                   .reactionTable = reactionTable,
@@ -705,6 +720,10 @@ namespace bicameral::frame {
 
                 submission.read = true;
                 ReportSimReadback(m_sim.ReadFrame(slot));
+                if (auto surface = m_surface.Read(slot)) {
+                    m_latestSurface = std::move(surface->words);
+                    m_surfaceChanged = true;
+                }
                 if (submission.extraction > m_completedExtraction.number) {
                     m_completedExtraction = {
                         .number = submission.extraction, .fence = submission.fence, .tick = submission.extractionTick};
@@ -869,6 +888,7 @@ namespace bicameral::frame {
             if (m_options.autoTrace && m_frameNumber == AUTO_TRACE_FRAME)
                 events.push_back({.kind = InputKind::KeyDown, .key = 'T'});  // 人がいない確認で T の流れを通す
 
+            UpdateSurfacePicker();
             std::vector<render::CellCoordinate> cells = m_viewController.HandleInput(events, m_swapChain.Width(),
                                                                                      m_swapChain.Height());
             const render::PointerDrag drag = m_viewController.TakeDrag();  // 筆で塗る(T-0245)
@@ -893,8 +913,9 @@ namespace bicameral::frame {
             }
 
             if (m_options.autoPlace && m_editor)
-                rng::move(m_editor->Brush().TakeAutoCommands(m_frameNumber, waitingCommands, m_nextSequence),
-                          std::back_inserter(m_pendingCommands));
+                rng::move(
+                    m_editor->Brush().TakeAutoCommands(m_frameNumber, waitingCommands, m_latestSurface, m_nextSequence),
+                    std::back_inserter(m_pendingCommands));
 
             if (m_editor && m_editor->Brush().TakeUndoRequest())
                 UndoBrushStroke();
@@ -1133,18 +1154,23 @@ namespace bicameral::frame {
 
             const auto extractionTarget = static_cast<uint32_t>(extraction % sim::PROBE_EXTRACTION_COUNT);
 
-            ID3D12CommandList* list = m_sim.RecordFrame(
-                slot, {.firstTick = start.tick,
-                       .firstUnit = start.unit,
-                       .unitCount = unitCount,
-                       .extract = extract,
-                       .extractionTarget = extractionTarget,
-                       .commands = commands,
-                       .afterExtract = [this](auto* simList,
-                                              const auto& context) { m_peek.RecordAfterExtract(simList, context); },
-                       .saveTo = SaveSlotFor(start, unitCount, restoreFrom),
-                       .restoreFrom = restoreFrom,
-                       .tableSwaps = m_frameTableSwaps});
+            // 物の印は筆が「面に沿って」の時と --auto-place の時だけ読み戻す(T-0332。View)
+            const bool brushOnSurface = m_editor && m_editor->Brush().Holding() && m_editor->Brush().OnSurface();
+            m_surface.SetEnabled(brushOnSurface || (m_editor && m_options.autoPlace));
+            ID3D12CommandList* list = m_sim.RecordFrame(slot, {.firstTick = start.tick,
+                                                               .firstUnit = start.unit,
+                                                               .unitCount = unitCount,
+                                                               .extract = extract,
+                                                               .extractionTarget = extractionTarget,
+                                                               .commands = commands,
+                                                               .afterExtract =
+                                                                   [this](auto* simList, const auto& context) {
+                                                                       m_peek.RecordAfterExtract(simList, context);
+                                                                       m_surface.RecordAfterExtract(simList, context);
+                                                                   },
+                                                               .saveTo = SaveSlotFor(start, unitCount, restoreFrom),
+                                                               .restoreFrom = restoreFrom,
+                                                               .tableSwaps = m_frameTableSwaps});
 
             if (list == nullptr)
                 return false;
@@ -1416,7 +1442,32 @@ namespace bicameral::frame {
                     .brushPreview = MakeBrushPreview()};
         }
 
-        // カーソルの下の筆の形(T-0279。描画側だけ。筆を持っていて、カーソルがパネルの上でなく断面に当たる時)
+        // 筆の「面に沿って」(T-0332): 左ボタン・ドラッグ・カーソルのセルを、光線が最初に当たる物の手前にする(拾えなければ断面)。
+        // 運びの途中でなければ最新の物の印にする(ドラッグの間は押した時の面で塗る。塗ったばかりの物の上へ積み上がっていかない)
+        void FrameLoop::UpdateSurfacePicker() {
+            const bool onSurface = m_editor && m_editor->Brush().Holding() && m_editor->Brush().OnSurface();
+            if (m_surfaceChanged && (!m_editor || !m_editor->Brush().Stroking())) {
+                m_pickSurface = m_latestSurface;
+                m_surfaceChanged = false;
+            }
+
+            if (!onSurface || m_pickSurface.empty()) {
+                m_viewController.SetCellPicker({});
+                return;
+            }
+
+            m_viewController.SetCellPicker(
+                [this](const render::CameraRay& ray) -> std::optional<render::CellCoordinate> {
+                    const auto hit = editor::PickSurfaceCell(ray, m_pickSurface, sim::PROBE_GRID_SIZE);
+                    if (!hit)
+                        return std::nullopt;
+
+                    return hit->cell;
+                });
+        }
+
+        // カーソルの下の筆の形(T-0279。描画側だけ。筆を持っていて、カーソルがパネルの上でなく断面に当たる時)。
+        // 面に沿って(T-0332)なら、形を切って見せる面は光線が当たった物の面(面の軸と中心のセルの座標)
         std::vector<editor::BrushPreviewLine> FrameLoop::MakeBrushPreview() const {
             if (!m_editor || !m_editor->Brush().Holding() || m_editor->WantsPointer())
                 return {};
@@ -1429,8 +1480,18 @@ namespace bicameral::frame {
 
             const sim::ProbeCommand command = sim::MakePlaceCommand(0, 0, m_editor->Brush().PreviewShape(*cell), {});
             const render::DebugViewSettings& settings = m_viewController.Settings();
-            const editor::BrushPreview preview = editor::BuildBrushPreview(command.payload, settings.sliceAxis,
-                                                                           settings.slicePosition);
+            uint32_t axis = settings.sliceAxis;
+            uint32_t plane = settings.slicePosition;
+            const auto ray = m_viewController.CursorRay(width, height);
+            if (m_editor->Brush().OnSurface() && ray) {
+                if (const auto hit = editor::PickSurfaceCell(*ray, m_pickSurface, sim::PROBE_GRID_SIZE)) {
+                    const std::array<uint32_t, 3> center = {hit->cell.x, hit->cell.y, hit->cell.z};
+                    axis = hit->normalAxis;
+                    plane = center[axis];
+                }
+            }
+
+            const editor::BrushPreview preview = editor::BuildBrushPreview(command.payload, axis, plane);
 
             return editor::ProjectBrushPreview(preview, m_viewController.Camera().Basis(width, height), width, height);
         }

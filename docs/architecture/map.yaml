@@ -334,6 +334,9 @@ views:
       - { id: probepeek, group: simlib, label: "ProbePeek<br/>覗き窓: 世界の写し → 影の鎖 k = 1〜9 → 抽出",
           code: "engine/src/sim/probe_peek.cpp::ProbePeek::RecordAfterExtract", ticket: T-0096, doc: docs/design/17-multiresolution.md,
           note: "ProbeSim の抽出の後のフック。世界のバッファは読むだけ(D-403)。shaders/sim/multires_peek.hlsl(MirrorWorld・ExtractShadow)" }
+      - { id: probesurface, group: simlib, label: "ProbeSurface<br/>筆の面に沿って: 物のセルの印 64³ ビットを読み戻す",
+          code: "engine/src/sim/probe_surface.cpp::ProbeSurface::RecordAfterExtract", ticket: T-0332, doc: docs/design/14-editor-tools.md,
+          note: "抽出の後のフック(View。世界は読むだけ)。shaders/sim/probe_surface.hlsl・common/probe_surface.hlsli(しきい値 仮 20 mol)。光線は editor/surface_pick(PickSurfaceCell)" }
       - { id: peektest, group: tests, label: "gpu_probe_peek_test<br/>覗く・移る・やめるで CPU とビット一致・ハッシュ列が変わらない",
           code: "tests/gpu_probe_peek_test.cpp::RunPeek", ticket: T-0096 }
       - { id: multirestest, group: tests, label: "multires_test<br/>k = 0〜9 の往復・24 段と帳簿・影・たくさんの要求",

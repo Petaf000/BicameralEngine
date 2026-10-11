@@ -1,11 +1,21 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-11 / チケット: 統合(t-0208・t-0287〔t-0024 を含む〕・t-0280・t-0311・t-0272)確かめと記録
+最終更新: 2026-10-11 / チケット: 統合(t-0208・t-0287・t-0280・t-0311・t-0272)確かめと記録 完了 → T-0332 完了
 
 ## 状態(3 行以内)
-- t-0208・t-0287(t-0024 を含む)・t-0280・t-0311・t-0272 を main に合わせた(b55b5f0。衝突は文書だけ: ADR-0052 の追記 7 が T-0311 と T-0272 で重なり T-0272 を追記 8 に・perf.md は両方の行)。
-- shaders の multires_wide* と gpu_multires の自動の合わせを読んで確かめた(下の節)。debug・release のビルドは警告なし(前からの C4189 だけ)。テストは下の「テスト」。
-- 進行中: 本体 T-0332・wt2 T-0320・wt3 T-0323・wt4 T-0326・wt5 T-0329・wt6 T-0314。
+- t-0208・t-0287(t-0024 を含む)・t-0280・t-0311・t-0272 を main に合わせ(b55b5f0)、合わせた形を確かめて記録した(50447cd。push 済み)。
+- T-0332 完了: 筆の「面に沿って」(カーソルの光線が最初に当たる物の手前に置く・ドラッグで面に沿って塗る)。
+- 進行中: wt2 T-0320・wt3 T-0323・wt4 T-0326・wt5 T-0329・wt6 T-0314。
+
+## 本体で入ったもの(2026-10-11。T-0332)
+- **T-0332 面に沿って置く・塗る**(14 §2「実装(T-0332)」・ADR-0089 追記): 筆のパネル「当て方: 断面 / 面に沿って」。面に沿ってなら左ボタン・ドラッグ・カーソルのセルが、
+  画素の光線が最初に当たる物のセルの手前の空いたセル(当たらなければ断面)。物の印は抽出の後ろのフックで GPU が作り(sim/probe_surface・shaders/sim/probe_surface.hlsl。
+  64³ ビット)、フレームの枠ごとに読み戻す(ProbeExtractContext に枠の番号 slot を足した)。物 = 物質量の合計がしきい値以上(**仮 20 mol**。common/probe_surface.hlsli)。
+  光線は editor/surface_pick(Amanatides–Woo)。窓は render::DebugViewController::SetCellPicker(拾えなければ断面)・CursorRay。運びの途中は押した時の印のまま
+  (frame_loop の UpdateSurfacePicker)。カーソルの下の表示は面の軸で形を切る。印を読むのは面に沿っての筆を持つ間と `--auto-place` の間だけ。
+  `--auto-place` は 2 つ目の元に戻すの後に、+x から -x へ向く決まった光線 3 本で木箱の東の壁の外 x = 36 を拾い、木の 1 セルを (36, 29〜34, 30) に 6 個塗る。
+  試験: surface_pick(CPU)・gpu_probe_place(印が刻みの境界のフレームで CPU リファレンス BuildProbeSurfaceMask とビット一致)・window_place_record/play。
+  注意: 刻みの途中で終わったフレームの抽出 S(t) には、その刻みの適用の単位が当てたコマンドが入っている(CPU リファレンスの S(t) とは違う)。
 
 ## 統合で入ったもの(2026-10-11 その 4。詳しくは各チケットの引き継ぎメモ)
 - **合わせた形の確かめ(t-0311 × t-0272)**: 見出しは 4 + 16(印)+ 2 × (1 + 85) = 192 語 = 768 B/頁(上限 64 種: 面の語 513 + 3 × 512 × 56 = 86529 → 塊 85。要求の語の塊の数 8 ビットに入る)。
@@ -86,6 +96,10 @@
 - **気体(T-0026 G1・T-0184 G2 済み → T-0185〔(a) 済み: 1 レベルの気体の GPU〔shaders/sim/gas_step.hlsl・shaders/common/gas_gpu.hlsli・engine/src/sim/gpu_gas.*・tests/gpu_gas_test.cpp〔--dump・--passes〕〕が CPU と毎刻みビット一致。**64bit の「0 で止める引き算」(a > b ? a - b : 0)を書かない**〔NVIDIA のドライバが誤って下ろす。符号付きの差 + if で〕〕・T-0208〜T-0210・T-0186)**: G2 で成分の MUSCL(既定 MC)と移す物質量の乱数の丸め(07 §2.2・ADR-0043 §6・§7)。1 セルの物質量は 2^31 µmol 未満(assert)。 1 レベルの CPU リファレンス engine/src/sim/gas_reference.*(ライブラリ bicameral_gas)・tests/gas_reference_test.cpp。07 §2.1・ADR-0043(Accepted。D-440)。 T-0226 で c̃ 30 m/s(仮)→ 340 m/s・小刻み 24・圧力の拡散を ÷4c̃(3 次元の安定の条件は 1 次元の見積もりより厳しかった。ν = c̃Δt÷Δx ≤ 0.6 を MakeGasCoefficients が assert。既定 0.47)。32³ で 9.6 ms/刻み(約 290 ns/セル。セルの数に比例。64³ で 74 ms → T-0233)。音の波 340.7 m/s・等温の衝撃波が出る(pdV が無いので温まらない → T-0234)。熱いセルの音速は 340 m/s で頭打ち(外すと発散。仮で案 A = QUESTIONS Q32)。`--substeps 4` は安定の条件を破る。試験の時間: debug で gas_reference 約 12.5 分・gpu_gas 約 10 分・gpu_gas_warp 約 15 分(TIMEOUT 1800)。05 のセルの形はまだ変えていない(G3)。tidy の新しいファイルの約 20 件は G2 の初めに直す。
 
 ## 動いているもの(確認方法つき)
+- **テスト(2026-10-11、T-0332)**: debug・release のビルドは警告なし。debug の `^(surface_pick|brush_.*|gpu_probe_place(_warp)?|window_place_.*|float_check.*)$` は
+  gpu_probe_place(_warp) が 1 回目に落ちた(刻みの途中で終わるフレームの印を CPU の S(t) と比べていた = 試験の誤り)→ 刻みの境界のフレームだけ比べるように直し、
+  debug の gpu_probe_place(_warp) 2 本が通過(34 秒ずつ)・ほか 11 本は 1 回目で通過(window_place_record 95 秒・play 110 秒)。
+  release の `^(surface_pick|brush_.*|gpu_probe_(place|sim|peek|rewind)(_warp)?|window_(place|replay|hot_reload)_.*|float_check.*)$` 30 本が通過(約 18 分)。archmap OK(158)。tidy はしていない。
 - **テスト(2026-10-11、統合 t-0208・t-0287・t-0280・t-0311・t-0272〔b55b5f0〕)**: debug・release のビルドは警告なし(release は前からの implicit_conduction.cpp の C4189 だけ)。
   release の `^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|reaction.*|multires|multires_wide|fixed|physics|float_check.*|luau.*|time_control|lab_box|gas_reference|gas_tree|brush_.*|gpu_multires(_warp|_wide)?|gpu_lab_box(_warp)?|gpu_gas(_warp)?|gpu_probe_(sim|peek|place|trace|rewind)(_warp)?|window_(place|lab|hot_reload|replay).*)$`
   66 本が通過(約 51 分。gpu_multires_wide 678 秒・gpu_gas_warp 586 秒・gpu_multires_warp 199 秒・gas_tree 5 秒)。

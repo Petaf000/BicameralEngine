@@ -11,10 +11,12 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "platform/input.h"
@@ -76,6 +78,13 @@ namespace bicameral::render {
         // 断面に当たらない・回している・平行移動している間は無し。今のカメラと断面で毎回拾い直す(キーで断面を動かしても付いてくる)
         [[nodiscard]] std::optional<CellCoordinate> CursorCell(uint32_t width, uint32_t height) const;
 
+        // 今のカーソルの画素の光線(ポインタがまだ来ていない・回している・平行移動している間は無し。T-0332)
+        [[nodiscard]] std::optional<CameraRay> CursorRay(uint32_t width, uint32_t height) const;
+
+        // 左ボタン(つつく・筆で置く)・ドラッグ・カーソルのセルの拾い方(筆の「面に沿って」。T-0332)。空・拾えない光線なら断面のセル
+        using CellPicker = std::function<std::optional<CellCoordinate>(const CameraRay& ray)>;
+        void SetCellPicker(CellPicker picker) { m_cellPicker = std::move(picker); }
+
         // --- 覗き窓(T-0096)---
         // cell を覗いて depth まで潜る(--peek。窓では P と PageDown・PageUp)
         void Peek(CellCoordinate cell, uint32_t depth);
@@ -90,6 +99,7 @@ namespace bicameral::render {
         void HandleKey(const InputEvent& event, uint32_t width, uint32_t height);
         void HandlePeekKey(const InputEvent& event, uint32_t width, uint32_t height);
         void FocusOnPeek();
+        [[nodiscard]] std::optional<CellCoordinate> PickCell(const CameraRay& ray) const;
 
         uint32_t m_gridSize;  // 格子の 1 辺のセルの数
         DebugViewSettings m_settings;
@@ -106,6 +116,8 @@ namespace bicameral::render {
         std::vector<CameraRay> m_pushRays;  // Shift + 左クリックの光線(TakePushRays で取る)
         bool m_leftHeld = false;            // Shift なしの左ボタンを押している(筆で塗る)
         PointerDrag m_drag;                 // TakeDrag で取る
+
+        CellPicker m_cellPicker;  // 空なら断面(SetCellPicker)
 
         PeekView m_peek;
         bool m_peekChanged = false;  // 覗く場所が変わった(TakePeekChange で取る)

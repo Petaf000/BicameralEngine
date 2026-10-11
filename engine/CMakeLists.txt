@@ -97,6 +97,7 @@ add_library(bicameral_sim STATIC
   src/sim/lab_comparison.cpp
   src/sim/lab_session.cpp
   src/sim/probe_peek.cpp
+  src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
@@ -162,6 +163,7 @@ add_library(bicameral_editor STATIC
   src/editor/brush_preview.cpp  # カーソルの下の筆の形の線(T-0279。common/probe_place.hlsli の形の読み方を使う)
   src/editor/brush_stroke.cpp
   src/editor/brush_undo.cpp
+  src/editor/surface_pick.cpp  # 光線が最初に当たる物のセルの手前(T-0332)
   src/editor/time_control.cpp
 )
 target_include_directories(bicameral_editor PUBLIC src)
