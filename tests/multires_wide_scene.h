@@ -3,6 +3,7 @@
 // w01 → w09・w02 → w10・w03 → w11(どれも 10 /s)が進み、1 セル 11 種(溢れ 3 種)になる = 1 頁の溢れが 512 × 3 = 1536 成分。
 // 根を 2 つ置く: 頁を持つ根(セルごとに量が違う。全部を刻む段で足りなくなる)と、一様な根(頁に広げて刻む段で足りなくなる)。
 // GPU は書く面の塊が足りない刻みで塊を配って同じ刻みのうちに刻み直し、CPU の上限の無い世界と毎刻みビット一致する。
+// 一様な根は 9 種目を作る規則だけが進むので、溢れを使う世界は待たせた印で頁に広げて刻む(T-0276。それまでは一様のまま止まっていた)。
 // T-0248: 1 セルが前の GPU の当座の上限(24 種)を超える場面(異性体 m01〜m32 の鎖)と、溢れの世界の費用を測る場面(空気だけ・成分の多いセル)
 #pragma once
 
@@ -21,6 +22,7 @@ namespace bicameral::test {
     constexpr uint32_t WIDE_OVERFLOW_WORLD_BLOCKS = 4;
     constexpr uint64_t WIDE_OVERFLOW_TICKS = 8;
     constexpr uint64_t WIDE_OVERFLOW_SEED = 0x776964650236ull;
+    constexpr int64_t WIDE_OVERFLOW_UNIFORM_X = 8;  // 一様な根の原点(頁を持つ根は 0)
 
     inline std::string WideOverflowName(uint32_t i) {
         return std::format("w{:02}", i);
@@ -64,10 +66,22 @@ namespace bicameral::test {
             for (uint32_t index = 0; index < cells.size(); ++index)
                 cells[index] = MakeWideOverflowCell(table, index, uniform, nameOf);
 
-            sim::PlaceRootBlock(nest, uniform ? 8 : 0, 0, 0, cells);
+            sim::PlaceRootBlock(nest, uniform ? WIDE_OVERFLOW_UNIFORM_X : 0, 0, 0, cells);
         }
 
         return nest;
+    }
+
+    // 一様な根(最初は w01〜w08 だけ)の刻むセルの成分の最大(溢れを含む)。9 以上なら 9 種目を作った(T-0276)
+    inline uint32_t WideOverflowUniformRootSpecies(const sim::MultiresNest& nest) {
+        const uint32_t slot = sim::LookupBlock(nest, 0, WIDE_OVERFLOW_UNIFORM_X, 0, 0);
+        uint32_t most = 0;
+        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+            const uint32_t species = sim::LoadWideNestCell(nest, slot, index).speciesCount;
+            most = species > most ? species : most;
+        }
+
+        return most;
     }
 
     // --- 1 セル 25 種以上(T-0248): 異性体 m01〜m32。m01〜m08 のセルで m(i) → m(i + 8)(i = 1〜24。どれも 10 /s)が鎖のように進み、

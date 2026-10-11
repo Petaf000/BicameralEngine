@@ -744,6 +744,14 @@ FX_FN bool MrHasSteppedCell(MrBlock block) {
     return any;
 }
 
+// 一様なブロックのセルの評価で頁に広げるか: 変わる、または溢れを使う世界(expandHeld)で 9 種目の生成物を待たせた(RX_LIMIT_PRODUCTS。T-0276)。
+// インラインの形で評価すると 9 種目を作る規則だけが進むセルは「変わらない」になるが、頁に広げたセルは上限の無い形で刻むので待たない(D-428)。
+// 溢れを使わない世界は今までどおり待たせる(頁に広げても同じく待つので広げない。D-448 の当座のふるまい)
+template <typename Step, typename Cell>
+FX_FN bool MrUniformStepExpands(Step step, Cell value, bool expandHeld) {
+    return !RxSameCell(step.cell, value) || (expandHeld && (step.limits & RX_LIMIT_PRODUCTS) != 0);
+}
+
 // 一様なブロック(値 value)を待ちの丸めで評価した結果(T-0115)
 struct MrUniformWait {
     uint32_t changed;   // 刻むセルが 1 つでも変わる(頁に広げて刻む)
@@ -752,9 +760,10 @@ struct MrUniformWait {
 
 // 一様なブロックを刻み tick に待ちの丸めで評価する。待ちはセルの ID ごとに違うので、値が同じでも刻むセルを 1 つずつ見る
 // (評価するのは起こす刻み ≤ tick の時だけ。普通は変わる最初のセルで抜ける)
-// (セルの形 Cell のテンプレート。C++ の RxWideCell = 溢れのある一様の値。T-0199)
+// (セルの形 Cell のテンプレート。C++ の RxWideCell = 溢れのある一様の値。T-0199。expandHeld は MrUniformStepExpands)
 template <typename Table, typename Cell>
-FX_FN MrUniformWait MrUniformWaitOf(Table table, Cell value, uint64_t worldSeed, uint64_t tick, MrBlock block) {
+FX_FN MrUniformWait MrUniformWaitOf(Table table, Cell value, uint64_t worldSeed, uint64_t tick, MrBlock block,
+                                    bool expandHeld) {
     MrUniformWait result;
     result.changed = 0;
     result.wakeTick = RX_WAIT_NEVER;
@@ -763,7 +772,7 @@ FX_FN MrUniformWait MrUniformWaitOf(Table table, Cell value, uint64_t worldSeed,
             continue;
 
         const RxWaitStepOf<Cell> step = MrStepCellWait(table, value, worldSeed, tick, block, index);
-        if (!RxSameCell(step.cell, value)) {
+        if (MrUniformStepExpands(step, value, expandHeld)) {
             result.changed = 1;
             return result;
         }
