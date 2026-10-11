@@ -12,7 +12,8 @@
 //   物質を足す・消す表(T-0242・ADR-0065): 印のある刻みに、GPU と CPU の箱の全部のセルを名前で付け替える(RemapLabBox。コマンドの前)。
 //   付け替えは表 2 つだけから決まるので、記録は今までどおり印の列と表の中身だけ(再生は同じ付け替えを作り直す)。
 // 計器(T-0221): 刻むたびに読み戻した GPU の箱から見るセルと箱全体の値を取る(sim/lab_gauge。世界に何も返さない)。
-// 箱は小さい(512 セル)ので、1 刻みずつ待つ(エディタの道具。ゲームの世界のフレームの歩調〔ADR-0011〕とは別のキュー)。
+// 箱は小さい(根 1 つで 512 セル、根を並べても 64 個〔32768 セル〕まで。T-0173)ので、1 刻みずつ待つ(エディタの道具。
+// ゲームの世界のフレームの歩調〔ADR-0011〕とは別のキュー)。
 #pragma once
 
 #include <cstdint>
@@ -34,12 +35,11 @@ namespace bicameral::sim {
     class LabSession {
     public:
         // table は写して持つ(呼ぶ側の表が消えてもよい)。tableVersion は記録に残す表の版(0 = 分からない)。
-        // tableBytes は表の中身(script::TableBytes。記録に残す。空 = 分からない〔試験の表〕。T-0217)
-        [[nodiscard]] static std::expected<LabSession, std::string> Create(ID3D12Device5* device,
-                                                                           D3D12_COMMAND_LIST_TYPE queueType,
-                                                                           const BakedReactionTable& table,
-                                                                           uint64_t tableVersion = 0,
-                                                                           std::string tableBytes = {});
+        // tableBytes は表の中身(script::TableBytes。記録に残す。空 = 分からない〔試験の表〕。T-0217)。
+        // shape は箱の形(根を並べた数。T-0173)。作った後は変えられない(違う形の記録は Replay が断る。別の実験室を作る)
+        [[nodiscard]] static std::expected<LabSession, std::string> Create(
+            ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType, const BakedReactionTable& table,
+            uint64_t tableVersion = 0, std::string tableBytes = {}, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
         // 反応表を替える(ホットリロード。T-0218・ADR-0055): 次の刻み NextTick() から新しい表で続ける(表を替えた印を置く)。
         // 刻む前にもう一度替えたら、印は最後の表の 1 つだけ(今の表に戻したなら印を消す)。tableVersion は 0 でないこと(記録の印が表を指す)。
@@ -73,12 +73,14 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> Reset();
 
         // 初めの箱から記録のコマンドを流し直す(記録の刻みの数まで)。記録のハッシュと違った最初の刻みは ReplayDivergence()。
+        // 記録の箱の形がこの実験室と違えば流さずにエラー(T-0173)。
         // 刻み 0 の表は記録の版の表(0 なら最新の表)。記録の表(刻み 0 と印)にこの実験室が持たない版があれば流さずにエラー。
         // 流し終えて最新の表と違えば、次の刻みから最新の表に替える印を置く(実験室の表は世界と同じ。ADR-0054 の 3)
         [[nodiscard]] std::expected<void, std::string> Replay(const LabRecording& recording);
 
         // --- 見る ---
         [[nodiscard]] uint64_t NextTick() const { return m_tick; }
+        [[nodiscard]] lab::LabBoxShape Shape() const { return m_box.Shape(); }
         [[nodiscard]] const MultiresNest& Cpu() const { return m_cpu; }
         [[nodiscard]] const MultiresNest& Gpu() const { return m_read; }
         [[nodiscard]] const BakedReactionTable& Table() const { return m_table; }
@@ -94,7 +96,7 @@ namespace bicameral::sim {
         [[nodiscard]] const std::optional<SpeciesRemapReport>& LastRemapReport() const { return m_lastRemapReport; }
 
         // --- 計器(T-0221)---
-        // 見るセルを替える(今までの値は捨てる: 前のセルの値と混ぜない)
+        // 見るセル(lab::LabCellIndex)を替える(今までの値は捨てる: 前のセルの値と混ぜない。箱の外なら替えない)
         void SetGaugeCell(uint32_t cellIndex);
         [[nodiscard]] uint32_t GaugeCell() const { return m_gaugeCell; }
         [[nodiscard]] const std::vector<LabGaugeSample>& Gauge() const { return m_gauge; }

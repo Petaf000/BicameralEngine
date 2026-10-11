@@ -59,12 +59,15 @@ namespace {
         return sim::BakeReactionTable(definition);
     }
 
-    uint64_t TotalOf(const sim::MultiresNest& nest, uint32_t species) {
+    uint64_t TotalOf(const sim::MultiresNest& nest, uint32_t species,
+                     lab::LabBoxShape shape = sim::LAB_SINGLE_ROOT_SHAPE) {
         uint64_t total = 0;
-        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
-            const reaction::RxCell cell = sim::LabBoxCell(nest, index);
-            for (uint32_t i = 0; i < cell.speciesCount; ++i)
-                total += cell.species[i] == species ? cell.amounts[i] : 0;
+        for (uint32_t slot = 0; slot < lab::LabRootCount(shape); ++slot) {
+            for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+                const reaction::RxCell cell = sim::LoadNestCell(nest, slot, index);
+                for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                    total += cell.species[i] == species ? cell.amounts[i] : 0;
+            }
         }
 
         return total;
@@ -466,6 +469,111 @@ namespace {
         return CheckNoMismatch(*session);
     }
 
+    // --- 根を並べた箱(T-0173)---
+    constexpr lab::LabBoxShape LARGE_SHAPE = {
+        .rootsX = 4, .rootsY = 1, .rootsZ = 2};  // x に 4・z に 2(枠の順を確かめる)
+    constexpr uint32_t LARGE_RUN_TICKS = 100;
+    constexpr uint32_t LARGE_SWAP_TICKS = 20;
+
+    // 根の境(x と z の 7 | 8)を挟んで木を 2×2×2 に置き、(7, 3, 7) に火を付けて流す → 表を替えて流す → 同じ形の別の箱で再生。
+    // 毎刻みビット一致・燃えた・隣の根の木のエネルギーが増えた(根の境を熱が通る)・違う形の記録は断る
+    std::expected<void, std::string> RunLargeBox(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
+                                                 const sim::BakedReactionTable& table) {
+        auto session = sim::LabSession::Create(device, queueType, table, FIRST_TABLE_VERSION, "first", LARGE_SHAPE);
+        if (!session)
+            return std::unexpected(session.error());
+
+        const std::vector<sim::LabMaterial> materials = sim::MakeLabMaterials(table);
+        const auto wood = std::ranges::find_if(materials, [](const sim::LabMaterial& m) { return m.name == "木"; });
+        if (wood == materials.end())
+            return std::unexpected("木の材料が無い");
+
+        // --- 箱全体の空気 → 根の境に木 → 火 ---
+        const std::array<sim::SpeciesAmount, 2> atmosphere = {
+            sim::SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = sim::LabGasMicromoles(60000, 300000)},
+            sim::SpeciesAmount{.species = table.SpeciesId("nitrogen"),
+                               .amount = sim::LabGasMicromoles(140000, 300000)}};
+        if (!session->PlaceRegion(sim::LabWholeBox(LARGE_SHAPE), atmosphere, 300000))
+            return std::unexpected("箱全体に置けない");
+
+        constexpr uint32_t BORDER = sim::LAB_BOX_EDGE - 1;
+        for (uint32_t i = 0; i < 8; ++i) {
+            const sim::LabCellPosition cell{.x = BORDER + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = BORDER + (i >> 2)};
+            if (!session->Place(cell, wood->contents, 300000))
+                return std::unexpected("置けない");
+        }
+
+        if (auto stepped = session->Step(IGNITE_TICK); !stepped)
+            return stepped;
+
+        const uint32_t neighbor = sim::LabCellPosition{.x = BORDER + 1, .y = 3, .z = BORDER}.Index();
+        const int64_t neighborBefore = sim::LabBoxCell(session->Gpu(), neighbor, LARGE_SHAPE).energy;
+        if (!session->SetTemperature({.x = BORDER, .y = 3, .z = BORDER}, IGNITE_MILLIKELVIN))
+            return std::unexpected("温度を決められない");
+
+        if (auto stepped = session->Step(LARGE_RUN_TICKS - IGNITE_TICK); !stepped)
+            return stepped;
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint64_t placed = 8 * wood->contents[0].amount;
+        const uint64_t left = TotalOf(session->Gpu(), cellulose, LARGE_SHAPE);
+        const int64_t neighborAfter = sim::LabBoxCell(session->Gpu(), neighbor, LARGE_SHAPE).energy;
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: 4×1×2 の根の箱で {} 刻み: セルロース {} → {} µmol・隣の根の木 {} → {} mJ(GPU)",
+            LARGE_RUN_TICKS, placed, left, neighborBefore, neighborAfter);
+        if (left >= placed)
+            return std::unexpected("燃えていない");
+
+        if (neighborAfter <= neighborBefore)
+            return std::unexpected("根の境の向こうの木が温まっていない");
+
+        // --- 刻みの途中で表を替える(印は全部の根をつつく)---
+        const auto swapped = MakeSwappedTable();
+        if (!swapped)
+            return std::unexpected(swapped.error());
+
+        if (auto changed = session->ChangeTable(*swapped, SWAPPED_TABLE_VERSION, "swapped"); !changed)
+            return changed;
+
+        if (auto stepped = session->Step(LARGE_SWAP_TICKS); !stepped)
+            return stepped;
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        // --- 同じ形の別の箱で再生(ファイルの形を通す)・違う形の記録は断る ---
+        const sim::LabRecording recorded = session->Recording();
+        const auto parsed = sim::ParseLabRecording(sim::SerializeLabRecording(recorded));
+        if (!parsed || !sim::SameLabShape(parsed->shape, LARGE_SHAPE))
+            return std::unexpected("記録の箱の形が残らない");
+
+        auto other = sim::LabSession::Create(device, queueType, table, FIRST_TABLE_VERSION, "first", LARGE_SHAPE);
+        if (!other)
+            return std::unexpected(other.error());
+
+        if (auto added = other->AddTable(*swapped, SWAPPED_TABLE_VERSION, "swapped"); !added)
+            return added;
+
+        if (auto replayed = other->Replay(*parsed); !replayed)
+            return replayed;
+
+        if (auto checked = CheckNoMismatch(*other); !checked)
+            return checked;
+
+        if (other->ReplayDivergence() || other->Recording().hashes != recorded.hashes)
+            return std::unexpected("別の箱での再生が記録と違う");
+
+        sim::LabRecording single = recorded;
+        single.shape = sim::LAB_SINGLE_ROOT_SHAPE;
+        if (other->Replay(single).has_value())
+            return std::unexpected("違う形の記録を再生できてしまった");
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
@@ -511,12 +619,18 @@ namespace {
             return 1;
         }
 
+        if (auto result = RunLargeBox(device->Get(), options->queueType, *table); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(根を並べた箱: {})", result.error());
+            return 1;
+        }
+
         if (!test::PassesValidation(*device, "gpu_lab_box_test"))
             return 1;
 
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
-            "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える)",
+            "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える・"
+            "根を並べた箱でも一致)",
             RUN_TICKS);
 
         return 0;

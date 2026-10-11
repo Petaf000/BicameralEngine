@@ -7,13 +7,18 @@
 
 namespace bicameral::sim {
 
-    std::expected<GpuLabBox, std::string> GpuLabBox::Create(ID3D12Device5* device, const BakedReactionTable& table) {
-        auto nest = GpuMultires::Create(device, table, LabBoxCapacity(table));
+    std::expected<GpuLabBox, std::string> GpuLabBox::Create(ID3D12Device5* device, const BakedReactionTable& table,
+                                                            lab::LabBoxShape shape) {
+        if (!lab::LabShapeValid(shape))
+            return std::unexpected("実験室の箱の形が範囲の外");
+
+        auto nest = GpuMultires::Create(device, table, LabBoxCapacity(table, shape));
         if (!nest)
             return std::unexpected(nest.error());
 
         GpuLabBox result(std::move(*nest));
         result.m_speciesCount = static_cast<uint32_t>(table.species.size());
+        result.m_shape = shape;
 
         const auto shader = gpu::LoadShader("sim/lab_box_apply.cso");
         if (!shader)
@@ -72,8 +77,9 @@ namespace bicameral::sim {
 
             const D3D12_GPU_VIRTUAL_ADDRESS commandAddress = m_commands->GetGPUVirtualAddress();
             m_nest.SetExternalViews(commandAddress, commandAddress);
-            m_nest.RecordExternalDispatch(list, debugRing, m_applyPipeline.Get(), 1,
-                                          {static_cast<uint32_t>(commands.size()), LAB_BOX_SLOT, m_speciesCount, 0});
+            m_nest.RecordExternalDispatch(
+                list, debugRing, m_applyPipeline.Get(), 1,
+                {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, 0});
         }
 
         m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);

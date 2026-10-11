@@ -20,6 +20,7 @@
 #include <expected>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -62,7 +63,9 @@ namespace bicameral::editor {
     private:
         bool CreateSession();
         void RunAuto();
-        [[nodiscard]] std::expected<void, std::string> ReplayInNewSession(const sim::LabRecording& recorded);
+        [[nodiscard]] std::expected<void, std::string> RunAutoLargeBox(std::span<const sim::SpeciesAmount> wood);
+        [[nodiscard]] std::expected<void, std::string> ReplayInNewSession(const sim::LabRecording& recorded,
+                                                                          bool expectMissingTables);
 
         void BuildControls();
         void BuildMaterialRows(uint32_t milliKelvin);
@@ -71,6 +74,8 @@ namespace bicameral::editor {
         [[nodiscard]] std::vector<sim::SpeciesAmount> ComposedContents(uint32_t temperatureMilliKelvin) const;
         [[nodiscard]] sim::LabCellRange PlaceRange() const;
         void BuildStatus();
+        void BuildShapeChoice();
+        void ClampCells();
         void BuildSlice();
         void BuildCell() const;
         void BuildRecording();
@@ -87,6 +92,7 @@ namespace bicameral::editor {
         std::string m_message;  // 最後の操作の結果
 
         // --- 操作の状態(View。世界に入らない)---
+        size_t m_shapeChoice = 0;  // 箱の大きさ(lab_panel.cpp の BOX_SHAPES の添字。T-0173)
         std::array<int, 3> m_cell = {3, 3, 3};
         size_t m_preset = 1;  // ひな形(m_materials の添字。初めは木)
         MaterialRows m_rows{};

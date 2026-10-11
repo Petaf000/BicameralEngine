@@ -6,7 +6,8 @@
 //   → CPU: StepLabBox(コマンドを当てる → StepNest。反応 + 熱の伝導)/ GPU: sim/gpu_lab_box(同じ関数を GPU で)
 //   → FindLabMismatch で刻みごとに比べる。食い違えば最初の刻みとセル。
 //   記録(LabRecording)はコマンドの列とハッシュの列だけ(初めの箱は決まっている: 300 K の空気)。読み直して流せば同じ実験になる。
-// 箱は多重解像度の木の本物の根 1 つ(8³ セル、0.5 m 角 = 4 m 角。外とは熱も物も通さない)。仮の世界(ProbeSim)とは別の世界。
+// 箱は多重解像度の木の本物の根(8³ セル、0.5 m 角 = 4 m 角)を x・y・z に並べたもの(T-0173。lab::LabBoxShape。初めは根 1 つ)。
+// 外とは熱も物も通さない(並べた根どうしは木の伝導で熱が通る)。仮の世界(ProbeSim)とは別の世界。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
@@ -27,8 +28,20 @@
 
 namespace bicameral::sim {
 
-    inline constexpr uint32_t LAB_BOX_SLOT = 0;  // 箱の根の枠
-    inline constexpr uint32_t LAB_BOX_EDGE = multires::MR_BLOCK_EDGE;
+    inline constexpr uint32_t LAB_BOX_SLOT = 0;  // 箱の最初の根の枠(根は x → y → z の順に 0 から。lab::LabRootSlot)
+    inline constexpr uint32_t LAB_BOX_EDGE = multires::MR_BLOCK_EDGE;  // 根 1 つの辺のセルの数
+
+    // 箱の形(T-0173): 根を並べた数。根 1 つが T-0142 からの箱(記録の版 4 まで)
+    inline constexpr lab::LabBoxShape LAB_SINGLE_ROOT_SHAPE = {.rootsX = 1, .rootsY = 1, .rootsZ = 1};
+
+    [[nodiscard]] constexpr bool SameLabShape(lab::LabBoxShape a, lab::LabBoxShape b) {
+        return a.rootsX == b.rootsX && a.rootsY == b.rootsY && a.rootsZ == b.rootsZ;
+    }
+
+    // 箱のセルの数(根の数 × 512)
+    [[nodiscard]] constexpr uint32_t LabBoxCellCount(lab::LabBoxShape shape) {
+        return lab::LabRootCount(shape) * multires::MR_BLOCK_CELLS;
+    }
     inline constexpr uint32_t LAB_MAX_COMMANDS_PER_TICK = 64;  // 1 刻みに当てるコマンドの上限(GPU の写しの大きさ)
     inline constexpr uint64_t LAB_WORLD_SEED = 20261009;
     inline constexpr int32_t LAB_INITIAL_TEMPERATURE_MILLIKELVIN = 300000;
@@ -41,7 +54,8 @@ namespace bicameral::sim {
         uint32_t y = 0;
         uint32_t z = 0;
 
-        [[nodiscard]] uint32_t Index() const { return multires::MrCellIndex(x, y, z); }
+        // 箱のセルの番号(lab::LabCellIndex。根 1 つの箱なら MrCellIndex と同じ)
+        [[nodiscard]] uint32_t Index() const { return lab::LabCellIndex(x, y, z); }
     };
 
     // 直方体の範囲(両端を含む。T-0220)。箱全体は LabWholeBox()
@@ -50,8 +64,16 @@ namespace bicameral::sim {
         LabCellPosition high;
     };
 
-    [[nodiscard]] constexpr LabCellRange LabWholeBox() {
-        return {.low = {}, .high = {.x = LAB_BOX_EDGE - 1, .y = LAB_BOX_EDGE - 1, .z = LAB_BOX_EDGE - 1}};
+    [[nodiscard]] constexpr LabCellRange LabWholeBox(lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE) {
+        return {.low = {},
+                .high = {.x = (LAB_BOX_EDGE * shape.rootsX) - 1,
+                         .y = (LAB_BOX_EDGE * shape.rootsY) - 1,
+                         .z = (LAB_BOX_EDGE * shape.rootsZ) - 1}};
+    }
+
+    // 箱のセルの番号から座標
+    [[nodiscard]] constexpr LabCellPosition LabCellPositionOf(uint32_t index) {
+        return {.x = lab::LabCellX(index), .y = lab::LabCellY(index), .z = lab::LabCellZ(index)};
     }
 
     // --- 量の換算(T-0220。パネルが量・圧力を µmol に直す。整数だけ)---
@@ -106,17 +128,23 @@ namespace bicameral::sim {
 
     // --- 箱 ---
 
-    [[nodiscard]] MultiresCapacity LabBoxCapacity(const BakedReactionTable& table);
+    // 箱の木の容量(根の数だけの枠と頁。shape は lab::LabShapeValid であること)
+    [[nodiscard]] MultiresCapacity LabBoxCapacity(const BakedReactionTable& table,
+                                                  lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
-    // 300 K の空気を満たした箱(根はいつも頁を持つ。GPU のコマンドは頁のセルに書くため)
-    [[nodiscard]] MultiresNest MakeLabBoxNest(const BakedReactionTable& table);
+    // 300 K の空気を満たした箱(根はいつも頁を持つ。GPU のコマンドは頁のセルに書くため)。根は x → y → z の順に枠 0 から
+    [[nodiscard]] MultiresNest MakeLabBoxNest(const BakedReactionTable& table,
+                                              lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
-    // 箱のセル index(MrCellIndex)
-    [[nodiscard]] reaction::RxCell LabBoxCell(const MultiresNest& nest, uint32_t index);
+    // 箱のセル index(lab::LabCellIndex。根 1 つなら MrCellIndex)
+    [[nodiscard]] reaction::RxCell LabBoxCell(const MultiresNest& nest, uint32_t index,
+                                              lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
     // CPU リファレンス: 1 刻みのコマンド(並びは (targetTick, sequence) の昇順)を shaders/sim/lab_box.hlsl と同じ順で当てる。
     // 当てた数を返す(当てられないコマンドは飛ばす。表を替えた印は箱をつつくので数に入る。表そのものは呼ぶ側が先に替える)
-    uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands);
+    // 当てたセルを含む根だけをつつく(表を替えた印は全部の根)
+    uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands,
+                              lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
     // --- 物質の一覧が変わる表への差し替え(T-0242・ADR-0065)---
 
@@ -129,22 +157,23 @@ namespace bicameral::sim {
 
     // CPU リファレンスの 1 刻み: コマンドを当てる → StepNest(LAB_STEP_OPTIONS)
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
-                    std::span<const Command> commands);
+                    std::span<const Command> commands, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
     // --- 比べる ---
 
     struct LabMismatch {
         uint64_t tick = 0;
-        uint32_t
-            cell = lab::LAB_NO_CELL;  // 最初に違ったセル(LAB_NO_CELL ならセルは同じで、見出し・端数・帳簿などが違う)
+        uint32_t cell = lab::
+            LAB_NO_CELL;  // 最初に違ったセル(LabCellIndex。LAB_NO_CELL ならセルは同じで、見出し・端数・帳簿などが違う)
         reaction::RxCell cpu{};
         reaction::RxCell gpu{};
         std::string what;  // 表示用の説明
     };
 
-    // 状態の全部(HashWholeNest)が違えば、最初に違ったセル(番号の順)か、セル以外の欄の名前
+    // 状態の全部(HashWholeNest)が違えば、最初に違ったセル(根の枠の順 → 根の中の番号の順)か、セル以外の欄の名前
     [[nodiscard]] std::optional<LabMismatch> FindLabMismatch(const MultiresNest& cpu, const MultiresNest& gpu,
-                                                             uint64_t tick);
+                                                             uint64_t tick,
+                                                             lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
     // --- 実験の記録(コマンドの列 + 刻みごとの状態のハッシュ)---
 
@@ -157,8 +186,10 @@ namespace bicameral::sim {
 
     // 版 2(T-0194)から、実験に使った反応表の版(script::TableVersion)を持つ。0 = 分からない(版 1 の記録・試験の表)。
     // 版 3(T-0218)から、刻みの途中で表を替えた所はコマンドの列の印(MakeLabTableCommand)で持つ。
-    // 版 4(T-0217)から、刻み 0 の表と印の表の中身(tables)を持つ。別の起動でも、途中で表を替えた記録を再生できる
+    // 版 4(T-0217)から、刻み 0 の表と印の表の中身(tables)を持つ。別の起動でも、途中で表を替えた記録を再生できる。
+    // 版 5(T-0173)から、箱の形(shape)を持つ。版 4 までは根 1 つ
     struct LabRecording {
+        lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE;
         uint64_t tableVersion = 0;      // 刻み 0 の表の版
         uint64_t tickCount = 0;         // 流した刻みの数(刻み 0 〜 tickCount − 1)
         std::vector<Command> commands;  // (targetTick, sequence) の昇順
