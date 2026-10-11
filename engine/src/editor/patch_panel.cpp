@@ -80,21 +80,46 @@ namespace bicameral::editor {
             return rules;
         }
 
+        // セルの物質 species の量(µmol)
+        uint64_t AmountOf(const reaction::RxCell& cell, uint32_t species) {
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (cell.species[i] == species)
+                    return cell.amounts[i];
+            }
+
+            return 0;
+        }
+
         // 箱全体の物質 species の合計(µmol)
         uint64_t BoxTotalOf(const sim::MultiresNest& nest, lab::LabBoxShape shape, uint32_t species) {
             const sim::LabCellRange whole = sim::LabWholeBox(shape);
             uint64_t total = 0;
             for (uint32_t z = 0; z <= whole.high.z; ++z) {
                 for (uint32_t y = 0; y <= whole.high.y; ++y) {
-                    for (uint32_t x = 0; x <= whole.high.x; ++x) {
-                        const reaction::RxCell cell = sim::LabBoxCell(nest, lab::LabCellIndex(x, y, z), shape);
-                        for (uint32_t i = 0; i < cell.speciesCount; ++i)
-                            total += cell.species[i] == species ? cell.amounts[i] : 0;
-                    }
+                    for (uint32_t x = 0; x <= whole.high.x; ++x)
+                        total += AmountOf(sim::LabBoxCell(nest, lab::LabCellIndex(x, y, z), shape), species);
                 }
             }
 
             return total;
+        }
+
+        // 刻み tick に (x, y, z) のセルを覆う効いているパッチの数(実験室の断面の色)
+        uint32_t CoveringCount(const ConstWordList& list, int32_t x, int32_t y, int32_t z, uint64_t tick) {
+            uint32_t covering = 0;
+            for (uint32_t i = 0; i < reaction::MpPatchCount(list); ++i) {
+                const reaction::MpPatch patch = reaction::MpLoadPatch(list, i);
+                const bool inside = x >= patch.lowX && x <= patch.highX && y >= patch.lowY && y <= patch.highY &&
+                                    z >= patch.lowZ && z <= patch.highZ;
+                covering += inside && reaction::MpActiveAt(patch, tick) ? 1 : 0;
+            }
+
+            return covering;
+        }
+
+        bool InRange(const std::array<int32_t, 3>& low, const std::array<int32_t, 3>& high, int32_t x, int32_t y,
+                     int32_t z) {
+            return x >= low[0] && x <= high[0] && y >= low[1] && y <= high[1] && z >= low[2] && z <= high[2];
         }
 
         std::string DescribeRange(const std::array<int32_t, 3>& low, const std::array<int32_t, 3>& high) {
@@ -292,9 +317,9 @@ namespace bicameral::editor {
     // 効き方(MP_KIND_* の一覧)と強さ
     void PatchPanel::BuildEffect() {
         ImGui::SeparatorText("効き方");
-        if (ImGui::BeginCombo("種類", PATCH_KINDS.at(m_kind).label.data())) {
+        if (ImGui::BeginCombo("種類", PATCH_KINDS.at(m_kind).label)) {
             for (size_t i = 0; i < PATCH_KINDS.size(); ++i) {
-                if (ImGui::Selectable(PATCH_KINDS[i].label.data(), i == m_kind))
+                if (ImGui::Selectable(PATCH_KINDS[i].label, i == m_kind))
                     m_kind = i;
             }
 
@@ -611,7 +636,6 @@ namespace bicameral::editor {
         ImGui::SliderInt("z", &m_labSliceZ, 0, static_cast<int>(whole.high.z));
 
         const ConstWordList list{.words = session->Cpu().magicPatches};
-        const uint32_t count = reaction::MpPatchCount(list);
         const uint64_t tick = session->NextTick();
         const float pixels = std::min(LAB_CELL_MAX_PIXELS,
                                       LAB_SLICE_PIXELS / static_cast<float>(std::max(edgeX, edgeY)));
@@ -622,13 +646,7 @@ namespace bicameral::editor {
         const bool selected = m_target == Target::Lab && Compose(composed);
         for (int y = 0; y < edgeY; ++y) {
             for (int x = 0; x < edgeX; ++x) {
-                uint32_t covering = 0;
-                for (uint32_t i = 0; i < count; ++i) {
-                    const reaction::MpPatch patch = reaction::MpLoadPatch(list, i);
-                    const bool inside = x >= patch.lowX && x <= patch.highX && y >= patch.lowY && y <= patch.highY &&
-                                        m_labSliceZ >= patch.lowZ && m_labSliceZ <= patch.highZ;
-                    covering += inside && reaction::MpActiveAt(patch, tick) ? 1 : 0;
-                }
+                const uint32_t covering = CoveringCount(list, x, y, m_labSliceZ, tick);
 
                 // 断面の上が y の大きい方(箱の上)
                 const ImVec2 low = {origin.x + (static_cast<float>(x) * pixels),
@@ -638,10 +656,7 @@ namespace bicameral::editor {
                 drawList->AddRectFilled(low, high,
                                         covering > 0 ? IM_COL32(shade, 64, shade, 255) : IM_COL32(40, 40, 48, 255));
 
-                const bool inSelection = selected && x >= composed.low[0] && x <= composed.high[0] &&
-                                         y >= composed.low[1] && y <= composed.high[1] &&
-                                         m_labSliceZ >= composed.low[2] && m_labSliceZ <= composed.high[2];
-                if (inSelection)
+                if (selected && InRange(composed.low, composed.high, x, y, m_labSliceZ))
                     drawList->AddRect(low, high, IM_COL32(255, 220, 64, 255));
             }
         }

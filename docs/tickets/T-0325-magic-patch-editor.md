@@ -40,6 +40,8 @@
 - debug・6 ランナーが同じ GPU を使う中: window_patch_record(100〜106 秒)・window_patch_play(97〜120 秒)通過(3 回)。
 - 回帰(debug): window_place_record / play・window_replay_record / play / editor・brush_preview・float_check_source_accepts 通過
   (window_replay_record は 1 回目に負荷で 240 秒の時間切れ、流し直して 94 秒で通過。エディタを使わない起動の道は変えていない)。
+- clang-tidy(job.py tidy): patch_panel の指摘 0(全体 215 件はすべて前からあるもの。frame_loop の Run・Finish の大きさなど)。
+- main(8cbf977)に載せ直し: 変わらず(main が進んでいない)。
 
 ## 引き継ぎメモ
 - 実験室の「断られた」は、置いた時に CPU リファレンスの列の写しへ同じ関数で足して決める(GPU の実験室は断った数を返さない)。

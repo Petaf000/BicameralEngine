@@ -38,8 +38,8 @@ namespace bicameral::editor {
     };
 
     struct PatchKind {
-        uint32_t kind = 0;  // MP_KIND_*
-        std::string_view label;
+        uint32_t kind = 0;       // MP_KIND_*
+        const char* label = "";  // 表示の名前(ImGui に渡すので 0 終端)
         PatchStrength strength = PatchStrength::None;
     };
 
