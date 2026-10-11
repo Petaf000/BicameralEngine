@@ -40,7 +40,10 @@ assert が出て、release の再生と S(101) から食い違う原因を突き
 - 2026-10-11(作業役 wt2・約 1 時間 40 分): 付け替えの道(RecordTableSwap → RemapSpecies → 適用 → RefreshTable・覗き窓の ApplyDueTables・
   物理〔物質 ID を持たない〕・保存点〔差し替えで捨てる〕・熱のキャッシュ〔2 世代とも作り直す〕)を読んで穴が無いのを確かめ、-O3 の debug で
   記録 10 本・release の再生 10 本・release の記録 3 本の debug の再生がすべて一致・assert 0 を確かめた → 原因は ADR-0079 の -Od。
-  エディタの既定を Remap にし、生の置くコマンドの穴を塞いだ。ADR-0065・design/13 §2.5 に追記。テストは下の「引き継ぎメモ」。
+  エディタの既定を Remap にし、生の置くコマンドの穴を塞いだ。ADR-0065・design/13 §2.5 に追記。
+  release: window_*(18 本)・reaction_hot_reload・reaction_replay_table・reaction_species_remap・float_check_*・gpu_probe_sim・gpu_probe_peek の
+  25 本が通過。rebase(main 1f3e3b7。文書だけ)の後の debug: reaction_hot_reload・reaction_species_remap・window_place_record/play・
+  window_hot_reload_copy/record/play・window_table_edit(_copy)の 9 本が通過(窓の assert 0 件)。
 
 ## 引き継ぎメモ(HANDOFF に載せる状態)
 - エディタのホットリロードは既定で Remap(物質を足す・消す表も当てる)。`--species-remap` は `--auto-reload` のオゾンの段を足すだけ。
