@@ -8,6 +8,8 @@
 //   - (GPU)木の球を置いて同じ刻みに火を付ける・木炭を足す・格子からはみ出す・大きく足す・当てられない値・木箱の壁を窒素に置き換える、
 //     を 1 刻みずつ / 刻みの途中で切るばらばらの分け方で流し、刻みごとのハッシュ・エネルギー・湧き出し・計算したブロックの数が
 //     CPU と一致する。イベントは当たった置くコマンドとつつきの分だけ
+//   - (CPU)球以外の形(直方体・円柱。T-0245)のセルの数・格子の端・当てられない大きさ・T-0222 の記録は球のまま
+//   - (GPU)直方体・円柱を置く・足す・はみ出す、ドラッグで塗る(同じ刻みに重なる球 12 個・間を空けた足す 6 個)も CPU と一致
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ。
 #include <algorithm>
@@ -62,9 +64,10 @@ namespace {
 
     uint32_t CoveredCells(const ProbePlace& place) {
         uint32_t covered = 0;
-        for (uint32_t z = ProbePlaceBegin(place.z, place.radius); z < ProbePlaceEnd(place.z, place.radius); ++z) {
-            for (uint32_t y = ProbePlaceBegin(place.y, place.radius); y < ProbePlaceEnd(place.y, place.radius); ++y) {
-                for (uint32_t x = ProbePlaceBegin(place.x, place.radius); x < ProbePlaceEnd(place.x, place.radius); ++x)
+        for (uint32_t z = ProbePlaceBegin(place.z, place.extentZ); z < ProbePlaceEnd(place.z, place.extentZ); ++z) {
+            for (uint32_t y = ProbePlaceBegin(place.y, place.extentY); y < ProbePlaceEnd(place.y, place.extentY); ++y) {
+                for (uint32_t x = ProbePlaceBegin(place.x, place.extentX); x < ProbePlaceEnd(place.x, place.extentX);
+                     ++x)
                     covered += ProbePlaceCovers(place, x, y, z) ? 1 : 0;
             }
         }
@@ -141,6 +144,65 @@ namespace {
             "当てられない値(格子の外・半径・温度・表に無い物質・重なる物質・量・物質の数 4・0)は飛ばす");
     }
 
+    // 球以外の形(T-0245・ADR-0089): 直方体・円柱のセルの数・格子の端・当てられない大きさ。形の欄が 0 の(T-0222 の)コマンドは球のまま
+    void TestShapes(const BakedReactionTable& table, Failures& failures) {
+        const std::vector<LabMaterial> materials = MakeLabMaterials(table);
+        const std::vector<SpeciesAmount>& wood = Material(materials, "木").contents;
+        const auto decode = [&](const ProbePlaceShape& shape) {
+            return Decode(MakePlaceCommand(0, 0, shape, wood), table);
+        };
+
+        const ProbePlace box = decode(
+            {.x = 10, .y = 10, .z = 10, .radius = 1, .kind = PROBE_PLACE_SHAPE_BOX, .size2 = 2, .size3 = 0});
+        failures.Check(box.valid == 1 && CoveredCells(box) == 15, "直方体: 半幅 (1, 2, 0) は 3 × 5 × 1 = 15 セル");
+
+        const ProbePlace boxCorner = decode(
+            {.x = 0, .y = 63, .z = 0, .radius = 2, .kind = PROBE_PLACE_SHAPE_BOX, .size2 = 2, .size3 = 2});
+        failures.Check(boxCorner.valid == 1 && CoveredCells(boxCorner) == 27, "直方体: 格子の角で 3 × 3 × 3 に切る");
+
+        const ProbePlace upright = decode(
+            {.x = 10, .y = 10, .z = 10, .radius = 2, .kind = PROBE_PLACE_SHAPE_CYLINDER, .size2 = 1, .size3 = 1});
+        failures.Check(
+            upright.valid == 1 && CoveredCells(upright) == 39 && upright.extentY == 1 && upright.extentX == 2,
+            "円柱(y の軸): 半径 2 の円 13 セル × 高さ 3 = 39 セル");
+
+        const ProbePlace disc = decode(
+            {.x = 10, .y = 10, .z = 10, .radius = 1, .kind = PROBE_PLACE_SHAPE_CYLINDER, .size2 = 0, .size3 = 2});
+        failures.Check(disc.valid == 1 && CoveredCells(disc) == 5 && disc.extentZ == 0,
+                       "円柱(z の軸): 半径 1・厚さ 1 は 5 セル");
+
+        const ProbePlace largest = decode({.x = 32,
+                                           .y = 32,
+                                           .z = 32,
+                                           .radius = PROBE_PLACE_MAX_RADIUS,
+                                           .kind = PROBE_PLACE_SHAPE_BOX,
+                                           .size2 = PROBE_PLACE_MAX_RADIUS,
+                                           .size3 = PROBE_PLACE_MAX_RADIUS});
+        failures.Check(largest.valid == 1 && CoveredCells(largest) == 17 * 17 * 17,
+                       "直方体: 1 コマンドの上限は 17³ セル");
+
+        const std::array<ProbePlaceShape, 5> rejected = {{
+            {.kind = 3},
+            {.radius = 1, .kind = PROBE_PLACE_SHAPE_SPHERE, .size2 = 1},
+            {.radius = 1, .kind = PROBE_PLACE_SHAPE_BOX, .size2 = PROBE_PLACE_MAX_RADIUS + 1},
+            {.radius = 1, .kind = PROBE_PLACE_SHAPE_CYLINDER, .size2 = 1, .size3 = 3},
+            {.radius = PROBE_PLACE_MAX_RADIUS + 1, .kind = PROBE_PLACE_SHAPE_BOX},
+        }};
+        failures.Check(rng::none_of(rejected, [&](const ProbePlaceShape& shape) { return decode(shape).valid; }),
+                       "当てられない形(知らない形・球の余分な大きさ・半幅の上限・円柱の軸・大きさ 1 の上限)は飛ばす");
+
+        // --- T-0222 の記録(形の欄が 0)は球のまま・格子の外の古い印(中心の語の上の 8 ビット)は当てない ---
+        ProbePlacePayload legacy{};
+        rng::copy(MakePlaceCommand(0, 0, {.x = 10, .y = 10, .z = 10, .radius = 2}, wood).payload,
+                  std::begin(legacy.words));
+        const ProbePlace legacySphere = ProbeDecodePlace(legacy, static_cast<uint32_t>(table.species.size()));
+        legacy.words[PROBE_PLACE_WORD_CENTER] = 0xFF000000u;
+        const ProbePlace legacyOutside = ProbeDecodePlace(legacy, static_cast<uint32_t>(table.species.size()));
+        failures.Check(legacySphere.valid == 1 && legacySphere.shape == PROBE_PLACE_SHAPE_SPHERE &&
+                           CoveredCells(legacySphere) == 33 && legacyOutside.valid == 0,
+                       "T-0222 の形: 球のまま・格子の外の印は当てない");
+    }
+
     // --- 場面 ---
 
     std::vector<ProbeCommand> MakeCommands(const BakedReactionTable& table) {
@@ -164,6 +226,39 @@ namespace {
         place(7, {.x = 28, .y = 32, .z = 32, .radius = 2}, Material(materials, "窒素").contents);
         place(9, {.x = 32, .y = 32, .z = 32, .radius = PROBE_PLACE_MAX_RADIUS, .replace = false}, wood);
         commands.push_back(MakePokeCommand(11, sequence++, 30, 32, 32));
+
+        // 球以外の形(T-0245): 木の直方体の壁・木炭の円柱(縦)・格子の端からはみ出す空気の円柱(z の軸)を足す
+        place(13, {.x = 12, .y = 40, .z = 32, .radius = 1, .kind = PROBE_PLACE_SHAPE_BOX, .size2 = 6, .size3 = 4},
+              wood);
+        place(13,
+              {.x = 12,
+               .y = 40,
+               .z = 32,
+               .radius = 2,
+               .replace = false,
+               .kind = PROBE_PLACE_SHAPE_CYLINDER,
+               .size2 = 3,
+               .size3 = 1},
+              Material(materials, "木炭").contents);
+        place(14,
+              {.x = 2,
+               .y = 2,
+               .z = 60,
+               .radius = 5,
+               .replace = false,
+               .kind = PROBE_PLACE_SHAPE_CYLINDER,
+               .size2 = 8,
+               .size3 = 2},
+              Material(materials, "空気").contents);
+        commands.push_back(MakePokeCommand(15, sequence++, 12, 40, 32));
+
+        // ドラッグで塗る(T-0245): 同じ刻みに重なる球を 1 セルずつずらして 12 個(置き換え)と、重ならない間隔の足すを 6 個
+        for (uint32_t i = 0; i < 12; ++i)
+            place(17, {.x = 40 + i, .y = 20, .z = 32, .radius = 3}, wood);
+
+        for (uint32_t i = 0; i < 6; ++i)
+            place(18, {.x = 36 + (i * 5), .y = 24, .z = 32, .radius = 2, .replace = false},
+                  Material(materials, "木炭").contents);
 
         return commands;
     }
@@ -373,6 +468,7 @@ int main(int argc, char** argv) {
 
     Failures failures;
     TestCellRules(*table, failures);
+    TestShapes(*table, failures);
     TestScene(device->Get(), *table, failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_place_test");

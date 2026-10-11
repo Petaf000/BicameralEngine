@@ -1,4 +1,4 @@
-// lab_panel.cpp — エディタの「実験室」のパネル(lab_panel.h)。
+// lab_panel.cpp — エディタの「実験室」のパネル(lab_panel.h)。材料の行は editor/material_rows(筆と共通。T-0245)。
 #include "editor/lab_panel.h"
 
 #include <algorithm>
@@ -20,10 +20,6 @@ namespace bicameral::editor {
         constexpr int MAX_KELVIN = static_cast<int>(lab::LAB_MAX_TEMPERATURE_MILLIKELVIN / 1000);
         constexpr float SLICE_CELL_PIXELS = 22.0f;
         constexpr float HOT_KELVIN = 2000.0f;  // 断面の色がいちばん明るくなる温度
-        constexpr double MICROMOLES_PER_MOLE = 1e6;
-        constexpr double MILLIGRAMS_PER_GRAM = 1e3;
-        constexpr double PASCALS_PER_KILOPASCAL = 1e3;
-        constexpr double MAX_AMOUNT_INPUT = 1e9;  // 入力の上限(mol・g・kPa。整数に直す時に溢れないように)
 
         // --auto-lab の実験(tests/gpu_lab_box_test と同じ形を短く)
         constexpr uint32_t AUTO_IGNITE_TICK = 3;
@@ -115,13 +111,8 @@ namespace bicameral::editor {
             return;
 
         // --- 材料の行の物質 ID を名前で新しい表へ(物質を足す・消す表では ID がずれる。消えた物質の行は空に。T-0242)---
-        if (m_table != nullptr) {
-            for (MaterialRow& row : m_rows) {
-                const auto oldId = static_cast<size_t>(row.species);
-                const bool known = row.species > 0 && oldId < m_table->speciesNames.size();
-                row.species = known ? static_cast<int>(loaded->table.SpeciesId(m_table->speciesNames[oldId])) : 0;
-            }
-        }
+        if (m_table != nullptr)
+            RemapMaterialRows(*m_table, loaded->table, m_rows);
 
         m_loaded = std::move(loaded);
         m_table = std::shared_ptr<const sim::BakedReactionTable>(m_loaded, &m_loaded->table);
@@ -243,49 +234,12 @@ namespace bicameral::editor {
 
     void LabPanel::LoadPreset(size_t index) {
         m_rows = {};
-        if (index >= m_materials.size())
-            return;
-
-        const std::vector<sim::SpeciesAmount>& contents = m_materials[index].contents;
-        for (size_t i = 0; i < std::min(contents.size(), m_rows.size()); ++i) {
-            m_rows[i] = {.species = static_cast<int>(contents[i].species),
-                         .amount = static_cast<double>(contents[i].amount) / MICROMOLES_PER_MOLE,
-                         .unit = AmountUnit::Mole};
-        }
-    }
-
-    // 1 行の量を µmol に(表示の入力だけ浮動小数点。コマンドに入るのは整数の µmol)
-    uint64_t LabPanel::RowMicromoles(const MaterialRow& row, uint32_t temperatureMilliKelvin) const {
-        const sim::BakedReactionTable& table = m_session->Table();
-        if (row.species <= 0 || static_cast<size_t>(row.species) >= table.molarMasses.size() || row.amount <= 0.0)
-            return 0;
-
-        const double amount = std::min(row.amount, MAX_AMOUNT_INPUT);
-        switch (row.unit) {
-            case AmountUnit::Mole: return static_cast<uint64_t>(std::llround(amount * MICROMOLES_PER_MOLE));
-            case AmountUnit::Gram:
-                return sim::LabMassMicromoles(static_cast<uint64_t>(std::llround(amount * MILLIGRAMS_PER_GRAM)),
-                                              table.molarMasses[static_cast<size_t>(row.species)]);
-            case AmountUnit::KiloPascal:
-                return sim::LabGasMicromoles(static_cast<uint64_t>(std::llround(amount * PASCALS_PER_KILOPASCAL)),
-                                             temperatureMilliKelvin);
-        }
-
-        return 0;
+        if (index < m_materials.size())
+            LoadMaterialRows(m_materials[index], m_rows);
     }
 
     std::vector<sim::SpeciesAmount> LabPanel::ComposedContents(uint32_t temperatureMilliKelvin) const {
-        std::vector<sim::SpeciesAmount> contents;
-        for (const MaterialRow& row : m_rows) {
-            const uint64_t amount = RowMicromoles(row, temperatureMilliKelvin);
-            const auto species = static_cast<uint32_t>(row.species);
-            const bool repeated = std::ranges::any_of(
-                contents, [&](const sim::SpeciesAmount& c) { return c.species == species; });
-            if (amount > 0 && !repeated)
-                contents.push_back({.species = species, .amount = amount});
-        }
-
-        return contents;
+        return ComposeMaterial(m_session->Table(), m_rows, temperatureMilliKelvin);
     }
 
     sim::LabCellRange LabPanel::PlaceRange() const {
@@ -311,41 +265,7 @@ namespace bicameral::editor {
     }
 
     void LabPanel::BuildMaterialRows(uint32_t milliKelvin) {
-        const sim::BakedReactionTable& table = m_session->Table();
-        constexpr std::array<const char*, 3> UNIT_NAMES = {"mol", "g", "kPa(分圧)"};
-        for (size_t i = 0; i < m_rows.size(); ++i) {
-            MaterialRow& row = m_rows[i];
-            ImGui::PushID(static_cast<int>(i));
-            ImGui::SetNextItemWidth(150.0f);
-            const auto speciesIndex = static_cast<size_t>(std::max(row.species, 0));
-            const char* name = row.species > 0 && speciesIndex < table.speciesNames.size()
-                                   ? table.speciesNames[speciesIndex].c_str()
-                                   : "(なし)";
-            if (ImGui::BeginCombo("##species", name)) {
-                if (ImGui::Selectable("(なし)", row.species <= 0))
-                    row.species = 0;
-
-                for (size_t id = 1; id < table.speciesNames.size(); ++id) {
-                    if (ImGui::Selectable(table.speciesNames[id].c_str(), speciesIndex == id))
-                        row.species = static_cast<int>(id);
-                }
-
-                ImGui::EndCombo();
-            }
-
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(110.0f);
-            ImGui::InputDouble("##amount", &row.amount, 0.0, 0.0, "%.4g");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(100.0f);
-            int unit = static_cast<int>(row.unit);
-            if (ImGui::Combo("##unit", &unit, UNIT_NAMES.data(), static_cast<int>(UNIT_NAMES.size())))
-                row.unit = static_cast<AmountUnit>(unit);
-
-            ImGui::SameLine();
-            ImGui::Text("= %llu µmol", static_cast<unsigned long long>(RowMicromoles(row, milliKelvin)));
-            ImGui::PopID();
-        }
+        BuildMaterialRowsUi(m_session->Table(), m_rows, milliKelvin);
     }
 
     void LabPanel::BuildControls() {

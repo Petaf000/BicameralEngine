@@ -23,29 +23,17 @@
 #include <string>
 #include <vector>
 
+#include "editor/material_rows.h"
 #include "gpu/com_ptr.h"
 #include "script/reaction_table_loader.h"
 #include "sim/lab_session.h"
 
 namespace bicameral::editor {
 
-    enum class AmountUnit : uint8_t {
-        Mole,
-        Gram,
-        KiloPascal,  // 1 セル(0.125 m³)を理想気体で満たした分圧(置く温度で µmol に直す)
-    };
-
     enum class RangeKind : uint8_t {
         Cell,
         Box,
         Whole,
-    };
-
-    // 材料の 1 行(表示の入力。置く時に整数の µmol に直す)
-    struct MaterialRow {
-        int species = 0;  // 物質 ID(0 = なし)
-        double amount = 0.0;
-        AmountUnit unit = AmountUnit::Mole;
     };
 
     class LabPanel {
@@ -80,7 +68,6 @@ namespace bicameral::editor {
         void BuildMaterialRows(uint32_t milliKelvin);
         void BuildStepControls();
         void LoadPreset(size_t index);
-        [[nodiscard]] uint64_t RowMicromoles(const MaterialRow& row, uint32_t temperatureMilliKelvin) const;
         [[nodiscard]] std::vector<sim::SpeciesAmount> ComposedContents(uint32_t temperatureMilliKelvin) const;
         [[nodiscard]] sim::LabCellRange PlaceRange() const;
         void BuildStatus();
@@ -102,7 +89,7 @@ namespace bicameral::editor {
         // --- 操作の状態(View。世界に入らない)---
         std::array<int, 3> m_cell = {3, 3, 3};
         size_t m_preset = 1;  // ひな形(m_materials の添字。初めは木)
-        std::array<MaterialRow, lab::LAB_MAX_FILL_SPECIES> m_rows{};
+        MaterialRows m_rows{};
         RangeKind m_rangeKind = RangeKind::Cell;
         std::array<int, 3> m_rangeLow = {0, 0, 0};
         std::array<int, 3> m_rangeHigh = {7, 7, 7};

@@ -155,9 +155,10 @@ add_library(bicameral_view STATIC
 target_include_directories(bicameral_view PUBLIC src)
 target_link_libraries(bicameral_view PUBLIC bicameral_core)
 
-# --- editor: エディタの時間の操作(GPU を知らない。CPU だけのテストがある。T-0023)---
+# --- editor: エディタの時間の操作・筆の運び(GPU を知らない。CPU だけのテストがある。T-0023・T-0245)---
 # ImGui のパネル(src/editor/editor_overlay.cpp)は D3D12 を使うのでランタイムの方に入れる
 add_library(bicameral_editor STATIC
+  src/editor/brush_stroke.cpp
   src/editor/time_control.cpp
 )
 target_include_directories(bicameral_editor PUBLIC src)
@@ -171,6 +172,7 @@ add_executable(bicameral
   src/editor/gauge_panel.cpp
   src/editor/graph_panel.cpp
   src/editor/lab_panel.cpp
+  src/editor/material_rows.cpp
   src/editor/reaction_table_panel.cpp
   src/frame/auto_reload.cpp
   src/frame/frame_loop.cpp

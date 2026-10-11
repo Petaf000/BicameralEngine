@@ -175,9 +175,11 @@ namespace bicameral::sim {
         const uint32_t mode = shape.replace ? PROBE_PLACE_MODE_REPLACE : PROBE_PLACE_MODE_ADD;
         const auto count = static_cast<uint32_t>(contents.size());
         const bool inside = shape.x < PROBE_GRID_SIZE && shape.y < PROBE_GRID_SIZE && shape.z < PROBE_GRID_SIZE;
-        command.payload[PROBE_PLACE_WORD_CENTER] = inside ? shape.x | (shape.y << 8) | (shape.z << 16) : 0xFF000000u;
+        // 形の大きさ 2・3 は 4 ビット(上限を超える値は 0xF にして当てないコマンドに)。格子の外は x = 0xFF
+        const uint32_t sizes = (std::min(shape.size2, 0xFu) << 24) | (std::min(shape.size3, 0xFu) << 28);
+        command.payload[PROBE_PLACE_WORD_CENTER] = inside ? shape.x | (shape.y << 8) | (shape.z << 16) | sizes : 0xFFu;
         command.payload[PROBE_PLACE_WORD_SHAPE] = std::min(shape.radius, 0xFFu) | (mode << 8) |
-                                                  (std::min(count, 0xFFu) << 16);
+                                                  (std::min(count, 0xFFu) << 16) | (std::min(shape.kind, 0xFFu) << 24);
         command.payload[PROBE_PLACE_WORD_TEMPERATURE] = shape.temperatureMilliKelvin;
 
         const uint32_t written = std::min(count, PROBE_PLACE_MAX_SPECIES);
@@ -1186,7 +1188,7 @@ namespace bicameral::sim {
         };
 
         // 置くコマンド(T-0222)を current に当てる(probe_tick.hlsl の ApplyPlace と同じ順と範囲)。変わったエネルギーを返す。
-        // 触ったブロック(球の範囲の箱が重なるブロック全部)は予定の種にし、「刻みの直前に変わった」にする
+        // 触ったブロック(形を囲む箱が重なるブロック全部)は予定の種にし、「刻みの直前に変わった」にする
         uint64_t ApplyPlace(const ReactionTableView& table, uint32_t speciesCount, ReferenceGeneration current,
                             uint64_t tick, const ProbeCommand& command, std::vector<uint8_t>& seeds,
                             std::vector<uint64_t>& changedMarks) {
@@ -1198,11 +1200,11 @@ namespace bicameral::sim {
 
             // --- セル ---
             int64_t source = 0;
-            for (uint32_t z = ProbePlaceBegin(place.z, place.radius); z < ProbePlaceEnd(place.z, place.radius); ++z) {
-                for (uint32_t y = ProbePlaceBegin(place.y, place.radius); y < ProbePlaceEnd(place.y, place.radius);
+            for (uint32_t z = ProbePlaceBegin(place.z, place.extentZ); z < ProbePlaceEnd(place.z, place.extentZ); ++z) {
+                for (uint32_t y = ProbePlaceBegin(place.y, place.extentY); y < ProbePlaceEnd(place.y, place.extentY);
                      ++y) {
-                    for (uint32_t x = ProbePlaceBegin(place.x, place.radius); x < ProbePlaceEnd(place.x, place.radius);
-                         ++x) {
+                    for (uint32_t x = ProbePlaceBegin(place.x, place.extentX);
+                         x < ProbePlaceEnd(place.x, place.extentX); ++x) {
                         if (!ProbePlaceCovers(place, x, y, z))
                             continue;
 
@@ -1219,12 +1221,12 @@ namespace bicameral::sim {
             }
 
             // --- ブロック ---
-            const uint32_t beginX = ProbePlaceBegin(place.x, place.radius) / PROBE_BLOCK_SIZE;
-            const uint32_t beginY = ProbePlaceBegin(place.y, place.radius) / PROBE_BLOCK_SIZE;
-            const uint32_t beginZ = ProbePlaceBegin(place.z, place.radius) / PROBE_BLOCK_SIZE;
-            const uint32_t endX = (ProbePlaceEnd(place.x, place.radius) - 1) / PROBE_BLOCK_SIZE;
-            const uint32_t endY = (ProbePlaceEnd(place.y, place.radius) - 1) / PROBE_BLOCK_SIZE;
-            const uint32_t endZ = (ProbePlaceEnd(place.z, place.radius) - 1) / PROBE_BLOCK_SIZE;
+            const uint32_t beginX = ProbePlaceBegin(place.x, place.extentX) / PROBE_BLOCK_SIZE;
+            const uint32_t beginY = ProbePlaceBegin(place.y, place.extentY) / PROBE_BLOCK_SIZE;
+            const uint32_t beginZ = ProbePlaceBegin(place.z, place.extentZ) / PROBE_BLOCK_SIZE;
+            const uint32_t endX = (ProbePlaceEnd(place.x, place.extentX) - 1) / PROBE_BLOCK_SIZE;
+            const uint32_t endY = (ProbePlaceEnd(place.y, place.extentY) - 1) / PROBE_BLOCK_SIZE;
+            const uint32_t endZ = (ProbePlaceEnd(place.z, place.extentZ) - 1) / PROBE_BLOCK_SIZE;
             for (uint32_t bz = beginZ; bz <= endZ; ++bz) {
                 for (uint32_t by = beginY; by <= endY; ++by) {
                     for (uint32_t bx = beginX; bx <= endX; ++bx) {
