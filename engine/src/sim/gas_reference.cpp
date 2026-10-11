@@ -3,6 +3,8 @@
 // 面の質量の流れを出し、風上のセルごとに出ていく割合を合計 1 までに抑える → (4) 面ごとに移す成分の物質量を決める
 // (MUSCL で面へ延ばした割合・乱数の丸め。G2)→ 風上のセルごとに合計が中身を超えないよう抑える → (5) 移す。
 // どの段も前の段の結果を読み、次の配列へ整数の足し引きだけで書く(順番に依存しない。04 R2・R3)。
+// 断熱(T-0234・07 §2.4): セルのエネルギーは全エネルギー(熱 + 化学 + 運動)。温度は運動エネルギーを引いた熱から導き、
+// (5) で移す塊は風上の熱の分け前 + 押し出す仕事 n R T + 運動エネルギーの分け前を運ぶ(上へ動けば重さの仕事を失い、帳簿へ)。
 #include "sim/gas_reference.h"
 
 #include <algorithm>
@@ -26,6 +28,17 @@ namespace bicameral::sim {
         constexpr uint64_t HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 = 392266;
 
         constexpr uint64_t GRAVITY_MICROMETER_PER_SECOND2 = 9806650;
+
+        // 重さの仕事: 質量 1 mg が 1 セル(0.5 m)上がる仕事 = 1e-6 kg × g × 0.5 m = 4.903325 µJ(× これ ÷ 1e6)
+        constexpr uint64_t GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 = 4903325;
+
+        // 気体定数 R = 8.314462618 J/(mol·K) = 8314.462618 nJ/(µmol·K)(× これ ÷ 1e6。α の γ を作る)
+        constexpr uint64_t GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6 = 8314462618;
+
+        // 運動量の 2 乗を運動エネルギーへ: ½ m v² = P² × 2^-41 ÷ m(µJ。P は mg·2^-20 m/s、m は mg)
+        constexpr uint32_t KINETIC_SHIFT = 41;
+        constexpr uint64_t MAX_MOMENTUM = (uint64_t)1
+                                          << 52;  // 2 乗を 41 ずらした 3 軸の和が 64bit に収まる(150 g で約 3 万 m/s)
         constexpr uint64_t MICRO = 1000000;
         constexpr uint64_t ONE_Q32 = (uint64_t)1 << 32;
         constexpr uint64_t LOW_32_BITS = ONE_Q32 - 1;
@@ -105,9 +118,24 @@ namespace bicameral::sim {
             return mass;
         }
 
-        // 温度(mK)= 熱(µJ)× 1e6 ÷ 熱容量(nJ/K)。熱が 0 以下なら 0
-        uint32_t CellTemperature(const GasConfig& config, const GasCell& cell) {
-            const int64_t heat = cell.energy * 1000 - ChemicalEnergy(config, cell);
+        // 運動エネルギー(µJ)= Σ (P² >> 41)÷ m(軸ごとに切り捨ててから足す。GPU も同じ形)。等温は 0(エネルギーに数えない)
+        int64_t KineticEnergy(const GasConfig& config, const GasCell& cell, uint64_t mass) {
+            if (config.thermodynamics != GasThermodynamics::Adiabatic || mass == 0)
+                return 0;
+
+            uint64_t scaledSquare = 0;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                const uint64_t magnitude = fx::FxAbsU64(cell.momentum[axis]);
+                assert(magnitude < MAX_MOMENTUM);
+                scaledSquare += fx::FxShiftRightU128(fx::FxMulU64Full(magnitude, magnitude), KINETIC_SHIFT);
+            }
+
+            return (int64_t)(scaledSquare / mass);
+        }
+
+        // 温度(mK)= 熱(µJ)× 1e6 ÷ 熱容量(nJ/K)。熱 = エネルギー − 化学 − 運動(µJ)。熱が 0 以下なら 0
+        uint32_t CellTemperature(const GasConfig& config, const GasCell& cell, int64_t kineticMicroJoule) {
+            const int64_t heat = cell.energy * 1000 - ChemicalEnergy(config, cell) - kineticMicroJoule;
             const uint64_t capacity = HeatCapacity(config, cell);
             if (heat <= 0 || capacity == 0)
                 return 0;
@@ -135,7 +163,7 @@ namespace bicameral::sim {
             derived.mass = CellMass(config, coefficients, cell);
             derived.inverseMass = derived.mass == 0 ? 0 : std::numeric_limits<uint64_t>::max() / derived.mass;
             derived.inverseAmount = amount == 0 ? 0 : std::numeric_limits<uint64_t>::max() / amount;
-            derived.temperature = CellTemperature(config, cell);
+            derived.temperature = CellTemperature(config, cell, KineticEnergy(config, cell, derived.mass));
             derived.pressure = CellPressure(config, cell, derived.temperature);
 
             return derived;
@@ -332,27 +360,53 @@ namespace bicameral::sim {
             return fx::FxApplySign(quotient, a < 0);
         }
 
-        // 移す塊のエネルギー: 熱は風上の熱を熱容量の比で分け(塊の温度 = 風上の温度)、化学のエネルギーは移す物質量から。
+        // 移す塊のエネルギー(µJ。丸める前): 熱は風上の熱を熱容量の比で分け(塊の温度 = 風上の温度)、化学のエネルギーは移す物質量から。
         // 物質量の切り捨てとエネルギーの切り捨てが別々だと、塊の温度が少しずつ偏り、流れに沿って熱が運ばれる偽の温度の縞が
-        // 浮力で対流を育てる(試作で見た。07 §2.1)。丸めは最も近い整数(偏りなし)
-        int64_t MovedEnergy(const GasConfig& config, const GasCell& source, const GasCell& moved) {
+        // 浮力で対流を育てる(試作で見た。07 §2.1)。
+        // 断熱(T-0234): + 押し出す仕事 pV = n R T(塊を押し出す風上の気体が失い、受ける側が得る = 熱 + これがエンタルピー。
+        // 風上は膨張で冷え、風下は圧縮で温まる。07 §2.4)+ 運動エネルギーの分け前(運動量と同じ割合)
+        int64_t MovedEnergy(const GasConfig& config, const GasCell& source, const GasDerived& sourceDerived,
+                            const GasCell& moved, uint64_t fraction) {
             const uint64_t sourceCapacity = HeatCapacity(config, source);
             const int64_t movedChemical = ChemicalEnergy(config, moved);
             if (sourceCapacity == 0)
-                return DivideNearest(movedChemical, 1000);
+                return movedChemical;
 
-            const int64_t sourceHeat = source.energy * 1000 - ChemicalEnergy(config, source);
+            const int64_t sourceKinetic = KineticEnergy(config, source, sourceDerived.mass);
+            const int64_t sourceHeat = source.energy * 1000 - ChemicalEnergy(config, source) - sourceKinetic;
             const fx::FxU128 numerator = fx::FxMulU64Full(fx::FxAbsU64(sourceHeat), HeatCapacity(config, moved));
             const fx::FxDivResult share = fx::FxDivU128By64(numerator, sourceCapacity);
             const uint64_t heat = share.quotient + (share.remainder * 2 >= sourceCapacity ? 1 : 0);
             const int64_t movedHeat = fx::FxApplySign(heat, sourceHeat < 0);
+            int64_t energy = movedHeat + movedChemical;
+            if (config.thermodynamics != GasThermodynamics::Adiabatic)
+                return energy;
 
-            return DivideNearest(movedHeat + movedChemical, 1000);
+            // --- 押し出す仕事 n R T(µJ)= n × T × (圧力の係数)÷ 8(V = 0.125 m³)と運動エネルギーの分け前 ---
+            const fx::FxU128 amountTemperature = fx::FxMulU64Full(TotalAmount(config, moved),
+                                                                  sourceDerived.temperature);
+            assert(amountTemperature.hi == 0);
+            energy += (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 35);
+            energy += (int64_t)MulShiftU64((uint64_t)sourceKinetic, fraction, 32);
+
+            return energy;
+        }
+
+        // 重さの仕事(µJ): 縦の面を上へ動く塊は m g Δx を失い、下へ動く塊は得る(位置のエネルギーは数えないので帳簿へ。断熱のときだけ。
+        // 上がる空気が冷える〔約 10 mK/m〕のは、押し出す仕事とこれの差)
+        int64_t GravityWork(const GasBox& box, const GasFace& face, const GasCell& moved) {
+            if (face.axis != 2 || !box.config.gravity || box.config.thermodynamics != GasThermodynamics::Adiabatic)
+                return 0;
+
+            const uint64_t mass = CellMass(box.config, box.coefficients, moved);
+            const auto work = (int64_t)(mass * GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / MICRO);
+
+            return face.flow > 0 ? work : -work;
         }
 
         // 中身の一部を移す(風上 → 風下)。どちらかが開いた境界の外なら帳簿へ
-        void Transfer(GasBox& box, const std::vector<GasCell>& forced, std::vector<GasCell>& next,
-                      const GasFace& face) {
+        void Transfer(GasBox& box, const std::vector<GasCell>& forced, const std::vector<GasDerived>& derived,
+                      std::vector<GasCell>& next, const GasFace& face) {
             if (face.fraction == 0)
                 return;
 
@@ -364,9 +418,15 @@ namespace bicameral::sim {
 
             GasCell moved;
             moved.amounts = face.moved;
-            moved.energy = MovedEnergy(box.config, source, moved);
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                 moved.momentum[axis] = fx::FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
+
+            // --- エネルギー: 引く側は塊のエネルギー、足す側はそこから重さの仕事を引いた値(差は帳簿へ。丸めは最も近い整数で偏りなし)---
+            const int64_t energy = MovedEnergy(box.config, source, SideDerived(box, derived, donor), moved,
+                                               face.fraction);
+            const int64_t sent = DivideNearest(energy, 1000);
+            const int64_t received = DivideNearest(energy - GravityWork(box, face, moved), 1000);
+            box.ledger.energy += received - sent;
 
             // --- 引く側 ---
             if (donor.kind == SideKind::Cell) {
@@ -376,14 +436,14 @@ namespace bicameral::sim {
                     cell.amounts[s] -= moved.amounts[s];
                 }
 
-                cell.energy -= moved.energy;
+                cell.energy -= sent;
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                     cell.momentum[axis] -= moved.momentum[axis];
             } else {
                 for (uint32_t s = 0; s < speciesCount; ++s)
                     box.ledger.amounts[s] += (int64_t)moved.amounts[s];
 
-                box.ledger.energy += moved.energy;
+                box.ledger.energy += sent;
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                     box.ledger.momentum[axis] += moved.momentum[axis];
             }
@@ -394,14 +454,14 @@ namespace bicameral::sim {
                 for (uint32_t s = 0; s < speciesCount; ++s)
                     cell.amounts[s] += moved.amounts[s];
 
-                cell.energy += moved.energy;
+                cell.energy += received;
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                     cell.momentum[axis] += moved.momentum[axis];
             } else {
                 for (uint32_t s = 0; s < speciesCount; ++s)
                     box.ledger.amounts[s] -= (int64_t)moved.amounts[s];
 
-                box.ledger.energy -= moved.energy;
+                box.ledger.energy -= received;
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                     box.ledger.momentum[axis] -= moved.momentum[axis];
             }
@@ -611,7 +671,7 @@ namespace bicameral::sim {
             // --- (5) 風上の中身(力を当てた後)を移す ---
             std::vector<GasCell> next = forced;
             for (const GasFace& face : faces)
-                Transfer(box, forced, next, face);
+                Transfer(box, forced, derived, next, face);
 
             box.cells = std::move(next);
         }
@@ -705,6 +765,9 @@ namespace bicameral::sim {
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                 ghost.momentum[axis] = mass * config.windVelocity[axis];
 
+            ghost.energy += DivideNearest(KineticEnergy(config, ghost, (uint64_t)mass),
+                                          1000);  // 風の運動エネルギー(断熱)
+
             box.ghost.push_back(ghost);
         }
 
@@ -714,7 +777,21 @@ namespace bicameral::sim {
         const uint64_t sound = config.soundSpeedMmPerS;
         const fx::FxU128 numerator = fx::FxMulU64Full(sound * sound * 8 * ground.mass, ONE_Q32);
         box.coefficients.soundScale = fx::FxDivU128By64(numerator, (uint64_t)ground.pressure * MICRO).quotient;
-        box.coefficients.soundTemperature = ground.temperature;
+
+        // 断熱: α を 1 ÷ γ = C_v ÷ (C_v + n R) 倍(圧縮で温まる分だけ圧力が強く戻るので、音速 √(α γ c_iso²) を c̃ にそろえる)
+        if (config.thermodynamics == GasThermodynamics::Adiabatic) {
+            const GasCell& groundCell = box.reference.front();
+            const uint64_t capacity = HeatCapacity(config, groundCell);
+            const uint64_t gasConstant = fx::FxDivU128By64(fx::FxMulU64Full(TotalAmount(config, groundCell),
+                                                                            GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6),
+                                                           MICRO)
+                                             .quotient;
+            box.coefficients.soundScale = fx::FxDivU128By64(fx::FxMulU64Full(box.coefficients.soundScale, capacity),
+                                                            capacity + gasConstant)
+                                              .quotient;
+        }
+        box.coefficients.soundTemperature = config.soundCapTemperature == 0 ? ground.temperature
+                                                                            : config.soundCapTemperature;
 
         // --- セル = 層の基準 + 風 ---
         box.cells.resize((size_t)config.sizeX * config.sizeY * config.sizeZ);
@@ -741,6 +818,17 @@ namespace bicameral::sim {
         derived.scaledPressure = scaled;
 
         return derived;
+    }
+
+    int64_t GasKineticEnergy(const GasBox& box, const GasCell& cell) {
+        return KineticEnergy(box.config, cell, CellMass(box.config, box.coefficients, cell));
+    }
+
+    void SetGasMomentum(const GasBox& box, GasCell& cell, const std::array<int64_t, GAS_AXES>& momentum) {
+        const uint64_t mass = CellMass(box.config, box.coefficients, cell);
+        const int64_t before = KineticEnergy(box.config, cell, mass);
+        cell.momentum = momentum;
+        cell.energy += DivideNearest(KineticEnergy(box.config, cell, mass) - before, 1000);
     }
 
     int64_t GasVelocity(const GasBox& box, const GasCell& cell, uint32_t axis) {

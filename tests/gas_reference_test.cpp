@@ -5,6 +5,9 @@
 //   微量の成分(1 セル 5 µmol)が風で流れる(切り捨てでは動かない)。
 //   T-0226(本物の音速。D-440): 細い管の圧力の段差が 340 m/s で伝わる・強い段差は衝撃波になり等温の気体の理論の速さで進み、幅が広がらない・
 //   1% のでたらめな乱れが 3 次元で育たない(安定の条件)・1 セルの 5 倍の圧力や 1500 K のセルで真空のセルができず保存が保たれる。
+//   T-0234(断熱の仕事 pdV・運動エネルギーの散逸を熱へ): 全エネルギー(熱 + 化学 + 運動)が毎刻み「初め + 帳簿(重さの仕事)」とビット一致・
+//   弱い圧縮の波と膨張の波の温度が T ∝ p^((γ−1)/γ)・強い段差の衝撃波の速さと後ろの温度が Rankine–Hugoniot・膨張の波の温度が断熱の理論・
+//   動きが止まると失った運動エネルギーが熱になる。等温の形(T-0226 まで)も設定で残し、等温の衝撃波の試験で確かめる。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。測った値も表示する(07 §2.1 に書いた数字の出どころ)。
 #include <algorithm>
 #include <array>
@@ -46,9 +49,10 @@ namespace {
         config.sizeY = sizeY;
         config.sizeZ = sizeZ;
         config.speciesCount = 3;
-        config.species[0] = {.molarMass = 28013, .heatCapacity = 29124, .formationEnergy = 0};  // N2
-        config.species[1] = {.molarMass = 31999, .heatCapacity = 29378, .formationEnergy = 0};  // O2
-        config.species[2] = {.molarMass = 28013, .heatCapacity = 29124, .formationEnergy = 0};  // 煙の印
+        // 比熱は定積の c_v(定圧 29.124・29.378 J/(mol·K) − R。断熱では押し出す仕事が R の分を足す。T-0234)
+        config.species[0] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};  // N2
+        config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0};  // O2
+        config.species[2] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};  // 煙の印
 
         return config;
     }
@@ -107,8 +111,7 @@ namespace {
         AddSmoke(box, box.Index(5, 5, 5));
 
         GasCell& moving = box.cells[box.Index(2, 6, 4)];
-        moving.momentum[0] = ROUGH_CELL_MASS * 2 * METER_PER_SECOND;
-        moving.momentum[2] = -ROUGH_CELL_MASS * METER_PER_SECOND;
+        SetGasMomentum(box, moving, {ROUGH_CELL_MASS * 2 * METER_PER_SECOND, 0, -ROUGH_CELL_MASS * METER_PER_SECOND});
 
         return box;
     }
@@ -124,8 +127,7 @@ namespace {
             EXPECT(box.ledger.amounts[s] == 0);
         }
 
-        EXPECT(after.energy == before.energy);
-        EXPECT(box.ledger.energy == 0);
+        EXPECT(after.energy == before.energy + box.ledger.energy);  // 断熱では帳簿は重さの仕事だけ(T-0234)
         for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
             EXPECT(after.momentum[axis] == before.momentum[axis] + box.ledger.momentum[axis]);
 
@@ -147,9 +149,9 @@ namespace {
         std::fill(reference.begin() + 1, reference.end(), reference.front());
         GasBox box = MakeGasBox(config, reference);
         Heat(box, box.Index(1, 2, 1), AIR_TEMPERATURE + 80000);
-        box.cells[box.Index(5, 5, 2)].momentum = {ROUGH_CELL_MASS * 3 * METER_PER_SECOND,
-                                                  -ROUGH_CELL_MASS * METER_PER_SECOND,
-                                                  ROUGH_CELL_MASS * 2 * METER_PER_SECOND};
+        SetGasMomentum(box, box.cells[box.Index(5, 5, 2)],
+                       {ROUGH_CELL_MASS * 3 * METER_PER_SECOND, -ROUGH_CELL_MASS * METER_PER_SECOND,
+                        ROUGH_CELL_MASS * 2 * METER_PER_SECOND});
         AddSmoke(box, box.Index(6, 1, 0));
 
         const GasTotals before = SumGas(box);
@@ -160,6 +162,7 @@ namespace {
             EXPECT(after.amounts[s] == before.amounts[s]);
 
         EXPECT(after.energy == before.energy);
+        EXPECT(box.ledger.energy == 0);
         for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
             EXPECT(after.momentum[axis] == before.momentum[axis]);
             EXPECT(box.ledger.momentum[axis] == 0);
@@ -177,16 +180,32 @@ namespace {
         std::printf("static atmosphere: max speed after 600 ticks = %lld (2^-20 m/s)\n", (long long)speed);
         EXPECT(speed <= 1);
         EXPECT(SumGas(box).energy == before.energy);
+        EXPECT(box.ledger.energy == 0);
+    }
+
+    // 試験の空気の比熱比 γ = (c_v + R)÷ c_v(物質量で重み付けた c_v)と断熱の音速 √(γ R T ÷ M)(m/s)
+    double AirGamma(const GasConfig& config) {
+        const double capacity = (0.79 * config.species[0].heatCapacity) + (0.21 * config.species[1].heatCapacity);
+        return (capacity + 8314.462618) / capacity;
+    }
+
+    double AirSoundSpeed(const GasConfig& config) {
+        const double molarMass = ((0.79 * config.species[0].molarMass) + (0.21 * config.species[1].molarMass)) * 1e-6;
+        return std::sqrt(AirGamma(config) * 8.314462618 * (AIR_TEMPERATURE / 1000.0) / molarMass);
     }
 
     // --- 乱した大気が落ち着く(音の波が減衰し、増えない)---
     void TestDisturbedAtmosphereSettles() {
         GasBox box = MakeAirBox(MakeAirConfig(4, 4, 16));
+        // 1% 濃く、断熱の圧縮と同じだけ温める(等エントロピーの乱れ: 膨らんで周りの圧力に戻ると周りと同じ温度になり、浮力は残らない。
+        // 同じ温度のまま濃くすると、膨らんで冷えた分〔約 0.8 K〕が重く沈み、成層の中で浮力の振動〔周期 約 6 分〕を続ける。本物の振る舞い)
         GasCell& cell = box.cells[box.Index(1, 2, 7)];
+        std::array<uint64_t, GAS_MAX_SPECIES> amounts = cell.amounts;
         for (uint32_t s = 0; s < box.config.speciesCount; ++s)
-            cell.amounts[s] += cell.amounts[s] / 100;  // 同じ温度のまま 1% 濃く(圧力だけの乱れ。浮力は残らない)
+            amounts[s] += amounts[s] / 100;
 
-        cell.energy += cell.energy / 100;
+        const double heating = 1.0 + ((AirGamma(box.config) - 1.0) / 100.0);
+        cell = MakeGasCell(box.config, amounts, (uint32_t)std::lround(AIR_TEMPERATURE * heating));
 
         int64_t early = 0;
         for (uint32_t tick = 0; tick < 120; ++tick) {
@@ -222,14 +241,22 @@ namespace {
         return total == 0 ? 0 : weighted * 1000 / total;
     }
 
-    // 半径 1.5 セル(0.75 m)の球(中心 (5, 5, 4))を +30 K
+    // 半径 1.5 セル(0.75 m)の球(中心 (5, 5, 4))を同じ圧力のまま +30 K(物質量を T_前 ÷ T_後 倍。T-0234: 同じ密度のまま温めると
+    // 圧力が 1 割高く、断熱では膨らんで約 9 K 冷えてしまう)
     void HeatBubble(GasBox& box) {
+        constexpr uint32_t HOT = AIR_TEMPERATURE + 30000;
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             const int32_t dx = (int32_t)CellX(box, index) - 5;
             const int32_t dy = (int32_t)((index / box.config.sizeX) % box.config.sizeY) - 5;
             const int32_t dz = (int32_t)CellZ(box, index) - 4;
-            if (dx * dx + dy * dy + dz * dz <= 2)
-                Heat(box, index, AIR_TEMPERATURE + 30000);
+            if (dx * dx + dy * dy + dz * dz > 2)
+                continue;
+
+            std::array<uint64_t, GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount = amount * AIR_TEMPERATURE / HOT;
+
+            box.cells[index] = MakeGasCell(box.config, amounts, HOT);
         }
     }
 
@@ -252,7 +279,7 @@ namespace {
         EXPECT(end - start >= 1000);  // 2 秒で 0.5 m 以上(熱の重心。泡の後ろに残る熱も数える)
         EXPECT(upward >= METER_PER_SECOND /
                              2);  // 泡の上で 0.5 m/s 以上(半径 0.75 m・+30 K の終端速度の目安 √(g ΔT/T r) ≈ 0.85 m/s)
-        EXPECT(SumGas(box).energy == before.energy);
+        EXPECT(SumGas(box).energy == before.energy + box.ledger.energy);
     }
 
     // 煙の印の x の平均(セルの単位 × 1000)
@@ -414,9 +441,15 @@ namespace {
     constexpr double TICK_SECOND = 1.0 / 60.0;
 
     // 左半分を同じ温度のまま overPercent % 濃くする(圧力も同じ割合で上がる)
-    GasBox MakePressureTube(uint32_t overPercent) {
+    GasBox MakePressureTube(uint32_t overPercent, GasThermodynamics thermodynamics, uint32_t soundSpeedMmPerS) {
         GasConfig config = MakeAirConfig(TUBE_LENGTH, 1, 1);
         config.gravity = false;
+        config.thermodynamics = thermodynamics;
+        config.soundSpeedMmPerS = soundSpeedMmPerS;
+        if (thermodynamics == GasThermodynamics::Adiabatic)
+            config.soundCapTemperature =
+                UINT32_MAX;  // 衝撃波で温まった気体の音速を頭打ちにしない(理論と比べるため。ν ≤ 0.54)
+
         GasBox box = MakeAirBox(config);
         for (uint32_t x = 0; x < TUBE_LENGTH / 2; ++x) {
             GasCell& cell = box.cells[x];
@@ -448,14 +481,28 @@ namespace {
         return 0;
     }
 
+    // 段差の位置からの速さ(m/s)の範囲 [from, to] の真ん中 6 割のセルの平均の温度(K)。時刻は 18 刻み目
+    double TubeTemperature(const GasBox& box, double fromSpeed, double toSpeed) {
+        const double seconds = 18 * TICK_SECOND;
+        const double from = (TUBE_LENGTH / 2.0) + (fromSpeed * seconds / CELL_METER);
+        const double to = (TUBE_LENGTH / 2.0) + (toSpeed * seconds / CELL_METER);
+        const auto first = (uint32_t)std::lround(from + (0.2 * (to - from)));
+        const auto last = (uint32_t)std::lround(from + (0.8 * (to - from)));
+        double sum = 0;
+        for (uint32_t x = first; x <= last; ++x)
+            sum += DeriveGasCell(box, box.cells[x], 0).temperature / 1000.0;
+
+        return sum / (last - first + 1);
+    }
+
     struct TubeFront {
         double speed = 0;       // m/s(6 刻み目から 18 刻み目まで)
         double earlyWidth = 0;  // 前線の幅(段差の 10%〜90%。セル)、6 刻み目
         double lateWidth = 0;   // 18 刻み目
     };
 
-    TubeFront MeasureTubeFront(uint32_t overPercent) {
-        GasBox box = MakePressureTube(overPercent);
+    // 18 刻み流して前線を測る(box は 18 刻み目の状態を返す)
+    TubeFront MeasureTubeFront(GasBox& box, uint32_t overPercent) {
         const GasTotals before = SumGas(box);
 
         Run(box, 6);
@@ -471,20 +518,106 @@ namespace {
         const GasTotals after = SumGas(box);
         EXPECT(after.amounts == before.amounts);
         EXPECT(after.energy == before.energy);
-        std::printf("tube +%u%%: front speed %.1f m/s, width %.2f -> %.2f cells\n", overPercent, front.speed,
+        EXPECT(box.ledger.energy == 0);
+        std::printf("tube +%u%% (%s): front speed %.1f m/s, width %.2f -> %.2f cells\n", overPercent,
+                    box.config.thermodynamics == GasThermodynamics::Adiabatic ? "adiabatic" : "isothermal", front.speed,
                     front.earlyWidth, front.lateWidth);
 
         return front;
     }
 
-    // 圧力の弱い段差は音の波: 前線が c̃ = 340 m/s で進む
-    void TestSoundSpeed() {
-        const TubeFront front = MeasureTubeFront(1);
-        EXPECT(front.speed >= 340.0 * 0.98 && front.speed <= 340.0 * 1.02);
-        EXPECT(front.lateWidth > front.earlyWidth * 1.2);  // 線形の波の前線は数値の拡散で広がる(衝撃波との比べ)
+    // 断熱の気体(比熱比 γ・音速 c)の衝撃波管の理論(厳密な Riemann の解。Toro 4 章)。左右は同じ温度、左の圧力が ratio 倍
+    struct RiemannSolution {
+        double shockSpeed = 0;           // m/s
+        double contactSpeed = 0;         // 接触面(左右の気体の境)
+        double tailSpeed = 0;            // 膨張の波の後ろの端
+        double shockedTemperature = 0;   // 衝撃波の後ろの温度 ÷ 初めの温度(Rankine–Hugoniot)
+        double expandedTemperature = 0;  // 膨張の波の後ろの温度 ÷ 初めの温度(断熱: (p* ÷ p_左)^((γ−1)/γ))
+    };
+
+    RiemannSolution SolveRiemann(double ratio, double gamma, double sound) {
+        // 圧力の単位は p_右 = c² ÷ γ(密度 1)。左は密度も ratio 倍
+        const double pressureRight = sound * sound / gamma;
+        const double pressureLeft = pressureRight * ratio;
+        auto wave = [&](double pressure, double side, double density) {
+            if (pressure > side) {
+                const double a = 2 / ((gamma + 1) * density);
+                const double b = (gamma - 1) / (gamma + 1) * side;
+                return (pressure - side) * std::sqrt(a / (pressure + b));
+            }
+
+            return 2 * sound / (gamma - 1) * (std::pow(pressure / side, (gamma - 1) / (2 * gamma)) - 1);
+        };
+
+        double low = 0;
+        double high = pressureLeft;
+        for (int iteration = 0; iteration < 200; ++iteration) {
+            const double middle = (low + high) / 2;
+            if (wave(middle, pressureLeft, ratio) + wave(middle, pressureRight, 1) > 0)
+                high = middle;
+            else
+                low = middle;
+        }
+
+        const double star = low;
+        const double shockRatio = star / pressureRight;
+        RiemannSolution solution;
+        solution.contactSpeed = 0.5 * (wave(star, pressureRight, 1) - wave(star, pressureLeft, ratio));
+        solution.shockSpeed = sound * std::sqrt(((gamma + 1) / (2 * gamma) * shockRatio) + ((gamma - 1) / (2 * gamma)));
+        const double compression = (shockRatio + ((gamma - 1) / (gamma + 1))) /
+                                   (((gamma - 1) / (gamma + 1) * shockRatio) + 1);
+        solution.shockedTemperature = shockRatio / compression;
+        solution.expandedTemperature = std::pow(star / pressureLeft, (gamma - 1) / gamma);
+        solution.tailSpeed = solution.contactSpeed - (sound * std::pow(star / pressureLeft, (gamma - 1) / (2 * gamma)));
+
+        return solution;
     }
 
-    // 等温の気体(この気体は断熱の仕事を入れていない)の衝撃波管の理論: 中間の圧力 x = p* ÷ p_右 は
+    // 衝撃波の後ろ(接触面〜衝撃波)と膨張の波の後ろ(膨張の波の端〜接触面)の温度を理論と比べる(差は初めとの差の割合)
+    void ExpectTubeTemperatures(const GasBox& box, const RiemannSolution& theory, double tolerance) {
+        const double initial = AIR_TEMPERATURE / 1000.0;
+        const double shocked = TubeTemperature(box, theory.contactSpeed, theory.shockSpeed);
+        const double expanded = TubeTemperature(box, theory.tailSpeed, theory.contactSpeed);
+        const double shockedTheory = initial * theory.shockedTemperature;
+        const double expandedTheory = initial * theory.expandedTemperature;
+        std::printf("  behind shock %.3f K (theory %.3f K), behind expansion %.3f K (theory %.3f K)\n", shocked,
+                    shockedTheory, expanded, expandedTheory);
+        EXPECT(std::abs(shocked - shockedTheory) <= std::abs(shockedTheory - initial) * tolerance);
+        EXPECT(std::abs(expanded - expandedTheory) <= std::abs(expandedTheory - initial) * tolerance);
+    }
+
+    // 圧力の弱い段差は音の波: 前線が c̃ = 340 m/s で進む(既定の設定)。断熱: 圧縮の波の後ろは温まり、膨張の波の後ろは冷える
+    // (T ∝ p^((γ−1)/γ)。弱い波なので等エントロピーとほぼ同じ。T-0234)
+    void TestSoundSpeed() {
+        GasBox box = MakePressureTube(1, GasThermodynamics::Adiabatic, 340000);
+        const TubeFront front = MeasureTubeFront(box, 1);
+        EXPECT(front.speed >= 340.0 * 0.98 && front.speed <= 340.0 * 1.02);
+        EXPECT(front.lateWidth > front.earlyWidth * 1.2);  // 線形の波の前線は数値の拡散で広がる(衝撃波との比べ)
+
+        RiemannSolution theory = SolveRiemann(1.01, AirGamma(box.config), 340.0);
+        ExpectTubeTemperatures(box, theory, 0.03);
+    }
+
+    // 強い段差は衝撃波になる(断熱。T-0234): 音速より速く(理論どおり)進み、前線の幅が時間で広がらない(非線形の切り立ち)。
+    // 衝撃波の後ろは Rankine–Hugoniot の温度まで温まり、膨張の波の後ろは断熱の理論どおり冷える。
+    // c̃ を本物の断熱の音速にして α = 1(力も本物の圧力)にし、理想気体の厳密な解と比べる
+    void TestShockForms() {
+        for (const uint32_t overPercent : {100u, 400u}) {
+            const GasConfig air = MakeAirConfig(1, 1, 1);
+            const double sound = AirSoundSpeed(air);
+            GasBox box = MakePressureTube(overPercent, GasThermodynamics::Adiabatic,
+                                          (uint32_t)std::lround(sound * 1000));
+            const TubeFront front = MeasureTubeFront(box, overPercent);
+            const RiemannSolution theory = SolveRiemann(1.0 + (overPercent / 100.0), AirGamma(air), sound);
+            std::printf("  adiabatic shock theory: %.1f m/s (sound %.1f m/s)\n", theory.shockSpeed, sound);
+            EXPECT(front.speed >= theory.shockSpeed * 0.98 && front.speed <= theory.shockSpeed * 1.02);
+            EXPECT(front.lateWidth <= front.earlyWidth + 0.5);
+            EXPECT(front.lateWidth <= 8.0);
+            ExpectTubeTemperatures(box, theory, 0.05);
+        }
+    }
+
+    // 等温の気体(T-0226 までの形。設定で残す)の衝撃波管の理論: 中間の圧力 x = p* ÷ p_右 は
     // √x − 1/√x = ln(比 ÷ x)、衝撃波の速さ = c̃ √x(等温の Rankine–Hugoniot)
     double IsothermalShockSpeed(double pressureRatio) {
         double low = 1.0;
@@ -500,30 +633,105 @@ namespace {
         return 340.0 * std::sqrt(low);
     }
 
-    // 強い段差は衝撃波になる: 音速より速く(理論どおり)進み、前線の幅が時間で広がらない(非線形の切り立ち)
-    void TestShockForms() {
-        for (const uint32_t overPercent : {100u, 400u}) {
-            const TubeFront front = MeasureTubeFront(overPercent);
-            const double expected = IsothermalShockSpeed(1.0 + (overPercent / 100.0));
-            std::printf("  isothermal shock theory: %.1f m/s\n", expected);
-            EXPECT(front.speed >= expected * 0.98 && front.speed <= expected * 1.02);
-            EXPECT(front.lateWidth <= front.earlyWidth + 0.5);
-            EXPECT(front.lateWidth <= 8.0);
+    void TestIsothermalShock() {
+        GasBox box = MakePressureTube(100, GasThermodynamics::Isothermal, 340000);
+        const TubeFront front = MeasureTubeFront(box, 100);
+        const double expected = IsothermalShockSpeed(2.0);
+        std::printf("  isothermal shock theory: %.1f m/s\n", expected);
+        EXPECT(front.speed >= expected * 0.98 && front.speed <= expected * 1.02);
+        EXPECT(front.lateWidth <= front.earlyWidth + 0.5);
+    }
+
+    // 運動エネルギーの散逸を熱へ(T-0234): 閉じた箱(重力なし)の全部のセルをでたらめな速さ(各軸 ±5 m/s)で動かすと、
+    // 混ざって動きが止まり、失った運動エネルギーの分だけ平均の温度が上がる(全エネルギーは毎刻みビット単位で一定)
+    void TestKineticEnergyBecomesHeat() {
+        GasConfig config = MakeAirConfig(8, 8, 8);
+        config.gravity = false;
+        std::vector<GasCell> reference = MakeHydrostaticReference(config, AIR_FRACTIONS_Q32, AIR_TEMPERATURE,
+                                                                  SURFACE_PRESSURE);
+        std::fill(reference.begin() + 1, reference.end(), reference.front());
+        GasBox box = MakeGasBox(config, reference);
+        uint64_t state = 777;
+        for (GasCell& cell : box.cells) {
+            std::array<int64_t, GAS_AXES> momentum = {};
+            for (int64_t& value : momentum) {
+                state = (state * 6364136223846793005ull) + 1442695040888963407ull;
+                value = ((int64_t)((state >> 33) % 11) - 5) * ROUGH_CELL_MASS * METER_PER_SECOND;
+            }
+
+            SetGasMomentum(box, cell, momentum);
         }
+
+        auto kinetic = [&box]() {
+            double sum = 0;
+            for (const GasCell& cell : box.cells)
+                sum += (double)GasKineticEnergy(box, cell) * 1e-6;  // J
+
+            return sum;
+        };
+
+        auto meanTemperature = [&box]() {
+            double sum = 0;
+            for (const GasCell& cell : box.cells)
+                sum += DeriveGasCell(box, cell, 0).temperature / 1000.0;
+
+            return sum / (double)box.cells.size();
+        };
+
+        double capacity = 0;  // J/K(箱全体の定積の熱容量)
+        for (const GasCell& cell : box.cells) {
+            for (uint32_t s = 0; s < config.speciesCount; ++s)
+                capacity += (double)cell.amounts[s] * config.species[s].heatCapacity * 1e-9;
+        }
+
+        const int64_t energy = SumGas(box).energy;
+        const double kineticBefore = kinetic();
+        const double temperatureBefore = meanTemperature();
+        for (uint32_t tick = 0; tick < 120; ++tick) {
+            StepGas(box);
+            EXPECT(SumGas(box).energy == energy);  // 毎刻み
+        }
+
+        const double lost = kineticBefore - kinetic();
+        const double warming = meanTemperature() - temperatureBefore;
+        std::printf("kinetic energy %.1f J -> %.1f J after 2 s, mean temperature +%.4f K (lost / capacity = %.4f K)\n",
+                    kineticBefore, kineticBefore - lost, warming, lost / capacity);
+        EXPECT(lost >= kineticBefore * 0.5);  // 半分以上が熱になる(数値の粘性と衝撃波。本物の粘性は入れていない)
+        EXPECT(std::abs(warming - (lost / capacity)) <= (lost / capacity) * 0.05);
+    }
+
+    // 全エネルギーが毎刻み「初め + 帳簿(重さの仕事)」とビット一致(重力ありの閉じた箱。T-0234)
+    void TestEnergyEveryTick() {
+        GasBox box = MakeDisturbedClosedBox();
+        const int64_t energy = SumGas(box).energy;
+        for (uint32_t tick = 0; tick < 60; ++tick) {
+            StepGas(box);
+            EXPECT(SumGas(box).energy == energy + box.ledger.energy);
+        }
+
+        std::printf("closed box with gravity: energy ledger (gravity work) after 1 s = %lld mJ\n",
+                    (long long)box.ledger.energy);
     }
 
     // 3 次元の安定の条件: 重力ありの閉じた 10³ の箱の全部のセルを ±1% でたらめに乱しても、音の波が育たない
     // (素の Rusanov の拡散〔÷ 2c̃〕・小刻み 32 では 1 秒で 40 m/s・真空のセルまで育った。T-0226)
     void TestNoiseStaysSmall() {
+        // 断熱の乱れ(密度 ±1%・温度はその (γ − 1) 倍。膨らんで戻ると周りと同じ温度)。同じ温度の乱れだと ±0.8 K の浮力の対流が
+        // 本当に起きて 10 cm/s ほどになる(安定の条件の試験にならない。T-0234)
         GasBox box = MakeAirBox(MakeAirConfig(10, 10, 10));
+        const double gammaLessOne = AirGamma(box.config) - 1.0;
         uint64_t state = 12345;
-        for (GasCell& cell : box.cells) {
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            GasCell& cell = box.cells[index];
+            const uint32_t temperature = DeriveGasCell(box, cell, CellZ(box, index)).temperature;
             state = (state * 6364136223846793005ull) + 1442695040888963407ull;
             const int64_t perMille = (int64_t)((state >> 33) % 21) - 10;  // −10〜+10(1/1000)
+            std::array<uint64_t, GAS_MAX_SPECIES> amounts = cell.amounts;
             for (uint32_t s = 0; s < box.config.speciesCount; ++s)
-                cell.amounts[s] = (uint64_t)((int64_t)cell.amounts[s] + ((int64_t)cell.amounts[s] * perMille / 1000));
+                amounts[s] = (uint64_t)((int64_t)amounts[s] + ((int64_t)amounts[s] * perMille / 1000));
 
-            cell.energy += cell.energy * perMille / 1000;
+            const double heating = 1.0 + (gammaLessOne * (double)perMille / 1000.0);
+            cell = MakeGasCell(box.config, amounts, (uint32_t)std::lround(temperature * heating));
         }
 
         const GasTotals before = SumGas(box);
@@ -531,7 +739,7 @@ namespace {
         const int64_t speed = MaxSpeed(box);
         std::printf("noise +-1%% in 10^3 box: max speed after 5 s = %lld (2^-20 m/s)\n", (long long)speed);
         EXPECT(speed <= METER_PER_SECOND / 10);
-        EXPECT(SumGas(box).energy == before.energy);
+        EXPECT(SumGas(box).energy == before.energy + box.ledger.energy);
     }
 
     // 最も軽いセルの質量(mg)
@@ -570,7 +778,7 @@ namespace {
             std::printf("strong pressure (%s): lightest cell %llu mg, max speed after 2 s = %lld (2^-20 m/s)\n",
                         hot ? "1500 K" : "x5 amount", (unsigned long long)lightest, (long long)speed);
             EXPECT(after.amounts == before.amounts);
-            EXPECT(after.energy == before.energy);
+            EXPECT(after.energy == before.energy + box.ledger.energy);
             // 真空のセルができない(不安定なら 0 まで抜けた)。熱いセルは膨らんで軽くなる(圧力が釣り合えば約 1/5 = 30000 mg)
             EXPECT(lightest >= (uint64_t)ROUGH_CELL_MASS / 8);
             EXPECT(speed <= 10 * METER_PER_SECOND);
@@ -591,6 +799,9 @@ int main() {
     TestTraceSpeciesMoves();
     TestSoundSpeed();
     TestShockForms();
+    TestIsothermalShock();
+    TestKineticEnergyBecomesHeat();
+    TestEnergyEveryTick();
     TestNoiseStaysSmall();
     TestStrongPressureStable();
 

@@ -23,6 +23,8 @@ namespace bicameral::sim {
     FX_CONST uint32_t GAS_GPU_RECONSTRUCTION_UPWIND = 0;
     FX_CONST uint32_t GAS_GPU_RECONSTRUCTION_MINMOD = 1;
     FX_CONST uint32_t GAS_GPU_RECONSTRUCTION_MC = 2;
+    FX_CONST uint32_t GAS_GPU_THERMODYNAMICS_ISOTHERMAL = 0;  // sim::GasThermodynamics と同じ値(T-0234)
+    FX_CONST uint32_t GAS_GPU_THERMODYNAMICS_ADIABATIC = 1;
 
     // 設定と係数(1 個。t0)
     struct GasGpuParameters {
@@ -45,7 +47,7 @@ namespace bicameral::sim {
         uint32_t gravity;             // 0 / 1
         uint32_t reconstruction;      // GAS_GPU_RECONSTRUCTION_*
         uint32_t stochasticRounding;  // 0 / 1
-        uint32_t unused;
+        uint32_t thermodynamics;      // GAS_GPU_THERMODYNAMICS_*(T-0234)
     };
 
     // セル(sim::GasCell と同じ並び。64 バイト)
@@ -74,7 +76,8 @@ namespace bicameral::sim {
         int64_t flow;                         // 質量の流れ(mg/小刻み。左 → 右が正)
         uint64_t fraction;                    // 風上の中身のうち移す割合(Q32。流れの段は抑える前、移す量の段で抑えた後)
         uint64_t moved[GAS_GPU_MAX_SPECIES];  // 移す成分の物質量(µmol)
-        int64_t movedEnergy;                  // 移すエネルギー(mJ)
+        int64_t movedEnergy;                  // 風上から引くエネルギー(mJ)
+        int64_t receivedEnergy;               // 風下へ足すエネルギー(mJ。断熱では重さの仕事を引いた値。T-0234)
         int64_t movedMomentum[3];             // 移す運動量
     };
 

@@ -2,12 +2,14 @@
 // (sim/gas_reference の StepGas。G1・G2)と毎刻みビット一致することと、G1・G2 の合格の条件を GPU の結果でも満たすことを確かめる。
 // 場面(gas_reference_test と同じ作り): 閉じた箱の保存・周期的な箱の運動量・静止大気・熱い泡・風で煙(MC と 1 次の風上のにじみの比べ)・
 // 微量の成分(乱数の丸め)・minmod と切り捨て。刻みごとに GPU のセルと帳簿を読み戻し、CPU の状態のハッシュと帳簿を比べる。
-// T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波(等温の理論 404 m/s)・1 セルの 5 倍の圧力(整数の範囲)。
+// T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波・1 セルの 5 倍の圧力(整数の範囲)。
+// T-0234(断熱の仕事 pdV・運動エネルギーの散逸): 既定は断熱(衝撃波は断熱の理論 398.6 m/s)。等温の形も場面 shock_isothermal(404 m/s)で確かめる。
 // 引数: gpu_test_options.h(--warp・--queue)と
 //   --scene <名前>: 1 つの場面だけ(既定は全部)
 //   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
 //     HW と WARP で書き出して diff すると、どの面のどの欄が違うかが分かる。T-0185)
-//   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120)
+//   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120。
+//              --isothermal で T-0234 の前の等温の形と比べる)
 #include "sim/gpu_gas.h"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -45,9 +47,10 @@ namespace {
         config.sizeY = sizeY;
         config.sizeZ = sizeZ;
         config.speciesCount = 3;
-        config.species[0] = {.molarMass = 28013, .heatCapacity = 29124, .formationEnergy = 0};
-        config.species[1] = {.molarMass = 31999, .heatCapacity = 29378, .formationEnergy = 0};
-        config.species[2] = {.molarMass = 28013, .heatCapacity = 29124, .formationEnergy = 0};
+        // 比熱は定積の c_v(gas_reference_test と同じ。T-0234)
+        config.species[0] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};
+        config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0};
+        config.species[2] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};
         if (substepsOverride != 0)
             config.substeps = substepsOverride;
 
@@ -95,9 +98,8 @@ namespace {
         Heat(box, box.Index(3, 3, 1), AIR_TEMPERATURE + 50000);
         Heat(box, box.Index(4, 3, 1), AIR_TEMPERATURE + 50000);
         AddSmoke(box, box.Index(5, 5, 5));
-        GasCell& moving = box.cells[box.Index(2, 6, 4)];
-        moving.momentum[0] = ROUGH_CELL_MASS * 2 * METER_PER_SECOND;
-        moving.momentum[2] = -ROUGH_CELL_MASS * METER_PER_SECOND;
+        SetGasMomentum(box, box.cells[box.Index(2, 6, 4)],
+                       {ROUGH_CELL_MASS * 2 * METER_PER_SECOND, 0, -ROUGH_CELL_MASS * METER_PER_SECOND});
 
         return {.name = "closed", .box = box, .ticks = 60};
     }
@@ -112,9 +114,9 @@ namespace {
         std::fill(reference.begin() + 1, reference.end(), reference.front());
         GasBox box = MakeGasBox(config, reference);
         Heat(box, box.Index(1, 1, 1), AIR_TEMPERATURE + 80000);
-        box.cells[box.Index(5, 0, 2)].momentum = {ROUGH_CELL_MASS * 3 * METER_PER_SECOND,
-                                                  -ROUGH_CELL_MASS * METER_PER_SECOND,
-                                                  ROUGH_CELL_MASS * 2 * METER_PER_SECOND};
+        SetGasMomentum(box, box.cells[box.Index(5, 0, 2)],
+                       {ROUGH_CELL_MASS * 3 * METER_PER_SECOND, -ROUGH_CELL_MASS * METER_PER_SECOND,
+                        ROUGH_CELL_MASS * 2 * METER_PER_SECOND});
         AddSmoke(box, box.Index(6, 1, 0));
 
         return {.name = "periodic", .box = box, .ticks = 60};
@@ -186,10 +188,19 @@ namespace {
     // --- T-0226: 細い管(x に 640 セル・壁・重力なし)の左半分の圧力を overPercent % 上げた段差を 18 刻み(0.3 秒)放す ---
     constexpr uint32_t TUBE_LENGTH = 640;
     constexpr uint64_t TUBE_TICKS = 18;
+    constexpr uint32_t ADIABATIC_SOUND_MM_PER_S = 343734;  // √(γ R T ÷ M)、試験の空気(γ = 1.3985)・293.15 K
 
-    Scene MakeTubeScene(const char* name, uint32_t overPercent) {
+    Scene MakeTubeScene(const char* name, uint32_t overPercent,
+                        GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic) {
         GasConfig config = MakeAirConfig(TUBE_LENGTH, 1, 1);
         config.gravity = false;
+        config.thermodynamics = thermodynamics;
+        if (thermodynamics == GasThermodynamics::Adiabatic && overPercent > 1) {
+            // 断熱の衝撃波は c̃ を本物の断熱の音速(343.7 m/s。α = 1)にし、温まった気体の音速を頭打ちにせず理想気体の理論と比べる
+            config.soundSpeedMmPerS = ADIABATIC_SOUND_MM_PER_S;
+            config.soundCapTemperature = UINT32_MAX;
+        }
+
         GasBox box = MakeAirBox(config);
         for (uint32_t x = 0; x < TUBE_LENGTH / 2; ++x) {
             GasCell& cell = box.cells[x];
@@ -227,6 +238,8 @@ namespace {
         scenes.push_back(MakeTraceScene());
         scenes.push_back(MakeTubeScene("sound", 1));
         scenes.push_back(MakeTubeScene("shock", 100));
+        scenes.push_back(
+            MakeTubeScene("shock_isothermal", 100, GasThermodynamics::Isothermal));  // 等温の形(T-0234 の前)
         scenes.push_back(MakeBlastScene());
 
         return scenes;
@@ -435,8 +448,9 @@ namespace {
             return error;
 
         if (scene.name == "closed" || scene.name == "bubble") {
-            if (final.ledger.amounts != std::array<int64_t, GAS_MAX_SPECIES>{} || final.ledger.energy != 0)
-                return "閉じた箱の帳簿に物かエネルギーが出入りした";
+            // エネルギーの帳簿は重さの仕事(断熱。T-0234)なので 0 でなくてよい
+            if (final.ledger.amounts != std::array<int64_t, GAS_MAX_SPECIES>{})
+                return "閉じた箱の帳簿に物が出入りした";
         }
 
         if (scene.name == "periodic" && final.ledger.momentum != std::array<int64_t, GAS_AXES>{})
@@ -463,10 +477,11 @@ namespace {
                 return "風で煙が流れない";
         }
 
-        // 管の前線の速さ(段差は x = 320 から始まる): 音の波は 340 m/s、圧力 2 倍の段差は等温の衝撃波の理論 404.2 m/s(± 2%)
-        if (scene.name == "sound" || scene.name == "shock") {
+        // 管の前線の速さ(段差は x = 320 から始まる): 音の波は 340 m/s、圧力 2 倍の段差は断熱の衝撃波の理論 398.6 m/s
+        // (厳密な Riemann の解。gas_reference_test)、等温の形では等温の理論 404.2 m/s(± 2%)
+        if (scene.name == "sound" || scene.name == "shock" || scene.name == "shock_isothermal") {
             const double speed = (TubeFront(final) - (TUBE_LENGTH / 2.0)) * 0.5 * 60.0 / (double)TUBE_TICKS;
-            const double expected = scene.name == "sound" ? 340.0 : 404.2;
+            const double expected = scene.name == "sound" ? 340.0 : (scene.name == "shock" ? 398.6 : 404.2);
             Log(Channel::Sim, Level::Info, "  {}: 前線の速さ {:.1f} m/s(理論 {:.1f})", scene.name, speed, expected);
             if (std::abs(speed - expected) > expected * 0.02)
                 return "管の波の速さが合わない";
@@ -503,8 +518,11 @@ namespace {
     }
 
     // --- 計測: CPU と比べず、大きい箱で 1 刻みの GPU 時間 ---
-    int Profile(ID3D12Device5* device, GpuParts& parts, uint32_t size, uint64_t ticks) {
+    int Profile(ID3D12Device5* device, GpuParts& parts, uint32_t size, uint64_t ticks, bool isothermal) {
         GasConfig config = MakeAirConfig(size, size, size);
+        if (isothermal)
+            config.thermodynamics = GasThermodynamics::Isothermal;  // T-0234 の前の形と比べる
+
         config.boundary = {GasBoundary::Open, GasBoundary::Periodic, GasBoundary::Wall};
         config.windVelocity = {(int32_t)(2 * METER_PER_SECOND), 0, 0};
         GasBox box = MakeAirBox(config);
@@ -544,8 +562,8 @@ namespace {
                 return 1;
 
             const double milliseconds = (double)*elapsed * 1000.0 / (double)frequency / (double)ticks;
-            Log(Channel::Sim, Level::Info, "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・小刻み {}: 1 刻み {:.3f} ms",
-                round, size, box.cells.size(), config.substeps, milliseconds);
+            Log(Channel::Sim, Level::Info, "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・小刻み {}・{}: 1 刻み {:.3f} ms",
+                round, size, box.cells.size(), config.substeps, isothermal ? "等温" : "断熱", milliseconds);
         }
 
         return 0;
@@ -554,6 +572,7 @@ namespace {
     struct GasTestOptions {
         std::string scene;
         bool profile = false;
+        bool isothermal = false;
         uint32_t size = 32;
         uint64_t ticks = 120;
     };
@@ -569,6 +588,8 @@ namespace {
                 options.scene = arguments[++index];
             else if (argument == "--profile")
                 options.profile = true;
+            else if (argument == "--isothermal")
+                options.isothermal = true;
             else if (argument == "--size" && hasValue)
                 options.size = (uint32_t)std::stoul(arguments[++index]);
             else if (argument == "--substeps" && hasValue)
@@ -593,7 +614,7 @@ namespace {
         if (!gasOptions || !options) {
             Log(Channel::Sim, Level::Error,
                 "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前] [--substeps n] [--passes n] "
-                "[--dump ファイル] [--profile [--size n] [--ticks n]]");
+                "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal]]");
             return 2;
         }
 
@@ -612,7 +633,7 @@ namespace {
 
         GpuParts parts{.queue = std::move(*queue), .debugRing = std::move(*debugRing)};
         if (gasOptions->profile)
-            return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks);
+            return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks, gasOptions->isothermal);
 
         std::vector<std::pair<std::string, GasBox>> results;
         uint32_t sceneCount = 0;

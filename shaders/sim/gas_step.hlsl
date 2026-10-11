@@ -38,6 +38,9 @@ static const uint64_t ONE_Q32 = FX_U64(1u, 0u);
 static const uint64_t MAX_U64 = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
 static const uint64_t MAX_CELL_AMOUNT = FX_U64(0u, 0x80000000u);
 static const uint32_t GAS_ROUNDING_PURPOSE = 0x47610001u;
+static const uint64_t GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 = 4903325;  // 1 mg が 1 セル上がる仕事 4.903325 µJ(T-0234)
+static const uint32_t KINETIC_SHIFT = 41;                               // ½ m v² = P² × 2^-41 ÷ m(µJ)
+static const uint64_t MAX_MOMENTUM = FX_U64(0x100000u, 0u);             // 2^52
 
 // --- 面の片側(箱の中のセル・開いた境界の外・壁)---
 static const uint32_t SIDE_CELL = 0;
@@ -116,8 +119,23 @@ uint64_t CellMass(GasGpuCell cell) {
     return mass;
 }
 
-uint32_t CellTemperature(GasGpuCell cell) {
-    const int64_t heat = cell.energy * 1000 - ChemicalEnergy(cell);
+// 運動エネルギー(µJ。gas_reference.cpp の KineticEnergy)。等温は 0
+int64_t KineticEnergy(GasGpuCell cell, uint64_t mass) {
+    if (GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC || mass == 0)
+        return 0;
+
+    uint64_t scaledSquare = 0;
+    [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+        const uint64_t magnitude = FxAbsU64(cell.momentum[axis]);
+        FX_ASSERT(magnitude < MAX_MOMENTUM);
+        scaledSquare += FxShiftRightU128(FxMulU64Full(magnitude, magnitude), KINETIC_SHIFT);
+    }
+
+    return (int64_t)(scaledSquare / mass);
+}
+
+uint32_t CellTemperature(GasGpuCell cell, int64_t kineticMicroJoule) {
+    const int64_t heat = cell.energy * 1000 - ChemicalEnergy(cell) - kineticMicroJoule;
     const uint64_t capacity = HeatCapacity(cell);
     if (heat <= 0 || capacity == 0)
         return 0;
@@ -136,7 +154,7 @@ GasGpuDerived DeriveCell(GasGpuCell cell, uint32_t z) {
     derived.mass = CellMass(cell);
     derived.inverseMass = derived.mass == 0 ? 0 : MAX_U64 / derived.mass;
     derived.inverseAmount = amount == 0 ? 0 : MAX_U64 / amount;
-    derived.temperature = CellTemperature(cell);
+    derived.temperature = CellTemperature(cell, KineticEnergy(cell, derived.mass));
     derived.unused = 0;
 
     // --- 本物の圧力 p = n × T × R ÷ V ---
@@ -560,19 +578,39 @@ int64_t DivideNearest(int64_t a, uint64_t b) {
     return FxApplySign(quotient, a < 0);
 }
 
-int64_t MovedEnergy(GasGpuCell source, GasGpuCell moved) {
+// µJ(丸める前)。断熱: + 押し出す仕事 n R T + 運動エネルギーの分け前(T-0234)
+int64_t MovedEnergy(GasGpuCell source, GasGpuDerived sourceDerived, GasGpuCell moved, uint64_t fraction) {
     const uint64_t sourceCapacity = HeatCapacity(source);
     const int64_t movedChemical = ChemicalEnergy(moved);
     if (sourceCapacity == 0)
-        return DivideNearest(movedChemical, 1000);
+        return movedChemical;
 
-    const int64_t sourceHeat = source.energy * 1000 - ChemicalEnergy(source);
+    const int64_t sourceKinetic = KineticEnergy(source, sourceDerived.mass);
+    const int64_t sourceHeat = source.energy * 1000 - ChemicalEnergy(source) - sourceKinetic;
     const FxU128 numerator = FxMulU64Full(FxAbsU64(sourceHeat), HeatCapacity(moved));
     const FxDivResult share = FxDivU128By64(numerator, sourceCapacity);
     const uint64_t heat = share.quotient + (share.remainder * 2 >= sourceCapacity ? 1 : 0);
     const int64_t movedHeat = FxApplySign(heat, sourceHeat < 0);
+    int64_t energy = movedHeat + movedChemical;
+    if (GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
+        return energy;
 
-    return DivideNearest(movedHeat + movedChemical, 1000);
+    const FxU128 amountTemperature = FxMulU64Full(TotalAmount(moved), sourceDerived.temperature);
+    FX_ASSERT(amountTemperature.hi == 0);
+    energy += (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 35);
+    energy += (int64_t)MulShiftU64((uint64_t)sourceKinetic, fraction, 32);
+
+    return energy;
+}
+
+// 重さの仕事(µJ。gas_reference.cpp の GravityWork): 縦の面を上へ動く塊が失う m g Δx
+int64_t GravityWork(uint32_t axis, int64_t flow, GasGpuCell moved) {
+    if (axis != 2 || GAS_P.gravity == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
+        return 0;
+
+    const int64_t work = (int64_t)(CellMass(moved) * GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / MICRO);
+
+    return flow > 0 ? work : -work;
 }
 
 // --- 段 8: 中身を超えた成分を抑え、移すエネルギーと運動量(面。gas_reference.cpp の LimitMovedAmounts の 2 回目・Transfer の前半)---
@@ -608,21 +646,25 @@ int64_t MovedEnergy(GasGpuCell source, GasGpuCell moved) {
     moved.momentum[0] = 0;
     moved.momentum[1] = 0;
     moved.momentum[2] = 0;
-    face.movedEnergy = MovedEnergy(source, moved);
+    const int64_t energy = MovedEnergy(source, SideDerived(donor), moved, face.fraction);
+    face.movedEnergy = DivideNearest(energy, 1000);
+    face.receivedEnergy = DivideNearest(energy - GravityWork(sides.axis, face.flow, moved), 1000);
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis)
         face.movedMomentum[axis] = FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
 
     g_faces[faceId] = face;
 
-    // --- 帳簿(開いた境界の外から入る物は正、出る物は負)---
-    if (donor.kind == SIDE_CELL && receiver.kind == SIDE_CELL)
+    // --- 帳簿(開いた境界の外から入る物は正、出る物は負。エネルギーは重さの仕事〔受けた − 引いた〕も)---
+    if (donor.kind == SIDE_CELL && receiver.kind == SIDE_CELL) {
+        LedgerAdd(GAS_GPU_LEDGER_ENERGY, face.receivedEnergy - face.movedEnergy);
         return;
+    }
 
     const int64_t sign = donor.kind == SIDE_CELL ? -1 : 1;
     [unroll] for (uint32_t species = 0; species < GAS_GPU_MAX_SPECIES; ++species)
         LedgerAdd(GAS_GPU_LEDGER_AMOUNTS + (species * 8), sign * (int64_t)face.moved[species]);
 
-    LedgerAdd(GAS_GPU_LEDGER_ENERGY, sign * face.movedEnergy);
+    LedgerAdd(GAS_GPU_LEDGER_ENERGY, donor.kind == SIDE_CELL ? -face.movedEnergy : face.receivedEnergy);
     [unroll] for (uint32_t momentumAxis = 0; momentumAxis < 3; ++momentumAxis)
         LedgerAdd(GAS_GPU_LEDGER_MOMENTUM + (momentumAxis * 8), sign * face.movedMomentum[momentumAxis]);
 }
@@ -635,7 +677,7 @@ void ApplyMoved(inout GasGpuCell cell, GasGpuFace face, bool donor) {
         cell.amounts[s] += (uint64_t)(sign * (int64_t)face.moved[s]);
     }
 
-    cell.energy += sign * face.movedEnergy;
+    cell.energy += donor ? -face.movedEnergy : face.receivedEnergy;
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
         cell.momentum[axis] += sign * face.movedMomentum[axis];
     }
