@@ -930,6 +930,35 @@ namespace bicameral::sim {
         ++tree.tick;
     }
 
+    std::vector<GasTreeFaceLayout> ListGasTreeFaces(const GasTree& tree) {
+        // 面を作る時だけの Finer は一覧に残らない(作らないか、外側の隣なら Mixed にしてある)
+        const auto toSide = [](const TreeSide& side) {
+            GasTreeFaceSide result{.kind = GasTreeSideKind::Cell, .index = side.index, .level = side.level};
+            if (side.kind == SideKind::Ghost)
+                result.kind = GasTreeSideKind::Ghost;
+            else if (side.kind == SideKind::Wall)
+                result.kind = GasTreeSideKind::Wall;
+            else if (side.kind != SideKind::Cell)
+                result.kind = GasTreeSideKind::Mixed;
+
+            return result;
+        };
+
+        std::vector<GasTreeFaceLayout> layout;
+        for (const TreeFace& face : EnumerateFaces(tree)) {
+            assert(face.left.kind != SideKind::Finer && face.right.kind != SideKind::Finer);
+            layout.push_back({.left = toSide(face.left),
+                              .right = toSide(face.right),
+                              .leftOuter = toSide(face.leftOuter),
+                              .rightOuter = toSide(face.rightOuter),
+                              .axis = face.axis,
+                              .level = face.level,
+                              .id = face.id});
+        }
+
+        return layout;
+    }
+
     GasTreeTotals SumGasTree(const GasTree& tree) {
         GasTreeTotals totals;
         for (uint32_t index = 0; index < tree.cells.size(); ++index) {

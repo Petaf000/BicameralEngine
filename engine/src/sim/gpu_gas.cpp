@@ -5,6 +5,7 @@
 
 #include "common/gas_gpu.hlsli"
 #include "gpu/resources.h"
+#include "sim/gpu_gas_internal.h"
 
 namespace bicameral::sim {
 
@@ -43,73 +44,6 @@ namespace bicameral::sim {
         static_assert((uint32_t)GasThermodynamics::Isothermal == GAS_GPU_THERMODYNAMICS_ISOTHERMAL &&
                       (uint32_t)GasThermodynamics::Adiabatic == GAS_GPU_THERMODYNAMICS_ADIABATIC);
 
-        GasGpuCell ToGpuCell(const GasCell& cell) {
-            GasGpuCell result{};
-            for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-                result.amounts[s] = cell.amounts[s];
-
-            result.energy = cell.energy;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                result.momentum[axis] = cell.momentum[axis];
-
-            return result;
-        }
-
-        GasCell FromGpuCell(const GasGpuCell& cell) {
-            GasCell result;
-            for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-                result.amounts[s] = cell.amounts[s];
-
-            result.energy = cell.energy;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                result.momentum[axis] = cell.momentum[axis];
-
-            return result;
-        }
-
-        GasGpuDerived ToGpuDerived(const GasDerived& derived) {
-            return {.mass = derived.mass,
-                    .inverseMass = derived.inverseMass,
-                    .inverseAmount = derived.inverseAmount,
-                    .temperature = derived.temperature,
-                    .unused = 0,
-                    .pressure = derived.pressure,
-                    .scaledPressure = derived.scaledPressure};
-        }
-
-        GasGpuParameters MakeParameters(const GasBox& box) {
-            const GasConfig& config = box.config;
-            const GasCoefficients& coefficients = box.coefficients;
-            GasGpuParameters parameters{};
-            for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s) {
-                parameters.massPerAmount[s] = coefficients.massPerAmount[s];
-                parameters.formationEnergy[s] = config.species[s].formationEnergy;
-                parameters.heatCapacity[s] = config.species[s].heatCapacity;
-            }
-
-            parameters.centralFlow = coefficients.centralFlow;
-            parameters.pressureFlow = coefficients.pressureFlow;
-            parameters.pressureImpulse = coefficients.pressureImpulse;
-            parameters.gravityImpulse = coefficients.gravityImpulse;
-            parameters.soundScale = coefficients.soundScale;
-            parameters.randomSeed = config.randomSeed;
-
-            parameters.size[0] = config.sizeX;
-            parameters.size[1] = config.sizeY;
-            parameters.size[2] = config.sizeZ;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                parameters.boundary[axis] = (uint32_t)config.boundary[axis];
-
-            parameters.speciesCount = config.speciesCount;
-            parameters.soundTemperature = coefficients.soundTemperature;
-            parameters.gravity = config.gravity ? 1 : 0;
-            parameters.reconstruction = (uint32_t)config.reconstruction;
-            parameters.stochasticRounding = config.stochasticRounding ? 1 : 0;
-            parameters.thermodynamics = (uint32_t)config.thermodynamics;
-
-            return parameters;
-        }
-
         template <typename T>
         ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, std::span<const T> data) {
             const auto bytes = std::as_bytes(data);
@@ -130,6 +64,73 @@ namespace bicameral::sim {
         }
 
     }  // namespace
+
+    // --- CPU の形と GPU の形の写し(gpu_gas_internal.h。木の GPU〔gpu_gas_tree.cpp〕も使う)---
+
+    GasGpuCell ToGasGpuCell(const GasCell& cell) {
+        GasGpuCell result{};
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
+            result.amounts[s] = cell.amounts[s];
+
+        result.energy = cell.energy;
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            result.momentum[axis] = cell.momentum[axis];
+
+        return result;
+    }
+
+    GasCell FromGasGpuCell(const GasGpuCell& cell) {
+        GasCell result;
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
+            result.amounts[s] = cell.amounts[s];
+
+        result.energy = cell.energy;
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            result.momentum[axis] = cell.momentum[axis];
+
+        return result;
+    }
+
+    GasGpuDerived ToGasGpuDerived(const GasDerived& derived) {
+        return {.mass = derived.mass,
+                .inverseMass = derived.inverseMass,
+                .inverseAmount = derived.inverseAmount,
+                .temperature = derived.temperature,
+                .unused = 0,
+                .pressure = derived.pressure,
+                .scaledPressure = derived.scaledPressure};
+    }
+
+    GasGpuParameters MakeGasGpuParameters(const GasConfig& config, const GasCoefficients& coefficients) {
+        GasGpuParameters parameters{};
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s) {
+            parameters.massPerAmount[s] = coefficients.massPerAmount[s];
+            parameters.formationEnergy[s] = config.species[s].formationEnergy;
+            parameters.heatCapacity[s] = config.species[s].heatCapacity;
+        }
+
+        parameters.centralFlow = coefficients.centralFlow;
+        parameters.pressureFlow = coefficients.pressureFlow;
+        parameters.pressureImpulse = coefficients.pressureImpulse;
+        parameters.gravityImpulse = coefficients.gravityImpulse;
+        parameters.soundScale = coefficients.soundScale;
+        parameters.randomSeed = config.randomSeed;
+
+        parameters.size[0] = config.sizeX;
+        parameters.size[1] = config.sizeY;
+        parameters.size[2] = config.sizeZ;
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            parameters.boundary[axis] = (uint32_t)config.boundary[axis];
+
+        parameters.speciesCount = config.speciesCount;
+        parameters.soundTemperature = coefficients.soundTemperature;
+        parameters.gravity = config.gravity ? 1 : 0;
+        parameters.reconstruction = (uint32_t)config.reconstruction;
+        parameters.stochasticRounding = config.stochasticRounding ? 1 : 0;
+        parameters.thermodynamics = (uint32_t)config.thermodynamics;
+
+        return parameters;
+    }
 
     std::expected<GpuGas, std::string> GpuGas::Create(ID3D12Device5* device, const GasBox& box) {
         GpuGas result;
@@ -190,16 +191,16 @@ namespace bicameral::sim {
         }
 
         // --- t0〜t2(設定・層ごとの基準と外)---
-        const std::array<GasGpuParameters, 1> parameters = {MakeParameters(box)};
+        const std::array<GasGpuParameters, 1> parameters = {MakeGasGpuParameters(box.config, box.coefficients)};
         std::vector<GasGpuDerived> referenceDerived;
         std::vector<GasGpuCell> ghost;
         referenceDerived.reserve(box.referenceDerived.size());
         ghost.reserve(box.ghost.size());
         for (const GasDerived& layer : box.referenceDerived)
-            referenceDerived.push_back(ToGpuDerived(layer));
+            referenceDerived.push_back(ToGasGpuDerived(layer));
 
         for (const GasCell& layer : box.ghost)
-            ghost.push_back(ToGpuCell(layer));
+            ghost.push_back(ToGasGpuCell(layer));
 
         m_srvs = {CreateUploadBuffer(device, std::span<const GasGpuParameters>(parameters)),
                   CreateUploadBuffer(device, std::span<const GasGpuDerived>(referenceDerived)),
@@ -209,7 +210,7 @@ namespace bicameral::sim {
         std::vector<GasGpuCell> cells;
         cells.reserve(box.cells.size());
         for (const GasCell& cell : box.cells)
-            cells.push_back(ToGpuCell(cell));
+            cells.push_back(ToGasGpuCell(cell));
 
         const std::array<GasLedger, 1> ledger = {box.ledger};
         m_cellUpload = CreateUploadBuffer(device, std::span<const GasGpuCell>(cells));
@@ -286,7 +287,7 @@ namespace bicameral::sim {
         cells.clear();
         cells.reserve(gpuCells.size());
         for (const GasGpuCell& cell : gpuCells)
-            cells.push_back(FromGpuCell(cell));
+            cells.push_back(FromGasGpuCell(cell));
 
         return true;
     }

@@ -202,5 +202,12 @@ foreach(_entry IN ITEMS GasDerive GasFaceForce GasApplyForce GasFaceFlow GasOutf
   bicameral_add_shader(sim/gas_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
 endforeach()
 
+# 気体の多重解像度の木の 1 小刻みの Compute の段(T-0209。呼ぶ順は engine/src/sim/gpu_gas_tree.cpp)
+foreach(_entry IN ITEMS GasTreeDerive GasTreeFaceForce GasTreeApplyForce GasTreeFaceFlow GasTreeOutflow GasTreeFaceMoved GasTreeMovedSum GasTreeFaceFinal GasTreeTransfer)
+  string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
+  string(TOLOWER "${_snake}" _snake)
+  bicameral_add_shader(sim/gas_tree_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
+endforeach()
+
 get_property(BICAMERAL_SHADER_OUTPUTS GLOBAL PROPERTY BICAMERAL_SHADER_OUTPUTS)
 add_custom_target(bicameral_shaders ALL DEPENDS ${BICAMERAL_SHADER_OUTPUTS} ${BICAMERAL_FLOAT_SOURCE_STAMP})
