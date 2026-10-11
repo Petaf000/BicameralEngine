@@ -35,8 +35,9 @@ using namespace bicameral::sim;  // probe_sim.hlsli・probe_patch.hlsli の定�
 namespace {
 
     constexpr uint64_t TOTAL_TICKS = 32;
-    constexpr uint64_t STOP_END_TICK = 12;  // 止めるパッチの終わり(刻み 0 から 12 刻み)
-    constexpr uint64_t SWAP_TICK = 16;      // 規則の ID がずれる表に替える刻み
+    constexpr uint64_t STOP_END_TICK = 12;                     // 止めるパッチの終わり(刻み 0 から 12 刻み)
+    constexpr uint32_t PROBE_CATALYST_JOULES_PER_MOL = 40000;  // 触媒が下げる活性化エネルギー(T-0288。仮)
+    constexpr uint64_t SWAP_TICK = 16;                         // 規則の ID がずれる表に替える刻み
     constexpr uint64_t SWAP_VERSION = 0x50A7C4;
     constexpr uint64_t SAVE_TICK = 8;        // 保存点(パッチが効いている途中)
     constexpr uint64_t REWIND_AT_TICK = 15;  // ここまで進めてから SAVE_TICK へ戻す(差し替えの前)
@@ -135,8 +136,11 @@ namespace {
         patch(3, "cellulose_combustion", reaction::MpMakeStopEffect(), 6, {.low = {-9, -9, -9}, .high = {-2, -2, -2}});
         patch(4, "cellulose_pyrolysis", reaction::MpMakeScaleEffect(-5), 5, {.low = {-4, -4, -4}, .high = {3, 9, 3}});
 
-        // 刻み 5: 小さいパッチを 12 個(列は 5 + 12 = 17 → 最後の 1 個は一杯で断る)。3 刻みで終わる
-        for (int32_t i = 0; i < 12; ++i) {
+        // 刻み 5: 小さいパッチを 12 個(列は 5 + 12 = 17 → 最後の 1 個は一杯で断る)。3 刻みで終わる。
+        // 最初の 1 個は右の壁(燃えている)のセルロースの燃焼の活性化エネルギーを下げる触媒(T-0288。炭の 2^10 倍と重なる)
+        patch(5, "cellulose_combustion", reaction::MpMakeCatalystEffect(PROBE_CATALYST_JOULES_PER_MOL), 3,
+              {.low = {34, 30, 30}, .high = {37, 34, 34}});
+        for (int32_t i = 1; i < 12; ++i) {
             const int32_t x = 4 + (i * 4);
             patch(5, "carbon_partial_combustion", reaction::MpMakeScaleEffect(1), 3,
                   {.low = {x, 50, 10}, .high = {x + 1, 51, 11}});

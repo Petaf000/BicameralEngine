@@ -106,7 +106,7 @@ namespace bicameral::sim {
     [[nodiscard]] ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap);
 
     // 魔法のパッチを置く(T-0323・ADR-0095。PROBE_COMMAND_TYPE_PATCH。common/probe_patch.hlsli)。規則は名前の鍵(RxRule::key)で持つので、
-    // 表を差し替えても同じ名前の規則に効き続ける。effect は MpMakeScaleEffect / MpMakeStopEffect、範囲は仮の世界のセルの座標の直方体
+    // 表を差し替えても同じ名前の規則に効き続ける。effect は MpMakeScaleEffect / MpMakeStopEffect / MpMakeCatalystEffect(T-0288)、範囲は仮の世界のセルの座標の直方体
     // (両端を含む。格子の外にはみ出してよい)、期間は targetTick から durationTicks 刻み。値は試験用の仮のもの(D-006)
     struct ProbePatchRange {
         std::array<int32_t, 3> low{};

@@ -92,10 +92,10 @@ struct RxRule {
     uint32_t productCoefficients[RX_MAX_PRODUCTS];
 
     // --- 速度と熱 ---
-    uint32_t firstOrderMask;  // 速度式で次数 1 の反応物(ビット i = reactants[i])。1〜2 個
-    uint32_t padding;
-    int64_t reactionEnthalpy;  // 進行度 1 µmol あたりの µJ(= J/mol)。Σ 生成物の H0 − Σ 反応物の H0。正なら吸熱
-    uint64_t key;              // 規則の名前のハッシュ。乱数の入力に使い、表の並び(規則の ID)に結果を依存させない
+    uint32_t firstOrderMask;    // 速度式で次数 1 の反応物(ビット i = reactants[i])。1〜2 個
+    uint32_t activationEnergy;  // J/mol(Arrhenius の Ea。速さの表はベイク済み。魔法の触媒が下げられる上限。T-0288)
+    int64_t reactionEnthalpy;   // 進行度 1 µmol あたりの µJ(= J/mol)。Σ 生成物の H0 − Σ 反応物の H0。正なら吸熱
+    uint64_t key;               // 規則の名前のハッシュ。乱数の入力に使い、表の並び(規則の ID)に結果を依存させない
 };
 
 // セル(レベル 0)。成分は物質 ID の昇順、物質量が 0 になったものは消す(同じ中身なら同じ並び = 同じハッシュ)

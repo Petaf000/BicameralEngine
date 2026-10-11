@@ -240,6 +240,11 @@ namespace bicameral::sim {
             rule.reactionEnthalpy = ReactionEnthalpy(rule, baked);
             rule.key = HashName(definition.name);
 
+            // 魔法の触媒が下げられる上限(T-0288)。範囲の外の Ea は BakeRates が断る
+            const int64_t activationEnergy = definition.rate.activationEnergy;
+            const bool storable = activationEnergy >= 0 && activationEnergy <= int64_t{UINT32_MAX};
+            rule.activationEnergy = storable ? static_cast<uint32_t>(activationEnergy) : 0u;
+
             return rule;
         }
 
