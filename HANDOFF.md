@@ -1,11 +1,37 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-11 / チケット: 統合(t-0320・t-0323・t-0314・t-0329・t-0326)確かめと記録 完了 → T-0169 完了
+最終更新: 2026-10-11 / チケット: 統合(t-0209・t-0288・t-0350・t-0327・t-0347)確かめと記録 完了 → T-0351(本体)
 
 ## 状態(3 行以内)
-- t-0320・t-0323・t-0314・t-0329・t-0326 を main に合わせ(245146b)、合わせた形を確かめて記録した。
-- T-0169 完了: テストの試験の表は data/packages/combustion_test を読む(C++ の写し engine/src/sim/reaction_test_table を消した)。
-- 進行中: wt2 T-0209・wt3 T-0288・wt4 T-0327・wt5 T-0347/T-0312・wt6 T-0350。
+- t-0209・t-0288・t-0350・t-0327・t-0347 を main に合わせ(8cbf977)、合わせた形を確かめて記録した(ReadWideChunkUse の引き方を直した)。
+- 本体: T-0351(実験室の細かくした所の熱を陰解法で。Q40 の B)。
+- 進行中: wt2 T-0356・wt3 T-0359・wt4 T-0362・wt5 T-0312・wt6 T-0325。
+
+## 統合で入ったもの(2026-10-11 その 6。詳しくは各チケットの引き継ぎメモ)
+- **合わせた形の確かめ(t-0327 × t-0347)**: ADR-0052 は追記 11 = T-0327・追記 12 = T-0347(T-0347 のチケットの参照も 12 に直した)。
+  T-0327 が面の塊の表の続きを最初の塊の先頭に移した(見出し 24 語/頁・`WideTableEntryWord`・面の論理の語は `MrWideSideOffset` でずれる)のに、
+  T-0347 は古い引き方で書いていたので直した: multires_tree.hlsl の TrimFractionChunks(`WideTableEntryWord(table, j)`)と
+  gpu_multires.cpp の ReadWideChunkUse(ReadOverflow と同じに MrWideSideOffset でずらしてから塊を引く。統合の最初の直しは表だけ直してずらしが抜けていた)。
+  ほかに古い引き方は無い(塊の表を引くのは WideTableEntryWord・ReadOverflow・ReadWideChunkUse・RecordUpload の写しだけ)。最初の塊を先に返しても、
+  TreeWideTrim と WideAllocate の返す段は配らないので同じ段のうちに表の続きは書き換わらない。
+  T-0169 の後に入ったテストに `sim/reaction_test_table.h` は無かった(tests/CMakeLists.txt の末尾の一覧も足りている)。
+  gpu_multires_test の RunFractionChunksWide(T-0347)は「粗くした後の空きの塊の数がどの組でも同じ」で落ちた(125 → 119): 漏れではなく、頁は返しても
+  塊を付けたままで、粗くする要求は親の頁の新しい面(組ごとに面 0 と 1 を交互)に塊を足すため、上限 96 で 2 組目に面 1 が 6 塊増えた
+  (毎刻みの「空き + 頁 + 端数 = 全部」「端数 = 要る塊」は通っていた)。組を 4 にして 2 組目からの空きを比べる形に直した。
+- **T-0209(完了。σ = 0・レベル差 1 まで)気体の多重解像度の GPU**: 面の一覧は木を作った時に CPU が一度作って写す(ListGasTreeFaces。木を作った後に変えない間だけ)・
+  粗い側へ整数部 + 2^-64 の端数・帳簿は 64bit の原子的な足し算 2 回・1 セルの部品は shaders/common/gas_cell.hlsli・ctest gpu_gas_tree(_warp)・ADR-0117 追記。
+  残り T-0356(2^σ。wt2)・T-0357(木が変わる時の面の一覧・d ≥ 2)・T-0358(費用の計測)。
+- **T-0288(一部完了)魔法の触媒**: MP_KIND_CATALYST(= 3。効き方の語の 8〜31bit が ΔEa J/mol)。MpCatalyzeRate は表の値に exp(ΔEa/RT) を掛ける(ベイクと同じ整数の式・
+  温度ごとにその場で)・ΔEa は足し合わせて Ea を上限・止めるが勝ち・2^shift と重ねられる・RxRule の padding を activationEnergy に(80 バイトのまま)。ADR-0095 追記 2。
+  触媒の強さの単位は仮 A(J/mol の差)= QUESTIONS Q37 の 3。「逆の触媒」は作っていない。転換は T-0359(wt3)。
+- **T-0350(完了)実験室の細かくした所の計器と窓**: 窓で止まった原因は LabPanel::RunAuto が材料の一覧の反復子を作り直しの後に使っていた(debug の STL の検査のダイアログ)。
+  計器は葉のセルを µmol に(端数は切り捨て)・見るセルは細かいセルも・断面に細かいセルを 4×4 で。ADR-0137 追記 1。
+- **T-0327(一部完了)GPU の 1 セルの上限**: 見出しは上限に依らない(192 → 24 語/頁)・**上限 96(仮 = Q39)**(128 は HW の compute キューで刻みが返らない)・
+  試験の many は 96 種の表・塊の置き場の既定は「1 頁の 2 面が 64 種」分(170 塊)のまま(上限 96 の頁が 2 つ以上埋まる世界は wideChunks を渡す)・
+  大きい形のセルが一面に並ぶ場面の計測は HW で DEVICE_HUNG(未確認)。ADR-0052 追記 11。上限を無くすのは T-0362(wt4)。
+- **T-0347(完了)畳む時の端数の溢れ・端数の枠の塊を返す**: multires_tree_wide_fold_check・TreeWideTrim(要求の処理の後と畳んだ後。費用は未計測)・試験 RunFractionChunksWide。
+  ADR-0052 追記 12。**仮**: 溢れを使う世界の GPU は溢れのある頁を畳まない(T-0312 まで。9 種以上が混ざった静かな頁が値 1 つに戻らない・VRAM と刻みの費用が少し残る)。
+- **危険(更新)**: 溢れを使う世界の GPU の「畳む」は端数の溢れを返すようになった(T-0347)。溢れのある頁を畳まないので CPU と食い違う場面が残る(T-0312)。
 
 ## 本体で入ったもの(2026-10-11。T-0169)
 - **T-0169 テストの試験の表をパッケージへ**(ADR-0033 追記): tests/reaction_test_table.{h,cpp}(ライブラリ bicameral_test_reaction_table)の `sim::MakeCombustionTestTable()` が
@@ -366,6 +392,7 @@
 NEXT.md の先頭。判断待ちは無し(D-433〜D-436)。ユーザーに判断を求める時は「プレイヤーと遊びへの影響」の水準で出す(CLAUDE.md §5)。
 
 ## 注意(次の Claude がハマりそうな所)
+- **`--auto-*` の窓(T-0350)**: `--auto-*` で起動した窓は debug の CRT の検査(STL の反復子の検査など)をダイアログでなく標準エラーへ出してすぐ落ちる(main.cpp)。窓の自動の確認が「止まる」ではなく「落ちる」になったら標準エラーを見る。
 - **GPU の溢れ(T-0176)**: 溢れの並びは shaders/common/multires_wide.hlsli(C++ と HLSL で共有)。読むのは今の面(頁の先頭の語)。GPU のセルの溢れを読む段を足す時は
   `MR_WIDE_CELLS` の変種を作り(g_overflowBase は変種だけが宣言する。既定のシェーダーの cbuffer を大きくすると implicit_build・lab_box のルート署名と合わなくなる)、
   RecordXxx で m_wideCells の時にその変種を選ぶ。ルート署名はもう 1 語も空いていない。

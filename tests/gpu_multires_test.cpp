@@ -9,6 +9,7 @@
 #include "sim/gpu_multires.h"
 
 #include <optional>
+#include <span>
 
 #include "common/multires_activity.hlsli"
 #include "common/multires_wide.hlsli"
@@ -602,7 +603,7 @@ namespace {
 
     // --- 端数の枠の塊(T-0347)---
 
-    constexpr uint64_t FRACTION_CYCLES = 3;      // 細かくし直す・粗くするの組の数
+    constexpr uint64_t FRACTION_CYCLES = 4;      // 細かくし直す・粗くするの組の数(2 組目からの空きを比べる)
     constexpr uint64_t FRACTION_FOLD_TICK = 40;  // 畳む刻み(この刻みにちょうど静かになるよう忙しさの印を置く)
 
     // 端数の枠が今の面の溢れに要る塊だけを持ち、置き場から塊が漏れないか(空き + 頁 + 端数の枠 = 全部)。空きの塊の数を返す
@@ -688,9 +689,12 @@ namespace {
             MostFractionSpecies(cpu) <= RX_MAX_CELL_SPECIES)
             return std::unexpected("要求を全部適用していない・端数に溢れが無い(場面が試していない)");
 
-        if (!std::ranges::all_of(freeAfterCoarsen, [&](uint32_t free) { return free == freeAfterCoarsen.front(); }))
-            return std::unexpected(std::format("粗くした後の空きの塊の数が組ごとに違う(最初 {}・最後 {})",
-                                               freeAfterCoarsen.front(), freeAfterCoarsen.back()));
+        // 頁は返しても塊を付けたまま(刻みの WideAllocate が余りを返す)で、粗くする要求は親の頁の新しい面(組ごとに面 0 と 1 を交互)に
+        // 塊を足すので、2 組目までに両方の面が要る大きさになる。それより後の組で空きが減れば漏れ(統合の確かめ。上限 96 で 2 組目に頁が 6 塊増える)
+        const std::span<const uint32_t> settled = std::span(freeAfterCoarsen).subspan(1);
+        if (!std::ranges::all_of(settled, [&](uint32_t free) { return free == settled.front(); }))
+            return std::unexpected(std::format("粗くした後の空きの塊の数が 2 組目から違う(2 組目 {}・最後 {})",
+                                               settled.front(), settled.back()));
 
         return {};
     }

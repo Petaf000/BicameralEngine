@@ -22,9 +22,9 @@
 - [x] lab_box(CPU): 組の数 16・ブロック 16・同じ濃度・保存量・細かいセル/箱のセルに置く・粗い葉に当てない・細かい所が燃える・決定的・
       枠の無い箱は細かくならない・当てられない印・最初に違った細かいセル・版 6 と版 5
 - [x] gpu_lab_box(HW・WARP): 根の一部を 2 段細かくし、細かいセルの木に火を付けて 60 刻み毎刻みビット一致・燃えた・同じ形の別の箱で再生
-- [ ] window_lab: `--auto-lab` で細かくできる根 1 つを確かめる(LabPanel::RunAutoRefinedBox は書いたが、窓の中で止まるので呼んでいない)→ **T-0350**
+- [x] window_lab: `--auto-lab` で細かくできる根 1 つを確かめる(LabPanel::RunAutoRefinedBox は書いたが、窓の中で止まるので呼んでいない)→ **T-0350 で済**
 - [x] パネル: 「1 段細かく」「2 段細かく」(細かくできる箱だけ)・細かくしたブロックの数・箱の大きさの選択肢に細かくできる箱 2 つ
-- [ ] 細かいセルを数える計器・見るセル・断面 → **T-0350**
+- [x] 細かいセルを数える計器・見るセル・断面 → **T-0350 で済**
 
 ## メモ・参考
 - 実装: common/lab_box.hlsli(LAB_COMMAND_TYPE_REFINE・LabFineCellWord・LabCellWordInBox・LabRefineCommandValid・LabTarget・LabClipToBlock・

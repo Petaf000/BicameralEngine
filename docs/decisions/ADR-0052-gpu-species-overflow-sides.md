@@ -247,3 +247,9 @@
 - **試験**: gpu_multires_test の RunFractionChunksWide(--part coarsen と wide): GPU で豊かな子を粗くしてから細かくし直す・粗くするを 3 組、
   毎刻み「端数の枠の塊 = 今の面の溢れに要る塊の和」「空き + 頁 + 端数の枠 = 置き場の全部」(GpuMultires::ReadWideChunkUse)、粗くした後の空きの塊の数が
   どの組でも同じ。最後に許容差つきで畳む段で溢れのある端数(16 種)の枠を帳簿へ返す。CPU と毎刻みビット一致・保存がビット一致。
+- **合わせた時の直し(2026-10-11 統合。t-0327 × t-0347)**: T-0347 は塊の表を古い引き方(見出しに全部の塊の番号)で書いていたので、
+  追記 11 の引き方に直した: TrimFractionChunks は `WideTableEntryWord(table, j)`、GpuMultires::ReadWideChunkUse は ReadOverflow と同じに
+  面の論理の語を `MrWideSideOffset` でずらしてから塊を引く。塊を返す時に最初の塊(表の続きを持つ)を先にスタックへ積んでも、TreeWideTrim は
+  返すだけで配らないので、同じ段のうちに表の続きが書き換わることはない(配るのは後の段)。
+  試験 RunFractionChunksWide の「粗くした後の空きの塊の数がどの組でも同じ」は、頁が塊を付けたまま返る(刻みの WideAllocate が余りを返す)ため、
+  粗くする要求が親の頁の新しい面(組ごとに交互)に足す塊で 2 組目に変わりうる(上限 96 で 6 塊)。組を 4 にして 2 組目からを比べる形にした。

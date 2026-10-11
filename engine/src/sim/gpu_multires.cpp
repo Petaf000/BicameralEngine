@@ -727,9 +727,10 @@ namespace bicameral::sim {
 
             // --- 今の面の溢れの数(始まりの表の終わり。塊を持たない面は 0)---
             const uint32_t table = MrWideTableAt(header, words[header + MR_WIDE_HEADER_SIDE]);
-            const uint32_t last = MR_BLOCK_CELLS;
-            // 塊の表の j 番目: 0 番目は見出し、1 番目からは最初の塊の先頭(T-0327・ReadOverflow と同じ引き方)
-            const uint32_t entry = last / MR_WIDE_CHUNK_WORDS;
+            // 面の論理の語は最初の塊の先頭の塊の表の続きの後ろから(MrWideSideOffset)。塊の表の j 番目: 0 番目は見出し、
+            // 1 番目からは最初の塊の先頭(T-0327・ReadOverflow と同じ引き方)
+            const uint32_t offset = MrWideSideOffset(MR_BLOCK_CELLS);
+            const uint32_t entry = offset / MR_WIDE_CHUNK_WORDS;
             const uint32_t firstChunk = words[table + 1];
             const auto chunkAt = [&] {
                 return entry == 0 ? firstChunk
@@ -737,7 +738,7 @@ namespace bicameral::sim {
             };
             const uint32_t count = words[table] == 0
                                        ? 0
-                                       : words[MrWideChunkWord(pool, chunkAt()) + (last % MR_WIDE_CHUNK_WORDS)];
+                                       : words[MrWideChunkWord(pool, chunkAt()) + (offset % MR_WIDE_CHUNK_WORDS)];
             use.fractionNeeded += MrWideChunksFor(count);
         }
 
