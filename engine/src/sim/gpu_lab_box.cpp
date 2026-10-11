@@ -16,6 +16,12 @@ namespace bicameral::sim {
         if (!nest)
             return std::unexpected(nest.error());
 
+        // --- 細かくできる箱は細かいレベルの熱を陰解法で(T-0351。CPU の LabStepOptions と同じ上限)---
+        if (shape.refineBlocks > 0) {
+            if (auto enabled = nest->EnableImplicitConduction(device, LabImplicitLimits(shape)); !enabled)
+                return std::unexpected(enabled.error());
+        }
+
         GpuLabBox result(std::move(*nest));
         result.m_speciesCount = static_cast<uint32_t>(table.species.size());
         result.m_shape = shape;
@@ -108,7 +114,7 @@ namespace bicameral::sim {
                 {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, m_ruleCount});
         }
 
-        m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);
+        m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LabStepOptions(m_shape));
 
         return true;
     }

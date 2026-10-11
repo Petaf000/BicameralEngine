@@ -1,6 +1,6 @@
 # T-0385 main で gpu_multires_test の「端数の枠の塊」が落ちる(T-0327 と T-0347 を合わせた後。粗くした後の空きの塊の数が組ごとに違う)
 
-- Status: Todo
+- Status: Done(2026-10-12)
 - 種類: 工学(不具合)
 - PC: 必須
 - 見積もり: チャット 0.5 回分
@@ -22,6 +22,10 @@
    「空き + 頁の今の面に要る塊」で比べる形にする。漏れ(要る数より多く付け続ける)なら TreeWideReserve・TreeWideTrim を直す。
 
 ## 完了条件
-- [ ] `gpu_multires_test --part coarsen` と ctest の gpu_multires_wide・gpu_multires_warp が通る
+- [x] `gpu_multires_test --part coarsen` と ctest の gpu_multires_wide・gpu_multires_warp が通る
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-12(作業役・本体): 原因は「漏れ」ではなく試験の約束だった(ADR-0052 追記 12 の「合わせた時の直し」): 頁は塊を付けたまま返る
+  (余りは刻みの WideAllocate が返す・この試験は刻まない)ので、粗くする要求が親の頁の新しい面(組ごとに交互)に足す塊で 2 組目に変わる
+  (上限 96 で 6 塊)。統合(97db9b2)で組を 4 にして 2 組目からを比べる形にしてあり、main(1f6530c + T-0351)の release の ctest で
+  gpu_multires_wide(898 秒)・gpu_multires_warp が通った。コードの直しは無し。

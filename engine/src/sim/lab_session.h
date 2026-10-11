@@ -32,6 +32,32 @@
 
 namespace bicameral::sim {
 
+    // 実験室のキュー(使い回す。T-0351): 捨てる時に手元に返し、次に同じデバイス・種類のキューが要る時に使う。
+    // 陰解法の段(細かくできる箱)を作った後に新しいキューを作ると、NVIDIA(RTX 3070 Ti・release)で 2 回目あたりから
+    // CreateCommandQueue が E_OUTOFMEMORY になる(VRAM・コミットは余っている。gpu_lab_box で再現。原因は未確認)。
+    // 箱の形を替えるたびに実験を作り直すので、キューを作り直さない形にした。返したキューはプロセスの終わりまで持つ
+    class PooledImmediateQueue {
+    public:
+        [[nodiscard]] static std::expected<PooledImmediateQueue, std::string> Take(ID3D12Device5* device,
+                                                                                   D3D12_COMMAND_LIST_TYPE type);
+
+        PooledImmediateQueue(PooledImmediateQueue&& other) noexcept;
+        PooledImmediateQueue& operator=(PooledImmediateQueue&& other) noexcept;
+        PooledImmediateQueue(const PooledImmediateQueue&) = delete;
+        PooledImmediateQueue& operator=(const PooledImmediateQueue&) = delete;
+        ~PooledImmediateQueue();
+
+        [[nodiscard]] gpu::ImmediateQueue& Get() { return *m_queue; }
+
+    private:
+        PooledImmediateQueue(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE type, gpu::ImmediateQueue queue);
+        void Return();
+
+        ID3D12Device5* m_device = nullptr;
+        D3D12_COMMAND_LIST_TYPE m_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        std::optional<gpu::ImmediateQueue> m_queue;
+    };
+
     class LabSession {
     public:
         // table は写して持つ(呼ぶ側の表が消えてもよい)。tableVersion は記録に残す表の版(0 = 分からない)。
@@ -109,7 +135,7 @@ namespace bicameral::sim {
         [[nodiscard]] const std::vector<LabGaugeSample>& Gauge() const { return m_gauge; }
 
     private:
-        LabSession(BakedReactionTable table, gpu::ImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box);
+        LabSession(BakedReactionTable table, PooledImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box);
 
         bool Queue(const Command& command);
         void DropPendingTableChange();
@@ -130,7 +156,7 @@ namespace bicameral::sim {
         std::map<uint64_t, std::string> m_tableBytes;     // その中身(分かるものだけ。記録に残す。T-0217)
         std::optional<SpeciesRemap> m_boxRemap;           // 次の刻みで箱に当てる付け替え(SwitchTable が作る。T-0242)
         std::optional<SpeciesRemapReport> m_lastRemapReport;
-        gpu::ImmediateQueue m_queue;
+        PooledImmediateQueue m_queue;
         gpu::DebugRing m_ring;
         GpuLabBox m_box;
         uint32_t

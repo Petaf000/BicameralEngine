@@ -5,16 +5,91 @@
 #include <array>
 #include <cstddef>
 #include <format>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 #include "core/log.h"
 
 namespace bicameral::sim {
 
+    namespace {
+        struct SpareQueue {
+            ID3D12Device5* device = nullptr;
+            D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            gpu::ImmediateQueue queue;
+        };
+
+        // 返したキュー(プロセスの終わりまで持つ。キューがデバイスを持つので、同じ番地に別のデバイスができることはない)
+        std::mutex& SpareMutex() {
+            static std::mutex mutex;
+            return mutex;
+        }
+
+        std::vector<SpareQueue>& SpareQueues() {
+            static std::vector<SpareQueue> spares;
+            return spares;
+        }
+    }
+
+    std::expected<PooledImmediateQueue, std::string> PooledImmediateQueue::Take(ID3D12Device5* device,
+                                                                               D3D12_COMMAND_LIST_TYPE type) {
+        {
+            const std::scoped_lock lock(SpareMutex());
+            auto& spares = SpareQueues();
+            const auto found = std::ranges::find_if(
+                spares, [&](const SpareQueue& spare) { return spare.device == device && spare.type == type; });
+            if (found != spares.end()) {
+                gpu::ImmediateQueue queue = std::move(found->queue);
+                spares.erase(found);
+                return PooledImmediateQueue(device, type, std::move(queue));
+            }
+        }
+
+        auto queue = gpu::ImmediateQueue::Create(device, type);
+        if (!queue)
+            return std::unexpected(queue.error());
+
+        return PooledImmediateQueue(device, type, std::move(*queue));
+    }
+
+    PooledImmediateQueue::PooledImmediateQueue(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE type,
+                                               gpu::ImmediateQueue queue)
+        : m_device(device), m_type(type), m_queue(std::move(queue)) {}
+
+    PooledImmediateQueue::PooledImmediateQueue(PooledImmediateQueue&& other) noexcept
+        : m_device(std::exchange(other.m_device, nullptr)), m_type(other.m_type), m_queue(std::move(other.m_queue)) {
+        other.m_queue.reset();
+    }
+
+    PooledImmediateQueue& PooledImmediateQueue::operator=(PooledImmediateQueue&& other) noexcept {
+        if (this != &other) {
+            Return();
+            m_device = std::exchange(other.m_device, nullptr);
+            m_type = other.m_type;
+            m_queue = std::move(other.m_queue);
+            other.m_queue.reset();
+        }
+
+        return *this;
+    }
+
+    PooledImmediateQueue::~PooledImmediateQueue() { Return(); }
+
+    void PooledImmediateQueue::Return() {
+        if (!m_queue || m_device == nullptr)
+            return;
+
+        const std::scoped_lock lock(SpareMutex());
+        SpareQueues().push_back({.device = m_device, .type = m_type, .queue = std::move(*m_queue)});
+        m_queue.reset();
+        m_device = nullptr;
+    }
+
     std::expected<LabSession, std::string> LabSession::Create(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                                               const BakedReactionTable& table, uint64_t tableVersion,
                                                               std::string tableBytes, lab::LabBoxShape shape) {
-        auto queue = gpu::ImmediateQueue::Create(device, queueType);
+        auto queue = PooledImmediateQueue::Take(device, queueType);
         if (!queue)
             return std::unexpected(queue.error());
 
@@ -37,7 +112,7 @@ namespace bicameral::sim {
         return session;
     }
 
-    LabSession::LabSession(BakedReactionTable table, gpu::ImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box)
+    LabSession::LabSession(BakedReactionTable table, PooledImmediateQueue queue, gpu::DebugRing ring, GpuLabBox box)
         : m_table(std::move(table)),
           m_queue(std::move(queue)),
           m_ring(std::move(ring)),
@@ -169,7 +244,7 @@ namespace bicameral::sim {
         }
 
         // --- GPU: 1 本のリスト(最初だけ初めの箱を写す)---
-        ID3D12GraphicsCommandList10* list = m_queue.Begin();
+        ID3D12GraphicsCommandList10* list = m_queue.Get().Begin();
         if (list == nullptr)
             return std::unexpected("コマンドリストを始められない");
 
@@ -188,7 +263,7 @@ namespace bicameral::sim {
 
         m_box.RecordReadback(list);
         m_ring.RecordReadbackAndReset(list);
-        if (!m_queue.ExecuteAndWait())
+        if (!m_queue.Get().ExecuteAndWait())
             return std::unexpected("GPU での実行に失敗");
 
         m_uploaded = true;

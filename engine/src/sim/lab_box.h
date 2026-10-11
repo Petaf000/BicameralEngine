@@ -50,8 +50,8 @@ namespace bicameral::sim {
     inline constexpr uint64_t LAB_WORLD_SEED = 20261009;
     inline constexpr int32_t LAB_INITIAL_TEMPERATURE_MILLIKELVIN = 300000;
 
-    // 箱の刻み: 反応(待ちの丸め)+ 熱の伝導(17 §4)。陰解法・小刻みは使わない(細かくした箱でも。細かいレベルの面の係数は
-    // 頭打ちで熱が遅い。ADR-0137。仮〔ユーザー未確認〕)
+    // 細かくできない箱(refineBlocks = 0)の刻み: 反応(待ちの丸め)+ 熱の伝導(17 §4)。陰解法・小刻みは使わない(T-0173 までの箱と記録のまま)。
+    // 細かくできる箱は LabStepOptions(細かいレベルの熱を陰解法で。T-0351)
     inline constexpr MultiresStepOptions LAB_STEP_OPTIONS = {.conduction = true};
 
     struct LabCellPosition {
@@ -150,6 +150,15 @@ namespace bicameral::sim {
     [[nodiscard]] MultiresCapacity LabBoxCapacity(const BakedReactionTable& table,
                                                   lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
+    // 細かくできる箱の陰解法の系の大きさの上限(T-0351): 細かくする枠が全部系に入る大きさ(未知数 = 枠 × 512・
+    // セル = 枠 × ImBlockCellBound(512)・多重格子の節はセルの 2 倍・隣は未知数 × 24)。GPU(GpuLabBox)は同じ値で陰解法の段を作る
+    [[nodiscard]] MultiresImplicitLimits LabImplicitLimits(lab::LabBoxShape shape);
+
+    // 箱の 1 刻みの選択(CPU の StepLabBox と GPU の GpuLabBox::RecordTick が同じものを使う)。細かくできない箱は LAB_STEP_OPTIONS。
+    // 細かくできる箱は細かいレベル(1〜LAB_MAX_REFINE_LEVELS)の熱を陰解法(方式②。基準 = 箱のセルのレベル 0)で解き、細かい所の熱が
+    // 本当の速さで伝わる(T-0351・ADR-0137 追記 2・QUESTIONS Q40 の B。レベル 0 の面は今までどおり陽解法)
+    [[nodiscard]] MultiresStepOptions LabStepOptions(lab::LabBoxShape shape);
+
     // 300 K の空気を満たした箱(根はいつも頁を持つ。GPU のコマンドは頁のセルに書くため)。根は x → y → z の順に枠 0 から
     [[nodiscard]] MultiresNest MakeLabBoxNest(const BakedReactionTable& table,
                                               lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
@@ -195,7 +204,7 @@ namespace bicameral::sim {
     // 細かくした(レベル 1 以上の本物の)ブロックの数
     [[nodiscard]] uint32_t LabRefinedBlockCount(const MultiresNest& nest);
 
-    // CPU リファレンスの 1 刻み: 細かくする(ApplyLabRefines)→ パッチの境 → コマンドを当てる → StepNest(LAB_STEP_OPTIONS)
+    // CPU リファレンスの 1 刻み: 細かくする(ApplyLabRefines)→ パッチの境 → コマンドを当てる → StepNest(LabStepOptions(shape))
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                     std::span<const Command> commands, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 

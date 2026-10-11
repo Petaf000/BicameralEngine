@@ -9,6 +9,7 @@
 #include <functional>
 #include <type_traits>
 
+#include "common/implicit_conduction.hlsli"
 #include "sim/multires_nest_internal.h"
 
 using namespace bicameral::multires;
@@ -363,6 +364,29 @@ namespace bicameral::sim {
                 .rootLevel = 0};
     }
 
+    MultiresImplicitLimits LabImplicitLimits(lab::LabBoxShape shape) {
+        constexpr uint32_t LINKS_PER_UNKNOWN = 24;  // 段 0 の隣(未知数 × 12 まで)と粗い段の隣の分
+        const uint32_t unknowns = shape.refineBlocks * MR_BLOCK_CELLS;
+        const uint32_t cells = shape.refineBlocks * ImBlockCellBound(MR_BLOCK_CELLS);
+
+        return {.unknowns = unknowns, .cells = cells, .nodes = 2 * cells, .links = LINKS_PER_UNKNOWN * unknowns};
+    }
+
+    MultiresStepOptions LabStepOptions(lab::LabBoxShape shape) {
+        if (shape.refineBlocks == 0)
+            return LAB_STEP_OPTIONS;
+
+        // 基準(頭打ちにならない最後のレベル)は箱のセルのレベル 0 に置く: 箱には何でも置けるので物質で決めず、細かくした所は全部陰解法。
+        // 頭打ちにならない所を陰解法で解いても本当の速さ(後退 Euler を 1 mK まで解く。D-436)なので、どの物質でも細かい所は本当の速さになる
+        MultiresStepOptions options = LAB_STEP_OPTIONS;
+        options.subcycleBaseLevel = 0;
+        options.implicitConduction = true;
+        options.implicitMaxGap = lab::LAB_MAX_REFINE_LEVELS;
+        options.implicitLimits = LabImplicitLimits(shape);
+
+        return options;
+    }
+
     MultiresNest MakeLabBoxNest(const BakedReactionTable& table, lab::LabBoxShape shape) {
         const std::array<SpeciesAmount, 2> air = {
             SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = AIR_OXYGEN_MICROMOLES},
@@ -618,7 +642,7 @@ namespace bicameral::sim {
         ApplyLabRefines(nest, commands, shape);
         ApplyLabPatchBoundaries(nest, tick, shape);
         ApplyLabCommands(nest, table, commands, shape);
-        StepNest(nest, table, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);
+        StepNest(nest, table, LAB_WORLD_SEED, tick, LabStepOptions(shape));
     }
 
     // --- 比べる ---

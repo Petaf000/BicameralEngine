@@ -10,8 +10,11 @@
 // 一部を細かくした箱(T-0314・ADR-0137): 細かくする印で根の一部を 2 段細かくすると、組の数・ブロックの数が見込みどおり・
 // 細かいセルは同じ濃度(量の単位 8^-k)・保存量が変わらない・細かいセルに置く/箱のセルに置くと覆う葉全部に・粗い葉の一部には当てない・
 // 細かい所の木が燃える・コマンドの無い刻みは保存・枠の無い箱は細かくならない・記録の版 6 は枠の数を持つ。
+// 細かくした所の熱(T-0351): 熱い点の広がりの増え方が、陰解法ではレベル 0 の理論の値と小刻み(世界の陽解法)に合い、陰解法なしは遅い。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +25,7 @@
 #include <string_view>
 #include <vector>
 
+#include "common/multires_conduction.hlsli"
 #include "reaction_test_table.h"
 #include "sim/lab_box.h"
 #include "sim/lab_gauge.h"
@@ -625,6 +629,149 @@ namespace {
         EXPECT(!SameLabShape(SHAPE, FIXED));
     }
 
+    // --- 細かくした所の熱の速さ(T-0351・ADR-0137 追記 2): 熱い点の超過エネルギーの 2 次のモーメント(広がりの分散)は、拡散なら
+    //     1 刻みに 2 × α × Δt(軸ごと)ずつ増える。陽解法でも後退 Euler でも、頭打ちでなければこの増え方は離散の式のまま正確
+    //     (Σ x² L g = 2 Σ g)なので、時間の刻み方によらず「熱の伝わる速さ」を測れる。レベル 0(頭打ちでない)の箱の増え方を理論の値とし、
+    //     2 段細かくした所の熱い点の増え方を 3 つの刻み方で比べる: 陰解法(LabStepOptions)・小刻み(方式①。世界の陽解法の本当の速さ)・
+    //     旧(陰解法なし = Q40 の A。頭打ちで遅い)。頭打ちが起きるよう、空気を 1/16 に薄くする(薄い気体は熱の拡散が速い)
+    constexpr uint32_t HEAT_THINNING = 16;
+    constexpr uint32_t HEAT_HOT_MILLIKELVIN = 600000;
+
+    // 箱を薄い空気で満たすコマンド(範囲は箱全部)
+    Command MakeThinAirFill(const BakedReactionTable& table, const MultiresNest& nest, lab::LabBoxShape shape,
+                            uint32_t sequence) {
+        const reaction::RxCell air = LabBoxCell(nest, lab::LabCellIndex(0, 0, 0), shape);
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        const uint32_t nitrogen = table.SpeciesId("nitrogen");
+        const std::array<SpeciesAmount, 2> thin = {
+            SpeciesAmount{.species = oxygen, .amount = AmountOf(air, oxygen) / HEAT_THINNING},
+            SpeciesAmount{.species = nitrogen, .amount = AmountOf(air, nitrogen) / HEAT_THINNING}};
+
+        return MakeLabFillRegionCommand(0, sequence, LabWholeBox(shape), thin, LAB_INITIAL_TEMPERATURE_MILLIKELVIN);
+    }
+
+    // レベル level の辺 edge セルの格子で、熱い点 hot からの超過エネルギーの 2 次のモーメント(そのレベルのセルの辺の 2 乗。
+    // 背景は熱い点から最も遠い角のセル)。cellAt はそのレベルのセル
+    template <typename CellAt>
+    double HeatSpread(uint32_t edge, LabCellPosition hot, CellAt cellAt) {
+        const int64_t background = cellAt(0, 0, 0).energy;
+        double weight = 0;
+        double moment = 0;
+        for (uint32_t z = 0; z < edge; ++z) {
+            for (uint32_t y = 0; y < edge; ++y) {
+                for (uint32_t x = 0; x < edge; ++x) {
+                    const auto excess = static_cast<double>(cellAt(x, y, z).energy - background);
+                    const auto dx = static_cast<double>(x) - hot.x;
+                    const auto dy = static_cast<double>(y) - hot.y;
+                    const auto dz = static_cast<double>(z) - hot.z;
+                    weight += excess;
+                    moment += excess * ((dx * dx) + (dy * dy) + (dz * dz));
+                }
+            }
+        }
+
+        return weight > 0 ? moment / weight : 0;
+    }
+
+    // 理論の値: 細かくしない 3×3×3 の根の箱(レベル 0 は頭打ちでない)の中央の熱い点の広がりの、1 刻みの増え(レベル 0 のセルの辺の 2 乗)
+    double LevelZeroSpreadRate(const BakedReactionTable& table, uint64_t ticks) {
+        constexpr lab::LabBoxShape SHAPE = {.rootsX = 3, .rootsY = 3, .rootsZ = 3, .refineBlocks = 0};
+        constexpr LabCellPosition HOT = {.x = 12, .y = 12, .z = 12};
+        MultiresNest nest = MakeLabBoxNest(table, SHAPE);
+        const std::vector<Command> setup = {MakeThinAirFill(table, nest, SHAPE, 0),
+                                            MakeLabTemperatureCommand(0, 1, HOT, HEAT_HOT_MILLIKELVIN)};
+        EXPECT(ApplyLabCommands(nest, table, setup, SHAPE) == 2);
+        const auto spread = [&] {
+            return HeatSpread(LAB_BOX_EDGE * 3, HOT, [&](uint32_t x, uint32_t y, uint32_t z) {
+                return LabBoxCell(nest, lab::LabCellIndex(x, y, z), SHAPE);
+            });
+        };
+        const double before = spread();
+        for (uint64_t tick = 0; tick < ticks; ++tick)
+            StepNest(nest, table, LAB_WORLD_SEED, tick, LabStepOptions(SHAPE));
+
+        return (spread() - before) / static_cast<double>(ticks);
+    }
+
+    void TestRefinedHeatSpeed(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        constexpr lab::LabBoxShape SHAPE = {
+            .rootsX = 1, .rootsY = 1, .rootsZ = 1, .refineBlocks = LAB_DEFAULT_REFINE_BLOCKS};
+        constexpr uint32_t FINE_EDGE = LAB_BOX_EDGE * 4;
+        constexpr LabCellPosition HOT = {.x = 16, .y = 16, .z = 16, .level = 2};
+        constexpr uint64_t TICKS = 4;
+        constexpr double FINE_TO_ROOT = 16;  // レベル 2 のセルの辺の 2 乗 → レベル 0
+
+        // --- 箱全部を 2 段細かくして薄い空気で満たし、細かいセル 1 つを熱くする ---
+        MultiresNest nest = MakeLabBoxNest(table, SHAPE);
+        const std::vector<Command> setup = {MakeLabRefineCommand(0, 0, LabWholeBox(SHAPE), 2),
+                                            MakeThinAirFill(table, nest, SHAPE, 1)};
+        StepLabBox(nest, table, 0, setup, SHAPE);
+        EXPECT(LabRefinedBlockCount(nest) == 72);
+        const Command hot = MakeLabTemperatureCommand(1, 0, HOT, HEAT_HOT_MILLIKELVIN);
+        EXPECT(ApplyLabCommands(nest, table, std::span(&hot, 1), SHAPE) == 1);
+
+        // --- 頭打ちが起きる場面か(薄い空気の基準のレベル = 頭打ちにならない最後のレベル)。ふつうの材料の基準も出す ---
+        const ReactionTableView view = table.View();
+        const auto baseOf = [&](const reaction::RxCell& cell) {
+            return multires::MrSubcycleBaseLevel(multires::MrCellThermal(view, cell));
+        };
+        const auto thinCell = LabBoxFineCell(nest, {.level = 2});
+        EXPECT(thinCell.has_value());
+        const int32_t base = thinCell ? baseOf(*thinCell) : 0;
+        // レベル 0 は頭打ちでなく(理論の値に使う)、細かい所は頭打ち(陰解法なしなら遅い)
+        EXPECT(base >= 0 && base < static_cast<int32_t>(lab::LAB_MAX_REFINE_LEVELS));
+        const MultiresNest fresh = MakeLabBoxNest(table, LAB_SINGLE_ROOT_SHAPE);
+        std::printf("lab_box_test: 基準のレベル(頭打ちにならない最後): 薄い空気 %d・空気 %d", base,
+                    baseOf(LabBoxCell(fresh, 0)));
+        for (const LabMaterial& material : materials) {
+            if (material.contents.empty())
+                continue;
+
+            const reaction::RxCell cell = MakeReactionCell(table, material.contents,
+                                                           LAB_INITIAL_TEMPERATURE_MILLIKELVIN);
+            std::printf("・%.*s %d", static_cast<int>(material.name.size()), material.name.data(), baseOf(cell));
+        }
+
+        std::printf("\n");
+
+        // --- 3 つの刻み方で流して、広がりの増え方(レベル 0 の単位)を比べる ---
+        const auto rateOf = [&](const MultiresStepOptions& options) {
+            MultiresNest run = nest;
+            const auto spread = [&] {
+                return HeatSpread(FINE_EDGE, HOT, [&](uint32_t x, uint32_t y, uint32_t z) {
+                    return *LabBoxFineCell(run, {.x = x, .y = y, .z = z, .level = 2});
+                });
+            };
+            const double before = spread();
+            for (uint64_t tick = 1; tick <= TICKS; ++tick)
+                StepNest(run, table, LAB_WORLD_SEED, tick, options);
+
+            return (spread() - before) / (FINE_TO_ROOT * static_cast<double>(TICKS));
+        };
+        const double theory = LevelZeroSpreadRate(table, TICKS);
+        const double implicit = rateOf(LabStepOptions(SHAPE));
+        const auto gap = static_cast<uint32_t>(std::clamp(static_cast<int32_t>(lab::LAB_MAX_REFINE_LEVELS) - base, 0,
+                                                          static_cast<int32_t>(MULTIRES_MAX_SUBCYCLE_GAP)));
+        const double subcycled = rateOf({.conduction = true, .subcycleBaseLevel = base, .maxSubcycleGap = gap});
+        const double capped = rateOf(LAB_STEP_OPTIONS);
+        std::printf(
+            "lab_box_test: 細かい所の熱の広がり(レベル 0 のセルの辺の 2 乗 / 刻み): 理論(レベル 0)%.4f・"
+            "陰解法 %.4f・小刻み %.4f・陰解法なし %.4f\n",
+            theory, implicit, subcycled, capped);
+        EXPECT(theory > 0);
+        EXPECT(std::abs(implicit - theory) < theory * 0.05);
+        EXPECT(std::abs(subcycled - theory) < theory * 0.05);
+        EXPECT(capped < theory * 0.7);
+
+        // --- 陰解法の刻みでもエネルギーと元素はビット単位で保存 ---
+        MultiresNest conserved = nest;
+        const ConservedTotals initial = ComputeConservedTotals(conserved, table, 2);
+        for (uint64_t tick = 1; tick <= TICKS; ++tick)
+            StepLabBox(conserved, table, tick, {}, SHAPE);
+
+        EXPECT(ComputeConservedTotals(conserved, table, 2) == initial);
+    }
+
     // --- 細かくした箱の計器・葉のセル・断面(T-0350)。窓の --auto-lab と同じ、根 1 つの細かくできる箱 ---
     void TestRefinedGauge(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
         constexpr lab::LabBoxShape SHAPE = {.rootsX = 1, .rootsY = 1, .rootsZ = 1, .refineBlocks = 128};
@@ -961,6 +1108,7 @@ int main() {
     TestMagicCatalyst(*table);
     TestRefinedBox(*table, materials);
     TestRefinedGauge(*table, materials);
+    TestRefinedHeatSpeed(*table, materials);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);
