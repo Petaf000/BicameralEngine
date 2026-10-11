@@ -361,6 +361,11 @@ bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 
 bicameral_add_gpu_test(gpu_conduct_bench)
 target_link_libraries(gpu_conduct_bench PRIVATE bicameral_sim)
 
+# 置くコマンドが 1 刻みにたくさん来た時の適用の単位の時間(T-0280。ctest には登録しない。docs/perf.md)。
+# 走らせ方: job.py run -Preset release -Exe gpu_place_bench
+bicameral_add_gpu_test(gpu_place_bench)
+target_link_libraries(gpu_place_bench PRIVATE bicameral_sim)
+
 # 窓の操作の記録 → 再生(T-0086、06「テスト」の 2 つ目・15 §2)。ランタイム(bicameral)を 2 回走らせる:
 #   1 回目: 自動クリックで窓の操作を入れて記録する。2 回目: 別の分け方(重さを分けた単位・目標 fps)で再生し、刻みごとのハッシュが全部一致すれば 0。
 # 窓を開くのでハードウェアの GPU と画面が要る(ラベル gpu。CI は外す)。

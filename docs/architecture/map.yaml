@@ -144,6 +144,9 @@ views:
       - { id: conductbench, group: tests, label: "gpu_conduct_bench<br/>伝播の規模ごとの伝導の時間",
           code: "tests/gpu_conduct_bench.cpp::RunScenario", ticket: T-0005,
           note: "ctest に入れない計測(docs/perf.md)。1 点のつつきが止まるまでと、熱の保存" }
+      - { id: placebench, group: tests, label: "gpu_place_bench<br/>置くコマンドの適用の時間",
+          code: "tests/gpu_place_bench.cpp::RunScenario", ticket: T-0280,
+          note: "ctest に入れない計測(docs/perf.md)。球・直方体 × 置き換え・足す × 1 刻みに 1・8・64 個。適用は 1 グループ 256 スレッド(ADR-0125)" }
       - { id: commandqueue, group: simlib, label: "GPU のコマンドキュー<br/>(targetTick, sequence) の順。適用の単位が先頭から取る",
           code: "shaders/sim/probe_tick.hlsl::ApplyCommand", ticket: T-0086, doc: docs/design/06-simulation-loop.md,
           note: "足すのは CPU だけ(末尾と空きを CPU が控える: ProbeSim::FreeCommandSlots)" }
@@ -596,6 +599,7 @@ views:
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]
+      - [placebench, probesim]
       - [frameloop, probeview, "記録済みのリスト(direct キュー)"]
       - [frameloop, queue, "Submit・GpuWait"]
       - [frameloop, swapchain, "WaitForFrame・Present"]

@@ -35,7 +35,7 @@ void EmitTickEvent(uint32_t type, uint32_t place) {
     tickEvents.Store2(PROBE_TICK_EVENT_HEADER_BYTES + slot * PROBE_TICK_EVENT_RECORD_BYTES, uint2(type, place));
 }
 
-// 1 つのコマンドを適用する(適用の単位の 1 スレッドが番号順に呼ぶ)。commandHead = 語 [0..3]、address = キューの中の場所
+// 1 つのコマンドを適用する(適用の単位のグループが番号順に呼ぶ。置く以外はスレッド 0 だけ)。commandHead = 語 [0..3]、address = キューの中の場所
 // つつき: そのセルを約 2700 K 温めるエネルギーを足し(湧き出しとして S(t + 1) の欄に数える)、熱のキャッシュを作り直し、
 // そのブロックを刻み t の活性の一覧へ(伝導の Work Graph が、そのブロックと隣を起こす)
 // 押す(T-0098): 光線が最初に入る物を番号の順に探し、動く物なら力積を加える(common/physics_push.hlsli。CPU は PhysicsWorld::Push)
@@ -73,10 +73,16 @@ void ApplyPush(uint32_t address) {
         EmitTickEvent(PROBE_EVENT_BODY_PUSHED, hit);
 }
 
-// 置く(T-0222・T-0245。common/probe_place.hlsli): 形(球・直方体・円柱)の中のセルを (z, y, x) の順に置き換える・足す。変わったエネルギーは湧き出しの欄へ。
-// 触ったブロック(形を囲む箱が重なるブロック全部。CPU も同じ)は「刻みの直前に変わった」にし、起こす刻みを今にする
-// (この後の WakeDueBlocks が一覧へ 1 回だけ足す。ADR-0018)。物質の数は適用の単位の引数(その刻みの表)
-void ApplyPlace(uint64_t tick, uint32_t address) {
+// 適用の単位のスレッドの数(T-0280・ADR-0125)。コマンドは番号の順に 1 つずつ、置くコマンドのセルだけをグループの全部のスレッドで分けて当てる
+static const uint32_t PROBE_APPLY_GROUP_SIZE = 256;
+
+// 置く(T-0222・T-0245。common/probe_place.hlsli): 形(球・直方体・円柱)の中のセルを置き換える・足す。変わったエネルギーは湧き出しの欄へ。
+// セルは形を囲む箱の中の通し番号で、スレッド thread が thread, thread + PROBE_APPLY_GROUP_SIZE, … を受け持つ(T-0280・ADR-0125)。
+// 1 つのコマンドの中のセルは互いに読まない(ProbePlaceCell は自分のセルだけ)ので、どの順に当てても CPU の (z, y, x) の順と同じ結果。
+// 湧き出しは整数の和(順に依らない)。触ったブロック(形を囲む箱が重なるブロック全部。CPU も同じ)は「刻みの直前に変わった」にし、
+// 起こす刻みを今にする(この後の WakeDueBlocks が一覧へ 1 回だけ足す。ADR-0018)。ブロックとイベントとトレースはスレッド 0 だけ
+// (今までと同じ順)。物質の数は適用の単位の引数(その刻みの表)
+void ApplyPlace(uint64_t tick, uint32_t address, uint32_t thread) {
     ProbePlacePayload payload;
     for (uint32_t word = 0; word < PROBE_PLACE_PAYLOAD_WORDS; ++word)
         payload.words[word] = commandQueue.Load(address + 16 + (word * 4));
@@ -85,30 +91,40 @@ void ApplyPlace(uint64_t tick, uint32_t address) {
     if (place.valid == 0)
         return;
 
-    // --- セル ---
+    // --- セル(グループで分ける)---
     const uint32_t base = GenerationBase(tick);
+    const uint32_t beginX = ProbePlaceBegin(place.x, place.extentX);
+    const uint32_t beginY = ProbePlaceBegin(place.y, place.extentY);
+    const uint32_t beginZ = ProbePlaceBegin(place.z, place.extentZ);
+    const uint32_t sizeX = ProbePlaceEnd(place.x, place.extentX) - beginX;
+    const uint32_t sizeY = ProbePlaceEnd(place.y, place.extentY) - beginY;
+    const uint32_t volume = sizeX * sizeY * (ProbePlaceEnd(place.z, place.extentZ) - beginZ);
     int64_t source = 0;
-    for (uint32_t z = ProbePlaceBegin(place.z, place.extentZ); z < ProbePlaceEnd(place.z, place.extentZ); ++z) {
-        for (uint32_t y = ProbePlaceBegin(place.y, place.extentY); y < ProbePlaceEnd(place.y, place.extentY); ++y) {
-            for (uint32_t x = ProbePlaceBegin(place.x, place.extentX); x < ProbePlaceEnd(place.x, place.extentX); ++x) {
-                if (!ProbePlaceCovers(place, x, y, z))
-                    continue;
+    for (uint32_t boxCell = thread; boxCell < volume; boxCell += PROBE_APPLY_GROUP_SIZE) {
+        const uint32_t x = beginX + (boxCell % sizeX);
+        const uint32_t y = beginY + ((boxCell / sizeX) % sizeY);
+        const uint32_t z = beginZ + (boxCell / (sizeX * sizeY));
+        if (!ProbePlaceCovers(place, x, y, z))
+            continue;
 
-                const uint32_t index = base + ProbeCellIndex(x, y, z);
-                const RxCell before = cells[index];
-                const ProbePlaced placed = ProbePlaceCell(ReactionTable(), before, place);
-                if (placed.applied == 0)
-                    continue;
+        const uint32_t index = base + ProbeCellIndex(x, y, z);
+        const RxCell before = cells[index];
+        const ProbePlaced placed = ProbePlaceCell(ReactionTable(), before, place);
+        if (placed.applied == 0)
+            continue;
 
-                source += placed.cell.energy - before.energy;
-                cells[index] = placed.cell;
-                thermal[index] = ProbeMakeCache(ReactionTable(), placed.cell);
-            }
-        }
+        source += placed.cell.energy - before.energy;
+        cells[index] = placed.cell;
+        thermal[index] = ProbeMakeCache(ReactionTable(), placed.cell);
     }
 
-    uint64_t original;
-    hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SOURCE, (uint64_t)source, original);
+    if (source != 0) {
+        uint64_t original;
+        hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_SOURCE, (uint64_t)source, original);
+    }
+
+    if (thread != 0)
+        return;
 
     // --- ブロック ---
     const uint32_t blockBeginX = ProbePlaceBegin(place.x, place.extentX) / PROBE_BLOCK_SIZE;
@@ -134,15 +150,19 @@ void ApplyPlace(uint64_t tick, uint32_t address) {
     EmitTickEvent(PROBE_EVENT_PLACE_APPLIED, ProbePokePlace(place.x, place.y, place.z));
 }
 
-void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address) {
+// 置くコマンドはグループの全部のスレッドで、ほかはスレッド 0 だけが当てる(T-0280)
+void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address, uint32_t thread) {
     const uint32_t type = commandHead.w & 0xFFFFu;
-    if (type == PROBE_COMMAND_TYPE_PUSH) {
-        ApplyPush(address);
+    if (type == PROBE_COMMAND_TYPE_PLACE) {
+        ApplyPlace(tick, address, thread);
         return;
     }
 
-    if (type == PROBE_COMMAND_TYPE_PLACE) {
-        ApplyPlace(tick, address);
+    if (thread != 0)
+        return;
+
+    if (type == PROBE_COMMAND_TYPE_PUSH) {
+        ApplyPush(address);
         return;
     }
 
@@ -269,15 +289,22 @@ void SortEventKeys(uint32_t thread) {
         commandQueue.Store4(destination + offset, input.Load4(source + offset));
 }
 
-// --- [0] コマンドの適用: 1 スレッドがキューの先頭から番号順に(06 §3「同じ刻みの中は sequence の順」)---
+// --- [0] コマンドの適用: 1 グループがキューの先頭から番号順に 1 つずつ(06 §3「同じ刻みの中は sequence の順」)---
 // キューは (targetTick, sequence) の昇順なので、targetTick が今の刻みを超えたら止まる。今の刻みより前のもの(遅れて届いた)は捨てて知らせる。
-// 順番に依存する本物のコマンドもこの形で決定的に適用できる。数が増えて 1 スレッドで重くなったら、種類ごとに分ける(T-0005 以降)
-[numthreads(1, 1, 1)] void ApplyCommands() {
+// 順番に依存する本物のコマンドもこの形で決定的に適用できる。置くコマンドのセルだけはグループの全部のスレッドで分け、コマンドの間に
+// グループの同期(UAV の書き込みを見せる)を挟む(次のコマンドは前のコマンドが書いたセルを読む。T-0280・ADR-0125)。
+// 全部のスレッドが同じキューの語を読むので、ループの回り方はグループの中で揃う(同期を分岐の中に置かない)
+[numthreads(PROBE_APPLY_GROUP_SIZE, 1, 1)] void ApplyCommands(uint3 groupThreadId : SV_GroupThreadID) {
+    const uint32_t thread = groupThreadId.x;
     const uint64_t tick = CurrentTick();
-    BeginTick(tick);
     const uint32_t tail = commandQueue.Load(PROBE_COMMAND_QUEUE_TAIL * 4);
     uint32_t head = commandQueue.Load(PROBE_COMMAND_QUEUE_HEAD * 4);
-    WgGaugePeak(PROBE_STATS_GAUGE_COMMAND_QUEUE, tail - head);  // 待っている数(T-0008)
+    if (thread == 0) {
+        BeginTick(tick);
+        WgGaugePeak(PROBE_STATS_GAUGE_COMMAND_QUEUE, tail - head);  // 待っている数(T-0008)
+    }
+
+    DeviceMemoryBarrierWithGroupSync();  // BeginTick が 0 にした湧き出しの欄へ、置くコマンドが足す
 
     for (uint32_t visited = 0; visited < PROBE_COMMAND_QUEUE_CAPACITY && head != tail; ++visited) {
         const uint32_t address = QueueRecordAddress(head);
@@ -287,14 +314,18 @@ void SortEventKeys(uint32_t thread) {
             break;
 
         if (targetTick == tick)
-            ApplyCommand(tick, commandHead, address);
-        else {
+            ApplyCommand(tick, commandHead, address, thread);
+        else if (thread == 0) {
             DEBUG_ASSERT(false, DebugFormat::ProbeCommandLate, (uint32_t)targetTick, (uint32_t)tick);
             EmitTickEvent(PROBE_EVENT_COMMAND_LATE, commandHead.w & 0xFFFFu);
         }
 
         ++head;
+        DeviceMemoryBarrierWithGroupSync();  // このコマンドが書いたセルを、次のコマンドの全部のスレッドが読めるように
     }
+
+    if (thread != 0)
+        return;
 
     commandQueue.Store(PROBE_COMMAND_QUEUE_HEAD * 4, head);
 
