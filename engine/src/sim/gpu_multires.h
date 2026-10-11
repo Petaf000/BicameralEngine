@@ -149,12 +149,13 @@ namespace bicameral::sim {
         [[nodiscard]] std::optional<ActivitySeeds> ReadSeeds() const;
 
         // 溢れの塊の置き場の使い方(RecordReadback の時。溢れを使う世界だけ。試験用。T-0347)。
-        // 端数の枠は今の面の溢れに要る塊だけを持つ(fractionChunks == fractionNeeded)・塊は置き場から漏れない(空き + 頁 + 端数の枠 = 全部)
+        // 端数の枠は今の面の溢れに要る塊だけを持つ(fractionChunks == fractionNeeded)・塊は置き場から漏れない(空き + 頁 + 端数の枠 + 一様の値 = 全部)
         struct WideChunkUse {
             uint32_t capacity = 0;
             uint32_t freeChunks = 0;
             uint32_t pageChunks = 0;      // 頁の両面が持つ塊
             uint32_t fractionChunks = 0;  // 端数の枠の両面が持つ塊
+            uint32_t uniformChunks = 0;   // 一様の値の溢れの両面が持つ塊(T-0312)
             uint32_t fractionNeeded = 0;  // 端数の枠の今の面の溢れに要る塊(MrWideChunksFor)の和
         };
         [[nodiscard]] std::optional<WideChunkUse> ReadWideChunkUse() const;
@@ -282,6 +283,9 @@ namespace bicameral::sim {
         [[nodiscard]] bool OverflowFits(const MultiresNest& nest) const;
         void AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const;
         void ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const;
+        // 溢れの領域の並び(C++ の数え方: 頁 → 端数の枠 → 一様の値〔世界の枠〕。T-0312)の area 番目の見出しの先頭(u6 の語)
+        [[nodiscard]] uint32_t OverflowAreaCount() const;
+        [[nodiscard]] uint32_t OverflowHeaderWord(uint32_t base, uint32_t area) const;
         // 刻みの段の後: 塊が足りなかった頁に塊を配り、同じ刻みのうちに刻み直す(T-0236)
         void RecordWideRetry(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         // 要求の処理・畳むの後: 端数の枠が要らない塊を置き場へ返す(溢れを使う世界だけ。T-0347)
