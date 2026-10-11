@@ -141,6 +141,21 @@ namespace bicameral::sim {
             return tables;
         }
 
+        // common/magic_patch.hlsli の List の約束(箱の世界のパッチの列。T-0024)
+        struct NestPatchList {
+            std::span<uint32_t> words;
+
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+
+        // common/lab_box.hlsli の Blocks の約束(箱の根の枠。T-0173)
+        struct NestBlocks {
+            std::span<const MrBlock> blocks;
+
+            [[nodiscard]] MrBlock Block(uint32_t slot) const { return blocks[slot]; }
+        };
+
     }  // namespace
 
     // --- コマンド ---
@@ -198,6 +213,28 @@ namespace bicameral::sim {
         SetPayload(command, lab::LAB_PAYLOAD_TABLE_VERSION, static_cast<uint32_t>(tableVersion));
         SetPayload(command, lab::LAB_PAYLOAD_TABLE_VERSION + 1, static_cast<uint32_t>(tableVersion >> 32));
         command.size = static_cast<uint16_t>(sizeof(uint32_t) * 2);
+
+        return command;
+    }
+
+    Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
+                                uint32_t durationTicks, LabCellRange range) {
+        Command command;
+        command.targetTick = targetTick;
+        command.sequence = sequence;
+        command.type = static_cast<uint16_t>(lab::LAB_COMMAND_TYPE_PATCH);
+        SetPayload(command, MP_COMMAND_RULE_KEY, static_cast<uint32_t>(ruleKey));
+        SetPayload(command, MP_COMMAND_RULE_KEY + 1, static_cast<uint32_t>(ruleKey >> 32));
+        SetPayload(command, MP_COMMAND_EFFECT, effect);
+        SetPayload(command, MP_COMMAND_DURATION, durationTicks);
+        const std::array<uint32_t, 3> low = {range.low.x, range.low.y, range.low.z};
+        const std::array<uint32_t, 3> high = {range.high.x, range.high.y, range.high.z};
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            SetPayload(command, MP_COMMAND_LOW + axis, low[axis]);
+            SetPayload(command, MP_COMMAND_HIGH + axis, high[axis]);
+        }
+
+        command.size = static_cast<uint16_t>(sizeof(uint32_t) * MP_COMMAND_WORDS);
 
         return command;
     }
@@ -323,6 +360,7 @@ namespace bicameral::sim {
                               lab::LabBoxShape shape) {
         const ReactionTableView view = table.View();
         const auto speciesCount = static_cast<uint32_t>(table.species.size());
+        const auto ruleCount = static_cast<uint32_t>(table.rules.size());
 
         // --- セル 1 つに当てる(根が一様なら当てない。lab_box.hlsl の ApplyToCell と同じ)---
         uint64_t touched = 0;  // つつく根(lab::LabRootBit)
@@ -344,6 +382,16 @@ namespace bicameral::sim {
             if (lab::LabCommandMarksTable(words)) {
                 touched |= lab::LabAllRoots(shape);
                 applied += 1;
+                continue;
+            }
+
+            // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(lab_box.hlsl と同じ)---
+            if (lab::LabCommandIsPatch(words)) {
+                const NestPatchList list{.words = nest.magicPatches};
+                const uint64_t roots = lab::LabApplyPatchCommand(list, view, NestBlocks{.blocks = nest.blocks}, shape,
+                                                                 words, ruleCount);
+                touched |= roots;
+                applied += roots != 0 ? 1 : 0;
                 continue;
             }
 
@@ -429,8 +477,20 @@ namespace bicameral::sim {
         return remapped;
     }
 
+    bool ApplyLabPatchBoundaries(MultiresNest& nest, uint64_t tick, lab::LabBoxShape shape) {
+        const NestPatchList list{.words = nest.magicPatches};
+        const uint64_t roots = lab::LabPatchBoundaries(list, NestBlocks{.blocks = nest.blocks}, shape, tick);
+        for (uint32_t slot = 0; slot < lab::LabRootCount(shape); ++slot) {
+            if (((roots >> slot) & 1) != 0)
+                nest_detail::PokeBlock(nest, slot);
+        }
+
+        return roots != 0;
+    }
+
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                     std::span<const Command> commands, lab::LabBoxShape shape) {
+        ApplyLabPatchBoundaries(nest, tick, shape);
         ApplyLabCommands(nest, table, commands, shape);
         StepNest(nest, table, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);
     }
@@ -478,6 +538,8 @@ namespace bicameral::sim {
             field = "数える欄";
         else if (!SameBytes(cpu.freeBlocks, gpu.freeBlocks) || !SameBytes(cpu.freeFractions, gpu.freeFractions))
             field = "空きのスタック";
+        else if (cpu.magicPatches != gpu.magicPatches)
+            field = "魔法のパッチの列";
 
         mismatch.what = std::format("刻み {} の{}が違う(セルは全部同じ)", tick, field);
         return mismatch;

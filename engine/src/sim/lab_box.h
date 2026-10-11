@@ -109,6 +109,12 @@ namespace bicameral::sim {
     // 印そのものはセルを変えず、箱をつつく(待ちの予定を新しい表で求め直す)。印は版だけ。表の中身は記録の tables に残す(T-0217)
     [[nodiscard]] Command MakeLabTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t tableVersion);
 
+    // 魔法のパッチ(T-0024・ADR-0095。common/magic_patch.hlsli)を刻み targetTick から durationTicks 刻み足す。
+    // 名前の鍵 ruleKey(RxRule::key。表を替えても同じ名前の規則に効く。T-0287)の規則の速さを、
+    // effect(MpMakeScaleEffect(shift) = 2^shift 倍 / MpMakeStopEffect() = 止める)で変える。範囲は箱のセルの座標
+    [[nodiscard]] Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
+                                              uint32_t durationTicks, LabCellRange range);
+
     // 表を替えた印なら、その表の版
     [[nodiscard]] std::optional<uint64_t> LabTableVersionOf(const Command& command);
 
@@ -145,6 +151,10 @@ namespace bicameral::sim {
     // 当てたセルを含む根だけをつつく(表を替えた印は全部の根)
     uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands,
                               lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
+
+    // CPU リファレンス: 刻み tick の初め(コマンドの前)に、速さが変わる魔法のパッチ(始まり・終わり)の範囲が重なる根をつつき、
+    // 終わったパッチを列から除く(shaders/sim/lab_box.hlsl の ApplyLabPatchBoundaries と同じ。T-0024)。つついたら true
+    bool ApplyLabPatchBoundaries(MultiresNest& nest, uint64_t tick, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
     // --- 物質の一覧が変わる表への差し替え(T-0242・ADR-0065)---
 

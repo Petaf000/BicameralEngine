@@ -77,6 +77,9 @@ namespace bicameral::sim {
         std::vector<uint32_t> freeFractions;  // 端数の枠の空きのスタック(数は counters[MR_COUNTER_FREE_FRACTIONS])
         std::vector<uint64_t> ledger;         // 世界の帳簿 [MR_LEDGER_LEVELS × ledgerColumns]
         std::array<uint32_t, multires::MR_COUNTER_COUNT> counters{};
+        // 魔法のパッチの列(T-0024・ADR-0095。common/magic_patch.hlsli の MP_LIST_WORDS 語。コマンドが足し、刻みの反応が読む。GPU は u5)。
+        // 状態の要約(ハッシュ)にはまだ入れていない(セルの結果に効くので、比べるテストはセルで見る)
+        std::vector<uint32_t> magicPatches = std::vector<uint32_t>(reaction::MP_LIST_WORDS, 0);
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
         //     GPU は順の決まらない一覧で持つので、集合として比べる(状態の要約に入れない)---
@@ -314,7 +317,8 @@ namespace bicameral::sim {
     // 世界(本物の葉のセルと端数)の要約。影は入らない
     [[nodiscard]] uint64_t HashRealLeaves(const MultiresNest& nest);
 
-    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄)の要約。CPU と GPU を比べるため。索引・要求・種は入らない
+    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄・効いている魔法のパッチ)の要約。CPU と GPU を比べるため。
+    // 索引・要求・種は入らない。パッチの列が空なら、パッチを入れる前(T-0024 より前)と同じ値
     [[nodiscard]] uint64_t HashWholeNest(const MultiresNest& nest);
 
     // 本物の葉のセルと世界の帳簿の、元素の数とエネルギーの合計を finestLevel の単位 × 2^-64 で

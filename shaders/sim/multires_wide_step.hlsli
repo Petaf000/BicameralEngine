@@ -159,7 +159,7 @@ bool RestepWideCell(MrBlock block, uint32_t index, uint32_t side, bool fits, uin
 
     const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
     const RxGpuWideCell before = LoadGpuWideCell(g_cells[PageCellAddress(block.page, index)], block.page, side, index);
-    const RxWaitStepOf<RxGpuWideCell> step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
+    const RxWaitStepOf<RxGpuWideCell> step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
     wakeTick = MinTick(wakeTick, step.wakeTick);
     tally = MrAddLimits(tally, step.limits);
     StoreGpuWideCell(step.cell, PageCellAddress(block.page, index), block.page, 1 - side, first);
@@ -191,7 +191,7 @@ void MarkWideCell(MrBlock block, uint32_t index, uint32_t side, RxCell inlineCel
     const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     const RxGpuWideCell wide = LoadGpuWideCell(inlineCell, block.page, side, index);
-    gs_wideOffsets[index] = WideTailCount(MrStepCellWait(MakeTable(), wide, seed, tick, block, index).cell);
+    gs_wideOffsets[index] = WideTailCount(MrStepCellWait(MakeStepTable(), wide, seed, tick, block, index).cell);
     InterlockedOr(gs_wideMarks[index / 32], 1u << (index % 32));
     gs_wideAny = 1;
 }
@@ -291,7 +291,7 @@ WaitBlockResult StepPagedWaitWide(uint32_t slot, uint32_t thread) {
             range = WideRange(block.page, side, index);
 
         if (range.x == range.y) {
-            const RxWaitStep step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
+            const RxWaitStep step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
             if ((step.limits & RX_LIMIT_PRODUCTS) == 0) {
                 g_cells[address] = step.cell;
                 wakeTick = MinTick(wakeTick, step.wakeTick);
@@ -307,7 +307,7 @@ WaitBlockResult StepPagedWaitWide(uint32_t slot, uint32_t thread) {
         gs_wideAny = 1;
         InterlockedOr(gs_wideMarks[index / 32], 1u << (index % 32));
         const RxGpuWideCell wide = LoadSteppedWideCell(block, index, side);
-        gs_wideOffsets[index] = WideTailCount(MrStepCellWait(MakeTable(), wide, seed, tick, block, index).cell);
+        gs_wideOffsets[index] = WideTailCount(MrStepCellWait(MakeStepTable(), wide, seed, tick, block, index).cell);
     }
 
     GroupMemoryBarrierWithGroupSync();

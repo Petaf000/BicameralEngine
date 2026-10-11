@@ -43,6 +43,9 @@ FX_CONST uint32_t LAB_COMMAND_TYPE_TABLE = 0x4C03;
 // 範囲のコマンド(T-0220): FILL・TEMPERATURE と同じ中身を直方体のセル全部に当てる。payload の LAB_PAYLOAD_CELL の語が範囲
 FX_CONST uint32_t LAB_COMMAND_TYPE_FILL_REGION = 0x4C04;
 FX_CONST uint32_t LAB_COMMAND_TYPE_TEMPERATURE_REGION = 0x4C05;
+// 魔法のパッチを足す(T-0024・ADR-0095)。payload は common/magic_patch.hlsli の MP_COMMAND_*(範囲はレベル 0 = 箱のセルの座標)。
+// 始まりはコマンドの刻み。セルは変えず、足せて箱に重なれば箱をつつく(速さが変わる。ADR-0018)
+FX_CONST uint32_t LAB_COMMAND_TYPE_PATCH = 0x4C06;
 
 // payload の語(FILL と TEMPERATURE で共通の先頭 2 語)
 FX_CONST uint32_t LAB_PAYLOAD_CELL = 0;         // セルの番号(MrCellIndex(x, y, z))
@@ -313,6 +316,78 @@ FX_FN RxCell LabApplyCommand(Table table, RxCell cell, LabCommand command) {
     }
 
     return LabSetTemperature(table, filled, temperature);
+}
+
+// --- 魔法のパッチ(T-0024・ADR-0095。common/magic_patch.hlsli)-----------------------------------
+
+FX_FN bool LabCommandIsPatch(LabCommand command) {
+    return LabCommandType(command) == LAB_COMMAND_TYPE_PATCH;
+}
+
+// コマンドの刻み(words[0..1] = targetTick)
+FX_FN uint64_t LabCommandTick(LabCommand command) {
+    return FX_U64(command.words[1], command.words[0]);
+}
+
+FX_FN MpPatch LabCommandPatch(LabCommand command) {
+    return MpPatchFromCommand(
+        FX_U64(LabPayload(command, MP_COMMAND_RULE_KEY + 1), LabPayload(command, MP_COMMAND_RULE_KEY)),
+        LabPayload(command, MP_COMMAND_EFFECT), LabPayload(command, MP_COMMAND_DURATION),
+        (int32_t)LabPayload(command, MP_COMMAND_LOW), (int32_t)LabPayload(command, MP_COMMAND_LOW + 1),
+        (int32_t)LabPayload(command, MP_COMMAND_LOW + 2), (int32_t)LabPayload(command, MP_COMMAND_HIGH),
+        (int32_t)LabPayload(command, MP_COMMAND_HIGH + 1), (int32_t)LabPayload(command, MP_COMMAND_HIGH + 2),
+        LabCommandTick(command));
+}
+
+// パッチの範囲がブロック(8³ セル)に重なるか
+FX_FN bool LabPatchTouchesBlock(MpPatch patch, MrBlock block) {
+    const int64_t last = (int64_t)MR_BLOCK_EDGE - 1;
+
+    return MpOverlaps(patch, block.level, block.originX, block.originY, block.originZ, block.originX + last,
+                      block.originY + last, block.originZ + last);
+}
+
+// 箱の根のうち、パッチの範囲が重なるもの(LabRootBit。T-0173 の大きい箱でも、範囲は箱の座標 = レベル 0 の座標)。
+// Blocks は Block(slot) で根の MrBlock を返す型(C++ は木の枠の span、HLSL は g_blocks)
+template <typename Blocks>
+FX_FN uint64_t LabPatchRoots(Blocks blocks, LabBoxShape shape, MpPatch patch) {
+    uint64_t roots = 0;
+    const uint32_t count = LabRootCount(shape);
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        if (LabPatchTouchesBlock(patch, blocks.Block(slot)))
+            roots |= LabRootBit(slot);
+    }
+
+    return roots;
+}
+
+// パッチのコマンドを当てる: 列に足し、足せたら範囲が重なる根(LabRootBit。呼ぶ側がつつく)。足せなければ 0。
+// table = 今の反応表、ruleCount = その規則の数
+template <typename List, typename Table, typename Blocks>
+FX_FN uint64_t LabApplyPatchCommand(List list, Table table, Blocks blocks, LabBoxShape shape, LabCommand command,
+                                    uint32_t ruleCount) {
+    const MpPatch patch = LabCommandPatch(command);
+    if (!MpAddPatch(list, table, patch, LabCommandTick(command), ruleCount))
+        return 0;
+
+    return LabPatchRoots(blocks, shape, patch);
+}
+
+// 刻み tick の初め(コマンドを当てる前): 速さが変わる(始まり・終わり)パッチの範囲が重なる根(LabRootBit。呼ぶ側がつつく)。
+// その後で終わったパッチを列から除く
+template <typename List, typename Blocks>
+FX_FN uint64_t LabPatchBoundaries(List list, Blocks blocks, LabBoxShape shape, uint64_t tick) {
+    const uint32_t count = MpPatchCount(list);
+    uint64_t roots = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const MpPatch patch = MpLoadPatch(list, i);
+        if (MpBoundaryAt(patch, tick))
+            roots |= LabPatchRoots(blocks, shape, patch);
+    }
+
+    MpRetireExpired(list, tick);
+
+    return roots;
 }
 
 LAB_NAMESPACE_END

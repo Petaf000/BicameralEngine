@@ -88,6 +88,13 @@ namespace bicameral::sim {
         return Queue(MakeLabTemperatureRegionCommand(m_tick, m_sequence, range, temperatureMilliKelvin));
     }
 
+    bool LabSession::ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range) {
+        if (rule >= m_table.rules.size())
+            return false;
+
+        return Queue(MakeLabPatchCommand(m_tick, m_sequence, m_table.rules[rule].key, effect, durationTicks, range));
+    }
+
     // --- 刻む ---
 
     // 刻み tick のコマンド(置いたもの + 再生中の記録)を (targetTick, sequence) の順に
