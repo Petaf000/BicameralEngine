@@ -1,0 +1,819 @@
+// gas_tree.cpp — 気体の多重解像度の木の CPU リファレンス(gas_tree.h・T-0208・07 §2.5・ADR-0117)。
+// 小刻みの段は gas_reference.cpp の Substep と同じ(導く値 → 面の力を当てる → 流れと出ていく割合 → 移す成分の物質量 → 移す)。
+// 違うのは面の両側がレベルの違うセルでありうることだけ: 面は細かい側のレベルの単位で計算し、粗い側の中身は × 8^d で細かい単位に直して読み、
+// 粗い側への増減は整数部 + 2^-64 の端数で足す(AddScaled)。どの段も整数の足し引きだけで次の配列へ書く(順番に依存しない。04 R2・R3)。
+#include "sim/gas_tree.h"
+
+#include <algorithm>
+#include <cassert>
+#include <limits>
+
+#include "common/fixed.hlsli"
+#include "sim/gas_internal.h"
+
+namespace bicameral::sim {
+
+    namespace {
+
+        namespace fx = bicameral::fx;
+        namespace gd = gas_detail;
+
+        constexpr uint32_t MAX_TREE_LEVEL = 20;  // 3k ≤ 61: 端数を合計(レベル 0 の 2^-64)へ正確に移せる深さ
+
+        // 面の片側。Finer と Mixed は面を作る時だけ使う(Finer: 細かいセルが覆う = 細かい側が面を計算する。
+        // Mixed: MUSCL の外側の隣がレベルの違うセル = 勾配を使わない)
+        enum class SideKind : uint8_t {
+            Cell,
+            Ghost,
+            Wall,
+            Finer,
+            Mixed,
+        };
+
+        struct TreeSide {
+            SideKind kind = SideKind::Cell;
+            uint32_t index = 0;  // Cell: セルの番号 / Ghost: 層 z
+            uint32_t level = 0;
+        };
+
+        struct TreeFace {
+            TreeSide left;
+            TreeSide right;
+            TreeSide leftOuter;
+            TreeSide rightOuter;
+            uint32_t axis = 0;
+            uint32_t level = 0;  // 面を計算する単位(細かい側のレベル)
+            uint32_t id = 0;     // 面の番号(そのレベルの座標から。乱数の丸め。R6)
+            int64_t flow = 0;
+            int64_t impulse = 0;
+            uint64_t fraction = 0;
+            int64_t weightLeft = 0;  // 面のレベルの単位
+            int64_t weightRight = 0;
+            std::array<uint64_t, GAS_MAX_SPECIES> moved = {};  // 面のレベルの単位
+        };
+
+        // 小刻みの中の状態(力を当てた後・移した後)
+        struct TreeState {
+            std::vector<GasCell> cells;
+            std::vector<GasTreeFraction> fractions;
+        };
+
+        // --- 端数つきの足し算 ---
+
+        // whole + fraction × 2^-64 に value × 2^-shift を足す(shift < 64。value は符号つき。128bit の足し算なので順に依存しない)
+        void AddScaled(int64_t& whole, uint64_t& fraction, int64_t value, uint32_t shift) {
+            if (shift == 0) {
+                whole += value;
+                return;
+            }
+
+            assert(shift < 64);
+            const int64_t high = value >> shift;  // −∞ 方向(C++20 の算術シフト)
+            const uint64_t low = ((uint64_t)value & (((uint64_t)1 << shift) - 1)) << (64 - shift);
+            fraction += low;
+            whole += high + (fraction < low ? 1 : 0);
+        }
+
+        void AddScaledUnsigned(uint64_t& whole, uint64_t& fraction, int64_t value, uint32_t shift) {
+            auto signedWhole = (int64_t)whole;
+            AddScaled(signedWhole, fraction, value, shift);
+            assert(signedWhole >= 0);
+            whole = (uint64_t)signedWhole;
+        }
+
+        // 端数(2^-64 × レベル k の単位)を合計(2^-64 × レベル 0 の単位)へ。下位の 3k ビットは 0(細かい側の単位でしか増えない)
+        void AddFraction(GasQ64& total, uint64_t fraction, uint32_t shift) {
+            assert(shift == 0 || (fraction & (((uint64_t)1 << shift) - 1)) == 0);
+            const uint64_t low = shift == 0 ? fraction : fraction >> shift;
+            total.fraction += low;
+            total.whole += total.fraction < low ? 1 : 0;
+        }
+
+        void AddLedger(GasQ64& ledger, int64_t value, uint32_t level) {
+            AddScaled(ledger.whole, ledger.fraction, value, 3 * level);
+        }
+
+        // --- 面の両側 ---
+
+        uint32_t CellLayer(const GasTree& tree, uint32_t index) {
+            return tree.places[index].coordinate[2];
+        }
+
+        const GasCell& SideCell(const GasTree& tree, const std::vector<GasCell>& cells, const TreeSide& side) {
+            return side.kind == SideKind::Ghost ? tree.levels[side.level].ghost[side.index] : cells[side.index];
+        }
+
+        const GasDerived& SideDerived(const GasTree& tree, const std::vector<GasDerived>& derived,
+                                      const TreeSide& side) {
+            return side.kind == SideKind::Ghost ? tree.levels[side.level].referenceDerived[side.index]
+                                                : derived[side.index];
+        }
+
+        // 側の中身を面の単位へ直すずらし(粗い側は 3d。同じレベル・境界は 0)
+        uint32_t ContentShift(const TreeFace& face, const TreeSide& side) {
+            return side.kind == SideKind::Cell ? 3 * (face.level - side.level) : 0;
+        }
+
+        // 基準との質量の差(数。密度のような値なのでレベルの単位のまま)。開いた境界の外・壁は 0
+        int64_t Excess(const GasTree& tree, const std::vector<GasDerived>& derived, const TreeSide& side) {
+            if (side.kind != SideKind::Cell)
+                return 0;
+
+            const GasTreeLevel& level = tree.levels[side.level];
+            return (int64_t)derived[side.index].mass -
+                   (int64_t)level.referenceDerived[CellLayer(tree, side.index)].mass;
+        }
+
+        // 静水圧の差の半分(µPa)= 質量の差 × 39.2266 ÷ 2 ÷ 2^k(レベル k の数の質量の差。セルの高さが 2^-k)
+        int64_t HalfHydrostatic(int64_t excess, uint32_t level) {
+            return excess * (int64_t)gd::HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / ((int64_t)20000 << level);
+        }
+
+        // 面の両側の質量の差を面のレベルの数へ(粗い側は高さが 2^d 倍なので静水圧の差も 2^d 倍)
+        int64_t FaceExcess(const GasTree& tree, const std::vector<GasDerived>& derived, const TreeFace& face) {
+            const int64_t left = Excess(tree, derived, face.left) * ((int64_t)1 << (ContentShift(face, face.left) / 3));
+            const int64_t right = Excess(tree, derived, face.right) *
+                                  ((int64_t)1 << (ContentShift(face, face.right) / 3));
+
+            return left + right;
+        }
+
+        // --- 面の一覧 ---
+
+        // レベル level の座標(軸 axis だけ箱の外になりうる)の側。無ければ 1 つ粗いレベル(隣のレベルの差は 1 まで。T-0208)
+        TreeSide Resolve(const GasTree& tree, uint32_t level, std::array<int64_t, GAS_AXES> coordinate, uint32_t axis,
+                         uint32_t ownLayer) {
+            const GasTreeLevel& grid = tree.levels[level];
+            const auto size = (int64_t)grid.size[axis];
+            const GasBoundary boundary = tree.config.boundary[axis];
+            if (coordinate[axis] < 0 || coordinate[axis] >= size) {
+                if (boundary == GasBoundary::Open)
+                    return {.kind = SideKind::Ghost, .index = ownLayer, .level = level};
+
+                if (boundary == GasBoundary::Wall)
+                    return {.kind = SideKind::Wall, .index = 0, .level = level};
+
+                coordinate[axis] = ((coordinate[axis] % size) + size) % size;
+            }
+
+            const auto x = (uint32_t)coordinate[0];
+            const auto y = (uint32_t)coordinate[1];
+            const auto z = (uint32_t)coordinate[2];
+            const int32_t found = tree.Find(level, x, y, z);
+            if (found >= 0)
+                return {.kind = SideKind::Cell, .index = (uint32_t)found, .level = level};
+
+            if (found == GAS_TREE_COVERED)
+                return {.kind = SideKind::Finer, .index = 0, .level = level + 1};
+
+            assert(level > 0);
+            const int32_t parent = tree.Find(level - 1, x / 2, y / 2, z / 2);
+            assert(parent >= 0 && "隣のレベルの差は 1 まで(2:1。T-0208)");
+
+            return {.kind = SideKind::Cell, .index = (uint32_t)parent, .level = level - 1};
+        }
+
+        // MUSCL の外側の隣: 面と同じレベルのセルか境界だけ使う
+        TreeSide OuterSide(const GasTree& tree, uint32_t level, std::array<int64_t, GAS_AXES> coordinate, uint32_t axis,
+                           uint32_t ownLayer) {
+            const TreeSide side = Resolve(tree, level, coordinate, axis, ownLayer);
+            if (side.kind == SideKind::Finer || (side.kind == SideKind::Cell && side.level != level))
+                return {.kind = SideKind::Mixed, .index = 0, .level = level};
+
+            return side;
+        }
+
+        // セル index の軸 axis の面(high = プラス側)。other は面の向こうの側
+        TreeFace MakeFace(const GasTree& tree, uint32_t index, uint32_t axis, bool high, const TreeSide& other) {
+            const GasTreePlace& place = tree.places[index];
+            const TreeSide self = {.kind = SideKind::Cell, .index = index, .level = place.level};
+            TreeFace face;
+            face.axis = axis;
+            face.level = place.level;
+            face.left = high ? self : other;
+            face.right = high ? other : self;
+            face.id = ((tree.GridIndex(place.level, place.coordinate[0], place.coordinate[1], place.coordinate[2]) *
+                        GAS_AXES) +
+                       axis) *
+                          2 +
+                      (high ? 1 : 0);
+
+            std::array<int64_t, GAS_AXES> coordinate = {place.coordinate[0], place.coordinate[1], place.coordinate[2]};
+            const int64_t left = high ? coordinate[axis] : coordinate[axis] - 1;
+            const bool sameLevel = other.kind != SideKind::Cell || other.level == place.level;
+            face.leftOuter = {.kind = SideKind::Mixed, .index = 0, .level = place.level};
+            face.rightOuter = face.leftOuter;
+            if (!sameLevel)
+                return face;
+
+            coordinate[axis] = left - 1;
+            face.leftOuter = OuterSide(tree, place.level, coordinate, axis, place.coordinate[2]);
+            coordinate[axis] = left + 2;
+            face.rightOuter = OuterSide(tree, place.level, coordinate, axis, place.coordinate[2]);
+
+            return face;
+        }
+
+        // 面の一覧: 同じレベルの面はマイナス側のセルが 1 回(gas_reference と同じ)、レベルをまたぐ面は細かい側のセルが両向きに作る
+        std::vector<TreeFace> EnumerateFaces(const GasTree& tree) {
+            std::vector<TreeFace> faces;
+            faces.reserve((tree.cells.size() * GAS_AXES) + 64);
+
+            for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+                const GasTreePlace& place = tree.places[index];
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                    std::array<int64_t, GAS_AXES> coordinate = {place.coordinate[0], place.coordinate[1],
+                                                                place.coordinate[2]};
+                    coordinate[axis] -= 1;
+                    const TreeSide minus = Resolve(tree, place.level, coordinate, axis, place.coordinate[2]);
+                    if (minus.kind != SideKind::Finer)
+                        faces.push_back(MakeFace(tree, index, axis, false, minus));
+
+                    coordinate[axis] += 2;
+                    const TreeSide plus = Resolve(tree, place.level, coordinate, axis, place.coordinate[2]);
+                    const bool boundary = plus.kind == SideKind::Wall || plus.kind == SideKind::Ghost;
+                    const bool coarser = plus.kind == SideKind::Cell && plus.level < place.level;
+                    if (boundary || coarser)
+                        faces.push_back(MakeFace(tree, index, axis, true, plus));
+                }
+            }
+
+            return faces;
+        }
+
+        // --- 面の力と流れ(gas_reference.cpp の同じ名前の関数を、面のレベルの係数で)---
+
+        int64_t DrivingPressure(const GasTree& tree, const std::vector<GasDerived>& derived, const TreeFace& face) {
+            const int64_t difference = SideDerived(tree, derived, face.left).scaledPressure -
+                                       SideDerived(tree, derived, face.right).scaledPressure;
+            if (face.axis != 2 || !tree.config.gravity)
+                return difference;
+
+            return difference - HalfHydrostatic(FaceExcess(tree, derived, face), face.level);
+        }
+
+        // 縦の面の重さ: 両側の質量の差(数)の平均の 1/4 を両側が受ける。粗い側は細かい単位で × 2^d
+        // (粗いセルの 1 面は細かい面 4^d 枚に分かれ、細かい単位は 8^-d なので、全部の細かい面で同じレベルの面の 1/4 になる)
+        void ComputeFaceWeight(const GasTree& tree, const std::vector<GasDerived>& derived, TreeFace& face) {
+            if (face.axis != 2 || !tree.config.gravity)
+                return;
+
+            const auto coefficient = (int64_t)tree.levels[face.level].coefficients.gravityImpulse;
+            if (face.left.kind == SideKind::Wall) {
+                face.weightRight = fx::FxMulShiftS64(Excess(tree, derived, face.right), coefficient, 17);
+                return;
+            }
+
+            if (face.right.kind == SideKind::Wall) {
+                face.weightLeft = fx::FxMulShiftS64(Excess(tree, derived, face.left), coefficient, 17);
+                return;
+            }
+
+            const int64_t quarter = fx::FxMulShiftS64(
+                Excess(tree, derived, face.left) + Excess(tree, derived, face.right), coefficient, 18);
+            face.weightLeft = quarter * ((int64_t)1 << (ContentShift(face, face.left) / 3));
+            face.weightRight = quarter * ((int64_t)1 << (ContentShift(face, face.right) / 3));
+        }
+
+        void ComputeFaceForce(const GasTree& tree, const std::vector<GasDerived>& derived, TreeFace& face) {
+            const auto coefficient = (int64_t)tree.levels[face.level].coefficients.pressureImpulse;
+            ComputeFaceWeight(tree, derived, face);
+
+            // --- 壁: 鏡に映した圧力(縦の壁は半セル分の静水圧で壁まで延ばす)---
+            if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall) {
+                const bool wallBelow = face.left.kind == SideKind::Wall;
+                const TreeSide& inside = wallBelow ? face.right : face.left;
+                int64_t pressure = derived[inside.index].scaledPressure;
+                if (face.axis == 2 && tree.config.gravity) {
+                    const int64_t hydrostatic = HalfHydrostatic(Excess(tree, derived, inside), face.level);
+                    pressure += wallBelow ? hydrostatic : -hydrostatic;
+                }
+
+                face.impulse = fx::FxMulShiftS64(pressure * 2, coefficient, 16);
+                return;
+            }
+
+            const int64_t pressureSum = SideDerived(tree, derived, face.left).scaledPressure +
+                                        SideDerived(tree, derived, face.right).scaledPressure;
+            face.impulse = fx::FxMulShiftS64(pressureSum, coefficient, 16);
+        }
+
+        // 質量の流れ(面のレベルの単位)。運動量は数のまま足す(同じ速さなら同じ数 = 運動量の密度)
+        void ComputeFaceFlow(const GasTree& tree, const std::vector<GasDerived>& derived,
+                             const std::vector<GasCell>& forced, TreeFace& face) {
+            if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
+                return;
+
+            const GasCoefficients& coefficients = tree.levels[face.level].coefficients;
+            const int64_t momentumSum = SideCell(tree, forced, face.left).momentum[face.axis] +
+                                        SideCell(tree, forced, face.right).momentum[face.axis];
+            const int64_t central = fx::FxMulShiftS64(momentumSum, (int64_t)coefficients.centralFlow, 52);
+            const int64_t diffusion = fx::FxMulShiftS64(DrivingPressure(tree, derived, face),
+                                                        (int64_t)coefficients.pressureFlow, 40);
+            face.flow = central + diffusion;
+        }
+
+        const TreeSide& Donor(const TreeFace& face) {
+            return face.flow > 0 ? face.left : face.right;
+        }
+
+        // 風上の中身(面の単位)のうち移す割合(Q32。抑える前)
+        uint64_t RawFraction(const GasTree& tree, const std::vector<GasDerived>& derived, const TreeFace& face) {
+            if (face.flow == 0)
+                return 0;
+
+            const TreeSide& donor = Donor(face);
+            const GasDerived& donorDerived = SideDerived(tree, derived, donor);
+            const uint32_t shift = ContentShift(face, donor);
+            uint64_t inverseMass = donorDerived.inverseMass;
+            if (shift != 0)
+                inverseMass = donorDerived.mass == 0
+                                  ? 0
+                                  : std::numeric_limits<uint64_t>::max() / (donorDerived.mass << shift);
+
+            return gd::MulShiftU64(fx::FxAbsU64(face.flow), inverseMass, 32);
+        }
+
+        // 出ていく割合の合計が 1 を超えるセルは比例して縮める(割合はどれも同じ中身に対する値なので、レベルをまたぐ面もそのまま足せる)
+        void LimitOutflow(const GasTree& tree, const std::vector<GasDerived>& derived, std::vector<TreeFace>& faces) {
+            std::vector<uint64_t> outflow(tree.cells.size(), 0);
+            for (TreeFace& face : faces) {
+                face.fraction = RawFraction(tree, derived, face);
+                const TreeSide& donor = Donor(face);
+                if (face.fraction != 0 && donor.kind == SideKind::Cell)
+                    outflow[donor.index] += face.fraction;
+            }
+
+            for (TreeFace& face : faces) {
+                const TreeSide& donor = Donor(face);
+                if (face.fraction == 0 || donor.kind != SideKind::Cell || outflow[donor.index] <= gd::ONE_Q32)
+                    continue;
+
+                face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, gd::ONE_Q32), outflow[donor.index])
+                                    .quotient;
+            }
+        }
+
+        // --- 移す成分の物質量(G2。MUSCL は同じレベルの 3 つ並びだけ)---
+
+        int64_t SpeciesRatio(const GasTree& tree, const std::vector<GasCell>& cells,
+                             const std::vector<GasDerived>& derived, const TreeSide& side, uint32_t s) {
+            const uint64_t inverseAmount = SideDerived(tree, derived, side).inverseAmount;
+
+            return (int64_t)gd::MulShiftU64(SideCell(tree, cells, side).amounts[s], inverseAmount, 32);
+        }
+
+        int64_t HalfSlope(const GasTree& tree, const std::vector<GasCell>& cells,
+                          const std::vector<GasDerived>& derived, const TreeFace& face, uint32_t s) {
+            const bool forward = face.flow > 0;
+            const TreeSide& outer = forward ? face.leftOuter : face.rightOuter;
+            const TreeSide& donor = forward ? face.left : face.right;
+            const TreeSide& receiver = forward ? face.right : face.left;
+            const bool outerUsable = outer.kind != SideKind::Wall && outer.kind != SideKind::Mixed;
+            if (donor.kind != SideKind::Cell || !outerUsable || receiver.kind == SideKind::Wall)
+                return 0;
+
+            const int64_t donorRatio = SpeciesRatio(tree, cells, derived, donor, s);
+            const int64_t slope = gd::LimitedSlope(tree.config.reconstruction,
+                                                   donorRatio - SpeciesRatio(tree, cells, derived, outer, s),
+                                                   SpeciesRatio(tree, cells, derived, receiver, s) - donorRatio);
+
+            return fx::FxMulShiftS64(slope, (int64_t)(gd::ONE_Q32 - face.fraction), 33);
+        }
+
+        // 移す成分 s の物質量(Q32 の面の単位。128bit)。同じレベルの面は gas_reference と同じ式、粗い風上は中身 × 8^d(1 次の風上)
+        fx::FxU128 MovedAmountQ32(const GasTree& tree, const std::vector<GasCell>& cells,
+                                  const std::vector<GasDerived>& derived, const TreeFace& face, uint32_t s) {
+            const TreeSide& donor = Donor(face);
+            const GasCell& source = SideCell(tree, cells, donor);
+            const uint32_t shift = ContentShift(face, donor);
+            if (shift != 0) {
+                const fx::FxU128 product = fx::FxMulU64Full(source.amounts[s], face.fraction);
+                return {.hi = (product.hi << shift) | (product.lo >> (64 - shift)), .lo = product.lo << shift};
+            }
+
+            const uint64_t moved = source.amounts[s] * face.fraction;
+            if (tree.config.reconstruction == GasReconstruction::Upwind)
+                return {.hi = 0, .lo = moved};
+
+            const int64_t halfSlope = HalfSlope(tree, cells, derived, face, s);
+            const uint64_t total = gd::TotalAmount(tree.config, source) * face.fraction;
+            const uint64_t correction = gd::MulShiftU64(total, fx::FxAbsU64(halfSlope), 32);
+            if (halfSlope >= 0)
+                return {.hi = 0, .lo = moved + correction};
+
+            return {.hi = 0, .lo = moved > correction ? moved - correction : 0};
+        }
+
+        uint64_t RoundAmount(const GasTree& tree, fx::FxU128 amountQ32, uint64_t hash) {
+            const uint64_t whole = fx::FxShiftRightU128(amountQ32, 32);
+            if (!tree.config.stochasticRounding)
+                return whole;
+
+            return whole + ((hash >> 32) < (amountQ32.lo & gd::LOW_32_BITS) ? 1 : 0);
+        }
+
+        // 乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分。レベル 0 は gas_reference と同じ
+        void ComputeMovedAmounts(const GasTree& tree, const std::vector<GasCell>& cells,
+                                 const std::vector<GasDerived>& derived, uint64_t roundingTick,
+                                 std::vector<TreeFace>& faces) {
+            for (TreeFace& face : faces) {
+                if (face.fraction == 0)
+                    continue;
+
+                const uint64_t faceHash = fx::FxHash64(tree.config.randomSeed, roundingTick, face.id,
+                                                       gd::GAS_ROUNDING_PURPOSE + face.level);
+                for (uint32_t s = 0; s < tree.config.speciesCount; ++s) {
+                    const fx::FxU128 amountQ32 = MovedAmountQ32(tree, cells, derived, face, s);
+                    face.moved[s] = RoundAmount(tree, amountQ32, fx::FxHashCombine(faceHash, s));
+                }
+            }
+        }
+
+        // 風上のセルごとに、移す物質量の合計が中身を超えたら比例して縮める。合計は風上のレベル + 1 の単位で数える
+        // (同じレベルの面は × 8。比も切り捨ても gas_reference と同じ値になる)
+        void LimitMovedAmounts(const GasTree& tree, const std::vector<GasCell>& cells, std::vector<TreeFace>& faces) {
+            const uint32_t speciesCount = tree.config.speciesCount;
+            std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> outgoing(tree.cells.size());
+            for (const TreeFace& face : faces) {
+                const TreeSide& donor = Donor(face);
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const uint32_t unitShift = 3 - ContentShift(face, donor);
+                for (uint32_t s = 0; s < speciesCount; ++s)
+                    outgoing[donor.index][s] += face.moved[s] << unitShift;
+            }
+
+            for (TreeFace& face : faces) {
+                const TreeSide& donor = Donor(face);
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                for (uint32_t s = 0; s < speciesCount; ++s) {
+                    const uint64_t total = outgoing[donor.index][s];
+                    const uint64_t content = cells[donor.index].amounts[s] << 3;
+                    if (total <= content)
+                        continue;
+
+                    face.moved[s] = fx::FxDivU128By64(fx::FxMulU64Full(face.moved[s], content), total).quotient;
+                }
+            }
+        }
+
+        // --- 当てる ---
+
+        // セルの運動量に面の単位の増減を足す(粗い側は端数つき)
+        void AddMomentum(TreeState& state, const TreeSide& side, uint32_t axis, int64_t value, uint32_t faceLevel) {
+            const uint32_t shift = 3 * (faceLevel - side.level);
+            AddScaled(state.cells[side.index].momentum[axis], state.fractions[side.index].momentum[axis], value, shift);
+        }
+
+        void ApplyImpulse(GasTree& tree, TreeState& state, const TreeFace& face) {
+            // --- 重さ(箱の外から働く力なので帳簿へ)---
+            if (face.left.kind == SideKind::Cell && face.weightLeft != 0) {
+                AddMomentum(state, face.left, 2, -face.weightLeft, face.level);
+                AddLedger(tree.ledger.momentum[2], -face.weightLeft, face.level);
+            }
+
+            if (face.right.kind == SideKind::Cell && face.weightRight != 0) {
+                AddMomentum(state, face.right, 2, -face.weightRight, face.level);
+                AddLedger(tree.ledger.momentum[2], -face.weightRight, face.level);
+            }
+
+            if (face.impulse == 0)
+                return;
+
+            if (face.left.kind == SideKind::Cell)
+                AddMomentum(state, face.left, face.axis, -face.impulse, face.level);
+            else
+                AddLedger(tree.ledger.momentum[face.axis], face.impulse, face.level);
+
+            if (face.right.kind == SideKind::Cell)
+                AddMomentum(state, face.right, face.axis, face.impulse, face.level);
+            else
+                AddLedger(tree.ledger.momentum[face.axis], -face.impulse, face.level);
+        }
+
+        // 塊(面の単位)を side へ足す(sign = 1)か引く(−1)。セルでなければ(開いた境界の外)帳簿へ逆向きに
+        void AddParcel(GasTree& tree, TreeState& state, const TreeSide& side, uint32_t faceLevel, const GasCell& parcel,
+                       int64_t energy, int64_t sign) {
+            const uint32_t speciesCount = tree.config.speciesCount;
+            if (side.kind != SideKind::Cell) {
+                for (uint32_t s = 0; s < speciesCount; ++s)
+                    AddLedger(tree.ledger.amounts[s], -sign * (int64_t)parcel.amounts[s], faceLevel);
+
+                AddLedger(tree.ledger.energy, -sign * energy, faceLevel);
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                    AddLedger(tree.ledger.momentum[axis], -sign * parcel.momentum[axis], faceLevel);
+
+                return;
+            }
+
+            const uint32_t shift = 3 * (faceLevel - side.level);
+            GasCell& cell = state.cells[side.index];
+            GasTreeFraction& fraction = state.fractions[side.index];
+            for (uint32_t s = 0; s < speciesCount; ++s) {
+                assert(sign > 0 || shift != 0 || cell.amounts[s] >= parcel.amounts[s]);
+                AddScaledUnsigned(cell.amounts[s], fraction.amounts[s], sign * (int64_t)parcel.amounts[s], shift);
+            }
+
+            AddScaled(cell.energy, fraction.energy, sign * energy, shift);
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                AddScaled(cell.momentum[axis], fraction.momentum[axis], sign * parcel.momentum[axis], shift);
+        }
+
+        // 重さの仕事(面の単位。1 mg が 1 セル〔0.5 m × 2^-k〕上がる仕事)
+        int64_t GravityWork(const GasTree& tree, const TreeFace& face, const GasCell& moved) {
+            const GasConfig& config = tree.config;
+            if (face.axis != 2 || !config.gravity || config.thermodynamics != GasThermodynamics::Adiabatic)
+                return 0;
+
+            const uint64_t mass = gd::CellMass(config, tree.levels[face.level].coefficients, moved);
+            const auto work = (int64_t)(mass * gd::GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / (gd::MICRO << face.level));
+
+            return face.flow > 0 ? work : -work;
+        }
+
+        void Transfer(GasTree& tree, const std::vector<GasCell>& forced, const std::vector<GasDerived>& derived,
+                      TreeState& next, const TreeFace& face) {
+            if (face.fraction == 0)
+                return;
+
+            const TreeSide& donor = Donor(face);
+            const TreeSide& receiver = face.flow > 0 ? face.right : face.left;
+
+            // --- 風上の中身を面の単位へ(粗い風上は × 8^d)---
+            GasCell source = SideCell(tree, forced, donor);
+            GasDerived sourceDerived = SideDerived(tree, derived, donor);
+            const uint32_t shift = ContentShift(face, donor);
+            if (shift != 0) {
+                for (uint64_t& amount : source.amounts)
+                    amount <<= shift;
+
+                source.energy *= (int64_t)1 << shift;
+                for (int64_t& momentum : source.momentum)
+                    momentum *= (int64_t)1 << shift;
+
+                sourceDerived.mass <<= shift;
+            }
+
+            GasCell moved;
+            moved.amounts = face.moved;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                moved.momentum[axis] = fx::FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
+
+            const int64_t energy = gd::MovedEnergy(tree.config, source, sourceDerived, moved, face.fraction);
+            const int64_t sent = gd::DivideNearest(energy, 1000);
+            const int64_t received = gd::DivideNearest(energy - GravityWork(tree, face, moved), 1000);
+            AddLedger(tree.ledger.energy, received - sent, face.level);
+
+            AddParcel(tree, next, donor, face.level, moved, sent, -1);
+            AddParcel(tree, next, receiver, face.level, moved, received, 1);
+        }
+
+        std::vector<GasDerived> DeriveAll(const GasTree& tree) {
+            std::vector<GasDerived> derived(tree.cells.size());
+            for (uint32_t index = 0; index < tree.cells.size(); ++index)
+                derived[index] = DeriveGasTreeCell(tree, index);
+
+            return derived;
+        }
+
+        void Substep(GasTree& tree, const std::vector<TreeFace>& layout, uint64_t roundingTick) {
+            // --- (1) 導く値(整数部だけ)---
+            const std::vector<GasDerived> derived = DeriveAll(tree);
+
+            // --- (2) 面の力を先に当てる ---
+            std::vector<TreeFace> faces = layout;
+            for (TreeFace& face : faces)
+                ComputeFaceForce(tree, derived, face);
+
+            TreeState forced = {.cells = tree.cells, .fractions = tree.fractions};
+            for (const TreeFace& face : faces)
+                ApplyImpulse(tree, forced, face);
+
+            // --- (3) 力を当てた後の運動量で流れ(前進・後退の順)・出ていく割合を抑える ---
+            for (TreeFace& face : faces)
+                ComputeFaceFlow(tree, derived, forced.cells, face);
+
+            LimitOutflow(tree, derived, faces);
+
+            // --- (4) 移す成分の物質量 ---
+            ComputeMovedAmounts(tree, forced.cells, derived, roundingTick, faces);
+            LimitMovedAmounts(tree, forced.cells, faces);
+
+            // --- (5) 移す ---
+            TreeState next = forced;
+            for (const TreeFace& face : faces)
+                Transfer(tree, forced.cells, derived, next, face);
+
+            tree.cells = std::move(next.cells);
+            tree.fractions = std::move(next.fractions);
+        }
+
+        // --- 木を作る ---
+
+        // レベル k の係数: 流れ・拡散・力積は × 2^k(面積 ÷ 体積)。ほか(物質の質量・重さの力積・α)はレベル 0 と同じ
+        GasCoefficients MakeLevelCoefficients(const GasConfig& config, const GasCoefficients& base, uint32_t level) {
+            GasCoefficients coefficients = base;
+            const uint64_t substeps = config.substeps;
+            coefficients.centralFlow = ((uint64_t)1 << (31 + level)) / (30 * substeps);
+            coefficients.pressureFlow = fx::FxDivU128By64(fx::FxMulU64Full(25, (uint64_t)1 << (40 + level)),
+                                                          24 * substeps * config.soundSpeedMmPerS)
+                                            .quotient;
+            coefficients.pressureImpulse = ((uint64_t)1 << (31 + level)) / (15 * substeps);
+
+            return coefficients;
+        }
+
+        // レベル k の静水圧の基準(MakeHydrostaticReference と同じ形で、層の厚さが 2^-k)
+        std::vector<GasCell> MakeLevelReference(const GasConfig& config, const GasCoefficients& coefficients,
+                                                uint32_t level, std::span<const uint32_t> fractionsQ32,
+                                                uint32_t temperature, uint64_t surfacePressure) {
+            std::vector<GasCell> layers;
+            uint64_t pressure = surfacePressure;
+            for (uint32_t z = 0; z < (config.sizeZ << level); ++z) {
+                const uint64_t divisor = gd::PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 * temperature;
+                const uint64_t total = fx::FxDivU128By64(fx::FxMulU64Full(pressure, gd::ONE_Q32), divisor).quotient;
+
+                std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};
+                for (uint32_t s = 0; s < config.speciesCount && s < fractionsQ32.size(); ++s)
+                    amounts[s] = gd::MulShiftU64(total, fractionsQ32[s], 32);
+
+                const GasCell cell = MakeGasCell(config, amounts, temperature);
+                layers.push_back(cell);
+
+                const uint64_t mass = config.gravity ? gd::CellMass(config, coefficients, cell) : 0;
+                pressure -= mass * gd::HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / ((uint64_t)10000 << level);
+            }
+
+            return layers;
+        }
+
+        // 開いた境界の外 = 層の基準 + 風(MakeGasBox と同じ)
+        GasCell MakeGhost(const GasConfig& config, const GasCell& layer, uint64_t mass) {
+            GasCell ghost = layer;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                ghost.momentum[axis] = (int64_t)mass * config.windVelocity[axis];
+
+            ghost.energy += gd::DivideNearest(gd::KineticEnergy(config, ghost, mass), 1000);
+
+            return ghost;
+        }
+
+        GasTreeLevel MakeFinerLevel(const GasConfig& config, const GasTreeLevel& base, uint32_t level,
+                                    std::span<const uint32_t> fractionsQ32, uint32_t temperature,
+                                    uint64_t surfacePressure) {
+            GasTreeLevel result;
+            result.size = {config.sizeX << level, config.sizeY << level, config.sizeZ << level};
+            result.coefficients = MakeLevelCoefficients(config, base.coefficients, level);
+            result.reference = MakeLevelReference(config, base.coefficients, level, fractionsQ32, temperature,
+                                                  surfacePressure);
+            for (const GasCell& layer : result.reference) {
+                result.referenceDerived.push_back(gd::DeriveRaw(config, result.coefficients, layer));
+                result.ghost.push_back(MakeGhost(config, layer, result.referenceDerived.back().mass));
+            }
+
+            result.grid.assign((size_t)result.size[0] * result.size[1] * result.size[2], GAS_TREE_ABSENT);
+
+            return result;
+        }
+
+        // 範囲を細かくする: 下の粗いセルを覆い、細かいセルを置く(番号は後で振る。置いた印は 0)
+        void Refine(GasTree& tree, const GasTreeRegion& region) {
+            assert(region.level >= 1 && region.level < tree.levels.size());
+            const uint32_t count = region.size[0] * region.size[1] * region.size[2];
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint32_t x = region.origin[0] + (i % region.size[0]);
+                const uint32_t y = region.origin[1] + ((i / region.size[0]) % region.size[1]);
+                const uint32_t z = region.origin[2] + (i / (region.size[0] * region.size[1]));
+                int32_t& parent = tree.levels[region.level - 1]
+                                      .grid[tree.GridIndex(region.level - 1, x / 2, y / 2, z / 2)];
+                int32_t& fine = tree.levels[region.level].grid[tree.GridIndex(region.level, x, y, z)];
+                assert(parent != GAS_TREE_ABSENT && fine == GAS_TREE_ABSENT);
+                parent = GAS_TREE_COVERED;
+                fine = 0;
+            }
+        }
+
+        // 置いたセルに番号を振り、層の基準 + 風で埋める(レベル 0 から順に、x が最も速く回る順)
+        void NumberCells(GasTree& tree) {
+            for (uint32_t level = 0; level < tree.levels.size(); ++level) {
+                GasTreeLevel& grid = tree.levels[level];
+                for (uint32_t index = 0; index < grid.grid.size(); ++index) {
+                    if (grid.grid[index] != 0)
+                        continue;
+
+                    const uint32_t x = index % grid.size[0];
+                    const uint32_t y = (index / grid.size[0]) % grid.size[1];
+                    const uint32_t z = index / (grid.size[0] * grid.size[1]);
+                    grid.grid[index] = (int32_t)tree.cells.size();
+                    tree.cells.push_back(grid.ghost[z]);
+                    tree.places.push_back({.level = level, .coordinate = {x, y, z}});
+                }
+            }
+
+            tree.fractions.assign(tree.cells.size(), GasTreeFraction{});
+        }
+
+    }  // namespace
+
+    GasTree MakeGasTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
+                        std::span<const uint32_t> fractionsQ32, uint32_t temperatureMilliKelvin,
+                        uint64_t surfacePressureMicroPascal) {
+        uint32_t maxLevel = 0;
+        for (const GasTreeRegion& region : regions) {
+            assert(region.origin[0] % 2 == 0 && region.origin[1] % 2 == 0 && region.origin[2] % 2 == 0);
+            assert(region.size[0] % 2 == 0 && region.size[1] % 2 == 0 && region.size[2] % 2 == 0);
+            maxLevel = std::max(maxLevel, region.level);
+        }
+
+        // 安定の条件: いちばん細かいレベルの ν = c̃ Δt ÷ Δx × 2^k ≤ 0.6(全部のレベルが同じ小刻み。T-0208)
+        assert(maxLevel <= MAX_TREE_LEVEL);
+        assert(((uint64_t)config.soundSpeedMmPerS * 10 << maxLevel) <= (uint64_t)config.substeps * 30000 * 6);
+
+        // --- レベル 0 は 1 レベルの箱と同じ(係数・基準・α)---
+        // 重さが無ければ基準の層は全部地面の層と同じ(gas_reference_test の周期的な箱と同じ扱い。層ごとの基準の差が偽の力にならない)
+        std::vector<GasCell> reference = MakeHydrostaticReference(config, fractionsQ32, temperatureMilliKelvin,
+                                                                  surfacePressureMicroPascal);
+        if (!config.gravity)
+            std::fill(reference.begin(), reference.end(), reference.front());
+
+        const GasBox base = MakeGasBox(config, std::move(reference));
+        GasTree tree;
+        tree.config = config;
+        tree.levels.resize(maxLevel + 1);
+        GasTreeLevel& root = tree.levels[0];
+        root.size = {config.sizeX, config.sizeY, config.sizeZ};
+        root.coefficients = base.coefficients;
+        root.reference = base.reference;
+        root.referenceDerived = base.referenceDerived;
+        root.ghost = base.ghost;
+        root.grid.assign(base.cells.size(), 0);
+
+        for (uint32_t level = 1; level <= maxLevel; ++level)
+            tree.levels[level] = MakeFinerLevel(config, root, level, fractionsQ32, temperatureMilliKelvin,
+                                                surfacePressureMicroPascal);
+
+        // --- 粗いレベルの範囲から順に細かくする ---
+        for (uint32_t level = 1; level <= maxLevel; ++level) {
+            for (const GasTreeRegion& region : regions) {
+                if (region.level == level)
+                    Refine(tree, region);
+            }
+        }
+
+        NumberCells(tree);
+
+        return tree;
+    }
+
+    GasDerived DeriveGasTreeCell(const GasTree& tree, uint32_t cellIndex) {
+        const GasTreePlace& place = tree.places[cellIndex];
+        const GasTreeLevel& level = tree.levels[place.level];
+        GasDerived derived = gd::DeriveRaw(tree.config, level.coefficients, tree.cells[cellIndex]);
+
+        // p̃ = α(p − p_基準)。熱いセルは α × T_基準 ÷ T(DeriveGasCell と同じ)
+        const int64_t deviation = derived.pressure - level.referenceDerived[place.coordinate[2]].pressure;
+        int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)level.coefficients.soundScale, 32);
+        const uint32_t soundTemperature = level.coefficients.soundTemperature;
+        if (derived.temperature > soundTemperature)
+            scaled = fx::FxDivS64(fx::FxMulShiftS64(scaled, soundTemperature, 0), derived.temperature);
+
+        derived.scaledPressure = scaled;
+
+        return derived;
+    }
+
+    void StepGasTree(GasTree& tree) {
+        const std::vector<TreeFace> layout = EnumerateFaces(tree);
+        for (uint32_t substep = 0; substep < tree.config.substeps; ++substep)
+            Substep(tree, layout, (tree.tick * tree.config.substeps) + substep);
+
+        ++tree.tick;
+    }
+
+    GasTreeTotals SumGasTree(const GasTree& tree) {
+        GasTreeTotals totals;
+        for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+            const uint32_t shift = 3 * tree.places[index].level;
+            const GasCell& cell = tree.cells[index];
+            const GasTreeFraction& fraction = tree.fractions[index];
+            for (uint32_t s = 0; s < tree.config.speciesCount; ++s) {
+                AddScaled(totals.amounts[s].whole, totals.amounts[s].fraction, (int64_t)cell.amounts[s], shift);
+                AddFraction(totals.amounts[s], fraction.amounts[s], shift);
+            }
+
+            AddScaled(totals.energy.whole, totals.energy.fraction, cell.energy, shift);
+            AddFraction(totals.energy, fraction.energy, shift);
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                AddScaled(totals.momentum[axis].whole, totals.momentum[axis].fraction, cell.momentum[axis], shift);
+                AddFraction(totals.momentum[axis], fraction.momentum[axis], shift);
+            }
+        }
+
+        return totals;
+    }
+
+}  // namespace bicameral::sim
