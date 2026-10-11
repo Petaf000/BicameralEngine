@@ -121,7 +121,8 @@ PROBE_CONST uint32_t PROBE_FIXED_UNITS_PER_TICK = 3;  // 適用・伝導・ハ�
 
 // --- ルート定数(b0。単位を記録するときに埋め込む)---
 // [0] 刻みの下位 [1] 刻みの上位 [2] 引数(抽出: 書き先の組。適用: その刻みの表の物質の数〔置くコマンドの検査。T-0222〕)
-PROBE_CONST uint32_t PROBE_ROOT_CONSTANT_COUNT = 3;
+// [3] 今の表の規則の数(魔法のパッチを足す時の検査。T-0323。ルートの SRV に GetDimensions を使わない〔T-0024〕ので定数で渡す)
+PROBE_CONST uint32_t PROBE_ROOT_CONSTANT_COUNT = 4;
 
 // --- コマンド(CPU → GPU。06 §3 の 64 バイトの形。C++ は sim/command.h)---
 // 語: [0] targetTick の下位 [1] targetTick の上位 [2] sequence [3] type(下位 16bit)| size(上位 16bit)[4..15] payload 48 バイト
@@ -139,6 +140,10 @@ PROBE_CONST uint32_t PROBE_COMMAND_TYPE_TABLE = 3;
 // 物を置く筆(T-0222・D-449。common/probe_place.hlsli): payload は ProbePlacePayload(中心・半径・置き換えか足すか・温度・物質 3 つまで)。
 //   球の中のセルを置き換える・足す(エディタの明示的な湧き出し。変わったエネルギーは湧き出しの欄へ)。触ったブロックを起こす
 PROBE_CONST uint32_t PROBE_COMMAND_TYPE_PLACE = 4;
+// 魔法のパッチを置く(T-0323・ADR-0095。common/probe_patch.hlsli): payload は magic_patch.hlsli の MP_COMMAND_*(規則の名前の鍵・
+//   効き方・期間・範囲〔レベル 0 = セルの座標の直方体。格子の外にはみ出してよい〕)。始まりはコマンドの刻み。パッチの列(u14)に足し、
+//   範囲のブロックを起こす。列が一杯・当てられない値なら足さない(断った数をハッシュの表の欄へ)
+PROBE_CONST uint32_t PROBE_COMMAND_TYPE_PATCH = 5;
 
 // --- GPU のコマンドキュー(06 §3。T-0086)---
 // 環状のバッファ。見出し 16 バイト([0] 末尾 = 足した総数 [1] 先頭 = 取り出した総数。どちらも 2^32 で一周する)+ コマンド × 容量。
@@ -251,13 +256,16 @@ PROBE_CONST uint32_t PROBE_EVENT_BODY_PUSHED = 3;
 PROBE_CONST uint32_t PROBE_PUSH_NOTHING = 0xFFFFFFFFu;
 // 置くコマンドを適用した(T-0222)。場所: 球の中心(ProbePokePlace)。当てられないコマンドは出さない
 PROBE_CONST uint32_t PROBE_EVENT_PLACE_APPLIED = 4;
+// 魔法のパッチのコマンドを当てた(T-0323)。場所: 列の中の番号(足せた)/ PROBE_PATCH_REFUSED(足せなかった)
+PROBE_CONST uint32_t PROBE_EVENT_PATCH_APPLIED = 5;
+PROBE_CONST uint32_t PROBE_PATCH_REFUSED = 0xFFFFFFFFu;
 
 // --- 刻みごとの状態のハッシュ(GPU → CPU。06 §2 段 9)---
 // 表: PROBE_HASH_CAPACITY 個 × 32 バイト([0,1] 刻み [2,3] ハッシュ [4,5] エネルギーの合計(mJ、mod 2^64)
 //   [6] その状態を作った刻みで予定したブロックの数 [7] 0)+ 32 バイト([8,9] その状態を作った刻みのつつきが足したエネルギー(mJ)
 //   [10,11] 物の状態のハッシュ(物理を入れたとき。PhysicsWorld::StateHash と同じ式。無ければ 0。T-0098)
 //   [12] 反応の上限で 9 種目の生成物を待たせたセルの数(RX_LIMIT_PRODUCTS)[13] 進む規則が多すぎて選んだセルの数(RX_LIMIT_CANDIDATES)
-//   [14,15] 0。[12]・[13] は (セル, 刻み) の数で、多重解像度の世界の MR_COUNTER_LIMIT_* と同じ考え方(T-0163・T-0177))。
+//   [14] その刻みに足せなかった魔法のパッチのコマンドの数(列が一杯・当てられない値。T-0323)[15] 0。[12]・[13] は (セル, 刻み) の数で、多重解像度の世界の MR_COUNTER_LIMIT_* と同じ考え方(T-0163・T-0177))。
 // 欄は刻み t の適用の単位が用意し(刻み・0)、適用がつつきのエネルギーを、伝導が予定の数と上限の印の数を、刻みの最後の単位がハッシュと
 // エネルギーの合計を足す。
 // 保存則の検査(D-206): エネルギーの合計(t + 1) = エネルギーの合計(t) + つつきのエネルギー(t + 1 の欄)。
@@ -272,6 +280,7 @@ PROBE_CONST uint32_t PROBE_HASH_OFFSET_SOURCE = 32;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_BODIES = 40;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_LIMIT_PRODUCTS = 48;
 PROBE_CONST uint32_t PROBE_HASH_OFFSET_LIMIT_CANDIDATES = 52;
+PROBE_CONST uint32_t PROBE_HASH_OFFSET_PATCHES_REFUSED = 56;
 PROBE_CONST uint32_t PROBE_HASH_BYTES = PROBE_HASH_CAPACITY * PROBE_HASH_ENTRY_BYTES;
 
 // --- 規則(CPU と GPU で同じ)---

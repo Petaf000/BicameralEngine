@@ -267,6 +267,22 @@ FX_FN MpPatch MpPatchFromCommand(uint64_t ruleKey, uint32_t effect, uint32_t dur
     return patch;
 }
 
+// 列の要約(状態のハッシュに混ぜる。T-0323)。列が空なら 0(今までの記録のハッシュが変わらない)。効いているパッチの語だけを順に混ぜる
+// (並びは CPU と GPU で同じ。MpRetireExpired)。仮の世界(ProbeSim)は状態の要約がセルの和なので、これを足す
+template <typename List>
+FX_FN uint64_t MpListHash(List list) {
+    const uint32_t count = MpPatchCount(list);
+    if (count == 0)
+        return 0;
+
+    uint64_t hash = FxHashCombine(FX_U64(0x4D414749u, 0x43504154u), (uint64_t)count);
+    const uint32_t used = MP_LIST_HEADER_WORDS + (count * MP_PATCH_WORDS);
+    for (uint32_t word = MP_LIST_HEADER_WORDS; word < used; ++word)
+        hash = FxHashCombine(hash, (uint64_t)list.PatchWord(word));
+
+    return hash;
+}
+
 // --- 表に重ねる --------------------------------------------------------------------------------
 
 // レベル level・座標 (x, y, z) のセルを刻み tick に覆うパッチの印(ビット i = 列の i 番目)

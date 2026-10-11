@@ -16,10 +16,11 @@ namespace bicameral::sim {
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
         //   u0 セル・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
         //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ・u13 物理の物(T-0098。物理なしなら仮の置き場)
+        //   ・u14 魔法のパッチの列(T-0323)
         //   → b0 単位の定数 → デバッグのリング
         //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
         //   ・t5 物質の付け替えの表(T-0223)
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 14,
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 15,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
@@ -40,6 +41,7 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_BLOCK_SCHEDULE = 11;
         constexpr uint32_t UAV_THERMAL = 12;
         constexpr uint32_t UAV_BODIES = 13;
+        constexpr uint32_t UAV_MAGIC_PATCHES = 14;
         constexpr uint32_t SRV_INPUT = 0;
         constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
         constexpr uint32_t SRV_SPECIES_REMAP = 5;   // t5 付け替えの表(T-0223)
@@ -122,10 +124,11 @@ namespace bicameral::sim {
             return gpu::CreateComputePipeline(device, rootSignature, *bytecode);
         }
 
-        // 単位の定数(b0): 刻みの下位・上位・引数
-        void SetUnitConstants(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t argument) {
+        // 単位の定数(b0): 刻みの下位・上位・引数・表の規則の数(適用の単位だけが読む。T-0323)
+        void SetUnitConstants(ID3D12GraphicsCommandList10* list, uint64_t tick, uint32_t argument,
+                              uint32_t ruleCount = 0) {
             const std::array<uint32_t, PROBE_ROOT_CONSTANT_COUNT> constants = {
-                static_cast<uint32_t>(tick), static_cast<uint32_t>(tick >> 32), argument};
+                static_cast<uint32_t>(tick), static_cast<uint32_t>(tick >> 32), argument, ruleCount};
             list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), PROBE_ROOT_CONSTANT_COUNT,
                                                constants.data(), 0);
         }
@@ -254,6 +257,33 @@ namespace bicameral::sim {
         return remapped;
     }
 
+    ProbeCommand MakePatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
+                                  uint32_t durationTicks, const ProbePatchRange& range) {
+        ProbeCommand command{.targetTick = targetTick,
+                             .sequence = sequence,
+                             .type = static_cast<uint16_t>(PROBE_COMMAND_TYPE_PATCH),
+                             .size = static_cast<uint16_t>(reaction::MP_COMMAND_WORDS * 4)};
+
+        command.payload[reaction::MP_COMMAND_RULE_KEY] = static_cast<uint32_t>(ruleKey);
+        command.payload[reaction::MP_COMMAND_RULE_KEY + 1] = static_cast<uint32_t>(ruleKey >> 32);
+        command.payload[reaction::MP_COMMAND_EFFECT] = effect;
+        command.payload[reaction::MP_COMMAND_DURATION] = durationTicks;
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            command.payload[reaction::MP_COMMAND_LOW + axis] = static_cast<uint32_t>(range.low[axis]);
+            command.payload[reaction::MP_COMMAND_HIGH + axis] = static_cast<uint32_t>(range.high[axis]);
+        }
+
+        return command;
+    }
+
+    reaction::MpPatch DecodePatchCommand(const ProbeCommand& command) {
+        ProbePatchPayload payload{};
+        for (uint32_t word = 0; word < reaction::MP_COMMAND_WORDS; ++word)
+            payload.words[word] = command.payload[word];
+
+        return ProbeDecodePatch(payload, command.targetTick);
+    }
+
     ProbeCommand MakeTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t version) {
         ProbeCommand command{.targetTick = targetTick,
                              .sequence = sequence,
@@ -365,8 +395,12 @@ namespace bicameral::sim {
         m_commandQueue = gpu::CreateBuffer(device, PROBE_COMMAND_QUEUE_BYTES, gpu::BufferKind::UnorderedAccess);
         m_tickEvents = gpu::CreateBuffer(device, PROBE_TICK_EVENT_BYTES, gpu::BufferKind::UnorderedAccess);
         m_blockSchedule = gpu::CreateBuffer(device, PROBE_SCHEDULE_BYTES, gpu::BufferKind::UnorderedAccess);
-        if (!m_cells || !m_thermal || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents || !m_blockSchedule)
+        m_magicPatches = gpu::CreateBuffer(device, PROBE_PATCH_LIST_BYTES, gpu::BufferKind::UnorderedAccess);
+        if (!m_cells || !m_thermal || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents ||
+            !m_blockSchedule || !m_magicPatches)
             return false;
+
+        m_magicPatches->SetName(L"ProbeSim.magicPatches");  // 作った時は 0(パッチの数 0 = 空の列)
 
         m_blockSchedule->SetName(
             L"ProbeSim.blockSchedule");  // 最初のフレームで初めの中身を写す(ProbeInitialScheduleWords)
@@ -457,6 +491,7 @@ namespace bicameral::sim {
         m_viewSpecies = ProbeViewSpecies(table);
         m_tableCopy = table;
         m_speciesCount = static_cast<uint32_t>(table.species.size());
+        m_ruleCount = static_cast<uint32_t>(table.rules.size());
 
         return m_initialUploads[4] && m_initialUploads[5] && m_initialUploads[6];
     }
@@ -793,6 +828,7 @@ namespace bicameral::sim {
         // 物理が無ければ、シェーダーは物の数 0 で読まないので、仮に重さの捨て場を結ぶ
         list->SetComputeRootUnorderedAccessView(
             UAV_BODIES, m_physics ? m_physics->Bodies()->GetGPUVirtualAddress() : m_busySink->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_MAGIC_PATCHES, m_magicPatches->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
@@ -811,8 +847,9 @@ namespace bicameral::sim {
     void ProbeSim::RecordUnit(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick, uint32_t unit,
                               bool tableSwapped) {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
-        SetUnitConstants(list, tick,
-                         unit == PROBE_UNIT_APPLY ? m_speciesCount : 0);  // 適用: 置くコマンドの検査(T-0222)
+        // 適用: 置くコマンドの検査(物質の数。T-0222)とパッチの検査(規則の数。T-0323)
+        SetUnitConstants(list, tick, unit == PROBE_UNIT_APPLY ? m_speciesCount : 0,
+                         unit == PROBE_UNIT_APPLY ? m_ruleCount : 0);
         if (unit == PROBE_UNIT_APPLY) {
             // コマンドの適用は 1 グループがキューの先頭から番号順に(置くコマンドのセルだけをグループで分ける。probe_tick.hlsl・ADR-0125)。刻みの一覧と表の欄の用意も
             list->SetPipelineState(m_applyPipeline.Get());
@@ -888,6 +925,7 @@ namespace bicameral::sim {
         }
 
         m_speciesCount = static_cast<uint32_t>(table.species.size());
+        m_ruleCount = static_cast<uint32_t>(table.rules.size());
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         BindRootViews(list, frame.input.Get());
@@ -1096,7 +1134,8 @@ namespace bicameral::sim {
                               .sourceEnergy = entry[8] | (uint64_t{entry[9]} << 32),
                               .scheduledBlocks = entry[6],
                               .bodyHash = entry[10] | (uint64_t{entry[11]} << 32),
-                              .limits = {.productsHeld = entry[12], .candidatesLimited = entry[13]}});
+                              .limits = {.productsHeld = entry[12], .candidatesLimited = entry[13]},
+                              .patchesRefused = entry[14]});
         }
 
         return hashes;
@@ -1292,6 +1331,68 @@ namespace bicameral::sim {
             return source;
         }
 
+        // --- 魔法のパッチ(T-0323。probe_tick.hlsl の ApplyPatchBoundaries・ApplyPatch と同じ順)---
+
+        // common/magic_patch.hlsli の List の約束(CPU リファレンスのパッチの列)
+        struct ReferencePatchList {
+            std::span<uint32_t> words;
+
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+
+        // パッチの範囲が重なるブロックを予定の種にし、「刻みの直前に変わった」にする(GPU の WakePatchBlocks と同じ)
+        void WakePatchBlocks(const reaction::MpPatch& patch, uint64_t tick, std::vector<uint8_t>& seeds,
+                             std::vector<uint64_t>& changedMarks) {
+            const ProbePatchBlocks range = ProbePatchBlockRange(patch);
+            if (range.valid == 0)
+                return;
+
+            for (uint32_t bz = range.beginZ; bz <= range.endZ; ++bz) {
+                for (uint32_t by = range.beginY; by <= range.endY; ++by) {
+                    for (uint32_t bx = range.beginX; bx <= range.endX; ++bx) {
+                        const uint32_t block = ProbeBlockIndex(bx, by, bz);
+                        seeds[block] = 1;
+                        changedMarks[block] = ProbeChangeMark(tick) - 1;
+                    }
+                }
+            }
+        }
+
+        // 刻みの初め: 速さが変わる(始まり・終わり)パッチの範囲を起こし、終わったパッチを除く
+        void ApplyPatchBoundaries(ReferencePatchList list, uint64_t tick, std::vector<uint8_t>& seeds,
+                                  std::vector<uint64_t>& changedMarks) {
+            const uint32_t count = reaction::MpPatchCount(list);
+            for (uint32_t i = 0; i < count; ++i) {
+                const reaction::MpPatch patch = reaction::MpLoadPatch(list, i);
+                if (reaction::MpBoundaryAt(patch, tick))
+                    WakePatchBlocks(patch, tick, seeds, changedMarks);
+            }
+
+            reaction::MpRetireExpired(list, tick);
+        }
+
+        // 刻み tick のパッチのコマンドを並びの順に当てる(足せたら範囲を起こす)。足せなかった数を返す
+        uint32_t ApplyPatchCommands(ReferencePatchList list, const ReactionTableView& table, uint32_t ruleCount,
+                                    uint64_t tick, std::span<const ProbeCommand> commands, std::vector<uint8_t>& seeds,
+                                    std::vector<uint64_t>& changedMarks) {
+            uint32_t refused = 0;
+            for (const ProbeCommand& command : commands) {
+                if (command.targetTick != tick || command.type != PROBE_COMMAND_TYPE_PATCH)
+                    continue;
+
+                const reaction::MpPatch patch = DecodePatchCommand(command);
+                if (!reaction::MpAddPatch(list, table, patch, tick, ruleCount)) {
+                    ++refused;
+                    continue;
+                }
+
+                WakePatchBlocks(patch, tick, seeds, changedMarks);
+            }
+
+            return refused;
+        }
+
         // 1 セルの伝導と反応(GPU の ConductBlock と同じ。格子の外の面は自分を渡す = 断熱)
         ProbeCellStep ReferenceStepCell(const ReactionTableView& table, ReferenceGeneration current, uint32_t index,
                                         uint64_t tick, uint64_t changedMark) {
@@ -1305,9 +1406,11 @@ namespace bicameral::sim {
 
             constexpr uint32_t LAST = PROBE_GRID_SIZE - 1;
 
-            return ProbeStepCell(table, current.cells[index], self, at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z),
-                                 at(y > 0, x, y - 1, z), at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1),
-                                 at(z < LAST, x, y, z + 1), tick, changedMark, index);
+            // セルを覆う魔法のパッチを表に重ねる(T-0323。table.magicPatches が空なら数 0 = 重ねない)
+            return ProbeStepCell(reaction::MpPatchTable(table, 0, x, y, z, tick), current.cells[index], self,
+                                 at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z), at(y > 0, x, y - 1, z),
+                                 at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1), at(z < LAST, x, y, z + 1), tick,
+                                 changedMark, index);
         }
 
         // 上限の印(RxWaitStep::limits)を数える(GPU の ConductBlock の CountLimits と同じ)
@@ -1364,7 +1467,8 @@ namespace bicameral::sim {
         : m_table(&table),
           m_blockFlags(PROBE_BLOCK_COUNT, 0),
           m_changedMarks(PROBE_BLOCK_COUNT, 0),
-          m_scheduled(PROBE_BLOCK_COUNT, 0) {
+          m_scheduled(PROBE_BLOCK_COUNT, 0),
+          m_magicPatches(reaction::MP_LIST_WORDS, 0) {
         FX_ASSERT(initialWorld.empty() || initialWorld.size() == PROBE_CELL_COUNT);
         const std::vector<reaction::RxCell> initial = initialWorld.empty()
                                                           ? MakeProbeInitialWorld(table)
@@ -1394,7 +1498,8 @@ namespace bicameral::sim {
             m_table = newTable;
         }
 
-        const ReactionTableView table = m_table->View();
+        ReactionTableView table = m_table->View();
+        table.magicPatches = m_magicPatches;  // 魔法のパッチの列(下で書き換えると、表から読む値も変わる。T-0323)
         const size_t currentBase = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;
         const size_t nextBase = static_cast<size_t>((tick + 1) & 1) * PROBE_CELL_COUNT;
         const ReferenceGeneration current{.cells = m_cells.data() + currentBase,
@@ -1404,6 +1509,13 @@ namespace bicameral::sim {
         std::vector<uint8_t> seeds = m_blockFlags;
         const auto speciesCount = static_cast<uint32_t>(m_table->species.size());
         m_sourceEnergy = ApplyPokes(table, speciesCount, current, tick, commands, seeds, m_changedMarks);
+
+        // 魔法のパッチ(T-0323): 始まり・終わりの範囲を起こして終わったものを除き(GPU はコマンドの前。触るのは予定の印だけなので順は効かない)、
+        // パッチのコマンドを当てる
+        const ReferencePatchList patches{.words = m_magicPatches};
+        ApplyPatchBoundaries(patches, tick, seeds, m_changedMarks);
+        m_patchesRefused = ApplyPatchCommands(patches, table, static_cast<uint32_t>(m_table->rules.size()), tick,
+                                              commands, seeds, m_changedMarks);
 
         // 表を差し替えた刻み(GPU の RefreshTable と同じ。T-0139): 2 世代の熱のキャッシュを新しい表で作り直し、
         // 全部のブロックを「刻みの直前に変わった」にして起こす(速さ f が変わるので待ちを引き直す。ADR-0018)
@@ -1465,6 +1577,17 @@ namespace bicameral::sim {
 
     std::span<const reaction::RxCell> ProbeReference::State(uint64_t tick) const {
         return std::span(m_cells).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
+    }
+
+    uint64_t ProbeReference::PatchListHash() const {
+        ReactionTableView list{};
+        list.magicPatches = m_magicPatches;
+
+        return reaction::MpListHash(list);
+    }
+
+    uint64_t ProbeReference::StateHash(uint64_t tick) const {
+        return ProbeStateHash(State(tick)) + PatchListHash();
     }
 
     uint64_t ProbeStateHash(std::span<const reaction::RxCell> cells) {

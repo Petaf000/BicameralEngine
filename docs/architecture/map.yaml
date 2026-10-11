@@ -132,6 +132,9 @@ views:
       - { id: probeplace, group: shared, label: "probe_place.hlsli<br/>置くコマンドを読み解き、形(球・直方体・円柱)の中の 1 セルに当てる",
           code: "shaders/common/probe_place.hlsli::ProbePlaceCell", ticket: T-0222, doc: docs/decisions/ADR-0067-place-command.md,
           note: "置き換え(MakeReactionCell と同じ値)・足す(量と持ち込むエネルギーの和)。GPU の ApplyPlace と CPU の ProbeReference が同じ関数" }
+      - { id: probepatch, group: shared, label: "probe_patch.hlsli<br/>仮の世界に魔法のパッチを置くコマンドと、範囲が重なるブロック",
+          code: "shaders/common/probe_patch.hlsli::ProbePatchBlockRange", ticket: T-0323, doc: docs/decisions/ADR-0095-magic-patch-rate-intervention.md,
+          note: "適用の単位が始まり・終わりのパッチの範囲を起こして終わったものを除き(ApplyPatchBoundaries)、コマンドで列(u14)に足す。伝導の ConductBlock が MpPatchTable で表に重ねる。列は保存点と状態の要約に入る" }
       - { id: probeworld, group: shared, label: "probe_world.hlsli<br/>1 セルの伝導 + 反応・つつき・ハッシュ",
           code: "shaders/common/probe_world.hlsli::ProbeStepCell", ticket: T-0089, doc: docs/design/02-reaction-system.md,
           note: "GPU(ConductBlock)と CPU リファレンスが同じ関数。熱のキャッシュ(温度・面の係数)はセルから決まる値" }
@@ -633,6 +636,8 @@ views:
       - [probereference, probeworld, "同じ関数"]
       - [commandqueue, probeplace, "ApplyPlace"]
       - [probereference, probeplace, "同じ関数"]
+      - [commandqueue, probepatch, "ApplyPatch"]
+      - [probereference, probepatch, "同じ関数"]
       - [probeworld, heatconduction]
       - [probeworld, reactionhlsl, "RxStepCellWait"]
       - [probesimtest, replaysession, "記録 → 書く → 読む → 再生"]

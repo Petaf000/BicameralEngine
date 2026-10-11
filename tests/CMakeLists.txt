@@ -327,6 +327,13 @@ bicameral_add_gpu_test(gpu_probe_place_test)
 target_link_libraries(gpu_probe_place_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_place gpu_probe_place_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_place_warp gpu_probe_place_test warp --warp)
+# 魔法のパッチ(T-0323): 止める・速める・はみ出す・断る・表の差し替えを跨ぐパッチを、保存点へ戻す流し直しとばらばらの分け方で流して
+# CPU と毎刻みビット一致(状態の要約にパッチの列が入る)・再生ファイルの要約と一致
+bicameral_add_gpu_test(gpu_probe_patch_test)
+target_link_libraries(gpu_probe_patch_test PRIVATE bicameral_sim bicameral_save)
+bicameral_add_gpu_test_case(gpu_probe_patch gpu_probe_patch_test gpu --no-gbv)
+bicameral_add_gpu_test_case(gpu_probe_patch_warp gpu_probe_patch_test warp --warp)
+set_tests_properties(gpu_probe_patch gpu_probe_patch_warp PROPERTIES TIMEOUT 900)
 # 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
 bicameral_add_gpu_test(gpu_probe_trace_test)
 target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)

@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "common/probe_patch.hlsli"
 #include "common/probe_place.hlsli"
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
@@ -104,6 +105,20 @@ namespace bicameral::sim {
     // 消えた物質の材料は落とす。置くコマンドでなければそのまま。差し替えと同じフレームに前の表で作った筆のコマンドに使う
     [[nodiscard]] ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap);
 
+    // 魔法のパッチを置く(T-0323・ADR-0095。PROBE_COMMAND_TYPE_PATCH。common/probe_patch.hlsli)。規則は名前の鍵(RxRule::key)で持つので、
+    // 表を差し替えても同じ名前の規則に効き続ける。effect は MpMakeScaleEffect / MpMakeStopEffect、範囲は仮の世界のセルの座標の直方体
+    // (両端を含む。格子の外にはみ出してよい)、期間は targetTick から durationTicks 刻み。値は試験用の仮のもの(D-006)
+    struct ProbePatchRange {
+        std::array<int32_t, 3> low{};
+        std::array<int32_t, 3> high{};
+    };
+
+    [[nodiscard]] ProbeCommand MakePatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey,
+                                                uint32_t effect, uint32_t durationTicks, const ProbePatchRange& range);
+
+    // パッチのコマンドの中身を読む(GPU の ApplyPatch と同じ ProbeDecodePatch。始まり = targetTick)
+    [[nodiscard]] reaction::MpPatch DecodePatchCommand(const ProbeCommand& command);
+
     // --- GPU から戻ってくるもの ---
 
     struct ProbeEvent {
@@ -135,6 +150,7 @@ namespace bicameral::sim {
         uint32_t scheduledBlocks = 0;  // S(tick) を作った刻み(tick − 1)で伝導と反応を計算したブロックの数
         uint64_t bodyHash = 0;         // 物の状態のハッシュ(PhysicsWorld::StateHash。物理なしなら 0。T-0098)
         ProbeLimitCounts limits;  // S(tick) を作った刻み(tick − 1)で反応の上限に当たったセルの数(計算したブロックだけ)
+        uint32_t patchesRefused = 0;  // S(tick) を作った刻みに足せなかった魔法のパッチのコマンドの数(T-0323)
 
         // 世界全体の要約(セル + 物。再生ファイルに入れて突き合わせる値)
         [[nodiscard]] uint64_t WorldHash() const { return hash ^ bodyHash; }
@@ -296,6 +312,9 @@ namespace bicameral::sim {
         // 世界のセル(2 世代 × PROBE_CELL_COUNT × RxCell。S(t) は世代 t & 1)。テストが読み戻すだけ(フレームの間は COMMON)
         [[nodiscard]] ID3D12Resource* Cells() const { return m_cells.Get(); }
 
+        // 魔法のパッチの列(MP_LIST_WORDS 語。common/magic_patch.hlsli。T-0323)。テストが読み戻すだけ(フレームの間は COMMON)
+        [[nodiscard]] ID3D12Resource* MagicPatches() const { return m_magicPatches.Get(); }
+
         // 伝導の Work Graph の裏のメモリ(ドライバが決める。docs/perf.md に残す)
         [[nodiscard]] uint64_t ConductBackingMemoryBytes() const { return m_conductGraph->BackingMemoryBytes(); }
 
@@ -449,6 +468,7 @@ namespace bicameral::sim {
         bool m_initialized = false;
         std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(O2・CO2・炭)
         uint32_t m_speciesCount = 0;  // 今の表の物質の数(適用の単位の引数。置くコマンドの検査。T-0222)
+        uint32_t m_ruleCount = 0;     // 今の表の規則の数(単位の定数 [3]。パッチを足す時の検査。T-0323)
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
         ComPtr<ID3D12Resource> m_busySink;
 
@@ -465,6 +485,8 @@ namespace bicameral::sim {
         // 活性の一覧(刻みの偶奇で 2 組。PROBE_ACTIVE_LIST_BYTES)。フレームの中では UAV、伝導の間だけ入力の組を GPU の入力の状態にする
         std::array<ComPtr<ID3D12Resource>, 2> m_activeLists;
         ComPtr<ID3D12Resource> m_blockSchedule;  // 予定の印(PROBE_SCHEDULE_BYTES)
+        ComPtr<ID3D12Resource>
+            m_magicPatches;  // 魔法のパッチの列(u14。PROBE_PATCH_LIST_BYTES。作った時は 0 = 空。T-0323)
 
         // --- 読み戻しとフレームの枠 ---
         gpu::ReadbackRing m_events;
@@ -525,6 +547,16 @@ namespace bicameral::sim {
         // 最後に物質を付け替えた差し替えで起きたこと(刻みの始めの世代の分。付け替えていなければ 0。T-0223)
         [[nodiscard]] const SpeciesRemapReport& LastRemapReport() const { return m_remapReport; }
 
+        // 魔法のパッチの列(MP_LIST_WORDS 語。GPU の u14 と同じ。T-0323)と、その要約(状態のハッシュに足す分。空なら 0)
+        [[nodiscard]] std::span<const uint32_t> MagicPatches() const { return m_magicPatches; }
+        [[nodiscard]] uint64_t PatchListHash() const;
+
+        // S(tick) の要約(GPU のハッシュの表の hash と同じ値 = セルの和 + パッチの列の要約)。tick は最後の Advance の次の刻み
+        [[nodiscard]] uint64_t StateHash(uint64_t tick) const;
+
+        // 最後の Advance で足せなかったパッチのコマンドの数(GPU の表の patchesRefused と同じ)
+        [[nodiscard]] uint32_t PatchesRefused() const { return m_patchesRefused; }
+
         // 最後の Advance のつつきが足したエネルギー(mJ。GPU の表の sourceEnergy と同じ)
         [[nodiscard]] uint64_t SourceEnergy() const { return m_sourceEnergy; }
 
@@ -552,6 +584,8 @@ namespace bicameral::sim {
         std::vector<uint8_t> m_blockFlags;               // 前の刻みのブロックごとの結果(PROBE_BLOCK_COUNT)
         std::vector<uint64_t> m_changedMarks;  // ブロックが最後に変わった刻みの印(tc。待ちの丸め。PROBE_BLOCK_COUNT)
         std::vector<uint8_t> m_scheduled;      // 最後の Advance で予定したブロック(PROBE_BLOCK_COUNT)
+        std::vector<uint32_t> m_magicPatches;  // 魔法のパッチの列(MP_LIST_WORDS。T-0323)
+        uint32_t m_patchesRefused = 0;
         uint64_t m_sourceEnergy = 0;
         uint32_t m_scheduledBlocks = 0;
         uint32_t m_wokenBlocks = 0;
