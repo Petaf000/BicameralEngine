@@ -62,8 +62,9 @@ namespace bicameral::frame {
 
         while (count < m_settings.maxUnitsPerFrame) {
             const bool startsTick = m_cursor.unit == 0;
-            // 現実の時間より先へは進めない
-            if (startsTick && m_pendingTicks < 1.0)
+            const bool catchingUp = CatchingUp();
+            // 現実の時間より先へは進めない(流し直して追いつく間は別)
+            if (startsTick && !catchingUp && m_pendingTicks < 1.0)
                 break;
 
             // 止まる刻みに着いた(--screenshot-tick)
@@ -78,7 +79,7 @@ namespace bicameral::frame {
             if (count > 0 && used + estimate > budget)
                 break;
 
-            if (startsTick)
+            if (startsTick && !catchingUp)
                 m_pendingTicks -= 1.0;
 
             used += estimate;

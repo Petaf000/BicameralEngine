@@ -3,6 +3,7 @@
 // 版 2(T-0170・T-0193): 反応表の中身と読んだパッケージの一覧が往復すること・表の壊れ方を拒否すること・版 1 のファイルを表の無い形で読むこと。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "save/replay_file.h"
+#include "save/replay_session.h"
 
 #include <cstdio>
 #include <cstring>
@@ -218,7 +219,39 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+    // 記録中の巻き戻し(T-0143)・筆の元に戻す(T-0278・ADR-0101): 戻した刻みから先のコマンドとハッシュを捨て、流し直した分で
+    // 書き直すと、元に戻した運び(足し直さなかったコマンド)は記録に残らない
+    void TestRecorderRewind() {
+        auto command = [](uint64_t tick, uint32_t sequence) {
+            return sim::Command{.targetTick = tick, .sequence = sequence, .type = 1, .size = 0};
+        };
+
+        save::ReplayRecorder recorder;
+        const std::vector<sim::Command> first = {command(2, 0), command(5, 1), command(5, 2), command(7, 3)};
+        recorder.AddCommands(first);
+        for (uint64_t tick = 1; tick <= 9; ++tick)
+            recorder.AddHash(tick, tick * 100);
+
+        recorder.Rewind(4);  // S(4) の保存点へ。番号 1・2 の運びを元に戻した
+        const std::vector<sim::Command> again = {command(7, 3)};
+        recorder.AddCommands(again);
+        for (uint64_t tick = 5; tick <= 9; ++tick)
+            recorder.AddHash(tick, tick * 1000);
+
+        const save::ReplayFile replay = recorder.Build();
+        EXPECT(replay.commands.size() == 2 && replay.commands[0].sequence == 0 && replay.commands[1].sequence == 3);
+        EXPECT(replay.tickHashes.size() == 9);
+        EXPECT(replay.tickHashes[3].tick == 4 && replay.tickHashes[3].hash == 400);   // 戻した刻みの状態は残す
+        EXPECT(replay.tickHashes[4].tick == 5 && replay.tickHashes[4].hash == 5000);  // 先は書き直した
+        EXPECT(replay.tickHashes[8].tick == 9 && replay.tickHashes[8].hash == 9000);
+    }
+
+}  // namespace
+
 int main() {
+    TestRecorderRewind();
     TestRoundTrip();
     TestTablesRoundTrip();
     TestFile();

@@ -21,6 +21,9 @@ add_test(NAME time_control COMMAND time_control_test)
 add_executable(brush_stroke_test brush_stroke_test.cpp)
 target_link_libraries(brush_stroke_test PRIVATE bicameral_editor)
 add_test(NAME brush_stroke COMMAND brush_stroke_test)
+add_executable(brush_undo_test brush_undo_test.cpp)
+target_link_libraries(brush_undo_test PRIVATE bicameral_editor)
+add_test(NAME brush_undo COMMAND brush_undo_test)
 
 add_executable(debug_camera_test debug_camera_test.cpp)
 target_link_libraries(debug_camera_test PRIVATE bicameral_view)
@@ -378,10 +381,14 @@ set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中�
 add_test(NAME window_lab_compare COMMAND bicameral --editor --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
 set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 世界に物を置く筆(T-0222): パネルの筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずのものが全部 GPU で
-# 当たったか(--auto-place。通らなければ 1)を記録し、別の起動で再生して同じハッシュ列になる(置くコマンドも再生ファイルだけで再現)
+# 当たったか(--auto-place。通らなければ 1)を記録し、別の起動で再生して同じハッシュ列になる(置くコマンドも再生ファイルだけで再現)。
+# 元に戻す(T-0278・ADR-0101): 円柱・直方体のドラッグの運びを 1 つずつ元に戻し(保存点へ戻して除いて流し直す。戻す前と違う状態になる)、
+# 記録は元に戻した後の流れ。再生(別の起動・その運びが無い列だけ)が同じハッシュ列 = 元に戻した世界は「置かなかった世界」と同じ。
+# 刻みが遅い(debug で 1 フレーム 1 刻み未満)ので、保存点は 2 刻みごとに 8 個
 set(WINDOW_PLACE_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place.bcreplay)
 add_test(NAME window_place_record
-         COMMAND bicameral --editor --auto-place --frames 120 --record ${WINDOW_PLACE_FILE})
+         COMMAND bicameral --editor --auto-place --save-points 8 --save-interval 2 --frames 120
+                 --record ${WINDOW_PLACE_FILE})
 add_test(NAME window_place_play COMMAND bicameral --replay ${WINDOW_PLACE_FILE} --target-fps 30)
 set_tests_properties(window_place_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-place: .*OK")

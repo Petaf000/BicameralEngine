@@ -26,6 +26,11 @@ namespace bicameral::save {
         m_hashes.push_back({.tick = tick, .hash = hash});
     }
 
+    void ReplayRecorder::Rewind(uint64_t tick) {
+        std::erase_if(m_commands, [&](const sim::Command& command) { return command.targetTick >= tick; });
+        std::erase_if(m_hashes, [&](const ReplayTickHash& row) { return row.tick > tick; });
+    }
+
     // S(lastTick) まで確かめられるので、その状態に入るコマンド(targetTick < lastTick)だけを残す
     ReplayFile ReplayRecorder::Build() const {
         ReplayFile replay{.world = ReplayWorld::Probe, .startTick = 0, .tickHashes = m_hashes};

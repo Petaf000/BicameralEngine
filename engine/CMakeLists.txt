@@ -159,6 +159,7 @@ target_link_libraries(bicameral_view PUBLIC bicameral_core)
 # ImGui のパネル(src/editor/editor_overlay.cpp)は D3D12 を使うのでランタイムの方に入れる
 add_library(bicameral_editor STATIC
   src/editor/brush_stroke.cpp
+  src/editor/brush_undo.cpp
   src/editor/time_control.cpp
 )
 target_include_directories(bicameral_editor PUBLIC src)

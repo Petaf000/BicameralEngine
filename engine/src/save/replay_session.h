@@ -2,6 +2,7 @@
 //
 // どちらも CPU の帳簿だけ(GPU を知らない)。フレームのループ(frame/frame_loop.cpp)が次のように使う:
 //   記録: GPU のキューへ足したコマンドを AddCommands、読み戻した刻みごとのハッシュを AddHash → 終わるときに Write。
+//         巻き戻した(筆の元に戻すも)ら Rewind で戻した刻みから先を捨て、流し直した分を書き直す(T-0278)。
 //         書くのは「最後にハッシュを読み戻した刻み」までに適用されるコマンドだけ(その先の刻みの結果は確かめられないので)。
 //   再生: 毎フレーム TakeCommands(まだ記録していない最初の適用の刻み, 足せる数)で、刻みに間に合う分だけ(先読みは数刻み)GPU のキューへ足す。
 //         読み戻したハッシュを CheckHash に渡す。ファイルの最後のハッシュまで確かめたら Finished()。
@@ -24,6 +25,11 @@ namespace bicameral::save {
     public:
         void AddCommands(std::span<const sim::Command> commands);
         void AddHash(uint64_t tick, uint64_t hash);
+
+        // 巻き戻し(T-0143)と筆の元に戻す(T-0278・ADR-0101): 世界が刻み tick の境界へ戻った。tick 以降に当たるコマンドと
+        // S(tick + 1) からのハッシュを捨てる(流し直した分を AddCommands・AddHash で書き直す)。元に戻した運びは
+        // 足し直されないので記録に残らない(記録は「最後の流れ」だけ。元に戻す操作の印は残さない)
+        void Rewind(uint64_t tick);
 
         // 記録を再生ファイルの形にする(仮の世界。刻み 0 の全部 0 の状態から)
         [[nodiscard]] ReplayFile Build() const;
