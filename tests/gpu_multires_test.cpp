@@ -29,6 +29,9 @@ using namespace bicameral::reaction;
 
 namespace {
 
+    // 溢れの場面で段ごとのタイムスタンプを入れるか(T-0290 の切り分け。--wide-stamps)
+    bool s_wideStageTimestamps = false;
+
     // 計測の前に刻みを何回投げるか(短い仕事の間は GPU のクロックが上がらず、時間が 6〜8 倍に出る)
     constexpr uint32_t WARMUP_STEPS = 400;
 
@@ -287,6 +290,7 @@ namespace {
         if (!gpu)
             return std::unexpected(gpu.error());
 
+        gpu->SetStageTimestamps(s_wideStageTimestamps);
         const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
         sim::MultiresNest read;
         uint32_t most = 0;
@@ -343,6 +347,8 @@ namespace {
                                             {.wideCells = true, .wideChunks = many ? WideManyChunks(cpu) : 0});
         if (!gpu)
             return std::unexpected(gpu.error());
+
+        gpu->SetStageTimestamps(s_wideStageTimestamps);
 
         const sim::MultiresStepOptions options = test::LimitsStepOptions(conduction);
         sim::MultiresNest read;
@@ -803,6 +809,61 @@ namespace {
         return 0;
     }
 
+    // 溢れの場面を 1 つ流す(T-0290 の切り分け。場面 = limits / limits-conduct / overflow / overflow-conduct / many / many-conduct)
+    std::expected<RunResult, std::string> RunWideSceneByName(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                             gpu::DebugRing& ring, std::string_view scene) {
+        const bool conduction = scene.ends_with("-conduct");
+        if (scene.starts_with("limits")) {
+            const auto table = sim::BakeReactionTable(test::MakeLimitsTestTable());
+            return table ? RunLimitsStepWide(device, queue, ring, *table, conduction)
+                         : std::unexpected(std::string("表を作れない"));
+        }
+
+        const bool many = scene.starts_with("many");
+        if (!many && !scene.starts_with("overflow"))
+            return std::unexpected(std::format("場面の名前が違う: {}", scene));
+
+        const auto table = sim::BakeReactionTable(many ? test::MakeWideManyTable() : test::MakeWideOverflowTable());
+        return table ? RunWideOverflow(device, queue, ring, *table, conduction, many)
+                     : std::unexpected(std::string("表を作れない"));
+    }
+
+    // 溢れの場面の並び(カンマ区切り)を count 回続けて流す(T-0290 の切り分け。--repeat-wide <場面,場面,...> <回数>)。
+    // 前の場面の後でだけ止まるのかを、場面の組み合わせで見る
+    // fresh なら場面ごとにキューとデバッグのリングを作り直す(--repeat-fresh-queue / --repeat-fresh-ring)
+    struct RepeatOptions {
+        D3D12_COMMAND_LIST_TYPE queueType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        bool freshQueue = false;
+        bool freshRing = false;
+    };
+
+    int RunWideRepeat(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring, std::string_view scenes,
+                      uint32_t count, const RepeatOptions& repeat) {
+        for (uint32_t round = 0; round < count; ++round) {
+            for (const auto part : views::split(scenes, ',')) {
+                const std::string_view scene(part.begin(), part.end());
+                const std::string name = std::format("{} {} 回目", scene, round + 1);
+                auto freshQueue = repeat.freshQueue ? gpu::ImmediateQueue::Create(device, repeat.queueType)
+                                                    : std::unexpected(std::string("作り直さない"));
+                auto freshRing = repeat.freshRing ? gpu::DebugRing::Create(device)
+                                                  : std::unexpected(std::string("作り直さない"));
+                gpu::ImmediateQueue& sceneQueue = freshQueue ? *freshQueue : queue;
+                gpu::DebugRing& sceneRing = freshRing ? *freshRing : ring;
+                const auto result = Timed(name,
+                                          [&] { return RunWideSceneByName(device, sceneQueue, sceneRing, scene); });
+                if (result)
+                    continue;
+
+                Log(Channel::Gpu, Level::Error, "繰り返し: FAILED {}: {}", name, result.error());
+                return 1;
+            }
+        }
+
+        Log(Channel::Gpu, Level::Info, "繰り返し: OK({} を {} 回)", scenes, count);
+
+        return 0;
+    }
+
     // どの場面を流すか(--part。ctest は debug の 1200 秒の上限に収まるよう 2 本に分ける。T-0263)
     enum class Part : uint8_t { All, Chains, Wide };
 
@@ -906,11 +967,23 @@ namespace {
         bool measureWide = false;
         std::optional<Part> part = Part::All;
         std::optional<DiagnoseOptions> diagnose;
+        std::string_view repeatScene;
+        uint32_t repeatCount = 0;
+        RepeatOptions repeat;
         for (size_t index = 0; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
             if (argument == "--measure-wide")
                 measureWide = true;
-            else if (argument == "--part" && index + 1 < arguments.size())
+            else if (argument == "--wide-stamps")
+                s_wideStageTimestamps = true;
+            else if (argument == "--repeat-fresh-queue")
+                repeat.freshQueue = true;
+            else if (argument == "--repeat-fresh-ring")
+                repeat.freshRing = true;
+            else if (argument == "--repeat-wide" && index + 2 < arguments.size()) {
+                repeatScene = arguments[++index];
+                repeatCount = std::max(1, std::atoi(arguments[++index]));
+            } else if (argument == "--part" && index + 1 < arguments.size())
                 part = ParsePart(arguments[++index]);
             else if (argument == "--diagnose-wide" && index + 1 < arguments.size())
                 diagnose = DiagnoseOptions{
@@ -930,7 +1003,8 @@ namespace {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--part "
                 "all|chains|wide] [--diagnose-wide <刻み/リスト> [--diagnose-compare] [--diagnose-conduct] "
-                "[--diagnose-limits]]");
+                "[--diagnose-limits]] [--repeat-wide <場面,...> <回数> [--repeat-fresh-queue] [--repeat-fresh-ring]] "
+                "[--wide-stamps]");
             return 2;
         }
 
@@ -952,6 +1026,11 @@ namespace {
 
         if (measureWide)
             return RunMeasureWide(device->Get(), *queue, *ring);
+
+        if (repeatCount > 0)
+            return RunWideRepeat(
+                device->Get(), *queue, *ring, repeatScene, repeatCount,
+                {.queueType = options->queueType, .freshQueue = repeat.freshQueue, .freshRing = repeat.freshRing});
 
         if (diagnose) {
             const auto manyTable = sim::BakeReactionTable(diagnose->limits ? test::MakeLimitsTestTable()
