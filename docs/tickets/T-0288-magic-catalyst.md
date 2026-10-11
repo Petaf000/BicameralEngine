@@ -41,6 +41,8 @@
   ログではどちらも GPU と CPU の要約が一致したまま進んでおり(活性 120 刻みまで済み・仮の世界は表の差し替え・物質の付け替えまで一致)、
   止まった(DEVICE_HUNG)のではなく、6 つのランナーが CPU と GPU を取り合って遅い(gpu_probe_sim は CPU リファレンスの遅い反応の場面で 475 秒)。
   パッチの無いセルは MpPatchedTable::Rate が covering = 0 で今までどおりすぐ返るので、触媒で遅くなる所は無い。
+- gpu_multires_activity は ctest でもう一度時間切れ(313 秒。300 秒の上限)になったので、`job.py run -Exe gpu_multires_activity_test -- --queue compute`
+  (同じ引数・GBV あり・時間の上限なし)で流し直し → **OK(120 刻みで GPU と CPU がビット一致・208 秒)**。gpu_probe_sim は流し直していない(司令塔の統合の時に)。
 
 ## 引き継ぎメモ
 - 触媒の語は「種類 3・8〜31bit = ΔEa(J/mol)」。古い記録の効き方(1・2)はそのまま。コマンドの payload の形・列の形は変わらない。
