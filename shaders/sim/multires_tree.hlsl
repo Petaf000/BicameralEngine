@@ -926,7 +926,7 @@ uint32_t ReserveTailChunks(MrRequest request, MrRequestState state, uint32_t top
 
         if (attach) {
             for (uint32_t j = held; j < need; ++j) {
-                g_treeWords[table + 1 + j] = g_treeWords[stack + freeCount - 1 - taken];
+                g_treeWords[WideTableEntryWord(table, j)] = g_treeWords[stack + freeCount - 1 - taken];
                 taken += 1;
             }
 
@@ -984,7 +984,7 @@ uint32_t ReserveSideChunks(uint32_t area, uint32_t entries, bool attach, uint32_
 
     if (attach) {
         for (uint32_t j = held; j < need; ++j)
-            g_treeWords[table + 1 + j] = g_treeWords[stack + freeCount - 1 - (taken + (j - held))];
+            g_treeWords[WideTableEntryWord(table, j)] = g_treeWords[stack + freeCount - 1 - (taken + (j - held))];
 
         g_treeWords[table] = need;
     }

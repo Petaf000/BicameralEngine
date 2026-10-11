@@ -46,12 +46,22 @@ uint32_t WideChunkCount(uint32_t page, uint32_t side) {
     return g_treeWords[MrWideTableAt(WideAreaHeader(page), side)];
 }
 
+// 塊の表(先頭 table = MrWideTableAt)の j 番目の塊の番号を持つ u6 の語。0 番目は見出し、1 番目からは最初の塊の先頭(T-0327。
+// 見出しの大きさを 1 セルの上限に依らなくする)。j ≥ 1 は最初の塊を持つこと(付ける時は 0 番目から順に書く)
+uint32_t WideTableEntryWord(uint32_t table, uint32_t j) {
+    if (j == 0)
+        return table + 1;
+
+    return MrWideChunkWord(WidePoolWord(), g_treeWords[table + 1]) + MrWideTableEntryInChunk(j);
+}
+
 // 面 side の論理の語 word の u6 の語(塊の表を引く。面が持つ塊の中であること)
 uint32_t WideWord(uint32_t page, uint32_t side, uint32_t word) {
     const uint32_t table = MrWideTableAt(WideAreaHeader(page), side);
-    const uint32_t chunk = g_treeWords[table + 1 + (word / MR_WIDE_CHUNK_WORDS)];
+    const uint32_t offset = MrWideSideOffset(word);
+    const uint32_t chunk = g_treeWords[WideTableEntryWord(table, offset / MR_WIDE_CHUNK_WORDS)];
 
-    return MrWideChunkWord(WidePoolWord(), chunk) + (word % MR_WIDE_CHUNK_WORDS);
+    return MrWideChunkWord(WidePoolWord(), chunk) + (offset % MR_WIDE_CHUNK_WORDS);
 }
 
 // 面 side のセル index の溢れの [始まり, 終わり)(塊を持たない面は溢れが無い)

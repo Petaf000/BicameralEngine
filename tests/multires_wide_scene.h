@@ -89,7 +89,8 @@ namespace bicameral::test {
 
     constexpr uint32_t WIDE_MANY_SPECIES = 32;
     constexpr uint32_t WIDE_MANY_OLD_LIMIT = 24;  // T-0176〜T-0236 の GPU の 1 セルの当座の上限
-    constexpr uint64_t WIDE_MANY_TICKS = 10;
+    // 試験の many の場面の刻み(T-0327: 表が GPU の上限〔96〕まであるので、1 セル 64 種〔T-0272 の上限〕を超えるまで刻む。20 刻みで 80 種)
+    constexpr uint64_t WIDE_MANY_TICKS = 20;
 
     inline std::string WideManyName(uint32_t i) {
         return std::format("m{:02}", i);
