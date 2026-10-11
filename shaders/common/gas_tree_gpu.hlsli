@@ -1,5 +1,5 @@
 // gas_tree_gpu.hlsli — 気体の多重解像度の木の GPU 版(T-0209。07 §2.5・ADR-0117)が C++ と HLSL で共有する置き場所の形:
-// 面の形(どのセル・外・壁が面の両側か)・レベルごとの係数・セルの場所(レベル・層・自分の面の並びの範囲)・セルの端数・帳簿の並び。
+// 面の形(どのセル・外・壁が面の両側か)・レベルごとの係数と小刻みの指数・セルの場所(レベル・層・自分の面の並びの範囲)・セルの端数・粗い小刻みの間に出した量(T-0356)・帳簿の並び。
 // C++ では engine/src/sim/gpu_gas_tree.cpp が GasTree(sim/gas_tree.h)から詰めて写し、HLSL では shaders/sim/gas_tree_step.hlsl が読む。
 // セル・導く値・面の動く値・セルごとの合計・設定は 1 レベルの形(common/gas_gpu.hlsli)をそのまま使う。
 // 64bit の値を先に・32bit の値を後に置き、32bit の数は偶数にそろえる(gas_gpu.hlsli と同じ約束)。浮動小数点は使わない(04 §4)。
@@ -45,8 +45,8 @@ namespace bicameral::sim {
         uint64_t pressureFlow;
         uint64_t pressureImpulse;
         uint64_t gravityImpulse;
-        uint32_t layerBegin;  // 層の表(基準の導く値・開いた境界の外)の始め
-        uint32_t unused;
+        uint32_t layerBegin;        // 層の表(基準の導く値・開いた境界の外)の始め
+        uint32_t subcycleExponent;  // σ: 1 刻みに substeps × 2^σ 回の小刻み(T-0356)
     };
 
     // セルの場所(16 バイト)。自分の面は面の並び(u32: 面の番号 × 2 + 自分が右側なら 1)の [faceBegin, faceEnd)
@@ -62,6 +62,13 @@ namespace bicameral::sim {
         uint64_t amounts[GAS_GPU_MAX_SPECIES];
         uint64_t energy;
         uint64_t momentum[3];
+    };
+
+    // 粗い小刻み 1 回の間に出した量(セルごと。gas_tree.cpp の TreeWork の committedOutflow・taken。T-0356)。
+    // セルの小刻みの初めに 0 にし、細かい面が何度も引く時の抑えに使う。40 バイト
+    struct GasTreeGpuCarry {
+        uint64_t committedOutflow;            // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
+        uint64_t taken[GAS_GPU_MAX_SPECIES];  // 出した物質量(風上のレベル + 1 の単位)
     };
 
     // 帳簿(RWByteAddressBuffer。sim::GasTreeTotals と同じ並び = whole(int64)+ fraction(uint64)× 8。レベル 0 の単位)。

@@ -1,5 +1,6 @@
-// gpu_gas_tree.cpp — 気体の多重解像度の木の 1 刻みを GPU の Compute で走らせる(gpu_gas_tree.h・T-0209)。段を呼ぶ順は shaders/sim/gas_tree_step.hlsl の
-// 先頭の表と同じで、CPU リファレンス(gas_tree.cpp の MicroStep。σ = 0)の段を面の段とセルの段に分けて並べたもの。段の間は全部の UAV の書き込みを待つ。
+// gpu_gas_tree.cpp — 気体の多重解像度の木の 1 刻みを GPU の Compute で走らせる(gpu_gas_tree.h・T-0209・T-0356)。段を呼ぶ順は shaders/sim/gas_tree_step.hlsl の
+// 先頭の表と同じで、CPU リファレンス(gas_tree.cpp の MicroStep)の段を面の段とセルの段に分けて並べたもの。段の間は全部の UAV の書き込みを待つ。
+// 1 刻み = いちばん細かい小刻み substeps × 2^σmax 回 × 9 段。どのレベルの小刻みが始まる・終わるかは段の中でルート定数の小刻みの番号から決める。
 // 木の形(面の一覧・セルの場所・セルごとの面の並び・レベルごとの係数と層の基準)は Create で一度だけ作って写す(木は作った後に変えない。T-0208)。
 #include "sim/gpu_gas_tree.h"
 
@@ -12,12 +13,12 @@ namespace bicameral::sim {
     namespace {
 
         constexpr uint32_t THREADS_PER_GROUP = 64;  // gas_tree_step.hlsl の numthreads
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 4;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 8;
         constexpr uint32_t MAX_GROUPS = 65535;  // Dispatch の 1 次元の上限
 
-        // u0〜u7 / b0 / デバッグのリング / t0〜t6
+        // u0〜u10 / b0 / デバッグのリング / t0〜t6
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 8, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 7};
+            .uavCount = 11, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 7};
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(Pass の順)
         constexpr std::array<const char*, 9> SHADER_NAMES = {
@@ -31,6 +32,7 @@ namespace bicameral::sim {
         static_assert(sizeof(GasTreeGpuFace) == 64);
         static_assert(sizeof(GasTreeGpuLevel) == 40);
         static_assert(sizeof(GasTreeGpuPlace) == 16);
+        static_assert(sizeof(GasTreeGpuCarry) == 40);
         static_assert(sizeof(GasTreeGpuFraction) == 64 && sizeof(GasTreeFraction) == 64);
         static_assert(sizeof(GasTreeTotals) == GAS_TREE_GPU_LEDGER_BYTES);
         static_assert((uint32_t)GasTreeSideKind::Cell == GAS_TREE_GPU_SIDE_CELL &&
@@ -155,9 +157,6 @@ namespace bicameral::sim {
     }  // namespace
 
     std::expected<GpuGasTree, std::string> GpuGasTree::Create(ID3D12Device5* device, const GasTree& tree) {
-        if (tree.maxSubcycleExponent != 0)
-            return std::unexpected("レベルごとの小刻み(σ > 0)の木はまだ GPU に載らない(T-0356)");
-
         // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提
         for (const GasCell& cell : tree.cells) {
             for (uint32_t s = tree.config.speciesCount; s < GAS_MAX_SPECIES; ++s) {
@@ -169,6 +168,7 @@ namespace bicameral::sim {
         GpuGasTree result;
         result.m_cellCount = (uint32_t)tree.cells.size();
         result.m_substeps = tree.config.substeps;
+        result.m_maxExponent = tree.maxSubcycleExponent;
         result.m_tick = tree.tick;
         if (auto created = result.CreatePipelines(device); !created)
             return std::unexpected(created.error());
@@ -220,7 +220,7 @@ namespace bicameral::sim {
                               .pressureImpulse = coefficients.pressureImpulse,
                               .gravityImpulse = coefficients.gravityImpulse,
                               .layerBegin = layerBegins[k],
-                              .unused = 0});
+                              .subcycleExponent = level.subcycleExponent});
             for (const GasDerived& layer : level.referenceDerived)
                 referenceDerived.push_back(ToGasGpuDerived(layer));
 
@@ -257,14 +257,17 @@ namespace bicameral::sim {
     // 状態と作業のバッファ(gas_tree_step.hlsl の結び付けの順)・初めの状態の写し・読み戻し
     std::expected<void, std::string> GpuGasTree::CreateBuffers(ID3D12Device5* device, const GasTree& tree) {
         const uint64_t n = m_cellCount;
-        const std::array<uint64_t, 8> uavBytes = {n * sizeof(GasGpuCell),                      // u0 セル
-                                                  n * sizeof(GasTreeGpuFraction),              // u1 端数
-                                                  n * sizeof(GasGpuCell),                      // u2 力を当てた後のセル
-                                                  n * sizeof(GasTreeGpuFraction),              // u3 その端数
-                                                  n * sizeof(GasGpuDerived),                   // u4 導く値
-                                                  (uint64_t)m_faceCount * sizeof(GasGpuFace),  // u5 面
-                                                  n * sizeof(GasGpuCellSums),                  // u6 セルごとの合計
-                                                  GAS_TREE_GPU_LEDGER_BYTES};                  // u7 帳簿
+        const std::array<uint64_t, 11> uavBytes = {n * sizeof(GasGpuCell),                      // u0 セル
+                                                   n * sizeof(GasTreeGpuFraction),              // u1 端数
+                                                   n * sizeof(GasGpuCell),                      // u2 力を当てた後のセル
+                                                   n * sizeof(GasTreeGpuFraction),              // u3 その端数
+                                                   n * sizeof(GasGpuDerived),                   // u4 導く値
+                                                   (uint64_t)m_faceCount * sizeof(GasGpuFace),  // u5 面
+                                                   n * sizeof(GasGpuCellSums),                  // u6 セルごとの合計
+                                                   GAS_TREE_GPU_LEDGER_BYTES,                   // u7 帳簿
+                                                   n * sizeof(GasGpuCell),                      // u8 小刻みの終わりの値
+                                                   n * sizeof(GasTreeGpuFraction),              // u9 その端数
+                                                   n * sizeof(GasTreeGpuCarry)};                // u10 出した量
         for (size_t i = 0; i < uavBytes.size(); ++i) {
             m_uavs[i] = gpu::CreateBuffer(device, uavBytes[i], gpu::BufferKind::UnorderedAccess);
             if (!m_uavs[i])
@@ -330,14 +333,18 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &barrier);
     }
 
+    // 1 刻み = いちばん細かい小刻み substeps × 2^σmax 回(gas_tree.cpp の StepGasTree)。乱数の丸めの小刻みの通し番号はレベルごとに段の中で作る
     void GpuGasTree::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
-        for (uint32_t substep = 0; substep < m_substeps; ++substep) {
-            // 乱数の丸めの小刻みの通し番号(gas_tree.cpp の RoundingTick。σ = 0 なのでどのレベルも同じ)
-            const uint64_t roundingTick = (m_tick * m_substeps) + substep;
-            const Constants constants{.roundingTickLow = (uint32_t)roundingTick,
-                                      .roundingTickHigh = (uint32_t)(roundingTick >> 32),
+        const uint32_t micros = m_substeps << m_maxExponent;
+        for (uint32_t micro = 0; micro < micros; ++micro) {
+            const Constants constants{.tickLow = (uint32_t)m_tick,
+                                      .tickHigh = (uint32_t)(m_tick >> 32),
+                                      .micro = micro,
+                                      .substeps = m_substeps,
+                                      .maxExponent = m_maxExponent,
                                       .cellCount = m_cellCount,
-                                      .faceCount = m_faceCount};
+                                      .faceCount = m_faceCount,
+                                      .unused = 0};
             for (size_t pass = 0; pass < (size_t)Pass::Count; ++pass)
                 RecordPass(list, debugRing, (Pass)pass, constants);
         }

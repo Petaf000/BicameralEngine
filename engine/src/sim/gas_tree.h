@@ -119,8 +119,18 @@ namespace bicameral::sim {
     // セルから導く値(整数部だけ。そのレベルの層の基準を使う)
     [[nodiscard]] GasDerived DeriveGasTreeCell(const GasTree& tree, uint32_t cellIndex);
 
-    // 1 刻み(レベル k は substeps × 2^σ(k) 回の小刻み)
-    void StepGasTree(GasTree& tree);
+    // 抑えを通った回数(試験で、粗い側から細かい面が何度も引く時の抑えの道を通ったかを確かめる。T-0356。状態には効かない)
+    struct GasTreeStepStats {
+        uint64_t limitedOutflow = 0;           // 出ていく割合の合計で縮めた面
+        uint64_t limitedSubcycledOutflow = 0;  // そのうち風上の小刻みが粗い面(× 2^g で数えた)
+        uint64_t
+            limitedAfterCommitted = 0;   // そのうち使える分が 1 未満(風上の小刻みの初めに同じ小刻みの面がもう出した)
+        uint64_t limitedAmounts = 0;     // 移す物質量が中身を超えて縮めた面と成分
+        uint64_t limitedAfterTaken = 0;  // そのうち中身から風上の小刻みの間にもう出した分を引いた
+    };
+
+    // 1 刻み(レベル k は substeps × 2^σ(k) 回の小刻み)。stats があれば抑えを通った回数を足す
+    void StepGasTree(GasTree& tree, GasTreeStepStats* stats = nullptr);
 
     // 合計(レベル 0 の単位。セルの整数 × 8^-k + 端数)
     [[nodiscard]] GasTreeTotals SumGasTree(const GasTree& tree);
