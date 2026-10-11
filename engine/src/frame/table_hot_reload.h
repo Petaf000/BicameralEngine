@@ -30,9 +30,10 @@ namespace bicameral::frame {
     class TableHotReload {
     public:
         // watch: ファイルを見るか(再生でなければ通常の起動でも。再生中は見ない)。initial は起動時に読んだ表。
-        // policy: 物質を足す・消す表を当てるか(Remap なら世界・覗き窓・実験室が名前で付け替える。T-0242。既定にするのは T-0254)
+        // policy: 物質を足す・消す表を当てるか(Remap なら世界・覗き窓・実験室が名前で付け替える。T-0242)。既定は Remap
+        // (エディタも通常の起動も。D-438・T-0266・ADR-0065)
         TableHotReload(script::ReactionTableSource source, std::shared_ptr<const script::LoadedReactionTable> initial,
-                       bool watch, script::SpeciesChangePolicy policy = script::SpeciesChangePolicy::Reject);
+                       bool watch, script::SpeciesChangePolicy policy = script::SpeciesChangePolicy::Remap);
 
         // 知っている表に足す(再生ファイルに残っていた表。T-0193)
         void AddKnown(const std::shared_ptr<const script::LoadedReactionTable>& table) { Remember(table); }

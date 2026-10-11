@@ -61,3 +61,16 @@
   S(s) はもう新しい ID。CPU リファレンスは刻みの境界だけで抽出するので s より後の境界から)。
 - それでも debug の窓では物質を足す差し替えの刻みの直後から世界が release と違う(debug の記録を release で再生すると S(100) まで一致し、
   差し替えの直後の S(101) から違う)。窓の世界のどこかが付け替えに追従していない。エディタの既定を Remap にするのはこれを直してから(T-0266)。
+
+## 追記(2026-10-11・T-0266): ホットリロードの既定を Remap に
+- **ホットリロードは既定で `SpeciesChangePolicy::Remap`**(frame/table_hot_reload の既定。frame_loop は方針を渡さない)。
+  T-0243 で通常の起動(`--editor` なし)もファイルを見るようになったので、エディタと通常の起動の両方(D-438)。
+  ctest window_hot_reload_game_record も `--species-remap` で通常の起動の付け替えを確かめる。
+  物質を足す・消す表も、世界・覗き窓・実験室が名前で付け替えて当てる。`--species-remap` は `--auto-reload` のオゾンを足す・消す段を足すだけになった。
+  スクリプトの層(script::CheckHotReloadCompatible・ReactionHotReload)の既定は Reject のまま(付け替えられない世界を守る側の既定)。
+- T-0254 の「debug の窓で差し替えの直後から assert・release と違う」の原因は、付け替えではなく **debug のシミュのシェーダーの -Od(T-0239・ADR-0079)**
+  だった: 食い違った記録はどれも -Od のビルド(ADR-0079 の前)。-O3 の debug では、覗き窓あり 7 回・なし 3 回の記録で GPU の assert 0 件・
+  release の再生が全部一致、release の記録 3 本を debug(assert つき)で再生して assert 0 件・全部一致(release も黙って桁あふれしていない)。
+- 読んで見つけた別の穴を塞いだ(フレームの区切り方による): 刻みの途中で終わったフレームで足した生の置くコマンド(前の表の ID のまま GPU のキュー)が
+  次のフレームの差し替えの刻みに当たると、別の物質を置いていた。差し替えはそういうコマンドが全部当たった後の刻みへ回す(遅れは 1 刻み)。
+  巻き戻しで足し直す控え・履歴の、差し替えの刻み以降の置くコマンドも新しい ID に付け替える(frame_loop の TakeTableSwaps・RemapLivePlaceCommands)。
