@@ -186,6 +186,28 @@ namespace {
         EXPECT((scheduler.Cursor() == SimCursor{.tick = 6, .unit = 0}));
     }
 
+    // 筆の元に戻す(T-0278): 巻き戻した後、元の刻みまでは現実の時間を待たずに進む(止めていても)。その先は今まで通り
+    void TestCatchUpAfterRewind() {
+        SimScheduler scheduler(3);
+        for (uint32_t unit = 0; unit < 3; ++unit)
+            scheduler.ReportUnitTime(unit, 0.1);
+
+        scheduler.AddTicks(9);
+        EXPECT(scheduler.TakeUnits() == 27);
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 9, .unit = 0}));
+
+        scheduler.ClearBacklog();  // 止めている
+        scheduler.Rewind(4);
+        scheduler.CatchUpTo(9);
+        scheduler.CatchUpTo(7);  // 小さい方は効かない(2 回続けて戻しても先の目標を忘れない)
+        EXPECT(scheduler.CatchingUp());
+        EXPECT(scheduler.TakeUnits() == 15);  // 刻み 4〜8。未処理の刻みは使わない
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 9, .unit = 0}));
+        EXPECT(!scheduler.CatchingUp());
+        EXPECT(scheduler.TakeUnits() == 0);  // 止めているので先へは進まない
+        EXPECT(scheduler.PendingTicks() == 0.0);
+    }
+
 }  // namespace
 
 int main() {
@@ -197,6 +219,7 @@ int main() {
     TestCatchUpLimit();
     TestStopTick();
     TestBreakIntervalAndRewind();
+    TestCatchUpAfterRewind();
     if (failureCount == 0)
         std::printf("sim_scheduler_test: OK\n");
 

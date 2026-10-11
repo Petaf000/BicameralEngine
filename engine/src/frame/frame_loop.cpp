@@ -27,6 +27,7 @@
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/unicode.h"
+#include "editor/brush_undo.h"
 #include "editor/editor_overlay.h"
 #include "editor/time_control.h"
 #include "frame/sim_scheduler.h"
@@ -306,6 +307,7 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeLiveCommands(uint64_t applyTick, uint64_t endApplyTick,
                                                                           uint32_t limit);
             void CheckAutoRewind();
+            void UndoBrushStroke();
             [[nodiscard]] bool CreateAutoReload();
 
             // --- 計測 ---
@@ -386,6 +388,8 @@ namespace bicameral::frame {
             // 今の流れで GPU のキューへ足したコマンド(刻みの順。再生ファイルを流していない時)と、巻き戻した後に足し直すコマンド
             std::vector<sim::ProbeCommand> m_commandHistory;
             std::deque<sim::ProbeCommand> m_rewindFeed;
+            bool m_catchUpAfterRewind = false;            // 筆の元に戻す: 戻した後、元の刻みまで流し直す(T-0278)
+            std::optional<uint64_t> m_lastTableSwapTick;  // 最後に反応表を差し替えた刻み(それより前へは元に戻さない)
 
             // --- 計測 ---
             uint64_t m_computeFrequency = 0;
@@ -728,6 +732,9 @@ namespace bicameral::frame {
                 if (!m_options.recordPath.empty())
                     m_recorder.AddHash(tickHash.tick, tickHash.WorldHash());
 
+                if (m_editor)
+                    m_editor->Brush().NoteHash(tickHash.tick, tickHash.WorldHash());
+
                 if (!m_replay.empty())
                     m_replay.front().CheckHash(tickHash.tick, tickHash.WorldHash());
 
@@ -885,6 +892,9 @@ namespace bicameral::frame {
                 rng::move(m_editor->Brush().TakeAutoCommands(m_frameNumber, waitingCommands, m_nextSequence),
                           std::back_inserter(m_pendingCommands));
 
+            if (m_editor && m_editor->Brush().TakeUndoRequest())
+                UndoBrushStroke();
+
             const bool autoClick = m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0;
             const bool autoIgnite = m_options.autoIgnite && m_frameNumber == 0;  // 下の最初の 1 回と同じ場所
             if (autoClick || autoIgnite) {
@@ -966,6 +976,11 @@ namespace bicameral::frame {
                                                           : m_replay.front().TakeCommands(applyTick, limit);
 
             TakeTableSwaps(start, limit, commands);
+            for (const sim::ProbeCommand& command : commands) {
+                if (command.type == sim::PROBE_COMMAND_TYPE_TABLE)
+                    m_lastTableSwapTick = std::max(m_lastTableSwapTick.value_or(0), command.targetTick);
+            }
+
             if (!m_options.recordPath.empty())
                 m_recorder.AddCommands(commands);
 
@@ -1430,13 +1445,11 @@ namespace bicameral::frame {
             return true;
         }
 
-        // 巻き戻せない理由(空なら巻き戻せる)。記録と CPU の物理の突き合わせとトレースは、刻みが一度ずつ進む前提なので
+        // 巻き戻せない理由(空なら巻き戻せる)。CPU の物理の突き合わせとトレースは、刻みが一度ずつ進む前提なので。
+        // 記録中は巻き戻せる(記録を戻した刻みまで切り詰めて書き直す。T-0278・ADR-0101)
         std::string FrameLoop::RewindUnavailableReason() const {
             if (m_savePointCount == 0)
                 return "保存点なし(--save-points 0)";
-
-            if (!m_options.recordPath.empty())
-                return "記録中は巻き戻さない";
 
             if (m_physicsCheck)
                 return "--check-physics の間は巻き戻さない";
@@ -1468,12 +1481,20 @@ namespace bicameral::frame {
                 return;
             }
 
+            // 記録中は、反応表の差し替えより前へ戻さない(巻き戻しは差し替えの印を足し直さないので、記録から落ちる。T-0278)
+            if (!m_options.recordPath.empty() && m_lastTableSwapTick && *m_lastTableSwapTick >= tick) {
+                Log(Channel::Sim, Level::Warning, "刻み {} へ巻き戻せない: 記録中に刻み {} で反応表を差し替えた", tick,
+                    *m_lastTableSwapTick);
+                return;
+            }
+
             m_rewindRequest = tick;
         }
 
         // GPU を待ち、読み戻しを全部読んでから、カーソルとコマンドを保存点の刻みへ戻す。戻す保存点の番号を返す
         uint32_t FrameLoop::PrepareRewind() {
             const uint64_t tick = std::exchange(m_rewindRequest, UINT64_MAX);
+            const bool catchUp = std::exchange(m_catchUpAfterRewind, false);
             if (!m_compute.WaitIdle())
                 return sim::NO_SAVE_POINT;
 
@@ -1484,14 +1505,25 @@ namespace bicameral::frame {
                     index = candidate;
             }
 
-            if (index == sim::NO_SAVE_POINT)
+            if (index == sim::NO_SAVE_POINT) {
+                Log(Channel::Sim, Level::Error, "巻き戻し: 刻み {} の保存点がもう無い(戻さなかった)", tick);
                 return index;
+            }
 
             const SimCursor from = m_scheduler.Cursor();
             m_scheduler.Rewind(tick);
+            if (catchUp)
+                m_scheduler.CatchUpTo(from.tick);  // 筆の元に戻す: 今の刻みまで流し直す(T-0278)
+
             m_sim.DiscardSavePointsAfter(tick);
             if (!m_replay.empty())
                 m_replay.front().Rewind(tick);
+
+            if (!m_options.recordPath.empty())
+                m_recorder.Rewind(tick);
+
+            if (m_editor)
+                m_editor->Brush().NoteRewound(tick);
 
             // 今の流れで足したコマンドのうち、戻した刻み以降のものを足し直す(まだ足していなかった分の後ろに)
             const auto kept = rng::find_if(
@@ -1565,6 +1597,48 @@ namespace bicameral::frame {
             m_autoReload.emplace(std::move(*autoReload));
 
             return true;
+        }
+
+        // 筆の元に戻す(T-0278・ADR-0101): 最後の運びを、待っている列・今の流れの控え・足し直しを待つ列から除く。GPU へ足していたなら、
+        // その運びが最初に当たった刻み以前の保存点へ戻して今の刻みまで流し直す(記録中なら記録も書き直す。PrepareRewind)
+        void FrameLoop::UndoBrushStroke() {
+            editor::BrushPanel& brush = m_editor->Brush();
+            const std::span<const uint32_t> last = brush.LastStroke();
+            const editor::BrushStrokeSequences stroke(last.begin(), last.end());
+            if (stroke.empty() || brush.Stroking()) {
+                brush.NoteUndoFailed(stroke.empty() ? "戻す運びが無い" : "塗っている途中");
+                return;
+            }
+
+            const uint64_t firstTick = std::min(editor::EarliestStrokeTick(stroke, m_commandHistory),
+                                                editor::EarliestStrokeTick(stroke, m_rewindFeed));
+            uint64_t rewindTick = UINT64_MAX;
+            if (firstTick != UINT64_MAX) {
+                const std::string reason = m_rewindRequest != UINT64_MAX ? "巻き戻しの途中" : RewindUnavailableReason();
+                if (!reason.empty()) {
+                    brush.NoteUndoFailed(reason);
+                    return;
+                }
+
+                const std::vector<uint64_t> savePoints = SavePointTicks();
+                const auto plan = editor::PlanBrushUndo(firstTick, savePoints, m_lastTableSwapTick);
+                if (!plan) {
+                    brush.NoteUndoFailed(plan.error());
+                    return;
+                }
+
+                rewindTick = *plan;
+            }
+
+            editor::RemoveStrokeCommands(stroke, m_pendingCommands);
+            editor::RemoveStrokeCommands(stroke, m_commandHistory);
+            editor::RemoveStrokeCommands(stroke, m_rewindFeed);
+            if (rewindTick != UINT64_MAX) {
+                m_rewindRequest = rewindTick;
+                m_catchUpAfterRewind = true;
+            }
+
+            brush.NoteUndone(firstTick, rewindTick, m_latestHash);
         }
 
         // --auto-rewind: 保存点が 2 つできたら、古い方へ 1 回だけ戻す

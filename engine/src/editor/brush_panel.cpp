@@ -71,6 +71,17 @@ namespace bicameral::editor {
         constexpr uint32_t AUTO_PAINT_STEPS = 3;
         constexpr uint32_t AUTO_PAINTED = 18;
 
+        // --- --auto-place の元に戻す(T-0278・ADR-0101)---
+        // フレーム 23: 円柱の後につつく(元に戻した運びより後のコマンドは、流し直しで残る)。26 以降: 投げた置くコマンドが全部
+        //   届いたら、最後の運び(円柱 5 個)を元に戻す → 流し直しが戻す前の最後の状態まで届いたら、次の運び(直方体のドラッグ
+        //   13 個。2 フレームに分かれた 1 つの運び)を元に戻す。残る置いたのは 1 回ずつの 5 つだけ
+        constexpr uint64_t AUTO_AFTER_POKE_FRAME = 23;
+        constexpr uint64_t AUTO_UNDO_FRAME = 26;
+        constexpr uint32_t AUTO_UNDO_COUNT = 2;
+        constexpr uint32_t AUTO_UNDONE_COMMANDS = 18;
+
+        constexpr size_t MAX_UNDO_STROKES = 64;  // 控える運び(古いものから忘れる。保存点より古い運びはどうせ戻せない)
+
         render::CellCoordinate AutoCell(uint32_t x, uint32_t y) {
             return {.x = x, .y = y, .z = sim::PROBE_VIEW_Z};
         }
@@ -160,10 +171,17 @@ namespace bicameral::editor {
         std::ranges::transform(pressed, std::back_inserter(pressedCells), ToBrushCell);
         std::ranges::transform(dragged, std::back_inserter(draggedCells), ToBrushCell);
 
+        if (!pressedCells.empty())
+            BeginStroke();
+
         const std::vector<BrushCell> dabs = m_stroke.Paint(pressedCells, draggedCells, released, Extents(), !m_replace,
                                                            BrushStroke::Budget(waitingCommands));
-        for (const BrushCell& dab : dabs)
+        for (const BrushCell& dab : dabs) {
+            if (!m_strokes.empty())
+                m_strokes.back().push_back(sequence);
+
             commands.push_back(sim::MakePlaceCommand(0, sequence++, MakeShape(dab), contents));
+        }
 
         m_paintedCount += static_cast<uint32_t>(commands.size());
 
@@ -172,9 +190,71 @@ namespace bicameral::editor {
 
     void BrushPanel::NotePlaced(const sim::ProbeEvent& event) {
         m_placedCount += 1;
+        m_placedTicks.push_back(event.tick);
         m_lastPlaced = std::format("刻み {} に ({}, {}, {}) を中心に置いた", event.tick, event.PokeX(), event.PokeY(),
                                    event.PokeZ());
         Log(Channel::Sim, Level::Info, "筆: {}", m_lastPlaced);
+    }
+
+    // --- 元に戻す(T-0278・ADR-0101)---
+
+    // 運びを始める(コマンドをまだ 1 つも作っていない運びは使い回す)
+    void BrushPanel::BeginStroke() {
+        if (!m_strokes.empty() && m_strokes.back().empty())
+            return;
+
+        m_strokes.emplace_back();
+        if (m_strokes.size() > MAX_UNDO_STROKES)
+            m_strokes.erase(m_strokes.begin());
+    }
+
+    std::span<const uint32_t> BrushPanel::LastStroke() const {
+        if (m_strokes.empty())
+            return {};
+
+        return m_strokes.back();
+    }
+
+    void BrushPanel::NoteUndone(uint64_t firstTick, uint64_t rewindTick, const sim::ProbeTickHash& latest) {
+        const size_t count = m_strokes.empty() ? 0 : m_strokes.back().size();
+        if (!m_strokes.empty())
+            m_strokes.pop_back();
+
+        m_autoUndone += m_autoRunning ? 1 : 0;
+        m_autoUndoneCommands += m_autoRunning ? static_cast<uint32_t>(count) : 0;
+        if (rewindTick == UINT64_MAX) {
+            m_undoMessage = std::format("元に戻した: {} 個(まだ世界へ送っていなかったので除いただけ)", count);
+        } else {
+            m_undoMessage = std::format("元に戻した: {} 個(刻み {} に置いた運び。刻み {} の保存点から流し直す)", count,
+                                        firstTick, rewindTick);
+            // 戻す前に読み戻した状態にその運びが入っていたなら、流し直した同じ刻みの状態は違うはず
+            if (latest.tick > firstTick)
+                m_undoChecks.push_back({.tick = latest.tick, .hashBefore = latest.WorldHash()});
+        }
+
+        Log(Channel::Sim, Level::Info, "筆: {}", m_undoMessage);
+    }
+
+    void BrushPanel::NoteUndoFailed(std::string reason) {
+        m_undoMessage = std::format("元に戻せない: {}", reason);
+        m_autoUndoFailed = m_autoUndoFailed || m_autoRunning;
+        Log(Channel::Sim, Level::Warning, "筆: {}", m_undoMessage);
+    }
+
+    void BrushPanel::NoteRewound(uint64_t tick) {
+        std::erase_if(m_placedTicks, [&](uint64_t placed) { return placed >= tick; });
+    }
+
+    void BrushPanel::NoteHash(uint64_t tick, uint64_t worldHash) {
+        for (UndoCheck& check : m_undoChecks) {
+            if (check.observed || check.tick != tick)
+                continue;
+
+            check.observed = true;
+            check.changed = worldHash != check.hashBefore;
+            Log(Channel::Sim, check.changed ? Level::Info : Level::Error, "筆: 元に戻した後の刻み {} の状態は{}", tick,
+                check.changed ? "戻す前と違う(運びを除けた)" : "戻す前と同じ(運びが除けていない)");
+        }
     }
 
     // --- パネル ---
@@ -208,7 +288,27 @@ namespace bicameral::editor {
         if (!m_lastPlaced.empty())
             ImGui::TextUnformatted(m_lastPlaced.c_str());
 
+        BuildUndo();
         ImGui::End();
+    }
+
+    void BrushPanel::BuildUndo() {
+        ImGui::SeparatorText("元に戻す");
+        const bool empty = LastStroke().empty() || Stroking();
+        ImGui::BeginDisabled(empty);
+        if (ImGui::Button("最後の運びを元に戻す (Ctrl+Z)"))
+            m_undoRequested = true;
+
+        ImGui::EndDisabled();
+        // 文字の入力中は入力欄の Ctrl+Z が先(RouteGlobal は焦点のある窓より後)
+        if (!empty && ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal))
+            m_undoRequested = true;
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("控えた運び %zu", m_strokes.size());
+        ImGui::TextDisabled("保存点へ戻して、その運びを除いて今の刻みまで流し直す(保存点より古い運びは戻せない)");
+        if (!m_undoMessage.empty())
+            ImGui::TextUnformatted(m_undoMessage.c_str());
     }
 
     void BrushPanel::BuildShape() {
@@ -278,6 +378,10 @@ namespace bicameral::editor {
             commands.push_back(sim::MakePokeCommand(0, sequence++, AUTO_CENTER_X, AUTO_CENTER_Y, sim::PROBE_VIEW_Z));
 
         RunAutoPaint(frame, waitingCommands, sequence, commands);
+        if (frame == AUTO_AFTER_POKE_FRAME)
+            commands.push_back(sim::MakePokeCommand(0, sequence++, 44, 20, sim::PROBE_VIEW_Z));
+
+        RunAutoUndo(frame);
 
         return commands;
     }
@@ -293,6 +397,8 @@ namespace bicameral::editor {
                 continue;
             }
 
+            BeginStroke();
+            m_strokes.back().push_back(sequence);
             commands.push_back(sim::MakePlaceCommand(0, sequence++, stroke.shape, material->contents));
             m_autoSent += 1;
             m_autoExpected += stroke.expectApplied ? 1 : 0;
@@ -354,15 +460,43 @@ namespace bicameral::editor {
         commands.insert(commands.end(), painted.begin(), painted.end());
     }
 
+    // 元に戻す(T-0278): 投げた置くコマンドが全部届いてから、最後の運びを戻す。2 つ目は 1 つ目の流し直しが戻す前の最後の状態まで
+    // 届いてから(どちらも、戻す前の状態にその運びが入っている = 本当に除けたかを比べられる時)
+    void BrushPanel::RunAutoUndo(uint64_t frame) {
+        if (frame < AUTO_UNDO_FRAME || m_autoUndoRequests >= AUTO_UNDO_COUNT || m_autoUndoFailed ||
+            m_autoPaintSteps < AUTO_PAINT_STEPS)
+            return;
+
+        const bool allPlaced = m_placedTicks.size() >= m_autoExpected - m_autoUndoneCommands;
+        const bool previousSeen = std::ranges::all_of(m_undoChecks,
+                                                      [](const UndoCheck& check) { return check.observed; });
+        if (!allPlaced || !previousSeen || m_autoUndone != m_autoUndoRequests)
+            return;
+
+        m_autoUndoRequests += 1;
+        m_undoRequested = true;
+        Log(Channel::Sim, Level::Info, "--auto-place: フレーム {} に最後の運びを元に戻す({} 回目)", frame,
+            m_autoUndoRequests);
+    }
+
     bool BrushPanel::AutoPassed() const {
+        const bool undone = m_autoUndone == AUTO_UNDO_COUNT && m_autoUndoneCommands == AUTO_UNDONE_COMMANDS &&
+                            !m_autoUndoFailed && m_undoChecks.size() == AUTO_UNDO_COUNT &&
+                            std::ranges::all_of(m_undoChecks, [](const UndoCheck& check) { return check.changed; });
+
         return m_autoSent == AUTO_STROKES.size() && m_autoPaintSteps == AUTO_PAINT_STEPS &&
-               m_autoPainted == AUTO_PAINTED && m_placedCount == m_autoExpected;
+               m_autoPainted == AUTO_PAINTED && undone && m_placedTicks.size() == m_autoExpected - m_autoUndoneCommands;
     }
 
     std::string BrushPanel::AutoSummary() const {
-        return std::format("投げた {} / {}・ドラッグ {} 手順で {} 個(はず {})・当たった {}(当たるはず {})", m_autoSent,
-                           AUTO_STROKES.size(), m_autoPaintSteps, m_autoPainted, AUTO_PAINTED, m_placedCount,
-                           m_autoExpected);
+        const auto changed = std::ranges::count_if(m_undoChecks, [](const UndoCheck& check) { return check.changed; });
+
+        return std::format(
+            "投げた {} / {}・ドラッグ {} 手順で {} 個(はず {})・元に戻した運び {} で {} 個(はず {} で {})・"
+            "戻す前と違う状態になった {} / {}・残って当たった {}(はず {})",
+            m_autoSent, AUTO_STROKES.size(), m_autoPaintSteps, m_autoPainted, AUTO_PAINTED, m_autoUndone,
+            m_autoUndoneCommands, AUTO_UNDO_COUNT, AUTO_UNDONE_COMMANDS, changed, m_undoChecks.size(),
+            m_placedTicks.size(), m_autoExpected - m_autoUndoneCommands);
     }
 
 }  // namespace bicameral::editor

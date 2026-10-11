@@ -7,6 +7,8 @@
 //     (間隔・1 フレームの上限・待っているコマンドの上限)→ 中心ごとに置くコマンド(sim::MakePlaceCommand)
 //   → フレームのループが刻みを付けて GPU のキューへ・再生ファイルへ(つつきと同じ道)。世界は GPU だけが変える(D-107)。
 // パネルの選んだ値は View の状態で、世界にも再生ファイルにも入らない(入るのはコマンドだけ)。
+// 元に戻す(T-0278・ADR-0101): 運び(押してから、離して置き終えるまで)ごとにコマンドの番号を控え、「元に戻す」(ボタン・Ctrl+Z)で
+//   フレームのループが最後の運びを除いて保存点から流し直す(editor/brush_undo)。
 #pragma once
 
 #include <cstddef>
@@ -15,9 +17,11 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "editor/brush_stroke.h"
+#include "editor/brush_undo.h"
 #include "editor/material_rows.h"
 #include "render/debug_camera.h"
 #include "sim/lab_box.h"
@@ -45,8 +49,29 @@ namespace bicameral::editor {
         // 置いたことが GPU から戻った(PROBE_EVENT_PLACE_APPLIED)
         void NotePlaced(const sim::ProbeEvent& event);
 
+        // --- 元に戻す(T-0278・ADR-0101)---
+        // 元に戻すを頼まれた(ボタン・Ctrl+Z・--auto-place)。フレームのループがフレームごとに 1 回取る
+        [[nodiscard]] bool TakeUndoRequest() { return std::exchange(m_undoRequested, false); }
+
+        // 最後の運びのコマンドの番号(無ければ空)。塗っている途中(Stroking)は戻さない
+        [[nodiscard]] std::span<const uint32_t> LastStroke() const;
+        [[nodiscard]] bool Stroking() const { return m_stroke.Active(); }
+
+        // 最後の運びを元に戻した。firstTick = その運びが最初に当たった刻み・rewindTick = 戻した保存点の刻み
+        // (UINT64_MAX = まだ GPU へ足していなかったので除いただけ)・latest = 戻す前に読み戻した最後の状態
+        // (流し直した同じ刻みの状態と違えば、運びが世界を変えていた = 本当に除けた)
+        void NoteUndone(uint64_t firstTick, uint64_t rewindTick, const sim::ProbeTickHash& latest);
+        void NoteUndoFailed(std::string reason);
+
+        // 世界が刻み tick の境界へ戻った(巻き戻しも元に戻すも)。その刻みから先に置いた記録を消す(流し直すともう一度届く)
+        void NoteRewound(uint64_t tick);
+
+        // 読み戻した状態 S(tick) のハッシュ(元に戻した後の流し直しを、戻す前の同じ刻みと比べる)
+        void NoteHash(uint64_t tick, uint64_t worldHash);
+
         // --- 人がいない確認(--auto-place): 決まったフレームに筆で置く・足す・はみ出す・当たらない値を投げ、火を付け、
-        //     直方体をドラッグで塗り(1 フレームに置ききれない分を次のフレームへ)、自由に組んだ材料の円柱を足す ---
+        //     直方体をドラッグで塗り(1 フレームに置ききれない分を次のフレームへ)、自由に組んだ材料の円柱を足し、つついてから
+        //     円柱・直方体の運びを 1 つずつ元に戻す(T-0278。記録は元に戻した後の流れ。別の起動の --replay で同じハッシュ列)---
         void StartAuto() { m_autoRunning = true; }
 
         // フレーム frame に投げる自動のコマンド(sequence は通しで増やす)
@@ -73,6 +98,9 @@ namespace bicameral::editor {
         void RunAutoStrokes(uint64_t frame, uint32_t& sequence, std::vector<sim::ProbeCommand>& commands);
         void RunAutoPaint(uint64_t frame, size_t waitingCommands, uint32_t& sequence,
                           std::vector<sim::ProbeCommand>& commands);
+        void RunAutoUndo(uint64_t frame);
+        void BuildUndo();
+        void BeginStroke();
 
         std::shared_ptr<const sim::BakedReactionTable> m_table;
         uint64_t m_tableVersion = 0;
@@ -92,9 +120,23 @@ namespace bicameral::editor {
         bool m_replace = true;  // 置き換え(実験室の「置く」と同じ。D-439)か、足すか
         BrushStroke m_stroke;
 
+        // --- 元に戻す ---
+        std::vector<BrushStrokeSequences> m_strokes;  // 古い順(上限 MAX_UNDO_STROKES)
+        bool m_undoRequested = false;
+        std::string m_undoMessage;
+
+        struct UndoCheck {
+            uint64_t tick = 0;  // 戻す前に読み戻した最後の状態の刻み
+            uint64_t hashBefore = 0;
+            bool observed = false;  // 流し直して同じ刻みの状態が届いた
+            bool changed = false;   // それが戻す前と違った
+        };
+        std::vector<UndoCheck> m_undoChecks;
+
         // --- 結果 ---
-        uint32_t m_placedCount = 0;
-        uint32_t m_paintedCount = 0;  // 投げた置くコマンドの数(ドラッグの分も)
+        std::vector<uint64_t> m_placedTicks;  // 置いたことが届いた刻み(巻き戻すと、戻した刻みから先を消す)
+        uint32_t m_placedCount = 0;           // 届いた回数(巻き戻しで減らない)
+        uint32_t m_paintedCount = 0;          // 投げた置くコマンドの数(ドラッグの分も)
         std::string m_lastPlaced;
 
         // --- 自動の確認 ---
@@ -103,6 +145,10 @@ namespace bicameral::editor {
         uint32_t m_autoSent = 0;        // 投げた 1 回ずつの筆の運び(当たらない値も)
         uint32_t m_autoPaintSteps = 0;  // ドラッグの自動の手順を済ませた数
         uint32_t m_autoPainted = 0;     // ドラッグで投げた置くコマンドの数
+        uint32_t m_autoUndoRequests = 0;
+        uint32_t m_autoUndone = 0;          // 元に戻した運び
+        uint32_t m_autoUndoneCommands = 0;  // 元に戻した運びの置くコマンドの数
+        bool m_autoUndoFailed = false;
     };
 
 }  // namespace bicameral::editor

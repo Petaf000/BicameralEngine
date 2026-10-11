@@ -11,6 +11,7 @@
 // どう分けて投げても世界の結果は変わらない(06 §1)ので、ここの判断は世界の結果に入らない(View と Controller の仕事。D-107)。
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -61,6 +62,10 @@ namespace bicameral::frame {
         void SetBreakInterval(uint64_t ticks) { m_breakInterval = ticks; }
         // カーソルを刻み tick の境界へ戻す(保存点へ戻した後。未処理の刻みはそのまま)
         void Rewind(uint64_t tick) { m_cursor = {.tick = tick, .unit = 0}; }
+        // 刻み tick までは現実の時間を待たずに進める(筆の元に戻す。巻き戻して今の刻みまで流し直す。T-0278)。
+        // 止めている間も進む。1 フレームの予算はそのまま(追いつくのに数フレームかかってよい)。世界の結果は変えない
+        void CatchUpTo(uint64_t tick) { m_catchUpTick = std::max(m_catchUpTick, tick); }
+        [[nodiscard]] bool CatchingUp() const { return m_cursor.tick < m_catchUpTick; }
 
         // 終わった単位の GPU の時間(数フレーム遅れで届く)。unit は刻みの中の番号
         void ReportUnitTime(uint32_t unit, double gpuMilliseconds);
@@ -92,6 +97,7 @@ namespace bicameral::frame {
         SimCursor m_cursor;
         uint64_t m_stopTick = UINT64_MAX;  // この刻みより先を始めない(既定: 止まらない)
         uint64_t m_breakInterval = 0;      // この倍数の刻みの境界でフレームを切る(0 = 切らない)
+        uint64_t m_catchUpTick = 0;        // この刻みまでは現実の時間を待たない(CatchUpTo)
         double m_pendingTicks = 0.0;
         uint64_t m_droppedTicks = 0;
 

@@ -92,6 +92,10 @@ views:
           code: "engine/src/editor/brush_stroke.cpp::BrushStroke::Paint", ticket: T-0245,
           doc: docs/decisions/ADR-0089-brush-shapes-and-painting.md,
           note: "足すは形を囲む箱が重ならない間隔・置き換えは半幅ごと。1 フレーム 8 個・待ち 64 個まで、残りは次のフレームに続きから。brush_stroke_test" }
+      - { id: brushundo, group: framelib, label: "BrushUndo<br/>筆の元に戻す: 保存点へ戻し、その運びを除いて流し直す",
+          code: "engine/src/editor/brush_undo.cpp::PlanBrushUndo", ticket: T-0278,
+          doc: docs/decisions/ADR-0101-brush-undo-and-recording.md,
+          note: "運び = 押してから置き終えるまでのコマンドの番号。運びが最初に当たる刻み以前の保存点へ戻し、今の刻みまで追いつく。記録は元に戻した後の流れだけ。brush_undo_test" }
       - { id: tablepanel, group: framelib, label: "ReactionTablePanel<br/>反応表: 一覧・検索・保存則の検査・値を Luau に書き戻す",
           code: "engine/src/editor/reaction_table_panel.cpp::ReactionTablePanel::Build", ticket: T-0219,
           doc: docs/design/14-editor-tools.md,
@@ -587,6 +591,7 @@ views:
       - [editoroverlay, brushpanel, "筆"]
       - [brushpanel, commandqueue, "置くコマンド"]
       - [brushpanel, brushstroke, "ドラッグ"]
+      - [brushpanel, brushundo, "元に戻す"]
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
