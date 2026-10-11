@@ -76,7 +76,8 @@ bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
 
         // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(sim/lab_box.cpp と同じ)---
         if (LabCommandIsPatch(command)) {
-            touched |= LabApplyPatchCommand(MakePatchList(), MakeLabBlocks(), shape, command, g_external3);
+            touched |=
+                LabApplyPatchCommand(MakePatchList(), MakeTable(), MakeLabBlocks(), shape, command, g_external3);
             continue;
         }
 

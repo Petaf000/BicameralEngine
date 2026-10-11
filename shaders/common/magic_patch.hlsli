@@ -11,6 +11,7 @@
 //   速さの表の値は「仮数 × 2^指数」なので、指数に shift を足すだけで、どの機械でも同じ整数の結果になる。
 //   **保存則は変えない**(D-428・D-419): 変わるのは「1 刻みにどれだけ進みたいか」だけで、進んだ分は反応の核が係数 × 進行度で
 //   成分を動かす(元素の数とエネルギーはビット単位で保存される)。触媒(活性化エネルギーを下げる)・転換・湧き出しと吸い込みは後のチケット。
+// 規則は名前の鍵(RxRule::key)で持つ(T-0287): 規則の並びが変わる表の差し替え(T-0218・T-0242)でも、同じ名前の規則に効き続ける。
 // 範囲と期間: 範囲はレベル 0(0.5 m)のセルの単位の直方体(両端を含む)。セルがその直方体と重なれば効く(粗いセルは丸ごと効く)。
 //   期間は [始まりの刻み, 終わりの刻み)。速さが変わる刻み(始まりと終わり)に、範囲に重なるブロックを「つつく」(ADR-0018:
 //   速さを変えるものは tc を書いてから評価する。待ちを古い乱数のまま新しい速さで使うと偏る)。
@@ -24,24 +25,25 @@ RX_NAMESPACE_BEGIN
 // --- 列の形(uint32 の語。[0] = パッチの数・[1..3] = 予約(0)・その後に MP_PATCH_WORDS 語ずつ)-----------------
 FX_CONST uint32_t MP_MAX_PATCHES = 16;
 FX_CONST uint32_t MP_LIST_HEADER_WORDS = 4;
-FX_CONST uint32_t MP_PATCH_WORDS = 12;
+FX_CONST uint32_t MP_PATCH_WORDS = 13;
 FX_CONST uint32_t MP_LIST_WORDS = MP_LIST_HEADER_WORDS + (MP_MAX_PATCHES * MP_PATCH_WORDS);
 
 // パッチの語(列の中の 1 つ分)
-FX_CONST uint32_t MP_WORD_RULE = 0;
-FX_CONST uint32_t MP_WORD_EFFECT = 1;
-FX_CONST uint32_t MP_WORD_START = 2;  // 始まりの刻み(下位・上位)
-FX_CONST uint32_t MP_WORD_END = 4;    // 終わりの刻み(この刻みからは効かない。下位・上位)
-FX_CONST uint32_t MP_WORD_LOW = 6;    // 小さい角 x, y, z(int32。レベル 0 のセルの単位)
-FX_CONST uint32_t MP_WORD_HIGH = 9;   // 大きい角 x, y, z(両端を含む)
+FX_CONST uint32_t
+    MP_WORD_RULE_KEY = 0;  // 規則の名前の鍵(RxRule::key。下位・上位。T-0287: ID で持つと表の差し替えでずれる)
+FX_CONST uint32_t MP_WORD_EFFECT = 2;
+FX_CONST uint32_t MP_WORD_START = 3;  // 始まりの刻み(下位・上位)
+FX_CONST uint32_t MP_WORD_END = 5;    // 終わりの刻み(この刻みからは効かない。下位・上位)
+FX_CONST uint32_t MP_WORD_LOW = 7;    // 小さい角 x, y, z(int32。レベル 0 のセルの単位)
+FX_CONST uint32_t MP_WORD_HIGH = 10;  // 大きい角 x, y, z(両端を含む)
 
 // コマンドの payload の語(実験室と、後で世界のコマンドが同じ並びを使う。始まりの刻みはコマンドの targetTick)
-FX_CONST uint32_t MP_COMMAND_RULE = 0;
-FX_CONST uint32_t MP_COMMAND_EFFECT = 1;
-FX_CONST uint32_t MP_COMMAND_DURATION = 2;  // 期間(刻み。1 以上)
-FX_CONST uint32_t MP_COMMAND_LOW = 3;       // 小さい角 x, y, z
-FX_CONST uint32_t MP_COMMAND_HIGH = 6;      // 大きい角 x, y, z
-FX_CONST uint32_t MP_COMMAND_WORDS = 9;
+FX_CONST uint32_t MP_COMMAND_RULE_KEY = 0;  // 規則の名前の鍵(下位・上位)
+FX_CONST uint32_t MP_COMMAND_EFFECT = 2;
+FX_CONST uint32_t MP_COMMAND_DURATION = 3;  // 期間(刻み。1 以上)
+FX_CONST uint32_t MP_COMMAND_LOW = 4;       // 小さい角 x, y, z
+FX_CONST uint32_t MP_COMMAND_HIGH = 7;      // 大きい角 x, y, z
+FX_CONST uint32_t MP_COMMAND_WORDS = 10;
 
 // 効き方の語: 下位 8bit = 種類、8〜15bit = shift(符号付き 8bit。MP_KIND_SCALE だけ)
 FX_CONST uint32_t MP_KIND_SCALE = 1;       // 速さを 2^shift 倍(増幅・弱める)
@@ -51,7 +53,7 @@ FX_CONST int32_t MP_MAX_LEVEL_SHIFT = 40;  // 範囲の比べ方で使うレベ�
 
 // パッチ 1 つ
 struct MpPatch {
-    uint32_t rule;
+    uint64_t ruleKey;  // RxRule::key(規則の名前のハッシュ)。表を替えても同じ名前の規則に効く
     uint32_t effect;
     uint64_t startTick;
     uint64_t endTick;
@@ -108,11 +110,25 @@ FX_FN uint64_t MpScaleRate(uint64_t packed, int32_t shift) {
 
 // --- パッチの検査 ------------------------------------------------------------------------------
 
-// 当てられるか(規則が表の中・効き方が正しい・期間が 1 刻み以上・角の順)。ruleCount = 表の規則の数
-FX_FN bool MpPatchValid(MpPatch patch, uint32_t ruleCount) {
-    const bool ordered = patch.lowX <= patch.highX && patch.lowY <= patch.highY && patch.lowZ <= patch.highZ;
+// 表に名前の鍵 key の規則があるか(ruleCount = 表の規則の数。足す時だけ呼ぶ)
+template <typename Table>
+FX_FN bool MpRuleKnown(Table table, uint64_t key, uint32_t ruleCount) {
+    for (uint32_t rule = 0; rule < ruleCount; ++rule) {
+        if (table.Rule(rule).key == key)
+            return true;
+    }
 
-    return patch.rule < ruleCount && MpEffectValid(patch.effect) && patch.startTick < patch.endTick && ordered;
+    return false;
+}
+
+// 当てられるか(規則が表にある・効き方が正しい・期間が 1 刻み以上・角の順)。ruleCount = 表の規則の数
+template <typename Table>
+FX_FN bool MpPatchValid(Table table, MpPatch patch, uint32_t ruleCount) {
+    const bool ordered = patch.lowX <= patch.highX && patch.lowY <= patch.highY && patch.lowZ <= patch.highZ;
+    if (!MpEffectValid(patch.effect) || patch.startTick >= patch.endTick || !ordered)
+        return false;
+
+    return MpRuleKnown(table, patch.ruleKey, ruleCount);
 }
 
 // 刻み tick に効いているか
@@ -166,7 +182,7 @@ template <typename List>
 FX_FN MpPatch MpLoadPatch(List list, uint32_t index) {
     const uint32_t base = MP_LIST_HEADER_WORDS + (index * MP_PATCH_WORDS);
     MpPatch patch;
-    patch.rule = list.PatchWord(base + MP_WORD_RULE);
+    patch.ruleKey = FX_U64(list.PatchWord(base + MP_WORD_RULE_KEY + 1), list.PatchWord(base + MP_WORD_RULE_KEY));
     patch.effect = list.PatchWord(base + MP_WORD_EFFECT);
     patch.startTick = FX_U64(list.PatchWord(base + MP_WORD_START + 1), list.PatchWord(base + MP_WORD_START));
     patch.endTick = FX_U64(list.PatchWord(base + MP_WORD_END + 1), list.PatchWord(base + MP_WORD_END));
@@ -183,7 +199,8 @@ FX_FN MpPatch MpLoadPatch(List list, uint32_t index) {
 template <typename List>
 FX_FN void MpStorePatch(List list, uint32_t index, MpPatch patch) {
     const uint32_t base = MP_LIST_HEADER_WORDS + (index * MP_PATCH_WORDS);
-    list.SetPatchWord(base + MP_WORD_RULE, patch.rule);
+    list.SetPatchWord(base + MP_WORD_RULE_KEY, (uint32_t)(patch.ruleKey & FX_LOW32_MASK));
+    list.SetPatchWord(base + MP_WORD_RULE_KEY + 1, (uint32_t)(patch.ruleKey >> 32));
     list.SetPatchWord(base + MP_WORD_EFFECT, patch.effect);
     list.SetPatchWord(base + MP_WORD_START, (uint32_t)(patch.startTick & FX_LOW32_MASK));
     list.SetPatchWord(base + MP_WORD_START + 1, (uint32_t)(patch.startTick >> 32));
@@ -218,12 +235,12 @@ FX_FN void MpRetireExpired(List list, uint64_t tick) {
 }
 
 // パッチを足す(先に終わったものを除く)。列が一杯・当てられないパッチなら足さずに false
-// (どちらも CPU と GPU で同じ判定なので、断った結果も一致する。断ったことは呼ぶ側が数える)
-template <typename List>
-FX_FN bool MpAddPatch(List list, MpPatch patch, uint64_t tick, uint32_t ruleCount) {
+// (どちらも CPU と GPU で同じ判定なので、断った結果も一致する。断ったことは呼ぶ側が数える)。table は今の反応表
+template <typename List, typename Table>
+FX_FN bool MpAddPatch(List list, Table table, MpPatch patch, uint64_t tick, uint32_t ruleCount) {
     MpRetireExpired(list, tick);
     const uint32_t count = MpPatchCount(list);
-    if (count >= MP_MAX_PATCHES || !MpPatchValid(patch, ruleCount))
+    if (count >= MP_MAX_PATCHES || !MpPatchValid(table, patch, ruleCount))
         return false;
 
     MpStorePatch(list, count, patch);
@@ -233,10 +250,10 @@ FX_FN bool MpAddPatch(List list, MpPatch patch, uint64_t tick, uint32_t ruleCoun
 }
 
 // コマンドの payload の語(MP_COMMAND_*)からパッチを作る。始まり = 当てる刻み tick、終わり = tick + 期間(あふれは当てない印 0)
-FX_FN MpPatch MpPatchFromCommand(uint32_t rule, uint32_t effect, uint32_t duration, int32_t lowX, int32_t lowY,
+FX_FN MpPatch MpPatchFromCommand(uint64_t ruleKey, uint32_t effect, uint32_t duration, int32_t lowX, int32_t lowY,
                                  int32_t lowZ, int32_t highX, int32_t highY, int32_t highZ, uint64_t tick) {
     MpPatch patch;
-    patch.rule = rule;
+    patch.ruleKey = ruleKey;
     patch.effect = effect;
     patch.startTick = tick;
     patch.endTick = tick + (uint64_t)duration;
@@ -266,17 +283,19 @@ FX_FN uint32_t MpCoveringMask(List list, int32_t level, int64_t x, int64_t y, in
     return mask;
 }
 
-// 覆うパッチ(mask)のうち規則 rule のものを重ねた速さの表の値。止めるものが 1 つでもあれば 0、ほかは shift の和
+// 覆うパッチ(mask)のうち名前の鍵 ruleKey の規則のものを重ねた速さの表の値。止めるものが 1 つでもあれば 0、ほかは shift の和
 // (重ねる順に依らない)
 template <typename List>
-FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, uint32_t rule, uint64_t packed) {
+FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, uint64_t ruleKey, uint64_t packed) {
     int32_t shift = 0;
     for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
         if (((mask >> i) & 1u) == 0)
             continue;
 
         const uint32_t base = MP_LIST_HEADER_WORDS + (i * MP_PATCH_WORDS);
-        if (list.PatchWord(base + MP_WORD_RULE) != rule)
+        const uint64_t key = FX_U64(list.PatchWord(base + MP_WORD_RULE_KEY + 1),
+                                    list.PatchWord(base + MP_WORD_RULE_KEY));
+        if (key != ruleKey)
             continue;
 
         const uint32_t effect = list.PatchWord(base + MP_WORD_EFFECT);
@@ -306,7 +325,7 @@ struct MpPatchedTable {
         if (covering == 0)
             return packed;
 
-        return MpPatchedRate(base, covering, rule, packed);
+        return MpPatchedRate(base, covering, base.Rule(rule).key, packed);
     }
 };
 

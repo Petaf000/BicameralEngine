@@ -217,13 +217,14 @@ namespace bicameral::sim {
         return command;
     }
 
-    Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint32_t rule, uint32_t effect,
+    Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
                                 uint32_t durationTicks, LabCellRange range) {
         Command command;
         command.targetTick = targetTick;
         command.sequence = sequence;
         command.type = static_cast<uint16_t>(lab::LAB_COMMAND_TYPE_PATCH);
-        SetPayload(command, MP_COMMAND_RULE, rule);
+        SetPayload(command, MP_COMMAND_RULE_KEY, static_cast<uint32_t>(ruleKey));
+        SetPayload(command, MP_COMMAND_RULE_KEY + 1, static_cast<uint32_t>(ruleKey >> 32));
         SetPayload(command, MP_COMMAND_EFFECT, effect);
         SetPayload(command, MP_COMMAND_DURATION, durationTicks);
         const std::array<uint32_t, 3> low = {range.low.x, range.low.y, range.low.z};
@@ -387,8 +388,8 @@ namespace bicameral::sim {
             // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(lab_box.hlsl と同じ)---
             if (lab::LabCommandIsPatch(words)) {
                 const NestPatchList list{.words = nest.magicPatches};
-                const uint64_t roots =
-                    lab::LabApplyPatchCommand(list, NestBlocks{.blocks = nest.blocks}, shape, words, ruleCount);
+                const uint64_t roots = lab::LabApplyPatchCommand(list, view, NestBlocks{.blocks = nest.blocks}, shape,
+                                                                 words, ruleCount);
                 touched |= roots;
                 applied += roots != 0 ? 1 : 0;
                 continue;

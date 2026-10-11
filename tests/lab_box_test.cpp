@@ -526,6 +526,46 @@ namespace {
                parsed->tableVersion == 0x1111);
     }
 
+    // 魔法のパッチは規則を名前の鍵で持つ(T-0287): 規則の定義の並びを逆にして焼き直した表でも、同じ名前の規則にだけ効く
+    void TestPatchFollowsRuleName(const BakedReactionTable& table) {
+        using namespace bicameral::reaction;
+
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        std::ranges::reverse(definition.rules);
+        const auto reversed = BakeReactionTable(definition);
+        EXPECT(reversed.has_value());
+        if (!reversed || table.rules.size() < 2)
+            return;
+
+        // --- 元の表の規則 0 を 2^3 倍するパッチ(刻み 0〜9・セル (0, 0, 0))---
+        std::vector<uint32_t> words(MP_LIST_WORDS, 0);
+        const MpPatch patch = MpPatchFromCommand(table.rules[0].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0, 0);
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        const List list{.words = words};
+        EXPECT(MpAddPatch(list, reversed->View(), patch, 0, static_cast<uint32_t>(reversed->rules.size())));
+
+        // --- 新しい表で同じ名前の規則(ID はベイクの並びで決まる)だけが 2^3 倍になる(最も熱い所の速さで比べる)---
+        ReactionTableView view = reversed->View();
+        view.magicPatches = words;
+        // Rate は HLSL と同じく const でない
+        MpPatchedTable<ReactionTableView> patched = MpPatchTable(view, 0, 0, 0, 0, 0);
+        const auto found = std::ranges::find(reversed->ruleNames, table.ruleNames[0]);
+        EXPECT(found != reversed->ruleNames.end());
+        if (found == reversed->ruleNames.end())
+            return;
+
+        const auto same = static_cast<uint32_t>(std::distance(reversed->ruleNames.begin(), found));
+        const uint32_t other = same == 0 ? 1 : 0;
+        constexpr uint32_t HOTTEST_KELVIN = RX_RATE_TABLE_KELVINS - 1;
+        EXPECT(RxRateMantissa(view.Rate(same, HOTTEST_KELVIN)) != 0);
+        EXPECT(patched.Rate(same, HOTTEST_KELVIN) == MpScaleRate(view.Rate(same, HOTTEST_KELVIN), 3));
+        EXPECT(patched.Rate(other, HOTTEST_KELVIN) == view.Rate(other, HOTTEST_KELVIN));
+    }
+
     // 魔法のパッチ(T-0024・ADR-0095): 効き方の語・速さの倍率・列の出し入れ・範囲。仮の値(D-006: ゲームの中身ではない)
     void TestMagicPatch(const BakedReactionTable& table) {
         using namespace bicameral::reaction;
@@ -546,21 +586,27 @@ namespace {
             void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
         };
         const List list{.words = words};
+        const ReactionTableView view = table.View();
         const auto ruleCount = static_cast<uint32_t>(table.rules.size());
+        const uint64_t firstKey = table.rules[0].key;  // パッチは規則を名前の鍵で持つ(T-0287)
+        constexpr uint64_t UNKNOWN_KEY = 0;
+        EXPECT(MpRuleKnown(view, firstKey, ruleCount) && !MpRuleKnown(view, UNKNOWN_KEY, ruleCount));
         for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
-            const MpPatch patch = MpPatchFromCommand(0, MpMakeStopEffect(), 10 + i, 0, 0, 0, 1, 1, 1, 5);
-            EXPECT(MpAddPatch(list, patch, 5, ruleCount));
+            const MpPatch patch = MpPatchFromCommand(firstKey, MpMakeStopEffect(), 10 + i, 0, 0, 0, 1, 1, 1, 5);
+            EXPECT(MpAddPatch(list, view, patch, 5, ruleCount));
         }
 
-        EXPECT(!MpAddPatch(list, MpPatchFromCommand(0, MpMakeStopEffect(), 30, 0, 0, 0, 1, 1, 1, 5), 5, ruleCount));
-        EXPECT(!MpAddPatch(list, MpPatchFromCommand(ruleCount, MpMakeStopEffect(), 30, 0, 0, 0, 1, 1, 1, 5), 5,
+        EXPECT(!MpAddPatch(list, view, MpPatchFromCommand(firstKey, MpMakeStopEffect(), 30, 0, 0, 0, 1, 1, 1, 5), 5,
                            ruleCount));
         MpRetireExpired(list, 17);  // 終わり 15〜17 の 3 つが消える
         EXPECT(MpPatchCount(list) == MP_MAX_PATCHES - 3 && MpLoadPatch(list, 0).endTick == 18);
-        EXPECT(!MpAddPatch(list, MpPatchFromCommand(0, MpMakeStopEffect(), 0, 0, 0, 0, 1, 1, 1, 17), 17, ruleCount));
+        EXPECT(!MpAddPatch(list, view, MpPatchFromCommand(UNKNOWN_KEY, MpMakeStopEffect(), 30, 0, 0, 0, 1, 1, 1, 17),
+                           17, ruleCount));
+        EXPECT(!MpAddPatch(list, view, MpPatchFromCommand(firstKey, MpMakeStopEffect(), 0, 0, 0, 0, 1, 1, 1, 17), 17,
+                           ruleCount));
 
         // --- 範囲: レベル 0 の [0, 1] に、レベル −1(1 m)の 0 は重なり、レベル 1(0.25 m)の 4 は重ならない ---
-        const MpPatch patch = MpPatchFromCommand(0, MpMakeStopEffect(), 1, 0, 0, 0, 1, 1, 1, 0);
+        const MpPatch patch = MpPatchFromCommand(firstKey, MpMakeStopEffect(), 1, 0, 0, 0, 1, 1, 1, 0);
         EXPECT(MpOverlaps(patch, -1, 0, 0, 0, 0, 0, 0) && MpOverlaps(patch, 1, 3, 3, 3, 3, 3, 3));
         EXPECT(!MpOverlaps(patch, 1, 4, 0, 0, 4, 0, 0) && !MpOverlaps(patch, 0, -1, 0, 0, -1, 0, 0));
 
@@ -568,7 +614,7 @@ namespace {
         MultiresNest nest = MakeLabBoxNest(table);
         nest.blocks[LAB_BOX_SLOT].busyTick = 1;
         const uint64_t hashWithout = HashWholeNest(nest);
-        const Command command = MakeLabPatchCommand(3, 0, 0, MpMakeScaleEffect(4), 5, LabWholeBox());
+        const Command command = MakeLabPatchCommand(3, 0, firstKey, MpMakeScaleEffect(4), 5, LabWholeBox());
         EXPECT(ApplyLabCommands(nest, table, std::span(&command, 1)) == 1);
         EXPECT(nest.magicPatches[0] == 1 && nest.blocks[LAB_BOX_SLOT].busyTick == multires::MR_BUSY_POKED);
         nest.blocks[LAB_BOX_SLOT].busyTick = 1;
@@ -594,12 +640,14 @@ namespace {
         };
         settle();
         const LabCellRange highX = {.low = {.x = 8, .y = 0, .z = 0}, .high = {.x = 9, .y = 15, .z = 15}};
-        const Command largeCommand = MakeLabPatchCommand(3, 0, 0, MpMakeStopEffect(), 5, highX);
+        const Command largeCommand = MakeLabPatchCommand(3, 0, firstKey, MpMakeStopEffect(), 5, highX);
         EXPECT(ApplyLabCommands(large, table, std::span(&largeCommand, 1), SHAPE) == 1);
         EXPECT(large.magicPatches[0] == 1 && pokedRoots() == 0b1010'1010u);  // x の根が 1 の枠 1・3・5・7
         settle();
         EXPECT(!ApplyLabPatchBoundaries(large, 7, SHAPE) && pokedRoots() == 0);
         EXPECT(ApplyLabPatchBoundaries(large, 8, SHAPE) && pokedRoots() == 0b1010'1010u && large.magicPatches[0] == 0);
+
+        TestPatchFollowsRuleName(table);
     }
 
 }  // namespace

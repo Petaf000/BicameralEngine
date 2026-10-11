@@ -89,7 +89,10 @@ namespace bicameral::sim {
     }
 
     bool LabSession::ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range) {
-        return Queue(MakeLabPatchCommand(m_tick, m_sequence, rule, effect, durationTicks, range));
+        if (rule >= m_table.rules.size())
+            return false;
+
+        return Queue(MakeLabPatchCommand(m_tick, m_sequence, m_table.rules[rule].key, effect, durationTicks, range));
     }
 
     // --- 刻む ---

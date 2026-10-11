@@ -331,11 +331,12 @@ FX_FN uint64_t LabCommandTick(LabCommand command) {
 
 FX_FN MpPatch LabCommandPatch(LabCommand command) {
     return MpPatchFromCommand(
-        LabPayload(command, MP_COMMAND_RULE), LabPayload(command, MP_COMMAND_EFFECT),
-        LabPayload(command, MP_COMMAND_DURATION), (int32_t)LabPayload(command, MP_COMMAND_LOW),
-        (int32_t)LabPayload(command, MP_COMMAND_LOW + 1), (int32_t)LabPayload(command, MP_COMMAND_LOW + 2),
-        (int32_t)LabPayload(command, MP_COMMAND_HIGH), (int32_t)LabPayload(command, MP_COMMAND_HIGH + 1),
-        (int32_t)LabPayload(command, MP_COMMAND_HIGH + 2), LabCommandTick(command));
+        FX_U64(LabPayload(command, MP_COMMAND_RULE_KEY + 1), LabPayload(command, MP_COMMAND_RULE_KEY)),
+        LabPayload(command, MP_COMMAND_EFFECT), LabPayload(command, MP_COMMAND_DURATION),
+        (int32_t)LabPayload(command, MP_COMMAND_LOW), (int32_t)LabPayload(command, MP_COMMAND_LOW + 1),
+        (int32_t)LabPayload(command, MP_COMMAND_LOW + 2), (int32_t)LabPayload(command, MP_COMMAND_HIGH),
+        (int32_t)LabPayload(command, MP_COMMAND_HIGH + 1), (int32_t)LabPayload(command, MP_COMMAND_HIGH + 2),
+        LabCommandTick(command));
 }
 
 // パッチの範囲がブロック(8³ セル)に重なるか
@@ -361,12 +362,12 @@ FX_FN uint64_t LabPatchRoots(Blocks blocks, LabBoxShape shape, MpPatch patch) {
 }
 
 // パッチのコマンドを当てる: 列に足し、足せたら範囲が重なる根(LabRootBit。呼ぶ側がつつく)。足せなければ 0。
-// ruleCount = 表の規則の数
-template <typename List, typename Blocks>
-FX_FN uint64_t LabApplyPatchCommand(List list, Blocks blocks, LabBoxShape shape, LabCommand command,
+// table = 今の反応表、ruleCount = その規則の数
+template <typename List, typename Table, typename Blocks>
+FX_FN uint64_t LabApplyPatchCommand(List list, Table table, Blocks blocks, LabBoxShape shape, LabCommand command,
                                     uint32_t ruleCount) {
     const MpPatch patch = LabCommandPatch(command);
-    if (!MpAddPatch(list, patch, LabCommandTick(command), ruleCount))
+    if (!MpAddPatch(list, table, patch, LabCommandTick(command), ruleCount))
         return 0;
 
     return LabPatchRoots(blocks, shape, patch);
