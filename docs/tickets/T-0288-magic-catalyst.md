@@ -32,7 +32,15 @@
 - 試験は下の「テストの結果」。
 
 ## テストの結果
-- (追記する)
+- debug・6 ランナーが同じ GPU を使う中: lab_box(TestMagicCatalyst を含む)・gpu_lab_box_warp(74 秒)・gpu_probe_patch_warp(46 秒)通過。
+- debug(16 本): reaction_package・reaction_hot_reload・reaction_table_edit・reaction_package_scene・reaction_replay_table・reaction・
+  reaction_contention・reaction_wait ほか reaction_*・multires・multires_wide・multires_activity・gpu_reaction・
+  **gpu_lab_box(HW。触媒の場面を含め 342 秒)**・**gpu_probe_patch(HW。52 秒)** 通過(RxRule に Ea を入れても表・記録の再生は今までどおり)。
+- main(245146b)に載せ直し: 変わらず(main が進んでいない)。
+- HW の Work Graph の道(debug): gpu_multires(鎖。777 秒)通過。gpu_multires_activity(305 秒)・gpu_probe_sim(913 秒)は ctest の時間切れ。
+  ログではどちらも GPU と CPU の要約が一致したまま進んでおり(活性 120 刻みまで済み・仮の世界は表の差し替え・物質の付け替えまで一致)、
+  止まった(DEVICE_HUNG)のではなく、6 つのランナーが CPU と GPU を取り合って遅い(gpu_probe_sim は CPU リファレンスの遅い反応の場面で 475 秒)。
+  パッチの無いセルは MpPatchedTable::Rate が covering = 0 で今までどおりすぐ返るので、触媒で遅くなる所は無い。
 
 ## 引き継ぎメモ
 - 触媒の語は「種類 3・8〜31bit = ΔEa(J/mol)」。古い記録の効き方(1・2)はそのまま。コマンドの payload の形・列の形は変わらない。
