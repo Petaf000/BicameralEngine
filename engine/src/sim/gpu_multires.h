@@ -148,6 +148,17 @@ namespace bicameral::sim {
         };
         [[nodiscard]] std::optional<ActivitySeeds> ReadSeeds() const;
 
+        // 溢れの塊の置き場の使い方(RecordReadback の時。溢れを使う世界だけ。試験用。T-0347)。
+        // 端数の枠は今の面の溢れに要る塊だけを持つ(fractionChunks == fractionNeeded)・塊は置き場から漏れない(空き + 頁 + 端数の枠 = 全部)
+        struct WideChunkUse {
+            uint32_t capacity = 0;
+            uint32_t freeChunks = 0;
+            uint32_t pageChunks = 0;      // 頁の両面が持つ塊
+            uint32_t fractionChunks = 0;  // 端数の枠の両面が持つ塊
+            uint32_t fractionNeeded = 0;  // 端数の枠の今の面の溢れに要る塊(MrWideChunksFor)の和
+        };
+        [[nodiscard]] std::optional<WideChunkUse> ReadWideChunkUse() const;
+
         // --- 計測: index 番目のタイムスタンプを打つ。RecordReadback が打った分を写し、ReadTimestamps で読む ---
         void RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t index);
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
@@ -273,6 +284,8 @@ namespace bicameral::sim {
         void ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const;
         // 刻みの段の後: 塊が足りなかった頁に塊を配り、同じ刻みのうちに刻み直す(T-0236)
         void RecordWideRetry(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 要求の処理・畳むの後: 端数の枠が要らない塊を置き場へ返す(溢れを使う世界だけ。T-0347)
+        void RecordWideTrim(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] uint64_t ActivityBytes() const;
@@ -300,6 +313,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_wideRetryPipeline;
         ComPtr<ID3D12PipelineState> m_wideDeferredPipeline;
         ComPtr<ID3D12PipelineState> m_treeWideReservePipeline;  // 細かくする子の頁に溢れの塊を付ける(T-0237)
+        ComPtr<ID3D12PipelineState> m_treeWideTrimPipeline;     // 端数の枠が要らない塊を返す(T-0347)
         uint32_t m_wideChunks = 0;                              // 溢れの塊の置き場の塊の数
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)

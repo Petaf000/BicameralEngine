@@ -323,8 +323,9 @@ namespace bicameral::sim {
             auto wideDeferred = LoadComputePipeline(device, m_rootSignature.Get(),
                                                     "sim/multires_step_wide_deferred.cso");
             auto wideReserve = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_reserve.cso");
+            auto wideTrim = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_trim.cso");
             for (const auto* loaded :
-                 {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideDeferred, &wideReserve}) {
+                 {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideDeferred, &wideReserve, &wideTrim}) {
                 if (!*loaded)
                     return std::unexpected(loaded->error());
             }
@@ -335,6 +336,7 @@ namespace bicameral::sim {
             m_wideRetryPipeline = std::move(*wideRetry);
             m_wideDeferredPipeline = std::move(*wideDeferred);
             m_treeWideReservePipeline = std::move(*wideReserve);
+            m_treeWideTrimPipeline = std::move(*wideTrim);
         }
 
         static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT && CONDUCT_SHADERS.size() == CONDUCT_PASS_COUNT);
@@ -343,6 +345,9 @@ namespace bicameral::sim {
             const char* path = tree ? TREE_SHADERS[pass] : CONDUCT_SHADERS[pass - TREE_PASS_COUNT];
             if (options.wideCells && pass == PassResolve)
                 path = "sim/multires_tree_wide_resolve.cso";  // 粗くする要求を「入りきらない」で断らない(T-0329)
+
+            if (options.wideCells && pass == PassFoldCheck)
+                path = "sim/multires_tree_wide_fold_check.cso";  // 端数の溢れも帳簿へ返す(T-0347)
             auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), path);
             if (!pipeline)
                 return std::unexpected(pipeline.error());
@@ -686,6 +691,41 @@ namespace bicameral::sim {
         }
     }
 
+    std::optional<GpuMultires::WideChunkUse> GpuMultires::ReadWideChunkUse() const {
+        if (!m_wideCells)
+            return std::nullopt;
+
+        std::vector<uint32_t> words(BufferSizes()[BufferTreeWords] / sizeof(uint32_t));
+        if (!gpu::ReadBuffer(m_readbacks[BufferTreeWords].Get(), std::as_writable_bytes(std::span(words))))
+            return std::nullopt;
+
+        const uint32_t base = OverflowBaseWord();
+        const auto pages = static_cast<uint32_t>(PageCount());
+        const uint32_t pool = MrWidePoolWord(base, pages);
+        WideChunkUse use{.capacity = words[pool + MR_WIDE_POOL_CAPACITY],
+                         .freeChunks = words[pool + MR_WIDE_POOL_FREE]};
+        for (uint32_t area = 0; area < pages + m_capacity.fractions; ++area) {
+            const bool fraction = area >= pages;
+            const uint32_t header = fraction ? MrWideFractionHeaderWord(pool, m_wideChunks, area - pages)
+                                             : MrWideHeaderWord(base, area);
+            const uint32_t held = words[MrWideTableAt(header, 0)] + words[MrWideTableAt(header, 1)];
+            (fraction ? use.fractionChunks : use.pageChunks) += held;
+            if (!fraction)
+                continue;
+
+            // --- 今の面の溢れの数(始まりの表の終わり。塊を持たない面は 0)---
+            const uint32_t table = MrWideTableAt(header, words[header + MR_WIDE_HEADER_SIDE]);
+            const uint32_t last = MR_BLOCK_CELLS;
+            const uint32_t chunk = words[table + 1 + (last / MR_WIDE_CHUNK_WORDS)];
+            const uint32_t count = words[table] == 0
+                                       ? 0
+                                       : words[MrWideChunkWord(pool, chunk) + (last % MR_WIDE_CHUNK_WORDS)];
+            use.fractionNeeded += MrWideChunksFor(count);
+        }
+
+        return use;
+    }
+
     uint64_t GpuMultires::ActivityBytes() const {
         return MR_ACTIVITY_RECORDS + (uint64_t{MrActivityCapacity(m_capacity.worldBlocks)} * sizeof(uint32_t));
     }
@@ -905,6 +945,18 @@ namespace bicameral::sim {
         m_constants.tickHigh = static_cast<uint32_t>(tick >> 32);
         RecordTreePass(list, debugRing, PassFoldCheck, std::max(1u, m_capacity.worldBlocks));
         RecordTreePass(list, debugRing, PassFold, 1);
+        RecordWideTrim(list, debugRing);
+    }
+
+    void GpuMultires::RecordWideTrim(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (!m_wideCells)
+            return;
+
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_treeWideTrimPipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(1, 1, 1);
+        UavBarrier(list);
     }
 
     void GpuMultires::RecordQuietRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -953,6 +1005,7 @@ namespace bicameral::sim {
 
         // --- 解放と索引の作り直し(印がある時だけ働く)---
         RecordTreePass(list, debugRing, PassRelease, 1);
+        RecordWideTrim(list, debugRing);  // 返した端数の枠・粗くした親の余りの塊(T-0347。段の時間は解放に含める)
         RecordTreePass(list, debugRing, PassClearIndex, GroupsFor(m_capacity.indexEntries, TREE_THREADS));
         RecordTreePass(list, debugRing, PassFillIndex, GroupsFor(m_capacity.worldBlocks, TREE_THREADS));
     }

@@ -10,6 +10,7 @@
 
 #include <optional>
 
+#include "common/multires_activity.hlsli"
 #include "common/multires_wide.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -599,6 +600,154 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // --- 端数の枠の塊(T-0347)---
+
+    constexpr uint64_t FRACTION_CYCLES = 3;      // 細かくし直す・粗くするの組の数
+    constexpr uint64_t FRACTION_FOLD_TICK = 40;  // 畳む刻み(この刻みにちょうど静かになるよう忙しさの印を置く)
+
+    // 端数の枠が今の面の溢れに要る塊だけを持ち、置き場から塊が漏れないか(空き + 頁 + 端数の枠 = 全部)。空きの塊の数を返す
+    std::expected<uint32_t, std::string> CheckFractionChunks(const sim::GpuMultires& gpu, uint64_t tick) {
+        const std::optional<sim::GpuMultires::WideChunkUse> use = gpu.ReadWideChunkUse();
+        if (!use)
+            return std::unexpected(std::format("刻み {}: 置き場を読めない", tick));
+
+        if (use->fractionChunks != use->fractionNeeded ||
+            use->freeChunks + use->pageChunks + use->fractionChunks != use->capacity) {
+            return std::unexpected(
+                std::format("刻み {}: 端数の枠の塊 {}(要る {})・空き {} + 頁 {} + 端数 {} が全部 {} と違う", tick,
+                            use->fractionChunks, use->fractionNeeded, use->freeChunks, use->pageChunks,
+                            use->fractionChunks, use->capacity));
+        }
+
+        return use->freeChunks;
+    }
+
+    // 刻み tick の要求: 豊かな子を粗くした後(TestCoarsenFullWide の前半)、細かくし直す・粗くするを交互に
+    std::vector<MrRequest> FractionCycleRequestsAt(uint64_t tick) {
+        if (tick < test::COARSEN_FULL_TICKS)
+            return test::CoarsenFullRequestsAt(tick);
+
+        const bool refine = (tick - test::COARSEN_FULL_TICKS) % 2 == 0;
+        return {test::MakeMultiresRequest(refine ? MR_REQUEST_REFINE : MR_REQUEST_COARSEN, test::CoarsenFullPoint(true),
+                                          1)};
+    }
+
+    // 許容差つきで畳む刻みに、端数の枠を持つブロックがちょうど静かになるよう忙しさの印を置く(試験のための直接の書き換え)
+    void MarkFractionsQuiet(sim::MultiresNest& nest, uint64_t tick) {
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            MrBlock& block = nest.blocks[slot];
+            if (block.kind == MR_BLOCK_REAL && block.fraction != MR_NO_FRACTION)
+                block.busyTick = MrActivityMark(tick) - (MR_QUIET_TICKS + 1);
+        }
+    }
+
+    // 粗くする・細かくし直すを繰り返す(GPU で)。端数の枠の塊を毎刻み確かめ、粗くした後の空きの塊の数がどの組でも同じか
+    std::expected<void, std::string> RunFractionCycles(gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                                                       sim::GpuMultires& gpu, sim::MultiresNest& cpu,
+                                                       const sim::BakedReactionTable& table,
+                                                       const sim::ConservedTotals& initial) {
+        sim::MultiresNest read;
+        std::vector<uint32_t> freeAfterCoarsen;
+        uint32_t grantedBefore = 0;  // 組を始める前に適用した要求の数
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS + (2 * FRACTION_CYCLES); ++tick) {
+            if (tick == test::COARSEN_FULL_TICKS)
+                grantedBefore = cpu.counters[MR_COUNTER_GRANTED];
+
+            const std::vector<MrRequest> requests = FractionCycleRequestsAt(tick);
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu.RecordUpload(list, cpu))
+                    return false;
+
+                if (!gpu.RecordRequests(list, requests))
+                    return false;
+
+                gpu.RecordProcessRequests(list, ring.GpuAddress());
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::SubmitRequests(cpu, requests);
+            sim::ProcessRequests(cpu);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(compared.error());
+
+            const std::expected<uint32_t, std::string> freeChunks = CheckFractionChunks(gpu, tick);
+            if (!freeChunks)
+                return std::unexpected(freeChunks.error());
+
+            if (requests.front().op == MR_REQUEST_COARSEN && tick >= test::COARSEN_FULL_TICKS)
+                freeAfterCoarsen.push_back(*freeChunks);
+
+            if (sim::ComputeConservedTotals(cpu, table, 1) != initial)
+                return std::unexpected(std::format("刻み {}: 保存が崩れた", tick));
+        }
+
+        if (cpu.counters[MR_COUNTER_GRANTED] != grantedBefore + (2 * FRACTION_CYCLES) ||
+            MostFractionSpecies(cpu) <= RX_MAX_CELL_SPECIES)
+            return std::unexpected("要求を全部適用していない・端数に溢れが無い(場面が試していない)");
+
+        if (!std::ranges::all_of(freeAfterCoarsen, [&](uint32_t free) { return free == freeAfterCoarsen.front(); }))
+            return std::unexpected(std::format("粗くした後の空きの塊の数が組ごとに違う(最初 {}・最後 {})",
+                                               freeAfterCoarsen.front(), freeAfterCoarsen.back()));
+
+        return {};
+    }
+
+    // GPU で豊かな子を粗くし(親の端数の枠に溢れ)、細かくし直す・粗くするを繰り返しても端数の枠は今の面の溢れに要る塊だけを持ち、
+    // 空きの塊の数が戻る。最後に許容差つきで畳む段で溢れのある端数の枠を帳簿へ返す。CPU と毎刻みビット一致・保存がビット一致
+    std::expected<RunResult, std::string> RunFractionChunksWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                                gpu::DebugRing& ring,
+                                                                const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
+        sim::EnableWideCells(cpu);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const sim::ConservedTotals initial = sim::ComputeConservedTotals(cpu, table, 1);
+        if (auto cycled = RunFractionCycles(queue, ring, *gpu, cpu, table, initial); !cycled)
+            return std::unexpected(std::format("端数の枠の塊: {}", cycled.error()));
+
+        // --- 許容差つきで畳む(頁は 1 mK と量のビット単位でしか畳まない = 畳まない。端数の枠は返す)---
+        const MrFoldTolerance tolerance = {.temperatureMk = 1, .amountShift = MR_FOLD_EXACT_SHIFT};
+        const uint32_t root = sim::LookupBlock(cpu, 0, 0, 0, 0);
+        const uint32_t foldedBefore = cpu.counters[MR_COUNTER_FOLDED];
+        const uint32_t fractionSpecies = MostFractionSpecies(cpu);
+        MarkFractionsQuiet(cpu, FRACTION_FOLD_TICK);
+        sim::MultiresNest read;
+        const auto record = [&](ID3D12GraphicsCommandList10* list) {
+            if (!gpu->RecordUpload(list, cpu))
+                return false;
+
+            gpu->RecordFoldPages(list, ring.GpuAddress(), FRACTION_FOLD_TICK, tolerance);
+
+            return true;
+        };
+        if (auto executed = ExecuteTick(queue, ring, *gpu, read, FRACTION_FOLD_TICK, record); !executed)
+            return std::unexpected(executed.error());
+
+        sim::FoldQuietPages(cpu, table, FRACTION_FOLD_TICK, tolerance);
+        if (auto compared = CompareTick(cpu, read, FRACTION_FOLD_TICK); !compared)
+            return std::unexpected(std::format("端数の枠を返す: {}", compared.error()));
+
+        if (auto checked = CheckFractionChunks(*gpu, FRACTION_FOLD_TICK); !checked)
+            return std::unexpected(std::format("端数の枠を返す: {}", checked.error()));
+
+        if (cpu.blocks[root].fraction != MR_NO_FRACTION || cpu.counters[MR_COUNTER_FOLDED] != foldedBefore ||
+            sim::ComputeConservedTotals(cpu, table, 1) != initial)
+            return std::unexpected("端数の枠を返す: 返していない・頁を畳んだ・保存が崩れた");
+
+        Log(Channel::Gpu, Level::Info,
+            "端数の枠の塊: 粗くする・細かくし直すを {} 組(端数の枠は要る塊だけを持つ)・溢れのある端数({} "
+            "種)を帳簿へ返した"
+            "(CPU と GPU で毎刻み同じ)",
+            FRACTION_CYCLES, fractionSpecies);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // 32 種のセルの溢れの塊の置き場(T-0248): 全部の頁の 2 面が 32 種のセルで埋まっても足りる数(既定の数は 1 頁の 2 面分なので、
     // 2 つの根が両方 32 種になる刻みで尽きて待たせる)
     // species = 表の物質の数(1 セルの最大)
@@ -1069,6 +1218,8 @@ namespace {
                                        [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
         const auto coarsenUnion = Timed("GPU で粗くする和集合",
                                         [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
+        const auto fractionChunks = Timed("端数の枠の塊",
+                                          [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
         if (!exhausted) {
@@ -1077,7 +1228,7 @@ namespace {
         }
 
         for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
-                                   &wideManyConduct, &refineWide, &coarsenWide, &coarsenUnion}) {
+                                   &wideManyConduct, &refineWide, &coarsenWide, &coarsenUnion, &fractionChunks}) {
             if (*result)
                 continue;
 
@@ -1167,7 +1318,9 @@ namespace {
                                         [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
         const auto coarsenWide = Timed("溢れの端数",
                                        [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
-        for (const auto* result : {&coarsenUnion, &coarsenWide}) {
+        const auto fractionChunks = Timed("端数の枠の塊",
+                                          [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
+        for (const auto* result : {&coarsenUnion, &coarsenWide, &fractionChunks}) {
             if (*result)
                 continue;
 

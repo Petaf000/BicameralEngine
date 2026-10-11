@@ -23,4 +23,9 @@
 ## 見積もり
 2 チャット(影で 1、一様の値の溢れと畳むで 1)。
 
+## T-0347 の後(2026-10-11)
+- 溢れの世界の TreeFoldCheck に変種ができた(multires_tree_wide_fold_check)。端数の溢れは帳簿へ返す・返した枠の溢れは空・塊は TreeWideTrim が返す。
+- 当座の仮: 変種は**溢れのある頁を畳まない**(畳むかを調べない)。ここで一様の値の溢れ(StoreWideUniform の GPU 版)と MrWideFoldStats の GPU 版を
+  入れたら、この仮を外す(multires_tree.hlsl の TreeFoldCheck の `foldable`)。畳んで返す頁の溢れを空にするのも、仮を外す時に要る。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
