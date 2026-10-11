@@ -10,7 +10,8 @@
 // 書く面の塊が足りなければ、印(要求)を付けて刻みの後の段(WideAllocate)が枠の順に塊を配り、WideRetry が同じ刻みのうちに
 // 溢れるセルだけ刻み直す(T-0236。置き場が尽きた時だけ待たせて MR_COUNTER_LIMIT_PRODUCTS に数える)。
 // 1 セルが GPU で持てる成分は RX_GPU_WIDE_SPECIES まで(T-0248 で 24 → 32。表の物質が 32 以下なら CPU の上限の無い世界と食い違わない。
-// 超える生成物は待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。64 は HW の伝導の段で DEVICE_HUNG。上限を無くすのは T-0272)。
+// 超える生成物は待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。56 以上は HW の compute キューで、32 種のセルを刻んだ後の伝導の段が
+// DEVICE_HUNG〔T-0290・ADR-0052 追記 5〕。上限を無くすのは T-0272)。
 #ifndef BICAMERAL_MULTIRES_WIDE_HLSLI
 #define BICAMERAL_MULTIRES_WIDE_HLSLI
 
