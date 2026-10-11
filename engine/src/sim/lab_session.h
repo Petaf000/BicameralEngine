@@ -103,8 +103,8 @@ namespace bicameral::sim {
         [[nodiscard]] const std::optional<SpeciesRemapReport>& LastRemapReport() const { return m_lastRemapReport; }
 
         // --- 計器(T-0221)---
-        // 見るセル(lab::LabCellIndex)を替える(今までの値は捨てる: 前のセルの値と混ぜない。箱の外なら替えない)
-        void SetGaugeCell(uint32_t cellIndex);
+        // 見るセル(セルの語 lab::LabFineCellWord。細かいセルも。T-0350)を替える(今までの値は捨てる: 前のセルの値と混ぜない。箱の外なら替えない)
+        void SetGaugeCell(uint32_t cellWord);
         [[nodiscard]] uint32_t GaugeCell() const { return m_gaugeCell; }
         [[nodiscard]] const std::vector<LabGaugeSample>& Gauge() const { return m_gauge; }
 

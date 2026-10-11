@@ -57,7 +57,8 @@ namespace bicameral::editor {
         // --- 見るもの(View。世界に入らない)---
         GaugeQuantity m_quantity = GaugeQuantity::CellTemperature;
         int m_species = 1;                      // 物質量・速さの物質 ID
-        std::array<int, 3> m_cell = {3, 3, 3};  // 見るセル
+        std::array<int, 3> m_cell = {3, 3, 3};  // 見るセル(レベル m_level のセルの座標)
+        int m_level = 0;                        // 見るセルの細かさ(段。細かくできる箱だけ。T-0350)
         int m_windowTicks = 600;                // グラフに出す直近の刻みの数
 
         // --- 比べる ---

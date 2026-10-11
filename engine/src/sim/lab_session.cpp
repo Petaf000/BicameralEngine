@@ -447,11 +447,11 @@ namespace bicameral::sim {
 
     // --- 計器(T-0221)---
 
-    void LabSession::SetGaugeCell(uint32_t cellIndex) {
-        if (!lab::LabCellInBox(Shape(), cellIndex) || cellIndex == m_gaugeCell)
+    void LabSession::SetGaugeCell(uint32_t cellWord) {
+        if (!lab::LabCellWordInBox(Shape(), cellWord) || cellWord == m_gaugeCell)
             return;
 
-        m_gaugeCell = cellIndex;
+        m_gaugeCell = cellWord;
         m_gauge.clear();
     }
 

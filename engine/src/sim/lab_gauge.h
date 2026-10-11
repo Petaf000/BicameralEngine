@@ -25,10 +25,14 @@ namespace bicameral::sim {
 
     inline constexpr size_t LAB_GAUGE_MAX_SAMPLES = 20000;  // 計器が持つ刻みの数の上限(超えたら古い方から捨てる)
 
-    // 計器の 1 刻み(刻み tick を終えた箱)
+    // 計器の 1 刻み(刻み tick を終えた箱)。細かくした箱(T-0314)では葉のセル(覆われていない本物のセル)を数える(T-0350):
+    //   箱全体 = 葉のセル全部の量を µmol に直した和(レベル k の葉の量の単位は 8^-k µmol。覆われた粗いセルの古い値は数えない)。
+    //   見るセル = その空間に重なる葉の量を µmol に直した和(見るセルより粗い葉は体積の割合)。温度は重なる葉の温度の体積の平均。
+    //   µmol に直した端数(1 µmol 未満)は切り捨てる(計器は見るだけで、世界の帳簿〔端数〕は変えない)。細かくしていない箱は今まで通り。
     struct LabGaugeSample {
         uint64_t tick = 0;
-        uint32_t cell = 0;  // 見るセル(lab::LabCellIndex。根 1 つの箱なら MrCellIndex)
+        uint32_t cell =
+            0;  // 見るセルの語(lab::LabFineCellWord。レベル 0 は lab::LabCellIndex = 根 1 つの箱なら MrCellIndex)
 
         // --- 温度(mK)---
         int32_t cellTemperatureMilliKelvin = 0;
@@ -41,10 +45,39 @@ namespace bicameral::sim {
         bool operator==(const LabGaugeSample&) const = default;
     };
 
-    // 箱の状態から計器の値を取る(nest は GPU から読み戻した箱でも CPU リファレンスでも同じ形。shape は箱の形。T-0173)
+    // 箱の状態から計器の値を取る(nest は GPU から読み戻した箱でも CPU リファレンスでも同じ形。shape は箱の形。T-0173)。
+    // cellWord は見るセルの語(細かいセルも。T-0350)
     [[nodiscard]] LabGaugeSample SampleLabGauge(const MultiresNest& nest, const BakedReactionTable& table,
-                                                uint64_t tick, uint32_t cellIndex,
+                                                uint64_t tick, uint32_t cellWord,
                                                 lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
+
+    // --- 細かいセルを見る(T-0350。パネルの断面とセルの欄)---
+
+    // 葉のセル(覆われていない本物のセル)1 つと、その位置(レベルと座標)
+    struct LabLeafCell {
+        reaction::RxCell cell;
+        LabCellPosition position;
+    };
+
+    // 位置 position(レベル position.level のセル)を含む葉のセル(同じレベルか粗いレベル)。
+    // その位置がもっと細かく分かれている(細かくした所を粗いレベルで指した)か箱の外なら、無い
+    [[nodiscard]] std::optional<LabLeafCell> LabLeafAt(const MultiresNest& nest, LabCellPosition position);
+
+    // 断面の 1 辺の細かさ(箱のセル 1 つを最も細かいレベルのセル 4 つ分に分けて描く)
+    inline constexpr uint32_t LAB_FINE_SLICE_SCALE = 1u << lab::LAB_MAX_REFINE_LEVELS;
+
+    // 断面の 1 セル: そこを含む葉の温度とレベル
+    struct LabSliceCell {
+        int32_t temperatureMilliKelvin = 0;
+        uint32_t level = 0;
+
+        bool operator==(const LabSliceCell&) const = default;
+    };
+
+    // 断面 1 枚: 箱のセルの z = cellZ の層の中の、最も細かいレベルの z = cellZ × 4 + fineZ の面。
+    // 幅 = 箱のセルの幅 × 4・高さ = 奥行き y × 4、並びは y × 幅 + x。細かくしていない箱のセルは 4×4 とも同じ値
+    [[nodiscard]] std::vector<LabSliceCell> LabFineSlice(const MultiresNest& nest, const BakedReactionTable& table,
+                                                         lab::LabBoxShape shape, uint32_t cellZ, uint32_t fineZ);
 
     // 反応の速さ: 物質 species の、前の刻みからの増え方(µmol/刻み。減れば負)。最初の刻み・物質が範囲の外なら 0。
     // wholeBox = 箱全体の量、でなければ見るセルの量
@@ -54,7 +87,7 @@ namespace bicameral::sim {
     // CPU リファレンスだけで記録を初めの箱から流し、刻みごとの計器の値を返す(GPU の値と比べる基準)。
     // 表を替えた印のある記録は扱わない(表が 1 つの実験だけ。エラー)
     [[nodiscard]] std::expected<std::vector<LabGaugeSample>, std::string> RunLabGaugeOnCpu(
-        const LabRecording& recording, const BakedReactionTable& table, uint32_t cellIndex);
+        const LabRecording& recording, const BakedReactionTable& table, uint32_t cellWord);
 
     // --- 2 つの実験を比べる(T-0221)---
 
