@@ -228,10 +228,24 @@ namespace bicameral::editor {
         m_gauge->Build(*m_lab);
         m_reactionTable->Build(status.reactionTable);
         m_brush->Build();
+        DrawBrushPreview(status.brushPreview);
 
         ImGui::Render();
 
         return Merge(keys, buttons);
+    }
+
+    // カーソルの下の筆の形(T-0279): 断面の上で覆うセルの縁は濃く、形を囲む箱は薄く。パネルの後ろ(背景の描画リスト)に引く
+    void EditorOverlay::DrawBrushPreview(std::span<const BrushPreviewLine> lines) {
+        constexpr ImU32 SLICE_COLOR = IM_COL32(255, 220, 64, 255);
+        constexpr ImU32 BOX_COLOR = IM_COL32(255, 255, 255, 96);
+        constexpr float SLICE_THICKNESS = 2.0f;
+        constexpr float BOX_THICKNESS = 1.0f;
+        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+        for (const BrushPreviewLine& line : lines) {
+            drawList->AddLine({line.from[0], line.from[1]}, {line.to[0], line.to[1]},
+                              line.onSlice ? SLICE_COLOR : BOX_COLOR, line.onSlice ? SLICE_THICKNESS : BOX_THICKNESS);
+        }
     }
 
     TimeRequest EditorOverlay::BuildTimePanel(const EditorStatus& status, const TimeControl& time) const {

@@ -297,6 +297,7 @@ namespace bicameral::frame {
             void FilterEditorInput(std::vector<InputEvent>& events) const;
             [[nodiscard]] editor::EditorStatus MakeEditorStatus() const;
             [[nodiscard]] editor::GraphPanelStatus MakeGraphPanelStatus() const;
+            [[nodiscard]] std::vector<editor::BrushPreviewLine> MakeBrushPreview() const;
 
             // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
             [[nodiscard]] std::string RewindUnavailableReason() const;
@@ -1414,7 +1415,27 @@ namespace bicameral::frame {
                                       .waiting = m_tableReload.Waiting(),
                                       .lastFailed = m_tableReload.LastFailed(),
                                       .modifiedWorld = m_tableReload.WorldModified(),
-                                      .message = m_tableReload.LastMessage()}};
+                                      .message = m_tableReload.LastMessage()},
+                    .brushPreview = MakeBrushPreview()};
+        }
+
+        // カーソルの下の筆の形(T-0279。描画側だけ。筆を持っていて、カーソルがパネルの上でなく断面に当たる時)
+        std::vector<editor::BrushPreviewLine> FrameLoop::MakeBrushPreview() const {
+            if (!m_editor || !m_editor->Brush().Holding() || m_editor->WantsPointer())
+                return {};
+
+            const uint32_t width = m_swapChain.Width();
+            const uint32_t height = m_swapChain.Height();
+            const auto cell = m_viewController.CursorCell(width, height);
+            if (!cell)
+                return {};
+
+            const sim::ProbeCommand command = sim::MakePlaceCommand(0, 0, m_editor->Brush().PreviewShape(*cell), {});
+            const render::DebugViewSettings& settings = m_viewController.Settings();
+            const editor::BrushPreview preview = editor::BuildBrushPreview(command.payload, settings.sliceAxis,
+                                                                           settings.slicePosition);
+
+            return editor::ProjectBrushPreview(preview, m_viewController.Camera().Basis(width, height), width, height);
         }
 
         // 性能のパネル(T-0143): 直近 1 秒の単位ごとの GPU 時間を 1 刻みあたりに、伝導のグラフのカウンタはそのまま

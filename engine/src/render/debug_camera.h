@@ -7,6 +7,7 @@
 //   今までの z = 32 の面の見え方と同じ)。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -78,6 +79,11 @@ namespace bicameral::render {
     // 画素 (pixelX, pixelY)(左上が 0。画素の中心は +0.5)を通る光線
     [[nodiscard]] CameraRay RayThroughPixel(const CameraBasis& basis, float pixelX, float pixelY, uint32_t width,
                                             uint32_t height);
+
+    // 格子の点が写る画素(RayThroughPixel の逆。forward・right・up は互いに直交している)。カメラの後ろ(透視)なら無し。
+    // 返す {x, y} は左上が 0 の画素の座標(画面の外でもそのまま返す)
+    [[nodiscard]] std::optional<std::array<float, 2>> ProjectToPixel(const CameraBasis& basis, Vector3 point,
+                                                                     uint32_t width, uint32_t height);
 
     struct CellCoordinate {
         uint32_t x = 0;

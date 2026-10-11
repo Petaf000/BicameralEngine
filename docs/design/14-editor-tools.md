@@ -206,6 +206,19 @@ M1 の仮の世界(64³ の熱)を立体のまま見る道具。エディタの 
   保存点は `--save-points 8 --save-interval 2`)。
 - まだ無いもの: やり直し(Redo)・刻み 0 の保存点(起動直後の運びを戻す)・元に戻す操作の履歴の記録(T-0278 の判断待ち)。
 
+### 実装(T-0279): カーソルの下に筆の形を描く
+- **描画側だけ**(シミュにも再生ファイルにも入らない。D-107)。筆を持っていて、カーソルがパネルの上でなく断面に当たる時、
+  カーソルの断面のセル(`render::DebugViewController::CursorCell`。最後のポインタの画素の光線を今のカメラと断面で拾い直す。
+  回す・平行移動の間は無し)を中心にした今の筆の形を描く。
+- **線**(engine/src/editor/brush_preview): 筆のパネルの形(`BrushPanel::PreviewShape`)を置くコマンドの語にし、置くのと同じ読み方
+  (common/probe_place.hlsli の ProbeDecodePlace・ProbePlaceBegin/End・ProbePlaceCovers)で
+  ① 断面の上で形が覆うセルの縁(置くとそこに当たる。濃い黄色・2 px。断面の真ん中の面 plane + 0.5 の上)と
+  ② 形を囲む箱(格子の中に切る。薄い白・1 px)の線分を格子の座標で作り、`render::ProjectToPixel`(RayThroughPixel の逆)で画面へ。
+  エディタの殻が ImGui の背景の描画リストに引く(パネルの後ろ・世界の絵の上)。
+- **確かめ方**: brush_preview(CPU。球・直方体・円柱の断面の覆うセルの数と縁の数を形の式から数えた値と比べる・格子の隅で切る・
+  読めない形は描かない・ProjectToPixel が RayThroughPixel の逆・CursorCell が断面に付いてくる)。
+- まだ無いもの: 形の 3D の表面(今は断面の切り口と囲む箱)・足すか置き換えかで色を変える・材料の色。
+
 ## 3. UI の仕上げ
 - 最初は Dear ImGui の標準の見た目。仕上げの段(L5 の後半)で、テーマ・アイコン・レイアウトを整え、UE のような見た目にする(自作のウィジェットを足す)。
 

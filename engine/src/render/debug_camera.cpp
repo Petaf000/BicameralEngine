@@ -132,6 +132,34 @@ namespace bicameral::render {
         return {.origin = basis.position, .direction = basis.forward + offset};
     }
 
+    std::optional<std::array<float, 2>> ProjectToPixel(const CameraBasis& basis, Vector3 point, uint32_t width,
+                                                       uint32_t height) {
+        const auto dot = [](Vector3 left, Vector3 right) {
+            return left.x * right.x + left.y * right.y + left.z * right.z;
+        };
+        const float rightSquared = dot(basis.right, basis.right);
+        const float upSquared = dot(basis.up, basis.up);
+        const float forwardSquared = dot(basis.forward, basis.forward);
+        if (rightSquared <= 0.0f || upSquared <= 0.0f || forwardSquared <= 0.0f)
+            return std::nullopt;
+
+        const Vector3 offset = point - basis.position;
+        float u = dot(offset, basis.right) / rightSquared;
+        float v = dot(offset, basis.up) / upSquared;
+        if (!basis.orthographic) {
+            // 透視: offset = t × (forward + u × right + v × up)。t が小さい(カメラの後ろ・すぐ前)なら写さない
+            const float t = dot(offset, basis.forward) / forwardSquared;
+            if (!(t > PARALLEL_EPSILON))
+                return std::nullopt;
+
+            u /= t;
+            v /= t;
+        }
+
+        return std::array<float, 2>{(u + 1.0f) * 0.5f * static_cast<float>(width),
+                                    (1.0f - v) * 0.5f * static_cast<float>(height)};
+    }
+
     std::optional<CellCoordinate> PickSliceCell(const CameraRay& ray, uint32_t axis, uint32_t plane,
                                                 uint32_t gridSize) {
         if (axis > 2 || plane >= gridSize)

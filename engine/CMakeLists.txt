@@ -158,12 +158,13 @@ target_link_libraries(bicameral_view PUBLIC bicameral_core)
 # --- editor: エディタの時間の操作・筆の運び(GPU を知らない。CPU だけのテストがある。T-0023・T-0245)---
 # ImGui のパネル(src/editor/editor_overlay.cpp)は D3D12 を使うのでランタイムの方に入れる
 add_library(bicameral_editor STATIC
+  src/editor/brush_preview.cpp  # カーソルの下の筆の形の線(T-0279。common/probe_place.hlsli の形の読み方を使う)
   src/editor/brush_stroke.cpp
   src/editor/brush_undo.cpp
   src/editor/time_control.cpp
 )
 target_include_directories(bicameral_editor PUBLIC src)
-target_link_libraries(bicameral_editor PUBLIC bicameral_frame)
+target_link_libraries(bicameral_editor PUBLIC bicameral_frame bicameral_view bicameral_fixed)
 
 # ランタイム(ゲーム本体)。世界の状態は VRAM に常駐し、CPU は窓・入力・Present・音の出力・セーブ I/O だけを担う。
 add_executable(bicameral
