@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "reaction_test_table.h"
@@ -937,6 +938,202 @@ namespace {
         EXPECT(gain(300) >= 16 && gain(300) <= 19 && gain(600) >= 7 && gain(600) <= 10);
         EXPECT(rateWith({catalyst}, 0) == 0 && MpCatalyzeRate(view.Rate(rule, 450), 0, 450) == view.Rate(rule, 450));
     }
+
+    // --- 転換(T-0359)。値は試験用の仮のもの(D-006)---
+
+    // 規則 name の生成物の species を replacement(係数 coefficient)に替えた定義をベイクした表(転換と比べる)
+    std::expected<BakedReactionTable, std::string> BakeWithProduct(std::string_view name, std::string_view species,
+                                                                   std::string_view replacement, uint32_t coefficient) {
+        ReactionTableDefinition definition = MakeConversionTestTable();
+        for (RuleDefinition& rule : definition.rules) {
+            if (rule.name != name)
+                continue;
+
+            for (RuleTerm& term : rule.products) {
+                if (term.species == species)
+                    term = {.species = std::string(replacement), .coefficient = coefficient};
+            }
+        }
+
+        return BakeReactionTable(definition);
+    }
+
+    uint32_t RuleIdOf(const BakedReactionTable& table, std::string_view name) {
+        const auto found = std::ranges::find(table.ruleNames, name);
+        return found == table.ruleNames.end() ? UINT32_MAX
+                                              : static_cast<uint32_t>(std::distance(table.ruleNames.begin(), found));
+    }
+
+    // 規則の生成物のうち物質 species の欄(無ければ RX_MAX_PRODUCTS)
+    uint32_t ProductSlotOf(const reaction::RxRule& rule, uint32_t species) {
+        for (uint32_t slot = 0; slot < rule.productCount; ++slot) {
+            if (rule.products[slot] == species)
+                return slot;
+        }
+
+        return reaction::RX_MAX_PRODUCTS;
+    }
+
+    // 元素の組成の型(ベイク)と、転換の釣り合いの検査(足す時と効かせる時に同じ関数)
+    void TestConvertBalance(const BakedReactionTable& table) {
+        using namespace bicameral::reaction;
+        const ReactionTableView view = table.View();
+        const uint32_t carbon = table.SpeciesId("carbon");
+        const uint32_t dicarbon = table.SpeciesId("dicarbon_test");
+        const uint32_t dioxide = table.SpeciesId("carbon_dioxide");
+        const uint32_t isomer = table.SpeciesId("carbon_dioxide_isomer_test");
+        const uint32_t monoxide = table.SpeciesId("carbon_monoxide");
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+
+        // --- 効き方の語と組成の型 ---
+        const uint32_t effect = MpMakeConvertEffect(2, 12345);
+        EXPECT(MpEffectKind(effect) == MP_KIND_CONVERT && MpEffectConvertSlot(effect) == 2 &&
+               MpEffectConvertSpecies(effect) == 12345 && MpEffectValid(effect));
+        EXPECT(!MpEffectValid(MpMakeConvertEffect(3, 5)) && !MpEffectValid(MpMakeConvertEffect(0, 0)));
+        EXPECT(MpSpeciesCount(view) == table.species.size());
+        EXPECT(table.species[dioxide].elementClass != 0 &&
+               table.species[dioxide].elementClass == table.species[isomer].elementClass &&
+               table.species[dioxide].elementClass != table.species[monoxide].elementClass);
+        EXPECT(table.species[carbon].elementClass == table.species[dicarbon].elementClass &&
+               table.species[carbon].elementUnits == 1 && table.species[dicarbon].elementUnits == 2 &&
+               table.species[oxygen].elementUnits == 2);
+
+        // --- 係数: 6 CO2 → 6 異性体・6 C → 3 C2・釣り合わない(CO)・欄の外・表の外・反応物と同じ・割り切れない ---
+        const RxRule combustion = table.rules[RuleIdOf(table, "cellulose_combustion")];
+        const RxRule pyrolysis = table.rules[RuleIdOf(table, "cellulose_pyrolysis")];
+        const uint32_t dioxideSlot = ProductSlotOf(combustion, dioxide);
+        const uint32_t carbonSlot = ProductSlotOf(pyrolysis, carbon);
+        EXPECT(MpConvertedCoefficient(view, combustion, dioxideSlot, isomer) == 6);
+        EXPECT(MpConvertedCoefficient(view, pyrolysis, carbonSlot, dicarbon) == 3);
+        EXPECT(MpConvertedCoefficient(view, combustion, dioxideSlot, monoxide) == 0);
+        EXPECT(MpConvertedCoefficient(view, combustion, combustion.productCount, isomer) == 0);
+        EXPECT(MpConvertedCoefficient(view, combustion, dioxideSlot, static_cast<uint32_t>(table.species.size())) == 0);
+        RxRule changed = combustion;
+        changed.reactants[0] = isomer;
+        EXPECT(MpConvertedCoefficient(view, changed, dioxideSlot, isomer) == 0);
+        changed = pyrolysis;
+        changed.productCoefficients[carbonSlot] = 5;
+        EXPECT(MpConvertedCoefficient(view, changed, carbonSlot, dicarbon) == 0);
+
+        // --- 足す時: 釣り合う転換は足し、釣り合わない転換は断る ---
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        std::vector<uint32_t> words(MP_LIST_WORDS, 0);
+        const List list{.words = words};
+        const auto ruleCount = static_cast<uint32_t>(table.rules.size());
+        const auto add = [&](uint32_t slot, uint32_t species) {
+            return MpAddPatch(
+                list, view,
+                MpPatchFromCommand(combustion.key, MpMakeConvertEffect(slot, species), 10, 0, 0, 0, 0, 0, 0, 0), 0,
+                ruleCount);
+        };
+        EXPECT(add(dioxideSlot, isomer) && !add(dioxideSlot, monoxide) && !add(dioxideSlot, oxygen) &&
+               !add(combustion.productCount, isomer));
+        EXPECT(MpPatchCount(list) == 1);
+    }
+
+    // 転換を重ねた表の規則: 「生成物を替えてベイクした表」と同じ規則(反応熱も)・セルを進めるとビット単位で同じ・元素とエネルギーは保存・
+    // 速さは変わらない・欄ごとに先のパッチが勝つ・止める / 2^shift 倍と重なる
+    void TestMagicConvert() {
+        using namespace bicameral::reaction;
+        const auto table = BakeReactionTable(MakeConversionTestTable());
+        const auto replaced = BakeWithProduct("cellulose_combustion", "carbon_dioxide", "carbon_dioxide_isomer_test",
+                                              6);
+        const auto pyrolyzed = BakeWithProduct("cellulose_pyrolysis", "carbon", "dicarbon_test", 3);
+        EXPECT(table.has_value() && replaced.has_value() && pyrolyzed.has_value());
+        if (!table || !replaced || !pyrolyzed)
+            return;
+
+        TestConvertBalance(*table);
+
+        const uint32_t combustionId = RuleIdOf(*table, "cellulose_combustion");
+        const uint32_t pyrolysisId = RuleIdOf(*table, "cellulose_pyrolysis");
+        const RxRule combustion = table->rules[combustionId];
+        const RxRule pyrolysis = table->rules[pyrolysisId];
+        const uint32_t dioxide = table->SpeciesId("carbon_dioxide");
+        const uint32_t isomer = table->SpeciesId("carbon_dioxide_isomer_test");
+        const uint32_t convertIsomer = MpMakeConvertEffect(ProductSlotOf(combustion, dioxide), isomer);
+        const uint32_t convertDicarbon = MpMakeConvertEffect(ProductSlotOf(pyrolysis, table->SpeciesId("carbon")),
+                                                             table->SpeciesId("dicarbon_test"));
+
+        // --- セル (0, 0, 0) を覆うパッチ(規則の鍵と効き方の組)を重ねた表 ---
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        const ReactionTableView view = table->View();
+        const auto ruleCount = static_cast<uint32_t>(table->rules.size());
+        std::vector<uint32_t> words;
+        const auto patchedWith = [&](std::initializer_list<std::pair<uint64_t, uint32_t>> patches) {
+            words.assign(MP_LIST_WORDS, 0);
+            const List list{.words = words};
+            for (const auto& [key, effect] : patches)
+                EXPECT(MpAddPatch(list, view, MpPatchFromCommand(key, effect, 10, 0, 0, 0, 0, 0, 0, 0), 0, ruleCount));
+
+            ReactionTableView patchedView = view;
+            patchedView.magicPatches = words;
+
+            return MpPatchTable(patchedView, 0, 0, 0, 0, 0);
+        };
+        const auto sameRule = [](const RxRule& a, const RxRule& b) {
+            bool same = a.productCount == b.productCount && a.reactionEnthalpy == b.reactionEnthalpy && a.key == b.key;
+            for (uint32_t i = 0; i < a.productCount; ++i)
+                same = same && a.products[i] == b.products[i] && a.productCoefficients[i] == b.productCoefficients[i];
+
+            return same;
+        };
+
+        // --- 替えてベイクした表と同じ規則(反応熱を H0 で求め直す)・速さは同じ・ほかの規則は変わらない ---
+        auto patched = patchedWith({{combustion.key, convertIsomer}, {pyrolysis.key, convertDicarbon}});
+        EXPECT(sameRule(patched.Rule(combustionId), replaced->rules[combustionId]));
+        EXPECT(sameRule(patched.Rule(pyrolysisId), pyrolyzed->rules[pyrolysisId]));
+        EXPECT(patched.Rule(combustionId).reactionEnthalpy != combustion.reactionEnthalpy);
+        EXPECT(sameRule(patched.Rule(RuleIdOf(*table, "carbon_combustion")),
+                        table->rules[RuleIdOf(*table, "carbon_combustion")]));
+        for (const uint32_t kelvin : {450u, 900u})
+            EXPECT(patched.Rate(combustionId, kelvin) == view.Rate(combustionId, kelvin));
+
+        // --- 欄ごとに先のパッチが勝つ(同じ物質への転換は規則を変えない)・止める / 2^shift 倍と重なる ---
+        const uint32_t keepDioxide = MpMakeConvertEffect(ProductSlotOf(combustion, dioxide), dioxide);
+        auto first = patchedWith({{combustion.key, convertIsomer}, {combustion.key, keepDioxide}});
+        EXPECT(sameRule(first.Rule(combustionId), replaced->rules[combustionId]));
+        auto kept = patchedWith({{combustion.key, keepDioxide}, {combustion.key, convertIsomer}});
+        EXPECT(sameRule(kept.Rule(combustionId), combustion));
+        auto stopped = patchedWith({{combustion.key, convertIsomer}, {combustion.key, MpMakeStopEffect()}});
+        EXPECT(stopped.Rate(combustionId, 900) == 0 &&
+               sameRule(stopped.Rule(combustionId), replaced->rules[combustionId]));
+        auto scaled = patchedWith({{combustion.key, convertIsomer}, {combustion.key, MpMakeScaleEffect(3)}});
+        EXPECT(scaled.Rate(combustionId, 900) == MpScaleRate(view.Rate(combustionId, 900), 3));
+
+        // --- セルを進める: 替えてベイクした表とビット単位で同じ・元素とエネルギーは保存・異性体ができる ---
+        // (熱分解の炭は炭の燃焼で CO2 になるので、替えるのはセルロースの燃焼だけ。比べる表もそれだけを替えたもの)
+        patched = patchedWith({{combustion.key, convertIsomer}});
+        const std::vector<SpeciesAmount> wood = {{.species = table->SpeciesId("cellulose"), .amount = 100000},
+                                                 {.species = table->SpeciesId("oxygen"), .amount = 600000}};
+        RxCell cell = MakeReactionCell(*table, wood, 900000);
+        RxCell expected = cell;
+        const std::vector<uint64_t> elementsBefore = CountElements(*table, cell);
+        const int64_t energyBefore = cell.energy;
+        for (uint64_t tick = 1; tick <= 40; ++tick) {
+            cell = RxStepCellWait(patched, cell, 0x5EED, tick, tick - 1, 7).cell;
+            expected = StepReactionCellWait(*replaced, expected, 0x5EED, tick, tick - 1, 7).cell;
+            EXPECT(HashReactionCell(cell) == HashReactionCell(expected));
+        }
+
+        EXPECT(CountElements(*table, cell) == elementsBefore && cell.energy == energyBefore);
+        uint64_t isomerAmount = 0;
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            if (cell.species[i] == isomer)
+                isomerAmount = cell.amounts[i];
+        }
+
+        std::printf("lab_box_test: 転換 40 刻みで異性体(仮)%llu µmol\n", static_cast<unsigned long long>(isomerAmount));
+        EXPECT(isomerAmount > 0);
+    }
 }  // namespace
 
 int main() {
@@ -959,6 +1156,7 @@ int main() {
     TestVersionFourRecording();
     TestMagicPatch(*table);
     TestMagicCatalyst(*table);
+    TestMagicConvert();
     TestRefinedBox(*table, materials);
     TestRefinedGauge(*table, materials);
 
