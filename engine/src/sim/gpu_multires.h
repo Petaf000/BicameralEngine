@@ -123,6 +123,9 @@ namespace bicameral::sim {
                                     ID3D12PipelineState* pipeline, uint32_t groupCount,
                                     const std::array<uint32_t, 4>& external);
         [[nodiscard]] ID3D12RootSignature* RootSignature() const { return m_rootSignature.Get(); }
+        // 魔法のパッチの列(common/magic_patch.hlsli の MP_LIST_WORDS 語。T-0024・ADR-0095)。刻みの間は u5 に結ばれ、
+        // コマンドを当てる Compute(実験室など)は外のバッファの 2 本目としてこれを結んで書く
+        [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS PatchListAddress() const { return m_patches->GetGPUVirtualAddress(); }
 
         // --- 反応表の差し替え(T-0194。ADR-0047 の続き)---
         // 次に記録するリストから table を使う(新しいアップロードのバッファに写し、ルートの結び先を替える)。物質の一覧が変わる表なら、
@@ -233,7 +236,9 @@ namespace bicameral::sim {
                                                                        const GpuMultiresOptions& options);
         [[nodiscard]] std::expected<void, std::string> CreateBuffers(ID3D12Device5* device,
                                                                      const BakedReactionTable& table);
-        void BindRoot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) const;
+        // external = 外のバッファを u4・u5 に結ぶ(RecordExternalDispatch)。そうでなければ u5 は魔法のパッチの列(T-0024)
+        void BindRoot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                      bool external = false) const;
         void SetGraphProgram(ID3D12GraphicsCommandList10* list);
         void SetActivityProgram(ID3D12GraphicsCommandList10* list);
         void DispatchGraph(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t entry,
@@ -318,6 +323,11 @@ namespace bicameral::sim {
         uint32_t m_requestUploadCursor = 0;
         std::array<ComPtr<ID3D12Resource>, TABLE_COUNT> m_tables;
         std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> m_externalViews{};  // u4・u5(0 なら代わりにセル)
+
+        // --- 魔法のパッチの列(T-0024。刻みの間の u5。RecordUpload で写し、RecordReadback で読む)---
+        ComPtr<ID3D12Resource> m_patches;
+        ComPtr<ID3D12Resource> m_patchUpload;
+        ComPtr<ID3D12Resource> m_patchReadback;
 
         // --- 活性の種の一覧(T-0100。MR_ACTIVITY_*)---
         std::array<ComPtr<ID3D12Resource>, ACTIVITY_LISTS> m_activity;

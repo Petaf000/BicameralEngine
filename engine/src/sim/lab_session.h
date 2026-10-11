@@ -66,6 +66,9 @@ namespace bicameral::sim {
         bool PlaceRegion(LabCellRange range, std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin);
         bool SetTemperatureRegion(LabCellRange range, uint32_t temperatureMilliKelvin);
 
+        // 魔法のパッチ(T-0024・ADR-0095。MakeLabPatchCommand): 次の刻みから durationTicks 刻み、範囲の規則 rule の速さを effect で変える
+        bool ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range);
+
         // tickCount 刻み進める。食い違ったらその刻みで止まり(Mismatch())、以後は Reset まで進めない。GPU の失敗はエラー
         [[nodiscard]] std::expected<void, std::string> Step(uint32_t tickCount);
 

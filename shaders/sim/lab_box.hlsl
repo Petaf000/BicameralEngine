@@ -12,6 +12,46 @@
 #include "sim/multires_bindings.hlsli"
 
 RWStructuredBuffer<uint32_t> g_labCommands : register(u4);  // LabCommand × 数(LAB_COMMAND_WORDS 語ずつ)
+// 魔法のパッチの列(T-0024。GpuMultires::PatchListAddress を外のバッファの 2 本目に結ぶ。common/magic_patch.hlsli)
+RWStructuredBuffer<uint32_t> g_labPatches : register(u5);
+
+// common/magic_patch.hlsli の List の約束
+struct LabPatchList {
+    uint32_t unused;
+
+    uint32_t PatchWord(uint32_t word) { return g_labPatches[word]; }
+
+    void SetPatchWord(uint32_t word, uint32_t value) { g_labPatches[word] = value; }
+};
+
+LabPatchList MakePatchList() {
+    LabPatchList list;
+    list.unused = 0;
+
+    return list;
+}
+
+// common/lab_box.hlsli の Blocks の約束(箱の根の枠)
+struct LabBlocks {
+    uint32_t unused;
+
+    MrBlock Block(uint32_t slot) { return g_blocks[slot]; }
+};
+
+LabBlocks MakeLabBlocks() {
+    LabBlocks blocks;
+    blocks.unused = 0;
+
+    return blocks;
+}
+
+uint32_t RuleCount() {
+    uint32_t count = 0;
+    uint32_t stride = 0;
+    g_rules.GetDimensions(count, stride);
+
+    return count;
+}
 
 // 箱のセル index(LabCellIndex)にコマンドを当てる。根が一様なら当てない(箱の根はいつも頁を持つ: sim/lab_box.cpp の MakeLabBoxNest。
 // CPU の ApplyLabCommands も同じ)。当てたら true
@@ -41,6 +81,12 @@ bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
             continue;
         }
 
+        // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(sim/lab_box.cpp と同じ)---
+        if (LabCommandIsPatch(command)) {
+            touched |= LabApplyPatchCommand(MakePatchList(), MakeLabBlocks(), shape, command, RuleCount());
+            continue;
+        }
+
         // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(sim/lab_box.cpp と同じ順)---
         if (LabRegionCommandValid(command, g_external2, shape)) {
             const LabRegion region = LabCommandRegion(command);
@@ -65,6 +111,19 @@ bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
     // --- 変えた根は「つつかれた」(次の刻みで変わったとみなして全部のセルを評価し直す。multires_tree.cpp の PokeBlock)---
     for (uint32_t slot = 0; slot < LabRootCount(shape); ++slot) {
         if (((touched >> slot) & 1) != 0)
+            g_blocks[slot].busyTick = MR_BUSY_POKED;
+    }
+}
+
+// --- 魔法のパッチの境(T-0024): 刻みの初めに、速さが変わるパッチの範囲が重なる根をつつき、終わったパッチを除く ---
+// g_external0・g_external2 = 刻みの下位・上位、g_external1 = 箱の形(LabPackShape)。CPU リファレンスは sim/lab_box.cpp の
+// ApplyLabPatchBoundaries
+[numthreads(1, 1, 1)] void ApplyLabPatchBoundaries() {
+    const LabBoxShape shape = LabUnpackShape(g_external1);
+    const uint64_t tick = ((uint64_t)g_external2 << 32) | (uint64_t)g_external0;
+    const uint64_t roots = LabPatchBoundaries(MakePatchList(), MakeLabBlocks(), shape, tick);
+    for (uint32_t slot = 0; slot < LabRootCount(shape); ++slot) {
+        if (((roots >> slot) & 1) != 0)
             g_blocks[slot].busyTick = MR_BUSY_POKED;
     }
 }

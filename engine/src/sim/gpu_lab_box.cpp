@@ -28,9 +28,15 @@ namespace bicameral::sim {
         if (!remapShader)
             return std::unexpected(remapShader.error());
 
-        result.m_applyPipeline = gpu::CreateComputePipeline(device, result.m_nest.RootSignature(), *shader);
-        result.m_remapPipeline = gpu::CreateComputePipeline(device, result.m_nest.RootSignature(), *remapShader);
-        if (!result.m_applyPipeline || !result.m_remapPipeline)
+        const auto boundaryShader = gpu::LoadShader("sim/lab_box_patch_boundaries.cso");
+        if (!boundaryShader)
+            return std::unexpected(boundaryShader.error());
+
+        ID3D12RootSignature* root = result.m_nest.RootSignature();
+        result.m_applyPipeline = gpu::CreateComputePipeline(device, root, *shader);
+        result.m_remapPipeline = gpu::CreateComputePipeline(device, root, *remapShader);
+        result.m_patchBoundaryPipeline = gpu::CreateComputePipeline(device, root, *boundaryShader);
+        if (!result.m_applyPipeline || !result.m_remapPipeline || !result.m_patchBoundaryPipeline)
             return std::unexpected("実験室の箱のパイプラインを作れない");
 
         // --- コマンドの列(u4)と写し ---
@@ -70,13 +76,20 @@ namespace bicameral::sim {
         if (commands.size() > LAB_MAX_COMMANDS_PER_TICK)
             return false;
 
-        // --- コマンドを当てる(無ければ投げない。CPU の ApplyLabCommands も何もしない)---
+        // --- 魔法のパッチの境(T-0024。CPU の ApplyLabPatchBoundaries。毎刻み 1 スレッド)---
+        const D3D12_GPU_VIRTUAL_ADDRESS patchAddress = m_nest.PatchListAddress();
+        m_nest.SetExternalViews(m_commands->GetGPUVirtualAddress(), patchAddress);
+        m_nest.RecordExternalDispatch(
+            list, debugRing, m_patchBoundaryPipeline.Get(), 1,
+            {static_cast<uint32_t>(tick), lab::LabPackShape(m_shape), static_cast<uint32_t>(tick >> 32), 0});
+
+        // --- コマンドを当てる(無ければ投げない。CPU の ApplyLabCommands も何もしない)。u5 = パッチの列 ---
         if (!commands.empty()) {
             if (!RecordCommandUpload(list, commands))
                 return false;
 
             const D3D12_GPU_VIRTUAL_ADDRESS commandAddress = m_commands->GetGPUVirtualAddress();
-            m_nest.SetExternalViews(commandAddress, commandAddress);
+            m_nest.SetExternalViews(commandAddress, patchAddress);
             m_nest.RecordExternalDispatch(
                 list, debugRing, m_applyPipeline.Get(), 1,
                 {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, 0});

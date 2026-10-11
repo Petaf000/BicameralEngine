@@ -167,6 +167,14 @@ namespace bicameral::sim::nest_detail {
     // 広げたブロックは results の expanded に書く(multires_nest.cpp)
     std::vector<uint8_t> ExpandForStep(MultiresNest& nest, std::span<BlockStepResult> results);
 
+    // 刻みの反応の評価に渡す表: 魔法のパッチの列を重ねて読めるようにする(T-0024・ADR-0095。common/magic_patch.hlsli)
+    inline ReactionTableView StepTableView(const MultiresNest& nest, const BakedReactionTable& table) {
+        ReactionTableView view = table.View();
+        view.magicPatches = nest.magicPatches;
+
+        return view;
+    }
+
     // 木を変えたブロックをつつく: 活性の種にし、忙しさの印を「つつかれた」にする(T-0100・T-0101)
     inline void PokeBlock(MultiresNest& nest, uint32_t slot) {
         nest.seeds[slot] = 1;

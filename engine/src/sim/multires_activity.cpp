@@ -338,7 +338,7 @@ namespace bicameral::sim {
             stepped[slot] = slot >= worldBlocks || nest.blocks[slot].activeTick == mark ? 1 : 0;
 
         const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
-            nest, table.View(), stepped, worldSeed, tick, options, mark);
+            nest, nest_detail::StepTableView(nest, table), stepped, worldSeed, tick, options, mark);
 
         // --- 待ちの丸め: 変わったブロックは忙しさの印(= tc)を書いて次の刻みに起こし、評価したブロックは起こす刻みを書く ---
         nest_detail::RecordWaitResults(nest, results, tick);
@@ -361,7 +361,7 @@ namespace bicameral::sim {
             return;
         }
 
-        const ReactionTableView view = table.View();
+        const ReactionTableView view = nest_detail::StepTableView(nest, table);
         const uint64_t mark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             // --- ちょうど静かになったら、端数の枠を帳簿へ移して返す(畳めるかはその後で調べる。溢れのある端数の枠も。T-0199)---

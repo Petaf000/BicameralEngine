@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <iterator>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "core/log.h"
@@ -67,6 +69,22 @@ namespace {
                 const reaction::RxCell cell = sim::LoadNestCell(nest, slot, index);
                 for (uint32_t i = 0; i < cell.speciesCount; ++i)
                     total += cell.species[i] == species ? cell.amounts[i] : 0;
+            }
+        }
+
+        return total;
+    }
+
+    // 範囲(両端を含む)のセルの物質 species の合計
+    uint64_t RegionTotalOf(const sim::MultiresNest& nest, sim::LabCellRange range, uint32_t species) {
+        uint64_t total = 0;
+        for (uint32_t z = range.low.z; z <= range.high.z; ++z) {
+            for (uint32_t y = range.low.y; y <= range.high.y; ++y) {
+                for (uint32_t x = range.low.x; x <= range.high.x; ++x) {
+                    const reaction::RxCell cell = sim::LabBoxCell(nest, multires::MrCellIndex(x, y, z));
+                    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                        total += cell.species[i] == species ? cell.amounts[i] : 0;
+                }
             }
         }
 
@@ -574,6 +592,110 @@ namespace {
         return {};
     }
 
+    // --- 魔法のパッチ(T-0024・ADR-0095)。値は試験用の仮のもの(D-006)---
+
+    uint32_t RuleIdOf(const sim::BakedReactionTable& table, std::string_view name) {
+        const auto found = std::ranges::find(table.ruleNames, name);
+        return found == table.ruleNames.end() ? UINT32_MAX
+                                              : static_cast<uint32_t>(std::distance(table.ruleNames.begin(), found));
+    }
+
+    struct PatchGroups {
+        sim::LabCellRange stopped{.low = {.x = 1, .y = 1, .z = 1},
+                                  .high = {.x = 2, .y = 2, .z = 2}};  // 魔素あり・止める
+        sim::LabCellRange catalyzed{.low = {.x = 5, .y = 1, .z = 1},
+                                    .high = {.x = 6, .y = 2, .z = 2}};  // 魔素あり・そのまま
+        sim::LabCellRange amplified{.low = {.x = 1, .y = 5, .z = 5},
+                                    .high = {.x = 2, .y = 6, .z = 6}};  // 魔素なし・速める
+        sim::LabCellRange plain{.low = {.x = 5, .y = 5, .z = 5},
+                                .high = {.x = 6, .y = 6, .z = 6}};  // 魔素なし・そのまま
+    };
+
+    // 450 K の木を 4 か所に置き、2 か所にパッチ(魔素の触媒の規則を止める・魔素なしの燃焼を 2^PATCH_SHIFT 倍)を PATCH_TICKS 刻み。
+    // 毎刻み CPU と GPU がビット一致・元素は保存・止めた所は燃えず、終わると燃え始める・速めた所はそのままの所よりずっと燃える
+    std::expected<void, std::string> RunPatch(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
+                                              const sim::BakedReactionTable& table) {
+        constexpr uint32_t PATCH_TICKS = 50;
+        constexpr int32_t PATCH_SHIFT = 10;
+        auto session = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "patch");
+        if (!session)
+            return std::unexpected(session.error());
+
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        const uint32_t manaTest = table.SpeciesId("mana_test");
+        const uint32_t catalyzedRule = RuleIdOf(table, "mana_test_catalyzed_cellulose_combustion");
+        const uint32_t plainRule = RuleIdOf(table, "cellulose_combustion");
+        if (cellulose == 0 || manaTest == 0 || catalyzedRule == UINT32_MAX || plainRule == UINT32_MAX)
+            return std::unexpected("表に試験の物質か規則が無い");
+
+        // --- 置く(魔素ありの 2 か所・なしの 2 か所)とパッチ 2 つ(同じ刻み 0 のコマンド)---
+        std::vector<sim::SpeciesAmount> wood = {{.species = cellulose, .amount = MANA_WOOD_CELLULOSE_MICROMOLES},
+                                                {.species = oxygen, .amount = MANA_WOOD_OXYGEN_MICROMOLES}};
+        std::vector<sim::SpeciesAmount> manaWood = wood;
+        manaWood.push_back({.species = manaTest, .amount = MANA_MICROMOLES});
+        std::ranges::sort(wood, {}, &sim::SpeciesAmount::species);
+        std::ranges::sort(manaWood, {}, &sim::SpeciesAmount::species);
+        const PatchGroups groups;
+        const bool queued = session->PlaceRegion(groups.stopped, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->PlaceRegion(groups.catalyzed, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->PlaceRegion(groups.amplified, wood, MANA_WARM_MILLIKELVIN) &&
+                            session->PlaceRegion(groups.plain, wood, MANA_WARM_MILLIKELVIN) &&
+                            session->ApplyPatch(catalyzedRule, reaction::MpMakeStopEffect(), PATCH_TICKS,
+                                                groups.stopped) &&
+                            session->ApplyPatch(plainRule, reaction::MpMakeScaleEffect(PATCH_SHIFT), PATCH_TICKS,
+                                                groups.amplified);
+        if (!queued)
+            return std::unexpected("置けない・パッチを出せない");
+
+        if (auto stepped = session->Step(1); !stepped)
+            return std::unexpected(stepped.error());
+
+        const std::vector<sim::NamedElementCount> elementsBefore = CountBoxElements(*session);
+        if (auto stepped = session->Step(PATCH_TICKS - 1); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        // --- パッチの間: 止めた所はほとんど燃えない・速めた所はずっと燃える ---
+        const uint64_t placed = 8 * MANA_WOOD_CELLULOSE_MICROMOLES;
+        const auto burned = [&](sim::LabCellRange range) {
+            return placed - RegionTotalOf(session->Gpu(), range, cellulose);
+        };
+        const uint64_t stoppedDuring = burned(groups.stopped);
+        const uint64_t catalyzedDuring = burned(groups.catalyzed);
+        const uint64_t amplifiedDuring = burned(groups.amplified);
+        const uint64_t plainDuring = burned(groups.plain);
+        if (auto stepped = session->Step(PATCH_TICKS); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        const uint64_t stoppedAfter = burned(groups.stopped);
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: パッチ {} 刻み 燃えたセルロース 止めた {}(終わった後 {})・触媒のまま {}・2^{} 倍 "
+            "{}・そのまま {} µmol",
+            PATCH_TICKS, stoppedDuring, stoppedAfter, catalyzedDuring, PATCH_SHIFT, amplifiedDuring, plainDuring);
+        if (CountBoxElements(*session) != elementsBefore)
+            return std::unexpected("パッチで元素の数が変わった");
+
+        if (session->Cpu().magicPatches[0] != 0 || session->Gpu().magicPatches[0] != 0)
+            return std::unexpected("終わったパッチが列に残る");
+
+        if (catalyzedDuring <= 10 * (stoppedDuring + 1))
+            return std::unexpected("止めるパッチが効かない");
+
+        if (stoppedAfter <= 10 * (stoppedDuring + 1))
+            return std::unexpected("止めるパッチが終わっても燃え始めない");
+
+        if (amplifiedDuring <= 10 * (plainDuring + 1))
+            return std::unexpected("速めるパッチが効かない");
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
@@ -624,13 +746,18 @@ namespace {
             return 1;
         }
 
+        if (auto result = RunPatch(device->Get(), options->queueType, *table); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(魔法のパッチ: {})", result.error());
+            return 1;
+        }
+
         if (!test::PassesValidation(*device, "gpu_lab_box_test"))
             return 1;
 
         Log(Channel::Gpu, Level::Info,
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
             "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える・"
-            "根を並べた箱でも一致)",
+            "根を並べた箱でも一致・魔法のパッチで止める / 速める〔根を並べた箱でも〕)",
             RUN_TICKS);
 
         return 0;

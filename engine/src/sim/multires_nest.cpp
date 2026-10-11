@@ -552,8 +552,8 @@ namespace bicameral::sim {
             stepped[slot] = kind != MR_BLOCK_UNUSED && kind != MR_BLOCK_MIRROR ? 1 : 0;
         }
 
-        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(nest, table.View(), stepped,
-                                                                                          worldSeed, tick, options, 0);
+        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
+            nest, nest_detail::StepTableView(nest, table), stepped, worldSeed, tick, options, 0);
         nest_detail::RecordWaitResults(nest, results, tick);
     }
 

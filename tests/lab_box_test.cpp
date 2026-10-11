@@ -526,6 +526,77 @@ namespace {
                parsed->tableVersion == 0x1111);
     }
 
+    // 魔法のパッチ(T-0024・ADR-0095): 効き方の語・速さの倍率・列の出し入れ・範囲。仮の値(D-006: ゲームの中身ではない)
+    void TestMagicPatch(const BakedReactionTable& table) {
+        using namespace bicameral::reaction;
+
+        // --- 効き方: 2^shift 倍・止める ---
+        EXPECT(MpEffectShift(MpMakeScaleEffect(-5)) == -5 && MpEffectShift(MpMakeScaleEffect(64)) == 64);
+        EXPECT(MpEffectValid(MpMakeScaleEffect(-64)) && !MpEffectValid(MpMakeScaleEffect(65)));
+        EXPECT(MpEffectValid(MpMakeStopEffect()) && !MpEffectValid(0) && !MpEffectValid(7));
+        const uint64_t packed = (uint64_t{0x9000'0000} << 32) | static_cast<uint32_t>(-40);
+        EXPECT(MpScaleRate(packed, 3) == ((uint64_t{0x9000'0000} << 32) | static_cast<uint32_t>(-37)));
+        EXPECT(MpScaleRate(static_cast<uint32_t>(-40), 3) == static_cast<uint32_t>(-40));  // 仮数 0 はそのまま
+
+        // --- 列: 足す・一杯で断る・終わったものを除く(順は変えない)---
+        std::vector<uint32_t> words(MP_LIST_WORDS, 0);
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        const List list{.words = words};
+        const auto ruleCount = static_cast<uint32_t>(table.rules.size());
+        for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
+            const MpPatch patch = MpPatchFromCommand(0, MpMakeStopEffect(), 10 + i, 0, 0, 0, 1, 1, 1, 5);
+            EXPECT(MpAddPatch(list, patch, 5, ruleCount));
+        }
+
+        EXPECT(!MpAddPatch(list, MpPatchFromCommand(0, MpMakeStopEffect(), 30, 0, 0, 0, 1, 1, 1, 5), 5, ruleCount));
+        EXPECT(!MpAddPatch(list, MpPatchFromCommand(ruleCount, MpMakeStopEffect(), 30, 0, 0, 0, 1, 1, 1, 5), 5,
+                           ruleCount));
+        MpRetireExpired(list, 17);  // 終わり 15〜17 の 3 つが消える
+        EXPECT(MpPatchCount(list) == MP_MAX_PATCHES - 3 && MpLoadPatch(list, 0).endTick == 18);
+        EXPECT(!MpAddPatch(list, MpPatchFromCommand(0, MpMakeStopEffect(), 0, 0, 0, 0, 1, 1, 1, 17), 17, ruleCount));
+
+        // --- 範囲: レベル 0 の [0, 1] に、レベル −1(1 m)の 0 は重なり、レベル 1(0.25 m)の 4 は重ならない ---
+        const MpPatch patch = MpPatchFromCommand(0, MpMakeStopEffect(), 1, 0, 0, 0, 1, 1, 1, 0);
+        EXPECT(MpOverlaps(patch, -1, 0, 0, 0, 0, 0, 0) && MpOverlaps(patch, 1, 3, 3, 3, 3, 3, 3));
+        EXPECT(!MpOverlaps(patch, 1, 4, 0, 0, 4, 0, 0) && !MpOverlaps(patch, 0, -1, 0, 0, -1, 0, 0));
+
+        // --- 箱: パッチのコマンドは列に足し、箱をつつく。終わりの刻みにまたつつき、列から除く ---
+        MultiresNest nest = MakeLabBoxNest(table);
+        nest.blocks[LAB_BOX_SLOT].busyTick = 1;
+        const Command command = MakeLabPatchCommand(3, 0, 0, MpMakeScaleEffect(4), 5, LabWholeBox());
+        EXPECT(ApplyLabCommands(nest, table, std::span(&command, 1)) == 1);
+        EXPECT(nest.magicPatches[0] == 1 && nest.blocks[LAB_BOX_SLOT].busyTick == multires::MR_BUSY_POKED);
+        nest.blocks[LAB_BOX_SLOT].busyTick = 4;
+        EXPECT(!ApplyLabPatchBoundaries(nest, 7) && nest.magicPatches[0] == 1);
+        EXPECT(ApplyLabPatchBoundaries(nest, 8) && nest.magicPatches[0] == 0);
+
+        // --- 大きい箱(T-0173): 範囲は箱の座標。足したときと境の刻みには、範囲が重なる根だけをつつく ---
+        constexpr lab::LabBoxShape SHAPE = {.rootsX = 2, .rootsY = 2, .rootsZ = 2};
+        MultiresNest large = MakeLabBoxNest(table, SHAPE);
+        const auto settle = [&large] {
+            for (uint32_t slot = 0; slot < 8; ++slot)
+                large.blocks[slot].busyTick = 1;
+        };
+        const auto pokedRoots = [&large] {
+            uint32_t roots = 0;
+            for (uint32_t slot = 0; slot < 8; ++slot)
+                roots |= large.blocks[slot].busyTick == multires::MR_BUSY_POKED ? 1u << slot : 0u;
+            return roots;
+        };
+        settle();
+        const LabCellRange highX = {.low = {.x = 8, .y = 0, .z = 0}, .high = {.x = 9, .y = 15, .z = 15}};
+        const Command largeCommand = MakeLabPatchCommand(3, 0, 0, MpMakeStopEffect(), 5, highX);
+        EXPECT(ApplyLabCommands(large, table, std::span(&largeCommand, 1), SHAPE) == 1);
+        EXPECT(large.magicPatches[0] == 1 && pokedRoots() == 0b1010'1010u);  // x の根が 1 の枠 1・3・5・7
+        settle();
+        EXPECT(!ApplyLabPatchBoundaries(large, 7, SHAPE) && pokedRoots() == 0);
+        EXPECT(ApplyLabPatchBoundaries(large, 8, SHAPE) && pokedRoots() == 0b1010'1010u && large.magicPatches[0] == 0);
+    }
+
 }  // namespace
 
 int main() {
@@ -546,6 +617,7 @@ int main() {
     TestGauge(*table, materials);
     TestLargeBox(*table, materials);
     TestVersionFourRecording();
+    TestMagicPatch(*table);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);
