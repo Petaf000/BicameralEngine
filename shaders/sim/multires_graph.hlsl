@@ -176,9 +176,15 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
 
 #ifdef MR_WIDE_CELLS
-    // --- 溢れ: 子の頁へ写す(親を覆う前。一様な子は頁を持たない。一様な親は溢れを持たない)---
+    // --- 溢れ: 子の頁へ写す(親を覆う前。一様な子は頁を持たない。一様な親は溢れを持たない)。
+    //     端数の溢れも子の端数の枠へ(T-0311。childFraction はグループで同じ)---
     if (!uniformChild)
         RefineWideTails(parent.page, childPage, octant, t, fromRequest && !MrIsUniform(parent));
+
+    if (childFraction != MR_NO_FRACTION) {
+        GroupMemoryBarrierWithGroupSync();  // gs_tailStarts を使い回す
+        RefineWideTails(WideFractionArea(parent.fraction), WideFractionArea(childFraction), octant, t, true);
+    }
 #endif
 
     // --- 本物なら親を覆う(全部のスレッドが親を読み終えてから。一様な親は覆われた所を空と読むので書かない)---
@@ -193,10 +199,13 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     }
 
 #ifdef MR_WIDE_CELLS
-    if (real && !uniformChild) {
+    if (real) {
         AllMemoryBarrierWithGroupSync();  // 全部のスレッドが親の溢れを写し終えてから
-        if (t == 0)
+        if (t == 0 && !uniformChild)
             CoverWideTails(parent.page, octant);
+
+        if (t == 0 && parent.fraction != MR_NO_FRACTION)
+            CoverWideTails(WideFractionArea(parent.fraction), octant);  // 端数の溢れ(T-0311)
     }
 #endif
 
@@ -295,9 +304,12 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
 
 #ifdef MR_WIDE_CELLS
     // --- 溢れ: 返す子の頁と、広げた親の頁(取ったばかり)の今の面を空にする(CPU の ClearPageOverflow)。
-    //     溢れのある子を粗くする和集合・端数の溢れは T-0311 ---
+    //     返す子の端数の枠の溢れも空にする(T-0311。CPU の ClearFractionOverflow)。溢れのある子を粗くする和集合は T-0329 ---
     if (!MrIsUniform(child))
         ClearWideSideWords(child.page, t, MR_OCTANT_CELLS);
+
+    if (child.fraction != MR_NO_FRACTION)
+        ClearWideSideWords(WideFractionArea(child.fraction), t, MR_OCTANT_CELLS);
 
     if (expandParent)
         ClearWideSideWords(parentPage, t, MR_OCTANT_CELLS);

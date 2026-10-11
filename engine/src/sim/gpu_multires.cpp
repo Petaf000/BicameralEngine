@@ -479,9 +479,7 @@ namespace bicameral::sim {
         sizes[BufferCells] = (m_blockCapacity + (PageCount() * MR_BLOCK_CELLS)) * sizeof(RxCell);
         sizes[BufferFractions] = uint64_t{m_capacity.fractions} * MR_BLOCK_CELLS * sizeof(MrFraction);
         sizes[BufferCounters] = uint64_t{MR_COUNTER_COUNT} * sizeof(uint32_t);
-        const uint64_t overflowWords = m_wideCells ? MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks)
-                                                   : 0;
-        sizes[BufferTreeWords] = (uint64_t{OverflowBaseWord()} + overflowWords) * sizeof(uint32_t);
+        sizes[BufferTreeWords] = (uint64_t{OverflowBaseWord()} * sizeof(uint32_t)) + OverflowBytes();
         sizes[BufferFreeFractions] = uint64_t{m_capacity.fractions} * sizeof(uint32_t);
         sizes[BufferLedger] = uint64_t{MR_LEDGER_LEVELS} * m_capacity.ledgerColumns * sizeof(uint64_t);
         sizes[BufferRequests] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequest);
@@ -505,7 +503,8 @@ namespace bicameral::sim {
         if (!m_wideCells)
             return 0;
 
-        return MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks) * sizeof(uint32_t);
+        return MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.fractions) *
+               sizeof(uint32_t);
     }
 
     uint64_t GpuMultires::PageCount() const {
@@ -565,49 +564,51 @@ namespace bicameral::sim {
         return (m_capacity.worldBlocks * 2) + m_capacity.indexEntries + m_capacity.pages;
     }
 
-    // CPU の溢れを GPU に写せるか(塊の置き場・1 セルの成分の数に入る。端数の溢れはまだ持てない)
+    // CPU の溢れを GPU に写せるか(塊の置き場・1 セルの成分の数に入る。頁と端数の枠〔T-0311〕の両方)
     bool GpuMultires::OverflowFits(const MultiresNest& nest) const {
         if (!nest.wideCells)
             return true;
 
-        if (!m_wideCells || nest.cellOverflow.size() != PageCount())
+        if (!m_wideCells || nest.cellOverflow.size() != PageCount() ||
+            nest.fractionOverflow.size() != m_capacity.fractions)
             return false;
-
-        for (uint32_t fractionSlot = 0; fractionSlot < m_capacity.fractions; ++fractionSlot) {
-            if (FractionHasOverflow(nest, fractionSlot))
-                return false;
-        }
 
         // 要求の語の塊の数は 8 ビット(MrWideMakeRequest)
         static_assert(MR_WIDE_SIDE_CHUNKS <= 0xffu);
         constexpr uint32_t MOST_TAIL = RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES;
         uint64_t chunks = 0;
-        for (const MultiresOverflowArea& area : nest.cellOverflow) {
+        bool fits = true;
+        const auto count = [&](const MultiresOverflowArea& area) {
             chunks += MrWideChunksFor(area.offsets[MR_BLOCK_CELLS]);
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (area.offsets[index + 1] - area.offsets[index] > MOST_TAIL)
-                    return false;
-            }
-        }
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                fits = fits && area.offsets[index + 1] - area.offsets[index] <= MOST_TAIL;
+        };
+        std::ranges::for_each(nest.cellOverflow, count);
+        std::ranges::for_each(nest.fractionOverflow, count);
 
-        return chunks <= m_wideChunks;
+        return fits && chunks <= m_wideChunks;
     }
 
-    // 溢れの領域の像: 頁の今の面 0 = CPU の溢れ(塊は頁の番号の順に 0 から配る)、面 1 は塊なし。空きのスタックは上から若い番号
+    // 溢れの領域の像: 頁と端数の枠(T-0311)の今の面 0 = CPU の溢れ(塊は頁の番号の順、続けて枠の番号の順に 0 から配る)、
+    // 面 1 は塊なし。空きのスタックは上から若い番号
     void GpuMultires::AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const {
         if (!m_wideCells)
             return;
 
         const auto pages = static_cast<uint32_t>(PageCount());
         const size_t first = words.size();
-        words.resize(first + MrWideAreaWords(pages, m_wideChunks), 0);
+        words.resize(first + MrWideAreaWords(pages, m_wideChunks, m_capacity.fractions), 0);
         const uint32_t pool = MrWidePoolWord(0, pages);
         uint32_t used = 0;
-        for (uint32_t page = 0; nest.wideCells && page < pages; ++page) {
-            const MultiresOverflowArea& area = nest.cellOverflow[page];
+        const uint32_t areas = nest.wideCells ? pages + m_capacity.fractions : 0;
+        for (uint32_t page = 0; page < areas; ++page) {
+            const bool fraction = page >= pages;
+            const MultiresOverflowArea& area = fraction ? nest.fractionOverflow[page - pages] : nest.cellOverflow[page];
             const uint32_t count = area.offsets[MR_BLOCK_CELLS];
             const uint32_t chunks = MrWideChunksFor(count);
-            const size_t table = first + MrWideTableWord(0, page, 0);
+            const uint32_t header = fraction ? MrWideFractionHeaderWord(pool, m_wideChunks, page - pages)
+                                             : MrWideHeaderWord(0, page);
+            const size_t table = first + MrWideTableAt(header, 0);
             words[table] = chunks;
             for (uint32_t chunk = 0; chunk < chunks; ++chunk)
                 words[table + 1 + chunk] = used + chunk;
@@ -644,15 +645,18 @@ namespace bicameral::sim {
         const uint32_t base = OverflowBaseWord();
         const auto pages = static_cast<uint32_t>(PageCount());
         const uint32_t pool = MrWidePoolWord(base, pages);
-        for (uint32_t page = 0; page < pages; ++page) {
-            const uint32_t current = words[MrWideHeaderWord(base, page) + MR_WIDE_HEADER_SIDE];
-            const uint32_t table = MrWideTableWord(base, page, current);
+        for (uint32_t page = 0; page < pages + m_capacity.fractions; ++page) {
+            const bool fraction = page >= pages;
+            const uint32_t header = fraction ? MrWideFractionHeaderWord(pool, m_wideChunks, page - pages)
+                                             : MrWideHeaderWord(base, page);
+            const uint32_t current = words[header + MR_WIDE_HEADER_SIDE];
+            const uint32_t table = MrWideTableAt(header, current);
             const auto logical = [&](uint32_t word) {
                 const uint32_t chunk = words[table + 1 + (word / MR_WIDE_CHUNK_WORDS)];
                 return words[MrWideChunkWord(pool, chunk) + (word % MR_WIDE_CHUNK_WORDS)];
             };
 
-            MultiresOverflowArea& area = nest.cellOverflow[page];
+            MultiresOverflowArea& area = fraction ? nest.fractionOverflow[page - pages] : nest.cellOverflow[page];
             const bool empty = words[table] == 0;
             for (uint32_t index = 0; index <= MR_BLOCK_CELLS; ++index)
                 area.offsets[index] = empty ? 0 : logical(index);

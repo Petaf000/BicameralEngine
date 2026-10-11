@@ -17,8 +17,24 @@ uint32_t WidePoolWord() {
     return MrWidePoolWord(g_overflowBase, WidePageCount());
 }
 
+// 端数の枠 fractionSlot の溢れの領域の番号(T-0311。頁の後ろ)。下の道具の page は領域の番号(頁か端数の枠)
+uint32_t WideFractionArea(uint32_t fractionSlot) {
+    return WidePageCount() + fractionSlot;
+}
+
+// 領域 area の見出しの先頭(頁は u6 の溢れの領域の先頭から、端数の枠は空きのスタックの後ろから)
+uint32_t WideAreaHeader(uint32_t area) {
+    const uint32_t pages = WidePageCount();
+    if (area < pages)
+        return MrWideHeaderWord(g_overflowBase, area);
+
+    const uint32_t pool = WidePoolWord();
+
+    return MrWideFractionHeaderWord(pool, g_treeWords[pool + MR_WIDE_POOL_CAPACITY], area - pages);
+}
+
 uint32_t WideHeaderAt(uint32_t page, uint32_t field) {
-    return MrWideHeaderWord(g_overflowBase, page) + field;
+    return WideAreaHeader(page) + field;
 }
 
 uint32_t WideCurrentSide(uint32_t page) {
@@ -27,12 +43,12 @@ uint32_t WideCurrentSide(uint32_t page) {
 
 // 面 side が持つ塊の数
 uint32_t WideChunkCount(uint32_t page, uint32_t side) {
-    return g_treeWords[MrWideTableWord(g_overflowBase, page, side)];
+    return g_treeWords[MrWideTableAt(WideAreaHeader(page), side)];
 }
 
 // 面 side の論理の語 word の u6 の語(塊の表を引く。面が持つ塊の中であること)
 uint32_t WideWord(uint32_t page, uint32_t side, uint32_t word) {
-    const uint32_t table = MrWideTableWord(g_overflowBase, page, side);
+    const uint32_t table = MrWideTableAt(WideAreaHeader(page), side);
     const uint32_t chunk = g_treeWords[table + 1 + (word / MR_WIDE_CHUNK_WORDS)];
 
     return MrWideChunkWord(WidePoolWord(), chunk) + (word % MR_WIDE_CHUNK_WORDS);

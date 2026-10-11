@@ -878,11 +878,11 @@ void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
 
 static const uint32_t MR_WIDE_RESERVE_NONE = 0;
 
-// 細かくする要求の depth 段目の子の頁に写す溢れの数(一番上の親の頁の今の面から。子のセルを親のセルへたどる)
-uint32_t RefineTailEntries(MrRequest request, MrRequestState state, uint32_t depth) {
+// 細かくする要求の depth 段目の子の頁(または端数の枠)に写す溢れの数(一番上の親の領域 page〔頁か端数の枠。T-0311〕の今の面から。
+// 子のセルを親のセルへたどる)
+uint32_t RefineTailEntries(MrRequest request, MrRequestState state, uint32_t depth, uint32_t page) {
     uint32_t octants[MR_MAX_CHAIN_LEVELS];
     MrBlock block = g_blocks[state.target];
-    const uint32_t page = block.page;
     for (uint32_t level = 0; level <= depth; ++level) {
         octants[level] = MrOctantOfPoint(block, request.x, request.y, request.z, request.level);
         block = MrMakeChildBlock(block, state.target, octants[level], MR_BLOCK_REAL, MR_NO_FRACTION, MR_NO_PAGE);
@@ -902,26 +902,19 @@ uint32_t RefineTailEntries(MrRequest request, MrRequestState state, uint32_t dep
     return total;
 }
 
-// 要求 i に足す塊の数(attach なら stack の上から taken 番目より下を取って子の頁の面 0 の表に足す)
-uint32_t ReserveRefineChunks(uint32_t i, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
-    if (i >= RequestCount())
-        return MR_WIDE_RESERVE_NONE;
-
-    const MrRequestState state = g_states[i];
-    const MrRequest request = g_requests[i];
-    if (state.status != MR_STATUS_GRANTED || request.op != MR_REQUEST_REFINE)
-        return MR_WIDE_RESERVE_NONE;
-
-    // --- 一様な親は溢れを持たない(GPU の一様の値はインラインだけ)・溢れの無い親は写すものが無い ---
-    const MrBlock parent = g_blocks[state.target];
-    if (MrIsUniform(parent) || WideRange(parent.page, WideCurrentSide(parent.page), MR_BLOCK_CELLS - 1).y == 0)
+// 一番上の親の領域 top(頁か端数の枠)の溢れを、段ごとの子の領域(fractions なら端数の枠、でなければ頁)の面 0 へ写すのに足す塊の数
+// (attach なら stack の上から taken 番目より下を取って子の領域の面 0 の表に足す)
+uint32_t ReserveTailChunks(MrRequest request, MrRequestState state, uint32_t top, bool fractions, bool attach,
+                           uint32_t stack, uint32_t freeCount, uint32_t taken) {
+    // --- 溢れの無い親は写すものが無い ---
+    if (WideRange(top, WideCurrentSide(top), MR_BLOCK_CELLS - 1).y == 0)
         return MR_WIDE_RESERVE_NONE;
 
     uint32_t chunks = 0;
     for (uint32_t depth = 0; depth < state.levels; ++depth) {
-        const uint32_t page = PoppedPage(state, depth);
-        const uint32_t need = MrWideChunksFor(RefineTailEntries(request, state, depth));
-        const uint32_t table = MrWideTableWord(g_overflowBase, page, 0);
+        const uint32_t area = fractions ? WideFractionArea(PoppedFraction(state, depth)) : PoppedPage(state, depth);
+        const uint32_t need = MrWideChunksFor(RefineTailEntries(request, state, depth, top));
+        const uint32_t table = MrWideTableAt(WideAreaHeader(area), 0);
         const uint32_t held = g_treeWords[table];
         if (need <= held)
             continue;
@@ -936,6 +929,30 @@ uint32_t ReserveRefineChunks(uint32_t i, bool attach, uint32_t stack, uint32_t f
         }
 
         chunks += need - held;
+    }
+
+    return chunks;
+}
+
+// 要求 i に足す塊の数(子の頁の分、続けて子の端数の枠の分。T-0311)
+uint32_t ReserveRefineChunks(uint32_t i, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
+    if (i >= RequestCount())
+        return MR_WIDE_RESERVE_NONE;
+
+    const MrRequestState state = g_states[i];
+    const MrRequest request = g_requests[i];
+    if (state.status != MR_STATUS_GRANTED || request.op != MR_REQUEST_REFINE)
+        return MR_WIDE_RESERVE_NONE;
+
+    // --- 一様な親の頁は溢れを持たない(GPU の一様の値はインラインだけ)。端数の枠は一様な親でも持てる ---
+    const MrBlock parent = g_blocks[state.target];
+    uint32_t chunks = 0;
+    if (!MrIsUniform(parent))
+        chunks += ReserveTailChunks(request, state, parent.page, false, attach, stack, freeCount, taken);
+
+    if (parent.fraction != MR_NO_FRACTION) {
+        const uint32_t top = WideFractionArea(parent.fraction);
+        chunks += ReserveTailChunks(request, state, top, true, attach, stack, freeCount, taken + chunks);
     }
 
     return chunks;

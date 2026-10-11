@@ -413,6 +413,97 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }
 
+    // --- 端数の溢れ(T-0311。TestCoarsenFullWide の場面): 溢れを使う CPU の世界で入りきらない豊かな子を粗くし(親のセルと端数は 16 種)、
+    //     GPU に写して伝導ありで刻む。刻み COARSEN_WIDE_REFINE_TICK に同じ八分の一を細かくし直す(子の端数の枠へ端数の溢れを写し、
+    //     親の端数の溢れを覆う)。CPU と毎刻みビット一致・保存がビット一致。GPU で粗くする和集合は T-0329 ---
+    constexpr uint64_t COARSEN_WIDE_REFINE_TICK = 4;
+
+    // 本物のブロックの端数の枠の成分の最大(溢れを含む)
+    uint32_t MostFractionSpecies(const sim::MultiresNest& nest) {
+        uint32_t most = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL || block.fraction == MR_NO_FRACTION)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                most = std::max(most, sim::LoadWideFraction(nest, block.fraction, index).speciesCount);
+        }
+
+        return most;
+    }
+
+    std::expected<RunResult, std::string> RunCoarsenFullWide(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                             gpu::DebugRing& ring,
+                                                             const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
+        sim::EnableWideCells(cpu);
+        for (uint64_t tick = 0; tick < test::COARSEN_FULL_TICKS; ++tick) {
+            sim::SubmitRequests(cpu, test::CoarsenFullRequestsAt(tick));
+            sim::ProcessRequests(cpu);
+        }
+
+        const uint32_t coarsenedFraction = MostFractionSpecies(cpu);
+        if (cpu.counters[MR_COUNTER_COARSEN_FULL] != 0 || coarsenedFraction <= RX_MAX_CELL_SPECIES)
+            return std::unexpected("溢れの端数: 豊かな子を粗くしていない・端数に溢れが無い(場面が試していない)");
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const sim::ConservedTotals initial = sim::ComputeConservedTotals(cpu, table, 1);
+        const sim::MultiresStepOptions options = test::LimitsStepOptions(true);
+        const MrRequest refine = test::MakeMultiresRequest(MR_REQUEST_REFINE, test::CoarsenFullPoint(true), 1);
+        const uint32_t grantedBefore = cpu.counters[MR_COUNTER_GRANTED];
+        sim::MultiresNest read;
+        bool conserved = true;
+        uint32_t refinedFraction = 0;
+        for (uint64_t tick = 0; tick < test::LIMITS_STEP_TICKS; ++tick) {
+            const bool refining = tick == COARSEN_WIDE_REFINE_TICK;
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (refining) {
+                    if (!gpu->RecordRequests(list, {&refine, 1}))
+                        return false;
+
+                    gpu->RecordProcessRequests(list, ring.GpuAddress());
+                }
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::LIMITS_STEP_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            if (refining) {
+                sim::SubmitRequests(cpu, {&refine, 1});
+                sim::ProcessRequests(cpu);
+                refinedFraction = MostFractionSpecies(cpu);
+            }
+
+            sim::StepNest(cpu, table, test::LIMITS_STEP_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(std::format("溢れの端数: {}", compared.error()));
+
+            conserved = conserved && sim::ComputeConservedTotals(cpu, table, 1) == initial;
+        }
+
+        if (cpu.counters[MR_COUNTER_GRANTED] != grantedBefore + 1)
+            return std::unexpected("溢れの端数: 細かくし直す要求を適用していない");
+
+        if (!conserved || cpu.counters[MR_COUNTER_OVERFLOW] != 0 || cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0)
+            return std::unexpected("溢れの端数: 保存が崩れた・成分を捨てた・待たせた");
+
+        Log(Channel::Gpu, Level::Info,
+            "溢れの端数: 粗くした端数の最大の成分 {}・細かくし直した後 {}(CPU と GPU で毎刻み同じ)", coarsenedFraction,
+            refinedFraction);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
+    }
+
     // 32 種のセルの溢れの塊の置き場(T-0248): 全部の頁の 2 面が 32 種のセルで埋まっても足りる数(既定の数は 1 頁の 2 面分なので、
     // 2 つの根が両方 32 種になる刻みで尽きて待たせる)
     uint32_t WideManyChunks(const sim::MultiresNest& nest) {
@@ -871,6 +962,8 @@ namespace {
             "32 種・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
         const auto refineWide = Timed("溢れの世界で細かくする",
                                       [&] { return RunRefineWide(device, queue, ring, *limitsTable); });
+        const auto coarsenWide = Timed("溢れの端数",
+                                       [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
         if (!exhausted) {
@@ -879,7 +972,7 @@ namespace {
         }
 
         for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
-                                   &wideManyConduct, &refineWide}) {
+                                   &wideManyConduct, &refineWide, &coarsenWide}) {
             if (*result)
                 continue;
 
@@ -895,7 +988,7 @@ namespace {
         }
 
         Log(Channel::Gpu, Level::Info,
-            "溢れの場面: OK(上限・大きい溢れ・32 種・細かくするで GPU と CPU が毎刻みビット一致)");
+            "溢れの場面: OK(上限・大きい溢れ・32 種・細かくする・溢れの端数で GPU と CPU が毎刻みビット一致)");
 
         return 0;
     }
