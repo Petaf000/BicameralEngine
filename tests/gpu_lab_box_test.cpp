@@ -76,12 +76,13 @@ namespace {
     }
 
     // 範囲(両端を含む)のセルの物質 species の合計
-    uint64_t RegionTotalOf(const sim::MultiresNest& nest, sim::LabCellRange range, uint32_t species) {
+    uint64_t RegionTotalOf(const sim::MultiresNest& nest, sim::LabCellRange range, uint32_t species,
+                           lab::LabBoxShape shape = sim::LAB_SINGLE_ROOT_SHAPE) {
         uint64_t total = 0;
         for (uint32_t z = range.low.z; z <= range.high.z; ++z) {
             for (uint32_t y = range.low.y; y <= range.high.y; ++y) {
                 for (uint32_t x = range.low.x; x <= range.high.x; ++x) {
-                    const reaction::RxCell cell = sim::LabBoxCell(nest, multires::MrCellIndex(x, y, z));
+                    const reaction::RxCell cell = sim::LabBoxCell(nest, lab::LabCellIndex(x, y, z), shape);
                     for (uint32_t i = 0; i < cell.speciesCount; ++i)
                         total += cell.species[i] == species ? cell.amounts[i] : 0;
                 }
@@ -292,9 +293,13 @@ namespace {
     // 元素の名前ごとの原子の数(CPU の箱の全部のセル)
     std::vector<sim::NamedElementCount> CountBoxElements(const sim::LabSession& session) {
         std::vector<sim::NamedElementCount> totals;
-        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+        const lab::LabBoxShape shape = session.Shape();
+        for (uint32_t index = 0; index < lab::LAB_CELL_INDEX_LIMIT; ++index) {
+            if (!lab::LabCellInBox(shape, index))
+                continue;
+
             for (const sim::NamedElementCount& count :
-                 sim::CountNamedElements(session.Table(), sim::LabBoxCell(session.Cpu(), index))) {
+                 sim::CountNamedElements(session.Table(), sim::LabBoxCell(session.Cpu(), index, shape))) {
                 const auto found = std::ranges::find(totals, count.element, &sim::NamedElementCount::element);
                 if (found == totals.end())
                     totals.push_back(count);
@@ -600,6 +605,7 @@ namespace {
                                               : static_cast<uint32_t>(std::distance(table.ruleNames.begin(), found));
     }
 
+    // 4 か所の木(どれも 2×2×2 セル)
     struct PatchGroups {
         sim::LabCellRange stopped{.low = {.x = 1, .y = 1, .z = 1},
                                   .high = {.x = 2, .y = 2, .z = 2}};  // 魔素あり・止める
@@ -611,13 +617,23 @@ namespace {
                                 .high = {.x = 6, .y = 6, .z = 6}};  // 魔素なし・そのまま
     };
 
+    // 根を並べた箱(T-0173)の 4 か所: 止める所は x と z の根の境、速める所は x の根の境をまたぐ
+    constexpr PatchGroups LARGE_PATCH_GROUPS = {
+        .stopped = {.low = {.x = 7, .y = 1, .z = 7}, .high = {.x = 8, .y = 2, .z = 8}},
+        .catalyzed = {.low = {.x = 15, .y = 1, .z = 1}, .high = {.x = 16, .y = 2, .z = 2}},
+        .amplified = {.low = {.x = 23, .y = 5, .z = 3}, .high = {.x = 24, .y = 6, .z = 4}},
+        .plain = {.low = {.x = 29, .y = 5, .z = 12}, .high = {.x = 30, .y = 6, .z = 13}}};
+
     // 450 K の木を 4 か所に置き、2 か所にパッチ(魔素の触媒の規則を止める・魔素なしの燃焼を 2^PATCH_SHIFT 倍)を PATCH_TICKS 刻み。
     // 毎刻み CPU と GPU がビット一致・元素は保存・止めた所は燃えず、終わると燃え始める・速めた所はそのままの所よりずっと燃える
+    // shape = 箱の形(大きい箱では範囲は箱の座標。パッチは範囲が重なる根だけをつつく)
     std::expected<void, std::string> RunPatch(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
-                                              const sim::BakedReactionTable& table) {
+                                              const sim::BakedReactionTable& table,
+                                              lab::LabBoxShape shape = sim::LAB_SINGLE_ROOT_SHAPE,
+                                              const PatchGroups& groups = {}) {
         constexpr uint32_t PATCH_TICKS = 50;
         constexpr int32_t PATCH_SHIFT = 10;
-        auto session = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "patch");
+        auto session = sim::LabSession::Create(device, queueType, table, MANA_TABLE_VERSION, "patch", shape);
         if (!session)
             return std::unexpected(session.error());
 
@@ -636,7 +652,6 @@ namespace {
         manaWood.push_back({.species = manaTest, .amount = MANA_MICROMOLES});
         std::ranges::sort(wood, {}, &sim::SpeciesAmount::species);
         std::ranges::sort(manaWood, {}, &sim::SpeciesAmount::species);
-        const PatchGroups groups;
         const bool queued = session->PlaceRegion(groups.stopped, manaWood, MANA_WARM_MILLIKELVIN) &&
                             session->PlaceRegion(groups.catalyzed, manaWood, MANA_WARM_MILLIKELVIN) &&
                             session->PlaceRegion(groups.amplified, wood, MANA_WARM_MILLIKELVIN) &&
@@ -661,7 +676,7 @@ namespace {
         // --- パッチの間: 止めた所はほとんど燃えない・速めた所はずっと燃える ---
         const uint64_t placed = 8 * MANA_WOOD_CELLULOSE_MICROMOLES;
         const auto burned = [&](sim::LabCellRange range) {
-            return placed - RegionTotalOf(session->Gpu(), range, cellulose);
+            return placed - RegionTotalOf(session->Gpu(), range, cellulose, shape);
         };
         const uint64_t stoppedDuring = burned(groups.stopped);
         const uint64_t catalyzedDuring = burned(groups.catalyzed);
@@ -675,9 +690,10 @@ namespace {
 
         const uint64_t stoppedAfter = burned(groups.stopped);
         Log(Channel::Gpu, Level::Info,
-            "gpu_lab_box_test: パッチ {} 刻み 燃えたセルロース 止めた {}(終わった後 {})・触媒のまま {}・2^{} 倍 "
-            "{}・そのまま {} µmol",
-            PATCH_TICKS, stoppedDuring, stoppedAfter, catalyzedDuring, PATCH_SHIFT, amplifiedDuring, plainDuring);
+            "gpu_lab_box_test: 根 {} つの箱でパッチ {} 刻み 燃えたセルロース 止めた {}(終わった後 {})・触媒のまま {}・"
+            "2^{} 倍 {}・そのまま {} µmol",
+            lab::LabRootCount(shape), PATCH_TICKS, stoppedDuring, stoppedAfter, catalyzedDuring, PATCH_SHIFT,
+            amplifiedDuring, plainDuring);
         if (CountBoxElements(*session) != elementsBefore)
             return std::unexpected("パッチで元素の数が変わった");
 
@@ -748,6 +764,12 @@ namespace {
 
         if (auto result = RunPatch(device->Get(), options->queueType, *table); !result) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(魔法のパッチ: {})", result.error());
+            return 1;
+        }
+
+        if (auto result = RunPatch(device->Get(), options->queueType, *table, LARGE_SHAPE, LARGE_PATCH_GROUPS);
+            !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(根を並べた箱の魔法のパッチ: {})", result.error());
             return 1;
         }
 
