@@ -22,15 +22,23 @@ uint32_t WideFractionArea(uint32_t fractionSlot) {
     return WidePageCount() + fractionSlot;
 }
 
-// 領域 area の見出しの先頭(頁は u6 の溢れの領域の先頭から、端数の枠は空きのスタックの後ろから)
+// 世界の枠 slot の一様の値の溢れの領域の番号(T-0312。値の溢れはセル 0 の範囲)
+uint32_t WideUniformArea(uint32_t slot) {
+    return MR_WIDE_UNIFORM_AREA | slot;
+}
+
+// 領域 area の見出しの先頭(頁は u6 の溢れの領域の先頭から、一様の値・端数の枠は空きのスタックの後ろから)
 uint32_t WideAreaHeader(uint32_t area) {
     const uint32_t pages = WidePageCount();
     if (area < pages)
         return MrWideHeaderWord(g_overflowBase, area);
 
     const uint32_t pool = WidePoolWord();
+    const uint32_t capacity = g_treeWords[pool + MR_WIDE_POOL_CAPACITY];
+    if ((area & MR_WIDE_UNIFORM_AREA) != 0)
+        return MrWideUniformHeaderWord(pool, capacity, area & ~MR_WIDE_UNIFORM_AREA);
 
-    return MrWideFractionHeaderWord(pool, g_treeWords[pool + MR_WIDE_POOL_CAPACITY], area - pages);
+    return MrWideFractionHeaderWord(pool, capacity, g_worldBlocks, area - pages);
 }
 
 uint32_t WideHeaderAt(uint32_t page, uint32_t field) {
@@ -72,7 +80,7 @@ uint2 WideRange(uint32_t page, uint32_t side, uint32_t index) {
     return uint2(g_treeWords[WideWord(page, side, index)], g_treeWords[WideWord(page, side, index + 1)]);
 }
 
-// 頁の今の面を面 0 にして空にする(threads スレッドで分ける。同期は呼ぶ側。一様の値は溢れを持たない)。
+// 領域の今の面を面 0 にして空にする(threads スレッドで分ける。同期は呼ぶ側)。
 // 前に使った頁の塊はそのまま持つ(次に書く時に要らなければ WideAllocate が返す)ので、塊を持つなら始まりの表を 0 にする
 void ClearWideSideWords(uint32_t page, uint32_t thread, uint32_t threads) {
     if (WideChunkCount(page, 0) != 0) {

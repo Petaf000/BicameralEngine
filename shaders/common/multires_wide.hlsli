@@ -8,7 +8,9 @@
 // 塊に分けて、見出しの塊の表(面ごと)が置き場の塊の番号を持つ(T-0236: 使う分だけの VRAM。溢れの無い面は塊を持たず、空気だけの頁は見出しだけ)。
 // 刻むブロックは今の面を読み、もう片方の面へ書いてから面を入れ替える(読む前に別のセルの溢れを上書きしないため)。
 // 端数の枠も同じ形の溢れ(見出し・2 面・塊は同じ置き場)を持ち、見出しは空きのスタックの後ろに枠の順に並ぶ(T-0311)。
-// 溢れの領域の番号(area)は、頁は頁の番号、端数の枠は「頁の数 + 枠の番号」。
+// 一様なブロックの値 1 つの溢れ(CPU の MultiresUniformOverflow)も同じ形の領域を世界の枠ごとに持ち、値の溢れはセル 0 の範囲に置く
+// (始まりの表はセル 1 から後ろが全部「溢れの数」。見出しは空きのスタックの後ろ・端数の枠の見出しの前に枠の順。T-0312)。
+// 溢れの領域の番号(area)は、頁は頁の番号、端数の枠は「頁の数 + 枠の番号」、一様の値は MR_WIDE_UNIFORM_AREA | 世界の枠の番号。
 // 書く面の塊が足りなければ、印(要求)を付けて刻みの後の段(WideAllocate)が枠の順に塊を配り、WideRetry が同じ刻みのうちに
 // 溢れるセルだけ刻み直す(T-0236。置き場が尽きた時だけ待たせて MR_COUNTER_LIMIT_PRODUCTS に数える)。
 // 1 セルが GPU で持てる成分は RX_GPU_WIDE_SPECIES まで(T-0248 で 24 → 32、T-0272 で 64、T-0327 で 96。表の物質が 96 以下なら
@@ -35,7 +37,8 @@ FX_CONST uint32_t MR_WIDE_CHUNK_WORDS = 1024;  // 4 KiB。最初の塊に塊の�
 // 面の塊の表は [塊の数][最初の塊の番号](見出し)+ 2 番目からの塊の番号(最初の塊の先頭 MR_WIDE_TABLE_SPILL 語)。
 // 見出しの大きさが 1 セルの上限(RX_GPU_WIDE_SPECIES)に依らない(T-0327。前は見出しに表を丸ごと持ち、上限 64 で 192 語 = 768 B/頁)。
 // 面の塊の数の最大 c は、表の続き(c − 1 語)と論理の語が c 塊に入る最小: 1024c ≥ (c − 1) + 論理の語 ⇔ c ≥ (論理の語 − 1) ÷ 1023
-FX_CONST uint32_t MR_WIDE_SIDE_CHUNKS = (MR_WIDE_SIDE_WORDS - 1 + (MR_WIDE_CHUNK_WORDS - 2)) / (MR_WIDE_CHUNK_WORDS - 1);
+FX_CONST uint32_t MR_WIDE_SIDE_CHUNKS = (MR_WIDE_SIDE_WORDS - 1 + (MR_WIDE_CHUNK_WORDS - 2)) /
+                                        (MR_WIDE_CHUNK_WORDS - 1);
 FX_CONST uint32_t MR_WIDE_TABLE_SPILL = MR_WIDE_SIDE_CHUNKS - 1;  // 最初の塊の先頭に置く塊の表の続き(語)
 
 // --- 頁の見出し: [今の面][要求][要求した刻みの busyTick の下位・上位][刻み直すセルの印 × 16][面 0 の塊の数・最初の塊][面 1 の塊の数・最初の塊] ---
@@ -107,9 +110,17 @@ FX_FN uint32_t MrWideStackWord(uint32_t pool, uint32_t capacity) {
     return pool + MR_WIDE_POOL_CHUNKS + (capacity * MR_WIDE_CHUNK_WORDS);
 }
 
-// 端数の枠 fractionSlot の見出しの先頭(T-0311。空きのスタックの後ろ。capacity = 塊の数)
-FX_FN uint32_t MrWideFractionHeaderWord(uint32_t pool, uint32_t capacity, uint32_t fractionSlot) {
-    return MrWideStackWord(pool, capacity) + capacity + (fractionSlot * MR_WIDE_HEADER_WORDS);
+// 一様の値の溢れの領域の番号の印(T-0312。下位は世界の枠の番号。頁・端数の枠の番号とは重ならない)
+FX_CONST uint32_t MR_WIDE_UNIFORM_AREA = 1u << 31;
+
+// 世界の枠 slot の一様の値の溢れの見出しの先頭(T-0312。空きのスタックの後ろ。capacity = 塊の数)
+FX_FN uint32_t MrWideUniformHeaderWord(uint32_t pool, uint32_t capacity, uint32_t slot) {
+    return MrWideStackWord(pool, capacity) + capacity + (slot * MR_WIDE_HEADER_WORDS);
+}
+
+// 端数の枠 fractionSlot の見出しの先頭(T-0311。一様の値の見出しの後ろ。capacity = 塊の数・worldBlocks = 世界の枠の数)
+FX_FN uint32_t MrWideFractionHeaderWord(uint32_t pool, uint32_t capacity, uint32_t worldBlocks, uint32_t fractionSlot) {
+    return MrWideUniformHeaderWord(pool, capacity, worldBlocks) + (fractionSlot * MR_WIDE_HEADER_WORDS);
 }
 
 // 見出しの先頭 header から、面 side の塊の表の先頭
@@ -117,10 +128,11 @@ FX_FN uint32_t MrWideTableAt(uint32_t header, uint32_t side) {
     return header + MR_WIDE_HEADER_TABLES + (side * MR_WIDE_TABLE_WORDS);
 }
 
-// 溢れの領域の語の数(fractions = 端数の枠の数。T-0311)
-FX_FN uint64_t MrWideAreaWords(uint32_t pages, uint32_t capacity, uint32_t fractions) {
+// 溢れの領域の語の数(worldBlocks = 世界の枠の数〔一様の値。T-0312〕・fractions = 端数の枠の数〔T-0311〕)
+FX_FN uint64_t MrWideAreaWords(uint32_t pages, uint32_t capacity, uint32_t worldBlocks, uint32_t fractions) {
     return ((uint64_t)pages * MR_WIDE_HEADER_WORDS) + MR_WIDE_POOL_CHUNKS +
-           ((uint64_t)capacity * (MR_WIDE_CHUNK_WORDS + 1)) + ((uint64_t)fractions * MR_WIDE_HEADER_WORDS);
+           ((uint64_t)capacity * (MR_WIDE_CHUNK_WORDS + 1)) + ((uint64_t)worldBlocks * MR_WIDE_HEADER_WORDS) +
+           ((uint64_t)fractions * MR_WIDE_HEADER_WORDS);
 }
 
 // 面の論理の語 word の、塊を並べた中の位置(最初の塊の先頭は塊の表の続き。T-0327)

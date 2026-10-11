@@ -613,14 +613,58 @@ namespace {
             return std::unexpected(std::format("刻み {}: 置き場を読めない", tick));
 
         if (use->fractionChunks != use->fractionNeeded ||
-            use->freeChunks + use->pageChunks + use->fractionChunks != use->capacity) {
-            return std::unexpected(
-                std::format("刻み {}: 端数の枠の塊 {}(要る {})・空き {} + 頁 {} + 端数 {} が全部 {} と違う", tick,
-                            use->fractionChunks, use->fractionNeeded, use->freeChunks, use->pageChunks,
-                            use->fractionChunks, use->capacity));
+            use->freeChunks + use->pageChunks + use->fractionChunks + use->uniformChunks != use->capacity) {
+            return std::unexpected(std::format(
+                "刻み {}: 端数の枠の塊 {}(要る {})・空き {} + 頁 {} + 端数 {} + 一様の値 {} が全部 {} と違う", tick,
+                use->fractionChunks, use->fractionNeeded, use->freeChunks, use->pageChunks, use->fractionChunks,
+                use->uniformChunks, use->capacity));
         }
 
         return use->freeChunks;
+    }
+
+    // --- 一様の値の溢れを写して読み戻す(T-0312): 溢れを使う世界の一様な根が 9 種目からの成分を持つ(CPU の uniformOverflow)。
+    //     GPU に写して刻まずに読み戻すと、一様の値の溢れまで CPU とビット一致・置き場の塊は一様の値の 1 塊 ---
+    std::expected<RunResult, std::string> RunUniformOverflowRoundTrip(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                                      gpu::DebugRing& ring,
+                                                                      const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = sim::MakeMultiresNest(
+            test::MakeMultiresCapacity(table, test::WIDE_OVERFLOW_WORLD_BLOCKS, 0, test::WIDE_OVERFLOW_WORLD_BLOCKS));
+        sim::EnableWideCells(cpu);
+        std::vector<sim::SpeciesAmount> amounts;
+        for (uint32_t i = 1; i <= test::WIDE_OVERFLOW_SPECIES; ++i)
+            amounts.push_back({.species = table.SpeciesId(test::WideOverflowName(i)), .amount = 1000000 + (i * 1000)});
+
+        // --- 溢れのある一様な根(原点)と、溢れの無い一様な根 ---
+        const RxWideCell value = sim::MakeWideReactionCell(table, amounts, 300000);
+        const std::vector<RxCell> empty(MR_BLOCK_CELLS, RxMakeEmptyCell(0));
+        const uint32_t wideSlot = sim::PlaceRootBlock(cpu, 0, 0, 0, empty);
+        sim::PlaceRootBlock(cpu, test::WIDE_OVERFLOW_UNIFORM_X, 0, 0, empty);
+        sim::StoreWideUniform(cpu, wideSlot, value);
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read;
+        const auto upload = [&](ID3D12GraphicsCommandList10* list) {
+            return gpu->RecordUpload(list, cpu);
+        };
+        if (auto executed = ExecuteTick(queue, ring, *gpu, read, 0, upload); !executed)
+            return std::unexpected(executed.error());
+
+        if (auto compared = CompareTick(cpu, read, 0); !compared)
+            return std::unexpected(std::format("一様の値の溢れ: {}", compared.error()));
+
+        const uint32_t species = sim::LoadWideUniform(read, wideSlot).speciesCount;
+        const std::optional<sim::GpuMultires::WideChunkUse> use = gpu->ReadWideChunkUse();
+        if (species != test::WIDE_OVERFLOW_SPECIES || !use || use->uniformChunks != 1 ||
+            use->freeChunks + use->uniformChunks != use->capacity)
+            return std::unexpected(std::format("一様の値の溢れ: 読み戻した一様の値の成分 {}・塊が違う", species));
+
+        Log(Channel::Gpu, Level::Info, "一様の値の溢れ: {} 種の一様の値を写して読み戻した(CPU とビット一致)", species);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu)};
     }
 
     // 刻み tick の要求: 豊かな子を粗くした後(TestCoarsenFullWide の前半)、細かくし直す・粗くするを交互に
@@ -1237,6 +1281,8 @@ namespace {
                                         [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
         const auto fractionChunks = Timed("端数の枠の塊",
                                           [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
+        const auto uniformRoundTrip = Timed(
+            "一様の値の溢れ", [&] { return RunUniformOverflowRoundTrip(device, queue, ring, *wideTable); });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
         if (!exhausted) {
@@ -1244,8 +1290,9 @@ namespace {
             return 1;
         }
 
-        for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
-                                   &wideManyConduct, &refineWide, &coarsenWide, &coarsenUnion, &fractionChunks}) {
+        for (const auto* result :
+             {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany, &wideManyConduct,
+              &refineWide, &coarsenWide, &coarsenUnion, &fractionChunks, &uniformRoundTrip}) {
             if (*result)
                 continue;
 
@@ -1323,21 +1370,24 @@ namespace {
         return 0;
     }
 
-    // 粗くする溢れの場面だけ(--part coarsen。T-0329 の切り分け用。溢れの場面〔wide〕にも入っている)
+    // 粗くする溢れの場面と一様の値の溢れだけ(--part coarsen。T-0329・T-0312 の切り分け用。溢れの場面〔wide〕にも入っている)
     int RunCoarsenScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
         const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
-        if (!limitsTable) {
+        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
+        if (!limitsTable || !wideTable) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
             return 1;
         }
 
+        const auto uniformRoundTrip = Timed(
+            "一様の値の溢れ", [&] { return RunUniformOverflowRoundTrip(device, queue, ring, *wideTable); });
         const auto coarsenUnion = Timed("GPU で粗くする和集合",
                                         [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
         const auto coarsenWide = Timed("溢れの端数",
                                        [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
         const auto fractionChunks = Timed("端数の枠の塊",
                                           [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
-        for (const auto* result : {&coarsenUnion, &coarsenWide, &fractionChunks}) {
+        for (const auto* result : {&uniformRoundTrip, &coarsenUnion, &coarsenWide, &fractionChunks}) {
             if (*result)
                 continue;
 
