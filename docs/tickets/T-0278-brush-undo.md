@@ -28,6 +28,8 @@
 - 同日: debug のビルドは警告なし。`^(brush_undo|brush_stroke|sim_scheduler|replay_file|window_place_.*)$` 6 本が 1 回目で通過
   (window_place_record 86 秒: 刻み 14 と 12 の保存点へ戻し、どちらも戻す前と違う状態・残って当たった 5 / 5。play 80 秒: 52 / 52 一致)。
   フレームのループを触ったので `^(time_control|window_replay_(record|play|editor|rewind))$` 5 本も通過。archmap OK(154)。
+- 同日: main(1f3e3b7。文書だけの統合)へ載せ直した(衝突なし)。debug のビルドは警告なし・
+  `^(brush_undo|sim_scheduler|replay_file|window_place_.*)$` 5 本が通過。release・tidy・計測はしていない。かかった時間は約 1 時間 25 分。
 
 ## 引き継ぎメモ(HANDOFF に載せる内容)
 - 動いているもの: `bicameral --editor` の筆のパネルの「最後の運びを元に戻す (Ctrl+Z)」。運び = 押してから置き終えるまで
