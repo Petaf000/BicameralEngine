@@ -5,15 +5,18 @@
 // データの流れ:
 //   コマンド(実験室なら LAB_COMMAND_TYPE_PATCH。06 §3。再生ファイルに入る)→ MpAddPatch がパッチの列(世界の状態。GPU は u5、CPU は
 //   MultiresNest::magicPatches。どちらも同じ uint32 の語の並び)に足す → 刻みの反応の評価(MrStepCellWait)が、セルを覆うパッチを
-//   MpPatchTable で表に重ねる(MpPatchedTable の Rate だけが変わる)→ 反応の核(reaction.hlsli)はそのまま。
+//   MpPatchTable で表に重ねる(MpPatchedTable の Rate と、転換なら Rule が変わる)→ 反応の核(reaction.hlsli)はそのまま。
 //
-// 効き方(今あるもの): 規則 1 つの速さを 2^shift 倍にする(増幅・弱める)/ 止める(阻害)/ 活性化エネルギーを下げる(触媒。T-0288)。
+// 効き方(今あるもの): 規則 1 つの速さを 2^shift 倍にする(増幅・弱める)/ 止める(阻害)/ 活性化エネルギーを下げる(触媒。T-0288)/
+//   生成物を替える(転換。T-0359)。
 //   速さの表の値は「仮数 × 2^指数」なので、指数に shift を足すだけで、どの機械でも同じ整数の結果になる。
 //   触媒は k = A·exp(−(Ea − ΔEa) / RT) = 表の値 × exp(ΔEa / RT)。倍率が温度で変わる(冷たいほど大きく効く)ので、
 //   プレイヤーが温度を変えて測ると「2^shift 倍」(どの温度でも同じ倍率)と区別できる。ΔEa / RT はベイク(reaction_table.cpp の
 //   BakeRate)と同じ整数の計算で、読む温度ごとにその場で求める(表を作り直さない。ADR-0095 追記)。下げる量は規則の Ea が上限(Ea' ≥ 0)。
 //   **保存則は変えない**(D-428・D-419): 変わるのは「1 刻みにどれだけ進みたいか」だけで、進んだ分は反応の核が係数 × 進行度で
-//   成分を動かす(元素の数とエネルギーはビット単位で保存される)。転換(生成物の差し替え。T-0359)・湧き出しと吸い込みは後のチケット。
+//   成分を動かす(元素の数とエネルギーはビット単位で保存される)。
+// 転換(T-0359): 規則の生成物 1 つを、元素が釣り合う別の物質に替える(Rule が変わる。釣り合わない転換は足す時に断り、効かせる時も
+//   効かない)。反応熱は替えた後の生成物の H0 で求め直すので、エネルギーも保存される。湧き出しと吸い込みは後のチケット。
 // 規則は名前の鍵(RxRule::key)で持つ(T-0287): 規則の並びが変わる表の差し替え(T-0218・T-0242)でも、同じ名前の規則に効き続ける。
 // 範囲と期間: 範囲はレベル 0(0.5 m)のセルの単位の直方体(両端を含む)。セルがその直方体と重なれば効く(粗いセルは丸ごと効く)。
 //   期間は [始まりの刻み, 終わりの刻み)。速さが変わる刻み(始まりと終わり)に、範囲に重なるブロックを「つつく」(ADR-0018:
@@ -49,10 +52,14 @@ FX_CONST uint32_t MP_COMMAND_HIGH = 7;      // 大きい角 x, y, z
 FX_CONST uint32_t MP_COMMAND_WORDS = 10;
 
 // 効き方の語: 下位 8bit = 種類、8〜15bit = shift(符号付き 8bit。MP_KIND_SCALE だけ)、
-// 8〜31bit = 下げる活性化エネルギー(J/mol。符号なし 24bit。MP_KIND_CATALYST だけ)
-FX_CONST uint32_t MP_KIND_SCALE = 1;                           // 速さを 2^shift 倍(増幅・弱める)
-FX_CONST uint32_t MP_KIND_STOP = 2;                            // 止める(阻害)
-FX_CONST uint32_t MP_KIND_CATALYST = 3;                        // 活性化エネルギーを下げる(触媒。T-0288)
+// 8〜31bit = 下げる活性化エネルギー(J/mol。符号なし 24bit。MP_KIND_CATALYST だけ)、
+// 8〜9bit = 生成物の欄・10〜31bit = 替える先の物質 ID(MP_KIND_CONVERT だけ)
+FX_CONST uint32_t MP_KIND_SCALE = 1;                   // 速さを 2^shift 倍(増幅・弱める)
+FX_CONST uint32_t MP_KIND_STOP = 2;                    // 止める(阻害)
+FX_CONST uint32_t MP_KIND_CATALYST = 3;                // 活性化エネルギーを下げる(触媒。T-0288)
+FX_CONST uint32_t MP_KIND_CONVERT = 4;                 // 生成物 1 つを別の物質に替える(転換。T-0359)
+FX_CONST uint32_t MP_MAX_CONVERT_SPECIES = 0x3FFFFFu;  // 替える先の物質 ID の上限(22bit)
+FX_CONST uint32_t MP_MAX_CONVERT_FACTOR = 0xFFFFu;     // 転換で掛け合わせる係数・公約数の上限(積が 32bit に収まる)
 FX_CONST uint32_t MP_MAX_CATALYST_JOULES_PER_MOL = 0xFFFFFFu;  // 1 つのパッチが下げる量の上限(24bit。約 16.8 MJ/mol)
 FX_CONST int32_t MP_MAX_SHIFT = 64;                            // |shift| の上限(16 個重ねても指数は int32 に十分収まる)
 FX_CONST int32_t MP_MAX_LEVEL_SHIFT = 40;  // 範囲の比べ方で使うレベルの差の上限(64bit の座標があふれない)
@@ -86,6 +93,12 @@ FX_FN uint32_t MpMakeCatalystEffect(uint32_t loweredJoulesPerMol) {
     return MP_KIND_CATALYST | ((loweredJoulesPerMol & MP_MAX_CATALYST_JOULES_PER_MOL) << 8);
 }
 
+// 規則の生成物の欄 productSlot(0〜RX_MAX_PRODUCTS − 1)の物質を物質 species に替える。係数は元素の数が同じになるように
+// 求め直す(MpConvertedCoefficient)。物質 ID は今の表の ID(表を替えた後は、その表で釣り合う時だけ効く)
+FX_FN uint32_t MpMakeConvertEffect(uint32_t productSlot, uint32_t species) {
+    return MP_KIND_CONVERT | ((productSlot & 0x3u) << 8) | ((species & MP_MAX_CONVERT_SPECIES) << 10);
+}
+
 FX_FN uint32_t MpEffectKind(uint32_t effect) {
     return effect & 0xFFu;
 }
@@ -100,10 +113,22 @@ FX_FN uint32_t MpEffectCatalystJoulesPerMol(uint32_t effect) {
     return effect >> 8;
 }
 
+// 8〜9bit を生成物の欄、10〜31bit を替える先の物質 ID として読む
+FX_FN uint32_t MpEffectConvertSlot(uint32_t effect) {
+    return (effect >> 8) & 0x3u;
+}
+
+FX_FN uint32_t MpEffectConvertSpecies(uint32_t effect) {
+    return effect >> 10;
+}
+
 FX_FN bool MpEffectValid(uint32_t effect) {
     const uint32_t kind = MpEffectKind(effect);
     if (kind == MP_KIND_CATALYST)
         return MpEffectCatalystJoulesPerMol(effect) != 0;
+
+    if (kind == MP_KIND_CONVERT)
+        return MpEffectConvertSlot(effect) < RX_MAX_PRODUCTS && MpEffectConvertSpecies(effect) != 0;
 
     if ((effect >> 16) != 0)
         return false;
@@ -159,27 +184,97 @@ FX_FN uint64_t MpCatalyzeRate(uint64_t packed, uint32_t loweredJoulesPerMol, uin
     return (scaled << 32) | (uint64_t)(uint32_t)(int32_t)exponent;
 }
 
-// --- パッチの検査 ------------------------------------------------------------------------------
+// --- 転換(生成物の差し替え。T-0359)--------------------------------------------------------------
+// 元素の釣り合い(02 §2 の 1・D-428): 替える前の c 個の物質 a と、替えた後の d 個の物質 b の元素が全部同じ時だけ替える。
+// 物質の組成の型(RxSpecies::elementClass。原子の比)が同じで c × 公約数(a) = d × 公約数(b) になる整数 d があれば釣り合う
+// (例: 2 O3 → 3 O2。ベイクが型を付ける。reaction_table.cpp の BakeElementClasses)。足す時(コマンド)にも、効かせる時
+// (表を替えた後かもしれない)にも同じ関数で確かめるので、CPU と GPU で同じ判定になり、釣り合わない転換はどこでも効かない。
+// 反応熱は替えた後の生成物の H0 で求め直す(ベイクの ReactionEnthalpy と同じ式。エネルギーの保存。D-428)。
+// 速さ(と触媒の Ea)は変えない: 進む量は同じで、出てくる物質と熱が変わる。
 
-// 表に名前の鍵 key の規則があるか(ruleCount = 表の規則の数。足す時だけ呼ぶ)
+// 表の物質の数(0 番を含む)。ベイクが物質 0(使わない)の elementUnits に置く。GPU でルートの SRV の大きさを読まないため
 template <typename Table>
-FX_FN bool MpRuleKnown(Table table, uint64_t key, uint32_t ruleCount) {
-    for (uint32_t rule = 0; rule < ruleCount; ++rule) {
-        if (table.Rule(rule).key == key)
-            return true;
-    }
-
-    return false;
+FX_FN uint32_t MpSpeciesCount(Table table) {
+    return table.Species(0).elementUnits;
 }
 
-// 当てられるか(規則が表にある・効き方が正しい・期間が 1 刻み以上・角の順)。ruleCount = 表の規則の数
+// 規則 rule の生成物の欄 slot を物質 species に替えた時の係数(元素が釣り合わなければ 0 = 替えない)。
+// 替える先は今の表にある物質で、元素を持ち、規則の反応物でないこと(反応物と同じ物を作ると、何も変わらない輪になる)
+template <typename Table>
+FX_FN uint32_t MpConvertedCoefficient(Table table, RxRule rule, uint32_t slot, uint32_t species) {
+    if (slot >= rule.productCount || species == 0 || species >= MpSpeciesCount(table))
+        return 0;
+
+    for (uint32_t i = 0; i < rule.reactantCount; ++i) {
+        if (rule.reactants[i] == species)
+            return 0;
+    }
+
+    const RxSpecies before = table.Species(rule.products[slot]);
+    const RxSpecies after = table.Species(species);
+    const uint32_t coefficient = rule.productCoefficients[slot];
+    const bool sameClass = before.elementClass != 0 && before.elementClass == after.elementClass;
+    const bool bounded = coefficient <= MP_MAX_CONVERT_FACTOR && before.elementUnits <= MP_MAX_CONVERT_FACTOR &&
+                         after.elementUnits != 0;
+    if (!sameClass || !bounded)
+        return 0;
+
+    const uint32_t units = coefficient * before.elementUnits;
+    if (units % after.elementUnits != 0)
+        return 0;
+
+    return units / after.elementUnits;
+}
+
+// 反応熱(進行度 1 µmol あたりの µJ)= Σ 生成物の H0 − Σ 反応物の H0(ベイクの ReactionEnthalpy と同じ式)
+template <typename Table>
+FX_FN int64_t MpRuleEnthalpy(Table table, RxRule rule) {
+    int64_t enthalpy = 0;
+    for (uint32_t i = 0; i < rule.productCount; ++i)
+        enthalpy += (int64_t)rule.productCoefficients[i] * table.Species(rule.products[i]).h0;
+
+    for (uint32_t i = 0; i < rule.reactantCount; ++i)
+        enthalpy -= (int64_t)rule.reactantCoefficients[i] * table.Species(rule.reactants[i]).h0;
+
+    return enthalpy;
+}
+
+// --- パッチの検査 ------------------------------------------------------------------------------
+
+// 表で名前の鍵 key の規則の ID(無ければ ruleCount。ruleCount = 表の規則の数。足す時だけ呼ぶ)
+template <typename Table>
+FX_FN uint32_t MpFindRule(Table table, uint64_t key, uint32_t ruleCount) {
+    for (uint32_t rule = 0; rule < ruleCount; ++rule) {
+        if (table.Rule(rule).key == key)
+            return rule;
+    }
+
+    return ruleCount;
+}
+
+// 表に名前の鍵 key の規則があるか
+template <typename Table>
+FX_FN bool MpRuleKnown(Table table, uint64_t key, uint32_t ruleCount) {
+    return MpFindRule(table, key, ruleCount) < ruleCount;
+}
+
+// 当てられるか(規則が表にある・効き方が正しい・期間が 1 刻み以上・角の順・転換なら今の表で元素が釣り合う)。
+// ruleCount = 表の規則の数
 template <typename Table>
 FX_FN bool MpPatchValid(Table table, MpPatch patch, uint32_t ruleCount) {
     const bool ordered = patch.lowX <= patch.highX && patch.lowY <= patch.highY && patch.lowZ <= patch.highZ;
     if (!MpEffectValid(patch.effect) || patch.startTick >= patch.endTick || !ordered)
         return false;
 
-    return MpRuleKnown(table, patch.ruleKey, ruleCount);
+    const uint32_t rule = MpFindRule(table, patch.ruleKey, ruleCount);
+    if (rule >= ruleCount)
+        return false;
+
+    if (MpEffectKind(patch.effect) != MP_KIND_CONVERT)
+        return true;
+
+    return MpConvertedCoefficient(table, table.Rule(rule), MpEffectConvertSlot(patch.effect),
+                                  MpEffectConvertSpecies(patch.effect)) != 0;
 }
 
 // 刻み tick に効いているか
@@ -374,7 +469,7 @@ FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, RxRule rule, uint32_t kel
 
         if (kind == MP_KIND_CATALYST)
             lowered += MpEffectCatalystJoulesPerMol(effect);
-        else
+        else if (kind == MP_KIND_SCALE)
             shift += MpEffectShift(effect);
     }
 
@@ -383,15 +478,80 @@ FX_FN uint64_t MpPatchedRate(List list, uint32_t mask, RxRule rule, uint32_t kel
     return MpScaleRate(MpCatalyzeRate(packed, limited, kelvin), shift);
 }
 
-// パッチを重ねた表(reaction.hlsli の Table の約束。Rate だけが変わる)。Table は PatchWord(word) も持つ(パッチの列を読む)
+// 覆う転換のパッチ(converting。MpConvertingMask)のうち規則 rule(名前の鍵で比べる)のものを当てた規則。
+// 生成物の欄ごとに、列の前の(先に足した)パッチが勝つ(後のものは同じ欄に効かない。順は CPU と GPU で同じ)。
+// 釣り合いは替える前の規則で欄ごとに確かめる(欄どうしは独立なので、どの組み合わせでも全体が釣り合う)。替えたら反応熱を求め直す
+template <typename Table>
+FX_FN RxRule MpConvertedRule(Table table, uint32_t converting, RxRule rule) {
+    RxRule converted = rule;
+    uint32_t doneSlots = 0;
+    for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
+        if (((converting >> i) & 1u) == 0)
+            continue;
+
+        const uint32_t base = MP_LIST_HEADER_WORDS + (i * MP_PATCH_WORDS);
+        const uint64_t key = FX_U64(table.PatchWord(base + MP_WORD_RULE_KEY + 1),
+                                    table.PatchWord(base + MP_WORD_RULE_KEY));
+        const uint32_t effect = table.PatchWord(base + MP_WORD_EFFECT);
+        const uint32_t slot = MpEffectConvertSlot(effect);
+        if (key != rule.key || ((doneSlots >> slot) & 1u) != 0)
+            continue;
+
+        const uint32_t species = MpEffectConvertSpecies(effect);
+        const uint32_t coefficient = MpConvertedCoefficient(table, rule, slot, species);
+        if (coefficient == 0)
+            continue;
+
+        // 欄 slot を書き換える(動的な添字を使わない。GPU でレジスタのまま)
+        for (uint32_t p = 0; p < RX_MAX_PRODUCTS; ++p) {
+            if (p == slot) {
+                converted.products[p] = species;
+                converted.productCoefficients[p] = coefficient;
+            }
+        }
+
+        doneSlots |= 1u << slot;
+    }
+
+    if (doneSlots != 0)
+        converted.reactionEnthalpy = MpRuleEnthalpy(table, converted);
+
+    return converted;
+}
+
+// 覆うパッチ(covering)のうち転換のもの
+template <typename List>
+FX_FN uint32_t MpConvertingMask(List list, uint32_t covering) {
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
+        if (((covering >> i) & 1u) == 0)
+            continue;
+
+        const uint32_t effect = list.PatchWord(MP_LIST_HEADER_WORDS + (i * MP_PATCH_WORDS) + MP_WORD_EFFECT);
+        if (MpEffectKind(effect) == MP_KIND_CONVERT)
+            mask |= 1u << i;
+    }
+
+    return mask;
+}
+
+// パッチを重ねた表(reaction.hlsli の Table の約束。Rate と、転換が覆うセルでは Rule が変わる)。
+// Table は PatchWord(word) も持つ(パッチの列を読む)
 template <typename Table>
 struct MpPatchedTable {
     Table base;
-    uint32_t covering;  // MpCoveringMask
+    uint32_t covering;    // MpCoveringMask
+    uint32_t converting;  // そのうち転換のもの(MpConvertingMask)
 
     RxSpecies Species(uint32_t id) { return base.Species(id); }
 
-    RxRule Rule(uint32_t id) { return base.Rule(id); }
+    RxRule Rule(uint32_t id) {
+        const RxRule rule = base.Rule(id);
+        if (converting == 0)
+            return rule;
+
+        return MpConvertedRule(base, converting, rule);
+    }
 
     uint32_t RuleIndex(uint32_t position) { return base.RuleIndex(position); }
 
@@ -409,6 +569,7 @@ FX_FN MpPatchedTable<Table> MpPatchTable(Table table, int32_t level, int64_t x, 
     MpPatchedTable<Table> patched;
     patched.base = table;
     patched.covering = MpCoveringMask(table, level, x, y, z, tick);
+    patched.converting = MpConvertingMask(table, patched.covering);
 
     return patched;
 }

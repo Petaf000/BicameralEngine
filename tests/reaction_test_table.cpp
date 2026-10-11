@@ -77,4 +77,20 @@ namespace bicameral::sim {
         return definition;
     }
 
+    ReactionTableDefinition MakeConversionTestTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.species.push_back({.name = "carbon_dioxide_isomer_test",
+                                      .composition = {{.element = "C", .count = 1}, {.element = "O", .count = 2}},
+                                      .formationEnthalpy = -300000,
+                                      .heatCapacity = 37135,
+                                      .thermalConductivity = 17 * 5000});
+        definition.species.push_back({.name = "dicarbon_test",
+                                      .composition = {{.element = "C", .count = 2}},
+                                      .formationEnthalpy = 830000,
+                                      .heatCapacity = 43200,
+                                      .thermalConductivity = 17 * 5000});
+
+        return definition;
+    }
+
 }  // namespace bicameral::sim

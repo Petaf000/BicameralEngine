@@ -79,6 +79,13 @@ struct RxSpecies {
     uint32_t ruleBegin;     // 索引(この物質を「ID が最小の反応物」に持つ規則)の始まり
     uint32_t ruleCount;
     uint32_t conductivity;  // 熱伝導率(mW/(m·K))。セルの値は物質量で重み付けた平均(heat_conduction.hlsli。T-0089)
+
+    // --- 元素の組成の型(魔法の転換の釣り合いの検査。magic_patch.hlsli・T-0359)---
+    // 組成を元素ごとの数の最大公約数で割った「型」の番号(1〜。同じ型 = 原子の比が同じ。0 = 元素を持たない)と、その公約数。
+    // c 個の物質 a と d 個の物質 b の元素が全部同じ ⇔ 型が同じ かつ c × 公約数(a) = d × 公約数(b)(整数だけで正確に判定できる)。
+    // 物質 0(使わない)の elementUnits には表の物質の数(0 番を含む)を置く(GPU で表の大きさを読むため。MpSpeciesCount)
+    uint32_t elementClass;
+    uint32_t elementUnits;
 };
 
 // 反応の規則

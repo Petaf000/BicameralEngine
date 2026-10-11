@@ -7,7 +7,8 @@
 //   - (CPU)木箱の壁に火を付け、セルロースの 2 つの規則を止めた所は、止めている間セルロースが減らない(止めない世界では減る)。
 //     パッチのある世界と無い世界は違う
 //   - (GPU)火・止める・速める・格子の外・角にはみ出す・規則が表に無い(断る)・列が一杯(断る)・表の差し替え(規則の ID がずれる)を
-//     跨ぐパッチ・差し替えた後のパッチを、(1) 1 刻みずつ + 保存点へ戻して流し直す、(2) 刻みの途中で切るばらばらの分け方、で流し、
+//     跨ぐパッチ・差し替えた後のパッチ・セルロースの燃焼の生成物を替える転換(釣り合うものは差し替えを跨いで効き、釣り合わないものは
+//     断る。T-0359)を、(1) 1 刻みずつ + 保存点へ戻して流し直す、(2) 刻みの途中で切るばらばらの分け方、で流し、
 //     刻みごとの状態の要約(セル + パッチの列)・エネルギー・湧き出し・計算したブロックの数・上限・断った数が CPU と一致する。
 //     コマンドは再生ファイル(SerializeReplay → ParseReplay)から ReplayPlayer で足し、記録の要約とも突き合わせる
 //   - debug layer のエラーが 0 件
@@ -42,6 +43,8 @@ namespace {
     constexpr uint64_t SAVE_TICK = 8;        // 保存点(パッチが効いている途中)
     constexpr uint64_t REWIND_AT_TICK = 15;  // ここまで進めてから SAVE_TICK へ戻す(差し替えの前)
     constexpr uint64_t UNKNOWN_RULE_KEY = 0x1234;
+    constexpr uint64_t CONVERT_TICK = 9;  // 転換(T-0359)を置く刻み(差し替えを跨いで CONVERT_END_TICK まで)
+    constexpr uint64_t CONVERT_END_TICK = 21;
 
     // 火を付ける木箱の壁のセル(左の壁と右の壁。木箱は [28, 36) の 8³)
     constexpr std::array<uint32_t, 3> LEFT_WALL = {28, 32, 32};
@@ -70,14 +73,28 @@ namespace {
         return static_cast<uint32_t>(std::distance(table.speciesNames.begin(), rng::find(table.speciesNames, name)));
     }
 
+    uint32_t RuleIdOf(const BakedReactionTable& table, std::string_view name) {
+        return static_cast<uint32_t>(std::distance(table.ruleNames.begin(), rng::find(table.ruleNames, name)));
+    }
+
+    // 規則の生成物のうち物質 species の欄(無ければ RX_MAX_PRODUCTS)
+    uint32_t ProductSlotOf(const reaction::RxRule& rule, uint32_t species) {
+        uint32_t slot = 0;
+        while (slot < rule.productCount && rule.products[slot] != species)
+            ++slot;
+
+        return slot < rule.productCount ? slot : reaction::RX_MAX_PRODUCTS;
+    }
+
     uint64_t AmountOf(const reaction::RxCell& cell, uint32_t species) {
         const uint32_t slot = reaction::RxFindSlot(cell, species);
         return slot == reaction::RX_NO_SLOT ? 0 : cell.amounts[slot];
     }
 
-    // 規則の ID がずれる表: 名前の順で前にある規則(boudouard)を抜く(gpu_lab_box_test の MakeShiftedTable と同じ。物質は同じ)
+    // 規則の ID がずれる表: 名前の順で前にある規則(boudouard)を抜く(gpu_lab_box_test の MakeShiftedTable と同じ。物質は同じ)。
+    // どちらの表も転換の試験の仮の物質を足した表(T-0359)
     std::expected<BakedReactionTable, std::string> MakeShiftedTable() {
-        ReactionTableDefinition definition = MakeCombustionTestTable();
+        ReactionTableDefinition definition = MakeConversionTestTable();
         std::erase_if(definition.rules, [](const RuleDefinition& rule) { return rule.name == "boudouard"; });
 
         return BakeReactionTable(definition);
@@ -146,6 +163,21 @@ namespace {
                   {.low = {x, 50, 10}, .high = {x + 1, 51, 11}});
         }
 
+        // 刻み 9: 右の壁のセルロースの燃焼を触媒で燃やし(刻み 5 と同じ)、その CO2 を同じ元素の仮の物質に替える転換(T-0359。どちらも
+        // 差し替えを跨ぐ)と、CO に替えようとする転換(元素が釣り合わないので断る)
+        const uint32_t dioxide = SpeciesId(table, "carbon_dioxide");
+        const reaction::RxRule& combustion = table.rules[RuleIdOf(table, "cellulose_combustion")];
+        const ProbePatchRange right = {.low = {34, 30, 30}, .high = {37, 34, 34}};
+        patch(CONVERT_TICK, "cellulose_combustion", reaction::MpMakeCatalystEffect(PROBE_CATALYST_JOULES_PER_MOL),
+              CONVERT_END_TICK - CONVERT_TICK, right);
+        patch(CONVERT_TICK, "cellulose_combustion",
+              reaction::MpMakeConvertEffect(ProductSlotOf(combustion, dioxide),
+                                            SpeciesId(table, "carbon_dioxide_isomer_test")),
+              CONVERT_END_TICK - CONVERT_TICK, right);
+        patch(CONVERT_TICK, "cellulose_combustion",
+              reaction::MpMakeConvertEffect(ProductSlotOf(combustion, dioxide), SpeciesId(table, "carbon_monoxide")), 5,
+              right);
+
         // 刻み 16: 規則の ID がずれる表に替える印。刻み 20: 替えた表の名前の鍵で止める(右の壁)
         commands.push_back(MakeTableCommand(SWAP_TICK, sequence++, SWAP_VERSION));
         if (withPatches) {
@@ -171,6 +203,8 @@ namespace {
         uint64_t leftCelluloseWhileStopped = 0;  // S(STOP_END_TICK) の左の壁のセルロース
         uint64_t leftCelluloseInitial = 0;
         uint32_t patchesAtSwap = 0;  // 差し替えの刻みの初めに列にあったパッチの数
+        uint64_t isomerAtEnd = 0;    // 最後の刻みの世界の、転換で替えた仮の物質の量(T-0359)
+        uint64_t dioxideAtEnd = 0;   // 同じ、CO2 の量
     };
 
     Reference RunReference(const BakedReactionTable& table, const BakedReactionTable& shifted,
@@ -198,6 +232,13 @@ namespace {
                                     .patchesRefused = reference.PatchesRefused()});
             if (tick + 1 == STOP_END_TICK)
                 result.leftCelluloseWhileStopped = AmountOf(state[leftIndex], cellulose);
+
+            if (tick + 1 == ticks) {
+                for (const reaction::RxCell& cell : state) {
+                    result.isomerAtEnd += AmountOf(cell, SpeciesId(table, "carbon_dioxide_isomer_test"));
+                    result.dioxideAtEnd += AmountOf(cell, SpeciesId(table, "carbon_dioxide"));
+                }
+            }
         }
 
         return result;
@@ -315,10 +356,17 @@ namespace {
                                    plain.leftCelluloseWhileStopped));
         failures.Check(expected.ticks[STOP_END_TICK].hash != plain.ticks[STOP_END_TICK].hash,
                        "パッチのある世界と無い世界は違う");
-        failures.Check(expected.ticks[3].patchesRefused == 1 && expected.ticks[6].patchesRefused == 1,
-                       "表に無い規則(刻み 2)と一杯の列(刻み 5)を 1 つずつ断る");
-        failures.Check(expected.patchesAtSwap == 1,
-                       "差し替えの刻みに残っているパッチは差し替えを跨ぐ速める 1 つだけ(ほかは終わって除いた)");
+        failures.Check(expected.ticks[3].patchesRefused == 1 && expected.ticks[6].patchesRefused == 1 &&
+                           expected.ticks[CONVERT_TICK + 1].patchesRefused == 1,
+                       "表に無い規則(刻み 2)と一杯の列(刻み 5)と釣り合わない転換(刻み 9)を 1 つずつ断る");
+        failures.Check(
+            expected.patchesAtSwap == 3,
+            "差し替えの刻みに残っているパッチは差し替えを跨ぐ速める・触媒・転換の 3 つだけ(ほかは終わって除いた)");
+        const Reference plainToEnd = RunReference(table, shifted, plainCommands, TOTAL_TICKS);
+        failures.Check(
+            expected.isomerAtEnd > 0 && plainToEnd.isomerAtEnd == 0,
+            std::format("転換で替えた物質ができる(転換あり {}・なし {} µmol。CO2 は {}・{} µmol)", expected.isomerAtEnd,
+                        plainToEnd.isomerAtEnd, expected.dioxideAtEnd, plainToEnd.dioxideAtEnd));
 
         // --- 再生ファイル(CPU の要約を記録として持つ)---
         save::ReplayFile recording;
@@ -360,8 +408,8 @@ namespace {
             const auto refusedEvents = rng::count_if(result.events, [](const ProbeEvent& event) {
                 return event.type == PROBE_EVENT_PATCH_APPLIED && event.place == PROBE_PATCH_REFUSED;
             });
-            failures.Check(patchEvents == PatchCommandCount(commands) && refusedEvents == 2,
-                           std::format("{}: パッチのイベントはコマンドの数だけ(断った 2 つを含む)", name));
+            failures.Check(patchEvents == PatchCommandCount(commands) && refusedEvents == 3,
+                           std::format("{}: パッチのイベントはコマンドの数だけ(断った 3 つを含む)", name));
         }
     }
 
@@ -384,7 +432,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const auto table = BakeReactionTable(MakeCombustionTestTable());
+    const auto table = BakeReactionTable(MakeConversionTestTable());
     const auto shifted = MakeShiftedTable();
     if (!table || !shifted) {
         Log(Channel::Sim, Level::Error, "試験の反応の表をベイクできない");

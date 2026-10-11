@@ -873,6 +873,94 @@ namespace {
         return {};
     }
 
+    // 転換(T-0359): 450 K の魔素ありの木を 3 か所に置き、1 か所は魔素の燃焼の CO2 を同じ元素の仮の物質(異性体の役)に替え、
+    // 1 か所は CO に替えようとする(元素が釣り合わないので CPU も GPU も断る)。毎刻み CPU と GPU がビット一致・元素は保存・
+    // 替えた所だけに異性体ができる・終わると列から除く。表は試験の表に仮の物質を足したもの(値は仮。D-006)
+    std::expected<void, std::string> RunConvert(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType) {
+        constexpr uint32_t PATCH_TICKS = 50;
+        const auto table = sim::BakeReactionTable(sim::MakeConversionTestTable());
+        if (!table)
+            return std::unexpected(table.error());
+
+        auto session = sim::LabSession::Create(device, queueType, *table, MANA_TABLE_VERSION, "convert",
+                                               sim::LAB_SINGLE_ROOT_SHAPE);
+        if (!session)
+            return std::unexpected(session.error());
+
+        const uint32_t cellulose = table->SpeciesId("cellulose");
+        const uint32_t dioxide = table->SpeciesId("carbon_dioxide");
+        const uint32_t isomer = table->SpeciesId("carbon_dioxide_isomer_test");
+        const uint32_t monoxide = table->SpeciesId("carbon_monoxide");
+        const uint32_t rule = RuleIdOf(*table, "mana_test_catalyzed_cellulose_combustion");
+        if (cellulose == 0 || isomer == 0 || rule == UINT32_MAX)
+            return std::unexpected("表に試験の物質か規則が無い");
+
+        uint32_t slot = 0;
+        while (slot < table->rules[rule].productCount && table->rules[rule].products[slot] != dioxide)
+            ++slot;
+
+        // --- 置く(3 か所とも魔素あり)と転換 2 つ(釣り合う・釣り合わない)---
+        std::vector<sim::SpeciesAmount> manaWood = {
+            {.species = cellulose, .amount = MANA_WOOD_CELLULOSE_MICROMOLES},
+            {.species = table->SpeciesId("oxygen"), .amount = MANA_WOOD_OXYGEN_MICROMOLES},
+            {.species = table->SpeciesId("mana_test"), .amount = MANA_MICROMOLES}};
+        std::ranges::sort(manaWood, {}, &sim::SpeciesAmount::species);
+        const PatchGroups groups;
+        const sim::LabCellRange converted = groups.catalyzed;
+        const sim::LabCellRange refused = groups.stopped;
+        const sim::LabCellRange plain = groups.plain;
+        const bool queued = session->PlaceRegion(converted, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->PlaceRegion(refused, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->PlaceRegion(plain, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->ApplyPatch(rule, reaction::MpMakeConvertEffect(slot, isomer), PATCH_TICKS,
+                                                converted) &&
+                            session->ApplyPatch(rule, reaction::MpMakeConvertEffect(slot, monoxide), PATCH_TICKS,
+                                                refused);
+        if (!queued)
+            return std::unexpected("置けない・パッチを出せない");
+
+        if (auto stepped = session->Step(1); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (session->Cpu().magicPatches[0] != 1 || session->Gpu().magicPatches[0] != 1)
+            return std::unexpected("釣り合う転換だけが列に入る(釣り合わない転換は断る)");
+
+        const std::vector<sim::NamedElementCount> elementsBefore = CountBoxElements(*session);
+        if (auto stepped = session->Step(PATCH_TICKS - 1); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        const auto total = [&](sim::LabCellRange range, uint32_t species) {
+            return RegionTotalOf(session->Gpu(), range, species, sim::LAB_SINGLE_ROOT_SHAPE);
+        };
+        const uint64_t convertedIsomer = total(converted, isomer);
+        const uint64_t refusedIsomer = total(refused, isomer);
+        const uint64_t plainIsomer = total(plain, isomer);
+        const uint64_t plainDioxide = total(plain, dioxide);
+        if (auto stepped = session->Step(PATCH_TICKS); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: 転換 {} 刻み 異性体(仮)替えた所 {}・断った所 {}・そのまま {} µmol(そのままの所の CO2 {} "
+            "µmol)",
+            PATCH_TICKS, convertedIsomer, refusedIsomer, plainIsomer, plainDioxide);
+        if (CountBoxElements(*session) != elementsBefore)
+            return std::unexpected("転換で元素の数が変わった");
+
+        if (session->Cpu().magicPatches[0] != 0 || session->Gpu().magicPatches[0] != 0)
+            return std::unexpected("終わった転換が列に残る");
+
+        if (convertedIsomer == 0 || refusedIsomer != 0 || plainIsomer != 0 || plainDioxide == 0)
+            return std::unexpected("転換が替えた所だけに効かない");
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
@@ -949,6 +1037,12 @@ namespace {
             return 1;
         }
 
+        // --- 生成物を替える転換(T-0359)---
+        if (auto result = RunConvert(device->Get(), options->queueType); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(転換: {})", result.error());
+            return 1;
+        }
+
         // --- 表を替える刻みを跨ぐパッチ・保存点(T-0287): 規則の ID がずれる表に途中で替える ---
         const auto shifted = MakeShiftedTable();
         const bool moved = shifted &&
@@ -974,7 +1068,8 @@ namespace {
             "gpu_lab_box_test: OK(実験室の箱の GPU と CPU が {} "
             "刻みビット一致・記録から流し直しても同じ・刻みの途中で表を替えても一致・仮の魔素で木が低い温度で燃える・"
             "根を並べた箱でも一致・魔法のパッチで止める / "
-            "速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕・活性化エネルギーを下げる触媒)",
+            "速める〔根を並べた箱・表を替える刻みを跨いでも。保存点から再生しても同じ〕・活性化エネルギーを下げる触媒・"
+            "生成物を替える転換)",
             RUN_TICKS);
 
         return 0;

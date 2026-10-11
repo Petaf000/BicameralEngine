@@ -79,7 +79,7 @@ namespace bicameral::sim {
 
     // --- ベイクした表 ---
 
-    static_assert(sizeof(reaction::RxSpecies) == 24);
+    static_assert(sizeof(reaction::RxSpecies) == 32);
     static_assert(sizeof(reaction::RxRule) == 80);
     static_assert(sizeof(reaction::RxCell) == 112);
 

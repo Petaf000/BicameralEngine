@@ -8,6 +8,7 @@
 #include <bit>
 #include <format>
 #include <map>
+#include <numeric>
 
 namespace bicameral::sim {
 
@@ -138,6 +139,33 @@ namespace bicameral::sim {
             }
 
             return species;
+        }
+
+        // 元素の組成の型(RxSpecies::elementClass・elementUnits。魔法の転換の釣り合いの検査。magic_patch.hlsli・T-0359)。
+        // 組成を最大公約数で割った並びが同じ物質に同じ番号(1〜。物質 ID の順に初めて出た順)を付ける。元素を持たない物質は 0。
+        // 物質 0(使わない)の elementUnits には物質の数(0 番を含む)を置く(GPU が表の大きさを読む。MpSpeciesCount)
+        void BakeElementClasses(BakedReactionTable& baked) {
+            const size_t elementCount = baked.elementNames.size();
+            std::map<std::vector<uint32_t>, uint32_t> classes;
+            for (size_t id = 1; id < baked.species.size(); ++id) {
+                const auto composition = std::span(baked.speciesElements).subspan(id * elementCount, elementCount);
+                uint32_t divisor = 0;
+                for (const uint32_t count : composition)
+                    divisor = std::gcd(divisor, count);
+
+                if (divisor == 0)
+                    continue;
+
+                std::vector<uint32_t> ratio(composition.begin(), composition.end());
+                for (uint32_t& count : ratio)
+                    count /= divisor;
+
+                const auto found = classes.emplace(std::move(ratio), static_cast<uint32_t>(classes.size() + 1)).first;
+                baked.species[id].elementClass = found->second;
+                baked.species[id].elementUnits = divisor;
+            }
+
+            baked.species[0].elementUnits = static_cast<uint32_t>(baked.species.size());
         }
 
         // --- 規則 ---
@@ -385,6 +413,8 @@ namespace bicameral::sim {
         const auto species = BakeAllSpecies(ordered, *elements, baked);
         if (!species)
             return std::unexpected(species.error());
+
+        BakeElementClasses(baked);
 
         NameIndex ruleNames;
         for (const RuleDefinition& entry : ordered.rules) {
