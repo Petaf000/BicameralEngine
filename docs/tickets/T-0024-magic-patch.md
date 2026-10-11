@@ -43,8 +43,16 @@
 - 同じ回(別のコミット。T-0287 の最初の一部を前倒し): **パッチは規則を名前の鍵(RxRule::key・64bit)で持つ**ようにした。列の 1 つ分は 13 語、
   コマンドの payload は 10 語。足す時は表に同じ鍵の規則があるかを調べ(無ければ断る)、評価は Rule(id).key と比べる(覆うパッチがあるセルだけ)。
   LabSession::ApplyPatch は今の表の規則の ID を受け、鍵にしてコマンドに入れる。lab_box_test に「規則の並びを逆にした表でも同じ名前の規則にだけ効く」を足した。
+- 2026-10-11(作業役・wt3、3 体目): **main(c044ed4。T-0173 の根を並べた箱・ADR-0113)に載せ直した**(git rebase。3 つのコミットとも実験室のコードで衝突)。
+  衝突の解き方: パッチのコマンドと境は「範囲が重なる根」の印(LabRootBit)を返す形にした(lab_box.hlsli の LabPatchRoots。Blocks の約束 =
+  Block(slot) で根の MrBlock。C++ は木の枠の span、HLSL は g_blocks)。範囲は箱の座標(= レベル 0 の座標。根の原点は根の座標 × 8)。
+  境の Compute(ApplyLabPatchBoundaries)は g_external1 = 箱の形(LabPackShape。今までは箱の枠)。ApplyLabPatchBoundaries(C++)は形を受ける(既定は根 1 つ)。
+  当てた数は「足せて、どれかの根に重なった」パッチを数える(根 1 つの時の今までと同じ)。lab_box_test に 2×2×2 の箱で x の根が 1 の枠だけを
+  つつく確かめ、gpu_lab_box に 4×1×2 の根の箱で根の境をまたぐ 4 か所のパッチの場面(RunPatch を形と置き場所で回す)を足した。
 
 ## テストの結果
+- 載せ直した後(3 体目): debug の lab_box・gpu_lab_box(HW)・gpu_lab_box_warp は通過(根を並べた箱のパッチを含む)。release の multires・multires_activity・multires_wide・
+  lab_box・gpu_lab_box(_warp)・gpu_multires(_warp・_wide)・window_lab・window_lab_compare・float_check の 16 本も通過(gpu_multires_wide 478 秒)。
 - debug・6 ランナーが同じ GPU を使う中: multires・multires_wide・multires_activity・multires_uniform・lab_box(TestMagicPatch を含む)・
   gpu_lab_box_warp(RunPatch を含め WARP で毎刻み CPU とビット一致・止める / 速めるが効く)は通過(6 / 7)。
 - **gpu_lab_box(HW)は RunPatch だけ落ちる**: 「刻み 0 のセル (1, 1, 1) が違う」(止めるパッチの範囲の最初のセル)。RunPatch より前の場面(火・再生・
