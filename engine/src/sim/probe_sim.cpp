@@ -814,7 +814,7 @@ namespace bicameral::sim {
         SetUnitConstants(list, tick,
                          unit == PROBE_UNIT_APPLY ? m_speciesCount : 0);  // 適用: 置くコマンドの検査(T-0222)
         if (unit == PROBE_UNIT_APPLY) {
-            // コマンドの適用は 1 スレッドがキューの先頭から番号順に(probe_tick.hlsl)。刻みの一覧と表の欄の用意も
+            // コマンドの適用は 1 グループがキューの先頭から番号順に(置くコマンドのセルだけをグループで分ける。probe_tick.hlsl・ADR-0125)。刻みの一覧と表の欄の用意も
             list->SetPipelineState(m_applyPipeline.Get());
             list->Dispatch(1, 1, 1);
 
