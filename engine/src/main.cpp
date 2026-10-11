@@ -57,9 +57,13 @@
 //
 // 引数は wmain で UTF-16 のまま受け取る(main の char** は ANSI コードページなので日本語のパスが壊れる)。
 // 終わるときは必ず SingletonFinalizer::Finalize() を通す(ログを最後に閉じ、ファイルへ書き出すため)。
+#include <crtdbg.h>
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <optional>
+#include <span>
+#include <string_view>
 
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
@@ -415,10 +419,28 @@ namespace {
         return frame::RunFrameLoop(options->frameLoop);
     }
 
+    // 人がいない確認(--auto-*)では、debug の CRT の検査(assert・STL の反復子の検査・abort)をダイアログでなく標準エラーへ出す。
+    // ダイアログは押す人がいないので窓のアプリが止まったまま時間切れになり、ログも書き出されずに残らない(T-0350)
+    void ReportCrtFailuresToStderrWhenAutomatic(std::span<wchar_t*> arguments) {
+        const bool automatic = std::ranges::any_of(
+            arguments, [](const wchar_t* argument) { return std::wstring_view(argument).starts_with(L"--auto"); });
+        if (!automatic)
+            return;
+
+#ifdef _DEBUG
+        for (const int reportType : {_CRT_ASSERT, _CRT_ERROR}) {
+            _CrtSetReportMode(reportType, _CRTDBG_MODE_FILE);
+            _CrtSetReportFile(reportType, _CRTDBG_FILE_STDERR);
+        }
+#endif
+    }
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    const int exitCode = Run(std::span(argv, static_cast<size_t>(argc)));
+    const std::span arguments(argv, static_cast<size_t>(argc));
+    ReportCrtFailuresToStderrWhenAutomatic(arguments);
+    const int exitCode = Run(arguments);
     bicameral::SingletonFinalizer::Finalize();  // ログは最初に作られるので最後に壊れる(作った順の逆)
 
     return exitCode;

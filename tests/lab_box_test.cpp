@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <initializer_list>
 #include <span>
@@ -624,6 +625,70 @@ namespace {
         EXPECT(!SameLabShape(SHAPE, FIXED));
     }
 
+    // --- 細かくした箱の計器・葉のセル・断面(T-0350)。窓の --auto-lab と同じ、根 1 つの細かくできる箱 ---
+    void TestRefinedGauge(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        constexpr lab::LabBoxShape SHAPE = {.rootsX = 1, .rootsY = 1, .rootsZ = 1, .refineBlocks = 128};
+        constexpr uint32_t FINE_TO_MICROMOLES = 6;  // レベル 2 の量の単位は 8^-2 µmol
+        const LabMaterial* wood = FindMaterial(materials, "木");
+        const uint32_t nitrogen = table.SpeciesId("nitrogen");
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        const LabCellPosition fine = {.x = 8, .y = 8, .z = 8, .level = 2};
+        const uint64_t woodMicromoles = wood->contents[0].amount >> FINE_TO_MICROMOLES;
+
+        // --- 細かくしても、箱全体と箱のセル (4, 4, 4)(細かいセル 64 個)の量は同じ(葉を µmol に直して数える)---
+        MultiresNest nest = MakeLabBoxNest(table, SHAPE);
+        const LabGaugeSample before = SampleLabGauge(nest, table, 0, lab::LabCellIndex(4, 4, 4), SHAPE);
+        const std::vector<Command> refine = {
+            MakeLabRefineCommand(0, 0, {.low = {.x = 2, .y = 2, .z = 2}, .high = {.x = 5, .y = 5, .z = 5}}, 2)};
+        EXPECT(ApplyLabRefines(nest, refine, SHAPE) == 16 && LabRefinedBlockCount(nest) == 16);
+        const LabGaugeSample after = SampleLabGauge(nest, table, 0, lab::LabCellIndex(4, 4, 4), SHAPE);
+        EXPECT(after.boxAmounts == before.boxAmounts && after.cellAmounts == before.cellAmounts);
+        EXPECT(std::abs(after.cellTemperatureMilliKelvin - before.cellTemperatureMilliKelvin) <= 1);
+
+        // --- 細かいセル 1 つに木: 見る細かいセル・それを含む箱のセル・箱全体のセルロースは置いた量の 64 分の 1 µmol。
+        //     粗い葉(レベル 1)の中の細かいセルは、その葉の体積の割合(窒素は箱のセルの 64 分の 1)---
+        const std::vector<Command> place = {MakeLabFillCommand(1, 0, fine, wood->contents, 300000)};
+        EXPECT(ApplyLabCommands(nest, table, place, SHAPE) == 1);
+        const LabGaugeSample watched = SampleLabGauge(nest, table, 1, fine.Index(), SHAPE);
+        EXPECT(watched.cell == fine.Index() && watched.cellAmounts[cellulose] == woodMicromoles);
+        EXPECT(watched.boxAmounts[cellulose] == woodMicromoles);
+        EXPECT(SampleLabGauge(nest, table, 1, lab::LabCellIndex(2, 2, 2), SHAPE).cellAmounts[cellulose] ==
+               woodMicromoles);
+        const LabGaugeSample corner = SampleLabGauge(nest, table, 1, LabCellPosition{.level = 2}.Index(), SHAPE);
+        EXPECT(corner.cellAmounts[nitrogen] == (before.cellAmounts[nitrogen] >> FINE_TO_MICROMOLES));
+
+        // --- 葉のセル: 細かいセルはそのまま、粗い葉の中の細かい位置はその葉、細かく分かれた箱のセルは無い ---
+        const auto leaf = LabLeafAt(nest, fine);
+        EXPECT(leaf.has_value() && leaf->position.level == 2 &&
+               AmountOf(leaf->cell, cellulose) == wood->contents[0].amount);
+        const auto coarseLeaf = LabLeafAt(nest, {.x = 1, .y = 1, .z = 1, .level = 2});
+        EXPECT(coarseLeaf.has_value() && coarseLeaf->position.level == 1 && coarseLeaf->position.x == 0);
+        EXPECT(!LabLeafAt(nest, {.x = 2, .y = 2, .z = 2}).has_value());
+
+        // --- 断面: 木の細かいセルの面はレベル 2、隅はレベル 1。細かくしていない箱は全部レベル 0 で根のセルの温度 ---
+        const uint32_t width = LAB_BOX_EDGE * LAB_FINE_SLICE_SCALE;
+        const std::vector<LabSliceCell> slice = LabFineSlice(nest, table, SHAPE, 2, 0);
+        EXPECT(slice.size() == size_t{width} * width);
+        EXPECT(slice[(size_t{fine.y} * width) + fine.x].level == 2 && slice.front().level == 1);
+        const MultiresNest plain = MakeLabBoxNest(table, LAB_SINGLE_ROOT_SHAPE);
+        const std::vector<LabSliceCell> plainSlice = LabFineSlice(plain, table, LAB_SINGLE_ROOT_SHAPE, 3, 0);
+        const int32_t rootTemperature = reaction::RxComputeThermal(table.View(),
+                                                                   LabBoxCell(plain, lab::LabCellIndex(0, 0, 3)))
+                                            .temperature;
+        EXPECT(std::ranges::all_of(plainSlice, [&](const LabSliceCell& cell) {
+            return cell.level == 0 && cell.temperatureMilliKelvin == rootTemperature;
+        }));
+
+        // --- CPU だけの計器も細かいセルを見る: 火を付けると見る細かいセルのセルロースが減る ---
+        const std::vector<Command> commands = {refine[0], place[0],
+                                               MakeLabTemperatureCommand(2, 0, fine, IGNITE_MILLIKELVIN)};
+        const LabRecording recording{.shape = SHAPE, .tickCount = 40, .commands = commands};
+        const auto gauge = RunLabGaugeOnCpu(recording, table, fine.Index());
+        EXPECT(gauge.has_value() && gauge->size() == 40);
+        EXPECT(gauge.has_value() && gauge->back().cellAmounts[cellulose] < woodMicromoles);
+        EXPECT(gauge.has_value() && gauge->front().boxAmounts[nitrogen] == before.boxAmounts[nitrogen]);
+    }
+
     // 版 4 の記録(箱の形が無い)は根 1 つとして読む
     void TestVersionFourRecording() {
         const LabRecording recording{.tableVersion = 0x1111, .tickCount = 1, .hashes = {7}};
@@ -895,6 +960,7 @@ int main() {
     TestMagicPatch(*table);
     TestMagicCatalyst(*table);
     TestRefinedBox(*table, materials);
+    TestRefinedGauge(*table, materials);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

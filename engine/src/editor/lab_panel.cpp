@@ -129,6 +129,50 @@ namespace bicameral::editor {
                     .z = static_cast<uint32_t>(cell[2])};
         }
 
+        // 細かくした箱の計器と断面(T-0350。--auto-lab): GPU の箱の計器が CPU リファレンスだけで流した値と全刻み一致・
+        // 細かくしただけの刻み 0 の箱の窒素が細かくする前と同じ(葉を µmol に直して数える)・火を付けた細かいセルの木の量が
+        // 置いた量の 64 分の 1(µmol)・断面に細かいセル(火の所はレベル 2 で熱く、ほかはレベル 1)
+        std::expected<void, std::string> CheckRefinedGauge(const sim::LabSession& session,
+                                                           std::span<const sim::SpeciesAmount> wood,
+                                                           sim::LabCellPosition lit) {
+            const sim::BakedReactionTable& table = session.Table();
+            const std::vector<sim::LabGaugeSample>& gauge = session.Gauge();
+            const auto cpu = sim::RunLabGaugeOnCpu(session.Recording(), table, lit.Index());
+            if (!cpu)
+                return std::unexpected(cpu.error());
+
+            if (gauge != *cpu)
+                return std::unexpected("細かいセルの計器(GPU)が CPU だけで流した値と違う");
+
+            const uint32_t nitrogen = table.SpeciesId("nitrogen");
+            const uint32_t cellulose = table.SpeciesId("cellulose");
+            const sim::LabGaugeSample unrefined = sim::SampleLabGauge(sim::MakeLabBoxNest(table, session.Shape()),
+                                                                      table, 0, lit.Index(), session.Shape());
+            if (gauge.size() < 2 || gauge[0].boxAmounts.at(nitrogen) != unrefined.boxAmounts.at(nitrogen))
+                return std::unexpected("細かくした箱の窒素の合計が細かくする前と違う");
+
+            constexpr uint32_t FINE_TO_MICROMOLES = 6;  // レベル 2 の量の単位は 8^-2 = 64 分の 1 µmol
+            const uint64_t placed = wood.front().amount >> FINE_TO_MICROMOLES;
+            if (wood.front().species != cellulose || gauge[1].cellAmounts.at(cellulose) != placed)
+                return std::unexpected(std::format("見る細かいセルの木の量が {} µmol でない({})", placed,
+                                                   gauge[1].cellAmounts.at(cellulose)));
+
+            // --- 断面(GPU の箱): 火を付けた細かいセルの面 ---
+            const lab::LabBoxShape shape = session.Shape();
+            const uint32_t width = sim::LAB_BOX_EDGE * shape.rootsX * sim::LAB_FINE_SLICE_SCALE;
+            const std::vector<sim::LabSliceCell> slice = sim::LabFineSlice(
+                session.Gpu(), table, shape, lit.z / sim::LAB_FINE_SLICE_SCALE, lit.z % sim::LAB_FINE_SLICE_SCALE);
+            const sim::LabSliceCell fire = slice.at((size_t{lit.y} * width) + lit.x);
+            if (fire.level != 2 || fire.temperatureMilliKelvin <= static_cast<int32_t>(AUTO_ROOM_MILLIKELVIN))
+                return std::unexpected(std::format("断面の火の所がレベル 2 で熱くない(レベル {}・{} mK)", fire.level,
+                                                   fire.temperatureMilliKelvin));
+
+            if (slice.front().level != 1)
+                return std::unexpected(std::format("断面の隅がレベル 1 でない({})", slice.front().level));
+
+            return {};
+        }
+
     }  // namespace
 
     LabPanel::LabPanel(ID3D12Device* device) {
@@ -263,6 +307,12 @@ namespace bicameral::editor {
             m_rangeLow.at(axis) = std::clamp(m_rangeLow.at(axis), 0, edges.at(axis) - 1);
             m_rangeHigh.at(axis) = std::clamp(m_rangeHigh.at(axis), 0, edges.at(axis) - 1);
         }
+
+        // 細かいセル(T-0350): 細かくできない箱では箱のセル。座標は箱のセルの中(0〜2^段 − 1)
+        const int maxLevel = shape.refineBlocks == 0 ? 0 : static_cast<int>(lab::LAB_MAX_REFINE_LEVELS);
+        m_fineLevel = std::clamp(m_fineLevel, 0, maxLevel);
+        for (int& offset : m_fineCell)
+            offset = std::clamp(offset, 0, (1 << m_fineLevel) - 1);
     }
 
     void LabPanel::BuildStatus() {
@@ -325,14 +375,18 @@ namespace bicameral::editor {
 
     std::optional<sim::Command> LabPanel::ComposedCommand(bool temperatureOnly) const {
         const auto milliKelvin = static_cast<uint32_t>(m_temperatureKelvin) * 1000u;
-        if (temperatureOnly)
-            return sim::MakeLabTemperatureRegionCommand(0, 0, PlaceRange(), milliKelvin);
+        const bool fineCell = m_rangeKind == RangeKind::Cell && m_fineLevel > 0;  // 細かいセル 1 つ(T-0350)
+        if (temperatureOnly) {
+            return fineCell ? sim::MakeLabTemperatureCommand(0, 0, SelectedPosition(), milliKelvin)
+                            : sim::MakeLabTemperatureRegionCommand(0, 0, PlaceRange(), milliKelvin);
+        }
 
         const std::vector<sim::SpeciesAmount> contents = ComposedContents(milliKelvin);
         if (contents.empty())
             return std::nullopt;
 
-        return sim::MakeLabFillRegionCommand(0, 0, PlaceRange(), contents, milliKelvin);
+        return fineCell ? sim::MakeLabFillCommand(0, 0, SelectedPosition(), contents, milliKelvin)
+                        : sim::MakeLabFillRegionCommand(0, 0, PlaceRange(), contents, milliKelvin);
     }
 
     void LabPanel::BuildMaterialRows(uint32_t milliKelvin) {
@@ -375,6 +429,9 @@ namespace bicameral::editor {
         const auto longest = std::max({shape.rootsX, shape.rootsY, shape.rootsZ});
         const int maxCell = static_cast<int>(sim::LAB_BOX_EDGE * longest) - 1;
         ImGui::SliderInt3("セル (x, y, z)", m_cell.data(), 0, maxCell);
+        if (shape.refineBlocks != 0)
+            BuildFineCellControls();
+
         if (m_rangeKind == RangeKind::Box) {
             ImGui::SliderInt3("小さい角", m_rangeLow.data(), 0, maxCell);
             ImGui::SliderInt3("大きい角", m_rangeHigh.data(), 0, maxCell);
@@ -384,13 +441,22 @@ namespace bicameral::editor {
 
         const std::vector<sim::SpeciesAmount> contents = ComposedContents(milliKelvin);
         ImGui::BeginDisabled(contents.empty());
-        if (ImGui::Button("置く"))
-            static_cast<void>(m_session->PlaceRegion(PlaceRange(), contents, milliKelvin));
+        const bool fineCell = m_rangeKind == RangeKind::Cell && m_fineLevel > 0;
+        if (ImGui::Button("置く")) {
+            if (fineCell)
+                static_cast<void>(m_session->Place(SelectedPosition(), contents, milliKelvin));
+            else
+                static_cast<void>(m_session->PlaceRegion(PlaceRange(), contents, milliKelvin));
+        }
 
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("温度だけ"))
-            static_cast<void>(m_session->SetTemperatureRegion(PlaceRange(), milliKelvin));
+        if (ImGui::Button("温度だけ")) {
+            if (fineCell)
+                static_cast<void>(m_session->SetTemperature(SelectedPosition(), milliKelvin));
+            else
+                static_cast<void>(m_session->SetTemperatureRegion(PlaceRange(), milliKelvin));
+        }
 
         // --- 範囲を細かくする(T-0314。細かくできる箱だけ。細かいセルの断面・計器は T-0350)---
         ImGui::BeginDisabled(m_session->Shape().refineBlocks == 0);
@@ -406,6 +472,19 @@ namespace bicameral::editor {
                                 m_session->Shape().refineBlocks);
 
         BuildStepControls();
+    }
+
+    // 1 セルを細かいセルで選ぶ(細かくできる箱だけ。T-0350): 段の数と、箱のセルの中の座標。断面で細かいセルを押しても選べる
+    void LabPanel::BuildFineCellControls() {
+        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SliderInt("細かさ (段)", &m_fineLevel, 0, static_cast<int>(lab::LAB_MAX_REFINE_LEVELS));
+        if (m_fineLevel == 0)
+            return;
+
+        ImGui::SliderInt3("細かいセル(箱のセルの中)", m_fineCell.data(), 0, (1 << m_fineLevel) - 1);
+        const sim::LabCellPosition selected = SelectedPosition();
+        ImGui::TextDisabled("レベル %u の (%u, %u, %u)。1 セルの「置く」「温度だけ」はこのセル(量の単位 8^-%u µmol)",
+                            selected.level, selected.x, selected.y, selected.z, selected.level);
     }
 
     void LabPanel::BuildStepControls() {
@@ -437,36 +516,27 @@ namespace bicameral::editor {
         }
     }
 
-    // 選んだ z の断面の温度(CPU)。押すとセルを選ぶ
+    // 選んだ z の断面の温度(CPU)。押すとセルを選ぶ。細かくした所(T-0350)は箱のセルを 4×4 に分けて、そこを含む葉の温度を描き、
+    // 押した所の葉(レベルと座標)を選ぶ
     void LabPanel::BuildSlice() {
         ImGui::SeparatorText(std::format("断面 z = {}(色 = CPU の温度)", m_cell[2]).c_str());
-        const sim::MultiresNest& cpu = m_session->Cpu();
         const lab::LabBoxShape shape = m_session->Shape();
+        constexpr int SCALE = static_cast<int>(sim::LAB_FINE_SLICE_SCALE);
+        if (shape.refineBlocks != 0) {
+            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SliderInt("細かい断面(箱のセルの中の z)", &m_fineZ, 0, SCALE - 1);
+        }
+
+        m_fineZ = shape.refineBlocks != 0 ? std::clamp(m_fineZ, 0, SCALE - 1) : 0;
+        const std::vector<sim::LabSliceCell> slice = sim::LabFineSlice(m_session->Cpu(), m_session->Table(), shape,
+                                                                       static_cast<uint32_t>(m_cell[2]),
+                                                                       static_cast<uint32_t>(m_fineZ));
         const int edgeX = static_cast<int>(sim::LAB_BOX_EDGE * shape.rootsX);
         const int edgeY = static_cast<int>(sim::LAB_BOX_EDGE * shape.rootsY);
         const float pixels = SliceCellPixels(shape);
         for (int y = edgeY - 1; y >= 0; --y) {
             for (int x = 0; x < edgeX; ++x) {
-                const uint32_t index = lab::LabCellIndex(static_cast<uint32_t>(x), static_cast<uint32_t>(y),
-                                                         static_cast<uint32_t>(m_cell[2]));
-                const int32_t temperature = TemperatureOf(m_session->Table(), sim::LabBoxCell(cpu, index, shape));
-                const std::string id = std::format("##lab{}_{}", x, y);
-                const bool selected = x == m_cell[0] && y == m_cell[1];
-                if (selected)
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
-
-                if (ImGui::ColorButton(id.c_str(), TemperatureColor(temperature), ImGuiColorEditFlags_NoTooltip,
-                                       {pixels, pixels})) {
-                    m_cell[0] = x;
-                    m_cell[1] = y;
-                }
-
-                if (selected)
-                    ImGui::PopStyleVar();
-
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("(%d, %d, %d) %.1f K", x, y, m_cell[2],
-                                      static_cast<double>(temperature) / 1000.0);
+                BuildSliceCell(slice, x, y, pixels);
 
                 // 根の境は少し広く空ける(並べた根が見分けられるように)
                 const bool rootEdge = (x + 1) % static_cast<int>(sim::LAB_BOX_EDGE) == 0;
@@ -476,14 +546,93 @@ namespace bicameral::editor {
         }
     }
 
-    // 選んだセルの成分と温度を CPU と GPU で並べる
-    void LabPanel::BuildCell() const {
-        const uint32_t index = PositionOf(m_cell).Index();
-        const reaction::RxCell cpu = sim::LabBoxCell(m_session->Cpu(), index, m_session->Shape());
-        const reaction::RxCell gpu = sim::LabBoxCell(m_session->Gpu(), index, m_session->Shape());
-        const sim::BakedReactionTable& table = m_session->Table();
+    // 断面の箱のセル 1 つ。細かく分かれていれば、ボタンの上に 4×4 の葉の色を重ねる
+    void LabPanel::BuildSliceCell(std::span<const sim::LabSliceCell> slice, int x, int y, float pixels) {
+        constexpr int SCALE = static_cast<int>(sim::LAB_FINE_SLICE_SCALE);
+        const size_t width = sim::LAB_BOX_EDGE * m_session->Shape().rootsX * sim::LAB_FINE_SLICE_SCALE;
+        const auto at = [&](int subX, int subY) -> const sim::LabSliceCell& {
+            return slice[(static_cast<size_t>((y * SCALE) + subY) * width) + static_cast<size_t>((x * SCALE) + subX)];
+        };
+        bool split = false;
+        for (int sub = 0; sub < SCALE * SCALE; ++sub)
+            split = split || at(sub % SCALE, sub / SCALE).level > 0;
 
-        ImGui::SeparatorText(std::format("セル ({}, {}, {})", m_cell[0], m_cell[1], m_cell[2]).c_str());
+        const std::string id = std::format("##lab{}_{}", x, y);
+        const bool selected = x == m_cell[0] && y == m_cell[1];
+        if (selected)
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+
+        const bool pressed = ImGui::ColorButton(id.c_str(), TemperatureColor(at(0, 0).temperatureMilliKelvin),
+                                                ImGuiColorEditFlags_NoTooltip, {pixels, pixels});
+        if (selected)
+            ImGui::PopStyleVar();
+
+        const ImVec2 low = ImGui::GetItemRectMin();
+        const float sub = pixels / static_cast<float>(SCALE);
+        const int hoverX = std::clamp(static_cast<int>((ImGui::GetMousePos().x - low.x) / sub), 0, SCALE - 1);
+        const int hoverY = SCALE - 1 -
+                           std::clamp(static_cast<int>((ImGui::GetMousePos().y - low.y) / sub), 0, SCALE - 1);
+        if (split) {
+            // 上が y の大きい方(断面と同じ向き)
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            for (int subY = 0; subY < SCALE; ++subY) {
+                for (int subX = 0; subX < SCALE; ++subX) {
+                    const ImVec2 cornerLow = {low.x + (sub * static_cast<float>(subX)),
+                                              low.y + (sub * static_cast<float>(SCALE - 1 - subY))};
+                    const ImVec2 cornerHigh = {cornerLow.x + sub, cornerLow.y + sub};
+                    draw->AddRectFilled(
+                        cornerLow, cornerHigh,
+                        ImGui::ColorConvertFloat4ToU32(TemperatureColor(at(subX, subY).temperatureMilliKelvin)));
+                }
+            }
+        }
+
+        if (pressed) {
+            m_cell[0] = x;
+            m_cell[1] = y;
+            const sim::LabSliceCell& leaf = split ? at(hoverX, hoverY) : at(0, 0);
+            const int shift = static_cast<int>(lab::LAB_MAX_REFINE_LEVELS - leaf.level);
+            m_fineLevel = static_cast<int>(leaf.level);
+            m_fineCell = {hoverX >> shift, hoverY >> shift, m_fineZ >> shift};
+        }
+
+        if (ImGui::IsItemHovered()) {
+            const sim::LabSliceCell& leaf = split ? at(hoverX, hoverY) : at(0, 0);
+            ImGui::SetTooltip("(%d, %d, %d) レベル %u  %.1f K", x, y, m_cell[2], leaf.level,
+                              static_cast<double>(leaf.temperatureMilliKelvin) / 1000.0);
+        }
+    }
+
+    // 選んだセル: 箱のセル m_cell の中の、レベル m_fineLevel の m_fineCell(T-0350。細かくしていなければ箱のセル)
+    sim::LabCellPosition LabPanel::SelectedPosition() const {
+        const auto level = static_cast<uint32_t>(m_fineLevel);
+        const auto along = [&](size_t axis) {
+            return (static_cast<uint32_t>(m_cell.at(axis)) << level) + static_cast<uint32_t>(m_fineCell.at(axis));
+        };
+
+        return {.x = along(0), .y = along(1), .z = along(2), .level = level};
+    }
+
+    // 選んだセルを含む葉の成分と温度を CPU と GPU で並べる(細かくした所はその葉。T-0350)
+    void LabPanel::BuildCell() const {
+        const sim::LabCellPosition selected = SelectedPosition();
+        const auto cpuLeaf = sim::LabLeafAt(m_session->Cpu(), selected);
+        const auto gpuLeaf = sim::LabLeafAt(m_session->Gpu(), selected);
+        if (!cpuLeaf || !gpuLeaf) {
+            ImGui::SeparatorText(
+                std::format("セル ({}, {}, {}) レベル {}", selected.x, selected.y, selected.z, selected.level).c_str());
+            ImGui::TextDisabled("細かく分かれている(断面で細かいセルを押すか、細かさを上げて選ぶ)");
+            return;
+        }
+
+        const reaction::RxCell& cpu = cpuLeaf->cell;
+        const reaction::RxCell& gpu = gpuLeaf->cell;
+        const sim::BakedReactionTable& table = m_session->Table();
+        const sim::LabCellPosition leaf = cpuLeaf->position;
+
+        ImGui::SeparatorText(std::format("セル ({}, {}, {}) レベル {}(量の単位 8^-{} µmol)", leaf.x, leaf.y, leaf.z,
+                                         leaf.level, leaf.level)
+                                 .c_str());
         ImGui::Text("温度 CPU %.1f K / GPU %.1f K   エネルギー CPU %lld mJ / GPU %lld mJ",
                     static_cast<double>(TemperatureOf(table, cpu)) / 1000.0,
                     static_cast<double>(TemperatureOf(table, gpu)) / 1000.0, static_cast<long long>(cpu.energy),
@@ -492,8 +641,8 @@ namespace bicameral::editor {
             return;
 
         ImGui::TableSetupColumn("物質");
-        ImGui::TableSetupColumn("CPU (µmol)");
-        ImGui::TableSetupColumn("GPU (µmol)");
+        ImGui::TableSetupColumn("CPU");
+        ImGui::TableSetupColumn("GPU");
         ImGui::TableHeadersRow();
         for (uint32_t species = 1; species < table.speciesNames.size(); ++species) {
             const auto amountOf = [&](const reaction::RxCell& cell) {
@@ -577,9 +726,14 @@ namespace bicameral::editor {
             return;
         }
 
-        const auto wood = std::ranges::find_if(m_materials, [](const sim::LabMaterial& m) { return m.name == "木"; });
-        if (wood == m_materials.end())
+        const auto material = std::ranges::find_if(m_materials,
+                                                   [](const sim::LabMaterial& m) { return m.name == "木"; });
+        if (material == m_materials.end())
             return;
+
+        // 材料の一覧は箱を作り直すたびに作り直す(CreateSession)ので、成分を写しておく
+        // (一覧の反復子を次の箱で使うと無効で、debug の窓は検査のダイアログで止まっていた。T-0350)
+        const std::vector<sim::SpeciesAmount> wood = material->contents;
 
         // --- 箱全体を酸素の多い 200 kPa の空気にしてから(範囲のコマンドと分圧の換算。T-0220)、真ん中に木を 8 セル ---
         const uint64_t nitrogen = sim::LabGasMicromoles(AUTO_NITROGEN_PASCAL, AUTO_ROOM_MILLIKELVIN);
@@ -589,8 +743,8 @@ namespace bicameral::editor {
             sim::SpeciesAmount{.species = m_table->SpeciesId("nitrogen"), .amount = nitrogen}};
         static_cast<void>(m_session->PlaceRegion(sim::LabWholeBox(), atmosphere, AUTO_ROOM_MILLIKELVIN));
         for (uint32_t i = 0; i < 8; ++i)
-            static_cast<void>(m_session->Place({.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)},
-                                               wood->contents, AUTO_ROOM_MILLIKELVIN));
+            static_cast<void>(m_session->Place({.x = 3 + (i & 1u), .y = 3 + ((i >> 1) & 1u), .z = 3 + (i >> 2)}, wood,
+                                               AUTO_ROOM_MILLIKELVIN));
 
         // --- 火を付けた刻みに、刻みの途中の表の差し替えも通す(木が速く燃える本物の表。T-0218)---
         const auto swapped = MakeAutoSwappedTable(*m_loaded);
@@ -635,39 +789,48 @@ namespace bicameral::editor {
             nitrogen, AUTO_TICKS, AUTO_IGNITE_TICK);
 
         // --- 根を並べた箱(T-0173)---
-        if (auto large = RunAutoLargeBox(wood->contents); !large) {
+        if (auto large = RunAutoLargeBox(wood); !large) {
             Log(Channel::Sim, Level::Error, "--auto-lab: 根を並べた箱で失敗({})", large.error());
             return;
         }
 
-        // --- 一部を細かくした箱(T-0314)は窓の中で止まる(箱を作る所から先で戻らない。原因は調べ中 = T-0350)ので、
-        //     今は呼ばない(同じ確かめは gpu_lab_box の RunRefinedBox が HW・WARP で通る)。直したら呼ぶ:
-        //     RunAutoRefinedBox(wood->contents)
+        // --- 一部を細かくした箱(T-0314)---
+        if (auto refined = RunAutoRefinedBox(wood); !refined) {
+            Log(Channel::Sim, Level::Error, "--auto-lab: 一部を細かくした箱で失敗({})", refined.error());
+            return;
+        }
 
         m_autoFailed = false;
         m_cell = {3, 3, 3};
     }
 
     // 一部を細かくした箱(細かくできる根 1 つ): (2..5)³ を 2 段細かくし、細かいセル 2³ に木を置いて 1 つに火を付けて流し、
-    // GPU と CPU が毎刻み一致・細かくしたブロックが 16・細かい所の木が燃えた・記録から同じ形の別の箱で再生しても同じ
+    // GPU と CPU が毎刻み一致・細かくしたブロックが 16・細かい所の木が燃えた・細かいセルの計器と断面(T-0350)・
+    // 記録から同じ形の別の箱で再生しても同じ
     std::expected<void, std::string> LabPanel::RunAutoRefinedBox(std::span<const sim::SpeciesAmount> wood) {
         m_shapeChoice = AUTO_REFINED_SHAPE;
         if (!CreateSession())
             return std::unexpected(std::format("箱を作れない: {}", m_error));
 
+        // --- 計器は火を付ける細かいセルを見る(T-0350)---
+        constexpr uint32_t FINE = 8;  // レベル 2 の座標(箱のセル 2 = 0.25 m 角の細かいセルの 8)
+        const sim::LabCellPosition lit = {.x = FINE, .y = FINE, .z = FINE, .level = 2};
+        m_session->SetGaugeCell(lit.Index());
+        if (m_session->GaugeCell() != lit.Index())
+            return std::unexpected("計器の見るセルを細かいセルにできない");
+
         static_cast<void>(m_session->Refine({.low = {.x = 2, .y = 2, .z = 2}, .high = {.x = 5, .y = 5, .z = 5}}, 2));
         auto result = m_session->Step(1);
-        constexpr uint32_t FINE = 8;  // レベル 2 の座標(箱のセル 2 = 0.25 m 角の細かいセルの 8)
-        for (uint32_t i = 0; i < 8; ++i)
-            static_cast<void>(
-                m_session->Place({.x = FINE + (i & 1u), .y = FINE + ((i >> 1) & 1u), .z = FINE + (i >> 2), .level = 2},
-                                 wood, AUTO_ROOM_MILLIKELVIN));
+        for (uint32_t i = 0; i < 8; ++i) {
+            if (!m_session->Place({.x = FINE + (i & 1u), .y = FINE + ((i >> 1) & 1u), .z = FINE + (i >> 2), .level = 2},
+                                  wood, AUTO_ROOM_MILLIKELVIN))
+                return std::unexpected("細かいセルに木を置けない");
+        }
 
         if (result)
             result = m_session->Step(AUTO_IGNITE_TICK - 1);
 
-        static_cast<void>(
-            m_session->SetTemperature({.x = FINE, .y = FINE, .z = FINE, .level = 2}, AUTO_IGNITE_MILLIKELVIN));
+        static_cast<void>(m_session->SetTemperature(lit, AUTO_IGNITE_MILLIKELVIN));
         if (result)
             result = m_session->Step(AUTO_TICKS - AUTO_IGNITE_TICK);
 
@@ -683,20 +846,24 @@ namespace bicameral::editor {
 
         // --- 火を付けた細かいセルのセルロースが減った(GPU の箱)---
         const uint32_t cellulose = m_session->Table().SpeciesId("cellulose");
-        const auto lit = sim::LabBoxFineCell(m_session->Gpu(), {.x = FINE, .y = FINE, .z = FINE, .level = 2});
+        const auto litCell = sim::LabBoxFineCell(m_session->Gpu(), lit);
         uint64_t left = 0;
-        for (uint32_t i = 0; lit && i < lit->speciesCount; ++i)
-            left += lit->species[i] == cellulose ? lit->amounts[i] : 0;
+        for (uint32_t i = 0; litCell && i < litCell->speciesCount; ++i)
+            left += litCell->species[i] == cellulose ? litCell->amounts[i] : 0;
 
-        if (!lit || left >= wood.front().amount)
+        if (!litCell || left >= wood.front().amount)
             return std::unexpected("細かいセルの木が燃えていない");
+
+        if (auto checked = CheckRefinedGauge(*m_session, wood, lit); !checked)
+            return checked;
 
         if (auto replayed = ReplayInNewSession(m_session->Recording(), false); !replayed)
             return replayed;
 
         Log(Channel::Sim, Level::Info,
             "--auto-lab: 根の一部を 2 段細かくした箱で {} 刻み GPU と CPU が一致し、細かいセルの木が燃え"
-            "(セルロース {} → {})、記録から同じ形の別の箱で再生しても同じ",
+            "(セルロース {} → {})、細かいセルの計器が CPU だけで流した値と全刻み一致・断面に細かいセル、"
+            "記録から同じ形の別の箱で再生しても同じ",
             AUTO_TICKS, wood.front().amount, left);
 
         return {};
@@ -720,10 +887,11 @@ namespace bicameral::editor {
 
         // --- 根の境(7 と 8 の間)を挟んで木を 2×2×2。(7, 7, 7) に火を付ける ---
         constexpr uint32_t BORDER = sim::LAB_BOX_EDGE - 1;
-        for (uint32_t i = 0; i < 8; ++i)
-            static_cast<void>(
-                m_session->Place({.x = BORDER + (i & 1u), .y = BORDER + ((i >> 1) & 1u), .z = BORDER + (i >> 2)}, wood,
-                                 AUTO_ROOM_MILLIKELVIN));
+        for (uint32_t i = 0; i < 8; ++i) {
+            if (!m_session->Place({.x = BORDER + (i & 1u), .y = BORDER + ((i >> 1) & 1u), .z = BORDER + (i >> 2)}, wood,
+                                  AUTO_ROOM_MILLIKELVIN))
+                return std::unexpected("木を置けない");
+        }
 
         auto result = m_session->Step(AUTO_IGNITE_TICK);
         static_cast<void>(m_session->SetTemperature({.x = BORDER, .y = BORDER, .z = BORDER}, AUTO_IGNITE_MILLIKELVIN));

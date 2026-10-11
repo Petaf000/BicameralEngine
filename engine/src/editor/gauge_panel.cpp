@@ -228,14 +228,24 @@ namespace bicameral::editor {
         ImGui::SeparatorText("計器(GPU から読み戻した箱の値。刻みごと)");
         // 箱の形(根を並べた数。T-0173)の中に収める。スライダーの上限はいちばん長い辺
         const lab::LabBoxShape shape = session.Shape();
+        // 細かくできる箱は見るセルを細かいセルにもできる(T-0350。座標はそのレベルのセルの座標 = 箱の座標 × 2^段)
         const std::array<uint32_t, 3> roots = {shape.rootsX, shape.rootsY, shape.rootsZ};
-        const int maxCell = static_cast<int>(sim::LAB_BOX_EDGE * std::ranges::max(roots)) - 1;
-        ImGui::SliderInt3("見るセル", m_cell.data(), 0, maxCell);
-        for (size_t axis = 0; axis < roots.size(); ++axis)
-            m_cell.at(axis) = std::clamp(m_cell.at(axis), 0, static_cast<int>(sim::LAB_BOX_EDGE * roots.at(axis)) - 1);
+        const int maxLevel = shape.refineBlocks == 0 ? 0 : static_cast<int>(lab::LAB_MAX_REFINE_LEVELS);
+        if (maxLevel > 0) {
+            ImGui::SetNextItemWidth(150.0f);
+            ImGui::SliderInt("見るセルの細かさ (段)", &m_level, 0, maxLevel);
+        }
 
-        session.SetGaugeCell(lab::LabCellIndex(static_cast<uint32_t>(m_cell[0]), static_cast<uint32_t>(m_cell[1]),
-                                               static_cast<uint32_t>(m_cell[2])));
+        m_level = std::clamp(m_level, 0, maxLevel);
+        const int maxCell = (static_cast<int>(sim::LAB_BOX_EDGE * std::ranges::max(roots)) << m_level) - 1;
+        ImGui::SliderInt3("見るセル", m_cell.data(), 0, maxCell);
+        for (size_t axis = 0; axis < roots.size(); ++axis) {
+            const int edge = static_cast<int>(sim::LAB_BOX_EDGE * roots.at(axis)) << m_level;
+            m_cell.at(axis) = std::clamp(m_cell.at(axis), 0, edge - 1);
+        }
+
+        session.SetGaugeCell(lab::LabFineCellWord(static_cast<uint32_t>(m_level), static_cast<uint32_t>(m_cell[0]),
+                                                  static_cast<uint32_t>(m_cell[1]), static_cast<uint32_t>(m_cell[2])));
         BuildQuantityControls(session.Table());
         ImGui::SetNextItemWidth(220.0f);
         ImGui::SliderInt("直近の刻み", &m_windowTicks, 10, static_cast<int>(sim::LAB_GAUGE_MAX_SAMPLES));

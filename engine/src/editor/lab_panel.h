@@ -78,6 +78,9 @@ namespace bicameral::editor {
         void BuildShapeChoice();
         void ClampCells();
         void BuildSlice();
+        void BuildSliceCell(std::span<const sim::LabSliceCell> slice, int x, int y, float pixels);
+        void BuildFineCellControls();
+        [[nodiscard]] sim::LabCellPosition SelectedPosition() const;
         void BuildCell() const;
         void BuildRecording();
         void Report(const std::expected<void, std::string>& result);
@@ -95,6 +98,10 @@ namespace bicameral::editor {
         // --- 操作の状態(View。世界に入らない)---
         size_t m_shapeChoice = 0;  // 箱の大きさ(lab_panel.cpp の BOX_SHAPES の添字。T-0173)
         std::array<int, 3> m_cell = {3, 3, 3};
+        // 選んだ細かいセル(T-0350): 段の数(0 = 箱のセル)と箱のセル m_cell の中の座標、断面の細かい z(箱のセルの中の 0〜3)
+        int m_fineLevel = 0;
+        std::array<int, 3> m_fineCell = {0, 0, 0};
+        int m_fineZ = 0;
         size_t m_preset = 1;  // ひな形(m_materials の添字。初めは木)
         MaterialRows m_rows{};
         RangeKind m_rangeKind = RangeKind::Cell;
