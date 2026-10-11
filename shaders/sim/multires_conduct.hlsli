@@ -314,6 +314,7 @@ bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
 
 // 一様なブロックの刻むセルを待ちの丸めで評価する(CPU の StepBlocks の初めの MrUniformWaitOf。1 スレッド = 1 セル)。
 // 変わるなら gs_conductReacts に OR し、スレッドの受け持つセルの起こす刻みの最小を返す
+// (溢れを使う変種は 9 種目の生成物を待たせたセルも「変わる」。UNIFORM_EXPANDS_HELD。T-0276)
 uint64_t EvaluateUniformCells(uint32_t slot, MrBlock block, uint32_t thread) {
     const RxCell value = g_cells[slot];
     const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
@@ -327,7 +328,7 @@ uint64_t EvaluateUniformCells(uint32_t slot, MrBlock block, uint32_t thread) {
 
         const RxWaitStep step = MrStepCellWait(MakeTable(), value, seed, tick, block, index);
         wakeTick = MinTick(wakeTick, step.wakeTick);
-        changes = changes || !MrSameCell(step.cell, value);
+        changes = changes || MrUniformStepExpands(step, value, UNIFORM_EXPANDS_HELD);
     }
 
     OrGroupReacts(changes);

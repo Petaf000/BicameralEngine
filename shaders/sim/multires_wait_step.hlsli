@@ -113,7 +113,8 @@ WaitBlockResult StepPagedWaitShaped(uint32_t slot, uint32_t thread) {
 #endif
 }
 
-// 一様なブロックを待ちの丸めで評価する(CPU の MrUniformWaitOf を 64 スレッドで。変わるかは OR、変わらなければ最小)
+// 一様なブロックを待ちの丸めで評価する(CPU の MrUniformWaitOf を 64 スレッドで。変わるかは OR、変わらなければ最小)。
+// 溢れを使う変種は 9 種目の生成物を待たせたセルも「変わる」として頁に広げる(UNIFORM_EXPANDS_HELD。T-0276)
 WaitBlockResult EvaluateUniformWait(uint32_t slot, uint32_t thread) {
     BeginWaitReduce(thread);
     const MrBlock block = g_blocks[slot];
@@ -128,7 +129,7 @@ WaitBlockResult EvaluateUniformWait(uint32_t slot, uint32_t thread) {
 
         const RxWaitStep step = MrStepCellWait(MakeTable(), value, seed, tick, block, index);
         wakeTick = MinTick(wakeTick, step.wakeTick);
-        if (!MrSameCell(step.cell, value))
+        if (MrUniformStepExpands(step, value, UNIFORM_EXPANDS_HELD))
             InterlockedOr(gs_waitChanged, 1u);
     }
 

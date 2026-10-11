@@ -4,6 +4,7 @@
 //   - 畳む: 12 種(溢れのある)セルの頁をビット単位で畳み、一様の値の溢れごと細かくする・粗くする・伝導で頁に広げる。保存は毎刻みビット単位
 //   - ほぼ同じ頁と端数: 12 種のほぼ同じ頁を平均の値で畳み、溢れのある端数の枠を帳簿へ返す。保存は毎刻みビット単位
 //   - 静かな葉: 9 種目からの成分の量の差も許容差で比べる(インラインの 8 種だけ同じでも粗くしない)
+//   - 一様な 8 種の根(T-0276): 9 種目を作る規則だけが進む一様なブロックも、溢れを使う世界は頁に広げて 9 種目を作る
 // 表は反応しない 12 種の表(この試験だけのデータ)と、上限の試験の表(tests/reaction_limits_table.h)・燃焼の試験の表。
 #include <algorithm>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include "core/singleton.h"
 #include "multires_limits_scene.h"
 #include "multires_test_scene.h"
+#include "multires_wide_scene.h"
 #include "sim/multires_nest.h"
 #include "sim/reaction_test_table.h"
 
@@ -321,6 +323,49 @@ namespace {
         Expect(different == 0, "静かな葉: 9 種目からの量の差も許容差で比べる");
     }
 
+    // --- 一様なブロックの 9 種目(T-0276)---
+
+    // 一様な 8 種の根で 9 種目を作る規則だけが進む場面(表と根は multires_wide_scene.h): 溢れを使う世界は一様な根も頁に広げて
+    // 9 種目を作り、待たせない(伝導あり・なし)。溢れを使わない世界は今までどおり待たせる(一様のまま。D-448 の当座のふるまい)。
+    // 保存は毎刻みビット単位
+    void TestUniformMakesNinth() {
+        const auto table = BakeReactionTable(test::MakeWideOverflowTable());
+        Expect(table.has_value(), "大きい溢れの表をベイクできる");
+        if (!table)
+            return;
+
+        for (const bool conduction : {false, true}) {
+            for (const bool wide : {true, false}) {
+                MultiresNest nest = test::MakeWideOverflowNest(*table);
+                if (wide)
+                    EnableWideCells(nest);
+
+                const ConservedTotals initial = ComputeConservedTotals(nest, *table, 1);
+                bool conserved = true;
+                for (uint64_t tick = 0; tick < test::WIDE_OVERFLOW_TICKS; ++tick) {
+                    StepNest(nest, *table, test::WIDE_OVERFLOW_SEED, tick, test::LimitsStepOptions(conduction));
+                    conserved = conserved && ComputeConservedTotals(nest, *table, 1) == initial;
+                }
+
+                const uint32_t slot = LookupBlock(nest, 0, test::WIDE_OVERFLOW_UNIFORM_X, 0, 0);
+                const uint32_t most = test::WideOverflowUniformRootSpecies(nest);
+                Log(Channel::Sim, Level::Info,
+                    "一様な 8 種の根(溢れ {}・伝導 {}): 成分の最大 {}・一様のまま {}・待たせた {}",
+                    wide ? "あり" : "なし", conduction ? "あり" : "なし", most, MrIsUniform(nest.blocks[slot]),
+                    nest.counters[MR_COUNTER_LIMIT_PRODUCTS]);
+                if (wide) {
+                    Expect(most > RX_MAX_CELL_SPECIES && nest.counters[MR_COUNTER_LIMIT_PRODUCTS] == 0,
+                           "一様な 8 種の根: 溢れを使う世界は 9 種目を作る(待たせない)");
+                } else if (!conduction) {
+                    Expect(MrIsUniform(nest.blocks[slot]) && most == test::WIDE_OVERFLOW_START_SPECIES,
+                           "一様な 8 種の根: 溢れを使わない世界は今までどおり待たせる");
+                }
+
+                Expect(conserved, "一様な 8 種の根: 元素とエネルギーが毎刻み同じ");
+            }
+        }
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -336,6 +381,7 @@ namespace {
         TestExpandWide(inert);
         TestFoldWideNear(inert);
         TestQuietWide(inert);
+        TestUniformMakesNinth();
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_wide_test: FAILED ({} 件)", failureCount);

@@ -369,13 +369,13 @@ namespace bicameral::sim {
                 if (MrChangeMark(tick) < block.wakeTick)
                     continue;
 
-                // (一様の値に溢れがあれば溢れまで読む。T-0199。溢れの無い一様の値はインラインの形のまま = GPU の溢れの世界と同じ:
-                //  9 種目だけを作る規則はここでは待たせる。上限の無い形で評価するのは CPU と GPU を一緒に直す T-0276)
+                // (一様の値に溢れがあれば溢れまで読む。T-0199。溢れの無い一様の値はインラインの形のまま = GPU の溢れの世界と同じ。
+                //  溢れを使う世界では 9 種目の生成物を待たせたら頁に広げ、上限の無い形で刻む = 待たせない。T-0276)
                 const bool wideValue = nest.wideCells && !nest.uniformOverflow[slot].species.empty();
-                const MrUniformWait wait = wideValue
-                                               ? MrUniformWaitOf(view, LoadWideUniform(nest, slot), worldSeed, tick,
-                                                                 block)
-                                               : MrUniformWaitOf(view, UniformAt(nest, slot), worldSeed, tick, block);
+                const MrUniformWait wait = wideValue ? MrUniformWaitOf(view, LoadWideUniform(nest, slot), worldSeed,
+                                                                       tick, block, true)
+                                                     : MrUniformWaitOf(view, UniformAt(nest, slot), worldSeed, tick,
+                                                                       block, nest.wideCells);
                 if (wait.changed != 0) {
                     block.page = MR_PAGE_WANTED;
                     continue;

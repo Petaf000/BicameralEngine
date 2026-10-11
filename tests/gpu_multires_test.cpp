@@ -367,9 +367,15 @@ namespace {
             return std::unexpected(std::format("大きい溢れ: 待たせた {}・頁の溢れの最大 {} 成分・1 セルの最大 {} 種",
                                                cpu.counters[MR_COUNTER_LIMIT_PRODUCTS], mostEntries, mostSpecies));
 
+        // --- 一様な 8 種の根も 9 種目を作る(9 種目を作る規則だけが進む一様なブロックを頁に広げる。T-0276)---
+        const uint32_t uniformSpecies = test::WideOverflowUniformRootSpecies(read);
+        if (uniformSpecies <= RX_MAX_CELL_SPECIES)
+            return std::unexpected(std::format("大きい溢れ: 一様な根が 9 種目を作っていない(成分 {})", uniformSpecies));
+
         Log(Channel::Gpu, Level::Info,
-            "大きい溢れ(伝導 {}): 頁の溢れの最大 {} 成分・1 セルの最大 {} 種・待たせた 0(CPU と GPU で同じ)",
-            conduction ? "あり" : "なし", mostEntries, mostSpecies);
+            "大きい溢れ(伝導 {}): 頁の溢れの最大 {} 成分・1 セルの最大 {} 種・一様な根の成分 {}・待たせた 0(CPU と GPU "
+            "で同じ)",
+            conduction ? "あり" : "なし", mostEntries, mostSpecies, uniformSpecies);
 
         return RunResult{.digest = sim::HashWholeNest(cpu), .freeFractions = cpu.counters[MR_COUNTER_FREE_FRACTIONS]};
     }

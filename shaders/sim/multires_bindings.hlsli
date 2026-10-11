@@ -74,6 +74,13 @@ cbuffer RootConstants : register(b0) {
 #endif
 };
 
+// 一様なブロックの評価で 9 種目の生成物を待たせたセルも頁に広げるか(溢れを使う変種だけ。CPU の MrUniformWaitOf の expandHeld。T-0276)
+#ifdef MR_WIDE_CELLS
+static const bool UNIFORM_EXPANDS_HELD = true;
+#else
+static const bool UNIFORM_EXPANDS_HELD = false;
+#endif
+
 // g_stepFlags(gpu_multires.cpp の STEP_FLAG_*)
 static const uint32_t MR_STEP_CONDUCTION = 1;  // 熱の伝導を入れる(活性の刻むノードは刻まずに伝導の一覧に足す)
 static const uint32_t MR_STEP_LISTED = 2;  // 伝導の段は伝導の一覧(MR_GRAPH_INPUT_CONDUCT_*)のブロック。無ければ全部の枠
