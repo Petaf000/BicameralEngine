@@ -34,6 +34,8 @@ MrUniformWaitOf・GPU の multires_wait_step.hlsli / multires_conduct.hlsli)は�
   広げた頁は今までの道(CPU は上限の無い形、GPU はインライン → 待たせたセルを上限の無い形で刻み直す)で刻むので、9 種目を同じ刻みに作る。
   試験: multires_wide_test に TestUniformMakesNinth(大きい溢れの場面〔multires_wide_scene.h〕の一様な根。溢れの世界は 9 種目を作る・
   溢れを使わない世界は一様のまま・保存は毎刻み。伝導あり・なし)、gpu_multires の RunWideOverflow に「一様な根も 9 種目を作る」を足した。
+  テスト: release の multires.*・reaction・reaction_wait・reaction_contention・lab_box(13 本)と gpu_multires(HW)・gpu_multires_warp・
+  gpu_multires_uniform、debug(警告なし)の multires・multires_wide・multires_uniform が通過(main 1a2383f の上。rebase は不要だった)。tidy は流していない。
 
 ## 結果の変わる場面
 - 溢れを使わない世界(既定)は変わらない(CPU は expandHeld = false、GPU の既定のシェーダーは UNIFORM_EXPANDS_HELD = false で今と同じ式)。
