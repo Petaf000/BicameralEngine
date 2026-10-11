@@ -13,6 +13,7 @@
 // 刻んだ後に変わったブロックは忙しさの印(= tc)を書いて次の刻みに起こし、評価して変わらなければ次に評価の要る刻みを書く(RecordWaitResults)。
 #include <algorithm>
 #include <optional>
+#include <type_traits>
 
 #include "common/multires_activity.hlsli"
 #include "sim/multires_nest.h"
@@ -32,13 +33,10 @@ namespace bicameral::sim {
 
         // --- 頁を畳む(T-0103・T-0104)---
 
-        // ビット単位で一様なら、その値(覆われていないセルが全部同じ・覆われたセルは空)
-        // (溢れのある頁は畳まない。値 1 つはインラインの形なので。T-0187)
+        // ビット単位で一様なら、その値(覆われていないセルが全部同じ・覆われたセルは空)。溢れの無い頁
         std::optional<RxCell> ExactFoldValue(MultiresNest& nest, uint32_t slot) {
             const MrBlock& block = nest.blocks[slot];
-            if (PageHasOverflow(nest, block.page))
-                return std::nullopt;
-
+            FX_ASSERT(!PageHasOverflow(nest, block.page));
             const uint32_t valueCell = MrFoldValueCell(block);
             const RxCell value = valueCell < MR_BLOCK_CELLS ? CellAt(nest, slot, valueCell) : RxMakeEmptyCell(0);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
@@ -49,13 +47,61 @@ namespace bicameral::sim {
             return value;
         }
 
-        // 値 1 つに戻して、頁を空きのスタックに積む(枠の順)
-        void FoldPage(MultiresNest& nest, uint32_t slot, const RxCell& value) {
+        // 溢れのある頁の版(上限の無い形で比べる。溢れまで同じ時だけ。T-0199)
+        std::optional<RxWideCell> ExactWideFoldValue(const MultiresNest& nest, uint32_t slot) {
+            const MrBlock& block = nest.blocks[slot];
+            const uint32_t valueCell = MrFoldValueCell(block);
+            const RxWideCell value = valueCell < MR_BLOCK_CELLS ? LoadWideNestCell(nest, slot, valueCell)
+                                                                : RxMakeEmptyWideCell(0);
+            const RxWideCell empty = RxMakeEmptyWideCell(0);
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const RxWideCell& expected = MrIsCoveredCell(block, index) ? empty : value;
+                if (!RxSameCell(LoadWideNestCell(nest, slot, index), expected))
+                    return std::nullopt;
+            }
+
+            return value;
+        }
+
+        // 頁を空きのスタックに積む(枠の順)。頁の溢れは空にしてから返す(次に使う所に古い溢れを残さない。T-0199)
+        void ReleaseFoldedPage(MultiresNest& nest, uint32_t slot) {
             MrBlock& block = nest.blocks[slot];
+            ClearPageOverflow(nest, block.page);
             FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = block.page;
-            UniformAt(nest, slot) = value;
             block.page = MR_NO_PAGE;
             nest.counters[MR_COUNTER_FOLDED] += 1;
+        }
+
+        // 値 1 つに戻して、頁を返す(溢れを使う世界は一様の値の溢れを空に)
+        void FoldPage(MultiresNest& nest, uint32_t slot, const RxCell& value) {
+            UniformAt(nest, slot) = value;
+            if (nest.wideCells)
+                nest.uniformOverflow[slot] = {};
+
+            ReleaseFoldedPage(nest, slot);
+        }
+
+        // 上限の無い値 1 つ(インライン + 一様の値の溢れ)に戻して、頁を返す(T-0199)
+        void FoldWidePage(MultiresNest& nest, uint32_t slot, const RxWideCell& value) {
+            StoreWideUniform(nest, slot, value);
+            ReleaseFoldedPage(nest, slot);
+        }
+
+        // ビット単位で一様なら畳む(溢れのある頁は溢れまで同じ時だけ)。畳んだら true
+        bool FoldExact(MultiresNest& nest, uint32_t slot) {
+            if (PageHasOverflow(nest, nest.blocks[slot].page)) {
+                const std::optional<RxWideCell> wide = ExactWideFoldValue(nest, slot);
+                if (wide)
+                    FoldWidePage(nest, slot, *wide);
+
+                return wide.has_value();
+            }
+
+            const std::optional<RxCell> value = ExactFoldValue(nest, slot);
+            if (value)
+                FoldPage(nest, slot, *value);
+
+            return value.has_value();
         }
 
         // 帳簿の段 ledgerLevel に bits(その段の単位 × 2^-64)を足す。桁あふれ(= その段の 1 単位 = 1 段粗い段の 2^61)は粗い段へ繰り上げる
@@ -79,16 +125,18 @@ namespace bicameral::sim {
             AddLedgerBits(nest, level - 3, column, units << 55u);
         }
 
-        // 端数の枠のセルの端数を全部帳簿へ移し(端数はそのレベルの単位 × 2^-64 = 帳簿の同じ段の値)、枠を空きのスタックへ返す(T-0104)
+        // 端数の枠のセルの端数を全部帳簿へ移し(端数はそのレベルの単位 × 2^-64 = 帳簿の同じ段の値)、枠を空きのスタックへ返す(T-0104)。
+        // 溢れを使う世界は端数の溢れの成分も移し、溢れを空にしてから返す(T-0199)
         void ReturnFractionsToLedger(MultiresNest& nest, uint32_t slot) {
             MrBlock& block = nest.blocks[slot];
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const MrFraction fraction = nest_detail::FractionAt(nest, block.fraction, index);
+                const MrWideFraction fraction = LoadWideFraction(nest, block.fraction, index);
                 AddLedgerBits(nest, block.level, 0, fraction.energy);
                 for (uint32_t i = 0; i < fraction.speciesCount; ++i)
                     AddLedgerBits(nest, block.level, 1 + fraction.species[i], fraction.amounts[i]);
             }
 
+            ClearFractionOverflow(nest, block.fraction);
             nest.freeFractions[nest.counters[MR_COUNTER_FREE_FRACTIONS]++] = block.fraction;
             block.fraction = MR_NO_FRACTION;
         }
@@ -136,6 +184,19 @@ namespace bicameral::sim {
             }
         };
 
+        // 溢れを使う世界の版(上限の無い形で読む。溢れの成分の量の幅も比べる。T-0199)
+        struct QuietWideLeafCells {
+            const MultiresNest* nest = nullptr;
+            const ReactionTableView* table = nullptr;
+            uint32_t slot = 0;
+
+            [[nodiscard]] RxWideCell Cell(uint32_t index) const { return LoadWideNestCell(*nest, slot, index); }
+
+            [[nodiscard]] int32_t Temperature(const RxWideCell& cell) const {
+                return RxComputeThermal(*table, cell).temperature;
+            }
+        };
+
         // 葉を粗くしても、子のセル 2×2×2 の組のどれも許容差の中か(一様ならいつも)
         bool LeafCoarsenable(const MultiresNest& nest, const ReactionTableView* table, uint32_t slot,
                              const MrFoldTolerance& tolerance) {
@@ -143,11 +204,65 @@ namespace bicameral::sim {
                 return true;
 
             const QuietLeafCells cells{.nest = &nest, .table = table, .slot = slot};
+            const QuietWideLeafCells wideCells{.nest = &nest, .table = table, .slot = slot};
             for (uint32_t group = 0; group < MR_OCTANT_CELLS; ++group) {
-                if (!MrCoarsenGroupWithin(cells, group, tolerance))
+                const uint32_t first = MrCoarsenGroupCell(group, 0);
+                const bool within = nest.wideCells ? MrCoarsenGroupWithinOf(wideCells, group, tolerance,
+                                                                            wideCells.Cell(first), MrWideFoldStats{})
+                                                   : MrCoarsenGroupWithin(cells, group, tolerance);
+                if (!within)
                     return false;
             }
 
+            return true;
+        }
+
+        // 頁を持つブロックの覆われていないセルの集計(CollectFoldStats の上限の無い形。T-0199)
+        MrWideFoldStats CollectWideFoldStats(const MultiresNest& nest, const ReactionTableView& table, uint32_t slot) {
+            const MrBlock& block = nest.blocks[slot];
+            MrWideFoldStats stats;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (MrIsCoveredCell(block, index))
+                    continue;
+
+                const RxWideCell cell = LoadWideNestCell(nest, slot, index);
+                stats = MrAddFoldCell(stats, cell, RxComputeThermal(table, cell).temperature);
+            }
+
+            return stats;
+        }
+
+        // 平均の値で畳み、切り捨ての余りを帳簿へ(合計はビット一致)。Stats・Value は形(インライン・上限なし)
+        template <typename Stats, typename Value>
+        void FoldAverage(MultiresNest& nest, uint32_t slot, const Stats& stats, const Value& value) {
+            const int32_t level = nest.blocks[slot].level;
+            AddFoldRemainder(nest, level, 0, value.energyRemainder);
+            for (uint32_t i = 0; i < stats.speciesCount; ++i)
+                AddFoldRemainder(nest, level, 1 + stats.species[i], value.amountRemainders[i]);
+
+            if constexpr (std::is_same_v<Value, MrWideFoldValue>)
+                FoldWidePage(nest, slot, value.cell);
+            else
+                FoldPage(nest, slot, value.cell);
+        }
+
+        // ほぼ同じなら平均の値で畳む。畳んだら true(溢れを使う世界は上限の無い集計で。成分が 8 種を超えても畳める。T-0199)
+        bool FoldNear(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
+                      const MrFoldTolerance& tolerance) {
+            if (nest.wideCells) {
+                const MrWideFoldStats stats = CollectWideFoldStats(nest, view, slot);
+                if (!MrFoldStatsWithin(stats, tolerance))
+                    return false;
+
+                FoldAverage(nest, slot, stats, MrFoldStatsValueOf(stats, MrWideFoldValue{}));
+                return true;
+            }
+
+            const MrFoldStats stats = CollectFoldStats(nest, view, slot);
+            if (!MrFoldStatsWithin(stats, tolerance))
+                return false;
+
+            FoldAverage(nest, slot, stats, MrFoldStatsValue(stats));
             return true;
         }
 
@@ -235,9 +350,7 @@ namespace bicameral::sim {
             if (!MrWantsFoldCheck(nest.blocks[slot], mark))
                 continue;
 
-            const std::optional<RxCell> value = ExactFoldValue(nest, slot);
-            if (value)
-                FoldPage(nest, slot, *value);
+            FoldExact(nest, slot);
         }
     }
 
@@ -251,10 +364,8 @@ namespace bicameral::sim {
         const ReactionTableView view = table.View();
         const uint64_t mark = MrChangeMark(tick);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
-            // --- ちょうど静かになったら、端数の枠を帳簿へ移して返す(畳めるかはその後で調べる)---
-            //     (溢れのある端数の枠は返さない。T-0187)
-            if (MrWantsFractionReturn(nest.blocks[slot], mark) &&
-                !FractionHasOverflow(nest, nest.blocks[slot].fraction))
+            // --- ちょうど静かになったら、端数の枠を帳簿へ移して返す(畳めるかはその後で調べる。溢れのある端数の枠も。T-0199)---
+            if (MrWantsFractionReturn(nest.blocks[slot], mark))
                 ReturnFractionsToLedger(nest, slot);
 
             const MrBlock& block = nest.blocks[slot];
@@ -263,26 +374,12 @@ namespace bicameral::sim {
 
             // --- ビット単位で一様ならそのまま畳む(値が変わらないのでつつかない。T-0125)。全部覆われていれば(覆われていないセルが無い)
             //     ビット単位の判定だけ ---
-            const std::optional<RxCell> exact = ExactFoldValue(nest, slot);
-            if (exact) {
-                FoldPage(nest, slot, *exact);
-                continue;
-            }
-
-            if (MrFoldValueCell(block) == MR_BLOCK_CELLS || PageHasOverflow(nest, block.page))
-                continue;
-
-            const MrFoldStats stats = CollectFoldStats(nest, view, slot);
-            if (!MrFoldStatsWithin(stats, tolerance))
+            if (FoldExact(nest, slot))
                 continue;
 
             // --- 平均の値で畳み、切り捨ての余りを帳簿へ(合計はビット一致)---
-            const MrFoldValue value = MrFoldStatsValue(stats);
-            AddFoldRemainder(nest, block.level, 0, value.energyRemainder);
-            for (uint32_t i = 0; i < stats.speciesCount; ++i)
-                AddFoldRemainder(nest, block.level, 1 + stats.species[i], value.amountRemainders[i]);
-
-            FoldPage(nest, slot, value.cell);
+            if (MrFoldValueCell(block) == MR_BLOCK_CELLS || !FoldNear(nest, view, slot, tolerance))
+                continue;
 
             // --- セルの値が変わった(反応の速さ f も変わる)ので、つついて tc を書き直す(古い乱数・新しい f にしない。ADR-0018 追記 T-0125)---
             nest_detail::PokeBlock(nest, slot);

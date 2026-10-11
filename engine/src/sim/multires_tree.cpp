@@ -208,6 +208,30 @@ namespace bicameral::sim {
                 nest.states[i].status = MR_STATUS_INVALID;
         }
 
+        // 一様な子(値 childValue、端数なし)を一様な親へ粗くしても親が一様のままか(multires_tree.hlsli の MrCoarsenKeepsUniform の
+        // 上限の無い形。一様の値に溢れがあっても溢れまで比べる。T-0199)
+        bool CoarsenKeepsWideUniform(const RxWideCell& childValue, const RxWideCell& parentValue) {
+            MrWideChildren children;
+            children.cells.fill(childValue);
+            const MrWideCoarsened result = MrCoarsenWideCell(children);
+
+            return result.lostCount == 0 && result.overflowCount == 0 && MrFractionIsZero(result.fraction) &&
+                   RxSameCell(result.cell, parentValue);
+        }
+
+        // 粗くする要求で親に要る頁の数(MrCoarsenPageNeed の溢れを使う世界の版。T-0199)
+        uint32_t CoarsenWidePageNeed(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot) {
+            const MrBlock& child = nest.blocks[childSlot];
+            if (!MrIsUniform(nest.blocks[parentSlot]))
+                return 0;
+
+            if (MrIsUniform(child) && child.fraction == MR_NO_FRACTION &&
+                CoarsenKeepsWideUniform(LoadWideUniform(nest, childSlot), LoadWideUniform(nest, parentSlot)))
+                return 0;
+
+            return 1;
+        }
+
         // --- 2. 確定: 取り合いに負けたら後回し。要る枠の数(端数は控えめに多く取り、適用の後で 0 なら返す)---
 
         void Settle(MultiresNest& nest, uint32_t i) {
@@ -226,8 +250,10 @@ namespace bicameral::sim {
             if (coarsen) {
                 const uint32_t parent = nest.blocks[state.target].parent;
                 state.fractionNeed = nest.blocks[parent].fraction == MR_NO_FRACTION ? 1 : 0;
-                state.pageNeed = MrCoarsenPageNeed(nest.blocks[state.target], UniformAt(nest, state.target),
-                                                   nest.blocks[parent], UniformAt(nest, parent));
+                state.pageNeed = nest.wideCells
+                                     ? CoarsenWidePageNeed(nest, state.target, parent)
+                                     : MrCoarsenPageNeed(nest.blocks[state.target], UniformAt(nest, state.target),
+                                                         nest.blocks[parent], UniformAt(nest, parent));
                 return;
             }
 
@@ -320,7 +346,9 @@ namespace bicameral::sim {
             const uint32_t childFraction = octantFraction ? candidate : MR_NO_FRACTION;
 
             // --- セルと端数: 子は親と同じ数(一様なら値 1 つ)---
-            if (uniform)
+            if (uniform && nest.wideCells)
+                StoreWideUniform(nest, childSlot, LoadWideUniform(nest, parentSlot));  // 溢れごと(T-0199)
+            else if (uniform)
                 UniformAt(nest, childSlot) = UniformAt(nest, parentSlot);
 
             if (nest.wideCells) {
@@ -427,8 +455,12 @@ namespace bicameral::sim {
             // --- 一様な親: 子が同じ値に戻らなければ頁に広げる(T-0102)---
             if (state.pageNeed != 0) {
                 const uint32_t page = PoppedPage(nest, state, 0);
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                    PageCellAt(nest, page, index) = MrUniformCell(parent, UniformAt(nest, child.parent), index);
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    if (nest.wideCells)  // 一様の値の溢れごと(返された頁の溢れは空。T-0199)
+                        StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, child.parent, index));
+                    else
+                        PageCellAt(nest, page, index) = MrUniformCell(parent, UniformAt(nest, child.parent), index);
+                }
 
                 parent.page = page;
             }
@@ -542,6 +574,8 @@ namespace bicameral::sim {
         const bool uniform = std::ranges::all_of(cells, [&](const RxCell& cell) { return MrSameCell(cell, cells[0]); });
         if (uniform) {
             UniformAt(nest, slot) = cells[0];
+            if (nest.wideCells)
+                nest.uniformOverflow[slot] = {};  // 前に使った枠の一様の値の溢れを残さない(T-0199)
         } else {
             block.page = nest_detail::PopPage(nest);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)

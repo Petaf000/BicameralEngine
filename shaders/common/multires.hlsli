@@ -598,14 +598,15 @@ FX_FN int64_t MrCeilMillijoules(int64_t microjoules) {
 // 影の子 2³ の合計を「親 × 8」(子の単位)に合わせる(17 §3 B)。
 //   物質: 親にある物質だけを、子の今の量の比で配る(親に無い物質は消える)。
 //   エネルギー: 子ごとに「化学のエネルギー以上」(熱が負にならない)を確保し、残りを子の今の熱の比で配る。
-// 端数は扱わない(影は世界に返さないので、整数部だけを親に従わせる)
-template <typename Table>
-FX_FN MrShadowFamily MrPullBackShadow(Table table, RxCell parent, MrShadowFamily family) {
-    MrShadowFamily result;
+// 端数は扱わない(影は世界に返さないので、整数部だけを親に従わせる)。
+// セルの形 Cell と子 2³ の形 Family のテンプレート(MrShadowFamily = GPU と今の世界、C++ の MrWideShadowFamily = 溢れを持つ世界。T-0199)
+template <typename Table, typename Cell, typename Family>
+FX_FN Family MrPullBackShadowOf(Table table, Cell parent, Family family) {
+    Family result = family;
     result.clamped = 0;
     // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
     for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-        result.cells[j] = RxMakeEmptyCell(0);
+        result.cells[j] = RxEmptyCellLike(family.cells[j], 0);
 
     // --- 物質 ---
     for (uint32_t p = 0; p < parent.speciesCount; ++p) {
@@ -644,6 +645,12 @@ FX_FN MrShadowFamily MrPullBackShadow(Table table, RxCell parent, MrShadowFamily
         result.cells[j].energy += (int64_t)spareShares.values[j];
 
     return result;
+}
+
+// インラインの形(GPU と今の世界)
+template <typename Table>
+FX_FN MrShadowFamily MrPullBackShadow(Table table, RxCell parent, MrShadowFamily family) {
+    return MrPullBackShadowOf(table, parent, family);
 }
 
 // --- 刻み --------------------------------------------------------------------------------------
@@ -745,8 +752,9 @@ struct MrUniformWait {
 
 // 一様なブロックを刻み tick に待ちの丸めで評価する。待ちはセルの ID ごとに違うので、値が同じでも刻むセルを 1 つずつ見る
 // (評価するのは起こす刻み ≤ tick の時だけ。普通は変わる最初のセルで抜ける)
-template <typename Table>
-FX_FN MrUniformWait MrUniformWaitOf(Table table, RxCell value, uint64_t worldSeed, uint64_t tick, MrBlock block) {
+// (セルの形 Cell のテンプレート。C++ の RxWideCell = 溢れのある一様の値。T-0199)
+template <typename Table, typename Cell>
+FX_FN MrUniformWait MrUniformWaitOf(Table table, Cell value, uint64_t worldSeed, uint64_t tick, MrBlock block) {
     MrUniformWait result;
     result.changed = 0;
     result.wakeTick = RX_WAIT_NEVER;
@@ -754,8 +762,8 @@ FX_FN MrUniformWait MrUniformWaitOf(Table table, RxCell value, uint64_t worldSee
         if (!MrIsSteppedCell(block, index))
             continue;
 
-        const RxWaitStep step = MrStepCellWait(table, value, worldSeed, tick, block, index);
-        if (!MrSameCell(step.cell, value)) {
+        const RxWaitStepOf<Cell> step = MrStepCellWait(table, value, worldSeed, tick, block, index);
+        if (!RxSameCell(step.cell, value)) {
             result.changed = 1;
             return result;
         }
@@ -835,8 +843,9 @@ FX_FN MrFoldTolerance MrUnpackFoldTolerance(uint32_t packed) {
 struct MrFoldStats {
     // --- セル ---
     uint32_t cellCount;
-    uint32_t tooManySpecies;  // 合わせた成分が RX_MAX_CELL_SPECIES を超えた(畳まない)
-    int32_t lowTemperature;   // mK
+    uint32_t
+        tooManySpecies;  // 合わせた成分が RX_MAX_CELL_SPECIES を超えた(畳まない。上限の無い形〔C++ の MrWideFoldStats〕では起きない)
+    int32_t lowTemperature;  // mK
     int32_t highTemperature;
     uint64_t highTotal;  // セルの成分の物質量の合計の最大
     MrWide energy;       // エネルギーの和(上の 2 語。下の語は使わない)
@@ -872,8 +881,21 @@ FX_FN MrFoldStats MrMakeFoldStats() {
     return stats;
 }
 
-// 成分の位置(物質 ID の昇順に並べた時に入る位置)
-FX_FN uint32_t MrFoldSpeciesPosition(MrFoldStats stats, uint32_t speciesId) {
+// --- 集計の形ごとの道具(粗くする核の「形ごとの道具」と同じ考え。上限の無い形は C++ の multires_wide_cell.h。T-0199)---
+
+// 成分をもう 1 つ増やせるか(MrFoldStats はインラインの数まで)
+FX_FN bool MrFoldStatsHasRoom(MrFoldStats stats) {
+    return stats.speciesCount < RX_MAX_CELL_SPECIES;
+}
+
+// 書く前に、成分の数 + 1 個ぶんの場所を用意する(MrFoldStats は初めからあるので、そのまま)
+FX_FN MrFoldStats MrFoldStatsWithRoom(MrFoldStats stats) {
+    return stats;
+}
+
+// 成分の位置(物質 ID の昇順に並べた時に入る位置)。以下の集計の関数は集計の形 Stats(とセルの形 Cell)のテンプレート
+template <typename Stats>
+FX_FN uint32_t MrFoldSpeciesPosition(Stats stats, uint32_t speciesId) {
     uint32_t position = 0;
     while (position < stats.speciesCount && stats.species[position] < speciesId)
         position += 1;
@@ -882,15 +904,18 @@ FX_FN uint32_t MrFoldSpeciesPosition(MrFoldStats stats, uint32_t speciesId) {
 }
 
 // 成分が無ければ ID の順の位置に空けて差し込む(一杯なら tooManySpecies)
-FX_FN MrFoldStats MrFoldInsertSpecies(MrFoldStats stats, uint32_t speciesId) {
+template <typename Stats>
+FX_FN Stats MrFoldInsertSpecies(Stats stats, uint32_t speciesId) {
     const uint32_t position = MrFoldSpeciesPosition(stats, speciesId);
     if (position < stats.speciesCount && stats.species[position] == speciesId)
         return stats;
 
-    if (stats.speciesCount >= RX_MAX_CELL_SPECIES) {
+    if (!MrFoldStatsHasRoom(stats)) {
         stats.tooManySpecies = 1;
         return stats;
     }
+
+    stats = MrFoldStatsWithRoom(stats);
 
     for (uint32_t i = stats.speciesCount; i > position; --i) {
         stats.species[i] = stats.species[i - 1];
@@ -913,7 +938,8 @@ FX_FN MrFoldStats MrFoldInsertSpecies(MrFoldStats stats, uint32_t speciesId) {
 }
 
 // 覆われていないセル 1 つ(温度は RxComputeThermal の値)を足す
-FX_FN MrFoldStats MrAddFoldCell(MrFoldStats stats, RxCell cell, int32_t temperature) {
+template <typename Stats, typename Cell>
+FX_FN Stats MrAddFoldCell(Stats stats, Cell cell, int32_t temperature) {
     stats.cellCount += 1;
     stats.lowTemperature = temperature < stats.lowTemperature ? temperature : stats.lowTemperature;
     stats.highTemperature = temperature > stats.highTemperature ? temperature : stats.highTemperature;
@@ -942,7 +968,8 @@ FX_FN MrFoldStats MrAddFoldCell(MrFoldStats stats, RxCell cell, int32_t temperat
 }
 
 // 集めたセルの差が許容差の中か(成分が無いセルの量は 0)
-FX_FN bool MrFoldStatsWithin(MrFoldStats stats, MrFoldTolerance tolerance) {
+template <typename Stats>
+FX_FN bool MrFoldStatsWithin(Stats stats, MrFoldTolerance tolerance) {
     if (stats.cellCount == 0 || stats.tooManySpecies != 0)
         return false;
 
@@ -989,17 +1016,22 @@ FX_FN FxDivResult MrFloorDivideEnergy(MrWide energy, uint64_t divisor) {
     return result;
 }
 
-FX_FN MrFoldValue MrFoldStatsValue(MrFoldStats stats) {
-    MrFoldValue value;
+// 書く前に、余りの一覧に count 個ぶんの場所を用意する(MrFoldValue は初めからあるので、そのまま)
+FX_FN MrFoldValue MrFoldValueWithRoom(MrFoldValue value, uint32_t count) {
+    RX_UNUSED(count);
+
+    return value;
+}
+
+// 平均の値(集計の形 Stats・値の形 Value のテンプレート。value は空の値で渡す。余りの一覧の使わない所は value のまま)
+template <typename Stats, typename Value>
+FX_FN Value MrFoldStatsValueOf(Stats stats, Value value) {
     const uint64_t cells = stats.cellCount;
     const FxDivResult energy = MrFloorDivideEnergy(stats.energy, cells);
-    value.cell = RxMakeEmptyCell((int64_t)energy.quotient);
+    value.cell = RxEmptyCellLike(value.cell, (int64_t)energy.quotient);
     value.energyRemainder = energy.remainder;
-    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
-        value.amountRemainders[i] = 0;
-        if (i >= stats.speciesCount)
-            continue;
-
+    value = MrFoldValueWithRoom(value, stats.speciesCount);
+    for (uint32_t i = 0; i < stats.speciesCount; ++i) {
         FxU128 sum = {stats.sumHigh[i], stats.sumLow[i]};
         const FxDivResult amount = FxDivU128By64(sum, cells);
         value.cell = RxAddSpecies(value.cell, stats.species[i], amount.quotient);
@@ -1007,6 +1039,18 @@ FX_FN MrFoldValue MrFoldStatsValue(MrFoldStats stats) {
     }
 
     return value;
+}
+
+// インラインの形(GPU と今の世界)
+FX_FN MrFoldValue MrFoldStatsValue(MrFoldStats stats) {
+    MrFoldValue value;
+    value.cell = RxMakeEmptyCell(0);
+    value.energyRemainder = 0;
+    // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        value.amountRemainders[i] = 0;
+
+    return MrFoldStatsValueOf(stats, value);
 }
 
 MR_NAMESPACE_END

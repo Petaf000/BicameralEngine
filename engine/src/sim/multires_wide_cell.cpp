@@ -26,7 +26,6 @@ namespace bicameral::sim {
             if (oldCount == 0 && newCount == 0)
                 return;  // 溢れの無いセル(ほとんど)は何もしない
 
-
             area.species.erase(area.species.begin() + begin, area.species.begin() + end);
             area.amounts.erase(area.amounts.begin() + begin, area.amounts.begin() + end);
             area.species.insert(area.species.begin() + begin, species.begin(), species.end());
@@ -64,12 +63,49 @@ namespace bicameral::sim {
         nest.wideCells = true;
         nest.cellOverflow.assign(pageCount, MultiresOverflowArea{});
         nest.fractionOverflow.assign(nest.capacity.fractions, MultiresOverflowArea{});
+        nest.uniformOverflow.assign(nest.blocks.size(), MultiresUniformOverflow{});
+    }
+
+    RxWideCell LoadWideUniform(const MultiresNest& nest, uint32_t slot) {
+        RxWideCell wide = RxWidenCell(nest_detail::UniformAt(nest, slot));
+        if (!nest.wideCells)
+            return wide;
+
+        const MultiresUniformOverflow& tail = nest.uniformOverflow[slot];
+        FX_ASSERT(tail.species.empty() || wide.speciesCount == RX_MAX_CELL_SPECIES);
+        wide.species.insert(wide.species.end(), tail.species.begin(), tail.species.end());
+        wide.amounts.insert(wide.amounts.end(), tail.amounts.begin(), tail.amounts.end());
+        wide.speciesCount += static_cast<uint32_t>(tail.species.size());
+
+        return wide;
+    }
+
+    void StoreWideUniform(MultiresNest& nest, uint32_t slot, const RxWideCell& value) {
+        FX_ASSERT(nest.wideCells || RxFitsInline(value));
+        RxCell& narrow = nest_detail::UniformAt(nest, slot);
+        narrow = RxMakeEmptyCell(value.energy);
+        narrow.speciesCount = std::min(value.speciesCount, RX_MAX_CELL_SPECIES);
+        for (uint32_t i = 0; i < narrow.speciesCount; ++i) {
+            narrow.species[i] = value.species[i];
+            narrow.amounts[i] = value.amounts[i];
+        }
+
+        if (!nest.wideCells)
+            return;
+
+        MultiresUniformOverflow& tail = nest.uniformOverflow[slot];
+        const uint32_t inlineCount = narrow.speciesCount;
+        tail.species.assign(value.species.begin() + inlineCount, value.species.begin() + value.speciesCount);
+        tail.amounts.assign(value.amounts.begin() + inlineCount, value.amounts.begin() + value.speciesCount);
     }
 
     RxWideCell LoadWideNestCell(const MultiresNest& nest, uint32_t slot, uint32_t index) {
-        RxWideCell wide = RxWidenCell(LoadNestCell(nest, slot, index));
         const MrBlock& block = nest.blocks[slot];
-        if (!nest.wideCells || MrIsUniform(block))
+        if (nest.wideCells && MrIsUniform(block))
+            return MrIsCoveredCell(block, index) ? RxMakeEmptyWideCell(0) : LoadWideUniform(nest, slot);
+
+        RxWideCell wide = RxWidenCell(LoadNestCell(nest, slot, index));
+        if (!nest.wideCells)
             return wide;
 
         const MultiresOverflowArea& area = nest.cellOverflow[block.page];

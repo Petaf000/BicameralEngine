@@ -8,6 +8,7 @@
 #pragma once
 
 #include <array>
+#include <climits>
 #include <cstdint>
 #include <vector>
 
@@ -42,6 +43,65 @@ namespace bicameral::multires {
         std::vector<uint32_t> lostSpecies;
         std::vector<uint32_t> lostBits;
     };
+
+    // 影の子 2³(MrShadowFamily の上限なし版。引き戻し MrPullBackShadowOf の入力と出力。T-0199)
+    struct MrWideShadowFamily {
+        std::array<reaction::RxWideCell, MR_CHILDREN_PER_CELL> cells;
+        uint32_t clamped = 0;
+    };
+
+    // ほぼ同じ頁を畳む集計(MrFoldStats の上限なし版。tooManySpecies は起きない。T-0199)。初めの値は MrMakeFoldStats と同じ
+    struct MrWideFoldStats {
+        // --- セル ---
+        uint32_t cellCount = 0;
+        uint32_t tooManySpecies = 0;
+        int32_t lowTemperature = INT32_MAX;  // mK
+        int32_t highTemperature = INT32_MIN;
+        uint64_t highTotal = 0;
+        MrWide energy = MrMakeWide();
+
+        // --- 成分(物質 ID の昇順)---
+        uint32_t speciesCount = 0;
+        std::vector<uint32_t> species;
+        std::vector<uint32_t> present;
+        std::vector<uint64_t> lowAmount;
+        std::vector<uint64_t> highAmount;
+        std::vector<uint64_t> sumHigh;
+        std::vector<uint64_t> sumLow;
+    };
+
+    // 平均の値と切り捨ての余り(MrFoldValue の上限なし版。余りの並びは集計の species と同じ)
+    struct MrWideFoldValue {
+        reaction::RxWideCell cell;
+        uint64_t energyRemainder = 0;
+        std::vector<uint64_t> amountRemainders;
+    };
+
+    // --- 畳む集計が呼ぶ、形ごとの道具(multires.hlsli の「集計の形ごとの道具」の上限なし版)---
+
+    inline bool MrFoldStatsHasRoom(const MrWideFoldStats& /*stats*/) {
+        return true;
+    }
+
+    inline MrWideFoldStats MrFoldStatsWithRoom(MrWideFoldStats stats) {
+        const size_t wanted = static_cast<size_t>(stats.speciesCount) + 1;
+        if (stats.species.size() < wanted) {
+            stats.species.resize(wanted, 0);
+            stats.present.resize(wanted, 0);
+            stats.lowAmount.resize(wanted, 0);
+            stats.highAmount.resize(wanted, 0);
+            stats.sumHigh.resize(wanted, 0);
+            stats.sumLow.resize(wanted, 0);
+        }
+
+        return stats;
+    }
+
+    inline MrWideFoldValue MrFoldValueWithRoom(MrWideFoldValue value, uint32_t count) {
+        value.amountRemainders.assign(count, 0);
+
+        return value;
+    }
 
     // --- 粗くする核が呼ぶ、形ごとの道具(multires.hlsli の「粗くした結果の形ごとの道具」の上限なし版)---
 
