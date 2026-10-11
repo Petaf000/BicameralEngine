@@ -1,7 +1,8 @@
 // multires_tree.hlsl — 多重解像度の世界の木の管理の Compute の段(17 §5「木の管理」。T-0018。ADR-0016)。
 // 1 刻みの要求の処理: (静かな葉を粗くするなら TreeQuiet。T-0101)→ TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
 // → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。
-// 溢れを使う世界(MR_WIDE_CELLS の変種。T-0237)は TreeAllocate の後に TreeWideReserve(細かくする子の頁に溢れの塊を付ける)。
+// 溢れを使う世界(MR_WIDE_CELLS の変種。T-0237)は TreeAllocate の後に TreeWideReserve(細かくする子の頁に溢れの塊を付ける)、
+// 要求の処理と畳むの後に TreeWideTrim(端数の枠が今の面の溢れに要らない塊を返す。T-0347)。
 // 要求の処理の前: TreeFoldCheck → TreeFold(静かで一様・ほぼ同じになった頁を枠の順に畳む・端数の枠を返す。T-0103・T-0112)。
 // 刻んだ後: TreeExpand(一様で反応が進むブロックに枠の順で頁を配る。T-0102)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
 // RecordProcessRequests。CPU リファレンスは engine/src/sim/multires_tree.cpp(同じ関数・同じ順)。
@@ -11,6 +12,11 @@
 #include "sim/multires_bindings.hlsli"
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
+
+// 溢れの領域 area(頁か端数の枠)の今の面の溢れの合計
+uint32_t WideTotal(uint32_t area) {
+    return WideRange(area, WideCurrentSide(area), MR_BLOCK_CELLS - 1).y;
+}
 #endif
 
 static const uint32_t TREE_THREADS = 64;
@@ -558,12 +564,25 @@ void AddLedgerCarrying(int32_t ledgerLevel, uint32_t column, uint64_t bits) {
     }
 }
 
-// 端数の枠のセル index の端数を帳簿の同じ段へ(ReturnFractionsToLedger の 1 セル分)
+// 端数の枠のセル index の端数を帳簿の同じ段へ(ReturnFractionsToLedger の 1 セル分)。
+// 溢れを使う世界(multires_tree_wide_fold_check)は端数の枠の今の面の溢れの成分も返す(CPU は上限の無い形で読む。T-0347)
 void ReturnFractionCell(MrBlock block, uint32_t index) {
     const MrFraction fraction = g_fractions[FractionAddress(block.fraction, index)];
     AddLedgerCarrying(block.level, 0, fraction.energy);
     for (uint32_t i = 0; i < fraction.speciesCount; ++i)
         AddLedgerCarrying(block.level, 1 + fraction.species[i], fraction.amounts[i]);
+
+#ifdef MR_WIDE_CELLS
+    const uint32_t area = WideFractionArea(block.fraction);
+    const uint32_t side = WideCurrentSide(area);
+    const uint2 range = WideRange(area, side, index);
+    for (uint32_t entry = range.x; entry < range.y; ++entry) {
+        const uint32_t word = MrWideEntryWord(entry);
+        const uint64_t amount = FX_U64(g_treeWords[WideWord(area, side, word + 2)],
+                                       g_treeWords[WideWord(area, side, word + 1)]);
+        AddLedgerCarrying(block.level, 1 + g_treeWords[WideWord(area, side, word)], amount);
+    }
+#endif
 }
 
 // ビット単位で一様か(全部のスレッドが呼ぶ。グループで一様な結果)
@@ -796,13 +815,24 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
     uint32_t flags = 0;
     if (!MrIsExactFold(tolerance) && MrWantsFractionReturn(block, mark)) {
         ReturnFractionCell(block, index);
+#ifdef MR_WIDE_CELLS
+        // 返す枠の溢れを空に(全部のセルが読み終えてから。CPU の ClearFractionOverflow。塊は TreeWideTrim が返す。T-0347)
+        AllMemoryBarrierWithGroupSync();
+        ClearWideSideWords(WideFractionArea(block.fraction), index, MR_BLOCK_CELLS);
+#endif
         block.fraction = MR_NO_FRACTION;
         flags |= MR_CLAIM_FOLD_RETURN;
     }
 
     // --- 畳めるか: まずビット単位(値が変わらない)。違えば、許容差つきで覆われていないセルがあれば、ほぼ同じか(T-0125。
-    //     FoldsExactly はグループで一様な結果)---
-    if (MrWantsFoldCheck(block, mark)) {
+    //     FoldsExactly はグループで一様な結果)。溢れを使う世界は、溢れのある頁を畳まない(GPU の一様の値はまだインラインだけで、
+    //     畳むと溢れを落とす。仮。溢れまで畳むのは T-0312)---
+    bool foldable = MrWantsFoldCheck(block, mark);
+#ifdef MR_WIDE_CELLS
+    if (foldable)
+        foldable = WideTotal(block.page) == 0;
+#endif
+    if (foldable) {
         if (FoldsExactly(block, index))
             flags |= MR_CLAIM_FOLD_COPY;
         else if (!MrIsExactFold(tolerance) && MrFoldValueCell(block) != MR_BLOCK_CELLS)
@@ -992,11 +1022,6 @@ uint32_t ReserveSideChunks(uint32_t area, uint32_t entries, bool attach, uint32_
     return need - held;
 }
 
-// 溢れの領域 area の今の面の溢れの合計
-uint32_t WideTotal(uint32_t area) {
-    return WideRange(area, WideCurrentSide(area), MR_BLOCK_CELLS - 1).y;
-}
-
 // 粗くする要求に足す塊の数(親の頁の新しい面、続けて親の端数の枠の新しい面。広げた頁・取った端数の枠は残りの溢れが無い)
 uint32_t ReserveCoarsenChunks(MrRequestState state, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
     const MrBlock child = g_blocks[state.target];
@@ -1071,5 +1096,76 @@ uint32_t ReserveRefineChunks(uint32_t i, bool attach, uint32_t stack, uint32_t f
     GroupMemoryBarrierWithGroupSync();
     if (i == 0)
         g_treeWords[pool + MR_WIDE_POOL_FREE] = freeCount - gs_grantedBlocks;
+}
+
+// --- 溢れを使う世界: 端数の枠の塊を返す(T-0347。要求の処理の後と、頁を畳んだ後。1 グループ)---
+// 端数の枠は今の面の溢れに要る塊(MrWideChunksFor)だけを持つ。使っている枠(ブロックが持つ)は今の面の余りともう片方の面の塊を、
+// 空きの枠(TreeRelease・TreeFold が返した。溢れは空)は全部の塊を、項目の順(ブロックの枠の順 → 空きのスタックの順)の累積和で
+// 置き場の空きのスタックに積む。粗くした親の新しい面の上限で取った余り(T-0329)・覆った親の余り・返した枠の塊がここで戻る。
+// どの塊を返すかは結果に出ない(CPU は塊を持たない)。刻みの段の WideAllocate は頁しか見ないので、端数の枠はここだけで返す
+
+// 項目 item の端数の枠(item < g_blockCount はブロックの枠が持つ枠、その後ろは空きのスタック。無ければ MR_NO_FRACTION)
+uint32_t TrimFractionAt(uint32_t item, uint32_t freeFractions) {
+    if (item < g_blockCount)
+        return g_blocks[item].fraction;
+
+    const uint32_t position = item - g_blockCount;
+
+    return position < freeFractions ? g_freeFractions[position] : MR_NO_FRACTION;
+}
+
+// 端数の枠 fractionSlot が返す塊の数(使っていなければ全部)。give なら返す塊を stack の position から積み、塊の表を詰める
+uint32_t TrimFractionChunks(uint32_t fractionSlot, bool used, bool give, uint32_t stack, uint32_t position) {
+    if (fractionSlot == MR_NO_FRACTION)
+        return 0;
+
+    const uint32_t area = WideFractionArea(fractionSlot);
+    const uint32_t header = WideAreaHeader(area);
+    const uint32_t current = g_treeWords[header + MR_WIDE_HEADER_SIDE];
+    const uint32_t need = used ? MrWideChunksFor(WideTotal(area)) : 0u;
+    uint32_t given = 0;
+    for (uint32_t side = 0; side < 2; ++side) {
+        const uint32_t table = MrWideTableAt(header, side);
+        const uint32_t held = g_treeWords[table];
+        const uint32_t keep = side == current ? min(held, need) : 0u;
+        if (give && keep != held) {
+            for (uint32_t j = keep; j < held; ++j)
+                g_treeWords[stack + position + given + (j - keep)] = g_treeWords[WideTableEntryWord(table, j)];
+
+            g_treeWords[table] = keep;
+        }
+
+        given += held - keep;
+    }
+
+    if (give && !used)
+        g_treeWords[header + MR_WIDE_HEADER_SIDE] = 0;  // 空きの枠は面 0(塊なし = 空)
+
+    return given;
+}
+
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeWideTrim(uint32_t i : SV_GroupIndex) {
+    const uint32_t pool = WidePoolWord();
+    const uint32_t stack = MrWideStackWord(pool, g_treeWords[pool + MR_WIDE_POOL_CAPACITY]);
+    const uint32_t freeCount = g_treeWords[pool + MR_WIDE_POOL_FREE];
+    const uint32_t freeFractions = g_counters[MR_COUNTER_FREE_FRACTIONS];
+    const uint32_t items = g_blockCount + freeFractions;
+    uint32_t given = 0;  // ここまでの区切りで返した塊の数(グループで一様)
+    for (uint32_t first = 0; first < items; first += MR_MAX_REQUESTS) {
+        const uint32_t item = first + i;
+        const uint32_t fractionSlot = item < items ? TrimFractionAt(item, freeFractions) : MR_NO_FRACTION;
+        const bool used = item < g_blockCount;
+        const uint32_t want = TrimFractionChunks(fractionSlot, used, false, stack, 0);
+        InclusiveScan(i, want, 0, 0);
+
+        if (want != 0)
+            TrimFractionChunks(fractionSlot, used, true, stack, freeCount + given + gs_blockScan[i] - want);
+
+        given += gs_blockScan[MR_MAX_REQUESTS - 1];
+        GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
+    }
+
+    if (i == 0 && given != 0)
+        g_treeWords[pool + MR_WIDE_POOL_FREE] = freeCount + given;
 }
 #endif

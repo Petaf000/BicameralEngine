@@ -148,6 +148,8 @@ foreach(_entry IN ITEMS TreeResolve TreeSettle TreeAllocate TreeRelease TreeClea
 endforeach()
 bicameral_add_shader(sim/multires_tree.hlsl PROFILE cs_6_8 ENTRY TreeWideReserve NAME multires_tree_wide_reserve DEFINES MR_WIDE_CELLS=1)  # 細かくする子の頁・粗くする親の新しい面に溢れの塊を付ける(T-0237・T-0329)
 bicameral_add_shader(sim/multires_tree.hlsl PROFILE cs_6_8 ENTRY TreeResolve NAME multires_tree_wide_resolve DEFINES MR_WIDE_CELLS=1)  # 溢れを使う世界は粗くする要求を「入りきらない」で断らない(T-0329)
+bicameral_add_shader(sim/multires_tree.hlsl PROFILE cs_6_8 ENTRY TreeFoldCheck NAME multires_tree_wide_fold_check DEFINES MR_WIDE_CELLS=1)  # 畳む時に端数の溢れも帳簿へ返す(T-0347)
+bicameral_add_shader(sim/multires_tree.hlsl PROFILE cs_6_8 ENTRY TreeWideTrim NAME multires_tree_wide_trim DEFINES MR_WIDE_CELLS=1)  # 端数の枠が要らない塊を返す(T-0347)
 foreach(_entry IN ITEMS ConductBegin ConductMark ConductPrepare ConductFlows ConductApply ConductEnd)  # 熱の伝導の段(T-0107・小刻みの終わり T-0109)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
