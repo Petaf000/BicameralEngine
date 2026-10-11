@@ -7,6 +7,9 @@
 // 分圧と質量から µmol への換算(300 K・1 気圧の 1 セルが空気の材料の量と合う)。
 // 計器と比べる段取り(T-0221): 計器の値(置いた量・最高温度)・反応の速さの和が量の差・保存点で切る・A は元の実験と同じ・
 // 条件を 1 つ足した B は保存点の刻みから違う・表を替えた記録は CPU の計器で流さない。
+// 一部を細かくした箱(T-0314・ADR-0137): 細かくする印で根の一部を 2 段細かくすると、組の数・ブロックの数が見込みどおり・
+// 細かいセルは同じ濃度(量の単位 8^-k)・保存量が変わらない・細かいセルに置く/箱のセルに置くと覆う葉全部に・粗い葉の一部には当てない・
+// 細かい所の木が燃える・コマンドの無い刻みは保存・枠の無い箱は細かくならない・記録の版 6 は枠の数を持つ。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <cstdint>
@@ -513,6 +516,113 @@ namespace {
         EXPECT(sample.cellAmounts[table.SpeciesId("cellulose")] == wood->contents[0].amount);
     }
 
+    // --- 一部を細かくした箱(T-0314)---
+    void TestRefinedBox(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
+        constexpr lab::LabBoxShape SHAPE = {.rootsX = 2, .rootsY = 1, .rootsZ = 1, .refineBlocks = 128};
+        const LabMaterial* wood = FindMaterial(materials, "木");
+        const LabMaterial* charcoal = FindMaterial(materials, "木炭");
+        const uint32_t oxygen = table.SpeciesId("oxygen");
+        const uint32_t cellulose = table.SpeciesId("cellulose");
+        constexpr int32_t FINEST = 2;
+
+        // --- 根 0 の (2..5)³ を 2 段: レベル 1 は根 0 の 8 つ全部、レベル 2 は (1..2)³ の 8 つ。組は段ごとに 8 = 16 ---
+        MultiresNest nest = MakeLabBoxNest(table, SHAPE);
+        EXPECT(nest.capacity.worldBlocks == 2 + 128 && nest.capacity.pages == 2 + 128);
+        const ConservedTotals initial = ComputeConservedTotals(nest, table, FINEST);
+        const LabCellRange inner = {.low = {.x = 2, .y = 2, .z = 2}, .high = {.x = 5, .y = 5, .z = 5}};
+        const std::vector<Command> refine = {MakeLabRefineCommand(0, 0, inner, 2)};
+        EXPECT(LabRefineRounds(refine, SHAPE).size() == 16);
+        StepLabBox(nest, table, 0, refine, SHAPE);
+        EXPECT(LabRefinedBlockCount(nest) == 16);
+        EXPECT(ComputeConservedTotals(nest, table, FINEST) == initial);
+
+        // --- 細かいセルは同じ濃度(量の数が箱のセルと同じ)。粗い葉の所(レベル 2 の (0, 0, 0))はレベル 2 のセルが無い ---
+        const reaction::RxCell coarse = LabBoxCell(nest, lab::LabCellIndex(12, 0, 0), SHAPE);
+        const auto fine = LabBoxFineCell(nest, {.x = 9, .y = 9, .z = 9, .level = 2});
+        EXPECT(fine.has_value() && AmountOf(*fine, oxygen) == AmountOf(coarse, oxygen));
+        EXPECT(!LabBoxFineCell(nest, {.x = 0, .y = 0, .z = 0, .level = 2}).has_value());
+        EXPECT(LabBoxFineCell(nest, {.x = 0, .y = 0, .z = 0, .level = 1}).has_value());
+        EXPECT(!LabBoxFineCell(nest, {.x = 4, .y = 4, .z = 4, .level = 1}).has_value());  // 覆われている
+
+        // --- 細かいセル 1 つに置く・箱のセル (3, 3, 3) に置くとレベル 2 の 4³ 全部・粗い葉の一部(レベル 2 の (0, 0, 0))には当てない ---
+        const std::vector<Command> place = {
+            MakeLabFillCommand(1, 0, {.x = 9, .y = 9, .z = 9, .level = 2}, wood->contents, 300000),
+            MakeLabFillCommand(1, 1, {.x = 3, .y = 3, .z = 3}, charcoal->contents, 300000),
+            MakeLabFillCommand(1, 2, {.x = 0, .y = 0, .z = 0, .level = 2}, charcoal->contents, 300000),
+            MakeLabFillCommand(1, 3, {.x = 0, .y = 0, .z = 0, .level = 3}, charcoal->contents, 300000)};
+        MultiresNest placed = nest;
+        EXPECT(ApplyLabCommands(placed, table, place, SHAPE) == 3);
+        const auto woodCell = LabBoxFineCell(placed, {.x = 9, .y = 9, .z = 9, .level = 2});
+        EXPECT(woodCell.has_value() && AmountOf(*woodCell, cellulose) == wood->contents[0].amount);
+        const uint32_t carbon = table.SpeciesId("carbon");
+        uint32_t charcoalCells = 0;
+        for (uint32_t z = 12; z < 16; ++z) {
+            for (uint32_t y = 12; y < 16; ++y) {
+                for (uint32_t x = 12; x < 16; ++x) {
+                    const auto cell = LabBoxFineCell(placed, {.x = x, .y = y, .z = z, .level = 2});
+                    charcoalCells += cell.has_value() && AmountOf(*cell, carbon) == charcoal->contents[0].amount ? 1
+                                                                                                                 : 0;
+                }
+            }
+        }
+
+        EXPECT(charcoalCells == 64);
+        const auto untouched = LabBoxFineCell(placed, {.x = 0, .y = 0, .z = 0, .level = 1});
+        EXPECT(untouched.has_value() && AmountOf(*untouched, carbon) == 0);
+
+        // --- 細かい所の木に火を付けると燃える。コマンドの無い刻みは保存量が変わらない ---
+        MultiresNest burn = nest;
+        StepLabBox(burn, table, 1, std::span(place).first(1), SHAPE);
+        const std::vector<Command> ignite = {
+            MakeLabTemperatureCommand(2, 0, {.x = 9, .y = 9, .z = 9, .level = 2}, IGNITE_MILLIKELVIN)};
+        StepLabBox(burn, table, 2, ignite, SHAPE);
+        const ConservedTotals lit = ComputeConservedTotals(burn, table, FINEST);
+        for (uint64_t tick = 3; tick < 80; ++tick)
+            StepLabBox(burn, table, tick, {}, SHAPE);
+
+        EXPECT(ComputeConservedTotals(burn, table, FINEST) == lit);
+        const auto burnt = LabBoxFineCell(burn, {.x = 9, .y = 9, .z = 9, .level = 2});
+        EXPECT(burnt.has_value() && AmountOf(*burnt, cellulose) < wood->contents[0].amount);
+
+        // --- 同じ列なら同じハッシュ(決定的)---
+        MultiresNest again = MakeLabBoxNest(table, SHAPE);
+        StepLabBox(again, table, 0, refine, SHAPE);
+        StepLabBox(again, table, 1, std::span(place).first(1), SHAPE);
+        StepLabBox(again, table, 2, ignite, SHAPE);
+        for (uint64_t tick = 3; tick < 80; ++tick)
+            StepLabBox(again, table, tick, {}, SHAPE);
+
+        EXPECT(HashWholeNest(again) == HashWholeNest(burn));
+        EXPECT(!FindLabMismatch(again, burn, 79, SHAPE).has_value());
+
+        // --- 当てられない印(段 0・3・箱の外)は組にならない。枠の無い箱は細かくならない(枠が足りない = NO_SPACE)---
+        const std::vector<Command> invalid = {
+            MakeLabRefineCommand(0, 0, inner, 0), MakeLabRefineCommand(0, 1, inner, 3),
+            MakeLabRefineCommand(0, 2, {.low = {}, .high = {.x = 16, .y = 0, .z = 0}}, 1)};
+        EXPECT(LabRefineRounds(invalid, SHAPE).empty());
+        constexpr lab::LabBoxShape FIXED = {.rootsX = 2, .rootsY = 1, .rootsZ = 1};
+        MultiresNest fixed = MakeLabBoxNest(table, FIXED);
+        EXPECT(ApplyLabRefines(fixed, refine, FIXED) == 16 && LabRefinedBlockCount(fixed) == 0);
+
+        // --- 違うセルを見つける: 細かいセルを 1 つ変えると、その細かいセルの語 ---
+        MultiresNest changed = burn;
+        const Command warm = MakeLabTemperatureCommand(79, 0, {.x = 9, .y = 9, .z = 9, .level = 2}, 400000);
+        ApplyLabCommands(changed, table, std::span(&warm, 1), SHAPE);
+        const auto mismatch = FindLabMismatch(burn, changed, 79, SHAPE);
+        EXPECT(mismatch.has_value() && lab::LabCellWordLevel(mismatch->cell) == 2);
+
+        // --- 記録の版 6 は細かくする枠の数を持つ。版 5 で枠の数が 0 でなければ壊れている ---
+        const LabRecording recording{
+            .shape = SHAPE, .tickCount = 1, .commands = refine, .hashes = {HashWholeNest(nest)}};
+        std::vector<std::byte> bytes = SerializeLabRecording(recording);
+        const auto parsed = ParseLabRecording(bytes);
+        EXPECT(parsed.has_value() && SameLabShape(parsed->shape, SHAPE) && parsed->commands.size() == 1);
+        EXPECT(bytes[4] == std::byte{6});
+        bytes[4] = std::byte{5};
+        EXPECT(!ParseLabRecording(bytes).has_value());
+        EXPECT(!SameLabShape(SHAPE, FIXED));
+    }
+
     // 版 4 の記録(箱の形が無い)は根 1 つとして読む
     void TestVersionFourRecording() {
         const LabRecording recording{.tableVersion = 0x1111, .tickCount = 1, .hashes = {7}};
@@ -546,8 +656,8 @@ namespace {
         // --- 抜いた規則のパッチは新しい表に足せない(名前の鍵が無い)---
         std::vector<uint32_t> words(MP_LIST_WORDS, 0);
         const auto ruleCount = static_cast<uint32_t>(shifted->rules.size());
-        const MpPatch removedPatch =
-            MpPatchFromCommand(table.rules[0].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0, 0);
+        const MpPatch removedPatch = MpPatchFromCommand(table.rules[0].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0,
+                                                        0);
 
         // --- 元の表の規則 1 を 2^3 倍するパッチ(刻み 0〜9・セル (0, 0, 0))---
         const MpPatch patch = MpPatchFromCommand(table.rules[1].key, MpMakeScaleEffect(3), 10, 0, 0, 0, 0, 0, 0, 0);
@@ -684,6 +794,7 @@ int main() {
     TestLargeBox(*table, materials);
     TestVersionFourRecording();
     TestMagicPatch(*table);
+    TestRefinedBox(*table, materials);
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);

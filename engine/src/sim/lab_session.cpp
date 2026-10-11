@@ -88,6 +88,10 @@ namespace bicameral::sim {
         return Queue(MakeLabTemperatureRegionCommand(m_tick, m_sequence, range, temperatureMilliKelvin));
     }
 
+    bool LabSession::Refine(LabCellRange range, uint32_t levels) {
+        return Queue(MakeLabRefineCommand(m_tick, m_sequence, range, levels));
+    }
+
     bool LabSession::ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range) {
         if (rule >= m_table.rules.size())
             return false;

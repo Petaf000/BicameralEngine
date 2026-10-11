@@ -45,17 +45,42 @@ LabBlocks MakeLabBlocks() {
     return blocks;
 }
 
-// 箱のセル index(LabCellIndex)にコマンドを当てる。根が一様なら当てない(箱の根はいつも頁を持つ: sim/lab_box.cpp の MakeLabBoxNest。
-// CPU の ApplyLabCommands も同じ)。当てたら true
-bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
-    const MrBlock block = g_blocks[LabCellSlot(shape, index)];
-    if (MrIsUniform(block))
-        return false;
+// common/lab_box.hlsli の Cells の約束: 枠 slot のセル local にコマンドを当てる。ブロックが一様なら当てない(箱の根はいつも頁を持ち、
+// 頁を持つ親を細かくした子も頁を持つ: sim/lab_box.cpp の MakeLabBoxNest・17 §5。CPU の ApplyLabCommands も同じ)。当てたら true
+struct LabCells {
+    uint32_t unused;
 
-    const uint32_t address = PageCellAddress(block.page, LabCellLocal(index));
-    g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
+    bool Apply(uint32_t slot, uint32_t local, LabCommand command) {
+        const MrBlock block = g_blocks[slot];
+        if (MrIsUniform(block))
+            return false;
 
-    return true;
+        const uint32_t address = PageCellAddress(block.page, local);
+        g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
+
+        return true;
+    }
+};
+
+LabCells MakeLabCells() {
+    LabCells cells;
+    cells.unused = 0;
+
+    return cells;
+}
+
+// つついた根の木の全部の枠(根・細かくした子と孫。T-0314)を「つつかれた」にする
+void PokeRoots(LabBoxShape shape, uint64_t roots) {
+    for (uint32_t root = 0; root < LabRootCount(shape); ++root) {
+        if (((roots >> root) & 1) == 0)
+            continue;
+
+        for (uint32_t ordinal = 0; ordinal < LAB_SUBTREE_SLOTS; ++ordinal) {
+            const uint32_t slot = LabSubtreeSlot(MakeLabBlocks(), root, ordinal);
+            if (slot != MR_NO_BLOCK)
+                g_blocks[slot].busyTick = MR_BUSY_POKED;
+        }
+    }
 }
 
 // g_external0 = コマンドの数、g_external1 = 箱の形(LabPackShape。T-0173)、g_external2 = 表の物質の数、g_external3 = 表の規則の数
@@ -76,50 +101,32 @@ bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
 
         // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(sim/lab_box.cpp と同じ)---
         if (LabCommandIsPatch(command)) {
-            touched |=
-                LabApplyPatchCommand(MakePatchList(), MakeTable(), MakeLabBlocks(), shape, command, g_external3);
+            touched |= LabApplyPatchCommand(MakePatchList(), MakeTable(), MakeLabBlocks(), shape, command, g_external3);
             continue;
         }
 
-        // --- 範囲(T-0220): x → y → z の順に 1 セルずつ(sim/lab_box.cpp と同じ順)---
+        // --- 範囲(T-0220): 範囲の葉のセル全部(細かくした所は細かいセル全部。T-0314。sim/lab_box.cpp と同じ順)---
         if (LabRegionCommandValid(command, g_external2, shape)) {
-            const LabRegion region = LabCommandRegion(command);
-            for (uint32_t z = region.lowZ; z <= region.highZ; ++z) {
-                for (uint32_t y = region.lowY; y <= region.highY; ++y) {
-                    for (uint32_t x = region.lowX; x <= region.highX; ++x) {
-                        const uint32_t index = LabCellIndex(x, y, z);
-                        if (ApplyToCell(shape, index, command))
-                            touched |= LabRootBit(LabCellSlot(shape, index));
-                    }
-                }
-            }
-
+            touched |= LabApplyToTarget(MakeLabBlocks(), MakeLabCells(), shape, LabRegionTarget(command), command);
             continue;
         }
 
         const uint32_t cell = LabCommandCell(command, g_external2, shape);
-        if (cell != LAB_NO_CELL && ApplyToCell(shape, cell, command))
-            touched |= LabRootBit(LabCellSlot(shape, cell));
+        if (cell != LAB_NO_CELL)
+            touched |= LabApplyToTarget(MakeLabBlocks(), MakeLabCells(), shape, LabCellTarget(cell), command);
     }
 
-    // --- 変えた根は「つつかれた」(次の刻みで変わったとみなして全部のセルを評価し直す。multires_tree.cpp の PokeBlock)---
-    for (uint32_t slot = 0; slot < LabRootCount(shape); ++slot) {
-        if (((touched >> slot) & 1) != 0)
-            g_blocks[slot].busyTick = MR_BUSY_POKED;
-    }
+    // --- 変えた根の木は「つつかれた」(次の刻みで変わったとみなして全部のセルを評価し直す。multires_tree.cpp の PokeBlock)---
+    PokeRoots(shape, touched);
 }
 
-// --- 魔法のパッチの境(T-0024): 刻みの初めに、速さが変わるパッチの範囲が重なる根をつつき、終わったパッチを除く ---
-// g_external0・g_external2 = 刻みの下位・上位、g_external1 = 箱の形(LabPackShape)。CPU リファレンスは sim/lab_box.cpp の
-// ApplyLabPatchBoundaries
-[numthreads(1, 1, 1)] void ApplyLabPatchBoundaries() {
+    // --- 魔法のパッチの境(T-0024): 刻みの初めに、速さが変わるパッチの範囲が重なる根をつつき、終わったパッチを除く ---
+    // g_external0・g_external2 = 刻みの下位・上位、g_external1 = 箱の形(LabPackShape)。CPU リファレンスは sim/lab_box.cpp の
+    // ApplyLabPatchBoundaries
+    [numthreads(1, 1, 1)] void ApplyLabPatchBoundaries() {
     const LabBoxShape shape = LabUnpackShape(g_external1);
     const uint64_t tick = ((uint64_t)g_external2 << 32) | (uint64_t)g_external0;
-    const uint64_t roots = LabPatchBoundaries(MakePatchList(), MakeLabBlocks(), shape, tick);
-    for (uint32_t slot = 0; slot < LabRootCount(shape); ++slot) {
-        if (((roots >> slot) & 1) != 0)
-            g_blocks[slot].busyTick = MR_BUSY_POKED;
-    }
+    PokeRoots(shape, LabPatchBoundaries(MakePatchList(), MakeLabBlocks(), shape, tick));
 }
 
 // --- 物質の付け替え(T-0242・ADR-0065): u4 = 付け替えの表(common/species_remap.hlsli の「GPU のバッファの形」を 32bit の語で)---

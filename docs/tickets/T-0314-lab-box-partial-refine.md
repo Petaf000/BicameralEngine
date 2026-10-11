@@ -1,0 +1,73 @@
+# T-0314 実験室の箱の一部を細かくする(木の要求)
+
+- Status: Done(2026-10-11。一部完了: 細かくして刻む・置く・温度・比べる〔最初に違ったセル〕・記録と再生・パネルのボタンまで。
+  細かいセルの計器・断面・見るセルと、窓の自動の確認〔--auto-lab で止まる〕は T-0350 に分けた)
+- 種類: 工学
+- PC: 必須
+- 見積もり: 作業役 1 体・2 時間の約束の中
+- マイルストーン: M2 (docs/plan/ROADMAP.md。D-449)
+- 設計: docs/design/14-editor-tools.md §2「実装(T-0314)」・17 §5「木の管理」/ 決定: ADR-0137(新)・ADR-0113・ADR-0037・ADR-0055・ADR-0095・D-449
+
+## 目的(1〜2 行)
+中身(反応表・魔素の値)を細かい所で触って決めるために、実験室の箱の指定した範囲を 1〜2 段細かくし、細かいセルに置く・温度・比べる・
+記録と再生が働き、GPU と CPU が刻みごとにビット一致すること(T-0173 から分けたもの)。
+
+## 完了条件(チェックできる形で)
+- [x] 細かくする印 `LAB_COMMAND_TYPE_REFINE`(範囲 = レベル 0・段の数 1〜2)を記録に残し、刻みの初めに木の要求の組にする(LabRefineRounds)。
+      CPU は ProcessRequests、GPU は RecordProcessRequests(組は段ごと・座標の偶奇ごとの 8 組 = 取り合わない。1 刻み 16 組まで)
+- [x] 細かくできる箱 = 箱の形の `refineBlocks`(根の外の枠・頁。0 の箱は容量もハッシュも今まで通り)。記録 BLAB 版 6(形の 4 語目)
+- [x] 細かいセルの語(レベル k の座標)で 1 セルに置く・温度。箱のセル・範囲は覆う葉全部に当たる(量は同じ数 = 同じ濃度。単位 8^-k)。
+      粗い葉の一部には当てない。当てた根の木の全部の枠をつつく(表の印・パッチも)
+- [x] 最初に違ったセル(FindLabMismatch)が細かくした子のセルも比べる。`LabBoxFineCell`・`LabRefinedBlockCount`
+- [x] lab_box(CPU): 組の数 16・ブロック 16・同じ濃度・保存量・細かいセル/箱のセルに置く・粗い葉に当てない・細かい所が燃える・決定的・
+      枠の無い箱は細かくならない・当てられない印・最初に違った細かいセル・版 6 と版 5
+- [x] gpu_lab_box(HW・WARP): 根の一部を 2 段細かくし、細かいセルの木に火を付けて 60 刻み毎刻みビット一致・燃えた・同じ形の別の箱で再生
+- [ ] window_lab: `--auto-lab` で細かくできる根 1 つを確かめる(LabPanel::RunAutoRefinedBox は書いたが、窓の中で止まるので呼んでいない)→ **T-0350**
+- [x] パネル: 「1 段細かく」「2 段細かく」(細かくできる箱だけ)・細かくしたブロックの数・箱の大きさの選択肢に細かくできる箱 2 つ
+- [ ] 細かいセルを数える計器・見るセル・断面 → **T-0350**
+
+## メモ・参考
+- 実装: common/lab_box.hlsli(LAB_COMMAND_TYPE_REFINE・LabFineCellWord・LabCellWordInBox・LabRefineCommandValid・LabTarget・LabClipToBlock・
+  LabSubtreeSlot・LabApplyToTarget)・sim/lab_box.hlsl(LabCells・PokeRoots)・sim/lab_box(MakeLabRefineCommand・LabRefineRounds・ApplyLabRefines・
+  LabBoxFineCell・LabRefinedBlockCount・NestCells・PokeRoots・版 6)・sim/gpu_lab_box(RecordTick の頭で組を通す)・sim/lab_session(Refine)・
+  editor/lab_panel(BOX_SHAPES の 8・9 番目・細かくするボタン・RunAutoRefinedBox)。
+- 木の取り合いは「細かくする先の親」ごと。同じ親の子 8 つを 1 回の ProcessRequests で作ると 7 つが CONFLICT になる → 偶奇の組に分けた。
+- 細かいセルの量の単位は 8^-k なので、置く操作はレベルを知らずに同じ数を書けば同じ濃度・温度(LabApplyCommand は変えていない)。
+- 名前に `round` を使うと float_check が浮動小数点の関数と見て落とす(requestGroup に直した)。
+
+## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-11(作業役・wt6): 細かくする要求を印のコマンドにし、CPU で木の要求の組(段 × 偶奇)に直して CPU・GPU の両方に通す形にした(ADR-0137)。
+  置く操作は「指した空間の葉全部」を根の木(根・子・孫)をなめて当てる共通の関数(LabApplyToTarget)にし、GPU と CPU が同じ順。
+  細かくできる枠は箱の形の 4 語目(版 5 の予約語)に入れ、0 の箱は今まで通り(古い記録のハッシュが変わらない)。
+  debug のビルドは警告なし。lab_box(1 回目で通過)・gpu_lab_box(225 秒)・gpu_lab_box_warp(72 秒)が通過。
+  window_lab に足した細かくできる箱の確認(RunAutoRefinedBox)は、根を並べた箱の確認の後で止まった(ctest は 561 秒で失敗・run は 900 秒の時間切れ。
+  標準出力が途中で切れて最後の行が分からない)。同じ流れの gpu_lab_box(HW・WARP)は通るので、窓の違い(debug layer が有効・同じ COMPUTE の
+  キュー)を疑う。RecordProcessRequests(Work Graph の GPU 入力からの起動)は窓の起動では今まで使われていなかった。呼ぶのをやめて T-0350 へ。
+
+## 引き継ぎメモ(HANDOFF に載せる内容)
+- 動いているもの: `bicameral --editor` のパネル「実験室」で箱の大きさに「…・細かくできる〔枠 128〕」を選んで作り、範囲を選んで
+  「1 段細かく」「2 段細かく」→ 刻むと細かくなる。細かいセルに置く API は `LabSession::Place({.x, .y, .z, .level})`(パネルの UI はまだ箱のセル)。
+  自動の確認は gpu_lab_box(HW・WARP)の RunRefinedBox。`--auto-lab` の細かくした箱の確認は窓の中で止まるので呼んでいない(T-0350)。
+- 注意:
+  - 細かくできるのは形の `refineBlocks` > 0 の箱だけ(0 の箱は要求が NO_SPACE で何も起きない)。枠を使い切ると残りは細かくならない(黙って)。
+  - 細かくした所は粗く戻らない(粗くする・畳むは箱で呼ばない。作り直す)。細かい所の熱は 17 §4 の頭打ちで本当より遅い(ADR-0137 の 6)。
+  - 計器(SampleLabGauge)・断面は根のセルしか読まないので、細かくした所では覆われた根のセルの古い値を数える(T-0350)。
+  - 記録は版 6。版 5 は読める(枠 0)。LabSession::Replay は枠の数まで同じ形でないと断る。
+
+## 判断待ち
+- **細かい所の熱の伝わり(ADR-0137 の 6。仮〔ユーザー未確認〕で A)**
+  - A(今): 箱では小刻み・陰解法を使わない。プレイヤーと遊びへの影響: 実験室で細かくした所の熱の伝わりが本当より遅く、細かい木の燃え広がりや
+    冷え方が世界(覗き窓・陰解法を使う所)と違って見えうる。実験室で決めた中身の値が細かい所では少しずれる。速い・古い記録を壊さない。
+  - B: 細かくできる箱だけ陰解法(方式②)を使う。影響: 細かい所の熱が世界と同じになり、実験室で見た燃え広がりがそのまま世界で起きる(D-428 に沿う)。
+    刻みが重くなり、GPU の陰解法の上限の決め方が箱にも要る。
+  - おすすめ: B を別チケット(T-0351 候補)で。今は A のまま(細かくできる箱は新しい箱なので、後で B に替えても古い記録は版 5 以前と別に扱える)。
+- 仮(ユーザー未確認・取り消しやすい): パネルの細かくできる箱は 2 つ(1×1×1・2×2×2)で枠 128(lab_panel.cpp の BOX_SHAPES)。段の上限 2(0.125 m 角)。
+  プレイヤーと遊びへの影響: 無し(作る人の道具)。もっと細かく(3 段 = 6 cm)が要れば LAB_MAX_REFINE_LEVELS と組の数(3 段 = 24 組 > 写しの枠 16)の見直しが要る。
+
+## 分けたもの(司令塔が ROADMAP に足すか決める)
+- **T-0350 実験室の細かくした所の計器・断面・見るセル・窓の自動の確認**: まず `--auto-lab` で RunAutoRefinedBox が止まる原因を調べて呼ぶ
+  (仮説: debug layer が有効な窓で RecordProcessRequests の検証エラー → 止まる。`job.py run -- --editor --auto-lab --frames 20` の
+  bin/logs のログは異常終了で空になるので、段ごとに stderr へ出して切り分ける)。それから SampleLabGauge が葉のセルを数える(量は 8^-k の単位を µmol に直す。端数は帳簿の扱いを決める)・
+  計器の見るセルを細かいセルにできる・パネルの断面に細かいセルを描く・セルのスライダーにレベル・RunLabGaugeOnCpu と比べる段取り
+  (--auto-lab-compare)を細かくした箱で確かめる。
+- (候補)T-0351 細かくできる箱で細かい所の熱の陰解法(判断待ちの B)。

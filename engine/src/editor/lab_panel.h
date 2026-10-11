@@ -64,6 +64,7 @@ namespace bicameral::editor {
         bool CreateSession();
         void RunAuto();
         [[nodiscard]] std::expected<void, std::string> RunAutoLargeBox(std::span<const sim::SpeciesAmount> wood);
+        [[nodiscard]] std::expected<void, std::string> RunAutoRefinedBox(std::span<const sim::SpeciesAmount> wood);
         [[nodiscard]] std::expected<void, std::string> ReplayInNewSession(const sim::LabRecording& recorded,
                                                                           bool expectMissingTables);
 

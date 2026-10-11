@@ -12,7 +12,7 @@
 #ifndef BICAMERAL_LAB_BOX_HLSLI
 #define BICAMERAL_LAB_BOX_HLSLI
 
-#include "multires.hlsli"
+#include "multires_tree.hlsli"
 
 #ifdef __cplusplus
 #define LAB_NAMESPACE_BEGIN                    \
@@ -46,6 +46,10 @@ FX_CONST uint32_t LAB_COMMAND_TYPE_TEMPERATURE_REGION = 0x4C05;
 // 魔法のパッチを足す(T-0024・ADR-0095)。payload は common/magic_patch.hlsli の MP_COMMAND_*(範囲はレベル 0 = 箱のセルの座標)。
 // 始まりはコマンドの刻み。セルは変えず、足せて箱に重なれば箱をつつく(速さが変わる。ADR-0018)
 FX_CONST uint32_t LAB_COMMAND_TYPE_PATCH = 0x4C06;
+// 箱の一部を細かくする(T-0314・ADR-0137)。payload の LAB_PAYLOAD_CELL の語が範囲(レベル 0 = 箱のセルの座標)、
+// LAB_PAYLOAD_REFINE_LEVELS が段の数(1〜LAB_MAX_REFINE_LEVELS)。セルは変えない。CPU が刻みのコマンドを当てる前に
+// 木の「細かくする」要求(17 §5)の組に直し、CPU は ProcessRequests・GPU は GpuMultires::RecordProcessRequests で通す(sim/lab_box.cpp の LabRefineRounds)
+FX_CONST uint32_t LAB_COMMAND_TYPE_REFINE = 0x4C07;
 
 // payload の語(FILL と TEMPERATURE で共通の先頭 2 語)
 FX_CONST uint32_t LAB_PAYLOAD_CELL = 0;         // セルの番号(MrCellIndex(x, y, z))
@@ -53,6 +57,7 @@ FX_CONST uint32_t LAB_PAYLOAD_TEMPERATURE = 1;  // 温度(mK)
 FX_CONST uint32_t LAB_PAYLOAD_COUNT = 2;        // FILL だけ: 物質の数(0〜LAB_MAX_FILL_SPECIES)
 FX_CONST uint32_t LAB_PAYLOAD_ENTRIES = 3;      // FILL だけ: [物質 ID][量の下位][量の上位](µmol。箱のレベルの単位)× 数
 FX_CONST uint32_t LAB_PAYLOAD_TABLE_VERSION = 0;  // TABLE だけ: 表の版の下位・上位(2 語)
+FX_CONST uint32_t LAB_PAYLOAD_REFINE_LEVELS = 1;  // REFINE だけ: 細かくする段の数
 FX_CONST uint32_t LAB_MAX_FILL_SPECIES = 3;
 FX_CONST uint32_t LAB_NO_CELL = 0xFFFFFFFFu;
 
@@ -81,10 +86,13 @@ FX_CONST uint32_t LAB_CELL_ROOT_SHIFT = 9;          // MR_BLOCK_CELLS = 2^9
 FX_CONST uint32_t LAB_CELL_INDEX_LIMIT = 1u << 15;  // 9 + 2 × 3 ビット
 FX_CONST uint32_t LAB_SHAPE_FIELD_BITS = 8;         // LabPackShape の 1 軸のビット数
 
+// refineBlocks = 細かくするために根の外に足す世界の枠の数(T-0314。0 = 細かくできない箱。T-0173 までの箱と記録は 0。
+// 頁と端数の枠も同じ数だけ足す。足りなければ細かくする要求が MR_STATUS_NO_SPACE になる = 細かくならない)。GPU は使わない(LabPackShape に入らない)
 struct LabBoxShape {
     uint32_t rootsX;
     uint32_t rootsY;
     uint32_t rootsZ;
+    uint32_t refineBlocks;
 };
 
 FX_FN LabBoxShape LabMakeShape(uint32_t rootsX, uint32_t rootsY, uint32_t rootsZ) {
@@ -92,14 +100,17 @@ FX_FN LabBoxShape LabMakeShape(uint32_t rootsX, uint32_t rootsY, uint32_t rootsZ
     shape.rootsX = rootsX;
     shape.rootsY = rootsY;
     shape.rootsZ = rootsZ;
+    shape.refineBlocks = 0;
 
     return shape;
 }
 
-// どの軸も 1〜LAB_MAX_ROOTS_PER_AXIS
+// どの軸も 1〜LAB_MAX_ROOTS_PER_AXIS。細かくする枠は LAB_MAX_REFINE_BLOCKS まで
+FX_CONST uint32_t LAB_MAX_REFINE_BLOCKS = 1024;
 FX_FN bool LabShapeValid(LabBoxShape shape) {
     return shape.rootsX >= 1 && shape.rootsX <= LAB_MAX_ROOTS_PER_AXIS && shape.rootsY >= 1 &&
-           shape.rootsY <= LAB_MAX_ROOTS_PER_AXIS && shape.rootsZ >= 1 && shape.rootsZ <= LAB_MAX_ROOTS_PER_AXIS;
+           shape.rootsY <= LAB_MAX_ROOTS_PER_AXIS && shape.rootsZ >= 1 && shape.rootsZ <= LAB_MAX_ROOTS_PER_AXIS &&
+           shape.refineBlocks <= LAB_MAX_REFINE_BLOCKS;
 }
 
 // GPU のルート定数 1 語に詰める(shaders/sim/lab_box.hlsl の g_external1)
@@ -162,6 +173,43 @@ FX_FN uint32_t LabCellLocal(uint32_t index) {
 FX_FN bool LabCellInBox(LabBoxShape shape, uint32_t index) {
     return index < LAB_CELL_INDEX_LIMIT && LabCellRootX(index) < shape.rootsX && LabCellRootY(index) < shape.rootsY &&
            LabCellRootZ(index) < shape.rootsZ;
+}
+
+// --- 一部を細かくした箱のセル(T-0314・ADR-0137)-----------------------------------------------
+// 細かいセル(レベル k = 1〜LAB_MAX_REFINE_LEVELS)の座標は箱の座標 × 2^k。量の単位は 8^-k µmol・8^-k mJ(17 §1)なので、
+// 同じ材料の数を置けば同じ濃度・温度になる(置く操作はレベルを知らなくてよい)。
+// 1 セルのコマンドのセルの語: レベル 0 は LabCellIndex のまま、レベル k は (k << 27) | x | (y << 9) | (z << 18)。
+FX_CONST uint32_t LAB_MAX_REFINE_LEVELS = 2;
+FX_CONST uint32_t LAB_SUBTREE_SLOTS = 73;  // 根 1 つの木の枠の最大(1 + 8 + 64 = LAB_MAX_REFINE_LEVELS 段)
+FX_CONST uint32_t LAB_FINE_LEVEL_SHIFT = 27;
+FX_CONST uint32_t LAB_FINE_LEVEL_MASK = 3u;
+FX_CONST uint32_t LAB_FINE_COORD_BITS = 9;
+FX_CONST uint32_t LAB_FINE_COORD_MASK = 0x1FFu;
+
+FX_FN uint32_t LabFineCellWord(uint32_t level, uint32_t x, uint32_t y, uint32_t z) {
+    if (level == 0)
+        return LabCellIndex(x, y, z);
+
+    return (level << LAB_FINE_LEVEL_SHIFT) | x | (y << LAB_FINE_COORD_BITS) | (z << (2 * LAB_FINE_COORD_BITS));
+}
+
+FX_FN uint32_t LabCellWordLevel(uint32_t word) {
+    return (word >> LAB_FINE_LEVEL_SHIFT) & LAB_FINE_LEVEL_MASK;
+}
+
+// セルの語が箱の中か(レベル 0 は LabCellInBox。細かいセルは段の数と座標の上限を見る)
+FX_FN bool LabCellWordInBox(LabBoxShape shape, uint32_t word) {
+    const uint32_t level = LabCellWordLevel(word);
+    if (level == 0)
+        return LabCellInBox(shape, word);
+
+    const uint32_t x = word & LAB_FINE_COORD_MASK;
+    const uint32_t y = (word >> LAB_FINE_COORD_BITS) & LAB_FINE_COORD_MASK;
+    const uint32_t z = (word >> (2 * LAB_FINE_COORD_BITS)) & LAB_FINE_COORD_MASK;
+    const bool unusedBits = (word >> (LAB_FINE_LEVEL_SHIFT + 2)) != 0;
+
+    return !unusedBits && level <= LAB_MAX_REFINE_LEVELS && x < ((MR_BLOCK_EDGE * shape.rootsX) << level) &&
+           y < ((MR_BLOCK_EDGE * shape.rootsY) << level) && z < ((MR_BLOCK_EDGE * shape.rootsZ) << level);
 }
 
 // セルを含む根の枠
@@ -237,14 +285,14 @@ FX_FN bool LabContentsValid(LabCommand command, uint32_t speciesCount) {
     return true;
 }
 
-// コマンドが当たるセルの番号(LabCellIndex)。当てられないコマンド(1 セルの種類でない・箱の外・温度が範囲外・物質の誤り)なら LAB_NO_CELL
+// コマンドが当たるセルの語(LabFineCellWord。レベル 0 なら LabCellIndex)。当てられないコマンド(1 セルの種類でない・箱の外・温度が範囲外・物質の誤り)なら LAB_NO_CELL
 FX_FN uint32_t LabCommandCell(LabCommand command, uint32_t speciesCount, LabBoxShape shape) {
     const uint32_t type = LabCommandType(command);
     if (type != LAB_COMMAND_TYPE_FILL && type != LAB_COMMAND_TYPE_TEMPERATURE)
         return LAB_NO_CELL;
 
     const uint32_t cell = LabPayload(command, LAB_PAYLOAD_CELL);
-    if (!LabCellInBox(shape, cell) || !LabContentsValid(command, speciesCount))
+    if (!LabCellWordInBox(shape, cell) || !LabContentsValid(command, speciesCount))
         return LAB_NO_CELL;
 
     return cell;
@@ -264,18 +312,162 @@ FX_FN LabRegion LabCommandRegion(LabCommand command) {
     return region;
 }
 
+// 範囲が箱の中で小さい角 ≤ 大きい角か(レベル 0)
+FX_FN bool LabRegionInBox(LabRegion region, LabBoxShape shape) {
+    const bool inside = region.highX < MR_BLOCK_EDGE * shape.rootsX && region.highY < MR_BLOCK_EDGE * shape.rootsY &&
+                        region.highZ < MR_BLOCK_EDGE * shape.rootsZ;
+    const bool ordered = region.lowX <= region.highX && region.lowY <= region.highY && region.lowZ <= region.highZ;
+
+    return inside && ordered;
+}
+
 // 範囲のコマンドで、当てられるか(範囲が箱の中で小さい角 ≤ 大きい角・温度と中身が当てられる)
 FX_FN bool LabRegionCommandValid(LabCommand command, uint32_t speciesCount, LabBoxShape shape) {
     const uint32_t type = LabCommandType(command);
     if (type != LAB_COMMAND_TYPE_FILL_REGION && type != LAB_COMMAND_TYPE_TEMPERATURE_REGION)
         return false;
 
-    const LabRegion region = LabCommandRegion(command);
-    const bool inside = region.highX < MR_BLOCK_EDGE * shape.rootsX && region.highY < MR_BLOCK_EDGE * shape.rootsY &&
-                        region.highZ < MR_BLOCK_EDGE * shape.rootsZ;
-    const bool ordered = region.lowX <= region.highX && region.lowY <= region.highY && region.lowZ <= region.highZ;
+    return LabRegionInBox(LabCommandRegion(command), shape) && LabContentsValid(command, speciesCount);
+}
 
-    return inside && ordered && LabContentsValid(command, speciesCount);
+// 細かくするコマンドで、当てられるか(範囲が箱の中・段の数が 1〜LAB_MAX_REFINE_LEVELS。T-0314)
+FX_FN bool LabRefineCommandValid(LabCommand command, LabBoxShape shape) {
+    const uint32_t levels = LabPayload(command, LAB_PAYLOAD_REFINE_LEVELS);
+
+    return LabCommandType(command) == LAB_COMMAND_TYPE_REFINE && levels >= 1 && levels <= LAB_MAX_REFINE_LEVELS &&
+           LabRegionInBox(LabCommandRegion(command), shape);
+}
+
+// --- 当てる空間(T-0314): レベル level のセルの座標の直方体。コマンドはこの空間の、レベル level 以上の葉のセル全部に当たる ---
+struct LabTarget {
+    uint32_t level;
+    LabRegion region;
+};
+
+// 1 セルのコマンドのセルの語(LabCellWordInBox)から
+FX_FN LabTarget LabCellTarget(uint32_t word) {
+    LabTarget target;
+    target.level = LabCellWordLevel(word);
+    if (target.level == 0) {
+        target.region.lowX = LabCellX(word);
+        target.region.lowY = LabCellY(word);
+        target.region.lowZ = LabCellZ(word);
+    } else {
+        target.region.lowX = word & LAB_FINE_COORD_MASK;
+        target.region.lowY = (word >> LAB_FINE_COORD_BITS) & LAB_FINE_COORD_MASK;
+        target.region.lowZ = (word >> (2 * LAB_FINE_COORD_BITS)) & LAB_FINE_COORD_MASK;
+    }
+
+    target.region.highX = target.region.lowX;
+    target.region.highY = target.region.lowY;
+    target.region.highZ = target.region.lowZ;
+
+    return target;
+}
+
+// 範囲のコマンド(レベル 0)から
+FX_FN LabTarget LabRegionTarget(LabCommand command) {
+    LabTarget target;
+    target.level = 0;
+    target.region = LabCommandRegion(command);
+
+    return target;
+}
+
+// ブロックの中の 1 軸の範囲(ブロックの局所の座標。low > high なら重ならない)
+struct LabSpan {
+    int64_t low;
+    int64_t high;
+};
+
+FX_FN LabSpan LabClipAxis(uint32_t low, uint32_t high, uint32_t shift, int64_t origin) {
+    const int64_t scaledLow = ((int64_t)low) << shift;
+    const int64_t scaledHigh = ((((int64_t)high) + 1) << shift) - 1;
+    const int64_t last = origin + (int64_t)MR_BLOCK_EDGE - 1;
+    LabSpan span;
+    span.low = (scaledLow > origin ? scaledLow : origin) - origin;
+    span.high = (scaledHigh < last ? scaledHigh : last) - origin;
+
+    return span;
+}
+
+// 本物のブロック block(レベル ≥ target.level)の中で、当てる空間に入るセルの局所の範囲。入らなければ lowX > highX
+FX_FN LabRegion LabClipToBlock(MrBlock block, LabTarget target) {
+    LabRegion local;
+    local.lowX = 1;
+    local.highX = 0;
+    local.lowY = 0;
+    local.highY = 0;
+    local.lowZ = 0;
+    local.highZ = 0;
+    if (block.kind != MR_BLOCK_REAL || block.level < (int32_t)target.level)
+        return local;
+
+    const uint32_t shift = (uint32_t)block.level - target.level;
+    const LabSpan x = LabClipAxis(target.region.lowX, target.region.highX, shift, block.originX);
+    const LabSpan y = LabClipAxis(target.region.lowY, target.region.highY, shift, block.originY);
+    const LabSpan z = LabClipAxis(target.region.lowZ, target.region.highZ, shift, block.originZ);
+    if (x.low > x.high || y.low > y.high || z.low > z.high)
+        return local;
+
+    local.lowX = (uint32_t)x.low;
+    local.highX = (uint32_t)x.high;
+    local.lowY = (uint32_t)y.low;
+    local.highY = (uint32_t)y.high;
+    local.lowZ = (uint32_t)z.low;
+    local.highZ = (uint32_t)z.high;
+
+    return local;
+}
+
+// 根 root の木の ordinal 番目(0 = 根、1〜8 = 子、9〜72 = 孫)の枠。無ければ MR_NO_BLOCK
+template <typename Blocks>
+FX_FN uint32_t LabSubtreeSlot(Blocks blocks, uint32_t root, uint32_t ordinal) {
+    if (ordinal == 0)
+        return root;
+
+    if (ordinal <= 8)
+        return blocks.Block(root).children[ordinal - 1];
+
+    const uint32_t child = blocks.Block(root).children[(ordinal - 9) / 8];
+    if (child == MR_NO_BLOCK)
+        return MR_NO_BLOCK;
+
+    return blocks.Block(child).children[(ordinal - 9) % 8];
+}
+
+// 当てる空間の葉のセル全部にコマンドを当てる(根の枠の順 → 根の木の中の順 → セルの番号の順)。覆われたセルには書かない。
+// Cells は Apply(slot, local, command) でセル 1 つに当て、当てたら true を返す型(C++ は木、HLSL は g_cells)。
+// 当てたセルを含む根(LabRootBit)を返す
+template <typename Blocks, typename Cells>
+FX_FN uint64_t LabApplyToTarget(Blocks blocks, Cells cells, LabBoxShape shape, LabTarget target, LabCommand command) {
+    uint64_t touched = 0;
+    const uint32_t roots = LabRootCount(shape);
+    for (uint32_t root = 0; root < roots; ++root) {
+        const bool refined = MrHasRealChild(blocks.Block(root));
+        for (uint32_t ordinal = 0; ordinal < LAB_SUBTREE_SLOTS; ++ordinal) {
+            if (ordinal > 0 && !refined)
+                break;
+
+            const uint32_t slot = LabSubtreeSlot(blocks, root, ordinal);
+            if (slot == MR_NO_BLOCK)
+                continue;
+
+            const MrBlock block = blocks.Block(slot);
+            const LabRegion local = LabClipToBlock(block, target);
+            for (uint32_t z = local.lowZ; z <= local.highZ && local.lowX <= local.highX; ++z) {
+                for (uint32_t y = local.lowY; y <= local.highY; ++y) {
+                    for (uint32_t x = local.lowX; x <= local.highX; ++x) {
+                        const uint32_t index = MrCellIndex(x, y, z);
+                        if (!MrIsCoveredCell(block, index) && cells.Apply(slot, index, command))
+                            touched |= LabRootBit(root);
+                    }
+                }
+            }
+        }
+    }
+
+    return touched;
 }
 
 // --- セルを作る --------------------------------------------------------------------------------

@@ -77,6 +77,18 @@ namespace bicameral::sim {
         if (commands.size() > LAB_MAX_COMMANDS_PER_TICK)
             return false;
 
+        // --- 細かくする(T-0314。CPU の ApplyLabRefines と同じ組を同じ順に。組ごとに要求の写しの枠を 1 つ使う)---
+        const std::vector<std::vector<multires::MrRequest>> rounds = LabRefineRounds(commands, m_shape);
+        if (rounds.size() > GpuMultires::REQUEST_UPLOAD_SLOTS)
+            return false;
+
+        for (const std::vector<multires::MrRequest>& requestGroup : rounds) {
+            if (!m_nest.RecordRequests(list, requestGroup))
+                return false;
+
+            m_nest.RecordProcessRequests(list, debugRing);
+        }
+
         // --- 魔法のパッチの境(T-0024。CPU の ApplyLabPatchBoundaries。毎刻み 1 スレッド)---
         const D3D12_GPU_VIRTUAL_ADDRESS patchAddress = m_nest.PatchListAddress();
         m_nest.SetExternalViews(m_commands->GetGPUVirtualAddress(), patchAddress);

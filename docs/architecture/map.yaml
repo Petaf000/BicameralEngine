@@ -103,7 +103,7 @@ views:
       - { id: labsession, group: simlib, label: "LabSession<br/>箱を GPU と CPU リファレンスで並べて刻み、最初に違った刻みとセル",
           code: "engine/src/sim/lab_session.cpp::LabSession::StepOne", ticket: T-0142,
           doc: docs/decisions/ADR-0037-lab-box.md,
-          note: "GpuLabBox(lab_box.hlsl でコマンドを当てる → GpuMultires::RecordStep)と StepLabBox(同じ関数 → StepNest)。箱は根を x・y・z に並べられる(lab::LabBoxShape。最大 4×4×4。T-0173・ADR-0113)。gpu_lab_box・lab_box" }
+          note: "GpuLabBox(lab_box.hlsl でコマンドを当てる → GpuMultires::RecordStep)と StepLabBox(同じ関数 → StepNest)。箱は根を x・y・z に並べられる(lab::LabBoxShape。最大 4×4×4。T-0173・ADR-0113)。一部を細かくする印は刻みの初めに木の要求の組(LabRefineRounds → ProcessRequests / RecordProcessRequests)にして 2 段まで細かくし、細かいセルにも置ける(T-0314・ADR-0137)。gpu_lab_box・lab_box" }
       - { id: labcomparison, group: simlib, label: "RunLabComparison<br/>同じ保存点から A(元の続き)と B(条件を 1 つ足す)を流す",
           code: "engine/src/sim/lab_comparison.cpp::RunLabComparison", ticket: T-0221, doc: docs/design/14-editor-tools.md,
           note: "保存点 = 記録を刻み t で切ったもの(sim/lab_gauge の CutLabRecording)。同じ箱で A → B を Replay。lab_box・window_lab_compare" }
