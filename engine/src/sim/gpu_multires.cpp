@@ -257,8 +257,10 @@ namespace bicameral::sim {
         result.m_constants.overflowBase = result.OverflowBaseWord();
         if (options.wideCells) {
             const auto doubled = static_cast<uint32_t>(result.PageCount() * 2);
-            result.m_wideChunks = options.wideChunks != 0 ? options.wideChunks
-                                                          : std::max(doubled, 2 * MR_WIDE_SIDE_CHUNKS);
+            // 既定は 1 頁の 2 面が 64 種のセルで埋まる分(T-0272 の上限。上限を 96 に上げても既定の VRAM は変えない。T-0327)
+            constexpr uint32_t DEFAULT_SIDE_SPECIES = 64;
+            const uint32_t sideChunks = MrWideChunksFor(MR_BLOCK_CELLS * (DEFAULT_SIDE_SPECIES - RX_MAX_CELL_SPECIES));
+            result.m_wideChunks = options.wideChunks != 0 ? options.wideChunks : std::max(doubled, 2 * sideChunks);
         }
 
         if (auto pipelines = result.CreatePipelines(device, options); !pipelines)

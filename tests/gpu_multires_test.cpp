@@ -896,9 +896,10 @@ namespace {
             if (first >= MEASURE_WARMUP_TICKS)
                 milliseconds += listMs;
 
-            if (first == 0)
-                ticksPerList = std::clamp(static_cast<uint32_t>(MEASURE_LIST_BUDGET_MS / std::max(listMs, 0.001)), 1u,
-                                          MEASURE_WARMUP_TICKS + MEASURE_TICKS);
+            // 1 刻みの時間はセルの成分が増えると伸びる(大きい形のセルの場面。T-0327)ので、リストごとに見積もり直す
+            const double tickMs = listMs / static_cast<double>(last - first);
+            ticksPerList = std::clamp(static_cast<uint32_t>(MEASURE_LIST_BUDGET_MS / std::max(tickMs, 0.001)), 1u,
+                                      MEASURE_WARMUP_TICKS + MEASURE_TICKS);
 
             first = last;
         }

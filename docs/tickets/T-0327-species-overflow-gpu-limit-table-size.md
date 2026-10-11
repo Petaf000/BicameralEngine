@@ -23,14 +23,20 @@
 - 2026-10-11(作業役、wt4・ブランチ t-0327。約 1.7 時間): 面の塊の表の続きを最初の塊の先頭に置き、見出しを 192 → 24 語にした(上限に依らない。
   WideTableEntryWord・MrWideSideOffset・AppendOverflowImage・ReadOverflow)。上限を 128 にすると HW の compute キューで溢れの場面(11 種の overflow でも)の
   刻みが返らなくなった(DEVICE_HUNG にならず時間切れ 2 回)。64 は通り、96 は通った → 上限 96(仮)。試験の many の場面を 96 種の表・20 刻みにし、
-  1 セルの最大を「64 種を超える」で確かめる。--measure-wide に「大きい形のセル」(64 種の表 = 1 セル 33〜64 種が一面)の場面を足した。
+  1 セルの最大を「64 種を超える」で確かめる。--measure-wide に「大きい形のセル」(64 種の表 = 1 セル 33〜64 種が一面)の場面を足した(HW で DEVICE_HUNG。T-0362)。
+  試験: HW --repeat-wide 4 場面 × 3 回・gpu_multires_wide・gpu_multires_warp・multires_wide が通った。rebase は main 245146b のまま(変化なし)。
 
 ## 引き継ぎメモ
 - 上限 RX_GPU_WIDE_SPECIES = 96(shaders/common/multires_wide.hlsli)。128 で止まる再現: 128 にして build →
   `job.py run -Preset release -Exe gpu_multires_test --timeout 200 -- --queue compute --repeat-wide overflow,limits 1`(返らずに時間切れ。64・96 は 1 分以内に OK)。
 - 面の塊の表: 0 番目は見出し、1 番目からは最初の塊の先頭(MR_WIDE_TABLE_SPILL 語)。塊を付ける所(GrantWideChunks・TreeWideReserve の 2 か所)は
   0 番目から順に書くこと(WideTableEntryWord が 1 番目からは見出しの最初の塊を読む)。
-- 大きい形のセルが一面に並ぶ場面の重さは docs/perf.md(T-0327)。軽くするのは T-0362(作業場の形で 1 セルを複数スレッド・スクラッチを小さく)と一緒に。
+- **大きい形のセルが一面に並ぶ場面(--measure-wide の「大きい形のセル」= 64 種の表・根 64)は HW で 2 回とも測る途中で DEVICE_HUNG**
+  (リストの刻みの数を毎リスト見積もり直しても。1 刻みが TDR〔2 秒〕を超えるのか本当の止まりかは未確認。上限 64 の T-0326 の時も測っていなかったので、
+  この変更で起きたのかも未確認)。--measure-wide はこの場面で exit 1 になる(前の場面の値は出る)。T-0362 で軽くする時に段ごとのタイムスタンプ
+  (--diagnose-wide)で切り分ける。1 か所に 33 種以上を混ぜたセルが一面に並ぶ極端な場面なので、ふつうの世界・試験の場面(2 根)では起きない。
+- 塊の置き場の既定(wideChunks = 0)は「1 頁の 2 面が 64 種のセル」の分のまま(170 塊)。上限 96 の頁が 2 つ以上埋まる世界は wideChunks を渡す。
+- 空気だけの溢れの世界の溢れの VRAM は 776 → 692 KiB(見出し 768 → 96 B/頁)。
 
 ## 判断待ち
 - **上限 96(仮・ユーザー未確認。D-448 / Q39 の続き)**。プレイヤーと遊びへの影響: 1 か所に 65〜96 種を混ぜる実験(錬金の釜・魔法の研究の場)でも
