@@ -12,6 +12,9 @@
 // 1 グループの中でスレッドは別々のセルに書き、見出し・返す枠・索引はスレッド 0 だけが書く。数える欄と帳簿は足し算。
 // 次のレベルは前のレベルの書き込みを読むので、出力の前に Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC)、バッファは globallycoherent。
 #include "sim/multires_bindings.hlsli"
+#ifdef MR_WIDE_CELLS
+#include "sim/multires_wide_access.hlsli"
+#endif
 
 // 再帰の深さの上限(要求の鎖は MR_MAX_CHAIN_LEVELS 段まで)
 static const uint32_t MR_MAX_RECURSION = MR_MAX_CHAIN_LEVELS;
@@ -40,6 +43,90 @@ void ReleaseFraction(uint32_t request, uint32_t fractionSlot) {
     g_states[request].releases[count] = fractionSlot;
     g_states[request].releaseCount = count + 1;
 }
+
+#ifdef MR_WIDE_CELLS
+// --- 溢れを使う変種(multires_graph_wide。T-0237。CPU は multires_tree.cpp の CopyWideToChild と「親を覆う」)---
+
+groupshared uint32_t gs_tailStarts[MR_BLOCK_CELLS + 1];  // 子のセルの溢れの数 → 子の頁の面 0 の始まり
+
+// 溢れの成分 1 つ(3 語)を写す
+void CopyWideEntry(uint32_t fromPage, uint32_t fromSide, uint32_t fromEntry, uint32_t toPage, uint32_t toSide,
+                   uint32_t toEntry) {
+    const uint32_t from = MrWideEntryWord(fromEntry);
+    const uint32_t to = MrWideEntryWord(toEntry);
+    for (uint32_t word = 0; word < MR_WIDE_ENTRY_WORDS; ++word)
+        g_treeWords[WideWord(toPage, toSide, to + word)] = g_treeWords[WideWord(fromPage, fromSide, from + word)];
+}
+
+// 細かくした子の頁(取ったばかり)の面 0 に、親の八分の一のセルの溢れを写す(1 スレッド = 子のセル t。グループの全部のスレッドが呼ぶ)。
+// 塊は TreeWideReserve が要求の順に付けてある。足りない(置き場が尽きた)時だけ写さずに MR_COUNTER_OVERFLOW に数える。
+// copyTails でない(影。T-0312)なら子の頁を空にするだけ(前に使った頁の溢れを読まないため)
+void RefineWideTails(uint32_t parentPage, uint32_t childPage, uint32_t octant, uint32_t t, bool copyTails) {
+    const uint32_t parentSide = copyTails ? WideCurrentSide(parentPage) : 0u;
+    const uint2 range = copyTails ? WideRange(parentPage, parentSide, MrParentCellOfChild(octant, t)) : uint2(0, 0);
+    gs_tailStarts[t] = range.y - range.x;
+    GroupMemoryBarrierWithGroupSync();
+    if (t == 0) {
+        uint32_t total = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const uint32_t count = gs_tailStarts[index];
+            gs_tailStarts[index] = total;
+            total += count;
+        }
+
+        gs_tailStarts[MR_BLOCK_CELLS] = total;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // --- 写すものが無い・塊が足りない: 今の面を面 0 にして空に ---
+    const uint32_t total = gs_tailStarts[MR_BLOCK_CELLS];
+    const bool fits = MrWideChunksFor(total) <= WideChunkCount(childPage, 0);
+    if (total == 0 || !fits) {
+        ClearWideSideWords(childPage, t, MR_BLOCK_CELLS);
+        if (!fits && t == 0)
+            InterlockedAdd(g_counters[MR_COUNTER_OVERFLOW], total);
+
+        return;
+    }
+
+    // --- 始まりの表と成分(セルの番号の順に詰める)---
+    if (t == 0) {
+        g_treeWords[WideHeaderAt(childPage, MR_WIDE_HEADER_SIDE)] = 0;
+        g_treeWords[WideWord(childPage, 0, MR_BLOCK_CELLS)] = total;
+    }
+
+    const uint32_t first = gs_tailStarts[t];
+    g_treeWords[WideWord(childPage, 0, t)] = first;
+    for (uint32_t entry = range.x; entry < range.y; ++entry)
+        CopyWideEntry(parentPage, parentSide, entry, childPage, 0, first + (entry - range.x));
+}
+
+// 親を覆う: 覆った八分の一のセルの溢れを今の面から除いて前へ詰める(スレッド 0。写す先はいつも読む所より前なので、同じ面の中で
+// 読む前に上書きしない)。細かくするのはまれなので 1 スレッドで(親の溢れの数だけ)
+void CoverWideTails(uint32_t page, uint32_t octant) {
+    const uint32_t side = WideCurrentSide(page);
+    if (WideChunkCount(page, side) == 0)
+        return;
+
+    uint32_t written = 0;
+    uint32_t start = g_treeWords[WideWord(page, side, 0)];
+    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+        const uint32_t end = g_treeWords[WideWord(page, side, index + 1)];
+        g_treeWords[WideWord(page, side, index)] = written;
+        if (MrOctantOfCell(index) != octant) {
+            for (uint32_t entry = start; entry < end; ++entry) {
+                CopyWideEntry(page, side, entry, page, side, written);
+                written += 1;
+            }
+        }
+
+        start = end;
+    }
+
+    g_treeWords[WideWord(page, side, MR_BLOCK_CELLS)] = written;
+}
+#endif
 
 // 1 段を細かくする(1 スレッド = 子のセル t。親のセル t も読む)
 void RefineLevel(MrRefineRecord record, uint32_t t) {
@@ -88,6 +175,12 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     if (childFraction != MR_NO_FRACTION)
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
 
+#ifdef MR_WIDE_CELLS
+    // --- 溢れ: 子の頁へ写す(親を覆う前。一様な子は頁を持たない。一様な親は溢れを持たない)---
+    if (!uniformChild)
+        RefineWideTails(parent.page, childPage, octant, t, fromRequest && !MrIsUniform(parent));
+#endif
+
     // --- 本物なら親を覆う(全部のスレッドが親を読み終えてから。一様な親は覆われた所を空と読むので書かない)---
     GroupMemoryBarrierWithGroupSync();
     if (real && t < MR_OCTANT_CELLS) {
@@ -98,6 +191,14 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
         if (parent.fraction != MR_NO_FRACTION)
             g_fractions[FractionAddress(parent.fraction, index)] = MrMakeEmptyFraction();
     }
+
+#ifdef MR_WIDE_CELLS
+    if (real && !uniformChild) {
+        AllMemoryBarrierWithGroupSync();  // 全部のスレッドが親の溢れを写し終えてから
+        if (t == 0)
+            CoverWideTails(parent.page, octant);
+    }
+#endif
 
     if (t != 0)
         return;
@@ -191,6 +292,16 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     g_fractions[FractionAddress(parentFraction, index)] = result.fraction;
 
     GroupMemoryBarrierWithGroupSync();
+
+#ifdef MR_WIDE_CELLS
+    // --- 溢れ: 返す子の頁と、広げた親の頁(取ったばかり)の今の面を空にする(CPU の ClearPageOverflow)。
+    //     溢れのある子を粗くする和集合・端数の溢れは T-0311 ---
+    if (!MrIsUniform(child))
+        ClearWideSideWords(child.page, t, MR_OCTANT_CELLS);
+
+    if (expandParent)
+        ClearWideSideWords(parentPage, t, MR_OCTANT_CELLS);
+#endif
     if (t != 0)
         return;
 

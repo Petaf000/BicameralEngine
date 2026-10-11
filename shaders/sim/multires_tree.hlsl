@@ -1,6 +1,7 @@
 // multires_tree.hlsl — 多重解像度の世界の木の管理の Compute の段(17 §5「木の管理」。T-0018。ADR-0016)。
 // 1 刻みの要求の処理: (静かな葉を粗くするなら TreeQuiet。T-0101)→ TreeResolve → TreeSettle → TreeAllocate → (Work Graph: RefineNode の鎖・CoarsenRequestNode)→ TreeRelease
 // → TreeClearIndex → TreeFillIndex(後ろの 2 つは索引を作り直す印がある時だけ働く)。
+// 溢れを使う世界(MR_WIDE_CELLS の変種。T-0237)は TreeAllocate の後に TreeWideReserve(細かくする子の頁に溢れの塊を付ける)。
 // 要求の処理の前: TreeFoldCheck → TreeFold(静かで一様・ほぼ同じになった頁を枠の順に畳む・端数の枠を返す。T-0103・T-0112)。
 // 刻んだ後: TreeExpand(一様で反応が進むブロックに枠の順で頁を配る。T-0102)。呼ぶ順は engine/src/sim/gpu_multires.cpp の
 // RecordProcessRequests。CPU リファレンスは engine/src/sim/multires_tree.cpp(同じ関数・同じ順)。
@@ -8,6 +9,9 @@
 // 順番に依存しない理由: 解決と確定は要求ごとに自分の値だけを書き、取り合いは atomic の最小(小さい番号が勝つ)。
 // 割り当てと解放は 1 グループの累積和で、要求の順に枠を配る・積む(ADR-0016)。数える欄は足し算。
 #include "sim/multires_bindings.hlsli"
+#ifdef MR_WIDE_CELLS
+#include "sim/multires_wide_access.hlsli"
+#endif
 
 static const uint32_t TREE_THREADS = 64;
 
@@ -865,3 +869,97 @@ void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
     g_counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions + returned;
     g_counters[MR_COUNTER_FOLDED] += folded;
 }
+
+#ifdef MR_WIDE_CELLS
+// --- 溢れを使う世界: 細かくする子の頁に溢れの塊を付ける(T-0237。TreeAllocate の後・Work Graph の前。1 グループ)---
+// 子の頁の面 0 に、親の八分の一のセルの溢れを写す(multires_graph.hlsl の RefineWideTails)ための塊を、許可した要求の順の累積和で
+// 空きのスタックの上から配る(WideAllocate と同じ型)。足りなければその要求には配らない(写す時に数える。置き場が尽きた時だけ)。
+// どの塊を使うかは結果に出ない。頁が前に持っていた面 0 の塊はそのまま使う
+
+static const uint32_t MR_WIDE_RESERVE_NONE = 0;
+
+// 細かくする要求の depth 段目の子の頁に写す溢れの数(一番上の親の頁の今の面から。子のセルを親のセルへたどる)
+uint32_t RefineTailEntries(MrRequest request, MrRequestState state, uint32_t depth) {
+    uint32_t octants[MR_MAX_CHAIN_LEVELS];
+    MrBlock block = g_blocks[state.target];
+    const uint32_t page = block.page;
+    for (uint32_t level = 0; level <= depth; ++level) {
+        octants[level] = MrOctantOfPoint(block, request.x, request.y, request.z, request.level);
+        block = MrMakeChildBlock(block, state.target, octants[level], MR_BLOCK_REAL, MR_NO_FRACTION, MR_NO_PAGE);
+    }
+
+    const uint32_t side = WideCurrentSide(page);
+    uint32_t total = 0;
+    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+        uint32_t cell = index;
+        for (uint32_t level = depth + 1; level > 0; --level)
+            cell = MrParentCellOfChild(octants[level - 1], cell);
+
+        const uint2 range = WideRange(page, side, cell);
+        total += range.y - range.x;
+    }
+
+    return total;
+}
+
+// 要求 i に足す塊の数(attach なら stack の上から taken 番目より下を取って子の頁の面 0 の表に足す)
+uint32_t ReserveRefineChunks(uint32_t i, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
+    if (i >= RequestCount())
+        return MR_WIDE_RESERVE_NONE;
+
+    const MrRequestState state = g_states[i];
+    const MrRequest request = g_requests[i];
+    if (state.status != MR_STATUS_GRANTED || request.op != MR_REQUEST_REFINE)
+        return MR_WIDE_RESERVE_NONE;
+
+    // --- 一様な親は溢れを持たない(GPU の一様の値はインラインだけ)・溢れの無い親は写すものが無い ---
+    const MrBlock parent = g_blocks[state.target];
+    if (MrIsUniform(parent) || WideRange(parent.page, WideCurrentSide(parent.page), MR_BLOCK_CELLS - 1).y == 0)
+        return MR_WIDE_RESERVE_NONE;
+
+    uint32_t chunks = 0;
+    for (uint32_t depth = 0; depth < state.levels; ++depth) {
+        const uint32_t page = PoppedPage(state, depth);
+        const uint32_t need = MrWideChunksFor(RefineTailEntries(request, state, depth));
+        const uint32_t table = MrWideTableWord(g_overflowBase, page, 0);
+        const uint32_t held = g_treeWords[table];
+        if (need <= held)
+            continue;
+
+        if (attach) {
+            for (uint32_t j = held; j < need; ++j) {
+                g_treeWords[table + 1 + j] = g_treeWords[stack + freeCount - 1 - taken];
+                taken += 1;
+            }
+
+            g_treeWords[table] = need;
+        }
+
+        chunks += need - held;
+    }
+
+    return chunks;
+}
+
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeWideReserve(uint32_t i : SV_GroupIndex) {
+    const uint32_t pool = WidePoolWord();
+    const uint32_t stack = MrWideStackWord(pool, g_treeWords[pool + MR_WIDE_POOL_CAPACITY]);
+    const uint32_t freeCount = g_treeWords[pool + MR_WIDE_POOL_FREE];
+    const uint32_t want = ReserveRefineChunks(i, false, stack, freeCount, 0);
+    if (i == 0)
+        gs_grantedBlocks = 0;
+
+    InclusiveScan(i, want, 0, 0);
+
+    // --- 累積和が空きに入る要求だけ配る(累積和は増えるだけなので、配るのは一覧の前から続く)---
+    const uint32_t sum = gs_blockScan[i];
+    if (want != 0 && sum <= freeCount) {
+        ReserveRefineChunks(i, true, stack, freeCount, sum - want);
+        InterlockedMax(gs_grantedBlocks, sum);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (i == 0)
+        g_treeWords[pool + MR_WIDE_POOL_FREE] = freeCount - gs_grantedBlocks;
+}
+#endif

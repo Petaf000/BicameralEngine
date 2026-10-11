@@ -52,7 +52,8 @@ namespace bicameral::sim {
         // 成分の二段(T-0176。CPU の EnableWideCells の世界と同じ): セルは「インライン 8 + 頁ごとの溢れ」で、全部を刻む Compute
         // (RecordStep の伝導なし)が 9 種目以上の生成物を待たせずに作る。溢れは u6 の後ろに、頁ごとの見出し(288 B)と、使う分だけ配る
         // 4 KiB の塊の置き場に取る(shaders/common/multires_wide.hlsli。T-0236)。伝導の段(陽解法)も溢れを読む(T-0211)。
-        // まだ陰解法・要求の処理・活性のグラフ・覗き窓は溢れを読まない(T-0237・T-0238・T-0212)ので、使えるのは全部の刻み(伝導あり・なし。陰解法なし)だけ
+        // 要求の処理は細かくする(子の頁へ溢れを写す・親を覆う)と頁を返す・配る時に空にするまで(T-0237)。粗くする和集合・端数の溢れ
+        // (T-0311)・影と畳む(T-0312)・陰解法・活性のグラフ・覗き窓(T-0238・T-0212)はまだ溢れを読まない。陰解法は使えない
         bool wideCells = false;
         // 溢れの塊の置き場の塊の数(1 塊 4 KiB。0 = 既定: 頁の数 × 2 と、1 頁の両面を全部の溢れで埋める数の大きい方)。
         // 尽きた時だけ溢れるセルを待たせて MR_COUNTER_LIMIT_PRODUCTS に数える(T-0236)
@@ -291,7 +292,8 @@ namespace bicameral::sim {
         // 塊が足りなかった頁に塊を配る・刻み直す(T-0236)
         ComPtr<ID3D12PipelineState> m_wideAllocatePipeline;
         ComPtr<ID3D12PipelineState> m_wideRetryPipeline;
-        uint32_t m_wideChunks = 0;  // 溢れの塊の置き場の塊の数
+        ComPtr<ID3D12PipelineState> m_treeWideReservePipeline;  // 細かくする子の頁に溢れの塊を付ける(T-0237)
+        uint32_t m_wideChunks = 0;                              // 溢れの塊の置き場の塊の数
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

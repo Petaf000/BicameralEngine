@@ -320,7 +320,8 @@ namespace bicameral::sim {
             auto wideAllocate = LoadComputePipeline(device, m_rootSignature.Get(),
                                                     "sim/multires_step_wide_allocate.cso");
             auto wideRetry = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_retry.cso");
-            for (const auto* loaded : {&wideWait, &wideExpanded, &wideAllocate, &wideRetry}) {
+            auto wideReserve = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_reserve.cso");
+            for (const auto* loaded : {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideReserve}) {
                 if (!*loaded)
                     return std::unexpected(loaded->error());
             }
@@ -329,6 +330,7 @@ namespace bicameral::sim {
             m_stepWideExpandedWaitPipeline = std::move(*wideExpanded);
             m_wideAllocatePipeline = std::move(*wideAllocate);
             m_wideRetryPipeline = std::move(*wideRetry);
+            m_treeWideReservePipeline = std::move(*wideReserve);
         }
 
         static_assert(TREE_SHADERS.size() == TREE_PASS_COUNT && CONDUCT_SHADERS.size() == CONDUCT_PASS_COUNT);
@@ -351,7 +353,9 @@ namespace bicameral::sim {
             m_conductWidePipelines[pass] = std::move(*pipeline);
         }
 
-        const auto library = gpu::LoadShader("sim/multires_graph.cso");
+        // 溢れを使う世界は細かくする時に溢れを写す変種(T-0237)
+        const auto library = gpu::LoadShader(options.wideCells ? "sim/multires_graph_wide.cso"
+                                                               : "sim/multires_graph.cso");
         if (!library)
             return std::unexpected(library.error());
 
@@ -890,6 +894,14 @@ namespace bicameral::sim {
         RecordTreePass(list, debugRing, PassResolve, requestGroups);
         RecordTreePass(list, debugRing, PassSettle, requestGroups);
         RecordTreePass(list, debugRing, PassAllocate, 1);
+        if (m_wideCells) {
+            // 細かくする子の頁に溢れの塊を付ける(T-0237)
+            list->SetPipelineState(m_treeWideReservePipeline.Get());
+            BindRoot(list, debugRing);
+            list->Dispatch(1, 1, 1);
+            UavBarrier(list);
+            StampStage(list);
+        }
 
         // --- 適用(Work Graph。GPU の入力は SRV の状態で読む)---
         ID3D12Resource* graphInput = m_buffers[BufferGraphInput].Get();
