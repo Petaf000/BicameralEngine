@@ -636,6 +636,15 @@ namespace bicameral::sim {
             }
         }
 
+        // --- 魔法のパッチの列(T-0024・ADR-0095。効いているパッチの語だけ。列が空なら前と同じ要約〔記録のハッシュが変わらない〕)---
+        const uint32_t patchCount = nest.magicPatches.empty() ? 0 : std::min(nest.magicPatches[0], MP_MAX_PATCHES);
+        if (patchCount > 0) {
+            hash = FxHashCombine(hash, patchCount);
+            const size_t used = MP_LIST_HEADER_WORDS + (size_t{patchCount} * MP_PATCH_WORDS);
+            for (size_t word = MP_LIST_HEADER_WORDS; word < used && word < nest.magicPatches.size(); ++word)
+                hash = FxHashCombine(hash, nest.magicPatches[word]);
+        }
+
         return hash;
     }
 

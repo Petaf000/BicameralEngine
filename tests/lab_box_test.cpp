@@ -567,12 +567,17 @@ namespace {
         // --- 箱: パッチのコマンドは列に足し、箱をつつく。終わりの刻みにまたつつき、列から除く ---
         MultiresNest nest = MakeLabBoxNest(table);
         nest.blocks[LAB_BOX_SLOT].busyTick = 1;
+        const uint64_t hashWithout = HashWholeNest(nest);
         const Command command = MakeLabPatchCommand(3, 0, 0, MpMakeScaleEffect(4), 5, LabWholeBox());
         EXPECT(ApplyLabCommands(nest, table, std::span(&command, 1)) == 1);
         EXPECT(nest.magicPatches[0] == 1 && nest.blocks[LAB_BOX_SLOT].busyTick == multires::MR_BUSY_POKED);
+        nest.blocks[LAB_BOX_SLOT].busyTick = 1;
+        EXPECT(HashWholeNest(nest) != hashWithout);  // 効いているパッチは状態の要約に入る
         nest.blocks[LAB_BOX_SLOT].busyTick = 4;
         EXPECT(!ApplyLabPatchBoundaries(nest, 7) && nest.magicPatches[0] == 1);
         EXPECT(ApplyLabPatchBoundaries(nest, 8) && nest.magicPatches[0] == 0);
+        nest.blocks[LAB_BOX_SLOT].busyTick = 1;
+        EXPECT(HashWholeNest(nest) == hashWithout);  // 列が空なら要約はパッチを入れる前と同じ(残った古い語は入らない)
 
         // --- 大きい箱(T-0173): 範囲は箱の座標。足したときと境の刻みには、範囲が重なる根だけをつつく ---
         constexpr lab::LabBoxShape SHAPE = {.rootsX = 2, .rootsY = 2, .rootsZ = 2};

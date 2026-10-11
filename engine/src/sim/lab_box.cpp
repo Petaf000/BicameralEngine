@@ -537,6 +537,8 @@ namespace bicameral::sim {
             field = "数える欄";
         else if (!SameBytes(cpu.freeBlocks, gpu.freeBlocks) || !SameBytes(cpu.freeFractions, gpu.freeFractions))
             field = "空きのスタック";
+        else if (cpu.magicPatches != gpu.magicPatches)
+            field = "魔法のパッチの列";
 
         mismatch.what = std::format("刻み {} の{}が違う(セルは全部同じ)", tick, field);
         return mismatch;

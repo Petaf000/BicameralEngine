@@ -41,8 +41,10 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> ReplaceTable(
             const BakedReactionTable& table) {
             auto retired = m_nest.ReplaceTable(table);
-            if (retired)
+            if (retired) {
                 m_speciesCount = static_cast<uint32_t>(table.species.size());
+                m_ruleCount = static_cast<uint32_t>(table.rules.size());
+            }
 
             return retired;
         }
@@ -71,6 +73,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_commandUpload;               // CPU が書く写し
         uint32_t m_speciesCount = 0;
         lab::LabBoxShape m_shape = LAB_SINGLE_ROOT_SHAPE;
+        // 今の表の規則の数(パッチの検査。ルートの SRV は GetDimensions で大きさを読めない〔未定義〕ので定数で渡す。T-0024)
+        uint32_t m_ruleCount = 0;
     };
 
 }  // namespace bicameral::sim

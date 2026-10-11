@@ -19,6 +19,7 @@ namespace bicameral::sim {
         GpuLabBox result(std::move(*nest));
         result.m_speciesCount = static_cast<uint32_t>(table.species.size());
         result.m_shape = shape;
+        result.m_ruleCount = static_cast<uint32_t>(table.rules.size());
 
         const auto shader = gpu::LoadShader("sim/lab_box_apply.cso");
         if (!shader)
@@ -92,7 +93,7 @@ namespace bicameral::sim {
             m_nest.SetExternalViews(commandAddress, patchAddress);
             m_nest.RecordExternalDispatch(
                 list, debugRing, m_applyPipeline.Get(), 1,
-                {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, 0});
+                {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, m_ruleCount});
         }
 
         m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LAB_STEP_OPTIONS);

@@ -317,7 +317,8 @@ namespace bicameral::sim {
     // 世界(本物の葉のセルと端数)の要約。影は入らない
     [[nodiscard]] uint64_t HashRealLeaves(const MultiresNest& nest);
 
-    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄)の要約。CPU と GPU を比べるため。索引・要求・種は入らない
+    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄・効いている魔法のパッチ)の要約。CPU と GPU を比べるため。
+    // 索引・要求・種は入らない。パッチの列が空なら、パッチを入れる前(T-0024 より前)と同じ値
     [[nodiscard]] uint64_t HashWholeNest(const MultiresNest& nest);
 
     // 本物の葉のセルと世界の帳簿の、元素の数とエネルギーの合計を finestLevel の単位 × 2^-64 で

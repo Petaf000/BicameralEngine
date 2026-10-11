@@ -45,14 +45,6 @@ LabBlocks MakeLabBlocks() {
     return blocks;
 }
 
-uint32_t RuleCount() {
-    uint32_t count = 0;
-    uint32_t stride = 0;
-    g_rules.GetDimensions(count, stride);
-
-    return count;
-}
-
 // 箱のセル index(LabCellIndex)にコマンドを当てる。根が一様なら当てない(箱の根はいつも頁を持つ: sim/lab_box.cpp の MakeLabBoxNest。
 // CPU の ApplyLabCommands も同じ)。当てたら true
 bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
@@ -66,7 +58,8 @@ bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
     return true;
 }
 
-// g_external0 = コマンドの数、g_external1 = 箱の形(LabPackShape。T-0173)、g_external2 = 表の物質の数
+// g_external0 = コマンドの数、g_external1 = 箱の形(LabPackShape。T-0173)、g_external2 = 表の物質の数、g_external3 = 表の規則の数
+// (規則の数を GetDimensions で読まない: g_rules はルートの SRV で、大きさを持たない〔読むと未定義。WARP は読めても HW は読めない〕。T-0024)
 [numthreads(1, 1, 1)] void ApplyLabCommands() {
     const LabBoxShape shape = LabUnpackShape(g_external1);
     uint64_t touched = 0;  // つつく根(LabRootBit)
@@ -83,7 +76,7 @@ bool ApplyToCell(LabBoxShape shape, uint32_t index, LabCommand command) {
 
         // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(sim/lab_box.cpp と同じ)---
         if (LabCommandIsPatch(command)) {
-            touched |= LabApplyPatchCommand(MakePatchList(), MakeLabBlocks(), shape, command, RuleCount());
+            touched |= LabApplyPatchCommand(MakePatchList(), MakeLabBlocks(), shape, command, g_external3);
             continue;
         }
 
