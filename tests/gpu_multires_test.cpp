@@ -3,9 +3,13 @@
 // 場面は tests/multires_test_scene.h(本物の鎖・影の鎖・たくさんの要求)。状態の全部(見出し・セル・端数・空きのスタック・帳簿・数える欄)を
 // 毎刻み比べ、GPU の索引で本物のブロックが全部引けることも確かめる。本物の鎖とたくさんの要求は 2 回走らせて一致を確かめる。
 // 時間は別に、1 本のリストで暖機(GPU のクロックを上げる)してから測る(1 刻みの予算に収まるか)。
+// debug では 2 回目の実行と時間の計測をしない(1200 秒の上限に届くため。T-0263)。場面と刻みの数は release と同じ。
 // 粗くすると成分が入りきらない場面(tests/multires_limits_scene.h。T-0022)も毎刻み比べる(断った数・見出しの quietCheck も)。
-// 引数は gpu_test_options.h。
+// 引数は gpu_test_options.h と --part all|chains|wide(ctest の HW は chains と wide の 2 本。T-0263)・--measure-wide(計測だけ)。
 #include "sim/gpu_multires.h"
+
+#include <optional>
+
 #include "common/multires_wide.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -27,6 +31,14 @@ namespace {
 
     // 計測の前に刻みを何回投げるか(短い仕事の間は GPU のクロックが上がらず、時間が 6〜8 倍に出る)
     constexpr uint32_t WARMUP_STEPS = 400;
+
+    // debug(FX_ASSERT・GPU の検証つき)では 6 つのランナーの並走で 1 本が 1200 秒の上限に届いた(T-0263)。
+    // debug は同じ場面を 1 回ずつ流して CPU と比べるだけにし、2 回目の実行(決定性)と時間の計測(暖機 400 刻み × 2)は release だけでする
+#ifdef NDEBUG
+    constexpr bool REPEAT_AND_MEASURE = true;
+#else
+    constexpr bool REPEAT_AND_MEASURE = false;
+#endif
 
     struct RunResult {
         uint64_t digest = 0;
@@ -620,20 +632,186 @@ namespace {
         return 0;
     }
 
+    // 場面 1 つを流し、かかった時間(壁時計)をログに出す(debug でどの場面が重いかを見るため。T-0263)
+    template <typename Scene>
+    auto Timed(std::string_view name, Scene&& scene) {
+        const auto start = chr::steady_clock::now();
+        auto result = scene();
+        const double seconds = chr::duration<double>(chr::steady_clock::now() - start).count();
+        Log(Channel::Gpu, Level::Info, "場面 {}: {:.1f} 秒", name, seconds);
+
+        return result;
+    }
+
+    // 鎖の場面(本物の鎖・影の鎖・たくさんの要求・粗くすると入りきらない子・上限〔溢れなし〕)。通らなければ 1
+    int RunChainScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                       const sim::BakedReactionTable& table) {
+        using test::MultiresScenario;
+        const auto runReal = [&] {
+            return RunScenario(device, queue, ring, table, MultiresScenario::Real);
+        };
+        const auto runStress = [&] {
+            return RunStress(device, queue, ring, table);
+        };
+        const auto first = Timed("本物の鎖", runReal);
+        const auto second = [&] {
+            if constexpr (REPEAT_AND_MEASURE)
+                return Timed("本物の鎖(2 回目)", runReal);
+            else
+                return first;
+        }();
+
+        const auto shadow = Timed("影の鎖",
+                                  [&] { return RunScenario(device, queue, ring, table, MultiresScenario::Shadow); });
+
+        // 計測は CPU の重いたくさんの要求の前に(GPU が長く空くとクロックが下がり、暖機しても時間が数倍に出る)
+        std::expected<ChainTiming, std::string> realTiming = ChainTiming{};
+        std::expected<ChainTiming, std::string> shadowTiming = ChainTiming{};
+        if constexpr (REPEAT_AND_MEASURE) {
+            realTiming = MeasureChain(device, queue, ring, table, MultiresScenario::Real);
+            shadowTiming = MeasureChain(device, queue, ring, table, MultiresScenario::Shadow);
+        }
+
+        const auto stress = Timed("たくさんの要求", runStress);
+        const auto stressAgain = [&] {
+            if constexpr (REPEAT_AND_MEASURE)
+                return Timed("たくさんの要求(2 回目)", runStress);
+            else
+                return stress;
+        }();
+
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        if (!limitsTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
+            return 1;
+        }
+
+        const auto coarsenFull = RunCoarsenFull(device, queue, ring, *limitsTable);
+        const auto limitsStep = Timed("上限", [&] { return RunLimitsStep(device, queue, ring, *limitsTable, false); });
+        const auto limitsConduct = Timed("上限・伝導",
+                                         [&] { return RunLimitsStep(device, queue, ring, *limitsTable, true); });
+        for (const auto* result :
+             {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct}) {
+            if (*result)
+                continue;
+
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
+            return 1;
+        }
+
+        if (first->digest != second->digest || stress->digest != stressAgain->digest) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(2 回の実行が食い違う)");
+            return 1;
+        }
+
+        if (!realTiming || !shadowTiming) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(計測)");
+            return 1;
+        }
+
+        // 時間は release だけで測る(debug は 0 のまま)
+        if constexpr (REPEAT_AND_MEASURE) {
+            Log(Channel::Gpu, Level::Info,
+                "GPU 時間: 細かくする要求({} 段){:.3f} ms・刻み(鎖あり){:.3f} ms・粗くする要求(1 段){:.3f} ms・"
+                "要求 0 件の処理 {:.3f} ms・端数の枠の空き {}",
+                test::MULTIRES_LEVELS, realTiming->createMs, realTiming->stepMs, realTiming->endMs, realTiming->emptyMs,
+                second->freeFractions);
+            Log(Channel::Gpu, Level::Info,
+                "GPU 時間(影): 影を作る {:.3f} ms・刻み + 引き戻し {:.3f} ms・捨てる {:.3f} ms", shadowTiming->createMs,
+                shadowTiming->stepMs, shadowTiming->endMs);
+        }
+
+        Log(Channel::Gpu, Level::Info,
+            "鎖の場面: OK(本物の鎖・影の鎖の {} 刻み・たくさんの要求の {} 刻みで GPU と CPU がビット一致。"
+            "要約 本物 {:016x} / 影 {:016x} / たくさん {:016x})",
+            test::MULTIRES_END_TICK, test::STRESS_TICKS, first->digest, shadow->digest, stress->digest);
+
+        return 0;
+    }
+
+    // 溢れを使う世界の場面(上限の場面を溢れで・大きい溢れ・1 セル 32 種・塊の置き場が尽きる)。通らなければ 1
+    int RunWideScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
+        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
+        if (!limitsTable || !wideTable || !manyTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
+            return 1;
+        }
+
+        const auto limitsWide = Timed("上限・溢れ",
+                                      [&] { return RunLimitsStepWide(device, queue, ring, *limitsTable, false); });
+        const auto limitsWideConduct = Timed(
+            "上限・溢れ・伝導", [&] { return RunLimitsStepWide(device, queue, ring, *limitsTable, true); });
+        const auto wideOverflow = Timed("大きい溢れ",
+                                        [&] { return RunWideOverflow(device, queue, ring, *wideTable, false); });
+        const auto wideOverflowConduct = Timed("大きい溢れ・伝導",
+                                               [&] { return RunWideOverflow(device, queue, ring, *wideTable, true); });
+        const auto wideMany = Timed("32 種",
+                                    [&] { return RunWideOverflow(device, queue, ring, *manyTable, false, true); });
+        const auto wideManyConduct = Timed(
+            "32 種・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
+        const auto exhausted = Timed("塊の置き場が尽きる",
+                                     [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
+        if (!exhausted) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", exhausted.error());
+            return 1;
+        }
+
+        for (const auto* result :
+             {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany, &wideManyConduct}) {
+            if (*result)
+                continue;
+
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
+            return 1;
+        }
+
+        // 伝導ありの溢れの世界で伝導が働いている(熱が流れなければ、溢れを持つセルの熱容量・伝導率を比べたことにならない。T-0211)
+        if (limitsWide->digest == limitsWideConduct->digest) {
+            Log(Channel::Gpu, Level::Error,
+                "gpu_multires_test: FAILED(溢れの世界で伝導ありとなしが同じ = 熱が流れていない)");
+            return 1;
+        }
+
+        Log(Channel::Gpu, Level::Info, "溢れの場面: OK(上限・大きい溢れ・32 種で GPU と CPU が毎刻みビット一致)");
+
+        return 0;
+    }
+
+    // どの場面を流すか(--part。ctest は debug の 1200 秒の上限に収まるよう 2 本に分ける。T-0263)
+    enum class Part : uint8_t { All, Chains, Wide };
+
+    std::optional<Part> ParsePart(std::string_view text) {
+        if (text == "all")
+            return Part::All;
+        if (text == "chains")
+            return Part::Chains;
+        if (text == "wide")
+            return Part::Wide;
+
+        return std::nullopt;
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureWide = false;
-        for (char* argument : arguments) {
-            if (std::string_view(argument) == "--measure-wide")
+        std::optional<Part> part = Part::All;
+        for (size_t index = 0; index < arguments.size(); ++index) {
+            const std::string_view argument = arguments[index];
+            if (argument == "--measure-wide")
                 measureWide = true;
+            else if (argument == "--part" && index + 1 < arguments.size())
+                part = ParsePart(arguments[++index]);
             else
-                rest.push_back(argument);
+                rest.push_back(arguments[index]);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options) {
+        if (!options || !part) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide]");
+                "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--part "
+                "all|chains|wide]");
             return 2;
         }
 
@@ -656,88 +834,16 @@ namespace {
         if (measureWide)
             return RunMeasureWide(device->Get(), *queue, *ring);
 
-        using test::MultiresScenario;
-        const auto first = RunScenario(device->Get(), *queue, *ring, *table, MultiresScenario::Real);
-        const auto second = RunScenario(device->Get(), *queue, *ring, *table, MultiresScenario::Real);
-        const auto shadow = RunScenario(device->Get(), *queue, *ring, *table, MultiresScenario::Shadow);
-        // 計測は CPU の重いたくさんの要求の前に(GPU が長く空くとクロックが下がり、暖機しても時間が数倍に出る)
-        const auto realTiming = MeasureChain(device->Get(), *queue, *ring, *table, MultiresScenario::Real);
-        const auto shadowTiming = MeasureChain(device->Get(), *queue, *ring, *table, MultiresScenario::Shadow);
-        const auto stress = RunStress(device->Get(), *queue, *ring, *table);
-        const auto stressAgain = RunStress(device->Get(), *queue, *ring, *table);
-        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
-        if (!limitsTable) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
+        if (*part != Part::Wide && RunChainScenes(device->Get(), *queue, *ring, *table) != 0)
             return 1;
-        }
 
-        const auto coarsenFull = RunCoarsenFull(device->Get(), *queue, *ring, *limitsTable);
-        const auto limitsStep = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, false);
-        const auto limitsConduct = RunLimitsStep(device->Get(), *queue, *ring, *limitsTable, true);
-        const auto limitsWide = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable, false);
-        const auto limitsWideConduct = RunLimitsStepWide(device->Get(), *queue, *ring, *limitsTable, true);
-        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
-        if (!wideTable) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(大きい溢れの試験の表を作れない)");
+        if (*part != Part::Chains && RunWideScenes(device->Get(), *queue, *ring) != 0)
             return 1;
-        }
-
-        const auto wideOverflow = RunWideOverflow(device->Get(), *queue, *ring, *wideTable, false);
-        const auto wideOverflowConduct = RunWideOverflow(device->Get(), *queue, *ring, *wideTable, true);
-        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
-        if (!manyTable) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(1 セル 25 種以上の試験の表を作れない)");
-            return 1;
-        }
-
-        const auto wideMany = RunWideOverflow(device->Get(), *queue, *ring, *manyTable, false, true);
-        const auto wideManyConduct = RunWideOverflow(device->Get(), *queue, *ring, *manyTable, true, true);
-        if (auto exhausted = RunWideOverflowExhausted(device->Get(), *queue, *ring, *wideTable); !exhausted) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", exhausted.error());
-            return 1;
-        }
-
-        for (const auto* result :
-             {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct, &limitsWide,
-              &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany, &wideManyConduct}) {
-            if (*result)
-                continue;
-
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
-            return 1;
-        }
-
-        if (first->digest != second->digest || stress->digest != stressAgain->digest) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(2 回の実行が食い違う)");
-            return 1;
-        }
-
-        // 伝導ありの溢れの世界で伝導が働いている(熱が流れなければ、溢れを持つセルの熱容量・伝導率を比べたことにならない。T-0211)
-        if (limitsWide->digest == limitsWideConduct->digest) {
-            Log(Channel::Gpu, Level::Error,
-                "gpu_multires_test: FAILED(溢れの世界で伝導ありとなしが同じ = 熱が流れていない)");
-            return 1;
-        }
 
         if (!test::PassesValidation(*device, "gpu_multires_test"))
             return 1;
 
-        if (!realTiming || !shadowTiming) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(計測)");
-            return 1;
-        }
-
-        Log(Channel::Gpu, Level::Info,
-            "GPU 時間: 細かくする要求({} 段){:.3f} ms・刻み(鎖あり){:.3f} ms・粗くする要求(1 段){:.3f} ms・"
-            "要求 0 件の処理 {:.3f} ms・端数の枠の空き {}",
-            test::MULTIRES_LEVELS, realTiming->createMs, realTiming->stepMs, realTiming->endMs, realTiming->emptyMs,
-            second->freeFractions);
-        Log(Channel::Gpu, Level::Info, "GPU 時間(影): 影を作る {:.3f} ms・刻み + 引き戻し {:.3f} ms・捨てる {:.3f} ms",
-            shadowTiming->createMs, shadowTiming->stepMs, shadowTiming->endMs);
-        Log(Channel::Gpu, Level::Info,
-            "gpu_multires_test: OK(本物の鎖・影の鎖の {} 刻み・たくさんの要求の {} 刻みで GPU と CPU がビット一致。"
-            "要約 本物 {:016x} / 影 {:016x} / たくさん {:016x})",
-            test::MULTIRES_END_TICK, test::STRESS_TICKS, first->digest, shadow->digest, stress->digest);
+        Log(Channel::Gpu, Level::Info, "gpu_multires_test: OK");
 
         return 0;
     }
