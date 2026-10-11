@@ -37,6 +37,8 @@
   上限 32 で gpu_multires_wide(HW)が通った後、上限を 64 にして T-0290 の再現(compute キュー・4 場面 × 3 回)・gpu_multires・gpu_multires_wide(HW)が通った。
   試験の many の場面を GPU の上限まで(64 種の表。1 セル 59 種)にした。CPU の試験に「熱の和」を足した(multires_wide_test)。
   計測: 空気だけの溢れの世界 1.31 / 7.45 ns/セル(伝導ありは良くなった)、32 種のセル 1920 / 836 ns/セル(2.5〜3 倍遅い。T-0326)。
+  rebase(main f36c6f4。文書だけの差)の後に build・multires_wide・gpu_multires_warp(WARP。1 セル 59 種・待たせた 0・毎刻み CPU と一致)が通った。
+  残り物: gpu_multires_test の場面の名前「32 種」は今は上限(64)までの場面(ログの表示だけ。T-0326 で直す)。
 
 ## 引き継ぎメモ
 - 上限 RX_GPU_WIDE_SPECIES = 64(shaders/common/multires_wide.hlsli。戻すなら 1 行)。上限の無い形のセルを持つのは 64 スレッドの段
