@@ -80,6 +80,29 @@ uint2 WideRange(uint32_t page, uint32_t side, uint32_t index) {
     return uint2(g_treeWords[WideWord(page, side, index)], g_treeWords[WideWord(page, side, index + 1)]);
 }
 
+// 世界の枠 slot の一様の値の溢れの数(今の面のセル 0 の範囲。観察の枠は持たない。T-0384)
+uint32_t UniformTailCount(uint32_t slot) {
+    if (slot >= g_worldBlocks)
+        return 0;
+
+    const uint32_t area = WideUniformArea(slot);
+    const uint2 range = WideRange(area, WideCurrentSide(area), 0);
+
+    return range.y - range.x;
+}
+
+// ブロックの覆われていないセルの数(MrIsCoveredCell でないセル。一様の値を頁に広げる時に溢れを写すセル)
+uint32_t UncoveredCellCount(MrBlock block) {
+    if (block.kind != MR_BLOCK_REAL)
+        return MR_BLOCK_CELLS;
+
+    uint32_t cells = 0;
+    for (uint32_t octant = 0; octant < 8; ++octant)
+        cells += block.children[octant] == MR_NO_BLOCK ? MR_OCTANT_CELLS : 0u;
+
+    return cells;
+}
+
 // 領域の今の面を面 0 にして空にする(threads スレッドで分ける。同期は呼ぶ側)。
 // 前に使った頁の塊はそのまま持つ(次に書く時に要らなければ WideAllocate が返す)ので、塊を持つなら始まりの表を 0 にする
 void ClearWideSideWords(uint32_t page, uint32_t thread, uint32_t threads) {

@@ -391,6 +391,9 @@ namespace bicameral::sim {
 
             if (options.wideCells && pass == PassFoldCheck)
                 path = "sim/multires_tree_wide_fold_check.cso";  // 端数の溢れも帳簿へ返す(T-0347)
+
+            if (options.wideCells && pass == PassExpand)
+                path = "sim/multires_tree_wide_expand.cso";  // 一様の値の溢れを写す塊も配る(T-0384)
             auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), path);
             if (!pipeline)
                 return std::unexpected(pipeline.error());

@@ -667,6 +667,78 @@ namespace {
         return RunResult{.digest = sim::HashWholeNest(cpu)};
     }
 
+    // --- 一様の値の溢れを刻む(T-0384): 溢れのある一様な根(11 種。CPU の uniformOverflow)を写して GPU で刻む。反応のある表
+    //     (reacting)は評価で変わる → 頁に広げて一様の値の溢れごと刻む(TreeExpand の溢れの変種が塊を配り、CopyUniformTails が写す)。
+    //     反応の無い表は速い形で評価して変わらない(一様のまま・起こす刻みも同じ)。CPU の溢れの世界と毎刻みビット一致・保存がビット一致 ---
+    std::expected<RunResult, std::string> RunUniformOverflowSteps(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                                  gpu::DebugRing& ring,
+                                                                  const sim::BakedReactionTable& wideTable,
+                                                                  bool reacting) {
+        sim::ReactionTableDefinition inertDefinition = test::MakeWideOverflowTable();
+        inertDefinition.rules.clear();
+        const auto inertTable = sim::BakeReactionTable(inertDefinition);
+        if (!inertTable)
+            return std::unexpected(std::format("一様の値の溢れを刻む: 反応の無い表を作れない: {}", inertTable.error()));
+
+        const sim::BakedReactionTable& table = reacting ? wideTable : *inertTable;
+        sim::MultiresNest cpu = sim::MakeMultiresNest(
+            test::MakeMultiresCapacity(table, test::WIDE_OVERFLOW_WORLD_BLOCKS, 0, test::WIDE_OVERFLOW_WORLD_BLOCKS));
+        sim::EnableWideCells(cpu);
+        std::vector<sim::SpeciesAmount> amounts;
+        for (uint32_t i = 1; i <= test::WIDE_OVERFLOW_SPECIES; ++i)
+            amounts.push_back({.species = table.SpeciesId(test::WideOverflowName(i)), .amount = 1000000 + (i * 1000)});
+
+        // --- 溢れのある一様な根(原点)と、溢れの無い一様な根 ---
+        const RxWideCell value = sim::MakeWideReactionCell(table, amounts, 300000);
+        const std::vector<RxCell> empty(MR_BLOCK_CELLS, RxMakeEmptyCell(0));
+        const uint32_t wideSlot = sim::PlaceRootBlock(cpu, 0, 0, 0, empty);
+        sim::PlaceRootBlock(cpu, test::WIDE_OVERFLOW_UNIFORM_X, 0, 0, empty);
+        sim::StoreWideUniform(cpu, wideSlot, value);
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        // --- 毎刻み CPU と比べる ---
+        const sim::ConservedTotals initial = sim::ComputeConservedTotals(cpu, table, 1);
+        const sim::MultiresStepOptions options;
+        sim::MultiresNest read;
+        bool conserved = true;
+        for (uint64_t tick = 0; tick < test::WIDE_OVERFLOW_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                gpu->RecordStep(list, ring.GpuAddress(), test::WIDE_OVERFLOW_SEED, tick, options);
+
+                return true;
+            };
+            if (auto executed = ExecuteTick(queue, ring, *gpu, read, tick, record); !executed)
+                return std::unexpected(executed.error());
+
+            sim::StepNest(cpu, table, test::WIDE_OVERFLOW_SEED, tick, options);
+            if (auto compared = CompareTick(cpu, read, tick); !compared)
+                return std::unexpected(std::format("一様の値の溢れを刻む: {}", compared.error()));
+
+            conserved = conserved && sim::ComputeConservedTotals(cpu, table, 1) == initial;
+        }
+
+        // --- 場面が試したか(反応のある表は頁に広げた・反応の無い表は一様のまま)---
+        const bool expanded = !MrIsUniform(cpu.blocks[wideSlot]);
+        const uint32_t species = sim::LoadWideNestCell(cpu, wideSlot, 0).speciesCount;
+        if (!conserved || cpu.counters[MR_COUNTER_OVERFLOW] != 0 || cpu.counters[MR_COUNTER_LIMIT_PRODUCTS] != 0)
+            return std::unexpected("一様の値の溢れを刻む: 保存が崩れた・成分を捨てた・待たせた");
+
+        if (expanded != reacting || species < test::WIDE_OVERFLOW_SPECIES)
+            return std::unexpected(
+                std::format("一様の値の溢れを刻む: 広げた {}・成分 {}(場面が試していない)", expanded, species));
+
+        Log(Channel::Gpu, Level::Info, "一様の値の溢れを刻む({}): 広げた {}・セル 0 の成分 {}(CPU と GPU で毎刻み同じ)",
+            reacting ? "反応あり" : "反応なし", expanded, species);
+
+        return RunResult{.digest = sim::HashWholeNest(cpu)};
+    }
+
     // 刻み tick の要求: 豊かな子を粗くした後(TestCoarsenFullWide の前半)、細かくし直す・粗くするを交互に
     std::vector<MrRequest> FractionCycleRequestsAt(uint64_t tick) {
         if (tick < test::COARSEN_FULL_TICKS)
@@ -1281,6 +1353,11 @@ namespace {
                                           [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
         const auto uniformRoundTrip = Timed(
             "一様の値の溢れ", [&] { return RunUniformOverflowRoundTrip(device, queue, ring, *wideTable); });
+        const auto uniformSteps = Timed("一様の値の溢れを刻む",
+                                        [&] { return RunUniformOverflowSteps(device, queue, ring, *wideTable, true); });
+        const auto uniformQuiet = Timed("一様の値の溢れ・反応なし", [&] {
+            return RunUniformOverflowSteps(device, queue, ring, *wideTable, false);
+        });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
         if (!exhausted) {
@@ -1288,9 +1365,9 @@ namespace {
             return 1;
         }
 
-        for (const auto* result :
-             {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany, &wideManyConduct,
-              &refineWide, &coarsenWide, &coarsenUnion, &fractionChunks, &uniformRoundTrip}) {
+        for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
+                                   &wideManyConduct, &refineWide, &coarsenWide, &coarsenUnion, &fractionChunks,
+                                   &uniformRoundTrip, &uniformSteps, &uniformQuiet}) {
             if (*result)
                 continue;
 
@@ -1379,13 +1456,19 @@ namespace {
 
         const auto uniformRoundTrip = Timed(
             "一様の値の溢れ", [&] { return RunUniformOverflowRoundTrip(device, queue, ring, *wideTable); });
+        const auto uniformSteps = Timed("一様の値の溢れを刻む",
+                                        [&] { return RunUniformOverflowSteps(device, queue, ring, *wideTable, true); });
+        const auto uniformQuiet = Timed("一様の値の溢れ・反応なし", [&] {
+            return RunUniformOverflowSteps(device, queue, ring, *wideTable, false);
+        });
         const auto coarsenUnion = Timed("GPU で粗くする和集合",
                                         [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
         const auto coarsenWide = Timed("溢れの端数",
                                        [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
         const auto fractionChunks = Timed("端数の枠の塊",
                                           [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
-        for (const auto* result : {&uniformRoundTrip, &coarsenUnion, &coarsenWide, &fractionChunks}) {
+        for (const auto* result :
+             {&uniformRoundTrip, &uniformSteps, &uniformQuiet, &coarsenUnion, &coarsenWide, &fractionChunks}) {
             if (*result)
                 continue;
 
