@@ -95,13 +95,14 @@ namespace bicameral::test {
         return std::format("m{:02}", i);
     }
 
-    inline sim::ReactionTableDefinition MakeWideManyTable() {
+    // species = 物質の数(m01〜)。試験の場面は GPU の 1 セルの上限まで(T-0272。上限 64 なら 1 セル 33 種以上)、計測の場面は 32
+    inline sim::ReactionTableDefinition MakeWideManyTable(uint32_t species = WIDE_MANY_SPECIES) {
         sim::ReactionTableDefinition definition;
         definition.elements = {{.name = "X", .atomicMass = 10000}};
-        for (uint32_t i = 1; i <= WIDE_MANY_SPECIES; ++i)
+        for (uint32_t i = 1; i <= species; ++i)
             definition.species.push_back(LimitsSpecies(WideManyName(i), -700 * static_cast<int64_t>(i)));
 
-        for (uint32_t i = 1; i + WIDE_OVERFLOW_START_SPECIES <= WIDE_MANY_SPECIES; ++i) {
+        for (uint32_t i = 1; i + WIDE_OVERFLOW_START_SPECIES <= species; ++i) {
             definition.rules.push_back(LimitsRule(std::format("wide_many_{}", i), WideManyName(i),
                                                   WideManyName(i + WIDE_OVERFLOW_START_SPECIES), 1, 1));
         }

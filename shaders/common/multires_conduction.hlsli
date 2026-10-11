@@ -128,6 +128,57 @@ FX_FN MrThermal MrCellThermal(Table table, Cell cell) {
     return result;
 }
 
+// 熱の和を 1 成分ずつ足す形(T-0272)。GPU の溢れを使う変種の伝導の段が、溢れを持つセルの熱を上限の無い形のセルを作らずに
+// (インライン → 溢れの順に 1 成分ずつ読んで)求める。和は RxChemicalEnergy・RxHeatCapacity・HcCellConductance と同じ式・同じ順なので、
+// 上限の無い形のセルの MrCellThermal とビット単位で同じ(整数の和なので並びにも依らない)
+struct MrThermalSums {
+    int64_t chemical;       // Σ 物質量 × H0(µJ)
+    uint64_t heatCapacity;  // Σ 物質量 × 比熱(nJ/K)
+    FxU128 weighted;        // Σ 物質量 × 伝導率
+    uint64_t total;         // Σ 物質量
+};
+
+FX_FN MrThermalSums MrMakeThermalSums() {
+    MrThermalSums sums;
+    sums.chemical = 0;
+    sums.heatCapacity = 0;
+    sums.weighted.hi = 0;
+    sums.weighted.lo = 0;
+    sums.total = 0;
+
+    return sums;
+}
+
+template <typename Table>
+FX_FN MrThermalSums MrAddThermalSpecies(Table table, MrThermalSums sums, uint32_t species, uint64_t amount) {
+    // --- 化学のエネルギー・熱容量(RxChemicalEnergy・RxHeatCapacity の 1 項)---
+    const int64_t chemicalTerm = RxMulS64Checked((int64_t)amount, table.Species(species).h0);
+    FX_ASSERT(!FxAddOverflowsS64(sums.chemical, chemicalTerm));
+    sums.chemical += chemicalTerm;
+    sums.heatCapacity += amount * (uint64_t)table.Species(species).heatCapacity;
+
+    // --- 伝導率の重み付きの和(HcCellConductance の 1 項)---
+    const FxU128 term = FxMulU64Full(amount, (uint64_t)table.Species(species).conductivity);
+    const uint64_t low = sums.weighted.lo + term.lo;
+    sums.weighted.hi += term.hi + (low < sums.weighted.lo ? (uint64_t)1 : (uint64_t)0);
+    sums.weighted.lo = low;
+    sums.total += amount;
+
+    return sums;
+}
+
+// 和からセルの熱(MrCellThermal の後半)。energy = セルのエネルギー(mJ)
+FX_FN MrThermal MrThermalFromSums(int64_t energy, MrThermalSums sums) {
+    const RxThermal thermal = RxThermalFromSums(energy, sums.chemical, sums.heatCapacity);
+
+    MrThermal result;
+    result.temperature = thermal.temperature > 0 ? (uint32_t)thermal.temperature : 0;
+    result.conductance = HcConductanceFromSums(sums.weighted, sums.total);
+    result.capacityLimit = (thermal.heatCapacity >> HC_CAPACITY_SHIFT) * HC_LIMIT_PER_CAPACITY;
+
+    return result;
+}
+
 // コンダクタンスの係数を、面がレベル level のセルの面の時の、そのレベルの単位で
 FX_FN uint64_t MrConductanceLimit(uint32_t conductance, int32_t level) {
     return MrScaleByLevel((uint64_t)conductance * HC_LIMIT_PER_CONDUCTANCE, level);

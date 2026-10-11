@@ -320,8 +320,11 @@ namespace bicameral::sim {
             auto wideAllocate = LoadComputePipeline(device, m_rootSignature.Get(),
                                                     "sim/multires_step_wide_allocate.cso");
             auto wideRetry = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_retry.cso");
+            auto wideDeferred = LoadComputePipeline(device, m_rootSignature.Get(),
+                                                    "sim/multires_step_wide_deferred.cso");
             auto wideReserve = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_reserve.cso");
-            for (const auto* loaded : {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideReserve}) {
+            for (const auto* loaded :
+                 {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideDeferred, &wideReserve}) {
                 if (!*loaded)
                     return std::unexpected(loaded->error());
             }
@@ -330,6 +333,7 @@ namespace bicameral::sim {
             m_stepWideExpandedWaitPipeline = std::move(*wideExpanded);
             m_wideAllocatePipeline = std::move(*wideAllocate);
             m_wideRetryPipeline = std::move(*wideRetry);
+            m_wideDeferredPipeline = std::move(*wideDeferred);
             m_treeWideReservePipeline = std::move(*wideReserve);
         }
 
@@ -1092,6 +1096,20 @@ namespace bicameral::sim {
         StampStage(list);
     }
 
+    // 溢れを使う世界の伝導の足す段の後(T-0272): 足す段(512 スレッド)が反応を回した溢れるセルを、1 グループ 64 スレッド = 1 枠の段が
+    // 上限の無い形で刻む(512 スレッドの段に上限の無い形のセルを持たせない。T-0290)。回したセルが無い枠はすぐ抜ける
+    void GpuMultires::RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (!m_wideCells)
+            return;
+
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_wideDeferredPipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
+        UavBarrier(list);
+        StampStage(list);
+    }
+
     void GpuMultires::StampStage(ID3D12GraphicsCommandList10* list) {
         if (!m_stageTimestamps)
             return;
@@ -1130,8 +1148,10 @@ namespace bicameral::sim {
         if (options.implicitConduction)
             RecordImplicitConduction(list, debugRing, options);
 
-        // --- 最後の小刻みの変化を足して反応(溢れの塊が足りなかったブロックは同じ刻みのうちに刻み直す。T-0236)---
+        // --- 最後の小刻みの変化を足して反応(溢れを持つセルの反応は 64 スレッドの段が刻み〔T-0272〕、溢れの塊が足りなかったブロックは
+        //     同じ刻みのうちに刻み直す〔T-0236〕)---
         RecordConductStage(list, debugRing, ConductPassApply);
+        RecordWideDeferred(list, debugRing);
         RecordWideRetry(list, debugRing);
         m_constants.stepFlags = flags;
     }

@@ -268,6 +268,7 @@ namespace bicameral::sim {
         void ReadOverflow(std::span<const uint32_t> words, MultiresNest& nest) const;
         // 刻みの段の後: 塊が足りなかった頁に塊を配り、同じ刻みのうちに刻み直す(T-0236)
         void RecordWideRetry(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
@@ -292,6 +293,7 @@ namespace bicameral::sim {
         // 塊が足りなかった頁に塊を配る・刻み直す(T-0236)
         ComPtr<ID3D12PipelineState> m_wideAllocatePipeline;
         ComPtr<ID3D12PipelineState> m_wideRetryPipeline;
+        ComPtr<ID3D12PipelineState> m_wideDeferredPipeline;
         ComPtr<ID3D12PipelineState> m_treeWideReservePipeline;  // 細かくする子の頁に溢れの塊を付ける(T-0237)
         uint32_t m_wideChunks = 0;                              // 溢れの塊の置き場の塊の数
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;

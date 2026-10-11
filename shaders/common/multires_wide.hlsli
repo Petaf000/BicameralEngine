@@ -9,9 +9,9 @@
 // 刻むブロックは今の面を読み、もう片方の面へ書いてから面を入れ替える(読む前に別のセルの溢れを上書きしないため)。
 // 書く面の塊が足りなければ、印(要求)を付けて刻みの後の段(WideAllocate)が枠の順に塊を配り、WideRetry が同じ刻みのうちに
 // 溢れるセルだけ刻み直す(T-0236。置き場が尽きた時だけ待たせて MR_COUNTER_LIMIT_PRODUCTS に数える)。
-// 1 セルが GPU で持てる成分は RX_GPU_WIDE_SPECIES まで(T-0248 で 24 → 32。表の物質が 32 以下なら CPU の上限の無い世界と食い違わない。
-// 超える生成物は待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。56 以上は HW の compute キューで、32 種のセルを刻んだ後の伝導の段が
-// DEVICE_HUNG〔T-0290・ADR-0052 追記 5〕。上限を無くすのは T-0272)。
+// 1 セルが GPU で持てる成分は RX_GPU_WIDE_SPECIES まで(T-0248 で 24 → 32、T-0272 で 64。表の物質が 64 以下なら CPU の上限の無い世界と
+// 食い違わない。超える生成物は待たせて MR_COUNTER_LIMIT_PRODUCTS に数える。32 を超えると HW の compute キューで伝導の段が止まったのは、
+// 512 スレッドの段が上限の無い形のセルを持っていたため〔T-0290〕で、T-0272 で伝導の段から無くした。表の物質の数まで上げるのは T-0327)。
 #ifndef BICAMERAL_MULTIRES_WIDE_HLSLI
 #define BICAMERAL_MULTIRES_WIDE_HLSLI
 
@@ -19,7 +19,7 @@
 
 MR_NAMESPACE_BEGIN
 
-FX_CONST uint32_t RX_GPU_WIDE_SPECIES = 32;  // GPU の刻みが 1 セルで持てる成分の数(インライン 8 + 溢れ 24)
+FX_CONST uint32_t RX_GPU_WIDE_SPECIES = 64;  // GPU の刻みが 1 セルで持てる成分の数(インライン 8 + 溢れ 56)
 FX_CONST uint32_t MR_WIDE_ENTRY_WORDS = 3;   // 物質 ID・µmol の下位・上位
 // 面の溢れの成分の最大(全部のセルが RX_GPU_WIDE_SPECIES 種)と、面の論理の語の最大
 FX_CONST uint32_t MR_WIDE_SIDE_ENTRIES = MR_BLOCK_CELLS * (RX_GPU_WIDE_SPECIES - RX_MAX_CELL_SPECIES);
@@ -39,10 +39,12 @@ FX_CONST uint32_t MR_WIDE_HEADER_TABLES = MR_WIDE_HEADER_MARKS + MR_WIDE_MARK_WO
 FX_CONST uint32_t MR_WIDE_TABLE_WORDS = 1 + MR_WIDE_SIDE_CHUNKS;
 FX_CONST uint32_t MR_WIDE_HEADER_WORDS = MR_WIDE_HEADER_TABLES + (2 * MR_WIDE_TABLE_WORDS);
 
-// 要求の語: 0 = 無し。ビット 0〜7 = 書く面に要る塊の数、8 = 書く面、9 = 刻み直す(足りなかった)、10 = 配れた
+// 要求の語: 0 = 無し。ビット 0〜7 = 書く面に要る塊の数、8 = 書く面、9 = 刻み直す(足りなかった)、10 = 配れた、
+// 11 = 伝導の段が印のセルの反応を後の段(WideDeferredPass)に回した(T-0272。塊の数・面は持たない。WideDeferredPass が消してから ② で書き直す)
 FX_CONST uint32_t MR_WIDE_REQUEST_PRESENT = 1u << 31;
 FX_CONST uint32_t MR_WIDE_REQUEST_RETRY = 1u << 9;
 FX_CONST uint32_t MR_WIDE_REQUEST_GRANTED = 1u << 10;
+FX_CONST uint32_t MR_WIDE_REQUEST_DEFERRED = 1u << 11;
 
 FX_FN uint32_t MrWideMakeRequest(uint32_t side, uint32_t chunks, bool retry) {
     return MR_WIDE_REQUEST_PRESENT | (retry ? MR_WIDE_REQUEST_RETRY : 0u) | (side << 8) | chunks;

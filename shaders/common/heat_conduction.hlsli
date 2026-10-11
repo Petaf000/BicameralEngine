@@ -40,6 +40,18 @@ struct HcThermalCache {
     uint64_t faceLimit;    // min(G の係数, C の上限の係数)。面の係数 = min(両側の faceLimit)
 };
 
+// 伝導率 × 物質量の和(weighted)と物質量の和(total)からコンダクタンス(mW/K)。HcCellConductance の後半
+// (溢れを 1 成分ずつ読んで足す GPU の変種も使う。T-0272)
+FX_FN uint32_t HcConductanceFromSums(FxU128 weighted, uint64_t total) {
+    if (total == 0)
+        return 0;
+
+    const uint64_t conductivity = FxDivU128By64(weighted, total).quotient;
+    const uint64_t conductance = conductivity >> HC_CONDUCTANCE_SHIFT;
+
+    return conductance < HC_UINT32_MAX ? (uint32_t)conductance : (uint32_t)HC_UINT32_MAX;
+}
+
 // セルのコンダクタンス(mW/K)。伝導率を物質量で重み付けた平均(割り算 1 回。成分が変わった刻みだけ)
 // セルの形 Cell のテンプレート(RxCell・C++ の RxWideCell。T-0187)
 template <typename Table, typename Cell>
@@ -56,13 +68,7 @@ FX_FN uint32_t HcCellConductance(Table table, Cell cell) {
         total += cell.amounts[i];
     }
 
-    if (total == 0)
-        return 0;
-
-    const uint64_t conductivity = FxDivU128By64(weighted, total).quotient;
-    const uint64_t conductance = conductivity >> HC_CONDUCTANCE_SHIFT;
-
-    return conductance < HC_UINT32_MAX ? (uint32_t)conductance : (uint32_t)HC_UINT32_MAX;
+    return HcConductanceFromSums(weighted, total);
 }
 
 FX_FN uint64_t HcFaceLimit(uint32_t conductance, uint64_t heatCapacity) {
