@@ -48,7 +48,10 @@
   核に触るチケット(wt3 の T-0359 など)が合わさった後も、同じ型で「既定の世界は変わらない」を確かめられる。
 - マクロの決まり: 核(reaction.hlsli)と multires_wide_step.hlsli の形に依らない道具は成分をマクロだけで触る。RX_SET_ENTRY は既定で 2 文に
   なるので {} の中だけで使う。作業場の形の読み書きは multires_wide_step.hlsli の特殊化(RX_CELL_ACCESSORS が無いと #error)。
-- 作業役 2 の最後の確かめ: 下の「最後の確かめ」を見る。
+- 作業役 2 の最後の確かめ(マクロにした後・release): HW の compute キューで `--repeat-wide many,many-conduct,limits,limits-conduct 3` が通った
+  (160 種の表で 1 セル 98 種・頁の溢れ 40453 成分・待たせた 0・毎刻み CPU とビット一致。GPU の順番待ち約 25 分)。WARP と ctest 全体は
+  マクロにした後に流していない(時間の約束のため。C++ はマクロが main と同じ配列の式に展開するので main と同じ。WARP の gpu_multires_warp は
+  main でも「端数の枠の塊」で落ちる = T-0385)。T-0380 の初めに `job.py test` を流す。
 - (以下は T-0327 からの申し送り。結果は T-0362 の計測を見る)--measure-wide の「大きい形のセル」(64 種の表・根 64 に 1 セル 33〜64 種が一面)は HW で測る途中に DEVICE_HUNG(T-0327。原因は未確認)。
   まず --diagnose-wide の段ごとのタイムスタンプで 1 刻みの時間と段を見て、TDR か本当の止まりかを分ける。
 
