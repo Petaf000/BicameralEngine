@@ -391,7 +391,8 @@ bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 
 bicameral_add_gpu_test(gpu_probe_blank_test)
 target_link_libraries(gpu_probe_blank_test PRIVATE bicameral_sim bicameral_reaction_script)
 add_dependencies(gpu_probe_blank_test bicameral_data)
-bicameral_add_gpu_test_case(gpu_probe_blank gpu_probe_blank_test gpu)
+# HW は gpu_probe_sim と同じく GBV を切る(--no-gbv): GBV ありでは 15 分以上返らなかった(計装が遅いだけ。--no-gbv は 27 秒で通る)
+bicameral_add_gpu_test_case(gpu_probe_blank gpu_probe_blank_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_blank_warp gpu_probe_blank_test warp --warp)
 
 # 伝導の Work Graph の時間を伝播の規模ごとに測る(T-0005。ctest には登録しない。docs/perf.md)。
@@ -428,7 +429,7 @@ set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRE
 # ブランクの世界(既定。T-0371・D-455): セルは全部空・積み木なし・表は空。窓とエディタが起動し、記録 → 別の起動の再生で
 # ハッシュ列が一致する(再生ファイルが世界の種類を持つ。何も起きないので全部の刻みが同じハッシュ)
 set(WINDOW_BLANK_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_blank.bcreplay)
-add_test(NAME window_blank_record COMMAND bicameral --world blank --editor --frames 120 --record ${WINDOW_BLANK_FILE})
+add_test(NAME window_blank_record COMMAND bicameral --editor --frames 120 --record ${WINDOW_BLANK_FILE})
 add_test(NAME window_blank_play COMMAND bicameral --replay ${WINDOW_BLANK_FILE} --target-fps 30)
 set_tests_properties(window_blank_record PROPERTIES LABELS gpu FIXTURES_SETUP window_blank TIMEOUT 600
   PASS_REGULAR_EXPRESSION "世界: ブランクの世界")
@@ -437,6 +438,9 @@ set_tests_properties(window_blank_play PROPERTIES LABELS gpu FIXTURES_REQUIRED w
 # 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
 add_test(NAME window_lab COMMAND bicameral --world sample --editor --auto-lab --frames 20)
 set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
+# ブランクの世界の実験室(T-0371): 材料の無い表なので空のセルの箱を作って 60 刻み、GPU と CPU が一致・空のまま・再生しても同じ
+add_test(NAME window_lab_blank COMMAND bicameral --editor --auto-lab --frames 20)
+set_tests_properties(window_lab_blank PROPERTIES LABELS gpu TIMEOUT 900)
 add_test(NAME window_lab_compare COMMAND bicameral --world sample --editor --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
 set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 世界に物を置く筆(T-0222): パネルの筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずのものが全部 GPU で

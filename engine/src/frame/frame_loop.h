@@ -109,8 +109,7 @@ namespace bicameral::frame {
         // --- 世界のデータ(T-0157・ADR-0033)---
         // どの世界で起動するか(--world。T-0371): 既定はブランクの世界(D-455。セルは全部空・積み木なし・表は --packages が無ければ空)。
         // サンプルの世界(D-456)は空気の中の木箱と積み木と試験の表(combustion_test)。--replay のときは再生ファイルの世界にする
-        // 仮(T-0371 の続き): GPU のブランクの世界の刻みが止まる疑い(gpu_probe_blank が返らない)を直すまで、既定はサンプルの世界のまま
-        save::ReplayWorld world = save::ReplayWorld::Sample;
+        save::ReplayWorld world = save::ReplayWorld::Blank;
         // 反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。--packages)。サンプルの世界は空なら exe の横の data/packages
         // (ゲーム本体 = combustion_test)。ブランクの世界は空なら何も読まない(空の表)、渡せばゲーム本体なしで全部を読む
         fs::path packageRoot;

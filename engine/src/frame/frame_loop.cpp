@@ -455,10 +455,11 @@ namespace bicameral::frame {
         }
 
         // デバイスの検証の設定。物理のシェーダーは GPU-based validation の計装が最初の実行で数分かかる(debug。gpu_physics_test と同じ)ので、
-        // 物理を入れるときは切る(debug layer は残す。T-0098)
+        // 物理を入れるときは切る(debug layer は残す。T-0098)。ブランクの世界(積み木なし)も --physics の旗で決める
+        // (積み木の有無で決めると、ブランクの窓は GBV の計装で最初のフレームが 5 分を超えた。T-0371)
         gpu::DeviceOptions LoopDeviceOptions(const FrameLoopOptions& options) {
             gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
-            if (HasStackScene(options) && deviceOptions.gpuBasedValidation) {
+            if (options.physics && deviceOptions.gpuBasedValidation) {
                 deviceOptions.gpuBasedValidation = false;
                 Log(Channel::Gpu, Level::Info, "物理を入れるので GPU-based validation を切る(--no-physics なら有効)");
             }

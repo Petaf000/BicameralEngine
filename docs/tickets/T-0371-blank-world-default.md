@@ -12,12 +12,13 @@
 「サンプルの世界」として名前を付けて選ぶ形にし、試験はどちらの世界を使うかを明示する。
 
 ## 完了条件(チェックできる形で)
-- [ ] 起動の既定がブランク(`--world blank`。表は空〔物質 0・規則 0〕・セルは全部空・積み木なし)。今の世界は `--world sample`
-  (`--world` は入った。**既定は仮で sample のまま**: 下の GPU の止まりを直したら frame_loop.h の既定を Blank に・main.cpp の説明を直す)
+- [x] 起動の既定がブランク(`--world blank`。表は空〔物質 0・規則 0〕・セルは全部空・積み木なし)。今の世界は `--world sample`
+  (2026-10-12 その 2: frame_loop.h の既定を Blank に・main.cpp の説明を直した)
 - [x] ブランクの表のベイク・版・中身からの作り直し(再生)が壊れない(CPU の試験 blank_world。通った)
 - [x] ブランクの世界は何刻み進めても何も変わらない(CPU リファレンス。空の表・試験の表とも 4 刻み、ハッシュとエネルギーが刻み 0 のまま)
-- [ ] ブランクの世界の GPU の刻みが CPU とハッシュ一致(gpu_probe_blank。**返らなかった**: 下の「続き」)
-- [ ] 窓: ブランクで起動・エディタ付きで起動・記録 → 再生でハッシュ列一致(window_blank_record/play を足した。未実行)
+- [x] ブランクの世界の GPU の刻みが CPU とハッシュ一致(gpu_probe_blank。止まりは GBV の計装が遅いだけだった: --no-gbv の HW 27 秒・
+  WARP 35 秒で通る。ctest の HW も gpu_probe_sim と同じく --no-gbv にした)
+- [x] 窓: ブランクで起動・エディタ付きで起動・記録 → 再生でハッシュ列一致(window_blank_record/play。debug で通過。実験室の空の箱は window_lab_blank)
 - [ ] 今の窓の試験はサンプルの世界を明示(`--world sample`)して読み、結果(ハッシュ・画像)が変わらない(明示した。未実行)
 - [x] サンプルの世界の中身のうち 1〜2 個をパッケージへ → 時間切れで T-0398〜T-0400 へ分けた
 
@@ -45,18 +46,21 @@
 - 再生ファイルの「世界の種類」(save::ReplayWorld)に Blank を足す。形式の版は変えない(ヘッダの world の欄は既にある)。
 
 ## 続き(次の作業役へ)
-- **gpu_probe_blank(gpu。GBV あり)が返らない**: 15:26 に GPU を取って 15 分以上 `Start 108: gpu_probe_blank` のまま(ctest の TIMEOUT 300 でも
-  切れず、ランナーの --timeout 900 で切れた)。疑い: (1) 空の表(規則 0・物質は 0 番だけ)か、物の無いセル(熱容量 0)で GPU の刻みの
-  どこかのループが終わらない(CPU リファレンスは同じ 4 刻みが 9 秒で通った)、(2) GBV の計装が遅いだけ(gpu_probe_sim は --no-gbv で
-  回している)。まず `job.py run -Exe gpu_probe_blank_test -- --no-gbv`(と --warp)を短い --timeout で流し、空の表と試験の表のどちらで
-  止まるかをログ(「作れない」・各表の行)で分ける。止まるなら、表の数 0 の時の Work Graph の入力・活性の一覧・熱の割り算(熱容量 0)を見る。
-  **main の T-0397(HW の Work Graph が最初の刻みで DEVICE_HUNG。t-0359 の後)と同じ原因かもしれない**(この枝は t-0359 の入った main から
-  始めた)。T-0397 が直った main で、サンプルの世界の gpu_probe_sim(HW)が通るかと並べて確かめる。
-- 直ったら: frame_loop.h の `world` の既定を Blank に(main.cpp の --world の説明も)・window_blank_record の `--world blank` は外してよい・
-  窓の試験(window_* と image の probe_volume・probe_slice)を流して結果が変わらないことを確かめる。
-- 実験室の箱は表に空気が無ければ空のセルで満たすようにした(lab_box.cpp)が、ブランクの世界のエディタで箱を作る所は試していない。
+- **gpu_probe_blank の止まり(解決)**: GBV の計装が遅いだけだった。`run -Exe gpu_probe_blank_test -- --no-gbv` は HW 27 秒・`--warp` 35 秒で
+  空の表・試験の表とも CPU とハッシュ一致・刻み 0 のまま。ctest の HW は gpu_probe_sim と同じく `--no-gbv` に(debug 39 秒)。T-0397 とは別の件。
+- **窓の GBV**: 前の巡目で GBV を切る条件を「積み木がある(HasStackScene)」にしていたので、ブランクの窓は GBV ありで最初のフレームが
+  330 秒かかり、window_blank_play が TIMEOUT 240 で落ちた。条件を元の `options.physics` に戻した(サンプルの窓は前から GBV なし)。
+- 既定を Blank に。window_blank_record は `--world` を外して既定を確かめる。ブランクの実験室: `--auto-lab` は材料が 1 つも無い表なら
+  空の箱を 60 刻み流して GPU と CPU の一致・隅のセルが空のまま・記録から別の箱で再生しても同じ、を確かめる(window_lab_blank を足した)。
+- 残り: --world sample を付けた今の窓の試験(window_*)・画像の試験(image_*)の流し直し(release でよい。サンプルの窓は前から GBV なしで、
+  --world sample を明示しただけなので変わらない見込み)。通ったら完了条件の残り 2 つに印を付けて Done。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-12(wt2): `--world blank|sample`・空の表(LoadBlankReactionTable)・空の世界(MakeBlankProbeWorld)・再生ファイルの世界の種類(Blank = 2)・
   空の表の GPU のバッファ(0 の要素 1 つ)・実験室の空のセル。試験 blank_world(CPU。通った)・gpu_probe_blank(返らない)・window_blank を足し、
   今の窓の試験に --world sample を明示。GPU の止まりのため既定は仮で sample。ADR-0151 追記 1・13 §2.6。残りは T-0398〜T-0400。
+- 2026-10-12 その 2(wt2): gpu_probe_blank の止まりは GBV の遅さ(--no-gbv で HW 27 秒・WARP 35 秒で通る。ctest の HW を --no-gbv に)。
+  既定の世界を Blank に・main.cpp の説明を直した。窓の GBV を切る条件を `options.physics` に戻した(ブランクの窓は最初のフレームが 330 秒だった)。
+  `--auto-lab` に材料の無い表の空の箱の確かめ(RunAutoEmptyBox)と window_lab_blank を足した。debug: blank_world・gpu_probe_blank(_warp)・
+  window_blank_record・window_lab_blank は通過(GBV あり)、window_blank_play は GBV ありで TIMEOUT 240 → 条件を戻して流し直し、window_blank_record 60 秒・window_blank_play 59 秒・
+  window_lab_blank 78 秒で通過。**--world sample の窓の試験・画像の試験は時間切れで未実行**(GPU の順番待ちで 31 分待った)。
