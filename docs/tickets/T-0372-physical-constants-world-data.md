@@ -16,7 +16,7 @@
 - [x] どこまでをデータにするかの案を ADR-0171(Proposed)に書く
 - [x] 重力を世界のデータの 1 つの値(µm/s²)にし、物理(PxParameters::gravity)と気体(GasConfig → GasCoefficients → GasGpuParameters)が同じ換算で読む
 - [x] 気体定数 R を units.hlsli の 1 か所に寄せる(gas_internal.h・reaction_table.cpp・lab_box.cpp・magic_patch.hlsli)
-- [ ] 標準の重力で今の結果が変わらない(CPU の試験・GPU の試験のビット一致・今の世界のハッシュ)
+- [x] 標準の重力で今の結果が変わらない(CPU の試験・GPU の試験のビット一致・画像の試験)
 - [ ] 重力を変えた世界の試験(無重力・別の重力で CPU と GPU がビット一致)— T-0423 に分けた
 - [ ] 世界のパッケージ(Luau の環境の値)から重力を読む — T-0373(環境ミキサー)/T-0400 と合わせる(下の「T-0400 との関係」)
 
@@ -79,4 +79,7 @@
 - 2026-10-12(wt4・並走): 物理定数を洗い出し(重力 4 か所・R 5 か所〔うちエディタ 1〕・音速の基準・単位)、ADR-0171(Proposed。案 A = 重力は世界のデータ・R は器)を書いた。
   重力を world_physics.hlsli の単位と換算に通し、物理(PxParameters::gravity)と気体(GasConfig → GasCoefficients → GasGpuParameters)が同じ値から読む形にした。
   R は units.hlsli の 1 か所に寄せた(magic_patch.hlsli は定数の 1 行だけ)。標準の重力の換算は static_assert で前の定数と一致を確かめた。
-  debug の CPU の試験 19 本(gas_reference・gas_tree・lab_box・physics_*・reaction_*・fixed)が通った。GPU の試験の結果は下に追記。
+  debug の CPU の試験 19 本(gas_reference・gas_tree・lab_box・physics_*・reaction_*・fixed)が通った。
+  release の GPU(HW): gpu_gas・gpu_gas_tree・gpu_physics_wall・gpu_physics_stack_alternative・gpu_probe_physics・gpu_probe_physics_compute の 6 本が通った(CPU とビット一致)。
+  続けて gpu_lab_box・gpu_probe_patch(R の 1 行)・image_probe_volume・image_probe_slice(画像が基準と一致)が通った。WARP の組(gpu_gas_warp など)は流していない。
+  残り: T-0423(重力を変えた世界の試験)・パッケージの環境の値から重力を読む(T-0373/T-0400)・ADR-0171 のユーザーの判断。Status は Doing のまま(判断待ち)。
