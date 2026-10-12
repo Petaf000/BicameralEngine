@@ -180,10 +180,13 @@ namespace bicameral::sim {
     // --- 物質の一覧が変わる表への差し替え(T-0242・ADR-0065)---
 
     // CPU リファレンス: 箱の全部のセル(MultiresNest::cells。一様の値と頁。空のセルは空のまま)を remap(今の表 → next)で付け替える。
-    // shaders/sim/lab_box.hlsl の RemapLabSpecies と同じ。箱は 1 レベルなので端数の枠と帳簿は使っていない(付け替えない)
-    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next);
+    // shaders/sim/lab_box.hlsl の RemapLabSpecies と同じ。箱は 1 レベルなので端数の枠と帳簿は使っていない(付け替えない)。
+    // 魔法のパッチの列の転換の替える先も付け替える(T-0377。tick = 表を差し替える刻み。効かなくなった転換の数は報告に)
+    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next,
+                                   uint64_t tick);
 
-    // まだ刻んでいない置く操作(FILL・FILL_REGION)の材料の物質 ID を付け替える(消えた物質の材料は落とす。ほかの種類はそのまま)
+    // まだ刻んでいない置く操作(FILL・FILL_REGION)の材料の物質 ID を付け替える(消えた物質の材料は落とす)。
+    // 魔法のパッチのコマンドは転換の替える先を付け替える(消えた物質なら当てる時に断られる。T-0377)。ほかの種類はそのまま
     [[nodiscard]] Command RemapLabCommand(const Command& command, const SpeciesRemap& remap);
 
     // --- 一部を細かくする(T-0314・ADR-0137)---

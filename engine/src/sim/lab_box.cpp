@@ -474,7 +474,8 @@ namespace bicameral::sim {
 
     // --- 物質の付け替え(T-0242)---
 
-    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next) {
+    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next,
+                                   uint64_t tick) {
         SpeciesRemapReport report;
         if (remap.identity)
             return report;
@@ -482,13 +483,27 @@ namespace bicameral::sim {
         for (RxCell& cell : nest.cells)
             report.Add(RemapReactionCell(remap, next, cell));
 
+        // 魔法の転換の替える先も新しい ID に(消えた物質への転換は効かなくなる。GPU はスレッド 0 が同じ関数。T-0377)
+        report.conversionsDisabled = RemapPatchList(remap, nest.magicPatches, tick);
+
         return report;
     }
 
     Command RemapLabCommand(const Command& command, const SpeciesRemap& remap) {
+        if (remap.identity)
+            return command;
+
+        // --- 魔法のパッチ: 転換の替える先を新しい ID に(消えた物質なら 0 = 当てる時に断られる。T-0377)---
+        if (command.type == lab::LAB_COMMAND_TYPE_PATCH) {
+            Command remapped = command;
+            remapped.payload[MP_COMMAND_EFFECT] = RemapPatchEffect(remap, command.payload[MP_COMMAND_EFFECT]);
+
+            return remapped;
+        }
+
         const bool fills = command.type == lab::LAB_COMMAND_TYPE_FILL ||
                            command.type == lab::LAB_COMMAND_TYPE_FILL_REGION;
-        if (!fills || remap.identity)
+        if (!fills)
             return command;
 
         // --- 材料を読み直して、残る物質だけ新しい ID で書き直す(残る物質どうしの順は変わらない)---

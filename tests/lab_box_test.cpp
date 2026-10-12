@@ -1281,6 +1281,76 @@ namespace {
         std::printf("lab_box_test: 転換 40 刻みで異性体(仮)%llu µmol\n", static_cast<unsigned long long>(isomerAmount));
         EXPECT(isomerAmount > 0);
     }
+
+    // 物質を足す・消す表の差し替えを跨ぐ転換(T-0377): 列の転換の替える先が新しい表の ID になる(ずれた ID を追う)・
+    // 替える先が消えた転換は 0(効かない)になり数える・終わったパッチは数えない・ほかの効き方はそのまま・
+    // まだ当てていないパッチのコマンドも付け替える(消えた物質への転換は 0 = 当てる時に断られる)
+    void TestMagicConvertRemap() {
+        using namespace bicameral::reaction;
+        const auto before = BakeReactionTable(MakeConversionRemapBeforeTestTable());
+        const auto after = BakeReactionTable(MakeConversionRemapAfterTestTable());
+        EXPECT(before.has_value() && after.has_value());
+        if (!before || !after)
+            return;
+
+        const auto remap = BuildSpeciesRemap(*before, *after);
+        EXPECT(remap.has_value() && !remap->identity);
+        if (!remap)
+            return;
+
+        const uint32_t isomerBefore = before->SpeciesId("carbon_dioxide_isomer_test");
+        const uint32_t isomerAfter = after->SpeciesId("carbon_dioxide_isomer_test");
+        const uint32_t late = before->SpeciesId("carbon_dioxide_late_test");
+        EXPECT(isomerBefore != isomerAfter && after->SpeciesId("carbon_dioxide") == isomerBefore);
+
+        // --- 列: 異性体への転換・消える物質への転換・止める・終わった(この刻みに除かれる)消える物質への転換 ---
+        constexpr uint64_t SWAP_TICK = 10;
+        std::vector<uint32_t> words(MP_LIST_WORDS, 0);
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        const List list{.words = words};
+        const std::array<uint32_t, 4> effects = {MpMakeConvertEffect(1, isomerBefore), MpMakeConvertEffect(0, late),
+                                                 MpMakeStopEffect(), MpMakeConvertEffect(2, late)};
+        for (uint32_t i = 0; i < effects.size(); ++i) {
+            const MpPatch patch = {.ruleKey = 0xABC0u + i,
+                                   .effect = effects[i],
+                                   .startTick = 0,
+                                   .endTick = i == 3 ? SWAP_TICK : SWAP_TICK + 20};
+            MpStorePatch(list, i, patch);
+        }
+
+        words[0] = static_cast<uint32_t>(effects.size());
+        const std::vector<uint32_t> untouched = words;
+        const uint32_t disabled = RemapPatchList(*remap, words, SWAP_TICK);
+        const auto effectOf = [&](uint32_t index) {
+            return MpLoadPatch(list, index).effect;
+        };
+        EXPECT(disabled == 1);
+        EXPECT(effectOf(0) == MpMakeConvertEffect(1, isomerAfter) && effectOf(1) == MpMakeConvertEffect(0, 0) &&
+               effectOf(2) == MpMakeStopEffect() && effectOf(3) == MpMakeConvertEffect(2, 0));
+        EXPECT(MpLoadPatch(list, 1).ruleKey == 0xABC1u && words[0] == effects.size());
+
+        // 物質の一覧が同じ表なら何も変えない
+        std::vector<uint32_t> same = untouched;
+        const auto identity = BuildSpeciesRemap(*before, *before);
+        EXPECT(identity.has_value() && RemapPatchList(*identity, same, SWAP_TICK) == 0 && same == untouched);
+
+        // 消えた転換は効かない(替える先 0 は釣り合いの判定で断る)・足す時も断る
+        const RxRule combustion = after->rules[RuleIdOf(*after, "cellulose_combustion")];
+        EXPECT(MpConvertedCoefficient(after->View(), combustion, 0, 0) == 0 && !MpEffectValid(effectOf(1)));
+
+        // --- まだ当てていないパッチのコマンド ---
+        const LabCellRange range = {.low = {.x = 0, .y = 0, .z = 0}, .high = {.x = 1, .y = 1, .z = 1}};
+        const Command toIsomer = MakeLabPatchCommand(SWAP_TICK, 0, combustion.key, effects[0], 5, range);
+        const Command toLate = MakeLabPatchCommand(SWAP_TICK, 1, combustion.key, effects[1], 5, range);
+        const Command stop = MakeLabPatchCommand(SWAP_TICK, 2, combustion.key, effects[2], 5, range);
+        EXPECT(RemapLabCommand(toIsomer, *remap).payload[MP_COMMAND_EFFECT] == MpMakeConvertEffect(1, isomerAfter));
+        EXPECT(RemapLabCommand(toLate, *remap).payload[MP_COMMAND_EFFECT] == MpMakeConvertEffect(0, 0));
+        EXPECT(RemapLabCommand(stop, *remap) == stop && RemapLabCommand(toLate, *identity) == toLate);
+    }
 }  // namespace
 
 int main() {
@@ -1304,6 +1374,7 @@ int main() {
     TestMagicPatch(*table);
     TestMagicCatalyst(*table);
     TestMagicConvert();
+    TestMagicConvertRemap();
     TestRefinedBox(*table, materials);
     TestRefinedGauge(*table, materials);
     TestRefinedHeatSpeed(*table, materials);

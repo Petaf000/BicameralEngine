@@ -100,6 +100,8 @@ struct ProbeSpeciesRemap {
 
     uint32_t UnitOffset() { return PartOffset() + partCount * 8; }
 
+    uint32_t SpeciesCount() { return speciesCount; }
+
     uint32_t NewId(uint32_t oldId) { return speciesRemap.Load(NewIdOffset() + oldId * 4); }
 
     uint32_t PartBegin(uint32_t oldId) { return speciesRemap.Load(PartBeginOffset() + oldId * 4); }

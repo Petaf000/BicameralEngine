@@ -93,4 +93,26 @@ namespace bicameral::sim {
         return definition;
     }
 
+    ReactionTableDefinition MakeConversionRemapBeforeTestTable() {
+        ReactionTableDefinition definition = MakeConversionTestTable();
+        definition.species.push_back({.name = "carbon_dioxide_late_test",
+                                      .composition = {{.element = "C", .count = 1}, {.element = "O", .count = 2}},
+                                      .formationEnthalpy = -350000,
+                                      .heatCapacity = 37135,
+                                      .thermalConductivity = 17 * 5000});
+
+        return definition;
+    }
+
+    ReactionTableDefinition MakeConversionRemapAfterTestTable() {
+        ReactionTableDefinition definition = MakeConversionTestTable();
+        definition.species.push_back({.name = "a_marker_test",
+                                      .composition = {{.element = "C", .count = 1}, {.element = "O", .count = 1}},
+                                      .formationEnthalpy = 100000,
+                                      .heatCapacity = 29142,
+                                      .thermalConductivity = 17 * 5000});
+
+        return definition;
+    }
+
 }  // namespace bicameral::sim

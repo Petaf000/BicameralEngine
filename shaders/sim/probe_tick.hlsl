@@ -433,11 +433,15 @@ void SortEventKeys(uint32_t thread) {
 
 // --- [0] の前(物質の一覧が変わる表に差し替えた刻みだけ。T-0223・ADR-0065): 2 世代のセルの物質を名前で付け替える ---
 // CPU が新しい表と付け替えの表(t5)を写してから、適用の単位の前に流す(コマンドの適用も新しい ID で)。1 スレッド = 1 セル。
-// 本体は CPU リファレンス(sim::ProbeReference の RemapSpecies)と同じ RxRemapCell
+// 本体は CPU リファレンス(sim::ProbeReference の RemapSpecies)と同じ RxRemapCell。スレッド 0 は魔法のパッチの列(u14)の
+// 転換の替える先も付け替える(MpRemapPatchList。単位の定数の刻み = 差し替える刻み。T-0377)
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RemapSpecies(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t index = dispatchThreadId.x;
     if (index >= 2 * PROBE_CELL_COUNT)
         return;
+
+    if (index == 0)
+        MpRemapPatchList(PatchList(), SpeciesRemap(), CurrentTick());
 
     cells[index] = RxRemapCell(SpeciesRemap(), ReactionTable(), cells[index]).cell;
 }

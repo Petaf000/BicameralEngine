@@ -13,7 +13,8 @@
 // 付け替えの表の読み方は呼ぶ側が Remap 型で渡す(C++ は配列の span、HLSL はバッファを読む構造体)。Remap に要るメソッド:
 //   uint32_t NewId(uint32_t oldId)(0 = 消えた)/ uint32_t PartBegin(uint32_t oldId)(PartBegin(oldId + 1) までが分けた先)/
 //   RxRemapPart Part(uint32_t index) / int64_t RemovedH0(uint32_t oldId)(今の表の h0)/
-//   uint32_t UnitCount() / RxRemapUnit Unit(uint32_t index)(使う単体。新しい表の ID の昇順)
+//   uint32_t UnitCount() / RxRemapUnit Unit(uint32_t index)(使う単体。新しい表の ID の昇順)/
+//   uint32_t SpeciesCount()(今の表の物質の数。0 番を含む。範囲の外の ID を読まないため。魔法のパッチの付け替え MpRemapPatchList。T-0377)
 // 新しい表は Table 型(reaction.hlsli と同じ。h0 を読む)。
 //
 // GPU のバッファの形(ByteAddressBuffer。sim::PackSpeciesRemap が作る。h0 は 8 バイト境界):
