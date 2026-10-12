@@ -202,9 +202,9 @@ namespace bicameral::sim {
         for (const GasCell& layer : box.ghost)
             ghost.push_back(ToGasGpuCell(layer));
 
-        m_srvs = {CreateUploadBuffer(device, std::span<const GasGpuParameters>(parameters)),
-                  CreateUploadBuffer(device, std::span<const GasGpuDerived>(referenceDerived)),
-                  CreateUploadBuffer(device, std::span<const GasGpuCell>(ghost))};
+        m_srvs = {gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuParameters>(parameters))),
+                  gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuDerived>(referenceDerived))),
+                  gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuCell>(ghost)))};
 
         // --- 初めの箱 ---
         std::vector<GasGpuCell> cells;
@@ -219,8 +219,8 @@ namespace bicameral::sim {
         m_ledgerReadback = gpu::CreateBuffer(device, GAS_GPU_LEDGER_BYTES, gpu::BufferKind::Readback);
         m_faceReadback = gpu::CreateBuffer(device, uavBytes[3], gpu::BufferKind::Readback);
         m_sumReadback = gpu::CreateBuffer(device, uavBytes[4], gpu::BufferKind::Readback);
-        if (!m_srvs[0] || !m_srvs[1] || !m_srvs[2] || !m_cellUpload || !m_ledgerUpload || !m_cellReadback ||
-            !m_ledgerReadback || !m_faceReadback || !m_sumReadback)
+        if (!std::ranges::all_of(m_srvs, &gpu::ResidentBuffer::Valid) || !m_cellUpload || !m_ledgerUpload ||
+            !m_cellReadback || !m_ledgerReadback || !m_faceReadback || !m_sumReadback)
             return std::unexpected("気体のアップロード・読み戻しのバッファを作れない");
 
         return {};
@@ -234,6 +234,7 @@ namespace bicameral::sim {
             gpu::Transition(m_uavs[0].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             gpu::Transition(m_uavs[5].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
         list->ResourceBarrier((uint32_t)toUav.size(), toUav.data());
+        gpu::RecordResidentUploads(list, m_srvs);
     }
 
     // 1 つの段を投げ、全部の UAV の書き込みを次の段より前に終わらせる
@@ -248,7 +249,7 @@ namespace bicameral::sim {
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &constants, 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
         for (uint32_t i = 0; i < m_srvs.size(); ++i)
-            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_srvs[i]->GetGPUVirtualAddress());
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_srvs[i].buffer->GetGPUVirtualAddress());
 
         const uint64_t threads = FACE_PASS[(size_t)pass] ? (uint64_t)m_cellCount * GAS_GPU_FACES_PER_CELL : m_cellCount;
         list->Dispatch(GroupsFor(threads), 1, 1);

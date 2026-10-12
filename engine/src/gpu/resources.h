@@ -67,4 +67,25 @@ namespace bicameral::gpu {
     // UAV で書いたバッファを読み戻しのバッファへ写すコマンドを記録する(UAV → COPY_SOURCE の遷移つき)
     void RecordCopyToReadback(ID3D12GraphicsCommandList* list, ID3D12Resource* source, ID3D12Resource* readback);
 
+    // --- シェーダーが毎段読む変わらない表(T-0410)---
+    // アップロードのヒープは CPU のメモリで、シェーダーが直接読むと毎回 PCIe 越しになる(L2 に収まらない大きさや、追い出される負荷で、
+    // セルの数に対して超線形に遅くなる。T-0374 で 32³ が約 30 倍)。変わらない表は既定のヒープの写しを読む。
+    // 毎フレーム CPU が書く小さな定数(フレームの定数・トレースの絞り込み・覗き窓の入力)はアップロードのヒープのままでよい。
+    struct ResidentBuffer {
+        ComPtr<ID3D12Resource> buffer;  // 既定のヒープ(シェーダーが読む。COMMON で作る)
+        ComPtr<ID3D12Resource> upload;  // 写しの元(写すリストが GPU で終わるまで持つ)
+
+        [[nodiscard]] bool Valid() const { return buffer && upload; }
+    };
+
+    // bytes で埋めたアップロードのバッファを作る(作れなければ nullptr)
+    [[nodiscard]] ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, std::span<const std::byte> bytes);
+
+    // bytes を持つ表の写しの組を作る。中身が既定のヒープへ入るのは RecordResidentUploads を記録したリストが走った後
+    [[nodiscard]] ResidentBuffer CreateResidentBuffer(ID3D12Device* device, std::span<const std::byte> bytes);
+
+    // 写しを記録し、シェーダーが読める状態(NON_PIXEL_SHADER_RESOURCE)にする。表は COMMON にある前提
+    //(作った直後か、前のリストの終わりで COMMON に戻った後。同じリストで読んだ後に写し直さない)
+    void RecordResidentUploads(ID3D12GraphicsCommandList* list, std::span<const ResidentBuffer> buffers);
+
 }  // namespace bicameral::gpu
