@@ -30,10 +30,10 @@ namespace bicameral::sim {
             static std::vector<SpareQueue> spares;
             return spares;
         }
-    }
+    }  // namespace
 
     std::expected<PooledImmediateQueue, std::string> PooledImmediateQueue::Take(ID3D12Device5* device,
-                                                                               D3D12_COMMAND_LIST_TYPE type) {
+                                                                                D3D12_COMMAND_LIST_TYPE type) {
         {
             const std::scoped_lock lock(SpareMutex());
             auto& spares = SpareQueues();
@@ -74,7 +74,9 @@ namespace bicameral::sim {
         return *this;
     }
 
-    PooledImmediateQueue::~PooledImmediateQueue() { Return(); }
+    PooledImmediateQueue::~PooledImmediateQueue() {
+        Return();
+    }
 
     void PooledImmediateQueue::Return() {
         if (!m_queue || m_device == nullptr)
@@ -255,7 +257,7 @@ namespace bicameral::sim {
         // --- 物質の一覧が変わった刻み: コマンドの前に箱の全部のセルを付け替える(GPU と CPU が同じ RxRemapCell。T-0242)---
         std::optional<SpeciesRemap> boxRemap = std::exchange(m_boxRemap, std::nullopt);
         if (boxRemap && !m_box.RecordSpeciesRemap(list, m_ring.GpuAddress(), PackSpeciesRemap(*boxRemap),
-                                                  static_cast<uint32_t>(m_cpu.cells.size())))
+                                                  static_cast<uint32_t>(m_cpu.cells.size()), tick))
             return std::unexpected("箱の物質の付け替えを記録できない");
 
         if (!m_box.RecordTick(list, m_ring.GpuAddress(), tick, commands))
@@ -281,12 +283,13 @@ namespace bicameral::sim {
 
         // --- CPU リファレンス → 比べる ---
         if (boxRemap) {
-            m_lastRemapReport = RemapLabBox(m_cpu, *boxRemap, m_table);
+            m_lastRemapReport = RemapLabBox(m_cpu, *boxRemap, m_table, tick);
             Log(Channel::Sim, Level::Info,
                 "実験室: 刻み {} で物質を付け替えた(分けた物質 {} µmol・失った原子 {} + {} µmol・足したエネルギー {} "
-                "mJ)",
+                "mJ・効かなくなった転換 {})",
                 tick, m_lastRemapReport->decomposedMicromoles, m_lastRemapReport->remainderAtomMicromoles,
-                m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->energyDeltaMilliJoules);
+                m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->energyDeltaMilliJoules,
+                m_lastRemapReport->conversionsDisabled);
         }
 
         StepLabBox(m_cpu, m_table, tick, commands, Shape());

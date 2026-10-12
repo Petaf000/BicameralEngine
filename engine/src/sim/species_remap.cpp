@@ -8,6 +8,7 @@
 #include <string_view>
 #include <utility>
 
+#include "common/magic_patch.hlsli"
 #include "core/aliases.h"
 
 namespace bicameral::sim {
@@ -90,6 +91,7 @@ namespace bicameral::sim {
         remainderAtomMicromoles += other.remainderAtomMicromoles;
         overflowAtomMicromoles += other.overflowAtomMicromoles;
         energyDeltaMilliJoules += other.energyDeltaMilliJoules;
+        conversionsDisabled += other.conversionsDisabled;
     }
 
     std::expected<SpeciesRemap, std::string> BuildSpeciesRemap(const BakedReactionTable& current,
@@ -154,6 +156,30 @@ namespace bicameral::sim {
                 .remainderAtomMicromoles = result.remainderAtoms,
                 .overflowAtomMicromoles = result.overflowAtoms,
                 .energyDeltaMilliJoules = result.energyDelta};
+    }
+
+    // --- 魔法のパッチの付け替え(T-0377)---
+
+    uint32_t RemapPatchEffect(const SpeciesRemap& remap, uint32_t effect) {
+        if (remap.identity)
+            return effect;
+
+        return reaction::MpRemapEffect(remap.View(), effect);
+    }
+
+    uint32_t RemapPatchList(const SpeciesRemap& remap, std::span<uint32_t> patchWords, uint64_t tick) {
+        // common/magic_patch.hlsli の List の約束(パッチの列の語)
+        struct WordList {
+            std::span<uint32_t> words;
+
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+
+        if (remap.identity || patchWords.size() < reaction::MP_LIST_WORDS)
+            return 0;
+
+        return reaction::MpRemapPatchList(WordList{.words = patchWords}, remap.View(), tick);
     }
 
     std::vector<uint32_t> PackSpeciesRemap(const SpeciesRemap& remap) {

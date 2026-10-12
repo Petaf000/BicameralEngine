@@ -961,6 +961,122 @@ namespace {
         return {};
     }
 
+    // 物質を足す・消す表の差し替えを跨ぐ転換(T-0377): 魔素ありの木を 2 か所に置き、魔素の燃焼の CO2 を 1 か所は異性体(差し替えで
+    // ID がずれる)、もう 1 か所は消える物質に替える。燃えている途中で物質の一覧が変わる表に替え、同じ刻みに前の表の ID で
+    // 消える物質への転換をもう 1 つ出す。替える先の付け替え(列とまだ当てていないコマンド)が CPU と GPU で毎刻み一致し、
+    // 異性体への転換は効き続け、消える物質への転換は効かなくなり(1 つ数える)、後から出した転換は断る
+    std::expected<void, std::string> RunConvertRemap(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType) {
+        constexpr uint32_t PATCH_TICKS = 80;
+        constexpr uint32_t BEFORE_SWAP_TICKS = 30;
+        constexpr uint64_t REMAP_TABLE_VERSION = 0x6666;
+        const auto before = sim::BakeReactionTable(sim::MakeConversionRemapBeforeTestTable());
+        const auto after = sim::BakeReactionTable(sim::MakeConversionRemapAfterTestTable());
+        if (!before || !after)
+            return std::unexpected(!before ? before.error() : after.error());
+
+        auto session = sim::LabSession::Create(device, queueType, *before, MANA_TABLE_VERSION, "remap",
+                                               sim::LAB_SINGLE_ROOT_SHAPE);
+        if (!session)
+            return std::unexpected(session.error());
+
+        const uint32_t dioxide = before->SpeciesId("carbon_dioxide");
+        const uint32_t late = before->SpeciesId("carbon_dioxide_late_test");
+        const uint32_t rule = RuleIdOf(*before, "mana_test_catalyzed_cellulose_combustion");
+        if (late == 0 || rule == UINT32_MAX)
+            return std::unexpected("表に試験の物質か規則が無い");
+
+        uint32_t slot = 0;
+        while (slot < before->rules[rule].productCount && before->rules[rule].products[slot] != dioxide)
+            ++slot;
+
+        // --- 置く(2 か所とも魔素あり)と転換 2 つ ---
+        std::vector<sim::SpeciesAmount> manaWood = {
+            {.species = before->SpeciesId("cellulose"), .amount = MANA_WOOD_CELLULOSE_MICROMOLES},
+            {.species = before->SpeciesId("oxygen"), .amount = MANA_WOOD_OXYGEN_MICROMOLES},
+            {.species = before->SpeciesId("mana_test"), .amount = MANA_MICROMOLES}};
+        std::ranges::sort(manaWood, {}, &sim::SpeciesAmount::species);
+        const PatchGroups groups;
+        const sim::LabCellRange kept = groups.catalyzed;
+        const sim::LabCellRange lost = groups.stopped;
+        const uint32_t toIsomer = reaction::MpMakeConvertEffect(slot, before->SpeciesId("carbon_dioxide_isomer_test"));
+        const uint32_t toLate = reaction::MpMakeConvertEffect(slot, late);
+        const bool queued = session->PlaceRegion(kept, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->PlaceRegion(lost, manaWood, MANA_WARM_MILLIKELVIN) &&
+                            session->ApplyPatch(rule, toIsomer, PATCH_TICKS, kept) &&
+                            session->ApplyPatch(rule, toLate, PATCH_TICKS, lost);
+        if (!queued)
+            return std::unexpected("置けない・パッチを出せない");
+
+        if (auto stepped = session->Step(BEFORE_SWAP_TICKS); !stepped)
+            return std::unexpected(stepped.error());
+
+        const auto total = [&](sim::LabCellRange range, uint32_t species) {
+            return RegionTotalOf(session->Gpu(), range, species, sim::LAB_SINGLE_ROOT_SHAPE);
+        };
+        const uint64_t lateBefore = total(lost, late);
+        const uint64_t isomerBefore = total(kept, before->SpeciesId("carbon_dioxide_isomer_test"));
+
+        // --- 差し替え(同じ刻みに前の表の ID で消える物質への転換をもう 1 つ)---
+        const std::vector<sim::NamedElementCount> elementsBefore = CountBoxElements(*session);
+        const bool late2 = session->ApplyPatch(rule, toLate, 5, lost);
+        if (auto change = session->ChangeTable(*after, REMAP_TABLE_VERSION, "remap"); !late2 || !change)
+            return std::unexpected(!late2 ? "パッチを出せない" : change.error());
+
+        if (auto stepped = session->Step(1); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        const auto& report = session->LastRemapReport();
+        const uint64_t lostAtoms = report ? report->remainderAtomMicromoles + report->overflowAtomMicromoles : 0;
+        const auto effectOf = [&](const sim::MultiresNest& nest, uint32_t index) {
+            return nest.magicPatches[reaction::MP_LIST_HEADER_WORDS + (index * reaction::MP_PATCH_WORDS) +
+                                     reaction::MP_WORD_EFFECT];
+        };
+        const uint32_t isomerAfter = after->SpeciesId("carbon_dioxide_isomer_test");
+        const uint32_t afterSlot = [&] {
+            const uint32_t afterRule = RuleIdOf(*after, "mana_test_catalyzed_cellulose_combustion");
+            uint32_t found = 0;
+            while (found < after->rules[afterRule].productCount &&
+                   after->rules[afterRule].products[found] != after->SpeciesId("carbon_dioxide"))
+                ++found;
+
+            return found;
+        }();
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: 付け替えを跨ぐ転換: 効かなくなった転換 {}・列 {}(異性体 {} µmol・消える物質 {} µmol)",
+            report ? report->conversionsDisabled : 0, session->Gpu().magicPatches[0], isomerBefore, lateBefore);
+        if (!report || report->conversionsDisabled != 1 || session->Gpu().magicPatches[0] != 2)
+            return std::unexpected("消える物質への転換を 1 つ数え、後から出した転換は断る");
+
+        if (effectOf(session->Gpu(), 0) != reaction::MpMakeConvertEffect(afterSlot, isomerAfter) ||
+            effectOf(session->Gpu(), 1) != reaction::MpMakeConvertEffect(afterSlot, 0))
+            return std::unexpected("列の転換の替える先が新しい表の ID にならない");
+
+        if (SumAtoms(elementsBefore) != SumAtoms(CountBoxElements(*session)) + lostAtoms)
+            return std::unexpected("付け替えで元素が保たれない");
+
+        // --- 続けて燃やす: 異性体は増え続け、元素は保たれ、毎刻み一致 ---
+        const std::vector<sim::NamedElementCount> elementsAfter = CountBoxElements(*session);
+        if (auto stepped = session->Step(PATCH_TICKS - BEFORE_SWAP_TICKS - 1); !stepped)
+            return std::unexpected(stepped.error());
+
+        if (auto checked = CheckNoMismatch(*session); !checked)
+            return checked;
+
+        const uint64_t isomerEnd = total(kept, isomerAfter);
+        Log(Channel::Gpu, Level::Info, "gpu_lab_box_test: 付け替えを跨ぐ転換: 異性体 {} → {} µmol", isomerBefore,
+            isomerEnd);
+        if (lateBefore == 0 || isomerBefore == 0 || isomerEnd <= isomerBefore)
+            return std::unexpected("差し替えの前は両方の転換が効き、後も異性体への転換が効き続ける");
+
+        if (CountBoxElements(*session) != elementsAfter)
+            return std::unexpected("転換で元素の数が変わった");
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
@@ -1040,6 +1156,12 @@ namespace {
         // --- 生成物を替える転換(T-0359)---
         if (auto result = RunConvert(device->Get(), options->queueType); !result) {
             Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(転換: {})", result.error());
+            return 1;
+        }
+
+        // --- 物質を足す・消す表の差し替えを跨ぐ転換(T-0377)---
+        if (auto result = RunConvertRemap(device->Get(), options->queueType); !result) {
+            Log(Channel::Gpu, Level::Error, "gpu_lab_box_test: FAILED(付け替えを跨ぐ転換: {})", result.error());
             return 1;
         }
 

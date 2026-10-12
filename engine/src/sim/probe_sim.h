@@ -102,7 +102,8 @@ namespace bicameral::sim {
     [[nodiscard]] std::vector<uint32_t> ProbePlaceBlocks(const ProbePlace& place);
 
     // 置くコマンドの物質 ID を、物質の一覧が変わる表への付け替え remap(sim/species_remap.h)で新しい表の ID にする(T-0242)。
-    // 消えた物質の材料は落とす。置くコマンドでなければそのまま。差し替えと同じフレームに前の表で作った筆のコマンドに使う
+    // 消えた物質の材料は落とす。魔法のパッチのコマンドは転換の替える先を付け替える(消えた物質なら当てる時に断られる。T-0377)。
+    // ほかの種類はそのまま。差し替えと同じフレームに前の表で作った筆のコマンドに使う
     [[nodiscard]] ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap);
 
     // 魔法のパッチを置く(T-0323・ADR-0095。PROBE_COMMAND_TYPE_PATCH。common/probe_patch.hlsli)。規則は名前の鍵(RxRule::key)で持つので、
@@ -398,9 +399,9 @@ namespace bicameral::sim {
                         bool tableSwapped);
         [[nodiscard]] bool ValidateTableSwap(const ProbeFrameInput& input) const;
         [[nodiscard]] bool RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
-                                           const BakedReactionTable& table);
+                                           const BakedReactionTable& table, uint64_t tick);
         [[nodiscard]] bool RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
-                                              const SpeciesRemap& remap);
+                                              const SpeciesRemap& remap, uint64_t tick);
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);

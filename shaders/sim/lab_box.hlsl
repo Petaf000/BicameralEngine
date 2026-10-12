@@ -144,6 +144,8 @@ struct LabSpeciesRemap {
 
     uint32_t UnitWord() { return PartWord() + (2 * partCount); }
 
+    uint32_t SpeciesCount() { return speciesCount; }
+
     uint32_t NewId(uint32_t oldId) { return g_labCommands[NewIdWord() + oldId]; }
 
     uint32_t PartBegin(uint32_t oldId) { return g_labCommands[PartBeginWord() + oldId]; }
@@ -174,8 +176,9 @@ struct LabSpeciesRemap {
     }
 };
 
-// g_external0 = 箱のセルの数(u1 の全部 = 一様の値 × 枠 + 頁 × 512。使っていないセルは空なので付け替えても空のまま)。
-// 1 スレッド = 1 セル。新しい表はもう結んである(単体の h0 を新しい表から読む)
+// g_external0 = 箱のセルの数(u1 の全部 = 一様の値 × 枠 + 頁 × 512。使っていないセルは空なので付け替えても空のまま)、
+// g_external1・g_external2 = 差し替える刻みの下位・上位。1 スレッド = 1 セル。新しい表はもう結んである(単体の h0 を新しい表から読む)。
+// スレッド 0 は魔法のパッチの列(u5)の転換の替える先も付け替える(T-0377。CPU リファレンスは sim/lab_box.cpp の RemapLabBox)
 [numthreads(64, 1, 1)] void RemapLabSpecies(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t index = dispatchThreadId.x;
     if (index >= g_external0)
@@ -185,5 +188,10 @@ struct LabSpeciesRemap {
     remap.speciesCount = g_labCommands[0];
     remap.partCount = g_labCommands[1];
     remap.unitCount = g_labCommands[2];
+    if (index == 0) {
+        const uint64_t tick = ((uint64_t)g_external2 << 32) | (uint64_t)g_external1;
+        MpRemapPatchList(MakePatchList(), remap, tick);
+    }
+
     g_cells[index] = RxRemapCell(remap, MakeTable(), g_cells[index]).cell;
 }

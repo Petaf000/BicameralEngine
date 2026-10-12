@@ -52,9 +52,10 @@ namespace bicameral::sim {
 
         // 箱の全部のセル(cellCount 個。MultiresNest::cells の数)を付け替える(T-0242・ADR-0065。shaders/sim/lab_box.hlsl の
         // RemapLabSpecies。CPU リファレンスは RemapLabBox)。remapWords は sim::PackSpeciesRemap(今の表 → 新しい表)。
-        // 新しい表は ReplaceTable で先に結んでおく。写しのバッファはこのリストが終わるまで持つ(次の付け替えで捨てる)
+        // 新しい表は ReplaceTable で先に結んでおく。写しのバッファはこのリストが終わるまで持つ(次の付け替えで捨てる)。
+        // 魔法のパッチの列の転換の替える先も同じ段で付け替える(tick = 差し替える刻み。T-0377)
         [[nodiscard]] bool RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                              std::span<const uint32_t> remapWords, uint32_t cellCount);
+                                              std::span<const uint32_t> remapWords, uint32_t cellCount, uint64_t tick);
 
         void RecordReadback(ID3D12GraphicsCommandList10* list) { m_nest.RecordReadback(list); }
         [[nodiscard]] bool Read(MultiresNest& nest) const { return m_nest.Read(nest); }

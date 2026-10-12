@@ -223,7 +223,19 @@ namespace bicameral::sim {
     }
 
     ProbeCommand RemapPlaceCommand(const ProbeCommand& command, const SpeciesRemap& remap) {
-        if (command.type != PROBE_COMMAND_TYPE_PLACE || remap.identity)
+        if (remap.identity)
+            return command;
+
+        // --- 魔法のパッチ: 転換の替える先を新しい ID に(消えた物質なら 0 = 当てる時に断られ、断った数に出る。T-0377)---
+        if (command.type == PROBE_COMMAND_TYPE_PATCH) {
+            ProbeCommand remapped = command;
+            remapped.payload[reaction::MP_COMMAND_EFFECT] = RemapPatchEffect(
+                remap, command.payload[reaction::MP_COMMAND_EFFECT]);
+
+            return remapped;
+        }
+
+        if (command.type != PROBE_COMMAND_TYPE_PLACE)
             return command;
 
         // --- 残る物質の材料だけ、新しい ID で詰め直す(当てられない数のコマンドは当てられないまま)---
@@ -707,7 +719,7 @@ namespace bicameral::sim {
             // 表の差し替え(T-0139): その刻みの適用の単位の前に写す(適用の後の RefreshTable は RecordUnit)
             const auto swap = rng::find(input.tableSwaps, tick, &ProbeTableSwap::tick);
             const bool tableSwapped = unit == PROBE_UNIT_APPLY && swap != input.tableSwaps.end();
-            if (tableSwapped && !RecordTableSwap(list, frame, *swap->table)) {
+            if (tableSwapped && !RecordTableSwap(list, frame, *swap->table, tick)) {
                 Log(Channel::Sim, Level::Error, "反応表の差し替えを記録できない(刻み {})", tick);
                 return nullptr;
             }
@@ -888,8 +900,8 @@ namespace bicameral::sim {
 
     // 反応表の差し替え(T-0139・ADR-0047): 新しい表を新しい既定のバッファに写し、ルートの結び先を替える。差し替える前の表は
     // このフレームの前の単位と、まだ GPU にある前のフレームが読むので、このリストが終わるまで持つ(状態を追わないよう、毎回新しく作る)
-    bool ProbeSim::RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
-                                   const BakedReactionTable& table) {
+    bool ProbeSim::RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame, const BakedReactionTable& table,
+                                   uint64_t tick) {
         const auto remap = BuildSpeciesRemap(m_tableCopy, table);
         if (!remap) {
             Log(Channel::Sim, Level::Error, "物質を付け替えられない表: {}", remap.error());
@@ -932,12 +944,14 @@ namespace bicameral::sim {
         BindRootViews(list, frame.input.Get());
         m_tableCopy = table;
 
-        return remap->identity || RecordSpeciesRemap(list, frame, *remap);
+        return remap->identity || RecordSpeciesRemap(list, frame, *remap, tick);
     }
 
     // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 付け替えの表を写して t5 に結び、2 世代のセルを付け替える(適用の単位の前)。
-    // 新しい表はもう結んである(RxRemapCell は単体の h0 を新しい表から読む)
-    bool ProbeSim::RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame, const SpeciesRemap& remap) {
+    // 新しい表はもう結んである(RxRemapCell は単体の h0 を新しい表から読む)。魔法のパッチの列(u14)の転換の替える先も
+    // 同じ段のスレッド 0 が付け替える(単位の定数の刻み = tick を読む。T-0377)
+    bool ProbeSim::RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame, const SpeciesRemap& remap,
+                                      uint64_t tick) {
         ComPtr<ID3D12Device5> device;
         if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
@@ -961,6 +975,7 @@ namespace bicameral::sim {
             frame.keepAlive.push_back(std::move(m_speciesRemap));
         m_speciesRemap = std::move(buffer);
         BindRootViews(list, frame.input.Get());
+        SetUnitConstants(list, tick, 0);
 
         list->SetPipelineState(m_remapSpeciesPipeline.Get());
         list->Dispatch(2 * LINEAR_CELL_GROUPS, 1, 1);
@@ -1574,6 +1589,9 @@ namespace bicameral::sim {
             if (index >= currentBase && index < currentBase + PROBE_CELL_COUNT)
                 m_remapReport.Add(report);
         }
+
+        // 魔法の転換の替える先も新しい ID に(消えた物質への転換は効かなくなる。GPU は RemapSpecies のスレッド 0。T-0377)
+        m_remapReport.conversionsDisabled = RemapPatchList(*remap, m_magicPatches, tick);
     }
 
     std::span<const reaction::RxCell> ProbeReference::State(uint64_t tick) const {

@@ -36,6 +36,7 @@ namespace bicameral::sim {
         std::span<const int64_t> removedH0;
         std::span<const reaction::RxRemapUnit> units;
 
+        [[nodiscard]] uint32_t SpeciesCount() const { return static_cast<uint32_t>(newIds.size()); }
         [[nodiscard]] uint32_t NewId(uint32_t oldId) const { return newIds[oldId]; }
         [[nodiscard]] uint32_t PartBegin(uint32_t oldId) const { return partBegin[oldId]; }
         [[nodiscard]] reaction::RxRemapPart Part(uint32_t index) const { return parts[index]; }
@@ -67,6 +68,7 @@ namespace bicameral::sim {
         uint64_t remainderAtomMicromoles = 0;  // 単体の原子の数で割り切れずに失った原子(µmol)
         uint64_t overflowAtomMicromoles = 0;   // セルの成分の上限に入らずに失った原子(µmol)
         int64_t energyDeltaMilliJoules = 0;    // 熱を保つためにセルに足したエネルギー(mJ。改造による出入り)
+        uint32_t conversionsDisabled = 0;      // 替える先の物質が消えて効かなくなった魔法の転換の数(T-0377)
 
         void Add(const SpeciesRemapReport& other);
     };
@@ -79,6 +81,12 @@ namespace bicameral::sim {
     // 本体は common/species_remap.hlsli の RxRemapCell(GPU と同じ関数)
     [[nodiscard]] SpeciesRemapReport RemapReactionCell(const SpeciesRemap& remap, const BakedReactionTable& next,
                                                        reaction::RxCell& cell);
+
+    // 魔法のパッチ(common/magic_patch.hlsli。T-0377): 転換の替える先の物質 ID を新しい表の ID にする(消えた物質は 0 = 効かない)。
+    // 本体は MpRemapEffect・MpRemapPatchList(GPU の付け替えの段と同じ関数)。列は表を差し替える刻み tick の始めに付け替え、
+    // 効かなくなった転換の数を返す。コマンドの効き方の語(まだ当てていないパッチのコマンド)は RemapPatchEffect で付け替える
+    [[nodiscard]] uint32_t RemapPatchEffect(const SpeciesRemap& remap, uint32_t effect);
+    uint32_t RemapPatchList(const SpeciesRemap& remap, std::span<uint32_t> patchWords, uint64_t tick);
 
     // GPU に上げる形(32bit の語の列。common/species_remap.hlsli の「GPU のバッファの形」)
     [[nodiscard]] std::vector<uint32_t> PackSpeciesRemap(const SpeciesRemap& remap);

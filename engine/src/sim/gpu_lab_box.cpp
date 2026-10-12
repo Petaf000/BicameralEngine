@@ -119,9 +119,10 @@ namespace bicameral::sim {
         return true;
     }
 
-    // 物質の付け替え(T-0242): 付け替えの表を u4 に写し、箱の全部のセルを 1 スレッド 1 セルで付け替える
+    // 物質の付け替え(T-0242): 付け替えの表を u4 に写し、箱の全部のセルを 1 スレッド 1 セルで付け替える。
+    // u5 はパッチの列(スレッド 0 が転換の替える先を付け替える。T-0377)
     bool GpuLabBox::RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                       std::span<const uint32_t> remapWords, uint32_t cellCount) {
+                                       std::span<const uint32_t> remapWords, uint32_t cellCount, uint64_t tick) {
         ComPtr<ID3D12Device> device;
         if (remapWords.empty() || FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
@@ -148,10 +149,10 @@ namespace bicameral::sim {
 
         constexpr uint32_t REMAP_GROUP_THREADS = 64;  // lab_box.hlsl の RemapLabSpecies と同じ
         const D3D12_GPU_VIRTUAL_ADDRESS remapAddress = m_remap->GetGPUVirtualAddress();
-        m_nest.SetExternalViews(remapAddress, remapAddress);
+        m_nest.SetExternalViews(remapAddress, m_nest.PatchListAddress());
         m_nest.RecordExternalDispatch(list, debugRing, m_remapPipeline.Get(),
                                       (cellCount + REMAP_GROUP_THREADS - 1) / REMAP_GROUP_THREADS,
-                                      {cellCount, 0, 0, 0});
+                                      {cellCount, static_cast<uint32_t>(tick), static_cast<uint32_t>(tick >> 32), 0});
 
         return true;
     }

@@ -395,6 +395,50 @@ FX_FN bool MpAddPatch(List list, Table table, MpPatch patch, uint64_t tick, uint
     return true;
 }
 
+// --- 物質の付け替え(物質を足す・消す反応表の差し替え。ADR-0065・T-0377)-----------------------------------
+
+// 効き方の語の物質 ID を新しい表の ID に付け替える(転換の替える先だけ。ほかの効き方の語はそのまま)。
+// remap は common/species_remap.hlsli の Remap の約束(NewId・SpeciesCount)。替える先が消えた(と、今の表の範囲の外の)転換は
+// 替える先 0 = 「替える先が無い」にする: 効かせる時は MpConvertedCoefficient が 0 を返すので効かず、足す時は MpEffectValid が断る
+template <typename Remap>
+FX_FN uint32_t MpRemapEffect(Remap remap, uint32_t effect) {
+    if (MpEffectKind(effect) != MP_KIND_CONVERT)
+        return effect;
+
+    const uint32_t species = MpEffectConvertSpecies(effect);
+    uint32_t remapped = 0;
+    if (species != 0 && species < remap.SpeciesCount())
+        remapped = remap.NewId(species);
+
+    return MpMakeConvertEffect(MpEffectConvertSlot(effect), remapped);
+}
+
+// パッチの列の転換の替える先を新しい表の ID に付け替える(列の順・ほかの語はそのまま。表を差し替える刻み tick の始め、
+// 終わったパッチを除く前に呼ぶ)。替える先が消えて効かなくなった転換の数を返す(呼ぶ側が報告する。tick より前に終わった
+// パッチ〔この刻みに除かれる〕と、もう替える先が無かった転換は数えない)。GPU(実験室の RemapLabSpecies・仮の世界の RemapSpecies の
+// スレッド 0)と CPU リファレンス(sim/lab_box.cpp の RemapLabBox・ProbeReference::RemapSpecies)が同じ関数を呼ぶ
+template <typename List, typename Remap>
+FX_FN uint32_t MpRemapPatchList(List list, Remap remap, uint64_t tick) {
+    const uint32_t count = MpPatchCount(list);
+    uint32_t disabled = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t base = MP_LIST_HEADER_WORDS + (i * MP_PATCH_WORDS);
+        const uint32_t effect = list.PatchWord(base + MP_WORD_EFFECT);
+        if (MpEffectKind(effect) != MP_KIND_CONVERT)
+            continue;
+
+        const uint32_t remapped = MpRemapEffect(remap, effect);
+        const uint64_t endTick = FX_U64(list.PatchWord(base + MP_WORD_END + 1), list.PatchWord(base + MP_WORD_END));
+        const bool lost = MpEffectConvertSpecies(effect) != 0 && MpEffectConvertSpecies(remapped) == 0;
+        if (lost && endTick > tick)
+            disabled += 1;
+
+        list.SetPatchWord(base + MP_WORD_EFFECT, remapped);
+    }
+
+    return disabled;
+}
+
 // コマンドの payload の語(MP_COMMAND_*)からパッチを作る。始まり = 当てる刻み tick、終わり = tick + 期間(あふれは当てない印 0)
 FX_FN MpPatch MpPatchFromCommand(uint64_t ruleKey, uint32_t effect, uint32_t duration, int32_t lowX, int32_t lowY,
                                  int32_t lowZ, int32_t highX, int32_t highY, int32_t highZ, uint64_t tick) {

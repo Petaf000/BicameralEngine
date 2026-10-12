@@ -11,6 +11,9 @@
 //     断る。T-0359)を、(1) 1 刻みずつ + 保存点へ戻して流し直す、(2) 刻みの途中で切るばらばらの分け方、で流し、
 //     刻みごとの状態の要約(セル + パッチの列)・エネルギー・湧き出し・計算したブロックの数・上限・断った数が CPU と一致する。
 //     コマンドは再生ファイル(SerializeReplay → ParseReplay)から ReplayPlayer で足し、記録の要約とも突き合わせる
+//   - (GPU)物質を足す・消す表の差し替えを跨ぐ転換(T-0377): 替える先の ID がずれる転換は新しい ID に付け替えて効き続け、替える先が
+//     消えた転換は効かなくなり(数える)、差し替えの後に前の表の ID で作った消えた物質への転換は付け替えで 0 になって断られる。
+//     同じ 2 つの分け方で CPU と毎刻み一致
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ。
 #include <algorithm>
@@ -29,6 +32,7 @@
 #include "save/replay_file.h"
 #include "save/replay_session.h"
 #include "sim/probe_sim.h"
+#include "sim/species_remap.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli・probe_patch.hlsli の定数
@@ -45,6 +49,7 @@ namespace {
     constexpr uint64_t UNKNOWN_RULE_KEY = 0x1234;
     constexpr uint64_t CONVERT_TICK = 9;  // 転換(T-0359)を置く刻み(差し替えを跨いで CONVERT_END_TICK まで)
     constexpr uint64_t CONVERT_END_TICK = 21;
+    constexpr uint64_t REMAP_LATE_TICK = 20;  // 差し替えの後に、前の表の ID で消えた物質への転換を出す刻み(T-0377)
 
     // 火を付ける木箱の壁のセル(左の壁と右の壁。木箱は [28, 36) の 8³)
     constexpr std::array<uint32_t, 3> LEFT_WALL = {28, 32, 32};
@@ -205,7 +210,22 @@ namespace {
         uint32_t patchesAtSwap = 0;  // 差し替えの刻みの初めに列にあったパッチの数
         uint64_t isomerAtEnd = 0;    // 最後の刻みの世界の、転換で替えた仮の物質の量(T-0359)
         uint64_t dioxideAtEnd = 0;   // 同じ、CO2 の量
+
+        // --- 物質の付け替えを跨ぐ転換(T-0377)---
+        uint64_t isomerAtSwap = 0;               // S(SWAP_TICK) の異性体の量(前の表の ID)
+        uint64_t lateAtSwap = 0;                 // 同じ、消える物質(carbon_dioxide_late_test)の量
+        uint32_t conversionsDisabled = 0;        // 差し替えで効かなくなった転換の数
+        std::vector<uint32_t> patchesAfterSwap;  // 差し替えの刻みを進めた後のパッチの列
     };
+
+    // 全部のセルの物質 species の量
+    uint64_t TotalOf(std::span<const reaction::RxCell> state, uint32_t species) {
+        uint64_t total = 0;
+        for (const reaction::RxCell& cell : state)
+            total += AmountOf(cell, species);
+
+        return total;
+    }
 
     Reference RunReference(const BakedReactionTable& table, const BakedReactionTable& shifted,
                            std::span<const ProbeCommand> commands, uint64_t ticks) {
@@ -218,10 +238,18 @@ namespace {
             {.tick = 0, .hash = reference.StateHash(0), .energy = ProbeEnergySum(reference.State(0))});
 
         for (uint64_t tick = 0; tick < ticks; ++tick) {
-            if (tick == SWAP_TICK)
+            if (tick == SWAP_TICK) {
                 result.patchesAtSwap = reference.MagicPatches()[0];
+                result.isomerAtSwap = TotalOf(reference.State(tick), SpeciesId(table, "carbon_dioxide_isomer_test"));
+                result.lateAtSwap = TotalOf(reference.State(tick), SpeciesId(table, "carbon_dioxide_late_test"));
+            }
 
             reference.Advance(tick, commands, tick == SWAP_TICK ? &shifted : nullptr);
+            if (tick == SWAP_TICK) {
+                result.conversionsDisabled = reference.LastRemapReport().conversionsDisabled;
+                result.patchesAfterSwap.assign(reference.MagicPatches().begin(), reference.MagicPatches().end());
+            }
+
             const std::span<const reaction::RxCell> state = reference.State(tick + 1);
             result.ticks.push_back({.tick = tick + 1,
                                     .hash = reference.StateHash(tick + 1),
@@ -234,10 +262,9 @@ namespace {
                 result.leftCelluloseWhileStopped = AmountOf(state[leftIndex], cellulose);
 
             if (tick + 1 == ticks) {
-                for (const reaction::RxCell& cell : state) {
-                    result.isomerAtEnd += AmountOf(cell, SpeciesId(table, "carbon_dioxide_isomer_test"));
-                    result.dioxideAtEnd += AmountOf(cell, SpeciesId(table, "carbon_dioxide"));
-                }
+                const BakedReactionTable& now = tick >= SWAP_TICK ? shifted : table;  // 差し替えの後は新しい表の ID
+                result.isomerAtEnd = TotalOf(state, SpeciesId(now, "carbon_dioxide_isomer_test"));
+                result.dioxideAtEnd = TotalOf(state, SpeciesId(now, "carbon_dioxide"));
             }
         }
 
@@ -340,37 +367,13 @@ namespace {
     // 刻みの途中で切れる分け方
     constexpr std::array<uint32_t, 7> MIXED_FRAMES = {1, 2, 5, 4, 7, 11, 3};
 
-    void TestScene(ID3D12Device5* device, const BakedReactionTable& table, const BakedReactionTable& shifted,
-                   Failures& failures) {
-        const std::vector<ProbeCommand> commands = MakeCommands(table, shifted, true);
-        const Reference expected = RunReference(table, shifted, commands, TOTAL_TICKS);
-        Log(Channel::Sim, Level::Info, "パッチの場面: CPU S({}) = {:016x}", TOTAL_TICKS, expected.ticks.back().hash);
-
-        // --- CPU: 効き目と断った数 ---
-        const std::vector<ProbeCommand> plainCommands = MakeCommands(table, shifted, false);
-        const Reference plain = RunReference(table, shifted, plainCommands, STOP_END_TICK);
-        failures.Check(expected.leftCelluloseWhileStopped == expected.leftCelluloseInitial &&
-                           plain.leftCelluloseWhileStopped < plain.leftCelluloseInitial,
-                       std::format("止めている間は左の壁のセルロースが減らない(止めた {} / 初め {}・止めない {})",
-                                   expected.leftCelluloseWhileStopped, expected.leftCelluloseInitial,
-                                   plain.leftCelluloseWhileStopped));
-        failures.Check(expected.ticks[STOP_END_TICK].hash != plain.ticks[STOP_END_TICK].hash,
-                       "パッチのある世界と無い世界は違う");
-        failures.Check(expected.ticks[3].patchesRefused == 1 && expected.ticks[6].patchesRefused == 1 &&
-                           expected.ticks[CONVERT_TICK + 1].patchesRefused == 1,
-                       "表に無い規則(刻み 2)と一杯の列(刻み 5)と釣り合わない転換(刻み 9)を 1 つずつ断る");
-        failures.Check(
-            expected.patchesAtSwap == 3,
-            "差し替えの刻みに残っているパッチは差し替えを跨ぐ速める・触媒・転換の 3 つだけ(ほかは終わって除いた)");
-        const Reference plainToEnd = RunReference(table, shifted, plainCommands, TOTAL_TICKS);
-        failures.Check(
-            expected.isomerAtEnd > 0 && plainToEnd.isomerAtEnd == 0,
-            std::format("転換で替えた物質ができる(転換あり {}・なし {} µmol。CO2 は {}・{} µmol)", expected.isomerAtEnd,
-                        plainToEnd.isomerAtEnd, expected.dioxideAtEnd, plainToEnd.dioxideAtEnd));
-
+    // 再生ファイルを作り、GPU を 2 つの分け方で流して、CPU の要約と毎刻み突き合わせる。refusedCount = 断るパッチのコマンドの数
+    void CheckGpuRuns(ID3D12Device5* device, const BakedReactionTable& table, const BakedReactionTable& shifted,
+                      std::span<const ProbeCommand> commands, const Reference& expected, int64_t refusedCount,
+                      Failures& failures) {
         // --- 再生ファイル(CPU の要約を記録として持つ)---
         save::ReplayFile recording;
-        recording.commands = commands;
+        recording.commands.assign(commands.begin(), commands.end());
         for (const ProbeTickHash& tick : expected.ticks) {
             if (tick.tick > 0)
                 recording.tickHashes.push_back({.tick = tick.tick, .hash = tick.WorldHash()});
@@ -379,7 +382,7 @@ namespace {
         const auto bytes = save::SerializeReplay(recording);
         const auto parsed = bytes ? save::ParseReplay(*bytes)
                                   : std::expected<save::ReplayFile, std::string>(std::unexpect, bytes.error());
-        failures.Check(parsed.has_value() && parsed->commands == commands,
+        failures.Check(parsed.has_value() && rng::equal(parsed->commands, commands),
                        "再生ファイルの往復でパッチのコマンドが変わらない");
         if (!parsed) {
             Log(Channel::Sim, Level::Error, "再生ファイル: {}", parsed.error());
@@ -408,9 +411,106 @@ namespace {
             const auto refusedEvents = rng::count_if(result.events, [](const ProbeEvent& event) {
                 return event.type == PROBE_EVENT_PATCH_APPLIED && event.place == PROBE_PATCH_REFUSED;
             });
-            failures.Check(patchEvents == PatchCommandCount(commands) && refusedEvents == 3,
-                           std::format("{}: パッチのイベントはコマンドの数だけ(断った 3 つを含む)", name));
+            failures.Check(patchEvents == PatchCommandCount(commands) && refusedEvents == refusedCount,
+                           std::format("{}: パッチのイベントはコマンドの数だけ(断ったものを含む)", name));
         }
+    }
+
+    void TestScene(ID3D12Device5* device, const BakedReactionTable& table, const BakedReactionTable& shifted,
+                   Failures& failures) {
+        const std::vector<ProbeCommand> commands = MakeCommands(table, shifted, true);
+        const Reference expected = RunReference(table, shifted, commands, TOTAL_TICKS);
+        Log(Channel::Sim, Level::Info, "パッチの場面: CPU S({}) = {:016x}", TOTAL_TICKS, expected.ticks.back().hash);
+
+        // --- CPU: 効き目と断った数 ---
+        const std::vector<ProbeCommand> plainCommands = MakeCommands(table, shifted, false);
+        const Reference plain = RunReference(table, shifted, plainCommands, STOP_END_TICK);
+        failures.Check(expected.leftCelluloseWhileStopped == expected.leftCelluloseInitial &&
+                           plain.leftCelluloseWhileStopped < plain.leftCelluloseInitial,
+                       std::format("止めている間は左の壁のセルロースが減らない(止めた {} / 初め {}・止めない {})",
+                                   expected.leftCelluloseWhileStopped, expected.leftCelluloseInitial,
+                                   plain.leftCelluloseWhileStopped));
+        failures.Check(expected.ticks[STOP_END_TICK].hash != plain.ticks[STOP_END_TICK].hash,
+                       "パッチのある世界と無い世界は違う");
+        failures.Check(expected.ticks[3].patchesRefused == 1 && expected.ticks[6].patchesRefused == 1 &&
+                           expected.ticks[CONVERT_TICK + 1].patchesRefused == 1,
+                       "表に無い規則(刻み 2)と一杯の列(刻み 5)と釣り合わない転換(刻み 9)を 1 つずつ断る");
+        failures.Check(
+            expected.patchesAtSwap == 3,
+            "差し替えの刻みに残っているパッチは差し替えを跨ぐ速める・触媒・転換の 3 つだけ(ほかは終わって除いた)");
+        const Reference plainToEnd = RunReference(table, shifted, plainCommands, TOTAL_TICKS);
+        failures.Check(
+            expected.isomerAtEnd > 0 && plainToEnd.isomerAtEnd == 0,
+            std::format("転換で替えた物質ができる(転換あり {}・なし {} µmol。CO2 は {}・{} µmol)", expected.isomerAtEnd,
+                        plainToEnd.isomerAtEnd, expected.dioxideAtEnd, plainToEnd.dioxideAtEnd));
+
+        CheckGpuRuns(device, table, shifted, commands, expected, 3, failures);
+    }
+
+    // --- 物質を足す・消す差し替えを跨ぐ転換(T-0377)---
+
+    // 両方の壁に火を付け、セルロースの燃焼の CO2 を、右の壁は異性体(差し替えで ID がずれる)、左の壁は消える物質に替える
+    // (どちらも最後まで)。刻み SWAP_TICK に物質の一覧が変わる表へ替え、刻み REMAP_LATE_TICK に前の表の ID で消える物質への転換を
+    // もう 1 つ出す(フレームの付け替え RemapPlaceCommand を通す = 窓の筆と同じ)
+    std::vector<ProbeCommand> MakeRemapCommands(const BakedReactionTable& before, const BakedReactionTable& after) {
+        uint32_t sequence = 0;
+        std::vector<ProbeCommand> commands;
+        commands.push_back(MakePokeCommand(0, sequence++, LEFT_WALL[0], LEFT_WALL[1], LEFT_WALL[2]));
+        commands.push_back(MakePokeCommand(0, sequence++, RIGHT_WALL[0], RIGHT_WALL[1], RIGHT_WALL[2]));
+
+        const reaction::RxRule& combustion = before.rules[RuleIdOf(before, "cellulose_combustion")];
+        const uint32_t slot = ProductSlotOf(combustion, SpeciesId(before, "carbon_dioxide"));
+        const uint64_t key = RuleKey(before, "cellulose_combustion");
+        const uint32_t late = SpeciesId(before, "carbon_dioxide_late_test");
+        const ProbePatchRange left = {.low = {26, 30, 30}, .high = {29, 34, 34}};
+        const ProbePatchRange right = {.low = {34, 30, 30}, .high = {37, 34, 34}};
+        commands.push_back(MakePatchCommand(
+            0, sequence++, key, reaction::MpMakeConvertEffect(slot, SpeciesId(before, "carbon_dioxide_isomer_test")),
+            TOTAL_TICKS, right));
+        commands.push_back(
+            MakePatchCommand(0, sequence++, key, reaction::MpMakeConvertEffect(slot, late), TOTAL_TICKS, left));
+        commands.push_back(MakeTableCommand(SWAP_TICK, sequence++, SWAP_VERSION));
+
+        const auto remap = BuildSpeciesRemap(before, after);
+        FX_ASSERT(remap.has_value());
+        commands.push_back(RemapPlaceCommand(
+            MakePatchCommand(REMAP_LATE_TICK, sequence++, key, reaction::MpMakeConvertEffect(slot, late), 4, left),
+            *remap));
+        rng::sort(commands, CommandPrecedes);
+
+        return commands;
+    }
+
+    void TestRemapScene(ID3D12Device5* device, const BakedReactionTable& before, const BakedReactionTable& after,
+                        Failures& failures) {
+        const std::vector<ProbeCommand> commands = MakeRemapCommands(before, after);
+        const Reference expected = RunReference(before, after, commands, TOTAL_TICKS);
+        Log(Channel::Sim, Level::Info,
+            "付け替えを跨ぐ転換: CPU S({}) = {:016x}・異性体 {} → {} µmol・消える物質 {} µmol・効かなくなった転換 {}",
+            TOTAL_TICKS, expected.ticks.back().hash, expected.isomerAtSwap, expected.isomerAtEnd, expected.lateAtSwap,
+            expected.conversionsDisabled);
+
+        // --- CPU: 付け替えた列・効き目・断った数 ---
+        const reaction::RxRule& combustion = after.rules[RuleIdOf(after, "cellulose_combustion")];
+        const uint32_t slot = ProductSlotOf(combustion, SpeciesId(after, "carbon_dioxide"));
+        const auto effectAfterSwap = [&](uint32_t index) {
+            const size_t word = reaction::MP_LIST_HEADER_WORDS + (index * reaction::MP_PATCH_WORDS) +
+                                reaction::MP_WORD_EFFECT;
+            return word < expected.patchesAfterSwap.size() ? expected.patchesAfterSwap[word] : 0u;
+        };
+        failures.Check(expected.conversionsDisabled == 1 && !expected.patchesAfterSwap.empty() &&
+                           expected.patchesAfterSwap[0] == 2 &&
+                           effectAfterSwap(0) ==
+                               reaction::MpMakeConvertEffect(slot, SpeciesId(after, "carbon_dioxide_isomer_test")) &&
+                           effectAfterSwap(1) == reaction::MpMakeConvertEffect(slot, 0),
+                       "差し替えで異性体への転換は新しい ID に・消える物質への転換は替える先 0 に(1 つ数える)");
+        failures.Check(
+            expected.lateAtSwap > 0 && expected.isomerAtSwap > 0 && expected.isomerAtEnd > expected.isomerAtSwap,
+            "差し替えの前は両方の転換が効き、後も異性体への転換は効き続ける");
+        failures.Check(expected.ticks[REMAP_LATE_TICK + 1].patchesRefused == 1,
+                       "差し替えの後に前の表の ID で出した消えた物質への転換は断る");
+
+        CheckGpuRuns(device, before, after, commands, expected, 1, failures);
     }
 
 }  // namespace
@@ -441,9 +541,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const auto remapBefore = BakeReactionTable(MakeConversionRemapBeforeTestTable());
+    const auto remapAfter = BakeReactionTable(MakeConversionRemapAfterTestTable());
+    if (!remapBefore || !remapAfter) {
+        Log(Channel::Sim, Level::Error, "付け替えの試験の反応の表をベイクできない");
+        bicameral::SingletonFinalizer::Finalize();
+
+        return 1;
+    }
+
     Failures failures;
     TestCommandShape(*table, failures);
     TestScene(device->Get(), *table, *shifted, failures);
+    TestRemapScene(device->Get(), *remapBefore, *remapAfter, failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_patch_test");
     const bool passed = failures.count == 0 && passesValidation;
