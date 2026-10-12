@@ -14,7 +14,8 @@
 ## 完了条件(チェックできる形で)
 - [x] T-0362 の後の --measure-wide(空気だけの溢れの世界・32 種・上限の種・大きい形のセル)を測り、docs/perf.md に T-0327 の値と並べる
   (空気だけの溢れの世界 3.72 / 8.96 ns/セル・8564 KiB = T-0327 の幅〔1.63〜11.4 / 7.19〜7.27・8558 KiB〕。+6 KiB は main の世界の枠の分)
-- [ ] 大きい形のセルの場面の ns/セルを下げる(作業場の段の手を測って比べる)
+- [x] 大きい形のセルの場面の ns/セルを下げる(作業場の段の手を測って比べる)(4021 / 4161 → 1768 / 1062 ns/セル〔伝導なし / あり〕。
+  交互の並び + ① の結果を ③ に写す・32 グループ。VRAM は作業場の分 +11.2 MiB〔64 種の表〕。perf.md)
 - [ ] 作業場の段の結果が CPU とビット一致(HW の compute キューで `--repeat-wide many,many-conduct,limits,limits-conduct`)・ctest が通る
 - [x] 既定の世界のシェーダーの DXIL が main と同じ(runner/t380/gen.py〔t362 の型〕で 92 本の .cso が main c6bca01 と MD5 で同じ)
 
@@ -29,12 +30,12 @@
   4021 / 4161 ns/セル〔伝導なし / あり〕。T-0327 の DEVICE_HUNG は起きない)。作業場の並びを語ごとにスレッドが交互に並ぶ形にして
   3103 / 2155(ワープの読み書きがまとまる)、グループの数を選べるようにして(GpuMultires の wideSpaceGroups・g_external2)64 グループで 3015 / 1440。
   ① の結果を作業場に残して ③ は写すだけ(StepSpaceCell・StoreSpaceCell。作業場はスレッドの 8 セルごとに書くセルと結果の語)を書いた
-  (ビルドは通る。HW の --repeat-wide と計測は下の引き継ぎメモ)。試験に --diagnose-species・--wide-space-groups・--measure-big-only を足した。
+  (HW の --repeat-wide が通り、1768 / 1062 ns/セル)。試験に --diagnose-species・--wide-space-groups・--measure-big-only を足した。
 
 ## 引き継ぎメモ
 - ① → ③ の写しを入れた形で HW の compute キューの `--repeat-wide many,many-conduct,limits,limits-conduct 1` が通った(160 種の表で 1 セル 98 種・
-  毎刻み CPU とビット一致・待たせた 0)。この形の --measure-wide の大きい形のセルはまだ測っていない(次に `--measure-wide --measure-big-only` を
-  32 / 64 グループで)。WARP と ctest 全体も未実行。
+  毎刻み CPU とビット一致・待たせた 0)。計測は 32 グループで 1768 / 1062 ns/セル(64 グループとの組み合わせは未計測)。
+  完了条件の残り: WARP(gpu_multires_warp は main でも T-0385 で落ちる)と ctest 全体(`job.py test`)が未実行。
 - 作業場の VRAM が増えた: レーン = (3 + 2 + 3 × 8)c + 64 語(前は 8c)。64 種の表で 32 グループ 4 → 約 15 MiB、160 種で 10 → 約 38 MiB。
   空気だけの世界(表が 32 種以下)は作業場が無いので変わらない。重すぎるなら既定のグループの数を下げるか、① の結果を残すのを止める(コミットを戻す)。
 - 伝導なしの場面はグループを 64 にしても変わらなかった(3103 → 3015)。全部を刻む段 → WideDeferred → WideBig → 配る → 刻み直す → WideBig の
