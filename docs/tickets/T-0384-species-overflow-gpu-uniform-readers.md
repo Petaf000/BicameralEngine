@@ -37,7 +37,8 @@
   (multires_tree_wide_expand。ReserveExpandChunks)が配った頁の面 0 に「溢れの数 × 覆われていないセル」の塊を一覧の順の累積和で配り、
   StepExpandedWait の CopyUniformTails が始まりの表と成分を写してから刻む。既定の世界は #ifdef の外を変えていない。
   試験: gpu_multires_test の RunUniformOverflowSteps(--part coarsen・wide。11 種の一様な根を写して 8 刻み。反応のある表 = 広げて刻む・
-  反応の無い表 = 一様のまま)。
+  反応の無い表 = 一様のまま)。debug のビルドは通った。**HW・WARP の試験の結果は未確認**(GPU の順番待ちが 1 時間を超え、
+  2 時間の約束に間に合わなかった。wt5 のランナーに HW〔--queue compute --part coarsen〕→ WARP〔--warp〕の run を積んだ。結果は wt5 の runner/logs)。
 
 ## 引き継ぎメモ
 - 道具: UniformTailCount(slot)(世界の枠だけ。観察の枠は 0)・UncoveredCellCount(block)(multires_wide_access.hlsli)。
