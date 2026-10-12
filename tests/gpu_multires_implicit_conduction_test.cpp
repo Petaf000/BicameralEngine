@@ -10,6 +10,8 @@
 // 同じ上限を渡し、毎刻みビット一致と保存量(ComputeConservedTotals)の一致を確かめる。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 1 刻み全体の GPU の ms(陰解法あり / なし。なしは同じ場面を陽解法の
 // 頭打ちで刻む比べる相手)。同じ場面を 2 回流して 2 回目を使う。
+// --squeeze none,blocks,levels,cheapest(カンマ区切り。既定は全部)で上限の形を選ぶ。ctest は 2 本に分ける(1 本を 10 分に収める。T-0426)。
+// 計測は none を含むときだけ。
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -20,6 +22,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -423,6 +426,26 @@ namespace {
 
     // --- 計測 ---
 
+    // --squeeze の名前の並び(カンマ区切り)を上限の形に。知らない名前があれば空
+    std::vector<Squeeze> ParseSqueezes(std::string_view text) {
+        std::vector<Squeeze> squeezes;
+        for (const auto part : views::split(text, ',')) {
+            const std::string_view name(part.begin(), part.end());
+            if (name == "none")
+                squeezes.push_back(Squeeze::None);
+            else if (name == "blocks")
+                squeezes.push_back(Squeeze::Blocks);
+            else if (name == "levels")
+                squeezes.push_back(Squeeze::Levels);
+            else if (name == "cheapest")
+                squeezes.push_back(Squeeze::Cheapest);
+            else
+                return {};
+        }
+
+        return squeezes;
+    }
+
     double Mean(std::span<const double> values) {
         if (values.empty())
             return 0.0;
@@ -550,17 +573,22 @@ namespace {
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureOnly = false;
-        for (char* argument : arguments) {
-            if (std::string_view(argument) == "--measure-only")
+        std::vector<Squeeze> squeezes{Squeeze::None, Squeeze::Blocks, Squeeze::Levels, Squeeze::Cheapest};
+        for (size_t index = 0; index < arguments.size(); ++index) {
+            const std::string_view argument = arguments[index];
+            if (argument == "--measure-only")
                 measureOnly = true;
+            else if (argument == "--squeeze" && index + 1 < arguments.size())
+                squeezes = ParseSqueezes(arguments[++index]);
             else
-                rest.push_back(argument);
+                rest.push_back(arguments[index]);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options) {
+        if (!options || squeezes.empty()) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_multires_implicit_conduction_test [--warp] [--queue direct|compute] [--measure-only]");
+                "使い方: gpu_multires_implicit_conduction_test [--warp] [--queue direct|compute] [--measure-only] "
+                "[--squeeze none,blocks,levels,cheapest]");
             return 2;
         }
 
@@ -582,7 +610,8 @@ namespace {
         }
 
         Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .table = &*table, .frequency = 0};
-        if (RELEASE && options->adapter != gpu::AdapterKind::Warp) {
+        const bool measure = measureOnly || rng::contains(squeezes, Squeeze::None);
+        if (RELEASE && measure && options->adapter != gpu::AdapterKind::Warp) {
             if (FAILED(queue->Native()->GetTimestampFrequency(&context.frequency)))
                 context.frequency = 0;
 
@@ -598,7 +627,8 @@ namespace {
         if (measureOnly)
             return 0;
 
-        for (const Squeeze squeeze : {Squeeze::None, Squeeze::Blocks, Squeeze::Levels, Squeeze::Cheapest}) {
+        for (const Squeeze squeeze : squeezes) {
+            const auto start = chr::steady_clock::now();
             for (const SceneSpec& scene : Scenes()) {
                 if (auto checked = CheckScene(context, scene, squeeze); !checked) {
                     Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_conduction_test: FAILED ({})",
@@ -606,6 +636,9 @@ namespace {
                     return 1;
                 }
             }
+
+            Log(Channel::Gpu, Level::Info, "{}: {:.1f} 秒", SqueezeName(squeeze),
+                chr::duration<double>(chr::steady_clock::now() - start).count());
         }
 
         if (!test::PassesValidation(*device, "gpu_multires_implicit_conduction_test"))

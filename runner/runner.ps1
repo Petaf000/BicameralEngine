@@ -100,6 +100,37 @@ function Get-LogSummary($log, $err) {
   return [ordered]@{ lines = $lines.Count; errors = @($errors); tail = @($tail) }
 }
 
+# GPU の順番待ちの秒(_gpulock.ps1 が $env:JOB_GPU_WAIT のファイルに「待ち終えた秒の合計 [待ち始めた時刻(UNIX 秒)]」を書く)。
+# 読めない・書きかけのときは $Last(前に読めた値)を返す(読み損ねで上限を早めに切らない)
+function Get-GpuWaitSec([string]$WaitFile, [double]$Last) {
+  try {
+    if (-not (Test-Path -LiteralPath $WaitFile)) { return $Last }
+    $text = ([IO.File]::ReadAllText($WaitFile)).Trim()
+    if (-not $text) { return $Last }
+    $parts = $text -split '\s+'
+    $total = [double]$parts[0]
+    if ($parts.Count -ge 2) { $total += [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$parts[1] }
+    return $total
+  } catch { return $Last }
+}
+
+# ジョブの終わりを待つ。上限 $TimeoutSec は GPU の順番待ち(D-460)の時間を除いて数える(T-0426。待ちが長いと試験が始まる前に
+# 上限に届き、待ちの分を見込んで上限を長くすると止まったジョブが GPU を長く塞ぐため)。足す待ちは 6 時間まで
+function Wait-JobProcess($Process, [int]$TimeoutSec, [string]$WaitFile) {
+  $start = Get-Date
+  $waited = 0.0
+  while (-not $Process.WaitForExit(2000)) {
+    $waited = Get-GpuWaitSec $WaitFile $waited
+    $limit = $TimeoutSec + [Math]::Min($waited, 21600)
+    if (((Get-Date) - $start).TotalSeconds -lt $limit) { continue }
+
+    & taskkill.exe /T /F /PID $Process.Id | Out-Null
+    return 'timeout'
+  }
+  $Process.WaitForExit()
+  return $Process.ExitCode
+}
+
 function Write-Heartbeat($state) {
   $hb = [ordered]@{ time = (Get-Date).ToString('o'); keyId = $KeyId; state = $state; project = $Project }
   [IO.File]::WriteAllText((Join-Path $Root 'heartbeat.json'), ($hb | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
@@ -157,6 +188,7 @@ try {
     $out = Join-Path $Dirs.out $name
     New-Item -ItemType Directory -Force -Path $out | Out-Null
     $log = Join-Path $Dirs.logs "$name.log"
+    $gpuWait = Join-Path $Dirs.running "$name.gpuwait"
     $err = Join-Path $Dirs.logs "$name.err.log"
     $inner = @"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -164,6 +196,7 @@ try {
 `$ProgressPreference = 'SilentlyContinue'
 `$env:JOB_OUT = '$out'
 `$env:JOB_NAME = '$name'
+`$env:JOB_GPU_WAIT = '$gpuWait'
 Set-Location -LiteralPath '$Project'
 try {
   & '$run' *>&1 | Out-String -Stream -Width 400
@@ -177,14 +210,14 @@ try {
 
     $started = Get-Date
     Write-Heartbeat "running:$name"
-    Write-Host "[実行] $name(上限 $timeout 秒)" -ForegroundColor Green
+    Write-Host "[実行] $name(上限 $timeout 秒。GPU の順番待ちは数えない)" -ForegroundColor Green
     $p = Start-Process -FilePath 'powershell.exe' `
            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc) `
            -WorkingDirectory $Project -RedirectStandardOutput $log -RedirectStandardError $err `
            -NoNewWindow -PassThru
     $null = $p.Handle
-    if ($p.WaitForExit($timeout * 1000)) { $p.WaitForExit(); $code = $p.ExitCode }
-    else { & taskkill.exe /T /F /PID $p.Id | Out-Null; $code = 'timeout' }
+    $code = Wait-JobProcess $p $timeout $gpuWait
+    Remove-Item -LiteralPath $gpuWait -Force -ErrorAction SilentlyContinue
 
     $ended = Get-Date
     $outFiles = @(Get-ChildItem -LiteralPath $out -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($Root.Length + 1) })
