@@ -239,15 +239,21 @@ namespace bicameral::sim {
 
         const std::array<GasGpuParameters, 1> parameters = {
             MakeGasGpuParameters(tree.config, tree.levels[0].coefficients)};
-        m_srvs = {CreateUploadBuffer(device, std::span<const GasGpuParameters>(parameters)),
-                  CreateUploadBuffer(device, std::span<const GasTreeGpuLevel>(levels)),
-                  CreateUploadBuffer(device, std::span<const GasGpuDerived>(referenceDerived)),
-                  CreateUploadBuffer(device, std::span<const GasGpuCell>(ghost)),
-                  CreateUploadBuffer(device, std::span<const GasTreeGpuFace>(gpuFaces)),
-                  CreateUploadBuffer(device, std::span<const GasTreeGpuPlace>(places)),
-                  CreateUploadBuffer(device, std::span<const uint32_t>(cellFaces))};
-        for (const ComPtr<ID3D12Resource>& srv : m_srvs) {
-            if (!srv)
+        m_srvUploads = {CreateUploadBuffer(device, std::span<const GasGpuParameters>(parameters)),
+                        CreateUploadBuffer(device, std::span<const GasTreeGpuLevel>(levels)),
+                        CreateUploadBuffer(device, std::span<const GasGpuDerived>(referenceDerived)),
+                        CreateUploadBuffer(device, std::span<const GasGpuCell>(ghost)),
+                        CreateUploadBuffer(device, std::span<const GasTreeGpuFace>(gpuFaces)),
+                        CreateUploadBuffer(device, std::span<const GasTreeGpuPlace>(places)),
+                        CreateUploadBuffer(device, std::span<const uint32_t>(cellFaces))};
+        // 読むのは既定のヒープの写しから(アップロードのヒープは CPU のメモリで、毎段 PCIe 越しに読むと L2 に収まらない大きさで
+        // セルの数に対して超線形に遅くなる。32³ で 1 刻み 約 1300 ms。T-0374)。写すのは RecordUpload
+        for (size_t i = 0; i < m_srvUploads.size(); ++i) {
+            if (!m_srvUploads[i])
+                return std::unexpected("気体の木の形のバッファを作れない");
+
+            m_srvs[i] = gpu::CreateBuffer(device, m_srvUploads[i]->GetDesc().Width, gpu::BufferKind::UnorderedAccess);
+            if (!m_srvs[i])
                 return std::unexpected("気体の木の形のバッファを作れない");
         }
 
@@ -311,6 +317,16 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier((uint32_t)toUav.size(), toUav.data());
+
+        // --- 木の形(t0〜t6)を既定のヒープへ(T-0374)---
+        std::array<D3D12_RESOURCE_BARRIER, 7> toShaderResource{};
+        for (size_t i = 0; i < m_srvs.size(); ++i) {
+            list->CopyResource(m_srvs[i].Get(), m_srvUploads[i].Get());
+            toShaderResource[i] = gpu::Transition(m_srvs[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
+        list->ResourceBarrier((uint32_t)toShaderResource.size(), toShaderResource.data());
     }
 
     // 1 つの段を投げ、全部の UAV の書き込みを次の段より前に終わらせる
@@ -336,6 +352,9 @@ namespace bicameral::sim {
     // 1 刻み = いちばん細かい小刻み substeps × 2^σmax 回(gas_tree.cpp の StepGasTree)。乱数の丸めの小刻みの通し番号はレベルごとに段の中で作る
     void GpuGasTree::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         const uint32_t micros = m_substeps << m_maxExponent;
+        if (m_passTimestamps)
+            list->EndQuery(m_passTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+
         for (uint32_t micro = 0; micro < micros; ++micro) {
             const Constants constants{.tickLow = (uint32_t)m_tick,
                                       .tickHigh = (uint32_t)(m_tick >> 32),
@@ -345,8 +364,13 @@ namespace bicameral::sim {
                                       .cellCount = m_cellCount,
                                       .faceCount = m_faceCount,
                                       .unused = 0};
-            for (size_t pass = 0; pass < (size_t)Pass::Count; ++pass)
+            for (size_t pass = 0; pass < (size_t)Pass::Count; ++pass) {
                 RecordPass(list, debugRing, (Pass)pass, constants);
+                if (m_passTimestamps) {
+                    const uint32_t slot = 1 + (micro * (uint32_t)Pass::Count) + (uint32_t)pass;
+                    list->EndQuery(m_passTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot);
+                }
+            }
         }
 
         ++m_tick;
@@ -406,6 +430,39 @@ namespace bicameral::sim {
             return std::nullopt;
 
         return ticks[1] - ticks[0];
+    }
+
+    // --- 段ごとの計測(T-0374)。段の後のバリアの後に打つので、差 = その段の Dispatch + バリア ---
+
+    bool GpuGasTree::EnablePassTiming(ID3D12Device* device) {
+        static_assert(PASS_COUNT == (size_t)Pass::Count);
+        const uint32_t count = 1 + PassesPerTick();
+        const D3D12_QUERY_HEAP_DESC queryDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = count, .NodeMask = 0};
+        if (FAILED(device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&m_passTimestamps))))
+            return false;
+
+        m_passTimestampReadback = gpu::CreateBuffer(device, count * sizeof(uint64_t), gpu::BufferKind::Readback);
+
+        return m_passTimestampReadback != nullptr;
+    }
+
+    void GpuGasTree::RecordPassTimingReadback(ID3D12GraphicsCommandList10* list) const {
+        if (m_passTimestamps)
+            list->ResolveQueryData(m_passTimestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 1 + PassesPerTick(),
+                                   m_passTimestampReadback.Get(), 0);
+    }
+
+    std::optional<std::array<uint64_t, GpuGasTree::PASS_COUNT>> GpuGasTree::PassTimingTicks() const {
+        std::vector<uint64_t> ticks(1 + PassesPerTick());
+        if (!m_passTimestamps ||
+            !gpu::ReadBuffer(m_passTimestampReadback.Get(), std::as_writable_bytes(std::span(ticks))))
+            return std::nullopt;
+
+        std::array<uint64_t, PASS_COUNT> totals = {};
+        for (size_t slot = 1; slot < ticks.size(); ++slot)
+            totals[(slot - 1) % PASS_COUNT] += ticks[slot] - ticks[slot - 1];
+
+        return totals;
     }
 
 }  // namespace bicameral::sim
