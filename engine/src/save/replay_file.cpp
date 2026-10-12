@@ -326,7 +326,8 @@ namespace bicameral::save {
         if (header.tableCount > MAX_TABLES)
             return std::unexpected(std::format("表の数 {} が多すぎる(上限 {})", header.tableCount, MAX_TABLES));
 
-        if (header.world != static_cast<uint32_t>(ReplayWorld::Probe))
+        if (header.world != static_cast<uint32_t>(ReplayWorld::Sample) &&
+            header.world != static_cast<uint32_t>(ReplayWorld::Blank))
             return std::unexpected(std::format("知らない世界の種類 {}", header.world));
 
         const auto fixed = FixedBytes(header);

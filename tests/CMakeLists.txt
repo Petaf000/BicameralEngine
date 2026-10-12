@@ -92,6 +92,11 @@ target_compile_definitions(reaction_replay_table_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(reaction_replay_table_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME reaction_replay_table COMMAND reaction_replay_table_test)
+# ブランクの世界(T-0371・D-455): 空の表のベイクと作り直し・何刻み進めても何も起きない・再生ファイルの世界の種類(CPU リファレンス)
+add_executable(blank_world_test blank_world_test.cpp)
+target_precompile_headers(blank_world_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(blank_world_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_save bicameral_core)
+add_test(NAME blank_world COMMAND blank_world_test)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
 # 物質を足す・消す表の差し替えで、セルの物質 ID を名前で付け替える(T-0223・ADR-0065。CPU リファレンス。GPU は T-0242)
 add_executable(reaction_species_remap_test reaction_species_remap_test.cpp)
@@ -101,7 +106,7 @@ add_test(NAME reaction_species_remap COMMAND reaction_species_remap_test)
 set_tests_properties(reaction_species_remap PROPERTIES TIMEOUT 600)
 # 表が読めない・検査で落ちる時、ランタイムは窓を開く前に止まる(T-0157。GPU を使わない)
 add_test(NAME reaction_package_runtime_stops
-         COMMAND bicameral --frames 1 --packages ${CMAKE_CURRENT_SOURCE_DIR}/packages_broken)
+         COMMAND bicameral --world sample --frames 1 --packages ${CMAKE_CURRENT_SOURCE_DIR}/packages_broken)
 set_tests_properties(reaction_package_runtime_stops PROPERTIES
   PASS_REGULAR_EXPRESSION "フレームのループを始められない: 反応表のパッケージ.*ベイクの検査で落ちた" TIMEOUT 60)
 
@@ -382,6 +387,12 @@ set_tests_properties(gpu_probe_peek gpu_probe_peek_warp PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test(gpu_probe_fire_test)
 target_link_libraries(gpu_probe_fire_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 --no-gbv)
+# ブランクの世界(T-0371・D-455): 空の表・物の無い世界の GPU の刻みが CPU とハッシュ一致し、刻み 0 のまま変わらない
+bicameral_add_gpu_test(gpu_probe_blank_test)
+target_link_libraries(gpu_probe_blank_test PRIVATE bicameral_sim bicameral_reaction_script)
+add_dependencies(gpu_probe_blank_test bicameral_data)
+bicameral_add_gpu_test_case(gpu_probe_blank gpu_probe_blank_test gpu)
+bicameral_add_gpu_test_case(gpu_probe_blank_warp gpu_probe_blank_test warp --warp)
 
 # 伝導の Work Graph の時間を伝播の規模ごとに測る(T-0005。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_conduct_bench
@@ -398,7 +409,7 @@ target_link_libraries(gpu_place_bench PRIVATE bicameral_sim)
 # 窓を開くのでハードウェアの GPU と画面が要る(ラベル gpu。CI は外す)。
 set(WINDOW_REPLAY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_replay.bcreplay)
 add_test(NAME window_replay_record
-         COMMAND bicameral --frames 300 --auto-click --auto-push --record ${WINDOW_REPLAY_FILE})
+         COMMAND bicameral --world sample --frames 300 --auto-click --auto-push --record ${WINDOW_REPLAY_FILE})
 add_test(NAME window_replay_play
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --sim-load 400000 --sim-split 3 --target-fps 30)
 # 物理(T-0098)の積み木を押す。物理のパイプラインの作成が debug で約 1 分かかるので、時間の上限を広げた
@@ -414,10 +425,19 @@ set_tests_properties(window_replay_editor PROPERTIES LABELS gpu FIXTURES_REQUIRE
 add_test(NAME window_replay_rewind
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-rewind --save-interval 40)
 set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
+# ブランクの世界(既定。T-0371・D-455): セルは全部空・積み木なし・表は空。窓とエディタが起動し、記録 → 別の起動の再生で
+# ハッシュ列が一致する(再生ファイルが世界の種類を持つ。何も起きないので全部の刻みが同じハッシュ)
+set(WINDOW_BLANK_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_blank.bcreplay)
+add_test(NAME window_blank_record COMMAND bicameral --world blank --editor --frames 120 --record ${WINDOW_BLANK_FILE})
+add_test(NAME window_blank_play COMMAND bicameral --replay ${WINDOW_BLANK_FILE} --target-fps 30)
+set_tests_properties(window_blank_record PROPERTIES LABELS gpu FIXTURES_SETUP window_blank TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "世界: ブランクの世界")
+set_tests_properties(window_blank_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_blank TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK")
 # 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
-add_test(NAME window_lab COMMAND bicameral --editor --auto-lab --frames 20)
+add_test(NAME window_lab COMMAND bicameral --world sample --editor --auto-lab --frames 20)
 set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
-add_test(NAME window_lab_compare COMMAND bicameral --editor --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
+add_test(NAME window_lab_compare COMMAND bicameral --world sample --editor --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
 set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 世界に物を置く筆(T-0222): パネルの筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずのものが全部 GPU で
 # 当たったか(--auto-place。通らなければ 1)を記録し、別の起動で再生して同じハッシュ列になる(置くコマンドも再生ファイルだけで再現)。
@@ -426,7 +446,7 @@ set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 刻みが遅い(debug で 1 フレーム 1 刻み未満)ので、保存点は 2 刻みごとに 8 個
 set(WINDOW_PLACE_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place.bcreplay)
 add_test(NAME window_place_record
-         COMMAND bicameral --editor --auto-place --save-points 8 --save-interval 2 --frames 120
+         COMMAND bicameral --world sample --editor --auto-place --save-points 8 --save-interval 2 --frames 120
                  --record ${WINDOW_PLACE_FILE})
 add_test(NAME window_place_play COMMAND bicameral --replay ${WINDOW_PLACE_FILE} --target-fps 30)
 set_tests_properties(window_place_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place TIMEOUT 600
@@ -439,7 +459,7 @@ set_tests_properties(window_place_play PROPERTIES LABELS gpu FIXTURES_REQUIRED w
 # 記録を別の起動で再生して同じハッシュ列(パッチのコマンドも再生ファイルだけで再現)
 set(WINDOW_PATCH_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_patch.bcreplay)
 add_test(NAME window_patch_record
-         COMMAND bicameral --editor --auto-patch --frames 120 --record ${WINDOW_PATCH_FILE})
+         COMMAND bicameral --world sample --editor --auto-patch --frames 120 --record ${WINDOW_PATCH_FILE})
 add_test(NAME window_patch_play COMMAND bicameral --replay ${WINDOW_PATCH_FILE} --target-fps 30)
 set_tests_properties(window_patch_record PROPERTIES LABELS gpu FIXTURES_SETUP window_patch TIMEOUT 900
   PASS_REGULAR_EXPRESSION "--auto-patch: .*OK")
@@ -465,7 +485,7 @@ set(WINDOW_HOT_RELOAD_SWAP "反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ 
 add_test(NAME window_hot_reload_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_HOT_RELOAD_PACKAGES})
 add_test(NAME window_hot_reload_record
-         COMMAND bicameral --editor --auto-reload --species-remap --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
+         COMMAND bicameral --world sample --editor --auto-reload --species-remap --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
                  --peek 28,32,32 --peek-depth 9 --frames 3000 --record ${WINDOW_HOT_RELOAD_FILE})
 add_test(NAME window_hot_reload_play
          COMMAND bicameral --replay ${WINDOW_HOT_RELOAD_FILE} --peek 28,32,32 --peek-depth 9
@@ -485,7 +505,7 @@ set(WINDOW_GAME_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_hot_reload_game.b
 add_test(NAME window_hot_reload_game_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_GAME_RELOAD_PACKAGES})
 add_test(NAME window_hot_reload_game_record
-         COMMAND bicameral --auto-reload --species-remap --auto-ignite --packages ${WINDOW_GAME_RELOAD_PACKAGES} --frames 3000
+         COMMAND bicameral --world sample --auto-reload --species-remap --auto-ignite --packages ${WINDOW_GAME_RELOAD_PACKAGES} --frames 3000
                  --save-points 4 --save-interval 4 --auto-rewind --record ${WINDOW_GAME_RELOAD_FILE})
 add_test(NAME window_hot_reload_game_play
          COMMAND bicameral --replay ${WINDOW_GAME_RELOAD_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
@@ -500,7 +520,7 @@ set(WINDOW_TABLE_EDIT_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/table_edit_packages)
 add_test(NAME window_table_edit_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_TABLE_EDIT_PACKAGES})
 add_test(NAME window_table_edit
-         COMMAND bicameral --editor --auto-table-edit --packages ${WINDOW_TABLE_EDIT_PACKAGES} --frames 3000)
+         COMMAND bicameral --world sample --editor --auto-table-edit --packages ${WINDOW_TABLE_EDIT_PACKAGES} --frames 3000)
 set_tests_properties(window_table_edit_copy PROPERTIES FIXTURES_SETUP window_table_edit_packages)
 set_tests_properties(window_table_edit PROPERTIES LABELS gpu TIMEOUT 600 FIXTURES_REQUIRED window_table_edit_packages
   PASS_REGULAR_EXPRESSION "--auto-table-edit: 元の版 [0-9a-f]+ の表に戻った。OK")
@@ -513,7 +533,7 @@ set(IMAGE_BASELINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/images)
 set(IMAGE_COMPARE ${PROJECT_SOURCE_DIR}/tools/image_compare/image_compare.py)
 function(bicameral_add_image_test name tick)
   add_test(NAME image_${name}_capture
-           COMMAND bicameral --frames 3000 --screenshot-tick ${tick} --screenshot ${IMAGE_ACTUAL_DIR}/${name}.bmp ${ARGN})
+           COMMAND bicameral --world sample --frames 3000 --screenshot-tick ${tick} --screenshot ${IMAGE_ACTUAL_DIR}/${name}.bmp ${ARGN})
   add_test(NAME image_${name}
            COMMAND ${Python3_EXECUTABLE} ${IMAGE_COMPARE} compare ${IMAGE_ACTUAL_DIR}/${name}.bmp
                    ${IMAGE_BASELINE_DIR}/${name}.png --diff ${IMAGE_ACTUAL_DIR}/${name}.diff.png)
@@ -575,6 +595,6 @@ foreach(_name IN ITEMS
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
-    gpu_conduct_bench gpu_place_bench)
+    gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

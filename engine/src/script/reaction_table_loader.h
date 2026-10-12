@@ -22,12 +22,13 @@
 
 namespace bicameral::script {
 
-    // 今の仮の世界のゲーム本体のパッケージ(公開用の試験の表。ゲームの中身の表は T-0002 でユーザーが決める)
+    // サンプルの世界のゲーム本体のパッケージ(公開用の試験の表。D-456。ゲームの中身の表は T-0002 でユーザーが決める)。
+    // ブランクの世界(D-455)はこれを読まない(LoadBlankReactionTable か、basePackage を空にして読む)
     constexpr std::string_view DEFAULT_BASE_PACKAGE = "combustion_test";
 
     struct ReactionTableSource {
         fs::path packageRoot;  // 直下のフォルダが 1 つずつパッケージ(空なら DefaultPackageRoot)
-        std::string basePackage{DEFAULT_BASE_PACKAGE};  // ゲーム本体。読めなければ失敗
+        std::string basePackage{DEFAULT_BASE_PACKAGE};  // ゲーム本体。読めなければ失敗(空ならゲーム本体なし = 全部 Mod)
         MergeMode mergeMode = MergeMode::AddOnly;       // 表の合わせ方(仮で案 C の既定。QUESTIONS Q8)
         fs::path typeDefinitions;  // 型検査に使う型の定義(T-0140。空なら DefaultTypeDefinitionsPath。読めなければ失敗)
     };
@@ -48,6 +49,10 @@ namespace bicameral::script {
 
     // パッケージのフォルダから反応表を読んでベイクする。誤りには「どのフォルダ・どのパッケージ・どの欄か」を付ける
     [[nodiscard]] std::expected<LoadedReactionTable, std::string> LoadReactionTable(const ReactionTableSource& source);
+
+    // ブランクの世界の表(D-455・ADR-0151 の 3・T-0371): パッケージを 1 つも読まない空の表(物質は使わない 0 番だけ・規則 0)。
+    // 版と中身は空の表のもの(再生ファイルに残し、RebuildReactionTable で同じ表に作り直せる)。packageRoot は空
+    [[nodiscard]] std::expected<LoadedReactionTable, std::string> LoadBlankReactionTable();
 
     // 再生ファイルに残した表の中身(TableBytes)から、パッケージのフォルダ無しで同じ表を作り直す(T-0193・ADR-0050)。
     // 中身のハッシュと、作り直した表の版が expectedVersion と同じでなければ失敗(壊れた・書き換えた中身で世界を動かさない)。

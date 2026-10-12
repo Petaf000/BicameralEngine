@@ -193,16 +193,21 @@ namespace bicameral::sim {
             uint32_t levelsLeft;
         };
 
+        // 空の列(ブランクの世界の表の規則など。T-0371)は 0 の要素 1 つ分にする(大きさ 0 のバッファは作れない。数は定数で渡すので
+        // 読まれない)
         template <typename T>
         ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, std::span<const T> data) {
             const auto bytes = std::as_bytes(data);
-            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
+            const size_t bufferBytes = std::max(bytes.size(), sizeof(T));
+            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bufferBytes, gpu::BufferKind::Upload);
             void* mapped = nullptr;
             const D3D12_RANGE noRead{.Begin = 0, .End = 0};
             if (!buffer || FAILED(buffer->Map(0, &noRead, &mapped)))
                 return nullptr;
 
-            std::memcpy(mapped, bytes.data(), bytes.size());
+            std::memset(mapped, 0, bufferBytes);
+            if (!bytes.empty())
+                std::memcpy(mapped, bytes.data(), bytes.size());
             buffer->Unmap(0, nullptr);
 
             return buffer;
