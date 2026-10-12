@@ -137,6 +137,125 @@ WaitBlockResult EvaluateUniformWait(uint32_t slot, uint32_t thread) {
     return EndWaitReduce(thread, wakeTick);
 }
 
+#ifdef MR_WIDE_CELLS
+// 一様の値(インライン + 一様の値の溢れ〔WideUniformArea のセル 0 の範囲。T-0312〕)を速い形で読む。速い形に入らなければ false
+// (観察の枠は一様の値の溢れの領域を持たないので、インラインだけ)
+bool LoadUniformMid(uint32_t slot, out RxGpuMidCell value) {
+    const RxCell inlineValue = g_cells[slot];
+    if (slot >= g_worldBlocks) {
+        value = RxEmptyCellLike(MidShape(), inlineValue.energy);
+        value.speciesCount = inlineValue.speciesCount;
+        for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+            value.species[i] = inlineValue.species[i];
+            value.amounts[i] = inlineValue.amounts[i];
+        }
+
+        return true;
+    }
+
+    const uint32_t area = WideUniformArea(slot);
+    const uint32_t side = WideCurrentSide(area);
+    value = RxEmptyCellLike(MidShape(), inlineValue.energy);
+    if (!WideFitsShape(RX_GPU_MID_SPECIES, inlineValue, area, side, 0))
+        return false;
+
+    value = LoadGpuWideCell(MidShape(), inlineValue, area, side, 0);
+
+    return true;
+}
+
+// 一様なブロックを速い形で評価する(溢れを使う変種。T-0384。CPU の MrUniformWaitOf(…, LoadWideUniform, …, true))。
+// 一様の値の溢れまで読む。溢れの無い値も速い形で評価する: 8 種以下の間はインラインの形とビット単位で同じ(T-0175)で、9 種目を作るセルは
+// インラインなら待たせた印(UNIFORM_EXPANDS_HELD で広げる)・速い形なら変わる(広げる)なので、どちらも頁に広げる。速い形の上限(32 種)で
+// 待たせたセルも広げる(上限の無い形では変わる = 広げる)。反応の核の展開はインラインの評価を置き換えるので増えない。
+// 速い形に入らない値(33 種以上)は評価せずに頁に広げる(仮。CPU は上限の無い形で評価して、変わらなければ一様のまま = 食い違う。T-0389)
+WaitBlockResult EvaluateUniformWaitWide(uint32_t slot, uint32_t thread) {
+    BeginWaitReduce(thread);
+    const MrBlock block = g_blocks[slot];
+    const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
+    const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
+    uint64_t wakeTick = RX_WAIT_NEVER;
+    RxGpuMidCell value;
+    if (!LoadUniformMid(slot, value)) {
+        InterlockedOr(gs_waitChanged, 1u);
+        return EndWaitReduce(thread, wakeTick);
+    }
+
+    for (uint32_t k = 0; k < MR_BLOCK_CELLS / WAIT_STEP_THREADS; ++k) {
+        const uint32_t index = thread + (WAIT_STEP_THREADS * k);
+        if (!MrIsSteppedCell(block, index))
+            continue;
+
+        const RxWaitStepOf<RxGpuMidCell> step = MrStepCellWait(MakeStepTable(), value, seed, tick, block, index);
+        wakeTick = MinTick(wakeTick, step.wakeTick);
+        if (!SameGpuWideCell(step.cell, value) || (step.limits & RX_LIMIT_PRODUCTS) != 0)
+            InterlockedOr(gs_waitChanged, 1u);
+    }
+
+    return EndWaitReduce(thread, wakeTick);
+}
+
+// 頁に広げたブロック(枠 slot)の頁の面 0 へ、一様の値の溢れを覆われていないセル全部に写す(CPU の ExpandWantedPages の
+// StoreWidePageCell。T-0384)。塊は TreeExpand の溢れの変種が配ってある(置き場が尽きて足りなければ写さずに MR_COUNTER_OVERFLOW に
+// 数える = CPU と食い違う。細かくする時と同じ)。並びはセルの番号の順(覆われていないセルが溢れの数ずつ)。
+// ClearWidePage の後に全部のスレッドが呼ぶ(終わりに同期)
+void CopyUniformTails(uint32_t slot, MrBlock block, uint32_t thread) {
+    const uint32_t count = UniformTailCount(slot);
+    const uint32_t entries = count * UncoveredCellCount(block);
+    if (entries == 0)
+        return;
+
+    if (MrWideChunksFor(entries) > WideChunkCount(block.page, 0)) {
+        if (thread == 0)
+            InterlockedAdd(g_counters[MR_COUNTER_OVERFLOW], 1u);
+
+        return;
+    }
+
+    // --- 始まりの表(スレッド 0 のプレフィックス和)---
+    if (thread == 0) {
+        uint32_t total = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            gs_wideOffsets[index] = total;
+            total += MrIsCoveredCell(block, index) ? 0u : count;
+        }
+
+        g_treeWords[WideWord(block.page, 0, MR_BLOCK_CELLS)] = total;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // --- 成分を写す(一様の値の溢れはどのセルも同じ)---
+    const uint32_t area = WideUniformArea(slot);
+    const uint32_t side = WideCurrentSide(area);
+    const uint32_t first = WideRange(area, side, 0).x;
+    for (uint32_t index = thread; index < MR_BLOCK_CELLS; index += WAIT_STEP_THREADS) {
+        const uint32_t start = gs_wideOffsets[index];
+        g_treeWords[WideWord(block.page, 0, index)] = start;
+        if (MrIsCoveredCell(block, index))
+            continue;
+
+        for (uint32_t e = 0; e < count; ++e) {
+            const uint32_t from = MrWideEntryWord(first + e);
+            const uint32_t to = MrWideEntryWord(start + e);
+            for (uint32_t w = 0; w < 3; ++w)
+                g_treeWords[WideWord(block.page, 0, to + w)] = g_treeWords[WideWord(area, side, from + w)];
+        }
+    }
+
+    AllMemoryBarrierWithGroupSync();
+}
+#endif
+
+// 一様なブロックを評価する(溢れを使う変種は EvaluateUniformWaitWide。T-0384)
+WaitBlockResult EvaluateUniformWaitShaped(uint32_t slot, uint32_t thread) {
+#ifdef MR_WIDE_CELLS
+    return EvaluateUniformWaitWide(slot, thread);
+#else
+    return EvaluateUniformWait(slot, thread);
+#endif
+}
+
 // 刻んだ結果を見出しに書く(スレッド 0。CPU の RecordWaitResults の 1 ブロック分)
 void FinishWaitBlock(uint32_t slot, uint32_t changed, uint64_t wakeTick) {
     const uint64_t mark = CurrentChangeMark();
@@ -169,7 +288,7 @@ void StepBlockWait(uint32_t slot, uint32_t thread) {
         return;
     }
 
-    const WaitBlockResult result = EvaluateUniformWait(slot, thread);
+    const WaitBlockResult result = EvaluateUniformWaitShaped(slot, thread);
     if (thread != 0)
         return;
 
@@ -189,7 +308,8 @@ void StepExpandedWait(uint32_t slot, uint32_t thread) {
     }
 
 #ifdef MR_WIDE_CELLS
-    ClearWidePage(block.page, thread);  // 前に使った頁の溢れを読まない
+    ClearWidePage(block.page, thread);      // 前に使った頁の溢れを読まない
+    CopyUniformTails(slot, block, thread);  // 一様の値の溢れごと(T-0384)
 #endif
 
     StepPagedWaitShaped(slot, thread);  // 同じスレッドが同じセルを受け持つので、埋めた後に同期は要らない

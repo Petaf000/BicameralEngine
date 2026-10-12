@@ -447,6 +447,66 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 // (伝導を入れた刻みでは ConductPrepare が埋め、ConductApply が刻む。配った・凍らせた印を伝導の作業場に書く。T-0107)。
 // 伝導の小刻み(T-0109)では小刻みごとに呼ぶ。印は小刻みごと、種は 1 刻みに 1 回だけ足す(AppendSeedOnce)
 
+#ifdef MR_WIDE_CELLS
+// 溢れを使う世界(T-0384): 頁に広げたブロックの頁の面 0 に、一様の値の溢れを覆われていないセル全部へ写す
+// (multires_wait_step.hlsli の CopyUniformTails)ための塊を、一覧の順(枠の順)の累積和で空きのスタックの上から配る
+// (TreeWideReserve と同じ型)。足りなければそのブロックには配らない(写す時に数える。置き場が尽きた時だけ)。前から持つ塊はそのまま使う
+
+// 頁に広げるブロック slot の頁の面 0 に足す塊の数(attach なら stack の上から taken 番目より下を付ける)
+uint32_t ReserveExpandTail(uint32_t slot, bool attach, uint32_t stack, uint32_t freeCount, uint32_t taken) {
+    const MrBlock block = g_blocks[slot];
+    const uint32_t entries = UniformTailCount(slot) * UncoveredCellCount(block);
+    if (entries == 0)
+        return 0;
+
+    const uint32_t need = MrWideChunksFor(entries);
+    const uint32_t table = MrWideTableAt(WideAreaHeader(block.page), 0);
+    const uint32_t held = g_treeWords[table];
+    if (need <= held)
+        return 0;
+
+    if (attach) {
+        for (uint32_t j = held; j < need; ++j)
+            g_treeWords[WideTableEntryWord(table, j)] = g_treeWords[stack + freeCount - 1 - (taken + (j - held))];
+
+        g_treeWords[table] = need;
+    }
+
+    return need - held;
+}
+
+void ReserveExpandChunks(uint32_t i, uint32_t granted) {
+    if (i == 0)
+        gs_grantedBlocks = 0;
+
+    AllMemoryBarrierWithGroupSync();  // 頁を配った枠(g_blocks)と一覧を全部のスレッドが読めるように
+
+    const uint32_t pool = WidePoolWord();
+    const uint32_t stack = MrWideStackWord(pool, g_treeWords[pool + MR_WIDE_POOL_CAPACITY]);
+    const uint32_t freeCount = g_treeWords[pool + MR_WIDE_POOL_FREE];
+    uint32_t taken = 0;  // ここまでの区切りで欲しい塊の数(グループで一様)
+    for (uint32_t first = 0; first < granted; first += MR_MAX_REQUESTS) {
+        const uint32_t position = first + i;
+        const uint32_t slot = position < granted ? ExpandRecord(position + 1) : MR_NO_BLOCK;
+        const uint32_t want = slot != MR_NO_BLOCK ? ReserveExpandTail(slot, false, stack, freeCount, 0) : 0u;
+        InclusiveScan(i, want, 0, 0);
+
+        // --- 累積和が空きに入るブロックだけ配る(累積和は増えるだけなので、配るのは一覧の前から続く)---
+        const uint32_t sum = taken + gs_blockScan[i];
+        if (want != 0 && sum <= freeCount) {
+            ReserveExpandTail(slot, true, stack, freeCount, sum - want);
+            InterlockedMax(gs_grantedBlocks, sum);
+        }
+
+        taken += gs_blockScan[MR_MAX_REQUESTS - 1];
+        GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
+    }
+
+    if (i == 0)
+        g_treeWords[pool + MR_WIDE_POOL_FREE] = freeCount - gs_grantedBlocks;
+}
+#endif
+
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeExpand(uint32_t i : SV_GroupIndex) {
     const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
     uint32_t wanted = 0;  // ここまでの区切りで頁に広げたいブロックの数(グループで一様)
@@ -469,6 +529,9 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
         wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
         GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
     }
+#ifdef MR_WIDE_CELLS
+    ReserveExpandChunks(i, min(wanted, freePages));
+#endif
 
     if (i != 0)
         return;
