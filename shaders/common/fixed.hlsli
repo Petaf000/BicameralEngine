@@ -16,6 +16,7 @@
 #include <cstdint>
 #define FX_FN constexpr inline
 #define FX_CONST inline constexpr
+#define FX_UNROLL
 #define FX_NAMESPACE_BEGIN namespace bicameral::fx {
 #define FX_NAMESPACE_END }
 #ifndef FX_ASSERT
@@ -33,6 +34,7 @@
 #include "common/debug_ring.hlsli"
 #define FX_FN
 #define FX_CONST static const
+#define FX_UNROLL [unroll]  // 決まった数の回しを開く(配列を動的な添字で読まずにレジスタのままにする。T-0397)
 #define FX_NAMESPACE_BEGIN
 #define FX_NAMESPACE_END
 #ifndef FX_ASSERT

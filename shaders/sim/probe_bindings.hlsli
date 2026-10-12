@@ -52,6 +52,7 @@ struct ProbeReactionTable {
     RxSpecies Species(uint32_t id) { return reactionSpecies[id]; }
 
     RxRule Rule(uint32_t id) { return reactionRules[id]; }
+    RxRule RateRule(uint32_t id) { return reactionRules[id]; }
 
     uint32_t RuleIndex(uint32_t position) { return reactionRuleIndex[position]; }
 

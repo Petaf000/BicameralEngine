@@ -198,32 +198,58 @@ FX_FN uint32_t MpSpeciesCount(Table table) {
     return table.Species(0).elementUnits;
 }
 
-// 規則 rule の生成物の欄 slot を物質 species に替えた時の係数(元素が釣り合わなければ 0 = 替えない)。
+// 生成物の欄 1 つを替えた結果: 係数(0 = 替えない)と、反応熱の変わる分(替えた後の係数 × H0 − 替える前の係数 × H0。J/mol)
+struct MpSlotConversion {
+    uint32_t coefficient;
+    int64_t enthalpyChange;
+};
+
+// 規則 rule の生成物の欄 slot を物質 species に替えた時の係数(元素が釣り合わなければ 0 = 替えない)と反応熱の変わる分。
 // 替える先は今の表にある物質で、元素を持ち、規則の反応物でないこと(反応物と同じ物を作ると、何も変わらない輪になる)
 template <typename Table>
-FX_FN uint32_t MpConvertedCoefficient(Table table, RxRule rule, uint32_t slot, uint32_t species) {
+FX_FN MpSlotConversion MpConvertSlot(Table table, RxRule rule, uint32_t slot, uint32_t species) {
+    MpSlotConversion result;
+    result.coefficient = 0;
+    result.enthalpyChange = 0;
     if (slot >= rule.productCount || species == 0 || species >= MpSpeciesCount(table))
-        return 0;
+        return result;
 
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
         if (rule.reactants[i] == species)
-            return 0;
+            return result;
     }
 
-    const RxSpecies before = table.Species(rule.products[slot]);
+    // 欄 slot を決まった数の回しで選ぶ(動的な添字を使わない。GPU でローカルの配列にしない。T-0397)
+    uint32_t beforeId = 0;
+    uint32_t coefficient = 0;
+    FX_UNROLL for (uint32_t p = 0; p < RX_MAX_PRODUCTS; ++p) {
+        if (p == slot) {
+            beforeId = rule.products[p];
+            coefficient = rule.productCoefficients[p];
+        }
+    }
+
+    const RxSpecies before = table.Species(beforeId);
     const RxSpecies after = table.Species(species);
-    const uint32_t coefficient = rule.productCoefficients[slot];
     const bool sameClass = before.elementClass != 0 && before.elementClass == after.elementClass;
     const bool bounded = coefficient <= MP_MAX_CONVERT_FACTOR && before.elementUnits <= MP_MAX_CONVERT_FACTOR &&
                          after.elementUnits != 0;
     if (!sameClass || !bounded)
-        return 0;
+        return result;
 
     const uint32_t units = coefficient * before.elementUnits;
     if (units % after.elementUnits != 0)
-        return 0;
+        return result;
 
-    return units / after.elementUnits;
+    result.coefficient = units / after.elementUnits;
+    result.enthalpyChange = ((int64_t)result.coefficient * after.h0) - ((int64_t)coefficient * before.h0);
+
+    return result;
+}
+
+template <typename Table>
+FX_FN uint32_t MpConvertedCoefficient(Table table, RxRule rule, uint32_t slot, uint32_t species) {
+    return MpConvertSlot(table, rule, slot, species).coefficient;
 }
 
 // 反応熱(進行度 1 µmol あたりの µJ)= Σ 生成物の H0 − Σ 反応物の H0(ベイクの ReactionEnthalpy と同じ式)
@@ -529,6 +555,7 @@ template <typename Table>
 FX_FN RxRule MpConvertedRule(Table table, uint32_t converting, RxRule rule) {
     RxRule converted = rule;
     uint32_t doneSlots = 0;
+    int64_t enthalpyChange = 0;
     for (uint32_t i = 0; i < MP_MAX_PATCHES; ++i) {
         if (((converting >> i) & 1u) == 0)
             continue;
@@ -542,23 +569,26 @@ FX_FN RxRule MpConvertedRule(Table table, uint32_t converting, RxRule rule) {
             continue;
 
         const uint32_t species = MpEffectConvertSpecies(effect);
-        const uint32_t coefficient = MpConvertedCoefficient(table, rule, slot, species);
-        if (coefficient == 0)
+        const MpSlotConversion conversion = MpConvertSlot(table, rule, slot, species);
+        if (conversion.coefficient == 0)
             continue;
 
         // 欄 slot を書き換える(動的な添字を使わない。GPU でレジスタのまま)
-        for (uint32_t p = 0; p < RX_MAX_PRODUCTS; ++p) {
+        FX_UNROLL for (uint32_t p = 0; p < RX_MAX_PRODUCTS; ++p) {
             if (p == slot) {
                 converted.products[p] = species;
-                converted.productCoefficients[p] = coefficient;
+                converted.productCoefficients[p] = conversion.coefficient;
             }
         }
 
+        enthalpyChange += conversion.enthalpyChange;
         doneSlots |= 1u << slot;
     }
 
-    if (doneSlots != 0)
-        converted.reactionEnthalpy = MpRuleEnthalpy(table, converted);
+    // 反応熱は替えた欄の分だけ足し直す。ベイクの反応熱は Σ 生成物の H0 − Σ 反応物の H0(reaction_table.cpp の ReactionEnthalpy)
+    // なので、整数で MpRuleEnthalpy を求め直したのとビット単位で同じ。規則全部の物質を読み直さない(核が規則を読む所ごとに
+    // 展開されるので、HW の Work Graph が大きくなりすぎて止まった。T-0397)
+    converted.reactionEnthalpy = rule.reactionEnthalpy + enthalpyChange;
 
     return converted;
 }
@@ -596,6 +626,9 @@ struct MpPatchedTable {
 
         return MpConvertedRule(base, converting, rule);
     }
+
+    // 速さと優先度だけに使う規則(reaction.hlsli の Table の約束。転換は速さの欄を変えないので替える前の規則。T-0397)
+    RxRule RateRule(uint32_t id) { return base.Rule(id); }
 
     uint32_t RuleIndex(uint32_t position) { return base.RuleIndex(position); }
 

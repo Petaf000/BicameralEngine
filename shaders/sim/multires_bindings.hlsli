@@ -159,6 +159,7 @@ struct GpuReactionTable {
     RxSpecies Species(uint32_t id) { return g_species[id]; }
 
     RxRule Rule(uint32_t id) { return g_rules[id]; }
+    RxRule RateRule(uint32_t id) { return g_rules[id]; }
 
     uint32_t RuleIndex(uint32_t position) { return g_ruleIndex[position]; }
 

@@ -92,6 +92,9 @@ namespace bicameral::sim {
 
         [[nodiscard]] reaction::RxSpecies Species(uint32_t id) const { return species[id]; }
         [[nodiscard]] reaction::RxRule Rule(uint32_t id) const { return rules[id]; }
+        [[nodiscard]] reaction::RxRule RateRule(uint32_t id) const {
+            return rules[id];
+        }  // 速さと優先度だけに使う規則(T-0397)
         [[nodiscard]] uint32_t RuleIndex(uint32_t position) const { return ruleIndex[position]; }
         [[nodiscard]] uint64_t Rate(uint32_t rule, uint32_t kelvin) const {
             return rates[(size_t{rule} * reaction::RX_RATE_TABLE_KELVINS) + kelvin];
