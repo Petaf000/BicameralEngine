@@ -179,6 +179,15 @@ namespace bicameral::sim {
             return {.nodes = std::move(nodes), .links = std::move(links)};
         }
 
+        // UAV のバッファ全体を読み戻しへ写し、UAV に戻す(UAV → COPY_SOURCE → UAV)。
+        // 同じリストの後の RecordRelease が UAV から COMMON へ遷移するので、COPY_SOURCE のまま残さない(T-0377。D3D12 [527])
+        void CopyToReadbackKeepingUav(ID3D12GraphicsCommandList* list, ID3D12Resource* source,
+                                      ID3D12Resource* readback) {
+            gpu::RecordCopyToReadback(list, source, readback);
+            const D3D12_RESOURCE_BARRIER back = gpu::Transition(source, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &back);
+        }
     }  // namespace
 
     std::expected<GpuImplicit, std::string> GpuImplicit::Create(ID3D12Device5* device, const GpuImplicitLimits& limits,
@@ -691,13 +700,13 @@ namespace bicameral::sim {
     }
 
     void GpuImplicit::RecordReadback(ID3D12GraphicsCommandList* list) {
-        gpu::RecordCopyToReadback(list, m_buffers[BufferCells].Get(), m_cellsReadback.Get());
+        CopyToReadbackKeepingUav(list, m_buffers[BufferCells].Get(), m_cellsReadback.Get());
         RecordCostReadback(list);
     }
 
     void GpuImplicit::RecordCostReadback(ID3D12GraphicsCommandList* list) {
-        gpu::RecordCopyToReadback(list, m_buffers[BufferState].Get(), m_stateReadback.Get());
-        gpu::RecordCopyToReadback(list, m_buffers[BufferWide].Get(), m_wideReadback.Get());
+        CopyToReadbackKeepingUav(list, m_buffers[BufferState].Get(), m_stateReadback.Get());
+        CopyToReadbackKeepingUav(list, m_buffers[BufferWide].Get(), m_wideReadback.Get());
 
         D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
             m_buffers[BufferPlan].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
