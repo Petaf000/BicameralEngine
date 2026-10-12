@@ -743,7 +743,7 @@ namespace {
     }
 
     // 保存点(パッチの途中で切った記録)と記録全体を、別の箱で初めから再生する → 毎刻みビット一致・ハッシュが記録と同じ
-    // (パッチは記録のコマンドで、効いているパッチの語は状態の要約に入る。T-0287)
+    // (パッチは記録のコマンドで、効いているパッチの語は状態の要約に入る。T-0287)。swap.table が無ければ表は替えない(T-0378)
     std::expected<void, std::string> ReplayPatchRecording(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                                           const sim::BakedReactionTable& table, const PatchSwap& swap,
                                                           lab::LabBoxShape shape, const sim::LabRecording& recorded) {
@@ -751,8 +751,10 @@ namespace {
         if (!other)
             return std::unexpected(other.error());
 
-        if (auto added = other->AddTable(*swap.table, swap.version, "shifted"); !added)
-            return added;
+        if (swap.table != nullptr) {
+            if (auto added = other->AddTable(*swap.table, swap.version, "shifted"); !added)
+                return added;
+        }
 
         const sim::LabRecording savePoint = sim::CutLabRecording(recorded, PATCH_SAVE_POINT_TICK);
         for (const sim::LabRecording* recording : {&savePoint, &recorded}) {
@@ -958,7 +960,8 @@ namespace {
         if (convertedIsomer == 0 || refusedIsomer != 0 || plainIsomer != 0 || plainDioxide == 0)
             return std::unexpected("転換が替えた所だけに効かない");
 
-        return {};
+        // --- 転換の途中の保存点(刻み PATCH_SAVE_POINT_TICK)と記録全体を別の箱で再生する(T-0378。表は替えない)---
+        return ReplayPatchRecording(device, queueType, *table, {}, sim::LAB_SINGLE_ROOT_SHAPE, session->Recording());
     }
 
     // 物質を足す・消す表の差し替えを跨ぐ転換(T-0377): 魔素ありの木を 2 か所に置き、魔素の燃焼の CO2 を 1 か所は異性体(差し替えで
