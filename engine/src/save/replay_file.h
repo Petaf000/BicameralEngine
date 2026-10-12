@@ -37,7 +37,10 @@ namespace bicameral::save {
 
     // 世界の種類(どのシミュのコマンドと状態か)。ファイルには u32 で書く
     enum class ReplayWorld : uint8_t {
-        Probe = 1,  // 仮の世界(sim/probe_sim。T-0004〜)。初期状態は全部 0、表は無い
+        // サンプルの世界(sim/probe_sim の空気の中の木箱と積み木。T-0004〜。D-456)。初期状態は sim::MakeProbeInitialWorld
+        Sample = 1,
+        // ブランクの世界(D-455・T-0371): セルは全部空・積み木なし。表は記録した表(パッケージ無しなら空の表)
+        Blank = 2,
     };
 
     struct ReplayTickHash {
@@ -59,7 +62,7 @@ namespace bicameral::save {
 
     struct ReplayFile {
         // --- どの世界の、どの状態から始まるか ---
-        ReplayWorld world = ReplayWorld::Probe;
+        ReplayWorld world = ReplayWorld::Sample;
         uint64_t tableVersion = 0;            // 初期状態の反応表の版(script::TableVersion。版 1 のファイルは 0)
         uint64_t seed = 0;                    // 世界の生成のシード(D-312)
         uint64_t startTick = 0;               // 初期状態の刻み

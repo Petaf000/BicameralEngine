@@ -517,9 +517,12 @@ namespace bicameral::sim {
 
     // --- 初めの世界(T-0089)---
 
-    // 1 世代ぶんのセル(PROBE_CELL_COUNT 個)。全体が 300 K の空気(N2・O2、1 気圧)、中央に木箱
+    // サンプルの世界(D-456)。1 世代ぶんのセル(PROBE_CELL_COUNT 個)。全体が 300 K の空気(N2・O2、1 気圧)、中央に木箱
     // (8³ セル = 4 m 角、壁の厚さ 1 セル、中は空気。壁のセルは体積の 1 割がセルロースで、残りは孔の中の空気)
     [[nodiscard]] std::vector<reaction::RxCell> MakeProbeInitialWorld(const BakedReactionTable& table);
+
+    // ブランクの世界(D-455・T-0371): 1 世代ぶんのセルが全部空(物質なし・エネルギー 0)。どの表でも何も起きない
+    [[nodiscard]] std::vector<reaction::RxCell> MakeBlankProbeWorld();
 
     // 抽出に写す物質(O2・CO2・炭の順。描画の色分け)
     [[nodiscard]] std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table);

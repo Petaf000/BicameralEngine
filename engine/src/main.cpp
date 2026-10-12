@@ -37,7 +37,12 @@
 //   --save-interval <t>              保存点へ写す間隔(刻み。既定 120)
 //   --auto-rewind                    保存点が 2 つできたら、古い方へ 1 回巻き戻す(人がいない確認。--replay と一緒にハッシュ列を確かめる。
 //                                    --auto-reload となら最初に反応表を差し替えた後の保存点へ。T-0299)
-//   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。既定: exe の横の data/packages。
+//   --world <blank|sample>           どの世界で起動するか(T-0371・D-455・D-456。既定は blank)。blank = ブランクの世界
+//                                    (セルは全部空・積み木なし・表は --packages が無ければ空)。sample = サンプルの世界(空気の中の木箱・積み木・
+//                                    試験の表 combustion_test)。木箱・積み木・試験の表を使う --auto-* は sample と一緒に使う。
+//                                    --replay のときは再生ファイルの世界(引数は見ない)
+//   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。sample の既定: exe の横の
+//                                    data/packages〔ゲーム本体 = combustion_test〕。blank はゲーム本体なしで全部を読む。
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --auto-lab-compare               実験室の計器のグラフが CPU の値と一致し、保存点から条件を 1 つ足した 2 つの実験を比べられるか
@@ -224,6 +229,17 @@ namespace {
         return {};
     }
 
+    // --world <blank|sample>(T-0371。既定 blank = D-455)
+    std::expected<save::ReplayWorld, std::string> ParseWorld(std::wstring_view text) {
+        if (text == L"blank")
+            return save::ReplayWorld::Blank;
+
+        if (text == L"sample")
+            return save::ReplayWorld::Sample;
+
+        return std::unexpected(std::format("--world は blank か sample: {}", ToUtf8(text)));
+    }
+
     // 表示の引数(--view・--camera・--screenshot・--peek・--peek-depth)
     std::expected<void, std::string> ParseViewOption(std::wstring_view argument, std::wstring_view text,
                                                      frame::FrameLoopOptions& loop) {
@@ -380,7 +396,13 @@ namespace {
                 options.frameLoop.replayPath = arguments[++i];
             else if (argument == L"--packages" && hasValue)
                 options.frameLoop.packageRoot = arguments[++i];
-            else if (argument == L"--log-dir" && hasValue)
+            else if (argument == L"--world" && hasValue) {
+                const auto world = ParseWorld(arguments[++i]);
+                if (!world)
+                    return std::unexpected(world.error());
+
+                options.frameLoop.world = *world;
+            } else if (argument == L"--log-dir" && hasValue)
                 options.logDirectory = arguments[++i];
             else if (argument == L"--log-level" && hasValue) {
                 const std::string name = ToUtf8(arguments[++i]);

@@ -90,14 +90,27 @@ namespace bicameral::gpu {
 
     // --- シェーダーが毎段読む変わらない表(T-0410)---
 
+    namespace {
+        // 空の列(ブランクの世界の表の規則など。T-0371)は大きさ 0 のバッファが作れないので、0 で埋めた最小の大きさにする
+        // (要素の数は定数で渡すので読まれない。最小は表のどの要素の型より大きい)
+        constexpr size_t MIN_RESIDENT_BUFFER_BYTES = 256;
+
+        size_t ResidentBufferBytes(std::span<const std::byte> bytes) {
+            return std::max(bytes.size(), MIN_RESIDENT_BUFFER_BYTES);
+        }
+    }  // namespace
+
     ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, std::span<const std::byte> bytes) {
-        ComPtr<ID3D12Resource> buffer = CreateBuffer(device, bytes.size(), BufferKind::Upload);
+        const size_t bufferBytes = ResidentBufferBytes(bytes);
+        ComPtr<ID3D12Resource> buffer = CreateBuffer(device, bufferBytes, BufferKind::Upload);
         void* mapped = nullptr;
         const D3D12_RANGE noRead{.Begin = 0, .End = 0};
         if (!buffer || !BICAMERAL_CHECK_HR(Channel::Gpu, buffer->Map(0, &noRead, &mapped)))
             return nullptr;
 
-        std::memcpy(mapped, bytes.data(), bytes.size());
+        std::memset(mapped, 0, bufferBytes);
+        if (!bytes.empty())
+            std::memcpy(mapped, bytes.data(), bytes.size());
         buffer->Unmap(0, nullptr);
 
         return buffer;
@@ -108,7 +121,7 @@ namespace bicameral::gpu {
         if (!result.upload)
             return result;
 
-        result.buffer = CreateBuffer(device, bytes.size(), BufferKind::UnorderedAccess);
+        result.buffer = CreateBuffer(device, ResidentBufferBytes(bytes), BufferKind::UnorderedAccess);
 
         return result;
     }

@@ -89,18 +89,23 @@ namespace bicameral::sim {
             std::memcpy(base + offset, &value, sizeof(T));
         }
 
-        // アップロードのバッファを作って中身を書く(最初のフレームで既定のヒープへ写す元)
+        // アップロードのバッファを作って中身を書く(最初のフレームで既定のヒープへ写す元)。
+        // 空の列(ブランクの世界の表の規則など。T-0371)は 0 の要素 1 つ分にする(大きさ 0 のバッファは作れない。数はルート定数で渡すので
+        // 読まれない)
         template <typename T>
         ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, const std::vector<T>& data,
                                                   const wchar_t* name) {
             const auto bytes = std::as_bytes(std::span(data));
-            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
+            const size_t bufferBytes = std::max(bytes.size(), sizeof(T));
+            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bufferBytes, gpu::BufferKind::Upload);
             void* mapped = nullptr;
             const D3D12_RANGE noRead{};
             if (!buffer || FAILED(buffer->Map(0, &noRead, &mapped)))
                 return nullptr;
 
-            std::memcpy(mapped, bytes.data(), bytes.size());
+            std::memset(mapped, 0, bufferBytes);
+            if (!bytes.empty())
+                std::memcpy(mapped, bytes.data(), bytes.size());
             buffer->Unmap(0, nullptr);
             buffer->SetName(name);
 
@@ -1217,6 +1222,10 @@ namespace bicameral::sim {
         }
 
         return cells;
+    }
+
+    std::vector<reaction::RxCell> MakeBlankProbeWorld() {
+        return std::vector<reaction::RxCell>(PROBE_CELL_COUNT, reaction::RxMakeEmptyCell(0));
     }
 
     std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table) {

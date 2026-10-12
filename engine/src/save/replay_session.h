@@ -31,11 +31,15 @@ namespace bicameral::save {
         // 足し直されないので記録に残らない(記録は「最後の流れ」だけ。元に戻す操作の印は残さない)
         void Rewind(uint64_t tick);
 
+        // どの世界の記録か(既定はサンプルの世界。ブランクの世界で走らせたら Blank。T-0371)
+        void SetWorld(ReplayWorld world) { m_world = world; }
+
         // 記録を再生ファイルの形にする(仮の世界。刻み 0 の全部 0 の状態から)
         [[nodiscard]] ReplayFile Build() const;
         [[nodiscard]] std::expected<void, std::string> Write(const fs::path& path) const;
 
     private:
+        ReplayWorld m_world = ReplayWorld::Sample;
         std::vector<sim::Command> m_commands;
         std::vector<ReplayTickHash> m_hashes;
     };

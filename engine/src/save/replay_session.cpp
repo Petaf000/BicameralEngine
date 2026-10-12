@@ -33,7 +33,7 @@ namespace bicameral::save {
 
     // S(lastTick) まで確かめられるので、その状態に入るコマンド(targetTick < lastTick)だけを残す
     ReplayFile ReplayRecorder::Build() const {
-        ReplayFile replay{.world = ReplayWorld::Probe, .startTick = 0, .tickHashes = m_hashes};
+        ReplayFile replay{.world = m_world, .startTick = 0, .tickHashes = m_hashes};
         const uint64_t lastTick = m_hashes.empty() ? 0 : m_hashes.back().tick;
         rng::copy_if(m_commands, std::back_inserter(replay.commands),
                      [&](const sim::Command& command) { return command.targetTick < lastTick; });
@@ -54,7 +54,7 @@ namespace bicameral::save {
         if (!replay)
             return std::unexpected(replay.error());
 
-        if (replay->world != ReplayWorld::Probe || replay->startTick != 0 || !replay->initialDelta.empty())
+        if (replay->startTick != 0 || !replay->initialDelta.empty())
             return std::unexpected("仮の世界は刻み 0 の全部 0 の状態からしか再生できない");
 
         return ReplayPlayer(std::move(*replay));

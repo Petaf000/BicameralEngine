@@ -392,13 +392,16 @@ namespace bicameral::sim {
         const std::array<SpeciesAmount, 2> air = {
             SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = AIR_OXYGEN_MICROMOLES},
             SpeciesAmount{.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_MICROMOLES}};
-        const RxCell fill = MakeReactionCell(table, air, LAB_INITIAL_TEMPERATURE_MILLIKELVIN);
+        // 表に空気の物質が無い(ブランクの世界など。T-0371)なら空のセルで満たす
+        const bool hasAir = air[0].species != 0 && air[1].species != 0;
+        const RxCell fill = hasAir ? MakeReactionCell(table, air, LAB_INITIAL_TEMPERATURE_MILLIKELVIN)
+                                   : RxMakeEmptyCell(0);
 
         // --- 頁を持たせるため、1 つだけ違うセルで根を置き(PlaceRootBlock は全部同じなら一様にする)、すぐ戻す。
         //     根は x → y → z の順に置く(空きのスタックから枠 0, 1, 2… が出る = lab::LabRootSlot)---
         MultiresNest nest = MakeMultiresNest(LabBoxCapacity(table, shape));
         std::vector<RxCell> cells(MR_BLOCK_CELLS, fill);
-        cells[0] = RxMakeEmptyCell(0);
+        cells[0] = RxMakeEmptyCell(hasAir ? 0 : 1);
         for (uint32_t rootZ = 0; rootZ < shape.rootsZ; ++rootZ) {
             for (uint32_t rootY = 0; rootY < shape.rootsY; ++rootY) {
                 for (uint32_t rootX = 0; rootX < shape.rootsX; ++rootX) {

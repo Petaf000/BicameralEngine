@@ -180,6 +180,30 @@ namespace bicameral::frame {
             std::vector<double> unitGpuMilliseconds;
         };
 
+        // --- 世界の選び方(T-0371・D-455・D-456)---
+
+        // 積み木の場面を入れるか(サンプルの世界だけ。ブランクの世界は物も無い)
+        bool HasStackScene(const FrameLoopOptions& options) {
+            return options.physics && options.world == save::ReplayWorld::Sample;
+        }
+
+        // 世界の表の読み方: サンプルの世界はゲーム本体(combustion_test)を含むフォルダ。ブランクの世界は --packages のフォルダを
+        // ゲーム本体なし(全部 Mod)で読む
+        script::ReactionTableSource WorldTableSource(const FrameLoopOptions& options) {
+            if (options.world == save::ReplayWorld::Sample)
+                return {.packageRoot = options.packageRoot};
+
+            return {.packageRoot = options.packageRoot, .basePackage = {}};
+        }
+
+        // パッケージのファイルを見るか(再生中は見ない。ブランクの世界は --packages を渡した時だけ。渡さなければ読むものが無い)
+        bool WatchesPackages(const FrameLoopOptions& options) {
+            if (!options.replayPath.empty())
+                return false;
+
+            return options.world == save::ReplayWorld::Sample || !options.packageRoot.empty();
+        }
+
         // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
         struct FrameLoopParts {
             // --- 窓と GPU ---
@@ -219,8 +243,7 @@ namespace bicameral::frame {
                   m_viewController(sim::PROBE_GRID_SIZE, options.view, options.camera),
                   m_replay(std::move(parts.replay)),
                   // 通常の起動でもファイルを見る(D-438・T-0243)。物質を足す・消す表も当てる(既定の Remap。T-0266)
-                  m_tableReload({.packageRoot = options.packageRoot}, std::move(parts.reactionTable),
-                                options.replayPath.empty()),
+                  m_tableReload(WorldTableSource(options), std::move(parts.reactionTable), WatchesPackages(options)),
                   m_scheduler(m_sim.UnitsPerTick(), {.targetFps = static_cast<double>(options.targetFps),
                                                      .maxUnitsPerFrame = sim::ProbeSim::MAX_UNITS_PER_FRAME}),
                   m_computeFrequency(m_compute.TimestampFrequency()),
@@ -241,8 +264,11 @@ namespace bicameral::frame {
                 if (options.peek)
                     m_viewController.Peek(options.peekCell, options.peekDepth);
 
+                // --record: どの世界の記録か(T-0371)
+                m_recorder.SetWorld(options.world);
+
                 // --check-physics: 窓と同じ場面の CPU の物理
-                if (options.physics && options.checkPhysics) {
+                if (HasStackScene(options) && options.checkPhysics) {
                     m_physicsCheck = std::make_unique<sim::PhysicsWorld>(sim::MakeProbeStackScene(),
                                                                          physics::PxDefaultParameters());
                 }
@@ -429,7 +455,8 @@ namespace bicameral::frame {
         }
 
         // デバイスの検証の設定。物理のシェーダーは GPU-based validation の計装が最初の実行で数分かかる(debug。gpu_physics_test と同じ)ので、
-        // 物理を入れるときは切る(debug layer は残す。T-0098)
+        // 物理を入れるときは切る(debug layer は残す。T-0098)。ブランクの世界(積み木なし)も --physics の旗で決める
+        // (積み木の有無で決めると、ブランクの窓は GBV の計装で最初のフレームが 5 分を超えた。T-0371)
         gpu::DeviceOptions LoopDeviceOptions(const FrameLoopOptions& options) {
             gpu::DeviceOptions deviceOptions = gpu::DefaultDeviceOptions();
             if (options.physics && deviceOptions.gpuBasedValidation) {
@@ -440,19 +467,24 @@ namespace bicameral::frame {
             return deviceOptions;
         }
 
-        // 仮の世界(物理の場面は積み木。T-0098。ProbeSim は作るときに読むだけ)
+        // 仮の世界の刻み。サンプルの世界は空気の中の木箱と積み木(T-0089・T-0098)、ブランクの世界は全部空のセルで物なし(T-0371)。
+        // ProbeSim は作るときに読むだけ
         std::expected<sim::ProbeSim, std::string> CreateSimulation(ID3D12Device5* device,
                                                                    const FrameLoopOptions& options,
                                                                    const sim::BakedReactionTable& reactionTable) {
             const sim::PhysicsScene physicsScene = sim::MakeProbeStackScene();
+            const bool sample = options.world == save::ReplayWorld::Sample;
+            const std::vector<reaction::RxCell> initialWorld = sample ? sim::MakeProbeInitialWorld(reactionTable)
+                                                                      : sim::MakeBlankProbeWorld();
 
             return sim::ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, reactionTable,
                                          {.busyIterations = options.simLoad,
                                           .busyPieces = options.simSplit,
                                           .trace = options.trace,
                                           .traceCapacity = TRACE_CAPACITY_PER_FRAME,
-                                          .physicsScene = options.physics ? &physicsScene : nullptr,
-                                          .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase}});
+                                          .physicsScene = HasStackScene(options) ? &physicsScene : nullptr,
+                                          .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
+                                          .initialWorld = initialWorld});
         }
 
         // 世界の反応表: データのフォルダのパッケージ(既定は exe の横の data/packages)からベイクする(T-0157・ADR-0033)。
@@ -461,7 +493,9 @@ namespace bicameral::frame {
         std::expected<std::shared_ptr<const script::LoadedReactionTable>, std::string> LoadWorldReactionTable(
             const FrameLoopOptions& options) {
             const auto start = chr::steady_clock::now();
-            auto loaded = script::LoadReactionTable({.packageRoot = options.packageRoot});
+            const bool blankTable = options.world == save::ReplayWorld::Blank && options.packageRoot.empty();
+            auto loaded = blankTable ? script::LoadBlankReactionTable()
+                                     : script::LoadReactionTable(WorldTableSource(options));
             if (!loaded)
                 return std::unexpected(loaded.error());
 
@@ -551,7 +585,8 @@ namespace bicameral::frame {
             return WorldReactionTables{.initial = std::move(*loaded)};
         }
 
-        std::expected<FrameLoopParts, std::string> CreateParts(const FrameLoopOptions& options) {
+        // options.world は再生ファイルの世界に直す(--replay のとき。T-0371)
+        std::expected<FrameLoopParts, std::string> CreateParts(FrameLoopOptions& options) {
             // --- 再生ファイル(表の中身を持っていれば、パッケージより先に要る)と反応表 ---
             std::vector<save::ReplayPlayer> replay;
             if (!options.replayPath.empty()) {
@@ -559,8 +594,13 @@ namespace bicameral::frame {
                 if (!player)
                     return std::unexpected(player.error());
 
+                options.world = player->File().world;
                 replay.push_back(std::move(*player));
             }
+
+            Log(Channel::Sim, Level::Info, "世界: {}",
+                options.world == save::ReplayWorld::Sample ? "サンプルの世界(空気の中の木箱と積み木)"
+                                                           : "ブランクの世界(セルは全部空・物なし)");
 
             auto reactionTables = LoadWorldReactionTables(options, replay.empty() ? nullptr : &replay.front().File());
             if (!reactionTables)
@@ -2190,7 +2230,8 @@ namespace bicameral::frame {
 
     }  // namespace
 
-    int RunFrameLoop(const FrameLoopOptions& options) {
+    int RunFrameLoop(const FrameLoopOptions& requested) {
+        FrameLoopOptions options = requested;  // 世界の種類は再生ファイルで決まることがある
         auto parts = CreateParts(options);
         if (!parts) {
             Log(Channel::Core, Level::Error, "フレームのループを始められない: {}", parts.error());

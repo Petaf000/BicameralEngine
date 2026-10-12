@@ -75,8 +75,10 @@ namespace bicameral::script {
         if (!loaded)
             return std::unexpected(std::format("{}: {}", where, loaded.error()));
 
-        if (const auto base = CheckBasePackage(*loaded, source.basePackage); !base)
-            return std::unexpected(std::format("{}: {}", where, base.error()));
+        if (!source.basePackage.empty()) {
+            if (const auto base = CheckBasePackage(*loaded, source.basePackage); !base)
+                return std::unexpected(std::format("{}: {}", where, base.error()));
+        }
 
         // --- 定義 → ベイク(元素の釣り合い・知らない物質・係数・速度の範囲の検査)---
         const auto definition = ReadReactionTableDefinition(*loaded);
@@ -95,6 +97,21 @@ namespace bicameral::script {
                                    .modifiedWorld = loaded->modifiedWorld,
                                    .tableVersion = TableVersion(*loaded),
                                    .tableBytes = TableBytes(*loaded)};
+    }
+
+    std::expected<LoadedReactionTable, std::string> LoadBlankReactionTable() {
+        // 何も読まない合わせた表 → 定義(分類が無いので全部空)→ ベイク(使わない物質 0 番だけの表)
+        const PackageSetResult empty;
+        const auto definition = ReadReactionTableDefinition(empty);
+        if (!definition)
+            return std::unexpected(std::format("ブランクの表: {}", definition.error()));
+
+        auto baked = sim::BakeReactionTable(*definition);
+        if (!baked)
+            return std::unexpected(std::format("ブランクの表: ベイクの検査で落ちた: {}", baked.error()));
+
+        return LoadedReactionTable{
+            .table = std::move(*baked), .tableVersion = TableVersion(empty), .tableBytes = TableBytes(empty)};
     }
 
     std::expected<LoadedReactionTable, std::string> RebuildReactionTable(std::string_view tableBytes,

@@ -726,6 +726,22 @@ namespace bicameral::editor {
             return;
         }
 
+        // --- 材料が 1 つも無い表(ブランクの世界。T-0371)は空の箱だけを確かめる ---
+        if (m_materials.empty()) {
+            if (auto empty = RunAutoEmptyBox(); !empty) {
+                Log(Channel::Sim, Level::Error, "--auto-lab: 空の箱で失敗({})", empty.error());
+                return;
+            }
+
+            Log(Channel::Sim, Level::Info,
+                "--auto-lab: 材料の無い表(ブランクの世界)で空の箱を {} 刻み流して GPU と CPU "
+                "が一致し、隅のセルは空のまま・"
+                "記録から別の箱で再生しても同じ",
+                AUTO_TICKS);
+            m_autoFailed = false;
+            return;
+        }
+
         const auto material = std::ranges::find_if(m_materials,
                                                    [](const sim::LabMaterial& m) { return m.name == "木"; });
         if (material == m_materials.end())
@@ -802,6 +818,25 @@ namespace bicameral::editor {
 
         m_autoFailed = false;
         m_cell = {3, 3, 3};
+    }
+
+    // 空の箱(ブランクの世界。T-0371): 表に空気が無いので箱は空のセルで満たされる(MakeLabBoxNest)。AUTO_TICKS 刻み流し、
+    // GPU と CPU が毎刻み一致・隅のセルと最後のセルが空のまま・記録から別の箱で再生しても同じ
+    std::expected<void, std::string> LabPanel::RunAutoEmptyBox() {
+        auto result = m_session->Step(AUTO_TICKS);
+        if (result && m_session->Mismatch())
+            result = std::unexpected(m_session->Mismatch()->what);
+
+        if (!result)
+            return result;
+
+        const uint32_t lastCell = sim::LabBoxCellCount(sim::LAB_SINGLE_ROOT_SHAPE) - 1;
+        for (const uint32_t index : {0u, lastCell}) {
+            if (sim::LabBoxCell(m_session->Gpu(), index).speciesCount != 0)
+                return std::unexpected(std::format("空の箱のセル {} に物がある", index));
+        }
+
+        return ReplayInNewSession(m_session->Recording(), false);
     }
 
     // 一部を細かくした箱(細かくできる根 1 つ): (2..5)³ を 2 段細かくし、細かいセル 2³ に木を置いて 1 つに火を付けて流し、

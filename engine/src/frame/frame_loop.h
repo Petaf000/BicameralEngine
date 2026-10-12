@@ -21,6 +21,7 @@
 #include "gpu/device.h"
 #include "gpu/graph_trace.h"
 #include "render/debug_view_controller.h"
+#include "save/replay_file.h"
 
 namespace bicameral::frame {
 
@@ -70,7 +71,7 @@ namespace bicameral::frame {
         uint32_t peekDepth = 0;           // 潜る段(カメラが寄る。0〜9)
 
         // --- 物理(T-0098)---
-        bool physics = true;  // 仮の世界に積み木(sim::MakeProbeStackScene)を入れる。Shift + 左クリックで押す
+        bool physics = true;  // サンプルの世界に積み木(sim::MakeProbeStackScene)を入れる。Shift + 左クリックで押す
         // CPU の物理(sim::PhysicsWorld)を並べて走らせ、刻みごとの物のハッシュを突き合わせる(--check-physics。調べる用)
         bool checkPhysics = false;
         bool physicsComputeBroadphase = false;  // 広域の選別を Compute で(--physics-compute。比べる用)
@@ -106,7 +107,11 @@ namespace bicameral::frame {
         bool autoRewind = false;  // 保存点が 2 つできたら古い方へ 1 回戻す(人がいない確認。--auto-rewind)
 
         // --- 世界のデータ(T-0157・ADR-0033)---
-        // 反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ)。空なら exe の横の data/packages(--packages)
+        // どの世界で起動するか(--world。T-0371): 既定はブランクの世界(D-455。セルは全部空・積み木なし・表は --packages が無ければ空)。
+        // サンプルの世界(D-456)は空気の中の木箱と積み木と試験の表(combustion_test)。--replay のときは再生ファイルの世界にする
+        save::ReplayWorld world = save::ReplayWorld::Blank;
+        // 反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。--packages)。サンプルの世界は空なら exe の横の data/packages
+        // (ゲーム本体 = combustion_test)。ブランクの世界は空なら何も読まない(空の表)、渡せばゲーム本体なしで全部を読む
         fs::path packageRoot;
 
         // --- 表示と GPU ---
