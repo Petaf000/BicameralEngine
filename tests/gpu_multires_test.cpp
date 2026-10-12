@@ -5,7 +5,8 @@
 // 時間は別に、1 本のリストで暖機(GPU のクロックを上げる)してから測る(1 刻みの予算に収まるか)。
 // debug では 2 回目の実行と時間の計測をしない(1200 秒の上限に届くため。T-0263)。場面と刻みの数は release と同じ。
 // 粗くすると成分が入りきらない場面(tests/multires_limits_scene.h。T-0022)も毎刻み比べる(断った数・見出しの quietCheck も)。
-// 引数は gpu_test_options.h と --part all|chains|wide(ctest の HW は chains と wide の 2 本。T-0263)・--measure-wide(計測だけ)。
+// 引数は gpu_test_options.h と --part all|chains|wide|wide-<組>(組は RunWideScenes の上)・--measure-wide(計測だけ)。
+// ctest の HW は鎖(chains)と溢れの 6 つの組の 7 本、WARP は鎖と溢れ(wide)の 2 本(1 本を 10 分に収める。T-0263・T-0426)。
 #include "sim/gpu_multires.h"
 
 #include <optional>
@@ -1337,12 +1338,32 @@ namespace {
         return 0;
     }
 
-    // 溢れを使う世界の場面(上限の場面を溢れで・大きい溢れ・1 セル上限〔RX_GPU_WIDE_SPECIES〕の種・塊の置き場が尽きる)。通らなければ 1
-    int RunWideScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+    // 場面の結果を並べて見る(どれか 1 つでも失敗ならエラーを出して 1)
+    template <typename... Results>
+    int FirstFailure(const Results&... results) {
+        int code = 0;
+        const auto check = [&](const auto& result) {
+            if (code != 0 || result)
+                return;
+
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result.error());
+            code = 1;
+        };
+        (check(results), ...);
+
+        return code;
+    }
+
+    // --- 溢れを使う世界の場面: 6 つの組(--part wide-limits / wide-overflow / wide-many / wide-many-conduct / wide-coarsen /
+    //     wide-uniform) ---
+    // ctest は組ごとに 1 本にする(1 本を 10 分に収め、GPU の順番待ち〔D-460〕で他のランナーを長く止めないため。T-0426)。
+    // 重いのは場面ごとの Work Graph の作成(debug の HW で 1 つ 15〜380 秒。CPU が混むほど長い)なので、1 組を 3 場面までにする。
+    // --part wide は 6 つを続けて流す。通らなければ 1
+
+    // 上限の場面を溢れで(伝導あり・なし)(--part wide-limits)
+    int RunWideLimitsScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
         const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
-        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
-        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable(WIDE_SCENE_MANY_SPECIES));
-        if (!limitsTable || !wideTable || !manyTable) {
+        if (!limitsTable) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
             return 1;
         }
@@ -1351,22 +1372,95 @@ namespace {
                                       [&] { return RunLimitsStepWide(device, queue, ring, *limitsTable, false); });
         const auto limitsWideConduct = Timed(
             "上限・溢れ・伝導", [&] { return RunLimitsStepWide(device, queue, ring, *limitsTable, true); });
+        if (FirstFailure(limitsWide, limitsWideConduct) != 0)
+            return 1;
+
+        // 伝導ありの溢れの世界で伝導が働いている(熱が流れなければ、溢れを持つセルの熱容量・伝導率を比べたことにならない。T-0211)
+        if (limitsWide->digest == limitsWideConduct->digest) {
+            Log(Channel::Gpu, Level::Error,
+                "gpu_multires_test: FAILED(溢れの世界で伝導ありとなしが同じ = 熱が流れていない)");
+            return 1;
+        }
+
+        Log(Channel::Gpu, Level::Info, "溢れの場面(上限): OK(伝導あり・なしで GPU と CPU が毎刻みビット一致)");
+
+        return 0;
+    }
+
+    // 大きい溢れ(伝導あり・なし)・溢れの世界で細かくする(--part wide-overflow)
+    int RunWideOverflowScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
+        if (!limitsTable || !wideTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
+            return 1;
+        }
+
         const auto wideOverflow = Timed("大きい溢れ",
                                         [&] { return RunWideOverflow(device, queue, ring, *wideTable, false); });
         const auto wideOverflowConduct = Timed("大きい溢れ・伝導",
                                                [&] { return RunWideOverflow(device, queue, ring, *wideTable, true); });
-        const auto wideMany = Timed("上限まで(64 種の表)",
-                                    [&] { return RunWideOverflow(device, queue, ring, *manyTable, false, true); });
-        const auto wideManyConduct = Timed(
-            "上限まで・伝導", [&] { return RunWideOverflow(device, queue, ring, *manyTable, true, true); });
         const auto refineWide = Timed("溢れの世界で細かくする",
                                       [&] { return RunRefineWide(device, queue, ring, *limitsTable); });
+        if (FirstFailure(wideOverflow, wideOverflowConduct, refineWide) != 0)
+            return 1;
+
+        Log(Channel::Gpu, Level::Info,
+            "溢れの場面(大きい溢れ): OK(大きい溢れ・細かくするで GPU と CPU が毎刻みビット一致)");
+
+        return 0;
+    }
+
+    // 1 セル上限〔RX_GPU_WIDE_SPECIES〕の種(64 種の表)。conduction なら伝導あり(--part wide-many / wide-many-conduct)
+    int RunWideManyScene(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring, bool conduction) {
+        const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable(WIDE_SCENE_MANY_SPECIES));
+        if (!manyTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
+            return 1;
+        }
+
+        const auto wideMany = Timed(conduction ? "上限まで・伝導" : "上限まで(64 種の表)",
+                                    [&] { return RunWideOverflow(device, queue, ring, *manyTable, conduction, true); });
+        if (FirstFailure(wideMany) != 0)
+            return 1;
+
+        Log(Channel::Gpu, Level::Info, "溢れの場面(上限まで{}): OK(速い形と大きい形で GPU と CPU が毎刻みビット一致)",
+            conduction ? "・伝導" : "");
+
+        return 0;
+    }
+
+    // 溢れの端数・粗くする和集合・端数の枠の塊(--part wide-coarsen)
+    int RunWideCoarsenScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        if (!limitsTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
+            return 1;
+        }
+
         const auto coarsenWide = Timed("溢れの端数",
                                        [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
         const auto coarsenUnion = Timed("GPU で粗くする和集合",
                                         [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
         const auto fractionChunks = Timed("端数の枠の塊",
                                           [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
+        if (FirstFailure(coarsenWide, coarsenUnion, fractionChunks) != 0)
+            return 1;
+
+        Log(Channel::Gpu, Level::Info,
+            "溢れの場面(粗くする): OK(溢れの端数・粗くする和集合・端数の枠の塊で GPU と CPU が毎刻みビット一致)");
+
+        return 0;
+    }
+
+    // 一様の値の溢れ(写して戻す・刻む・反応なし)・塊の置き場が尽きる(--part wide-uniform)
+    int RunWideUniformScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
+        if (!wideTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(溢れの試験の表を作れない)");
+            return 1;
+        }
+
         const auto uniformRoundTrip = Timed(
             "一様の値の溢れ", [&] { return RunUniformOverflowRoundTrip(device, queue, ring, *wideTable); });
         const auto uniformSteps = Timed("一様の値の溢れを刻む",
@@ -1376,33 +1470,27 @@ namespace {
         });
         const auto exhausted = Timed("塊の置き場が尽きる",
                                      [&] { return RunWideOverflowExhausted(device, queue, ring, *wideTable); });
-        if (!exhausted) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", exhausted.error());
+        if (FirstFailure(exhausted, uniformRoundTrip, uniformSteps, uniformQuiet) != 0)
             return 1;
-        }
-
-        for (const auto* result : {&limitsWide, &limitsWideConduct, &wideOverflow, &wideOverflowConduct, &wideMany,
-                                   &wideManyConduct, &refineWide, &coarsenWide, &coarsenUnion, &fractionChunks,
-                                   &uniformRoundTrip, &uniformSteps, &uniformQuiet}) {
-            if (*result)
-                continue;
-
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
-            return 1;
-        }
-
-        // 伝導ありの溢れの世界で伝導が働いている(熱が流れなければ、溢れを持つセルの熱容量・伝導率を比べたことにならない。T-0211)
-        if (limitsWide->digest == limitsWideConduct->digest) {
-            Log(Channel::Gpu, Level::Error,
-                "gpu_multires_test: FAILED(溢れの世界で伝導ありとなしが同じ = 熱が流れていない)");
-            return 1;
-        }
 
         Log(Channel::Gpu, Level::Info,
-            "溢れの場面: OK(上限・大きい溢れ・上限まで〔速い形と大きい形〕・細かくする・溢れの端数で GPU と CPU "
-            "が毎刻みビット一致)");
+            "溢れの場面(一様の値): OK(一様の値の溢れ・塊の置き場で GPU と CPU が毎刻みビット一致)");
 
         return 0;
+    }
+
+    // 溢れの場面を全部(--part wide。6 つの組を続けて)
+    int RunWideScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        if (RunWideLimitsScenes(device, queue, ring) != 0 || RunWideOverflowScenes(device, queue, ring) != 0)
+            return 1;
+
+        if (RunWideManyScene(device, queue, ring, false) != 0 || RunWideManyScene(device, queue, ring, true) != 0)
+            return 1;
+
+        if (RunWideCoarsenScenes(device, queue, ring) != 0)
+            return 1;
+
+        return RunWideUniformScenes(device, queue, ring);
     }
 
     // 溢れの場面を 1 つ流す(T-0290 の切り分け。場面 = limits / limits-conduct / overflow / overflow-conduct / many / many-conduct)
@@ -1461,42 +1549,19 @@ namespace {
         return 0;
     }
 
-    // 粗くする溢れの場面と一様の値の溢れだけ(--part coarsen。T-0329・T-0312 の切り分け用。溢れの場面〔wide〕にも入っている)
-    int RunCoarsenScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
-        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
-        const auto wideTable = sim::BakeReactionTable(test::MakeWideOverflowTable());
-        if (!limitsTable || !wideTable) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
-            return 1;
-        }
-
-        const auto uniformRoundTrip = Timed(
-            "一様の値の溢れ", [&] { return RunUniformOverflowRoundTrip(device, queue, ring, *wideTable); });
-        const auto uniformSteps = Timed("一様の値の溢れを刻む",
-                                        [&] { return RunUniformOverflowSteps(device, queue, ring, *wideTable, true); });
-        const auto uniformQuiet = Timed("一様の値の溢れ・反応なし", [&] {
-            return RunUniformOverflowSteps(device, queue, ring, *wideTable, false);
-        });
-        const auto coarsenUnion = Timed("GPU で粗くする和集合",
-                                        [&] { return RunCoarsenUnionWide(device, queue, ring, *limitsTable); });
-        const auto coarsenWide = Timed("溢れの端数",
-                                       [&] { return RunCoarsenFullWide(device, queue, ring, *limitsTable); });
-        const auto fractionChunks = Timed("端数の枠の塊",
-                                          [&] { return RunFractionChunksWide(device, queue, ring, *limitsTable); });
-        for (const auto* result :
-             {&uniformRoundTrip, &uniformSteps, &uniformQuiet, &coarsenUnion, &coarsenWide, &fractionChunks}) {
-            if (*result)
-                continue;
-
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
-            return 1;
-        }
-
-        return 0;
-    }
-
-    // どの場面を流すか(--part。ctest は debug の 1200 秒の上限に収まるよう 2 本に分ける。T-0263)
-    enum class Part : uint8_t { All, Chains, Wide, Coarsen };
+    // どの場面を流すか(--part。ctest は 1 本を 10 分に収めるよう、鎖と溢れの 4 つの組に分ける。T-0263・T-0426)
+    enum class Part : uint8_t {
+        All,
+        Chains,
+        Wide,
+        WideLimits,
+        WideOverflow,
+        WideMany,
+        WideManyConduct,
+        WideCoarsen,
+        WideUniform,
+        Coarsen
+    };
 
     std::optional<Part> ParsePart(std::string_view text) {
         if (text == "all")
@@ -1505,7 +1570,19 @@ namespace {
             return Part::Chains;
         if (text == "wide")
             return Part::Wide;
-        if (text == "coarsen")
+        if (text == "wide-limits")
+            return Part::WideLimits;
+        if (text == "wide-overflow")
+            return Part::WideOverflow;
+        if (text == "wide-many")
+            return Part::WideMany;
+        if (text == "wide-many-conduct")
+            return Part::WideManyConduct;
+        if (text == "wide-coarsen")
+            return Part::WideCoarsen;
+        if (text == "wide-uniform")
+            return Part::WideUniform;
+        if (text == "coarsen")  // T-0329 の切り分け用(wide-coarsen と wide-uniform)
             return Part::Coarsen;
 
         return std::nullopt;
@@ -1600,6 +1677,21 @@ namespace {
         return {};
     }
 
+    // 溢れの組を 1 つだけ流す(--part wide-limits など。All・Chains・Wide のときは何もしない)
+    int RunWidePart(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring, Part part) {
+        switch (part) {
+            case Part::WideLimits: return RunWideLimitsScenes(device, queue, ring);
+            case Part::WideOverflow: return RunWideOverflowScenes(device, queue, ring);
+            case Part::WideMany: return RunWideManyScene(device, queue, ring, false);
+            case Part::WideManyConduct: return RunWideManyScene(device, queue, ring, true);
+            case Part::WideCoarsen: return RunWideCoarsenScenes(device, queue, ring);
+            case Part::WideUniform: return RunWideUniformScenes(device, queue, ring);
+            case Part::Coarsen:
+                return RunWideCoarsenScenes(device, queue, ring) != 0 ? 1 : RunWideUniformScenes(device, queue, ring);
+            default: return 0;
+        }
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureWide = false;
@@ -1650,7 +1742,8 @@ namespace {
         if (!options || !part) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--part "
-                "all|chains|wide|coarsen] [--diagnose-wide <刻み/リスト> [--diagnose-compare] [--diagnose-conduct] "
+                "all|chains|wide|wide-<組>|coarsen] [--diagnose-wide <刻み/リスト> "
+                "[--diagnose-compare] [--diagnose-conduct] "
                 "[--diagnose-limits] [--diagnose-species <表の物質>]] [--repeat-wide <場面,...> <回数> "
                 "[--repeat-fresh-queue] [--repeat-fresh-ring]] "
                 "[--wide-stamps] [--wide-space-groups <グループ>] [--measure-big-only]");
@@ -1700,7 +1793,7 @@ namespace {
         if (wide && RunWideScenes(device->Get(), *queue, *ring) != 0)
             return 1;
 
-        if (*part == Part::Coarsen && RunCoarsenScenes(device->Get(), *queue, *ring) != 0)
+        if (RunWidePart(device->Get(), *queue, *ring, *part) != 0)
             return 1;
 
         if (!test::PassesValidation(*device, "gpu_multires_test"))

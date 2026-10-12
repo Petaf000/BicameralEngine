@@ -223,14 +223,23 @@ bicameral_add_gpu_test_case(gpu_reaction_limits_warp gpu_reaction_test warp --wa
 
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
-# HW は鎖の場面(gpu_multires)と溢れの場面(gpu_multires_wide)の 2 本に分ける: debug の GPU-based validation で 1 本では 1200 s に届いた
+# HW は鎖の場面(gpu_multires)と溢れの場面の 4 つの組(gpu_multires_wide_*)に分ける: debug の GPU-based validation で 1 本では 1200 s に届いた
 # (T-0124・T-0263)。debug は 2 回目の実行と計測も省く(鎖の場面 約 400 s)。溢れの場面は GBV を切る(debug layer と FX_ASSERT は残る):
-# GBV ありの debug では 1 場面 210〜290 s × 7 で 1200 s に入らない・切ると 7 場面で約 80 s(2026-10-11。release は元から GBV なし)
+# GBV ありの debug では 1 場面 210〜290 s × 7 で 1200 s に入らない・切ると 7 場面で約 80 s(2026-10-11。release は元から GBV なし)。
+# 溢れの場面を 1 本(gpu_multires_wide)で流すと 285〜1148 s かかり、GPU の順番待ち(D-460)で他のランナーを長く止めたので、
+# 1 本を 10 分に収めるよう 6 つの組(1 組 3 場面まで)に分けた(T-0426。組の中身は gpu_multires_test の RunWideScenes の上。
+# CPU リファレンスとの比べ方は変えていない)。重いのは場面ごとの Work Graph の作成で、CPU が混むと 1 つ 100〜380 s になるので上限は 900 s
 bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute --part chains)
-bicameral_add_gpu_test_case(gpu_multires_wide gpu_multires_test gpu --queue compute --part wide --no-gbv)
-set_tests_properties(gpu_multires gpu_multires_wide PROPERTIES TIMEOUT 1200)
-# WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)
-bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute)
+set_tests_properties(gpu_multires PROPERTIES TIMEOUT 1200)
+foreach(_part limits overflow many many_conduct coarsen uniform)
+  string(REPLACE "_" "-" _arg "wide-${_part}")
+  bicameral_add_gpu_test_case(gpu_multires_wide_${_part} gpu_multires_test gpu --queue compute --part ${_arg} --no-gbv)
+  set_tests_properties(gpu_multires_wide_${_part} PROPERTIES TIMEOUT 900)
+endforeach()
+# WARP は exe の横の NuGet の版(T-0097)で動く。OS の WARP では Work Graph を作る所で落ちる(ADR-0013)。鎖と溢れの 2 本(T-0426)
+bicameral_add_gpu_test_case(gpu_multires_warp gpu_multires_test warp --warp --queue compute --part chains)
+bicameral_add_gpu_test_case(gpu_multires_wide_warp gpu_multires_test warp --warp --queue compute --part wide)
+set_tests_properties(gpu_multires_warp gpu_multires_wide_warp PROPERTIES TIMEOUT 900)
 
 bicameral_add_gpu_test(gpu_multires_implicit_test)  # 細かいレベルの熱の陰解法の GPU と CPU のビット一致(T-0117)
 target_link_libraries(gpu_multires_implicit_test PRIVATE bicameral_sim)
@@ -249,9 +258,13 @@ bicameral_add_gpu_test_case(gpu_multires_implicit_build_warp gpu_multires_implic
 set_tests_properties(gpu_multires_implicit_build gpu_multires_implicit_build_warp PROPERTIES TIMEOUT 1200)
 bicameral_add_gpu_test(gpu_multires_implicit_conduction_test)  # GPU の伝導の段から陰解法を呼んで全部・活性の刻みで CPU とビット一致(T-0132)
 target_link_libraries(gpu_multires_implicit_conduction_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction gpu_multires_implicit_conduction_test gpu --queue compute)
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_warp gpu_multires_implicit_conduction_test warp --warp --queue compute)
-set_tests_properties(gpu_multires_implicit_conduction gpu_multires_implicit_conduction_warp PROPERTIES TIMEOUT 1200)
+# 上限の形(--squeeze)で 2 本に分ける: 1 本では release で 690〜1112 s かかった(T-0426)。計測は none を含む方だけ
+bicameral_add_gpu_test_case(gpu_multires_implicit_conduction gpu_multires_implicit_conduction_test gpu --queue compute --squeeze none,blocks)
+bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_squeeze gpu_multires_implicit_conduction_test gpu --queue compute --squeeze levels,cheapest)
+bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_warp gpu_multires_implicit_conduction_test warp --warp --queue compute --squeeze none,blocks)
+bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_squeeze_warp gpu_multires_implicit_conduction_test warp --warp --queue compute --squeeze levels,cheapest)
+set_tests_properties(gpu_multires_implicit_conduction gpu_multires_implicit_conduction_squeeze gpu_multires_implicit_conduction_warp
+  gpu_multires_implicit_conduction_squeeze_warp PROPERTIES TIMEOUT 900)
 
 bicameral_add_gpu_test(gpu_multires_activity_test)  # 木の上の活性の GPU と CPU のビット一致(T-0100)
 target_link_libraries(gpu_multires_activity_test PRIVATE bicameral_sim)
