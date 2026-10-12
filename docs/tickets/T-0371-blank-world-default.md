@@ -1,6 +1,6 @@
 # T-0371 サンプルの世界をパッケージへ分け、ブランクから起動するのを既定にする
 
-- Status: Doing
+- Status: Done(2026-10-12 その 3 のマージの後、release で window_* と image_* が全部通った。残りの中身は T-0398〜T-0400)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分(この範囲。残りは T-0398〜T-0400)
@@ -19,7 +19,7 @@
 - [x] ブランクの世界の GPU の刻みが CPU とハッシュ一致(gpu_probe_blank。止まりは GBV の計装が遅いだけだった: --no-gbv の HW 27 秒・
   WARP 35 秒で通る。ctest の HW も gpu_probe_sim と同じく --no-gbv にした)
 - [x] 窓: ブランクで起動・エディタ付きで起動・記録 → 再生でハッシュ列一致(window_blank_record/play。debug で通過。実験室の空の箱は window_lab_blank)
-- [ ] 今の窓の試験はサンプルの世界を明示(`--world sample`)して読み、結果(ハッシュ・画像)が変わらない(明示した。未実行)
+- [x] 今の窓の試験はサンプルの世界を明示(`--world sample`)して読み、結果(ハッシュ・画像)が変わらない(2026-10-12 その 3: release で window_* と image_* が全部通過)
 - [x] サンプルの世界の中身のうち 1〜2 個をパッケージへ → 時間切れで T-0398〜T-0400 へ分けた
 
 ## C++・HLSL に埋まっているサンプルの世界の中身(2026-10-12 の洗い出し)
@@ -64,3 +64,4 @@
   `--auto-lab` に材料の無い表の空の箱の確かめ(RunAutoEmptyBox)と window_lab_blank を足した。debug: blank_world・gpu_probe_blank(_warp)・
   window_blank_record・window_lab_blank は通過(GBV あり)、window_blank_play は GBV ありで TIMEOUT 240 → 条件を戻して流し直し、window_blank_record 60 秒・window_blank_play 59 秒・
   window_lab_blank 78 秒で通過。**--world sample の窓の試験・画像の試験は時間切れで未実行**(GPU の順番待ちで 31 分待った)。
+- 2026-10-12 その 3(本体・記録だけ): マージの後の release で window_*・image_*(窓と画像 28 本)が全部通ったので Done にした。
