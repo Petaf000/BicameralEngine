@@ -1057,18 +1057,33 @@ namespace {
         if (SumAtoms(elementsBefore) != SumAtoms(CountBoxElements(*session)) + lostAtoms)
             return std::unexpected("付け替えで元素が保たれない");
 
-        // --- 続けて燃やす: 異性体は増え続け、元素は保たれ、毎刻み一致 ---
+        // --- 異性体への転換の所に新しい表の ID で木を置き直して燃やす(前の木は燃え尽きている)。替える先を付け替えていなければ
+        //     前の表の異性体の ID は CO2 を指すので異性体はできない。元素は保たれ、毎刻み一致 ---
+        std::vector<sim::SpeciesAmount> manaWoodAfter = {
+            {.species = after->SpeciesId("cellulose"), .amount = MANA_WOOD_CELLULOSE_MICROMOLES},
+            {.species = after->SpeciesId("oxygen"), .amount = MANA_WOOD_OXYGEN_MICROMOLES},
+            {.species = after->SpeciesId("mana_test"), .amount = MANA_MICROMOLES}};
+        std::ranges::sort(manaWoodAfter, {}, &sim::SpeciesAmount::species);
+        if (!session->PlaceRegion(kept, manaWoodAfter, MANA_WARM_MILLIKELVIN))
+            return std::unexpected("置き直せない");
+
+        if (auto stepped = session->Step(1); !stepped)
+            return std::unexpected(stepped.error());
+
+        const uint64_t isomerReplaced = total(kept, isomerAfter);
         const std::vector<sim::NamedElementCount> elementsAfter = CountBoxElements(*session);
-        if (auto stepped = session->Step(PATCH_TICKS - BEFORE_SWAP_TICKS - 1); !stepped)
+        if (auto stepped = session->Step(PATCH_TICKS - BEFORE_SWAP_TICKS - 2); !stepped)
             return std::unexpected(stepped.error());
 
         if (auto checked = CheckNoMismatch(*session); !checked)
             return checked;
 
         const uint64_t isomerEnd = total(kept, isomerAfter);
-        Log(Channel::Gpu, Level::Info, "gpu_lab_box_test: 付け替えを跨ぐ転換: 異性体 {} → {} µmol", isomerBefore,
-            isomerEnd);
-        if (lateBefore == 0 || isomerBefore == 0 || isomerEnd <= isomerBefore)
+        Log(Channel::Gpu, Level::Info, "gpu_lab_box_test: 付け替えを跨ぐ転換: 置き直した後の異性体 {} → {} µmol",
+            isomerReplaced, isomerEnd);
+        // 置く操作は中身を置き換える(前の異性体は消える)。魔素ありの 450 K の木は 1 刻みで燃え尽きるので、置き直した刻みの異性体が
+        // 付け替えた転換の効き目(付け替えないと 0)
+        if (lateBefore == 0 || isomerBefore == 0 || isomerReplaced == 0 || isomerEnd < isomerReplaced)
             return std::unexpected("差し替えの前は両方の転換が効き、後も異性体への転換が効き続ける");
 
         if (CountBoxElements(*session) != elementsAfter)
