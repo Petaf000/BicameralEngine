@@ -11,8 +11,11 @@
 //   gas->RecordStep(list, debugRingAddress);      // 1 刻み
 //   gas->RecordReadback(list);  → 投げて待つ → gas->Read(cells, fractions, ledger)
 // 計測(T-0358): EnableTiming の後、RecordTimestamp(list, 0) → 刻み → RecordTimestamp(list, 1) → RecordTimingReadback → 待つ → TimingTicks。
+// 段ごとの計測(T-0374): EnablePassTiming の後は RecordStep が段ごとにタイムスタンプを打つ。1 つのリストに RecordStep 1 回 →
+//   RecordPassTimingReadback → 待つ → PassTimingTicks(段ごとの 1 刻みの合計)。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -28,7 +31,7 @@ namespace bicameral::sim {
     public:
         [[nodiscard]] static std::expected<GpuGasTree, std::string> Create(ID3D12Device5* device, const GasTree& tree);
 
-        // 初めの状態(Create に渡したセル・端数・帳簿)を GPU へ写す
+        // 初めの状態(Create に渡したセル・端数・帳簿)と木の形を GPU へ写す(刻みより前に必ず 1 回)
         void RecordUpload(ID3D12GraphicsCommandList10* list);
 
         // 1 刻み(いちばん細かい小刻み config.substeps × 2^σmax 回 × 9 段)
@@ -52,6 +55,13 @@ namespace bicameral::sim {
         void RecordTimestamp(ID3D12GraphicsCommandList10* list, uint32_t slot) const;  // slot 0 = 始め、1 = 終わり
         void RecordTimingReadback(ID3D12GraphicsCommandList10* list) const;            // 2 つを打った同じリストで
         [[nodiscard]] std::optional<uint64_t> TimingTicks() const;
+
+        // --- 段ごとの計測(T-0374。段の並びは gas_tree_step.hlsl の入口の順)---
+        static constexpr size_t PASS_COUNT = 9;
+        [[nodiscard]] bool EnablePassTiming(ID3D12Device* device);
+        // RecordStep 1 回を記録した同じリストで
+        void RecordPassTimingReadback(ID3D12GraphicsCommandList10* list) const;
+        [[nodiscard]] std::optional<std::array<uint64_t, PASS_COUNT>> PassTimingTicks() const;
 
     private:
         // shaders/sim/gas_tree_step.hlsl の入口(呼ぶ順。.cso の名前と同じ順)
@@ -97,12 +107,15 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
         std::array<ComPtr<ID3D12Resource>, 11> m_uavs;  // u0〜u10(gas_tree_step.hlsl の結び付け)
-        std::array<ComPtr<ID3D12Resource>, 7>
-            m_srvs;  // t0〜t6(設定・レベル・層の基準・層の外・面の形・セルの場所・セルの面の並び)
+        // t0〜t6(設定・レベル・層の基準・層の外・面の形・セルの場所・セルの面の並び)。既定のヒープ。写しの元がアップロードのヒープ
+        std::array<ComPtr<ID3D12Resource>, 7> m_srvs;
+        std::array<ComPtr<ID3D12Resource>, 7> m_srvUploads;
         std::array<ComPtr<ID3D12Resource>, 3> m_uploads;    // 初めのセル・端数・帳簿
         std::array<ComPtr<ID3D12Resource>, 3> m_readbacks;  // セル・端数・帳簿
         ComPtr<ID3D12QueryHeap> m_timestamps;               // 計測(EnableTiming の後だけ)
         ComPtr<ID3D12Resource> m_timestampReadback;
+        ComPtr<ID3D12QueryHeap> m_passTimestamps;  // 段ごとの計測(EnablePassTiming の後だけ。1 + 1 刻みの段の数)
+        ComPtr<ID3D12Resource> m_passTimestampReadback;
     };
 
 }  // namespace bicameral::sim

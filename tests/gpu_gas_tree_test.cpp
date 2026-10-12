@@ -8,7 +8,7 @@
 // 引数: gpu_test_options.h(--warp・--queue)と --scene <名前>(1 つの場面だけ)・--ticks n(場面の刻みの数を替える)
 //   --profile: CPU とは比べず、大きい木(レベル 0 の n³〔--size n、既定 16〕の真ん中 (n/2)³ をレベル 1 に)で 1 刻みの GPU 時間(タイムスタンプ)を測る
 //              (--ticks 既定 20。--subcycled でレベルごとの小刻み〔レベル 0 は 24・レベル 1 は 48〕、無ければ全部 48。
-//              --uniform で細かくしない〔全部レベル 0 の n³〕。T-0358)
+//              --uniform で細かくしない〔全部レベル 0 の n³〕。T-0358。--passes で最後の刻みの段ごとの時間も出す。T-0374)
 #include "sim/gpu_gas_tree.h"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -349,7 +349,8 @@ namespace {
         bool subcycled = false;  // 計測: レベルごとの小刻み
         bool uniform =
             false;  // 計測: 細かくしない(全部レベル 0 の木。1 レベルの箱の GPU と同じ形の場面で、木の段の形の費用を見る)
-        uint32_t size = 16;  // 計測: レベル 0 の箱の一辺(4 の倍数)
+        uint32_t size = 16;   // 計測: レベル 0 の箱の一辺(4 の倍数)
+        bool passes = false;  // 計測: 段ごとの時間(T-0374)
     };
 
     // --- 計測(T-0358): CPU と比べず、大きい木で 1 刻みの GPU 時間 ---
@@ -375,6 +376,8 @@ namespace {
                 options.subcycled = true;
             else if (argument == "--uniform")
                 options.uniform = true;
+            else if (argument == "--passes")
+                options.passes = true;
             else
                 rest.push_back(arguments[index]);
         }
@@ -389,7 +392,7 @@ namespace {
         if (!treeOptions || !options) {
             Log(Channel::Sim, Level::Error,
                 "使い方: gpu_gas_tree_test [--warp] [--queue direct|compute] [--scene 名前] [--ticks n] "
-                "[--profile [--size n] [--subcycled] [--uniform]]");
+                "[--profile [--size n] [--subcycled] [--uniform] [--passes]]");
             return 2;
         }
 
@@ -442,6 +445,22 @@ namespace {
         return sceneCount > 0 ? 0 : 1;
     }
 
+    // 最後の刻みの段ごとの時間(T-0374。段の並びは gas_tree_step.hlsl の入口の順)
+    void LogPassTiming(const GpuGasTree& gas, uint64_t frequency) {
+        constexpr std::array<const char*, GpuGasTree::PASS_COUNT> PASS_NAMES = {
+            "derive",     "face_force", "apply_force", "face_flow", "outflow",
+            "face_moved", "moved_sum",  "face_final",  "transfer"};
+        const auto totals = gas.PassTimingTicks();
+        if (!totals || frequency == 0)
+            return;
+
+        std::string line;
+        for (size_t pass = 0; pass < PASS_NAMES.size(); ++pass)
+            line += std::format(" {} {:.3f}", PASS_NAMES[pass], (double)(*totals)[pass] * 1000.0 / (double)frequency);
+
+        Log(Channel::Sim, Level::Info, "gpu_gas_tree_test: 段ごと(ms・最後の 1 刻み):{}", line);
+    }
+
     int Profile(ID3D12Device5* device, GpuParts& parts, const TreeTestOptions& options) {
         const uint32_t size = options.size;
         GasConfig config = MakeAirConfig(size, size, size);
@@ -460,7 +479,7 @@ namespace {
             Heat(config, tree.cells[index], AIR_TEMPERATURE + 30000);
 
         auto gas = GpuGasTree::Create(device, tree);
-        if (!gas || !gas->EnableTiming(device)) {
+        if (!gas || !gas->EnableTiming(device) || (options.passes && !gas->EnablePassTiming(device))) {
             Log(Channel::Sim, Level::Error, "gpu_gas_tree_test: FAILED(計測の準備に失敗)");
             return 1;
         }
@@ -481,13 +500,14 @@ namespace {
             gas->RecordTimestamp(list, 1);
             gas->RecordReadback(list);
             gas->RecordTimingReadback(list);
+            gas->RecordPassTimingReadback(list);
             parts.debugRing.RecordReadbackAndReset(list);
             if (!parts.queue.ExecuteAndWait()) {
                 Log(Channel::Sim, Level::Error, "gpu_gas_tree_test: FAILED(GPU での実行に失敗)");
                 return 1;
             }
 
-            (void)parts.debugRing.Drain();
+            const gpu::DebugRingContents debugOutput = parts.debugRing.Drain();
             const std::optional<uint64_t> elapsed = gas->TimingTicks();
             if (!elapsed || frequency == 0)
                 return 1;
@@ -495,10 +515,12 @@ namespace {
             const double milliseconds = (double)*elapsed * 1000.0 / (double)frequency / (double)ticks;
             Log(Channel::Sim, Level::Info,
                 "gpu_gas_tree_test: 計測 {} 回目 レベル 0 {}³{} = {} セル・面 {}・{}・1 刻みの段 "
-                "{}: 1 刻み {:.3f} ms",
+                "{}: 1 刻み {:.3f} ms(FX_ASSERT {} 件)",
                 round, size, options.uniform ? "(細かくしない)" : " の真ん中をレベル 1 に", tree.cells.size(),
                 gas->FaceCount(), options.subcycled ? "小刻み 24 / 48" : "小刻み 48", gas->PassesPerTick(),
-                milliseconds);
+                milliseconds, debugOutput.assertCount);
+            if (options.passes)
+                LogPassTiming(*gas, frequency);
         }
 
         return 0;
