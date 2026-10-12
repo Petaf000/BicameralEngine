@@ -1,6 +1,6 @@
 # T-0384 GPU の段が一様の値の溢れを読む(評価・広げる・細かくする・粗くする・伝導。T-0312 から分けた)
 
-- Status: Doing(2026-10-12 一部: 評価・頁に広げる〔伝導なしの刻み〕まで。細かくする・粗くする・頁を返すは T-0389、伝導は T-0390)
+- Status: Done(2026-10-12。範囲を「評価・頁に広げる〔伝導なしの刻み〕」に絞った。細かくする・粗くする・頁を返すは T-0389、伝導は T-0390)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -26,8 +26,10 @@
    CPU と HW・WARP が毎刻みビット一致・保存がビット一致。gpu_multires_test の RunUniformOverflowRoundTrip を広げる。
 
 ## 完了条件
-- [ ] 溢れのある一様の値を持つ世界を GPU で刻んで、CPU の溢れの世界と毎刻みビット一致(評価・広げる・細かくする・粗くする・伝導)
-- [ ] 既定の世界(wideCells を使わない)のシェーダー・VRAM・結果は変わらない
+- [x] 溢れのある一様の値を持つ世界を GPU で刻んで、CPU の溢れの世界と毎刻みビット一致(評価・広げる。HW・WARP。
+  細かくする・粗くする は T-0389、伝導 は T-0390 へ移した)
+- [x] 既定の世界(wideCells を使わない)のシェーダー・VRAM・結果は変わらない(差分は `#ifdef MR_WIDE_CELLS` の中と wideCells の時だけ使う
+  multires_tree_wide_expand.cso。既定の StepBlockWait は EvaluateUniformWaitShaped 経由で前と同じ EvaluateUniformWait。DXIL の比較はしていない)
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-12(作業役。並走の作業ツリー wt5。約 1 時間 40 分。一部): 伝導なしの刻みの 2 段が一様の値の溢れを読む。
@@ -39,6 +41,13 @@
   試験: gpu_multires_test の RunUniformOverflowSteps(--part coarsen・wide。11 種の一様な根を写して 8 刻み。反応のある表 = 広げて刻む・
   反応の無い表 = 一様のまま)。debug のビルドは通った。**HW・WARP の試験の結果は未確認**(GPU の順番待ちが 1 時間を超え、
   2 時間の約束に間に合わなかった。wt5 のランナーに HW〔--queue compute --part coarsen〕→ WARP〔--warp〕の run を積んだ。結果は wt5 の runner/logs)。
+- 2026-10-12(作業役。wt5。続き。完了): 前の巡目の「HW の --part coarsen が 109 秒から止まった」は **GPU-based validation(GBV)を付けて流したため**
+  (run の既定は GBV あり。ctest の gpu_multires_wide は --no-gbv)。--no-gbv では同じ場面が 5 秒で通る(止まりではなく GBV で極端に遅いか、
+  GBV の計装で刻みが返らない。どちらかは未確認)。シェーダーの止まりの疑い(CopyUniformTails・ReserveExpandChunks)は静的に読んで問題なし
+  (ループの上限はグループで一様・return はグループで一様・内側のループを return で抜けない)。WARP では「反応なし」の場面が規則 0 個の表で
+  GPU の規則のバッファが 0 バイトになって作れず落ちていた → 試験の反応の無い表を「セルに無い物質だけを使う規則 1 つ」に直した。
+  通った(debug): WARP --part coarsen・HW --part coarsen --no-gbv(161 秒)・HW --part wide --no-gbv(285 秒。一様の値の 3 場面を含む)・
+  WARP --part wide(459 秒)。どれも CPU と毎刻みビット一致・保存がビット一致。chains(既定の世界)は流していない(差分が溢れの変種だけのため)。
 
 ## 引き継ぎメモ
 - 道具: UniformTailCount(slot)(世界の枠だけ。観察の枠は 0)・UncoveredCellCount(block)(multires_wide_access.hlsli)。
@@ -48,9 +57,12 @@
 - 一様の値の領域の塊は、ブロックを広げた後も付けたまま(CPU も uniformOverflow を残す。読まない)。返すのは T-0389(頁を返す・ブロックを返す時)
   か T-0312 の残り(畳む時に使い直す)。
 - 費用: 溢れの世界の一様なブロックの評価が全部速い形になった(未計測。空気だけの溢れの世界の ns/セル を T-0389 か T-0390 で測る)。
+- 試験の流し方(T-0389・T-0390 も): 溢れの世界の HW の run は **--no-gbv を付ける**(GBV ありの debug では刻みが返らず、全部のランナーの GPU を
+  上限まで止めた)。切り分けは `run -Exe gpu_multires_test -- --queue compute --part coarsen --no-gbv`(約 160 秒)→ `--part wide --no-gbv`(約 290 秒)。
+  WARP は GBV なしが既定。HW の最初の場面はパイプラインを作るので約 100 秒かかる。
 
 ## 判断待ち
-- なし(実装の細部だけ)。仮(ユーザー未確認・取り消しやすい): 33 種以上の一様の値は GPU では評価せずに頁に広げる(CPU は上限の無い形で評価して
+- 1 件(仮で進めた。ユーザー未確認・取り消しやすい): 33 種以上の一様の値は GPU では評価せずに頁に広げる(CPU は上限の無い形で評価して
   変わらなければ一様のまま = その場面だけ食い違う)。プレイヤーへの影響: 33 種以上が混ざった静かな一様の場所が、GPU では毎回頁に広げて刻まれる
   (VRAM と刻みの費用が増える。反応の結果・保存は変わらない)。T-0389 で大きい形の評価(WideDeferred と同じ 64 スレッドの段)にする。
 

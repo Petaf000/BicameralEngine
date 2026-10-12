@@ -674,8 +674,10 @@ namespace {
                                                                   gpu::DebugRing& ring,
                                                                   const sim::BakedReactionTable& wideTable,
                                                                   bool reacting) {
+        // 反応の無い表: 規則を空にすると GPU の規則のバッファが 0 バイトになる(作れない)ので、セルに無い物質だけを使う規則を 1 つ残す
         sim::ReactionTableDefinition inertDefinition = test::MakeWideOverflowTable();
-        inertDefinition.rules.clear();
+        inertDefinition.species.push_back(test::LimitsSpecies("idle", -700));
+        inertDefinition.rules = {test::LimitsRule("idle_make", "idle", test::WideOverflowName(1), 1, 1)};
         const auto inertTable = sim::BakeReactionTable(inertDefinition);
         if (!inertTable)
             return std::unexpected(std::format("一様の値の溢れを刻む: 反応の無い表を作れない: {}", inertTable.error()));
