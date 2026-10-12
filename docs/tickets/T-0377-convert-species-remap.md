@@ -1,6 +1,6 @@
 # T-0377 物質を足す・消す反応表の差し替えで、転換のパッチの物質 ID を付け替える(T-0359 から分けた)
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -19,7 +19,7 @@
       (この刻みに終わるパッチと、もう替える先の無い転換は数えない)
 - [x] まだ当てていないパッチのコマンドも付け替える(実験室 RemapLabCommand・仮の世界 RemapPlaceCommand = 窓の筆の付け替え)。
       消えた物質への転換は当てる時に断る(仮の世界は断った数・イベントに出る)
-- [ ] 試験: lab_box_test の TestMagicConvertRemap(CPU)/ gpu_lab_box_test の RunConvertRemap / gpu_probe_patch_test の TestRemapScene
+- [x] 試験: lab_box_test の TestMagicConvertRemap(CPU)/ gpu_lab_box_test の RunConvertRemap / gpu_probe_patch_test の TestRemapScene
       (どちらも毎刻み GPU と CPU がビット一致。仮の世界は保存点へ戻す・ばらばらの分け方・再生ファイル)
 - [x] 02 §5.1・ADR-0095 追記 4
 
@@ -36,6 +36,11 @@
   消えた転換は列から除かず替える先 0 にした(状態の要約に残る)。ビルドは 2 回とも素直に通った(警告 0)。
   実験室の試験は最初、差し替えの時には木が燃え尽きていて「後も効き続ける」を確かめられなかったので、差し替えの後に新しい表の ID で
   木を置き直す形にした。
+- 2026-10-12(作業役・wt3 その 2): main(e6701b1)へ rebase。gpu_lab_box(HW・debug)が通った(置き直した確かめも、最後の PassesValidation も)。
+  D3D12 [527] 240 件の原因は T-0377 の前から(2026-10-09 の a4ec8af)ある陰解法の読み戻し: GpuMultiresImplicit の刻みが
+  GpuImplicit::RecordCostReadback(State・Wide を UAV → COPY_SOURCE にしたまま)の後に RecordRelease(全部を UAV → COMMON)を積む。
+  2 段細かくした箱(陰解法を通る)の 60 刻み × 2 つのバッファ × 2 つの箱 = 240。読み戻しを UAV → COPY_SOURCE → UAV に戻す形に直した
+  (gpu_implicit.cpp の CopyToReadbackKeepingUav。Cells の RecordReadback も同じ)。
 
 ## テストの結果
 - 2026-10-12(debug・main c6bca01 の上): CPU 5 本(reaction_hot_reload・reaction_replay_table・reaction_species_remap・multires・lab_box)通過。
@@ -46,6 +51,7 @@
   別件: gpu_lab_box の「2 段細かくした箱」の辺り(224〜340 秒)で debug layer の D3D12 [527](ResourceBarrier の前の状態が
   UNORDERED_ACCESS でなく COPY_SOURCE)が 240 件出る(どちらの実行でも同じ数。付け替えの段は通らない所なので T-0377 の変更ではない
   見込み・main で出るかは未確認)。このままだと最後の PassesValidation で gpu_lab_box が落ちる。
+- 2026-10-12(debug・HW・e6701b1 の上 + [527] の直し): gpu_lab_box 通過(526 秒。[527] 0 件・PassesValidation 通過)。
 
 ## 引き継ぎメモ
 - 替える先 0 の転換は列に残る(期間の終わりまで)。エディタのパッチの一覧(T-0325)で「替える先が消えた」と出すなら、効き方の語の
