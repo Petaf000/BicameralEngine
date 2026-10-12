@@ -230,9 +230,9 @@ namespace bicameral::sim {
             return (int64_t)derived[side.index].mass - (int64_t)box.referenceDerived[CellLayer(box, side.index)].mass;
         }
 
-        // 質量の差 Δm(mg)が 1 セルの高さで作る静水圧の差の半分(µPa)= Δm × 39.2266 ÷ 2
-        int64_t HalfHydrostatic(int64_t excess) {
-            return excess * (int64_t)HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / 20000;
+        // 質量の差 Δm(mg)が 1 セルの高さで作る静水圧の差の半分(µPa)= Δm × 層の重さの係数(標準の重力で 39.2266)÷ 2
+        int64_t HalfHydrostatic(const GasBox& box, int64_t excess) {
+            return excess * (int64_t)box.coefficients.hydrostatic / 20000;
         }
 
         // 圧力の拡散を起こす圧力の差: p̃_左 − p̃_右。縦の面では、両側の質量の差の平均が作る静水圧の差を引く
@@ -243,7 +243,8 @@ namespace bicameral::sim {
             if (face.axis != 2 || !box.config.gravity)
                 return difference;
 
-            return difference - HalfHydrostatic(Excess(box, derived, face.left) + Excess(box, derived, face.right));
+            return difference -
+                   HalfHydrostatic(box, Excess(box, derived, face.left) + Excess(box, derived, face.right));
         }
 
         // 縦の面の重さ: 面の両側の質量の差の平均 × g を、両側のセルが 1/4 ずつ受ける(セルから見ると 1/4・1/2・1/4 で均した重さ。
@@ -282,7 +283,7 @@ namespace bicameral::sim {
                 const FaceSide inside = wallBelow ? face.right : face.left;
                 int64_t pressure = derived[inside.index].scaledPressure;
                 if (face.axis == 2 && box.config.gravity) {
-                    const int64_t hydrostatic = HalfHydrostatic(Excess(box, derived, inside));
+                    const int64_t hydrostatic = HalfHydrostatic(box, Excess(box, derived, inside));
                     pressure += wallBelow ? hydrostatic : -hydrostatic;
                 }
 
@@ -371,7 +372,7 @@ namespace bicameral::sim {
                 return 0;
 
             const uint64_t mass = CellMass(box.config, box.coefficients, moved);
-            const auto work = (int64_t)(mass * GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / MICRO);
+            const auto work = (int64_t)(mass * box.coefficients.gravityWork / MICRO);
 
             return face.flow > 0 ? work : -work;
         }
@@ -654,6 +655,7 @@ namespace bicameral::sim {
 
     GasCoefficients MakeGasCoefficients(const GasConfig& config) {
         assert(config.substeps > 0 && config.soundSpeedMmPerS > 0);
+        assert(config.gravityMicrometersPerSecond2 <= fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2);
 
         // 安定の条件: ν = c̃ Δt_小刻み ÷ Δx = c̃(mm/s)÷ (30000 × 小刻み)。圧力の拡散(陽解法の 3 次元の拡散)で ν ≤ 約 2/3、
         // 余裕を見て 0.6 まで(既定の 340 m/s・小刻み 24 で 0.47。T-0226 で 1% の乱れが育つ境を測った: 小刻み 16 で発散・18 で安定)
@@ -676,8 +678,13 @@ namespace bicameral::sim {
         // 面の力積: (p̃_左 + p̃_右)÷ 2 × 1e-6 × A × Δt × 1e6(mg/kg)× 2^20 =(和)× 2^15 ÷ (15 × 小刻み)
         coefficients.pressureImpulse = ((uint64_t)1 << 31) / (15 * substeps);
 
-        // 浮力: Δm(mg)× g × Δt × 2^20 = Δm × 9.80665 × 2^20 ÷ (60 × 小刻み)
-        coefficients.gravityImpulse = (GRAVITY_MICROMETER_PER_SECOND2 << 36) / (60 * substeps * MICRO);
+        // 浮力: Δm(mg)× g × Δt × 2^20 = Δm × g(µm/s²)× 2^36 ÷ (60 × 小刻み × 10^6)(2^36 は 2^20 と mg ÷ kg の 2^16 の分)
+        const uint64_t gravity = config.gravityMicrometersPerSecond2;
+        coefficients.gravityImpulse = (gravity << 36) / (60 * substeps * MICRO);
+
+        // 層の重さの圧力・重さの仕事(換算は world_physics.hlsli。標準の重力で 392266・4903325)
+        coefficients.hydrostatic = fx::GasHydrostaticFromMicrometers(config.gravityMicrometersPerSecond2);
+        coefficients.gravityWork = fx::GasGravityWorkFromMicrometers(config.gravityMicrometersPerSecond2);
 
         return coefficients;
     }
@@ -717,7 +724,7 @@ namespace bicameral::sim {
 
             // --- 上の層の圧力 = この層の重さの分だけ下げる(釣り合いは近似でよい: 力は基準との差で入れるので、基準そのものは止まっている)---
             const uint64_t mass = CellMass(config, coefficients, cell);
-            pressure -= mass * HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / 10000;
+            pressure -= mass * coefficients.hydrostatic / 10000;
         }
 
         return layers;

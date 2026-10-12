@@ -175,9 +175,9 @@ namespace bicameral::sim {
                    (int64_t)level.referenceDerived[CellLayer(tree, side.index)].mass;
         }
 
-        // 静水圧の差の半分(µPa)= 質量の差 × 39.2266 ÷ 2 ÷ 2^k(レベル k の数の質量の差。セルの高さが 2^-k)
-        int64_t HalfHydrostatic(int64_t excess, uint32_t level) {
-            return excess * (int64_t)gd::HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / ((int64_t)20000 << level);
+        // 静水圧の差の半分(µPa)= 質量の差 × 層の重さの係数(標準の重力で 39.2266)÷ 2 ÷ 2^k(レベル k の数の質量の差。セルの高さが 2^-k)
+        int64_t HalfHydrostatic(const GasTree& tree, int64_t excess, uint32_t level) {
+            return excess * (int64_t)tree.levels[0].coefficients.hydrostatic / ((int64_t)20000 << level);
         }
 
         // 面の両側の質量の差を面のレベルの数へ(粗い側は高さが 2^d 倍なので静水圧の差も 2^d 倍)
@@ -300,7 +300,7 @@ namespace bicameral::sim {
             if (face.axis != 2 || !tree.config.gravity)
                 return difference;
 
-            return difference - HalfHydrostatic(FaceExcess(tree, derived, face), face.level);
+            return difference - HalfHydrostatic(tree, FaceExcess(tree, derived, face), face.level);
         }
 
         // 縦の面の重さ: 両側の質量の差(数)の平均の 1/4 を両側が受ける。粗い側は細かい単位で × 2^d
@@ -336,7 +336,7 @@ namespace bicameral::sim {
                 const TreeSide& inside = wallBelow ? face.right : face.left;
                 int64_t pressure = derived[inside.index].scaledPressure;
                 if (face.axis == 2 && tree.config.gravity) {
-                    const int64_t hydrostatic = HalfHydrostatic(Excess(tree, derived, inside), face.level);
+                    const int64_t hydrostatic = HalfHydrostatic(tree, Excess(tree, derived, inside), face.level);
                     pressure += wallBelow ? hydrostatic : -hydrostatic;
                 }
 
@@ -636,7 +636,8 @@ namespace bicameral::sim {
                 return 0;
 
             const uint64_t mass = gd::CellMass(config, tree.levels[face.level].coefficients, moved);
-            const auto work = (int64_t)(mass * gd::GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / (gd::MICRO << face.level));
+            const auto work = (int64_t)(mass * tree.levels[face.level].coefficients.gravityWork /
+                                        (gd::MICRO << face.level));
 
             return face.flow > 0 ? work : -work;
         }
@@ -763,7 +764,8 @@ namespace bicameral::sim {
                                                           24 * substeps * config.soundSpeedMmPerS)
                                             .quotient;
             coefficients.pressureImpulse = ((uint64_t)1 << (31 + level)) / (15 * substeps);
-            coefficients.gravityImpulse = (gd::GRAVITY_MICROMETER_PER_SECOND2 << 36) / (60 * substeps * gd::MICRO);
+            coefficients.gravityImpulse = ((uint64_t)config.gravityMicrometersPerSecond2 << 36) /
+                                          (60 * substeps * gd::MICRO);
 
             return coefficients;
         }
@@ -786,7 +788,7 @@ namespace bicameral::sim {
                 layers.push_back(cell);
 
                 const uint64_t mass = config.gravity ? gd::CellMass(config, coefficients, cell) : 0;
-                pressure -= mass * gd::HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / ((uint64_t)10000 << level);
+                pressure -= mass * coefficients.hydrostatic / ((uint64_t)10000 << level);
             }
 
             return layers;

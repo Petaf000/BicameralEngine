@@ -35,6 +35,8 @@ namespace bicameral::sim {
         uint64_t pressureFlow;
         uint64_t pressureImpulse;
         uint64_t gravityImpulse;
+        uint64_t hydrostatic;  // 質量(mg)× これ ÷ 10^4 = 1 セルの高さの層の重さの圧力(µPa。世界の重力から。ADR-0171)
+        uint64_t gravityWork;  // 質量(mg)× これ ÷ 10^6 = 1 セル上がる重さの仕事(µJ)
         uint64_t soundScale;
         uint64_t randomSeed;
 

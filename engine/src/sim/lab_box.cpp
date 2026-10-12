@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include "common/implicit_conduction.hlsli"
+#include "common/units.hlsli"
 #include "sim/multires_nest_internal.h"
 
 using namespace bicameral::multires;
@@ -36,8 +37,8 @@ namespace bicameral::sim {
 
         // --- 量の換算(T-0220): µmol = p[Pa] × V[m³] × 10^6 ÷ (R[J/(mol·K)] × T[K])
         //     = p × (0.125 × 10^6 × 10^3 × 10^9) ÷ (R × 10^9 × T[mK])。R = 8.314462618(CODATA 2018 の定義値)---
-        constexpr uint64_t GAS_NUMERATOR_PER_PASCAL = 125'000'000'000'000'000;  // 0.125 m³ × 10^18
-        constexpr uint64_t GAS_CONSTANT_NANO = 8'314'462'618;                   // R × 10^9
+        constexpr uint64_t GAS_NUMERATOR_PER_PASCAL = 125'000'000'000'000'000;               // 0.125 m³ × 10^18
+        constexpr uint64_t GAS_CONSTANT_NANO = fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN;  // R × 10^9(units.hlsli)
         constexpr uint64_t MICROMOLES_PER_MOLE = 1'000'000;
 
         // --- 記録のファイルの形(リトルエンディアン。版を上げたら読む側も直す)---

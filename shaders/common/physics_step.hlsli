@@ -161,9 +161,10 @@ FX_FN PxVec3 PxWorldInertiaRow(PxMat3 rotation, PxVec3 inertia, uint32_t i) {
 
 // --- 刻みの初め: 物の初期化 -----------------------------------------------------------------------
 // 慣性の目標と初めの推定。刻みの初めの姿勢を取り、Δ を 0 に、色を消す
-FX_FN PxBody PxInitializeBody(PxBody body, int64_t rate) {
+// gravity は PxParameters::gravity(2^-20 m/s²。0 以上)
+FX_FN PxBody PxInitializeBody(PxBody body, int64_t rate, int64_t gravity) {
     // 重力の 1 小刻みの変位 g h²(2^-32 m)= g(2^-20 m/s²)× 2^12 / rate²
-    const int64_t gravityStep = (PX_GRAVITY << PX_DELTA_EXTRA_BITS) / (rate * rate);
+    const int64_t gravityStep = (gravity << PX_DELTA_EXTRA_BITS) / (rate * rate);
 
     body.startPosition = body.position;
     body.startRotation = body.rotation;
@@ -187,9 +188,10 @@ FX_FN PxBody PxInitializeBody(PxBody body, int64_t rate) {
                                       (body.angularVelocity.y << PX_DELTA_EXTRA_BITS) / rate,
                                       (body.angularVelocity.z << PX_DELTA_EXTRA_BITS) / rate);
 
-    // 初めの推定: 前の刻みで重力の向きに加速していた割合(Q16)だけ重力を入れる(適応的なウォームスタート)
+    // 初めの推定: 前の刻みで重力の向きに加速していた割合(Q16)だけ重力を入れる(適応的なウォームスタート)。
+    // 無重力では入れるものが無い(0 で割らない)
     const int64_t accelerationY = (body.velocity.y - body.previousVelocity.y) * rate;  // 2^-20 m/s²
-    const int64_t weightQ16 = PxClamp(FxDivShiftS64(-accelerationY, PX_GRAVITY, 16), 0, 65536);
+    const int64_t weightQ16 = gravity > 0 ? PxClamp(FxDivShiftS64(-accelerationY, gravity, 16), 0, 65536) : 0;
     body.deltaLinear = PxMakeVec3(velocityStep.x, velocityStep.y - FxMulShiftS64(gravityStep, weightQ16, 16),
                                   velocityStep.z);
     body.deltaAngular = body.inertialAngular;

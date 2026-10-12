@@ -10,6 +10,7 @@
 
 #include "physics_math.hlsli"
 #include "units.hlsli"
+#include "world_physics.hlsli"
 
 PX_NAMESPACE_BEGIN
 
@@ -19,7 +20,6 @@ FX_CONST int32_t PX_SOLVE_GAIN_SHIFT = 24;           // H(2^-8)X(2^-32)= g(2^-16
 FX_CONST uint32_t PX_FORCE_FROM_PENALTY_SHIFT = 24;  // k(2^-8 N/m)× C(2^-32 m)/ 2^24 = 力(2^-16 N)
 FX_CONST uint32_t PX_ARM_TO_JACOBIAN_SHIFT = 20;     // 腕(2^-20 m)× 方向(Q30)/ 2^20 = r × b(2^-30 m)
 FX_CONST uint32_t PX_GAP_TO_CONSTRAINT_SHIFT = 18;   // 隙間(2^-20 m)× 方向(Q30)/ 2^18 = C(2^-32 m)
-FX_CONST int64_t PX_GRAVITY = 10283018;              // 9.80665 m/s²(2^-20 m/s²)
 
 // --- パラメータ(試作で決めた値。T-0016 のチケット)--------------------------------------------
 // GPU の構造化バッファでも同じ並びになるように、64bit の値を先に、32bit の値を後に置く(T-0090。physics_step.hlsli の約束)
@@ -37,6 +37,9 @@ struct PxParameters {
     int64_t gapSlop;             // 本反復で、これ以下の隙間は触れているとみなす(2^-32 m。T-0091)
     int64_t proximityMatch;      // 特徴の番号が合わない点は、これ以内の前の点から λ を引き継ぐ(2^-20 m。T-0091)
     int64_t recollideMinMotion;  // 組の 1 刻みの動きがこれを超える時だけ探し直す(2^-32 m。T-0091)
+
+    // --- 世界の値(ADR-0171)---
+    int64_t gravity;  // 重力の強さ(2^-20 m/s²。-y 向き。0 = 無重力)。世界のデータから PxGravityFromMicrometers で作る
 
     // --- 32bit ---
     uint32_t iterations;
@@ -63,7 +66,8 @@ FX_FN PxParameters PxDefaultParameters() {
     p.gapSlop = 4294967;          // 1 mm
     p.proximityMatch = 20972;     // 2 cm
     p.recollideIteration = 5;
-    p.recollideMinMotion = 21474836;  // 5 mm
+    p.recollideMinMotion = 21474836;                                                 // 5 mm
+    p.gravity = PxGravityFromMicrometers(STANDARD_GRAVITY_MICROMETERS_PER_SECOND2);  // 9.80665 m/s²(10283018)
     return p;
 }
 

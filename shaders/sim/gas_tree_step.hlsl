@@ -151,9 +151,9 @@ int64_t Excess(TreeSide side) {
     return (int64_t)g_derived[side.index].mass - (int64_t)g_referenceDerived[g_places[side.index].layer].mass;
 }
 
-// 静水圧の差の半分(µPa)= 質量の差 × 39.2266 ÷ 2 ÷ 2^k(gas_tree.cpp の HalfHydrostatic)
+// 静水圧の差の半分(µPa)= 質量の差 × 層の重さの係数(標準の重力で 39.2266)÷ 2 ÷ 2^k(gas_tree.cpp の HalfHydrostatic)
 int64_t HalfHydrostatic(int64_t excess, uint32_t level) {
-    return excess * HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / ((int64_t)20000 << level);
+    return excess * (int64_t)GAS_P.hydrostatic / ((int64_t)20000 << level);
 }
 
 int64_t DrivingPressure(GasTreeGpuFace layout, TreeSide left, TreeSide right) {
@@ -588,7 +588,7 @@ int64_t GravityWork(GasTreeGpuFace layout, int64_t flow, GasGpuCell moved) {
     if (layout.axis != 2 || GAS_P.gravity == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
         return 0;
 
-    const int64_t work = (int64_t)(CellMass(moved) * GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / (MICRO << layout.level));
+    const int64_t work = (int64_t)(CellMass(moved) * GAS_P.gravityWork / (MICRO << layout.level));
 
     return flow > 0 ? work : -work;
 }
