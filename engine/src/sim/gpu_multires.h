@@ -58,6 +58,9 @@ namespace bicameral::sim {
         // 溢れの塊の置き場の塊の数(1 塊 4 KiB。0 = 既定: 頁の数 × 2 と、1 頁の両面を全部の溢れで埋める数の大きい方)。
         // 尽きた時だけ溢れるセルを待たせて MR_COUNTER_LIMIT_PRODUCTS に数える(T-0236)
         uint32_t wideChunks = 0;
+        // 速い形に入らないセルを刻む作業場の段のグループの数(T-0380。0 = 既定 MR_WIDE_SPACE_GROUPS)。作業場の VRAM はグループの数に
+        // 比例し(1 グループ 64 スレッド × 8 語 × 1 セルの上限)、同時に刻めるブロックの数もグループの数まで
+        uint32_t wideSpaceGroups = 0;
     };
 
     class GpuMultiresImplicit;
@@ -323,6 +326,7 @@ namespace bicameral::sim {
         uint32_t m_wideChunks = 0;                              // 溢れの塊の置き場の塊の数
         uint32_t m_spaceSpecies =
             0;  // 作業場の 1 セルの成分の上限(表の物質の数。速い形に収まる表なら 0 = 作業場なし。T-0362)
+        uint32_t m_spaceGroups = 0;  // 作業場の段のグループの数(T-0380。作業場なしなら 0)
         std::array<ComPtr<ID3D12PipelineState>, TREE_PASS_COUNT> m_treePipelines;
         std::array<ComPtr<ID3D12PipelineState>, CONDUCT_PASS_COUNT> m_conductPipelines;  // 熱の伝導の段(T-0107)
         std::unique_ptr<gpu::WorkGraph> m_conductGraph;  // 伝導の段の Work Graph 版(無ければ Compute だけ)

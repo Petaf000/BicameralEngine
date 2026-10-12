@@ -93,7 +93,8 @@ RxGpuMidCell MidShape() {
 
 // --- 作業場の形(T-0362)---
 // 作業場の段(WideBigPass)だけがコンパイルする。g_external0 = 作業場の始まり(u6 の語)、g_external1 = 1 セルの成分の上限(表の物質の数。
-// RX_GPU_WIDE_SPECIES まで)。並びは shaders/common/multires_wide.hlsli の「作業場」。スレッドのレーンは [刻む前 A][書く B][使う量]。
+// RX_GPU_WIDE_SPECIES まで)。並びは shaders/common/multires_wide.hlsli の「作業場」。スレッドのレーンは [刻む前 A][使う量][書く B × 8][① の結果 × 8]
+// (B と ① の結果は受け持つ 8 セルごと。③ は刻み直さずに写す。T-0380)。
 // セルは「成分 0 の語」を指す小さな値で、写しても同じ場所を指す。核の中で元のセルを残す所(反応物を引く前)は RxWritableCell が
 // A から B へ写す。RxCompactCell・RxTryAddSpecies は同じ場所で詰める・ずらす(書く位置が読む位置を追い越さない)
 
@@ -102,12 +103,14 @@ static uint32_t s_spaceGroup = 0;  // 作業場の段のグループの番号(Wi
 struct RxGpuSpaceCell {
     int64_t energy;
     uint32_t speciesCount;
-    uint32_t word;  // 成分 0 の u6 の語(成分 i は word + 3i: 物質 ID・µmol の下位・上位)
-    uint32_t lane;  // スレッドのレーンの先頭(A = lane、B = lane + 3c、使う量 = lane + 6c)
+    uint32_t word;  // 成分 0 の u6 の語(成分 i の語 k は SpaceWord(word, 3i + k): 物質 ID・µmol の下位・上位)
+    uint32_t lane;  // スレッドのレーンの先頭(A = lane、使う量 = SpaceWord(lane, 3c))
+    uint32_t
+        write;  // このセルの書くセル B(SpaceWord(lane, 5c + 3ck)。k = セルの番号 / 64。① の結果を ③ まで残す。T-0380)
 };
 
 struct RxGpuSpaceUsage {
-    uint32_t word;  // 成分 i の使う量は word + 2i(下位・上位)
+    uint32_t word;  // 成分 i の使う量は SpaceWord(word, 2i)(下位・上位)
     uint64_t heat;
 };
 
@@ -115,40 +118,47 @@ uint32_t SpaceCapacity() {
     return g_external1;
 }
 
-// スレッド thread のレーンの先頭
+// スレッド thread のレーンの先頭。グループの 64 スレッドのレーンは語ごとに交互に並ぶ(レーンの k 語目 = 先頭 + 64k。T-0380):
+// 同じ成分を読む隣のスレッドの語が並ぶので、ワープの読み書きがまとまる(前はレーンを続けて置き、隣のスレッドが 8c 語離れていた)
 uint32_t SpaceLaneWord(uint32_t thread) {
-    const uint32_t laneWords = MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES * SpaceCapacity();
+    const uint32_t laneWords = (MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES * SpaceCapacity()) +
+                               (MR_WIDE_SPACE_RESULT_WORDS * MR_WIDE_SPACE_CELLS_PER_THREAD);
 
-    return g_external0 + (((s_spaceGroup * WAIT_STEP_THREADS) + thread) * laneWords);
+    return g_external0 + (s_spaceGroup * WAIT_STEP_THREADS * laneWords) + thread;
+}
+
+// レーンの中の語 word から offset 語先(交互に並ぶので 64 語ずつ進む)
+uint32_t SpaceWord(uint32_t word, uint32_t offset) {
+    return word + (MR_WIDE_SPACE_THREADS * offset);
 }
 
 template <>
 uint32_t RxSpeciesAt<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i) {
-    return g_treeWords[cell.word + (MR_WIDE_ENTRY_WORDS * i)];
+    return g_treeWords[SpaceWord(cell.word, MR_WIDE_ENTRY_WORDS * i)];
 }
 
 template <>
 uint64_t RxAmountAt<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i) {
-    const uint32_t word = cell.word + (MR_WIDE_ENTRY_WORDS * i);
+    const uint32_t word = MR_WIDE_ENTRY_WORDS * i;
 
-    return FX_U64(g_treeWords[word + 2], g_treeWords[word + 1]);
+    return FX_U64(g_treeWords[SpaceWord(cell.word, word + 2)], g_treeWords[SpaceWord(cell.word, word + 1)]);
 }
 
 template <>
 RxGpuSpaceCell RxWithAmount<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i, uint64_t amount) {
-    const uint32_t word = cell.word + (MR_WIDE_ENTRY_WORDS * i);
-    g_treeWords[word + 1] = (uint32_t)amount;
-    g_treeWords[word + 2] = (uint32_t)(amount >> 32);
+    const uint32_t word = MR_WIDE_ENTRY_WORDS * i;
+    g_treeWords[SpaceWord(cell.word, word + 1)] = (uint32_t)amount;
+    g_treeWords[SpaceWord(cell.word, word + 2)] = (uint32_t)(amount >> 32);
 
     return cell;
 }
 
 template <>
 RxGpuSpaceCell RxWithEntry<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i, uint32_t speciesId, uint64_t amount) {
-    const uint32_t word = cell.word + (MR_WIDE_ENTRY_WORDS * i);
-    g_treeWords[word] = speciesId;
-    g_treeWords[word + 1] = (uint32_t)amount;
-    g_treeWords[word + 2] = (uint32_t)(amount >> 32);
+    const uint32_t word = MR_WIDE_ENTRY_WORDS * i;
+    g_treeWords[SpaceWord(cell.word, word)] = speciesId;
+    g_treeWords[SpaceWord(cell.word, word + 1)] = (uint32_t)amount;
+    g_treeWords[SpaceWord(cell.word, word + 2)] = (uint32_t)(amount >> 32);
 
     return cell;
 }
@@ -157,25 +167,25 @@ RxGpuSpaceCell RxWithEntry<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i, uint
 template <>
 RxGpuSpaceCell RxWritableCell<RxGpuSpaceCell>(RxGpuSpaceCell cell) {
     RxGpuSpaceCell copy = cell;
-    copy.word = cell.lane + (MR_WIDE_ENTRY_WORDS * SpaceCapacity());
+    copy.word = cell.write;
     if (copy.word == cell.word)
         return copy;
 
     for (uint32_t w = 0; w < MR_WIDE_ENTRY_WORDS * cell.speciesCount; ++w)
-        g_treeWords[copy.word + w] = g_treeWords[cell.word + w];
+        g_treeWords[SpaceWord(copy.word, w)] = g_treeWords[SpaceWord(cell.word, w)];
 
     return copy;
 }
 
 template <>
 uint64_t RxUsageAt<RxGpuSpaceUsage>(RxGpuSpaceUsage usage, uint32_t i) {
-    return FX_U64(g_treeWords[usage.word + (2 * i) + 1], g_treeWords[usage.word + (2 * i)]);
+    return FX_U64(g_treeWords[SpaceWord(usage.word, (2 * i) + 1)], g_treeWords[SpaceWord(usage.word, 2 * i)]);
 }
 
 template <>
 RxGpuSpaceUsage RxWithUsage<RxGpuSpaceUsage>(RxGpuSpaceUsage usage, uint32_t i, uint64_t amount) {
-    g_treeWords[usage.word + (2 * i)] = (uint32_t)amount;
-    g_treeWords[usage.word + (2 * i) + 1] = (uint32_t)(amount >> 32);
+    g_treeWords[SpaceWord(usage.word, 2 * i)] = (uint32_t)amount;
+    g_treeWords[SpaceWord(usage.word, (2 * i) + 1)] = (uint32_t)(amount >> 32);
 
     return usage;
 }
@@ -204,23 +214,33 @@ RxGpuSpaceCell RxCellWithRoom(RxGpuSpaceCell cell) {
 // 0 の使う量(核が添字に使うのは成分の位置 < speciesCount だけなので、そこまで 0 にする)
 RxGpuSpaceUsage RxEmptyUsage(RxGpuSpaceCell cell) {
     RxGpuSpaceUsage usage;
-    usage.word = cell.lane + (2 * MR_WIDE_ENTRY_WORDS * SpaceCapacity());
+    usage.word = SpaceWord(cell.lane, MR_WIDE_ENTRY_WORDS * SpaceCapacity());
     usage.heat = 0;
     for (uint32_t w = 0; w < 2 * cell.speciesCount; ++w)
-        g_treeWords[usage.word + w] = 0;
+        g_treeWords[SpaceWord(usage.word, w)] = 0;
 
     return usage;
 }
 
-// スレッド thread の作業場の形(A を指す空のセル)
-RxGpuSpaceCell SpaceShape(uint32_t thread) {
+// 頁のセル index の作業場の形(受け持つスレッド index % 64 の A を指す空のセル。書くセルは index / 64 番目の B)
+RxGpuSpaceCell SpaceShape(uint32_t index) {
+    const uint32_t k = index / WAIT_STEP_THREADS;
     RxGpuSpaceCell shape;
     shape.energy = 0;
     shape.speciesCount = 0;
-    shape.lane = SpaceLaneWord(thread);
+    shape.lane = SpaceLaneWord(index % WAIT_STEP_THREADS);
     shape.word = shape.lane;
+    shape.write = SpaceWord(shape.lane, (MR_WIDE_ENTRY_WORDS + 2 + (MR_WIDE_ENTRY_WORDS * k)) * SpaceCapacity());
 
     return shape;
+}
+
+// 頁のセル index の ① の結果の語(レーンの書くセルの後ろ)
+uint32_t SpaceResultWord(uint32_t index) {
+    const uint32_t k = index / WAIT_STEP_THREADS;
+    const uint32_t offset = (MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES * SpaceCapacity()) + (MR_WIDE_SPACE_RESULT_WORDS * k);
+
+    return SpaceWord(SpaceLaneWord(index % WAIT_STEP_THREADS), offset);
 }
 #endif
 
@@ -348,6 +368,56 @@ WideCellStep StepWideCellAs(Cell shape, MrBlock block, uint32_t index, uint32_t 
 
     return result;
 }
+
+#ifdef MR_WIDE_BIG_PASS
+// 作業場の形の ①(T-0380): 刻んで、結果のセルを書くセル B に、起こす刻み・上限の印・変わったかを ① の結果の語に残す
+// (③ の StoreSpaceCell が刻み直さずに写す。① と ③ は同じ入力〔刻む前の面・同じ種と刻み〕で同じ式なので、刻み直した時と
+// ビット単位で同じ。変わったかの比べ方も前の ③ と同じ〔A の刻む前と結果〕)
+WideCellStep StepSpaceCell(MrBlock block, uint32_t index, uint32_t side) {
+    const uint64_t seed = FX_U64(g_seedHigh, g_seedLow);
+    const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
+    const RxGpuSpaceCell before = LoadGpuWideCell(SpaceShape(index), g_cells[PageCellAddress(block.page, index)],
+                                                  block.page, side, index);
+    const RxWaitStepOf<RxGpuSpaceCell> step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
+
+    WideCellStep result;
+    result.tail = WideTailCount(step.cell);
+    result.limits = step.limits;
+    result.wakeTick = step.wakeTick;
+    result.changed = !SameGpuWideCell(before, step.cell);
+
+    // --- 結果を残す(核が書かなかったセルは A のままなので B へ写す)---
+    const RxGpuSpaceCell kept = RxWritableCell(step.cell);
+    const uint32_t word = SpaceResultWord(index);
+    g_treeWords[SpaceWord(word, 0)] = (uint32_t)kept.energy;
+    g_treeWords[SpaceWord(word, 1)] = (uint32_t)((uint64_t)kept.energy >> 32);
+    g_treeWords[SpaceWord(word, 2)] = kept.speciesCount;
+    g_treeWords[SpaceWord(word, 3)] = result.limits;
+    g_treeWords[SpaceWord(word, 4)] = (uint32_t)result.wakeTick;
+    g_treeWords[SpaceWord(word, 5)] = (uint32_t)(result.wakeTick >> 32);
+    g_treeWords[SpaceWord(word, 6)] = result.changed ? 1u : 0u;
+
+    return result;
+}
+
+// 作業場の形の ③(T-0380): ① の結果を頁へ・溢れをもう片方の面の first からへ写す
+WideCellStep StoreSpaceCell(MrBlock block, uint32_t index, uint32_t side, uint32_t first) {
+    const uint32_t word = SpaceResultWord(index);
+    RxGpuSpaceCell cell = SpaceShape(index);
+    cell.word = cell.write;
+    cell.energy = (int64_t)FX_U64(g_treeWords[SpaceWord(word, 1)], g_treeWords[SpaceWord(word, 0)]);
+    cell.speciesCount = g_treeWords[SpaceWord(word, 2)];
+    StoreGpuWideCell(cell, PageCellAddress(block.page, index), block.page, 1 - side, first);
+
+    WideCellStep result;
+    result.tail = WideTailCount(cell);
+    result.limits = g_treeWords[SpaceWord(word, 3)];
+    result.wakeTick = FX_U64(g_treeWords[SpaceWord(word, 5)], g_treeWords[SpaceWord(word, 4)]);
+    result.changed = g_treeWords[SpaceWord(word, 6)] != 0;
+
+    return result;
+}
+#endif
 
 WideCellStep EmptyWideCellStep() {
     WideCellStep step;
@@ -722,8 +792,10 @@ bool StepMarkedWideCell(MrBlock block, uint32_t index, uint32_t side, bool write
     }
 
 #ifdef MR_WIDE_BIG_PASS
-    if (!done)
-        step = StepWideCellAs(SpaceShape(index % WAIT_STEP_THREADS), block, index, side, write, first);
+    if (!done && write)
+        step = StoreSpaceCell(block, index, side, first);
+    else if (!done)
+        step = StepSpaceCell(block, index, side);
 #else
     if (!done) {
         gs_wideBig = 1;
