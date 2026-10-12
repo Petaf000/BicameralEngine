@@ -50,6 +50,8 @@
   どこかのループが終わらない(CPU リファレンスは同じ 4 刻みが 9 秒で通った)、(2) GBV の計装が遅いだけ(gpu_probe_sim は --no-gbv で
   回している)。まず `job.py run -Exe gpu_probe_blank_test -- --no-gbv`(と --warp)を短い --timeout で流し、空の表と試験の表のどちらで
   止まるかをログ(「作れない」・各表の行)で分ける。止まるなら、表の数 0 の時の Work Graph の入力・活性の一覧・熱の割り算(熱容量 0)を見る。
+  **main の T-0397(HW の Work Graph が最初の刻みで DEVICE_HUNG。t-0359 の後)と同じ原因かもしれない**(この枝は t-0359 の入った main から
+  始めた)。T-0397 が直った main で、サンプルの世界の gpu_probe_sim(HW)が通るかと並べて確かめる。
 - 直ったら: frame_loop.h の `world` の既定を Blank に(main.cpp の --world の説明も)・window_blank_record の `--world blank` は外してよい・
   窓の試験(window_* と image の probe_volume・probe_slice)を流して結果が変わらないことを確かめる。
 - 実験室の箱は表に空気が無ければ空のセルで満たすようにした(lab_box.cpp)が、ブランクの世界のエディタで箱を作る所は試していない。
