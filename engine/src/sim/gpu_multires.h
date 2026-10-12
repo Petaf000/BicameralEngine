@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "gpu/com_ptr.h"
+#include "gpu/resources.h"
 #include "gpu/work_graph.h"
 #include "sim/multires_nest.h"
 #include "sim/reaction_table.h"
@@ -131,7 +132,7 @@ namespace bicameral::sim {
         [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS PatchListAddress() const { return m_patches->GetGPUVirtualAddress(); }
 
         // --- 反応表の差し替え(T-0194。ADR-0047 の続き)---
-        // 次に記録するリストから table を使う(新しいアップロードのバッファに写し、ルートの結び先を替える)。物質の一覧が変わる表なら、
+        // 次に記録する段から table を使う(既定のヒープの新しい写しを作り、次の結び付けで写して結び先を替える。T-0410)。物質の一覧が変わる表なら、
         // セルの付け替えは呼ぶ側(覗き窓は影の鎖を作り直す・実験室は GpuLabBox::RecordSpeciesRemap。T-0242)。返すのは前の表のバッファで、それを読んだリストが
         // GPU で終わるまで呼ぶ側が持つ。作れなければ今の表のまま空を返す
         [[nodiscard]] std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> ReplaceTable(
@@ -349,7 +350,9 @@ namespace bicameral::sim {
         std::array<ComPtr<ID3D12Resource>, BufferCount> m_readbacks;
         ComPtr<ID3D12Resource> m_requestUpload;  // REQUEST_UPLOAD_SLOTS × (要求の数 + 一覧)
         uint32_t m_requestUploadCursor = 0;
-        std::array<ComPtr<ID3D12Resource>, TABLE_COUNT> m_tables;
+        // 反応の表(t0〜t3)。既定のヒープの写しで、作った・替えた後の最初の BindRoot が写す(T-0410。BindRoot は const なので mutable)
+        std::array<gpu::ResidentBuffer, TABLE_COUNT> m_tables;
+        mutable bool m_tablesPending = false;
         std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> m_externalViews{};  // u4・u5(0 なら代わりにセル)
 
         // --- 魔法のパッチの列(T-0024。刻みの間の u5。RecordUpload で写し、RecordReadback で読む)---

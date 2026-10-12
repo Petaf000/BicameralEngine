@@ -193,19 +193,15 @@ namespace bicameral::sim {
             uint32_t levelsLeft;
         };
 
-        template <typename T>
-        ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, std::span<const T> data) {
-            const auto bytes = std::as_bytes(data);
-            ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
-            void* mapped = nullptr;
-            const D3D12_RANGE noRead{.Begin = 0, .End = 0};
-            if (!buffer || FAILED(buffer->Map(0, &noRead, &mapped)))
-                return nullptr;
+        // 反応の表(t0〜t3)を既定のヒープの写しにする(T-0410。写すのは次の BindRoot)
+        constexpr size_t REACTION_TABLE_COUNT = 4;  // 物質・規則・索引・速度(GpuMultires::TABLE_COUNT)
 
-            std::memcpy(mapped, bytes.data(), bytes.size());
-            buffer->Unmap(0, nullptr);
-
-            return buffer;
+        std::array<gpu::ResidentBuffer, REACTION_TABLE_COUNT> CreateTables(ID3D12Device* device,
+                                                                           const BakedReactionTable& table) {
+            return {gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.species))),
+                    gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.rules))),
+                    gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.ruleIndex))),
+                    gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.rates)))};
         }
 
         bool WriteUpload(ID3D12Resource* upload, std::span<const std::byte> bytes) {
@@ -521,10 +517,10 @@ namespace bicameral::sim {
         m_constants.graphInputLow = static_cast<uint32_t>(graphInput);
         m_constants.graphInputHigh = static_cast<uint32_t>(graphInput >> 32);
 
-        m_tables = {
-            CreateFilledUpload(device, std::span(table.species)), CreateFilledUpload(device, std::span(table.rules)),
-            CreateFilledUpload(device, std::span(table.ruleIndex)), CreateFilledUpload(device, std::span(table.rates))};
-        if (!std::ranges::all_of(m_tables, [](const auto& buffer) { return buffer != nullptr; }))
+        static_assert(TABLE_COUNT == REACTION_TABLE_COUNT);
+        m_tables = CreateTables(device, table);
+        m_tablesPending = true;
+        if (!std::ranges::all_of(m_tables, &gpu::ResidentBuffer::Valid))
             return std::unexpected("反応の表のバッファを作れない");
 
         const D3D12_QUERY_HEAP_DESC queryDesc{
@@ -960,8 +956,15 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(ACTIVITY_VIEW, m_activity[m_activityWrite]->GetGPUVirtualAddress());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
+
+        // --- 反応の表: 作った・替えた後の最初の結び付けで既定のヒープへ写す(T-0410。それより前に記録した段は前の表を読む)---
+        if (m_tablesPending) {
+            gpu::RecordResidentUploads(list, m_tables);
+            m_tablesPending = false;
+        }
+
         for (uint32_t i = 0; i < TABLE_COUNT; ++i)
-            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_tables[i]->GetGPUVirtualAddress());
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_tables[i].buffer->GetGPUVirtualAddress());
     }
 
     void GpuMultires::SetGraphProgram(ID3D12GraphicsCommandList10* list) {
@@ -1488,23 +1491,26 @@ namespace bicameral::sim {
 
     // --- 外のバッファとパイプライン ---
 
-    // 反応表の差し替え(T-0194): 表はアップロードのヒープにあり、BindRoot が記録のたびに結ぶので、持ち替えるだけで次のリストから効く
+    // 反応表の差し替え(T-0194): BindRoot が記録のたびに結ぶので、持ち替えるだけで次の結び付けから効く(写しもその時。T-0410)
     std::expected<std::vector<ComPtr<ID3D12Resource>>, std::string> GpuMultires::ReplaceTable(
         const BakedReactionTable& table) {
         ComPtr<ID3D12Device> device;
-        if (!m_tables[0] || FAILED(m_tables[0]->GetDevice(IID_PPV_ARGS(&device))))
+        if (!m_tables[0].buffer || FAILED(m_tables[0].buffer->GetDevice(IID_PPV_ARGS(&device))))
             return std::unexpected("反応の表のバッファが無い");
 
-        std::array<ComPtr<ID3D12Resource>, TABLE_COUNT> tables = {
-            CreateFilledUpload(device.Get(), std::span(table.species)),
-            CreateFilledUpload(device.Get(), std::span(table.rules)),
-            CreateFilledUpload(device.Get(), std::span(table.ruleIndex)),
-            CreateFilledUpload(device.Get(), std::span(table.rates))};
-        if (!std::ranges::all_of(tables, [](const auto& buffer) { return buffer != nullptr; }))
+        std::array<gpu::ResidentBuffer, TABLE_COUNT> tables = CreateTables(device.Get(), table);
+        if (!std::ranges::all_of(tables, &gpu::ResidentBuffer::Valid))
             return std::unexpected("差し替える反応の表のバッファを作れない");
 
-        std::vector<ComPtr<ID3D12Resource>> retired(m_tables.begin(), m_tables.end());
+        // 前の表と、その写しの元(まだ写していないかもしれないリストが読む)を返す
+        std::vector<ComPtr<ID3D12Resource>> retired;
+        for (const gpu::ResidentBuffer& resident : m_tables) {
+            retired.push_back(resident.buffer);
+            retired.push_back(resident.upload);
+        }
+
         m_tables = std::move(tables);
+        m_tablesPending = true;
 
         return retired;
     }

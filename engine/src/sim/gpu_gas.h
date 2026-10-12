@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "gpu/com_ptr.h"
+#include "gpu/resources.h"
 #include "sim/gas_reference.h"
 
 namespace bicameral::sim {
@@ -89,9 +90,10 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
         std::array<ComPtr<ID3D12Resource>, 6> m_uavs;  // u0〜u5(gas_step.hlsl の結び付け)
-        std::array<ComPtr<ID3D12Resource>, 3> m_srvs;  // t0 パラメータ・t1 層の基準の導く値・t2 層の開いた境界の外
-        ComPtr<ID3D12Resource> m_cellUpload;           // 初めのセル
-        ComPtr<ID3D12Resource> m_ledgerUpload;         // 初めの帳簿
+        // t0 パラメータ・t1 層の基準の導く値・t2 層の開いた境界の外。既定のヒープの写し(T-0410。写すのは RecordUpload)
+        std::array<gpu::ResidentBuffer, 3> m_srvs;
+        ComPtr<ID3D12Resource> m_cellUpload;    // 初めのセル
+        ComPtr<ID3D12Resource> m_ledgerUpload;  // 初めの帳簿
         ComPtr<ID3D12Resource> m_cellReadback;
         ComPtr<ID3D12Resource> m_ledgerReadback;
         ComPtr<ID3D12Resource> m_faceReadback;  // 調べる用

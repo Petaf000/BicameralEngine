@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "gpu/com_ptr.h"
+#include "gpu/resources.h"
 #include "sim/gas_tree.h"
 
 namespace bicameral::sim {
@@ -107,9 +108,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
         std::array<ComPtr<ID3D12Resource>, 11> m_uavs;  // u0〜u10(gas_tree_step.hlsl の結び付け)
-        // t0〜t6(設定・レベル・層の基準・層の外・面の形・セルの場所・セルの面の並び)。既定のヒープ。写しの元がアップロードのヒープ
-        std::array<ComPtr<ID3D12Resource>, 7> m_srvs;
-        std::array<ComPtr<ID3D12Resource>, 7> m_srvUploads;
+        // t0〜t6(設定・レベル・層の基準・層の外・面の形・セルの場所・セルの面の並び)。既定のヒープの写し(T-0374・T-0410)
+        std::array<gpu::ResidentBuffer, 7> m_srvs;
         std::array<ComPtr<ID3D12Resource>, 3> m_uploads;    // 初めのセル・端数・帳簿
         std::array<ComPtr<ID3D12Resource>, 3> m_readbacks;  // セル・端数・帳簿
         ComPtr<ID3D12QueryHeap> m_timestamps;               // 計測(EnableTiming の後だけ)

@@ -79,6 +79,11 @@ namespace bicameral::sim {
             return buffer;
         }
 
+        template <typename T>
+        gpu::ResidentBuffer CreateResident(ID3D12Device* device, std::span<const T> data) {
+            return gpu::CreateResidentBuffer(device, std::as_bytes(data));
+        }
+
         uint32_t GroupsFor(uint64_t threadCount) {
             return (uint32_t)((threadCount + THREADS_PER_GROUP - 1) / THREADS_PER_GROUP);
         }
@@ -239,23 +244,17 @@ namespace bicameral::sim {
 
         const std::array<GasGpuParameters, 1> parameters = {
             MakeGasGpuParameters(tree.config, tree.levels[0].coefficients)};
-        m_srvUploads = {CreateUploadBuffer(device, std::span<const GasGpuParameters>(parameters)),
-                        CreateUploadBuffer(device, std::span<const GasTreeGpuLevel>(levels)),
-                        CreateUploadBuffer(device, std::span<const GasGpuDerived>(referenceDerived)),
-                        CreateUploadBuffer(device, std::span<const GasGpuCell>(ghost)),
-                        CreateUploadBuffer(device, std::span<const GasTreeGpuFace>(gpuFaces)),
-                        CreateUploadBuffer(device, std::span<const GasTreeGpuPlace>(places)),
-                        CreateUploadBuffer(device, std::span<const uint32_t>(cellFaces))};
+        m_srvs = {CreateResident(device, std::span<const GasGpuParameters>(parameters)),
+                  CreateResident(device, std::span<const GasTreeGpuLevel>(levels)),
+                  CreateResident(device, std::span<const GasGpuDerived>(referenceDerived)),
+                  CreateResident(device, std::span<const GasGpuCell>(ghost)),
+                  CreateResident(device, std::span<const GasTreeGpuFace>(gpuFaces)),
+                  CreateResident(device, std::span<const GasTreeGpuPlace>(places)),
+                  CreateResident(device, std::span<const uint32_t>(cellFaces))};
         // 読むのは既定のヒープの写しから(アップロードのヒープは CPU のメモリで、毎段 PCIe 越しに読むと L2 に収まらない大きさで
         // セルの数に対して超線形に遅くなる。32³ で 1 刻み 約 1300 ms。T-0374)。写すのは RecordUpload
-        for (size_t i = 0; i < m_srvUploads.size(); ++i) {
-            if (!m_srvUploads[i])
-                return std::unexpected("気体の木の形のバッファを作れない");
-
-            m_srvs[i] = gpu::CreateBuffer(device, m_srvUploads[i]->GetDesc().Width, gpu::BufferKind::UnorderedAccess);
-            if (!m_srvs[i])
-                return std::unexpected("気体の木の形のバッファを作れない");
-        }
+        if (!std::ranges::all_of(m_srvs, &gpu::ResidentBuffer::Valid))
+            return std::unexpected("気体の木の形のバッファを作れない");
 
         return {};
     }
@@ -319,14 +318,7 @@ namespace bicameral::sim {
         list->ResourceBarrier((uint32_t)toUav.size(), toUav.data());
 
         // --- 木の形(t0〜t6)を既定のヒープへ(T-0374)---
-        std::array<D3D12_RESOURCE_BARRIER, 7> toShaderResource{};
-        for (size_t i = 0; i < m_srvs.size(); ++i) {
-            list->CopyResource(m_srvs[i].Get(), m_srvUploads[i].Get());
-            toShaderResource[i] = gpu::Transition(m_srvs[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        }
-
-        list->ResourceBarrier((uint32_t)toShaderResource.size(), toShaderResource.data());
+        gpu::RecordResidentUploads(list, m_srvs);
     }
 
     // 1 つの段を投げ、全部の UAV の書き込みを次の段より前に終わらせる
@@ -341,7 +333,7 @@ namespace bicameral::sim {
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &constants, 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
         for (uint32_t i = 0; i < m_srvs.size(); ++i)
-            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_srvs[i]->GetGPUVirtualAddress());
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_srvs[i].buffer->GetGPUVirtualAddress());
 
         const uint32_t threads = FACE_PASS[(size_t)pass] ? m_faceCount : m_cellCount;
         list->Dispatch(GroupsFor(threads), 1, 1);

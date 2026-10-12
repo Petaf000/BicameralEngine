@@ -88,6 +88,45 @@ namespace bicameral::gpu {
         list->CopyResource(readback, source);
     }
 
+    // --- シェーダーが毎段読む変わらない表(T-0410)---
+
+    ComPtr<ID3D12Resource> CreateFilledUpload(ID3D12Device* device, std::span<const std::byte> bytes) {
+        ComPtr<ID3D12Resource> buffer = CreateBuffer(device, bytes.size(), BufferKind::Upload);
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead{.Begin = 0, .End = 0};
+        if (!buffer || !BICAMERAL_CHECK_HR(Channel::Gpu, buffer->Map(0, &noRead, &mapped)))
+            return nullptr;
+
+        std::memcpy(mapped, bytes.data(), bytes.size());
+        buffer->Unmap(0, nullptr);
+
+        return buffer;
+    }
+
+    ResidentBuffer CreateResidentBuffer(ID3D12Device* device, std::span<const std::byte> bytes) {
+        ResidentBuffer result{.buffer = nullptr, .upload = CreateFilledUpload(device, bytes)};
+        if (!result.upload)
+            return result;
+
+        result.buffer = CreateBuffer(device, bytes.size(), BufferKind::UnorderedAccess);
+
+        return result;
+    }
+
+    void RecordResidentUploads(ID3D12GraphicsCommandList* list, std::span<const ResidentBuffer> buffers) {
+        // COMMON から COPY_DEST へは暗黙に上がる。写した後は読む状態へ(リストの終わりで COMMON に戻り、次のリストは読む状態へ暗黙に上がる)
+        std::vector<D3D12_RESOURCE_BARRIER> toShaderResource;
+        toShaderResource.reserve(buffers.size());
+        for (const ResidentBuffer& resident : buffers) {
+            list->CopyResource(resident.buffer.Get(), resident.upload.Get());
+            toShaderResource.push_back(Transition(resident.buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+        }
+
+        if (!toShaderResource.empty())
+            list->ResourceBarrier(static_cast<uint32_t>(toShaderResource.size()), toShaderResource.data());
+    }
+
     // --- ルート署名とパイプライン ---
 
     ComPtr<ID3D12RootSignature> CreateRootSignature(ID3D12Device* device, const RootSignatureLayout& layout) {
