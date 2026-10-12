@@ -38,6 +38,8 @@
   マクロ(RX_SPECIES_AT・RX_AMOUNT_AT・RX_USAGE_AT・RX_SET_ENTRY・RX_ADD_AMOUNT・RX_SUB_AMOUNT・RX_ADD_USAGE・RX_MAKE_WRITABLE)に変え、
   既定は前と同じ配列の式、RX_CELL_ACCESSORS を定義した作業場の段だけが関数に展開するようにした。reaction.hlsli を読む溢れを使わないシェーダー
   92 本の .cso が main と MD5 で同じになった(前は 25 本が違った)。C++ の RxWideCell の参照の多重定義は要らなくなったので消した。
+- 2026-10-12(本体の作業役・マージの確かめ): main(c6bca01。t-0359 の転換と合わせた後)と t-0362 を合わせる前(0172a5a)の既定の 92 本の .cso の MD5 が
+  92 本とも同じ(runner/dx の gen.py・cmp.py。git 管理外。runner/t362/gen.py の型を main の build.ninja に合わせたもの)。マクロは転換が入っても DXIL を変えない。
 
 ## 引き継ぎメモ
 - 作業場の形と段は ADR-0052 追記 14。作業場は表の物質が 32(RX_GPU_MID_SPECIES)を超える世界だけ作る(32 × 64 スレッド × 8 語 × 上限。160 種で 10 MiB)。

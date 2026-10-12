@@ -31,6 +31,13 @@
 - 2026-10-12(作業役・wt3。前の作業役がユーザーの中断で止まった所から): 書きかけは無く、実装は 1 コミットに入っていた。main(1f6530c。
   GPU の順番待ち・T-0169 の試験の表)に rebase(衝突なし)→ ビルド(debug・警告 0)→ 関係するテスト 18 本 OK。
   実験室の転換の保存点の再生試験を足しかけたが、GPU の順番待ち(約 1 時間)で 2 時間を超えるので戻して T-0378 に分けた。
+- 2026-10-12(本体の作業役・マージの確かめ): main で t-0362(核の成分のマクロ・作業場の段)と自動で合わさった形を読んだ。転換は MpPatchedTable::Rule の
+  中だけで効き、核は規則を table.Rule() で読み、成分はマクロで書くので、作業場の段(multires_step_wide_big も MrStepCellWait → MpPatchTable)でも効く。
+  RxSpecies 32 バイトはルートの SRV の StructuredBuffer で読み、C++ は sizeof の static_assert 1 か所(ストライドを書く所は無い)。作業場の大きさは表の物質の数で、
+  MpSpeciesCount(物質 0 の elementUnits)と同じ数。DXIL(reaction.hlsli を読む既定の 92 本): t-0359 が 23 本を変えた(RxSpecies の型で +2 行の 14 本と、
+  パッチを読む段 multires_step_wait 10601 → 14765 行・multires_activity_graph 27238 → 38000 行・lab_box_apply 4356 → 4446 行など 9 本。転換の分 = 正しい変化)。費用は T-0396。
+  **release の HW の Work Graph の 3 本(gpu_multires_activity・gpu_multires_uniform・gpu_multires_conduction)が最初の刻みで DEVICE_HUNG**(WARP は通る。1f6530c では通っていた)。
+  疑いはこのチケット(活性のグラフの DXIL 27238 → 38000 行)。直すのは T-0397。
 
 ## テストの結果
 - 2026-10-12(main 1f6530c に rebase 後・debug): CPU 12 本(reaction_package・reaction_hot_reload・reaction_table_edit・reaction_package_scene・

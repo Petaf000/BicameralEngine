@@ -1,12 +1,31 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-12 / チケット: 統合の確かめ(t-0312・GPU の順番待ち)・T-0385・D-454〜D-460 の反映・T-0351 完了
+最終更新: 2026-10-12 / チケット: マージの確かめ(t-0356・t-0359・t-0325・t-0362)・ROADMAP / QUESTIONS の反映(T-0392〜T-0396・Q41〜Q43)
 
 ## 状態(3 行以内)
-- main(1f6530c。t-0312 と GPU の順番待ち 3c8ff58 を合わせた後)+ T-0351 を debug・release でビルドし、release の ctest(75 本)を流した。T-0385 は直っていた(試験の約束。コードの直し無し)。
-  gpu_lab_box(HW)だけ T-0351 で落ちた(陰解法の後に新しいキューが作れない)ので、実験室のキューを使い回す形にして通した(ADR-0137 追記 3)。
-- ユーザーの決定 D-454〜D-460(エンジンは中身を持たない・ブランクが既定・サンプルの世界は別パッケージ・環境ミキサー・重さの見積もりは M3 の終わり・順番は今のまま・GPU の順番待ち)を DECISIONS・ROADMAP(T-0371〜T-0373)・13 §2.6・14 §2・ADR-0151 に反映。
-- 進行中: wt2 T-0356・wt3 T-0359・wt4 T-0362・wt5 T-0384・wt6 T-0325。
+- main(c6bca01 まで。t-0356 気体の 2^σ を GPU で・t-0359 魔法の転換・t-0325 パッチのパネル・t-0362 核の成分のマクロと作業場の段)の release を確かめた: CPU 50 本・GPU 21 本は通過、**HW の Work Graph の 3 本(gpu_multires_activity・gpu_multires_uniform・gpu_multires_conduction)が刻み 0 で DEVICE_HUNG**(2 回とも。WARP は通る)。**push していない**(T-0397)。
+  t-0359 × t-0362 の反応の核は意味として合っていた(下)。既定の世界の DXIL は t-0362 を合わせる前と 92 本とも同じ。
+- 進行中: wt2 T-0371・wt3 T-0377・wt4 T-0380・wt5 T-0384(未マージ・試験未)・wt6 T-0374。
+
+## 本体で入ったもの(2026-10-12 その 2。マージの確かめ)
+- **反応の核のマージ(t-0359 × t-0362)**: 転換は `MpPatchedTable::Rule`(magic_patch.hlsli)の中だけで規則を替え、核は規則を `table.Rule()` で読み、
+  セルの成分は t-0362 のマクロ(RX_SPECIES_AT・RX_SET_ENTRY など)で書く。作業場の段(multires_step_wide_big)も `MrStepCellWait` → `MpPatchTable` を通るので
+  転換が効く。RxSpecies 24 → 32 バイトは、GPU はルートの SRV の `StructuredBuffer<RxSpecies>`(ストライドはシェーダーの型)、C++ は reaction_table.h の
+  static_assert だけ。作業場の 1 セルの上限 = 表の物質の数(m_spaceSpecies)と MpSpeciesCount(物質 0 の elementUnits)は同じ数。直しは要らなかった。
+- **HW の活性・伝導のグラフが止まる(T-0397。直していない)**: release の gpu_multires_activity・gpu_multires_uniform・gpu_multires_conduction(HW)が、
+  ワークグラフ MultiresActivity を作った直後の最初の刻みで DXGI_ERROR_DEVICE_HUNG(gpu_multires_uniform は 2 回とも。間の gpu_probe_sim〔HW〕・gpu_multires_wide〔HW。compute〕は通るので
+  GPU の調子ではない)。WARP(gpu_multires_uniform_warp)は通る。前の巡目の main(1f6530c)の release 75 本では通っていた。**疑い = t-0359**: 転換で
+  MpPatchedTable::Rule が核の table.Rule() のたびに MpConvertedRule を展開し、活性のグラフ(1 ノードに核 2 か所)の DXIL が 27238 → 38000 行、
+  伝導のグラフ 9429 → 11786 行に増えた(下の DXIL)。t-0362 は既定の DXIL を変えていないので外れ、t-0356・t-0325 はこれらのシェーダーを触っていない。
+  T-0359 の作業役はこれらの GPU 試験を流していなかった(GPU 6 本だけ)。直し方の案: 転換を覆うセルだけを別の段・ノードに回す / 規則を読むのを 1 セルで 1 回にする
+  (転換した規則を候補を集める時に 1 回作って持つ)/ HW の Work Graph の変種だけ転換の展開を外して転換を覆うセルを compute の段で刻む。
+- **DXIL**(reaction.hlsli を読む溢れを使わないシェーダー 92 本。runner/dx の gen.py・cmp.py〔git 管理外〕。main の release の build.ninja の dxc の行):
+  c6bca01 と 0172a5a(t-0362 の前)は 92 本とも同じ MD5。t-0356 も 0 本。**t-0359 が 23 本を変えた**(正しい変化): RxSpecies の型で +2 行が 14 本、
+  パッチを読む段が大きくなったのが 9 本(multires_step_wait 10601 → 14765 行・multires_activity_graph 27238 → 38000 行・multires_conduct_apply 5684 → 7882 行・
+  probe_conduct 7413 → 9751 行・lab_box_apply・probe_tick_apply など)。**転換のパッチが無い世界でも大きい**ので、費用を T-0396 で測る。
+- ROADMAP: T-0356・T-0358・T-0359・T-0325・T-0362 を完了に、T-0312 を一部完了に。分けたもの T-0374・T-0377・T-0378・T-0380・T-0381・T-0383・T-0384・
+  T-0386・T-0389・T-0390 の行を足した。ID 未割り当ての候補に T-0392(D-458 全部を合わせた重さ)・T-0393(実験室の陰解法の費用)・T-0394(キューが作れない件)・
+  T-0395(大きい箱の重さ)。T-0396(転換で大きくなったシェーダーの費用)・T-0397(HW の活性・伝導のグラフが止まる。急ぎ)は新しく足した。QUESTIONS に Q41〜Q43(T-0359 の 2 件・T-0384 の 1 件)。
 
 ## 本体で入ったもの(2026-10-12。決定の反映・T-0385)
 - **運転メモ(GPU の順番待ち。D-460)**: 効いている(同時に走らない)が、1 本が長いと全部が待つ。release の 40 本(GPU)は約 1 時間持ち続け、
