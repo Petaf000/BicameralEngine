@@ -155,7 +155,8 @@ FX_FN uint64_t MpScaleRate(uint64_t packed, int32_t shift) {
 // 触媒: 速さの表の値(温度 kelvin K)を exp(ΔEa / RT) 倍にする(ΔEa = loweredJoulesPerMol J/mol。規則の Ea 以下に抑えてから渡す)。
 // ΔEa / RT はベイク(reaction_table.cpp の BakeRate)と同じ式(nJ にして Q32 で割り、log2 e を掛ける)。log2 の整数の部分は指数へ、
 // 端数は 2^端数(Q31)を仮数に掛けて 32bit に正規化する(どれも切り捨て。CPU と GPU で同じ整数)。仮数 0・0 K はそのまま
-FX_CONST uint64_t MP_GAS_CONSTANT_NANOJOULES = FX_U64(0x1u, 0xEF94A19Au);  // 8.314462618 J/(mol·K) を nJ で
+FX_CONST uint64_t MP_GAS_CONSTANT_NANOJOULES =
+    GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN;  // 8.314462618 J/(mol·K) を nJ で(units.hlsli)
 FX_CONST uint64_t MP_NANOJOULES_PER_JOULE = 1000000000u;
 
 FX_FN uint64_t MpCatalyzeRate(uint64_t packed, uint32_t loweredJoulesPerMol, uint32_t kelvin) {

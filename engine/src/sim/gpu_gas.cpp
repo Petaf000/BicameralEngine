@@ -32,7 +32,7 @@ namespace bicameral::sim {
         static_assert(sizeof(GasGpuDerived) == 48);
         static_assert(sizeof(GasGpuFace) == 112);
         static_assert(sizeof(GasGpuCellSums) == 40);
-        static_assert(sizeof(GasGpuParameters) == 176);
+        static_assert(sizeof(GasGpuParameters) == 192);
         static_assert(sizeof(GasLedger) == GAS_GPU_LEDGER_BYTES);
         static_assert(GAS_GPU_MAX_SPECIES == GAS_MAX_SPECIES);
         static_assert((uint32_t)GasBoundary::Wall == GAS_GPU_BOUNDARY_WALL &&
@@ -113,6 +113,8 @@ namespace bicameral::sim {
         parameters.pressureFlow = coefficients.pressureFlow;
         parameters.pressureImpulse = coefficients.pressureImpulse;
         parameters.gravityImpulse = coefficients.gravityImpulse;
+        parameters.hydrostatic = coefficients.hydrostatic;
+        parameters.gravityWork = coefficients.gravityWork;
         parameters.soundScale = coefficients.soundScale;
         parameters.randomSeed = config.randomSeed;
 

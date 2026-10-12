@@ -18,8 +18,8 @@ namespace bicameral::sim {
     namespace {
 
         // --- 物理の定数(整数)---
-        // 気体定数 R = 8.314462618 J/(mol·K)(nJ/(mol·K) で正確に)
-        constexpr uint64_t GAS_CONSTANT_NANOJOULES = 8314462618;
+        // 気体定数 R = 8.314462618 J/(mol·K)(nJ/(mol·K) で正確に。器の定数 units.hlsli。ADR-0171)
+        constexpr uint64_t GAS_CONSTANT_NANOJOULES = fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN;
         constexpr uint64_t NANOJOULES_PER_JOULE = 1000000000;
         constexpr uint64_t MICROJOULES_PER_JOULE = 1000000;
         // 生成エンタルピーの基準の温度 298.15 K(mK)。比熱(mJ/(mol·K))× これ = µJ/mol

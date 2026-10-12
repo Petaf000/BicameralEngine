@@ -31,6 +31,8 @@
 #include <span>
 #include <vector>
 
+#include "common/world_physics.hlsli"
+
 namespace bicameral::sim {
 
     inline constexpr uint32_t GAS_MAX_SPECIES = 4;
@@ -78,6 +80,8 @@ namespace bicameral::sim {
         uint32_t substeps = 24;  // 1 刻み(1/60 s)を何回に分けるか。c̃ Δt ÷ Δx = 0.47(安定の限界は約 2/3。T-0226)
         uint32_t soundSpeedMmPerS = 340000;  // 音速 c̃(mm/s)。本物の音速(D-440・ADR-0043)。落とした値も設定で選べる
         bool gravity = true;
+        // 重力の強さ(µm/s²。世界のデータ。ADR-0171・world_physics.hlsli)。重さの力積・層の重さの圧力・重さの仕事はここから作る
+        uint32_t gravityMicrometersPerSecond2 = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
         GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
 
         // これより熱いセルは実効の音速を c̃ で頭打ちにする(mK。安定の条件を守る。0 = 地面の層の基準の温度〔QUESTIONS Q32 の仮の案 A〕)。
@@ -100,6 +104,8 @@ namespace bicameral::sim {
         uint64_t pressureFlow = 0;                                 // (p̃_左 − p̃_右)× これ >> 40 = 質量の流れ(mg/小刻み)
         uint64_t pressureImpulse = 0;  // (p̃_左 + p̃_右)× これ >> 16 = 面の力積(運動量の単位/小刻み)
         uint64_t gravityImpulse = 0;   // (m − m_基準)× これ >> 16 = 重さの力積(運動量の単位/小刻み)
+        uint64_t hydrostatic = 0;      // 質量(mg)× これ ÷ 10^4 = 1 セルの高さの層の重さの圧力(µPa。レベル 0)
+        uint64_t gravityWork = 0;      // 質量(mg)× これ ÷ 10^6 = 1 セル上がる重さの仕事(µJ。レベル 0)
         uint64_t soundScale =
             0;  // α = c̃² ÷ (γ c_iso²) の Q32(等温は γ = 1。c_iso² = p ÷ ρ・γ は地面の層の基準から。MakeGasBox が入れる)
         uint32_t soundTemperature =

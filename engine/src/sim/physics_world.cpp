@@ -152,7 +152,7 @@ namespace bicameral::sim {
 
     void PhysicsWorld::InitializeBodies() {
         for (PhysicsBody& body : m_bodies)
-            body = PxInitializeBody(body, m_rate);
+            body = PxInitializeBody(body, m_rate, m_parameters.gravity);
     }
 
     void PhysicsWorld::Linearize() {

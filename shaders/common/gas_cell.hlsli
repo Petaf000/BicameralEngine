@@ -9,15 +9,13 @@
 
 // --- 物理の定数(gas_reference.cpp と同じ)---
 static const uint64_t PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 = 285682760;
-static const int64_t HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 = 392266;
 static const uint64_t MICRO = 1000000;
 static const uint64_t ONE_Q32 = FX_U64(1u, 0u);
 static const uint64_t MAX_U64 = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
 static const uint64_t MAX_CELL_AMOUNT = FX_U64(0u, 0x80000000u);
 static const uint32_t GAS_ROUNDING_PURPOSE = 0x47610001u;
-static const uint64_t GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 = 4903325;  // 1 mg が 1 セル上がる仕事 4.903325 µJ(T-0234)
-static const uint32_t KINETIC_SHIFT = 41;                               // ½ m v² = P² × 2^-41 ÷ m(µJ)
-static const uint64_t MAX_MOMENTUM = FX_U64(0x100000u, 0u);             // 2^52
+static const uint32_t KINETIC_SHIFT = 41;                    // ½ m v² = P² × 2^-41 ÷ m(µJ)
+static const uint64_t MAX_MOMENTUM = FX_U64(0x100000u, 0u);  // 2^52
 
 uint64_t MulShiftU64(uint64_t a, uint64_t b, uint32_t shift) {
     return FxShiftRightU128(FxMulU64Full(a, b), shift);

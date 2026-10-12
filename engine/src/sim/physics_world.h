@@ -25,7 +25,9 @@ namespace bicameral::sim {
     static_assert(sizeof(PhysicsBody) == 448);
     static_assert(sizeof(PhysicsContactPoint) == 368);
     static_assert(sizeof(PhysicsManifold) == 3016);
-    static_assert(sizeof(physics::PxParameters) == 96);
+    static_assert(sizeof(physics::PxParameters) == 104);
+    // 標準の重力の換算は前の定数 PX_GRAVITY と同じ値(ADR-0171。世界のハッシュを変えない)
+    static_assert(fx::PxGravityFromMicrometers(fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) == 10283018);
 
     // 場面の 1 つの物から、刻みを始める前の物を作る
     [[nodiscard]] PhysicsBody MakePhysicsBody(const PhysicsSceneBody& source, int64_t rate);

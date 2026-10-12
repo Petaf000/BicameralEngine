@@ -4,6 +4,7 @@
 
 #include <cstdint>
 
+#include "common/units.hlsli"
 #include "sim/gas_reference.h"
 
 namespace bicameral::sim::gas_detail {
@@ -12,17 +13,16 @@ namespace bicameral::sim::gas_detail {
 
     // 理想気体: p(µPa)= n(µmol)× T(mK)× R ÷ V × 1e-3 = n × T × 0.0665157(R = 8.314462618 J/(mol·K)・V = 0.125 m³)。Q32
     inline constexpr uint64_t PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 = 285682760;
+    // R(nJ/(mol·K))× 2^32 ÷ (0.125 m³ × 10^12)= R × 2^23 ÷ 244140625(gas_cell.hlsli の同じ名前の値も変えずに合わせる。ADR-0171)
+    static_assert(PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 ==
+                  (fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN << 23) / 244140625);
 
-    // 層の重さで下がる圧力: m(mg)× 1e-6 × g ÷ A(0.25 m²)= m × 39.2266 µPa(g = 9.80665 m/s²)
-    inline constexpr uint64_t HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 = 392266;
+    // 重力は世界のデータ(GasConfig::gravityMicrometersPerSecond2 → GasCoefficients。ADR-0171)。標準の重力の換算は前の定数と同じ値
+    static_assert(fx::GasHydrostaticFromMicrometers(fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) == 392266);
+    static_assert(fx::GasGravityWorkFromMicrometers(fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) == 4903325);
 
-    inline constexpr uint64_t GRAVITY_MICROMETER_PER_SECOND2 = 9806650;
-
-    // 重さの仕事: 質量 1 mg が 1 セル(0.5 m)上がる仕事 = 1e-6 kg × g × 0.5 m = 4.903325 µJ(× これ ÷ 1e6)
-    inline constexpr uint64_t GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 = 4903325;
-
-    // 気体定数 R = 8.314462618 J/(mol·K) = 8314.462618 nJ/(µmol·K)(× これ ÷ 1e6。α の γ を作る)
-    inline constexpr uint64_t GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6 = 8314462618;
+    // 気体定数 R = 8.314462618 J/(mol·K) = 8314.462618 nJ/(µmol·K)(× これ ÷ 1e6。α の γ を作る。器の定数 units.hlsli)
+    inline constexpr uint64_t GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6 = fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN;
 
     // 運動量の 2 乗を運動エネルギーへ: ½ m v² = P² × 2^-41 ÷ m(µJ。P は mg·2^-20 m/s、m は mg)
     inline constexpr uint32_t KINETIC_SHIFT = 41;

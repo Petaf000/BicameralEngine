@@ -189,7 +189,7 @@ int64_t Excess(GasSide side) {
 }
 
 int64_t HalfHydrostatic(int64_t excess) {
-    return excess * HYDROSTATIC_MICROPASCAL_PER_MASS_X10000 / 20000;
+    return excess * (int64_t)GAS_P.hydrostatic / 20000;
 }
 
 int64_t DrivingPressure(GasFaceSides sides) {
@@ -448,7 +448,7 @@ int64_t GravityWork(uint32_t axis, int64_t flow, GasGpuCell moved) {
     if (axis != 2 || GAS_P.gravity == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
         return 0;
 
-    const int64_t work = (int64_t)(CellMass(moved) * GRAVITY_WORK_MICROJOULE_PER_MASS_X1E6 / MICRO);
+    const int64_t work = (int64_t)(CellMass(moved) * GAS_P.gravityWork / MICRO);
 
     return flow > 0 ? work : -work;
 }

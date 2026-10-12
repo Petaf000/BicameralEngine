@@ -29,6 +29,11 @@ FX_CONST int64_t MICROJOULES_PER_MILLIJOULE = 1000;
 FX_CONST int32_t MILLIKELVIN_PER_KELVIN = 1000;
 FX_CONST int32_t TEMPERATURE_MAX_MILLIKELVIN = 2100000000;
 
+// --- 単位の選び方から決まる換算の定数(器。世界ごとに変えない。ADR-0171)--------------------------
+// 気体定数 R = 8.314462618 J/(mol·K)(SI の定義値 k_B × N_A。nJ/(mol·K) で正確に = nJ/(µmol·K) × 10^6)。
+// 理想気体の圧力・反応の速さ(アレニウス)・圧力と物質量の換算が使う
+FX_CONST uint64_t GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN = FX_U64(0x1u, 0xEF94A19Au);  // 8314462618
+
 // --- 角度・回転・比率 --------------------------------------------------------------------------
 // 角度(uint32): 1 周 = 2^32(FxSinCosTurn32)。回転の四元数と sin・cos の結果は Q1.30
 FX_CONST uint32_t ROTATION_FRACTION_BITS = 30;
