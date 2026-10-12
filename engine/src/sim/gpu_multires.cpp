@@ -298,8 +298,10 @@ namespace bicameral::sim {
 
             // 速い形に入らないセルを刻む作業場(T-0362)。表の物質が速い形に収まれば作らない(空気だけの世界の VRAM は変わらない)
             const auto tableSpecies = static_cast<uint32_t>(table.species.size());
-            if (tableSpecies > RX_GPU_MID_SPECIES)
+            if (tableSpecies > RX_GPU_MID_SPECIES) {
                 result.m_spaceSpecies = std::min(tableSpecies, RX_GPU_WIDE_SPECIES);
+                result.m_spaceGroups = options.wideSpaceGroups != 0 ? options.wideSpaceGroups : MR_WIDE_SPACE_GROUPS;
+            }
         }
 
         if (auto pipelines = result.CreatePipelines(device, options); !pipelines)
@@ -567,7 +569,7 @@ namespace bicameral::sim {
 
         return (MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.worldBlocks,
                                 m_capacity.fractions) +
-                MrWideSpaceWords(m_spaceSpecies)) *
+                MrWideSpaceWords(m_spaceSpecies, m_spaceGroups)) *
                sizeof(uint32_t);
     }
 
@@ -683,7 +685,7 @@ namespace bicameral::sim {
         const size_t first = words.size();
         // 作業場(T-0362)は刻む段が書いてから読むので 0 のまま
         words.resize(first + MrWideAreaWords(pages, m_wideChunks, m_capacity.worldBlocks, m_capacity.fractions) +
-                         MrWideSpaceWords(m_spaceSpecies),
+                         MrWideSpaceWords(m_spaceSpecies, m_spaceGroups),
                      0);
         const uint32_t pool = MrWidePoolWord(0, pages);
         uint32_t used = 0;
@@ -1294,7 +1296,7 @@ namespace bicameral::sim {
     }
 
     // WideDeferred・WideRetry の後(T-0362): 速い形(32 種)に入らないセルのあったブロックを、作業場の形で刻む(作業場の分の
-    // MR_WIDE_SPACE_GROUPS グループが枠を順に受け持つ)。表の物質が速い形に収まる世界(作業場なし)は流さない。外の定数に
+    // m_spaceGroups グループが枠を順に受け持つ)。表の物質が速い形に収まる世界(作業場なし)は流さない。外の定数に
     // 作業場の始まりと 1 セルの上限を渡す(このパイプラインは外のバッファを使わない)
     void GpuMultires::RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         if (!m_wideCells || m_spaceSpecies == 0)
@@ -1303,11 +1305,12 @@ namespace bicameral::sim {
         const auto areaWords = MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.worldBlocks,
                                                m_capacity.fractions);
         const std::array<uint32_t, 4> saved = m_constants.external;
-        m_constants.external = {OverflowBaseWord() + static_cast<uint32_t>(areaWords), m_spaceSpecies, 0, 0};
+        m_constants.external = {OverflowBaseWord() + static_cast<uint32_t>(areaWords), m_spaceSpecies, m_spaceGroups,
+                                0};
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(m_wideBigPipeline.Get());
         BindRoot(list, debugRing);
-        list->Dispatch(MR_WIDE_SPACE_GROUPS, 1, 1);
+        list->Dispatch(m_spaceGroups, 1, 1);
         UavBarrier(list);
         StampStage(list);
         m_constants.external = saved;

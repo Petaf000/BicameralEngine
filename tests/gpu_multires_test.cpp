@@ -1050,15 +1050,17 @@ namespace {
 
     std::expected<WideCost, std::string> MeasureWideCost(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                         uint32_t manySpecies, bool wide, bool conduction) {
+                                                         uint32_t manySpecies, bool wide, bool conduction,
+                                                         uint32_t spaceGroups) {
         const bool many = manySpecies != 0;
         sim::MultiresNest nest = test::MakeMeasureNest(table, many);
         if (wide)
             sim::EnableWideCells(nest);
 
-        auto gpu = sim::GpuMultires::Create(
-            device, table, nest.capacity,
-            {.wideCells = wide, .wideChunks = many ? WideManyChunks(nest, manySpecies) : 0});
+        auto gpu = sim::GpuMultires::Create(device, table, nest.capacity,
+                                            {.wideCells = wide,
+                                             .wideChunks = many ? WideManyChunks(nest, manySpecies) : 0,
+                                             .wideSpaceGroups = spaceGroups});
         uint64_t frequency = 0;
         if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
             return std::unexpected("計測の準備ができない");
@@ -1111,8 +1113,15 @@ namespace {
     // 大きい形のセルが一面に並ぶ計測の場面の表の物質の数(T-0327。T-0326 の申し送り): 1 セル 33〜64 種(速い形に入らない)
     constexpr uint32_t MEASURE_BIG_SPECIES = 64;
 
+    // --measure-wide の選び(T-0380)
+    struct MeasureOptions {
+        uint32_t spaceGroups = 0;  // 作業場の段のグループの数(--wide-space-groups。0 = 既定)
+        bool bigOnly = false;      // 大きい形のセルの場面だけ(--measure-big-only)
+    };
+
     // 場面ごとに 2 回測って 2 回目を出す(1 回目はシェーダーの準備・クロックの立ち上がりを含む)
-    int RunMeasureWide(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+    int RunMeasureWide(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                       const MeasureOptions& measure) {
         const auto airTable = sim::BakeReactionTable(sim::MakeCombustionTestTable());
         const auto manyTable = sim::BakeReactionTable(test::MakeWideManyTable());
         const auto bigTable = sim::BakeReactionTable(test::MakeWideManyTable(MEASURE_BIG_SPECIES));
@@ -1128,12 +1137,17 @@ namespace {
         for (const Case& item : {Case{"空気・既定の世界", 0, false}, Case{"空気・溢れの世界", 0, true},
                                  Case{"上限の種のセル・溢れの世界", test::WIDE_MANY_SPECIES, true},
                                  Case{"大きい形のセル・溢れの世界", MEASURE_BIG_SPECIES, true}}) {
+            if (measure.bigOnly && item.manySpecies != MEASURE_BIG_SPECIES)
+                continue;
+
             for (const bool conduction : {false, true}) {
                 const sim::BakedReactionTable& table = item.manySpecies == 0                     ? *airTable
                                                        : item.manySpecies == MEASURE_BIG_SPECIES ? *bigTable
                                                                                                  : *manyTable;
-                const auto first = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction);
-                const auto cost = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction);
+                const auto first = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction,
+                                                   measure.spaceGroups);
+                const auto cost = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction,
+                                                  measure.spaceGroups);
                 if (!first || !cost) {
                     Log(Channel::Gpu, Level::Error, "計測 {}: {}", item.name, cost ? first.error() : cost.error());
                     return 1;
@@ -1423,6 +1437,9 @@ namespace {
         bool compare = false;
         bool conduction = false;
         bool limits = false;  // 上限の場面(RunLimitsStepWide と同じ。表は MakeLimitsTestTable)
+        // 計測の場面の表の物質の数(--diagnose-species。T-0380 の大きい形のセルは 64)
+        uint32_t species = test::WIDE_MANY_SPECIES;
+        uint32_t spaceGroups = 0;  // 作業場の段のグループの数(--wide-space-groups。0 = 既定)
     };
 
     // 段ごとの時間(ms)を「a/b/c」にし、合計を返す
@@ -1442,8 +1459,10 @@ namespace {
                                                   const DiagnoseOptions& diagnose) {
         sim::MultiresNest cpu = diagnose.limits ? test::MakeCoarsenFullNest(table) : test::MakeMeasureNest(table, true);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(
-            device, table, cpu.capacity, {.wideCells = true, .wideChunks = diagnose.limits ? 0 : WideManyChunks(cpu)});
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
+                                            {.wideCells = true,
+                                             .wideChunks = diagnose.limits ? 0 : WideManyChunks(cpu, diagnose.species),
+                                             .wideSpaceGroups = diagnose.spaceGroups});
         const uint64_t ticks = diagnose.limits ? test::LIMITS_STEP_TICKS : DIAGNOSE_TICKS;
         const uint64_t worldSeed = diagnose.limits ? test::LIMITS_STEP_SEED : test::WIDE_OVERFLOW_SEED;
         uint64_t frequency = 0;
@@ -1499,6 +1518,7 @@ namespace {
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureWide = false;
+        MeasureOptions measure;
         std::optional<Part> part = Part::All;
         std::optional<DiagnoseOptions> diagnose;
         std::string_view repeatScene;
@@ -1528,17 +1548,27 @@ namespace {
                 diagnose->conduction = true;
             else if (argument == "--diagnose-limits" && diagnose)
                 diagnose->limits = true;
+            else if (argument == "--wide-space-groups" && index + 1 < arguments.size())
+                measure.spaceGroups = std::max(1u, static_cast<uint32_t>(std::atoi(arguments[++index])));
+            else if (argument == "--measure-big-only")
+                measure.bigOnly = true;
+            else if (argument == "--diagnose-species" && diagnose && index + 1 < arguments.size())
+                diagnose->species = std::max(1u, static_cast<uint32_t>(std::atoi(arguments[++index])));
             else
                 rest.push_back(arguments[index]);
         }
+
+        if (diagnose)
+            diagnose->spaceGroups = measure.spaceGroups;
 
         const auto options = test::ParseGpuTestOptions(rest);
         if (!options || !part) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--part "
                 "all|chains|wide|coarsen] [--diagnose-wide <刻み/リスト> [--diagnose-compare] [--diagnose-conduct] "
-                "[--diagnose-limits]] [--repeat-wide <場面,...> <回数> [--repeat-fresh-queue] [--repeat-fresh-ring]] "
-                "[--wide-stamps]");
+                "[--diagnose-limits] [--diagnose-species <表の物質>]] [--repeat-wide <場面,...> <回数> "
+                "[--repeat-fresh-queue] [--repeat-fresh-ring]] "
+                "[--wide-stamps] [--wide-space-groups <グループ>] [--measure-big-only]");
             return 2;
         }
 
@@ -1559,7 +1589,7 @@ namespace {
         }
 
         if (measureWide)
-            return RunMeasureWide(device->Get(), *queue, *ring);
+            return RunMeasureWide(device->Get(), *queue, *ring, measure);
 
         if (repeatCount > 0)
             return RunWideRepeat(
@@ -1567,8 +1597,8 @@ namespace {
                 {.queueType = options->queueType, .freshQueue = repeat.freshQueue, .freshRing = repeat.freshRing});
 
         if (diagnose) {
-            const auto manyTable = sim::BakeReactionTable(diagnose->limits ? test::MakeLimitsTestTable()
-                                                                           : test::MakeWideManyTable());
+            const auto manyTable = sim::BakeReactionTable(
+                diagnose->limits ? test::MakeLimitsTestTable() : test::MakeWideManyTable(diagnose->species));
             const auto diagnosed = manyTable ? DiagnoseWide(device->Get(), *queue, *ring, *manyTable, *diagnose)
                                              : std::unexpected(std::string("表を作れない"));
             if (!diagnosed)
