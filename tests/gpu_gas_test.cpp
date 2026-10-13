@@ -103,7 +103,9 @@ namespace {
     constexpr uint32_t MOON_GRAVITY = 1620000;
 
     GasConfig WithGravity(GasConfig config, uint32_t gravity) {
-        ApplyWorldPhysics({.gravityMicrometersPerSecond2 = gravity}, config);
+        WorldPhysics world = StandardWorldPhysics();  // 音速の基準は標準のまま、重力だけ替える
+        world.gravityMicrometersPerSecond2 = gravity;
+        ApplyWorldPhysics(world, config);
         return config;
     }
 

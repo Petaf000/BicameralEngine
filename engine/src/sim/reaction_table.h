@@ -26,6 +26,7 @@
 #include "sim/material_templates.h"
 #include "sim/reaction_wide_cell.h"
 #include "sim/world_layout.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
 
@@ -82,6 +83,7 @@ namespace bicameral::sim {
         WorldLayoutDefinition worldLayout;  // 世界の組み立て(world_cells・world_bodies。T-0398)
 
         MaterialTemplateDefinition templates;  // 材料のひな形・抽出の物質・既定(T-0399)
+        WorldPhysics environment;              // 環境の値(分類 environment。無ければブランク = 0。T-0400・ADR-0176)
     };
 
     // --- ベイクした表 ---
@@ -130,7 +132,8 @@ namespace bicameral::sim {
         std::vector<std::string> warnings;      // ベイクは通したが、書いた人に見せる食い違い(文献の反応熱など)
 
         // --- CPU だけ: 同じ読み込みに足した分類(世界のデータ。物質は ID に直したもの。T-0398〜T-0400。分類ごとに 1 行)---
-        WorldLayout worldLayout;  // 世界の組み立て(MakeProbeInitialWorld・MakeLayoutPhysicsScene が読む。T-0398)
+        WorldLayout worldLayout;   // 世界の組み立て(MakeProbeInitialWorld・MakeLayoutPhysicsScene が読む。T-0398)
+        WorldPhysics environment;  // 環境の値(重力・気体の音速の基準 → 物理と気体の設定。T-0400・ADR-0176)
 
         MaterialTemplates templates;  // 材料のひな形・抽出の物質・既定(T-0399)
 

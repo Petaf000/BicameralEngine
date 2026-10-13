@@ -8,4 +8,5 @@ return {
     material_templates = require("material_templates"),
     view_quantities = require("view_quantities"),
     editor_defaults = require("editor_defaults"),
+    environment = require("environment"),
 }
