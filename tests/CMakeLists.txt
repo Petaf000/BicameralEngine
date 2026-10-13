@@ -234,9 +234,7 @@ endfunction()
 
 # add_gpu_test_case(<テスト名> <exe> <ラベル> <引数...>)
 function(bicameral_add_gpu_test_case testName executable label)
-  # 作業ディレクトリは exe のある bin(job.py run と同じ)。ctest の既定(out/build/<p>/tests)では、ドライバのシェーダーのキャッシュに
-  # 当たらず、パイプラインを作るたびにコンパイルし直していた(debug の溢れの場面で 1 回 約 65 秒。T-0427)
-  add_test(NAME ${testName} COMMAND ${executable} ${ARGN} WORKING_DIRECTORY $<TARGET_FILE_DIR:${executable}>)
+  add_test(NAME ${testName} COMMAND ${executable} ${ARGN})
   # GPU のテストが固まったとき(Work Graph のハング・WARP)に runner を長く塞がないよう、ctest の既定(1500 秒)より短く切る(T-0005)
   set_tests_properties(${testName} PROPERTIES LABELS ${label} TIMEOUT 300)
 endfunction()
@@ -259,9 +257,9 @@ target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
 # GBV ありの debug では 1 場面 210〜290 s × 7 で 1200 s に入らない・切ると 7 場面で約 80 s(2026-10-11。release は元から GBV なし)。
 # 溢れの場面を 1 本(gpu_multires_wide)で流すと 285〜1148 s かかり、GPU の順番待ち(D-460)で他のランナーを長く止めたので、
 # 1 本を 10 分に収めるよう 6 つの組(1 組 3 場面まで)に分けた(T-0426。組の中身は gpu_multires_test の RunWideScenes の上。
-# CPU リファレンスとの比べ方は変えていない)。重かったのは場面ごとのパイプライン(Compute 35 本 + Work Graph)の作成で、ctest から起動すると
-# ドライバのシェーダーのキャッシュに当たらず毎回コンパイルしていた(debug 1 回 約 65 s)。作業ディレクトリを bin にし(上の関数)、
-# 試験の中でもパイプラインを使い回す(gpu::PipelineCache。--no-pipeline-cache で毎回作る)。T-0427。上限は 900 s のまま
+# CPU リファレンスとの比べ方は変えていない)。重かったのは場面ごとのパイプライン(Compute 35 本 + Work Graph)の作成: ctest から起動した
+# プロセスはドライバのシェーダーのキャッシュに当たらず(作業ディレクトリを bin にしても同じ。原因は未確認)、作るたびにコンパイルしていた
+# (debug 1 回 約 65 s)。試験の中でパイプラインを使い回す(gpu::PipelineCache。--no-pipeline-cache で毎回作る。T-0427)。上限は 900 s のまま
 # 鎖の場面も 3 つの組に分ける(debug の HW で 1 本 441〜777 s だった。T-0426): 本物の鎖・影の鎖(release は計測も)/ たくさんの要求 /
 # 粗くすると入りきらない子・上限(溢れなし)
 bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute --part chains-real)
