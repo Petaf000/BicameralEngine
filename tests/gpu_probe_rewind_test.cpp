@@ -11,6 +11,9 @@
 //       基準(差し替えあり)を別の ProbeSim で流し、写しながら 120 刻み進む側は、差し替えより前の保存点(刻み 20)が空になり
 //       (戻そうとすると RecordFrame が断る)、差し替えの後の保存点(刻み 60)へ戻して進めると S(61)〜S(TICKS) が基準と全部一致する
 //       (戻した後の世界 = その時の表で刻んだ世界)。差し替えなしの基準とは違う(差し替えが効いている)
+//   - 刻み 0 の保存点(T-0411・D-474): 単位の無いリストで世界を初期化だけし、次の単位の無いリストで S(0) を写して 120 刻み進む。
+//       刻み 0 へ戻してコマンドを全部足し直すと S(1)〜S(TICKS) が基準と全部一致し、足し直さないと最後の刻みで違う
+//       (刻み 0 のつつきも戻すとキューから捨てられ、足し直した分だけが効く。起動直後の筆の運びを元に戻す道の土台)
 //   - フレームの単位の数はばらばら(刻みの途中で切れる)。保存点の刻みでだけ、境界で切ってから写す
 //   - シェーダーの assert と debug layer のエラーが 0 件
 // 保存点 1 つの大きさと、写す・戻すフレームの GPU の時間をログに出す(docs/perf.md)。
@@ -127,6 +130,17 @@ namespace {
 
         // 保存点へ戻す前に、境界を保存点の刻みに合わせる
         void JumpTo(uint64_t tick) { m_position = tick * m_simulation.UnitsPerTick(); }
+
+        // 単位の無いリスト。最初の 1 つは世界を初期化するだけ。saveTo を渡せば、今の境界の状態を写すだけ(刻み 0 の保存点。T-0411)
+        bool SubmitEmpty(uint32_t saveTo) {
+            const uint32_t unitsPerTick = m_simulation.UnitsPerTick();
+            const ProbeFrameInput input{.firstTick = m_position / unitsPerTick,
+                                        .firstUnit = static_cast<uint32_t>(m_position % unitsPerTick),
+                                        .unitCount = 0,
+                                        .saveTo = saveTo};
+
+            return Submit(input, false);
+        }
 
         // 刻み swap.tick の適用の単位を投げるフレームで、表を差し替える(T-0299)
         void SetTableSwap(const ProbeTableSwap& swap) { m_swap = swap; }
@@ -312,6 +326,39 @@ namespace {
                        "差し替え: シェーダーの assert が 0 件");
     }
 
+    // 刻み 0 の保存点(T-0411・D-474)。baseline は差し替えなしの基準
+    void RunTickZeroTest(ID3D12Device5* device, const BakedReactionTable& table, const PhysicsScene& scene,
+                         const std::map<uint64_t, uint64_t>& baseline, Failures& failures) {
+        std::optional<Created> rewind = Create(device, table, scene, 1);
+        failures.Check(rewind.has_value(), "刻み 0: 作れた");
+        if (!rewind)
+            return;
+
+        // --- 初期化だけのリスト → 刻み 0 の境界で写す → 写さずに進む ---
+        const std::vector<ProbeCommand> commands = MakeCommands();
+        Driver driver(*rewind->queue, *rewind->simulation);
+        failures.Check(driver.SubmitEmpty(NO_SAVE_POINT), "刻み 0: 初期化だけのリストを投げた");
+        failures.Check(driver.SubmitEmpty(0), "刻み 0: 刻み 0 の境界で写した");
+        failures.Check(rewind->simulation->SavePointTick(0) == 0, "刻み 0: 保存点が刻み 0 を持つ");
+        failures.Check(driver.Advance(FIRST_LEG_TICKS, commands, NO_SAVE_POINT, false), "刻み 0: 写した後に進めた");
+        failures.Check(MatchesBaseline(driver.TakeHashes(), baseline, 0, FIRST_LEG_TICKS, "刻み 0: 写した後"),
+                       "刻み 0: 初期化だけのリストと写すリストを挟んでも世界のハッシュ列が変わらない");
+
+        // --- 刻み 0 へ戻して全部足し直す → 基準と同じ ---
+        driver.JumpTo(0);
+        failures.Check(driver.Advance(TICKS, commands, 0, false), "刻み 0: 刻み 0 へ戻して進めた");
+        failures.Check(MatchesBaseline(driver.TakeHashes(), baseline, 0, TICKS, "刻み 0 から"),
+                       "刻み 0: 刻み 0 へ巻き戻した後のハッシュ列が、最初から流した時と同じ");
+
+        // --- 刻み 0 へ戻して足し直さない → 違う(刻み 0 のつつきもキューから捨てられた)---
+        driver.JumpTo(0);
+        failures.Check(driver.Advance(TICKS, {}, 0, false), "刻み 0: 刻み 0 へ戻して(コマンドなしで)進めた");
+        const std::map<uint64_t, uint64_t> withoutCommands = driver.TakeHashes();
+        failures.Check(withoutCommands.contains(TICKS) && withoutCommands.at(TICKS) != baseline.at(TICKS),
+                       "刻み 0: 足し直さないと最後の刻みで違う");
+        failures.Check(driver.DebugAssertCount() == 0, "刻み 0: シェーダーの assert が 0 件");
+    }
+
     int RunTest(ID3D12Device5* device, const BakedReactionTable& table) {
         const PhysicsScene scene = MakeProbeStackScene();
         const std::vector<ProbeCommand> commands = MakeCommands();
@@ -365,6 +412,7 @@ namespace {
         failures.Check(baseDriver.DebugAssertCount() == 0 && driver.DebugAssertCount() == 0,
                        "シェーダーの assert が 0 件");
         RunTableSwapTest(device, table, scene, baseline, failures);
+        RunTickZeroTest(device, table, scene, baseline, failures);
         Log(Channel::Sim, Level::Info, "写す・戻すフレームの単位以外の GPU 時間: 平均 {:.0f} µs({} フレーム。暖機なし)",
             driver.SaveRestoreMicroseconds() / std::max(1u, driver.SaveRestoreFrames()), driver.SaveRestoreFrames());
 

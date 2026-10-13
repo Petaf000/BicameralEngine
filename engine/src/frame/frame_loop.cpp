@@ -431,7 +431,7 @@ namespace bicameral::frame {
             std::optional<AutoReload> m_autoReload;  // --auto-reload(T-0195)
 
             // --- 巻き戻し(T-0143)---
-            uint32_t m_savePointCount = 0;
+            uint32_t m_savePointCount = 0;          // 刻み 0 の保存点(TICK_ZERO_SAVE_SLOT)を含めた数
             uint64_t m_rewindRequest = UINT64_MAX;  // 次に投げるフレームで戻す保存点の刻み
             uint32_t m_rewindCount = 0;
             bool m_extractAfterRewind = false;  // 止めている間に戻したら、戻した状態を抽出だけのリストで見せる
@@ -1201,12 +1201,16 @@ namespace bicameral::frame {
             const uint32_t restoreFrom = m_rewindRequest != UINT64_MAX ? PrepareRewind() : sim::NO_SAVE_POINT;
             const bool restoring = restoreFrom != sim::NO_SAVE_POINT;
 
+            // 刻み 0 の保存点(T-0411): 保存点を使うなら、最初のリストは世界の初期化だけにする(単位もコマンドも足さない)。
+            // 初期化と同じリストでは写せない(写すのはリストの先頭で、バッファが COMMON の時。ProbeSim::RecordSave)ので、
+            // 次のリストの先頭で S(0) を写す。いつ投げるかだけが変わり、世界の結果は変わらない
             const SimCursor start = m_scheduler.Cursor();
-            const uint32_t unitCount = m_scheduler.TakeUnits();
+            const bool initializeOnly = m_simSubmissionCount == 0 && m_savePointCount > 0 && start == SimCursor{};
+            const uint32_t unitCount = initializeOnly ? 0 : m_scheduler.TakeUnits();
             // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)か、
             // 止めたまま戻した状態をまだ見せていないなら、抽出だけのリストを投げる
             const bool extractOnly = unitCount == 0 && (NeedsStopExtraction() || m_extractAfterRewind);
-            if (unitCount == 0 && !extractOnly && !restoring)
+            if (unitCount == 0 && !extractOnly && !restoring && !initializeOnly)
                 return true;
 
             const uint64_t extraction = m_lastExtraction + 1;
@@ -1217,11 +1221,13 @@ namespace bicameral::frame {
             if (!extract)
                 ++m_interval.skippedExtractions;
 
-            const std::vector<sim::ProbeCommand> commands = TakeCommands(start);
+            const std::vector<sim::ProbeCommand> commands = initializeOnly ? std::vector<sim::ProbeCommand>()
+                                                                           : TakeCommands(start);
             if (m_tableSwapFailed)
                 return false;
 
-            StartRequestedTrace(start);
+            if (!initializeOnly)
+                StartRequestedTrace(start);
             // 抽出は S(終わった後のカーソルの刻み)。刻みの途中で終わったら、その刻みの始めの状態(ProbeSim::RecordFrame)
             const uint64_t extractionTick = m_scheduler.Cursor().tick;
 
@@ -1616,6 +1622,7 @@ namespace bicameral::frame {
         // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
         // 保存点: saveIntervalTicks の倍数の刻みの境界で、そのフレームの先頭に S(刻み) を VRAM の保存点へ写す(GPU → GPU)。
         //   SimScheduler がその境界でフレームを切るので、どの境界も必ずどれかのフレームの先頭になる。
+        //   刻み 0 は別の保存点(TICK_ZERO_SAVE_SLOT)へ写して捨てない。ほかの境界は残りの保存点を回して使う(T-0411・D-474)。
         // 戻す: GPU を待って読み戻しを全部読み、カーソルを保存点の刻みへ。次のリストの先頭で世界を保存点の状態に戻し、
         //   その刻み以降のコマンド(再生ファイル、なければ今の流れで足したコマンド)を足し直す。同じコマンドなら同じハッシュ列になる。
         //   戻した後のつつきは、足し直すコマンドに混ぜて刻みの順に足す(先の流れは変わりうるので、戻した刻みより先の保存点は捨てる)。
@@ -1627,15 +1634,19 @@ namespace bicameral::frame {
             if (requested == 0)
                 return true;
 
-            if (!m_sim.CreateSavePoints(m_device.Get(), requested)) {
-                Log(Channel::Sim, Level::Error, "保存点を作れない({} 個)", requested);
+            // 刻み 0 の保存点を 1 つ足す(T-0411)
+            const uint32_t total = requested + 1;
+            if (!m_sim.CreateSavePoints(m_device.Get(), total)) {
+                Log(Channel::Sim, Level::Error, "保存点を作れない({} 個)", total);
                 return false;
             }
 
-            m_savePointCount = requested;
+            m_savePointCount = total;
             m_scheduler.SetBreakInterval(m_options.saveIntervalTicks);
-            Log(Channel::Sim, Level::Info, "巻き戻し: 保存点 {} 個 × {:.1f} MiB、{} 刻みごと", requested,
-                static_cast<double>(m_sim.SavePointBytes()) / (1024.0 * 1024.0), m_options.saveIntervalTicks);
+            Log(Channel::Sim, Level::Info,
+                "巻き戻し: 保存点 {} 個(刻み 0 の 1 個 + {} 刻みごとに回す {} 個)× {:.1f} MiB", total,
+                m_options.saveIntervalTicks, requested,
+                static_cast<double>(m_sim.SavePointBytes()) / (1024.0 * 1024.0));
 
             return true;
         }
@@ -1741,16 +1752,22 @@ namespace bicameral::frame {
             return index;
         }
 
-        // 保存点の刻みの境界から単位を始めるフレームなら、写す保存点の番号(刻み / 間隔 を数で回す)
+        // 保存点の刻みの境界から単位を始めるフレームなら、写す保存点の番号。刻み 0 は TICK_ZERO_SAVE_SLOT、
+        // ほかは残りの保存点を 刻み / 間隔 で回す(いちばん古いものから上書きする。T-0411)
         uint32_t FrameLoop::SaveSlotFor(SimCursor start, uint32_t unitCount, uint32_t restoreFrom) const {
             const uint64_t interval = m_options.saveIntervalTicks;
             const bool due = m_savePointCount > 0 && restoreFrom == sim::NO_SAVE_POINT && unitCount > 0 &&
-                             start.unit == 0 && start.tick > 0 && start.tick % interval == 0 &&
-                             m_simSubmissionCount > 0;  // 最初のリストは世界を初期化する(写すのはその後)
+                             start.unit == 0 && start.tick % interval == 0 &&
+                             m_simSubmissionCount > 0;  // 最初のリストは世界を初期化する(写すのはその後。SubmitSim)
             if (!due)
                 return sim::NO_SAVE_POINT;
 
-            return static_cast<uint32_t>((start.tick / interval) % m_savePointCount);
+            if (start.tick == 0)
+                return TICK_ZERO_SAVE_SLOT;
+
+            const uint64_t rotating = m_savePointCount - 1;
+
+            return static_cast<uint32_t>(1 + (start.tick / interval - 1) % rotating);
         }
 
         // 窓のクリックと、巻き戻した後に足し直すコマンド(endApplyTick より前の分)を、刻み・番号の順に混ぜる
@@ -1840,7 +1857,7 @@ namespace bicameral::frame {
             brush.NoteUndone(firstTick, rewindTick, m_latestHash);
         }
 
-        // --auto-rewind: 保存点が 2 つできたら、古い方へ 1 回だけ戻す。--auto-reload と一緒なら、最初に表を差し替えた後にできた
+        // --auto-rewind: 保存点が 2 つできたら、古い方(刻み 0 の保存点があればそこ。T-0411)へ 1 回だけ戻す。--auto-reload と一緒なら、最初に表を差し替えた後にできた
         // 保存点へ(差し替えより前の保存点は捨てられている。戻した後も記録の再生と同じハッシュ列になるか。T-0299)
         void FrameLoop::CheckAutoRewind() {
             if (!m_options.autoRewind || m_rewindCount > 0 || m_rewindRequest != UINT64_MAX)
