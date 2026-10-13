@@ -12,7 +12,10 @@
 // 計測は、根 8³ の世界(全部が基準以下のレベル = 小刻み 63 回が空。空の段の費用)を分けない・64 回で、鎖(レベル 0〜6)を Δkmax 0〜3 で比べる。
 // --near-fold: 鎖を、許容差つきで頁を畳む(端数の枠を返す)・静かな葉を粗くするも入れて、頁が全部畳まれるまで毎刻み比べる(T-0112。
 // CPU は multires_conduction_test の --residue と同じ順。熱が止まって静かになるまで約 2000 刻みかかる)。
-// 引数は gpu_test_options.h と --subcycle・--measure-only(計測だけで抜ける。T-0111)・--near-fold。
+// 引数は gpu_test_options.h と --subcycle・--measure-only(計測だけで抜ける。T-0111)・--near-fold・--scenes all|chain|stress
+// (鎖だけ・たくさんの要求だけ。Compute 版と Work Graph 版の組は分けない。ctest の小刻みは 1 本を GPU の順番待ち〔D-460〕に合う
+// 10 分に収めるよう 2 本に分ける。T-0426。計測は鎖の組〔と all〕だけ)。
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -411,10 +414,29 @@ namespace {
                      .step = split}};
     }
 
+    // 流す場面(--scenes。既定は全部)
+    struct SceneSelection {
+        bool chain = true;
+        bool stress = true;
+    };
+
+    std::optional<SceneSelection> ParseSceneSelection(std::string_view text) {
+        if (text == "all")
+            return SceneSelection{};
+        if (text == "chain")
+            return SceneSelection{.chain = true, .stress = false};
+        if (text == "stress")
+            return SceneSelection{.chain = false, .stress = true};
+
+        return std::nullopt;
+    }
+
     // withGraph = 伝導の段の Work Graph 版も走らせる(release の WARP では最初の DispatchGraph でデバイスが失われるので外す。
-    // debug の WARP とハードウェアでは一致する。WARP の JIT の不具合と推定・未確認。ADR-0013 と同じ種類)
+    // debug の WARP とハードウェアでは一致する。WARP の JIT の不具合と推定・未確認。ADR-0013 と同じ種類)。
+    // 選ばなかった場面は流さない(その組の hashes は 0 のまま揃う)
     std::expected<void, std::string> RunAll(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
-                                            const sim::BakedReactionTable& table, bool withGraph, bool subcycle) {
+                                            const sim::BakedReactionTable& table, bool withGraph, bool subcycle,
+                                            const SceneSelection& selection) {
         const sim::MultiresCapacity capacity = test::MakeActivityNest(table).capacity;
         auto gpu = sim::GpuMultires::Create(device, table, capacity, {.activity = true, .conductionGraph = true});
         if (!gpu)
@@ -424,17 +446,23 @@ namespace {
         std::array<uint64_t, runs.size()> hashes{};
         std::vector<TickCheck> checks;
         for (size_t i = 0; i < runs.size(); ++i) {
+            if (runs[i].stress ? !selection.stress : !selection.chain)
+                continue;
+
             if (runs[i].graph && !withGraph) {
                 Log(Channel::Gpu, Level::Warning, "{}: 走らせない(release の WARP)", runs[i].name);
                 hashes[i] = hashes[i - 1];
                 continue;
             }
 
+            const auto start = chr::steady_clock::now();
             auto hash = RunScene(queue, ring, *gpu, table, runs[i], checks);
             if (!hash)
                 return std::unexpected(hash.error());
 
             hashes[i] = *hash;
+            Log(Channel::Gpu, Level::Info, "{}: {:.1f} 秒", runs[i].name,
+                chr::duration<double>(chr::steady_clock::now() - start).count());
         }
 
         if (hashes[0] != hashes[1] || hashes[2] != hashes[3])
@@ -577,21 +605,29 @@ namespace {
         bool subcycle = false;
         bool measureOnly = false;  // 計測だけ(比べる実行を省く。T-0111 で段を詰める時の繰り返し用)
         bool nearFold = false;     // 許容差つきで畳む鎖だけ(T-0112)
+        SceneSelection scenes;     // 流す場面(--scenes)
     };
 
-    // gpu_test_options.h の引数と --subcycle・--measure-only
+    // gpu_test_options.h の引数と --subcycle・--measure-only・--near-fold・--scenes
     std::optional<RunOptions> ParseRunOptions(std::span<char*> arguments) {
         std::vector<char*> rest;
         RunOptions options;
-        for (char* argument : arguments) {
-            if (std::string_view(argument) == "--subcycle")
+        for (size_t index = 0; index < arguments.size(); ++index) {
+            const std::string_view argument(arguments[index]);
+            if (argument == "--subcycle")
                 options.subcycle = true;
-            else if (std::string_view(argument) == "--measure-only")
+            else if (argument == "--measure-only")
                 options.measureOnly = true;
-            else if (std::string_view(argument) == "--near-fold")
+            else if (argument == "--near-fold")
                 options.nearFold = true;
-            else
-                rest.push_back(argument);
+            else if (argument == "--scenes" && index + 1 < arguments.size()) {
+                const auto selection = ParseSceneSelection(arguments[++index]);
+                if (!selection)
+                    return std::nullopt;
+
+                options.scenes = *selection;
+            } else
+                rest.push_back(arguments[index]);
         }
 
         const auto gpuOptions = test::ParseGpuTestOptions(rest);
@@ -624,7 +660,7 @@ namespace {
         if (!options) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_conduction_test [--warp] [--queue direct|compute] [--subcycle] [--measure-only] "
-                "[--near-fold]");
+                "[--near-fold] [--scenes all|chain|stress]");
             return 2;
         }
 
@@ -666,7 +702,7 @@ namespace {
         constexpr bool RELEASE = false;
 #endif
         const bool warp = options->gpu.adapter == gpu::AdapterKind::Warp;
-        if (RELEASE && !warp) {
+        if (RELEASE && !warp && options->scenes.chain) {
             if (auto measured = MeasureAll(device->Get(), *queue, *ring, *table, options->subcycle); !measured) {
                 Log(Channel::Gpu, Level::Error, "gpu_multires_conduction_test: FAILED(計測: {})", measured.error());
                 return 1;
@@ -676,7 +712,8 @@ namespace {
         if (options->measureOnly)
             return 0;
 
-        if (auto result = RunAll(device->Get(), *queue, *ring, *table, !(RELEASE && warp), options->subcycle);
+        if (auto result = RunAll(device->Get(), *queue, *ring, *table, !(RELEASE && warp), options->subcycle,
+                                 options->scenes);
             !result) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_conduction_test: FAILED ({})", result.error());
             return 1;

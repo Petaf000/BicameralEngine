@@ -11,17 +11,21 @@
 // 記録の形(GpuImplicitRecordShape。T-0154)を変えても同じ値: 前の刻みの数から選ぶ形・全部の回を ImTail で回す形・上限まで積む形。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 刻みごとの GPU の ms(同じ系を写し直して REPEATS 回解いた最小)。
 //   V サイクルの上限(木の既定 64 と 16)・記録の形・ImTail の境(GpuImplicitTuning)を変えて比べる。
+// --scene hot,chain,stress(既定は全部): 流す場面を並べる。ctest の HW は熱い点・鎖とたくさんの要求の 2 本に分ける
+// (1 本を GPU の順番待ち〔D-460〕に合う 10 分に収める。T-0426)。場面ごとの秒(CPU で作る・比べる)をログに出す。
 #include <algorithm>
 #include <cstdint>
 #include <expected>
 #include <format>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "common/multires_conduction.hlsli"
+#include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -57,6 +61,7 @@ namespace {
         std::string name;
         std::vector<TreeTick> ticks;
         sim::ImplicitOptions options;
+        bool stress = false;  // たくさんの要求(系が大きい。形を変えて比べるのは release だけ)
     };
 
     // 木の陰解法と同じ選択(multires_implicit_conduction.cpp の MakeImplicitOptions。ADR-0019)
@@ -120,7 +125,7 @@ namespace {
         nest.captureImplicitGrid = true;
 
         const sim::MultiresStepOptions options = TreeOptions(table);
-        TreeScene scene{.name = "たくさんの要求", .ticks = {}, .options = TreeImplicitOptions(options)};
+        TreeScene scene{.name = "たくさんの要求", .ticks = {}, .options = TreeImplicitOptions(options), .stress = true};
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             const std::vector<MrRequest> requests = test::MakeStressRequests(nest, tick);
             test::BeginActivityTick(nest, tick, requests);
@@ -327,11 +332,48 @@ namespace {
     constexpr uint64_t CHAIN_EARLY_TICKS = 12;
     constexpr uint64_t STRESS_TICKS = 8;
 
-    std::vector<TreeScene> MakeScenes(const sim::BakedReactionTable& table) {
+    // 流す場面(--scene。既定は全部)
+    struct SceneSelection {
+        bool hot = true;
+        bool chain = true;
+        bool stress = true;
+    };
+
+    // 「hot,chain」のような並びを読む(知らない名前があれば nullopt。名前を変えた時に ctest の組から黙って落ちないように)
+    std::optional<SceneSelection> ParseSceneSelection(std::string_view text) {
+        SceneSelection selection{.hot = false, .chain = false, .stress = false};
+        for (const auto part : views::split(text, ',')) {
+            const std::string_view name(part.begin(), part.end());
+            if (name == "hot")
+                selection.hot = true;
+            else if (name == "chain")
+                selection.chain = true;
+            else if (name == "stress")
+                selection.stress = true;
+            else
+                return std::nullopt;
+        }
+
+        return selection;
+    }
+
+    // 場面を CPU で刻んで系を集める(選んだ場面だけ。どれに何秒かかったかをログに出す)
+    std::vector<TreeScene> MakeScenes(const sim::BakedReactionTable& table, const SceneSelection& selection) {
         std::vector<TreeScene> scenes;
-        scenes.push_back(HotPointScene(table, HOT_TICKS));
-        scenes.push_back(ChainScene(table, CHAIN_TICKS));
-        scenes.push_back(StressScene(table, STRESS_TICKS));
+        const auto add = [&](auto&& make) {
+            const auto start = chr::steady_clock::now();
+            scenes.push_back(make());
+            Log(Channel::Sim, Level::Info, "{}: CPU で作る {:.1f} 秒", scenes.back().name,
+                chr::duration<double>(chr::steady_clock::now() - start).count());
+        };
+        if (selection.hot)
+            add([&] { return HotPointScene(table, HOT_TICKS); });
+
+        if (selection.chain)
+            add([&] { return ChainScene(table, CHAIN_TICKS); });
+
+        if (selection.stress)
+            add([&] { return StressScene(table, STRESS_TICKS); });
 
         return scenes;
     }
@@ -354,19 +396,18 @@ namespace {
         .tailMaxNodes = 1024, .tailMaxLinks = 32, .coarsestTailMaxNodes = 4096};
 
     std::expected<void, std::string> CheckAll(const SolveSetup& setup, const std::vector<TreeScene>& scenes) {
-        for (size_t s = 0; s < scenes.size(); ++s) {
-            const TreeScene& scene = scenes[s];
+        for (const TreeScene& scene : scenes) {
             if (scene.ticks.empty())
                 return std::unexpected(std::format("{}: 陰解法の系が無い(場面が試験になっていない)", scene.name));
 
-            const bool last = s + 1 == scenes.size();
-            if (last && RELEASE) {
+            const auto start = chr::steady_clock::now();
+            if (scene.stress && RELEASE) {
                 if (auto other = RunScene(setup, scene, scene.options, COARSEST_TAIL, 1, ShapeMode::Full); !other)
                     return std::unexpected(std::format("最も粗い段を ImTail で回す形: {}", other.error()));
             }
 
             // 記録の形を変えても同じ値か(T-0154)。debug の WARP では 1 グループで 2 万セルを回すと長いので、たくさんの要求は release だけ
-            if (!last || RELEASE) {
+            if (!scene.stress || RELEASE) {
                 if (auto other = RunScene(setup, scene, scene.options, {}, 1, ShapeMode::AllTail); !other)
                     return std::unexpected(std::format("全部の回を ImTail で回す形: {}", other.error()));
             }
@@ -382,8 +423,10 @@ namespace {
                 maxCells = std::max(maxCells, scene.ticks[tick].grid.cells.size());
             }
 
-            Log(Channel::Sim, Level::Info, "{}: {} 刻み一致(V サイクル最大 {}・系のセル最大 {}・最後の段 {})",
-                scene.name, results->size(), maxCycles, maxCells, ShapeText(scene.ticks.back().grid));
+            Log(Channel::Sim, Level::Info,
+                "{}: {} 刻み一致(V サイクル最大 {}・系のセル最大 {}・最後の段 {})・{:.1f} 秒", scene.name,
+                results->size(), maxCycles, maxCells, ShapeText(scene.ticks.back().grid),
+                chr::duration<double>(chr::steady_clock::now() - start).count());
         }
 
         return {};
@@ -468,17 +511,22 @@ namespace {
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureOnly = false;
-        for (char* argument : arguments) {
-            if (std::string_view(argument) == "--measure-only")
+        std::optional<SceneSelection> selection = SceneSelection{};
+        for (size_t index = 0; index < arguments.size(); ++index) {
+            const std::string_view argument(arguments[index]);
+            if (argument == "--measure-only")
                 measureOnly = true;
+            else if (argument == "--scene" && index + 1 < arguments.size())
+                selection = ParseSceneSelection(arguments[++index]);
             else
-                rest.push_back(argument);
+                rest.push_back(arguments[index]);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options) {
+        if (!options || !selection) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_multires_implicit_tree_test [--warp] [--queue direct|compute] [--measure-only]");
+                "使い方: gpu_multires_implicit_tree_test [--warp] [--queue direct|compute] [--measure-only] "
+                "[--scene hot,chain,stress]");
             return 2;
         }
 
@@ -499,7 +547,7 @@ namespace {
             return 1;
         }
 
-        const std::vector<TreeScene> scenes = MakeScenes(*table);
+        const std::vector<TreeScene> scenes = MakeScenes(*table, *selection);
         SolveSetup setup{.device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = 0};
 
         if (RELEASE && options->adapter != gpu::AdapterKind::Warp) {

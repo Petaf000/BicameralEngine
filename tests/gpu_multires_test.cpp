@@ -5,8 +5,9 @@
 // 時間は別に、1 本のリストで暖機(GPU のクロックを上げる)してから測る(1 刻みの予算に収まるか)。
 // debug では 2 回目の実行と時間の計測をしない(1200 秒の上限に届くため。T-0263)。場面と刻みの数は release と同じ。
 // 粗くすると成分が入りきらない場面(tests/multires_limits_scene.h。T-0022)も毎刻み比べる(断った数・見出しの quietCheck も)。
-// 引数は gpu_test_options.h と --part all|chains|wide|wide-<組>(組は RunWideScenes の上)・--measure-wide(計測だけ)。
-// ctest の HW は鎖(chains)と溢れの 6 つの組の 7 本、WARP は鎖と溢れ(wide)の 2 本(1 本を 10 分に収める。T-0263・T-0426)。
+// 引数は gpu_test_options.h と --part all|chains|chains-<組>|wide|wide-<組>(組は RunRealChainScenes・RunWideScenes の上)・
+// --measure-wide(計測だけ)。ctest の HW は鎖の 3 つの組と溢れの 6 つの組の 9 本、WARP は鎖(chains)と溢れ(wide)の 2 本
+// (1 本を GPU の順番待ちに合う 10 分に収める。T-0263・T-0426)。
 #include "sim/gpu_multires.h"
 
 #include <optional>
@@ -1252,15 +1253,15 @@ namespace {
         return result;
     }
 
-    // 鎖の場面(本物の鎖・影の鎖・たくさんの要求・粗くすると入りきらない子・上限〔溢れなし〕)。通らなければ 1
-    int RunChainScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
-                       const sim::BakedReactionTable& table) {
+    // --- 鎖の場面: 3 つの組(--part chains-real / chains-stress / chains-limits。--part chains は 3 つを続けて)。
+    //     1 本を GPU の順番待ち(D-460)に合う 10 分に収めるよう分けた(debug の HW で 1 本 441〜777 秒だった。T-0426)---
+
+    // 本物の鎖・影の鎖(release は本物の鎖を 2 回と、時間の計測も)。通らなければ 1(--part chains-real)
+    int RunRealChainScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                           const sim::BakedReactionTable& table) {
         using test::MultiresScenario;
         const auto runReal = [&] {
             return RunScenario(device, queue, ring, table, MultiresScenario::Real);
-        };
-        const auto runStress = [&] {
-            return RunStress(device, queue, ring, table);
         };
         const auto first = Timed("本物の鎖", runReal);
         const auto second = [&] {
@@ -1281,26 +1282,7 @@ namespace {
             shadowTiming = MeasureChain(device, queue, ring, table, MultiresScenario::Shadow);
         }
 
-        const auto stress = Timed("たくさんの要求", runStress);
-        const auto stressAgain = [&] {
-            if constexpr (REPEAT_AND_MEASURE)
-                return Timed("たくさんの要求(2 回目)", runStress);
-            else
-                return stress;
-        }();
-
-        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
-        if (!limitsTable) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
-            return 1;
-        }
-
-        const auto coarsenFull = RunCoarsenFull(device, queue, ring, *limitsTable);
-        const auto limitsStep = Timed("上限", [&] { return RunLimitsStep(device, queue, ring, *limitsTable, false); });
-        const auto limitsConduct = Timed("上限・伝導",
-                                         [&] { return RunLimitsStep(device, queue, ring, *limitsTable, true); });
-        for (const auto* result :
-             {&first, &second, &shadow, &stress, &stressAgain, &coarsenFull, &limitsStep, &limitsConduct}) {
+        for (const auto* result : {&first, &second, &shadow}) {
             if (*result)
                 continue;
 
@@ -1308,8 +1290,8 @@ namespace {
             return 1;
         }
 
-        if (first->digest != second->digest || stress->digest != stressAgain->digest) {
-            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(2 回の実行が食い違う)");
+        if (first->digest != second->digest) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(本物の鎖の 2 回の実行が食い違う)");
             return 1;
         }
 
@@ -1331,11 +1313,81 @@ namespace {
         }
 
         Log(Channel::Gpu, Level::Info,
-            "鎖の場面: OK(本物の鎖・影の鎖の {} 刻み・たくさんの要求の {} 刻みで GPU と CPU がビット一致。"
-            "要約 本物 {:016x} / 影 {:016x} / たくさん {:016x})",
-            test::MULTIRES_END_TICK, test::STRESS_TICKS, first->digest, shadow->digest, stress->digest);
+            "本物の鎖・影の鎖: OK({} 刻みで GPU と CPU がビット一致。要約 本物 {:016x} / 影 {:016x})",
+            test::MULTIRES_END_TICK, first->digest, shadow->digest);
 
         return 0;
+    }
+
+    // たくさんの要求(release は 2 回流して一致も)。通らなければ 1(--part chains-stress)
+    int RunStressChainScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                             const sim::BakedReactionTable& table) {
+        const auto runStress = [&] {
+            return RunStress(device, queue, ring, table);
+        };
+        const auto stress = Timed("たくさんの要求", runStress);
+        const auto stressAgain = [&] {
+            if constexpr (REPEAT_AND_MEASURE)
+                return Timed("たくさんの要求(2 回目)", runStress);
+            else
+                return stress;
+        }();
+
+        for (const auto* result : {&stress, &stressAgain}) {
+            if (*result)
+                continue;
+
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
+            return 1;
+        }
+
+        if (stress->digest != stressAgain->digest) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(たくさんの要求の 2 回の実行が食い違う)");
+            return 1;
+        }
+
+        Log(Channel::Gpu, Level::Info, "たくさんの要求: OK({} 刻みで GPU と CPU がビット一致。要約 {:016x})",
+            test::STRESS_TICKS, stress->digest);
+
+        return 0;
+    }
+
+    // 粗くすると入りきらない子・上限(溢れなし。伝導あり・なし)。通らなければ 1(--part chains-limits)
+    int RunLimitsChainScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring) {
+        const auto limitsTable = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        if (!limitsTable) {
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(上限の試験の表を作れない)");
+            return 1;
+        }
+
+        const auto coarsenFull = Timed("粗くすると入りきらない子",
+                                       [&] { return RunCoarsenFull(device, queue, ring, *limitsTable); });
+        const auto limitsStep = Timed("上限", [&] { return RunLimitsStep(device, queue, ring, *limitsTable, false); });
+        const auto limitsConduct = Timed("上限・伝導",
+                                         [&] { return RunLimitsStep(device, queue, ring, *limitsTable, true); });
+        for (const auto* result : {&coarsenFull, &limitsStep, &limitsConduct}) {
+            if (*result)
+                continue;
+
+            Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED ({})", result->error());
+            return 1;
+        }
+
+        Log(Channel::Gpu, Level::Info, "粗くすると入りきらない子・上限: OK(GPU と CPU がビット一致)");
+
+        return 0;
+    }
+
+    // 鎖の場面を全部(--part chains。3 つの組を続けて)
+    int RunChainScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                       const sim::BakedReactionTable& table) {
+        if (RunRealChainScenes(device, queue, ring, table) != 0)
+            return 1;
+
+        if (RunStressChainScenes(device, queue, ring, table) != 0)
+            return 1;
+
+        return RunLimitsChainScenes(device, queue, ring);
     }
 
     // 場面の結果を並べて見る(どれか 1 つでも失敗ならエラーを出して 1)
@@ -1549,10 +1601,13 @@ namespace {
         return 0;
     }
 
-    // どの場面を流すか(--part。ctest は 1 本を 10 分に収めるよう、鎖と溢れの 4 つの組に分ける。T-0263・T-0426)
+    // どの場面を流すか(--part。ctest は 1 本を 10 分に収めるよう、鎖の 3 つの組と溢れの 6 つの組に分ける。T-0263・T-0426)
     enum class Part : uint8_t {
         All,
         Chains,
+        ChainsReal,
+        ChainsStress,
+        ChainsLimits,
         Wide,
         WideLimits,
         WideOverflow,
@@ -1568,6 +1623,12 @@ namespace {
             return Part::All;
         if (text == "chains")
             return Part::Chains;
+        if (text == "chains-real")
+            return Part::ChainsReal;
+        if (text == "chains-stress")
+            return Part::ChainsStress;
+        if (text == "chains-limits")
+            return Part::ChainsLimits;
         if (text == "wide")
             return Part::Wide;
         if (text == "wide-limits")
@@ -1677,9 +1738,13 @@ namespace {
         return {};
     }
 
-    // 溢れの組を 1 つだけ流す(--part wide-limits など。All・Chains・Wide のときは何もしない)
-    int RunWidePart(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring, Part part) {
+    // 鎖か溢れの組を 1 つだけ流す(--part chains-real・wide-limits など。All・Chains・Wide のときは何もしない)
+    int RunOnePart(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                   const sim::BakedReactionTable& table, Part part) {
         switch (part) {
+            case Part::ChainsReal: return RunRealChainScenes(device, queue, ring, table);
+            case Part::ChainsStress: return RunStressChainScenes(device, queue, ring, table);
+            case Part::ChainsLimits: return RunLimitsChainScenes(device, queue, ring);
             case Part::WideLimits: return RunWideLimitsScenes(device, queue, ring);
             case Part::WideOverflow: return RunWideOverflowScenes(device, queue, ring);
             case Part::WideMany: return RunWideManyScene(device, queue, ring, false);
@@ -1742,7 +1807,7 @@ namespace {
         if (!options || !part) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_test [--warp] [--queue direct|compute] [--measure-wide] [--part "
-                "all|chains|wide|wide-<組>|coarsen] [--diagnose-wide <刻み/リスト> "
+                "all|chains|chains-<組>|wide|wide-<組>|coarsen] [--diagnose-wide <刻み/リスト> "
                 "[--diagnose-compare] [--diagnose-conduct] "
                 "[--diagnose-limits] [--diagnose-species <表の物質>]] [--repeat-wide <場面,...> <回数> "
                 "[--repeat-fresh-queue] [--repeat-fresh-ring]] "
@@ -1793,7 +1858,7 @@ namespace {
         if (wide && RunWideScenes(device->Get(), *queue, *ring) != 0)
             return 1;
 
-        if (RunWidePart(device->Get(), *queue, *ring, *part) != 0)
+        if (RunOnePart(device->Get(), *queue, *ring, *table, *part) != 0)
             return 1;
 
         if (!test::PassesValidation(*device, "gpu_multires_test"))
