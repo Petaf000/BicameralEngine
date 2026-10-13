@@ -42,11 +42,12 @@ namespace bicameral::editor {
     // パネルに出す 1 フレームの状態(フレームのループが詰める)
     // 反応表とホットリロード(T-0139。frame/table_hot_reload)
     struct ReactionTableStatus {
-        uint64_t version = 0;   // 世界が使っている表の版
-        uint32_t swaps = 0;     // 差し替えた回数
-        uint32_t failures = 0;  // 読み直せなかった回数
-        bool watching = false;  // ファイルを見ている(再生中は見ない)
-        bool waiting = false;   // 読めた表が刻みの境界を待っている(止めている間など)
+        uint64_t version = 0;       // 世界が使っている表の版
+        uint64_t worldVersion = 0;  // 世界を作った(刻み 0 の)表の版(違えば作り直すと初めのセル・物が替わる。T-0453)
+        uint32_t swaps = 0;         // 差し替えた回数
+        uint32_t failures = 0;      // 読み直せなかった回数
+        bool watching = false;      // ファイルを見ている(再生中は見ない)
+        bool waiting = false;       // 読めた表が刻みの境界を待っている(止めている間など)
         bool lastFailed = false;
         bool modifiedWorld = false;  // 「改造された世界」(プレイ中に法則が変わった・印付きの Mod。D-437・D-438)
         std::string message;         // 最後の読み直しの結果(誤りならファイル:行:列: 何が違うか)

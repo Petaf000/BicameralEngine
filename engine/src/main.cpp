@@ -59,9 +59,11 @@
 //   --auto-patch                     魔法のパッチのパネルで実験室に止めるパッチを置き、止めた反応が進まない・仮の世界に投げた
 //                                    パッチが足せた / 断られたで戻るかを確かめる(--editor と一緒に。T-0325)
 //   --auto-table-edit                反応表のパネルで --packages の写しの木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版で終える
+//                                    (--editor と一緒に。T-0219)
 //   --auto-mixer                     環境ミキサーで標準パッケージを全部足す → 当たる → 元素を外す(全部外れる)→ 初めの表で終える
 //                                    (--editor と一緒に。ブランクの世界で。T-0452)
-//                                    (--editor と一緒に。T-0219)
+//   --auto-rebuild                   環境ミキサーで空気で満たす(と依存)を足す → 当たる → 世界を作り直す → 作り直した世界が
+//                                    --mix で起動したのと同じ表で 60 刻み進んだら終える(--editor と一緒に。--record は作り直した所から。T-0453)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -358,6 +360,8 @@ namespace {
             loop.autoTableEdit = true;
         else if (argument == L"--auto-mixer")
             loop.autoMixer = true;
+        else if (argument == L"--auto-rebuild")
+            loop.autoRebuild = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
         else if (argument == L"--auto-patch")

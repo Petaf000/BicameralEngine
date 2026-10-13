@@ -511,6 +511,15 @@ set_tests_properties(window_mixer_record PROPERTIES LABELS gpu FIXTURES_SETUP wi
   PASS_REGULAR_EXPRESSION "--auto-mixer: 外して初めの表")
 set_tests_properties(window_mixer_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_mixer TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
+# 世界を作り直す(T-0453・ADR-0192): ブランクの世界に環境ミキサーで空気で満たす(と依存)を足す → 当たる → 「世界を作り直す」で
+# 今の表で刻み 0 から(--mix で起動したのと同じ表)→ 60 刻み。記録は作り直した所からで、別の起動の再生でハッシュ列が同じ
+set(WINDOW_REBUILD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_rebuild.bcreplay)
+add_test(NAME window_rebuild_record COMMAND bicameral --editor --auto-rebuild --frames 3000 --record ${WINDOW_REBUILD_FILE})
+add_test(NAME window_rebuild_play COMMAND bicameral --replay ${WINDOW_REBUILD_FILE} --target-fps 30)
+set_tests_properties(window_rebuild_record PROPERTIES LABELS gpu FIXTURES_SETUP window_rebuild TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-rebuild: 作り直した世界.*OK")
+set_tests_properties(window_rebuild_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_rebuild TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
          COMMAND bicameral --editor --frames 120

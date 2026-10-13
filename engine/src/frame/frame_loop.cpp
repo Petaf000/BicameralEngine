@@ -87,6 +87,8 @@ namespace bicameral::frame {
         constexpr uint32_t TRACE_KEY_RADIUS_CELLS = 8;  // 最後につついたセルの周り ±何セル
         constexpr uint64_t AUTO_TRACE_FRAME = 30;       // --auto-trace が T を押すフレーム
         constexpr uint64_t AUTO_PUSH_FRAME = 60;        // --auto-push が押すフレーム(T-0098)
+        constexpr uint64_t
+            AUTO_REBUILD_TICKS = 60;  // --auto-rebuild: 作り直した世界をこの刻みまで流してから確かめる(T-0453)
 
         // --auto-time(T-0023): 止める → 止まったかを確かめる → 1 刻みを 3 回 → 3 刻みだけ進んだかを確かめる → 速さを変えて動かす
         constexpr uint64_t AUTO_TIME_PAUSE_FRAME = 20;
@@ -236,14 +238,19 @@ namespace bicameral::frame {
             return options.world == save::ReplayWorld::Sample || !options.packageRoot.empty() || !options.mix.empty();
         }
 
-        // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
-        struct FrameLoopParts {
-            // --- 窓と GPU ---
+        // 窓と GPU(世界を作り直しても使い続ける。T-0453)
+        struct LoopDevice {
             std::unique_ptr<Window> window;
             gpu::Device device;
             gpu::Queue direct;
             gpu::Queue compute;
             gpu::SwapChain swapChain;
+        };
+
+        // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
+        struct FrameLoopParts {
+            LoopDevice loopDevice;
+            uint32_t rebuilds = 0;  // この世界の前に作り直した回数(RunFrameLoop が数える。T-0453)
 
             // --- シミュと表示 ---
             sim::ProbeSim simulation;
@@ -259,15 +266,26 @@ namespace bicameral::frame {
             std::vector<std::shared_ptr<const script::LoadedReactionTable>> replayTables;
         };
 
+        // 世界を作り直す依頼(T-0453・ADR-0192): 窓と GPU はそのまま、世界が使っていた表で刻み 0 から
+        // (環境ミキサーで足した一覧を --mix で起動したのと同じ世界)。表示とカメラは続ける
+        struct LoopRebuild {
+            LoopDevice loopDevice;
+            std::shared_ptr<const script::LoadedReactionTable> table;  // 作り直す世界の初めの表
+            std::vector<std::string> mix;                              // 次の世界の --mix
+            render::DebugViewSettings view;
+            render::OrbitCameraState camera;
+            uint64_t frames = 0;  // 作り直す前に描いたフレーム(--frames の残りを数える)
+        };
+
         class FrameLoop {
         public:
             FrameLoop(const FrameLoopOptions& options, FrameLoopParts&& parts)
                 : m_options(options),
-                  m_window(std::move(parts.window)),
-                  m_device(std::move(parts.device)),
-                  m_direct(std::move(parts.direct)),
-                  m_compute(std::move(parts.compute)),
-                  m_swapChain(std::move(parts.swapChain)),
+                  m_window(std::move(parts.loopDevice.window)),
+                  m_device(std::move(parts.loopDevice.device)),
+                  m_direct(std::move(parts.loopDevice.direct)),
+                  m_compute(std::move(parts.loopDevice.compute)),
+                  m_swapChain(std::move(parts.loopDevice.swapChain)),
                   m_sim(std::move(parts.simulation)),
                   m_peek(std::move(parts.peek)),
                   m_surface(std::move(parts.surface)),
@@ -298,6 +316,7 @@ namespace bicameral::frame {
 
                 // --record: どの世界の記録か(T-0371)
                 m_recorder.SetWorld(options.world);
+                m_rebuilds = parts.rebuilds;
 
                 // --check-physics: 窓と同じ場面の CPU の物理(重力は起動時の表の環境の値。T-0400)
                 const sim::BakedReactionTable& initialTable = m_tableReload.Find(m_tableReload.InitialVersion())->table;
@@ -312,6 +331,10 @@ namespace bicameral::frame {
             [[nodiscard]] bool CreateEditor();
             [[nodiscard]] bool CreateSavePoints();
             [[nodiscard]] int Run();
+
+            // 世界を作り直す依頼で終わった(T-0453)。窓と GPU と今の表を渡す(この後の FrameLoop は壊すだけ)
+            [[nodiscard]] bool RebuildRequested() const { return m_rebuildRequested; }
+            [[nodiscard]] LoopRebuild ReleaseForRebuild();
 
         private:
             // --- 描画 ---
@@ -352,11 +375,14 @@ namespace bicameral::frame {
             // --- フレームの流れ ---
             bool RunFrame(Clock::time_point frameStart);
             int Finish(bool failed, Clock::time_point start);
+            int FinishForRebuild(Clock::time_point start);
             [[nodiscard]] bool IsDeviceLost() const;
 
             // --- エディタと時間の操作(T-0023)---
             void BuildEditor();
             void ApplyMixRequest(const editor::MixRequest& request);
+            void RequestRebuild();
+            void CheckAutoRebuild();
             [[nodiscard]] bool SubmitEditor();
             void ApplyTimeRequest(const editor::TimeRequest& request);
             void CheckAutoTime();
@@ -474,6 +500,12 @@ namespace bicameral::frame {
             Stats m_lastInterval;  // 前の 1 秒(エディタの表示)
             double m_lastIntervalSeconds = 0.0;
             Stats m_total;  // 全体
+
+            // --- 世界を作り直す(T-0453)---
+            uint32_t m_rebuilds = 0;          // この世界の前に作り直した回数
+            bool m_rebuildRequested = false;  // 環境ミキサーの「世界を作り直す」(Run を終え、RunFrameLoop が作り直す)
+            bool m_autoRebuildDone = false;   // --auto-rebuild の後半(作り直した世界)を確かめた
+            bool m_autoRebuildFailed = false;
         };
 
         // --- 作る ---
@@ -626,29 +658,8 @@ namespace bicameral::frame {
             return WorldReactionTables{.initial = std::move(*loaded)};
         }
 
-        // options.world は再生ファイルの世界に直す(--replay のとき。T-0371)
-        std::expected<FrameLoopParts, std::string> CreateParts(FrameLoopOptions& options) {
-            // --- 再生ファイル(表の中身を持っていれば、パッケージより先に要る)と反応表 ---
-            std::vector<save::ReplayPlayer> replay;
-            if (!options.replayPath.empty()) {
-                auto player = save::ReplayPlayer::Load(options.replayPath);
-                if (!player)
-                    return std::unexpected(player.error());
-
-                options.world = player->File().world;
-                replay.push_back(std::move(*player));
-            }
-
-            Log(Channel::Sim, Level::Info, "世界: {}",
-                options.world == save::ReplayWorld::Sample ? "サンプルの世界(空気の中の木箱と積み木)"
-                                                           : "ブランクの世界(セルは全部空・物なし)");
-
-            auto reactionTables = LoadWorldReactionTables(options, replay.empty() ? nullptr : &replay.front().File());
-            if (!reactionTables)
-                return std::unexpected(reactionTables.error());
-
-            const std::shared_ptr<const script::LoadedReactionTable>& reactionTable = reactionTables->initial;
-
+        // 窓と GPU(世界を作り直しても使い続ける。T-0453)
+        std::expected<LoopDevice, std::string> CreateLoopDevice(const FrameLoopOptions& options) {
             auto window = CreateWindowForLoop();
             if (!window)
                 return std::unexpected(window.error());
@@ -675,11 +686,24 @@ namespace bicameral::frame {
             if (!swapChain)
                 return std::unexpected(swapChain.error());
 
-            auto simulation = CreateSimulation(native, options, reactionTable->table);
+            return LoopDevice{.window = std::move(*window),
+                              .device = std::move(*device),
+                              .direct = std::move(*direct),
+                              .compute = std::move(*compute),
+                              .swapChain = std::move(*swapChain)};
+        }
+
+        // 世界の部品(シミュ・覗き窓・面の印・描画)を窓と GPU の上に作る。初めのセルと物は表の世界の組み立てから
+        std::expected<FrameLoopParts, std::string> CreateWorldParts(const FrameLoopOptions& options,
+                                                                    LoopDevice&& loopDevice,
+                                                                    WorldReactionTables&& tables,
+                                                                    std::vector<save::ReplayPlayer>&& replay) {
+            ID3D12Device5* native = loopDevice.device.Get();
+            auto simulation = CreateSimulation(native, options, tables.initial->table);
             if (!simulation)
                 return std::unexpected(simulation.error());
 
-            auto peek = sim::ProbePeek::Create(native, reactionTable->table);
+            auto peek = sim::ProbePeek::Create(native, tables.initial->table);
             if (!peek)
                 return std::unexpected(peek.error());
 
@@ -691,18 +715,69 @@ namespace bicameral::frame {
             if (!view)
                 return std::unexpected(view.error());
 
-            return FrameLoopParts{.window = std::move(*window),
-                                  .device = std::move(*device),
-                                  .direct = std::move(*direct),
-                                  .compute = std::move(*compute),
-                                  .swapChain = std::move(*swapChain),
+            return FrameLoopParts{.loopDevice = std::move(loopDevice),
                                   .simulation = std::move(*simulation),
                                   .peek = std::move(*peek),
                                   .surface = std::move(*surface),
                                   .view = std::move(*view),
                                   .replay = std::move(replay),
-                                  .reactionTable = reactionTable,
-                                  .replayTables = std::move(reactionTables->swaps)};
+                                  .reactionTable = std::move(tables.initial),
+                                  .replayTables = std::move(tables.swaps)};
+        }
+
+        // options.world は再生ファイルの世界に直す(--replay のとき。T-0371)
+        std::expected<FrameLoopParts, std::string> CreateParts(FrameLoopOptions& options) {
+            // --- 再生ファイル(表の中身を持っていれば、パッケージより先に要る)と反応表 ---
+            std::vector<save::ReplayPlayer> replay;
+            if (!options.replayPath.empty()) {
+                auto player = save::ReplayPlayer::Load(options.replayPath);
+                if (!player)
+                    return std::unexpected(player.error());
+
+                options.world = player->File().world;
+                replay.push_back(std::move(*player));
+            }
+
+            Log(Channel::Sim, Level::Info, "世界: {}",
+                options.world == save::ReplayWorld::Sample ? "サンプルの世界(空気の中の木箱と積み木)"
+                                                           : "ブランクの世界(セルは全部空・物なし)");
+
+            auto reactionTables = LoadWorldReactionTables(options, replay.empty() ? nullptr : &replay.front().File());
+            if (!reactionTables)
+                return std::unexpected(reactionTables.error());
+
+            auto loopDevice = CreateLoopDevice(options);
+            if (!loopDevice)
+                return std::unexpected(loopDevice.error());
+
+            return CreateWorldParts(options, std::move(*loopDevice), std::move(*reactionTables), std::move(replay));
+        }
+
+        // 作り直す世界の起動の値と部品(T-0453): 足した一覧を --mix にし(パッケージのファイルもその一覧で見る)、
+        // 表示・カメラ・--frames の残りを続ける。表は読み直さず、世界が使っていた表で作る
+        std::expected<FrameLoopParts, std::string> CreateRebuiltParts(FrameLoopOptions& options, LoopRebuild&& rebuild,
+                                                                      uint32_t rebuilds) {
+            options.mix = std::move(rebuild.mix);
+            options.view = rebuild.view;
+            options.camera = rebuild.camera;
+            if (options.frameLimit > 0) {
+                const uint64_t left = options.frameLimit > rebuild.frames ? options.frameLimit - rebuild.frames : 1;
+                options.frameLimit = static_cast<uint32_t>(left);
+            }
+
+            std::string mix;
+            for (const std::string& name : options.mix)
+                mix += (mix.empty() ? "" : ",") + name;
+
+            Log(Channel::Sim, Level::Info, "世界を作り直した({} 回目。--mix {} で起動したのと同じ世界・表の版 {:016x})",
+                rebuilds, mix.empty() ? "なし" : mix, rebuild.table->tableVersion);
+
+            auto parts = CreateWorldParts(options, std::move(rebuild.loopDevice),
+                                          WorldReactionTables{.initial = std::move(rebuild.table)}, {});
+            if (parts)
+                parts->rebuilds = rebuilds;
+
+            return parts;
         }
 
         bool FrameLoop::CreateFrameSlots() {
@@ -1429,6 +1504,17 @@ namespace bicameral::frame {
                 m_editor->Mixer().StartAuto();
             }
 
+            // --auto-rebuild(T-0453): 前半は環境ミキサーが足して作り直しを頼み、後半は作り直した世界で CheckAutoRebuild が確かめる
+            if (m_options.autoRebuild) {
+                if (!m_options.replayPath.empty()) {
+                    Log(Channel::Tool, Level::Error, "--auto-rebuild は --replay とは使えない");
+                    return false;
+                }
+
+                if (m_rebuilds == 0)
+                    m_editor->Mixer().StartAutoRebuild();
+            }
+
             // --auto-table-edit(T-0219): 書き換えるのは --packages で渡した写しだけ
             if (m_options.autoTableEdit) {
                 if (!m_options.replayPath.empty() || m_options.packageRoot.empty()) {
@@ -1476,6 +1562,9 @@ namespace bicameral::frame {
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
                 if (const auto mix = m_editor->Mixer().TakeRequest())
                     ApplyMixRequest(*mix);
+
+                if (m_editor->Mixer().TakeRebuild())
+                    RequestRebuild();
             }
 
             if (m_options.autoTime) {
@@ -1504,6 +1593,68 @@ namespace bicameral::frame {
             source.addedPackages = request.folders;
             const bool applied = m_tableReload.ReplaceSource(std::move(source));
             m_editor->Mixer().Result(request, applied, m_tableReload.LastMessage());
+        }
+
+        // 環境ミキサーの「世界を作り直す」(T-0453・ADR-0192): 世界が今使っている表で刻み 0 から作り直す
+        // (足した一覧を --mix で起動したのと同じ世界)。次のフレームの初めに Run を終える。再生中は作り直さない
+        void FrameLoop::RequestRebuild() {
+            if (!m_replay.empty()) {
+                Log(Channel::Sim, Level::Warning, "再生中は世界を作り直せない(記録の世界を流す)");
+                return;
+            }
+
+            m_rebuildRequested = true;
+            Log(Channel::Sim, Level::Info, "世界を作り直す: 今の表(版 {:016x})で刻み 0 から{}",
+                m_tableReload.AppliedVersion(), m_options.recordPath.empty() ? "" : "。記録は作り直した所から");
+        }
+
+        // --auto-rebuild の後半(T-0453): 作り直した世界を AUTO_REBUILD_TICKS 刻み流してから、初めの表が「足した一覧を --mix で
+        // 起動した時の表」と同じ版で、初めのセルの領域(空気で満たす)を持つかを確かめる。世界の中身が同じことは記録の再生で見る
+        void FrameLoop::CheckAutoRebuild() {
+            if (m_rebuilds == 0 || m_autoRebuildDone || m_autoRebuildFailed ||
+                m_scheduler.Cursor().tick < AUTO_REBUILD_TICKS)
+                return;
+
+            const auto initial = m_tableReload.Find(m_tableReload.InitialVersion());
+            const auto fresh = LoadWorldReactionTable(m_options);
+            std::string failure;
+            if (!fresh)
+                failure = "--mix で表を読めない: " + fresh.error();
+            else if (initial == nullptr || (*fresh)->tableVersion != initial->tableVersion)
+                failure = "作り直した世界の表が --mix で起動した時の表と違う";
+            else if (initial->table.worldLayout.cellRegions.empty())
+                failure = "作り直した世界の表に初めのセルの領域が無い";
+
+            m_autoRebuildFailed = !failure.empty();
+            m_autoRebuildDone = failure.empty();
+            if (m_autoRebuildFailed) {
+                Log(Channel::Tool, Level::Error, "--auto-rebuild: {}", failure);
+                return;
+            }
+
+            Log(Channel::Tool, Level::Info,
+                "--auto-rebuild: 作り直した世界(作り直し {} 回)は --mix で起動したのと同じ表(版 "
+                "{:016x}・初めのセルの領域 "
+                "{})で刻み {} まで進んだ。OK",
+                m_rebuilds, initial->tableVersion, initial->table.worldLayout.cellRegions.size(),
+                m_scheduler.Cursor().tick);
+        }
+
+        // 作り直す依頼で終えた FrameLoop から、窓と GPU と今の表を取り出す(エディタは窓と GPU があるうちに閉じる)
+        LoopRebuild FrameLoop::ReleaseForRebuild() {
+            std::vector<std::string> mix = m_editor ? m_editor->Mixer().Mix() : m_options.mix;
+            m_editor.reset();
+
+            return LoopRebuild{.loopDevice = {.window = std::move(m_window),
+                                              .device = std::move(m_device),
+                                              .direct = std::move(m_direct),
+                                              .compute = std::move(m_compute),
+                                              .swapChain = std::move(m_swapChain)},
+                               .table = m_tableReload.Find(m_tableReload.AppliedVersion()),
+                               .mix = std::move(mix),
+                               .view = m_viewController.Settings(),
+                               .camera = m_viewController.Camera().State(),
+                               .frames = m_frameNumber};
         }
 
         bool FrameLoop::SubmitEditor() {
@@ -1581,6 +1732,7 @@ namespace bicameral::frame {
                     .rewindUnavailable = RewindUnavailableReason(),
                     .graph = MakeGraphPanelStatus(),
                     .reactionTable = {.version = m_tableReload.AppliedVersion(),
+                                      .worldVersion = m_tableReload.InitialVersion(),
                                       .swaps = m_tableReload.AppliedCount(),
                                       .failures = m_tableReload.FailedCount(),
                                       .watching = m_tableReload.Watching(),
@@ -2066,6 +2218,17 @@ namespace bicameral::frame {
                 if (m_options.autoMixer && m_editor && m_editor->Mixer().AutoFinished())
                     break;
 
+                // 環境ミキサーの「世界を作り直す」(T-0453): この世界を終え、RunFrameLoop が今の表で作り直す
+                if (m_rebuildRequested)
+                    return FinishForRebuild(start);
+
+                // --auto-rebuild: 作り直す前に失敗した・作り直した世界を確かめた
+                if (m_options.autoRebuild) {
+                    CheckAutoRebuild();
+                    if (m_autoRebuildDone || m_autoRebuildFailed || (m_editor && m_editor->Mixer().AutoFailed()))
+                        break;
+                }
+
                 // 最後のハッシュまで確かめた(--screenshot-tick なら写すまで続ける)
                 if (!m_replay.empty() && m_replay.front().Finished() && !m_options.screenshotTick)
                     break;
@@ -2098,6 +2261,21 @@ namespace bicameral::frame {
             }
 
             return Finish(false, start);
+        }
+
+        // 世界を作り直す前の終わり(T-0453): GPU を待って残りを読み、要約を出す。記録は書かない(記録は作り直した所から。
+        // 検査の失敗〔debug layer など〕は最後の世界の Finish が数える)
+        int FrameLoop::FinishForRebuild(Clock::time_point start) {
+            if (IsDeviceLost())
+                return Finish(true, start);
+
+            m_direct.Flush();
+            m_compute.Flush();
+            CollectSimSubmissions();
+            AddStats(m_interval);
+            LogStats(m_total, Clock::now() - start, "作り直す前の世界");
+
+            return FinishTrace() ? 0 : 1;
         }
 
         // 終わり: GPU を待って残りを読み、全体の要約を出す
@@ -2181,6 +2359,14 @@ namespace bicameral::frame {
             if (m_options.autoMixer && (!m_editor || !m_editor->Mixer().AutoDone())) {
                 Log(Channel::Tool, Level::Error, "--auto-mixer: 環境ミキサーの確かめが通らなかった({})",
                     m_editor ? m_editor->Mixer().AutoFailure() : "--editor が要る");
+                return 1;
+            }
+
+            if (m_options.autoRebuild && !m_autoRebuildDone) {
+                Log(Channel::Tool, Level::Error, "--auto-rebuild: 世界を作り直す確かめが通らなかった({})",
+                    m_rebuilds > 0
+                        ? "作り直した世界"
+                        : "作り直す前に終わった: " + (m_editor ? m_editor->Mixer().AutoFailure() : "--editor が要る"));
                 return 1;
             }
 
@@ -2332,24 +2518,44 @@ namespace bicameral::frame {
 
     }  // namespace
 
+    namespace {
+
+        // 1 つの世界を窓で動かす。世界を作り直す依頼で終わったら、rebuild に窓と GPU と今の表を入れる(T-0453)
+        int RunWorld(const FrameLoopOptions& options, FrameLoopParts&& parts, std::vector<LoopRebuild>& rebuild) {
+            FrameLoop loop(options, std::move(parts));
+            if (!loop.CreateFrameSlots()) {
+                Log(Channel::Gpu, Level::Error, "描画のフレームの枠を作れない");
+                return 1;
+            }
+
+            if (!loop.CreateEditor() || !loop.CreateSavePoints())
+                return 1;
+
+            const int result = loop.Run();
+            if (result == 0 && loop.RebuildRequested())
+                rebuild.push_back(loop.ReleaseForRebuild());
+
+            return result;
+        }
+
+    }  // namespace
+
     int RunFrameLoop(const FrameLoopOptions& requested) {
         FrameLoopOptions options = requested;  // 世界の種類は再生ファイルで決まることがある
         auto parts = CreateParts(options);
-        if (!parts) {
-            Log(Channel::Core, Level::Error, "フレームのループを始められない: {}", parts.error());
-            return 1;
+        for (uint32_t rebuilds = 1;; ++rebuilds) {
+            if (!parts) {
+                Log(Channel::Core, Level::Error, "フレームのループを始められない: {}", parts.error());
+                return 1;
+            }
+
+            std::vector<LoopRebuild> rebuild;  // 作り直す依頼で終わったら 1 つ(std::optional は tidy の警告が多い)
+            const int result = RunWorld(options, std::move(*parts), rebuild);
+            if (rebuild.empty())
+                return result;
+
+            parts = CreateRebuiltParts(options, std::move(rebuild.front()), rebuilds);
         }
-
-        FrameLoop loop(options, std::move(*parts));
-        if (!loop.CreateFrameSlots()) {
-            Log(Channel::Gpu, Level::Error, "描画のフレームの枠を作れない");
-            return 1;
-        }
-
-        if (!loop.CreateEditor() || !loop.CreateSavePoints())
-            return 1;
-
-        return loop.Run();
     }
 
 }  // namespace bicameral::frame
