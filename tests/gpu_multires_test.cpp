@@ -8,6 +8,7 @@
 // 引数は gpu_test_options.h と --part all|chains|chains-<組>|wide|wide-<組>(組は RunRealChainScenes・RunWideScenes の上)・
 // --measure-wide(計測だけ)。ctest の HW は鎖の 3 つの組と溢れの 6 つの組の 9 本、WARP は鎖(chains)と溢れ(wide)の 2 本
 // (1 本を GPU の順番待ちに合う 10 分に収める。T-0263・T-0426)。
+// 場面ごとに作る GpuMultires のパイプラインは 1 つのプロセスの中で使い回す(T-0427。--no-pipeline-cache で毎回作る)。
 #include "sim/gpu_multires.h"
 
 #include <optional>
@@ -46,6 +47,18 @@ namespace {
 #else
     constexpr bool REPEAT_AND_MEASURE = false;
 #endif
+
+    // 場面ごとに作る GpuMultires のパイプラインと Work Graph のプログラムを使い回す置き場(T-0427。--no-pipeline-cache で毎回作る)。
+    // ドライバのシェーダーのキャッシュに当たらない時、作るのに debug で 1 場面 約 60 秒かかっていた。使い回すのはコンパイルの結果
+    // だけで、バッファ・裏のメモリ・状態は場面ごとに新しく作るので、CPU リファレンスとの比べ方は変わらない
+    gpu::PipelineCache* s_pipelineCache = nullptr;
+
+    std::expected<sim::GpuMultires, std::string> CreateGpu(ID3D12Device5* device, const sim::BakedReactionTable& table,
+                                                           const sim::MultiresCapacity& capacity,
+                                                           sim::GpuMultiresOptions options = {}) {
+        options.pipelineCache = s_pipelineCache;
+        return sim::GpuMultires::Create(device, table, capacity, options);
+    }
 
     struct RunResult {
         uint64_t digest = 0;
@@ -168,7 +181,7 @@ namespace {
                                                       gpu::DebugRing& ring, const sim::BakedReactionTable& table,
                                                       test::MultiresScenario scenario) {
         sim::MultiresNest cpu = test::MakeMultiresNestForTest(table);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity);
+        auto gpu = CreateGpu(device, table, cpu.capacity);
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -195,7 +208,7 @@ namespace {
     std::expected<RunResult, std::string> RunCoarsenFull(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity);
+        auto gpu = CreateGpu(device, table, cpu.capacity);
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -233,7 +246,7 @@ namespace {
                                                         gpu::DebugRing& ring, const sim::BakedReactionTable& table,
                                                         bool conduction) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity);
+        auto gpu = CreateGpu(device, table, cpu.capacity);
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -290,7 +303,7 @@ namespace {
                                                             bool conduction) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -362,7 +375,7 @@ namespace {
                                                         gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table, 0, REFINE_WIDE_WORLD_BLOCKS);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -469,7 +482,7 @@ namespace {
         if (cpu.counters[MR_COUNTER_COARSEN_FULL] != 0 || coarsenedFraction <= RX_MAX_CELL_SPECIES)
             return std::unexpected("溢れの端数: 豊かな子を粗くしていない・端数に溢れが無い(場面が試していない)");
 
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -530,7 +543,7 @@ namespace {
                                                               const sim::BakedReactionTable& table) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         uint64_t frequency = 0;
         if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
             return std::unexpected(gpu ? std::string("タイムスタンプの周波数を読めない") : gpu.error());
@@ -644,7 +657,7 @@ namespace {
         sim::PlaceRootBlock(cpu, test::WIDE_OVERFLOW_UNIFORM_X, 0, 0, empty);
         sim::StoreWideUniform(cpu, wideSlot, value);
 
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -699,7 +712,7 @@ namespace {
         sim::PlaceRootBlock(cpu, test::WIDE_OVERFLOW_UNIFORM_X, 0, 0, empty);
         sim::StoreWideUniform(cpu, wideSlot, value);
 
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -826,7 +839,7 @@ namespace {
                                                                 const sim::BakedReactionTable& table) {
         sim::MultiresNest cpu = test::MakeCoarsenFullNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, {.wideCells = true});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -895,7 +908,7 @@ namespace {
         sim::MultiresNest cpu = many ? test::MakeWideOverflowNest(table, test::WideManyName)
                                      : test::MakeWideOverflowNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(
+        auto gpu = CreateGpu(
             device, table, cpu.capacity,
             {.wideCells = true, .wideChunks = many ? WideManyChunks(cpu, WIDE_SCENE_MANY_SPECIES) : 0});
         if (!gpu)
@@ -961,8 +974,7 @@ namespace {
         constexpr uint32_t SMALL_CHUNKS = 8;  // 1 頁の溢れが 1536 成分になると、1 頁の 2 面(6 塊ずつ)も入らない
         sim::MultiresNest cpu = test::MakeWideOverflowNest(table);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
-                                            {.wideCells = true, .wideChunks = SMALL_CHUNKS});
+        auto gpu = CreateGpu(device, table, cpu.capacity, {.wideCells = true, .wideChunks = SMALL_CHUNKS});
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -994,7 +1006,7 @@ namespace {
     std::expected<RunResult, std::string> RunStress(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
         sim::MultiresNest cpu = test::MakeStressNest(table);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity);
+        auto gpu = CreateGpu(device, table, cpu.capacity);
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -1076,7 +1088,7 @@ namespace {
                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table,
                                                          test::MultiresScenario scenario) {
         const sim::MultiresNest initial = test::MakeMultiresNestForTest(table);
-        auto gpu = sim::GpuMultires::Create(device, table, initial.capacity);
+        auto gpu = CreateGpu(device, table, initial.capacity);
         ID3D12GraphicsCommandList10* list = gpu ? queue.Begin() : nullptr;
         if (list == nullptr)
             return std::unexpected("計測の準備ができない");
@@ -1133,10 +1145,10 @@ namespace {
         if (wide)
             sim::EnableWideCells(nest);
 
-        auto gpu = sim::GpuMultires::Create(device, table, nest.capacity,
-                                            {.wideCells = wide,
-                                             .wideChunks = many ? WideManyChunks(nest, manySpecies) : 0,
-                                             .wideSpaceGroups = spaceGroups});
+        auto gpu = CreateGpu(device, table, nest.capacity,
+                             {.wideCells = wide,
+                              .wideChunks = many ? WideManyChunks(nest, manySpecies) : 0,
+                              .wideSpaceGroups = spaceGroups});
         uint64_t frequency = 0;
         if (!gpu || FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
             return std::unexpected("計測の準備ができない");
@@ -1682,10 +1694,10 @@ namespace {
                                                   const DiagnoseOptions& diagnose) {
         sim::MultiresNest cpu = diagnose.limits ? test::MakeCoarsenFullNest(table) : test::MakeMeasureNest(table, true);
         sim::EnableWideCells(cpu);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
-                                            {.wideCells = true,
-                                             .wideChunks = diagnose.limits ? 0 : WideManyChunks(cpu, diagnose.species),
-                                             .wideSpaceGroups = diagnose.spaceGroups});
+        auto gpu = CreateGpu(device, table, cpu.capacity,
+                             {.wideCells = true,
+                              .wideChunks = diagnose.limits ? 0 : WideManyChunks(cpu, diagnose.species),
+                              .wideSpaceGroups = diagnose.spaceGroups});
         const uint64_t ticks = diagnose.limits ? test::LIMITS_STEP_TICKS : DIAGNOSE_TICKS;
         const uint64_t worldSeed = diagnose.limits ? test::LIMITS_STEP_SEED : test::WIDE_OVERFLOW_SEED;
         uint64_t frequency = 0;
@@ -1766,10 +1778,13 @@ namespace {
         std::string_view repeatScene;
         uint32_t repeatCount = 0;
         RepeatOptions repeat;
+        bool usePipelineCache = true;
         for (size_t index = 0; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
             if (argument == "--measure-wide")
                 measureWide = true;
+            else if (argument == "--no-pipeline-cache")
+                usePipelineCache = false;
             else if (argument == "--wide-stamps")
                 s_wideStageTimestamps = true;
             else if (argument == "--repeat-fresh-queue")
@@ -1811,7 +1826,7 @@ namespace {
                 "[--diagnose-compare] [--diagnose-conduct] "
                 "[--diagnose-limits] [--diagnose-species <表の物質>]] [--repeat-wide <場面,...> <回数> "
                 "[--repeat-fresh-queue] [--repeat-fresh-ring]] "
-                "[--wide-stamps] [--wide-space-groups <グループ>] [--measure-big-only]");
+                "[--wide-stamps] [--wide-space-groups <グループ>] [--measure-big-only] [--no-pipeline-cache]");
             return 2;
         }
 
@@ -1830,6 +1845,10 @@ namespace {
             Log(Channel::Gpu, Level::Error, "gpu_multires_test: FAILED(キューかデバッグのリングを作れない)");
             return 1;
         }
+
+        // デバイスより後に作る(先に消える。持っているパイプラインがデバイスを参照する)
+        gpu::PipelineCache pipelineCache;
+        s_pipelineCache = usePipelineCache ? &pipelineCache : nullptr;
 
         if (measureWide)
             return RunMeasureWide(device->Get(), *queue, *ring, measure);
@@ -1864,6 +1883,8 @@ namespace {
         if (!test::PassesValidation(*device, "gpu_multires_test"))
             return 1;
 
+        Log(Channel::Gpu, Level::Info, "パイプラインの使い回し: {}(使い回した {} 回・作った {} 回)",
+            usePipelineCache ? "あり" : "なし", pipelineCache.HitCount(), pipelineCache.MissCount());
         Log(Channel::Gpu, Level::Info, "gpu_multires_test: OK");
 
         return 0;
