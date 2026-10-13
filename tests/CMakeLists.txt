@@ -69,6 +69,13 @@ target_compile_definitions(environment_package_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(environment_package_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME environment_package COMMAND environment_package_test)
+add_executable(standard_packages_test standard_packages_test.cpp)  # 標準パッケージと環境ミキサーの足す一覧(T-0373・ADR-0182・ADR-0183)
+target_link_libraries(standard_packages_test PRIVATE bicameral_reaction_script bicameral_core)
+target_compile_definitions(standard_packages_test PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages"
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard")
+add_dependencies(standard_packages_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME standard_packages COMMAND standard_packages_test)
 add_executable(reaction_hot_reload_test reaction_hot_reload_test.cpp)  # 反応表のホットリロード(T-0139)
 target_link_libraries(reaction_hot_reload_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(reaction_hot_reload_test PRIVATE
@@ -479,6 +486,21 @@ set_tests_properties(window_blank_record PROPERTIES LABELS gpu FIXTURES_SETUP wi
   PASS_REGULAR_EXPRESSION "世界: ブランクの世界")
 set_tests_properties(window_blank_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_blank TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
+# 環境ミキサー(T-0452・D-457): ブランクの世界に標準パッケージ(data/standard)を全部足す → 次の刻みの境界で当たる → 元素を外す
+# (依存するものも外れる)→ 初めの表に戻る。記録して、別の起動の再生でハッシュ列と表の差し替えが同じ(再生は棚なしで表を作る)
+set(WINDOW_MIXER_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_mixer.bcreplay)
+add_test(NAME window_mixer_record COMMAND bicameral --editor --auto-mixer --frames 3000 --record ${WINDOW_MIXER_FILE})
+add_test(NAME window_mixer_play COMMAND bicameral --replay ${WINDOW_MIXER_FILE} --target-fps 30)
+set_tests_properties(window_mixer_record PROPERTIES LABELS gpu FIXTURES_SETUP window_mixer TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-mixer: 外して初めの表")
+set_tests_properties(window_mixer_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_mixer TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK")
+# 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
+add_test(NAME window_mix_start
+         COMMAND bicameral --editor --frames 120
+                 --mix real_elements,real_matter,real_reactions,earth_environment,earth_air)
+set_tests_properties(window_mix_start PROPERTIES LABELS gpu TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "反応表: パッケージ .*earth_air")
 # ブランクの世界の刻み 0 の保存点(T-0411): 再生しながら刻み 0 と 40 で写し、刻み 0 へ戻して再生し直しても記録と同じハッシュ列
 add_test(NAME window_blank_rewind
          COMMAND bicameral --replay ${WINDOW_BLANK_FILE} --editor --auto-rewind --save-interval 40)

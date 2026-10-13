@@ -13,6 +13,7 @@
 -- --- マニフェスト(package.luau が返す表。ADR-0031 の 1)---
 export type PackageManifest = {
     format: number, -- この版が読める形は 1
+    title: string?, -- 人に見せる名前(環境ミキサーの一覧。T-0373)
     depends: { string }?, -- 依存するパッケージの名前
     entry: string?, -- 表を返すファイル(既定 "init")
 }
@@ -98,6 +99,8 @@ export type EditorDefaults = {
 export type Environment = {
     gravity_um_per_s2: number?, -- 重力の強さ(µm/s²。地球 9806650)
     sound_speed_mm_per_s: number?, -- 気体の音速の基準(mm/s。D-440 の本物の音速 340000)
+    atmosphere_temperature_mk: number?, -- 基準の大気の温度(mK。T-0373。atmosphere を書いたら要る)
+    atmosphere_surface_pressure_pa: number?, -- 基準の大気の地面の圧力(Pa。atmosphere を書いたら要る)
 }
 
 -- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。反応表のほかの分類(UI の文字列など)は形を決めていない ---
@@ -111,5 +114,6 @@ export type PackageEntry = {
     view_quantities: ViewQuantities?,
     editor_defaults: EditorDefaults?,
     environment: Environment?,
+    atmosphere: { [string]: number }?, -- 基準の大気の成分(物質 → ppm。足して 1000000。T-0373)
     [string]: any,
 }

@@ -48,6 +48,7 @@ add_library(bicameral_reaction STATIC
   src/sim/species_remap.cpp  # 物質を足す・消す表の差し替えの付け替え(T-0223・ADR-0065)
   src/sim/world_layout.cpp  # 世界の組み立て(初めのセル・物。パッケージの world_cells・world_bodies。T-0398)
   src/sim/material_templates.cpp  # 材料のひな形・抽出の物質・既定(同じ読み込みの分類。T-0399)
+  src/sim/world_atmosphere.cpp  # 基準の大気(分類 atmosphere と environment の大気の値。T-0373・ADR-0182)
 )
 target_include_directories(bicameral_reaction PUBLIC src)
 target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
@@ -145,6 +146,7 @@ add_library(bicameral_reaction_script STATIC
   src/script/world_layout_package.cpp  # 世界の組み立ての分類を読む(T-0398)
   src/script/material_templates_package.cpp  # 分類 material_templates・view_quantities・editor_defaults(T-0399)
   src/script/environment_package.cpp  # 世界の環境の値(分類 environment → sim::WorldPhysics。T-0400・ADR-0176)
+  src/script/standard_packages.cpp  # 標準パッケージの棚と、環境ミキサーで足す一覧(T-0373・ADR-0183)
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
 target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)
@@ -185,6 +187,7 @@ add_executable(bicameral
   src/editor/graph_panel.cpp
   src/editor/lab_panel.cpp
   src/editor/material_rows.cpp
+  src/editor/mixer_panel.cpp  # 環境ミキサー(標準パッケージを世界に足す・外す。T-0452・D-457)
   src/editor/reaction_table_panel.cpp
   src/frame/auto_reload.cpp
   src/frame/frame_loop.cpp

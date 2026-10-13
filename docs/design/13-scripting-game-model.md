@@ -128,6 +128,13 @@ Luau は CPU で動く。GPU の世界に効くものは「表にベイクして
   書かない値は 0 = ブランク)。`script::ReadWorldEnvironment` → ベイクした表の `environment`(`sim::WorldPhysics`)→ 物理の重力・気体の設定。
   反応表と同じ読み込みなので表の版・再生ファイルの表の中身に入る。サンプルの世界は `combustion_test/environment.luau`(地球の値)。
   基準の大気(成分・温度・地面の圧力)は大気の成分と一緒に T-0373 で足す。
+- **基準の大気(T-0373・ADR-0182)**: 成分は分類 `atmosphere`(物質 → ppm。足して 1000000)、温度と地面の圧力は `environment` の
+  `atmosphere_temperature_mk`・`atmosphere_surface_pressure_pa`。`script::ReadWorldAtmosphere` → `sim::BakeWorldAtmosphere`(知らない物質・
+  合計・温度と圧力の有無を検査)→ ベイクした表の `atmosphere`。気体を世界に載せる段(T-0210)が層の基準に使う。
+- **標準パッケージ(T-0373・ADR-0183)**: `data/standard` の棚(real_elements・real_matter・real_reactions・earth_environment・earth_air)。
+  値は現実のまま(熱伝導率に試験の倍率を掛けない)。足すのは環境ミキサー(14 §2)か `--mix`。読み方は `ReactionTableSource::addedPackages`
+  (と、ブランクの世界で元のフォルダを読まない `readPackageRoot = false`)。サンプルの世界 combustion_test とは並べる(仮。ADR-0183 の案 A)。
+  地球の重力・音速の基準の値はエンジンから出し(`sim::StandardWorldPhysics` を消した)、試験の写しは tests/standard_world_physics.h。
 
 ## 3. 進行(Model)
 - 進行の状態 = GPU の小さなバッファ: フラグ(ビット列)・カウンタ(int32)・発見の記録(何を・いつ・どこで)。

@@ -366,6 +366,12 @@ namespace bicameral::script {
 
         definition.environment = *environment;
 
+        auto atmosphere = ReadWorldAtmosphere(packages);
+        if (!atmosphere)
+            return std::unexpected(atmosphere.error());
+
+        definition.atmosphere = std::move(*atmosphere);
+
         return definition;
     }
 

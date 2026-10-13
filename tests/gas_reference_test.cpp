@@ -18,6 +18,7 @@
 
 #include "sim/gas_reference.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 namespace {
 
@@ -118,7 +119,7 @@ namespace {
     }
 
     // --- 閉じた箱: 成分・エネルギーは一定、運動量は初め + 帳簿 ---
-    GasBox MakeDisturbedClosedBox(uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+    GasBox MakeDisturbedClosedBox(uint32_t gravity = STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
         GasBox box = MakeAirBox(WithGravity(MakeAirConfig(8, 8, 8), gravity));
         Heat(box, box.Index(3, 3, 1), AIR_TEMPERATURE + 50000);
         Heat(box, box.Index(4, 3, 1), AIR_TEMPERATURE + 50000);
@@ -817,7 +818,7 @@ namespace {
         const int64_t moonDrop = LayerPressureDrop(WithGravity(earth, MOON_GRAVITY));
         const int64_t zeroDrop = LayerPressureDrop(WithGravity(earth, 0));
         const double ratio = (double)moonDrop / (double)earthDrop;
-        const double gravityRatio = (double)MOON_GRAVITY / (double)fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
+        const double gravityRatio = (double)MOON_GRAVITY / (double)STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
         std::printf(
             "layer pressure drop: earth %lld uPa, moon %lld uPa (ratio %.5f, gravity ratio %.5f), zero %lld uPa\n",
             (long long)earthDrop, (long long)moonDrop, ratio, gravityRatio, (long long)zeroDrop);

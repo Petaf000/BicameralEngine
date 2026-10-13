@@ -98,6 +98,9 @@ namespace bicameral::frame {
         // 反応表のパネルで木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版に戻って終える(--auto-table-edit。--editor と
         // --packages の写しと一緒に。editor/reaction_table_panel。T-0219)
         bool autoTableEdit = false;
+        // 環境ミキサーで標準パッケージを全部足す → 当たる → 元素を外す → 初めの表に戻って終える(--auto-mixer。--editor と
+        // ブランクの世界で。editor/mixer_panel。T-0452)
+        bool autoMixer = false;
         // 筆で木を置く・木炭を足す・格子からはみ出す・当たらない値を投げ、木に火を付ける。当たるはずの置くコマンドが全部 GPU で
         // 当たったかを確かめる(--auto-place。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0222)
         bool autoPlace = false;
@@ -118,6 +121,9 @@ namespace bicameral::frame {
         // 反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。--packages)。サンプルの世界は空なら exe の横の data/packages
         // (ゲーム本体 = combustion_test)。ブランクの世界は空なら何も読まない(空の表)、渡せばゲーム本体なしで全部を読む
         fs::path packageRoot;
+        // 足す標準パッケージ(--mix・環境ミキサー。exe の横の data/standard の名前。依存も書く。T-0373・ADR-0183)。
+        // 世界の表は packageRoot のもの(ブランクで --packages が無ければ無し)にこれを足して読む
+        std::vector<std::string> mix;
 
         // --- 表示と GPU ---
         render::DebugViewSettings view;   // 最初のデバッグ表示(T-0015)

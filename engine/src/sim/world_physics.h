@@ -1,7 +1,8 @@
 // world_physics.h — 世界ごとに違ってよい物理の値(世界のデータ = 環境の値。ADR-0171・ADR-0176・D-480)を 1 つにまとめ、物理と気体の設定へ渡す。
-// 器(エンジン)の既定は 0 = ブランクの世界(D-455: 何かを足すまで物も気体も重さを持たず、気体の音速の基準も無い)。標準の値(地球)は
-// StandardWorldPhysics() にあり、標準の値で書いた試験の場面が明示して渡す(標準パッケージ T-0373 が渡すようになるまでの置き場所)。
+// 器(エンジン)の既定は 0 = ブランクの世界(D-455: 何かを足すまで物も気体も重さを持たず、気体の音速の基準も無い)。地球の値は
+// 標準パッケージ data/standard/earth_environment にある(環境ミキサーで足す。T-0373。エンジンは中身を持たない D-454)。
 // 世界のパッケージは分類 environment に書き、script::ReadWorldEnvironment がこれに読む(script/environment_package.h。T-0400)。
+// 地球の値で書いた試験の場面は tests/standard_world_physics.h の写しを使う(standard_packages_test がパッケージと同じか確かめる)。
 // 重力の単位・上限・換算は shaders/common/world_physics.hlsli(CPU と GPU が同じ換算を通る)。音速の基準は CPU で係数にするだけなので、
 // 単位と上限(安定の条件)は gas_reference.h の GasSoundSpeedLimitMmPerS。
 //
@@ -27,16 +28,6 @@ namespace bicameral::sim {
         // 0 = 無い(ブランクの世界。気体を使う世界は環境で渡す)。上限は気体の小刻みの数で決まる(GasSoundSpeedLimitMmPerS)
         uint32_t soundSpeedMillimetersPerSecond = 0;
     };
-
-    // 標準の音速の基準 340 m/s(D-440: 本物の音速。地面の近くの空気)。標準パッケージ(T-0373)が渡すまでの置き場所
-    inline constexpr uint32_t STANDARD_SOUND_SPEED_MILLIMETERS_PER_SECOND = 340000;
-
-    // 標準の値(地球の重力 9.80665 m/s²・音速の基準 340 m/s)。標準の値で書いた試験の場面が使う。
-    // サンプルの世界のパッケージの environment も同じ値(environment_package_test が確かめる)
-    [[nodiscard]] constexpr WorldPhysics StandardWorldPhysics() {
-        return {.gravityMicrometersPerSecond2 = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2,
-                .soundSpeedMillimetersPerSecond = STANDARD_SOUND_SPEED_MILLIMETERS_PER_SECOND};
-    }
 
     // --- 各サブシステムの設定へ渡す ---
 

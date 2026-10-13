@@ -24,8 +24,8 @@ namespace bicameral::frame {
           m_appliedVersion(initial->tableVersion),
           m_worldModified(initial->modifiedWorld) {
         Remember(initial);
-        if (watch)
-            m_reload.emplace(std::move(source), std::move(initial), policy);
+        m_reload.emplace(std::move(source), std::move(initial), policy);
+        m_watchFiles = watch;
     }
 
     void TableHotReload::Remember(const std::shared_ptr<const script::LoadedReactionTable>& table) {
@@ -39,20 +39,39 @@ namespace bicameral::frame {
     }
 
     void TableHotReload::Poll(uint64_t frameNumber) {
-        if (!m_reload || frameNumber % POLL_INTERVAL_FRAMES != 0)
+        if (!m_watchFiles || frameNumber % POLL_INTERVAL_FRAMES != 0)
             return;
 
-        script::HotReloadResult result = m_reload->Poll();
+        (void)Accept(m_reload->Poll());
+    }
+
+    bool TableHotReload::ReplaceSource(script::ReactionTableSource source) {
+        script::HotReloadResult result = m_reload->Replace(std::move(source));
+        if (result.state == script::HotReloadState::Unchanged) {
+            m_lastFailed = false;
+            m_lastMessage = "同じ法則の表(版が同じ)なので当てない";
+            return true;
+        }
+
+        if (!Accept(std::move(result)))
+            return false;
+
+        m_watchFiles = true;  // 足したパッケージのファイルも見る
+
+        return true;
+    }
+
+    bool TableHotReload::Accept(script::HotReloadResult result) {
         if (result.state == script::HotReloadState::Failed) {
             ++m_failedCount;
             m_lastFailed = true;
             m_lastMessage = std::move(result.message);
             Log(Channel::Sim, Level::Warning, "反応表を読み直せなかった(今の表のまま): {}", m_lastMessage);
-            return;
+            return false;
         }
 
         if (result.state != script::HotReloadState::Reloaded)
-            return;
+            return true;
 
         // プレイ中に法則が変わった世界は「改造された世界」(D-437・D-438)。読み直した表に印を付けて当てる(記録の表にも残る)。
         // 起動時と同じ中身に戻した表は版が同じなので、記録には起動時の表(印なし)が残る(世界の印は WorldModified に残る)
@@ -65,6 +84,8 @@ namespace bicameral::frame {
                                     m_waiting->tableVersion, m_waiting->table.species.size() - 1,
                                     m_waiting->table.rules.size(), result.message.empty() ? "" : "。", result.message);
         Log(Channel::Sim, Level::Info, "反応表を読み直した: {}", m_lastMessage);
+
+        return true;
     }
 
     std::expected<void, std::string> TableHotReload::ScheduleReplayed(std::span<const sim::ProbeCommand> commands) {

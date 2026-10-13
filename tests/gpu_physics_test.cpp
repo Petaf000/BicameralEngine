@@ -19,6 +19,7 @@
 #include "sim/physics_scene.h"
 #include "sim/physics_world.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::physics;

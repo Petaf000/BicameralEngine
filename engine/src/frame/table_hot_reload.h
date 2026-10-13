@@ -45,6 +45,12 @@ namespace bicameral::frame {
         // 数フレームごとにファイルを見る(読み直しはこのスレッドで同期。エディタのフレームが 1 回止まる)
         void Poll(uint64_t frameNumber);
 
+        // 読む元を替えてすぐ読み直す(環境ミキサーで標準パッケージを足す・外す。T-0452)。読めたら Poll と同じく
+        // 次の刻みの境界で当て、以後は替えた読む元のファイルを見る。読めない・当てられなければ false(読む元も今の表も元のまま。
+        // 理由は LastMessage)。再生中は呼ばない(呼び手が止める)
+        [[nodiscard]] bool ReplaceSource(script::ReactionTableSource source);
+        [[nodiscard]] const script::ReactionTableSource& Source() const { return m_reload->Source(); }
+
         // このフレームの単位 [firstUnit, firstUnit + unitCount)(通しの単位の番号)で当てる差し替え。
         // 生の操作(再生でない): 待っている表があり、このフレームに適用の単位 applyTick があれば、印のコマンドを commands に足す
         // (sequence は nextSequence から。commands は (targetTick, sequence) の順に並べ直す。canAddCommand でなければ次のフレームへ)。
@@ -57,7 +63,7 @@ namespace bicameral::frame {
         [[nodiscard]] uint64_t AppliedVersion() const { return m_appliedVersion; }
         [[nodiscard]] uint32_t AppliedCount() const { return m_appliedCount; }
         [[nodiscard]] uint32_t FailedCount() const { return m_failedCount; }
-        [[nodiscard]] bool Watching() const { return m_reload.has_value(); }
+        [[nodiscard]] bool Watching() const { return m_watchFiles; }
         [[nodiscard]] bool Waiting() const { return m_waiting != nullptr; }
         [[nodiscard]] const std::string& LastMessage() const { return m_lastMessage; }
         [[nodiscard]] bool LastFailed() const { return m_lastFailed; }
@@ -72,9 +78,12 @@ namespace bicameral::frame {
         };
 
         void Remember(const std::shared_ptr<const script::LoadedReactionTable>& table);
+        [[nodiscard]] bool Accept(script::HotReloadResult result);  // 読み直しの結果を受ける(Poll・ReplaceSource)
         [[nodiscard]] std::expected<void, std::string> ScheduleReplayed(std::span<const sim::ProbeCommand> commands);
 
-        std::optional<script::ReactionTableHotReload> m_reload;                          // watch のときだけ
+        std::optional<script::ReactionTableHotReload>
+            m_reload;  // 読む元と今の表(ファイルを見るのは m_watchFiles の時だけ)
+        bool m_watchFiles = false;
         std::map<uint64_t, std::shared_ptr<const script::LoadedReactionTable>> m_known;  // 版 → 表(再生が探す)
         std::shared_ptr<const script::LoadedReactionTable> m_waiting;                    // 読めて、まだ当てていない表
         std::vector<Scheduled> m_scheduled;  // 印を GPU のキューへ足した、まだ記録していない差し替え(刻みの順)

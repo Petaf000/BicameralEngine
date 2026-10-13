@@ -37,6 +37,7 @@
 #include "reaction_test_table.h"
 #include "sim/probe_sim.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)

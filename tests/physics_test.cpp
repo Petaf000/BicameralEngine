@@ -19,6 +19,7 @@
 #include "sim/physics_scene.h"
 #include "sim/physics_world.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::physics;
@@ -392,9 +393,9 @@ namespace {
     void TestFallScalesWithGravity() {
         constexpr uint64_t FALL_TICKS = 60;  // 1 s(地球で約 4.9 m 落ちる。地面には届かない)
         const sim::PhysicsScene scene = MakeFallScene();
-        const double earth = Meters(FallDistance(scene, fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2, FALL_TICKS));
+        const double earth = Meters(FallDistance(scene, sim::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2, FALL_TICKS));
         const double moon = Meters(FallDistance(scene, MOON_GRAVITY, FALL_TICKS));
-        const double gravityRatio = (double)MOON_GRAVITY / (double)fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
+        const double gravityRatio = (double)MOON_GRAVITY / (double)sim::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
         const double seconds = (double)FALL_TICKS / 60.0;
         const double theoryEarth = 0.5 * GRAVITY * seconds * seconds;
 

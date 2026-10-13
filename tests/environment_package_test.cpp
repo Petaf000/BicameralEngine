@@ -15,6 +15,7 @@
 
 #include "script/luau_sandbox.h"
 #include "script/reaction_table_loader.h"
+#include "standard_world_physics.h"
 
 namespace {
 

@@ -24,6 +24,7 @@
 #include "editor/gauge_panel.h"
 #include "editor/graph_panel.h"
 #include "editor/lab_panel.h"
+#include "editor/mixer_panel.h"
 #include "editor/patch_panel.h"
 #include "editor/reaction_table_panel.h"
 #include "editor/time_control.h"
@@ -136,6 +137,9 @@ namespace bicameral::editor {
         // 魔法のパッチを置くパネル(T-0325)
         [[nodiscard]] PatchPanel& Patch() { return *m_patch; }
 
+        // 環境ミキサー(T-0452。標準パッケージを世界に足す・外す)
+        [[nodiscard]] MixerPanel& Mixer() { return *m_mixer; }
+
     private:
         EditorOverlay(Window& window, uint32_t frameCount);
 
@@ -170,6 +174,7 @@ namespace bicameral::editor {
         std::unique_ptr<ReactionTablePanel> m_reactionTable;
         std::unique_ptr<BrushPanel> m_brush;
         std::unique_ptr<PatchPanel> m_patch;
+        std::unique_ptr<MixerPanel> m_mixer;
         bool m_contextCreated = false;
         bool m_win32Initialized = false;
         bool m_dx12Initialized = false;

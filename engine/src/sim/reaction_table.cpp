@@ -453,6 +453,12 @@ namespace bicameral::sim {
 
         baked.environment = ordered.environment;  // 環境の値は物質を指さないので、そのまま(T-0400)
 
+        auto atmosphere = BakeWorldAtmosphere(ordered.atmosphere, baked);
+        if (!atmosphere)
+            return std::unexpected(atmosphere.error());
+
+        baked.atmosphere = std::move(*atmosphere);
+
         return baked;
     }
 

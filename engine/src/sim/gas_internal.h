@@ -18,8 +18,9 @@ namespace bicameral::sim::gas_detail {
                   (fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN << 23) / 244140625);
 
     // 重力は世界のデータ(GasConfig::gravityMicrometersPerSecond2 → GasCoefficients。ADR-0171)。標準の重力の換算は前の定数と同じ値
-    static_assert(fx::GasHydrostaticFromMicrometers(fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) == 392266);
-    static_assert(fx::GasGravityWorkFromMicrometers(fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) == 4903325);
+    // (9806650 µm/s² は換算を確かめる値。世界の値は標準パッケージ earth_environment が渡す。T-0373)
+    static_assert(fx::GasHydrostaticFromMicrometers(9806650) == 392266);
+    static_assert(fx::GasGravityWorkFromMicrometers(9806650) == 4903325);
 
     // 気体定数 R = 8.314462618 J/(mol·K) = 8314.462618 nJ/(µmol·K)(× これ ÷ 1e6。α の γ を作る。器の定数 units.hlsli)
     inline constexpr uint64_t GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6 = fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN;

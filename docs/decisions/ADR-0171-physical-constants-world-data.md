@@ -53,3 +53,8 @@
 - 世界のパッケージの分類 `environment`(`gravity_um_per_s2`・`sound_speed_mm_per_s`)から `WorldPhysics` を読む(`script::ReadWorldEnvironment`)。
   サンプルの世界は `combustion_test/environment.luau` の地球の値を読み、窓の `WorldPhysicsOf`(世界の種類で決めていた)は無くした。
   `StandardWorldPhysics()` は標準の値で書いた試験の場面だけが使う(標準パッケージ T-0373 ができたら消せる)。
+
+## 追記 3(2026-10-13・T-0373): 地球の値をエンジンから出した
+- 標準パッケージ `data/standard/earth_environment` が地球の重力(9806650 µm/s²)と音速の基準(340000 mm/s)を渡す(環境ミキサー・--mix)。
+- エンジンの `sim::StandardWorldPhysics()`・`STANDARD_SOUND_SPEED_MILLIMETERS_PER_SECOND`・`fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2` は消し、
+  試験の場面の写しは tests/standard_world_physics.h(standard_packages_test がパッケージと同じか確かめる)。換算の static_assert は数を直接書いた。

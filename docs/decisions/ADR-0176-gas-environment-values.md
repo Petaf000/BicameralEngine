@@ -50,3 +50,7 @@
   標準パッケージができたら消せる。
 - しにくくなる: 古い再生ファイル(環境の分類が無い表)のサンプルの世界は、再生すると重力 0 になる(今は保存した再生ファイルは無い)。
 - 未対応: 環境の値のホットリロード(表は差し替わるが、物理の重力は世界を作った時の値のまま。T-0444)。
+
+## 追記(2026-10-13・T-0373)
+- 決定 1 の「標準の値 340 m/s は `StandardWorldPhysics()` に置く」は、標準パッケージ earth_environment に移した(エンジンから消した。ADR-0171 追記 3)。
+- 決定 3 の基準の大気は ADR-0182(分類 atmosphere + environment の atmosphere_temperature_mk・atmosphere_surface_pressure_pa)。

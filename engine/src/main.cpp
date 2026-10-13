@@ -45,6 +45,8 @@
 //   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。sample の既定: exe の横の
 //                                    data/packages〔ゲーム本体 = combustion_test〕。blank はゲーム本体なしで全部を読む。
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
+//   --mix <name,...>                 標準パッケージ(exe の横の data/standard)を世界に足す(環境ミキサーと同じ。依存も書く。
+//                                    例 real_elements,real_matter,real_reactions,earth_environment,earth_air。T-0373・D-457)
 //   --auto-lab                       実験室の箱に木を置いて火を付け、GPU と CPU の一致と記録の再生を確かめる(--editor と一緒に。T-0142)
 //   --auto-lab-compare               実験室の計器のグラフが CPU の値と一致し、保存点から条件を 1 つ足した 2 つの実験を比べられるか
 //                                    確かめる(--editor と一緒に。T-0221)
@@ -57,6 +59,8 @@
 //   --auto-patch                     魔法のパッチのパネルで実験室に止めるパッチを置き、止めた反応が進まない・仮の世界に投げた
 //                                    パッチが足せた / 断られたで戻るかを確かめる(--editor と一緒に。T-0325)
 //   --auto-table-edit                反応表のパネルで --packages の写しの木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版で終える
+//   --auto-mixer                     環境ミキサーで標準パッケージを全部足す → 当たる → 元素を外す(全部外れる)→ 初めの表で終える
+//                                    (--editor と一緒に。ブランクの世界で。T-0452)
 //                                    (--editor と一緒に。T-0219)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
@@ -82,6 +86,7 @@
 #include "core/unicode.h"
 #include "frame/frame_loop.h"
 #include "platform/caps.h"
+#include "script/standard_packages.h"
 #include "sim/probe_trace.h"
 
 namespace {
@@ -351,6 +356,8 @@ namespace {
             loop.speciesRemap = true;
         else if (argument == L"--auto-table-edit")
             loop.autoTableEdit = true;
+        else if (argument == L"--auto-mixer")
+            loop.autoMixer = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
         else if (argument == L"--auto-patch")
@@ -397,7 +404,13 @@ namespace {
                 options.frameLoop.replayPath = arguments[++i];
             else if (argument == L"--packages" && hasValue)
                 options.frameLoop.packageRoot = arguments[++i];
-            else if (argument == L"--world" && hasValue) {
+            else if (argument == L"--mix" && hasValue) {
+                auto mix = script::ParseMixList(ToUtf8(arguments[++i]));
+                if (!mix)
+                    return std::unexpected(mix.error());
+
+                options.frameLoop.mix = std::move(*mix);
+            } else if (argument == L"--world" && hasValue) {
                 const auto world = ParseWorld(arguments[++i]);
                 if (!world)
                     return std::unexpected(world.error());
