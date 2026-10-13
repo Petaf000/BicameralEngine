@@ -1,6 +1,6 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-14 未明(3 回目・司令塔のチャット)/ 並走 3 巡: 2 巡の分 + T-0453・T-0444・T-0396・T-0426(閉じた)。全部マージ済み
+最終更新: 2026-10-14 未明(3 回目・司令塔のチャット)/ 並走 4 巡: 3 巡の分 + T-0412・T-0455・T-0470・T-0479。全部マージ済み
 
 ## 状態(3 行以内)
 - main = 8d4e356(第 1 巡のマージ efd83fa の後に release の CPU 50・GPU 9・窓と画像 31 本が全部通過 + 第 2 巡の t-0373・t-0269・t-0426b)。
@@ -19,6 +19,9 @@
 - 第 3 巡(マージ済み): T-0453 ミキサーの「世界を作り直す」(RunFrameLoop が窓と GPU を残して次の FrameLoop を作る・--auto-rebuild・ADR-0192)/
   T-0444 環境の値のホットリロード(重力をルート定数で・表の差し替えの刻みで切り替え・sim::CheckWorldPhysics。ADR-0194)/ T-0396 転換の道の費用(--measure-convert。Q55)/
   T-0426 を閉じた(debug も 1 本 10 分以内。implicit_conduction を形 × 場面に・gpu_gas_blast を分けた・WARP は debug でも伝導の Work Graph 版を外した)。判断待ちは Q46〜Q55。
+- 第 4 巡(マージ済み): T-0412 世界の写しの早送り(④ の最初。sim::WorldCopy・ADR-0198)/ T-0455 試験が遅かった原因 = VS の開発者環境が環境変数を化けさせてドライバのシェーダーキャッシュが外れていた(_vsenv.ps1 を直した。gpu_multires_wide_* が 1 本 50 s → 2〜8 s)/
+  T-0470 気体の木の環境の差し替え(ADR-0200)・T-0479 分けた小刻みの木の偽の流れの直し(ADR-0201)。判断待ちは Q46〜Q57。
+- **注意**: VS の Developer PowerShell(Enter-VsDevShell)から exe を起動すると、ドライバのキャッシュが外れて起動のたびに数十秒かかるはず(T-0455 から推定・未確認)。ランナーのジョブは直した。
 - **試験の名前の変化**: gpu_gas → gpu_gas + gpu_gas_flow / gpu_probe_sim → + _tables / gpu_multires → + _stress・_limits / implicit_tree・subcycle・implicit_conduction を分けた(T-0426 のチケット「HANDOFF に写す」)・
   新しい world_layout・environment_package・standard_packages・window_place_tick0_*・window_blank_rewind・window_mixer_*・window_mix_start。
 
