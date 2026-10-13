@@ -32,6 +32,9 @@ namespace bicameral::frame {
     inline constexpr uint32_t AUTO_SAVE_POINTS = UINT32_MAX;
     inline constexpr uint32_t DEFAULT_EDITOR_SAVE_POINTS = 6;
     inline constexpr uint32_t MAX_SAVE_POINTS = 64;
+    // 刻み 0 の保存点の番号(T-0411・D-474)。保存点を使うなら、--save-points の数とは別に 1 つ足し、捨てない
+    // (起動直後の筆の運びも元に戻せる。巻き戻しのパネルから最初の状態へも戻れる)。反応表を差し替えると、ほかと同じく捨てる
+    inline constexpr uint32_t TICK_ZERO_SAVE_SLOT = 0;
 
     struct FrameLoopOptions {
         // --- フレームの進め方 ---
@@ -102,9 +105,10 @@ namespace bicameral::frame {
         bool autoPatch = false;
 
         // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
-        uint32_t savePoints = AUTO_SAVE_POINTS;  // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)
-        uint64_t saveIntervalTicks = 120;        // 何刻みごとに写すか(その倍数の刻みの境界で写す)
-        bool autoRewind = false;  // 保存点が 2 つできたら古い方へ 1 回戻す(人がいない確認。--auto-rewind)
+        // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)。1 以上なら刻み 0 の保存点を別に 1 つ足す(T-0411)
+        uint32_t savePoints = AUTO_SAVE_POINTS;
+        uint64_t saveIntervalTicks = 120;  // 何刻みごとに写すか(その倍数の刻みの境界で写す)
+        bool autoRewind = false;           // 保存点が 2 つできたら古い方へ 1 回戻す(人がいない確認。--auto-rewind)
 
         // --- 世界のデータ(T-0157・ADR-0033)---
         // どの世界で起動するか(--world。T-0371): 既定はブランクの世界(D-455。セルは全部空・積み木なし・表は --packages が無ければ空)。

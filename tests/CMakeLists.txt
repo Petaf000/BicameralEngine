@@ -440,7 +440,7 @@ set_tests_properties(window_replay_play PROPERTIES LABELS gpu FIXTURES_REQUIRED 
 add_test(NAME window_replay_editor
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-time)
 set_tests_properties(window_replay_editor PROPERTIES LABELS gpu FIXTURES_REQUIRED window_replay TIMEOUT 240)
-# 巻き戻し(T-0143): 40 刻みごとに保存点へ写しながら再生し、保存点が 2 つできたら古い方へ戻して再生し直しても、
+# 巻き戻し(T-0143): 40 刻みごとに保存点へ写しながら再生し、保存点が 2 つできたら古い方(刻み 0 の保存点。T-0411)へ戻して再生し直しても、
 # 戻した後のハッシュ列が記録と同じ(保存点 + 再生。ADR-0036)。戻せなかったら 1
 add_test(NAME window_replay_rewind
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --editor --auto-rewind --save-interval 40)
@@ -454,6 +454,10 @@ set_tests_properties(window_blank_record PROPERTIES LABELS gpu FIXTURES_SETUP wi
   PASS_REGULAR_EXPRESSION "世界: ブランクの世界")
 set_tests_properties(window_blank_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_blank TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
+# ブランクの世界の刻み 0 の保存点(T-0411): 再生しながら刻み 0 と 40 で写し、刻み 0 へ戻して再生し直しても記録と同じハッシュ列
+add_test(NAME window_blank_rewind
+         COMMAND bicameral --replay ${WINDOW_BLANK_FILE} --editor --auto-rewind --save-interval 40)
+set_tests_properties(window_blank_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRED window_blank TIMEOUT 240)
 # 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
 add_test(NAME window_lab COMMAND bicameral --world sample --editor --auto-lab --frames 20)
 set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
@@ -475,6 +479,17 @@ add_test(NAME window_place_play COMMAND bicameral --replay ${WINDOW_PLACE_FILE} 
 set_tests_properties(window_place_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-place: .*OK")
 set_tests_properties(window_place_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_place TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK")
+# 刻み 0 の保存点(T-0411・D-474): 保存点の間隔を十分長くして、保存点が刻み 0 の 1 つだけの時に同じ --auto-place を流す。
+# 起動直後(最初の回す保存点より前)の運びを元に戻す = 刻み 0 へ戻してその運びを除いて流し直す。記録 → 別の起動の再生が同じハッシュ列
+set(WINDOW_PLACE_TICK0_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place_tick0.bcreplay)
+add_test(NAME window_place_tick0_record
+         COMMAND bicameral --world sample --editor --auto-place --save-interval 1000000 --frames 120
+                 --record ${WINDOW_PLACE_TICK0_FILE})
+add_test(NAME window_place_tick0_play COMMAND bicameral --replay ${WINDOW_PLACE_TICK0_FILE} --target-fps 30)
+set_tests_properties(window_place_tick0_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place_tick0 TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-place: .*OK")
+set_tests_properties(window_place_tick0_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_place_tick0 TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
 # 魔法のパッチのパネル(T-0325): 実験室で木を燃やしながらパネルと同じ道でセルロースを使う規則を止め、止めた間は箱のセルロースが
 # 減らない(止めない同じ実験では減る)・列が一杯のパッチは断られる・記録から流し直しても同じ。仮の世界に止める・格子の外に
