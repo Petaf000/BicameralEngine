@@ -5,7 +5,8 @@
 // T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波・1 セルの 5 倍の圧力(整数の範囲)。
 // T-0234(断熱の仕事 pdV・運動エネルギーの散逸): 既定は断熱(衝撃波は断熱の理論 398.6 m/s)。等温の形も場面 shock_isothermal(404 m/s)で確かめる。
 // 引数: gpu_test_options.h(--warp・--queue)と
-//   --scene <名前>: 1 つの場面だけ(既定は全部)
+//   --scene <名前>[,<名前>...]: その場面だけ(既定は全部)。ctest は GPU の順番待ち(D-460)に合わせて 2 組に分けて流す(T-0426)。
+//     並べた名前が 1 つでも無ければ失敗(場面の名前を変えた時に、組から黙って落ちないように)
 //   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
 //     HW と WARP で書き出して diff すると、どの面のどの欄が違うかが分かる。T-0185)
 //   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120。
@@ -22,6 +23,8 @@
 #include "sim/world_physics.h"
 
 #include <cmath>
+#include <ranges>
+#include <string_view>
 
 using namespace bicameral;
 using namespace bicameral::sim;
@@ -613,7 +616,7 @@ namespace {
     }
 
     struct GasTestOptions {
-        std::string scene;
+        std::vector<std::string> scenes;  // 空なら全部
         bool profile = false;
         bool isothermal = false;
         uint32_t size = 32;
@@ -627,9 +630,10 @@ namespace {
         for (size_t index = 1; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
             const bool hasValue = index + 1 < arguments.size();
-            if (argument == "--scene" && hasValue)
-                options.scene = arguments[++index];
-            else if (argument == "--profile")
+            if (argument == "--scene" && hasValue) {
+                for (const auto part : std::string_view(arguments[++index]) | std::views::split(','))
+                    options.scenes.emplace_back(std::string_view(part));
+            } else if (argument == "--profile")
                 options.profile = true;
             else if (argument == "--isothermal")
                 options.isothermal = true;
@@ -656,7 +660,8 @@ namespace {
         const auto options = test::ParseGpuTestOptions(std::span(arguments));
         if (!gasOptions || !options) {
             Log(Channel::Sim, Level::Error,
-                "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前] [--substeps n] [--passes n] "
+                "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前[,名前...]] [--substeps n] "
+                "[--passes n] "
                 "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal]]");
             return 2;
         }
@@ -681,9 +686,13 @@ namespace {
         std::vector<std::pair<std::string, GasBox>> results;
         uint32_t sceneCount = 0;
         uint32_t failureCount = 0;  // 食い違っても残りの場面は走らせる(どの場面が壊れたかを一度に見る)
+        const std::vector<std::string>& selected = gasOptions->scenes;
+        uint32_t selectedCount = 0;
         for (const Scene& scene : MakeScenes()) {
-            if (!gasOptions->scene.empty() && gasOptions->scene != scene.name)
+            if (!selected.empty() && !rng::contains(selected, scene.name))
                 continue;
+
+            ++selectedCount;
 
             const auto started = chr::steady_clock::now();
             const auto final = RunScene(device->Get(), parts, scene);
@@ -702,6 +711,12 @@ namespace {
             Log(Channel::Sim, Level::Info, "gpu_gas_test: {} の {} 刻みが毎刻み CPU とビット一致({:.1f} s)", scene.name,
                 scene.ticks, chr::duration<double>(chr::steady_clock::now() - started).count());
             ++sceneCount;
+        }
+
+        if (!selected.empty() && selectedCount != selected.size()) {
+            Log(Channel::Sim, Level::Error, "gpu_gas_test: FAILED(--scene の名前のうち {} 個が場面に無い)",
+                selected.size() - selectedCount);
+            return 1;
         }
 
         if (!test::PassesValidation(*device, "gpu_gas_test") || failureCount > 0)

@@ -21,6 +21,9 @@
 //     (reaction_limits_table.h)のセルを置いた世界では両方とも 0 でない
 //   - debug layer のエラーが 0 件
 // 引数: gpu_test_options.h(--warp)。キューは compute だけ(シミュは compute キュー。06 §4)。
+//   --part all|framings|tables: 流す組(既定 all)。framings = 分け方・イベントの溢れ・記録と再生・遅い起こし、
+//     tables = 表の差し替え・物質の付け替え・反応の上限。ctest は GPU の順番待ち(D-460)に合わせて 2 本に分ける(T-0426。比べ方は同じ)。
+//     組ごとの秒をログに出す
 #include <algorithm>
 #include <array>
 #include <filesystem>
@@ -846,10 +849,44 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+    // 1 つの確かめを流し、かかった秒をログに出す(組の分け方を決める目安。T-0426)
+    void Timed(std::string_view name, const std::function<void()>& test) {
+        const auto started = chr::steady_clock::now();
+        test();
+        Log(Channel::Sim, Level::Info, "gpu_probe_sim_test: {} {:.1f} s", name,
+            chr::duration<double>(chr::steady_clock::now() - started).count());
+    }
+
+    // --part を取り除いて返す(残りは gpu_test_options.h へ)。知らない組なら std::nullopt
+    std::optional<std::string> TakePart(std::vector<char*>& arguments) {
+        std::string part = "all";
+        std::vector<char*> rest;
+        for (size_t index = 0; index < arguments.size(); ++index) {
+            if (index > 0 && std::string_view(arguments[index]) == "--part" && index + 1 < arguments.size()) {
+                part = arguments[++index];
+                continue;
+            }
+
+            rest.push_back(arguments[index]);
+        }
+
+        arguments = rest;
+        if (part != "all" && part != "framings" && part != "tables")
+            return std::nullopt;
+
+        return part;
+    }
+
+}  // namespace
+
 int main(int argc, char** argv) {
-    const auto options = test::ParseGpuTestOptions(std::span(argv, static_cast<size_t>(argc)));
-    if (!options) {
-        Log(Channel::Sim, Level::Error, "使い方: gpu_probe_sim_test [--warp]");
+    std::vector<char*> arguments(argv, argv + argc);
+    const std::optional<std::string> part = TakePart(arguments);
+    const auto options = test::ParseGpuTestOptions(std::span(arguments));
+    if (!options || !part) {
+        Log(Channel::Sim, Level::Error, "使い方: gpu_probe_sim_test [--warp] [--part all|framings|tables]");
         bicameral::SingletonFinalizer::Finalize();
 
         return 2;
@@ -872,19 +909,25 @@ int main(int argc, char** argv) {
     }
 
     Failures failures;
-    TestFramings(device->Get(), *table, failures);
-    TestEventOverflow(device->Get(), *table, failures);
-    TestRecordAndReplay(device->Get(), *table, failures);
-    TestSlowWake(device->Get(), *table, failures);
-    TestTableSwap(device->Get(), *table, failures);
-    TestSpeciesSwap(device->Get(), *table, true, failures);
-    TestSpeciesSwap(device->Get(), *table, false, failures);
-    TestLimits(device->Get(), failures);
+    ID3D12Device5* const raw = device->Get();
+    if (*part != "tables") {
+        Timed("分け方", [&] { TestFramings(raw, *table, failures); });
+        Timed("イベントの溢れ", [&] { TestEventOverflow(raw, *table, failures); });
+        Timed("記録と再生", [&] { TestRecordAndReplay(raw, *table, failures); });
+        Timed("遅い起こし", [&] { TestSlowWake(raw, *table, failures); });
+    }
+
+    if (*part != "framings") {
+        Timed("表の差し替え", [&] { TestTableSwap(raw, *table, failures); });
+        Timed("物質の付け替え", [&] { TestSpeciesSwap(raw, *table, true, failures); });
+        Timed("物質の付け替え(H を捨てる)", [&] { TestSpeciesSwap(raw, *table, false, failures); });
+        Timed("反応の上限", [&] { TestLimits(raw, failures); });
+    }
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");
     const bool passed = failures.count == 0 && passesValidation;
-    Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_probe_sim_test({}): {}",
-        gpu::AdapterKindName(options->adapter), passed ? "OK" : "FAILED");
+    Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_probe_sim_test({}・{}): {}",
+        gpu::AdapterKindName(options->adapter), *part, passed ? "OK" : "FAILED");
     bicameral::SingletonFinalizer::Finalize();
 
     return passed ? 0 : 1;
