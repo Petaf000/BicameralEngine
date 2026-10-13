@@ -23,12 +23,12 @@ namespace bicameral::sim {
                 const uint32_t species = table.SpeciesId(entry.species);
                 if (species == 0) {
                     return std::unexpected(
-                        std::format("world_cells.{}.contents: 知らない物質 {}", region.name, entry.species));
+                        std::format("world_cells.{}.amounts_umol: 知らない物質 {}", region.name, entry.species));
                 }
 
                 if (std::ranges::contains(amounts, species, &SpeciesAmount::species)) {
                     return std::unexpected(
-                        std::format("world_cells.{}.contents: 物質 {} が 2 回ある", region.name, entry.species));
+                        std::format("world_cells.{}.amounts_umol: 物質 {} が 2 回ある", region.name, entry.species));
                 }
 
                 amounts.push_back({.species = species, .amount = entry.micromoles});

@@ -761,6 +761,10 @@ views:
           code: "engine/src/script/reaction_package.cpp::ReadReactionTableDefinition", ticket: T-0021,
           doc: docs/design/02-reaction-system.md,
           note: "値は整数だけ・単位は欄の名前・A は 10 進の文字列でも・知らない欄は誤り(ADR-0032)。試験の表は data/packages/combustion_test(reaction_package_test)" }
+      - { id: worldlayout, group: tool, label: "世界の組み立てを読む<br/>(world_cells・world_bodies → 初めのセル・物)",
+          code: "engine/src/script/world_layout_package.cpp::ReadWorldLayout", ticket: T-0398,
+          doc: docs/design/13-scripting-game-model.md,
+          note: "反応表と同じ読み込み(表の版・中身に入る。再生は表の中身から同じ初めの世界)。ベイクで物質の名前を ID に(sim/world_layout の BakeWorldLayout)。窓の初めの世界は sim::MakeProbeInitialWorld・物は sim::MakeLayoutPhysicsScene。分類が無ければ空(ブランク)。ADR-0172・world_layout_test" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0021,
           doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。名前のバイト順で ID を振る(並びに依らない。ADR-0032)。文献の反応熱の食い違いは警告。C++ の試験の表と Luau の試験の表がビットで同じ" }
@@ -789,6 +793,8 @@ views:
       - [packages, typecheck, "読む前に"]
       - [packages, rxread, "分類 → 鍵 → 値"]
       - [rxread, bake, "定義"]
+      - [packages, worldlayout, "world_cells・world_bodies"]
+      - [worldlayout, bake, "名前のままの組み立て"]
       - [bake, table]
       - [rtload, packages, "起動時"]
       - [rtload, vram, "表を GPU へ"]
