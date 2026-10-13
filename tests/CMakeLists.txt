@@ -463,6 +463,13 @@ bicameral_add_gpu_test_case(gpu_probe_rewind gpu_probe_rewind_test gpu)
 # 物理のパイプラインの作成が、ほかの作業ツリーと GPU を分けている間は debug で 4 分を超えることがある
 set_tests_properties(gpu_probe_rewind PROPERTIES TIMEOUT 900)
 
+# 世界の写しの早送り(T-0412・ADR-0198): 写しを取っても本物のハッシュ列が変わらない・同じコマンドなら写し = 本物 = CPU リファレンス・
+# 使い直した写しが条件(木の量)で CPU と同じ刻みに止まる
+bicameral_add_gpu_test(gpu_world_copy_test)
+target_link_libraries(gpu_world_copy_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_world_copy gpu_world_copy_test gpu)
+set_tests_properties(gpu_world_copy PROPERTIES TIMEOUT 900)
+
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu --no-gbv)
@@ -742,7 +749,7 @@ foreach(_name IN ITEMS
     gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
-    gpu_probe_trace_test gpu_probe_rewind_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
+    gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

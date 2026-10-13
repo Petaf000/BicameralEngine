@@ -105,6 +105,7 @@ add_library(bicameral_sim STATIC
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
+  src/sim/world_copy.cpp  # 世界の写しの早送り(T-0412)
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)

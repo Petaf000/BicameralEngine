@@ -209,6 +209,8 @@ namespace bicameral::sim {
         const BakedReactionTable* table = nullptr;  // nullptr なら差し替えない
     };
 
+    class ProbeSim;
+
     struct ProbeFrameInput {
         uint64_t firstTick = 0;  // 最初の単位の刻み
         uint32_t firstUnit = 0;  // 最初の単位の、刻みの中の番号(0〜UnitsPerTick()-1)
@@ -234,6 +236,13 @@ namespace bicameral::sim {
         // 単位の前に、世界をこの番号の保存点の状態へ戻す(firstTick は保存点の刻み)。GPU のキューで待っていたコマンドは捨てる
         // (呼ぶ側が firstTick 以降のコマンドを、このフレームの commands から足し直す)
         uint32_t restoreFrom = NO_SAVE_POINT;
+
+        // 写しの早送り(T-0412・ADR-0198。sim/world_copy): 単位の前に、別の ProbeSim(本物の世界)の刻みの境界の状態 S(firstTick) を
+        // この世界へ写す(保存点から戻すのと同じく 2 世代に写し、GPU のキューで待っていたコマンドは捨てる)。約束: firstUnit == 0・
+        // この世界も写す元も初期化のリストを投げた後・同じ形(物理の有無と物の数)・保存点と同時には使えない。
+        // 呼ぶ側の約束: 写す元と同じキューに投げ、写す元が最後に記録したリストが刻み firstTick の境界で終わっていて、写す元の次のリストより前。
+        // 写す元は読むだけ(世界を変えない。D-403)。表は写さない(この世界を作った表のまま。写す元の Table() で作る)
+        const ProbeSim* adoptFrom = nullptr;
 
         // --- 反応表の差し替え(T-0139)。差し替えたフレームを記録すると、保存点は全部空になる(差し替えより前へは戻らない。T-0299)---
         std::span<const ProbeTableSwap> tableSwaps;
@@ -316,11 +325,21 @@ namespace bicameral::sim {
         // 世界のセル(2 世代 × PROBE_CELL_COUNT × RxCell。S(t) は世代 t & 1)。テストが読み戻すだけ(フレームの間は COMMON)
         [[nodiscard]] ID3D12Resource* Cells() const { return m_cells.Get(); }
 
+        // 熱のキャッシュ(2 世代 × PROBE_CELL_COUNT × HcThermalCache。S(t) は世代 t & 1)。読み戻すだけ(フレームの間は COMMON。T-0412)
+        [[nodiscard]] ID3D12Resource* Thermal() const { return m_thermal.Get(); }
+
+        // GPU が今使っている反応表(最後の差し替えの後。写しの早送りの世界を同じ表で作る。T-0412)
+        [[nodiscard]] const BakedReactionTable& Table() const { return m_tableCopy; }
+
         // 魔法のパッチの列(MP_LIST_WORDS 語。common/magic_patch.hlsli。T-0323)。テストが読み戻すだけ(フレームの間は COMMON)
         [[nodiscard]] ID3D12Resource* MagicPatches() const { return m_magicPatches.Get(); }
 
         // 伝導の Work Graph の裏のメモリ(ドライバが決める。docs/perf.md に残す)
         [[nodiscard]] uint64_t ConductBackingMemoryBytes() const { return m_conductGraph->BackingMemoryBytes(); }
+
+        // 既定のヒープに置いた主なバッファの大きさの和(世界・表・抽出・伝導の Work Graph の裏のメモリ・物理の状態。保存点は除く。
+        // 写しの早送りの VRAM の目安。T-0412)
+        [[nodiscard]] uint64_t DefaultHeapBytes() const;
 
         // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
         [[nodiscard]] const GpuPhysics* Physics() const { return m_physics.get(); }
@@ -437,6 +456,9 @@ namespace bicameral::sim {
         [[nodiscard]] bool ValidateSavePoints(const ProbeFrameInput& input) const;
         void RecordSave(ID3D12GraphicsCommandList10* list, uint32_t index, uint64_t tick);
         void RecordRestore(ID3D12GraphicsCommandList10* list, uint32_t index);
+        [[nodiscard]] bool ValidateAdopt(const ProbeFrameInput& input) const;
+        void RecordAdopt(ID3D12GraphicsCommandList10* list, const ProbeSim& source, uint64_t tick);
+        void RecordOverwriteState(ID3D12GraphicsCommandList10* list, std::span<const StateRegion> from);
         void ResetCommandMirror();
         [[nodiscard]] std::vector<ProbeTickHash> ReadHashes(const FrameSlot& frame) const;
 
