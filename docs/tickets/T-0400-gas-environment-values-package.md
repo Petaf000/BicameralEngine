@@ -13,9 +13,9 @@
 sim::GasOptions の音速の基準 340 m/s(D-440)・地面の層の基準の温度などの「環境」の値を、世界のパッケージの環境の値から読む(T-0372 の物理定数と合わせて決める)。
 
 ## 完了条件(チェックできる形で)
-- [ ] どの値を環境(パッケージ)に、どれを器(エンジン)に残すかを決める(ADR-0151 の 5。T-0372 は済み: 重力は sim::WorldPhysics、R は器〔D-480・ADR-0171〕。同じ形に揃える)
-- [ ] 気体の試験(gas_reference・gpu_gas)の結果が変わらない
-- [ ] 今の試験(--world sample・サンプルのパッケージを読む試験)の結果(ハッシュ・画像)が変わらない
+- [x] どの値を環境(パッケージ)に、どれを器(エンジン)に残すかを決める(→ ADR-0176。Proposed・案 A を仮で。ADR-0151 の 5。T-0372 は済み: 重力は sim::WorldPhysics、R は器〔D-480・ADR-0171〕。同じ形に揃える)
+- [x] 気体の試験(gas_reference・gpu_gas)の結果が変わらない(release・HW で通過)
+- [x] 今の試験(--world sample・サンプルのパッケージを読む試験)の結果(ハッシュ・画像)が変わらない(作業ログ)
 
 ## 洗い出し(2026-10-13。engine/src・shaders・tests を grep)
 
@@ -54,3 +54,11 @@ sim::GasOptions の音速の基準 340 m/s(D-440)・地面の層の基準の温�
   表の版が変わる。世界の組み立ては別の読み込み(または版に入れない分類)にするかをここで決める。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-13(wt4・並走): 洗い出し(中身として埋まっていたのは音速の基準 340 m/s だけ。基準の温度は呼び手が渡す基準の大気から導く値)と ADR-0176(Proposed)。
+  音速の基準を `WorldPhysics` に足し(ブランク 0・器の既定 0・上限 `GasSoundSpeedLimitMmPerS`)、分類 `environment` を読む `script/environment_package`・
+  型 `Environment`・`combustion_test/environment.luau`(地球の値)を足した。T-0398 の共有の決め事に従い、wt2 の欄の道具のコミットを cherry-pick して
+  ベイクした表の `environment` に通し、窓は表の環境で物理の重力を作る(`WorldPhysicsOf` を無くした)。試験 environment_package(新)。
+  debug: environment_package・reaction_package・luau_type_check・reaction_replay_table・reaction_hot_reload・reaction_table_edit・replay_file・blank_world・
+  gas_reference・gas_tree・gpu_gas_tree が通過。release(警告 0): environment_package・gas_reference・gpu_gas(HW)・window_replay_*(6 本)・
+  window_lab・window_lab_compare・window_place_*・window_patch_*・window_hot_reload_game_* が通過。image_*(画像が基準と一致)・
+  `run -- --world sample --check-physics --frames 240`(積み木の CPU と GPU の物のハッシュの食い違い 0)も通過。Status は Doing のまま(ADR-0176 のユーザーの判断待ち)。
