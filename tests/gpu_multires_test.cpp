@@ -6,14 +6,15 @@
 // debug では 2 回目の実行と時間の計測をしない(1200 秒の上限に届くため。T-0263)。場面と刻みの数は release と同じ。
 // 粗くすると成分が入りきらない場面(tests/multires_limits_scene.h。T-0022)も毎刻み比べる(断った数・見出しの quietCheck も)。
 // 引数は gpu_test_options.h と --part all|chains|chains-<組>|wide|wide-<組>(組は RunRealChainScenes・RunWideScenes の上)・
-// --measure-wide(計測だけ)。ctest の HW は鎖の 3 つの組と溢れの 6 つの組の 9 本、WARP は鎖(chains)と溢れ(wide)の 2 本
-// (1 本を GPU の順番待ちに合う 10 分に収める。T-0263・T-0426)。
+// --measure-wide(計測だけ。--measure-convert で転換のパッチの費用も。T-0396)。ctest の HW は鎖の 3 つの組と
+// 溢れの 6 つの組の 9 本、WARP は鎖(chains)と溢れ(wide)の 2 本(1 本を GPU の順番待ちに合う 10 分に収める。T-0263・T-0426)。
 // 場面ごとに作る GpuMultires のパイプラインは 1 つのプロセスの中で使い回す(T-0427。--no-pipeline-cache で毎回作る)。
 #include "sim/gpu_multires.h"
 
 #include <optional>
 #include <span>
 
+#include "common/magic_patch.hlsli"
 #include "common/multires_activity.hlsli"
 #include "common/multires_wide.hlsli"
 #include "core/aliases.h"
@@ -1136,14 +1137,38 @@ namespace {
         uint32_t ticksPerList = 0;
     };
 
+    // 転換のパッチの費用を測る(T-0396。--measure-convert): 表の規則 0 から順に count 本(MP_MAX_PATCHES まで)に、生成物の欄 0 を
+    // 同じ物質に替える転換を、世界全部・刻み 0 から測り終わるまで効かせる。替える先が同じなので結果は変わらず、核が規則を読むたびに
+    // 転換の道(MpConvertedRule)を最後まで通る。釣り合いの判定(MpAddPatch)を通さず列に直に書く(判定で断られる表でも道の費用は同じ)
+    void AddMeasureConvertPatches(sim::MultiresNest& nest, const sim::BakedReactionTable& table, uint32_t count) {
+        struct List {
+            std::span<uint32_t> words;
+            [[nodiscard]] uint32_t PatchWord(uint32_t word) const { return words[word]; }
+            void SetPatchWord(uint32_t word, uint32_t value) const { words[word] = value; }
+        };
+        const List list{.words = nest.magicPatches};
+        constexpr int32_t EDGE = 1 << 30;
+        const uint32_t used = std::min({count, MP_MAX_PATCHES, static_cast<uint32_t>(table.rules.size())});
+        for (uint32_t i = 0; i < used; ++i) {
+            const RxRule& rule = table.rules[i];
+            const uint32_t effect = MpMakeConvertEffect(0, rule.products[0]);
+            MpStorePatch(list, i, MpPatchFromCommand(rule.key, effect, EDGE, -EDGE, -EDGE, -EDGE, EDGE, EDGE, EDGE, 0));
+        }
+
+        list.SetPatchWord(0, used);
+    }
+
     std::expected<WideCost, std::string> MeasureWideCost(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                          gpu::DebugRing& ring, const sim::BakedReactionTable& table,
                                                          uint32_t manySpecies, bool wide, bool conduction,
-                                                         uint32_t spaceGroups) {
+                                                         uint32_t spaceGroups, uint32_t convertPatches) {
         const bool many = manySpecies != 0;
         sim::MultiresNest nest = test::MakeMeasureNest(table, many);
         if (wide)
             sim::EnableWideCells(nest);
+
+        if (convertPatches != 0)
+            AddMeasureConvertPatches(nest, table, convertPatches);
 
         auto gpu = CreateGpu(device, table, nest.capacity,
                              {.wideCells = wide,
@@ -1205,6 +1230,7 @@ namespace {
     struct MeasureOptions {
         uint32_t spaceGroups = 0;  // 作業場の段のグループの数(--wide-space-groups。0 = 既定)
         bool bigOnly = false;      // 大きい形のセルの場面だけ(--measure-big-only)
+        bool convert = false;      // 転換のパッチ 0 本・1 本・16 本で比べる(--measure-convert。T-0396)
     };
 
     // 場面ごとに 2 回測って 2 回目を出す(1 回目はシェーダーの準備・クロックの立ち上がりを含む)
@@ -1228,26 +1254,29 @@ namespace {
             if (measure.bigOnly && item.manySpecies != MEASURE_BIG_SPECIES)
                 continue;
 
+            const std::vector<uint32_t> patchCounts = measure.convert ? std::vector<uint32_t>{0, 1, MP_MAX_PATCHES}
+                                                                      : std::vector<uint32_t>{0};
             for (const bool conduction : {false, true}) {
-                const sim::BakedReactionTable& table = item.manySpecies == 0                     ? *airTable
-                                                       : item.manySpecies == MEASURE_BIG_SPECIES ? *bigTable
-                                                                                                 : *manyTable;
-                const auto first = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction,
-                                                   measure.spaceGroups);
-                const auto cost = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide, conduction,
-                                                  measure.spaceGroups);
-                if (!first || !cost) {
-                    Log(Channel::Gpu, Level::Error, "計測 {}: {}", item.name, cost ? first.error() : cost.error());
-                    return 1;
-                }
+                for (const uint32_t patches : patchCounts) {
+                    const sim::BakedReactionTable& table = item.manySpecies == 0                     ? *airTable
+                                                           : item.manySpecies == MEASURE_BIG_SPECIES ? *bigTable
+                                                                                                     : *manyTable;
+                    const auto first = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide,
+                                                       conduction, measure.spaceGroups, patches);
+                    const auto cost = MeasureWideCost(device, queue, ring, table, item.manySpecies, item.wide,
+                                                      conduction, measure.spaceGroups, patches);
+                    if (!first || !cost) {
+                        Log(Channel::Gpu, Level::Error, "計測 {}: {}", item.name, cost ? first.error() : cost.error());
+                        return 1;
+                    }
 
-                Log(Channel::Gpu, Level::Info,
-                    "計測 {}(伝導 {}・根 {}・{} 刻み・1 リスト {} 刻み): {:.2f} ns/セル(1 回目 {:.2f})・バッファ {} "
-                    "KiB・"
-                    "溢れ {} KiB・待たせた {}",
-                    item.name, conduction ? "あり" : "なし", test::MEASURE_ROOTS, MEASURE_TICKS, cost->ticksPerList,
-                    cost->nsPerCell, first->nsPerCell, cost->bufferBytes / 1024, cost->overflowBytes / 1024,
-                    cost->productsHeld);
+                    Log(Channel::Gpu, Level::Info,
+                        "計測 {}(伝導 {}・転換のパッチ {} 本・根 {}・{} 刻み・1 リスト {} 刻み): {:.2f} ns/セル(1 回目 "
+                        "{:.2f})・バッファ {} KiB・溢れ {} KiB・待たせた {}",
+                        item.name, conduction ? "あり" : "なし", patches, test::MEASURE_ROOTS, MEASURE_TICKS,
+                        cost->ticksPerList, cost->nsPerCell, first->nsPerCell, cost->bufferBytes / 1024,
+                        cost->overflowBytes / 1024, cost->productsHeld);
+                }
             }
         }
 
@@ -1809,6 +1838,8 @@ namespace {
                 measure.spaceGroups = std::max(1u, static_cast<uint32_t>(std::atoi(arguments[++index])));
             else if (argument == "--measure-big-only")
                 measure.bigOnly = true;
+            else if (argument == "--measure-convert")
+                measure.convert = true;
             else if (argument == "--diagnose-species" && diagnose && index + 1 < arguments.size())
                 diagnose->species = std::max(1u, static_cast<uint32_t>(std::atoi(arguments[++index])));
             else
@@ -1826,7 +1857,8 @@ namespace {
                 "[--diagnose-compare] [--diagnose-conduct] "
                 "[--diagnose-limits] [--diagnose-species <表の物質>]] [--repeat-wide <場面,...> <回数> "
                 "[--repeat-fresh-queue] [--repeat-fresh-ring]] "
-                "[--wide-stamps] [--wide-space-groups <グループ>] [--measure-big-only] [--no-pipeline-cache]");
+                "[--wide-stamps] [--wide-space-groups <グループ>] [--measure-big-only] [--measure-convert] "
+                "[--no-pipeline-cache]");
             return 2;
         }
 
