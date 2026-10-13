@@ -27,6 +27,7 @@
 #include "editor/lab_panel.h"
 #include "editor/mixer_panel.h"
 #include "editor/patch_panel.h"
+#include "editor/play_metric_panel.h"
 #include "editor/reaction_table_panel.h"
 #include "editor/time_control.h"
 #include "gpu/com_ptr.h"
@@ -101,6 +102,9 @@ namespace bicameral::editor {
 
         // --- 写しの早送り(T-0412)---
         CopyProgress copy;
+
+        // --- 遊びの指標(T-0432)---
+        PlayMetricProgress playMetrics;
     };
 
     class EditorOverlay {
@@ -148,6 +152,9 @@ namespace bicameral::editor {
         // 写しの早送り(T-0412。今の世界の写しを別に早送りして測る)
         [[nodiscard]] CopyPanel& Copy() { return *m_copy; }
 
+        // 遊びの指標(T-0432。パッケージの指標を表を変えるたびに測り、前の版と比べる)
+        [[nodiscard]] PlayMetricPanel& PlayMetrics() { return *m_playMetrics; }
+
     private:
         EditorOverlay(Window& window, uint32_t frameCount);
 
@@ -184,6 +191,7 @@ namespace bicameral::editor {
         std::unique_ptr<PatchPanel> m_patch;
         std::unique_ptr<MixerPanel> m_mixer;
         std::unique_ptr<CopyPanel> m_copy;
+        std::unique_ptr<PlayMetricPanel> m_playMetrics;
         bool m_contextCreated = false;
         bool m_win32Initialized = false;
         bool m_dx12Initialized = false;

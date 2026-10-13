@@ -24,6 +24,7 @@
 
 #include "common/reaction.hlsli"
 #include "sim/material_templates.h"
+#include "sim/play_metric.h"
 #include "sim/reaction_wide_cell.h"
 #include "sim/world_atmosphere.h"
 #include "sim/world_layout.h"
@@ -87,6 +88,7 @@ namespace bicameral::sim {
         WorldPhysics environment;              // 環境の値(分類 environment。無ければブランク = 0。T-0400・ADR-0176)
         WorldAtmosphereDefinition
             atmosphere;  // 基準の大気(分類 atmosphere と environment の大気の値。T-0373・ADR-0182)
+        std::vector<PlayMetricDefinition> playMetrics;  // 遊びの指標(分類 play_metrics。T-0432・ADR-0206)
     };
 
     // --- ベイクした表 ---
@@ -139,7 +141,8 @@ namespace bicameral::sim {
         WorldPhysics environment;    // 環境の値(重力・気体の音速の基準 → 物理と気体の設定。T-0400・ADR-0176)
         WorldAtmosphere atmosphere;  // 基準の大気(成分・温度・地面の圧力 → 気体の層の基準。T-0373・ADR-0182。空 = 無い)
 
-        MaterialTemplates templates;  // 材料のひな形・抽出の物質・既定(T-0399)
+        MaterialTemplates templates;          // 材料のひな形・抽出の物質・既定(T-0399)
+        std::vector<PlayMetric> playMetrics;  // 遊びの指標(鍵の順。sim/play_metric_measure が測る。T-0432・ADR-0206)
 
         [[nodiscard]] ReactionTableView View() const {
             return {.species = species, .rules = rules, .ruleIndex = ruleIndex, .rates = rates};

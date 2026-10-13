@@ -14,14 +14,18 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <filesystem>
+#include <memory>
 #include <optional>
+#include <string>
 
 #include "core/aliases.h"
 #include "gpu/device.h"
 #include "gpu/graph_trace.h"
 #include "render/debug_view_controller.h"
 #include "save/replay_file.h"
+#include "script/reaction_table_loader.h"
 
 namespace bicameral::frame {
 
@@ -108,6 +112,9 @@ namespace bicameral::frame {
         // 刻み 60 で今の世界の写しを取り 600 刻み早送りし、写しの刻みごとのハッシュが本物と同じかを確かめる(--auto-copy。
         // --editor と一緒に。--record で記録し、別の起動の --replay で本物が変わらないことを確かめる。T-0412)
         bool autoCopy = false;
+        // エディタの遊びの指標が起動の初めに表の指標を全部測り終え、全部測れたかを確かめる(--auto-metrics。--editor と一緒に。
+        // --record で記録し、別の起動の --replay で本物が変わらないことを確かめる。T-0432)
+        bool autoMetrics = false;
         // 筆で木を置く・木炭を足す・格子からはみ出す・当たらない値を投げ、木に火を付ける。当たるはずの置くコマンドが全部 GPU で
         // 当たったかを確かめる(--auto-place。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0222)
         bool autoPlace = false;
@@ -140,5 +147,9 @@ namespace bicameral::frame {
 
     // 終了コード: 0 = 正常、1 = 失敗(作れない・デバイスの喪失・debug layer のエラー・再生のハッシュの不一致・記録を書けない)
     int RunFrameLoop(const FrameLoopOptions& options);
+
+    // 世界の反応表を --packages・--mix・--world から読む(フレームのループが起動時に読むのと同じ。--measure-metrics も使う。T-0432)
+    [[nodiscard]] std::expected<std::shared_ptr<const script::LoadedReactionTable>, std::string> LoadLoopReactionTable(
+        const FrameLoopOptions& options);
 
 }  // namespace bicameral::frame

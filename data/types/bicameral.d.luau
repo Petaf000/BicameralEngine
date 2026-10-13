@@ -103,6 +103,25 @@ export type Environment = {
     atmosphere_surface_pressure_pa: number?, -- 基準の大気の地面の圧力(Pa。atmosphere を書いたら要る)
 }
 
+-- --- 遊びの指標(分類 play_metrics。T-0432・ADR-0206。1 つの鍵 = 1 つの指標。読み手は engine/src/script/play_metrics_package.h)---
+-- 場面は world_cells の初めの世界。つつきを当て、量が at_most 以下(at_least 以上)になるまで写しを早送りして刻みを測る
+export type PlayMetricPoke = {
+    tick: number, -- 当てる刻み(0 から。max_ticks より前)
+    cell: { number }, -- { x, y, z }(セル)
+}
+
+export type PlayMetric = {
+    label: string?, -- 表示の名前(省けば鍵)
+    max_ticks: number, -- 早送りの上限(刻み。sample_interval_ticks の倍数)
+    sample_interval_ticks: number, -- 量を測る間隔(刻み)
+    pokes: { PlayMetricPoke }?, -- 場面に当てるつつき(セルを温める)
+    quantity: string, -- 測る量: "max_temperature"(mK)・"cells_at_or_above"(セル)・"species_amount"(µmol)
+    temperature_mk: number?, -- cells_at_or_above のしきい値の温度(この量だけ)
+    species: string?, -- species_amount の物質(この量だけ)
+    at_most: number?, -- 量がこれ以下で止める(at_least と 1 つまで。どちらも無ければ上限の量を測る)
+    at_least: number?,
+}
+
 -- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。反応表のほかの分類(UI の文字列など)は形を決めていない ---
 export type PackageEntry = {
     elements: { [string]: Element }?,
@@ -115,5 +134,6 @@ export type PackageEntry = {
     editor_defaults: EditorDefaults?,
     environment: Environment?,
     atmosphere: { [string]: number }?, -- 基準の大気の成分(物質 → ppm。足して 1000000。T-0373)
+    play_metrics: { [string]: PlayMetric }?, -- 遊びの指標(T-0432)
     [string]: any,
 }

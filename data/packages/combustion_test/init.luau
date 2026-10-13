@@ -9,4 +9,5 @@ return {
     view_quantities = require("view_quantities"),
     editor_defaults = require("editor_defaults"),
     environment = require("environment"),
+    play_metrics = require("play_metrics"), -- 遊びの指標(T-0432)
 }

@@ -15,6 +15,7 @@
 #include "script/environment_package.h"
 #include "script/material_templates_package.h"
 #include "script/package_fields.h"
+#include "script/play_metrics_package.h"
 #include "script/world_layout_package.h"
 
 namespace bicameral::script {
@@ -371,6 +372,12 @@ namespace bicameral::script {
             return std::unexpected(atmosphere.error());
 
         definition.atmosphere = std::move(*atmosphere);
+
+        auto playMetrics = ReadPlayMetrics(packages);
+        if (!playMetrics)
+            return std::unexpected(playMetrics.error());
+
+        definition.playMetrics = std::move(*playMetrics);
 
         return definition;
     }

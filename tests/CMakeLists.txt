@@ -120,6 +120,11 @@ target_compile_definitions(world_layout_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(world_layout_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME world_layout COMMAND world_layout_test)
+add_executable(play_metric_test play_metric_test.cpp)  # 遊びの指標の形(分類 play_metrics・差・値のファイル。T-0432・ADR-0206)
+target_precompile_headers(play_metric_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(play_metric_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
+add_dependencies(play_metric_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME play_metric COMMAND play_metric_test)
 # 物質を足す・消す表の差し替えで、セルの物質 ID を名前で付け替える(T-0223・ADR-0065。CPU リファレンス。GPU は T-0242)
 add_executable(reaction_species_remap_test reaction_species_remap_test.cpp)
 target_precompile_headers(reaction_species_remap_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
@@ -469,6 +474,10 @@ bicameral_add_gpu_test(gpu_world_copy_test)
 target_link_libraries(gpu_world_copy_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_world_copy gpu_world_copy_test gpu)
 set_tests_properties(gpu_world_copy PROPERTIES TIMEOUT 900)
+bicameral_add_gpu_test(gpu_play_metric_test)  # 遊びの指標を写しの早送りで測る(T-0432・ADR-0206)
+target_link_libraries(gpu_play_metric_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_play_metric gpu_play_metric_test gpu)
+set_tests_properties(gpu_play_metric PROPERTIES TIMEOUT 900)
 
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
@@ -556,6 +565,16 @@ add_test(NAME window_copy_play COMMAND bicameral --replay ${WINDOW_COPY_FILE} --
 set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP window_copy TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-copy: OK")
 set_tests_properties(window_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_copy TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 遊びの指標(T-0432・ADR-0206): エディタが起動の初めにサンプルの世界の指標を本物の刻みの合間に測り終える(--auto-metrics)。
+# 記録を指標無しの別の起動で再生して同じハッシュ列 = 指標を測っても本物は変わらない(D-403)
+set(WINDOW_METRICS_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_metrics.bcreplay)
+add_test(NAME window_metrics_record
+         COMMAND bicameral --world sample --editor --auto-ignite --auto-metrics --frames 20000 --record ${WINDOW_METRICS_FILE})
+add_test(NAME window_metrics_play COMMAND bicameral --replay ${WINDOW_METRICS_FILE} --target-fps 30)
+set_tests_properties(window_metrics_record PROPERTIES LABELS gpu FIXTURES_SETUP window_metrics TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-metrics: .*OK")
+set_tests_properties(window_metrics_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_metrics TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
@@ -760,6 +779,7 @@ foreach(_name IN ITEMS
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
-    gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test)
+    gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test play_metric_test
+    gpu_play_metric_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

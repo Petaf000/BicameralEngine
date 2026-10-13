@@ -459,6 +459,12 @@ namespace bicameral::sim {
 
         baked.atmosphere = std::move(*atmosphere);
 
+        auto playMetrics = BakePlayMetrics(definition.playMetrics, baked);
+        if (!playMetrics)
+            return std::unexpected(playMetrics.error());
+
+        baked.playMetrics = std::move(*playMetrics);
+
         return baked;
     }
 

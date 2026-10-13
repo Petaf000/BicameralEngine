@@ -69,6 +69,7 @@ namespace bicameral::editor {
         overlay->m_patch = std::make_unique<PatchPanel>();
         overlay->m_mixer = std::make_unique<MixerPanel>();
         overlay->m_copy = std::make_unique<CopyPanel>();
+        overlay->m_playMetrics = std::make_unique<PlayMetricPanel>();
         if (!overlay->CreateGpuObjects(device, frameCount))
             return std::unexpected("エディタの描画のリソースを作れない");
 
@@ -235,6 +236,7 @@ namespace bicameral::editor {
         m_patch->Build(*m_lab);
         m_mixer->Build(status.reactionTable, status.replaying);
         m_copy->Build(status.copy, TICKS_PER_SECOND);
+        m_playMetrics->Build(status.playMetrics, TICKS_PER_SECOND);
         DrawBrushPreview(status.brushPreview);
         PatchPanel::DrawRanges(status.patchRanges);
 
