@@ -1,6 +1,6 @@
 # T-0453 環境ミキサーで足した環境・初めのセルを今の世界に効かせる(世界を作り直す)
 
-- Status: Doing(wt2・2026-10-13 第 3 巡)
+- Status: Done(wt2・2026-10-13 第 3 巡。案 A・R1 は仮)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -42,3 +42,6 @@
   世界の部品(CreateWorldParts)に分け、RunFrameLoop が「作り直す」依頼で終わった FrameLoop から窓・GPU・今の表を受け取って次の世界を作る
   (CreateRebuiltParts。表は読み直さない・表示とカメラと --frames の残りを続ける)。ミキサーのパネルに「世界を作り直す」と、今の表が世界を作った表と
   違うかの表示(ReactionTableStatus::worldVersion)。--auto-rebuild と window_rebuild_record/play。
+  試験: release で window_rebuild_record/play・window_mixer_record/play・window_mix_start、debug(debug layer あり)で window_rebuild_record/play が通過
+  (作り直した世界の 60 刻みのハッシュが別の起動の再生と一致・debug layer のエラー 0)。作り直しの止まりは run で 0.76 s(perf.md。ctest は 19 s〔T-0455〕)。
+  残り: 案 B・C(足した刻みにセルを置き換える・足し合わせる)は要る時に別のボタンで。足した一覧の保存はセーブの形(15)。
