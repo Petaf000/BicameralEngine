@@ -653,6 +653,21 @@ namespace bicameral::sim {
 
     using namespace gas_detail;  // 下の公開の関数から小刻みの部品を使う
 
+    uint32_t GasSoundCapTemperature(uint32_t soundSpeedMmPerS, uint64_t soundSpeedLimitMmPerS,
+                                    uint32_t referenceTemperature) {
+        const uint64_t limit = soundSpeedLimitMmPerS;
+        assert(soundSpeedMmPerS > 0 && soundSpeedMmPerS <= limit && limit < ((uint64_t)1 << 32));
+
+        // T_基準 × 上限² ÷ c̃²(128bit。商が 64bit を超える〔c̃ がとても小さい〕なら頭打ちなし)
+        const uint64_t soundSquared = (uint64_t)soundSpeedMmPerS * soundSpeedMmPerS;
+        const fx::FxU128 numerator = fx::FxMulU64Full(referenceTemperature, limit * limit);
+        if (numerator.hi >= soundSquared)
+            return UINT32_MAX;
+
+        const uint64_t cap = fx::FxDivU128By64(numerator, soundSquared).quotient;
+        return (uint32_t)std::min<uint64_t>(cap, UINT32_MAX);
+    }
+
     GasCoefficients MakeGasCoefficients(const GasConfig& config) {
         // 音速の基準は世界の環境の値(ADR-0176)。0 = 無い世界(ブランク)では気体の箱を作れない
         assert(config.substeps > 0 && config.soundSpeedMmPerS > 0);
@@ -772,8 +787,13 @@ namespace bicameral::sim {
                                                             capacity + gasConstant)
                                               .quotient;
         }
-        box.coefficients.soundTemperature = config.soundCapTemperature == 0 ? ground.temperature
-                                                                            : config.soundCapTemperature;
+
+        // 頭打ちの温度(D-461・T-0269): 既定は安定の上限まで本物の音速(T_基準 ×(上限 ÷ c̃)²)
+        box.coefficients.soundTemperature = config.soundCapTemperature == 0
+                                                ? GasSoundCapTemperature(config.soundSpeedMmPerS,
+                                                                         GasSoundSpeedLimitMmPerS(config.substeps),
+                                                                         ground.temperature)
+                                                : config.soundCapTemperature;
 
         // --- セル = 層の基準 + 風 ---
         box.cells.resize((size_t)config.sizeX * config.sizeY * config.sizeZ);
@@ -790,7 +810,7 @@ namespace bicameral::sim {
     GasDerived DeriveGasCell(const GasBox& box, const GasCell& cell, uint32_t z) {
         GasDerived derived = DeriveRaw(box.config, box.coefficients, cell);
 
-        // p̃ = α(p − p_基準)。基準より熱いセルは α × T_基準 ÷ T(実効の音速を c̃ に抑える。c_iso² ∝ T)
+        // p̃ = α(p − p_基準)。頭打ちの温度 T_頭 より熱いセルは α × T_頭 ÷ T(実効の音速を安定の上限に抑える。c_iso² ∝ T。T-0269)
         const int64_t deviation = derived.pressure - box.referenceDerived[z].pressure;
         int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
         const uint32_t soundTemperature = box.coefficients.soundTemperature;

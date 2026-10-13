@@ -4,6 +4,7 @@
 // 微量の成分(乱数の丸め)・minmod と切り捨て。刻みごとに GPU のセルと帳簿を読み戻し、CPU の状態のハッシュと帳簿を比べる。
 // T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波・1 セルの 5 倍の圧力(整数の範囲)。
 // T-0234(断熱の仕事 pdV・運動エネルギーの散逸): 既定は断熱(衝撃波は断熱の理論 398.6 m/s)。等温の形も場面 shock_isothermal(404 m/s)で確かめる。
+// T-0269(D-461): 熱いセルの音速の頭打ちが約 473 K から(ν ≤ 0.6)。1500 K のセル(hot_cell)と 1500 K・5 倍の物質量の爆発(blast_hot)。
 // 引数: gpu_test_options.h(--warp・--queue)と
 //   --scene <名前>[,<名前>...]: その場面だけ(既定は全部)。ctest は GPU の順番待ち(D-460)に合わせて 2 組に分けて流す(T-0426)。
 //     並べた名前が 1 つでも無ければ失敗(場面の名前を変えた時に、組から黙って落ちないように)
@@ -216,9 +217,9 @@ namespace {
         config.gravity = false;
         config.thermodynamics = thermodynamics;
         if (thermodynamics == GasThermodynamics::Adiabatic && overPercent > 1) {
-            // 断熱の衝撃波は c̃ を本物の断熱の音速(343.7 m/s。α = 1)にし、温まった気体の音速を頭打ちにせず理想気体の理論と比べる
+            // 断熱の衝撃波は c̃ を本物の断熱の音速(343.7 m/s。α = 1)にし、理想気体の理論と比べる(頭打ちは既定の約 463 K から。
+            // 衝撃波の後ろは 323 K なので掛からない。T-0269)
             config.soundSpeedMmPerS = ADIABATIC_SOUND_MM_PER_S;
-            config.soundCapTemperature = UINT32_MAX;
         }
 
         GasBox box = MakeAirBox(config);
@@ -245,6 +246,22 @@ namespace {
         return {.name = "blast", .box = box, .ticks = 30};
     }
 
+    // 閉じた 12³ の箱の 1 セルだけ 1500 K(hot_cell)・1500 K で 5 倍の物質量(blast_hot。熱い爆発。25 倍の圧力)。
+    // 頭打ちの温度(約 473 K。T-0269)より熱いセルの音速が安定の上限 432 m/s(ν = 0.6)で走る
+    Scene MakeHotScene(const char* name, bool dense) {
+        GasBox box = MakeAirBox(MakeAirConfig(12, 12, 12));
+        const uint32_t center = box.Index(6, 6, 3);
+        if (dense) {
+            GasCell& cell = box.cells[center];
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+                cell.amounts[s] *= 5;
+        }
+
+        Heat(box, center, 1500000);
+
+        return {.name = name, .box = box, .ticks = 30};
+    }
+
     std::vector<Scene> MakeScenes() {
         std::vector<Scene> scenes;
         scenes.push_back(MakeClosedScene());
@@ -261,6 +278,8 @@ namespace {
         scenes.push_back(
             MakeTubeScene("shock_isothermal", 100, GasThermodynamics::Isothermal));  // 等温の形(T-0234 の前)
         scenes.push_back(MakeBlastScene());
+        scenes.push_back(MakeHotScene("hot_cell", false));
+        scenes.push_back(MakeHotScene("blast_hot", true));
 
         // 重力を変えた世界(T-0423): 無重力・月・上限 100 m/s²
         scenes.push_back(MakeClosedScene("closed_zero_gravity", 0));
@@ -535,14 +554,16 @@ namespace {
                 return "管の波の速さが合わない";
         }
 
-        if (scene.name == "blast") {
+        if (scene.name == "blast" || scene.name == "hot_cell" || scene.name == "blast_hot") {
             uint64_t lightest = UINT64_MAX;
             for (uint32_t index = 0; index < final.cells.size(); ++index)
                 lightest = std::min(lightest, DeriveGasCell(final, final.cells[index], CellZ(final, index)).mass);
 
-            Log(Channel::Sim, Level::Info, "  blast: 最も軽いセル {} mg・最大の速さ {} (2^-20 m/s)", lightest,
+            Log(Channel::Sim, Level::Info, "  {}: 最も軽いセル {} mg・最大の速さ {} (2^-20 m/s)", scene.name, lightest,
                 MaxSpeed(final));
-            if (lightest < (uint64_t)ROUGH_CELL_MASS / 2)
+            // 熱いセルは膨らんで軽くなる(圧力が釣り合えば約 1/5。熱い爆発は膨らみ過ぎてもっと軽い。gas_reference_test と同じ目安)
+            const uint64_t massDivisor = scene.name == "blast" ? 2 : (scene.name == "hot_cell" ? 8 : 16);
+            if (lightest < (uint64_t)ROUGH_CELL_MASS / massDivisor)
                 return "強い圧力で真空に近いセルができた";
         }
 

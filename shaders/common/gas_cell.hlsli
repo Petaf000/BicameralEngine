@@ -103,7 +103,7 @@ GasGpuDerived DeriveCellFromReference(GasGpuCell cell, int64_t referencePressure
     FX_ASSERT(amountTemperature.hi == 0);
     derived.pressure = (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 32);
 
-    // --- p̃ = α(p − p_基準)。基準より熱いセルは α × T_基準 ÷ T ---
+    // --- p̃ = α(p − p_基準)。頭打ちの温度より熱いセルは α × T_頭 ÷ T(T-0269)---
     const int64_t deviation = derived.pressure - referencePressure;
     int64_t scaled = FxMulShiftS64(deviation, (int64_t)GAS_P.soundScale, 32);
     if (derived.temperature > GAS_P.soundTemperature)
