@@ -10,7 +10,7 @@
 // 同じ上限を渡し、毎刻みビット一致と保存量(ComputeConservedTotals)の一致を確かめる。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 1 刻み全体の GPU の ms(陰解法あり / なし。なしは同じ場面を陽解法の
 // 頭打ちで刻む比べる相手)。同じ場面を 2 回流して 2 回目を使う。
-// --squeeze none,blocks,levels,cheapest(カンマ区切り。既定は全部)で上限の形を選ぶ。ctest は 2 本に分ける(1 本を 10 分に収める。T-0426)。
+// --squeeze none,blocks,levels,cheapest(カンマ区切り。既定は全部)で上限の形を選ぶ。ctest は HW を 3 本・WARP を 2 本に分ける(1 本を 10 分に収める。T-0426)。
 // 計測は none を含むときだけ。
 #include <algorithm>
 #include <array>
