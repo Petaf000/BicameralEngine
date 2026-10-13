@@ -47,6 +47,19 @@ GPU を使う試験は全部のランナーで 1 本ずつ(D-460)なので、1 �
 3. **ジョブの上限から GPU の順番待ちを除く**(runner/runner.ps1・scripts/jobs/_gpulock.ps1): _gpulock.ps1 が待った秒を
    `$env:JOB_GPU_WAIT` のファイル(runner/running/<job>.gpuwait)に書き、ランナーは上限にその秒を足して数える(足すのは 6 時間まで)。
    **ランナーを起動し直すまで効かない**(古いランナーは環境変数を渡さないので、_gpulock.ps1 は何もしない)。
+4. **gpu_gas(+_warp)を場面の 2 組に**(2026-10-13): gpu_gas_test の `--scene` に名前をカンマで並べられるようにした(並べた名前が場面に
+   無ければ失敗。名前を変えた時に組から黙って落ちないように)。組は tests/CMakeLists.txt の GPU_GAS_BOX_SCENES・GPU_GAS_FLOW_SCENES:
+   | 名前 | 場面 | release(2026-10-13・待ち 0 秒) |
+   |---|---|---|
+   | gpu_gas / gpu_gas_warp | 箱: closed・periodic・single_layer・static・bubble・closed_zero_gravity・closed_moon・closed_max_gravity・bubble_zero_gravity | HW 58.0 s / WARP 389.6 s |
+   | gpu_gas_flow / gpu_gas_flow_warp | 流れ: wind_mc・wind_upwind(wind_mc と比べるので同じ組)・wind_minmod_floor・trace・sound・shock・shock_isothermal・blast・static_moon・static_max_gravity | HW 24.2 s / WARP 362.7 s |
+   上限は 1800 → 900 秒。WARP の重いのは bubble(137 s)と bubble_zero_gravity・static の 3 つ(28 s 前後)・風の 3 つ(70〜80 s)。
+5. **gpu_probe_sim(+_warp)を 2 本に**: gpu_probe_sim_test に `--part all|framings|tables` を足し、確かめごとの秒をログに出す。
+   | 名前 | --part | 確かめ | release(2026-10-13) |
+   |---|---|---|---|
+   | gpu_probe_sim / _warp | framings | 分け方・イベントの溢れ・記録と再生・遅い起こし | HW 73.3 s(34.3・7.4・13.5・17.3)/ WARP 97.2 s(49.9・10.4・17.1・19.5) |
+   | gpu_probe_sim_tables / _tables_warp | tables | 表の差し替え・物質の付け替え・反応の上限 | HW 37.6 s(15.4・13.6・8.0)/ WARP 53.8 s(21.0・21.4・11.3) |
+   debug(10 分超えだったのは debug の 755 s・636 s)は未計測。release の比で HW は約 2:1 に分かれる(debug の framings は約 500 s の見込み)。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-12(wt5・t-0426): 調べた(ctest の TIMEOUT は待ちを含まない・ジョブの上限が含む・重いのは Work Graph の作成)。gpu_multires_wide を 6 本・
@@ -54,13 +67,16 @@ GPU を使う試験は全部のランナーで 1 本ずつ(D-460)なので、1 �
   debug の HW で 4 組の形を流した(混んでいた時): limits(5 場面)532.7 s・many 172.3 s・many_conduct 476.3 s・coarsen(4 場面)600 s で切れた
   → 1 組 3 場面までに分け直した。この試験のジョブは GPU を 1459 秒待ち、ジョブの上限 3600 秒で WARP の途中で切られた(上限から待ちを除く理由)。
   **6 組の形・implicit_conduction の 2 本はビルドだけで、まだ流していない**(下の「続き」)。
+- 2026-10-13(wt5・t-0426): gpu_gas(+_warp)を場面の 2 組に・gpu_probe_sim(+_warp)を --part の 2 本に分けた。release の 8 本が通った
+  (秒は上の 4・5)。debug の秒と、1〜3 の続き(wide の 6 本・implicit_conduction の 2 本を流す・implicit_tree・gpu_multires)はまだ。
 
 ## 続き(次の作業役へ)
+0. 2026-10-13 に分けた gpu_gas(_flow)・gpu_probe_sim(_tables)と WARP を debug で流して秒を表に足す(10 分を超えたら組を分け直す)。
 1. debug・release で `-Filter '^gpu_multires_(wide|warp)'` と `'^gpu_multires_implicit_conduction'` を流し、1 本ずつの秒をこの表に足す
    (GPU の待ちが長いので、ランナーを起動し直して上限から待ちを除いた後が楽)。10 分を超える組があればさらに分ける。
 2. まだ分けていない 10 分超えの候補: gpu_multires_subcycle_warp(gpu_multires_conduction_test。T-0397 が触っているので後で)・
-   gpu_multires_implicit_tree(場面を全部 CPU で先に作るので、場面で分けるなら MakeScenes も分ける)・gpu_gas_warp(--scene を並びにして 2 本)・
-   gpu_multires(鎖。release は 2 回目の実行と計測を含む)・gpu_probe_sim。
+   gpu_multires_implicit_tree(場面を全部 CPU で先に作るので、場面で分けるなら MakeScenes も分ける)・
+   gpu_multires(鎖。release は 2 回目の実行と計測を含む)。gpu_gas_warp・gpu_probe_sim は 2026-10-13 に分けた(上の 4・5)。
 3. Work Graph の作成が遅い原因は T-0427(研究)。
 
 ## 判断待ち

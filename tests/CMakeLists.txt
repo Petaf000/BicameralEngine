@@ -309,9 +309,15 @@ set_tests_properties(gpu_lab_box gpu_lab_box_warp PROPERTIES TIMEOUT 900)  # 並
 
 bicameral_add_gpu_test(gpu_gas_test)  # 気体の流れの GPU と CPU の毎刻みのビット一致・G1・G2 の合格の条件(T-0185)
 target_link_libraries(gpu_gas_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_gas gpu_gas_test gpu --queue compute)
-bicameral_add_gpu_test_case(gpu_gas_warp gpu_gas_test warp --warp --queue compute)
-set_tests_properties(gpu_gas gpu_gas_warp PROPERTIES TIMEOUT 1800)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い。T-0226 で小刻みが 6 倍)
+# GPU の順番待ち(D-460)に合わせて場面を 2 組に分ける(T-0426。1 本 10 分以内。比べ方は同じ)。release の WARP の目安(2026-10-12):
+# 箱の組(閉じた箱・泡・重さの違い)約 390 秒・流れの組(風・管・爆発・静止大気の重さの違い)約 360 秒
+set(GPU_GAS_BOX_SCENES closed,periodic,single_layer,static,bubble,closed_zero_gravity,closed_moon,closed_max_gravity,bubble_zero_gravity)
+set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal,blast,static_moon,static_max_gravity)
+bicameral_add_gpu_test_case(gpu_gas gpu_gas_test gpu --queue compute --scene ${GPU_GAS_BOX_SCENES})
+bicameral_add_gpu_test_case(gpu_gas_flow gpu_gas_test gpu --queue compute --scene ${GPU_GAS_FLOW_SCENES})
+bicameral_add_gpu_test_case(gpu_gas_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_BOX_SCENES})
+bicameral_add_gpu_test_case(gpu_gas_flow_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_FLOW_SCENES})
+set_tests_properties(gpu_gas gpu_gas_flow gpu_gas_warp gpu_gas_flow_warp PROPERTIES TIMEOUT 900)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い)
 bicameral_add_gpu_test(gpu_gas_tree_test)  # 気体の多重解像度の木の GPU と CPU(gas_tree)の毎刻みのビット一致(T-0209)
 target_link_libraries(gpu_gas_tree_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_gas_tree gpu_gas_tree_test gpu --queue compute)
@@ -360,8 +366,12 @@ bicameral_add_gpu_test(gpu_probe_sim_test)
 target_link_libraries(gpu_probe_sim_test PRIVATE bicameral_sim bicameral_save)
 # HW の 4 つ(sim・trace・peek・fire)は GPU-based validation を切る(--no-gbv。2026-10-05 ユーザー決定): 大きいシェーダーを使うたびに
 # GBV の計装で約 2 分止まり、300 s を超えた。どれも CPU とビット一致を毎回比べる。GBV が要る調べ物の時だけ外して走らせる(BACKLOG)
-bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu --no-gbv)
-bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp)
+# GPU の順番待ち(D-460)に合わせて 2 本ずつに分ける(T-0426。debug で 1 本 10 分を超えた): 分け方・イベント・記録と再生・遅い起こし /
+# 表の差し替え・物質の付け替え・反応の上限(_tables)
+bicameral_add_gpu_test_case(gpu_probe_sim gpu_probe_sim_test gpu --no-gbv --part framings)
+bicameral_add_gpu_test_case(gpu_probe_sim_tables gpu_probe_sim_test gpu --no-gbv --part tables)
+bicameral_add_gpu_test_case(gpu_probe_sim_warp gpu_probe_sim_test warp --warp --part framings)
+bicameral_add_gpu_test_case(gpu_probe_sim_tables_warp gpu_probe_sim_test warp --warp --part tables)
 # 世界に物を置く筆(T-0222): 置く・足す・はみ出す・当たらない値のコマンドを流して CPU と毎刻みビット一致(分け方を変えても)
 bicameral_add_gpu_test(gpu_probe_place_test)
 target_link_libraries(gpu_probe_place_test PRIVATE bicameral_sim bicameral_save)
@@ -380,7 +390,7 @@ target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_trace gpu_probe_trace_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_trace_warp gpu_probe_trace_test warp --warp)
 # WARP の仮の世界は重い(2026-10-03 の PC の debug で sim 130 s・trace 65 s)。CI の機械(コアが少ない)で 300 s を越えないよう長めに切る
-set_tests_properties(gpu_probe_sim gpu_probe_sim_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)  # gpu_probe_sim は debug で 300 秒を超える(T-0139 で表の差し替えを足した)
+set_tests_properties(gpu_probe_sim gpu_probe_sim_tables gpu_probe_sim_warp gpu_probe_sim_tables_warp gpu_probe_trace_warp PROPERTIES TIMEOUT 900)  # gpu_probe_sim は debug で 300 秒を超える(T-0139 で表の差し替えを足した)
 # 覗き窓(T-0096): 影の鎖と抽出の覗きの欄が CPU とビット一致・覗いても世界のハッシュ列が変わらない
 bicameral_add_gpu_test(gpu_probe_physics_test)  # 仮の世界の刻みに入れた物理と押すコマンドの GPU と CPU のビット一致(T-0098)
 target_link_libraries(gpu_probe_physics_test PRIVATE bicameral_sim)
