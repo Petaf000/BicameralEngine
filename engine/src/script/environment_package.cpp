@@ -3,34 +3,25 @@
 // どの値も Luau の倍精度から誤差なしで整数に直せるものだけ通す(04 R7。reaction_package.cpp と同じ決まり)。
 #include "script/environment_package.h"
 
-#include <cmath>
 #include <cstdint>
 #include <format>
 
+#include "script/package_fields.h"
 #include "sim/gas_reference.h"
 
 namespace bicameral::script {
 
     namespace {
 
-        constexpr int64_t EXACT_INTEGER_LIMIT = int64_t{1} << 53;  // 倍精度で誤差なしに表せる整数の上限
-
-        // 整数で書いた数を読む(小数・[minimum, maximum] の外は誤り)
-        std::expected<uint32_t, std::string> ReadValue(const TableEntry& entry, std::string_view key, int64_t minimum,
+        // 1 つの値を整数で読む([minimum, maximum] の外は誤り)。誤りには、その鍵を書いたパッケージの名前を付ける
+        std::expected<uint32_t, std::string> ReadValue(const std::string& key, const TableEntry& entry, int64_t minimum,
                                                        int64_t maximum) {
-            const std::string path = std::format("{}.{}('{}' が書いた)", ENVIRONMENT_CATEGORY, key, entry.package);
-            constexpr auto LIMIT = static_cast<double>(EXACT_INTEGER_LIMIT);
-            const ScriptValue& value = entry.value;
-            const bool exact = value.IsNumber() && value.number >= -LIMIT && value.number <= LIMIT &&
-                               std::trunc(value.number) == value.number;
-            if (!exact)
-                return std::unexpected(std::format("{}: 整数で書く", path));
+            const auto value = ReadInteger(entry.value, std::format("{}.{}", ENVIRONMENT_CATEGORY, key), minimum,
+                                           maximum);
+            if (!value)
+                return std::unexpected(std::format("パッケージ {}: {}", entry.package, value.error()));
 
-            const auto integer = static_cast<int64_t>(value.number);
-            if (integer < minimum || integer > maximum)
-                return std::unexpected(std::format("{}: {} は範囲 {}〜{} の外", path, integer, minimum, maximum));
-
-            return static_cast<uint32_t>(integer);
+            return static_cast<uint32_t>(*value);
         }
 
     }  // namespace
@@ -46,20 +37,20 @@ namespace bicameral::script {
 
         for (const auto& [key, entry] : category->second) {
             if (key == ENVIRONMENT_GRAVITY_KEY) {
-                const auto gravity = ReadValue(entry, key, 0, fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2);
+                const auto gravity = ReadValue(key, entry, 0, fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2);
                 if (!gravity)
                     return std::unexpected(gravity.error());
 
                 world.gravityMicrometersPerSecond2 = *gravity;
             } else if (key == ENVIRONMENT_SOUND_SPEED_KEY) {
-                const auto soundSpeed = ReadValue(entry, key, 0, soundSpeedLimit);
+                const auto soundSpeed = ReadValue(key, entry, 0, soundSpeedLimit);
                 if (!soundSpeed)
                     return std::unexpected(soundSpeed.error());
 
                 world.soundSpeedMillimetersPerSecond = *soundSpeed;
             } else {
                 return std::unexpected(
-                    std::format("{}.{}('{}' が書いた): 知らない鍵", ENVIRONMENT_CATEGORY, key, entry.package));
+                    std::format("パッケージ {}: {}.{}: 知らない鍵", entry.package, ENVIRONMENT_CATEGORY, key));
             }
         }
 

@@ -188,14 +188,6 @@ namespace bicameral::frame {
             return options.physics && !table.worldLayout.bodies.empty();
         }
 
-        // 世界の物理の値(ADR-0171・D-480): ブランクの世界は重力 0、サンプルの世界は標準の値(標準パッケージ T-0373 が渡すようになるまで)
-        sim::WorldPhysics WorldPhysicsOf(const FrameLoopOptions& options) {
-            if (options.world == save::ReplayWorld::Sample)
-                return sim::StandardWorldPhysics();
-
-            return {};
-        }
-
         // 世界の表の読み方: サンプルの世界はゲーム本体(combustion_test)を含むフォルダ。ブランクの世界は --packages のフォルダを
         // ゲーム本体なし(全部 Mod)で読む
         script::ReactionTableSource WorldTableSource(const FrameLoopOptions& options) {
@@ -276,12 +268,12 @@ namespace bicameral::frame {
                 // --record: どの世界の記録か(T-0371)
                 m_recorder.SetWorld(options.world);
 
-                // --check-physics: 窓と同じ場面の CPU の物理
+                // --check-physics: 窓と同じ場面の CPU の物理(重力は起動時の表の環境の値。T-0400)
                 const sim::BakedReactionTable& initialTable = m_tableReload.Find(m_tableReload.InitialVersion())->table;
                 if (HasStackScene(options, initialTable) && options.checkPhysics) {
                     m_physicsCheck = std::make_unique<sim::PhysicsWorld>(
                         sim::MakeLayoutPhysicsScene(initialTable.worldLayout),
-                        sim::PhysicsParametersFor(WorldPhysicsOf(options)));
+                        sim::PhysicsParametersFor(initialTable.environment));
                 }
             }
 
@@ -495,7 +487,8 @@ namespace bicameral::frame {
                  .traceCapacity = TRACE_CAPACITY_PER_FRAME,
                  .physicsScene = HasStackScene(options, reactionTable) ? &physicsScene : nullptr,
                  .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
-                 .physicsParameters = sim::PhysicsParametersFor(WorldPhysicsOf(options)),
+                 // 世界の環境の値(表の分類 environment。ブランクは重力 0。ADR-0171・ADR-0176)
+                 .physicsParameters = sim::PhysicsParametersFor(reactionTable.environment),
                  .initialWorld = initialWorld});
         }
 

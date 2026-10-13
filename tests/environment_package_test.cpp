@@ -1,7 +1,8 @@
 // environment_package_test.cpp — 世界のパッケージの環境の値(分類 environment → sim::WorldPhysics。T-0400・ADR-0176)を CPU だけで確かめる。
 // 見るもの: サンプルの世界のパッケージ(data/packages/combustion_test)の環境が、標準の値(StandardWorldPhysics。試験の場面が使う)と同じ /
 //           分類が無い世界はブランク(全部 0)/ 環境だけのパッケージで別の重力・音速の基準を渡せる /
-//           知らない鍵・整数でない数・範囲の外(重力の上限・音速の基準の安定の上限)を、鍵と書いたパッケージの名前付きで落とす。
+//           知らない鍵・整数でない数・範囲の外(重力の上限・音速の基準の安定の上限)を、鍵と書いたパッケージの名前付きで落とす /
+//           ランタイムの入り口(LoadReactionTable)のベイクした表が環境を持ち、ブランクの表は 0、再生の作り直しでも同じ。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/environment_package.h"
 
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "script/luau_sandbox.h"
+#include "script/reaction_table_loader.h"
 
 namespace {
 
@@ -133,7 +135,7 @@ namespace {
 
         std::printf("rejected: %s\n", world.error().c_str());
         EXPECT(Contains(world.error(), part));
-        EXPECT(Contains(world.error(), "'world' が書いた"));
+        EXPECT(Contains(world.error(), "パッケージ world"));
     }
 
     // 形の誤り: 知らない鍵(綴りの誤り)・整数でない数・範囲の外・数でない値
@@ -146,6 +148,25 @@ namespace {
         ExpectRejected("return { environment = { sound_speed_mm_per_s = \"340000\" } }", "整数");
     }
 
+    // ランタイムの入り口: ベイクした表の environment(窓の物理の重力はここから。frame_loop.cpp)
+    void TestBakedTableCarriesEnvironment() {
+        const auto loaded = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR)});
+        if (!loaded) {
+            std::printf("FAILED: 表を読めない: %s\n", loaded.error().c_str());
+            ++failureCount;
+
+            return;
+        }
+
+        EXPECT(SameWorld(loaded->table.environment, sim::StandardWorldPhysics()));
+
+        const auto rebuilt = RebuildReactionTable(loaded->tableBytes, loaded->tableVersion);
+        EXPECT(rebuilt && SameWorld(rebuilt->table.environment, sim::StandardWorldPhysics()));
+
+        const auto blank = LoadBlankReactionTable();
+        EXPECT(blank && SameWorld(blank->table.environment, sim::WorldPhysics{}));
+    }
+
 }  // namespace
 
 int main() {
@@ -153,6 +174,7 @@ int main() {
     TestBlankWithoutCategory();
     TestCustomEnvironment();
     TestRejectsBrokenEnvironment();
+    TestBakedTableCarriesEnvironment();
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
 

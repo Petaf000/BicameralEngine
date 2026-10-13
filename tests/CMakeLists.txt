@@ -67,6 +67,7 @@ add_executable(environment_package_test environment_package_test.cpp)  # 世界�
 target_link_libraries(environment_package_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(environment_package_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_dependencies(environment_package_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME environment_package COMMAND environment_package_test)
 add_executable(reaction_hot_reload_test reaction_hot_reload_test.cpp)  # 反応表のホットリロード(T-0139)
 target_link_libraries(reaction_hot_reload_test PRIVATE bicameral_reaction_script bicameral_core)

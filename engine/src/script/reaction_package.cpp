@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "script/environment_package.h"
 #include "script/package_fields.h"
 #include "script/world_layout_package.h"
 
@@ -351,6 +352,12 @@ namespace bicameral::script {
             return std::unexpected(worldLayout.error());
 
         definition.worldLayout = std::move(*worldLayout);
+
+        auto environment = ReadWorldEnvironment(packages);
+        if (!environment)
+            return std::unexpected(environment.error());
+
+        definition.environment = *environment;
 
         return definition;
     }

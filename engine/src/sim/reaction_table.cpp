@@ -445,6 +445,8 @@ namespace bicameral::sim {
 
         baked.worldLayout = std::move(*layout);
 
+        baked.environment = ordered.environment;  // 環境の値は物質を指さないので、そのまま(T-0400)
+
         return baked;
     }
 

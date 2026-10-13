@@ -28,7 +28,8 @@ namespace bicameral::script {
     constexpr std::string_view ENVIRONMENT_GRAVITY_KEY = "gravity_um_per_s2";
     constexpr std::string_view ENVIRONMENT_SOUND_SPEED_KEY = "sound_speed_mm_per_s";
 
-    // 合わせた表から世界の物理の値を作る。分類が無ければブランク(全部 0)。誤りには「どの鍵か・どのパッケージが書いたか」を付ける
+    // 合わせた表から世界の物理の値を作る。分類が無ければブランク(全部 0)。誤りは「パッケージ X: environment.鍵: 何が違うか」。
+    // ReadReactionTableDefinition がこれを呼び、ベイクした表の environment に入る(T-0398 の共有の決め事)
     [[nodiscard]] std::expected<sim::WorldPhysics, std::string> ReadWorldEnvironment(const PackageSetResult& packages);
 
 }  // namespace bicameral::script

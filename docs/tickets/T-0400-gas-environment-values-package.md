@@ -34,6 +34,9 @@ sim::GasOptions の音速の基準 340 m/s(D-440)・地面の層の基準の温�
 - 音速の基準は環境の値(ブランクは 0 = 無い。器の既定も 0)。単位・上限・換算は器。基準の温度は新しい値にせず、基準の大気から導く(大気は T-0373)。
 - 読み込みは T-0398 の共有の決め事に従う: 反応表と同じ読み込みの分類 `environment`(1 つの鍵 = 1 つの値)。読む所 `script/environment_package.{h,cpp}`、
   型 `data/types/bicameral.d.luau` の `Environment`、サンプルの値 `data/packages/combustion_test/environment.luau`。
+  つなぎ目: `ReadReactionTableDefinition` → `ReactionTableDefinition::environment` → `BakeReactionTable` → `BakedReactionTable::environment`
+  (wt2 のコミット「パッケージの欄の道具を分け…」を cherry-pick して、印の節に 1 行ずつ)。窓は `reactionTable.environment` で物理の重力を作る
+  (`WorldPhysicsOf`〔世界の種類で決めていた〕は無くした)。ブランクの表・再生の作り直しも同じ道を通る。
 
 ## 判断待ち(ユーザー)
 - **音速の基準を作り手が書くか、エンジンが大気から導くか**(ADR-0176 の案 A / B)。
