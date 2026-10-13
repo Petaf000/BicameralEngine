@@ -1,5 +1,7 @@
 # NEXT.md — 次にやること(上から順に)
 
+**「続き」は司令塔として並走で進める(docs/claude/COMMANDER.md を先に読む。CLAUDE.md §3)。** 下の順は並走の割り当ての元。
+
 チケットは docs/plan/ROADMAP.md の「今の順」(D-471。① 〜 ⑦)から取る。思いつきは docs/plan/BACKLOG.md へ(CLAUDE.md 原則 8)。
 指針は DECISIONS の「指針と進め方」(D-462〜D-471)。チャットの初めに、プロジェクトの文書(claude.ai の claude/ の最新の指針)が
 この NEXT(2026-10-13 の 2 回目)より新しくないか確かめ、新しければ先に読んで反映する(docs/claude/COMMANDER.md)。
