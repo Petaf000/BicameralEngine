@@ -360,7 +360,7 @@ namespace {
     }
 
     int RunTest(ID3D12Device5* device, const BakedReactionTable& table) {
-        const PhysicsScene scene = MakeProbeStackScene();
+        const PhysicsScene scene = MakeLayoutPhysicsScene(table.worldLayout);
         const std::vector<ProbeCommand> commands = MakeCommands();
         std::optional<Created> base = Create(device, table, scene, 0);
         std::optional<Created> rewind = Create(device, table, scene, static_cast<uint32_t>(SAVE_TICKS.size()));

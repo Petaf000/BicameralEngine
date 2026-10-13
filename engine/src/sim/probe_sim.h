@@ -518,8 +518,9 @@ namespace bicameral::sim {
 
     // --- 初めの世界(T-0089)---
 
-    // サンプルの世界(D-456)。1 世代ぶんのセル(PROBE_CELL_COUNT 個)。全体が 300 K の空気(N2・O2、1 気圧)、中央に木箱
-    // (8³ セル = 4 m 角、壁の厚さ 1 セル、中は空気。壁のセルは体積の 1 割がセルロースで、残りは孔の中の空気)
+    // 表の世界の組み立て(パッケージの world_cells。T-0398・ADR-0172)から 1 世代ぶんのセル(PROBE_CELL_COUNT 個)を作る。
+    // 領域を層の順に重ね書きし、格子の外は捨てる。組み立てが無い表(ブランク)なら MakeBlankProbeWorld と同じ全部空のセル。
+    // サンプルの世界(D-456。data/packages/combustion_test/world_cells.luau)は 300 K の空気の中に木箱(8³ セル・壁の厚さ 1)
     [[nodiscard]] std::vector<reaction::RxCell> MakeProbeInitialWorld(const BakedReactionTable& table);
 
     // ブランクの世界(D-455・T-0371): 1 世代ぶんのセルが全部空(物質なし・エネルギー 0)。どの表でも何も起きない

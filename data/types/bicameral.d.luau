@@ -42,10 +42,31 @@ export type Reaction = {
     reaction_enthalpy_j_per_mol: number?, -- 文献の反応熱(検査用。食い違えばベイクが警告)
 }
 
+-- --- 世界の組み立て(分類 world_cells・world_bodies。T-0398・ADR-0172。engine/src/script/world_layout_package.h)---
+-- セルの領域: 箱の中を同じ中身で埋める。layer の小さい順に重ね書き(同じなら鍵の順)。場所を省けば格子の全部
+export type WorldCellRegion = {
+    layer: number?, -- 重ねる順(既定 0)
+    min_cell: { number }?, -- { x, y, z }(セル)。size_cells と両方書くか両方省く
+    size_cells: { number }?, -- { x, y, z }(セルの数)
+    shell_cells: number?, -- 外側の殻の厚さ(セル。既定 0 = 中まで埋める)
+    amounts_umol: { [string]: number }, -- 物質 → 1 セルの量(µmol)
+    temperature_mk: number, -- 温度(mK)
+}
+
+-- 物(直方体)。物理の座標(y が上)。order の小さい順に番号が付く(同じなら鍵の順)
+export type WorldBody = {
+    order: number?, -- 番号を振る順(既定 0)
+    size_mm: { number }, -- { x, y, z } 辺の長さ(mm)
+    position_mm: { number }, -- { x, y, z } 重心(mm)
+    mass_g: number, -- 質量(g)。0 = 動かない物(地面・壁)
+}
+
 -- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。反応表のほかの分類(UI の文字列など)は形を決めていない ---
 export type PackageEntry = {
     elements: { [string]: Element }?,
     species: { [string]: Species }?,
     reactions: { [string]: Reaction }?,
+    world_cells: { [string]: WorldCellRegion }?,
+    world_bodies: { [string]: WorldBody }?,
     [string]: any,
 }

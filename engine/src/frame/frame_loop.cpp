@@ -183,9 +183,9 @@ namespace bicameral::frame {
 
         // --- 世界の選び方(T-0371・D-455・D-456)---
 
-        // 積み木の場面を入れるか(サンプルの世界だけ。ブランクの世界は物も無い)
-        bool HasStackScene(const FrameLoopOptions& options) {
-            return options.physics && options.world == save::ReplayWorld::Sample;
+        // 物理の場面を入れるか(表の世界の組み立てに物がある時。T-0398。ブランクの世界は物も無い)
+        bool HasStackScene(const FrameLoopOptions& options, const sim::BakedReactionTable& table) {
+            return options.physics && !table.worldLayout.bodies.empty();
         }
 
         // 世界の物理の値(ADR-0171・D-480): ブランクの世界は重力 0、サンプルの世界は標準の値(標準パッケージ T-0373 が渡すようになるまで)
@@ -277,9 +277,11 @@ namespace bicameral::frame {
                 m_recorder.SetWorld(options.world);
 
                 // --check-physics: 窓と同じ場面の CPU の物理
-                if (HasStackScene(options) && options.checkPhysics) {
+                const sim::BakedReactionTable& initialTable = m_tableReload.Find(m_tableReload.InitialVersion())->table;
+                if (HasStackScene(options, initialTable) && options.checkPhysics) {
                     m_physicsCheck = std::make_unique<sim::PhysicsWorld>(
-                        sim::MakeProbeStackScene(), sim::PhysicsParametersFor(WorldPhysicsOf(options)));
+                        sim::MakeLayoutPhysicsScene(initialTable.worldLayout),
+                        sim::PhysicsParametersFor(WorldPhysicsOf(options)));
                 }
             }
 
@@ -476,25 +478,25 @@ namespace bicameral::frame {
             return deviceOptions;
         }
 
-        // 仮の世界の刻み。サンプルの世界は空気の中の木箱と積み木(T-0089・T-0098)、ブランクの世界は全部空のセルで物なし(T-0371)。
+        // 仮の世界の刻み。初めのセルと物は表の世界の組み立て(パッケージの world_cells・world_bodies。T-0398)から作る。
+        // サンプルの世界は空気の中の木箱と積み木(T-0089・T-0098)、ブランクの世界は全部空のセルで物なし(T-0371)。
         // ProbeSim は作るときに読むだけ
         std::expected<sim::ProbeSim, std::string> CreateSimulation(ID3D12Device5* device,
                                                                    const FrameLoopOptions& options,
                                                                    const sim::BakedReactionTable& reactionTable) {
-            const sim::PhysicsScene physicsScene = sim::MakeProbeStackScene();
-            const bool sample = options.world == save::ReplayWorld::Sample;
-            const std::vector<reaction::RxCell> initialWorld = sample ? sim::MakeProbeInitialWorld(reactionTable)
-                                                                      : sim::MakeBlankProbeWorld();
+            const sim::PhysicsScene physicsScene = sim::MakeLayoutPhysicsScene(reactionTable.worldLayout);
+            const std::vector<reaction::RxCell> initialWorld = sim::MakeProbeInitialWorld(reactionTable);
 
-            return sim::ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, reactionTable,
-                                         {.busyIterations = options.simLoad,
-                                          .busyPieces = options.simSplit,
-                                          .trace = options.trace,
-                                          .traceCapacity = TRACE_CAPACITY_PER_FRAME,
-                                          .physicsScene = HasStackScene(options) ? &physicsScene : nullptr,
-                                          .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
-                                          .physicsParameters = sim::PhysicsParametersFor(WorldPhysicsOf(options)),
-                                          .initialWorld = initialWorld});
+            return sim::ProbeSim::Create(
+                device, D3D12_COMMAND_LIST_TYPE_COMPUTE, reactionTable,
+                {.busyIterations = options.simLoad,
+                 .busyPieces = options.simSplit,
+                 .trace = options.trace,
+                 .traceCapacity = TRACE_CAPACITY_PER_FRAME,
+                 .physicsScene = HasStackScene(options, reactionTable) ? &physicsScene : nullptr,
+                 .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
+                 .physicsParameters = sim::PhysicsParametersFor(WorldPhysicsOf(options)),
+                 .initialWorld = initialWorld});
         }
 
         // 世界の反応表: データのフォルダのパッケージ(既定は exe の横の data/packages)からベイクする(T-0157・ADR-0033)。

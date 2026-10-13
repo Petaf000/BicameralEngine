@@ -1,0 +1,86 @@
+// world_layout.h — 世界の組み立て(初めのセルの中身と、置く物)。パッケージの分類 world_cells・world_bodies に書く(T-0398・ADR-0172)。
+//
+// データの流れ: パッケージの world_cells・world_bodies(script/world_layout_package が名前のまま読む)→ WorldLayoutDefinition
+//   (ReactionTableDefinition::worldLayout)→ BakeWorldLayout(BakeReactionTable の最後。物質の名前を ID に直し、領域ごとのセルを作る)
+//   → WorldLayout(BakedReactionTable::worldLayout)→ MakeProbeInitialWorld(セル)・MakeLayoutPhysicsScene(物)。
+// エンジンは組み立ての「書き方」だけを持ち、何をどこに置くか(空気・木箱・積み木)はパッケージが決める(D-454・ADR-0151 の 2)。
+// 分類が無ければ空(ブランクの世界。D-455): セルは全部空・物なし。
+// 表の中身(TableBytes)に入るので、再生ファイルは表の中身だけから同じ初めの世界を作り直す(T-0193)。
+// 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <expected>
+#include <string>
+#include <vector>
+
+#include "common/reaction.hlsli"
+
+namespace bicameral::sim {
+
+    struct BakedReactionTable;
+
+    // --- 定義(人が書く値。名前のまま)---
+
+    struct WorldCellAmount {
+        std::string species;
+        uint64_t micromoles = 0;
+    };
+
+    // セルの領域 1 つ: 箱(min から size セル)の中を同じ中身のセルで埋める。shellCells > 0 なら外側の厚さ shellCells の殻だけ。
+    // 層 layer の小さい順(同じ層は名前の順)に重ねて書く(後から書いた領域が上書きする)
+    struct WorldCellRegionDefinition {
+        std::string name;
+        int64_t layer = 0;
+
+        // --- 場所(セル。wholeWorld なら格子の全部)---
+        bool wholeWorld = true;
+        std::array<uint32_t, 3> minCell{};
+        std::array<uint32_t, 3> sizeCells{};
+        uint32_t shellCells = 0;  // 0 = 中まで埋める
+
+        // --- 中身 ---
+        std::vector<WorldCellAmount> contents;
+        int32_t temperatureMilliKelvin = 0;
+    };
+
+    // 物 1 つ(直方体。物理の座標 = y が上・格子の (0, 0, 0) の角が原点)。並び order の小さい順(同じなら名前の順)に番号を振る
+    struct WorldBodyDefinition {
+        std::string name;
+        int64_t order = 0;
+
+        std::array<int64_t, 3> sizeMillimeters{};      // 辺の長さ
+        std::array<int64_t, 3> positionMillimeters{};  // 重心
+        uint64_t massGrams = 0;                        // 0 = 動かない物(地面・壁)
+    };
+
+    struct WorldLayoutDefinition {
+        std::vector<WorldCellRegionDefinition> cellRegions;
+        std::vector<WorldBodyDefinition> bodies;
+    };
+
+    // --- ベイクしたもの(物質は ID。並びは書く順)---
+
+    struct WorldCellRegion {
+        bool wholeWorld = true;
+        std::array<uint32_t, 3> minCell{};
+        std::array<uint32_t, 3> sizeCells{};
+        uint32_t shellCells = 0;
+        reaction::RxCell cell{};  // 埋める中身(MakeReactionCell で作ったもの)
+    };
+
+    struct WorldLayout {
+        std::vector<WorldCellRegion> cellRegions;  // 層の順
+        std::vector<WorldBodyDefinition> bodies;   // 番号の順(物質を指さないので定義のまま)
+
+        // セル (x, y, z) が region に入るか(箱の中で、殻なら外側の厚さ shellCells の中)
+        [[nodiscard]] static bool Contains(const WorldCellRegion& region, uint32_t x, uint32_t y, uint32_t z);
+    };
+
+    // 名前を ID に直し、領域ごとのセルを作る(table は物質までベイクした表)。知らない物質・1 セルの成分の数の上限
+    // (RX_MAX_CELL_SPECIES)を超える中身・同じ物質が 2 回は誤り
+    [[nodiscard]] std::expected<WorldLayout, std::string> BakeWorldLayout(const WorldLayoutDefinition& definition,
+                                                                          const BakedReactionTable& table);
+
+}  // namespace bicameral::sim

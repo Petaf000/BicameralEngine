@@ -86,7 +86,7 @@ namespace bicameral::editor {
         // 2 つ目の元に戻すが済んだ後(残る置いたのは 1 回ずつの 5 つで、木箱の東の壁から離れている)に、+x の側から -x へ向く決まった光線
         // (画面の画素ではなく格子の座標。カメラに依らない)で、物の印から拾ったセルに木の 1 セル(球・半径 0・置き換え)を z = 30 の
         // y = 29 で押し、y = 31・34 へドラッグする。拾うのは東の壁 x = 35 の外に接する x = 36(初めの世界の木箱 28〜35。
-        // sim/probe_sim.cpp の MakeProbeInitialWorld)で、(36, 29〜34, 30) に間隔 1 で 6 個が当たる
+        // 試験のパッケージの world_cells.luau)で、(36, 29〜34, 30) に間隔 1 で 6 個が当たる
         constexpr float AUTO_SURFACE_ORIGIN_X = 60.5f;
         constexpr uint32_t AUTO_SURFACE_X = 36;
         constexpr uint32_t AUTO_SURFACE_Z = 30;

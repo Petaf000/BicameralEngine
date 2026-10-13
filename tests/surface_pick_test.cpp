@@ -35,7 +35,7 @@ namespace {
 #define EXPECT(condition) Expect((condition), #condition, __LINE__)
 
     constexpr uint32_t GRID = 64;
-    constexpr uint32_t CRATE_BEGIN = 28;  // sim/probe_sim.cpp の MakeProbeInitialWorld の木箱(28〜35)
+    constexpr uint32_t CRATE_BEGIN = 28;  // 試験のパッケージの world_cells.luau の木箱(28〜35)
     constexpr uint32_t CRATE_END = 36;
 
     void SetSolid(std::vector<uint32_t>& words, uint32_t x, uint32_t y, uint32_t z) {

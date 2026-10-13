@@ -437,6 +437,14 @@ namespace bicameral::sim {
 
         BuildRuleIndex(baked);
 
+        // --- 同じ読み込みに足した分類(世界のデータ。T-0398〜T-0400)。物質の名前を ID に直して確かめる(知らない物質は誤り)。
+        // 分類ごとに別のファイルで行い、ここで 1 行ずつつなぐ ---
+        auto layout = BakeWorldLayout(ordered.worldLayout, baked);
+        if (!layout)
+            return std::unexpected(layout.error());
+
+        baked.worldLayout = std::move(*layout);
+
         return baked;
     }
 

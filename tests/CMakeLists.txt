@@ -98,6 +98,15 @@ target_precompile_headers(blank_world_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/
 target_link_libraries(blank_world_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_save bicameral_core)
 add_test(NAME blank_world COMMAND blank_world_test)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
+# 世界の組み立て(T-0398・ADR-0172): 試験のパッケージの world_cells・world_bodies が前の C++ の組み立て(木箱・積み木)とビット一致・
+# ランタイムの入り口と再生ファイルの中身から同じ・ブランクは空・Mod で足せる・誤りの出し方(CPU)
+add_executable(world_layout_test world_layout_test.cpp)
+target_precompile_headers(world_layout_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(world_layout_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
+target_compile_definitions(world_layout_test PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_dependencies(world_layout_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME world_layout COMMAND world_layout_test)
 # 物質を足す・消す表の差し替えで、セルの物質 ID を名前で付け替える(T-0223・ADR-0065。CPU リファレンス。GPU は T-0242)
 add_executable(reaction_species_remap_test reaction_species_remap_test.cpp)
 target_precompile_headers(reaction_species_remap_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
@@ -633,6 +642,6 @@ foreach(_name IN ITEMS
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
-    gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test)
+    gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

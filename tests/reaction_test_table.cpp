@@ -73,6 +73,8 @@ namespace bicameral::sim {
             return std::ranges::any_of(rule.reactants,
                                        [](const RuleTerm& term) { return term.species == "cellulose"; });
         });
+        definition.worldLayout =
+            {};  // 世界の組み立て(T-0398)は木箱のセルロースを指すので空にする(この表で初めの世界は作らない)
 
         return definition;
     }
