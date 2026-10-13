@@ -31,6 +31,7 @@
 #include "editor/editor_overlay.h"
 #include "editor/surface_pick.h"
 #include "editor/time_control.h"
+#include "frame/play_metric_runner.h"
 #include "frame/sim_scheduler.h"
 #include "frame/table_hot_reload.h"
 #include "frame/trace_capture.h"
@@ -396,6 +397,8 @@ namespace bicameral::frame {
             void CheckAutoRebuild();
             void UpdateWorldCopy();
             [[nodiscard]] WorldCopyRunner::CreateCopy WorldCopyFactory() const;
+            void UpdatePlayMetrics();
+            [[nodiscard]] PlayMetricRunner::CreateMeasurer PlayMetricFactory() const;
             [[nodiscard]] bool SubmitEditor();
             void ApplyTimeRequest(const editor::TimeRequest& request);
             void CheckAutoTime();
@@ -528,6 +531,9 @@ namespace bicameral::frame {
             // --- 重さの見張り(安全網の警告。T-0413・D-468): 本物の刻みが等速の予算を超えたら警告する ---
             sim::TickCostAccumulator m_tickCosts{1};
             WeightWatch m_weightWatch;
+
+            // --- 遊びの指標(T-0432。エディタだけ。本物の刻みの合間に回す)---
+            PlayMetricRunner m_playMetrics;
         };
 
         // --- 作る ---
@@ -1779,6 +1785,36 @@ namespace bicameral::frame {
             m_worldCopy.Update(m_compute, m_sim, m_scheduler.Cursor(), m_tableReload.AppliedVersion(),
                                m_scheduler.SpareMilliseconds(), m_scheduler.DroppedTicks(), TickBudgetMilliseconds(),
                                [this] { return WorldCopyFactory(); });
+            UpdatePlayMetrics();
+        }
+
+        // 遊びの指標(T-0432・ADR-0206): パネルの依頼と「表を変えたら測る」を渡し、写しの早送りの後ろに、残りの余りで指標の写しを
+        // 回す(同じ compute キュー。写しの早送りが走っている間は譲る。frame/play_metric_runner)。エディタだけ
+        void FrameLoop::UpdatePlayMetrics() {
+            if (!m_editor)
+                return;
+
+            if (m_editor->PlayMetrics().TakeRequest())
+                m_playMetrics.Request();
+
+            m_playMetrics.Update(m_compute, m_tableReload.AppliedVersion(), m_editor->PlayMetrics().AutoMeasure(),
+                                 m_scheduler.SpareMilliseconds(), m_worldCopy.Progress().running,
+                                 [this] { return PlayMetricFactory(); });
+        }
+
+        // 指標を測る物を作る関数(別のスレッドで呼ぶので、今の表はここで写して持つ)。場面は今の表の世界の組み立て
+        // (元の世界と写しは同じ表から作るので、物の数は本物と違ってもよい)
+        PlayMetricRunner::CreateMeasurer FrameLoop::PlayMetricFactory() const {
+            return [device = m_device.Get(), table = m_sim.Table(), physics = m_options.physics,
+                    broadphaseGraph = !m_options.physicsComputeBroadphase]() {
+                const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(table.worldLayout);
+                const bool stack = physics && !table.worldLayout.bodies.empty();
+                return sim::PlayMetricMeasurer::Create(
+                    device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+                    {.physicsScene = stack ? &scene : nullptr,
+                     .physicsOptions = {.broadphaseGraph = broadphaseGraph},
+                     .physicsParameters = sim::PhysicsParametersFor(table.environment)});
+            };
         }
 
         // 写しの世界を作る関数(別のスレッドで呼ぶので、今の表と場面はここで写して持つ): GPU が今使っている表と、
@@ -1865,7 +1901,8 @@ namespace bicameral::frame {
                                       .message = m_tableReload.LastMessage()},
                     .brushPreview = MakeBrushPreview(),
                     .patchRanges = MakePatchRanges(),
-                    .copy = m_worldCopy.Progress()};
+                    .copy = m_worldCopy.Progress(),
+                    .playMetrics = m_playMetrics.Progress()};
         }
 
         // 筆の「面に沿って」(T-0332): 左ボタン・ドラッグ・カーソルのセルを、光線が最初に当たる物の手前にする(拾えなければ断面)。
@@ -2348,6 +2385,10 @@ namespace bicameral::frame {
                 if (m_options.autoCopy && m_worldCopy.AutoFinished())
                     break;
 
+                // --auto-metrics: 遊びの指標を測り終えた(パイプラインの作成があるので、--frames は上限)
+                if (m_options.autoMetrics && m_playMetrics.Progress().hasResult)
+                    break;
+
                 // 環境ミキサーの「世界を作り直す」(T-0453): この世界を終え、RunFrameLoop が今の表で作り直す
                 if (m_rebuildRequested)
                     return FinishForRebuild(start);
@@ -2497,6 +2538,21 @@ namespace bicameral::frame {
 
             if (m_options.autoCopy)
                 Log(Channel::Sim, Level::Info, "--auto-copy: OK");
+
+            if (m_options.autoMetrics) {
+                const editor::PlayMetricProgress& metrics = m_playMetrics.Progress();
+                const bool measured = metrics.hasResult && !metrics.diffs.empty() &&
+                                      rng::all_of(metrics.diffs, [](const sim::PlayMetricDiff& diff) {
+                                          return diff.current && diff.current->measured;
+                                      });
+                if (!measured) {
+                    Log(Channel::Sim, Level::Error, "--auto-metrics: 遊びの指標を測れなかった({})",
+                        metrics.message.empty() ? "終わらなかった・登録が無い" : metrics.message);
+                    return 1;
+                }
+
+                Log(Channel::Sim, Level::Info, "--auto-metrics: {} 個を測れた。OK", metrics.diffs.size());
+            }
 
             if (m_options.autoReload && (!m_autoReload || !m_autoReload->Done())) {
                 Log(Channel::Tool, Level::Error, "--auto-reload: ホットリロードの確かめが通らなかった({})",
@@ -2704,6 +2760,11 @@ namespace bicameral::frame {
 
             parts = CreateRebuiltParts(options, std::move(rebuild.front()), rebuilds);
         }
+    }
+
+    std::expected<std::shared_ptr<const script::LoadedReactionTable>, std::string> LoadLoopReactionTable(
+        const FrameLoopOptions& options) {
+        return LoadWorldReactionTable(options);
     }
 
 }  // namespace bicameral::frame

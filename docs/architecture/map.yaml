@@ -134,6 +134,14 @@ views:
           code: "engine/src/frame/weight_check.cpp::CheckWeight", ticket: T-0413,
           doc: docs/decisions/ADR-0204-weight-check.md,
           note: "超えた刻みは直すべき不具合(D-468)。続けて超えた区間・いちばん重い刻み・安全網の見込み。本物は WeightWatch で 1 秒ごとに警告" }
+      - { id: playmetric, group: simlib, label: "PlayMetricMeasurer<br/>遊びの指標: 表の初めの世界を写して指標ごとに早送りして測る",
+          code: "engine/src/sim/play_metric_measure.cpp::PlayMetricMeasurer::RecordNext", ticket: T-0432,
+          doc: docs/decisions/ADR-0206-play-metrics.md,
+          note: "指標はパッケージの分類 play_metrics(script/play_metrics_package)。CPU リファレンス MeasurePlayMetricReference とビット一致。前の版との差 ComparePlayMetrics。gpu_play_metric・bicameral --measure-metrics" }
+      - { id: playmetricrunner, group: framelib, label: "PlayMetricRunner<br/>遊びの指標を表を変えるたびに本物の刻みの合間で測る",
+          code: "engine/src/frame/play_metric_runner.cpp::PlayMetricRunner::Update", ticket: T-0432,
+          doc: docs/decisions/ADR-0206-play-metrics.md,
+          note: "写しの早送りが走っている間は譲る。測り終えたら写しを捨てる。パネル editor/play_metric_panel。window_metrics(--auto-metrics)" }
       - { id: probeview, group: framelib, label: "ProbeView<br/>抽出の格子を光線で辿る(ボリューム・最大値・断面)",
           code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0015, doc: docs/design/14-editor-tools.md,
           note: "画面いっぱいの三角形 1 枚。重ね書き: 格子の枠・断面の枠・活性なブロック・色の凡例" }
@@ -656,6 +664,9 @@ views:
       - [worldcopy, tickcost, "刻みごとの重さ"]
       - [worldcopyrunner, weightcheck, "重さの検査"]
       - [frameloop, tickcost, "本物の重さの見張り"]
+      - [frameloop, playmetricrunner, "遊びの指標(表を変えたら・余りの予算)"]
+      - [playmetricrunner, playmetric, "指標ごとに写して測る"]
+      - [playmetric, worldcopy, "S(0) を写す・早送り"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]

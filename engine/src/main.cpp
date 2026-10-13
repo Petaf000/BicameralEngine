@@ -2,6 +2,10 @@
 //
 // 引数が無ければ窓を開いてフレームのループを回す(frame/frame_loop.h。T-0004・T-0012)。
 //   bicameral --caps                 GPU の対応状況を表示して終了
+//   bicameral --measure-metrics      窓を開かずに遊びの指標(パッケージの分類 play_metrics)を全部測り、前の版との差を出して終了
+//                                    (--packages・--mix・--world・--no-physics・--warp が効く。T-0432・ADR-0206)
+//   --metrics-baseline <file>        前の版の値のファイル(--measure-metrics と。無いファイルは「前の版なし」)
+//   --metrics-save                   測った値で --metrics-baseline を書き直す
 //   --frames <n>                     n フレームで終える(自動の確認用。既定は窓を閉じるまで)
 //   --no-vsync                       垂直同期を待たずに Present する
 //   --latency <2|3>                  CPU が GPU より先に進めるフレームの数(既定 2)
@@ -68,6 +72,8 @@
 //                                    --mix で起動したのと同じ表で 60 刻み進んだら終える(--editor と一緒に。--record は作り直した所から。T-0453)
 //   --auto-copy                      刻み 60 で世界の写しを取り 600 刻み早送りして、写しのハッシュが本物と同じかを確かめる
 //                                    (--editor と一緒に。T-0412)
+//   --auto-metrics                   エディタの遊びの指標が起動の初めに表の指標を全部測り終え、全部測れたかを確かめる
+//                                    (--editor と一緒に。T-0432)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -91,6 +97,7 @@
 #include "core/singleton.h"
 #include "core/unicode.h"
 #include "frame/frame_loop.h"
+#include "frame/play_metric_cli.h"
 #include "platform/caps.h"
 #include "script/standard_packages.h"
 #include "sim/probe_trace.h"
@@ -101,6 +108,8 @@ namespace {
 
     struct Options {
         bool runCaps = false;
+        bool measureMetrics = false;  // --measure-metrics(T-0432)
+        frame::PlayMetricCommandOptions metrics;
         frame::FrameLoopOptions frameLoop;
         fs::path logDirectory;  // 空なら DefaultLogDirectory()
         Level logLevel = Level::Info;
@@ -370,6 +379,8 @@ namespace {
             loop.autoRebuild = true;
         else if (argument == L"--auto-copy")
             loop.autoCopy = true;
+        else if (argument == L"--auto-metrics")
+            loop.autoMetrics = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
         else if (argument == L"--auto-patch")
@@ -387,6 +398,12 @@ namespace {
             const bool hasValue = i + 1 < arguments.size();
             if (argument == L"--caps")
                 options.runCaps = true;
+            else if (argument == L"--measure-metrics")
+                options.measureMetrics = true;
+            else if (argument == L"--metrics-save")
+                options.metrics.saveBaseline = true;
+            else if (argument == L"--metrics-baseline" && hasValue)
+                options.metrics.baselinePath = arguments[++i];
             else if (ParseFrameLoopFlag(argument, options.frameLoop))
                 continue;
             else if ((argument == L"--frames" || argument == L"--latency" || argument == L"--target-fps" ||
@@ -467,6 +484,15 @@ namespace {
 
         if (options->runCaps)
             return RunCapsProbe();
+
+        if (options->measureMetrics) {
+            if (options->metrics.saveBaseline && options->metrics.baselinePath.empty()) {
+                Log(Channel::Core, Level::Error, "--metrics-save には --metrics-baseline <file> が要る");
+                return 2;
+            }
+
+            return frame::RunPlayMetricCommand(options->frameLoop, options->metrics);
+        }
 
         return frame::RunFrameLoop(options->frameLoop);
     }
