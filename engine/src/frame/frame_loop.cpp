@@ -389,7 +389,7 @@ namespace bicameral::frame {
             void RequestRebuild();
             void CheckAutoRebuild();
             void UpdateWorldCopy();
-            [[nodiscard]] std::expected<sim::WorldCopy, std::string> CreateWorldCopy() const;
+            [[nodiscard]] WorldCopyRunner::CreateCopy WorldCopyFactory() const;
             [[nodiscard]] bool SubmitEditor();
             void ApplyTimeRequest(const editor::TimeRequest& request);
             void CheckAutoTime();
@@ -1730,18 +1730,23 @@ namespace bicameral::frame {
 
             m_worldCopy.Update(m_compute, m_sim, m_scheduler.Cursor(), m_tableReload.AppliedVersion(),
                                m_scheduler.SpareMilliseconds(), m_scheduler.DroppedTicks(),
-                               [this] { return CreateWorldCopy(); });
+                               [this] { return WorldCopyFactory(); });
         }
 
-        // 写しの世界: GPU が今使っている表と、世界を作った時と同じ物理の場面(物の数が同じでないと写せない)
-        std::expected<sim::WorldCopy, std::string> FrameLoop::CreateWorldCopy() const {
+        // 写しの世界を作る関数(別のスレッドで呼ぶので、今の表と場面はここで写して持つ): GPU が今使っている表と、
+        // 世界を作った時と同じ物理の場面(物の数が同じでないと写せない)
+        WorldCopyRunner::CreateCopy FrameLoop::WorldCopyFactory() const {
             const sim::BakedReactionTable& initial = m_tableReload.Find(m_tableReload.InitialVersion())->table;
-            const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(initial.worldLayout);
 
-            return sim::WorldCopy::Create(m_device.Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, m_sim.Table(),
-                                          {.physicsScene = HasStackScene(m_options, initial) ? &scene : nullptr,
-                                           .physicsOptions = {.broadphaseGraph = !m_options.physicsComputeBroadphase},
-                                           .physicsParameters = sim::PhysicsParametersFor(m_sim.Table().environment)});
+            return
+                [device = m_device.Get(), table = m_sim.Table(), layout = initial.worldLayout,
+                 stack = HasStackScene(m_options, initial), broadphaseGraph = !m_options.physicsComputeBroadphase]() {
+                    const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(layout);
+                    return sim::WorldCopy::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+                                                  {.physicsScene = stack ? &scene : nullptr,
+                                                   .physicsOptions = {.broadphaseGraph = broadphaseGraph},
+                                                   .physicsParameters = sim::PhysicsParametersFor(table.environment)});
+                };
         }
 
         // --auto-time: 止めている間は刻みが進まず、1 刻みを 3 回押したらちょうど 3 刻み進んだか
@@ -2286,6 +2291,10 @@ namespace bicameral::frame {
 
                 // --auto-mixer: 足して当て、外して戻った・失敗した
                 if (m_options.autoMixer && m_editor && m_editor->Mixer().AutoFinished())
+                    break;
+
+                // --auto-copy: 写しの早送りを本物と比べ終えた・失敗した(写しを作るのに 10 秒を超えることがあるので、--frames は上限)
+                if (m_options.autoCopy && m_worldCopy.AutoFinished())
                     break;
 
                 // 環境ミキサーの「世界を作り直す」(T-0453): この世界を終え、RunFrameLoop が今の表で作り直す

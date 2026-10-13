@@ -6,6 +6,7 @@
 // 早送りの量は、そのフレームのシミュの予算の余り(SimScheduler::SpareMilliseconds)に入る刻みの数だけ(D-468: 写しのせいで
 // 本物を遅らせない。余りが無いフレームは進めず、待ったフレームを数える)。測ったことのない間は 1 刻みずつ。
 // 写しは 1 つだけ(仮。T-0412 の判断待ち)。作るのは最初の依頼の時(それまで VRAM を使わない)。表を差し替えた後の依頼は作り直す。
+// 作る(パイプラインの作成。キャッシュに当たらないと 10 秒を超える)のは別のスレッドで、フレームのループを止めない(D-468)。
 // 写しにはコマンドを当てない(今の状態から何もしなければどうなるか)。中身(何を測るか)は依頼の条件(editor::CopyRequest)で決まる。
 //
 // 人がいない確かめ(--auto-copy): 本物が刻み AUTO_START_TICK に着いたら上限 AUTO_TICKS 刻みの写しを取り、終わったら写しの
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
@@ -31,6 +33,7 @@ namespace bicameral::frame {
 
     class WorldCopyRunner {
     public:
+        // 写しを作る関数(別のスレッドで呼ぶ。フレームのループのデータは作る時に写して持つ)
         using CreateCopy = std::function<std::expected<sim::WorldCopy, std::string>()>;
 
         static constexpr uint64_t AUTO_START_TICK = 60;
@@ -42,8 +45,9 @@ namespace bicameral::frame {
         void Cancel();
 
         // 本物のシミュのリストを投げた後に呼ぶ。cursor = 本物の次に投げる単位・droppedTicks = 本物が追いつけず捨てた刻みの累計
+        // makeCreate は写しを作る時だけ呼ぶ(今の表などを写した CreateCopy を返す)
         void Update(gpu::Queue& compute, const sim::ProbeSim& world, SimCursor cursor, uint64_t tableVersion,
-                    double spareMilliseconds, uint64_t droppedTicks, const CreateCopy& create);
+                    double spareMilliseconds, uint64_t droppedTicks, const std::function<CreateCopy()>& makeCreate);
 
         [[nodiscard]] const editor::CopyProgress& Progress() const { return m_progress; }
 
@@ -51,13 +55,15 @@ namespace bicameral::frame {
         void StartAuto() { m_auto = AutoStage::Waiting; }
         void NoteWorldHash(uint64_t tick, uint64_t worldHash);  // 本物の読み戻した刻みのハッシュ
         [[nodiscard]] bool AutoPassed() const { return m_auto == AutoStage::Passed; }
+        [[nodiscard]] bool AutoFinished() const { return m_auto == AutoStage::Passed || m_auto == AutoStage::Failed; }
         [[nodiscard]] const std::string& AutoSummary() const { return m_autoSummary; }
 
     private:
         enum class AutoStage : uint8_t { Off, Waiting, Running, Comparing, Passed, Failed };
 
         void Collect(gpu::Queue& compute);
-        [[nodiscard]] bool Prepare(gpu::Queue& compute, uint64_t tableVersion, const CreateCopy& create);
+        [[nodiscard]] bool Prepare(gpu::Queue& compute, uint64_t tableVersion,
+                                   const std::function<CreateCopy()>& makeCreate);
         void Start(gpu::Queue& compute, const sim::ProbeSim& world, SimCursor cursor, uint64_t droppedTicks);
         void Advance(gpu::Queue& compute, double spareMilliseconds);
         void Submit(gpu::Queue& compute, const std::vector<ID3D12CommandList*>& lists);
@@ -67,6 +73,8 @@ namespace bicameral::frame {
 
         std::optional<sim::WorldCopy> m_copy;
         uint64_t m_copyTableVersion = 0;
+        std::future<std::expected<sim::WorldCopy, std::string>> m_creating;  // 別のスレッドで作っている写し
+        uint64_t m_creatingTableVersion = 0;
         uint64_t m_fence = 0;
         bool m_cancelled = false;
         std::optional<editor::CopyRequest> m_request;

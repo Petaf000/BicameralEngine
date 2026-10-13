@@ -551,7 +551,7 @@ set_tests_properties(window_rebuild_play PROPERTIES LABELS gpu FIXTURES_REQUIRED
 # 本物の同じ刻みと全部同じ(--auto-copy)。記録を写し無しの別の起動で再生して同じハッシュ列 = 写しを取っても本物は変わらない(D-403)
 set(WINDOW_COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_copy.bcreplay)
 add_test(NAME window_copy_record
-         COMMAND bicameral --world sample --editor --auto-ignite --auto-copy --frames 1500 --record ${WINDOW_COPY_FILE})
+         COMMAND bicameral --world sample --editor --auto-ignite --auto-copy --frames 20000 --record ${WINDOW_COPY_FILE})
 add_test(NAME window_copy_play COMMAND bicameral --replay ${WINDOW_COPY_FILE} --target-fps 30)
 set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP window_copy TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-copy: OK")

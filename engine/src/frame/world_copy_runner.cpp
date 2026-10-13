@@ -2,6 +2,7 @@
 #include "frame/world_copy_runner.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <utility>
 
@@ -27,7 +28,7 @@ namespace bicameral::frame {
 
     void WorldCopyRunner::Update(gpu::Queue& compute, const sim::ProbeSim& world, SimCursor cursor,
                                  uint64_t tableVersion, double spareMilliseconds, uint64_t droppedTicks,
-                                 const CreateCopy& create) {
+                                 const std::function<CreateCopy()>& makeCreate) {
         m_droppedTicks = droppedTicks;
         UpdateAuto(cursor);
         Collect(compute);
@@ -35,7 +36,7 @@ namespace bicameral::frame {
             return;  // GPU にある写しのリストは 1 組だけ
 
         if (m_request) {
-            if (!Prepare(compute, tableVersion, create))
+            if (!Prepare(compute, tableVersion, makeCreate))
                 return;
 
             // 写しを取るのは、本物の最後のリストが刻みの境界で終わっている時だけ(sim/world_copy.h の約束)
@@ -54,13 +55,24 @@ namespace bicameral::frame {
 
     // --- 写しを作る・取る・進める ---
 
-    // 写しを作り(表が替わっていたら作り直す)、初期化を投げる。写しを取れる状態なら true
-    bool WorldCopyRunner::Prepare(gpu::Queue& compute, uint64_t tableVersion, const CreateCopy& create) {
+    // 写しを作り(表が替わっていたら作り直す。別のスレッドで)、初期化を投げる。写しを取れる状態なら true
+    bool WorldCopyRunner::Prepare(gpu::Queue& compute, uint64_t tableVersion,
+                                  const std::function<CreateCopy()>& makeCreate) {
         if (m_copy && m_copyTableVersion != tableVersion)
             m_copy.reset();  // GPU にリストは無い(Pending でない)
 
+        if (!m_copy && !m_creating.valid()) {
+            m_creating = std::async(std::launch::async, makeCreate());
+            m_creatingTableVersion = tableVersion;
+            m_progress.message = "写しの世界を作っている(パイプラインの作成)";
+            return false;
+        }
+
         if (!m_copy) {
-            auto created = create();
+            if (m_creating.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                return false;
+
+            auto created = m_creating.get();
             if (!created) {
                 Log(Channel::Sim, Level::Error, "写しの早送り: {}", created.error());
                 m_progress = {.failed = true, .message = "写しを作れない: " + created.error()};
@@ -72,7 +84,11 @@ namespace bicameral::frame {
             }
 
             m_copy.emplace(std::move(*created));
-            m_copyTableVersion = tableVersion;
+            m_copyTableVersion = m_creatingTableVersion;
+            if (m_copyTableVersion != tableVersion) {
+                m_copy.reset();  // 作っている間に表が替わった(次のフレームで作り直す)
+                return false;
+            }
         }
 
         if (m_copy->Initialized())
