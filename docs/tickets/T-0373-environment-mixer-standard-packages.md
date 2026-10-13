@@ -1,6 +1,6 @@
 # T-0373 環境ミキサー(中身の部分): 標準パッケージと、それを世界に足す仕組み
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分(UI は T-0452 に分けた)
@@ -17,14 +17,14 @@
 - **T-0453**: 足した環境の値・初めのセル(earth_air)を動いている世界に効かせる「世界を作り直す」(今は表の法則だけ差し替わる。T-0444 と関係)。
 
 ## 完了条件(チェックできる形で)
-- [ ] data/standard に real_elements・real_matter・real_reactions・earth_environment・earth_air(依存つき・title つき)
-- [ ] 足す仕組み: ReactionTableSource::addedPackages・readPackageRoot、棚 script/standard_packages(ReadStandardCatalog・MixAdd・MixRemove・MixFolders)、
+- [x] data/standard に real_elements・real_matter・real_reactions・earth_environment・earth_air(依存つき・title つき)
+- [x] 足す仕組み: ReactionTableSource::addedPackages・readPackageRoot、棚 script/standard_packages(ReadStandardCatalog・MixAdd・MixRemove・MixFolders)、
       ホットリロードの読む元の差し替え(ReactionTableHotReload::Replace)、窓の --mix
-- [ ] 基準の大気: 分類 atmosphere + environment の atmosphere_temperature_mk・atmosphere_surface_pressure_pa → sim::WorldAtmosphere(ADR-0182)
-- [ ] 重力の移し替え: sim::StandardWorldPhysics と fx::STANDARD_GRAVITY をエンジンから消し、試験は tests/standard_world_physics.h(写し)
-- [ ] 試験: standard_packages(新)・environment_package・reaction_package・world_layout・blank_world・reaction_hot_reload・物理と気体の CPU の試験が通る
-- [ ] 窓: --world blank --mix(全部)が起動して刻む・window_blank_*・--world sample の窓の試験が変わらない
-- [ ] release のビルドが警告 0・archmap --check
+- [x] 基準の大気: 分類 atmosphere + environment の atmosphere_temperature_mk・atmosphere_surface_pressure_pa → sim::WorldAtmosphere(ADR-0182)
+- [x] 重力の移し替え: sim::StandardWorldPhysics と fx::STANDARD_GRAVITY をエンジンから消し、試験は tests/standard_world_physics.h(写し)
+- [x] 試験: standard_packages(新)・environment_package・reaction_package・world_layout・blank_world・reaction_hot_reload・物理と気体の CPU の試験が通る
+- [x] 窓: --world blank --mix(全部)が起動して刻む・window_blank_*・--world sample の窓の試験が変わらない
+- [x] release のビルドが警告 0・archmap --check
 
 ## 判断待ち(仮で進めたもの。ユーザー未確認)
 1. **サンプルの世界(combustion_test)と標準パッケージの関係**(ADR-0183 の案 A〜C)。仮: **案 A 並べる**。
@@ -41,3 +41,10 @@
 - 反応の速さ: 熱分解だけ文献(Bradbury 1979)、ほかの 4 本は combustion_test と同じ仮の値(未確認と明記)。⑤ の場面で文献の値に。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-13(wt2・並走): 着手前に UI(T-0452)と世界を作り直す(T-0453)を分けた。data/standard に 5 つの標準パッケージ(現実の値・title・依存)、
+  ReactionTableSource::addedPackages・readPackageRoot・棚 script/standard_packages・--mix、基準の大気(分類 atmosphere。ADR-0182)、
+  StandardWorldPhysics と STANDARD_GRAVITY をエンジンから消して tests/standard_world_physics.h へ(ADR-0171 追記 3・ADR-0183)。
+  release(警告 0): standard_packages(新)・environment_package・reaction_package・world_layout・blank_world・reaction_hot_reload・
+  reaction_replay_table・luau_*・gas_reference・gas_tree・gpu_gas_tree(_warp)が通過。archmap --check OK。
+  窓(release・GPU): window_mix_start・window_blank_record/play/rewind・window_hot_reload(_game)_*・window_table_edit が通過。
+  司令塔がマージ後に: ROADMAP の T-0373 を Done に・T-0452(Done)・T-0453(Todo)の行・QUESTIONS に判断待ち 1〜3(ADR-0182・ADR-0183)。
