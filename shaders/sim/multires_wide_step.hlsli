@@ -93,7 +93,7 @@ RxGpuMidCell MidShape() {
 
 // --- 作業場の形(T-0362)---
 // 作業場の段(WideBigPass)だけがコンパイルする。g_external0 = 作業場の始まり(u6 の語)、g_external1 = 1 セルの成分の上限(表の物質の数。
-// RX_GPU_WIDE_SPECIES まで)。並びは shaders/common/multires_wide.hlsli の「作業場」。スレッドのレーンは [刻む前 A][使う量][書く B × 8][① の結果 × 8]
+// RX_GPU_WIDE_SPECIES まで)。並びは shaders/common/multires_wide.hlsli の「作業場」。スレッドのレーンは [刻む前 A][使う量][書く B × 8][位置の表][① の結果 × 8]
 // (B と ① の結果は受け持つ 8 セルごと。③ は刻み直さずに写す。T-0380)。
 // セルは「成分 0 の語」を指す小さな値で、写しても同じ場所を指す。核の中で元のセルを残す所(反応物を引く前)は RxWritableCell が
 // A から B へ写す。RxCompactCell・RxTryAddSpecies は同じ場所で詰める・ずらす(書く位置が読む位置を追い越さない)
@@ -137,6 +137,30 @@ uint32_t RxSpeciesAt<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i) {
     return g_treeWords[SpaceWord(cell.word, MR_WIDE_ENTRY_WORDS * i)];
 }
 
+// 物質 ID speciesId の位置の表の語(レーンの書くセルの後ろ c 語。T-0380)。RxWithEntry が書き、RxFindSlot が引く
+uint32_t SpaceSlotWord(uint32_t lane, uint32_t speciesId) {
+    return SpaceWord(lane, ((MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES - 1) * SpaceCapacity()) + speciesId);
+}
+
+// 物質 ID の位置(T-0380。核の RxFindSlot の作業場の形の版): 位置の表が指す成分が同じ物質なら、それが前から探した位置と同じ
+// (1 セルに同じ物質の成分は 1 つだけ)。表が古い(前のセル・別の書くセルの位置・まだ書いていない)と違う物質を指すので、前から探す。
+// 成分を前から探すと 1 セルの成分の数に比例して読む(作業場の段の候補を集める所が成分の数の 2 乗になっていた)
+template <>
+uint32_t RxFindSlot<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t speciesId) {
+    if (speciesId < SpaceCapacity()) {
+        const uint32_t slot = g_treeWords[SpaceSlotWord(cell.lane, speciesId)];
+        if (slot < cell.speciesCount && RxSpeciesAt(cell, slot) == speciesId)
+            return slot;
+    }
+
+    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+        if (RxSpeciesAt(cell, i) == speciesId)
+            return i;
+    }
+
+    return RX_NO_SLOT;
+}
+
 template <>
 uint64_t RxAmountAt<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i) {
     const uint32_t word = MR_WIDE_ENTRY_WORDS * i;
@@ -157,6 +181,9 @@ template <>
 RxGpuSpaceCell RxWithEntry<RxGpuSpaceCell>(RxGpuSpaceCell cell, uint32_t i, uint32_t speciesId, uint64_t amount) {
     const uint32_t word = MR_WIDE_ENTRY_WORDS * i;
     g_treeWords[SpaceWord(cell.word, word)] = speciesId;
+    if (speciesId < SpaceCapacity())
+        g_treeWords[SpaceSlotWord(cell.lane, speciesId)] = i;
+
     g_treeWords[SpaceWord(cell.word, word + 1)] = (uint32_t)amount;
     g_treeWords[SpaceWord(cell.word, word + 2)] = (uint32_t)(amount >> 32);
 

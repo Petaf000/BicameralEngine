@@ -68,14 +68,15 @@ FX_CONST uint32_t MR_WIDE_REQUEST_BIG = 1u << 12;
 
 // --- 作業場(T-0362。溢れの領域の後ろ。速い形に入らないセルを作業場の段が置く)---
 // [グループ(既定 MR_WIDE_SPACE_GROUPS。GpuMultires の wideSpaceGroups)× スレッド MR_WIDE_SPACE_THREADS × レーン]。レーンは 1 セルの成分の上限 c について
-// [刻む前のセル 3c][使う量 2c][書くセル 3c × 8][① の結果 8 語 × 8](成分 i は物質 ID・µmol の下位・上位 / 使う量の下位・上位)。
+// [刻む前のセル 3c][使う量 2c][書くセル 3c × 8][物質 ID → 成分の位置 c][① の結果 8 語 × 8](成分 i は物質 ID・µmol の下位・上位 /
+// 使う量の下位・上位。位置の表は核の RxFindSlot を前から探さずに引くため。T-0380)。
 // 書くセルと ① の結果はスレッドが受け持つ 8 セル(セル thread + 64k)ごとに持ち、③ は ① の結果を写すだけ(刻み直さない。T-0380)。
 // グループの中は語ごとにスレッドが交互に並ぶ(レーンの k 語目のスレッド t は グループの先頭 + 64k + t。T-0380)
 FX_CONST uint32_t
     MR_WIDE_SPACE_GROUPS = 32;  // 作業場の段のグループの数の既定(T-0362。T-0380 で GpuMultires が選べるように)
 FX_CONST uint32_t MR_WIDE_SPACE_THREADS = 64;          // = WAIT_STEP_THREADS(multires_wait_step.hlsli)
 FX_CONST uint32_t MR_WIDE_SPACE_CELLS_PER_THREAD = 8;  // = MR_BLOCK_CELLS / MR_WIDE_SPACE_THREADS
-FX_CONST uint32_t MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES = 3 + 2 + (3 * MR_WIDE_SPACE_CELLS_PER_THREAD);
+FX_CONST uint32_t MR_WIDE_SPACE_LANE_WORDS_PER_SPECIES = 3 + 2 + (3 * MR_WIDE_SPACE_CELLS_PER_THREAD) + 1;
 FX_CONST uint32_t
     MR_WIDE_SPACE_RESULT_WORDS = 8;  // ① の結果(エネルギー 2・成分の数・上限の印・起こす刻み 2・変わったか・空き)
 
