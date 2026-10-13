@@ -21,6 +21,7 @@ add_library(bicameral_gpu STATIC
   src/gpu/device.cpp
   src/gpu/graph_trace.cpp
   src/gpu/immediate_queue.cpp
+  src/gpu/pipeline_cache.cpp
   src/gpu/queue.cpp
   src/gpu/readback_ring.cpp
   src/gpu/resources.cpp

@@ -27,6 +27,15 @@ namespace bicameral::gpu {
                                                                           std::span<const std::byte> library,
                                                                           std::wstring_view programName);
 
+        // 作る手順を 2 つに分けたもの(T-0427。作ったプログラムを gpu::PipelineCache で使い回すため)。
+        // CreateProgram = 状態オブジェクト(ドライバのコンパイル。重い)、Create(program) = プロパティと裏のメモリ(グラフごと)
+        [[nodiscard]] static std::expected<ComPtr<ID3D12StateObject>, std::string> CreateProgram(
+            ID3D12Device5* device, ID3D12RootSignature* globalRootSignature, std::span<const std::byte> library,
+            std::wstring_view programName);
+        [[nodiscard]] static std::expected<WorkGraph, std::string> Create(ID3D12Device5* device,
+                                                                          ComPtr<ID3D12StateObject> program,
+                                                                          std::wstring_view programName);
+
         // 入口のノードの番号。名前が無ければ UINT32_MAX
         [[nodiscard]] uint32_t EntrypointIndex(std::wstring_view nodeName) const;
 

@@ -18,6 +18,7 @@
 #include "common/multires_wide.hlsli"
 
 #include "core/log.h"
+#include "gpu/creation_timer.h"
 #include "gpu/resources.h"
 #include "sim/gpu_multires_implicit.h"
 
@@ -217,18 +218,64 @@ namespace bicameral::sim {
         }
 
         // .cso を読んで Compute のパイプラインを作る
-        std::expected<ComPtr<ID3D12PipelineState>, std::string> LoadComputePipeline(ID3D12Device5* device,
-                                                                                    ID3D12RootSignature* rootSignature,
-                                                                                    const char* path) {
+        std::expected<ComPtr<ID3D12PipelineState>, std::string> CreateComputePipelineFromFile(
+            ID3D12Device5* device, ID3D12RootSignature* rootSignature, const char* path) {
             const auto bytecode = gpu::LoadShader(path);
             if (!bytecode)
                 return std::unexpected(bytecode.error());
 
+            const gpu::CreationTimer timer;
             ComPtr<ID3D12PipelineState> pipeline = gpu::CreateComputePipeline(device, rootSignature, *bytecode);
             if (!pipeline)
                 return std::unexpected(std::format("多重解像度のパイプラインを作れない({})", path));
 
+            // 1 秒を超えたものだけ名前を出す(ドライバのキャッシュに当たらない時、どのシェーダーが重いか。T-0427)
+            constexpr int64_t SLOW_CREATION_MS = 1000;
+            if (const gpu::CreationCost cost = timer.Elapsed(); cost.wallMs >= SLOW_CREATION_MS) {
+                Log(Channel::Gpu, Level::Info, "多重解像度: {} の作成 {} ms(プロセスの CPU {} ms)", path, cost.wallMs,
+                    cost.processCpuMs);
+            }
+
             return pipeline;
+        }
+
+        // Compute のパイプライン。cache があれば、同じルート署名と .cso の組を使い回す(T-0427)
+        std::expected<ComPtr<ID3D12PipelineState>, std::string> LoadComputePipeline(ID3D12Device5* device,
+                                                                                    ID3D12RootSignature* rootSignature,
+                                                                                    gpu::PipelineCache* cache,
+                                                                                    const char* path) {
+            if (cache == nullptr)
+                return CreateComputePipelineFromFile(device, rootSignature, path);
+
+            return cache->ComputePipeline(rootSignature, path,
+                                          [&] { return CreateComputePipelineFromFile(device, rootSignature, path); });
+        }
+
+        // DXIL ライブラリの .cso を読んで Work Graph を作る。cache があればプログラム(状態オブジェクト)を使い回し、
+        // 裏のメモリだけグラフごとに取る(T-0427)
+        std::expected<std::unique_ptr<gpu::WorkGraph>, std::string> LoadWorkGraph(ID3D12Device5* device,
+                                                                                  ID3D12RootSignature* rootSignature,
+                                                                                  gpu::PipelineCache* cache,
+                                                                                  const char* libraryPath,
+                                                                                  std::wstring_view programName) {
+            const auto createProgram = [&]() -> std::expected<ComPtr<ID3D12StateObject>, std::string> {
+                const auto library = gpu::LoadShader(libraryPath);
+                if (!library)
+                    return std::unexpected(library.error());
+
+                return gpu::WorkGraph::CreateProgram(device, rootSignature, *library, programName);
+            };
+            auto program = cache != nullptr
+                               ? cache->WorkGraphProgram(rootSignature, libraryPath, programName, createProgram)
+                               : createProgram();
+            if (!program)
+                return std::unexpected(program.error());
+
+            auto graph = gpu::WorkGraph::Create(device, std::move(*program), programName);
+            if (!graph)
+                return std::unexpected(graph.error());
+
+            return std::make_unique<gpu::WorkGraph>(std::move(*graph));
         }
 
         void UavBarrier(ID3D12GraphicsCommandList10* list) {
@@ -336,14 +383,29 @@ namespace bicameral::sim {
 
     std::expected<void, std::string> GpuMultires::CreatePipelines(ID3D12Device5* device,
                                                                   const GpuMultiresOptions& options) {
-        m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
-        if (!m_rootSignature)
-            return std::unexpected("多重解像度のルート署名を作れない");
+        // --- ルート署名(パイプラインを使い回す時は、ルート署名も同じものにする。T-0427)---
+        const auto createRoot = [&]() -> std::expected<ComPtr<ID3D12RootSignature>, std::string> {
+            ComPtr<ID3D12RootSignature> root = gpu::CreateRootSignature(device, ROOT_LAYOUT);
+            if (!root)
+                return std::unexpected("多重解像度のルート署名を作れない");
+
+            return root;
+        };
+        auto root = options.pipelineCache != nullptr ? options.pipelineCache->RootSignature("multires", createRoot)
+                                                     : createRoot();
+        if (!root)
+            return std::unexpected(root.error());
+
+        m_rootSignature = std::move(*root);
 
         // --- Compute(起こす段・刻む・頁に広げて刻む〔待ちの丸め。T-0121〕・木の管理の段・伝導の段)---
-        auto wake = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wake.cso");
-        auto stepWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wait.cso");
-        auto expandedWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_expanded_wait.cso");
+        const gpu::CreationTimer computeTimer;  // 作成の時間をログに出す(T-0427)
+        auto wake = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                        "sim/multires_step_wake.cso");
+        auto stepWait = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                            "sim/multires_step_wait.cso");
+        auto expandedWait = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                "sim/multires_step_expanded_wait.cso");
         for (const auto* loaded : {&wake, &stepWait, &expandedWait}) {
             if (!*loaded)
                 return std::unexpected(loaded->error());
@@ -353,17 +415,22 @@ namespace bicameral::sim {
         m_stepWaitPipeline = std::move(*stepWait);
         m_stepExpandedWaitPipeline = std::move(*expandedWait);
         if (options.wideCells) {
-            auto wideWait = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_wait.cso");
-            auto wideExpanded = LoadComputePipeline(device, m_rootSignature.Get(),
+            auto wideWait = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                "sim/multires_step_wide_wait.cso");
+            auto wideExpanded = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
                                                     "sim/multires_step_wide_expanded_wait.cso");
-            auto wideAllocate = LoadComputePipeline(device, m_rootSignature.Get(),
+            auto wideAllocate = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
                                                     "sim/multires_step_wide_allocate.cso");
-            auto wideRetry = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_retry.cso");
-            auto wideDeferred = LoadComputePipeline(device, m_rootSignature.Get(),
+            auto wideRetry = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                 "sim/multires_step_wide_retry.cso");
+            auto wideDeferred = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
                                                     "sim/multires_step_wide_deferred.cso");
-            auto wideBig = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_step_wide_big.cso");
-            auto wideReserve = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_reserve.cso");
-            auto wideTrim = LoadComputePipeline(device, m_rootSignature.Get(), "sim/multires_tree_wide_trim.cso");
+            auto wideBig = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                               "sim/multires_step_wide_big.cso");
+            auto wideReserve = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                   "sim/multires_tree_wide_reserve.cso");
+            auto wideTrim = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                "sim/multires_tree_wide_trim.cso");
             for (const auto* loaded : {&wideWait, &wideExpanded, &wideAllocate, &wideRetry, &wideDeferred, &wideBig,
                                        &wideReserve, &wideTrim}) {
                 if (!*loaded)
@@ -392,7 +459,7 @@ namespace bicameral::sim {
 
             if (options.wideCells && pass == PassExpand)
                 path = "sim/multires_tree_wide_expand.cso";  // 一様の値の溢れを写す塊も配る(T-0384)
-            auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), path);
+            auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache, path);
             if (!pipeline)
                 return std::unexpected(pipeline.error());
 
@@ -401,24 +468,26 @@ namespace bicameral::sim {
 
         static_assert(CONDUCT_WIDE_SHADERS.size() == CONDUCT_PASS_COUNT);
         for (uint32_t pass = 0; options.wideCells && pass < CONDUCT_PASS_COUNT; ++pass) {
-            auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), CONDUCT_WIDE_SHADERS[pass]);
+            auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                CONDUCT_WIDE_SHADERS[pass]);
             if (!pipeline)
                 return std::unexpected(pipeline.error());
 
             m_conductWidePipelines[pass] = std::move(*pipeline);
         }
 
-        // 溢れを使う世界は細かくする時に溢れを写す変種(T-0237)
-        const auto library = gpu::LoadShader(options.wideCells ? "sim/multires_graph_wide.cso"
-                                                               : "sim/multires_graph.cso");
-        if (!library)
-            return std::unexpected(library.error());
+        const gpu::CreationCost computeCost = computeTimer.Elapsed();
+        Log(Channel::Gpu, Level::Info, "多重解像度: Compute のパイプラインの作成 {} ms(プロセスの CPU {} ms)",
+            computeCost.wallMs, computeCost.processCpuMs);
 
-        auto graph = gpu::WorkGraph::Create(device, m_rootSignature.Get(), *library, L"Multires");
+        // 溢れを使う世界は細かくする時に溢れを写す変種(T-0237)
+        auto graph = LoadWorkGraph(device, m_rootSignature.Get(), options.pipelineCache,
+                                   options.wideCells ? "sim/multires_graph_wide.cso" : "sim/multires_graph.cso",
+                                   L"Multires");
         if (!graph)
             return std::unexpected(graph.error());
 
-        m_graph = std::make_unique<gpu::WorkGraph>(std::move(*graph));
+        m_graph = std::move(*graph);
         m_entries = {m_graph->EntrypointIndex(L"RefineNode"), m_graph->EntrypointIndex(L"CoarsenRequestNode"),
                      m_graph->EntrypointIndex(L"PullBackNode"), m_graph->EntrypointIndex(L"RemoveShadowNode")};
         if (std::ranges::contains(m_entries, UINT32_MAX))
@@ -426,7 +495,7 @@ namespace bicameral::sim {
 
         m_constants.graphEntries = m_entries[EntryRefine] | (m_entries[EntryCoarsenRequest] << 16);
         if (options.conductionGraph) {
-            if (auto created = CreateConductionGraph(device); !created)
+            if (auto created = CreateConductionGraph(device, options.pipelineCache); !created)
                 return created;
         }
 
@@ -434,16 +503,12 @@ namespace bicameral::sim {
             return {};
 
         // --- 活性のグラフ(T-0100)---
-        const auto activityLibrary = gpu::LoadShader("sim/multires_activity_graph.cso");
-        if (!activityLibrary)
-            return std::unexpected(activityLibrary.error());
-
-        auto activityGraph = gpu::WorkGraph::Create(device, m_rootSignature.Get(), *activityLibrary,
-                                                    L"MultiresActivity");
+        auto activityGraph = LoadWorkGraph(device, m_rootSignature.Get(), options.pipelineCache,
+                                           "sim/multires_activity_graph.cso", L"MultiresActivity");
         if (!activityGraph)
             return std::unexpected(activityGraph.error());
 
-        m_activityGraph = std::make_unique<gpu::WorkGraph>(std::move(*activityGraph));
+        m_activityGraph = std::move(*activityGraph);
         m_activityEntries = {m_activityGraph->EntrypointIndex(L"ActivitySeedNode"),
                              m_activityGraph->EntrypointIndex(L"ObserverStepNode"),
                              m_activityGraph->EntrypointIndex(L"ExpandStepNode")};
@@ -453,16 +518,14 @@ namespace bicameral::sim {
         return {};
     }
 
-    std::expected<void, std::string> GpuMultires::CreateConductionGraph(ID3D12Device5* device) {
-        const auto library = gpu::LoadShader("sim/multires_conduct_graph.cso");
-        if (!library)
-            return std::unexpected(library.error());
-
-        auto graph = gpu::WorkGraph::Create(device, m_rootSignature.Get(), *library, L"MultiresConduct");
+    std::expected<void, std::string> GpuMultires::CreateConductionGraph(ID3D12Device5* device,
+                                                                        gpu::PipelineCache* cache) {
+        auto graph = LoadWorkGraph(device, m_rootSignature.Get(), cache, "sim/multires_conduct_graph.cso",
+                                   L"MultiresConduct");
         if (!graph)
             return std::unexpected(graph.error());
 
-        m_conductGraph = std::make_unique<gpu::WorkGraph>(std::move(*graph));
+        m_conductGraph = std::move(*graph);
         m_conductEntries = {m_conductGraph->EntrypointIndex(L"ConductPrepareNode"),
                             m_conductGraph->EntrypointIndex(L"ConductFlowsNode"),
                             m_conductGraph->EntrypointIndex(L"ConductApplyNode"),

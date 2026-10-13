@@ -8,6 +8,7 @@
 #include "core/log.h"
 #include "core/unicode.h"
 #include "gpu/com_ptr.h"
+#include "gpu/creation_timer.h"
 #include "gpu/resources.h"
 
 namespace bicameral::gpu {
@@ -36,11 +37,34 @@ namespace bicameral::gpu {
                                                             ID3D12RootSignature* globalRootSignature,
                                                             std::span<const std::byte> library,
                                                             std::wstring_view programName) {
+        auto program = CreateProgram(device, globalRootSignature, library, programName);
+        if (!program)
+            return std::unexpected(program.error());
+
+        return Create(device, std::move(*program), programName);
+    }
+
+    std::expected<ComPtr<ID3D12StateObject>, std::string> WorkGraph::CreateProgram(
+        ID3D12Device5* device, ID3D12RootSignature* globalRootSignature, std::span<const std::byte> library,
+        std::wstring_view programName) {
+        const std::wstring name(programName);
+        const CreationTimer timer;  // ドライバのコンパイルの時間(キャッシュに当たったか。T-0427)
+        ComPtr<ID3D12StateObject> stateObject = CreateStateObject(device, globalRootSignature, library, name);
+        if (!stateObject)
+            return std::unexpected("ワークグラフの状態オブジェクトを作れない");
+
+        const CreationCost cost = timer.Elapsed();
+        Log(Channel::WorkGraph, Level::Info, "ワークグラフ {}: プログラムの作成 {} ms(プロセスの CPU {} ms)",
+            ToUtf8(name), cost.wallMs, cost.processCpuMs);
+
+        return stateObject;
+    }
+
+    std::expected<WorkGraph, std::string> WorkGraph::Create(ID3D12Device5* device, ComPtr<ID3D12StateObject> program,
+                                                            std::wstring_view programName) {
         const std::wstring name(programName);
         WorkGraph graph;
-        graph.m_stateObject = CreateStateObject(device, globalRootSignature, library, name);
-        if (!graph.m_stateObject)
-            return std::unexpected("ワークグラフの状態オブジェクトを作れない");
+        graph.m_stateObject = std::move(program);
 
         ComPtr<ID3D12StateObjectProperties1> stateProperties;
         if (FAILED(graph.m_stateObject.As(&stateProperties)) || FAILED(graph.m_stateObject.As(&graph.m_properties)))

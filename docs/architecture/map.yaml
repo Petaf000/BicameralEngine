@@ -212,7 +212,7 @@ views:
           code: "engine/src/gpu/immediate_queue.cpp::ImmediateQueue::ExecuteAndWait", ticket: T-0013,
           note: "テストと準備用。フレームのループは待たない別の仕組み(T-0012)" }
       - { id: workgraph, group: gpulib, label: "WorkGraph<br/>状態オブジェクト・裏のメモリ・DispatchGraph",
-          code: "engine/src/gpu/work_graph.cpp::WorkGraph::Create", ticket: T-0013 }
+          code: "engine/src/gpu/work_graph.cpp::WorkGraph::CreateProgram", ticket: T-0013 }
       - { id: gpufixedtest, group: tests, label: "gpu_fixed_test<br/>自己テストを GPU で走らせ CPU と 1 値ずつ比べる",
           code: "tests/gpu_fixed_test.cpp::CompareWithCpu", ticket: T-0013,
           note: "ハードウェアと WARP、debug(-Od)と release で一致" }

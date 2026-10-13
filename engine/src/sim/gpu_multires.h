@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "gpu/com_ptr.h"
+#include "gpu/pipeline_cache.h"
 #include "gpu/resources.h"
 #include "gpu/work_graph.h"
 #include "sim/multires_nest.h"
@@ -62,6 +63,11 @@ namespace bicameral::sim {
         // 速い形に入らないセルを刻む作業場の段のグループの数(T-0380。0 = 既定 MR_WIDE_SPACE_GROUPS)。作業場の VRAM はグループの数に
         // 比例し(1 グループ 64 スレッド × 8 語 × 1 セルの上限)、同時に刻めるブロックの数もグループの数まで
         uint32_t wideSpaceGroups = 0;
+
+        // 作ったルート署名・パイプライン・Work Graph のプログラムを使い回す置き場(T-0427。無ければ毎回作る)。同じデバイスで
+        // 何度も作る所(試験の場面ごと)用。使い回すのはコンパイルの結果だけで、裏のメモリとバッファはこの GpuMultires が持つ。
+        // 作る時に使うだけで覚えない
+        gpu::PipelineCache* pipelineCache = nullptr;
     };
 
     class GpuMultiresImplicit;
@@ -280,7 +286,8 @@ namespace bicameral::sim {
         void RecordConductStage(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass);
         void RecordImplicitConduction(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                       const MultiresStepOptions& options);
-        [[nodiscard]] std::expected<void, std::string> CreateConductionGraph(ID3D12Device5* device);
+        [[nodiscard]] std::expected<void, std::string> CreateConductionGraph(ID3D12Device5* device,
+                                                                             gpu::PipelineCache* cache);
         [[nodiscard]] std::vector<std::byte> MakeTreeWordsImage(const MultiresNest& nest) const;
         // 成分の二段(T-0176): u6 の溢れの領域の始まり(語)・CPU の溢れを写せるか・写す像・読み戻した像から CPU の溢れを作る
         [[nodiscard]] uint32_t OverflowBaseWord() const;
