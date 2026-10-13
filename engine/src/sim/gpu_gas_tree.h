@@ -35,6 +35,13 @@ namespace bicameral::sim {
         // 初めの状態(Create に渡したセル・端数・帳簿)と木の形を GPU へ写す(刻みより前に必ず 1 回)
         void RecordUpload(ID3D12GraphicsCommandList10* list);
 
+        // 環境の値のホットリロード(T-0470・ADR-0200): tree(SetGasTreeEnvironment で環境を替えた後の設定・係数・層の基準)から
+        // 設定・レベルごとの係数・層の基準・層の外(t0〜t3)を作り直して写す。次に記録する RecordStep から新しい値で刻む(刻みの境目で呼ぶ)。
+        // 木の形(面・セルの場所。t4〜t6)はそのまま。前の t0〜t3 と写しの元は keepAlive へ(呼ぶ側がこのリストが GPU で終わるまで持つ)。
+        // 木の形・小刻みが Create の時と同じであること(CheckGasTreeEnvironment)。作れなければ false
+        [[nodiscard]] bool RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasTree& tree,
+                                             std::vector<ComPtr<ID3D12Resource>>& keepAlive);
+
         // 1 刻み(いちばん細かい小刻み config.substeps × 2^σmax 回 × 9 段)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
@@ -103,6 +110,7 @@ namespace bicameral::sim {
         uint32_t m_faceCount = 0;
         uint32_t m_substeps = 0;
         uint32_t m_maxExponent = 0;  // σmax(1 刻み = いちばん細かい小刻み m_substeps × 2^これ 回)
+        uint32_t m_levelCount = 0;
         uint64_t m_tick = 0;
 
         ComPtr<ID3D12RootSignature> m_rootSignature;

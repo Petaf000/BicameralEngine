@@ -40,19 +40,25 @@ namespace bicameral::sim {
 
     // 範囲: 重力は fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2 まで、音速の基準は気体の小刻み gasSubsteps の安定の上限
     // (GasSoundSpeedLimitMmPerS)まで。パッケージの読み込み(script::ReadWorldEnvironment)と同じ決まりで、コードで作った表と
-    // ホットリロードの検査(script::CheckHotReloadCompatible)が通す。外なら理由
-    [[nodiscard]] inline std::expected<void, std::string> CheckWorldPhysics(
-        const WorldPhysics& world, uint32_t gasSubsteps = GasConfig{}.substeps) {
+    // ホットリロードの検査(script::CheckHotReloadCompatible)が通す。気体の箱・木の検査(CheckGasEnvironment・CheckGasTreeEnvironment)も
+    // 同じ理由の形でここを通す。gasFinestShift は多重解像度の木の ν がいちばん大きいレベルの k − σ(上限は 2^これ 分の 1。T-0470)。外なら理由
+    [[nodiscard]] inline std::expected<void, std::string> CheckWorldPhysics(const WorldPhysics& world,
+                                                                            uint32_t gasSubsteps = GasConfig{}.substeps,
+                                                                            uint32_t gasFinestShift = 0) {
         if (world.gravityMicrometersPerSecond2 > fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2) {
             return std::unexpected(std::format("重力 {} µm/s² は器の上限 {} µm/s² を超える",
                                                world.gravityMicrometersPerSecond2,
                                                fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2));
         }
 
-        const uint64_t soundSpeedLimit = GasSoundSpeedLimitMmPerS(gasSubsteps);
+        const uint64_t soundSpeedLimit = GasSoundSpeedLimitMmPerS(gasSubsteps) >> gasFinestShift;
         if (world.soundSpeedMillimetersPerSecond > soundSpeedLimit) {
-            return std::unexpected(std::format("音速の基準 {} mm/s は気体の小刻み {} の安定の上限 {} mm/s を超える",
-                                               world.soundSpeedMillimetersPerSecond, gasSubsteps, soundSpeedLimit));
+            const std::string tree = gasFinestShift == 0
+                                         ? std::string()
+                                         : std::format("(木のいちばん細かい ν のレベルで 2^{} 分の 1)", gasFinestShift);
+            return std::unexpected(std::format("音速の基準 {} mm/s は気体の小刻み {}{} の安定の上限 {} mm/s を超える",
+                                               world.soundSpeedMillimetersPerSecond, gasSubsteps, tree,
+                                               soundSpeedLimit));
         }
 
         return {};
