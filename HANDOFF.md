@@ -1,6 +1,6 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-13(3 回目・司令塔のチャット・21:30)/ 並走 2 巡: T-0436・T-0398〜T-0400・T-0373・T-0452・T-0411・T-0426・T-0269・T-0427・T-0380・R-SLOPE の案(19)。全部マージ済み
+最終更新: 2026-10-14 未明(3 回目・司令塔のチャット)/ 並走 3 巡: 2 巡の分 + T-0453・T-0444・T-0396・T-0426(閉じた)。全部マージ済み
 
 ## 状態(3 行以内)
 - main = 8d4e356(第 1 巡のマージ efd83fa の後に release の CPU 50・GPU 9・窓と画像 31 本が全部通過 + 第 2 巡の t-0373・t-0269・t-0426b)。
@@ -16,6 +16,9 @@
 - 第 2 巡(マージ済み): T-0373 標準パッケージ(data/standard の 5 つ)・`--mix`・分類 atmosphere(ADR-0182・ADR-0183)と T-0452 ミキサーのパネル / T-0269 音速の頭打ちを安定の上限から(473 K)/ T-0426 の後半。
 - 第 2 巡(後からマージ): T-0427(遅いのは Compute のパイプラインのドライバのコンパイル。gpu_multires_test は GpuMultiresOptions::pipelineCache で使い回す。仕組みは T-0455)・T-0380(作業場の形の成分の位置を表で引く。861 / 306 ns/セル〔64 グループ〕。1 セル複数スレッドは T-0458)。
 - 第 2 巡のマージの後の試験: main の GPU・窓 31 本(100304)・wt3 の多重解像度 5 本・wt4 の溢れの debug 6 本が通過。
+- 第 3 巡(マージ済み): T-0453 ミキサーの「世界を作り直す」(RunFrameLoop が窓と GPU を残して次の FrameLoop を作る・--auto-rebuild・ADR-0192)/
+  T-0444 環境の値のホットリロード(重力をルート定数で・表の差し替えの刻みで切り替え・sim::CheckWorldPhysics。ADR-0194)/ T-0396 転換の道の費用(--measure-convert。Q55)/
+  T-0426 を閉じた(debug も 1 本 10 分以内。implicit_conduction を形 × 場面に・gpu_gas_blast を分けた・WARP は debug でも伝導の Work Graph 版を外した)。判断待ちは Q46〜Q55。
 - **試験の名前の変化**: gpu_gas → gpu_gas + gpu_gas_flow / gpu_probe_sim → + _tables / gpu_multires → + _stress・_limits / implicit_tree・subcycle・implicit_conduction を分けた(T-0426 のチケット「HANDOFF に写す」)・
   新しい world_layout・environment_package・standard_packages・window_place_tick0_*・window_blank_rewind・window_mixer_*・window_mix_start。
 
@@ -80,9 +83,9 @@
 - 許容差なし(MrExactFoldTolerance)で呼ぶと、熱が通った葉は組の中のエネルギーがビット単位で違うので粗くならない(鎖の場面で本物 14・頁 14 のまま。T-0113。ゲームは D-435 の許容差で呼ぶ想定)。
 - release のビルドで implicit_conduction.cpp(158) に C4189('added' が未使用。T-0110 の FX_ASSERT の中だけで使う変数)。並走の T-0117 の範囲なので触っていない。
 - 影のブロックは自分の中だけ伝導する(外は断熱。親との受け渡しは引き戻し)。
-- **release の WARP では、伝導の段の Work Graph 版(multires_conduct_graph.hlsl)の最初の DispatchGraph でデバイスが失われる**(DXGI_ERROR_DRIVER_INTERNAL_ERROR)。
+- **WARP(2026-10-13 から debug も)では、伝導の段の Work Graph 版(multires_conduct_graph.hlsl)の最初の DispatchGraph でデバイスが失われる**(DXGI_ERROR_DRIVER_INTERNAL_ERROR)。
   debug の WARP とハードウェア(debug・release)では CPU と一致する。WARP の JIT の不具合と推定(未確認。ADR-0013 と同じ種類)。既定の Compute 版は release の WARP でも一致。
-  テストは release の WARP でだけ Work Graph 版を外している(gpu_multires_conduction_test.cpp の RunAll。--subcycle も同じ)。
+  テストは WARP で(debug も。T-0426。どの変更から debug でも落ちるようになったかは未確認)Work Graph 版を外している(gpu_multires_conduction_test.cpp の RunAll。--subcycle も同じ)。
 - 伝導の段の Compute は活性の時も全部の枠の数だけグループを投げる(一覧の数を超えたグループはすぐ抜ける)。世界の枠が数万になったら ExecuteIndirect か Work Graph 版を測り直す。
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
