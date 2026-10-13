@@ -1,6 +1,6 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-13(3 回目・司令塔のチャット)/ 並走 2 巡: T-0436・T-0398〜T-0400・T-0373・T-0452・T-0411・T-0426・T-0269・R-SLOPE の案(19)。T-0427・T-0380 はマージ待ち
+最終更新: 2026-10-13(3 回目・司令塔のチャット・21:30)/ 並走 2 巡: T-0436・T-0398〜T-0400・T-0373・T-0452・T-0411・T-0426・T-0269・T-0427・T-0380・R-SLOPE の案(19)。全部マージ済み
 
 ## 状態(3 行以内)
 - main = 8d4e356(第 1 巡のマージ efd83fa の後に release の CPU 50・GPU 9・窓と画像 31 本が全部通過 + 第 2 巡の t-0373・t-0269・t-0426b)。
@@ -14,7 +14,8 @@
   T-0400 環境の値 → 分類 environment(重力・音速の基準。`sim::WorldPhysics`。窓の WorldPhysicsOf は消えた。ADR-0176)/ T-0411 刻み 0 の保存点 / T-0426 試験の分け直し(前半)/ docs/design/19 坂の原理の案。
   新しい分類はどれも反応表と同じ読み込み・同じ表の版(T-0398 の共有の決め事。つなぎ目は reaction_table.h・reaction_package.cpp・reaction_table.cpp の「同じ読み込みに足した分類」の節に 1 行ずつ)。
 - 第 2 巡(マージ済み): T-0373 標準パッケージ(data/standard の 5 つ)・`--mix`・分類 atmosphere(ADR-0182・ADR-0183)と T-0452 ミキサーのパネル / T-0269 音速の頭打ちを安定の上限から(473 K)/ T-0426 の後半。
-- 第 2 巡(マージ待ち): t-0427(パイプラインの使い回し。wt3 の 20261013-085258-test の結果を見てから)・t-0380(作業場の物質の表で 981 / 498 ns/セル。wt4 の 082935-test と git の列の後)。
+- 第 2 巡(後からマージ): T-0427(遅いのは Compute のパイプラインのドライバのコンパイル。gpu_multires_test は GpuMultiresOptions::pipelineCache で使い回す。仕組みは T-0455)・T-0380(作業場の形の成分の位置を表で引く。861 / 306 ns/セル〔64 グループ〕。1 セル複数スレッドは T-0458)。
+- 第 2 巡のマージの後の試験: main の GPU・窓 31 本(100304)・wt3 の多重解像度 5 本・wt4 の溢れの debug 6 本が通過。
 - **試験の名前の変化**: gpu_gas → gpu_gas + gpu_gas_flow / gpu_probe_sim → + _tables / gpu_multires → + _stress・_limits / implicit_tree・subcycle・implicit_conduction を分けた(T-0426 のチケット「HANDOFF に写す」)・
   新しい world_layout・environment_package・standard_packages・window_place_tick0_*・window_blank_rewind・window_mixer_*・window_mix_start。
 
