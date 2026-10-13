@@ -1,0 +1,35 @@
+# T-0412 世界の写しの早送り
+
+- Status: Doing
+- 種類: 工学
+- PC: 必須
+- 見積もり: チャット 1 回分
+- マイルストーン: D-471 ④ 測る道具(docs/plan/ROADMAP.md「今の順」)
+- 設計: docs/design/14-editor-tools.md「重さの検査と写しの早送り」「実装(T-0412)」/ 決定: D-470・D-403・D-468・D-482 ④・ADR-0198
+
+## 目的(1〜2 行)
+今の世界の写しを作って別に早送りし、「何分で火が消えるか」に答える。写しは世界に返さない(D-403)。同じコマンドの列で本物と同じ結果。
+T-0413(重さの検査)と T-0432(遊びの指標の自動テスト)が乗る「写しを作る → 条件まで早送り → 測った値を返す」の API にする。
+
+## 完了条件(チェックできる形で)
+- [x] API: sim::WorldCopy(Create → RecordInitialization → RecordStart → RecordNext / Complete → Result)。写す道は ProbeFrameInput::adoptFrom
+- [x] 本物の刻みを遅らせない: 本物と同じキューの後ろ・シミュの予算の余りだけで回す(frame::WorldCopyRunner。D-468)
+- [x] gpu_world_copy: 写しを取っても本物のハッシュ列が変わらない・同じコマンドなら写し = 本物(セル + 物)・セルのハッシュと木の量が CPU リファレンスと一致・使い直した写しが条件で CPU と同じ刻みに止まる
+- [ ] window_copy_record/play(`--auto-copy`): 窓の中で写しのハッシュ = 本物・記録を写し無しで再生して同じハッシュ列
+- [ ] release のビルドが警告 0・archmap --check
+
+## 判断待ち(仮で進めたもの。ADR-0198「判断待ち」)
+- 早送りの間エディタの世界を止めるか: 仮 = 止めない(予算の余りで回す)。おすすめ = パネルのチェックで選べる(既定は止めない)。
+- 写しの数の上限: 仮 = 1 つ(VRAM は世界 1 つ分)。おすすめ = 1 のまま、T-0432 で並べたくなったら設定で。
+- 写しにはコマンドを当てない(パネル)。API は当てられる(T-0432 の指標の場面は「火を付ける」などのコマンドを当てて測る)。
+
+## 分けたもの
+- T-0476: 実験室の箱(LabSession)の写しの早送り(箱は記録の再生で同じ状態を作れる〔RunLabComparison〕ので、その上に条件と早送りを足す)。ROADMAP に行を足すのは本体。
+
+## メモ・参考
+- VRAM: 写し 1 つ = 本物の ProbeSim 1 つ分(DefaultHeapBytes。試験の世界の値は docs/perf.md)。読み戻しは別に約 28 MiB + 4 MiB(CPU から見える)。
+- 写しには、写した刻みより先へ予約した本物のコマンドは当たらない(写す時に GPU のキューを空にする)。
+
+## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-14(wt2 作業役): ProbeSim に adoptFrom(保存点の戻しと同じ道で別の世界の S(t) を写す)・sim::WorldCopy・GPU の試験 gpu_world_copy。
+  エディタのパネル「写しの早送り」(editor/copy_panel)と frame::WorldCopyRunner(予算の余り = SimScheduler::SpareMilliseconds)・`--auto-copy`。ADR-0198。

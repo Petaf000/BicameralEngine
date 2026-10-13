@@ -41,13 +41,15 @@ using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
 
 namespace {
 
-    constexpr uint64_t TICKS = 100;
-    constexpr uint64_t FORK_TICK = 30;    // 1 つ目の写しを取る刻み
-    constexpr uint64_t SECOND_TICK = 60;  // 写しを使い直す刻み(1 つ目の早送りが終わった後)
-    constexpr uint64_t SECOND_LIMIT = 120;
-    constexpr uint64_t THRESHOLD_SAMPLE = 6;  // 2 つ目の閾値 = CPU の木の量の道のりの、この番目の読み戻しの値
+    // CPU リファレンス(全部のセルを毎刻み)が debug で 1 刻み 1 秒ほどかかるので、刻みは少なめ(GPU の順番待ち。D-460)
+    constexpr uint64_t TICKS = 80;
+    constexpr uint64_t FORK_TICK = 20;    // 1 つ目の写しを取る刻み
+    constexpr uint64_t SECOND_TICK = 40;  // 写しを使い直す刻み(1 つ目の早送りが終わった後)
+    constexpr uint64_t SECOND_LIMIT = 60;
+    constexpr uint64_t DIVERGING_POKE_TICK = 50;  // 使い直した写しに当てないつつき
+    constexpr uint64_t THRESHOLD_SAMPLE = 4;      // 2 つ目の閾値 = CPU の木の量の道のりの、この番目の読み戻しの値
     constexpr uint32_t SAMPLE_INTERVAL = 10;
-    constexpr uint64_t COPY_TICKS_PER_FRAME = 4;
+    constexpr uint64_t COPY_TICKS_PER_FRAME = 16;  // 読み戻す刻み(10 刻みごと)で切れる
     constexpr std::array<uint32_t, 5> FRAME_UNITS = {3, 7, 5, 11, 4};
 
     constexpr int64_t METER = int64_t{1} << 20;
@@ -58,10 +60,10 @@ namespace {
     std::vector<ProbeCommand> MakeCommands() {
         return {
             MakePokeCommand(0, 0, 28, 32, 32),  // 木箱の壁に火をつける
-            MakePushCommand(30, 1, {10 * METER, 11 * METER / 2, 6 * METER}, {0, 0, UNIT}, PUSH_IMPULSE_MNS),
-            MakePokeCommand(30, 2, 36, 32, 32),  // 写しの始めの刻みのコマンド(写しにも当たる)
-            MakePokeCommand(70, 3, 20, 40, 24),
-            MakePushCommand(90, 4, {10 * METER + 3 * METER / 10, 44 * METER / 5, 26 * METER}, {0, 0, -UNIT},
+            MakePushCommand(FORK_TICK, 1, {10 * METER, 11 * METER / 2, 6 * METER}, {0, 0, UNIT}, PUSH_IMPULSE_MNS),
+            MakePokeCommand(FORK_TICK, 2, 36, 32, 32),  // 写しの始めの刻みのコマンド(写しにも当たる)
+            MakePokeCommand(DIVERGING_POKE_TICK, 3, 20, 40, 24),
+            MakePushCommand(70, 4, {10 * METER + 3 * METER / 10, 44 * METER / 5, 26 * METER}, {0, 0, -UNIT},
                             PUSH_IMPULSE_MNS),
         };
     }
@@ -296,14 +298,14 @@ namespace {
             if (!copy->Initialized())
                 return copy->RecordInitialization();
 
+            if (starts == 1 && copy->Finished() && first.worldHashes.empty())
+                CollectHashes(copy->Result(), first);  // 使い直すと結果は空になる
+
             // 写しを取る(本物のリストが刻みの境界で終わった直後)
             const bool startFirst = starts == 0 && atBoundary && tick == FORK_TICK;
             const bool startSecond = starts == 1 && atBoundary && tick == SECOND_TICK && copy->Finished();
             if (startFirst || startSecond) {
                 ++starts;
-                if (startSecond)
-                    CollectHashes(copy->Result(), first);  // 使い直すと結果は空になる
-
                 CopyPath& path = startFirst ? first : second;
                 WorldCopyQuery query{.maxTicks = startFirst ? TICKS - FORK_TICK : SECOND_LIMIT,
                                      .sampleIntervalTicks = SAMPLE_INTERVAL,
@@ -360,11 +362,13 @@ namespace {
         failures.Check(CountMismatches(second.cellHashes, referenceSecond.cellHashes, SECOND_TICK + 1, result.endTick,
                                        "2 つ目の写し と CPU") == 0,
                        "使い直した写しのセルのハッシュも CPU と同じ");
-        // 刻み 70 のつつきを当てていないので、S(71) から本物と違う(コマンドが効いていることの確かめ)
+        // 刻み DIVERGING_POKE_TICK のつつきを当てていないので、その次の刻みから本物と違う(コマンドが効いていることの確かめ)
         const bool diverged = rng::any_of(second.worldHashes, [&](const auto& entry) {
-            return entry.first > 70 && entry.first <= TICKS && baseline.at(entry.first) != entry.second;
+            return entry.first > DIVERGING_POKE_TICK && entry.first <= TICKS &&
+                   baseline.at(entry.first) != entry.second;
         });
-        failures.Check(result.endTick <= 70 || diverged, "つつきを当てない写しは本物と違う(コマンドが効いている)");
+        failures.Check(result.endTick > DIVERGING_POKE_TICK && diverged,
+                       "つつきを当てない写しは本物と違う(コマンドが効いている)");
         for (const auto& [tick, amount] : second.wood) {
             failures.Check(referenceSecond.wood.contains(tick) && referenceSecond.wood.at(tick) == amount,
                            "使い直した写しの木の量が CPU と同じ");

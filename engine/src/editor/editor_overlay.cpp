@@ -29,6 +29,7 @@ namespace bicameral::editor {
         constexpr uint32_t SRV_DESCRIPTOR_COUNT = 64;
         constexpr float FONT_SIZE_PIXELS = 18.0f;
         constexpr float PANEL_MARGIN_PIXELS = 12.0f;
+        constexpr uint64_t TICKS_PER_SECOND = 60;  // 1 刻み = 世界時間 1/60 秒(06 §1・D-409)
 
         // 日本語の字がある Windows の標準のフォント(上から順に探す)
         constexpr std::array<std::wstring_view, 3> JAPANESE_FONT_FILES = {L"meiryo.ttc", L"YuGothM.ttc",
@@ -67,6 +68,7 @@ namespace bicameral::editor {
         overlay->m_brush = std::make_unique<BrushPanel>();
         overlay->m_patch = std::make_unique<PatchPanel>();
         overlay->m_mixer = std::make_unique<MixerPanel>();
+        overlay->m_copy = std::make_unique<CopyPanel>();
         if (!overlay->CreateGpuObjects(device, frameCount))
             return std::unexpected("エディタの描画のリソースを作れない");
 
@@ -232,6 +234,7 @@ namespace bicameral::editor {
         m_brush->Build();
         m_patch->Build(*m_lab);
         m_mixer->Build(status.reactionTable, status.replaying);
+        m_copy->Build(status.copy, TICKS_PER_SECOND);
         DrawBrushPreview(status.brushPreview);
         PatchPanel::DrawRanges(status.patchRanges);
 

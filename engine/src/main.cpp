@@ -66,6 +66,8 @@
 //                                    (--editor と一緒に。ブランクの世界で。T-0452)
 //   --auto-rebuild                   環境ミキサーで空気で満たす(と依存)を足す → 当たる → 世界を作り直す → 作り直した世界が
 //                                    --mix で起動したのと同じ表で 60 刻み進んだら終える(--editor と一緒に。--record は作り直した所から。T-0453)
+//   --auto-copy                      刻み 60 で世界の写しを取り 600 刻み早送りして、写しのハッシュが本物と同じかを確かめる
+//                                    (--editor と一緒に。T-0412)
 //   --warp                           WARP(ソフトウェアの D3D12)で走らせる
 //   --log-dir <path>                 ログファイルの置き場所(既定: exe の横の logs/。ADR-0006)
 //   --log-level <trace|debug|info|warning|error|fatal>
@@ -366,6 +368,8 @@ namespace {
             loop.autoMixer = true;
         else if (argument == L"--auto-rebuild")
             loop.autoRebuild = true;
+        else if (argument == L"--auto-copy")
+            loop.autoCopy = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
         else if (argument == L"--auto-patch")

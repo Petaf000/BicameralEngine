@@ -105,6 +105,9 @@ namespace bicameral::frame {
         // ブランクの世界で。editor/mixer_panel。T-0452)
         bool autoMixer = false;
         bool autoRebuild = false;  // 環境ミキサーで足して世界を作り直す確かめ(--auto-rebuild。T-0453)
+        // 刻み 60 で今の世界の写しを取り 600 刻み早送りし、写しの刻みごとのハッシュが本物と同じかを確かめる(--auto-copy。
+        // --editor と一緒に。--record で記録し、別の起動の --replay で本物が変わらないことを確かめる。T-0412)
+        bool autoCopy = false;
         // 筆で木を置く・木炭を足す・格子からはみ出す・当たらない値を投げ、木に火を付ける。当たるはずの置くコマンドが全部 GPU で
         // 当たったかを確かめる(--auto-place。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0222)
         bool autoPlace = false;

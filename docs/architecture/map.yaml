@@ -118,6 +118,14 @@ views:
           code: "engine/src/sim/probe_save_point.cpp::ProbeSim::RecordRestore", ticket: T-0143,
           doc: docs/decisions/ADR-0036-rewind-save-points.md,
           note: "GPU → GPU のコピー(読み戻しなし)。戻すとコマンドキューを空にし、刻み t 以降のコマンドを足し直す。gpu_probe_rewind・window_replay_rewind" }
+      - { id: worldcopy, group: simlib, label: "WorldCopy<br/>世界の写しの早送り: S(t) を別の世界へ写し、条件まで早送りして測る",
+          code: "engine/src/sim/world_copy.cpp::WorldCopy::RecordNext", ticket: T-0412,
+          doc: docs/decisions/ADR-0198-world-copy-fast-forward.md,
+          note: "写すのは保存点から戻すのと同じ道(ProbeFrameInput::adoptFrom。写す元は読むだけ)。刻みごとの要約と、決まった間隔のセルと熱の読み戻しを条件に渡す。gpu_world_copy" }
+      - { id: worldcopyrunner, group: framelib, label: "WorldCopyRunner<br/>写しの早送りを本物の刻みの合間(予算の余り)で回す",
+          code: "engine/src/frame/world_copy_runner.cpp::WorldCopyRunner::Update", ticket: T-0412,
+          doc: docs/decisions/ADR-0198-world-copy-fast-forward.md,
+          note: "本物のリストの後ろに同じ compute キューで投げる。量は SimScheduler::SpareMilliseconds に入る刻みの数(D-468)。パネル editor/copy_panel。window_copy(--auto-copy)" }
       - { id: probeview, group: framelib, label: "ProbeView<br/>抽出の格子を光線で辿る(ボリューム・最大値・断面)",
           code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0015, doc: docs/design/14-editor-tools.md,
           note: "画面いっぱいの三角形 1 枚。重ね書き: 格子の枠・断面の枠・活性なブロック・色の凡例" }
@@ -635,6 +643,8 @@ views:
       - [brushpanel, brushstroke, "ドラッグ"]
       - [brushpanel, brushundo, "元に戻す"]
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
+      - [frameloop, worldcopyrunner, "写しの早送り(余りの予算)"]
+      - [worldcopyrunner, worldcopy, "写す・早送り・測る"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]

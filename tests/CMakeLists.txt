@@ -547,6 +547,16 @@ set_tests_properties(window_rebuild_record PROPERTIES LABELS gpu FIXTURES_SETUP 
   PASS_REGULAR_EXPRESSION "--auto-rebuild: 作り直した世界.*OK")
 set_tests_properties(window_rebuild_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_rebuild TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 世界の写しの早送り(T-0412・ADR-0198): 火を付けたサンプルの世界で刻み 60 に写しを取り 600 刻み早送りし、写しの刻みごとのハッシュが
+# 本物の同じ刻みと全部同じ(--auto-copy)。記録を写し無しの別の起動で再生して同じハッシュ列 = 写しを取っても本物は変わらない(D-403)
+set(WINDOW_COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_copy.bcreplay)
+add_test(NAME window_copy_record
+         COMMAND bicameral --world sample --editor --auto-ignite --auto-copy --frames 1500 --record ${WINDOW_COPY_FILE})
+add_test(NAME window_copy_play COMMAND bicameral --replay ${WINDOW_COPY_FILE} --target-fps 30)
+set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP window_copy TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-copy: OK")
+set_tests_properties(window_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_copy TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
          COMMAND bicameral --editor --frames 120

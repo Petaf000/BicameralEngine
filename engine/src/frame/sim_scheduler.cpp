@@ -90,6 +90,8 @@ namespace bicameral::frame {
             }
         }
 
+        m_lastUsedMilliseconds = used;
+
         return count;
     }
 
