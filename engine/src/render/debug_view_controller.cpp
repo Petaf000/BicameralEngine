@@ -28,17 +28,6 @@ namespace bicameral::render {
             return "?";
         }
 
-        std::string_view QuantityName(DebugViewQuantity quantity) {
-            switch (quantity) {
-                case DebugViewQuantity::Temperature: return "温度";
-                case DebugViewQuantity::OxygenDepletion: return "O2 の減り";
-                case DebugViewQuantity::CarbonDioxide: return "CO2";
-                case DebugViewQuantity::Carbon: return "炭";
-            }
-
-            return "?";
-        }
-
         constexpr std::array<char, 3> AXIS_NAMES = {'x', 'y', 'z'};
 
         std::array<float, 4> ToFloat4(Vector3 vector) {
@@ -290,6 +279,12 @@ namespace bicameral::render {
             flags |= VIEW_FLAG_LOGARITHMIC;
 
         flags |= static_cast<uint32_t>(m_settings.quantity) << VIEW_QUANTITY_SHIFT;
+        std::array<float, 4> spans{};
+        for (uint32_t slot = 0; slot < m_scales.size(); ++slot) {
+            spans[slot] = m_scales[slot].spanMicromoles;
+            flags |= m_scales[slot].depletion ? 1u << (VIEW_DEPLETION_SHIFT + slot) : 0u;
+        }
+
         if (m_peek.peeking)
             flags |= m_peek.depth << VIEW_PEEK_DEPTH_SHIFT;
 
@@ -304,13 +299,27 @@ namespace bicameral::render {
                 .position = ToFloat4(basis.position),
                 .forward = ToFloat4(basis.forward),
                 .right = ToFloat4(basis.right),
-                .up = ToFloat4(basis.up)};
+                .up = ToFloat4(basis.up),
+                .speciesSpans = spans};
+    }
+
+    void DebugViewController::UseSpeciesScales(uint64_t tableVersion,
+                                               const std::array<DebugViewSpeciesScale, 3>& scales) {
+        m_scales = scales;
+        m_scalesVersion = tableVersion;
     }
 
     std::string DebugViewController::Describe() const {
+        const auto quantity = static_cast<uint32_t>(m_settings.quantity);
+        std::string quantityName = "温度";
+        if (quantity > 0) {
+            const std::string& label = m_scales[quantity - 1].label;
+            quantityName = label.empty() ? std::format("物質の枠 {}(なし)", quantity) : label;
+        }
+
         return std::format("{}  断面 {} = {}  活性なブロック {}  色 {}({})", ModeName(m_settings.mode),
                            AXIS_NAMES[m_settings.sliceAxis], m_settings.slicePosition,
-                           m_settings.showActiveBlocks ? "あり" : "なし", QuantityName(m_settings.quantity),
+                           m_settings.showActiveBlocks ? "あり" : "なし", quantityName,
                            m_settings.logarithmic ? "対数" : "線形");
     }
 

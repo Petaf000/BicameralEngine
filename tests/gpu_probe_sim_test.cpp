@@ -797,6 +797,7 @@ namespace {
         });
         definition.worldLayout =
             {};  // 世界の組み立て(T-0398)は木箱のセルロースを指すので空にする(この表で初めの世界は作らない)
+        PruneMaterialTemplates(definition);
 
         auto baked = BakeReactionTable(definition);
         if (!baked)

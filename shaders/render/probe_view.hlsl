@@ -1,5 +1,6 @@
 // probe_view.hlsl — 仮の世界(common/probe_sim.hlsli の 64³ のセル)のデバッグ表示(T-0015。前は z = 32 の面だけ: T-0004・T-0005)。
-// 色分けする量は 4 通り(T-0089): 温度・O2 の減り・CO2・炭(抽出の 4 語。probe_sim.hlsli)。
+// 色分けする量は 4 通り(T-0089): 温度と、抽出に写す物質の枠 1〜3(抽出の 4 語。probe_sim.hlsli。どの物質か・色が 1 になる量・
+// 幅からの減りを塗るかはパッケージの view_quantities。T-0399)。
 //
 // データの流れ: シミュ(compute キュー)が抽出の 3 組のどれかに全部のセルと活性の印を書く → 描画(direct キュー)がフェンスを待ってから、
 // フレームの定数(frame。CPU がフレームごとに書く。engine/src/render/probe_view_constants.h と同じ並び)が指す組を読む(06 §4)。
@@ -15,7 +16,7 @@
 StructuredBuffer<uint32_t> extraction0 : register(t0);
 StructuredBuffer<uint32_t> extraction1 : register(t1);
 StructuredBuffer<uint32_t> extraction2 : register(t2);
-ByteAddressBuffer frame : register(t3);  // ProbeViewConstants(96 バイト)
+ByteAddressBuffer frame : register(t3);  // ProbeViewConstants(112 バイト)
 
 // --- 表示の仕方と重ね書き(render/probe_view_constants.h の DebugViewMode・VIEW_FLAG_*)---
 static const uint32_t VIEW_MODE_VOLUME = 0;
@@ -27,18 +28,12 @@ static const uint32_t VIEW_FLAG_LOGARITHMIC = 2;
 static const uint32_t
     VIEW_QUANTITY_SHIFT = 8;  // flags のビット 8〜9 = 色分けする量(render/probe_view_constants.h の DebugViewQuantity)
 static const uint32_t VIEW_QUANTITY_TEMPERATURE = 0;
-static const uint32_t VIEW_QUANTITY_OXYGEN_DEPLETION = 1;
-static const uint32_t VIEW_QUANTITY_CARBON_DIOXIDE = 2;
-static const uint32_t VIEW_QUANTITY_CARBON = 3;
+static const uint32_t VIEW_DEPLETION_SHIFT = 12;   // flags のビット 12〜14 = 物質の枠 1〜3 は幅からの減りを塗る(T-0399)
 static const uint32_t VIEW_PEEK_DEPTH_SHIFT = 16;  // flags のビット 16〜19 = 潜っている段(0 = 潜っていない。T-0096)
 
 // --- 量を 0〜1 にする幅 ---
 static const float AMBIENT_KELVIN = 300.0;    // 温度はこれより上の分
 static const float HOT_KELVIN_SPAN = 1700.0;  // 300 K + 1700 K = 2000 K で 1
-static const float
-    AIR_OXYGEN_MICROMOLES = 1063800.0;  // 空気のセルの O2(sim/probe_sim.cpp の初めの世界)。O2 の減り = これ − O2
-static const float GAS_SPAN_MICROMOLES = 1100000.0;       // CO2 はこれで 1
-static const float CARBON_SPAN_MICROMOLES = 240000000.0;  // 炭は木箱の壁のセルが全部炭になった量(約 2.3e8 µmol)で 1
 
 // --- 色 ---
 static const float3 BACKGROUND = float3(0.02, 0.02, 0.03);
@@ -74,7 +69,7 @@ static const float PEEK_CELL_LINE_SHADE = 0.35;
 // 格子を斜めに抜けるときのセルの数の上限
 static const uint32_t MAX_STEPS = PROBE_GRID_SIZE * 3 + 4;
 
-// フレームの定数(render/probe_view_constants.h の ProbeViewConstants と同じ並び。96 バイト)
+// フレームの定数(render/probe_view_constants.h の ProbeViewConstants と同じ並び。112 バイト)
 struct ViewConstants {
     // --- 何をどこに描くか ---
     uint32_t extraction;  // 読む抽出(0〜2)
@@ -92,6 +87,9 @@ struct ViewConstants {
     float3 forward;     // 見ている向き
     float3 right;       // 画面の半分の幅の分(透視は向きの傾き、平行は世界の長さ)
     float3 up;          // 画面の半分の高さの分
+
+    // --- 物質の枠 1〜3 の色が 1 になる量(µmol。0 = 塗らない。T-0399)---
+    float3 speciesSpans;
 };
 
 ViewConstants LoadConstants() {
@@ -109,6 +107,7 @@ ViewConstants LoadConstants() {
     constants.forward = asfloat(frame.Load3(48));
     constants.right = asfloat(frame.Load3(64));
     constants.up = asfloat(frame.Load3(80));
+    constants.speciesSpans = asfloat(frame.Load3(96));
 
     return constants;
 }
@@ -151,13 +150,16 @@ float WordsAmount(ViewConstants constants, uint32_t wordBase) {
     if (quantity == VIEW_QUANTITY_TEMPERATURE)
         return Normalized(max(value * 0.001 - AMBIENT_KELVIN, 0.0), HOT_KELVIN_SPAN, constants.flags);
 
-    if (quantity == VIEW_QUANTITY_OXYGEN_DEPLETION)
-        return Normalized(max(AIR_OXYGEN_MICROMOLES - value, 0.0), AIR_OXYGEN_MICROMOLES, constants.flags);
+    // 物質の枠: 幅で 1。減りの枠は 幅 − 量(空気の酸素の減りなど)。幅 0(書いていない枠)は塗らない
+    const uint32_t slot = quantity - 1;
+    const float span = constants.speciesSpans[slot];
+    if (span <= 0.0)
+        return 0.0;
 
-    if (quantity == VIEW_QUANTITY_CARBON_DIOXIDE)
-        return Normalized(value, GAS_SPAN_MICROMOLES, constants.flags);
+    if (((constants.flags >> (VIEW_DEPLETION_SHIFT + slot)) & 1) != 0)
+        return Normalized(max(span - value, 0.0), span, constants.flags);
 
-    return Normalized(value, CARBON_SPAN_MICROMOLES, constants.flags);
+    return Normalized(value, span, constants.flags);
 }
 
 float CellAmount(ViewConstants constants, uint3 cell) {

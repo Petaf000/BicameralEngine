@@ -61,12 +61,47 @@ export type WorldBody = {
     mass_g: number, -- 質量(g)。0 = 動かない物(地面・壁)
 }
 
--- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。反応表のほかの分類(UI の文字列など)は形を決めていない ---
+-- --- 材料のひな形・抽出の物質・既定(分類 material_templates・view_quantities・editor_defaults。T-0399)---
+-- 読み手は engine/src/script/material_templates_package.h。量は 1 セル(0.5 m 角)あたりの µmol
+export type MaterialAmount = {
+    species: string, -- 物質の名前
+    micromoles: number,
+}
+
+export type MaterialTemplate = {
+    label: string, -- パネルに出す名前
+    order: number?, -- パネルの並び(小さい順。同じなら鍵の順)
+    contents: { MaterialAmount }, -- 1〜3 個。書いた順に置く
+}
+
+export type ViewQuantity = {
+    label: string, -- 表示の「色分けする量」の名前
+    species: string, -- 抽出に写す物質
+    span_micromoles: number, -- この量で色が 1
+    depletion: boolean?, -- true なら 幅 − 量 を塗る(減り)
+}
+
+export type ViewQuantities = {
+    slot_1: ViewQuantity?,
+    slot_2: ViewQuantity?,
+    slot_3: ViewQuantity?,
+}
+
+export type EditorDefaults = {
+    lab_fill: string?, -- 実験室の箱を満たす材料(material_templates の鍵)
+    place_material: string?, -- 「置く」で初めに選ぶ材料
+    temperature_mk: number?, -- 箱を満たす温度・置く温度の初め(mK。lab_fill を書いたら要る)
+}
+
+-- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。ここに無い分類(UI の文字列など)は形を決めていない ---
 export type PackageEntry = {
     elements: { [string]: Element }?,
     species: { [string]: Species }?,
     reactions: { [string]: Reaction }?,
     world_cells: { [string]: WorldCellRegion }?,
     world_bodies: { [string]: WorldBody }?,
+    material_templates: { [string]: MaterialTemplate }?,
+    view_quantities: ViewQuantities?,
+    editor_defaults: EditorDefaults?,
     [string]: any,
 }

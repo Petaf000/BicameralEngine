@@ -5,7 +5,7 @@
 //   パネル(editor/lab_panel)が置く操作を Command(LAB_COMMAND_TYPE_*。common/lab_box.hlsli)にする
 //   → CPU: StepLabBox(コマンドを当てる → StepNest。反応 + 熱の伝導)/ GPU: sim/gpu_lab_box(同じ関数を GPU で)
 //   → FindLabMismatch で刻みごとに比べる。食い違えば最初の刻みとセル。
-//   記録(LabRecording)はコマンドの列とハッシュの列だけ(初めの箱は決まっている: 300 K の空気)。読み直して流せば同じ実験になる。
+//   記録(LabRecording)はコマンドの列とハッシュの列だけ(初めの箱は表で決まる: パッケージの既定の材料と温度。T-0399)。読み直して流せば同じ実験になる。
 // 箱は多重解像度の木の本物の根(8³ セル、0.5 m 角 = 4 m 角)を x・y・z に並べたもの(T-0173。lab::LabBoxShape。初めは根 1 つ)。
 // 外とは熱も物も通さない(並べた根どうしは木の伝導で熱が通る)。仮の世界(ProbeSim)とは別の世界。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
@@ -48,7 +48,6 @@ namespace bicameral::sim {
     }
     inline constexpr uint32_t LAB_MAX_COMMANDS_PER_TICK = 64;  // 1 刻みに当てるコマンドの上限(GPU の写しの大きさ)
     inline constexpr uint64_t LAB_WORLD_SEED = 20261009;
-    inline constexpr int32_t LAB_INITIAL_TEMPERATURE_MILLIKELVIN = 300000;
 
     // 細かくできない箱(refineBlocks = 0)の刻み: 反応(待ちの丸め)+ 熱の伝導(17 §4)。陰解法・小刻みは使わない(T-0173 までの箱と記録のまま)。
     // 細かくできる箱は LabStepOptions(細かいレベルの熱を陰解法で。T-0351)
@@ -133,16 +132,22 @@ namespace bicameral::sim {
     // 64 バイトをそのまま uint32 × 16 で読む(GPU に写す形と同じ)
     [[nodiscard]] lab::LabCommand ToLabCommand(const Command& command);
 
-    // --- 試験の表の材料(パネルの「置く」の選択肢。tests/packages/combustion_test と同じ物質の名前)---
+    // --- 材料(パネルの「置く」の選択肢。パッケージの分類 material_templates。T-0399)---
 
     struct LabMaterial {
-        std::string_view name;  // 表示の名前
+        std::string key;   // パッケージの鍵(自動の確かめはこれで探す)
+        std::string name;  // 表示の名前(パッケージの label)
         std::vector<SpeciesAmount> contents;
     };
 
-    // 空気・木(セルロース 1 割 + 孔の空気。仮の世界の木箱の壁と同じ)・木炭・二酸化炭素・窒素・魔素(試験。仮の魔素 mana_test。T-0225)。
-    // 表に無い物質の材料は入らない
+    // ひな形の成分を置くコマンドの材料に(書いた順)
+    [[nodiscard]] std::vector<SpeciesAmount> MaterialContents(const MaterialTemplate& material);
+
+    // 表の材料のひな形(table.templates.materials。並び = パッケージの order → 鍵)。ブランクの世界では空
     [[nodiscard]] std::vector<LabMaterial> MakeLabMaterials(const BakedReactionTable& table);
+
+    // 鍵で材料を探す(無ければ nullptr)
+    [[nodiscard]] const LabMaterial* FindLabMaterial(std::span<const LabMaterial> materials, std::string_view key);
 
     // --- 箱 ---
 
@@ -159,7 +164,7 @@ namespace bicameral::sim {
     // 本当の速さで伝わる(T-0351・ADR-0137 追記 2・QUESTIONS Q40 の B。レベル 0 の面は今までどおり陽解法)
     [[nodiscard]] MultiresStepOptions LabStepOptions(lab::LabBoxShape shape);
 
-    // 300 K の空気を満たした箱(根はいつも頁を持つ。GPU のコマンドは頁のセルに書くため)。根は x → y → z の順に枠 0 から
+    // パッケージの既定(editor_defaults の lab_fill・temperature_mk)の材料を満たした箱。書いていなければ空のセル(T-0399)(根はいつも頁を持つ。GPU のコマンドは頁のセルに書くため)。根は x → y → z の順に枠 0 から
     [[nodiscard]] MultiresNest MakeLabBoxNest(const BakedReactionTable& table,
                                               lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 

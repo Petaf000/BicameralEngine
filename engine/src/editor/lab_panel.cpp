@@ -187,6 +187,8 @@ namespace bicameral::editor {
         // --- 材料の行の物質 ID を名前で新しい表へ(物質を足す・消す表では ID がずれる。消えた物質の行は空に。T-0242)---
         if (m_table != nullptr)
             RemapMaterialRows(*m_table, loaded->table, m_rows);
+        else
+            UseDefaults(loaded->table.templates);
 
         m_loaded = std::move(loaded);
         m_table = std::shared_ptr<const sim::BakedReactionTable>(m_loaded, &m_loaded->table);
@@ -352,6 +354,13 @@ namespace bicameral::editor {
     }
 
     // --- 材料を組む(T-0220。表の全物質から 3 つまで・量の単位・温度・置く範囲)---
+
+    // 初めの表のパッケージの既定(「置く」の初めの材料と温度。T-0399)
+    void LabPanel::UseDefaults(const sim::MaterialTemplates& templates) {
+        m_preset = templates.placeMaterial.value_or(0);
+        if (templates.temperatureMilliKelvin > 0)
+            m_temperatureKelvin = templates.temperatureMilliKelvin / 1000;
+    }
 
     void LabPanel::LoadPreset(size_t index) {
         m_rows = {};
@@ -742,9 +751,8 @@ namespace bicameral::editor {
             return;
         }
 
-        const auto material = std::ranges::find_if(m_materials,
-                                                   [](const sim::LabMaterial& m) { return m.name == "木"; });
-        if (material == m_materials.end())
+        const sim::LabMaterial* material = sim::FindLabMaterial(m_materials, "wood");
+        if (material == nullptr)
             return;
 
         // 材料の一覧は箱を作り直すたびに作り直す(CreateSession)ので、成分を写しておく

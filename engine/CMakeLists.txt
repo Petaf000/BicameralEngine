@@ -47,6 +47,7 @@ add_library(bicameral_reaction STATIC
   src/sim/reaction_table.cpp
   src/sim/species_remap.cpp  # 物質を足す・消す表の差し替えの付け替え(T-0223・ADR-0065)
   src/sim/world_layout.cpp  # 世界の組み立て(初めのセル・物。パッケージの world_cells・world_bodies。T-0398)
+  src/sim/material_templates.cpp  # 材料のひな形・抽出の物質・既定(同じ読み込みの分類。T-0399)
 )
 target_include_directories(bicameral_reaction PUBLIC src)
 target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
@@ -142,6 +143,7 @@ add_library(bicameral_reaction_script STATIC
   src/script/reaction_hot_reload.cpp
   src/script/reaction_table_edit.cpp
   src/script/world_layout_package.cpp  # 世界の組み立ての分類を読む(T-0398)
+  src/script/material_templates_package.cpp  # 分類 material_templates・view_quantities・editor_defaults(T-0399)
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
 target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)

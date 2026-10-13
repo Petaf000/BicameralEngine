@@ -3,13 +3,14 @@
 // データの流れ: platform/window の入力のイベント → HandleInput → カメラと表示の設定(View の状態。世界には入らない)
 //   + つつくセル(フレームのループがコマンドにする。06 §3)→ Constants() が描画の定数(render/probe_view_constants.h)を作る。
 // 操作: 左クリック = つつく / Shift + 左クリック = 光線の先の物を押す(T-0098)/ 右ドラッグ = 回る / 中ドラッグ = 平行移動 / ホイール = 寄る / 1・2・3 = 表示 / X・Y・Z = 断面の軸 /
-//   Q・E = 断面を動かす(Shift で 8) / B = 活性なブロック / L = 対数・線形 / C = 色分けする量(温度・O2 の減り・CO2・炭)/
+//   Q・E = 断面を動かす(Shift で 8) / B = 活性なブロック / L = 対数・線形 / C = 色分けする量(温度・抽出の物質の枠 1〜3。パッケージの view_quantities)/
 //   O = 透視・平行 / R = カメラを戻す /
 //   T = 連鎖のトレースを頼む(どこを何刻みかはフレームのループが決める。T-0088)/
 //   P = カーソルの下の断面のセルを覗く(覗き窓。T-0096)/ Shift + P = やめる / PageDown・PageUp = 潜る・浮かぶ(カメラが点に寄る)。
 // 設定が変わったらログに出す(画面に文字はまだ無い。12 §5)。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -46,6 +47,13 @@ namespace bicameral::render {
         DebugViewQuantity quantity = DebugViewQuantity::Temperature;
     };
 
+    // 抽出の物質の枠 1 つの表示(パッケージの view_quantities を frame が渡す。T-0399)。幅 0 = 書いていない枠(塗らない)
+    struct DebugViewSpeciesScale {
+        std::string label;
+        float spanMicromoles = 0.0f;
+        bool depletion = false;  // 幅からの減りを塗る
+    };
+
     // 左ボタンを押したままポインタが通った断面のセル(筆で塗る。T-0245)と、離したか
     struct PointerDrag {
         std::vector<CellCoordinate> cells;  // 古い順(続けて同じセルは 1 つ)
@@ -64,6 +72,10 @@ namespace bicameral::render {
         [[nodiscard]] const DebugViewSettings& Settings() const { return m_settings; }
         [[nodiscard]] const OrbitCamera& Camera() const { return m_camera; }
         [[nodiscard]] std::string Describe() const;  // 今の設定を 1 行で(ログ用)
+
+        // 抽出の物質の枠 1〜3 の名前と色の幅(表の版 tableVersion ごとに 1 回。T-0399)
+        void UseSpeciesScales(uint64_t tableVersion, const std::array<DebugViewSpeciesScale, 3>& scales);
+        [[nodiscard]] std::optional<uint64_t> SpeciesScalesVersion() const { return m_scalesVersion; }
 
         // 前に呼んでから T が押されたか(押されていたら true を返して忘れる)
         [[nodiscard]] bool TakeTraceRequest();
@@ -104,6 +116,10 @@ namespace bicameral::render {
         uint32_t m_gridSize;  // 格子の 1 辺のセルの数
         DebugViewSettings m_settings;
         OrbitCamera m_camera;
+
+        // --- 抽出の物質の枠(UseSpeciesScales)---
+        std::array<DebugViewSpeciesScale, 3> m_scales;
+        std::optional<uint64_t> m_scalesVersion;
 
         // --- ドラッグ中の状態 ---
         bool m_rotating = false;

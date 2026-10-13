@@ -469,7 +469,7 @@ namespace bicameral::sim {
         // 表 4 つ・セル・キャッシュ(1 世代ぶん。2 世代に写す)・予定の印(初めの起こす刻みの印。ProbeInitialScheduleWords)
         std::array<ComPtr<ID3D12Resource>, 7> m_initialUploads;
         bool m_initialized = false;
-        std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(O2・CO2・炭)
+        std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> m_viewSpecies{};  // 抽出に写す物質(ProbeViewSpecies)
         uint32_t m_speciesCount = 0;  // 今の表の物質の数(適用の単位の引数。置くコマンドの検査。T-0222)
         uint32_t m_ruleCount = 0;     // 今の表の規則の数(単位の定数 [3]。パッチを足す時の検査。T-0323)
         std::array<ComPtr<ID3D12Resource>, PROBE_EXTRACTION_COUNT> m_extractions;
@@ -526,7 +526,7 @@ namespace bicameral::sim {
     // ブランクの世界(D-455・T-0371): 1 世代ぶんのセルが全部空(物質なし・エネルギー 0)。どの表でも何も起きない
     [[nodiscard]] std::vector<reaction::RxCell> MakeBlankProbeWorld();
 
-    // 抽出に写す物質(O2・CO2・炭の順。描画の色分け)
+    // 抽出に写す物質(パッケージの view_quantities の slot_1〜3。描画の色分け。書いていない枠は 0。T-0399)
     [[nodiscard]] std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table);
 
     // --- CPU リファレンス(GPU とビット一致するはずのもの。D-307・CLAUDE.md 原則 4)---

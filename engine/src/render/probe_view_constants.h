@@ -14,20 +14,22 @@ namespace bicameral::render {
         Slice = 2,              // 断面だけ
     };
 
-    // 色分けする量(probe_view.hlsl の VIEW_QUANTITY_*。T-0089)
+    // 色分けする量(probe_view.hlsl の VIEW_QUANTITY_*。T-0089)。物質の枠は抽出に写す物質(パッケージの view_quantities。T-0399)
     enum class DebugViewQuantity : uint8_t {
-        Temperature = 0,      // 300 K より上の分
-        OxygenDepletion = 1,  // 空気の O2 からの減り
-        CarbonDioxide = 2,
-        Carbon = 3,  // 炭
+        Temperature = 0,  // 300 K より上の分
+        Species1 = 1,     // 抽出の物質の枠 1(view_quantities.slot_1)
+        Species2 = 2,
+        Species3 = 3,
     };
 
     inline constexpr uint32_t DEBUG_VIEW_QUANTITY_COUNT = 4;
 
-    // flags のビット(probe_view.hlsl の VIEW_FLAG_*)。ビット 8〜9 は色分けする量、16〜19 は潜っている段
+    // flags のビット(probe_view.hlsl の VIEW_FLAG_*)。ビット 8〜9 は色分けする量、12〜14 は減りを塗る枠、16〜19 は潜っている段
     inline constexpr uint32_t VIEW_FLAG_ACTIVE_BLOCKS = 1u << 0;  // 活性なブロックを重ねる
     inline constexpr uint32_t VIEW_FLAG_LOGARITHMIC = 1u << 1;    // 色は対数(無ければ線形)
     inline constexpr uint32_t VIEW_QUANTITY_SHIFT = 8;
+    // ビット 12〜14 = 物質の枠 1〜3 が「幅からの減り」を塗る(空気の酸素の減りなど。T-0399)
+    inline constexpr uint32_t VIEW_DEPLETION_SHIFT = 12;
     inline constexpr uint32_t
         VIEW_PEEK_DEPTH_SHIFT = 16;  // ビット 16〜19 = 覗き窓で潜っている段(0 = 潜っていない。T-0096)
 
@@ -50,8 +52,11 @@ namespace bicameral::render {
         std::array<float, 4> forward{};
         std::array<float, 4> right{};
         std::array<float, 4> up{};
+
+        // --- 物質の枠 1〜3 の色が 1 になる量(µmol。0 = 塗らない。w は使わない。T-0399)---
+        std::array<float, 4> speciesSpans{};
     };
 
-    static_assert(sizeof(ProbeViewConstants) == 96, "probe_view.hlsl の読み方と合わせる");
+    static_assert(sizeof(ProbeViewConstants) == 112, "probe_view.hlsl の読み方と合わせる");
 
 }  // namespace bicameral::render

@@ -72,6 +72,7 @@ namespace bicameral::editor {
         void BuildControls();
         void BuildMaterialRows(uint32_t milliKelvin);
         void BuildStepControls();
+        void UseDefaults(const sim::MaterialTemplates& templates);
         void LoadPreset(size_t index);
         [[nodiscard]] std::vector<sim::SpeciesAmount> ComposedContents(uint32_t temperatureMilliKelvin) const;
         [[nodiscard]] sim::LabCellRange PlaceRange() const;
@@ -103,7 +104,7 @@ namespace bicameral::editor {
         int m_fineLevel = 0;
         std::array<int, 3> m_fineCell = {0, 0, 0};
         int m_fineZ = 0;
-        size_t m_preset = 1;  // ひな形(m_materials の添字。初めは木)
+        size_t m_preset = 0;  // ひな形(m_materials の添字。初めはパッケージの place_material)
         MaterialRows m_rows{};
         RangeKind m_rangeKind = RangeKind::Cell;
         std::array<int, 3> m_rangeLow = {0, 0, 0};

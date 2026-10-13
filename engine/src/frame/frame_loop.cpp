@@ -68,6 +68,19 @@ namespace bicameral::frame {
         constexpr auto STATS_INTERVAL = chr::seconds(1);
         constexpr auto MINIMIZED_SLEEP = chr::milliseconds(16);
 
+        // 表の抽出の物質の枠(パッケージの view_quantities)→ 描画の名前と色の幅(T-0399。描画だけ浮動小数点)
+        std::array<render::DebugViewSpeciesScale, 3> SpeciesScales(const sim::BakedReactionTable& table) {
+            std::array<render::DebugViewSpeciesScale, 3> scales;
+            for (size_t slot = 0; slot < scales.size(); ++slot) {
+                const sim::ViewQuantityTemplate& quantity = table.templates.viewQuantities[slot];
+                scales[slot] = {.label = quantity.label,
+                                .spanMicromoles = static_cast<float>(quantity.spanMicromoles),
+                                .depletion = quantity.depletion};
+            }
+
+            return scales;
+        }
+
         // --- 窓の T で始める連鎖のトレース(T-0088)---
         constexpr uint64_t TRACE_KEY_TICKS = 60;        // 次の刻みから何刻み
         constexpr uint32_t TRACE_KEY_RADIUS_CELLS = 8;  // 最後につついたセルの周り ±何セル
@@ -1285,6 +1298,12 @@ namespace bicameral::frame {
 
             // 見せる抽出: CPU から見て終わっている最新(シミュを待たない。抽出の 3 組の約束。ファイルの先頭)
             const auto extraction = static_cast<uint32_t>(m_completedExtraction.number % sim::PROBE_EXTRACTION_COUNT);
+            const uint64_t tableVersion = m_tableReload.AppliedVersion();
+            if (m_viewController.SpeciesScalesVersion() != tableVersion) {
+                if (const auto loaded = m_tableReload.Find(tableVersion); loaded != nullptr)
+                    m_viewController.UseSpeciesScales(tableVersion, SpeciesScales(loaded->table));
+            }
+
             *slot.mappedConstants = m_viewController.Constants(extraction, m_swapChain.Width(), m_swapChain.Height());
             m_direct.GpuWait(m_compute, m_completedExtraction.fence);
             slot.renderFence = m_direct.Submit(slot.list.Get());
