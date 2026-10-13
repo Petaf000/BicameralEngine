@@ -563,6 +563,10 @@ set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP win
   PASS_REGULAR_EXPRESSION "--auto-copy: OK")
 set_tests_properties(window_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_copy TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 重さの見張り(安全網の警告。T-0413・ADR-0204・D-468): 結果に入らない重さ(約 22 ms/刻み)を足すと、本物の刻みが等速の予算を超えた警告が出る
+add_test(NAME window_weight_warn COMMAND bicameral --frames 240 --sim-load 5200000 --sim-split 16)
+set_tests_properties(window_weight_warn PROPERTIES LABELS gpu TIMEOUT 300
+  PASS_REGULAR_EXPRESSION "刻みが等速の予算 [0-9.]+ ms を超えた")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
          COMMAND bicameral --editor --frames 120
