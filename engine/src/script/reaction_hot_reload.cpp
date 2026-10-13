@@ -11,6 +11,7 @@
 
 #include "script/luau_type_check.h"
 #include "sim/species_remap.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::script {
 
@@ -93,6 +94,10 @@ namespace bicameral::script {
     std::expected<void, std::string> CheckHotReloadCompatible(const sim::BakedReactionTable& current,
                                                               const sim::BakedReactionTable& next,
                                                               SpeciesChangePolicy policy) {
+        // 環境の値(重力・音速の基準)は差し替えの刻みから物理と気体に当たるので、器が受けられる範囲であること(T-0444・ADR-0194)
+        if (const auto environment = sim::CheckWorldPhysics(next.environment); !environment)
+            return std::unexpected(std::format("環境の値を今の世界に当てられない: {}", environment.error()));
+
         // 付け替えられる世界: 消す物質は元素に分けて戻す(元素の一覧・組み立ての変化も名前で付け替える。単体の無い元素は捨てる。D-484)
         if (policy == SpeciesChangePolicy::Remap) {
             const auto remap = sim::BuildSpeciesRemap(current, next);

@@ -61,6 +61,9 @@ namespace bicameral::sim {
         uint32_t Push(const physics::PxVec3& origin, const physics::PxVec3& direction,
                       uint32_t impulseMillinewtonSeconds);
 
+        // 次の Step から重力を替える(2^-20 m/s²。環境の値のホットリロード。GpuPhysics::SetGravity と同じ。T-0444)。刻みと刻みの間に呼ぶ
+        void SetGravity(int64_t gravity) { m_parameters.gravity = gravity; }
+
         [[nodiscard]] const std::vector<PhysicsBody>& Bodies() const { return m_bodies; }
         [[nodiscard]] const PhysicsStepStats& Stats() const { return m_stats; }
         [[nodiscard]] const std::map<std::pair<uint32_t, uint32_t>, PhysicsManifold>& Manifolds() const {

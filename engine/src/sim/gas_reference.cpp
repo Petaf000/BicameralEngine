@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <format>
 #include <limits>
 
 #include "common/fixed.hlsli"
@@ -746,54 +747,66 @@ namespace bicameral::sim {
         return layers;
     }
 
+    namespace {
+
+        // 設定・係数・層の基準から、基準の導く値・開いた境界の外・α・頭打ちの温度を作る(MakeGasBox・SetGasEnvironment)
+        void MakeGasLayers(GasBox& box) {
+            const GasConfig& config = box.config;
+            box.referenceDerived.clear();
+            box.ghost.clear();
+
+            // --- 基準の導く値(p̃ = 0)と開いた境界の外(基準 + 風)---
+            for (const GasCell& layer : box.reference) {
+                box.referenceDerived.push_back(DeriveRaw(config, box.coefficients, layer));
+
+                GasCell ghost = layer;
+                const auto mass = (int64_t)box.referenceDerived.back().mass;
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                    ghost.momentum[axis] = mass * config.windVelocity[axis];
+
+                ghost.energy += DivideNearest(KineticEnergy(config, ghost, (uint64_t)mass),
+                                              1000);  // 風の運動エネルギー(断熱)
+
+                box.ghost.push_back(ghost);
+            }
+
+            // --- α = c̃² ÷ c_iso²、c_iso² = p ÷ ρ = p(µPa)× 0.125 ÷ m(mg)(地面の層)---
+            // α(Q32)= c̃(mm/s)² × m × 8 × 2^32 ÷ (p × 1e6)
+            const GasDerived& ground = box.referenceDerived.front();
+            const uint64_t sound = config.soundSpeedMmPerS;
+            const fx::FxU128 numerator = fx::FxMulU64Full(sound * sound * 8 * ground.mass, ONE_Q32);
+            box.coefficients.soundScale = fx::FxDivU128By64(numerator, (uint64_t)ground.pressure * MICRO).quotient;
+
+            // 断熱: α を 1 ÷ γ = C_v ÷ (C_v + n R) 倍(圧縮で温まる分だけ圧力が強く戻るので、音速 √(α γ c_iso²) を c̃ にそろえる)
+            if (config.thermodynamics == GasThermodynamics::Adiabatic) {
+                const GasCell& groundCell = box.reference.front();
+                const uint64_t capacity = HeatCapacity(config, groundCell);
+                const uint64_t gasConstant = fx::FxDivU128By64(fx::FxMulU64Full(TotalAmount(config, groundCell),
+                                                                                GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6),
+                                                               MICRO)
+                                                 .quotient;
+                box.coefficients.soundScale = fx::FxDivU128By64(fx::FxMulU64Full(box.coefficients.soundScale, capacity),
+                                                                capacity + gasConstant)
+                                                  .quotient;
+            }
+
+            // 頭打ちの温度(D-461・T-0269): 既定は安定の上限まで本物の音速(T_基準 ×(上限 ÷ c̃)²)
+            box.coefficients.soundTemperature = config.soundCapTemperature == 0
+                                                    ? GasSoundCapTemperature(config.soundSpeedMmPerS,
+                                                                             GasSoundSpeedLimitMmPerS(config.substeps),
+                                                                             ground.temperature)
+                                                    : config.soundCapTemperature;
+        }
+
+    }  // namespace
+
     GasBox MakeGasBox(const GasConfig& config, std::vector<GasCell> reference) {
         assert(reference.size() == config.sizeZ);
         GasBox box;
         box.config = config;
         box.coefficients = MakeGasCoefficients(config);
         box.reference = std::move(reference);
-
-        // --- 基準の導く値(p̃ = 0)と開いた境界の外(基準 + 風)---
-        for (const GasCell& layer : box.reference) {
-            box.referenceDerived.push_back(DeriveRaw(config, box.coefficients, layer));
-
-            GasCell ghost = layer;
-            const auto mass = (int64_t)box.referenceDerived.back().mass;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                ghost.momentum[axis] = mass * config.windVelocity[axis];
-
-            ghost.energy += DivideNearest(KineticEnergy(config, ghost, (uint64_t)mass),
-                                          1000);  // 風の運動エネルギー(断熱)
-
-            box.ghost.push_back(ghost);
-        }
-
-        // --- α = c̃² ÷ c_iso²、c_iso² = p ÷ ρ = p(µPa)× 0.125 ÷ m(mg)(地面の層)---
-        // α(Q32)= c̃(mm/s)² × m × 8 × 2^32 ÷ (p × 1e6)
-        const GasDerived& ground = box.referenceDerived.front();
-        const uint64_t sound = config.soundSpeedMmPerS;
-        const fx::FxU128 numerator = fx::FxMulU64Full(sound * sound * 8 * ground.mass, ONE_Q32);
-        box.coefficients.soundScale = fx::FxDivU128By64(numerator, (uint64_t)ground.pressure * MICRO).quotient;
-
-        // 断熱: α を 1 ÷ γ = C_v ÷ (C_v + n R) 倍(圧縮で温まる分だけ圧力が強く戻るので、音速 √(α γ c_iso²) を c̃ にそろえる)
-        if (config.thermodynamics == GasThermodynamics::Adiabatic) {
-            const GasCell& groundCell = box.reference.front();
-            const uint64_t capacity = HeatCapacity(config, groundCell);
-            const uint64_t gasConstant = fx::FxDivU128By64(fx::FxMulU64Full(TotalAmount(config, groundCell),
-                                                                            GAS_CONSTANT_NANOJOULE_PER_AMOUNT_X1E6),
-                                                           MICRO)
-                                             .quotient;
-            box.coefficients.soundScale = fx::FxDivU128By64(fx::FxMulU64Full(box.coefficients.soundScale, capacity),
-                                                            capacity + gasConstant)
-                                              .quotient;
-        }
-
-        // 頭打ちの温度(D-461・T-0269): 既定は安定の上限まで本物の音速(T_基準 ×(上限 ÷ c̃)²)
-        box.coefficients.soundTemperature = config.soundCapTemperature == 0
-                                                ? GasSoundCapTemperature(config.soundSpeedMmPerS,
-                                                                         GasSoundSpeedLimitMmPerS(config.substeps),
-                                                                         ground.temperature)
-                                                : config.soundCapTemperature;
+        MakeGasLayers(box);
 
         // --- セル = 層の基準 + 風 ---
         box.cells.resize((size_t)config.sizeX * config.sizeY * config.sizeZ);
@@ -805,6 +818,41 @@ namespace bicameral::sim {
         }
 
         return box;
+    }
+
+    std::expected<void, std::string> CheckGasEnvironment(const GasConfig& current, const GasConfig& next) {
+        // 環境の値の外は今と同じであること
+        GasConfig expected = next;
+        expected.soundSpeedMmPerS = current.soundSpeedMmPerS;
+        expected.gravityMicrometersPerSecond2 = current.gravityMicrometersPerSecond2;
+        if (expected != current)
+            return std::unexpected("気体の箱の作り(大きさ・物質・小刻み・境界・風・丸め)は環境の値では替えられない");
+
+        if (next.soundSpeedMmPerS == 0)
+            return std::unexpected("気体の箱には音速の基準が要る(0 にはできない)");
+
+        const uint64_t limit = GasSoundSpeedLimitMmPerS(next.substeps);
+        if (next.soundSpeedMmPerS > limit) {
+            return std::unexpected(std::format("音速の基準 {} mm/s は気体の小刻み {} の安定の上限 {} mm/s を超える",
+                                               next.soundSpeedMmPerS, next.substeps, limit));
+        }
+
+        if (next.gravityMicrometersPerSecond2 > fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2) {
+            return std::unexpected(std::format("重力 {} µm/s² は器の上限 {} µm/s² を超える",
+                                               next.gravityMicrometersPerSecond2,
+                                               fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2));
+        }
+
+        return {};
+    }
+
+    void SetGasEnvironment(GasBox& box, const GasConfig& config, std::vector<GasCell> reference) {
+        assert(CheckGasEnvironment(box.config, config).has_value());
+        assert(reference.size() == config.sizeZ);
+        box.config = config;
+        box.coefficients = MakeGasCoefficients(config);
+        box.reference = std::move(reference);
+        MakeGasLayers(box);
     }
 
     GasDerived DeriveGasCell(const GasBox& box, const GasCell& cell, uint32_t z) {

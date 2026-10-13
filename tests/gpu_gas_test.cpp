@@ -5,6 +5,8 @@
 // T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波・1 セルの 5 倍の圧力(整数の範囲)。
 // T-0234(断熱の仕事 pdV・運動エネルギーの散逸): 既定は断熱(衝撃波は断熱の理論 398.6 m/s)。等温の形も場面 shock_isothermal(404 m/s)で確かめる。
 // T-0269(D-461): 熱いセルの音速の頭打ちが約 473 K から(ν ≤ 0.6)。1500 K のセル(hot_cell)と 1500 K・5 倍の物質量の爆発(blast_hot)。
+// T-0444(環境の値のホットリロード): 途中の刻みで重力・音速の基準・層の基準を替えても毎刻みビット一致(closed_environment_change・
+//   open_environment_change)。
 // 引数: gpu_test_options.h(--warp・--queue)と
 //   --scene <名前>[,<名前>...]: その場面だけ(既定は全部)。ctest は GPU の順番待ち(D-460)に合わせて 2 組に分けて流す(T-0426)。
 //     並べた名前が 1 つでも無ければ失敗(場面の名前を変えた時に、組から黙って落ちないように)
@@ -94,10 +96,19 @@ namespace {
 
     // --- 場面 ---
 
+    // 刻み tick の始めに環境(重力・音速の基準と、それで作り直した層の基準)を替える(T-0444。CPU は SetGasEnvironment、
+    // GPU は GpuGas::RecordEnvironment)
+    struct EnvironmentChange {
+        uint64_t tick = 0;
+        GasConfig config;
+        std::vector<GasCell> reference;
+    };
+
     struct Scene {
         std::string name;
         GasBox box;
         uint64_t ticks = 0;
+        std::optional<EnvironmentChange> change;
     };
 
     // 閉じた箱に熱いセル・煙・動くセル(gas_reference_test の MakeDisturbedClosedBox)
@@ -260,6 +271,19 @@ namespace {
         return {.name = name, .box = box, .ticks = 30};
     }
 
+    // 環境の値のホットリロード(T-0444・ADR-0194): 途中の刻みで重力と音速の基準を替える(基準の大気は同じで、層の基準は作り直す)
+    Scene WithEnvironmentChange(Scene scene, std::string name, uint64_t tick, uint32_t gravity, uint32_t soundSpeed) {
+        GasConfig config = scene.box.config;
+        ApplyWorldPhysics({.gravityMicrometersPerSecond2 = gravity, .soundSpeedMillimetersPerSecond = soundSpeed},
+                          config);
+        std::vector<GasCell> reference = MakeHydrostaticReference(config, AIR_FRACTIONS_Q32, AIR_TEMPERATURE,
+                                                                  SURFACE_PRESSURE);
+        scene.name = std::move(name);
+        scene.change = EnvironmentChange{.tick = tick, .config = config, .reference = std::move(reference)};
+
+        return scene;
+    }
+
     std::vector<Scene> MakeScenes() {
         std::vector<Scene> scenes;
         scenes.push_back(MakeClosedScene());
@@ -286,6 +310,11 @@ namespace {
         scenes.push_back(MakeStaticScene("static_moon", MOON_GRAVITY));
         scenes.push_back(MakeStaticScene("static_max_gravity", fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2));
         scenes.push_back(MakeBubbleScene("bubble_zero_gravity", 0));
+        // 環境の値のホットリロード(T-0444): 閉じた箱は刻み 30 から月の重力・300 m/s、開いた境界と風の箱は刻み 90 から月の重力・380 m/s
+        scenes.push_back(
+            WithEnvironmentChange(MakeClosedScene(), "closed_environment_change", 30, MOON_GRAVITY, 300000));
+        scenes.push_back(WithEnvironmentChange(MakeWindScene("wind_mc", GasReconstruction::MonotonizedCentral, true),
+                                               "open_environment_change", 90, MOON_GRAVITY, 380000));
 
         return scenes;
     }
@@ -353,6 +382,7 @@ namespace {
         gas->SetDebugPassLimit(passLimit);
         GasBox cpu = scene.box;
         GasBox gpuState = scene.box;
+        std::vector<ComPtr<ID3D12Resource>> keepAlive;  // 環境を替える前の t0〜t2(毎刻み待つので最後まで持つだけ)
         for (uint64_t tick = 0; tick < scene.ticks; ++tick) {
             ID3D12GraphicsCommandList10* list = parts.queue.Begin();
             if (list == nullptr)
@@ -361,6 +391,16 @@ namespace {
             parts.debugRing.RecordBegin(list);
             if (tick == 0)
                 gas->RecordUpload(list);
+
+            if (scene.change && scene.change->tick == tick) {
+                if (const auto checked = CheckGasEnvironment(cpu.config, scene.change->config); !checked)
+                    return std::unexpected(std::format("環境を替えられない: {}", checked.error()));
+
+                SetGasEnvironment(cpu, scene.change->config, scene.change->reference);
+                SetGasEnvironment(gpuState, scene.change->config, scene.change->reference);
+                if (!gas->RecordEnvironment(list, cpu, keepAlive))
+                    return std::unexpected("GPU の環境を替えられない");
+            }
 
             gas->RecordStep(list, parts.debugRing.GpuAddress());
             gas->RecordReadback(list);

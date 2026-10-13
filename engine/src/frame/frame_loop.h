@@ -95,6 +95,9 @@ namespace bicameral::frame {
         // --auto-reload で、速度の書き換えの後にオゾンを足す・消す段も確かめる(--species-remap。T-0242)。エディタのホットリロードは
         // これと関係なく、物質を足す・消す表も名前で付け替えて当てる(既定で Remap。T-0266・ADR-0065)
         bool speciesRemap = false;
+        // --auto-reload で、速度を直す時に環境(combustion_test/environment.luau)の重力も月の値にする(環境の値のホットリロード。
+        // 差し替えの刻みから物理の重力が替わる。--check-physics と一緒に。T-0444)
+        bool autoReloadEnvironment = false;
         // 反応表のパネルで木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版に戻って終える(--auto-table-edit。--editor と
         // --packages の写しと一緒に。editor/reaction_table_panel。T-0219)
         bool autoTableEdit = false;

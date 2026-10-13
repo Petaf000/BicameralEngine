@@ -177,6 +177,53 @@ namespace bicameral::sim {
         return {};
     }
 
+    // t0〜t2(設定・層ごとの基準の導く値・開いた境界の外)の既定のヒープの写し。写すのは RecordResidentUploads
+    std::array<gpu::ResidentBuffer, 3> GpuGas::CreateLayerBuffers(ID3D12Device* device, const GasBox& box) {
+        const std::array<GasGpuParameters, 1> parameters = {MakeGasGpuParameters(box.config, box.coefficients)};
+        std::vector<GasGpuDerived> referenceDerived;
+        std::vector<GasGpuCell> ghost;
+        referenceDerived.reserve(box.referenceDerived.size());
+        ghost.reserve(box.ghost.size());
+        for (const GasDerived& layer : box.referenceDerived)
+            referenceDerived.push_back(ToGasGpuDerived(layer));
+
+        for (const GasCell& layer : box.ghost)
+            ghost.push_back(ToGasGpuCell(layer));
+
+        return {gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuParameters>(parameters))),
+                gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuDerived>(referenceDerived))),
+                gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuCell>(ghost)))};
+    }
+
+    // 環境の値のホットリロード(T-0444): 新しい t0〜t2 を作って写し、前のものは呼ぶ側に持たせる(記録済みの刻みがまだ読む)。
+    // 新しいバッファは作った直後で COMMON なので、同じリストで前の刻みが読んだ後でも写せる(RecordResidentUploads の約束)
+    bool GpuGas::RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasBox& box,
+                                   std::vector<ComPtr<ID3D12Resource>>& keepAlive) {
+        if ((uint32_t)box.cells.size() != m_cellCount || box.config.substeps != m_substeps)
+            return false;
+
+        ComPtr<ID3D12Device> device;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        std::array<gpu::ResidentBuffer, 3> buffers = CreateLayerBuffers(device.Get(), box);
+        if (!std::ranges::all_of(buffers, &gpu::ResidentBuffer::Valid))
+            return false;
+
+        gpu::RecordResidentUploads(list, buffers);
+        for (gpu::ResidentBuffer& old : m_srvs) {
+            keepAlive.push_back(std::move(old.buffer));
+            keepAlive.push_back(std::move(old.upload));
+        }
+
+        for (const gpu::ResidentBuffer& buffer : buffers)
+            keepAlive.push_back(buffer.upload);
+
+        m_srvs = std::move(buffers);
+
+        return true;
+    }
+
     // バッファ(gas_step.hlsl の結び付けの順)・初めの箱の写し・読み戻し
     std::expected<void, std::string> GpuGas::CreateBuffers(ID3D12Device5* device, const GasBox& box) {
         const uint64_t n = m_cellCount;
@@ -193,20 +240,7 @@ namespace bicameral::sim {
         }
 
         // --- t0〜t2(設定・層ごとの基準と外)---
-        const std::array<GasGpuParameters, 1> parameters = {MakeGasGpuParameters(box.config, box.coefficients)};
-        std::vector<GasGpuDerived> referenceDerived;
-        std::vector<GasGpuCell> ghost;
-        referenceDerived.reserve(box.referenceDerived.size());
-        ghost.reserve(box.ghost.size());
-        for (const GasDerived& layer : box.referenceDerived)
-            referenceDerived.push_back(ToGasGpuDerived(layer));
-
-        for (const GasCell& layer : box.ghost)
-            ghost.push_back(ToGasGpuCell(layer));
-
-        m_srvs = {gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuParameters>(parameters))),
-                  gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuDerived>(referenceDerived))),
-                  gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuCell>(ghost)))};
+        m_srvs = CreateLayerBuffers(device, box);
 
         // --- 初めの箱 ---
         std::vector<GasGpuCell> cells;

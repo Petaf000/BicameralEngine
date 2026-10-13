@@ -305,6 +305,7 @@ namespace bicameral::frame {
                     m_physicsCheck = std::make_unique<sim::PhysicsWorld>(
                         sim::MakeLayoutPhysicsScene(initialTable.worldLayout),
                         sim::PhysicsParametersFor(initialTable.environment));
+                    m_physicsCheckEnvironment = initialTable.environment;
                 }
             }
 
@@ -328,6 +329,7 @@ namespace bicameral::frame {
             void ReportSimReadback(const sim::ProbeFrameReadback& readback);
             void ReportEvents(const sim::ProbeFrameReadback& readback);
             void CheckPhysics(const sim::ProbeTickHash& tickHash);
+            void NotePhysicsCheckGravity();
             void CollectFrameSlot(uint32_t slotIndex);
 
             // --- コマンド(クリックと再生)---
@@ -442,6 +444,8 @@ namespace bicameral::frame {
             // --- CPU の物理との突き合わせ(--check-physics。T-0098)---
             std::unique_ptr<sim::PhysicsWorld> m_physicsCheck;
             std::vector<sim::ProbeCommand> m_physicsCheckPushes;  // 投げた押すコマンド(刻みの順)
+            sim::WorldPhysics m_physicsCheckEnvironment;          // 今の表の環境の値(差し替えで替わる。T-0444)
+            std::vector<std::pair<uint64_t, int64_t>> m_physicsCheckGravity;  // (刻み, その刻みからの重力 2^-20 m/s²)
             uint64_t m_physicsCheckMismatches = 0;
 
             // --- コマンド ---
@@ -871,6 +875,11 @@ namespace bicameral::frame {
         void FrameLoop::CheckPhysics(const sim::ProbeTickHash& tickHash) {
             while (m_physicsCheck->Tick() < tickHash.tick) {
                 const uint64_t tick = m_physicsCheck->Tick();
+                for (const auto& [gravityTick, gravity] : m_physicsCheckGravity) {
+                    if (gravityTick == tick)
+                        m_physicsCheck->SetGravity(gravity);
+                }
+
                 for (const sim::ProbeCommand& command : m_physicsCheckPushes) {
                     if (command.targetTick == tick)
                         PushFromCommand(*m_physicsCheck, command);
@@ -1153,6 +1162,26 @@ namespace bicameral::frame {
             for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
                 if (swap.table != nullptr)
                     m_peek.QueueTableSwap(swap.tick, *swap.table);
+            }
+
+            if (m_physicsCheck)
+                NotePhysicsCheckGravity();
+        }
+
+        // --check-physics: 差し替えで表の重力が変わる刻みを控える(CPU の物理もその刻みの Step から新しい重力。GPU は
+        // ProbeSim::ApplyEnvironment が同じ決まりで替える。T-0444)
+        void FrameLoop::NotePhysicsCheckGravity() {
+            std::vector<sim::ProbeTableSwap> swaps = m_frameTableSwaps;
+            rng::sort(swaps, {}, &sim::ProbeTableSwap::tick);
+            for (const sim::ProbeTableSwap& swap : swaps) {
+                if (swap.table == nullptr || swap.table->environment == m_physicsCheckEnvironment)
+                    continue;
+
+                if (swap.table->environment.gravityMicrometersPerSecond2 !=
+                    m_physicsCheckEnvironment.gravityMicrometersPerSecond2)
+                    m_physicsCheckGravity.emplace_back(swap.tick, sim::PhysicsGravityFor(swap.table->environment));
+
+                m_physicsCheckEnvironment = swap.table->environment;
             }
         }
 
@@ -1869,7 +1898,8 @@ namespace bicameral::frame {
                 return false;
             }
 
-            auto autoReload = AutoReload::Create(m_options.packageRoot, m_options.speciesRemap);
+            auto autoReload = AutoReload::Create(m_options.packageRoot, m_options.speciesRemap,
+                                                 m_options.autoReloadEnvironment);
             if (!autoReload) {
                 Log(Channel::Tool, Level::Error, "{}", autoReload.error());
                 return false;

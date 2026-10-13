@@ -69,6 +69,7 @@ namespace bicameral::sim {
     struct GpuPhysicsCursor {
         uint64_t tick = 0;
         uint32_t currentHalf = 1;  // 今の小刻みの組の枠
+        int64_t gravity = 0;       // その刻みの重力(2^-20 m/s²。環境の値のホットリロードで替わる。T-0444)
     };
 
     class GpuPhysics {
@@ -95,11 +96,20 @@ namespace bicameral::sim {
         // --- 巻き戻し(T-0143。sim/probe_save_point.cpp)---
         // 刻みをまたいで残る GPU の状態(u0〜u13。一時的なものも含めて全部写す。リストの間は COMMON)
         [[nodiscard]] std::span<const ComPtr<ID3D12Resource>> StateBuffers() const { return m_uavs; }
-        [[nodiscard]] GpuPhysicsCursor Cursor() const { return {.tick = m_tick, .currentHalf = m_half}; }
+        [[nodiscard]] GpuPhysicsCursor Cursor() const {
+            return {.tick = m_tick, .currentHalf = m_half, .gravity = m_gravity};
+        }
         void SetCursor(const GpuPhysicsCursor& cursor) {
             m_tick = cursor.tick;
             m_half = cursor.currentHalf;
+            m_gravity = cursor.gravity;
         }
+
+        // --- 環境の値のホットリロード(T-0444・ADR-0194)---
+        // 次に記録する刻みから重力を替える(2^-20 m/s²。PxGravityFromMicrometers で作る。0 以上)。刻みの境目でだけ呼ぶ
+        // (RecordStep の間)。記録の順 = 刻みの順なので、前に記録した刻みは前の重力のまま。RecordInitialize で作った時の重力に戻る
+        void SetGravity(int64_t gravity) { m_gravity = gravity; }
+        [[nodiscard]] int64_t Gravity() const { return m_gravity; }
 
         // --- 計測(T-0092)---
         [[nodiscard]] bool EnableProfiling(ID3D12Device* device);
@@ -146,6 +156,8 @@ namespace bicameral::sim {
             uint32_t solveEntry = 0;
             uint32_t colorBodiesLow = 0;
             uint32_t colorBodiesHigh = 0;
+            uint32_t gravityLow = 0;  // 今の重力(T-0444)
+            uint32_t gravityHigh = 0;
         };
 
         [[nodiscard]] std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
@@ -180,7 +192,8 @@ namespace bicameral::sim {
         uint32_t m_bodyCount = 0;
         uint32_t m_frictionQ16 = 0;
         uint64_t m_tick = 0;
-        uint32_t m_half = 1;  // 今の小刻みの組の枠(小刻みの初めに入れ替える)
+        uint32_t m_half = 1;    // 今の小刻みの組の枠(小刻みの初めに入れ替える)
+        int64_t m_gravity = 0;  // 今の重力(ルート定数で渡す。作った時は m_parameters.gravity。T-0444)
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;  // BroadphaseGraph は空

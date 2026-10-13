@@ -9,6 +9,7 @@
 #include "core/log.h"
 #include "gpu/com_ptr.h"
 #include "gpu/resources.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
     namespace {
@@ -905,6 +906,19 @@ namespace bicameral::sim {
 
     // 反応表の差し替え(T-0139・ADR-0047): 新しい表を新しい既定のバッファに写し、ルートの結び先を替える。差し替える前の表は
     // このフレームの前の単位と、まだ GPU にある前のフレームが読むので、このリストが終わるまで持つ(状態を追わないよう、毎回新しく作る)
+    // 環境の値のホットリロード(T-0444・ADR-0194): 新しい表の重力が今の表と違えば、この刻みの物理の単位から新しい重力で刻む
+    // (物理の単位は同じ刻みの適用の後ろ。記録の順 = 刻みの順)。同じなら触らない(作った時の physicsParameters の重力のまま)。
+    // 気体はまだ世界に無い(T-0210)。載せる時は同じ所で SetGasEnvironment と GpuGas::RecordEnvironment を呼ぶ
+    void ProbeSim::ApplyEnvironment(const WorldPhysics& environment, uint64_t tick) {
+        const WorldPhysics& current = m_tableCopy.environment;
+        if (!m_physics || environment.gravityMicrometersPerSecond2 == current.gravityMicrometersPerSecond2)
+            return;
+
+        Log(Channel::Sim, Level::Info, "刻み {} から重力を {} µm/s² にする(表の環境の値)", tick,
+            environment.gravityMicrometersPerSecond2);
+        m_physics->SetGravity(PhysicsGravityFor(environment));
+    }
+
     bool ProbeSim::RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame, const BakedReactionTable& table,
                                    uint64_t tick) {
         const auto remap = BuildSpeciesRemap(m_tableCopy, table);
@@ -953,6 +967,7 @@ namespace bicameral::sim {
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         BindRootViews(list, frame.input.Get());
+        ApplyEnvironment(table.environment, tick);
         m_tableCopy = table;
 
         return remap->identity || RecordSpeciesRemap(list, frame, *remap, tick);

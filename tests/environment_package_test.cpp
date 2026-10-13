@@ -2,7 +2,8 @@
 // 見るもの: サンプルの世界のパッケージ(data/packages/combustion_test)の環境が、標準の値(StandardWorldPhysics。試験の場面が使う)と同じ /
 //           分類が無い世界はブランク(全部 0)/ 環境だけのパッケージで別の重力・音速の基準を渡せる /
 //           知らない鍵・整数でない数・範囲の外(重力の上限・音速の基準の安定の上限)を、鍵と書いたパッケージの名前付きで落とす /
-//           ランタイムの入り口(LoadReactionTable)のベイクした表が環境を持ち、ブランクの表は 0、再生の作り直しでも同じ。
+//           ランタイムの入り口(LoadReactionTable)のベイクした表が環境を持ち、ブランクの表は 0、再生の作り直しでも同じ /
+//           ホットリロードの検査(CheckHotReloadCompatible)が、器の範囲の外の環境(コードで作った表)を理由付きで当てない(T-0444)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/environment_package.h"
 
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "script/luau_sandbox.h"
+#include "script/reaction_hot_reload.h"
 #include "script/reaction_table_loader.h"
 #include "standard_world_physics.h"
 
@@ -168,6 +170,42 @@ namespace {
         EXPECT(blank && SameWorld(blank->table.environment, sim::WorldPhysics{}));
     }
 
+    // ホットリロードの検査(T-0444・ADR-0194): 環境の値は差し替えの刻みから物理と気体に当たるので、器の範囲の外は理由付きで当てない
+    void TestHotReloadChecksEnvironment() {
+        const auto loaded = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR)});
+        if (!loaded) {
+            std::printf("FAILED: 表を読めない: %s\n", loaded.error().c_str());
+            ++failureCount;
+
+            return;
+        }
+
+        const sim::BakedReactionTable& current = loaded->table;
+        sim::BakedReactionTable moon = current;
+        moon.environment.gravityMicrometersPerSecond2 = 1620000;
+        moon.environment.soundSpeedMillimetersPerSecond = 300000;
+        EXPECT(CheckHotReloadCompatible(current, moon).has_value());
+        EXPECT(CheckHotReloadCompatible(current, moon, SpeciesChangePolicy::Remap).has_value());
+
+        sim::BakedReactionTable tooFast = current;
+        tooFast.environment.soundSpeedMillimetersPerSecond = static_cast<uint32_t>(sim::GasSoundSpeedLimitMmPerS(
+                                                                 sim::GasConfig{}.substeps)) +
+                                                             1;
+        const auto fastResult = CheckHotReloadCompatible(current, tooFast, SpeciesChangePolicy::Remap);
+        EXPECT(!fastResult);
+        if (!fastResult) {
+            std::printf("rejected: %s\n", fastResult.error().c_str());
+            EXPECT(Contains(fastResult.error(), "音速の基準"));
+        }
+
+        sim::BakedReactionTable tooHeavy = current;
+        tooHeavy.environment.gravityMicrometersPerSecond2 = fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2 + 1;
+        const auto heavyResult = CheckHotReloadCompatible(current, tooHeavy);
+        EXPECT(!heavyResult);
+        if (!heavyResult)
+            EXPECT(Contains(heavyResult.error(), "重力"));
+    }
+
 }  // namespace
 
 int main() {
@@ -176,6 +214,7 @@ int main() {
     TestCustomEnvironment();
     TestRejectsBrokenEnvironment();
     TestBakedTableCarriesEnvironment();
+    TestHotReloadChecksEnvironment();
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
 

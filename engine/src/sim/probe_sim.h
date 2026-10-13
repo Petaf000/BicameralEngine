@@ -202,6 +202,7 @@ namespace bicameral::sim {
     // 適用の後に熱のキャッシュを作り直して全部のブロックを起こす(RefreshTable)。呼ぶ側の約束: 今の表から付け替えられる表
     // (script::CheckHotReloadCompatible が SpeciesChangePolicy::Remap で通る)・(tick, 0) の単位がこのフレームにある・同じ刻みに
     // MakeTableCommand の印を足す(記録と再生のため)。table は RecordFrame の中で写し終わる(呼んだ後は持たなくてよい)。
+    // 表の環境の値(重力)が今の表と違えば、同じ刻みの物理の単位から新しい重力で刻む(T-0444・ADR-0194)。
     // 1 フレームに幾つあってもよい(刻みの順でなくてよい。同じ刻みに 2 つは不可)
     struct ProbeTableSwap {
         uint64_t tick = 0;
@@ -401,6 +402,7 @@ namespace bicameral::sim {
         [[nodiscard]] bool ValidateTableSwap(const ProbeFrameInput& input) const;
         [[nodiscard]] bool RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                            const BakedReactionTable& table, uint64_t tick);
+        void ApplyEnvironment(const WorldPhysics& environment, uint64_t tick);
         [[nodiscard]] bool RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                               const SpeciesRemap& remap, uint64_t tick);
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);

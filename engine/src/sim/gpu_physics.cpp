@@ -13,7 +13,7 @@ namespace bicameral::sim {
         using namespace bicameral::physics;
 
         constexpr uint32_t THREADS_PER_GROUP = 64;  // physics_step.hlsl の numthreads
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 14;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
         constexpr uint32_t STATS_BYTES = sizeof(GpuPhysicsStats);
 
         // u0〜u13 / b0 / デバッグのリング / t0〜t1(ルート署名の大きさ 48 / 64 語)
@@ -77,6 +77,7 @@ namespace bicameral::sim {
                                                               const GpuPhysicsOptions& options) {
         GpuPhysics result;
         result.m_parameters = parameters;
+        result.m_gravity = parameters.gravity;
         result.m_options = options;
         result.m_bodyCount = (uint32_t)scene.bodies.size();
         result.m_frictionQ16 = scene.frictionQ16;
@@ -183,7 +184,9 @@ namespace bicameral::sim {
                 .frictionQ16 = m_frictionQ16,
                 .solveEntry = m_solveEntry,
                 .colorBodiesLow = (uint32_t)m_uavs[12]->GetGPUVirtualAddress(),
-                .colorBodiesHigh = (uint32_t)(m_uavs[12]->GetGPUVirtualAddress() >> 32)};
+                .colorBodiesHigh = (uint32_t)(m_uavs[12]->GetGPUVirtualAddress() >> 32),
+                .gravityLow = (uint32_t)(uint64_t)m_gravity,
+                .gravityHigh = (uint32_t)((uint64_t)m_gravity >> 32)};
     }
 
     // 1 つのパスを投げ、全部の UAV の書き込みを次のパスより前に終わらせる
@@ -332,6 +335,7 @@ namespace bicameral::sim {
     void GpuPhysics::RecordInitialize(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         m_tick = 0;
         m_half = 1;
+        m_gravity = m_parameters.gravity;  // 作った時の重力から(T-0444)
         RecordPass(list, debugRing, Pass::Initialize, BaseConstants(), m_bodyCount);
     }
 
