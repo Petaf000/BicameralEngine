@@ -71,7 +71,8 @@ namespace bicameral::frame {
         uint32_t peekDepth = 0;           // 潜る段(カメラが寄る。0〜9)
 
         // --- 物理(T-0098)---
-        bool physics = true;  // サンプルの世界に積み木(sim::MakeProbeStackScene)を入れる。Shift + 左クリックで押す
+        bool physics =
+            true;  // 表の世界の組み立ての物〔積み木。sim::MakeLayoutPhysicsScene〕を入れる。Shift + 左クリックで押す
         // CPU の物理(sim::PhysicsWorld)を並べて走らせ、刻みごとの物のハッシュを突き合わせる(--check-physics。調べる用)
         bool checkPhysics = false;
         bool physicsComputeBroadphase = false;  // 広域の選別を Compute で(--physics-compute。比べる用)

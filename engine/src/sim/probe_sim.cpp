@@ -1162,63 +1162,18 @@ namespace bicameral::sim {
         return hashes;
     }
 
-    // --- 初めの世界(T-0089)---
-
-    namespace {
-
-        // 1 気圧・300 K の 0.5 m 角(0.125 m³)の空気 = 約 5.08 mol(O2 20.95 %・残りを N2。Ar は無視)
-        constexpr uint64_t AIR_OXYGEN_MICROMOLES = 1063800;
-        constexpr uint64_t AIR_NITROGEN_MICROMOLES = 4014200;
-
-        // 木箱の壁のセル: 体積の 1 割が木(密度 500 kg/m³ のセルロースで約 38.6 mol)、残りは孔の中の空気
-        // (reaction_test.cpp の CrateAir と同じ値)
-        constexpr uint64_t CRATE_CELLULOSE_MICROMOLES = 38600000;
-        constexpr uint64_t CRATE_OXYGEN_MICROMOLES = 983000;
-        constexpr uint64_t CRATE_NITROGEN_MICROMOLES = 3697000;
-
-        constexpr int32_t INITIAL_TEMPERATURE_MILLIKELVIN = 300000;
-
-        // 木箱: 中央の 8³ セル(4 m 角)、壁の厚さ 1 セル
-        constexpr uint32_t CRATE_SIZE = 8;
-        constexpr uint32_t CRATE_BEGIN = (PROBE_GRID_SIZE - CRATE_SIZE) / 2;
-        constexpr uint32_t CRATE_END = CRATE_BEGIN + CRATE_SIZE;
-
-        bool InCrate(uint32_t value) {
-            return value >= CRATE_BEGIN && value < CRATE_END;
-        }
-
-        bool OnCrateWall(uint32_t value) {
-            return value == CRATE_BEGIN || value == CRATE_END - 1;
-        }
-
-        bool IsCrateWall(uint32_t x, uint32_t y, uint32_t z) {
-            return InCrate(x) && InCrate(y) && InCrate(z) && (OnCrateWall(x) || OnCrateWall(y) || OnCrateWall(z));
-        }
-
-    }  // namespace
+    // --- 初めの世界(T-0089。中身はパッケージの world_cells。T-0398)---
 
     std::vector<reaction::RxCell> MakeProbeInitialWorld(const BakedReactionTable& table) {
-        const uint32_t cellulose = table.SpeciesId("cellulose");
-        const uint32_t oxygen = table.SpeciesId("oxygen");
-        const uint32_t nitrogen = table.SpeciesId("nitrogen");
-        const std::array<SpeciesAmount, 2> air = {
-            SpeciesAmount{.species = oxygen, .amount = AIR_OXYGEN_MICROMOLES},
-            SpeciesAmount{.species = nitrogen, .amount = AIR_NITROGEN_MICROMOLES}};
-        const std::array<SpeciesAmount, 3> wall = {
-            SpeciesAmount{.species = cellulose, .amount = CRATE_CELLULOSE_MICROMOLES},
-            SpeciesAmount{.species = oxygen, .amount = CRATE_OXYGEN_MICROMOLES},
-            SpeciesAmount{.species = nitrogen, .amount = CRATE_NITROGEN_MICROMOLES}};
-
-        const reaction::RxCell airCell = MakeReactionCell(table, air, INITIAL_TEMPERATURE_MILLIKELVIN);
-        const reaction::RxCell wallCell = MakeReactionCell(table, wall, INITIAL_TEMPERATURE_MILLIKELVIN);
-
-        std::vector<reaction::RxCell> cells(PROBE_CELL_COUNT, airCell);
-        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
-            const uint32_t x = index % PROBE_GRID_SIZE;
-            const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
-            const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
-            if (IsCrateWall(x, y, z))
-                cells[index] = wallCell;
+        std::vector<reaction::RxCell> cells = MakeBlankProbeWorld();
+        for (const WorldCellRegion& region : table.worldLayout.cellRegions) {
+            for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+                const uint32_t x = index % PROBE_GRID_SIZE;
+                const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
+                const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
+                if (WorldLayout::Contains(region, x, y, z))
+                    cells[index] = region.cell;
+            }
         }
 
         return cells;

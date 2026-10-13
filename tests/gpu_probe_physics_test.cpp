@@ -1,6 +1,6 @@
 // gpu_probe_physics_test.cpp — 仮の世界の刻みに入れた物理(T-0098)の GPU と CPU リファレンスのビット一致。
 //
-// 確かめること(仮の世界に積み木 sim::MakeProbeStackScene を入れ、決まった刻みに光線で押して崩す):
+// 確かめること(仮の世界に試験のパッケージの積み木〔world_bodies。sim::MakeLayoutPhysicsScene〕を入れ、決まった刻みに光線で押して崩す):
 //   - 刻みごとの物の状態のハッシュ(ハッシュの表の欄)が、CPU の sim::PhysicsWorld(同じ刻みに Push → Step)と毎刻み一致
 //   - 押すコマンドのイベント(押した物の番号)が CPU の Push の結果と同じ。最初の押しは 5 段目の箱(番号 6)に当たる
 //   - フレームの切れ目を単位の途中に置いても(物理の単位がフレームをまたいでも)結果が同じ。2 回目は重さの単位を 3 つ入れ、
@@ -507,7 +507,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const PhysicsScene scene = MakeProbeStackScene();
+    const PhysicsScene scene = MakeLayoutPhysicsScene(table->worldLayout);
     Log(Channel::Sim, Level::Info, "仮の世界に積み木(物 {})を入れて {} 刻み。刻み {} と {} に押す", scene.bodies.size(),
         config->ticks, PUSHES[0].tick, PUSHES[1].tick);
 

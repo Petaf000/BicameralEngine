@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "sim/world_layout.h"
+
 namespace bicameral::sim {
 
     // 物の 1 つ。形は直方体(T-0016 の範囲。ボクセルの物は T-0043)
@@ -38,9 +40,10 @@ namespace bicameral::sim {
     // 場面 A: 1 m の立方体 10 段(各 500 kg)を地面に積む。60 s
     [[nodiscard]] PhysicsScene MakeStackScene();
 
-    // 仮の世界の積み木(T-0098): 場面 A と同じ 10 段を、仮の世界の格子の中(物理の座標 x = 10 m・z = 16.25 m。格子の左寄り、
-    // 既定の断面を通る位置)に積む。地面は格子の床。窓のクリックで押して崩す
-    [[nodiscard]] PhysicsScene MakeProbeStackScene();
+    // 表の世界の組み立ての物(パッケージの world_bodies。T-0398・ADR-0172)の場面。60 s。物が無ければ空の場面。
+    // 長さ(mm)は 2^-20 m に、質量(g)は mg に直す(割り切れない端は 0 の方へ切る)。向きは回さない。
+    // サンプルの世界(data/packages/combustion_test/world_bodies.luau)は仮の世界の積み木(T-0098): 地面と 1 m の立方体 10 段
+    [[nodiscard]] PhysicsScene MakeLayoutPhysicsScene(const WorldLayout& layout);
 
     // 質量比: 1 kg の箱の上に 100 kg の箱。10 s
     [[nodiscard]] PhysicsScene MakeMassRatioScene();

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "script/package_fields.h"
+#include "script/world_layout_package.h"
 
 namespace bicameral::script {
 
@@ -345,6 +346,11 @@ namespace bicameral::script {
             return std::unexpected(result.error());
 
         // --- 同じ読み込みに足した分類(世界のデータ。T-0398〜T-0400)。分類ごとに別のファイルで読み、ここで 1 行ずつつなぐ ---
+        auto worldLayout = ReadWorldLayout(packages);
+        if (!worldLayout)
+            return std::unexpected(worldLayout.error());
+
+        definition.worldLayout = std::move(*worldLayout);
 
         return definition;
     }

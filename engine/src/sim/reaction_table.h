@@ -24,6 +24,7 @@
 
 #include "common/reaction.hlsli"
 #include "sim/reaction_wide_cell.h"
+#include "sim/world_layout.h"
 
 namespace bicameral::sim {
 
@@ -77,6 +78,7 @@ namespace bicameral::sim {
         std::vector<RuleDefinition> rules;
 
         // --- 同じ読み込みに足した分類(世界のデータ。名前のまま。T-0398〜T-0400。分類ごとに 1 行)---
+        WorldLayoutDefinition worldLayout;  // 世界の組み立て(world_cells・world_bodies。T-0398)
     };
 
     // --- ベイクした表 ---
@@ -125,6 +127,7 @@ namespace bicameral::sim {
         std::vector<std::string> warnings;      // ベイクは通したが、書いた人に見せる食い違い(文献の反応熱など)
 
         // --- CPU だけ: 同じ読み込みに足した分類(世界のデータ。物質は ID に直したもの。T-0398〜T-0400。分類ごとに 1 行)---
+        WorldLayout worldLayout;  // 世界の組み立て(MakeProbeInitialWorld・MakeLayoutPhysicsScene が読む。T-0398)
 
         [[nodiscard]] ReactionTableView View() const {
             return {.species = species, .rules = rules, .ruleIndex = ruleIndex, .rates = rates};

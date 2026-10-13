@@ -787,6 +787,8 @@ namespace {
         std::erase_if(definition.rules, [](const RuleDefinition& rule) {
             return rng::any_of(rule.reactants, [](const RuleTerm& term) { return term.species == "cellulose"; });
         });
+        definition.worldLayout =
+            {};  // 世界の組み立て(T-0398)は木箱のセルロースを指すので空にする(この表で初めの世界は作らない)
 
         auto baked = BakeReactionTable(definition);
         if (!baked)

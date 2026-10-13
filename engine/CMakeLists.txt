@@ -46,6 +46,7 @@ endif()
 add_library(bicameral_reaction STATIC
   src/sim/reaction_table.cpp
   src/sim/species_remap.cpp  # 物質を足す・消す表の差し替えの付け替え(T-0223・ADR-0065)
+  src/sim/world_layout.cpp  # 世界の組み立て(初めのセル・物。パッケージの world_cells・world_bodies。T-0398)
 )
 target_include_directories(bicameral_reaction PUBLIC src)
 target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
@@ -140,6 +141,7 @@ add_library(bicameral_reaction_script STATIC
   src/script/reaction_table_loader.cpp
   src/script/reaction_hot_reload.cpp
   src/script/reaction_table_edit.cpp
+  src/script/world_layout_package.cpp  # 世界の組み立ての分類を読む(T-0398)
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
 target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)

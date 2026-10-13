@@ -34,7 +34,7 @@ sim::MakeProbeInitialWorld(空気の中の木箱・空気の成分・300 K)と s
    - 読む所: `engine/src/script/<分類>_package.{h,cpp}`(ライブラリ bicameral_reaction_script)。
      `std::expected<sim::<X>Definition, std::string> Read<X>(const PackageSetResult&)`。欄の道具は `script/package_fields.h`
      (CheckRecord・ReadIntegerField・ReadCategory など。この作業で reaction_package.cpp から出した。wt3・wt4 はコミット
-     「T-0398: パッケージの欄の道具を分け…」を cherry-pick してよい。マージで同じ変更は重ならない)。
+     073eca1「T-0398: パッケージの欄の道具を分け…」(ブランチ t-0398。つなぎ目の節も入っている)を cherry-pick してよい。マージで同じ変更は重ならない)。
      知らない欄は誤り・数は整数だけ・誤りは「パッケージ X: 分類.鍵.欄: 何が違うか」。
    - 型: `engine/src/sim/<分類>.{h,cpp}`(ライブラリ bicameral_reaction。浮動小数点なし)。名前で書いた定義と、物質を ID に直したもの。
    - つなぐ所(印の節に 1 行ずつ): `ReactionTableDefinition` と `BakedReactionTable`(sim/reaction_table.h の「同じ読み込みに足した分類」の節)・
