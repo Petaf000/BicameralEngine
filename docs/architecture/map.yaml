@@ -126,6 +126,14 @@ views:
           code: "engine/src/frame/world_copy_runner.cpp::WorldCopyRunner::Update", ticket: T-0412,
           doc: docs/decisions/ADR-0198-world-copy-fast-forward.md,
           note: "本物のリストの後ろに同じ compute キューで投げる。量は SimScheduler::SpareMilliseconds に入る刻みの数(D-468)。パネル editor/copy_panel。window_copy(--auto-copy)" }
+      - { id: tickcost, group: simlib, label: "TickCostAccumulator<br/>単位の GPU 時間を刻みごとにまとめる(重さ)",
+          code: "engine/src/sim/tick_cost.cpp::TickCostAccumulator::Add", ticket: T-0413,
+          doc: docs/decisions/ADR-0204-weight-check.md,
+          note: "刻みがフレームをまたいでも終えた刻みを要約(活性のブロック数)と組にする。写しの検査と本物の見張りが同じ部品。weight_check・gpu_world_copy" }
+      - { id: weightcheck, group: framelib, label: "CheckWeight<br/>重さの検査: 予算・演出のスローの窓に収まるか",
+          code: "engine/src/frame/weight_check.cpp::CheckWeight", ticket: T-0413,
+          doc: docs/decisions/ADR-0204-weight-check.md,
+          note: "超えた刻みは直すべき不具合(D-468)。続けて超えた区間・いちばん重い刻み・安全網の見込み。本物は WeightWatch で 1 秒ごとに警告" }
       - { id: probeview, group: framelib, label: "ProbeView<br/>抽出の格子を光線で辿る(ボリューム・最大値・断面)",
           code: "engine/src/render/probe_view.cpp::ProbeView::Record", ticket: T-0015, doc: docs/design/14-editor-tools.md,
           note: "画面いっぱいの三角形 1 枚。重ね書き: 格子の枠・断面の枠・活性なブロック・色の凡例" }
@@ -645,6 +653,9 @@ views:
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
       - [frameloop, worldcopyrunner, "写しの早送り(余りの予算)"]
       - [worldcopyrunner, worldcopy, "写す・早送り・測る"]
+      - [worldcopy, tickcost, "刻みごとの重さ"]
+      - [worldcopyrunner, weightcheck, "重さの検査"]
+      - [frameloop, tickcost, "本物の重さの見張り"]
       - [frameloop, probesim, "予算ぶんの単位(compute キュー)・トレースの範囲"]
       - [probesim, probeconduct, "DispatchGraph(GPU の入力)"]
       - [conductbench, probesim]

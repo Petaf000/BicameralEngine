@@ -49,6 +49,7 @@ namespace bicameral::sim {
             return std::unexpected("写しの読み戻しを作れない");
 
         copy.m_vramBytes = copy.m_simulation->DefaultHeapBytes();
+        copy.m_costs = TickCostAccumulator(copy.m_simulation->UnitsPerTick());
         Log(Channel::Sim, Level::Info, "写しの世界を作った(既定のヒープ {} MiB)", copy.m_vramBytes >> 20);
 
         return copy;
@@ -103,6 +104,7 @@ namespace bicameral::sim {
         m_result = {.startTick = tick, .endTick = tick};
         m_tick = tick;
         m_nextCommand = 0;
+        m_costs.Reset();
         m_running = true;
         m_finished = false;
 
@@ -248,8 +250,17 @@ namespace bicameral::sim {
         if (std::exchange(m_pendingStart, false) && Judge(m_result.startTick, nullptr, sample == m_result.startTick))
             return;
 
+        // 刻みごとの GPU の時間(写しのリストはいつも刻みの境界から刻みの境界まで。数えられない刻みは 0)
+        std::vector<TickCost> costs;
+        (void)m_costs.Add(readback, costs);
+        auto cost = costs.begin();
         for (const ProbeTickHash& hash : readback.hashes) {
+            while (cost != costs.end() && cost->tick < hash.tick)
+                ++cost;
+
             m_result.hashes.push_back(hash);
+            m_result.tickGpuTimestampTicks.push_back(
+                cost != costs.end() && cost->tick == hash.tick ? cost->gpuTimestampTicks : 0);
             if (Judge(hash.tick, &hash, sample == hash.tick))
                 return;
         }

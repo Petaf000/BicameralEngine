@@ -27,6 +27,7 @@
 
 #include "gpu/com_ptr.h"
 #include "sim/probe_sim.h"
+#include "sim/tick_cost.h"
 
 namespace bicameral::sim {
 
@@ -61,6 +62,9 @@ namespace bicameral::sim {
         uint64_t ticksRun = 0;           // 早送りした刻みの数(条件の刻みより先まで走った分を含む)
         uint32_t frames = 0;             // 投げたリストの組の数
         uint32_t debugAssertCount = 0;   // シェーダーの assert(写しの世界の分)
+        // hashes[i] と同じ並びで、S(hashes[i].tick) を作った刻みの GPU の時間(その刻みの単位の和。タイムスタンプの刻み。
+        // 数えられなかった刻みは 0。sim/tick_cost。T-0413)。活性のブロックの数は hashes[i].scheduledBlocks
+        std::vector<uint64_t> tickGpuTimestampTicks;
     };
 
     class WorldCopy {
@@ -111,6 +115,7 @@ namespace bicameral::sim {
 
         std::unique_ptr<ProbeSim> m_simulation;
         uint64_t m_vramBytes = 0;
+        TickCostAccumulator m_costs{1};  // 単位の GPU 時間を刻みごとに(Create で写しの単位の数に)
 
         // --- 読み戻し(S(t) のセルと熱。写しの世界の COMMON のバッファから写す)---
         ComPtr<ID3D12CommandAllocator> m_allocator;

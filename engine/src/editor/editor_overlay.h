@@ -76,6 +76,11 @@ namespace bicameral::editor {
         double renderGpuMilliseconds = 0.0;
         double budgetMilliseconds = 0.0;
 
+        // --- 重さの見張り(安全網の警告。T-0413・D-468)---
+        double tickBudgetMilliseconds = 0.0;  // 等速の 1 刻みの予算
+        uint64_t overBudgetTicks = 0;         // 起動からの、等速の予算を超えた刻み
+        frame::WeightSpan lastOverBudget;     // 最後に警告した区間
+
         // --- 入力と表示 ---
         std::string view;  // デバッグ表示の設定(DebugViewController::Describe)
         bool replaying = false;

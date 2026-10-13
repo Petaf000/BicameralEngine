@@ -5,6 +5,8 @@
 // 本物の刻みの合間に sim::WorldCopy を回す → 進みと結果(CopyProgress)を EditorStatus で受けて出す。
 // 中身は持たない(D-454): 条件は「最高温度がしきい値より下」「物質の量がしきい値以下」「上限まで」の形だけで、
 // どの物質か・何 K かは作り手が選ぶ。写しにはコマンドを当てない(今の状態から何もしなければどうなるか)。
+// 重さの検査(T-0413・ADR-0204・D-468): 早送りした刻みごとの GPU の時間と活性のブロック数を、1 刻みの予算と演出のスローの窓で
+// 判定して出す(frame/weight_check)。予算はパネルの値(仮。0 ならこの機械の今のシミュの予算)。
 #pragma once
 
 #include <cstdint>
@@ -14,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "frame/weight_check.h"
 #include "script/reaction_table_loader.h"
 
 namespace bicameral::editor {
@@ -32,6 +35,13 @@ namespace bicameral::editor {
         uint32_t temperatureMillikelvin = 0;  // BelowTemperature のしきい値
         uint32_t species = 0;                 // SpeciesAtOrBelow の物質 ID(今の表)
         uint64_t amountMicromoles = 0;        // SpeciesAtOrBelow のしきい値
+
+        // --- 重さの検査(T-0413)---
+        double tickBudgetMilliseconds = 0.0;  // 等速の 1 刻みの予算(0 = この機械の今の予算。フレームのループが埋める)
+        double cautionRatio = 0.8;            // 予算のこの割合を超えた刻みは注意
+        uint64_t slowOffsetTicks = 0;         // 演出のスローの窓(写しの始めから。長さ 0 なら窓なし)
+        uint64_t slowTicks = 0;
+        double slowSpeedScale = 1.0;
     };
 
     // フレームのループが渡す進みと結果
@@ -50,6 +60,12 @@ namespace bicameral::editor {
         double tickGpuMicroseconds = 0.0;                    // 早送りの 1 刻みの GPU の時間
         uint64_t waitedFrames = 0;                           // 余りの予算が無くて進めなかったフレーム(D-468)
         std::string message;                                 // 失敗・待ちの理由
+
+        // --- 重さの検査(finished の時。T-0413)---
+        bool weighed = false;
+        frame::WeightReport weight;
+        double tickBudgetMilliseconds = 0.0;  // 判定に使った等速の 1 刻みの予算
+        std::vector<float> tickMilliseconds;  // 刻みごとの GPU の時間(表示用に間引いた最大値の列)
     };
 
     class CopyPanel {
@@ -66,7 +82,9 @@ namespace bicameral::editor {
 
     private:
         void BuildCondition();
+        void BuildWeightInput();
         void BuildResult(const CopyProgress& progress, uint64_t ticksPerSecond) const;
+        static void BuildWeight(const CopyProgress& progress, uint64_t ticksPerSecond);
 
         std::shared_ptr<const script::LoadedReactionTable> m_table;
         std::optional<CopyRequest> m_request;
@@ -79,6 +97,14 @@ namespace bicameral::editor {
         int m_temperatureKelvin = 400;
         int m_speciesIndex = 0;  // 今の表の物質 ID - 1
         int m_amountMillimoles = 0;
+
+        // --- 重さの検査の入力 ---
+        float m_tickBudgetMilliseconds = 0.0f;  // 0 = この機械の今の予算
+        int m_cautionPercent = 80;
+        bool m_slow = false;
+        float m_slowStartSeconds = 0.0f;
+        float m_slowLengthSeconds = 2.0f;
+        int m_slowSpeedPercent = 25;
     };
 
 }  // namespace bicameral::editor
