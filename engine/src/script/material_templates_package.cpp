@@ -4,12 +4,13 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <format>
 #include <limits>
 #include <span>
 #include <utility>
+
+#include "script/package_fields.h"
 
 namespace bicameral::script {
 
@@ -21,53 +22,11 @@ namespace bicameral::script {
         using sim::MaterialTemplateDefinition;
         using sim::ViewQuantityDefinition;
 
-        constexpr int64_t EXACT_INTEGER_LIMIT = int64_t{1} << 53;  // 倍精度で誤差なしに表せる整数の上限
         constexpr int64_t INT32_LIMIT = std::numeric_limits<int32_t>::max();
         constexpr std::array<std::string_view, sim::VIEW_QUANTITY_SLOT_COUNT> VIEW_SLOT_KEYS = {"slot_1", "slot_2",
                                                                                                 "slot_3"};
 
-        // --- 欄を読む道具(reaction_package.cpp と同じ形。T-0398 が script/package_fields.h に分けたら、そちらへ寄せる)---
-
-        // 表で、鍵が全部 allowed の中の文字列か(知らない欄は綴りの誤り)
-        std::expected<void, std::string> CheckRecord(const ScriptValue& value,
-                                                     std::span<const std::string_view> allowed, std::string_view path) {
-            if (!value.IsTable())
-                return std::unexpected(std::format("{}: 表で書く", path));
-
-            for (const ScriptField& field : value.fields) {
-                const bool known = field.key.IsString() && std::ranges::contains(allowed, field.key.text);
-                if (!known)
-                    return std::unexpected(std::format("{}: 知らない欄 {}", path, ToDebugText(field.key)));
-            }
-
-            return {};
-        }
-
-        // 整数で書いた数(小数・±2^53 の外・[minimum, maximum] の外は誤り)
-        std::expected<int64_t, std::string> ReadInteger(const ScriptValue& value, std::string_view path,
-                                                        int64_t minimum, int64_t maximum) {
-            constexpr auto LIMIT = static_cast<double>(EXACT_INTEGER_LIMIT);
-            const bool exact = value.IsNumber() && value.number >= -LIMIT && value.number <= LIMIT &&
-                               std::trunc(value.number) == value.number;
-            if (!exact)
-                return std::unexpected(std::format("{}: 整数(±2^53 まで)で書く", path));
-
-            const auto integer = static_cast<int64_t>(value.number);
-            if (integer < minimum || integer > maximum)
-                return std::unexpected(std::format("{}: {} は範囲 {}〜{} の外", path, integer, minimum, maximum));
-
-            return integer;
-        }
-
-        // 欄 field の整数(無ければ誤り)
-        std::expected<int64_t, std::string> ReadIntegerField(const ScriptValue& table, std::string_view field,
-                                                             std::string_view path, int64_t minimum, int64_t maximum) {
-            const ScriptValue* value = table.Find(field);
-            if (value == nullptr)
-                return std::unexpected(std::format("{}: 欄 {} がない", path, field));
-
-            return ReadInteger(*value, std::format("{}.{}", path, field), minimum, maximum);
-        }
+        // --- 欄を読む道具(整数・欄の検査は script/package_fields。文字列だけここに)---
 
         // 値の文字列(無い・文字列でない・空は誤り)
         std::expected<std::string, std::string> ReadText(const ScriptValue* value, std::string_view path) {
@@ -106,7 +65,8 @@ namespace bicameral::script {
                 if (!species)
                     return std::unexpected(species.error());
 
-                const auto micromoles = ReadIntegerField(field.value, "micromoles", itemPath, 1, EXACT_INTEGER_LIMIT);
+                const auto micromoles = ReadIntegerField(field.value, "micromoles", itemPath, 1,
+                                                         PACKAGE_EXACT_INTEGER_LIMIT);
                 if (!micromoles)
                     return std::unexpected(micromoles.error());
 
@@ -164,7 +124,7 @@ namespace bicameral::script {
             if (!species)
                 return std::unexpected(species.error());
 
-            const auto span = ReadIntegerField(value, "span_micromoles", path, 1, EXACT_INTEGER_LIMIT);
+            const auto span = ReadIntegerField(value, "span_micromoles", path, 1, PACKAGE_EXACT_INTEGER_LIMIT);
             if (!span)
                 return std::unexpected(span.error());
 
@@ -189,19 +149,7 @@ namespace bicameral::script {
 
         std::expected<void, std::string> ReadMaterials(const PackageSetResult& packages,
                                                        MaterialTemplateDefinition& definition) {
-            const auto* entries = FindCategory(packages, MATERIAL_TEMPLATES_CATEGORY);
-            if (entries == nullptr)
-                return {};
-
-            for (const auto& [key, entry] : *entries) {
-                auto material = ReadMaterial(key, entry.value, std::format("{}.{}", MATERIAL_TEMPLATES_CATEGORY, key));
-                if (!material)
-                    return std::unexpected(std::format("パッケージ {}: {}", entry.package, material.error()));
-
-                definition.materials.push_back(std::move(*material));
-            }
-
-            return {};
+            return ReadCategory(packages, MATERIAL_TEMPLATES_CATEGORY, ReadMaterial, definition.materials);
         }
 
         std::expected<void, std::string> ReadViewQuantities(const PackageSetResult& packages,
