@@ -913,6 +913,12 @@ namespace bicameral::sim {
             return false;
         }
 
+        // 単体の無い元素の原子は捨てて当てる(D-484)。GPU の世界は量を数えないので、何を捨てるかだけ知らせる(量は CPU リファレンスの報告)
+        if (!remap->dropped.empty())
+            Log(Channel::Sim, Level::Warning,
+                "刻み {} の表の差し替えで、単体が新しい表に無い元素の原子を捨てる(改造による出入り): {}", tick,
+                remap->dropped);
+
         ComPtr<ID3D12Device5> device;
         if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;

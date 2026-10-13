@@ -90,6 +90,7 @@ namespace bicameral::sim {
         decomposedMicromoles += other.decomposedMicromoles;
         remainderAtomMicromoles += other.remainderAtomMicromoles;
         overflowAtomMicromoles += other.overflowAtomMicromoles;
+        droppedAtomMicromoles += other.droppedAtomMicromoles;
         energyDeltaMilliJoules += other.energyDeltaMilliJoules;
         conversionsDisabled += other.conversionsDisabled;
     }
@@ -105,7 +106,6 @@ namespace bicameral::sim {
         remap.removedH0.assign(currentCount, 0);
         remap.identity = current.speciesNames == next.speciesNames;
 
-        std::string missing;
         for (uint32_t species = 1; species < currentCount; ++species) {
             remap.partBegin[species] = static_cast<uint32_t>(remap.parts.size());
             remap.removedH0[species] = current.species[species].h0;
@@ -119,27 +119,21 @@ namespace bicameral::sim {
                 continue;
             }
 
-            // --- 消えた: 元素ごとに単体へ分ける ---
+            // --- 消えた: 元素ごとに単体へ分ける(単体の無い元素は捨てる。D-484)---
             remap.identity = false;
             for (const auto& [element, atoms] : composition) {
                 const UnitSpecies unit = UnitOf(next, units, element);
-                if (unit.species == 0) {
-                    missing += std::format("{}{} の {}", missing.empty() ? "" : "・", current.speciesNames[species],
-                                           element);
+                remap.parts.push_back({.species = unit.species, .atomsPerMol = atoms});
+                if (unit.species == reaction::RX_REMAP_DROPPED) {
+                    remap.dropped += std::format("{}{} の {}", remap.dropped.empty() ? "" : "・",
+                                                 current.speciesNames[species], element);
                     continue;
                 }
 
-                remap.parts.push_back({.species = unit.species, .atomsPerMol = atoms});
                 AddUnit(remap.units, {.species = unit.species, .atoms = unit.atoms});
             }
         }
         remap.partBegin[currentCount] = static_cast<uint32_t>(remap.parts.size());
-
-        if (!missing.empty())
-            return std::unexpected(
-                std::format("消す物質を元素に分けて戻す先(その元素だけでできた物質)が新しい表に無い: {}"
-                            "(単体を足すか、物質を残す)",
-                            missing));
 
         return remap;
     }
@@ -155,6 +149,7 @@ namespace bicameral::sim {
         return {.decomposedMicromoles = result.decomposed,
                 .remainderAtomMicromoles = result.remainderAtoms,
                 .overflowAtomMicromoles = result.overflowAtoms,
+                .droppedAtomMicromoles = result.droppedAtoms,
                 .energyDeltaMilliJoules = result.energyDelta};
     }
 

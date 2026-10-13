@@ -11,8 +11,9 @@
 //     単体の原子の数で割り切れない端数(O2 に奇数個の O)と、セルの成分の上限(RX_MAX_CELL_SPECIES)に入らない分は失う(報告する)。
 //   - 熱は保つ: 分けた分の化学のエネルギーの差をセルのエネルギーに足す(mJ に切り上げるので熱は減らない)。差は改造による出入りとして報告する。
 //     残った物質の値(生成エンタルピーなど)が変わった分は、これまでの差し替え(ADR-0047)と同じくエネルギーを保つ。
-//   - 単体の無い元素を含む物質を消す表は当てない(BuildSpeciesRemap が理由を返す)。世界の中身を見ずに表だけで決める
-//     (GPU の世界を読み戻さずに済み、記録と再生で同じ判断になる)。
+//   - 単体の無い元素(新しい表にその元素だけでできた物質が無い)の原子は捨てる(D-484)。断らずに当て、捨てた原子は改造による出入りとして
+//     報告する(端数と同じ扱い。保存則の帳簿は「捨てた分」込みで合う)。熱は保つ(捨てた原子の化学のエネルギーも差に入る)。
+//   - 付け替えは世界の中身を見ずに表だけで決める(GPU の世界を読み戻さずに済み、記録と再生で同じ判断になる)。
 // 決定性: 表 2 つだけから決まるので、再生は記録した表の中身(ADR-0050)から同じ付け替えを作り直す(新しいコマンドは要らない)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
@@ -56,6 +57,8 @@ namespace bicameral::sim {
         std::vector<reaction::RxRemapUnit> units;  // 使う単体(新しい表の ID の昇順)
 
         bool identity = false;  // 物質の一覧(名前・ID・組み立て)が同じ。セルを触らなくてよい
+        std::string
+            dropped;  // 単体が無いので原子を捨てる「物質 の 元素」(「・」区切り。空 = 捨てない。表を替える時に知らせる)
 
         [[nodiscard]] SpeciesRemapView View() const {
             return {.newIds = newIds, .partBegin = partBegin, .parts = parts, .removedH0 = removedH0, .units = units};
@@ -67,13 +70,15 @@ namespace bicameral::sim {
         uint64_t decomposedMicromoles = 0;     // 元素に分けた物質の量(µmol)
         uint64_t remainderAtomMicromoles = 0;  // 単体の原子の数で割り切れずに失った原子(µmol)
         uint64_t overflowAtomMicromoles = 0;   // セルの成分の上限に入らずに失った原子(µmol)
+        uint64_t droppedAtomMicromoles = 0;    // 新しい表に単体の無い元素なので捨てた原子(µmol。D-484)
         int64_t energyDeltaMilliJoules = 0;    // 熱を保つためにセルに足したエネルギー(mJ。改造による出入り)
         uint32_t conversionsDisabled = 0;      // 替える先の物質が消えて効かなくなった魔法の転換の数(T-0377)
 
         void Add(const SpeciesRemapReport& other);
     };
 
-    // 今の表 current から新しい表 next への付け替え。単体の無い元素を含む物質を消す表なら、理由(物質と元素の名前)を返す
+    // 今の表 current から新しい表 next への付け替え。今は失敗しない(D-484 で単体の無い元素も捨てて当てる。何を捨てるかは dropped)。
+    // 当てられない理由を返す形は、呼ぶ側(ホットリロードの検査・実験室)の約束として残す
     [[nodiscard]] std::expected<SpeciesRemap, std::string> BuildSpeciesRemap(const BakedReactionTable& current,
                                                                              const BakedReactionTable& next);
 

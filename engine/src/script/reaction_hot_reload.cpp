@@ -93,7 +93,7 @@ namespace bicameral::script {
     std::expected<void, std::string> CheckHotReloadCompatible(const sim::BakedReactionTable& current,
                                                               const sim::BakedReactionTable& next,
                                                               SpeciesChangePolicy policy) {
-        // 付け替えられる世界: 消す物質を元素に分けて戻せるか(元素の一覧・組み立ての変化も名前で付け替える)
+        // 付け替えられる世界: 消す物質は元素に分けて戻す(元素の一覧・組み立ての変化も名前で付け替える。単体の無い元素は捨てる。D-484)
         if (policy == SpeciesChangePolicy::Remap) {
             const auto remap = sim::BuildSpeciesRemap(current, next);
             if (!remap)

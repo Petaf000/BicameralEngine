@@ -8,6 +8,7 @@
 //   - 残る物質は ID だけ替える(名前のバイト順の ID なので、残る物質どうしの順は変わらない = 昇順のまま)。
 //   - 消えた物質は元素ごとの単体へ原子の数を保って分ける。単体は新しい表の ID の昇順に 1 つずつ、そのセルの消えた物質の原子を全部集めて
 //     単体の原子の数で割る(端数は失う)。入りきらない単体(成分の上限)は足さない(失う)。どちらも報告する。
+//   - 新しい表に単体の無い元素の原子は捨てる(分けた先の species が RX_REMAP_DROPPED。D-484)。改造による出入りとして報告する。
 //   - 熱を保つ: 分けた分の化学のエネルギーの差(µJ)を mJ に切り上げてエネルギーに足す(熱は減らず、増えても 1 mJ 未満)。
 //
 // 付け替えの表の読み方は呼ぶ側が Remap 型で渡す(C++ は配列の span、HLSL はバッファを読む構造体)。Remap に要るメソッド:
@@ -29,7 +30,7 @@ RX_NAMESPACE_BEGIN
 
 // 消えた物質 1 mol を分けた先の 1 つ(元素 1 つぶん)
 struct RxRemapPart {
-    uint32_t species;      // 新しい表の単体の ID
+    uint32_t species;      // 新しい表の単体の ID(RX_REMAP_DROPPED = 単体が無いので捨てる)
     uint32_t atomsPerMol;  // 消えた物質 1 mol に入っているこの元素の原子の数(mol)
 };
 
@@ -46,10 +47,12 @@ struct RxRemapResult {
     uint64_t decomposed;      // 元素に分けた物質の量(µmol)
     uint64_t remainderAtoms;  // 単体の原子の数で割り切れずに失った原子(µmol)
     uint64_t overflowAtoms;   // 成分の上限に入らずに失った原子(µmol)
+    uint64_t droppedAtoms;    // 新しい表に単体の無い元素なので捨てた原子(µmol。D-484)
     int64_t energyDelta;      // エネルギーに足した量(mJ)
 };
 
 FX_CONST uint32_t RX_REMAP_HEADER_WORDS = 4;
+FX_CONST uint32_t RX_REMAP_DROPPED = 0;  // 分けた先が無い元素(物質 ID 0 は使わない)
 
 // 切り上げの割り算(divisor > 0。0 以下は 0 方向の切り捨てが切り上げ)
 FX_FN int64_t RxCeilDivS64(int64_t value, int64_t divisor) {
@@ -78,6 +81,19 @@ FX_FN uint64_t RxRemapUnitAtoms(Remap remap, RxCell cell, uint32_t unitSpecies) 
     return atoms;
 }
 
+// 消えた物質 species の amount µmol のうち、単体の無い元素なので捨てる原子の数(µmol)
+template <typename Remap>
+FX_FN uint64_t RxRemapDroppedAtoms(Remap remap, uint32_t species, uint64_t amount) {
+    uint64_t atoms = 0;
+    for (uint32_t index = remap.PartBegin(species); index < remap.PartBegin(species + 1); ++index) {
+        const RxRemapPart part = remap.Part(index);
+        if (part.species == RX_REMAP_DROPPED)
+            atoms += amount * (uint64_t)part.atomsPerMol;
+    }
+
+    return atoms;
+}
+
 template <typename Remap, typename Table>
 FX_FN RxRemapResult RxRemapCell(Remap remap, Table table, RxCell cell) {
     RxRemapResult result;
@@ -85,6 +101,7 @@ FX_FN RxRemapResult RxRemapCell(Remap remap, Table table, RxCell cell) {
     result.decomposed = 0;
     result.remainderAtoms = 0;
     result.overflowAtoms = 0;
+    result.droppedAtoms = 0;
     result.energyDelta = 0;
 
     // --- 残る物質は ID だけ替える(昇順のまま)。消えた物質の化学のエネルギー(今の表)を数える ---
@@ -94,6 +111,7 @@ FX_FN RxRemapResult RxRemapCell(Remap remap, Table table, RxCell cell) {
         const uint32_t newId = remap.NewId(species);
         if (newId == 0) {
             result.decomposed += cell.amounts[slot];
+            result.droppedAtoms += RxRemapDroppedAtoms(remap, species, cell.amounts[slot]);
             removedChemical += RxMulS64Checked((int64_t)cell.amounts[slot], remap.RemovedH0(species));
             continue;
         }
@@ -123,7 +141,7 @@ FX_FN RxRemapResult RxRemapCell(Remap remap, Table table, RxCell cell) {
         addedChemical += RxMulS64Checked((int64_t)amount, table.Species(unit.species).h0);
     }
 
-    // --- 熱を保つ: 化学のエネルギーの差を mJ に切り上げて足す ---
+    // --- 熱を保つ: 化学のエネルギーの差を mJ に切り上げて足す(捨てた原子の化学のエネルギーも差に入る)---
     result.energyDelta = RxCeilDivS64(addedChemical - removedChemical, (int64_t)RX_MICROJOULES_PER_MILLIJOULE);
     result.cell.energy += result.energyDelta;
 

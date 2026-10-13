@@ -27,6 +27,8 @@
 #include <functional>
 #include <optional>
 #include <ranges>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/aliases.h"
@@ -774,15 +776,18 @@ namespace {
     }
 
     // --- 物質を足す・消す差し替え(T-0223・ADR-0065): 水素(H2)を足してセルロースと木の規則を消した表に、刻みの途中で替える ---
-    // 水素の後ろの物質の ID がずれ、木の壁のセルロースは炭・水素・酸素の単体に分かれる。GPU の付け替えの段が CPU と毎刻みビット一致
+    // 水素の後ろの物質の ID がずれ、木の壁のセルロースは炭・水素・酸素の単体に分かれる。GPU の付け替えの段が CPU と毎刻みビット一致。
+    // 水素を足さない版(D-484・T-0436)は、単体の無い H の原子を捨てて当てる
 
-    std::optional<BakedReactionTable> MakeSpeciesChangedTable() {
+    std::optional<BakedReactionTable> MakeSpeciesChangedTable(bool withHydrogen) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
-        definition.species.push_back({.name = "hydrogen",
-                                      .composition = {{.element = "H", .count = 2}},
-                                      .formationEnthalpy = 0,
-                                      .heatCapacity = 28836,
-                                      .thermalConductivity = 18 * 5000});
+        if (withHydrogen) {
+            definition.species.push_back({.name = "hydrogen",
+                                          .composition = {{.element = "H", .count = 2}},
+                                          .formationEnthalpy = 0,
+                                          .heatCapacity = 28836,
+                                          .thermalConductivity = 18 * 5000});
+        }
         std::erase_if(definition.species, [](const SpeciesDefinition& species) { return species.name == "cellulose"; });
         std::erase_if(definition.rules, [](const RuleDefinition& rule) {
             return rng::any_of(rule.reactants, [](const RuleTerm& term) { return term.species == "cellulose"; });
@@ -795,13 +800,19 @@ namespace {
         return std::move(*baked);
     }
 
-    void TestSpeciesSwap(ID3D12Device5* device, const BakedReactionTable& table, Failures& failures) {
-        const std::optional<BakedReactionTable> swapped = MakeSpeciesChangedTable();
-        failures.Check(swapped.has_value() && swapped->speciesNames != table.speciesNames &&
-                           BuildSpeciesRemap(table, *swapped).has_value(),
-                       "物質の付け替え: 差し替える表をベイクでき、付け替えられる(物質の一覧が違う)");
+    void TestSpeciesSwap(ID3D12Device5* device, const BakedReactionTable& table, bool withHydrogen,
+                         Failures& failures) {
+        const std::string_view variant = withHydrogen ? "水素あり" : "水素なし(H を捨てる)";
+        const std::optional<BakedReactionTable> swapped = MakeSpeciesChangedTable(withHydrogen);
+        failures.Check(swapped.has_value(), std::format("物質の付け替え {}: 差し替える表をベイクできる", variant));
         if (!swapped)
             return;
+
+        // 物質の一覧が違い、付け替えられる。水素なしの版だけ H を捨てる
+        const auto remap = BuildSpeciesRemap(table, *swapped);
+        failures.Check(
+            swapped->speciesNames != table.speciesNames && remap.has_value() && remap->dropped.empty() == withHydrogen,
+            std::format("物質の付け替え {}: 付け替えられる・捨てる元素の有無が合う", variant));
 
         std::vector<ProbeCommand> commands = MakeCommands();
         commands.push_back(MakeTableCommand(SWAP_TICK, static_cast<uint32_t>(commands.size()), 0x5BEC1E5ULL));
@@ -810,21 +821,24 @@ namespace {
         const TableSwapPlan swap{.tick = SWAP_TICK, .table = &*swapped};
         const Reference expected = RunReference(table, commands, {}, swap);
         failures.Check(expected.ticks[SWAP_TICK + 1].scheduledBlocks == PROBE_BLOCK_COUNT,
-                       "物質の付け替え: 差し替えた刻みに全部のブロックを計算する(CPU)");
+                       std::format("物質の付け替え {}: 差し替えた刻みに全部のブロックを計算する(CPU)", variant));
 
-        for (const Plan& plan : {MakePlans()[0], MixedPlan()}) {
+        const std::vector<Plan> plans = withHydrogen ? std::vector<Plan>{MakePlans()[0], MixedPlan()}
+                                                     : std::vector<Plan>{MakePlans()[0]};
+        for (const Plan& plan : plans) {
             save::ReplayPlayer player = MakePlayer(commands);
             const RunResult result = RunPlan(device, table, plan, ScheduledSource(player), swap);
 
-            Log(Channel::Sim, Level::Info, "物質の付け替え GPU({}): S({}) = {:016x}", plan.name,
+            Log(Channel::Sim, Level::Info, "物質の付け替え {} GPU({}): S({}) = {:016x}", variant, plan.name,
                 result.hashes.empty() ? 0 : result.hashes.back().tick,
                 result.hashes.empty() ? 0 : result.hashes.back().hash);
 
+            failures.Check(result.ok && HashesMatch(result.hashes, expected),
+                           std::format("物質の付け替え {} {}: 刻みごとのハッシュと計算したブロックの数が CPU と一致",
+                                       variant, plan.name));
             failures.Check(
-                result.ok && HashesMatch(result.hashes, expected),
-                std::format("物質の付け替え {}: 刻みごとのハッシュと計算したブロックの数が CPU と一致", plan.name));
-            failures.Check(result.extractionHash == expected.extractionHash,
-                           std::format("物質の付け替え {}: 最後の抽出(新しい表の ID の物質)が CPU と一致", plan.name));
+                result.extractionHash == expected.extractionHash,
+                std::format("物質の付け替え {} {}: 最後の抽出(新しい表の ID の物質)が CPU と一致", variant, plan.name));
         }
     }
 
@@ -861,7 +875,8 @@ int main(int argc, char** argv) {
     TestRecordAndReplay(device->Get(), *table, failures);
     TestSlowWake(device->Get(), *table, failures);
     TestTableSwap(device->Get(), *table, failures);
-    TestSpeciesSwap(device->Get(), *table, failures);
+    TestSpeciesSwap(device->Get(), *table, true, failures);
+    TestSpeciesSwap(device->Get(), *table, false, failures);
     TestLimits(device->Get(), failures);
 
     const bool passesValidation = test::PassesValidation(*device, "gpu_probe_sim_test");

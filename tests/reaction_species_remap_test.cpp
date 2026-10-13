@@ -4,7 +4,8 @@
 // 確かめること:
 //   - 同じ表なら何もしない・物質を足すと後ろの ID がずれ、セルは名前で同じ中身になる(並びもそのまま)
 //   - 物質を消すと元素に分けて単体へ戻す: 原子の数が保たれる(単体の端数だけ失い、報告と合う)・熱は減らず 1 mJ 未満しか増えない
-//   - 組み立てが変わった同じ名前の物質は「消して足した」扱い・セルの成分の上限に入らない分は報告する・単体の無い元素は当てない
+//   - 組み立てが変わった同じ名前の物質は「消して足した」扱い・セルの成分の上限に入らない分は報告する
+//   - 単体の無い元素は原子を捨てて当て、捨てた分を報告する(D-484): 元素ごとの原子は「捨てた分」込みで合う・熱は保つ
 //   - ホットリロードの検査(script::CheckHotReloadCompatible)の 2 つの方針
 //   - 世界(ProbeReference): 足すだけの差し替えは、同じ表への差し替えと名前で見て毎刻み同じ・消す差し替えは元素を保ち、その後も進む
 // 失敗すると失敗した条件を表示して 1 を返す(ctest が落ちる)。
@@ -235,18 +236,47 @@ namespace {
         EXPECT(report.overflowAtomMicromoles == 1000 + 500 && report.remainderAtomMicromoles == 0);
     }
 
+    // 単体の無い元素(水素の無い表でセルロースを消す): H の原子は捨て、捨てた分を報告する。C・O は単体へ。熱は保つ(D-484)
     void TestMissingUnit(const BakedReactionTable& base) {
         const BakedReactionTable noHydrogen = Bake(WithoutCellulose(MakeCombustionTestTable()));
         const auto remap = BuildSpeciesRemap(base, noHydrogen);
-        EXPECT(!remap.has_value());
+        EXPECT(remap.has_value());
         if (!remap)
-            EXPECT(remap.error().find("cellulose の H") != std::string::npos);
+            return;
 
-        // ホットリロードの検査: Reject は物質の一覧が変われば当てない・Remap は分けて戻せる表だけ当てる
+        EXPECT(remap->dropped == "cellulose の H");
+
+        // C6H10O5 が 1001 µmol: C 6006・H 10010(捨てる)・O 5005(O2 2502 と端数 1)
+        const reaction::RxCell original = MakeCell(base, {{"carbon", 3}, {"cellulose", 1001}, {"oxygen", 500}});
+        reaction::RxCell cell = original;
+        const SpeciesRemapReport report = RemapReactionCell(*remap, noHydrogen, cell);
+
+        EXPECT(AmountOf(noHydrogen, cell, "carbon") == 3 + 6006);
+        EXPECT(AmountOf(noHydrogen, cell, "oxygen") == 500 + 2502);
+        EXPECT(report.decomposedMicromoles == 1001 && report.droppedAtomMicromoles == 10010);
+        EXPECT(report.remainderAtomMicromoles == 1 && report.overflowAtomMicromoles == 0);
+
+        // 保存則の帳簿: 元素ごとの原子は「捨てた分・端数」込みで合う
+        const auto before = CountNamedElements(base, original);
+        const auto after = CountNamedElements(noHydrogen, cell);
+        EXPECT(AtomsOf(before, "C") == AtomsOf(after, "C"));
+        EXPECT(AtomsOf(before, "H") == AtomsOf(after, "H") + report.droppedAtomMicromoles && AtomsOf(after, "H") == 0);
+        EXPECT(AtomsOf(before, "O") == AtomsOf(after, "O") + report.remainderAtomMicromoles);
+
+        // 熱は保つ(mJ への切り上げで 1 mJ 未満だけ増える)。足したエネルギーは改造による出入りとして報告と合う
+        const int64_t heatGain = HeatOf(noHydrogen, cell) - HeatOf(base, original);
+        EXPECT(heatGain >= 0 && heatGain < 1000);
+        EXPECT(cell.energy == original.energy + report.energyDeltaMilliJoules);
+
+        // 消えた物質を含まないセルは何も捨てない
+        reaction::RxCell air = MakeCell(base, {{"oxygen", 1000}, {"nitrogen", 3000}});
+        EXPECT(RemapReactionCell(*remap, noHydrogen, air).droppedAtomMicromoles == 0);
+
+        // ホットリロードの検査: Reject は物質の一覧が変われば当てない・Remap は単体の無い元素があっても当てる(D-484)
         const BakedReactionTable removed = Bake(WithoutCellulose(WithHydrogen()));
         EXPECT(!script::CheckHotReloadCompatible(base, removed).has_value());
         EXPECT(script::CheckHotReloadCompatible(base, removed, script::SpeciesChangePolicy::Remap).has_value());
-        EXPECT(!script::CheckHotReloadCompatible(base, noHydrogen, script::SpeciesChangePolicy::Remap).has_value());
+        EXPECT(script::CheckHotReloadCompatible(base, noHydrogen, script::SpeciesChangePolicy::Remap).has_value());
         EXPECT(script::CheckHotReloadCompatible(base, base, script::SpeciesChangePolicy::Remap).has_value());
     }
 

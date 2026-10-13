@@ -31,8 +31,8 @@ namespace bicameral::script {
     };
 
     // 新しい表を今の世界に当てられるか: 物質の一覧(名前・並び = ID・元素の組み立て)が同じなら当てられる。
-    // 違うとき、Reject なら当てない(足した・消した物質の名前を理由に書く)。Remap なら、消す物質を元素に分けて戻せる表なら当てられる
-    // (単体の無い元素を含む物質を消す表は理由を返す。sim/species_remap.h)
+    // 違うとき、Reject なら当てない(足した・消した物質の名前を理由に書く)。Remap なら当てられる(消す物質は元素に分けて戻し、
+    // 単体の無い元素の原子は捨てて報告する。D-484・sim/species_remap.h)
     [[nodiscard]] std::expected<void, std::string> CheckHotReloadCompatible(
         const sim::BakedReactionTable& current, const sim::BakedReactionTable& next,
         SpeciesChangePolicy policy = SpeciesChangePolicy::Reject);

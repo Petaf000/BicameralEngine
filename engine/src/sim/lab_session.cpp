@@ -285,11 +285,12 @@ namespace bicameral::sim {
         if (boxRemap) {
             m_lastRemapReport = RemapLabBox(m_cpu, *boxRemap, m_table, tick);
             Log(Channel::Sim, Level::Info,
-                "実験室: 刻み {} で物質を付け替えた(分けた物質 {} µmol・失った原子 {} + {} µmol・足したエネルギー {} "
-                "mJ・効かなくなった転換 {})",
+                "実験室: 刻み {} で物質を付け替えた(分けた物質 {} µmol・失った原子 {} + {} µmol・単体が無く捨てた原子 "
+                "{} µmol・"
+                "足したエネルギー {} mJ・効かなくなった転換 {})",
                 tick, m_lastRemapReport->decomposedMicromoles, m_lastRemapReport->remainderAtomMicromoles,
-                m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->energyDeltaMilliJoules,
-                m_lastRemapReport->conversionsDisabled);
+                m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->droppedAtomMicromoles,
+                m_lastRemapReport->energyDeltaMilliJoules, m_lastRemapReport->conversionsDisabled);
         }
 
         StepLabBox(m_cpu, m_table, tick, commands, Shape());
