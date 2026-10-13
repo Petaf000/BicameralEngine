@@ -13,9 +13,9 @@
 sim::MakeLabMaterials(空気・木・木炭…)・実験室の空気で満たす既定・筆とパッチのパネルの既定の材料(木・cellulose)・抽出の物質(ProbeViewSpecies)と描画の O2 の基準量を、パッケージの値にする。
 
 ## 完了条件(チェックできる形で)
-- [ ] 材料のひな形の分類・型の定義・読む所。ブランクの世界ではひな形が空でパネルが壊れない
-- [ ] パネルの自動の確かめ(--auto-lab・--auto-place・--auto-patch)がサンプルのパッケージのひな形で通る
-- [ ] 今の試験(--world sample・サンプルのパッケージを読む試験)の結果(ハッシュ・画像)が変わらない
+- [x] 材料のひな形の分類・型の定義・読む所。ブランクの世界ではひな形が空でパネルが壊れない(window_lab_blank)
+- [x] パネルの自動の確かめ(--auto-lab・--auto-place・--auto-patch)がサンプルのパッケージのひな形で通る(window_lab・window_lab_compare・window_place_record/play・window_patch_record/play。release)
+- [x] 今の試験(--world sample・サンプルのパッケージを読む試験)の結果(ハッシュ・画像)が変わらない(image_probe_volume・image_probe_slice・gpu_lab_box・gpu_probe_sim・gpu_probe_place・gpu_probe_peek・CPU の 22 本。release)
 
 ## メモ・参考
 - 洗い出しの一覧は T-0371 のチケット。合わせた表の版(TableVersion)は全部の分類を含むので、反応表と同じ読み込みに新しい分類を足すと
@@ -41,3 +41,7 @@ sim::MakeLabMaterials(空気・木・木炭…)・実験室の空気で満たす
    表の差し替え(ホットリロード)が 1 回起きる(世界は変わらない)。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-13(wt3): 分類 material_templates・view_quantities・editor_defaults を反応表と同じ読み込みに足し(T-0398 の共有の決め事)、
+  実験室・筆・パネルの材料・実験室の箱を満たす空気と温度・抽出の物質・描画の色の幅をパッケージから読む形にした(ADR-0174)。
+  release のビルド警告 0・CPU 22 本・window_lab/place/patch の 7 本・gpu_lab_box・gpu_probe_sim/place/peek・image_probe_volume/slice が通過。
+  wt2 の欄の道具(073eca1。script/package_fields)を cherry-pick して、自分の欄の道具をそちらへ寄せた。
