@@ -463,6 +463,13 @@ bicameral_add_gpu_test_case(gpu_probe_rewind gpu_probe_rewind_test gpu)
 # 物理のパイプラインの作成が、ほかの作業ツリーと GPU を分けている間は debug で 4 分を超えることがある
 set_tests_properties(gpu_probe_rewind PROPERTIES TIMEOUT 900)
 
+# 世界の写しの早送り(T-0412・ADR-0198): 写しを取っても本物のハッシュ列が変わらない・同じコマンドなら写し = 本物 = CPU リファレンス・
+# 使い直した写しが条件(木の量)で CPU と同じ刻みに止まる
+bicameral_add_gpu_test(gpu_world_copy_test)
+target_link_libraries(gpu_world_copy_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_world_copy gpu_world_copy_test gpu)
+set_tests_properties(gpu_world_copy PROPERTIES TIMEOUT 900)
+
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_peek gpu_probe_peek_test gpu --no-gbv)
@@ -539,6 +546,16 @@ add_test(NAME window_rebuild_play COMMAND bicameral --replay ${WINDOW_REBUILD_FI
 set_tests_properties(window_rebuild_record PROPERTIES LABELS gpu FIXTURES_SETUP window_rebuild TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-rebuild: 作り直した世界.*OK")
 set_tests_properties(window_rebuild_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_rebuild TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 世界の写しの早送り(T-0412・ADR-0198): 火を付けたサンプルの世界で刻み 60 に写しを取り 600 刻み早送りし、写しの刻みごとのハッシュが
+# 本物の同じ刻みと全部同じ(--auto-copy)。記録を写し無しの別の起動で再生して同じハッシュ列 = 写しを取っても本物は変わらない(D-403)
+set(WINDOW_COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_copy.bcreplay)
+add_test(NAME window_copy_record
+         COMMAND bicameral --world sample --editor --auto-ignite --auto-copy --frames 20000 --record ${WINDOW_COPY_FILE})
+add_test(NAME window_copy_play COMMAND bicameral --replay ${WINDOW_COPY_FILE} --target-fps 30)
+set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP window_copy TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-copy: OK")
+set_tests_properties(window_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_copy TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
@@ -742,7 +759,7 @@ foreach(_name IN ITEMS
     gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
-    gpu_probe_trace_test gpu_probe_rewind_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
+    gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

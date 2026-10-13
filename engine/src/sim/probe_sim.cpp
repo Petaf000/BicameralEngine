@@ -414,9 +414,14 @@ namespace bicameral::sim {
         m_tickEvents = gpu::CreateBuffer(device, PROBE_TICK_EVENT_BYTES, gpu::BufferKind::UnorderedAccess);
         m_blockSchedule = gpu::CreateBuffer(device, PROBE_SCHEDULE_BYTES, gpu::BufferKind::UnorderedAccess);
         m_magicPatches = gpu::CreateBuffer(device, PROBE_PATCH_LIST_BYTES, gpu::BufferKind::UnorderedAccess);
+        // 0 の見出し(保存点から戻す・写しを取る時にコマンドキューを空にする。既定のヒープは 0 で初期化される)
+        m_zeroQueueHeader = gpu::CreateBuffer(device, PROBE_COMMAND_QUEUE_HEADER_BYTES,
+                                              gpu::BufferKind::UnorderedAccess);
         if (!m_cells || !m_thermal || !m_busySink || !m_hashes || !m_commandQueue || !m_tickEvents ||
-            !m_blockSchedule || !m_magicPatches)
+            !m_blockSchedule || !m_magicPatches || !m_zeroQueueHeader)
             return false;
+
+        m_zeroQueueHeader->SetName(L"ProbeSim.zeroQueueHeader");
 
         m_magicPatches->SetName(L"ProbeSim.magicPatches");  // 作った時は 0(パッチの数 0 = 空の列)
 
@@ -674,8 +679,9 @@ namespace bicameral::sim {
         if (!ValidateInput(slot, input))
             return nullptr;
 
-        // 保存点から戻すフレームは、コマンドキューが空になってから足す(足す場所を入力に書く前に CPU の控えを空に。T-0143)
-        if (input.restoreFrom != NO_SAVE_POINT)
+        // 保存点から戻す・写しを取るフレームは、コマンドキューが空になってから足す(足す場所を入力に書く前に CPU の控えを空に。
+        // T-0143・T-0412)
+        if (input.restoreFrom != NO_SAVE_POINT || input.adoptFrom != nullptr)
             ResetCommandMirror();
 
         FrameSlot& frame = m_slots[slot];
@@ -697,7 +703,10 @@ namespace bicameral::sim {
             RecordInitialization(list);
 
         // 巻き戻し(T-0143): 刻みの境界から始まるフレームの先頭で、保存点へ写すか保存点から戻す(コマンドを足す前)
-        if (input.restoreFrom != NO_SAVE_POINT)
+        // 写しの早送り(T-0412): 別の世界の S(firstTick) をこの世界へ(戻すのと同じ所)
+        if (input.adoptFrom != nullptr)
+            RecordAdopt(list, *input.adoptFrom, input.firstTick);
+        else if (input.restoreFrom != NO_SAVE_POINT)
             RecordRestore(list, input.restoreFrom);
         else if (input.saveTo != NO_SAVE_POINT)
             RecordSave(list, input.saveTo, input.firstTick);

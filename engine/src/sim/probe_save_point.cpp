@@ -9,7 +9,9 @@
 // 写すもの: セルと熱のキャッシュ(S(t) の世代だけ)・予定の印・活性の一覧 2 組・ハッシュの表・刻みのイベントの一時置き場・
 // 魔法のパッチの列(T-0323)・物理の u0〜u13。
 // 写さないもの: コマンドキュー(戻すと空にし、呼ぶ側が足し直す)・抽出・イベントのリング・カウンタ・トレース(どれも出力。世界の結果に入らない)。
+// 同じ道で、別の ProbeSim(本物の世界)の S(t) をこの世界へ写す(写しの早送り。T-0412・ADR-0198。sim/world_copy)。
 #include <algorithm>
+#include <array>
 
 #include "core/aliases.h"
 #include "core/log.h"
@@ -50,16 +52,6 @@ namespace bicameral::sim {
 
     bool ProbeSim::CreateSavePoints(ID3D12Device5* device, uint32_t count) {
         m_savePoints.clear();
-        if (!m_zeroQueueHeader) {
-            // 既定のヒープは 0 で初期化される(D3D12_HEAP_FLAG_CREATE_NOT_ZEROED を付けない)
-            m_zeroQueueHeader = gpu::CreateBuffer(device, PROBE_COMMAND_QUEUE_HEADER_BYTES,
-                                                  gpu::BufferKind::UnorderedAccess);
-            if (!m_zeroQueueHeader)
-                return false;
-
-            m_zeroQueueHeader->SetName(L"ProbeSim.zeroQueueHeader");
-        }
-
         const std::vector<StateRegion> regions = StateRegions(0);
         m_savePoints.resize(count);
         for (uint32_t index = 0; index < count; ++index) {
@@ -79,6 +71,26 @@ namespace bicameral::sim {
         }
 
         return true;
+    }
+
+    uint64_t ProbeSim::DefaultHeapBytes() const {
+        uint64_t bytes = m_conductGraph->BackingMemoryBytes();
+        const auto add = [&](const ComPtr<ID3D12Resource>& buffer) {
+            if (buffer)
+                bytes += buffer->GetDesc().Width;
+        };
+
+        for (const ComPtr<ID3D12Resource>& buffer : {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue,
+                                                     m_tickEvents, m_blockSchedule, m_magicPatches, m_speciesRemap})
+            add(buffer);
+
+        rng::for_each(m_activeLists, add);
+        rng::for_each(m_extractions, add);
+        rng::for_each(m_reactionTable, add);
+        if (m_physics)
+            rng::for_each(m_physics->StateBuffers(), add);
+
+        return bytes;
     }
 
     uint64_t ProbeSim::SavePointBytes() const {
@@ -123,6 +135,9 @@ namespace bicameral::sim {
     bool ProbeSim::ValidateSavePoints(const ProbeFrameInput& input) const {
         const bool saving = input.saveTo != NO_SAVE_POINT;
         const bool restoring = input.restoreFrom != NO_SAVE_POINT;
+        if (input.adoptFrom != nullptr)
+            return !saving && !restoring && ValidateAdopt(input);
+
         if (!saving && !restoring)
             return true;
 
@@ -135,6 +150,32 @@ namespace bicameral::sim {
                 saving ? static_cast<int64_t>(input.saveTo) : -1,
                 restoring ? static_cast<int64_t>(input.restoreFrom) : -1, input.firstTick, input.firstUnit,
                 m_savePoints.size(), m_initialized);
+        }
+
+        return valid;
+    }
+
+    // 写しの早送りの約束(T-0412): 刻みの境界・両方とも初期化の後・同じ形(写す部分の並びと大きさ)・物理の刻みが firstTick
+    bool ProbeSim::ValidateAdopt(const ProbeFrameInput& input) const {
+        const ProbeSim& source = *input.adoptFrom;
+        bool valid = &source != this && input.firstUnit == 0 && m_initialized && source.m_initialized &&
+                     (m_physics == nullptr) == (source.m_physics == nullptr);
+        if (valid && m_physics)
+            valid = m_physicsInitialized && source.m_physics->Tick() == input.firstTick;
+
+        if (valid) {
+            const std::vector<StateRegion> own = StateRegions(0);
+            const std::vector<StateRegion> other = source.StateRegions(0);
+            valid = own.size() == other.size() &&
+                    rng::equal(own, other,
+                               [](const StateRegion& a, const StateRegion& b) { return a.bytes == b.bytes; });
+        }
+
+        if (!valid) {
+            Log(Channel::Sim, Level::Error,
+                "写しの早送りの写し方が不正: 刻み {} 単位 {}(初期化 {} / 写す元 {}、物理 {} / {})", input.firstTick,
+                input.firstUnit, m_initialized, source.m_initialized, m_physics != nullptr,
+                source.m_physics != nullptr);
         }
 
         return valid;
@@ -166,34 +207,51 @@ namespace bicameral::sim {
 
     void ProbeSim::RecordRestore(ID3D12GraphicsCommandList10* list, uint32_t index) {
         const SavePoint& savePoint = m_savePoints[index];
-        const std::vector<StateRegion> regions = StateRegions(savePoint.tick);
+        std::vector<StateRegion> from = StateRegions(savePoint.tick);
+        for (size_t region = 0; region < from.size(); ++region)
+            from[region] = {.resource = savePoint.buffers[region].Get(), .bytes = from[region].bytes};
+
+        RecordOverwriteState(list, from);
+        if (m_physics)
+            m_physics->SetCursor(savePoint.physics);
+    }
+
+    // 写しの早送り(T-0412): 写す元の S(tick)(その世代の位置)を、この世界へ。写す元のバッファは読むだけ
+    void ProbeSim::RecordAdopt(ID3D12GraphicsCommandList10* list, const ProbeSim& source, uint64_t tick) {
+        RecordOverwriteState(list, source.StateRegions(tick));
+        if (m_physics)
+            m_physics->SetCursor(source.m_physics->Cursor());
+    }
+
+    // from(StateRegions の順。resource の offset から bytes)を世界へ写し、コマンドキューを空にする(戻す・写しを取る)
+    void ProbeSim::RecordOverwriteState(ID3D12GraphicsCommandList10* list, std::span<const StateRegion> from) {
+        const std::vector<StateRegion> regions = StateRegions(0);
         std::vector<ID3D12Resource*> sources = {m_zeroQueueHeader.Get()};
         std::vector<ID3D12Resource*> destinations = {m_commandQueue.Get()};
         for (size_t region = 0; region < regions.size(); ++region) {
-            sources.push_back(savePoint.buffers[region].Get());
+            sources.push_back(from[region].resource);
             destinations.push_back(regions[region].resource);
         }
 
         RecordAround(list, sources, destinations, false);
         for (size_t region = 0; region < regions.size(); ++region) {
             const StateRegion& state = regions[region];
-            ID3D12Resource* saved = savePoint.buffers[region].Get();
+            const StateRegion& source = from[region];
             if (state.generationBytes == 0) {
-                list->CopyBufferRegion(state.resource, 0, saved, 0, state.bytes);
+                list->CopyBufferRegion(state.resource, 0, source.resource, source.offset, state.bytes);
                 continue;
             }
 
             // 2 世代とも S(t) にする(予定していないブロックは 2 世代が同じ値、という約束を保つ)
-            for (uint64_t generation = 0; generation < 2; ++generation)
-                list->CopyBufferRegion(state.resource, generation * state.generationBytes, saved, 0, state.bytes);
+            for (uint64_t generation = 0; generation < 2; ++generation) {
+                list->CopyBufferRegion(state.resource, generation * state.generationBytes, source.resource,
+                                       source.offset, state.bytes);
+            }
         }
 
         // コマンドキューを空に(末尾 = 先頭 = 0。CPU の控えは RecordFrame が入力を書く前に空にしている)
         list->CopyBufferRegion(m_commandQueue.Get(), 0, m_zeroQueueHeader.Get(), 0, PROBE_COMMAND_QUEUE_HEADER_BYTES);
         RecordAround(list, sources, destinations, true);
-
-        if (m_physics)
-            m_physics->SetCursor(savePoint.physics);
     }
 
     void ProbeSim::ResetCommandMirror() {

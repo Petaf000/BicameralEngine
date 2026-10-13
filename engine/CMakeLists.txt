@@ -105,6 +105,7 @@ add_library(bicameral_sim STATIC
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
+  src/sim/world_copy.cpp  # 世界の写しの早送り(T-0412)
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
@@ -182,6 +183,7 @@ target_link_libraries(bicameral_editor PUBLIC bicameral_frame bicameral_view bic
 add_executable(bicameral
   src/main.cpp
   src/editor/brush_panel.cpp
+  src/editor/copy_panel.cpp  # 写しの早送り(T-0412)
   src/editor/patch_panel.cpp
   src/editor/editor_overlay.cpp
   src/editor/gauge_panel.cpp
@@ -194,6 +196,7 @@ add_executable(bicameral
   src/frame/frame_loop.cpp
   src/frame/table_hot_reload.cpp
   src/frame/trace_capture.cpp
+  src/frame/world_copy_runner.cpp  # 写しの早送りを本物の刻みの合間に回す(T-0412)
   src/platform/agility_sdk.cpp
   src/platform/caps.cpp
   src/platform/window.cpp

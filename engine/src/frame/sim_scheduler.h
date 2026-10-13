@@ -82,6 +82,11 @@ namespace bicameral::frame {
 
         // --- 見積もり(ログと確認用)---
         [[nodiscard]] double BudgetMilliseconds() const;
+
+        // 最後の TakeUnits で予算から余った時間(見積もり。写しの早送りがこの中で回る。T-0412・D-468)
+        [[nodiscard]] double SpareMilliseconds() const {
+            return std::max(BudgetMilliseconds() - m_lastUsedMilliseconds, 0.0);
+        }
         [[nodiscard]] double UnitMilliseconds(uint32_t unit) const { return m_unitMilliseconds[unit]; }  // 0 = 未計測
         [[nodiscard]] double RenderMilliseconds() const { return m_renderMilliseconds; }
         [[nodiscard]] double PendingTicks() const { return m_pendingTicks; }
@@ -100,6 +105,7 @@ namespace bicameral::frame {
         uint64_t m_catchUpTick = 0;        // この刻みまでは現実の時間を待たない(CatchUpTo)
         double m_pendingTicks = 0.0;
         uint64_t m_droppedTicks = 0;
+        double m_lastUsedMilliseconds = 0.0;  // 最後の TakeUnits が予算から使った見積もり
 
         // --- 計測の平均 ---
         double m_renderMilliseconds = 0.0;

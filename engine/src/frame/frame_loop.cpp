@@ -34,6 +34,7 @@
 #include "frame/sim_scheduler.h"
 #include "frame/table_hot_reload.h"
 #include "frame/trace_capture.h"
+#include "frame/world_copy_runner.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
 #include "gpu/resources.h"
@@ -317,6 +318,8 @@ namespace bicameral::frame {
                 // --record: どの世界の記録か(T-0371)
                 m_recorder.SetWorld(options.world);
                 m_rebuilds = parts.rebuilds;
+                if (options.autoCopy)
+                    m_worldCopy.StartAuto();
 
                 // --check-physics: 窓と同じ場面の CPU の物理(重力は起動時の表の環境の値。T-0400)
                 const sim::BakedReactionTable& initialTable = m_tableReload.Find(m_tableReload.InitialVersion())->table;
@@ -385,6 +388,8 @@ namespace bicameral::frame {
             void ApplyMixRequest(const editor::MixRequest& request);
             void RequestRebuild();
             void CheckAutoRebuild();
+            void UpdateWorldCopy();
+            [[nodiscard]] WorldCopyRunner::CreateCopy WorldCopyFactory() const;
             [[nodiscard]] bool SubmitEditor();
             void ApplyTimeRequest(const editor::TimeRequest& request);
             void CheckAutoTime();
@@ -510,6 +515,9 @@ namespace bicameral::frame {
             bool m_rebuildRequested = false;  // 環境ミキサーの「世界を作り直す」(Run を終え、RunFrameLoop が作り直す)
             bool m_autoRebuildDone = false;   // --auto-rebuild の後半(作り直した世界)を確かめた
             bool m_autoRebuildFailed = false;
+
+            // --- 写しの早送り(T-0412。本物の刻みの合間に回す)---
+            WorldCopyRunner m_worldCopy;
         };
 
         // --- 作る ---
@@ -920,6 +928,8 @@ namespace bicameral::frame {
                     m_editor->Brush().NoteHash(tickHash.tick, tickHash.WorldHash());
                     m_editor->Patch().NoteTick(tickHash.tick);
                 }
+
+                m_worldCopy.NoteWorldHash(tickHash.tick, tickHash.WorldHash());
 
                 if (!m_replay.empty())
                     m_replay.front().CheckHash(tickHash.tick, tickHash.WorldHash());
@@ -1586,6 +1596,7 @@ namespace bicameral::frame {
                     m_editor->Patch().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
                                                loaded->tableVersion);
                     m_editor->Mixer().UseTable(loaded);
+                    m_editor->Copy().UseTable(loaded);
                 }
 
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
@@ -1706,6 +1717,38 @@ namespace bicameral::frame {
                 m_timeControl.SteppedTicks());
         }
 
+        // 写しの早送り(T-0412・ADR-0198): パネルの依頼を渡し、本物のリストの後ろに、シミュの予算の余りで写しのリストを投げる
+        // (同じ compute キュー。写しを取るのは本物のカーソルが刻みの境界の時。frame/world_copy_runner)
+        void FrameLoop::UpdateWorldCopy() {
+            if (m_editor) {
+                if (const auto request = m_editor->Copy().TakeRequest())
+                    m_worldCopy.Request(*request);
+
+                if (m_editor->Copy().TakeCancel())
+                    m_worldCopy.Cancel();
+            }
+
+            m_worldCopy.Update(m_compute, m_sim, m_scheduler.Cursor(), m_tableReload.AppliedVersion(),
+                               m_scheduler.SpareMilliseconds(), m_scheduler.DroppedTicks(),
+                               [this] { return WorldCopyFactory(); });
+        }
+
+        // 写しの世界を作る関数(別のスレッドで呼ぶので、今の表と場面はここで写して持つ): GPU が今使っている表と、
+        // 世界を作った時と同じ物理の場面(物の数が同じでないと写せない)
+        WorldCopyRunner::CreateCopy FrameLoop::WorldCopyFactory() const {
+            const sim::BakedReactionTable& initial = m_tableReload.Find(m_tableReload.InitialVersion())->table;
+
+            return
+                [device = m_device.Get(), table = m_sim.Table(), layout = initial.worldLayout,
+                 stack = HasStackScene(m_options, initial), broadphaseGraph = !m_options.physicsComputeBroadphase]() {
+                    const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(layout);
+                    return sim::WorldCopy::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+                                                  {.physicsScene = stack ? &scene : nullptr,
+                                                   .physicsOptions = {.broadphaseGraph = broadphaseGraph},
+                                                   .physicsParameters = sim::PhysicsParametersFor(table.environment)});
+                };
+        }
+
         // --auto-time: 止めている間は刻みが進まず、1 刻みを 3 回押したらちょうど 3 刻み進んだか
         void FrameLoop::CheckAutoTime() {
             const SimCursor cursor = m_scheduler.Cursor();
@@ -1770,7 +1813,8 @@ namespace bicameral::frame {
                                       .modifiedWorld = m_tableReload.WorldModified(),
                                       .message = m_tableReload.LastMessage()},
                     .brushPreview = MakeBrushPreview(),
-                    .patchRanges = MakePatchRanges()};
+                    .patchRanges = MakePatchRanges(),
+                    .copy = m_worldCopy.Progress()};
         }
 
         // 筆の「面に沿って」(T-0332): 左ボタン・ドラッグ・カーソルのセルを、光線が最初に当たる物の手前にする(拾えなければ断面)。
@@ -2184,6 +2228,7 @@ namespace bicameral::frame {
             if (!SubmitSim())
                 return false;
 
+            UpdateWorldCopy();
             SubmitRender();
             BuildEditor();
             if (!SubmitEditor() || !SubmitScreenshot())
@@ -2246,6 +2291,10 @@ namespace bicameral::frame {
 
                 // --auto-mixer: 足して当て、外して戻った・失敗した
                 if (m_options.autoMixer && m_editor && m_editor->Mixer().AutoFinished())
+                    break;
+
+                // --auto-copy: 写しの早送りを本物と比べ終えた・失敗した(写しを作るのに 10 秒を超えることがあるので、--frames は上限)
+                if (m_options.autoCopy && m_worldCopy.AutoFinished())
                     break;
 
                 // 環境ミキサーの「世界を作り直す」(T-0453): この世界を終え、RunFrameLoop が今の表で作り直す
@@ -2379,6 +2428,15 @@ namespace bicameral::frame {
 
             if (m_options.autoPatch)
                 Log(Channel::Sim, Level::Info, "--auto-patch: {}。OK", m_editor->Patch().AutoSummary());
+
+            if (m_options.autoCopy && !m_worldCopy.AutoPassed()) {
+                Log(Channel::Sim, Level::Error, "--auto-copy: 写しの早送りの確かめが通らなかった({})",
+                    m_worldCopy.AutoSummary().empty() ? "終わらなかった" : m_worldCopy.AutoSummary());
+                return 1;
+            }
+
+            if (m_options.autoCopy)
+                Log(Channel::Sim, Level::Info, "--auto-copy: OK");
 
             if (m_options.autoReload && (!m_autoReload || !m_autoReload->Done())) {
                 Log(Channel::Tool, Level::Error, "--auto-reload: ホットリロードの確かめが通らなかった({})",
