@@ -245,14 +245,18 @@ bicameral_add_gpu_test_case(gpu_reaction_limits_warp gpu_reaction_test warp --wa
 
 bicameral_add_gpu_test(gpu_multires_test)  # 多重解像度の入れ子の GPU と CPU のビット一致(T-0017)
 target_link_libraries(gpu_multires_test PRIVATE bicameral_sim)
-# HW は鎖の場面(gpu_multires)と溢れの場面の 4 つの組(gpu_multires_wide_*)に分ける: debug の GPU-based validation で 1 本では 1200 s に届いた
+# HW は鎖の場面の 3 つの組(gpu_multires・_stress・_limits)と溢れの場面の 6 つの組(gpu_multires_wide_*)に分ける: debug の GPU-based validation で 1 本では 1200 s に届いた
 # (T-0124・T-0263)。debug は 2 回目の実行と計測も省く(鎖の場面 約 400 s)。溢れの場面は GBV を切る(debug layer と FX_ASSERT は残る):
 # GBV ありの debug では 1 場面 210〜290 s × 7 で 1200 s に入らない・切ると 7 場面で約 80 s(2026-10-11。release は元から GBV なし)。
 # 溢れの場面を 1 本(gpu_multires_wide)で流すと 285〜1148 s かかり、GPU の順番待ち(D-460)で他のランナーを長く止めたので、
 # 1 本を 10 分に収めるよう 6 つの組(1 組 3 場面まで)に分けた(T-0426。組の中身は gpu_multires_test の RunWideScenes の上。
 # CPU リファレンスとの比べ方は変えていない)。重いのは場面ごとの Work Graph の作成で、CPU が混むと 1 つ 100〜380 s になるので上限は 900 s
-bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute --part chains)
-set_tests_properties(gpu_multires PROPERTIES TIMEOUT 1200)
+# 鎖の場面も 3 つの組に分ける(debug の HW で 1 本 441〜777 s だった。T-0426): 本物の鎖・影の鎖(release は計測も)/ たくさんの要求 /
+# 粗くすると入りきらない子・上限(溢れなし)
+bicameral_add_gpu_test_case(gpu_multires gpu_multires_test gpu --queue compute --part chains-real)
+bicameral_add_gpu_test_case(gpu_multires_stress gpu_multires_test gpu --queue compute --part chains-stress)
+bicameral_add_gpu_test_case(gpu_multires_limits gpu_multires_test gpu --queue compute --part chains-limits)
+set_tests_properties(gpu_multires gpu_multires_stress gpu_multires_limits PROPERTIES TIMEOUT 900)
 foreach(_part limits overflow many many_conduct coarsen uniform)
   string(REPLACE "_" "-" _arg "wide-${_part}")
   bicameral_add_gpu_test_case(gpu_multires_wide_${_part} gpu_multires_test gpu --queue compute --part ${_arg} --no-gbv)
@@ -270,9 +274,12 @@ bicameral_add_gpu_test_case(gpu_multires_implicit_warp gpu_multires_implicit_tes
 set_tests_properties(gpu_multires_implicit gpu_multires_implicit_warp PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test(gpu_multires_implicit_tree_test)  # 木につないだ陰解法の系を GPU で解いて CPU とビット一致(T-0127)
 target_link_libraries(gpu_multires_implicit_tree_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_multires_implicit_tree gpu_multires_implicit_tree_test gpu --queue compute)
+# HW は場面で 2 本に(1 本 270〜894 s だった。T-0426): 熱い点・鎖 / たくさんの要求。WARP は 1 本 120〜305 s なので 1 本のまま
+bicameral_add_gpu_test_case(gpu_multires_implicit_tree gpu_multires_implicit_tree_test gpu --queue compute --scene hot,chain)
+bicameral_add_gpu_test_case(gpu_multires_implicit_tree_stress gpu_multires_implicit_tree_test gpu --queue compute --scene stress)
 bicameral_add_gpu_test_case(gpu_multires_implicit_tree_warp gpu_multires_implicit_tree_test warp --warp --queue compute)
-set_tests_properties(gpu_multires_implicit_tree gpu_multires_implicit_tree_warp PROPERTIES TIMEOUT 1200)
+set_tests_properties(gpu_multires_implicit_tree gpu_multires_implicit_tree_stress gpu_multires_implicit_tree_warp
+  PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test(gpu_multires_implicit_build_test)  # 陰解法の系(未知数・境のセル・面)を GPU で作って CPU とビット一致(T-0129)
 target_link_libraries(gpu_multires_implicit_build_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_implicit_build gpu_multires_implicit_build_test gpu --queue compute)
@@ -309,9 +316,14 @@ target_link_libraries(gpu_multires_conduction_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_conduction gpu_multires_conduction_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_multires_conduction_warp gpu_multires_conduction_test warp --warp --queue compute)
 set_tests_properties(gpu_multires_conduction gpu_multires_conduction_warp PROPERTIES TIMEOUT 900)  # debug で活性のグラフの作成に数分
-bicameral_add_gpu_test_case(gpu_multires_subcycle gpu_multires_conduction_test gpu --queue compute --subcycle)  # 細かいレベルの熱の刻み(T-0109)
-bicameral_add_gpu_test_case(gpu_multires_subcycle_warp gpu_multires_conduction_test warp --warp --queue compute --subcycle)
-set_tests_properties(gpu_multires_subcycle gpu_multires_subcycle_warp PROPERTIES TIMEOUT 2400)  # CPU の小刻み 64 回が重い
+# 細かいレベルの熱の刻み(T-0109)。CPU の小刻み 64 回が重いので、鎖とたくさんの要求の 2 本に分ける(1 本 621〜1163 s だった。T-0426)
+bicameral_add_gpu_test_case(gpu_multires_subcycle gpu_multires_conduction_test gpu --queue compute --subcycle --scenes chain)
+bicameral_add_gpu_test_case(gpu_multires_subcycle_stress gpu_multires_conduction_test gpu --queue compute --subcycle --scenes stress)
+bicameral_add_gpu_test_case(gpu_multires_subcycle_warp gpu_multires_conduction_test warp --warp --queue compute --subcycle --scenes chain)
+bicameral_add_gpu_test_case(gpu_multires_subcycle_stress_warp gpu_multires_conduction_test warp --warp --queue compute --subcycle
+  --scenes stress)
+set_tests_properties(gpu_multires_subcycle gpu_multires_subcycle_stress gpu_multires_subcycle_warp
+  gpu_multires_subcycle_stress_warp PROPERTIES TIMEOUT 1200)
 bicameral_add_gpu_test_case(gpu_multires_near_fold gpu_multires_conduction_test gpu --queue compute --near-fold)  # 許容差つきで畳む(T-0112)
 bicameral_add_gpu_test_case(gpu_multires_near_fold_warp gpu_multires_conduction_test warp --warp --queue compute --near-fold)
 set_tests_properties(gpu_multires_near_fold gpu_multires_near_fold_warp PROPERTIES TIMEOUT 2400)  # 静かになるまで約 2000 刻み
