@@ -41,7 +41,7 @@
 
     PxBody body = g_bodies[i];
     body.active = PxIsActiveAt(body, CurrentTick());
-    body = PxInitializeBody(body, PxStepRate(g_parameters[0]), g_parameters[0].gravity);
+    body = PxInitializeBody(body, PxStepRate(g_parameters[0]), CurrentGravity());
     g_bodies[i] = body;
     g_touchMass[i] = PxTouchMass(body);
     g_incidentCounts[i] = 0;

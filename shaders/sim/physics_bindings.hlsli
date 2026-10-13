@@ -65,6 +65,10 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_solveEntry;  // physics_graph.hlsl の SolveBodyNode の入口の番号(Initialize が色ごとの GPU の入力に書く)
     uint32_t g_colorBodiesLow;  // u12 の GPU の仮想アドレス
     uint32_t g_colorBodiesHigh;
+    // 重力(2^-20 m/s²。PxParameters::gravity と同じ単位)。刻みごとに替えられるように t0 でなくルート定数で渡す
+    // (環境の値のホットリロード。表の差し替えの刻みから新しい重力。T-0444)
+    uint32_t g_gravityLow;
+    uint32_t g_gravityHigh;
 };
 
 // --- 色ごとの GPU の入力(D3D12_NODE_GPU_INPUT: 入口・レコードの数・レコードのアドレスと間隔、24 バイト)---
@@ -93,6 +97,11 @@ uint32_t ManifoldIndex(uint32_t manifoldHalf, uint32_t slot) {
 
 uint64_t CurrentTick() {
     return ((uint64_t)g_tickHigh << 32) | (uint64_t)g_tickLow;
+}
+
+// 今の刻みの重力(2^-20 m/s²。ルート定数。T-0444)
+int64_t CurrentGravity() {
+    return (int64_t)(((uint64_t)g_gravityHigh << 32) | (uint64_t)g_gravityLow);
 }
 
 void Flag(uint32_t bit) {

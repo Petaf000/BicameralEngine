@@ -28,7 +28,9 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "common/world_physics.hlsli"
@@ -43,6 +45,8 @@ namespace bicameral::sim {
         uint32_t molarMass = 0;       // mg/mol(04 §2)
         uint32_t heatCapacity = 0;    // mJ/(mol·K)。断熱では定積のモル比熱 c_v(定圧の分 R は押し出す仕事で入る。T-0234)
         int64_t formationEnergy = 0;  // H0(J/mol = µJ/µmol)。セルのエネルギー = 熱 + Σ 物質量 × H0
+
+        [[nodiscard]] bool operator==(const GasSpecies&) const = default;
     };
 
     // 軸ごとの境界(両端とも同じ)
@@ -99,6 +103,8 @@ namespace bicameral::sim {
         GasReconstruction reconstruction = GasReconstruction::MonotonizedCentral;
         bool stochasticRounding = true;  // 移す物質量の端数を決定的な乱数で丸める(R6)。false は切り捨て(G1)
         uint64_t randomSeed = 0;         // 丸めの乱数の種(世界のシード。R6)
+
+        [[nodiscard]] bool operator==(const GasConfig&) const = default;
     };
 
     // 音速の基準の上限(mm/s。器の決まり。ADR-0176): 安定の条件 ν = c̃ Δt_小刻み ÷ Δx ≤ 0.6(Δx = 0.5 m・Δt_小刻み = 1/60 s ÷ 小刻み)。
@@ -191,6 +197,18 @@ namespace bicameral::sim {
 
     // 箱を作る: 全部のセルを層の基準 + 風の速度で埋める
     [[nodiscard]] GasBox MakeGasBox(const GasConfig& config, std::vector<GasCell> reference);
+
+    // --- 環境の値のホットリロード(T-0444・ADR-0194。world_physics.h)---
+
+    // 今の箱の設定 current を next に替えられるか。違ってよいのは環境の値(重力・音速の基準)だけ(箱の形・物質・小刻み・境界・風・
+    // 丸めは世界の作り)。音速の基準は 0 にできない(気体の箱に要る)・小刻みの安定の上限まで、重力は器の上限まで。外なら理由
+    [[nodiscard]] std::expected<void, std::string> CheckGasEnvironment(const GasConfig& current, const GasConfig& next);
+
+    // 箱の環境を替える: 設定・係数・層の基準(reference。新しい重力・基準の大気で MakeHydrostaticReference が作ったもの)と、
+    // そこから導く値・開いた境界の外・α・頭打ちの温度を作り直す。状態(セル・帳簿・刻み)はそのまま(保存量に触れない)なので、
+    // 新しい重力・基準と釣り合っていない分は次の刻みから流れになる。刻みの境目(StepGas の間)で呼ぶ。
+    // 呼ぶ側の約束: CheckGasEnvironment(box.config, config) が通る・reference は sizeZ 層。GPU は GpuGas::RecordEnvironment
+    void SetGasEnvironment(GasBox& box, const GasConfig& config, std::vector<GasCell> reference);
 
     // セルから導く値(層 z の基準を使う)
     [[nodiscard]] GasDerived DeriveGasCell(const GasBox& box, const GasCell& cell, uint32_t z);

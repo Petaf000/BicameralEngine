@@ -8,7 +8,9 @@
 //   - 最後の抽出の物の欄と、読み戻した物が CPU の物と一致。物理の統計の overflow が 0
 //   - debug layer のエラーとシェーダーの assert が 0 件
 // 物理の単位の GPU 時間(タイムスタンプ)をログに出す(docs/perf.md)。
-// 引数: gpu_test_options.h(--warp)と --ticks n(進める刻み。既定 240)
+// --gravity-swap(T-0444・環境の値のホットリロード): 刻み GRAVITY_SWAP_TICK に、環境の重力だけ月にした表へ差し替える
+//   (ProbeTableSwap + 表の印のコマンド。窓のホットリロードと同じ道)。CPU は同じ刻みの Step の前に PhysicsWorld::SetGravity。
+// 引数: gpu_test_options.h(--warp)と --ticks n(進める刻み。既定 240)・--gravity-swap
 #include <algorithm>
 #include <charconv>
 #include <format>
@@ -42,9 +44,15 @@ namespace {
     struct TestConfig {
         uint64_t ticks = 240;
         bool computeBroadphase =
-            false;          // --broadphase-compute: 広域の選別を Compute で(既定は ProbeSim と同じ Work Graph)
-        bool noise = true;  // 2 回目に別のキューの雑音と重い単位を流すか(WARP では重すぎるので流さない)
+            false;                 // --broadphase-compute: 広域の選別を Compute で(既定は ProbeSim と同じ Work Graph)
+        bool noise = true;         // 2 回目に別のキューの雑音と重い単位を流すか(WARP では重すぎるので流さない)
+        bool gravitySwap = false;  // --gravity-swap: 刻み GRAVITY_SWAP_TICK に重力を月にした表へ差し替える(T-0444)
     };
+
+    constexpr uint64_t GRAVITY_SWAP_TICK = 60;     // 1 回目と 2 回目の押しの間
+    constexpr uint32_t MOON_GRAVITY = 1620000;     // µm/s²
+    constexpr uint64_t GRAVITY_SWAP_VERSION = 1;   // 表の印の版(記録しないので値は何でもよい)
+    constexpr uint32_t GRAVITY_SWAP_SEQUENCE = 3;  // 押すコマンドの後ろの番号
 
     constexpr int64_t METER = int64_t{1} << 20;
     constexpr int32_t UNIT = 1 << 30;                                  // Q1.30 の 1
@@ -105,11 +113,15 @@ namespace {
         std::vector<PhysicsBody> finalBodies;
     };
 
-    Expected RunReference(const PhysicsScene& scene, uint64_t ticks) {
+    // swapped: 刻み GRAVITY_SWAP_TICK から当てる表(nullptr なら差し替えない)。重力は表の環境の値から(ProbeSim と同じ)
+    Expected RunReference(const PhysicsScene& scene, uint64_t ticks, const BakedReactionTable* swapped) {
         Expected expected;
         PhysicsWorld world(scene,
                            PhysicsParametersFor(StandardWorldPhysics()));  // サンプルの世界と同じ標準の重力(D-480)
         for (uint64_t tick = 0; tick < ticks; ++tick) {
+            if (swapped != nullptr && tick == GRAVITY_SWAP_TICK)
+                world.SetGravity(PhysicsGravityFor(swapped->environment));
+
             for (const Push& push : PUSHES) {
                 if (push.tick != tick)
                     continue;
@@ -182,11 +194,17 @@ namespace {
         GpuRun(ID3D12Device5* device, const TestConfig& config, bool second)
             : m_device(device), m_config(config), m_second(second) {}
 
-        Run Execute(const BakedReactionTable& table, const PhysicsScene& scene) {
+        Run Execute(const BakedReactionTable& table, const PhysicsScene& scene, const BakedReactionTable* swapped) {
             if (!Create(table, scene))
                 return std::move(m_run);
 
-            const std::vector<ProbeCommand> commands = MakePushCommands();
+            std::vector<ProbeCommand> commands = MakePushCommands();
+            const ProbeTableSwap swap{.tick = GRAVITY_SWAP_TICK, .table = swapped};
+            if (swapped != nullptr) {
+                commands.push_back(MakeTableCommand(GRAVITY_SWAP_TICK, GRAVITY_SWAP_SEQUENCE, GRAVITY_SWAP_VERSION));
+                rng::sort(commands, CommandPrecedes);
+            }
+
             const std::span<const uint32_t> frameUnits = m_second ? std::span<const uint32_t>(SMALL_FRAME_UNITS)
                                                                   : std::span<const uint32_t>(FRAME_UNITS);
             const uint64_t totalUnits = m_config.ticks * m_unitsPerTick;
@@ -196,6 +214,8 @@ namespace {
                 const auto units = static_cast<uint32_t>(
                     std::min<uint64_t>(frameUnits[frame % frameUnits.size()], totalUnits - position));
                 const bool last = position + units == totalUnits;
+                const uint64_t swapUnit = GRAVITY_SWAP_TICK * m_unitsPerTick;
+                const bool swapHere = swapped != nullptr && swapUnit >= position && swapUnit < position + units;
                 const ProbeFrameInput input{
                     .firstTick = position / m_unitsPerTick,
                     .firstUnit = static_cast<uint32_t>(position % m_unitsPerTick),
@@ -203,7 +223,9 @@ namespace {
                     .extract = m_second || last,  // 2 回目は窓と同じく毎フレーム(刻みの途中でも)抽出する
                     .extractionTarget = last ? 0 : frame % PROBE_EXTRACTION_COUNT,
                     .commands = frame == 0 ? std::span<const ProbeCommand>(commands) : std::span<const ProbeCommand>(),
-                    .readPhysics = last};
+                    .readPhysics = last,
+                    .tableSwaps = swapHere ? std::span<const ProbeTableSwap>(&swap, 1)
+                                           : std::span<const ProbeTableSwap>()};
 
                 if (!SubmitFrame(frame, input))
                     return std::move(m_run);
@@ -435,6 +457,7 @@ namespace {
     std::optional<TestConfig> ParseConfig(std::vector<char*>& arguments, std::optional<test::GpuTestOptions>& options) {
         TestConfig config{.ticks = TakeTicks(arguments, 240)};
         config.computeBroadphase = TakeFlag(arguments, "--broadphase-compute");
+        config.gravitySwap = TakeFlag(arguments, "--gravity-swap");
         options = test::ParseGpuTestOptions(std::span(arguments));
         if (!options || config.ticks <= PUSHES.back().tick)
             return std::nullopt;
@@ -491,7 +514,8 @@ int main(int argc, char** argv) {
     const auto table = BakeReactionTable(MakeCombustionTestTable());
     if (!config || !options || !table) {
         Log(Channel::Sim, Level::Error,
-            "使い方: gpu_probe_physics_test [--warp] [--ticks n(> {})] [--broadphase-compute]", PUSHES.back().tick);
+            "使い方: gpu_probe_physics_test [--warp] [--ticks n(> {})] [--broadphase-compute] [--gravity-swap]",
+            PUSHES.back().tick);
         bicameral::SingletonFinalizer::Finalize();
 
         return 2;
@@ -512,9 +536,16 @@ int main(int argc, char** argv) {
     Log(Channel::Sim, Level::Info, "仮の世界に積み木(物 {})を入れて {} 刻み。刻み {} と {} に押す", scene.bodies.size(),
         config->ticks, PUSHES[0].tick, PUSHES[1].tick);
 
-    const Expected expected = RunReference(scene, config->ticks);
-    const Run first = GpuRun(device->Get(), *config, false).Execute(*table, scene);
-    const Run second = GpuRun(device->Get(), *config, true).Execute(*table, scene);
+    // --gravity-swap: 環境の重力だけ月にした表(物質の一覧は同じ)
+    BakedReactionTable moonTable = *table;
+    moonTable.environment.gravityMicrometersPerSecond2 = MOON_GRAVITY;
+    const BakedReactionTable* swapped = config->gravitySwap ? &moonTable : nullptr;
+    if (swapped != nullptr)
+        Log(Channel::Sim, Level::Info, "刻み {} に重力 {} µm/s² の表へ差し替える", GRAVITY_SWAP_TICK, MOON_GRAVITY);
+
+    const Expected expected = RunReference(scene, config->ticks, swapped);
+    const Run first = GpuRun(device->Get(), *config, false).Execute(*table, scene, swapped);
+    const Run second = GpuRun(device->Get(), *config, true).Execute(*table, scene, swapped);
     const int failures = Judge(first, second, expected, config->ticks);
 
     const bool passed = failures == 0 && test::PassesValidation(*device, "gpu_probe_physics_test");

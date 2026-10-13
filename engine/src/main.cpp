@@ -54,6 +54,8 @@
 //   --species-remap                  --auto-reload で、物質を足す・消す表の段(オゾンを足す・消す)も確かめる(T-0242。ホットリロードは
 //                                    エディタでも通常の起動でも既定で物質を足す・消す表も当てる。D-438・T-0266)
 //                                    (--auto-reload は --editor なしでもよい〔T-0243〕。--record と使い、--replay でハッシュ列を確かめる。T-0195)
+//   --auto-reload-environment        --auto-reload で、速度を直す時に環境の重力も月の値にする(差し替えの刻みから物理の重力が替わる。
+//                                    --check-physics と一緒に。T-0444)
 //   --auto-place                     筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずの置くコマンドが全部
 //                                    当たったかを確かめる(--editor と一緒に。T-0222)
 //   --auto-patch                     魔法のパッチのパネルで実験室に止めるパッチを置き、止めた反応が進まない・仮の世界に投げた
@@ -356,6 +358,8 @@ namespace {
             loop.autoReload = true;
         else if (argument == L"--species-remap")
             loop.speciesRemap = true;
+        else if (argument == L"--auto-reload-environment")
+            loop.autoReloadEnvironment = true;
         else if (argument == L"--auto-table-edit")
             loop.autoTableEdit = true;
         else if (argument == L"--auto-mixer")

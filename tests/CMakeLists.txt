@@ -349,8 +349,8 @@ bicameral_add_gpu_test(gpu_gas_test)  # 気体の流れの GPU と CPU の毎刻
 target_link_libraries(gpu_gas_test PRIVATE bicameral_sim)
 # GPU の順番待ち(D-460)に合わせて場面を 2 組に分ける(T-0426。1 本 10 分以内。比べ方は同じ)。release の WARP の目安(2026-10-12):
 # 箱の組(閉じた箱・泡・重さの違い)約 390 秒・流れの組(風・管・爆発・熱いセル〔T-0269〕・静止大気の重さの違い)約 360 秒(2026-10-13 の T-0269 の後: 箱 513 秒・流れ 359 秒。負荷あり)
-set(GPU_GAS_BOX_SCENES closed,periodic,single_layer,static,bubble,closed_zero_gravity,closed_moon,closed_max_gravity,bubble_zero_gravity)
-set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal,blast,hot_cell,blast_hot,static_moon,static_max_gravity)
+set(GPU_GAS_BOX_SCENES closed,periodic,single_layer,static,bubble,closed_zero_gravity,closed_moon,closed_max_gravity,bubble_zero_gravity,closed_environment_change)
+set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal,blast,hot_cell,blast_hot,static_moon,static_max_gravity,open_environment_change)
 bicameral_add_gpu_test_case(gpu_gas gpu_gas_test gpu --queue compute --scene ${GPU_GAS_BOX_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_flow gpu_gas_test gpu --queue compute --scene ${GPU_GAS_FLOW_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_BOX_SCENES})
@@ -378,6 +378,9 @@ bicameral_add_gpu_test_case(gpu_physics_stack_alternative gpu_physics_test gpu -
 # 重力を変えた世界(T-0423・D-480): 無重力(積んだまま動かない)・月・上限 100 m/s² で GPU と CPU がビット一致
 bicameral_add_gpu_test_case(gpu_physics_stack_zero_gravity gpu_physics_test gpu --scene stack --gravity 0 --ticks 300)
 bicameral_add_gpu_test_case(gpu_physics_pile_moon gpu_physics_test gpu --scene pile --gravity 1620000)
+# 環境の値のホットリロード(T-0444): 落ちている途中で無重力 → 月 → 上限 100 m/s² に替えても GPU と CPU がビット一致
+bicameral_add_gpu_test_case(gpu_physics_pile_gravity_change gpu_physics_test gpu --scene pile
+                            --gravity-change 40:0,80:1620000,120:100000000 --ticks 180)
 bicameral_add_gpu_test_case(gpu_physics_stack_max_gravity gpu_physics_test gpu --scene stack --gravity 100000000 --ticks 600)
 
 # 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
@@ -435,6 +438,8 @@ target_link_libraries(gpu_probe_physics_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_physics gpu_probe_physics_test gpu)
 bicameral_add_gpu_test_case(gpu_probe_physics_warp gpu_probe_physics_test warp --warp --ticks 120)
 bicameral_add_gpu_test_case(gpu_probe_physics_compute gpu_probe_physics_test gpu --broadphase-compute)
+# 環境の値のホットリロード(T-0444): 表の差し替えの刻みから物理の重力が替わり、CPU の物理(同じ刻みに SetGravity)とビット一致
+bicameral_add_gpu_test_case(gpu_probe_physics_gravity_swap gpu_probe_physics_test gpu --gravity-swap)
 
 # 巻き戻し(T-0143): 保存点へ写して戻し、コマンドを足し直すと最初から流した時と同じハッシュ列
 bicameral_add_gpu_test(gpu_probe_rewind_test)
@@ -624,6 +629,24 @@ set_tests_properties(window_hot_reload_game_record PROPERTIES LABELS gpu TIMEOUT
   FIXTURES_REQUIRED window_hot_reload_game_packages FIXTURES_SETUP window_hot_reload_game)
 set_tests_properties(window_hot_reload_game_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_hot_reload_game
   PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ へ差し替える\\(改造された世界\\).*再生: OK")
+# 環境の値のホットリロード(T-0444・ADR-0194): --auto-reload で速度を直す時に環境の重力も月にする。差し替えの刻みから物理の重力が替わり、
+# --check-physics(CPU の物理も同じ刻みに重力を替える)と食い違わない(食い違うと「物理の突き合わせ」の行が出る)。
+# 再生は写しのフォルダが無くても再生ファイルの表だけで、同じ刻みに重力が替わって同じハッシュ列になる
+set(WINDOW_GRAVITY_RELOAD_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/gravity_reload_packages)
+set(WINDOW_GRAVITY_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_gravity_reload.bcreplay)
+add_test(NAME window_gravity_reload_copy
+         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_GRAVITY_RELOAD_PACKAGES})
+add_test(NAME window_gravity_reload_record
+         COMMAND bicameral --world sample --auto-reload --auto-reload-environment --check-physics
+                 --packages ${WINDOW_GRAVITY_RELOAD_PACKAGES} --frames 3000 --record ${WINDOW_GRAVITY_RELOAD_FILE})
+add_test(NAME window_gravity_reload_play
+         COMMAND bicameral --replay ${WINDOW_GRAVITY_RELOAD_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
+set_tests_properties(window_gravity_reload_copy PROPERTIES FIXTURES_SETUP window_gravity_reload_packages)
+set_tests_properties(window_gravity_reload_record PROPERTIES LABELS gpu TIMEOUT 600
+  FIXTURES_REQUIRED window_gravity_reload_packages FIXTURES_SETUP window_gravity_reload
+  PASS_REGULAR_EXPRESSION "から重力を 1620000 .*--auto-reload: 刻み [0-9]+ まで流した" FAIL_REGULAR_EXPRESSION "物理の突き合わせ")
+set_tests_properties(window_gravity_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FIXTURES_REQUIRED window_gravity_reload
+  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*から重力を 1620000 .*再生: OK")
 # 反応表のパネル(T-0219): 写したパッケージの木の燃焼の速さをパネルの書き戻しで変える → ホットリロードで当たる
 # → 元に戻す(ファイルは元の中身)→ 元の版の表に戻って終える(editor/reaction_table_panel。通らなければ終了コード 1)
 set(WINDOW_TABLE_EDIT_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/table_edit_packages)

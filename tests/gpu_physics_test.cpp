@@ -8,6 +8,8 @@
 //   --scene wall: れんが 300 個の壁(1 つの大きな島)
 //   --keep-empty-colors: 使わない色の解も投げる(述語で飛ばさない。T-0094 の比べる用)
 //   --profile: CPU とは比べず、2 回目の実行でパスの種類ごとの GPU 時間(タイムスタンプ)を出す(T-0092)
+//   --gravity-change 刻み:µm/s²[,刻み:µm/s²...]: その刻みの始めから重力を替える(環境の値のホットリロード。T-0444)。
+//     GPU は GpuPhysics::SetGravity、CPU は PhysicsWorld::SetGravity を同じ刻みの境目で呼ぶ
 #include "sim/gpu_physics.h"
 #include "core/aliases.h"
 #include "core/log.h"
@@ -20,6 +22,12 @@
 #include "sim/physics_world.h"
 #include "sim/world_physics.h"
 #include "standard_world_physics.h"
+
+#include <ranges>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 using namespace bicameral;
 using namespace bicameral::physics;
@@ -41,8 +49,18 @@ namespace {
         bool broadphaseGraph = true;
         sim::GpuPhysicsSolver solver = sim::GpuPhysicsSolver::Compute;
         bool skipEmptyColors = true;
-        sim::WorldPhysics world = sim::StandardWorldPhysics();  // 世界の重力(--gravity µm/s²。T-0423)
+        sim::WorldPhysics world = sim::StandardWorldPhysics();      // 世界の重力(--gravity µm/s²。T-0423)
+        std::vector<std::pair<uint64_t, uint32_t>> gravityChanges;  // (刻み, その刻みからの重力 µm/s²)。T-0444
     };
+
+    // 刻み tick の始めに替える重力があれば当てる(GpuPhysics と PhysicsWorld のどちらにも)
+    template <typename Physics>
+    void ApplyGravityChange(Physics& physics, const PhysicsTestOptions& options, uint64_t tick) {
+        for (const auto& [changeTick, gravity] : options.gravityChanges) {
+            if (changeTick == tick)
+                physics.SetGravity(sim::PhysicsGravityFor({.gravityMicrometersPerSecond2 = gravity}));
+        }
+    }
 
     struct GpuRun {
         std::vector<uint64_t> hashes;  // 区間の終わりごと
@@ -166,8 +184,10 @@ namespace {
             initialize = false;
 
             const uint64_t end = std::min(tickCount, physics.Tick() + options.segmentTicks);
-            while (physics.Tick() < end)
+            while (physics.Tick() < end) {
+                ApplyGravityChange(physics, options, physics.Tick());
                 physics.RecordStep(list, debugRing.GpuAddress());
+            }
 
             physics.RecordReadback(list);
             debugRing.RecordReadbackAndReset(list);
@@ -190,8 +210,10 @@ namespace {
             if (world == nullptr)
                 continue;
 
-            while (world->Tick() < end)
+            while (world->Tick() < end) {
+                ApplyGravityChange(*world, options, world->Tick());
                 world->Step();
+            }
 
             if (world->StateHash() != run.hashes.back()) {
                 ReportFirstDifference(world->Bodies(), bodies);
@@ -209,6 +231,20 @@ namespace {
 
     sim::GpuPhysicsSolver ParseSolver(std::string_view name) {
         return name == "graph" ? sim::GpuPhysicsSolver::Graph : sim::GpuPhysicsSolver::Compute;
+    }
+
+    // 「刻み:µm/s²」をカンマで並べたもの
+    bool ParseGravityChanges(std::string_view text, std::vector<std::pair<uint64_t, uint32_t>>& changes) {
+        for (const auto part : std::views::split(text, ',')) {
+            const std::string item(part.begin(), part.end());
+            const size_t colon = item.find(':');
+            if (colon == std::string::npos)
+                return false;
+
+            changes.emplace_back(std::stoull(item.substr(0, colon)), (uint32_t)std::stoul(item.substr(colon + 1)));
+        }
+
+        return !changes.empty();
     }
 
     std::optional<PhysicsTestOptions> TakePhysicsOptions(std::vector<char*>& arguments) {
@@ -238,7 +274,10 @@ namespace {
                 options.segmentTicks = std::max<uint64_t>(1, std::stoull(std::string(value)));
             else if (name == "--gravity")
                 options.world.gravityMicrometersPerSecond2 = (uint32_t)std::stoul(std::string(value));
-            else {
+            else if (name == "--gravity-change") {
+                if (!ParseGravityChanges(value, options.gravityChanges))
+                    return std::nullopt;
+            } else {
                 ++index;
                 continue;
             }
@@ -252,6 +291,11 @@ namespace {
 
         if (options.world.gravityMicrometersPerSecond2 > fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)
             return std::nullopt;
+
+        for (const auto& change : options.gravityChanges) {
+            if (change.second > fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)
+                return std::nullopt;
+        }
 
         return options;
     }
@@ -279,7 +323,9 @@ namespace {
         if (!physicsOptions || !options) {
             Log(Channel::Physics, Level::Error,
                 "使い方: gpu_physics_test [--warp] [--queue direct|compute] [--scene stack|mass_ratio|pile|wall] "
-                "[--ticks n] [--segment n] [--gravity µm/s²] [--broadphase compute|graph] [--solver compute|graph] "
+                "[--ticks n] [--segment n] [--gravity µm/s²] [--gravity-change 刻み:µm/s²,...] [--broadphase "
+                "compute|graph] "
+                "[--solver compute|graph] "
                 "[--keep-empty-colors] [--profile]");
             return 2;
         }

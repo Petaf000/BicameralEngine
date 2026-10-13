@@ -127,6 +127,9 @@ Luau は CPU で動く。GPU の世界に効くものは「表にベイクして
 - **環境の値(T-0400・ADR-0176)**: 分類 `environment` に 1 つの鍵 = 1 つの値で書く(`gravity_um_per_s2`・`sound_speed_mm_per_s`。整数・単位は鍵の名前・
   書かない値は 0 = ブランク)。`script::ReadWorldEnvironment` → ベイクした表の `environment`(`sim::WorldPhysics`)→ 物理の重力・気体の設定。
   反応表と同じ読み込みなので表の版・再生ファイルの表の中身に入る。サンプルの世界は `combustion_test/environment.luau`(地球の値)。
+  ホットリロード(T-0444・ADR-0194): 差し替えた表の環境の値は、差し替えの刻みの境目から物理(`ProbeSim::ApplyEnvironment` →
+  `GpuPhysics::SetGravity`。CPU は `PhysicsWorld::SetGravity`)と気体(`SetGasEnvironment`・`GpuGas::RecordEnvironment`。世界に載せる T-0210 から)に当たる。
+  状態はそのまま(法則だけ替わる。仮)。器の範囲の外は `script::CheckHotReloadCompatible`(`sim::CheckWorldPhysics`)が理由付きで当てない。
   基準の大気(成分・温度・地面の圧力)は大気の成分と一緒に T-0373 で足す。
 - **基準の大気(T-0373・ADR-0182)**: 成分は分類 `atmosphere`(物質 → ppm。足して 1000000)、温度と地面の圧力は `environment` の
   `atmosphere_temperature_mk`・`atmosphere_surface_pressure_pa`。`script::ReadWorldAtmosphere` → `sim::BakeWorldAtmosphere`(知らない物質・

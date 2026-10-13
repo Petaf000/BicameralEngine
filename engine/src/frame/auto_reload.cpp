@@ -34,6 +34,11 @@ namespace bicameral::frame {
         constexpr std::string_view OZONE = "ozone";
         constexpr uint64_t RUN_TICKS_AFTER_SPECIES = 10;  // 物質を足した・消した表で流す刻み
 
+        // 環境の値のホットリロード(T-0444): environment.luau の重力を月の値(1.62 m/s²)に
+        constexpr std::string_view ENVIRONMENT_FILE = "combustion_test/environment.luau";
+        constexpr std::string_view GRAVITY_BEFORE = "gravity_um_per_s2 = 9806650";
+        constexpr std::string_view GRAVITY_AFTER = "gravity_um_per_s2 = 1620000";
+
         std::expected<std::string, std::string> ReadWhole(const fs::path& file) {
             std::ifstream input(file, std::ios::binary);
             if (!input)
@@ -44,7 +49,8 @@ namespace bicameral::frame {
 
     }  // namespace
 
-    std::expected<AutoReload, std::string> AutoReload::Create(const fs::path& packageRoot, bool withSpecies) {
+    std::expected<AutoReload, std::string> AutoReload::Create(const fs::path& packageRoot, bool withSpecies,
+                                                              bool withEnvironment) {
         const fs::path file = packageRoot / PACKAGE_FILE;
         auto read = ReadWhole(file);
         if (!read)
@@ -76,8 +82,35 @@ namespace bicameral::frame {
             added.insert(anchor, OZONE_SPECIES);
         }
 
-        return AutoReload(file, std::move(original), std::move(edited), speciesFile, std::move(*species),
+        AutoReload result(file, std::move(original), std::move(edited), speciesFile, std::move(*species),
                           std::move(added));
+        if (!withEnvironment)
+            return result;
+
+        // --- 重力を月にした中身(T-0444)---
+        result.m_environmentFile = packageRoot / ENVIRONMENT_FILE;
+        auto environment = ReadWhole(result.m_environmentFile);
+        if (!environment)
+            return std::unexpected(environment.error());
+
+        const size_t gravity = environment->find(GRAVITY_BEFORE);
+        if (gravity == std::string::npos)
+            return std::unexpected(std::format("--auto-reload: {} に書き換える所({})が無い",
+                                               result.m_environmentFile.string(), GRAVITY_BEFORE));
+
+        result.m_environmentOriginal = *environment;
+        result.m_environmentEdited = std::move(*environment);
+        result.m_environmentEdited.replace(gravity, GRAVITY_BEFORE.size(), GRAVITY_AFTER);
+
+        return result;
+    }
+
+    // 環境の重力を月にする(edited)/ 元に戻す。環境を替えない時は何もしない(T-0444)
+    void AutoReload::WriteEnvironment(bool edited) {
+        if (m_environmentEdited.empty())
+            return;
+
+        WriteFile(m_environmentFile, edited ? m_environmentEdited : m_environmentOriginal);
     }
 
     void AutoReload::WriteFile(const fs::path& file, const std::string& text) {
@@ -138,6 +171,7 @@ namespace bicameral::frame {
                     return;
 
                 Write(m_original);
+                WriteEnvironment(false);
                 if (m_stage == Stage::RemoveApplied)
                     m_stage = Stage::Done;
 
@@ -180,6 +214,7 @@ namespace bicameral::frame {
                     tables.LastMessage());
                 m_stage = Stage::Edited;
                 Write(m_edited);
+                WriteEnvironment(true);
                 return;
 
             case Stage::Edited:
@@ -204,6 +239,7 @@ namespace bicameral::frame {
 
                 if (m_speciesAdded.empty()) {
                     Write(m_original);
+                    WriteEnvironment(false);
                     if (m_stage == Stage::Swapped)
                         m_stage = Stage::Done;
 

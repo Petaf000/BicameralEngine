@@ -30,7 +30,8 @@ namespace bicameral::script {
         Remap,  // 名前で付け替えて当てる(sim::BuildSpeciesRemap が通る表なら。世界・覗き窓・実験室〔T-0242〕。エディタは --species-remap の時)
     };
 
-    // 新しい表を今の世界に当てられるか: 物質の一覧(名前・並び = ID・元素の組み立て)が同じなら当てられる。
+    // 新しい表を今の世界に当てられるか: 環境の値(重力・音速の基準)が器の範囲(sim::CheckWorldPhysics。差し替えの刻みから物理と
+    // 気体に当たる。T-0444)で、物質の一覧(名前・並び = ID・元素の組み立て)が同じなら当てられる。
     // 違うとき、Reject なら当てない(足した・消した物質の名前を理由に書く)。Remap なら当てられる(消す物質は元素に分けて戻し、
     // 単体の無い元素の原子は捨てて報告する。D-484・sim/species_remap.h)
     [[nodiscard]] std::expected<void, std::string> CheckHotReloadCompatible(

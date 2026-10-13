@@ -900,6 +900,84 @@ namespace {
         }
     }
 
+    // --- 環境の値のホットリロード(T-0444・ADR-0194)---
+
+    // 新しい環境(重力・音速の基準)で層の基準を作り直して当てる(基準の大気は同じ)
+    void ChangeEnvironment(GasBox& box, uint32_t gravity, uint32_t soundSpeed) {
+        GasConfig next = box.config;
+        WorldPhysics world{.gravityMicrometersPerSecond2 = gravity, .soundSpeedMillimetersPerSecond = soundSpeed};
+        ApplyWorldPhysics(world, next);
+        EXPECT(CheckGasEnvironment(box.config, next).has_value());
+        SetGasEnvironment(box, next,
+                          MakeHydrostaticReference(next, AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE));
+    }
+
+    // 器が受けられない環境は理由を返す(音速の基準 0・安定の上限の外・重力の上限の外・箱の作りが違う)
+    void TestEnvironmentCheck() {
+        const GasConfig current = MakeDisturbedClosedBox().config;
+        GasConfig next = current;
+        next.gravityMicrometersPerSecond2 = MOON_GRAVITY;
+        next.soundSpeedMmPerS = 300000;
+        EXPECT(CheckGasEnvironment(current, next).has_value());
+
+        next.soundSpeedMmPerS = 0;
+        EXPECT(!CheckGasEnvironment(current, next).has_value());
+
+        next.soundSpeedMmPerS = (uint32_t)GasSoundSpeedLimitMmPerS(current.substeps) + 1;
+        const auto overLimit = CheckGasEnvironment(current, next);
+        EXPECT(!overLimit.has_value());
+        if (!overLimit)
+            std::printf("environment check: %s\n", overLimit.error().c_str());
+
+        next.soundSpeedMmPerS = 300000;
+        next.gravityMicrometersPerSecond2 = fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2 + 1;
+        EXPECT(!CheckGasEnvironment(current, next).has_value());
+
+        GasConfig resized = current;
+        resized.sizeZ += 1;
+        EXPECT(!CheckGasEnvironment(current, resized).has_value());
+    }
+
+    // 同じ値を当て直しても結果は変わらない / 違う値は差し替えの刻みから効き、保存則はそのまま / 静止大気は新しい重力で動き出す
+    void TestEnvironmentChange() {
+        GasBox unchanged = MakeDisturbedClosedBox();
+        GasBox same = unchanged;
+        GasBox changed = unchanged;
+        const GasTotals before = SumGas(unchanged);
+        Run(unchanged, 20);
+        Run(same, 20);
+        Run(changed, 20);
+        EXPECT(HashGas(changed) == HashGas(unchanged));
+
+        ChangeEnvironment(same, same.config.gravityMicrometersPerSecond2, same.config.soundSpeedMmPerS);
+        ChangeEnvironment(changed, MOON_GRAVITY, 300000);
+        EXPECT(changed.coefficients.gravityImpulse < unchanged.coefficients.gravityImpulse);
+        Run(unchanged, 20);
+        Run(same, 20);
+        Run(changed, 20);
+        EXPECT(HashGas(same) == HashGas(unchanged) && same.ledger.energy == unchanged.ledger.energy);
+        EXPECT(HashGas(changed) != HashGas(unchanged));
+
+        const GasTotals after = SumGas(changed);
+        for (uint32_t s = 0; s < changed.config.speciesCount; ++s)
+            EXPECT(after.amounts[s] == before.amounts[s]);
+
+        EXPECT(after.energy == before.energy + changed.ledger.energy);
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            EXPECT(after.momentum[axis] == before.momentum[axis] + changed.ledger.momentum[axis]);
+
+        // 静止大気(標準の重力で釣り合った層)を無重力にすると、層の重さの差がほどけて動き出す
+        GasBox still = MakeAirBox(MakeAirConfig(4, 4, 16));
+        Run(still, 10);
+        const int64_t stillSpeed = MaxSpeed(still);
+        ChangeEnvironment(still, 0, still.config.soundSpeedMmPerS);
+        Run(still, 30);
+        EXPECT(stillSpeed <= 1 && MaxSpeed(still) > 1000);
+        std::printf("environment change: closed box gravity work %lld -> %lld mJ, still air max speed %lld -> %lld\n",
+                    (long long)unchanged.ledger.energy, (long long)changed.ledger.energy, (long long)stillSpeed,
+                    (long long)MaxSpeed(still));
+    }
+
 }  // namespace
 
 int main() {
@@ -923,6 +1001,8 @@ int main() {
     TestStrongPressureStable();
     TestHydrostaticScalesWithGravity();
     TestClosedBoxAnyGravity();
+    TestEnvironmentCheck();
+    TestEnvironmentChange();
 
     if (failureCount != 0) {
         std::printf("gas_reference_test: %d failure(s)\n", failureCount);

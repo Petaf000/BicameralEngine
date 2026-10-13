@@ -7,6 +7,8 @@
 //   → 物質を足す(species.luau にオゾンを足す。後ろの物質の ID がずれる)→ 差し替わってオゾンが表にあるのを見て流す
 //   → 物質を消す(オゾンの無い中身に戻す)→ 差し替わってオゾンが無くなったのを見て流す(T-0242・ADR-0065)
 //   → 元の中身に戻して終える(Done)。
+//   withEnvironment(--auto-reload-environment。T-0444): 速度を直す時に環境(combustion_test/environment.luau)の重力も月の値にする
+//   (差し替えの刻みから物理の重力が替わる)。終える時に元の中身に戻す。
 // 記録(--record)と一緒に使い、記録の再生(--replay。表の中身は再生ファイルにある。T-0193)でハッシュ列が一致するかを
 // 別の起動で確かめる(ctest window_hot_reload_*)。書き換えるのは --packages で渡した写しだけ(ゲーム本体のデータは書かない)。
 #pragma once
@@ -25,7 +27,8 @@ namespace bicameral::frame {
         // packageRoot の中の試験のパッケージ(combustion_test/reactions.luau)を書き換える準備。読めない・書き換える所が無ければ error
         // withSpecies: 速度の書き換えの後に物質を足す・消す段も(--species-remap。T-0242)
         [[nodiscard]] static std::expected<AutoReload, std::string> Create(const fs::path& packageRoot,
-                                                                           bool withSpecies = false);
+                                                                           bool withSpecies = false,
+                                                                           bool withEnvironment = false);
 
         // 毎フレーム。tick は世界の次に投げる刻み
         void Update(uint64_t tick, const TableHotReload& tables);
@@ -58,6 +61,7 @@ namespace bicameral::frame {
               m_speciesAdded(std::move(speciesAdded)) {}
 
         void Write(const std::string& text) { WriteFile(m_file, text); }
+        void WriteEnvironment(bool edited);
         void WriteFile(const fs::path& file, const std::string& text);
         void UpdateSpecies(uint64_t tick, const TableHotReload& tables);
         [[nodiscard]] bool WaitApplied(uint64_t tick, const TableHotReload& tables, uint32_t count, bool hasOzone);
@@ -69,6 +73,9 @@ namespace bicameral::frame {
         fs::path m_speciesFile;  // 物質を足す・消す所(combustion_test/species.luau。T-0242)
         std::string m_speciesOriginal;
         std::string m_speciesAdded;  // オゾンを足した中身(空 = 物質を足す・消す段をしない)
+        fs::path m_environmentFile;  // 重力を替える所(combustion_test/environment.luau。T-0444)
+        std::string m_environmentOriginal;
+        std::string m_environmentEdited;  // 重力を月にした中身(空 = 環境は替えない)
         Stage m_stage = Stage::Start;
         uint64_t m_swapTick = 0;  // 差し替わったのを見た刻み
         std::string m_failure;
