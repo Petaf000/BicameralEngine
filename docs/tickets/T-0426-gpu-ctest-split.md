@@ -1,6 +1,6 @@
 # T-0426 GPU の ctest を順番待ちに合う大きさに分け直す
 
-- Status: In Progress
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -96,17 +96,51 @@ GPU を使う試験は全部のランナーで 1 本ずつ(D-460)なので、1 �
    (188.2・**一番安い積み方 454.3**)/ WARP none,blocks 332.7 s(237.6・94.9)/ WARP levels,cheapest 397.6 s(205.8・191.6)。
    HW の levels,cheapest が 10 分を超えたので、HW を 3 本に: gpu_multires_implicit_conduction(none,blocks)・
    gpu_multires_implicit_conduction_squeeze(levels)・**gpu_multires_implicit_conduction_cheapest(cheapest。新しい名前)**。WARP は 2 本のまま。
+11. **WARP では伝導の段の Work Graph 版を外す(debug も)**(2026-10-13 その 3・t-0426c): debug の gpu_multires_subcycle_warp・_stress_warp が
+   「(活性・Work Graph)刻み 0: GPU での実行に失敗」(DXGI_ERROR_DRIVER_INTERNAL_ERROR)で落ちた。分けたのとは関係なく、分けていない
+   gpu_multires_conduction_warp(debug)も同じ所で落ちる。今までは release の WARP だけ落ちていた(HANDOFF の注意)。debug の WARP で最後に通ったのは
+   2026-10-06(その後 debug の WARP では流していなかった。間のどの変更からかは**未特定**。候補は伝導の hlsli を触った 852172c〔T-0272〕)。
+   gpu_multires_conduction_test の RunAll で、Work Graph 版を「release の WARP」ではなく「WARP 全部」で外した(ハードウェアは debug・release とも Work Graph 版も比べる)。
+12. **implicit_conduction を形 × 場面に分け直した**: debug の HW は 1 つの形(6 回の場面)で 900 s を超え(3 本とも Timeout)、1 場面(全部・活性)で 300〜340 s。
+   gpu_multires_implicit_conduction_test に `--scenes hot,chain,stress` を足し、HW は形 × 場面の 12 本・WARP は形ごとの 4 本(計測〔release の HW〕は none の 3 本だけ):
+   | 形 | HW 熱い点(名前の後ろなし) | HW _chain | HW _stress | WARP _warp |
+   |---|---|---|---|---|
+   | none(gpu_multires_implicit_conduction) | debug 347.6 / release 124.4 | 357.1 / 129.2 | 477.7 / 147.8 | 361.5 / 206.8 |
+   | _blocks | 333.4 / 66.6 | 345.7 / 69.5 | 523.9 / 82.3 | 300.7 / 96.9 |
+   | _levels | 308.3 / 65.5 | 342.5 / 67.6 | 547.3 / 83.4 | 458.9 / 193.1 |
+   | _cheapest | 298.2 / 63.5 | 319.3 / 66.4 | 435.9 / 74.7 | 334.0 / 194.6 |
+   (秒。2026-10-13〜14・待ち 0 秒。release は T-0427 のパイプラインの使い回しの後で、前の 543〜643 s から大きく減った。debug の HW は刻みの GPU の仕事が大半)
+13. **gpu_gas の流れの組を 2 つに**: 流れの組が debug の WARP で 629.8 s(T-0444 で環境の変化の場面が増えた)。gpu_gas_flow(風・管・音・衝撃波)と
+   **gpu_gas_blast**(爆発・熱いセル・静止大気の重さ・開いた環境の変化)。WARP も同じ(gpu_gas_blast_warp)。
+14. **debug の秒**(2026-10-13〜14。wt5 のランナー・GPU の待ち 0 秒。release の秒は上の 6〜10・12):
+   | 名前 | debug(秒) |
+   |---|---|
+   | gpu_multires / _stress / _limits | 254.1 / 153.7 / 229.0 |
+   | gpu_multires_warp / gpu_multires_wide_warp | 49.8 / 225.4 |
+   | gpu_multires_wide_limits / _overflow / _many / _many_conduct / _coarsen / _uniform | 96.2 / 95.6 / 151.2 / 185.0 / 110.8 / 71.8(T-0427 の後) |
+   | gpu_multires_implicit_tree / _stress / _warp | 571.7 / 157.6 / 167.8(T-0427 の前) |
+   | gpu_multires_subcycle / _stress(HW) | 169.7 / 358.2 |
+   | gpu_multires_subcycle_warp / _stress_warp | 252.6 / 448.3(Work Graph 版を外した後) |
+   | gpu_multires_conduction_warp | 106.9 |
+   | gpu_gas / gpu_gas_warp | 389.0 / 504.2(release 35.9 / 339.9) |
+   | gpu_gas_flow / gpu_gas_flow_warp(分けた後) | 284.1 / 325.8(release 26.3 / 245.6) |
+   | gpu_gas_blast / gpu_gas_blast_warp | 224.5(1 回目は static_moon で「LLVM ERROR: out of memory」で落ちた。流し直しで通った) / 287.5(release 15.9 / 222.6) |
+   | gpu_probe_sim / _tables / _warp / _tables_warp | 315.3 / 190.3 / 336.1 / 214.0 |
+   10 分に近いのは implicit_tree(debug 572 s。T-0427 の前の値)・implicit_conduction の _stress(debug 436〜547 s)。CPU が混むと延びる。
 
 ### HANDOFF に写す「試験の名前の一覧の変化」(T-0426 全体)
 - 消えた名前: gpu_multires_wide(→ gpu_multires_wide_limits / _overflow / _many / _many_conduct / _coarsen / _uniform)。
 - 足した名前: gpu_multires_wide_{limits,overflow,many,many_conduct,coarsen,uniform}・gpu_multires_wide_warp・gpu_multires_stress・gpu_multires_limits・
-  gpu_multires_implicit_conduction_squeeze(+_warp)・gpu_multires_implicit_conduction_cheapest(HW だけ)・gpu_multires_implicit_tree_stress・gpu_multires_subcycle_stress(+_warp)・
-  gpu_gas_flow(+_warp)・gpu_probe_sim_tables(+_warp)。
-- 名前は同じで中身が減った: gpu_multires(鎖の本物・影だけ)・gpu_multires_warp(鎖だけ)・gpu_multires_implicit_conduction(+_warp。none,blocks だけ)・
-  gpu_multires_implicit_conduction_squeeze(HW は levels だけ。WARP は levels,cheapest)・
+  gpu_multires_implicit_conduction_{chain,stress}・gpu_multires_implicit_conduction_{blocks,levels,cheapest}(+_chain・_stress・_warp)・
+  gpu_multires_implicit_tree_stress・gpu_multires_subcycle_stress(+_warp)・gpu_gas_flow(+_warp)・gpu_gas_blast(+_warp)・gpu_probe_sim_tables(+_warp)。
+- 消えた名前(T-0426 の途中で一度入れたもの): gpu_multires_implicit_conduction_squeeze(+_warp)。
+- 名前は同じで中身が減った: gpu_multires(鎖の本物・影だけ)・gpu_multires_warp(鎖だけ)・gpu_multires_implicit_conduction(形 none の熱い点だけ)・
+  gpu_multires_implicit_conduction_warp(形 none だけ)・
   gpu_multires_implicit_tree(HW は熱い点・鎖だけ)・gpu_multires_subcycle(+_warp。鎖だけ)・gpu_gas(+_warp。箱だけ)・gpu_probe_sim(+_warp。framings だけ)。
 - `-Filter` の目安: 鎖 `^gpu_multires(_stress|_limits|_warp)?$`・溢れ `^gpu_multires_wide`・陰解法 `^gpu_multires_implicit`・
-  小刻み `^gpu_multires_subcycle`・気体 `^gpu_gas(_flow)?(_warp)?$`(`^gpu_gas` は gpu_gas_tree なども当たる)。
+  小刻み `^gpu_multires_subcycle`・気体 `^gpu_gas(_flow|_blast)?(_warp)?$`(`^gpu_gas` は gpu_gas_tree なども当たる)。
+- 振る舞いの変化: WARP の gpu_multires_conduction_warp・subcycle(_stress)_warp は、伝導の段の Work Graph 版を debug でも流さない(上の 11)。
+  HANDOFF の「release の WARP では伝導の段の Work Graph 版で…」の注意を「WARP では(debug も)」に直す。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-12(wt5・t-0426): 調べた(ctest の TIMEOUT は待ちを含まない・ジョブの上限が含む・重いのは Work Graph の作成)。gpu_multires_wide を 6 本・
@@ -120,17 +154,13 @@ GPU を使う試験は全部のランナーで 1 本ずつ(D-460)なので、1 �
   gpu_multires(鎖)を 3 本・implicit_tree(HW)を 2 本・subcycle(HW・WARP)を 2 本ずつ・implicit_conduction の HW の squeeze を 2 本に分けた。
   release の新しい 10 本も通った(秒は 7〜9。cheapest の分け直しは release のビルドだけで、流していない)。release の 1 本の最長は wide_coarsen 443 s・
   implicit_conduction 543 s・cheapest(分ける前の形で 454 s)。**debug はビルドだけで、まだ流していない**(GPU の順番待ちが 1 回 10〜25 分で、2 時間に入らなかった)。
+- 2026-10-13〜14 その 3(wt5・t-0426c): debug の結果から、WARP の伝導の Work Graph 版が debug でも落ちる(分け方とは無関係)ので WARP 全部で外し、
+  implicit_conduction を形 × 場面の 16 本・gpu_gas の流れの組を 2 本に分けた。debug・release で残りの組を全部流し、1 本 10 分以内を確かめた
+  (秒は 12・14。gpu_gas_blast の debug は 1 回目に「LLVM ERROR: out of memory」で落ち、流し直しで 224.5 s で通った。一度きり・未再現)。チケットを閉じた。
 
 ## 続き(次の作業役へ)
-1. **debug で全部を流して秒を表に足す**(10 分を超えた組はさらに分ける)。2026-10-13 その 2 の終わりに wt5 のランナーへ投げた debug の試験の結果を見る
-   (runner/logs の 2026-10-13 18 時台〔日本時間〕以降の `*-test.log`。`-Show` 付きなので場面ごとの秒が出ている):
-   `'^gpu_multires(_stress|_limits)?$|^gpu_multires_implicit_tree'`・`'^gpu_multires_subcycle|^gpu_multires_implicit_conduction'`。
-   まだ流していない debug の組: `'^gpu_multires_(wide|warp)'`・`'^gpu_gas(_flow)?(_warp)?$|^gpu_probe_sim(_tables)?(_warp)?$'`。
-2. release の gpu_multires_implicit_conduction_cheapest を 1 回流す(分けた後の形。約 460 s の見込み)。
-3. release でも 10 分に近いもの: implicit_conduction(none,blocks)543 s・wide_coarsen 443 s・cheapest 454 s。CPU が混むと 1.5〜2 倍になるので、
-   debug で 10 分を超えたら場面か形で分ける(wide_coarsen は「粗くする和集合」206 s が重い。implicit_conduction は計測 約 183 s を別にもできる)。
-   wide_many(1 場面 314 s)はこれ以上分けられない。重さは HW の場面ごとの Work Graph の作成(1 場面 約 50 s・WARP は数秒)で、T-0427 が直せば全部軽くなる。
-4. Work Graph の作成が遅い原因は T-0427(研究。wt3)。
+- なし(閉じた)。次に見るもの: debug の WARP で伝導の段の Work Graph 版が落ちるようになった変更の特定(未特定。WARP の JIT の不具合と推定。
+  直すならハードウェアの Work Graph 版は通っているので WARP 側の回避の研究。BACKLOG 行き)・10 分に近い implicit_tree(debug)を T-0427 の後で測り直す。
 
 ## 判断待ち
 - なし(ユーザーの判断が要るものは無い。試験の名前が変わったことは統合の時に HANDOFF へ)。
