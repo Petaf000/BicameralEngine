@@ -1190,7 +1190,10 @@ namespace bicameral::sim {
     }
 
     std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table) {
-        return {table.SpeciesId("oxygen"), table.SpeciesId("carbon_dioxide"), table.SpeciesId("carbon")};
+        static_assert(PROBE_VIEW_SPECIES_COUNT == VIEW_QUANTITY_SLOT_COUNT);
+        const auto& slots = table.templates.viewQuantities;
+
+        return {slots[0].species, slots[1].species, slots[2].species};
     }
 
     // --- CPU リファレンス ---

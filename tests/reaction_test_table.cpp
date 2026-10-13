@@ -56,6 +56,32 @@ namespace bicameral::sim {
         return std::move(*definition);
     }
 
+    void PruneMaterialTemplates(ReactionTableDefinition& definition) {
+        const auto known = [&](const std::string& name) {
+            return std::ranges::contains(definition.species, name, &SpeciesDefinition::name);
+        };
+
+        // --- 消えた物質を指す材料・抽出の枠と、消えた材料を指す既定 ---
+        MaterialTemplateDefinition& templates = definition.templates;
+        std::erase_if(templates.materials, [&](const MaterialDefinition& material) {
+            return !std::ranges::all_of(material.contents,
+                                        [&](const MaterialAmountDefinition& amount) { return known(amount.species); });
+        });
+        for (auto& slot : templates.viewQuantities) {
+            if (slot && !known(slot->species))
+                slot.reset();
+        }
+
+        const auto materialKnown = [&](const std::string& key) {
+            return key.empty() || std::ranges::contains(templates.materials, key, &MaterialDefinition::key);
+        };
+        if (!materialKnown(templates.editor.placeMaterial))
+            templates.editor.placeMaterial.clear();
+
+        if (!materialKnown(templates.editor.labFill))
+            templates.editor.labFill.clear();
+    }
+
     ReactionTableDefinition MakeSpeciesChangedTestTable() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.species.push_back({.name = "hydrogen",
@@ -75,6 +101,8 @@ namespace bicameral::sim {
         });
         definition.worldLayout =
             {};  // 世界の組み立て(T-0398)は木箱のセルロースを指すので空にする(この表で初めの世界は作らない)
+
+        PruneMaterialTemplates(definition);
 
         return definition;
     }

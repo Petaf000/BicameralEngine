@@ -675,10 +675,10 @@ namespace bicameral::editor {
         if (failure.empty())
             failure = RunAutoLabExperiment(lab, true, stoppedLeft);
 
-        const auto material = rng::find_if(lab.Materials(), [](const sim::LabMaterial& m) { return m.name == "木"; });
+        const sim::LabMaterial* material = sim::FindLabMaterial(lab.Materials(), "wood");
         const uint32_t cellulose = m_table->SpeciesId("cellulose");
         uint64_t placed = 0;
-        if (material != lab.Materials().end()) {
+        if (material != nullptr) {
             for (const sim::SpeciesAmount& amount : material->contents)
                 placed += amount.species == cellulose ? amount.amount * 8 : 0;
         }
@@ -714,10 +714,10 @@ namespace bicameral::editor {
 
         const sim::BakedReactionTable& table = session.Table();
         const uint32_t cellulose = table.SpeciesId("cellulose");
-        const auto material = rng::find_if(lab.Materials(), [](const sim::LabMaterial& m) { return m.name == "木"; });
+        const sim::LabMaterial* material = sim::FindLabMaterial(lab.Materials(), "wood");
         const std::vector<uint32_t> rules = RulesConsuming(*m_table,
                                                            m_table->SpeciesId("cellulose"));  // パネルの表の ID
-        if (material == lab.Materials().end() || rules.empty() || rules.size() >= reaction::MP_MAX_PATCHES)
+        if (material == nullptr || rules.empty() || rules.size() >= reaction::MP_MAX_PATCHES)
             return std::format("表に木かセルロースを使う規則が無い(規則 {} 個)", rules.size());
 
         // --- 箱全体を酸素の多い 200 kPa の空気に・真ん中に木を 8 セル(--auto-lab と同じ)---

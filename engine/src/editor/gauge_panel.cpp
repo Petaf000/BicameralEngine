@@ -361,8 +361,8 @@ namespace bicameral::editor {
 
         sim::LabSession& session = *lab.Session();
         const auto& materials = lab.Materials();
-        const auto wood = std::ranges::find_if(materials, [](const sim::LabMaterial& m) { return m.name == "木"; });
-        if (wood == materials.end())
+        const sim::LabMaterial* wood = sim::FindLabMaterial(materials, "wood");
+        if (wood == nullptr)
             return std::unexpected("木の材料が無い");
 
         // --- A: 木を置いて火を付ける(グラフの値 = 読み戻した GPU の箱)---

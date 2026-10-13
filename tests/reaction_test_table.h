@@ -16,6 +16,10 @@ namespace bicameral::sim {
     // 試験のパッケージの表の定義(元素 5・物質 8〔仮の魔素 mana_test を含む。T-0225〕・規則 7)
     [[nodiscard]] ReactionTableDefinition MakeCombustionTestTable();
 
+    // 物質を消した定義から、消えた物質を指す材料のひな形・抽出の枠・既定を除く(ベイクが知らない物質で落ちないように。
+    // T-0399・T-0398 の共有の決め事 4)。試験の中で物質を消したら呼ぶ
+    void PruneMaterialTemplates(ReactionTableDefinition& definition);
+
     // 物質を足す・消す差し替えの試験用(T-0223・T-0242): 試験の表に水素(H2)とオゾン(O3)を足し、セルロースとそれを使う規則を消した表
     // (物質の数が 8 → 9 に変わる。仮の魔素は残る)。水素・オゾンの後ろの物質の ID がずれ、セルロースは炭・水素・酸素の単体に分かれる
     // (ADR-0065)。試験のパッケージそのものは変えない

@@ -648,7 +648,7 @@ namespace {
             SpeciesAmount{.species = oxygen, .amount = AmountOf(air, oxygen) / HEAT_THINNING},
             SpeciesAmount{.species = nitrogen, .amount = AmountOf(air, nitrogen) / HEAT_THINNING}};
 
-        return MakeLabFillRegionCommand(0, sequence, LabWholeBox(shape), thin, LAB_INITIAL_TEMPERATURE_MILLIKELVIN);
+        return MakeLabFillRegionCommand(0, sequence, LabWholeBox(shape), thin, table.templates.temperatureMilliKelvin);
     }
 
     // レベル level の辺 edge セルの格子で、熱い点 hot からの超過エネルギーの 2 次のモーメント(そのレベルのセルの辺の 2 乗。
@@ -729,7 +729,7 @@ namespace {
                 continue;
 
             const reaction::RxCell cell = MakeReactionCell(table, material.contents,
-                                                           LAB_INITIAL_TEMPERATURE_MILLIKELVIN);
+                                                           table.templates.temperatureMilliKelvin);
             std::printf("・%.*s %d", static_cast<int>(material.name.size()), material.name.data(), baseOf(cell));
         }
 

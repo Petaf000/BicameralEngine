@@ -158,9 +158,10 @@ namespace bicameral::editor {
         int m_shift = 4;       // 2^shift
         int m_joulesPerMol = 20000;
         int m_durationTicks = 60;
-        bool m_corners = false;                      // 範囲を両端の角で(false = 中心 + 半幅)
-        bool m_picking = false;                      // 左クリックのセルを中心に
-        std::array<int, 3> m_center = {28, 32, 32};  // 仮の世界の木箱の壁(--auto-ignite の火)
+        bool m_corners = false;  // 範囲を両端の角で(false = 中心 + 半幅)
+        bool m_picking = false;  // 左クリックのセルを中心に
+        // 格子の真ん中(エンジンは世界の中身を知らない。T-0399。前は仮の世界の木箱の壁 28,32,32)
+        std::array<int, 3> m_center = {32, 32, 32};
         std::array<int, 3> m_halfCells = {3, 3, 3};
         std::array<int, 3> m_low = {0, 0, 0};
         std::array<int, 3> m_high = {7, 7, 7};

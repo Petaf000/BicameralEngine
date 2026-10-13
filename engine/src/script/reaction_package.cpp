@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "script/material_templates_package.h"
 #include "script/package_fields.h"
 #include "script/world_layout_package.h"
 
@@ -351,6 +352,12 @@ namespace bicameral::script {
             return std::unexpected(worldLayout.error());
 
         definition.worldLayout = std::move(*worldLayout);
+
+        auto templates = ReadMaterialTemplates(packages);
+        if (!templates)
+            return std::unexpected(templates.error());
+
+        definition.templates = std::move(*templates);
 
         return definition;
     }

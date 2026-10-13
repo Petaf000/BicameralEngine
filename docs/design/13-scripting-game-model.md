@@ -113,13 +113,17 @@ Luau は CPU で動く。GPU の世界に効くものは「表にベイクして
   なる(世界はまだ空)。今の世界は `--world sample`(空気の中の木箱・積み木・ゲーム本体 combustion_test)。再生ファイルは世界の種類
   (`save::ReplayWorld` の Sample = 1・Blank = 2。形式の版は同じ)を持ち、`--replay` はそれで起動する。試験: blank_world(CPU)・
   gpu_probe_blank(_warp)・window_blank_record/play。今の窓の試験は `--world sample` を明示する。
-  サンプルの世界の中身はまだ C++ にある(材料のひな形・抽出の物質は T-0399、気体の環境の値は T-0400)。
+  サンプルの世界の中身はまだ C++ にある(気体の環境の値は T-0400)。
 - **世界の組み立て(T-0398・ADR-0172)**: 初めのセルと物は、パッケージの分類 `world_cells`(領域: 物質 → µmol・温度・箱〔省けば格子の全部〕・
   殻の厚さ・重ねる順 layer)・`world_bodies`(直方体: mm・g・番号の順 order)に書く(script/world_layout_package・sim/world_layout)。
   反応表と同じ読み込みなので表の版と中身に入り、再生ファイルは表の中身だけから同じ初めの世界を作る。分類が無ければ空(ブランク)。
   窓の世界は `--world` に依らず読んだ表の組み立てから作る(`sim::MakeProbeInitialWorld`・`sim::MakeLayoutPhysicsScene`)。
   サンプルの木箱と積み木は combustion_test の world_cells.luau・world_bodies.luau(前の C++ とビット一致。world_layout_test)。
   ほかの分類(材料のひな形・環境の値)も同じ形で足す(T-0398 のチケットの「共有の決め事」)。
+- **実装(T-0399・ADR-0174)**: 材料のひな形・抽出の物質・実験室と置く操作の既定はパッケージの分類 `material_templates`・`view_quantities`・
+  `editor_defaults`(反応表と同じ読み込み・同じ表の版。読む所 script/material_templates_package・ベイク sim::BakeMaterialTemplates・
+  型 data/types/bicameral.d.luau)。分類が無ければ材料は 0 個・実験室の箱は空のセル・抽出の物質は 0 番(ブランクの世界)。
+  サンプルの値は data/packages/combustion_test の material_templates.luau・view_quantities.luau・editor_defaults.luau。
 
 ## 3. 進行(Model)
 - 進行の状態 = GPU の小さなバッファ: フラグ(ビット列)・カウンタ(int32)・発見の記録(何を・いつ・どこで)。

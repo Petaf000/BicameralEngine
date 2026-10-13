@@ -99,7 +99,7 @@ namespace bicameral::editor {
             Cylinder,
         };
 
-        [[nodiscard]] const sim::LabMaterial* FindMaterial(std::string_view name) const;
+        [[nodiscard]] const sim::LabMaterial* FindMaterial(std::string_view key) const;  // 鍵で
         [[nodiscard]] sim::ProbePlaceShape MakeShape(const BrushCell& center) const;
         [[nodiscard]] BrushExtents Extents() const;
         [[nodiscard]] uint32_t TemperatureMilliKelvin() const;
@@ -126,7 +126,7 @@ namespace bicameral::editor {
         int m_halfZ = 2;        // 直方体の z の半幅
         int m_halfLength = 2;   // 円柱の軸の向きの半幅
         int m_axis = 1;         // 円柱の軸(0 = x・1 = y〔縦〕・2 = z)
-        size_t m_preset = 1;    // ひな形(m_materials の添字。初めは木)
+        size_t m_preset = 0;    // ひな形(m_materials の添字。初めはパッケージの place_material)
         MaterialRows m_rows{};
         int m_temperatureKelvin = 300;
         bool m_replace = true;     // 置き換え(実験室の「置く」と同じ。D-439)か、足すか

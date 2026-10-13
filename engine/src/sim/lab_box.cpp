@@ -20,19 +20,6 @@ namespace bicameral::sim {
 
     namespace {
 
-        // --- 材料の量(1 セル = 0.5 m 角 = 0.125 m³。仮の世界の初めの世界と同じ値。sim/probe_sim.cpp)---
-        constexpr uint64_t AIR_OXYGEN_MICROMOLES = 1063800;
-        constexpr uint64_t AIR_NITROGEN_MICROMOLES = 4014200;
-        constexpr uint64_t AIR_TOTAL_MICROMOLES = AIR_OXYGEN_MICROMOLES + AIR_NITROGEN_MICROMOLES;
-        // 木: 体積の 1 割が木(密度 500 kg/m³ のセルロース)、残りは孔の中の空気
-        constexpr uint64_t WOOD_CELLULOSE_MICROMOLES = 38600000;
-        constexpr uint64_t PORE_OXYGEN_MICROMOLES = 983000;
-        constexpr uint64_t PORE_NITROGEN_MICROMOLES = 3697000;
-        // 木炭: 体積の 1 割が炭(密度 300 kg/m³ の炭素 = 3.75 kg ≒ 312 mol)、残りは孔の中の空気
-        constexpr uint64_t CHARCOAL_CARBON_MICROMOLES = 312000000;
-        // 仮の魔素(T-0225。試験用の仮の値): 空気の 1 割の物質量。筆で「足す」と、そのセルの木や炭に触媒として効く
-        constexpr uint64_t MANA_TEST_MICROMOLES = AIR_TOTAL_MICROMOLES / 10;
-
         constexpr uint32_t COMMAND_WORDS_PER_ENTRY = 3;
 
         // --- 量の換算(T-0220): µmol = p[Pa] × V[m³] × 10^6 ÷ (R[J/(mol·K)] × T[K])
@@ -317,34 +304,26 @@ namespace bicameral::sim {
 
     // --- 材料 ---
 
+    std::vector<SpeciesAmount> MaterialContents(const MaterialTemplate& material) {
+        std::vector<SpeciesAmount> contents;
+        for (const MaterialAmount& amount : material.contents)
+            contents.push_back({.species = amount.species, .amount = amount.micromoles});
+
+        return contents;
+    }
+
     std::vector<LabMaterial> MakeLabMaterials(const BakedReactionTable& table) {
-        const uint32_t oxygen = table.SpeciesId("oxygen");
-        const uint32_t nitrogen = table.SpeciesId("nitrogen");
-        const uint32_t cellulose = table.SpeciesId("cellulose");
-        const uint32_t carbon = table.SpeciesId("carbon");
-        const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
-        const uint32_t manaTest = table.SpeciesId("mana_test");
-
         std::vector<LabMaterial> materials;
-        const auto add = [&](std::string_view name, std::vector<SpeciesAmount> contents) {
-            const bool known = std::ranges::all_of(contents,
-                                                   [](const SpeciesAmount& entry) { return entry.species != 0; });
-            if (known)
-                materials.push_back({.name = name, .contents = std::move(contents)});
-        };
-
-        add("空気", {{oxygen, AIR_OXYGEN_MICROMOLES}, {nitrogen, AIR_NITROGEN_MICROMOLES}});
-        add("木", {{cellulose, WOOD_CELLULOSE_MICROMOLES},
-                   {oxygen, PORE_OXYGEN_MICROMOLES},
-                   {nitrogen, PORE_NITROGEN_MICROMOLES}});
-        add("木炭", {{carbon, CHARCOAL_CARBON_MICROMOLES},
-                     {oxygen, PORE_OXYGEN_MICROMOLES},
-                     {nitrogen, PORE_NITROGEN_MICROMOLES}});
-        add("二酸化炭素", {{carbonDioxide, AIR_TOTAL_MICROMOLES}});
-        add("窒素", {{nitrogen, AIR_TOTAL_MICROMOLES}});
-        add("魔素(試験)", {{manaTest, MANA_TEST_MICROMOLES}});
+        for (const MaterialTemplate& material : table.templates.materials)
+            materials.push_back({.key = material.key, .name = material.label, .contents = MaterialContents(material)});
 
         return materials;
+    }
+
+    const LabMaterial* FindLabMaterial(std::span<const LabMaterial> materials, std::string_view key) {
+        const auto found = std::ranges::find(materials, key, &LabMaterial::key);
+
+        return found != materials.end() ? &*found : nullptr;
     }
 
     // --- 箱 ---
@@ -389,19 +368,18 @@ namespace bicameral::sim {
     }
 
     MultiresNest MakeLabBoxNest(const BakedReactionTable& table, lab::LabBoxShape shape) {
-        const std::array<SpeciesAmount, 2> air = {
-            SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = AIR_OXYGEN_MICROMOLES},
-            SpeciesAmount{.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_MICROMOLES}};
-        // 表に空気の物質が無い(ブランクの世界など。T-0371)なら空のセルで満たす
-        const bool hasAir = air[0].species != 0 && air[1].species != 0;
-        const RxCell fill = hasAir ? MakeReactionCell(table, air, LAB_INITIAL_TEMPERATURE_MILLIKELVIN)
-                                   : RxMakeEmptyCell(0);
+        // パッケージの既定の材料と温度で満たす。書いていない(ブランクの世界など。T-0371・T-0399)なら空のセル
+        const MaterialTemplates& templates = table.templates;
+        const bool hasFill = templates.labFill.has_value();
+        const RxCell fill = hasFill ? MakeReactionCell(table, MaterialContents(templates.materials[*templates.labFill]),
+                                                       templates.temperatureMilliKelvin)
+                                    : RxMakeEmptyCell(0);
 
         // --- 頁を持たせるため、1 つだけ違うセルで根を置き(PlaceRootBlock は全部同じなら一様にする)、すぐ戻す。
         //     根は x → y → z の順に置く(空きのスタックから枠 0, 1, 2… が出る = lab::LabRootSlot)---
         MultiresNest nest = MakeMultiresNest(LabBoxCapacity(table, shape));
         std::vector<RxCell> cells(MR_BLOCK_CELLS, fill);
-        cells[0] = RxMakeEmptyCell(hasAir ? 0 : 1);
+        cells[0] = RxMakeEmptyCell(hasFill ? 0 : 1);
         for (uint32_t rootZ = 0; rootZ < shape.rootsZ; ++rootZ) {
             for (uint32_t rootY = 0; rootY < shape.rootsY; ++rootY) {
                 for (uint32_t rootX = 0; rootX < shape.rootsX; ++rootX) {

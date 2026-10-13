@@ -445,6 +445,12 @@ namespace bicameral::sim {
 
         baked.worldLayout = std::move(*layout);
 
+        auto templates = BakeMaterialTemplates(definition.templates, baked);
+        if (!templates)
+            return std::unexpected(templates.error());
+
+        baked.templates = std::move(*templates);
+
         return baked;
     }
 

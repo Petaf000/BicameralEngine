@@ -27,7 +27,7 @@ namespace bicameral::editor {
         // → 木の球に火を付ける(つつき)。当たるのは 5 つ
         struct AutoStroke {
             uint64_t frame;
-            std::string_view material;
+            std::string_view material;  // 材料の鍵(サンプルのパッケージの material_templates。T-0399)
             sim::ProbePlaceShape shape;
             bool expectApplied;
         };
@@ -38,27 +38,27 @@ namespace bicameral::editor {
 
         constexpr std::array<AutoStroke, 6> AUTO_STROKES = {{
             {.frame = 6,
-             .material = "木",
+             .material = "wood",
              .shape = {.x = AUTO_CENTER_X, .y = AUTO_CENTER_Y, .z = sim::PROBE_VIEW_Z, .radius = 3},
              .expectApplied = true},
             {.frame = 8,
-             .material = "木炭",
+             .material = "charcoal",
              .shape = {.x = AUTO_CENTER_X, .y = AUTO_CENTER_Y, .z = sim::PROBE_VIEW_Z, .radius = 1, .replace = false},
              .expectApplied = true},
             {.frame = 9,
-             .material = "魔素(試験)",
+             .material = "mana_test",
              .shape = {.x = AUTO_CENTER_X, .y = AUTO_CENTER_Y, .z = sim::PROBE_VIEW_Z, .radius = 2, .replace = false},
              .expectApplied = true},
             {.frame = 10,
-             .material = "二酸化炭素",
+             .material = "carbon_dioxide",
              .shape = {.x = 0, .y = 0, .z = 0, .radius = 0, .temperatureMilliKelvin = 900000},
              .expectApplied = true},
             {.frame = 12,
-             .material = "空気",
+             .material = "air",
              .shape = {.x = 63, .y = 63, .z = 40, .radius = sim::PROBE_PLACE_MAX_RADIUS, .replace = false},
              .expectApplied = true},
             {.frame = 14,
-             .material = "木",
+             .material = "wood",
              .shape = {.x = 40, .y = 10, .z = 10, .radius = sim::PROBE_PLACE_MAX_RADIUS + 1},
              .expectApplied = false},
         }};
@@ -109,7 +109,7 @@ namespace bicameral::editor {
         if (table == nullptr || (m_table != nullptr && version == m_tableVersion))
             return;
 
-        // --- 材料の行の物質 ID を名前で新しい表へ(初めの表なら木のひな形を読み込む)---
+        // --- 材料の行の物質 ID を名前で新しい表へ(初めの表ならパッケージの既定のひな形と温度を読み込む。T-0399)---
         const bool first = m_table == nullptr;
         if (!first)
             RemapMaterialRows(*m_table, *table, m_rows);
@@ -117,14 +117,20 @@ namespace bicameral::editor {
         m_table = std::move(table);
         m_tableVersion = version;
         m_materials = sim::MakeLabMaterials(*m_table);
-        if (first && m_preset < m_materials.size())
+        if (!first)
+            return;
+
+        const sim::MaterialTemplates& templates = m_table->templates;
+        m_preset = templates.placeMaterial.value_or(0);
+        if (templates.temperatureMilliKelvin > 0)
+            m_temperatureKelvin = templates.temperatureMilliKelvin / 1000;
+
+        if (m_preset < m_materials.size())
             LoadMaterialRows(m_materials[m_preset], m_rows);
     }
 
-    const sim::LabMaterial* BrushPanel::FindMaterial(std::string_view name) const {
-        const auto found = std::ranges::find(m_materials, name, &sim::LabMaterial::name);
-
-        return found != m_materials.end() ? &*found : nullptr;
+    const sim::LabMaterial* BrushPanel::FindMaterial(std::string_view key) const {
+        return sim::FindLabMaterial(m_materials, key);
     }
 
     // --- 形 ---
@@ -441,7 +447,7 @@ namespace bicameral::editor {
         std::vector<render::CellCoordinate> dragged;
         bool released = false;
         if (frame == AUTO_PAINT_BOX_FRAME) {
-            const sim::LabMaterial* wood = FindMaterial("木");
+            const sim::LabMaterial* wood = FindMaterial("wood");
             if (wood == nullptr)
                 return;
 
@@ -457,8 +463,8 @@ namespace bicameral::editor {
         } else if (frame == AUTO_PAINT_RELEASE_FRAME) {
             released = true;
         } else if (frame == AUTO_PAINT_CYLINDER_FRAME) {
-            const sim::LabMaterial* charcoal = FindMaterial("木炭");
-            const sim::LabMaterial* mana = FindMaterial("魔素(試験)");
+            const sim::LabMaterial* charcoal = FindMaterial("charcoal");
+            const sim::LabMaterial* mana = FindMaterial("mana_test");
             if (charcoal == nullptr || mana == nullptr)
                 return;
 
@@ -517,7 +523,7 @@ namespace bicameral::editor {
             return;
 
         m_autoSurfaceDone = true;
-        const sim::LabMaterial* wood = FindMaterial("木");
+        const sim::LabMaterial* wood = FindMaterial("wood");
         if (wood == nullptr)
             return;
 
