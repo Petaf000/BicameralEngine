@@ -1,6 +1,6 @@
 # T-0399 実験室・筆・パネルの材料のひな形と抽出の物質をパッケージから読む
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -45,3 +45,5 @@ sim::MakeLabMaterials(空気・木・木炭…)・実験室の空気で満たす
   実験室・筆・パネルの材料・実験室の箱を満たす空気と温度・抽出の物質・描画の色の幅をパッケージから読む形にした(ADR-0174)。
   release のビルド警告 0・CPU 22 本・window_lab/place/patch の 7 本・gpu_lab_box・gpu_probe_sim/place/peek・image_probe_volume/slice が通過。
   wt2 の欄の道具(073eca1。script/package_fields)を cherry-pick して、自分の欄の道具をそちらへ寄せた。
+  注: cherry-pick したコミット(15b7747)には、自分の material_templates_package.cpp を package_fields へ寄せた変更と、つなぎ目の節への
+  自分の行の置き直しも入っている(メッセージは wt2 のまま)。マージで t-0398 と重なる所は「節の見出しは wt2・行は分類ごとに 1 つずつ」で両方残す。
