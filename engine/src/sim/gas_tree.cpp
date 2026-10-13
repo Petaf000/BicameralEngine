@@ -567,38 +567,64 @@ namespace bicameral::sim {
             AddScaled(state.cells[side.index].momentum[axis], state.fractions[side.index].momentum[axis], value, shift);
         }
 
-        // 側への力積は、側の小刻みが面と同じなら力を当てた値(forced。その小刻みの流れに効く)へ、側が粗い小刻みなら次の値(next。
-        // 粗い小刻みの終わりに受ける。粗い側の値は小刻みの初めのまま。T-0320)へ。immediatePass で前者・後者を分けて 2 回呼ぶ
-        // (next は forced を写した後に足すため)。帳簿(箱の外の側)は前者の回で
-        void ApplyImpulse(GasTree& tree, TreeWork& work, const TreeFace& face, bool immediatePass) {
-            const bool leftCell = face.left.kind == SideKind::Cell;
-            const bool rightCell = face.right.kind == SideKind::Cell;
-            const bool leftNow = leftCell && (SubcycleGap(tree, face, face.left) == 0) == immediatePass;
-            const bool rightNow = rightCell && (SubcycleGap(tree, face, face.right) == 0) == immediatePass;
-            TreeState& state = immediatePass ? work.forced : work.next;
+        // 側が受ける力(面の力積と重さ。面の単位)の multiplier 倍を state へ
+        void AddSideForce(TreeState& state, const TreeFace& face, const TreeSide& side, bool right,
+                          int64_t multiplier) {
+            const int64_t weight = right ? face.weightRight : face.weightLeft;
+            if (weight != 0)
+                AddMomentum(state, side, 2, -weight * multiplier, face.level);
 
-            // --- 重さ(箱の外から働く力なので帳簿へ)---
-            if (leftNow && face.weightLeft != 0) {
-                AddMomentum(state, face.left, 2, -face.weightLeft, face.level);
-                AddLedger(tree.ledger.momentum[2], -face.weightLeft, face.level);
+            if (face.impulse != 0)
+                AddMomentum(state, side, face.axis, (right ? face.impulse : -face.impulse) * multiplier, face.level);
+        }
+
+        // 側が受ける力。側の小刻みが面と同じ(g = 0)なら力を当てた値(forced。その小刻みの流れに効く)へ。
+        // 側が粗い小刻み(g > 0。粗い側)なら、本当の力は次の値(next。粗い小刻みの終わりに受ける。T-0320)へ足すが、粗い小刻みの初めに
+        // この面の初めの力 × 2^g を見込みとして forced にも足し、同じ分を next から引く(T-0479。Berger–Colella の粗い側の流束 + 差の受け直し)。
+        // 見込みが無いと、粗いセルの forced は細かい面の側の圧力を受けないまま流れを出し、一様な圧力の高まり(閉じた部屋の火・基準と違う大気)
+        // で偽の流れが出た(閉じた箱の 11% の一様な加圧で約 11 m/s)。合計(next)は見込みの有無で変わらないので保存はそのまま。
+        // immediatePass で forced の回と next の回に分けて 2 回呼ぶ(next は forced を写した後に足すため)。帳簿(箱の外の側)は前者の回で
+        void ApplySideForce(GasTree& tree, TreeWork& work, const TreeFace& face, const TreeSide& side, bool right,
+                            bool immediatePass, uint64_t micro) {
+            const uint32_t gap = SubcycleGap(tree, face, side);
+            const bool starts = Starts(tree, side.level, micro);
+            const int64_t predicted = (int64_t)1 << gap;
+            if (immediatePass) {
+                if (gap == 0 || starts)
+                    AddSideForce(work.forced, face, side, right, predicted);
+
+                if (gap == 0) {
+                    const int64_t weight = right ? face.weightRight : face.weightLeft;
+                    AddLedger(tree.ledger.momentum[2], -weight, face.level);
+                }
+
+                return;
             }
 
-            if (rightNow && face.weightRight != 0) {
-                AddMomentum(state, face.right, 2, -face.weightRight, face.level);
-                AddLedger(tree.ledger.momentum[2], -face.weightRight, face.level);
-            }
-
-            if (face.impulse == 0)
+            if (gap == 0)
                 return;
 
-            if (leftNow)
-                AddMomentum(state, face.left, face.axis, -face.impulse, face.level);
-            else if (!leftCell && immediatePass)
+            AddSideForce(work.next, face, side, right, starts ? 1 - predicted : 1);
+            const int64_t weight = right ? face.weightRight : face.weightLeft;
+            AddLedger(tree.ledger.momentum[2], -weight, face.level);
+        }
+
+        void ApplyImpulse(GasTree& tree, TreeWork& work, const TreeFace& face, bool immediatePass, uint64_t micro) {
+            // --- セルの側(重さは箱の外から働く力なので帳簿へ)---
+            if (face.left.kind == SideKind::Cell)
+                ApplySideForce(tree, work, face, face.left, false, immediatePass, micro);
+
+            if (face.right.kind == SideKind::Cell)
+                ApplySideForce(tree, work, face, face.right, true, immediatePass, micro);
+
+            // --- 箱の外の側(壁・開いた境界の外)の力積は帳簿へ ---
+            if (face.impulse == 0 || !immediatePass)
+                return;
+
+            if (face.left.kind != SideKind::Cell)
                 AddLedger(tree.ledger.momentum[face.axis], face.impulse, face.level);
 
-            if (rightNow)
-                AddMomentum(state, face.right, face.axis, face.impulse, face.level);
-            else if (!rightCell && immediatePass)
+            if (face.right.kind != SideKind::Cell)
                 AddLedger(tree.ledger.momentum[face.axis], -face.impulse, face.level);
         }
 
@@ -700,7 +726,7 @@ namespace bicameral::sim {
                 ComputeFaceForce(tree, work.derived, face);
 
             for (const TreeFace& face : faces)
-                ApplyImpulse(tree, work, face, true);
+                ApplyImpulse(tree, work, face, true, micro);
 
             for (uint32_t index = 0; index < tree.cells.size(); ++index) {
                 if (!Starts(tree, tree.places[index].level, micro))
@@ -711,7 +737,7 @@ namespace bicameral::sim {
             }
 
             for (const TreeFace& face : faces)
-                ApplyImpulse(tree, work, face, false);
+                ApplyImpulse(tree, work, face, false, micro);
         }
 
         // いちばん細かい小刻み 1 回: 小刻みを始めるレベルの面だけを計算し、小刻みを終えるレベルのセルが次の値を受ける

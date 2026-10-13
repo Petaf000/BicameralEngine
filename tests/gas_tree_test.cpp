@@ -6,6 +6,7 @@
 //   静止大気が動かない・閉じた箱の保存が毎刻みビット一致・波の反射が T-0208 と同じ程度。
 //   環境の値のホットリロード(T-0470・ADR-0200): 途中の刻みで重力・音速の基準・基準の大気を替えても閉じた箱の保存が毎刻みビット一致・
 //   替えた木は新しい環境で作った木と同じ係数・層の基準・頭打ちの温度で同じに進む・同じ値の当て直しは結果を変えない・木の上限の外は断る。
+//   一様な加圧(T-0479): 一様に加圧した静止大気が分けた形でも動かない(重さなしは 1 mm/s 未満、重さありは 0.1 m/s 未満)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。測った値も表示する(07 §2.5 に書いた数字の出どころ)。
 #include <algorithm>
 #include <array>
@@ -674,6 +675,50 @@ namespace {
         EXPECT(GasTreeSoundSpeedLimitMmPerS(MakeAirTree(TwoLevelConfig(), {})) == 864000);
     }
 
+    // --- 一様な加圧(T-0479): 箱の全部のセルの物質量を同じ温度のまま 1/9 増やす(閉じた部屋で火が空気を温めた・基準と違う大気)---
+
+    void Pressurize(GasTree& tree) {
+        for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+            std::array<uint64_t, GAS_MAX_SPECIES> amounts = tree.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount += amount / 9;
+
+            const uint32_t temperature = DeriveGasTreeCell(tree, index).temperature;
+            GasCell pressurized = MakeGasCell(tree.config, amounts, temperature);
+            pressurized.momentum = tree.cells[index].momentum;
+            tree.cells[index] = pressurized;
+        }
+    }
+
+    // 一様に加圧した静止大気は動かない: 重さなしは丸めの分だけ(1 mm/s 未満。面の圧力の力積が釣り合う)、重さありでも分けない形と同じ程度。
+    // 分けた形で粗いセルが細かい面の側の圧力を見込まずに流れを出すと、約 11 m/s の偽の流れが出た(T-0479)
+    void TestUniformOverpressureStaysStill() {
+        struct Case {
+            GasConfig config;
+            GasTreeOptions options;
+            const char* name = "";
+        };
+
+        const std::array<Case, 2> cases = {
+            Case{.config = TwoLevelConfig(), .options = {}, .name = "same substeps"},
+            Case{.config = SubcycledConfig(), .options = SUBCYCLED, .name = "subcycled"}};
+        for (const Case& pressureCase : cases) {
+            for (const bool gravity : {false, true}) {
+                GasConfig config = pressureCase.config;
+                config.gravity = gravity;
+                GasTree tree = MakeAirTree(config, MIDDLE_REGION, pressureCase.options);
+                Pressurize(tree);
+                for (int tick = 0; tick < 30; ++tick)
+                    StepGasTree(tree);
+
+                const double speed = (double)MaxMomentum(tree) / (double)METER_PER_SECOND / (double)ROUGH_CELL_MASS;
+                std::printf("uniform overpressure (%s, %s): max speed after 30 ticks = %.6f m/s\n", pressureCase.name,
+                            gravity ? "gravity" : "no gravity", speed);
+                EXPECT(speed < (gravity ? 0.1 : 0.001));
+            }
+        }
+    }
+
 }  // namespace
 
 int main() {
@@ -686,6 +731,7 @@ int main() {
     TestEnvironmentChangeConservation();
     TestEnvironmentMatchesFreshTree();
     TestEnvironmentCheckOnTree();
+    TestUniformOverpressureStaysStill();
 
     if (failureCount != 0) {
         std::printf("gas_tree_test: %d failure(s)\n", failureCount);
