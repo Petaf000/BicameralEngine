@@ -62,3 +62,7 @@ sim::GasOptions の音速の基準 340 m/s(D-440)・地面の層の基準の温�
   gas_reference・gas_tree・gpu_gas_tree が通過。release(警告 0): environment_package・gas_reference・gpu_gas(HW)・window_replay_*(6 本)・
   window_lab・window_lab_compare・window_place_*・window_patch_*・window_hot_reload_game_* が通過。image_*(画像が基準と一致)・
   `run -- --world sample --check-physics --frames 240`(積み木の CPU と GPU の物のハッシュの食い違い 0)も通過。Status は Doing のまま(ADR-0176 のユーザーの判断待ち)。
+- 2026-10-13 その 2(wt4): main(1ef520b。t-0398・t-0411・t-0426 など)へ載せ直した。cherry-pick の分は main の 073eca1 に任せて落とした。つなぎ目は wt2 の行と両方残し、
+  窓は t-0398 の組み立て(MakeLayoutPhysicsScene・HasStackScene(表))の上で、重力を表の environment から作る形にした。release(警告 0)で
+  environment_package・reaction_package・luau_type_check・reaction_replay_table・reaction_hot_reload・replay_file・blank_world・world_layout・gas_reference・
+  gpu_gas・gpu_gas_flow・window_replay_*・window_place_*・window_hot_reload_game_* と `--world sample --check-physics`(食い違い 0)が通過。archmap --check も通過。
