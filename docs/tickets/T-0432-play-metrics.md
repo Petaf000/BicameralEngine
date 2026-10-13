@@ -1,6 +1,6 @@
 # T-0432 遊びの指標の自動テスト
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -18,9 +18,9 @@
 - [x] エディタのパネル「遊びの指標」(表を変えたら測る・ボタン・差の表)・frame/play_metric_runner(予算の余りで。D-468)
 - [x] コマンドライン `bicameral --measure-metrics [--metrics-baseline <file>] [--metrics-save]`
 - [x] サンプルの世界に指標 sealed_fire_out(密室の火が消えるまで)
-- [ ] 試験: play_metric(CPU)・gpu_play_metric(本物のハッシュ列が変わらない・同じ表なら同じ値・速さを変えた表なら差が出る・CPU とビット一致)・
+- [x] 試験: play_metric(CPU)・gpu_play_metric(本物のハッシュ列が変わらない・同じ表なら同じ値・速さを変えた表なら差が出る・CPU とビット一致)・
       window_metrics_record/play(エディタで測っても本物の記録が別の起動の再生と一致)
-- [ ] release のビルドの警告 0・archmap --check
+- [x] release のビルドの警告 0・archmap --check
 
 ## 判断待ち(仮で進めた。ユーザー未確認。詳しくは ADR-0206「判断待ち」)
 作り手(エンジンを使う人)から見た違い:
@@ -47,3 +47,9 @@
 - 影響の見える化(T-0433)はこの値と差を使う。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-14(wt3): 分類 play_metrics(読む所・ベイク・型)・sim::PlayMetricMeasurer(元の世界 S(0) + 写しを使い直す)・CPU リファレンス・
+  前の版との差と値のファイル・パネル「遊びの指標」と PlayMetricRunner(表を変えたら測る・予算の余りで・写しの早送りに譲る)・
+  --measure-metrics / --metrics-baseline / --metrics-save・--auto-metrics。サンプルに sealed_fire_out(1000 K 以上が 0 まで = 16680 刻み)。
+  release で通過: play_metric ほか CPU 11 本・gpu_play_metric(本物のハッシュ列が同じ・同じ表で同じ値・木の燃焼 10 倍で 16680 → 16440 刻み
+  〔−240〕・fire_prefix の値・道のり・60 刻みのセルのハッシュが CPU と一致)・window_metrics_record/play。ADR-0206(Proposed)。
+  CPU で追うのは 60 刻みの fire_prefix だけ(sealed_fire_out の 16680 刻みは release の CPU で約 6.5 分の見込み。同じ場面・同じ判定)。
