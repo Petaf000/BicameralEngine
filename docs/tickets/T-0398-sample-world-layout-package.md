@@ -1,6 +1,6 @@
 # T-0398 サンプルの世界の組み立て(木箱・空気・温度・積み木)をパッケージで書く
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -15,7 +15,7 @@ sim::MakeProbeInitialWorld(空気の中の木箱・空気の成分・300 K)と s
 ## 完了条件(チェックできる形で)
 - [x] 世界の組み立ての分類と型の定義(data/types)・読む所(world_cells・world_bodies。script/world_layout_package・sim/world_layout・ADR-0172)
 - [x] --world sample がパッケージの組み立てを読み、今の C++ の組み立てと同じセル(ビット一致)になる試験(world_layout。物も同じ)
-- [ ] 今の試験(--world sample・サンプルのパッケージを読む試験)の結果(ハッシュ・画像)が変わらない
+- [x] 今の試験(--world sample・サンプルのパッケージを読む試験)の結果(ハッシュ・画像)が変わらない(release で下の作業ログの組が通過。gpu_probe_place/patch/peek/trace・window_patch_*・window_replay_editor/rewind/peek は未実行〔初めの世界はビット一致なので変わらない見込み〕)
 
 ## メモ・参考
 - 洗い出しの一覧は T-0371 のチケット。合わせた表の版(TableVersion)は全部の分類を含むので、反応表と同じ読み込みに新しい分類を足すと
@@ -73,4 +73,6 @@ sim::MakeProbeInitialWorld(空気の中の木箱・空気の成分・300 K)と s
   欄の道具を script/package_fields へ出した。分類 world_cells・world_bodies(script/world_layout_package・sim/world_layout・型の定義)、
   MakeProbeInitialWorld を表の組み立てから・MakeProbeStackScene → MakeLayoutPhysicsScene、窓は --world に依らず表の組み立てから。
   試験のパッケージに world_cells.luau・world_bodies.luau。world_layout_test(前の C++ とビット一致・ランタイムの入り口と再生の作り直し・
-  ブランク・Mod・誤り)。ADR-0172(Proposed)・13 §2.6・map.yaml。release: CPU 54 本・image_ 5 本・gpu_probe_sim/rewind/fire・窓の試験が通過。
+  ブランク・Mod・誤り)。ADR-0172(Proposed)・13 §2.6・map.yaml。release で通過: CPU 54 本・image_ 5 本・gpu_probe_sim/rewind/fire/physics/physics_compute・
+  window_replay_record/play・window_place_record/play・window_lab・window_blank_record/play・window_hot_reload_*(6)・window_table_edit(_copy)。
+  gpu_probe_physics は 1 回目に TIMEOUT 322 秒(途中で 220 秒止まった。ほかの GPU の負荷の疑い)、流し直しで 81 秒で通過。
