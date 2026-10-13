@@ -101,6 +101,7 @@ namespace bicameral::frame {
         // 環境ミキサーで標準パッケージを全部足す → 当たる → 元素を外す → 初めの表に戻って終える(--auto-mixer。--editor と
         // ブランクの世界で。editor/mixer_panel。T-0452)
         bool autoMixer = false;
+        bool autoRebuild = false;  // 環境ミキサーで足して世界を作り直す確かめ(--auto-rebuild。T-0453)
         // 筆で木を置く・木炭を足す・格子からはみ出す・当たらない値を投げ、木に火を付ける。当たるはずの置くコマンドが全部 GPU で
         // 当たったかを確かめる(--auto-place。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0222)
         bool autoPlace = false;

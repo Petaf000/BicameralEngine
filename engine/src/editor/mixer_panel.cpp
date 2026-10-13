@@ -62,7 +62,7 @@ namespace bicameral::editor {
 
         ImGui::TextColored(NOTE_COLOR, "標準パッケージを世界に足す(%s)。表の法則は次の刻みの境界で替わる",
                            m_catalog->root.generic_string().c_str());
-        ImGui::TextColored(NOTE_COLOR, "重力・初めのセル(空気で満たす)は世界を作り直すまで効かない(T-0453)");
+        ImGui::TextColored(NOTE_COLOR, "初めのセル・物(空気で満たす など)は「世界を作り直す」で効く");
         if (replaying)
             ImGui::TextColored(NOTE_COLOR, "再生中は足せない(記録の表を当てる)");
 
@@ -78,7 +78,32 @@ namespace bicameral::editor {
         if (status.lastFailed && !status.message.empty())
             ImGui::TextColored(ERROR_COLOR, "読み直せなかった(古い表のまま): %s", status.message.c_str());
 
+        BuildRebuild(status, replaying);
         ImGui::End();
+    }
+
+    // 「世界を作り直す」(T-0453・ADR-0192): 今の表で刻み 0 から(足した一覧を --mix で起動したのと同じ世界)。
+    // 表の法則は足した時に当たっているので、作り直して変わるのは初めのセル・物と、それまでの世界の状態が消えること
+    void MixerPanel::BuildRebuild(const ReactionTableStatus& status, bool replaying) {
+        ImGui::Separator();
+        const bool busy = replaying || m_request.has_value() || status.waiting;
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("世界を作り直す"))
+            m_rebuildRequested = true;
+
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "今の表で刻み 0 から作り直す(足した一覧を --mix で起動したのと同じ世界)。\n"
+                "今のセル・置いた物・燃えている火は消える。記録は作り直した所から");
+        }
+
+        ImGui::SameLine();
+        if (status.version == status.worldVersion) {
+            ImGui::TextColored(NOTE_COLOR, "世界は今の表で作った");
+        } else {
+            ImGui::TextColored(GOOD_COLOR, "今の表は世界を作った表と違う(作り直すと初めのセル・物も替わる)");
+        }
     }
 
     // 1 つのパッケージの行: 足す / 外すボタン・見せる名前・依存(一緒に足す・外すもの)
@@ -202,8 +227,38 @@ namespace bicameral::editor {
                 m_autoStage = AutoStage::Done;
                 break;
 
+            case AutoStage::RebuildStart:
+            case AutoStage::RebuildAdded: RunAutoRebuild(status); break;
+
             default: break;
         }
+    }
+
+    // --auto-rebuild の前半(T-0453): 空気で満たす(と依存)を足し、当たったら作り直しを頼む
+    void MixerPanel::RunAutoRebuild(const ReactionTableStatus& status) {
+        if (m_autoStage == AutoStage::RebuildStart) {
+            m_autoInitialVersion = status.version;
+            auto added = script::MixAdd(*m_catalog, m_mix, "earth_air");
+            if (!added)
+                return FailAuto(added.error());
+
+            Request(std::move(*added));
+            m_autoStage = AutoStage::RebuildAdded;
+            m_autoWaitFrames = 0;
+            return;
+        }
+
+        if (m_request || status.waiting || status.version == m_autoInitialVersion || !m_table ||
+            m_table->tableVersion != status.version)
+            return;
+
+        if (m_table->table.worldLayout.cellRegions.empty())
+            return FailAuto("空気で満たすを足した表に初めのセルの領域が無い");
+
+        Log(Channel::Tool, Level::Info, "--auto-rebuild: 足した表が当たった(版 {:016x}・初めのセルの領域 {})。作り直す",
+            status.version, m_table->table.worldLayout.cellRegions.size());
+        m_rebuildRequested = true;
+        m_autoStage = AutoStage::Done;
     }
 
     void MixerPanel::FailAuto(std::string why) {
