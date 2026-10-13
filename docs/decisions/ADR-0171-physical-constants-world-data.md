@@ -39,3 +39,11 @@
 - しにくくなる: 重力の上限(100 m/s²)を超える世界は、気体の重さの力積の係数の桁の見直しが要る。
 - 試験: 標準の重力ではビット一致(換算は今までの定数と同じ値になる)。別の重力の試験は T-0423。
 - ADR-0151 の 5 は、この ADR が Accepted になったら「T-0372 の結論は ADR-0171」と追記する。
+
+## 追記 1(2026-10-13・T-0372 の続き・T-0423): ブランクの世界の重力 0 の実装
+- 器の既定の重力を 0 にした(`PxDefaultParameters().gravity = 0`・`GasConfig::gravityMicrometersPerSecond2 = 0`)。器は世界の値を持たない(D-480)。
+- 世界の値は `engine/src/sim/world_physics.h` の `WorldPhysics`(既定 0 = ブランク)にまとめ、`PhysicsParametersFor`(物理)・`ApplyWorldPhysics`(気体)で渡す。
+  標準の値(地球)は `StandardWorldPhysics()`。標準パッケージ(T-0373)が世界のデータとして渡すようになるまでの置き場所。
+- 窓の世界は `frame_loop.cpp` の `WorldPhysicsOf`(ブランク → 0・サンプル → 標準)。サンプルの世界と標準の重力で書いた試験の場面は、標準の値を明示して渡す(結果は変わらない)。
+- 試験(T-0423): 物理の CPU(physics_gravity・physics_gravity_checked)・物理の GPU と CPU(無重力・月・上限)・気体の CPU(gas_reference の重力の節)・
+  気体の GPU と CPU(gpu_gas の closed_zero_gravity など 6 場面)。

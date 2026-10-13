@@ -50,6 +50,7 @@
 #include "sim/probe_surface.h"
 #include "sim/probe_trace.h"
 #include "sim/reaction_table.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::frame {
     namespace {
@@ -187,6 +188,14 @@ namespace bicameral::frame {
             return options.physics && options.world == save::ReplayWorld::Sample;
         }
 
+        // 世界の物理の値(ADR-0171・D-480): ブランクの世界は重力 0、サンプルの世界は標準の値(標準パッケージ T-0373 が渡すようになるまで)
+        sim::WorldPhysics WorldPhysicsOf(const FrameLoopOptions& options) {
+            if (options.world == save::ReplayWorld::Sample)
+                return sim::StandardWorldPhysics();
+
+            return {};
+        }
+
         // 世界の表の読み方: サンプルの世界はゲーム本体(combustion_test)を含むフォルダ。ブランクの世界は --packages のフォルダを
         // ゲーム本体なし(全部 Mod)で読む
         script::ReactionTableSource WorldTableSource(const FrameLoopOptions& options) {
@@ -269,8 +278,8 @@ namespace bicameral::frame {
 
                 // --check-physics: 窓と同じ場面の CPU の物理
                 if (HasStackScene(options) && options.checkPhysics) {
-                    m_physicsCheck = std::make_unique<sim::PhysicsWorld>(sim::MakeProbeStackScene(),
-                                                                         physics::PxDefaultParameters());
+                    m_physicsCheck = std::make_unique<sim::PhysicsWorld>(
+                        sim::MakeProbeStackScene(), sim::PhysicsParametersFor(WorldPhysicsOf(options)));
                 }
             }
 
@@ -484,6 +493,7 @@ namespace bicameral::frame {
                                           .traceCapacity = TRACE_CAPACITY_PER_FRAME,
                                           .physicsScene = HasStackScene(options) ? &physicsScene : nullptr,
                                           .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
+                                          .physicsParameters = sim::PhysicsParametersFor(WorldPhysicsOf(options)),
                                           .initialWorld = initialWorld});
         }
 

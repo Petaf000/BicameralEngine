@@ -178,6 +178,7 @@ add_test(NAME fixed COMMAND fixed_test)
 add_executable(physics_test physics_test.cpp)
 target_link_libraries(physics_test PRIVATE bicameral_physics bicameral_core)
 add_test(NAME physics_math COMMAND physics_test math)
+add_test(NAME physics_gravity COMMAND physics_test gravity)  # 重力を変えた世界(無重力・月・上限。T-0423)
 foreach(_scene IN ITEMS stack mass_ratio pile wall)
   add_test(NAME physics_${_scene} COMMAND physics_test scene ${_scene})
   set_tests_properties(physics_${_scene} PROPERTIES TIMEOUT 600)
@@ -195,6 +196,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_test(NAME physics_${_scene}_checked COMMAND physics_checked_test scene ${_scene} --full)
     set_tests_properties(physics_${_scene}_checked PROPERTIES TIMEOUT 600)
   endforeach()
+  add_test(NAME physics_gravity_checked COMMAND physics_checked_test gravity)  # 重力の上限で桁あふれしない(T-0423)
 endif()
 
 # --- GPU を使うテスト(T-0013)-------------------------------------------------------------------------
@@ -329,6 +331,10 @@ set_tests_properties(gpu_physics_wall PROPERTIES TIMEOUT 600)
 bicameral_add_gpu_test_case(gpu_physics_stack_warp gpu_physics_test warp --warp --scene stack --ticks 120)
 # 採らなかった方(広域の選別を Compute・色ごとの解を Work Graph。T-0092 で測って比べた)も壊れていないこと
 bicameral_add_gpu_test_case(gpu_physics_stack_alternative gpu_physics_test gpu --scene stack --broadphase compute --solver graph)
+# 重力を変えた世界(T-0423・D-480): 無重力(積んだまま動かない)・月・上限 100 m/s² で GPU と CPU がビット一致
+bicameral_add_gpu_test_case(gpu_physics_stack_zero_gravity gpu_physics_test gpu --scene stack --gravity 0 --ticks 300)
+bicameral_add_gpu_test_case(gpu_physics_pile_moon gpu_physics_test gpu --scene pile --gravity 1620000)
+bicameral_add_gpu_test_case(gpu_physics_stack_max_gravity gpu_physics_test gpu --scene stack --gravity 100000000 --ticks 600)
 
 # 整数のルーチンの費用の計測(T-0010、04 §6)。合否の無い計測なので ctest には登録しない。
 # 走らせ方: job.py run -Preset release -Exe gpu_fixed_bench

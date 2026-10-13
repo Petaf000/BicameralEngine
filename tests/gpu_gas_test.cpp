@@ -19,6 +19,7 @@
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
 #include "sim/gas_reference.h"
+#include "sim/world_physics.h"
 
 #include <cmath>
 
@@ -53,6 +54,8 @@ namespace {
         config.species[2] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};
         if (substepsOverride != 0)
             config.substeps = substepsOverride;
+
+        ApplyWorldPhysics(StandardWorldPhysics(), config);  // 標準の重力の世界(D-480。器の既定は 0)
 
         return config;
     }
@@ -93,15 +96,24 @@ namespace {
     };
 
     // 閉じた箱に熱いセル・煙・動くセル(gas_reference_test の MakeDisturbedClosedBox)
-    Scene MakeClosedScene() {
-        GasBox box = MakeAirBox(MakeAirConfig(8, 8, 8));
+    // 重力を変えた世界(T-0423・D-480)。月の重力 1.62 m/s²
+    constexpr uint32_t MOON_GRAVITY = 1620000;
+
+    GasConfig WithGravity(GasConfig config, uint32_t gravity) {
+        ApplyWorldPhysics({.gravityMicrometersPerSecond2 = gravity}, config);
+        return config;
+    }
+
+    Scene MakeClosedScene(std::string name = "closed",
+                          uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+        GasBox box = MakeAirBox(WithGravity(MakeAirConfig(8, 8, 8), gravity));
         Heat(box, box.Index(3, 3, 1), AIR_TEMPERATURE + 50000);
         Heat(box, box.Index(4, 3, 1), AIR_TEMPERATURE + 50000);
         AddSmoke(box, box.Index(5, 5, 5));
         SetGasMomentum(box, box.cells[box.Index(2, 6, 4)],
                        {ROUGH_CELL_MASS * 2 * METER_PER_SECOND, 0, -ROUGH_CELL_MASS * METER_PER_SECOND});
 
-        return {.name = "closed", .box = box, .ticks = 60};
+        return {.name = std::move(name), .box = box, .ticks = 60};
     }
 
     // 周期的な箱(重力なし。大きさ 1 と 2 の周期的な軸も混ぜて、面が自分自身・同じ隣を 2 回向く形も確かめる)
@@ -133,13 +145,16 @@ namespace {
         return {.name = "single_layer", .box = box, .ticks = 60};
     }
 
-    Scene MakeStaticScene() {
-        return {.name = "static", .box = MakeAirBox(MakeAirConfig(4, 4, 16)), .ticks = 300};
+    Scene MakeStaticScene(std::string name = "static",
+                          uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+        return {
+            .name = std::move(name), .box = MakeAirBox(WithGravity(MakeAirConfig(4, 4, 16), gravity)), .ticks = 300};
     }
 
     // 半径 1.5 セル(0.75 m)の +30 K の泡(中心 (5, 5, 4))。10 × 10 × 20 の閉じた箱で 2 秒
-    Scene MakeBubbleScene() {
-        GasBox box = MakeAirBox(MakeAirConfig(10, 10, 20));
+    Scene MakeBubbleScene(std::string name = "bubble",
+                          uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+        GasBox box = MakeAirBox(WithGravity(MakeAirConfig(10, 10, 20), gravity));
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             const int32_t dx = (int32_t)CellX(box, index) - 5;
             const int32_t dy = (int32_t)((index / box.config.sizeX) % box.config.sizeY) - 5;
@@ -148,7 +163,7 @@ namespace {
                 Heat(box, index, AIR_TEMPERATURE + 30000);
         }
 
-        return {.name = "bubble", .box = box, .ticks = 120};
+        return {.name = std::move(name), .box = box, .ticks = 120};
     }
 
     // x は開いた境界で風 2 m/s、y は周期的、z は壁。4 セル幅の煙(x = 4〜7・z = 2〜3)を 3 秒
@@ -241,6 +256,14 @@ namespace {
         scenes.push_back(
             MakeTubeScene("shock_isothermal", 100, GasThermodynamics::Isothermal));  // 等温の形(T-0234 の前)
         scenes.push_back(MakeBlastScene());
+
+        // 重力を変えた世界(T-0423): 無重力・月・上限 100 m/s²
+        scenes.push_back(MakeClosedScene("closed_zero_gravity", 0));
+        scenes.push_back(MakeClosedScene("closed_moon", MOON_GRAVITY));
+        scenes.push_back(MakeClosedScene("closed_max_gravity", fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2));
+        scenes.push_back(MakeStaticScene("static_moon", MOON_GRAVITY));
+        scenes.push_back(MakeStaticScene("static_max_gravity", fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2));
+        scenes.push_back(MakeBubbleScene("bubble_zero_gravity", 0));
 
         return scenes;
     }
@@ -360,14 +383,15 @@ namespace {
         return speed;
     }
 
-    int64_t HeatCentroidZ(const GasBox& box) {
+    // 基準より minExcess(mK)以上熱いセルの、熱さで重み付けた z の重心(1/1000 セル)。既定は少しでも熱いセル全部
+    int64_t HeatCentroidZ(const GasBox& box, int64_t minExcess = 1) {
         int64_t weighted = 0;
         int64_t total = 0;
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             const uint32_t z = CellZ(box, index);
             const int64_t excess = (int64_t)DeriveGasCell(box, box.cells[index], z).temperature -
                                    (int64_t)box.referenceDerived[z].temperature;
-            if (excess <= 0)
+            if (excess < minExcess)
                 continue;
 
             weighted += excess * z;
@@ -447,7 +471,7 @@ namespace {
         if (std::string error = CheckConservation(scene.box, final); !error.empty())
             return error;
 
-        if (scene.name == "closed" || scene.name == "bubble") {
+        if (scene.name.starts_with("closed") || scene.name.starts_with("bubble")) {
             // エネルギーの帳簿は重さの仕事(断熱。T-0234)なので 0 でなくてよい
             if (final.ledger.amounts != std::array<int64_t, GAS_MAX_SPECIES>{})
                 return "閉じた箱の帳簿に物が出入りした";
@@ -456,8 +480,27 @@ namespace {
         if (scene.name == "periodic" && final.ledger.momentum != std::array<int64_t, GAS_AXES>{})
             return "周期的な箱の帳簿に運動量が出入りした";
 
-        if (scene.name == "static" && MaxSpeed(final) > 1)
+        if (scene.box.config.gravityMicrometersPerSecond2 == 0 && final.ledger.energy != 0)
+            return "無重力の帳簿に重さの仕事が出た";
+
+        if (scene.name.starts_with("static") && MaxSpeed(final) > 1)
             return std::format("静止大気が動いた(最大 {} 単位)", MaxSpeed(final));
+
+        if (scene.name == "bubble_zero_gravity") {
+            // 浮力が無いので泡は上がらない(膨らむだけ。標準の重力では熱の重心が 1 セル以上上がる)。泡の上の w は閉じた箱を往復する
+            // 音の波でその瞬間に 0.2 m/s ほどあるので判定に使わない(記録だけ)。
+            // 音の波が箱じゅうを少し温めるので、重心は泡の芯(基準より 5 K 以上熱いセル)で見る(上の方が広い箱なので、
+            // 少しでも熱いセル全部の重心は音の波の分だけ上に寄る)
+            constexpr int64_t CORE_EXCESS = 5000;
+            const int64_t rise = HeatCentroidZ(final, CORE_EXCESS) - HeatCentroidZ(scene.box, CORE_EXCESS);
+            const int64_t upward = GasVelocity(final, final.cells[final.Index(5, 5, 6)], 2);
+            Log(Channel::Sim, Level::Info,
+                "  無重力の熱い泡: 芯の重心が 2 秒で {} / 1000 セル動く・泡の上の w = {}(2^-20 m/s)・全部の熱の重心 {} "
+                "/ 1000 セル",
+                rise, upward, HeatCentroidZ(final) - HeatCentroidZ(scene.box));
+            if (rise > 100 || rise < -100)
+                return std::format("無重力で熱い泡が動いた(芯 {} / 1000 セル)", rise);
+        }
 
         if (scene.name == "bubble") {
             const int64_t rise = HeatCentroidZ(final) - HeatCentroidZ(scene.box);

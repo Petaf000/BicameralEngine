@@ -67,7 +67,7 @@ FX_FN PxParameters PxDefaultParameters() {
     p.proximityMatch = 20972;     // 2 cm
     p.recollideIteration = 5;
     p.recollideMinMotion = 21474836;                                                 // 5 mm
-    p.gravity = PxGravityFromMicrometers(STANDARD_GRAVITY_MICROMETERS_PER_SECOND2);  // 9.80665 m/s²(10283018)
+    p.gravity = 0;  // 重力は世界のデータ(ADR-0171)。器の既定は 0 = ブランクの世界(D-480)。標準の値は sim::PhysicsParametersFor で入れる
     return p;
 }
 

@@ -18,6 +18,7 @@
 #include "core/singleton.h"
 #include "sim/physics_scene.h"
 #include "sim/physics_world.h"
+#include "sim/world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::physics;
@@ -249,7 +250,8 @@ namespace {
     }
 
     SceneResult RunScene(const sim::PhysicsScene& scene, uint64_t tickCount) {
-        sim::PhysicsWorld world(scene, PxDefaultParameters());
+        sim::PhysicsWorld world(scene,
+                                sim::PhysicsParametersFor(sim::StandardWorldPhysics()));  // 標準の重力の世界(D-480)
         SceneResult result;
         const bool isPile = scene.name == "pile";
 
@@ -342,6 +344,101 @@ namespace {
         }
     }
 
+    // --- 重力を変えた世界(T-0423・D-480・ADR-0171)-------------------------------------------------
+    constexpr int64_t METER_UNITS = (int64_t)1 << 20;  // 位置の単位(2^-20 m)
+    constexpr uint32_t MOON_GRAVITY = 1620000;         // 月の重力 1.62 m/s²(µm/s²)
+
+    // 地面と、底が地面から 10 m 上にある 1 m の立方体(500 kg。積み木の場面の 1 段目を持ち上げたもの)
+    sim::PhysicsScene MakeFallScene() {
+        sim::PhysicsScene scene = sim::MakeStackScene();
+        scene.name = "fall";
+        scene.bodies.resize(2);
+        scene.bodies[1].position[1] += 10 * METER_UNITS;
+        return scene;
+    }
+
+    // 重力 gravity(µm/s²)の世界で ticks 刻み進め、最後の物が落ちた距離(2^-20 m)
+    int64_t FallDistance(const sim::PhysicsScene& scene, uint32_t gravity, uint64_t ticks) {
+        sim::PhysicsWorld world(scene, sim::PhysicsParametersFor({.gravityMicrometersPerSecond2 = gravity}));
+        for (uint64_t tick = 0; tick < ticks; ++tick)
+            world.Step();
+
+        return scene.bodies.back().position[1] - world.Bodies().back().position.y;
+    }
+
+    // 無重力: 浮いた物も積んだ物も動かない(位置と向きがビット単位で初めのまま)
+    void TestZeroGravity() {
+        Expect(FallDistance(MakeFallScene(), 0, 120) == 0, "無重力で浮いた物が動いた");
+
+        const sim::PhysicsScene stack = sim::MakeStackScene();
+        sim::PhysicsWorld world(stack, sim::PhysicsParametersFor(sim::WorldPhysics{}));
+        for (int tick = 0; tick < 300; ++tick)
+            world.Step();
+
+        bool still = true;
+        for (size_t index = 0; index < stack.bodies.size(); ++index) {
+            const sim::PhysicsBody& body = world.Bodies()[index];
+            const auto& source = stack.bodies[index];
+            still = still && body.position.x == source.position[0] && body.position.y == source.position[1] &&
+                    body.position.z == source.position[2] && body.rotation.x == source.rotation[0] &&
+                    body.rotation.y == source.rotation[1] && body.rotation.z == source.rotation[2] &&
+                    body.rotation.w == source.rotation[3];
+        }
+
+        Expect(still, "無重力で積んだ物が動いた(力の無い所に力が出た)");
+    }
+
+    // 落ちる距離は重力に比例し(月と地球の比が重力の比と 0.1% で一致)、½ g t² に近い(陰的な積分の分 3% 以内)
+    void TestFallScalesWithGravity() {
+        constexpr uint64_t FALL_TICKS = 60;  // 1 s(地球で約 4.9 m 落ちる。地面には届かない)
+        const sim::PhysicsScene scene = MakeFallScene();
+        const double earth = Meters(FallDistance(scene, fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2, FALL_TICKS));
+        const double moon = Meters(FallDistance(scene, MOON_GRAVITY, FALL_TICKS));
+        const double gravityRatio = (double)MOON_GRAVITY / (double)fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
+        const double seconds = (double)FALL_TICKS / 60.0;
+        const double theoryEarth = 0.5 * GRAVITY * seconds * seconds;
+
+        Log(Channel::Physics, Level::Info,
+            "落下 1 s: 地球 {:.4f} m(½gt² {:.4f})・月 {:.4f} m / 比 {:.5f}(重力の比 {:.5f})", earth, theoryEarth, moon,
+            moon / earth, gravityRatio);
+        Expect(std::abs(moon / earth - gravityRatio) < gravityRatio * 1e-3, "落ちる距離が重力に比例しない");
+        Expect(std::abs(earth - theoryEarth) < theoryEarth * 0.03,
+               "地球の重力で 1 s に落ちる距離が ½gt² から 3% 以上ずれた");
+    }
+
+    // 重力の上限(100 m/s²)でも積み木が桁あふれせず(physics_checked_test の FX_ASSERT)、止まり、同じ入力で同じ結果
+    void TestMaxGravity() {
+        const sim::PhysicsScene stack = sim::MakeStackScene();
+        const auto run = [&](uint64_t ticks) {
+            sim::PhysicsWorld world(
+                stack,
+                sim::PhysicsParametersFor({.gravityMicrometersPerSecond2 = fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2}));
+            SceneResult result;
+            for (uint64_t tick = 0; tick < ticks; ++tick) {
+                world.Step();
+                Accumulate(result, world, world.Tick() >= 240);
+            }
+
+            return result;
+        };
+
+        const uint64_t ticks = FULL_BY_DEFAULT ? 600 : 120;
+        const SceneResult first = run(ticks);
+        const SceneResult second = run(ticks);
+        Log(Channel::Physics, Level::Info,
+            "重力 100 m/s² の積み木 {} 刻み: 食い込み {:.2f} mm / 速さ {:.4f} m/s(終盤 {:.4f})", ticks,
+            first.maxPenetration * 1000, first.maxSpeed, first.lateSpeed);
+        Expect(first.hashes == second.hashes, "重力 100 m/s² で 2 回目の実行の状態が食い違った");
+        if (FULL_BY_DEFAULT)
+            Expect(first.lateSpeed < 0.01, "重力 100 m/s² の積み木が止まらない");
+    }
+
+    void TestGravity() {
+        TestZeroGravity();
+        TestFallScalesWithGravity();
+        TestMaxGravity();
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -351,8 +448,11 @@ int main(int argc, char** argv) {
         TestSolve6();
     } else if (mode == "scene" && argc > 2)
         TestScene(argv[2], FULL_BY_DEFAULT || (argc > 3 && std::string_view(argv[3]) == "--full"));
+    else if (mode == "gravity")
+        TestGravity();
     else {
-        Log(Channel::Physics, Level::Error, "使い方: physics_test math | scene stack|mass_ratio|pile [--full]");
+        Log(Channel::Physics, Level::Error,
+            "使い方: physics_test math | gravity | scene stack|mass_ratio|pile [--full]");
         failureCount = 1;
     }
 

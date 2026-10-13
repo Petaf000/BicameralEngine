@@ -81,7 +81,8 @@ namespace bicameral::sim {
         uint32_t soundSpeedMmPerS = 340000;  // 音速 c̃(mm/s)。本物の音速(D-440・ADR-0043)。落とした値も設定で選べる
         bool gravity = true;
         // 重力の強さ(µm/s²。世界のデータ。ADR-0171・world_physics.hlsli)。重さの力積・層の重さの圧力・重さの仕事はここから作る
-        uint32_t gravityMicrometersPerSecond2 = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
+        // 器の既定は 0 = ブランクの世界(D-480)。標準の値は sim::ApplyWorldPhysics(StandardWorldPhysics(), config) で入れる(world_physics.h)
+        uint32_t gravityMicrometersPerSecond2 = 0;
         GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
 
         // これより熱いセルは実効の音速を c̃ で頭打ちにする(mK。安定の条件を守る。0 = 地面の層の基準の温度〔QUESTIONS Q32 の仮の案 A〕)。

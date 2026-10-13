@@ -18,6 +18,7 @@
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
 #include "sim/gas_tree.h"
+#include "sim/world_physics.h"
 
 #include <cmath>
 
@@ -45,6 +46,8 @@ namespace {
         config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0};
         config.species[2] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};
         config.substeps = 48;  // 全部のレベルが同じ小刻み: レベル 1 の ν = 0.47(T-0208)
+
+        ApplyWorldPhysics(StandardWorldPhysics(), config);  // 標準の重力の世界(D-480。器の既定は 0)
 
         return config;
     }

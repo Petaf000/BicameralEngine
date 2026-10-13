@@ -28,6 +28,8 @@ namespace bicameral::lab {
         result.recollideIteration = p.recollideIteration < 0 ? physics::PX_NO_RECOLLIDE
                                                              : (uint32_t)p.recollideIteration;
         result.recollideMinMotion = (int64_t)(p.recollideMinMotion * 4294967296.0);
+        // 重力は世界のデータ(µm/s²。器の既定は 0。D-480)。試作と同じ値を整数の世界にも入れる
+        result.gravity = fx::PxGravityFromMicrometers((uint32_t)(p.gravity * 1000000.0 + 0.5));
         return result;
     }
 

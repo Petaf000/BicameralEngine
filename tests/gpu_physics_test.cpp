@@ -2,7 +2,7 @@
 // CPU リファレンス(sim::PhysicsWorld)とビット一致することを確かめる(T-0090)。
 // 区間(--segment 刻み)ごとに GPU の物を全部読み戻し、状態のハッシュと統計(食い込み・接触の数・色の数)を CPU と比べる。
 // GPU はもう 1 回走らせ、区間ごとのハッシュが 1 回目と同じこと(2 回の実行で一致)も確かめる。
-// 引数: gpu_test_options.h(--warp・--queue)と --scene stack|mass_ratio|pile|wall・--ticks n(既定: release は場面の全部、debug は 120)・--segment n(既定 60)
+// 引数: gpu_test_options.h(--warp・--queue)と --scene stack|mass_ratio|pile|wall・--gravity µm/s²(既定は標準の重力。T-0423)・--ticks n(既定: release は場面の全部、debug は 120)・--segment n(既定 60)
 //   --broadphase compute|graph: 広域の選別 → 接触の幾何を Compute の 2 パスか Work Graph か(既定 graph。T-0092)
 //   --solver compute|graph: 色ごとの解き方を Compute の Dispatch か Work Graph か(既定 compute。T-0092)
 //   --scene wall: れんが 300 個の壁(1 つの大きな島)
@@ -18,6 +18,7 @@
 #include "gpu_test_options.h"
 #include "sim/physics_scene.h"
 #include "sim/physics_world.h"
+#include "sim/world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::physics;
@@ -39,6 +40,7 @@ namespace {
         bool broadphaseGraph = true;
         sim::GpuPhysicsSolver solver = sim::GpuPhysicsSolver::Compute;
         bool skipEmptyColors = true;
+        sim::WorldPhysics world = sim::StandardWorldPhysics();  // 世界の重力(--gravity µm/s²。T-0423)
     };
 
     struct GpuRun {
@@ -131,7 +133,8 @@ namespace {
         const sim::GpuPhysicsOptions physicsOptions{.broadphaseGraph = testOptions.broadphaseGraph,
                                                     .solver = testOptions.solver,
                                                     .skipEmptyColors = testOptions.skipEmptyColors};
-        auto physics = sim::GpuPhysics::Create(device, scene, PxDefaultParameters(), physicsOptions);
+        auto physics = sim::GpuPhysics::Create(device, scene, sim::PhysicsParametersFor(testOptions.world),
+                                               physicsOptions);
         if (!physics)
             return std::unexpected(physics.error());
 
@@ -232,6 +235,8 @@ namespace {
                 options.solver = ParseSolver(value);
             else if (name == "--segment")
                 options.segmentTicks = std::max<uint64_t>(1, std::stoull(std::string(value)));
+            else if (name == "--gravity")
+                options.world.gravityMicrometersPerSecond2 = (uint32_t)std::stoul(std::string(value));
             else {
                 ++index;
                 continue;
@@ -242,6 +247,9 @@ namespace {
 
         const std::array<std::string_view, 4> scenes = {"stack", "mass_ratio", "pile", "wall"};
         if (std::ranges::find(scenes, options.sceneName) == scenes.end())
+            return std::nullopt;
+
+        if (options.world.gravityMicrometersPerSecond2 > fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)
             return std::nullopt;
 
         return options;
@@ -270,7 +278,7 @@ namespace {
         if (!physicsOptions || !options) {
             Log(Channel::Physics, Level::Error,
                 "使い方: gpu_physics_test [--warp] [--queue direct|compute] [--scene stack|mass_ratio|pile|wall] "
-                "[--ticks n] [--segment n] [--broadphase compute|graph] [--solver compute|graph] "
+                "[--ticks n] [--segment n] [--gravity µm/s²] [--broadphase compute|graph] [--solver compute|graph] "
                 "[--keep-empty-colors] [--profile]");
             return 2;
         }
@@ -278,9 +286,10 @@ namespace {
         const sim::PhysicsScene scene = MakeScene(physicsOptions->sceneName);
         const uint64_t tickCount = std::min(physicsOptions->tickLimit, scene.tickCount);
         Log(Channel::Physics, Level::Info,
-            "gpu_physics_test: {} を {} 刻み(区間 {})、adapter {}, queue {}, 広域の選別 {}", scene.name, tickCount,
-            physicsOptions->segmentTicks, gpu::AdapterKindName(options->adapter),
-            test::QueueTypeName(options->queueType), physicsOptions->broadphaseGraph ? "Work Graph" : "Compute");
+            "gpu_physics_test: {} を {} 刻み(区間 {}・重力 {} µm/s²)、adapter {}, queue {}, 広域の選別 {}", scene.name,
+            tickCount, physicsOptions->segmentTicks, physicsOptions->world.gravityMicrometersPerSecond2,
+            gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType),
+            physicsOptions->broadphaseGraph ? "Work Graph" : "Compute");
 
         // GPU-based validation は切る: 物理のシェーダー(-Od の debug)の計装で、パイプラインを作るのが数分を超えて終わらなかった
         // (gpu_reaction_test の WARP と同じ症状)。debug layer は残す
@@ -293,7 +302,7 @@ namespace {
         }
 
         // --- 1 回目: CPU と比べる ---
-        sim::PhysicsWorld world(scene, PxDefaultParameters());
+        sim::PhysicsWorld world(scene, sim::PhysicsParametersFor(physicsOptions->world));
         const auto cpuStarted = chr::steady_clock::now();
         auto parts = CreateGpuParts(device->Get(), options->queueType, scene, *physicsOptions);
         if (!parts) {

@@ -33,6 +33,7 @@
 #include "gpu_test_options.h"
 #include "reaction_test_table.h"
 #include "sim/probe_sim.h"
+#include "sim/world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -225,7 +226,9 @@ namespace {
     std::optional<Created> Create(ID3D12Device5* device, const BakedReactionTable& table, const PhysicsScene& scene,
                                   uint32_t savePoints) {
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"RewindTestSim");
-        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table, {.physicsScene = &scene});
+        auto simulation = ProbeSim::Create(
+            device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+            {.physicsScene = &scene, .physicsParameters = PhysicsParametersFor(StandardWorldPhysics())});
         if (!queue || !simulation) {
             Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
                 simulation ? "" : simulation.error());

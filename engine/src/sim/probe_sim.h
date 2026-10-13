@@ -256,6 +256,7 @@ namespace bicameral::sim {
         const PhysicsScene* physicsScene = nullptr;
         GpuPhysicsOptions
             physicsOptions;  // 物理の解き方(既定は T-0092 で測った形: 広域と接触は Work Graph・色ごとの解は Compute)
+        // 物理の値(解き方 + 世界の重力)。既定は重力 0(ブランクの世界。D-480)。積み木の場面は sim::PhysicsParametersFor(世界の値) で渡す
         physics::PxParameters physicsParameters = physics::PxDefaultParameters();
 
         // 初めの世界(PROBE_CELL_COUNT 個。空なら MakeProbeInitialWorld。試験用。T-0122)。作る時だけ読む(呼んだ後は持たなくてよい)

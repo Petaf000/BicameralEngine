@@ -17,10 +17,12 @@
 #include <vector>
 
 #include "sim/gas_reference.h"
+#include "sim/world_physics.h"
 
 namespace {
 
     using namespace bicameral::sim;
+    namespace fx = bicameral::fx;
 
     int failureCount = 0;
 
@@ -54,6 +56,16 @@ namespace {
         config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0};  // O2
         config.species[2] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};  // 煙の印
 
+        ApplyWorldPhysics(StandardWorldPhysics(), config);  // 標準の重力の世界(D-480。器の既定は 0)
+
+        return config;
+    }
+
+    // 重力を変えた世界(T-0423・D-480)。月の重力 1.62 m/s²
+    constexpr uint32_t MOON_GRAVITY = 1620000;
+
+    GasConfig WithGravity(GasConfig config, uint32_t gravity) {
+        ApplyWorldPhysics({.gravityMicrometersPerSecond2 = gravity}, config);
         return config;
     }
 
@@ -104,8 +116,8 @@ namespace {
     }
 
     // --- 閉じた箱: 成分・エネルギーは一定、運動量は初め + 帳簿 ---
-    GasBox MakeDisturbedClosedBox() {
-        GasBox box = MakeAirBox(MakeAirConfig(8, 8, 8));
+    GasBox MakeDisturbedClosedBox(uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+        GasBox box = MakeAirBox(WithGravity(MakeAirConfig(8, 8, 8), gravity));
         Heat(box, box.Index(3, 3, 1), AIR_TEMPERATURE + 50000);
         Heat(box, box.Index(4, 3, 1), AIR_TEMPERATURE + 50000);
         AddSmoke(box, box.Index(5, 5, 5));
@@ -785,6 +797,66 @@ namespace {
         }
     }
 
+    // --- 重力を変えた世界(T-0423・D-480・ADR-0171)---
+
+    // 静止大気の地面の層と一番上の層の圧力の差(µPa)。セルの物質量は µmol の整数なので、1 層の差(月で約 50 µmol 分)では
+    // 丸めが 1% 近くになる。箱の高さ全部の差で比べる
+    int64_t LayerPressureDrop(const GasConfig& config) {
+        const GasBox box = MakeAirBox(config);
+        const uint32_t top = config.sizeZ - 1;
+        return DeriveGasCell(box, box.cells[box.Index(0, 0, 0)], 0).pressure -
+               DeriveGasCell(box, box.cells[box.Index(0, 0, top)], top).pressure;
+    }
+
+    // 静止大気の層ごとの圧力の差は重力に比例し(無重力では 0)、どの重力でも静止大気は動かない
+    void TestHydrostaticScalesWithGravity() {
+        const GasConfig earth = MakeAirConfig(4, 4, 16);
+        const int64_t earthDrop = LayerPressureDrop(earth);
+        const int64_t moonDrop = LayerPressureDrop(WithGravity(earth, MOON_GRAVITY));
+        const int64_t zeroDrop = LayerPressureDrop(WithGravity(earth, 0));
+        const double ratio = (double)moonDrop / (double)earthDrop;
+        const double gravityRatio = (double)MOON_GRAVITY / (double)fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2;
+        std::printf(
+            "layer pressure drop: earth %lld uPa, moon %lld uPa (ratio %.5f, gravity ratio %.5f), zero %lld uPa\n",
+            (long long)earthDrop, (long long)moonDrop, ratio, gravityRatio, (long long)zeroDrop);
+        EXPECT(zeroDrop == 0);
+        EXPECT(std::abs(ratio - gravityRatio) < gravityRatio * 5e-3);
+
+        for (const uint32_t gravity : {0u, MOON_GRAVITY, fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2}) {
+            GasBox box = MakeAirBox(WithGravity(earth, gravity));
+            const GasTotals before = SumGas(box);
+            Run(box, 120);
+            std::printf("static atmosphere (gravity %u um/s^2): max speed after 120 ticks = %lld\n", gravity,
+                        (long long)MaxSpeed(box));
+            EXPECT(MaxSpeed(box) <= 1);
+            EXPECT(SumGas(box).energy == before.energy);
+            EXPECT(box.ledger.energy == 0);
+        }
+    }
+
+    // 乱した閉じた箱: 重力の値によらず保存則がビット単位で成り立つ(エネルギー = 初め + 帳簿の重さの仕事。無重力では帳簿が 0)
+    void TestClosedBoxAnyGravity() {
+        for (const uint32_t gravity : {0u, MOON_GRAVITY, fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2}) {
+            GasBox box = MakeDisturbedClosedBox(gravity);
+            const GasTotals before = SumGas(box);
+            Run(box, 120);
+            const GasTotals after = SumGas(box);
+
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+                EXPECT(after.amounts[s] == before.amounts[s]);
+
+            EXPECT(after.energy == before.energy + box.ledger.energy);
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                EXPECT(after.momentum[axis] == before.momentum[axis] + box.ledger.momentum[axis]);
+
+            if (gravity == 0)
+                EXPECT(box.ledger.energy == 0);
+
+            std::printf("closed box (gravity %u um/s^2): gravity work %lld mJ, max speed %lld\n", gravity,
+                        (long long)box.ledger.energy, (long long)MaxSpeed(box));
+        }
+    }
+
 }  // namespace
 
 int main() {
@@ -804,6 +876,8 @@ int main() {
     TestEnergyEveryTick();
     TestNoiseStaysSmall();
     TestStrongPressureStable();
+    TestHydrostaticScalesWithGravity();
+    TestClosedBoxAnyGravity();
 
     if (failureCount != 0) {
         std::printf("gas_reference_test: %d failure(s)\n", failureCount);

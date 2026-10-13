@@ -30,6 +30,7 @@
 #include "reaction_test_table.h"
 #include "sim/physics_world.h"
 #include "sim/probe_sim.h"
+#include "sim/world_physics.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -105,7 +106,8 @@ namespace {
 
     Expected RunReference(const PhysicsScene& scene, uint64_t ticks) {
         Expected expected;
-        PhysicsWorld world(scene, physics::PxDefaultParameters());
+        PhysicsWorld world(scene,
+                           PhysicsParametersFor(StandardWorldPhysics()));  // サンプルの世界と同じ標準の重力(D-480)
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             for (const Push& push : PUSHES) {
                 if (push.tick != tick)
@@ -219,7 +221,8 @@ namespace {
                                                {.busyIterations = m_second ? busyIterations : 0u,
                                                 .busyPieces = m_second ? 3u : 1u,
                                                 .physicsScene = &scene,
-                                                .physicsOptions = {.broadphaseGraph = !m_config.computeBroadphase}});
+                                                .physicsOptions = {.broadphaseGraph = !m_config.computeBroadphase},
+                                                .physicsParameters = PhysicsParametersFor(StandardWorldPhysics())});
 
             // 雑音: 別の優先度の高い direct のキューで重い仕事を流す(窓の描画のように、物理の途中に割り込ませる)
             auto noiseQueue = gpu::Queue::Create(m_device, D3D12_COMMAND_LIST_TYPE_DIRECT, L"PhysicsProbeTestNoise",

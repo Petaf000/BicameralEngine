@@ -1,11 +1,11 @@
 # T-0372 物理定数を世界のデータに
 
-- Status: Doing
+- Status: Done
 - 種類: 研究(どこまでをデータにするか・整数の精度と GPU の費用)+ 工学(重力を通す)
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
 - マイルストーン: M2 (docs/plan/ROADMAP.md)
-- 設計: docs/design/13-scripting-game-model.md §2.6・04-numerics-determinism.md §2 / 決定: D-454・ADR-0151 の 5・ADR-0171(Proposed)
+- 設計: docs/design/13-scripting-game-model.md §2.6・04-numerics-determinism.md §2 / 決定: D-454・ADR-0151 の 5・ADR-0171(Accepted・D-480)
 
 ## 目的(1〜2 行)
 エンジンの定数として埋まっている物理定数を洗い出し、「世界ごとに違ってよい値」(重力など)は世界のデータとして CPU と GPU が同じ値を読む形にする。
@@ -17,8 +17,9 @@
 - [x] 重力を世界のデータの 1 つの値(µm/s²)にし、物理(PxParameters::gravity)と気体(GasConfig → GasCoefficients → GasGpuParameters)が同じ換算で読む
 - [x] 気体定数 R を units.hlsli の 1 か所に寄せる(gas_internal.h・reaction_table.cpp・lab_box.cpp・magic_patch.hlsli)
 - [x] 標準の重力で今の結果が変わらない(CPU の試験・GPU の試験のビット一致・画像の試験)
-- [ ] 重力を変えた世界の試験(無重力・別の重力で CPU と GPU がビット一致)— T-0423 に分けた
-- [ ] 世界のパッケージ(Luau の環境の値)から重力を読む — T-0373(環境ミキサー)/T-0400 と合わせる(下の「T-0400 との関係」)
+- [x] ブランクの世界の重力を 0 に(器の既定 0・世界の値は sim::WorldPhysics。サンプルは標準の値を明示。D-480・ADR-0171 追記 1)
+- [x] 重力を変えた世界の試験(無重力・別の重力で CPU と GPU がビット一致)— T-0423(Done)
+- [→] 世界のパッケージ(Luau の環境の値)から重力を読む — T-0373(環境ミキサー)/T-0400 へ渡した(下の「T-0400 との関係」。StandardWorldPhysics() の置き場所を標準パッケージへ移す)
 
 ## 研究の打ち切り条件(研究のときだけ)
 - R を世界ごとの値にする案は、「定数がシフト・除数の係数に入っている所が、値を変えても桁あふれ・精度落ちなく式を作り直せるか」を
@@ -84,3 +85,7 @@
   release の GPU(HW): gpu_gas・gpu_gas_tree・gpu_physics_wall・gpu_physics_stack_alternative・gpu_probe_physics・gpu_probe_physics_compute の 6 本が通った(CPU とビット一致)。
   続けて gpu_lab_box・gpu_probe_patch(R の 1 行)・image_probe_volume・image_probe_slice(画像が基準と一致)が通った。WARP の組(gpu_gas_warp など)は流していない。
   残り: T-0423(重力を変えた世界の試験)・パッケージの環境の値から重力を読む(T-0373/T-0400)・ADR-0171 のユーザーの判断。Status は Doing のまま(判断待ち)。
+- 2026-10-13: D-480(案 A・ブランクの重力 0)を受けて、器の既定の重力を 0 にした(PxDefaultParameters・GasConfig)。世界の値は新しい engine/src/sim/world_physics.h の
+  WorldPhysics(既定 0)にまとめ、PhysicsParametersFor・ApplyWorldPhysics で物理と気体へ渡す。窓はブランク → 0・サンプル → StandardWorldPhysics()(frame_loop の WorldPhysicsOf)。
+  標準の重力で書いた試験の場面は標準の値を明示して渡した(結果は変わらない: 物理・気体・仮の世界の物理・巻き戻し・窓と画像が通過)。重力を変えた試験は T-0423。
+  ADR-0171 に追記 1、ADR-0151 の 5 に「結論は ADR-0171」。パッケージから重力を読むのは T-0373/T-0400 へ。Status を Done に。
