@@ -357,15 +357,20 @@ set_tests_properties(gpu_lab_box gpu_lab_box_warp PROPERTIES TIMEOUT 900)  # 並
 
 bicameral_add_gpu_test(gpu_gas_test)  # 気体の流れの GPU と CPU の毎刻みのビット一致・G1・G2 の合格の条件(T-0185)
 target_link_libraries(gpu_gas_test PRIVATE bicameral_sim)
-# GPU の順番待ち(D-460)に合わせて場面を 2 組に分ける(T-0426。1 本 10 分以内。比べ方は同じ)。release の WARP の目安(2026-10-12):
-# 箱の組(閉じた箱・泡・重さの違い)約 390 秒・流れの組(風・管・爆発・熱いセル〔T-0269〕・静止大気の重さの違い)約 360 秒(2026-10-13 の T-0269 の後: 箱 513 秒・流れ 359 秒。負荷あり)
+# GPU の順番待ち(D-460)に合わせて場面を 3 組に分ける(T-0426。1 本 10 分以内。比べ方は同じ)。release の WARP の目安(2026-10-12):
+# 箱の組(閉じた箱・泡・重さの違い)約 390 秒・流れの組(風・管・爆発・熱いセル〔T-0269〕・静止大気の重さの違い)約 360 秒(2026-10-13 の T-0269 の後: 箱 513 秒・流れ 359 秒。負荷あり)。
+# 流れの組は debug の WARP で 630 秒(2026-10-14。環境の変化〔T-0444〕の場面が増えた)なので、風・管・音・衝撃波と、爆発・熱いセル・静止大気・開いた環境の変化に分けた
 set(GPU_GAS_BOX_SCENES closed,periodic,single_layer,static,bubble,closed_zero_gravity,closed_moon,closed_max_gravity,bubble_zero_gravity,closed_environment_change)
-set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal,blast,hot_cell,blast_hot,static_moon,static_max_gravity,open_environment_change)
+set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal)
+set(GPU_GAS_BLAST_SCENES blast,hot_cell,blast_hot,static_moon,static_max_gravity,open_environment_change)
 bicameral_add_gpu_test_case(gpu_gas gpu_gas_test gpu --queue compute --scene ${GPU_GAS_BOX_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_flow gpu_gas_test gpu --queue compute --scene ${GPU_GAS_FLOW_SCENES})
+bicameral_add_gpu_test_case(gpu_gas_blast gpu_gas_test gpu --queue compute --scene ${GPU_GAS_BLAST_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_BOX_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_flow_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_FLOW_SCENES})
-set_tests_properties(gpu_gas gpu_gas_flow gpu_gas_warp gpu_gas_flow_warp PROPERTIES TIMEOUT 900)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い)
+bicameral_add_gpu_test_case(gpu_gas_blast_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_BLAST_SCENES})
+set_tests_properties(gpu_gas gpu_gas_flow gpu_gas_blast gpu_gas_warp gpu_gas_flow_warp gpu_gas_blast_warp
+  PROPERTIES TIMEOUT 900)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い)
 bicameral_add_gpu_test(gpu_gas_tree_test)  # 気体の多重解像度の木の GPU と CPU(gas_tree)の毎刻みのビット一致(T-0209)
 target_link_libraries(gpu_gas_tree_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_gas_tree gpu_gas_tree_test gpu --queue compute)
