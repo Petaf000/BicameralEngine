@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "script/package_fields.h"
+
 namespace bicameral::script {
 
     namespace {
@@ -23,75 +25,10 @@ namespace bicameral::script {
         using sim::RuleTerm;
         using sim::SpeciesDefinition;
 
-        constexpr int64_t EXACT_INTEGER_LIMIT = int64_t{1} << 53;  // 倍精度で誤差なしに表せる整数の上限
+        constexpr int64_t EXACT_INTEGER_LIMIT = PACKAGE_EXACT_INTEGER_LIMIT;  // 倍精度で誤差なしに表せる整数の上限
         constexpr int64_t UINT32_LIMIT = std::numeric_limits<uint32_t>::max();
         constexpr size_t DECIMAL_DIGITS_MAX = 19;  // 10^19 − 1 < 2^64
         constexpr int64_t DECIMAL_EXPONENT_MAX = 999;
-
-        // --- 欄を読む道具 ---
-
-        // 表の鍵が全部 allowed の中の文字列か(知らない欄は綴りの誤りとして落とす)
-        std::expected<void, std::string> CheckFields(const ScriptValue& table,
-                                                     std::span<const std::string_view> allowed, std::string_view path) {
-            for (const ScriptField& field : table.fields) {
-                const bool known = field.key.IsString() &&
-                                   std::find(allowed.begin(), allowed.end(), field.key.text) != allowed.end();
-                if (!known)
-                    return std::unexpected(std::format("{}: 知らない欄 {}", path, ToDebugText(field.key)));
-            }
-
-            return {};
-        }
-
-        std::expected<const ScriptValue*, std::string> RequireField(const ScriptValue& table, std::string_view field,
-                                                                    std::string_view path) {
-            const ScriptValue* value = table.Find(field);
-            if (value == nullptr)
-                return std::unexpected(std::format("{}: 欄 {} がない", path, field));
-
-            return value;
-        }
-
-        std::expected<void, std::string> RequireTable(const ScriptValue& value, std::string_view path) {
-            if (!value.IsTable())
-                return std::unexpected(std::format("{}: 表で書く", path));
-
-            return {};
-        }
-
-        // 整数で書いた数を読む(小数・±2^53 の外・[minimum, maximum] の外は誤り)
-        std::expected<int64_t, std::string> ReadInteger(const ScriptValue& value, std::string_view path,
-                                                        int64_t minimum, int64_t maximum) {
-            constexpr auto LIMIT = static_cast<double>(EXACT_INTEGER_LIMIT);
-            const bool exact = value.IsNumber() && value.number >= -LIMIT && value.number <= LIMIT &&
-                               std::trunc(value.number) == value.number;
-            if (!exact)
-                return std::unexpected(std::format("{}: 整数(±2^53 まで)で書く", path));
-
-            const auto integer = static_cast<int64_t>(value.number);
-            if (integer < minimum || integer > maximum)
-                return std::unexpected(std::format("{}: {} は範囲 {}〜{} の外", path, integer, minimum, maximum));
-
-            return integer;
-        }
-
-        std::expected<int64_t, std::string> ReadIntegerField(const ScriptValue& table, std::string_view field,
-                                                             std::string_view path, int64_t minimum, int64_t maximum) {
-            const auto value = RequireField(table, field, path);
-            if (!value)
-                return std::unexpected(value.error());
-
-            return ReadInteger(**value, std::format("{}.{}", path, field), minimum, maximum);
-        }
-
-        // 表であることと、知らない欄が無いことを確かめる
-        std::expected<void, std::string> CheckRecord(const ScriptValue& value,
-                                                     std::span<const std::string_view> allowed, std::string_view path) {
-            if (auto table = RequireTable(value, path); !table)
-                return table;
-
-            return CheckFields(value, allowed, path);
-        }
 
         // --- 元素 ---
 
@@ -309,28 +246,6 @@ namespace bicameral::script {
             return rule;
         }
 
-        // --- 分類ごと ---
-
-        // 分類 category の鍵を全部 read で読み、out に足す(鍵はバイト順。ベイクも名前の順に並べ直す)
-        template <typename Definition, typename Reader>
-        std::expected<void, std::string> ReadCategory(const PackageSetResult& packages, std::string_view category,
-                                                      Reader read, std::vector<Definition>& out) {
-            const auto found = packages.tables.find(std::string(category));
-            if (found == packages.tables.end())
-                return {};
-
-            for (const auto& [key, entry] : found->second) {
-                const std::string path = std::format("{}.{}", category, key);
-                auto definition = read(key, entry.value, path);
-                if (!definition)
-                    return std::unexpected(std::format("パッケージ {}: {}", entry.package, definition.error()));
-
-                out.push_back(std::move(*definition));
-            }
-
-            return {};
-        }
-
         // --- 10 進の数 ---
 
         // 仮数の数字の並び(先頭と末尾の 0 を落とし、落とした末尾の数を指数へ)を数にする
@@ -428,6 +343,8 @@ namespace bicameral::script {
 
         if (auto result = ReadCategory(packages, REACTION_RULES_CATEGORY, ReadRule, definition.rules); !result)
             return std::unexpected(result.error());
+
+        // --- 同じ読み込みに足した分類(世界のデータ。T-0398〜T-0400)。分類ごとに別のファイルで読み、ここで 1 行ずつつなぐ ---
 
         return definition;
     }

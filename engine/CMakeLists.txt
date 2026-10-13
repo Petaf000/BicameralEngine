@@ -122,6 +122,7 @@ add_library(bicameral_script STATIC
   src/script/luau_package.cpp
   src/script/luau_type_check.cpp
   src/script/luau_literal_edit.cpp
+  src/script/package_fields.cpp  # パッケージの欄を読む道具(反応表と世界のデータの分類が共有。T-0398)
   src/script/script_value.cpp
 )
 target_include_directories(bicameral_script PUBLIC src)
