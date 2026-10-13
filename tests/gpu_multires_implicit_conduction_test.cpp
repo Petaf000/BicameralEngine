@@ -10,13 +10,16 @@
 // 同じ上限を渡し、毎刻みビット一致と保存量(ComputeConservedTotals)の一致を確かめる。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 1 刻み全体の GPU の ms(陰解法あり / なし。なしは同じ場面を陽解法の
 // 頭打ちで刻む比べる相手)。同じ場面を 2 回流して 2 回目を使う。
-// --squeeze none,blocks,levels,cheapest(カンマ区切り。既定は全部)で上限の形を選ぶ。ctest は HW を 3 本・WARP を 2 本に分ける(1 本を 10 分に収める。T-0426)。
-// 計測は none を含むときだけ。
+// --squeeze none,blocks,levels,cheapest(カンマ区切り。既定は全部)で上限の形を、--scenes hot,chain,stress(既定は全部)で場面を選ぶ。
+// ctest は 1 本を GPU の順番待ち(D-460)に合う 10 分に収めるよう、HW は形 × 場面の 12 本、WARP は形ごとの 4 本に分ける
+// (debug の HW は 1 つの形で 900 s 超え・1 場面で 300〜340 s・WARP は 2 つの形で 606〜745 s だった。T-0426)。
+// 計測は none を含むときだけ(選んだ場面だけ)。
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -570,25 +573,47 @@ namespace {
                 {.name = "たくさんの要求", .kind = SceneKind::Stress, .ticks = STRESS_TICKS}};
     }
 
+    // --scenes の名前の並び(カンマ区切り)を場面に。知らない名前があれば nullopt(名前を変えた時に ctest の組から黙って落ちないように)
+    std::optional<std::vector<SceneSpec>> ParseScenes(std::string_view text) {
+        const std::vector<SceneSpec> all = Scenes();
+        std::vector<SceneSpec> scenes;
+        for (const auto part : views::split(text, ',')) {
+            const std::string_view name(part.begin(), part.end());
+            if (name == "hot")
+                scenes.push_back(all[0]);
+            else if (name == "chain")
+                scenes.push_back(all[1]);
+            else if (name == "stress")
+                scenes.push_back(all[2]);
+            else
+                return std::nullopt;
+        }
+
+        return scenes;
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measureOnly = false;
         std::vector<Squeeze> squeezes{Squeeze::None, Squeeze::Blocks, Squeeze::Levels, Squeeze::Cheapest};
+        std::optional<std::vector<SceneSpec>> scenes = Scenes();
         for (size_t index = 0; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
             if (argument == "--measure-only")
                 measureOnly = true;
             else if (argument == "--squeeze" && index + 1 < arguments.size())
                 squeezes = ParseSqueezes(arguments[++index]);
+            else if (argument == "--scenes" && index + 1 < arguments.size())
+                scenes = ParseScenes(arguments[++index]);
             else
                 rest.push_back(arguments[index]);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options || squeezes.empty()) {
+        if (!options || squeezes.empty() || !scenes || scenes->empty()) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_multires_implicit_conduction_test [--warp] [--queue direct|compute] [--measure-only] "
-                "[--squeeze none,blocks,levels,cheapest]");
+                "[--squeeze none,blocks,levels,cheapest] [--scenes hot,chain,stress]");
             return 2;
         }
 
@@ -615,7 +640,7 @@ namespace {
             if (FAILED(queue->Native()->GetTimestampFrequency(&context.frequency)))
                 context.frequency = 0;
 
-            for (const SceneSpec& scene : Scenes()) {
+            for (const SceneSpec& scene : *scenes) {
                 if (auto measured = MeasureScene(context, scene); !measured) {
                     Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_conduction_test: FAILED(計測 {}: {})",
                         scene.name, measured.error());
@@ -629,7 +654,7 @@ namespace {
 
         for (const Squeeze squeeze : squeezes) {
             const auto start = chr::steady_clock::now();
-            for (const SceneSpec& scene : Scenes()) {
+            for (const SceneSpec& scene : *scenes) {
                 if (auto checked = CheckScene(context, scene, squeeze); !checked) {
                     Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_conduction_test: FAILED ({})",
                         checked.error());

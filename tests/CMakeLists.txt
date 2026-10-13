@@ -296,15 +296,25 @@ bicameral_add_gpu_test_case(gpu_multires_implicit_build_warp gpu_multires_implic
 set_tests_properties(gpu_multires_implicit_build gpu_multires_implicit_build_warp PROPERTIES TIMEOUT 1200)
 bicameral_add_gpu_test(gpu_multires_implicit_conduction_test)  # GPU の伝導の段から陰解法を呼んで全部・活性の刻みで CPU とビット一致(T-0132)
 target_link_libraries(gpu_multires_implicit_conduction_test PRIVATE bicameral_sim)
-# 上限の形(--squeeze)で分ける: 1 本では release で 690〜1112 s かかった(T-0426)。計測は none を含む方だけ。
-# HW は levels,cheapest の 1 本が release で 643 s(一番安い積み方だけで 454 s。2026-10-13)だったので 2 本に。WARP は 333 s・398 s で 2 本のまま
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction gpu_multires_implicit_conduction_test gpu --queue compute --squeeze none,blocks)
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_squeeze gpu_multires_implicit_conduction_test gpu --queue compute --squeeze levels)
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_cheapest gpu_multires_implicit_conduction_test gpu --queue compute --squeeze cheapest)
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_warp gpu_multires_implicit_conduction_test warp --warp --queue compute --squeeze none,blocks)
-bicameral_add_gpu_test_case(gpu_multires_implicit_conduction_squeeze_warp gpu_multires_implicit_conduction_test warp --warp --queue compute --squeeze levels,cheapest)
-set_tests_properties(gpu_multires_implicit_conduction gpu_multires_implicit_conduction_squeeze gpu_multires_implicit_conduction_cheapest
-  gpu_multires_implicit_conduction_warp gpu_multires_implicit_conduction_squeeze_warp PROPERTIES TIMEOUT 900)
+# 上限の形(--squeeze)と場面(--scenes)で分ける(1 本を GPU の順番待ち〔D-460〕に合う 10 分に収める。T-0426): 1 本では release で
+# 690〜1112 s。形ごとでも debug の HW は 1 つの形で 900 s を超え・WARP は 2 つの形で 606〜745 s(2026-10-13)。
+# debug の HW は 1 場面(全部・活性)で 300〜340 s かかる(刻みの GPU の仕事。作成は 1 回 約 40 s)ので、HW は形 × 場面の 12 本
+# (名前の後ろなし = 熱い点・_chain・_stress)、WARP は形ごとの 4 本。計測(release の HW)は none の 3 本だけ(その場面だけ)
+foreach(_squeeze none blocks levels cheapest)
+  if(_squeeze STREQUAL "none")
+    set(_name gpu_multires_implicit_conduction)
+  else()
+    set(_name gpu_multires_implicit_conduction_${_squeeze})
+  endif()
+  bicameral_add_gpu_test_case(${_name} gpu_multires_implicit_conduction_test gpu --queue compute --squeeze ${_squeeze}
+    --scenes hot)
+  bicameral_add_gpu_test_case(${_name}_chain gpu_multires_implicit_conduction_test gpu --queue compute --squeeze ${_squeeze}
+    --scenes chain)
+  bicameral_add_gpu_test_case(${_name}_stress gpu_multires_implicit_conduction_test gpu --queue compute --squeeze ${_squeeze}
+    --scenes stress)
+  bicameral_add_gpu_test_case(${_name}_warp gpu_multires_implicit_conduction_test warp --warp --queue compute --squeeze ${_squeeze})
+  set_tests_properties(${_name} ${_name}_chain ${_name}_stress ${_name}_warp PROPERTIES TIMEOUT 900)
+endforeach()
 
 bicameral_add_gpu_test(gpu_multires_activity_test)  # 木の上の活性の GPU と CPU のビット一致(T-0100)
 target_link_libraries(gpu_multires_activity_test PRIVATE bicameral_sim)
@@ -347,15 +357,20 @@ set_tests_properties(gpu_lab_box gpu_lab_box_warp PROPERTIES TIMEOUT 900)  # 並
 
 bicameral_add_gpu_test(gpu_gas_test)  # 気体の流れの GPU と CPU の毎刻みのビット一致・G1・G2 の合格の条件(T-0185)
 target_link_libraries(gpu_gas_test PRIVATE bicameral_sim)
-# GPU の順番待ち(D-460)に合わせて場面を 2 組に分ける(T-0426。1 本 10 分以内。比べ方は同じ)。release の WARP の目安(2026-10-12):
-# 箱の組(閉じた箱・泡・重さの違い)約 390 秒・流れの組(風・管・爆発・熱いセル〔T-0269〕・静止大気の重さの違い)約 360 秒(2026-10-13 の T-0269 の後: 箱 513 秒・流れ 359 秒。負荷あり)
+# GPU の順番待ち(D-460)に合わせて場面を 3 組に分ける(T-0426。1 本 10 分以内。比べ方は同じ)。release の WARP の目安(2026-10-12):
+# 箱の組(閉じた箱・泡・重さの違い)約 390 秒・流れの組(風・管・爆発・熱いセル〔T-0269〕・静止大気の重さの違い)約 360 秒(2026-10-13 の T-0269 の後: 箱 513 秒・流れ 359 秒。負荷あり)。
+# 流れの組は debug の WARP で 630 秒(2026-10-14。環境の変化〔T-0444〕の場面が増えた)なので、風・管・音・衝撃波と、爆発・熱いセル・静止大気・開いた環境の変化に分けた
 set(GPU_GAS_BOX_SCENES closed,periodic,single_layer,static,bubble,closed_zero_gravity,closed_moon,closed_max_gravity,bubble_zero_gravity,closed_environment_change)
-set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal,blast,hot_cell,blast_hot,static_moon,static_max_gravity,open_environment_change)
+set(GPU_GAS_FLOW_SCENES wind_mc,wind_upwind,wind_minmod_floor,trace,sound,shock,shock_isothermal)
+set(GPU_GAS_BLAST_SCENES blast,hot_cell,blast_hot,static_moon,static_max_gravity,open_environment_change)
 bicameral_add_gpu_test_case(gpu_gas gpu_gas_test gpu --queue compute --scene ${GPU_GAS_BOX_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_flow gpu_gas_test gpu --queue compute --scene ${GPU_GAS_FLOW_SCENES})
+bicameral_add_gpu_test_case(gpu_gas_blast gpu_gas_test gpu --queue compute --scene ${GPU_GAS_BLAST_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_BOX_SCENES})
 bicameral_add_gpu_test_case(gpu_gas_flow_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_FLOW_SCENES})
-set_tests_properties(gpu_gas gpu_gas_flow gpu_gas_warp gpu_gas_flow_warp PROPERTIES TIMEOUT 900)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い)
+bicameral_add_gpu_test_case(gpu_gas_blast_warp gpu_gas_test warp --warp --queue compute --scene ${GPU_GAS_BLAST_SCENES})
+set_tests_properties(gpu_gas gpu_gas_flow gpu_gas_blast gpu_gas_warp gpu_gas_flow_warp gpu_gas_blast_warp
+  PROPERTIES TIMEOUT 900)  # 毎刻み読み戻して CPU と比べる(debug の CPU リファレンスが重い)
 bicameral_add_gpu_test(gpu_gas_tree_test)  # 気体の多重解像度の木の GPU と CPU(gas_tree)の毎刻みのビット一致(T-0209)
 target_link_libraries(gpu_gas_tree_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_gas_tree gpu_gas_tree_test gpu --queue compute)
