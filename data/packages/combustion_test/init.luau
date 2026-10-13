@@ -5,4 +5,5 @@ return {
     reactions = require("reactions"),
     world_cells = require("world_cells"), -- サンプルの世界の組み立て(T-0398)
     world_bodies = require("world_bodies"),
+    environment = require("environment"),
 }

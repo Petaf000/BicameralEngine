@@ -63,6 +63,11 @@ target_compile_definitions(reaction_package_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(reaction_package_test bicameral_data)  # ランタイムの入り口は exe の横の data/packages を読む(T-0157)
 add_test(NAME reaction_package COMMAND reaction_package_test)
+add_executable(environment_package_test environment_package_test.cpp)  # 世界の環境の値(分類 environment。T-0400・ADR-0176)
+target_link_libraries(environment_package_test PRIVATE bicameral_reaction_script bicameral_core)
+target_compile_definitions(environment_package_test PRIVATE
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+add_test(NAME environment_package COMMAND environment_package_test)
 add_executable(reaction_hot_reload_test reaction_hot_reload_test.cpp)  # 反応表のホットリロード(T-0139)
 target_link_libraries(reaction_hot_reload_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(reaction_hot_reload_test PRIVATE

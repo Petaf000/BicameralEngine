@@ -78,7 +78,9 @@ namespace bicameral::sim {
 
         // --- 刻み ---
         uint32_t substeps = 24;  // 1 刻み(1/60 s)を何回に分けるか。c̃ Δt ÷ Δx = 0.47(安定の限界は約 2/3。T-0226)
-        uint32_t soundSpeedMmPerS = 340000;  // 音速 c̃(mm/s)。本物の音速(D-440・ADR-0043)。落とした値も設定で選べる
+        // 音速 c̃(mm/s。世界の環境の値。ADR-0176)。器の既定は 0 = 無い(ブランクの世界)。標準の 340 m/s(D-440)は
+        // sim::ApplyWorldPhysics(StandardWorldPhysics(), config) で入れる(world_physics.h)。上限は GasSoundSpeedLimitMmPerS(substeps)
+        uint32_t soundSpeedMmPerS = 0;
         bool gravity = true;
         // 重力の強さ(µm/s²。世界のデータ。ADR-0171・world_physics.hlsli)。重さの力積・層の重さの圧力・重さの仕事はここから作る
         // 器の既定は 0 = ブランクの世界(D-480)。標準の値は sim::ApplyWorldPhysics(StandardWorldPhysics(), config) で入れる(world_physics.h)
@@ -97,6 +99,12 @@ namespace bicameral::sim {
         bool stochasticRounding = true;  // 移す物質量の端数を決定的な乱数で丸める(R6)。false は切り捨て(G1)
         uint64_t randomSeed = 0;         // 丸めの乱数の種(世界のシード。R6)
     };
+
+    // 音速の基準の上限(mm/s。器の決まり。ADR-0176): 安定の条件 ν = c̃ Δt_小刻み ÷ Δx ≤ 0.6(Δx = 0.5 m・Δt_小刻み = 1/60 s ÷ 小刻み)。
+    // 圧力の拡散(陽解法の 3 次元の拡散)の境は約 2/3 で、余裕を見て 0.6(T-0226)。既定の小刻み 24 で 432 m/s
+    [[nodiscard]] constexpr uint64_t GasSoundSpeedLimitMmPerS(uint32_t substeps) {
+        return (uint64_t)substeps * 18000;
+    }
 
     // 小刻みの係数(設定から 1 回だけ作る。割り算はここだけで、小刻みの中は掛け算とシフト。04 §6・ADR-0010)
     struct GasCoefficients {

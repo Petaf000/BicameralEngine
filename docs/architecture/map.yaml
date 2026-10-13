@@ -765,6 +765,10 @@ views:
           code: "engine/src/script/world_layout_package.cpp::ReadWorldLayout", ticket: T-0398,
           doc: docs/design/13-scripting-game-model.md,
           note: "反応表と同じ読み込み(表の版・中身に入る。再生は表の中身から同じ初めの世界)。ベイクで物質の名前を ID に(sim/world_layout の BakeWorldLayout)。窓の初めの世界は sim::MakeProbeInitialWorld・物は sim::MakeLayoutPhysicsScene。分類が無ければ空(ブランク)。ADR-0172・world_layout_test" }
+      - { id: envread, group: tool, label: "環境の値を読む<br/>(environment → 重力・気体の音速の基準)",
+          code: "engine/src/script/environment_package.cpp::ReadWorldEnvironment", ticket: T-0400,
+          doc: docs/design/13-scripting-game-model.md,
+          note: "1 つの鍵 = 1 つの値(整数・単位は鍵の名前)。書かない値は 0 = ブランク。知らない鍵・範囲の外は誤り。ベイクした表の environment → 物理の重力・気体の設定(ADR-0171・ADR-0176。environment_package_test)" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0021,
           doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。名前のバイト順で ID を振る(並びに依らない。ADR-0032)。文献の反応熱の食い違いは警告。C++ の試験の表と Luau の試験の表がビットで同じ" }
@@ -795,6 +799,7 @@ views:
       - [rxread, bake, "定義"]
       - [packages, worldlayout, "world_cells・world_bodies"]
       - [worldlayout, bake, "名前のままの組み立て"]
+      - [rxread, envread, "分類 environment"]
       - [bake, table]
       - [rtload, packages, "起動時"]
       - [rtload, vram, "表を GPU へ"]

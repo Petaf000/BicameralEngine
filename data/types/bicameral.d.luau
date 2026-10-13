@@ -61,6 +61,13 @@ export type WorldBody = {
     mass_g: number, -- 質量(g)。0 = 動かない物(地面・壁)
 }
 
+-- --- 環境(分類 environment。T-0400・ADR-0176。1 つの鍵 = 1 つの値・整数で、単位は鍵の名前。書かない値は 0 = 無い)---
+-- 読み手は engine/src/script/environment_package.cpp(範囲: 重力 0〜100 m/s²・音速の基準は気体の小刻みの安定の上限まで)
+export type Environment = {
+    gravity_um_per_s2: number?, -- 重力の強さ(µm/s²。地球 9806650)
+    sound_speed_mm_per_s: number?, -- 気体の音速の基準(mm/s。D-440 の本物の音速 340000)
+}
+
 -- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。反応表のほかの分類(UI の文字列など)は形を決めていない ---
 export type PackageEntry = {
     elements: { [string]: Element }?,
@@ -68,5 +75,6 @@ export type PackageEntry = {
     reactions: { [string]: Reaction }?,
     world_cells: { [string]: WorldCellRegion }?,
     world_bodies: { [string]: WorldBody }?,
+    environment: Environment?,
     [string]: any,
 }

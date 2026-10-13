@@ -142,6 +142,7 @@ add_library(bicameral_reaction_script STATIC
   src/script/reaction_hot_reload.cpp
   src/script/reaction_table_edit.cpp
   src/script/world_layout_package.cpp  # 世界の組み立ての分類を読む(T-0398)
+  src/script/environment_package.cpp  # 世界の環境の値(分類 environment → sim::WorldPhysics。T-0400・ADR-0176)
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
 target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)

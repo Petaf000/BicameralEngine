@@ -47,3 +47,9 @@
 - 窓の世界は `frame_loop.cpp` の `WorldPhysicsOf`(ブランク → 0・サンプル → 標準)。サンプルの世界と標準の重力で書いた試験の場面は、標準の値を明示して渡す(結果は変わらない)。
 - 試験(T-0423): 物理の CPU(physics_gravity・physics_gravity_checked)・物理の GPU と CPU(無重力・月・上限)・気体の CPU(gas_reference の重力の節)・
   気体の GPU と CPU(gpu_gas の closed_zero_gravity など 6 場面)。
+
+## 追記 2(2026-10-13・T-0400): 音速の基準と、パッケージの環境の値
+- 気体の音速の基準(340 m/s)も世界のデータにした(`WorldPhysics::soundSpeedMillimetersPerSecond`。ブランクは 0)。基準の温度は新しい値にしない。詳細は ADR-0176(Proposed)。
+- 世界のパッケージの分類 `environment`(`gravity_um_per_s2`・`sound_speed_mm_per_s`)から `WorldPhysics` を読む(`script::ReadWorldEnvironment`)。
+  サンプルの世界は `combustion_test/environment.luau` の地球の値を読み、窓の `WorldPhysicsOf`(世界の種類で決めていた)は無くした。
+  `StandardWorldPhysics()` は標準の値で書いた試験の場面だけが使う(標準パッケージ T-0373 ができたら消せる)。

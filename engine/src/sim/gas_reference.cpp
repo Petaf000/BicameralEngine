@@ -654,12 +654,13 @@ namespace bicameral::sim {
     using namespace gas_detail;  // 下の公開の関数から小刻みの部品を使う
 
     GasCoefficients MakeGasCoefficients(const GasConfig& config) {
+        // 音速の基準は世界の環境の値(ADR-0176)。0 = 無い世界(ブランク)では気体の箱を作れない
         assert(config.substeps > 0 && config.soundSpeedMmPerS > 0);
         assert(config.gravityMicrometersPerSecond2 <= fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2);
 
         // 安定の条件: ν = c̃ Δt_小刻み ÷ Δx = c̃(mm/s)÷ (30000 × 小刻み)。圧力の拡散(陽解法の 3 次元の拡散)で ν ≤ 約 2/3、
         // 余裕を見て 0.6 まで(既定の 340 m/s・小刻み 24 で 0.47。T-0226 で 1% の乱れが育つ境を測った: 小刻み 16 で発散・18 で安定)
-        assert((uint64_t)config.soundSpeedMmPerS * 10 <= (uint64_t)config.substeps * 30000 * 6);
+        assert(config.soundSpeedMmPerS <= GasSoundSpeedLimitMmPerS(config.substeps));
         const uint64_t substeps = config.substeps;
         GasCoefficients coefficients;
 
