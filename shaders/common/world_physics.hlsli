@@ -15,9 +15,6 @@ FX_NAMESPACE_BEGIN
 // 約 268 m/s² まで。余裕を見て 100 m/s² で切る(層の重さの圧力・物理の変位の桁はこれより広い)
 FX_CONST uint32_t GRAVITY_MAX_MICROMETERS_PER_SECOND2 = 100000000;
 
-// 標準の重力 9.80665 m/s²(定義値)。標準パッケージ(T-0373)が世界のデータとして渡すまでの、ただ 1 つの置き場所
-FX_CONST uint32_t STANDARD_GRAVITY_MICROMETERS_PER_SECOND2 = 9806650;
-
 // --- 各段の単位への換算(端数は四捨五入。標準の重力では今までの定数とビット一致)------------------
 // 物理: 2^-20 m/s²(9806650 → 10283018)
 FX_FN int64_t PxGravityFromMicrometers(uint32_t gravityMicrometersPerSecond2) {

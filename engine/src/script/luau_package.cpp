@@ -25,9 +25,12 @@ namespace bicameral::script {
         constexpr size_t MAX_NAME_LENGTH = 64;
         constexpr size_t MAX_LISTED_CONFLICTS = 3;
 
+        constexpr size_t MAX_TITLE_BYTES = 256;
+
         struct Manifest {
             std::vector<std::string> depends;  // basePackage も入れたもの
             std::string entry = "init";
+            std::string title;  // 人に見せる名前(環境ミキサーの一覧。省けば空。T-0373)
         };
 
         // 分類 → 鍵 → 値(1 つのパッケージが返したもの)
@@ -114,9 +117,13 @@ namespace bicameral::script {
                     if (!field.value.IsString() || !ModulePath(field.value.text))
                         return std::unexpected("entry はパッケージの中のファイルの名前('init' の形)");
                     manifest.entry = field.value.text;
+                } else if (key == "title") {
+                    if (!field.value.IsString() || field.value.text.size() > MAX_TITLE_BYTES)
+                        return std::unexpected(std::format("title は {} バイトまでの文字列", MAX_TITLE_BYTES));
+                    manifest.title = field.value.text;
                 } else {
                     return std::unexpected(
-                        std::format("知らない欄 {}(書けるのは format・depends・entry)", ToDebugText(field.key)));
+                        std::format("知らない欄 {}(書けるのは format・title・depends・entry)", ToDebugText(field.key)));
                 }
             }
 
@@ -427,6 +434,23 @@ namespace bicameral::script {
         }
 
         return packages;
+    }
+
+    // --- マニフェストだけ読む(環境ミキサーの一覧。T-0373)---
+
+    std::expected<PackageManifestInfo, std::string> ReadPackageManifest(LuauSandbox& sandbox,
+                                                                        const PackageSource& package) {
+        if (!sandbox.IsSealed())
+            return std::unexpected("殻を Seal してから読む");
+        if (!IsValidPackageName(package.name))
+            return std::unexpected(std::format("パッケージ '{}': 名前は英小文字・数字・_・- だけ", package.name));
+
+        auto manifest = ReadManifest(sandbox, package, PackageLoadOptions{});
+        if (!manifest)
+            return std::unexpected(std::format("パッケージ '{}': {}", package.name, manifest.error()));
+
+        return PackageManifestInfo{
+            .name = package.name, .title = std::move(manifest->title), .depends = std::move(manifest->depends)};
     }
 
     // --- 読み込みと合わせ ---

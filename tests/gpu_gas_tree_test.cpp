@@ -19,6 +19,7 @@
 #include "gpu_test_options.h"
 #include "sim/gas_tree.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 #include <cmath>
 

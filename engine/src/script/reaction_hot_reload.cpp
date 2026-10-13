@@ -127,15 +127,38 @@ namespace bicameral::script {
         m_pending = m_seen;
     }
 
-    // パッケージのフォルダと型の定義(型の定義を直しても読み直す)
+    // パッケージのフォルダ・足した標準パッケージのフォルダ・型の定義(型の定義を直しても読み直す)
     uint64_t ReactionTableHotReload::Fingerprint() const {
-        const fs::path root = m_source.packageRoot.empty() ? DefaultPackageRoot() : m_source.packageRoot;
         const fs::path definitions = m_source.typeDefinitions.empty() ? DefaultTypeDefinitionsPath()
                                                                       : m_source.typeDefinitions;
         bool ok = false;
         const std::string definitionText = ReadWhole(definitions, ok);
 
-        return MixField(DirectoryFingerprint(root), ok ? definitionText : std::string("型の定義を読めない"));
+        uint64_t fingerprint = 0;
+        if (m_source.readPackageRoot) {
+            const fs::path root = m_source.packageRoot.empty() ? DefaultPackageRoot() : m_source.packageRoot;
+            fingerprint = DirectoryFingerprint(root);
+        }
+
+        for (const fs::path& folder : m_source.addedPackages)
+            fingerprint = MixField(fingerprint, std::format("{:016x}", DirectoryFingerprint(folder)));
+
+        return MixField(fingerprint, ok ? definitionText : std::string("型の定義を読めない"));
+    }
+
+    HotReloadResult ReactionTableHotReload::Replace(ReactionTableSource source) {
+        // 読む元を替えて、すぐ読み直す(環境ミキサーで足す・外す。T-0373)。落ちたら元の読む元に戻す(今の表のまま)
+        ReactionTableSource previous = std::exchange(m_source, std::move(source));
+        HotReloadResult result = Reload();
+        if (result.state == HotReloadState::Failed) {
+            m_source = std::move(previous);
+            return result;
+        }
+
+        m_seen = Fingerprint();
+        m_pending = m_seen;
+
+        return result;
     }
 
     HotReloadResult ReactionTableHotReload::Poll() {

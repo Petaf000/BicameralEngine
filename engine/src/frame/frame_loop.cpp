@@ -44,6 +44,7 @@
 #include "render/screenshot.h"
 #include "save/replay_session.h"
 #include "script/reaction_table_loader.h"
+#include "script/standard_packages.h"
 #include "sim/physics_world.h"
 #include "sim/probe_peek.h"
 #include "sim/probe_sim.h"
@@ -201,21 +202,38 @@ namespace bicameral::frame {
             return options.physics && !table.worldLayout.bodies.empty();
         }
 
-        // 世界の表の読み方: サンプルの世界はゲーム本体(combustion_test)を含むフォルダ。ブランクの世界は --packages のフォルダを
-        // ゲーム本体なし(全部 Mod)で読む
-        script::ReactionTableSource WorldTableSource(const FrameLoopOptions& options) {
-            if (options.world == save::ReplayWorld::Sample)
-                return {.packageRoot = options.packageRoot};
+        // 足す標準パッケージ(--mix)のフォルダ。棚が読めない・棚に無い・依存が足りなければ誤り(T-0373)
+        std::expected<std::vector<fs::path>, std::string> MixFolders(const FrameLoopOptions& options) {
+            if (options.mix.empty())
+                return std::vector<fs::path>{};
 
-            return {.packageRoot = options.packageRoot, .basePackage = {}};
+            const auto catalog = script::ReadStandardCatalog(script::DefaultStandardPackageRoot());
+            if (!catalog)
+                return std::unexpected(catalog.error());
+
+            return script::MixFolders(*catalog, options.mix);
         }
 
-        // パッケージのファイルを見るか(再生中は見ない。ブランクの世界は --packages を渡した時だけ。渡さなければ読むものが無い)
+        // 世界の表の読み方: サンプルの世界はゲーム本体(combustion_test)を含むフォルダ。ブランクの世界は --packages のフォルダを
+        // ゲーム本体なし(全部 Mod)で読む(渡さなければフォルダは読まない)。どちらも --mix の標準パッケージを足す。
+        // 足すフォルダの誤りは起動時の LoadWorldReactionTable が先に止める(ここでは足さない)
+        script::ReactionTableSource WorldTableSource(const FrameLoopOptions& options) {
+            std::vector<fs::path> added = MixFolders(options).value_or(std::vector<fs::path>{});
+            if (options.world == save::ReplayWorld::Sample)
+                return {.packageRoot = options.packageRoot, .addedPackages = std::move(added)};
+
+            return {.packageRoot = options.packageRoot,
+                    .basePackage = {},
+                    .readPackageRoot = !options.packageRoot.empty(),
+                    .addedPackages = std::move(added)};
+        }
+
+        // パッケージのファイルを見るか(再生中は見ない。ブランクの世界は --packages か --mix を渡した時だけ。無ければ読むものが無い)
         bool WatchesPackages(const FrameLoopOptions& options) {
             if (!options.replayPath.empty())
                 return false;
 
-            return options.world == save::ReplayWorld::Sample || !options.packageRoot.empty();
+            return options.world == save::ReplayWorld::Sample || !options.packageRoot.empty() || !options.mix.empty();
         }
 
         // 作るもの一式(FrameLoop はこれを受け取ってから動く。作れなかったら FrameLoop を作らない)
@@ -338,6 +356,7 @@ namespace bicameral::frame {
 
             // --- エディタと時間の操作(T-0023)---
             void BuildEditor();
+            void ApplyMixRequest(const editor::MixRequest& request);
             [[nodiscard]] bool SubmitEditor();
             void ApplyTimeRequest(const editor::TimeRequest& request);
             void CheckAutoTime();
@@ -511,7 +530,11 @@ namespace bicameral::frame {
         std::expected<std::shared_ptr<const script::LoadedReactionTable>, std::string> LoadWorldReactionTable(
             const FrameLoopOptions& options) {
             const auto start = chr::steady_clock::now();
-            const bool blankTable = options.world == save::ReplayWorld::Blank && options.packageRoot.empty();
+            if (const auto mixFolders = MixFolders(options); !mixFolders)
+                return std::unexpected(std::format("--mix: {}", mixFolders.error()));
+
+            const bool blankTable = options.world == save::ReplayWorld::Blank && options.packageRoot.empty() &&
+                                    options.mix.empty();
             auto loaded = blankTable ? script::LoadBlankReactionTable()
                                      : script::LoadReactionTable(WorldTableSource(options));
             if (!loaded)
@@ -1395,6 +1418,17 @@ namespace bicameral::frame {
             if (m_options.autoPatch)
                 m_editor->Patch().StartAuto();
 
+            // 環境ミキサー(T-0452): 起動時に足した一覧(--mix)から始める
+            m_editor->Mixer().SetMix(m_options.mix);
+            if (m_options.autoMixer) {
+                if (!m_options.replayPath.empty()) {
+                    Log(Channel::Tool, Level::Error, "--auto-mixer は --replay とは使えない");
+                    return false;
+                }
+
+                m_editor->Mixer().StartAuto();
+            }
+
             // --auto-table-edit(T-0219): 書き換えるのは --packages で渡した写しだけ
             if (m_options.autoTableEdit) {
                 if (!m_options.replayPath.empty() || m_options.packageRoot.empty()) {
@@ -1436,9 +1470,12 @@ namespace bicameral::frame {
                                                loaded->tableVersion);
                     m_editor->Patch().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
                                                loaded->tableVersion);
+                    m_editor->Mixer().UseTable(loaded);
                 }
 
                 request = m_editor->Build(MakeEditorStatus(), m_timeControl);
+                if (const auto mix = m_editor->Mixer().TakeRequest())
+                    ApplyMixRequest(*mix);
             }
 
             if (m_options.autoTime) {
@@ -1453,6 +1490,20 @@ namespace bicameral::frame {
 
             CheckAutoRewind();
             ApplyTimeRequest(request);
+        }
+
+        // 環境ミキサーの依頼: 世界の表の読む元の足すフォルダを替えて読み直す(ほかは今の読む元のまま)。読めたら次の刻みの境界で
+        // 当てる(ホットリロードと同じ道。記録には印のコマンドと表の中身が残る)。再生中は替えない
+        void FrameLoop::ApplyMixRequest(const editor::MixRequest& request) {
+            if (!m_options.replayPath.empty()) {
+                m_editor->Mixer().Result(request, false, "再生中は足せない");
+                return;
+            }
+
+            script::ReactionTableSource source = m_tableReload.Source();
+            source.addedPackages = request.folders;
+            const bool applied = m_tableReload.ReplaceSource(std::move(source));
+            m_editor->Mixer().Result(request, applied, m_tableReload.LastMessage());
         }
 
         bool FrameLoop::SubmitEditor() {
@@ -2011,6 +2062,10 @@ namespace bicameral::frame {
                 if (m_options.autoTableEdit && m_editor && m_editor->ReactionTable().AutoFinished())
                     break;
 
+                // --auto-mixer: 足して当て、外して戻った・失敗した
+                if (m_options.autoMixer && m_editor && m_editor->Mixer().AutoFinished())
+                    break;
+
                 // 最後のハッシュまで確かめた(--screenshot-tick なら写すまで続ける)
                 if (!m_replay.empty() && m_replay.front().Finished() && !m_options.screenshotTick)
                     break;
@@ -2120,6 +2175,12 @@ namespace bicameral::frame {
             if (m_options.autoReload && (!m_autoReload || !m_autoReload->Done())) {
                 Log(Channel::Tool, Level::Error, "--auto-reload: ホットリロードの確かめが通らなかった({})",
                     m_autoReload ? m_autoReload->Failure() : "始められない");
+                return 1;
+            }
+
+            if (m_options.autoMixer && (!m_editor || !m_editor->Mixer().AutoDone())) {
+                Log(Channel::Tool, Level::Error, "--auto-mixer: 環境ミキサーの確かめが通らなかった({})",
+                    m_editor ? m_editor->Mixer().AutoFailure() : "--editor が要る");
                 return 1;
             }
 

@@ -78,12 +78,12 @@ namespace bicameral::sim {
 
         // --- 刻み ---
         uint32_t substeps = 24;  // 1 刻み(1/60 s)を何回に分けるか。c̃ Δt ÷ Δx = 0.47(安定の限界は約 2/3。T-0226)
-        // 音速 c̃(mm/s。世界の環境の値。ADR-0176)。器の既定は 0 = 無い(ブランクの世界)。標準の 340 m/s(D-440)は
-        // sim::ApplyWorldPhysics(StandardWorldPhysics(), config) で入れる(world_physics.h)。上限は GasSoundSpeedLimitMmPerS(substeps)
+        // 音速 c̃(mm/s。世界の環境の値。ADR-0176)。器の既定は 0 = 無い(ブランクの世界)。地球の 340 m/s(D-440)は標準パッケージ
+        // earth_environment の値を sim::ApplyWorldPhysics で入れる(world_physics.h。T-0373)。上限は GasSoundSpeedLimitMmPerS(substeps)
         uint32_t soundSpeedMmPerS = 0;
         bool gravity = true;
         // 重力の強さ(µm/s²。世界のデータ。ADR-0171・world_physics.hlsli)。重さの力積・層の重さの圧力・重さの仕事はここから作る
-        // 器の既定は 0 = ブランクの世界(D-480)。標準の値は sim::ApplyWorldPhysics(StandardWorldPhysics(), config) で入れる(world_physics.h)
+        // 器の既定は 0 = ブランクの世界(D-480)。地球の値は標準パッケージ earth_environment の値を sim::ApplyWorldPhysics で入れる
         uint32_t gravityMicrometersPerSecond2 = 0;
         GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
 

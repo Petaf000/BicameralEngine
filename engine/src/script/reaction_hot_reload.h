@@ -59,6 +59,12 @@ namespace bicameral::script {
 
         [[nodiscard]] HotReloadResult Poll();
 
+        // 読む元を替えてすぐ読み直す(環境ミキサーで標準パッケージを足す・外す。T-0373)。当てられなければ Failed で、
+        // 読む元も今の表も元のまま。表の版が同じなら Unchanged(読む元は替わる)
+        [[nodiscard]] HotReloadResult Replace(ReactionTableSource source);
+
+        [[nodiscard]] const ReactionTableSource& Source() const { return m_source; }
+
         [[nodiscard]] const std::shared_ptr<const LoadedReactionTable>& Current() const { return m_current; }
 
     private:

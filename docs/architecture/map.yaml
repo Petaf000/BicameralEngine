@@ -99,6 +99,10 @@ views:
           code: "engine/src/editor/brush_undo.cpp::PlanBrushUndo", ticket: T-0278,
           doc: docs/decisions/ADR-0101-brush-undo-and-recording.md,
           note: "運び = 押してから置き終えるまでのコマンドの番号。運びが最初に当たる刻み以前の保存点へ戻し、今の刻みまで追いつく。記録は元に戻した後の流れだけ。brush_undo_test" }
+      - { id: mixerpanel, group: framelib, label: "MixerPanel<br/>環境ミキサー: 標準パッケージを世界に足す・外す",
+          code: "engine/src/editor/mixer_panel.cpp::MixerPanel::Build", ticket: T-0452,
+          doc: docs/design/14-editor-tools.md,
+          note: "棚(script/standard_packages)→ 依存をたどった足す一覧 → TableHotReload::ReplaceSource → 刻みの境界で差し替え(記録に残る)。window_mixer(--auto-mixer)" }
       - { id: tablepanel, group: framelib, label: "ReactionTablePanel<br/>反応表: 一覧・検索・保存則の検査・値を Luau に書き戻す",
           code: "engine/src/editor/reaction_table_panel.cpp::ReactionTablePanel::Build", ticket: T-0219,
           doc: docs/design/14-editor-tools.md,
@@ -622,6 +626,7 @@ views:
       - [gaugepanel, labcomparison, "並べて流す"]
       - [labcomparison, labsession, "保存点から再生"]
       - [editoroverlay, tablepanel, "反応表"]
+      - [editoroverlay, mixerpanel, "環境ミキサー"]
       - [editoroverlay, brushpanel, "筆"]
       - [brushpanel, commandqueue, "置くコマンド"]
       - [editoroverlay, patchpanel, "魔法のパッチ"]
@@ -773,6 +778,14 @@ views:
           code: "engine/src/script/environment_package.cpp::ReadWorldEnvironment", ticket: T-0400,
           doc: docs/design/13-scripting-game-model.md,
           note: "1 つの鍵 = 1 つの値(整数・単位は鍵の名前)。書かない値は 0 = ブランク。知らない鍵・範囲の外は誤り。ベイクした表の environment → 物理の重力・気体の設定(ADR-0171・ADR-0176。environment_package_test)" }
+      - { id: atmosphere, group: tool, label: "基準の大気<br/>(atmosphere の成分 + 温度・地面の圧力)",
+          code: "engine/src/sim/world_atmosphere.cpp::BakeWorldAtmosphere", ticket: T-0373,
+          doc: docs/decisions/ADR-0182-base-atmosphere-package.md,
+          note: "読むのは script::ReadWorldAtmosphere。物質の名前を ID に・割合の合計 1000000・温度と圧力の有無を検査。ベイクした表の atmosphere → 気体の層の基準(T-0210)。standard_packages_test" }
+      - { id: stdshelf, group: tool, label: "標準パッケージの棚<br/>(data/standard。足す・外すと依存)",
+          code: "engine/src/script/standard_packages.cpp::ReadStandardCatalog", ticket: T-0373,
+          doc: docs/decisions/ADR-0183-standard-packages-mixer.md,
+          note: "現実の元素・物質・反応・地球の環境・空気で満たす。MixAdd・MixRemove が依存をたどり、MixFolders が ReactionTableSource::addedPackages に。窓の --mix・環境ミキサー(T-0452)。standard_packages_test" }
       - { id: bake, group: tool, label: "ベイク(整数)<br/>元素とエネルギーの釣り合いを検査",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0021,
           doc: docs/design/02-reaction-system.md, note: "ベイクも fixed.hlsli で計算する(R7)。名前のバイト順で ID を振る(並びに依らない。ADR-0032)。文献の反応熱の食い違いは警告。C++ の試験の表と Luau の試験の表がビットで同じ" }
@@ -806,6 +819,9 @@ views:
       - [packages, mattemplates, "分類 → 鍵 → 値"]
       - [mattemplates, bake, "名前で書いた材料"]
       - [rxread, envread, "分類 environment"]
+      - [rxread, atmosphere, "分類 atmosphere"]
+      - [atmosphere, bake, "名前のままの大気"]
+      - [stdshelf, packages, "足したフォルダ"]
       - [bake, table]
       - [rtload, packages, "起動時"]
       - [rtload, vram, "表を GPU へ"]

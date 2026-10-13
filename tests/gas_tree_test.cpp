@@ -15,6 +15,7 @@
 #include "sim/gas_reference.h"
 #include "sim/gas_tree.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 namespace {
 

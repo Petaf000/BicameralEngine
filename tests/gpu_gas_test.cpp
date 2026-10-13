@@ -21,6 +21,7 @@
 #include "gpu_test_options.h"
 #include "sim/gas_reference.h"
 #include "sim/world_physics.h"
+#include "standard_world_physics.h"
 
 #include <cmath>
 #include <ranges>
@@ -109,8 +110,7 @@ namespace {
         return config;
     }
 
-    Scene MakeClosedScene(std::string name = "closed",
-                          uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+    Scene MakeClosedScene(std::string name = "closed", uint32_t gravity = STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
         GasBox box = MakeAirBox(WithGravity(MakeAirConfig(8, 8, 8), gravity));
         Heat(box, box.Index(3, 3, 1), AIR_TEMPERATURE + 50000);
         Heat(box, box.Index(4, 3, 1), AIR_TEMPERATURE + 50000);
@@ -150,15 +150,13 @@ namespace {
         return {.name = "single_layer", .box = box, .ticks = 60};
     }
 
-    Scene MakeStaticScene(std::string name = "static",
-                          uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+    Scene MakeStaticScene(std::string name = "static", uint32_t gravity = STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
         return {
             .name = std::move(name), .box = MakeAirBox(WithGravity(MakeAirConfig(4, 4, 16), gravity)), .ticks = 300};
     }
 
     // 半径 1.5 セル(0.75 m)の +30 K の泡(中心 (5, 5, 4))。10 × 10 × 20 の閉じた箱で 2 秒
-    Scene MakeBubbleScene(std::string name = "bubble",
-                          uint32_t gravity = fx::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
+    Scene MakeBubbleScene(std::string name = "bubble", uint32_t gravity = STANDARD_GRAVITY_MICROMETERS_PER_SECOND2) {
         GasBox box = MakeAirBox(WithGravity(MakeAirConfig(10, 10, 20), gravity));
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             const int32_t dx = (int32_t)CellX(box, index) - 5;

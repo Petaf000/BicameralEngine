@@ -1,7 +1,8 @@
 // luau_package.h — Luau のパッケージ(1 フォルダ = 1 パッケージ)を読み、表を合わせる(T-0138、13 §2・D-320・ADR-0031)。
 //
 // パッケージ: フォルダの中の *.luau。ゲーム本体もパッケージの 1 つ(options.basePackage)。
-//   package.luau(マニフェスト)が表を返す: { format = 1, depends = { "core" }, entry = "init" }(depends・entry は省ける)。
+//   package.luau(マニフェスト)が表を返す: { format = 1, title = "見せる名前", depends = { "core" }, entry = "init" }
+//   (title・depends・entry は省ける)。
 //   entry のファイルが「分類 → 鍵 → 値」の表を返す(例 { reactions = { burn = {...} }, elements = {...} })。
 //   require("sub/util") はそのパッケージの中の sub/util.luau だけを読む(ほかのパッケージ・ファイルの外には届かない)。
 // 読む順番: 依存の後。依存の関係で決まらないものはパッケージの名前(バイト順)。フォルダを並べた順・入れた順には依らない(決定性)。
@@ -96,6 +97,17 @@ namespace bicameral::script {
     [[nodiscard]] std::expected<PackageSetResult, std::string> LoadPackages(LuauSandbox& sandbox,
                                                                             std::span<const PackageSource> packages,
                                                                             const PackageLoadOptions& options);
+
+    // マニフェスト(package.luau)だけを読んだもの(環境ミキサーの一覧と依存の確かめ。T-0373)。表は読まない
+    struct PackageManifestInfo {
+        std::string name;
+        std::string title;                 // 人に見せる名前(書いていなければ空)
+        std::vector<std::string> depends;  // 依存するパッケージ(書いた順)
+    };
+
+    // sandbox は Seal 済みのもの。マニフェストが無い・形が違う・名前の規則に合わなければ理由
+    [[nodiscard]] std::expected<PackageManifestInfo, std::string> ReadPackageManifest(LuauSandbox& sandbox,
+                                                                                      const PackageSource& package);
 
     // 合わせた表の中身(分類・鍵・値)のバイト列。どのパッケージが書いたかは入れない(同じ中身なら同じ版)
     [[nodiscard]] std::string TableBytes(const PackageSetResult& result);

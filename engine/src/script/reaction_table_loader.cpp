@@ -56,6 +56,29 @@ namespace bicameral::script {
                     .mergeMode = source.mergeMode, .basePackage = source.basePackage, .typeChecker = checker->get()});
         }
 
+        // 読むパッケージ: root の直下のフォルダ(readPackageRoot のとき)+ 足した標準パッケージのフォルダ
+        std::expected<std::vector<PackageSource>, std::string> ReadSourcePackages(const ReactionTableSource& source,
+                                                                                  const fs::path& root) {
+            std::vector<PackageSource> packages;
+            if (source.readPackageRoot) {
+                auto fromRoot = ReadPackageRoot(root);
+                if (!fromRoot)
+                    return std::unexpected(fromRoot.error());
+
+                packages = std::move(*fromRoot);
+            }
+
+            for (const fs::path& folder : source.addedPackages) {
+                auto added = ReadPackageFolder(folder);
+                if (!added)
+                    return std::unexpected(std::format("足した標準パッケージ {}: {}", PathText(folder), added.error()));
+
+                packages.push_back(std::move(*added));
+            }
+
+            return packages;
+        }
+
     }  // namespace
 
     fs::path DefaultPackageRoot() {
@@ -63,11 +86,15 @@ namespace bicameral::script {
     }
 
     std::expected<LoadedReactionTable, std::string> LoadReactionTable(const ReactionTableSource& source) {
-        const fs::path root = source.packageRoot.empty() ? DefaultPackageRoot() : source.packageRoot;
-        const std::string where = std::format("反応表のパッケージ({})", PathText(root));
+        const fs::path root = !source.readPackageRoot      ? fs::path{}
+                              : source.packageRoot.empty() ? DefaultPackageRoot()
+                                                           : source.packageRoot;
+        const std::string where = std::format("反応表のパッケージ({}{})",
+                                              source.readPackageRoot ? PathText(root) : "フォルダなし",
+                                              source.addedPackages.empty() ? "" : " + 足した標準パッケージ");
 
         // --- フォルダ → パッケージ → 合わせた表 ---
-        const auto packages = ReadPackageRoot(root);
+        const auto packages = ReadSourcePackages(source, root);
         if (!packages)
             return std::unexpected(std::format("{}: {}", where, packages.error()));
 
