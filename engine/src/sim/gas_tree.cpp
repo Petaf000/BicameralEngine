@@ -876,9 +876,12 @@ namespace bicameral::sim {
         // 安定の条件: どのレベルも ν = c̃ Δt ÷ Δx × 2^(k − σ) ≤ 0.6(σ はレベルごとの小刻みの指数。T-0320)
         assert(maxLevel <= MAX_TREE_LEVEL);
         std::vector<uint32_t> exponents(maxLevel + 1, 0);
+        uint32_t finestShift = 0;  // k − σ の最大(そのレベルの ν はレベル 0 の 2^これ 倍)
         for (uint32_t level = 0; level <= maxLevel; ++level) {
             if (level > options.subcycleBaseLevel)
                 exponents[level] = std::min(level - options.subcycleBaseLevel, options.maxSubcycleGap);
+
+            finestShift = std::max(finestShift, level - exponents[level]);
 
             assert(((uint64_t)config.soundSpeedMmPerS * 10 << (level - exponents[level])) <=
                    (uint64_t)config.substeps * 30000 * 6);
@@ -899,6 +902,13 @@ namespace bicameral::sim {
         GasTreeLevel& root = tree.levels[0];
         root.size = {config.sizeX, config.sizeY, config.sizeZ};
         root.coefficients = base.coefficients;
+
+        // 熱いセルの頭打ちの温度(T-0269): ν がいちばん大きいレベルで安定の上限に届く温度(全部のレベルが同じ値を使う)
+        if (config.soundCapTemperature == 0) {
+            root.coefficients.soundTemperature = GasSoundCapTemperature(
+                config.soundSpeedMmPerS, GasSoundSpeedLimitMmPerS(config.substeps) >> finestShift,
+                base.referenceDerived.front().temperature);
+        }
         root.reference = base.reference;
         root.referenceDerived = base.referenceDerived;
         root.ghost = base.ghost;
@@ -926,7 +936,7 @@ namespace bicameral::sim {
         const GasTreeLevel& level = tree.levels[place.level];
         GasDerived derived = gd::DeriveRaw(tree.config, level.coefficients, tree.cells[cellIndex]);
 
-        // p̃ = α(p − p_基準)。熱いセルは α × T_基準 ÷ T(DeriveGasCell と同じ)
+        // p̃ = α(p − p_基準)。頭打ちの温度より熱いセルは α × T_頭 ÷ T(DeriveGasCell と同じ)
         const int64_t deviation = derived.pressure - level.referenceDerived[place.coordinate[2]].pressure;
         int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)level.coefficients.soundScale, 32);
         const uint32_t soundTemperature = level.coefficients.soundTemperature;

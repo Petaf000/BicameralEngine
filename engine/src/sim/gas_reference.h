@@ -87,8 +87,9 @@ namespace bicameral::sim {
         uint32_t gravityMicrometersPerSecond2 = 0;
         GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
 
-        // これより熱いセルは実効の音速を c̃ で頭打ちにする(mK。安定の条件を守る。0 = 地面の層の基準の温度〔QUESTIONS Q32 の仮の案 A〕)。
-        // 断熱では衝撃波で温まった気体の力も弱めるので、衝撃波を理論と比べる試験は頭打ちを外す(UINT32_MAX。T-0234)
+        // これより熱いセルは実効の音速をそこで頭打ちにする(mK。安定の条件を守る)。0 = 安定の上限から求める(GasSoundCapTemperature。
+        // D-461〔Q32 案 D〕・T-0269。既定の 340 m/s・小刻み 24 で約 473 K)。UINT32_MAX = 頭打ちなし(試験だけ)。
+        // 地面の層の基準の温度を入れると T-0234 までの形(Q32 の案 A。熱いセルの音速を c̃ に抑える)
         uint32_t soundCapTemperature = 0;
 
         // --- 風(開いた境界の外の速度。2^-20 m/s)---
@@ -106,6 +107,13 @@ namespace bicameral::sim {
         return (uint64_t)substeps * 18000;
     }
 
+    // 熱いセルの音速の頭打ちの温度(mK。D-461〔Q32 案 D〕・T-0269・07 §2.4): 実効の音速 c̃ √(T ÷ T_基準)(c_iso² ∝ T)が
+    // 安定の上限(mm/s。1 レベルの箱は GasSoundSpeedLimitMmPerS = ν 0.6。多重解像度の木は細かいレベルの分だけ小さい)に届く温度
+    // T_基準 ×(上限 ÷ c̃)²(切り捨て。これ以下なら ν ≤ 0.6)。既定の 340 m/s・小刻み 24・293.15 K で約 473 K。
+    // c̃ が上限なら T_基準。uint32 を超えるなら UINT32_MAX(頭打ちなし)
+    [[nodiscard]] uint32_t GasSoundCapTemperature(uint32_t soundSpeedMmPerS, uint64_t soundSpeedLimitMmPerS,
+                                                  uint32_t referenceTemperature);
+
     // 小刻みの係数(設定から 1 回だけ作る。割り算はここだけで、小刻みの中は掛け算とシフト。04 §6・ADR-0010)
     struct GasCoefficients {
         std::array<uint64_t, GAS_MAX_SPECIES> massPerAmount = {};  // mg/µmol の Q32
@@ -118,7 +126,7 @@ namespace bicameral::sim {
         uint64_t soundScale =
             0;  // α = c̃² ÷ (γ c_iso²) の Q32(等温は γ = 1。c_iso² = p ÷ ρ・γ は地面の層の基準から。MakeGasBox が入れる)
         uint32_t soundTemperature =
-            0;  // 地面の層の基準の温度(mK)。これより熱いセルは α を T_基準 ÷ T 倍して実効の音速を c̃ に抑える
+            0;  // 頭打ちの温度 T_頭(mK。MakeGasBox が入れる)。これより熱いセルは α を T_頭 ÷ T 倍して実効の音速を抑える
     };
 
     // セル(保存量だけ)。単位はレベル 0(04 §2)

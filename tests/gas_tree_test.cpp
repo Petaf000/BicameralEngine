@@ -468,15 +468,43 @@ namespace {
     // T-0208 の実装(小刻みを分ける前)で測った値(2026-10-11)
     constexpr uint64_t T0208_CLOSED_BOX_HASH = 0x968f764677303a49ull;
 
+    // T-0208 の時の頭打ちの形(熱いセルの音速を地面の温度から抑える。Q32 の案 A)。T-0269 で既定は安定の上限から(約 473 K)になったので、
+    // 昔のハッシュと比べる時は頭打ちの温度に地面の層の基準の温度を入れる
+    GasConfig TwoLevelConfigCapAtGround() {
+        GasConfig config = TwoLevelConfig();
+        config.soundCapTemperature = MakeAirTree(config, {}).levels[0].referenceDerived.front().temperature;
+        return config;
+    }
+
     void TestNoSubcycleMatchesT0208() {
-        const uint64_t closedBox = HashTicks(MakeDisturbedTwoLevelBox(), 12);
+        const uint64_t closedBox = HashTicks(MakeDisturbedTwoLevelBox(TwoLevelConfigCapAtGround()), 12);
         std::printf("no subcycling: closed two-level box hash chain (12 ticks) = 0x%016llx (T-0208: 0x%016llx)\n",
                     (unsigned long long)closedBox, (unsigned long long)T0208_CLOSED_BOX_HASH);
         EXPECT(closedBox == T0208_CLOSED_BOX_HASH);
 
         // 基準がいちばん細かいレベル以上なら σ = 0(分けない)
         const GasTreeOptions aboveFinest = {.subcycleBaseLevel = 1, .maxSubcycleGap = 3};
-        EXPECT(HashTicks(MakeDisturbedTwoLevelBox(TwoLevelConfig(), aboveFinest), 12) == T0208_CLOSED_BOX_HASH);
+        EXPECT(HashTicks(MakeDisturbedTwoLevelBox(TwoLevelConfigCapAtGround(), aboveFinest), 12) ==
+               T0208_CLOSED_BOX_HASH);
+        EXPECT(HashTicks(MakeDisturbedTwoLevelBox(TwoLevelConfig(), aboveFinest), 12) ==
+               HashTicks(MakeDisturbedTwoLevelBox(), 12));
+    }
+
+    // 熱いセルの頭打ちの温度(T-0269): 木は ν がいちばん大きいレベル(k − σ が最大)で安定の上限に届く温度。
+    // 小刻み 48・分けない 2 レベル(レベル 1 の上限 432 m/s)と小刻み 24・分ける 2 レベル(どのレベルも 432 m/s)はどちらも約 473 K で、
+    // 1 レベルの箱(小刻み 24)と同じ。小刻み 48 の 1 レベルなら上限 864 m/s で約 1893 K
+    void TestSoundCapTemperatureAcrossLevels() {
+        const uint32_t
+            sameSubsteps = MakeAirTree(TwoLevelConfig(), MIDDLE_REGION).levels[0].coefficients.soundTemperature;
+        const uint32_t subcycled = MakeAirTree(SubcycledConfig(), MIDDLE_REGION, SUBCYCLED)
+                                       .levels[0]
+                                       .coefficients.soundTemperature;
+        const uint32_t singleLevel = MakeAirTree(TwoLevelConfig(), {}).levels[0].coefficients.soundTemperature;
+        std::printf("sound cap temperature: two levels (48) %u mK, subcycled (24/48) %u mK, single level (48) %u mK\n",
+                    sameSubsteps, subcycled, singleLevel);
+        EXPECT(sameSubsteps >= 470000 && sameSubsteps <= 476000);
+        EXPECT(subcycled == sameSubsteps);
+        EXPECT(singleLevel >= 1880000 && singleLevel <= 1900000);
     }
 
 }  // namespace
@@ -487,6 +515,7 @@ int main() {
     TestClosedBoxConservationAcrossLevels();
     TestPressureWaveCrossesLevels();
     TestNoSubcycleMatchesT0208();
+    TestSoundCapTemperatureAcrossLevels();
 
     if (failureCount != 0) {
         std::printf("gas_tree_test: %d failure(s)\n", failureCount);
