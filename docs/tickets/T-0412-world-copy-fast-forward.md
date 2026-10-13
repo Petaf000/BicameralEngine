@@ -1,6 +1,6 @@
 # T-0412 世界の写しの早送り
 
-- Status: Doing
+- Status: Done(判断待ち 2 つは ADR-0198 に仮で)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -15,8 +15,8 @@ T-0413(重さの検査)と T-0432(遊びの指標の自動テスト)が乗る「
 - [x] API: sim::WorldCopy(Create → RecordInitialization → RecordStart → RecordNext / Complete → Result)。写す道は ProbeFrameInput::adoptFrom
 - [x] 本物の刻みを遅らせない: 本物と同じキューの後ろ・シミュの予算の余りだけで回す(frame::WorldCopyRunner。D-468)
 - [x] gpu_world_copy: 写しを取っても本物のハッシュ列が変わらない・同じコマンドなら写し = 本物(セル + 物)・セルのハッシュと木の量が CPU リファレンスと一致・使い直した写しが条件で CPU と同じ刻みに止まる
-- [ ] window_copy_record/play(`--auto-copy`): 窓の中で写しのハッシュ = 本物・記録を写し無しで再生して同じハッシュ列
-- [ ] release のビルドが警告 0・archmap --check
+- [x] window_copy_record/play(`--auto-copy`): 窓の中で写しのハッシュ = 本物・記録を写し無しで再生して同じハッシュ列
+- [x] release・debug のビルドが警告 0・archmap --check
 
 ## 判断待ち(仮で進めたもの。ADR-0198「判断待ち」)
 - 早送りの間エディタの世界を止めるか: 仮 = 止めない(予算の余りで回す)。おすすめ = パネルのチェックで選べる(既定は止めない)。
@@ -38,3 +38,5 @@ T-0413(重さの検査)と T-0432(遊びの指標の自動テスト)が乗る「
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-14(wt2 作業役): ProbeSim に adoptFrom(保存点の戻しと同じ道で別の世界の S(t) を写す)・sim::WorldCopy・GPU の試験 gpu_world_copy。
   エディタのパネル「写しの早送り」(editor/copy_panel)と frame::WorldCopyRunner(予算の余り = SimScheduler::SpareMilliseconds)・`--auto-copy`。ADR-0198。
+- 試験: gpu_world_copy(debug 245 s・release 90 s)・window_copy_record/play(debug・release)・gpu_probe_rewind(debug。戻す道を共通にした)が通った。
+  窓の自動の確かめで写しの世界の作成がフレームのループを 15.9 秒止めていた(本物が 953 刻み捨てた)のを見つけ、別のスレッドで作るように直した。
