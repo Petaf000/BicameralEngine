@@ -15,7 +15,10 @@
 //   粗い側から細かい面が 2^g 回引く時は、出ていく割合を × 2^g で数えて粗い小刻み 1 回の合計を 1 以下に抑える(熱の C/8 ÷ 引く回数と同じ考え)。
 // いまの制限: 隣のレベルの差は 1 まで(2:1。d ≥ 2 は assert)・レベルをまたぐ面の成分は 1 次の風上(MUSCL は同じレベルの 3 つ並びだけ)・
 //   どのレベルも安定の条件 ν × 2^(k − σ) ≤ 0.6 を満たすこと(MakeGasTree が assert)。
-//   木は作った後に変えない(細かくする・粗くするは T-0210 で 05 のセルに載せる時)。
+//   木の形(範囲・σ)は作った後に変えない(細かくする・粗くするは T-0210 で 05 のセルに載せる時)。
+// 環境の値のホットリロード(T-0470・ADR-0200): 重力・音速の基準・基準の大気は刻みの境目で SetGasTreeEnvironment が替える
+//   (1 レベルの SetGasEnvironment と同じ形。係数・層の基準・頭打ちの温度を MakeGasTree と同じ道で作り直し、状態は保つ)。
+//   小刻みの数(substeps・σ)は木の作りなので替えない: 音速の基準の上限は木の形から決まり(GasTreeSoundSpeedLimitMmPerS)、外は断る。
 // 全部がレベル 0 なら gas_reference と毎刻みビット一致する(面の番号・乱数・式の形が同じ)。
 //
 // データの流れ: GasConfig(レベル 0 の箱の大きさ・境界・物質)+ 細かくする範囲 → MakeGasTree → StepGasTree → SumGasTree・DeriveGasTreeCell。
@@ -24,7 +27,9 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "sim/gas_reference.h"
@@ -115,6 +120,27 @@ namespace bicameral::sim {
     [[nodiscard]] GasTree MakeGasTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
                                       std::span<const uint32_t> fractionsQ32, uint32_t temperatureMilliKelvin,
                                       uint64_t surfacePressureMicroPascal, const GasTreeOptions& options = {});
+
+    // --- 環境の値のホットリロード(T-0470・ADR-0200。gas_reference.h の CheckGasEnvironment・SetGasEnvironment の木の版)---
+
+    // ν がいちばん大きいレベルの k − σ(そのレベルの ν はレベル 0 の 2^これ 倍)
+    [[nodiscard]] uint32_t GasTreeFinestShift(const GasTree& tree);
+
+    // 木の音速の基準の上限(mm/s): どのレベルも ν × 2^(k − σ) ≤ 0.6 → GasSoundSpeedLimitMmPerS(substeps) >> GasTreeFinestShift。
+    // MakeGasTree の安定の条件と同じ。頭打ちの温度(T-0269)もこの上限から求める
+    [[nodiscard]] uint64_t GasTreeSoundSpeedLimitMmPerS(const GasTree& tree);
+
+    // 今の木の設定を next に替えられるか: CheckGasEnvironment(違ってよいのは重力・音速の基準だけ・音速の基準 0 は不可・重力の上限)に加え、
+    // 音速の基準が木の上限の中か(sim::CheckWorldPhysics と同じ理由の形)。小刻みの数は替えないので、上限を超える値は断る。外なら理由
+    [[nodiscard]] std::expected<void, std::string> CheckGasTreeEnvironment(const GasTree& tree, const GasConfig& next);
+
+    // 木の環境を替える: 設定と、全部のレベルの係数・層の基準(新しい重力・基準の大気〔成分の割合・温度・地面の圧力〕で MakeGasTree と同じ道)・
+    // 導く値・開いた境界の外・α・頭打ちの温度(soundCapTemperature が 0 なら新しい c̃ と木の上限から求め直す)を作り直す。
+    // 木の形(範囲・σ・セルの表)と状態(セル・端数・帳簿・刻み)はそのまま(保存量に触れない。新しい重力・基準と釣り合っていない分は
+    // 次の刻みから流れになる。ADR-0194 の 1)。刻みの境目(StepGasTree の間)で呼ぶ。
+    // 呼ぶ側の約束: CheckGasTreeEnvironment(tree, config) が通る。GPU は GpuGasTree::RecordEnvironment
+    void SetGasTreeEnvironment(GasTree& tree, const GasConfig& config, std::span<const uint32_t> fractionsQ32,
+                               uint32_t temperatureMilliKelvin, uint64_t surfacePressureMicroPascal);
 
     // セルから導く値(整数部だけ。そのレベルの層の基準を使う)
     [[nodiscard]] GasDerived DeriveGasTreeCell(const GasTree& tree, uint32_t cellIndex);

@@ -346,23 +346,40 @@ bool IsDonor(CellFace cellFace, int64_t flow) {
         LedgerAddScaled(momentumAxis, -face.impulse, ledgerShift);
 }
 
-// 自分の面の力積と重さを、面の単位から自分の単位へ端数つきで足す(この小刻みで計算した面のうち、小刻みの差が 0 か〔immediate〕0 でないか)
-void AddFaceForces(GasTreeGpuPlace place, bool immediate, inout GasGpuCell cell, inout GasTreeGpuFraction fraction) {
+// 自分の面の力積と重さを、面の単位から自分の単位へ端数つきで足す(この小刻みで計算した面だけ。gas_tree.cpp の ApplySideForce)。
+// immediate(forced の回): 小刻みの差が 0 の面は 1 倍、0 でない面(自分が粗い側)は自分の小刻みが始まる時だけ見込みの 2^g 倍。
+// そうでない回(next の回): 小刻みの差が 0 でない面を 1 倍、自分の小刻みが始まる時は見込みを引いて 1 − 2^g 倍(T-0479)
+void AddFaceForces(GasTreeGpuPlace place, bool immediate, bool starts, inout GasGpuCell cell,
+                   inout GasTreeGpuFraction fraction) {
     for (uint32_t entry = place.faceBegin; entry < place.faceEnd; ++entry) {
         const CellFace cellFace = CellFaceAt(entry, place.level);
-        if (!cellFace.active || (cellFace.gap == 0) != immediate)
+        if (!cellFace.active)
             continue;
+
+        const int64_t predicted = (int64_t)1 << cellFace.gap;
+        int64_t multiplier = 1;
+        if (immediate) {
+            if (cellFace.gap != 0 && !starts)
+                continue;
+
+            multiplier = predicted;
+        } else {
+            if (cellFace.gap == 0)
+                continue;
+
+            multiplier = starts ? 1 - predicted : 1;
+        }
 
         const GasGpuFace face = g_faces[cellFace.faceIndex];
         const uint32_t axis = g_layout[cellFace.faceIndex].axis;
         const int64_t weight = cellFace.right ? face.weightRight : face.weightLeft;
-        AddScaled(cell.momentum[2], fraction.momentum[2], -weight, cellFace.shift);
-        AddMomentum(cell, fraction, axis, cellFace.right ? face.impulse : -face.impulse, cellFace.shift);
+        AddScaled(cell.momentum[2], fraction.momentum[2], -weight * multiplier, cellFace.shift);
+        AddMomentum(cell, fraction, axis, (cellFace.right ? face.impulse : -face.impulse) * multiplier, cellFace.shift);
     }
 }
 
-// --- 段 3: 力を当てる(gas_tree.cpp の ApplyForces)。小刻みを始めるセルは同じ小刻みの面の力積を forced へ・next は forced の写し。
-// 細かい小刻みの面の力積は next へ(粗い側は粗い小刻みの終わりに受ける。T-0320)---
+// --- 段 3: 力を当てる(gas_tree.cpp の ApplyForces)。小刻みを始めるセルは同じ小刻みの面の力積と細かい小刻みの面の見込みを forced へ・
+// next は forced の写し。細かい小刻みの面の力積は next へ(粗い側は粗い小刻みの終わりに受ける。T-0320。見込みの分は引く。T-0479)---
 [numthreads(64, 1, 1)] void GasTreeApplyForce(uint32_t index : SV_DispatchThreadID) {
     if (index >= g_cellCount)
         return;
@@ -370,10 +387,11 @@ void AddFaceForces(GasTreeGpuPlace place, bool immediate, inout GasGpuCell cell,
     const GasTreeGpuPlace place = g_places[index];
     GasGpuCell next;
     GasTreeGpuFraction nextFraction;
-    if (Starts(place.level)) {
+    const bool starts = Starts(place.level);
+    if (starts) {
         GasGpuCell cell = g_forced[index];
         GasTreeGpuFraction fraction = g_forcedFractions[index];
-        AddFaceForces(place, true, cell, fraction);
+        AddFaceForces(place, true, true, cell, fraction);
         g_forced[index] = cell;
         g_forcedFractions[index] = fraction;
         next = cell;
@@ -383,7 +401,7 @@ void AddFaceForces(GasTreeGpuPlace place, bool immediate, inout GasGpuCell cell,
         nextFraction = g_nextFractions[index];
     }
 
-    AddFaceForces(place, false, next, nextFraction);
+    AddFaceForces(place, false, starts, next, nextFraction);
     g_next[index] = next;
     g_nextFractions[index] = nextFraction;
 }

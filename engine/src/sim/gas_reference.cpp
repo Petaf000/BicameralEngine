@@ -14,6 +14,7 @@
 
 #include "common/fixed.hlsli"
 #include "sim/gas_internal.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
 
@@ -831,19 +832,10 @@ namespace bicameral::sim {
         if (next.soundSpeedMmPerS == 0)
             return std::unexpected("気体の箱には音速の基準が要る(0 にはできない)");
 
-        const uint64_t limit = GasSoundSpeedLimitMmPerS(next.substeps);
-        if (next.soundSpeedMmPerS > limit) {
-            return std::unexpected(std::format("音速の基準 {} mm/s は気体の小刻み {} の安定の上限 {} mm/s を超える",
-                                               next.soundSpeedMmPerS, next.substeps, limit));
-        }
-
-        if (next.gravityMicrometersPerSecond2 > fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2) {
-            return std::unexpected(std::format("重力 {} µm/s² は器の上限 {} µm/s² を超える",
-                                               next.gravityMicrometersPerSecond2,
-                                               fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2));
-        }
-
-        return {};
+        // 範囲(重力の上限・小刻みの安定の上限)は読み込み・ホットリロードと同じ決まりと理由の形(T-0470)
+        const WorldPhysics world = {.gravityMicrometersPerSecond2 = next.gravityMicrometersPerSecond2,
+                                    .soundSpeedMillimetersPerSecond = next.soundSpeedMmPerS};
+        return CheckWorldPhysics(world, next.substeps);
     }
 
     void SetGasEnvironment(GasBox& box, const GasConfig& config, std::vector<GasCell> reference) {

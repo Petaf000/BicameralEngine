@@ -4,6 +4,9 @@
 //   同じ入力なら同じ状態・圧力の波がレベル 0 → 1 → 0 の境を通る時の反射と通った波の誤差が小さい(全部レベル 0 の管と比べる)。
 //   レベルごとの小刻み(T-0320): 分けなければ T-0208 の実装と毎刻みビット一致(状態の鎖のハッシュ)・分けても(レベル 1 が 2 倍の小刻み)
 //   静止大気が動かない・閉じた箱の保存が毎刻みビット一致・波の反射が T-0208 と同じ程度。
+//   環境の値のホットリロード(T-0470・ADR-0200): 途中の刻みで重力・音速の基準・基準の大気を替えても閉じた箱の保存が毎刻みビット一致・
+//   替えた木は新しい環境で作った木と同じ係数・層の基準・頭打ちの温度で同じに進む・同じ値の当て直しは結果を変えない・木の上限の外は断る。
+//   一様な加圧(T-0479): 一様に加圧した静止大気が分けた形でも動かない(重さなしは 1 mm/s 未満、重さありは 0.1 m/s 未満)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。測った値も表示する(07 §2.5 に書いた数字の出どころ)。
 #include <algorithm>
 #include <array>
@@ -507,6 +510,215 @@ namespace {
         EXPECT(singleLevel >= 1880000 && singleLevel <= 1900000);
     }
 
+    // --- 環境の値のホットリロード(T-0470・ADR-0200): 刻みの境目で重力・音速の基準・基準の大気を替える ---
+
+    constexpr uint32_t MOON_GRAVITY = 1620000;                // µm/s²
+    constexpr uint32_t COLD_TEMPERATURE = 263150;             // 替えた後の基準の大気の温度(mK)
+    constexpr uint64_t LOW_PRESSURE = 90000ull * 1000000ull;  // 替えた後の基準の大気の地面の圧力(µPa)
+
+    GasConfig WithEnvironment(GasConfig config, uint32_t gravity, uint32_t soundSpeed) {
+        ApplyWorldPhysics({.gravityMicrometersPerSecond2 = gravity, .soundSpeedMillimetersPerSecond = soundSpeed},
+                          config);
+        return config;
+    }
+
+    bool SameLayers(const std::vector<GasCell>& a, const std::vector<GasCell>& b) {
+        if (a.size() != b.size())
+            return false;
+
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].amounts != b[i].amounts || a[i].energy != b[i].energy || a[i].momentum != b[i].momentum)
+                return false;
+        }
+
+        return true;
+    }
+
+    // 刻み changeTick の始めに環境と基準の大気を替えて ticks 刻み進め、毎刻み保存(成分・エネルギーと運動量は初め + 帳簿)を確かめる。
+    // 最初に壊れた刻み(-1 = なし)
+    int StepWithEnvironmentChange(GasTree& tree, const GasConfig& next, int changeTick, int ticks) {
+        const GasTreeTotals before = SumGasTree(tree);
+        int brokenTick = -1;
+        for (int tick = 0; tick < ticks; ++tick) {
+            if (tick == changeTick) {
+                EXPECT(CheckGasTreeEnvironment(tree, next).has_value());
+                SetGasTreeEnvironment(tree, next, AIR_FRACTIONS_Q32, COLD_TEMPERATURE, LOW_PRESSURE);
+            }
+
+            StepGasTree(tree);
+            const GasTreeTotals now = SumGasTree(tree);
+            bool kept = now.energy == AddQ64(before.energy, tree.ledger.energy);
+            for (uint32_t s = 0; s < tree.config.speciesCount; ++s)
+                kept = kept && now.amounts[s] == before.amounts[s] && tree.ledger.amounts[s] == GasQ64{};
+
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                kept = kept && now.momentum[axis] == AddQ64(before.momentum[axis], tree.ledger.momentum[axis]);
+
+            if (!kept && brokenTick < 0)
+                brokenTick = tick;
+        }
+
+        return brokenTick;
+    }
+
+    struct EnvironmentCase {
+        GasConfig config;
+        GasTreeOptions options;
+        uint32_t soundSpeed = 0;  // 替えた後の音速の基準(木の上限 432 m/s の中)
+        const char* name = "";
+    };
+
+    std::array<EnvironmentCase, 2> EnvironmentCases() {
+        return {
+            EnvironmentCase{.config = TwoLevelConfig(), .options = {}, .soundSpeed = 300000, .name = "same substeps"},
+            EnvironmentCase{
+                .config = SubcycledConfig(), .options = SUBCYCLED, .soundSpeed = 420000, .name = "subcycled"}};
+    }
+
+    // 閉じた 2 レベルの箱の途中で環境を替えても、毎刻み保存がビット単位で保たれ、同じ入力なら同じ状態
+    void TestEnvironmentChangeConservation() {
+        for (const EnvironmentCase& environment : EnvironmentCases()) {
+            const GasConfig next = WithEnvironment(environment.config, MOON_GRAVITY, environment.soundSpeed);
+            GasTree tree = MakeDisturbedTwoLevelBox(environment.config, environment.options);
+            const int brokenTick = StepWithEnvironmentChange(tree, next, 5, 30);
+            GasTree again = MakeDisturbedTwoLevelBox(environment.config, environment.options);
+            StepWithEnvironmentChange(again, next, 5, 30);
+
+            std::printf(
+                "environment change (%s): first broken tick = %d (-1 = none in 30), cells with fractions = %u, "
+                "max speed = %.3f m/s\n",
+                environment.name, brokenTick, CountFractions(tree),
+                (double)MaxMomentum(tree) / (double)METER_PER_SECOND / (double)ROUGH_CELL_MASS);
+            EXPECT(brokenTick < 0);
+            EXPECT(CountFractions(tree) > 0);
+            EXPECT(HashTreeState(0, tree) == HashTreeState(0, again));
+        }
+    }
+
+    // 環境を替えた木は、新しい環境で作った木(MakeGasTree)に今の状態を写したものと同じ係数・層の基準・頭打ちの温度を持ち、毎刻み同じに進む
+    // (同じ道で作り直す)。同じ値の当て直しは結果を変えない
+    void TestEnvironmentMatchesFreshTree() {
+        for (const EnvironmentCase& environment : EnvironmentCases()) {
+            GasTree tree = MakeDisturbedTwoLevelBox(environment.config, environment.options);
+            for (int tick = 0; tick < 3; ++tick)
+                StepGasTree(tree);
+
+            GasTree same = tree;
+            SetGasTreeEnvironment(same, tree.config, AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE);
+            EXPECT(HashTicks(same, 6) == HashTicks(tree, 6));
+
+            const GasConfig next = WithEnvironment(environment.config, MOON_GRAVITY, environment.soundSpeed);
+            GasTree changed = tree;
+            SetGasTreeEnvironment(changed, next, AIR_FRACTIONS_Q32, COLD_TEMPERATURE, LOW_PRESSURE);
+            GasTree fresh = MakeGasTree(next, MIDDLE_REGION, AIR_FRACTIONS_Q32, COLD_TEMPERATURE, LOW_PRESSURE,
+                                        environment.options);
+            fresh.cells = tree.cells;
+            fresh.fractions = tree.fractions;
+            fresh.ledger = tree.ledger;
+            fresh.tick = tree.tick;
+
+            bool sameLevels = changed.levels.size() == fresh.levels.size();
+            for (size_t k = 0; sameLevels && k < fresh.levels.size(); ++k) {
+                const GasCoefficients& a = changed.levels[k].coefficients;
+                const GasCoefficients& b = fresh.levels[k].coefficients;
+                sameLevels = a.pressureFlow == b.pressureFlow && a.gravityImpulse == b.gravityImpulse &&
+                             a.hydrostatic == b.hydrostatic && a.gravityWork == b.gravityWork &&
+                             a.soundScale == b.soundScale && a.soundTemperature == b.soundTemperature &&
+                             SameLayers(changed.levels[k].reference, fresh.levels[k].reference) &&
+                             SameLayers(changed.levels[k].ghost, fresh.levels[k].ghost) &&
+                             changed.levels[k].subcycleExponent == tree.levels[k].subcycleExponent;
+            }
+
+            std::printf(
+                "environment matches fresh tree (%s): sound cap %u -> %u mK, gravity impulse (level 1) %llu -> "
+                "%llu\n",
+                environment.name, tree.levels[0].coefficients.soundTemperature,
+                changed.levels[0].coefficients.soundTemperature,
+                (unsigned long long)tree.levels[1].coefficients.gravityImpulse,
+                (unsigned long long)changed.levels[1].coefficients.gravityImpulse);
+            EXPECT(sameLevels);
+            EXPECT(changed.levels[0].coefficients.soundTemperature != tree.levels[0].coefficients.soundTemperature);
+            EXPECT(HashTicks(changed, 6) == HashTicks(fresh, 6));
+        }
+    }
+
+    // 器が受けられない環境は理由を返す: 音速の基準の上限は木の形から(ν がいちばん大きいレベル)。1 レベルの箱なら受けられる値も断る
+    void TestEnvironmentCheckOnTree() {
+        // 小刻み 48・分けない 2 レベル: レベル 1 の ν がレベル 0 の 2 倍なので、上限は 1 レベルの箱(864 m/s)の半分
+        const GasTree twoLevel = MakeAirTree(TwoLevelConfig(), MIDDLE_REGION);
+        EXPECT(GasTreeFinestShift(twoLevel) == 1);
+        EXPECT(GasTreeSoundSpeedLimitMmPerS(twoLevel) == 432000);
+
+        GasConfig next = WithEnvironment(twoLevel.config, MOON_GRAVITY, 432000);
+        EXPECT(CheckGasTreeEnvironment(twoLevel, next).has_value());
+
+        next.soundSpeedMmPerS = 432001;
+        EXPECT(CheckGasEnvironment(twoLevel.config, next).has_value());
+        const auto overLimit = CheckGasTreeEnvironment(twoLevel, next);
+        EXPECT(!overLimit.has_value());
+        if (!overLimit)
+            std::printf("tree environment check: %s\n", overLimit.error().c_str());
+
+        next.soundSpeedMmPerS = 0;
+        EXPECT(!CheckGasTreeEnvironment(twoLevel, next).has_value());
+
+        next = WithEnvironment(twoLevel.config, bicameral::fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2 + 1, 300000);
+        EXPECT(!CheckGasTreeEnvironment(twoLevel, next).has_value());
+
+        next = twoLevel.config;
+        next.substeps = 96;  // 小刻みの数は木の作り(替えない)
+        EXPECT(!CheckGasTreeEnvironment(twoLevel, next).has_value());
+
+        // 分けた木(小刻み 24 / 48)はどのレベルも ν が同じ・全部レベル 0 の木(小刻み 48)は 1 レベルの箱と同じ上限
+        const GasTree subcycled = MakeAirTree(SubcycledConfig(), MIDDLE_REGION, SUBCYCLED);
+        EXPECT(GasTreeFinestShift(subcycled) == 0 && GasTreeSoundSpeedLimitMmPerS(subcycled) == 432000);
+        EXPECT(GasTreeSoundSpeedLimitMmPerS(MakeAirTree(TwoLevelConfig(), {})) == 864000);
+    }
+
+    // --- 一様な加圧(T-0479): 箱の全部のセルの物質量を同じ温度のまま 1/9 増やす(閉じた部屋で火が空気を温めた・基準と違う大気)---
+
+    void Pressurize(GasTree& tree) {
+        for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+            std::array<uint64_t, GAS_MAX_SPECIES> amounts = tree.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount += amount / 9;
+
+            const uint32_t temperature = DeriveGasTreeCell(tree, index).temperature;
+            GasCell pressurized = MakeGasCell(tree.config, amounts, temperature);
+            pressurized.momentum = tree.cells[index].momentum;
+            tree.cells[index] = pressurized;
+        }
+    }
+
+    // 一様に加圧した静止大気は動かない: 重さなしは丸めの分だけ(1 mm/s 未満。面の圧力の力積が釣り合う)、重さありでも分けない形と同じ程度。
+    // 分けた形で粗いセルが細かい面の側の圧力を見込まずに流れを出すと、約 11 m/s の偽の流れが出た(T-0479)
+    void TestUniformOverpressureStaysStill() {
+        struct Case {
+            GasConfig config;
+            GasTreeOptions options;
+            const char* name = "";
+        };
+
+        const std::array<Case, 2> cases = {
+            Case{.config = TwoLevelConfig(), .options = {}, .name = "same substeps"},
+            Case{.config = SubcycledConfig(), .options = SUBCYCLED, .name = "subcycled"}};
+        for (const Case& pressureCase : cases) {
+            for (const bool gravity : {false, true}) {
+                GasConfig config = pressureCase.config;
+                config.gravity = gravity;
+                GasTree tree = MakeAirTree(config, MIDDLE_REGION, pressureCase.options);
+                Pressurize(tree);
+                for (int tick = 0; tick < 30; ++tick)
+                    StepGasTree(tree);
+
+                const double speed = (double)MaxMomentum(tree) / (double)METER_PER_SECOND / (double)ROUGH_CELL_MASS;
+                std::printf("uniform overpressure (%s, %s): max speed after 30 ticks = %.6f m/s\n", pressureCase.name,
+                            gravity ? "gravity" : "no gravity", speed);
+                EXPECT(speed < (gravity ? 0.1 : 0.001));
+            }
+        }
+    }
+
 }  // namespace
 
 int main() {
@@ -516,6 +728,10 @@ int main() {
     TestPressureWaveCrossesLevels();
     TestNoSubcycleMatchesT0208();
     TestSoundCapTemperatureAcrossLevels();
+    TestEnvironmentChangeConservation();
+    TestEnvironmentMatchesFreshTree();
+    TestEnvironmentCheckOnTree();
+    TestUniformOverpressureStaysStill();
 
     if (failureCount != 0) {
         std::printf("gas_tree_test: %d failure(s)\n", failureCount);

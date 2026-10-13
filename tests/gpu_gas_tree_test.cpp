@@ -5,6 +5,8 @@
 // レベルをまたぐ静止大気(動かないことも)・開いた境界と風(細かい範囲が開いた境界に接する。MC・乱数の丸め)・
 // minmod と切り捨て・全部レベル 0 の木(周期的な箱)。分けた形は閉じた箱・静止大気・開いた境界と風と、粗いセルが細かい範囲へ速く流れ込む箱
 // (粗い側から細かい面が何度も引く時の抑え〔committedOutflow・taken〕を通る。CPU の GasTreeStepStats で通ったことも確かめる)。刻みごとに GPU のセル・端数・帳簿(whole + 2^-64)を読み戻して CPU と比べる。
+// 環境の値のホットリロード(T-0470・ADR-0200。名前が _environment_change の場面): 途中の刻みで重力・音速の基準・基準の大気を替える
+// (CPU は SetGasTreeEnvironment、GPU は GpuGasTree::RecordEnvironment)。閉じた箱は毎刻み保存(初め + 帳簿)も確かめる。
 // 引数: gpu_test_options.h(--warp・--queue)と --scene <名前>(1 つの場面だけ)・--ticks n(場面の刻みの数を替える)
 //   --profile: CPU とは比べず、大きい木(レベル 0 の n³〔--size n、既定 16〕の真ん中 (n/2)³ をレベル 1 に)で 1 刻みの GPU 時間(タイムスタンプ)を測る
 //              (--ticks 既定 20。--subcycled でレベルごとの小刻み〔レベル 0 は 24・レベル 1 は 48〕、無ければ全部 48。
@@ -91,11 +93,21 @@ namespace {
 
     // --- 場面 ---
 
+    // 刻み tick の始めに環境(重力・音速の基準)と基準の大気(温度・地面の圧力。成分の割合は同じ)を替える(T-0470)
+    struct EnvironmentChange {
+        uint64_t tick = 0;
+        GasConfig config;
+        uint32_t temperature = 0;
+        uint64_t surfacePressure = 0;
+    };
+
     struct Scene {
         std::string name;
         GasTree tree;
         uint64_t ticks = 0;
-        bool expectStill = false;  // 静止大気: 状態が少しも変わらないことも確かめる
+        std::optional<EnvironmentChange> change;
+        bool expectConserved = false;  // 閉じた箱: 毎刻み成分は同じ・エネルギーと運動量は初め + 帳簿(ビット単位)
+        bool expectStill = false;      // 静止大気: 状態が少しも変わらないことも確かめる
         bool expectLimits =
             false;  // 粗い側から細かい面が何度も引く時の抑えを通ることも確かめる(CPU の GasTreeStepStats)
     };
@@ -211,6 +223,46 @@ namespace {
         return {.name = "subcycled_fast", .tree = tree, .ticks = 4, .expectLimits = true};
     }
 
+    // --- 環境の値のホットリロード(T-0470)---
+
+    constexpr uint32_t MOON_GRAVITY = 1620000;  // µm/s²
+
+    Scene WithEnvironmentChange(Scene scene, std::string name, uint32_t gravity, uint32_t soundSpeed,
+                                uint32_t temperature, uint64_t surfacePressure) {
+        GasConfig config = scene.tree.config;
+        ApplyWorldPhysics({.gravityMicrometersPerSecond2 = gravity, .soundSpeedMillimetersPerSecond = soundSpeed},
+                          config);
+        scene.name = std::move(name);
+        scene.ticks = 8;
+        scene.expectStill = false;
+        scene.expectLimits = false;
+        scene.change = EnvironmentChange{
+            .tick = 3, .config = config, .temperature = temperature, .surfacePressure = surfacePressure};
+        scene.expectConserved = config.boundary[0] != GasBoundary::Open && config.boundary[1] != GasBoundary::Open &&
+                                config.boundary[2] != GasBoundary::Open;
+
+        return scene;
+    }
+
+    // 閉じた 2 レベルの箱(小刻み 48・木の上限 432 m/s)を月の重力・300 m/s・冷たく薄い基準の大気へ
+    Scene MakeClosedEnvironmentChangeScene() {
+        return WithEnvironmentChange(MakeClosedScene(), "closed_environment_change", MOON_GRAVITY, 300000,
+                                     AIR_TEMPERATURE - 30000, 90000ull * 1000000ull);
+    }
+
+    // 分けた閉じた箱(小刻み 24 / 48)を重力 2 倍・420 m/s へ(基準の大気は同じ)
+    Scene MakeSubcycledEnvironmentChangeScene() {
+        return WithEnvironmentChange(MakeSubcycledClosedScene(), "subcycled_environment_change",
+                                     2 * StandardWorldPhysics().gravityMicrometersPerSecond2, 420000, AIR_TEMPERATURE,
+                                     SURFACE_PRESSURE);
+    }
+
+    // 開いた境界と風の木を月の重力・380 m/s・薄い基準の大気へ(開いた境界の外も作り直す)
+    Scene MakeOpenEnvironmentChangeScene() {
+        return WithEnvironmentChange(MakeOpenWindScene(), "open_environment_change", MOON_GRAVITY, 380000,
+                                     AIR_TEMPERATURE, 95000ull * 1000000ull);
+    }
+
     std::vector<Scene> MakeScenes() {
         std::vector<Scene> scenes;
         scenes.push_back(MakeClosedScene());
@@ -222,6 +274,9 @@ namespace {
         scenes.push_back(MakeSubcycledStaticScene());
         scenes.push_back(MakeSubcycledOpenWindScene());
         scenes.push_back(MakeSubcycledFastScene());
+        scenes.push_back(MakeClosedEnvironmentChangeScene());
+        scenes.push_back(MakeSubcycledEnvironmentChangeScene());
+        scenes.push_back(MakeOpenEnvironmentChangeScene());
 
         return scenes;
     }
@@ -261,6 +316,26 @@ namespace {
         return "(見つからない)";
     }
 
+    GasQ64 AddQ64(GasQ64 a, GasQ64 b) {
+        GasQ64 sum;
+        sum.fraction = a.fraction + b.fraction;
+        sum.whole = a.whole + b.whole + (sum.fraction < a.fraction ? 1 : 0);
+        return sum;
+    }
+
+    // 閉じた箱の保存: 成分は初めと同じ(帳簿 0)・エネルギーと運動量は初め + 帳簿
+    bool Conserved(const GasTree& tree, const GasTreeTotals& before) {
+        const GasTreeTotals now = SumGasTree(tree);
+        bool kept = now.energy == AddQ64(before.energy, tree.ledger.energy);
+        for (uint32_t s = 0; s < tree.config.speciesCount; ++s)
+            kept = kept && now.amounts[s] == before.amounts[s] && tree.ledger.amounts[s] == GasQ64{};
+
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            kept = kept && now.momentum[axis] == AddQ64(before.momentum[axis], tree.ledger.momentum[axis]);
+
+        return kept;
+    }
+
     struct GpuParts {
         gpu::ImmediateQueue queue;
         gpu::DebugRing debugRing;
@@ -275,6 +350,8 @@ namespace {
             return std::unexpected(gas.error());
 
         GasTree cpu = scene.tree;
+        const GasTreeTotals before = SumGasTree(cpu);
+        std::vector<ComPtr<ID3D12Resource>> keepAlive;  // 環境を替える前の t0〜t3(毎刻み待つので最後まで持つだけ)
         GasTreeStepStats stats;
         std::vector<GasCell> cells;
         std::vector<GasTreeFraction> fractions;
@@ -287,6 +364,18 @@ namespace {
             parts.debugRing.RecordBegin(list);
             if (tick == 0)
                 gas->RecordUpload(list);
+
+            // 環境の値のホットリロード(T-0470): CPU と GPU が同じ刻みの境目で替える
+            if (scene.change && tick == scene.change->tick) {
+                const EnvironmentChange& change = *scene.change;
+                if (const auto checked = CheckGasTreeEnvironment(cpu, change.config); !checked)
+                    return std::unexpected(checked.error());
+
+                SetGasTreeEnvironment(cpu, change.config, AIR_FRACTIONS_Q32, change.temperature,
+                                      change.surfacePressure);
+                if (!gas->RecordEnvironment(list, cpu, keepAlive))
+                    return std::unexpected("環境を GPU へ写せない");
+            }
 
             gas->RecordStep(list, parts.debugRing.GpuAddress());
             gas->RecordReadback(list);
@@ -311,6 +400,9 @@ namespace {
             if (!same)
                 return std::unexpected(std::format("刻み {} で CPU と食い違う: {}", tick + 1,
                                                    FirstDifference(cpu, cells, fractions, ledger)));
+
+            if (scene.expectConserved && !Conserved(cpu, before))
+                return std::unexpected(std::format("刻み {} で保存が崩れた", tick + 1));
         }
 
         if (cpu.maxSubcycleExponent != 0)

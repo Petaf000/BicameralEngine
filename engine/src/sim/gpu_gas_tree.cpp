@@ -1,7 +1,8 @@
 // gpu_gas_tree.cpp — 気体の多重解像度の木の 1 刻みを GPU の Compute で走らせる(gpu_gas_tree.h・T-0209・T-0356)。段を呼ぶ順は shaders/sim/gas_tree_step.hlsl の
 // 先頭の表と同じで、CPU リファレンス(gas_tree.cpp の MicroStep)の段を面の段とセルの段に分けて並べたもの。段の間は全部の UAV の書き込みを待つ。
 // 1 刻み = いちばん細かい小刻み substeps × 2^σmax 回 × 9 段。どのレベルの小刻みが始まる・終わるかは段の中でルート定数の小刻みの番号から決める。
-// 木の形(面の一覧・セルの場所・セルごとの面の並び・レベルごとの係数と層の基準)は Create で一度だけ作って写す(木は作った後に変えない。T-0208)。
+// 木の形(面の一覧・セルの場所・セルごとの面の並び)は Create で一度だけ作って写す(木は作った後に変えない。T-0208)。
+// レベルごとの係数と層の基準(環境から決まる t0〜t3)は、環境の値のホットリロードで RecordEnvironment が写し直す(T-0470・ADR-0200)。
 #include "sim/gpu_gas_tree.h"
 
 #include "common/gas_tree_gpu.hlsli"
@@ -102,6 +103,39 @@ namespace bicameral::sim {
             return begins;
         }
 
+        constexpr size_t ENVIRONMENT_SRV_COUNT = 4;  // t0〜t3(設定・レベル・層の基準・層の外)は環境から決まる
+
+        // 環境から決まる表(t0〜t3): 設定・レベルごとの係数と σ・層の基準の導く値・層の外。Create とホットリロード(T-0470)が同じここを通る
+        std::array<gpu::ResidentBuffer, ENVIRONMENT_SRV_COUNT> CreateEnvironmentBuffers(ID3D12Device* device,
+                                                                                        const GasTree& tree) {
+            const std::vector<uint32_t> layerBegins = LayerBegins(tree);
+            std::vector<GasTreeGpuLevel> levels;
+            std::vector<GasGpuDerived> referenceDerived;
+            std::vector<GasGpuCell> ghost;
+            for (uint32_t k = 0; k < tree.levels.size(); ++k) {
+                const GasTreeLevel& level = tree.levels[k];
+                const GasCoefficients& coefficients = level.coefficients;
+                levels.push_back({.centralFlow = coefficients.centralFlow,
+                                  .pressureFlow = coefficients.pressureFlow,
+                                  .pressureImpulse = coefficients.pressureImpulse,
+                                  .gravityImpulse = coefficients.gravityImpulse,
+                                  .layerBegin = layerBegins[k],
+                                  .subcycleExponent = level.subcycleExponent});
+                for (const GasDerived& layer : level.referenceDerived)
+                    referenceDerived.push_back(ToGasGpuDerived(layer));
+
+                for (const GasCell& layer : level.ghost)
+                    ghost.push_back(ToGasGpuCell(layer));
+            }
+
+            const std::array<GasGpuParameters, 1> parameters = {
+                MakeGasGpuParameters(tree.config, tree.levels[0].coefficients)};
+            return {CreateResident(device, std::span<const GasGpuParameters>(parameters)),
+                    CreateResident(device, std::span<const GasTreeGpuLevel>(levels)),
+                    CreateResident(device, std::span<const GasGpuDerived>(referenceDerived)),
+                    CreateResident(device, std::span<const GasGpuCell>(ghost))};
+        }
+
         // 側の番号: セルはセルの番号、外は層の表の番号、壁と Mixed は 0
         uint32_t SideIndex(const GasTreeFaceSide& side, const std::vector<uint32_t>& layerBegins) {
             if (side.kind == GasTreeSideKind::Cell)
@@ -174,6 +208,7 @@ namespace bicameral::sim {
         result.m_cellCount = (uint32_t)tree.cells.size();
         result.m_substeps = tree.config.substeps;
         result.m_maxExponent = tree.maxSubcycleExponent;
+        result.m_levelCount = (uint32_t)tree.levels.size();
         result.m_tick = tree.tick;
         if (auto created = result.CreatePipelines(device); !created)
             return std::unexpected(created.error());
@@ -214,25 +249,6 @@ namespace bicameral::sim {
         const std::vector<GasTreeFaceLayout> faces = ListGasTreeFaces(tree);
         m_faceCount = (uint32_t)faces.size();
 
-        std::vector<GasTreeGpuLevel> levels;
-        std::vector<GasGpuDerived> referenceDerived;
-        std::vector<GasGpuCell> ghost;
-        for (uint32_t k = 0; k < tree.levels.size(); ++k) {
-            const GasTreeLevel& level = tree.levels[k];
-            const GasCoefficients& coefficients = level.coefficients;
-            levels.push_back({.centralFlow = coefficients.centralFlow,
-                              .pressureFlow = coefficients.pressureFlow,
-                              .pressureImpulse = coefficients.pressureImpulse,
-                              .gravityImpulse = coefficients.gravityImpulse,
-                              .layerBegin = layerBegins[k],
-                              .subcycleExponent = level.subcycleExponent});
-            for (const GasDerived& layer : level.referenceDerived)
-                referenceDerived.push_back(ToGasGpuDerived(layer));
-
-            for (const GasCell& layer : level.ghost)
-                ghost.push_back(ToGasGpuCell(layer));
-        }
-
         std::vector<GasTreeGpuFace> gpuFaces;
         gpuFaces.reserve(faces.size());
         for (const GasTreeFaceLayout& face : faces)
@@ -242,12 +258,11 @@ namespace bicameral::sim {
         std::vector<uint32_t> cellFaces;
         BuildCellFaces(tree, faces, layerBegins, places, cellFaces);
 
-        const std::array<GasGpuParameters, 1> parameters = {
-            MakeGasGpuParameters(tree.config, tree.levels[0].coefficients)};
-        m_srvs = {CreateResident(device, std::span<const GasGpuParameters>(parameters)),
-                  CreateResident(device, std::span<const GasTreeGpuLevel>(levels)),
-                  CreateResident(device, std::span<const GasGpuDerived>(referenceDerived)),
-                  CreateResident(device, std::span<const GasGpuCell>(ghost)),
+        std::array<gpu::ResidentBuffer, ENVIRONMENT_SRV_COUNT> environment = CreateEnvironmentBuffers(device, tree);
+        m_srvs = {std::move(environment[0]),
+                  std::move(environment[1]),
+                  std::move(environment[2]),
+                  std::move(environment[3]),
                   CreateResident(device, std::span<const GasTreeGpuFace>(gpuFaces)),
                   CreateResident(device, std::span<const GasTreeGpuPlace>(places)),
                   CreateResident(device, std::span<const uint32_t>(cellFaces))};
@@ -319,6 +334,35 @@ namespace bicameral::sim {
 
         // --- 木の形(t0〜t6)を既定のヒープへ(T-0374)---
         gpu::RecordResidentUploads(list, m_srvs);
+    }
+
+    // 環境の値のホットリロード(T-0470・ADR-0200。GpuGas::RecordEnvironment と同じ形): 新しい t0〜t3 を作って写し、前のものは呼ぶ側に持たせる
+    // (記録済みの刻みがまだ読む)。新しいバッファは作った直後で COMMON なので、同じリストで前の刻みが読んだ後でも写せる。t4〜t6(木の形)はそのまま
+    bool GpuGasTree::RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasTree& tree,
+                                       std::vector<ComPtr<ID3D12Resource>>& keepAlive) {
+        const bool sameShape = (uint32_t)tree.cells.size() == m_cellCount && tree.config.substeps == m_substeps &&
+                               tree.maxSubcycleExponent == m_maxExponent &&
+                               (uint32_t)tree.levels.size() == m_levelCount;
+        if (!sameShape)
+            return false;
+
+        ComPtr<ID3D12Device> device;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        std::array<gpu::ResidentBuffer, ENVIRONMENT_SRV_COUNT> buffers = CreateEnvironmentBuffers(device.Get(), tree);
+        if (!std::ranges::all_of(buffers, &gpu::ResidentBuffer::Valid))
+            return false;
+
+        gpu::RecordResidentUploads(list, buffers);
+        for (size_t i = 0; i < buffers.size(); ++i) {
+            keepAlive.push_back(std::move(m_srvs[i].buffer));
+            keepAlive.push_back(std::move(m_srvs[i].upload));
+            keepAlive.push_back(buffers[i].upload);
+            m_srvs[i] = std::move(buffers[i]);
+        }
+
+        return true;
     }
 
     // 1 つの段を投げ、全部の UAV の書き込みを次の段より前に終わらせる

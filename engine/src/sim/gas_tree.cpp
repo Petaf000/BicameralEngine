@@ -13,6 +13,7 @@
 
 #include "common/fixed.hlsli"
 #include "sim/gas_internal.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
 
@@ -566,38 +567,64 @@ namespace bicameral::sim {
             AddScaled(state.cells[side.index].momentum[axis], state.fractions[side.index].momentum[axis], value, shift);
         }
 
-        // 側への力積は、側の小刻みが面と同じなら力を当てた値(forced。その小刻みの流れに効く)へ、側が粗い小刻みなら次の値(next。
-        // 粗い小刻みの終わりに受ける。粗い側の値は小刻みの初めのまま。T-0320)へ。immediatePass で前者・後者を分けて 2 回呼ぶ
-        // (next は forced を写した後に足すため)。帳簿(箱の外の側)は前者の回で
-        void ApplyImpulse(GasTree& tree, TreeWork& work, const TreeFace& face, bool immediatePass) {
-            const bool leftCell = face.left.kind == SideKind::Cell;
-            const bool rightCell = face.right.kind == SideKind::Cell;
-            const bool leftNow = leftCell && (SubcycleGap(tree, face, face.left) == 0) == immediatePass;
-            const bool rightNow = rightCell && (SubcycleGap(tree, face, face.right) == 0) == immediatePass;
-            TreeState& state = immediatePass ? work.forced : work.next;
+        // 側が受ける力(面の力積と重さ。面の単位)の multiplier 倍を state へ
+        void AddSideForce(TreeState& state, const TreeFace& face, const TreeSide& side, bool right,
+                          int64_t multiplier) {
+            const int64_t weight = right ? face.weightRight : face.weightLeft;
+            if (weight != 0)
+                AddMomentum(state, side, 2, -weight * multiplier, face.level);
 
-            // --- 重さ(箱の外から働く力なので帳簿へ)---
-            if (leftNow && face.weightLeft != 0) {
-                AddMomentum(state, face.left, 2, -face.weightLeft, face.level);
-                AddLedger(tree.ledger.momentum[2], -face.weightLeft, face.level);
+            if (face.impulse != 0)
+                AddMomentum(state, side, face.axis, (right ? face.impulse : -face.impulse) * multiplier, face.level);
+        }
+
+        // 側が受ける力。側の小刻みが面と同じ(g = 0)なら力を当てた値(forced。その小刻みの流れに効く)へ。
+        // 側が粗い小刻み(g > 0。粗い側)なら、本当の力は次の値(next。粗い小刻みの終わりに受ける。T-0320)へ足すが、粗い小刻みの初めに
+        // この面の初めの力 × 2^g を見込みとして forced にも足し、同じ分を next から引く(T-0479。Berger–Colella の粗い側の流束 + 差の受け直し)。
+        // 見込みが無いと、粗いセルの forced は細かい面の側の圧力を受けないまま流れを出し、一様な圧力の高まり(閉じた部屋の火・基準と違う大気)
+        // で偽の流れが出た(閉じた箱の 11% の一様な加圧で約 11 m/s)。合計(next)は見込みの有無で変わらないので保存はそのまま。
+        // immediatePass で forced の回と next の回に分けて 2 回呼ぶ(next は forced を写した後に足すため)。帳簿(箱の外の側)は前者の回で
+        void ApplySideForce(GasTree& tree, TreeWork& work, const TreeFace& face, const TreeSide& side, bool right,
+                            bool immediatePass, uint64_t micro) {
+            const uint32_t gap = SubcycleGap(tree, face, side);
+            const bool starts = Starts(tree, side.level, micro);
+            const int64_t predicted = (int64_t)1 << gap;
+            if (immediatePass) {
+                if (gap == 0 || starts)
+                    AddSideForce(work.forced, face, side, right, predicted);
+
+                if (gap == 0) {
+                    const int64_t weight = right ? face.weightRight : face.weightLeft;
+                    AddLedger(tree.ledger.momentum[2], -weight, face.level);
+                }
+
+                return;
             }
 
-            if (rightNow && face.weightRight != 0) {
-                AddMomentum(state, face.right, 2, -face.weightRight, face.level);
-                AddLedger(tree.ledger.momentum[2], -face.weightRight, face.level);
-            }
-
-            if (face.impulse == 0)
+            if (gap == 0)
                 return;
 
-            if (leftNow)
-                AddMomentum(state, face.left, face.axis, -face.impulse, face.level);
-            else if (!leftCell && immediatePass)
+            AddSideForce(work.next, face, side, right, starts ? 1 - predicted : 1);
+            const int64_t weight = right ? face.weightRight : face.weightLeft;
+            AddLedger(tree.ledger.momentum[2], -weight, face.level);
+        }
+
+        void ApplyImpulse(GasTree& tree, TreeWork& work, const TreeFace& face, bool immediatePass, uint64_t micro) {
+            // --- セルの側(重さは箱の外から働く力なので帳簿へ)---
+            if (face.left.kind == SideKind::Cell)
+                ApplySideForce(tree, work, face, face.left, false, immediatePass, micro);
+
+            if (face.right.kind == SideKind::Cell)
+                ApplySideForce(tree, work, face, face.right, true, immediatePass, micro);
+
+            // --- 箱の外の側(壁・開いた境界の外)の力積は帳簿へ ---
+            if (face.impulse == 0 || !immediatePass)
+                return;
+
+            if (face.left.kind != SideKind::Cell)
                 AddLedger(tree.ledger.momentum[face.axis], face.impulse, face.level);
 
-            if (rightNow)
-                AddMomentum(state, face.right, face.axis, face.impulse, face.level);
-            else if (!rightCell && immediatePass)
+            if (face.right.kind != SideKind::Cell)
                 AddLedger(tree.ledger.momentum[face.axis], -face.impulse, face.level);
         }
 
@@ -699,7 +726,7 @@ namespace bicameral::sim {
                 ComputeFaceForce(tree, work.derived, face);
 
             for (const TreeFace& face : faces)
-                ApplyImpulse(tree, work, face, true);
+                ApplyImpulse(tree, work, face, true, micro);
 
             for (uint32_t index = 0; index < tree.cells.size(); ++index) {
                 if (!Starts(tree, tree.places[index].level, micro))
@@ -710,7 +737,7 @@ namespace bicameral::sim {
             }
 
             for (const TreeFace& face : faces)
-                ApplyImpulse(tree, work, face, false);
+                ApplyImpulse(tree, work, face, false, micro);
         }
 
         // いちばん細かい小刻み 1 回: 小刻みを始めるレベルの面だけを計算し、小刻みを終えるレベルのセルが次の値を受ける
@@ -805,23 +832,52 @@ namespace bicameral::sim {
             return ghost;
         }
 
-        GasTreeLevel MakeFinerLevel(const GasConfig& config, const GasTreeLevel& base, uint32_t level,
-                                    uint32_t exponent, std::span<const uint32_t> fractionsQ32, uint32_t temperature,
-                                    uint64_t surfacePressure) {
-            GasTreeLevel result;
-            result.size = {config.sizeX << level, config.sizeY << level, config.sizeZ << level};
-            result.subcycleExponent = exponent;
-            result.coefficients = MakeLevelCoefficients(config, base.coefficients, level, exponent);
-            result.reference = MakeLevelReference(config, base.coefficients, level, fractionsQ32, temperature,
+        // レベル k(≥ 1)の環境から決まる値: 係数・層の基準・導く値・開いた境界の外(大きさ・σ・セルの表は木の形で、ここでは触れない)
+        void MakeFinerLevelEnvironment(const GasConfig& config, const GasTreeLevel& root, uint32_t level,
+                                       GasTreeLevel& result, std::span<const uint32_t> fractionsQ32,
+                                       uint32_t temperature, uint64_t surfacePressure) {
+            result.coefficients = MakeLevelCoefficients(config, root.coefficients, level, result.subcycleExponent);
+            result.reference = MakeLevelReference(config, root.coefficients, level, fractionsQ32, temperature,
                                                   surfacePressure);
+            result.referenceDerived.clear();
+            result.ghost.clear();
             for (const GasCell& layer : result.reference) {
                 result.referenceDerived.push_back(gd::DeriveRaw(config, result.coefficients, layer));
                 result.ghost.push_back(MakeGhost(config, layer, result.referenceDerived.back().mass));
             }
+        }
 
-            result.grid.assign((size_t)result.size[0] * result.size[1] * result.size[2], GAS_TREE_ABSENT);
+        // 環境から決まる値(係数・層の基準・導く値・開いた境界の外・α・頭打ちの温度)を全部のレベルで作る。木の形(大きさ・σ・セルの表)と
+        // 状態(セル・端数・帳簿・刻み)には触れない。MakeGasTree と SetGasTreeEnvironment が同じここを通る(T-0470・ADR-0200)
+        void BuildLevelEnvironments(GasTree& tree, std::span<const uint32_t> fractionsQ32, uint32_t temperature,
+                                    uint64_t surfacePressure) {
+            const GasConfig& config = tree.config;
 
-            return result;
+            // --- レベル 0 は 1 レベルの箱と同じ(係数・基準・α)---
+            // 重さが無ければ基準の層は全部地面の層と同じ(gas_reference_test の周期的な箱と同じ扱い。層ごとの基準の差が偽の力にならない)
+            std::vector<GasCell> reference = MakeHydrostaticReference(config, fractionsQ32, temperature,
+                                                                      surfacePressure);
+            if (!config.gravity)
+                std::fill(reference.begin(), reference.end(), reference.front());
+
+            GasBox base = MakeGasBox(config, std::move(reference));
+            GasTreeLevel& root = tree.levels[0];
+            root.coefficients = base.coefficients;
+
+            // 熱いセルの頭打ちの温度(T-0269): ν がいちばん大きいレベルで安定の上限に届く温度(全部のレベルが同じ値を使う)
+            if (config.soundCapTemperature == 0) {
+                root.coefficients.soundTemperature = GasSoundCapTemperature(config.soundSpeedMmPerS,
+                                                                            GasTreeSoundSpeedLimitMmPerS(tree),
+                                                                            base.referenceDerived.front().temperature);
+            }
+
+            root.reference = std::move(base.reference);
+            root.referenceDerived = std::move(base.referenceDerived);
+            root.ghost = std::move(base.ghost);
+
+            for (uint32_t level = 1; level < tree.levels.size(); ++level)
+                MakeFinerLevelEnvironment(config, root, level, tree.levels[level], fractionsQ32, temperature,
+                                          surfacePressure);
         }
 
         // 範囲を細かくする: 下の粗いセルを覆い、細かいセルを置く(番号は後で振る。置いた印は 0)
@@ -873,50 +929,27 @@ namespace bicameral::sim {
             maxLevel = std::max(maxLevel, region.level);
         }
 
-        // 安定の条件: どのレベルも ν = c̃ Δt ÷ Δx × 2^(k − σ) ≤ 0.6(σ はレベルごとの小刻みの指数。T-0320)
+        // --- 木の形: レベルごとの大きさ・小刻みの指数 σ(T-0320)・セルの表 ---
         assert(maxLevel <= MAX_TREE_LEVEL);
-        std::vector<uint32_t> exponents(maxLevel + 1, 0);
-        uint32_t finestShift = 0;  // k − σ の最大(そのレベルの ν はレベル 0 の 2^これ 倍)
-        for (uint32_t level = 0; level <= maxLevel; ++level) {
-            if (level > options.subcycleBaseLevel)
-                exponents[level] = std::min(level - options.subcycleBaseLevel, options.maxSubcycleGap);
-
-            finestShift = std::max(finestShift, level - exponents[level]);
-
-            assert(((uint64_t)config.soundSpeedMmPerS * 10 << (level - exponents[level])) <=
-                   (uint64_t)config.substeps * 30000 * 6);
-        }
-
-        // --- レベル 0 は 1 レベルの箱と同じ(係数・基準・α)---
-        // 重さが無ければ基準の層は全部地面の層と同じ(gas_reference_test の周期的な箱と同じ扱い。層ごとの基準の差が偽の力にならない)
-        std::vector<GasCell> reference = MakeHydrostaticReference(config, fractionsQ32, temperatureMilliKelvin,
-                                                                  surfacePressureMicroPascal);
-        if (!config.gravity)
-            std::fill(reference.begin(), reference.end(), reference.front());
-
-        const GasBox base = MakeGasBox(config, std::move(reference));
         GasTree tree;
         tree.config = config;
         tree.levels.resize(maxLevel + 1);
-        tree.maxSubcycleExponent = exponents[maxLevel];
-        GasTreeLevel& root = tree.levels[0];
-        root.size = {config.sizeX, config.sizeY, config.sizeZ};
-        root.coefficients = base.coefficients;
+        for (uint32_t level = 0; level <= maxLevel; ++level) {
+            GasTreeLevel& grid = tree.levels[level];
+            grid.size = {config.sizeX << level, config.sizeY << level, config.sizeZ << level};
+            if (level > options.subcycleBaseLevel)
+                grid.subcycleExponent = std::min(level - options.subcycleBaseLevel, options.maxSubcycleGap);
 
-        // 熱いセルの頭打ちの温度(T-0269): ν がいちばん大きいレベルで安定の上限に届く温度(全部のレベルが同じ値を使う)
-        if (config.soundCapTemperature == 0) {
-            root.coefficients.soundTemperature = GasSoundCapTemperature(
-                config.soundSpeedMmPerS, GasSoundSpeedLimitMmPerS(config.substeps) >> finestShift,
-                base.referenceDerived.front().temperature);
+            grid.grid.assign((size_t)grid.size[0] * grid.size[1] * grid.size[2], level == 0 ? 0 : GAS_TREE_ABSENT);
         }
-        root.reference = base.reference;
-        root.referenceDerived = base.referenceDerived;
-        root.ghost = base.ghost;
-        root.grid.assign(base.cells.size(), 0);
 
-        for (uint32_t level = 1; level <= maxLevel; ++level)
-            tree.levels[level] = MakeFinerLevel(config, root, level, exponents[level], fractionsQ32,
-                                                temperatureMilliKelvin, surfacePressureMicroPascal);
+        tree.maxSubcycleExponent = tree.levels[maxLevel].subcycleExponent;
+
+        // 安定の条件: どのレベルも ν = c̃ Δt ÷ Δx × 2^(k − σ) ≤ 0.6(σ はレベルごとの小刻みの指数。T-0320)
+        assert(config.soundSpeedMmPerS <= GasTreeSoundSpeedLimitMmPerS(tree));
+
+        // --- 環境から決まる値(係数・層の基準・α・頭打ちの温度)---
+        BuildLevelEnvironments(tree, fractionsQ32, temperatureMilliKelvin, surfacePressureMicroPascal);
 
         // --- 粗いレベルの範囲から順に細かくする ---
         for (uint32_t level = 1; level <= maxLevel; ++level) {
@@ -929,6 +962,36 @@ namespace bicameral::sim {
         NumberCells(tree);
 
         return tree;
+    }
+
+    uint32_t GasTreeFinestShift(const GasTree& tree) {
+        uint32_t shift = 0;
+        for (uint32_t level = 0; level < tree.levels.size(); ++level)
+            shift = std::max(shift, level - tree.levels[level].subcycleExponent);
+
+        return shift;
+    }
+
+    uint64_t GasTreeSoundSpeedLimitMmPerS(const GasTree& tree) {
+        return GasSoundSpeedLimitMmPerS(tree.config.substeps) >> GasTreeFinestShift(tree);
+    }
+
+    std::expected<void, std::string> CheckGasTreeEnvironment(const GasTree& tree, const GasConfig& next) {
+        // 箱の作り・音速の基準 0・重力の上限は 1 レベルの箱と同じ決まり
+        if (auto checked = CheckGasEnvironment(tree.config, next); !checked)
+            return checked;
+
+        // 音速の基準の上限は木の形(ν がいちばん大きいレベル)から。範囲の外の理由は読み込み・ホットリロードと同じ形(CheckWorldPhysics)
+        const WorldPhysics world = {.gravityMicrometersPerSecond2 = next.gravityMicrometersPerSecond2,
+                                    .soundSpeedMillimetersPerSecond = next.soundSpeedMmPerS};
+        return CheckWorldPhysics(world, next.substeps, GasTreeFinestShift(tree));
+    }
+
+    void SetGasTreeEnvironment(GasTree& tree, const GasConfig& config, std::span<const uint32_t> fractionsQ32,
+                               uint32_t temperatureMilliKelvin, uint64_t surfacePressureMicroPascal) {
+        assert(CheckGasTreeEnvironment(tree, config).has_value());
+        tree.config = config;
+        BuildLevelEnvironments(tree, fractionsQ32, temperatureMilliKelvin, surfacePressureMicroPascal);
     }
 
     GasDerived DeriveGasTreeCell(const GasTree& tree, uint32_t cellIndex) {
