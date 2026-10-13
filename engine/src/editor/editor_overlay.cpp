@@ -382,6 +382,14 @@ namespace bicameral::editor {
         Line(std::format("シミュ GPU {:.2f} ms/投入(予算 {:.2f})", status.simGpuMilliseconds,
                          status.budgetMilliseconds));
         Line(std::format("描画 GPU {:.2f} ms/フレーム", status.renderGpuMilliseconds));
+        if (status.overBudgetTicks > 0) {
+            // 負荷で遅れるのは直すべき不具合(D-468)。重さの検査は「写しの早送り」のパネル
+            const frame::WeightSpan& span = status.lastOverBudget;
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f),
+                               "予算を超えた刻み %llu(等速の予算 %.2f ms。最後: 刻み %llu が %.2f ms・ブロック %u)",
+                               static_cast<unsigned long long>(status.overBudgetTicks), status.tickBudgetMilliseconds,
+                               static_cast<unsigned long long>(span.peakTick), span.peakMilliseconds, span.peakBlocks);
+        }
 
         // --- 入力と表示 ---
         ImGui::Separator();

@@ -8,10 +8,13 @@
 // 写しは 1 つだけ(仮。T-0412 の判断待ち)。作るのは最初の依頼の時(それまで VRAM を使わない)。表を差し替えた後の依頼は作り直す。
 // 作る(パイプラインの作成。キャッシュに当たらないと 10 秒を超える)のは別のスレッドで、フレームのループを止めない(D-468)。
 // 写しにはコマンドを当てない(今の状態から何もしなければどうなるか)。中身(何を測るか)は依頼の条件(editor::CopyRequest)で決まる。
+// 重さの検査(T-0413・ADR-0204): 終えたら刻みごとの GPU の時間と活性のブロック数を予算(依頼の値か、この機械の今の予算)と
+// 演出のスローの窓で判定する(frame/weight_check)。予算を超えた刻みは直すべき不具合として警告のログ(D-468)。
 //
 // 人がいない確かめ(--auto-copy): 本物が刻み AUTO_START_TICK に着いたら上限 AUTO_TICKS 刻みの写しを取り、終わったら写しの
 // 刻みごとの世界のハッシュが、本物が同じ刻みに読み戻したハッシュと全部同じかを比べる(本物にコマンドを足さない起動で。
 // 写しは本物と同じ結果になる・写しを取っても本物は変わらないことは、--record と別の起動の --replay で確かめる)。
+// 重さの集め方が決定的なこと: 写しの刻みごとの活性のブロック数が本物の同じ刻みと全部同じで、重さを全部の刻みで測れたこと(T-0413)。
 #pragma once
 
 #include <cstdint>
@@ -26,6 +29,7 @@
 
 #include "editor/copy_panel.h"
 #include "frame/sim_scheduler.h"
+#include "frame/weight_check.h"
 #include "gpu/queue.h"
 #include "sim/world_copy.h"
 
@@ -44,16 +48,18 @@ namespace bicameral::frame {
         void Request(const editor::CopyRequest& request) { m_request = request; }
         void Cancel();
 
-        // 本物のシミュのリストを投げた後に呼ぶ。cursor = 本物の次に投げる単位・droppedTicks = 本物が追いつけず捨てた刻みの累計
+        // 本物のシミュのリストを投げた後に呼ぶ。cursor = 本物の次に投げる単位・droppedTicks = 本物が追いつけず捨てた刻みの累計・
+        // tickBudgetMilliseconds = この機械の今の等速の 1 刻みの予算(依頼に予算が無い時の重さの検査に使う)
         // makeCreate は写しを作る時だけ呼ぶ(今の表などを写した CreateCopy を返す)
         void Update(gpu::Queue& compute, const sim::ProbeSim& world, SimCursor cursor, uint64_t tableVersion,
-                    double spareMilliseconds, uint64_t droppedTicks, const std::function<CreateCopy()>& makeCreate);
+                    double spareMilliseconds, uint64_t droppedTicks, double tickBudgetMilliseconds,
+                    const std::function<CreateCopy()>& makeCreate);
 
         [[nodiscard]] const editor::CopyProgress& Progress() const { return m_progress; }
 
         // --- 人がいない確かめ(--auto-copy)---
         void StartAuto() { m_auto = AutoStage::Waiting; }
-        void NoteWorldHash(uint64_t tick, uint64_t worldHash);  // 本物の読み戻した刻みのハッシュ
+        void NoteWorldHash(const sim::ProbeTickHash& hash);  // 本物の読み戻した刻みの要約
         [[nodiscard]] bool AutoPassed() const { return m_auto == AutoStage::Passed; }
         [[nodiscard]] bool AutoFinished() const { return m_auto == AutoStage::Passed || m_auto == AutoStage::Failed; }
         [[nodiscard]] const std::string& AutoSummary() const { return m_autoSummary; }
@@ -68,6 +74,7 @@ namespace bicameral::frame {
         void Advance(gpu::Queue& compute, double spareMilliseconds);
         void Submit(gpu::Queue& compute, const std::vector<ID3D12CommandList*>& lists);
         void RefreshProgress(const gpu::Queue& compute);
+        void Weigh(const gpu::Queue& compute);
         void UpdateAuto(SimCursor cursor);
         [[nodiscard]] sim::WorldCopyQuery MakeQuery(const editor::CopyRequest& request);
 
@@ -78,6 +85,8 @@ namespace bicameral::frame {
         uint64_t m_fence = 0;
         bool m_cancelled = false;
         std::optional<editor::CopyRequest> m_request;
+        editor::CopyRequest m_active;  // 走っている問いの依頼(重さの検査の予算は始めた時に埋める)
+        double m_tickBudgetMilliseconds = 0.0;
         editor::CopyProgress m_progress;
         // 条件が測った値(刻み, 値)。写しの条件の関数が書く(フレームのループの外から持つので共有)
         std::shared_ptr<std::vector<std::pair<uint64_t, uint64_t>>>
@@ -89,6 +98,8 @@ namespace bicameral::frame {
         AutoStage m_auto = AutoStage::Off;
         std::map<uint64_t, uint64_t> m_worldHashes;  // 本物(AUTO_START_TICK より後)
         std::map<uint64_t, uint64_t> m_copyHashes;
+        std::map<uint64_t, uint32_t> m_worldBlocks;  // 本物の刻みごとの活性のブロック数
+        std::map<uint64_t, uint32_t> m_copyBlocks;
         std::string m_autoSummary;
     };
 

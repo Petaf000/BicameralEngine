@@ -10,6 +10,10 @@
 //   - 同じ写しを使い直す: 本物が刻み SECOND_TICK に来たら、コマンドを当てずに写しを取り直し、条件「木の量が閾値以下」で止める。
 //     止まった刻みが、CPU リファレンスで同じ条件を数えた刻みと同じ(閾値は CPU の木の量の道のりから決める)・
 //     止まるまでのセルのハッシュが CPU と一致・つつきを当てていないので基準と違う刻みがある
+//   - 重さの集め方(T-0413・ADR-0204): 本物はばらばらの単位の数(刻みがフレームをまたぐ)で流しても、sim::TickCostAccumulator が
+//     全部の刻みの重さを集め、活性のブロック数が要約と同じ。写しは全部の刻みに GPU の時間があり、活性のブロック数が基準の同じ刻みと
+//     同じ(GPU の時間は揺れるので、決定的な値 = 刻みの数とブロック数で比べる)。写しを取っても本物のブロック数は基準と同じ。
+//     重さの検査(frame::CheckWeight)が全部の刻みを判定し、ブロックの和が基準と同じ
 //   - シェーダーの assert と debug layer のエラーが 0 件
 // 写しの VRAM(既定のヒープの主なバッファ)と、早送りの 1 刻みの GPU の時間をログに出す(docs/perf.md)。
 // 引数: gpu_test_options.h(--warp・--no-gbv)
@@ -27,11 +31,13 @@
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
+#include "frame/weight_check.h"
 #include "gpu/device.h"
 #include "gpu/queue.h"
 #include "gpu_test_options.h"
 #include "reaction_test_table.h"
 #include "sim/probe_sim.h"
+#include "sim/tick_cost.h"
 #include "sim/world_copy.h"
 #include "sim/world_physics.h"
 #include "standard_world_physics.h"
@@ -154,7 +160,8 @@ namespace {
     // 本物の世界を 1 フレームずつ投げる。写しがあれば、本物のフレームの後ろに写しのリストを同じキューで投げ、両方を待つ
     class Driver {
     public:
-        Driver(gpu::Queue& queue, ProbeSim& simulation) : m_queue(queue), m_simulation(simulation) {}
+        Driver(gpu::Queue& queue, ProbeSim& simulation)
+            : m_queue(queue), m_simulation(simulation), m_costs(simulation.UnitsPerTick()) {}
 
         // 刻み to の境界まで。commands は最初のフレームで足す。breakAt の境界ではフレームを切り、onBoundary(刻み) を呼ぶ
         // (写しを取る・早送りを回す)
@@ -194,8 +201,16 @@ namespace {
                     return false;
 
                 const ProbeFrameReadback readback = m_simulation.ReadFrame(0);
-                for (const ProbeTickHash& hash : readback.hashes)
+                for (const ProbeTickHash& hash : readback.hashes) {
                     m_hashes[hash.tick] = hash.WorldHash();
+                    m_blocks[hash.tick] = hash.scheduledBlocks;
+                }
+
+                // 刻みごとの重さ(刻みはフレームをまたぐ。T-0413)
+                std::vector<TickCost> costs;
+                m_costsMatched = m_costs.Add(readback, costs) && m_costsMatched;
+                for (const TickCost& cost : costs)
+                    m_costBlocks[cost.tick] = cost.gpuTimestampTicks > 0 ? cost.scheduledBlocks : UINT32_MAX;
 
                 m_debugAssertCount += readback.debugAssertCount;
             }
@@ -205,6 +220,10 @@ namespace {
 
         [[nodiscard]] const std::map<uint64_t, uint64_t>& Hashes() const { return m_hashes; }
         [[nodiscard]] uint32_t DebugAssertCount() const { return m_debugAssertCount; }
+        [[nodiscard]] const std::map<uint64_t, uint32_t>& Blocks() const { return m_blocks; }
+        // 重さを集めた刻みの活性のブロック数(GPU の時間が 0 なら UINT32_MAX)
+        [[nodiscard]] const std::map<uint64_t, uint32_t>& CostBlocks() const { return m_costBlocks; }
+        [[nodiscard]] bool CostsMatched() const { return m_costsMatched; }
 
     private:
         gpu::Queue& m_queue;
@@ -212,6 +231,10 @@ namespace {
         uint64_t m_position = 0;
         uint64_t m_frame = 0;
         std::map<uint64_t, uint64_t> m_hashes;
+        std::map<uint64_t, uint32_t> m_blocks;
+        TickCostAccumulator m_costs;
+        std::map<uint64_t, uint32_t> m_costBlocks;
+        bool m_costsMatched = true;
         uint32_t m_debugAssertCount = 0;
     };
 
@@ -240,13 +263,39 @@ namespace {
         std::map<uint64_t, uint64_t> worldHashes;
         std::map<uint64_t, uint64_t> cellHashes;
         std::map<uint64_t, uint64_t> wood;
+        std::map<uint64_t, uint32_t> blocks;     // 活性のブロック数(T-0413)
+        std::vector<frame::WeightTick> weights;  // 刻みごとの重さ(GPU の時間が 0 の刻みは入れない)
+        bool weightsAligned = false;             // tickGpuTimestampTicks が hashes と同じ数
     };
 
-    void CollectHashes(const WorldCopyResult& result, CopyPath& path) {
-        for (const ProbeTickHash& hash : result.hashes) {
+    void CollectHashes(const WorldCopyResult& result, CopyPath& path, double frequency) {
+        path.weightsAligned = result.tickGpuTimestampTicks.size() == result.hashes.size();
+        for (size_t index = 0; index < result.hashes.size(); ++index) {
+            const ProbeTickHash& hash = result.hashes[index];
             path.worldHashes[hash.tick] = hash.WorldHash();
             path.cellHashes[hash.tick] = hash.hash;
+            path.blocks[hash.tick] = hash.scheduledBlocks;
+            const uint64_t gpuTicks = path.weightsAligned ? result.tickGpuTimestampTicks[index] : 0;
+            if (gpuTicks > 0) {
+                path.weights.push_back({.tick = hash.tick,
+                                        .gpuMilliseconds = static_cast<double>(gpuTicks) * 1000.0 / frequency,
+                                        .scheduledBlocks = hash.scheduledBlocks});
+            }
         }
+    }
+
+    // 刻み from〜to のブロック数が全部同じ刻みの数(どちらかに無ければ違うと数える)
+    uint64_t CountSameBlocks(const std::map<uint64_t, uint32_t>& got, const std::map<uint64_t, uint32_t>& expected,
+                             uint64_t from, uint64_t to) {
+        uint64_t same = 0;
+        for (uint64_t tick = from; tick <= to; ++tick) {
+            const auto a = got.find(tick);
+            const auto b = expected.find(tick);
+            if (a != got.end() && b != expected.end() && a->second == b->second)
+                ++same;
+        }
+
+        return same;
     }
 
     int RunTest(ID3D12Device5* device, const BakedReactionTable& table) {
@@ -289,6 +338,7 @@ namespace {
         if (!copy)
             return failures.count;
 
+        const double frequency = static_cast<double>(real->queue->TimestampFrequency());
         CopyPath first;
         CopyPath second;
         uint32_t starts = 0;
@@ -299,7 +349,7 @@ namespace {
                 return copy->RecordInitialization();
 
             if (starts == 1 && copy->Finished() && first.worldHashes.empty())
-                CollectHashes(copy->Result(), first);  // 使い直すと結果は空になる
+                CollectHashes(copy->Result(), first, frequency);  // 使い直すと結果は空になる
 
             // 写しを取る(本物のリストが刻みの境界で終わった直後)
             const bool startFirst = starts == 0 && atBoundary && tick == FORK_TICK;
@@ -339,7 +389,7 @@ namespace {
 
         copy->Complete();
         failures.Check(starts == 2 && copy->Finished() && !copy->Result().failed, "写しを 2 回使って終えた");
-        CollectHashes(copy->Result(), second);
+        CollectHashes(copy->Result(), second, frequency);
 
         // --- 1. 本物は変わらない ---
         failures.Check(CountMismatches(driver.Hashes(), baseline, 1, TICKS, "写しを取った本物 と 基準") == 0,
@@ -374,8 +424,31 @@ namespace {
                            "使い直した写しの木の量が CPU と同じ");
         }
 
+        // --- 重さの集め方(T-0413。決定的な値 = 刻みの数と活性のブロック数で比べる)---
+        const uint64_t firstTicks = TICKS - FORK_TICK;
+        failures.Check(driver.CostsMatched() && baseDriver.CostsMatched(),
+                       "本物の終えた刻みと要約の数が毎フレーム合う");
+        failures.Check(CountSameBlocks(driver.CostBlocks(), driver.Blocks(), 1, TICKS) == TICKS,
+                       "本物(刻みがフレームをまたぐ)の全部の刻みの重さを集め、ブロック数が要約と同じ");
+        failures.Check(CountSameBlocks(driver.Blocks(), baseDriver.Blocks(), 1, TICKS) == TICKS,
+                       "写しを取っても本物の活性のブロック数が基準と同じ");
+        failures.Check(first.weightsAligned && first.weights.size() == firstTicks && second.weightsAligned &&
+                           second.weights.size() == second.blocks.size(),
+                       "写しの全部の刻みに GPU の時間がある");
+        failures.Check(CountSameBlocks(first.blocks, baseDriver.Blocks(), FORK_TICK + 1, TICKS) == firstTicks,
+                       "写しの活性のブロック数が基準の同じ刻みと同じ");
+
+        uint64_t baselineBlocks = 0;
+        for (uint64_t tick = FORK_TICK + 1; tick <= TICKS; ++tick)
+            baselineBlocks += baseDriver.Blocks().at(tick);
+
+        const frame::WeightReport weight = frame::CheckWeight(first.weights, {.tickMilliseconds = 1000.0});
+        Log(Channel::Sim, Level::Info, "1 つ目の写しの {}", frame::DescribeWeight(weight, 60.0));
+        failures.Check(weight.ticks == firstTicks && weight.blockSum == baselineBlocks &&
+                           weight.verdict == frame::WeightVerdict::Fits,
+                       "重さの検査が全部の刻みを判定し、ブロックの和が基準と同じ");
+
         // --- 重さ ---
-        const double frequency = static_cast<double>(real->queue->TimestampFrequency());
         Log(Channel::Sim, Level::Info,
             "写しの VRAM {} MiB・早送り 1 刻みの GPU 時間 {:.1f} µs({} 刻み・{} リスト。2 つ目)",
             copy->VramBytes() >> 20,

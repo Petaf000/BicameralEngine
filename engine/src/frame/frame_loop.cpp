@@ -34,6 +34,7 @@
 #include "frame/sim_scheduler.h"
 #include "frame/table_hot_reload.h"
 #include "frame/trace_capture.h"
+#include "frame/weight_check.h"
 #include "frame/world_copy_runner.h"
 #include "gpu/com_ptr.h"
 #include "gpu/queue.h"
@@ -52,6 +53,7 @@
 #include "sim/probe_surface.h"
 #include "sim/probe_trace.h"
 #include "sim/reaction_table.h"
+#include "sim/tick_cost.h"
 #include "sim/world_physics.h"
 
 namespace bicameral::frame {
@@ -318,6 +320,7 @@ namespace bicameral::frame {
                 // --record: どの世界の記録か(T-0371)
                 m_recorder.SetWorld(options.world);
                 m_rebuilds = parts.rebuilds;
+                m_tickCosts = sim::TickCostAccumulator(m_sim.UnitsPerTick());
                 if (options.autoCopy)
                     m_worldCopy.StartAuto();
 
@@ -353,6 +356,9 @@ namespace bicameral::frame {
             // --- シミュの読み戻し ---
             void CollectSimSubmissions();
             void ReportSimReadback(const sim::ProbeFrameReadback& readback);
+            void WatchWeight(const sim::ProbeFrameReadback& readback);
+            void ReportWeightWatch();
+            [[nodiscard]] double TickBudgetMilliseconds() const;
             void ReportEvents(const sim::ProbeFrameReadback& readback);
             void CheckPhysics(const sim::ProbeTickHash& tickHash);
             void NotePhysicsCheckGravity();
@@ -518,6 +524,10 @@ namespace bicameral::frame {
 
             // --- 写しの早送り(T-0412。本物の刻みの合間に回す)---
             WorldCopyRunner m_worldCopy;
+
+            // --- 重さの見張り(安全網の警告。T-0413・D-468): 本物の刻みが等速の予算を超えたら警告する ---
+            sim::TickCostAccumulator m_tickCosts{1};
+            WeightWatch m_weightWatch;
         };
 
         // --- 作る ---
@@ -929,7 +939,7 @@ namespace bicameral::frame {
                     m_editor->Patch().NoteTick(tickHash.tick);
                 }
 
-                m_worldCopy.NoteWorldHash(tickHash.tick, tickHash.WorldHash());
+                m_worldCopy.NoteWorldHash(tickHash);
 
                 if (!m_replay.empty())
                     m_replay.front().CheckHash(tickHash.tick, tickHash.WorldHash());
@@ -938,8 +948,46 @@ namespace bicameral::frame {
                     CheckPhysics(tickHash);
             }
 
+            WatchWeight(readback);
             ReportEvents(readback);
             CollectTrace(readback);
+        }
+
+        // --- 重さの見張り(T-0413・ADR-0204・D-468・06 §6)---
+
+        // 等速の 1 刻みの予算 = 1 フレームのシミュの予算 × 目標 fps ÷ 60 刻み/秒(エディタの速さの操作では変えない:
+        // 「等速でこの刻みは予算に入るか」を見る)
+        double FrameLoop::TickBudgetMilliseconds() const {
+            return m_scheduler.BudgetMilliseconds() * static_cast<double>(m_options.targetFps) / 60.0;
+        }
+
+        // 終えた刻みの重さ(単位の GPU 時間の和)を予算と比べる。写しの重さの検査と同じ部品で集める(sim/tick_cost)
+        void FrameLoop::WatchWeight(const sim::ProbeFrameReadback& readback) {
+            std::vector<sim::TickCost> costs;
+            (void)m_tickCosts.Add(readback, costs);
+            const double allowance = TickBudgetMilliseconds();
+            for (const sim::TickCost& cost : costs) {
+                m_weightWatch.Note(
+                    {.tick = cost.tick,
+                     .gpuMilliseconds = TimestampMilliseconds(cost.gpuTimestampTicks, m_computeFrequency),
+                     .scheduledBlocks = cost.scheduledBlocks},
+                    allowance);
+            }
+        }
+
+        // 1 秒ごと: 予算を超えた刻みがあれば 1 行の警告(直すべき不具合。どの刻み・何が重かったか)
+        void FrameLoop::ReportWeightWatch() {
+            WeightSpan span;
+            uint64_t overTicks = 0;
+            if (!m_weightWatch.TakeSpan(span, overTicks))
+                return;
+
+            Log(Channel::Sim, Level::Warning,
+                "重さ: 刻み {}〜{} のうち {} 刻みが等速の予算 {:.2f} ms を超えた"
+                "(いちばん重い刻み {} が {:.2f} ms = 予算の {:.0f}%・計算したブロック {})。"
+                "負荷で遅れるのは直すべき不具合(D-468。重さの検査は「写しの早送り」のパネル)",
+                span.firstTick, span.lastTick, overTicks, TickBudgetMilliseconds(), span.peakTick,
+                span.peakMilliseconds, span.peakRatio * 100.0, span.peakBlocks);
         }
 
         // 押すコマンド(probe_sim.hlsli の PROBE_COMMAND_TYPE_PUSH の payload)を CPU の物理へ
@@ -1729,7 +1777,7 @@ namespace bicameral::frame {
             }
 
             m_worldCopy.Update(m_compute, m_sim, m_scheduler.Cursor(), m_tableReload.AppliedVersion(),
-                               m_scheduler.SpareMilliseconds(), m_scheduler.DroppedTicks(),
+                               m_scheduler.SpareMilliseconds(), m_scheduler.DroppedTicks(), TickBudgetMilliseconds(),
                                [this] { return WorldCopyFactory(); });
         }
 
@@ -1795,6 +1843,9 @@ namespace bicameral::frame {
                     .simGpuMilliseconds = average(last.simGpuMilliseconds, last.simSubmissionsMeasured),
                     .renderGpuMilliseconds = average(last.renderGpuMilliseconds, last.renderFramesMeasured),
                     .budgetMilliseconds = m_scheduler.BudgetMilliseconds(),
+                    .tickBudgetMilliseconds = TickBudgetMilliseconds(),
+                    .overBudgetTicks = m_weightWatch.OverTicks(),
+                    .lastOverBudget = m_weightWatch.LastSpan(),
                     .view = m_viewController.Describe(),
                     .replaying = !m_replay.empty(),
                     .recording = !m_options.recordPath.empty(),
@@ -2332,6 +2383,7 @@ namespace bicameral::frame {
                     continue;
 
                 LogStats(m_interval, frameStart - intervalStart, "1 秒");
+                ReportWeightWatch();
                 AddStats(m_interval);
                 m_lastInterval = m_interval;
                 m_lastIntervalSeconds = chr::duration<double>(frameStart - intervalStart).count();
@@ -2388,6 +2440,9 @@ namespace bicameral::frame {
             CollectSimSubmissions();
             AddStats(m_interval);
             LogStats(m_total, Clock::now() - start, "全体");
+            ReportWeightWatch();
+            Log(Channel::Sim, Level::Info, "重さの見張り: 測った刻み {}・等速の予算を超えた刻み {}(D-468)",
+                m_weightWatch.MeasuredTicks(), m_weightWatch.OverTicks());
             const bool replayPassed = FinishReplay();
             if (!FinishTrace())
                 return 1;
@@ -2428,6 +2483,11 @@ namespace bicameral::frame {
 
             if (m_options.autoPatch)
                 Log(Channel::Sim, Level::Info, "--auto-patch: {}。OK", m_editor->Patch().AutoSummary());
+
+            if (m_options.autoCopy && m_weightWatch.MeasuredTicks() == 0) {
+                Log(Channel::Sim, Level::Error, "--auto-copy: 本物の刻みの重さを測れなかった(重さの見張り)");
+                return 1;
+            }
 
             if (m_options.autoCopy && !m_worldCopy.AutoPassed()) {
                 Log(Channel::Sim, Level::Error, "--auto-copy: 写しの早送りの確かめが通らなかった({})",

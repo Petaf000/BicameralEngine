@@ -105,6 +105,7 @@ add_library(bicameral_sim STATIC
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_trace.cpp
+  src/sim/tick_cost.cpp  # 単位の GPU 時間を刻みごとに(重さの検査。T-0413)
   src/sim/world_copy.cpp  # 世界の写しの早送り(T-0412)
 )
 target_include_directories(bicameral_sim PUBLIC src)
@@ -156,6 +157,7 @@ target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicamera
 # --- frame: フレームの歩調の計算(GPU を知らない。CPU だけのテストがある)---
 add_library(bicameral_frame STATIC
   src/frame/sim_scheduler.cpp
+  src/frame/weight_check.cpp  # 重さの検査の判定(T-0413)
 )
 target_include_directories(bicameral_frame PUBLIC src)
 

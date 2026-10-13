@@ -22,6 +22,12 @@ add_executable(sim_scheduler_test sim_scheduler_test.cpp)
 target_link_libraries(sim_scheduler_test PRIVATE bicameral_frame)
 add_test(NAME sim_scheduler COMMAND sim_scheduler_test)
 
+# 重さの検査(T-0413・ADR-0204): 予算・スローの窓の判定と、単位の GPU 時間を刻みにまとめる部品(GPU を使わない)
+add_executable(weight_check_test weight_check_test.cpp)
+target_link_libraries(weight_check_test PRIVATE bicameral_frame bicameral_sim)
+target_precompile_headers(weight_check_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+add_test(NAME weight_check COMMAND weight_check_test)
+
 add_executable(time_control_test time_control_test.cpp)
 target_link_libraries(time_control_test PRIVATE bicameral_editor)
 add_test(NAME time_control COMMAND time_control_test)
@@ -466,7 +472,7 @@ set_tests_properties(gpu_probe_rewind PROPERTIES TIMEOUT 900)
 # 世界の写しの早送り(T-0412・ADR-0198): 写しを取っても本物のハッシュ列が変わらない・同じコマンドなら写し = 本物 = CPU リファレンス・
 # 使い直した写しが条件(木の量)で CPU と同じ刻みに止まる
 bicameral_add_gpu_test(gpu_world_copy_test)
-target_link_libraries(gpu_world_copy_test PRIVATE bicameral_sim)
+target_link_libraries(gpu_world_copy_test PRIVATE bicameral_sim bicameral_frame)
 bicameral_add_gpu_test_case(gpu_world_copy gpu_world_copy_test gpu)
 set_tests_properties(gpu_world_copy PROPERTIES TIMEOUT 900)
 
