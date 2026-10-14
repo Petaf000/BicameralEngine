@@ -32,6 +32,7 @@ namespace bicameral::script {
             std::vector<std::string> depends;  // 書いた依存(LoadPackages が basePackage も足す)
             std::string entry = "init";
             std::string title;  // 人に見せる名前(環境ミキサーの一覧。省けば空。T-0373)
+            bool game = false;  // ゲーム本体(省けば false。T-0557・ADR-0250)
         };
 
         // 分類 → 鍵 → 値(1 つのパッケージが返したもの)
@@ -171,9 +172,13 @@ namespace bicameral::script {
                     if (!field.value.IsString() || field.value.text.size() > MAX_TITLE_BYTES)
                         return std::unexpected(std::format("title は {} バイトまでの文字列", MAX_TITLE_BYTES));
                     manifest.title = field.value.text;
+                } else if (key == "game") {
+                    if (!field.value.IsBoolean())
+                        return std::unexpected("game は true か false(ゲーム本体なら true)");
+                    manifest.game = field.value.boolean;
                 } else {
-                    return std::unexpected(
-                        std::format("知らない欄 {}(書けるのは format・title・depends・entry)", ToDebugText(field.key)));
+                    return std::unexpected(std::format("知らない欄 {}(書けるのは format・title・depends・entry・game)",
+                                                       ToDebugText(field.key)));
                 }
             }
 
@@ -241,6 +246,28 @@ namespace bicameral::script {
 
                 depends.push_back(basePackage);
             }
+        }
+
+        // ゲーム本体の名前: 渡された名前、無ければマニフェストに game = true と書いたもの(1 つまで。無ければ空)。
+        // 2 つ以上・渡した名前のほかに game = true があれば誤り(どれを本体にするか決まらない。T-0557・ADR-0250)
+        std::expected<std::string, std::string> ResolveGamePackage(const std::map<std::string, OrderNode>& nodes,
+                                                                   const std::string& named) {
+            std::vector<std::string> declared;
+            for (const auto& [name, node] : nodes) {
+                if (node.manifest.game && name != named)
+                    declared.push_back(name);
+            }
+
+            if (declared.empty())
+                return named;
+            if (!named.empty())
+                return std::unexpected(
+                    std::format("ゲーム本体は {} なのに、{} も game = true と書いている", named, declared.front()));
+            if (declared.size() > 1)
+                return std::unexpected(std::format(
+                    "game = true のパッケージが 2 つある({} と {})。ゲーム本体は 1 つだけ", declared[0], declared[1]));
+
+            return declared.front();
         }
 
         // 依存のうち、まだ並べられていないもの(無い・読まないものなら理由も)
@@ -585,8 +612,10 @@ namespace bicameral::script {
         if (!manifest)
             return std::unexpected(std::format("パッケージ '{}': {}", package.name, manifest.error()));
 
-        return PackageManifestInfo{
-            .name = package.name, .title = std::move(manifest->title), .depends = std::move(manifest->depends)};
+        return PackageManifestInfo{.name = package.name,
+                                   .title = std::move(manifest->title),
+                                   .depends = std::move(manifest->depends),
+                                   .game = manifest->game};
     }
 
     // --- 読み込みと合わせ ---
@@ -629,11 +658,16 @@ namespace bicameral::script {
             nodes.emplace(name, OrderNode{.manifest = std::move(*manifest)});
         }
 
-        // --- ゲーム本体への依存(ゲーム本体のたどる依存は除く)---
+        // --- ゲーム本体(名前を渡されなければ game = true のもの)と、それへの依存(ゲーム本体のたどる依存は除く)---
+        auto basePackage = ResolveGamePackage(nodes, options.basePackage);
+        if (!basePackage)
+            return std::unexpected(basePackage.error());
+
+        result.gamePackage = *basePackage;
         std::set<std::string> baseClosure;
-        if (!options.basePackage.empty()) {
-            baseClosure = DependencyClosure(nodes, options.basePackage);
-            AddBaseDependency(nodes, options.basePackage, baseClosure);
+        if (!basePackage->empty()) {
+            baseClosure = DependencyClosure(nodes, *basePackage);
+            AddBaseDependency(nodes, *basePackage, baseClosure);
         }
 
         // --- 順番 → 読み込み ---
@@ -643,7 +677,7 @@ namespace bicameral::script {
 
         std::set<std::string> loaded;
         for (const std::string& name : order) {
-            const LoadContext context = MakeLoadContext(byName, nodes, name, options.basePackage, baseClosure);
+            const LoadContext context = MakeLoadContext(byName, nodes, name, *basePackage, baseClosure);
             std::string reason = LoadOne(sandbox, *byName.at(name), nodes.at(name).manifest, loaded, options, context,
                                          result);
             if (!reason.empty()) {

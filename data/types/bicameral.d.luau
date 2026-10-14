@@ -16,6 +16,7 @@ export type PackageManifest = {
     title: string?, -- 人に見せる名前(環境ミキサーの一覧。T-0373)
     depends: { string }?, -- 依存するパッケージの名前
     entry: string?, -- 表を返すファイル(既定 "init")
+    game: boolean?, -- ゲーム本体なら true(読む一覧の中に 1 つまで。名前に依らない。T-0557・ADR-0250)
 }
 
 -- --- 反応表(分類 elements・species・reactions。ADR-0032。値は整数で、単位は欄の名前)---
@@ -129,6 +130,8 @@ export type PlayMetric = {
     sample_interval_ticks: number, -- 量を測る間隔(刻み)
     pokes: { PlayMetricPoke }?, -- 場面に当てるつつき(セルを温める)
     quantity: string, -- 測る量: "max_temperature"(mK)・"cells_at_or_above"(セル)・"species_amount"(µmol)
+    min_cell: { number }?, -- 量を測る範囲 { x, y, z }(セル)。size_cells と両方書くか両方省く(省けば世界全体。T-0559)
+    size_cells: { number }?, -- 範囲の大きさ { x, y, z }(セルの数)
     temperature_mk: number?, -- cells_at_or_above のしきい値の温度(この量だけ)
     species: string?, -- species_amount の物質(この量だけ)
     at_most: number?, -- 量がこれ以下で止める(at_least と 1 つまで。どちらも無ければ上限の量を測る)

@@ -18,6 +18,23 @@ namespace bicameral::sim {
 
         constexpr std::string_view FILE_HEADER = "bicameral-play-metrics 1";
 
+        // 範囲が格子に収まらなければ理由(収まれば空)
+        std::string RegionOutsideGrid(const PlayMetricRegion& region) {
+            if (region.wholeWorld)
+                return {};
+
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const uint64_t end = uint64_t{region.minCell[axis]} + region.sizeCells[axis];
+                if (region.sizeCells[axis] == 0 || end > PROBE_GRID_SIZE) {
+                    return std::format("min_cell ({}, {}, {})・size_cells ({}, {}, {}) が格子({}³)に収まらない",
+                                       region.minCell[0], region.minCell[1], region.minCell[2], region.sizeCells[0],
+                                       region.sizeCells[1], region.sizeCells[2], PROBE_GRID_SIZE);
+                }
+            }
+
+            return {};
+        }
+
         std::expected<PlayMetric, std::string> BakeOne(const PlayMetricDefinition& definition,
                                                        const BakedReactionTable& table) {
             const std::string path = std::format("play_metrics.{}", definition.key);
@@ -35,6 +52,7 @@ namespace bicameral::sim {
                               .sampleIntervalTicks = definition.sampleIntervalTicks,
                               .pokes = definition.pokes,
                               .quantity = definition.quantity,
+                              .region = definition.region,
                               .temperatureMillikelvin = definition.temperatureMillikelvin,
                               .stop = definition.stop,
                               .threshold = definition.threshold};
@@ -50,6 +68,9 @@ namespace bicameral::sim {
                                                        poke.y, poke.z, PROBE_GRID_SIZE));
                 }
             }
+
+            if (const std::string outside = RegionOutsideGrid(metric.region); !outside.empty())
+                return std::unexpected(std::format("{}: 範囲 {}", path, outside));
 
             if (definition.quantity == PlayMetricQuantity::SpeciesAmount) {
                 metric.species = table.SpeciesId(definition.species);

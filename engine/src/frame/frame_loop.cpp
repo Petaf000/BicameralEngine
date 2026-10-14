@@ -222,8 +222,9 @@ namespace bicameral::frame {
             return script::MixFolders(*catalog, options.mix);
         }
 
-        // 世界の表の読み方: サンプルの世界はゲーム本体(combustion_test)を含むフォルダ。ブランクの世界は --packages のフォルダを
-        // ゲーム本体なし(全部 Mod)で読む(渡さなければフォルダは読まない)。どちらも --mix の標準パッケージを足す。
+        // 世界の表の読み方: ゲーム本体はマニフェストに game = true と書いたパッケージ(名前に依らない。T-0557・ADR-0250)。
+        // サンプルの世界はゲーム本体が要る(無ければ起動しない)。ブランクの世界は --packages のフォルダを読み、game = true が
+        // あればそれがゲーム本体、無ければ全部 Mod(渡さなければフォルダは読まない)。どちらも --mix の標準パッケージを足す。
         // 足すフォルダの誤りは起動時の LoadWorldReactionTable が先に止める(ここでは足さない)
         script::ReactionTableSource WorldTableSource(const FrameLoopOptions& options) {
             std::vector<fs::path> added = MixFolders(options).value_or(std::vector<fs::path>{});
@@ -231,7 +232,7 @@ namespace bicameral::frame {
                 return {.packageRoot = options.packageRoot, .addedPackages = std::move(added)};
 
             return {.packageRoot = options.packageRoot,
-                    .basePackage = {},
+                    .requireGame = false,
                     .readPackageRoot = !options.packageRoot.empty(),
                     .addedPackages = std::move(added)};
         }
@@ -635,9 +636,11 @@ namespace bicameral::frame {
             for (const std::string& name : loaded->loadOrder)
                 packages += (packages.empty() ? "" : "・") + name;
 
-            Log(Channel::Sim, Level::Info, "反応表: パッケージ {}(物質 {}・規則 {}・版 {:016x}{}・読んでベイク {} ms)",
-                packages, loaded->table.species.size() - 1, loaded->table.rules.size(), loaded->tableVersion,
-                loaded->modifiedWorld ? "・改造された世界" : "", elapsedMs);
+            Log(Channel::Sim, Level::Info,
+                "反応表: パッケージ {}(ゲーム本体 {}・物質 {}・規則 {}・版 {:016x}{}・読んでベイク {} ms)", packages,
+                loaded->gamePackage.empty() ? "なし" : loaded->gamePackage, loaded->table.species.size() - 1,
+                loaded->table.rules.size(), loaded->tableVersion, loaded->modifiedWorld ? "・改造された世界" : "",
+                elapsedMs);
 
             for (const script::PackageRejection& rejection : loaded->rejected)
                 Log(Channel::Sim, Level::Warning, "パッケージ {} を読まなかった: {}", rejection.package,

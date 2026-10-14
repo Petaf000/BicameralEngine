@@ -288,10 +288,10 @@ namespace {
 
     void TestHotReload(const fs::path& root) {
         const fs::path package = root / "coupling_world";
-        WriteText(package / "package.luau", "return { format = 1 }");
+        WriteText(package / "package.luau", "return { format = 1, game = true }");
         WriteText(package / "init.luau", MachineInit("0.5"));
 
-        const ReactionTableSource source{.packageRoot = root, .basePackage = "coupling_world"};
+        const ReactionTableSource source{.packageRoot = root};
         auto initial = LoadReactionTable(source);
         EXPECT(initial.has_value());
         if (!initial) {

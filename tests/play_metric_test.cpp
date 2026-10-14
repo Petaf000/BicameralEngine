@@ -2,7 +2,7 @@
 // 見るもの: サンプルの世界のパッケージ(data/packages/combustion_test)の指標「密室の火が消えるまで」が読めてベイクされる /
 //           分類が無い世界は空 / 形の誤り(知らない欄・量と欄の組み合わせ・at_most と at_least の両方・列でないつつき)を
 //           鍵と書いたパッケージの名前付きで落とす / ベイクの誤り(知らない物質・上限が間隔の倍数でない・格子の外・上限より後のつつき)/
-//           判定はつつきを全部当てた後の刻みだけ / 前の版との差(同じ・変わった・初めて・消えた)/ 値のファイルの往復と壊れたファイル。
+//           判定はつつきを全部当てた後の刻みだけ / 範囲(min_cell・size_cells。T-0559)の読み・ベイク・その中だけの量 / 前の版との差(同じ・変わった・初めて・消えた)/ 値のファイルの往復と壊れたファイル。
 // GPU と CPU リファレンスで測った値が同じことは tests/gpu_play_metric_test。失敗すると条件と行を表示して 1 を返す。
 #include <cstdio>
 #include <expected>
@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/probe_sim.hlsli"
 #include "reaction_test_table.h"
 #include "script/luau_sandbox.h"
 #include "script/play_metrics_package.h"
@@ -183,6 +184,60 @@ namespace {
                ordered->front().JudgeAfterTick() == 7);
     }
 
+    // --- 範囲(セルの箱の中だけの量。T-0559)---
+
+    void TestRegion() {
+        const std::string base = "max_ticks = 120, sample_interval_ticks = 10, quantity = 'max_temperature', ";
+        const auto read = ReadInit(MetricInit(base + "min_cell = { 1, 2, 3 }, size_cells = { 4, 5, 6 }"));
+        EXPECT(read && read->size() == 1);
+        if (read && read->size() == 1) {
+            const PlayMetricRegion expected{.wholeWorld = false, .minCell = {1, 2, 3}, .sizeCells = {4, 5, 6}};
+            EXPECT(read->front().region == expected);
+        }
+
+        const auto whole = ReadInit(MetricInit(base + "at_most = 1"));
+        EXPECT(whole && whole->size() == 1 && whole->front().region.wholeWorld);
+        ExpectReadError(base + "min_cell = { 1, 2, 3 }", "両方");
+        ExpectReadError(base + "min_cell = { 1, 2, 3 }, size_cells = { 0, 1, 1 }", "size_cells");
+
+        // ベイク: 格子に収まらない範囲は誤り
+        const auto table = BakeReactionTable(MakeCombustionTestTable());
+        if (!table)
+            return;
+
+        PlayMetricDefinition outside{.key = "m", .maxTicks = 120, .sampleIntervalTicks = 10};
+        outside.region = {.wholeWorld = false, .minCell = {60, 0, 0}, .sizeCells = {5, 1, 1}};
+        ExpectBakeError(*table, outside, "収まらない");
+
+        // 量: 箱の中のセルだけを数える(箱の外の熱い・物質のあるセルは入らない)
+        std::vector<reaction::RxCell> cells(PROBE_CELL_COUNT);
+        std::vector<reaction::HcThermalCache> thermal(PROBE_CELL_COUNT);
+        const uint32_t inside = ProbeCellIndex(2, 3, 4);
+        const uint32_t beyond = ProbeCellIndex(10, 3, 4);
+        thermal[inside].temperature = 900000;
+        thermal[beyond].temperature = 2000000;
+        for (const uint32_t index : {inside, beyond}) {
+            cells[index].speciesCount = 1;
+            cells[index].species[0] = 7;
+            cells[index].amounts[0] = index == inside ? 11 : 1000;
+        }
+
+        PlayMetric metric{.key = "m", .label = "m", .maxTicks = 10, .sampleIntervalTicks = 10};
+        metric.region = {.wholeWorld = false, .minCell = {0, 0, 0}, .sizeCells = {8, 8, 8}};
+        metric.quantity = PlayMetricQuantity::MaxTemperature;
+        EXPECT(MeasurePlayMetricQuantity(metric, cells, thermal) == 900000);
+        metric.quantity = PlayMetricQuantity::CellsAtOrAbove;
+        metric.temperatureMillikelvin = 800000;
+        EXPECT(MeasurePlayMetricQuantity(metric, cells, thermal) == 1);
+        metric.quantity = PlayMetricQuantity::SpeciesAmount;
+        metric.species = 7;
+        EXPECT(MeasurePlayMetricQuantity(metric, cells, thermal) == 11);
+
+        // 範囲なし = 世界全体
+        metric.region = {};
+        EXPECT(MeasurePlayMetricQuantity(metric, cells, thermal) == 1011);
+    }
+
     // --- 判定(つつきを全部当てた後だけ)---
 
     void TestObserver() {
@@ -258,6 +313,7 @@ int main() {
     TestSamplePackage();
     TestRead();
     TestBake();
+    TestRegion();
     TestObserver();
     TestCompare();
     if (failureCount != 0) {

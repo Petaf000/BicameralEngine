@@ -9,4 +9,5 @@ return {
     title = "サンプルの世界(燃焼の試験)",
     depends = { "real_elements", "real_matter", "real_reactions", "earth_environment" },
     entry = "init",
+    game = true, -- ゲーム本体(名前ではなくこの印で決まる。T-0557・ADR-0250)
 }

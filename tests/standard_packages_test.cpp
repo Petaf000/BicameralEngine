@@ -3,7 +3,8 @@
 //           各パッケージを依存と一緒に足すとベイクが通り(文献の反応熱との食い違いも無い)、全部足した表が期待どおり
 //           (元素・物質・規則の数・地球の環境 = 試験の写し StandardWorldPhysics・基準の大気・空気で満たすセル)/
 //           足す順に依らず同じ表の版 / 何も足さないとブランクの表と同じ版 / サンプルの世界に足すとぶつかる鍵のパッケージは読まない /
-//           基準の大気の検査(割合の合計・知らない物質・温度と圧力の有無)/ マニフェストの title / ホットリロードの読む元の差し替え。
+//           基準の大気の検査(割合の合計・知らない物質・温度と圧力の有無)/ マニフェストの title / ホットリロードの読む元の差し替え /
+//           ゲーム本体はマニフェストの game = true(⑤ の場面もサンプルも名前に依らず本体。T-0557)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/standard_packages.h"
 
@@ -61,7 +62,8 @@ namespace {
         if (!folders)
             return std::unexpected(folders.error());
 
-        return LoadReactionTable({.basePackage = {}, .readPackageRoot = false, .addedPackages = std::move(*folders)});
+        return LoadReactionTable(
+            {.requireGame = false, .readPackageRoot = false, .addedPackages = std::move(*folders)});
     }
 
     // --- 棚と足す一覧 ---
@@ -232,7 +234,7 @@ namespace {
 
     // 何も足さない読み方 = ブランクの表(D-455)
     void TestEmptyMixIsBlank() {
-        const auto empty = LoadReactionTable({.basePackage = {}, .readPackageRoot = false});
+        const auto empty = LoadReactionTable({.requireGame = false, .readPackageRoot = false});
         const auto blank = LoadBlankReactionTable();
         EXPECT(empty && blank && empty->tableVersion == blank->tableVersion);
         EXPECT(empty && empty->table.atmosphere.Empty() && empty->table.environment.gravityMicrometersPerSecond2 == 0);
@@ -285,6 +287,38 @@ namespace {
                                               .standardRoot = fs::path(BICAMERAL_DATA_STANDARD_DIR)});
         EXPECT(mixed && mixed->tableVersion == sample->tableVersion);
         EXPECT(mixed && mixed->rejected.empty());
+    }
+
+    // ゲーム本体はマニフェストの game = true で決まる(名前に依らない。T-0557・ADR-0250)。⑤ の場面(data/scenes。ADR-0240)は
+    // ブランクの世界の読み方(ゲーム本体は無くてもよい)でも本体として読まれ、標準の値(熱伝導率)を印なしで書き直せる
+    void TestSceneIsGame() {
+        const fs::path standardRoot = fs::path(BICAMERAL_DATA_STANDARD_DIR);
+        const auto scene = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_SCENES_DIR) / "grass_fire_river",
+                                              .requireGame = false,
+                                              .standardRoot = standardRoot});
+        if (!scene) {
+            std::printf("FAILED: 場面を読めない: %s\n", scene.error().c_str());
+            ++failureCount;
+
+            return;
+        }
+
+        EXPECT(scene->gamePackage == "grass_fire_river" && scene->loadOrder.back() == "grass_fire_river");
+        EXPECT(scene->rejected.empty() && !scene->modifiedWorld && !scene->overrides.empty());
+
+        // サンプルの世界も同じ印でゲーム本体
+        const auto sample = LoadReactionTable(
+            {.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR), .requireGame = false, .standardRoot = standardRoot});
+        EXPECT(sample && sample->gamePackage == "combustion_test");
+
+        // 標準パッケージだけ(game = true なし)はゲーム本体なし。ゲーム本体が要る読み方(サンプルの世界)なら止まる
+        const std::vector<fs::path> elements{standardRoot / "real_elements"};
+        const auto standardOnly = LoadReactionTable(
+            {.requireGame = false, .readPackageRoot = false, .addedPackages = elements});
+        EXPECT(standardOnly && standardOnly->gamePackage.empty());
+
+        const auto required = LoadReactionTable({.readPackageRoot = false, .addedPackages = elements});
+        EXPECT(!required && required.error().find("game = true") != std::string::npos);
     }
 
     // --- 基準の大気の検査 ---
@@ -365,7 +399,7 @@ namespace {
         if (!catalog || !blank)
             return;
 
-        ReactionTableSource source{.basePackage = {}, .readPackageRoot = false};
+        ReactionTableSource source{.requireGame = false, .readPackageRoot = false};
         ReactionTableHotReload reload(source, std::make_shared<const LoadedReactionTable>(*blank),
                                       SpeciesChangePolicy::Remap);
 
@@ -401,6 +435,7 @@ int main() {
     TestFullMix();
     TestEmptyMixIsBlank();
     TestSampleWithMix();
+    TestSceneIsGame();
     TestAtmosphereChecks();
     TestManifestTitle();
     TestHotReloadReplace();

@@ -141,7 +141,8 @@ namespace bicameral::frame {
         // サンプルの世界(D-456)は空気の中の木箱と積み木と試験の表(combustion_test)。--replay のときは再生ファイルの世界にする
         save::ReplayWorld world = save::ReplayWorld::Blank;
         // 反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。--packages)。サンプルの世界は空なら exe の横の data/packages
-        // (ゲーム本体 = combustion_test)。ブランクの世界は空なら何も読まない(空の表)、渡せばゲーム本体なしで全部を読む
+        // (ゲーム本体が要る)。ブランクの世界は空なら何も読まない(空の表)、渡せば全部を読む。どちらもゲーム本体は
+        // マニフェストに game = true と書いたパッケージ(ブランクでは無くてもよい = 全部 Mod。T-0557・ADR-0250)
         fs::path packageRoot;
         // 足す標準パッケージ(--mix・環境ミキサー。exe の横の data/standard の名前。依存も書く。T-0373・ADR-0183)。
         // 世界の表は packageRoot のもの(ブランクで --packages が無ければ無し)にこれを足して読む

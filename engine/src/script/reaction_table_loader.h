@@ -24,14 +24,12 @@
 
 namespace bicameral::script {
 
-    // サンプルの世界のゲーム本体のパッケージ(公開用の試験の表。D-456。ゲームの中身の表は T-0002 でユーザーが決める)。
-    // ブランクの世界(D-455)はこれを読まない(LoadBlankReactionTable か、basePackage を空にして読む)
-    constexpr std::string_view DEFAULT_BASE_PACKAGE = "combustion_test";
-
     struct ReactionTableSource {
         fs::path packageRoot;  // 直下のフォルダが 1 つずつパッケージ(空なら DefaultPackageRoot)
-        std::string basePackage{DEFAULT_BASE_PACKAGE};  // ゲーム本体。読めなければ失敗(空ならゲーム本体なし = 全部 Mod)
-        MergeMode mergeMode = MergeMode::AddOnly;       // 表の合わせ方(仮で案 C の既定。QUESTIONS Q8)
+        // ゲーム本体は、読むパッケージのうちマニフェストに game = true と書いたもの(名前に依らない。1 つまで。T-0557・ADR-0250)。
+        // 見つかれば、読めなければ失敗。requireGame: 無ければ失敗(サンプルの世界・場面)。false なら無い時は全部 Mod(ブランクの世界)
+        bool requireGame = true;
+        MergeMode mergeMode = MergeMode::AddOnly;  // 表の合わせ方(仮で案 C の既定。QUESTIONS Q8)
         fs::path typeDefinitions;  // 型検査に使う型の定義(T-0140。空なら DefaultTypeDefinitionsPath。読めなければ失敗)
 
         // --- 環境ミキサーで足した標準パッケージ(T-0373・ADR-0183・script/standard_packages.h)---
@@ -47,6 +45,7 @@ namespace bicameral::script {
         fs::path packageRoot;           // 実際に読んだフォルダ
         fs::path standardRoot;  // 依存の標準パッケージを探した棚(T-0498。エディタの表のパネルが書き戻す先を探す)
         std::vector<std::string> loadOrder;      // 読めたパッケージ(読んだ順)
+        std::string gamePackage;                 // ゲーム本体(game = true のパッケージ。無ければ空。T-0557)
         std::vector<PackageRejection> rejected;  // 読まなかった Mod と理由(ゲーム本体はここに来ない。来たら失敗)
         std::vector<TableOverride> overrides;    // 上書き(OverrideMarked・Override のとき)
         bool modifiedWorld = false;              // 「改造された世界」の印

@@ -1,4 +1,4 @@
 bicameral-play-metrics 1
+1 0 36000 1536000000 far_grass_left_after_10_min
 1 1 1560 0 grass_fire_out
-1 1 960 1741702939 grass_fire_reaches_river
-1 0 36000 1536000000 grass_left_after_10_min
+1 1 960 205702939 grass_fire_reaches_river
