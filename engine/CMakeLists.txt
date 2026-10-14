@@ -52,6 +52,7 @@ add_library(bicameral_reaction STATIC
   src/sim/material_templates.cpp  # 材料のひな形・抽出の物質・既定(同じ読み込みの分類。T-0399)
   src/sim/world_atmosphere.cpp  # 基準の大気(分類 atmosphere と environment の大気の値。T-0373・ADR-0182)
   src/sim/play_metric.cpp  # 遊びの指標の形・前の版との差(分類 play_metrics。T-0432・ADR-0206)
+  src/sim/coupling_table.cpp  # 流れどうしの結合(分類 drags・machines)のベイクと |q| ≤ 1 の検査(T-0536・ADR-0238)
 )
 target_include_directories(bicameral_reaction PUBLIC src)
 target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
@@ -161,6 +162,7 @@ add_library(bicameral_reaction_script STATIC
   src/script/material_templates_package.cpp  # 分類 material_templates・view_quantities・editor_defaults(T-0399)
   src/script/environment_package.cpp  # 世界の環境の値(分類 environment → sim::WorldPhysics。T-0400・ADR-0176)
   src/script/play_metrics_package.cpp  # 遊びの指標の分類 play_metrics を読む(T-0432・ADR-0206)
+  src/script/coupling_package.cpp  # 分類 drags・machines を 1 つの読み手で読む(T-0536・ADR-0238)
   src/script/standard_packages.cpp  # 標準パッケージの棚と、環境ミキサーで足す一覧(T-0373・ADR-0183)
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
@@ -207,6 +209,7 @@ add_executable(bicameral
   src/editor/material_rows.cpp
   src/editor/mixer_panel.cpp  # 環境ミキサー(標準パッケージを世界に足す・外す。T-0452・D-457)
   src/editor/reaction_table_panel.cpp
+  src/editor/coupling_rows.cpp  # 反応表のパネルの「結合」の欄(分類 drags・machines。T-0536)
   src/frame/auto_reload.cpp
   src/frame/auto_play.cpp  # --auto-play: 編集の状態・元に戻す/やり直す・プレイとやめるの確かめ(T-0497)
   src/frame/auto_play_table.cpp  # --auto-play-table: 表の差し替えを編集として扱う確かめ(T-0548)

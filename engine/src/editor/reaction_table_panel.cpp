@@ -15,6 +15,7 @@
 #include <imgui.h>
 
 #include "core/log.h"
+#include "editor/coupling_rows.h"
 #include "editor/editor_overlay.h"
 #include "script/luau_literal_edit.h"
 
@@ -243,6 +244,11 @@ namespace bicameral::editor {
 
             if (ImGui::BeginTabItem("元素")) {
                 BuildElements();
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("結合")) {  // 分類 drags・machines(T-0536)
+                BuildCouplingRows(m_table->table);
                 ImGui::EndTabItem();
             }
 

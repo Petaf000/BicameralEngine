@@ -445,6 +445,14 @@ namespace bicameral::sim {
 
         baked.playMetrics = std::move(*playMetrics);
 
+        // 流れどうしの結合(引きずり・押す構造。1 つの検査 |q| ≤ 1 で、押さえた値は警告。T-0536・ADR-0238)
+        auto couplings = BakeCouplings(definition.couplings, baked);
+        if (!couplings)
+            return std::unexpected(couplings.error());
+
+        baked.couplings = std::move(couplings->couplings);
+        std::ranges::move(couplings->warnings, std::back_inserter(baked.warnings));
+
         return baked;
     }
 
