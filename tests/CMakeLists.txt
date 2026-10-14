@@ -615,9 +615,11 @@ set(WINDOW_METRICS_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_metrics.bcreplay)
 add_test(NAME window_metrics_record
          COMMAND bicameral --world sample --editor --play --auto-ignite --auto-metrics --frames 20000 --record ${WINDOW_METRICS_FILE})
 add_test(NAME window_metrics_play COMMAND bicameral --replay ${WINDOW_METRICS_FILE} --target-fps 30)
+# 記録の長さは指標の写しが測り終えるまで(予算の余りで回るので PC の混み具合で 75〜300 秒。2026-10-15 に並走のビルド中 301 秒)。
+# 再生はその刻みを等速で流すので、上限は記録と同じにする(240 秒で切れた)
 set_tests_properties(window_metrics_record PROPERTIES LABELS gpu FIXTURES_SETUP window_metrics TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-metrics: .*OK")
-set_tests_properties(window_metrics_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_metrics TIMEOUT 240
+set_tests_properties(window_metrics_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_metrics TIMEOUT 600
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start

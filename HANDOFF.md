@@ -1,23 +1,30 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-15(本体の作業役・第 2 巡の記録)/ 第 2 巡(T-0492・T-0493・T-0499・T-0503・T-0505)をマージして release で確かめ、Q66〜Q69 を記録
+最終更新: 2026-10-15(本体の作業役・第 3 巡の記録)/ 第 3 巡(T-0495・T-0509・T-0518・T-0519・T-0530)をマージして release で確かめ、Q70〜Q74 を記録
 
 ## 状態(3 行以内)
-- main = 第 2 巡のマージ(7d1ca9b)+ この記録のコミット。release で CPU 56 本(drag_model・gas_projection・world_atmosphere・slope_check を含む)・GPU の HW 36 本(陰解法の組 gpu_multires_implicit*・gpu_multires_implicit_conduction の形 × 場面 12 本・gpu_multires_conduction・gpu_lab_box・gpu_gas 系・gpu_reaction 系・gpu_probe 系)・image_* 5 本・window_* 全部(43 本)・WARP 18 本(陰解法・gas・reaction・probe)が全部通過。直したもの無し。gpu_multires_implicit_conduction_*_warp の 4 本は GPU の順番を長く塞ぐので流していない(HW の 12 本は通過)。
-- ③ 坂の原理: ベイクの坂の警告(T-0492)・引きずりの模型(T-0493 の 1 チャット目)・圧力の投影の CPU 模型(T-0503)が済んだ。② は大気を高さごとに(T-0499)。陰解法の止まり(T-0505)を直した。
-- **判断待ち Q66〜Q69**(第 2 巡の仮)と Q62〜Q65・Q30・Q31。**「続き」は司令塔として並走(COMMANDER.md)**。GPU を使う作業役は 3 体まで。
+- main = 第 3 巡のマージ(e578756)+ この記録のコミット。release で CPU 65 本(push_model・physics_energy〔checked 含む〕・slope_check・sim_scheduler の TestHold・gas_projection〔約 31 s〕を含む)・GPU の HW 99 本(gpu_physics_* 9 本・gpu_play_metric・gpu_probe 系 13 本〔gpu_probe_physics* を含む〕・gpu_world_copy・gpu_reaction 系・gpu_fixed・gpu_work_graph 系・gpu_gas 系・image_* 5 本・window_* 全部・陰解法の HW の組 18 本)が全部通過。window_metrics_play が 1 回 240 秒の上限で切れた(記録が並走のビルド中で 301 秒〔普段 75 秒〕になり、再生はその刻みを等速で流すため)→ 上限を記録と同じ 600 秒にした。WARP は流していない。
+- ③ 坂の原理: 押す構造の一般の形(T-0495・模型)・投影の解き直し(T-0530)が済み、坂の計器(T-0518)と物理の散逸の帳簿(T-0519)は 1 チャット目。② は編集の状態で時間を進めない(T-0509)。
+- **判断待ち Q70〜Q74**(第 3 巡の仮)と Q62〜Q69・Q30・Q31。**「続き」は司令塔として並走(COMMANDER.md)**。GPU を使う作業役は 3 体まで。
 
-## この仕事でしたこと(2026-10-15・司令塔の第 2 巡 + 本体の作業役)
-- 第 2 巡(マージ済み。衝突は tests/CMakeLists.txt〔両方残した〕と docs/design/19〔T-0493 を §9・T-0492 を §10〕だけ):
-  T-0492 坂を上る規則のベイクの警告とパネル(sim/reaction_slope。規則の「坂」・物質の「標準エントロピー」の欄。boudouard が 949 K 未満で警告。ADR-0218。仮 = Q67)/
-  T-0493 引きずりの一般の形の 1 チャット目(drag_model: 結合の強さ q で |q| ≤ 1 なら坂を上らない・煙が熱を +3.06 セル運ぶ・保存はビット単位。ADR-0220 Proposed。表の書き方 = Q66)/
-  T-0499 基準の大気を高さごとに(environment.atmosphere_profile・高さの静水圧・earth_environment の ISA 8 点と補助 atmosphere.luau・world_atmosphere。ADR-0182 の改訂。仮 = Q68)/
-  T-0503 圧力の投影の CPU 模型(sim/gas_projection。静止大気 0・保存はビット単位・泡は陽解法と 3% 差。強い爆発は約 3 刻み → T-0530)/
-  T-0505 陰解法の安い回の 1 グループに節の上限 4096(64³ ×10⁶ 474 → 72 ms・128³ が止まらない。ADR-0224。上限 = Q69)。
-- 本体の作業役: release の確かめ(下の「動いているもの」)。記録: ROADMAP(T-0492・T-0499・T-0503・T-0505 を Done・T-0493 を Doing・T-0518・T-0519・T-0524・T-0530・T-0531・T-0533 を足した。
-  T-0503 の案 A/B は D-467 の約束どおり案 B を T-0530 で作る〔問いにしない。T-0530 の行に理由〕)・QUESTIONS(Q66〜Q69)・BACKLOG(T-0499 の作り心地: 点の列の型)・COMMANDER の番号・NEXT。
-- 第 3 巡の割り当て(作業中): wt2 T-0495 坂を上らせる構造の一般の形 / wt3 T-0518 開発ビルドの計器 / wt4 T-0519 物理の散逸 → 熱 / wt5 T-0530 圧力の投影の解き直し / wt6 T-0509 編集の状態で時間を進めない。
-- **試験の名前の変化**: drag_model・gas_projection・world_atmosphere(CPU)を足した。
+## この仕事でしたこと(2026-10-15・司令塔の第 3 巡 + 本体の作業役)
+- 第 3 巡(マージ済み。衝突は docs/design/19 だけ〔§11 = T-0519・§12 = T-0518・§13 = T-0495 に付け直した〕):
+  T-0495 押す構造の一般の形(蓄えの流れと押される物の流れの交差 = T-0493 の q と同じ 2 × 2 の形で一つの芯。模型 push_model: ポンプ・蓄えが尽きる・発電機・熱機関で保存はビット単位・
+  効率の最大は q だけで決まる。ADR-0228 Proposed・表の書き方 = Q70。分けた: T-0536・T-0537)/
+  T-0509 編集の状態で置いても時間を進めない(SimScheduler::HoldAt でカーソルを (E, 0)/(E, 1) に止め、置き直しは置く前の S(E) から当て直す。ADR-0236・仮 = Q74。分けた: T-0548)/
+  T-0518 坂の計器の 1 チャット目(sim/slope_gauge・仮の世界のなぞり・物質の任意の欄 condensed・`--slope-gauge`。boudouard が 179 回とも成分しだいで坂を上った。ADR-0230・仮 = Q73。分けた: T-0539〜T-0541)/
+  T-0519 物理の散逸の帳簿(PxBody に mechanicalEnergy・dissipatedEnergy。PxBody 448 → 464 バイト・CPU と GPU でビット一致・物理のハッシュは変わらない。ADR-0232・仮 = Q71。分けた: T-0542)/
+  T-0530 圧力の投影の外側の反復(最速の 5 倍の爆発が 1 刻み目 0.29 kPa・保存はビット単位。止め方 = Q72〔仮 = 案 A 上限 4〕。ADR-0234)。
+- 本体の作業役: release の確かめ(上の「状態」)。記録: ROADMAP(T-0495・T-0509・T-0530 を Done・T-0518・T-0519 を Doing・T-0536・T-0537・T-0539〜T-0542・T-0548 を足した)・
+  QUESTIONS(Q70〜Q74 を足した・Q64 ① を閉じた・Q64 ④⑤ は T-0548・Q67 ④ は Q73 ① へ)・BACKLOG(species.luau の SOLIDS と real_matter の condensed の二重)・COMMANDER の番号・NEXT。
+- 第 4 巡の割り当て(作業中): wt2 T-0536 引きずりと押す構造をエンジンの表へ / wt3 T-0414 ⑤ 草原の延焼の場面の分解と最初の道 / wt4 T-0542 散逸を熱へ返す /
+  wt5 T-0531 圧力の投影の GPU 化 / wt6 T-0548 表の差し替えを編集として。
+- **試験の名前の変化**: push_model・physics_energy・physics_energy_checked(CPU)を足した。gas_projection は release で約 31 秒(T-0503 の 7 秒から)。
+  slope_check は計器との照合が増えた。sim_scheduler に TestHold。window_play_record/play は編集の状態で時間が進まない手順に作り直した。
+
+## 前の仕事(2026-10-15 第 2 巡)
+- T-0492 坂を上る規則のベイクの警告とパネル(ADR-0218・Q67)/ T-0493 引きずりの一般の形の 1 チャット目(drag_model・ADR-0220・Q66)/ T-0499 基準の大気を高さごとに(Q68)/
+  T-0503 圧力の投影の CPU 模型(gas_projection)/ T-0505 陰解法の安い回の 1 グループに節の上限 4096(ADR-0224・Q69)。drag_model・gas_projection・world_atmosphere を足した。
 
 ## 前の仕事(2026-10-15 第 1 巡)
 - T-0496 パッチを全部外した(D-493)/ T-0497 エディタを UE の形に(仮 = Q64)/ T-0498 サンプルを標準パッケージ「現実」の上に(仮 = Q65)/ T-0491 坂の検査の物差し(slope_check。仮 = Q63)/
@@ -27,9 +34,7 @@
 - 「前の仕事(2026-10-13 の 3 回目・司令塔。2026-10-14 夜の反映まで)」「前の仕事(2026-10-13 の 2 回目)」「2026-10-12 の 2 巡の並走で入ったもの」の節は、400 行に収めるため消した。2960562 の HANDOFF.md にある。
 
 ## 動いているもの(確認方法つき)
-- **テスト(2026-10-15 第 2 巡のマージの後・release)**: release で CPU 56 本(drag_model・gas_projection・world_atmosphere・slope_check を含む)・GPU の HW 36 本(陰解法の組 gpu_multires_implicit*・gpu_multires_implicit_conduction の形 × 場面 12 本・gpu_multires_conduction・gpu_lab_box・gpu_gas 系・gpu_reaction 系・gpu_probe 系)・image_* 5 本・window_* 全部(43 本)・WARP 18 本(陰解法・gas・reaction・probe)が全部通過。直したもの無し。gpu_multires_implicit_conduction_*_warp の 4 本は GPU の順番を長く塞ぐので流していない(HW の 12 本は通過)。
-- **テスト(2026-10-13 その 2・release)**: physics_*(math・gravity・4 場面)と *_checked・gas_reference・gpu_physics の 7 本(新しい重力の 3 本を含む)・gpu_gas(新しい 6 場面を含む)・
-  gpu_probe_physics・_compute・gpu_probe_rewind・窓と画像とブランクの組(`^(window_|image_|gpu_probe_blank)`)が通過。gas_tree はビルドだけ(既定の重力を明示しただけ)。
+- **テスト(2026-10-15 第 3 巡のマージの後・release)**: 上の「状態」のとおり(CPU 65 本・GPU の HW 99 本が通過。試験の組は runner/main-batches.txt〔git 管理外〕の形で 4〜9 本ずつ)。
 - **テスト(2026-10-12 その 3 のマージの後・release)**: CPU 52 本・陰解法 10 本・多重解像度/実験室/ブランク 20 本・窓と画像 28 本・溢れの大きい組 8 本が全部通過。
 - 2026-10-11 以前の各チケットのテストの記録(どの組をどの順で流したか)は aa3e55c の HANDOFF.md と各チケットの「テストの結果」にある。
 - `job.py test` は分けて投げる(GPU の組は 4〜8 本ずつ。T-0426 で長い試験を分けた)。例: `-Filter "^gpu_multires(_warp|_activity|_activity_warp|_quiet|_quiet_warp|_uniform|_uniform_warp)?$"`・
@@ -77,7 +82,7 @@
   (この節の前の版は aa3e55c の HANDOFF.md)。
 
 ## 次にやること
-NEXT.md の先頭(③ の残り・T-0530・T-0533・T-0524・T-0509)。判断待ちは QUESTIONS の Q66〜Q69・Q62〜Q65(巡目の区切りにユーザーへ)。ユーザーに聞く時は、エンジンの仕組みなら作り手から見た違いで、
+NEXT.md の先頭(第 4 巡の報告を待ってマージ → 確かめと記録。③ の残り T-0536・T-0542・T-0531・T-0539〜T-0541・T-0537・T-0504・T-0533 / ② T-0548・T-0524 / ⑤ T-0414)。判断待ちは QUESTIONS の Q70〜Q74・Q62〜Q69(巡目の区切りにユーザーへ)。ユーザーに聞く時は、エンジンの仕組みなら作り手から見た違いで、
 ゲームの中身ならプレイヤーと遊びへの影響で聞く(CLAUDE.md §5・D-476)。
 
 ## 注意(次の Claude がハマりそうな所)
