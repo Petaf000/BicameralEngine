@@ -222,6 +222,7 @@ namespace bicameral::editor {
         if (!m_strokes.empty() && m_strokes.back().empty())
             return;
 
+        m_redo.clear();  // 新しい運びを始めたら、やり直しの列は捨てる(T-0497)
         m_strokes.emplace_back();
         if (m_strokes.size() > MAX_UNDO_STROKES)
             m_strokes.erase(m_strokes.begin());
@@ -234,10 +235,14 @@ namespace bicameral::editor {
         return m_strokes.back();
     }
 
-    void BrushPanel::NoteUndone(uint64_t firstTick, uint64_t rewindTick, const sim::ProbeTickHash& latest) {
+    void BrushPanel::NoteUndone(uint64_t firstTick, uint64_t rewindTick, const sim::ProbeTickHash& latest,
+                                UndoneStroke undone) {
         const size_t count = m_strokes.empty() ? 0 : m_strokes.back().size();
-        if (!m_strokes.empty())
+        if (!m_strokes.empty()) {
+            undone.sequences = std::move(m_strokes.back());
             m_strokes.pop_back();
+            m_redo.push_back(std::move(undone));
+        }
 
         m_autoUndone += m_autoRunning ? 1 : 0;
         m_autoUndoneCommands += m_autoRunning ? static_cast<uint32_t>(count) : 0;
@@ -258,6 +263,47 @@ namespace bicameral::editor {
         m_undoMessage = std::format("元に戻せない: {}", reason);
         m_autoUndoFailed = m_autoUndoFailed || m_autoRunning;
         Log(Channel::Sim, Level::Warning, "筆: {}", m_undoMessage);
+    }
+
+    void BrushPanel::NoteRedone(uint64_t rewindTick) {
+        if (m_redo.empty())
+            return;
+
+        const size_t count = m_redo.back().sequences.size();
+        m_strokes.push_back(std::move(m_redo.back().sequences));
+        m_redo.pop_back();
+        m_undoMessage = rewindTick == UINT64_MAX
+                            ? std::format("やり直した: {} 個(まだ世界へ送っていなかった分を戻した)", count)
+                            : std::format("やり直した: {} 個(刻み {} の保存点から流し直す)", count, rewindTick);
+        Log(Channel::Sim, Level::Info, "筆: {}", m_undoMessage);
+    }
+
+    void BrushPanel::NoteRedoFailed(std::string reason) {
+        m_undoMessage = std::format("やり直せない: {}", reason);
+        Log(Channel::Sim, Level::Warning, "筆: {}", m_undoMessage);
+    }
+
+    void BrushPanel::ForgetStrokesFrom(uint32_t sequence) {
+        const auto madeAfter = [&](const BrushStrokeSequences& stroke) {
+            return std::ranges::any_of(stroke, [&](uint32_t value) { return value >= sequence; });
+        };
+
+        std::erase_if(m_strokes, madeAfter);
+        std::erase_if(m_redo, [&](const UndoneStroke& undone) { return madeAfter(undone.sequences); });
+    }
+
+    std::vector<sim::ProbeCommand> BrushPanel::StrokeOnce(const sim::ProbePlaceShape& shape, std::string_view material,
+                                                          uint32_t& sequence) {
+        const sim::LabMaterial* found = FindMaterial(material);
+        if (found == nullptr) {
+            Log(Channel::Sim, Level::Error, "筆: 材料「{}」が反応表に無い", material);
+            return {};
+        }
+
+        BeginStroke();
+        m_strokes.back().push_back(sequence);
+
+        return {sim::MakePlaceCommand(0, sequence++, shape, found->contents)};
     }
 
     void BrushPanel::NoteRewound(uint64_t tick) {
@@ -339,8 +385,19 @@ namespace bicameral::editor {
             m_undoRequested = true;
 
         ImGui::SameLine();
-        ImGui::TextDisabled("控えた運び %zu", m_strokes.size());
-        ImGui::TextDisabled("保存点へ戻して、その運びを除いて今の刻みまで流し直す(保存点より古い運びは戻せない)");
+        ImGui::BeginDisabled(m_redo.empty());
+        if (ImGui::Button("やり直す (Ctrl+Y)"))
+            m_redoRequested = true;
+
+        ImGui::EndDisabled();
+        if (!m_redo.empty() && ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, ImGuiInputFlags_RouteGlobal))
+            m_redoRequested = true;
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("控えた運び %zu・やり直せる %zu", m_strokes.size(), m_redo.size());
+        ImGui::TextDisabled("保存点へ戻して、その運びを除いて(やり直しは戻して)今の刻みまで流し直す");
+        ImGui::TextDisabled(
+            "編集の状態では何回でも戻せる。プレイ中は最近約 12 秒の運びだけ(プレイ前に置いたものはやめてから)");
         if (!m_undoMessage.empty())
             ImGui::TextUnformatted(m_undoMessage.c_str());
     }

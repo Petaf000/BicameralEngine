@@ -6,10 +6,17 @@
 namespace bicameral::editor {
 
     std::expected<uint64_t, std::string> PlanBrushUndo(uint64_t firstTick, std::span<const uint64_t> savePointTicks,
-                                                       std::optional<uint64_t> lastTableSwapTick) {
+                                                       std::optional<uint64_t> lastTableSwapTick, uint64_t floorTick) {
+        if (firstTick < floorTick) {
+            return std::unexpected(
+                std::format("刻み {} の運びは戻せない(プレイ中は刻み {} より後だけ。プレイ前に置いたものは"
+                            "プレイをやめてから・プレイ中は最近約 12 秒)",
+                            firstTick, floorTick));
+        }
+
         std::optional<uint64_t> best;
         for (const uint64_t tick : savePointTicks) {
-            if (tick <= firstTick && (!best || tick > *best))
+            if (tick >= floorTick && tick <= firstTick && (!best || tick > *best))
                 best = tick;
         }
 

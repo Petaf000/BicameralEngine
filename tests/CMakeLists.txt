@@ -538,7 +538,7 @@ set_tests_properties(window_replay_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRE
 # ブランクの世界(既定。T-0371・D-455): セルは全部空・積み木なし・表は空。窓とエディタが起動し、記録 → 別の起動の再生で
 # ハッシュ列が一致する(再生ファイルが世界の種類を持つ。何も起きないので全部の刻みが同じハッシュ)
 set(WINDOW_BLANK_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_blank.bcreplay)
-add_test(NAME window_blank_record COMMAND bicameral --editor --frames 120 --record ${WINDOW_BLANK_FILE})
+add_test(NAME window_blank_record COMMAND bicameral --editor --play --frames 120 --record ${WINDOW_BLANK_FILE})
 add_test(NAME window_blank_play COMMAND bicameral --replay ${WINDOW_BLANK_FILE} --target-fps 30)
 set_tests_properties(window_blank_record PROPERTIES LABELS gpu FIXTURES_SETUP window_blank TIMEOUT 600
   PASS_REGULAR_EXPRESSION "世界: ブランクの世界")
@@ -547,7 +547,7 @@ set_tests_properties(window_blank_play PROPERTIES LABELS gpu FIXTURES_REQUIRED w
 # 環境ミキサー(T-0452・D-457): ブランクの世界に標準パッケージ(data/standard)を全部足す → 次の刻みの境界で当たる → 元素を外す
 # (依存するものも外れる)→ 初めの表に戻る。記録して、別の起動の再生でハッシュ列と表の差し替えが同じ(再生は棚なしで表を作る)
 set(WINDOW_MIXER_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_mixer.bcreplay)
-add_test(NAME window_mixer_record COMMAND bicameral --editor --auto-mixer --frames 3000 --record ${WINDOW_MIXER_FILE})
+add_test(NAME window_mixer_record COMMAND bicameral --editor --play --auto-mixer --frames 3000 --record ${WINDOW_MIXER_FILE})
 add_test(NAME window_mixer_play COMMAND bicameral --replay ${WINDOW_MIXER_FILE} --target-fps 30)
 set_tests_properties(window_mixer_record PROPERTIES LABELS gpu FIXTURES_SETUP window_mixer TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-mixer: 外して初めの表")
@@ -556,7 +556,7 @@ set_tests_properties(window_mixer_play PROPERTIES LABELS gpu FIXTURES_REQUIRED w
 # 世界を作り直す(T-0453・ADR-0192): ブランクの世界に環境ミキサーで空気で満たす(と依存)を足す → 当たる → 「世界を作り直す」で
 # 今の表で刻み 0 から(--mix で起動したのと同じ表)→ 60 刻み。記録は作り直した所からで、別の起動の再生でハッシュ列が同じ
 set(WINDOW_REBUILD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_rebuild.bcreplay)
-add_test(NAME window_rebuild_record COMMAND bicameral --editor --auto-rebuild --frames 3000 --record ${WINDOW_REBUILD_FILE})
+add_test(NAME window_rebuild_record COMMAND bicameral --editor --play --auto-rebuild --frames 3000 --record ${WINDOW_REBUILD_FILE})
 add_test(NAME window_rebuild_play COMMAND bicameral --replay ${WINDOW_REBUILD_FILE} --target-fps 30)
 set_tests_properties(window_rebuild_record PROPERTIES LABELS gpu FIXTURES_SETUP window_rebuild TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-rebuild: 作り直した世界.*OK")
@@ -566,7 +566,7 @@ set_tests_properties(window_rebuild_play PROPERTIES LABELS gpu FIXTURES_REQUIRED
 # 本物の同じ刻みと全部同じ(--auto-copy)。記録を写し無しの別の起動で再生して同じハッシュ列 = 写しを取っても本物は変わらない(D-403)
 set(WINDOW_COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_copy.bcreplay)
 add_test(NAME window_copy_record
-         COMMAND bicameral --world sample --editor --auto-ignite --auto-copy --frames 20000 --record ${WINDOW_COPY_FILE})
+         COMMAND bicameral --world sample --editor --play --auto-ignite --auto-copy --frames 20000 --record ${WINDOW_COPY_FILE})
 add_test(NAME window_copy_play COMMAND bicameral --replay ${WINDOW_COPY_FILE} --target-fps 30)
 set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP window_copy TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-copy: OK")
@@ -581,7 +581,7 @@ set_tests_properties(window_weight_warn PROPERTIES LABELS gpu TIMEOUT 300
 # 記録を指標無しの別の起動で再生して同じハッシュ列 = 指標を測っても本物は変わらない(D-403)
 set(WINDOW_METRICS_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_metrics.bcreplay)
 add_test(NAME window_metrics_record
-         COMMAND bicameral --world sample --editor --auto-ignite --auto-metrics --frames 20000 --record ${WINDOW_METRICS_FILE})
+         COMMAND bicameral --world sample --editor --play --auto-ignite --auto-metrics --frames 20000 --record ${WINDOW_METRICS_FILE})
 add_test(NAME window_metrics_play COMMAND bicameral --replay ${WINDOW_METRICS_FILE} --target-fps 30)
 set_tests_properties(window_metrics_record PROPERTIES LABELS gpu FIXTURES_SETUP window_metrics TIMEOUT 600
   PASS_REGULAR_EXPRESSION "--auto-metrics: .*OK")
@@ -589,7 +589,7 @@ set_tests_properties(window_metrics_play PROPERTIES LABELS gpu FIXTURES_REQUIRED
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
-         COMMAND bicameral --editor --frames 120
+         COMMAND bicameral --editor --play --frames 120
                  --mix real_elements,real_matter,real_reactions,earth_environment,earth_air)
 set_tests_properties(window_mix_start PROPERTIES LABELS gpu TIMEOUT 600
   PASS_REGULAR_EXPRESSION "反応表: パッケージ .*earth_air")
@@ -598,12 +598,12 @@ add_test(NAME window_blank_rewind
          COMMAND bicameral --replay ${WINDOW_BLANK_FILE} --editor --auto-rewind --save-interval 40)
 set_tests_properties(window_blank_rewind PROPERTIES LABELS gpu FIXTURES_REQUIRED window_blank TIMEOUT 240)
 # 実験室(T-0142): パネルの箱に木を置いて火を付け 60 刻み、GPU と CPU が毎刻み一致し、記録から再生しても同じ。通らなければ 1
-add_test(NAME window_lab COMMAND bicameral --world sample --editor --auto-lab --frames 20)
+add_test(NAME window_lab COMMAND bicameral --world sample --editor --play --auto-lab --frames 20)
 set_tests_properties(window_lab PROPERTIES LABELS gpu TIMEOUT 900)  # 並走中は debug のパイプラインの作成に数分
 # ブランクの世界の実験室(T-0371): 材料の無い表なので空のセルの箱を作って 60 刻み、GPU と CPU が一致・空のまま・再生しても同じ
-add_test(NAME window_lab_blank COMMAND bicameral --editor --auto-lab --frames 20)
+add_test(NAME window_lab_blank COMMAND bicameral --editor --play --auto-lab --frames 20)
 set_tests_properties(window_lab_blank PROPERTIES LABELS gpu TIMEOUT 900)
-add_test(NAME window_lab_compare COMMAND bicameral --world sample --editor --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
+add_test(NAME window_lab_compare COMMAND bicameral --world sample --editor --play --auto-lab-compare --frames 20)  # 計器と比べる画面(T-0221)
 set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 世界に物を置く筆(T-0222): パネルの筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずのものが全部 GPU で
 # 当たったか(--auto-place。通らなければ 1)を記録し、別の起動で再生して同じハッシュ列になる(置くコマンドも再生ファイルだけで再現)。
@@ -612,7 +612,7 @@ set_tests_properties(window_lab_compare PROPERTIES LABELS gpu TIMEOUT 900)
 # 刻みが遅い(debug で 1 フレーム 1 刻み未満)ので、保存点は 2 刻みごとに 8 個
 set(WINDOW_PLACE_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place.bcreplay)
 add_test(NAME window_place_record
-         COMMAND bicameral --world sample --editor --auto-place --save-points 8 --save-interval 2 --frames 120
+         COMMAND bicameral --world sample --editor --play --auto-place --save-points 8 --save-interval 2 --frames 120
                  --record ${WINDOW_PLACE_FILE})
 add_test(NAME window_place_play COMMAND bicameral --replay ${WINDOW_PLACE_FILE} --target-fps 30)
 set_tests_properties(window_place_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place TIMEOUT 600
@@ -623,7 +623,7 @@ set_tests_properties(window_place_play PROPERTIES LABELS gpu FIXTURES_REQUIRED w
 # 起動直後(最初の回す保存点より前)の運びを元に戻す = 刻み 0 へ戻してその運びを除いて流し直す。記録 → 別の起動の再生が同じハッシュ列
 set(WINDOW_PLACE_TICK0_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_place_tick0.bcreplay)
 add_test(NAME window_place_tick0_record
-         COMMAND bicameral --world sample --editor --auto-place --save-interval 1000000 --frames 120
+         COMMAND bicameral --world sample --editor --play --auto-place --save-interval 1000000 --frames 120
                  --record ${WINDOW_PLACE_TICK0_FILE})
 add_test(NAME window_place_tick0_play COMMAND bicameral --replay ${WINDOW_PLACE_TICK0_FILE} --target-fps 30)
 set_tests_properties(window_place_tick0_record PROPERTIES LABELS gpu FIXTURES_SETUP window_place_tick0 TIMEOUT 600
@@ -634,6 +634,16 @@ set_tests_properties(window_place_tick0_play PROPERTIES LABELS gpu FIXTURES_REQU
 # 減らない(止めない同じ実験では減る)・列が一杯のパッチは断られる・記録から流し直しても同じ。仮の世界に止める・格子の外に
 # はみ出す触媒・期間 0 のパッチを投げ、足せた / 断られたが GPU から戻る(--auto-patch。通らなければ 1)。
 # 記録を別の起動で再生して同じハッシュ列(パッチのコマンドも再生ファイルだけで再現)
+# エディタは UE と同じ形(T-0497・D-491): 起動は止まった編集の状態。置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめると
+# プレイ前の世界に戻る(2 回のプレイのハッシュ列が同じ)。記録(最後の流れ)を別の起動で再生して同じハッシュ列
+set(WINDOW_PLAY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_play.bcreplay)
+add_test(NAME window_play_record
+         COMMAND bicameral --world sample --editor --auto-play --frames 1200 --record ${WINDOW_PLAY_FILE})
+add_test(NAME window_play_play COMMAND bicameral --replay ${WINDOW_PLAY_FILE} --target-fps 30)
+set_tests_properties(window_play_record PROPERTIES LABELS gpu FIXTURES_SETUP window_play TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
+set_tests_properties(window_play_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_play TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK")
 set(WINDOW_PATCH_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_patch.bcreplay)
 add_test(NAME window_patch_record
          COMMAND bicameral --world sample --editor --auto-patch --frames 120 --record ${WINDOW_PATCH_FILE})
@@ -662,7 +672,7 @@ set(WINDOW_HOT_RELOAD_SWAP "反応表を刻み [0-9]+ の始めに版 [0-9a-f]+ 
 add_test(NAME window_hot_reload_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_HOT_RELOAD_PACKAGES})
 add_test(NAME window_hot_reload_record
-         COMMAND bicameral --world sample --editor --auto-reload --species-remap --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
+         COMMAND bicameral --world sample --editor --play --auto-reload --species-remap --auto-ignite --packages ${WINDOW_HOT_RELOAD_PACKAGES}
                  --peek 28,32,32 --peek-depth 9 --frames 3000 --record ${WINDOW_HOT_RELOAD_FILE})
 add_test(NAME window_hot_reload_play
          COMMAND bicameral --replay ${WINDOW_HOT_RELOAD_FILE} --peek 28,32,32 --peek-depth 9
@@ -715,7 +725,7 @@ set(WINDOW_TABLE_EDIT_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/table_edit_packages)
 add_test(NAME window_table_edit_copy
          COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_TABLE_EDIT_PACKAGES})
 add_test(NAME window_table_edit
-         COMMAND bicameral --world sample --editor --auto-table-edit --packages ${WINDOW_TABLE_EDIT_PACKAGES} --frames 3000)
+         COMMAND bicameral --world sample --editor --play --auto-table-edit --packages ${WINDOW_TABLE_EDIT_PACKAGES} --frames 3000)
 set_tests_properties(window_table_edit_copy PROPERTIES FIXTURES_SETUP window_table_edit_packages)
 set_tests_properties(window_table_edit PROPERTIES LABELS gpu TIMEOUT 600 FIXTURES_REQUIRED window_table_edit_packages
   PASS_REGULAR_EXPRESSION "--auto-table-edit: 元の版 [0-9a-f]+ の表に戻った。OK")

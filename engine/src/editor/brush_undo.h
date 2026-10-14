@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -54,11 +55,39 @@ namespace bicameral::editor {
         return count;
     }
 
+    // commands からその運びのコマンドを取り出す(取り出したものを順のまま返す。やり直しで戻す。T-0497)
+    template <class Commands>
+    [[nodiscard]] std::vector<sim::Command> TakeStrokeCommands(std::span<const uint32_t> stroke, Commands& commands) {
+        std::vector<sim::Command> taken;
+        std::ranges::copy_if(commands, std::back_inserter(taken),
+                             [&](const sim::Command& command) { return StrokeHas(stroke, command); });
+        RemoveStrokeCommands(stroke, commands);
+
+        return taken;
+    }
+
+    // プレイ中の元に戻す・やり直しが届く範囲(D-491 ②: 最近約 12 秒 = 720 刻み。仮)。編集の状態は起動からいつでも
+    inline constexpr uint64_t PLAY_UNDO_WINDOW_TICKS = 720;
+
+    // 元に戻す・やり直しで戻ってよいいちばん古い刻み(T-0497)。編集の状態なら 0(何回でも戻せる)。
+    // プレイ中は、プレイを始めた刻み playStartTick と「今の刻みの約 12 秒前」の新しい方(プレイ前の運び = 編集の状態で置いたものは、
+    // プレイをやめてから戻す。刻み 0 の保存点はプレイ中の元に戻すに使わない。プレイを刻み 0 から始めた最初の 12 秒は別)
+    [[nodiscard]] inline uint64_t UndoFloorTick(bool playing, uint64_t playStartTick, uint64_t nowTick) {
+        if (!playing)
+            return 0;
+
+        const uint64_t recent = nowTick > PLAY_UNDO_WINDOW_TICKS ? nowTick - PLAY_UNDO_WINDOW_TICKS : 0;
+
+        return std::max(playStartTick, recent);
+    }
+
     // 刻み firstTick に当たった運びを除くために戻る保存点の刻み(firstTick 以前でいちばん新しいもの)。
     // 保存点 S(s) には刻み s のコマンドはまだ入っていない(s 以降を足し直す。ADR-0036)ので s ≤ firstTick でよい。
-    // lastTableSwapTick = 最後に反応表を差し替えた刻み。巻き戻しは差し替えを足し直さないので、それ以前の保存点へは戻さない
+    // lastTableSwapTick = 最後に反応表を差し替えた刻み。巻き戻しは差し替えを足し直さないので、それ以前の保存点へは戻さない。
+    // floorTick = 戻ってよいいちばん古い刻み(UndoFloorTick。運びも保存点もこれ以後。T-0497)
     [[nodiscard]] std::expected<uint64_t, std::string> PlanBrushUndo(uint64_t firstTick,
                                                                      std::span<const uint64_t> savePointTicks,
-                                                                     std::optional<uint64_t> lastTableSwapTick);
+                                                                     std::optional<uint64_t> lastTableSwapTick,
+                                                                     uint64_t floorTick = 0);
 
 }  // namespace bicameral::editor

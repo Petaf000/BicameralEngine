@@ -66,9 +66,38 @@ namespace {
         EXPECT(editor::RemoveStrokeCommands(stroke, feed) == 0);
     }
 
+    // プレイ中の元に戻す(T-0497・D-491): プレイを始めた刻みと「約 12 秒前」の新しい方より後だけ。編集の状態は 0 から
+    void TestUndoFloor() {
+        EXPECT(editor::UndoFloorTick(false, 50, 5000) == 0);
+        EXPECT(editor::UndoFloorTick(true, 50, 100) == 50);
+        EXPECT(editor::UndoFloorTick(true, 50, 5000) == 5000 - editor::PLAY_UNDO_WINDOW_TICKS);
+        EXPECT(editor::UndoFloorTick(true, 0, 300) == 0);  // 刻み 0 から始めたプレイの最初の 12 秒
+
+        const std::vector<uint64_t> savePoints = {0, 50, 120, 240};
+        EXPECT(editor::PlanBrushUndo(60, savePoints, std::nullopt, 50) == uint64_t{50});  // プレイを始めた保存点へ
+        EXPECT(!editor::PlanBrushUndo(40, savePoints, std::nullopt, 50).has_value());     // プレイ前の運び
+        EXPECT(editor::PlanBrushUndo(40, savePoints, std::nullopt, 0) == uint64_t{0});    // 編集の状態
+        EXPECT(!editor::PlanBrushUndo(130, savePoints, std::nullopt, 125).has_value());   // 範囲の中の保存点が無い
+        EXPECT(editor::PlanBrushUndo(250, savePoints, std::nullopt, 125) == uint64_t{240});
+    }
+
+    // やり直しのために、除くコマンドを順のまま取り出す
+    void TestTakeStrokeCommands() {
+        const BrushStrokeSequences stroke = {3, 5};
+        std::deque<sim::Command> commands = {MakeCommand(1, 2), MakeCommand(1, 3), MakeCommand(2, 4),
+                                             MakeCommand(2, 5)};
+        const std::vector<sim::Command> taken = editor::TakeStrokeCommands(stroke, commands);
+        EXPECT(taken.size() == 2);
+        EXPECT(taken[0].sequence == 3 && taken[1].sequence == 5);
+        EXPECT(commands.size() == 2);
+        EXPECT(commands[0].sequence == 2 && commands[1].sequence == 4);
+    }
+
 }  // namespace
 
 int main() {
+    TestUndoFloor();
+    TestTakeStrokeCommands();
     TestEarliestTick();
     TestPlan();
     TestRemove();

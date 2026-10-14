@@ -39,6 +39,7 @@ namespace bicameral::frame {
     // 刻み 0 の保存点の番号(T-0411・D-474)。保存点を使うなら、--save-points の数とは別に 1 つ足し、捨てない
     // (起動直後の筆の運びも元に戻せる。巻き戻しのパネルから最初の状態へも戻れる)。反応表を差し替えると、ほかと同じく捨てる
     inline constexpr uint32_t TICK_ZERO_SAVE_SLOT = 0;
+    // --editor の生の起動(再生でない)は、プレイを始めた刻みの保存点をもう 1 つ足す(最後の番号。やめるとここへ戻る。T-0497・D-491)
 
     struct FrameLoopOptions {
         // --- フレームの進め方 ---
@@ -118,6 +119,11 @@ namespace bicameral::frame {
         // 筆で木を置く・木炭を足す・格子からはみ出す・当たらない値を投げ、木に火を付ける。当たるはずの置くコマンドが全部 GPU で
         // 当たったかを確かめる(--auto-place。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0222)
         bool autoPlace = false;
+        // 起動してすぐプレイを押す(--play。--editor の起動は止まった編集の状態から始まる。窓の試験で世界を動かす時に。T-0497・D-491)
+        bool play = false;
+        // 編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるでプレイ前の世界に戻るかを確かめる
+        // (--auto-play。--editor と --world sample と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0497)
+        bool autoPlay = false;
         // 魔法のパッチのパネルで実験室に止めるパッチを置いて止めた反応が進まないこと・仮の世界にパッチを投げて足せた / 断られたが
         // 戻ることを確かめる(--auto-patch。--editor と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0325)
         bool autoPatch = false;
