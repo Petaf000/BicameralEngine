@@ -1,6 +1,6 @@
 # ADR-0176 気体の環境の値(音速の基準・基準の温度)の置き場所と、パッケージの分類 environment
 
-- Status: Proposed(案 A を仮で実装。ユーザー未確認。T-0400)
+- Status: Accepted(2026-10-14 ユーザー決定)
 - 日付: 2026-10-13
 - 決めた人: ユーザー(Claude が提案した場合も、決めるのはユーザー)
 
@@ -54,3 +54,6 @@
 ## 追記(2026-10-13・T-0373)
 - 決定 1 の「標準の値 340 m/s は `StandardWorldPhysics()` に置く」は、標準パッケージ earth_environment に移した(エンジンから消した。ADR-0171 追記 3)。
 - 決定 3 の基準の大気は ADR-0182(分類 atmosphere + environment の atmosphere_temperature_mk・atmosphere_surface_pressure_pa)。
+
+## ユーザーの決定(2026-10-14)
+- D-489 ①: 案 A(作り手が環境の値に書く)。T-0443 は作らない。

@@ -1,6 +1,6 @@
 # ADR-0206 遊びの指標の自動テスト(書き方・いつ測るか・前の版の置き場所)
 
-- Status: Proposed(下の「判断待ち」の 3 つは仮の案で実装。ユーザー未確認。T-0432)
+- Status: Accepted(2026-10-14 ユーザー決定)
 - 日付: 2026-10-14
 - 決めた人: ユーザー(Claude が提案した場合も、決めるのはユーザー)
 
@@ -58,3 +58,6 @@
 ## 影響
 - ReactionTableDefinition・BakedReactionTable に `playMetrics`(T-0398 の印の節)。frame_loop.h に `LoadLoopReactionTable`。
 - sim::WorldCopy の API は変えない(T-0413 と合わせた)。
+
+## ユーザーの決定(2026-10-14)
+- D-492 ③: パッケージに書く・表を変えたら自動 + ボタン・前の版は起動中だけ + CLI はファイル。
