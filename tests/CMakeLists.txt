@@ -509,6 +509,11 @@ bicameral_add_gpu_test_case(gpu_probe_blank_warp gpu_probe_blank_test warp --war
 bicameral_add_gpu_test(gpu_conduct_bench)
 target_link_libraries(gpu_conduct_bench PRIVATE bicameral_sim)
 
+# 一様な箱の陰解法の熱を、箱の大きさ・伝わる速さごとに測る(T-0494。D-467。ctest には登録しない。docs/perf.md)。
+# 走らせ方: job.py run -Preset release -Exe gpu_implicit_box_bench -- --no-gbv
+bicameral_add_gpu_test(gpu_implicit_box_bench)
+target_link_libraries(gpu_implicit_box_bench PRIVATE bicameral_sim)
+
 # 置くコマンドが 1 刻みにたくさん来た時の適用の単位の時間(T-0280。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_place_bench
 bicameral_add_gpu_test(gpu_place_bench)
@@ -790,7 +795,7 @@ foreach(_name IN ITEMS
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
-    gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test play_metric_test
+    gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test play_metric_test
     gpu_play_metric_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()
