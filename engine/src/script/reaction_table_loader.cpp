@@ -22,18 +22,23 @@ namespace bicameral::script {
             return {text.begin(), text.end()};
         }
 
-        // ゲーム本体が読めたか。読めなかったら理由(rejected にあればそれ、無ければ「見つからない」)
-        std::expected<void, std::string> CheckBasePackage(const PackageSetResult& loaded,
-                                                          std::string_view basePackage) {
-            if (std::ranges::contains(loaded.loadOrder, basePackage))
+        // ゲーム本体が読めたか。読めなかったら理由(rejected にあればそれ)。無い時は requireGame なら「見つからない」
+        std::expected<void, std::string> CheckGamePackage(const PackageSetResult& loaded, bool requireGame) {
+            const std::string& game = loaded.gamePackage;
+            if (game.empty()) {
+                if (!requireGame)
+                    return {};
+
+                return std::unexpected("ゲーム本体(package.luau に game = true と書いたパッケージ)が見つからない");
+            }
+
+            if (std::ranges::contains(loaded.loadOrder, game))
                 return {};
 
-            const auto rejection = std::ranges::find(loaded.rejected, basePackage, &PackageRejection::package);
-            if (rejection != loaded.rejected.end())
-                return std::unexpected(
-                    std::format("ゲーム本体のパッケージ {} を読めない: {}", basePackage, rejection->reason));
+            const auto rejection = std::ranges::find(loaded.rejected, game, &PackageRejection::package);
+            const std::string reason = rejection != loaded.rejected.end() ? rejection->reason : "理由なし";
 
-            return std::unexpected(std::format("ゲーム本体のパッケージ {} が見つからない", basePackage));
+            return std::unexpected(std::format("ゲーム本体のパッケージ {} を読めない: {}", game, reason));
         }
 
         // パッケージ群を型検査してから殻で読んで合わせる(ホストの関数は無い。反応表は値だけ)
@@ -51,10 +56,8 @@ namespace bicameral::script {
 
             (*sandbox)->Seal();
 
-            return LoadPackages(
-                **sandbox, packages,
-                PackageLoadOptions{
-                    .mergeMode = source.mergeMode, .basePackage = source.basePackage, .typeChecker = checker->get()});
+            return LoadPackages(**sandbox, packages,
+                                PackageLoadOptions{.mergeMode = source.mergeMode, .typeChecker = checker->get()});
         }
 
         fs::path StandardRootOf(const ReactionTableSource& source) {
@@ -111,10 +114,8 @@ namespace bicameral::script {
         if (!loaded)
             return std::unexpected(std::format("{}: {}", where, loaded.error()));
 
-        if (!source.basePackage.empty()) {
-            if (const auto base = CheckBasePackage(*loaded, source.basePackage); !base)
-                return std::unexpected(std::format("{}: {}", where, base.error()));
-        }
+        if (const auto game = CheckGamePackage(*loaded, source.requireGame); !game)
+            return std::unexpected(std::format("{}: {}", where, game.error()));
 
         // --- 定義 → ベイク(元素の釣り合い・知らない物質・係数・速度の範囲の検査)---
         const auto definition = ReadReactionTableDefinition(*loaded);
@@ -129,6 +130,7 @@ namespace bicameral::script {
                                    .packageRoot = root,
                                    .standardRoot = StandardRootOf(source),
                                    .loadOrder = loaded->loadOrder,
+                                   .gamePackage = loaded->gamePackage,
                                    .rejected = loaded->rejected,
                                    .overrides = loaded->overrides,
                                    .modifiedWorld = loaded->modifiedWorld,

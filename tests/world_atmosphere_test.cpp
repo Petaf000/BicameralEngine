@@ -56,14 +56,13 @@ namespace {
             folders.push_back(STANDARD_DIR / name);
 
         return script::LoadReactionTable(
-            {.basePackage = {}, .readPackageRoot = false, .addedPackages = std::move(folders)});
+            {.requireGame = false, .readPackageRoot = false, .addedPackages = std::move(folders)});
     }
 
-    // tests/packages_atmosphere/<place> の <place>_world をゲーム本体として読む(依存は data/standard の棚から)
+    // tests/packages_atmosphere/<place> の <place>_world(game = true)をゲーム本体として読む(依存は data/standard の棚から)
     std::expected<script::LoadedReactionTable, std::string> LoadWorld(const std::string& place) {
-        return script::LoadReactionTable({.packageRoot = ATMOSPHERE_PACKAGES_DIR / place,
-                                          .basePackage = place + "_world",
-                                          .standardRoot = STANDARD_DIR});
+        return script::LoadReactionTable(
+            {.packageRoot = ATMOSPHERE_PACKAGES_DIR / place, .standardRoot = STANDARD_DIR});
     }
 
     uint32_t PartsOf(const std::vector<AtmosphereFraction>& fractions, uint32_t species) {

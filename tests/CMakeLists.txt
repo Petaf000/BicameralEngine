@@ -83,7 +83,8 @@ add_executable(standard_packages_test standard_packages_test.cpp)  # 標準パ�
 target_link_libraries(standard_packages_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(standard_packages_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages"
-  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard")
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard"
+  BICAMERAL_DATA_SCENES_DIR="${PROJECT_SOURCE_DIR}/data/scenes")  # ⑤ の場面がゲーム本体として読めるか(T-0557)
 add_dependencies(standard_packages_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME standard_packages COMMAND standard_packages_test)
 

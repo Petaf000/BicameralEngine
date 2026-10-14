@@ -55,7 +55,8 @@
 //                                    試験の表 combustion_test)。木箱・積み木・試験の表を使う --auto-* は sample と一緒に使う。
 //                                    --replay のときは再生ファイルの世界(引数は見ない)
 //   --packages <path>                反応表のパッケージのフォルダ(直下のフォルダが 1 つずつパッケージ。sample の既定: exe の横の
-//                                    data/packages〔ゲーム本体 = combustion_test〕。blank はゲーム本体なしで全部を読む。
+//                                    data/packages)。ゲーム本体はマニフェストに game = true と書いたもの(sample は必須・blank は
+//                                    無ければ全部 Mod。T-0557)。場面は --packages data/scenes/<場面>(ADR-0240)。
 //                                    読めない・検査で落ちたら起動しない。script/reaction_table_loader.h。T-0157)
 //   --mix <name,...>                 標準パッケージ(exe の横の data/standard)を世界に足す(環境ミキサーと同じ。依存も書く。
 //                                    例 real_elements,real_matter,real_reactions,earth_environment,earth_air。T-0373・D-457)

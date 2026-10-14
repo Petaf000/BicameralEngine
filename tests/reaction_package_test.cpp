@@ -424,7 +424,7 @@ namespace {
         ExpectLoadFails("ゲーム本体が無い", root / "empty", "見つからない");
 
         WritePackage(root / "syntax" / BASE_PACKAGE,
-                     {{"package.luau", "return { format = 1 }"}, {"init.luau", "return {"}});
+                     {{"package.luau", "return { format = 1, game = true }"}, {"init.luau", "return {"}});
         ExpectLoadFails("ゲーム本体が Luau として読めない", root / "syntax",
                         "ゲーム本体のパッケージ combustion_test を読めない");
 

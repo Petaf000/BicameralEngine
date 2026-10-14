@@ -1,8 +1,10 @@
 // luau_package.h — Luau のパッケージ(1 フォルダ = 1 パッケージ)を読み、表を合わせる(T-0138、13 §2・D-320・ADR-0031)。
 //
-// パッケージ: フォルダの中の *.luau。ゲーム本体もパッケージの 1 つ(options.basePackage)。
-//   package.luau(マニフェスト)が表を返す: { format = 1, title = "見せる名前", depends = { "core" }, entry = "init" }
-//   (title・depends・entry は省ける)。
+// パッケージ: フォルダの中の *.luau。ゲーム本体もパッケージの 1 つ。
+//   package.luau(マニフェスト)が表を返す: { format = 1, title = "見せる名前", depends = { "core" }, entry = "init", game = true }
+//   (title・depends・entry・game は省ける)。
+//   ゲーム本体 = マニフェストに game = true と書いたパッケージ(読む一覧の中に 1 つまで。名前には依らない。T-0557・ADR-0250)。
+//   options.basePackage で名前を渡すと、それをゲーム本体にする(試験の道。ほかに game = true と書いたものがあれば誤り)。
 //   entry のファイルが「分類 → 鍵 → 値」の表を返す(例 { reactions = { burn = {...} }, elements = {...} })。
 //   require("sub/util") はそのパッケージの中の sub/util.luau だけを読む(ファイルの外には届かない)。
 //   require("@dep") は、たどって依存するパッケージ dep の entry が返す表(require("@dep/sub/util") はその中のファイル)。
@@ -52,7 +54,9 @@ namespace bicameral::script {
 
     struct PackageLoadOptions {
         MergeMode mergeMode = MergeMode::AddOnly;
-        std::string basePackage;  // ゲーム本体。空でなければ、ほかの全部がこれに依存する(最初に読む)
+        // ゲーム本体の名前。空なら、マニフェストに game = true と書いたもの(無ければゲーム本体なし = 全部 Mod)。
+        // ゲーム本体があれば、ほかの全部がこれに依存する(最初に読む)
+        std::string basePackage;
 
         // あれば、走らせる前に型検査する(T-0140・ADR-0046): マニフェストの前に package.luau、entry の前に全部のファイル。
         // 誤りがあるパッケージ(と依存するもの)は読まない。理由に「ファイル:行:列: 何が違うか」が入る
@@ -85,6 +89,7 @@ namespace bicameral::script {
         std::map<std::string, std::map<std::string, TableEntry>> tables;  // 分類 → 鍵 → 値(バイト順)
         std::vector<TableOverride> overrides;                             // 上書き(起きた順)
         bool modifiedWorld = false;  // 「改造された世界」の印(OverrideMarked で上書きがあった)
+        std::string gamePackage;     // ゲーム本体の名前(無ければ空。読めずに rejected に入っても名前は入る。T-0557)
         std::vector<TypeDiagnostic>
             typeDiagnostics;  // 型検査の誤り(見つけた順。1 つのパッケージの中はファイル → 行の順)
     };
@@ -109,6 +114,7 @@ namespace bicameral::script {
         std::string name;
         std::string title;                 // 人に見せる名前(書いていなければ空)
         std::vector<std::string> depends;  // 依存するパッケージ(書いた順)
+        bool game = false;                 // マニフェストに game = true(ゲーム本体。T-0557)
     };
 
     // sandbox は Seal 済みのもの。マニフェストが無い・形が違う・名前の規則に合わなければ理由

@@ -16,6 +16,7 @@ export type PackageManifest = {
     title: string?, -- 人に見せる名前(環境ミキサーの一覧。T-0373)
     depends: { string }?, -- 依存するパッケージの名前
     entry: string?, -- 表を返すファイル(既定 "init")
+    game: boolean?, -- ゲーム本体なら true(読む一覧の中に 1 つまで。名前に依らない。T-0557・ADR-0250)
 }
 
 -- --- 反応表(分類 elements・species・reactions。ADR-0032。値は整数で、単位は欄の名前)---

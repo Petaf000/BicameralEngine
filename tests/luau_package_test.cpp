@@ -1,6 +1,7 @@
 // luau_package_test.cpp — script/luau_package(Luau のパッケージ。T-0138、13 §2・ADR-0031)を CPU だけで確かめる。
 // 見るもの: パッケージの中だけの require(キャッシュ・循環・外に出られない)/ 読む順番(依存 → 名前)/ 依存の欠け・循環 /
 //           表の合わせ方 3 種(追加だけ・印つきの上書き・印なしの上書き)と「改造された世界」の印 / マニフェストと戻り値の誤り /
+//           ゲーム本体はマニフェストの game = true で決まる(名前に依らない。T-0557)/
 //           ディスクのフォルダから読む / 決定性(入れる順番・殻を変えても、同じパッケージ群なら同じバイト列)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/luau_package.h"
@@ -228,6 +229,46 @@ namespace {
         // ゲーム本体でないパッケージが依存の鍵を書くのは Mod の書き直し(足すだけなら読まない)
         const PackageSetResult noBase = Load({standard, game});
         EXPECT(HasRejection(noBase, "game", "species.a('std' が書いた)"));
+    }
+
+    // ゲーム本体はマニフェストの game = true で決まる(名前に依らない。T-0557・ADR-0250)。名前を渡した時と同じ読み方
+    // (自分の依存の鍵を印なしで書き直せる・Mod はその後に読む)。2 つ・渡した名前と食い違うのは誤り(どれが本体か決まらない)
+    void TestGameFromManifest() {
+        const PackageSource standard = SimplePackage("std", "", "return { species = { a = { k = 1 } } }");
+        const PackageSource scene = MakePackage(
+            "scene", {{"package.luau", "return { format = 1, depends = { 'std' }, game = true }"},
+                      {"init.luau", "return { species = { a = { k = 100 } } }"}});
+        const PackageSource mod = SimplePackage("aaa_mod", "", "return { species = { b = { k = 3 } } }");
+
+        const PackageSetResult result = Load({standard, scene, mod});
+        EXPECT(result.gamePackage == "scene");
+        EXPECT((result.loadOrder == std::vector<std::string>{"std", "scene", "aaa_mod"}));
+        EXPECT(result.rejected.empty() && !result.modifiedWorld);
+        EXPECT(FieldNumber(EntryValue(result, "species", "a"), "k") == 100.0);
+
+        // game = true が無ければゲーム本体なし(全部 Mod)。同じ名前を渡すのはよい
+        EXPECT(Load({standard, mod}).gamePackage.empty());
+        EXPECT(Load({standard, scene}, {.basePackage = "scene"}).gamePackage == "scene");
+
+        // game の形の誤りはそのパッケージを読まない
+        const PackageSource badFlag = MakePackage(
+            "bad", {{"package.luau", "return { format = 1, game = 'yes' }"}, {"init.luau", "return {}"}});
+        EXPECT(HasRejection(Load({badFlag}), "bad", "game は true か false"));
+
+        // 2 つ・渡した名前のほかに game = true → 全体の誤り
+        auto sandbox = MakeSealed();
+        if (!sandbox)
+            return;
+
+        const PackageSource other = MakePackage(
+            "other", {{"package.luau", "return { format = 1, game = true }"}, {"init.luau", "return {}"}});
+        const std::vector<PackageSource> twoGames{standard, scene, other};
+        const auto two = LoadPackages(*sandbox, twoGames, {});
+        EXPECT(!two && two.error().find("2 つある") != std::string::npos);
+
+        const std::vector<PackageSource> named{standard, scene};
+        const auto mismatch = LoadPackages(*sandbox, named, {.basePackage = "std"});
+        EXPECT(!mismatch && mismatch.error().find("scene も game = true") != std::string::npos);
     }
 
     void TestRequireErrors() {
@@ -537,6 +578,7 @@ int main() {
     TestRequireInsidePackage();
     TestRequireDependency();
     TestBaseOverridesDependency();
+    TestGameFromManifest();
     TestRequireErrors();
     TestOrder();
     TestMergeAddOnly();

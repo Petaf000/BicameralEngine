@@ -39,10 +39,10 @@
 | 見た目 | デバッグ表示(立体・断面・温度の色・C キーで草/炭/水) | 燃えている所と燃えた所の区別・炎と煙の最低限の見た目 | 番号は司令塔が付ける(「⑤ の最低限の見た目」。M7 の前倒しの小さい版) |
 | 操作 | クリックでつつく(断面に当たったセル)・筆で置く | 草の面(物の面)を直接クリックして火をつける | **T-0560** |
 | 測る | 遊びの指標(世界全体の量)・写しの早送り | 範囲を書ける指標・指標ごとに場面(初めの世界)の違いを書く | **T-0559** |
-| 場面を起動する | `--world sample --packages <場面のフォルダ>` | ゲーム本体の名前が combustion_test に決め打ち(場面のフォルダの名前を偽る) | **T-0557** |
+| 場面を起動する | `--packages <場面のフォルダ>`(T-0557 で済み。ゲーム本体はマニフェストの game = true) | — | T-0557(済み) |
 
 ## 3. 最小の版(作ったもの・2026-10-15)
-- 場所: `data/scenes/grass_fire_river/combustion_test/`(パッケージ 1 つ。エンジンの C++ は変えていない)。置き場と起動の形は ADR-0240(Proposed)。
+- 場所: `data/scenes/grass_fire_river/grass_fire_river/`(パッケージ 1 つ。T-0557 で combustion_test から改名。エンジンの C++ は変えていない)。置き場と起動の形は ADR-0240(Proposed)。
   - 依存: real_elements・real_matter・real_reactions・earth_environment。足した物: 元素 Si・物質 silica(砂)・water(液体の水。相変化なし)。
   - 書き直し: 現実の物質の熱伝導率に試験の倍率(サンプルの世界と同じ。凝縮相は固体の倍率)。**砂は倍率を掛けない**(下の記録 5)。
   - 組み立て(64³・0.5 m): 地面 y 0〜3(砂 2000 mol + 孔の空気)/ 草 y 4(セルロース 1.2 mol ≒ 0.78 kg/m² + 空気。x 0〜39 と 44〜63)/
@@ -50,8 +50,8 @@
   - 遊びの指標: grass_fire_reaches_river(手前の草の 9 割が燃えるまで)・grass_left_after_10_min(10 分後の草。向こう岸 1,536,000,000 µmol が残れば止まった)・
     grass_fire_out(1000 K 以上のセルが無くなるまで)。前の版の値 `data/scenes/grass_fire_river/metrics_baseline.txt`。
 - 起動(exe の横から):
-  - 遊ぶ: `bicameral --world sample --packages data/scenes/grass_fire_river --editor --no-physics`(F5 → 断面を y の向き・y = 4 にして草をクリック)
-  - 測る: `bicameral --world sample --packages data/scenes/grass_fire_river --measure-metrics --no-physics --metrics-baseline data/scenes/grass_fire_river/metrics_baseline.txt`
+  - 遊ぶ: `bicameral --packages data/scenes/grass_fire_river --editor --no-physics`(T-0557 から。前は `--world sample` が要った)(F5 → 断面を y の向き・y = 4 にして草をクリック)
+  - 測る: `bicameral --packages data/scenes/grass_fire_river --measure-metrics --no-physics --metrics-baseline data/scenes/grass_fire_river/metrics_baseline.txt`
 - 測った値(2026-10-15・RTX 3070 Ti・release・3 指標で約 25 秒):
 
 | 版 | 川に着くまで | 10 分後の草(向こう岸) | 火が消えるまで |

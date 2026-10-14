@@ -42,6 +42,7 @@ namespace bicameral::script {
         [[nodiscard]] bool IsTable() const { return kind == Kind::Table; }
         [[nodiscard]] bool IsString() const { return kind == Kind::String; }
         [[nodiscard]] bool IsNumber() const { return kind == Kind::Number; }
+        [[nodiscard]] bool IsBoolean() const { return kind == Kind::Boolean; }
 
         // 文字列の鍵 key の値(無ければ nullptr)
         [[nodiscard]] const ScriptValue* Find(std::string_view key) const;
