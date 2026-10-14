@@ -43,7 +43,7 @@ CPU とビット一致させる。重い物を落とすと床のセルが温ま�
 - gpu_probe_physics・_warp・_compute・_gravity_swap: セル(ハッシュ・エネルギー・つつき・物理の熱)が毎刻み CPU とビット一致・
   エネルギーの増え = つつき + 物理の熱・帳簿が合い CPU と同じ。セルへ返した熱 157.8 kJ(240 刻み。2 回押して崩す)・残り 0.015 J。
 - 世界のハッシュが変わった試験: gpu_world_copy(写しのセルのハッシュを CPU リファレンスと比べる。CPU に熱が無かった → 足して通った)。
-  期待値をハードコードした試験は無かった。gpu_probe_rewind・gpu_play_metric・gpu_probe_blank・gpu_probe_place は変えずに通った
+  期待値をハードコードした試験は無かった。gpu_probe_rewind・gpu_play_metric・gpu_probe_blank・gpu_probe_place・window_replay_*(6 本。押す + 巻き戻し + 再生)は変えずに通った
   (2 回の実行・巻き戻しの比べは同じ GPU の道どうし)。
 - 窓: `--world sample --auto-push --screenshot-tick 300 --view mip` で、押した方だけ積み木の落ちた床のセルが赤く(300 K より上)写る
   (out/build/release/bin/t0561_push_view.png と t0561_still_view.png。何度上がったかは未測。色は対数で 300〜2000 K)。
