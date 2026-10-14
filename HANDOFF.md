@@ -1,58 +1,27 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-14 夜(司令塔のチャット)/ ユーザーの答え(Q35・Q37・Q41・Q42・Q46〜Q60)を D-487〜D-493 として反映。コードは変えていない
+最終更新: 2026-10-15(本体の作業役)/ 第 1 巡(T-0491・T-0494・T-0496・T-0497・T-0498)をマージして release で確かめ、D-494(Q61)と Q62〜Q65 を記録
 
 ## 状態(3 行以内)
-- main = 8d4e356(第 1 巡のマージ efd83fa の後に release の CPU 50・GPU 9・窓と画像 31 本が全部通過 + 第 2 巡の t-0373・t-0269・t-0426b)。
-- ② 中身の器は T-0453(ミキサーの重力・空気を今の世界へ)・T-0443/T-0444 を残して済んだ。③ は案の下書き(docs/design/19)があり、ユーザーの答え(Q52)待ち。
-- **判断待ち Q46〜Q52**(どれも仮で進めてある)。**「続き」は司令塔として並走(COMMANDER.md)**。GPU の順番待ちが 1 回 30〜90 分になったので、GPU を使う作業役は 3 体までにする。
+- main = 第 1 巡のマージ(2960562)+ この記録のコミット。release で CPU 59 本・GPU / 窓 / 画像 の確かめの組(下)が全部通過。
+- ③ 坂の原理: 物差し T-0491 と広い伝わりの計測 T-0494 が済み、第 2 巡で T-0492(案 A の本体)・T-0493(引きずり)・T-0503(圧力の CPU 模型)。② は T-0499(大気を高さごとに。D-494)・T-0505(ShapeFrom の止まり)。
+- **判断待ち Q62〜Q65**(どれも仮で進めてある)と Q30・Q31。**「続き」は司令塔として並走(COMMANDER.md)**。GPU を使う作業役は 3 体まで。
 
-## この仕事でしたこと(2026-10-13 の 3 回目・司令塔)
-- 反映: 設計チャットの追加の決定 D-485(中身を書く手間を減らす道具)・D-486(⑤ の場面はエディタで作る)(222845b)。開始の手順に preferences と COMMANDER.md を足した(b2b0d16。読み落として 1 本ずつ進めたため)。
-- T-0436(本体): 単体の無い元素の原子は捨てて報告(D-484)。
-- 第 1 巡(マージ済み): T-0398 世界の組み立て → 分類 world_cells・world_bodies(ADR-0172)/ T-0399 材料のひな形・抽出の物質 → material_templates・view_quantities・editor_defaults(ADR-0174)/
-  T-0400 環境の値 → 分類 environment(重力・音速の基準。`sim::WorldPhysics`。窓の WorldPhysicsOf は消えた。ADR-0176)/ T-0411 刻み 0 の保存点 / T-0426 試験の分け直し(前半)/ docs/design/19 坂の原理の案。
-  新しい分類はどれも反応表と同じ読み込み・同じ表の版(T-0398 の共有の決め事。つなぎ目は reaction_table.h・reaction_package.cpp・reaction_table.cpp の「同じ読み込みに足した分類」の節に 1 行ずつ)。
-- 第 2 巡(マージ済み): T-0373 標準パッケージ(data/standard の 5 つ)・`--mix`・分類 atmosphere(ADR-0182・ADR-0183)と T-0452 ミキサーのパネル / T-0269 音速の頭打ちを安定の上限から(473 K)/ T-0426 の後半。
-- 第 2 巡(後からマージ): T-0427(遅いのは Compute のパイプラインのドライバのコンパイル。gpu_multires_test は GpuMultiresOptions::pipelineCache で使い回す。仕組みは T-0455)・T-0380(作業場の形の成分の位置を表で引く。861 / 306 ns/セル〔64 グループ〕。1 セル複数スレッドは T-0458)。
-- 第 2 巡のマージの後の試験: main の GPU・窓 31 本(100304)・wt3 の多重解像度 5 本・wt4 の溢れの debug 6 本が通過。
-- 第 3 巡(マージ済み): T-0453 ミキサーの「世界を作り直す」(RunFrameLoop が窓と GPU を残して次の FrameLoop を作る・--auto-rebuild・ADR-0192)/
-  T-0444 環境の値のホットリロード(重力をルート定数で・表の差し替えの刻みで切り替え・sim::CheckWorldPhysics。ADR-0194)/ T-0396 転換の道の費用(--measure-convert。Q55)/
-  T-0426 を閉じた(debug も 1 本 10 分以内。implicit_conduction を形 × 場面に・gpu_gas_blast を分けた・WARP は debug でも伝導の Work Graph 版を外した)。判断待ちは Q46〜Q55。
-- 第 4 巡(マージ済み): T-0412 世界の写しの早送り(④ の最初。sim::WorldCopy・ADR-0198)/ T-0455 試験が遅かった原因 = VS の開発者環境が環境変数を化けさせてドライバのシェーダーキャッシュが外れていた(_vsenv.ps1 を直した。gpu_multires_wide_* が 1 本 50 s → 2〜8 s)/
-  T-0470 気体の木の環境の差し替え(ADR-0200)・T-0479 分けた小刻みの木の偽の流れの直し(ADR-0201)。判断待ちは Q46〜Q57。
-- 第 5 巡(マージ済み): T-0413 重さの検査(写しで刻みごとの GPU 時間と活性のブロック数を集め、予算・演出のスローの窓と比べる。本物の刻みが予算を超えたら警告。ADR-0204)/
-  T-0432 遊びの指標の自動テスト(分類 play_metrics・表を変えたら写しで測って前の版との差。サンプルに sealed_fire_out。ADR-0206)。**④ 測る道具はこれで揃った**。判断待ちは Q46〜Q59。
-- **2026-10-14 夜の反映**: ユーザーが判断待ちに全部答えた → D-487(③ は案 A・引きずりと坂を上らせる構造は一般の形を ③ で)・D-488〜D-492(仮の案はほぼそのまま。サンプルを標準パッケージの上に作り直す・大気は高さごと・エディタは UE と同じ形)・
-  D-493(パッチを全部外す)。ADR 11 本を Accepted に(0095 は Superseded)。新しいチケット T-0491〜T-0499(ROADMAP)。QUESTIONS は Q30・Q31 だけ残した。
-- **注意**: VS の Developer PowerShell(Enter-VsDevShell)から exe を起動すると、ドライバのキャッシュが外れて起動のたびに数十秒かかるはず(T-0455 から推定・未確認)。ランナーのジョブは直した。
-- **試験の名前の変化**: gpu_gas → gpu_gas + gpu_gas_flow / gpu_probe_sim → + _tables / gpu_multires → + _stress・_limits / implicit_tree・subcycle・implicit_conduction を分けた(T-0426 のチケット「HANDOFF に写す」)・
-  新しい world_layout・environment_package・standard_packages・window_place_tick0_*・window_blank_rewind・window_mixer_*・window_mix_start。
+## この仕事でしたこと(2026-10-15・司令塔の第 1 巡 + 本体の作業役)
+- 第 1 巡(マージ済み。衝突は司令塔が解いた): T-0496 パッチを全部外した(D-493。magic_patch・転換の道・パネル・コマンド・試験。DXIL −24〜28%・試験のハッシュは前のまま)/
+  T-0497 エディタを UE の形に(起動は編集の状態・プレイ・やめるとプレイを始めた刻みへ・Ctrl+Y・プレイ中の Undo 720 刻み・`--play` / `--auto-play`。仮 = Q64)/
+  T-0498 サンプルを標準パッケージ「現実」の上に(依存は棚から・`require("@dep")`・argon が入り物質の ID が 1 つずれた。仮 = Q65)/
+  T-0491 坂の検査の物差し(slope_check。伝導の坂を上る面 0・坂を上る規則は boudouard。幅は仮 = Q63)/
+  T-0494 広い伝わりの重さ(打ち切りに当たった。問い = Q62。分けた T-0503〜T-0505)。マージの直し: --auto-patch を消し --play / --auto-play を残した(2960562)。
+- 本体の作業役: release の確かめ(CPU 59 本〔slope_check を含む〕・image_* 5 本・window_* 全部・gpu_reaction 系・gpu_probe 系〔WARP を含む〕・gpu_world_copy・gpu_play_metric・
+  gpu_multires(_activity)・gpu_lab_box〔WARP を含む〕が通過)。記録: D-494(Q61 = 案 1: 大気は高さの点ごとに温度と成分・圧力は地面だけで上は静水圧)・
+  ROADMAP(5 本を Done・T-0503〜T-0505・T-0509 を足した・T-0473 の行を消した・T-0499 を D-494 に)・QUESTIONS(Q61 を閉じ Q62〜Q65)・CLAUDE.md §4 と COMMANDER の magic_patch の記述・番号の配り方。
+- 第 2 巡の割り当て(作業中): wt2 T-0492 案 A の本体 / wt3 T-0493 引きずりの一般の形 / wt4 T-0499 大気を高さごとに / wt5 T-0505 ShapeFrom の止まり / wt6 T-0503 圧力の投影の CPU 模型。
+- **試験の名前の変化**: window_patch_*・gpu_probe_patch は消えた。window_play_record / window_play_play・slope_check・gpu_implicit_box_bench(ctest 外の計測)を足した。
+  世界を動かす窓の試験は `--play` を付ける(T-0497。`--editor` の起動は止まった編集の状態)。
 
-## 前の仕事(2026-10-13 の 2 回目)
-- **反映**(ec9c049): 2026-10-13 の設計チャットの決定を DECISIONS へ。D-481(Q45: 生き物が魔素を操る = 押す + 解く。解くは反応表の一般の触媒。D-451 を改訂)・
-  D-482(調整の負担を減らす道具: 影響の見える化・法則のノード表示・組み合わせの導出・遊びの指標の自動テスト)・D-483(魔法の遊び方〔一旦の決定。中身は非公開〕から出る
-  エンジンへの要求: 坂を世界に描く・押す手応え・刻む模様は素材と形だけ・直前の操作の繰り返し)。02 §5・09 §0・18 §3・14 §2・10 §1・12 §3・15 §2・ROADMAP(④ に T-0432、
-  ⑤ に T-0433〜T-0435)・QUESTIONS の Q45 を閉じた。プロジェクトの claude/22 に「反映済み ec9c049」と書いた。
-- **T-0372 の続き(Done)**: 器の既定の重力を 0 に(`PxDefaultParameters().gravity`・`GasConfig::gravityMicrometersPerSecond2`)。世界の値は新しい
-  `engine/src/sim/world_physics.h` の `WorldPhysics`(既定 0 = ブランク・`StandardWorldPhysics()` = 地球。T-0373 で標準パッケージへ移す)→ `PhysicsParametersFor`・`ApplyWorldPhysics`。
-  窓は `frame_loop.cpp` の `WorldPhysicsOf`(ブランク → 0・サンプル → 標準)。標準の重力で書いた試験(物理・気体・仮の世界の物理・巻き戻し・physics_lab)は標準の値を明示。ADR-0171 追記 1・ADR-0151 の 5。
-- **T-0423(Done)**: physics_test に `gravity`(無重力で浮いた物・積んだ物がビット単位で動かない / 1 s の落下が重力に比例〔月 ÷ 地球 = 0.16519〕・½gt² と 1.7% / 上限 100 m/s² の積み木が止まる)。
-  gpu_physics_test に `--gravity`(ctest: gpu_physics_stack_zero_gravity・_pile_moon・_stack_max_gravity)。gas_reference に重力の節(箱の高さの圧力の差が重力に比例・どの重力でも静止大気が動かない・
-  閉じた箱の保存則〔無重力では重さの仕事 0〕)。gpu_gas に 6 場面(closed_*_gravity・closed_moon・static_moon・static_max_gravity・bubble_zero_gravity)。前の仕事(① の反映)は 886c52c の HANDOFF.md。
-
-## 2026-10-12 の 2 巡の並走で入ったもの(main aa3e55c まで)
-- T-0374 気体の木の形の SRV を既定のヒープへ(32³ が約 30 倍速く)/ T-0384 一様な値を読む段が溢れを読む(完了)/ T-0380 大きい形のセルの場面を軽く(Doing・一部)/
-  T-0377 転換の物質 ID の付け替え(Done)/ T-0378 実験室の転換の再生の試験(Done)/ T-0397 転換で HW の Work Graph が止まった件(Done。Table に RateRule)/
-  T-0371 ブランクの世界を起動の既定に(サンプルは `--world sample`。Done)/ T-0372 重力を世界のデータに(R は器に残す案 A を仮に・ADR-0171 Proposed・T-0423 を分けた・Doing)/
-  T-0410 アップロードのヒープの洗い出しと直し(Done。gpu_gas の直した後の値は次の --profile の時に perf.md へ)/
-  T-0426 長い GPU 試験の ctest を分けた・ランナーの上限から GPU の待ちを除いた(Doing。残りは 10 分を超える試験の分け直し)/
-  T-0427 試験の Work Graph の作成が遅い件(研究・Todo)/ T-0394 キューが作れない件(チケットのファイルだけ)。
-- 3337c85(T-0397 の記録)の後のマージ: t-0410・t-0372・t-0377 の 2 回目・t-0426・t-0371(aa3e55c)。試験の名前が変わった分は T-0426 のチケット。
-- **新しい Table 型には RateRule が要る**(T-0397)。**実験室・試験で ImmediateQueue を作っては捨てる形を新しく足さない**(ADR-0137 追記 3。T-0394)。
-- GPU の順番待ち(D-460)は効いているが、1 本が長いと全部が待つ。GPU の組は 4〜8 本ずつに分け、上限は短めに(COMMANDER)。
-- それより前の「本体で入ったもの / 統合で入ったもの / 並走で入ったもの」の節(2026-10-11〜12)は、400 行に収めるために消した。
-  aa3e55c の HANDOFF.md と各チケットの作業ログ・引き継ぎメモにある。
+## それより前の仕事
+- 「前の仕事(2026-10-13 の 3 回目・司令塔。2026-10-14 夜の反映まで)」「前の仕事(2026-10-13 の 2 回目)」「2026-10-12 の 2 巡の並走で入ったもの」の節は、400 行に収めるため消した。2960562 の HANDOFF.md にある。
 
 ## 動いているもの(確認方法つき)
 - **テスト(2026-10-13 この仕事・release)**: physics_*(math・gravity・4 場面)と *_checked・gas_reference・gpu_physics の 7 本(新しい重力の 3 本を含む)・gpu_gas(新しい 6 場面を含む)・
@@ -104,7 +73,7 @@
   (この節の前の版は aa3e55c の HANDOFF.md)。
 
 ## 次にやること
-NEXT.md の先頭(D-471 の順)。判断待ちは QUESTIONS(Q44 が次の PC チャットの最初)。ユーザーに聞く時は、エンジンの仕組みなら作り手から見た違い、
+NEXT.md の先頭(③ の残り・T-0499・T-0503〜T-0505・T-0509)。判断待ちは QUESTIONS の Q62〜Q65(巡目の区切りにユーザーへ)。ユーザーに聞く時は、エンジンの仕組みなら作り手から見た違いで、
 ゲームの中身ならプレイヤーと遊びへの影響で聞く(CLAUDE.md §5・D-476)。
 
 ## 注意(次の Claude がハマりそうな所)

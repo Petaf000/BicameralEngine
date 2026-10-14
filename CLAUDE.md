@@ -122,7 +122,7 @@
   **シミュのコード(shaders/sim・shaders/common・engine/src/sim)に浮動小数点があるとビルドが落ちる**(tools/float_check、04 §4)。
 - **ルートの SRV / UAV に GetDimensions を使わない**(大きさを持たないので値が未定義。NVIDIA で読めない。大きさはルート定数か定数バッファで渡す。T-0024)。
 - **シェーダーが毎段読む大きい SRV をアップロードのヒープから直接読まない**(既定のヒープへ写す。PCIe 越しの読みでセルの数に対して超線形に遅くなる。T-0374)。
-- **シミュの共通のコード(reaction.hlsli・magic_patch.hlsli など)で、書き換えた構造体の配列を動的な添字で読まない**(GPU でローカルの配列になり、
+- **シミュの共通のコード(reaction.hlsli・multires.hlsli など)で、書き換えた構造体の配列を動的な添字で読まない**(GPU でローカルの配列になり、
   HW の Work Graph が止まった。決まった数の回し + `FX_UNROLL` で選ぶ。速さ・優先度・反応物だけ読む所は表の `RateRule`。T-0397)。
 - **run は既定で GPU-based validation(GBV)が付く。** 多重解像度・溢れの HW の run は `--no-gbv` を付ける(付けないと極端に遅く、止まったように見える。T-0384)。
 - **.ps1 は UTF-8(BOM 付き)+ CRLF で保存する。** BOM が無いと Windows PowerShell 5.1 が日本語を CP932 で読み、文字化けや構文エラーになる。
