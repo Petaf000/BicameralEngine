@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "common/reaction.hlsli"
+#include "sim/coupling_table.h"
 #include "sim/material_templates.h"
 #include "sim/play_metric.h"
 #include "sim/reaction_slope.h"
@@ -97,6 +98,7 @@ namespace bicameral::sim {
         WorldAtmosphereDefinition
             atmosphere;  // 基準の大気(分類 atmosphere と environment の大気の値。T-0373・ADR-0182)
         std::vector<PlayMetricDefinition> playMetrics;  // 遊びの指標(分類 play_metrics。T-0432・ADR-0206)
+        std::vector<CouplingDefinition> couplings;      // 流れどうしの結合(分類 drags・machines。T-0536・ADR-0238)
     };
 
     // --- ベイクした表 ---
@@ -151,6 +153,7 @@ namespace bicameral::sim {
 
         MaterialTemplates templates;          // 材料のひな形・抽出の物質・既定(T-0399)
         std::vector<PlayMetric> playMetrics;  // 遊びの指標(鍵の順。sim/play_metric_measure が測る。T-0432・ADR-0206)
+        std::vector<Coupling> couplings;      // 流れどうしの結合(drags → machines・鍵の順。まだ刻みは読まない。T-0536)
 
         [[nodiscard]] ReactionTableView View() const {
             return {.species = species, .rules = rules, .ruleIndex = ruleIndex, .rates = rates};

@@ -17,10 +17,12 @@
 #include <string>
 
 #include "common/fixed.hlsli"
+#include "sim/coupling_table.h"
 
 namespace {
 
     namespace fx = bicameral::fx;
+    namespace sim = bicameral::sim;
 
     int failureCount = 0;
 
@@ -79,8 +81,10 @@ namespace {
     BakedMachine BakeMachine(const MachineEntry& entry) {
         BakedMachine baked{
             .couplingQ16 = entry.couplingQ16, .costQ16 = entry.costQ16, .speed = entry.speed, .warning = {}};
-        if (fx::FxAbsU64(entry.couplingQ16) > (uint64_t)ONE_Q16) {
-            baked.couplingQ16 = entry.couplingQ16 < 0 ? -ONE_Q16 : ONE_Q16;
+        const sim::ClampedCoupling clamped = sim::ClampCouplingQ16(
+            entry.couplingQ16);  // エンジンのベイクと同じ検査(T-0536)
+        if (clamped.clamped) {
+            baked.couplingQ16 = clamped.couplingQ16;
             baked.warning = "coupling |q| > 1 allows efficiency > 1 (perpetual motion); clamped to 1. ";
         }
 
@@ -90,9 +94,7 @@ namespace {
             baked.warning += "cost must be > 0 and speed >= 0; machine disabled. ";
         }
 
-        const uint64_t slipQ32 = (uint64_t)(ONE_Q32 - baked.couplingQ16 * baked.couplingQ16);
-        const int64_t rootQ16 = (int64_t)fx::FxSqrtU64(slipQ32);
-        baked.peakEfficiencyQ16 = (ONE_Q16 - rootQ16) * ONE_Q16 / (ONE_Q16 + rootQ16);
+        baked.peakEfficiencyQ16 = sim::PeakEfficiencyQ16(baked.couplingQ16);
         return baked;
     }
 

@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "script/coupling_package.h"
 #include "script/environment_package.h"
 #include "script/material_templates_package.h"
 #include "script/package_fields.h"
@@ -401,6 +402,12 @@ namespace bicameral::script {
             return std::unexpected(playMetrics.error());
 
         definition.playMetrics = std::move(*playMetrics);
+
+        auto couplings = ReadCouplings(packages);  // 分類 drags・machines(1 つの読み手。T-0536)
+        if (!couplings)
+            return std::unexpected(couplings.error());
+
+        definition.couplings = std::move(*couplings);
 
         return definition;
     }

@@ -135,6 +135,24 @@ export type PlayMetric = {
     at_least: number?,
 }
 
+-- --- 流れどうしの結合(分類 drags・machines。T-0536・ADR-0238。1 つの鍵 = 1 つの結合。読み手は engine/src/script/coupling_package.h)---
+-- 2 つの分類は同じ型・同じベイク・同じ検査(|q| > 1 は警告して ±1 に押さえる)。流れは "heat"・"work"・"gas"・"species:<物質>"。
+-- 書き方は仮(ユーザー未確認。QUESTIONS Q66・Q70)
+export type Drag = {
+    flow: string, -- 流れ X("heat"・"species:<物質>")
+    drags: string, -- 引きずられる量 Y("heat"・"species:<物質>")
+    coupling: number | string, -- 結合の強さ q(−1〜1)。小数は 10 進の文字列 "0.3"・"-0.5"
+    within: string?, -- 効く物質(省けばどこでも)
+}
+
+export type Machine = {
+    store: string, -- 蓄え X("work"・"heat"・"species:<物質>")
+    push: string, -- 押す物 Y("gas"・"heat"・"species:<物質>")
+    coupling: number | string, -- 結合の強さ q(1 = きっちり結合)。小数は 10 進の文字列 "0.9"
+    cost_j_per_mol: number, -- w: Y を 1 mol 押すのに使う蓄え(J/mol)
+    speed_w: number, -- P: 負荷のない時に蓄えを使う速さ(W)
+}
+
 -- --- entry が返す表(分類 → 鍵 → 値。ADR-0031 の 1)。反応表のほかの分類(UI の文字列など)は形を決めていない ---
 export type PackageEntry = {
     elements: { [string]: Element }?,
@@ -148,5 +166,7 @@ export type PackageEntry = {
     environment: Environment?,
     atmosphere: { [string]: number }?, -- 一様な大気の成分(物質 → ppm。足して 1000000。T-0373。高さで変えるなら environment.atmosphere_profile)
     play_metrics: { [string]: PlayMetric }?, -- 遊びの指標(T-0432)
+    drags: { [string]: Drag }?, -- 引きずり(T-0536)
+    machines: { [string]: Machine }?, -- 押す構造(T-0536)
     [string]: any,
 }

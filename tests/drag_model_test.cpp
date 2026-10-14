@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "common/fixed.hlsli"
+#include "sim/coupling_table.h"
 #include "sim/gas_reference.h"
 #include "sim/world_physics.h"
 #include "standard_world_physics.h"
@@ -28,6 +29,7 @@ namespace {
 
     using namespace bicameral::sim;
     namespace fx = bicameral::fx;
+    namespace sim = bicameral::sim;
 
     int failureCount = 0;
 
@@ -66,12 +68,13 @@ namespace {
     };
 
     // ベイクの検査: |q| > 1 は結合の行列が半正定でなくなる(ある坂の組で坂を上る = 永久機関)。警告して ±1 に押さえる(D-487 ②「警告して動かす」)
+    // 押さえ方はエンジンのベイクと同じ関数(sim::ClampCouplingQ16。分類 drags・machines に共通の 1 つの検査。T-0536)
     BakedDrag BakeDragCoupling(const DragEntry& entry) {
-        BakedDrag baked{.couplingQ16 = entry.couplingQ16};
-        if (fx::FxAbsU64(entry.couplingQ16) <= (uint64_t)COUPLING_ONE)
+        const sim::ClampedCoupling clamped = sim::ClampCouplingQ16(entry.couplingQ16);
+        BakedDrag baked{.couplingQ16 = clamped.couplingQ16};
+        if (!clamped.clamped)
             return baked;
 
-        baked.couplingQ16 = entry.couplingQ16 < 0 ? -COUPLING_ONE : COUPLING_ONE;
         baked.warning =
             "coupling |q| > 1 makes a perpetual motion machine (Onsager matrix not positive semi-definite); clamped to "
             "1";
