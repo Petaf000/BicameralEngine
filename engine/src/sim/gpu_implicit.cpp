@@ -241,18 +241,26 @@ namespace bicameral::sim {
 
     // 前の刻みで下りが止まった段(ImTail の境か最も粗い段)まで段ごとに積めば、同じ形の刻みは空の段を積まない。
     // 形が深くなった刻みは、その分を ImTail が回す(値は同じ。その刻みだけ遅い。次の刻みで形が追いつく)
-    GpuImplicitRecordShape GpuImplicit::ShapeFrom(const GpuImplicitCost& previous) {
+    GpuImplicitRecordShape GpuImplicit::ShapeFrom(const GpuImplicitCost& previous, uint32_t cheapTailMaxNodes) {
         const uint32_t levels = std::max(previous.levelCount, 1u);
         const uint32_t terminal = std::min(previous.wantedTailDepth, levels - 1);
 
         // V サイクルは前の刻みの回数 + 余裕(半分か CYCLE_MARGIN の大きい方)まで段ごとに積む。回が急に増えた刻みだけ、余裕の後の回が
-        // 1 グループで遅い(たくさんの要求の全部 ImTail は 1 回約 5 ms。T-0154)
+        // 安い回で遅い(たくさんの要求の全部 ImTail は 1 回約 5 ms。T-0154)
         const uint32_t cycles = std::max(previous.cycles, 1u);
         const uint32_t dispatchCycles = cycles + std::max(cycles / 2, CYCLE_MARGIN);
 
+        // 安い回の 1 グループに節の多い段を入れない(T-0505): 先頭から節が上限を超える段は段ごとの Dispatch。
+        // 下りが止まる段より深い段は ImTail か最も粗い段の掃き出しが受け持つので数えない
+        uint32_t cheapLevels = 0;
+        while (cheapLevels < terminal && cheapLevels < GpuImplicitCost::KEPT_LEVELS &&
+               previous.levelNodes[cheapLevels] > cheapTailMaxNodes)
+            ++cheapLevels;
+
         return {.dispatchLevels = terminal + 1,
                 .coarsestDispatch = previous.wantedTailDepth >= previous.levelCount,
-                .dispatchCycles = dispatchCycles};
+                .dispatchCycles = dispatchCycles,
+                .cheapLevels = cheapLevels};
     }
 
     // バッファの大きさ(上限から。空にならないように 1 つ分は持つ)
@@ -558,18 +566,28 @@ namespace bicameral::sim {
     // → 上り(直し → 後の掃き出し)× 段。下りが止まる段より下の Dispatch は引数が 0 グループ(ImPlanArgs)
     void GpuImplicit::RecordVCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options) {
         const uint32_t levels = m_constants.dispatchLevels;
-        for (uint32_t depth = 0; depth + 1 < levels; ++depth) {
-            const uint32_t slot = DepthSlot(depth);
-            RecordSmooth(list, depth, slot + IM_SLOT_SMOOTH, options.preSmooth);
-            m_constants.depth = depth + 1;
-            DispatchIndirect(list, PassRestrict, slot + IM_SLOT_RESTRICT);
-        }
+        RecordDown(list, options, levels - 1);
 
         DispatchIndirect(list, PassTail, IM_SLOT_TAIL);
         if (m_constants.coarsestDispatch != 0)
             RecordSmooth(list, IM_TERMINAL_DEPTH, IM_SLOT_COARSEST, options.coarsestSweeps);
 
-        for (uint32_t depth = levels - 1; depth-- > 0;) {
+        RecordUp(list, options, levels - 1);
+    }
+
+    // 下り(前の掃き出し → 縮約)を段 0 から depthEnd の手前まで。下りが止まる段より下の段は引数が 0 グループ
+    void GpuImplicit::RecordDown(ID3D12GraphicsCommandList* list, const ImplicitOptions& options, uint32_t depthEnd) {
+        for (uint32_t depth = 0; depth < depthEnd; ++depth) {
+            const uint32_t slot = DepthSlot(depth);
+            RecordSmooth(list, depth, slot + IM_SLOT_SMOOTH, options.preSmooth);
+            m_constants.depth = depth + 1;
+            DispatchIndirect(list, PassRestrict, slot + IM_SLOT_RESTRICT);
+        }
+    }
+
+    // 上り(直し → 後の掃き出し)を depthEnd の手前の段から段 0 まで
+    void GpuImplicit::RecordUp(ID3D12GraphicsCommandList* list, const ImplicitOptions& options, uint32_t depthEnd) {
+        for (uint32_t depth = depthEnd; depth-- > 0;) {
             const uint32_t slot = DepthSlot(depth);
             m_constants.depth = depth;
             DispatchIndirect(list, PassProlong, slot + IM_SLOT_PROLONG);
@@ -621,8 +639,10 @@ namespace bicameral::sim {
                              (options.coarsestSweeps << (2 * SWEEP_BITS));
 
         // --- 計画 → 温度・範囲 → V サイクル × 上限(止めた後の回は述語で飛ばす)---
-        // dispatchCycles 回の後は ImTail が段 0 から V サイクル全体を回す安い回(T-0179。止めた後の回の段ごとのバリアを減らす)
+        // dispatchCycles 回の後は安い回(T-0179。止めた後の回の段ごとのバリアを減らす): 節の多い先頭の段だけ段ごと、残りは ImTail(T-0505)
         const uint32_t dispatchCycles = shape.dispatchCycles == 0 ? options.cycles : std::max(shape.dispatchCycles, 1u);
+        // 安い回の段ごとの段は、積んだ段の引数がある所まで(下りが止まる段より深くは ImTail が受け持つ。T-0505)
+        const uint32_t cheapLevels = std::min(shape.cheapLevels, m_constants.dispatchLevels - 1);
         RecordPlan(list);
         Dispatch(list, PassBegin, 1);
         DispatchIndirect(list, PassStart, IM_SLOT_CELLS);
@@ -634,7 +654,7 @@ namespace bicameral::sim {
             if (cycle < dispatchCycles)
                 RecordVCycle(list, options);
             else
-                RecordWholeTailCycle(list);
+                RecordCheapCycle(list, options, cheapLevels);
 
             if (options.toleranceMillikelvin != 0)
                 DispatchIndirect(list, PassConverged, IM_SLOT_CONVERGED);
@@ -666,10 +686,18 @@ namespace bicameral::sim {
         return true;
     }
 
-    void GpuImplicit::RecordWholeTailCycle(ID3D12GraphicsCommandList* list) {
-        m_constants.wholeTail = 1;
+    // 安い回(T-0179・T-0505): 段 depthEnd より上は段ごとの Dispatch(引数は計画が作った同じもの)、そこから下は ImTail が
+    // min(下りが止まる段, depthEnd) から 1 グループで回す。順は RecordVCycle と同じなので値も同じ。
+    // depthEnd = 0 なら段 0 から全体が 1 グループ(Dispatch 3 つ)。1 グループの仕事は ShapeFrom が節の数で抑える
+    void GpuImplicit::RecordCheapCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options,
+                                       uint32_t depthEnd) {
+        RecordDown(list, options, depthEnd);
+
+        m_constants.cheapTail = depthEnd + 1;
         Dispatch(list, PassTail, 1);
-        m_constants.wholeTail = 0;
+        m_constants.cheapTail = 0;
+
+        RecordUp(list, options, depthEnd);
     }
 
     uint32_t GpuImplicit::DispatchesPerCycle(const ImplicitOptions& options) const {
@@ -754,6 +782,9 @@ namespace bicameral::sim {
                 .levelCount = plan[IM_PLAN_LEVEL_COUNT],
                 .tailDepth = plan[IM_PLAN_TAIL],
                 .wantedTailDepth = plan[IM_PLAN_WANTED_TAIL]};
+        const uint32_t kept = std::min(cost.levelCount, GpuImplicitCost::KEPT_LEVELS);
+        for (uint32_t depth = 0; depth < kept; ++depth)
+            cost.levelNodes[depth] = plan[IM_PLAN_DEPTH_BASE + (IM_PLAN_NODE_COUNT * IM_PLAN_DEPTH_STRIDE) + depth];
 
         return true;
     }

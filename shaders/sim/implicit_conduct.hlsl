@@ -50,7 +50,7 @@ cbuffer ImConstants : register(b0) {
     uint32_t g_maxLevels;  // 段の上限(ImPlanLevels のグループの数)
     uint32_t
         g_coarsestDispatch;  // 0 なら最も粗い段の掃き出しの Dispatch を積んでいない(いつも ImTail が受け持つ。T-0154)
-    uint32_t g_wholeTail;    // 1 なら ImTail が段 0 から V サイクル全体を回す(記録した回の後の安い回。T-0179)
+    uint32_t g_cheapTail;    // 1 以上なら記録した回の後の安い回: ImTail が min(下りが止まる段, g_cheapTail − 1) から(T-0179・T-0505)
     uint32_t g_sweeps;       // 掃き出しの回数: 前 | 後 << 8 | 最も粗い段 << 16
 };
 
@@ -372,7 +372,8 @@ void TailProlong(uint32_t depth, uint32_t lane) {
 }
 
 // CPU の VCycle(計画の IM_PLAN_TAIL の段)と同じ順: 前の掃き出し → 縮約 → (下の段)→ 最も粗い段 → 直し → 後の掃き出し
-// g_wholeTail なら段 0 から V サイクル全体(T-0179。間接の引数を通らず 1 グループで呼ばれるので、系が空なら何もしない)
+// 安い回(g_cheapTail。T-0179・T-0505)は段 min(下りが止まる段, g_cheapTail − 1) から: その段より上は段ごとの Dispatch が回す
+// (段 0 からなら V サイクル全体)。間接の引数を通らず 1 グループで呼ばれるので、系が空なら何もしない
 [numthreads(IM_TAIL_THREADS, 1, 1)] void ImTail(uint32_t lane : SV_GroupIndex) {
     if (CyclesDone() || LevelCount() == 0)
         return;
@@ -381,7 +382,7 @@ void TailProlong(uint32_t depth, uint32_t lane) {
     const uint32_t postSmooth = (g_sweeps >> 8) & 0xFFu;
     const uint32_t coarsestSweeps = g_sweeps >> 16;
     const uint32_t last = LevelCount() - 1;
-    const uint32_t tailDepth = g_wholeTail != 0 ? 0 : g_plan[IM_PLAN_TAIL];
+    const uint32_t tailDepth = g_cheapTail != 0 ? min(g_plan[IM_PLAN_TERMINAL], g_cheapTail - 1) : g_plan[IM_PLAN_TAIL];
     for (uint32_t down = tailDepth; down < last; ++down) {
         TailSmooth(down, preSmooth, lane);
         TailRestrict(down + 1, lane);

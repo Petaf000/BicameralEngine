@@ -41,6 +41,10 @@ namespace bicameral::sim {
         uint32_t levelCount = 0;       // 段の数
         uint32_t tailDepth = 0;        // ImTail が受け持つ最初の段(段の数なら受け持たない)
         uint32_t wantedTailDepth = 0;  // 記録の形で切る前の ImTail の境(次の刻みの形を選ぶのに使う。T-0154)
+
+        // --- 段ごとの節の数(先頭の KEPT_LEVELS 段。次の刻みの安い回の形を選ぶのに使う。T-0505)---
+        static constexpr uint32_t KEPT_LEVELS = 16;
+        std::array<uint32_t, KEPT_LEVELS> levelNodes{};
     };
 
     // 大きさの上限(バッファの大きさ。T-0136)。写す系と段はこれに収まること
@@ -77,9 +81,13 @@ namespace bicameral::sim {
         uint32_t dispatchLevels = 0;
         // 最も粗い段の掃き出しを Dispatch で積むか(ImTail に入らない大きい最も粗い段の時だけ要る)。false なら ImTail が受け持つ
         bool coarsestDispatch = true;
-        // V サイクルを段ごとの Dispatch で積む回の数(0 なら上限 options.cycles まで。1 以上)。これより後の回は ImTail が段 0 から
-        // V サイクル全体を 1 グループで回す安い回(3 Dispatch)にする(T-0179)。値は同じ。大きい系をその回まで回すと遅い(1 グループ)
+        // V サイクルを段ごとの Dispatch で積む回の数(0 なら上限 options.cycles まで。1 以上)。これより後の回は安い回にする(T-0179)。値は同じ
         uint32_t dispatchCycles = 0;
+        // 安い回で段ごとの Dispatch を積む段の数(T-0505)。その段から下(最も粗い段まで)を ImTail が 1 グループで回す。
+        // 0 なら段 0 から V サイクル全体が 1 グループ(T-0179 の形。Dispatch は 3 つ)。1 グループに大きい段を入れると GPU が止まる
+        // (128³ の 1 グループの V サイクルを数十回で 2 秒を超えた。T-0494)ので、ShapeFrom は節が多い段をここに入れる。
+        // 下りが止まる段より深くは下りない(値は同じ)
+        uint32_t cheapLevels = 0;
     };
 
     class GpuImplicit {
@@ -99,8 +107,10 @@ namespace bicameral::sim {
         [[nodiscard]] static GpuImplicitLimits LimitsOf(const ImplicitGrid& grid);
 
         // 前の刻みの数から記録の形を選ぶ(T-0154): 段は下りが止まった段(切る前の ImTail の境)まで積み、
-        // 最も粗い段の掃き出しは前の刻みが ImTail を使わなかった時だけ積む
-        [[nodiscard]] static GpuImplicitRecordShape ShapeFrom(const GpuImplicitCost& previous);
+        // 最も粗い段の掃き出しは前の刻みが ImTail を使わなかった時だけ積む。安い回は、節が cheapTailMaxNodes を超える先頭の段を
+        // 段ごとの Dispatch にする(T-0505。1 グループの仕事の上限)
+        [[nodiscard]] static GpuImplicitRecordShape ShapeFrom(const GpuImplicitCost& previous,
+                                                              uint32_t cheapTailMaxNodes = CHEAP_TAIL_MAX_NODES);
 
         // CPU の系(セル・面・段の形と段の表)を写す。grid は上限に収まること
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList* list, const ImplicitGrid& grid);
@@ -144,6 +154,9 @@ namespace bicameral::sim {
 
         // ShapeFrom が前の刻みの V の回数に足す余裕の最小(T-0179)
         static constexpr uint32_t CYCLE_MARGIN = 2;
+        // 安い回の ImTail(1 グループ)に入れる段の節の上限(T-0505)。V 1 回の 1 グループは節あたり約 40 ns(T-0494 の 64³)なので、
+        // 上限 64 回を全部回しても 1 刻み約 10 ms で止まる。docs/perf.md の T-0505 の計測で選んだ
+        static constexpr uint32_t CHEAP_TAIL_MAX_NODES = 4096;
 
         // V サイクル 1 回に積む Dispatch の数(0 グループのものも含む。最後に RecordStep した形で。計測の表に使う)
         [[nodiscard]] uint32_t DispatchesPerCycle(const ImplicitOptions& options) const;
@@ -202,7 +215,8 @@ namespace bicameral::sim {
             uint32_t coarsestTailMaxNodes = 0;
             uint32_t maxLevels = 0;
             uint32_t coarsestDispatch = 1;
-            uint32_t wholeTail = 0;  // 1 なら ImTail が段 0 から V サイクル全体を回す(T-0179)
+            uint32_t cheapTail =
+                0;  // 1 以上なら安い回: ImTail が min(下りが止まる段, cheapTail − 1) から回す(T-0179・T-0505)
             uint32_t sweeps = 0;
         };
 
@@ -226,7 +240,10 @@ namespace bicameral::sim {
         void RecordCopies(ID3D12GraphicsCommandList* list, std::span<const CopyRegion> regions);
         void RecordSmooth(ID3D12GraphicsCommandList* list, uint32_t depth, uint32_t slot, uint32_t sweeps);
         void RecordVCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options);
-        void RecordWholeTailCycle(ID3D12GraphicsCommandList* list);  // ImTail が段 0 から V サイクル全体(T-0179)
+        void RecordDown(ID3D12GraphicsCommandList* list, const ImplicitOptions& options, uint32_t depthEnd);
+        void RecordUp(ID3D12GraphicsCommandList* list, const ImplicitOptions& options, uint32_t depthEnd);
+        // 安い回: 段 depthEnd より上は段ごとの Dispatch、そこから下は ImTail の 1 グループ(T-0179・T-0505)
+        void RecordCheapCycle(ID3D12GraphicsCommandList* list, const ImplicitOptions& options, uint32_t depthEnd);
         void BeginSkippable(ID3D12GraphicsCommandList* list, uint32_t word);
         void EndSkippable(ID3D12GraphicsCommandList* list);
 

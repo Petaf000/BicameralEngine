@@ -8,7 +8,8 @@
 //   - 鎖: レベル 0〜6・いちばん細かいブロックが 1500 K・端数の枠 16(粗い側に端数の枠が無いブロックもある)
 //   - たくさんの要求: 深さ 26 段・木箱が燃える(相変化と反応で熱容量が変わる。Δk ≤ 8 を陰解法)
 // 確かめること: 毎刻み、セルのエネルギー・端数・V サイクルの回数・安全網の数が CPU と一致。CPU が木の中で解いた費用(nest.implicitCost)とも一致。
-// 記録の形(GpuImplicitRecordShape。T-0154)を変えても同じ値: 前の刻みの数から選ぶ形・全部の回を ImTail で回す形・上限まで積む形。
+// 記録の形(GpuImplicitRecordShape。T-0154)を変えても同じ値: 前の刻みの数から選ぶ形・全部の回を ImTail で回す形・上限まで積む形・
+// 2 回目からを安い回にして先頭の 1〜2 段を段ごと・残りを ImTail で回す形(T-0505)。
 // 計測(release のハードウェアだけ。--measure-only なら計測だけ): 刻みごとの GPU の ms(同じ系を写し直して REPEATS 回解いた最小)。
 //   V サイクルの上限(木の既定 64 と 16)・記録の形・ImTail の境(GpuImplicitTuning)を変えて比べる。
 // --scene hot,chain,stress(既定は全部): 流す場面を並べる。ctest の HW は熱い点・鎖とたくさんの要求の 2 本に分ける
@@ -281,9 +282,10 @@ namespace {
 
     // 記録の形(T-0154。どれでも値は同じ)
     enum class ShapeMode : uint8_t {
-        Full,      // 既定: 上限の段まで・全部の回を段ごとに積む(T-0136 の形)
-        Adaptive,  // 前の刻みの GPU の数から(GpuImplicit::ShapeFrom)。初めの刻みは Full
-        AllTail,   // 段ごとに積まない: ImTail が段 0 から全部
+        Full,        // 既定: 上限の段まで・全部の回を段ごとに積む(T-0136 の形)
+        Adaptive,    // 前の刻みの GPU の数から(GpuImplicit::ShapeFrom)。初めの刻みは Full
+        AllTail,     // 段ごとに積まない: ImTail が段 0 から全部
+        CheapSplit,  // 前の刻みから + 2 回目から安い回・安い回の段ごとの段は刻みごとに 1 と 2(T-0505)
     };
 
     sim::GpuImplicitRecordShape ShapeOf(ShapeMode mode, const std::vector<Solved>& previous) {
@@ -292,6 +294,15 @@ namespace {
                 return previous.empty() ? sim::GpuImplicitRecordShape{}
                                         : sim::GpuImplicit::ShapeFrom(previous.back().cost);
             case ShapeMode::AllTail: return {.dispatchLevels = 1, .coarsestDispatch = false};
+            case ShapeMode::CheapSplit: {
+                sim::GpuImplicitRecordShape shape = previous.empty()
+                                                        ? sim::GpuImplicitRecordShape{}
+                                                        : sim::GpuImplicit::ShapeFrom(previous.back().cost);
+                shape.dispatchCycles = 1;
+                shape.cheapLevels = 1 + static_cast<uint32_t>(previous.size() % 2);
+
+                return shape;
+            }
             default: return {};
         }
     }
@@ -410,6 +421,9 @@ namespace {
             if (!scene.stress || RELEASE) {
                 if (auto other = RunScene(setup, scene, scene.options, {}, 1, ShapeMode::AllTail); !other)
                     return std::unexpected(std::format("全部の回を ImTail で回す形: {}", other.error()));
+
+                if (auto other = RunScene(setup, scene, scene.options, {}, 1, ShapeMode::CheapSplit); !other)
+                    return std::unexpected(std::format("安い回を段ごと + ImTail で回す形: {}", other.error()));
             }
 
             const auto results = RunScene(setup, scene, scene.options, {}, 1, ShapeMode::Adaptive);
@@ -462,6 +476,7 @@ namespace {
         switch (mode) {
             case ShapeMode::Adaptive: return "前の刻みから";
             case ShapeMode::AllTail: return "全部 ImTail";
+            case ShapeMode::CheapSplit: return "安い回を段ごと + ImTail";
             default: return "上限まで";
         }
     }
