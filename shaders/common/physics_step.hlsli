@@ -50,6 +50,10 @@ struct PxBody {
     PxVec3 deltaLinear;
     PxVec3 deltaAngular;
 
+    // --- 散逸の帳簿(T-0519。単位 PX_ENERGY_FRACTION_BITS)---
+    int64_t mechanicalEnergy;  // 直近に数えた力学的エネルギー(運動 + 回転 + 重力の位置。小刻みの初めと終わりに数える)
+    int64_t dissipatedEnergy;  // 小刻みの中で失った力学的エネルギーの累計(負 = 解き方が生んだ分。世界へ返す熱の元)
+
     // --- 32bit ---
     int32_t color;    // PX_NO_COLOR = 塗っていない
     uint32_t active;  // 1 = 世界にいる(spawnTick ≤ 刻み < removeTick)
@@ -159,6 +163,56 @@ FX_FN PxVec3 PxWorldInertiaRow(PxMat3 rotation, PxVec3 inertia, uint32_t i) {
                       PxWorldInertiaEntry(rotation, inertia, i, 2));
 }
 
+// --- 力学的エネルギー(散逸の帳簿。T-0519・19 §2.2 G2)------------------------------------------------
+// 物理で失った運動エネルギーを、整数で決定的に数えて帳簿に載せる(D-465 の保存則。世界の熱へ返すのは T-0542)。
+// 数え方: 小刻みの初め(PxInitializeBody)と終わり(PxFinishBody)に同じ式で力学的エネルギーを数え、その差を物ごとの dissipatedEnergy に足す。
+// 接触・摩擦・AVBD の陰的な積分の減衰・仕上げ(α = 0)の位置の直しの全部が差に入る(どの行で失ったかは分けない)。
+// 小刻みの外の出入り(押す力積・現れる・消える・重力の差し替え)は差に入らない(次の初めに数え直す)ので、帳簿の式は
+//   (物が世界に入った時の力学的エネルギー)+(押した分)−(今の力学的エネルギー)= Σ dissipatedEnergy
+// が押しの無い間ビット単位で成り立つ(tests/physics_test の energy)。物ごとの値は運動量のやり取り(当たった物が当てられた物を動かす)を含むので、
+// 物ごとの正負に物理の意味は無い。意味があるのは合計(と、接して動く物の組の合計)。
+// 単位: 2^-10 µJ(約 1 nJ)。質量 mg × 速さ² (2^-20 m/s)² = 2^-40 µJ なので 10 進の係数が出ない。int64 で約 9 × 10^9 J まで。
+// 世界のセルのエネルギー(1 mJ。units.hlsli)へ渡す時は 1000 × 2^10 で割り、端数を帳簿に残す。
+FX_CONST uint32_t PX_ENERGY_FRACTION_BITS = 10;
+
+// 値の 2 乗(2^-20 → 2^-24。速さ・角速度・長さ)
+FX_FN uint64_t PxSquareQ24(int64_t value) {
+    const uint64_t magnitude = FxAbsU64(value);
+    return FxShiftRightU128(FxMulU64Full(magnitude, magnitude), 16);
+}
+
+// 運動 + 重力の位置(½ m v² + m g y)。gravity は 2^-20 m/s²(y の負の向き)
+// s = v² + 2 g y(2^-24 m²/s²)、½ × mg × 10^-6 × s × 2^-24 J = m s × 2^-25 µJ = m s / 2^15(2^-10 µJ)
+FX_FN int64_t PxTranslationalEnergy(PxBody body, int64_t gravity) {
+    const int64_t speedSquared = (int64_t)(PxSquareQ24(body.velocity.x) + PxSquareQ24(body.velocity.y) +
+                                           PxSquareQ24(body.velocity.z));
+    const int64_t height = FxMulShiftS64(gravity, body.position.y, 15);  // 2 g y(2^-40 → 2^-24)
+    return FxMulShiftS64((int64_t)body.massMilligrams, speedSquared + height, 15);
+}
+
+// 回転(½ Σ I_k ω_k²。直方体 I_x = m (h_y² + h_z²) / 3。ω は局所の向き)
+// r_k ω_k²(2^-24 m²/s²)の和を Σ として、½ × mg × 10^-6 × Σ / 3 × 2^-24 J = m Σ / 2^15 / 3(2^-10 µJ)
+FX_FN int64_t PxRotationalEnergy(PxBody body) {
+    const PxMat3 rotation = PxRotationMatrix(body.rotation);
+    const PxVec3 local = PxMulMatTransposed(rotation, body.angularVelocity, PX_UNIT_SHIFT);
+    const uint64_t squareX = PxSquareQ24(body.halfExtent.x);
+    const uint64_t squareY = PxSquareQ24(body.halfExtent.y);
+    const uint64_t squareZ = PxSquareQ24(body.halfExtent.z);
+    const uint64_t sum = FxShiftRightU128(FxMulU64Full(squareY + squareZ, PxSquareQ24(local.x)), 24) +
+                         FxShiftRightU128(FxMulU64Full(squareX + squareZ, PxSquareQ24(local.y)), 24) +
+                         FxShiftRightU128(FxMulU64Full(squareX + squareY, PxSquareQ24(local.z)), 24);
+
+    return (int64_t)(FxShiftRightU128(FxMulU64Full(body.massMilligrams, sum), 15) / 3);
+}
+
+// 力学的エネルギー(2^-10 µJ)。動かない物・世界にいない物は 0
+FX_FN int64_t PxMechanicalEnergy(PxBody body, int64_t gravity) {
+    if (!PxIsDynamic(body) || body.active == 0)
+        return 0;
+
+    return PxTranslationalEnergy(body, gravity) + PxRotationalEnergy(body);
+}
+
 // --- 刻みの初め: 物の初期化 -----------------------------------------------------------------------
 // 慣性の目標と初めの推定。刻みの初めの姿勢を取り、Δ を 0 に、色を消す
 // gravity は PxParameters::gravity(2^-20 m/s²。0 以上)
@@ -173,6 +227,9 @@ FX_FN PxBody PxInitializeBody(PxBody body, int64_t rate, int64_t gravity) {
     body.color = PX_NO_COLOR;
     if (!PxIsDynamic(body) || body.active == 0)
         return body;
+
+    // 小刻みの初めの力学的エネルギー(押した分・重力の差し替えはここで数え直す。T-0519)
+    body.mechanicalEnergy = PxMechanicalEnergy(body, gravity);
 
     const PxMat3 rotation = PxRotationMatrix(body.rotation);
     body.inertiaWorld.row0 = PxWorldInertiaRow(rotation, body.inertiaOverH2, 0);
@@ -548,8 +605,9 @@ FX_FN PxBody PxUpdateVelocity(PxBody body, int64_t rate) {
     return body;
 }
 
-// 位置と向きを刻みの初め + Δ に
-FX_FN PxBody PxFinishBody(PxBody body) {
+// 位置と向きを刻みの初め + Δ に。小刻みで失った力学的エネルギーを散逸の帳簿に足す(T-0519)。
+// gravity は小刻みの初め(PxInitializeBody)と同じ値
+FX_FN PxBody PxFinishBody(PxBody body, int64_t gravity) {
     if (!PxIsDynamic(body) || body.active == 0)
         return body;
 
@@ -558,6 +616,10 @@ FX_FN PxBody PxFinishBody(PxBody body) {
                                    body.deltaLinear.z / divisor);
     body.position = PxAdd(body.startPosition, step);
     body.rotation = PxIntegrateRotation(body.startRotation, body.deltaAngular);
+
+    const int64_t energy = PxMechanicalEnergy(body, gravity);
+    body.dissipatedEnergy += body.mechanicalEnergy - energy;
+    body.mechanicalEnergy = energy;
 
     return body;
 }
