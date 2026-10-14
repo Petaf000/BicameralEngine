@@ -30,6 +30,7 @@ export type Species = {
     thermal_conductivity_mw_per_m_k: number,
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
     condensed: boolean?, -- 凝縮相(固体・液体)。省ける(既定 気体)。坂の計器が活量を 1 と置く(T-0518。相が入るまでの仮の欄)
+    radiation_absorption_mm2_per_mol: number?, -- 1 mol が放射を遮る面積(mm²/mol)。省ける(既定 0 = 放射しない・吸わない)。セルの放射率 = 1 − e^−Σ a·n ÷ 面(T-0583・ADR-0252)
 }
 
 export type ReactionRate = {

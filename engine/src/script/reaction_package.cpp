@@ -80,7 +80,8 @@ namespace bicameral::script {
                                                           "heat_capacity_mj_per_mol_k",
                                                           "thermal_conductivity_mw_per_m_k",
                                                           "standard_entropy_mj_per_mol_k",
-                                                          "condensed"};
+                                                          "condensed",
+                                                          "radiation_absorption_mm2_per_mol"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -123,6 +124,16 @@ namespace bicameral::script {
                     return std::unexpected(std::format("{}.condensed: true か false で書く", path));
 
                 species.condensed = condensed->boolean;
+            }
+
+            // 1 mol が放射を遮る面積(任意。既定 0 = 放射しない。放射の CPU リファレンスだけが読む。T-0583・ADR-0252)
+            if (const ScriptValue* declared = value.Find("radiation_absorption_mm2_per_mol")) {
+                const auto absorption = ReadInteger(*declared, path + ".radiation_absorption_mm2_per_mol", 0,
+                                                    UINT32_LIMIT);
+                if (!absorption)
+                    return std::unexpected(absorption.error());
+
+                species.radiationAbsorption = static_cast<uint32_t>(*absorption);
             }
 
             return species;
