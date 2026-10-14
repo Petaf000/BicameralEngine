@@ -1,6 +1,6 @@
 # T-0496 パッチ(触媒・阻害・転換・増幅)を全部外す
 
-- Status: Doing
+- Status: Done(2026-10-15)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -21,8 +21,8 @@
 - [x] 試験: gpu_probe_patch_test・window_patch_*・gpu_lab_box_test の RunPatch / RunConvert / RunConvertRemap・lab_box_test の魔法の試験・
       gpu_multires_test の --measure-convert
 - [x] 設計書(02 §5.0・14 §2・00・01・13・15・19)と map.yaml
-- [ ] release のビルドが警告 0・archmap --check・関係する試験(lab_box・reaction_species_remap・gpu_lab_box・gpu_probe_sim・gpu_multires の組)
-- [ ] 普段の世界の反応の段が速く戻ること(--measure-wide の形。T-0396 の A / B と同じ測り方)。前後の値を docs/perf.md に
+- [x] release のビルドが警告 0・archmap --check・関係する試験(lab_box・reaction_species_remap・gpu_lab_box・gpu_probe_sim・gpu_multires の組)
+- [x] 普段の世界の反応の段が速く戻ること(--measure-wide の形。T-0396 の A / B と同じ測り方)。前後の値を docs/perf.md に
 
 ## メモ・参考
 - 残したもの(パッチと関係なく使う): 物質の付け替え(species_remap。物質を足す・消す表の差し替え。ADR-0065)・置くコマンドの付け替え
@@ -53,3 +53,10 @@
 - ROADMAP の T-0496 の行を Done に。T-0473(転換の無い変種のシェーダー)は D-493 で作らないことになっている(行があれば消す)。
 - CLAUDE.md §4 と docs/claude/COMMANDER.md・runner/worker-common.md の「magic_patch.hlsli など」「魔法のパッチはエディタの実験の道具だけ」の行
   (magic_patch.hlsli はもう無い。共通のコードの例は reaction.hlsli・multires.hlsli に)。
+
+## 通した試験(release)
+- CPU 28 本(lab_box・reaction_species_remap・reaction_*・multires_*・float_check ほか)。
+- GPU: gpu_multires・gpu_multires_activity・gpu_lab_box・gpu_probe_sim・gpu_probe_sim_tables・gpu_probe_place・gpu_probe_rewind・
+  gpu_multires_wide_{limits,overflow,many,many_conduct,coarsen,uniform}・window_lab・window_lab_compare・window_place_record/play・
+  window_hot_reload_copy/record/play。どれも前と同じハッシュの基準のまま通った(試験のハッシュは変わっていない)。
+- 流していない: WARP の組・debug・gpu_multires_stress / limits・ほかの window_*(パッチに関係しない道)。
