@@ -2,10 +2,10 @@
 //
 // 手順(--world sample --editor。条件が揃ったら次へ進む。フレームの数には頼らない):
 //   1. 起動から AUTO_PLAY_HOLD_FRAMES フレーム、世界が刻み 0 の前で止まっている(編集の状態)
-//   2. 編集の状態で木の球 A → 木炭 B を置く(置いた分の刻みだけ進む)。最後の刻み E の状態のハッシュ h(AB) を控える
+//   2. 編集の状態で木の球 A → 木炭 B を置く(置いた分の刻みだけ進む)。止まった境界 E の状態 S(E) のハッシュ h(AB) を控える
 //   3. 元に戻す(B)→ h(E) が h(AB) と違う。元に戻す(A)→ さらに違う。やり直す(A)→ 1 回目の元に戻す後と同じ。
 //      やり直す(B)→ h(AB) と同じ(止まっている間の Undo/Redo を何回でも)
-//   4. プレイ(始めた刻み P)→ 60 刻み後にプレイ中に木の球 C を置く → 刻み P + 100 でやめる
+//   4. プレイ(始めた刻み P = E)→ 60 刻み後にプレイ中に木の球 C を置く → 刻み P + 100 でやめる
 //   5. 編集の状態へ戻った: カーソルが刻み P の境界・その後 20 フレーム動かない
 //   6. もう一度プレイ → 刻み P〜P+50 のハッシュが 1 回目のプレイと同じ(プレイ前の世界に戻った)・P+60〜P+100 のどこかが違う
 //      (C が消えた)→ やめて終える
@@ -80,7 +80,7 @@ namespace bicameral::frame {
             Done,
         };
 
-        // 編集の状態で、操作の後の流し直しが終わり、刻み tick の状態が今の世代で届いた
+        // 操作の後の流し直しが終わり、刻みの境界 tick の状態 S(tick) が今の世代で届いた
         [[nodiscard]] bool Settled(const AutoPlayState& state, uint64_t tick) const;
         [[nodiscard]] uint64_t HashAt(uint64_t tick) const;
         AutoPlayAction Act(Step next, AutoPlayAction action);
@@ -98,7 +98,7 @@ namespace bicameral::frame {
         bool m_recordFirst = false;
         bool m_recordSecond = false;
 
-        uint64_t m_editTick = 0;  // 編集の状態で比べる刻み E(最後に置いた刻み)
+        uint64_t m_editTick = 0;  // 編集の状態で比べる刻みの境界 E(置き終えた後のカーソル)
         uint64_t m_hashAB = 0;
         uint64_t m_hashUndoB = 0;
         uint64_t m_hashUndoA = 0;

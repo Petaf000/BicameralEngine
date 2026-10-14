@@ -31,7 +31,8 @@ namespace bicameral::frame {
             return AutoPlayAction::None;
         }
 
-        const uint64_t last = state.cursor.tick == 0 ? 0 : state.cursor.tick - 1;
+        // 読み戻すハッシュは刻みの境界の状態 S(t)(刻み t − 1 を終えた状態)。今のカーソルの境界の状態を比べる
+        const uint64_t boundary = state.cursor.tick;
         switch (m_step) {
             case Step::Hold:
                 if (state.cursor != SimCursor{}) {
@@ -42,14 +43,14 @@ namespace bicameral::frame {
                 return state.frame >= HOLD_FRAMES ? Act(Step::PlaceA, AutoPlayAction::StrokeA) : AutoPlayAction::None;
 
             case Step::PlaceA:
-                return state.cursor.tick > 0 && Settled(state, last) ? Act(Step::PlaceB, AutoPlayAction::StrokeB)
-                                                                     : AutoPlayAction::None;
+                return boundary > 0 && Settled(state, boundary) ? Act(Step::PlaceB, AutoPlayAction::StrokeB)
+                                                                : AutoPlayAction::None;
 
             case Step::PlaceB:
-                if (!Settled(state, last))
+                if (!Settled(state, boundary))
                     return AutoPlayAction::None;
 
-                m_editTick = last;
+                m_editTick = boundary;
                 m_hashAB = HashAt(m_editTick);
                 return Act(Step::UndoB, AutoPlayAction::Undo);
 
@@ -92,14 +93,13 @@ namespace bicameral::frame {
                 return Act(Step::Check, AutoPlayAction::None);
 
             case Step::Check:
-                if (state.cursor != SimCursor{.tick = m_editTick + 1, .unit = 0}) {
-                    Fail(
-                        std::format("編集の状態で刻みが進んだ(刻み {}。期待は {})", state.cursor.tick, m_editTick + 1));
+                if (state.cursor != SimCursor{.tick = m_editTick, .unit = 0}) {
+                    Fail(std::format("編集の状態で刻みが進んだ(刻み {}。期待は {})", state.cursor.tick, m_editTick));
                     return AutoPlayAction::None;
                 }
 
                 m_recordFirst = true;
-                m_playStart = m_editTick + 1;
+                m_playStart = m_editTick;
                 return Act(Step::Playing, AutoPlayAction::Play);
 
             default: return AutoPlayAction::None;
@@ -199,7 +199,7 @@ namespace bicameral::frame {
     // --- 補助 ---
 
     bool AutoPlay::Settled(const AutoPlayState& state, uint64_t tick) const {
-        if (state.settling || state.cursor.unit != 0 || state.cursor.tick <= tick)
+        if (state.settling || state.cursor.unit != 0 || state.cursor.tick < tick)
             return false;
 
         const auto found = m_hashes.find(tick);
