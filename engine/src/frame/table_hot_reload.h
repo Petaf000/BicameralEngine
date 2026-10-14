@@ -87,7 +87,8 @@ namespace bicameral::frame {
 
         // 当てた表(差し替えの後に GPU が使っている表。表示用)と、最後の読み直しの結果
         [[nodiscard]] uint64_t AppliedVersion() const { return m_appliedVersion; }
-        [[nodiscard]] uint32_t AppliedCount() const { return m_appliedCount; }
+        // 今の世界の流れで当たっている差し替えの数(巻き戻すと戻した刻み以降の分は数えず、足し直した印でまた数える。T-0548)
+        [[nodiscard]] uint32_t AppliedCount() const { return static_cast<uint32_t>(m_appliedLog.size()); }
         [[nodiscard]] uint32_t FailedCount() const { return m_failedCount; }
         [[nodiscard]] bool Watching() const { return m_watchFiles; }
         [[nodiscard]] bool Waiting() const { return m_waiting != nullptr; }
@@ -122,7 +123,6 @@ namespace bicameral::frame {
 
         uint64_t m_initialVersion = 0;
         uint64_t m_appliedVersion = 0;
-        uint32_t m_appliedCount = 0;
         uint32_t m_failedCount = 0;
         std::string m_lastMessage;
         bool m_lastFailed = false;

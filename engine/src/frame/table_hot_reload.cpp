@@ -163,7 +163,6 @@ namespace bicameral::frame {
 
             m_appliedVersion = it->table->tableVersion;
             m_appliedLog.emplace_back(it->tick, m_appliedVersion);
-            ++m_appliedCount;
             m_worldModified |= it->table->modifiedWorld;
             Log(Channel::Sim, Level::Info, "反応表を刻み {} の始めに版 {:016x} へ差し替える{}", it->tick,
                 m_appliedVersion, it->table->modifiedWorld ? "(改造された世界)" : "");
