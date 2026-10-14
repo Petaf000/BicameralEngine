@@ -28,6 +28,7 @@ export type Species = {
     formation_enthalpy_j_per_mol: number,
     heat_capacity_mj_per_mol_k: number,
     thermal_conductivity_mw_per_m_k: number,
+    standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
 }
 
 export type ReactionRate = {

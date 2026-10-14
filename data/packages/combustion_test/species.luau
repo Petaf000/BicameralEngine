@@ -7,6 +7,11 @@
 --   セルロース(C6H10O5 の 1 単位あたり): 生成エンタルピー約 −963 kJ/mol は燃焼熱からの逆算、比熱は約 1.3 J/(g·K)(どちらも未確認)。
 --     この値だと熱分解が発熱になる(実際は生成物が複雑でほぼ中立)。
 --   熱伝導率: 現実の値(木 120・炭 100・気体 17〜27 mW/(m·K)。未確認)に試験の倍率を掛けたもの(units.luau)。
+--   標準エントロピー(298.15 K・1 bar。任意の欄。坂の検査〔T-0491・D-487〕だけが読む):
+--     CODATA Key Values for Thermodynamics(1989)の S°(O2 205.152・N2 191.609・Ar 154.846・CO2 213.785・CO 197.660・
+--     H2O(気)188.835・黒鉛 5.740 J/(mol·K))。セルロースの 170 J/(mol·K)(C6H10O5 の 1 単位)は推定で**未確認**
+--     (結晶のグルコース 209.2 J/(mol·K) から見積もった。照合先の候補: Goldberg et al., J. Chem. Thermodyn. 81 (2015) 184)。
+--     セルロースの値を ±100 J/(mol·K) 動かしても、セルロースの規則が坂を下る向きは変わらない(T-0491 の試験の表)。
 local units = require("units")
 local solid = units.solid_conductivity
 local gas = units.gas_conductivity
@@ -17,42 +22,49 @@ return {
         formation_enthalpy_j_per_mol = -963000,
         heat_capacity_mj_per_mol_k = 211000,
         thermal_conductivity_mw_per_m_k = solid(120),
+        standard_entropy_mj_per_mol_k = 170000,
     },
     carbon = {
         composition = { C = 1 },
         formation_enthalpy_j_per_mol = 0,
         heat_capacity_mj_per_mol_k = 8520,
         thermal_conductivity_mw_per_m_k = solid(100),
+        standard_entropy_mj_per_mol_k = 5740,
     },
     oxygen = {
         composition = { O = 2 },
         formation_enthalpy_j_per_mol = 0,
         heat_capacity_mj_per_mol_k = 29378,
         thermal_conductivity_mw_per_m_k = gas(27),
+        standard_entropy_mj_per_mol_k = 205152,
     },
     nitrogen = {
         composition = { N = 2 },
         formation_enthalpy_j_per_mol = 0,
         heat_capacity_mj_per_mol_k = 29124,
         thermal_conductivity_mw_per_m_k = gas(26),
+        standard_entropy_mj_per_mol_k = 191609,
     },
     carbon_dioxide = {
         composition = { C = 1, O = 2 },
         formation_enthalpy_j_per_mol = -393509,
         heat_capacity_mj_per_mol_k = 37135,
         thermal_conductivity_mw_per_m_k = gas(17),
+        standard_entropy_mj_per_mol_k = 213785,
     },
     carbon_monoxide = {
         composition = { C = 1, O = 1 },
         formation_enthalpy_j_per_mol = -110527,
         heat_capacity_mj_per_mol_k = 29142,
         thermal_conductivity_mw_per_m_k = gas(25),
+        standard_entropy_mj_per_mol_k = 197660,
     },
     water_vapor = {
         composition = { H = 2, O = 1 },
         formation_enthalpy_j_per_mol = -241826,
         heat_capacity_mj_per_mol_k = 33580,
         thermal_conductivity_mw_per_m_k = gas(25),
+        standard_entropy_mj_per_mol_k = 188835,
     },
     -- 触るための仮の魔素(気体。T-0225・D-449・D-451)。エディタで値を動かして試すための試験用の物質で、ゲームの中身ではない(D-006)。
     -- 値は動きが見えるだけの仮の値: 生成エンタルピー 0(元素の単体)・比熱は単原子の理想気体の 5/2 R・熱伝導率は気体並み。

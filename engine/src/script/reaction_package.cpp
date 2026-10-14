@@ -74,9 +74,9 @@ namespace bicameral::script {
 
         std::expected<SpeciesDefinition, std::string> ReadSpecies(const std::string& name, const ScriptValue& value,
                                                                   const std::string& path) {
-            static constexpr std::string_view FIELDS[] = {"composition", "formation_enthalpy_j_per_mol",
-                                                          "heat_capacity_mj_per_mol_k",
-                                                          "thermal_conductivity_mw_per_m_k"};
+            static constexpr std::string_view FIELDS[] = {
+                "composition", "formation_enthalpy_j_per_mol", "heat_capacity_mj_per_mol_k",
+                "thermal_conductivity_mw_per_m_k", "standard_entropy_mj_per_mol_k"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -97,11 +97,23 @@ namespace bicameral::script {
                     return std::unexpected(result->error());
             }
 
-            return SpeciesDefinition{.name = name,
-                                     .composition = std::move(*composition),
-                                     .formationEnthalpy = *enthalpy,
-                                     .heatCapacity = static_cast<uint32_t>(*heatCapacity),
-                                     .thermalConductivity = static_cast<uint32_t>(*conductivity)};
+            SpeciesDefinition species{.name = name,
+                                      .composition = std::move(*composition),
+                                      .formationEnthalpy = *enthalpy,
+                                      .heatCapacity = static_cast<uint32_t>(*heatCapacity),
+                                      .thermalConductivity = static_cast<uint32_t>(*conductivity)};
+
+            // 標準エントロピー(任意。坂の検査だけが読む。T-0491)。第三法則で負にはならない
+            if (const ScriptValue* declared = value.Find("standard_entropy_mj_per_mol_k")) {
+                const auto entropy = ReadInteger(*declared, path + ".standard_entropy_mj_per_mol_k", 0,
+                                                 EXACT_INTEGER_LIMIT);
+                if (!entropy)
+                    return std::unexpected(entropy.error());
+
+                species.standardEntropy = *entropy;
+            }
+
+            return species;
         }
 
         // --- 規則 ---

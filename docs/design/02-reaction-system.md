@@ -244,7 +244,8 @@ return {
   elements = { C = { atomic_mass_mg_per_mol = 12011 }, O = { atomic_mass_mg_per_mol = 15999 } },
   species = {
     oxygen = { composition = { O = 2 }, formation_enthalpy_j_per_mol = 0,
-               heat_capacity_mj_per_mol_k = 29378, thermal_conductivity_mw_per_m_k = 135000 },
+               heat_capacity_mj_per_mol_k = 29378, thermal_conductivity_mw_per_m_k = 135000,
+               standard_entropy_mj_per_mol_k = 205152 },  -- 省ける。298.15 K・1 bar。坂の検査だけが読む(D-487・T-0491)
   },
   reactions = {
     carbon_combustion = {
