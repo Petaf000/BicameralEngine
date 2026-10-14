@@ -74,9 +74,12 @@ namespace bicameral::script {
 
         std::expected<SpeciesDefinition, std::string> ReadSpecies(const std::string& name, const ScriptValue& value,
                                                                   const std::string& path) {
-            static constexpr std::string_view FIELDS[] = {
-                "composition", "formation_enthalpy_j_per_mol", "heat_capacity_mj_per_mol_k",
-                "thermal_conductivity_mw_per_m_k", "standard_entropy_mj_per_mol_k"};
+            static constexpr std::string_view FIELDS[] = {"composition",
+                                                          "formation_enthalpy_j_per_mol",
+                                                          "heat_capacity_mj_per_mol_k",
+                                                          "thermal_conductivity_mw_per_m_k",
+                                                          "standard_entropy_mj_per_mol_k",
+                                                          "condensed"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -111,6 +114,14 @@ namespace bicameral::script {
                     return std::unexpected(entropy.error());
 
                 species.standardEntropy = *entropy;
+            }
+
+            // 凝縮相(任意。坂の計器だけが読む。T-0518・ADR-0230)
+            if (const ScriptValue* condensed = value.Find("condensed")) {
+                if (condensed->kind != ScriptValue::Kind::Boolean)
+                    return std::unexpected(std::format("{}.condensed: true か false で書く", path));
+
+                species.condensed = condensed->boolean;
             }
 
             return species;

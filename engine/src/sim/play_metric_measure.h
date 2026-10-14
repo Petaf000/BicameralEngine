@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -51,10 +52,17 @@ namespace bicameral::sim {
     [[nodiscard]] WorldCopyQuery MakePlayMetricQuery(const PlayMetric& metric,
                                                      std::shared_ptr<PlayMetricObserver> observer);
 
+    // CPU リファレンスの刻みごとの見張り(見るだけ。世界に何も返さない)。Advance(tick) の後に呼ぶ。
+    // marksBefore = Advance の前のブロックの印(ChangedMarks の写し)。reference.State(tick)・Caches(tick)・State(tick + 1) が読める
+    using PlayMetricReferenceWatch = std::function<void(uint64_t tick, std::span<const uint64_t> marksBefore,
+                                                        const ProbeReference& reference)>;
+
     // CPU リファレンスで 1 つの指標を測る(全部のセルを毎刻み。遅い: debug で 1 刻み約 1 秒)。
-    // cellHashes があれば S(1)〜S(止めた刻み) のセルのハッシュを足す(GPU の ProbeTickHash::hash と比べる)
+    // cellHashes があれば S(1)〜S(止めた刻み) のセルのハッシュを足す(GPU の ProbeTickHash::hash と比べる)。
+    // watch があれば刻みごとに呼ぶ(坂の計器 sim/slope_gauge。T-0518)
     [[nodiscard]] PlayMetricValue MeasurePlayMetricReference(const BakedReactionTable& table, const PlayMetric& metric,
-                                                             std::vector<uint64_t>* cellHashes = nullptr);
+                                                             std::vector<uint64_t>* cellHashes = nullptr,
+                                                             const PlayMetricReferenceWatch& watch = {});
 
     class PlayMetricMeasurer {
     public:

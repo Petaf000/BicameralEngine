@@ -20,6 +20,14 @@
 #include <string_view>
 #include <vector>
 
+namespace bicameral::reaction {
+    struct RxRule;
+}
+
+namespace bicameral::reaction {
+    struct RxRule;
+}
+
 namespace bicameral::sim {
 
     struct BakedReactionTable;
@@ -53,6 +61,18 @@ namespace bicameral::sim {
         std::vector<std::string> missingEntropy;  // 標準エントロピーの無い物質(正味の係数が 0 でないもの)
         bool tooLarge = false;                    // 値が大きすぎて 64bit で数えられない
     };
+
+    // 規則の正味の係数(生成物 − 反応物。触媒は両辺で消えるので入らない)
+    struct RuleNetTerm {
+        uint32_t species = 0;
+        int64_t coefficient = 0;
+    };
+
+    [[nodiscard]] std::vector<RuleNetTerm> RuleNetTerms(const reaction::RxRule& rule);
+
+    // 規則の標準の坂 ΔG°(T)(mJ/mol。添字 = K、0 K は 0)。CheckReactionSlopes と同じ値(坂の計器 sim/slope_gauge が使う)。
+    // 調べられない規則(正味の物質に標準エントロピーが無い・値が大きすぎる)は空
+    [[nodiscard]] std::vector<int64_t> RuleStandardGibbs(const BakedReactionTable& baked, uint32_t ruleId);
 
     // 規則ごとの坂(添字 = 規則 ID)。baked の物質・規則・速度の表・standardEntropies を読む
     [[nodiscard]] std::vector<RuleSlope> CheckReactionSlopes(const BakedReactionTable& baked);

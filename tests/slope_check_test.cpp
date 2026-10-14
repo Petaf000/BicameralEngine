@@ -19,6 +19,8 @@
 // 使い方: 引数なし = ctest(短い刻み。伝導で坂を上る流れが 0・なぞりが一致・規則の一覧が出る)。
 //         `--burn [刻み]` = 燃え方の計器を長く測る(既定 18000 刻み。ctest では流さない)。結果と「同じく動く」の幅は
 //         docs/tickets/T-0491-slope-check-gauge.md と docs/design/19 §8。
+// 開発ビルドの坂の計器(sim/slope_gauge。整数。T-0518)を同じ木箱に並べて走らせ、この倍精度の数え上げと進行度・坂を上った回が
+// 同じことを確かめる(合成のセルでも ΔG を 1 J/mol の中で比べる)。
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -34,6 +36,7 @@
 #include "core/aliases.h"
 #include "reaction_test_table.h"
 #include "sim/probe_sim.h"
+#include "sim/slope_gauge.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
@@ -288,6 +291,7 @@ namespace {
         uint64_t replayMismatches = 0;  // なぞった結果が S(t + 1) と違うセル(0 のはず)
         uint64_t energyMismatches = 0;  // エネルギーの合計が保存されない刻み(0 のはず)
         BurnGauge burn;
+        SlopeGaugeTally gauge;  // 開発ビルドの坂の計器(整数。T-0518)
     };
 
     double Kelvin(uint32_t milliKelvin) {
@@ -510,6 +514,90 @@ namespace {
             gauge.celluloseGoneTick = tick;
     }
 
+    // --- 開発ビルドの坂の計器(整数)を倍精度と比べる(T-0518)---
+
+    // 合成のセル(boudouard の物質だけ)の ΔG を、計器(整数)と倍精度(活量込み・1 K に切り捨てた温度)で比べる
+    void CheckCellGibbs(const BakedReactionTable& table, std::span<const SpeciesThermo> thermo) {
+        const SlopeGaugeTable gauge = MakeSlopeGaugeTable(table);
+        const uint32_t carbon = table.SpeciesId("carbon");
+        const uint32_t monoxide = table.SpeciesId("carbon_monoxide");
+        const uint32_t dioxide = table.SpeciesId("carbon_dioxide");
+        const auto found = rng::find(table.ruleNames, std::string("boudouard"));
+        EXPECT(found != table.ruleNames.end() && carbon != 0 && monoxide != 0 && dioxide != 0);
+        if (found == table.ruleNames.end())
+            return;
+
+        const auto ruleId = static_cast<uint32_t>(found - table.ruleNames.begin());
+        EXPECT(table.speciesCondensed.size() == table.species.size());
+        for (size_t id = 1; id < thermo.size() && id < table.speciesCondensed.size(); ++id)
+            EXPECT((table.speciesCondensed[id] != 0) == thermo[id].condensed);
+
+        constexpr uint64_t MANY = 10000000;  // 10 mol
+        constexpr uint64_t FEW = 1;          // 1 µmol
+        constexpr uint32_t HOT_KELVIN = 1700;
+        constexpr uint32_t WARM_KELVIN = 900;
+        struct Case {
+            uint64_t monoxideAmount;
+            uint64_t dioxideAmount;
+            uint32_t kelvin;
+            bool uphill;
+        };
+
+        // CO が多く CO2 が少ないと 1700 K でも坂を上る(T-0491 の行き過ぎ)。逆なら 900 K でも下る
+        constexpr std::array<Case, 3> CASES = {Case{MANY, FEW, HOT_KELVIN, true}, Case{FEW, MANY, HOT_KELVIN, false},
+                                               Case{FEW, MANY, WARM_KELVIN, false}};
+        const std::vector<NetTerm> terms = NetTerms(table.View().Rule(ruleId));
+        for (const Case& c : CASES) {
+            reaction::RxCell cell{};
+            cell.speciesCount = 3;
+            cell.species[0] = carbon;
+            cell.amounts[0] = MANY;
+            cell.species[1] = monoxide;
+            cell.amounts[1] = c.monoxideAmount;
+            cell.species[2] = dioxide;
+            cell.amounts[2] = c.dioxideAmount;
+
+            int64_t gibbs = 0;
+            EXPECT(CellRuleGibbs(gauge, ruleId, cell, c.kelvin, gibbs));
+            const auto kelvin = static_cast<double>(c.kelvin);
+            double expected = StandardGibbs(terms, thermo, kelvin);
+            for (const NetTerm& term : terms)
+                expected += term.coefficient * GAS_CONSTANT * kelvin *
+                            std::log(Activity(thermo[term.species], cell, term.species, kelvin));
+
+            const double integer = static_cast<double>(gibbs) * MILLI;
+            std::printf("  計器の ΔG(boudouard・%u K・CO %llu・CO2 %llu µmol): 整数 %.3f J/mol・倍精度 %.3f J/mol\n",
+                        c.kelvin, static_cast<unsigned long long>(c.monoxideAmount),
+                        static_cast<unsigned long long>(c.dioxideAmount), integer, expected);
+            EXPECT(std::abs(integer - expected) < 1.0);
+            EXPECT((gibbs > 0) == c.uphill);
+        }
+    }
+
+    // 木箱の数え上げ: 計器(整数・1 K に切り捨て)と倍精度(温度はそのまま)で、なぞり・進行度・坂を上った回が同じ
+    void CheckGaugeAgainstDouble(const BakedReactionTable& table, const Tally& tally) {
+        const SlopeGaugeTally& gauge = tally.gauge;
+        EXPECT(gauge.replayMismatches == 0);
+        EXPECT(gauge.replayedCells == tally.replayedCells);
+        EXPECT(gauge.rules.size() == tally.rules.size());
+        for (const std::string& line : SlopeGaugeReport(table, gauge))
+            std::printf("  %s\n", line.c_str());
+
+        for (uint32_t id = 0; id < gauge.rules.size() && id < tally.rules.size(); ++id) {
+            const SlopeGaugeRuleTally& integer = gauge.rules[id];
+            const RuleTally& reference = tally.rules[id];
+            EXPECT(integer.events == reference.events);
+            // 倍精度は刻みごとに mol で足すので丸めの差が残る(整数は µmol のまま足す)
+            constexpr double EXTENT_RELATIVE_TOLERANCE = 1.0e-9;
+            const double extent = static_cast<double>(integer.extentMicromoles) * MICRO;
+            EXPECT(std::abs(extent - reference.extent) <= EXTENT_RELATIVE_TOLERANCE * std::max(1.0, reference.extent));
+            std::printf("  計器 %-42s 坂を上った 整数 %llu 回・倍精度 %llu 回\n", table.ruleNames[id].c_str(),
+                        static_cast<unsigned long long>(integer.uphillEvents),
+                        static_cast<unsigned long long>(reference.uphillEvents));
+            EXPECT(integer.uphillEvents == reference.uphillEvents);
+        }
+    }
+
     // --- 木箱を進める ---
 
     // 遊びの指標 sealed_fire_out と同じ: 木箱の壁 (28, 32, 32) を刻み 0 につつく
@@ -519,6 +607,7 @@ namespace {
 
     Tally RunCrate(const BakedReactionTable& table, std::span<const SpeciesThermo> thermo, uint64_t ticks) {
         const std::vector<ProbeCommand> commands = MakeCommands();
+        const SlopeGaugeTable gaugeTable = MakeSlopeGaugeTable(table);
         ProbeReference reference(table);
         Tally tally;
         tally.rules.resize(table.rules.size());
@@ -533,6 +622,7 @@ namespace {
             reference.Advance(tick, commands);
             const std::span<const reaction::RxCell> next = reference.State(tick + 1);
             CountReactions(table, thermo, current, caches, next, marks, tick, tally);
+            CountProbeSlopeTick(table, gaugeTable, current, caches, next, marks, tick, tally.gauge);
             if (ProbeEnergySum(next) != energyBefore + reference.SourceEnergy())
                 tally.energyMismatches += 1;
 
@@ -616,12 +706,14 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     CheckCelluloseSpread(*table, thermo, ranges);
     CheckBakedSlopes(*table, thermo, ranges);
+    CheckCellGibbs(*table, thermo);
     EXPECT(ranges.size() == table->rules.size());
 
     const auto begin = std::chrono::steady_clock::now();
     const Tally tally = RunCrate(*table, thermo, ticks);
     const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
     PrintTally(*table, tally, ticks);
+    CheckGaugeAgainstDouble(*table, tally);
     std::printf("CPU の時間 %.1f 秒(%.1f ms/刻み)\n", seconds, seconds * 1000.0 / static_cast<double>(ticks));
 
     // --- 次へ進む条件(19 §5 の段 0): 伝導で坂を上る流れが 0・なぞりが一致(規則ごとの数が本物)・燃えている ---

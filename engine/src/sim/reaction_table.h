@@ -55,6 +55,9 @@ namespace bicameral::sim {
         // 標準モルエントロピー(mJ/(mol·K)。298.15 K・1 bar)。任意。GPU の表に入らない(表とハッシュは変わらない)。
         // 坂の検査だけが使う(ベイクの警告 sim/reaction_slope・T-0492。試験 slope_check・T-0491。D-487)
         std::optional<int64_t> standardEntropy;
+        // 凝縮相(固体・液体)か。任意(既定 false = 気体)。GPU の表に入らない。坂の計器(sim/slope_gauge・T-0518)が
+        // 活量を 1 と置くのに使う(気体は分圧)。エンジンの物質は相を持たない(M2)ので、相が入るまでの仮の欄(ADR-0230)
+        bool condensed = false;
     };
 
     struct RuleTerm {
@@ -139,6 +142,7 @@ namespace bicameral::sim {
         // --- CPU だけ: 坂の検査(sim/reaction_slope。T-0492・D-487)---
         std::vector<std::optional<int64_t>> standardEntropies;  // mJ/(mol·K)。添字 = 物質 ID(書いていなければ無し)
         std::vector<RuleSlope> ruleSlopes;                      // 規則ごとの坂(添字 = 規則 ID。パネルの「坂」の欄)
+        std::vector<uint8_t> speciesCondensed;  // 1 = 凝縮相(活量 1。坂の計器 sim/slope_gauge・T-0518)。添字 = 物質 ID
 
         // --- CPU だけ: 同じ読み込みに足した分類(世界のデータ。物質は ID に直したもの。T-0398〜T-0400。分類ごとに 1 行)---
         WorldLayout worldLayout;     // 世界の組み立て(MakeProbeInitialWorld・MakeLayoutPhysicsScene が読む。T-0398)

@@ -29,6 +29,7 @@ export type Species = {
     heat_capacity_mj_per_mol_k: number,
     thermal_conductivity_mw_per_m_k: number,
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
+    condensed: boolean?, -- 凝縮相(固体・液体)。省ける(既定 気体)。坂の計器が活量を 1 と置く(T-0518。相が入るまでの仮の欄)
 }
 
 export type ReactionRate = {

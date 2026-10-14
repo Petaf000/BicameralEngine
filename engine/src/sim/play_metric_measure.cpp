@@ -80,7 +80,8 @@ namespace bicameral::sim {
     // --- CPU リファレンス ---
 
     PlayMetricValue MeasurePlayMetricReference(const BakedReactionTable& table, const PlayMetric& metric,
-                                               std::vector<uint64_t>* cellHashes) {
+                                               std::vector<uint64_t>* cellHashes,
+                                               const PlayMetricReferenceWatch& watch) {
         const std::vector<ProbeCommand> commands = MakePokeCommands(metric);
         ProbeReference reference(table);
         PlayMetricObserver observer(metric);
@@ -99,7 +100,14 @@ namespace bicameral::sim {
             while (nextCommand < commands.size() && commands[nextCommand].targetTick == tick)
                 ++nextCommand;
 
+            std::vector<uint64_t> marksBefore;
+            if (watch)
+                marksBefore.assign(reference.ChangedMarks().begin(), reference.ChangedMarks().end());
+
             reference.Advance(tick, std::span(commands).subspan(first, nextCommand - first));
+            if (watch)
+                watch(tick, marksBefore, reference);
+
             if (cellHashes != nullptr)
                 cellHashes->push_back(reference.StateHash(tick + 1));
         }
