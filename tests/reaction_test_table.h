@@ -25,16 +25,4 @@ namespace bicameral::sim {
     // (ADR-0065)。試験のパッケージそのものは変えない
     [[nodiscard]] ReactionTableDefinition MakeSpeciesChangedTestTable();
 
-    // 魔法の転換の試験用(T-0359): 試験の表に、二酸化炭素と同じ元素の仮の物質(carbon_dioxide_isomer_test。異性体の役)と
-    // 炭素 2 原子の仮の物質(dicarbon_test。係数が変わる転換の役)を足した表。値はどちらも試験用の仮のもの(D-006)
-    [[nodiscard]] ReactionTableDefinition MakeConversionTestTable();
-
-    // 物質を足す・消す差し替えを跨ぐ転換の試験用(T-0377)。値はどちらも試験用の仮のもの(D-006):
-    //   - 前の表 = MakeConversionTestTable に、二酸化炭素と同じ元素の仮の物質をもう 1 つ(carbon_dioxide_late_test。消える転換の
-    //     替える先の役。名前の順で異性体の後ろ)足した表
-    //   - 後の表 = MakeConversionTestTable に、名前の順で一番前の仮の物質(a_marker_test。CO と同じ元素)を足した表(late は無い)。
-    //     異性体の ID は 1 つ後ろへずれ、前の表の異性体の ID は後の表では二酸化炭素を指す
-    [[nodiscard]] ReactionTableDefinition MakeConversionRemapBeforeTestTable();
-    [[nodiscard]] ReactionTableDefinition MakeConversionRemapAfterTestTable();
-
 }  // namespace bicameral::sim
