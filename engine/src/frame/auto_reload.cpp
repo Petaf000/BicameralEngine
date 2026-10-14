@@ -1,9 +1,11 @@
 // auto_reload.cpp — 窓での人がいないホットリロードの確認(auto_reload.h)。
 #include "frame/auto_reload.h"
 
+#include <array>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <tuple>
 
 #include "core/log.h"
 
@@ -52,6 +54,46 @@ namespace bicameral::frame {
         }
 
     }  // namespace
+
+    std::expected<std::vector<PackageEdit>, std::string> MakeSpeciesAndGravityEdit(const fs::path& packageRoot) {
+        const std::array<std::tuple<std::string_view, std::string_view, std::string_view, bool>, 2> places = {
+            std::tuple{SPECIES_FILE, SPECIES_ANCHOR, OZONE_SPECIES, true},
+            std::tuple{ENVIRONMENT_FILE, GRAVITY_BEFORE, GRAVITY_AFTER, false}};
+
+        std::vector<PackageEdit> edits;
+        for (const auto& [name, anchor, text, insert] : places) {
+            const fs::path file = packageRoot / name;
+            auto original = ReadWhole(file);
+            if (!original)
+                return std::unexpected(original.error());
+
+            const size_t at = original->find(anchor);
+            if (at == std::string::npos)
+                return std::unexpected(std::format("{} に書き換える所({})が無い", file.string(), anchor));
+
+            std::string edited = *original;
+            if (insert)
+                edited.insert(at, text);
+            else
+                edited.replace(at, anchor.size(), text);
+
+            edits.push_back({.file = file, .original = std::move(*original), .edited = std::move(edited)});
+        }
+
+        return edits;
+    }
+
+    std::expected<void, std::string> WritePackageEdits(const std::vector<PackageEdit>& edits, bool edited) {
+        for (const PackageEdit& edit : edits) {
+            const std::string& text = edited ? edit.edited : edit.original;
+            std::ofstream output(edit.file, std::ios::binary | std::ios::trunc);
+            output.write(text.data(), static_cast<std::streamsize>(text.size()));
+            if (!output)
+                return std::unexpected(std::format("{} を書けない", edit.file.string()));
+        }
+
+        return {};
+    }
 
     std::expected<AutoReload, std::string> AutoReload::Create(const fs::path& packageRoot, bool withSpecies,
                                                               bool withEnvironment) {

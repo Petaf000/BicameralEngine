@@ -7,10 +7,11 @@
 //          (戻すときにキューで待っていたコマンドを捨てられること。戻した後も 60・100 で写し直す)
 //       2. 保存点(刻み 100)へ戻して TICKS まで → 一致(巻き戻した後にもう一度巻き戻す)
 //       3. 保存点(刻み 60)へ戻し、コマンドを足し直さずに進める → 刻み 70 のつつきの後で基準と違う(試験が効いていることの確かめ)
-//   - 反応表の差し替え(T-0299・ADR-0047 §6): 同じコマンドで刻み 40 に木の燃焼の速さを 100 倍にした表へ替える。
-//       基準(差し替えあり)を別の ProbeSim で流し、写しながら 120 刻み進む側は、差し替えより前の保存点(刻み 20)が空になり
-//       (戻そうとすると RecordFrame が断る)、差し替えの後の保存点(刻み 60)へ戻して進めると S(61)〜S(TICKS) が基準と全部一致する
-//       (戻した後の世界 = その時の表で刻んだ世界)。差し替えなしの基準とは違う(差し替えが効いている)
+//   - 反応表の差し替え(T-0299・T-0548・ADR-0246): 同じコマンドで刻み 40 に木の燃焼の速さを 100 倍にした表へ替える。
+//       基準(差し替えあり)を別の ProbeSim で流し、写しながら 120 刻み進む側は、保存点を全部残す(保存点はその境界の表も持つ)。
+//       差し替えの後の保存点(刻み 60)へ戻して進めると S(61)〜S(TICKS) が基準と全部一致し(戻した後の世界 = その時の表で刻んだ世界)、
+//       差し替えより前の保存点(刻み 20)へ戻すと表も前の表に戻り、刻み 40 で差し替え直して S(21)〜S(TICKS) が基準と全部一致する。
+//       差し替えなしの基準とは違う(差し替えが効いている)
 //   - 刻み 0 の保存点(T-0411・D-474): 単位の無いリストで世界を初期化だけし、次の単位の無いリストで S(0) を写して 120 刻み進む。
 //       刻み 0 へ戻してコマンドを全部足し直すと S(1)〜S(TICKS) が基準と全部一致し、足し直さないと最後の刻みで違う
 //       (刻み 0 のつつきも戻すとキューから捨てられ、足し直した分だけが効く。起動直後の筆の運びを元に戻す道の土台)
@@ -296,7 +297,7 @@ namespace {
             baseline.contains(TICKS) && unswapped.contains(TICKS) && baseline.at(TICKS) != unswapped.at(TICKS),
             "差し替え: 差し替えが効いている(差し替えなしと最後の刻みで違う)");
 
-        // --- 写しながら進む(差し替えより前の保存点は空になる)---
+        // --- 写しながら進む(差し替えても保存点は残る)---
         Driver driver(*rewind->queue, *rewind->simulation);
         driver.SetTableSwap(swap);
         ProbeSim& simulation = *rewind->simulation;
@@ -305,16 +306,11 @@ namespace {
                        "差し替え: 保存点を写しても基準と同じ");
         Log(Channel::Sim, Level::Info, "差し替え(刻み {})の後の保存点の刻み: {} {} {}(空 = {})", SWAP_TICK,
             simulation.SavePointTick(0), simulation.SavePointTick(1), simulation.SavePointTick(2), UINT64_MAX);
-        failures.Check(simulation.SavePointTick(0) == UINT64_MAX, "差し替え: 差し替えより前の保存点(刻み 20)は空");
-        failures.Check(simulation.SavePointTick(1) == SAVE_TICKS[1] && simulation.SavePointTick(2) == SAVE_TICKS[2],
-                       "差し替え: 差し替えの後の保存点(刻み 60・100)は残る");
-
-        // --- 差し替えより前へは戻れない(RecordFrame が断る。世界は変わらない)---
-        driver.JumpTo(SAVE_TICKS[0]);
-        Log(Channel::Sim, Level::Info,
-            "差し替え: 刻み 20 の保存点へ戻そうとする(断られるはず。次の行の誤りは期待どおり)");
-        failures.Check(!driver.Advance(TICKS, CommandsFrom(SAVE_TICKS[0]), 0, false),
-                       "差し替え: 差し替えより前の保存点へは戻せない");
+        failures.Check(simulation.SavePointTick(0) == SAVE_TICKS[0] && simulation.SavePointTick(1) == SAVE_TICKS[1] &&
+                           simulation.SavePointTick(2) == SAVE_TICKS[2],
+                       "差し替え: 差し替えより前(刻み 20)も後(刻み 60・100)も保存点は残る");
+        failures.Check(simulation.SavePointChangesTable(0) && !simulation.SavePointChangesTable(1),
+                       "差し替え: 刻み 20 の保存点は前の表・刻み 60 の保存点は今の表");
 
         // --- 差し替えの後の保存点へ戻す → その時の表で刻んだ世界と同じ ---
         driver.JumpTo(SAVE_TICKS[1]);
@@ -322,6 +318,13 @@ namespace {
                        "差し替え: 刻み 60 へ戻して進めた");
         failures.Check(MatchesBaseline(driver.TakeHashes(), baseline, SAVE_TICKS[1], TICKS, "差し替え: 刻み 60 から"),
                        "差し替え: 差し替えの後の保存点へ戻した世界が、差し替えた表で最初から流した世界と同じ");
+
+        // --- 差し替えより前の保存点へ戻す → 表も前の表に戻り、刻み 40 で差し替え直して同じ(T-0548)---
+        driver.JumpTo(SAVE_TICKS[0]);
+        failures.Check(driver.Advance(TICKS, CommandsFrom(SAVE_TICKS[0]), 0, false),
+                       "差し替え: 刻み 20 へ戻して進めた");
+        failures.Check(MatchesBaseline(driver.TakeHashes(), baseline, SAVE_TICKS[0], TICKS, "差し替え: 刻み 20 から"),
+                       "差し替え: 差し替えより前の保存点へ戻して差し替え直した世界が、最初から流した世界と同じ");
 
         failures.Check(baseDriver.DebugAssertCount() == 0 && driver.DebugAssertCount() == 0,
                        "差し替え: シェーダーの assert が 0 件");

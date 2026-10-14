@@ -107,6 +107,13 @@ namespace bicameral::sim {
             m_pendingTables.push_back({tick, table});
         }
 
+        // 世界を刻み tick の保存点へ戻した(T-0548): tick 以降に替える予定を捨てる。表も戻るなら(table)tick でその表へ
+        void RewindTables(uint64_t tick, const BakedReactionTable* table) {
+            std::erase_if(m_pendingTables, [&](const PendingTable& pending) { return pending.tick >= tick; });
+            if (table != nullptr)
+                m_pendingTables.push_back({tick, *table});
+        }
+
         // ProbeFrameInput::afterExtract から呼ぶ(シミュのフレームのリストの抽出の後ろ)
         void RecordAfterExtract(ID3D12GraphicsCommandList10* list, const ProbeExtractContext& context);
 

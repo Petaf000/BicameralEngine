@@ -187,6 +187,7 @@ add_library(bicameral_editor STATIC
   src/editor/brush_preview.cpp  # カーソルの下の筆の形の線(T-0279。common/probe_place.hlsli の形の読み方を使う)
   src/editor/brush_stroke.cpp
   src/editor/brush_undo.cpp
+  src/editor/edit_table.cpp  # 編集の境界に当てる反応表の印(T-0548)
   src/editor/surface_pick.cpp  # 光線が最初に当たる物のセルの手前(T-0332)
   src/editor/time_control.cpp
 )
@@ -208,6 +209,7 @@ add_executable(bicameral
   src/editor/reaction_table_panel.cpp
   src/frame/auto_reload.cpp
   src/frame/auto_play.cpp  # --auto-play: 編集の状態・元に戻す/やり直す・プレイとやめるの確かめ(T-0497)
+  src/frame/auto_play_table.cpp  # --auto-play-table: 表の差し替えを編集として扱う確かめ(T-0548)
   src/frame/frame_loop.cpp
   src/frame/table_hot_reload.cpp
   src/frame/trace_capture.cpp

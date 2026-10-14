@@ -644,7 +644,10 @@ namespace bicameral::sim {
         FrameSlot& frame = m_slots[slot];
         frame.keepAlive.clear();  // この枠の前のリストは GPU が終えている(呼ぶ側の約束)
 
-        // 差し替えがあれば、フレームの終わりの抽出は最後の表の ID で物質を読む(物質の一覧が変わると ID がずれる。T-0223)
+        // 差し替えがあれば、フレームの終わりの抽出は最後の表の ID で物質を読む(物質の一覧が変わると ID がずれる。T-0223)。
+        // 表の違う保存点へ戻すなら、まずその表の ID で(T-0548)
+        if (input.restoreFrom != NO_SAVE_POINT && SavePointChangesTable(input.restoreFrom))
+            m_viewSpecies = ProbeViewSpecies(m_savePoints[input.restoreFrom].table);
         if (!input.tableSwaps.empty())
             m_viewSpecies = ProbeViewSpecies(*rng::max(input.tableSwaps, {}, &ProbeTableSwap::tick).table);
         WriteInput(frame, input);
@@ -663,8 +666,8 @@ namespace bicameral::sim {
         // 写しの早送り(T-0412): 別の世界の S(firstTick) をこの世界へ(戻すのと同じ所)
         if (input.adoptFrom != nullptr)
             RecordAdopt(list, *input.adoptFrom, input.firstTick);
-        else if (input.restoreFrom != NO_SAVE_POINT)
-            RecordRestore(list, input.restoreFrom);
+        else if (input.restoreFrom != NO_SAVE_POINT && !RecordRestore(list, frame, input.restoreFrom))
+            return nullptr;
         else if (input.saveTo != NO_SAVE_POINT)
             RecordSave(list, input.saveTo, input.firstTick);
 
@@ -727,12 +730,7 @@ namespace bicameral::sim {
         frame.unitCount = input.unitCount;
         TrackCommands(input.commands, NextApplyTick(tick, unit));
 
-        // 表を差し替えたら、保存点(このフレームの先頭で写したものも)は全部捨てる。保存点は世界だけを写し表を持たないので、
-        // 差し替えより前の保存点へ戻ると、前の表の世界を新しい表で刻むことになる(ADR-0047 §6・T-0299)
-        if (!input.tableSwaps.empty()) {
-            for (SavePoint& savePoint : m_savePoints)
-                savePoint.tick = UINT64_MAX;
-        }
+        // 表を差し替えても保存点は捨てない。保存点はその境界の表も持ち、戻すと表も戻る(T-0548・ADR-0246。ADR-0047 §6 を置き換え)
 
         return list;
     }
@@ -897,6 +895,17 @@ namespace bicameral::sim {
                 "刻み {} の表の差し替えで、単体が新しい表に無い元素の原子を捨てる(改造による出入り): {}", tick,
                 remap->dropped);
 
+        if (!RecordTableBuffers(list, frame, table, tick))
+            return false;
+
+        BindRootViews(list, frame.input.Get());
+
+        return remap->identity || RecordSpeciesRemap(list, frame, *remap, tick);
+    }
+
+    // 表 4 つを写して結び直し、環境の値(重力)を合わせる(差し替えと、表の違う保存点へ戻す時。世界のセルには触れない。T-0548)
+    bool ProbeSim::RecordTableBuffers(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                      const BakedReactionTable& table, uint64_t tick) {
         ComPtr<ID3D12Device5> device;
         if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
@@ -929,11 +938,11 @@ namespace bicameral::sim {
         m_speciesCount = static_cast<uint32_t>(table.species.size());
 
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-        BindRootViews(list, frame.input.Get());
         ApplyEnvironment(table.environment, tick);
         m_tableCopy = table;
+        m_tableSerial = ++m_lastTableSerial;
 
-        return remap->identity || RecordSpeciesRemap(list, frame, *remap, tick);
+        return true;
     }
 
     // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 付け替えの表を写して t5 に結び、2 世代のセルを付け替える(適用の単位の前)。
@@ -1309,10 +1318,9 @@ namespace bicameral::sim {
 
             constexpr uint32_t LAST = PROBE_GRID_SIZE - 1;
 
-            return ProbeStepCell(table, current.cells[index], self,
-                                 at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z), at(y > 0, x, y - 1, z),
-                                 at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1), at(z < LAST, x, y, z + 1), tick,
-                                 changedMark, index);
+            return ProbeStepCell(table, current.cells[index], self, at(x > 0, x - 1, y, z), at(x < LAST, x + 1, y, z),
+                                 at(y > 0, x, y - 1, z), at(y < LAST, x, y + 1, z), at(z > 0, x, y, z - 1),
+                                 at(z < LAST, x, y, z + 1), tick, changedMark, index);
         }
 
         // 上限の印(RxWaitStep::limits)を数える(GPU の ConductBlock の CountLimits と同じ)

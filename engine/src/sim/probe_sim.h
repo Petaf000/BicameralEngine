@@ -228,7 +228,7 @@ namespace bicameral::sim {
         // 写す元は読むだけ(世界を変えない。D-403)。表は写さない(この世界を作った表のまま。写す元の Table() で作る)
         const ProbeSim* adoptFrom = nullptr;
 
-        // --- 反応表の差し替え(T-0139)。差し替えたフレームを記録すると、保存点は全部空になる(差し替えより前へは戻らない。T-0299)---
+        // --- 反応表の差し替え(T-0139)。保存点はその境界の表も持つので、差し替えより前の保存点へも戻れる(戻すと表も戻る。T-0548・ADR-0246)---
         std::span<const ProbeTableSwap> tableSwaps;
     };
 
@@ -314,6 +314,14 @@ namespace bicameral::sim {
 
         // GPU が今使っている反応表(最後の差し替えの後。写しの早送りの世界を同じ表で作る。T-0412)
         [[nodiscard]] const BakedReactionTable& Table() const { return m_tableCopy; }
+
+        // 保存点 index へ戻すと表も替わるか(その境界の表が今の表と違う)と、その表(T-0548。覗き窓へ知らせる)
+        [[nodiscard]] bool SavePointChangesTable(uint32_t index) const {
+            return index < m_savePoints.size() && m_savePoints[index].tableSerial != m_tableSerial;
+        }
+        [[nodiscard]] const BakedReactionTable& SavePointTable(uint32_t index) const {
+            return m_savePoints[index].table;
+        }
 
         // 伝導の Work Graph の裏のメモリ(ドライバが決める。docs/perf.md に残す)
         [[nodiscard]] uint64_t ConductBackingMemoryBytes() const { return m_conductGraph->BackingMemoryBytes(); }
@@ -402,6 +410,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool ValidateTableSwap(const ProbeFrameInput& input) const;
         [[nodiscard]] bool RecordTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                            const BakedReactionTable& table, uint64_t tick);
+        [[nodiscard]] bool RecordTableBuffers(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                              const BakedReactionTable& table, uint64_t tick);
         void ApplyEnvironment(const WorldPhysics& environment, uint64_t tick);
         [[nodiscard]] bool RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                               const SpeciesRemap& remap, uint64_t tick);
@@ -431,12 +441,16 @@ namespace bicameral::sim {
             uint64_t tick = UINT64_MAX;                   // UINT64_MAX = 空
             std::vector<ComPtr<ID3D12Resource>> buffers;  // StateRegions の順
             GpuPhysicsCursor physics;
+
+            // --- その境界で世界が使っていた表(戻す時に表も戻す。差し替えをまたいで戻れる。T-0548・ADR-0246)---
+            BakedReactionTable table;
+            uint64_t tableSerial = UINT64_MAX;  // m_tableSerial の写し(同じなら表を写し直さない)
         };
 
         [[nodiscard]] std::vector<StateRegion> StateRegions(uint64_t tick) const;
         [[nodiscard]] bool ValidateSavePoints(const ProbeFrameInput& input) const;
         void RecordSave(ID3D12GraphicsCommandList10* list, uint32_t index, uint64_t tick);
-        void RecordRestore(ID3D12GraphicsCommandList10* list, uint32_t index);
+        [[nodiscard]] bool RecordRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint32_t index);
         [[nodiscard]] bool ValidateAdopt(const ProbeFrameInput& input) const;
         void RecordAdopt(ID3D12GraphicsCommandList10* list, const ProbeSim& source, uint64_t tick);
         void RecordOverwriteState(ID3D12GraphicsCommandList10* list, std::span<const StateRegion> from);
@@ -471,6 +485,8 @@ namespace bicameral::sim {
         std::array<ComPtr<ID3D12Resource>, 4> m_reactionTable;
         ComPtr<ID3D12Resource> m_speciesRemap;  // 最後に使った付け替えの表(t5。無ければ入力を仮に結ぶ。T-0223)
         BakedReactionTable m_tableCopy;         // GPU が使っている表の写し(付け替えの表を作る。T-0223)
+        uint64_t m_tableSerial = 0;             // 今の表の通し番号(保存点が同じ表かを見る。T-0548)
+        uint64_t m_lastTableSerial = 0;         // 配った通し番号の最後(結び直すたびに新しい番号。戻しても使い回さない)
         // 表 4 つ・セル・キャッシュ(1 世代ぶん。2 世代に写す)・予定の印(初めの起こす刻みの印。ProbeInitialScheduleWords)
         std::array<ComPtr<ID3D12Resource>, 7> m_initialUploads;
         bool m_initialized = false;

@@ -28,6 +28,7 @@
 #include "core/log.h"
 #include "core/unicode.h"
 #include "editor/brush_undo.h"
+#include "editor/edit_table.h"
 #include "editor/editor_overlay.h"
 #include "editor/surface_pick.h"
 #include "editor/time_control.h"
@@ -374,7 +375,10 @@ namespace bicameral::frame {
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeCommands(SimCursor start);
             [[nodiscard]] std::vector<sim::ProbeCommand> TakeClickCommands(uint64_t applyTick, uint32_t limit);
             void TakeTableSwaps(SimCursor start, uint32_t limit, std::vector<sim::ProbeCommand>& commands);
-            void RemapLivePlaceCommands(uint64_t previousVersion, std::vector<sim::ProbeCommand>& commands);
+            void RemapLivePlaceCommands(std::vector<sim::ProbeCommand>& commands);
+            void RemapCommandsFrom(uint64_t tick, uint64_t fromVersion, uint64_t toVersion,
+                                   std::vector<sim::ProbeCommand>& commands,
+                                   std::vector<sim::ProbeCommand>* extra = nullptr);
             void NoteQueuedPlaces(std::span<const sim::ProbeCommand> commands);
             [[nodiscard]] bool FinishReplay();
             bool SubmitSim();
@@ -426,6 +430,9 @@ namespace bicameral::frame {
             void StartPlay();
             void StopPlay();
             void ApplyEditCommands();
+            void ApplyEditTable();
+            void SetBoundaryTable(uint64_t tick, const std::shared_ptr<const script::LoadedReactionTable>& table,
+                                  bool sent);
             void UpdateEditHold();
             [[nodiscard]] uint64_t UndoFloor() const;
             void UpdateAutoPlay();
@@ -1266,6 +1273,10 @@ namespace bicameral::frame {
                     m_lastTableSwapTick = std::max(m_lastTableSwapTick.value_or(0), command.targetTick);
             }
 
+            // 今の流れの控え(巻き戻すと足し直す)。差し替えの印も入れる(戻した後にまた当てる。T-0548・ADR-0246)
+            if (m_replay.empty())
+                m_commandHistory.insert(m_commandHistory.end(), commands.begin(), commands.end());
+
             if (!m_options.recordPath.empty())
                 m_recorder.AddCommands(commands);
 
@@ -1284,14 +1295,14 @@ namespace bicameral::frame {
             const uint32_t unitsPerTick = m_sim.UnitsPerTick();
             const uint64_t firstUnit = (start.tick * unitsPerTick) + start.unit;
             const uint64_t endUnit = (m_scheduler.Cursor().tick * unitsPerTick) + m_scheduler.Cursor().unit;
-            const uint64_t previousVersion = m_tableReload.AppliedVersion();
             // 生の操作で待っている表は、前のフレームまでに足した置くコマンド(前の表の ID のまま GPU のキューにある)が全部当たった
-            // 後の刻みにだけ当てる(このフレームのコマンドは RemapLivePlaceCommands が付け替える。T-0266)
+            // 後の刻みにだけ当てる(このフレームのコマンドは RemapLivePlaceCommands が付け替える。T-0266)。
+            // 編集の状態では新しい印を作らない(ApplyEditTable が編集の境界の印にする。T-0548)
             const bool clearOfQueuedPlaces = sim::ProbeSim::NextApplyTick(start.tick, start.unit) >=
                                              m_queuedPlaceTickEnd;
+            const bool canAdd = commands.size() < limit && clearOfQueuedPlaces && !m_timeControl.Editing();
             auto swaps = m_tableReload.TakeSwaps(firstUnit, static_cast<uint32_t>(endUnit - firstUnit), unitsPerTick,
-                                                 !m_replay.empty(), commands.size() < limit && clearOfQueuedPlaces,
-                                                 m_nextSequence, commands);
+                                                 !m_replay.empty(), canAdd, m_nextSequence, commands);
             if (!swaps) {
                 Log(Channel::Sim, Level::Error, "{}", swaps.error());
                 m_tableSwapFailed = true;
@@ -1301,7 +1312,7 @@ namespace bicameral::frame {
 
             m_frameTableSwaps = std::move(*swaps);
             if (m_replay.empty()) {
-                RemapLivePlaceCommands(previousVersion, commands);
+                RemapLivePlaceCommands(commands);
                 NoteQueuedPlaces(commands);
             }
 
@@ -1332,31 +1343,43 @@ namespace bicameral::frame {
             }
         }
 
-        // 物質の一覧が変わる差し替え(T-0242・ADR-0065): このフレームに前の表で作った筆のコマンド(置く。物質 ID を持つ)のうち、
-        // 差し替えの刻み以降に当たるものを名前で新しい表の ID にする(世界は差し替えの刻みの始めにセルを付け替えてからコマンドを当てる)。
-        // 記録はこの後なので、再生ファイルには付け替えた後のコマンドが残る(再生では付け替えない)
-        void FrameLoop::RemapLivePlaceCommands(uint64_t previousVersion, std::vector<sim::ProbeCommand>& commands) {
-            const auto previous = m_tableReload.Find(previousVersion);
-            const sim::BakedReactionTable* from = previous != nullptr ? &previous->table : nullptr;
-            for (const sim::ProbeTableSwap& swap : m_frameTableSwaps) {
-                if (from == nullptr || swap.table == nullptr)
-                    break;
+        // 物質の一覧が変わる差し替え(T-0242・ADR-0065): このフレームに新しく作った差し替えの印(足し直した印は、控えのコマンドが
+        // もう付け替えてあるので除く。T-0548)の刻み以降に当たる置くコマンド(物質 ID を持つ)を、名前で新しい表の ID にする
+        // (世界は差し替えの刻みの始めにセルを付け替えてからコマンドを当てる)。記録はこの後なので、再生ファイルには付け替えた後の
+        // コマンドが残る(再生では付け替えない)
+        void FrameLoop::RemapLivePlaceCommands(std::vector<sim::ProbeCommand>& commands) {
+            const std::optional<TableHotReload::NewSwap>& swap = m_tableReload.LastNewSwap();
+            if (!swap)
+                return;
 
-                const auto remap = sim::BuildSpeciesRemap(*from, *swap.table);
-                if (remap && !remap->identity) {
-                    // このフレームのコマンドと、巻き戻しで足し直す控え(まだ足していない分・足した履歴の差し替えの刻み以降)も
-                    // 新しい ID に(履歴は付け替える前の写しを持つ。T-0266)
-                    const auto remapFrom = [&](sim::ProbeCommand& command) {
-                        if (command.targetTick >= swap.tick)
-                            command = sim::RemapPlaceCommand(command, *remap);
-                    };
-                    rng::for_each(commands, remapFrom);
-                    rng::for_each(m_rewindFeed, remapFrom);
-                    rng::for_each(m_commandHistory, remapFrom);
-                }
+            // このフレームのコマンドと、巻き戻しで足し直す控え(まだ足していない分・足した履歴の差し替えの刻み以降)も新しい ID に
+            RemapCommandsFrom(swap->tick, swap->fromVersion, swap->toVersion, commands);
+        }
 
-                from = swap.table;
-            }
+        // 刻み tick 以降に当たる置くコマンド(commands・足し直す列・送った履歴)を、表 from の ID から表 to の ID へ。
+        // extra には刻みを問わず付け替える列も渡せる(まだ刻みの決まっていない待っているコマンド)
+        void FrameLoop::RemapCommandsFrom(uint64_t tick, uint64_t fromVersion, uint64_t toVersion,
+                                          std::vector<sim::ProbeCommand>& commands,
+                                          std::vector<sim::ProbeCommand>* extra) {
+            const auto from = m_tableReload.Find(fromVersion);
+            const auto to = m_tableReload.Find(toVersion);
+            if (from == nullptr || to == nullptr || fromVersion == toVersion)
+                return;
+
+            const auto remap = sim::BuildSpeciesRemap(from->table, to->table);
+            if (!remap || remap->identity)
+                return;
+
+            const auto remapFrom = [&](sim::ProbeCommand& command) {
+                if (command.targetTick >= tick)
+                    command = sim::RemapPlaceCommand(command, *remap);
+            };
+            rng::for_each(commands, remapFrom);
+            rng::for_each(m_rewindFeed, remapFrom);
+            rng::for_each(m_commandHistory, remapFrom);
+            if (extra != nullptr)
+                rng::for_each(*extra,
+                              [&](sim::ProbeCommand& command) { command = sim::RemapPlaceCommand(command, *remap); });
         }
 
         // GPU のキューへ足した生の置くコマンドの最後の刻みを覚える(TakeTableSwaps が差し替えをそれより後へ回す。T-0266)
@@ -1472,8 +1495,7 @@ namespace bicameral::frame {
             if (list == nullptr)
                 return false;
 
-            // 表を差し替えたフレームなら、保存点(このフレームの先頭で写したものも)は ProbeSim が全部捨てた(ADR-0047 §6・T-0299)
-            m_frameTableSwaps.clear();
+            m_frameTableSwaps.clear();  // 保存点は捨てない(その境界の表も持つ。T-0548・ADR-0246)
 
             if (extract) {
                 // 抽出の組を描画が読み終えるまで、GPU の上で待ってから走る
@@ -1642,6 +1664,18 @@ namespace bicameral::frame {
             if (m_options.autoPlay && !m_replay.empty()) {
                 Log(Channel::Tool, Level::Error, "--auto-play は --replay とは使えない");
                 return false;
+            }
+
+            // --auto-play-table(T-0548): --packages の写しの表を書き換える
+            if (m_options.autoPlayTable) {
+                auto edits = MakeSpeciesAndGravityEdit(m_options.packageRoot);
+                if (m_options.packageRoot.empty() || !edits) {
+                    Log(Channel::Tool, Level::Error, "--auto-play-table: {}",
+                        m_options.packageRoot.empty() ? std::string("--packages の写しが要る") : edits.error());
+                    return false;
+                }
+
+                m_autoPlay.UseTableScript(std::move(*edits));
             }
 
             if (m_replay.empty()) {
@@ -2103,13 +2137,8 @@ namespace bicameral::frame {
                 return;
             }
 
-            // 反応表の差し替えより前へは戻さない(保存点は世界だけを写すので、戻ると前の表の世界を新しい表で刻む。記録中は差し替えの印も
-            // 記録から落ちる)。差し替えると保存点は全部捨てる(ProbeSim)ので、ここは守り(ADR-0047 §6・T-0278・T-0299)
-            if (m_lastTableSwapTick && *m_lastTableSwapTick >= tick) {
-                Log(Channel::Sim, Level::Warning, "刻み {} へ巻き戻せない: 刻み {} で反応表を差し替えた", tick,
-                    *m_lastTableSwapTick);
-                return;
-            }
+            // 反応表の差し替えをまたいでも戻せる: 保存点はその境界の表も持ち(ProbeSim)、差し替えの印は控えか再生ファイルから
+            // 足し直す(T-0548・ADR-0246。ADR-0047 §6 の「差し替えより前へは戻さない」を置き換え)
 
             m_rewindRequest = tick;
         }
@@ -2134,6 +2163,10 @@ namespace bicameral::frame {
                 Log(Channel::Sim, Level::Error, "巻き戻し: 刻み {} の保存点がもう無い(戻さなかった)", tick);
                 return index;
             }
+
+            // 表も保存点の境界の表へ(T-0548): 刻み tick 以降の差し替えは足し直す印でまた当てる。覗き窓も同じ表へ
+            m_tableReload.NoteRewound(tick);
+            m_peek.RewindTables(tick, m_sim.SavePointChangesTable(index) ? &m_sim.SavePointTable(index) : nullptr);
 
             const SimCursor from = m_scheduler.Cursor();
             m_scheduler.Rewind(tick);
@@ -2224,7 +2257,6 @@ namespace bicameral::frame {
             rng::sort(commands, [](const sim::ProbeCommand& a, const sim::ProbeCommand& b) {
                 return a.targetTick != b.targetTick ? a.targetTick < b.targetTick : a.sequence < b.sequence;
             });
-            m_commandHistory.insert(m_commandHistory.end(), commands.begin(), commands.end());
 
             return commands;
         }
@@ -2291,7 +2323,7 @@ namespace bicameral::frame {
             if (!reason.empty())
                 return std::unexpected(reason);
 
-            return editor::PlanBrushUndo(firstTick, SavePointTicks(), m_lastTableSwapTick, UndoFloor());
+            return editor::PlanBrushUndo(firstTick, SavePointTicks(), UndoFloor());
         }
 
         // やり直し(T-0497・D-491 ②): 最後に元に戻した運びのコマンドを元の刻みのまま今の流れの控えへ戻し、その刻み以前の保存点へ
@@ -2381,6 +2413,12 @@ namespace bicameral::frame {
             std::erase_if(m_commandHistory, madeInPlay);
             m_rewindRequest = *plan;
             m_rewindCatchUpTick = playStart;
+
+            // 表はファイルの今の中身(ファイルが正本。プレイ中の差し替えの印は上で捨てた。Q64 ④・T-0548)。待っている表もそれ
+            if (const auto file = m_tableReload.FileTable()) {
+                (void)m_tableReload.TakeWaiting();
+                SetBoundaryTable(playStart, file, true);
+            }
             Log(Channel::Sim, Level::Info, "プレイをやめた: 刻み {} の保存点へ戻す{}", *plan,
                 *plan < playStart ? std::format("(刻み {} まで流し直す)", playStart) : std::string());
         }
@@ -2409,6 +2447,67 @@ namespace bicameral::frame {
 
             m_rewindRequest = *plan;
             m_rewindCatchUpTick = cursor.tick;
+        }
+
+        // 編集の状態の表の差し替え(T-0548・ADR-0246): 待っている表(ファイル・反応表のパネル・環境ミキサー)を編集の境界 E の印にして、
+        // 時間を進めずに当てる(置いたものと同じ道: E の適用の単位の後なら S(E) へ戻して E の適用で当て直す。保存点は捨てない)。
+        // E の適用の後で戻せない(保存点が無い)時は待たせたまま、プレイを押した最初の刻みで当たる(ADR-0236 §6 と同じ)
+        void FrameLoop::ApplyEditTable() {
+            if (!m_editor || !m_timeControl.Editing() || !m_replay.empty() || !m_tableReload.Waiting() ||
+                m_rewindRequest != UINT64_MAX || m_scheduler.CatchingUp())
+                return;
+
+            const SimCursor cursor = m_scheduler.Cursor();
+            const std::optional<SimCursor> hold = m_scheduler.Hold();
+            const bool applied = cursor.unit == 1 && hold && *hold == cursor;
+            if (cursor.unit != 0 && !applied)
+                return;
+
+            uint64_t rewindTick = UINT64_MAX;
+            if (applied) {
+                const auto plan = PlanStrokeRewind(cursor.tick);
+                if (!plan) {
+                    if (!std::exchange(m_editApplyWarned, true))
+                        Log(Channel::Sim, Level::Warning,
+                            "編集の状態で反応表を当て直せない({})。プレイを押した最初の刻みで当たる", plan.error());
+                    return;
+                }
+
+                rewindTick = *plan;
+            }
+
+            SetBoundaryTable(cursor.tick, m_tableReload.TakeWaiting(), applied);
+            if (rewindTick != UINT64_MAX) {
+                m_rewindRequest = rewindTick;
+                m_rewindCatchUpTick = cursor.tick;
+            }
+        }
+
+        // 編集の境界 tick に当てる表を table にする(editor/edit_table): tick の印を外し、tick 以降に当てるコマンドと待っている
+        // コマンドの物質の ID を付け替え、S(tick) の表と違えば新しい印を足す。sent = tick の適用の後(印は送った履歴へ。戻すと足し直す)。
+        // まだなら足し直す列へ(次の E の適用の単位で当たる)
+        void FrameLoop::SetBoundaryTable(uint64_t tick, const std::shared_ptr<const script::LoadedReactionTable>& table,
+                                         bool sent) {
+            const editor::BoundaryTablePlan plan = editor::PlanBoundaryTable(tick, m_commandHistory, m_rewindFeed,
+                                                                             m_tableReload.InitialVersion());
+            if (plan.currentVersion == table->tableVersion)
+                return;  // もう同じ表
+
+            editor::RemoveTableMarkersAt(tick, m_commandHistory, m_rewindFeed);
+            std::vector<sim::ProbeCommand> none;
+            RemapCommandsFrom(tick, plan.currentVersion, table->tableVersion, none, &m_pendingCommands);
+            if (table->tableVersion != plan.beforeVersion) {
+                const sim::ProbeCommand marker = sim::MakeTableCommand(tick, m_nextSequence++, table->tableVersion);
+                if (sent)
+                    editor::InsertInOrder(m_commandHistory, marker);
+                else
+                    editor::InsertInOrder(m_rewindFeed, marker);
+            }
+
+            Log(Channel::Sim, Level::Info,
+                "編集の状態: 刻み {} の始めの表を版 {:016x} にする(前は {:016x}・S({}) は {:016x}){}", tick,
+                table->tableVersion, plan.currentVersion, tick, plan.beforeVersion,
+                sent ? "。S(E) へ戻して当て直す" : "");
         }
 
         // 編集の状態の止まる場所(T-0509): E に当てるコマンド(待っている・足し直しを待つ・もう当てた)があれば (E, 1)、無ければ (E, 0)。
@@ -2448,13 +2547,15 @@ namespace bicameral::frame {
         // --auto-play(T-0497): 今の様子を渡し、返った操作をボタン・キーと同じ道で行う
         void FrameLoop::UpdateAutoPlay() {
             const bool settling = m_rewindRequest != UINT64_MAX || m_scheduler.CatchingUp() ||
-                                  m_scheduler.BeforeHold() || !m_pendingCommands.empty() || !m_rewindFeed.empty();
+                                  m_scheduler.BeforeHold() || !m_pendingCommands.empty() || !m_rewindFeed.empty() ||
+                                  m_tableReload.Waiting();
             const AutoPlayState state{
                 .frame = m_frameNumber,
                 .cursor = m_scheduler.Cursor(),
                 .editing = m_timeControl.Editing(),
                 .settling = settling,
-                .playStartTick = m_timeControl.Editing() || m_playStartPending ? UINT64_MAX : m_playStartTick};
+                .playStartTick = m_timeControl.Editing() || m_playStartPending ? UINT64_MAX : m_playStartTick,
+                .tableVersion = m_tableReload.AppliedVersion()};
             ApplyAutoPlayAction(m_autoPlay.Update(state));
         }
 
@@ -2478,6 +2579,8 @@ namespace bicameral::frame {
                 case AutoPlayAction::Redo: brush.RequestRedo(); break;
                 case AutoPlayAction::Play: m_autoPlayRequest.play = true; break;
                 case AutoPlayAction::Stop: m_autoPlayRequest.stopPlay = true; break;
+                case AutoPlayAction::EditTable: m_autoPlay.WriteTable(true); break;
+                case AutoPlayAction::RevertTable: m_autoPlay.WriteTable(false); break;
                 case AutoPlayAction::None: break;
             }
 
@@ -2486,8 +2589,9 @@ namespace bicameral::frame {
                     m_scheduler.Cursor().tick, static_cast<int>(action));
         }
 
-        // --auto-rewind: 保存点が 2 つできたら、古い方(刻み 0 の保存点があればそこ。T-0411)へ 1 回だけ戻す。--auto-reload と一緒なら、最初に表を差し替えた後にできた
-        // 保存点へ(差し替えより前の保存点は捨てられている。戻した後も記録の再生と同じハッシュ列になるか。T-0299)
+        // --auto-rewind: 保存点が 2 つできたら、古い方(刻み 0 の保存点があればそこ。T-0411)へ 1 回だけ戻す。--auto-reload と一緒なら、
+        // 最初に表を差し替えた後に(差し替えをまたいで戻り、表も戻って印でまた差し替わる。戻した後も記録の再生と同じハッシュ列になるか。
+        // T-0299・T-0548)
         void FrameLoop::CheckAutoRewind() {
             if (!m_options.autoRewind || m_rewindCount > 0 || m_rewindRequest != UINT64_MAX)
                 return;
@@ -2561,6 +2665,7 @@ namespace bicameral::frame {
             QueueClicks();
             ApplyEditCommands();
             m_tableReload.Poll(m_frameNumber);
+            ApplyEditTable();
             if (m_autoReload)
                 m_autoReload->Update(m_scheduler.Cursor().tick, m_tableReload);
 

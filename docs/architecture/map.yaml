@@ -96,6 +96,10 @@ views:
           code: "engine/src/editor/brush_undo.cpp::PlanBrushUndo", ticket: T-0278,
           doc: docs/decisions/ADR-0101-brush-undo-and-recording.md,
           note: "運び = 押してから置き終えるまでのコマンドの番号。運びが最初に当たる刻み以前の保存点へ戻し、今の刻みまで追いつく。記録は元に戻した後の流れだけ。brush_undo_test" }
+      - { id: edittable, group: framelib, label: "EditTable<br/>表の差し替えを編集に: 編集の境界の印を決め直す",
+          code: "engine/src/editor/edit_table.cpp::PlanBoundaryTable", ticket: T-0548,
+          doc: docs/decisions/ADR-0246-table-swap-as-edit.md,
+          note: "ファイル・パネル・ミキサーの差し替えを、編集の境界 E の始めの印にして S(E) へ戻して当て直す。保存点は表も持ち、戻すと表も戻る。edit_table_test・window_play_table" }
       - { id: mixerpanel, group: framelib, label: "MixerPanel<br/>環境ミキサー: 標準パッケージを世界に足す・外す",
           code: "engine/src/editor/mixer_panel.cpp::MixerPanel::Build", ticket: T-0452,
           doc: docs/design/14-editor-tools.md,
@@ -662,6 +666,8 @@ views:
       - [brushpanel, commandqueue, "置くコマンド"]
       - [brushpanel, brushstroke, "ドラッグ"]
       - [brushpanel, brushundo, "元に戻す"]
+      - [tablepanel, edittable, "編集の状態の差し替え"]
+      - [edittable, brushundo, "同じ道で当て直す"]
       - [frameloop, savepoint, "写す・戻す(巻き戻し)"]
       - [frameloop, worldcopyrunner, "写しの早送り(余りの予算)"]
       - [worldcopyrunner, worldcopy, "写す・早送り・測る"]

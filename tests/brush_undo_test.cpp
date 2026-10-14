@@ -41,17 +41,12 @@ namespace {
 
     void TestPlan() {
         const std::vector<uint64_t> savePoints = {16, 4, 8, 12};  // 並びは問わない
-        EXPECT(editor::PlanBrushUndo(10, savePoints, std::nullopt) == uint64_t{8});
-        EXPECT(editor::PlanBrushUndo(12, savePoints, std::nullopt) ==
+        EXPECT(editor::PlanBrushUndo(10, savePoints) == uint64_t{8});
+        EXPECT(editor::PlanBrushUndo(12, savePoints) ==
                uint64_t{12});  // 保存点 S(12) に刻み 12 のコマンドはまだ入っていない
-        EXPECT(editor::PlanBrushUndo(40, savePoints, std::nullopt) == uint64_t{16});
-        EXPECT(!editor::PlanBrushUndo(3, savePoints, std::nullopt).has_value());  // 古すぎる
-        EXPECT(!editor::PlanBrushUndo(10, std::vector<uint64_t>{}, std::nullopt).has_value());
-
-        // 反応表の差し替え: 戻す保存点より前(刻み 7)なら戻せる・同じか後(8・9)なら戻せない
-        EXPECT(editor::PlanBrushUndo(10, savePoints, 7) == uint64_t{8});
-        EXPECT(!editor::PlanBrushUndo(10, savePoints, 8).has_value());
-        EXPECT(!editor::PlanBrushUndo(10, savePoints, 9).has_value());
+        EXPECT(editor::PlanBrushUndo(40, savePoints) == uint64_t{16});
+        EXPECT(!editor::PlanBrushUndo(3, savePoints).has_value());  // 古すぎる
+        EXPECT(!editor::PlanBrushUndo(10, std::vector<uint64_t>{}).has_value());
     }
 
     void TestRemove() {
@@ -74,11 +69,11 @@ namespace {
         EXPECT(editor::UndoFloorTick(true, 0, 300) == 0);  // 刻み 0 から始めたプレイの最初の 12 秒
 
         const std::vector<uint64_t> savePoints = {0, 50, 120, 240};
-        EXPECT(editor::PlanBrushUndo(60, savePoints, std::nullopt, 50) == uint64_t{50});  // プレイを始めた保存点へ
-        EXPECT(!editor::PlanBrushUndo(40, savePoints, std::nullopt, 50).has_value());     // プレイ前の運び
-        EXPECT(editor::PlanBrushUndo(40, savePoints, std::nullopt, 0) == uint64_t{0});    // 編集の状態
-        EXPECT(!editor::PlanBrushUndo(130, savePoints, std::nullopt, 125).has_value());   // 範囲の中の保存点が無い
-        EXPECT(editor::PlanBrushUndo(250, savePoints, std::nullopt, 125) == uint64_t{240});
+        EXPECT(editor::PlanBrushUndo(60, savePoints, 50) == uint64_t{50});  // プレイを始めた保存点へ
+        EXPECT(!editor::PlanBrushUndo(40, savePoints, 50).has_value());     // プレイ前の運び
+        EXPECT(editor::PlanBrushUndo(40, savePoints, 0) == uint64_t{0});    // 編集の状態
+        EXPECT(!editor::PlanBrushUndo(130, savePoints, 125).has_value());   // 範囲の中の保存点が無い
+        EXPECT(editor::PlanBrushUndo(250, savePoints, 125) == uint64_t{240});
     }
 
     // やり直しのために、除くコマンドを順のまま取り出す

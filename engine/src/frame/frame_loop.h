@@ -124,6 +124,9 @@ namespace bicameral::frame {
         // 編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるでプレイ前の世界に戻るかを確かめる
         // (--auto-play。--editor と --world sample と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0497)
         bool autoPlay = false;
+        // --auto-play の表の手順(--auto-play-table。--packages の写しの表を編集の状態とプレイ中に書き換え、表の差し替えを編集として
+        // 扱えているか〔時間を進めずに当たる・元に戻す・やめるとファイルの表〕を確かめる。T-0548)
+        bool autoPlayTable = false;
         // 編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるでプレイ前の世界に戻るかを確かめる
         // (--auto-play。--editor と --world sample と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0497)
 

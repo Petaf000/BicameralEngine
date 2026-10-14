@@ -42,6 +42,9 @@ add_test(NAME brush_preview COMMAND brush_preview_test)
 add_executable(brush_undo_test brush_undo_test.cpp)
 target_link_libraries(brush_undo_test PRIVATE bicameral_editor)
 add_test(NAME brush_undo COMMAND brush_undo_test)
+add_executable(edit_table_test edit_table_test.cpp)
+target_link_libraries(edit_table_test PRIVATE bicameral_editor)
+add_test(NAME edit_table COMMAND edit_table_test)
 add_executable(surface_pick_test surface_pick_test.cpp)  # 光線が最初に当たる物のセルの手前(T-0332)
 target_link_libraries(surface_pick_test PRIVATE bicameral_editor)
 add_test(NAME surface_pick COMMAND surface_pick_test)
@@ -674,6 +677,23 @@ set_tests_properties(window_play_record PROPERTIES LABELS gpu FIXTURES_SETUP win
   PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
 set_tests_properties(window_play_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_play TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
+# 表の差し替えを編集として扱う(T-0548・ADR-0246): パッケージの写しの表(物質と重力を足す)を、編集の状態で書き換えると時間を進めずに
+# 当たり・元に戻す・やり直すでも残り・プレイをやめるとプレイ前の世界とファイルの今の中身の表に戻る(--auto-play-table。手順は frame/auto_play.h)。
+# 記録(最後の流れ。刻み 0 の始めに表の印)を、写しのフォルダが無くても再生ファイルの表だけで再生して同じハッシュ列
+set(WINDOW_PLAY_TABLE_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/play_table_packages)
+set(WINDOW_PLAY_TABLE_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_play_table.bcreplay)
+add_test(NAME window_play_table_copy
+         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/data/packages ${WINDOW_PLAY_TABLE_PACKAGES})
+add_test(NAME window_play_table_record
+         COMMAND bicameral --world sample --editor --auto-play-table --packages ${WINDOW_PLAY_TABLE_PACKAGES} --frames 2400
+                 --record ${WINDOW_PLAY_TABLE_FILE})
+add_test(NAME window_play_table_play
+         COMMAND bicameral --replay ${WINDOW_PLAY_TABLE_FILE} --packages ${CMAKE_CURRENT_BINARY_DIR}/no_such_packages)
+set_tests_properties(window_play_table_copy PROPERTIES FIXTURES_SETUP window_play_table_packages)
+set_tests_properties(window_play_table_record PROPERTIES LABELS gpu TIMEOUT 600
+  FIXTURES_REQUIRED window_play_table_packages FIXTURES_SETUP window_play_table PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
+set_tests_properties(window_play_table_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_play_table TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生ファイルの表を使う.*再生: OK")
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)
@@ -707,8 +727,8 @@ set_tests_properties(window_hot_reload_play PROPERTIES LABELS gpu TIMEOUT 240 FI
 # 通常のゲームの起動(--editor なし)でもファイルを見る(T-0243・D-438): 写しの表を壊す → 古い表のまま → 速度を直す → 差し替わる。
 # プレイ中に法則が変わった世界は「改造された世界」(D-437)。読み直した表の印は記録の表にも残り、再生の差し替えの行に出る
 # --species-remap: 通常の起動でも物質を足す・消す表を名前で付け替えて当てる(既定の Remap。D-438・T-0266)
-# --auto-rewind: 最初の差し替えの後にできた保存点へ 1 回戻す(差し替えより前の保存点は捨てられている)。記録は戻した刻みで切り詰めて
-# 書き直すので、再生の一致が「戻した後の世界 = その時の表で刻んだ世界」を確かめる(T-0299)
+# --auto-rewind: 最初の差し替えの後に、いちばん古い保存点(刻み 0。差し替えより前)へ 1 回戻す(表も戻り、差し替えの印を足し直して
+# また当たる。T-0548)。記録は戻した刻みで切り詰めて書き直すので、再生の一致が「戻した後の世界 = その時の表で刻んだ世界」を確かめる(T-0299)
 set(WINDOW_GAME_RELOAD_PACKAGES ${CMAKE_CURRENT_BINARY_DIR}/game_reload_packages)
 set(WINDOW_GAME_RELOAD_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_hot_reload_game.bcreplay)
 add_test(NAME window_hot_reload_game_copy
