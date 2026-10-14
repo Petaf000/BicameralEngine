@@ -135,6 +135,16 @@ namespace bicameral::sim {
     int64_t ImplicitTemperature(const ImplicitCell& cell);
     int64_t ImplicitEnergyFor(uint64_t heatCapacity, int64_t millikelvin);
 
+    // --- 一般の右辺で解く(T-0503 研究。気体の圧力の投影の模型 gas_projection.cpp が熱の多重格子を流用する)---
+    // 段 0 の式 (C_i + Σ g) x_i − Σ g x_j = D_i × rhs_i(rhs は対角 D で割った値。値の単位は呼ぶ側が決める)に、
+    // V サイクルを 1 回当てる(options の掃き出しの回数・直しの倍率を使う。cycles・tolerance は見ない)
+    void CycleImplicitGrid(const ImplicitGrid& grid, const std::vector<int64_t>& rhs, std::vector<int64_t>& values,
+                           const ImplicitOptions& options, ImplicitCost& cost);
+
+    // 段 0 の節 node の残差(値の単位。右辺 + Σ 隣の重み × 値 − 値)。× D_i で式の単位の誤差になる
+    int64_t ImplicitGridResidual(const ImplicitGrid& grid, const std::vector<int64_t>& rhs,
+                                 const std::vector<int64_t>& values, size_t node);
+
     // 保存量: 全部のセルのエネルギー + 端数(最も細かいレベルの単位 × 2^64。2 の補数で 2^128 を法とする。等しいかを比べる用)
     fx::FxU128 ImplicitConservedTotal(const ImplicitGrid& grid);
 
