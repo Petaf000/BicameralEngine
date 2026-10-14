@@ -4,6 +4,8 @@
 //   同じ入力なら同じハッシュ・熱い泡(gas_reference と同じ場面)の熱の重心が 2 秒で gas_reference(1.32 セル)の 1/3〜3 倍上がる。
 // 測る値(表示だけ): 1 刻みの V サイクルの回数(音速 340 m/s・3400 m/s・最速)と、爆発(1 セル 5 倍の圧力・1500 K・煙の印)で
 //   圧力の前線・熱い所・煙の広がりが刻みごとにどう見えるか(gas_reference の小刻み 24 と比べる。D-487 ⑥)。
+// 外側の反復(T-0530): 最速で 5 倍の爆発が 1 刻み目の終わりに中心の近くの圧力の差 1 kPa 以下・外側の反復ありでも保存はビット単位・ハッシュ一致・
+//   熱い泡は同じ桁。測る値: 外側の反復の回数 × V サイクル(弱い差〔泡・扉〕と強い爆発)・許容差と上限の違い。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <array>
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <vector>
 
 #include "sim/gas_projection.h"
@@ -100,6 +103,7 @@ namespace {
         GasProjectionOptions options;
         options.pressure.soundSpeedMmPerS = soundSpeed;
         options.pressure.substeps = substeps;
+        options.outerIterations = 1;  // T-0503 の試験は線形の 1 回のまま(外側の反復は T-0530 の試験)
         return options;
     }
 
@@ -119,6 +123,13 @@ namespace {
         int64_t worstError = 0;
         uint64_t ticks = 0;
 
+        // --- 外側の反復(T-0530)---
+        uint64_t outer = 0;
+        uint32_t maxOuter = 0;
+        uint32_t outerUnconverged = 0;
+        int64_t firstMismatch = 0;
+        int64_t worstMismatch = 0;
+
         void Add(const GasProjectionCost& cost) {
             cycles += cost.cycles;
             maxCycles = std::max(maxCycles, cost.maxCycles);
@@ -126,6 +137,21 @@ namespace {
             levels = cost.gridLevels;
             worstError = std::max(worstError, cost.worstMassError);
             ++ticks;
+
+            outer += cost.outerIterations;
+            maxOuter = std::max(maxOuter, cost.maxOuterIterations);
+            outerUnconverged += cost.outerUnconverged;
+            firstMismatch = std::max(firstMismatch, cost.firstMismatch);
+            worstMismatch = std::max(worstMismatch, cost.worstMismatch);
+        }
+
+        void PrintOuter(const char* name) const {
+            std::printf(
+                "  outer %s: %.2f/tick (max %u, at limit %u), V cycles %.2f/tick (max %u), mismatch first %lld mg / "
+                "kept %lld mg\n",
+                name, ticks == 0 ? 0.0 : (double)outer / (double)ticks, maxOuter, outerUnconverged,
+                ticks == 0 ? 0.0 : (double)cycles / (double)ticks, maxCycles, (long long)firstMismatch,
+                (long long)worstMismatch);
         }
 
         void Print(const char* name) const {
@@ -389,20 +415,261 @@ namespace {
         summary.Print(SpeedName(speed));
     }
 
+    // --- 外側の反復(T-0530): 強い圧力の差を同じ刻みで釣り合わせる ---
+    uint32_t outerRelaxation = 100;  // 試す倍率(%)
+    bool outerSecant = true;         // 試す: セルの傾きで割る(既定と同じ)
+
+    GasProjectionOptions MakeOuterOptions(uint32_t soundSpeed, uint32_t outer, uint32_t toleranceMg,
+                                          uint32_t cycles = 64) {
+        GasProjectionOptions options = MakeOptions(soundSpeed);
+        options.outerRelaxationPercent = outerRelaxation;
+        options.outerSecant = outerSecant;
+        options.outerIterations = outer;
+        options.outerToleranceMilligrams = toleranceMg;
+        options.solver.cycles = cycles;
+        return options;
+    }
+
+    // 全部のセルの |p − p_基準| の最大と最小の差(Pa。閉じた箱では全体が少し上がるので差で見る)
+    double PressureSpread(const GasBox& box) {
+        double low = 1e30;
+        double high = -1e30;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const uint32_t z = Coordinate(box, index)[2];
+            const double pressure = (double)(DeriveGasCell(box, box.cells[index], z).pressure -
+                                             box.referenceDerived[z].pressure) *
+                                    1e-6;
+            low = std::min(low, pressure);
+            high = std::max(high, pressure);
+        }
+
+        return high - low;
+    }
+
+    // 爆発(TestBlastVisibility と同じ場面)を外側の反復ありで。1 刻み目の終わりの中心の近くの圧力の差(Pa)を返す
+    double RunOuterBlast(uint32_t speed, uint32_t outer, uint32_t toleranceMg, uint32_t cycles, bool print) {
+        GasBox box = MakeBlastBox();
+        const GasTotals before = SumGas(box);
+        GasProjection state;
+        CostSummary summary;
+        std::vector<BlastView> views;
+        bool conserved = true;
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s outer %u tol %u V %u w %u%%%s", SpeedName(speed), outer, toleranceMg,
+                      cycles, outerRelaxation, outerSecant ? " secant" : "");
+        for (int tick = 1; tick <= BLAST_TICKS; ++tick) {
+            const GasProjectionCost cost = StepGasProjection(box, state,
+                                                             MakeOuterOptions(speed, outer, toleranceMg, cycles));
+            summary.Add(cost);
+            conserved = conserved && ConservedAgainst(box, before);
+            views.push_back(ViewBlast(box));
+            if (print && (tick <= 3 || tick == BLAST_TICKS)) {
+                PrintBlast(name, tick, views.back());
+                std::printf("      spread %.0f Pa, outer %u, V %u, mismatch first %lld / kept %lld mg\n",
+                            PressureSpread(box), cost.outerIterations, cost.cycles, (long long)cost.firstMismatch,
+                            (long long)cost.worstMismatch);
+            }
+        }
+
+        std::printf("  blast %s: tick 1 near %.0f Pa, tick 2 near %.0f Pa\n", name, views[0].nearPressure,
+                    views[1].nearPressure);
+        summary.PrintOuter(name);
+        EXPECT(conserved);
+        EXPECT(views.back().smokeRadius > views.front().smokeRadius);  // 煙は数刻みかけて広がる(D-487 ⑥)
+
+        return views[0].nearPressure;
+    }
+
+    // 既定の止め方(上限 4 回・許容差 100 mg・セルの傾きで割る)で、最速の強い爆発が同じ刻みで釣り合う
+    void TestOuterBlast() {
+        std::printf("outer iteration, blast (16^3 closed box, 1 cell 5x pressure at 1500 K):\n");
+        const GasProjectionOptions defaults;
+        const double linear = RunOuterBlast(0, 1, defaults.outerToleranceMilligrams, 64, true);
+        const double settled = RunOuterBlast(0, defaults.outerIterations, defaults.outerToleranceMilligrams, 64, true);
+        EXPECT(settled <= 1000);  // 最速なら強い爆発も同じ刻みで釣り合う(D-467)
+        EXPECT(settled < linear);
+        RunOuterBlast(REAL_SOUND, defaults.outerIterations, defaults.outerToleranceMilligrams, 64, false);
+    }
+
+    // 止め方の違いを測る(--sweep のときだけ。07 §2.6 の表)
+    void SweepOuterBlast() {
+        outerSecant = false;
+        for (const uint32_t outer : {2u, 3u, 4u, 8u})
+            RunOuterBlast(0, outer, 1, 64, false);
+
+        RunOuterBlast(0, 8, 10, 64, false);
+        RunOuterBlast(0, 8, 100, 64, false);
+        RunOuterBlast(0, 8, 1, 1, false);
+        RunOuterBlast(0, 16, 1, 1, false);
+        RunOuterBlast(REAL_SOUND, 8, 1, 64, true);
+        RunOuterBlast(SLOW_SOUND, 8, 1, 64, true);
+
+        // 一律の倍率(速く縮むが、回数を増やすと揺れる)
+        outerRelaxation = 150;
+        for (const uint32_t outer : {2u, 3u, 8u})
+            RunOuterBlast(0, outer, 10, 64, false);
+
+        outerRelaxation = 100;
+
+        // セルの傾きで割る(対角のニュートン)
+        outerSecant = true;
+        for (const uint32_t outer : {2u, 3u, 4u, 8u})
+            RunOuterBlast(0, outer, 10, 64, outer == 4);
+
+        RunOuterBlast(0, 4, 100, 64, false);
+        RunOuterBlast(0, 8, 100, 64, false);
+        RunOuterBlast(0, 8, 10, 1, false);
+        RunOuterBlast(REAL_SOUND, 4, 10, 64, false);
+        RunOuterBlast(REAL_SOUND, 8, 10, 64, false);
+    }
+
+    // 爆発の後を長く見る(外側の反復あり。炎・熱・煙の広がりが数刻みかけて見えるか。D-487 ⑥)
+    void PrintLongBlast(const char* name, int tick, const GasBox& box) {
+        const BlastView view = ViewBlast(box);
+        std::printf("  long %-20s tick %3d: hot cells %4d, hot radius %.2f, smoke radius %.2f, max speed %.2f m/s\n",
+                    name, tick, view.hotCells, view.hotRadius, view.smokeRadius,
+                    (double)MaxSpeed(box) / (double)METER_PER_SECOND);
+    }
+
+    bool IsLongBlastTick(int tick) {
+        return tick == 1 || tick == 3 || tick == 10 || tick == 30 || tick == 60 || tick == 120;
+    }
+
+    void TestOuterBlastLong() {
+        {
+            GasBox box = MakeBlastBox();
+            for (int tick = 1; tick <= 120; ++tick) {
+                StepGas(box);
+                if (IsLongBlastTick(tick))
+                    PrintLongBlast("gas_reference 24", tick, box);
+            }
+        }
+
+        for (const uint32_t outer : {1u, 8u}) {
+            GasBox box = MakeBlastBox();
+            GasProjection state;
+            for (int tick = 1; tick <= 120; ++tick) {
+                StepGasProjection(box, state, MakeOuterOptions(0, outer, 10));
+                if (IsLongBlastTick(tick))
+                    PrintLongBlast(outer == 1 ? "fastest linear" : "fastest outer 8", tick, box);
+            }
+        }
+    }
+
+    // 外側の反復ありでも、保存は毎刻みビット単位・2 回の実行でハッシュ一致
+    uint64_t RunOuterDisturbed(uint32_t speed, uint32_t outer, uint32_t toleranceMg, bool& conserved) {
+        GasBox box = MakeBlastBox();
+        Heat(box, box.Index(3, 3, 1), AIR_TEMPERATURE + 50000);
+        const GasTotals before = SumGas(box);
+        GasProjection state;
+        conserved = true;
+        for (int tick = 0; tick < 20; ++tick) {
+            StepGasProjection(box, state, MakeOuterOptions(speed, outer, toleranceMg));
+            conserved = conserved && ConservedAgainst(box, before);
+        }
+
+        return HashGas(box);
+    }
+
+    void TestOuterDeterminism(uint32_t speed, uint32_t outer, uint32_t toleranceMg) {
+        bool first = false;
+        bool second = false;
+        const uint64_t hashA = RunOuterDisturbed(speed, outer, toleranceMg, first);
+        const uint64_t hashB = RunOuterDisturbed(speed, outer, toleranceMg, second);
+        std::printf(
+            "outer iteration closed box (%s, outer %u, tol %u mg): conserved every tick = %d, hash %016llx / %016llx\n",
+            SpeedName(speed), outer, toleranceMg, first ? 1 : 0, (unsigned long long)hashA, (unsigned long long)hashB);
+        EXPECT(first && second);
+        EXPECT(hashA == hashB);
+    }
+
+    // 弱い差: 熱い泡(外側の反復は 1 回で止まるか・上がり方は同じ桁か)
+    void TestOuterBubble(uint32_t speed, uint32_t outer, uint32_t toleranceMg) {
+        GasBox box = MakeAirBox(MakeAirConfig(10, 10, 20));
+        HeatBubble(box);
+        const int64_t start = HeatCentroidZ(box);
+        GasProjection state;
+        CostSummary summary;
+        for (int tick = 0; tick < 120; ++tick)
+            summary.Add(StepGasProjection(box, state, MakeOuterOptions(speed, outer, toleranceMg)));
+
+        const int64_t rise = HeatCentroidZ(box) - start;
+        std::printf("outer iteration hot bubble (%s, outer %u, tol %u mg%s): heat centroid rise %lld (1/1000 cell)\n",
+                    SpeedName(speed), outer, toleranceMg, outerSecant ? ", secant" : "", (long long)rise);
+        summary.PrintOuter(SpeedName(speed));
+        EXPECT(rise * 3 >= REFERENCE_BUBBLE_RISE && rise <= REFERENCE_BUBBLE_RISE * 3);
+    }
+
+    // 弱い差: 扉(閉じた箱の左半分が 2% 高い圧力・同じ温度。仕切りを外した刻みから)
+    void TestOuterDoor(uint32_t speed, uint32_t outer, uint32_t toleranceMg) {
+        GasBox box = MakeAirBox(MakeAirConfig(16, 8, 8));
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[0] >= 8)
+                continue;
+
+            std::array<uint64_t, GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount = amount * 102 / 100;
+
+            box.cells[index] = MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
+        }
+
+        const double initial = PressureSpread(box);
+        GasProjection state;
+        CostSummary summary;
+        std::array<double, 3> spreads = {};
+        for (int tick = 1; tick <= 30; ++tick) {
+            summary.Add(StepGasProjection(box, state, MakeOuterOptions(speed, outer, toleranceMg)));
+            if (tick <= 3)
+                spreads[tick - 1] = PressureSpread(box);
+        }
+
+        std::printf("door (%s, outer %u, tol %u mg%s): spread %.0f -> %.0f, %.0f, %.0f Pa\n", SpeedName(speed), outer,
+                    toleranceMg, outerSecant ? ", secant" : "", initial, spreads[0], spreads[1], spreads[2]);
+        summary.PrintOuter(SpeedName(speed));
+    }
+
 }  // namespace
 
-int main() {
-    TestStaticAtmosphere(REAL_SOUND);
-    TestStaticAtmosphere(0);
-    TestConservationAndDeterminism(REAL_SOUND, 1);
-    TestConservationAndDeterminism(0, 1);
-    TestConservationAndDeterminism(REAL_SOUND, 3);
-    TestHotBubble(REAL_SOUND, 1);
-    TestHotBubble(REAL_SOUND * 10, 1);
-    TestHotBubble(0, 1);
-    TestBlastVisibility();
-    TestBlastSettles(REAL_SOUND);
-    TestBlastSettles(0);
+// 引数 --sweep で、外側の反復の止め方の違いを測る(遅い。ctest では回さない)
+int main(int argc, char** argv) {
+    const bool sweep = argc > 1 && std::string_view(argv[1]) == "--sweep";
+    if (!sweep) {
+        TestStaticAtmosphere(REAL_SOUND);
+        TestStaticAtmosphere(0);
+        TestConservationAndDeterminism(REAL_SOUND, 1);
+        TestConservationAndDeterminism(0, 1);
+        TestConservationAndDeterminism(REAL_SOUND, 3);
+        TestHotBubble(REAL_SOUND, 1);
+        TestHotBubble(REAL_SOUND * 10, 1);
+        TestHotBubble(0, 1);
+        TestBlastVisibility();
+        TestBlastSettles(REAL_SOUND);
+        TestBlastSettles(0);
+    }
+
+    // --- 外側の反復(T-0530。既定の止め方)---
+    const GasProjectionOptions defaults;
+    TestOuterBlast();
+    TestOuterDeterminism(0, defaults.outerIterations, defaults.outerToleranceMilligrams);
+    TestOuterDeterminism(REAL_SOUND, 8, 1);  // 上限に届く刻みがある止め方でも
+    TestOuterBubble(0, defaults.outerIterations, defaults.outerToleranceMilligrams);
+    TestOuterBubble(REAL_SOUND, defaults.outerIterations, defaults.outerToleranceMilligrams);
+    TestOuterDoor(0, defaults.outerIterations, defaults.outerToleranceMilligrams);
+    TestOuterDoor(REAL_SOUND, defaults.outerIterations, defaults.outerToleranceMilligrams);
+
+    if (sweep) {
+        SweepOuterBlast();
+        TestOuterBlastLong();
+        for (const bool secant : {false, true}) {
+            outerSecant = secant;
+            for (const uint32_t tolerance : {1u, 10u, 100u, 300u})
+                TestOuterBubble(0, 8, tolerance);
+
+            TestOuterDoor(0, 8, 10);
+            TestOuterDoor(REAL_SOUND, 8, 10);
+        }
+    }
 
     if (failureCount != 0) {
         std::printf("%d failure(s)\n", failureCount);

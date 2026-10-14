@@ -3,11 +3,15 @@
 //   1. 圧力の式を作る(BeginGasPressure)→ セルを熱の陰解法の節に(熱容量 = C_i、面の係数 = K)して多重格子の段を作る(BuildImplicitGrid)
 //   2. 右辺 = (E_i − Σ F*_i)÷ D_i(D_i = C_i + Σ K。128bit の積から 1 回の割り算)
 //   3. V サイクルを、全部のセルの式の誤差(残差 × D_i)が許容差(mg)以下になるまで(上限 options.solver.cycles)
-//   4. 解いた x で当てる(FinishGasPressure)
+//   4. 解いた x を箱の写しに仮に当てる(FinishGasPressure)
+//   5. 外側の反復(T-0530): 仮の状態の本当の質量の差 E_真 と C_i x_i の食い違い G が許容差を超えたら、右辺に G ÷ s_i ÷ D_i を足して 3 へ
+//      (s_i はセルの傾き = E_真 の変化 ÷ 質量の変化の割線。最速では対角のニュートンと同じ)。
+//      止まったら(上限でも)仮の状態を採る
 #include "sim/gas_projection.h"
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 
 #include "common/fixed.hlsli"
 
@@ -18,6 +22,8 @@ namespace bicameral::sim {
         namespace fx = bicameral::fx;
 
         constexpr uint32_t CAPACITY_SHIFT = 48;  // C・K の Q(mg/µPa)
+        constexpr uint32_t MISMATCH_SHIFT =
+            32;  // 食い違い G を mg の Q16 で持つ(C × x の Q48 から 32 ずらす。最速の大きな x でも 64bit に入る)
 
         // 符号付きの (|a| × b)÷ d(128bit の積。0 方向へ切り捨て)
         int64_t MulDivSigned(int64_t a, uint64_t b, uint64_t d) {
@@ -84,16 +90,9 @@ namespace bicameral::sim {
             return (int64_t)worst;
         }
 
-        // 1 回の投影
-        void Project(GasBox& box, GasProjection& state, const GasProjectionOptions& options, uint64_t roundingTick,
-                     GasProjectionCost& cost) {
-            const GasPressureSystem system = BeginGasPressure(box, options.pressure);
-            const ImplicitGrid grid = MakePressureGrid(box, system);
-            const std::vector<int64_t> rhs = PressureRhs(grid, system);
-            state.pressures.resize(box.cells.size(), 0);
-
-            // --- V サイクル(許容差に届いたら止める。上限は options.solver.cycles)---
-            std::vector<int64_t>& values = state.pressures;
+        // V サイクル(許容差に届いたら止める。上限は options.solver.cycles)
+        void Solve(const ImplicitGrid& grid, const std::vector<int64_t>& rhs, std::vector<int64_t>& values,
+                   const GasProjectionOptions& options, GasProjectionCost& cost) {
             uint32_t cycles = 0;
             int64_t error = WorstMassError(grid, rhs, values);
             while (error > (int64_t)options.toleranceMilligrams && cycles < options.solver.cycles) {
@@ -105,10 +104,109 @@ namespace bicameral::sim {
             cost.cycles += cycles;
             cost.maxCycles = std::max(cost.maxCycles, cycles);
             cost.unconverged += error > (int64_t)options.toleranceMilligrams ? 1 : 0;
-            cost.gridLevels = (uint32_t)grid.levels.size();
             cost.worstMassError = std::max(cost.worstMassError, error);
+        }
 
-            FinishGasPressure(box, options.pressure, system, values, roundingTick);
+        // 外側の反復で比べる量(セルの順): E_真 = V p̃ ÷ c_箱²(mg の Q16。式の E_i と同じ量)と質量(mg)
+        struct OuterState {
+            std::vector<int64_t> excesses;
+            std::vector<int64_t> masses;
+        };
+
+        OuterState MeasureState(const GasBox& box, const GasPressureSystem& system) {
+            OuterState state;
+            state.excesses.resize(box.cells.size());
+            state.masses.resize(box.cells.size());
+            const uint32_t layer = box.config.sizeX * box.config.sizeY;
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                state.excesses[index] = fx::FxMulShiftS64(system.statePressures[index],
+                                                          (int64_t)system.stateCapacities[index], MISMATCH_SHIFT);
+                state.masses[index] = (int64_t)DeriveGasCell(box, box.cells[index], index / layer).mass;
+            }
+
+            return state;
+        }
+
+        // 食い違い G_i = E_真,i − C_i x_i(mg の Q16)。式が仮定した刻みの終わりの圧力 x と、仮の状態の本当の圧力の差を質量で測る。
+        // 最大の |G|(mg)を返す
+        int64_t Mismatch(const OuterState& trial, const GasPressureSystem& system, const std::vector<int64_t>& values,
+                         std::vector<int64_t>& mismatches) {
+            mismatches.resize(values.size());
+            uint64_t worst = 0;
+            for (size_t index = 0; index < values.size(); ++index) {
+                const int64_t assumed = fx::FxMulShiftS64(values[index], (int64_t)system.cellCapacities[index],
+                                                          MISMATCH_SHIFT);
+                mismatches[index] = trial.excesses[index] - assumed;
+                worst = std::max(worst, fx::FxAbsU64(mismatches[index]) >> (CAPACITY_SHIFT - MISMATCH_SHIFT));
+            }
+
+            return (int64_t)worst;
+        }
+
+        // セルの傾き s_i = ΔE_真 ÷ Δ質量(Q16。前の状態と今の仮の状態の割線)。式は s = 1(質量の変化がそのまま E を変える)と仮定するが、
+        // 熱い気体を受けるセル・断熱で膨らむセルでは違う。質量があまり動かないセルと、外れた値は 1 にする
+        int64_t SecantSlope(const OuterState& before, const OuterState& after, size_t index) {
+            constexpr int64_t ONE = (int64_t)1 << 16;
+            constexpr int64_t MIN_MASS_CHANGE = 16;  // mg
+            const int64_t massChange = after.masses[index] - before.masses[index];
+            if (std::abs(massChange) < MIN_MASS_CHANGE)
+                return ONE;
+
+            const int64_t slope = (after.excesses[index] - before.excesses[index]) / massChange;
+
+            return std::clamp(slope, ONE / 4, ONE * 4);
+        }
+
+        // 右辺に G ÷ s ÷ D_i を足す(右辺は値の単位 µPa。PressureRhs と同じ形)
+        void CorrectRhs(const ImplicitGrid& grid, const std::vector<int64_t>& mismatches, const OuterState* before,
+                        const OuterState& after, const GasProjectionOptions& options, std::vector<int64_t>& rhs) {
+            const ImplicitGridLevel& cells = grid.levels[0];
+            for (size_t index = 0; index < rhs.size(); ++index) {
+                int64_t relaxed = mismatches[index] * (int64_t)options.outerRelaxationPercent / 100;
+                if (options.outerSecant && before != nullptr)
+                    relaxed = relaxed * ((int64_t)1 << 16) / SecantSlope(*before, after, index);
+
+                rhs[index] += MulDivSigned(relaxed, (uint64_t)1 << MISMATCH_SHIFT, cells.diagonals[index].lo);
+            }
+        }
+
+        // 1 回の投影(外側の反復を含む)
+        void Project(GasBox& box, GasProjection& state, const GasProjectionOptions& options, uint64_t roundingTick,
+                     GasProjectionCost& cost) {
+            const GasPressureSystem system = BeginGasPressure(box, options.pressure);
+            const ImplicitGrid grid = MakePressureGrid(box, system);
+            std::vector<int64_t> rhs = PressureRhs(grid, system);
+            state.pressures.resize(box.cells.size(), 0);
+            cost.gridLevels = (uint32_t)grid.levels.size();
+
+            std::vector<int64_t>& values = state.pressures;
+            std::vector<int64_t> mismatches;
+            OuterState previous = MeasureState(box, system);
+            const uint32_t limit = std::max<uint32_t>(options.outerIterations, 1);
+            for (uint32_t outer = 1;; ++outer) {
+                Solve(grid, rhs, values, options, cost);
+
+                // --- 仮に当てて、食い違いを測る ---
+                GasBox trial = box;
+                FinishGasPressure(trial, options.pressure, system, values, roundingTick);
+                OuterState measured = MeasureState(trial, BeginGasPressure(trial, options.pressure));
+                const int64_t mismatch = Mismatch(measured, system, values, mismatches);
+                if (outer == 1)
+                    cost.firstMismatch = std::max(cost.firstMismatch, mismatch);
+
+                const bool settled = mismatch <= (int64_t)options.outerToleranceMilligrams;
+                if (settled || outer >= limit) {
+                    cost.outerIterations += outer;
+                    cost.maxOuterIterations = std::max(cost.maxOuterIterations, outer);
+                    cost.outerUnconverged += settled ? 0 : 1;
+                    cost.worstMismatch = std::max(cost.worstMismatch, mismatch);
+                    box = std::move(trial);  // セルと帳簿(FinishGasPressure が両方を書く)
+                    return;
+                }
+
+                CorrectRhs(grid, mismatches, &previous, measured, options, rhs);
+                previous = std::move(measured);
+            }
         }
 
     }  // namespace
