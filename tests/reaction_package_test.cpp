@@ -124,7 +124,8 @@ namespace {
             return;
         }
 
-        EXPECT(luau->species.size() == 9 && luau->rules.size() == 7);  // 仮の魔素の物質 1・規則 2 を含む(T-0225)
+        // 使わない 0 番 + 標準パッケージの現実の物質 8(argon を含む。T-0498)+ 仮の魔素の物質 1。規則は現実 5 + 仮の魔素 2(T-0225)
+        EXPECT(luau->species.size() == 10 && luau->rules.size() == 7);
         EXPECT(luau->rates.size() == luau->rules.size() * reaction::RX_RATE_TABLE_KELVINS);
         PrintWarnings(*luau);
         EXPECT(luau->warnings.empty());  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
@@ -244,7 +245,7 @@ namespace {
         }
 
         PrintWarnings(*baked);
-        EXPECT(baked->species.size() == 10 && baked->rules.size() == 8 && baked->warnings.empty());
+        EXPECT(baked->species.size() == 11 && baked->rules.size() == 8 && baked->warnings.empty());
         EXPECT(baked->SpeciesId("hydrogen") != 0);
         EXPECT(std::ranges::find(baked->ruleNames, "water_gas") != baked->ruleNames.end());
     }
@@ -307,8 +308,10 @@ namespace {
 
         EXPECT(SameTable(loaded->table, *source));
         EXPECT(loaded->packageRoot == DefaultPackageRoot());
-        EXPECT(loaded->loadOrder == std::vector<std::string>{std::string(BASE_PACKAGE)});
-        EXPECT(loaded->rejected.empty() && loaded->overrides.empty() && !loaded->modifiedWorld);
+        // 依存の標準パッケージを棚から読み、最後にゲーム本体(T-0498)。ゲーム本体が現実の物質を書き直しても印は付かない
+        EXPECT((loaded->loadOrder == std::vector<std::string>{"real_elements", "real_matter", "earth_environment",
+                                                              "real_reactions", std::string(BASE_PACKAGE)}));
+        EXPECT(loaded->rejected.empty() && !loaded->overrides.empty() && !loaded->modifiedWorld);
         EXPECT(loaded->tableVersion != 0);
         std::printf("ランタイムの表: %s(版 %016llx。リポジトリのパッケージとビットで同じ)\n",
                     reinterpret_cast<const char*>(loaded->packageRoot.generic_u8string().c_str()),

@@ -245,7 +245,8 @@ namespace {
             }
 
             EXPECT(table->tableVersion == stored.version && table->tableBytes == stored.content);
-            EXPECT(stored.loadOrder == std::vector<std::string>{std::string(BASE_PACKAGE)} && !stored.modifiedWorld);
+            // 依存の標準パッケージ(棚)の後にゲーム本体(T-0498)
+            EXPECT(!stored.loadOrder.empty() && stored.loadOrder.back() == BASE_PACKAGE && !stored.modifiedWorld);
             rebuilt.push_back(std::move(*table));
         }
 

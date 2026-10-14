@@ -80,10 +80,14 @@ namespace {
 
     // 希ガスを 3 つ足す(成分の上限の試験。セルに 8 種類を入れるため)
     ReactionTableDefinition WithNobleGases(ReactionTableDefinition definition) {
-        definition.elements.push_back({.name = "Ar", .atomicMass = 39948});
+        // 試験の表は標準パッケージの argon(Ar)を持つ(T-0498)。無い時だけ足す
+        if (!rng::contains(definition.species, std::string("argon"), &SpeciesDefinition::name)) {
+            definition.elements.push_back({.name = "Ar", .atomicMass = 39948});
+            definition.species.push_back(Simple("argon", "Ar", 1, 0));
+        }
+
         definition.elements.push_back({.name = "He", .atomicMass = 4003});
         definition.elements.push_back({.name = "Ne", .atomicMass = 20180});
-        definition.species.push_back(Simple("argon", "Ar", 1, 0));
         definition.species.push_back(Simple("helium", "He", 1, 0));
         definition.species.push_back(Simple("neon", "Ne", 1, 0));
 
