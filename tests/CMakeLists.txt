@@ -131,6 +131,14 @@ target_precompile_headers(play_metric_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/
 target_link_libraries(play_metric_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
 add_dependencies(play_metric_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME play_metric COMMAND play_metric_test)
+# 坂の検査の物差し(D-487・T-0491): 燃える木箱で面の熱の流れと反応ごとのエントロピーの生成を数える(CPU。`--burn [刻み]` で燃え方の計器)
+add_executable(slope_check_test slope_check_test.cpp)
+target_precompile_headers(slope_check_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(slope_check_test PRIVATE bicameral_test_reaction_table bicameral_reaction_script bicameral_sim
+                      bicameral_core)  # 試験の表(末尾の一覧に足さない: 並走のほかの枝と重ならないように)
+add_dependencies(slope_check_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME slope_check COMMAND slope_check_test)
+set_tests_properties(slope_check PROPERTIES TIMEOUT 900)
 # 物質を足す・消す表の差し替えで、セルの物質 ID を名前で付け替える(T-0223・ADR-0065。CPU リファレンス。GPU は T-0242)
 add_executable(reaction_species_remap_test reaction_species_remap_test.cpp)
 target_precompile_headers(reaction_species_remap_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う

@@ -6,7 +6,8 @@
 // 分類と書き方(1 つの鍵 = 1 つの元素・物質・規則。Mod は鍵を足して増やす。値は整数で、単位は欄の名前に書く):
 //   elements  = { C = { atomic_mass_mg_per_mol = 12011 } }
 //   species   = { oxygen = { composition = { O = 2 }, formation_enthalpy_j_per_mol = 0,
-//                            heat_capacity_mj_per_mol_k = 29378, thermal_conductivity_mw_per_m_k = 135000 } }
+//                            heat_capacity_mj_per_mol_k = 29378, thermal_conductivity_mw_per_m_k = 135000,
+//                            standard_entropy_mj_per_mol_k = 205152 } }   -- 省ける。298.15 K・1 bar(坂の検査だけが読む。T-0491)
 //   reactions = { carbon_combustion = {
 //                     reactants = { carbon = 1, oxygen = 1 }, products = { carbon_dioxide = 1 },
 //                     rate = { a = "3e8", activation_energy_j_per_mol = 160000 },

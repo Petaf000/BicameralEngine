@@ -50,6 +50,9 @@ namespace bicameral::sim {
         int64_t formationEnthalpy = 0;          // J/mol(298.15 K)
         uint32_t heatCapacity = 0;              // mJ/(mol·K)(一定と置く)
         uint32_t thermalConductivity = 0;       // mW/(m·K)(一定と置く。T-0089)
+        // 標準モルエントロピー(mJ/(mol·K)。298.15 K・1 bar)。任意。ベイクは読まない(GPU の表に入らない)。
+        // 坂の検査(反応ごとのエントロピーの生成。D-487・T-0491)だけが使う
+        std::optional<int64_t> standardEntropy;
     };
 
     struct RuleTerm {
