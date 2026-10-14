@@ -110,7 +110,8 @@ PROBE_CONST uint32_t PROBE_EXTRACTION_WORDS = PROBE_EXTRACTION_BODY_OFFSET + PRO
 // --- 物理(T-0098。sim/gpu_physics の整数の AVBD を刻みの単位に入れる)---
 // 物理の座標(2^-20 m、y が上)と格子の座標(セルの番号の空間。描画は y が画面の下向き)の対応:
 //   格子 x = 物理 x / 0.5 m、格子 y = PROBE_GRID_SIZE − 物理 y / 0.5 m、格子 z = 物理 z / 0.5 m。
-//   物理の地面の上の面(y = 0)が格子の底(y = PROBE_GRID_SIZE)。物と世界のセルのやり取り(燃える・熱)は無い(M6)
+//   物理の地面の上の面(y = 0)が格子の底(y = PROBE_GRID_SIZE)。物と世界のセルのやり取りは、物理で失った力学的エネルギーを
+//   接触点のセルの熱へ返すことだけ(T-0542・common/physics_heat.hlsli。燃える・物の温度は M6)
 PROBE_CONST uint32_t PROBE_PHYSICS_CELL_SHIFT = 19;  // 1 セル = 0.5 m = 2^19 × 2^-20 m
 
 // --- 1 刻みの単位(06 §4・ADR-0011)---
@@ -289,6 +290,19 @@ PROBE_FN uint32_t ProbeBlockIndex(uint32_t blockX, uint32_t blockY, uint32_t blo
 
 PROBE_FN uint32_t ProbeBlockOfCell(uint32_t x, uint32_t y, uint32_t z) {
     return ProbeBlockIndex(x / PROBE_BLOCK_SIZE, y / PROBE_BLOCK_SIZE, z / PROBE_BLOCK_SIZE);
+}
+
+// 物理の座標(2^-20 m)の 1 軸を格子の座標へ(格子の外は端のセルに寄せる。物理の熱を必ず世界のどこかへ返すため。T-0542)
+PROBE_FN uint32_t ProbeGridAxisOfPhysics(int64_t units) {
+    const int64_t cell = units >> PROBE_PHYSICS_CELL_SHIFT;  // 負は −∞ 側へ(算術シフト)
+    const int64_t last = (int64_t)PROBE_GRID_SIZE - 1;
+    return (uint32_t)(cell < 0 ? 0 : (cell > last ? last : cell));
+}
+
+// 物理の点(2^-20 m、y が上)が入っているセル。格子 y は上下が逆(物理の y = 0 〜 0.5 m が格子の y = PROBE_GRID_SIZE − 1)
+PROBE_FN uint32_t ProbeCellOfPhysicsPoint(int64_t x, int64_t y, int64_t z) {
+    return ProbeCellIndex(ProbeGridAxisOfPhysics(x), PROBE_GRID_SIZE - 1 - ProbeGridAxisOfPhysics(y),
+                          ProbeGridAxisOfPhysics(z));
 }
 
 // 64bit を混ぜる(splitmix64 の仕上げ。入力の 1 ビットの違いが全体に広がる)

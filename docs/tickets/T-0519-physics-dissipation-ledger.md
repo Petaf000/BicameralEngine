@@ -67,3 +67,4 @@
 ## 作業ログ
 - 2026-10-15(wt4): 洗い出し・PxMechanicalEnergy と物ごとの帳簿(PxInitializeBody・PxFinishBody)・SumPhysicsEnergy・physics_energy の試験(落とす・滑る)・
   gpu_physics_test の物ごとの帳簿の比較。ADR-0232(Proposed)。世界へ返すのは T-0542。
+- 2026-10-15(wt4・T-0542): 世界へ返す CPU の道を T-0542 で作った(ADR-0242。返す元は世界で 1 つ・仮)。GPU は T-0561。

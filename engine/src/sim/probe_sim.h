@@ -33,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "common/physics_heat.hlsli"
 #include "common/probe_place.hlsli"
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
@@ -544,8 +545,9 @@ namespace bicameral::sim {
         // 刻み tick を 1 つ進める(targetTick == tick のコマンドを並びの順に適用 → 伝導と反応)。
         // newTable があれば、刻みの始めに表をそれに差し替える(GPU の ProbeFrameInput::tableSwap と同じ。呼ぶ側が持ち続ける。T-0139)。
         // 物質の一覧が違う表なら、先に 2 世代のセルの物質を名前で付け替える(T-0223・ADR-0065。BuildSpeciesRemap が通る表であること)
+        // heat は物理の熱の入口(前の刻みの PhysicsWorld::HeatEntries。T-0542): コマンドの後に、入口の位置のセルへ milliJoules を足す
         void Advance(uint64_t tick, std::span<const ProbeCommand> commands,
-                     const BakedReactionTable* newTable = nullptr);
+                     const BakedReactionTable* newTable = nullptr, std::span<const physics::PxHeatEntry> heat = {});
 
         // 刻み tick の始めの状態 S(tick)(= tick 回進めた後)
         [[nodiscard]] std::span<const reaction::RxCell> State(uint64_t tick) const;
@@ -561,6 +563,9 @@ namespace bicameral::sim {
 
         // 最後の Advance のつつきが足したエネルギー(mJ。GPU の表の sourceEnergy と同じ)
         [[nodiscard]] uint64_t SourceEnergy() const { return m_sourceEnergy; }
+
+        // 最後の Advance で物理の熱の入口が足したエネルギー(mJ。T-0542)
+        [[nodiscard]] int64_t PhysicsHeatEnergy() const { return m_physicsHeatEnergy; }
 
         // 最後の Advance で GPU が伝導と反応を計算するはずのブロックの数
         [[nodiscard]] uint32_t ScheduledBlocks() const { return m_scheduledBlocks; }
@@ -587,6 +592,7 @@ namespace bicameral::sim {
         std::vector<uint64_t> m_changedMarks;  // ブロックが最後に変わった刻みの印(tc。待ちの丸め。PROBE_BLOCK_COUNT)
         std::vector<uint8_t> m_scheduled;      // 最後の Advance で予定したブロック(PROBE_BLOCK_COUNT)
         uint64_t m_sourceEnergy = 0;
+        int64_t m_physicsHeatEnergy = 0;
         uint32_t m_scheduledBlocks = 0;
         uint32_t m_wokenBlocks = 0;
         ProbeLimitCounts m_limits;
