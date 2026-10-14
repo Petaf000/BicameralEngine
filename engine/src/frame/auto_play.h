@@ -1,18 +1,20 @@
 // auto_play.h — 人がいない確かめ --auto-play(T-0497・D-491。UE と同じ形のエディタ)の手順と判定。GPU を知らない。
 //
-// 手順(--world sample --editor。条件が揃ったら次へ進む。フレームの数には頼らない):
-//   1. 起動から AUTO_PLAY_HOLD_FRAMES フレーム、世界が刻み 0 の前で止まっている(編集の状態)
-//   2. 編集の状態で木の球 A → 木炭 B を置く(置いた分の刻みだけ進む)。止まった境界 E の状態 S(E) のハッシュ h(AB) を控える
-//   3. 元に戻す(B)→ h(E) が h(AB) と違う。元に戻す(A)→ さらに違う。やり直す(A)→ 1 回目の元に戻す後と同じ。
-//      やり直す(B)→ h(AB) と同じ(止まっている間の Undo/Redo を何回でも)
-//   4. プレイ(始めた刻み P = E)→ 60 刻み後にプレイ中に木の球 C を置く → 刻み P + 100 でやめる
-//   5. 編集の状態へ戻った: カーソルが刻み P の境界・その後 20 フレーム動かない
-//   6. もう一度プレイ → 刻み P〜P+50 のハッシュが 1 回目のプレイと同じ(プレイ前の世界に戻った)・P+60〜P+100 のどこかが違う
-//      (C が消えた)→ やめて終える
-// フレームのループ(frame_loop)は毎フレーム Update に今の様子を渡し、返った操作をボタンと同じ道で行う。
-// ハッシュは読み戻した刻みごとに NoteHash へ(巻き戻しの流し直しで同じ刻みがまた届く。届いた時の「世代」で見分ける)。
+// 手順(--world sample --editor。条件が揃ったら次へ進む。フレームの数には頼らない)。編集の状態では世界の時間が進まない(T-0509):
+//   1. 起動から HOLD_FRAMES フレーム、世界が刻み 0 の前 (0, 0) で止まっている(編集の状態)
+//   2. 木の球 A → 木炭 B を置く。どちらも刻み 0 の適用の単位だけで当たり、カーソルは (0, 1) のまま(刻みの番号が変わらない)。
+//      STILL_FRAMES フレーム動かない
+//   3. プレイ 1(始めた刻み P = 0)→ STROKE_C_AFTER 刻み後にプレイ中に木の球 C → P + STOP_AFTER でやめる
+//   4. 編集の状態へ戻った: カーソルが (P, 1)(プレイ前に置いた A・B を当て直した)・STILL_FRAMES フレーム動かない
+//   5. 元に戻す(B)→ (P, 1)・元に戻す(A)→ (P, 0)・やり直す(A)→ (P, 1)。どれも刻みの番号は P のまま
+//   6. プレイ 2(A だけ)→ 刻み P + 1〜P + SAME_TICKS のどこかがプレイ 1 と違う(B を元に戻した分だけ世界が違う)→ やめる
+//   7. やり直す(B)→ プレイ 3 → 刻み P + 1〜P + SAME_TICKS がプレイ 1 と同じ(A・B の世界に戻った)・
+//      P + STROKE_C_AFTER〜P + STOP_AFTER のどこかが違う(C が消えた)→ 終える(記録はプレイ 3 の流れ。別の起動で再生して同じハッシュ列)
+// フレームのループ(frame_loop)は毎フレーム Update に今の様子を渡し、返った操作をボタン・キーと同じ道で行う。
+// ハッシュは読み戻した刻みごとに NoteHash へ。プレイを押してから、次に世界を保存点へ戻すまで(やめると戻す)をそのプレイの分にする。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -48,16 +50,20 @@ namespace bicameral::frame {
         static constexpr uint64_t HOLD_FRAMES = 30;     // 起動から止まっていることを見るフレーム
         static constexpr uint64_t STROKE_C_AFTER = 60;  // プレイを始めてから C を置くまでの刻み
         static constexpr uint64_t STOP_AFTER = 100;     // プレイを始めてからやめるまでの刻み
-        static constexpr uint64_t SAME_TICKS = 50;      // 2 回のプレイで同じはずの刻みの数
-        static constexpr uint64_t STILL_FRAMES = 20;    // やめた後に動かないことを見るフレーム
+        static constexpr uint64_t SAME_TICKS = 50;      // 2 回のプレイで比べる初めの刻みの数
+        static constexpr uint64_t STILL_FRAMES = 20;    // 編集の状態で動かないことを見るフレーム
+        static constexpr uint64_t ACTION_FRAMES = 3;    // 操作がフレームのループに届くまで待つフレーム
 
         [[nodiscard]] AutoPlayAction Update(const AutoPlayState& state);
 
         // 読み戻した刻み tick の状態のハッシュ
         void NoteHash(uint64_t tick, uint64_t worldHash);
 
-        // 世界を保存点へ戻した(戻す前に読み戻しを全部読んだ後。これより後に届くハッシュは流し直した世界のもの)
-        void NoteRewound() { ++m_generation; }
+        // 世界を保存点へ戻した(戻す前に読み戻しを全部読んだ後。これより後に届くハッシュは今のプレイのものではない)
+        void NoteRewound() {
+            ++m_rewinds;
+            m_recording = 0;
+        }
 
         [[nodiscard]] bool Finished() const { return m_step == Step::Done || m_failed; }
         [[nodiscard]] bool Passed() const { return m_step == Step::Done && !m_failed; }
@@ -68,42 +74,48 @@ namespace bicameral::frame {
             Hold,
             PlaceA,
             PlaceB,
-            UndoB,
-            UndoA,
-            RedoA,
-            RedoB,
-            Check,
+            EditStill,
             Playing,
             PlayingAfterC,
             Stopped,
+            UndoB,
+            UndoA,
+            RedoA,
+            PlayingUndone,
+            StoppedUndone,
+            RedoB,
             Replaying,
             Done,
         };
 
-        // 操作の後の流し直しが終わり、刻みの境界 tick の状態 S(tick) が今の世代で届いた
-        [[nodiscard]] bool Settled(const AutoPlayState& state, uint64_t tick) const;
-        [[nodiscard]] uint64_t HashAt(uint64_t tick) const;
-        AutoPlayAction Act(Step next, AutoPlayAction action);
+        // 編集の状態で、操作の後に止まった(カーソルが編集の境界 (E, unit)・待っているものが無い・要るなら保存点へ戻した)
+        [[nodiscard]] bool EditSettled(const AutoPlayState& state, uint32_t unit, bool rewound) const;
+        // 編集の状態でカーソルが STILL_FRAMES フレーム動かない(まだなら false。動いたら失敗)
+        [[nodiscard]] bool StayedStill(const AutoPlayState& state);
+        // プレイ n の刻み P + 1〜P + SAME_TICKS をプレイ 1 と比べる(同じ数・違う数)
+        [[nodiscard]] std::pair<uint32_t, uint32_t> CompareWithFirst(uint32_t play, uint64_t from, uint64_t to) const;
+        AutoPlayAction Act(Step next, AutoPlayAction action, uint64_t frame);
+        AutoPlayAction StartPlay(Step next, uint32_t play, uint64_t frame);
         void Fail(std::string reason);
         [[nodiscard]] AutoPlayAction UpdateEdit(const AutoPlayState& state);
         [[nodiscard]] AutoPlayAction UpdatePlay(const AutoPlayState& state);
+        [[nodiscard]] AutoPlayAction UpdateAfterStop(const AutoPlayState& state);
 
         Step m_step = Step::Hold;
         bool m_failed = false;
         std::string m_summary;
-        uint32_t m_generation = 0;                                   // 操作を 1 つ行うごとに増やす
-        std::map<uint64_t, std::pair<uint64_t, uint32_t>> m_hashes;  // 刻み → (ハッシュ, 届いた時の世代)
-        std::map<uint64_t, uint64_t> m_firstPlay;                    // 1 回目のプレイの刻み → ハッシュ
-        std::map<uint64_t, uint64_t> m_secondPlay;
-        bool m_recordFirst = false;
-        bool m_recordSecond = false;
 
-        uint64_t m_editTick = 0;  // 編集の状態で比べる刻みの境界 E(置き終えた後のカーソル)
-        uint64_t m_hashAB = 0;
-        uint64_t m_hashUndoB = 0;
-        uint64_t m_hashUndoA = 0;
-        uint64_t m_playStart = 0;   // 1 回目のプレイを始めた刻み P
-        uint64_t m_stillFrame = 0;  // やめた後に止まりを見始めたフレーム
+        // --- 操作の待ち ---
+        uint64_t m_actionFrame = 0;      // 最後に操作したフレーム
+        uint32_t m_rewinds = 0;          // 世界を保存点へ戻した回数
+        uint32_t m_rewindsAtAction = 0;  // 最後の操作の時の m_rewinds
+
+        // --- プレイのハッシュ(プレイ 1〜3。刻み → ハッシュ)---
+        std::array<std::map<uint64_t, uint64_t>, 4> m_plays;
+        uint32_t m_recording = 0;  // 今ハッシュを控えているプレイ(0 = 控えない)
+
+        uint64_t m_editTick = 0;    // 編集の境界 E(= プレイを始める刻み P)
+        uint64_t m_stillFrame = 0;  // 止まりを見始めたフレーム(0 = まだ)
         SimCursor m_stillCursor;
     };
 

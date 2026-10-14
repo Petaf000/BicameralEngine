@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace bicameral::frame {
@@ -71,6 +72,17 @@ namespace bicameral::frame {
         void CatchUpTo(uint64_t tick) { m_catchUpTick = std::max(m_catchUpTick, tick); }
         [[nodiscard]] bool CatchingUp() const { return m_cursor.tick < m_catchUpTick; }
 
+        // 編集の状態の止まる場所(T-0509・ADR-0236): カーソルを hold より先へ進めない。hold までは現実の時間を待たずに進め、
+        // hold の刻みの境界でフレームを切る(次のフレームがその境界から始まり、先頭で保存点へ写せる)。置いたものを時間を進めずに
+        // 当てる時は {E, 1}(刻み E の適用の単位だけ)、置いたものが無ければ {E, 0}。いつ投げるかだけを変え、世界の結果は変えない
+        void HoldAt(SimCursor hold) { m_hold = hold; }
+        void ClearHold() { m_hold.reset(); }
+        [[nodiscard]] std::optional<SimCursor> Hold() const { return m_hold; }
+        [[nodiscard]] bool BeforeHold() const {
+            return m_hold &&
+                   (m_cursor.tick < m_hold->tick || (m_cursor.tick == m_hold->tick && m_cursor.unit < m_hold->unit));
+        }
+
         // 終わった単位の GPU の時間(数フレーム遅れで届く)。unit は刻みの中の番号
         void ReportUnitTime(uint32_t unit, double gpuMilliseconds);
 
@@ -107,6 +119,7 @@ namespace bicameral::frame {
         uint64_t m_stopTick = UINT64_MAX;  // この刻みより先を始めない(既定: 止まらない)
         uint64_t m_breakInterval = 0;      // この倍数の刻みの境界でフレームを切る(0 = 切らない)
         uint64_t m_catchUpTick = 0;        // この刻みまでは現実の時間を待たない(CatchUpTo)
+        std::optional<SimCursor> m_hold;   // ここより先へ進めない(編集の状態。HoldAt)
         double m_pendingTicks = 0.0;
         uint64_t m_droppedTicks = 0;
         double m_lastUsedMilliseconds = 0.0;  // 最後の TakeUnits が予算から使った見積もり
