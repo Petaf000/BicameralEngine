@@ -37,6 +37,7 @@ namespace bicameral::sim {
     struct GasPressureSystem {
         // --- 節(セルの番号の順)---
         std::vector<uint64_t> capacities;       // C_i(mg/µPa の Q48)。開いた境界の面の K も足してある(外は x = 0)
+        std::vector<uint64_t> cellCapacities;   // C_i(K を足す前。外側の反復の食い違い E_真 − C_i x_i に使う。T-0530)
         std::vector<uint64_t> stateCapacities;  // V ÷ c_箱,i²(mg/µPa の Q48。E_i = これ × statePressures)
         std::vector<int64_t> statePressures;    // p̃_i = α(p − p_基準)(µPa。頭打ちなし)
         std::vector<int64_t> divergences;       // Σ 出ていく F*(mg)

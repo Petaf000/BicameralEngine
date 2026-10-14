@@ -1011,6 +1011,8 @@ namespace bicameral::sim {
             system.statePressures[index] = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
         }
 
+        system.cellCapacities = system.capacities;
+
         // --- 面: F* と出ていく量の合計。開いた境界の面は外を x = 0 として対角へ ---
         system.predictedFlows.resize(faces.size());
         for (size_t f = 0; f < faces.size(); ++f) {

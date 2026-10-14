@@ -1,6 +1,9 @@
 // gas_projection.h — 気体の圧力を刻みの中で解く投影の CPU 模型(T-0503 研究・07 §2.6・D-467・D-487 ⑥)。
 // 1 刻みを substeps 回の投影で進める。1 回 = BeginGasPressure(圧力の式)→ 熱の陰解法の多重格子(ImplicitGrid の V サイクル)で
 // 圧力 x を近似に解く → FinishGasPressure(面の流れ・力積・移す)。式の意味は gas_pressure_system.h。
+// 外側の反復(T-0530): 式は刻みの初めで状態方程式を線形にしているので、強い圧力の差(爆発)は 1 回では釣り合わない。
+// x を箱の写しに仮に当て、仮の状態の本当の「基準との質量の差」E_真 と、式が仮定した C_i x_i の食い違い G を右辺に足して解き直す(ニュートン型)。
+// G が許容差以下になった(または上限に届いた)仮の状態をそのまま採る。当てるのは 1 回分なので保存はビット単位のまま。
 // 気体の箱(GasBox)と帳簿は gas_reference のまま。前の回の x を初めの近似に使う(GasProjection に持つ)。
 // データの流れ: GasBox(セル)→ 圧力の式 → ImplicitGrid(C_i を熱容量・K を面の係数として)→ x → GasBox(セル・帳簿)
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
@@ -22,6 +25,16 @@ namespace bicameral::sim {
         ImplicitOptions solver = {.method = ImplicitMethod::Multigrid, .cycles = 64};
         // 止める判定: 全部のセルで、式の誤差(残差 × 対角)= 刻みの終わりの質量のずれがこれ以下(mg。1 mg は面の速さで約 0.2 mm/s)
         uint32_t toleranceMilligrams = 1;
+
+        // --- 外側の反復(T-0530。上限に届いたら、その時の仮の状態を採り、残りの食い違いは次の刻みへ持ち越す〔回数は決まった上限まで。D-468〕)---
+        // 上限(1 = 解き直さない〔T-0503 の線形の 1 回〕)。既定の 4・100 mg・傾きで割るは仮(ユーザー未確認。ADR-0234)
+        uint32_t outerIterations = 4;
+        // 全部のセルで |E_真 − C_i x_i| がこれ以下なら止める(mg。地面の温度で 1 mg は約 0.9 Pa の圧力の食い違い。熱いほど T ÷ T_地面 倍)
+        uint32_t outerToleranceMilligrams = 100;
+        // 右辺に足す食い違いの倍率(%。100 = そのまま)
+        uint32_t outerRelaxationPercent = 100;
+        // 食い違いをセルの傾き s_i(E_真 の変化 ÷ 質量の変化。前の状態との割線)で割ってから足す(対角のニュートン)
+        bool outerSecant = true;
     };
 
     // 前の回の圧力(µPa。セルの順。初めの近似)
@@ -36,7 +49,14 @@ namespace bicameral::sim {
         uint32_t unconverged = 0;    // 上限で止めた回の数
         uint32_t gridLevels = 0;     // 多重格子の段の数(最後の回)
         int64_t worstMassError = 0;  // 止めた時の式の誤差の最大(mg)
-        ImplicitCost solver;         // 節の計算の数・直列の段の数
+
+        // --- 外側の反復(T-0530)---
+        uint32_t outerIterations = 0;     // 仮に当てた回数(全部の回の合計。1 回の投影につき 1 以上)
+        uint32_t maxOuterIterations = 0;  // 1 回の投影で最も多かった数
+        uint32_t outerUnconverged = 0;    // 上限で止めた回の数(最速の約束〔D-467〕を守れなかった回)
+        int64_t worstMismatch = 0;        // 採った状態の食い違い |E_真 − C_i x_i| の最大(mg)
+        int64_t firstMismatch = 0;        // 1 回目(解き直す前)の食い違いの最大(mg。線形にした誤差の大きさ)
+        ImplicitCost solver;              // 節の計算の数・直列の段の数
     };
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options);
