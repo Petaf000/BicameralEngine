@@ -568,14 +568,6 @@ namespace bicameral::sim {
         if (!m_activityUpload || !m_activityReadback)
             return std::unexpected("活性の一覧の写しを作れない");
 
-        // --- 魔法のパッチの列(T-0024)---
-        constexpr uint64_t PATCH_BYTES = uint64_t{MP_LIST_WORDS} * sizeof(uint32_t);
-        m_patches = gpu::CreateBuffer(device, PATCH_BYTES, gpu::BufferKind::UnorderedAccess);
-        m_patchUpload = gpu::CreateBuffer(device, PATCH_BYTES, gpu::BufferKind::Upload);
-        m_patchReadback = gpu::CreateBuffer(device, PATCH_BYTES, gpu::BufferKind::Readback);
-        if (!m_patches || !m_patchUpload || !m_patchReadback)
-            return std::unexpected("魔法のパッチの列のバッファを作れない");
-
         const D3D12_GPU_VIRTUAL_ADDRESS graphInput = m_buffers[BufferGraphInput]->GetGPUVirtualAddress();
         m_constants.graphInputLow = static_cast<uint32_t>(graphInput);
         m_constants.graphInputHigh = static_cast<uint32_t>(graphInput >> 32);
@@ -954,16 +946,6 @@ namespace bicameral::sim {
 
         list->ResourceBarrier(BufferCount, barriers.data());
 
-        // --- 魔法のパッチの列(T-0024)---
-        if (nest.magicPatches.size() != MP_LIST_WORDS ||
-            !WriteUpload(m_patchUpload.Get(), std::as_bytes(std::span(nest.magicPatches))))
-            return false;
-
-        list->CopyResource(m_patches.Get(), m_patchUpload.Get());
-        const D3D12_RESOURCE_BARRIER patchesToUav = gpu::Transition(m_patches.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                                                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        list->ResourceBarrier(1, &patchesToUav);
-
         // --- 活性の一覧: この刻みの種 = CPU の種、もう 1 本は空 ---
         const std::vector<uint32_t> seeds = SeedSlots(nest);
         if (seeds.size() + 1 > MrActivityCapacity(m_capacity.worldBlocks))
@@ -996,8 +978,7 @@ namespace bicameral::sim {
 
     // --- 結び付けと起動 ---
 
-    void GpuMultires::BindRoot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                               bool external) const {
+    void GpuMultires::BindRoot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) const {
         static_assert(sizeof(RootConstants) == ROOT_CONSTANT_COUNT * sizeof(uint32_t));
         static_assert(BufferCount + 3 == UAV_COUNT);  // u4・u5 は外のバッファ、u13 は活性の一覧
         static_assert((UAV_COUNT * 2) + ROOT_CONSTANT_COUNT + 2 + (TABLE_COUNT * 2) <= 64);  // ルート署名の語
@@ -1011,10 +992,6 @@ namespace bicameral::sim {
             const D3D12_GPU_VIRTUAL_ADDRESS view = m_externalViews[i] != 0 ? m_externalViews[i] : standIn;
             list->SetComputeRootUnorderedAccessView(EXTERNAL_VIEW_FIRST + i, view);
         }
-
-        // --- 刻みの間の u5 は魔法のパッチの列(T-0024。multires_patches.hlsli。外のバッファを使う Compute だけ外を結ぶ)---
-        if (!external)
-            list->SetComputeRootUnorderedAccessView(EXTERNAL_VIEW_FIRST + 1, m_patches->GetGPUVirtualAddress());
 
         list->SetComputeRootUnorderedAccessView(ACTIVITY_VIEW, m_activity[m_activityWrite]->GetGPUVirtualAddress());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
@@ -1589,7 +1566,7 @@ namespace bicameral::sim {
 
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(pipeline);
-        BindRoot(list, debugRing, true);
+        BindRoot(list, debugRing);
         list->Dispatch(groupCount, 1, 1);
         UavBarrier(list);
     }
@@ -1602,7 +1579,6 @@ namespace bicameral::sim {
             gpu::RecordCopyToReadback(list, m_buffers[i].Get(), m_readbacks[i].Get());
 
         gpu::RecordCopyToReadback(list, m_activity[m_activityCurrent].Get(), m_activityReadback.Get());
-        gpu::RecordCopyToReadback(list, m_patches.Get(), m_patchReadback.Get());
 
         if (m_timestampCount > 0) {
             list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, m_timestampCount,
@@ -1635,9 +1611,7 @@ namespace bicameral::sim {
         std::ranges::copy(index, nest.index.begin());
         ReadOverflow(words, nest);
 
-        // --- 魔法のパッチの列(T-0024)---
-        nest.magicPatches.resize(MP_LIST_WORDS);
-        return gpu::ReadBuffer(m_patchReadback.Get(), std::as_writable_bytes(std::span(nest.magicPatches)));
+        return true;
     }
 
     std::optional<GpuMultires::ActivitySeeds> GpuMultires::ReadSeeds() const {

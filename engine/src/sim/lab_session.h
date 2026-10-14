@@ -92,10 +92,6 @@ namespace bicameral::sim {
         bool PlaceRegion(LabCellRange range, std::span<const SpeciesAmount> contents, uint32_t temperatureMilliKelvin);
         bool SetTemperatureRegion(LabCellRange range, uint32_t temperatureMilliKelvin);
 
-        // 魔法のパッチ(T-0024・ADR-0095。MakeLabPatchCommand): 次の刻みから durationTicks 刻み、範囲の規則 rule の速さを effect で変える。
-        // rule は今の表(Table())の規則の ID。コマンドには名前の鍵で入る(後で表を替えても同じ名前の規則に効く)。表に無い ID なら false
-        bool ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range);
-
         // 箱の範囲を levels 段細かくする(T-0314・MakeLabRefineCommand)。細かくできる箱(形の refineBlocks > 0)でなければ枠が無く細かくならない
         bool Refine(LabCellRange range, uint32_t levels);
 

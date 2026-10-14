@@ -444,13 +444,6 @@ bicameral_add_gpu_test(gpu_probe_place_test)
 target_link_libraries(gpu_probe_place_test PRIVATE bicameral_sim bicameral_save)
 bicameral_add_gpu_test_case(gpu_probe_place gpu_probe_place_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_place_warp gpu_probe_place_test warp --warp)
-# 魔法のパッチ(T-0323): 止める・速める・はみ出す・断る・表の差し替えを跨ぐパッチを、保存点へ戻す流し直しとばらばらの分け方で流して
-# CPU と毎刻みビット一致(状態の要約にパッチの列が入る)・再生ファイルの要約と一致
-bicameral_add_gpu_test(gpu_probe_patch_test)
-target_link_libraries(gpu_probe_patch_test PRIVATE bicameral_sim bicameral_save)
-bicameral_add_gpu_test_case(gpu_probe_patch gpu_probe_patch_test gpu --no-gbv)
-bicameral_add_gpu_test_case(gpu_probe_patch_warp gpu_probe_patch_test warp --warp)
-set_tests_properties(gpu_probe_patch gpu_probe_patch_warp PROPERTIES TIMEOUT 900)
 # 伝導の連鎖のトレース(T-0087): 2 回・分け方を変えて同じ、CPU リファレンスの予想と一致、わざとずらして最初の刻み・ブロック・セル
 bicameral_add_gpu_test(gpu_probe_trace_test)
 target_link_libraries(gpu_probe_trace_test PRIVATE bicameral_sim)
@@ -630,18 +623,6 @@ set_tests_properties(window_place_tick0_record PROPERTIES LABELS gpu FIXTURES_SE
   PASS_REGULAR_EXPRESSION "--auto-place: .*OK")
 set_tests_properties(window_place_tick0_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_place_tick0 TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
-# 魔法のパッチのパネル(T-0325): 実験室で木を燃やしながらパネルと同じ道でセルロースを使う規則を止め、止めた間は箱のセルロースが
-# 減らない(止めない同じ実験では減る)・列が一杯のパッチは断られる・記録から流し直しても同じ。仮の世界に止める・格子の外に
-# はみ出す触媒・期間 0 のパッチを投げ、足せた / 断られたが GPU から戻る(--auto-patch。通らなければ 1)。
-# 記録を別の起動で再生して同じハッシュ列(パッチのコマンドも再生ファイルだけで再現)
-set(WINDOW_PATCH_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_patch.bcreplay)
-add_test(NAME window_patch_record
-         COMMAND bicameral --world sample --editor --auto-patch --frames 120 --record ${WINDOW_PATCH_FILE})
-add_test(NAME window_patch_play COMMAND bicameral --replay ${WINDOW_PATCH_FILE} --target-fps 30)
-set_tests_properties(window_patch_record PROPERTIES LABELS gpu FIXTURES_SETUP window_patch TIMEOUT 900
-  PASS_REGULAR_EXPRESSION "--auto-patch: .*OK")
-set_tests_properties(window_patch_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_patch TIMEOUT 240
-  PASS_REGULAR_EXPRESSION "再生: OK")
 # 覗き窓(T-0096): 覗かずに記録した再生ファイルを、火をつけた木箱の壁を覗いて一番細かい段まで潜りながら再生してもハッシュ列が同じ(D-403)
 add_test(NAME window_replay_peek
          COMMAND bicameral --replay ${WINDOW_REPLAY_FILE} --peek 28,32,32 --peek-depth 9 --view slice)
@@ -789,7 +770,7 @@ foreach(_name IN ITEMS
     gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
-    gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_patch_test gpu_probe_physics_test gpu_probe_fire_test
+    gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test play_metric_test
     gpu_play_metric_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)

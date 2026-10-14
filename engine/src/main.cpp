@@ -62,8 +62,6 @@
 //                                    --check-physics と一緒に。T-0444)
 //   --auto-place                     筆で置く・足す・はみ出す・当たらない値を投げて火を付け、当たるはずの置くコマンドが全部
 //                                    当たったかを確かめる(--editor と一緒に。T-0222)
-//   --auto-patch                     魔法のパッチのパネルで実験室に止めるパッチを置き、止めた反応が進まない・仮の世界に投げた
-//                                    パッチが足せた / 断られたで戻るかを確かめる(--editor と一緒に。T-0325)
 //   --auto-table-edit                反応表のパネルで --packages の写しの木の燃焼の速さを書き戻す → 当たる → 戻す → 元の版で終える
 //                                    (--editor と一緒に。T-0219)
 //   --auto-mixer                     環境ミキサーで標準パッケージを全部足す → 当たる → 元素を外す(全部外れる)→ 初めの表で終える
@@ -383,8 +381,6 @@ namespace {
             loop.autoMetrics = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
-        else if (argument == L"--auto-patch")
-            loop.autoPatch = true;
         else
             return false;
 

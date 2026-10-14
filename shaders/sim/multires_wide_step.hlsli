@@ -381,7 +381,7 @@ WideCellStep StepWideCellAs(Cell shape, MrBlock block, uint32_t index, uint32_t 
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     const uint32_t address = PageCellAddress(block.page, index);
     const Cell before = LoadGpuWideCell(shape, g_cells[address], block.page, side, index);
-    const RxWaitStepOf<Cell> step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
+    const RxWaitStepOf<Cell> step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
 
     WideCellStep result;
     result.tail = WideTailCount(step.cell);
@@ -405,7 +405,7 @@ WideCellStep StepSpaceCell(MrBlock block, uint32_t index, uint32_t side) {
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     const RxGpuSpaceCell before = LoadGpuWideCell(SpaceShape(index), g_cells[PageCellAddress(block.page, index)],
                                                   block.page, side, index);
-    const RxWaitStepOf<RxGpuSpaceCell> step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
+    const RxWaitStepOf<RxGpuSpaceCell> step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
 
     WideCellStep result;
     result.tail = WideTailCount(step.cell);
@@ -595,7 +595,7 @@ WaitBlockResult StepPagedWaitWide(uint32_t slot, uint32_t thread) {
             range = WideRange(block.page, side, index);
 
         if (range.x == range.y) {
-            const RxWaitStep step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
+            const RxWaitStep step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
             if ((step.limits & RX_LIMIT_PRODUCTS) == 0) {
                 g_cells[address] = step.cell;
                 wakeTick = MinTick(wakeTick, step.wakeTick);

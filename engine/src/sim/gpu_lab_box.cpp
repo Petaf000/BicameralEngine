@@ -25,7 +25,6 @@ namespace bicameral::sim {
         GpuLabBox result(std::move(*nest));
         result.m_speciesCount = static_cast<uint32_t>(table.species.size());
         result.m_shape = shape;
-        result.m_ruleCount = static_cast<uint32_t>(table.rules.size());
 
         const auto shader = gpu::LoadShader("sim/lab_box_apply.cso");
         if (!shader)
@@ -35,15 +34,10 @@ namespace bicameral::sim {
         if (!remapShader)
             return std::unexpected(remapShader.error());
 
-        const auto boundaryShader = gpu::LoadShader("sim/lab_box_patch_boundaries.cso");
-        if (!boundaryShader)
-            return std::unexpected(boundaryShader.error());
-
         ID3D12RootSignature* root = result.m_nest.RootSignature();
         result.m_applyPipeline = gpu::CreateComputePipeline(device, root, *shader);
         result.m_remapPipeline = gpu::CreateComputePipeline(device, root, *remapShader);
-        result.m_patchBoundaryPipeline = gpu::CreateComputePipeline(device, root, *boundaryShader);
-        if (!result.m_applyPipeline || !result.m_remapPipeline || !result.m_patchBoundaryPipeline)
+        if (!result.m_applyPipeline || !result.m_remapPipeline)
             return std::unexpected("実験室の箱のパイプラインを作れない");
 
         // --- コマンドの列(u4)と写し ---
@@ -95,23 +89,16 @@ namespace bicameral::sim {
             m_nest.RecordProcessRequests(list, debugRing);
         }
 
-        // --- 魔法のパッチの境(T-0024。CPU の ApplyLabPatchBoundaries。毎刻み 1 スレッド)---
-        const D3D12_GPU_VIRTUAL_ADDRESS patchAddress = m_nest.PatchListAddress();
-        m_nest.SetExternalViews(m_commands->GetGPUVirtualAddress(), patchAddress);
-        m_nest.RecordExternalDispatch(
-            list, debugRing, m_patchBoundaryPipeline.Get(), 1,
-            {static_cast<uint32_t>(tick), lab::LabPackShape(m_shape), static_cast<uint32_t>(tick >> 32), 0});
-
-        // --- コマンドを当てる(無ければ投げない。CPU の ApplyLabCommands も何もしない)。u5 = パッチの列 ---
+        // --- コマンドを当てる(無ければ投げない。CPU の ApplyLabCommands も何もしない)---
         if (!commands.empty()) {
             if (!RecordCommandUpload(list, commands))
                 return false;
 
             const D3D12_GPU_VIRTUAL_ADDRESS commandAddress = m_commands->GetGPUVirtualAddress();
-            m_nest.SetExternalViews(commandAddress, patchAddress);
-            m_nest.RecordExternalDispatch(
-                list, debugRing, m_applyPipeline.Get(), 1,
-                {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, m_ruleCount});
+            m_nest.SetExternalViews(commandAddress, 0);
+            m_nest.RecordExternalDispatch(list, debugRing, m_applyPipeline.Get(), 1,
+                                          {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape),
+                                           m_speciesCount, 0});
         }
 
         m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LabStepOptions(m_shape));
@@ -119,10 +106,9 @@ namespace bicameral::sim {
         return true;
     }
 
-    // 物質の付け替え(T-0242): 付け替えの表を u4 に写し、箱の全部のセルを 1 スレッド 1 セルで付け替える。
-    // u5 はパッチの列(スレッド 0 が転換の替える先を付け替える。T-0377)
+    // 物質の付け替え(T-0242): 付け替えの表を u4 に写し、箱の全部のセルを 1 スレッド 1 セルで付け替える
     bool GpuLabBox::RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                       std::span<const uint32_t> remapWords, uint32_t cellCount, uint64_t tick) {
+                                       std::span<const uint32_t> remapWords, uint32_t cellCount) {
         ComPtr<ID3D12Device> device;
         if (remapWords.empty() || FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
@@ -149,10 +135,9 @@ namespace bicameral::sim {
 
         constexpr uint32_t REMAP_GROUP_THREADS = 64;  // lab_box.hlsl の RemapLabSpecies と同じ
         const D3D12_GPU_VIRTUAL_ADDRESS remapAddress = m_remap->GetGPUVirtualAddress();
-        m_nest.SetExternalViews(remapAddress, m_nest.PatchListAddress());
+        m_nest.SetExternalViews(remapAddress, 0);
         m_nest.RecordExternalDispatch(list, debugRing, m_remapPipeline.Get(),
-                                      (cellCount + REMAP_GROUP_THREADS - 1) / REMAP_GROUP_THREADS,
-                                      {cellCount, static_cast<uint32_t>(tick), static_cast<uint32_t>(tick >> 32), 0});
+                                      (cellCount + REMAP_GROUP_THREADS - 1) / REMAP_GROUP_THREADS, {cellCount, 0, 0, 0});
 
         return true;
     }

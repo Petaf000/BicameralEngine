@@ -7,7 +7,7 @@
 // どちらもフレームのリストの先頭(単位とコマンドを足す前)で記録する。リストの間はどのバッファも COMMON(バッファは
 // ExecuteCommandLists の後で COMMON に戻る)なので、COMMON → コピー → COMMON の明示の遷移で囲めば、後ろの単位の状態の扱いは変わらない。
 // 写すもの: セルと熱のキャッシュ(S(t) の世代だけ)・予定の印・活性の一覧 2 組・ハッシュの表・刻みのイベントの一時置き場・
-// 魔法のパッチの列(T-0323)・物理の u0〜u13。
+// 物理の u0〜u13。
 // 写さないもの: コマンドキュー(戻すと空にし、呼ぶ側が足し直す)・抽出・イベントのリング・カウンタ・トレース(どれも出力。世界の結果に入らない)。
 // 同じ道で、別の ProbeSim(本物の世界)の S(t) をこの世界へ写す(写しの早送り。T-0412・ADR-0198。sim/world_copy)。
 #include <algorithm>
@@ -81,7 +81,7 @@ namespace bicameral::sim {
         };
 
         for (const ComPtr<ID3D12Resource>& buffer : {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue,
-                                                     m_tickEvents, m_blockSchedule, m_magicPatches, m_speciesRemap})
+                                                     m_tickEvents, m_blockSchedule, m_speciesRemap})
             add(buffer);
 
         rng::for_each(m_activeLists, add);
@@ -118,8 +118,6 @@ namespace bicameral::sim {
             {.resource = m_activeLists[1].Get(), .bytes = PROBE_ACTIVE_LIST_BYTES},
             {.resource = m_hashes.Get(), .bytes = PROBE_HASH_BYTES},
             {.resource = m_tickEvents.Get(), .bytes = PROBE_TICK_EVENT_BYTES},
-            {.resource = m_magicPatches.Get(),
-             .bytes = PROBE_PATCH_LIST_BYTES},  // 効いているパッチ(世界の状態。T-0323)
         };
 
         if (m_physics) {

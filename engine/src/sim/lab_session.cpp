@@ -169,13 +169,6 @@ namespace bicameral::sim {
         return Queue(MakeLabRefineCommand(m_tick, m_sequence, range, levels));
     }
 
-    bool LabSession::ApplyPatch(uint32_t rule, uint32_t effect, uint32_t durationTicks, LabCellRange range) {
-        if (rule >= m_table.rules.size())
-            return false;
-
-        return Queue(MakeLabPatchCommand(m_tick, m_sequence, m_table.rules[rule].key, effect, durationTicks, range));
-    }
-
     // --- 刻む ---
 
     // 刻み tick のコマンド(置いたもの + 再生中の記録)を (targetTick, sequence) の順に
@@ -257,7 +250,7 @@ namespace bicameral::sim {
         // --- 物質の一覧が変わった刻み: コマンドの前に箱の全部のセルを付け替える(GPU と CPU が同じ RxRemapCell。T-0242)---
         std::optional<SpeciesRemap> boxRemap = std::exchange(m_boxRemap, std::nullopt);
         if (boxRemap && !m_box.RecordSpeciesRemap(list, m_ring.GpuAddress(), PackSpeciesRemap(*boxRemap),
-                                                  static_cast<uint32_t>(m_cpu.cells.size()), tick))
+                                                  static_cast<uint32_t>(m_cpu.cells.size())))
             return std::unexpected("箱の物質の付け替えを記録できない");
 
         if (!m_box.RecordTick(list, m_ring.GpuAddress(), tick, commands))
@@ -283,14 +276,13 @@ namespace bicameral::sim {
 
         // --- CPU リファレンス → 比べる ---
         if (boxRemap) {
-            m_lastRemapReport = RemapLabBox(m_cpu, *boxRemap, m_table, tick);
+            m_lastRemapReport = RemapLabBox(m_cpu, *boxRemap, m_table);
             Log(Channel::Sim, Level::Info,
                 "実験室: 刻み {} で物質を付け替えた(分けた物質 {} µmol・失った原子 {} + {} µmol・単体が無く捨てた原子 "
-                "{} µmol・"
-                "足したエネルギー {} mJ・効かなくなった転換 {})",
+                "{} µmol・足したエネルギー {} mJ)",
                 tick, m_lastRemapReport->decomposedMicromoles, m_lastRemapReport->remainderAtomMicromoles,
                 m_lastRemapReport->overflowAtomMicromoles, m_lastRemapReport->droppedAtomMicromoles,
-                m_lastRemapReport->energyDeltaMilliJoules, m_lastRemapReport->conversionsDisabled);
+                m_lastRemapReport->energyDeltaMilliJoules);
         }
 
         StepLabBox(m_cpu, m_table, tick, commands, Shape());

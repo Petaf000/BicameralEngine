@@ -203,10 +203,10 @@ void ConductBlock(DispatchNodeInputRecord<BlockRecord> input, uint3 groupThreadI
     // ブロックが最後に変わった刻みの印(刻みの初めの値。書くのはこのグループだけで、読んだ後のバリアの後に書く)
     const uint64_t changedMark = LoadBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block);
 
-    // --- 伝導と反応(前の世代の自分と 6 面の隣から)。セルを覆う魔法のパッチを表に重ねる(T-0323。核の展開の数は 1 のまま)---
+    // --- 伝導と反応(前の世代の自分と 6 面の隣から)---
     const HcThermalCache self = thermal[current + cellIndex];
     const ProbeCellStep step = ProbeStepCell(
-        MpPatchTable(ReactionTable(), 0, cell.x, cell.y, cell.z, tick), cells[current + cellIndex], self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self),
+        ReactionTable(), cells[current + cellIndex], self, NeighborOrSelf(current, cell, int3(-1, 0, 0), self),
         NeighborOrSelf(current, cell, int3(1, 0, 0), self), NeighborOrSelf(current, cell, int3(0, -1, 0), self),
         NeighborOrSelf(current, cell, int3(0, 1, 0), self), NeighborOrSelf(current, cell, int3(0, 0, -1), self),
         NeighborOrSelf(current, cell, int3(0, 0, 1), self), tick, changedMark, cellIndex);

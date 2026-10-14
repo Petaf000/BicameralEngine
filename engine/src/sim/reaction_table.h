@@ -93,7 +93,7 @@ namespace bicameral::sim {
 
     // --- ベイクした表 ---
 
-    static_assert(sizeof(reaction::RxSpecies) == 32);
+    static_assert(sizeof(reaction::RxSpecies) == 24);
     static_assert(sizeof(reaction::RxRule) == 80);
     static_assert(sizeof(reaction::RxCell) == 112);
 
@@ -112,12 +112,6 @@ namespace bicameral::sim {
         [[nodiscard]] uint32_t RuleIndex(uint32_t position) const { return ruleIndex[position]; }
         [[nodiscard]] uint64_t Rate(uint32_t rule, uint32_t kelvin) const {
             return rates[(size_t{rule} * reaction::RX_RATE_TABLE_KELVINS) + kelvin];
-        }
-
-        // 魔法のパッチの列(T-0024。common/magic_patch.hlsli の語。空 = パッチなし = 数 0)。多重解像度の刻みだけが読む
-        std::span<const uint32_t> magicPatches;
-        [[nodiscard]] uint32_t PatchWord(uint32_t word) const {
-            return word < magicPatches.size() ? magicPatches[word] : 0u;
         }
     };
 

@@ -21,7 +21,6 @@
 #ifndef BICAMERAL_MULTIRES_HLSLI
 #define BICAMERAL_MULTIRES_HLSLI
 
-#include "magic_patch.hlsli"
 #include "reaction.hlsli"
 
 #ifdef __cplusplus
@@ -666,7 +665,6 @@ FX_FN uint64_t MrChangeMark(uint64_t tick) {
 // この刻みにつつかれた(busyTick = この刻みの印)ブロックは「刻みの直前に変わった」として評価する(この刻みにも確率 f で進む)。
 // 次の刻みからは tc = この刻みの印で引き直すので、呼ぶ側はつつかれたブロックを次の刻みにまた評価する(記憶が無いので偏らない)
 // セルの形 Cell のテンプレート(RxCell = GPU と今の世界、C++ の RxWideCell = 溢れを持つ世界。T-0187)
-// Table は反応の表に加えて PatchWord(word)(魔法のパッチの列。magic_patch.hlsli)を持つ
 template <typename Table, typename Cell>
 FX_FN RxWaitStepOf<Cell> MrStepCellWait(Table table, Cell cell, uint64_t worldSeed, uint64_t tick, MrBlock block,
                                         uint32_t index) {
@@ -675,12 +673,7 @@ FX_FN RxWaitStepOf<Cell> MrStepCellWait(Table table, Cell cell, uint64_t worldSe
     const uint64_t mark = MrChangeMark(tick);
     const uint64_t changedMark = block.busyTick < mark ? block.busyTick : mark - 1;
 
-    // --- 魔法のパッチ(T-0024・ADR-0095): セルを覆うパッチを表に重ねる(Table は PatchWord でパッチの列を読む)---
-    const MpPatchedTable<Table> patched = MpPatchTable(table, block.level, block.originX + (int64_t)MrCellX(index),
-                                                       block.originY + (int64_t)MrCellY(index),
-                                                       block.originZ + (int64_t)MrCellZ(index), tick);
-
-    return RxStepCellWait(patched, cell, worldSeed, mark, changedMark, cellId);
+    return RxStepCellWait(table, cell, worldSeed, mark, changedMark, cellId);
 }
 
 // 上限の印(RxWaitStep::limits)の、数える器への足し分(T-0163)。CPU は counters[MR_COUNTER_LIMIT_*] に足し、GPU はスレッドで

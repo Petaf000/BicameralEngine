@@ -44,7 +44,6 @@ namespace bicameral::sim {
             auto retired = m_nest.ReplaceTable(table);
             if (retired) {
                 m_speciesCount = static_cast<uint32_t>(table.species.size());
-                m_ruleCount = static_cast<uint32_t>(table.rules.size());
             }
 
             return retired;
@@ -52,10 +51,9 @@ namespace bicameral::sim {
 
         // 箱の全部のセル(cellCount 個。MultiresNest::cells の数)を付け替える(T-0242・ADR-0065。shaders/sim/lab_box.hlsl の
         // RemapLabSpecies。CPU リファレンスは RemapLabBox)。remapWords は sim::PackSpeciesRemap(今の表 → 新しい表)。
-        // 新しい表は ReplaceTable で先に結んでおく。写しのバッファはこのリストが終わるまで持つ(次の付け替えで捨てる)。
-        // 魔法のパッチの列の転換の替える先も同じ段で付け替える(tick = 差し替える刻み。T-0377)
+        // 新しい表は ReplaceTable で先に結んでおく。写しのバッファはこのリストが終わるまで持つ(次の付け替えで捨てる)
         [[nodiscard]] bool RecordSpeciesRemap(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                              std::span<const uint32_t> remapWords, uint32_t cellCount, uint64_t tick);
+                                              std::span<const uint32_t> remapWords, uint32_t cellCount);
 
         void RecordReadback(ID3D12GraphicsCommandList10* list) { m_nest.RecordReadback(list); }
         [[nodiscard]] bool Read(MultiresNest& nest) const { return m_nest.Read(nest); }
@@ -68,15 +66,12 @@ namespace bicameral::sim {
         GpuMultires m_nest;
         ComPtr<ID3D12PipelineState> m_applyPipeline;
         ComPtr<ID3D12PipelineState> m_remapPipeline;
-        ComPtr<ID3D12PipelineState> m_patchBoundaryPipeline;  // 魔法のパッチの境(T-0024)
         ComPtr<ID3D12Resource> m_remap;                       // 付け替えの表(u4。T-0242)
         ComPtr<ID3D12Resource> m_remapUpload;                 // その写し
         ComPtr<ID3D12Resource> m_commands;                    // この刻みのコマンドの列(u4)
         ComPtr<ID3D12Resource> m_commandUpload;               // CPU が書く写し
         uint32_t m_speciesCount = 0;
         lab::LabBoxShape m_shape = LAB_SINGLE_ROOT_SHAPE;
-        // 今の表の規則の数(パッチの検査。ルートの SRV は GetDimensions で大きさを読めない〔未定義〕ので定数で渡す。T-0024)
-        uint32_t m_ruleCount = 0;
     };
 
 }  // namespace bicameral::sim

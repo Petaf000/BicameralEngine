@@ -6,7 +6,6 @@
 
 #include "common/debug_ring.hlsli"
 #include "common/graph_trace.hlsli"  // u2 space1(連鎖のトレース。T-0087)
-#include "common/probe_patch.hlsli"
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
 #include "common/species_remap.hlsli"
@@ -35,14 +34,12 @@ ByteAddressBuffer reactionRates : register(t4);
 ByteAddressBuffer speciesRemap
     : register(t5);  // 物質を足す・消す差し替えの付け替えの表(common/species_remap.hlsli の形。T-0223)
 
-// u13 は物理の物(probe_tick.hlsl だけが結ぶ)。u14 は魔法のパッチの列(MP_LIST_WORDS 語。common/probe_patch.hlsli。T-0323)
-RWStructuredBuffer<uint32_t> magicPatches : register(u14);
+// u13 は物理の物(probe_tick.hlsl だけが結ぶ)
 
 cbuffer UnitConstants : register(b0) {
     uint32_t tickLow;  // この単位の刻み(記録するときに埋め込む)
     uint32_t tickHigh;
-    uint32_t argument;   // Extract: 書き先の組
-    uint32_t ruleCount;  // 今の表の規則の数(パッチを足す時の検査。T-0323)
+    uint32_t argument;  // Extract: 書き先の組
 };
 
 // reaction.hlsli の Table の約束(表の読み方)
@@ -59,26 +56,7 @@ struct ProbeReactionTable {
     uint64_t Rate(uint32_t rule, uint32_t kelvin) {
         return reactionRates.Load<uint64_t>((rule * RX_RATE_TABLE_KELVINS + kelvin) * 8);
     }
-
-    // 魔法のパッチの列(magic_patch.hlsli の MpPatchTable が読む。T-0323)
-    uint32_t PatchWord(uint32_t word) { return magicPatches[word]; }
 };
-
-// magic_patch.hlsli の List の約束(パッチの列の読み書き。適用の単位だけが書く)
-struct ProbePatchList {
-    uint32_t unused;
-
-    uint32_t PatchWord(uint32_t word) { return magicPatches[word]; }
-
-    void SetPatchWord(uint32_t word, uint32_t value) { magicPatches[word] = value; }
-};
-
-ProbePatchList PatchList() {
-    ProbePatchList list;
-    list.unused = 0;
-
-    return list;
-}
 
 ProbeReactionTable ReactionTable() {
     ProbeReactionTable table;
@@ -100,8 +78,6 @@ struct ProbeSpeciesRemap {
     uint32_t PartOffset() { return PartBeginOffset() + (speciesCount + 1) * 4; }
 
     uint32_t UnitOffset() { return PartOffset() + partCount * 8; }
-
-    uint32_t SpeciesCount() { return speciesCount; }
 
     uint32_t NewId(uint32_t oldId) { return speciesRemap.Load(NewIdOffset() + oldId * 4); }
 

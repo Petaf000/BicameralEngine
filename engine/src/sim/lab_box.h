@@ -114,12 +114,6 @@ namespace bicameral::sim {
     // 印そのものはセルを変えず、箱をつつく(待ちの予定を新しい表で求め直す)。印は版だけ。表の中身は記録の tables に残す(T-0217)
     [[nodiscard]] Command MakeLabTableCommand(uint64_t targetTick, uint32_t sequence, uint64_t tableVersion);
 
-    // 魔法のパッチ(T-0024・ADR-0095。common/magic_patch.hlsli)を刻み targetTick から durationTicks 刻み足す。
-    // 名前の鍵 ruleKey(RxRule::key。表を替えても同じ名前の規則に効く。T-0287)の規則の速さを、
-    // effect(MpMakeScaleEffect(shift) = 2^shift 倍 / MpMakeStopEffect() = 止める / MpMakeCatalystEffect(J/mol) = 活性化エネルギーを下げる。T-0288)で変える。範囲は箱のセルの座標
-    [[nodiscard]] Command MakeLabPatchCommand(uint64_t targetTick, uint32_t sequence, uint64_t ruleKey, uint32_t effect,
-                                              uint32_t durationTicks, LabCellRange range);
-
     // 箱の range(レベル 0 = 箱のセルの座標)を levels 段(1〜lab::LAB_MAX_REFINE_LEVELS)細かくする(T-0314・ADR-0137)。
     // セルは変えない。刻み targetTick のほかのコマンドを当てる前に、木の「細かくする」要求(17 §5)で子を作る(LabRefineRounds)。
     // 細かくした所のセルは同じ濃度・温度のまま(子の量の単位は 8^-k)。枠が足りない所は細かくならない(箱の形の refineBlocks)
@@ -178,20 +172,13 @@ namespace bicameral::sim {
     uint32_t ApplyLabCommands(MultiresNest& nest, const BakedReactionTable& table, std::span<const Command> commands,
                               lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 
-    // CPU リファレンス: 刻み tick の初め(コマンドの前)に、速さが変わる魔法のパッチ(始まり・終わり)の範囲が重なる根をつつき、
-    // 終わったパッチを列から除く(shaders/sim/lab_box.hlsl の ApplyLabPatchBoundaries と同じ。T-0024)。つついたら true
-    bool ApplyLabPatchBoundaries(MultiresNest& nest, uint64_t tick, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
-
     // --- 物質の一覧が変わる表への差し替え(T-0242・ADR-0065)---
 
     // CPU リファレンス: 箱の全部のセル(MultiresNest::cells。一様の値と頁。空のセルは空のまま)を remap(今の表 → next)で付け替える。
     // shaders/sim/lab_box.hlsl の RemapLabSpecies と同じ。箱は 1 レベルなので端数の枠と帳簿は使っていない(付け替えない)。
-    // 魔法のパッチの列の転換の替える先も付け替える(T-0377。tick = 表を差し替える刻み。効かなくなった転換の数は報告に)
-    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next,
-                                   uint64_t tick);
+    SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next);
 
-    // まだ刻んでいない置く操作(FILL・FILL_REGION)の材料の物質 ID を付け替える(消えた物質の材料は落とす)。
-    // 魔法のパッチのコマンドは転換の替える先を付け替える(消えた物質なら当てる時に断られる。T-0377)。ほかの種類はそのまま
+    // まだ刻んでいない置く操作(FILL・FILL_REGION)の材料の物質 ID を付け替える(消えた物質の材料は落とす)。ほかの種類はそのまま
     [[nodiscard]] Command RemapLabCommand(const Command& command, const SpeciesRemap& remap);
 
     // --- 一部を細かくする(T-0314・ADR-0137)---
@@ -212,7 +199,7 @@ namespace bicameral::sim {
     // 細かくした(レベル 1 以上の本物の)ブロックの数
     [[nodiscard]] uint32_t LabRefinedBlockCount(const MultiresNest& nest);
 
-    // CPU リファレンスの 1 刻み: 細かくする(ApplyLabRefines)→ パッチの境 → コマンドを当てる → StepNest(LabStepOptions(shape))
+    // CPU リファレンスの 1 刻み: 細かくする(ApplyLabRefines)→ コマンドを当てる → StepNest(LabStepOptions(shape))
     void StepLabBox(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                     std::span<const Command> commands, lab::LabBoxShape shape = LAB_SINGLE_ROOT_SHAPE);
 

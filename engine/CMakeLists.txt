@@ -190,7 +190,6 @@ add_executable(bicameral
   src/editor/brush_panel.cpp
   src/editor/copy_panel.cpp  # 写しの早送り(T-0412)
   src/editor/play_metric_panel.cpp  # 遊びの指標(T-0432)
-  src/editor/patch_panel.cpp
   src/editor/editor_overlay.cpp
   src/editor/gauge_panel.cpp
   src/editor/graph_panel.cpp
