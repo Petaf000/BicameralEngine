@@ -200,6 +200,10 @@ T-0226 までの気体は等温に近く(塊は風上の熱だけを運ぶ)、�
   (段の中で飛ばす)、セルごとに forced・next・committedOutflow・taken を粗い小刻みの間持つ。乱数の小刻みの通し番号はレベルごとに段の中で作る。
   分けた形(レベル 0 は 24・レベル 1 は 48)の閉じた箱・静止大気・開いた境界と風・粗いセルが細かい範囲へ 1500 m/s で流れ込む箱(粗い側から何度も引く時の抑えを通る)
   も HW・WARP とも毎刻みビット一致(gpu_gas_tree_test の 9 場面)。木が変わる時の面の一覧と d ≥ 2 は T-0357、費用の計測は T-0358。
+- **高さの分布の層の基準(T-0499・ADR-0182 の改訂)**: `MakeHydrostaticReference` は層ごとの温度と成分(`GasReferenceLayer` の列。
+  基準の大気を各層の高さで `sim::SampleAtmosphere` したもの)から作れる。一様な形はそれを呼び、ビット単位で同じ。床の圧力は
+  `sim::AtmospherePressureMicroPascal`(同じ形の積み方)で出すので、層の圧力は高さの静水圧と 1 Pa 以内で合う。力は基準との差で入れるので、
+  温度の逆転・成分の傾きのある静止大気もどの重力(0・月・地球・上限)でも動かない(world_atmosphere_test)。木(多重解像度)はまだ一様な形だけ。
 - **環境の値のホットリロード(T-0470・ADR-0200)**: 重力・音速の基準・基準の大気は刻みの境目で `SetGasTreeEnvironment`(GPU は
   `GpuGasTree::RecordEnvironment` が t0〜t3 を写し直す)が替える。係数・層の基準・頭打ちの温度は `MakeGasTree` と同じ道(`BuildLevelEnvironments`)で
   作り直し、木の形と状態はそのまま(ADR-0194 の 1)。小刻みの数(substeps・σ)は替えないので、音速の基準の上限は木の形から

@@ -181,14 +181,18 @@ namespace {
         EXPECT(table.environment.soundSpeedMillimetersPerSecond ==
                sim::StandardWorldPhysics().soundSpeedMillimetersPerSecond);
 
-        // 基準の大気: 4 つの成分・足して 1・15 ℃・1 気圧
-        EXPECT(table.atmosphere.fractions.size() == 4);
-        uint64_t total = 0;
-        for (const sim::AtmosphereFraction& fraction : table.atmosphere.fractions)
-            total += fraction.partsPerMillion;
+        // 基準の大気: ISA の層の境 8 点(T-0499)・どの点も 4 つの成分で足して 1・海面 15 ℃・1 気圧
+        EXPECT(table.atmosphere.points.size() == 8);
+        for (const sim::AtmospherePoint& point : table.atmosphere.points) {
+            uint64_t total = 0;
+            for (const sim::AtmosphereFraction& fraction : point.fractions)
+                total += fraction.partsPerMillion;
 
-        EXPECT(total == sim::ATMOSPHERE_PARTS_PER_WHOLE);
-        EXPECT(table.atmosphere.temperatureMilliKelvin == 288150);
+            EXPECT(point.fractions.size() == 4 && total == sim::ATMOSPHERE_PARTS_PER_WHOLE);
+        }
+
+        EXPECT(!table.atmosphere.Empty() && table.atmosphere.points.front().heightMillimeters == 0);
+        EXPECT(!table.atmosphere.Empty() && table.atmosphere.points.front().temperatureMilliKelvin == 288150);
         EXPECT(table.atmosphere.surfacePressurePascals == 101325);
 
         // 空気で満たすセル: 格子の全部・4 つの成分・理想気体で 1 気圧(0.125 m³ に 1 万分の 1 の精度で)
@@ -219,7 +223,7 @@ namespace {
 
         // 再生の作り直し(表の中身だけ)でも同じ大気
         const auto rebuilt = RebuildReactionTable(loaded->tableBytes, loaded->tableVersion);
-        EXPECT(rebuilt && rebuilt->table.atmosphere.fractions.size() == 4 &&
+        EXPECT(rebuilt && rebuilt->table.atmosphere.points == loaded->table.atmosphere.points &&
                rebuilt->table.atmosphere.surfacePressurePascals == 101325);
     }
 
@@ -296,26 +300,33 @@ namespace {
             return sim::BakeWorldAtmosphere(definition, table);
         };
 
-        const sim::WorldAtmosphereDefinition good{.fractions = {{"nitrogen", 790000}, {"oxygen", 210000}},
-                                                  .temperatureMilliKelvin = 300000,
-                                                  .surfacePressurePascals = 101325};
+        // 一様な書き方(高さ 0 の点 1 つ)
+        const sim::WorldAtmosphereDefinition good{
+            .points = {{.temperatureMilliKelvin = 300000, .fractions = {{"nitrogen", 790000}, {"oxygen", 210000}}}},
+            .surfacePressurePascals = 101325};
         const auto baked = bake(good);
-        EXPECT(baked && baked->fractions.size() == 2 && baked->fractions[0].species < baked->fractions[1].species);
+        EXPECT(baked && baked->points.size() == 1 && baked->points[0].fractions.size() == 2 &&
+               baked->points[0].fractions[0].species < baked->points[0].fractions[1].species);
 
         auto shortSum = good;
-        shortSum.fractions[0].partsPerMillion = 780000;
+        shortSum.points[0].fractions[0].partsPerMillion = 780000;
         const auto shortResult = bake(shortSum);
         EXPECT(!shortResult && Contains(shortResult.error(), "990000"));
 
         auto unknown = good;
-        unknown.fractions[0].species = "helium";
+        unknown.points[0].fractions[0].species = "helium";
         const auto unknownResult = bake(unknown);
         EXPECT(!unknownResult && Contains(unknownResult.error(), "helium"));
 
         auto noTemperature = good;
-        noTemperature.temperatureMilliKelvin = 0;
+        noTemperature.points[0].temperatureMilliKelvin = 0;
         const auto noTemperatureResult = bake(noTemperature);
         EXPECT(!noTemperatureResult && Contains(noTemperatureResult.error(), "atmosphere_temperature_mk"));
+
+        auto noPressure = good;
+        noPressure.surfacePressurePascals = 0;
+        const auto noPressureResult = bake(noPressure);
+        EXPECT(!noPressureResult && Contains(noPressureResult.error(), "atmosphere_surface_pressure_pa"));
 
         const auto onlyPressure = bake({.surfacePressurePascals = 101325});
         EXPECT(!onlyPressure && Contains(onlyPressure.error(), "成分"));
