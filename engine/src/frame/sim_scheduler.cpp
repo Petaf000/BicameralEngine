@@ -62,7 +62,14 @@ namespace bicameral::frame {
 
         while (count < m_settings.maxUnitsPerFrame) {
             const bool startsTick = m_cursor.unit == 0;
-            const bool catchingUp = CatchingUp();
+            // 編集の状態の止まる場所(T-0509): そこで止まる。そこまでは流し直しと同じく現実の時間を待たない
+            if (m_hold && !BeforeHold())
+                break;
+
+            if (startsTick && count > 0 && m_hold && m_cursor.tick == m_hold->tick)
+                break;
+
+            const bool catchingUp = CatchingUp() || BeforeHold();
             // 現実の時間より先へは進めない(流し直して追いつく間は別)
             if (startsTick && !catchingUp && m_pendingTicks < 1.0)
                 break;

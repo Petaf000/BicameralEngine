@@ -208,6 +208,39 @@ namespace {
         EXPECT(scheduler.PendingTicks() == 0.0);
     }
 
+    // 編集の状態の止まる場所(T-0509): 止めていても止まる場所までは進み、その刻みの境界でフレームを切り、その先へは進まない
+    void TestHold() {
+        SimScheduler scheduler(3);
+        for (uint32_t unit = 0; unit < 3; ++unit)
+            scheduler.ReportUnitTime(unit, 0.1);
+
+        scheduler.HoldAt({.tick = 0, .unit = 0});
+        EXPECT(scheduler.TakeUnits() == 0);  // 置いたものが無い: 刻み 0 の前で止まる
+
+        scheduler.HoldAt({.tick = 0, .unit = 1});
+        EXPECT(scheduler.BeforeHold());
+        EXPECT(scheduler.TakeUnits() == 1);  // 適用の単位だけ(現実の時間は要らない)
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 0, .unit = 1}));
+        EXPECT(!scheduler.BeforeHold());
+        scheduler.AddTicks(5);
+        EXPECT(scheduler.TakeUnits() == 0);  // 時間があっても止まる場所の先へは進まない
+
+        // 流し直して止まる場所へ: その刻みの境界でフレームを切る(次のフレームが境界から始まる)
+        scheduler.ClearBacklog();
+        scheduler.Rewind(0);
+        scheduler.HoldAt({.tick = 4, .unit = 1});
+        EXPECT(scheduler.TakeUnits() == 12);
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 4, .unit = 0}));
+        EXPECT(scheduler.TakeUnits() == 1);
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 4, .unit = 1}));
+
+        // プレイ: 止まる場所を外すと、刻みの途中から最後の単位まで進む(その先は現実の時間)
+        scheduler.ClearHold();
+        EXPECT(scheduler.TakeUnits() == 2);
+        EXPECT((scheduler.Cursor() == SimCursor{.tick = 5, .unit = 0}));
+        EXPECT(scheduler.PendingTicks() == 0.0);
+    }
+
 }  // namespace
 
 int main() {
@@ -220,6 +253,7 @@ int main() {
     TestStopTick();
     TestBreakIntervalAndRewind();
     TestCatchUpAfterRewind();
+    TestHold();
     if (failureCount == 0)
         std::printf("sim_scheduler_test: OK\n");
 
