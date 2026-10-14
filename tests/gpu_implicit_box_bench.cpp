@@ -1,9 +1,10 @@
 // gpu_implicit_box_bench.cpp — 刻みの中で広い範囲に伝える重さ(T-0494。D-467・docs/design/19 §4)を測る。
 // 1 レベルの一様な箱(一辺 16・32・64・128 セル)の熱を陰解法(方式②。sim::GpuImplicit。ADR-0019)で解き、伝わる速さ
-// (伝導率 ×1・×10³・×10⁶。レベルを細かくするのと同じで、×4^k が k 段細かい)ごとに、1 刻みの GPU 時間・V サイクルの回数・
+// (×1・×4^5 ≈ ×10³・×4^10 ≈ ×10⁶)ごとに、1 刻みの GPU 時間・V サイクルの回数・
 // 箱の温度の幅(その刻みでどこまで坂を下りたか)を測る。系は CPU の BuildImplicitGrid で作って写す(GPU で作る段は T-0129。値は同じ)。
 // 場面: 箱の真ん中の 2³ セルが 1500 K・ほかは 300 K(鋭い熱い点。V サイクルが最も多く要る形)。物質は試験の表の空気(400 K の値)、
-// レベルは空気の基準(面の係数が熱容量の上限で頭打ちにならない最後のレベル。MrSubcycleBaseLevel)。
+// 伝わる速さはセルのレベルで変える: 基準(面の係数が熱容量の上限で頭打ちにならない最後のレベル。MrSubcycleBaseLevel)から k 段細かくすると、
+// 熱容量に対する面の係数(1 刻みに隣へ伝わる割合)が 4^k 倍になる(伝導率を 4^k 倍にするのと同じ式。空気の伝導率 65525 mW/K は ×10⁶ で 32bit を超える)。
 // 記録の形は 2 つ: 既定(段ごとの Dispatch を上限まで積む)と、前の刻みの数から選ぶ形(ShapeFrom。T-0154・T-0179 の固定費を削る形。
 // 伝導の段 GpuMultiresImplicit と同じ使い方)。保存量(エネルギー + 端数)が毎刻みビット一致しなければ失敗。
 //
@@ -53,7 +54,7 @@ namespace {
     constexpr uint32_t TEMPERATURE_FRACTION_BITS = 16;  // ImplicitTemperature は mK × 2^16
 
     constexpr std::array<uint32_t, 4> EDGES = {16, 32, 64, 128};
-    constexpr std::array<uint32_t, 3> SPEEDUPS = {1, 1000, 1000000};
+    constexpr std::array<int32_t, 3> SPEED_LEVEL_GAPS = {0, 5, 10};  // 伝わる速さ ×4^k(×1・×1024・×1048576)
 
     using Record = std::function<bool(ID3D12GraphicsCommandList10*)>;
 
@@ -216,13 +217,13 @@ namespace {
     }
 
     // perf.md の表の 1 行(条件 | 結果)
-    void LogRow(uint32_t edge, size_t cellCount, uint32_t speedup, bool shapeFromPrevious, const BoxTiming& timing) {
+    void LogRow(uint32_t edge, size_t cellCount, int32_t gap, bool shapeFromPrevious, const BoxTiming& timing) {
         const std::span<const double> later = std::span(timing.stepMs).subspan(1);
         const uint32_t maxCycles = *std::ranges::max_element(timing.cycles);
         Log(Channel::Sim, Level::Info,
-            "| 一辺 {}({} セル・段 {})・伝導率 ×{}・記録の形 {} | 刻み 0 {:.2f} ms(V {})/ 後 {} 刻みの平均 {:.2f} ms・"
+            "| 一辺 {}({} セル・段 {})・速さ ×4^{}・記録の形 {} | 刻み 0 {:.2f} ms(V {})/ 後 {} 刻みの平均 {:.2f} ms・"
             "V 最大 {} / 温度の幅 刻み 0 の後 {} mK → 最後 {} mK |",
-            edge, cellCount, timing.levelCount, speedup, shapeFromPrevious ? "前の刻みから" : "既定", timing.stepMs[0],
+            edge, cellCount, timing.levelCount, gap, shapeFromPrevious ? "前の刻みから" : "既定", timing.stepMs[0],
             timing.cycles[0], later.size(), Mean(later), maxCycles, timing.spreadMillikelvin.front(),
             timing.spreadMillikelvin.back());
         Log(Channel::Sim, Level::Info, "  刻みごと ms(V): {}", Series(timing));
@@ -245,20 +246,14 @@ namespace {
             if (edge > maxEdge)
                 continue;
 
-            for (const uint32_t speedup : SPEEDUPS) {
-                const uint64_t conductance = static_cast<uint64_t>(air.conductance) * speedup;
-                if (conductance > std::numeric_limits<uint32_t>::max())
-                    return std::unexpected(std::format("伝導率 ×{} が 32bit を超える", speedup));
-
-                const test::Material material = {.heatCapacity = air.heatCapacity,
-                                                 .conductance = static_cast<uint32_t>(conductance)};
-                const sim::ImplicitGrid grid = sim::BuildImplicitGrid(BoxCells(material, level, edge));
+            for (const int32_t gap : SPEED_LEVEL_GAPS) {
+                const sim::ImplicitGrid grid = sim::BuildImplicitGrid(BoxCells(air, level + gap, edge));
                 for (const bool shapeFromPrevious : {false, true}) {
                     const auto timing = MeasureBox(device, queue, ring, frequency, grid, shapeFromPrevious);
                     if (!timing)
-                        return std::unexpected(std::format("一辺 {}・×{}: {}", edge, speedup, timing.error()));
+                        return std::unexpected(std::format("一辺 {}・×4^{}: {}", edge, gap, timing.error()));
 
-                    LogRow(edge, grid.cells.size(), speedup, shapeFromPrevious, *timing);
+                    LogRow(edge, grid.cells.size(), gap, shapeFromPrevious, *timing);
                 }
             }
         }
