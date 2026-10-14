@@ -61,6 +61,9 @@ namespace bicameral::editor {
         uint32_t unitsPerTick = 1;
         double pendingTicks = 0.0;  // 現実の時間からみて、まだ始めていない刻み
         uint64_t droppedTicks = 0;  // 追いつけずに捨てた刻み(世界が遅れた分。D-202)
+        // プレイを始めた刻み(やめるとこの状態へ戻る。UINT64_MAX = 編集の状態か、まだ最初の刻みを投げていない。T-0497)
+        uint64_t playStartTick = UINT64_MAX;
+        bool canStopPlay = false;  // やめるで編集の状態へ戻れる(--editor で再生でない時)
 
         // --- 最後に読み戻した刻みの状態(待たない読み戻し。数フレーム遅れる)---
         uint64_t hashedTick = 0;
@@ -169,7 +172,7 @@ namespace bicameral::editor {
 
         // --- パネル ---
         [[nodiscard]] TimeRequest BuildTimePanel(const EditorStatus& status, const TimeControl& time) const;
-        [[nodiscard]] uint64_t BuildRewind(const EditorStatus& status) const;
+        [[nodiscard]] uint64_t BuildRewind(const EditorStatus& status, const TimeControl& time) const;
         void BuildStatusPanel(const EditorStatus& status) const;
         static void DrawBrushPreview(std::span<const BrushPreviewLine> lines);
         void BuildReactionTable(const ReactionTableStatus& table) const;

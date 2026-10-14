@@ -31,6 +31,7 @@
 #include "editor/editor_overlay.h"
 #include "editor/surface_pick.h"
 #include "editor/time_control.h"
+#include "frame/auto_play.h"
 #include "frame/play_metric_runner.h"
 #include "frame/sim_scheduler.h"
 #include "frame/table_hot_reload.h"
@@ -417,7 +418,17 @@ namespace bicameral::frame {
                                                                           uint32_t limit);
             void CheckAutoRewind();
             void UndoBrushStroke();
+            void RedoBrushStroke();
+            [[nodiscard]] std::expected<uint64_t, std::string> PlanStrokeRewind(uint64_t firstTick) const;
             [[nodiscard]] bool CreateAutoReload();
+
+            // --- 編集の状態とプレイ(T-0497・D-491)---
+            void StartPlay();
+            void StopPlay();
+            void ApplyEditCommands();
+            [[nodiscard]] uint64_t UndoFloor() const;
+            void UpdateAutoPlay();
+            void ApplyAutoPlayAction(AutoPlayAction action);
 
             // --- 計測 ---
             void LogStats(const Stats& stats, Clock::duration elapsed, std::string_view label) const;
@@ -509,6 +520,16 @@ namespace bicameral::frame {
             std::deque<sim::ProbeCommand> m_rewindFeed;
             bool m_catchUpAfterRewind = false;            // 筆の元に戻す: 戻した後、元の刻みまで流し直す(T-0278)
             std::optional<uint64_t> m_lastTableSwapTick;  // 最後に反応表を差し替えた刻み(それより前へは元に戻さない)
+            // 戻した後にこの刻みまで流し直す(プレイをやめて、プレイを始めた刻みより前の保存点へ戻った時。0 = しない。T-0497)
+            uint64_t m_rewindCatchUpTick = 0;
+
+            // --- 編集の状態とプレイ(T-0497・D-491)---
+            uint64_t m_playStartTick = 0;      // プレイを始めた刻み P(やめるとここへ戻る。エディタなし・再生は 0)
+            bool m_playStartPending = false;   // プレイを押したが、まだ最初の刻みを投げていない(P が決まっていない)
+            uint32_t m_playStartSequence = 0;  // プレイを押した時のコマンドの番号(これ以降はプレイ中に作ったもの)
+            uint32_t m_playStartSlot = sim::NO_SAVE_POINT;  // プレイを始めた刻みの保存点の番号(--editor の生の起動だけ)
+            AutoPlay m_autoPlay;                            // --auto-play
+            editor::TimeRequest m_autoPlayRequest;  // --auto-play のプレイ・やめる(BuildEditor でボタンと同じ道へ)
 
             // --- 計測 ---
             uint64_t m_computeFrequency = 0;
@@ -943,6 +964,8 @@ namespace bicameral::frame {
                     m_editor->Brush().NoteHash(tickHash.tick, tickHash.WorldHash());
 
                 m_worldCopy.NoteWorldHash(tickHash);
+                if (m_options.autoPlay)
+                    m_autoPlay.NoteHash(tickHash.tick, tickHash.WorldHash());
 
                 if (!m_replay.empty())
                     m_replay.front().CheckHash(tickHash.tick, tickHash.WorldHash());
@@ -1146,8 +1169,14 @@ namespace bicameral::frame {
                     m_editor->Brush().TakeAutoCommands(m_frameNumber, waitingCommands, m_latestSurface, m_nextSequence),
                     std::back_inserter(m_pendingCommands));
 
+            if (m_options.autoPlay && m_editor)
+                UpdateAutoPlay();
+
             if (m_editor && m_editor->Brush().TakeUndoRequest())
                 UndoBrushStroke();
+
+            if (m_editor && m_editor->Brush().TakeRedoRequest())
+                RedoBrushStroke();
 
             const bool autoClick = m_options.autoClick && m_frameNumber % AUTO_CLICK_INTERVAL_FRAMES == 0;
             const bool autoIgnite = m_options.autoIgnite && m_frameNumber == 0;  // 下の最初の 1 回と同じ場所
@@ -1381,8 +1410,18 @@ namespace bicameral::frame {
             // 初期化と同じリストでは写せない(写すのはリストの先頭で、バッファが COMMON の時。ProbeSim::RecordSave)ので、
             // 次のリストの先頭で S(0) を写す。いつ投げるかだけが変わり、世界の結果は変わらない
             const SimCursor start = m_scheduler.Cursor();
-            const bool initializeOnly = m_simSubmissionCount == 0 && m_savePointCount > 0 && start == SimCursor{};
+            // 編集の状態の起動(T-0497)も、最初のリストで初期化して S(0) を見せる(単位は無い)
+            const bool initializeOnly = m_simSubmissionCount == 0 && start == SimCursor{} &&
+                                        (m_savePointCount > 0 || m_timeControl.Editing());
             const uint32_t unitCount = initializeOnly ? 0 : m_scheduler.TakeUnits();
+            // プレイを始めた刻み(T-0497): プレイを押した後、最初に単位を投げる刻みの境界。その状態をプレイを始めた保存点へ写す
+            // (SaveSlotFor)。やめると、ここへ戻る
+            if (m_playStartPending && unitCount > 0 && start.unit == 0 && !restoring && !initializeOnly) {
+                m_playStartPending = false;
+                m_playStartTick = start.tick;
+                Log(Channel::Sim, Level::Info, "プレイ: 刻み {} から(やめるとこの刻みの状態へ戻る)", start.tick);
+            }
+
             // 止まる刻みに着いたのに、その状態をまだ抽出していない(最後のリストが抽出を飛ばした)か、
             // 止めたまま戻した状態をまだ見せていないなら、抽出だけのリストを投げる
             const bool extractOnly = unitCount == 0 && (NeedsStopExtraction() || m_extractAfterRewind);
@@ -1593,6 +1632,18 @@ namespace bicameral::frame {
                 m_editor->ReactionTable().StartAuto();
             }
 
+            // 起動は止まった編集の状態(D-491・T-0497)。再生は記録の流れのままプレイ
+            if (m_options.autoPlay && !m_replay.empty()) {
+                Log(Channel::Tool, Level::Error, "--auto-play は --replay とは使えない");
+                return false;
+            }
+
+            if (m_replay.empty()) {
+                m_timeControl.StartInEdit();
+                Log(Channel::Tool, Level::Info, "エディタ: 編集の状態で始める(プレイ = F5 / Space・やめる = Esc){}",
+                    m_options.play ? "。--play: すぐプレイを押す" : "");
+            }
+
             return true;
         }
 
@@ -1633,6 +1684,12 @@ namespace bicameral::frame {
                     RequestRebuild();
             }
 
+            // --play: 起動してすぐプレイを押す。--auto-play のプレイ・やめるも同じ道で(T-0497)
+            if (m_options.play && m_frameNumber == 0)
+                request.play = true;
+
+            request.play = request.play || std::exchange(m_autoPlayRequest.play, false);
+            request.stopPlay = request.stopPlay || std::exchange(m_autoPlayRequest.stopPlay, false);
             if (m_options.autoTime) {
                 CheckAutoTime();
                 const editor::TimeRequest automatic = AutoTimeRequest(m_frameNumber);
@@ -1736,11 +1793,24 @@ namespace bicameral::frame {
             if (!request.Any())
                 return;
 
-            m_timeControl.Apply(request, m_scheduler);
+            // やめるで戻れるのは --editor の生の起動だけ(エディタなし・再生は記録の流れのまま。T-0497)
+            editor::TimeRequest allowed = request;
+            if (!m_editor || !m_replay.empty())
+                allowed.stopPlay = false;
+
+            const bool wasEditing = m_timeControl.Editing();
+            m_timeControl.Apply(allowed, m_scheduler);
+            if (wasEditing && !m_timeControl.Editing())
+                StartPlay();
+            else if (!wasEditing && m_timeControl.Editing())
+                StopPlay();
+
             const SimCursor cursor = m_scheduler.Cursor();
-            Log(Channel::Sim, Level::Info, "時間の操作: {}  速さ ×{:g}  刻み {}(単位 {})  1 刻みずつ {}",
-                m_timeControl.Paused() ? "止めている" : "動いている", m_timeControl.Speed(), cursor.tick, cursor.unit,
-                m_timeControl.SteppedTicks());
+            const char* state = m_timeControl.Editing()  ? "編集の状態"
+                                : m_timeControl.Paused() ? "一時停止"
+                                                         : "動いている";
+            Log(Channel::Sim, Level::Info, "時間の操作: {}  速さ ×{:g}  刻み {}(単位 {})  1 刻みずつ {}", state,
+                m_timeControl.Speed(), cursor.tick, cursor.unit, m_timeControl.SteppedTicks());
         }
 
         // 写しの早送り(T-0412・ADR-0198): パネルの依頼を渡し、本物のリストの後ろに、シミュの予算の余りで写しのリストを投げる
@@ -1841,6 +1911,8 @@ namespace bicameral::frame {
                     .unitsPerTick = m_scheduler.UnitsPerTick(),
                     .pendingTicks = m_scheduler.PendingTicks(),
                     .droppedTicks = m_scheduler.DroppedTicks(),
+                    .playStartTick = m_timeControl.Editing() || m_playStartPending ? UINT64_MAX : m_playStartTick,
+                    .canStopPlay = m_editor != nullptr && m_replay.empty(),
                     .hashedTick = m_latestHash.tick,
                     .worldHash = m_latestHash.WorldHash(),
                     .energyMillijoules = m_latestHash.energy,
@@ -1969,18 +2041,21 @@ namespace bicameral::frame {
             if (requested == 0)
                 return true;
 
-            // 刻み 0 の保存点を 1 つ足す(T-0411)
-            const uint32_t total = requested + 1;
+            // 刻み 0 の保存点を 1 つ足す(T-0411)。--editor の生の起動は、プレイを始めた刻みの保存点も 1 つ(最後の番号。T-0497)
+            const bool playSlot = m_options.editor && m_options.replayPath.empty();
+            const uint32_t total = requested + 1 + (playSlot ? 1 : 0);
             if (!m_sim.CreateSavePoints(m_device.Get(), total)) {
                 Log(Channel::Sim, Level::Error, "保存点を作れない({} 個)", total);
                 return false;
             }
 
             m_savePointCount = total;
+            m_playStartSlot = playSlot ? total - 1 : sim::NO_SAVE_POINT;
             m_scheduler.SetBreakInterval(m_options.saveIntervalTicks);
             Log(Channel::Sim, Level::Info,
-                "巻き戻し: 保存点 {} 個(刻み 0 の 1 個 + {} 刻みごとに回す {} 個)× {:.1f} MiB", total,
-                m_options.saveIntervalTicks, requested,
+                "巻き戻し: 保存点 {} 個(刻み 0 の 1 個 + プレイを始めた刻みの {} 個 + {} 刻みごとに回す {} 個)× {:.1f} "
+                "MiB",
+                total, playSlot ? 1 : 0, m_options.saveIntervalTicks, requested,
                 static_cast<double>(m_sim.SavePointBytes()) / (1024.0 * 1024.0));
 
             return true;
@@ -2037,10 +2112,12 @@ namespace bicameral::frame {
         uint32_t FrameLoop::PrepareRewind() {
             const uint64_t tick = std::exchange(m_rewindRequest, UINT64_MAX);
             const bool catchUp = std::exchange(m_catchUpAfterRewind, false);
+            const uint64_t catchUpTick = std::exchange(m_rewindCatchUpTick, 0);
             if (!m_compute.WaitIdle())
                 return sim::NO_SAVE_POINT;
 
             CollectSimSubmissions();
+            m_autoPlay.NoteRewound();  // これより後に届くハッシュは戻した世界のもの
             uint32_t index = sim::NO_SAVE_POINT;
             for (uint32_t candidate = 0; candidate < m_savePointCount; ++candidate) {
                 if (m_sim.SavePointTick(candidate) == tick)
@@ -2056,6 +2133,8 @@ namespace bicameral::frame {
             m_scheduler.Rewind(tick);
             if (catchUp)
                 m_scheduler.CatchUpTo(from.tick);  // 筆の元に戻す: 今の刻みまで流し直す(T-0278)
+            else if (catchUpTick > tick)
+                m_scheduler.CatchUpTo(catchUpTick);  // プレイをやめた: プレイを始めた刻みまで流し直す(T-0497)
 
             m_sim.DiscardSavePointsAfter(tick);
             m_queuedPlaceTickEnd = 0;  // 戻すとキューは空になる(足し直す分は、また足す時に数える)
@@ -2086,19 +2165,28 @@ namespace bicameral::frame {
         }
 
         // 保存点の刻みの境界から単位を始めるフレームなら、写す保存点の番号。刻み 0 は TICK_ZERO_SAVE_SLOT、
-        // ほかは残りの保存点を 刻み / 間隔 で回す(いちばん古いものから上書きする。T-0411)
+        // プレイを始めた刻みは m_playStartSlot(T-0497)、ほかは残りの保存点を 刻み / 間隔 で回す(いちばん古いものから上書きする。T-0411)
         uint32_t FrameLoop::SaveSlotFor(SimCursor start, uint32_t unitCount, uint32_t restoreFrom) const {
             const uint64_t interval = m_options.saveIntervalTicks;
-            const bool due = m_savePointCount > 0 && restoreFrom == sim::NO_SAVE_POINT && unitCount > 0 &&
-                             start.unit == 0 && start.tick % interval == 0 &&
-                             m_simSubmissionCount > 0;  // 最初のリストは世界を初期化する(写すのはその後。SubmitSim)
-            if (!due)
+            const bool boundary = m_savePointCount > 0 && restoreFrom == sim::NO_SAVE_POINT && unitCount > 0 &&
+                                  start.unit == 0 &&
+                                  m_simSubmissionCount >
+                                      0;  // 最初のリストは世界を初期化する(写すのはその後。SubmitSim)
+            if (!boundary)
                 return sim::NO_SAVE_POINT;
 
             if (start.tick == 0)
                 return TICK_ZERO_SAVE_SLOT;
 
-            const uint64_t rotating = m_savePointCount - 1;
+            const bool playStart = m_playStartSlot != sim::NO_SAVE_POINT && !m_playStartPending &&
+                                   !m_timeControl.Editing() && start.tick == m_playStartTick;
+            if (playStart && m_sim.SavePointTick(m_playStartSlot) != start.tick)
+                return m_playStartSlot;
+
+            if (start.tick % interval != 0)
+                return sim::NO_SAVE_POINT;
+
+            const uint64_t rotating = m_savePointCount - 1 - (m_playStartSlot != sim::NO_SAVE_POINT ? 1 : 0);
 
             return static_cast<uint32_t>(1 + (start.tick / interval - 1) % rotating);
         }
@@ -2164,14 +2252,7 @@ namespace bicameral::frame {
                                                 editor::EarliestStrokeTick(stroke, m_rewindFeed));
             uint64_t rewindTick = UINT64_MAX;
             if (firstTick != UINT64_MAX) {
-                const std::string reason = m_rewindRequest != UINT64_MAX ? "巻き戻しの途中" : RewindUnavailableReason();
-                if (!reason.empty()) {
-                    brush.NoteUndoFailed(reason);
-                    return;
-                }
-
-                const std::vector<uint64_t> savePoints = SavePointTicks();
-                const auto plan = editor::PlanBrushUndo(firstTick, savePoints, m_lastTableSwapTick);
+                const auto plan = PlanStrokeRewind(firstTick);
                 if (!plan) {
                     brush.NoteUndoFailed(plan.error());
                     return;
@@ -2180,15 +2261,167 @@ namespace bicameral::frame {
                 rewindTick = *plan;
             }
 
-            editor::RemoveStrokeCommands(stroke, m_pendingCommands);
-            editor::RemoveStrokeCommands(stroke, m_commandHistory);
-            editor::RemoveStrokeCommands(stroke, m_rewindFeed);
+            // 取り出したコマンドはやり直しの列へ(元の刻みのまま戻す。T-0497)
+            editor::BrushPanel::UndoneStroke undone{.sent = editor::TakeStrokeCommands(stroke, m_commandHistory),
+                                                    .waiting = editor::TakeStrokeCommands(stroke, m_pendingCommands)};
+            rng::move(editor::TakeStrokeCommands(stroke, m_rewindFeed), std::back_inserter(undone.sent));
             if (rewindTick != UINT64_MAX) {
                 m_rewindRequest = rewindTick;
                 m_catchUpAfterRewind = true;
             }
 
-            brush.NoteUndone(firstTick, rewindTick, m_latestHash);
+            brush.NoteUndone(firstTick, rewindTick, m_latestHash, std::move(undone));
+        }
+
+        // 元に戻す・やり直しで戻る保存点の刻み(運びが最初に当たった刻み以前で、戻ってよい範囲〔UndoFloor〕のいちばん新しいもの)
+        std::expected<uint64_t, std::string> FrameLoop::PlanStrokeRewind(uint64_t firstTick) const {
+            const std::string reason = m_rewindRequest != UINT64_MAX ? "巻き戻しの途中" : RewindUnavailableReason();
+            if (!reason.empty())
+                return std::unexpected(reason);
+
+            return editor::PlanBrushUndo(firstTick, SavePointTicks(), m_lastTableSwapTick, UndoFloor());
+        }
+
+        // やり直し(T-0497・D-491 ②): 最後に元に戻した運びのコマンドを元の刻みのまま今の流れの控えへ戻し、その刻み以前の保存点へ
+        // 戻して今の刻みまで流し直す(元に戻すと同じ道。記録中なら記録も書き直す)。GPU へ足していなかった分は待っている列へ戻す
+        void FrameLoop::RedoBrushStroke() {
+            editor::BrushPanel& brush = m_editor->Brush();
+            const editor::BrushPanel::UndoneStroke* undone = brush.LastUndone();
+            if (undone == nullptr || brush.Stroking()) {
+                brush.NoteRedoFailed(undone == nullptr ? "やり直す運びが無い" : "塗っている途中");
+                return;
+            }
+
+            uint64_t rewindTick = UINT64_MAX;
+            if (!undone->sent.empty()) {
+                const uint64_t firstTick = rng::min(undone->sent, {}, &sim::ProbeCommand::targetTick).targetTick;
+                const auto plan = PlanStrokeRewind(firstTick);
+                if (!plan) {
+                    brush.NoteRedoFailed(plan.error());
+                    return;
+                }
+
+                rewindTick = *plan;
+                // 今の流れの控えは (刻み, 番号) の順(PrepareRewind が戻した刻みから先を足し直す)
+                const auto order = [](const sim::ProbeCommand& a, const sim::ProbeCommand& b) {
+                    return a.targetTick != b.targetTick ? a.targetTick < b.targetTick : a.sequence < b.sequence;
+                };
+                for (const sim::ProbeCommand& command : undone->sent)
+                    m_commandHistory.insert(rng::upper_bound(m_commandHistory, command, order), command);
+
+                m_rewindRequest = rewindTick;
+                m_catchUpAfterRewind = true;
+            }
+
+            m_pendingCommands.insert(m_pendingCommands.end(), undone->waiting.begin(), undone->waiting.end());
+            brush.NoteRedone(rewindTick);
+        }
+
+        // --- 編集の状態とプレイ(T-0497・D-491。UE と同じ形)---
+        // 編集の状態: 時間は進まない。置く・つつく・押すコマンドは、それを当てる刻みだけ進めて当てる(ApplyEditCommands。仮:
+        //   置くたびに 1 刻み〔1/60 秒〕ずつ世界が進む)。元に戻す・やり直しは刻み 0 の保存点から何回でも(流し直すのは置いた分の刻みだけ)。
+        // プレイ: 押した後の最初の刻みの境界 P の状態を、プレイを始めた保存点へ写す(SubmitSim・SaveSlotFor)。
+        // やめる: プレイ中に作ったコマンドを捨て、P の保存点へ戻す(残っていなければ P 以前の保存点から P まで流し直す)。
+
+        void FrameLoop::StartPlay() {
+            m_playStartPending = true;
+            m_playStartSequence = m_nextSequence;
+            Log(Channel::Sim, Level::Info, "プレイを押した(刻み {} の境界から)", m_scheduler.Cursor().tick);
+        }
+
+        void FrameLoop::StopPlay() {
+            // プレイ中に作ったコマンド(番号が m_playStartSequence 以降)と、その運びを捨てる
+            const auto madeInPlay = [&](const sim::ProbeCommand& command) {
+                return command.sequence >= m_playStartSequence;
+            };
+            std::erase_if(m_pendingCommands, madeInPlay);
+            std::erase_if(m_rewindFeed, madeInPlay);
+            if (m_editor)
+                m_editor->Brush().ForgetStrokesFrom(m_playStartSequence);
+
+            if (std::exchange(m_playStartPending, false)) {
+                Log(Channel::Sim, Level::Info, "プレイをやめた(まだ刻みを進めていない)");
+                return;
+            }
+
+            const uint64_t playStart = m_playStartTick;
+            const auto plan = PlanStrokeRewind(playStart);  // 編集の状態になった後なので、戻ってよい範囲は 0 から
+            if (!plan) {
+                Log(Channel::Sim, Level::Warning,
+                    "プレイをやめた: プレイ前の世界(刻み {})に戻せない({})。今の世界のまま編集の状態へ", playStart,
+                    plan.error());
+                return;
+            }
+
+            std::erase_if(m_commandHistory, madeInPlay);
+            m_rewindRequest = *plan;
+            m_rewindCatchUpTick = playStart;
+            Log(Channel::Sim, Level::Info, "プレイをやめた: 刻み {} の保存点へ戻す{}", *plan,
+                *plan < playStart ? std::format("(刻み {} まで流し直す)", playStart) : std::string());
+        }
+
+        // 編集の状態で待っているコマンド(置く・つつく・押す・元に戻した後の足し直し)があれば、それを当てる刻みまで進める
+        void FrameLoop::ApplyEditCommands() {
+            if (!m_editor || !m_timeControl.Editing() || m_rewindRequest != UINT64_MAX || m_scheduler.CatchingUp())
+                return;
+
+            if (m_pendingCommands.empty() && m_rewindFeed.empty())
+                return;
+
+            const SimCursor cursor = m_scheduler.Cursor();
+            const uint64_t applyTick = sim::ProbeSim::NextApplyTick(cursor.tick, cursor.unit);
+            const uint64_t lastTick = m_rewindFeed.empty() ? applyTick
+                                                           : std::max(applyTick, m_rewindFeed.back().targetTick);
+            m_scheduler.CatchUpTo(lastTick + 1);
+        }
+
+        // 元に戻す・やり直しで戻ってよいいちばん古い刻み(編集の状態は 0。プレイ中は最近約 12 秒かつプレイを始めた刻みから)
+        uint64_t FrameLoop::UndoFloor() const {
+            const uint64_t now = m_scheduler.Cursor().tick;
+            const uint64_t playStart = m_playStartPending ? now : m_playStartTick;
+
+            return editor::UndoFloorTick(!m_timeControl.Editing(), playStart, now);
+        }
+
+        // --auto-play(T-0497): 今の様子を渡し、返った操作をボタン・キーと同じ道で行う
+        void FrameLoop::UpdateAutoPlay() {
+            const bool settling = m_rewindRequest != UINT64_MAX || m_scheduler.CatchingUp() ||
+                                  !m_pendingCommands.empty() || !m_rewindFeed.empty();
+            const AutoPlayState state{
+                .frame = m_frameNumber,
+                .cursor = m_scheduler.Cursor(),
+                .editing = m_timeControl.Editing(),
+                .settling = settling,
+                .playStartTick = m_timeControl.Editing() || m_playStartPending ? UINT64_MAX : m_playStartTick};
+            ApplyAutoPlayAction(m_autoPlay.Update(state));
+        }
+
+        void FrameLoop::ApplyAutoPlayAction(AutoPlayAction action) {
+            editor::BrushPanel& brush = m_editor->Brush();
+            const auto stroke = [&](const sim::ProbePlaceShape& shape, std::string_view material) {
+                rng::move(brush.StrokeOnce(shape, material, m_nextSequence), std::back_inserter(m_pendingCommands));
+            };
+
+            switch (action) {
+                case AutoPlayAction::StrokeA:
+                    stroke({.x = 20, .y = 32, .z = sim::PROBE_VIEW_Z, .radius = 3}, "wood");
+                    break;
+                case AutoPlayAction::StrokeB:
+                    stroke({.x = 20, .y = 32, .z = sim::PROBE_VIEW_Z, .radius = 1, .replace = false}, "charcoal");
+                    break;
+                case AutoPlayAction::StrokeC:
+                    stroke({.x = 44, .y = 20, .z = sim::PROBE_VIEW_Z, .radius = 3}, "wood");
+                    break;
+                case AutoPlayAction::Undo: brush.RequestUndo(); break;
+                case AutoPlayAction::Redo: brush.RequestRedo(); break;
+                case AutoPlayAction::Play: m_autoPlayRequest.play = true; break;
+                case AutoPlayAction::Stop: m_autoPlayRequest.stopPlay = true; break;
+                case AutoPlayAction::None: break;
+            }
+
+            if (action != AutoPlayAction::None)
+                Log(Channel::Sim, Level::Info, "--auto-play: フレーム {} 刻み {} で操作 {}", m_frameNumber,
+                    m_scheduler.Cursor().tick, static_cast<int>(action));
         }
 
         // --auto-rewind: 保存点が 2 つできたら、古い方(刻み 0 の保存点があればそこ。T-0411)へ 1 回だけ戻す。--auto-reload と一緒なら、最初に表を差し替えた後にできた
@@ -2264,6 +2497,7 @@ namespace bicameral::frame {
         bool FrameLoop::RunFrame(Clock::time_point frameStart) {
             CollectSimSubmissions();
             QueueClicks();
+            ApplyEditCommands();
             m_tableReload.Poll(m_frameNumber);
             if (m_autoReload)
                 m_autoReload->Update(m_scheduler.Cursor().tick, m_tableReload);
@@ -2342,6 +2576,10 @@ namespace bicameral::frame {
 
                 // --auto-metrics: 遊びの指標を測り終えた(パイプラインの作成があるので、--frames は上限)
                 if (m_options.autoMetrics && m_playMetrics.Progress().hasResult)
+                    break;
+
+                // --auto-play: 編集の状態とプレイの確かめを終えた・失敗した(T-0497)
+                if (m_options.autoPlay && m_autoPlay.Finished())
                     break;
 
                 // 環境ミキサーの「世界を作り直す」(T-0453): この世界を終え、RunFrameLoop が今の表で作り直す
@@ -2484,6 +2722,15 @@ namespace bicameral::frame {
 
             if (m_options.autoCopy)
                 Log(Channel::Sim, Level::Info, "--auto-copy: OK");
+
+            if (m_options.autoPlay && !m_autoPlay.Passed()) {
+                Log(Channel::Sim, Level::Error, "--auto-play: 通らなかった({})",
+                    m_autoPlay.Summary().empty() ? "終わらなかった" : m_autoPlay.Summary());
+                return 1;
+            }
+
+            if (m_options.autoPlay)
+                Log(Channel::Sim, Level::Info, "--auto-play: {}。OK", m_autoPlay.Summary());
 
             if (m_options.autoMetrics) {
                 const editor::PlayMetricProgress& metrics = m_playMetrics.Progress();

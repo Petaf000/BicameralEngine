@@ -60,8 +60,12 @@ namespace bicameral::frame {
         // 巻き戻し(T-0143): 刻みの番号が ticks の倍数の境界で、そのフレームの単位を切る(次のフレームがその境界から始まり、
         // 先頭で保存点へ写せる)。0 なら切らない。世界の結果は変えない
         void SetBreakInterval(uint64_t ticks) { m_breakInterval = ticks; }
-        // カーソルを刻み tick の境界へ戻す(保存点へ戻した後。未処理の刻みはそのまま)
-        void Rewind(uint64_t tick) { m_cursor = {.tick = tick, .unit = 0}; }
+        // カーソルを刻み tick の境界へ戻す(保存点へ戻した後。未処理の刻みはそのまま)。前の流し直しの行き先は忘れる
+        // (残すと、戻した後に古い行き先まで流し直してしまう。プレイをやめて戻る時など。T-0497)
+        void Rewind(uint64_t tick) {
+            m_cursor = {.tick = tick, .unit = 0};
+            m_catchUpTick = 0;
+        }
         // 刻み tick までは現実の時間を待たずに進める(筆の元に戻す。巻き戻して今の刻みまで流し直す。T-0278)。
         // 止めている間も進む。1 フレームの予算はそのまま(追いつくのに数フレームかかってよい)。世界の結果は変えない
         void CatchUpTo(uint64_t tick) { m_catchUpTick = std::max(m_catchUpTick, tick); }

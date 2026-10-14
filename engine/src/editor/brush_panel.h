@@ -66,11 +66,35 @@ namespace bicameral::editor {
         [[nodiscard]] std::span<const uint32_t> LastStroke() const;
         [[nodiscard]] bool Stroking() const { return m_stroke.Active(); }
 
+        // 元に戻した運び(やり直しで、取り出したコマンドを元の刻みのまま戻す。T-0497・D-491 ②)
+        struct UndoneStroke {
+            BrushStrokeSequences sequences;
+            std::vector<sim::ProbeCommand> sent;     // GPU へ足していた分(刻みが決まっている)
+            std::vector<sim::ProbeCommand> waiting;  // まだ足していなかった分(戻すと次の刻みに当たる)
+        };
+
         // 最後の運びを元に戻した。firstTick = その運びが最初に当たった刻み・rewindTick = 戻した保存点の刻み
         // (UINT64_MAX = まだ GPU へ足していなかったので除いただけ)・latest = 戻す前に読み戻した最後の状態
-        // (流し直した同じ刻みの状態と違えば、運びが世界を変えていた = 本当に除けた)
-        void NoteUndone(uint64_t firstTick, uint64_t rewindTick, const sim::ProbeTickHash& latest);
+        // (流し直した同じ刻みの状態と違えば、運びが世界を変えていた = 本当に除けた)・undone = 取り出したコマンド(やり直しの列へ)
+        void NoteUndone(uint64_t firstTick, uint64_t rewindTick, const sim::ProbeTickHash& latest, UndoneStroke undone);
         void NoteUndoFailed(std::string reason);
+
+        // --- やり直し(T-0497)。新しい運びを始めると、やり直しの列は空になる ---
+        [[nodiscard]] bool TakeRedoRequest() { return std::exchange(m_redoRequested, false); }
+        [[nodiscard]] const UndoneStroke* LastUndone() const { return m_redo.empty() ? nullptr : &m_redo.back(); }
+        void NoteRedone(uint64_t rewindTick);
+        void NoteRedoFailed(std::string reason);
+
+        // ボタン・キーと同じ依頼(--auto-play)
+        void RequestUndo() { m_undoRequested = true; }
+        void RequestRedo() { m_redoRequested = true; }
+
+        // プレイをやめた(T-0497): 番号 sequence 以降のコマンドを持つ運び(プレイ中に置いたもの)を、元に戻す・やり直しの列から忘れる
+        void ForgetStrokesFrom(uint32_t sequence);
+
+        // 決まった形と材料の鍵で 1 回の運びを作る(--auto-play。材料が無ければ空)
+        [[nodiscard]] std::vector<sim::ProbeCommand> StrokeOnce(const sim::ProbePlaceShape& shape,
+                                                                std::string_view material, uint32_t& sequence);
 
         // 世界が刻み tick の境界へ戻った(巻き戻しも元に戻すも)。その刻みから先に置いた記録を消す(流し直すともう一度届く)
         void NoteRewound(uint64_t tick);
@@ -135,7 +159,9 @@ namespace bicameral::editor {
 
         // --- 元に戻す ---
         std::vector<BrushStrokeSequences> m_strokes;  // 古い順(上限 MAX_UNDO_STROKES)
+        std::vector<UndoneStroke> m_redo;             // やり直せる運び(最後に元に戻したものが後ろ)
         bool m_undoRequested = false;
+        bool m_redoRequested = false;
         std::string m_undoMessage;
 
         struct UndoCheck {

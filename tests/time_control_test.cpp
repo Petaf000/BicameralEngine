@@ -138,9 +138,64 @@ namespace {
         EXPECT(time.SpeedIndex() == editor::NORMAL_SPEED_INDEX);
     }
 
+    // 編集の状態(T-0497・D-491): 時間は進まず 1 刻みも効かない。プレイで 60 刻み/秒・Space は一時停止 / 再開・やめると編集の状態
+    void TestEditAndPlay() {
+        TimeControl time;
+        SimScheduler scheduler = MakeScheduler();
+        time.StartInEdit();
+        EXPECT(time.Editing());
+        EXPECT(time.Paused());
+        EXPECT(RunFrames(time, scheduler, 60) == 0);
+
+        time.Apply({.stepTicks = 1}, scheduler);  // 編集の状態では進めない
+        EXPECT(RunFrames(time, scheduler, 5) == 0);
+        EXPECT(time.SteppedTicks() == 0);
+
+        time.Apply({.play = true}, scheduler);
+        EXPECT(!time.Editing());
+        EXPECT(!time.Paused());
+        uint64_t ticks = RunFrames(time, scheduler, 60);
+        EXPECT(ticks >= 59 && ticks <= 61);
+
+        // プレイの中の一時停止と 1 刻み
+        time.Apply({.togglePause = true}, scheduler);
+        RunFrames(time, scheduler, 5);
+        EXPECT(time.Paused() && !time.Editing());
+        const uint64_t pausedTick = scheduler.Cursor().tick;
+        time.Apply({.stepTicks = 1}, scheduler);
+        RunFrames(time, scheduler, 3);
+        EXPECT(scheduler.Cursor().tick == pausedTick + 1);
+
+        time.Apply({.play = true}, scheduler);  // 一時停止中のプレイは再開
+        EXPECT(!time.Paused());
+
+        // やめる: 編集の状態へ(やめるがプレイ・Space より先に効く)
+        time.Apply({.play = true, .stopPlay = true, .togglePause = true}, scheduler);
+        EXPECT(time.Editing() && time.Paused());
+        RunFrames(time, scheduler, 5);
+        const uint64_t stoppedTick = scheduler.Cursor().tick;
+        EXPECT(RunFrames(time, scheduler, 30) == 0);
+        EXPECT(scheduler.Cursor().tick == stoppedTick);
+
+        // 編集の状態の Space はプレイを始める(仮)
+        time.Apply({.togglePause = true}, scheduler);
+        EXPECT(!time.Editing() && !time.Paused());
+        ticks = RunFrames(time, scheduler, 30);
+        EXPECT(ticks >= 29 && ticks <= 31);
+    }
+
+    // エディタなし・再生の起動はいつもプレイ(やめるは効かない形ではなく、編集の状態へ移るだけ。フレームのループが使わない)
+    void TestDefaultIsPlay() {
+        TimeControl time;
+        EXPECT(time.Mode() == editor::EditorMode::Play);
+        EXPECT(!time.Paused());
+    }
+
 }  // namespace
 
 int main() {
+    TestEditAndPlay();
+    TestDefaultIsPlay();
     TestPauseStopsAtTickBoundary();
     TestPauseInsideTick();
     TestStepAdvancesExactlyOneTick();

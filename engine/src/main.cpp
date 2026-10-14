@@ -35,7 +35,12 @@
 //   --trace-cells <x,y,z>:<x,y,z>    トレースするセルの箱 [最小, 最大)(既定: 全部。そのセルを含むブロックを記録する)
 //   --trace-dir <path>               窓の T で集めたトレースを書くフォルダ(既定: exe の横の traces/。T-0088)
 //   --auto-trace                     30 フレーム目に T を押す(人がいない確認で T の流れを通す。--auto-click と一緒に)
-//   --editor                         エディタの殻(ImGui の時間の操作・状態の表示。Space = 止める・N = 1 刻み)を重ねる(T-0023)
+//   --editor                         エディタの殻(ImGui の時間の操作・状態の表示)を重ねる(T-0023)。起動は止まった編集の状態
+//                                    (F5 / Space = プレイ・Esc = やめる〔プレイ前の世界へ戻る〕・プレイ中の Space = 一時停止・N = 1 刻み。
+//                                    再生〔--replay〕はプレイのまま。T-0497・D-491)
+//   --play                           起動してすぐプレイを押す(--editor で世界を動かしたい時・窓の試験。T-0497)
+//   --auto-play                      編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるで戻るかを確かめる
+//                                    (--editor と --world sample と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0497)
 //   --auto-time                      決まったフレームで止める・1 刻み・速さを操作し、止まった・1 刻みずつ進んだかを確かめる(T-0023)
 //   --save-points <n>                巻き戻しの保存点の数(--editor の既定は 6。0 なら巻き戻さない。1 つ約 33 MiB の VRAM。T-0143)。
 //                                    1 以上なら刻み 0 の保存点を別に 1 つ足す(捨てない。起動直後の筆の運びも戻せる。T-0411)
@@ -381,6 +386,10 @@ namespace {
             loop.autoMetrics = true;
         else if (argument == L"--auto-place")
             loop.autoPlace = true;
+        else if (argument == L"--play")
+            loop.play = true;
+        else if (argument == L"--auto-play")
+            loop.autoPlay = true;
         else
             return false;
 

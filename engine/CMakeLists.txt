@@ -198,6 +198,7 @@ add_executable(bicameral
   src/editor/mixer_panel.cpp  # 環境ミキサー(標準パッケージを世界に足す・外す。T-0452・D-457)
   src/editor/reaction_table_panel.cpp
   src/frame/auto_reload.cpp
+  src/frame/auto_play.cpp  # --auto-play: 編集の状態・元に戻す/やり直す・プレイとやめるの確かめ(T-0497)
   src/frame/frame_loop.cpp
   src/frame/table_hot_reload.cpp
   src/frame/trace_capture.cpp

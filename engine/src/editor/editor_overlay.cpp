@@ -45,7 +45,9 @@ namespace bicameral::editor {
 
         // 2 つの依頼を 1 つに(キーとボタンが同じフレームに来たとき)
         TimeRequest Merge(const TimeRequest& a, const TimeRequest& b) {
-            return {.togglePause = a.togglePause != b.togglePause,
+            return {.play = a.play || b.play,
+                    .stopPlay = a.stopPlay || b.stopPlay,
+                    .togglePause = a.togglePause != b.togglePause,
                     .stepTicks = a.stepTicks + b.stepTicks,
                     .speedSteps = a.speedSteps + b.speedSteps,
                     .resetSpeed = a.resetSpeed || b.resetSpeed,
@@ -204,14 +206,17 @@ namespace bicameral::editor {
         return ImGui::GetIO().WantCaptureKeyboard;
     }
 
-    // Space = 止める / 動かす、N = 1 刻み(押しっぱなしで続けて進む)。文字を打っている間は効かない
+    // キー(T-0497・D-491。仮): F5 = プレイ・Esc = やめる・Space = プレイ中の一時停止 / 再開(編集の状態ではプレイ)・
+    // N = 一時停止中に 1 刻み(押しっぱなしで続けて進む)。文字を打っている間は効かない
     TimeRequest EditorOverlay::TakeShortcuts(const TimeControl& time) const {
         if (WantsKeyboard())
             return {};
 
         TimeRequest request;
+        request.play = ImGui::IsKeyPressed(ImGuiKey_F5, false);
+        request.stopPlay = !time.Editing() && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         request.togglePause = ImGui::IsKeyPressed(ImGuiKey_Space, false);
-        if (time.Paused() && ImGui::IsKeyPressed(ImGuiKey_N, true))
+        if (!time.Editing() && time.Paused() && ImGui::IsKeyPressed(ImGuiKey_N, true))
             request.stepTicks = 1;
 
         return request;
@@ -260,12 +265,23 @@ namespace bicameral::editor {
         ImGui::SetNextWindowPos({PANEL_MARGIN_PIXELS, PANEL_MARGIN_PIXELS}, ImGuiCond_FirstUseEver);
         ImGui::Begin("時間", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
-        // --- 止める・1 刻み ---
-        if (ImGui::Button(time.Paused() ? "動かす (Space)" : "止める (Space)"))
-            request.togglePause = true;
+        // --- プレイ・やめる・一時停止・1 刻み(D-491。UE と同じ形)---
+        if (time.Editing()) {
+            if (ImGui::Button("プレイ (F5 / Space)"))
+                request.play = true;
+        } else {
+            ImGui::BeginDisabled(!status.canStopPlay);
+            if (ImGui::Button("やめる (Esc)"))
+                request.stopPlay = true;
+
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button(time.Paused() ? "再開 (Space)" : "一時停止 (Space)"))
+                request.togglePause = true;
+        }
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(!time.Paused());
+        ImGui::BeginDisabled(time.Editing() || !time.Paused());
         if (ImGui::Button("1 刻み (N)"))
             request.stepTicks += 1;
 
@@ -291,23 +307,34 @@ namespace bicameral::editor {
 
         // --- 今の刻み ---
         ImGui::Separator();
-        if (!time.Paused())
+        if (time.Editing())
+            Line(std::format("編集の状態: 刻み {} の前(時間は止まっている。置く・消すは何回でも元に戻せる)",
+                             status.tick));
+        else if (status.playStartTick != UINT64_MAX)
+            Line(std::format("プレイ中: 刻み {} から(やめるとこの刻みの状態へ戻る)", status.playStartTick));
+
+        if (!time.Editing() && !time.Paused())
             Line(std::format("動いている: 刻み {}", status.tick));
-        else if (status.unit == 0)
-            Line(std::format("止まっている: 刻み {} の前", status.tick));
-        else
-            Line(std::format("止めている: 刻み {} の残りを進めている", status.tick));
+        else if (!time.Editing() && status.unit == 0)
+            Line(std::format("一時停止: 刻み {} の前", status.tick));
+        else if (!time.Editing())
+            Line(std::format("一時停止: 刻み {} の残りを進めている", status.tick));
 
         Line(std::format("1 刻みずつ進めた: {} 刻み", time.SteppedTicks()));
-        request.rewindTick = BuildRewind(status);
+        request.rewindTick = BuildRewind(status, time);
         ImGui::End();
 
         return request;
     }
 
     // 巻き戻し(保存点 + 再生。T-0143・ADR-0036): 押した保存点の刻み(押さなければ UINT64_MAX)
-    uint64_t EditorOverlay::BuildRewind(const EditorStatus& status) const {
+    uint64_t EditorOverlay::BuildRewind(const EditorStatus& status, const TimeControl& time) const {
         ImGui::SeparatorText("巻き戻す(保存点 + 再生)");
+        if (time.Editing()) {
+            ImGui::TextDisabled("編集の状態では巻き戻さない(筆の元に戻す・やり直すを使う)");
+            return UINT64_MAX;
+        }
+
         if (!status.rewindUnavailable.empty()) {
             ImGui::TextDisabled("%s", status.rewindUnavailable.c_str());
             return UINT64_MAX;
