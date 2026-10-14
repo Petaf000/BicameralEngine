@@ -484,11 +484,13 @@ namespace {
     void TestOuterBlast() {
         std::printf("outer iteration, blast (16^3 closed box, 1 cell 5x pressure at 1500 K):\n");
         const GasProjectionOptions defaults;
-        const double linear = RunOuterBlast(0, 1, defaults.outerToleranceMilligrams, 64, true);
-        const double settled = RunOuterBlast(0, defaults.outerIterations, defaults.outerToleranceMilligrams, 64, true);
+        const uint32_t cycles = defaults.solver.cycles;
+        const double linear = RunOuterBlast(0, 1, defaults.outerToleranceMilligrams, cycles, true);
+        const double settled = RunOuterBlast(0, defaults.outerIterations, defaults.outerToleranceMilligrams, cycles,
+                                             true);
         EXPECT(settled <= 1000);  // 最速なら強い爆発も同じ刻みで釣り合う(D-467)
         EXPECT(settled < linear);
-        RunOuterBlast(REAL_SOUND, defaults.outerIterations, defaults.outerToleranceMilligrams, 64, false);
+        RunOuterBlast(REAL_SOUND, defaults.outerIterations, defaults.outerToleranceMilligrams, cycles, false);
     }
 
     // 止め方の違いを測る(--sweep のときだけ。07 §2.6 の表)
