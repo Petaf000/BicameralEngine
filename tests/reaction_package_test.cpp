@@ -108,6 +108,26 @@ namespace {
         return false;
     }
 
+    // 坂の警告(T-0492。頭が SLOPE_WARNING_PREFIX)と、それ以外の警告(文献の反応熱との食い違いなど)の数
+    size_t SlopeWarningCount(const BakedReactionTable& table) {
+        return static_cast<size_t>(std::ranges::count_if(
+            table.warnings, [](const std::string& warning) { return warning.starts_with(SLOPE_WARNING_PREFIX); }));
+    }
+
+    size_t OtherWarningCount(const BakedReactionTable& table) {
+        return table.warnings.size() - SlopeWarningCount(table);
+    }
+
+    bool HasSlopeWarning(const BakedReactionTable& table, std::string_view part) {
+        return std::ranges::any_of(table.warnings, [&](const std::string& warning) {
+            return warning.starts_with(SLOPE_WARNING_PREFIX) && warning.find(part) != std::string::npos;
+        });
+    }
+
+    uint32_t RuleId(const BakedReactionTable& table, std::string_view name) {
+        return static_cast<uint32_t>(std::ranges::find(table.ruleNames, name) - table.ruleNames.begin());
+    }
+
     void PrintWarnings(const BakedReactionTable& table) {
         for (const std::string& warning : table.warnings)
             std::printf("  警告: %s\n", warning.c_str());
@@ -128,7 +148,10 @@ namespace {
         EXPECT(luau->species.size() == 10 && luau->rules.size() == 7);
         EXPECT(luau->rates.size() == luau->rules.size() * reaction::RX_RATE_TABLE_KELVINS);
         PrintWarnings(*luau);
-        EXPECT(luau->warnings.empty());  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
+        EXPECT(OtherWarningCount(*luau) == 0);  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
+        // 坂を上る規則は boudouard の組だけ(949 K 以下で ΔG° > 0。T-0491 の静的な一覧と同じ。T-0492)
+        EXPECT(SlopeWarningCount(*luau) == 2 && HasSlopeWarning(*luau, "規則 boudouard ") &&
+               HasSlopeWarning(*luau, "mana_test_catalyzed_boudouard"));
         std::printf("試験のパッケージ: 物質 %zu・規則 %zu・速度の表 %zu バイト\n", luau->species.size() - 1,
                     luau->rules.size(), luau->rates.size() * sizeof(uint64_t));
     }
@@ -245,7 +268,9 @@ namespace {
         }
 
         PrintWarnings(*baked);
-        EXPECT(baked->species.size() == 11 && baked->rules.size() == 8 && baked->warnings.empty());
+        EXPECT(baked->species.size() == 11 && baked->rules.size() == 8 && OtherWarningCount(*baked) == 0);
+        // hydrogen に標準エントロピーを書いていないので water_gas の坂は調べられない(まとめて 1 行。表は当たる。T-0492)
+        EXPECT(HasSlopeWarning(*baked, "坂を調べられない規則 1 本: water_gas") && HasSlopeWarning(*baked, "hydrogen"));
         EXPECT(baked->SpeciesId("hydrogen") != 0);
         EXPECT(std::ranges::find(baked->ruleNames, "water_gas") != baked->ruleNames.end());
     }
@@ -255,11 +280,11 @@ namespace {
         const auto burn = std::ranges::find(definition.rules, "carbon_combustion", &RuleDefinition::name);
         burn->declaredReactionEnthalpy = -393000;  // 差 509 J/mol: 警告しない
         const auto close = BakeReactionTable(definition);
-        EXPECT(close && close->warnings.empty());
+        EXPECT(close && OtherWarningCount(*close) == 0);
 
         burn->declaredReactionEnthalpy = -350000;  // 差 43.5 kJ/mol: 警告(ベイクは通す。表は生成エンタルピーの差)
         const auto far = BakeReactionTable(definition);
-        EXPECT(far && far->warnings.size() == 1 && Contains(far->warnings.front(), "carbon_combustion"));
+        EXPECT(far && OtherWarningCount(*far) == 1 && Contains(far->warnings.front(), "carbon_combustion"));
         EXPECT(far && close && SameTable(*far, *close));
         if (far)
             PrintWarnings(*far);
@@ -278,6 +303,46 @@ namespace {
                    : parsed.error().c_str());
 
         return false;
+    }
+
+    // 坂を上る規則はベイクが警告し、表はそのまま当てる。GPU の表は物質のエントロピーに依らない(T-0492・D-487 ②)
+    void TestSlopeWarnings() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        const auto with = BakeReactionTable(definition);
+        EXPECT(with && with->ruleSlopes.size() == with->rules.size());
+        if (!with)
+            return;
+
+        const RuleSlope& boudouard = with->ruleSlopes[RuleId(*with, "boudouard")];
+        EXPECT(boudouard.state == RuleSlopeState::Uphill);
+        EXPECT(boudouard.balanceKelvin > 900 &&
+               boudouard.balanceKelvin < 1000);  // 比熱一定の近似で 949 K(文献 約 980 K)
+        EXPECT(boudouard.uphill.highKelvin + 1 == boudouard.balanceKelvin);
+        EXPECT(boudouard.gibbs300MilliJoules > 0 && boudouard.gibbs1000MilliJoules < 0);
+        EXPECT(with->ruleSlopes[RuleId(*with, "cellulose_combustion")].state == RuleSlopeState::Downhill);
+        // 触媒(mana_test)は両辺で消えるので、エントロピーが無くても調べられる
+        EXPECT(with->ruleSlopes[RuleId(*with, "mana_test_catalyzed_boudouard")].state == RuleSlopeState::Uphill);
+
+        // 一酸化炭素のエントロピーを消す: それを含む規則だけ未評価になり、まとめの 1 行に出る
+        auto monoxide = std::ranges::find(definition.species, "carbon_monoxide", &SpeciesDefinition::name);
+        monoxide->standardEntropy.reset();
+        const auto partial = BakeReactionTable(definition);
+        EXPECT(partial && SameTable(*with, *partial));
+        if (partial) {
+            EXPECT(partial->ruleSlopes[RuleId(*partial, "boudouard")].state == RuleSlopeState::Unevaluated);
+            EXPECT(partial->ruleSlopes[RuleId(*partial, "carbon_partial_combustion")].missingEntropy ==
+                   std::vector<std::string>{"carbon_monoxide"});
+            EXPECT(SlopeWarningCount(*partial) == 1 && HasSlopeWarning(*partial, "3 本") &&
+                   HasSlopeWarning(*partial, "carbon_monoxide"));
+            PrintWarnings(*partial);
+        }
+
+        // 全部消す: 表は同じで、坂の警告はまとめの 1 行だけ(読み込みは断らない)
+        for (SpeciesDefinition& species : definition.species)
+            species.standardEntropy.reset();
+
+        const auto without = BakeReactionTable(definition);
+        EXPECT(without && SameTable(*with, *without) && SlopeWarningCount(*without) == 1);
     }
 
     void TestParseDecimal() {
@@ -392,6 +457,7 @@ int main() {
     TestRejectsBrokenTables();
     TestModAddsSpeciesAndRule();
     TestDeclaredEnthalpyWarning();
+    TestSlopeWarnings();
     TestParseDecimal();
     TestLoaderReadsShippedTable();
     TestLoaderFailures();

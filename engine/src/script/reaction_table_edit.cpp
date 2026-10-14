@@ -270,7 +270,7 @@ namespace bicameral::script {
                 composition += std::format("{}{}", count.element, count.count);
             }
 
-            return SpeciesRow{
+            SpeciesRow row{
                 .name = species.name,
                 .composition = std::move(composition),
                 .formationEnthalpy = MakeInteger({category, species.name, "formation_enthalpy_j_per_mol"},
@@ -281,6 +281,13 @@ namespace bicameral::script {
                 .thermalConductivity = MakeInteger({category, species.name, "thermal_conductivity_mw_per_m_k"},
                                                    "thermal_conductivity_mw_per_m_k", species.thermalConductivity, 0,
                                                    UINT32_LIMIT)};
+            if (species.standardEntropy) {
+                row.standardEntropy = MakeInteger({category, species.name, "standard_entropy_mj_per_mol_k"},
+                                                  "standard_entropy_mj_per_mol_k", *species.standardEntropy, 0,
+                                                  EXACT_INTEGER_LIMIT);
+            }
+
+            return row;
         }
 
         // 書き戻す所を全部の値で探す
@@ -291,6 +298,9 @@ namespace bicameral::script {
             for (SpeciesRow& row : document.species) {
                 for (ReactionValue* value : {&row.formationEnthalpy, &row.heatCapacity, &row.thermalConductivity})
                     index.Locate(*value);
+
+                if (row.standardEntropy)
+                    index.Locate(*row.standardEntropy);
             }
 
             for (RuleRow& row : document.rules) {
@@ -314,6 +324,9 @@ namespace bicameral::script {
             for (SpeciesRow& row : document.species) {
                 for (ReactionValue* value : {&row.formationEnthalpy, &row.heatCapacity, &row.thermalConductivity})
                     mark(*value);
+
+                if (row.standardEntropy)
+                    mark(*row.standardEntropy);
             }
 
             for (RuleRow& row : document.rules) {
@@ -358,6 +371,15 @@ namespace bicameral::script {
 
         for (const sim::RuleDefinition& rule : definition->rules)
             document.rules.push_back(MakeRuleRow(rule, speciesByName));
+
+        // 坂の検査はベイクの結果(規則の名前で引く。T-0492)
+        const std::vector<std::string>& ruleNames = table.table.ruleNames;
+        for (RuleRow& row : document.rules) {
+            const auto found = std::ranges::find(ruleNames, row.name);
+            const auto ruleId = static_cast<size_t>(found - ruleNames.begin());
+            if (ruleId < table.table.ruleSlopes.size())
+                row.slope = table.table.ruleSlopes[ruleId];
+        }
 
         // --- 書き戻す所(フォルダが無い表 = 再生ファイルの表は書き戻せない)---
         if (table.packageRoot.empty()) {
@@ -449,6 +471,9 @@ namespace bicameral::script {
                 if (matches(*value))
                     return value;
             }
+
+            if (row.standardEntropy && matches(*row.standardEntropy))
+                return &*row.standardEntropy;
         }
 
         for (const RuleRow& row : document.rules) {

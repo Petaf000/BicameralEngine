@@ -46,6 +46,7 @@ endif()
 # 評価の本体は shaders/common/reaction.hlsli(HLSL と共通)。浮動小数点は禁止(engine/src/sim は検査の対象)。
 add_library(bicameral_reaction STATIC
   src/sim/reaction_table.cpp
+  src/sim/reaction_slope.cpp  # 坂を上る規則のベイクの警告(物質の標準エントロピーから ΔG°。T-0492・D-487)
   src/sim/species_remap.cpp  # 物質を足す・消す表の差し替えの付け替え(T-0223・ADR-0065)
   src/sim/world_layout.cpp  # 世界の組み立て(初めのセル・物。パッケージの world_cells・world_bodies。T-0398)
   src/sim/material_templates.cpp  # 材料のひな形・抽出の物質・既定(同じ読み込みの分類。T-0399)

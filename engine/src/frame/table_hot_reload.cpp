@@ -84,6 +84,8 @@ namespace bicameral::frame {
                                     m_waiting->tableVersion, m_waiting->table.species.size() - 1,
                                     m_waiting->table.rules.size(), result.message.empty() ? "" : "。", result.message);
         Log(Channel::Sim, Level::Info, "反応表を読み直した: {}", m_lastMessage);
+        for (const std::string& warning : m_waiting->table.warnings)
+            Log(Channel::Sim, Level::Warning, "反応表: {}", warning);  // 坂を上る規則など(表は当てる。D-487 ②)
 
         return true;
     }

@@ -185,6 +185,18 @@ return {
                        row.atomicMass.readOnly.find("標準パッケージ") != std::string::npos);
         }
 
+        // 坂の検査(ベイクの結果の写し。T-0492): boudouard は上る・燃焼は下る。エントロピーは書いた物質だけにある
+        for (const RuleRow& row : document.rules) {
+            if (row.name == "boudouard")
+                EXPECT(row.slope.state == sim::RuleSlopeState::Uphill && row.slope.balanceKelvin != 0);
+
+            if (row.name == "cellulose_combustion")
+                EXPECT(row.slope.state == sim::RuleSlopeState::Downhill);
+        }
+
+        for (const SpeciesRow& row : document.species)
+            EXPECT(row.standardEntropy.has_value() == (row.name != "mana_test"));
+
         for (const SpeciesRow& row : document.species) {
             // 熱伝導率は式(倍率を掛けたもの)なので書き戻せない
             EXPECT(row.thermalConductivity.file.empty() && !row.thermalConductivity.readOnly.empty());

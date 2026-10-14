@@ -9,6 +9,7 @@
 // ベイクの検査(02 §2): 元素の釣り合いが崩れた規則・知らない元素と物質・係数や次数の誤り・名前の重なりはエラーにする。
 // 反応熱は生成エンタルピーの差から自動で決まる(手で書かない)ので、エネルギーの釣り合いは構造的に守られる。
 // 文献の反応熱を書いた規則は、生成エンタルピーの差と比べて食い違えば警告を出す(BakedReactionTable::warnings。02 §2 の 2)。
+// 坂を上る規則(物質の標準エントロピーから ΔG° > 0)も警告する。表はそのまま当てる(sim/reaction_slope。T-0492・D-487)。
 // 並びに依らない(T-0021・ADR-0032): 元素・物質・規則・規則の項は名前のバイト順に並べ直してから ID を振る。
 // 定義の並び(C++ の配列の順・Luau の表の順・Mod を入れた順)が違っても、中身が同じなら同じバイト列の表になる。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
@@ -25,6 +26,7 @@
 #include "common/reaction.hlsli"
 #include "sim/material_templates.h"
 #include "sim/play_metric.h"
+#include "sim/reaction_slope.h"
 #include "sim/reaction_wide_cell.h"
 #include "sim/world_atmosphere.h"
 #include "sim/world_layout.h"
@@ -50,8 +52,8 @@ namespace bicameral::sim {
         int64_t formationEnthalpy = 0;          // J/mol(298.15 K)
         uint32_t heatCapacity = 0;              // mJ/(mol·K)(一定と置く)
         uint32_t thermalConductivity = 0;       // mW/(m·K)(一定と置く。T-0089)
-        // 標準モルエントロピー(mJ/(mol·K)。298.15 K・1 bar)。任意。ベイクは読まない(GPU の表に入らない)。
-        // 坂の検査(反応ごとのエントロピーの生成。D-487・T-0491)だけが使う
+        // 標準モルエントロピー(mJ/(mol·K)。298.15 K・1 bar)。任意。GPU の表に入らない(表とハッシュは変わらない)。
+        // 坂の検査だけが使う(ベイクの警告 sim/reaction_slope・T-0492。試験 slope_check・T-0491。D-487)
         std::optional<int64_t> standardEntropy;
     };
 
@@ -131,7 +133,12 @@ namespace bicameral::sim {
         std::vector<std::string> ruleNames;     // 添字 = 規則 ID
         std::vector<uint32_t> molarMasses;      // mg/mol。添字 = 物質 ID
         std::vector<uint32_t> speciesElements;  // 物質 ID × 元素の数 + 元素
-        std::vector<std::string> warnings;      // ベイクは通したが、書いた人に見せる食い違い(文献の反応熱など)
+        std::vector<std::string>
+            warnings;  // ベイクは通したが、書いた人に見せる食い違い(文献の反応熱・坂を上る規則など)
+
+        // --- CPU だけ: 坂の検査(sim/reaction_slope。T-0492・D-487)---
+        std::vector<std::optional<int64_t>> standardEntropies;  // mJ/(mol·K)。添字 = 物質 ID(書いていなければ無し)
+        std::vector<RuleSlope> ruleSlopes;                      // 規則ごとの坂(添字 = 規則 ID。パネルの「坂」の欄)
 
         // --- CPU だけ: 同じ読み込みに足した分類(世界のデータ。物質は ID に直したもの。T-0398〜T-0400。分類ごとに 1 行)---
         WorldLayout worldLayout;     // 世界の組み立て(MakeProbeInitialWorld・MakeLayoutPhysicsScene が読む。T-0398)
