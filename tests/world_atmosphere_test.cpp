@@ -152,7 +152,9 @@ namespace {
                     PartsOf(third.fractions, argon));
         EXPECT(third.temperatureMilliKelvin == 283334);
         EXPECT(TotalParts(third.fractions) == ATMOSPHERE_PARTS_PER_WHOLE);
-        EXPECT(PartsOf(third.fractions, nitrogen) == 733333);
+        // N2 733333.4・O2 266333.267・Ar 333.333 → 切り捨てで 999999 → 余りがいちばん大きい N2 に 1 ppm
+        EXPECT(PartsOf(third.fractions, nitrogen) == 733334 && PartsOf(third.fractions, oxygen) == 266333 &&
+               PartsOf(third.fractions, argon) == 333);
 
         for (int64_t height = -10; height < 1000010; height += 7777)
             EXPECT(TotalParts(SampleAtmosphere(*baked, height).fractions) == ATMOSPHERE_PARTS_PER_WHOLE);

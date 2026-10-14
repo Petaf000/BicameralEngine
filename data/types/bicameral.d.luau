@@ -108,7 +108,10 @@ export type Environment = {
     gravity_um_per_s2: number?, -- 重力の強さ(µm/s²。地球 9806650)
     sound_speed_mm_per_s: number?, -- 気体の音速の基準(mm/s。D-440 の本物の音速 340000)
     atmosphere_surface_pressure_pa: number?, -- 基準の大気の一番低い点の圧力(Pa。ほかの高さはエンジンが重力と温度から静水圧で出す)
-    atmosphere_profile: { AtmospherePoint }?, -- 基準の大気の高さの点の列(低い順。T-0499)
+    -- 基準の大気の高さの点の列(低い順。T-0499)。点の形は AtmospherePoint だが、ここでは any で受ける: 点を表の中にそのまま書くと
+    -- 型検査が点ごとに別の型を作り({ nitrogen: number } は { [string]: number } と「ちょうど同じ」でない)誤りにするため。
+    -- 欄の誤り(知らない欄・整数でない・範囲の外)は読み込み(environment_package.cpp)が場所付きで止める
+    atmosphere_profile: { any }?,
     atmosphere_temperature_mk: number?, -- 一様な大気の温度(mK。T-0373 の書き方。分類 atmosphere と一緒に。atmosphere_profile とは書けない)
 }
 
