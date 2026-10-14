@@ -92,6 +92,46 @@ namespace bicameral::editor {
             return std::format("{:.1f} kJ/mol", static_cast<double>(joules) / 1000.0);
         }
 
+        // 坂の欄(ベイクの坂の検査。T-0492・D-487): 上る = 赤・成分しだい = 黄・下る = 緑・未評価 = 灰。浮き出しに ΔG° と理由
+        void SlopeCell(const sim::RuleSlope& slope) {
+            constexpr double MILLI = 1e-6;  // mJ/mol → kJ/mol
+            switch (slope.state) {
+                case sim::RuleSlopeState::Uphill:
+                    ImGui::TextColored(ERROR_COLOR, "上る %u〜%u K", slope.uphill.lowKelvin, slope.uphill.highKelvin);
+                    break;
+                case sim::RuleSlopeState::Downhill:
+                    if (slope.nearBalance.count != 0)
+                        ImGui::TextColored(WARNING_COLOR, "成分しだい %u〜%u K", slope.nearBalance.lowKelvin,
+                                           slope.nearBalance.highKelvin);
+                    else
+                        ImGui::TextColored(GOOD_COLOR, "下る");
+                    break;
+                case sim::RuleSlopeState::Unevaluated: ImGui::TextDisabled("未評価"); break;
+            }
+
+            if (!ImGui::IsItemHovered())
+                return;
+
+            if (slope.state == sim::RuleSlopeState::Unevaluated) {
+                std::string missing;
+                for (const std::string& name : slope.missingEntropy)
+                    missing += (missing.empty() ? "" : "・") + name;
+
+                ImGui::SetTooltip(
+                    "坂を調べられない: %s",
+                    slope.tooLarge ? "値が大きすぎる" : std::format("標準エントロピーの無い物質 {}", missing).c_str());
+                return;
+            }
+
+            const std::string balance = slope.balanceKelvin == 0 ? "なし" : std::format("{} K", slope.balanceKelvin);
+            ImGui::SetTooltip(
+                "標準の坂 ΔG°(300 K) %.1f kJ/mol・ΔG°(1000 K) %.1f kJ/mol・釣り合い %s\n"
+                "上る: 速さが 0 でない温度で ΔG° > 0(表は当てる。警告だけ)\n"
+                "成分しだい: 下るが |ΔG°| < RT ln 10^6(生成物が溜まると坂を上りうる。開発ビルドの計器で確かめる)",
+                static_cast<double>(slope.gibbs300MilliJoules) * MILLI,
+                static_cast<double>(slope.gibbs1000MilliJoules) * MILLI, balance.c_str());
+        }
+
     }  // namespace
 
     void ReactionTablePanel::UseTable(std::shared_ptr<const script::LoadedReactionTable> table) {
@@ -285,7 +325,7 @@ namespace bicameral::editor {
 
     void ReactionTablePanel::BuildRules() {
         constexpr ImGuiTableFlags FLAGS = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY;
-        if (!ImGui::BeginTable("##rules", 6, FLAGS, {0.0f, 260.0f}))
+        if (!ImGui::BeginTable("##rules", 7, FLAGS, {0.0f, 260.0f}))
             return;
 
         ImGui::TableSetupScrollFreeze(0, 1);
@@ -295,6 +335,7 @@ namespace bicameral::editor {
         ImGui::TableSetupColumn("始まる温度");
         ImGui::TableSetupColumn("反応熱(差)");
         ImGui::TableSetupColumn("書いた反応熱");
+        ImGui::TableSetupColumn("坂");
         ImGui::TableHeadersRow();
         for (const script::RuleRow& rule : m_document->rules) {
             if (!Matches(rule.name, rule.equation))
@@ -322,6 +363,9 @@ namespace bicameral::editor {
                 ValueCell(*rule.declaredEnthalpy);
             else
                 ImGui::TextDisabled("—");
+
+            ImGui::TableNextColumn();
+            SlopeCell(rule.slope);
         }
 
         ImGui::EndTable();
@@ -329,7 +373,7 @@ namespace bicameral::editor {
 
     void ReactionTablePanel::BuildSpecies() {
         constexpr ImGuiTableFlags FLAGS = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY;
-        if (!ImGui::BeginTable("##species", 5, FLAGS, {0.0f, 260.0f}))
+        if (!ImGui::BeginTable("##species", 6, FLAGS, {0.0f, 260.0f}))
             return;
 
         ImGui::TableSetupScrollFreeze(0, 1);
@@ -338,6 +382,7 @@ namespace bicameral::editor {
         ImGui::TableSetupColumn("生成エンタルピー (J/mol)");
         ImGui::TableSetupColumn("比熱 (mJ/(mol·K))");
         ImGui::TableSetupColumn("熱伝導率 (mW/(m·K))");
+        ImGui::TableSetupColumn("標準エントロピー (mJ/(mol·K))");
         ImGui::TableHeadersRow();
         for (const script::SpeciesRow& species : m_document->species) {
             if (!Matches(species.name, species.composition))
@@ -354,6 +399,11 @@ namespace bicameral::editor {
             ValueCell(species.heatCapacity);
             ImGui::TableNextColumn();
             ValueCell(species.thermalConductivity);
+            ImGui::TableNextColumn();
+            if (species.standardEntropy)
+                ValueCell(*species.standardEntropy);
+            else
+                ImGui::TextDisabled("—(坂を調べない)");
         }
 
         ImGui::EndTable();

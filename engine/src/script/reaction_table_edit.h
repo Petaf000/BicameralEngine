@@ -3,7 +3,7 @@
 // データの流れ:
 //   世界が使っている表(LoadedReactionTable。起動時の表か、ホットリロードで当てた表)
 //   → BuildReactionTableDocument: 表の中身(TableBytes)から定義を読み直し(Luau は走らせない)、元素・物質・規則の行と、
-//     規則ごとの保存則の検査(元素の釣り合い・生成エンタルピーの差と書いた反応熱)を作る。
+//     規則ごとの保存則の検査(元素の釣り合い・生成エンタルピーの差と書いた反応熱)と坂の検査(ベイクの結果。T-0492)を作る。
 //     書き戻せる値は、パッケージのフォルダの .luau の中のリテラルの位置を探しておく(script/luau_literal_edit)。
 //   → パネルで値を変える → WriteReactionValue: そのリテラルの字面だけを差し替えてファイルへ書く
 //   → ホットリロード(ADR-0047)が読み直し、型検査・ベイクの検査を通れば刻みの境界で世界に当てる → 次の表でまた作る。
@@ -55,6 +55,7 @@ namespace bicameral::script {
         ReactionValue formationEnthalpy;
         ReactionValue heatCapacity;
         ReactionValue thermalConductivity;
+        std::optional<ReactionValue> standardEntropy;  // 書いていなければ無し(坂の検査だけが読む。T-0492)
     };
 
     struct RuleRow {
@@ -73,6 +74,7 @@ namespace bicameral::script {
         // --- 保存則の検査 ---
         std::vector<std::string> elementImbalance;  // 釣り合わない元素(例 "C: 6 → 5")。空なら釣り合う
         int64_t enthalpyJoulesPerMol = 0;           // 生成エンタルピーの差(生成物 − 反応物。負なら発熱)
+        sim::RuleSlope slope;                       // 坂の検査(ベイクの結果の写し。T-0492・D-487)
     };
 
     struct ReactionTableDocument {

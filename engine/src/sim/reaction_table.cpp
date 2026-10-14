@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <format>
+#include <iterator>
 #include <map>
 
 namespace bicameral::sim {
@@ -126,6 +127,7 @@ namespace bicameral::sim {
             baked.speciesNames.emplace_back();
             baked.molarMasses.push_back(0);
             baked.speciesElements.resize(elements.size(), 0);
+            baked.standardEntropies.emplace_back();
 
             NameIndex species;
             for (const SpeciesDefinition& entry : definition.species) {
@@ -135,6 +137,8 @@ namespace bicameral::sim {
 
                 if (auto result = BakeSpecies(entry, elements, definition, baked); !result)
                     return std::unexpected(result.error());
+
+                baked.standardEntropies.push_back(entry.standardEntropy);
             }
 
             return species;
@@ -406,6 +410,10 @@ namespace bicameral::sim {
         }
 
         BuildRuleIndex(baked);
+
+        // --- 坂の検査(D-487 ②: 警告して動かす。表は当たる。T-0492)---
+        baked.ruleSlopes = CheckReactionSlopes(baked);
+        std::ranges::move(SlopeWarnings(baked, baked.ruleSlopes), std::back_inserter(baked.warnings));
 
         // --- 同じ読み込みに足した分類(世界のデータ。T-0398〜T-0400)。物質の名前を ID に直して確かめる(知らない物質は誤り)。
         // 分類ごとに別のファイルで行い、ここで 1 行ずつつなぐ ---

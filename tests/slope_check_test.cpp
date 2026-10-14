@@ -221,6 +221,28 @@ namespace {
         }
     }
 
+    // ベイクの坂の検査(整数。sim/reaction_slope・T-0492)が、この倍精度の一覧と同じ温度の範囲を出す
+    void CheckBakedSlopes(const BakedReactionTable& table, std::span<const SpeciesThermo> thermo,
+                          std::span<const UphillRange> ranges) {
+        EXPECT(table.ruleSlopes.size() == ranges.size());
+        for (uint32_t id = 0; id < table.ruleSlopes.size() && id < ranges.size(); ++id) {
+            const RuleSlope& baked = table.ruleSlopes[id];
+            const std::vector<NetTerm> terms = NetTerms(table.View().Rule(id));
+            if (!HasAllEntropies(terms, thermo)) {
+                EXPECT(baked.state == RuleSlopeState::Unevaluated);
+                continue;
+            }
+
+            EXPECT((baked.state == RuleSlopeState::Uphill) == (ranges[id].count != 0));
+            EXPECT(baked.uphill.lowKelvin == ranges[id].lowKelvin && baked.uphill.highKelvin == ranges[id].highKelvin &&
+                   baked.uphill.count == ranges[id].count);
+            EXPECT(baked.balanceKelvin == BalanceKelvin(terms, thermo));
+            std::printf("  ベイクの坂 %-42s %s(上る %u〜%u K・成分しだい %u〜%u K)\n", table.ruleNames[id].c_str(),
+                        baked.state == RuleSlopeState::Uphill ? "上る" : "下る", baked.uphill.lowKelvin,
+                        baked.uphill.highKelvin, baked.nearBalance.lowKelvin, baked.nearBalance.highKelvin);
+        }
+    }
+
     // --- (2) 毎刻みの数え上げ ---
 
     struct ConductionTally {
@@ -593,6 +615,7 @@ int main(int argc, char** argv) {
     const std::vector<UphillRange> ranges = PrintStaticList(*table, thermo);
     std::fflush(stdout);
     CheckCelluloseSpread(*table, thermo, ranges);
+    CheckBakedSlopes(*table, thermo, ranges);
     EXPECT(ranges.size() == table->rules.size());
 
     const auto begin = std::chrono::steady_clock::now();

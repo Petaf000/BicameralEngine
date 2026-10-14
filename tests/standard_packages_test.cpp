@@ -151,7 +151,10 @@ namespace {
             }
 
             EXPECT(loaded->rejected.empty());
-            EXPECT(loaded->table.warnings.empty());
+            // 坂の警告(T-0492)は除く: 標準の real_reactions の boudouard は一方向で 949 K 以下で坂を上る(D-487 ②。警告して動かす)
+            EXPECT(std::ranges::none_of(loaded->table.warnings, [](const std::string& warning) {
+                return !warning.starts_with(sim::SLOPE_WARNING_PREFIX);
+            }));
             EXPECT(loaded->loadOrder.size() == mix->size());
         }
     }

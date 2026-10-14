@@ -344,6 +344,9 @@ views:
       - { id: reactiontable, group: simlib, label: "BakeReactionTable<br/>定義 → 整数の表(元素の釣り合いの検査)",
           code: "engine/src/sim/reaction_table.cpp::BakeReactionTable", ticket: T-0014, doc: docs/design/02-reaction-system.md,
           note: "Arrhenius を温度 1 K ごとの表に(整数の ln・exp。R7)。試験の表は data/packages/combustion_test(物質 8・規則 7。テストも読む。T-0169)" }
+      - { id: reactionslope, group: simlib, label: "CheckReactionSlopes<br/>坂を上る規則の警告(ΔG°。警告して動かす)",
+          code: "engine/src/sim/reaction_slope.cpp::CheckReactionSlopes", ticket: T-0492, doc: docs/design/19-slope-principle-research.md,
+          note: "物質の標準エントロピー(任意)から 1 K ごとの ΔG° を整数で。GPU の表は変えない。パネルの「坂」の欄(D-487 ②・ADR-0218)" }
       - { id: reactiontest, group: tests, label: "reaction_test<br/>ベイクの検査・保存則・取り合い・並び・遅い反応",
           code: "tests/reaction_test.cpp::TestClosedCellBurn", ticket: T-0014 }
       - { id: gpureactiontest, group: tests, label: "gpu_reaction_test<br/>セル 4096 × 400 刻みを GPU と CPU で比べる",
@@ -510,6 +513,7 @@ views:
       - [fixed, debugringhlsl, "FX_ASSERT"]
       - [reactionhlsl, fixed]
       - [reactiontable, fixed, "ベイクも整数(R7)"]
+      - [reactiontable, reactionslope, "坂の検査 → 警告(T-0492)"]
       - [reactiontable, reactionhlsl, "RxSpecies・RxRule・速度の表"]
       - [reactiontest, reactiontable]
       - [reactionwait, reactionhlsl, "取り合いと更新は同じ関数"]
