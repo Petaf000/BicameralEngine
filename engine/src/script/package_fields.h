@@ -8,6 +8,7 @@
 // ここは CPU だけ(原則 2)。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -45,6 +46,17 @@ namespace bicameral::script {
     [[nodiscard]] std::expected<int64_t, std::string> ReadIntegerField(const ScriptValue& table, std::string_view field,
                                                                        std::string_view path, int64_t minimum,
                                                                        int64_t maximum);
+
+    // { x, y, z } の 3 つの整数(各軸 [minimum, maximum])。セルの場所・大きさ(world_cells・play_metrics。T-0559 で共通に)
+    [[nodiscard]] std::expected<std::array<int64_t, 3>, std::string> ReadVector3(const ScriptValue& value,
+                                                                                 std::string_view path, int64_t minimum,
+                                                                                 int64_t maximum);
+
+    // 欄 field の { x, y, z }(欄が無ければ誤り)
+    [[nodiscard]] std::expected<std::array<int64_t, 3>, std::string> ReadVector3Field(const ScriptValue& table,
+                                                                                      std::string_view field,
+                                                                                      std::string_view path,
+                                                                                      int64_t minimum, int64_t maximum);
 
     // 表であることと、知らない欄が無いことを確かめる
     [[nodiscard]] std::expected<void, std::string> CheckRecord(const ScriptValue& value,

@@ -37,40 +37,6 @@ namespace bicameral::script {
         }
 
         // { x, y, z }(数の鍵 1〜3 だけの表)
-        std::expected<std::array<int64_t, 3>, std::string> ReadVector3(const ScriptValue& value, std::string_view path,
-                                                                       int64_t minimum, int64_t maximum) {
-            const bool shaped = value.IsTable() && value.fields.size() == 3;
-            if (!shaped)
-                return std::unexpected(std::format("{}: {{ x, y, z }} の 3 つの数で書く", path));
-
-            std::array<int64_t, 3> vector{};
-            for (uint32_t axis = 0; axis < 3; ++axis) {
-                const ScriptField& field = value.fields[axis];
-                if (!field.key.IsNumber() || field.key.number != static_cast<double>(axis + 1))
-                    return std::unexpected(std::format("{}: {{ x, y, z }} の 3 つの数で書く", path));
-
-                const auto component = ReadInteger(field.value, std::format("{}[{}]", path, axis + 1), minimum,
-                                                   maximum);
-                if (!component)
-                    return std::unexpected(component.error());
-
-                vector[axis] = *component;
-            }
-
-            return vector;
-        }
-
-        std::expected<std::array<int64_t, 3>, std::string> ReadVector3Field(const ScriptValue& table,
-                                                                            std::string_view field,
-                                                                            std::string_view path, int64_t minimum,
-                                                                            int64_t maximum) {
-            const auto value = RequireField(table, field, path);
-            if (!value)
-                return std::unexpected(value.error());
-
-            return ReadVector3(**value, std::format("{}.{}", path, field), minimum, maximum);
-        }
-
         std::array<uint32_t, 3> ToCells(const std::array<int64_t, 3>& vector) {
             return {static_cast<uint32_t>(vector[0]), static_cast<uint32_t>(vector[1]),
                     static_cast<uint32_t>(vector[2])};

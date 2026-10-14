@@ -8,13 +8,15 @@
 //   → PlayMetricValue → ComparePlayMetrics(前の版との差)→ エディタのパネル・コマンドライン(--measure-metrics)。
 // 指標の形(中身は持たない。D-454):
 //   - 場面 = 表の世界の組み立て(world_cells)の初めの世界 S(0) に、指標のつつき(刻みと場所)を当てたもの
-//   - 測る量 = 最高温度・しきい値以上のセルの数・物質の世界全体の量(world_copy.h の小さな道具)のどれか 1 つ
+//   - 測る量 = 最高温度・しきい値以上のセルの数・物質の量(world_copy.h の小さな道具)のどれか 1 つ。
+//     範囲(セルの箱 min_cell・size_cells。T-0559)を書けばその中だけ、書かなければ世界全体
 //   - 止め方 = 量がしきい値以下(at_most)/以上(at_least)になった最初の読み戻しの刻み。書かなければ上限の刻みの量を測る
 //   - 判定は、つつきを全部当てた後(最後のつつきの刻みより後)の読み戻しの刻みだけ(火をつける前に「火が無い」で止まらないように)
 // 値は「何刻みで止まったか」と「止まった刻みの量」。前の版の値はファイル(SerializePlayMetricValues)かエディタの前の測りから。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。秒の表示も整数で作る。ここは CPU だけ。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -50,6 +52,14 @@ namespace bicameral::sim {
         friend bool operator==(const PlayMetricPoke&, const PlayMetricPoke&) = default;
     };
 
+    // 量を測る範囲(セルの箱。T-0559)。wholeWorld なら格子の全部
+    struct PlayMetricRegion {
+        bool wholeWorld = true;
+        std::array<uint32_t, 3> minCell{};
+        std::array<uint32_t, 3> sizeCells{};
+        friend bool operator==(const PlayMetricRegion&, const PlayMetricRegion&) = default;
+    };
+
     // --- 定義(人が書く値。名前のまま)---
 
     struct PlayMetricDefinition {
@@ -61,6 +71,7 @@ namespace bicameral::sim {
         std::vector<PlayMetricPoke> pokes;
 
         PlayMetricQuantity quantity = PlayMetricQuantity::MaxTemperature;
+        PlayMetricRegion region;              // 量を測る範囲(書かなければ世界全体)
         std::string species;                  // SpeciesAmount の物質の名前
         uint32_t temperatureMillikelvin = 0;  // CellsAtOrAbove のしきい値の温度
         PlayMetricStop stop = PlayMetricStop::AtLimit;
@@ -77,6 +88,7 @@ namespace bicameral::sim {
         std::vector<PlayMetricPoke> pokes;  // 刻みの順(同じ刻みは書いた順)
 
         PlayMetricQuantity quantity = PlayMetricQuantity::MaxTemperature;
+        PlayMetricRegion region;  // 格子の中に収まる(ベイクが確かめた)
         uint32_t species = 0;
         uint32_t temperatureMillikelvin = 0;
         PlayMetricStop stop = PlayMetricStop::AtLimit;
@@ -88,7 +100,8 @@ namespace bicameral::sim {
         [[nodiscard]] bool Stops(uint64_t value) const;
     };
 
-    // 鍵の順に並べ、物質の名前を ID に直して確かめる(知らない物質・上限が間隔の倍数でない・つつきが上限より後は誤り)
+    // 鍵の順に並べ、物質の名前を ID に直して確かめる(知らない物質・上限が間隔の倍数でない・つつきが上限より後・
+    // 範囲が格子の外は誤り)
     [[nodiscard]] std::expected<std::vector<PlayMetric>, std::string> BakePlayMetrics(
         const std::vector<PlayMetricDefinition>& definitions, const BakedReactionTable& table);
 

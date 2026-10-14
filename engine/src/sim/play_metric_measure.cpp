@@ -5,6 +5,7 @@
 #include <format>
 #include <utility>
 
+#include "common/probe_sim.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
 
@@ -21,6 +22,37 @@ namespace bicameral::sim {
             return commands;
         }
 
+        // 範囲(セルの箱)の中だけで量を測る(世界全体の道具と同じ量。T-0559)
+        uint64_t MeasureInRegion(const PlayMetric& metric, std::span<const reaction::RxCell> cells,
+                                 std::span<const reaction::HcThermalCache> thermal) {
+            const PlayMetricRegion& region = metric.region;
+            uint64_t quantity = 0;
+            for (uint32_t z = region.minCell[2]; z < region.minCell[2] + region.sizeCells[2]; ++z) {
+                for (uint32_t y = region.minCell[1]; y < region.minCell[1] + region.sizeCells[1]; ++y) {
+                    for (uint32_t x = region.minCell[0]; x < region.minCell[0] + region.sizeCells[0]; ++x) {
+                        const uint32_t index = ProbeCellIndex(x, y, z);
+                        if (index >= cells.size() || index >= thermal.size())
+                            continue;
+
+                        const uint32_t temperature = thermal[index].temperature;
+                        switch (metric.quantity) {
+                            case PlayMetricQuantity::MaxTemperature:
+                                quantity = std::max<uint64_t>(quantity, temperature);
+                                break;
+                            case PlayMetricQuantity::CellsAtOrAbove:
+                                quantity += temperature >= metric.temperatureMillikelvin ? 1 : 0;
+                                break;
+                            case PlayMetricQuantity::SpeciesAmount:
+                                quantity += ProbeSpeciesAmount(cells.subspan(index, 1), metric.species);
+                                break;
+                        }
+                    }
+                }
+            }
+
+            return quantity;
+        }
+
         PlayMetricValue FailedValue(const PlayMetric& metric, std::string message) {
             return {.key = metric.key, .label = metric.label, .message = std::move(message)};
         }
@@ -31,6 +63,9 @@ namespace bicameral::sim {
 
     uint64_t MeasurePlayMetricQuantity(const PlayMetric& metric, std::span<const reaction::RxCell> cells,
                                        std::span<const reaction::HcThermalCache> thermal) {
+        if (!metric.region.wholeWorld)
+            return MeasureInRegion(metric, cells, thermal);
+
         switch (metric.quantity) {
             case PlayMetricQuantity::MaxTemperature: return ProbeMaxTemperature(thermal);
             case PlayMetricQuantity::CellsAtOrAbove: return ProbeCellsAtOrAbove(thermal, metric.temperatureMillikelvin);

@@ -170,11 +170,38 @@ namespace bicameral::script {
             return {};
         }
 
+        // 量を測る範囲(min_cell と size_cells は両方書くか両方省く。省けば世界全体。T-0559。格子に収まるかはベイク)
+        std::expected<void, std::string> ReadRegion(const ScriptValue& value, const std::string& path,
+                                                    PlayMetricDefinition& metric) {
+            const bool hasMin = value.Find("min_cell") != nullptr;
+            const bool hasSize = value.Find("size_cells") != nullptr;
+            if (hasMin != hasSize)
+                return std::unexpected(std::format("{}: min_cell と size_cells は両方書くか両方省く", path));
+            if (!hasMin)
+                return {};
+
+            const auto minCell = ReadVector3Field(value, "min_cell", path, 0, CELL_MAX);
+            if (!minCell)
+                return std::unexpected(minCell.error());
+
+            const auto sizeCells = ReadVector3Field(value, "size_cells", path, 1, CELL_MAX + 1);
+            if (!sizeCells)
+                return std::unexpected(sizeCells.error());
+
+            metric.region.wholeWorld = false;
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                metric.region.minCell[axis] = static_cast<uint32_t>((*minCell)[axis]);
+                metric.region.sizeCells[axis] = static_cast<uint32_t>((*sizeCells)[axis]);
+            }
+
+            return {};
+        }
+
         std::expected<PlayMetricDefinition, std::string> ReadMetric(const std::string& key, const ScriptValue& value,
                                                                     const std::string& path) {
-            static constexpr std::array<std::string_view, 9> FIELDS = {"label",   "max_ticks", "sample_interval_ticks",
-                                                                       "pokes",   "quantity",  "temperature_mk",
-                                                                       "species", "at_most",   "at_least"};
+            static constexpr std::array<std::string_view, 11> FIELDS = {
+                "label",      "max_ticks", "sample_interval_ticks", "pokes",   "quantity", "min_cell",
+                "size_cells", "species",   "temperature_mk",        "at_most", "at_least"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -204,6 +231,9 @@ namespace bicameral::script {
 
             if (auto stop = ReadStop(value, path, metric); !stop)
                 return std::unexpected(stop.error());
+
+            if (auto region = ReadRegion(value, path, metric); !region)
+                return std::unexpected(region.error());
 
             metric.maxTicks = static_cast<uint64_t>(*maxTicks);
             metric.sampleIntervalTicks = static_cast<uint32_t>(*interval);
