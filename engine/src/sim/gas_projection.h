@@ -36,10 +36,14 @@ namespace bicameral::sim {
     struct GasProjectionOptions {
         GasPressureOptions pressure;
 
-        // --- 多重格子(熱の陰解法の V サイクルをそのまま。cycles は上限)---
-        ImplicitOptions solver = {.method = ImplicitMethod::Multigrid, .cycles = 64};
-        // 止める判定: 全部のセルで、式の誤差(残差 × 対角)= 刻みの終わりの質量のずれがこれ以下(mg。1 mg は面の速さで約 0.2 mm/s)
-        uint32_t toleranceMilligrams = 1;
+        // --- 多重格子(熱の陰解法の V サイクルをそのまま。cycles は 1 回の解きの上限)---
+        // 内側の解きの止め方は外側の許容差から決める(ADR-0254。仮・ユーザー未確認): 外側の反復は解きの残りも食い違い G として測って直すので、
+        // 外側の許容差より細かく解いても採る状態は良くならない(不正確なニュートン)。上限 8 で 1 刻みの V の最大が
+        // 「外側の上限 × 8」に決まる(D-468)。GPU は記録する回が 64 → 8 になり、止めた後の回の費用が約 1/8(T-0531)
+        ImplicitOptions solver = {.method = ImplicitMethod::Multigrid, .cycles = 8};
+        // 止める判定: 全部のセルで、式の誤差(残差 × 対角)= 刻みの終わりの質量のずれがこれ以下(mg。1 mg は面の速さで約 0.2 mm/s)。
+        // 0 なら外側の許容差 ÷ INNER_TOLERANCE_DIVISOR(GasInnerToleranceMilligrams。既定 100 mg → 10 mg)
+        uint32_t toleranceMilligrams = 0;
 
         // --- 外側の反復(T-0530。上限に届いたら、その時の仮の状態を採り、残りの食い違いは次の刻みへ持ち越す〔回数は決まった上限まで。D-468〕)---
         // 上限(1 = 解き直さない〔T-0503 の線形の 1 回〕)。既定の 4・100 mg・傾きで割るは仮(ユーザー未確認。ADR-0234)
@@ -81,6 +85,12 @@ namespace bicameral::sim {
 
     // セルごとの止める閾値(T-0531。GPU の止める判定): |残差| がこれ以上のセルが 1 つでもあれば、式の誤差 floor(|残差| × D_i ÷ 2^48)が
     // 許容差を超える(⌈(許容差 + 1)× 2^48 ÷ D_i⌉。CPU の判定と整数で同じ)
+    // 内側の解きの許容差の既定 = 外側の許容差 ÷ これ(ADR-0254。T-0531 の計測で ÷ 2・÷ 4・÷ 10 を比べ、外側が上限に届く刻みが 1 mg と同じ程度の ÷ 10)
+    constexpr uint32_t INNER_TOLERANCE_DIVISOR = 10;
+
+    // 内側の解きの許容差(mg。options.toleranceMilligrams が 0 なら外側の許容差から。1 以上)
+    [[nodiscard]] uint32_t GasInnerToleranceMilligrams(const GasProjectionOptions& options);
+
     [[nodiscard]] std::vector<int64_t> GasPressureThresholds(const ImplicitGrid& grid, uint32_t toleranceMilligrams);
 
 }  // namespace bicameral::sim

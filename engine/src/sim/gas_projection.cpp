@@ -97,9 +97,10 @@ namespace bicameral::sim {
             if (options.solveObserver != nullptr)
                 before = values;
 
+            const auto tolerance = (int64_t)GasInnerToleranceMilligrams(options);
             uint32_t cycles = 0;
             int64_t error = WorstMassError(grid, rhs, values);
-            while (error > (int64_t)options.toleranceMilligrams && cycles < options.solver.cycles) {
+            while (error > tolerance && cycles < options.solver.cycles) {
                 CycleImplicitGrid(grid, rhs, values, options.solver, cost.solver);
                 ++cycles;
                 error = WorstMassError(grid, rhs, values);
@@ -107,7 +108,7 @@ namespace bicameral::sim {
 
             cost.cycles += cycles;
             cost.maxCycles = std::max(cost.maxCycles, cycles);
-            cost.unconverged += error > (int64_t)options.toleranceMilligrams ? 1 : 0;
+            cost.unconverged += error > tolerance ? 1 : 0;
             cost.worstMassError = std::max(cost.worstMassError, error);
             if (options.solveObserver != nullptr) {
                 (*options.solveObserver)({.grid = grid,
@@ -222,6 +223,13 @@ namespace bicameral::sim {
         }
 
     }  // namespace
+
+    uint32_t GasInnerToleranceMilligrams(const GasProjectionOptions& options) {
+        if (options.toleranceMilligrams != 0)
+            return options.toleranceMilligrams;
+
+        return std::max(options.outerToleranceMilligrams / INNER_TOLERANCE_DIVISOR, 1u);
+    }
 
     std::vector<int64_t> GasPressureThresholds(const ImplicitGrid& grid, uint32_t toleranceMilligrams) {
         const ImplicitGridLevel& cells = grid.levels[0];
