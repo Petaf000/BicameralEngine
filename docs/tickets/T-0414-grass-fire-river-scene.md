@@ -49,6 +49,7 @@
     川 x 40〜43・y 1〜4(水 2100 mol)/ 上は空気。材料: 空気・草・水・砂(筆の既定は水)。表示: 草(残り)・炭・水。
   - 遊びの指標: grass_fire_reaches_river(手前の草の 9 割が燃えるまで)・grass_left_after_10_min(10 分後の草。向こう岸 1,536,000,000 µmol が残れば止まった)・
     grass_fire_out(1000 K 以上のセルが無くなるまで)。前の版の値 `data/scenes/grass_fire_river/metrics_baseline.txt`。
+    (T-0559 で岸ごとの範囲に直した: grass_fire_reaches_river = 手前の岸の草・grass_left_after_10_min → far_grass_left_after_10_min = 向こう岸の草)
 - 起動(exe の横から):
   - 遊ぶ: `bicameral --packages data/scenes/grass_fire_river --editor --no-physics`(T-0557 から。前は `--world sample` が要った)(F5 → 断面を y の向き・y = 4 にして草をクリック)
   - 測る: `bicameral --packages data/scenes/grass_fire_river --measure-metrics --no-physics --metrics-baseline data/scenes/grass_fire_river/metrics_baseline.txt`
