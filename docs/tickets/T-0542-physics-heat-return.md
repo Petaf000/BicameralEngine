@@ -1,6 +1,6 @@
 # T-0542 物理で失った力学的エネルギーをセルの熱へ返す
 
-- Status: Doing(CPU の道は済み。GPU の世界へ足す所と窓の確かめは T-0561)
+- Status: Doing(物理の入口と帳簿は CPU・GPU とも済み・CPU の世界へ足すのも済み。GPU の世界へ足す所と窓の確かめは T-0561)
 - 種類: 工学
 - PC: 必須(ビルドと ctest)
 - 見積もり: チャット 1 回分 + T-0561
@@ -15,9 +15,11 @@ T-0519 で数えた物理の散逸(PxBody::dissipatedEnergy)を、世界のセ�
 - [x] CPU の物理(PhysicsWorld::HeatEntries・HeatLedger)と CPU リファレンスの世界(ProbeReference::Advance の heat)
 - [x] 試験 physics_heat(CPU): 仮の世界の反応の世界 + 物理で、毎刻み「Σ 散逸 = 1024000 × 返した mJ + 残り」「返した mJ = セルに足した熱 + まだ足していない分」
       「世界のエネルギーの和の増え = 足した熱」がビット単位で合う。落とした物で返した熱が m g h に 1% 以内・落ちた所の床のまわりに 9 割以上・2 回の実行で同じ。崩した積み木でも合う
-- [ ] GPU の物理の入口と帳簿(CPU とビット一致)・GPU の世界のセルへ足す・世界のハッシュが変わる理由 → **T-0561**
+- [x] GPU の物理の入口と帳簿(GpuPhysics の u14・u15、CollectHeat・HeatSum・HeatShare・HeatFinish)。gpu_physics_test が毎区間、
+      入口(重みが 0 でないものを並べ替えて)と帳簿を CPU とビット単位で比べる(gpu_physics_[sp]* 8 本が通った)
+- [ ] GPU の世界のセルへ足す・世界のハッシュが変わる理由 → **T-0561**
 - [ ] 重い物を落とすと床のセルが温まるのが窓で見えるか(--editor の run で 1 回)→ **T-0561**(窓は GPU の世界を描くので、GPU の道ができてから)
-- [x] release のビルド(警告 0)・archmap --check
+- [x] release のビルド(警告 0)・archmap --check・physics_[eghm]*(checked 含む 8 本)・blank_world・gpu_physics_[sp]*(8 本)・gpu_probe_[pr]*
 
 ## 作り
 - 入口(小刻みごと・接触点ごと): 最後の本反復の後・速度の更新の前に、w = Σ 行 |λ| × |行の向きの相対の速さ|(2^-16 W)と点の位置(A と B の点の真ん中)。
@@ -33,7 +35,8 @@ T-0519 で数えた物理の散逸(PxBody::dissipatedEnergy)を、世界のセ�
 - 崩した積み木(柱を上の方で 5000 N·s 押す。180 刻み): 返した熱 68979 J・残り −5.0 J・最も大きい借り −106.5 J。
 - 借りは T-0519 の 1 小刻みの最大(0.064 J)より大きい: 積み木の柱が静止のまま解き方の誤差でエネルギーを出し入れし、それが溜まる(返すのは正の分だけなので)。
   帳簿は合っている。熱の量への影響は 0.2% 以下。
-- 物の状態のハッシュ・GPU の物理・GPU の世界はまだ変えていない(このブランチでは世界のハッシュは変わらない。変わるのは T-0561)。
+- 物の状態のハッシュ・GPU の世界はまだ変えていない(このブランチでは世界のハッシュは変わらない。変わるのは T-0561: 物が接して動いた刻みの次の刻みから、
+  接触点のセルのエネルギーが増えるため)。GPU の物理は刻みの終わりに 3 パス・小刻みごとに 1 パス増えた(時間は未計測)。
 
 ## 判断待ち(仮で進めたもの。ユーザー未確認)
 1. **返す元を世界で 1 つにする**(ADR-0242 の 2。作り手から見た違い): 熱の場所は接触点の仕事の重みで決まるので変わらない。違いは量だけで、
@@ -42,12 +45,14 @@ T-0519 で数えた物理の散逸(PxBody::dissipatedEnergy)を、世界のセ�
 2. **両側の分とも接触点のセルへ**(物に温度ができるまで): T-0519 のおすすめ案 B のまま。物に温度ができたら半分を物へ。
 
 ## 分けたもの
-- **T-0561 GPU の物理と世界で熱を返す**: GpuPhysics に入口の枠([小刻み][組の枠][点]・40 バイト)と帳簿、CollectHeat(最後の本反復の後・UpdateVelocity の前、組ごと)、
-  ReturnHeat(Σ 散逸と Σ 重みを 64bit の原子的な足し算で → 入口ごとの分 → 帳簿。1 グループ + 入口ごと)。gpu_physics_test で入口(0 でない物の並べ替えた集合)と帳簿を CPU と比べる。
-  仮の世界: 適用の単位(刻み t + 1)で入口ごとに cells のエネルギーへ 64bit の原子的な足し算 → 足したセルのキャッシュを作り直す段 → ブロックの印と活性の一覧(重複に注意)。
+- **T-0561 GPU の世界で物理の熱をセルへ足す**: 物理の入口のバッファ(GpuPhysics::HeatEntries()・HeatEntryCount()。刻み t の分)を、
+  仮の世界の適用の単位(刻み t + 1。コマンドの後)で読む: 入口ごとに ProbeCellOfPhysicsPoint のセルの energy へ 64bit の原子的な足し算 →
+  足したセルの熱のキャッシュを作り直す段(同じセルに何個来ても同じ値)→ ブロックの印(changed = 印 − 1)と活性の一覧(同じブロックを重ねて足さない)。
+  ProbeReference::Advance の heat と同じ結果(ApplyPhysicsHeat)。ルート署名(仮の世界)に SRV 1 本。巻き戻しの写し(StateBuffers)は u14・u15 も写す(済み)。
   gpu_probe_physics_test は CPU の期待に ProbeReference(heat あり)を足してセルのハッシュも比べる。窓で落とした物の床が温まるか(--editor の run)。
   ブランクの世界(熱容量 0 のセル)へ熱が入った時の温度の扱いを確かめる。1〜2 チャット。
 
 ## 作業ログ
 - 2026-10-15(wt4): physics_heat.hlsli(入口・重み・分け方・帳簿)・PhysicsWorld の CollectHeatEntries / ReturnHeat・ProbeCellOfPhysicsPoint・
-  ProbeReference::Advance の heat・試験 physics_heat。ADR-0242。GPU と窓は T-0561。
+  ProbeReference::Advance の heat・試験 physics_heat。GpuPhysics の入口と帳簿(u14・u15・4 パス)と gpu_physics_test の比較。ADR-0242。
+  GPU の世界へ足すのと窓は T-0561。
