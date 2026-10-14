@@ -7,6 +7,10 @@
 //     単位をほぼ 1 つずつ投げる(窓の再生の --sim-load・--sim-split と同じ形)。2 回の実行で世界のハッシュ列が一致
 //   - 最後の抽出の物の欄と、読み戻した物が CPU の物と一致。物理の統計の overflow が 0
 //   - debug layer のエラーとシェーダーの assert が 0 件
+//   - 物理の熱(T-0561・ADR-0242): 物理の刻み t の熱の入口を、刻み t + 1 の初めに GPU の世界のセルへ足す。刻みごとのセルの状態のハッシュ・
+//     エネルギーの和・つつきのエネルギー・足した物理の熱が CPU の ProbeReference(heat あり)とビット一致。GPU の世界のエネルギーの増え
+//     = つつき + 物理の熱(毎刻み)。GPU の物理の帳簿「Σ 散逸 = PX_HEAT_UNITS_PER_MILLIJOULE × 返した熱 + 残り」と
+//     「返した熱 = セルに足した熱の和 + 直近の刻みの足していない分」が最後の刻みで合い、熱を返した(0 より大きい)
 // 物理の単位の GPU 時間(タイムスタンプ)をログに出す(docs/perf.md)。
 // --gravity-swap(T-0444・環境の値のホットリロード): 刻み GRAVITY_SWAP_TICK に、環境の重力だけ月にした表へ差し替える
 //   (ProbeTableSwap + 表の印のコマンド。窓のホットリロードと同じ道)。CPU は同じ刻みの Step の前に PhysicsWorld::SetGravity。
@@ -108,17 +112,33 @@ namespace {
     // --- CPU リファレンス ---
 
     struct Expected {
-        std::vector<uint64_t> bodyHashes;  // [t] = S(t + 1) の物のハッシュ
+        std::vector<uint64_t> bodyHashes;       // [t] = S(t + 1) の物のハッシュ
+        std::vector<ProbeTickHash> cellStates;  // [t] = S(t + 1) のセル(ハッシュ・エネルギー・つつき・物理の熱。T-0561)
         std::vector<ProbeEvent> pushEvents;
         std::vector<PhysicsBody> finalBodies;
+        physics::PxHeatLedger heatLedger{};
     };
 
-    // swapped: 刻み GRAVITY_SWAP_TICK から当てる表(nullptr なら差し替えない)。重力は表の環境の値から(ProbeSim と同じ)
-    Expected RunReference(const PhysicsScene& scene, uint64_t ticks, const BakedReactionTable* swapped) {
+    // swapped: 刻み GRAVITY_SWAP_TICK から当てる表(nullptr なら差し替えない)。重力は表の環境の値から(ProbeSim と同じ)。
+    // セルは ProbeReference(同じ表・同じコマンド)に、前の刻みの物理の熱の入口を刻みの初めに足して進める(T-0561)
+    Expected RunReference(const BakedReactionTable& table, const PhysicsScene& scene, uint64_t ticks,
+                          const BakedReactionTable* swapped) {
         Expected expected;
         PhysicsWorld world(scene,
                            PhysicsParametersFor(StandardWorldPhysics()));  // サンプルの世界と同じ標準の重力(D-480)
+        ProbeReference reference(table);
+        const std::vector<ProbeCommand> commands = MakePushCommands();
+        std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口
         for (uint64_t tick = 0; tick < ticks; ++tick) {
+            const bool swapHere = swapped != nullptr && tick == GRAVITY_SWAP_TICK;
+            reference.Advance(tick, commands, swapHere ? swapped : nullptr, heat);
+            const std::span<const reaction::RxCell> state = reference.State(tick + 1);
+            expected.cellStates.push_back({.tick = tick + 1,
+                                           .hash = ProbeStateHash(state),
+                                           .energy = ProbeEnergySum(state),
+                                           .sourceEnergy = reference.SourceEnergy(),
+                                           .physicsHeatEnergy = reference.PhysicsHeatEnergy()});
+
             if (swapped != nullptr && tick == GRAVITY_SWAP_TICK)
                 world.SetGravity(PhysicsGravityFor(swapped->environment));
 
@@ -134,9 +154,11 @@ namespace {
 
             world.Step();
             expected.bodyHashes.push_back(world.StateHash());
+            heat = world.HeatEntries();
         }
 
         expected.finalBodies = world.Bodies();
+        expected.heatLedger = world.HeatLedger();
 
         return expected;
     }
@@ -148,7 +170,8 @@ namespace {
         std::vector<ProbeTickHash> hashes;
         std::vector<ProbeEvent> events;
         std::vector<PhysicsBody> bodies;
-        std::vector<uint32_t> bodyView;  // 最後の抽出の物の欄
+        physics::PxHeatLedger heatLedger{};  // 最後の刻みの物理の熱の帳簿(T-0561)
+        std::vector<uint32_t> bodyView;      // 最後の抽出の物の欄
         GpuPhysicsStats stats;
         uint32_t debugAssertCount = 0;
         uint64_t physicsUnitTicks = 0;  // 物理の単位のタイムスタンプの刻みの合計
@@ -338,6 +361,7 @@ namespace {
 
             m_run.bodies = m_simulation->Physics()->ReadBodies();
             m_run.stats = m_simulation->Physics()->ReadStats();
+            m_run.heatLedger = m_simulation->Physics()->ReadHeatLedger();
             m_run.bodyView = ReadBodyView(m_device, m_simulation->Extraction(0));
             m_run.ok = m_run.hashes.size() == m_config.ticks && !m_run.bodyView.empty();
 
@@ -380,6 +404,54 @@ namespace {
         }
 
         return mismatches;
+    }
+
+    // セルの状態(ハッシュ・エネルギー・つつき・物理の熱)が CPU と違う刻みの数(T-0561)
+    uint32_t CountCellMismatches(const Run& run, const Expected& expected) {
+        uint32_t mismatches = 0;
+        for (size_t index = 0; index < run.hashes.size() && index < expected.cellStates.size(); ++index) {
+            const ProbeTickHash& gpu = run.hashes[index];
+            const ProbeTickHash& cpu = expected.cellStates[index];
+            if (gpu.hash == cpu.hash && gpu.energy == cpu.energy && gpu.sourceEnergy == cpu.sourceEnergy &&
+                gpu.physicsHeatEnergy == cpu.physicsHeatEnergy)
+                continue;
+
+            if (mismatches == 0) {
+                Log(Channel::Sim, Level::Error,
+                    "刻み {} のセルが違う: GPU ハッシュ {:016x} エネルギー {} つつき {} 物理の熱 {} / "
+                    "CPU {:016x} {} {} {}",
+                    gpu.tick, gpu.hash, gpu.energy, gpu.sourceEnergy, gpu.physicsHeatEnergy, cpu.hash, cpu.energy,
+                    cpu.sourceEnergy, cpu.physicsHeatEnergy);
+            }
+
+            ++mismatches;
+        }
+
+        return mismatches;
+    }
+
+    // GPU の世界のエネルギーの増え = つつき + 物理の熱(毎刻み。mod 2^64)。初めの状態 S(0) は表に無いので S(1) からの差
+    bool EnergyBalances(const Run& run) {
+        for (size_t index = 1; index < run.hashes.size(); ++index) {
+            const ProbeTickHash& state = run.hashes[index];
+            if (state.energy !=
+                run.hashes[index - 1].energy + state.sourceEnergy + static_cast<uint64_t>(state.physicsHeatEnergy))
+                return false;
+        }
+
+        return true;
+    }
+
+    // GPU の物理の帳簿: Σ 散逸 = 1024000 × 返した熱 + 残り、返した熱 = セルに足した熱の和 + 直近の刻みの分(まだ足していない)
+    bool HeatLedgerBalances(const Run& run, int64_t& cellHeat) {
+        cellHeat = 0;
+        for (const ProbeTickHash& state : run.hashes)
+            cellHeat += state.physicsHeatEnergy;
+
+        const physics::PxHeatLedger& ledger = run.heatLedger;
+        const int64_t dissipated = SumPhysicsEnergy(run.bodies).dissipatedEnergy;
+        return dissipated == physics::PX_HEAT_UNITS_PER_MILLIJOULE * ledger.returnedMilliJoules + ledger.remainder &&
+               cellHeat + ledger.tickMilliJoules == ledger.returnedMilliJoules;
     }
 
     std::vector<ProbeEvent> PushEvents(const Run& run) {
@@ -471,6 +543,9 @@ namespace {
     int Judge(const Run& first, const Run& second, const Expected& expected, uint64_t ticks) {
         const uint32_t mismatches = CountHashMismatches(first, expected);
         const uint32_t secondMismatches = CountHashMismatches(second, expected);
+        const uint32_t cellMismatches = CountCellMismatches(first, expected);
+        int64_t cellHeat = 0;
+        const bool ledgerBalances = HeatLedgerBalances(first, cellHeat);
         const std::vector<ProbeEvent> pushes = PushEvents(first);
         const bool sameRuns = first.ok && second.ok &&
                               rng::equal(first.hashes, second.hashes, {}, &ProbeTickHash::WorldHash,
@@ -484,6 +559,11 @@ namespace {
             first.hashes.empty() ? 0 : first.hashes.back().bodyHash,
             expected.bodyHashes.empty() ? 0 : expected.bodyHashes.back(), mismatches, secondMismatches,
             first.stats.contactCount, first.stats.colorCount, first.stats.overflow);
+        Log(Channel::Sim, Level::Info,
+            "物理の熱: セルへ足した {:.3f} J(+ 足していない {:.3f} J)・残り {:.6f} J・セルが CPU と違う刻み {}",
+            static_cast<double>(cellHeat) / 1000.0, static_cast<double>(first.heatLedger.tickMilliJoules) / 1000.0,
+            static_cast<double>(first.heatLedger.remainder) / physics::PX_HEAT_UNITS_PER_MILLIJOULE / 1000.0,
+            cellMismatches);
         Log(Channel::Sim, Level::Info, "物理の単位: {} 回、平均 {:.0f} µs(暖機なし)", first.physicsUnits,
             static_cast<double>(first.physicsUnitTicks) * first.microsecondsPerTimestamp /
                 std::max(1u, first.physicsUnits));
@@ -492,6 +572,15 @@ namespace {
         failures.Check(first.ok && second.ok, "走らせられた");
         failures.Check(mismatches == 0 && first.hashes.size() == expected.bodyHashes.size(),
                        "刻みごとの物のハッシュが CPU リファレンスとビット一致");
+        failures.Check(cellMismatches == 0 && first.hashes.size() == expected.cellStates.size(),
+                       "刻みごとのセル(ハッシュ・エネルギー・つつき・物理の熱)が CPU リファレンスとビット一致");
+        failures.Check(EnergyBalances(first) && EnergyBalances(second),
+                       "GPU の世界のエネルギーの増え = つつき + 物理の熱(毎刻み)");
+        failures.Check(
+            ledgerBalances && first.heatLedger.returnedMilliJoules == expected.heatLedger.returnedMilliJoules &&
+                first.heatLedger.remainder == expected.heatLedger.remainder,
+            "GPU の物理の帳簿が合い(Σ 散逸 = 返した熱 + 残り・返した熱 = セルの熱 + 足していない分)、CPU と同じ");
+        failures.Check(cellHeat > 0, "物理の熱をセルへ返した");
         failures.Check(pushes == expected.pushEvents, "押すコマンドのイベント(押した物)が CPU と同じ");
         failures.Check(!pushes.empty() && pushes[0].place == FIRST_PUSH_HIT, "最初の押しが 5 段目の箱に当たった");
         failures.Check(sameRuns && secondMismatches == 0,
@@ -543,7 +632,7 @@ int main(int argc, char** argv) {
     if (swapped != nullptr)
         Log(Channel::Sim, Level::Info, "刻み {} に重力 {} µm/s² の表へ差し替える", GRAVITY_SWAP_TICK, MOON_GRAVITY);
 
-    const Expected expected = RunReference(scene, config->ticks, swapped);
+    const Expected expected = RunReference(*table, scene, config->ticks, swapped);
     const Run first = GpuRun(device->Get(), *config, false).Execute(*table, scene, swapped);
     const Run second = GpuRun(device->Get(), *config, true).Execute(*table, scene, swapped);
     const int failures = Judge(first, second, expected, config->ticks);

@@ -8,6 +8,7 @@
 //   → (刻みの境界の状態があれば)Extract が全部のセルの温度と見る物質の量・活性の印を抽出の 3 組のどれかに写す(描画が読む。T-0015)
 //   → イベントとハッシュの表を CPU へ読み戻す(CPU は待たずに数フレーム後に読む。06 §3)
 // 入口ごとに別の .cso にする(shaders/CMakeLists.txt)。整数だけ(D-205)。バッファの結び方は sim/probe_bindings.hlsli。
+#include "common/physics_heat.hlsli"
 #include "common/physics_push.hlsli"
 #include "common/probe_place.hlsli"
 #include "sim/probe_bindings.hlsli"
@@ -15,6 +16,9 @@
 // 物理の物(T-0098。sim/gpu_physics の物のバッファ。物の数はフレームの入力の見出し。0 なら結んであるのは仮の置き場で、読まない)。
 // 伝導の Work Graph は使わないので、共有の結び方(probe_bindings.hlsli)ではなくここに置く
 RWStructuredBuffer<PxBody> bodies : register(u13);
+
+// 物理の熱の入口(T-0561・ADR-0242。sim/gpu_physics の u14。前の刻みの物理が分けた熱。数は単位の定数 argument。物理なしなら仮の置き場で、読まない)
+RWStructuredBuffer<PxHeatEntry> physicsHeat : register(u14);
 
 uint32_t BodyCount() {
     return HeaderWord(PROBE_HEADER_BODY_COUNT);
@@ -346,6 +350,49 @@ void SortEventKeys(uint32_t thread) {
     const uint64_t tick = CurrentTick();
     if (LoadBlockMark(PROBE_SCHEDULE_WAKE_WORD, block) <= ProbeChangeMark(tick))
         AppendActiveBlock((uint32_t)(tick & 1), block);
+}
+
+// --- [0] の続き(物理を入れた世界だけ。T-0561・ADR-0242・common/physics_heat.hlsli): 前の刻みの物理の熱をセルへ足す ---
+// CPU の ProbeReference の ApplyPhysicsHeat と同じ(コマンドの後・表の差し替えの作り直しの前)。2 段に分ける:
+//   AddPhysicsHeat: 1 スレッド = 1 つの入口。入口の位置のセルのエネルギーへ 64bit の原子的な足し算(同じセルに何個来ても順に依らない)と、
+//     ハッシュの表の物理の熱の欄(S(t + 1))
+//   FinishPhysicsHeat: 足し終わったセルから熱のキャッシュを作り直し(同じセルを何個の入口が書いても同じ値)、ブロックを「刻みの直前に
+//     変わった」にして起こす刻みを今にする(置くコマンドと同じ。後ろの WakeDueBlocks が一覧へ 1 回だけ足す。ADR-0018)
+// 入口の数(argument)は GpuPhysics::HeatEntryCount。重みが 0 の枠は熱も 0 なので飛ばす
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void AddPhysicsHeat(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    if (dispatchThreadId.x >= argument)
+        return;
+
+    const PxHeatEntry entry = physicsHeat[dispatchThreadId.x];
+    if (entry.milliJoules <= 0)
+        return;
+
+    const uint64_t tick = CurrentTick();
+    const uint32_t index = GenerationBase(tick) + ProbeCellOfPhysicsPoint(entry.position.x, entry.position.y, entry.position.z);
+    int64_t before;
+    InterlockedAdd(cells[index].energy, entry.milliJoules, before);
+
+    uint64_t original;
+    hashes.InterlockedAdd64(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_PHYSICS_HEAT, (uint64_t)entry.milliJoules, original);
+}
+
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void FinishPhysicsHeat(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    if (dispatchThreadId.x >= argument)
+        return;
+
+    const PxHeatEntry entry = physicsHeat[dispatchThreadId.x];
+    if (entry.milliJoules <= 0)
+        return;
+
+    const uint64_t tick = CurrentTick();
+    const uint32_t cell = ProbeCellOfPhysicsPoint(entry.position.x, entry.position.y, entry.position.z);
+    const uint32_t index = GenerationBase(tick) + cell;
+    thermal[index] = ProbeMakeCache(ReactionTable(), cells[index]);
+
+    const uint32_t block = ProbeBlockOfCell(cell % PROBE_GRID_SIZE, (cell / PROBE_GRID_SIZE) % PROBE_GRID_SIZE,
+                                            cell / PROBE_SLICE_CELL_COUNT);
+    StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block, ProbeChangeMark(tick) - 1);
+    StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, block, ProbeChangeMark(tick));
 }
 
 // --- [0] の続き(反応表を差し替えた刻みだけ。T-0139・ADR-0047): 新しい表で熱のキャッシュを作り直し、全部のブロックを起こす ---

@@ -112,6 +112,8 @@ bicameral_add_shader(sim/debug_ring_graph_probe.hlsl PROFILE lib_6_8)    # Âêå„Å
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY EnqueueCommands NAME probe_tick_enqueue)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY ApplyCommands NAME probe_tick_apply)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY WakeDueBlocks NAME probe_tick_wake_due)
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY AddPhysicsHeat NAME probe_tick_add_physics_heat)  # T-0561
+bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY FinishPhysicsHeat NAME probe_tick_finish_physics_heat)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY RefreshTable NAME probe_tick_refresh_table)
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY RemapSpecies NAME probe_tick_remap_species)  # T-0223
 bicameral_add_shader(sim/probe_tick.hlsl PROFILE cs_6_8 ENTRY Extract NAME probe_tick_extract)
