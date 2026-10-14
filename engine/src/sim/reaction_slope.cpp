@@ -33,10 +33,7 @@ namespace bicameral::sim {
 
         // --- 規則の正味の係数(生成物 − 反応物。触媒は両辺で消える)---
 
-        struct NetTerm {
-            uint32_t species = 0;
-            int64_t coefficient = 0;
-        };
+        using NetTerm = RuleNetTerm;
 
         std::vector<NetTerm> NetTerms(const RxRule& rule) {
             std::vector<NetTerm> terms;
@@ -101,6 +98,18 @@ namespace bicameral::sim {
             return slope.missingEntropy.empty() && !slope.tooLarge;
         }
 
+        // 規則の ΔG°(T)(mJ/mol)。terms は Evaluable を通ったもの
+        int64_t RuleGibbs(const BakedReactionTable& baked, std::span<const NetTerm> terms, uint32_t kelvin,
+                          int64_t logRatio) {
+            int64_t sum = 0;
+            for (const NetTerm& term : terms) {
+                const int64_t entropy = *baked.standardEntropies[term.species];
+                sum += term.coefficient * SpeciesGibbs(baked.species[term.species], entropy, kelvin, logRatio);
+            }
+
+            return sum;
+        }
+
         void Extend(KelvinRange& range, uint32_t kelvin) {
             range.lowKelvin = range.count == 0 ? kelvin : range.lowKelvin;
             range.highKelvin = kelvin;
@@ -121,14 +130,7 @@ namespace bicameral::sim {
                 return slope;
 
             const auto gibbs = [&](uint32_t kelvin) {
-                int64_t sum = 0;
-                for (const NetTerm& term : terms) {
-                    const int64_t entropy = *baked.standardEntropies[term.species];
-                    sum += term.coefficient *
-                           SpeciesGibbs(baked.species[term.species], entropy, kelvin, context.logRatios[kelvin]);
-                }
-
-                return sum;
+                return RuleGibbs(baked, terms, kelvin, context.logRatios[kelvin]);
             };
 
             constexpr uint32_t ROOM_KELVIN = 300;
@@ -177,6 +179,24 @@ namespace bicameral::sim {
         }
 
     }  // namespace
+
+    std::vector<RuleNetTerm> RuleNetTerms(const RxRule& rule) {
+        return NetTerms(rule);
+    }
+
+    std::vector<int64_t> RuleStandardGibbs(const BakedReactionTable& baked, uint32_t ruleId) {
+        RuleSlope slope;
+        const std::vector<NetTerm> terms = NetTerms(baked.rules[ruleId]);
+        if (!Evaluable(baked, terms, slope))
+            return {};
+
+        const std::vector<int64_t> logRatios = LogTemperatureRatios();
+        std::vector<int64_t> gibbs(RX_RATE_TABLE_KELVINS, 0);
+        for (uint32_t kelvin = 1; kelvin < RX_RATE_TABLE_KELVINS; ++kelvin)
+            gibbs[kelvin] = RuleGibbs(baked, terms, kelvin, logRatios[kelvin]);
+
+        return gibbs;
+    }
 
     std::vector<RuleSlope> CheckReactionSlopes(const BakedReactionTable& baked) {
         const SlopeContext context{.logRatios = LogTemperatureRatios(), .nearBalanceLog = FxLnU64(NEAR_BALANCE_RATIO)};

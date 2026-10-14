@@ -113,6 +113,7 @@ add_library(bicameral_sim STATIC
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
+  src/sim/slope_gauge.cpp  # 開発ビルドの坂の計器(反応が坂を上った量を刻みごとに数える。T-0518)
   src/sim/probe_trace.cpp
   src/sim/tick_cost.cpp  # 単位の GPU 時間を刻みごとに(重さの検査。T-0413)
   src/sim/world_copy.cpp  # 世界の写しの早送り(T-0412)
@@ -212,6 +213,7 @@ add_executable(bicameral
   src/frame/trace_capture.cpp
   src/frame/world_copy_runner.cpp  # 写しの早送りを本物の刻みの合間に回す(T-0412)
   src/frame/play_metric_cli.cpp  # bicameral --measure-metrics(遊びの指標を測る。T-0432)
+  src/frame/slope_gauge_cli.cpp  # bicameral --slope-gauge(開発ビルドの坂の計器。T-0518)
   src/frame/play_metric_runner.cpp  # 遊びの指標を本物の刻みの合間に測る(T-0432)
   src/platform/agility_sdk.cpp
   src/platform/caps.cpp

@@ -13,6 +13,7 @@
 --     H2O(気)188.835・黒鉛 5.740 J/(mol·K))。セルロースの 170 J/(mol·K)(C6H10O5 の 1 単位)は推定で**未確認**
 --     (結晶のグルコース 209.2 J/(mol·K) から見積もった。照合先の候補: Goldberg et al., J. Chem. Thermodyn. 81 (2015) 184)。
 --     セルロースの値を ±100 J/(mol·K) 動かしても、セルロースの規則が坂を下る向きは変わらない(T-0491 の試験の表)。
+--   凝縮相(任意の欄 condensed。坂の計器〔T-0518〕が活量を 1 と置く。気体は分圧): 炭(黒鉛)とセルロース。
 -- 液体の水と氷は相変化(T-0415)と一緒に足す。⑤ の場面に要る分だけ(D-471 ②)。
 return {
     species = {
@@ -65,6 +66,7 @@ return {
             heat_capacity_mj_per_mol_k = 8520,
             thermal_conductivity_mw_per_m_k = 100,
             standard_entropy_mj_per_mol_k = 5740,
+            condensed = true,
         },
         -- 木・草の燃える部分(セルロース C6H10O5 の 1 単位)
         cellulose = {
@@ -73,6 +75,7 @@ return {
             heat_capacity_mj_per_mol_k = 211000,
             thermal_conductivity_mw_per_m_k = 120,
             standard_entropy_mj_per_mol_k = 170000,
+            condensed = true,
         },
     },
 }

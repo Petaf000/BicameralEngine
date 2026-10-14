@@ -6,6 +6,8 @@
 //                                    (--packages・--mix・--world・--no-physics・--warp が効く。T-0432・ADR-0206)
 //   --metrics-baseline <file>        前の版の値のファイル(--measure-metrics と。無いファイルは「前の版なし」)
 //   --metrics-save                   測った値で --metrics-baseline を書き直す
+//   bicameral --slope-gauge <刻み>   窓を開かずに遊びの指標の場面を CPU リファレンスで流し、反応が坂を上った量を刻みごとに数えて
+//                                    ログに出して終了(開発ビルドの坂の計器。場面ごとに <刻み> まで。T-0518・ADR-0230)
 //   --frames <n>                     n フレームで終える(自動の確認用。既定は窓を閉じるまで)
 //   --no-vsync                       垂直同期を待たずに Present する
 //   --latency <2|3>                  CPU が GPU より先に進めるフレームの数(既定 2)
@@ -101,6 +103,7 @@
 #include "core/unicode.h"
 #include "frame/frame_loop.h"
 #include "frame/play_metric_cli.h"
+#include "frame/slope_gauge_cli.h"
 #include "platform/caps.h"
 #include "script/standard_packages.h"
 #include "sim/probe_trace.h"
@@ -111,7 +114,8 @@ namespace {
 
     struct Options {
         bool runCaps = false;
-        bool measureMetrics = false;  // --measure-metrics(T-0432)
+        bool measureMetrics = false;   // --measure-metrics(T-0432)
+        uint32_t slopeGaugeTicks = 0;  // --slope-gauge <刻み>(0 = しない。T-0518)
         frame::PlayMetricCommandOptions metrics;
         frame::FrameLoopOptions frameLoop;
         fs::path logDirectory;  // 空なら DefaultLogDirectory()
@@ -405,7 +409,14 @@ namespace {
                 options.runCaps = true;
             else if (argument == L"--measure-metrics")
                 options.measureMetrics = true;
-            else if (argument == L"--metrics-save")
+            else if (argument == L"--slope-gauge" && hasValue) {
+                constexpr uint32_t MAX_SLOPE_GAUGE_TICKS = 10000000;
+                const auto ticks = ParseCount(arguments[++i], MAX_SLOPE_GAUGE_TICKS);
+                if (!ticks || *ticks == 0)
+                    return std::unexpected("--slope-gauge には 1 以上の刻みの数を書く");
+
+                options.slopeGaugeTicks = *ticks;
+            } else if (argument == L"--metrics-save")
                 options.metrics.saveBaseline = true;
             else if (argument == L"--metrics-baseline" && hasValue)
                 options.metrics.baselinePath = arguments[++i];
@@ -489,6 +500,9 @@ namespace {
 
         if (options->runCaps)
             return RunCapsProbe();
+
+        if (options->slopeGaugeTicks != 0)
+            return frame::RunSlopeGaugeCommand(options->frameLoop, options->slopeGaugeTicks);
 
         if (options->measureMetrics) {
             if (options->metrics.saveBaseline && options->metrics.baselinePath.empty()) {
