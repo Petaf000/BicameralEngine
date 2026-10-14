@@ -11,6 +11,9 @@ namespace bicameral::frame {
         if (Finished())
             return AutoPlayAction::None;
 
+        if (m_tableScript)
+            return UpdateTable(state);
+
         if (m_step <= Step::EditStill)
             return UpdateEdit(state);
 
@@ -86,7 +89,7 @@ namespace bicameral::frame {
                 if (elapsed < SAME_TICKS + 10)
                     return AutoPlayAction::None;
 
-                const auto [same, differ] = CompareWithFirst(2, m_editTick + 1, m_editTick + SAME_TICKS);
+                const auto [same, differ] = Compare(1, 2, m_editTick + 1, m_editTick + SAME_TICKS);
                 if (differ == 0 || same + differ < SAME_TICKS / 2) {
                     Fail(std::format("B を元に戻したプレイがプレイ 1 と違わない(同じ {} 刻み・違う {} 刻み)", same,
                                      differ));
@@ -100,9 +103,8 @@ namespace bicameral::frame {
                 if (elapsed < STOP_AFTER + 10)
                     return AutoPlayAction::None;
 
-                const auto [same, early] = CompareWithFirst(3, m_editTick + 1, m_editTick + SAME_TICKS);
-                const auto [laterSame, differ] = CompareWithFirst(3, m_editTick + STROKE_C_AFTER,
-                                                                  m_editTick + STOP_AFTER);
+                const auto [same, early] = Compare(1, 3, m_editTick + 1, m_editTick + SAME_TICKS);
+                const auto [laterSame, differ] = Compare(1, 3, m_editTick + STROKE_C_AFTER, m_editTick + STOP_AFTER);
                 if (early != 0 || same < SAME_TICKS / 2 || differ == 0) {
                     Fail(
                         std::format("やり直したプレイ 3 とプレイ 1 の比べ: 初めの同じ {} 刻み・違う {} 刻み・"
@@ -192,13 +194,14 @@ namespace bicameral::frame {
         return true;
     }
 
-    std::pair<uint32_t, uint32_t> AutoPlay::CompareWithFirst(uint32_t play, uint64_t from, uint64_t to) const {
+    std::pair<uint32_t, uint32_t> AutoPlay::Compare(uint32_t firstPlay, uint32_t otherPlay, uint64_t from,
+                                                    uint64_t to) const {
         uint32_t same = 0;
         uint32_t differ = 0;
         for (uint64_t tick = from; tick <= to; ++tick) {
-            const auto first = m_plays[1].find(tick);
-            const auto other = m_plays[play].find(tick);
-            if (first == m_plays[1].end() || other == m_plays[play].end())
+            const auto first = m_plays[firstPlay].find(tick);
+            const auto other = m_plays[otherPlay].find(tick);
+            if (first == m_plays[firstPlay].end() || other == m_plays[otherPlay].end())
                 continue;
 
             if (first->second == other->second)

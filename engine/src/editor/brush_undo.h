@@ -83,11 +83,10 @@ namespace bicameral::editor {
 
     // 刻み firstTick に当たった運びを除くために戻る保存点の刻み(firstTick 以前でいちばん新しいもの)。
     // 保存点 S(s) には刻み s のコマンドはまだ入っていない(s 以降を足し直す。ADR-0036)ので s ≤ firstTick でよい。
-    // lastTableSwapTick = 最後に反応表を差し替えた刻み。巻き戻しは差し替えを足し直さないので、それ以前の保存点へは戻さない。
+    // 反応表の差し替えをまたいでも戻せる(保存点はその境界の表も持ち、差し替えの印も足し直す。T-0548・ADR-0246)。
     // floorTick = 戻ってよいいちばん古い刻み(UndoFloorTick。運びも保存点もこれ以後。T-0497)
     [[nodiscard]] std::expected<uint64_t, std::string> PlanBrushUndo(uint64_t firstTick,
                                                                      std::span<const uint64_t> savePointTicks,
-                                                                     std::optional<uint64_t> lastTableSwapTick,
                                                                      uint64_t floorTick = 0);
 
 }  // namespace bicameral::editor

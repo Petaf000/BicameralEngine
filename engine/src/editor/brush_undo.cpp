@@ -6,7 +6,7 @@
 namespace bicameral::editor {
 
     std::expected<uint64_t, std::string> PlanBrushUndo(uint64_t firstTick, std::span<const uint64_t> savePointTicks,
-                                                       std::optional<uint64_t> lastTableSwapTick, uint64_t floorTick) {
+                                                       uint64_t floorTick) {
         if (firstTick < floorTick) {
             return std::unexpected(
                 std::format("刻み {} の運びは戻せない(プレイ中は刻み {} より後だけ。プレイ前に置いたものは"
@@ -22,10 +22,6 @@ namespace bicameral::editor {
 
         if (!best)
             return std::unexpected(std::format("刻み {} より前の保存点が無い(古すぎる運び)", firstTick));
-
-        if (lastTableSwapTick && *lastTableSwapTick >= *best)
-            return std::unexpected(std::format("保存点の刻み {} の後に反応表を差し替えた(刻み {})ので戻せない", *best,
-                                               *lastTableSwapTick));
 
         return *best;
     }

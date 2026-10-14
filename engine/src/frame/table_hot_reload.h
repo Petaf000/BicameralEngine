@@ -7,6 +7,9 @@
 //     (sim::MakeTableCommand。版を持つ)を足し、表を sim::ProbeFrameInput::tableSwaps で渡す
 //   → 記録(--record)はコマンドの列に印が入り、表の中身は再生ファイルに残る(Find で引く。T-0193)。再生(--replay)は印の版の表を、
 //     知っている表(起動時の表・読み直した表・再生ファイルの表〔AddKnown〕)から探して同じ刻みに当てる(持っていなければ止まる)。
+// 巻き戻し(T-0548・ADR-0246): 世界を保存点へ戻したら NoteRewound。戻した刻み以降の差し替えは忘れ(当てた表も戻す)、
+//   足し直す印(今の流れの控えか再生ファイルから届く)を、知っている表から探してまた予定に積む。編集の状態の差し替えは
+//   フレームのループが TakeWaiting で受け取り、編集の境界の印にする(ここは新しい印を作らない)。
 // CPU は表(法則のデータ)をベイクして渡すだけで、世界の状態は GPU が新しい表で作り直す(原則 1・ADR-0047)。
 // ファイルは再生でなければ通常のゲームの起動でも見る(D-438・T-0243)。読み直した表は「改造された世界」の印を付けて当てる
 // (プレイ中に法則が変わった世界。D-437)。印は記録の表にも残る。
@@ -19,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "script/reaction_hot_reload.h"
@@ -55,9 +59,31 @@ namespace bicameral::frame {
         // 生の操作(再生でない): 待っている表があり、このフレームに適用の単位 applyTick があれば、印のコマンドを commands に足す
         // (sequence は nextSequence から。commands は (targetTick, sequence) の順に並べ直す。canAddCommand でなければ次のフレームへ)。
         // 再生: commands の中の印を予定に積む(版を知らなければ error)。返す差し替えはこのフレームの分だけ
+        // 足し直す印(生の操作は今の流れの控えから、再生は再生ファイルから)は、どちらも commands の中の印を予定に積む。
         [[nodiscard]] std::expected<std::vector<sim::ProbeTableSwap>, std::string> TakeSwaps(
             uint64_t firstUnit, uint32_t unitCount, uint32_t unitsPerTick, bool replaying, bool canAddCommand,
             uint32_t& nextSequence, std::vector<sim::ProbeCommand>& commands);
+
+        // 最後の TakeSwaps が新しく作った印(待っていた表。足し直した印は入らない)。from は差し替える前の表の版
+        struct NewSwap {
+            uint64_t tick = 0;
+            uint64_t fromVersion = 0;
+            uint64_t toVersion = 0;
+        };
+        [[nodiscard]] const std::optional<NewSwap>& LastNewSwap() const { return m_newSwap; }
+
+        // 世界を刻み tick の保存点へ戻した(T-0548): tick 以降の差し替えの予定と当てた記録を忘れ、当てた表を tick の前の表に戻す
+        void NoteRewound(uint64_t tick);
+
+        // 待っている表を受け取る(編集の状態で、フレームのループが編集の境界の印にする。T-0548)。無ければ nullptr
+        [[nodiscard]] std::shared_ptr<const script::LoadedReactionTable> TakeWaiting() {
+            return std::exchange(m_waiting, nullptr);
+        }
+
+        // ファイルの今の中身の表(最後に読めた表。プレイをやめた時の表。ファイルが正本。T-0548・Q64 ④)
+        [[nodiscard]] std::shared_ptr<const script::LoadedReactionTable> FileTable() const {
+            return Find(m_reload->Current()->tableVersion);
+        }
 
         // 当てた表(差し替えの後に GPU が使っている表。表示用)と、最後の読み直しの結果
         [[nodiscard]] uint64_t AppliedVersion() const { return m_appliedVersion; }
@@ -75,11 +101,12 @@ namespace bicameral::frame {
         struct Scheduled {
             uint64_t tick = 0;
             std::shared_ptr<const script::LoadedReactionTable> table;
+            bool fresh = false;  // 待っていた表から新しく作った印(足し直した印でない)
         };
 
         void Remember(const std::shared_ptr<const script::LoadedReactionTable>& table);
         [[nodiscard]] bool Accept(script::HotReloadResult result);  // 読み直しの結果を受ける(Poll・ReplaceSource)
-        [[nodiscard]] std::expected<void, std::string> ScheduleReplayed(std::span<const sim::ProbeCommand> commands);
+        [[nodiscard]] std::expected<void, std::string> ScheduleMarked(std::span<const sim::ProbeCommand> commands);
 
         std::optional<script::ReactionTableHotReload>
             m_reload;  // 読む元と今の表(ファイルを見るのは m_watchFiles の時だけ)
@@ -89,6 +116,9 @@ namespace bicameral::frame {
         std::vector<Scheduled> m_scheduled;  // 印を GPU のキューへ足した、まだ記録していない差し替え(刻みの順)
         std::vector<std::shared_ptr<const script::LoadedReactionTable>>
             m_inFlight;  // 返した差し替えの表(RecordFrame が写すまで)
+
+        std::vector<std::pair<uint64_t, uint64_t>> m_appliedLog;  // 当てた差し替え(刻み, 版)の刻みの順(巻き戻しで戻す)
+        std::optional<NewSwap> m_newSwap;
 
         uint64_t m_initialVersion = 0;
         uint64_t m_appliedVersion = 0;

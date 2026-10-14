@@ -16,11 +16,28 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <vector>
 
 #include "core/aliases.h"
 #include "frame/table_hot_reload.h"
 
 namespace bicameral::frame {
+
+    // 試験のパッケージの 1 ファイルの書き換え(元の中身と書き換えた中身)
+    struct PackageEdit {
+        fs::path file;
+        std::string original;
+        std::string edited;
+    };
+
+    // サンプルのパッケージに物質(オゾン。水蒸気・木などの ID がずれる)と環境の値(月の重力)を足す書き換え(--auto-play-table。T-0548)。
+    // --auto-reload の --species-remap・--auto-reload-environment と同じ所を書き換える。読めない・書き換える所が無ければ error
+    [[nodiscard]] std::expected<std::vector<PackageEdit>, std::string> MakeSpeciesAndGravityEdit(
+        const fs::path& packageRoot);
+
+    // edited なら書き換えた中身を、でなければ元の中身を書く(書けなければ error)
+    [[nodiscard]] std::expected<void, std::string> WritePackageEdits(const std::vector<PackageEdit>& edits,
+                                                                     bool edited);
 
     class AutoReload {
     public:

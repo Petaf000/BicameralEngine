@@ -90,7 +90,18 @@ namespace bicameral::frame {
         return true;
     }
 
-    std::expected<void, std::string> TableHotReload::ScheduleReplayed(std::span<const sim::ProbeCommand> commands) {
+    void TableHotReload::NoteRewound(uint64_t tick) {
+        std::erase_if(m_scheduled, [&](const Scheduled& scheduled) { return scheduled.tick >= tick; });
+        std::erase_if(m_appliedLog, [&](const auto& applied) { return applied.first >= tick; });
+        const uint64_t version = m_appliedLog.empty() ? m_initialVersion : m_appliedLog.back().second;
+        if (version != m_appliedVersion)
+            Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {} の表は版 {:016x}(差し替えの印は足し直す)", tick, version);
+
+        m_appliedVersion = version;
+    }
+
+    // commands の中の印(足し直す・再生する)を、知っている表から探して予定に積む
+    std::expected<void, std::string> TableHotReload::ScheduleMarked(std::span<const sim::ProbeCommand> commands) {
         for (const sim::ProbeCommand& command : commands) {
             if (command.type != sim::PROBE_COMMAND_TYPE_TABLE)
                 continue;
@@ -115,18 +126,23 @@ namespace bicameral::frame {
         uint64_t firstUnit, uint32_t unitCount, uint32_t unitsPerTick, bool replaying, bool canAddCommand,
         uint32_t& nextSequence, std::vector<sim::ProbeCommand>& commands) {
         m_inFlight.clear();  // 前のフレームの表は RecordFrame が写し終えた
+        m_newSwap.reset();
 
-        // --- 新しい差し替え: 再生は印から、生の操作は待っている表をこのフレームの最初の適用の単位へ ---
+        // --- 印の差し替え(再生ファイルの印・巻き戻して足し直す印)。生の操作は、待っている表をこのフレームの最初の適用の単位へ
+        //     (同じ刻みに足し直す印があれば次のフレームへ。1 刻みに差し替えは 1 つ)---
         const uint64_t applyTick = (firstUnit + unitsPerTick - 1) / unitsPerTick;  // ProbeSim::NextApplyTick と同じ
-        if (replaying) {
-            if (auto scheduled = ScheduleReplayed(commands); !scheduled)
-                return std::unexpected(std::move(scheduled.error()));
-        } else if (m_waiting && canAddCommand && applyTick * unitsPerTick < firstUnit + unitCount) {
+        if (auto scheduled = ScheduleMarked(commands); !scheduled)
+            return std::unexpected(std::move(scheduled.error()));
+
+        const bool tickFree = rng::none_of(m_scheduled, [&](const Scheduled& item) { return item.tick == applyTick; });
+        if (!replaying && m_waiting && canAddCommand && tickFree && applyTick * unitsPerTick < firstUnit + unitCount) {
             commands.push_back(sim::MakeTableCommand(applyTick, nextSequence++, m_waiting->tableVersion));
             rng::sort(commands, sim::CommandPrecedes);
-            m_scheduled.push_back({.tick = applyTick, .table = std::move(m_waiting)});
+            m_scheduled.push_back({.tick = applyTick, .table = std::move(m_waiting), .fresh = true});
             m_waiting = nullptr;
         }
+
+        rng::stable_sort(m_scheduled, {}, &Scheduled::tick);
 
         // --- このフレームに適用の単位がある差し替えを返す ---
         std::vector<sim::ProbeTableSwap> swaps;
@@ -141,7 +157,12 @@ namespace bicameral::frame {
             }
 
             swaps.push_back({.tick = it->tick, .table = &it->table->table});
+            if (it->fresh)
+                m_newSwap = NewSwap{
+                    .tick = it->tick, .fromVersion = m_appliedVersion, .toVersion = it->table->tableVersion};
+
             m_appliedVersion = it->table->tableVersion;
+            m_appliedLog.emplace_back(it->tick, m_appliedVersion);
             ++m_appliedCount;
             m_worldModified |= it->table->modifiedWorld;
             Log(Channel::Sim, Level::Info, "反応表を刻み {} の始めに版 {:016x} へ差し替える{}", it->tick,

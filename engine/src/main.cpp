@@ -41,6 +41,7 @@
 //                                    (F5 / Space = プレイ・Esc = やめる〔プレイ前の世界へ戻る〕・プレイ中の Space = 一時停止・N = 1 刻み。
 //                                    再生〔--replay〕はプレイのまま。T-0497・D-491)
 //   --play                           起動してすぐプレイを押す(--editor で世界を動かしたい時・窓の試験。T-0497)
+//   --auto-play-table                --auto-play の表の手順(--packages の写しの表を書き換える。表の差し替えを編集として扱う。T-0548)
 //   --auto-play                      編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるで戻るかを確かめる
 //                                    (--editor と --world sample と一緒に。--record と使い、--replay でハッシュ列を確かめる。T-0497)
 //   --auto-time                      決まったフレームで止める・1 刻み・速さを操作し、止まった・1 刻みずつ進んだかを確かめる(T-0023)
@@ -394,7 +395,10 @@ namespace {
             loop.play = true;
         else if (argument == L"--auto-play")
             loop.autoPlay = true;
-        else
+        else if (argument == L"--auto-play-table") {
+            loop.autoPlay = true;
+            loop.autoPlayTable = true;
+        } else
             return false;
 
         return true;

@@ -80,8 +80,8 @@ namespace bicameral::sim {
                 bytes += buffer->GetDesc().Width;
         };
 
-        for (const ComPtr<ID3D12Resource>& buffer : {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue,
-                                                     m_tickEvents, m_blockSchedule, m_speciesRemap})
+        for (const ComPtr<ID3D12Resource>& buffer :
+             {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue, m_tickEvents, m_blockSchedule, m_speciesRemap})
             add(buffer);
 
         rng::for_each(m_activeLists, add);
@@ -201,9 +201,16 @@ namespace bicameral::sim {
 
         savePoint.tick = tick;
         savePoint.physics = m_physics ? m_physics->Cursor() : GpuPhysicsCursor{};
+        // その境界の表(差し替えの後の最初の保存のときだけ写す。T-0548)
+        if (savePoint.tableSerial != m_tableSerial) {
+            savePoint.table = m_tableCopy;
+            savePoint.tableSerial = m_tableSerial;
+        }
     }
 
-    void ProbeSim::RecordRestore(ID3D12GraphicsCommandList10* list, uint32_t index) {
+    // 世界を保存点の状態へ。その境界の表が今の表と違えば、表も結び直す(セルと熱のキャッシュは保存点がその表で作ったもの。
+    // 差し替えをまたいで戻れる。T-0548・ADR-0246)
+    bool ProbeSim::RecordRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint32_t index) {
         const SavePoint& savePoint = m_savePoints[index];
         std::vector<StateRegion> from = StateRegions(savePoint.tick);
         for (size_t region = 0; region < from.size(); ++region)
@@ -212,6 +219,17 @@ namespace bicameral::sim {
         RecordOverwriteState(list, from);
         if (m_physics)
             m_physics->SetCursor(savePoint.physics);
+
+        if (savePoint.tableSerial == m_tableSerial)
+            return true;
+
+        Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {} の保存点の表へ戻す", savePoint.tick);
+        if (!RecordTableBuffers(list, frame, savePoint.table, savePoint.tick))
+            return false;
+
+        m_tableSerial = savePoint.tableSerial;
+
+        return true;
     }
 
     // 写しの早送り(T-0412): 写す元の S(tick)(その世代の位置)を、この世界へ。写す元のバッファは読むだけ
