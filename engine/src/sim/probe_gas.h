@@ -1,0 +1,126 @@
+// probe_gas.h — 仮の世界(ProbeSim の 64³ のセル)に気体の流れを載せる CPU リファレンス(T-0590・ADR-0256。07 §2・05 §3)。
+//
+// 形(ADR-0256 の 1〜4。仮・ユーザー未確認):
+//   - **セルが唯一の真実**: 気体の成分は、セル(reaction.hlsli の RxCell)の成分のうち表で凝縮相でない物質(condensed = false)。
+//     気体の別の格子は持たない。反応は同じセルの O2 を読み、生成物の CO2・H2O はそのまま流れに乗る。
+//     足した欄は気体の運動量 ×3(mg·2^-20 m/s)と、その運動エネルギーのぶん(mJ)だけ(セルの外に持つ。GPU に載せるのは T-0592)。
+//   - **区画**: 気体を流すのは世界の中の直方体の区画だけ(既定は無い = 今までと同じ。ブランクの世界は何も読まずに動く。D-455)。
+//     区画の外の面は軸ごとに壁・周期・開いた境界(gas_reference の GasBoundary)。
+//   - **段の順**: 刻みの初め(コマンドと物理の熱の入口の後)に気体の 1 刻み → 伝導と反応(06 §2 の段 3 → 段 4)。
+//   - **圧力の解き方は差し替えられる**: 陽解法の小刻み(gas_reference の StepGas。既定)か投影(gas_projection の StepGasProjection。
+//     T-0503・T-0530。GPU は T-0531)。どちらも同じ箱(GasBox)を進めるので、ここは選ぶだけ。
+//
+// 1 刻みの流れ: 区画のセル(RxCell)→ 気体の箱(GasBox。区画の気体の成分を物質 ID の順に 4 つまで〔GAS_MAX_SPECIES〕の欄へ、
+//   エネルギーは気体のぶん = 熱 × 気体の熱容量 ÷ セルの熱容量 + 気体の化学 + 運動エネルギーのぶん)→ StepGas / StepGasProjection
+//   → セルへ書き戻す(凝縮相のぶん = 前のエネルギー − 気体のぶん はそのまま、気体の成分とエネルギーを新しい値に)。
+//   区画の外との出入り(開いた境界・壁の力積・重さの仕事)は帳簿(物質 ID ごと)に足す。
+//   → 区画のセルのエネルギーの合計 + 運動エネルギーのぶん − 帳簿、元素の数 − 帳簿、運動量 − 帳簿 は毎刻みビット単位で一定。
+// 今の制限(分けたチケット): 区画の気体の物質が 5 つ以上になった刻みは流さずに数える(T-0591 で上限を外す)・
+//   固体のセルも気体を通す(凝縮相の体積は T-0593)・比熱は表の値をそのまま定積の比熱として使う(T-0591)・
+//   GPU と保存点・写しの早送り・状態のハッシュへの組み込み(T-0592)。
+// 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <expected>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "common/reaction.hlsli"
+#include "sim/gas_projection.h"
+#include "sim/gas_reference.h"
+#include "sim/reaction_table.h"
+
+namespace bicameral::sim {
+
+    // 圧力の解き方(07 §2.3・§2.6)
+    enum class ProbeGasPressure : uint8_t {
+        Explicit,    // 陽解法の小刻み(本物の音速を substeps 回。GPU は gas_step.hlsl)
+        Projection,  // 刻みの中で圧力を解く投影(外側の反復つき。GPU は T-0531)
+    };
+
+    struct ProbeGasOptions {
+        // --- 区画(仮の世界の格子の座標。y が上〔world_cells の約束〕。ADR-0256 の 5)---
+        std::array<uint32_t, 3> minCell = {0, 0, 0};
+        std::array<uint32_t, 3> sizeCells = {0, 0, 0};  // 0 を含めば気体は無い
+        // 区画の外の面(格子の軸 x・y・z の順)
+        std::array<GasBoundary, 3> boundary = {GasBoundary::Wall, GasBoundary::Wall, GasBoundary::Wall};
+        // 格子の y = 0 の床の高さ(mm。基準の大気をどの高さで読むか)
+        int64_t floorHeightMillimeters = 0;
+
+        // --- 解き方 ---
+        ProbeGasPressure pressure = ProbeGasPressure::Explicit;
+        uint32_t substeps = 24;  // 陽解法の小刻み(07 §2.3)
+        GasProjectionOptions
+            projection;           // 投影の設定(音速は projection.pressure.soundSpeedMmPerS。既定 0 = 最速。D-467)
+        uint64_t randomSeed = 0;  // 移す物質量の乱数の丸めの種(世界のシード。R6)
+
+        [[nodiscard]] bool Enabled() const { return sizeCells[0] != 0 && sizeCells[1] != 0 && sizeCells[2] != 0; }
+    };
+
+    // 区画の外との出入り(外から入った量を正)。物質 ID ごと
+    struct ProbeGasLedger {
+        std::vector<int64_t> amounts;                 // µmol。添字 = 物質 ID
+        int64_t energy = 0;                           // mJ(開いた境界の出入り + 重さの仕事。07 §2.4)
+        std::array<int64_t, GAS_AXES> momentum = {};  // 格子の軸 x・y・z の順
+    };
+
+    // 1 刻みの報告
+    struct ProbeGasStepReport {
+        uint32_t gasSpecies = 0;             // 区画の気体の物質の数
+        bool skippedTooManySpecies = false;  // 物質が GAS_MAX_SPECIES を超えたので流さなかった(T-0591 まで)
+        uint32_t changedCells = 0;           // 値が変わったセルの数
+        GasProjectionCost projection;        // 投影の費用(投影のときだけ)
+    };
+
+    class ProbeGasField {
+    public:
+        // 区画を作る。断る: 区画が格子からはみ出す・基準の大気が無い・音速の基準が 0(表の環境の値)
+        [[nodiscard]] static std::expected<ProbeGasField, std::string> Create(const BakedReactionTable& table,
+                                                                              const ProbeGasOptions& options);
+
+        // 格子の層 y の基準の大気のセル(静止。区画を静かな大気で満たす時に使う。速度 0)
+        [[nodiscard]] reaction::RxCell ReferenceCell(const BakedReactionTable& table, uint32_t gridY) const;
+
+        // 刻み tick の気体の 1 刻み。cells は格子の全部のセル(刻み tick の始めの世代。その場で書き換える)。
+        // 値が変わったセルの番号を changed に足す(呼ぶ側が熱のキャッシュを作り直し、活性の種にする)
+        ProbeGasStepReport Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells, uint64_t tick,
+                                std::vector<uint32_t>& changed);
+
+        [[nodiscard]] const ProbeGasOptions& Options() const { return m_options; }
+        [[nodiscard]] const ProbeGasLedger& Ledger() const { return m_ledger; }
+
+        // 区画のセル(区画の中の x + 幅 × (z + 奥行き × y)。気体の箱と同じ並び)の運動量と運動エネルギーのぶん
+        [[nodiscard]] std::span<const std::array<int64_t, GAS_AXES>> Momentum() const { return m_momentum; }
+        [[nodiscard]] int64_t KineticEnergySum() const;
+
+        // 区画のセルの番号(格子の全部のセルの中の番号)。region は区画の中の番号
+        [[nodiscard]] uint32_t GridIndex(uint32_t region) const;
+        [[nodiscard]] uint32_t RegionCellCount() const { return (uint32_t)m_momentum.size(); }
+
+        // 気体の欄(運動量・運動エネルギーのぶん・帳簿)のハッシュ(決定性の検査。セルは ProbeStateHash)
+        [[nodiscard]] uint64_t Hash() const;
+
+    private:
+        ProbeGasOptions m_options;
+        uint32_t m_soundSpeedMmPerS = 0;
+        uint32_t m_gravityMicrometersPerSecond2 = 0;
+        std::vector<std::vector<std::array<uint32_t, 2>>> m_layerAtmosphere;  // 層ごとの (物質 ID, ppm)
+        std::vector<uint32_t> m_layerTemperatures;                            // 層ごとの基準の温度(mK)
+        uint64_t m_surfacePressureMicroPascal = 0;                            // 区画の一番下の層の圧力
+        std::vector<uint32_t> m_atmosphereSpecies;                            // 基準の大気の物質(ID の順)
+
+        std::vector<std::array<int64_t, GAS_AXES>> m_momentum;  // 区画のセル(気体の箱の並び。軸は気体の箱の x・y・z)
+        std::vector<int64_t> m_kinetic;                         // 運動エネルギーのぶん(mJ。セルのエネルギーの外)
+        GasProjection m_projection;                             // 前の刻みの圧力(投影の初めの近似)
+        std::vector<uint32_t> m_projectionSpecies;              // m_projection を作った時の物質(変わったら捨てる)
+        ProbeGasLedger m_ledger;
+
+        [[nodiscard]] GasConfig MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const;
+        [[nodiscard]] std::vector<GasCell> MakeReference(const BakedReactionTable& table, const GasConfig& config,
+                                                         std::span<const uint32_t> slots) const;
+    };
+
+}  // namespace bicameral::sim

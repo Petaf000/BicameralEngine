@@ -29,6 +29,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -46,6 +47,7 @@
 #include "sim/command.h"
 #include "sim/gpu_physics.h"
 #include "sim/physics_scene.h"
+#include "sim/probe_gas.h"
 #include "sim/reaction_table.h"
 #include "sim/species_remap.h"
 
@@ -580,6 +582,12 @@ namespace bicameral::sim {
         // 最後の Advance のつつきが足したエネルギー(mJ。GPU の表の sourceEnergy と同じ)
         [[nodiscard]] uint64_t SourceEnergy() const { return m_sourceEnergy; }
 
+        // 気体の区画を載せる(T-0590・ADR-0256。CPU だけ。GPU は T-0592)。次の Advance から、コマンドと物理の熱の入口の後・
+        // 伝導と反応の前に気体の 1 刻みを入れる。区画が空・基準の大気が無い表などは断る(呼ばなければ今までと同じ)
+        [[nodiscard]] std::expected<void, std::string> EnableGas(const ProbeGasOptions& options);
+        [[nodiscard]] const ProbeGasField* GasField() const { return m_gas ? &*m_gas : nullptr; }
+        [[nodiscard]] const ProbeGasStepReport& LastGasReport() const { return m_gasReport; }
+
         // 最後の Advance で物理の熱の入口が足したエネルギー(mJ。T-0542)
         [[nodiscard]] int64_t PhysicsHeatEnergy() const { return m_physicsHeatEnergy; }
 
@@ -613,6 +621,8 @@ namespace bicameral::sim {
         uint32_t m_wokenBlocks = 0;
         ProbeLimitCounts m_limits;
         SpeciesRemapReport m_remapReport;
+        std::optional<ProbeGasField> m_gas;  // 気体の区画(T-0590。無ければ流さない)
+        ProbeGasStepReport m_gasReport;
 
         void RemapSpecies(uint64_t tick, const BakedReactionTable& newTable);
     };

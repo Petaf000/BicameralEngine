@@ -1451,6 +1451,20 @@ namespace bicameral::sim {
             rng::fill(m_changedMarks, ProbeChangeMark(tick) - 1);
             rng::fill(seeds, uint8_t{1});
         }
+        // (1b) 気体(区画があるときだけ。T-0590・ADR-0256): 伝導と反応の前に流す(06 §2 の段 3 → 段 4)。
+        //      値が変わったセルは熱のキャッシュを作り直し、そのブロックを予定の種にする(つついたセルと同じ)
+        if (m_gas) {
+            std::vector<uint32_t> gasChanged;
+            m_gasReport = m_gas->Step(*m_table, std::span(m_cells).subspan(currentBase, PROBE_CELL_COUNT), tick,
+                                      gasChanged);
+            for (const uint32_t index : gasChanged) {
+                m_caches[currentBase + index] = ProbeMakeCache(table, m_cells[currentBase + index]);
+                const uint32_t block = BlockOfCellIndex(index);
+                seeds[block] = 1;
+                m_changedMarks[block] = ProbeChangeMark(tick) - 1;
+            }
+        }
+
         m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
         m_scheduled = ScheduleBlocks(seeds);
         m_scheduledBlocks = static_cast<uint32_t>(rng::count(m_scheduled, uint8_t{1}));
@@ -1481,6 +1495,16 @@ namespace bicameral::sim {
             m_blockFlags[block] = static_cast<uint8_t>((changed[block] != 0 ? PROBE_BLOCK_FLAG_CHANGED : 0) |
                                                        (possible ? PROBE_BLOCK_FLAG_POSSIBLE : 0));
         }
+    }
+
+    std::expected<void, std::string> ProbeReference::EnableGas(const ProbeGasOptions& options) {
+        auto field = ProbeGasField::Create(*m_table, options);
+        if (!field)
+            return std::unexpected(field.error());
+
+        m_gas = std::move(*field);
+
+        return {};
     }
 
     // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 2 世代のセルを名前で付け替える(熱のキャッシュは Advance が新しい表で作り直す)。

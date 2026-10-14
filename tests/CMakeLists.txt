@@ -135,6 +135,13 @@ add_executable(physics_heat_test physics_heat_test.cpp)
 target_precompile_headers(physics_heat_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(physics_heat_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME physics_heat COMMAND physics_heat_test)
+
+# 仮の世界に気体を載せる CPU リファレンス(T-0590・ADR-0256): 静かな大気・燃える木箱の煙が上がる・帳簿込みの保存・決定性
+add_executable(probe_gas_test probe_gas_test.cpp)
+target_precompile_headers(probe_gas_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(probe_gas_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME probe_gas COMMAND probe_gas_test)
+set_tests_properties(probe_gas PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
 # 世界の組み立て(T-0398・ADR-0172): 試験のパッケージの world_cells・world_bodies が前の C++ の組み立て(木箱・積み木)とビット一致・

@@ -111,6 +111,7 @@ add_library(bicameral_sim STATIC
   src/sim/lab_comparison.cpp
   src/sim/lab_session.cpp
   src/sim/probe_peek.cpp
+  src/sim/probe_gas.cpp  # 仮の世界に気体の流れを載せる CPU リファレンス(T-0590)
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
@@ -122,7 +123,7 @@ add_library(bicameral_sim STATIC
 )
 target_include_directories(bicameral_sim PUBLIC src)
 target_precompile_headers(bicameral_sim PRIVATE src/pch.h)
-target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction bicameral_physics bicameral_multires bicameral_gas)
+target_link_libraries(bicameral_sim PUBLIC bicameral_gpu bicameral_reaction bicameral_physics bicameral_multires bicameral_gas bicameral_gas_projection)
 
 # --- save: セーブ・再生ファイルの読み書き(15。T-0086)。CPU だけ(GPU を知らない。CPU だけのテストがある)---
 # コマンドの形は sim/command.h(ヘッダだけ)を使う。
