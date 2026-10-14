@@ -45,17 +45,9 @@ namespace {
 
     constexpr std::string_view BASE_PACKAGE = "combustion_test";
 
+    // 試験のパッケージと、それが依存する標準パッケージ(T-0498)
     std::vector<PackageSource> BasePackages() {
-        const fs::path folder = fs::path(BICAMERAL_DATA_PACKAGES_DIR) / BASE_PACKAGE;
-        auto package = ReadPackageFolder(folder);
-        if (!package) {
-            std::printf("試験のパッケージを読めない: %s\n", package.error().c_str());
-            ++failureCount;
-
-            return {};
-        }
-
-        return {std::move(*package)};
+        return sim::ReadCombustionTestPackages();
     }
 
     // 試験のパッケージに依存する Mod(init だけ)

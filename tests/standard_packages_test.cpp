@@ -7,6 +7,7 @@
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/standard_packages.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -230,26 +231,53 @@ namespace {
         EXPECT(empty && empty->table.atmosphere.Empty() && empty->table.environment.gravityMicrometersPerSecond2 == 0);
     }
 
-    // サンプルの世界(combustion_test)に足すと、同じ鍵(元素 C など)を書くパッケージは読まない(足すだけの合わせ方。ADR-0031)。
-    // サンプルの表はそのまま(版が同じ)
+    // サンプルの世界(combustion_test)は標準パッケージの上に作る(D-490 ①・T-0498): 依存の標準パッケージは棚から読み、
+    // サンプルは現実の物質の熱伝導率だけを書き直す(印なし)。同じ標準パッケージを足しても同じ表(版が同じ・読まないものも無い)
     void TestSampleWithMix() {
         const auto catalog = Catalog();
         if (!catalog)
             return;
 
-        const auto sample = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR)});
+        const auto sample = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR),
+                                               .standardRoot = fs::path(BICAMERAL_DATA_STANDARD_DIR)});
         const auto folders = MixFolders(*catalog, Names{"real_elements", "real_matter"});
         if (!sample || !folders) {
-            std::printf("FAILED: サンプルか足すフォルダを読めない\n");
+            std::printf("FAILED: サンプルか足すフォルダを読めない: %s\n", sample ? "" : sample.error().c_str());
             ++failureCount;
 
             return;
         }
 
-        const auto mixed = LoadReactionTable(
-            {.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR), .addedPackages = *folders});
+        EXPECT((sample->loadOrder ==
+                Names{"real_elements", "real_matter", "earth_environment", "real_reactions", "combustion_test"}));
+        EXPECT(sample->rejected.empty() && !sample->modifiedWorld);
+        EXPECT(sample->standardRoot == fs::path(BICAMERAL_DATA_STANDARD_DIR));
+        EXPECT(!sample->overrides.empty() && std::ranges::all_of(sample->overrides, [](const TableOverride& entry) {
+            return entry.category == "species" && entry.previousPackage == "real_matter" &&
+                   entry.package == "combustion_test";
+        }));
+
+        // 熱伝導率は現実の値に試験の倍率(固体 20000・気体 5000。units.luau)。ほかの欄は現実の値のまま
+        const auto standardOnly = LoadMix(*catalog, Names{"real_elements", "real_matter"});
+        if (standardOnly) {
+            const auto conductivity = [](const sim::BakedReactionTable& table, std::string_view name) -> int64_t {
+                for (size_t index = 0; index < table.speciesNames.size(); ++index) {
+                    if (table.speciesNames[index] == name)
+                        return static_cast<int64_t>(table.species[index].conductivity);
+                }
+
+                return -1;
+            };
+            EXPECT(conductivity(sample->table, "cellulose") == conductivity(standardOnly->table, "cellulose") * 20000);
+            EXPECT(conductivity(sample->table, "oxygen") == conductivity(standardOnly->table, "oxygen") * 5000);
+            EXPECT(conductivity(sample->table, "argon") == conductivity(standardOnly->table, "argon") * 5000);
+        }
+
+        const auto mixed = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR),
+                                              .addedPackages = *folders,
+                                              .standardRoot = fs::path(BICAMERAL_DATA_STANDARD_DIR)});
         EXPECT(mixed && mixed->tableVersion == sample->tableVersion);
-        EXPECT(mixed && mixed->rejected.size() == 2);  // real_elements(C の重なり)と、それに依存する real_matter
+        EXPECT(mixed && mixed->rejected.empty());
     }
 
     // --- 基準の大気の検査 ---

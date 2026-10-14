@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,13 @@ namespace bicameral::script {
 
     struct
         PackageSource;  // luau_package.h(luau_package.h がこのヘッダの TypeDiagnostic を使うので、ここでは include しない)
+
+    // require("@名前") で見せる、依存するパッケージ(T-0498・13 §2.2)。そのファイルは検査の時に見えるが、
+    // 誤りは出さない(そのパッケージ自身の検査で出る)
+    struct PackageDependency {
+        const PackageSource* package = nullptr;
+        std::string entry = "init";  // require("@名前") が指すファイル(マニフェストの entry)
+    };
 
     // 型の定義に必ずある型の名前(package.luau の戻り値・entry の戻り値)
     constexpr std::string_view MANIFEST_TYPE_NAME = "PackageManifest";
@@ -58,8 +66,10 @@ namespace bicameral::script {
         // package.luau だけ(戻り値が PackageManifest か)。マニフェストを走らせる前に使う
         [[nodiscard]] std::vector<TypeDiagnostic> CheckManifest(const PackageSource& package);
 
-        // パッケージの全部の *.luau と、entry("init" の形)の戻り値が PackageEntry か。entry を走らせる前に使う
-        [[nodiscard]] std::vector<TypeDiagnostic> CheckPackage(const PackageSource& package, std::string_view entry);
+        // パッケージの全部の *.luau と、entry("init" の形)の戻り値が PackageEntry か。entry を走らせる前に使う。
+        // dependencies は require("@名前") で見せる依存のパッケージ(たどった全部)
+        [[nodiscard]] std::vector<TypeDiagnostic> CheckPackage(const PackageSource& package, std::string_view entry,
+                                                               std::span<const PackageDependency> dependencies = {});
 
     private:
         struct Impl;

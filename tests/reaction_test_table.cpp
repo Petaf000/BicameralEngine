@@ -14,6 +14,7 @@
 #include "script/luau_package.h"
 #include "script/luau_sandbox.h"
 #include "script/reaction_package.h"
+#include "script/standard_packages.h"
 
 namespace bicameral::sim {
 
@@ -30,17 +31,25 @@ namespace bicameral::sim {
 
     }  // namespace
 
-    ReactionTableDefinition MakeCombustionTestTable() {
+    std::vector<script::PackageSource> ReadCombustionTestPackages() {
         auto package = script::ReadPackageFolder(fs::path(BICAMERAL_DATA_PACKAGES_DIR) / TEST_PACKAGE);
         if (!package)
             StopWithoutTable(package.error());
 
+        std::vector<script::PackageSource> packages{std::move(*package)};
+        if (auto added = script::AddStandardDependencies(packages, fs::path(BICAMERAL_DATA_STANDARD_DIR)); !added)
+            StopWithoutTable(added.error());
+
+        return packages;
+    }
+
+    ReactionTableDefinition MakeCombustionTestTable() {
         auto sandbox = script::LuauSandbox::Create(script::SandboxLimits{});
         if (!sandbox)
             StopWithoutTable(sandbox.error());
 
         (*sandbox)->Seal();
-        const std::vector<script::PackageSource> packages{std::move(*package)};
+        const std::vector<script::PackageSource> packages = ReadCombustionTestPackages();
         const auto loaded = script::LoadPackages(**sandbox, packages,
                                                  script::PackageLoadOptions{.basePackage = std::string(TEST_PACKAGE)});
         if (!loaded)

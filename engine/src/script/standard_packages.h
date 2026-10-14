@@ -8,6 +8,8 @@
 //   → 足す・外す(MixAdd・MixRemove。依存も一緒に)→ 足す一覧(名前)→ MixFolders → ReactionTableSource::addedPackages
 //   → LoadReactionTable(ほかのパッケージと同じ読み込み・同じ表の版)。
 // 足す一覧は名前の順に持つ(読む順は依存で決まる。LoadPackages)。ここは CPU だけ(原則 2)。
+// パッケージは標準パッケージに依存してよい(depends に名前を書く)。読む一覧に無い依存は棚から足す(AddStandardDependencies。
+// サンプルの世界 combustion_test は標準パッケージの上に作り、遊びのための値だけを書く。T-0498・ADR-0183 の追記)。
 #pragma once
 
 #include <expected>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include "core/aliases.h"
+#include "script/luau_package.h"
 
 namespace bicameral::script {
 
@@ -57,6 +60,12 @@ namespace bicameral::script {
     // 足す一覧 → 読むフォルダ(棚に無い名前・依存が足りない一覧は誤り。「a は b が要る」の形)
     [[nodiscard]] std::expected<std::vector<fs::path>, std::string> MixFolders(const StandardCatalog& catalog,
                                                                                std::span<const std::string> mix);
+
+    // packages のどれかが依存しているのに packages に無いパッケージを、棚 root から足す(依存もたどる。packages の末尾へ名前の順に)。
+    // packages に同じ名前があれば棚からは足さない。棚にも無い依存は足さない(LoadPackages が「依存が無い」で読まない)。
+    // 棚は足すものがある時だけ読む(棚のフォルダが無ければ何も足さない)。マニフェストが読めないパッケージは飛ばす(LoadPackages が理由を出す)
+    [[nodiscard]] std::expected<void, std::string> AddStandardDependencies(std::vector<PackageSource>& packages,
+                                                                           const fs::path& root);
 
     // "a,b,c" → 名前の一覧(--mix。空の要素は誤り)
     [[nodiscard]] std::expected<std::vector<std::string>, std::string> ParseMixList(std::string_view text);

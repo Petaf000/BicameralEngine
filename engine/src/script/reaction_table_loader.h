@@ -2,6 +2,7 @@
 //
 // データの流れ: <exe の横>/data/packages(ビルドがリポジトリの data/packages を写す)→ ReadPackageRoot
 //   (+ 環境ミキサーで足した標準パッケージのフォルダ。ReactionTableSource::addedPackages。T-0373)
+//   (+ それらが依存しているのに無い標準パッケージを棚から。AddStandardDependencies。T-0498)
 //   → LoadPackages(走らせる前に data/types の型の定義で型検査〔T-0140〕→ 殻)
 //   → ReadReactionTableDefinition → sim::BakeReactionTable(元素とエネルギーの検査)→ LoadedReactionTable → GPU へ上げる(呼び手)。
 // 失敗(フォルダが無い・ゲーム本体のパッケージが読めない・形の誤り・検査で落ちる)は全部 error で返す。呼び手は起動を止める
@@ -36,12 +37,16 @@ namespace bicameral::script {
         // --- 環境ミキサーで足した標準パッケージ(T-0373・ADR-0183・script/standard_packages.h)---
         bool readPackageRoot = true;          // false: packageRoot を読まない(ブランクの世界に標準パッケージだけを足す)
         std::vector<fs::path> addedPackages;  // 1 つのフォルダ = 1 つのパッケージ。packageRoot のものと一緒に読む
+
+        // 読むパッケージが依存しているのに無い標準パッケージを探す棚(空なら DefaultStandardPackageRoot。T-0498)
+        fs::path standardRoot;
     };
 
     struct LoadedReactionTable {
-        sim::BakedReactionTable table;       // GPU に上げる表と CPU だけの名前など(warnings は文献の反応熱との食い違い)
-        fs::path packageRoot;                // 実際に読んだフォルダ
-        std::vector<std::string> loadOrder;  // 読めたパッケージ(読んだ順)
+        sim::BakedReactionTable table;  // GPU に上げる表と CPU だけの名前など(warnings は文献の反応熱との食い違い)
+        fs::path packageRoot;           // 実際に読んだフォルダ
+        fs::path standardRoot;  // 依存の標準パッケージを探した棚(T-0498。エディタの表のパネルが書き戻す先を探す)
+        std::vector<std::string> loadOrder;      // 読めたパッケージ(読んだ順)
         std::vector<PackageRejection> rejected;  // 読まなかった Mod と理由(ゲーム本体はここに来ない。来たら失敗)
         std::vector<TableOverride> overrides;    // 上書き(OverrideMarked・Override のとき)
         bool modifiedWorld = false;              // 「改造された世界」の印

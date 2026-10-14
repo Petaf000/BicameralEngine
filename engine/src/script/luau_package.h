@@ -4,11 +4,17 @@
 //   package.luau(マニフェスト)が表を返す: { format = 1, title = "見せる名前", depends = { "core" }, entry = "init" }
 //   (title・depends・entry は省ける)。
 //   entry のファイルが「分類 → 鍵 → 値」の表を返す(例 { reactions = { burn = {...} }, elements = {...} })。
-//   require("sub/util") はそのパッケージの中の sub/util.luau だけを読む(ほかのパッケージ・ファイルの外には届かない)。
+//   require("sub/util") はそのパッケージの中の sub/util.luau だけを読む(ファイルの外には届かない)。
+//   require("@dep") は、たどって依存するパッケージ dep の entry が返す表(require("@dep/sub/util") はその中のファイル)。
+//   その Run の中でもう一度走らせた写しなので、書き換えても dep の表は変わらない(読むだけ。T-0498)。
+//   依存していないパッケージには届かない。標準パッケージの上に世界を作り、値を写して一部だけ変える形に使う(13 §2.2)。
 // 読む順番: 依存の後。依存の関係で決まらないものはパッケージの名前(バイト順)。フォルダを並べた順・入れた順には依らない(決定性)。
 // 表の合わせ方(MergeMode。QUESTIONS Q8 が未回答なので切り替えられる形。仮で C: 既定は AddOnly、上書きを許す設定は OverrideMarked):
 //   新しい鍵は足す。既にある鍵を書こうとしたら AddOnly ではそのパッケージ(と依存するもの)を読まない、
 //   OverrideMarked では上書きして「改造された世界」の印を付ける、Override では印なしで上書きする。値は丸ごと置き換える。
+//   ただしゲーム本体(basePackage)が、自分のたどる依存(標準パッケージなど)の書いた鍵を書くのは、どの設定でも通し印を付けない
+//   (世界の作り手が自分の世界の値として決めたもの。Mod の上書きではない。上書きの記録 overrides には残す。T-0498・ADR-0183)。
+//   ゲーム本体が依存するパッケージ(たどった全部)は、ゲーム本体に依存させない(循環にしない)。
 // データの流れ: フォルダ → ReadPackageRoot → PackageSource → LoadPackages(殻で走らせる)→ PackageSetResult → ベイク(T-0021)。
 // ここは CPU だけ(原則 1・2)。同じパッケージ群・同じ設定なら、同じ PackageSetResult(CanonicalBytes が同じ)になる。
 #pragma once
@@ -119,6 +125,14 @@ namespace bicameral::script {
     // 書いたパッケージは分からないので、どの値も package = REPLAY_TABLE_PACKAGE。壊れていれば理由
     inline constexpr std::string_view REPLAY_TABLE_PACKAGE = "(再生ファイルの表)";
     [[nodiscard]] std::expected<PackageSetResult, std::string> ParseTableBytes(std::string_view bytes);
+
+    // require("@dep") / require("@dep/sub/util") の名前 → 依存するパッケージの名前と、その中のファイル("sub/util.luau"。
+    // "@dep" だけなら空 = entry)。@ で始まらない・名前の規則に合わなければ理由
+    struct DependencyRequire {
+        std::string package;
+        std::string path;
+    };
+    [[nodiscard]] std::expected<DependencyRequire, std::string> SplitDependencyRequire(std::string_view name);
 
     // 名前の規則(パッケージ・分類・require のパスの区切りごと): 英小文字・数字・'_'・'-' だけで 1〜64 文字
     [[nodiscard]] bool IsValidPackageName(std::string_view name);

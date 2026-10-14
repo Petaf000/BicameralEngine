@@ -1,6 +1,7 @@
 // luau_package.cpp — パッケージの読み込み・順番・require の解決・表の合わせ方(T-0138、13 §2・ADR-0031)。
 //
-// 流れ: マニフェストを全部読む(名前の順)→ 依存で順番を決める(決まらない所は名前の順)→ 順番に entry を走らせる
+// 流れ: マニフェストを全部読む(名前の順)→ ゲーム本体への依存を足す(ゲーム本体のたどる依存は除く)
+//   → 依存で順番を決める(決まらない所は名前の順)→ 順番に entry を走らせる(require は自分のファイルと、たどる依存の写し)
 //   → 戻り値の「分類 → 鍵 → 値」を確かめる → MergeMode で合わせる。
 // パッケージの誤り(マニフェスト・依存・実行・上書きの禁止)はそのパッケージと、それに依存するものだけを読まない(ほかは続ける)。
 // Luau は全部 1 つの殻で走らせる(Run ごとにグローバルは別。13 §2.1)。
@@ -28,7 +29,7 @@ namespace bicameral::script {
         constexpr size_t MAX_TITLE_BYTES = 256;
 
         struct Manifest {
-            std::vector<std::string> depends;  // basePackage も入れたもの
+            std::vector<std::string> depends;  // 書いた依存(LoadPackages が basePackage も足す)
             std::string entry = "init";
             std::string title;  // 人に見せる名前(環境ミキサーの一覧。省けば空。T-0373)
         };
@@ -63,17 +64,66 @@ namespace bicameral::script {
             return std::string(name) + std::string(MODULE_EXTENSION);
         }
 
-        ModuleResolver MakeResolver(const PackageSource& package) {
-            return [&package](std::string_view name) -> std::expected<ModuleFile, std::string> {
-                auto path = ModulePath(name);
-                if (!path)
-                    return std::unexpected(path.error());
+        // require で見えるパッケージ: 走らせるパッケージ自身と、そのたどる依存(読み込み済み。T-0498)
+        struct VisiblePackage {
+            const PackageSource* source = nullptr;
+            std::string entry;
+        };
+        using VisiblePackages = std::map<std::string, VisiblePackage>;
 
-                const auto found = package.files.find(*path);
-                if (found == package.files.end())
-                    return std::unexpected(std::format("パッケージ '{}' に {} が無い", package.name, *path));
+        // require("@dep") / require("@dep/sub/util") → 依存のパッケージの名前とファイル
+        std::expected<std::pair<std::string, std::string>, std::string> ResolveDependencyRequire(
+            const VisiblePackages& visible, std::string_view ownPackage, std::string_view name) {
+            const auto split = SplitDependencyRequire(name);
+            if (!split)
+                return std::unexpected(split.error());
 
-                return ModuleFile{.chunkName = package.name + "/" + *path, .source = found->second};
+            const auto found = visible.find(split->package);
+            if (found == visible.end() || split->package == ownPackage)
+                return std::unexpected(std::format("'{}' はパッケージ '{}' がたどって依存するパッケージではない",
+                                                   split->package, ownPackage));
+            if (!split->path.empty())
+                return std::pair{split->package, split->path};
+
+            auto entryPath = ModulePath(found->second.entry);
+            if (!entryPath)
+                return std::unexpected(entryPath.error());
+
+            return std::pair{split->package, std::move(*entryPath)};
+        }
+
+        // require の名前 → ファイル。名前の無い require("sub/util") は、require を書いたファイルのパッケージの中で探す
+        // (依存のパッケージのモジュールの中の require は、そのパッケージの中)
+        ModuleResolver MakeResolver(const VisiblePackages& visible) {
+            return [&visible](std::string_view name,
+                              std::string_view fromChunk) -> std::expected<ModuleFile, std::string> {
+                const std::string fromPackage(fromChunk.substr(0, fromChunk.find('/')));
+                std::pair<std::string, std::string> target;
+                if (name.starts_with('@')) {
+                    auto dependency = ResolveDependencyRequire(visible, fromPackage, name);
+                    if (!dependency)
+                        return std::unexpected(dependency.error());
+
+                    target = std::move(*dependency);
+                } else {
+                    auto path = ModulePath(name);
+                    if (!path)
+                        return std::unexpected(path.error());
+
+                    target = {fromPackage, std::move(*path)};
+                }
+
+                const std::string missing = std::format("パッケージ '{}' に {} が無い", target.first, target.second);
+                const auto package = visible.find(target.first);
+                if (package == visible.end())
+                    return std::unexpected(missing);
+
+                const auto& files = package->second.source->files;
+                const auto found = files.find(target.second);
+                if (found == files.end())
+                    return std::unexpected(missing);
+
+                return ModuleFile{.chunkName = target.first + "/" + target.second, .source = found->second};
             };
         }
 
@@ -133,8 +183,7 @@ namespace bicameral::script {
             return manifest;
         }
 
-        std::expected<Manifest, std::string> ReadManifest(LuauSandbox& sandbox, const PackageSource& package,
-                                                          const PackageLoadOptions& options) {
+        std::expected<Manifest, std::string> ReadManifest(LuauSandbox& sandbox, const PackageSource& package) {
             const auto file = package.files.find(std::string(MANIFEST_FILE));
             if (file == package.files.end())
                 return std::unexpected(std::format("{} が無い", MANIFEST_FILE));
@@ -146,12 +195,7 @@ namespace bicameral::script {
             if (run->values.size() != 1)
                 return std::unexpected("package.luau は表を 1 つ返す");
 
-            auto manifest = ParseManifest(run->values[0]);
-            if (manifest && !options.basePackage.empty() && package.name != options.basePackage &&
-                std::ranges::find(manifest->depends, options.basePackage) == manifest->depends.end())
-                manifest->depends.push_back(options.basePackage);
-
-            return manifest;
+            return ParseManifest(run->values[0]);
         }
 
         // --- 順番(依存の後。決まらない所は名前の順)---
@@ -166,6 +210,38 @@ namespace bicameral::script {
             Manifest manifest;
             OrderState state = OrderState::Pending;
         };
+
+        // name のたどる依存(depends をたどった全部。name は含めない。無い依存は飛ばす。循環しても止まる)
+        std::set<std::string> DependencyClosure(const std::map<std::string, OrderNode>& nodes,
+                                                const std::string& name) {
+            std::set<std::string> closure;
+            std::vector<std::string> pending{name};
+            while (!pending.empty()) {
+                const auto node = nodes.find(pending.back());
+                pending.pop_back();
+                if (node == nodes.end())
+                    continue;
+
+                for (const std::string& depend : node->second.manifest.depends) {
+                    if (depend != name && closure.insert(depend).second)
+                        pending.push_back(depend);
+                }
+            }
+
+            return closure;
+        }
+
+        // ほかの全部をゲーム本体に依存させる(Mod はゲーム本体の後に読む)。ゲーム本体のたどる依存は除く(循環にしない。T-0498)
+        void AddBaseDependency(std::map<std::string, OrderNode>& nodes, const std::string& basePackage,
+                               const std::set<std::string>& baseClosure) {
+            for (auto& [name, node] : nodes) {
+                std::vector<std::string>& depends = node.manifest.depends;
+                if (name == basePackage || baseClosure.contains(name) || std::ranges::contains(depends, basePackage))
+                    continue;
+
+                depends.push_back(basePackage);
+            }
+        }
 
         // 依存のうち、まだ並べられていないもの(無い・読まないものなら理由も)
         bool DependsReady(const std::map<std::string, OrderNode>& nodes, const OrderNode& node,
@@ -252,13 +328,13 @@ namespace bicameral::script {
         }
 
         std::expected<Contribution, std::string> RunEntry(LuauSandbox& sandbox, const PackageSource& package,
-                                                          const Manifest& manifest) {
+                                                          const Manifest& manifest, const VisiblePackages& visible) {
             const std::string path = manifest.entry + std::string(MODULE_EXTENSION);
             const auto file = package.files.find(path);
             if (file == package.files.end())
                 return std::unexpected(std::format("entry の {} が無い", path));
 
-            const ModuleResolver resolver = MakeResolver(package);
+            const ModuleResolver resolver = MakeResolver(visible);
             const auto run = sandbox.Run(package.name + "/" + path, file->second,
                                          RunOptions{.modules = &resolver, .captureValues = true});
             if (!run)
@@ -269,8 +345,20 @@ namespace bicameral::script {
 
         // --- 合わせる ---
 
-        // AddOnly で上書きがあれば理由を返す(合わせない)
-        std::string FindForbiddenOverrides(const PackageSetResult& result, const Contribution& contribution) {
+        // 1 つのパッケージを読むときの周り(T-0498)
+        struct LoadContext {
+            VisiblePackages visible;                                 // require で見えるもの(自分 + たどる依存)
+            std::vector<PackageDependency> dependencies;             // 型検査に見せるたどる依存
+            const std::set<std::string>* ownDependencies = nullptr;  // ゲーム本体のとき: 印なしで上書きしてよい書き手
+        };
+
+        bool OverridesOwnDependency(const LoadContext& context, const std::string& previousPackage) {
+            return context.ownDependencies != nullptr && context.ownDependencies->contains(previousPackage);
+        }
+
+        // AddOnly で上書きがあれば理由を返す(合わせない)。ゲーム本体が自分のたどる依存の鍵を書くのは上書きの禁止に当たらない
+        std::string FindForbiddenOverrides(const PackageSetResult& result, const Contribution& contribution,
+                                           const LoadContext& context) {
             std::vector<std::string> conflicts;
             for (const auto& [category, entries] : contribution) {
                 const auto existing = result.tables.find(category);
@@ -279,7 +367,8 @@ namespace bicameral::script {
 
                 for (const auto& [key, value] : entries) {
                     const auto previous = existing->second.find(key);
-                    if (previous != existing->second.end())
+                    if (previous != existing->second.end() &&
+                        !OverridesOwnDependency(context, previous->second.package))
                         conflicts.push_back(
                             std::format("{}.{}('{}' が書いた)", category, key, previous->second.package));
                 }
@@ -299,22 +388,23 @@ namespace bicameral::script {
 
         // 1 つの鍵を合わせる(既にあれば上書きを記録する。AddOnly の禁止は FindForbiddenOverrides が先に見ている)
         void MergeEntry(PackageSetResult& result, const std::string& category, const std::string& key,
-                        ScriptValue&& value, const std::string& package, MergeMode mode) {
+                        ScriptValue&& value, const std::string& package, MergeMode mode, const LoadContext& context) {
             auto [slot, added] = result.tables[category].try_emplace(key);
             if (!added) {
                 result.overrides.push_back(TableOverride{
                     .category = category, .key = key, .previousPackage = slot->second.package, .package = package});
-                if (mode == MergeMode::OverrideMarked)
+                if (mode == MergeMode::OverrideMarked && !OverridesOwnDependency(context, slot->second.package))
                     result.modifiedWorld = true;
             }
 
             slot->second = TableEntry{.value = std::move(value), .package = package};
         }
 
-        void Merge(PackageSetResult& result, const std::string& package, Contribution&& contribution, MergeMode mode) {
+        void Merge(PackageSetResult& result, const std::string& package, Contribution&& contribution, MergeMode mode,
+                   const LoadContext& context) {
             for (auto& [category, entries] : contribution) {
                 for (auto& [key, value] : entries)
-                    MergeEntry(result, category, key, std::move(value), package, mode);
+                    MergeEntry(result, category, key, std::move(value), package, mode, context);
             }
         }
 
@@ -333,7 +423,7 @@ namespace bicameral::script {
 
         std::string LoadOne(LuauSandbox& sandbox, const PackageSource& package, const Manifest& manifest,
                             const std::set<std::string>& loaded, const PackageLoadOptions& options,
-                            PackageSetResult& result) {
+                            const LoadContext& context, PackageSetResult& result) {
             for (const std::string& depend : manifest.depends) {
                 if (!loaded.contains(depend))
                     return std::format("依存するパッケージ '{}' を読まなかった", depend);
@@ -341,25 +431,49 @@ namespace bicameral::script {
 
             // --- 走らせる前に型検査(T-0140)---
             if (options.typeChecker != nullptr) {
-                std::string reason = TypeCheckReason(options.typeChecker->CheckPackage(package, manifest.entry),
-                                                     result);
+                std::string reason = TypeCheckReason(
+                    options.typeChecker->CheckPackage(package, manifest.entry, context.dependencies), result);
                 if (!reason.empty())
                     return reason;
             }
 
-            auto contribution = RunEntry(sandbox, package, manifest);
+            auto contribution = RunEntry(sandbox, package, manifest, context.visible);
             if (!contribution)
                 return contribution.error();
 
             if (options.mergeMode == MergeMode::AddOnly) {
-                std::string forbidden = FindForbiddenOverrides(result, *contribution);
+                std::string forbidden = FindForbiddenOverrides(result, *contribution, context);
                 if (!forbidden.empty())
                     return forbidden;
             }
 
-            Merge(result, package.name, std::move(*contribution), options.mergeMode);
+            Merge(result, package.name, std::move(*contribution), options.mergeMode, context);
 
             return {};
+        }
+
+        // name を読むときの周り: require で見えるもの・型検査に見せる依存・ゲーム本体なら印なしで上書きしてよい書き手
+        LoadContext MakeLoadContext(const std::map<std::string, const PackageSource*>& byName,
+                                    const std::map<std::string, OrderNode>& nodes, const std::string& name,
+                                    const std::string& basePackage, const std::set<std::string>& baseClosure) {
+            LoadContext context;
+            context.visible.emplace(name,
+                                    VisiblePackage{.source = byName.at(name), .entry = nodes.at(name).manifest.entry});
+            for (const std::string& depend : DependencyClosure(nodes, name)) {
+                const auto node = nodes.find(depend);
+                if (node == nodes.end())
+                    continue;
+
+                const PackageSource* source = byName.at(depend);
+                context.visible.emplace(depend, VisiblePackage{.source = source, .entry = node->second.manifest.entry});
+                context.dependencies.push_back(
+                    PackageDependency{.package = source, .entry = node->second.manifest.entry});
+            }
+
+            if (!basePackage.empty() && name == basePackage)
+                context.ownDependencies = &baseClosure;
+
+            return context;
         }
 
     }  // namespace
@@ -380,6 +494,28 @@ namespace bicameral::script {
 
     std::expected<std::string, std::string> PackageModulePath(std::string_view name) {
         return ModulePath(name);
+    }
+
+    std::expected<DependencyRequire, std::string> SplitDependencyRequire(std::string_view name) {
+        constexpr std::string_view FORM = "依存するパッケージは '@名前' か '@名前/sub/util' の形";
+        if (!name.starts_with('@'))
+            return std::unexpected(std::string(FORM));
+
+        name.remove_prefix(1);
+        const size_t slash = name.find('/');
+        DependencyRequire require{.package = std::string(name.substr(0, slash)), .path = {}};
+        if (!IsValidPackageName(require.package))
+            return std::unexpected(std::string(FORM));
+        if (slash == std::string_view::npos)
+            return require;
+
+        auto path = ModulePath(name.substr(slash + 1));
+        if (!path)
+            return std::unexpected(std::format("{}: {}", FORM, path.error()));
+
+        require.path = std::move(*path);
+
+        return require;
     }
 
     std::expected<PackageSource, std::string> ReadPackageFolder(const fs::path& folder) {
@@ -445,7 +581,7 @@ namespace bicameral::script {
         if (!IsValidPackageName(package.name))
             return std::unexpected(std::format("パッケージ '{}': 名前は英小文字・数字・_・- だけ", package.name));
 
-        auto manifest = ReadManifest(sandbox, package, PackageLoadOptions{});
+        auto manifest = ReadManifest(sandbox, package);
         if (!manifest)
             return std::unexpected(std::format("パッケージ '{}': {}", package.name, manifest.error()));
 
@@ -482,7 +618,7 @@ namespace bicameral::script {
             }
 
             auto manifest = IsValidPackageName(name)
-                                ? ReadManifest(sandbox, *package, options)
+                                ? ReadManifest(sandbox, *package)
                                 : std::expected<Manifest, std::string>(std::unexpect,
                                                                        "パッケージの名前は英小文字・数字・_・- だけ");
             if (!manifest) {
@@ -493,6 +629,13 @@ namespace bicameral::script {
             nodes.emplace(name, OrderNode{.manifest = std::move(*manifest)});
         }
 
+        // --- ゲーム本体への依存(ゲーム本体のたどる依存は除く)---
+        std::set<std::string> baseClosure;
+        if (!options.basePackage.empty()) {
+            baseClosure = DependencyClosure(nodes, options.basePackage);
+            AddBaseDependency(nodes, options.basePackage, baseClosure);
+        }
+
         // --- 順番 → 読み込み ---
         std::vector<std::string> order;
         while (OrderStep(nodes, order, result)) {
@@ -500,7 +643,9 @@ namespace bicameral::script {
 
         std::set<std::string> loaded;
         for (const std::string& name : order) {
-            std::string reason = LoadOne(sandbox, *byName.at(name), nodes.at(name).manifest, loaded, options, result);
+            const LoadContext context = MakeLoadContext(byName, nodes, name, options.basePackage, baseClosure);
+            std::string reason = LoadOne(sandbox, *byName.at(name), nodes.at(name).manifest, loaded, options, context,
+                                         result);
             if (!reason.empty()) {
                 result.rejected.push_back(PackageRejection{.package = name, .reason = std::move(reason)});
                 continue;

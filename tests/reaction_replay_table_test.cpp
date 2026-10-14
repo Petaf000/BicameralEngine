@@ -38,15 +38,15 @@ namespace {
     constexpr uint64_t OZONE_PLACE_TICK = 22;     // 筆でオゾンを置く
     constexpr uint64_t SPECIES_REMOVE_TICK = 30;  // オゾンの無い表へ戻す(オゾンは酸素に分かれる)
 
-    // 試験の表に足すオゾン(species.luau の carbon の前に入れる。値は文献値を丸めた試験の値: 生成エンタルピー +142.7 kJ/mol・
+    // 試験の表に足すオゾン(species.luau の足す物質の表の mana_test の前に入れる。T-0498 で carbon は標準パッケージへ移った。値は文献値を丸めた試験の値: 生成エンタルピー +142.7 kJ/mol・
     // 比熱 39.2 J/(mol·K)。未確認)
-    constexpr std::string_view SPECIES_ANCHOR = "    carbon = {";
+    constexpr std::string_view SPECIES_ANCHOR = "    mana_test = {";
     constexpr std::string_view OZONE_SPECIES =
         "    ozone = {\n"
         "        composition = { O = 3 },\n"
         "        formation_enthalpy_j_per_mol = 142700,\n"
         "        heat_capacity_mj_per_mol_k = 39200,\n"
-        "        thermal_conductivity_mw_per_m_k = gas(19),\n"
+        "        thermal_conductivity_mw_per_m_k = units.gas_conductivity(19),\n"
         "    },\n";
 
     int failureCount = 0;
@@ -81,11 +81,20 @@ namespace {
     }
 
     // 物質の一覧は同じまま、木の燃焼を 100 倍速く・窒素の熱容量を 1 割大きくする(ホットリロードで当てられる変更。
-    // gpu_probe_sim_test の MakeSwappedTable と同じ考え。差し替えの後の世界が必ず変わる)
+    // gpu_probe_sim_test の MakeSwappedTable と同じ考え。差し替えの後の世界が必ず変わる)。
+    // 木の燃焼と窒素は標準パッケージ(real_reactions・real_matter)の値なので、サンプルのパッケージで書き直す(T-0498)
+    constexpr std::string_view FASTER_COMBUSTION =
+        "return {\n"
+        "    cellulose_combustion = {\n"
+        "        reactants = { cellulose = 1, oxygen = 6 },\n"
+        "        products = { carbon_dioxide = 6, water_vapor = 5 },\n"
+        "        rate = { a = \"2e12\", activation_energy_j_per_mol = 150000 },\n"
+        "    },\n";
+
     bool ChangeTable(const fs::path& package) {
-        return ReplaceInFile(package / "reactions.luau", "a = \"2e10\"", "a = \"2e12\"") &&
-               ReplaceInFile(package / "species.luau", "heat_capacity_mj_per_mol_k = 29124",
-                             "heat_capacity_mj_per_mol_k = 32036");
+        return ReplaceInFile(package / "reactions.luau", "return {\n", FASTER_COMBUSTION) &&
+               ReplaceInFile(package / "species.luau", "return species",
+                             "species.nitrogen.heat_capacity_mj_per_mol_k = 32036\n\nreturn species");
     }
 
     // frame_loop の --auto-ignite と同じ木箱の壁に火をつけ、刻み SWAP_TICK の始めに表を差し替える。

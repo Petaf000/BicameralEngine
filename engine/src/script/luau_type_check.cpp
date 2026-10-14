@@ -60,11 +60,17 @@ namespace bicameral::script {
 
         class PackageFileResolver final : public Luau::FileResolver {
         public:
-            void Reset(const PackageSource& package) {
-                m_package = package.name;
+            void Reset(const PackageSource& package, std::span<const PackageDependency> dependencies) {
                 m_sources.clear();
-                for (const auto& [path, source] : package.files)
-                    m_sources.emplace(package.name + "/" + path, source);
+                m_entries.clear();
+                AddPackage(package);
+                for (const PackageDependency& dependency : dependencies) {
+                    if (dependency.package == nullptr)
+                        continue;
+
+                    AddPackage(*dependency.package);
+                    m_entries.insert_or_assign(dependency.package->name, dependency.entry);
+                }
             }
 
             void AddModule(std::string name, std::string source) {
@@ -79,8 +85,9 @@ namespace bicameral::script {
                 return Luau::SourceCode{found->second, Luau::SourceCode::Module};
             }
 
-            // require("sub/util") → "パッケージ/sub/util.luau"(殻の require と同じ規則。luau_package の PackageModulePath)。
-            // 規則に合わない・無いファイルも名前を返す(readSource が無いと答え、Luau が「require の先が無い」を出す)
+            // require("sub/util") → "require を書いたパッケージ/sub/util.luau"、require("@dep") → "dep/<entry>.luau"、
+            // require("@dep/sub/util") → "dep/sub/util.luau"(殻の require と同じ規則。luau_package の PackageModulePath・
+            // SplitDependencyRequire)。規則に合わない・無いファイルも名前を返す(readSource が無いと答え、Luau が「require の先が無い」を出す)
             std::optional<Luau::ModuleInfo> resolveModule(const Luau::ModuleInfo* context, Luau::AstExpr* expr,
                                                           const Luau::TypeCheckLimits& /*limits*/) override {
                 const auto* constant = expr ? expr->as<Luau::AstExprConstantString>() : nullptr;
@@ -88,14 +95,39 @@ namespace bicameral::script {
                     return std::nullopt;
 
                 const std::string_view name(constant->value.data, constant->value.size);
+                if (name.starts_with('@'))
+                    return Luau::ModuleInfo{DependencyModule(name)};
+
+                const std::string fromPackage = context->name.substr(0, context->name.find('/'));
                 const auto path = PackageModulePath(name);
 
-                return Luau::ModuleInfo{m_package + "/" + (path ? *path : std::string(name))};
+                return Luau::ModuleInfo{fromPackage + "/" + (path ? *path : std::string(name))};
             }
 
         private:
-            std::string m_package;
+            void AddPackage(const PackageSource& package) {
+                for (const auto& [path, source] : package.files)
+                    m_sources.emplace(package.name + "/" + path, source);
+            }
+
+            // "@dep" → "dep/<entry>.luau"。見せていない依存・規則に合わない名前は、そのままの名前(「require の先が無い」になる)
+            std::string DependencyModule(std::string_view name) const {
+                const auto split = SplitDependencyRequire(name);
+                if (!split)
+                    return std::string(name);
+
+                const auto entry = m_entries.find(split->package);
+                if (entry == m_entries.end())
+                    return std::string(name);
+
+                const auto path = split->path.empty() ? PackageModulePath(entry->second)
+                                                      : std::expected<std::string, std::string>(split->path);
+
+                return path ? split->package + "/" + *path : std::string(name);
+            }
+
             std::map<std::string, std::string> m_sources;  // "パッケージ/相対パス" → ソース
+            std::map<std::string, std::string> m_entries;  // 見せる依存のパッケージ → entry
         };
 
         // 全部のファイルを strict で見る(ファイルの先頭の --!nonstrict などはそのファイルだけに効く)
@@ -383,7 +415,8 @@ namespace bicameral::script {
 
         // 1 つのパッケージを検査する。files はパッケージの中の相対パス、returnCheck があれば戻り値の形も確かめる
         std::vector<TypeDiagnostic> Check(const PackageSource& package, const std::vector<std::string>& files,
-                                          const std::optional<ReturnCheck>& returnCheck);
+                                          const std::optional<ReturnCheck>& returnCheck,
+                                          std::span<const PackageDependency> dependencies = {});
 
         // returnCheck のファイルが返す表を、型の定義の型と欄ごとに突き合わせる(ShapeWalker)
         void CheckReturnShape(const PackageSource& package, const ReturnCheck& returnCheck,
@@ -392,10 +425,12 @@ namespace bicameral::script {
 
     std::vector<TypeDiagnostic> LuauTypeChecker::Impl::Check(const PackageSource& package,
                                                              const std::vector<std::string>& files,
-                                                             const std::optional<ReturnCheck>& returnCheck) {
+                                                             const std::optional<ReturnCheck>& returnCheck,
+                                                             std::span<const PackageDependency> dependencies) {
         // --- 前の検査の状態を捨てる(順番・回数に依らない診断にする)---
         frontend.clear();
-        fileResolver.Reset(package);
+        fileResolver.Reset(package, dependencies);
+        const std::string ownPrefix = package.name + "/";
 
         // --- ファイルごとの検査(ファイル → 行 → 列 → 種類 → 文の順。重複は 1 つ)---
         std::set<TypeDiagnostic> found;
@@ -403,8 +438,9 @@ namespace bicameral::script {
         for (const std::string& file : files) {
             const Luau::CheckResult result = frontend.check(package.name + "/" + file);
             for (const Luau::TypeError& error : result.errors) {
-                // 「引数に型を付けるとよい」は誤りではなく提案なので出さない
-                if (Luau::get_if<Luau::ExplicitFunctionAnnotationRecommended>(&error.data))
+                // 「引数に型を付けるとよい」は誤りではなく提案なので出さない。依存のパッケージの誤りはそちらの検査で出る
+                if (Luau::get_if<Luau::ExplicitFunctionAnnotationRecommended>(&error.data) ||
+                    !error.moduleName.starts_with(ownPrefix))
                     continue;
 
                 if (returnCheck && error.moduleName == returnCheck->targetModule &&
@@ -510,7 +546,8 @@ namespace bicameral::script {
                              ReturnCheck{.targetModule = manifest, .typeName = std::string(MANIFEST_TYPE_NAME)});
     }
 
-    std::vector<TypeDiagnostic> LuauTypeChecker::CheckPackage(const PackageSource& package, std::string_view entry) {
+    std::vector<TypeDiagnostic> LuauTypeChecker::CheckPackage(const PackageSource& package, std::string_view entry,
+                                                              std::span<const PackageDependency> dependencies) {
         std::vector<std::string> files;
         for (const auto& [path, source] : package.files)
             files.push_back(path);
@@ -522,7 +559,7 @@ namespace bicameral::script {
             returnCheck = ReturnCheck{.targetModule = package.name + "/" + *entryPath,
                                       .typeName = std::string(ENTRY_TYPE_NAME)};
 
-        return m_impl->Check(package, files, returnCheck);
+        return m_impl->Check(package, files, returnCheck, dependencies);
     }
 
     // --- 表示 ---

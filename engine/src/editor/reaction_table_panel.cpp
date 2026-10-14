@@ -26,9 +26,10 @@ namespace bicameral::editor {
         constexpr double START_RATE_PER_SECOND = 0.01;
         constexpr double GAS_CONSTANT = 8.314462618;  // J/(mol·K)
 
-        // --auto-table-edit が書き換える値(試験の表の木の燃焼の速さ)と書く値
+        // --auto-table-edit が書き換える値(サンプルの世界のパッケージが書いた規則の速さ。現実の反応は棚の標準パッケージにあり
+        // 書き戻さないので、サンプルが足した仮の魔素の規則を使う。T-0498)と書く値
         std::vector<std::string> AutoKeyPath() {
-            return {"reactions", "cellulose_combustion", "rate", "a"};
+            return {"reactions", "mana_test_catalyzed_cellulose_combustion", "rate", "a"};
         }
 
         constexpr const char* AUTO_TEXT = "4e10";

@@ -86,12 +86,31 @@ namespace {
         if (!package)
             return;
 
+        // 依存の標準パッケージ(require("@real_matter") の先。T-0498)
+        std::vector<PackageSource> standard;
+        for (const char* name : {"real_elements", "real_matter", "real_reactions", "earth_environment"}) {
+            auto dependency = ReadPackageFolder(DATA_DIR / "standard" / name);
+            EXPECT(dependency.has_value());
+            if (!dependency)
+                return;
+
+            standard.push_back(std::move(*dependency));
+        }
+
+        std::vector<PackageDependency> dependencies;
+        for (const PackageSource& dependency : standard)
+            dependencies.push_back(PackageDependency{.package = &dependency, .entry = "init"});
+
         const auto manifest = checker.CheckManifest(*package);
-        const auto all = checker.CheckPackage(*package, "init");
+        const auto all = checker.CheckPackage(*package, "init", dependencies);
+        const auto withoutDependencies = checker.CheckPackage(*package, "init");
         Print("combustion_test の manifest", manifest);
         Print("combustion_test", all);
         EXPECT(manifest.empty());
         EXPECT(all.empty());
+
+        // 依存を見せなければ require("@real_matter") の先が無い
+        EXPECT(Has(withoutDependencies, "combustion_test/species.luau", 7, "require の先が無い"));
     }
 
     // --- 誤りの場所と種類 ---

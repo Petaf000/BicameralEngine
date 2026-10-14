@@ -2,18 +2,25 @@
 // 既定で読むゲーム本体と同じもの。T-0157・ADR-0033)だけに書き、C++ には写しを置かない(前は sim/reaction_test_table に手で写していた)。
 // 公開側に置く試験データで、ゲームの中身ではない(D-006)。
 //
-// データの流れ: リポジトリの data/packages/combustion_test(BICAMERAL_DATA_PACKAGES_DIR)→ ReadPackageFolder → LoadPackages(Luau の殻)
+// データの流れ: リポジトリの data/packages/combustion_test(BICAMERAL_DATA_PACKAGES_DIR)+ それが依存する標準パッケージ
+//   (data/standard の real_elements・real_matter・real_reactions・earth_environment。T-0498)→ ReadPackageFolder → LoadPackages(Luau の殻)
 //   → ReadReactionTableDefinition → 定義(呼び手が値を変えてから sim::BakeReactionTable に渡せる)。
 // 定義の並びは名前のバイト順(パッケージの鍵の順)。ベイクも名前の順に並べ直すので、ベイクした表は並びに依らない(ADR-0032)。
 // 読めなければ理由を表示して終了コード 1 で止まる(試験の表が無いテストは何も確かめられない)。
 // 試験の中で作る特別な表(上限の表 reaction_limits_table.h・溢れの表・下の MakeSpeciesChangedTestTable)は C++ のまま。
 #pragma once
 
+#include <vector>
+
+#include "script/luau_package.h"
 #include "sim/reaction_table.h"
 
 namespace bicameral::sim {
 
-    // 試験のパッケージの表の定義(元素 5・物質 8〔仮の魔素 mana_test を含む。T-0225〕・規則 7)
+    // 試験のパッケージと、それが依存する標準パッケージ(名前は combustion_test が先頭。T-0498)。読めなければ止まる
+    [[nodiscard]] std::vector<script::PackageSource> ReadCombustionTestPackages();
+
+    // 試験のパッケージの表の定義(元素 6・物質 9〔標準パッケージの現実の元素・物質と、仮の魔素 mana_test。T-0225・T-0498〕・規則 7)
     [[nodiscard]] ReactionTableDefinition MakeCombustionTestTable();
 
     // 物質を消した定義から、消えた物質を指す材料のひな形・抽出の枠・既定を除く(ベイクが知らない物質で落ちないように。

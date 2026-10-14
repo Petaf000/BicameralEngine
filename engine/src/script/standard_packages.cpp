@@ -176,6 +176,62 @@ namespace bicameral::script {
         return folders;
     }
 
+    std::expected<void, std::string> AddStandardDependencies(std::vector<PackageSource>& packages,
+                                                             const fs::path& root) {
+        auto sandbox = LuauSandbox::Create(SandboxLimits{});
+        if (!sandbox)
+            return std::unexpected(sandbox.error());
+
+        (*sandbox)->Seal();
+
+        // --- 読む一覧に無い依存 ---
+        std::set<std::string> present;
+        for (const PackageSource& package : packages)
+            present.insert(package.name);
+
+        std::set<std::string> missing;
+        for (const PackageSource& package : packages) {
+            const auto manifest = ReadPackageManifest(**sandbox, package);
+            if (!manifest)
+                continue;
+
+            for (const std::string& depend : manifest->depends) {
+                if (!present.contains(depend))
+                    missing.insert(depend);
+            }
+        }
+
+        std::error_code error;
+        if (missing.empty() || !fs::is_directory(root, error))
+            return {};
+
+        // --- 棚から依存ごと集めて足す ---
+        const auto catalog = ReadStandardCatalog(root);
+        if (!catalog)
+            return std::unexpected(catalog.error());
+
+        std::set<std::string> collected;
+        for (const std::string& name : missing) {
+            if (catalog->Find(name) == nullptr)
+                continue;
+            if (auto result = CollectWithDependencies(*catalog, name, collected); !result)
+                return std::unexpected(result.error());
+        }
+
+        for (const std::string& name : collected) {
+            if (present.contains(name))
+                continue;
+
+            auto package = ReadPackageFolder(catalog->Find(name)->folder);
+            if (!package)
+                return std::unexpected(std::format("標準パッケージ {}: {}", name, package.error()));
+
+            packages.push_back(std::move(*package));
+        }
+
+        return {};
+    }
+
     std::expected<std::vector<std::string>, std::string> ParseMixList(std::string_view text) {
         std::vector<std::string> names;
         size_t begin = 0;

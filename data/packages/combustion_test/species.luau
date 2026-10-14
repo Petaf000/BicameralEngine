@@ -1,66 +1,37 @@
--- species.luau — 物質(1 mol あたり)。生成エンタルピーは 298.15 K の値(J/mol)、比熱は一定と置く(mJ/(mol·K))。
--- 出典:
---   気体と炭(黒鉛)の生成エンタルピー: CODATA Key Values for Thermodynamics(1989)の値を丸めたもの
---     (CO2 −393.51・CO −110.53・H2O(気)−241.826 kJ/mol。元素の単体 O2・N2・黒鉛は 0)。
---   比熱: NIST-JANAF 熱化学表の 298.15 K の Cp°(O2 29.378・N2 29.124・CO2 37.135・CO 29.142・H2O(気)33.58・黒鉛 8.52 J/(mol·K))。
---     ※ 値は T-0014 の C++ の表から写した。この T-0021 では表と一つずつ照合していない(未確認)。
---   セルロース(C6H10O5 の 1 単位あたり): 生成エンタルピー約 −963 kJ/mol は燃焼熱からの逆算、比熱は約 1.3 J/(g·K)(どちらも未確認)。
---     この値だと熱分解が発熱になる(実際は生成物が複雑でほぼ中立)。
---   熱伝導率: 現実の値(木 120・炭 100・気体 17〜27 mW/(m·K)。未確認)に試験の倍率を掛けたもの(units.luau)。
+-- species.luau — サンプルの世界の物質(1 mol あたり)。
+-- 現実の物質は標準パッケージ real_matter の値を写し、熱伝導率だけに試験の倍率を掛けて書き直す(遊びのための値。units.luau)。
+-- ほかの欄(組成・生成エンタルピー・比熱と、real_matter に足された欄)は現実の値のまま写す(値は real_matter の 1 か所。出典もそこ)。
+-- 依存の標準パッケージの鍵をゲーム本体が書き直すのは、作り手が自分の世界の値を決める形で、「改造された世界」の印は付かない
+-- (ADR-0183 の追記・T-0498)。require("@real_matter") は real_matter の表の写し(書き換えても real_matter の表は変わらない)。
 local units = require("units")
-local solid = units.solid_conductivity
-local gas = units.gas_conductivity
+local real: PackageEntry = require("@real_matter")
 
-return {
-    cellulose = {
-        composition = { C = 6, H = 10, O = 5 },
-        formation_enthalpy_j_per_mol = -963000,
-        heat_capacity_mj_per_mol_k = 211000,
-        thermal_conductivity_mw_per_m_k = solid(120),
-    },
-    carbon = {
-        composition = { C = 1 },
-        formation_enthalpy_j_per_mol = 0,
-        heat_capacity_mj_per_mol_k = 8520,
-        thermal_conductivity_mw_per_m_k = solid(100),
-    },
-    oxygen = {
-        composition = { O = 2 },
-        formation_enthalpy_j_per_mol = 0,
-        heat_capacity_mj_per_mol_k = 29378,
-        thermal_conductivity_mw_per_m_k = gas(27),
-    },
-    nitrogen = {
-        composition = { N = 2 },
-        formation_enthalpy_j_per_mol = 0,
-        heat_capacity_mj_per_mol_k = 29124,
-        thermal_conductivity_mw_per_m_k = gas(26),
-    },
-    carbon_dioxide = {
-        composition = { C = 1, O = 2 },
-        formation_enthalpy_j_per_mol = -393509,
-        heat_capacity_mj_per_mol_k = 37135,
-        thermal_conductivity_mw_per_m_k = gas(17),
-    },
-    carbon_monoxide = {
-        composition = { C = 1, O = 1 },
-        formation_enthalpy_j_per_mol = -110527,
-        heat_capacity_mj_per_mol_k = 29142,
-        thermal_conductivity_mw_per_m_k = gas(25),
-    },
-    water_vapor = {
-        composition = { H = 2, O = 1 },
-        formation_enthalpy_j_per_mol = -241826,
-        heat_capacity_mj_per_mol_k = 33580,
-        thermal_conductivity_mw_per_m_k = gas(25),
-    },
-    -- 触るための仮の魔素(気体。T-0225・D-449・D-451)。エディタで値を動かして試すための試験用の物質で、ゲームの中身ではない(D-006)。
-    -- 値は動きが見えるだけの仮の値: 生成エンタルピー 0(元素の単体)・比熱は単原子の理想気体の 5/2 R・熱伝導率は気体並み。
-    -- 本当の魔素(性質・反応・湧き出し)は非公開側で決める
+-- 倍率は固体と気体で違う(units.luau)。固体はこの一覧、ほかは気体として扱う(固体を real_matter に足したら、ここにも足す)
+local SOLIDS: { [string]: boolean } = {
+    cellulose = true,
+    carbon = true,
+}
+
+-- 足す物質: 触るための仮の魔素(気体。T-0225・D-449・D-451)。エディタで値を動かして試すための試験用の物質で、ゲームの中身ではない(D-006)。
+-- 値は動きが見えるだけの仮の値: 生成エンタルピー 0(元素の単体)・比熱は単原子の理想気体の 5/2 R・熱伝導率は気体並み。
+-- 本当の魔素(性質・反応・湧き出し)は非公開側で決める
+local species: { [string]: Species } = {
     mana_test = {
         composition = { mana_test = 1 },
         formation_enthalpy_j_per_mol = 0,
         heat_capacity_mj_per_mol_k = 20786,
-        thermal_conductivity_mw_per_m_k = gas(20),
+        thermal_conductivity_mw_per_m_k = units.gas_conductivity(20),
     },
 }
+
+-- 書き直す物質: 現実の物質を全部写し、熱伝導率だけに倍率を掛ける
+for name, realSpecies in real.species or {} do
+    local scaled = table.clone(realSpecies)
+    local conductivity = realSpecies.thermal_conductivity_mw_per_m_k
+    scaled.thermal_conductivity_mw_per_m_k = if SOLIDS[name]
+        then units.solid_conductivity(conductivity)
+        else units.gas_conductivity(conductivity)
+    species[name] = scaled
+end
+
+return species
