@@ -280,6 +280,9 @@ views:
       - { id: gasprojection, group: simlib, label: "StepGasProjection<br/>気体の圧力を刻みの中で解く投影の模型(研究)<br/>陰的な音 = 熱の陰解法と同じ形の式を多重格子で",
           code: "engine/src/sim/gas_projection.cpp::StepGasProjection", ticket: T-0503, doc: docs/design/07-transport.md,
           note: "式を作る・当てるのは gas_reference の部品(BeginGasPressure / FinishGasPressure)。圧力が近似でも保存はビット単位。音速 340 m/s〜最速で V サイクル 1〜3 回/刻み。外側の反復(T-0530・ADR-0234): 仮に当てた状態の食い違いを右辺に足して解き直し、強い爆発も同じ刻みで釣り合う(上限 4)。07 §2.6" }
+      - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
+          code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordSolve", ticket: T-0531, doc: docs/design/07-transport.md,
+          note: "止める判定はセルごとの閾値 ⌈(許容差 + 1) 2^48 ÷ D⌉(GasPressureThresholds)で CPU と整数で同じ。gpu_gas_projection_test が CPU の模型の解きを GPU で解き直してビット一致を確かめる。式を作る・当てる・外側の反復の GPU 版は T-0531 の残り" }
       - { id: gpugas, group: simlib, label: "GpuGas::RecordStep<br/>気体 G3a: 1 レベルの箱を GPU の Compute で<br/>1 小刻み = 面の段 4 つ・セルの段 5 つ",
           code: "engine/src/sim/gpu_gas.cpp::GpuGas::RecordStep", ticket: T-0185, doc: docs/design/07-transport.md,
           note: "CPU は面ごとに両側へ足し引き、GPU はセルが自分の 6 面を集める(整数なので同じ値)。箱の外との出入りは帳簿へ 64bit の原子的な足し算" }
@@ -534,6 +537,8 @@ views:
       - [gastreetest, gastree]
       - [gasprojection, gasreference, "式を作る・当てる"]
       - [gasprojection, implicitcpu, "多重格子を流用"]
+      - [gpugasprojection, gasprojection, "同じ解きをビット一致で"]
+      - [gpugasprojection, gpuimplicit, "V サイクルの段を使い回す"]
       - [gpugas, gasstephlsl, "9 段 × 小刻み"]
       - [gasstephlsl, gasgpuhlsli]
       - [gpugas, gasgpuhlsli]

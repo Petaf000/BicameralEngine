@@ -120,6 +120,10 @@ namespace {
 
     // --- GPU で解き直す ---
 
+    // 計測の時の同じ解きの繰り返し(1 本のリストに続けて積み、最小を採る。解きの間に CPU の模型が走る間 GPU が休んで
+    // クロックが下がるので、1 回だけだと数倍遅く出た〔2026-10-15 の 1 回目〕)
+    constexpr uint32_t MEASURE_REPEATS = 6;
+
     struct Replay {
         ID3D12Device5* device = nullptr;
         gpu::ImmediateQueue* queue = nullptr;
@@ -127,18 +131,22 @@ namespace {
         uint64_t frequency = 0;
         uint32_t toleranceMilligrams = 0;
         sim::ImplicitOptions solver;
+        bool measure = false;
         std::optional<sim::GpuImplicit> gpu;
+        std::optional<sim::GpuImplicitCost> previous;  // 前の解きの GPU の数(記録の形を選ぶ。T-0154・T-0505)
 
         // --- 結果 ---
         std::string failure;
         uint32_t solves = 0;
         uint32_t cycles = 0;
-        double milliseconds = 0;
+        double milliseconds = 0;         // 前の解きの数から選んだ記録の形(ShapeFrom)
+        double defaultMilliseconds = 0;  // 既定の形(V を上限 64 回まで段ごとに積む)
     };
 
-    std::expected<void, std::string> SolveOnGpu(Replay& replay, const sim::GasPressureSolve& solve,
-                                                std::vector<int64_t>& values, sim::GpuImplicitCost& cost,
-                                                double& milliseconds) {
+    // 1 回の解きを GPU で(repeats 回くり返して積み、最小の時間を返す。値は最後の回)
+    std::expected<double, std::string> SolveOnGpu(Replay& replay, const sim::GasPressureSolve& solve,
+                                                  const sim::GpuImplicitRecordShape& shape, uint32_t repeats,
+                                                  std::vector<int64_t>& values, sim::GpuImplicitCost& cost) {
         if (!replay.gpu) {
             auto created = sim::GpuImplicit::Create(replay.device, solve.grid);
             if (!created)
@@ -155,10 +163,13 @@ namespace {
 
         replay.ring->RecordBegin(list);
         bool recorded = gpu.RecordUpload(list, solve.grid);
-        recorded = recorded && gpu.RecordUploadSolve(list, solve.rhs, solve.before, thresholds);
-        gpu.RecordTimestamp(list, 0);
-        recorded = recorded && gpu.RecordSolve(list, replay.ring->GpuAddress(), replay.solver);
-        gpu.RecordTimestamp(list, 1);
+        for (uint32_t repeat = 0; repeat < repeats && recorded; ++repeat) {
+            recorded = gpu.RecordUploadSolve(list, solve.rhs, solve.before, thresholds);
+            gpu.RecordTimestamp(list, 2 * repeat);
+            recorded = recorded && gpu.RecordSolve(list, replay.ring->GpuAddress(), replay.solver, shape);
+            gpu.RecordTimestamp(list, (2 * repeat) + 1);
+        }
+
         if (!recorded)
             return std::unexpected("記録できない(系が上限を超えた)");
 
@@ -173,51 +184,76 @@ namespace {
             return std::unexpected(std::format("GPU の FX_ASSERT が {} 件", debugOutput.assertCount));
 
         values.resize(solve.after.size());
-        const std::vector<uint64_t> stamps = gpu.ReadTimestamps(2);
-        if (!gpu.ReadSolution(values, cost) || stamps.size() != 2)
+        const std::vector<uint64_t> stamps = gpu.ReadTimestamps(2 * repeats);
+        if (!gpu.ReadSolution(values, cost) || stamps.size() != 2 * repeats)
             return std::unexpected("読み戻せない");
 
-        milliseconds = (double)(stamps[1] - stamps[0]) * 1000.0 / (double)replay.frequency;
+        double best = 0;
+        for (uint32_t repeat = 0; repeat < repeats; ++repeat) {
+            const double ms = (double)(stamps[(2 * repeat) + 1] - stamps[2 * repeat]) * 1000.0 /
+                              (double)replay.frequency;
+            best = repeat == 0 ? ms : std::min(best, ms);
+        }
 
-        return {};
+        return best;
     }
 
+    // GPU の解きが CPU と同じか(違えば理由)
+    std::optional<std::string> Difference(const sim::GasPressureSolve& solve, const std::vector<int64_t>& values,
+                                          const sim::GpuImplicitCost& cost) {
+        if (cost.cycles != solve.cycles)
+            return std::format("V の回数 GPU {}・CPU {}", cost.cycles, solve.cycles);
+
+        const auto mismatch = std::ranges::mismatch(values, solve.after);
+        if (mismatch.in1 == values.end())
+            return std::nullopt;
+
+        const auto cell = (size_t)(mismatch.in1 - values.begin());
+        return std::format("セル {} の圧力 GPU {}・CPU {}(V {})", cell, *mismatch.in1, *mismatch.in2, solve.cycles);
+    }
+
+    // 既定の形と、前の解きの数から選んだ形(計測の時だけ)の両方で解き、どちらも CPU と比べる
     void CompareSolve(Replay& replay, const sim::GasPressureSolve& solve) {
         if (!replay.failure.empty())
             return;
 
+        const uint32_t repeats = replay.measure ? MEASURE_REPEATS : 1;
         std::vector<int64_t> values;
         sim::GpuImplicitCost cost;
-        double milliseconds = 0;
-        if (auto solved = SolveOnGpu(replay, solve, values, cost, milliseconds); !solved) {
-            replay.failure = std::format("解き {}: {}", replay.solves, solved.error());
+        const auto solved = SolveOnGpu(replay, solve, {}, repeats, values, cost);
+        std::optional<std::string> difference = solved ? Difference(solve, values, cost) : solved.error();
+        if (difference) {
+            replay.failure = std::format("解き {}(既定の形): {}", replay.solves, *difference);
             return;
         }
 
-        if (cost.cycles != solve.cycles) {
-            replay.failure = std::format("解き {}: V の回数 GPU {}・CPU {}", replay.solves, cost.cycles, solve.cycles);
-            return;
+        double shapedMs = *solved;
+        if (replay.measure && replay.previous) {
+            const auto shaped = SolveOnGpu(replay, solve, sim::GpuImplicit::ShapeFrom(*replay.previous), repeats,
+                                           values, cost);
+            difference = shaped ? Difference(solve, values, cost) : shaped.error();
+            if (difference) {
+                replay.failure = std::format("解き {}(前の数からの形): {}", replay.solves, *difference);
+                return;
+            }
+
+            shapedMs = *shaped;
         }
 
-        const auto mismatch = std::ranges::mismatch(values, solve.after);
-        if (mismatch.in1 != values.end()) {
-            const auto cell = (size_t)(mismatch.in1 - values.begin());
-            replay.failure = std::format("解き {}: セル {} の圧力 GPU {}・CPU {}(V {})", replay.solves, cell,
-                                         *mismatch.in1, *mismatch.in2, solve.cycles);
-            return;
-        }
-
+        replay.previous = cost;
         replay.solves += 1;
         replay.cycles += cost.cycles;
-        replay.milliseconds += milliseconds;
+        replay.milliseconds += shapedMs;
+        replay.defaultMilliseconds += *solved;
     }
 
     struct SceneResult {
         uint32_t solves = 0;
         uint32_t cycles = 0;
-        double milliseconds = 0;     // 2 刻み目からの解きの GPU 時間の合計
-        double worstTickMs = 0;      // 2 刻み目からの 1 刻みの解きの時間の最大
-        uint32_t measuredTicks = 0;  // 2 刻み目から
+        double milliseconds = 0;         // 2 刻み目からの解きの GPU 時間の合計(前の数からの形)
+        double defaultMilliseconds = 0;  // 同じ(既定の形)
+        double worstTickMs = 0;          // 2 刻み目からの 1 刻みの解きの時間の最大
+        uint32_t measuredTicks = 0;      // 2 刻み目から
         uint32_t outerIterations = 0;
     };
 
@@ -239,6 +275,7 @@ namespace {
             const uint32_t solvesBefore = replay.solves;
             const uint32_t cyclesBefore = replay.cycles;
             const double msBefore = replay.milliseconds;
+            const double defaultBefore = replay.defaultMilliseconds;
             const sim::GasProjectionCost cost = sim::StepGasProjection(box, state, options);
             if (!replay.failure.empty())
                 return std::unexpected(std::format("刻み {}: {}", tick, replay.failure));
@@ -251,6 +288,7 @@ namespace {
 
             const double tickMs = replay.milliseconds - msBefore;
             result.milliseconds += tickMs;
+            result.defaultMilliseconds += replay.defaultMilliseconds - defaultBefore;
             result.worstTickMs = std::max(result.worstTickMs, tickMs);
             result.measuredTicks += 1;
         }
@@ -262,6 +300,7 @@ namespace {
         for (const Scene scene : SCENES) {
             for (const uint32_t speed : SPEEDS) {
                 replay.gpu.reset();
+                replay.previous.reset();
                 const auto result = RunScene(replay, scene, speed, edge, ticks);
                 if (!result)
                     return std::unexpected(
@@ -273,10 +312,11 @@ namespace {
                 if (!measure || result->measuredTicks == 0)
                     continue;
 
-                // 表の行: | 一辺 | 場面 | 音速 | 刻み | 解き/刻み | V/刻み | 解きの GPU ms/刻み(平均 / 最大)|
-                Log(Channel::Sim, Level::Info, "| {}³ | {} | {} | {} | {:.2f} | {:.2f} | {:.3f} / {:.3f} |", edge,
-                    SceneName(scene), speed == 0 ? "最速" : "340 m/s", ticks, (double)result->solves / ticks,
-                    (double)result->cycles / ticks, result->milliseconds / result->measuredTicks, result->worstTickMs);
+                // 表の行: | 一辺 | 場面 | 音速 | 刻み | 解き/刻み | V/刻み | 解きの GPU ms/刻み 前の数からの形(平均 / 最大)| 既定の形(平均)|
+                Log(Channel::Sim, Level::Info, "| {}³ | {} | {} | {} | {:.2f} | {:.2f} | {:.3f} / {:.3f} | {:.3f} |",
+                    edge, SceneName(scene), speed == 0 ? "最速" : "340 m/s", ticks, (double)result->solves / ticks,
+                    (double)result->cycles / ticks, result->milliseconds / result->measuredTicks, result->worstTickMs,
+                    result->defaultMilliseconds / result->measuredTicks);
             }
         }
 
@@ -322,7 +362,8 @@ namespace {
             return 1;
         }
 
-        Replay replay{.device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = frequency};
+        Replay replay{
+            .device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = frequency, .measure = measure};
         if (auto ran = RunAll(replay, edge, ticks, measure); !ran) {
             Log(Channel::Gpu, Level::Error, "gpu_gas_projection_test: FAILED({})", ran.error());
             return 1;
