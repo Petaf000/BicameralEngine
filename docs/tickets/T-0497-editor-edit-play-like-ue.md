@@ -1,6 +1,6 @@
 # T-0497 エディタを UE と同じ形に(起動は編集の状態・プレイ・やめると戻る・Undo/Redo)
 
-- Status: Doing
+- Status: Done(判断待ちは仮で進めた)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -18,7 +18,7 @@
 - [x] プレイをやめるとプレイ前の世界に戻る(プレイを始めた刻みの保存点)
 - [x] 試験: window_play_record/play(起動が止まっている・Undo/Redo・プレイ → やめるで戻る〔2 回のプレイのハッシュ列が同じ〕・記録の再生)
 - [x] 起動で動く前提の窓の試験に `--play`
-- [ ] release で窓の試験の組が通る(作業ログ)
+- [x] release で窓の試験の組が通る(作業ログ)
 
 ## 作り手(エンジンを使う人)から見た違い
 | | 前 | 今(T-0497) |
@@ -77,3 +77,8 @@
 - T-0509(案): 編集の状態で時間を進めずに置く(判断待ち ① の案 B)。ROADMAP には本体が足す。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-15(wt5・t-0497): TimeControl に編集の状態とプレイ、frame_loop に編集の状態で当てる・プレイを始めた保存点・やめる・やり直し・
+  プレイ中の Undo の範囲、--play・--auto-play。release で警告 0・time_control・brush_undo・sim_scheduler・replay_file・
+  window_play_record/play(--auto-play: 刻み 2 で Undo 2 回・Redo 2 回が合い、プレイ → やめるで戻って 2 回のプレイの 50 刻みが同じ・置いた後の 40 刻みが違う)・
+  --play を足した window_blank/mixer/rebuild/copy/metrics/hot_reload/table_edit/place/place_tick0/mix_start/lab×3・
+  再生の window_replay_editor/rewind・window_blank_rewind が通った。archmap OK。window_patch_record は wt4(T-0496)が消すので触っていない。
