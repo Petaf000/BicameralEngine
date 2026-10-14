@@ -32,3 +32,7 @@
 - 2026-10-15(wt3): ゲーム本体をマニフェストの `game = true` で決めるようにした(ResolveGamePackage。PackageSetResult・LoadedReactionTable に
   gamePackage。ReactionTableSource は basePackage → requireGame)。サンプル・場面・試験のパッケージに game = true、型の定義に game。
   場面のフォルダを grass_fire_river に直した(git mv)。13 §2.2・ADR-0250(Proposed)。
+  試験(release・RTX 3070 Ti): luau_package・luau_type_check・standard_packages・world_atmosphere・world_layout・reaction_package・
+  reaction_table_edit・reaction_replay_table・reaction_hot_reload・coupling_table・environment_package・blank_world・play_metric が通過。
+  run: `--packages data/scenes/grass_fire_river --measure-metrics --no-physics --metrics-baseline …` でゲーム本体 grass_fire_river として読み、
+  3 指標とも前の版と同じ(16 秒・26 秒・向こう岸 1,536,000,000)。窓 `--packages data/scenes/grass_fire_river --editor --frames 120` も起動して終了 0。
