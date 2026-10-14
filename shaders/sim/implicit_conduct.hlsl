@@ -4,6 +4,8 @@
 //   ImPlanLevels → ImPlanArgs(段の形から長い行の節の一覧・ImTail の境・間接の Dispatch の引数を作る。T-0136)→ ImBegin → ImStart → (V サイクル: ImSmooth・ImRestrict・ImProlong の段の再帰〔小さい段から下は ImTail の 1 グループ〕
 //   → ImConverged → ImCycleEnd)× 上限の回数
 //   → ImFlows → (ImMark → ImLimitEnd → ImLimitFaces)× 安全網の上限の回数 → ImApply
+// 一般の右辺で解く形(T-0531。RecordSolve): ImPlanLevels → ImPlanArgs → ImBegin → ImSolveConverged → ImSolveCheckEnd
+//   → (V サイクル → ImSolveConverged → ImCycleEnd)× 上限の回数(流れ・安全網・足すは無い)
 // 回数は GPU が決める(V サイクルを止める・安全網を止める)。記録は上限の回数だけ積み、要らない回は述語(u8。SetPredication)で
 // Dispatch ごと飛ばす。述語を使わない時(比べる計測)も、段は状態の語を見て空で抜ける。
 // 1 スレッド = 1 節・1 セル・1 面。値の 2 本(A・B)は赤黒の色で読み書きを入れ替える(色 0: A → B、色 1: B → A。掃き出し 1 回で A に戻る)。
@@ -423,6 +425,41 @@ void TailProlong(uint32_t depth, uint32_t lane) {
 
     g_state[IM_STATE_CYCLES] += 1;
     if (g_tolerance != 0 && g_state[IM_STATE_NOT_CONVERGED] == 0) {
+        g_state[IM_STATE_DONE] = 1;
+        g_predicate[0] = 1;
+    }
+
+    g_state[IM_STATE_NOT_CONVERGED] = 0;
+}
+
+// --- 一般の右辺で解く形(T-0531。気体の圧力の投影 sim/gas_projection が CPU の模型。呼ぶ順は gpu_implicit.cpp の RecordSolve)---
+// 右辺・初めの近似(値 A・B)・セルごとの閾値(刻みの初めの温度の欄)は呼ぶ側が作業場に書く。ImStart・面の流れ・安全網は使わない。
+
+// 止める判定: |残差| が閾値(⌈(許容差 + 1)× 2^48 ÷ D⌉。GasPressureThresholds)以上のセルがあるか。
+// CPU の「式の誤差 floor(|残差| × D ÷ 2^48)が許容差を超える」と整数で同じ
+[numthreads(IM_THREADS, 1, 1)] void ImSolveConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+    uint32_t cell;
+    bool isLong;
+    if (CyclesDone() || !OrderedNode(0, IM_KIND_CONVERGED, group.x, lane, cell, isLong))
+        return;
+
+    int64_t relaxed;
+    if (isLong)
+        relaxed = RelaxGroup(cell, 0, lane);
+    else
+        relaxed = Relax(cell, 0);
+
+    if (lane != 0 && isLong)
+        return;
+
+    const int64_t residual = relaxed - g_work[ValueA(cell)];
+    if (FxAbsU64(residual) >= (uint64_t)g_work[Start(cell)])
+        InterlockedOr(g_state[IM_STATE_NOT_CONVERGED], 1u);
+}
+
+// V サイクルの前の判定の終わり(1 スレッド): 数えずに、収束していれば止める(CPU は V の前にも判定する)
+[numthreads(1, 1, 1)] void ImSolveCheckEnd() {
+    if (g_state[IM_STATE_NOT_CONVERGED] == 0) {
         g_state[IM_STATE_DONE] = 1;
         g_predicate[0] = 1;
     }

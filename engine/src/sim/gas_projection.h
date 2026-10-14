@@ -10,6 +10,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <span>
 #include <vector>
 
 #include "sim/gas_pressure_system.h"
@@ -17,6 +19,19 @@
 #include "sim/implicit_conduction.h"
 
 namespace bicameral::sim {
+
+    // 1 回の V サイクルの解き(Solve)を外から見る口(T-0531。GPU の試験が同じ系を GPU で解き直してビット一致を確かめ、時間を測る)。
+    // before は解く前の近似、after は解いた値、cycles は回した V サイクルの数(0 もある。V の前に判定する)
+    struct GasPressureSolve {
+        const ImplicitGrid& grid;
+        std::span<const int64_t> rhs;
+        std::span<const int64_t> before;
+        std::span<const int64_t> after;
+        uint32_t cycles = 0;
+        int64_t massError = 0;  // 止めた時の式の誤差の最大(mg)
+    };
+
+    using GasPressureSolveObserver = std::function<void(const GasPressureSolve&)>;
 
     struct GasProjectionOptions {
         GasPressureOptions pressure;
@@ -35,6 +50,9 @@ namespace bicameral::sim {
         uint32_t outerRelaxationPercent = 100;
         // 食い違いをセルの傾き s_i(E_真 の変化 ÷ 質量の変化。前の状態との割線)で割ってから足す(対角のニュートン)
         bool outerSecant = true;
+
+        // 解きを見る口(null なら呼ばない。試験と計測だけ)
+        const GasPressureSolveObserver* solveObserver = nullptr;
     };
 
     // 前の回の圧力(µPa。セルの順。初めの近似)
@@ -60,5 +78,9 @@ namespace bicameral::sim {
     };
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options);
+
+    // セルごとの止める閾値(T-0531。GPU の止める判定): |残差| がこれ以上のセルが 1 つでもあれば、式の誤差 floor(|残差| × D_i ÷ 2^48)が
+    // 許容差を超える(⌈(許容差 + 1)× 2^48 ÷ D_i⌉。CPU の判定と整数で同じ)
+    [[nodiscard]] std::vector<int64_t> GasPressureThresholds(const ImplicitGrid& grid, uint32_t toleranceMilligrams);
 
 }  // namespace bicameral::sim
