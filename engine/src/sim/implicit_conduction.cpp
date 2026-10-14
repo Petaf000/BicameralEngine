@@ -747,6 +747,17 @@ namespace bicameral::sim {
         return cost;
     }
 
+    void CycleImplicitGrid(const ImplicitGrid& grid, const std::vector<int64_t>& rhs, std::vector<int64_t>& values,
+                           const ImplicitOptions& options, ImplicitCost& cost) {
+        VCycle(grid, 0, rhs, values, options, cost);
+        cost.cycles += 1;
+    }
+
+    int64_t ImplicitGridResidual(const ImplicitGrid& grid, const std::vector<int64_t>& rhs,
+                                 const std::vector<int64_t>& values, size_t node) {
+        return Relax(grid.levels[0], rhs, values, node) - values[node];
+    }
+
     int64_t ImplicitTemperature(const ImplicitCell& cell) {
         return ImTemperature(cell.energy, cell.heatCapacity);
     }

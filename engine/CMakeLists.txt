@@ -79,6 +79,13 @@ add_library(bicameral_gas STATIC
 target_include_directories(bicameral_gas PUBLIC src)
 target_link_libraries(bicameral_gas PUBLIC bicameral_fixed)
 
+# --- gas_projection: 気体の圧力を刻みの中で解く投影の CPU 模型(T-0503 研究・07 §2.6)。熱の陰解法の多重格子(multires)を流用する。浮動小数点は禁止 ---
+add_library(bicameral_gas_projection STATIC
+  src/sim/gas_projection.cpp
+)
+target_include_directories(bicameral_gas_projection PUBLIC src)
+target_link_libraries(bicameral_gas_projection PUBLIC bicameral_gas bicameral_multires)
+
 # --- physics: 物理の場面の定義と整数のソルバーの CPU 側(08。T-0016)。GPU を知らない。浮動小数点は禁止 ---
 add_library(bicameral_physics STATIC
   src/sim/physics_scene.cpp
