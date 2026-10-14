@@ -6,7 +6,7 @@
 // CPU は系の大きさも段の数も知らない(大きさは上限から。T-0136)。記録の形(GpuImplicitRecordShape)は前の刻みの数から選ぶ(T-0154。
 // 数は遅れて読んだものでよい: 形は費用だけを変え、解いた値は同じ)。多重格子の段を Dispatch で積む回の数も前の刻みの段の数から選ぶ
 // (GpuImplicitLevels::RoundsFrom。T-0179。残りの回と小さい段の回は LvTail。HW も WARP も同じ。T-0147)。V サイクルも前の刻みの回数 + 余裕の回までを段ごとの Dispatch で積み、その後の回は
-// ImTail が段 0 から 1 グループで回す安い回にする(GpuImplicitRecordShape::dispatchCycles。T-0179)。
+// 安い回にする(GpuImplicitRecordShape::dispatchCycles。T-0179。節の多い先頭の段は段ごと、残りを ImTail が 1 グループで。T-0505)。
 // 使い方: multires->EnableImplicitConduction(device, limits) の後、MultiresStepOptions::implicitConduction の刻みを RecordStep・RecordStepActive で。
 // 上限(GpuMultiresImplicitLimits = MultiresImplicitLimits。T-0178): 流れの段の前に RecordAdmit が、系に入れるブロックを枠の順に予算
 // (MakeMultiresImplicitBudget)の中まで選ぶ。入らないブロックはその刻み陽解法のまま(Q22 の案 A。仮)。多重格子の 2 段目からが上限に

@@ -5,11 +5,13 @@
 // 場面: 箱の真ん中の 2³ セルが 1500 K・ほかは 300 K(鋭い熱い点。V サイクルが最も多く要る形)。物質は試験の表の空気(400 K の値)、
 // 伝わる速さはセルのレベルで変える: 基準(面の係数が熱容量の上限で頭打ちにならない最後のレベル。MrSubcycleBaseLevel)から k 段細かくすると、
 // 熱容量に対する面の係数(1 刻みに隣へ伝わる割合)が 4^k 倍になる(伝導率を 4^k 倍にするのと同じ式。空気の伝導率 65525 mW/K は ×10⁶ で 32bit を超える)。
-// 記録の形は 2 つ: 既定(段ごとの Dispatch を上限まで積む)と、前の刻みの数から選ぶ形(ShapeFrom。T-0154・T-0179 の固定費を削る形。
-// 伝導の段 GpuMultiresImplicit と同じ使い方)。保存量(エネルギー + 端数)が毎刻みビット一致しなければ失敗。
+// 記録の形は 3 つ: 既定(段ごとの Dispatch を上限まで積む)と、前の刻みの数から選ぶ形(ShapeFrom。T-0154・T-0179 の固定費を削る形。
+// 伝導の段 GpuMultiresImplicit と同じ使い方)と、その前の版(余裕の後の安い回を全部 1 グループ。T-0505 の前。128³ で GPU が止まるので
+// 64³ まで)。保存量(エネルギー + 端数)が毎刻みビット一致しなければ失敗。記録の形で解いた値は変わらないので、最後の刻みのセルが
+// 既定の形とビット一致しなければ失敗(CPU とのビット一致は gpu_implicit_test・gpu_multires_implicit* の試験)。
 //
 // ctest には登録しない(時間がかかり、時間は機械しだい)。
-// 走らせ方: `job.py run -Preset release -Exe gpu_implicit_box_bench -- --no-gbv [--max-edge 64]`。
+// 走らせ方: `job.py run -Preset release -Exe gpu_implicit_box_bench -- --no-gbv [--min-edge 32] [--max-edge 64]`。
 // 結果は Markdown の表の行としてログに出す(docs/perf.md・docs/tickets/T-0494-wide-propagation-cost.md に貼る)。
 #include <algorithm>
 #include <array>
@@ -47,6 +49,7 @@ namespace {
     constexpr uint32_t SMALL_WARMUP_STEPS = 64;    // 暖機(一辺 32 以下)
     constexpr uint32_t LARGE_WARMUP_STEPS = 8;     // 暖機(それより大きい箱。1 本のリストが長くなりすぎないように)
     constexpr size_t SMALL_BOX_CELLS = 32 * 32 * 32;
+    constexpr size_t OLD_SHAPE_MAX_CELLS = 64 * 64 * 64;  // 前の版の形を測る箱の上限(128³ は GPU が止まった。T-0494)
 
     constexpr int64_t AIR_SAMPLE_MILLIKELVIN = 400000;
     constexpr int64_t COLD_MILLIKELVIN = 300000;
@@ -57,6 +60,25 @@ namespace {
     constexpr std::array<int32_t, 3> SPEED_LEVEL_GAPS = {0, 5, 10};  // 伝わる速さ ×4^k(×1・×1024・×1048576)
 
     using Record = std::function<bool(ID3D12GraphicsCommandList10*)>;
+
+    // 記録の形(T-0505)
+    enum class Shape : uint8_t {
+        Default,        // 段ごとの Dispatch を上限まで
+        Previous,       // 前の刻みの数から(ShapeFrom)
+        PreviousWhole,  // 前の刻みの数から・安い回は全部 1 グループ(T-0505 の前の形)
+    };
+
+    constexpr std::array<Shape, 3> SHAPES = {Shape::Default, Shape::Previous, Shape::PreviousWhole};
+
+    std::string_view ShapeLabel(Shape shape) {
+        switch (shape) {
+            case Shape::Default: return "既定";
+            case Shape::Previous: return "前の刻みから";
+            case Shape::PreviousWhole: return "前の刻みから・安い回は全部 1 グループ(前)";
+        }
+
+        return "";
+    }
 
     // 1 本のリストを記録して投げ、読み戻す
     std::expected<void, std::string> Execute(gpu::ImmediateQueue& queue, gpu::DebugRing& ring, sim::GpuImplicit& gpu,
@@ -130,12 +152,25 @@ namespace {
         std::vector<uint32_t> limitedCells;
         std::vector<int64_t> spreadMillikelvin;
         uint32_t levelCount = 0;
+        uint32_t cheapLevels = 0;             // 最後の刻みの安い回で段ごとに積んだ段の数
+        std::vector<sim::ImplicitCell> last;  // 最後の刻みのセル(形どうしで比べる)
     };
 
-    // 暖機の後、grid を写して TICKS 刻みを 1 刻みずつ印を打って測る。shapeFromPrevious なら 2 刻み目から前の刻みの数で記録の形を選ぶ
+    sim::GpuImplicitRecordShape ShapeOf(Shape shape, const sim::GpuImplicitCost& previous) {
+        switch (shape) {
+            case Shape::Default: return {};
+            case Shape::Previous: return sim::GpuImplicit::ShapeFrom(previous);
+            case Shape::PreviousWhole:
+                return sim::GpuImplicit::ShapeFrom(previous, std::numeric_limits<uint32_t>::max());
+        }
+
+        return {};
+    }
+
+    // 暖機の後、grid を写して TICKS 刻みを 1 刻みずつ印を打って測る。既定でない形は 2 刻み目から前の刻みの数で記録の形を選ぶ
     std::expected<BoxTiming, std::string> MeasureBox(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                      gpu::DebugRing& ring, uint64_t frequency,
-                                                     const sim::ImplicitGrid& grid, bool shapeFromPrevious) {
+                                                     const sim::ImplicitGrid& grid, Shape recordShape) {
         auto gpu = sim::GpuImplicit::Create(device, grid);
         if (!gpu)
             return std::unexpected(gpu.error());
@@ -162,9 +197,9 @@ namespace {
         sim::GpuImplicitCost previous;
         BoxTiming timing;
         for (uint32_t tick = 0; tick < TICKS; ++tick) {
-            const sim::GpuImplicitRecordShape shape = shapeFromPrevious && tick != 0
-                                                          ? sim::GpuImplicit::ShapeFrom(previous)
-                                                          : sim::GpuImplicitRecordShape{};
+            const sim::GpuImplicitRecordShape shape = tick != 0 ? ShapeOf(recordShape, previous)
+                                                                : sim::GpuImplicitRecordShape{};
+            timing.cheapLevels = shape.cheapLevels;
             const auto record = [&](ID3D12GraphicsCommandList10* list) {
                 bool recorded = tick != 0 || gpu->RecordUpload(list, grid);
                 gpu->RecordTimestamp(list, 0);
@@ -194,6 +229,8 @@ namespace {
             previous = cost;
         }
 
+        timing.last = read.cells;
+
         return timing;
     }
 
@@ -217,20 +254,29 @@ namespace {
     }
 
     // perf.md の表の 1 行(条件 | 結果)
-    void LogRow(uint32_t edge, size_t cellCount, int32_t gap, bool shapeFromPrevious, const BoxTiming& timing) {
+    void LogRow(uint32_t edge, size_t cellCount, int32_t gap, Shape shape, const BoxTiming& timing) {
         const std::span<const double> later = std::span(timing.stepMs).subspan(1);
         const uint32_t maxCycles = *std::ranges::max_element(timing.cycles);
         Log(Channel::Sim, Level::Info,
-            "| 一辺 {}({} セル・段 {})・速さ ×4^{}・記録の形 {} | 刻み 0 {:.2f} ms(V {})/ 後 {} 刻みの平均 {:.2f} ms・"
-            "V 最大 {} / 温度の幅 刻み 0 の後 {} mK → 最後 {} mK |",
-            edge, cellCount, timing.levelCount, gap, shapeFromPrevious ? "前の刻みから" : "既定", timing.stepMs[0],
+            "| 一辺 {}({} セル・段 {})・速さ ×4^{}・記録の形 {}(安い回の段ごと {})| 刻み 0 {:.2f} ms(V {})/ 後 {} "
+            "刻みの平均 "
+            "{:.2f} ms・V 最大 {} / 温度の幅 刻み 0 の後 {} mK → 最後 {} mK |",
+            edge, cellCount, timing.levelCount, gap, ShapeLabel(shape), timing.cheapLevels, timing.stepMs[0],
             timing.cycles[0], later.size(), Mean(later), maxCycles, timing.spreadMillikelvin.front(),
             timing.spreadMillikelvin.back());
         Log(Channel::Sim, Level::Info, "  刻みごと ms(V): {}", Series(timing));
     }
 
+    // 形どうしで最後の刻みのセルの状態(エネルギー・端数)がビット一致するか
+    bool SameCells(std::span<const sim::ImplicitCell> a, std::span<const sim::ImplicitCell> b) {
+        return std::ranges::equal(a, b, [](const sim::ImplicitCell& x, const sim::ImplicitCell& y) {
+            return x.energy == y.energy && x.fraction == y.fraction;
+        });
+    }
+
     std::expected<void, std::string> MeasureAll(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
-                                                const sim::BakedReactionTable& table, uint32_t maxEdge) {
+                                                const sim::BakedReactionTable& table, uint32_t minEdge,
+                                                uint32_t maxEdge) {
         uint64_t frequency = 0;
         if (FAILED(queue.Native()->GetTimestampFrequency(&frequency)))
             return std::unexpected("タイムスタンプの周波数を読めない");
@@ -243,17 +289,26 @@ namespace {
             air.heatCapacity, level, MrSubcycleBaseLevel(thermal));
 
         for (const uint32_t edge : EDGES) {
-            if (edge > maxEdge)
+            if (edge < minEdge || edge > maxEdge)
                 continue;
 
             for (const int32_t gap : SPEED_LEVEL_GAPS) {
                 const sim::ImplicitGrid grid = sim::BuildImplicitGrid(BoxCells(air, level + gap, edge));
-                for (const bool shapeFromPrevious : {false, true}) {
-                    const auto timing = MeasureBox(device, queue, ring, frequency, grid, shapeFromPrevious);
+                std::vector<sim::ImplicitCell> reference;
+                for (const Shape shape : SHAPES) {
+                    if (shape == Shape::PreviousWhole && grid.cells.size() > OLD_SHAPE_MAX_CELLS)
+                        continue;
+
+                    const auto timing = MeasureBox(device, queue, ring, frequency, grid, shape);
                     if (!timing)
                         return std::unexpected(std::format("一辺 {}・×4^{}: {}", edge, gap, timing.error()));
 
-                    LogRow(edge, grid.cells.size(), gap, shapeFromPrevious, *timing);
+                    LogRow(edge, grid.cells.size(), gap, shape, *timing);
+                    if (shape == Shape::Default)
+                        reference = timing->last;
+                    else if (!SameCells(reference, timing->last))
+                        return std::unexpected(
+                            std::format("一辺 {}・×4^{}: 記録の形 {} で値が既定と違う", edge, gap, ShapeLabel(shape)));
                 }
             }
         }
@@ -263,10 +318,13 @@ namespace {
 
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
+        uint32_t minEdge = 0;
         uint32_t maxEdge = EDGES.back();
         for (size_t index = 0; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
-            if (argument == "--max-edge" && index + 1 < arguments.size())
+            if (argument == "--min-edge" && index + 1 < arguments.size())
+                minEdge = static_cast<uint32_t>(std::stoul(arguments[++index]));
+            else if (argument == "--max-edge" && index + 1 < arguments.size())
                 maxEdge = static_cast<uint32_t>(std::stoul(arguments[++index]));
             else
                 rest.push_back(arguments[index]);
@@ -275,7 +333,8 @@ namespace {
         const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_implicit_box_bench [--warp] [--queue direct|compute] [--no-gbv] [--max-edge N]");
+                "使い方: gpu_implicit_box_bench [--warp] [--queue direct|compute] [--no-gbv] [--min-edge N] "
+                "[--max-edge N]");
             return 2;
         }
 
@@ -293,7 +352,7 @@ namespace {
             return 1;
         }
 
-        if (auto measured = MeasureAll(device->Get(), *queue, *ring, *table, maxEdge); !measured) {
+        if (auto measured = MeasureAll(device->Get(), *queue, *ring, *table, minEdge, maxEdge); !measured) {
             Log(Channel::Gpu, Level::Error, "gpu_implicit_box_bench: FAILED({})", measured.error());
             return 1;
         }

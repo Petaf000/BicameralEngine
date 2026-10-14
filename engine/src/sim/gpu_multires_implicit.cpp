@@ -76,6 +76,7 @@ namespace bicameral::sim {
         uint32_t levelRounds = known ? GpuImplicitLevels::RoundsFrom(previous) : GpuImplicitLevels::ALL_ROUNDS;
         if (m_forceCheapest) {
             shape.dispatchCycles = 1;
+            shape.cheapLevels = 0;
             levelRounds = 0;
         }
 
