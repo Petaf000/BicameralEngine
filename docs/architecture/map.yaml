@@ -170,6 +170,9 @@ views:
       - { id: heatconduction, group: shared, label: "heat_conduction.hlsli<br/>温度の差の面の流れ(min の係数・1/8 の上限)",
           code: "shaders/common/heat_conduction.hlsli::HcFaceFlow", ticket: T-0089, doc: docs/design/07-transport.md,
           note: "両側が同じ大きさで逆向きを計算するのでエネルギーは構造的に保存。伝導率は物質の値(試験の表は大きくしてある)" }
+      - { id: radiation, group: shared, status: research, label: "radiation.hlsli<br/>放射の対の交換(σT⁴ を因数分解・対称な係数)",
+          code: "shaders/common/radiation.hlsli::RdPairCoefficient", ticket: T-0583, doc: docs/decisions/ADR-0252-radiation-pair-exchange.md,
+          note: "物質の a(1 mol が遮る面積)→ 吸収率 1 − e^−τ。対ごとに 1 つの整数で保存・坂を下る。CPU リファレンス sim/radiation_reference。光線で対を見つけるのは T-0584、刻みへは T-0585" }
       - { id: firetest, group: tests, label: "gpu_probe_fire_test<br/>木箱に火をつけて 10 分",
           code: "tests/gpu_probe_fire_test.cpp::RunFire", ticket: T-0089,
           note: "刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる(1 秒ごとの経過)。ctest は 1 分、10 分は release で" }

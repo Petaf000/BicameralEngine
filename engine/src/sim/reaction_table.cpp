@@ -129,6 +129,7 @@ namespace bicameral::sim {
             baked.speciesElements.resize(elements.size(), 0);
             baked.standardEntropies.emplace_back();
             baked.speciesCondensed.push_back(0);
+            baked.speciesRadiationAbsorption.push_back(0);
 
             NameIndex species;
             for (const SpeciesDefinition& entry : definition.species) {
@@ -141,6 +142,7 @@ namespace bicameral::sim {
 
                 baked.standardEntropies.push_back(entry.standardEntropy);
                 baked.speciesCondensed.push_back(entry.condensed ? 1 : 0);
+                baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
             }
 
             return species;

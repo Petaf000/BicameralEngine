@@ -73,6 +73,10 @@ target_compile_definitions(reaction_package_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(reaction_package_test bicameral_data)  # ランタイムの入り口は exe の横の data/packages を読む(T-0157)
 add_test(NAME reaction_package COMMAND reaction_package_test)
+# 放射の熱の交換の CPU リファレンス(T-0583・ADR-0252): 解析解・保存・坂を下る・行き過ぎの上限・物質の欄
+add_executable(radiation_reference_test radiation_reference_test.cpp)
+target_link_libraries(radiation_reference_test PRIVATE bicameral_test_reaction_table bicameral_reaction_script bicameral_core)
+add_test(NAME radiation_reference COMMAND radiation_reference_test)
 add_executable(environment_package_test environment_package_test.cpp)  # 世界の環境の値(分類 environment。T-0400・ADR-0176)
 target_link_libraries(environment_package_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(environment_package_test PRIVATE
