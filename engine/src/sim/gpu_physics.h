@@ -87,6 +87,14 @@ namespace bicameral::sim {
         [[nodiscard]] std::vector<PhysicsBody> ReadBodies() const;
         [[nodiscard]] GpuPhysicsStats ReadStats() const;
 
+        // 直近の刻みの熱の入口(重みが 0 でないものだけ。並びは枠の順)と熱の帳簿(T-0542。PhysicsWorld::HeatEntries・HeatLedger と比べる)
+        [[nodiscard]] std::vector<physics::PxHeatEntry> ReadHeatEntries() const;
+        [[nodiscard]] physics::PxHeatLedger ReadHeatLedger() const;
+
+        // 熱の入口のバッファ(PxHeatEntry × HeatEntryCount。u14)。仮の世界の適用が読む(T-0561)
+        [[nodiscard]] ID3D12Resource* HeatEntries() const { return m_uavs[14].Get(); }
+        [[nodiscard]] uint32_t HeatEntryCount() const;
+
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
         [[nodiscard]] uint32_t BodyCount() const { return m_bodyCount; }
 
@@ -94,7 +102,7 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12Resource* Bodies() const { return m_uavs[0].Get(); }
 
         // --- 巻き戻し(T-0143。sim/probe_save_point.cpp)---
-        // 刻みをまたいで残る GPU の状態(u0〜u13。一時的なものも含めて全部写す。リストの間は COMMON)
+        // 刻みをまたいで残る GPU の状態(u0〜u15。一時的なものも含めて全部写す。リストの間は COMMON)
         [[nodiscard]] std::span<const ComPtr<ID3D12Resource>> StateBuffers() const { return m_uavs; }
         [[nodiscard]] GpuPhysicsCursor Cursor() const {
             return {.tick = m_tick, .currentHalf = m_half, .gravity = m_gravity};
@@ -134,7 +142,11 @@ namespace bicameral::sim {
             UpdateDuals,
             UpdateVelocity,
             Finish,
-            BuildManifolds,   // Work Graph の後で組を作る(broadphaseGraph のとき)
+            BuildManifolds,  // Work Graph の後で組を作る(broadphaseGraph のとき)
+            CollectHeat,     // 熱の入口(T-0542)
+            HeatSum,
+            HeatShare,
+            HeatFinish,
             BroadphaseGraph,  // Work Graph(Pipeline は無い。m_graph)
             SolveColorGraph,  // Work Graph(GpuPhysicsSolver::Graph)
             Count,
@@ -166,7 +178,8 @@ namespace bicameral::sim {
         void RecordColoring(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                             Constants constants);
         void RecordIterations(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                              Constants constants);
+                              Constants constants, uint32_t substep);
+        void RecordReturnHeat(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordSolveColors(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                Constants constants);
         void RecordColorPredicateStates(ID3D12GraphicsCommandList10* list, bool toPredication) const;
@@ -202,9 +215,11 @@ namespace bicameral::sim {
         uint32_t m_solveEntry = 0;
         bool m_graphInitialized = false;                // 裏のメモリを初期化する SetProgram を記録したか
         bool m_graphProgramSet = false;                 // 今のリストの状態がグラフか(Compute のパスが PSO に戻す)
-        std::array<ComPtr<ID3D12Resource>, 14> m_uavs;  // u0〜u13(physics_bindings.hlsli の結び付け)
+        std::array<ComPtr<ID3D12Resource>, 16> m_uavs;  // u0〜u15(physics_bindings.hlsli の結び付け)
         std::array<ComPtr<ID3D12Resource>, 2> m_srvs;   // t0 パラメータ・t1 初めの物
         ComPtr<ID3D12Resource> m_bodiesReadback;
+        ComPtr<ID3D12Resource> m_heatEntriesReadback;
+        ComPtr<ID3D12Resource> m_heatReadback;
         ComPtr<ID3D12Resource> m_statsReadback;
 
         // --- 計測(T-0092)---

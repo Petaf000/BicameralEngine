@@ -15,6 +15,11 @@
         g_colorInputs.Store<uint64_t>(base + 16, (uint64_t)COLOR_RECORD_STRIDE_BYTES);
     }
 
+    if (i == 0) {  // 熱の帳簿を 0 に(T-0542)
+        for (uint32_t offset = 0; offset < HEAT_BUFFER_BYTES; offset += 8)
+            g_heat.Store<uint64_t>(offset, 0);
+    }
+
     if (i >= g_bodyCount)
         return;
 
@@ -186,4 +191,76 @@
         return;
 
     g_bodies[i] = PxFinishBody(g_bodies[i], CurrentGravity());
+}
+
+    // --- 熱を世界へ返す(T-0542・common/physics_heat.hlsli。CPU の PhysicsWorld::CollectHeatEntries・ReturnHeat と同じ)----------
+    // 小刻みごと(最後の本反復の後・UpdateVelocity の前。組ごと): 枠の全部の点の入口を書く(点の無い所は重み 0)。g_color = 小刻みの番号
+    [numthreads(64, 1, 1)] void CollectHeat(uint3 id : SV_DispatchThreadID) {
+    const uint32_t slot = id.x;
+    if (slot >= g_bodyCount * g_slotsPerBody)
+        return;
+
+    const uint32_t substep = (uint32_t)g_color;
+    const bool live = IsLiveSlot(slot);
+    const uint32_t index = ManifoldIndex(g_currentHalf, slot);
+    const ManifoldHeader header = g_manifolds[index];
+    uint64_t weightSum = 0;
+    for (uint32_t k = 0; k < PX_MANIFOLD_POINTS; ++k) {
+        PxHeatEntry entry = (PxHeatEntry)0;
+        if (live && k < header.count)
+            entry = PxMakeHeatEntry(g_points[PointIndex(index, k)], g_bodies[header.bodyA], g_bodies[header.bodyB]);
+
+        g_heatEntries[HeatEntryIndex(substep, slot, k)] = entry;
+        weightSum += entry.weight;
+    }
+
+    if (weightSum != 0) {
+        uint64_t original;
+        g_heat.InterlockedAdd64(HEAT_SUM_WEIGHT, weightSum, original);
+    }
+}
+
+// 刻みの終わり 1: Σ 物の dissipatedEnergy(物ごと)
+[numthreads(64, 1, 1)] void HeatSum(uint3 id : SV_DispatchThreadID) {
+    const uint32_t i = id.x;
+    if (i >= g_bodyCount)
+        return;
+
+    const int64_t dissipated = g_bodies[i].dissipatedEnergy;
+    if (dissipated != 0) {
+        uint64_t original;
+        g_heat.InterlockedAdd64(HEAT_SUM_DISSIPATED, (uint64_t)dissipated, original);
+    }
+}
+
+    // 刻みの終わり 2: 入口ごとに返す熱を分ける(入口の全部の小刻み)
+    [numthreads(64, 1, 1)] void HeatShare(uint3 id : SV_DispatchThreadID) {
+    const uint32_t entryIndex = id.x;
+    if (entryIndex >= g_parameters[0].substeps * g_bodyCount * g_slotsPerBody * PX_MANIFOLD_POINTS)
+        return;
+
+    const int64_t dissipated = (int64_t)g_heat.Load<uint64_t>(HEAT_SUM_DISSIPATED);
+    const int64_t returned = (int64_t)g_heat.Load<uint64_t>(HEAT_LEDGER_RETURNED);
+    const uint64_t weightSum = g_heat.Load<uint64_t>(HEAT_SUM_WEIGHT);
+    const int64_t available = PxHeatAvailableMilliJoules(PxHeatSource(dissipated, returned));
+    const int64_t share = PxHeatShare(available, g_heatEntries[entryIndex].weight, weightSum);
+    g_heatEntries[entryIndex].milliJoules = share;
+    if (share != 0) {
+        uint64_t original;
+        g_heat.InterlockedAdd64(HEAT_SUM_RETURNED, (uint64_t)share, original);
+    }
+}
+
+// 刻みの終わり 3(1 スレッド): 帳簿を進め、刻みの中の和を 0 に戻す
+[numthreads(1, 1, 1)] void HeatFinish(uint3 id : SV_DispatchThreadID) {
+    const int64_t dissipated = (int64_t)g_heat.Load<uint64_t>(HEAT_SUM_DISSIPATED);
+    const int64_t tickMilliJoules = (int64_t)g_heat.Load<uint64_t>(HEAT_SUM_RETURNED);
+    const int64_t returned = (int64_t)g_heat.Load<uint64_t>(HEAT_LEDGER_RETURNED) + tickMilliJoules;
+    g_heat.Store<uint64_t>(HEAT_LEDGER_RETURNED, (uint64_t)returned);
+    g_heat.Store<uint64_t>(HEAT_LEDGER_REMAINDER, (uint64_t)PxHeatSource(dissipated, returned));
+    g_heat.Store<uint64_t>(HEAT_LEDGER_WEIGHT_SUM, g_heat.Load<uint64_t>(HEAT_SUM_WEIGHT));
+    g_heat.Store<uint64_t>(HEAT_LEDGER_TICK, (uint64_t)tickMilliJoules);
+    g_heat.Store<uint64_t>(HEAT_SUM_DISSIPATED, 0);
+    g_heat.Store<uint64_t>(HEAT_SUM_WEIGHT, 0);
+    g_heat.Store<uint64_t>(HEAT_SUM_RETURNED, 0);
 }

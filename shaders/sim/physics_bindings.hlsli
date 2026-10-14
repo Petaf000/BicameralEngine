@@ -9,6 +9,7 @@
 #ifndef BICAMERAL_PHYSICS_BINDINGS_HLSLI
 #define BICAMERAL_PHYSICS_BINDINGS_HLSLI
 
+#include "common/physics_heat.hlsli"
 #include "common/physics_step.hlsli"
 
 // 組(PxManifold、3016 バイト)は構造化バッファの要素の上限(2048 バイト)を超えるので、見出しと点に分けて置く
@@ -32,6 +33,8 @@ struct ManifoldHeader {
 // u10 枠の接触の幾何(Work Graph の NarrowphaseNode → Compute の BuildManifolds。T-0092)[bodyCount × slotsPerBody] /
 // u11 色ごとの Work Graph の GPU の入力(D3D12_NODE_GPU_INPUT × PX_GPU_MAX_COLORS)/ u12 色ごとの物の一覧 [PX_GPU_MAX_COLORS][bodyCount] /
 // u13 色ごとの「その色の物がいる」(uint64 × PX_GPU_MAX_COLORS。色ごとの解の述語。T-0094)/
+// u14 熱の入口 [substeps][bodyCount × slotsPerBody][PX_MANIFOLD_POINTS](PxHeatEntry。T-0542)/
+// u15 熱の帳簿(PxHeatLedger 32 バイト + 刻みの中の和 HEAT_SUM_*)/
 // t0 パラメータ 1 個 / t1 場面から作った初めの物
 RWStructuredBuffer<PxBody> g_bodies : register(u0);
 RWStructuredBuffer<ManifoldHeader> g_manifolds : register(u1);
@@ -47,6 +50,8 @@ RWStructuredBuffer<PxContactGeometry> g_geometry : register(u10);
 RWByteAddressBuffer g_colorInputs : register(u11);
 RWStructuredBuffer<uint32_t> g_colorBodies : register(u12);
 RWByteAddressBuffer g_colorPredicates : register(u13);
+RWStructuredBuffer<PxHeatEntry> g_heatEntries : register(u14);
+RWByteAddressBuffer g_heat : register(u15);
 StructuredBuffer<PxParameters> g_parameters : register(t0);
 StructuredBuffer<PxBody> g_initialBodies : register(t1);
 
@@ -123,6 +128,22 @@ bool IsLiveSlot(uint32_t slot) {
 
 uint32_t PointIndex(uint32_t manifoldIndex, uint32_t k) {
     return manifoldIndex * PX_MANIFOLD_POINTS + k;
+}
+
+// --- 熱の帳簿(u15。T-0542・common/physics_heat.hlsli)---
+// 0〜31: PxHeatLedger(returnedMilliJoules・remainder・weightSum・tickMilliJoules)/ 32〜55: 刻みの中の和(刻みの終わりに 0 へ戻す)
+static const uint32_t HEAT_LEDGER_RETURNED = 0;
+static const uint32_t HEAT_LEDGER_REMAINDER = 8;
+static const uint32_t HEAT_LEDGER_WEIGHT_SUM = 16;
+static const uint32_t HEAT_LEDGER_TICK = 24;
+static const uint32_t HEAT_SUM_DISSIPATED = 32;  // Σ 物の dissipatedEnergy(2 の補数の 64bit の和)
+static const uint32_t HEAT_SUM_WEIGHT = 40;      // Σ 入口の重み(刻みの全部の小刻み)
+static const uint32_t HEAT_SUM_RETURNED = 48;    // この刻みに分けた熱(mJ)
+static const uint32_t HEAT_BUFFER_BYTES = 56;
+
+// 入口の番号(小刻み substep の枠 slot の点 k)
+uint32_t HeatEntryIndex(uint32_t substep, uint32_t slot, uint32_t k) {
+    return (substep * g_bodyCount * g_slotsPerBody + slot) * PX_MANIFOLD_POINTS + k;
 }
 
 // 組(PxManifold、3 KB)を丸ごと局所に持つ関数は置かない: 組を局所に持つ Compute のパスは、別のキューの仕事(窓の描画)が割り込むと
