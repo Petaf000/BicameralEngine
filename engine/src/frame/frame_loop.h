@@ -123,6 +123,9 @@ namespace bicameral::frame {
         bool play = false;
         // 編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるでプレイ前の世界に戻るかを確かめる
         // (--auto-play。--editor と --world sample と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0497)
+        bool autoPlay = false;
+        // 編集の状態で置く → 元に戻す・やり直す → プレイ → プレイ中に置く → やめるでプレイ前の世界に戻るかを確かめる
+        // (--auto-play。--editor と --world sample と一緒に。--record で記録し、別の起動の --replay でハッシュ列を確かめる。T-0497)
 
         // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
         // 保存点の数(VRAM に 1 つ約 33 MiB。0 なら巻き戻さない)。1 以上なら刻み 0 の保存点を別に 1 つ足す(T-0411)
