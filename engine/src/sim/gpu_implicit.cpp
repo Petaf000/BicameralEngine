@@ -48,12 +48,16 @@ namespace bicameral::sim {
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true};
 
         // implicit_conduct.hlsl の入口(Pass の順)
-        constexpr std::array<const char*, 15> SHADERS = {
-            "sim/implicit_begin.cso",     "sim/implicit_start.cso",       "sim/implicit_smooth.cso",
-            "sim/implicit_restrict.cso",  "sim/implicit_prolong.cso",     "sim/implicit_converged.cso",
-            "sim/implicit_cycle_end.cso", "sim/implicit_flows.cso",       "sim/implicit_mark.cso",
-            "sim/implicit_limit_end.cso", "sim/implicit_limit_faces.cso", "sim/implicit_apply.cso",
-            "sim/implicit_tail.cso",      "sim/implicit_plan_levels.cso", "sim/implicit_plan_args.cso"};
+        constexpr std::array<const char*, 17> SHADERS = {
+            "sim/implicit_begin.cso",          "sim/implicit_start.cso",
+            "sim/implicit_smooth.cso",         "sim/implicit_restrict.cso",
+            "sim/implicit_prolong.cso",        "sim/implicit_converged.cso",
+            "sim/implicit_cycle_end.cso",      "sim/implicit_flows.cso",
+            "sim/implicit_mark.cso",           "sim/implicit_limit_end.cso",
+            "sim/implicit_limit_faces.cso",    "sim/implicit_apply.cso",
+            "sim/implicit_tail.cso",           "sim/implicit_plan_levels.cso",
+            "sim/implicit_plan_args.cso",      "sim/implicit_solve_converged.cso",
+            "sim/implicit_solve_check_end.cso"};
 
         // RecordUpload が CPU の系から写すバッファ(Buffer の順。ほかは刻みの段が初めに書く)
         constexpr std::array<bool, 11> UPLOADED = {true,  true,  true,  true, true, false,
@@ -334,7 +338,12 @@ namespace bicameral::sim {
                                            gpu::BufferKind::Readback);
         m_timestampReadback = gpu::CreateBuffer(device, uint64_t{MAX_TIMESTAMPS} * sizeof(uint64_t),
                                                 gpu::BufferKind::Readback);
-        if (!m_cellsReadback || !m_stateReadback || !m_wideReadback || !m_planReadback || !m_timestampReadback)
+        m_solveUpload = gpu::CreateBuffer(device, uint64_t{3} * m_limits.cells * sizeof(int64_t),
+                                          gpu::BufferKind::Upload);
+        m_solutionReadback = gpu::CreateBuffer(device, uint64_t{m_limits.cells} * sizeof(int64_t),
+                                               gpu::BufferKind::Readback);
+        if (!m_cellsReadback || !m_stateReadback || !m_wideReadback || !m_planReadback || !m_timestampReadback ||
+            !m_solveUpload || !m_solutionReadback)
             return std::unexpected("陰解法の読み戻しを作れない");
 
         const D3D12_QUERY_HEAP_DESC queryDesc{
@@ -698,6 +707,105 @@ namespace bicameral::sim {
         m_constants.cheapTail = 0;
 
         RecordUp(list, options, depthEnd);
+    }
+
+    bool GpuImplicit::RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing, const ImplicitOptions& options,
+                                  const GpuImplicitRecordShape& shape) {
+        if (options.method != ImplicitMethod::Multigrid)
+            return false;
+
+        const uint32_t requested = shape.dispatchLevels == 0 ? m_maxDispatchLevels : shape.dispatchLevels;
+        m_constants.dispatchLevels = std::clamp(requested, 1u, m_maxDispatchLevels);
+        m_constants.coarsestDispatch = shape.coarsestDispatch ? 1 : 0;
+
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        for (uint32_t i = 0; i < BufferCount; ++i)
+            list->SetComputeRootUnorderedAccessView(i, m_buffers[i]->GetGPUVirtualAddress());
+
+        list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
+        m_constants.tolerance = 1;  // ImCycleEnd が止める判定を見る印(値は閾値の欄から)
+        m_constants.correctionScale = static_cast<int32_t>(options.correctionScale);
+        m_constants.sweeps = options.preSmooth | (options.postSmooth << SWEEP_BITS) |
+                             (options.coarsestSweeps << (2 * SWEEP_BITS));
+
+        // --- 計画 → 状態を初めに → V の前の判定 → (V サイクル → 判定)× 上限(止めた後の回は述語で飛ばす)---
+        const uint32_t dispatchCycles = shape.dispatchCycles == 0 ? options.cycles : std::max(shape.dispatchCycles, 1u);
+        const uint32_t cheapLevels = std::min(shape.cheapLevels, m_constants.dispatchLevels - 1);
+        RecordPlan(list);
+        Dispatch(list, PassBegin, 1);
+        DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
+        Dispatch(list, PassSolveCheckEnd, 1);
+        for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
+            BeginSkippable(list, PREDICATE_CYCLES);
+            if (cycle < dispatchCycles)
+                RecordVCycle(list, options);
+            else
+                RecordCheapCycle(list, options, cheapLevels);
+
+            DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
+            Dispatch(list, PassCycleEnd, 1);
+            EndSkippable(list);
+        }
+
+        const D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
+            m_buffers[BufferArgs].Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &barrier);
+
+        return true;
+    }
+
+    bool GpuImplicit::RecordUploadSolve(ID3D12GraphicsCommandList* list, std::span<const int64_t> rhs,
+                                        std::span<const int64_t> values, std::span<const int64_t> thresholds) {
+        const size_t cells = rhs.size();
+        if (cells == 0 || cells > m_limits.cells || values.size() != cells || thresholds.size() != cells)
+            return false;
+
+        // --- 写すバッファ: [右辺][初めの近似][閾値] ---
+        std::vector<int64_t> image;
+        image.reserve(3 * cells);
+        image.insert(image.end(), rhs.begin(), rhs.end());
+        image.insert(image.end(), values.begin(), values.end());
+        image.insert(image.end(), thresholds.begin(), thresholds.end());
+        if (!WriteUpload(m_solveUpload.Get(), std::as_bytes(std::span(image))))
+            return false;
+
+        // --- 作業場の番地(implicit_conduct.hlsl の ValueA・ValueB・Rhs・Start)へ ---
+        ID3D12Resource* work = m_buffers[BufferWork].Get();
+        D3D12_RESOURCE_BARRIER barrier = gpu::Transition(work, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                         D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &barrier);
+
+        const uint64_t bytes = cells * sizeof(int64_t);
+        const uint64_t nodes = m_limits.nodes;
+        list->CopyBufferRegion(work, 2 * nodes * sizeof(int64_t), m_solveUpload.Get(), 0, bytes);
+        list->CopyBufferRegion(work, 0, m_solveUpload.Get(), bytes, bytes);
+        list->CopyBufferRegion(work, nodes * sizeof(int64_t), m_solveUpload.Get(), bytes, bytes);
+        list->CopyBufferRegion(work, 3 * nodes * sizeof(int64_t), m_solveUpload.Get(), 2 * bytes, bytes);
+
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+
+        return true;
+    }
+
+    void GpuImplicit::RecordSolutionReadback(ID3D12GraphicsCommandList* list, uint32_t cellCount) {
+        ID3D12Resource* work = m_buffers[BufferWork].Get();
+        D3D12_RESOURCE_BARRIER barrier = gpu::Transition(work, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->ResourceBarrier(1, &barrier);
+        list->CopyBufferRegion(m_solutionReadback.Get(), 0, work, 0,
+                               uint64_t{std::min(cellCount, m_limits.cells)} * sizeof(int64_t));
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+
+        RecordCostReadback(list);
+    }
+
+    bool GpuImplicit::ReadSolution(std::span<int64_t> values, GpuImplicitCost& cost) const {
+        if (values.size() > m_limits.cells)
+            return false;
+
+        return gpu::ReadBuffer(m_solutionReadback.Get(), std::as_writable_bytes(values)) && ReadCost(cost);
     }
 
     uint32_t GpuImplicit::DispatchesPerCycle(const ImplicitOptions& options) const {

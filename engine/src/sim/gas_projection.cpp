@@ -93,6 +93,10 @@ namespace bicameral::sim {
         // V サイクル(許容差に届いたら止める。上限は options.solver.cycles)
         void Solve(const ImplicitGrid& grid, const std::vector<int64_t>& rhs, std::vector<int64_t>& values,
                    const GasProjectionOptions& options, GasProjectionCost& cost) {
+            std::vector<int64_t> before;
+            if (options.solveObserver != nullptr)
+                before = values;
+
             uint32_t cycles = 0;
             int64_t error = WorstMassError(grid, rhs, values);
             while (error > (int64_t)options.toleranceMilligrams && cycles < options.solver.cycles) {
@@ -105,6 +109,14 @@ namespace bicameral::sim {
             cost.maxCycles = std::max(cost.maxCycles, cycles);
             cost.unconverged += error > (int64_t)options.toleranceMilligrams ? 1 : 0;
             cost.worstMassError = std::max(cost.worstMassError, error);
+            if (options.solveObserver != nullptr) {
+                (*options.solveObserver)({.grid = grid,
+                                          .rhs = rhs,
+                                          .before = before,
+                                          .after = values,
+                                          .cycles = cycles,
+                                          .massError = error});
+            }
         }
 
         // 外側の反復で比べる量(セルの順): E_真 = V p̃ ÷ c_箱²(mg の Q16。式の E_i と同じ量)と質量(mg)
@@ -210,6 +222,21 @@ namespace bicameral::sim {
         }
 
     }  // namespace
+
+    std::vector<int64_t> GasPressureThresholds(const ImplicitGrid& grid, uint32_t toleranceMilligrams) {
+        const ImplicitGridLevel& cells = grid.levels[0];
+        const uint64_t allowed = (uint64_t)toleranceMilligrams + 1;
+        const fx::FxU128 numerator = {.hi = allowed >> (64 - CAPACITY_SHIFT), .lo = allowed << CAPACITY_SHIFT};
+        std::vector<int64_t> thresholds(cells.diagonals.size());
+        for (size_t index = 0; index < thresholds.size(); ++index) {
+            assert(cells.diagonals[index].hi == 0);
+            const fx::FxDivResult division = fx::FxDivU128By64(numerator, cells.diagonals[index].lo);
+            const uint64_t ceiling = division.quotient + (division.remainder != 0 ? 1 : 0);
+            thresholds[index] = (int64_t)std::min<uint64_t>(ceiling, (uint64_t)INT64_MAX);
+        }
+
+        return thresholds;
+    }
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options) {
         GasProjectionCost cost;

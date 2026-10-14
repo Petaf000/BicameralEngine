@@ -136,6 +136,23 @@ namespace bicameral::sim {
                                       uint32_t maxLimitRounds = DEFAULT_MAX_LIMIT_ROUNDS,
                                       const GpuImplicitRecordShape& shape = {});
 
+        // --- 一般の右辺で解く形(T-0531。気体の圧力の投影。CPU の模型は sim/gas_projection の Solve)---
+        // 段 0 の式 (C_i + Σ g) x_i − Σ g x_j = D_i × rhs_i を V サイクルで解く。作業場(WorkBuffer)の段 0 の値 A・B に初めの近似、
+        // 右辺の欄に rhs、刻みの初めの温度の欄にセルごとの閾値(GasPressureThresholds)を書いてから呼ぶ(RecordUploadSolve か、GPU の段が直接)。
+        // V の前に 1 回判定し、|残差| が閾値以上のセルが無くなるまで options.cycles を上限に回す(CPU の Solve と同じ順。止めた後の回は述語で飛ばす)。
+        // 面の流れ・安全網・足すは積まない。解いた値は作業場の値 A(セルの順)
+        [[nodiscard]] bool RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing,
+                                       const ImplicitOptions& options, const GpuImplicitRecordShape& shape = {});
+        // CPU から右辺・初めの近似・閾値(どれもセルの順)を作業場へ写す(RecordUpload の後。試験と計測用)
+        [[nodiscard]] bool RecordUploadSolve(ID3D12GraphicsCommandList* list, std::span<const int64_t> rhs,
+                                             std::span<const int64_t> values, std::span<const int64_t> thresholds);
+        // 解いた値(セルの数)と数を読み戻す(RecordSolve の後)
+        void RecordSolutionReadback(ID3D12GraphicsCommandList* list, uint32_t cellCount);
+        [[nodiscard]] bool ReadSolution(std::span<int64_t> values, GpuImplicitCost& cost) const;
+        // 作業場(64bit。並びは implicit_conduct.hlsl の先頭: 値 A × 節・値 B × 節・右辺 × 節・刻みの初めの温度 × セル…)
+        [[nodiscard]] ID3D12Resource* WorkBuffer() const { return m_buffers[BufferWork].Get(); }
+        [[nodiscard]] const GpuImplicitLimits& Limits() const { return m_limits; }
+
         // バッファを COMMON に戻す(RecordStep の後。同じリストで次の刻みに RecordReset をもう一度呼ぶため。T-0132)
         void RecordRelease(ID3D12GraphicsCommandList* list);
 
@@ -196,6 +213,8 @@ namespace bicameral::sim {
             PassTail,
             PassPlanLevels,
             PassPlanArgs,
+            PassSolveConverged,
+            PassSolveCheckEnd,
             PassCount
         };
 
@@ -263,7 +282,9 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_cellsReadback;
         ComPtr<ID3D12Resource> m_stateReadback;
         ComPtr<ID3D12Resource> m_wideReadback;
-        ComPtr<ID3D12Resource> m_planReadback;  // 計画の見出し(段の数・ImTail の境)
+        ComPtr<ID3D12Resource> m_planReadback;      // 計画の見出し(段の数・ImTail の境)
+        ComPtr<ID3D12Resource> m_solveUpload;       // 一般の右辺で解く形の右辺・初めの近似・閾値(セル × 3。T-0531)
+        ComPtr<ID3D12Resource> m_solutionReadback;  // 解いた値(セル)
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
         uint32_t m_timestampCount = 0;

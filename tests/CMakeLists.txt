@@ -557,6 +557,12 @@ target_link_libraries(gpu_conduct_bench PRIVATE bicameral_sim)
 bicameral_add_gpu_test(gpu_implicit_box_bench)
 target_link_libraries(gpu_implicit_box_bench PRIVATE bicameral_sim)
 
+# 気体の圧力の投影(T-0531)の GPU 版と CPU の模型(gas_projection)のビット一致。今は解く部分(GpuImplicit::RecordSolve)。
+# 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
+bicameral_add_gpu_test(gpu_gas_projection_test)
+target_link_libraries(gpu_gas_projection_test PRIVATE bicameral_sim bicameral_gas_projection)
+bicameral_add_gpu_test_case(gpu_gas_projection gpu_gas_projection_test gpu --queue compute)
+
 # 置くコマンドが 1 刻みにたくさん来た時の適用の単位の時間(T-0280。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_place_bench
 bicameral_add_gpu_test(gpu_place_bench)
