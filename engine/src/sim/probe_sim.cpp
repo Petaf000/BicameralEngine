@@ -17,10 +17,11 @@ namespace bicameral::sim {
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
         //   u0 セル・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
         //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ・u13 物理の物(T-0098。物理なしなら仮の置き場)
+        //   ・u14 物理の熱の入口(T-0561。物理なしなら仮の置き場)
         //   → b0 単位の定数 → デバッグのリング
         //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
         //   ・t5 物質の付け替えの表(T-0223)
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 14,
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 15,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
@@ -41,6 +42,7 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_BLOCK_SCHEDULE = 11;
         constexpr uint32_t UAV_THERMAL = 12;
         constexpr uint32_t UAV_BODIES = 13;
+        constexpr uint32_t UAV_PHYSICS_HEAT = 14;
         constexpr uint32_t SRV_INPUT = 0;
         constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
         constexpr uint32_t SRV_SPECIES_REMAP = 5;   // t5 付け替えの表(T-0223)
@@ -334,6 +336,8 @@ namespace bicameral::sim {
         m_enqueuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_enqueue.cso");
         m_applyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_apply.cso");
         m_wakeDuePipeline = LoadComputePipeline(device, root, "sim/probe_tick_wake_due.cso");
+        m_addPhysicsHeatPipeline = LoadComputePipeline(device, root, "sim/probe_tick_add_physics_heat.cso");
+        m_finishPhysicsHeatPipeline = LoadComputePipeline(device, root, "sim/probe_tick_finish_physics_heat.cso");
         m_refreshTablePipeline = LoadComputePipeline(device, root, "sim/probe_tick_refresh_table.cso");
         m_remapSpeciesPipeline = LoadComputePipeline(device, root, "sim/probe_tick_remap_species.cso");
         m_busyPipeline = LoadComputePipeline(device, root, "sim/probe_tick_busy.cso");
@@ -341,9 +345,9 @@ namespace bicameral::sim {
         m_flushEventsPipeline = LoadComputePipeline(device, root, "sim/probe_tick_flush_events.cso");
         m_extractPipeline = LoadComputePipeline(device, root, "sim/probe_tick_extract.cso");
 
-        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_refreshTablePipeline &&
-               m_remapSpeciesPipeline && m_busyPipeline && m_hashCellsPipeline && m_flushEventsPipeline &&
-               m_extractPipeline && CreateConductGraph(device);
+        return m_enqueuePipeline && m_applyPipeline && m_wakeDuePipeline && m_addPhysicsHeatPipeline &&
+               m_finishPhysicsHeatPipeline && m_refreshTablePipeline && m_remapSpeciesPipeline && m_busyPipeline &&
+               m_hashCellsPipeline && m_flushEventsPipeline && m_extractPipeline && CreateConductGraph(device);
     }
 
     // 伝導の Work Graph(WakeBlocks → ConductBlock)。compute と同じルート署名をグローバルのルート署名にする
@@ -811,6 +815,9 @@ namespace bicameral::sim {
         // 物理が無ければ、シェーダーは物の数 0 で読まないので、仮に重さの捨て場を結ぶ
         list->SetComputeRootUnorderedAccessView(
             UAV_BODIES, m_physics ? m_physics->Bodies()->GetGPUVirtualAddress() : m_busySink->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_PHYSICS_HEAT, m_physics
+                                                                      ? m_physics->HeatEntries()->GetGPUVirtualAddress()
+                                                                      : m_busySink->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
@@ -835,6 +842,7 @@ namespace bicameral::sim {
             // コマンドの適用は 1 グループがキューの先頭から番号順に(置くコマンドのセルだけをグループで分ける。probe_tick.hlsl・ADR-0125)。刻みの一覧と表の欄の用意も
             list->SetPipelineState(m_applyPipeline.Get());
             list->Dispatch(1, 1, 1);
+            RecordPhysicsHeat(list, tick);
 
             // 表を差し替えた刻み: 熱のキャッシュ(2 世代)を新しい表で作り直し、全部のブロックの起こす刻みを今にする(T-0139)
             if (tableSwapped) {
@@ -864,6 +872,30 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier(1, &allUavs);
+    }
+
+    // 物理の熱をセルへ(T-0561・ADR-0242。物理を入れた世界だけ): 前の刻みの物理の単位が分けた熱の入口(GpuPhysics の u14)を、
+    // コマンドの後に入口の位置のセルへ足し(AddPhysicsHeat)、足し終わったセルの熱のキャッシュとブロックの印を作り直す(FinishPhysicsHeat)。
+    // CPU の ProbeReference::Advance の heat と同じ。刻み 0 の入口は物理を初めに作った時の 0
+    void ProbeSim::RecordPhysicsHeat(ID3D12GraphicsCommandList10* list, uint64_t tick) const {
+        if (!m_physics)
+            return;
+
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        const uint32_t entryCount = m_physics->HeatEntryCount();
+        const uint32_t groups = (entryCount + PROBE_LINEAR_GROUP_SIZE - 1) / PROBE_LINEAR_GROUP_SIZE;
+        if (groups == 0)
+            return;
+
+        list->ResourceBarrier(1, &allUavs);
+        SetUnitConstants(list, tick, entryCount);
+        list->SetPipelineState(m_addPhysicsHeatPipeline.Get());
+        list->Dispatch(groups, 1, 1);
+
+        list->ResourceBarrier(1, &allUavs);
+        list->SetPipelineState(m_finishPhysicsHeatPipeline.Get());
+        list->Dispatch(groups, 1, 1);
+        SetUnitConstants(list, tick, m_speciesCount);  // 適用の単位の残りの段の定数に戻す
     }
 
     // 反応表の差し替え(T-0139・ADR-0047): 新しい表を新しい既定のバッファに写し、ルートの結び先を替える。差し替える前の表は
@@ -1147,7 +1179,8 @@ namespace bicameral::sim {
                               .sourceEnergy = entry[8] | (uint64_t{entry[9]} << 32),
                               .scheduledBlocks = entry[6],
                               .bodyHash = entry[10] | (uint64_t{entry[11]} << 32),
-                              .limits = {.productsHeld = entry[12], .candidatesLimited = entry[13]}});
+                              .limits = {.productsHeld = entry[12], .candidatesLimited = entry[13]},
+                              .physicsHeatEnergy = static_cast<int64_t>(entry[14] | (uint64_t{entry[15]} << 32))});
         }
 
         return hashes;

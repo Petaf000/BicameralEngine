@@ -137,6 +137,9 @@ namespace bicameral::sim {
         uint32_t scheduledBlocks = 0;  // S(tick) を作った刻み(tick − 1)で伝導と反応を計算したブロックの数
         uint64_t bodyHash = 0;         // 物の状態のハッシュ(PhysicsWorld::StateHash。物理なしなら 0。T-0098)
         ProbeLimitCounts limits;  // S(tick) を作った刻み(tick − 1)で反応の上限に当たったセルの数(計算したブロックだけ)
+        int64_t physicsHeatEnergy =
+            0;  // S(tick) を作った刻み(tick − 1)の初めに物理の熱としてセルへ足したエネルギー(mJ。T-0561)。
+                // energy(t) = energy(t − 1) + sourceEnergy + これ
 
         // 世界全体の要約(セル + 物。再生ファイルに入れて突き合わせる値)
         [[nodiscard]] uint64_t WorldHash() const { return hash ^ bodyHash; }
@@ -418,6 +421,7 @@ namespace bicameral::sim {
                                               const SpeciesRemap& remap, uint64_t tick);
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
+        void RecordPhysicsHeat(ID3D12GraphicsCommandList10* list, uint64_t tick) const;
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
@@ -464,7 +468,9 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         ComPtr<ID3D12PipelineState> m_enqueuePipeline;
         ComPtr<ID3D12PipelineState> m_applyPipeline;
-        ComPtr<ID3D12PipelineState> m_wakeDuePipeline;  // 起こす刻みの来たブロックを一覧へ(待ちの丸め。T-0122)
+        ComPtr<ID3D12PipelineState> m_wakeDuePipeline;         // 起こす刻みの来たブロックを一覧へ(待ちの丸め。T-0122)
+        ComPtr<ID3D12PipelineState> m_addPhysicsHeatPipeline;  // 物理の熱をセルへ足す(T-0561)
+        ComPtr<ID3D12PipelineState> m_finishPhysicsHeatPipeline;  // 足したセルのキャッシュとブロックの印(T-0561)
         ComPtr<ID3D12PipelineState>
             m_refreshTablePipeline;  // 表を差し替えた刻み: 熱のキャッシュと全部のブロックを起こす(T-0139)
         ComPtr<ID3D12PipelineState>

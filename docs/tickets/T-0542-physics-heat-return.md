@@ -1,6 +1,6 @@
 # T-0542 物理で失った力学的エネルギーをセルの熱へ返す
 
-- Status: Doing(物理の入口と帳簿は CPU・GPU とも済み・CPU の世界へ足すのも済み。GPU の世界へ足す所と窓の確かめは T-0561)
+- Status: Done(GPU の世界へ足す所と窓の確かめは T-0561 で済んだ)
 - 種類: 工学
 - PC: 必須(ビルドと ctest)
 - 見積もり: チャット 1 回分 + T-0561
@@ -17,8 +17,8 @@ T-0519 で数えた物理の散逸(PxBody::dissipatedEnergy)を、世界のセ�
       「世界のエネルギーの和の増え = 足した熱」がビット単位で合う。落とした物で返した熱が m g h に 1% 以内・落ちた所の床のまわりに 9 割以上・2 回の実行で同じ。崩した積み木でも合う
 - [x] GPU の物理の入口と帳簿(GpuPhysics の u14・u15、CollectHeat・HeatSum・HeatShare・HeatFinish)。gpu_physics_test が毎区間、
       入口(重みが 0 でないものを並べ替えて)と帳簿を CPU とビット単位で比べる(gpu_physics_[sp]* 8 本が通った)
-- [ ] GPU の世界のセルへ足す・世界のハッシュが変わる理由 → **T-0561**
-- [ ] 重い物を落とすと床のセルが温まるのが窓で見えるか(--editor の run で 1 回)→ **T-0561**(窓は GPU の世界を描くので、GPU の道ができてから)
+- [x] GPU の世界のセルへ足す・世界のハッシュが変わる理由 → **T-0561**
+- [x] 重い物を落とすと床のセルが温まるのが窓で見えるか(--editor の run で 1 回)→ **T-0561**(窓は GPU の世界を描くので、GPU の道ができてから)
 - [x] release のビルド(警告 0)・archmap --check・physics_[eghm]*(checked 含む 8 本)・blank_world・gpu_physics_[sp]*(8 本)・gpu_probe_[pr]*
 
 ## 作り

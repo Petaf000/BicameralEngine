@@ -6,7 +6,8 @@
 //     本物のフレームの後ろに同じキューで投げる(1 回に COPY_TICKS_PER_FRAME 刻み。本物の刻みの合間)。
 //       1. 本物のハッシュ列が基準と S(1)〜S(TICKS) で全部一致(写しは本物を変えない。D-403)
 //       2. 写しに本物と同じコマンド(FORK_TICK 以降)を当てて TICKS まで → 写しのハッシュ列(セル + 物)が基準と全部一致
-//       3. 写しのセルのハッシュが CPU リファレンス(ProbeReference)と毎刻み一致・読み戻したセルの木の量が CPU と同じ(10 刻みごと)
+//       3. 写しのセルのハッシュが CPU リファレンス(ProbeReference + PhysicsWorld。物理の熱を次の刻みの初めにセルへ足す。T-0561)と
+//          毎刻み一致・読み戻したセルの木の量が CPU と同じ(10 刻みごと)
 //   - 同じ写しを使い直す: 本物が刻み SECOND_TICK に来たら、コマンドを当てずに写しを取り直し、条件「木の量が閾値以下」で止める。
 //     止まった刻みが、CPU リファレンスで同じ条件を数えた刻みと同じ(閾値は CPU の木の量の道のりから決める)・
 //     止まるまでのセルのハッシュが CPU と一致・つつきを当てていないので基準と違う刻みがある
@@ -36,6 +37,7 @@
 #include "gpu/queue.h"
 #include "gpu_test_options.h"
 #include "reaction_test_table.h"
+#include "sim/physics_world.h"
 #include "sim/probe_sim.h"
 #include "sim/tick_cost.h"
 #include "sim/world_copy.h"
@@ -62,15 +64,37 @@ namespace {
     constexpr int32_t UNIT = 1 << 30;                 // Q1.30 の 1
     constexpr uint32_t PUSH_IMPULSE_MNS = 5'000'000;  // 5000 N·s
 
+    // 押す(CPU の PhysicsWorld::Push にも同じ値を渡す)
+    struct Push {
+        uint64_t tick = 0;
+        uint32_t sequence = 0;
+        std::array<int64_t, 3> origin{};
+        std::array<int32_t, 3> direction{};
+    };
+
+    const std::array<Push, 2> PUSHES = {{
+        {.tick = FORK_TICK,
+         .sequence = 1,
+         .origin = {10 * METER, 11 * METER / 2, 6 * METER},
+         .direction = {0, 0, UNIT}},
+        {.tick = 70,
+         .sequence = 4,
+         .origin = {10 * METER + 3 * METER / 10, 44 * METER / 5, 26 * METER},
+         .direction = {0, 0, -UNIT}},
+    }};
+
+    ProbeCommand MakePush(const Push& push) {
+        return MakePushCommand(push.tick, push.sequence, push.origin, push.direction, PUSH_IMPULSE_MNS);
+    }
+
     // 刻みの順・番号の順(GPU のキューの約束)
     std::vector<ProbeCommand> MakeCommands() {
         return {
             MakePokeCommand(0, 0, 28, 32, 32),  // 木箱の壁に火をつける
-            MakePushCommand(FORK_TICK, 1, {10 * METER, 11 * METER / 2, 6 * METER}, {0, 0, UNIT}, PUSH_IMPULSE_MNS),
+            MakePush(PUSHES[0]),
             MakePokeCommand(FORK_TICK, 2, 36, 32, 32),  // 写しの始めの刻みのコマンド(写しにも当たる)
             MakePokeCommand(DIVERGING_POKE_TICK, 3, 20, 40, 24),
-            MakePushCommand(70, 4, {10 * METER + 3 * METER / 10, 44 * METER / 5, 26 * METER}, {0, 0, -UNIT},
-                            PUSH_IMPULSE_MNS),
+            MakePush(PUSHES[1]),
         };
     }
 
@@ -99,6 +123,31 @@ namespace {
         std::map<uint64_t, uint64_t> wood;
     };
 
+    // CPU の世界: セル(ProbeReference)と物(PhysicsWorld)。物理の刻み t の熱の入口を刻み t + 1 の初めにセルへ足す(GPU と同じ。T-0561)
+    struct CpuWorld {
+        ProbeReference reference;
+        PhysicsWorld physics;
+        std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口
+
+        CpuWorld(const BakedReactionTable& table, const PhysicsScene& scene)
+            : reference(table), physics(scene, PhysicsParametersFor(StandardWorldPhysics())) {}
+
+        // due: この刻みのコマンド(押すのは pushes が true の時だけ。コマンドを当てない写しは押さない)
+        void Advance(uint64_t tick, std::span<const ProbeCommand> due, bool pushes) {
+            reference.Advance(tick, due, nullptr, heat);
+            for (const Push& push : PUSHES) {
+                if (pushes && push.tick == tick) {
+                    physics.Push(physics::PxMakeVec3(push.origin[0], push.origin[1], push.origin[2]),
+                                 physics::PxMakeVec3(push.direction[0], push.direction[1], push.direction[2]),
+                                 PUSH_IMPULSE_MNS);
+                }
+            }
+
+            physics.Step();
+            heat = physics.HeatEntries();
+        }
+    };
+
     void Record(const ProbeReference& reference, uint64_t tick, uint64_t sampleStart, uint32_t cellulose,
                 ReferencePath& path) {
         path.cellHashes[tick] = reference.StateHash(tick);
@@ -107,29 +156,30 @@ namespace {
     }
 
     // CPU リファレンス: コマンドありで TICKS まで(full)と、SECOND_TICK からコマンドなしで SECOND_LIMIT 刻み(second)
-    std::pair<ReferencePath, ReferencePath> RunReference(const BakedReactionTable& table, uint32_t cellulose) {
+    std::pair<ReferencePath, ReferencePath> RunReference(const BakedReactionTable& table, const PhysicsScene& scene,
+                                                         uint32_t cellulose) {
         const std::vector<ProbeCommand> commands = MakeCommands();
-        ProbeReference reference(table);
-        std::optional<ProbeReference> second;
+        CpuWorld world(table, scene);
+        std::optional<CpuWorld> second;
         ReferencePath full;
         ReferencePath without;
 
         for (uint64_t tick = 0; tick < TICKS; ++tick) {
             if (tick == SECOND_TICK) {
-                second = reference;
-                Record(*second, tick, SECOND_TICK, cellulose, without);
+                second = world;
+                Record(second->reference, tick, SECOND_TICK, cellulose, without);
             }
 
             std::vector<ProbeCommand> due;
             rng::copy_if(commands, std::back_inserter(due),
                          [&](const ProbeCommand& command) { return command.targetTick == tick; });
-            reference.Advance(tick, due);
-            Record(reference, tick + 1, FORK_TICK, cellulose, full);
+            world.Advance(tick, due, true);
+            Record(world.reference, tick + 1, FORK_TICK, cellulose, full);
         }
 
         for (uint64_t tick = SECOND_TICK; tick < SECOND_TICK + SECOND_LIMIT; ++tick) {
-            second->Advance(tick, {});
-            Record(*second, tick + 1, SECOND_TICK, cellulose, without);
+            second->Advance(tick, {}, false);
+            Record(second->reference, tick + 1, SECOND_TICK, cellulose, without);
         }
 
         return {std::move(full), std::move(without)};
@@ -318,7 +368,7 @@ namespace {
         const std::map<uint64_t, uint64_t>& baseline = baseDriver.Hashes();
 
         // --- CPU リファレンス ---
-        const auto [referenceFull, referenceSecond] = RunReference(table, cellulose);
+        const auto [referenceFull, referenceSecond] = RunReference(table, scene, cellulose);
         const uint64_t threshold = std::next(referenceSecond.wood.begin(), THRESHOLD_SAMPLE)->second;
         uint64_t expectedEnd = 0;
         for (const auto& [tick, amount] : referenceSecond.wood) {
