@@ -406,7 +406,6 @@ namespace bicameral::frame {
             [[nodiscard]] editor::EditorStatus MakeEditorStatus() const;
             [[nodiscard]] editor::GraphPanelStatus MakeGraphPanelStatus() const;
             [[nodiscard]] std::vector<editor::BrushPreviewLine> MakeBrushPreview() const;
-            [[nodiscard]] std::vector<editor::BrushPreviewLine> MakePatchRanges() const;
 
             // --- 巻き戻し(保存点 + 再生。T-0143・ADR-0036)---
             [[nodiscard]] std::string RewindUnavailableReason() const;
@@ -940,10 +939,8 @@ namespace bicameral::frame {
                 if (!m_options.recordPath.empty())
                     m_recorder.AddHash(tickHash.tick, tickHash.WorldHash());
 
-                if (m_editor) {
+                if (m_editor)
                     m_editor->Brush().NoteHash(tickHash.tick, tickHash.WorldHash());
-                    m_editor->Patch().NoteTick(tickHash.tick);
-                }
 
                 m_worldCopy.NoteWorldHash(tickHash);
 
@@ -1057,16 +1054,6 @@ namespace bicameral::frame {
                     continue;
                 }
 
-                if (event.type == sim::PROBE_EVENT_PATCH_APPLIED) {
-                    if (m_editor)
-                        m_editor->Patch().NoteApplied(event);
-                    else
-                        Log(Channel::Sim, Level::Info, "パッチ: 刻み {} に{}", event.tick,
-                            event.place == sim::PROBE_PATCH_REFUSED ? "断られた" : "足せた");
-
-                    continue;
-                }
-
                 if (event.type == sim::PROBE_EVENT_BODY_PUSHED) {
                     if (event.place == sim::PROBE_PUSH_NOTHING)
                         Log(Channel::Sim, Level::Info, "押す: 刻み {} で光線の先に動く物が無かった", event.tick);
@@ -1153,16 +1140,6 @@ namespace bicameral::frame {
                           std::back_inserter(m_pendingCommands));
                 cells.clear();
             }
-
-            // 魔法のパッチのパネル(T-0325): 中心を選んでいる間は左クリックのセルを中心に。コマンドは置くコマンドと同じ道で記録へ
-            if (m_editor && m_editor->Patch().Picking() && !cells.empty()) {
-                m_editor->Patch().PickCenter(cells.back());
-                cells.clear();
-            }
-
-            if (m_editor)
-                rng::move(m_editor->Patch().TakeWorldCommands(m_frameNumber, m_nextSequence),
-                          std::back_inserter(m_pendingCommands));
 
             if (m_options.autoPlace && m_editor)
                 rng::move(
@@ -1583,9 +1560,6 @@ namespace bicameral::frame {
             if (m_options.autoPlace)
                 m_editor->Brush().StartAuto();
 
-            if (m_options.autoPatch)
-                m_editor->Patch().StartAuto();
-
             // 環境ミキサー(T-0452): 起動時に足した一覧(--mix)から始める
             m_editor->Mixer().SetMix(m_options.mix);
             if (m_options.autoMixer) {
@@ -1646,8 +1620,6 @@ namespace bicameral::frame {
                     m_editor->Lab().UseTable(loaded);
                     m_editor->ReactionTable().UseTable(loaded);
                     m_editor->Brush().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
-                                               loaded->tableVersion);
-                    m_editor->Patch().UseTable(std::shared_ptr<const sim::BakedReactionTable>(loaded, &loaded->table),
                                                loaded->tableVersion);
                     m_editor->Mixer().UseTable(loaded);
                     m_editor->Copy().UseTable(loaded);
@@ -1900,7 +1872,6 @@ namespace bicameral::frame {
                                       .modifiedWorld = m_tableReload.WorldModified(),
                                       .message = m_tableReload.LastMessage()},
                     .brushPreview = MakeBrushPreview(),
-                    .patchRanges = MakePatchRanges(),
                     .copy = m_worldCopy.Progress(),
                     .playMetrics = m_playMetrics.Progress()};
         }
@@ -1955,20 +1926,6 @@ namespace bicameral::frame {
             }
 
             const editor::BrushPreview preview = editor::BuildBrushPreview(command.payload, axis, plane);
-
-            return editor::ProjectBrushPreview(preview, m_viewController.Camera().Basis(width, height), width, height);
-        }
-
-        // 魔法のパッチの範囲(T-0325。描画側だけ): 今の断面で切った線を画面の線分に
-        std::vector<editor::BrushPreviewLine> FrameLoop::MakePatchRanges() const {
-            if (!m_editor)
-                return {};
-
-            const uint32_t width = m_swapChain.Width();
-            const uint32_t height = m_swapChain.Height();
-            const render::DebugViewSettings& settings = m_viewController.Settings();
-            editor::BrushPreview preview;
-            preview.segments = m_editor->Patch().WorldRangeSegments(settings.sliceAxis, settings.slicePosition);
 
             return editor::ProjectBrushPreview(preview, m_viewController.Camera().Basis(width, height), width, height);
         }
@@ -2108,10 +2065,8 @@ namespace bicameral::frame {
             if (!m_options.recordPath.empty())
                 m_recorder.Rewind(tick);
 
-            if (m_editor) {
+            if (m_editor)
                 m_editor->Brush().NoteRewound(tick);
-                m_editor->Patch().NoteRewound(tick);
-            }
 
             // 今の流れで足したコマンドのうち、戻した刻み以降のものを足し直す(まだ足していなかった分の後ろに)
             const auto kept = rng::find_if(
@@ -2515,15 +2470,6 @@ namespace bicameral::frame {
 
             if (m_options.autoPlace)
                 Log(Channel::Sim, Level::Info, "--auto-place: {}。OK", m_editor->Brush().AutoSummary());
-
-            if (m_options.autoPatch && (!m_editor || !m_editor->Patch().AutoPassed())) {
-                Log(Channel::Sim, Level::Error, "--auto-patch: 魔法のパッチの確かめが通らなかった({})",
-                    m_editor ? m_editor->Patch().AutoSummary() : "--editor が要る");
-                return 1;
-            }
-
-            if (m_options.autoPatch)
-                Log(Channel::Sim, Level::Info, "--auto-patch: {}。OK", m_editor->Patch().AutoSummary());
 
             if (m_options.autoCopy && m_weightWatch.MeasuredTicks() == 0) {
                 Log(Channel::Sim, Level::Error, "--auto-copy: 本物の刻みの重さを測れなかった(重さの見張り)");

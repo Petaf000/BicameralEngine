@@ -12,25 +12,6 @@
 #include "sim/multires_bindings.hlsli"
 
 RWStructuredBuffer<uint32_t> g_labCommands : register(u4);  // LabCommand × 数(LAB_COMMAND_WORDS 語ずつ)
-// 魔法のパッチの列(T-0024。GpuMultires::PatchListAddress を外のバッファの 2 本目に結ぶ。common/magic_patch.hlsli)
-RWStructuredBuffer<uint32_t> g_labPatches : register(u5);
-
-// common/magic_patch.hlsli の List の約束
-struct LabPatchList {
-    uint32_t unused;
-
-    uint32_t PatchWord(uint32_t word) { return g_labPatches[word]; }
-
-    void SetPatchWord(uint32_t word, uint32_t value) { g_labPatches[word] = value; }
-};
-
-LabPatchList MakePatchList() {
-    LabPatchList list;
-    list.unused = 0;
-
-    return list;
-}
-
 // common/lab_box.hlsli の Blocks の約束(箱の根の枠)
 struct LabBlocks {
     uint32_t unused;
@@ -83,8 +64,7 @@ void PokeRoots(LabBoxShape shape, uint64_t roots) {
     }
 }
 
-// g_external0 = コマンドの数、g_external1 = 箱の形(LabPackShape。T-0173)、g_external2 = 表の物質の数、g_external3 = 表の規則の数
-// (規則の数を GetDimensions で読まない: g_rules はルートの SRV で、大きさを持たない〔読むと未定義。WARP は読めても HW は読めない〕。T-0024)
+// g_external0 = コマンドの数、g_external1 = 箱の形(LabPackShape。T-0173)、g_external2 = 表の物質の数
 [numthreads(1, 1, 1)] void ApplyLabCommands() {
     const LabBoxShape shape = LabUnpackShape(g_external1);
     uint64_t touched = 0;  // つつく根(LabRootBit)
@@ -96,12 +76,6 @@ void PokeRoots(LabBoxShape shape, uint64_t roots) {
         // --- 表を替えた印: セルは変えず、箱の根を全部つつくだけ(sim/lab_box.cpp の ApplyLabCommands と同じ。T-0218)---
         if (LabCommandMarksTable(command)) {
             touched |= LabAllRoots(shape);
-            continue;
-        }
-
-        // --- 魔法のパッチ(T-0024): 列に足す。足せたら範囲が重なる根をつつく(sim/lab_box.cpp と同じ)---
-        if (LabCommandIsPatch(command)) {
-            touched |= LabApplyPatchCommand(MakePatchList(), MakeTable(), MakeLabBlocks(), shape, command, g_external3);
             continue;
         }
 
@@ -120,15 +94,6 @@ void PokeRoots(LabBoxShape shape, uint64_t roots) {
     PokeRoots(shape, touched);
 }
 
-    // --- 魔法のパッチの境(T-0024): 刻みの初めに、速さが変わるパッチの範囲が重なる根をつつき、終わったパッチを除く ---
-    // g_external0・g_external2 = 刻みの下位・上位、g_external1 = 箱の形(LabPackShape)。CPU リファレンスは sim/lab_box.cpp の
-    // ApplyLabPatchBoundaries
-    [numthreads(1, 1, 1)] void ApplyLabPatchBoundaries() {
-    const LabBoxShape shape = LabUnpackShape(g_external1);
-    const uint64_t tick = ((uint64_t)g_external2 << 32) | (uint64_t)g_external0;
-    PokeRoots(shape, LabPatchBoundaries(MakePatchList(), MakeLabBlocks(), shape, tick));
-}
-
 // --- 物質の付け替え(T-0242・ADR-0065): u4 = 付け替えの表(common/species_remap.hlsli の「GPU のバッファの形」を 32bit の語で)---
 // common/species_remap.hlsli の Remap の約束(sim/probe_bindings.hlsli の ProbeSpeciesRemap と同じ並びを、語の配列で読む)
 struct LabSpeciesRemap {
@@ -143,8 +108,6 @@ struct LabSpeciesRemap {
     uint32_t PartWord() { return PartBeginWord() + speciesCount + 1; }
 
     uint32_t UnitWord() { return PartWord() + (2 * partCount); }
-
-    uint32_t SpeciesCount() { return speciesCount; }
 
     uint32_t NewId(uint32_t oldId) { return g_labCommands[NewIdWord() + oldId]; }
 
@@ -176,9 +139,8 @@ struct LabSpeciesRemap {
     }
 };
 
-// g_external0 = 箱のセルの数(u1 の全部 = 一様の値 × 枠 + 頁 × 512。使っていないセルは空なので付け替えても空のまま)、
-// g_external1・g_external2 = 差し替える刻みの下位・上位。1 スレッド = 1 セル。新しい表はもう結んである(単体の h0 を新しい表から読む)。
-// スレッド 0 は魔法のパッチの列(u5)の転換の替える先も付け替える(T-0377。CPU リファレンスは sim/lab_box.cpp の RemapLabBox)
+// g_external0 = 箱のセルの数(u1 の全部 = 一様の値 × 枠 + 頁 × 512。使っていないセルは空なので付け替えても空のまま)。
+// 1 スレッド = 1 セル。新しい表はもう結んである(単体の h0 を新しい表から読む。CPU リファレンスは sim/lab_box.cpp の RemapLabBox)
 [numthreads(64, 1, 1)] void RemapLabSpecies(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t index = dispatchThreadId.x;
     if (index >= g_external0)
@@ -188,10 +150,6 @@ struct LabSpeciesRemap {
     remap.speciesCount = g_labCommands[0];
     remap.partCount = g_labCommands[1];
     remap.unitCount = g_labCommands[2];
-    if (index == 0) {
-        const uint64_t tick = ((uint64_t)g_external2 << 32) | (uint64_t)g_external1;
-        MpRemapPatchList(MakePatchList(), remap, tick);
-    }
 
     g_cells[index] = RxRemapCell(remap, MakeTable(), g_cells[index]).cell;
 }

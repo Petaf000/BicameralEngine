@@ -13,9 +13,8 @@
 // 表の読み方は呼ぶ側が Table 型で渡す(C++ は配列の span、HLSL はバッファを読む構造体)。Table に要るメソッド:
 //   RxSpecies Species(uint32_t id) / RxRule Rule(uint32_t id) / uint32_t RuleIndex(uint32_t position) /
 //   uint64_t Rate(uint32_t rule, uint32_t kelvin) /
-//   RxRule RateRule(uint32_t id)(速さと優先度だけに使う規則。key・反応物・速さの欄だけを読む。ふつうの表は Rule と同じ。
-//   魔法のパッチを重ねた表〔magic_patch.hlsli の MpPatchedTable〕は転換の前の規則を返す: 転換が変えるのは生成物と反応熱だけで、
-//   転換の展開を核の規則を読む所ごとに写すと HW の Work Graph が大きくなりすぎて止まった。T-0397)
+//   RxRule RateRule(uint32_t id)(速さと優先度だけに使う規則。key・反応物・速さの欄だけを読む。今の表はどれも Rule と同じ。
+//   核が規則を読む所を「反応物と鍵」と「反応熱」に分けておくと、HW の Work Graph が小さく保てる。T-0397)
 //
 // セルの形も呼ぶ側が Cell 型で渡す(T-0175。成分の二段の CPU リファレンス):
 //   - RxCell: 成分はインラインの RX_MAX_CELL_SPECIES 個まで(GPU と、今の多重解像度の世界)。超える生成物は待たせる(RX_LIMIT_PRODUCTS)
@@ -82,13 +81,6 @@ struct RxSpecies {
     uint32_t ruleBegin;     // 索引(この物質を「ID が最小の反応物」に持つ規則)の始まり
     uint32_t ruleCount;
     uint32_t conductivity;  // 熱伝導率(mW/(m·K))。セルの値は物質量で重み付けた平均(heat_conduction.hlsli。T-0089)
-
-    // --- 元素の組成の型(魔法の転換の釣り合いの検査。magic_patch.hlsli・T-0359)---
-    // 組成を元素ごとの数の最大公約数で割った「型」の番号(1〜。同じ型 = 原子の比が同じ。0 = 元素を持たない)と、その公約数。
-    // c 個の物質 a と d 個の物質 b の元素が全部同じ ⇔ 型が同じ かつ c × 公約数(a) = d × 公約数(b)(整数だけで正確に判定できる)。
-    // 物質 0(使わない)の elementUnits には表の物質の数(0 番を含む)を置く(GPU で表の大きさを読むため。MpSpeciesCount)
-    uint32_t elementClass;
-    uint32_t elementUnits;
 };
 
 // 反応の規則
@@ -103,7 +95,7 @@ struct RxRule {
 
     // --- 速度と熱 ---
     uint32_t firstOrderMask;    // 速度式で次数 1 の反応物(ビット i = reactants[i])。1〜2 個
-    uint32_t activationEnergy;  // J/mol(Arrhenius の Ea。速さの表はベイク済み。魔法の触媒が下げられる上限。T-0288)
+    uint32_t activationEnergy;  // J/mol(Arrhenius の Ea。速さの表はベイク済み。表を読む道具が見るだけ)
     int64_t reactionEnthalpy;   // 進行度 1 µmol あたりの µJ(= J/mol)。Σ 生成物の H0 − Σ 反応物の H0。正なら吸熱
     uint64_t key;               // 規則の名前のハッシュ。乱数の入力に使い、表の並び(規則の ID)に結果を依存させない
 };
@@ -348,7 +340,7 @@ FX_FN int32_t RxRateExponent(uint64_t packed) {
 //   - n は P(n = k) = (1 − f)^(k−1) f(f = 1 刻みの進みの端数)。乱数は (世界のシード, changedTick, セル, 規則の鍵) だけで決まり、刻みに依らない。
 //   - 幾何分布は記憶が無いので、ブロックが変わるたびに引き直しても平均の速さは偏らない(Gillespie 1977 の 1 単位ずつの確率過程と同じ)。
 //     毎刻み変わるセルでは n ≤ 1 ⇔ 確率 f で、今までの丸めと同じ分布になる。
-//   - 速さ f はセルと規則の表だけで決まるので、ブロックが変わらない間は変わらない(魔法のパッチは「変わった」とみなして引き直す。ADR-0018)。
+//   - 速さ f はセルと規則の表だけで決まるので、ブロックが変わらない間は変わらない(表を替えた時は「変わった」とみなして引き直す。ADR-0018)。
 //   - 眠ったブロックを changedTick + n(セル・規則の最小)に起こせば、全部を計算した場合とビット一致する。D-424 の下限は要らない。
 // n = max(1, ceil(log2 U ÷ log2(1 − f)))、U = (乱数 | 1) ÷ 2^64。log2 は整数(FxLog2U64。R7)。f が 1/16 未満の時は log2(1 − f) を
 // 級数(−ln(1 − f) = f Σ f^(k−1) ÷ k)で求める(1 − f を作ると f の下の桁が消えるので)。
@@ -658,7 +650,7 @@ FX_FN RxUsage RxEmptyUsage(RxCell cell) {
 template <typename Table, typename Cell, typename Usage>
 FX_FN Usage RxSumUsage(Table table, Cell cell, RxCandidates candidates, Usage usage) {
     for (uint32_t c = 0; c < candidates.count; ++c) {
-        // 反応物は RateRule(転換で変わらない)から、反応熱だけを Rule から読む(転換した規則を動的な添字で読まない。T-0397)
+        // 反応物は RateRule から、反応熱だけを Rule から読む(規則の構造体を丸ごと動的な添字で読まない。T-0397)
         const RxRule rule = table.RateRule(candidates.rules[c]);
         const int64_t reactionEnthalpy = table.Rule(candidates.rules[c]).reactionEnthalpy;
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
@@ -707,7 +699,7 @@ FX_FN RxShrunk RxShrink(uint64_t extent, uint64_t available, uint64_t demand, ui
 }
 
 // 規則が、ある量を超えて使われている資源(物質か、吸熱なら熱)を使うか。反応物は rule(RateRule)、反応熱は reactionEnthalpy
-// (Rule。転換で変わる)
+// (Rule)
 template <typename Cell, typename Usage>
 FX_FN bool RxOverdraws(RxRule rule, int64_t reactionEnthalpy, Cell cell, Usage used, uint64_t heatAvailable) {
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
@@ -769,7 +761,7 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
     RxCandidates resolved = candidates;
     uint32_t roundedUp = 0;
     for (uint32_t c = 0; c < candidates.count; ++c) {
-        const RxRule rule = table.RateRule(candidates.rules[c]);  // 反応物と鍵(転換で変わらない)
+        const RxRule rule = table.RateRule(candidates.rules[c]);  // 反応物と鍵
         const int64_t reactionEnthalpy = table.Rule(candidates.rules[c]).reactionEnthalpy;
         const uint64_t extent = candidates.extents[c];
         const uint32_t random = RxShrinkRandom(randomSeed, rule);
@@ -888,7 +880,7 @@ FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates
     // --- 反応物を引く(差し込みで位置がずれる前に。呼ぶ側の cell は残す)---
     RX_MAKE_WRITABLE(cell);
     for (uint32_t c = 0; c < resolved.count; ++c) {
-        const RxRule rule = table.RateRule(resolved.rules[c]);  // 反応物は転換で変わらない
+        const RxRule rule = table.RateRule(resolved.rules[c]);  // 反応物
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
             const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
             const uint64_t amount = resolved.extents[c] * (uint64_t)rule.reactantCoefficients[i];
@@ -902,7 +894,7 @@ FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates
     result.cell = RxCompactCell(cell);
     result.overflowed = 0;
     for (uint32_t c = 0; c < resolved.count; ++c) {
-        // 生成物の欄は決まった数だけ回す(転換した規則を動的な添字で読むと、GPU でローカルの配列になる。T-0397)
+        // 生成物の欄は決まった数だけ回す(規則を動的な添字で読むと、GPU でローカルの配列になる。T-0397)
         const RxRule rule = table.Rule(resolved.rules[c]);
         FX_UNROLL for (uint32_t i = 0; i < RX_MAX_PRODUCTS; ++i) {
             if (i >= rule.productCount)

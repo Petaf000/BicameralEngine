@@ -177,7 +177,6 @@ bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY MirrorWorld NAM
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY ExtractShadow NAME multires_peek_extract)  # 覗き窓の抽出(T-0096)
 bicameral_add_shader(sim/lab_box.hlsl PROFILE cs_6_8 ENTRY ApplyLabCommands NAME lab_box_apply)  # 実験室の箱のコマンドを当てる(T-0142)
 bicameral_add_shader(sim/lab_box.hlsl PROFILE cs_6_8 ENTRY RemapLabSpecies NAME lab_box_remap)  # 実験室の箱の物質の付け替え(T-0242)
-bicameral_add_shader(sim/lab_box.hlsl PROFILE cs_6_8 ENTRY ApplyLabPatchBoundaries NAME lab_box_patch_boundaries)  # 魔法のパッチの境(T-0024)
 bicameral_add_shader(render/probe_view.hlsl PROFILE vs_6_8 ENTRY VSMain NAME probe_view_vs)
 bicameral_add_shader(render/probe_view.hlsl PROFILE ps_6_8 ENTRY PSMain NAME probe_view_ps)
 

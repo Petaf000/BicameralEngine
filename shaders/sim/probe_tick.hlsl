@@ -150,58 +150,6 @@ void ApplyPlace(uint64_t tick, uint32_t address, uint32_t thread) {
     EmitTickEvent(PROBE_EVENT_PLACE_APPLIED, ProbePokePlace(place.x, place.y, place.z));
 }
 
-// --- 魔法のパッチ(T-0323・ADR-0095。common/probe_patch.hlsli)---
-
-// パッチの範囲が重なるブロックを「刻みの直前に変わった」にし、起こす刻みを今にする(置くコマンドと同じ。この後の WakeDueBlocks が
-// 一覧へ 1 回だけ足す)。速さが変わる刻みに待ちを引き直させる(ADR-0018)
-void WakePatchBlocks(uint64_t tick, MpPatch patch) {
-    const ProbePatchBlocks range = ProbePatchBlockRange(patch);
-    if (range.valid == 0)
-        return;
-
-    for (uint32_t bz = range.beginZ; bz <= range.endZ; ++bz) {
-        for (uint32_t by = range.beginY; by <= range.endY; ++by) {
-            for (uint32_t bx = range.beginX; bx <= range.endX; ++bx) {
-                const uint32_t block = ProbeBlockIndex(bx, by, bz);
-                StoreBlockMark(PROBE_SCHEDULE_CHANGED_WORD, block, ProbeChangeMark(tick) - 1);
-                StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, block, ProbeChangeMark(tick));
-            }
-        }
-    }
-}
-
-// 刻みの初め(コマンドを当てる前): 速さが変わる(始まり・終わり)パッチの範囲を起こし、終わったパッチを列から除く(スレッド 0 だけ)。
-// CPU リファレンスの ApplyPatchBoundaries と同じ順
-void ApplyPatchBoundaries(uint64_t tick) {
-    const uint32_t count = MpPatchCount(PatchList());
-    for (uint32_t i = 0; i < count; ++i) {
-        const MpPatch patch = MpLoadPatch(PatchList(), i);
-        if (MpBoundaryAt(patch, tick))
-            WakePatchBlocks(tick, patch);
-    }
-
-    MpRetireExpired(PatchList(), tick);
-}
-
-// パッチを置くコマンド: 列に足し、足せたら範囲を起こす。足せなければ断った数を S(t + 1) の欄へ(スレッド 0 だけ)
-void ApplyPatch(uint64_t tick, uint32_t address) {
-    ProbePatchPayload payload;
-    [unroll] for (uint32_t word = 0; word < MP_COMMAND_WORDS; ++word)
-        payload.words[word] = commandQueue.Load(address + 16 + (word * 4));
-
-    const MpPatch patch = ProbeDecodePatch(payload, tick);
-    const uint32_t index = MpPatchCount(PatchList());
-    if (!MpAddPatch(PatchList(), ReactionTable(), patch, tick, ruleCount)) {
-        uint32_t previous;
-        hashes.InterlockedAdd(HashEntryAddress(tick + 1) + PROBE_HASH_OFFSET_PATCHES_REFUSED, 1, previous);
-        EmitTickEvent(PROBE_EVENT_PATCH_APPLIED, PROBE_PATCH_REFUSED);
-        return;
-    }
-
-    WakePatchBlocks(tick, patch);
-    EmitTickEvent(PROBE_EVENT_PATCH_APPLIED, index);
-}
-
 // 置くコマンドはグループの全部のスレッドで、ほかはスレッド 0 だけが当てる(T-0280)
 void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address, uint32_t thread) {
     const uint32_t type = commandHead.w & 0xFFFFu;
@@ -215,11 +163,6 @@ void ApplyCommand(uint64_t tick, uint4 commandHead, uint32_t address, uint32_t t
 
     if (type == PROBE_COMMAND_TYPE_PUSH) {
         ApplyPush(address);
-        return;
-    }
-
-    if (type == PROBE_COMMAND_TYPE_PATCH) {
-        ApplyPatch(tick, address);
         return;
     }
 
@@ -359,7 +302,6 @@ void SortEventKeys(uint32_t thread) {
     if (thread == 0) {
         BeginTick(tick);
         WgGaugePeak(PROBE_STATS_GAUGE_COMMAND_QUEUE, tail - head);  // 待っている数(T-0008)
-        ApplyPatchBoundaries(tick);  // 魔法のパッチの始まり・終わり(コマンドの前。T-0323)
     }
 
     DeviceMemoryBarrierWithGroupSync();  // BeginTick が 0 にした湧き出しの欄へ、置くコマンドが足す
@@ -433,15 +375,11 @@ void SortEventKeys(uint32_t thread) {
 
 // --- [0] の前(物質の一覧が変わる表に差し替えた刻みだけ。T-0223・ADR-0065): 2 世代のセルの物質を名前で付け替える ---
 // CPU が新しい表と付け替えの表(t5)を写してから、適用の単位の前に流す(コマンドの適用も新しい ID で)。1 スレッド = 1 セル。
-// 本体は CPU リファレンス(sim::ProbeReference の RemapSpecies)と同じ RxRemapCell。スレッド 0 は魔法のパッチの列(u14)の
-// 転換の替える先も付け替える(MpRemapPatchList。単位の定数の刻み = 差し替える刻み。T-0377)
+// 本体は CPU リファレンス(sim::ProbeReference の RemapSpecies)と同じ RxRemapCell
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RemapSpecies(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t index = dispatchThreadId.x;
     if (index >= 2 * PROBE_CELL_COUNT)
         return;
-
-    if (index == 0)
-        MpRemapPatchList(PatchList(), SpeciesRemap(), CurrentTick());
 
     cells[index] = RxRemapCell(SpeciesRemap(), ReactionTable(), cells[index]).cell;
 }
@@ -478,10 +416,6 @@ void SortEventKeys(uint32_t thread) {
         cellHash = ProbeCellHash(cellIndex, cell);
         energy = (uint64_t)cell.energy;  // 負の値も 2 の補数のまま足す(mod 2^64 の和。CPU も同じ)
     }
-
-    // 魔法のパッチの列の要約(列が空なら 0。T-0323)はセル 0 のスレッドが足す(列は S(t + 1) の一部)
-    if (cellIndex == 0)
-        cellHash += MpListHash(PatchList());
 
     const uint64_t hashSum = WaveActiveSum(cellHash);
     const uint64_t energySum = WaveActiveSum(energy);

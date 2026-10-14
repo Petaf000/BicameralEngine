@@ -26,7 +26,6 @@
 #include "editor/graph_panel.h"
 #include "editor/lab_panel.h"
 #include "editor/mixer_panel.h"
-#include "editor/patch_panel.h"
 #include "editor/play_metric_panel.h"
 #include "editor/reaction_table_panel.h"
 #include "editor/time_control.h"
@@ -102,9 +101,6 @@ namespace bicameral::editor {
         // --- 筆の形(カーソルの下。画面の線分。筆を持っていない・カーソルが断面に当たらない・パネルの上なら空。T-0279)---
         std::vector<BrushPreviewLine> brushPreview;
 
-        // --- 魔法のパッチの範囲(仮の世界の画面の線分。T-0325)---
-        std::vector<BrushPreviewLine> patchRanges;
-
         // --- 写しの早送り(T-0412)---
         CopyProgress copy;
 
@@ -148,9 +144,6 @@ namespace bicameral::editor {
         // 世界に物を置く筆(T-0222)
         [[nodiscard]] BrushPanel& Brush() { return *m_brush; }
 
-        // 魔法のパッチを置くパネル(T-0325)
-        [[nodiscard]] PatchPanel& Patch() { return *m_patch; }
-
         // 環境ミキサー(T-0452。標準パッケージを世界に足す・外す)
         [[nodiscard]] MixerPanel& Mixer() { return *m_mixer; }
 
@@ -193,7 +186,6 @@ namespace bicameral::editor {
         std::unique_ptr<GaugePanel> m_gauge;
         std::unique_ptr<ReactionTablePanel> m_reactionTable;
         std::unique_ptr<BrushPanel> m_brush;
-        std::unique_ptr<PatchPanel> m_patch;
         std::unique_ptr<MixerPanel> m_mixer;
         std::unique_ptr<CopyPanel> m_copy;
         std::unique_ptr<PlayMetricPanel> m_playMetrics;

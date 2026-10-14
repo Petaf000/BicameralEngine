@@ -348,7 +348,7 @@ uint64_t EvaluateUniformCells(uint32_t slot, MrBlock block, uint32_t thread) {
         if (!MrIsSteppedCell(block, index))
             continue;
 
-        const RxWaitStep step = MrStepCellWait(MakeStepTable(), value, seed, tick, block, index);
+        const RxWaitStep step = MrStepCellWait(MakeTable(), value, seed, tick, block, index);
         wakeTick = MinTick(wakeTick, step.wakeTick);
         changes = changes || MrUniformStepExpands(step, value, UNIFORM_EXPANDS_HELD);
     }
@@ -572,7 +572,7 @@ bool ApplyCell(MrBlock block, uint32_t index, bool react, inout uint64_t wakeTic
         if (WideHasTail(cell, block.page, WideCurrentSide(block.page), index))
             return DeferWideCell(block, index, cell, before, fraction.energy != fractionBefore);
 #endif
-        const RxWaitStep step = MrStepCellWait(MakeStepTable(), cell, seed, tick, block, index);
+        const RxWaitStep step = MrStepCellWait(MakeTable(), cell, seed, tick, block, index);
 #ifdef MR_WIDE_CELLS
         // 9 種目の生成物を待たせたセルも(8 種以下の間はインラインの核と上限の無い形がビット単位で同じ。T-0175)
         if ((step.limits & RX_LIMIT_PRODUCTS) != 0)

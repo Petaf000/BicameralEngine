@@ -66,7 +66,6 @@ namespace bicameral::editor {
         overlay->m_gauge = std::make_unique<GaugePanel>();
         overlay->m_reactionTable = std::make_unique<ReactionTablePanel>();
         overlay->m_brush = std::make_unique<BrushPanel>();
-        overlay->m_patch = std::make_unique<PatchPanel>();
         overlay->m_mixer = std::make_unique<MixerPanel>();
         overlay->m_copy = std::make_unique<CopyPanel>();
         overlay->m_playMetrics = std::make_unique<PlayMetricPanel>();
@@ -233,12 +232,10 @@ namespace bicameral::editor {
         m_gauge->Build(*m_lab);
         m_reactionTable->Build(status.reactionTable);
         m_brush->Build();
-        m_patch->Build(*m_lab);
         m_mixer->Build(status.reactionTable, status.replaying);
         m_copy->Build(status.copy, TICKS_PER_SECOND);
         m_playMetrics->Build(status.playMetrics, TICKS_PER_SECOND);
         DrawBrushPreview(status.brushPreview);
-        PatchPanel::DrawRanges(status.patchRanges);
 
         ImGui::Render();
 

@@ -11,7 +11,6 @@
 #define BICAMERAL_MULTIRES_WAIT_STEP_HLSLI
 
 #include "sim/multires_bindings.hlsli"
-#include "sim/multires_patches.hlsli"
 
 static const uint32_t WAIT_STEP_THREADS = 64;
 
@@ -88,7 +87,7 @@ WaitBlockResult StepPagedWait(uint32_t slot, uint32_t thread) {
 
         const uint32_t address = PageCellAddress(block.page, index);
         const RxCell before = g_cells[address];
-        const RxWaitStep step = MrStepCellWait(MakeStepTable(), before, seed, tick, block, index);
+        const RxWaitStep step = MrStepCellWait(MakeTable(), before, seed, tick, block, index);
         g_cells[address] = step.cell;
         wakeTick = MinTick(wakeTick, step.wakeTick);
         tally = MrAddLimits(tally, step.limits);
@@ -128,7 +127,7 @@ WaitBlockResult EvaluateUniformWait(uint32_t slot, uint32_t thread) {
         if (!MrIsSteppedCell(block, index))
             continue;
 
-        const RxWaitStep step = MrStepCellWait(MakeStepTable(), value, seed, tick, block, index);
+        const RxWaitStep step = MrStepCellWait(MakeTable(), value, seed, tick, block, index);
         wakeTick = MinTick(wakeTick, step.wakeTick);
         if (MrUniformStepExpands(step, value, UNIFORM_EXPANDS_HELD))
             InterlockedOr(gs_waitChanged, 1u);
@@ -186,7 +185,7 @@ WaitBlockResult EvaluateUniformWaitWide(uint32_t slot, uint32_t thread) {
         if (!MrIsSteppedCell(block, index))
             continue;
 
-        const RxWaitStepOf<RxGpuMidCell> step = MrStepCellWait(MakeStepTable(), value, seed, tick, block, index);
+        const RxWaitStepOf<RxGpuMidCell> step = MrStepCellWait(MakeTable(), value, seed, tick, block, index);
         wakeTick = MinTick(wakeTick, step.wakeTick);
         if (!SameGpuWideCell(step.cell, value) || (step.limits & RX_LIMIT_PRODUCTS) != 0)
             InterlockedOr(gs_waitChanged, 1u);
