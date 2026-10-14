@@ -185,5 +185,5 @@
     if (i >= g_bodyCount)
         return;
 
-    g_bodies[i] = PxFinishBody(g_bodies[i]);
+    g_bodies[i] = PxFinishBody(g_bodies[i], CurrentGravity());
 }

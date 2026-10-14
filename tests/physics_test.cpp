@@ -1,6 +1,7 @@
 // physics_test.cpp — 整数の AVBD(T-0016 研究 R-PHYS-1、08 §6)の CPU のテスト。
 //   math: 128bit の平方根が厳密 / 6×6 の解(2 の冪の対称スケーリング + Q62 の Cholesky)が、値の幅の広い行列でも
 //         double の解と 1e-6 以内(硬さ M/h²〜M/h² × 2^20 と質量の項が混ざる行列を真似る)
+//   energy: 散逸の帳簿(T-0519)。落とした物・滑る物で、失った力学的エネルギーと帳簿の散逸がビット単位で同じで、量が m g h・½ m v² と合う
 //   scene <名前>: 場面(stack・mass_ratio・pile)を整数で走らせ、チケットの基準を判定する。
 //         同じ場面をもう 1 回(最初の 600 刻み)走らせて、60 刻みごとの状態のハッシュが一致する(決定性)
 // 判定のための量(エネルギー・速さ・傾き)は double で計算する(テストだけ。シミュは整数)。
@@ -440,6 +441,124 @@ namespace {
         TestMaxGravity();
     }
 
+    // --- 散逸の帳簿(T-0519)--------------------------------------------------------------------------
+    constexpr double ENERGY_UNIT_JOULES = 1e-6 / 1024;  // 2^-10 µJ(physics::PX_ENERGY_FRACTION_BITS)
+
+    // 世界にいる動く物の力学的エネルギーを物の状態から数え直した和(帳簿の「直近に数えた値」に頼らない)
+    int64_t MechanicalEnergyNow(const sim::PhysicsWorld& world, int64_t gravity) {
+        int64_t sum = 0;
+        for (const sim::PhysicsBody& body : world.Bodies())
+            sum += PxMechanicalEnergy(body, gravity);
+
+        return sum;
+    }
+
+    double DoubleEnergyNow(const sim::PhysicsWorld& world) {
+        double sum = 0;
+        for (const sim::PhysicsBody& body : world.Bodies()) {
+            if (PxIsDynamic(body) && body.active != 0)
+                sum += EnergyOf(body);
+        }
+
+        return sum;
+    }
+
+    struct EnergyRun {
+        int64_t lost = 0;              // 区間で減った力学的エネルギー(初め − 終わり。数え直した値)
+        int64_t dissipated = 0;        // 区間で帳簿に載った散逸(Σ dissipatedEnergy の増え)
+        int64_t mostCreated = 0;       // 1 刻みで帳簿が減った最大(解き方が生んだエネルギー。正の値)
+        double doubleLost = 0;         // double の目安で減った量(J)
+        double finalSpeed = 0;         // 終わりの最大の速さ(m/s)
+        std::vector<int64_t> perTick;  // 刻みごとの帳簿の合計(2 回の実行の一致)
+    };
+
+    // 今の状態から ticks 刻み進め、帳簿と数え直しを比べる
+    EnergyRun RunEnergy(sim::PhysicsWorld& world, int64_t gravity, uint64_t ticks) {
+        EnergyRun run;
+        const int64_t startEnergy = MechanicalEnergyNow(world, gravity);
+        const int64_t startDissipated = sim::SumPhysicsEnergy(world.Bodies()).dissipatedEnergy;
+        const double startDouble = DoubleEnergyNow(world);
+        int64_t previous = startDissipated;
+        for (uint64_t tick = 0; tick < ticks; ++tick) {
+            world.Step();
+            const sim::PhysicsEnergyLedger ledger = sim::SumPhysicsEnergy(world.Bodies());
+            run.mostCreated = std::max(run.mostCreated, previous - ledger.dissipatedEnergy);
+            previous = ledger.dissipatedEnergy;
+            run.perTick.push_back(ledger.dissipatedEnergy);
+        }
+
+        const sim::PhysicsEnergyLedger ledger = sim::SumPhysicsEnergy(world.Bodies());
+        Expect(ledger.mechanicalEnergy == MechanicalEnergyNow(world, gravity),
+               "帳簿の力学的エネルギーが物の状態から数え直した値と違う");
+        run.lost = startEnergy - MechanicalEnergyNow(world, gravity);
+        run.dissipated = ledger.dissipatedEnergy - startDissipated;
+        run.doubleLost = startDouble - DoubleEnergyNow(world);
+        for (const sim::PhysicsBody& body : world.Bodies()) {
+            if (PxIsDynamic(body))
+                run.finalSpeed = std::max(run.finalSpeed, SpeedOf(body));
+        }
+
+        return run;
+    }
+
+    // 帳簿の式(失った力学的エネルギー = 帳簿に載った散逸)がビット単位で合い、量が物理の目安(J)と合う
+    void CheckEnergyRun(std::string_view name, const EnergyRun& run, double expectedJoules, double tolerance) {
+        const double lostJoules = (double)run.lost * ENERGY_UNIT_JOULES;
+        Log(Channel::Physics, Level::Info,
+            "{}: 失った力学的エネルギー {} = 帳簿 {}(2^-10 µJ)= {:.3f} J(目安 {:.3f} J・double の数え {:.3f} J)/ "
+            "1 刻みで生まれた最大 {:.6f} J / 終わりの速さ {:.4f} m/s",
+            name, run.lost, run.dissipated, lostJoules, expectedJoules, run.doubleLost,
+            (double)run.mostCreated * ENERGY_UNIT_JOULES, run.finalSpeed);
+        Expect(run.lost == run.dissipated,
+               std::format("{}: 失った力学的エネルギーと帳簿の散逸がビット単位で違う", name));
+        Expect(std::abs(lostJoules - expectedJoules) < expectedJoules * tolerance,
+               std::format("{}: 失った量が目安から {}% 以上ずれた", name, tolerance * 100));
+        Expect(std::abs(lostJoules - run.doubleLost) < expectedJoules * 1e-3,
+               std::format("{}: 整数の数えと double の数えが 0.1% 以上ずれた", name));
+    }
+
+    // 落とした物: 10 m 上の 500 kg の立方体が落ちて止まる → 失った = m g × 10 m(止まれば運動は 0)
+    EnergyRun RunDrop() {
+        const sim::PhysicsScene scene = MakeFallScene();
+        const physics::PxParameters parameters = sim::PhysicsParametersFor(
+            {.gravityMicrometersPerSecond2 = sim::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2});
+        sim::PhysicsWorld world(scene, parameters);
+        world.Step();  // 物が世界に入る(初めの 1 刻みは落ちるだけ。散逸は 0 に近い)
+
+        return RunEnergy(world, parameters.gravity, 239);
+    }
+
+    // 滑る物: 地面に置いた 500 kg の立方体を重心の高さで横に 2500 N·s(5 m/s)押す → 摩擦で止まる。失った = ½ m v²
+    EnergyRun RunSlide() {
+        sim::PhysicsScene scene = sim::MakeStackScene();
+        scene.name = "slide";
+        scene.bodies.resize(2);
+        const physics::PxParameters parameters = sim::PhysicsParametersFor(
+            {.gravityMicrometersPerSecond2 = sim::STANDARD_GRAVITY_MICROMETERS_PER_SECOND2});
+        sim::PhysicsWorld world(scene, parameters);
+        for (int tick = 0; tick < 30; ++tick)
+            world.Step();
+
+        constexpr int64_t UNIT = (int64_t)1 << 30;  // Q1.30 の 1
+        const uint32_t hit = world.Push(PxMakeVec3(-5 * METER_UNITS, METER_UNITS / 2, 0), PxMakeVec3(UNIT, 0, 0),
+                                        2500000);
+        Expect(hit == 1, "滑る物: 押す光線が立方体に当たらない");
+
+        return RunEnergy(world, parameters.gravity, 120);
+    }
+
+    void TestEnergy() {
+        const EnergyRun drop = RunDrop();
+        CheckEnergyRun("落とした物", drop, 500 * GRAVITY * 10, 0.01);
+        Expect(drop.finalSpeed < 0.01, "落とした物が止まらない");
+        Expect(RunDrop().perTick == drop.perTick, "落とした物: 2 回目の実行の帳簿が食い違った");
+
+        const EnergyRun slide = RunSlide();
+        CheckEnergyRun("滑る物", slide, 0.5 * 500 * 5 * 5, 0.02);
+        Expect(slide.finalSpeed < 0.01, "滑る物が止まらない");
+        Expect(RunSlide().perTick == slide.perTick, "滑る物: 2 回目の実行の帳簿が食い違った");
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -451,9 +570,11 @@ int main(int argc, char** argv) {
         TestScene(argv[2], FULL_BY_DEFAULT || (argc > 3 && std::string_view(argv[3]) == "--full"));
     else if (mode == "gravity")
         TestGravity();
+    else if (mode == "energy")
+        TestEnergy();
     else {
         Log(Channel::Physics, Level::Error,
-            "使い方: physics_test math | gravity | scene stack|mass_ratio|pile [--full]");
+            "使い方: physics_test math | gravity | energy | scene stack|mass_ratio|pile [--full]");
         failureCount = 1;
     }
 

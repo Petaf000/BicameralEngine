@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -22,7 +23,7 @@ namespace bicameral::sim {
     using PhysicsManifold = physics::PxManifold;
 
     // HLSL の構造化バッファと同じ並び(physics_step.hlsli の約束。変えたら GPU のテストも確かめる)
-    static_assert(sizeof(PhysicsBody) == 448);
+    static_assert(sizeof(PhysicsBody) == 464);
     static_assert(sizeof(PhysicsContactPoint) == 368);
     static_assert(sizeof(PhysicsManifold) == 3016);
     static_assert(sizeof(physics::PxParameters) == 104);
@@ -49,6 +50,16 @@ namespace bicameral::sim {
         uint32_t lambdaBits = 0;   // λ
         uint32_t deltaBits = 0;    // 変位・回転(2^-32)
     };
+
+    // 物理の散逸の帳簿(T-0519。単位 2^-10 µJ = physics::PX_ENERGY_FRACTION_BITS)。物の一覧から数えるので、
+    // CPU の世界(Bodies())にも GPU の読み戻し(GpuPhysics::ReadBodies())にも使える(整数の和なので順番に依存しない)
+    struct PhysicsEnergyLedger {
+        int64_t mechanicalEnergy = 0;  // 世界にいる動く物の力学的エネルギーの和(各物が直近の小刻みの終わりに数えた値)
+        int64_t dissipatedEnergy =
+            0;  // 失った力学的エネルギーの累計の和 = 世界へ返す熱(返すのは T-0542。消えた物の分も含む)
+    };
+
+    [[nodiscard]] PhysicsEnergyLedger SumPhysicsEnergy(std::span<const PhysicsBody> bodies);
 
     class PhysicsWorld {
     public:

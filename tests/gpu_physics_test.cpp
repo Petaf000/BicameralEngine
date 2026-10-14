@@ -113,6 +113,20 @@ namespace {
         return {};
     }
 
+    // 散逸の帳簿(T-0519)が物ごとにビット単位で同じか
+    std::string CompareEnergy(const std::vector<sim::PhysicsBody>& cpu, const std::vector<sim::PhysicsBody>& gpu) {
+        for (size_t index = 0; index < cpu.size() && index < gpu.size(); ++index) {
+            if (cpu[index].dissipatedEnergy != gpu[index].dissipatedEnergy ||
+                cpu[index].mechanicalEnergy != gpu[index].mechanicalEnergy) {
+                return std::format("物 {} の散逸の帳簿が食い違う: 失った {}/{}・力学的 {}/{}(cpu/gpu。2^-10 µJ)", index,
+                                   cpu[index].dissipatedEnergy, gpu[index].dissipatedEnergy,
+                                   cpu[index].mechanicalEnergy, gpu[index].mechanicalEnergy);
+            }
+        }
+
+        return {};
+    }
+
     // パスの種類ごとの GPU 時間(1 刻みあたり)
     void ReportProfile(const sim::GpuPhysics& physics, ID3D12CommandQueue* queue, uint64_t tickCount) {
         uint64_t frequency = 0;
@@ -224,6 +238,10 @@ namespace {
             const std::string statsError = CompareStats(world->Stats(), stats);
             if (!statsError.empty())
                 return std::unexpected(std::format("刻み {}: {}", end, statsError));
+
+            const std::string energyError = CompareEnergy(world->Bodies(), bodies);
+            if (!energyError.empty())
+                return std::unexpected(std::format("刻み {}: {}", end, energyError));
         }
 
         return run;

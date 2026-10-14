@@ -39,6 +39,17 @@ namespace bicameral::sim {
         return body;
     }
 
+    PhysicsEnergyLedger SumPhysicsEnergy(std::span<const PhysicsBody> bodies) {
+        PhysicsEnergyLedger ledger;
+        for (const PhysicsBody& body : bodies) {
+            ledger.dissipatedEnergy += body.dissipatedEnergy;
+            if (PxIsDynamic(body) && body.active != 0)
+                ledger.mechanicalEnergy += body.mechanicalEnergy;
+        }
+
+        return ledger;
+    }
+
     PhysicsWorld::PhysicsWorld(const PhysicsScene& scene, const PxParameters& parameters)
         : m_scene(scene), m_parameters(parameters), m_rate(PxStepRate(parameters)) {
         for (const PhysicsSceneBody& source : scene.bodies)
@@ -300,7 +311,7 @@ namespace bicameral::sim {
 
     void PhysicsWorld::Finish() {
         for (PhysicsBody& body : m_bodies)
-            body = PxFinishBody(body);
+            body = PxFinishBody(body, m_parameters.gravity);
     }
 
     // 光線が最初に入る物を番号の順に探し、動く物なら入った点に力積を加える(common/physics_push.hlsli。GPU の押すコマンドと同じ手順)
