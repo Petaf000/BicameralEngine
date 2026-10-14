@@ -28,6 +28,112 @@ namespace bicameral::script {
             return static_cast<uint32_t>(*value);
         }
 
+        // 成分の表(物質 → ppm)を名前のまま読む(物質の名前と合計はベイクが確かめる)
+        std::expected<std::vector<sim::AtmosphereFractionDefinition>, std::string> ReadComposition(
+            const ScriptValue& value, const std::string& path) {
+            if (auto table = RequireTable(value, path); !table)
+                return std::unexpected(table.error());
+
+            std::vector<sim::AtmosphereFractionDefinition> fractions;
+            for (const ScriptField& field : value.fields) {
+                if (!field.key.IsString())
+                    return std::unexpected(std::format("{}: 鍵は物質の名前", path));
+
+                const auto parts = ReadInteger(field.value, std::format("{}.{}", path, field.key.text), 0,
+                                               sim::ATMOSPHERE_PARTS_PER_WHOLE);
+                if (!parts)
+                    return std::unexpected(parts.error());
+
+                fractions.push_back({.species = field.key.text, .partsPerMillion = static_cast<uint32_t>(*parts)});
+            }
+
+            return fractions;
+        }
+
+        // 高さの 1 つの点 { height_mm, temperature_mk, composition }
+        std::expected<sim::AtmospherePointDefinition, std::string> ReadProfilePoint(const ScriptValue& value,
+                                                                                    const std::string& path) {
+            static constexpr std::string_view FIELDS[] = {"height_mm", "temperature_mk", "composition"};
+            if (auto record = CheckRecord(value, FIELDS, path); !record)
+                return std::unexpected(record.error());
+
+            const auto height = ReadIntegerField(value, "height_mm", path, -sim::ATMOSPHERE_HEIGHT_LIMIT_MILLIMETERS,
+                                                 sim::ATMOSPHERE_HEIGHT_LIMIT_MILLIMETERS);
+            if (!height)
+                return std::unexpected(height.error());
+
+            const auto temperature = ReadIntegerField(value, "temperature_mk", path, 1,
+                                                      ATMOSPHERE_TEMPERATURE_MAX_MILLIKELVIN);
+            if (!temperature)
+                return std::unexpected(temperature.error());
+
+            const auto composition = RequireField(value, "composition", path);
+            if (!composition)
+                return std::unexpected(composition.error());
+
+            auto fractions = ReadComposition(**composition, path + ".composition");
+            if (!fractions)
+                return std::unexpected(fractions.error());
+
+            return sim::AtmospherePointDefinition{.label = path,
+                                                  .heightMillimeters = *height,
+                                                  .temperatureMilliKelvin = static_cast<uint32_t>(*temperature),
+                                                  .fractions = std::move(*fractions)};
+        }
+
+        // environment.atmosphere_profile = { {…}, {…} }(書いた順。鍵は 1, 2, 3…。高さの順はベイクが確かめる)
+        std::expected<std::vector<sim::AtmospherePointDefinition>, std::string> ReadProfile(const TableEntry& entry) {
+            const std::string path = std::format("{}.{}", ENVIRONMENT_CATEGORY, ENVIRONMENT_ATMOSPHERE_PROFILE_KEY);
+            const auto fail = [&](const std::string& message) {
+                return std::unexpected(std::format("パッケージ {}: {}", entry.package, message));
+            };
+            if (!entry.value.IsTable() || entry.value.fields.empty())
+                return fail(std::format("{}: 点の列(1, 2, 3…)で書く", path));
+
+            std::vector<sim::AtmospherePointDefinition> points;
+            for (const ScriptField& field : entry.value.fields) {
+                if (!field.key.IsNumber() || field.key.number != static_cast<double>(points.size() + 1))
+                    return fail(std::format("{}: 点の列(1, 2, 3…)で書く", path));
+
+                auto point = ReadProfilePoint(field.value, std::format("{}[{}]", path, points.size() + 1));
+                if (!point)
+                    return fail(point.error());
+
+                points.push_back(std::move(*point));
+            }
+
+            return points;
+        }
+
+        // 一様な大気(T-0373 の書き方): environment.atmosphere_temperature_mk と分類 atmosphere = 高さ 0 の点 1 つ。
+        // 片方だけでも点を作り、無い方はベイクが「成分が無い」「温度が無い」で止める
+        std::expected<sim::AtmospherePointDefinition, std::string> ReadUniform(
+            const TableEntry* temperature, const std::map<std::string, TableEntry>* composition) {
+            sim::AtmospherePointDefinition point;
+            if (temperature != nullptr) {
+                const auto value = ReadValue(std::string(ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY), *temperature, 1,
+                                             ATMOSPHERE_TEMPERATURE_MAX_MILLIKELVIN);
+                if (!value)
+                    return std::unexpected(value.error());
+
+                point.temperatureMilliKelvin = *value;
+            }
+
+            if (composition == nullptr)
+                return point;
+
+            for (const auto& [species, entry] : *composition) {
+                const auto parts = ReadInteger(entry.value, std::format("{}.{}", ATMOSPHERE_CATEGORY, species), 0,
+                                               sim::ATMOSPHERE_PARTS_PER_WHOLE);
+                if (!parts)
+                    return std::unexpected(std::format("パッケージ {}: {}", entry.package, parts.error()));
+
+                point.fractions.push_back({.species = species, .partsPerMillion = static_cast<uint32_t>(*parts)});
+            }
+
+            return point;
+        }
+
     }  // namespace
 
     std::expected<sim::WorldPhysics, std::string> ReadWorldEnvironment(const PackageSetResult& packages) {
@@ -52,7 +158,8 @@ namespace bicameral::script {
                     return std::unexpected(soundSpeed.error());
 
                 world.soundSpeedMillimetersPerSecond = *soundSpeed;
-            } else if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY || key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY) {
+            } else if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY || key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY ||
+                       key == ENVIRONMENT_ATMOSPHERE_PROFILE_KEY) {
                 continue;  // 基準の大気の値(ReadWorldAtmosphere が読む)
             } else {
                 return std::unexpected(
@@ -65,17 +172,17 @@ namespace bicameral::script {
 
     std::expected<sim::WorldAtmosphereDefinition, std::string> ReadWorldAtmosphere(const PackageSetResult& packages) {
         sim::WorldAtmosphereDefinition atmosphere;
+        const TableEntry* temperature = nullptr;
+        const TableEntry* profile = nullptr;
 
-        // --- 温度と地面の圧力(分類 environment の 2 つの鍵)---
+        // --- 分類 environment の大気の値(地面の圧力・一様な大気の温度・高さの点の列)---
         if (const auto environment = packages.tables.find(std::string(ENVIRONMENT_CATEGORY));
             environment != packages.tables.end()) {
             for (const auto& [key, entry] : environment->second) {
                 if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY) {
-                    const auto temperature = ReadValue(key, entry, 1, ATMOSPHERE_TEMPERATURE_MAX_MILLIKELVIN);
-                    if (!temperature)
-                        return std::unexpected(temperature.error());
-
-                    atmosphere.temperatureMilliKelvin = *temperature;
+                    temperature = &entry;
+                } else if (key == ENVIRONMENT_ATMOSPHERE_PROFILE_KEY) {
+                    profile = &entry;
                 } else if (key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY) {
                     const auto pressure = ReadValue(key, entry, 1, ATMOSPHERE_PRESSURE_MAX_PASCALS);
                     if (!pressure)
@@ -86,18 +193,26 @@ namespace bicameral::script {
             }
         }
 
-        // --- 成分(分類 atmosphere。鍵 = 物質の名前)---
-        const auto category = packages.tables.find(std::string(ATMOSPHERE_CATEGORY));
-        if (category == packages.tables.end())
-            return atmosphere;
+        const auto uniform = packages.tables.find(std::string(ATMOSPHERE_CATEGORY));
+        const bool hasUniform = temperature != nullptr || uniform != packages.tables.end();
+        if (profile != nullptr && hasUniform)
+            return std::unexpected(
+                std::format("パッケージ {}: {}.{}(高さの点の列)と一様な大気({}・{}.{})は一緒に書けない(どちらか一方)",
+                            profile->package, ENVIRONMENT_CATEGORY, ENVIRONMENT_ATMOSPHERE_PROFILE_KEY,
+                            ATMOSPHERE_CATEGORY, ENVIRONMENT_CATEGORY, ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY));
 
-        for (const auto& [species, entry] : category->second) {
-            const auto parts = ReadInteger(entry.value, std::format("{}.{}", ATMOSPHERE_CATEGORY, species), 0,
-                                           sim::ATMOSPHERE_PARTS_PER_WHOLE);
-            if (!parts)
-                return std::unexpected(std::format("パッケージ {}: {}", entry.package, parts.error()));
+        if (profile != nullptr) {
+            auto points = ReadProfile(*profile);
+            if (!points)
+                return std::unexpected(points.error());
 
-            atmosphere.fractions.push_back({.species = species, .partsPerMillion = static_cast<uint32_t>(*parts)});
+            atmosphere.points = std::move(*points);
+        } else if (hasUniform) {
+            auto point = ReadUniform(temperature, uniform == packages.tables.end() ? nullptr : &uniform->second);
+            if (!point)
+                return std::unexpected(point.error());
+
+            atmosphere.points.push_back(std::move(*point));
         }
 
         return atmosphere;

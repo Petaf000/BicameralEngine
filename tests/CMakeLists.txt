@@ -83,6 +83,14 @@ target_compile_definitions(standard_packages_test PRIVATE
   BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard")
 add_dependencies(standard_packages_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME standard_packages COMMAND standard_packages_test)
+
+add_executable(world_atmosphere_test world_atmosphere_test.cpp)  # 基準の大気の高さの分布(T-0499・ADR-0182 の改訂)
+target_link_libraries(world_atmosphere_test PRIVATE bicameral_reaction_script bicameral_gas bicameral_core)
+target_compile_definitions(world_atmosphere_test PRIVATE
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard"
+  BICAMERAL_ATMOSPHERE_PACKAGES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/packages_atmosphere")
+add_dependencies(world_atmosphere_test bicameral_data)  # 型の定義は exe の横の data/types を読む
+add_test(NAME world_atmosphere COMMAND world_atmosphere_test)
 add_executable(reaction_hot_reload_test reaction_hot_reload_test.cpp)  # 反応表のホットリロード(T-0139)
 target_link_libraries(reaction_hot_reload_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(reaction_hot_reload_test PRIVATE

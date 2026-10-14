@@ -189,10 +189,23 @@ namespace bicameral::sim {
     [[nodiscard]] GasCell MakeGasCell(const GasConfig& config, std::span<const uint64_t> amounts,
                                       uint32_t temperatureMilliKelvin);
 
-    // 一定の温度で、下の層の重さの分だけ圧力を下げていく基準の層(z = 0 が地面の圧力)。成分の割合は Q32
+    // 一定の温度で、下の層の重さの分だけ圧力を下げていく基準の層(z = 0 が地面の圧力)。成分の割合は Q32。
+    // 全部の層が同じ温度と成分の、下の層ごとの版(ビット単位で同じ)
     [[nodiscard]] std::vector<GasCell> MakeHydrostaticReference(const GasConfig& config,
                                                                 std::span<const uint32_t> fractionsQ32,
                                                                 uint32_t temperatureMilliKelvin,
+                                                                uint64_t surfacePressureMicroPascal);
+
+    // 1 つの層の基準の大気(高さの分布。T-0499・world_atmosphere.h の SampleAtmosphere をその層の高さで読んだもの)
+    struct GasReferenceLayer {
+        uint32_t temperatureMilliKelvin = 0;
+        std::array<uint32_t, GAS_MAX_SPECIES> fractionsQ32 = {};  // 気体の物質の順
+    };
+
+    // 層ごとの温度と成分で、下の層の重さの分だけ圧力を下げていく基準の層(z = 0 が地面の圧力。圧力は作り手が書かず、
+    // 重さと温度から静水圧の釣り合いで出す。D-494)。呼ぶ側の約束: layers は config.sizeZ 層
+    [[nodiscard]] std::vector<GasCell> MakeHydrostaticReference(const GasConfig& config,
+                                                                std::span<const GasReferenceLayer> layers,
                                                                 uint64_t surfacePressureMicroPascal);
 
     // 箱を作る: 全部のセルを層の基準 + 風の速度で埋める

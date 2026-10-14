@@ -141,6 +141,13 @@ Luau は CPU で動く。GPU の世界に効くものは「表にベイクして
 - **基準の大気(T-0373・ADR-0182)**: 成分は分類 `atmosphere`(物質 → ppm。足して 1000000)、温度と地面の圧力は `environment` の
   `atmosphere_temperature_mk`・`atmosphere_surface_pressure_pa`。`script::ReadWorldAtmosphere` → `sim::BakeWorldAtmosphere`(知らない物質・
   合計・温度と圧力の有無を検査)→ ベイクした表の `atmosphere`。気体を世界に載せる段(T-0210)が層の基準に使う。
+- **基準の大気の高さの分布(T-0499・ADR-0182 の改訂・D-494)**: `environment.atmosphere_profile` に海面からの高さ(mm)の点ごとの
+  温度と成分(`{ height_mm, temperature_mk, composition }` の列。低い順)を書き、点の間は直線でつなぐ(`sim::SampleAtmosphere`)。
+  圧力は一番低い点の `atmosphere_surface_pressure_pa` だけで、ほかの高さはエンジンが重力・温度・成分から静水圧で出す
+  (`sim::AtmospherePressureMicroPascal`。整数・0.5 m ずつ・気体の層の基準と同じ形の積み方)。上の一様な書き方は高さ 0 の点 1 つとして
+  今まで通り読める(一緒に書くと誤り)。earth_environment は ISA(U.S. Standard Atmosphere 1976)の 8 点。ゲームは
+  `require("@earth_environment")` で写し、補助 `require("@earth_environment/atmosphere")` の `set_point`(点の上書き)・`settled`
+  (重い物ほど下に溜まる点)・`molar_masses` で書き直す(試験のパッケージ tests/packages_atmosphere)。
 - **標準パッケージ(T-0373・ADR-0183)**: `data/standard` の棚(real_elements・real_matter・real_reactions・earth_environment・earth_air)。
   値は現実のまま(熱伝導率に試験の倍率を掛けない)。足すのは環境ミキサー(14 §2)か `--mix`。読み方は `ReactionTableSource::addedPackages`
   (と、ブランクの世界で元のフォルダを読まない `readPackageRoot = false`)。

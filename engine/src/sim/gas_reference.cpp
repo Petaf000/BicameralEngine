@@ -724,18 +724,31 @@ namespace bicameral::sim {
     std::vector<GasCell> MakeHydrostaticReference(const GasConfig& config, std::span<const uint32_t> fractionsQ32,
                                                   uint32_t temperatureMilliKelvin,
                                                   uint64_t surfacePressureMicroPascal) {
+        GasReferenceLayer uniform{.temperatureMilliKelvin = temperatureMilliKelvin};
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES && s < fractionsQ32.size(); ++s)
+            uniform.fractionsQ32[s] = fractionsQ32[s];
+
+        const std::vector<GasReferenceLayer> layers(config.sizeZ, uniform);
+
+        return MakeHydrostaticReference(config, layers, surfacePressureMicroPascal);
+    }
+
+    std::vector<GasCell> MakeHydrostaticReference(const GasConfig& config, std::span<const GasReferenceLayer> profile,
+                                                  uint64_t surfacePressureMicroPascal) {
+        assert(profile.size() == config.sizeZ);
         const GasCoefficients coefficients = MakeGasCoefficients(config);
         std::vector<GasCell> layers;
         uint64_t pressure = surfacePressureMicroPascal;
 
         for (uint32_t z = 0; z < config.sizeZ; ++z) {
-            // --- 物質量 n = p ÷ (T × R ÷ V)---
+            // --- 物質量 n = p ÷ (T × R ÷ V)(この層の温度と成分。T-0499)---
+            const uint32_t temperatureMilliKelvin = profile[z].temperatureMilliKelvin;
             const uint64_t divisor = PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 * temperatureMilliKelvin;
             const uint64_t total = fx::FxDivU128By64(fx::FxMulU64Full(pressure, ONE_Q32), divisor).quotient;
 
             std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};
-            for (uint32_t s = 0; s < config.speciesCount && s < fractionsQ32.size(); ++s)
-                amounts[s] = MulShiftU64(total, fractionsQ32[s], 32);
+            for (uint32_t s = 0; s < config.speciesCount; ++s)
+                amounts[s] = MulShiftU64(total, profile[z].fractionsQ32[s], 32);
 
             const GasCell cell = MakeGasCell(config, amounts, temperatureMilliKelvin);
             layers.push_back(cell);

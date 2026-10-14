@@ -97,11 +97,22 @@ export type EditorDefaults = {
 
 -- --- 環境(分類 environment。T-0400・ADR-0176。1 つの鍵 = 1 つの値・整数で、単位は鍵の名前。書かない値は 0 = 無い)---
 -- 読み手は engine/src/script/environment_package.cpp(範囲: 重力 0〜100 m/s²・音速の基準は気体の小刻みの安定の上限まで)
+-- 基準の大気の高さの 1 つの点(T-0499・ADR-0182 の改訂。点の間は直線でつなぐ。端の点の外は端の値)
+export type AtmospherePoint = {
+    height_mm: number, -- 海面からの高さ(mm。整数・±2^40。前の点より高く)
+    temperature_mk: number, -- 温度(mK)
+    composition: { [string]: number }, -- 成分(物質 → ppm。足して 1000000。0 は書かない)
+}
+
 export type Environment = {
     gravity_um_per_s2: number?, -- 重力の強さ(µm/s²。地球 9806650)
     sound_speed_mm_per_s: number?, -- 気体の音速の基準(mm/s。D-440 の本物の音速 340000)
-    atmosphere_temperature_mk: number?, -- 基準の大気の温度(mK。T-0373。atmosphere を書いたら要る)
-    atmosphere_surface_pressure_pa: number?, -- 基準の大気の地面の圧力(Pa。atmosphere を書いたら要る)
+    atmosphere_surface_pressure_pa: number?, -- 基準の大気の一番低い点の圧力(Pa。ほかの高さはエンジンが重力と温度から静水圧で出す)
+    -- 基準の大気の高さの点の列(低い順。T-0499)。点の形は AtmospherePoint だが、ここでは any で受ける: 点を表の中にそのまま書くと
+    -- 型検査が点ごとに別の型を作り({ nitrogen: number } は { [string]: number } と「ちょうど同じ」でない)誤りにするため。
+    -- 欄の誤り(知らない欄・整数でない・範囲の外)は読み込み(environment_package.cpp)が場所付きで止める
+    atmosphere_profile: { any }?,
+    atmosphere_temperature_mk: number?, -- 一様な大気の温度(mK。T-0373 の書き方。分類 atmosphere と一緒に。atmosphere_profile とは書けない)
 }
 
 -- --- 遊びの指標(分類 play_metrics。T-0432・ADR-0206。1 つの鍵 = 1 つの指標。読み手は engine/src/script/play_metrics_package.h)---
@@ -134,7 +145,7 @@ export type PackageEntry = {
     view_quantities: ViewQuantities?,
     editor_defaults: EditorDefaults?,
     environment: Environment?,
-    atmosphere: { [string]: number }?, -- 基準の大気の成分(物質 → ppm。足して 1000000。T-0373)
+    atmosphere: { [string]: number }?, -- 一様な大気の成分(物質 → ppm。足して 1000000。T-0373。高さで変えるなら environment.atmosphere_profile)
     play_metrics: { [string]: PlayMetric }?, -- 遊びの指標(T-0432)
     [string]: any,
 }

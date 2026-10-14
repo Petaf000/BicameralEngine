@@ -799,10 +799,14 @@ views:
           code: "engine/src/script/environment_package.cpp::ReadWorldEnvironment", ticket: T-0400,
           doc: docs/design/13-scripting-game-model.md,
           note: "1 つの鍵 = 1 つの値(整数・単位は鍵の名前)。書かない値は 0 = ブランク。知らない鍵・範囲の外は誤り。ベイクした表の environment → 物理の重力・気体の設定(ADR-0171・ADR-0176。environment_package_test)" }
-      - { id: atmosphere, group: tool, label: "基準の大気<br/>(atmosphere の成分 + 温度・地面の圧力)",
-          code: "engine/src/sim/world_atmosphere.cpp::BakeWorldAtmosphere", ticket: T-0373,
+      - { id: atmosphere, group: tool, label: "基準の大気<br/>(高さの点ごとの温度と成分 + 一番低い点の圧力)",
+          code: "engine/src/sim/world_atmosphere.cpp::BakeWorldAtmosphere", ticket: T-0499,
           doc: docs/decisions/ADR-0182-base-atmosphere-package.md,
-          note: "読むのは script::ReadWorldAtmosphere。物質の名前を ID に・割合の合計 1000000・温度と圧力の有無を検査。ベイクした表の atmosphere → 気体の層の基準(T-0210)。standard_packages_test" }
+          note: "読むのは script::ReadWorldAtmosphere(environment.atmosphere_profile か一様な書き方)。物質の名前を ID に・点ごとの合計 1000000・高さの順・温度と圧力の有無を検査。ベイクした表の atmosphere → 気体の層の基準(T-0210)。standard_packages_test・world_atmosphere_test" }
+      - { id: atmospherecolumn, group: tool, label: "基準の大気の高さの値<br/>(点の間の直線・静水圧)",
+          code: "engine/src/sim/world_atmosphere.cpp::AtmospherePressureMicroPascal", ticket: T-0499,
+          doc: docs/decisions/ADR-0182-base-atmosphere-package.md,
+          note: "SampleAtmosphere(点の間を直線。割合の合計はちょうど 1)と、重力・温度・成分から 0.5 m ずつ積む静水圧(整数)。気体の層の基準は MakeHydrostaticReference の層ごとの版(GasReferenceLayer)。world_atmosphere_test" }
       - { id: stdshelf, group: tool, label: "標準パッケージの棚<br/>(data/standard。足す・外すと依存)",
           code: "engine/src/script/standard_packages.cpp::ReadStandardCatalog", ticket: T-0373,
           doc: docs/decisions/ADR-0183-standard-packages-mixer.md,
@@ -842,6 +846,7 @@ views:
       - [rxread, envread, "分類 environment"]
       - [rxread, atmosphere, "分類 atmosphere"]
       - [atmosphere, bake, "名前のままの大気"]
+      - [atmosphere, atmospherecolumn, "ベイクした高さの点"]
       - [stdshelf, packages, "足したフォルダ"]
       - [bake, table]
       - [rtload, packages, "起動時"]
