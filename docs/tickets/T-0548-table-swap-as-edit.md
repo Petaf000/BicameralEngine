@@ -1,6 +1,6 @@
 # T-0548 表の差し替え(反応表・環境の値のホットリロード・パネルでの値の変更・ミキサー)を編集として扱う
 
-- Status: Doing
+- Status: Done(判断待ちは仮で進めた)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -16,8 +16,9 @@ UE と同じ形(D-491)に揃える: 編集の状態で表を差し替えたら�
 - [x] 表を差し替えても保存点を捨てない。差し替えより前の保存点へも戻れる(戻すと表も戻り、差し替えの印を足し直して当て直す)
 - [x] 元に戻す・やり直す(置く・消す)が差し替えをまたいで効く
 - [x] プレイ中に差し替えてやめると、プレイ前の世界 + ファイルの今の中身の表に戻る(Q64 ④。仮)
-- [ ] 試験: edit_table(CPU)・brush_undo・window_play_table_record/play(新)・window_table_edit・window_hot_reload*・window_mixer*・window_play_*
-- [ ] release のビルド(警告 0)・archmap
+- [x] 試験: edit_table(CPU)・brush_undo・window_play_table_record/play(新)・window_table_edit・window_hot_reload*・window_mixer*・window_play_*・
+  gpu_probe_rewind(差し替えより前の保存点へ戻して差し替え直す)
+- [x] release のビルド(警告 0)・archmap
 
 ## 作り手(エンジンを使う人)から見た違い
 | | 前(ADR-0047 §6・ADR-0236 §6) | 今(T-0548・ADR-0246) |
@@ -58,3 +59,10 @@ UE と同じ形(D-491)に揃える: 編集の状態で表を差し替えたら�
   物質を足した後にやり直すと、前の表の ID のまま当たりうる。直すならやり直しの列も RemapCommandsFrom に渡す。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-15(wt6・t-0548): 根っこを「保存点が表を知らない」と見て、保存点に表を持たせ(ProbeSim)、差し替えの印を控えに入れて足し直す形にした
+  (差し替えで保存点を捨てる・差し替えより前へ戻さないの例外を消した。PlanBrushUndo の引数も消えた)。編集の状態の差し替えは E の印(ApplyEditTable・
+  editor/edit_table)、やめるとファイルの表(StopPlay)。AppliedCount は今の流れで当たっている数に(--auto-rewind で戻ると数え直す)。GPU のシェーダーは変えていない。
+  通した試験: edit_table・brush_undo・sim_scheduler・time_control・replay_file・reaction_hot_reload・reaction_table_edit・reaction_replay_table・
+  window_play_table_record/play(新)・window_play_record/play・window_table_edit・window_hot_reload_record/play・window_hot_reload_game_record/play・
+  window_mixer_record/play・window_gravity_reload_record/play・window_replay_record/editor/rewind・window_blank_record/rewind・window_place_record/play・
+  window_place_tick0_record/play・gpu_probe_rewind/peek/sim/sim_tables/physics_gravity_swap。release で警告 0・archmap OK。
