@@ -60,10 +60,12 @@ namespace bicameral::sim {
 
     void PhysicsWorld::Step() {
         m_stats = {};
+        m_heatEntries.clear();
         UpdateActivity();
         for (uint32_t i = 0; i < m_parameters.substeps; ++i)
             Substep();
 
+        ReturnHeat();
         ++m_tick;
     }
 
@@ -87,8 +89,10 @@ namespace bicameral::sim {
             if (iteration < iterations)
                 UpdateDuals(alphaQ16);
 
-            if (iteration + 1 == iterations)
+            if (iteration + 1 == iterations) {
+                CollectHeatEntries();  // λ が決まり、速度がまだ小刻みの初めの値の所(T-0542)
                 UpdateVelocities();
+            }
         }
 
         Finish();
@@ -312,6 +316,43 @@ namespace bicameral::sim {
     void PhysicsWorld::Finish() {
         for (PhysicsBody& body : m_bodies)
             body = PxFinishBody(body, m_parameters.gravity);
+    }
+
+    // --- 熱を世界へ返す(T-0542・common/physics_heat.hlsli)---
+
+    // 接触点ごとの仕事の重みと位置を熱の入口に積む(重みが 0 の点は積まない。GPU は決まった枠に 0 のまま置く。和は同じ)
+    void PhysicsWorld::CollectHeatEntries() {
+        for (const auto& [key, manifold] : m_manifolds) {
+            const PhysicsBody& a = m_bodies[manifold.bodyA];
+            const PhysicsBody& b = m_bodies[manifold.bodyB];
+            for (uint32_t k = 0; k < manifold.count; ++k) {
+                const PxHeatEntry entry = PxMakeHeatEntry(manifold.points[k], a, b);
+                if (entry.weight != 0)
+                    m_heatEntries.push_back(entry);
+            }
+        }
+    }
+
+    // 刻みの終わり: 返す元(Σ 散逸 − 返した量)を入口の重みで mJ に分ける。残り(端数・借り)は帳簿に
+    void PhysicsWorld::ReturnHeat() {
+        const int64_t dissipated = SumPhysicsEnergy(m_bodies).dissipatedEnergy;
+        const int64_t available = PxHeatAvailableMilliJoules(
+            PxHeatSource(dissipated, m_heatLedger.returnedMilliJoules));
+
+        uint64_t weightSum = 0;
+        for (const PxHeatEntry& entry : m_heatEntries)
+            weightSum += entry.weight;
+
+        int64_t returned = 0;
+        for (PxHeatEntry& entry : m_heatEntries) {
+            entry.milliJoules = PxHeatShare(available, entry.weight, weightSum);
+            returned += entry.milliJoules;
+        }
+
+        m_heatLedger.returnedMilliJoules += returned;
+        m_heatLedger.remainder = PxHeatSource(dissipated, m_heatLedger.returnedMilliJoules);
+        m_heatLedger.weightSum = weightSum;
+        m_heatLedger.tickMilliJoules = returned;
     }
 
     // 光線が最初に入る物を番号の順に探し、動く物なら入った点に力積を加える(common/physics_push.hlsli。GPU の押すコマンドと同じ手順)

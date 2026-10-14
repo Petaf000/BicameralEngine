@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/physics_heat.hlsli"
 #include "common/physics_push.hlsli"
 #include "common/physics_step.hlsli"
 #include "sim/physics_scene.h"
@@ -27,6 +28,8 @@ namespace bicameral::sim {
     static_assert(sizeof(PhysicsContactPoint) == 368);
     static_assert(sizeof(PhysicsManifold) == 3016);
     static_assert(sizeof(physics::PxParameters) == 104);
+    static_assert(sizeof(physics::PxHeatEntry) == 40);
+    static_assert(sizeof(physics::PxHeatLedger) == 32);
     // 標準の重力の換算は前の定数 PX_GRAVITY と同じ値(ADR-0171。世界のハッシュを変えない。9806650 µm/s² は換算を確かめる値で、
     // 世界の値は標準パッケージ earth_environment が渡す。T-0373)
     static_assert(fx::PxGravityFromMicrometers(9806650) == 10283018);
@@ -56,7 +59,7 @@ namespace bicameral::sim {
     struct PhysicsEnergyLedger {
         int64_t mechanicalEnergy = 0;  // 世界にいる動く物の力学的エネルギーの和(各物が直近の小刻みの終わりに数えた値)
         int64_t dissipatedEnergy =
-            0;  // 失った力学的エネルギーの累計の和 = 世界へ返す熱(返すのは T-0542。消えた物の分も含む)
+            0;  // 失った力学的エネルギーの累計の和(消えた物の分も含む)。世界へ返すのは PhysicsWorld::HeatEntries(T-0542)
     };
 
     [[nodiscard]] PhysicsEnergyLedger SumPhysicsEnergy(std::span<const PhysicsBody> bodies);
@@ -82,6 +85,13 @@ namespace bicameral::sim {
         }
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
 
+        // 直近の Step の熱の入口(接触点ごと・小刻みごと。milliJoules が世界へ返す熱。T-0542・common/physics_heat.hlsli)。
+        // 世界(仮の世界 ProbeSim)は次の刻みの初めに、入口の位置のセルへ足す(ProbeReference::Advance の heat)
+        [[nodiscard]] const std::vector<physics::PxHeatEntry>& HeatEntries() const { return m_heatEntries; }
+
+        // 熱の帳簿(Σ dissipatedEnergy = PX_HEAT_UNITS_PER_MILLIJOULE × returnedMilliJoules + remainder がいつも成り立つ)
+        [[nodiscard]] const physics::PxHeatLedger& HeatLedger() const { return m_heatLedger; }
+
         // 全部の物の位置・向き・速度のハッシュ(2 回の実行の一致・GPU との一致に使う)
         [[nodiscard]] uint64_t StateHash() const;
 
@@ -106,6 +116,8 @@ namespace bicameral::sim {
         void RecordPointBits(const PhysicsContactPoint& point);
         void UpdateVelocities();
         void Finish();
+        void CollectHeatEntries();
+        void ReturnHeat();
 
         PhysicsScene m_scene;
         physics::PxParameters m_parameters;
@@ -117,6 +129,8 @@ namespace bicameral::sim {
         int32_t m_colorCount = 0;
         uint64_t m_tick = 0;
         PhysicsStepStats m_stats;
+        std::vector<physics::PxHeatEntry> m_heatEntries;  // 直近の Step の熱の入口(重みが 0 の点は積まない)
+        physics::PxHeatLedger m_heatLedger{};
     };
 
 }  // namespace bicameral::sim

@@ -23,9 +23,12 @@
 #include "sim/world_physics.h"
 #include "standard_world_physics.h"
 
+#include <algorithm>
+#include <format>
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -122,6 +125,40 @@ namespace {
                                    cpu[index].dissipatedEnergy, gpu[index].dissipatedEnergy,
                                    cpu[index].mechanicalEnergy, gpu[index].mechanicalEnergy);
             }
+        }
+
+        return {};
+    }
+
+    // 熱の入口と帳簿(T-0542)が CPU と同じか。入口は重みが 0 でないものを (位置, 重み, mJ) の順に並べて比べる(並びは置き場所で違う)
+    std::string CompareHeat(const sim::PhysicsWorld& world, std::vector<physics::PxHeatEntry> gpu,
+                            const physics::PxHeatLedger& gpuLedger) {
+        const physics::PxHeatLedger& cpuLedger = world.HeatLedger();
+        if (cpuLedger.returnedMilliJoules != gpuLedger.returnedMilliJoules ||
+            cpuLedger.remainder != gpuLedger.remainder || cpuLedger.weightSum != gpuLedger.weightSum ||
+            cpuLedger.tickMilliJoules != gpuLedger.tickMilliJoules) {
+            return std::format(
+                "熱の帳簿が食い違う: 返した {}/{} mJ・残り {}/{}・重みの和 {}/{}・この刻み {}/{}(cpu/gpu)",
+                cpuLedger.returnedMilliJoules, gpuLedger.returnedMilliJoules, cpuLedger.remainder, gpuLedger.remainder,
+                cpuLedger.weightSum, gpuLedger.weightSum, cpuLedger.tickMilliJoules, gpuLedger.tickMilliJoules);
+        }
+
+        std::vector<physics::PxHeatEntry> cpu = world.HeatEntries();
+        const auto key = [](const physics::PxHeatEntry& e) {
+            return std::tuple(e.position.x, e.position.y, e.position.z, e.weight, e.milliJoules);
+        };
+        const auto less = [&](const physics::PxHeatEntry& a, const physics::PxHeatEntry& b) {
+            return key(a) < key(b);
+        };
+        rng::sort(cpu, less);
+        rng::sort(gpu, less);
+        if (cpu.size() != gpu.size())
+            return std::format("熱の入口の数が食い違う: {}/{}(cpu/gpu)", cpu.size(), gpu.size());
+
+        for (size_t index = 0; index < cpu.size(); ++index) {
+            if (key(cpu[index]) != key(gpu[index]))
+                return std::format("熱の入口 {} が食い違う(重み {}/{}・mJ {}/{})", index, cpu[index].weight,
+                                   gpu[index].weight, cpu[index].milliJoules, gpu[index].milliJoules);
         }
 
         return {};
@@ -242,6 +279,10 @@ namespace {
             const std::string energyError = CompareEnergy(world->Bodies(), bodies);
             if (!energyError.empty())
                 return std::unexpected(std::format("刻み {}: {}", end, energyError));
+
+            const std::string heatError = CompareHeat(*world, physics.ReadHeatEntries(), physics.ReadHeatLedger());
+            if (!heatError.empty())
+                return std::unexpected(std::format("刻み {}: {}", end, heatError));
         }
 
         return run;

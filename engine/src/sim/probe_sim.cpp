@@ -1334,6 +1334,29 @@ namespace bicameral::sim {
                                     index / PROBE_SLICE_CELL_COUNT);
         }
 
+        // 物理の熱の入口(T-0542・common/physics_heat.hlsli)を、入口の位置のセルのエネルギーへ足す。つついたセルと同じく、
+        // ブロックを予定の種にして「刻みの直前に変わった」にする(足す順番に依らない: 整数の和と、足した後のセルから作るキャッシュ)
+        int64_t ApplyPhysicsHeat(const ReactionTableView& table, ReferenceGeneration current, uint64_t tick,
+                                 std::span<const physics::PxHeatEntry> heat, std::vector<uint8_t>& seeds,
+                                 std::vector<uint64_t>& changedMarks) {
+            int64_t added = 0;
+            for (const physics::PxHeatEntry& entry : heat) {
+                if (entry.milliJoules <= 0)
+                    continue;
+
+                const uint32_t index = ProbeCellOfPhysicsPoint(entry.position.x, entry.position.y, entry.position.z);
+                current.cells[index].energy += entry.milliJoules;
+                current.caches[index] = ProbeMakeCache(table, current.cells[index]);
+                added += entry.milliJoules;
+
+                const uint32_t block = BlockOfCellIndex(index);
+                seeds[block] = 1;
+                changedMarks[block] = ProbeChangeMark(tick) - 1;
+            }
+
+            return added;
+        }
+
     }  // namespace
 
     std::vector<uint64_t> ProbeInitialBlockWakes(const BakedReactionTable& table,
@@ -1401,7 +1424,7 @@ namespace bicameral::sim {
     }
 
     void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands,
-                                 const BakedReactionTable* newTable) {
+                                 const BakedReactionTable* newTable, std::span<const physics::PxHeatEntry> heat) {
         if (newTable != nullptr) {
             RemapSpecies(tick, *newTable);
             m_table = newTable;
@@ -1417,6 +1440,7 @@ namespace bicameral::sim {
         std::vector<uint8_t> seeds = m_blockFlags;
         const auto speciesCount = static_cast<uint32_t>(m_table->species.size());
         m_sourceEnergy = ApplyPokes(table, speciesCount, current, tick, commands, seeds, m_changedMarks);
+        m_physicsHeatEnergy = ApplyPhysicsHeat(table, current, tick, heat, seeds, m_changedMarks);
 
         // 表を差し替えた刻み(GPU の RefreshTable と同じ。T-0139): 2 世代の熱のキャッシュを新しい表で作り直し、
         // 全部のブロックを「刻みの直前に変わった」にして起こす(速さ f が変わるので待ちを引き直す。ADR-0018)

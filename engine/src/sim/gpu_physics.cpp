@@ -16,25 +16,30 @@ namespace bicameral::sim {
         constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
         constexpr uint32_t STATS_BYTES = sizeof(GpuPhysicsStats);
 
-        // u0〜u13 / b0 / デバッグのリング / t0〜t1(ルート署名の大きさ 48 / 64 語)
+        // u0〜u15 / b0 / デバッグのリング / t0〜t1(ルート署名の大きさ 52 / 64 語)
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 14, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 2};
+            .uavCount = 16, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 2};
 
         constexpr uint32_t COLOR_PREDICATE_UAV = 13;  // u13 色ごとの「その色の物がいる」(述語。T-0094)
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(Pass の順)
-        constexpr std::array<const char*, 13> SHADER_NAMES = {
+        constexpr std::array<const char*, 17> SHADER_NAMES = {
             "sim/physics_initialize.cso",      "sim/physics_begin_substep.cso",     "sim/physics_broadphase.cso",
             "sim/physics_narrowphase.cso",     "sim/physics_prepare_manifolds.cso", "sim/physics_color_round.cso",
             "sim/physics_finish_coloring.cso", "sim/physics_recollide.cso",         "sim/physics_solve_color.cso",
             "sim/physics_update_duals.cso",    "sim/physics_update_velocity.cso",   "sim/physics_finish.cso",
-            "sim/physics_build_manifolds.cso"};
+            "sim/physics_build_manifolds.cso", "sim/physics_collect_heat.cso",      "sim/physics_heat_sum.cso",
+            "sim/physics_heat_share.cso",      "sim/physics_heat_finish.cso"};
 
         // 計測の表示名(Pass の順)
-        constexpr std::array<const char*, 15> PASS_NAMES = {
-            "Initialize",     "BeginSubstep",   "Broadphase",     "Narrowphase",     "PrepareManifolds",
-            "ColorRound",     "FinishColoring", "Recollide",      "SolveColor",      "UpdateDuals",
-            "UpdateVelocity", "Finish",         "BuildManifolds", "BroadphaseGraph", "SolveColorGraph"};
+        constexpr std::array<const char*, 19> PASS_NAMES = {
+            "Initialize",     "BeginSubstep",   "Broadphase",      "Narrowphase",    "PrepareManifolds",
+            "ColorRound",     "FinishColoring", "Recollide",       "SolveColor",     "UpdateDuals",
+            "UpdateVelocity", "Finish",         "BuildManifolds",  "CollectHeat",    "HeatSum",
+            "HeatShare",      "HeatFinish",     "BroadphaseGraph", "SolveColorGraph"};
+
+        // physics_bindings.hlsli の HEAT_BUFFER_BYTES(熱の帳簿 + 刻みの中の和。T-0542)
+        constexpr uint64_t HEAT_BUFFER_BYTES = 56;
 
         constexpr auto COLOR_COUNT = (uint64_t)PX_GPU_MAX_COLORS;
 
@@ -136,7 +141,8 @@ namespace bicameral::sim {
     std::expected<void, std::string> GpuPhysics::CreateBuffers(ID3D12Device5* device, const PhysicsScene& scene) {
         const uint64_t n = m_bodyCount;
         const uint64_t slots = n * m_options.slotsPerBody;
-        const std::array<uint64_t, 14> uavBytes = {
+        const uint64_t heatEntries = (uint64_t)m_parameters.substeps * slots * PX_MANIFOLD_POINTS;
+        const std::array<uint64_t, 16> uavBytes = {
             n * sizeof(PhysicsBody),                                       // u0 物
             2 * slots * MANIFOLD_HEADER_BYTES,                             // u1 組の見出し
             2 * n * sizeof(uint32_t),                                      // u2 持ち主の枠の数
@@ -150,7 +156,9 @@ namespace bicameral::sim {
             slots * sizeof(PxContactGeometry),  // u10 接触の幾何(GPU だけが読み書き。HLSL の間隔は C++ の大きさ以下)
             COLOR_COUNT * sizeof(D3D12_NODE_GPU_INPUT),  // u11 色ごとの GPU の入力
             COLOR_COUNT * n * sizeof(uint32_t),          // u12 色ごとの物の一覧
-            COLOR_COUNT * sizeof(uint64_t)};             // u13 その色の物がいる(述語)
+            COLOR_COUNT * sizeof(uint64_t),              // u13 その色の物がいる(述語)
+            heatEntries * sizeof(PxHeatEntry),           // u14 熱の入口(T-0542)
+            HEAT_BUFFER_BYTES};                          // u15 熱の帳簿
         for (size_t i = 0; i < uavBytes.size(); ++i) {
             m_uavs[i] = gpu::CreateBuffer(device, uavBytes[i], gpu::BufferKind::UnorderedAccess);
             if (!m_uavs[i])
@@ -168,7 +176,10 @@ namespace bicameral::sim {
                   CreateUploadBuffer(device, std::span<const PhysicsBody>(initialBodies))};
         m_bodiesReadback = gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback);
         m_statsReadback = gpu::CreateBuffer(device, STATS_BYTES, gpu::BufferKind::Readback);
-        if (!m_srvs[0] || !m_srvs[1] || !m_bodiesReadback || !m_statsReadback)
+        m_heatEntriesReadback = gpu::CreateBuffer(device, uavBytes[14], gpu::BufferKind::Readback);
+        m_heatReadback = gpu::CreateBuffer(device, HEAT_BUFFER_BYTES, gpu::BufferKind::Readback);
+        if (!m_srvs[0] || !m_srvs[1] || !m_bodiesReadback || !m_statsReadback || !m_heatEntriesReadback ||
+            !m_heatReadback)
             return std::unexpected("物理のアップロード・読み戻しのバッファを作れない");
 
         return {};
@@ -344,6 +355,7 @@ namespace bicameral::sim {
         for (uint32_t substep = 0; substep < m_parameters.substeps; ++substep)
             RecordSubstep(list, debugRing, substep);
 
+        RecordReturnHeat(list, debugRing);
         ++m_tick;
     }
 
@@ -371,7 +383,7 @@ namespace bicameral::sim {
         if (SkipsEmptyColors())
             RecordColorPredicateStates(list, true);  // FinishColoring が書いた「その色の物がいる」を述語に
 
-        RecordIterations(list, debugRing, constants);
+        RecordIterations(list, debugRing, constants, substep);
         if (SkipsEmptyColors())
             RecordColorPredicateStates(list, false);
 
@@ -392,7 +404,7 @@ namespace bicameral::sim {
 
     // 本反復は α = 1、最後の 1 回は α = 0。途中で接触を探し直し、最後の本反復の後で速度を決める
     void GpuPhysics::RecordIterations(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                      Constants constants) {
+                                      Constants constants, uint32_t substep) {
         const uint32_t slotCount = m_bodyCount * m_options.slotsPerBody;
         const uint32_t iterations = m_parameters.iterations;
         const bool graph = m_options.solver == GpuPhysicsSolver::Graph;
@@ -409,8 +421,12 @@ namespace bicameral::sim {
             if (iteration < iterations)
                 RecordPass(list, debugRing, Pass::UpdateDuals, constants, slotCount);
 
-            if (iteration + 1 == iterations)
+            if (iteration + 1 == iterations) {
+                Constants heat = constants;
+                heat.color = (int32_t)substep;  // CollectHeat は色を使わない。小刻みの番号を渡す(T-0542)
+                RecordPass(list, debugRing, Pass::CollectHeat, heat, slotCount);
                 RecordPass(list, debugRing, Pass::UpdateVelocity, constants, m_bodyCount);
+            }
         }
 
         if (graph)
@@ -451,9 +467,23 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &barrier);
     }
 
+    // 刻みの終わり: 返す元を入口の重みで分け、帳簿を進める(PhysicsWorld::ReturnHeat と同じ。T-0542)
+    void GpuPhysics::RecordReturnHeat(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        const Constants constants = BaseConstants();
+        RecordPass(list, debugRing, Pass::HeatSum, constants, m_bodyCount);
+        RecordPass(list, debugRing, Pass::HeatShare, constants, HeatEntryCount());
+        RecordPass(list, debugRing, Pass::HeatFinish, constants, 1);
+    }
+
+    uint32_t GpuPhysics::HeatEntryCount() const {
+        return m_parameters.substeps * m_bodyCount * m_options.slotsPerBody * PX_MANIFOLD_POINTS;
+    }
+
     void GpuPhysics::RecordReadback(ID3D12GraphicsCommandList10* list) const {
         gpu::RecordCopyToReadback(list, m_uavs[0].Get(), m_bodiesReadback.Get());
         gpu::RecordCopyToReadback(list, m_uavs[8].Get(), m_statsReadback.Get());
+        gpu::RecordCopyToReadback(list, m_uavs[14].Get(), m_heatEntriesReadback.Get());
+        gpu::RecordCopyToReadback(list, m_uavs[15].Get(), m_heatReadback.Get());
         if (m_timestamps && !m_profiledPasses.empty()) {
             list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                    (uint32_t)m_profiledPasses.size() + 1, m_timestampReadback.Get(), 0);
@@ -466,6 +496,23 @@ namespace bicameral::sim {
             bodies.clear();
 
         return bodies;
+    }
+
+    std::vector<PxHeatEntry> GpuPhysics::ReadHeatEntries() const {
+        std::vector<PxHeatEntry> entries(HeatEntryCount());
+        if (!gpu::ReadBuffer(m_heatEntriesReadback.Get(), std::as_writable_bytes(std::span(entries))))
+            return {};
+
+        std::erase_if(entries, [](const PxHeatEntry& entry) { return entry.weight == 0; });
+        return entries;
+    }
+
+    PxHeatLedger GpuPhysics::ReadHeatLedger() const {
+        PxHeatLedger ledger{};
+        if (!gpu::ReadBuffer(m_heatReadback.Get(), std::as_writable_bytes(std::span(&ledger, 1))))
+            ledger.remainder = INT64_MIN;
+
+        return ledger;
     }
 
     GpuPhysicsStats GpuPhysics::ReadStats() const {

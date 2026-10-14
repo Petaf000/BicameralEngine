@@ -129,6 +129,13 @@ add_executable(blank_world_test blank_world_test.cpp)
 target_precompile_headers(blank_world_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(blank_world_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_save bicameral_core)
 add_test(NAME blank_world COMMAND blank_world_test)
+
+# 物理で失った力学的エネルギーを仮の世界のセルの熱へ返す(T-0542。CPU の物理 + CPU リファレンスの反応の世界)
+add_executable(physics_heat_test physics_heat_test.cpp)
+target_precompile_headers(physics_heat_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(physics_heat_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME physics_heat COMMAND physics_heat_test)
+set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
 # 世界の組み立て(T-0398・ADR-0172): 試験のパッケージの world_cells・world_bodies が前の C++ の組み立て(木箱・積み木)とビット一致・
 # ランタイムの入り口と再生ファイルの中身から同じ・ブランクは空・Mod で足せる・誤りの出し方(CPU)
