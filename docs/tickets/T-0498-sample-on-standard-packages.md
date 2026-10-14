@@ -17,7 +17,8 @@
 - [x] ゲーム本体が依存の鍵を書き直しても「改造された世界」にならない(Mod は今までどおり)
 - [x] release のビルドが通る(警告 0)
 - [x] CPU の試験(luau・reaction・environment・standard・world_layout・blank_world・play_metric・lab_box・multires・replay・physics・gas など 48 本。release)
-- [ ] GPU・窓の試験(ハッシュの更新に要る最小の組)— 作業ログ
+- [x] GPU・窓の試験(最小の組 19 本: gpu_reaction(_warp・_limits)・gpu_probe_sim(_tables・_warp)・window_table_edit・
+      window_hot_reload(_game)・window_gravity_reload の記録と再生)。image_*・ほかの window_* は回していない(司令塔がマージ後の全体で)
 - [x] ADR-0183 の追記・13 §2.2/§2.6・data/standard/README
 
 ## やったこと(仕組み。作り手から見た違い)
@@ -71,3 +72,4 @@
 - 仕組み(依存は棚から・`@dep` の写し・ゲーム本体の書き直しは印なし)とデータの作り直し・パネルと自動の確認の書き換え所・文書。release のビルド OK(警告 0)。
 - 型検査: `local real: PackageEntry = require("@real_matter")` は表のリテラルの型が PackageEntry に入らず落ちたので、any で受けて物質の表に型を付けた。
 - CPU の試験 48 本が通った(1 回目は物質 9 種の前提で 6 本落ち → 直した)。archmap --check OK。
+- GPU・窓の最小の組 19 本が通った(2026-10-15)。
