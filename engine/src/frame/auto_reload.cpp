@@ -14,30 +14,34 @@ namespace bicameral::frame {
         constexpr uint64_t START_TICK = 10;            // 壊すのは、世界がこの刻みに着いてから
         constexpr uint64_t RUN_TICKS_AFTER_SWAP = 30;  // 差し替わってから流す刻み
 
-        // 書き換える所(data/packages/combustion_test/reactions.luau の木の燃焼の前指数因子を 2 倍に)
+        // 書き換える所(data/packages/combustion_test/reactions.luau の仮の魔素の木の燃焼の前指数因子を 2 倍に。
+        // 現実の木の燃焼は標準パッケージ real_reactions にあり、サンプルのパッケージ〔--packages の写し〕の外。T-0498)
         constexpr std::string_view PACKAGE_FILE = "combustion_test/reactions.luau";
         constexpr std::string_view RATE_BEFORE = "rate = { a = \"2e10\"";
         constexpr std::string_view RATE_AFTER = "rate = { a = \"4e10\"";
         constexpr std::string_view BROKEN_TAIL = "\n=== --auto-reload が壊した行(return の後ろの文は構文の誤り)\n";
 
-        // 物質を足す・消す(T-0242): species.luau の carbon の前にオゾンを足す(名前のバイト順で oxygen と water_vapor の間に入り、
-        // 水蒸気の ID がずれる)。値は文献値を丸めた試験の値(未確認)。tests/reaction_replay_table_test.cpp と同じ
+        // 物質を足す・消す(T-0242): species.luau の足す物質の表の mana_test の前にオゾンを足す(名前のバイト順で oxygen と
+        // water_vapor の間に入り、水蒸気の ID がずれる)。値は文献値を丸めた試験の値(未確認)。tests/reaction_replay_table_test.cpp と同じ
         constexpr std::string_view SPECIES_FILE = "combustion_test/species.luau";
-        constexpr std::string_view SPECIES_ANCHOR = "    carbon = {";
+        constexpr std::string_view SPECIES_ANCHOR = "    mana_test = {";
         constexpr std::string_view OZONE_SPECIES =
             "    ozone = {\n"
             "        composition = { O = 3 },\n"
             "        formation_enthalpy_j_per_mol = 142700,\n"
             "        heat_capacity_mj_per_mol_k = 39200,\n"
-            "        thermal_conductivity_mw_per_m_k = gas(19),\n"
+            "        thermal_conductivity_mw_per_m_k = units.gas_conductivity(19),\n"
             "    },\n";
         constexpr std::string_view OZONE = "ozone";
         constexpr uint64_t RUN_TICKS_AFTER_SPECIES = 10;  // 物質を足した・消した表で流す刻み
 
-        // 環境の値のホットリロード(T-0444): environment.luau の重力を月の値(1.62 m/s²)に
-        constexpr std::string_view ENVIRONMENT_FILE = "combustion_test/environment.luau";
-        constexpr std::string_view GRAVITY_BEFORE = "gravity_um_per_s2 = 9806650";
-        constexpr std::string_view GRAVITY_AFTER = "gravity_um_per_s2 = 1620000";
+        // 環境の値のホットリロード(T-0444): 重力を月の値(1.62 m/s²)に。地球の重力は標準パッケージ earth_environment にあるので、
+        // サンプルの init.luau に環境の鍵を足して書き直す(元に戻すと地球の値。T-0498)
+        constexpr std::string_view ENVIRONMENT_FILE = "combustion_test/init.luau";
+        constexpr std::string_view GRAVITY_BEFORE = "    play_metrics = require";
+        constexpr std::string_view GRAVITY_AFTER =
+            "    environment = { gravity_um_per_s2 = 1620000 }, -- --auto-reload-environment が足した(月の重力)\n"
+            "    play_metrics = require";
 
         std::expected<std::string, std::string> ReadWhole(const fs::path& file) {
             std::ifstream input(file, std::ios::binary);

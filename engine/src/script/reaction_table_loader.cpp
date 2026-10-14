@@ -10,6 +10,7 @@
 #include "script/luau_sandbox.h"
 #include "script/luau_type_check.h"
 #include "script/reaction_package.h"
+#include "script/standard_packages.h"
 
 namespace bicameral::script {
 
@@ -56,6 +57,10 @@ namespace bicameral::script {
                     .mergeMode = source.mergeMode, .basePackage = source.basePackage, .typeChecker = checker->get()});
         }
 
+        fs::path StandardRootOf(const ReactionTableSource& source) {
+            return source.standardRoot.empty() ? DefaultStandardPackageRoot() : source.standardRoot;
+        }
+
         // 読むパッケージ: root の直下のフォルダ(readPackageRoot のとき)+ 足した標準パッケージのフォルダ
         std::expected<std::vector<PackageSource>, std::string> ReadSourcePackages(const ReactionTableSource& source,
                                                                                   const fs::path& root) {
@@ -75,6 +80,10 @@ namespace bicameral::script {
 
                 packages.push_back(std::move(*added));
             }
+
+            // 依存しているのに無い標準パッケージ(サンプルの世界は標準パッケージの上に作る。T-0498)
+            if (auto added = AddStandardDependencies(packages, StandardRootOf(source)); !added)
+                return std::unexpected(added.error());
 
             return packages;
         }
@@ -118,6 +127,7 @@ namespace bicameral::script {
 
         return LoadedReactionTable{.table = std::move(*baked),
                                    .packageRoot = root,
+                                   .standardRoot = StandardRootOf(source),
                                    .loadOrder = loaded->loadOrder,
                                    .rejected = loaded->rejected,
                                    .overrides = loaded->overrides,

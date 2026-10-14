@@ -157,6 +157,79 @@ namespace {
         EXPECT(FieldTrue(checks, "nested"));
     }
 
+    // require("@dep"): たどって依存するパッケージの entry の写しを読む(T-0498)。中の require はそのパッケージの中で解く。
+    // 写しを書き換えても dep の表は変わらない。依存していないパッケージ・自分は @ で読めない
+    void TestRequireDependency() {
+        const PackageSource standard = MakePackage(
+            "std", {{"package.luau", MANIFEST},
+                    {"init.luau", "local value = require('lib/value')\nreturn { species = { a = { k = value.k } } }"},
+                    {"lib/value.luau", "return { k = 5 }"}});
+        const PackageSource middle = SimplePackage("middle", "'std'", "return { species = { b = { k = 7 } } }");
+        const char* init = R"(
+            local std = require("@std")
+            local scaled = std.species.a
+            scaled.k *= 10  -- 写しなので std の表は変わらない
+            return {
+                species = { a2 = { k = scaled.k } },
+                checks = { dep = {
+                    viaPath = require("@std/lib/value").k == 5,
+                    transitive = require("@std").species.a.k == 50,  -- 同じ Run の中では同じ写し
+                } },
+            }
+        )";
+        const PackageSource game = SimplePackage("game", "'middle'", init);
+        const PackageSource stranger = SimplePackage("stranger", "", "return { x = { y = require('@std') } }");
+        const PackageSource self = SimplePackage("selfref", "'std'", "return { x = { y = require('@selfref') } }");
+
+        const PackageSetResult result = Load({standard, middle, game, stranger, self});
+        EXPECT((result.loadOrder == std::vector<std::string>{"std", "middle", "game"}));
+        EXPECT(FieldNumber(EntryValue(result, "species", "a"), "k") == 5.0);
+        EXPECT(FieldNumber(EntryValue(result, "species", "a2"), "k") == 50.0);
+        const ScriptValue* checks = EntryValue(result, "checks", "dep");
+        EXPECT(FieldTrue(checks, "viaPath") && FieldTrue(checks, "transitive"));
+        EXPECT(HasRejection(result, "stranger", "依存するパッケージではない"));
+        EXPECT(HasRejection(result, "selfref", "依存するパッケージではない"));
+
+        // 名前の形
+        EXPECT(SplitDependencyRequire("@std").has_value() && SplitDependencyRequire("@std")->path.empty());
+        EXPECT(SplitDependencyRequire("@std/lib/value").has_value() &&
+               SplitDependencyRequire("@std/lib/value")->path == "lib/value.luau");
+        EXPECT(!SplitDependencyRequire("std").has_value() && !SplitDependencyRequire("@").has_value() &&
+               !SplitDependencyRequire("@std/../x").has_value() && !SplitDependencyRequire("@Std").has_value());
+    }
+
+    // ゲーム本体は、自分のたどる依存(標準パッケージなど)の鍵を書き直してよい: どの合わせ方でも通り、印は付かない(T-0498)。
+    // 依存はゲーム本体に依存させない(循環にしない)。Mod の書き直しは今までどおり(足すだけなら読まない)
+    void TestBaseOverridesDependency() {
+        const PackageSource standard = SimplePackage("std", "",
+                                                     "return { species = { a = { k = 1 }, b = { k = 2 } } }");
+        const PackageSource game = SimplePackage(
+            "game", "'std'", "local std = require('@std')\nreturn { species = { a = { k = std.species.a.k * 100 } } }");
+        const PackageSource mod = SimplePackage("mod", "", "return { species = { b = { k = 3 } } }");
+
+        for (const MergeMode mode : {MergeMode::AddOnly, MergeMode::OverrideMarked}) {
+            const PackageSetResult result = Load({standard, game}, {.mergeMode = mode, .basePackage = "game"});
+            EXPECT((result.loadOrder == std::vector<std::string>{"std", "game"}));
+            EXPECT(result.rejected.empty());
+            EXPECT(FieldNumber(EntryValue(result, "species", "a"), "k") == 100.0);
+            EXPECT(result.overrides.size() == 1 && result.overrides[0].previousPackage == "std" &&
+                   result.overrides[0].package == "game");
+            EXPECT(!result.modifiedWorld);
+        }
+
+        const PackageSetResult addOnly = Load({standard, game, mod}, {.basePackage = "game"});
+        EXPECT(HasRejection(addOnly, "mod", "species.b('std' が書いた)"));
+
+        const PackageSetResult marked = Load({standard, game, mod},
+                                             {.mergeMode = MergeMode::OverrideMarked, .basePackage = "game"});
+        EXPECT((marked.loadOrder == std::vector<std::string>{"std", "game", "mod"}));
+        EXPECT(marked.modifiedWorld);
+
+        // ゲーム本体でないパッケージが依存の鍵を書くのは Mod の書き直し(足すだけなら読まない)
+        const PackageSetResult noBase = Load({standard, game});
+        EXPECT(HasRejection(noBase, "game", "species.a('std' が書いた)"));
+    }
+
     void TestRequireErrors() {
         const char* retry = R"(
             local first = pcall(require, "bad")
@@ -462,6 +535,8 @@ namespace {
 
 int main() {
     TestRequireInsidePackage();
+    TestRequireDependency();
+    TestBaseOverridesDependency();
     TestRequireErrors();
     TestOrder();
     TestMergeAddOnly();

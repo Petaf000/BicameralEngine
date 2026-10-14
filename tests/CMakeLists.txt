@@ -5,7 +5,8 @@
 add_library(bicameral_test_reaction_table STATIC reaction_test_table.cpp)
 target_link_libraries(bicameral_test_reaction_table PUBLIC bicameral_reaction_script bicameral_core)
 target_compile_definitions(bicameral_test_reaction_table PRIVATE
-  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages"
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard")  # 試験の表は標準パッケージに依存する(T-0498)
 
 add_executable(smoke_test smoke_test.cpp)
 add_test(NAME smoke COMMAND smoke_test)
@@ -93,7 +94,8 @@ set_tests_properties(reaction_hot_reload PROPERTIES TIMEOUT 300)
 add_executable(reaction_table_edit_test reaction_table_edit_test.cpp)
 target_link_libraries(reaction_table_edit_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(reaction_table_edit_test PRIVATE
-  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
+  BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages"
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard")
 add_dependencies(reaction_table_edit_test bicameral_data)
 add_test(NAME reaction_table_edit COMMAND reaction_table_edit_test)
 set_tests_properties(reaction_table_edit PROPERTIES TIMEOUT 300)
@@ -795,6 +797,6 @@ foreach(_name IN ITEMS
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test play_metric_test
-    gpu_play_metric_test)
+    gpu_play_metric_test environment_package_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

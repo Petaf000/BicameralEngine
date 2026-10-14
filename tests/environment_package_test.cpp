@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "reaction_test_table.h"
 #include "script/luau_sandbox.h"
 #include "script/reaction_hot_reload.h"
 #include "script/reaction_table_loader.h"
@@ -58,13 +59,15 @@ namespace {
     }
 
     // パッケージ群 → 読み込み → 環境の値。読まなかったパッケージがあれば誤りにする
-    std::expected<sim::WorldPhysics, std::string> ReadEnvironment(const std::vector<PackageSource>& packages) {
+    std::expected<sim::WorldPhysics, std::string> ReadEnvironment(const std::vector<PackageSource>& packages,
+                                                                  std::string basePackage = {}) {
         auto sandbox = LuauSandbox::Create(SandboxLimits{});
         if (!sandbox)
             return std::unexpected(sandbox.error());
 
         (*sandbox)->Seal();
-        const auto loaded = LoadPackages(**sandbox, packages, PackageLoadOptions{});
+        const auto loaded = LoadPackages(**sandbox, packages,
+                                         PackageLoadOptions{.basePackage = std::move(basePackage)});
         if (!loaded)
             return std::unexpected(loaded.error());
 
@@ -87,15 +90,8 @@ namespace {
 
     // サンプルの世界のパッケージの環境 = 標準の値(試験の場面が StandardWorldPhysics で書いた結果がサンプルの世界と同じになる)
     void TestSamplePackageIsStandard() {
-        auto package = ReadPackageFolder(fs::path(BICAMERAL_DATA_PACKAGES_DIR) / "combustion_test");
-        if (!package) {
-            std::printf("FAILED: 試験のパッケージを読めない: %s\n", package.error().c_str());
-            ++failureCount;
-
-            return;
-        }
-
-        const auto world = ReadEnvironment({std::move(*package)});
+        // 試験のパッケージは環境の値を書かず、依存の標準パッケージ earth_environment が書く(T-0498)
+        const auto world = ReadEnvironment(sim::ReadCombustionTestPackages(), "combustion_test");
         if (!world) {
             std::printf("FAILED: 環境を読めない: %s\n", world.error().c_str());
             ++failureCount;

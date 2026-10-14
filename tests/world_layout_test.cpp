@@ -171,15 +171,16 @@ namespace {
 
     // 試験のパッケージ + init.luau が modEntry を返す Mod を読んでベイクする
     std::expected<BakedReactionTable, std::string> BakeWithMod(const std::string& modEntry) {
-        auto base = script::ReadPackageFolder(fs::path(BICAMERAL_DATA_PACKAGES_DIR) / "combustion_test");
         auto sandbox = script::LuauSandbox::Create(script::SandboxLimits{});
-        if (!base || !sandbox)
-            return std::unexpected(std::string("試験のパッケージか殻を作れない"));
+        if (!sandbox)
+            return std::unexpected(std::string("殻を作れない"));
 
         (*sandbox)->Seal();
         const script::PackageSource mod{.name = "layout_mod",
                                         .files = {{"package.luau", "return { format = 1 }"}, {"init.luau", modEntry}}};
-        const std::vector<script::PackageSource> packages{std::move(*base), mod};
+        std::vector<script::PackageSource>
+            packages = ReadCombustionTestPackages();  // 試験のパッケージ + 依存の標準(T-0498)
+        packages.push_back(mod);
         const auto loaded = script::LoadPackages(**sandbox, packages, {.basePackage = "combustion_test"});
         if (!loaded)
             return std::unexpected(loaded.error());

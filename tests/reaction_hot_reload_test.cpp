@@ -87,7 +87,8 @@ namespace {
         // --- 速度を変える → 新しい版 ---
         const fs::path reactions = root / BASE_PACKAGE / "reactions.luau";
         const std::string original = ReadText(reactions);
-        const std::string faster = ReplaceOnce(original, "a = \"3e8\"", "a = \"6e8\"");
+        // サンプルのパッケージが書いた規則(仮の魔素の木の燃焼。現実の反応は棚の標準パッケージ。T-0498)
+        const std::string faster = ReplaceOnce(original, "a = \"2e10\"", "a = \"4e10\"");
         WriteText(reactions, faster);
         const HotReloadResult reloaded = PollTwice(reload);
         EXPECT(reloaded.state == HotReloadState::Reloaded);
@@ -104,8 +105,8 @@ namespace {
         EXPECT(reload.Current()->tableVersion == fasterVersion);
 
         // --- 型の誤り → 落ちて今の表のまま(誤りにファイルの名前)---
-        WriteText(reactions, ReplaceOnce(faster, "activation_energy_j_per_mol = 160000",
-                                         "activation_energy_j_per_mol = \"160000x\""));
+        WriteText(reactions, ReplaceOnce(faster, "activation_energy_j_per_mol = 100000",
+                                         "activation_energy_j_per_mol = \"100000x\""));
         const HotReloadResult typeError = PollTwice(reload);
         std::printf("  型の誤り → %s\n", typeError.message.c_str());
         EXPECT(typeError.state == HotReloadState::Failed);

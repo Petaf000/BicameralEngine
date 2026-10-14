@@ -400,7 +400,9 @@ namespace bicameral::script {
         if (!m_modules)
             return std::unexpected("require はパッケージの中だけで使える");
 
-        auto file = (*m_modules)(name);
+        const std::string_view fromChunk = m_moduleLoading.empty() ? std::string_view(m_currentChunk)
+                                                                   : std::string_view(m_moduleLoading.back());
+        auto file = (*m_modules)(name, fromChunk);
         if (!file)
             return std::unexpected(std::format("require(\"{}\"): {}", name, file.error()));
 

@@ -15,6 +15,7 @@
 
 #include "script/luau_literal_edit.h"
 #include "script/reaction_package.h"
+#include "script/standard_packages.h"
 
 namespace bicameral::script {
 
@@ -38,11 +39,14 @@ namespace bicameral::script {
 
         // --- 書き戻す所を探す ---
 
-        // パッケージのフォルダの中身(読んだ順の後ろから。後のパッケージが前の値を上書きするので)
+        // パッケージのフォルダの中身(読んだ順の後ろから。後のパッケージが前の値を上書きするので)。
+        // folders は書き戻せるパッケージ → フォルダ(パッケージのフォルダの直下)。依存で読んだ棚の標準パッケージは
+        // 探すが書き戻さない(T-0498)
         class SourceIndex {
         public:
-            SourceIndex(fs::path root, std::vector<PackageSource> packages, const std::vector<std::string>& loadOrder)
-                : m_root(std::move(root)) {
+            SourceIndex(std::vector<PackageSource> packages, std::map<std::string, fs::path> folders,
+                        const std::vector<std::string>& loadOrder, const std::vector<TableOverride>& overrides)
+                : m_folders(std::move(folders)), m_overrides(overrides) {
                 for (const std::string& name : loadOrder | std::views::reverse) {
                     const auto package = std::ranges::find(packages, name, &PackageSource::name);
                     if (package != packages.end())
@@ -50,21 +54,56 @@ namespace bicameral::script {
                 }
             }
 
-            // value.keyPath(分類から)か、分類を除いた並びで探す。最初に見つかったパッケージで決める
+            // value.keyPath(分類から)か、分類を除いた並びで探す。最初に見つかったパッケージで決める。
+            // 鍵を後のパッケージが書き直していれば(上書きの記録)、そのパッケージの中だけで探す(前のパッケージのリテラルは、
+            // 今の表の値ではない。例: サンプルの世界が標準パッケージの熱伝導率に倍率を掛けて書き直したもの)
             void Locate(ReactionValue& value) const {
                 const std::span<const std::string> full = value.keyPath;
                 const std::span<const std::string> withoutCategory = full.subspan(1);
+                const TableOverride* rewritten = LastOverride(value);
                 for (const PackageSource& package : m_packages) {
+                    if (rewritten != nullptr && package.name != rewritten->package)
+                        continue;
+
                     for (const auto path : {full, withoutCategory}) {
-                        if (LocateIn(package, path, value))
-                            return;
+                        if (!LocateIn(package, path, value))
+                            continue;
+
+                        // 棚の標準パッケージの値は書き戻さない(現実の値で、ほかの世界も使う。遊びの値はゲーム本体で書き直す。T-0498)
+                        if (!m_folders.contains(package.name) && value.readOnly.empty()) {
+                            value.readOnly = std::format(
+                                "標準パッケージ {} の値(棚の値は書き戻さない。"
+                                "変えるならゲーム本体のパッケージで書き直す)",
+                                package.name);
+                            value.file.clear();
+                            value.sourceKeyPath.clear();
+                        }
+
+                        return;
                     }
                 }
 
-                value.readOnly = "パッケージのソースに見つからない";
+                value.readOnly = rewritten != nullptr
+                                     ? std::format("{} が {} の値を写して書き直している(リテラルが無い)",
+                                                   rewritten->package, rewritten->previousPackage)
+                                     : "パッケージのソースに見つからない";
             }
 
         private:
+            // value の鍵(分類・鍵)を最後に書き直したもの(無ければ nullptr)
+            const TableOverride* LastOverride(const ReactionValue& value) const {
+                if (value.keyPath.size() < 2)
+                    return nullptr;
+
+                const TableOverride* last = nullptr;
+                for (const TableOverride& entry : m_overrides) {
+                    if (entry.category == value.keyPath[0] && entry.key == value.keyPath[1])
+                        last = &entry;
+                }
+
+                return last;
+            }
+
             // package の中で path を探す。見つかった(書き戻せる・書き戻せない理由が決まった)なら true
             bool LocateIn(const PackageSource& package, std::span<const std::string> path, ReactionValue& value) const {
                 size_t count = 0;
@@ -77,8 +116,9 @@ namespace bicameral::script {
                     if (!found->expressions.empty()) {
                         value.readOnly = std::format("{}/{} の {} 行目は式なので書き戻せない", package.name, relative,
                                                      found->expressions.front().line);
-                    } else if (count == 1) {
-                        value.file = m_root / package.name / fs::path(std::u8string(relative.begin(), relative.end()));
+                    } else if (count == 1 && m_folders.contains(package.name)) {
+                        value.file = m_folders.at(package.name) /
+                                     fs::path(std::u8string(relative.begin(), relative.end()));
                         value.sourceKeyPath.assign(path.begin(), path.end());
                     }
                 }
@@ -97,7 +137,8 @@ namespace bicameral::script {
                 return true;
             }
 
-            fs::path m_root;
+            std::map<std::string, fs::path> m_folders;
+            std::vector<TableOverride> m_overrides;
             std::vector<PackageSource> m_packages;
         };
 
@@ -325,12 +366,24 @@ namespace bicameral::script {
         }
 
         auto packages = ReadPackageRoot(table.packageRoot);
+        std::map<std::string, fs::path> folders;
+        if (packages) {
+            for (const PackageSource& package : *packages)
+                folders.emplace(package.name, table.packageRoot / package.name);
+
+            // 依存で読んだ標準パッケージ(棚。探すだけで書き戻さない。T-0498)
+            if (auto added = AddStandardDependencies(*packages, table.standardRoot); !added) {
+                MarkAllReadOnly(document, std::format("標準パッケージの棚を読めない: {}", added.error()));
+                return document;
+            }
+        }
+
         if (!packages) {
             MarkAllReadOnly(document, std::format("パッケージのフォルダを読めない: {}", packages.error()));
             return document;
         }
 
-        LocateAll(SourceIndex(table.packageRoot, std::move(*packages), table.loadOrder), document);
+        LocateAll(SourceIndex(std::move(*packages), std::move(folders), table.loadOrder, table.overrides), document);
 
         return document;
     }

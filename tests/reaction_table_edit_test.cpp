@@ -127,8 +127,13 @@ return {
 
     // --- 試験の表の一覧と保存則の検査 ---
 
+    // 標準パッケージの棚の写し(パッケージのフォルダの隣。T-0498: サンプルの世界は棚の標準パッケージに依存する)
+    fs::path StandardRoot(const fs::path& packages) {
+        return packages.parent_path() / "standard";
+    }
+
     std::expected<ReactionTableDocument, std::string> Load(const fs::path& root) {
-        const auto loaded = LoadReactionTable({.packageRoot = root});
+        const auto loaded = LoadReactionTable({.packageRoot = root, .standardRoot = StandardRoot(root)});
         if (!loaded)
             return std::unexpected(loaded.error());
 
@@ -166,16 +171,31 @@ return {
     }
 
     void TestDocument(const ReactionTableDocument& document) {
-        // 現実の 4 元素・7 物質・5 規則 + 触るための仮の魔素(元素 1・物質 1・規則 2。T-0225)
-        EXPECT(document.elements.size() == 5);
-        EXPECT(document.species.size() == 8);
+        // 標準パッケージの現実の 5 元素・8 物質・5 規則 + 触るための仮の魔素(元素 1・物質 1・規則 2。T-0225・T-0498)
+        EXPECT(document.elements.size() == 6);
+        EXPECT(document.species.size() == 9);
         EXPECT(document.rules.size() == 7);
 
+        // サンプルのパッケージが書いた値だけ書き戻せる。棚の標準パッケージの値は探すが書き戻さない(T-0498)
+        for (const ElementRow& row : document.elements) {
+            if (row.name == "mana_test")
+                EXPECT(!row.atomicMass.file.empty());
+            else
+                EXPECT(row.atomicMass.file.empty() &&
+                       row.atomicMass.readOnly.find("標準パッケージ") != std::string::npos);
+        }
+
         for (const SpeciesRow& row : document.species) {
-            EXPECT(!row.formationEnthalpy.file.empty());
-            EXPECT(!row.heatCapacity.file.empty());
-            // solid(120)・gas(27) は式なので書き戻せない
+            // 熱伝導率は式(倍率を掛けたもの)なので書き戻せない
             EXPECT(row.thermalConductivity.file.empty() && !row.thermalConductivity.readOnly.empty());
+            if (row.name == "mana_test") {
+                EXPECT(!row.formationEnthalpy.file.empty() && !row.heatCapacity.file.empty());
+                continue;
+            }
+
+            // 現実の物質はサンプルが real_matter を写して書き直した鍵なので、real_matter のリテラルは今の表の値ではない(書き戻さない)
+            EXPECT(row.formationEnthalpy.file.empty() && row.heatCapacity.file.empty());
+            EXPECT(row.formationEnthalpy.readOnly.find("real_matter") != std::string::npos);
         }
 
         bool manaRuleFound = false;
@@ -183,7 +203,8 @@ return {
         int64_t manaEnthalpy = 1;
         for (const RuleRow& row : document.rules) {
             EXPECT(row.elementImbalance.empty());
-            EXPECT(!row.preExponential.file.empty() && !row.activationEnergy.file.empty());
+            const bool sampleRule = row.name.starts_with("mana_test");
+            EXPECT(sampleRule == (!row.preExponential.file.empty() && !row.activationEnergy.file.empty()));
             if (row.name == "carbon_combustion") {
                 EXPECT(row.enthalpyJoulesPerMol == -393509);
                 EXPECT(row.declaredEnthalpy && row.declaredEnthalpy->text == "-393500");
@@ -234,9 +255,9 @@ return {
 
     // 書き戻す → 読み直す → 同じ表(変えた値だけ違う)→ 戻す → 元のファイル・元の版
     void TestRoundTrip(const fs::path& root) {
-        const fs::path package = root / BASE_PACKAGE;
+        const fs::path package = root.parent_path();  // パッケージと棚の写しの全部
         const auto original = Snapshot(package);
-        const auto initial = LoadReactionTable({.packageRoot = root});
+        const auto initial = LoadReactionTable({.packageRoot = root, .standardRoot = StandardRoot(root)});
         EXPECT(initial.has_value());
         if (!initial)
             return;
@@ -250,16 +271,17 @@ return {
 
         TestDocument(*document);
         const auto values = WritableValues(*document);
-        EXPECT(values.size() >= 30);
+        EXPECT(values.size() >= 15);  // サンプルが足した元素・物質・規則の値(T-0498)
 
         // --- 同じ値 → 何も書かない("2.8e19" と書いてある所に "28e18" と書いても同じ値)---
         for (const ReactionValue* value : values)
             EXPECT(WriteReactionValue(*value, value->text).has_value());
 
         EXPECT(Snapshot(package) == original);
-        if (const auto* pyrolysis = FindReactionValue(
-                *document, std::vector<std::string>{"reactions", "cellulose_pyrolysis", "rate", "a"})) {
-            EXPECT(WriteReactionValue(*pyrolysis, "28e18").has_value());
+        if (const auto* manaRate = FindReactionValue(
+                *document,
+                std::vector<std::string>{"reactions", "mana_test_catalyzed_cellulose_combustion", "rate", "a"})) {
+            EXPECT(WriteReactionValue(*manaRate, "20e9").has_value());
             EXPECT(Snapshot(package) == original);
         }
 
@@ -307,7 +329,7 @@ return {
         }
 
         EXPECT(Snapshot(package) == original);
-        const auto restored = LoadReactionTable({.packageRoot = root});
+        const auto restored = LoadReactionTable({.packageRoot = root, .standardRoot = StandardRoot(root)});
         EXPECT(restored && restored->tableVersion == initial->tableVersion);
         std::printf("  書き戻した値 %zu 個(係数を除いて読み直せた %zu 個)\n", values.size(), changed);
 
@@ -338,6 +360,7 @@ int main() {
     fs::create_directories(packages);
     fs::copy(fs::path(BICAMERAL_DATA_PACKAGES_DIR) / BASE_PACKAGE, packages / BASE_PACKAGE,
              fs::copy_options::recursive);
+    fs::copy(fs::path(BICAMERAL_DATA_STANDARD_DIR), StandardRoot(packages), fs::copy_options::recursive);
 
     TestFinder();
     TestRoundTrip(packages);

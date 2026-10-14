@@ -62,8 +62,11 @@ namespace bicameral::script {
         std::string source;
     };
 
-    // require("名前") の名前をファイルにする。無い・許さない名前なら理由を返す(呼んだスクリプトに error として届く)
-    using ModuleResolver = std::function<std::expected<ModuleFile, std::string>(std::string_view name)>;
+    // require("名前") の名前をファイルにする。無い・許さない名前なら理由を返す(呼んだスクリプトに error として届く)。
+    // fromChunk は require を書いたチャンクの名前(Run のチャンクか、読み込み中のモジュールの chunkName)。
+    // 依存するパッケージのモジュールの中の require を、そのパッケージの中で解くのに使う(T-0498)
+    using ModuleResolver = std::function<std::expected<ModuleFile, std::string>(std::string_view name,
+                                                                                std::string_view fromChunk)>;
 
     // Run の追加の指定(既定は T-0020 の殻のまま: require なし・戻り値は文字列だけ)
     struct RunOptions {
