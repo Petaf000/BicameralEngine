@@ -56,6 +56,7 @@ cbuffer ImConstants : register(b0) {
         g_cheapTail;  // 1 以上なら記録した回の後の安い回: ImTail が min(下りが止まる段, g_cheapTail − 1) から(T-0179・T-0505)
     uint32_t g_sweeps;      // 掃き出しの回数: 前 | 後 << 8 | 最も粗い段 << 16
     uint32_t g_tailShared;  // 1 なら ImTail は収まる時に節の値を groupshared に置く(T-0587)
+    uint32_t g_checkColor;  // 1 なら止める判定は V の後: 段 0 に同じ色の隣が無ければ色 1 の節を飛ばす(T-0606)
 };
 
 static const uint32_t IM_THREADS = 64;
@@ -126,6 +127,10 @@ uint32_t ChildAt(uint32_t k) {
 }
 uint32_t ShortGroups(uint32_t count) {
     return (count + IM_THREADS - 1) / IM_THREADS;
+}
+// 段 depth のどの隣も色が違うか(計画の ImPlanColors。T-0606)
+bool SingleColorLevel(uint32_t depth) {
+    return g_plan[LevelWord(depth, IM_PLAN_SAME_COLOR)] == 0;
 }
 
 FxU128 FaceCoefficient(ImGpuFace face) {
@@ -286,16 +291,30 @@ bool CyclesDone() {
 
 // --- V サイクルの段 ---
 
-// 赤黒の掃き出しの 1 色: 色が合う節は掃き出しの初めの値から計算し、ほかは写す(同じ色の隣も初めの値を読む。順に依存しない)
+// 赤黒の掃き出しの 1 色: 色が合う節は掃き出しの初めの値から計算し、ほかは写す(同じ色の隣も初めの値を読む。順に依存しない)。
+// 段のどの隣も色が違う時(一様な箱。計画の印)は、色が合う節だけを値 A に直接書く(T-0606): 読む隣はどれも別の色でこの色の中では
+// 変わらないので、A → B → A と写す形と同じ値になる(色 1 の後は両方とも A に結果。B はその段では読まない)。写す節の読み書きが無くなる
 [numthreads(IM_THREADS, 1, 1)] void ImSmooth(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
     uint32_t node;
     bool isLong;
-    if (CyclesDone() || !OrderedNode(ConstantDepth(), g_color, group.x, lane, node, isLong))
+    const uint32_t depth = ConstantDepth();
+    if (CyclesDone() || !OrderedNode(depth, g_color, group.x, lane, node, isLong))
         return;
+
+    const bool update = g_nodes[node].color == g_color;
+    if (SingleColorLevel(depth)) {
+        if (!update)
+            return;  // 長い行の節はどれも色が合う(グループの中で同じ分岐)
+
+        const int64_t relaxed = isLong ? RelaxGroup(node, 0, lane) : Relax(node, 0);
+        if (!isLong || lane == 0)
+            g_work[ValueA(node)] = relaxed;
+
+        return;
+    }
 
     const uint32_t from = g_color;
     const int64_t current = g_work[from == 0 ? ValueA(node) : ValueB(node)];
-    const bool update = g_nodes[node].color == g_color;
     int64_t next = current;
     if (isLong) {
         const int64_t relaxed = RelaxGroup(node, from, lane);
@@ -309,37 +328,83 @@ bool CyclesDone() {
     g_work[from == 0 ? ValueB(node) : ValueA(node)] = next;
 }
 
-    // 残差を親へ(自分の D で重み付けた和 ÷ 親の D)。親の直しを 0 から。1 スレッド = 親の段(この段)の 1 節。子は 1 つ細かい段
-    [numthreads(IM_THREADS, 1, 1)] void ImRestrict(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
-    uint32_t parent;
-    bool isLong;
-    if (CyclesDone() || !OrderedNode(g_depth, IM_KIND_RESTRICT, group.x, lane, parent, isLong))
-        return;
+// 子 1 つの重み付きの残差(自分の D で重み付けた残差。親の単位)
+int64_t RestrictedResidual(uint32_t child, int64_t relaxed) {
+    const int64_t residual = relaxed - g_work[ValueA(child)];
+    return FxMulShiftS64(g_nodes[child].restrictWeight, residual, IM_WEIGHT_SHIFT);
+}
 
-    const ImGpuNode entry = g_nodes[parent];
-    int64_t sum = 0;
-    for (uint32_t k = entry.childStart; k < entry.childEnd; ++k) {
-        const uint32_t child = ChildAt(k);
-        int64_t relaxed;
-        if (isLong)
-            relaxed = RelaxGroup(child, 0, lane);  // グループの中で同じ分岐(バリアを含む)
-        else
-            relaxed = Relax(child, 0);
-
-        const int64_t residual = relaxed - g_work[ValueA(child)];
-        sum += FxMulShiftS64(g_nodes[child].restrictWeight, residual, IM_WEIGHT_SHIFT);
-    }
-
-    if (lane != 0 && isLong)
-        return;
-
+void WriteRestricted(uint32_t parent, int64_t sum) {
     g_work[Rhs(parent)] = sum;
     g_work[ValueA(parent)] = 0;
     g_work[ValueB(parent)] = 0;
 }
 
-// 親の直しを子へそのまま(倍率を掛けて)足す
-[numthreads(IM_THREADS, 1, 1)] void ImProlong(uint32_t local : SV_DispatchThreadID) {
+// 残差を親へ(自分の D で重み付けた和 ÷ 親の D)。親の直しを 0 から。子は 1 つ細かい段。
+// 前のグループは 1 つの親を IM_RESTRICT_LANES スレッドで: 子を順に分けて足し、グループの中で親ごとに足す(T-0606。64³ の段 1 への縮約は
+// 1 スレッドが子 8 つの Relax を順に回す読みの往復の待ちが大半だった。整数の和なので足す順によらず値は同じ)。
+// 後ろのグループは子の隣が多い親 1 つ(子ごとにグループで足す。T-0120)
+static const uint32_t IM_RESTRICT_LANES = 8;
+
+uint32_t RestrictShortGroups(uint32_t count) {
+    return ((count * IM_RESTRICT_LANES) + IM_THREADS - 1) / IM_THREADS;
+}
+
+[numthreads(IM_THREADS, 1, 1)] void ImRestrict(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+    if (CyclesDone())
+        return;  // どのスレッドも同じ(この段の間は誰も書かない)
+
+    const uint32_t count = NodeCount(g_depth);
+    const uint32_t shortGroups = RestrictShortGroups(count);
+
+    // --- 子の隣が多い親: グループ = 親 1 つ ---
+    if (group.x >= shortGroups) {
+        const uint32_t index = group.x - shortGroups;
+        if (index >= g_plan[LevelWord(g_depth, IM_PLAN_LONG_RESTRICT)])
+            return;
+
+        const uint32_t parent = g_plan[LongListWord(g_depth, IM_KIND_RESTRICT) + index];
+        const ImGpuNode entry = g_nodes[parent];
+        int64_t sum = 0;
+        for (uint32_t k = entry.childStart; k < entry.childEnd; ++k) {
+            const uint32_t child = ChildAt(k);
+            sum += RestrictedResidual(child, RelaxGroup(child, 0, lane));  // グループの中で同じ分岐(バリアを含む)
+        }
+
+        if (lane == 0)
+            WriteRestricted(parent, sum);
+
+        return;
+    }
+
+    // --- ほかの親: IM_RESTRICT_LANES スレッド = 親 1 つ(バリアがあるので範囲の外のスレッドも最後まで回る)---
+    const uint32_t local = ((group.x * IM_THREADS) + lane) / IM_RESTRICT_LANES;
+    const uint32_t slot = lane % IM_RESTRICT_LANES;
+    const uint32_t parent = NodeOffset(g_depth) + local;
+    const bool active = local < count && (g_plan[FlagWord(parent)] & 2u) == 0;
+    int64_t partial = 0;
+    if (active) {
+        const ImGpuNode entry = g_nodes[parent];
+        for (uint32_t k = entry.childStart + slot; k < entry.childEnd; k += IM_RESTRICT_LANES) {
+            const uint32_t child = ChildAt(k);
+            partial += RestrictedResidual(child, Relax(child, 0));
+        }
+    }
+
+    gs_partial[lane] = partial;
+    GroupMemoryBarrierWithGroupSync();
+    if (!active || slot != 0)
+        return;
+
+    int64_t sum = 0;
+    for (uint32_t i = 0; i < IM_RESTRICT_LANES; ++i)
+        sum += gs_partial[lane + i];
+
+    WriteRestricted(parent, sum);
+}
+
+    // 親の直しを子へそのまま(倍率を掛けて)足す
+    [numthreads(IM_THREADS, 1, 1)] void ImProlong(uint32_t local : SV_DispatchThreadID) {
     if (local >= NodeCount(g_depth) || CyclesDone())
         return;
 
@@ -556,11 +621,18 @@ void SharedTail(uint32_t tailDepth, uint32_t last, uint32_t base, uint32_t count
     }
 }
 
-    // 新しい温度の誤差の見込み(残差 × D/C)が tolerance を超えるセルがあるか(ADR-0019 の 3)
-    [numthreads(IM_THREADS, 1, 1)] void ImConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+// V の後の止める判定で、このセルを飛ばしてよいか(T-0606): V の段 0 の最後は色 0 → 色 1 の掃き出し。段 0 のどの隣も色が違えば、
+// 色 1 の節は隣(色 0)がその後変わらないので残差がちょうど 0(Relax が同じ値を返す)で、判定に何も足さない
+// (熱: 0 は許容差を超えない。圧力: 閾値は 1 以上〔GasPressureThresholds の切り上げ〕)。呼ぶ側が g_checkColor で V の後と伝える
+bool SkipChecked(uint32_t cell) {
+    return g_checkColor != 0 && g_nodes[cell].color != 0 && SingleColorLevel(0);
+}
+
+// 新しい温度の誤差の見込み(残差 × D/C)が tolerance を超えるセルがあるか(ADR-0019 の 3)
+[numthreads(IM_THREADS, 1, 1)] void ImConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
     uint32_t cell;
     bool isLong;
-    if (CyclesDone() || !OrderedNode(0, IM_KIND_CONVERGED, group.x, lane, cell, isLong))
+    if (CyclesDone() || !OrderedNode(0, IM_KIND_CONVERGED, group.x, lane, cell, isLong) || SkipChecked(cell))
         return;
 
     int64_t relaxed;
@@ -577,8 +649,8 @@ void SharedTail(uint32_t tailDepth, uint32_t last, uint32_t base, uint32_t count
         InterlockedOr(g_state[IM_STATE_NOT_CONVERGED], 1u);
 }
 
-// V サイクル 1 回の終わり(1 スレッド): 数えて、収束していれば止める
-[numthreads(1, 1, 1)] void ImCycleEnd() {
+    // V サイクル 1 回の終わり(1 スレッド): 数えて、収束していれば止める
+    [numthreads(1, 1, 1)] void ImCycleEnd() {
     if (CyclesDone())
         return;
 
@@ -591,15 +663,15 @@ void SharedTail(uint32_t tailDepth, uint32_t last, uint32_t base, uint32_t count
     g_state[IM_STATE_NOT_CONVERGED] = 0;
 }
 
-    // --- 一般の右辺で解く形(T-0531。気体の圧力の投影 sim/gas_projection が CPU の模型。呼ぶ順は gpu_implicit.cpp の RecordSolve)---
-    // 右辺・初めの近似(値 A・B)・セルごとの閾値(刻みの初めの温度の欄)は呼ぶ側が作業場に書く。ImStart・面の流れ・安全網は使わない。
+// --- 一般の右辺で解く形(T-0531。気体の圧力の投影 sim/gas_projection が CPU の模型。呼ぶ順は gpu_implicit.cpp の RecordSolve)---
+// 右辺・初めの近似(値 A・B)・セルごとの閾値(刻みの初めの温度の欄)は呼ぶ側が作業場に書く。ImStart・面の流れ・安全網は使わない。
 
-    // 止める判定: |残差| が閾値(⌈(許容差 + 1)× 2^48 ÷ D⌉。GasPressureThresholds)以上のセルがあるか。
-    // CPU の「式の誤差 floor(|残差| × D ÷ 2^48)が許容差を超える」と整数で同じ
-    [numthreads(IM_THREADS, 1, 1)] void ImSolveConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+// 止める判定: |残差| が閾値(⌈(許容差 + 1)× 2^48 ÷ D⌉。GasPressureThresholds)以上のセルがあるか。
+// CPU の「式の誤差 floor(|残差| × D ÷ 2^48)が許容差を超える」と整数で同じ
+[numthreads(IM_THREADS, 1, 1)] void ImSolveConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
     uint32_t cell;
     bool isLong;
-    if (CyclesDone() || !OrderedNode(0, IM_KIND_CONVERGED, group.x, lane, cell, isLong))
+    if (CyclesDone() || !OrderedNode(0, IM_KIND_CONVERGED, group.x, lane, cell, isLong) || SkipChecked(cell))
         return;
 
     int64_t relaxed;
@@ -616,8 +688,8 @@ void SharedTail(uint32_t tailDepth, uint32_t last, uint32_t base, uint32_t count
         InterlockedOr(g_state[IM_STATE_NOT_CONVERGED], 1u);
 }
 
-// V サイクルの前の判定の終わり(1 スレッド): 数えずに、収束していれば止める(CPU は V の前にも判定する)
-[numthreads(1, 1, 1)] void ImSolveCheckEnd() {
+    // V サイクルの前の判定の終わり(1 スレッド): 数えずに、収束していれば止める(CPU は V の前にも判定する)
+    [numthreads(1, 1, 1)] void ImSolveCheckEnd() {
     if (g_state[IM_STATE_NOT_CONVERGED] == 0) {
         g_state[IM_STATE_DONE] = 1;
         g_predicate[0] = 1;
@@ -626,10 +698,10 @@ void SharedTail(uint32_t tailDepth, uint32_t last, uint32_t base, uint32_t count
     g_state[IM_STATE_NOT_CONVERGED] = 0;
 }
 
-    // --- 面の流れと安全網 ---
+// --- 面の流れと安全網 ---
 
-    // 近似解からの流れと、刻みの初めの温度からの陽解法の流れ(安全網が使う)
-    [numthreads(IM_THREADS, 1, 1)] void ImFlows(uint32_t index : SV_DispatchThreadID) {
+// 近似解からの流れと、刻みの初めの温度からの陽解法の流れ(安全網が使う)
+[numthreads(IM_THREADS, 1, 1)] void ImFlows(uint32_t index : SV_DispatchThreadID) {
     if (index >= FaceCount())
         return;
 
@@ -834,8 +906,39 @@ uint32_t PlanRank(uint32_t kind, uint32_t lane) {
     if (lane < 3)
         g_plan[LevelWord(depth, lane)] = gs_planBase[lane];
 
-    if (lane == 0)
+    if (lane == 0) {
         g_plan[LevelWord(depth, IM_PLAN_MOST_LINKS)] = gs_planMostLinks;
+        g_plan[LevelWord(depth, IM_PLAN_SAME_COLOR)] = 0;  // ImPlanColors が立てる
+    }
+}
+
+// 節に同じ色の隣があれば、その段の印を立てる(ImPlanLevels の後。T-0606)。節は段の順に並ぶ。
+// IM_PLAN_COLOR_GROUPS グループで全部の節を IM_PLAN_COLOR_GROUPS × IM_THREADS ずつ回す(節の上限によらず Dispatch の上限に収まる)
+bool HasSameColorLink(uint32_t node) {
+    const ImGpuNode entry = g_nodes[node];
+    for (uint32_t k = entry.linkStart; k < entry.linkEnd; ++k) {
+        if (g_nodes[g_links[k].neighbor].color == entry.color)
+            return true;
+    }
+
+    return false;
+}
+
+[numthreads(IM_THREADS, 1, 1)] void ImPlanColors(uint32_t index : SV_DispatchThreadID) {
+    const uint32_t levels = LevelCount();
+    if (levels == 0)
+        return;
+
+    const uint32_t last = levels - 1;
+    const uint32_t total = NodeOffset(last) + NodeCount(last);
+    uint32_t depth = 0;
+    for (uint32_t node = index; node < total; node += IM_PLAN_COLOR_GROUPS * IM_THREADS) {
+        while (depth < last && node >= NodeOffset(depth + 1))
+            ++depth;
+
+        if (HasSameColorLink(node) && g_plan[LevelWord(depth, IM_PLAN_SAME_COLOR)] == 0)
+            InterlockedOr(g_plan[LevelWord(depth, IM_PLAN_SAME_COLOR)], 1u);
+    }
 }
 
 void WriteArgs(uint32_t slot, uint32_t groups) {
@@ -902,7 +1005,7 @@ uint32_t PlanTailDepth(uint32_t levels, uint32_t wanted) {
             WriteArgs(slot + IM_SLOT_SMOOTH + color, down ? groups : 0u);
         }
 
-        const uint32_t restrictGroups = ShortGroups(NodeCount(depth + 1)) +
+        const uint32_t restrictGroups = RestrictShortGroups(NodeCount(depth + 1)) +
                                         g_plan[LevelWord(depth + 1, IM_PLAN_LONG_RESTRICT)];
         WriteArgs(slot + IM_SLOT_RESTRICT, down ? restrictGroups : 0u);
         WriteArgs(slot + IM_SLOT_PROLONG, down ? ShortGroups(NodeCount(depth)) : 0u);
