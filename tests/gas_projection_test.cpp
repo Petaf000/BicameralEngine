@@ -256,7 +256,7 @@ namespace {
             if (dx * dx + dy * dy + dz * dz > 2)
                 continue;
 
-            std::array<uint64_t, GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+            GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
             for (uint64_t& amount : amounts)
                 amount = amount * AIR_TEMPERATURE / HOT;
 
@@ -299,7 +299,7 @@ namespace {
     GasBox MakeBlastBox() {
         GasBox box = MakeAirBox(MakeAirConfig(BLAST_SIZE, BLAST_SIZE, BLAST_SIZE));
         const uint32_t index = box.Index(BLAST_CENTER, BLAST_CENTER, BLAST_CENTER);
-        std::array<uint64_t, GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+        GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
         for (uint64_t& amount : amounts)
             amount = amount * 5 * AIR_TEMPERATURE / BLAST_TEMPERATURE;  // 5 倍の圧力・1500 K
 
@@ -609,7 +609,7 @@ namespace {
             if (Coordinate(box, index)[0] >= 8)
                 continue;
 
-            std::array<uint64_t, GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+            GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
             for (uint64_t& amount : amounts)
                 amount = amount * 102 / 100;
 

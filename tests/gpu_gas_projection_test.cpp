@@ -70,7 +70,7 @@ namespace {
 
     // 同じ圧力のまま温度を変える(物質量を温度に反比例させる)
     void SetTemperature(sim::GasBox& box, uint32_t index, uint32_t temperature, uint64_t pressurePercent) {
-        std::array<uint64_t, sim::GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+        sim::GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
         for (uint64_t& amount : amounts)
             amount = amount * pressurePercent * AIR_TEMPERATURE / (100 * (uint64_t)temperature);
 

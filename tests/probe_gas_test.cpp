@@ -6,9 +6,14 @@
 //   3. 保存: 毎刻み、元素の数・エネルギー(セル + 運動エネルギーのぶん − 帳簿)・運動量(− 帳簿)がビット単位で一定
 //   4. 決定性: 2 回の実行で、セルと気体の欄のハッシュが一致(陽解法・投影とも)
 //   5. ブランクの世界(基準の大気が無い)では区画を作れない(何も読まずに動く世界は今までどおり。D-455)
-// 表は試験の表(combustion_test)から CO を作る規則を除いたもの(区画の気体の物質を 4 つ〔N2・O2・CO2・H2O〕に収める。上限を外すのは T-0591)。
+//   6. 成分の数の上限なし(T-0591): 地球の空気(N2・O2・Ar・CO2)+ 燃えてできる H2O・CO の 6 種の区画で 2〜4 が成り立つ。
+//      気体の段の費用(1 刻みの ms)を 4 種と 6 種で出す
+//   7. 定積の比熱(T-0591・ADR-0258): 表が気体の比熱を定圧で書くと、ベイクが c_v = c_p − R を作る(凝縮相はそのまま)
+// 表は 1〜4 が試験の表(combustion_test)から CO を作る規則を除いたもの(区画の気体の物質 4 つ〔N2・O2・CO2・H2O〕。T-0590 の形)、
+// 6・7 が試験の表のまま + 地球の空気 + 定圧の比熱。
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <span>
@@ -71,6 +76,30 @@ namespace {
         auto baked = BakeReactionTable(definition);
         if (!baked) {
             std::printf("表を作れない: %s\n", baked.error().c_str());
+            std::exit(1);
+        }
+
+        return std::move(*baked);
+    }
+
+    // 試験の表のまま(CO を作る規則も)+ 地球の乾いた空気(N2・O2・Ar・CO2。300 K・1 気圧)+ 気体の比熱は定圧(T-0591)
+    BakedReactionTable MakeEarthAirTable() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.environment = StandardWorldPhysics();
+        definition.atmosphere = {
+            .points = {{.heightMillimeters = 0,
+                        .temperatureMilliKelvin = (uint32_t)AIR_TEMPERATURE,
+                        .fractions = {{.species = "nitrogen", .partsPerMillion = 780840},
+                                      {.species = "oxygen", .partsPerMillion = 209460},
+                                      {.species = "argon", .partsPerMillion = 9340},
+                                      {.species = "carbon_dioxide", .partsPerMillion = 360}}}},
+            .surfacePressurePascals = 101325,
+        };
+        definition.gasHeatCapacityAtConstantPressure = true;
+
+        auto baked = BakeReactionTable(definition);
+        if (!baked) {
+            std::printf("地球の空気の表を作れない: %s\n", baked.error().c_str());
             std::exit(1);
         }
 
@@ -238,6 +267,8 @@ namespace {
         uint64_t celluloseLeft = 0;
         bool conserved = true;
         uint32_t skipped = 0;
+        uint32_t maxGasSpecies = 0;       // 区画の気体の物質の数の最大
+        int64_t advanceMicroseconds = 0;  // 刻みを進めた時間の合計(気体・伝導・反応)
     };
 
     FireResult RunFire(const BakedReactionTable& table, bool flow, ProbeGasPressure pressure, uint64_t ticks) {
@@ -253,8 +284,13 @@ namespace {
 
         const Totals initial = Sum(table, reference.State(0), reference.GasField());
         for (uint64_t tick = 0; tick < ticks; ++tick) {
+            const auto start = std::chrono::steady_clock::now();
             reference.Advance(tick, {});
-            result.skipped += reference.LastGasReport().skippedTooManySpecies ? 1 : 0;
+            result.advanceMicroseconds += std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - start)
+                                              .count();
+            result.skipped += reference.LastGasReport().skippedCellOverflow ? 1 : 0;
+            result.maxGasSpecies = std::max(result.maxGasSpecies, reference.LastGasReport().gasSpecies);
             if (Sum(table, reference.State(tick + 1), reference.GasField()) != initial)
                 result.conserved = false;
         }
@@ -294,6 +330,76 @@ namespace {
         EXPECT(flow.heatCentroid > still.heatCentroid + 1000);          // 熱が 1 セル以上高く運ばれる
         EXPECT(flow.smokeCentroid > (WOOD_BOTTOM + WOOD_SIZE) * 1000);  // 煙の重心が木箱の上
         EXPECT(flow.smokeTop > still.smokeTop);
+        std::printf("費用(気体 %u 種): 1 刻み 伝導と反応だけ %.2f ms → 気体あり %.2f ms(区画 %u セル・release)\n",
+                    flow.maxGasSpecies, (double)still.advanceMicroseconds / 1000.0 / (double)SMOKE_TICKS,
+                    (double)flow.advanceMicroseconds / 1000.0 / (double)SMOKE_TICKS,
+                    REGION_SIZE[0] * REGION_SIZE[1] * REGION_SIZE[2]);
+    }
+
+    // --- 6. 成分の数の上限なし(T-0591)---
+    void TestManySpecies(const BakedReactionTable& table) {
+        const FireResult still = RunFire(table, false, ProbeGasPressure::Explicit, SMOKE_TICKS);
+        const FireResult flow = RunFire(table, true, ProbeGasPressure::Explicit, SMOKE_TICKS);
+        std::printf(
+            "6 種の空気の燃える木箱 2 秒(陽解法): 区画の気体の物質 最大 %u 種・熱の重心 %lld → %lld ミリセル・"
+            "CO2 の重心 %lld → %lld・保存 %s・流さなかった刻み %u\n",
+            flow.maxGasSpecies, (long long)still.heatCentroid, (long long)flow.heatCentroid,
+            (long long)still.smokeCentroid, (long long)flow.smokeCentroid, flow.conserved ? "yes" : "no", flow.skipped);
+        std::printf("費用(気体 %u 種): 1 刻み 伝導と反応だけ %.2f ms → 気体あり %.2f ms\n", flow.maxGasSpecies,
+                    (double)still.advanceMicroseconds / 1000.0 / (double)SMOKE_TICKS,
+                    (double)flow.advanceMicroseconds / 1000.0 / (double)SMOKE_TICKS);
+
+        EXPECT(flow.maxGasSpecies >= 5);
+        EXPECT(still.conserved);
+        EXPECT(flow.conserved);
+        EXPECT(flow.skipped == 0);
+        EXPECT(flow.heatCentroid > still.heatCentroid + 1000);
+        EXPECT(flow.smokeCentroid > (WOOD_BOTTOM + WOOD_SIZE) * 1000);
+
+        for (const ProbeGasPressure pressure : {ProbeGasPressure::Explicit, ProbeGasPressure::Projection}) {
+            const FireResult first = RunFire(table, true, pressure, SHORT_TICKS);
+            const FireResult second = RunFire(table, true, pressure, SHORT_TICKS);
+            std::printf("6 種の決定性(%s・%llu 刻み): 最大 %u 種・ハッシュ %016llx / %016llx・保存 %s\n",
+                        pressure == ProbeGasPressure::Explicit ? "陽解法" : "投影", (unsigned long long)SHORT_TICKS,
+                        first.maxGasSpecies, (unsigned long long)first.hash, (unsigned long long)second.hash,
+                        first.conserved ? "yes" : "no");
+            EXPECT(first.maxGasSpecies >= 5);
+            EXPECT(first.hash == second.hash);
+            EXPECT(first.conserved);
+            EXPECT(first.skipped == 0);
+        }
+    }
+
+    // --- 7. 定積の比熱(T-0591・ADR-0258)---
+    void TestHeatCapacityAtConstantVolume(const BakedReactionTable& constantVolume, const BakedReactionTable& earth) {
+        // 書いた値(NIST-JANAF の c_p)。N2 29124 → 20810・Ar 20786 → 12472・セルロース(凝縮相)はそのまま
+        const auto capacity = [](const BakedReactionTable& table, const char* name) {
+            return table.species[table.SpeciesId(name)].heatCapacity;
+        };
+
+        EXPECT(capacity(constantVolume, "nitrogen") == 29124);
+        EXPECT(capacity(earth, "nitrogen") == 29124 - 8314);
+        EXPECT(capacity(earth, "argon") == 20786 - 8314);
+        EXPECT(capacity(earth, "cellulose") == capacity(constantVolume, "cellulose"));
+        EXPECT(capacity(earth, "carbon") == capacity(constantVolume, "carbon"));
+
+        // 298.15 K の内部エネルギー = 生成エンタルピー − RT(H0 は書いた c_p から作る)
+        const int64_t h0Nitrogen = earth.species[earth.SpeciesId("nitrogen")].h0;
+        EXPECT(h0Nitrogen == constantVolume.species[constantVolume.SpeciesId("nitrogen")].h0);
+
+        // 気体の c_p が R 以下なら断る(凝縮相の書き忘れの多く)
+        ReactionTableDefinition broken = MakeCombustionTestTable();
+        broken.gasHeatCapacityAtConstantPressure = true;
+        for (SpeciesDefinition& species : broken.species) {
+            if (species.name == "nitrogen")
+                species.heatCapacity = 8000;
+        }
+
+        const auto refused = BakeReactionTable(broken);
+        EXPECT(!refused.has_value());
+        std::printf("定積の比熱: N2 %u → %u・Ar → %u mJ/(mol·K)・R 以下は断る %s\n",
+                    capacity(constantVolume, "nitrogen"), capacity(earth, "nitrogen"), capacity(earth, "argon"),
+                    refused ? "no" : "yes");
     }
 
     void TestDeterminism(const BakedReactionTable& table, ProbeGasPressure pressure) {
@@ -328,6 +434,10 @@ int main() {
     TestDeterminism(table, ProbeGasPressure::Explicit);
     TestDeterminism(table, ProbeGasPressure::Projection);
     TestSmokeRises(table);
+
+    const BakedReactionTable earth = MakeEarthAirTable();
+    TestHeatCapacityAtConstantVolume(table, earth);
+    TestManySpecies(earth);
 
     std::printf("probe_gas_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
     return failureCount == 0 ? 0 : 1;

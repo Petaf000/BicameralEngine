@@ -28,12 +28,18 @@ namespace bicameral::sim {
         // 面の段か(面の番号 = セル × 6 ごとに 1 スレッド)
         constexpr std::array<bool, 9> FACE_PASS = {false, true, false, true, false, true, false, true, false};
 
-        static_assert(sizeof(GasGpuCell) == 64 && sizeof(GasCell) == 64);
+        static_assert(sizeof(GasGpuCell) == 64);
         static_assert(sizeof(GasGpuDerived) == 48);
         static_assert(sizeof(GasGpuFace) == 112);
         static_assert(sizeof(GasGpuCellSums) == 40);
         static_assert(sizeof(GasGpuParameters) == 192);
-        static_assert(sizeof(GasLedger) == GAS_GPU_LEDGER_BYTES);
+        // 帳簿の GPU の形(sim::GasLedger の成分は GasPerSpecies〔数の上限なし。T-0591〕なので、GPU の欄の数の配列へ写す)
+        struct GpuLedger {
+            std::array<int64_t, GAS_MAX_SPECIES> amounts = {};
+            int64_t energy = 0;
+            std::array<int64_t, GAS_AXES> momentum = {};
+        };
+        static_assert(sizeof(GpuLedger) == GAS_GPU_LEDGER_BYTES);
         static_assert(GAS_GPU_MAX_SPECIES == GAS_MAX_SPECIES);
         static_assert((uint32_t)GasBoundary::Wall == GAS_GPU_BOUNDARY_WALL &&
                       (uint32_t)GasBoundary::Periodic == GAS_GPU_BOUNDARY_PERIODIC &&
@@ -142,7 +148,16 @@ namespace bicameral::sim {
         if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) > MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
 
-        // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提
+        // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提。
+        // 丸めの鍵は欄の番号だけ(物質 ID の鍵と 5 つ目からの成分は CPU だけ。T-0591)
+        if (box.config.speciesCount > GAS_MAX_SPECIES)
+            return std::unexpected("GPU の気体の段は成分 GAS_MAX_SPECIES 個まで(T-0591)");
+
+        for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
+            if (box.config.species[s].roundingKey != GAS_ROUNDING_KEY_SLOT)
+                return std::unexpected("GPU の気体の段は丸めの鍵が欄の番号だけ(T-0591)");
+        }
+
         for (const GasCell& cell : box.cells) {
             for (uint32_t s = box.config.speciesCount; s < GAS_MAX_SPECIES; ++s) {
                 if (cell.amounts[s] != 0)
@@ -248,9 +263,14 @@ namespace bicameral::sim {
         for (const GasCell& cell : box.cells)
             cells.push_back(ToGasGpuCell(cell));
 
-        const std::array<GasLedger, 1> ledger = {box.ledger};
+        std::array<GpuLedger, 1> ledger = {};
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
+            ledger[0].amounts[s] = box.ledger.amounts[s];
+
+        ledger[0].energy = box.ledger.energy;
+        ledger[0].momentum = box.ledger.momentum;
         m_cellUpload = CreateUploadBuffer(device, std::span<const GasGpuCell>(cells));
-        m_ledgerUpload = CreateUploadBuffer(device, std::span<const GasLedger>(ledger));
+        m_ledgerUpload = CreateUploadBuffer(device, std::span<const GpuLedger>(ledger));
         m_cellReadback = gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback);
         m_ledgerReadback = gpu::CreateBuffer(device, GAS_GPU_LEDGER_BYTES, gpu::BufferKind::Readback);
         m_faceReadback = gpu::CreateBuffer(device, uavBytes[3], gpu::BufferKind::Readback);
@@ -318,9 +338,16 @@ namespace bicameral::sim {
         if (!gpu::ReadBuffer(m_cellReadback.Get(), std::as_writable_bytes(std::span(gpuCells))))
             return false;
 
-        if (!gpu::ReadBuffer(m_ledgerReadback.Get(), std::as_writable_bytes(std::span(&ledger, 1))))
+        GpuLedger gpuLedger;
+        if (!gpu::ReadBuffer(m_ledgerReadback.Get(), std::as_writable_bytes(std::span(&gpuLedger, 1))))
             return false;
 
+        ledger = {};
+        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
+            ledger.amounts[s] = gpuLedger.amounts[s];
+
+        ledger.energy = gpuLedger.energy;
+        ledger.momentum = gpuLedger.momentum;
         cells.clear();
         cells.reserve(gpuCells.size());
         for (const GasGpuCell& cell : gpuCells)

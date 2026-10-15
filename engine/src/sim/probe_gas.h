@@ -10,14 +10,17 @@
 //   - **圧力の解き方は差し替えられる**: 陽解法の小刻み(gas_reference の StepGas。既定)か投影(gas_projection の StepGasProjection。
 //     T-0503・T-0530。GPU は T-0531)。どちらも同じ箱(GasBox)を進めるので、ここは選ぶだけ。
 //
-// 1 刻みの流れ: 区画のセル(RxCell)→ 気体の箱(GasBox。区画の気体の成分を物質 ID の順に 4 つまで〔GAS_MAX_SPECIES〕の欄へ、
+// 1 刻みの流れ: 区画のセル(RxCell)→ 気体の箱(GasBox。区画の気体の成分を物質 ID の順の欄へ。数の上限なし〔GasPerSpecies。T-0591〕。
+//   丸めの乱数の鍵は物質 ID〔欄の並びが変わっても同じ乱数〕、
 //   エネルギーは気体のぶん = 熱 × 気体の熱容量 ÷ セルの熱容量 + 気体の化学 + 運動エネルギーのぶん)→ StepGas / StepGasProjection
 //   → セルへ書き戻す(凝縮相のぶん = 前のエネルギー − 気体のぶん はそのまま、気体の成分とエネルギーを新しい値に)。
 //   区画の外との出入り(開いた境界・壁の力積・重さの仕事)は帳簿(物質 ID ごと)に足す。
 //   → 区画のセルのエネルギーの合計 + 運動エネルギーのぶん − 帳簿、元素の数 − 帳簿、運動量 − 帳簿 は毎刻みビット単位で一定。
-// 今の制限(分けたチケット): 区画の気体の物質が 5 つ以上になった刻みは流さずに数える(T-0591 で上限を外す)・
-//   固体のセルも気体を通す(凝縮相の体積は T-0593)・比熱は表の値をそのまま定積の比熱として使う(T-0591)・
-//   GPU と保存点・写しの早送り・状態のハッシュへの組み込み(T-0592)。
+// 比熱: 気体の段は表の比熱(RxSpecies.heatCapacity)を定積の比熱として読む。表が定圧で書くなら、ベイクが c_v = c_p − R を作る
+//   (ReactionTableDefinition::gasHeatCapacityAtConstantPressure。T-0591・ADR-0258)。
+// 今の制限(分けたチケット): 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超える刻みは流さずに数える
+//   (溢れのセルは R-MULTI-4)・固体のセルも気体を通す(凝縮相の体積は T-0593)・
+//   GPU と保存点・写しの早送り・状態のハッシュへの組み込み(T-0592。GPU の段は成分 GAS_MAX_SPECIES 個まで)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
@@ -69,10 +72,11 @@ namespace bicameral::sim {
 
     // 1 刻みの報告
     struct ProbeGasStepReport {
-        uint32_t gasSpecies = 0;             // 区画の気体の物質の数
-        bool skippedTooManySpecies = false;  // 物質が GAS_MAX_SPECIES を超えたので流さなかった(T-0591 まで)
-        uint32_t changedCells = 0;           // 値が変わったセルの数
-        GasProjectionCost projection;        // 投影の費用(投影のときだけ)
+        uint32_t gasSpecies = 0;  // 区画の気体の物質の数
+        // 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超えるので流さなかった(何も変えない。溢れのセルは R-MULTI-4)
+        bool skippedCellOverflow = false;
+        uint32_t changedCells = 0;     // 値が変わったセルの数
+        GasProjectionCost projection;  // 投影の費用(投影のときだけ)
     };
 
     class ProbeGasField {

@@ -679,7 +679,7 @@ namespace {
 
     void Pressurize(GasTree& tree) {
         for (uint32_t index = 0; index < tree.cells.size(); ++index) {
-            std::array<uint64_t, GAS_MAX_SPECIES> amounts = tree.cells[index].amounts;
+            GasPerSpecies<uint64_t> amounts = tree.cells[index].amounts;
             for (uint64_t& amount : amounts)
                 amount += amount / 9;
 

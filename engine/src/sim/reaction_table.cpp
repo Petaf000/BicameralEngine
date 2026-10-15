@@ -82,6 +82,9 @@ namespace bicameral::sim {
             return elements;
         }
 
+        // 気体定数 R(mJ/(mol·K)。8.314462618 J/(mol·K)〔CODATA 2018〕の切り捨て)。定積の比熱 = 定圧 − R(T-0591)
+        constexpr uint32_t GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN = 8314;
+
         // H0(0 K 基準の化学のエネルギー、J/mol)= 生成エンタルピー − 比熱 × 298.15 K
         int64_t ZeroKelvinEnthalpy(const SpeciesDefinition& species) {
             const int64_t sensibleMicrojoules = static_cast<int64_t>(species.heatCapacity) *
@@ -109,8 +112,19 @@ namespace bicameral::sim {
             if (definition.heatCapacity == 0 || molarMass == 0 || molarMass > UINT32_MAX)
                 return std::unexpected(std::format("物質 {}: 比熱かモル質量が 0 か大きすぎる", definition.name));
 
+            // 気体の比熱を定圧で書く表は、セルが読む定積の比熱 c_v = c_p − R にする(T-0591・ADR-0258。H0 は書いた c_p から)
+            uint32_t heatCapacity = definition.heatCapacity;
+            if (table.gasHeatCapacityAtConstantPressure && !definition.condensed) {
+                if (heatCapacity <= GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN)
+                    return std::unexpected(std::format(
+                        "物質 {}: 気体の定圧の比熱が気体定数 R(8314 mJ/(mol·K))以下(凝縮相なら condensed = true)",
+                        definition.name));
+
+                heatCapacity -= GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN;
+            }
+
             baked.species.push_back({.h0 = ZeroKelvinEnthalpy(definition),
-                                     .heatCapacity = definition.heatCapacity,
+                                     .heatCapacity = heatCapacity,
                                      .ruleBegin = 0,
                                      .ruleCount = 0,
                                      .conductivity = definition.thermalConductivity});

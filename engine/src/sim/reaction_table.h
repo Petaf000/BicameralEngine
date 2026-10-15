@@ -102,6 +102,12 @@ namespace bicameral::sim {
             atmosphere;  // 基準の大気(分類 atmosphere と environment の大気の値。T-0373・ADR-0182)
         std::vector<PlayMetricDefinition> playMetrics;  // 遊びの指標(分類 play_metrics。T-0432・ADR-0206)
         std::vector<CouplingDefinition> couplings;      // 流れどうしの結合(分類 drags・machines。T-0536・ADR-0238)
+
+        // 気体(condensed でない物質)の比熱を定圧の値 c_p として読み、ベイクが定積の比熱 c_v = c_p − R を作る(T-0591・ADR-0258。
+        // 仮・ユーザー未確認)。セルは体積が一定なので、反応・伝導・気体の段の温度は c_v で読むのが正しい(H0 は書いた c_p から。
+        // 298.15 K の内部エネルギー = 生成エンタルピー − RT)。既定 false = 書いた値をそのまま定積の比熱として読む(今まで)。
+        // パッケージから書く場所と既定を替えるかは T-0597
+        bool gasHeatCapacityAtConstantPressure = false;
     };
 
     // --- ベイクした表 ---
