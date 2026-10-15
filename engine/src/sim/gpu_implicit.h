@@ -7,6 +7,8 @@
 // 大きさは上限(GpuImplicitLimits)で決め、段の形・数は GPU のバッファ(計画 u9)から読む(T-0136): 刻みの初めに ImPlanLevels・ImPlanArgs が
 // 長い行の節の一覧・ImTail の境・間接の Dispatch の引数を作り、V サイクルは記録の上限の段(GpuImplicitTuning::dispatchLevels)まで
 // ExecuteIndirect で積む(その段が無い・下りが止まった段より下なら引数が 0 グループ)。CPU は段の数も ImTail の境も知らない。
+// 計画の段ごとの表(長い行の節・隣の数の最大・同じ色の隣)は系の形だけで決まるので、系を写した(RecordUpload・RecordCopySystem・
+// RecordCopyLevels)後の最初の刻み・解きだけで作る(T-0606)。系のバッファをほかの道で書き換える呼ぶ側は無い前提。
 //
 // 使い方(テスト):
 //   auto gpu = GpuImplicit::Create(device, limits);         // または Create(device, grid)(上限 = その系の大きさ)
