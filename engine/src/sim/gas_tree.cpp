@@ -929,6 +929,11 @@ namespace bicameral::sim {
             maxLevel = std::max(maxLevel, region.level);
         }
 
+        // 木の成分の欄は GAS_MAX_SPECIES 個・丸めの鍵は欄の番号(物質 ID の鍵と 5 つ目からの成分は 1 レベルの箱だけ。T-0591)
+        assert(config.speciesCount <= GAS_MAX_SPECIES);
+        assert(std::ranges::all_of(
+            config.species, [](const GasSpecies& species) { return species.roundingKey == GAS_ROUNDING_KEY_SLOT; }));
+
         // --- 木の形: レベルごとの大きさ・小刻みの指数 σ(T-0320)・セルの表 ---
         assert(maxLevel <= MAX_TREE_LEVEL);
         GasTree tree;

@@ -217,7 +217,7 @@ namespace {
         // 1% 濃く、断熱の圧縮と同じだけ温める(等エントロピーの乱れ: 膨らんで周りの圧力に戻ると周りと同じ温度になり、浮力は残らない。
         // 同じ温度のまま濃くすると、膨らんで冷えた分〔約 0.8 K〕が重く沈み、成層の中で浮力の振動〔周期 約 6 分〕を続ける。本物の振る舞い)
         GasCell& cell = box.cells[box.Index(1, 2, 7)];
-        std::array<uint64_t, GAS_MAX_SPECIES> amounts = cell.amounts;
+        GasPerSpecies<uint64_t> amounts = cell.amounts;
         for (uint32_t s = 0; s < box.config.speciesCount; ++s)
             amounts[s] += amounts[s] / 100;
 
@@ -269,7 +269,7 @@ namespace {
             if (dx * dx + dy * dy + dz * dz > 2)
                 continue;
 
-            std::array<uint64_t, GAS_MAX_SPECIES> amounts = box.cells[index].amounts;
+            GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
             for (uint64_t& amount : amounts)
                 amount = amount * AIR_TEMPERATURE / HOT;
 
@@ -775,7 +775,7 @@ namespace {
             const uint32_t temperature = DeriveGasCell(box, cell, CellZ(box, index)).temperature;
             state = (state * 6364136223846793005ull) + 1442695040888963407ull;
             const int64_t perMille = (int64_t)((state >> 33) % 21) - 10;  // −10〜+10(1/1000)
-            std::array<uint64_t, GAS_MAX_SPECIES> amounts = cell.amounts;
+            GasPerSpecies<uint64_t> amounts = cell.amounts;
             for (uint32_t s = 0; s < box.config.speciesCount; ++s)
                 amounts[s] = (uint64_t)((int64_t)amounts[s] + ((int64_t)amounts[s] * perMille / 1000));
 

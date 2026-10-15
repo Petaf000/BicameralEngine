@@ -26,9 +26,11 @@
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <expected>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <vector>
@@ -37,14 +39,91 @@
 
 namespace bicameral::sim {
 
+    // 成分の欄を中に持つ数(GPU の段〔gas_step.hlsl・GAS_GPU_MAX_SPECIES〕と多重解像度の木〔gas_tree〕が回す欄の数)。
+    // 1 レベルの箱の CPU リファレンスは上限なし(GasPerSpecies。5 つ目から外の配列。T-0591・D-401)
     inline constexpr uint32_t GAS_MAX_SPECIES = 4;
     inline constexpr uint32_t GAS_AXES = 3;
+
+    // 丸めの乱数の鍵を欄の番号にする印(GasSpecies::roundingKey の既定)
+    inline constexpr uint32_t GAS_ROUNDING_KEY_SLOT = UINT32_MAX;
+
+    // 成分ごとの値の並び(T-0591。気体の物質の数に上限を置かない。D-401)。
+    // GAS_MAX_SPECIES 個までは中に持ち、それより後ろの欄に書いた時に全部を外の配列へ移す(RxCell のインライン + 溢れと同じ考え。
+    // 4 つ以下の箱は確保せず、今までと同じ値・同じ速さ)。並びの外の欄を読むと 0(書いていない成分は 0)。
+    // 比べる時も足りない方を 0 で埋める(並びの長さに依らない)
+    template <typename T>
+    class GasPerSpecies {
+    public:
+        GasPerSpecies() = default;
+
+        GasPerSpecies(std::initializer_list<T> values) {
+            uint32_t slot = 0;
+            for (const T& value : values)
+                (*this)[slot++] = value;
+        }
+
+        // 中に持つ形からの写し(木と GPU の欄。GAS_MAX_SPECIES 個)
+        GasPerSpecies(const std::array<T, GAS_MAX_SPECIES>& values)
+            : m_inline(values) {}  // NOLINT(google-explicit-constructor)
+
+        [[nodiscard]] uint32_t Count() const { return m_spill.empty() ? GAS_MAX_SPECIES : (uint32_t)m_spill.size(); }
+
+        [[nodiscard]] const T& operator[](size_t slot) const {
+            if (slot >= Count())
+                return s_zero;
+
+            return Data()[slot];
+        }
+
+        T& operator[](size_t slot) {
+            if (slot >= Count())
+                Grow(slot + 1);
+
+            return Data()[slot];
+        }
+
+        [[nodiscard]] bool operator==(const GasPerSpecies& other) const {
+            const uint32_t count = std::max(Count(), other.Count());
+            for (uint32_t slot = 0; slot < count; ++slot) {
+                if (!((*this)[slot] == other[slot]))
+                    return false;
+            }
+
+            return true;
+        }
+
+        operator std::span<const T>() const { return {Data(), Count()}; }  // NOLINT(google-explicit-constructor)
+
+        // 範囲 for(並びの全部の欄)
+        T* begin() { return Data(); }                      // NOLINT(readability-identifier-naming)
+        T* end() { return Data() + Count(); }              // NOLINT(readability-identifier-naming)
+        const T* begin() const { return Data(); }          // NOLINT(readability-identifier-naming)
+        const T* end() const { return Data() + Count(); }  // NOLINT(readability-identifier-naming)
+
+    private:
+        std::array<T, GAS_MAX_SPECIES> m_inline = {};
+        std::vector<T> m_spill;  // 空でなければこちらが全部の欄(中の欄は使わない)
+        static inline const T s_zero{};
+
+        [[nodiscard]] T* Data() { return m_spill.empty() ? m_inline.data() : m_spill.data(); }
+        [[nodiscard]] const T* Data() const { return m_spill.empty() ? m_inline.data() : m_spill.data(); }
+
+        void Grow(size_t count) {
+            if (m_spill.empty())
+                m_spill.assign(m_inline.begin(), m_inline.end());
+
+            m_spill.resize(count);
+        }
+    };
 
     // 気体の物質(G1 は自前の小さな表。反応の表 RxSpecies とつなぐのは結合の段)
     struct GasSpecies {
         uint32_t molarMass = 0;       // mg/mol(04 §2)
         uint32_t heatCapacity = 0;    // mJ/(mol·K)。断熱では定積のモル比熱 c_v(定圧の分 R は押し出す仕事で入る。T-0234)
         int64_t formationEnergy = 0;  // H0(J/mol = µJ/µmol)。セルのエネルギー = 熱 + Σ 物質量 × H0
+        // 移す物質量の乱数の丸めの鍵(R6)。既定は欄の番号。世界のセルに載せる時は物質 ID(欄の並びが変わっても同じ乱数。T-0591)。
+        // GPU の段は欄の番号だけ(GpuGas は既定でない鍵を断る)
+        uint32_t roundingKey = GAS_ROUNDING_KEY_SLOT;
 
         [[nodiscard]] bool operator==(const GasSpecies&) const = default;
     };
@@ -78,7 +157,7 @@ namespace bicameral::sim {
 
         // --- 物質 ---
         uint32_t speciesCount = 0;
-        std::array<GasSpecies, GAS_MAX_SPECIES> species = {};
+        GasPerSpecies<GasSpecies> species;  // 数の上限なし(GPU と木は GAS_MAX_SPECIES まで。T-0591)
 
         // --- 刻み ---
         uint32_t substeps = 24;  // 1 刻み(1/60 s)を何回に分けるか。c̃ Δt ÷ Δx = 0.47(安定の限界は約 2/3。T-0226)
@@ -122,13 +201,13 @@ namespace bicameral::sim {
 
     // 小刻みの係数(設定から 1 回だけ作る。割り算はここだけで、小刻みの中は掛け算とシフト。04 §6・ADR-0010)
     struct GasCoefficients {
-        std::array<uint64_t, GAS_MAX_SPECIES> massPerAmount = {};  // mg/µmol の Q32
-        uint64_t centralFlow = 0;                                  // (P_左 + P_右)× これ >> 52 = 質量の流れ(mg/小刻み)
-        uint64_t pressureFlow = 0;                                 // (p̃_左 − p̃_右)× これ >> 40 = 質量の流れ(mg/小刻み)
-        uint64_t pressureImpulse = 0;  // (p̃_左 + p̃_右)× これ >> 16 = 面の力積(運動量の単位/小刻み)
-        uint64_t gravityImpulse = 0;   // (m − m_基準)× これ >> 16 = 重さの力積(運動量の単位/小刻み)
-        uint64_t hydrostatic = 0;      // 質量(mg)× これ ÷ 10^4 = 1 セルの高さの層の重さの圧力(µPa。レベル 0)
-        uint64_t gravityWork = 0;      // 質量(mg)× これ ÷ 10^6 = 1 セル上がる重さの仕事(µJ。レベル 0)
+        GasPerSpecies<uint64_t> massPerAmount;  // mg/µmol の Q32
+        uint64_t centralFlow = 0;               // (P_左 + P_右)× これ >> 52 = 質量の流れ(mg/小刻み)
+        uint64_t pressureFlow = 0;              // (p̃_左 − p̃_右)× これ >> 40 = 質量の流れ(mg/小刻み)
+        uint64_t pressureImpulse = 0;           // (p̃_左 + p̃_右)× これ >> 16 = 面の力積(運動量の単位/小刻み)
+        uint64_t gravityImpulse = 0;            // (m − m_基準)× これ >> 16 = 重さの力積(運動量の単位/小刻み)
+        uint64_t hydrostatic = 0;               // 質量(mg)× これ ÷ 10^4 = 1 セルの高さの層の重さの圧力(µPa。レベル 0)
+        uint64_t gravityWork = 0;               // 質量(mg)× これ ÷ 10^6 = 1 セル上がる重さの仕事(µJ。レベル 0)
         uint64_t soundScale =
             0;  // α = c̃² ÷ (γ c_iso²) の Q32(等温は γ = 1。c_iso² = p ÷ ρ・γ は地面の層の基準から。MakeGasBox が入れる)
         uint32_t soundTemperature =
@@ -137,8 +216,8 @@ namespace bicameral::sim {
 
     // セル(保存量だけ)。単位はレベル 0(04 §2)
     struct GasCell {
-        std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};  // µmol
-        int64_t energy = 0;  // mJ(断熱: 熱 + 化学 + 運動〔T-0234〕。等温: 熱 + 化学。07 §2.1・§2.4)
+        GasPerSpecies<uint64_t> amounts;  // µmol
+        int64_t energy = 0;               // mJ(断熱: 熱 + 化学 + 運動〔T-0234〕。等温: 熱 + 化学。07 §2.1・§2.4)
         std::array<int64_t, GAS_AXES> momentum = {};  // mg·2^-20 m/s
     };
 
@@ -154,13 +233,13 @@ namespace bicameral::sim {
 
     // 箱の外との出入りの帳簿(外から入った量を正)。閉じた箱の検査はこれを差し引く(07 §4)
     struct GasLedger {
-        std::array<int64_t, GAS_MAX_SPECIES> amounts = {};
+        GasPerSpecies<int64_t> amounts;
         int64_t energy = 0;  // 開いた境界の出入り + 重さの仕事(断熱。上へ動いた塊が失う m g Δx。T-0234)
         std::array<int64_t, GAS_AXES> momentum = {};
     };
 
     struct GasTotals {
-        std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};
+        GasPerSpecies<uint64_t> amounts;
         int64_t energy = 0;
         std::array<int64_t, GAS_AXES> momentum = {};
     };
@@ -199,7 +278,7 @@ namespace bicameral::sim {
     // 1 つの層の基準の大気(高さの分布。T-0499・world_atmosphere.h の SampleAtmosphere をその層の高さで読んだもの)
     struct GasReferenceLayer {
         uint32_t temperatureMilliKelvin = 0;
-        std::array<uint32_t, GAS_MAX_SPECIES> fractionsQ32 = {};  // 気体の物質の順
+        GasPerSpecies<uint32_t> fractionsQ32;  // 気体の物質の順
     };
 
     // 層ごとの温度と成分で、下の層の重さの分だけ圧力を下げていく基準の層(z = 0 が地面の圧力。圧力は作り手が書かず、

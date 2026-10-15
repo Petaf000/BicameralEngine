@@ -100,6 +100,25 @@ namespace bicameral::sim {
             return species;
         }
 
+        // 書き戻すセルの成分(物質 ID の順): 前のセルの凝縮相の成分 + 気体の箱の 0 でない成分
+        std::vector<SpeciesAmount> MergeCellSpecies(const BakedReactionTable& table, const reaction::RxCell& before,
+                                                    const GasCell& gas, std::span<const uint32_t> slots) {
+            std::vector<SpeciesAmount> amounts;
+            for (uint32_t i = 0; i < before.speciesCount; ++i) {
+                if (!IsGas(table, before.species[i]))
+                    amounts.push_back({.species = before.species[i], .amount = before.amounts[i]});
+            }
+
+            for (uint32_t s = 0; s < slots.size(); ++s) {
+                if (gas.amounts[s] != 0)
+                    amounts.push_back({.species = slots[s], .amount = gas.amounts[s]});
+            }
+
+            rng::sort(amounts, {}, &SpeciesAmount::species);
+
+            return amounts;
+        }
+
         // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
         constexpr std::array<uint32_t, GAS_AXES> GRID_AXIS_OF_GAS_AXIS = {0, 2, 1};
 
@@ -150,9 +169,6 @@ namespace bicameral::sim {
         rng::sort(field.m_atmosphereSpecies);
         field.m_atmosphereSpecies.erase(std::unique(field.m_atmosphereSpecies.begin(), field.m_atmosphereSpecies.end()),
                                         field.m_atmosphereSpecies.end());
-        if (field.m_atmosphereSpecies.size() > GAS_MAX_SPECIES)
-            return std::unexpected("基準の大気の物質が GAS_MAX_SPECIES を超える(T-0591)");
-
         const int64_t bottom = options.floorHeightMillimeters +
                                ((int64_t)options.minCell[1] * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS);
         field.m_surfacePressureMicroPascal = AtmospherePressureMicroPascal(
@@ -190,7 +206,8 @@ namespace bicameral::sim {
             const reaction::RxSpecies& species = table.species[slots[s]];
             config.species[s] = {.molarMass = table.molarMasses[slots[s]],
                                  .heatCapacity = species.heatCapacity,
-                                 .formationEnergy = species.h0};
+                                 .formationEnergy = species.h0,
+                                 .roundingKey = slots[s]};  // 物質 ID(区画の物質が増えても他の成分の丸めは変わらない)
         }
 
         config.substeps =
@@ -243,11 +260,6 @@ namespace bicameral::sim {
         ProbeGasStepReport report;
         const std::vector<uint32_t> slots = CollectGasSpecies(table, cells, *this, m_atmosphereSpecies);
         report.gasSpecies = (uint32_t)slots.size();
-        if (slots.size() > GAS_MAX_SPECIES) {
-            report.skippedTooManySpecies = true;
-            return report;
-        }
-
         if (slots != m_projectionSpecies) {
             m_projection = {};
             m_projectionSpecies = slots;
@@ -258,6 +270,7 @@ namespace bicameral::sim {
         GasBox box = MakeGasBox(config, MakeReference(table, config, slots));
         box.tick = tick;
         std::vector<int64_t> condensedEnergy(RegionCellCount(), 0);
+        std::array<int64_t, GAS_AXES> lostMomentum = {};  // 気体が無くなったセルの運動量(格子の軸。書き戻す時に帳簿へ)
         for (uint32_t region = 0; region < RegionCellCount(); ++region) {
             const reaction::RxCell& cell = cells[GridIndex(region)];
             GasCell& gas = box.cells[region];
@@ -273,14 +286,13 @@ namespace bicameral::sim {
             gas.energy = gasPart;
 
             // 気体が無くなったセル(反応が使い切った)の運動量は外へ出たものとして帳簿へ、運動エネルギーのぶんは凝縮相の熱へ
+            // (欄と帳簿は書き戻す時に替える。流さない刻みは何も変えない)
             const bool empty = std::ranges::all_of(gas.amounts, [](uint64_t amount) { return amount == 0; });
             if (empty) {
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= m_momentum[region][axis];
+                    lostMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] += m_momentum[region][axis];
 
                 condensedEnergy[region] += m_kinetic[region];
-                m_momentum[region] = {0, 0, 0};
-                m_kinetic[region] = 0;
                 continue;
             }
 
@@ -289,10 +301,25 @@ namespace bicameral::sim {
         }
 
         // --- 1 刻み(圧力の解き方を選ぶ)---
+        const GasProjection projectionBefore = m_projection;
         if (m_options.pressure == ProbeGasPressure::Explicit)
             StepGas(box);
         else
             report.projection = StepGasProjection(box, m_projection, m_options.projection);
+
+        // --- 書き戻せるか(1 セルの成分がインラインの数に収まる。収まらなければ流さない)---
+        std::vector<std::vector<SpeciesAmount>> merged(RegionCellCount());
+        for (uint32_t region = 0; region < RegionCellCount(); ++region) {
+            merged[region] = MergeCellSpecies(table, cells[GridIndex(region)], box.cells[region], slots);
+            if (merged[region].size() > reaction::RX_MAX_CELL_SPECIES) {
+                m_projection = projectionBefore;
+                report.skippedCellOverflow = true;
+                return report;
+            }
+        }
+
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            m_ledger.momentum[axis] -= lostMomentum[axis];
 
         // --- 帳簿(物質 ID ごと・格子の軸)---
         for (uint32_t s = 0; s < slots.size(); ++s)
@@ -309,29 +336,14 @@ namespace bicameral::sim {
             const GasCell& gas = box.cells[region];
             const int64_t kinetic = (GasKineticEnergy(box, gas) + 500) / 1000;  // µJ → mJ(最も近い整数。負にならない)
 
-            std::array<SpeciesAmount, reaction::RX_MAX_CELL_SPECIES + GAS_MAX_SPECIES> amounts = {};
-            uint32_t count = 0;
-            for (uint32_t i = 0; i < before.speciesCount; ++i) {
-                if (!IsGas(table, before.species[i]))
-                    amounts[count++] = {.species = before.species[i], .amount = before.amounts[i]};
-            }
-
-            for (uint32_t s = 0; s < slots.size(); ++s) {
-                if (gas.amounts[s] != 0)
-                    amounts[count++] = {.species = slots[s], .amount = gas.amounts[s]};
-            }
-
-            std::sort(amounts.begin(), amounts.begin() + count,
-                      [](const SpeciesAmount& a, const SpeciesAmount& b) { return a.species < b.species; });
-            FX_ASSERT(count <= reaction::RX_MAX_CELL_SPECIES);  // 溢れのセル(RxWideCell)は R-MULTI-4・T-0591
-
+            const std::vector<SpeciesAmount>& amounts = merged[region];
             reaction::RxCell after = reaction::RxMakeEmptyCell(condensedEnergy[region] + gas.energy - kinetic);
-            for (uint32_t i = 0; i < count && i < reaction::RX_MAX_CELL_SPECIES; ++i) {
+            for (uint32_t i = 0; i < amounts.size(); ++i) {
                 after.species[i] = amounts[i].species;
                 after.amounts[i] = amounts[i].amount;
             }
 
-            after.speciesCount = std::min<uint32_t>(count, reaction::RX_MAX_CELL_SPECIES);
+            after.speciesCount = (uint32_t)amounts.size();
             m_momentum[region] = gas.momentum;
             m_kinetic[region] = kinetic;
 

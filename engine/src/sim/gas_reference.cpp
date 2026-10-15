@@ -52,7 +52,7 @@ namespace bicameral::sim {
             int64_t weightRight = 0;
 
             // --- 移す成分の物質量(µmol。MUSCL と乱数の丸めの後、風上のセルごとに中身を超えないよう抑えた値)---
-            std::array<uint64_t, GAS_MAX_SPECIES> moved = {};
+            GasPerSpecies<uint64_t> moved;
         };
 
         uint64_t MulShiftU64(uint64_t a, uint64_t b, uint32_t shift) {
@@ -563,7 +563,13 @@ namespace bicameral::sim {
             return whole + ((hash >> 32) < (amountQ32 & LOW_32_BITS) ? 1 : 0);
         }
 
-        // 面ごとに移す成分の物質量。乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途)+ 成分(R6。並べた順に依存しない)
+        // 成分 s の丸めの鍵(既定は欄の番号。世界のセルに載せる時は物質 ID。T-0591)
+        uint64_t RoundingKey(const GasConfig& config, uint32_t s) {
+            const uint32_t key = config.species[s].roundingKey;
+            return key == GAS_ROUNDING_KEY_SLOT ? s : key;
+        }
+
+        // 面ごとに移す成分の物質量。乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途)+ 成分の鍵(R6。並べた順に依存しない)
         void ComputeMovedAmounts(const GasBox& box, const std::vector<GasCell>& cells,
                                  const std::vector<GasDerived>& derived, uint64_t roundingTick,
                                  std::vector<GasFace>& faces) {
@@ -575,7 +581,8 @@ namespace bicameral::sim {
                                                        GAS_ROUNDING_PURPOSE);
                 for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
                     const uint64_t amountQ32 = MovedAmountQ32(box, cells, derived, face, s);
-                    face.moved[s] = RoundAmount(box, amountQ32, fx::FxHashCombine(faceHash, s));
+                    face.moved[s] = RoundAmount(box, amountQ32,
+                                                fx::FxHashCombine(faceHash, RoundingKey(box.config, s)));
                 }
             }
         }
@@ -584,7 +591,7 @@ namespace bicameral::sim {
         // 延ばした割合(風上の最大 2 倍)と丸め上げで、出ていく割合の合計が 1 に近いセルでは超えうる
         void LimitMovedAmounts(const GasBox& box, const std::vector<GasCell>& cells, std::vector<GasFace>& faces) {
             const uint32_t speciesCount = box.config.speciesCount;
-            std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> outgoing(box.cells.size());
+            std::vector<GasPerSpecies<uint64_t>> outgoing(box.cells.size());
             for (const GasFace& face : faces) {
                 const FaceSide donor = face.flow > 0 ? face.left : face.right;
                 if (face.fraction == 0 || donor.kind != SideKind::Cell)
@@ -726,7 +733,7 @@ namespace bicameral::sim {
                                                   uint32_t temperatureMilliKelvin,
                                                   uint64_t surfacePressureMicroPascal) {
         GasReferenceLayer uniform{.temperatureMilliKelvin = temperatureMilliKelvin};
-        for (uint32_t s = 0; s < GAS_MAX_SPECIES && s < fractionsQ32.size(); ++s)
+        for (uint32_t s = 0; s < config.speciesCount && s < fractionsQ32.size(); ++s)
             uniform.fractionsQ32[s] = fractionsQ32[s];
 
         const std::vector<GasReferenceLayer> layers(config.sizeZ, uniform);
@@ -747,7 +754,7 @@ namespace bicameral::sim {
             const uint64_t divisor = PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 * temperatureMilliKelvin;
             const uint64_t total = fx::FxDivU128By64(fx::FxMulU64Full(pressure, ONE_Q32), divisor).quotient;
 
-            std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};
+            GasPerSpecies<uint64_t> amounts;
             for (uint32_t s = 0; s < config.speciesCount; ++s)
                 amounts[s] = MulShiftU64(total, profile[z].fractionsQ32[s], 32);
 
