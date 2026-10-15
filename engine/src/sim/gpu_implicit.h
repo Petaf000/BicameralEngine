@@ -92,7 +92,7 @@ namespace bicameral::sim {
 
     class GpuImplicit {
     public:
-        static constexpr uint32_t MAX_TIMESTAMPS = 64;
+        static constexpr uint32_t MAX_TIMESTAMPS = 1024;  // 段ごとの時間(T-0587)を何回分も打てるように 64 → 1024
         static constexpr uint32_t DEFAULT_MAX_LIMIT_ROUNDS = 16;
 
         [[nodiscard]] static std::expected<GpuImplicit, std::string> Create(ID3D12Device5* device,
@@ -180,6 +180,16 @@ namespace bicameral::sim {
 
         // 要らない回を述語で飛ばすか(既定 true。false なら段が空で抜けるだけ。計測で比べる用)
         void UsePredication(bool use) { m_predication = use; }
+        // ImTail が節の値を groupshared に置くか(既定 true。T-0587。false は前の形〔全体のメモリとバリア〕。値は同じ。計測で比べる用)
+        void UseSharedTail(bool use) { m_constants.tailShared = use ? 1 : 0; }
+
+        // --- 段ごとの時間(計測用。T-0587)---
+        // BeginStageStamps から EndStageStamps まで、Dispatch のたびに(バリアの後に)タイムスタンプを firstIndex + 1 から打つ
+        // (firstIndex に始まりの 1 つ)。段の名前は StageLabels(最後に打った組。種類 | 段 << 8 | 色 << 16)と PassName で
+        void BeginStageStamps(ID3D12GraphicsCommandList* list, uint32_t firstIndex);
+        void EndStageStamps() { m_stageStamps = false; }
+        [[nodiscard]] const std::vector<uint32_t>& StageLabels() const { return m_stageLabels; }
+        [[nodiscard]] static const char* PassName(uint32_t pass);
 
     private:
         enum Buffer : uint8_t {
@@ -237,6 +247,7 @@ namespace bicameral::sim {
             uint32_t cheapTail =
                 0;  // 1 以上なら安い回: ImTail が min(下りが止まる段, cheapTail − 1) から回す(T-0179・T-0505)
             uint32_t sweeps = 0;
+            uint32_t tailShared = 1;  // ImTail の節の値を groupshared に置くか(T-0587)
         };
 
         // 写す 1 つ(RecordCopies。大きさは写す先と source の残りで切る)
@@ -288,6 +299,12 @@ namespace bicameral::sim {
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
         uint32_t m_timestampCount = 0;
+
+        // --- 段ごとの時間(T-0587)---
+        void RecordStageStamp(ID3D12GraphicsCommandList* list, Pass pass);
+        bool m_stageStamps = false;
+        uint32_t m_stageStampNext = 0;
+        std::vector<uint32_t> m_stageLabels;
     };
 
 }  // namespace bicameral::sim

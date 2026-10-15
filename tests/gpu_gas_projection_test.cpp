@@ -7,6 +7,7 @@
 // 音速は最速(0)と 340 m/s。外側の反復は既定(上限 4・100 mg。ADR-0234)。
 //
 // 引数: [--edge n](既定 16)[--ticks n](既定 3)[--measure](GPU の時間を表に出す)[--breakdown](解きを固定費・V・止めた後の回に分ける)
+//       [--stages](場面ごとに 1 回、V 1 回の段ごとの時間。T-0587)[--global-tail](ImTail を前の形で。T-0587)
 // [--inner-tolerance mg][--inner-cycles n](内側の止め方を変えて比べる。ADR-0254)と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
 // ctest は一辺 16・3 刻み(gpu_gas_projection)。計測は `job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32`。
 // 合わなければ失敗(どの場面・何回目の解き・何番のセルか)。
@@ -137,7 +138,10 @@ namespace {
         uint32_t toleranceMilligrams = 0;
         sim::ImplicitOptions solver;
         bool measure = false;
-        bool breakdown = false;  // 解きの時間を固定費・V・止めた後の回に分ける(T-0531 の 2 チャット目)
+        bool breakdown = false;   // 解きの時間を固定費・V・止めた後の回に分ける(T-0531 の 2 チャット目)
+        bool stages = false;      // 場面ごとに 1 回、V 1 回の解きの段ごとの時間を出す(T-0587)
+        bool staged = false;      // この場面で段ごとの時間を出したか
+        bool globalTail = false;  // ImTail を前の形(節の値を全体のメモリに置く)で比べる(T-0587)
         // 内側の解きの止め方を変えて比べる(0 なら GasProjectionOptions の既定。T-0531 の 2 チャット目)
         uint32_t innerToleranceMilligrams = 0;
         uint32_t innerCycles = 0;
@@ -166,6 +170,7 @@ namespace {
                 return std::unexpected(created.error());
 
             replay.gpu.emplace(std::move(*created));
+            replay.gpu->UseSharedTail(!replay.globalTail);
         }
 
         sim::GpuImplicit& gpu = *replay.gpu;
@@ -215,6 +220,85 @@ namespace {
         }
 
         return best;
+    }
+
+    // 段ごとの時間(T-0587): V 1 回だけの解きを暖機の後 STAGE_ROUNDS 回積み、Dispatch ごと(バリアの後)のタイムスタンプの差の最小。
+    // 1 行に段の順で「種類 段 色: µs」を並べ、V の段の合計と 1 スレッドの段(CycleEnd。同期の床)を出す
+    constexpr uint32_t STAGE_ROUNDS = 8;
+    constexpr uint32_t STAGE_STRIDE = 96;  // 1 回の解きに打てるタイムスタンプ(MAX_TIMESTAMPS ÷ 回)
+
+    std::string StageLabel(uint32_t label) {
+        const uint32_t pass = label & 0xFFu;
+        const uint32_t depth = (label >> 8) & 0xFFu;
+        const std::string_view name = sim::GpuImplicit::PassName(pass);
+        if (name == "Smooth")
+            return std::format("S{}{}", depth, (label >> 16) & 1u ? "b" : "r");
+
+        if (name == "Restrict" || name == "Prolong" || name == "Tail")
+            return std::format("{}{}", name.substr(0, 1), depth);
+
+        return std::string(name);
+    }
+
+    std::expected<void, std::string> StageProfile(Replay& replay, const sim::GasPressureSolve& solve,
+                                                  const sim::GpuImplicitRecordShape& shape) {
+        sim::GpuImplicit& gpu = *replay.gpu;
+        sim::ImplicitOptions one = replay.solver;
+        one.cycles = 1;
+        const std::vector<int64_t> thresholds = sim::GasPressureThresholds(solve.grid, replay.toleranceMilligrams);
+        ID3D12GraphicsCommandList10* list = replay.queue->Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        replay.ring->RecordBegin(list);
+        bool recorded = gpu.RecordUpload(list, solve.grid);
+        for (uint32_t round = 0; round < MEASURE_WARMUP + STAGE_ROUNDS && recorded; ++round) {
+            recorded = gpu.RecordUploadSolve(list, solve.rhs, solve.before, thresholds);
+            if (round >= MEASURE_WARMUP)
+                gpu.BeginStageStamps(list, (round - MEASURE_WARMUP) * STAGE_STRIDE);
+
+            recorded = recorded && gpu.RecordSolve(list, replay.ring->GpuAddress(), one, shape);
+            gpu.EndStageStamps();
+        }
+
+        const auto stages = (uint32_t)gpu.StageLabels().size();
+        if (!recorded || stages + 1 > STAGE_STRIDE)
+            return std::unexpected("段ごとの時間を記録できない");
+
+        gpu.RecordSolutionReadback(list, (uint32_t)solve.after.size());
+        gpu.RecordRelease(list);
+        replay.ring->RecordReadbackAndReset(list);
+        if (!replay.queue->ExecuteAndWait())
+            return std::unexpected("GPU での実行に失敗");
+
+        (void)replay.ring->Drain();
+        const std::vector<uint64_t> stamps = gpu.ReadTimestamps(STAGE_ROUNDS * STAGE_STRIDE);
+        if (stamps.size() < ((STAGE_ROUNDS - 1) * STAGE_STRIDE) + stages + 1)
+            return std::unexpected("段ごとの時間を読み戻せない");
+
+        // --- 段ごとの最小 ---
+        std::string line;
+        double total = 0;
+        double floor = 1e9;
+        for (uint32_t stage = 0; stage < stages; ++stage) {
+            double best = 1e9;
+            for (uint32_t round = 0; round < STAGE_ROUNDS; ++round) {
+                const size_t at = ((size_t)round * STAGE_STRIDE) + stage;
+                best = std::min(best, (double)(stamps[at + 1] - stamps[at]) * 1e6 / (double)replay.frequency);
+            }
+
+            const std::string label = StageLabel(gpu.StageLabels()[stage]);
+            if (label == "CycleEnd")
+                floor = std::min(floor, best);
+
+            total += best;
+            line += std::format(" {}:{:.1f}", label, best);
+        }
+
+        Log(Channel::Sim, Level::Info, "  段ごと(µs・V 1 回の解き・段 {}・合計 {:.1f}・1 スレッドの段 {:.1f}):{}",
+            stages, total, floor, line);
+
+        return {};
     }
 
     // GPU の解きが CPU と同じか(違えば理由)
@@ -289,6 +373,14 @@ namespace {
 
         if (replay.breakdown && !Breakdown(replay, solve))
             return;
+
+        if (replay.stages && !replay.staged && replay.previous && solve.cycles > 0) {
+            replay.staged = true;
+            if (auto profiled = StageProfile(replay, solve, sim::GpuImplicit::ShapeFrom(*replay.previous)); !profiled) {
+                replay.failure = std::format("解き {}(段ごと): {}", replay.solves, profiled.error());
+                return;
+            }
+        }
 
         if (!replay.firstCost)
             replay.firstCost = cost;
@@ -399,6 +491,7 @@ namespace {
                 replay.gpu.reset();
                 replay.previous.reset();
                 replay.firstCost.reset();
+                replay.staged = false;
                 const auto result = RunScene(replay, scene, speed, edge, ticks);
                 if (!result)
                     return std::unexpected(
@@ -432,6 +525,8 @@ namespace {
         uint32_t ticks = 3;
         bool measure = false;
         bool breakdown = false;
+        bool stages = false;
+        bool globalTail = false;
         uint32_t innerTolerance = 0;
         uint32_t innerCycles = 0;
         for (size_t index = 0; index < arguments.size(); ++index) {
@@ -444,6 +539,10 @@ namespace {
                 measure = true;
             else if (argument == "--breakdown")
                 measure = breakdown = true;
+            else if (argument == "--stages")
+                measure = stages = true;
+            else if (argument == "--global-tail")
+                globalTail = true;
             else if (argument == "--inner-tolerance" && index + 1 < arguments.size())
                 innerTolerance = (uint32_t)std::stoul(arguments[++index]);
             else if (argument == "--inner-cycles" && index + 1 < arguments.size())
@@ -456,7 +555,7 @@ namespace {
         if (!options || edge < 4 || ticks == 0) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_gas_projection_test [--warp] [--queue direct|compute] [--no-gbv] [--edge N] [--ticks N] "
-                "[--measure] [--breakdown] [--inner-tolerance mg] [--inner-cycles n]");
+                "[--measure] [--breakdown] [--stages] [--global-tail] [--inner-tolerance mg] [--inner-cycles n]");
             return 2;
         }
 
@@ -480,6 +579,8 @@ namespace {
                       .frequency = frequency,
                       .measure = measure,
                       .breakdown = breakdown,
+                      .stages = stages,
+                      .globalTail = globalTail,
                       .innerToleranceMilligrams = innerTolerance,
                       .innerCycles = innerCycles};
         if (auto ran = RunAll(replay, edge, ticks, measure); !ran) {

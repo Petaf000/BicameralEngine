@@ -43,7 +43,7 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_COUNT = 11;
         constexpr uint32_t ARGS_BYTES = 3 * sizeof(uint32_t);  // D3D12_DISPATCH_ARGUMENTS
 
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 16;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 17;
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true};
 
@@ -540,6 +540,7 @@ namespace bicameral::sim {
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &m_constants, 0);
         list->Dispatch(groups, 1, 1);
         GlobalUavBarrier(list);
+        RecordStageStamp(list, pass);
     }
 
     // 間接の Dispatch: グループの数は計画の引数 slot(ImPlanArgs が書く。その段が要らなければ 0)
@@ -549,6 +550,31 @@ namespace bicameral::sim {
         list->ExecuteIndirect(m_dispatchSignature.Get(), 1, m_buffers[BufferArgs].Get(), uint64_t{slot} * ARGS_BYTES,
                               nullptr, 0);
         GlobalUavBarrier(list);
+        RecordStageStamp(list, pass);
+    }
+
+    void GpuImplicit::BeginStageStamps(ID3D12GraphicsCommandList* list, uint32_t firstIndex) {
+        RecordTimestamp(list, firstIndex);
+        m_stageStamps = true;
+        m_stageStampNext = firstIndex + 1;
+        m_stageLabels.clear();
+    }
+
+    // 段の後(バリアの後)に打つ。段の名前は種類・段・色
+    void GpuImplicit::RecordStageStamp(ID3D12GraphicsCommandList* list, Pass pass) {
+        if (!m_stageStamps)
+            return;
+
+        RecordTimestamp(list, m_stageStampNext++);
+        m_stageLabels.push_back(uint32_t{pass} | (m_constants.depth << 8) | (m_constants.color << 16));
+    }
+
+    const char* GpuImplicit::PassName(uint32_t pass) {
+        static constexpr std::array<const char*, PassCount> NAMES = {
+            "Begin",    "Start",      "Smooth",   "Restrict",       "Prolong",      "Converged",
+            "CycleEnd", "Flows",      "Mark",     "LimitEnd",       "LimitFaces",   "Apply",
+            "Tail",     "PlanLevels", "PlanArgs", "SolveConverged", "SolveCheckEnd"};
+        return pass < PassCount ? NAMES[pass] : "?";
     }
 
     // 段の形から長い行の節の一覧・ImTail の境・間接の引数を作り、引数を INDIRECT_ARGUMENT にする(T-0136)
