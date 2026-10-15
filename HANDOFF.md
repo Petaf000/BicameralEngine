@@ -1,42 +1,44 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-15(本体の作業役・第 4 巡の記録)/ 第 4 巡(T-0536・T-0548・T-0414・T-0542・T-0531)をマージして release で確かめ、Q75〜Q78 を記録
+最終更新: 2026-10-15(本体の作業役・第 5 巡の記録)/ 第 5 巡(T-0561・T-0557・T-0559・T-0531・T-0028・T-0210)をマージして release で確かめ、Q81〜Q85 を記録
 
 ## 状態(3 行以内)
-- main = 第 4 巡のマージ(f778b4a)+ この記録のコミット。release で CPU 68 本(coupling_table・edit_table・physics_heat を含む)・GPU 102 本(HW 92・WARP 10)が全部通過: gpu_physics_* 10 本・gpu_probe 系 18 本・gpu_world_copy・gpu_play_metric・gpu_gas 系 5 本(gpu_gas_projection を含む)・gpu_reaction 系 4 本・陰解法の HW の組 16 本・window_* 全部 42 本(window_play_table_* を含む)・image_* 5 本。直したものなし。陰解法・gpu_gas・溢れの WARP の長い組は流していない。
-- ③ 坂の原理: 引きずりと押す構造が反応表と同じ 1 つの読み込みに入った(T-0536)。散逸の熱は CPU の世界まで(T-0542)・投影の GPU 化は解く部分まで(T-0531)。② は表の差し替えも編集になった(T-0548)。
-- **判断待ち Q75〜Q78**(第 4 巡の仮)。Q62・Q63・Q65〜Q74 は 2026-10-15 の朝にユーザーへ聞いた(答えはまだ)。**「続き」は司令塔として並走(COMMANDER.md)**。
+- main = 第 5 巡のマージ(92af930)+ この記録のコミット。release で CPU 70 本(probe_gas・radiation_reference・gas_projection を含む)・GPU 39 本(gpu_physics_* 10・gpu_probe 系 18・gpu_world_copy・gpu_play_metric・gpu_gas 系 5〔gpu_gas_projection を含む〕・gpu_reaction 系 4)・window_* 全部 42 本と image_* 5 本が通過。落ちた 2 本は直した: reaction_package_runtime_stops(T-0557 で壊したパッケージに game = true が無かった)・image_probe_slice(T-0561 の物理の熱で床が温まる。基準を置き換えた)。
+- ③ 坂の原理: 物理の散逸の熱が GPU の世界のセルまで届いた(T-0561)。投影の内側の解きを外側の許容差から決め、32³ の爆発の解きが予算内(T-0531・ADR-0254)。⑤ の下支え: 放射(T-0028)・気体(T-0210)を分解して最初の道。
+- **判断待ち Q81〜Q85**(第 5 巡の仮)と Q75〜Q78(第 4 巡)。Q62・Q63・Q65〜Q74 は 2026-10-15 の朝にユーザーへ聞いた(答えはまだ)。**「続き」は司令塔として並走(COMMANDER.md)**。
 
-## この仕事でしたこと(2026-10-15・司令塔の第 4 巡 + 本体の作業役)
-- 第 4 巡(マージ済み。衝突なし):
-  T-0536 引きずり(drags)と押す構造(machines)を 1 つの読み手・型・ベイク・検査に(script/coupling_package・sim/coupling_table・反応表のパネルの「結合」のタブ・ctest coupling_table。
-  |q| > 1 は警告して ±1。書き方は仮 = Q66・Q70〔ADR-0238 Proposed〕。分けた: T-0554 世界の刻みへ・T-0555 置き場所)/
-  T-0548 表の差し替えを編集に(保存点が表を持ち、差し替えの印を足し直す。編集の状態の差し替えは刻み E で当たる・やめるとプレイ前の世界 + ファイルの今の中身の表。
-  ADR-0246 が ADR-0047 §6・T-0299・ADR-0236 の影響の段落を置き換えた。仮 = Q76。分けた: T-0567)/
-  T-0414 ⑤ 草原の延焼の分解と最小の版(data/scenes/grass_fire_river。Luau だけ。16 秒で川に着き 26 秒で消える・予算内。**川でなくても土の隙間で止まる** =
-  川の意味は放射と気体から。作り心地 9 件 → BACKLOG。仮 = Q75・ADR-0240。分けた: T-0557〜T-0560・名前だけの 6 つに T-0570〜T-0575)/
-  T-0542 物理の散逸をセルの熱へ(返し先 = 接触点の仕事の重み・借りの帳簿 common/physics_heat.hlsli・CPU の世界と ctest physics_heat・GpuPhysics の入口と帳簿 u14・u15 が CPU とビット一致。
-  返す元は世界で 1 つ = Q78。ADR-0242。分けた: T-0561 GPU の世界へ)/
-  T-0531 投影の GPU 化の 1 チャット目(解く部分 GpuImplicit::RecordSolve が CPU とビット一致・ctest gpu_gas_projection。32³ の爆発は解くだけで 12〜15 ms → 打ち切り条件。収め方 = Q77)。
-- 本体の作業役: release の確かめ(上の「状態」)。記録: ROADMAP(T-0536・T-0548 を Done・T-0414・T-0542・T-0531 を Doing・T-0554・T-0555・T-0557〜T-0561・T-0567・T-0570〜T-0575 を足した)・
-  QUESTIONS(Q75〜Q78・Q64 ④⑤ を閉じた・Q62・Q63・Q65〜Q74 に「聞いた」の印)・ADR-0047・ADR-0236 に ADR-0246 で置き換えた追記・BACKLOG(T-0414 の作り心地 9 件)・
-  COMMANDER の番号・`--no-gbv` の書き方を直した(GPU の試験の実行ファイルの引数で bicameral には無い。GBV は debug だけ。CLAUDE.md・COMMANDER)・NEXT。
-- 第 5 巡の割り当て(作業中): wt2 T-0561 散逸の熱を GPU の世界へ / wt3 T-0557 ゲーム本体の名前を決め打ちから外す(+ T-0559 指標に範囲)/ wt4 T-0028 放射の分解と最初の道 /
-  wt5 T-0531 の 2 チャット目(式を作る・当てる・外側の反復の GPU 版・64³)/ wt6 T-0210 気体を本物の世界へ の分解と最初の道。
-- **試験の名前の変化**: coupling_table・edit_table・physics_heat(CPU)・window_play_table_copy/record/play・gpu_gas_projection を足した。
+## この仕事でしたこと(2026-10-15・司令塔の第 5 巡 + 本体の作業役)
+- 第 5 巡(マージ済み。衝突は docs/perf.md だけ〔両方残した〕):
+  T-0561 物理の散逸の熱を GPU の世界のセルへ(適用の単位のコマンドの後に AddPhysicsHeat・FinishPhysicsHeat。仮の世界のルート署名に u14・ハッシュの表の [14,15] = 物理の熱。
+  gpu_probe_physics 系がセル・エネルギーの釣り合い・帳簿で CPU とビット一致。窓で積み木の落ちた床が温まる。物質の無いセルの熱は温度に出ない = Q82)/
+  T-0557 ゲーム本体 = マニフェストの `game = true`(DEFAULT_BASE_PACKAGE を消した。場面は data/scenes/grass_fire_river。ADR-0250・Q83)/
+  T-0559 遊びの指標に範囲(min_cell・size_cells。ADR-0251・Q83。場面の差分は T-0580)/
+  T-0531 の 2 チャット目(V の重さは止めた後の回のバリアとクロックの揺れの見かけ。内側の許容差 = 外側 ÷ 10・V の上限 8〔ADR-0254・Q84〕で 32³ の爆発の解き 2.5〜3.2 ms・64³ 9〜10 ms。
+  V 1 回の Dispatch を Work Graphs でつなぐ研究 = T-0587)/
+  T-0028 放射の分解と最初の道 T-0583(対の交換の本体の式・物質の欄 radiation_absorption_mm2_per_mol・ctest radiation_reference。ADR-0252・Q81。残り T-0584〜T-0586)/
+  T-0210 気体を本物の世界へ の分解と最初の道 T-0590(仮の世界の CPU リファレンスに気体の区画。ctest probe_gas。ADR-0256・Q85。残り T-0591〜T-0593)。
+- 本体の作業役: release の確かめ(上の「状態」)。ProbeReference::Advance の段の順を 3 本(T-0210・T-0561・T-0028)が合わさった後に読んだ:
+  表の付け替え(RemapSpecies)→ 適用 → 物理の熱 → 表の差し替え(熱のキャッシュの作り直し)→ 気体(1b。区画があるときだけ)→ 予定 → 伝導と反応。
+  GPU(RecordTableSwap → 適用 → RecordPhysicsHeat → RefreshTable → WakeDueBlocks → 伝導)と同じ順で、食い違いは無かった(気体は GPU の刻みにまだ無い = T-0592。放射は世界の刻みにまだ無い = T-0585)。
+  直したもの: tests/packages_broken のマニフェストに game = true(T-0557 の取りこぼし)・image_probe_slice の基準(T-0561 の意図した変化。積み木の根元の床のセルが散逸の熱でわずかに温まる)。
+  記録: ROADMAP(T-0542・T-0561・T-0557・T-0559・T-0583・T-0590 を Done・T-0531・T-0028・T-0210 を Doing・T-0580・T-0584〜T-0587・T-0591〜T-0593 を足した)・
+  QUESTIONS(Q81〜Q85・Q77 の数の更新)・COMMANDER の番号・NEXT。
+- 第 6 巡の割り当て(作業中): wt2 T-0591 気体の成分の上限を外す → T-0593 固体が気体を塞ぐ / wt3 T-0558 1 セルの量の上限を相で分ける /
+  wt4 T-0584 放射の対を光線で見つける(研究)→ T-0585 放射を世界の刻みへ / wt5 T-0587 V 1 回の Dispatch を Work Graphs でつなぐ(研究)/ wt6 T-0027 水の分解と最初の道。
+- **試験の名前の変化**: probe_gas・radiation_reference(CPU)を足した。gas_projection は内側の許容差の既定が変わった(外側 ÷ 10)。
 
-## 前の仕事(2026-10-15 第 3 巡)
-- T-0495 押す構造の一般の形(push_model・ADR-0228)/ T-0509 編集の状態で置いても時間を進めない(ADR-0236)/ T-0518 坂の計器の 1 チャット目(ADR-0230)/
-  T-0519 物理の散逸の帳簿(PxBody 464 バイト・ADR-0232)/ T-0530 圧力の投影の外側の反復(ADR-0234)。push_model・physics_energy を足した。
+## 前の仕事(2026-10-15 第 4 巡)
+- T-0536 引きずりと押す構造をエンジンの表へ(coupling_table・ADR-0238・Q66・Q70)/ T-0548 表の差し替えを編集に(ADR-0246・Q76)/
+  T-0414 ⑤ 草原の延焼の最小の版(data/scenes/grass_fire_river。川でなくても土の隙間で止まる = 川の意味は放射と気体から。ADR-0240・Q75)/
+  T-0542 物理の散逸をセルの熱へ(CPU の世界まで。ADR-0242・Q78)/ T-0531 の 1 チャット目(解く部分のビット一致・Q77)。
 
 ## それより前の仕事
-- 第 1 巡(T-0491・T-0494・T-0496・T-0497・T-0498)・第 2 巡(T-0492・T-0493・T-0499・T-0503・T-0505)と、2026-10-13〜14 の節は、400 行に収めるため消した。
-  第 1・2 巡は f778b4a の HANDOFF.md、2026-10-13 の節は 2960562 の HANDOFF.md にある。
+- 第 3 巡(T-0495・T-0509・T-0518・T-0519・T-0530)・第 1 巡・第 2 巡と、2026-10-13〜14 の節は、400 行に収めるため消した。
+  第 3 巡は c0d8c42 の HANDOFF.md、第 1・2 巡は f778b4a の HANDOFF.md、2026-10-13 の節は 2960562 の HANDOFF.md にある。
 
 ## 動いているもの(確認方法つき)
-- **テスト(2026-10-15 第 3 巡のマージの後・release)**: 上の「状態」のとおり(CPU 65 本・GPU の HW 99 本が通過。試験の組は runner/main-batches.txt〔git 管理外〕の形で 4〜9 本ずつ)。
-- **テスト(2026-10-12 その 3 のマージの後・release)**: CPU 52 本・陰解法 10 本・多重解像度/実験室/ブランク 20 本・窓と画像 28 本・溢れの大きい組 8 本が全部通過。
-- 2026-10-11 以前の各チケットのテストの記録(どの組をどの順で流したか)は aa3e55c の HANDOFF.md と各チケットの「テストの結果」にある。
+- **テスト(2026-10-15 第 5 巡のマージの後・release)**: 上の「状態」のとおり(試験の組は runner/main-batches.txt〔git 管理外〕の形で 4〜9 本ずつ。窓は 8 組・image 1 組。-Filter は「|」を使わず文字の組で)。
+- それより前のテストの記録(どの組をどの順で流したか)は前の版の HANDOFF.md(2026-10-12 は 2960562 の前・2026-10-11 以前は aa3e55c)と各チケットの「テストの結果」にある。
 - `job.py test` は分けて投げる(GPU の組は 4〜8 本ずつ。T-0426 で長い試験を分けた)。例: `-Filter "^gpu_multires(_warp|_activity|_activity_warp|_quiet|_quiet_warp|_uniform|_uniform_warp)?$"`・
   `-Filter ^gpu_multires_conduction`・`-Filter gpu_multires_subcycle`・`-Filter "gpu_probe|window_replay"`・CPU だけの組
   (`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|float_check)"`)と `-Filter reaction`。
@@ -82,7 +84,7 @@
   (この節の前の版は aa3e55c の HANDOFF.md)。
 
 ## 次にやること
-NEXT.md の先頭(第 5 巡の報告を待ってマージ → 確かめと記録。③ の残り T-0561・T-0531・T-0554・T-0555・T-0539〜T-0541・T-0537・T-0504・T-0533 / ⑤ T-0414 の道 T-0028・T-0210・T-0557〜T-0560)。判断待ちは QUESTIONS の Q75〜Q78(新)と、聞いた Q62〜Q74(巡目の区切りにユーザーへ)。ユーザーに聞く時は、エンジンの仕組みなら作り手から見た違いで、
+NEXT.md の先頭(第 6 巡の報告を待ってマージ → 確かめと記録。③ の残り T-0531〔3 チャット目〕・T-0587・T-0554・T-0555・T-0539〜T-0541・T-0537・T-0504・T-0533 / ⑤ T-0414 の道 T-0584〜T-0586〔放射〕・T-0591〜T-0593〔気体〕・T-0558・T-0560・T-0580・T-0027)。判断待ちは QUESTIONS の Q81〜Q85(新)・Q75〜Q78 と、聞いた Q62・Q63・Q65〜Q74。エンジンの仕組みは作り手から見た違いで、
 ゲームの中身ならプレイヤーと遊びへの影響で聞く(CLAUDE.md §5・D-476)。
 
 ## 注意(次の Claude がハマりそうな所)
@@ -392,9 +394,7 @@ NEXT.md の先頭(第 5 巡の報告を待ってマージ → 確かめと記録
   伝導の記録の種類は probe_sim.hlsli の `PROBE_TRACE_*`、CPU の予想は sim/probe_trace の `AppendExpectedProbeTrace`(範囲の判定を GPU と同じにする)。
 - `std::map` を持つ構造体を値で返すと clang-tidy の bugprone-exception-escape(ムーブが noexcept でない)。呼ぶ側の物に書く形にした(probe_trace.cpp の BuildTickTree)。
 - python の `"""` の中に C++ の `"\n"` を書くと本物の改行になる(heredoc の python で編集するとき)。`<<'EOF'` の cat で書くか、`\\n` にする。
-- gpu_conduct_bench は `--trace` を自分で取り除いてから gpu_test_options.h に渡す(知らない引数で止まるので)。
 - **トレースの範囲を変えるとき**(T-0088): `GraphTrace::SetFilter` / `ProbeSim::SetTraceFilter` は次の `RecordBegin(list, slot)` から効く。
   容量は `Create` の capacity(`ProbeSimOptions::traceCapacity`)までに切り詰める。ランタイムは `frame::TRACE_CAPACITY_PER_FRAME`(65,536)をいつも確保。
   `RecordBegin` に slot を渡す(slot ごとのアップロードと、読むときの範囲)。
 - exe の横のフォルダは `core/paths.h` の `ExecutableDirectory()`(ログ・シェーダー・トレースの既定の置き場所)。
-- 一度だけ debug のリンクが `LNK1236: corrupt or invalid COFF sections`(graph_trace.cpp.obj)で落ち、もう一度 build したら通った(release と続けて投げた直後)。
