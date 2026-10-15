@@ -63,3 +63,7 @@
 - 2026-10-15(wt3): 量の上限を根っこから洗った(上の表)。2^31 は気体の式の器を world_cells が写しただけで、セルの型は uint64。
   units.hlsli にセルの器(合計 2^36・気体のぶん 2^31)を置き、world_cells・材料のひな形(sim::CheckCellAmounts)・置くコマンド(合計)・気体の式が使う形にした。
   場面 grass_fire_river を本物の量(水 6917 mol・砂 3121 mol)に戻した。ADR-0260(Proposed)・04「セルの器」・07 §2 の注。T-0600・T-0601 を分けた。
+  試験(release): CPU の全部(^[^g]。world_layout 通る)・gpu_probe_place(CPU と GPU)通る。window_・image_ の 47 本も流れた(フィルタに入った)。
+  落ちたのは前からの 2 本で、この変更と無関係: reaction_package_runtime_stops(T-0557 の game = true が tests/packages_broken に無い)・
+  image_probe_slice(main が基準の画像を 2026-10-15 に置き換え済み。rebase で直る見込み)。
+  場面の指標(本物の水・砂): 川に着く 16 秒・消える 26 秒・向こう岸の草は全部残る(前と同じ)。川に着いた時の手前の草が 241,396 µmol 減った(砂の熱容量が増えた)→ 基準を書き直した。
