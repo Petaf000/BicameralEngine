@@ -11,6 +11,7 @@
 // GPU の刻みは今まで通り gpu_probe_* が同じ初めの世界で確かめる(初めの世界の作り方だけが変わった)。
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <span>
 #include <string>
 #include <vector>
@@ -239,6 +240,48 @@ namespace {
                       "x, y, z"));
     }
 
+    // セルの器(T-0558・ADR-0260): 凝縮相は合計 2^36 µmol まで書ける(0.5 m 角の水 6917 mol も)。合計と気体のぶんを超えたら誤り
+    void TestCellAmountLimits() {
+        constexpr uint64_t LIMIT = fx::CELL_AMOUNT_LIMIT_MICROMOLES;
+        constexpr uint64_t GAS_LIMIT = fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
+        const auto region = [](const std::string& amounts) {
+            return "return { world_cells = { dense = { layer = 2, min_cell = { 0, 0, 0 }, size_cells = { 1, 1, 1 }, "
+                   "amounts_umol = { " +
+                   amounts + " }, temperature_mk = 300000 } } }";
+        };
+
+        // --- 凝縮相(セルロース)は 2147 mol を超えて上限ちょうどまで ---
+        const std::string full = std::format("cellulose = {}, oxygen = 1", LIMIT - 1);
+        const auto baked = BakeWithMod(region(full));
+        if (!baked)
+            std::printf("読めない: %s\n", baked.error().c_str());
+
+        EXPECT(baked.has_value());
+        if (baked) {
+            const std::vector<reaction::RxCell> world = MakeProbeInitialWorld(*baked);
+            const uint32_t slot = reaction::RxFindSlot(world[0], baked->SpeciesId("cellulose"));
+            EXPECT(slot != reaction::RX_NO_SLOT && world[0].amounts[slot] == LIMIT - 1);
+        }
+
+        // --- 合計の上限・1 物質の上限・気体のぶんの上限 ---
+        EXPECT(FailsWith(region(std::format("cellulose = {}, oxygen = 2", LIMIT - 1)), "合計"));
+        EXPECT(FailsWith(region(std::format("cellulose = {}", LIMIT + 1)), "amounts_umol.cellulose"));
+        EXPECT(FailsWith(region(std::format("oxygen = {}", GAS_LIMIT)), "気体のぶん"));
+        EXPECT(
+            FailsWith(region(std::format("oxygen = {}, nitrogen = {}", GAS_LIMIT / 2, GAS_LIMIT / 2)), "気体のぶん"));
+        EXPECT(BakeWithMod(region(std::format("oxygen = {}", GAS_LIMIT - 1))).has_value());
+
+        // --- 材料のひな形も同じ器 ---
+        const auto material = [](uint64_t amount) {
+            return std::format(
+                "return {{ material_templates = {{ dense = {{ label = \"x\", contents = {{ {{ species = "
+                "\"cellulose\", micromoles = {} }} }} }} }} }}",
+                amount);
+        };
+        EXPECT(BakeWithMod(material(LIMIT)).has_value());
+        EXPECT(FailsWith(material(LIMIT + 1), "合計"));
+    }
+
 }  // namespace
 
 int main() {
@@ -246,6 +289,7 @@ int main() {
     TestRuntimeAndReplay();
     TestBlank();
     TestModAddsAndErrors();
+    TestCellAmountLimits();
 
     std::printf("world_layout_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
 

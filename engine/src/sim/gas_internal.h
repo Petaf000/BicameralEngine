@@ -33,8 +33,9 @@ namespace bicameral::sim::gas_detail {
     inline constexpr uint64_t ONE_Q32 = (uint64_t)1 << 32;
     inline constexpr uint64_t LOW_32_BITS = ONE_Q32 - 1;
 
-    // 1 セルの物質量の上限(µmol)。移す物質量を Q32 の 64bit で計算するため(0.125 m³ に 2147 mol = 大気の約 400 倍)
-    inline constexpr uint64_t MAX_CELL_AMOUNT = (uint64_t)1 << 31;
+    // 1 セルの気体のぶんの物質量の上限(µmol)。移す物質量を Q32 の 64bit で計算するため(0.125 m³ に 2147 mol = 大気の約 400 倍。
+    // セルの器の 1 つ。units.hlsli・ADR-0260)
+    inline constexpr uint64_t MAX_CELL_AMOUNT = fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
 
     // 丸めの乱数の用途(FxHash64。R6)
     inline constexpr uint32_t GAS_ROUNDING_PURPOSE = 0x47610001u;

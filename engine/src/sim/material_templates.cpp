@@ -35,6 +35,14 @@ namespace bicameral::sim {
                 baked.contents.push_back({.species = species, .micromoles = amount.micromoles});
             }
 
+            // 置くコマンド・実験室が 1 セルに置く量(セルの器。ADR-0260)
+            std::vector<SpeciesAmount> amounts;
+            for (const MaterialAmount& entry : baked.contents)
+                amounts.push_back({.species = entry.species, .amount = entry.micromoles});
+
+            if (auto fits = CheckCellAmounts(table, amounts); !fits)
+                return std::unexpected(std::format("{}: {}", where, fits.error()));
+
             return baked;
         }
 

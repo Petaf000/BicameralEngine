@@ -7,6 +7,7 @@
 #include <limits>
 #include <vector>
 
+#include "common/units.hlsli"
 #include "script/package_fields.h"
 
 namespace bicameral::script {
@@ -19,8 +20,8 @@ namespace bicameral::script {
 
         constexpr int64_t CELL_COORDINATE_MAX = int64_t{1}
                                                 << 20;  // セルの位置・大きさの上限(格子の大きさの器より十分大きい)
-        constexpr int64_t CELL_AMOUNT_MAX = (int64_t{1} << 31) -
-                                            1;  // 1 セルの 1 物質(µmol。気体の MAX_CELL_AMOUNT 未満)
+        // 1 セルの 1 物質(µmol)。セルの合計と気体のぶんはベイク(sim::BakeWorldLayout)が表の相で確かめる(ADR-0260)
+        constexpr auto CELL_AMOUNT_MAX = static_cast<int64_t>(fx::CELL_AMOUNT_LIMIT_MICROMOLES);
         constexpr int64_t TEMPERATURE_MAX = std::numeric_limits<int32_t>::max();  // mK
         constexpr int64_t LENGTH_MAX_MILLIMETERS = 1000000000;  // 1000 km(2^-20 m に直しても int64 に入る)
         constexpr int64_t MASS_MAX_GRAMS = int64_t{1} << 40;    // mg に直しても uint64 に入る

@@ -179,6 +179,11 @@ namespace bicameral::sim {
         uint64_t amount = 0;  // µmol
     };
 
+    // 1 セルの中身がセルの器に入るか(合計 ≤ CELL_AMOUNT_LIMIT・凝縮相でない成分の合計 < CELL_GAS_AMOUNT_LIMIT。units.hlsli・ADR-0260)。
+    // 入らなければ理由(場所は呼ぶ側が前に付ける)。世界の組み立てと材料のひな形のベイクが使う
+    [[nodiscard]] std::expected<void, std::string> CheckCellAmounts(const BakedReactionTable& table,
+                                                                    std::span<const SpeciesAmount> amounts);
+
     // 成分と温度(mK)からセルを作る。エネルギー = 化学 + 熱容量 × 温度 を mJ に切り上げる(熱が負にならないように)
     [[nodiscard]] reaction::RxCell MakeReactionCell(const BakedReactionTable& table,
                                                     std::span<const SpeciesAmount> amounts,

@@ -21,13 +21,13 @@ return {
     water = {
         label = "水",
         order = 3,
-        contents = { { species = "water", micromoles = 2100000000 } },
+        contents = { { species = "water", micromoles = 6917000000 } },
     },
     soil = {
         label = "砂",
         order = 4,
         contents = {
-            { species = "silica", micromoles = 2000000000 },
+            { species = "silica", micromoles = 3121000000 },
             { species = "oxygen", micromoles = 425520 },
             { species = "nitrogen", micromoles = 1605680 },
         },

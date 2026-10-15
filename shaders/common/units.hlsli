@@ -28,6 +28,12 @@ FX_CONST int64_t MICROJOULES_PER_MILLIJOULE = 1000;
 // 温度(int32、導出値): 1 = 1 mK。0〜2.1e6 K
 FX_CONST int32_t MILLIKELVIN_PER_KELVIN = 1000;
 FX_CONST int32_t TEMPERATURE_MAX_MILLIKELVIN = 2100000000;
+// 1 セルの物質量の上限(セルの器。T-0558・ADR-0260)。数はレベルによらない(レベル k の単位は 8^-k µmol で体積と同じ比)。
+// 合計(全部の相): 2^36 µmol ≒ 68,719 mol / 0.125 m³ = 550 mol/L。いちばん詰まった固体(ダイヤモンド 293 mol/L)の約 1.9 倍。
+//   和の器: 熱容量 Σ 量 × 比熱 は比熱 2^27 mJ/(mol·K) まで、化学 Σ 量 × H0 は |H0| 2^26 J/mol まで 64bit に収まる(物質の値の上限は T-0600)
+// 気体のぶん(凝縮相でない成分の合計): 2^31 µmol ≒ 2147 mol。気体の式が移す量を Q32 の 64bit で計算する器(07 §2。300 K で約 400 気圧)
+FX_CONST uint64_t CELL_AMOUNT_LIMIT_MICROMOLES = FX_U64(0x10u, 0u);
+FX_CONST uint64_t CELL_GAS_AMOUNT_LIMIT_MICROMOLES = FX_U64(0u, 0x80000000u);
 
 // --- 単位の選び方から決まる換算の定数(器。世界ごとに変えない。ADR-0171)--------------------------
 // 気体定数 R = 8.314462618 J/(mol·K)(SI の定義値 k_B × N_A。nJ/(mol·K) で正確に = nJ/(µmol·K) × 10^6)。

@@ -3,5 +3,5 @@
 return {
     slot_1 = { label = "草(残り)", species = "cellulose", span_micromoles = 1200000 },
     slot_2 = { label = "炭", species = "carbon", span_micromoles = 7200000 },
-    slot_3 = { label = "水", species = "water", span_micromoles = 2100000000 },
+    slot_3 = { label = "水", species = "water", span_micromoles = 6917000000 },
 }
