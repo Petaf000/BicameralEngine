@@ -1,5 +1,7 @@
 # T-0611 相変化を反応表で書く(水 ↔ 湯気・氷 ↔ 水)
 
+> **まだマージしない**: 標準パッケージに水を足したら、CPU の試験が落ちる(下の「引き継ぎ」)。直してからマージ。
+>
 > **司令塔がマージで見る所**
 > - エンジンの変更は 1 か所だけ: ベイクが「次数 1 の反応物 0 個」(反応物が全部次数 0)の規則を通す(`reaction_table.cpp`。評価のコード・GPU のシェーダー・表の形は同じ)。
 > - 標準パッケージ real_matter に `water`(液体)・`ice`、real_reactions に相変化の 4 規則を足した → **試験の表(combustion_test)と場面 grass_fire_river の物質と規則が増える**
@@ -7,7 +9,7 @@
 > - 場面 grass_fire_river の川(`water`)は real_matter の液体の水になり、**蒸発・凝縮が効く**(前は相変化の無い水)。場面の指標は測っていない。
 > - wt6 T-0610・wt2 T-0612 へ: **気体と液体の区画を同じ所に重ねると、エネルギーの保存が崩れる刻みがある**(下の「重なり」。相変化の規則とは別)。
 
-- Status: Done(仮。判断待ち 1〜4)
+- Status: Doing(2 時間で区切った。下の「引き継ぎ」の CPU の試験が落ちたまま。判断待ち 1〜4)
 - 種類: 設計 + 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -97,3 +99,16 @@
 - 2026-10-15(wt4): 規則の速さの形を読み、全部次数 0 の規則だけが足りないと分かった(評価は扱える・ベイクが断っていた)。real_matter に水・氷、
   real_reactions に 4 規則(飽和水蒸気圧に 2 点で合わせた・融点は急な Arrhenius)。最初の版で凝固を次数 0 にして氷が残り続けた → 氷について次数 1 に。
   湯気の場面でエネルギーの保存が崩れる刻みを見つけた(気体の区画と反応が気体の質量を変える所の見立て。元素は保存)。ADR-0272(Proposed)。T-0622〜T-0624 を分けた。
+
+## 引き継ぎ(2026-10-15・2 時間で区切った)
+- rebase main の後に CPU の全部(`^[^gwi]`)を流したら、標準パッケージに水を足したことで落ちた:
+  1. real_matter が型検査で読めない(`phase` の型を `("gas" | "solid" | "liquid")?` にしていた)→ **`string?` に直した**(確かめは投げたところ)。
+     これで standard_packages・reaction_package・environment_package・reaction_hot_reload・reaction_table_edit・reaction_package_scene・
+     reaction_replay_table・radiation_scene の多くが戻る見込み(どれも「依存するパッケージ real_matter を読まなかった」)。
+  2. slope_check: 試験が凝縮相の名前を手で並べていた → water・ice を足した(未確認)。
+  3. **reaction**(上限の無いセルとインラインのセルが毎刻み一致しない・燃焼の表)・**multires**・**multires_wide**(上限に当たらない場面が溢れを使わない世界と
+     毎刻み一致しない): 原因は見ていない。見立て: 試験のセル(test::MakeLimitsCell など)が表の物質を ID や数で選んでいて、物質が 2 つ増えて
+     水・氷が入った(相変化の規則が起きる)か、候補の上限に当たるようになった。物質 ID のずれだけなら試験の選び方を名前に直す。
+- 次の作業役へ: ① 上の 1・2 の確かめ ② 3 の原因 ③ GPU の組(combustion_test の物質が増えた。gpu_probe_*・gpu_multires_* を 4〜8 本ずつ)④ 場面の指標。
+- 戻し方(マージを急ぐ時): 水・氷と 4 規則を real_matter・real_reactions から別の標準パッケージ(例 real_water)へ移せば、サンプルの世界と場面は今まで通り
+  (ベイクの変更〔全部次数 0〕と probe_phase_test はそのまま使える。probe_phase_test は表に real_water を足す形にする)。
