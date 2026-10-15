@@ -7,6 +7,8 @@
 // 大きさは上限(GpuImplicitLimits)で決め、段の形・数は GPU のバッファ(計画 u9)から読む(T-0136): 刻みの初めに ImPlanLevels・ImPlanArgs が
 // 長い行の節の一覧・ImTail の境・間接の Dispatch の引数を作り、V サイクルは記録の上限の段(GpuImplicitTuning::dispatchLevels)まで
 // ExecuteIndirect で積む(その段が無い・下りが止まった段より下なら引数が 0 グループ)。CPU は段の数も ImTail の境も知らない。
+// 計画の段ごとの表(長い行の節・隣の数の最大・同じ色の隣)は系の形だけで決まるので、系を写した(RecordUpload・RecordCopySystem・
+// RecordCopyLevels)後の最初の刻み・解きだけで作る(T-0606)。系のバッファをほかの道で書き換える呼ぶ側は無い前提。
 //
 // 使い方(テスト):
 //   auto gpu = GpuImplicit::Create(device, limits);         // または Create(device, grid)(上限 = その系の大きさ)
@@ -225,6 +227,7 @@ namespace bicameral::sim {
             PassPlanArgs,
             PassSolveConverged,
             PassSolveCheckEnd,
+            PassPlanColors,
             PassCount
         };
 
@@ -248,6 +251,7 @@ namespace bicameral::sim {
                 0;  // 1 以上なら安い回: ImTail が min(下りが止まる段, cheapTail − 1) から回す(T-0179・T-0505)
             uint32_t sweeps = 0;
             uint32_t tailShared = 1;  // ImTail の節の値を groupshared に置くか(T-0587)
+            uint32_t checkColor = 0;  // 1 なら V の後の止める判定(段 0 に同じ色の隣が無ければ色 1 を飛ばす。T-0606)
         };
 
         // 写す 1 つ(RecordCopies。大きさは写す先と source の残りで切る)
@@ -283,6 +287,7 @@ namespace bicameral::sim {
         Constants m_constants;
         uint32_t m_maxDispatchLevels = 1;  // Create で決めた段ごとの Dispatch の段の上限(引数のバッファの大きさ)
         bool m_predication = true;
+        bool m_planReady = false;  // 段ごとの計画の表が今の系の形で作ってある(系を写すと false。T-0606)
 
         // --- GPU ---
         ComPtr<ID3D12RootSignature> m_rootSignature;

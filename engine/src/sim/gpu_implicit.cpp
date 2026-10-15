@@ -43,21 +43,29 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_COUNT = 11;
         constexpr uint32_t ARGS_BYTES = 3 * sizeof(uint32_t);  // D3D12_DISPATCH_ARGUMENTS
 
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 17;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 18;
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true};
 
         // implicit_conduct.hlsl の入口(Pass の順)
-        constexpr std::array<const char*, 17> SHADERS = {
-            "sim/implicit_begin.cso",          "sim/implicit_start.cso",
-            "sim/implicit_smooth.cso",         "sim/implicit_restrict.cso",
-            "sim/implicit_prolong.cso",        "sim/implicit_converged.cso",
-            "sim/implicit_cycle_end.cso",      "sim/implicit_flows.cso",
-            "sim/implicit_mark.cso",           "sim/implicit_limit_end.cso",
-            "sim/implicit_limit_faces.cso",    "sim/implicit_apply.cso",
-            "sim/implicit_tail.cso",           "sim/implicit_plan_levels.cso",
-            "sim/implicit_plan_args.cso",      "sim/implicit_solve_converged.cso",
-            "sim/implicit_solve_check_end.cso"};
+        constexpr std::array<const char*, 18> SHADERS = {"sim/implicit_begin.cso",
+                                                         "sim/implicit_start.cso",
+                                                         "sim/implicit_smooth.cso",
+                                                         "sim/implicit_restrict.cso",
+                                                         "sim/implicit_prolong.cso",
+                                                         "sim/implicit_converged.cso",
+                                                         "sim/implicit_cycle_end.cso",
+                                                         "sim/implicit_flows.cso",
+                                                         "sim/implicit_mark.cso",
+                                                         "sim/implicit_limit_end.cso",
+                                                         "sim/implicit_limit_faces.cso",
+                                                         "sim/implicit_apply.cso",
+                                                         "sim/implicit_tail.cso",
+                                                         "sim/implicit_plan_levels.cso",
+                                                         "sim/implicit_plan_args.cso",
+                                                         "sim/implicit_solve_converged.cso",
+                                                         "sim/implicit_solve_check_end.cso",
+                                                         "sim/implicit_plan_colors.cso"};
 
         // RecordUpload が CPU の系から写すバッファ(Buffer の順。ほかは刻みの段が初めに書く)
         constexpr std::array<bool, 11> UPLOADED = {true,  true,  true,  true, true, false,
@@ -68,7 +76,13 @@ namespace bicameral::sim {
             return IM_PLAN_DEPTH_BASE + (kind * IM_PLAN_DEPTH_STRIDE) + depth;
         }
 
-        // 段 depth の間接の引数の始まり
+        // V の後の止める判定で、段 0 に同じ色の隣が無ければ色 1 の節を飛ばしてよいか(T-0606。implicit_conduct.hlsl の SkipChecked):
+        // V の段 0 の最後が色 0 → 色 1 の掃き出しであること(後の掃き出しと最も粗い段の掃き出しがどちらも 1 回以上。段が 1 つの系は後者)
+        uint32_t CheckLastColorOnly(const ImplicitOptions& options) {
+            return options.postSmooth > 0 && options.coarsestSweeps > 0 ? 1u : 0u;
+        }
+
+        // 段 d の間接の引数の始まり
         constexpr uint32_t DepthSlot(uint32_t depth) {
             return IM_SLOT_DEPTH_BASE + (depth * IM_SLOT_DEPTH_STRIDE);
         }
@@ -416,6 +430,7 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier(BufferCount, barriers.data());
+        m_planReady = false;
 
         return true;
     }
@@ -455,6 +470,7 @@ namespace bicameral::sim {
                        .sourceOffset = faceCountOffset,
                        .bytes = sizeof(uint32_t)}};
         RecordCopies(list, regions);
+        m_planReady = false;  // 子の一覧の番地は面の数で決まる
     }
 
     void GpuImplicit::RecordCopyLevels(ID3D12GraphicsCommandList* list, ID3D12Resource* header, ID3D12Resource* nodes,
@@ -482,6 +498,7 @@ namespace bicameral::sim {
                        .sourceOffset = 0,
                        .bytes = BufferBytes(BufferLists) - childrenOffset}};
         RecordCopies(list, regions);
+        m_planReady = false;
     }
 
     // 写す(大きさは写す先の残りと source の残りの小さい方)。写す先は UAV → COPY_DEST → UAV
@@ -571,15 +588,22 @@ namespace bicameral::sim {
 
     const char* GpuImplicit::PassName(uint32_t pass) {
         static constexpr std::array<const char*, PassCount> NAMES = {
-            "Begin",    "Start",      "Smooth",   "Restrict",       "Prolong",      "Converged",
-            "CycleEnd", "Flows",      "Mark",     "LimitEnd",       "LimitFaces",   "Apply",
-            "Tail",     "PlanLevels", "PlanArgs", "SolveConverged", "SolveCheckEnd"};
+            "Begin",    "Start",      "Smooth",   "Restrict",       "Prolong",       "Converged",
+            "CycleEnd", "Flows",      "Mark",     "LimitEnd",       "LimitFaces",    "Apply",
+            "Tail",     "PlanLevels", "PlanArgs", "SolveConverged", "SolveCheckEnd", "PlanColors"};
         return pass < PassCount ? NAMES[pass] : "?";
     }
 
-    // 段の形から長い行の節の一覧・ImTail の境・間接の引数を作り、引数を INDIRECT_ARGUMENT にする(T-0136)
+    // 段の形から長い行の節の一覧・ImTail の境・間接の引数を作り、引数を INDIRECT_ARGUMENT にする(T-0136)。
+    // 段ごとの表(長い行の節の一覧・隣の数の最大・同じ色の隣)は系の形だけで決まるので、系を写し直した後の最初の 1 回だけ作る
+    // (T-0606。64³ で 1 回 約 0.4 ms。外側の反復の解き直し・熱の毎刻みで形が同じ時は作らない)。引数は記録の形で変わるので毎回
     void GpuImplicit::RecordPlan(ID3D12GraphicsCommandList* list) {
-        Dispatch(list, PassPlanLevels, m_constants.maxLevels);
+        if (!m_planReady) {
+            Dispatch(list, PassPlanLevels, m_constants.maxLevels);
+            Dispatch(list, PassPlanColors, IM_PLAN_COLOR_GROUPS);
+            m_planReady = true;
+        }
+
         Dispatch(list, PassPlanArgs, 1);
         const D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
             m_buffers[BufferArgs].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -691,8 +715,11 @@ namespace bicameral::sim {
             else
                 RecordCheapCycle(list, options, cheapLevels);
 
-            if (options.toleranceMillikelvin != 0)
+            if (options.toleranceMillikelvin != 0) {
+                m_constants.checkColor = CheckLastColorOnly(options);
                 DispatchIndirect(list, PassConverged, IM_SLOT_CONVERGED);
+                m_constants.checkColor = 0;
+            }
 
             Dispatch(list, PassCycleEnd, 1);
             if (skippable)
@@ -768,7 +795,9 @@ namespace bicameral::sim {
             else
                 RecordCheapCycle(list, options, cheapLevels);
 
+            m_constants.checkColor = CheckLastColorOnly(options);
             DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
+            m_constants.checkColor = 0;
             Dispatch(list, PassCycleEnd, 1);
             EndSkippable(list);
         }

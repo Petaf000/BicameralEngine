@@ -87,10 +87,12 @@ FX_CONST uint32_t IM_PLAN_TERMINAL = IM_PLAN_SHAPE_WORDS + 2;  // 下りが止�
 // 記録の形(GpuImplicitRecordShape)で切る前の ImTail の境(段の数なら受け持たない)。次の刻みの形を選ぶのに使う(T-0154)
 FX_CONST uint32_t IM_PLAN_WANTED_TAIL = IM_PLAN_SHAPE_WORDS + 3;
 FX_CONST uint32_t IM_PLAN_HEADER_WORDS = IM_PLAN_SHAPE_WORDS + 8;
-// 段ごとの表(IM_PLAN_LEVEL_WORDS 語ずつ): 長い行の節の数 [色 0・色 1・縮約]・隣の数の最大
+// 段ごとの表(IM_PLAN_LEVEL_WORDS 語ずつ): 長い行の節の数 [色 0・色 1・縮約]・隣の数の最大・同じ色の隣があるか(T-0606)
 FX_CONST uint32_t IM_PLAN_LONG_RESTRICT = 2;
 FX_CONST uint32_t IM_PLAN_MOST_LINKS = 3;
-FX_CONST uint32_t IM_PLAN_LEVEL_WORDS = 4;
+FX_CONST uint32_t IM_PLAN_SAME_COLOR = 4;  // 0 なら段のどの隣も色が違う(赤黒を 1 つの配列で書ける。ImPlanColors)
+FX_CONST uint32_t IM_PLAN_LEVEL_WORDS = 5;
+FX_CONST uint32_t IM_PLAN_COLOR_GROUPS = 1024;  // ImPlanColors のグループの数
 FX_CONST uint32_t IM_PLAN_MAX_LEVELS = IM_PLAN_DEPTH_STRIDE;
 FX_CONST uint32_t IM_PLAN_LEVELS_BASE = IM_PLAN_HEADER_WORDS;
 // その後ろ: 節の印 × 節の上限(bit 0: 隣が IM_LONG_ROW_LINKS より多い・bit 1: 子の隣の最大がそれより多い)→ 長い行の節の一覧
