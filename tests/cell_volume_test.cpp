@@ -343,6 +343,8 @@ namespace {
     constexpr uint32_t LIQUID_BARRIER_X = 2;
     constexpr uint64_t LIQUID_TICKS = 900;        // 15 秒
     constexpr uint64_t LIQUID_EARLY_TICKS = 120;  // 2 秒
+    // 渡り始めの目安: 向こうの水がこれに届いた刻み(T-0610 の移流で 2 秒には両方とも釣り合いを越えて揺れているので、量でなく届いた時で比べる)
+    constexpr uint64_t LIQUID_REACH_MICROMOLES = FULL_WATER / 2;
 
     ProbeLiquidOptions LiquidOptions(std::array<uint32_t, 3> minCell, std::array<uint32_t, 3> size) {
         return {.minCell = minCell, .sizeCells = size};
@@ -394,6 +396,7 @@ namespace {
     struct LiquidRun {
         uint64_t crossed = 0;       // 空き地(壁の向こう)の水(µmol)
         uint64_t crossedEarly = 0;  // 渡り始め(LIQUID_EARLY_TICKS 刻み)
+        uint64_t reachTick = 0;     // 向こうの水が LIQUID_REACH_MICROMOLES に届いた刻み(0 = 届かない)
         bool conserved = true;
     };
 
@@ -444,8 +447,12 @@ namespace {
             const LiquidBook before = MeasureLiquidBook(*field, cells);  // 燃やした後(燃えた分は区画の外の段)
             (void)field->Step(table, cells, changed);
             run.conserved = run.conserved && LiquidConserved(table, *field, cells, water, before);
+            const uint64_t crossed = WaterWhere(table, *field, cells, LIQUID_SIZE, LIQUID_BARRIER_X + 1, 0);
+            if (run.reachTick == 0 && crossed >= LIQUID_REACH_MICROMOLES)
+                run.reachTick = tick + 1;
+
             if (tick + 1 == LIQUID_EARLY_TICKS)
-                run.crossedEarly = WaterWhere(table, *field, cells, LIQUID_SIZE, LIQUID_BARRIER_X + 1, 0);
+                run.crossedEarly = crossed;
         }
 
         run.crossed = WaterWhere(table, *field, cells, LIQUID_SIZE, LIQUID_BARRIER_X + 1, 0);
@@ -457,10 +464,12 @@ namespace {
         std::array<LiquidRun, 5> runs;
         for (uint32_t b = 0; b < runs.size(); ++b) {
             runs[b] = RunLiquid(table, (Barrier)b, LIQUID_TICKS, 0);
-            std::printf("液体 %s: 向こうへ 2 秒で %llu・15 秒で %llu µmol(水 %llu µmol のうち)・保存 %s\n",
-                        BarrierName((Barrier)b), (unsigned long long)runs[b].crossedEarly,
-                        (unsigned long long)runs[b].crossed, (unsigned long long)(FULL_WATER * 4),
-                        runs[b].conserved ? "yes" : "no");
+            std::printf(
+                "液体 %s: 向こうへ 2 秒で %llu・15 秒で %llu µmol(水 %llu µmol のうち)・%llu µmol に届いた刻み "
+                "%llu・保存 %s\n",
+                BarrierName((Barrier)b), (unsigned long long)runs[b].crossedEarly, (unsigned long long)runs[b].crossed,
+                (unsigned long long)(FULL_WATER * 4), (unsigned long long)LIQUID_REACH_MICROMOLES,
+                (unsigned long long)runs[b].reachTick, runs[b].conserved ? "yes" : "no");
             EXPECT(runs[b].conserved);
         }
 
@@ -470,7 +479,9 @@ namespace {
         EXPECT(runs[(size_t)Barrier::Tiny].crossed * 100 >= none * 95);
         EXPECT(runs[(size_t)Barrier::Loose].crossed * 100 >= none * 95);
         EXPECT(runs[(size_t)Barrier::Half].crossedEarly > 0);
-        EXPECT(runs[(size_t)Barrier::Half].crossedEarly < runs[(size_t)Barrier::None].crossedEarly);
+        EXPECT(runs[(size_t)Barrier::Packed].reachTick == 0);
+        EXPECT(runs[(size_t)Barrier::None].reachTick != 0);
+        EXPECT(runs[(size_t)Barrier::Half].reachTick > runs[(size_t)Barrier::None].reachTick);
 
         const LiquidRun burn = RunLiquid(table, Barrier::Packed, LIQUID_TICKS, LIQUID_TICKS / 3);
         std::printf("液体 砂で満ちる → 5 秒で半分に燃える: 向こうへ %llu µmol・保存 %s\n",
