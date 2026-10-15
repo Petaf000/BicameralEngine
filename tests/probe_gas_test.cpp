@@ -116,7 +116,8 @@ namespace {
     }
 
     // 区画を基準の大気で満たした世界(区画の外は空)。wood なら底に燃える木箱(孔の空気は同じ圧力 = 物質量 × 300 ÷ 1000)
-    std::vector<reaction::RxCell> MakeWorld(const BakedReactionTable& table, const ProbeGasField& field, bool wood) {
+    std::vector<reaction::RxCell> MakeWorld(const BakedReactionTable& table, const ProbeGasField& field, bool wood,
+                                            bool steam = false) {
         std::vector<reaction::RxCell> cells = MakeBlankProbeWorld();
         for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
             const uint32_t index = field.GridIndex(region);
@@ -129,10 +130,24 @@ namespace {
                 continue;
             }
 
-            std::vector<SpeciesAmount> amounts = {{.species = table.SpeciesId("cellulose"), .amount = WOOD_AMOUNT}};
+            std::vector<SpeciesAmount> amounts;
+            if (!steam)
+                amounts.push_back({.species = table.SpeciesId("cellulose"), .amount = WOOD_AMOUNT});
+
+            uint64_t airAmount = 0;
+            for (uint32_t i = 0; i < air.speciesCount; ++i)
+                airAmount += air.amounts[i];
+
+            // 湯気の塊: 同じ圧力の熱い水蒸気が 9 割・空気が 1 割
+            if (steam)
+                amounts.push_back(
+                    {.species = table.SpeciesId("water_vapor"),
+                     .amount = airAmount * 9 / 10 * (uint64_t)AIR_TEMPERATURE / (uint64_t)WOOD_TEMPERATURE});
+
             for (uint32_t i = 0; i < air.speciesCount; ++i)
                 amounts.push_back({.species = air.species[i],
-                                   .amount = air.amounts[i] * (uint64_t)AIR_TEMPERATURE / (uint64_t)WOOD_TEMPERATURE});
+                                   .amount = air.amounts[i] * (steam ? 1u : 10u) / 10u * (uint64_t)AIR_TEMPERATURE /
+                                             (uint64_t)WOOD_TEMPERATURE});
 
             std::ranges::sort(amounts, {}, &SpeciesAmount::species);
             cells[index] = MakeReactionCell(table, amounts, WOOD_TEMPERATURE);
@@ -266,19 +281,23 @@ namespace {
         uint64_t smokeTop = 0;      // CO2 が 1 mol 以上ある最も高い層
         uint64_t celluloseLeft = 0;
         bool conserved = true;
+        uint64_t brokenTick = 0;   // 保存が最初に崩れた刻み(0 = 崩れない)
+        int64_t energyDrift = 0;   // その刻みのエネルギーのずれ(mJ)
+        bool momentumHeld = true;  // 運動量(− 帳簿)が一定
         uint32_t skipped = 0;
         uint32_t maxGasSpecies = 0;       // 区画の気体の物質の数の最大
         int64_t advanceMicroseconds = 0;  // 刻みを進めた時間の合計(気体・伝導・反応)
     };
 
-    FireResult RunFire(const BakedReactionTable& table, bool flow, ProbeGasPressure pressure, uint64_t ticks) {
+    FireResult RunFire(const BakedReactionTable& table, bool flow, ProbeGasPressure pressure, uint64_t ticks,
+                       bool steam = false) {
         const auto field = ProbeGasField::Create(table, MakeOptions(pressure));
         EXPECT(field.has_value());
         FireResult result;
         if (!field)
             return result;
 
-        ProbeReference reference(table, MakeWorld(table, *field, true));
+        ProbeReference reference(table, MakeWorld(table, *field, true, steam));
         if (flow)
             EXPECT(reference.EnableGas(MakeOptions(pressure)).has_value());
 
@@ -291,8 +310,13 @@ namespace {
                                               .count();
             result.skipped += reference.LastGasReport().skippedCellOverflow ? 1 : 0;
             result.maxGasSpecies = std::max(result.maxGasSpecies, reference.LastGasReport().gasSpecies);
-            if (Sum(table, reference.State(tick + 1), reference.GasField()) != initial)
+            const Totals now = Sum(table, reference.State(tick + 1), reference.GasField());
+            result.momentumHeld = result.momentumHeld && now.momentum == initial.momentum;
+            if (now != initial && result.conserved) {
                 result.conserved = false;
+                result.brokenTick = tick + 1;
+                result.energyDrift = now.energy - initial.energy;
+            }
         }
 
         const std::span<const reaction::RxCell> state = reference.State(ticks);
@@ -501,6 +525,64 @@ namespace {
         EXPECT(first.skipped == 0);
     }
 
+    // --- 8. 反応が気体の質量を変える(T-0646): 水蒸気が露(凝縮相)になる試験の規則を足す ---
+    // 露 = 液体の水の値(生成エンタルピー −285.83 kJ/mol・比熱 75.3 J/(mol·K))。速さは温度によらない一次(A /s・Ea 0)。
+    // 物質の名前は相変化の見本(real_matter の water。T-0611)と重ならないように試験だけのもの
+    BakedReactionTable MakeDewTable(uint64_t ratePerSecond) {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        std::erase_if(definition.rules, [](const RuleDefinition& rule) {
+            return std::ranges::any_of(rule.products,
+                                       [](const RuleTerm& term) { return term.species == "carbon_monoxide"; });
+        });
+
+        definition.environment = StandardWorldPhysics();
+        definition.atmosphere = {
+            .points = {{.heightMillimeters = 0,
+                        .temperatureMilliKelvin = (uint32_t)AIR_TEMPERATURE,
+                        .fractions = {{.species = "nitrogen", .partsPerMillion = 790000},
+                                      {.species = "oxygen", .partsPerMillion = 210000}}}},
+            .surfacePressurePascals = 101325,
+        };
+        definition.species.push_back({.name = "test_dew",
+                                      .composition = {{.element = "H", .count = 2}, {.element = "O", .count = 1}},
+                                      .formationEnthalpy = -285830,
+                                      .heatCapacity = 75300,
+                                      .thermalConductivity = 600,
+                                      .condensed = true});
+        definition.rules.push_back(
+            {.name = "test_dew_condensation",
+             .reactants = {{.species = "water_vapor", .coefficient = 1, .firstOrder = true}},
+             .products = {{.species = "test_dew", .coefficient = 1}},
+             .rate = {.preExponentialMantissa = ratePerSecond, .preExponentialExponent10 = 0, .activationEnergy = 0}});
+
+        auto baked = BakeReactionTable(definition);
+        if (!baked) {
+            std::printf("露の表を作れない: %s\n", baked.error().c_str());
+            std::exit(1);
+        }
+
+        return std::move(*baked);
+    }
+
+    void TestMassChangedByReaction() {
+        constexpr uint64_t TICKS = 600;  // 10 秒
+        for (const uint64_t rate : {1ull, 10ull, 100ull}) {
+            const BakedReactionTable table = MakeDewTable(rate);
+            for (const bool steam : {false, true}) {
+                const FireResult result = RunFire(table, true, ProbeGasPressure::Explicit, TICKS, steam);
+                std::printf(
+                    "露 %llu /s・%s %llu 刻み: 保存 %s(崩れた刻み %llu・エネルギー %+lld mJ)・運動量 %s・"
+                    "流さなかった刻み %u\n",
+                    (unsigned long long)rate, steam ? "湯気の塊" : "燃える木箱", (unsigned long long)TICKS,
+                    result.conserved ? "yes" : "no", (unsigned long long)result.brokenTick,
+                    (long long)result.energyDrift, result.momentumHeld ? "yes" : "no", result.skipped);
+                EXPECT(result.conserved);
+                EXPECT(result.momentumHeld);
+                EXPECT(result.skipped == 0);
+            }
+        }
+    }
+
     // --- 5. ブランクの世界 ---
     void TestBlankWorldHasNoGas() {
         const auto blank = BakeReactionTable({});
@@ -528,6 +610,7 @@ int main() {
     const BakedReactionTable earth = MakeEarthAirTable();
     TestHeatCapacityAtConstantVolume(table, earth);
     TestManySpecies(earth);
+    TestMassChangedByReaction();
 
     std::printf("probe_gas_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
     return failureCount == 0 ? 0 : 1;
