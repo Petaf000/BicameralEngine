@@ -52,8 +52,10 @@ cbuffer ImConstants : register(b0) {
     uint32_t g_maxLevels;  // 段の上限(ImPlanLevels のグループの数)
     uint32_t
         g_coarsestDispatch;  // 0 なら最も粗い段の掃き出しの Dispatch を積んでいない(いつも ImTail が受け持つ。T-0154)
-    uint32_t g_cheapTail;    // 1 以上なら記録した回の後の安い回: ImTail が min(下りが止まる段, g_cheapTail − 1) から(T-0179・T-0505)
-    uint32_t g_sweeps;       // 掃き出しの回数: 前 | 後 << 8 | 最も粗い段 << 16
+    uint32_t
+        g_cheapTail;  // 1 以上なら記録した回の後の安い回: ImTail が min(下りが止まる段, g_cheapTail − 1) から(T-0179・T-0505)
+    uint32_t g_sweeps;      // 掃き出しの回数: 前 | 後 << 8 | 最も粗い段 << 16
+    uint32_t g_tailShared;  // 1 なら ImTail は収まる時に節の値を groupshared に置く(T-0587)
 };
 
 static const uint32_t IM_THREADS = 64;
@@ -131,14 +133,40 @@ FxU128 FaceCoefficient(ImGpuFace face) {
     return coefficient;
 }
 
-// 右辺 + Σ 隣の重み × 値(values: 0 なら A、1 なら B)
+// 隣を先に読む本数(一覧の終わりを超えた分はその回の最初の隣を読み、足さない)
+static const uint32_t IM_RELAX_BATCH = 4;
+
+int64_t LinkValue(uint32_t neighbor, uint32_t values) {
+    return g_work[values == 0 ? ValueA(neighbor) : ValueB(neighbor)];
+}
+
+// 右辺 + Σ 隣の重み × 値(values: 0 なら A、1 なら B)。
+// 隣は IM_RELAX_BATCH 本ずつ先に読む(T-0587: 1 本ずつだと「隣を読む → 値を読む」の往復が隣の数だけ順に並び、小さい段の掃き出し・縮約・
+// ImTail の時間の大半だった)。足す順は一覧の順のまま(値は同じ)
 int64_t Relax(uint32_t node, uint32_t values) {
     const ImGpuNode entry = g_nodes[node];
     int64_t sum = g_work[Rhs(node)];
-    for (uint32_t k = entry.linkStart; k < entry.linkEnd; ++k) {
-        const ImGpuLink link = g_links[k];
-        const int64_t value = g_work[values == 0 ? ValueA(link.neighbor) : ValueB(link.neighbor)];
-        sum += ImMulWeight(link.weight, value);
+    for (uint32_t k = entry.linkStart; k < entry.linkEnd; k += IM_RELAX_BATCH) {
+        const bool has1 = k + 1 < entry.linkEnd;
+        const bool has2 = k + 2 < entry.linkEnd;
+        const bool has3 = k + 3 < entry.linkEnd;
+        const ImGpuLink link0 = g_links[k];
+        const ImGpuLink link1 = g_links[has1 ? k + 1 : k];
+        const ImGpuLink link2 = g_links[has2 ? k + 2 : k];
+        const ImGpuLink link3 = g_links[has3 ? k + 3 : k];
+        const int64_t value0 = LinkValue(link0.neighbor, values);
+        const int64_t value1 = LinkValue(link1.neighbor, values);
+        const int64_t value2 = LinkValue(link2.neighbor, values);
+        const int64_t value3 = LinkValue(link3.neighbor, values);
+        sum += ImMulWeight(link0.weight, value0);
+        if (has1)
+            sum += ImMulWeight(link1.weight, value1);
+
+        if (has2)
+            sum += ImMulWeight(link2.weight, value2);
+
+        if (has3)
+            sum += ImMulWeight(link3.weight, value3);
     }
 
     return sum;
@@ -373,6 +401,130 @@ void TailProlong(uint32_t depth, uint32_t lane) {
     DeviceMemoryBarrierWithGroupSync();
 }
 
+// --- ImTail の節の値を groupshared に置く形(T-0587)---
+// 段の間の同期が DeviceMemoryBarrierWithGroupSync(全体のメモリを通す往復)だと、1 グループが順に回す段の数 × 往復の待ちが
+// ImTail の時間の大半で、V 1 回の 16³ 約 5 割・32³ 約 3 割だった(docs/perf.md の T-0587)。受け持つ節(tailDepth から最後の段まで。
+// 番号は続いている)が収まれば、値 A・B・右辺を groupshared に読み、グループのバリアだけで回して最後に書き戻す。
+// 式・足す順・読む値は TailSmooth・TailRestrict・TailProlong と同じ(値は同じ)。隣と子は同じ範囲の中(段の中・1 つ細かい段)
+static const uint32_t IM_TAIL_SHARED_NODES = 1280;  // 3 × 8 B × 1280 = 30 KiB(グループの上限 32 KiB)
+groupshared int64_t gs_tailA[IM_TAIL_SHARED_NODES];
+groupshared int64_t gs_tailB[IM_TAIL_SHARED_NODES];
+groupshared int64_t gs_tailRhs[IM_TAIL_SHARED_NODES];
+
+// Relax と同じ式(右辺 + Σ 隣の重み × 値)を groupshared の値で。base は受け持つ最初の節
+int64_t SharedValue(uint32_t local, uint32_t values) {
+    return values == 0 ? gs_tailA[local] : gs_tailB[local];
+}
+
+// 隣は Relax と同じく IM_RELAX_BATCH 本ずつ先に読む(足す順は同じ)
+int64_t SharedRelax(uint32_t node, uint32_t values, uint32_t base) {
+    const ImGpuNode entry = g_nodes[node];
+    int64_t sum = gs_tailRhs[node - base];
+    for (uint32_t k = entry.linkStart; k < entry.linkEnd; k += IM_RELAX_BATCH) {
+        const bool has1 = k + 1 < entry.linkEnd;
+        const bool has2 = k + 2 < entry.linkEnd;
+        const bool has3 = k + 3 < entry.linkEnd;
+        const ImGpuLink link0 = g_links[k];
+        const ImGpuLink link1 = g_links[has1 ? k + 1 : k];
+        const ImGpuLink link2 = g_links[has2 ? k + 2 : k];
+        const ImGpuLink link3 = g_links[has3 ? k + 3 : k];
+        sum += ImMulWeight(link0.weight, SharedValue(link0.neighbor - base, values));
+        if (has1)
+            sum += ImMulWeight(link1.weight, SharedValue(link1.neighbor - base, values));
+
+        if (has2)
+            sum += ImMulWeight(link2.weight, SharedValue(link2.neighbor - base, values));
+
+        if (has3)
+            sum += ImMulWeight(link3.weight, SharedValue(link3.neighbor - base, values));
+    }
+
+    return sum;
+}
+
+void SharedTailSmooth(uint32_t depth, uint32_t sweeps, uint32_t lane, uint32_t base) {
+    const uint32_t begin = NodeOffset(depth);
+    const uint32_t end = begin + NodeCount(depth);
+    for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
+        for (uint32_t color = 0; color < 2; ++color) {
+            for (uint32_t node = begin + lane; node < end; node += IM_TAIL_THREADS) {
+                const uint32_t local = node - base;
+                const int64_t current = color == 0 ? gs_tailA[local] : gs_tailB[local];
+                int64_t next = current;
+                if (g_nodes[node].color == color)
+                    next = SharedRelax(node, color, base);
+
+                if (color == 0)
+                    gs_tailB[local] = next;
+                else
+                    gs_tailA[local] = next;
+            }
+
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+}
+
+void SharedTailRestrict(uint32_t depth, uint32_t lane, uint32_t base) {
+    const uint32_t end = NodeOffset(depth) + NodeCount(depth);
+    for (uint32_t parent = NodeOffset(depth) + lane; parent < end; parent += IM_TAIL_THREADS) {
+        const ImGpuNode entry = g_nodes[parent];
+        int64_t sum = 0;
+        for (uint32_t k = entry.childStart; k < entry.childEnd; ++k) {
+            const uint32_t child = ChildAt(k);
+            const int64_t residual = SharedRelax(child, 0, base) - gs_tailA[child - base];
+            sum += FxMulShiftS64(g_nodes[child].restrictWeight, residual, IM_WEIGHT_SHIFT);
+        }
+
+        gs_tailRhs[parent - base] = sum;
+        gs_tailA[parent - base] = 0;
+        gs_tailB[parent - base] = 0;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+}
+
+void SharedTailProlong(uint32_t depth, uint32_t lane, uint32_t base) {
+    const uint32_t end = NodeOffset(depth) + NodeCount(depth);
+    for (uint32_t node = NodeOffset(depth) + lane; node < end; node += IM_TAIL_THREADS) {
+        const int64_t correction = gs_tailA[g_nodes[node].parent - base];
+        gs_tailA[node - base] += FxMulShiftS64((int64_t)g_correctionScale, correction, IM_CORRECTION_SCALE_SHIFT);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// ImTail の V サイクルを groupshared で(節 base から count 個)。読む → 同じ順で回す → 書き戻す
+void SharedTail(uint32_t tailDepth, uint32_t last, uint32_t base, uint32_t count, uint32_t lane) {
+    for (uint32_t i = lane; i < count; i += IM_TAIL_THREADS) {
+        gs_tailA[i] = g_work[ValueA(base + i)];
+        gs_tailB[i] = g_work[ValueB(base + i)];
+        gs_tailRhs[i] = g_work[Rhs(base + i)];
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint32_t preSmooth = g_sweeps & 0xFFu;
+    const uint32_t postSmooth = (g_sweeps >> 8) & 0xFFu;
+    const uint32_t coarsestSweeps = g_sweeps >> 16;
+    for (uint32_t down = tailDepth; down < last; ++down) {
+        SharedTailSmooth(down, preSmooth, lane, base);
+        SharedTailRestrict(down + 1, lane, base);
+    }
+
+    SharedTailSmooth(last, coarsestSweeps, lane, base);
+    for (uint32_t up = last; up > tailDepth; --up) {
+        SharedTailProlong(up - 1, lane, base);
+        SharedTailSmooth(up - 1, postSmooth, lane, base);
+    }
+
+    for (uint32_t j = lane; j < count; j += IM_TAIL_THREADS) {
+        g_work[ValueA(base + j)] = gs_tailA[j];
+        g_work[ValueB(base + j)] = gs_tailB[j];
+        g_work[Rhs(base + j)] = gs_tailRhs[j];
+    }
+}
+
 // CPU の VCycle(計画の IM_PLAN_TAIL の段)と同じ順: 前の掃き出し → 縮約 → (下の段)→ 最も粗い段 → 直し → 後の掃き出し
 // 安い回(g_cheapTail。T-0179・T-0505)は段 min(下りが止まる段, g_cheapTail − 1) から: その段より上は段ごとの Dispatch が回す
 // (段 0 からなら V サイクル全体)。間接の引数を通らず 1 グループで呼ばれるので、系が空なら何もしない
@@ -385,6 +537,13 @@ void TailProlong(uint32_t depth, uint32_t lane) {
     const uint32_t coarsestSweeps = g_sweeps >> 16;
     const uint32_t last = LevelCount() - 1;
     const uint32_t tailDepth = g_cheapTail != 0 ? min(g_plan[IM_PLAN_TERMINAL], g_cheapTail - 1) : g_plan[IM_PLAN_TAIL];
+    const uint32_t base = NodeOffset(tailDepth);
+    const uint32_t end = NodeOffset(last) + NodeCount(last);
+    if (g_tailShared != 0 && end >= base && end - base <= IM_TAIL_SHARED_NODES) {
+        SharedTail(tailDepth, last, base, end - base, lane);
+        return;
+    }
+
     for (uint32_t down = tailDepth; down < last; ++down) {
         TailSmooth(down, preSmooth, lane);
         TailRestrict(down + 1, lane);
@@ -432,12 +591,12 @@ void TailProlong(uint32_t depth, uint32_t lane) {
     g_state[IM_STATE_NOT_CONVERGED] = 0;
 }
 
-// --- 一般の右辺で解く形(T-0531。気体の圧力の投影 sim/gas_projection が CPU の模型。呼ぶ順は gpu_implicit.cpp の RecordSolve)---
-// 右辺・初めの近似(値 A・B)・セルごとの閾値(刻みの初めの温度の欄)は呼ぶ側が作業場に書く。ImStart・面の流れ・安全網は使わない。
+    // --- 一般の右辺で解く形(T-0531。気体の圧力の投影 sim/gas_projection が CPU の模型。呼ぶ順は gpu_implicit.cpp の RecordSolve)---
+    // 右辺・初めの近似(値 A・B)・セルごとの閾値(刻みの初めの温度の欄)は呼ぶ側が作業場に書く。ImStart・面の流れ・安全網は使わない。
 
-// 止める判定: |残差| が閾値(⌈(許容差 + 1)× 2^48 ÷ D⌉。GasPressureThresholds)以上のセルがあるか。
-// CPU の「式の誤差 floor(|残差| × D ÷ 2^48)が許容差を超える」と整数で同じ
-[numthreads(IM_THREADS, 1, 1)] void ImSolveConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+    // 止める判定: |残差| が閾値(⌈(許容差 + 1)× 2^48 ÷ D⌉。GasPressureThresholds)以上のセルがあるか。
+    // CPU の「式の誤差 floor(|残差| × D ÷ 2^48)が許容差を超える」と整数で同じ
+    [numthreads(IM_THREADS, 1, 1)] void ImSolveConverged(uint32_t3 group : SV_GroupID, uint32_t lane : SV_GroupIndex) {
     uint32_t cell;
     bool isLong;
     if (CyclesDone() || !OrderedNode(0, IM_KIND_CONVERGED, group.x, lane, cell, isLong))

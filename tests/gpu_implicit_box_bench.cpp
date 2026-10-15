@@ -63,18 +63,21 @@ namespace {
 
     // 記録の形(T-0505)
     enum class Shape : uint8_t {
-        Default,        // 段ごとの Dispatch を上限まで
-        Previous,       // 前の刻みの数から(ShapeFrom)
-        PreviousWhole,  // 前の刻みの数から・安い回は全部 1 グループ(T-0505 の前の形)
+        Default,             // 段ごとの Dispatch を上限まで
+        Previous,            // 前の刻みの数から(ShapeFrom)
+        PreviousWhole,       // 前の刻みの数から・安い回は全部 1 グループ(T-0505 の前の形)
+        PreviousGlobalTail,  // 前の刻みの数から・ImTail は節の値を全体のメモリに置く(T-0587 の前の形)
     };
 
-    constexpr std::array<Shape, 3> SHAPES = {Shape::Default, Shape::Previous, Shape::PreviousWhole};
+    constexpr std::array<Shape, 4> SHAPES = {Shape::Default, Shape::Previous, Shape::PreviousGlobalTail,
+                                             Shape::PreviousWhole};
 
     std::string_view ShapeLabel(Shape shape) {
         switch (shape) {
             case Shape::Default: return "既定";
             case Shape::Previous: return "前の刻みから";
             case Shape::PreviousWhole: return "前の刻みから・安い回は全部 1 グループ(前)";
+            case Shape::PreviousGlobalTail: return "前の刻みから・ImTail は全体のメモリ(前)";
         }
 
         return "";
@@ -159,7 +162,8 @@ namespace {
     sim::GpuImplicitRecordShape ShapeOf(Shape shape, const sim::GpuImplicitCost& previous) {
         switch (shape) {
             case Shape::Default: return {};
-            case Shape::Previous: return sim::GpuImplicit::ShapeFrom(previous);
+            case Shape::Previous:
+            case Shape::PreviousGlobalTail: return sim::GpuImplicit::ShapeFrom(previous);
             case Shape::PreviousWhole:
                 return sim::GpuImplicit::ShapeFrom(previous, std::numeric_limits<uint32_t>::max());
         }
@@ -174,6 +178,8 @@ namespace {
         auto gpu = sim::GpuImplicit::Create(device, grid);
         if (!gpu)
             return std::unexpected(gpu.error());
+
+        gpu->UseSharedTail(recordShape != Shape::PreviousGlobalTail);
 
         // --- 暖機(同じ場面。写し直すので測る刻みの初めは同じ)---
         const uint32_t warmupSteps = grid.cells.size() > SMALL_BOX_CELLS ? LARGE_WARMUP_STEPS : SMALL_WARMUP_STEPS;
