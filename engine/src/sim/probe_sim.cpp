@@ -19,11 +19,11 @@ namespace bicameral::sim {
         // ルート署名(shaders/sim/probe_bindings.hlsli と同じ順。伝導の Work Graph もこれをグローバルのルート署名に使う):
         //   u0 セル・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
         //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ・u13 物理の物(T-0098。物理なしなら仮の置き場)
-        //   ・u14 物理の熱の入口(T-0561。物理なしなら仮の置き場)
+        //   ・u14 物理の熱の入口(T-0561。物理なしなら仮の置き場)・u15〜u18 気体の区画(T-0592。sim/probe_sim_gas.cpp。無ければ仮の置き場)
         //   → b0 単位の定数 → デバッグのリング
         //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
         //   ・t5 物質の付け替えの表(T-0223)
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 15,
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 19,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
@@ -45,6 +45,10 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_THERMAL = 12;
         constexpr uint32_t UAV_BODIES = 13;
         constexpr uint32_t UAV_PHYSICS_HEAT = 14;
+        constexpr uint32_t UAV_GAS_STATE = 15;       // 区画のセルごとの気体の欄
+        constexpr uint32_t UAV_GAS_WORK = 16;        // 気体の作業場
+        constexpr uint32_t UAV_GAS_CELLS = 17;       // 気体の箱のセル(GpuGas の u0)
+        constexpr uint32_t UAV_GAS_BOX_LEDGER = 18;  // 気体の箱の帳簿(GpuGas の u5)
         constexpr uint32_t SRV_INPUT = 0;
         constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
         constexpr uint32_t SRV_SPECIES_REMAP = 5;   // t5 付け替えの表(T-0223)
@@ -326,6 +330,9 @@ namespace bicameral::sim {
         if (auto physics = sim.CreatePhysics(device); !physics)
             return std::unexpected(physics.error());
 
+        if (auto gas = sim.CreateGas(device, table); !gas)
+            return std::unexpected(gas.error());
+
         return sim;
     }
 
@@ -513,6 +520,7 @@ namespace bicameral::sim {
         barriers.push_back(gpu::Transition(m_blockSchedule.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+        RecordGasInitialization(list);
         m_initialized = true;
     }
 
@@ -556,7 +564,7 @@ namespace bicameral::sim {
             return false;
         }
 
-        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input);
+        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input) && ValidateGas(input);
     }
 
     // 表の差し替えの約束: (tick, 適用の単位) がこのフレームの単位の中にあり、表がある(T-0139)
@@ -820,6 +828,14 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(UAV_PHYSICS_HEAT, m_physics
                                                                       ? m_physics->HeatEntries()->GetGPUVirtualAddress()
                                                                       : m_busySink->GetGPUVirtualAddress());
+        // 気体の区画(T-0592)。無ければシェーダーは読まないので、仮に重さの捨て場を結ぶ
+        const D3D12_GPU_VIRTUAL_ADDRESS sink = m_busySink->GetGPUVirtualAddress();
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_STATE, m_gas ? m_gasState->GetGPUVirtualAddress() : sink);
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_WORK, m_gas ? m_gasWork->GetGPUVirtualAddress() : sink);
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_CELLS,
+                                                m_gas ? m_gas->CellBuffer()->GetGPUVirtualAddress() : sink);
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_BOX_LEDGER,
+                                                m_gas ? m_gas->LedgerBuffer()->GetGPUVirtualAddress() : sink);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
@@ -851,6 +867,15 @@ namespace bicameral::sim {
                 list->ResourceBarrier(1, &allUavs);
                 list->SetPipelineState(m_refreshTablePipeline.Get());
                 list->Dispatch(2 * LINEAR_CELL_GROUPS, 1, 1);
+            }
+
+            // 気体(区画があるときだけ。T-0592・ADR-0256): 伝導と反応の前に流す。変わったセルのブロックは物理の熱と同じく起こす
+            if (m_gas) {
+                RecordGasGather(list);
+                RecordGasStep(list, tick);
+                BindRootArguments(list, input);
+                SetUnitConstants(list, tick, m_speciesCount);
+                RecordGasScatter(list);
             }
 
             // 起こす刻みの来たブロックを同じ一覧へ(適用が一覧の見出しを整えた後。待ちの丸め。T-0122)

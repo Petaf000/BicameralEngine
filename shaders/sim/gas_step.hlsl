@@ -407,7 +407,7 @@ uint64_t MovedAmountQ32(GasFaceSides sides, GasGpuCell source, int64_t flow, uin
         const uint64_t faceHash = FxHash64(GAS_P.randomSeed, roundingTick, faceId, GAS_ROUNDING_PURPOSE);
         [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
             const uint64_t amountQ32 = MovedAmountQ32(sides, source, face.flow, face.fraction, s);
-            face.moved[s] = RoundAmount(amountQ32, FxHashCombine(faceHash, s));
+            face.moved[s] = RoundAmount(amountQ32, FxHashCombine(faceHash, GAS_P.roundingKey[s]));
         }
     }
 

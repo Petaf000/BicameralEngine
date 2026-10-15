@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "common/physics_heat.hlsli"
+#include "common/probe_gas_gpu.hlsli"
 #include "common/probe_place.hlsli"
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
@@ -45,6 +46,7 @@
 #include "gpu/work_graph.h"
 #include "gpu/work_graph_stats.h"
 #include "sim/command.h"
+#include "sim/gpu_gas.h"
 #include "sim/gpu_physics.h"
 #include "sim/physics_scene.h"
 #include "sim/probe_gas.h"
@@ -262,6 +264,11 @@ namespace bicameral::sim {
 
         // 初めの世界(PROBE_CELL_COUNT 個。空なら MakeProbeInitialWorld。試験用。T-0122)。作る時だけ読む(呼んだ後は持たなくてよい)
         std::span<const reaction::RxCell> initialWorld;
+
+        // 気体の区画(T-0592・ADR-0256。既定は無い = 今までと同じ)。CPU の ProbeReference::EnableGas と同じ値を渡すと毎刻みビット一致する。
+        // GPU は陽解法だけ・区画の気体の物質は 4 つまで(超えた刻みは流さずに数える。T-0598)。
+        // 区画のある世界では、まだ表の差し替え・保存点・写しの早送りを断る(T-0620)
+        ProbeGasOptions gas;
     };
 
     // --- GPU で走らせる ---
@@ -337,6 +344,13 @@ namespace bicameral::sim {
         // 写しの早送りの VRAM の目安。T-0412)
         [[nodiscard]] uint64_t DefaultHeapBytes() const;
 
+        // 気体の区画(T-0592。無ければ HasGas() が false)。テストが読み戻すだけ(フレームの間は COMMON)。
+        // GasState = 区画のセルごとの ProbeGasCellState、GasWork = 制御・帳簿など(並びは common/probe_gas_gpu.hlsli と GasHeader)
+        [[nodiscard]] bool HasGas() const { return m_gas != nullptr; }
+        [[nodiscard]] ID3D12Resource* GasState() const { return m_gasState.Get(); }
+        [[nodiscard]] ID3D12Resource* GasWork() const { return m_gasWork.Get(); }
+        [[nodiscard]] const ProbeGasHeader& GasHeader() const { return m_gasHeader; }
+
         // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
         [[nodiscard]] const GpuPhysics* Physics() const { return m_physics.get(); }
 
@@ -401,6 +415,8 @@ namespace bicameral::sim {
         void RecordInitialization(ID3D12GraphicsCommandList10* list);
         [[nodiscard]] bool CreateFrameSlots(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE listType);
         [[nodiscard]] std::expected<void, std::string> CreatePhysics(ID3D12Device5* device);
+        [[nodiscard]] std::expected<void, std::string> CreateGas(ID3D12Device5* device,
+                                                                 const BakedReactionTable& table);
 
         // --- 入力とコマンド ---
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
@@ -425,6 +441,13 @@ namespace bicameral::sim {
         void RecordConduct(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysics(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordPhysicsHeat(ID3D12GraphicsCommandList10* list, uint64_t tick) const;
+        // 気体の段(sim/probe_sim_gas.cpp。適用の単位の中、物理の熱・表の作り直しの後・起こす刻みの来たブロックの前)。
+        // 区画 → 気体の箱(ProbeSim のルート署名)→ 箱の 1 刻み(GpuGas のルート署名)→ 結び直し(RecordUnit)→ 箱 → 区画
+        void RecordGasGather(ID3D12GraphicsCommandList10* list) const;
+        void RecordGasStep(ID3D12GraphicsCommandList10* list, uint64_t tick) const;
+        void RecordGasScatter(ID3D12GraphicsCommandList10* list) const;
+        void RecordGasInitialization(ID3D12GraphicsCommandList10* list) const;
+        [[nodiscard]] bool ValidateGas(const ProbeFrameInput& input) const;
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
@@ -509,6 +532,14 @@ namespace bicameral::sim {
         std::unique_ptr<GpuPhysics> m_physics;
         int64_t m_physicsRate = 0;  // 物理の 1 秒あたりの小刻みの数(押す力積の計算。フレームの入力の見出しで渡す)
         bool m_physicsInitialized = false;
+
+        // --- 気体の区画(T-0592。shaders/sim/probe_gas_tick.hlsl。区画が無ければ m_gas は nullptr)---
+        std::unique_ptr<GpuGas> m_gas;       // 気体の箱の 1 刻み(gas_step.hlsl)
+        ComPtr<ID3D12Resource> m_gasState;   // 区画のセルごとの ProbeGasCellState(作った時は 0 = 静止)
+        ComPtr<ID3D12Resource> m_gasWork;    // 制御・設定・見出し・帳簿など(probe_gas_gpu.hlsli)
+        ComPtr<ID3D12Resource> m_gasUpload;  // gasWork の初めの中身(最初のフレームで写す)
+        ProbeGasHeader m_gasHeader{};
+        std::array<ComPtr<ID3D12PipelineState>, 7> m_gasPipelines;  // GasBegin〜GasFinish(呼ぶ順)
 
         // --- 刻みの道具(表・キュー・イベント・活性)---
         ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)

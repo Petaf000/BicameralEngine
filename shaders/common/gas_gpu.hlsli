@@ -50,6 +50,8 @@ namespace bicameral::sim {
         uint32_t reconstruction;      // GAS_GPU_RECONSTRUCTION_*
         uint32_t stochasticRounding;  // 0 / 1
         uint32_t thermodynamics;      // GAS_GPU_THERMODYNAMICS_*(T-0234)
+        // 成分ごとの丸めの乱数の鍵(既定は欄の番号。世界のセルに載せる時は物質 ID。T-0591・T-0592)
+        uint32_t roundingKey[GAS_GPU_MAX_SPECIES];
     };
 
     // セル(sim::GasCell と同じ並び。64 バイト)

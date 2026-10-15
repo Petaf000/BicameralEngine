@@ -237,6 +237,12 @@ namespace bicameral::sim {
         return MakeHydrostaticReference(config, layers, m_surfacePressureMicroPascal);
     }
 
+    GasBox ProbeGasField::MakeAtmosphereBox(const BakedReactionTable& table) const {
+        const GasConfig config = MakeConfig(table, m_atmosphereSpecies);
+
+        return MakeGasBox(config, MakeReference(table, config, m_atmosphereSpecies));
+    }
+
     reaction::RxCell ProbeGasField::ReferenceCell(const BakedReactionTable& table, uint32_t gridY) const {
         assert(gridY >= m_options.minCell[1] && gridY < m_options.minCell[1] + m_options.sizeCells[1]);
         const GasConfig config = MakeConfig(table, m_atmosphereSpecies);

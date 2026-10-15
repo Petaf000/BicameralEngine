@@ -32,7 +32,7 @@ namespace bicameral::sim {
         static_assert(sizeof(GasGpuDerived) == 48);
         static_assert(sizeof(GasGpuFace) == 112);
         static_assert(sizeof(GasGpuCellSums) == 40);
-        static_assert(sizeof(GasGpuParameters) == 192);
+        static_assert(sizeof(GasGpuParameters) == 208);
         // 帳簿の GPU の形(sim::GasLedger の成分は GasPerSpecies〔数の上限なし。T-0591〕なので、GPU の欄の数の配列へ写す)
         struct GpuLedger {
             std::array<int64_t, GAS_MAX_SPECIES> amounts = {};
@@ -113,6 +113,8 @@ namespace bicameral::sim {
             parameters.massPerAmount[s] = coefficients.massPerAmount[s];
             parameters.formationEnergy[s] = config.species[s].formationEnergy;
             parameters.heatCapacity[s] = config.species[s].heatCapacity;
+            const uint32_t key = config.species[s].roundingKey;
+            parameters.roundingKey[s] = key == GAS_ROUNDING_KEY_SLOT ? s : key;  // 使わない欄も欄の番号(読まれない)
         }
 
         parameters.centralFlow = coefficients.centralFlow;
@@ -149,14 +151,9 @@ namespace bicameral::sim {
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
 
         // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提。
-        // 丸めの鍵は欄の番号だけ(物質 ID の鍵と 5 つ目からの成分は CPU だけ。T-0591)
+        // 丸めの鍵は設定のまま(欄の番号か物質 ID。T-0592)。5 つ目からの成分は CPU だけ(T-0598)
         if (box.config.speciesCount > GAS_MAX_SPECIES)
-            return std::unexpected("GPU の気体の段は成分 GAS_MAX_SPECIES 個まで(T-0591)");
-
-        for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
-            if (box.config.species[s].roundingKey != GAS_ROUNDING_KEY_SLOT)
-                return std::unexpected("GPU の気体の段は丸めの鍵が欄の番号だけ(T-0591)");
-        }
+            return std::unexpected("GPU の気体の段は成分 GAS_MAX_SPECIES 個まで(T-0598)");
 
         for (const GasCell& cell : box.cells) {
             for (uint32_t s = box.config.speciesCount; s < GAS_MAX_SPECIES; ++s) {
@@ -295,7 +292,7 @@ namespace bicameral::sim {
 
     // 1 つの段を投げ、全部の UAV の書き込みを次の段より前に終わらせる
     void GpuGas::RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
-                            const Constants& constants) const {
+                            const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const {
         static_assert(sizeof(Constants) == ROOT_CONSTANT_COUNT * sizeof(uint32_t));
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(m_pipelines[(size_t)pass].Get());
@@ -304,8 +301,8 @@ namespace bicameral::sim {
 
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &constants, 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
-        for (uint32_t i = 0; i < m_srvs.size(); ++i)
-            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), m_srvs[i].buffer->GetGPUVirtualAddress());
+        for (uint32_t i = 0; i < srvs.size(); ++i)
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), srvs[i]);
 
         const uint64_t threads = FACE_PASS[(size_t)pass] ? (uint64_t)m_cellCount * GAS_GPU_FACES_PER_CELL : m_cellCount;
         list->Dispatch(GroupsFor(threads), 1, 1);
@@ -313,19 +310,33 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &barrier);
     }
 
-    void GpuGas::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+    std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3> GpuGas::OwnSrvs() const {
+        return {m_srvs[0].buffer->GetGPUVirtualAddress(), m_srvs[1].buffer->GetGPUVirtualAddress(),
+                m_srvs[2].buffer->GetGPUVirtualAddress()};
+    }
+
+    // 刻み tick の小刻み × 9 段(乱数の丸めの小刻みの通し番号は gas_reference.cpp の StepGas と同じ)
+    void GpuGas::RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                                const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const {
         for (uint32_t substep = 0; substep < m_substeps; ++substep) {
-            // 乱数の丸めの小刻みの通し番号(gas_reference.cpp の StepGas と同じ)
-            const uint64_t roundingTick = (m_tick * m_substeps) + substep;
+            const uint64_t roundingTick = (tick * m_substeps) + substep;
             const Constants constants{.roundingTickLow = (uint32_t)roundingTick,
                                       .roundingTickHigh = (uint32_t)(roundingTick >> 32),
                                       .cellCount = m_cellCount,
                                       .unused = 0};
             for (size_t pass = 0; pass < std::min((size_t)m_debugPassLimit, (size_t)Pass::Count); ++pass)
-                RecordPass(list, debugRing, (Pass)pass, constants);
+                RecordPass(list, debugRing, (Pass)pass, constants, srvs);
         }
+    }
 
+    void GpuGas::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        RecordSubsteps(list, debugRing, m_tick, OwnSrvs());
         ++m_tick;
+    }
+
+    void GpuGas::RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                              D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost) const {
+        RecordSubsteps(list, debugRing, tick, {parameters, m_srvs[1].buffer->GetGPUVirtualAddress(), ghost});
     }
 
     void GpuGas::RecordReadback(ID3D12GraphicsCommandList10* list) const {
