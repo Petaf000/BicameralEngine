@@ -1,6 +1,6 @@
 # T-0619 格子の y を上にそろえる(物理の対応・描画・筆・試験)
 
-- Status: In progress
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,11 +12,11 @@
 描画(debug_camera の worldUp = −y・probe_view の物の置き方)は「格子の y が下向き」で食い違っている。案 A(仮・ユーザー未確認)で y を上にそろえる。
 
 ## 完了条件(チェックできる形で)
-- [ ] probe_sim.hlsli: 格子 y = 物理 y / 0.5 m(裏返さない)。ProbeCellOfPhysicsPoint・コメント(物理の地面の上の面が格子の y = 0)
-- [ ] 描画: debug_camera の worldUp = +y・probe_view の物の置き方(y を裏返さない・回転の符号)・BODY_LIGHT・frame_loop の押す光線(QueuePushes・autoPush)
-- [ ] 筆(brush_panel・brush_preview)と場面の試験(physics_heat_test の y の範囲など)を合わせる
-- [ ] 燃える木箱の煙が窓で上へ上がる画像(区画をアプリで載せる道は T-0620)
-- [ ] release のビルド・gpu_probe_physics・physics_heat・brush_preview・gpu_probe_gas
+- [x] probe_sim.hlsli: 格子 y = 物理 y / 0.5 m(裏返さない)。ProbeCellOfPhysicsPoint・コメント(物理の地面の上の面が格子の y = 0)
+- [x] 描画: debug_camera の worldUp = +y・probe_view の物の置き方(y を裏返さない・回転の符号)・BODY_LIGHT・frame_loop の押す光線(QueuePushes・autoPush)
+- [x] 筆(brush_panel・brush_preview)と場面の試験(physics_heat_test の y の範囲など)を合わせる
+- [x] 燃える木箱の煙が窓で上へ上がる画像(区画をアプリで載せる道は T-0620)
+- [x] release のビルド・gpu_probe_physics・physics_heat・brush_preview・gpu_probe_gas
 
 ## メモ・参考
 - 作り手から見た違い(案 A): 今書いた場面(world_cells の y が上)がそのまま上下正しく見え、気体の重さ・液体の重さと物理の重力が同じ向きになる。
@@ -42,3 +42,9 @@
   debug_camera_test は「画面の下 = +y」を「画面の下 = −y」に直した。古い再生ファイル(押す・物理の熱を含む)は、物理の熱の入るセルが違うのでハッシュが合わなくなる。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-15(作業役 wt3): 案 A(仮・ユーザー未確認)で y を上にそろえた。ProbeCellOfPhysicsPoint を裏返さない・debug_camera の上 = +y(左手系。forward の y の符号も)・
+  probe_view の物の置き方と回転(符号の入れ替えを外す)・BODY_LIGHT・押す光線(QueuePushes・--auto-push は格子の (20, 11, 32.5))。筆(brush_panel・brush_preview)は格子の座標だけで動くので変更なし。
+  試験: physics_heat の熱を見る範囲を格子の底へ・debug_camera の真ん中の画素を半画素上へ(画面の下 = −y)。release のビルド(警告 0)・physics_heat・debug_camera・brush_preview・
+  gpu_probe_physics(・_compute・_gravity_swap)・gpu_probe_gas・window_replay_*(6 本)が通った。窓(--world sample --auto-ignite --auto-push)で積み木が格子の底に立ち、押すと物 6 に当たる(前と同じ物)。
+  煙の画像: アプリで区画を載せる道が無い(T-0620)ので gpu_probe_gas_test の断面(z = 32・y が上)で、CO2 が底の木箱から区画の上まで広がるのを見た(気体の段はこのチケットで変えていない。画像は前とバイト一致)。
+  気づいたこと(このチケットの外): 同じ画像の温度の側が、区画の中でセル 1 つおきの市松模様(800 K 超と低いセルが交互)。T-0592 の時から同じ。気体の段の奇偶の分離の疑い → 司令塔へ。
