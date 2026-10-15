@@ -9,6 +9,8 @@
 #include "core/log.h"
 #include "gpu/com_ptr.h"
 #include "gpu/resources.h"
+#include "sim/radiation_lines.h"
+#include "sim/radiation_reference.h"
 #include "sim/world_physics.h"
 
 namespace bicameral::sim {
@@ -1498,6 +1500,10 @@ namespace bicameral::sim {
             }
         }
 
+        // (1c) 放射(段を入れた時だけ。T-0585・ADR-0263): 気体の後・伝導と反応の前(段の順: コマンド → 物理の熱 → 気体 → 放射 → 伝導と反応)
+        if (m_radiation)
+            StepRadiation(tick, currentBase, seeds);
+
         m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
         m_scheduled = ScheduleBlocks(seeds);
         m_scheduledBlocks = static_cast<uint32_t>(rng::count(m_scheduled, uint8_t{1}));
@@ -1538,6 +1544,53 @@ namespace bicameral::sim {
         m_gas = std::move(*field);
 
         return {};
+    }
+
+    // 放射の 1 刻み(T-0585・ADR-0263)。セルの吸収率 → 線の束で対(sim/radiation_lines)→ 対ごとの整数の交換(sim/radiation_reference)。
+    // 温度は刻みの初め(熱のキャッシュ)なので、セルの並びと対の並びによらない。変わったセルは熱のキャッシュを作り直す
+    void ProbeReference::StepRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds) {
+        m_radiationReport = {};
+        if (rng::none_of(m_table->speciesRadiationAbsorption, [](uint32_t value) { return value != 0; }))
+            return;
+
+        const ReactionTableView table = m_table->View();
+        std::vector<uint32_t> absorptance(PROBE_CELL_COUNT, 0);
+        std::vector<RadiationSurface> surfaces(PROBE_CELL_COUNT);
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            const reaction::RxCell& cell = m_cells[currentBase + index];
+            absorptance[index] = CellAbsorptanceQ16(*m_table, cell);
+            if (absorptance[index] == 0)
+                continue;
+
+            ++m_radiationReport.absorbingCells;
+            surfaces[index] = {.temperatureMk = m_caches[currentBase + index].temperature,
+                               .heatCapacityNanojoulesPerKelvin = reaction::RxHeatCapacity(table, cell),
+                               .absorptanceQ16 = absorptance[index]};
+        }
+
+        if (m_radiationReport.absorbingCells == 0)
+            return;
+
+        const RadiationGrid grid{.sizeX = PROBE_GRID_SIZE, .sizeY = PROBE_GRID_SIZE, .sizeZ = PROBE_GRID_SIZE};
+        const std::vector<RadiationPair> pairs = FindRadiationPairs(grid, absorptance, tick, m_radiation->seed);
+        m_radiationReport.pairs = pairs.size();
+
+        const std::vector<int64_t> changes = ExchangeRadiation(surfaces, pairs);
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            if (changes[index] == 0)
+                continue;
+
+            reaction::RxCell& cell = m_cells[currentBase + index];
+            cell.energy += changes[index];
+            m_caches[currentBase + index] = ProbeMakeCache(table, cell);
+            ++m_radiationReport.changedCells;
+            if (changes[index] < 0)
+                m_radiationReport.movedMilliJoules += static_cast<uint64_t>(-changes[index]);
+
+            const uint32_t block = BlockOfCellIndex(index);
+            seeds[block] = 1;
+            m_changedMarks[block] = ProbeChangeMark(tick) - 1;
+        }
     }
 
     // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 2 世代のセルを名前で付け替える(熱のキャッシュは Advance が新しい表で作り直す)。

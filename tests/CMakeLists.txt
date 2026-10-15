@@ -77,6 +77,21 @@ add_test(NAME reaction_package COMMAND reaction_package_test)
 add_executable(radiation_reference_test radiation_reference_test.cpp)
 target_link_libraries(radiation_reference_test PRIVATE bicameral_test_reaction_table bicameral_reaction_script bicameral_core)
 add_test(NAME radiation_reference COMMAND radiation_reference_test)
+# 放射の対を平行な線の束で見つける(T-0584・ADR-0262): 平行な板の解析解・陰・受け手の分け前・保存・膜
+add_executable(radiation_lines_test radiation_lines_test.cpp)
+target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
+add_test(NAME radiation_lines COMMAND radiation_lines_test)
+# 草原の延焼の場面を放射の段つきの CPU リファレンスで測る(T-0585・ADR-0263)。ctest は 2 秒の煙の試し。測り方は .cpp の先頭
+add_executable(radiation_scene_measure radiation_scene_measure.cpp)
+target_link_libraries(radiation_scene_measure PRIVATE bicameral_sim bicameral_reaction_script bicameral_core)
+target_precompile_headers(radiation_scene_measure PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_compile_definitions(radiation_scene_measure PRIVATE
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard"
+  BICAMERAL_DATA_SCENES_DIR="${PROJECT_SOURCE_DIR}/data/scenes"
+  BICAMERAL_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+add_dependencies(radiation_scene_measure bicameral_data)
+add_test(NAME radiation_scene COMMAND radiation_scene_measure)
+set_tests_properties(radiation_scene PROPERTIES TIMEOUT 3000)
 add_executable(environment_package_test environment_package_test.cpp)  # 世界の環境の値(分類 environment。T-0400・ADR-0176)
 target_link_libraries(environment_package_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(environment_package_test PRIVATE

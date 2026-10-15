@@ -561,6 +561,19 @@ namespace bicameral::sim {
     // 全部のセルを毎刻み計算する(活性を使わない)。GPU は活性のブロックだけを計算するので、一致すれば活性の取り方も正しい
     // (眠っているブロックは、計算しても変わらないことが規則で決まっている。probe_sim.hlsli の「活性」)。
     // 予定のブロックの数は、変わった・まだ進めるブロックの記録から GPU と同じ規則で予想する
+    // 放射の段(T-0585・ADR-0263。CPU だけ。GPU は T-0586)。物質の radiation_absorption_mm2_per_mol を書いた表でだけ動く
+    struct ProbeRadiationOptions {
+        uint64_t seed = 0;  // 向きの組と線の格子のずれを決める世界の種(R6。sim/radiation_lines)
+    };
+
+    // 最後の Advance の放射の段で起きたこと
+    struct ProbeRadiationReport {
+        uint64_t pairs = 0;             // 線が見つけた対の数
+        uint32_t absorbingCells = 0;    // 吸収率が 0 でないセル
+        uint32_t changedCells = 0;      // エネルギーが変わったセル
+        uint64_t movedMilliJoules = 0;  // 動いたエネルギー(減ったセルの和)
+    };
+
     class ProbeReference {
     public:
         // initialWorld が空なら MakeProbeInitialWorld(ProbeSimOptions::initialWorld と同じ)
@@ -593,6 +606,11 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> EnableGas(const ProbeGasOptions& options);
         [[nodiscard]] const ProbeGasField* GasField() const { return m_gas ? &*m_gas : nullptr; }
         [[nodiscard]] const ProbeGasStepReport& LastGasReport() const { return m_gasReport; }
+
+        // 放射の段を入れる(T-0585・ADR-0263。CPU だけ)。次の Advance から、気体の段の後・伝導と反応の前に放射の 1 刻みを入れる。
+        // 表の物質がどれも a を書いていなければ何もしない(呼ばなければ今までと同じ)
+        void EnableRadiation(const ProbeRadiationOptions& options) { m_radiation = options; }
+        [[nodiscard]] const ProbeRadiationReport& LastRadiationReport() const { return m_radiationReport; }
 
         // 最後の Advance で物理の熱の入口が足したエネルギー(mJ。T-0542)
         [[nodiscard]] int64_t PhysicsHeatEnergy() const { return m_physicsHeatEnergy; }
@@ -629,8 +647,12 @@ namespace bicameral::sim {
         SpeciesRemapReport m_remapReport;
         std::optional<ProbeGasField> m_gas;  // 気体の区画(T-0590。無ければ流さない)
         ProbeGasStepReport m_gasReport;
+        std::optional<ProbeRadiationOptions> m_radiation;  // 放射の段(T-0585。無ければ流さない)
+        ProbeRadiationReport m_radiationReport;
 
         void RemapSpecies(uint64_t tick, const BakedReactionTable& newTable);
+        // 放射の 1 刻み(刻みの初めの温度で対を交換し、current の世代のエネルギーに足す)。変わったブロックを予定の種にする
+        void StepRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds);
     };
 
     // ブロックごとの初めの起こす刻みの印(待ちの丸め。ADR-0018・T-0122): 刻み 0 を tc = 0 で計算してみて、変わるブロックは刻み 0 の印、

@@ -173,6 +173,9 @@ views:
       - { id: radiation, group: shared, status: research, label: "radiation.hlsli<br/>放射の対の交換(σT⁴ を因数分解・対称な係数)",
           code: "shaders/common/radiation.hlsli::RdPairCoefficient", ticket: T-0583, doc: docs/decisions/ADR-0252-radiation-pair-exchange.md,
           note: "物質の a(1 mol が遮る面積)→ 吸収率 1 − e^−τ。対ごとに 1 つの整数で保存・坂を下る。CPU リファレンス sim/radiation_reference。光線で対を見つけるのは T-0584、刻みへは T-0585" }
+      - { id: radiationlines, group: shared, status: research, label: "radiation_lines<br/>放射の対を平行な線の束で見つける",
+          code: "engine/src/sim/radiation_lines.cpp::FindRadiationPairs", ticket: T-0584, doc: docs/decisions/ADR-0262-radiation-parallel-lines.md,
+          note: "刻みごとに半球 32 本の向きの組・線の間隔 2 セル(どのセルも 1 本の向きで線 1 本)・整数の DDA・途中の透過。受け手の分け前の合計 ≤ 1。仮の世界の CPU の刻みの段(ProbeReference::StepRadiation。T-0585)。GPU は T-0586" }
       - { id: firetest, group: tests, label: "gpu_probe_fire_test<br/>木箱に火をつけて 10 分",
           code: "tests/gpu_probe_fire_test.cpp::RunFire", ticket: T-0089,
           note: "刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる(1 秒ごとの経過)。ctest は 1 分、10 分は release で" }
@@ -505,6 +508,7 @@ views:
           note: "型・小数のリテラル・<cmath> の関数。HLSL と C++ を同じ規則で" }
     edges:
       - [main, caps, "--caps"]
+      - [radiationlines, radiation, "対(見え方・分け前)"]
       - [caps, d3d12, "D3D12CreateDevice"]
       - [d3d12, sdkver, "起動時に読む"]
       - [d3d12, core, "bin/D3D12 から読み込む"]
