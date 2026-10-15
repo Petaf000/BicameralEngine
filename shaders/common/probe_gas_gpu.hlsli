@@ -3,7 +3,7 @@
 // (物理の熱・表の作り直しの後、起こす刻みの来たブロックを一覧へ足す前)で、区画のセル → 気体の箱(gas_step.hlsl の GpuGas)→ セルへ書き戻す。
 //
 // バッファ:
-//   - 気体の欄(gasState。区画のセルごとの ProbeGasCellState。ProbeGasField の m_momentum・m_kinetic と同じ並び = 区画の中の
+//   - 気体の欄(gasState。区画のセルごとの ProbeGasCellState。ProbeGasField の m_momentum・m_kinetic・m_mass と同じ並び = 区画の中の
 //     x + 幅 × (z + 奥行き × y)。運動量の軸は気体の箱の x・y・z〔= 格子の x・z・y〕)
 //   - 気体の作業場(gasWork。RWByteAddressBuffer): 先頭から 制御(欄の物質の数・断った印・運動量の失せ分・数)・
 //     設定の型(CPU が書く。設定の頭の物質に依らない欄)・見出し(ProbeGasHeader)、その後ろに見出しが場所を持つ
@@ -21,10 +21,11 @@
 namespace bicameral::sim {
 #endif
 
-    // 区画の 1 セルの気体の欄(32 バイト)
+    // 区画の 1 セルの気体の欄(40 バイト)
     struct ProbeGasCellState {
         int64_t momentum[3];  // mg·2^-20 m/s(気体の箱の軸)
         int64_t kinetic;      // 運動エネルギーのぶん(mJ。セルのエネルギーの外)
+        uint64_t mass;        // その時の気体の質量(mg。段の外で質量が変わった分を見る。T-0646・ADR-0286)
     };
 
     // 物質ごとの気体の値(物質 ID の順。表から CPU が作る。32 バイト)
@@ -78,7 +79,7 @@ namespace bicameral::sim {
     FX_CONST uint32_t PROBE_GAS_DYNAMIC_OFFSET = 1024;  // ここから見出しが場所を持つ欄
     FX_CONST uint32_t PROBE_GAS_ALIGNMENT = 256;
     FX_CONST uint32_t PROBE_GAS_SPECIES_BYTES = 32;
-    FX_CONST uint32_t PROBE_GAS_CELL_STATE_BYTES = 32;
+    FX_CONST uint32_t PROBE_GAS_CELL_STATE_BYTES = 40;
 
     // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
     FX_FN uint32_t ProbeGasGridAxis(uint32_t gasAxis) {

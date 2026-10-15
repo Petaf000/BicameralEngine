@@ -116,4 +116,18 @@ namespace bicameral::sim {
         return definition;
     }
 
+    void AddDewCondensationForTest(ReactionTableDefinition& definition, uint64_t ratePerSecond) {
+        definition.species.push_back({.name = "test_dew",
+                                      .composition = {{.element = "H", .count = 2}, {.element = "O", .count = 1}},
+                                      .formationEnthalpy = -285830,
+                                      .heatCapacity = 75300,
+                                      .thermalConductivity = 600,
+                                      .condensed = true});
+        definition.rules.push_back(
+            {.name = "test_dew_condensation",
+             .reactants = {{.species = "water_vapor", .coefficient = 1, .firstOrder = true}},
+             .products = {{.species = "test_dew", .coefficient = 1}},
+             .rate = {.preExponentialMantissa = ratePerSecond, .preExponentialExponent10 = 0, .activationEnergy = 0}});
+    }
+
 }  // namespace bicameral::sim

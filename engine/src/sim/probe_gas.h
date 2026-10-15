@@ -3,7 +3,13 @@
 // 形(ADR-0256 の 1〜4。仮・ユーザー未確認):
 //   - **セルが唯一の真実**: 気体の成分は、セル(reaction.hlsli の RxCell)の成分のうち表で凝縮相でない物質(condensed = false)。
 //     気体の別の格子は持たない。反応は同じセルの O2 を読み、生成物の CO2・H2O はそのまま流れに乗る。
-//     足した欄は気体の運動量 ×3(mg·2^-20 m/s)と、その運動エネルギーのぶん(mJ)だけ(セルの外に持つ。GPU に載せるのは T-0592)。
+//     足した欄は気体の運動量 ×3(mg·2^-20 m/s)と、その運動エネルギーのぶん(mJ)と、その時の気体の質量(mg)だけ
+//     (セルの外に持つ。GPU に載せるのは T-0592)。
+//   - **運動量と運動のエネルギーは気体の物質に付く**(T-0646・ADR-0286): 気体の段の外(反応・相変化・置く操作)でセルの気体の質量が
+//     変わったら、段の入口で運動量を今の質量に合わせる。減った時は速さを保つ(減った気体は同じ速さで凝縮相へ移り、その運動量は
+//     帳簿へ。凝縮相は運動量を持たない)、増えた時は運動量を保つ(増えた気体は静止して現れる)。どちらも運動のエネルギーは前の値を
+//     超えず、差は熱になる(気体の箱のエネルギーが前の運動エネルギーのぶんを含むので、帳簿は要らない)。段の終わりに気体が残らない
+//     セルの運動量は帳簿へ(質量の無い運動量は持たない)。
 //   - **区画**: 気体を流すのは世界の中の直方体の区画だけ(既定は無い = 今までと同じ。ブランクの世界は何も読まずに動く。D-455)。
 //     区画の外の面は軸ごとに壁・周期・開いた境界(gas_reference の GasBoundary)。
 //   - **段の順**: 刻みの初め(コマンドと物理の熱の入口の後)に気体の 1 刻み → 伝導と反応(06 §2 の段 3 → 段 4)。
@@ -107,6 +113,9 @@ namespace bicameral::sim {
         // 区画のセル(区画の中の x + 幅 × (z + 奥行き × y)。気体の箱と同じ並び)の運動量と運動エネルギーのぶん
         [[nodiscard]] std::span<const std::array<int64_t, GAS_AXES>> Momentum() const { return m_momentum; }
         [[nodiscard]] int64_t KineticEnergySum() const;
+        [[nodiscard]] std::span<const uint64_t> Mass() const {
+            return m_mass;
+        }  // 前の段の終わりの気体の質量(mg。T-0646)
 
         // 区画のセルの番号(格子の全部のセルの中の番号)。region は区画の中の番号
         [[nodiscard]] uint32_t GridIndex(uint32_t region) const;
@@ -130,8 +139,9 @@ namespace bicameral::sim {
 
         std::vector<std::array<int64_t, GAS_AXES>> m_momentum;  // 区画のセル(気体の箱の並び。軸は気体の箱の x・y・z)
         std::vector<int64_t> m_kinetic;                         // 運動エネルギーのぶん(mJ。セルのエネルギーの外)
-        GasProjection m_projection;                             // 前の刻みの圧力(投影の初めの近似)
-        std::vector<uint32_t> m_projectionSpecies;              // m_projection を作った時の物質(変わったら捨てる)
+        std::vector<uint64_t> m_mass;  // 前の気体の段の終わりの気体の質量(mg。段の外で変わった分を見る。T-0646)
+        GasProjection m_projection;    // 前の刻みの圧力(投影の初めの近似)
+        std::vector<uint32_t> m_projectionSpecies;  // m_projection を作った時の物質(変わったら捨てる)
         ProbeGasLedger m_ledger;
 
         [[nodiscard]] GasConfig MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const;

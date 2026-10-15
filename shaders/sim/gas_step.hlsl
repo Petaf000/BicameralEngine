@@ -10,6 +10,7 @@
 // CPU は面ごとに両側へ足し引きする(散らす形)が、GPU はセルが自分の 6 面を集める(集める形)。足し引きは整数なので順番に依存せず、
 // 同じ値になる(04 R2・R3)。箱の外との出入り(壁の力積・重さ・開いた境界の物)は帳簿へ 64bit の原子的な足し算で(整数なので順番に依存しない)。
 #include "common/gas_gpu.hlsli"
+#include "common/units.hlsli"
 
 // 成分ごとの欄を持つもの(gas_gpu.hlsli。成分の数に上限なし。T-0598)は ByteAddressBuffer: セル・面・セルごとの合計は頭の並び + 成分ごとの面
 // (件の数はセルの数・面の数 = セル × 6)、設定・外・帳簿は「頭 + 欄 × g_speciesStride」の件。回す成分の数は設定の speciesCount(≤ 欄の数)
@@ -410,7 +411,29 @@ bool IsDonor(bool right, int64_t flow) {
     g_faces.Store<uint64_t>(FaceAddress(faceId) + FACE_FRACTION, fraction);
 }
 
-// --- 段 5: 風上として出ていく割合の合計(セル。gas_reference.cpp の LimitOutflow の 1 回目の走査)---
+// 出ていく割合の合計の、引く側の熱を負にしない換算(gas_reference.cpp の EffectiveOutflow。T-0646・ADR-0286):
+// 割合の合計 × (C + n R) ÷ C(C = 熱容量。押し出す仕事 n R T のぶん)。等温はそのまま
+// 熱容量と物質量は小刻みの初めのセル(g_cells)の成分から(CPU は box.cells)
+uint64_t EffectiveOutflow(uint32_t index, uint64_t outflow) {
+    if (outflow == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
+        return outflow;
+
+    GasGpuTotals totals = GasZeroTotals();
+    const uint32_t speciesCount = SpeciesCount();
+    for (uint32_t s = 0; s < speciesCount; ++s)
+        GasAddSpecies(totals, s, g_cells.Load<uint64_t>(CellAmountAddress(index, s)));
+
+    const uint64_t capacity = totals.capacity;
+    if (capacity == 0)
+        return outflow;
+
+    const FxDivResult push = FxDivU128By64(FxMulU64Full(totals.amount, GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN), MICRO);
+    const uint64_t pushCapacity = push.quotient + (push.remainder != 0 ? 1 : 0);  // n R(nJ/K。切り上げ)
+
+    return FxDivU128By64(FxMulU64Full(outflow, capacity + pushCapacity), capacity).quotient;
+}
+
+// --- 段 5: 風上として出ていく割合の合計(セル。gas_reference.cpp の LimitOutflow の 1 回目の走査。EffectiveOutflow で換算)---
 [numthreads(64, 1, 1)] void GasOutflow(uint32_t index : SV_DispatchThreadID) {
     if (index >= g_cellCount)
         return;
@@ -423,7 +446,7 @@ bool IsDonor(bool right, int64_t flow) {
             outflow += face.fraction;
     }
 
-    g_sums.Store<uint64_t>(SumsAddress(index), outflow);
+    g_sums.Store<uint64_t>(SumsAddress(index), EffectiveOutflow(index, outflow));
 }
 
 // --- 移す成分の物質量(gas_reference.cpp の LimitedSlope・SpeciesRatio・HalfSlope・MovedAmountQ32・RoundAmount)---

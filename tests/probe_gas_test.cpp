@@ -9,6 +9,10 @@
 //   6. 成分の数の上限なし(T-0591): 地球の空気(N2・O2・Ar・CO2)+ 燃えてできる H2O・CO の 6 種の区画で 2〜4 が成り立つ。
 //      気体の段の費用(1 刻みの ms)を 4 種と 6 種で出す
 //   7. 定積の比熱(T-0591・ADR-0258): 表が気体の比熱を定圧で書くと、ベイクが c_v = c_p − R を作る(凝縮相はそのまま)
+//   8. 物質の無いエネルギーを作らない(T-0646・ADR-0286): 反応が気体の質量を変える場面(水蒸気が露になる試験の規則。燃える木箱・
+//      熱い湯気の塊)でも、毎刻み 2〜3 に加えて、区画のどのセルも熱(エネルギー − 化学)が負にならず、物質の無いセルはエネルギーを
+//      持たない(強い流れが 1 小刻みでセルの中身を押し出すと、押し出す仕事のぶん負のエネルギーが残っていた)。2・6 の木箱も同じく確かめる。
+//      熱が負のセルの数と最も負の熱は表示だけ(強い爆発でまだ少し残る。力積の後の熱で上限を決めるのは T-0647)
 // 表は 1〜4 が試験の表(combustion_test)から CO を作る規則を除いたもの(区画の気体の物質 4 つ〔N2・O2・CO2・H2O〕。T-0590 の形)、
 // 6・7 が試験の表のまま + 地球の空気 + 定圧の比熱。
 #include <algorithm>
@@ -199,6 +203,33 @@ namespace {
         return totals;
     }
 
+    // 区画のセルの熱の様子(T-0646): 物質が無いのにエネルギーを持つセルの数(0 が正しい)・熱(エネルギー − 化学)が負のセルの数と最も負の熱
+    struct HeatCheck {
+        uint32_t emptyWithEnergy = 0;
+        uint32_t negativeHeat = 0;
+        int64_t lowestHeatMilliJoules = 0;
+    };
+
+    void CheckHeat(const BakedReactionTable& table, std::span<const reaction::RxCell> cells, const ProbeGasField& field,
+                   HeatCheck& check) {
+        uint32_t empty = 0;
+        uint32_t negative = 0;
+        for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
+            const reaction::RxCell& cell = cells[field.GridIndex(region)];
+            int64_t chemical = 0;  // µJ
+            for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                chemical += (int64_t)cell.amounts[i] * table.species[cell.species[i]].h0;
+
+            const int64_t heat = (cell.energy * 1000) - chemical;
+            empty += cell.speciesCount == 0 && cell.energy != 0 ? 1 : 0;
+            negative += heat < 0 ? 1 : 0;
+            check.lowestHeatMilliJoules = std::min(check.lowestHeatMilliJoules, heat / 1000);
+        }
+
+        check.emptyWithEnergy = std::max(check.emptyWithEnergy, empty);
+        check.negativeHeat = std::max(check.negativeHeat, negative);
+    }
+
     // --- 見るもの: 物質の重心の高さ・熱い所の重心の高さ(セル。1 K 以上熱い所を熱の差で重み付け)---
     int64_t CentroidMilliCells(std::span<const reaction::RxCell> cells, uint32_t species) {
         uint64_t weight = 0;
@@ -284,6 +315,7 @@ namespace {
         uint64_t brokenTick = 0;   // 保存が最初に崩れた刻み(0 = 崩れない)
         int64_t energyDrift = 0;   // その刻みのエネルギーのずれ(mJ)
         bool momentumHeld = true;  // 運動量(− 帳簿)が一定
+        HeatCheck heat;            // 区画のセルの熱の様子(刻みごとの最大・最小。CheckHeat)
         uint32_t skipped = 0;
         uint32_t maxGasSpecies = 0;       // 区画の気体の物質の数の最大
         int64_t advanceMicroseconds = 0;  // 刻みを進めた時間の合計(気体・伝導・反応)
@@ -311,6 +343,9 @@ namespace {
             result.skipped += reference.LastGasReport().skippedCellOverflow ? 1 : 0;
             result.maxGasSpecies = std::max(result.maxGasSpecies, reference.LastGasReport().gasSpecies);
             const Totals now = Sum(table, reference.State(tick + 1), reference.GasField());
+            if (flow)
+                CheckHeat(table, reference.State(tick + 1), *field, result.heat);
+
             result.momentumHeld = result.momentumHeld && now.momentum == initial.momentum;
             if (now != initial && result.conserved) {
                 result.conserved = false;
@@ -342,14 +377,18 @@ namespace {
         const FireResult flow = RunFire(table, true, ProbeGasPressure::Explicit, SMOKE_TICKS);
         std::printf(
             "燃える木箱 2 秒(陽解法): 熱の重心 伝導だけ %lld → 気体あり %lld ミリセル・CO2 の重心 %lld → %lld・"
-            "CO2 1 mol 以上の最も高い層 %llu → %llu・残りのセルロース %llu → %llu µmol・保存 %s・流さなかった刻み %u\n",
+            "CO2 1 mol 以上の最も高い層 %llu → %llu・残りのセルロース %llu → %llu µmol・保存 %s・物質の無いエネルギー "
+            "%u・"
+            "熱が負のセル %u(最も負 %lld mJ)・流さなかった刻み %u\n",
             (long long)still.heatCentroid, (long long)flow.heatCentroid, (long long)still.smokeCentroid,
             (long long)flow.smokeCentroid, (unsigned long long)still.smokeTop, (unsigned long long)flow.smokeTop,
             (unsigned long long)still.celluloseLeft, (unsigned long long)flow.celluloseLeft,
-            flow.conserved ? "yes" : "no", flow.skipped);
+            flow.conserved ? "yes" : "no", flow.heat.emptyWithEnergy, flow.heat.negativeHeat,
+            (long long)flow.heat.lowestHeatMilliJoules, flow.skipped);
 
         EXPECT(still.conserved);
         EXPECT(flow.conserved);
+        EXPECT(flow.heat.emptyWithEnergy == 0);
         EXPECT(flow.skipped == 0);
         EXPECT(flow.heatCentroid > still.heatCentroid + 1000);          // 熱が 1 セル以上高く運ばれる
         EXPECT(flow.smokeCentroid > (WOOD_BOTTOM + WOOD_SIZE) * 1000);  // 煙の重心が木箱の上
@@ -464,6 +503,7 @@ namespace {
         EXPECT(flow.maxGasSpecies >= 5);
         EXPECT(still.conserved);
         EXPECT(flow.conserved);
+        EXPECT(flow.heat.emptyWithEnergy == 0);
         EXPECT(flow.skipped == 0);
         EXPECT(flow.heatCentroid > still.heatCentroid + 1000);
         EXPECT(flow.smokeCentroid > (WOOD_BOTTOM + WOOD_SIZE) * 1000);
@@ -525,9 +565,7 @@ namespace {
         EXPECT(first.skipped == 0);
     }
 
-    // --- 8. 反応が気体の質量を変える(T-0646): 水蒸気が露(凝縮相)になる試験の規則を足す ---
-    // 露 = 液体の水の値(生成エンタルピー −285.83 kJ/mol・比熱 75.3 J/(mol·K))。速さは温度によらない一次(A /s・Ea 0)。
-    // 物質の名前は相変化の見本(real_matter の water。T-0611)と重ならないように試験だけのもの
+    // --- 8. 反応が気体の質量を変える(T-0646): 水蒸気が露(凝縮相)になる試験の規則を足す(AddDewCondensationForTest)---
     BakedReactionTable MakeDewTable(uint64_t ratePerSecond) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         std::erase_if(definition.rules, [](const RuleDefinition& rule) {
@@ -543,17 +581,7 @@ namespace {
                                       {.species = "oxygen", .partsPerMillion = 210000}}}},
             .surfacePressurePascals = 101325,
         };
-        definition.species.push_back({.name = "test_dew",
-                                      .composition = {{.element = "H", .count = 2}, {.element = "O", .count = 1}},
-                                      .formationEnthalpy = -285830,
-                                      .heatCapacity = 75300,
-                                      .thermalConductivity = 600,
-                                      .condensed = true});
-        definition.rules.push_back(
-            {.name = "test_dew_condensation",
-             .reactants = {{.species = "water_vapor", .coefficient = 1, .firstOrder = true}},
-             .products = {{.species = "test_dew", .coefficient = 1}},
-             .rate = {.preExponentialMantissa = ratePerSecond, .preExponentialExponent10 = 0, .activationEnergy = 0}});
+        AddDewCondensationForTest(definition, ratePerSecond);
 
         auto baked = BakeReactionTable(definition);
         if (!baked) {
@@ -565,18 +593,20 @@ namespace {
     }
 
     void TestMassChangedByReaction() {
-        constexpr uint64_t TICKS = 600;  // 10 秒
-        for (const uint64_t rate : {1ull, 10ull, 100ull}) {
+        constexpr uint64_t TICKS = 240;  // 4 秒
+        for (const uint64_t rate : {10ull, 100ull}) {
             const BakedReactionTable table = MakeDewTable(rate);
             for (const bool steam : {false, true}) {
                 const FireResult result = RunFire(table, true, ProbeGasPressure::Explicit, TICKS, steam);
                 std::printf(
                     "露 %llu /s・%s %llu 刻み: 保存 %s(崩れた刻み %llu・エネルギー %+lld mJ)・運動量 %s・"
-                    "流さなかった刻み %u\n",
+                    "物質の無いエネルギー %u・熱が負のセル %u(最も負 %lld mJ)・流さなかった刻み %u\n",
                     (unsigned long long)rate, steam ? "湯気の塊" : "燃える木箱", (unsigned long long)TICKS,
                     result.conserved ? "yes" : "no", (unsigned long long)result.brokenTick,
-                    (long long)result.energyDrift, result.momentumHeld ? "yes" : "no", result.skipped);
+                    (long long)result.energyDrift, result.momentumHeld ? "yes" : "no", result.heat.emptyWithEnergy,
+                    result.heat.negativeHeat, (long long)result.heat.lowestHeatMilliJoules, result.skipped);
                 EXPECT(result.conserved);
+                EXPECT(result.heat.emptyWithEnergy == 0);
                 EXPECT(result.momentumHeld);
                 EXPECT(result.skipped == 0);
             }

@@ -32,4 +32,8 @@ namespace bicameral::sim {
     // (ADR-0065)。試験のパッケージそのものは変えない
     [[nodiscard]] ReactionTableDefinition MakeSpeciesChangedTestTable();
 
+    // 反応が気体の質量を減らす試験用(T-0646): 水蒸気が露(凝縮相。液体の水の値〔生成エンタルピー −285.83 kJ/mol・比熱 75.3 J/(mol·K)〕)に
+    // なる一次の規則(温度によらない速さ ratePerSecond /s)を足す。物質の名前は相変化の見本(real_matter の water。T-0611)と重ならない
+    void AddDewCondensationForTest(ReactionTableDefinition& definition, uint64_t ratePerSecond);
+
 }  // namespace bicameral::sim

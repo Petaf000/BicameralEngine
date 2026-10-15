@@ -320,6 +320,9 @@ namespace bicameral::sim {
     // 運動エネルギー(µJ)= Σ (運動量² >> 41)÷ 質量(断熱のときだけ。等温は 0。T-0234)
     [[nodiscard]] int64_t GasKineticEnergy(const GasBox& box, const GasCell& cell);
 
+    // 質量(mg)= Σ 物質量 × モル質量(小刻みの導く値・運動エネルギーと同じ式。T-0646)
+    [[nodiscard]] uint64_t GasCellMass(const GasBox& box, const GasCell& cell);
+
     // 運動量を替え、運動エネルギーの差をエネルギーへ足す(熱を変えずに動かす。断熱のとき)
     void SetGasMomentum(const GasBox& box, GasCell& cell, const std::array<int64_t, GAS_AXES>& momentum);
 
