@@ -2,8 +2,10 @@
 // パラメータ(設定と係数。GasConfig・GasCoefficients から作る)・セル・導く値・面・セルごとの合計・帳簿の並び。
 // C++ では engine/src/sim/gpu_gas.cpp が GasBox(sim/gas_reference.h)から詰めて写し、HLSL では shaders/sim/gas_step.hlsl が読む。
 //
-// 成分の数に上限は無い(T-0598・ADR-0284。CPU の GasPerSpecies〔T-0591〕と同じ)。成分ごとの欄を持つもの(パラメータ・セル・面・
-// セルごとの合計・帳簿)は「決まった形の頭 + 成分ごとの欄 × 欄の数」の 1 件にし、ByteAddressBuffer に件ごとに並べる。
+// 成分の数に上限は無い(T-0598・ADR-0284。CPU の GasPerSpecies〔T-0591〕と同じ)。成分ごとの欄を持つものは ByteAddressBuffer に:
+//   - 状態と作業(セル・面・セルごとの合計。毎段たくさんのスレッドが読む): 決まった形の頭 × 件の数の後ろに、成分ごとの面(uint64 × 件の数)を
+//     欄の数だけ(GasGpuPlaneAddress。隣のスレッドの同じ成分が隣り合うので読みがまとまり、使わない欄の面には触れない)
+//   - 設定・開いた境界の外・帳簿(件が少ない): 頭 + 欄 × 欄の数 の件を並べる
 // 欄の数(speciesStride)は箱を作る時に決まり、ルート定数で渡す(GetDimensions は使わない。T-0024)。回す成分の数は設定の speciesCount
 // (≤ 欄の数。仮の世界では刻みごとに GPU が決める)。
 // 構造化バッファの並びが C++ と同じになるよう、64bit の値を先に・32bit の値を後に置き、32bit の数は偶数にそろえる(physics_solver.hlsli と同じ約束)。
@@ -107,7 +109,12 @@ namespace bicameral::sim {
     FX_CONST uint32_t GAS_GPU_LEDGER_MOMENTUM = 8;  // int64 × 3
     FX_CONST uint32_t GAS_GPU_LEDGER_AMOUNTS = 32;  // int64 × 欄の数
 
-    // --- 1 件の大きさ(バイト。欄の数から)---
+    // 成分ごとの面の並び: 頭(headBytes)× 件の数 recordCount の後ろに、成分 s の面(uint64 × 件の数)。件 record の成分 s の場所
+    FX_FN uint32_t GasGpuPlaneAddress(uint32_t headBytes, uint32_t recordCount, uint32_t record, uint32_t s) {
+        return (recordCount * headBytes) + (((s * recordCount) + record) * 8);
+    }
+
+    // --- 1 件の大きさ(バイト。頭 + 欄の数ぶん。面の並びのバッファの大きさは これ × 件の数)---
     FX_FN uint32_t GasGpuParametersBytes(uint32_t speciesStride) {
         return GAS_GPU_PARAMETERS_BYTES + (speciesStride * GAS_GPU_SPECIES_BYTES);
     }

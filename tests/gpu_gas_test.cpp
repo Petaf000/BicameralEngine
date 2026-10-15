@@ -411,8 +411,9 @@ namespace {
             return;
 
         std::ofstream out(dumpPath);
-        const size_t FACE_WORDS = GasGpuFaceStride(gas.SpeciesStride()) / 8;  // 面の件(gas_gpu.hlsli。頭 + 欄)
-        const size_t SUM_WORDS = GasGpuSumsStride(gas.SpeciesStride()) / 8;   // セルごとの合計の件
+        // 面・セルごとの合計は頭の並びの後ろに成分ごとの面(gas_gpu.hlsli)。成分の面の語は頭の続きの番号で出る
+        constexpr size_t FACE_WORDS = GAS_GPU_FACE_BYTES / 8;
+        constexpr size_t SUM_WORDS = GAS_GPU_SUMS_BYTES / 8;
         for (size_t i = 0; i < faceWords.size(); ++i)
             out << std::format("face {} {} {}\n", i / FACE_WORDS, i % FACE_WORDS, (int64_t)faceWords[i]);
 

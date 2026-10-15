@@ -55,36 +55,43 @@ namespace bicameral::sim {
             return value;
         }
 
-        // 端数 ↔ 件(頭 + 物質量の端数 × 欄の数。件の大きさはセルと同じ)
+        // 端数 ↔ 頭の並び + 成分ごとの面(セルと同じ形)
         std::vector<std::byte> PackFractions(std::span<const GasTreeFraction> fractions, uint32_t speciesStride,
                                              uint32_t speciesCount) {
-            const size_t stride = GasGpuCellStride(speciesStride);
-            std::vector<std::byte> bytes(fractions.size() * stride);
-            for (size_t i = 0; i < fractions.size(); ++i) {
+            const auto count = (uint32_t)fractions.size();
+            std::vector<std::byte> bytes((size_t)count * GasGpuCellStride(speciesStride));
+            for (uint32_t i = 0; i < count; ++i) {
                 const GasTreeFraction& fraction = fractions[i];
-                const std::span<std::byte> record = std::span(bytes).subspan(i * stride, stride);
                 WriteRecord(
-                    record, 0,
+                    std::span(bytes), (size_t)i * GAS_TREE_GPU_FRACTION_BYTES,
                     GasTreeGpuFraction{.energy = fraction.energy,
                                        .momentum = {fraction.momentum[0], fraction.momentum[1], fraction.momentum[2]}});
-                for (uint32_t s = 0; s < speciesCount; ++s)
-                    WriteRecord(record, GAS_TREE_GPU_FRACTION_BYTES + (s * 8), fraction.amounts[s]);
+                for (uint32_t s = 0; s < speciesCount; ++s) {
+                    WriteRecord(std::span(bytes), GasGpuPlaneAddress(GAS_TREE_GPU_FRACTION_BYTES, count, i, s),
+                                fraction.amounts[s]);
+                }
             }
 
             return bytes;
         }
 
-        GasTreeFraction UnpackFraction(std::span<const std::byte> record, uint32_t speciesCount) {
-            const auto head = ReadRecord<GasTreeGpuFraction>(record, 0);
-            GasTreeFraction result;
-            for (uint32_t s = 0; s < speciesCount; ++s)
-                result.amounts[s] = ReadRecord<uint64_t>(record, GAS_TREE_GPU_FRACTION_BYTES + (s * 8));
+        std::vector<GasTreeFraction> UnpackFractions(std::span<const std::byte> bytes, uint32_t count,
+                                                     uint32_t speciesCount) {
+            std::vector<GasTreeFraction> fractions(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                const auto head = ReadRecord<GasTreeGpuFraction>(bytes, (size_t)i * GAS_TREE_GPU_FRACTION_BYTES);
+                GasTreeFraction& fraction = fractions[i];
+                for (uint32_t s = 0; s < speciesCount; ++s) {
+                    fraction.amounts[s] = ReadRecord<uint64_t>(
+                        bytes, GasGpuPlaneAddress(GAS_TREE_GPU_FRACTION_BYTES, count, i, s));
+                }
 
-            result.energy = head.energy;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                result.momentum[axis] = head.momentum[axis];
+                fraction.energy = head.energy;
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                    fraction.momentum[axis] = head.momentum[axis];
+            }
 
-            return result;
+            return fractions;
         }
 
         // 帳簿(gas_tree_gpu.hlsli の GAS_TREE_GPU_LEDGER_*)
@@ -177,7 +184,7 @@ namespace bicameral::sim {
                         device, PackGasGpuParameters(tree.config, tree.levels[0].coefficients, speciesStride)),
                     CreateResident(device, std::span<const GasTreeGpuLevel>(levels)),
                     CreateResident(device, std::span<const GasGpuDerived>(referenceDerived)),
-                    gpu::CreateResidentBuffer(device, PackGasGpuCells(ghost, speciesStride))};
+                    gpu::CreateResidentBuffer(device, PackGasGpuCellRecords(ghost, speciesStride))};
         }
 
         // 側の番号: セルはセルの番号、外は層の表の番号、壁と Mixed は 0
@@ -339,7 +346,7 @@ namespace bicameral::sim {
         }
 
         // --- 初めの状態 ---
-        m_uploads = {CreateUploadBuffer(device, PackGasGpuCells(tree.cells, m_speciesStride)),
+        m_uploads = {CreateUploadBuffer(device, PackGasGpuCellPlanes(tree.cells, m_speciesStride)),
                      CreateUploadBuffer(device, PackFractions(tree.fractions, m_speciesStride, m_speciesCount)),
                      CreateUploadBuffer(device, PackLedger(tree.ledger, m_speciesStride, m_speciesCount))};
         m_readbacks = {gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback),
@@ -463,13 +470,8 @@ namespace bicameral::sim {
             !gpu::ReadBuffer(m_readbacks[2].Get(), ledgerBytes))
             return false;
 
-        cells.clear();
-        fractions.clear();
-        for (size_t i = 0; i < m_cellCount; ++i) {
-            cells.push_back(UnpackGasGpuCell(std::span(cellBytes).subspan(i * stride, stride), m_speciesCount));
-            fractions.push_back(UnpackFraction(std::span(fractionBytes).subspan(i * stride, stride), m_speciesCount));
-        }
-
+        cells = UnpackGasGpuCellPlanes(cellBytes, m_cellCount, m_speciesCount);
+        fractions = UnpackFractions(fractionBytes, m_cellCount, m_speciesCount);
         ledger = UnpackLedger(ledgerBytes, m_speciesCount);
 
         return true;

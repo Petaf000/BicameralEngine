@@ -12,7 +12,8 @@
 //              ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(物理の熱と同じ。後ろの WakeDueBlocks が一覧へ足す)
 //   GasFinish  帳簿(物質 ID ごと・格子の軸)へ足す
 // 区画の中の番号 = x + 幅 × (z + 奥行き × y)(気体の箱の並び。箱の z = 格子の y = 上)。整数だけ(D-205)。
-// 気体の箱のセル・外は「頭 + 物質量 × 欄の数(header.slotCapacity)」の件(gas_gpu.hlsli)。回す欄はこの刻みの欄の物質の数だけ。
+// 気体の箱のセルは頭の並び + 成分ごとの面(欄の数 header.slotCapacity)、外は「頭 + 物質量 × 欄の数」の件(gas_gpu.hlsli)。
+// 回す欄はこの刻みの欄の物質の数だけ。
 #include "common/probe_gas_gpu.hlsli"
 #include "sim/probe_bindings.hlsli"
 
@@ -68,13 +69,13 @@ bool Skipped() {
     return gasWork.Load(PROBE_GAS_CONTROL_TOO_MANY) != 0 || gasWork.Load(PROBE_GAS_CONTROL_OVERFLOW) != 0;
 }
 
-// 気体の箱のセルの件(区画の中の番号 region)の場所と、欄 s の物質量の場所
-uint32_t GasCellAddress(ProbeGasHeader header, uint32_t region) {
-    return region * GasGpuCellStride(header.slotCapacity);
+// 気体の箱のセル(頭の並び + 成分ごとの面。gas_step と同じ)の区画の中の番号 region の頭と、欄 s の物質量の場所
+uint32_t GasCellAddress(uint32_t region) {
+    return region * GAS_GPU_CELL_BYTES;
 }
 
 uint32_t GasAmountAddress(ProbeGasHeader header, uint32_t region, uint32_t s) {
-    return GasCellAddress(header, region) + GAS_GPU_CELL_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, header.regionCellCount, region, s);
 }
 
 // 区画の中の番号 → 格子のセルの番号
@@ -314,7 +315,7 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     }
 
     gasWork.Store<int64_t>(header.condensedOffset + region * 8, condensed);
-    gasCells.Store<GasGpuCell>(GasCellAddress(header, region), gas);
+    gasCells.Store<GasGpuCell>(GasCellAddress(region), gas);
 }
 
 // 1 スレッド = 区画の 1 セル: 書き戻した成分の数がインラインの数を超えるか
@@ -364,7 +365,7 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
     const uint32_t grid = RegionGridCell(header, region);
     const uint32_t index = GenerationBase(tick) + grid;
     const RxCell before = cells[index];
-    const GasGpuCell gas = gasCells.Load<GasGpuCell>(GasCellAddress(header, region));
+    const GasGpuCell gas = gasCells.Load<GasGpuCell>(GasCellAddress(region));
 
     // --- 運動エネルギーのぶん(µJ → mJ。最も近い整数。負にならない)---
     GasGpuTotals totals = GasZeroTotals();

@@ -14,8 +14,9 @@
 // 64bit の「0 で止める引き算」(a > b ? a − b : 0)は書かない(NVIDIA のドライバが誤って下ろす。T-0185)。繰り上がりも比べずにビットで出す。
 #include "common/gas_tree_gpu.hlsli"
 
-// 成分ごとの欄を持つもの(セル・端数・面・セルごとの合計・出した量・帳簿・設定・外)は「頭 + 欄 × g_speciesStride」の件を並べた
-// ByteAddressBuffer(gas_gpu.hlsli・gas_tree_gpu.hlsli。成分の数に上限なし。T-0598)。回す成分の数は設定の speciesCount
+// 成分ごとの欄を持つもの(gas_gpu.hlsli・gas_tree_gpu.hlsli。成分の数に上限なし。T-0598)は ByteAddressBuffer: セル・端数・面・
+// セルごとの合計・出した量は頭の並び + 成分ごとの面(件の数はセルの数か面の数)、設定・外・帳簿は「頭 + 欄 × g_speciesStride」の件。
+// 回す成分の数は設定の speciesCount
 RWByteAddressBuffer g_cells : register(u0);                  // 状態(小刻みの初め → 終わり)
 RWByteAddressBuffer g_fractions : register(u1);              // 状態の端数
 RWByteAddressBuffer g_forced : register(u2);                 // 力を当てた後のセル
@@ -59,7 +60,7 @@ GasGpuSpecies GasSpeciesAt(uint32_t s) {
 
 #include "common/gas_cell.hlsli"
 
-// --- 件の読み書き(頭 + 欄。セルと端数は同じ大きさ、セルごとの合計と出した量も同じ大きさ)---
+// --- 件の読み書き(頭の並び + 成分ごとの面。セルと端数は同じ形、セルごとの合計と出した量も同じ形)---
 
 static const uint32_t FACE_FLOW = 24;  // GasGpuFace の flow・fraction の場所
 static const uint32_t FACE_FRACTION = 32;
@@ -69,27 +70,32 @@ uint32_t SpeciesCount() {
 }
 
 uint32_t CellAddress(uint32_t index) {
-    return index * GasGpuCellStride(g_speciesStride);
+    return index * GAS_GPU_CELL_BYTES;
 }
 
 uint32_t CellAmountAddress(uint32_t index, uint32_t s) {
-    return CellAddress(index) + GAS_GPU_CELL_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, g_cellCount, index, s);
 }
 
 uint32_t FaceAddress(uint32_t faceIndex) {
-    return faceIndex * GasGpuFaceStride(g_speciesStride);
+    return faceIndex * GAS_GPU_FACE_BYTES;
 }
 
 uint32_t FaceMovedAddress(uint32_t faceIndex, uint32_t s) {
-    return FaceAddress(faceIndex) + GAS_GPU_FACE_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_FACE_BYTES, g_faceCount, faceIndex, s);
 }
 
 uint32_t SumsAddress(uint32_t index) {
-    return index * GasGpuSumsStride(g_speciesStride);
+    return index * GAS_GPU_SUMS_BYTES;
 }
 
 uint32_t SumsAmountAddress(uint32_t index, uint32_t s) {
-    return SumsAddress(index) + GAS_GPU_SUMS_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_SUMS_BYTES, g_cellCount, index, s);
+}
+
+// 開いた境界の外(層の表の件 = 頭 + 欄 × g_speciesStride)
+uint32_t GhostAddress(uint32_t layer) {
+    return layer * GasGpuCellStride(g_speciesStride);
 }
 
 GasGpuFace LoadFace(uint32_t faceIndex) {
@@ -183,14 +189,14 @@ int64_t HeightFactor(GasTreeGpuFace layout, TreeSide side) {
 
 GasGpuCell ForcedSideCell(TreeSide side) {
     if (side.kind == GAS_TREE_GPU_SIDE_GHOST)
-        return g_ghost.Load<GasGpuCell>(CellAddress(side.index));
+        return g_ghost.Load<GasGpuCell>(GhostAddress(side.index));
 
     return g_forced.Load<GasGpuCell>(CellAddress(side.index));
 }
 
 uint64_t ForcedSideAmount(TreeSide side, uint32_t s) {
     if (side.kind == GAS_TREE_GPU_SIDE_GHOST)
-        return g_ghost.Load<uint64_t>(CellAmountAddress(side.index, s));
+        return g_ghost.Load<uint64_t>(GhostAddress(side.index) + GAS_GPU_CELL_BYTES + (s * 8));
 
     return g_forced.Load<uint64_t>(CellAmountAddress(side.index, s));
 }

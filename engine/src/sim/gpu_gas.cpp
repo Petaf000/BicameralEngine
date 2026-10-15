@@ -102,7 +102,7 @@ namespace bicameral::sim {
             WriteRecord(record, GAS_GPU_CELL_BYTES + (s * 8), cell.amounts[s]);
     }
 
-    std::vector<std::byte> PackGasGpuCells(std::span<const GasCell> cells, uint32_t speciesStride) {
+    std::vector<std::byte> PackGasGpuCellRecords(std::span<const GasCell> cells, uint32_t speciesStride) {
         const size_t stride = GasGpuCellStride(speciesStride);
         std::vector<std::byte> bytes(cells.size() * stride);
         for (size_t i = 0; i < cells.size(); ++i)
@@ -111,17 +111,36 @@ namespace bicameral::sim {
         return bytes;
     }
 
-    GasCell UnpackGasGpuCell(std::span<const std::byte> record, uint32_t speciesCount) {
-        const auto head = ReadRecord<GasGpuCell>(record, 0);
-        GasCell result;
-        for (uint32_t s = 0; s < speciesCount; ++s)
-            result.amounts[s] = ReadRecord<uint64_t>(record, GAS_GPU_CELL_BYTES + (s * 8));
+    std::vector<std::byte> PackGasGpuCellPlanes(std::span<const GasCell> cells, uint32_t speciesStride) {
+        const auto count = (uint32_t)cells.size();
+        std::vector<std::byte> bytes((size_t)count * GasGpuCellStride(speciesStride));
+        for (uint32_t i = 0; i < count; ++i) {
+            const GasCell& cell = cells[i];
+            const GasGpuCell head{.energy = cell.energy,
+                                  .momentum = {cell.momentum[0], cell.momentum[1], cell.momentum[2]}};
+            WriteRecord(std::span(bytes), (size_t)i * GAS_GPU_CELL_BYTES, head);
+            for (uint32_t s = 0; s < speciesStride; ++s)
+                WriteRecord(std::span(bytes), GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, count, i, s), cell.amounts[s]);
+        }
 
-        result.energy = head.energy;
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            result.momentum[axis] = head.momentum[axis];
+        return bytes;
+    }
 
-        return result;
+    std::vector<GasCell> UnpackGasGpuCellPlanes(std::span<const std::byte> bytes, uint32_t cellCount,
+                                                uint32_t speciesCount) {
+        std::vector<GasCell> cells(cellCount);
+        for (uint32_t i = 0; i < cellCount; ++i) {
+            const auto head = ReadRecord<GasGpuCell>(bytes, (size_t)i * GAS_GPU_CELL_BYTES);
+            GasCell& cell = cells[i];
+            for (uint32_t s = 0; s < speciesCount; ++s)
+                cell.amounts[s] = ReadRecord<uint64_t>(bytes, GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, cellCount, i, s));
+
+            cell.energy = head.energy;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                cell.momentum[axis] = head.momentum[axis];
+        }
+
+        return cells;
     }
 
     GasGpuDerived ToGasGpuDerived(const GasDerived& derived) {
@@ -237,7 +256,7 @@ namespace bicameral::sim {
         for (const GasDerived& layer : box.referenceDerived)
             referenceDerived.push_back(ToGasGpuDerived(layer));
 
-        const std::vector<std::byte> ghost = PackGasGpuCells(box.ghost, speciesStride);
+        const std::vector<std::byte> ghost = PackGasGpuCellRecords(box.ghost, speciesStride);
 
         return {gpu::CreateResidentBuffer(device, parameters),
                 gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuDerived>(referenceDerived))),
@@ -294,7 +313,7 @@ namespace bicameral::sim {
         m_srvs = CreateLayerBuffers(device, box, stride);
 
         // --- 初めの箱 ---
-        m_cellUpload = CreateUploadBuffer(device, PackGasGpuCells(box.cells, stride));
+        m_cellUpload = CreateUploadBuffer(device, PackGasGpuCellPlanes(box.cells, stride));
         m_ledgerUpload = CreateUploadBuffer(device, PackLedger(box.ledger, stride));
         m_cellReadback = gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback);
         m_ledgerReadback = gpu::CreateBuffer(device, uavBytes[5], gpu::BufferKind::Readback);
@@ -385,10 +404,7 @@ namespace bicameral::sim {
 
         ledger.energy = ReadRecord<int64_t>(ledgerBytes, GAS_GPU_LEDGER_ENERGY);
         ledger.momentum = ReadRecord<std::array<int64_t, GAS_AXES>>(ledgerBytes, GAS_GPU_LEDGER_MOMENTUM);
-        cells.clear();
-        cells.reserve(m_cellCount);
-        for (size_t i = 0; i < m_cellCount; ++i)
-            cells.push_back(UnpackGasGpuCell(std::span(cellBytes).subspan(i * stride, stride), m_speciesCount));
+        cells = UnpackGasGpuCellPlanes(cellBytes, m_cellCount, m_speciesCount);
 
         return true;
     }

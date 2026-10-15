@@ -11,8 +11,8 @@
 // 同じ値になる(04 R2・R3)。箱の外との出入り(壁の力積・重さ・開いた境界の物)は帳簿へ 64bit の原子的な足し算で(整数なので順番に依存しない)。
 #include "common/gas_gpu.hlsli"
 
-// 成分ごとの欄を持つもの(セル・面・セルごとの合計・帳簿・設定・外)は「頭 + 欄 × g_speciesStride」の件を並べた ByteAddressBuffer
-// (gas_gpu.hlsli。成分の数に上限なし。T-0598)。回す成分の数は設定の speciesCount(≤ 欄の数)
+// 成分ごとの欄を持つもの(gas_gpu.hlsli。成分の数に上限なし。T-0598)は ByteAddressBuffer: セル・面・セルごとの合計は頭の並び + 成分ごとの面
+// (件の数はセルの数・面の数 = セル × 6)、設定・外・帳簿は「頭 + 欄 × g_speciesStride」の件。回す成分の数は設定の speciesCount(≤ 欄の数)
 RWByteAddressBuffer g_cells : register(u0);                  // 状態(小刻みの初め → 終わり)
 RWByteAddressBuffer g_forced : register(u1);                 // 力を当てた後のセル
 RWStructuredBuffer<GasGpuDerived> g_derived : register(u2);  // 小刻みの初めの導く値
@@ -53,27 +53,27 @@ uint32_t SpeciesCount() {
 }
 
 uint32_t CellAddress(uint32_t index) {
-    return index * GasGpuCellStride(g_speciesStride);
+    return index * GAS_GPU_CELL_BYTES;
 }
 
 uint32_t CellAmountAddress(uint32_t index, uint32_t s) {
-    return CellAddress(index) + GAS_GPU_CELL_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, g_cellCount, index, s);
 }
 
 uint32_t FaceAddress(uint32_t faceId) {
-    return faceId * GasGpuFaceStride(g_speciesStride);
+    return faceId * GAS_GPU_FACE_BYTES;
 }
 
 uint32_t FaceMovedAddress(uint32_t faceId, uint32_t s) {
-    return FaceAddress(faceId) + GAS_GPU_FACE_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_FACE_BYTES, g_cellCount * GAS_GPU_FACES_PER_CELL, faceId, s);
 }
 
 uint32_t SumsAddress(uint32_t index) {
-    return index * GasGpuSumsStride(g_speciesStride);
+    return index * GAS_GPU_SUMS_BYTES;
 }
 
 uint32_t OutgoingAddress(uint32_t index, uint32_t s) {
-    return SumsAddress(index) + GAS_GPU_SUMS_BYTES + (s * 8);
+    return GasGpuPlaneAddress(GAS_GPU_SUMS_BYTES, g_cellCount, index, s);
 }
 
 GasGpuFace LoadFace(uint32_t faceId) {
