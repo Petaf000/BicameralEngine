@@ -7,6 +7,7 @@
 #include "common/fixed.hlsli"
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
+#include "sim/cell_volume.h"
 #include "sim/world_atmosphere.h"
 #include "sim/world_physics.h"
 
@@ -117,6 +118,32 @@ namespace bicameral::sim {
             rng::sort(amounts, {}, &SpeciesAmount::species);
 
             return amounts;
+        }
+
+        static_assert(CELL_OPEN_FULL == GAS_OPEN_FULL);
+
+        // 区画のセルの気体の空き(Q16。固体と液体が占めない体積の割合。T-0593・ADR-0268)。全部のセルが全部なら空(今まで通り)
+        std::vector<uint32_t> CollectGasOpen(const BakedReactionTable& table, std::span<const reaction::RxCell> cells,
+                                             const ProbeGasField& field, ProbeGasStepReport& report) {
+            std::vector<uint32_t> open(field.RegionCellCount(), CELL_OPEN_FULL);
+            bool partial = false;
+            for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
+                const CellVolumeShare share = ShareCellVolume(table, cells[field.GridIndex(region)]);
+                open[region] = GasOpenQ16(share, PROBE_CELL_VOLUME_PICOLITERS);
+                if (open[region] == CELL_OPEN_FULL)
+                    continue;
+
+                partial = true;
+                if (open[region] == 0)
+                    ++report.blockedCells;
+                else
+                    ++report.partialCells;
+            }
+
+            if (!partial)
+                open.clear();
+
+            return open;
         }
 
         // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
@@ -275,6 +302,11 @@ namespace bicameral::sim {
         const GasConfig config = MakeConfig(table, slots);
         GasBox box = MakeGasBox(config, MakeReference(table, config, slots));
         box.tick = tick;
+        box.openQ16 = CollectGasOpen(table, cells, *this, report);
+        if (m_options.pressure == ProbeGasPressure::Projection && !box.openQ16.empty()) {
+            report.opennessIgnored = true;  // 投影は空きを読まない(T-0617)
+            box.openQ16.clear();
+        }
         std::vector<int64_t> condensedEnergy(RegionCellCount(), 0);
         std::array<int64_t, GAS_AXES> lostMomentum = {};  // 気体が無くなったセルの運動量(格子の軸。書き戻す時に帳簿へ)
         for (uint32_t region = 0; region < RegionCellCount(); ++region) {

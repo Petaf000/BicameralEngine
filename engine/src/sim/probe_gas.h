@@ -15,11 +15,14 @@
 //   エネルギーは気体のぶん = 熱 × 気体の熱容量 ÷ セルの熱容量 + 気体の化学 + 運動エネルギーのぶん)→ StepGas / StepGasProjection
 //   → セルへ書き戻す(凝縮相のぶん = 前のエネルギー − 気体のぶん はそのまま、気体の成分とエネルギーを新しい値に)。
 //   区画の外との出入り(開いた境界・壁の力積・重さの仕事)は帳簿(物質 ID ごと)に足す。
+// セルの空き(T-0593・ADR-0268): 固体と液体が占める体積(物質の密度から。sim/cell_volume)を除いた残りが気体の体積。
+//   圧力はその体積で読み、面は両側の空きの小さい方だけ開く(GasBox::openQ16)。空きが 0 のセルは気体を通さない。
+//   密度を書いた物質が無い世界・どのセルも空きが全部の刻みは今までとビット単位で同じ。
 //   → 区画のセルのエネルギーの合計 + 運動エネルギーのぶん − 帳簿、元素の数 − 帳簿、運動量 − 帳簿 は毎刻みビット単位で一定。
 // 比熱: 気体の段は表の比熱(RxSpecies.heatCapacity)を定積の比熱として読む。表が定圧で書くなら、ベイクが c_v = c_p − R を作る
 //   (ReactionTableDefinition::gasHeatCapacityAtConstantPressure。T-0591・ADR-0258)。
 // 今の制限(分けたチケット): 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超える刻みは流さずに数える
-//   (溢れのセルは R-MULTI-4)・固体のセルも気体を通す(凝縮相の体積は T-0593)・
+//   (溢れのセルは R-MULTI-4)・投影の解き方はセルの空きを読まない(T-0617)・
 //   GPU と保存点・写しの早送り・状態のハッシュへの組み込み(T-0592。GPU の段は成分 GAS_MAX_SPECIES 個まで)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
@@ -77,6 +80,11 @@ namespace bicameral::sim {
         bool skippedCellOverflow = false;
         uint32_t changedCells = 0;     // 値が変わったセルの数
         GasProjectionCost projection;  // 投影の費用(投影のときだけ)
+
+        // --- セルの空き(固体と液体が占めない体積。T-0593・ADR-0268)---
+        uint32_t blockedCells = 0;     // 空きが 0(気体が入れない・面は全部閉じる)
+        uint32_t partialCells = 0;     // 空きが一部
+        bool opennessIgnored = false;  // 投影の解き方は空きを読まない(固体も気体を通す。T-0617)
     };
 
     class ProbeGasField {

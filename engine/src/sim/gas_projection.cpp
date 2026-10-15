@@ -247,6 +247,7 @@ namespace bicameral::sim {
     }
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options) {
+        assert(box.openQ16.empty());  // セルの空き(T-0593)は陽解法だけ。投影は T-0617
         GasProjectionCost cost;
         const uint32_t substeps = options.pressure.substeps;
         for (uint32_t substep = 0; substep < substeps; ++substep)

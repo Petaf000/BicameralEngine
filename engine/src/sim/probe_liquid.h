@@ -22,10 +22,14 @@
 //   - **質量・成分・エネルギー**: 面の運動量から 1 刻みに動く質量を決め(上流のセルから。出る合計がセルの液体を超えれば比で縮める)、
 //     上流の液体の成分の比で物質量を、液体のぶんのエネルギー(熱 × 動く熱容量 ÷ セルの熱容量 + 動く化学)を一緒に動かす。
 //     整数で引いて足すので、物質量とエネルギーは構造的にビット単位で保存。前の刻みの値だけから決める(Jacobi 型。順番に依存しない)。
-//   - **壁**: 液体でない凝縮相(固体)を少しでも含むセルは液体を通さない(仮。固体の体積を分け合うのは T-0612)。区画の外の面も壁。
+//   - **固体と体積を分け合う**(T-0612・ADR-0268。sim/cell_volume): 固体が占める体積(物質の密度から。書いていなければ 0)を除いた
+//     「空き」に液体が入る。満ち具合・溢れ・下の支えは空きで数え、圧力は「質量 ÷ 空き」(孔の中の水も開けた水と同じ高さで同じ圧力)。
+//     面は両側の空きの小さい方だけ開き、力と重さもその割合(残りは固体が受けて帳簿の壁へ)。空きが 0 のセルと区画の外の面は壁。
+//     孔が液体で満ちるまで上の液体を支えない(上の水は孔に染み込む)。
 //   - **段の順**: 適用 → 物理の熱 → 表の差し替え → 気体 → **液体** → 伝導と反応(ProbeReference::Advance の (1c))。
 // 今の制限(分けたチケット): 粘りは区画の設定(物質に書くのは T-0628)・相変化は反応表(T-0611)・
-//   気体と体積を分け合わない(液体が入っても空気は押し出されない。T-0612)・GPU・保存点・状態のハッシュへの組み込みは名前だけ。
+//   閉じた所の空気の圧力を液体の圧力に足さない(T-0618)・GPU・保存点・状態のハッシュへの組み込みは名前だけ。
+//   (液体が入ったセルの空気は、気体の空きが減って圧力が上がり、気体の段で押し出される。sim/probe_gas)
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
@@ -144,6 +148,7 @@ namespace bicameral::sim {
 
         // Step の段(probe_liquid.cpp)
         struct StepWork;
+        [[nodiscard]] uint32_t FaceOpenQ16At(const StepWork& work, uint32_t region, uint32_t axis) const;
         void ComputePressure(StepWork& work, ProbeLiquidStepReport& report) const;
         void ApplyForces(StepWork& work, ProbeLiquidStepReport& report);
         void MoveMass(const BakedReactionTable& table, std::span<reaction::RxCell> cells, StepWork& work,

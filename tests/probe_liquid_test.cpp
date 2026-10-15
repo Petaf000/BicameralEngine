@@ -54,7 +54,7 @@ namespace {
     constexpr uint64_t PARTIAL_WATER = 2000000000;  // µmol(世界の刻みの試験。セルの量の上限 T-0558 の前の値)
     constexpr uint64_t NITROGEN = 4000000;          // µmol(0.125 m³ の空気・300 K・1 気圧)
     constexpr uint64_t OXYGEN = 1000000;
-    constexpr uint64_t STONE = 20000000;  // µmol
+    constexpr uint64_t STONE = 21000000000;  // µmol(密度 2000 kg/m³ で 0.125 m³ を満たす 20,812 mol の少し上。T-0612)
     constexpr int32_t TEMPERATURE = 300000;
 
     constexpr uint64_t SETTLE_TICKS = 1800;  // 30 秒(T-0610 で摩擦を弱めて 15 → 30 秒)
@@ -73,12 +73,14 @@ namespace {
                                       .thermalConductivity = 600,
                                       .liquid = true,
                                       .density = withDensity ? 1000u : 0u});
-        definition.species.push_back({.name = "stone",
-                                      .composition = {{.element = "C", .count = 1}},
-                                      .formationEnthalpy = 0,
-                                      .heatCapacity = 8500,
-                                      .thermalConductivity = 2000,
-                                      .condensed = true});
+        definition.species.push_back(
+            {.name = "stone",
+             .composition = {{.element = "C", .count = 1}},
+             .formationEnthalpy = 0,
+             .heatCapacity = 8500,
+             .thermalConductivity = 2000,
+             .condensed = true,
+             .density = 2000});  // セルを満たす石は液体の壁(T-0612。密度を書かない固体は場所を取らない)
 
         auto baked = BakeReactionTable(definition);
         if (!baked) {

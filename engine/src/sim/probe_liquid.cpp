@@ -7,6 +7,7 @@
 #include "common/fixed.hlsli"
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
+#include "sim/cell_volume.h"
 
 namespace bicameral::sim {
 
@@ -44,10 +45,9 @@ namespace bicameral::sim {
             return species < table.speciesLiquid.size() && table.speciesLiquid[species] != 0;
         }
 
-        // 液体でない凝縮相(固体)。少しでもあれば液体を通さない(仮。T-0612)
-        bool IsSolid(const BakedReactionTable& table, uint32_t species) {
-            return species < table.speciesCondensed.size() && table.speciesCondensed[species] != 0 &&
-                   !IsLiquid(table, species);
+        // value × numerator ÷ denominator(0 の向きへ切り捨て)
+        int64_t ScaleSigned(int64_t value, uint64_t numerator, uint64_t denominator) {
+            return fx::FxApplySign(MulDiv(fx::FxAbsU64(value), numerator, denominator), value < 0);
         }
 
         uint64_t Mix(uint64_t hash, uint64_t value) {
@@ -61,9 +61,14 @@ namespace bicameral::sim {
 
         // 刻みの初めのセルから読んだ値(区画のセルごと)
         struct LiquidCellState {
-            bool wall = false;
-            uint64_t mass = 0;      // mg(1 mg 未満の液体は流れない)
-            uint64_t volume = 0;    // pL
+            bool wall = false;    // 固体で満ちている(空き 0)
+            uint64_t mass = 0;    // mg(1 mg 未満の液体は流れない)
+            uint64_t volume = 0;  // pL
+            // --- セルの空き(固体が占めない体積。T-0612・ADR-0268。sim/cell_volume)---
+            uint32_t open = CELL_OPEN_FULL;  // Q16
+            uint64_t room = 0;               // 液体が入れる体積(pL。セル − 固体)
+            uint64_t equivalent =
+                0;  // 空きが液体で満ちた時の質量を、セル全部の液体に直したもの(mg = 質量 ÷ 空き)。圧力はこれで書く
             int64_t heat = 0;       // µJ(= エネルギー × 1000 − 化学)
             uint64_t capacity = 0;  // nJ/K(セルの全部の成分)
         };
@@ -76,24 +81,33 @@ namespace bicameral::sim {
                 const uint64_t amount = cell.amounts[i];
                 chemical += (int64_t)amount * table.species[species].h0;
                 state.capacity += amount * table.species[species].heatCapacity;
-                if (amount != 0 && IsSolid(table, species))
-                    state.wall = true;
             }
 
             state.mass = ProbeLiquidField::LiquidMass(table, cell) / 1000000;  // ng → mg
             state.volume = ProbeLiquidField::LiquidVolume(table, cell);
+
+            // --- 固体が占める体積を除いた空き(密度を書いていない固体は場所を取らない)---
+            const CellVolumeShare share = ShareCellVolume(table, cell);
+            state.open = LiquidOpenQ16(share, PROBE_LIQUID_CELL_VOLUME_PICOLITERS);
+            state.wall = state.open == 0;
+            state.room = PROBE_LIQUID_CELL_VOLUME_PICOLITERS -
+                         std::min(share.solid, PROBE_LIQUID_CELL_VOLUME_PICOLITERS);
+            state.equivalent = state.open == CELL_OPEN_FULL || state.open == 0
+                                   ? state.mass
+                                   : MulDiv(state.mass, CELL_OPEN_FULL, state.open);
             state.heat = (cell.energy * 1000) - chemical;
             FX_ASSERT(state.heat >= 0);
 
             return state;
         }
 
-        // 下のセルが支える割合(pL の単位で、セルの体積 = 全部)。壁は全部・液体は満ち具合・空は 0
-        uint64_t SupportBelow(const LiquidCellState& below) {
+        // 下のセルが支える割合(分子, 分母)。固体で満ちたセルは全部・液体は空きの満ち具合・空は 0
+        // (孔のある固体は、孔が液体で満ちるまで上の液体を支えない = 上の水は孔に染み込む)
+        std::array<uint64_t, 2> SupportBelow(const LiquidCellState& below) {
             if (below.wall)
-                return PROBE_LIQUID_CELL_VOLUME_PICOLITERS;
+                return {1, 1};
 
-            return std::min(below.volume, PROBE_LIQUID_CELL_VOLUME_PICOLITERS);
+            return {std::min(below.volume, below.room), below.room};
         }
 
         // 物質量の増減(セルごと。物質 ID → 増減)
@@ -439,6 +453,15 @@ namespace bicameral::sim {
         return report;
     }
 
+    // 区画のセル region の + 側の面(格子の軸 axis)の開き(Q16。両側の空きの小さい方。T-0612・ADR-0268)。
+    // 0 = 閉じている(区画の外・どちらかのセルが固体で満ちている)。力・移流・運動のエネルギーの閉じた面の判定はすべてここ
+    uint32_t ProbeLiquidField::FaceOpenQ16At(const StepWork& work, uint32_t region, uint32_t axis) const {
+        if (RegionCoordinates(region)[axis] + 1 >= m_options.sizeCells[axis])
+            return 0;
+
+        return FaceOpenQ16(work.states[region].open, work.states[region + work.stride[axis]].open);
+    }
+
     // 圧力(質量の単位。P = 2 × 支えている上の液体 + 自分 + 溢れ)。列ごとに上から
     void ProbeLiquidField::ComputePressure(StepWork& work, ProbeLiquidStepReport& report) const {
         const auto size = m_options.sizeCells;
@@ -455,22 +478,23 @@ namespace bicameral::sim {
                         continue;
                     }
 
+                    // 圧力は空きの体積(セル − 固体)と「セル全部の液体に直した質量」で書く(孔の中の水の圧力 = 開けた水と同じ高さの圧力)
                     uint64_t overfill = 0;
-                    if (state.volume > PROBE_LIQUID_CELL_VOLUME_PICOLITERS) {
+                    if (state.volume > state.room) {
                         ++report.overfilledCells;
-                        overfill = MulDiv(state.mass * m_options.overfillStiffness,
-                                          state.volume - PROBE_LIQUID_CELL_VOLUME_PICOLITERS, state.volume);
+                        overfill = MulDiv(state.equivalent * m_options.overfillStiffness, state.volume - state.room,
+                                          state.volume);
                     }
 
                     // 満ちていないセルは上の液体を満ち具合の分だけ支える(残りは落ちてくる力になる)
-                    const uint64_t filled = std::min(state.volume, PROBE_LIQUID_CELL_VOLUME_PICOLITERS);
-                    const uint64_t supported = MulDiv(above, filled, PROBE_LIQUID_CELL_VOLUME_PICOLITERS);
+                    const uint64_t filled = std::min(state.volume, state.room);
+                    const uint64_t supported = MulDiv(above, filled, state.room);
                     // 下に支えられている分だけ圧力になる(下が空のセルは落ちている途中で、横へ押し広げない)
-                    const uint64_t support = y == 0 ? PROBE_LIQUID_CELL_VOLUME_PICOLITERS
-                                                    : SupportBelow(states[RegionIndex(x, y - 1, z)]);
-                    work.pressure[region] = (int64_t)MulDiv((2 * supported) + state.mass + overfill, support,
-                                                            PROBE_LIQUID_CELL_VOLUME_PICOLITERS);
-                    above = supported + state.mass;
+                    const std::array<uint64_t, 2> support = y == 0 ? std::array<uint64_t, 2>{1, 1}
+                                                                   : SupportBelow(states[RegionIndex(x, y - 1, z)]);
+                    work.pressure[region] = (int64_t)MulDiv((2 * supported) + state.equivalent + overfill, support[0],
+                                                            support[1]);
+                    above = supported + state.equivalent;
                 }
             }
         }
@@ -478,7 +502,6 @@ namespace bicameral::sim {
 
     // 面の運動量に力(圧力の差・重さ・壁・摩擦)を足し、望む動く質量を決める
     void ProbeLiquidField::ApplyForces(StepWork& work, ProbeLiquidStepReport& report) {
-        const auto size = m_options.sizeCells;
         const uint32_t count = RegionCellCount();
         const auto& states = work.states;
         const auto& pressure = work.pressure;
@@ -492,15 +515,13 @@ namespace bicameral::sim {
                 int64_t& face = m_faces[axis][region];
 
                 // − 側が区画の外か壁なら、その面の押し返しは壁から(+ 向き)
-                const bool minusClosed = at[axis] == 0 || states[region - step].wall;
+                const bool minusClosed = at[axis] == 0 || FaceOpenQ16At(work, region - step, axis) == 0;
                 if (!a.wall && minusClosed)
                     report.wall[axis] += pressure[region];
 
-                // + 側の面
-                const bool inside = at[axis] + 1 < size[axis];
-                const uint32_t neighbor = inside ? region + step : region;
-                const bool open = inside && !a.wall && !states[neighbor].wall;
-                if (!open) {
+                // + 側の面(一部だけ開いた面 = 孔は、力も重さも開いた割合だけ)
+                const uint32_t faceOpen = FaceOpenQ16At(work, region, axis);
+                if (faceOpen == 0) {
                     if (!a.wall)
                         report.wall[axis] -= pressure[region];
 
@@ -510,12 +531,20 @@ namespace bicameral::sim {
                     continue;
                 }
 
+                const uint32_t neighbor = region + step;
                 const LiquidCellState& b = states[neighbor];
-                face += pressure[region] - pressure[neighbor];
-                if (axis == 1) {
-                    const auto weight = (int64_t)(a.mass + b.mass);
-                    face -= weight;
+                const int64_t push = pressure[region] - pressure[neighbor];
+                const auto weight = axis == 1 ? (int64_t)(a.equivalent + b.equivalent) : 0;
+                if (faceOpen == CELL_OPEN_FULL) {
+                    face += push - weight;
                     report.gravity[axis] -= weight;
+                } else {
+                    // 一部だけ開いた面(孔): 力も重さも開いた割合だけ。押し切れない分は固体が受ける(帳簿の壁へ。T-0612)
+                    const int64_t openWeight = ScaleSigned(weight, faceOpen, CELL_OPEN_FULL);
+                    const int64_t change = ScaleSigned(push - weight, faceOpen, CELL_OPEN_FULL);
+                    face += change;
+                    report.gravity[axis] -= openWeight;
+                    report.wall[axis] += change - push + openWeight;
                 }
 
                 // まわりに液体が無い面の運動量は行き場が無い。移流なし(T-0609 の形)では上流が空の面も
@@ -619,9 +648,7 @@ namespace bicameral::sim {
                         work.kineticCarried[axis][to] += energy;  // 閉じた面へ入った分は SettleEnergy で熱に
 
                         // 閉じた面(壁・区画の外)へ入る運動量は壁が受ける
-                        const bool closed = states[to].wall || RegionCoordinates(to)[axis] + 1 >= size[axis] ||
-                                            states[to + step].wall;
-                        if (closed)
+                        if (FaceOpenQ16At(work, to, axis) == 0)
                             report.wall[axis] -= momentum;
                         else
                             m_faces[axis][to] += momentum;
@@ -650,6 +677,7 @@ namespace bicameral::sim {
         for (uint32_t axis = 0; axis < 3; ++axis) {
             for (uint32_t region = 0; region < count; ++region) {
                 int64_t& face = m_faces[axis][region];
+                FX_ASSERT(face == 0 || FaceOpenQ16At(work, region, axis) != 0);  // 閉じた面の運動量は壁が受けた
                 const bool inside = RegionCoordinates(region)[axis] + 1 < size[axis];
                 const uint32_t neighbor = region + work.stride[axis];
                 const uint64_t doubled = inside ? mass[region] + mass[neighbor] : 0;
