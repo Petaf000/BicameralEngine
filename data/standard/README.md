@@ -7,8 +7,8 @@
 | パッケージ | 中身 | 依存 |
 |---|---|---|
 | real_elements | 現実の元素(C・H・N・O・Ar の原子量) | なし |
-| real_matter | 現実の物質(空気の気体・水蒸気・CO・炭・セルロース。値は現実のまま) | real_elements |
-| real_reactions | 現実に則した反応(セルロースの熱分解と燃焼・炭の燃焼・Boudouard) | real_matter |
+| real_matter | 現実の物質(空気の気体・水蒸気・液体の水・氷・CO・炭・セルロース。値は現実のまま) | real_elements |
+| real_reactions | 現実に則した反応(セルロースの熱分解と燃焼・炭の燃焼・Boudouard・水の蒸発と凝縮・氷の融解と凝固〔T-0611・ADR-0272〕) | real_matter |
 | earth_environment | 地球の環境(重力・気体の音速の基準・基準の大気の高さの分布〔ISA の 8 点〕と海面の圧力)と、高さの点を書く補助 `atmosphere.luau`(T-0499) | real_matter |
 | earth_air | 世界のセルを地球の基準の大気(15 ℃・1 気圧の乾いた空気)で満たす | real_matter |
 

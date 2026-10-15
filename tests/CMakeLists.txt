@@ -168,6 +168,12 @@ target_precompile_headers(probe_liquid_test PRIVATE ${PROJECT_SOURCE_DIR}/engine
 target_link_libraries(probe_liquid_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME probe_liquid COMMAND probe_liquid_test)
 set_tests_properties(probe_liquid PROPERTIES TIMEOUT 1800)
+
+add_executable(probe_phase_test probe_phase_test.cpp)  # 水の相変化を反応表の規則で(T-0611・ADR-0272。CPU だけ)
+target_precompile_headers(probe_phase_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(probe_phase_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME probe_phase COMMAND probe_phase_test)
+set_tests_properties(probe_phase PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
 # 世界の組み立て(T-0398・ADR-0172): 試験のパッケージの world_cells・world_bodies が前の C++ の組み立て(木箱・積み木)とビット一致・

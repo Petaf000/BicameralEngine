@@ -32,6 +32,8 @@ export type Species = {
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
     condensed: boolean?, -- 凝縮相(固体・液体)。省ける(既定 気体)。坂の計器が活量を 1 と置く(T-0518。相が入るまでの仮の欄)
     radiation_absorption_mm2_per_mol: number?, -- 1 mol が放射を遮る面積(mm²/mol)。省ける(既定 0 = 放射しない・吸わない)。セルの放射率 = 1 − e^−Σ a·n ÷ 面(T-0583・ADR-0252)
+    phase: ("gas" | "solid" | "liquid")?, -- 相。省ける(既定 気体。condensed と書いたら同じ向き)。液体は液体の区画が流す(T-0609・ADR-0266)
+    density_kg_per_m3: number?, -- 密度。液体には要る(T-0609)
 }
 
 export type ReactionRate = {
@@ -43,7 +45,7 @@ export type Reaction = {
     reactants: { [string]: number }, -- 物質 → 係数
     products: { [string]: number },
     rate: ReactionRate,
-    orders: { [string]: number }?, -- 物質 → 次数(0 か 1)。省けば反応物は全部 1
+    orders: { [string]: number }?, -- 物質 → 次数(0 か 1)。省けば反応物は全部 1。書かない反応物は 0。全部 0 なら A は mol/(m³·s)(T-0611)
     reaction_enthalpy_j_per_mol: number?, -- 文献の反応熱(検査用。食い違えばベイクが警告)
 }
 

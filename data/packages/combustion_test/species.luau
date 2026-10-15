@@ -11,6 +11,8 @@ local realSpecies: { [string]: Species } = realMatter.species
 local SOLIDS: { [string]: boolean } = {
     cellulose = true,
     carbon = true,
+    water = true, -- 液体の水と氷も凝縮相の倍率(T-0611)
+    ice = true,
 }
 
 -- 足す物質: 触るための仮の魔素(気体。T-0225・D-449・D-451)。エディタで値を動かして試すための試験用の物質で、ゲームの中身ではない(D-006)。

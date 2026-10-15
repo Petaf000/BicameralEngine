@@ -14,7 +14,15 @@
 --     (結晶のグルコース 209.2 J/(mol·K) から見積もった。照合先の候補: Goldberg et al., J. Chem. Thermodyn. 81 (2015) 184)。
 --     セルロースの値を ±100 J/(mol·K) 動かしても、セルロースの規則が坂を下る向きは変わらない(T-0491 の試験の表)。
 --   凝縮相(任意の欄 condensed。坂の計器〔T-0518〕が活量を 1 と置く。気体は分圧): 炭(黒鉛)とセルロース。
--- 液体の水と氷は相変化(T-0415)と一緒に足す。⑤ の場面に要る分だけ(D-471 ②)。
+--   水の 3 相(T-0611・ADR-0272。湯気は上の water_vapor。相変化は real_reactions の規則):
+--     液体の水(water): 生成エンタルピー −285.830 kJ/mol・S° 69.95 J/(mol·K)(CODATA Key Values 1989)・
+--       Cp 75.33 J/(mol·K)(NIST-JANAF 298.15 K)・熱伝導率 0.598 W/(m·K)(25 ℃。IAPWS 2011 の目安)・
+--       密度 1000 kg/m³(0 ℃ 999.84・25 ℃ 997.05 を丸めた。一定と置く)。蒸発熱は生成エンタルピーの差 44.004 kJ/mol(298.15 K)。
+--     氷(ice。Ih): 融解熱 6.010 kJ/mol・融解のエントロピー 22.00 J/(mol·K)(273.15 K。どちらも教科書の値)・
+--       Cp 38.09 J/(mol·K)(273 K 付近。Giauque & Stout 1936 の値の目安)・熱伝導率 2.22 W/(m·K)(0 ℃)・密度 917 kg/m³(0 ℃ 916.7)。
+--       エンジンは比熱を一定と置くので、273.15 K で融解熱 6.010 kJ/mol・ΔS 22.00 になるように 298.15 K の値へ戻して書く
+--       (生成エンタルピー = −285.830 − 6.010 − (75.33 − 38.09) × 25.00 / 1000 = −292.771 kJ/mol、
+--        S° = 69.95 − 22.00 − 37.24 × ln(298.15 / 273.15) = 44.686 J/(mol·K)。273.15 K の S は 41.4 で、文献の 41.0 と合う)。
 return {
     species = {
         oxygen = {
@@ -67,6 +75,26 @@ return {
             thermal_conductivity_mw_per_m_k = 100,
             standard_entropy_mj_per_mol_k = 5740,
             condensed = true,
+        },
+        -- 液体の水(T-0611。低い方へ流れるのは液体の区画〔T-0609〕。湯気・氷との行き来は real_reactions の規則)
+        water = {
+            composition = { H = 2, O = 1 },
+            formation_enthalpy_j_per_mol = -285830,
+            heat_capacity_mj_per_mol_k = 75330,
+            thermal_conductivity_mw_per_m_k = 598,
+            standard_entropy_mj_per_mol_k = 69950,
+            phase = "liquid",
+            density_kg_per_m3 = 1000,
+        },
+        -- 氷(T-0611。値は 298.15 K へ戻したもの。上の出典)
+        ice = {
+            composition = { H = 2, O = 1 },
+            formation_enthalpy_j_per_mol = -292771,
+            heat_capacity_mj_per_mol_k = 38090,
+            thermal_conductivity_mw_per_m_k = 2220,
+            standard_entropy_mj_per_mol_k = 44686,
+            phase = "solid",
+            density_kg_per_m3 = 917,
         },
         -- 木・草の燃える部分(セルロース C6H10O5 の 1 単位)
         cellulose = {

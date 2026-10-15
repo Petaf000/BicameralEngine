@@ -144,8 +144,9 @@ namespace {
             return;
         }
 
-        // 使わない 0 番 + 標準パッケージの現実の物質 8(argon を含む。T-0498)+ 仮の魔素の物質 1。規則は現実 5 + 仮の魔素 2(T-0225)
-        EXPECT(luau->species.size() == 10 && luau->rules.size() == 7);
+        // 使わない 0 番 + 標準パッケージの現実の物質 10(argon・液体の水・氷を含む。T-0498・T-0611)+ 仮の魔素の物質 1。
+        // 規則は現実 9(水の相変化 4。T-0611)+ 仮の魔素 2(T-0225)
+        EXPECT(luau->species.size() == 12 && luau->rules.size() == 11);
         EXPECT(luau->rates.size() == luau->rules.size() * reaction::RX_RATE_TABLE_KELVINS);
         PrintWarnings(*luau);
         EXPECT(OtherWarningCount(*luau) == 0);  // 文献の反応熱は生成エンタルピーの差と 1 kJ/mol 以内
@@ -283,7 +284,7 @@ namespace {
         }
 
         PrintWarnings(*baked);
-        EXPECT(baked->species.size() == 11 && baked->rules.size() == 8 && OtherWarningCount(*baked) == 0);
+        EXPECT(baked->species.size() == 13 && baked->rules.size() == 12 && OtherWarningCount(*baked) == 0);
         // hydrogen に標準エントロピーを書いていないので water_gas の坂は調べられない(まとめて 1 行。表は当たる。T-0492)
         EXPECT(HasSlopeWarning(*baked, "坂を調べられない規則 1 本: water_gas") && HasSlopeWarning(*baked, "hydrogen"));
         EXPECT(baked->SpeciesId("hydrogen") != 0);

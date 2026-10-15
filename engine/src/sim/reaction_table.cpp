@@ -262,9 +262,11 @@ namespace bicameral::sim {
             if (!products)
                 return std::unexpected(products.error());
 
+            // 次数 1 の反応物は 0〜2 個。0 個 = 反応物が全部次数 0(あれば効く)の規則で、進みはセルの体積あたり一定
+            // (凝縮相は量によらず活量 1: 蒸発・融解。A は mol/(m³·s)。T-0611・ADR-0272)
             const int firstOrderCount = std::popcount(reactants->firstOrderMask);
-            if (firstOrderCount < 1 || firstOrderCount > 2)
-                return std::unexpected(std::format("規則 {}: 次数 1 の反応物は 1〜2 個", definition.name));
+            if (firstOrderCount > 2)
+                return std::unexpected(std::format("規則 {}: 次数 1 の反応物は 0〜2 個", definition.name));
 
             rule.reactantCount = reactants->count;
             rule.productCount = products->count;
