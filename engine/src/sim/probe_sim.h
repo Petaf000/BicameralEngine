@@ -48,6 +48,7 @@
 #include "sim/gpu_physics.h"
 #include "sim/physics_scene.h"
 #include "sim/probe_gas.h"
+#include "sim/probe_liquid.h"
 #include "sim/reaction_table.h"
 #include "sim/species_remap.h"
 
@@ -594,6 +595,12 @@ namespace bicameral::sim {
         [[nodiscard]] const ProbeGasField* GasField() const { return m_gas ? &*m_gas : nullptr; }
         [[nodiscard]] const ProbeGasStepReport& LastGasReport() const { return m_gasReport; }
 
+        // 液体の区画を載せる(T-0609・ADR-0266。CPU だけ)。次の Advance から、気体の後・伝導と反応の前に液体の 1 刻みを入れる。
+        // 区画が空・重力が 0 の表などは断る(呼ばなければ今までと同じ)
+        [[nodiscard]] std::expected<void, std::string> EnableLiquid(const ProbeLiquidOptions& options);
+        [[nodiscard]] const ProbeLiquidField* LiquidField() const { return m_liquid ? &*m_liquid : nullptr; }
+        [[nodiscard]] const ProbeLiquidStepReport& LastLiquidReport() const { return m_liquidReport; }
+
         // 最後の Advance で物理の熱の入口が足したエネルギー(mJ。T-0542)
         [[nodiscard]] int64_t PhysicsHeatEnergy() const { return m_physicsHeatEnergy; }
 
@@ -629,6 +636,8 @@ namespace bicameral::sim {
         SpeciesRemapReport m_remapReport;
         std::optional<ProbeGasField> m_gas;  // 気体の区画(T-0590。無ければ流さない)
         ProbeGasStepReport m_gasReport;
+        std::optional<ProbeLiquidField> m_liquid;  // 液体の区画(T-0609。無ければ流さない)
+        ProbeLiquidStepReport m_liquidReport;
 
         void RemapSpecies(uint64_t tick, const BakedReactionTable& newTable);
     };

@@ -1498,6 +1498,19 @@ namespace bicameral::sim {
             }
         }
 
+        // (1c) 液体(区画があるときだけ。T-0609・ADR-0266): 気体の後・伝導と反応の前。変わったセルの扱いは気体と同じ
+        if (m_liquid) {
+            std::vector<uint32_t> liquidChanged;
+            m_liquidReport = m_liquid->Step(*m_table, std::span(m_cells).subspan(currentBase, PROBE_CELL_COUNT),
+                                            liquidChanged);
+            for (const uint32_t index : liquidChanged) {
+                m_caches[currentBase + index] = ProbeMakeCache(table, m_cells[currentBase + index]);
+                const uint32_t block = BlockOfCellIndex(index);
+                seeds[block] = 1;
+                m_changedMarks[block] = ProbeChangeMark(tick) - 1;
+            }
+        }
+
         m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
         m_scheduled = ScheduleBlocks(seeds);
         m_scheduledBlocks = static_cast<uint32_t>(rng::count(m_scheduled, uint8_t{1}));
@@ -1536,6 +1549,16 @@ namespace bicameral::sim {
             return std::unexpected(field.error());
 
         m_gas = std::move(*field);
+
+        return {};
+    }
+
+    std::expected<void, std::string> ProbeReference::EnableLiquid(const ProbeLiquidOptions& options) {
+        auto field = ProbeLiquidField::Create(*m_table, options);
+        if (!field)
+            return std::unexpected(field.error());
+
+        m_liquid = std::move(*field);
 
         return {};
     }

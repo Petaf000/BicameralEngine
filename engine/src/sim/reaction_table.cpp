@@ -130,6 +130,8 @@ namespace bicameral::sim {
             baked.standardEntropies.emplace_back();
             baked.speciesCondensed.push_back(0);
             baked.speciesRadiationAbsorption.push_back(0);
+            baked.speciesLiquid.push_back(0);
+            baked.speciesMolarVolume.push_back(0);
 
             NameIndex species;
             for (const SpeciesDefinition& entry : definition.species) {
@@ -141,8 +143,19 @@ namespace bicameral::sim {
                     return std::unexpected(result.error());
 
                 baked.standardEntropies.push_back(entry.standardEntropy);
-                baked.speciesCondensed.push_back(entry.condensed ? 1 : 0);
+                baked.speciesCondensed.push_back(entry.condensed || entry.liquid ? 1 : 0);
                 baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
+
+                // 液体(T-0609・ADR-0266): 密度が要る。モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数
+                if (entry.liquid && entry.density == 0)
+                    return std::unexpected(std::format("物質 {}: 液体には密度(density_kg_per_m3)が要る", entry.name));
+
+                const uint64_t molarVolume = entry.density == 0
+                                                 ? 0
+                                                 : ((uint64_t{baked.molarMasses.back()} * 1000) + (entry.density / 2)) /
+                                                       entry.density;
+                baked.speciesLiquid.push_back(entry.liquid ? 1 : 0);
+                baked.speciesMolarVolume.push_back(molarVolume);
             }
 
             return species;

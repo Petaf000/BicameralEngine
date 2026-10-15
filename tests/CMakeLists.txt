@@ -147,6 +147,12 @@ target_precompile_headers(probe_gas_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/sr
 target_link_libraries(probe_gas_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME probe_gas COMMAND probe_gas_test)
 set_tests_properties(probe_gas PROPERTIES TIMEOUT 1800)
+
+add_executable(probe_liquid_test probe_liquid_test.cpp)
+target_precompile_headers(probe_liquid_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(probe_liquid_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME probe_liquid COMMAND probe_liquid_test)
+set_tests_properties(probe_liquid PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
 # 世界の組み立て(T-0398・ADR-0172): 試験のパッケージの world_cells・world_bodies が前の C++ の組み立て(木箱・積み木)とビット一致・
