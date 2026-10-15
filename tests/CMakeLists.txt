@@ -572,6 +572,11 @@ set_tests_properties(gpu_probe_peek gpu_probe_peek_warp PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test(gpu_probe_fire_test)
 target_link_libraries(gpu_probe_fire_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 --no-gbv)
+# 仮の世界の GPU の刻みに気体の区画(T-0592): 静かな大気と燃える木箱が CPU リファレンス(probe_gas)と毎刻みビット一致
+bicameral_add_gpu_test(gpu_probe_gas_test)
+target_link_libraries(gpu_probe_gas_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_gas gpu_probe_gas_test gpu --no-gbv)
+bicameral_add_gpu_test_case(gpu_probe_gas_warp gpu_probe_gas_test warp --warp)
 # ブランクの世界(T-0371・D-455): 空の表・物の無い世界の GPU の刻みが CPU とハッシュ一致し、刻み 0 のまま変わらない
 bicameral_add_gpu_test(gpu_probe_blank_test)
 target_link_libraries(gpu_probe_blank_test PRIVATE bicameral_sim bicameral_reaction_script)
@@ -894,7 +899,8 @@ foreach(_name IN ITEMS
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
-    gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test world_layout_test play_metric_test
+    gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
+    world_layout_test play_metric_test
     gpu_play_metric_test environment_package_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

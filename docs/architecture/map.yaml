@@ -290,6 +290,9 @@ views:
       - { id: probegas, group: simlib, label: "ProbeGasField::Step<br/>仮の世界に気体を載せる(CPU。T-0590)<br/>セルの気体の成分 → 気体の箱 → セルへ書き戻す",
           code: "engine/src/sim/probe_gas.cpp::ProbeGasField::Step", ticket: T-0590, doc: docs/design/07-transport.md,
           note: "セルが唯一の真実(気体の成分 = 凝縮相でない物質)。足した欄は運動量と運動エネルギーのぶんだけ。区画の中だけ流す・圧力は陽解法か投影を選ぶ。伝導と反応の前の段。ADR-0256" }
+      - { id: probesimgas, group: simlib, label: "ProbeSim::RecordGasGather<br/>仮の世界の GPU の刻みに気体の区画(T-0592)<br/>適用の単位の中: 区画 → 気体の箱 → gas_step → 区画",
+          code: "engine/src/sim/probe_sim_gas.cpp::ProbeSim::RecordGasGather", ticket: T-0592, doc: docs/design/07-transport.md,
+          note: "欄の物質(区画の気体の物質。ID の順・4 つまで〔T-0598〕)と設定・開いた境界の外を GPU が刻みごとに作る(shaders/sim/probe_gas_tick.hlsl)。丸めの鍵は物質 ID。CPU の ProbeGasField::Step と毎刻みビット一致(gpu_probe_gas_test)。陽解法だけ・表の差し替え・保存点・写しの早送りはまだ断る(T-0620・T-0621)。ADR-0270" }
       - { id: probeliquid, group: simlib, label: "ProbeLiquidField::Step<br/>仮の世界に液体を載せる(CPU。T-0609)<br/>列の静水圧 → 面の運動量 → 上流から動かす",
           code: "engine/src/sim/probe_liquid.cpp::ProbeLiquidField::Step", ticket: T-0609, doc: docs/design/07-transport.md,
           note: "セルが唯一の真実(液体の成分 = phase が liquid の物質)。足した欄は面の運動量だけ。3D のパイプ模型 + 列の静水圧(満ち具合と下の支えで重み)。運動量は内側の力が整数で打ち消し合い、外から入った分は帳簿。気体の後・伝導と反応の前の段。ADR-0266" }
@@ -559,6 +562,7 @@ views:
       - [probereference, probegas, "伝導と反応の前"]
       - [probegas, gasreference, "陽解法"]
       - [probegas, gasprojection, "投影"]
+      - [probesimgas, probegas, "毎刻みビット一致"]
       - [probereference, probeliquid, "気体の後"]
       - [gasprojection, gasreference, "式を作る・当てる"]
       - [gasprojection, implicitcpu, "多重格子を流用"]

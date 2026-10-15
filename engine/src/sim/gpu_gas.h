@@ -33,6 +33,17 @@ namespace bicameral::sim {
         // 1 刻み(config.substeps 回の小刻み × 9 段)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
+        // 外から刻みを決めて 1 刻み(仮の世界の気体の段。T-0592): 小刻みの通し番号は tick × substeps から(内の刻みの数は進めない)。
+        // parameters・ghost は t0(設定)・t2(開いた境界の外)に結ぶ別のバッファ(呼ぶ側が段ごとに作る。NON_PIXEL_SHADER_RESOURCE の状態)。
+        // t1(層の基準の導く値)は作った時の箱のまま(成分の並びによらない)
+        void RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                          D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost) const;
+
+        // 箱のセル(u0。GasGpuCell × セル)と帳簿(u5。GAS_GPU_LEDGER_BYTES)。仮の世界の段が読み書きする(T-0592)
+        [[nodiscard]] ID3D12Resource* CellBuffer() const { return m_uavs[0].Get(); }
+        [[nodiscard]] ID3D12Resource* LedgerBuffer() const { return m_uavs[5].Get(); }
+        [[nodiscard]] uint32_t Substeps() const { return m_substeps; }
+
         // 環境の値のホットリロード(T-0444・ADR-0194): box(SetGasEnvironment で環境を替えた後の設定・係数・層の基準)から
         // t0〜t2 を作り直して写す。次に記録する RecordStep から新しい値で刻む(刻みの境目で呼ぶ)。前の t0〜t2 と写しの元は keepAlive へ
         // (呼ぶ側がこのリストが GPU で終わるまで持つ)。箱の作りは同じであること(CheckGasEnvironment)。作れなければ false
@@ -88,7 +99,10 @@ namespace bicameral::sim {
         [[nodiscard]] static std::array<gpu::ResidentBuffer, 3> CreateLayerBuffers(ID3D12Device* device,
                                                                                    const GasBox& box);
         void RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
-                        const Constants& constants) const;
+                        const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const;
+        void RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                            const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const;
+        [[nodiscard]] std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3> OwnSrvs() const;
 
         uint32_t m_cellCount = 0;
         uint32_t m_substeps = 0;

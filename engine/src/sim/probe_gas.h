@@ -104,6 +104,10 @@ namespace bicameral::sim {
         [[nodiscard]] uint32_t GridIndex(uint32_t region) const;
         [[nodiscard]] uint32_t RegionCellCount() const { return (uint32_t)m_momentum.size(); }
 
+        // 基準の大気の物質(ID の順)と、それだけを欄にした静かな箱(GPU の段の設定の型・層の基準・開いた境界の外を作る。T-0592)
+        [[nodiscard]] std::span<const uint32_t> AtmosphereSpecies() const { return m_atmosphereSpecies; }
+        [[nodiscard]] GasBox MakeAtmosphereBox(const BakedReactionTable& table) const;
+
         // 気体の欄(運動量・運動エネルギーのぶん・帳簿)のハッシュ(決定性の検査。セルは ProbeStateHash)
         [[nodiscard]] uint64_t Hash() const;
 
