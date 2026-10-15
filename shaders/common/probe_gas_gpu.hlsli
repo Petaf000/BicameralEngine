@@ -5,9 +5,11 @@
 // バッファ:
 //   - 気体の欄(gasState。区画のセルごとの ProbeGasCellState。ProbeGasField の m_momentum・m_kinetic と同じ並び = 区画の中の
 //     x + 幅 × (z + 奥行き × y)。運動量の軸は気体の箱の x・y・z〔= 格子の x・z・y〕)
-//   - 気体の作業場(gasWork。RWByteAddressBuffer): 先頭から 制御(刻みごとの欄の物質・断った印・運動量の失せ分・数)・
-//     設定(GasGpuParameters。刻みごとに欄の物質で作る。gas_step の t0)・設定の型(CPU が書く。物質に依らない欄)・見出し(ProbeGasHeader)、
-//     その後ろに見出しが場所を持つ 開いた境界の外(gas_step の t2。刻みごと)・その基準の大気の並びの元・物質ごとの値・物質の印・帳簿・凝縮相のエネルギー
+//   - 気体の作業場(gasWork。RWByteAddressBuffer): 先頭から 制御(欄の物質の数・断った印・運動量の失せ分・数)・
+//     設定の型(CPU が書く。設定の頭の物質に依らない欄)・見出し(ProbeGasHeader)、その後ろに見出しが場所を持つ
+//     設定(頭 + 欄ごとの物質の値。刻みごとに欄の物質で作る。gas_step の t0)・開いた境界の外(gas_step の t2。刻みごと)・その基準の大気の並びの元・
+//     物質ごとの値・物質の印・欄の物質・物質 → 欄・基準の大気の物質・帳簿・凝縮相のエネルギー
+//   - 気体の箱のセル・外は「頭 + 物質量 × 欄の数」の件(gas_gpu.hlsli)。欄の数 = 表の気体の物質の数(区画に現れうる気体の物質の数。T-0598)
 // 構造化バッファの並びが C++ と同じになるよう、64bit の値を先に・32bit の値を後に置き、32bit の数は偶数にそろえる。
 // 浮動小数点は使わない(shaders/common は検査の対象。04 §4)。
 #ifndef BICAMERAL_PROBE_GAS_GPU_HLSLI
@@ -34,8 +36,6 @@ namespace bicameral::sim {
         uint32_t unused[2];
     };
 
-    FX_CONST uint32_t PROBE_GAS_MAX_ATMOSPHERE = GAS_GPU_MAX_SPECIES;  // 基準の大気の物質(GPU の欄の数まで。T-0598)
-
     // 見出し(CPU が作る時に書く。場所は gasWork の先頭からのバイト)
     struct ProbeGasHeader {
         uint32_t regionMin[3];   // 区画(格子の座標。y が上)
@@ -45,32 +45,37 @@ namespace bicameral::sim {
         uint32_t speciesCount;  // 表の物質の数
         uint32_t maskWords;     // 物質の印の語の数
         uint32_t atmosphereCount;
-        uint32_t atmosphereSpecies[PROBE_GAS_MAX_ATMOSPHERE];  // ID の順
-        uint32_t speciesOffset;                                // ProbeGasSpecies × speciesCount
-        uint32_t maskOffset;                                   // uint32 × maskWords
+        uint32_t slotCapacity;           // 欄の数(気体の箱の件の欄。表の気体の物質の数。T-0598)
+        uint32_t speciesOffset;          // ProbeGasSpecies × speciesCount
+        uint32_t maskOffset;             // uint32 × maskWords
         uint32_t ledgerOffset;           // int64 × speciesCount(物質 ID ごと)+ エネルギー + 運動量 × 3(格子の軸)
         uint32_t condensedOffset;        // int64 × regionCellCount(凝縮相のぶんのエネルギー。刻みの中だけ)
-        uint32_t ghostOffset;            // GasGpuCell × layerCount(欄の物質の並び。刻みごと。gas_step の t2)
-        uint32_t ghostAtmosphereOffset;  // GasGpuCell × layerCount(基準の大気の並び。CPU が書く)
-        uint32_t unused[3];
+        uint32_t ghostOffset;            // セルの件 × layerCount(欄の物質の並び。刻みごと。gas_step の t2)
+        uint32_t ghostAtmosphereOffset;  // セルの件 × layerCount(基準の大気の並び。CPU が書く)
+        uint32_t atmosphereOffset;       // uint32 × atmosphereCount(基準の大気の物質。ID の順)
+        uint32_t parametersOffset;       // 設定の頭 + GasGpuSpecies × 欄の数(刻みごと。gas_step の t0)
+        uint32_t slotsOffset;            // uint32 × 欄の数(この刻みの欄の物質。ID の順)
+        uint32_t slotOfOffset;  // uint32 × speciesCount(物質 ID → 欄。この刻みに欄が無ければ PROBE_GAS_NO_SLOT)
     };
 
+    FX_CONST uint32_t PROBE_GAS_NO_SLOT = 0xFFFFFFFFu;
+
     // --- 制御(gasWork の先頭)---
-    FX_CONST uint32_t PROBE_GAS_CONTROL_SLOT_COUNT = 0;  // この刻みの欄の物質の数(GPU の欄の数まで)
-    FX_CONST uint32_t PROBE_GAS_CONTROL_TOO_MANY = 4;    // 区画の気体の物質が欄の数を超えた(この刻みは流さない。T-0598)
-    FX_CONST uint32_t PROBE_GAS_CONTROL_OVERFLOW = 8;    // 書き戻すと 1 セルの成分がインラインの数を超える(流さない)
-    FX_CONST uint32_t PROBE_GAS_CONTROL_CHANGED = 12;    // この刻みに値が変わったセルの数
-    FX_CONST uint32_t PROBE_GAS_CONTROL_SLOTS = 16;      // uint32 × 4(欄の物質。ID の順)
-    FX_CONST uint32_t PROBE_GAS_CONTROL_LOST = 32;       // int64 × 3(気体が無くなったセルの運動量。格子の軸)
+    FX_CONST uint32_t PROBE_GAS_CONTROL_SLOT_COUNT = 0;  // この刻みの欄の物質の数(欄の数まで)
+    // 区画の気体の物質が欄の数を超えた(この刻みは流さない)。欄の数は表の気体の物質の数なので起きない(守りとして残す。T-0598)
+    FX_CONST uint32_t PROBE_GAS_CONTROL_TOO_MANY = 4;
+    FX_CONST uint32_t PROBE_GAS_CONTROL_OVERFLOW = 8;  // 書き戻すと 1 セルの成分がインラインの数を超える(流さない)
+    FX_CONST uint32_t PROBE_GAS_CONTROL_CHANGED = 12;  // この刻みに値が変わったセルの数
+    // 16〜31 は使わない(欄の物質は見出しの slotsOffset。T-0598)
+    FX_CONST uint32_t PROBE_GAS_CONTROL_LOST = 32;              // int64 × 3(気体が無くなったセルの運動量。格子の軸)
     FX_CONST uint32_t PROBE_GAS_CONTROL_SKIPPED_TOO_MANY = 56;  // 数(通し)
     FX_CONST uint32_t PROBE_GAS_CONTROL_SKIPPED_OVERFLOW = 60;  // 数(通し)
     FX_CONST uint32_t PROBE_GAS_CONTROL_STEPPED = 64;           // 流した刻みの数(通し)
     FX_CONST uint32_t PROBE_GAS_CONTROL_SPECIES_SEEN = 68;      // この刻みの区画の気体の物質の数(欄に入らなかった分も)
 
-    FX_CONST uint32_t PROBE_GAS_PARAMETERS_OFFSET = 256;  // GasGpuParameters(刻みごと。t0 は 256 バイトにそろえる)
-    FX_CONST uint32_t PROBE_GAS_TEMPLATE_OFFSET = 512;    // GasGpuParameters の型(物質に依らない欄)
-    FX_CONST uint32_t PROBE_GAS_HEADER_OFFSET = 768;      // ProbeGasHeader
-    FX_CONST uint32_t PROBE_GAS_DYNAMIC_OFFSET = 1024;    // ここから見出しが場所を持つ欄
+    FX_CONST uint32_t PROBE_GAS_TEMPLATE_OFFSET = 512;  // GasGpuParameters の型(設定の頭。物質に依らない欄)
+    FX_CONST uint32_t PROBE_GAS_HEADER_OFFSET = 768;    // ProbeGasHeader
+    FX_CONST uint32_t PROBE_GAS_DYNAMIC_OFFSET = 1024;  // ここから見出しが場所を持つ欄
     FX_CONST uint32_t PROBE_GAS_ALIGNMENT = 256;
     FX_CONST uint32_t PROBE_GAS_SPECIES_BYTES = 32;
     FX_CONST uint32_t PROBE_GAS_CELL_STATE_BYTES = 32;

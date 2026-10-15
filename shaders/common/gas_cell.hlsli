@@ -1,7 +1,8 @@
 // gas_cell.hlsli — 気体の 1 セルの熱力学の部品(導く値・移す塊のエネルギー・勾配の制限・乱数の丸め)を、1 レベルの箱の段
 // (shaders/sim/gas_step.hlsl。T-0185)と多重解像度の木の段(shaders/sim/gas_tree_step.hlsl。T-0209)で共有する。
 // CPU リファレンスは engine/src/sim/gas_reference.cpp の同じ名前の関数(gas_internal.h)で、式はそれを写したもの。
-// include する前に、設定(GasGpuParameters)を引く GAS_P を #define しておく。浮動小数点は使わない(04 §4)。
+// include する前に、設定の頭(GasGpuParameters)を引く GAS_P と、成分 s の値(GasGpuSpecies)を引く GAS_SPECIES(s) を #define しておく。
+// 成分の数に上限は無い(T-0598): セルの成分の和は GasGpuTotals に 1 つずつ足して作る。浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_GAS_CELL_HLSLI
 #define BICAMERAL_GAS_CELL_HLSLI
 
@@ -25,40 +26,34 @@ int64_t MinS64(int64_t a, int64_t b) {
     return a < b ? a : b;
 }
 
+// --- セルの成分の和(T-0598。成分の数に上限が無いので、セルの物質量は件の後ろの欄から 1 つずつ足す)---
+// 和は整数の足し算なので、足す順に依らず gas_reference.cpp の TotalAmount・HeatCapacity・ChemicalEnergy・CellMass と同じ値(04 R2)
+struct GasGpuTotals {
+    uint64_t amount;    // µmol
+    uint64_t capacity;  // 物質量 × 比熱
+    int64_t chemical;   // 物質量 × 生成のエネルギー(µJ)
+    uint64_t mass;      // mg
+};
+
+GasGpuTotals GasZeroTotals() {
+    GasGpuTotals totals;
+    totals.amount = 0;
+    totals.capacity = 0;
+    totals.chemical = 0;
+    totals.mass = 0;
+
+    return totals;
+}
+
+void GasAddSpecies(inout GasGpuTotals totals, uint32_t s, uint64_t amount) {
+    const GasGpuSpecies species = GAS_SPECIES(s);
+    totals.amount += amount;
+    totals.capacity += amount * (uint64_t)species.heatCapacity;
+    totals.chemical += (int64_t)amount * species.formationEnergy;
+    totals.mass += MulShiftU64(amount, species.massPerAmount, 32);
+}
+
 // --- セルから導く値(gas_reference.cpp の DeriveRaw・DeriveGasCell)---
-
-uint64_t TotalAmount(GasGpuCell cell) {
-    uint64_t total = 0;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        total += cell.amounts[s];
-    }
-
-    return total;
-}
-
-uint64_t HeatCapacity(GasGpuCell cell) {
-    uint64_t capacity = 0;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s)
-        capacity += cell.amounts[s] * (uint64_t)GAS_P.heatCapacity[s];
-
-    return capacity;
-}
-
-int64_t ChemicalEnergy(GasGpuCell cell) {
-    int64_t chemical = 0;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s)
-        chemical += (int64_t)cell.amounts[s] * GAS_P.formationEnergy[s];
-
-    return chemical;
-}
-
-uint64_t CellMass(GasGpuCell cell) {
-    uint64_t mass = 0;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s)
-        mass += MulShiftU64(cell.amounts[s], GAS_P.massPerAmount[s], 32);
-
-    return mass;
-}
 
 // 運動エネルギー(µJ。gas_reference.cpp の KineticEnergy)。等温は 0
 int64_t KineticEnergy(GasGpuCell cell, uint64_t mass) {
@@ -75,27 +70,26 @@ int64_t KineticEnergy(GasGpuCell cell, uint64_t mass) {
     return (int64_t)(scaledSquare / mass);
 }
 
-uint32_t CellTemperature(GasGpuCell cell, int64_t kineticMicroJoule) {
-    const int64_t heat = cell.energy * 1000 - ChemicalEnergy(cell) - kineticMicroJoule;
-    const uint64_t capacity = HeatCapacity(cell);
-    if (heat <= 0 || capacity == 0)
+uint32_t CellTemperature(GasGpuCell cell, GasGpuTotals totals, int64_t kineticMicroJoule) {
+    const int64_t heat = cell.energy * 1000 - totals.chemical - kineticMicroJoule;
+    if (heat <= 0 || totals.capacity == 0)
         return 0;
 
-    const uint64_t temperature = FxDivU128By64(FxMulU64Full((uint64_t)heat, MICRO), capacity).quotient;
+    const uint64_t temperature = FxDivU128By64(FxMulU64Full((uint64_t)heat, MICRO), totals.capacity).quotient;
     FX_ASSERT(temperature <= 0xFFFFFFFFu);
 
     return (uint32_t)temperature;
 }
 
-GasGpuDerived DeriveCellFromReference(GasGpuCell cell, int64_t referencePressure) {
-    const uint64_t amount = TotalAmount(cell);
+GasGpuDerived DeriveCellFromReference(GasGpuCell cell, GasGpuTotals totals, int64_t referencePressure) {
+    const uint64_t amount = totals.amount;
     FX_ASSERT(amount < MAX_CELL_AMOUNT);
 
     GasGpuDerived derived;
-    derived.mass = CellMass(cell);
+    derived.mass = totals.mass;
     derived.inverseMass = derived.mass == 0 ? 0 : MAX_U64 / derived.mass;
     derived.inverseAmount = amount == 0 ? 0 : MAX_U64 / amount;
-    derived.temperature = CellTemperature(cell, KineticEnergy(cell, derived.mass));
+    derived.temperature = CellTemperature(cell, totals, KineticEnergy(cell, derived.mass));
     derived.unused = 0;
 
     // --- 本物の圧力 p = n × T × R ÷ V ---
@@ -147,16 +141,18 @@ int64_t DivideNearest(int64_t a, uint64_t b) {
     return FxApplySign(quotient, a < 0);
 }
 
-// µJ(丸める前)。断熱: + 押し出す仕事 n R T + 運動エネルギーの分け前(T-0234)
-int64_t MovedEnergy(GasGpuCell source, GasGpuDerived sourceDerived, GasGpuCell moved, uint64_t fraction) {
-    const uint64_t sourceCapacity = HeatCapacity(source);
-    const int64_t movedChemical = ChemicalEnergy(moved);
+// µJ(丸める前)。断熱: + 押し出す仕事 n R T + 運動エネルギーの分け前(T-0234)。
+// sourceTotals・movedTotals は風上の中身と移す塊の成分の和(使うのは物質量・比熱・化学のエネルギー)
+int64_t MovedEnergy(GasGpuCell source, GasGpuTotals sourceTotals, GasGpuDerived sourceDerived, GasGpuTotals movedTotals,
+                    uint64_t fraction) {
+    const uint64_t sourceCapacity = sourceTotals.capacity;
+    const int64_t movedChemical = movedTotals.chemical;
     if (sourceCapacity == 0)
         return movedChemical;
 
     const int64_t sourceKinetic = KineticEnergy(source, sourceDerived.mass);
-    const int64_t sourceHeat = source.energy * 1000 - ChemicalEnergy(source) - sourceKinetic;
-    const FxU128 numerator = FxMulU64Full(FxAbsU64(sourceHeat), HeatCapacity(moved));
+    const int64_t sourceHeat = source.energy * 1000 - sourceTotals.chemical - sourceKinetic;
+    const FxU128 numerator = FxMulU64Full(FxAbsU64(sourceHeat), movedTotals.capacity);
     const FxDivResult share = FxDivU128By64(numerator, sourceCapacity);
     const uint64_t heat = share.quotient + (share.remainder * 2 >= sourceCapacity ? 1 : 0);
     const int64_t movedHeat = FxApplySign(heat, sourceHeat < 0);
@@ -164,7 +160,7 @@ int64_t MovedEnergy(GasGpuCell source, GasGpuDerived sourceDerived, GasGpuCell m
     if (GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
         return energy;
 
-    const FxU128 amountTemperature = FxMulU64Full(TotalAmount(moved), sourceDerived.temperature);
+    const FxU128 amountTemperature = FxMulU64Full(movedTotals.amount, sourceDerived.temperature);
     FX_ASSERT(amountTemperature.hi == 0);
     energy += (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 35);
     energy += (int64_t)MulShiftU64((uint64_t)sourceKinetic, fraction, 32);

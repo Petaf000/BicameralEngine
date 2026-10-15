@@ -5,6 +5,8 @@
 // レベルごとの係数と層の基準(環境から決まる t0〜t3)は、環境の値のホットリロードで RecordEnvironment が写し直す(T-0470・ADR-0200)。
 #include "sim/gpu_gas_tree.h"
 
+#include <cstring>
+
 #include "common/gas_tree_gpu.hlsli"
 #include "gpu/resources.h"
 #include "sim/gpu_gas_internal.h"
@@ -33,41 +35,84 @@ namespace bicameral::sim {
         static_assert(sizeof(GasTreeGpuFace) == 64);
         static_assert(sizeof(GasTreeGpuLevel) == 40);
         static_assert(sizeof(GasTreeGpuPlace) == 16);
-        static_assert(sizeof(GasTreeGpuCarry) == 40);
-        static_assert(sizeof(GasTreeGpuFraction) == 64 && sizeof(GasTreeFraction) == 64);
-        static_assert(sizeof(GasTreeTotals) == GAS_TREE_GPU_LEDGER_BYTES);
+        static_assert(sizeof(GasTreeGpuCarry) == GAS_TREE_GPU_CARRY_BYTES);
+        static_assert(sizeof(GasTreeGpuFraction) == GAS_TREE_GPU_FRACTION_BYTES);
+        static_assert(sizeof(GasQ64) == GAS_TREE_GPU_LEDGER_STRIDE);
         static_assert((uint32_t)GasTreeSideKind::Cell == GAS_TREE_GPU_SIDE_CELL &&
                       (uint32_t)GasTreeSideKind::Ghost == GAS_TREE_GPU_SIDE_GHOST &&
                       (uint32_t)GasTreeSideKind::Wall == GAS_TREE_GPU_SIDE_WALL &&
                       (uint32_t)GasTreeSideKind::Mixed == GAS_TREE_GPU_SIDE_MIXED);
 
-        GasTreeGpuFraction ToGpuFraction(const GasTreeFraction& fraction) {
-            GasTreeGpuFraction result{};
-            for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-                result.amounts[s] = fraction.amounts[s];
-
-            result.energy = fraction.energy;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                result.momentum[axis] = fraction.momentum[axis];
-
-            return result;
-        }
-
-        GasTreeFraction FromGpuFraction(const GasTreeGpuFraction& fraction) {
-            GasTreeFraction result;
-            for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-                result.amounts[s] = fraction.amounts[s];
-
-            result.energy = fraction.energy;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                result.momentum[axis] = fraction.momentum[axis];
-
-            return result;
+        template <typename T>
+        void WriteRecord(std::span<std::byte> bytes, size_t offset, const T& value) {
+            std::memcpy(bytes.data() + offset, &value, sizeof(T));
         }
 
         template <typename T>
-        ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, std::span<const T> data) {
-            const auto bytes = std::as_bytes(data);
+        T ReadRecord(std::span<const std::byte> bytes, size_t offset) {
+            T value;
+            std::memcpy(&value, bytes.data() + offset, sizeof(T));
+            return value;
+        }
+
+        // 端数 ↔ 件(頭 + 物質量の端数 × 欄の数。件の大きさはセルと同じ)
+        std::vector<std::byte> PackFractions(std::span<const GasTreeFraction> fractions, uint32_t speciesStride,
+                                             uint32_t speciesCount) {
+            const size_t stride = GasGpuCellStride(speciesStride);
+            std::vector<std::byte> bytes(fractions.size() * stride);
+            for (size_t i = 0; i < fractions.size(); ++i) {
+                const GasTreeFraction& fraction = fractions[i];
+                const std::span<std::byte> record = std::span(bytes).subspan(i * stride, stride);
+                WriteRecord(
+                    record, 0,
+                    GasTreeGpuFraction{.energy = fraction.energy,
+                                       .momentum = {fraction.momentum[0], fraction.momentum[1], fraction.momentum[2]}});
+                for (uint32_t s = 0; s < speciesCount; ++s)
+                    WriteRecord(record, GAS_TREE_GPU_FRACTION_BYTES + (s * 8), fraction.amounts[s]);
+            }
+
+            return bytes;
+        }
+
+        GasTreeFraction UnpackFraction(std::span<const std::byte> record, uint32_t speciesCount) {
+            const auto head = ReadRecord<GasTreeGpuFraction>(record, 0);
+            GasTreeFraction result;
+            for (uint32_t s = 0; s < speciesCount; ++s)
+                result.amounts[s] = ReadRecord<uint64_t>(record, GAS_TREE_GPU_FRACTION_BYTES + (s * 8));
+
+            result.energy = head.energy;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                result.momentum[axis] = head.momentum[axis];
+
+            return result;
+        }
+
+        // 帳簿(gas_tree_gpu.hlsli の GAS_TREE_GPU_LEDGER_*)
+        std::vector<std::byte> PackLedger(const GasTreeTotals& ledger, uint32_t speciesStride, uint32_t speciesCount) {
+            std::vector<std::byte> bytes(GasTreeGpuLedgerBytes(speciesStride));
+            WriteRecord(std::span(bytes), GAS_TREE_GPU_LEDGER_ENERGY, ledger.energy);
+            WriteRecord(std::span(bytes), GAS_TREE_GPU_LEDGER_MOMENTUM, ledger.momentum);
+            for (uint32_t s = 0; s < speciesCount; ++s) {
+                WriteRecord(std::span(bytes), GAS_TREE_GPU_LEDGER_AMOUNTS + (s * GAS_TREE_GPU_LEDGER_STRIDE),
+                            ledger.amounts[s]);
+            }
+
+            return bytes;
+        }
+
+        GasTreeTotals UnpackLedger(std::span<const std::byte> bytes, uint32_t speciesCount) {
+            GasTreeTotals ledger;
+            ledger.energy = ReadRecord<GasQ64>(bytes, GAS_TREE_GPU_LEDGER_ENERGY);
+            ledger.momentum = ReadRecord<std::array<GasQ64, GAS_AXES>>(bytes, GAS_TREE_GPU_LEDGER_MOMENTUM);
+            for (uint32_t s = 0; s < speciesCount; ++s) {
+                ledger.amounts[s] = ReadRecord<GasQ64>(bytes,
+                                                       GAS_TREE_GPU_LEDGER_AMOUNTS + (s * GAS_TREE_GPU_LEDGER_STRIDE));
+            }
+
+            return ledger;
+        }
+
+        ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, std::span<const std::byte> bytes) {
             ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
             void* mapped = nullptr;
             const D3D12_RANGE noRead{.Begin = 0, .End = 0};
@@ -110,8 +155,9 @@ namespace bicameral::sim {
                                                                                         const GasTree& tree) {
             const std::vector<uint32_t> layerBegins = LayerBegins(tree);
             std::vector<GasTreeGpuLevel> levels;
+            const uint32_t speciesStride = GasGpuSpeciesStride(tree.config.speciesCount);
             std::vector<GasGpuDerived> referenceDerived;
-            std::vector<GasGpuCell> ghost;
+            std::vector<GasCell> ghost;
             for (uint32_t k = 0; k < tree.levels.size(); ++k) {
                 const GasTreeLevel& level = tree.levels[k];
                 const GasCoefficients& coefficients = level.coefficients;
@@ -124,16 +170,14 @@ namespace bicameral::sim {
                 for (const GasDerived& layer : level.referenceDerived)
                     referenceDerived.push_back(ToGasGpuDerived(layer));
 
-                for (const GasCell& layer : level.ghost)
-                    ghost.push_back(ToGasGpuCell(layer));
+                ghost.insert(ghost.end(), level.ghost.begin(), level.ghost.end());
             }
 
-            const std::array<GasGpuParameters, 1> parameters = {
-                MakeGasGpuParameters(tree.config, tree.levels[0].coefficients)};
-            return {CreateResident(device, std::span<const GasGpuParameters>(parameters)),
+            return {gpu::CreateResidentBuffer(
+                        device, PackGasGpuParameters(tree.config, tree.levels[0].coefficients, speciesStride)),
                     CreateResident(device, std::span<const GasTreeGpuLevel>(levels)),
                     CreateResident(device, std::span<const GasGpuDerived>(referenceDerived)),
-                    CreateResident(device, std::span<const GasGpuCell>(ghost))};
+                    gpu::CreateResidentBuffer(device, PackGasGpuCells(ghost, speciesStride))};
         }
 
         // 側の番号: セルはセルの番号、外は層の表の番号、壁と Mixed は 0
@@ -196,16 +240,11 @@ namespace bicameral::sim {
     }  // namespace
 
     std::expected<GpuGasTree, std::string> GpuGasTree::Create(ID3D12Device5* device, const GasTree& tree) {
-        // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提
-        for (const GasCell& cell : tree.cells) {
-            for (uint32_t s = tree.config.speciesCount; s < GAS_MAX_SPECIES; ++s) {
-                if (cell.amounts[s] != 0)
-                    return std::unexpected("使わない成分の欄に物質量がある");
-            }
-        }
-
+        // 成分の数に上限は無い(1 件 = 頭 + 欄 × m_speciesStride。T-0598)
         GpuGasTree result;
         result.m_cellCount = (uint32_t)tree.cells.size();
+        result.m_speciesCount = tree.config.speciesCount;
+        result.m_speciesStride = GasGpuSpeciesStride(tree.config.speciesCount);
         result.m_substeps = tree.config.substeps;
         result.m_maxExponent = tree.maxSubcycleExponent;
         result.m_levelCount = (uint32_t)tree.levels.size();
@@ -218,6 +257,9 @@ namespace bicameral::sim {
 
         if (GroupsFor(result.m_faceCount) > MAX_GROUPS || GroupsFor(result.m_cellCount) > MAX_GROUPS)
             return std::unexpected("気体の木が大きすぎる(Dispatch の上限)");
+
+        if ((uint64_t)result.m_faceCount * GasGpuFaceStride(result.m_speciesStride) > UINT32_MAX)
+            return std::unexpected("気体の木が大きすぎる(面の件の番地が 32bit を超える)");
 
         if (auto created = result.CreateBuffers(device, tree); !created)
             return std::unexpected(created.error());
@@ -277,17 +319,19 @@ namespace bicameral::sim {
     // 状態と作業のバッファ(gas_tree_step.hlsl の結び付けの順)・初めの状態の写し・読み戻し
     std::expected<void, std::string> GpuGasTree::CreateBuffers(ID3D12Device5* device, const GasTree& tree) {
         const uint64_t n = m_cellCount;
-        const std::array<uint64_t, 11> uavBytes = {n * sizeof(GasGpuCell),                      // u0 セル
-                                                   n * sizeof(GasTreeGpuFraction),              // u1 端数
-                                                   n * sizeof(GasGpuCell),                      // u2 力を当てた後のセル
-                                                   n * sizeof(GasTreeGpuFraction),              // u3 その端数
-                                                   n * sizeof(GasGpuDerived),                   // u4 導く値
-                                                   (uint64_t)m_faceCount * sizeof(GasGpuFace),  // u5 面
-                                                   n * sizeof(GasGpuCellSums),                  // u6 セルごとの合計
-                                                   GAS_TREE_GPU_LEDGER_BYTES,                   // u7 帳簿
-                                                   n * sizeof(GasGpuCell),                      // u8 小刻みの終わりの値
-                                                   n * sizeof(GasTreeGpuFraction),              // u9 その端数
-                                                   n * sizeof(GasTreeGpuCarry)};                // u10 出した量
+        const uint64_t cellBytes = n * GasGpuCellStride(m_speciesStride);      // セルと端数の件は同じ大きさ
+        const uint64_t sumBytes = n * GasGpuSumsStride(m_speciesStride);       // セルごとの合計と出した量も
+        const std::array<uint64_t, 11> uavBytes = {cellBytes,                  // u0 セル
+                                                   cellBytes,                  // u1 端数
+                                                   cellBytes,                  // u2 力を当てた後のセル
+                                                   cellBytes,                  // u3 その端数
+                                                   n * sizeof(GasGpuDerived),  // u4 導く値
+                                                   (uint64_t)m_faceCount * GasGpuFaceStride(m_speciesStride),  // u5 面
+                                                   sumBytes,                                // u6 セルごとの合計
+                                                   GasTreeGpuLedgerBytes(m_speciesStride),  // u7 帳簿
+                                                   cellBytes,                               // u8 小刻みの終わりの値
+                                                   cellBytes,                               // u9 その端数
+                                                   sumBytes};                               // u10 出した量
         for (size_t i = 0; i < uavBytes.size(); ++i) {
             m_uavs[i] = gpu::CreateBuffer(device, uavBytes[i], gpu::BufferKind::UnorderedAccess);
             if (!m_uavs[i])
@@ -295,23 +339,12 @@ namespace bicameral::sim {
         }
 
         // --- 初めの状態 ---
-        std::vector<GasGpuCell> cells;
-        std::vector<GasTreeGpuFraction> fractions;
-        cells.reserve(tree.cells.size());
-        fractions.reserve(tree.fractions.size());
-        for (const GasCell& cell : tree.cells)
-            cells.push_back(ToGasGpuCell(cell));
-
-        for (const GasTreeFraction& fraction : tree.fractions)
-            fractions.push_back(ToGpuFraction(fraction));
-
-        const std::array<GasTreeTotals, 1> ledger = {tree.ledger};
-        m_uploads = {CreateUploadBuffer(device, std::span<const GasGpuCell>(cells)),
-                     CreateUploadBuffer(device, std::span<const GasTreeGpuFraction>(fractions)),
-                     CreateUploadBuffer(device, std::span<const GasTreeTotals>(ledger))};
+        m_uploads = {CreateUploadBuffer(device, PackGasGpuCells(tree.cells, m_speciesStride)),
+                     CreateUploadBuffer(device, PackFractions(tree.fractions, m_speciesStride, m_speciesCount)),
+                     CreateUploadBuffer(device, PackLedger(tree.ledger, m_speciesStride, m_speciesCount))};
         m_readbacks = {gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback),
                        gpu::CreateBuffer(device, uavBytes[1], gpu::BufferKind::Readback),
-                       gpu::CreateBuffer(device, GAS_TREE_GPU_LEDGER_BYTES, gpu::BufferKind::Readback)};
+                       gpu::CreateBuffer(device, uavBytes[7], gpu::BufferKind::Readback)};
         for (size_t i = 0; i < m_uploads.size(); ++i) {
             if (!m_uploads[i] || !m_readbacks[i])
                 return std::unexpected("気体の木のアップロード・読み戻しのバッファを作れない");
@@ -341,6 +374,7 @@ namespace bicameral::sim {
     bool GpuGasTree::RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasTree& tree,
                                        std::vector<ComPtr<ID3D12Resource>>& keepAlive) {
         const bool sameShape = (uint32_t)tree.cells.size() == m_cellCount && tree.config.substeps == m_substeps &&
+                               tree.config.speciesCount == m_speciesCount &&
                                tree.maxSubcycleExponent == m_maxExponent &&
                                (uint32_t)tree.levels.size() == m_levelCount;
         if (!sameShape)
@@ -399,7 +433,7 @@ namespace bicameral::sim {
                                       .maxExponent = m_maxExponent,
                                       .cellCount = m_cellCount,
                                       .faceCount = m_faceCount,
-                                      .unused = 0};
+                                      .speciesStride = m_speciesStride};
             for (size_t pass = 0; pass < (size_t)Pass::Count; ++pass) {
                 RecordPass(list, debugRing, (Pass)pass, constants);
                 if (m_passTimestamps) {
@@ -420,20 +454,23 @@ namespace bicameral::sim {
 
     bool GpuGasTree::Read(std::vector<GasCell>& cells, std::vector<GasTreeFraction>& fractions,
                           GasTreeTotals& ledger) const {
-        std::vector<GasGpuCell> gpuCells(m_cellCount);
-        std::vector<GasTreeGpuFraction> gpuFractions(m_cellCount);
-        if (!gpu::ReadBuffer(m_readbacks[0].Get(), std::as_writable_bytes(std::span(gpuCells))) ||
-            !gpu::ReadBuffer(m_readbacks[1].Get(), std::as_writable_bytes(std::span(gpuFractions))) ||
-            !gpu::ReadBuffer(m_readbacks[2].Get(), std::as_writable_bytes(std::span(&ledger, 1))))
+        const size_t stride = GasGpuCellStride(m_speciesStride);
+        std::vector<std::byte> cellBytes((size_t)m_cellCount * stride);
+        std::vector<std::byte> fractionBytes((size_t)m_cellCount * stride);
+        std::vector<std::byte> ledgerBytes(GasTreeGpuLedgerBytes(m_speciesStride));
+        if (!gpu::ReadBuffer(m_readbacks[0].Get(), cellBytes) ||
+            !gpu::ReadBuffer(m_readbacks[1].Get(), fractionBytes) ||
+            !gpu::ReadBuffer(m_readbacks[2].Get(), ledgerBytes))
             return false;
 
         cells.clear();
         fractions.clear();
-        for (const GasGpuCell& cell : gpuCells)
-            cells.push_back(FromGasGpuCell(cell));
+        for (size_t i = 0; i < m_cellCount; ++i) {
+            cells.push_back(UnpackGasGpuCell(std::span(cellBytes).subspan(i * stride, stride), m_speciesCount));
+            fractions.push_back(UnpackFraction(std::span(fractionBytes).subspan(i * stride, stride), m_speciesCount));
+        }
 
-        for (const GasTreeGpuFraction& fraction : gpuFractions)
-            fractions.push_back(FromGpuFraction(fraction));
+        ledger = UnpackLedger(ledgerBytes, m_speciesCount);
 
         return true;
     }

@@ -95,7 +95,7 @@ namespace bicameral::sim {
             uint32_t maxExponent = 0;
             uint32_t cellCount = 0;
             uint32_t faceCount = 0;
-            uint32_t unused = 0;
+            uint32_t speciesStride = 0;
         };
 
         GpuGasTree() = default;
@@ -108,6 +108,8 @@ namespace bicameral::sim {
 
         uint32_t m_cellCount = 0;
         uint32_t m_faceCount = 0;
+        uint32_t m_speciesCount = 0;   // 木の成分の数(読み戻す欄)
+        uint32_t m_speciesStride = 1;  // 1 件の成分の欄の数(gas_tree_step.hlsl の g_speciesStride。T-0598)
         uint32_t m_substeps = 0;
         uint32_t m_maxExponent = 0;  // σmax(1 刻み = いちばん細かい小刻み m_substeps × 2^これ 回)
         uint32_t m_levelCount = 0;

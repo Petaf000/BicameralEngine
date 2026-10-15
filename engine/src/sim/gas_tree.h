@@ -61,14 +61,14 @@ namespace bicameral::sim {
 
     // セルの端数(2^-64 × そのセルのレベルの単位)。細かい側から受けた量の下位。値 = セルの整数 + これ × 2^-64
     struct GasTreeFraction {
-        std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};
+        GasPerSpecies<uint64_t> amounts;  // 数の上限なし(T-0598)
         uint64_t energy = 0;
         std::array<uint64_t, GAS_AXES> momentum = {};
     };
 
     // 帳簿と合計(レベル 0 の単位。外から入った量を正)
     struct GasTreeTotals {
-        std::array<GasQ64, GAS_MAX_SPECIES> amounts = {};
+        GasPerSpecies<GasQ64> amounts;  // 数の上限なし(T-0598)
         GasQ64 energy;
         std::array<GasQ64, GAS_AXES> momentum = {};
     };
