@@ -40,16 +40,16 @@ namespace bicameral::render {
             Vector3 up;
         };
 
-        // 回る軸は −y。forward = cos(pitch)·(sin(yaw), 0, cos(yaw)) + sin(pitch)·(0, 1, 0)
-        // (pitch が正 = 上(−y)から見下ろす = 下(+y)を向く)
+        // 回る軸は +y(格子の y が上。T-0619)。forward = cos(pitch)·(sin(yaw), 0, cos(yaw)) − sin(pitch)·(0, 1, 0)
+        // (pitch が正 = 上(+y)から見下ろす = 下(−y)を向く)。格子は左手系(右 = +x・上 = +y・奥 = +z)
         Axes CameraAxes(const OrbitCameraState& state) {
             const float yaw = Radians(state.yawDegrees);
             const float pitch = Radians(state.pitchDegrees);
-            const Vector3 forward{std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw)};
-            const Vector3 worldUp{0.0f, -1.0f, 0.0f};
-            const Vector3 right = Normalize(Cross(forward, worldUp));
+            const Vector3 forward{std::cos(pitch) * std::sin(yaw), -std::sin(pitch), std::cos(pitch) * std::cos(yaw)};
+            const Vector3 worldUp{0.0f, 1.0f, 0.0f};
+            const Vector3 right = Normalize(Cross(worldUp, forward));
 
-            return {.forward = forward, .right = right, .up = Cross(right, forward)};
+            return {.forward = forward, .right = right, .up = Cross(forward, right)};
         }
 
     }  // namespace

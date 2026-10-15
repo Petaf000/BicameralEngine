@@ -65,7 +65,7 @@ namespace {
 
     // --- カメラ ---
 
-    // 既定の向き(0°・0°)で、画面の右 = +x・下 = +y・真ん中 = 注視点
+    // 既定の向き(0°・0°)で、画面の右 = +x・下 = −y(格子の y は上。T-0619)・真ん中 = 注視点
     void TestFrontView() {
         const OrbitCamera camera({.yawDegrees = 0.0f, .pitchDegrees = 0.0f, .distance = 80.0f});
         const CameraBasis basis = camera.Basis(WIDTH, HEIGHT);
@@ -78,7 +78,7 @@ namespace {
         const auto right = pick(WIDTH * 0.5f + 100.0f, HEIGHT * 0.5f);
         const auto below = pick(WIDTH * 0.5f, HEIGHT * 0.5f + 100.0f);
         EXPECT(right && right->x > 32 && right->y == 32);
-        EXPECT(below && below->y > 32 && below->x == 32);
+        EXPECT(below && below->y < 32 && below->x == 32);
         EXPECT(!pick(2.0f, 2.0f));  // 画面の隅は格子の外(横長の画面の左端)
     }
 
