@@ -339,6 +339,15 @@ namespace {
         // 触媒(mana_test)は両辺で消えるので、エントロピーが無くても調べられる
         EXPECT(with->ruleSlopes[RuleId(*with, "mana_test_catalyzed_boudouard")].state == RuleSlopeState::Uphill);
 
+        // 逆向きの対(相変化。T-0611): 坂の欄は 1 本ずつ上る温度があるが、一方向ではないので警告しない
+        const RuleSlope& evaporation = with->ruleSlopes[RuleId(*with, "water_evaporation")];
+        EXPECT(evaporation.state == RuleSlopeState::Uphill && evaporation.balanceKelvin == 374);
+        EXPECT(evaporation.reverseRule == RuleId(*with, "water_condensation"));
+        EXPECT(with->ruleSlopes[RuleId(*with, "water_condensation")].reverseRule == RuleId(*with, "water_evaporation"));
+        EXPECT(with->ruleSlopes[RuleId(*with, "ice_melting")].reverseRule == RuleId(*with, "water_freezing"));
+        EXPECT(boudouard.reverseRule == NO_REVERSE_RULE);
+        EXPECT(!HasSlopeWarning(*with, "water_") && !HasSlopeWarning(*with, "ice_"));
+
         // 一酸化炭素のエントロピーを消す: それを含む規則だけ未評価になり、まとめの 1 行に出る
         auto monoxide = std::ranges::find(definition.species, "carbon_monoxide", &SpeciesDefinition::name);
         monoxide->standardEntropy.reset();

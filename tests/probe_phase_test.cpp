@@ -242,7 +242,8 @@ namespace {
         return weight == 0 ? -1 : (int64_t)(moment / weight);
     }
 
-    // 保存の合計: 元素 − 気体の帳簿・エネルギー(セル + 気体の運動エネルギーのぶん − 気体の帳簿)
+    // 保存の合計: 元素 − 気体の帳簿・エネルギー(セル + 気体の運動エネルギーのぶん − 気体の帳簿
+    // + 液体の位置と運動のエネルギー − 液体の帳簿。液体の区画を載せた時。T-0610・ADR-0276)
     struct Totals {
         std::vector<uint64_t> elements;
         int64_t energy = 0;
@@ -271,6 +272,8 @@ namespace {
         }
 
         totals.energy += gas->KineticEnergySum() - gas->Ledger().energy;
+        if (const ProbeLiquidField* liquid = reference.LiquidField())
+            totals.energy += liquid->PotentialEnergySum() + liquid->KineticEnergySum() - liquid->Ledger().energy;
 
         return totals;
     }
@@ -336,7 +339,7 @@ namespace {
     void TestSteam(const BakedReactionTable& table) {
         std::printf("湯気(熱い石の上の水たまり → 冷たい池)\n");
         const Region& region = STEAM_REGION;
-        // 液体の区画は載せない(水たまりと池は石の堤で囲み、流れなくてよい。載せた時の保存の崩れは ReportSteamWithLiquid)
+        // 液体の区画は載せない(水たまりと池は石の堤で囲み、流れなくてよい。保存が崩れる刻みは ReportSteamBreak)
         ProbeReference reference = MakeReference(table, region, SteamCell, false);
 
         const uint64_t puddleBefore = AmountIn(table, reference, 0, region, "water", {0, 4}, {1, 2});
@@ -372,15 +375,17 @@ namespace {
         EXPECT(pondAfter > pondBefore);              // 池の水が増えた(湯気が冷たい池で凝縮した)
     }
 
-    // 記録(試験ではなく表示): 同じ場面に液体の区画も載せると、保存が崩れる刻みがある(相変化の規則とは別。気体と液体の
-    // 区画を重ねた試験はまだ無かった〔T-0609 の世界の刻みの試験は気体なし〕。T-0611 のチケットの「重なり」・T-0612 へ)
-    void ReportSteamWithLiquid(const BakedReactionTable& table) {
-        std::printf("記録: 湯気の場面に液体の区画も載せる\n");
-        ProbeReference reference = MakeReference(table, STEAM_REGION, SteamCell, true);
+    // 記録(試験ではなく表示): 湯気の場面で、エネルギーが最初に崩れる刻みを 1 刻みずつ探す(T-0646 が使う。T-0611 のチケットの「重なり」)。
+    //   liquid = false: 気体の区画だけ(TestSteam と同じ。1 秒ごとの確かめでは 901〜960 刻みのどこかで +54 kJ)。
+    //   liquid = true: 液体の区画も重ねる(液体の位置と運動のエネルギーを数えれば〔T-0610〕660 刻みまで保存する)。
+    //   崩れた刻みの気体の帳簿と運動エネルギーのぶんも出す(反応が気体の質量を変えた刻みとの突き合わせ用)
+    void ReportSteamBreak(const BakedReactionTable& table, bool liquid, uint64_t firstChecked, uint64_t lastTick) {
+        std::printf("記録: 湯気の場面(液体の区画 %s)で保存が崩れる刻み\n", liquid ? "あり" : "なし");
+        ProbeReference reference = MakeReference(table, STEAM_REGION, SteamCell, liquid);
         const Totals before = Sum(table, reference, 0);
-        for (uint64_t tick = 0; tick < 660; ++tick) {
+        for (uint64_t tick = 0; tick < lastTick; ++tick) {
             reference.Advance(tick, {});
-            if (tick < 480)
+            if (tick + 1 < firstChecked)
                 continue;
 
             const Totals now = Sum(table, reference, tick + 1);
@@ -393,7 +398,7 @@ namespace {
             }
         }
 
-        std::printf("  660 刻みまで保存\n");
+        std::printf("  %llu 刻みまで保存\n", (unsigned long long)lastTick);
     }
 
     // --- 3: 暖かい台の上の氷が溶けて流れ落ちる ---
@@ -484,7 +489,8 @@ int main() {
     TestIce(table);
     TestDeterminism(table);
     ReportQuietPond(table);
-    ReportSteamWithLiquid(table);
+    ReportSteamBreak(table, true, 480, 660);
+    ReportSteamBreak(table, false, 900, 960);
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);

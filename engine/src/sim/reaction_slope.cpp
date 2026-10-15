@@ -170,6 +170,34 @@ namespace bicameral::sim {
             return slope;
         }
 
+        // 正味の係数がちょうど符号違いか(逆向きの対。触媒の有無・次数・速さは問わない。正味が空の規則は対にしない)
+        bool IsReverse(std::span<const NetTerm> forward, std::span<const NetTerm> backward) {
+            if (forward.empty() || forward.size() != backward.size())
+                return false;
+
+            return std::ranges::all_of(forward, [&](const NetTerm& term) {
+                return std::ranges::any_of(backward, [&](const NetTerm& other) {
+                    return other.species == term.species && other.coefficient == -term.coefficient;
+                });
+            });
+        }
+
+        // 規則ごとに逆向きの規則を探す(最初に見つかった 1 本。T-0611)
+        void FindReverseRules(const BakedReactionTable& baked, std::vector<RuleSlope>& slopes) {
+            std::vector<std::vector<NetTerm>> terms;
+            terms.reserve(baked.rules.size());
+            for (const RxRule& rule : baked.rules)
+                terms.push_back(NetTerms(rule));
+
+            for (uint32_t ruleId = 0; ruleId < slopes.size(); ++ruleId) {
+                for (uint32_t other = 0; other < slopes.size() && slopes[ruleId].reverseRule == NO_REVERSE_RULE;
+                     ++other) {
+                    if (other != ruleId && IsReverse(terms[ruleId], terms[other]))
+                        slopes[ruleId].reverseRule = other;
+                }
+            }
+        }
+
         std::string Join(const std::vector<std::string>& names) {
             std::string text;
             for (const std::string& name : names)
@@ -205,6 +233,8 @@ namespace bicameral::sim {
         for (uint32_t ruleId = 0; ruleId < baked.rules.size(); ++ruleId)
             slopes.push_back(CheckRule(baked, ruleId, context));
 
+        FindReverseRules(baked, slopes);
+
         return slopes;
     }
 
@@ -215,7 +245,8 @@ namespace bicameral::sim {
         for (uint32_t ruleId = 0; ruleId < slopes.size(); ++ruleId) {
             const RuleSlope& slope = slopes[ruleId];
             const std::string& name = baked.ruleNames[ruleId];
-            if (slope.state == RuleSlopeState::Uphill) {
+            // 逆向きの対は向きを速さの比で決める(一方向ではない)ので警告しない
+            if (slope.state == RuleSlopeState::Uphill && slope.reverseRule == NO_REVERSE_RULE) {
                 const std::string balance = slope.balanceKelvin == 0
                                                 ? ""
                                                 : std::format("。釣り合いは {} K", slope.balanceKelvin);
