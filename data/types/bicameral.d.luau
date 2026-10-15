@@ -54,7 +54,7 @@ export type WorldCellRegion = {
     min_cell: { number }?, -- { x, y, z }(セル)。size_cells と両方書くか両方省く
     size_cells: { number }?, -- { x, y, z }(セルの数)
     shell_cells: number?, -- 外側の殻の厚さ(セル。既定 0 = 中まで埋める)
-    amounts_umol: { [string]: number }, -- 物質 → 1 セルの量(µmol)
+    amounts_umol: { [string]: number }, -- 物質 → 1 セルの量(µmol)。合計 2^36(約 68,719 mol)まで・condensed でない物質の合計は 2^31(約 2147 mol)未満(ADR-0260)
     temperature_mk: number, -- 温度(mK)
 }
 

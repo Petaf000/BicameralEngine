@@ -126,11 +126,13 @@ namespace {
             {.species = static_cast<uint32_t>(table.species.size()), .amount = 1}};
         const std::vector<SpeciesAmount> twice = {{.species = 1, .amount = 1}, {.species = 1, .amount = 2}};
         const std::vector<SpeciesAmount> tooMuch = {{.species = 1, .amount = PROBE_PLACE_MAX_AMOUNT + 1}};
+        const std::vector<SpeciesAmount> sumTooMuch = {{.species = 1, .amount = PROBE_PLACE_MAX_AMOUNT / 2},
+                                                       {.species = 2, .amount = (PROBE_PLACE_MAX_AMOUNT / 2) + 1}};
         const std::vector<SpeciesAmount> four = {{.species = 1, .amount = 1},
                                                  {.species = 2, .amount = 1},
                                                  {.species = 3, .amount = 1},
                                                  {.species = 4, .amount = 1}};
-        const std::array<ProbeCommand, 8> rejected = {
+        const std::array<ProbeCommand, 9> rejected = {
             MakePlaceCommand(0, 0, {.x = PROBE_GRID_SIZE, .y = 0, .z = 0}, wood.contents),
             MakePlaceCommand(0, 0, {.radius = PROBE_PLACE_MAX_RADIUS + 1}, wood.contents),
             MakePlaceCommand(0, 0, {.temperatureMilliKelvin = PROBE_PLACE_MAX_TEMPERATURE_MILLIKELVIN + 1},
@@ -138,13 +140,28 @@ namespace {
             MakePlaceCommand(0, 0, {}, unknown),
             MakePlaceCommand(0, 0, {}, twice),
             MakePlaceCommand(0, 0, {}, tooMuch),
+            MakePlaceCommand(0, 0, {}, sumTooMuch),
             MakePlaceCommand(0, 0, {}, four),
             MakePlaceCommand(0, 0, {}, {}),
         };
 
         failures.Check(
             rng::none_of(rejected, [&](const ProbeCommand& command) { return Decode(command, table).valid; }),
-            "当てられない値(格子の外・半径・温度・表に無い物質・重なる物質・量・物質の数 4・0)は飛ばす");
+            "当てられない値(格子の外・半径・温度・表に無い物質・重なる物質・量・量の合計・物質の数 4・0)は飛ばす");
+
+        // --- 足す: 足した後のセルの合計がセルの器(ADR-0260)を超えるセルは飛ばす。ちょうどなら足す ---
+        const uint64_t airTotal = ProbeCellTotalAmount(air);
+        const uint32_t woodSpecies = wood.contents.front().species;
+        const auto addAmount = [&](uint64_t amount) {
+            const std::vector<SpeciesAmount> contents = {{.species = woodSpecies, .amount = amount}};
+            return ProbePlaceCell(view, air,
+                                  Decode(MakePlaceCommand(0, 0, {.radius = 0, .replace = false}, contents), table));
+        };
+        const ProbePlaced fits = addAmount(PROBE_PLACE_MAX_AMOUNT - airTotal);
+        failures.Check(fits.applied == 1 && ProbeCellTotalAmount(fits.cell) == PROBE_PLACE_MAX_AMOUNT,
+                       "足す: 合計がちょうどセルの器なら足す(1 物質 2147 mol を超えてよい)");
+        failures.Check(addAmount(PROBE_PLACE_MAX_AMOUNT - airTotal + 1).applied == 0,
+                       "足す: 合計がセルの器を超えるセルは飛ばす");
     }
 
     // 球以外の形(T-0245・ADR-0089): 直方体・円柱のセルの数・格子の端・当てられない大きさ。形の欄が 0 の(T-0222 の)コマンドは球のまま

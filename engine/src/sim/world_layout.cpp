@@ -34,6 +34,9 @@ namespace bicameral::sim {
                 amounts.push_back({.species = species, .amount = entry.micromoles});
             }
 
+            if (auto fits = CheckCellAmounts(table, amounts); !fits)
+                return std::unexpected(std::format("world_cells.{}.amounts_umol: {}", region.name, fits.error()));
+
             return MakeReactionCell(table, amounts, region.temperatureMilliKelvin);
         }
 

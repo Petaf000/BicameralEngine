@@ -511,6 +511,34 @@ namespace bicameral::sim {
 
     }  // namespace
 
+    std::expected<void, std::string> CheckCellAmounts(const BakedReactionTable& table,
+                                                      std::span<const SpeciesAmount> amounts) {
+        // --- 合計(全部の相)と気体のぶん。足す前に残りと比べる(溢れない)---
+        uint64_t total = 0;
+        uint64_t gas = 0;
+        for (const SpeciesAmount& entry : amounts) {
+            if (entry.amount > fx::CELL_AMOUNT_LIMIT_MICROMOLES - total) {
+                return std::unexpected(std::format("1 セルの量の合計は {} µmol(約 {} mol)まで",
+                                                   fx::CELL_AMOUNT_LIMIT_MICROMOLES,
+                                                   fx::CELL_AMOUNT_LIMIT_MICROMOLES / fx::MICROMOLES_PER_MOLE));
+            }
+
+            total += entry.amount;
+            const bool condensed = entry.species < table.speciesCondensed.size() &&
+                                   table.speciesCondensed[entry.species] != 0;
+            if (!condensed)
+                gas += entry.amount;
+        }
+
+        if (gas >= fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES) {
+            return std::unexpected(std::format(
+                "1 セルの気体のぶん(condensed でない物質の合計)は {} µmol(約 {} mol)未満",
+                fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES, fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES / fx::MICROMOLES_PER_MOLE));
+        }
+
+        return {};
+    }
+
     RxCell MakeReactionCell(const BakedReactionTable& table, std::span<const SpeciesAmount> amounts,
                             int32_t temperatureMilliKelvin) {
         return FillReactionCell(table, RxMakeEmptyCell(0), amounts, temperatureMilliKelvin);

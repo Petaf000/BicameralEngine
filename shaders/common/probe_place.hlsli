@@ -50,8 +50,9 @@ FX_CONST uint32_t PROBE_PLACE_SHAPE_BOX = 1;
 FX_CONST uint32_t PROBE_PLACE_SHAPE_CYLINDER = 2;
 FX_CONST uint32_t PROBE_PLACE_MODE_REPLACE = 0;
 FX_CONST uint32_t PROBE_PLACE_MODE_ADD = 1;
-// 1 セルの 1 物質の量の上限(2^36 µmol ≈ 6.9 万 mol。0.5 m 角の木は約 4 億 µmol)。足し続けて桁が溢れないように
-FX_CONST uint64_t PROBE_PLACE_MAX_AMOUNT = FX_U64(16u, 0u);
+// 1 セルの量の合計の上限(セルの器 CELL_AMOUNT_LIMIT = 2^36 µmol ≈ 6.9 万 mol。units.hlsli・ADR-0260)。
+// 材料の合計も、足した後のセルの合計もこれまで(T-0558 の前は 1 物質ごとに 2^36)
+FX_CONST uint64_t PROBE_PLACE_MAX_AMOUNT = CELL_AMOUNT_LIMIT_MICROMOLES;
 // 温度の上限(実験室と同じ。反応の表の温度の範囲)
 FX_CONST uint32_t PROBE_PLACE_MAX_TEMPERATURE_MILLIKELVIN = 6000000;
 
@@ -143,6 +144,7 @@ FX_FN ProbePlace ProbeDecodePlace(ProbePlacePayload payload, uint32_t speciesCou
     // --- 物質(数が範囲の外なら読まない)---
     const bool countValid = place.count != 0 && place.count <= PROBE_PLACE_MAX_SPECIES;
     bool entriesValid = countValid;
+    uint64_t total = 0;  // 材料の合計(物質ごとに上限以下なので、合計の比べ方は溢れない)
     for (uint32_t i = 0; i < PROBE_PLACE_MAX_SPECIES; ++i) {
         const uint32_t word = PROBE_PLACE_WORD_ENTRIES + (PROBE_PLACE_WORDS_PER_ENTRY * i);
         const bool used = countValid && i < place.count;
@@ -150,6 +152,11 @@ FX_FN ProbePlace ProbeDecodePlace(ProbePlacePayload payload, uint32_t speciesCou
         place.amounts[i] = used ? FX_U64(payload.words[word + 2], payload.words[word + 1]) : 0;
         if (used && !ProbePlaceEntryValid(place, i, speciesCount))
             entriesValid = false;
+
+        if (entriesValid && place.amounts[i] > PROBE_PLACE_MAX_AMOUNT - total)
+            entriesValid = false;
+
+        total += entriesValid ? place.amounts[i] : 0;
     }
 
     // --- 形 ---
@@ -217,6 +224,17 @@ FX_FN int64_t ProbeMaterialEnergy(Table table, RxCell material, uint32_t tempera
     return total >= 0 ? millijoules : -millijoules;
 }
 
+// セルの量の合計(上限で止める。決まった数の回しで読む。T-0397)
+FX_FN uint64_t ProbeCellTotalAmount(RxCell cell) {
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        const uint64_t amount = i < cell.speciesCount ? cell.amounts[i] : (uint64_t)0;
+        total = amount > PROBE_PLACE_MAX_AMOUNT - total ? PROBE_PLACE_MAX_AMOUNT + 1 : total + amount;
+    }
+
+    return total;
+}
+
 // コマンドの材料だけのセル(成分は 3 つまでなので必ず入る)
 FX_FN RxCell ProbePlaceMaterial(ProbePlace place) {
     RxCell material = RxMakeEmptyCell(0);
@@ -244,17 +262,16 @@ FX_FN ProbePlaced ProbePlaceCell(Table table, RxCell cell, ProbePlace place) {
         return result;
     }
 
-    // --- 足す: 量の上限を超える・成分が入りきらないセルは飛ばす ---
+    // --- 足す: 足した後の合計がセルの器を超える・成分が入りきらないセルは飛ばす ---
+    const uint64_t cellTotal = ProbeCellTotalAmount(cell);
+    const uint64_t materialTotal = ProbeCellTotalAmount(material);
+    if (cellTotal > PROBE_PLACE_MAX_AMOUNT || materialTotal > PROBE_PLACE_MAX_AMOUNT - cellTotal)
+        return result;
+
     RxAdded added;
     added.cell = cell;
     added.overflowed = 0;
     for (uint32_t i = 0; i < place.count; ++i) {
-        const uint32_t slot = RxFindSlot(added.cell, place.species[i]);
-        if (slot != RX_NO_SLOT && added.cell.amounts[slot] > PROBE_PLACE_MAX_AMOUNT - place.amounts[i]) {
-            added.overflowed = 1;
-            break;
-        }
-
         const RxAdded next = RxTryAddSpecies(added.cell, place.species[i], place.amounts[i]);
         added.cell = next.cell;
         added.overflowed |= next.overflowed;
