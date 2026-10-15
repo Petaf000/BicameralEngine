@@ -12,7 +12,9 @@
 #include <array>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "core/aliases.h"
@@ -245,6 +247,124 @@ namespace {
         failures.Check(debugAssertCount == 0, std::format("{}: シェーダーの assert が 0 件", name));
     }
 
+    // --- 画像: 刻み tick の状態の z = 32 の縦の断面(y が上)。左 = 温度(300〜800 K を黒 → 赤 → 黄)・右 = CO2(0〜2 mol を黒 → 緑)。PPM ---
+    template <typename T>
+    std::vector<T> ReadWhole(ID3D12Device5* device, ID3D12Resource* buffer) {
+        const uint64_t bytes = buffer->GetDesc().Width;
+        std::vector<T> values(bytes / sizeof(T));
+        auto queue = gpu::ImmediateQueue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, bytes, gpu::BufferKind::Readback);
+        ID3D12GraphicsCommandList10* list = queue && readback ? queue->Begin() : nullptr;
+        if (list == nullptr)
+            return {};
+
+        list->CopyBufferRegion(readback.Get(), 0, buffer, 0, bytes);
+        if (!queue->ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(values))))
+            return {};
+
+        return values;
+    }
+
+    void WriteSlice(ID3D12Device5* device, const ProbeSim& simulation, const BakedReactionTable& table, uint64_t tick,
+                    const std::string& path) {
+        constexpr uint32_t Z = 32;
+        constexpr uint32_t X_BEGIN = 20;
+        constexpr uint32_t WIDTH = 24;
+        constexpr uint32_t HEIGHT = 32;
+        constexpr uint32_t SCALE = 10;
+        const std::vector<reaction::RxCell> cells = ReadWhole<reaction::RxCell>(device, simulation.Cells());
+        const std::vector<reaction::HcThermalCache> caches = ReadWhole<reaction::HcThermalCache>(device,
+                                                                                                 simulation.Thermal());
+        if (cells.size() < 2 * PROBE_CELL_COUNT || caches.size() < 2 * PROBE_CELL_COUNT)
+            return;
+
+        const size_t base = (tick & 1) * PROBE_CELL_COUNT;
+        const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
+        const uint32_t imageWidth = 2 * WIDTH * SCALE;
+        std::vector<uint8_t> pixels((size_t)imageWidth * HEIGHT * SCALE * 3, 0);
+        for (uint32_t row = 0; row < HEIGHT; ++row) {
+            const uint32_t y = HEIGHT - 1 - row;
+            for (uint32_t column = 0; column < WIDTH; ++column) {
+                const uint32_t index = ProbeCellIndex(X_BEGIN + column, y, Z);
+                const int64_t kelvin = caches[base + index].temperature / 1000;
+                const auto heat = (uint32_t)std::clamp<int64_t>((kelvin - 300) * 510 / 500, 0, 510);
+                uint64_t smoke = 0;
+                for (uint32_t i = 0; i < cells[base + index].speciesCount; ++i) {
+                    if (cells[base + index].species[i] == carbonDioxide)
+                        smoke = cells[base + index].amounts[i];
+                }
+
+                const std::array<std::array<uint8_t, 3>, 2> colors = {
+                    std::array<uint8_t, 3>{(uint8_t)std::min(heat, 255u), (uint8_t)(heat > 255 ? heat - 255 : 0), 0},
+                    std::array<uint8_t, 3>{0, (uint8_t)std::min<uint64_t>(smoke * 255 / 2000000, 255), 0}};
+                for (uint32_t panel = 0; panel < 2; ++panel) {
+                    for (uint32_t dy = 0; dy < SCALE; ++dy) {
+                        for (uint32_t dx = 0; dx < SCALE; ++dx) {
+                            const size_t pixel = ((size_t)(row * SCALE + dy) * imageWidth) +
+                                                 ((panel * WIDTH + column) * SCALE) + dx;
+                            for (uint32_t channel = 0; channel < 3; ++channel)
+                                pixels[pixel * 3 + channel] = colors[panel][channel];
+                        }
+                    }
+                }
+            }
+        }
+
+        std::ofstream file(path, std::ios::binary);
+        if (!file)
+            return;
+
+        file << std::format("P6\n{} {}\n255\n", imageWidth, HEIGHT * SCALE);
+        file.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+        Log(Channel::Sim, Level::Info, "断面の画像: {}", path);
+    }
+
+    // --- 費用: 30 刻みずつのフレームで 120 刻み流し、適用の単位(気体の段を含む)の GPU 時間の平均(µs/刻み)。gas が無ければ気体なし ---
+    double MeasureApply(ID3D12Device5* device, const BakedReactionTable& table, std::span<const reaction::RxCell> world,
+                        const ProbeGasOptions& gas, const std::string& imagePath) {
+        constexpr uint64_t MEASURE_TICKS = 120;
+        constexpr uint32_t TICKS_PER_FRAME = 30;
+        auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"GasMeasureSim");
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+                                           {.initialWorld = world, .gas = gas});
+        if (!queue || !simulation)
+            return 0.0;
+
+        const double usPerTimestamp = 1'000'000.0 / static_cast<double>(queue->TimestampFrequency());
+        const uint32_t unitsPerTick = simulation->UnitsPerTick();
+        double total = 0.0;
+        for (uint64_t tick = 0; tick < MEASURE_TICKS; tick += TICKS_PER_FRAME) {
+            const auto slot = static_cast<uint32_t>((tick / TICKS_PER_FRAME) % ProbeSim::FRAME_SLOT_COUNT);
+            ID3D12CommandList* list = simulation->RecordFrame(
+                slot, {.firstTick = tick, .unitCount = TICKS_PER_FRAME * unitsPerTick});
+            if (list == nullptr || !queue->WaitCpu(queue->Submit(list)))
+                return 0.0;
+
+            const ProbeFrameReadback readback = simulation->ReadFrame(slot);
+            // 最初のフレームは暖機(クロックが上がる前)として捨てる
+            for (size_t index = 0; tick != 0 && index < readback.unitGpuTicks.size(); index += unitsPerTick)
+                total += static_cast<double>(readback.unitGpuTicks[index + PROBE_UNIT_APPLY]) * usPerTimestamp;
+        }
+
+        WriteSlice(device, *simulation, table, MEASURE_TICKS, imagePath);
+
+        return total / static_cast<double>(MEASURE_TICKS - TICKS_PER_FRAME);
+    }
+
+    void Measure(ID3D12Device5* device, const BakedReactionTable& table) {
+        const auto field = ProbeGasField::Create(table, MakeOptions());
+        if (!field)
+            return;
+
+        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, true);
+        const double without = MeasureApply(device, table, world, {}, "gpu_probe_gas_without.ppm");
+        const double with = MeasureApply(device, table, world, MakeOptions(), "gpu_probe_gas_with.ppm");
+        Log(Channel::Sim, Level::Info,
+            "費用(燃える木箱・区画 {} セル・小刻み 24): 適用の単位 気体なし {:.1f} µs/刻み → 気体あり {:.1f} "
+            "µs/刻み(気体の段 約 {:.1f} µs)",
+            field->RegionCellCount(), without, with, with - without);
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -270,6 +390,9 @@ int main(int argc, char** argv) {
     Failures failures;
     CheckScene(device->Get(), table, "静かな大気", false, warp ? 3 : 10, failures);
     CheckScene(device->Get(), table, "燃える木箱", true, warp ? 4 : 60, failures);
+
+    if (!warp)
+        Measure(device->Get(), table);
 
     const bool passed = failures.count == 0 && test::PassesValidation(*device, "gpu_probe_gas_test");
     Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_probe_gas_test({}): {}",
