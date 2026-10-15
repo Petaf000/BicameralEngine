@@ -62,6 +62,12 @@ namespace bicameral::sim {
         // 1 mol が放射を遮る面積(mm²/mol)。任意(既定 0 = 放射しない・吸わない)。セルの吸収率 = 1 − e^−Σ a·n ÷ 面の面積で、
         // 放射率も同じ値(灰色体)。GPU の表にはまだ入らない(放射の CPU リファレンス sim/radiation_reference だけが読む。T-0583・ADR-0252)
         uint32_t radiationAbsorption = 0;
+        // 液体か(パッケージの phase = "liquid"。T-0609・ADR-0266 Proposed)。任意(既定 false)。液体は凝縮相(condensed)でもあり、
+        // 液体の場(sim/probe_liquid)が低い方へ流す。密度(density)が要る。GPU の表にはまだ入らない
+        bool liquid = false;
+        // 密度(kg/m³。パッケージの density_kg_per_m3)。任意(既定 0 = 書かない)。液体には要る(セルに入る量 = セルの体積 ÷ モル体積)。
+        // 固体の密度は、気体と体積を分け合う所(T-0612・T-0593)が読む予定
+        uint32_t density = 0;
     };
 
     struct RuleTerm {
@@ -157,6 +163,11 @@ namespace bicameral::sim {
 
         // --- CPU だけ(GPU の表に入るのは T-0586): 放射(sim/radiation_reference。T-0583・ADR-0252)---
         std::vector<uint32_t> speciesRadiationAbsorption;  // mm²/mol(1 mol が放射を遮る面積)。添字 = 物質 ID
+
+        // --- CPU だけ(GPU は T-0612 の後): 液体(sim/probe_liquid。T-0609・ADR-0266)---
+        std::vector<uint8_t> speciesLiquid;  // 1 = 液体(流れる。凝縮相でもある)。添字 = 物質 ID
+        std::vector<uint64_t>
+            speciesMolarVolume;  // mm³/mol(= モル質量 ÷ 密度。密度を書いていなければ 0)。添字 = 物質 ID
 
         // --- CPU だけ: 同じ読み込みに足した分類(世界のデータ。物質は ID に直したもの。T-0398〜T-0400。分類ごとに 1 行)---
         WorldLayout worldLayout;     // 世界の組み立て(MakeProbeInitialWorld・MakeLayoutPhysicsScene が読む。T-0398)

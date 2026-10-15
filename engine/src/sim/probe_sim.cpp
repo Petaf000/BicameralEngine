@@ -1500,7 +1500,20 @@ namespace bicameral::sim {
             }
         }
 
-        // (1c) 放射(段を入れた時だけ。T-0585・ADR-0263): 気体の後・伝導と反応の前(段の順: コマンド → 物理の熱 → 気体 → 放射 → 伝導と反応)
+        // (1c) 液体(区画があるときだけ。T-0609・ADR-0266): 気体の後・伝導と反応の前。変わったセルの扱いは気体と同じ
+        if (m_liquid) {
+            std::vector<uint32_t> liquidChanged;
+            m_liquidReport = m_liquid->Step(*m_table, std::span(m_cells).subspan(currentBase, PROBE_CELL_COUNT),
+                                            liquidChanged);
+            for (const uint32_t index : liquidChanged) {
+                m_caches[currentBase + index] = ProbeMakeCache(table, m_cells[currentBase + index]);
+                const uint32_t block = BlockOfCellIndex(index);
+                seeds[block] = 1;
+                m_changedMarks[block] = ProbeChangeMark(tick) - 1;
+            }
+        }
+
+        // (1d) 放射(段を入れた時だけ。T-0585・ADR-0263): 気体の後・伝導と反応の前(段の順: コマンド → 物理の熱 → 気体 → 液体 → 放射 → 伝導と反応)
         if (m_radiation)
             StepRadiation(tick, currentBase, seeds);
 
@@ -1591,6 +1604,16 @@ namespace bicameral::sim {
             seeds[block] = 1;
             m_changedMarks[block] = ProbeChangeMark(tick) - 1;
         }
+    }
+
+    std::expected<void, std::string> ProbeReference::EnableLiquid(const ProbeLiquidOptions& options) {
+        auto field = ProbeLiquidField::Create(*m_table, options);
+        if (!field)
+            return std::unexpected(field.error());
+
+        m_liquid = std::move(*field);
+
+        return {};
     }
 
     // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 2 世代のセルを名前で付け替える(熱のキャッシュは Advance が新しい表で作り直す)。

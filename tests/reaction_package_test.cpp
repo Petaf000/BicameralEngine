@@ -239,8 +239,23 @@ namespace {
                        WaterGas("carbon_monoxide = 1, hydrogen = 1", ", orders = { hydrogen = 1 }"), "反応物ではない");
         ExpectModFails("次数 2", HYDROGEN, WaterGas("carbon_monoxide = 1, hydrogen = 1", ", orders = { carbon = 2 }"),
                        "範囲");
+        ExpectModFails(
+            "相の綴り(T-0609)",
+            "hydrogen = { composition = { H = 2 }, formation_enthalpy_j_per_mol = 0, "
+            "heat_capacity_mj_per_mol_k = 28836, thermal_conductivity_mw_per_m_k = 900000, phase = \"plasma\" }",
+            good, "phase");
+        ExpectModFails("相と condensed の食い違い(T-0609)",
+                       "hydrogen = { composition = { H = 2 }, formation_enthalpy_j_per_mol = 0, "
+                       "heat_capacity_mj_per_mol_k = 28836, thermal_conductivity_mw_per_m_k = 900000, phase = "
+                       "\"liquid\", condensed = false }",
+                       good, "食い違う");
 
         // 中身の誤り(ベイクが落とす)
+        ExpectModFails(
+            "密度の無い液体(T-0609)",
+            "hydrogen = { composition = { H = 2 }, formation_enthalpy_j_per_mol = 0, "
+            "heat_capacity_mj_per_mol_k = 28836, thermal_conductivity_mw_per_m_k = 900000, phase = \"liquid\" }",
+            good, "密度");
         ExpectModFails("元素の釣り合い", HYDROGEN, WaterGas("carbon_monoxide = 1, hydrogen = 2", ""), "釣り合わない");
         ExpectModFails("知らない物質", HYDROGEN, WaterGas("carbon_monoxide = 1, helium = 1", ""), "知らない物質");
         ExpectModFails("知らない元素",

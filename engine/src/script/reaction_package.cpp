@@ -73,6 +73,22 @@ namespace bicameral::script {
             return composition;
         }
 
+        // 物質の相(phase)を読む。condensed も書いてあれば同じ向きであること
+        std::expected<void, std::string> ReadPhase(const ScriptValue& phase, const ScriptValue* condensed,
+                                                   const std::string& path, SpeciesDefinition& species) {
+            if (!phase.IsString() || (phase.text != "gas" && phase.text != "solid" && phase.text != "liquid"))
+                return std::unexpected(std::format("{}.phase: \"gas\"・\"solid\"・\"liquid\" のどれかで書く", path));
+
+            const bool phaseCondensed = phase.text != "gas";
+            if (condensed != nullptr && condensed->IsBoolean() && condensed->boolean != phaseCondensed)
+                return std::unexpected(std::format("{}: phase と condensed が食い違う", path));
+
+            species.condensed = phaseCondensed;
+            species.liquid = phase.text == "liquid";
+
+            return {};
+        }
+
         std::expected<SpeciesDefinition, std::string> ReadSpecies(const std::string& name, const ScriptValue& value,
                                                                   const std::string& path) {
             static constexpr std::string_view FIELDS[] = {"composition",
@@ -81,7 +97,9 @@ namespace bicameral::script {
                                                           "thermal_conductivity_mw_per_m_k",
                                                           "standard_entropy_mj_per_mol_k",
                                                           "condensed",
-                                                          "radiation_absorption_mm2_per_mol"};
+                                                          "radiation_absorption_mm2_per_mol",
+                                                          "phase",
+                                                          "density_kg_per_m3"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -134,6 +152,21 @@ namespace bicameral::script {
                     return std::unexpected(absorption.error());
 
                 species.radiationAbsorption = static_cast<uint32_t>(*absorption);
+            }
+
+            // 相(任意。T-0609・ADR-0266 Proposed): "gas" / "solid" / "liquid"。solid と liquid は凝縮相。condensed と食い違えば断る
+            if (const ScriptValue* phase = value.Find("phase")) {
+                if (auto result = ReadPhase(*phase, value.Find("condensed"), path, species); !result)
+                    return std::unexpected(result.error());
+            }
+
+            // 密度(任意。kg/m³。液体には要る〔ベイクが断る〕)
+            if (const ScriptValue* declared = value.Find("density_kg_per_m3")) {
+                const auto density = ReadInteger(*declared, path + ".density_kg_per_m3", 1, UINT32_LIMIT);
+                if (!density)
+                    return std::unexpected(density.error());
+
+                species.density = static_cast<uint32_t>(*density);
             }
 
             return species;
