@@ -1,6 +1,6 @@
 # T-0646 気体の区画で、物質の無い負のエネルギーが残る(強い流れの押し出す仕事)・段の外で気体の質量が変わった時の運動量
 
-- Status: Doing
+- Status: Done(ADR-0286 は Proposed のまま。判断待ち 1)
 - 種類: 工学(不具合)
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -17,7 +17,7 @@ T-0611 の湯気の場面で、気体の区画のエネルギーの合計が +54
 - [x] 段の外で気体の質量が変わった時の運動量(減ったら速さを保つ・増えたら運動量を保つ・気体の無いセルの運動量は帳簿へ。CPU probe_gas・GPU probe_gas_tick)
 - [x] probe_gas・gas_reference・gas_projection・gas_tree・drag_model(CPU。release)
 - [x] probe_phase: 湯気の場面(液体の区画なし・あり)と氷の場面で、毎刻みエネルギーがビット単位で一定・物質の無いセルはエネルギー 0
-- [x] gpu_gas・gpu_gas_flow・gpu_gas_blast・gpu_gas_species・gpu_probe_gas(GPU。毎刻み CPU とビット一致・気体の欄の質量も。湯気の塊の場面も)
+- [x] gpu_gas・gpu_gas_flow・gpu_gas_blast・gpu_gas_species・gpu_gas_tree・gpu_gas_projection・gpu_probe_gas(GPU。毎刻み CPU とビット一致・気体の欄の質量も。湯気の塊の場面も)
 - [x] release のビルド(警告 0)・archmap --check
 
 ## 調べたこと(2026-10-15)
