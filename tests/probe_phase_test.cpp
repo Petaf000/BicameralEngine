@@ -45,7 +45,8 @@ namespace {
 #define EXPECT(condition) Expect((condition), #condition, __LINE__)
 
     constexpr int32_t AIR_TEMPERATURE = 300000;  // mK
-    constexpr uint64_t STONE = 28000000000;      // µmol(0.125 m³ の岩 ≒ 337 kg を C の 12 g/mol で数えたもの)
+    // µmol(0.125 m³ の岩 ≒ 337 kg を C の 12 g/mol で数えたもの。密度 2000 でセルを満たす)
+    constexpr uint64_t STONE = 28000000000;
     constexpr uint64_t TICKS_PER_SECOND = 60;
 
     BakedReactionTable MakeTable() {
@@ -58,12 +59,14 @@ namespace {
                                       {.species = "oxygen", .partsPerMillion = 210000}}}},
             .surfacePressurePascals = 101325,
         };
-        definition.species.push_back({.name = "stone",
-                                      .composition = {{.element = "C", .count = 1}},
-                                      .formationEnthalpy = 0,
-                                      .heatCapacity = 8500,
-                                      .thermalConductivity = 2000000,
-                                      .condensed = true});
+        definition.species.push_back(
+            {.name = "stone",
+             .composition = {{.element = "C", .count = 1}},
+             .formationEnthalpy = 0,
+             .heatCapacity = 8500,
+             .thermalConductivity = 2000000,
+             .condensed = true,
+             .density = 2000});  // セルを満たす石は液体と気体の壁(T-0593・ADR-0268。密度を書かない固体は場所を取らない)
 
         auto baked = BakeReactionTable(definition);
         if (!baked) {
@@ -369,10 +372,12 @@ namespace {
 
         const uint64_t puddleAfter = AmountIn(table, reference, STEAM_TICKS, region, "water", {0, 4}, {0, 8});
         const uint64_t pondAfter = AmountIn(table, reference, STEAM_TICKS, region, "water", {8, 12}, {0, 8});
-        EXPECT(puddleAfter < puddleBefore / 5 * 3);  // 水たまりの 4 割より多くが湯気になった
-        EXPECT(vaporHighMax > 0);                    // 湯気が y 4(2 m)より上へ
-        EXPECT(centroidMax > 2500);                  // 湯気の重心が水たまり(y 1)より 1.5 セル以上高い
-        EXPECT(pondAfter > pondBefore);              // 池の水が増えた(湯気が冷たい池で凝縮した)
+        // 水たまりの 3 割より多くが湯気になった(T-0593 のマージで石が気体を塞ぎ、熱い石の中を通る空気が水たまりを温めなくなった。
+        // 20 秒で 3600 → 2428 mol。前は 1865 mol)
+        EXPECT(puddleAfter < puddleBefore / 10 * 7);
+        EXPECT(vaporHighMax > 0);        // 湯気が y 4(2 m)より上へ
+        EXPECT(centroidMax > 2500);      // 湯気の重心が水たまり(y 1)より 1.5 セル以上高い
+        EXPECT(pondAfter > pondBefore);  // 池の水が増えた(湯気が冷たい池で凝縮した)
     }
 
     // 記録(試験ではなく表示): 湯気の場面で、エネルギーが最初に崩れる刻みを 1 刻みずつ探す(T-0646 が使う。T-0611 のチケットの「重なり」)。

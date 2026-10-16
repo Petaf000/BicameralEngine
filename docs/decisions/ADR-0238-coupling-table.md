@@ -1,6 +1,6 @@
 # ADR-0238 流れどうしの結合(引きずり・押す構造)をエンジンの表へ: 1 つの型・1 つのベイク・1 つの検査
 
-- Status: Proposed(T-0536。形は ADR-0220・ADR-0228。表の書き方はユーザー未確認〔QUESTIONS Q66・Q70〕。仮のおすすめで進める)
+- Status: Accepted(2026-10-17 ユーザー決定。D-503。QUESTIONS Q66・Q70 を閉じた)
 - 日付: 2026-10-15
 - 決めた人: ユーザー(Claude が提案した場合も、決めるのはユーザー)
 
@@ -33,3 +33,6 @@ T-0493(ADR-0220)の交差(結合の強さ q)と T-0495(ADR-0228)の押す構造�
 - 作り手はパッケージに `drags`・`machines` を書けば、ベイクの警告(押さえた値)とパネルの一覧がすぐ見え、ホットリロードで読み直される。まだ世界は動かない(表示だけ)。
 - 分類や欄の名前が変わっても(ユーザーの答え)、変えるのは script/coupling_package と data/types の型だけ。sim の型・ベイク・検査はそのまま。
 - 実装: engine/src/sim/coupling_table・engine/src/script/coupling_package・engine/src/editor/coupling_rows・tests/coupling_table_test(ctest coupling_table)。
+
+## 追記 1(2026-10-17・ユーザー決定 D-503)
+- 2 つの分類 `drags`(どこでも効く法則)・`machines`(置いた所だけで効く物)と、q・費用・速さの書き方を決定にした(仮の案 A のまま)。
