@@ -57,8 +57,8 @@ CPU(probe_gas)と GPU はビット一致なので式の性質。原因を最小�
 - gas_projection: 通る。
 - probe_gas: 通る。燃える木箱 2 秒の熱の重心 11636 → 11781・CO2 の重心 10120 → 4595・CO2 1 mol 以上の最も高い層 22 → 3。
   6 種の空気の燃える木箱の CO2 の重心 4631 → 9070(どちらも市松の抜けたセルの運び方が変わった見込み。未確認)。
-- 回していない: GPU(gpu_gas・gpu_gas_tree・gpu_probe_gas)。頭打ちは CPU の係数で GPU に渡るので一致は変わらない見込み。H: の空きが 0 のため
-  最後のビルド(試験の範囲の直しとコメント)を通せていない → 司令塔が空きを作った後に release のビルドと gas_tree・gas_reference・GPU の 4 本。
+- 最後の release のビルド(警告 0)の上で gas_tree・gpu_gas(HW)・gpu_probe_gas(HW。CPU と毎刻みビット一致)が通った。archmap --check OK。
+  回していない: gpu_gas_tree・gpu_gas_flow・gpu_gas_blast と WARP 版(頭打ちは CPU の係数で GPU に渡るので一致は変わらない見込み)。
 
 ## 並走の重なり
 - wt6 T-0646(t-0646): gas_reference.cpp の LimitOutflow(EffectiveOutflow を足す)・gas_reference.h・probe_gas.cpp/h(段の外で質量が変わった時の運動量)・
@@ -71,4 +71,4 @@ CPU(probe_gas)と GPU はビット一致なので式の性質。原因を最小�
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-17(wt4): 再現の物差し(probe_gas_test 9)と最小の場面(gas_reference_test の等圧の熱い塊)。原因は陽解法の圧力の拡散の奇偶のモードで、
   T-0269 の頭打ちの温度が音の速さの数だけを見ていたこと(拡散の数は c_e² ÷ c̃)。頭打ちを T_基準 × 上限 ÷ c̃ に(ADR-0292 Proposed)。
-  湯気の塊の真空のセルは消え、燃える木箱の市松は約半分に。残り(p/ρ で比べる・T-0646 と重ねた測り直し)は T-0658 に分けた。H: の空きが 0 で最後のビルドは未確認。
+  湯気の塊の真空のセルは消え、燃える木箱の市松は約半分に。残り(p/ρ で比べる・T-0646 と重ねた測り直し)は T-0658 に分けた。H: の空きが 0 で t-0646 を重ねた測り直しは中止。
