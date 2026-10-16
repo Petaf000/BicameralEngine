@@ -149,6 +149,21 @@ namespace bicameral::sim {
         // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
         constexpr std::array<uint32_t, GAS_AXES> GRID_AXIS_OF_GAS_AXIS = {0, 2, 1};
 
+        // 気体の段の外(反応・相変化・置く操作)で、セルの気体の質量が前の段の終わりの before から now に変わった後の運動量(T-0646・ADR-0286)。
+        // 減った時: 減った気体は同じ速さのまま凝縮相へ移った = 速さを保つ(運動量 × now ÷ before。0 の向きへ切り捨て)。
+        // 増えた時: 増えた気体は静止して現れた = 運動量を保つ(速さが下がる)。どちらも運動のエネルギーは前の値を超えない
+        std::array<int64_t, GAS_AXES> MomentumAfterMassChange(const std::array<int64_t, GAS_AXES>& momentum,
+                                                              uint64_t before, uint64_t now) {
+            if (now >= before)
+                return momentum;
+
+            std::array<int64_t, GAS_AXES> kept = {};
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                kept[axis] = ScaleToward0(momentum[axis], now, before);
+
+            return kept;
+        }
+
     }  // namespace
 
     std::expected<ProbeGasField, std::string> ProbeGasField::Create(const BakedReactionTable& table,
@@ -205,6 +220,7 @@ namespace bicameral::sim {
         const uint32_t cells = options.sizeCells[0] * options.sizeCells[1] * options.sizeCells[2];
         field.m_momentum.assign(cells, {0, 0, 0});
         field.m_kinetic.assign(cells, 0);
+        field.m_mass.assign(cells, 0);
         field.m_ledger.amounts.assign(table.species.size(), 0);
 
         return field;
@@ -334,7 +350,14 @@ namespace bicameral::sim {
                 continue;
             }
 
-            gas.momentum = m_momentum[region];
+            // 段の外で質量が減ったセルは速さを保つ(減った気体の運動量は帳簿へ)。運動のエネルギーの減った分は、箱のエネルギーに
+            // 前の運動エネルギーのぶんを足すので熱になる(T-0646)
+            const std::array<int64_t, GAS_AXES> kept = MomentumAfterMassChange(m_momentum[region], m_mass[region],
+                                                                               GasCellMass(box, gas));
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                lostMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] += m_momentum[region][axis] - kept[axis];
+
+            gas.momentum = kept;
             gas.energy += m_kinetic[region];
         }
 
@@ -373,6 +396,7 @@ namespace bicameral::sim {
             const reaction::RxCell& before = cells[index];
             const GasCell& gas = box.cells[region];
             const int64_t kinetic = (GasKineticEnergy(box, gas) + 500) / 1000;  // µJ → mJ(最も近い整数。負にならない)
+            const uint64_t mass = GasCellMass(box, gas);
 
             const std::vector<SpeciesAmount>& amounts = merged[region];
             reaction::RxCell after = reaction::RxMakeEmptyCell(condensedEnergy[region] + gas.energy - kinetic);
@@ -384,6 +408,15 @@ namespace bicameral::sim {
             after.speciesCount = (uint32_t)amounts.size();
             m_momentum[region] = gas.momentum;
             m_kinetic[region] = kinetic;
+            m_mass[region] = mass;
+
+            // 気体が残らなかったセルの運動量は帳簿へ(質量の無い運動量は持たない。次に現れる気体は静止して現れる。T-0646)
+            if (mass == 0) {
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                    m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= gas.momentum[axis];
+
+                m_momentum[region] = {0, 0, 0};
+            }
 
             if (SameCell(after, before))
                 continue;
@@ -417,6 +450,7 @@ namespace bicameral::sim {
                 mix((uint64_t)momentum);
 
             mix((uint64_t)m_kinetic[region]);
+            mix(m_mass[region]);
         }
 
         for (const int64_t amount : m_ledger.amounts)

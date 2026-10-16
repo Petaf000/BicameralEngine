@@ -551,7 +551,27 @@ namespace bicameral::sim {
             }
         }
 
-        // 出ていく割合の合計が 1 を超えるセルは、その面の割合を比例して縮める(07「共通の形」。負の中身を作らない)
+        // 出ていく割合の合計の、引く側の熱を負にしない換算(T-0646・ADR-0286): 出ていく塊は熱の分け前(熱容量の比)に加えて
+        // 押し出す仕事 n R T を持って出る(MovedEnergy)ので、引く側の熱が残るのは 割合の合計 × (C + n R) ≤ C の時(C = 熱容量)。
+        // 割合の合計を (C + n R) ÷ C 倍した値を返す(1 を超えたら縮める。空気なら合計が約 0.71 まで。等温は押し出す仕事が無いのでそのまま)。
+        // これが無いと、強い流れが 1 小刻みでセルの中身をほぼ全部押し出し、物質の無い負のエネルギーが残る(T-0646。gas_step.hlsl の GasOutflow も同じ)
+        uint64_t EffectiveOutflow(const GasConfig& config, const GasCell& cell, uint64_t outflow) {
+            if (outflow == 0 || config.thermodynamics != GasThermodynamics::Adiabatic)
+                return outflow;
+
+            const uint64_t capacity = HeatCapacity(config, cell);
+            if (capacity == 0)
+                return outflow;
+
+            const fx::FxDivResult push = fx::FxDivU128By64(
+                fx::FxMulU64Full(TotalAmount(config, cell), fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN), MICRO);
+            const uint64_t pushCapacity = push.quotient + (push.remainder != 0 ? 1 : 0);  // n R(nJ/K。切り上げ)
+
+            return fx::FxDivU128By64(fx::FxMulU64Full(outflow, capacity + pushCapacity), capacity).quotient;
+        }
+
+        // 出ていく割合の合計(EffectiveOutflow で換算)が 1 を超えるセルは、その面の割合を比例して縮める(07「共通の形」。負の中身と
+        // 物質の無いエネルギーを作らない)
         void LimitOutflow(const GasBox& box, const std::vector<GasDerived>& derived, std::vector<GasFace>& faces) {
             std::vector<uint64_t> outflow(box.cells.size(), 0);
             for (GasFace& face : faces) {
@@ -560,6 +580,9 @@ namespace bicameral::sim {
                 if (face.fraction != 0 && donor.kind == SideKind::Cell)
                     outflow[donor.index] += face.fraction;
             }
+
+            for (uint32_t index = 0; index < box.cells.size(); ++index)
+                outflow[index] = EffectiveOutflow(box.config, box.cells[index], outflow[index]);
 
             for (GasFace& face : faces) {
                 const FaceSide donor = face.flow > 0 ? face.left : face.right;
@@ -981,6 +1004,10 @@ namespace bicameral::sim {
 
     int64_t GasKineticEnergy(const GasBox& box, const GasCell& cell) {
         return KineticEnergy(box.config, cell, CellMass(box.config, box.coefficients, cell));
+    }
+
+    uint64_t GasCellMass(const GasBox& box, const GasCell& cell) {
+        return CellMass(box.config, box.coefficients, cell);
     }
 
     void SetGasMomentum(const GasBox& box, GasCell& cell, const std::array<int64_t, GAS_AXES>& momentum) {

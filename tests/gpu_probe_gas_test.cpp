@@ -6,7 +6,9 @@
 //   1. 静かな大気: 刻みごとのハッシュが CPU と同じ・気体の欄(運動量・運動エネルギーのぶん)と帳簿も同じ
 //   2. 燃える木箱: 同じく毎刻み一致し、流さなかった刻みが 0
 //   3. 6 種の空気(N2・O2・Ar・CO2・H2O・CO。GPU の成分の欄に上限が無いこと。T-0598)の静かな大気と燃える木箱: 同じく毎刻み一致
-//   4. シェーダーの assert・debug layer のエラーが 0 件
+//   4. 湯気の塊が露になる(T-0646): 水蒸気が凝縮相になる試験の規則で、反応が気体の質量を減らすセルの運動量の合わせ直し
+//      (速さを保つ)と、出ていく割合の上限(引く側の熱を負にしない)が CPU と毎刻み一致・気体の欄(質量も)と帳簿も同じ
+//   5. シェーダーの assert・debug layer のエラーが 0 件
 // 気体の段(適用の単位の中)の GPU 時間を出す(docs/perf.md)。
 // 走らせ方: ctest(gpu_probe_gas・gpu_probe_gas_warp)か `job.py run -Preset release -Exe gpu_probe_gas_test`。引数は gpu_test_options.h
 #include <algorithm>
@@ -58,9 +60,12 @@ namespace {
         }
     };
 
-    // 基準の大気: N2 79%・O2 21%、six なら 6 種(N2・O2・Ar・CO2・H2O・CO。T-0598)
-    BakedReactionTable MakeTable(bool six) {
+    // 基準の大気: N2 79%・O2 21%、six なら 6 種(N2・O2・Ar・CO2・H2O・CO。T-0598)。dewRatePerSecond が 0 でなければ露の試験の規則(T-0646)
+    BakedReactionTable MakeTable(bool six, uint64_t dewRatePerSecond = 0) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
+        if (dewRatePerSecond != 0)
+            AddDewCondensationForTest(definition, dewRatePerSecond);
+
         std::erase_if(definition.rules, [](const RuleDefinition& rule) {
             return std::ranges::any_of(rule.products,
                                        [](const RuleTerm& term) { return term.species == "carbon_monoxide"; });
@@ -98,8 +103,10 @@ namespace {
                y >= WOOD_BOTTOM && y < WOOD_BOTTOM + WOOD_SIZE;
     }
 
-    // 区画を基準の大気で満たした世界(区画の外は空)。wood なら底に燃える木箱
-    std::vector<reaction::RxCell> MakeWorld(const BakedReactionTable& table, const ProbeGasField& field, bool wood) {
+    // 区画を基準の大気で満たした世界(区画の外は空)。wood なら底に燃える木箱(steam なら木箱の代わりに同じ圧力の熱い湯気の塊。
+    // 水蒸気 9 割・空気 1 割。probe_gas_test と同じ)
+    std::vector<reaction::RxCell> MakeWorld(const BakedReactionTable& table, const ProbeGasField& field, bool wood,
+                                            bool steam = false) {
         std::vector<reaction::RxCell> cells = MakeBlankProbeWorld();
         for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
             const uint32_t index = field.GridIndex(region);
@@ -112,10 +119,23 @@ namespace {
                 continue;
             }
 
-            std::vector<SpeciesAmount> amounts = {{.species = table.SpeciesId("cellulose"), .amount = WOOD_AMOUNT}};
+            std::vector<SpeciesAmount> amounts;
+            if (!steam)
+                amounts.push_back({.species = table.SpeciesId("cellulose"), .amount = WOOD_AMOUNT});
+
+            uint64_t airAmount = 0;
+            for (uint32_t i = 0; i < air.speciesCount; ++i)
+                airAmount += air.amounts[i];
+
+            if (steam)
+                amounts.push_back(
+                    {.species = table.SpeciesId("water_vapor"),
+                     .amount = airAmount * 9 / 10 * (uint64_t)AIR_TEMPERATURE / (uint64_t)WOOD_TEMPERATURE});
+
             for (uint32_t i = 0; i < air.speciesCount; ++i)
                 amounts.push_back({.species = air.species[i],
-                                   .amount = air.amounts[i] * (uint64_t)AIR_TEMPERATURE / (uint64_t)WOOD_TEMPERATURE});
+                                   .amount = air.amounts[i] * (steam ? 1u : 10u) / 10u * (uint64_t)AIR_TEMPERATURE /
+                                             (uint64_t)WOOD_TEMPERATURE});
 
             std::ranges::sort(amounts, {}, &SpeciesAmount::species);
             cells[index] = MakeReactionCell(table, amounts, WOOD_TEMPERATURE);
@@ -168,6 +188,8 @@ namespace {
             for (uint32_t axis = 0; axis < 3; ++axis)
                 same = same && readout.cells[region].momentum[axis] == field.Momentum()[region][axis];
 
+            same = same && readout.cells[region].mass == field.Mass()[region];
+
             kinetic += readout.cells[region].kinetic;
         }
 
@@ -186,14 +208,14 @@ namespace {
 
     // --- 走らせる(1 フレーム = 1 刻み。毎刻み CPU と比べる)---
     void CheckScene(ID3D12Device5* device, const BakedReactionTable& table, std::string_view name, bool wood,
-                    uint64_t ticks, Failures& failures) {
+                    uint64_t ticks, Failures& failures, bool steam = false) {
         const auto field = ProbeGasField::Create(table, MakeOptions());
         if (!field) {
             failures.Check(false, std::format("{}: 区画を作れる({})", name, field.error()));
             return;
         }
 
-        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, wood);
+        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, wood, steam);
         ProbeReference reference(table, world);
         failures.Check(reference.EnableGas(MakeOptions()).has_value(), std::format("{}: CPU の区画", name));
 
@@ -403,6 +425,7 @@ int main(int argc, char** argv) {
     CheckScene(device->Get(), table, "燃える木箱", true, warp ? 4 : 60, failures);
     CheckScene(device->Get(), sixTable, "6 種の空気・静か", false, warp ? 2 : 10, failures);
     CheckScene(device->Get(), sixTable, "6 種の空気・燃える木箱", true, warp ? 3 : 60, failures);
+    CheckScene(device->Get(), MakeTable(false, 100), "湯気の塊が露になる", true, warp ? 4 : 60, failures, true);
 
     if (!warp)
         Measure(device->Get(), table);

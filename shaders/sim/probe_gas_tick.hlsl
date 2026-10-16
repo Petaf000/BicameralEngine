@@ -271,6 +271,9 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     if (region >= header.regionCellCount)
         return;
 
+    g_gasParameters = gasWork.Load<GasGpuParameters>(
+        header.parametersOffset);  // 質量を数える(GasPrepare が書いた刻みの欄の物質)
+    g_gasSpeciesOffset = header.parametersOffset + GAS_GPU_PARAMETERS_BYTES;
     const uint32_t slotCount = SlotCount();
     const RxCell cell = cells[GenerationBase(CurrentTick()) + RegionGridCell(header, region)];
 
@@ -310,7 +313,29 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
 
         condensed += state.kinetic;
     } else {
-        gas.momentum = state.momentum;
+        // 段の外(反応・相変化・置く操作)で気体の質量が減ったセルは速さを保つ(減った気体の運動量は帳簿へ。運動のエネルギーの減った分は熱へ。
+        // CPU の MomentumAfterMassChange。T-0646・ADR-0286)
+        GasGpuTotals totals = GasZeroTotals();
+        for (uint32_t s = 0; s < slotCount; ++s)
+            GasAddSpecies(totals, s, gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)));
+
+        const uint64_t mass = totals.mass;
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+            int64_t kept = state.momentum[axis];
+            if (mass < state.mass) {
+                const uint64_t magnitude = FxDivU128By64(FxMulU64Full(FxAbsU64(kept), mass), state.mass).quotient;
+                kept = FxApplySign(magnitude, kept < 0);
+            }
+
+            const int64_t lost = state.momentum[axis] - kept;
+            if (lost != 0) {
+                int64_t original;
+                gasWork.InterlockedAdd64(PROBE_GAS_CONTROL_LOST + ProbeGasGridAxis(axis) * 8, lost, original);
+            }
+
+            gas.momentum[axis] = kept;
+        }
+
         gas.energy += state.kinetic;
     }
 
@@ -372,7 +397,8 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
     for (uint32_t s = 0; s < slotCount; ++s)
         GasAddSpecies(totals, s, gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)));
 
-    const int64_t kineticMicroJoule = KineticEnergy(gas, totals.mass);
+    const uint64_t mass = totals.mass;
+    const int64_t kineticMicroJoule = KineticEnergy(gas, mass);
     const int64_t kinetic = (int64_t)(((uint64_t)kineticMicroJoule + 500) / 1000);
     const int64_t condensed = gasWork.Load<int64_t>(header.condensedOffset + region * 8);
 
@@ -424,6 +450,21 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
     ProbeGasCellState state;
     state.momentum = gas.momentum;
     state.kinetic = kinetic;
+    state.mass = mass;
+
+    // 気体が残らなかったセルの運動量は帳簿へ(質量の無い運動量は持たない。CPU と同じ。T-0646)
+    if (mass == 0) {
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+            if (gas.momentum[axis] != 0) {
+                int64_t original;
+                gasWork.InterlockedAdd64(PROBE_GAS_CONTROL_LOST + ProbeGasGridAxis(axis) * 8, gas.momentum[axis],
+                                         original);
+            }
+
+            state.momentum[axis] = 0;
+        }
+    }
+
     gasState[region] = state;
 
     // --- 変わったセルだけ書く ---

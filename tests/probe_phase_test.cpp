@@ -7,10 +7,11 @@
 //      融解 6.010 kJ/mol(273.15 K)・蒸発 44.004 kJ/mol(298.15 K)
 //   2. 湯気: 熱い石の上の水たまりが湯気になり、湯気が気体の区画で上がる。湯気は冷たい池まで運ばれて凝縮する(池の水が増える)
 //   3. 氷: 暖かい台の上の氷が溶け、溶けた水が液体の区画で台から流れ落ちる
-//   4. 保存(湯気の場面は気体の区画だけで元素だけ〔エネルギーは崩れる刻みを表示。チケットの「重なり」〕・氷の場面は気体と液体の区画で両方): 1 秒ごとに、元素の数 − 気体の帳簿・エネルギー(セル + 気体の運動エネルギーのぶん − 気体の帳簿。潜熱は化学のエネルギーに
-//      入っている)がビット単位で一定。決定性: 2 回の実行でセル・気体・液体のハッシュが一致
-//   5. 記録(試験ではなく表示): 水と湯気が釣り合ったセルは眠らない(蒸発と凝縮が毎刻み行き来する。ADR-0272 の注)・
-//      湯気の場面に液体の区画も重ねると保存が崩れる刻み(T-0611 のチケットの「重なり」)
+//   4. 保存(湯気の場面は気体の区画だけと、液体の区画も重ねた時・氷の場面は気体と液体の区画): 毎刻み、エネルギー(セル + 気体の
+//      運動エネルギーのぶん − 気体の帳簿 + 液体の位置と運動のエネルギー − 液体の帳簿。潜熱は化学のエネルギーに入っている)が
+//      ビット単位で一定で、物質の無いセルはエネルギーを持たない(T-0646・ADR-0286)。1 秒ごとに元素の数 − 気体の帳簿も一定。
+//      決定性: 2 回の実行でセル・気体・液体のハッシュが一致
+//   5. 記録(試験ではなく表示): 水と湯気が釣り合ったセルは眠らない(蒸発と凝縮が毎刻み行き来する。ADR-0272 の注)
 // 表は試験の表(combustion_test。real_matter・real_reactions を写して熱伝導率に試験の倍率)+ 地球の環境 + 基準の大気(N2・O2)+ 石。
 #include <algorithm>
 #include <array>
@@ -254,14 +255,24 @@ namespace {
         bool operator==(const Totals&) const = default;
     };
 
+    // セルの外に持つエネルギー: 気体の運動エネルギーのぶん − 気体の帳簿 + 液体の位置と運動のエネルギー − 液体の帳簿
+    int64_t FieldEnergy(const ProbeReference& reference) {
+        const ProbeGasField* gas = reference.GasField();
+        int64_t energy = gas->KineticEnergySum() - gas->Ledger().energy;
+        if (const ProbeLiquidField* liquid = reference.LiquidField())
+            energy += liquid->PotentialEnergySum() + liquid->KineticEnergySum() - liquid->Ledger().energy;
+
+        return energy;
+    }
+
     Totals Sum(const BakedReactionTable& table, const ProbeReference& reference, uint64_t tick) {
         Totals totals;
         totals.elements.assign(table.elementNames.size(), 0);
         for (const reaction::RxCell& cell : reference.State(tick)) {
+            totals.energy += cell.energy;
             if (cell.speciesCount == 0)
                 continue;
 
-            totals.energy += cell.energy;
             const std::vector<uint64_t> elements = CountElements(table, cell);
             for (size_t e = 0; e < elements.size(); ++e)
                 totals.elements[e] += elements[e];
@@ -274,47 +285,77 @@ namespace {
                                       table.speciesElements[(species * table.elementNames.size()) + e];
         }
 
-        totals.energy += gas->KineticEnergySum() - gas->Ledger().energy;
-        if (const ProbeLiquidField* liquid = reference.LiquidField())
-            totals.energy += liquid->PotentialEnergySum() + liquid->KineticEnergySum() - liquid->Ledger().energy;
+        totals.energy += FieldEnergy(reference);
 
         return totals;
+    }
+
+    // 毎刻みの確かめ(元素を数えない軽い方): エネルギーの合計と、物質の無いのにエネルギーを持つセルの数(T-0646・ADR-0286)
+    struct EnergyCheck {
+        int64_t energy = 0;
+        uint32_t emptyWithEnergy = 0;
+    };
+
+    EnergyCheck SumEnergy(const ProbeReference& reference, uint64_t tick) {
+        EnergyCheck check;
+        for (const reaction::RxCell& cell : reference.State(tick)) {
+            check.energy += cell.energy;
+            if (cell.speciesCount == 0 && cell.energy != 0)
+                ++check.emptyWithEnergy;
+        }
+
+        check.energy += FieldEnergy(reference);
+
+        return check;
     }
 
     uint64_t RunHash(const ProbeReference& reference, uint64_t tick) {
         return reference.StateHash(tick) ^ reference.GasField()->Hash() ^ (reference.LiquidField()->Hash() * 3);
     }
 
-    // 1 秒ごとに保存を確かめながら進める。perSecond(tick) は 1 秒ごとの表示。
-    // energyHolds = false なら、エネルギーの崩れは表示だけ(元素は必ず確かめる。湯気の場面の既知の崩れ。T-0611 の「重なり」)
+    // 保存を確かめながら進める: エネルギーと物質の無いセルは毎刻み、元素は 1 秒ごと。perSecond(tick) は 1 秒ごとの表示。
+    // 崩れたら最初の刻みを表示する(どの刻みで崩れたかを見るため。T-0646)
     template <typename PerSecond>
-    void Run(const BakedReactionTable& table, ProbeReference& reference, uint64_t ticks, PerSecond perSecond,
-             bool energyHolds = true) {
+    void Run(const BakedReactionTable& table, ProbeReference& reference, uint64_t ticks, PerSecond perSecond) {
         const Totals before = Sum(table, reference, 0);
-        bool conserved = true;
+        bool energyConserved = true;
         bool elementsConserved = true;
+        uint32_t emptyWithEnergyMax = 0;
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             reference.Advance(tick, {});
+
+            const EnergyCheck check = SumEnergy(reference, tick + 1);
+            if (energyConserved && check.energy != before.energy)
+                std::printf("  エネルギーの保存が崩れた(%llu 刻み): %+lld mJ・気体の帳簿 %lld・運動 %lld\n",
+                            (unsigned long long)(tick + 1), (long long)(check.energy - before.energy),
+                            (long long)reference.GasField()->Ledger().energy,
+                            (long long)reference.GasField()->KineticEnergySum());
+
+            if (emptyWithEnergyMax == 0 && check.emptyWithEnergy != 0)
+                std::printf("  物質の無いのにエネルギーを持つセル(%llu 刻み): %u\n", (unsigned long long)(tick + 1),
+                            check.emptyWithEnergy);
+
+            energyConserved = energyConserved && check.energy == before.energy;
+            emptyWithEnergyMax = std::max(emptyWithEnergyMax, check.emptyWithEnergy);
             if ((tick + 1) % TICKS_PER_SECOND != 0)
                 continue;
 
             const Totals now = Sum(table, reference, tick + 1);
-            if (conserved && !(now == before)) {
-                std::printf("  保存が崩れた(%llu 刻み): エネルギー %+lld mJ", (unsigned long long)(tick + 1),
-                            (long long)(now.energy - before.energy));
+            if (elementsConserved && now.elements != before.elements) {
+                std::printf("  元素の保存が崩れた(%llu 刻み)", (unsigned long long)(tick + 1));
                 for (size_t e = 0; e < now.elements.size(); ++e)
                     std::printf("・%s %+lld", table.elementNames[e].c_str(),
                                 (long long)(now.elements[e] - before.elements[e]));
                 std::printf("・気体の報告 溢れ %d\n", reference.LastGasReport().skippedCellOverflow ? 1 : 0);
             }
 
-            conserved = conserved && now == before;
             elementsConserved = elementsConserved && now.elements == before.elements;
             perSecond(tick + 1);
         }
 
         EXPECT(elementsConserved);
-        EXPECT(conserved || !energyHolds);
+        EXPECT(energyConserved);
+        EXPECT(emptyWithEnergyMax == 0);
     }
 
     // --- 2: 熱い石の上の水たまりが湯気になって上がり、冷たい池で凝縮する ---
@@ -339,36 +380,33 @@ namespace {
         return {};
     }
 
-    void TestSteam(const BakedReactionTable& table) {
-        std::printf("湯気(熱い石の上の水たまり → 冷たい池)\n");
+    // liquid: 液体の区画も重ねる(水たまりと池は石の堤で囲むので流れなくてよいが、気体と液体の両方の区画で保存を確かめる)
+    void TestSteam(const BakedReactionTable& table, bool liquid) {
+        std::printf("湯気(熱い石の上の水たまり → 冷たい池。液体の区画 %s)\n", liquid ? "あり" : "なし");
         const Region& region = STEAM_REGION;
-        // 液体の区画は載せない(水たまりと池は石の堤で囲み、流れなくてよい。保存が崩れる刻みは ReportSteamBreak)
-        ProbeReference reference = MakeReference(table, region, SteamCell, false);
+        ProbeReference reference = MakeReference(table, region, SteamCell, liquid);
 
         const uint64_t puddleBefore = AmountIn(table, reference, 0, region, "water", {0, 4}, {1, 2});
         const uint64_t pondBefore = AmountIn(table, reference, 0, region, "water", {8, 12}, {0, 8});
         uint64_t vaporHighMax = 0;
         int64_t centroidMax = -1;
-        Run(
-            table, reference, STEAM_TICKS,
-            [&](uint64_t tick) {
-                const uint64_t vapor = AmountIn(table, reference, tick, region, "water_vapor", {0, 12}, {0, 8});
-                const uint64_t vaporHigh = AmountIn(table, reference, tick, region, "water_vapor", {0, 12}, {4, 8});
-                const int64_t centroid = CentroidMilliCells(table, reference, tick, region, "water_vapor");
-                const uint64_t puddle = AmountIn(table, reference, tick, region, "water", {0, 4}, {0, 8});
-                const uint64_t pond = AmountIn(table, reference, tick, region, "water", {8, 12}, {0, 8});
-                const uint64_t pondVapor = AmountIn(table, reference, tick, region, "water_vapor", {8, 12}, {0, 8});
-                vaporHighMax = std::max(vaporHighMax, vaporHigh);
-                centroidMax = std::max(centroidMax, centroid);
-                if (tick % (TICKS_PER_SECOND * 4) == 0)
-                    std::printf(
-                        "  %2llu 秒: 水たまり %.2f mol・湯気 %.2f mol(y 4 以上 %.2f・重心 y %.2f)・池 %+.3f "
-                        "mol(池の上の湯気 %.3f)\n",
-                        (unsigned long long)(tick / TICKS_PER_SECOND), (double)puddle * 1e-6, (double)vapor * 1e-6,
-                        (double)vaporHigh * 1e-6, (double)centroid * 1e-3, ((double)pond - (double)pondBefore) * 1e-6,
-                        (double)pondVapor * 1e-6);
-            },
-            false);
+        Run(table, reference, STEAM_TICKS, [&](uint64_t tick) {
+            const uint64_t vapor = AmountIn(table, reference, tick, region, "water_vapor", {0, 12}, {0, 8});
+            const uint64_t vaporHigh = AmountIn(table, reference, tick, region, "water_vapor", {0, 12}, {4, 8});
+            const int64_t centroid = CentroidMilliCells(table, reference, tick, region, "water_vapor");
+            const uint64_t puddle = AmountIn(table, reference, tick, region, "water", {0, 4}, {0, 8});
+            const uint64_t pond = AmountIn(table, reference, tick, region, "water", {8, 12}, {0, 8});
+            const uint64_t pondVapor = AmountIn(table, reference, tick, region, "water_vapor", {8, 12}, {0, 8});
+            vaporHighMax = std::max(vaporHighMax, vaporHigh);
+            centroidMax = std::max(centroidMax, centroid);
+            if (tick % (TICKS_PER_SECOND * 4) == 0)
+                std::printf(
+                    "  %2llu 秒: 水たまり %.2f mol・湯気 %.2f mol(y 4 以上 %.2f・重心 y %.2f)・池 %+.3f "
+                    "mol(池の上の湯気 %.3f)\n",
+                    (unsigned long long)(tick / TICKS_PER_SECOND), (double)puddle * 1e-6, (double)vapor * 1e-6,
+                    (double)vaporHigh * 1e-6, (double)centroid * 1e-3, ((double)pond - (double)pondBefore) * 1e-6,
+                    (double)pondVapor * 1e-6);
+        });
 
         const uint64_t puddleAfter = AmountIn(table, reference, STEAM_TICKS, region, "water", {0, 4}, {0, 8});
         const uint64_t pondAfter = AmountIn(table, reference, STEAM_TICKS, region, "water", {8, 12}, {0, 8});
@@ -378,32 +416,6 @@ namespace {
         EXPECT(vaporHighMax > 0);        // 湯気が y 4(2 m)より上へ
         EXPECT(centroidMax > 2500);      // 湯気の重心が水たまり(y 1)より 1.5 セル以上高い
         EXPECT(pondAfter > pondBefore);  // 池の水が増えた(湯気が冷たい池で凝縮した)
-    }
-
-    // 記録(試験ではなく表示): 湯気の場面で、エネルギーが最初に崩れる刻みを 1 刻みずつ探す(T-0646 が使う。T-0611 のチケットの「重なり」)。
-    //   liquid = false: 気体の区画だけ(TestSteam と同じ。1 秒ごとの確かめでは 901〜960 刻みのどこかで +54 kJ)。
-    //   liquid = true: 液体の区画も重ねる(液体の位置と運動のエネルギーを数えれば〔T-0610〕660 刻みまで保存する)。
-    //   崩れた刻みの気体の帳簿と運動エネルギーのぶんも出す(反応が気体の質量を変えた刻みとの突き合わせ用)
-    void ReportSteamBreak(const BakedReactionTable& table, bool liquid, uint64_t firstChecked, uint64_t lastTick) {
-        std::printf("記録: 湯気の場面(液体の区画 %s)で保存が崩れる刻み\n", liquid ? "あり" : "なし");
-        ProbeReference reference = MakeReference(table, STEAM_REGION, SteamCell, liquid);
-        const Totals before = Sum(table, reference, 0);
-        for (uint64_t tick = 0; tick < lastTick; ++tick) {
-            reference.Advance(tick, {});
-            if (tick + 1 < firstChecked)
-                continue;
-
-            const Totals now = Sum(table, reference, tick + 1);
-            if (!(now == before)) {
-                std::printf("  %llu 刻み: エネルギー %+lld mJ・気体の帳簿 %lld・運動 %lld\n",
-                            (unsigned long long)(tick + 1), (long long)(now.energy - before.energy),
-                            (long long)reference.GasField()->Ledger().energy,
-                            (long long)reference.GasField()->KineticEnergySum());
-                return;
-            }
-        }
-
-        std::printf("  %llu 刻みまで保存\n", (unsigned long long)lastTick);
     }
 
     // --- 3: 暖かい台の上の氷が溶けて流れ落ちる ---
@@ -490,12 +502,11 @@ namespace {
 int main() {
     const BakedReactionTable table = MakeTable();
     TestTable(table);
-    TestSteam(table);
+    TestSteam(table, false);
+    TestSteam(table, true);
     TestIce(table);
     TestDeterminism(table);
     ReportQuietPond(table);
-    ReportSteamBreak(table, true, 480, 660);
-    ReportSteamBreak(table, false, 900, 960);
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
