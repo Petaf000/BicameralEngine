@@ -592,6 +592,11 @@ bicameral_add_gpu_test(gpu_probe_gas_test)
 target_link_libraries(gpu_probe_gas_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_gas gpu_probe_gas_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_gas_warp gpu_probe_gas_test warp --warp)
+# 仮の世界の GPU の刻みに液体の区画(T-0613): 池に溜まる・堤を消すと抜ける・ダムの水が押し寄せる・移流なしが CPU リファレンス(probe_liquid)と毎刻みビット一致
+bicameral_add_gpu_test(gpu_probe_liquid_test)
+target_link_libraries(gpu_probe_liquid_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_probe_liquid gpu_probe_liquid_test gpu --no-gbv)
+bicameral_add_gpu_test_case(gpu_probe_liquid_warp gpu_probe_liquid_test warp --warp)
 # ブランクの世界(T-0371・D-455): 空の表・物の無い世界の GPU の刻みが CPU とハッシュ一致し、刻み 0 のまま変わらない
 bicameral_add_gpu_test(gpu_probe_blank_test)
 target_link_libraries(gpu_probe_blank_test PRIVATE bicameral_sim bicameral_reaction_script)
@@ -915,7 +920,7 @@ foreach(_name IN ITEMS
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
-    world_layout_test play_metric_test
+    gpu_probe_liquid_test world_layout_test play_metric_test
     gpu_play_metric_test environment_package_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

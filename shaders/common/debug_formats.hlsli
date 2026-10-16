@@ -32,3 +32,8 @@ DEBUG_FORMAT(WgLimitsFanRefused, WorkGraph, "work_graph_limits_probe/Fan",
              "レコード {}: 出力を {} 件求めた(上限 {}。越えた分は出さない)")
 DEBUG_FORMAT(WgLimitsChainRefused, WorkGraph, "work_graph_limits_probe/Chain",
              "レコード {}: 深さ {} で再帰の上限(自分へ出さない)")
+
+// --- T-0613 仮の世界の GPU の液体の段(shaders/sim/probe_liquid_tick.hlsl)---
+DEBUG_FORMAT(ProbeLiquidCellOverflow, Sim, "probe_liquid_tick/LiquidApply",
+             "区画のセル {}: 液体を動かすと成分が {} 個(インラインの数・作業場の件数を超える。この刻みはセルを変えない)")
+DEBUG_FORMAT(ProbeLiquidInvariant, Sim, "probe_liquid_tick", "区画のセル {}: 液体の段の約束が崩れた(種類 {})")

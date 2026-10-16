@@ -20,10 +20,11 @@ namespace bicameral::sim {
         //   u0 セル・u1 イベントのリング・u2/u3/u5 抽出・u4 重さの捨て場・u6 ハッシュの表・u7 コマンドキュー・
         //   u8 刻みのイベントの一時置き場・u9/u10 活性の一覧・u11 予定の印・u12 熱のキャッシュ・u13 物理の物(T-0098。物理なしなら仮の置き場)
         //   ・u14 物理の熱の入口(T-0561。物理なしなら仮の置き場)・u15〜u18 気体の区画(T-0592。sim/probe_sim_gas.cpp。無ければ仮の置き場)
+        //   ・u19 液体の区画(T-0613。sim/probe_sim_liquid.cpp。無ければ仮の置き場)。語の数: UAV 20 × 2 + 定数 3 + 3 × 2 + SRV 6 × 2 = 61/64
         //   → b0 単位の定数 → デバッグのリング
         //   → Work Graphs のカウンタ(u1 space1。T-0008)→ 連鎖のトレース(u2 space1。T-0087)→ t0 フレームの入力・t1〜t4 反応の表
         //   ・t5 物質の付け替えの表(T-0223)
-        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 19,
+        constexpr gpu::RootSignatureLayout ROOT_LAYOUT{.uavCount = 20,
                                                        .rootConstantCount = PROBE_ROOT_CONSTANT_COUNT,
                                                        .debugRing = true,
                                                        .graphStats = true,
@@ -49,6 +50,7 @@ namespace bicameral::sim {
         constexpr uint32_t UAV_GAS_WORK = 16;        // 気体の作業場
         constexpr uint32_t UAV_GAS_CELLS = 17;       // 気体の箱のセル(GpuGas の u0)
         constexpr uint32_t UAV_GAS_BOX_LEDGER = 18;  // 気体の箱の帳簿(GpuGas の u5)
+        constexpr uint32_t UAV_LIQUID_WORK = 19;     // 液体の作業場(制御・帳簿・状態)
         constexpr uint32_t SRV_INPUT = 0;
         constexpr uint32_t SRV_REACTION_FIRST = 1;  // t1 物質・t2 規則・t3 索引・t4 速度
         constexpr uint32_t SRV_SPECIES_REMAP = 5;   // t5 付け替えの表(T-0223)
@@ -333,6 +335,9 @@ namespace bicameral::sim {
         if (auto gas = sim.CreateGas(device, table); !gas)
             return std::unexpected(gas.error());
 
+        if (auto liquid = sim.CreateLiquid(device, table); !liquid)
+            return std::unexpected(liquid.error());
+
         return sim;
     }
 
@@ -521,6 +526,7 @@ namespace bicameral::sim {
                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         RecordGasInitialization(list);
+        RecordLiquidInitialization(list);
         m_initialized = true;
     }
 
@@ -564,7 +570,8 @@ namespace bicameral::sim {
             return false;
         }
 
-        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input) && ValidateGas(input);
+        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input) && ValidateGas(input) &&
+               ValidateLiquid(input);
     }
 
     // 表の差し替えの約束: (tick, 適用の単位) がこのフレームの単位の中にあり、表がある(T-0139)
@@ -836,6 +843,8 @@ namespace bicameral::sim {
                                                 m_gas ? m_gas->CellBuffer()->GetGPUVirtualAddress() : sink);
         list->SetComputeRootUnorderedAccessView(UAV_GAS_BOX_LEDGER,
                                                 m_gas ? m_gas->LedgerBuffer()->GetGPUVirtualAddress() : sink);
+        list->SetComputeRootUnorderedAccessView(UAV_LIQUID_WORK,
+                                                m_liquidWork ? m_liquidWork->GetGPUVirtualAddress() : sink);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), m_debugRing.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphStatsIndex(), m_graphStats.GpuAddress());
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.GraphTraceIndex(), m_graphTrace.GpuAddress());
@@ -876,6 +885,12 @@ namespace bicameral::sim {
                 BindRootArguments(list, input);
                 SetUnitConstants(list, tick, m_speciesCount);
                 RecordGasScatter(list);
+            }
+
+            // 液体(区画があるときだけ。T-0613・ADR-0266): 気体の後(CPU の (1c))。変わったセルのブロックは気体と同じく起こす
+            if (m_liquidWork) {
+                list->ResourceBarrier(1, &allUavs);
+                RecordLiquid(list);
             }
 
             // 起こす刻みの来たブロックを同じ一覧へ(適用が一覧の見出しを整えた後。待ちの丸め。T-0122)
