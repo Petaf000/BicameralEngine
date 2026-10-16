@@ -5,7 +5,8 @@
 // RecordLiquid が次の順に投げる(段の間は全部の UAV の書き込みを待つ。CPU の 1 刻みの段を、面やセルごとに「集める」形に直した):
 //   LiquidRead        刻みの初めのセルを写し、セルの値(質量・体積・空き・熱)を作る。区画の外の段で現れた・消えた液体の位置のエネルギーを帳簿へ
 //   LiquidPressure    列ごとに上から圧力(1 スレッド = 1 列)
-//   LiquidForces      面の運動量に圧力の差・重さ・壁・摩擦を足し、望む動く質量を決める(1 スレッド = 1 セルの + 側の面 ×3)
+//   LiquidForces      段の外で液体の質量が変わった面の運動量を合わせ直し(T-0656)、圧力の差・重さ・壁・摩擦を足し、望む動く質量を
+//                     決める(1 スレッド = 1 セルの + 側の面 ×3)
 //   LiquidOutgoing    セルから出る望む質量の合計(自分が上流の面を集める)
 //   LiquidMoveFaces   出る合計が中身を超えるセルは比で縮め、面を実際に動く質量を決める
 //   LiquidApply       自分に関わる 6 つの面の流れを集めて成分・液体のぶんのエネルギーを当てる(上流のセルは刻みの初めの写しから読む)
@@ -348,7 +349,22 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
             int64_t gravity = 0;
             int64_t friction = 0;
             int64_t dropped = 0;
+            int64_t vanished = 0;
             uint64_t desired = 0;
+
+            // 区画の外の段で液体の質量が変わった面の運動量を合わせ直す(CPU の FollowMassChange。T-0656・ADR-0286)。
+            // massOffset は前の刻みの終わりの質量(この段では誰も書かない。LiquidApply が書き直す)
+            if (face != 0 && Component(at, axis) + 1 < RegionSize(header, axis)) {
+                const uint32_t other = region + step;
+                const uint64_t before = LoadUnsigned(CellAddress(header.massOffset, region)) +
+                                        LoadUnsigned(CellAddress(header.massOffset, other));
+                const uint64_t now = a.mass + LoadState(header, other).mass;
+                if (now < before) {
+                    const int64_t kept = ScaleSigned(face, now, before);
+                    vanished -= face - kept;
+                    face = kept;
+                }
+            }
 
             // − 側が区画の外か閉じた面なら、その面の押し返しは壁から(+ 向き)
             const bool minusClosed = Component(at, axis) == 0 || min(LoadOpen(header, region - step), a.open) == 0;
@@ -397,7 +413,7 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
 
             liquidWork.Store<int64_t>(FaceAddress(header, header.forcedOffset, axis, region), face);
             liquidWork.Store<uint64_t>(FaceAddress(header, header.desiredOffset, axis, region), desired);
-            external[axis] = wall + gravity + friction + dropped;
+            external[axis] = wall + gravity + friction + dropped + vanished;
         }
     }
 

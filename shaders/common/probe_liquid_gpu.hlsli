@@ -67,7 +67,7 @@ namespace bicameral::sim {
         uint32_t leavingOffset;           // uint64 × 3 × 区画のセル(面から出る 2 倍の流れの合計)
         uint32_t carriedOffset;           // int64 × 3 × 区画のセル(運動量と一緒に運んだ後の運動のエネルギー)
         uint32_t releasedOffset;          // int64 × 3 × 区画のセル(運動のエネルギーから熱になる分)
-        uint32_t massOffset;              // uint64 × 区画のセル(動かした後の液体の質量 mg)
+        uint32_t massOffset;              // uint64 × 区画のセル(液体の質量 mg。持ち越す: 段の外の増減を見る。T-0656)
         uint32_t potentialCarriedOffset;  // int64 × 区画のセル(液体と一緒に運んだ後の位置のエネルギー)
         uint32_t changedOffset;           // uint32 × 区画のセル(液体を動かして値が変わった)
         uint32_t listOffset;              // 区画のセルごとに PROBE_LIQUID_LIST_ENTRIES 件(成分の増減の作業場)

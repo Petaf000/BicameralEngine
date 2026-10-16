@@ -489,10 +489,8 @@ namespace {
         uint64_t hash = 0;
     };
 
-    DamResult RunDamBreak(const BakedReactionTable& table, const ProbeLiquidOptions& options, bool checkConservation) {
-        auto created = ProbeLiquidField::Create(table, options);
-        EXPECT(created.has_value());
-        ProbeLiquidField field = std::move(*created);
+    // ダムの世界(床は石・左の水の塊・ほかは空気)
+    std::vector<reaction::RxCell> MakeDamWorld(const BakedReactionTable& table, const ProbeLiquidField& field) {
         std::vector<reaction::RxCell> cells = MakeBlankProbeWorld();
         for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
             const uint32_t x = region % DAM_REGION_SIZE[0];
@@ -503,6 +501,15 @@ namespace {
 
             cells[field.GridIndex(region)] = MakeCell(table, kind, FULL_WATER);
         }
+
+        return cells;
+    }
+
+    DamResult RunDamBreak(const BakedReactionTable& table, const ProbeLiquidOptions& options, bool checkConservation) {
+        auto created = ProbeLiquidField::Create(table, options);
+        EXPECT(created.has_value());
+        ProbeLiquidField field = std::move(*created);
+        std::vector<reaction::RxCell> cells = MakeDamWorld(table, field);
 
         const uint32_t water = table.SpeciesId("liquid_water");
         const auto wallColumn = [&] {
@@ -607,6 +614,81 @@ namespace {
         EXPECT(RunDamBreak(table, options, false).hash == results[0].hash);
     }
 
+    // 区画のセルの水を numerator ÷ denominator 倍にする(区画の外の段の蒸発・凝縮の代わり。セルのエネルギーは変えない。2 µmol 未満は触らない)
+    void ScaleWater(const BakedReactionTable& table, const ProbeLiquidField& field, std::span<reaction::RxCell> cells,
+                    uint64_t numerator, uint64_t denominator) {
+        const uint32_t water = table.SpeciesId("liquid_water");
+        for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
+            reaction::RxCell& cell = cells[field.GridIndex(region)];
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (cell.species[i] == water && cell.amounts[i] >= 2)
+                    cell.amounts[i] = cell.amounts[i] * numerator / denominator;
+            }
+        }
+    }
+
+    // --- 7: 区画の外の段で液体が減る・増える(T-0656・ADR-0286 の液体の版)---
+    //   ダムを壊して 1 秒流した後、全部のセルの水を半分にする(蒸発の代わり)→ 面の運動量は速さを保って半分になり(減った液体の分は帳簿へ)、
+    //   運動のエネルギーは増えない(前は運動量が残り、速さと運動のエネルギーが 2 倍になってその分を熱から取った)。
+    //   1 秒後に水を 2 倍に戻す(凝縮の代わり)→ 運動量を保ち(帳簿へ出ない)、運動のエネルギーは減って熱になる。
+    //   エネルギー(セル + 位置 + 運動 − 帳簿)と運動量(面 − 帳簿)は毎刻みビット単位で一定(水を変えても変わらない)
+    void TestMassChangeOutsideStep() {
+        std::printf("区画の外で液体が減る・増える\n");
+        const BakedReactionTable table = MakeTable();
+        auto created = ProbeLiquidField::Create(table, {.minCell = DAM_REGION_MIN, .sizeCells = DAM_REGION_SIZE});
+        EXPECT(created.has_value());
+        ProbeLiquidField field = std::move(*created);
+        std::vector<reaction::RxCell> cells = MakeDamWorld(table, field);
+        constexpr uint64_t ONE_SECOND_TICKS = 60;
+
+        const Totals before = MeasureTotals(table, field, cells);
+        bool conserved = true;
+        const auto step = [&] {
+            std::vector<uint32_t> changed;
+            const ProbeLiquidStepReport report = field.Step(table, cells, changed);
+            const Totals now = MeasureTotals(table, field, cells);
+            conserved = conserved && now.energy == before.energy && now.momentum == before.momentum;
+
+            return report;
+        };
+
+        for (uint64_t tick = 0; tick < ONE_SECOND_TICKS; ++tick)
+            step();
+
+        // --- 半分にする ---
+        const int64_t momentumBefore = field.MomentumSum(0);
+        const int64_t kineticBefore = field.KineticEnergySum();
+        ScaleWater(table, field, cells, 1, 2);
+        const ProbeLiquidStepReport halved = step();
+        const int64_t kineticHalved = field.KineticEnergySum();
+        std::printf("  半分: x の運動量 %lld → %lld(帳簿へ %lld)・運動のエネルギー %lld → %lld mJ・熱 %lld mJ\n",
+                    (long long)momentumBefore, (long long)field.MomentumSum(0), (long long)halved.vanished[0],
+                    (long long)kineticBefore, (long long)kineticHalved, (long long)halved.heat);
+        EXPECT(momentumBefore > 0);
+        const int64_t expectedVanished = -(momentumBefore / 2);
+        const int64_t gap = halved.vanished[0] - expectedVanished;
+        EXPECT((gap < 0 ? -gap : gap) * 100 <= momentumBefore);  // 減った液体が持って出た運動量 ≒ 半分
+        EXPECT(kineticHalved * 4 < kineticBefore * 3);           // 運動のエネルギーは増えない(≒ 半分)
+
+        for (uint64_t tick = 0; tick < ONE_SECOND_TICKS; ++tick)
+            step();
+
+        // --- 2 倍に戻す ---
+        const int64_t kineticBeforeDoubling = field.KineticEnergySum();
+        ScaleWater(table, field, cells, 2, 1);
+        const ProbeLiquidStepReport doubled = step();
+        std::printf("  2 倍: 帳簿へ %lld・運動のエネルギー %lld → %lld mJ・熱 %lld mJ\n",
+                    (long long)doubled.vanished[0], (long long)kineticBeforeDoubling,
+                    (long long)field.KineticEnergySum(), (long long)doubled.heat);
+        EXPECT(doubled.vanished == (std::array<int64_t, 3>{}));  // 増えた時は運動量を保つ
+        EXPECT(field.KineticEnergySum() * 4 < kineticBeforeDoubling * 3);
+
+        for (uint64_t tick = 0; tick < ONE_SECOND_TICKS; ++tick)
+            step();
+
+        EXPECT(conserved);
+    }
+
 }  // namespace
 
 int main() {
@@ -616,6 +698,7 @@ int main() {
     TestDeterminism();
     TestProbeReference();
     TestDamBreak();
+    TestMassChangeOutsideStep();
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);

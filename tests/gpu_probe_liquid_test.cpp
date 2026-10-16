@@ -70,7 +70,8 @@ namespace {
         }
     };
 
-    BakedReactionTable MakeTable() {
+    // evaporation: 水が湯気になる試験の規則(1 次・毎秒 5%・吸熱。流れている液体の質量が区画の外の段で減る場面。T-0656)
+    BakedReactionTable MakeTable(bool evaporation = false) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.environment = StandardWorldPhysics();
         definition.species.push_back({.name = "liquid_water",
@@ -94,6 +95,12 @@ namespace {
                                       .thermalConductivity = 300,
                                       .condensed = true,
                                       .density = 2000});
+        if (evaporation)
+            definition.rules.push_back(
+                {.name = "test_evaporation",
+                 .reactants = {{.species = "liquid_water", .coefficient = 1, .firstOrder = true}},
+                 .products = {{.species = "water_vapor", .coefficient = 1}},
+                 .rate = {.preExponentialMantissa = 5, .preExponentialExponent10 = -2, .activationEnergy = 0}});
 
         auto baked = BakeReactionTable(definition);
         FX_ASSERT(baked.has_value());
@@ -255,7 +262,7 @@ namespace {
         Log(Channel::Sim, Level::Error, "{}: 違うセル {} 個(区画 {} セル)", name, differing, field.RegionCellCount());
     }
 
-    // 並びは ProbeLiquidField::Hash と同じ(面の運動量 → 運動のエネルギー → 位置のエネルギー → 帳簿)
+    // 並びは ProbeLiquidField::Hash と同じ(面の運動量 → 運動のエネルギー → 位置のエネルギー → 液体の質量 → 帳簿)
     uint64_t GpuLiquidHash(const ProbeLiquidHeader& header, const LiquidReadout& readout) {
         const uint32_t count = header.regionCellCount;
         uint64_t hash = FNV_OFFSET;
@@ -266,6 +273,9 @@ namespace {
 
         for (uint32_t region = 0; region < count; ++region)
             hash = Mix(hash, readout.At<uint64_t>(header.potentialOffset + (region * 8)));
+
+        for (uint32_t region = 0; region < count; ++region)
+            hash = Mix(hash, readout.At<uint64_t>(header.massOffset + (region * 8)));
 
         for (uint32_t axis = 0; axis < 3; ++axis)
             hash = Mix(hash, readout.At<uint64_t>(PROBE_LIQUID_LEDGER_EXTERNAL + (axis * 8)));
@@ -416,6 +426,11 @@ int main(int argc, char** argv) {
     CheckScene(device->Get(), table, "堤を消すと抜ける(砂の床)", Scene::Drain, true, warp ? 4 : 120, failures);
     CheckScene(device->Get(), table, "ダムの水が押し寄せる", Scene::DamBreak, true, warp ? 4 : 180, failures);
     CheckScene(device->Get(), table, "池に溜まる・移流なし", Scene::Pool, false, warp ? 3 : 60, failures);
+
+    // 流れているダムの水が湯気になって減る(区画の外の段で液体の質量が変わる面の運動量。T-0656)
+    const BakedReactionTable evaporating = MakeTable(true);
+    CheckScene(device->Get(), evaporating, "ダムの水が押し寄せながら湯気になる", Scene::DamBreak, true, warp ? 4 : 180,
+               failures);
 
     if (!warp) {
         Measure(device->Get(), table, "池に溜まる", Scene::Pool);
