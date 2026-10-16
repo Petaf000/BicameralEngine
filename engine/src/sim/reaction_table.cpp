@@ -164,6 +164,12 @@ namespace bicameral::sim {
                 if (entry.liquid && entry.density == 0)
                     return std::unexpected(std::format("物質 {}: 液体には密度(density_kg_per_m3)が要る", entry.name));
 
+                // 密度の無い固体は場所を取らない(気体も液体も素通し。ADR-0268)。書き忘れを読み込みで知らせる(T-0616。表は当たる)
+                if (entry.condensed && entry.density == 0)
+                    baked.warnings.push_back(std::format(
+                        "物質 {}: 凝縮相に密度(density_kg_per_m3)が無い(セルの場所を取らず、気体も液体も素通しする)",
+                        entry.name));
+
                 const uint64_t molarVolume = entry.density == 0
                                                  ? 0
                                                  : ((uint64_t{baked.molarMasses.back()} * 1000) + (entry.density / 2)) /

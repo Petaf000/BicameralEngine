@@ -306,6 +306,29 @@ namespace {
             PrintWarnings(*far);
     }
 
+    // 凝縮相に密度を書き忘れるとベイクが警告する(表は当たる。T-0616)。標準パッケージの凝縮相は全部書いてある
+    void TestMissingDensityWarning() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        EXPECT(std::ranges::all_of(definition.species, [](const SpeciesDefinition& species) {
+            return !species.condensed || species.density != 0;
+        }));
+
+        const auto cellulose = std::ranges::find(definition.species, "cellulose", &SpeciesDefinition::name);
+        cellulose->density = 0;
+        const auto missing = BakeReactionTable(definition);
+        EXPECT(missing && OtherWarningCount(*missing) == 1 && Contains(missing->warnings.front(), "cellulose") &&
+               Contains(missing->warnings.front(), "density_kg_per_m3"));
+        if (missing)
+            PrintWarnings(*missing);
+
+        // 気体には書かなくてよい(警告しない)
+        cellulose->density = 1500;
+        const auto gas = std::ranges::find(definition.species, "oxygen", &SpeciesDefinition::name);
+        EXPECT(gas->density == 0);
+        const auto written = BakeReactionTable(definition);
+        EXPECT(written && OtherWarningCount(*written) == 0);
+    }
+
     // --- 10 進の数 ---
 
     bool IsDecimal(std::string_view text, uint64_t mantissa, int32_t exponent10) {
@@ -482,6 +505,7 @@ int main() {
     TestRejectsBrokenTables();
     TestModAddsSpeciesAndRule();
     TestDeclaredEnthalpyWarning();
+    TestMissingDensityWarning();
     TestSlopeWarnings();
     TestParseDecimal();
     TestLoaderReadsShippedTable();

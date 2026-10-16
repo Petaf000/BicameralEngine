@@ -14,6 +14,12 @@
 --     (結晶のグルコース 209.2 J/(mol·K) から見積もった。照合先の候補: Goldberg et al., J. Chem. Thermodyn. 81 (2015) 184)。
 --     セルロースの値を ±100 J/(mol·K) 動かしても、セルロースの規則が坂を下る向きは変わらない(T-0491 の試験の表)。
 --   凝縮相(任意の欄 condensed。坂の計器〔T-0518〕が活量を 1 と置く。気体は分圧): 炭(黒鉛)とセルロース。
+--   密度(density_kg_per_m3。凝縮相は全部に書く。セルの場所を取る量 = 物質量 × モル体積。ADR-0268・T-0616。書き忘れはベイクが警告する):
+--     炭(黒鉛)2260 kg/m³: 理想的な黒鉛の結晶の X 線密度 2.266 g/cm³(CRC Handbook of Chemistry and Physics の黒鉛 2.2〜2.27 の上端)を丸めた。
+--       木炭の骨格の密度(1.4〜2.0)より大きいが、炭は黒鉛として扱う(孔は物質量の少なさで出る)。
+--     セルロース 1500 kg/m³: 木の細胞壁の実質の密度(木材の真密度。教科書の値 1.49〜1.54 g/cm³。結晶のセルロース Iβ の計算値 1.63・
+--       非晶 1.48 の間)。木の孔(木材のかさ密度 0.3〜0.9)は物質量で出る。どちらも資料と一つずつは照合していない(未確認)。
+--     液体の水 1000・氷 917 は下の「水の 3 相」。
 --   水の 3 相(T-0611・ADR-0272。湯気は上の water_vapor。相変化は real_reactions の規則):
 --     液体の水(water): 生成エンタルピー −285.830 kJ/mol・S° 69.95 J/(mol·K)(CODATA Key Values 1989)・
 --       Cp 75.33 J/(mol·K)(NIST-JANAF 298.15 K)・熱伝導率 0.598 W/(m·K)(25 ℃。IAPWS 2011 の目安)・
@@ -75,6 +81,7 @@ return {
             thermal_conductivity_mw_per_m_k = 100,
             standard_entropy_mj_per_mol_k = 5740,
             condensed = true,
+            density_kg_per_m3 = 2260,
         },
         -- 液体の水(T-0611。低い方へ流れるのは液体の区画〔T-0609〕。湯気・氷との行き来は real_reactions の規則)
         water = {
@@ -104,6 +111,7 @@ return {
             thermal_conductivity_mw_per_m_k = 120,
             standard_entropy_mj_per_mol_k = 170000,
             condensed = true,
+            density_kg_per_m3 = 1500,
         },
     },
 }

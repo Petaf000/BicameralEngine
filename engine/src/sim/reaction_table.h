@@ -66,7 +66,7 @@ namespace bicameral::sim {
         // 液体の場(sim/probe_liquid・GPU は ProbeSim の液体の段 T-0613)が低い方へ流す。密度(density)が要る
         bool liquid = false;
         // 密度(kg/m³。パッケージの density_kg_per_m3)。任意(既定 0 = 書かない)。液体には要る(セルに入る量 = セルの体積 ÷ モル体積)。
-        // 固体の密度は、気体と体積を分け合う所(T-0612・T-0593)が読む予定
+        // 固体の密度はセルの体積を分け合う所(sim/cell_volume。ADR-0268)が読む。凝縮相に書かないとベイクが警告する(T-0616)
         uint32_t density = 0;
     };
 
