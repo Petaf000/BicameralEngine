@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "common/fixed.hlsli"
+#include "common/probe_region_hash.hlsli"
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
 #include "sim/cell_volume.h"
@@ -364,6 +365,27 @@ namespace bicameral::sim {
             hash = Mix(hash, (uint64_t)m_ledger.external[axis]);
 
         return Mix(hash, (uint64_t)m_ledger.energy);
+    }
+
+    uint64_t ProbeLiquidField::HashTerm() const {
+        uint64_t sum = 0;
+        for (uint32_t region = 0; region < RegionCellCount(); ++region) {
+            uint64_t term = ProbeRegionHashBegin(PROBE_LIQUID_CELL_HASH_SEED, region);
+            for (const auto& faces : m_faces)
+                term = ProbeRegionHashAdd(term, faces[region]);
+
+            for (const auto& kinetic : m_kinetic)
+                term = ProbeRegionHashAdd(term, kinetic[region]);
+
+            sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, m_potential[region]));
+        }
+
+        // 帳簿: 外から入った運動量 × 3 → 位置のエネルギーの出入り
+        uint64_t ledger = ProbeRegionHashBegin(PROBE_LIQUID_LEDGER_HASH_SEED, 0);
+        for (const int64_t external : m_ledger.external)
+            ledger = ProbeRegionHashAdd(ledger, external);
+
+        return sum + ProbeRegionHashEnd(ProbeRegionHashAdd(ledger, m_ledger.energy));
     }
 
     // 1 刻みの作業の値(Jacobi 型: 力と流れは刻みの初めの値 states だけから決める)

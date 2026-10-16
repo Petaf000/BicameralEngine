@@ -128,6 +128,7 @@ bicameral_add_shader(sim/probe_gas_tick.hlsl PROFILE cs_6_8 ENTRY GasGather NAME
 bicameral_add_shader(sim/probe_gas_tick.hlsl PROFILE cs_6_8 ENTRY GasCheck NAME probe_gas_check)
 bicameral_add_shader(sim/probe_gas_tick.hlsl PROFILE cs_6_8 ENTRY GasScatter NAME probe_gas_scatter)
 bicameral_add_shader(sim/probe_gas_tick.hlsl PROFILE cs_6_8 ENTRY GasFinish NAME probe_gas_finish)
+bicameral_add_shader(sim/probe_gas_tick.hlsl PROFILE cs_6_8 ENTRY GasHash NAME probe_gas_hash)
 # 仮の世界の GPU の液体の段(T-0613)。sim/probe_sim_liquid.cpp が呼ぶ順
 bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidRead NAME probe_liquid_read)
 bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidPressure NAME probe_liquid_pressure)
@@ -139,6 +140,7 @@ bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidLeavi
 bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidAdvect NAME probe_liquid_advect)
 bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidSettleFaces NAME probe_liquid_settle_faces)
 bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidSettleCells NAME probe_liquid_settle_cells)
+bicameral_add_shader(sim/probe_liquid_tick.hlsl PROFILE cs_6_8 ENTRY LiquidHash NAME probe_liquid_hash)
 bicameral_add_shader(sim/probe_surface.hlsl PROFILE cs_6_8 ENTRY BuildSurfaceMask NAME probe_surface_mask)  # 筆の面に沿って置く物の印(T-0332)
 bicameral_add_shader(sim/probe_conduct.hlsl PROFILE lib_6_8)  # 伝導の Work Graph(T-0005)
 bicameral_add_shader(sim/work_graph_limits_probe.hlsl PROFILE lib_6_8)  # ノードのカウンタと上限の試験(T-0008)

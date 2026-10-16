@@ -6,7 +6,8 @@
 // 作る時に CPU が決めるのは、区画の形・基準の大気だけの静かな箱(層の基準の導く値・開いた境界の外・設定の型)・物質ごとの値だけ。
 // 刻みごとの欄の物質(区画にある気体の物質。ID の順)と、それに合う設定は GPU が決める(D-107)。
 // 区画の気体の物質の数に上限は無い(気体の箱の件の欄の数 = 表の気体の物質の数。T-0598)。
-// 今の制限(分けたチケット): 陽解法だけ(投影は T-0621)・表の差し替え・保存点・写しの早送り・状態のハッシュに気体の欄が無い(T-0620)。
+// 保存点・写しの早送りは気体の欄(gasState)と作業場(gasWork。帳簿を含む)を写し、状態のハッシュは GasHash が気体の欄と帳簿を足す(T-0620)。
+// 今の制限(分けたチケット): 陽解法だけ(投影は T-0621)・表の差し替えは区画の欄の作りが変わらない表だけ(付け替えと作り直しは T-0670)。
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -23,12 +24,12 @@ namespace bicameral::sim {
     namespace {
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(呼ぶ順。m_gasPipelines の並び)
-        constexpr std::array<const char*, 7> GAS_SHADER_NAMES = {
+        constexpr std::array<const char*, 8> GAS_SHADER_NAMES = {
             "sim/probe_gas_begin.cso",  "sim/probe_gas_collect.cso", "sim/probe_gas_prepare.cso",
             "sim/probe_gas_gather.cso", "sim/probe_gas_check.cso",   "sim/probe_gas_scatter.cso",
-            "sim/probe_gas_finish.cso"};
+            "sim/probe_gas_finish.cso", "sim/probe_gas_hash.cso"};
 
-        enum GasPass : uint8_t { Begin, Collect, Prepare, Gather, Check, Scatter, Finish };
+        enum GasPass : uint8_t { Begin, Collect, Prepare, Gather, Check, Scatter, Finish, Hash };
 
         constexpr uint32_t MICRO = 1000000;
 
@@ -209,18 +210,27 @@ namespace bicameral::sim {
         m_gas->RecordUpload(list);
     }
 
-    // 区画のある世界でまだ断るもの(T-0620): 表の差し替え(物質の ID と帳簿の並び・環境の値の差し替え)・保存点・写しの早送り
-    bool ProbeSim::ValidateGas(const ProbeFrameInput& input) const {
+    // 表の差し替え(T-0620・ADR-0300): 作業場の設定の型・層の基準・開いた境界の外・物質ごとの値は作る時に表から作ったので、
+    // それが変わらない表だけ通す(変わる表の作り直しは T-0670)。物質の一覧が同じことは CheckRegionTableSwap が見てある
+    std::expected<void, std::string> ProbeSim::CheckGasTableSwap(const BakedReactionTable& table) const {
         if (!m_gas)
-            return true;
+            return {};
 
-        const bool valid = input.tableSwaps.empty() && input.saveTo == NO_SAVE_POINT &&
-                           input.restoreFrom == NO_SAVE_POINT && input.adoptFrom == nullptr;
-        if (!valid)
-            Log(Channel::Sim, Level::Error,
-                "気体の区画のある世界は、まだ表の差し替え・保存点・写しの早送りができない(T-0620)");
+        const BakedReactionTable& current = m_tableCopy;
+        if (table.environment != current.environment || table.atmosphere != current.atmosphere)
+            return std::unexpected("気体の区画のある世界で、環境の値(重力・音速の基準)か基準の大気が変わる表(T-0670)");
 
-        return valid;
+        for (uint32_t id = 0; id < m_gasHeader.speciesCount; ++id) {
+            const ProbeGasSpecies before = MakeGasSpecies(current, id);
+            const ProbeGasSpecies after = MakeGasSpecies(table, id);
+            if (std::memcmp(&before, &after, sizeof(ProbeGasSpecies)) != 0) {
+                return std::unexpected(std::format(
+                    "気体の区画のある世界で、物質 {} の気体の値(モル質量・h0・比熱・凝縮相)が変わる表(T-0670)",
+                    table.speciesNames[id]));
+            }
+        }
+
+        return {};
     }
 
     // 区画 → 気体の箱(ProbeSim のルート署名と単位の定数が結んである所で)
@@ -250,6 +260,12 @@ namespace bicameral::sim {
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(
             m_gasWork.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &toUav);
+    }
+
+    // 状態のハッシュの単位: HashCells と同じ欄へ気体の欄と帳簿の寄与を足す(atomic の和なので HashCells との間のバリアは要らない)
+    void ProbeSim::RecordGasHash(ID3D12GraphicsCommandList10* list) const {
+        list->SetPipelineState(m_gasPipelines[GasPass::Hash].Get());
+        list->Dispatch(GroupsFor(m_gasHeader.regionCellCount), 1, 1);
     }
 
     // 気体の箱 → 区画(RecordUnit が ProbeSim のルート署名と単位の定数を結び直した後で)

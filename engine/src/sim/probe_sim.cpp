@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 
 #include "core/aliases.h"
 #include "core/log.h"
@@ -570,8 +571,48 @@ namespace bicameral::sim {
             return false;
         }
 
-        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input) && ValidateGas(input) &&
-               ValidateLiquid(input);
+        return ValidateSavePoints(input) && ValidateCommands(input) && ValidateTableSwap(input) &&
+               ValidateRegions(input);
+    }
+
+    // 区画のある世界の表の差し替え(T-0620・ADR-0300): 物質の一覧が同じで、区画の欄の作りが変わらない表だけ
+    std::expected<void, std::string> ProbeSim::CheckRegionTableSwap(const BakedReactionTable& table) const {
+        if (!m_gas && !m_liquidWork)
+            return {};
+
+        const auto remap = BuildSpeciesRemap(m_tableCopy, table);
+        if (!remap || !remap->identity)
+            return std::unexpected("区画(気体・液体)のある世界で、物質の一覧が変わる表(付け替えは T-0670)");
+
+        if (auto gas = CheckGasTableSwap(table); !gas)
+            return gas;
+
+        return CheckLiquidTableSwap(table);
+    }
+
+    // 区画のある世界の約束: 表の差し替えは CheckRegionTableSwap が通す表だけ(どの差し替えも今の表と区画の欄の作りが同じなので、
+    // 前の差し替えの表と比べなくてよい)。写しの早送りの写す元は同じ区画(見出しが同じ = 写す欄の並びと大きさが同じ)
+    bool ProbeSim::ValidateRegions(const ProbeFrameInput& input) const {
+        for (const ProbeTableSwap& swap : input.tableSwaps) {
+            if (const auto compatible = CheckRegionTableSwap(*swap.table); !compatible) {
+                Log(Channel::Sim, Level::Error, "刻み {} の表の差し替えを断る: {}", swap.tick, compatible.error());
+                return false;
+            }
+        }
+
+        if (input.adoptFrom == nullptr)
+            return true;
+
+        const ProbeSim& source = *input.adoptFrom;
+        const bool sameGas = (m_gas == nullptr) == (source.m_gas == nullptr) &&
+                             std::memcmp(&m_gasHeader, &source.m_gasHeader, sizeof(ProbeGasHeader)) == 0;
+        const bool sameLiquid = (m_liquidWork == nullptr) == (source.m_liquidWork == nullptr) &&
+                                std::memcmp(&m_liquidHeader, &source.m_liquidHeader, sizeof(ProbeLiquidHeader)) == 0;
+        if (!sameGas || !sameLiquid)
+            Log(Channel::Sim, Level::Error, "写しの早送りの写す元と区画(気体 {}・液体 {})が違う",
+                sameGas ? "同じ" : "違う", sameLiquid ? "同じ" : "違う");
+
+        return sameGas && sameLiquid;
     }
 
     // 表の差し替えの約束: (tick, 適用の単位) がこのフレームの単位の中にあり、表がある(T-0139)
@@ -905,6 +946,13 @@ namespace bicameral::sim {
             // 表の欄は適用の単位が用意してある(刻み・0)
             list->SetPipelineState(m_hashCellsPipeline.Get());
             list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
+            // 区画の持ち越す欄(気体の運動量・液体の面の運動量など)と帳簿も状態に入れる(同じ欄への atomic の和。T-0620)
+            if (m_gas)
+                RecordGasHash(list);
+
+            if (m_liquidWork)
+                RecordLiquidHash(list);
+
             // 刻みのイベントを並べてリングへ(ハッシュとは別のバッファなので間のバリアは要らない)
             list->SetPipelineState(m_flushEventsPipeline.Get());
             list->Dispatch(1, 1, 1);
@@ -944,7 +992,8 @@ namespace bicameral::sim {
     // このフレームの前の単位と、まだ GPU にある前のフレームが読むので、このリストが終わるまで持つ(状態を追わないよう、毎回新しく作る)
     // 環境の値のホットリロード(T-0444・ADR-0194): 新しい表の重力が今の表と違えば、この刻みの物理の単位から新しい重力で刻む
     // (物理の単位は同じ刻みの適用の後ろ。記録の順 = 刻みの順)。同じなら触らない(作った時の physicsParameters の重力のまま)。
-    // 気体はまだ世界に無い(T-0210)。載せる時は同じ所で SetGasEnvironment と GpuGas::RecordEnvironment を呼ぶ
+    // 気体・液体の区画のある世界は、環境の値が変わる表を CheckRegionTableSwap が断る(作り直し = 同じ所で GpuGas::RecordEnvironment
+    // と作業場の設定の型・液体の重力を書き直すのは T-0670)
     void ProbeSim::ApplyEnvironment(const WorldPhysics& environment, uint64_t tick) {
         const WorldPhysics& current = m_tableCopy.environment;
         if (!m_physics || environment.gravityMicrometersPerSecond2 == current.gravityMicrometersPerSecond2)
@@ -1677,8 +1726,16 @@ namespace bicameral::sim {
         return std::span(m_cells).subspan(static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT, PROBE_CELL_COUNT);
     }
 
+    // 区画の欄は 1 組だけ持つので、最後の Advance の次の刻みの値(GPU のハッシュの単位と同じ。T-0620)
     uint64_t ProbeReference::StateHash(uint64_t tick) const {
-        return ProbeStateHash(State(tick));
+        uint64_t hash = ProbeStateHash(State(tick));
+        if (m_gas)
+            hash += m_gas->HashTerm();
+
+        if (m_liquid)
+            hash += m_liquid->HashTerm();
+
+        return hash;
     }
 
     uint64_t ProbeStateHash(std::span<const reaction::RxCell> cells) {

@@ -362,6 +362,12 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12Resource* LiquidWork() const { return m_liquidWork.Get(); }
         [[nodiscard]] const ProbeLiquidHeader& LiquidHeader() const { return m_liquidHeader; }
 
+        // 区画(気体・液体)のある世界で、表 table へ差し替えられるか(T-0620・ADR-0300)。今は、区画の欄の作りが変わらない表だけ:
+        // 物質の一覧が同じ・区画が読む物質ごとの値(気体: モル質量・h0・比熱・凝縮相 / 液体: モル体積・モル質量・液体と凝縮相)が同じ・
+        // 環境の値(重力・音速の基準)と基準の大気が同じ。反応の規則と速さだけを替えるホットリロードは通る。
+        // 断ったら理由(付け替えと作り直しは T-0670)。区画の無い世界はいつも通る。RecordFrame の表の差し替えもこれで検査する
+        [[nodiscard]] std::expected<void, std::string> CheckRegionTableSwap(const BakedReactionTable& table) const;
+
         // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
         [[nodiscard]] const GpuPhysics* Physics() const { return m_physics.get(); }
 
@@ -460,11 +466,17 @@ namespace bicameral::sim {
         void RecordGasStep(ID3D12GraphicsCommandList10* list, uint64_t tick) const;
         void RecordGasScatter(ID3D12GraphicsCommandList10* list) const;
         void RecordGasInitialization(ID3D12GraphicsCommandList10* list) const;
-        [[nodiscard]] bool ValidateGas(const ProbeFrameInput& input) const;
+        // 状態のハッシュの単位(HashCells の後)で、気体の欄と帳簿の寄与を足す(T-0620)
+        void RecordGasHash(ID3D12GraphicsCommandList10* list) const;
+        // 区画のある世界の表の差し替え(CheckRegionTableSwap の気体・液体の分。物質の一覧が同じことは呼ぶ側が見る)
+        [[nodiscard]] std::expected<void, std::string> CheckGasTableSwap(const BakedReactionTable& table) const;
         // 液体の段(sim/probe_sim_liquid.cpp。気体の段の後・起こす刻みの来たブロックの前。CPU の (1c))
         void RecordLiquid(ID3D12GraphicsCommandList10* list) const;
         void RecordLiquidInitialization(ID3D12GraphicsCommandList10* list) const;
-        [[nodiscard]] bool ValidateLiquid(const ProbeFrameInput& input) const;
+        void RecordLiquidHash(ID3D12GraphicsCommandList10* list) const;
+        [[nodiscard]] std::expected<void, std::string> CheckLiquidTableSwap(const BakedReactionTable& table) const;
+        // 区画のある世界の表の差し替え(CheckRegionTableSwap)と写しの早送り(写す元が同じ区画)の約束
+        [[nodiscard]] bool ValidateRegions(const ProbeFrameInput& input) const;
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
@@ -556,13 +568,14 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_gasWork;    // 制御・設定・見出し・帳簿など(probe_gas_gpu.hlsli)
         ComPtr<ID3D12Resource> m_gasUpload;  // gasWork の初めの中身(最初のフレームで写す)
         ProbeGasHeader m_gasHeader{};
-        std::array<ComPtr<ID3D12PipelineState>, 7> m_gasPipelines;  // GasBegin〜GasFinish(呼ぶ順)
+        std::array<ComPtr<ID3D12PipelineState>, 8> m_gasPipelines;  // GasBegin〜GasFinish(呼ぶ順)・GasHash
 
         // --- 液体の区画(T-0613。shaders/sim/probe_liquid_tick.hlsl。区画が無ければ m_liquidWork は nullptr)---
         ComPtr<ID3D12Resource> m_liquidWork;    // 制御・帳簿・見出し・状態・作業の値(probe_liquid_gpu.hlsli)
         ComPtr<ID3D12Resource> m_liquidUpload;  // liquidWork の見出しと物質ごとの値(最初のフレームで写す)
         ProbeLiquidHeader m_liquidHeader{};
-        std::array<ComPtr<ID3D12PipelineState>, 10> m_liquidPipelines;  // LiquidRead〜LiquidSettleCells(呼ぶ順)
+        std::array<ComPtr<ID3D12PipelineState>, 11>
+            m_liquidPipelines;  // LiquidRead〜LiquidSettleCells(呼ぶ順)・LiquidHash
 
         // --- 刻みの道具(表・キュー・イベント・活性)---
         ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
@@ -650,7 +663,8 @@ namespace bicameral::sim {
         // 最後に物質を付け替えた差し替えで起きたこと(刻みの始めの世代の分。付け替えていなければ 0。T-0223)
         [[nodiscard]] const SpeciesRemapReport& LastRemapReport() const { return m_remapReport; }
 
-        // S(tick) の要約(GPU のハッシュの表の hash と同じ値 = セルの和)。tick は最後の Advance の次の刻み
+        // S(tick) の要約(GPU のハッシュの表の hash と同じ値 = セルの和 + 区画の気体・液体の欄と帳簿の寄与〔T-0620〕)。
+        // tick は最後の Advance の次の刻み
         [[nodiscard]] uint64_t StateHash(uint64_t tick) const;
 
         // 最後の Advance のつつきが足したエネルギー(mJ。GPU の表の sourceEnergy と同じ)

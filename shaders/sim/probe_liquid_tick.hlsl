@@ -17,6 +17,7 @@
 // 帳簿(外から入った運動量・位置のエネルギーの出入り)は整数の和なので、波の和 + 64bit の原子的な足し算で順番によらず CPU と同じになる。
 // 区画の中の番号 = x + 幅 × (z + 奥行き × y)。整数だけ(D-205)。動的な添字で読むのはバッファ(作業場)だけで、ローカルの配列は決まった数の回しで読む(T-0397)。
 #include "common/probe_liquid_gpu.hlsli"
+#include "common/probe_region_hash.hlsli"
 #include "sim/probe_bindings.hlsli"
 
 RWByteAddressBuffer liquidWork : register(u19);  // 制御・帳簿・見出し・状態・作業の値(probe_liquid_gpu.hlsli)
@@ -857,4 +858,39 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
 
     uint32_t previous;
     liquidWork.InterlockedAdd(PROBE_LIQUID_CONTROL_CHANGED, 1, previous);
+}
+
+    // --- 状態のハッシュ(T-0620。ハッシュの単位の HashCells の後。区画があるときだけ)---
+    // 区画のセルの持ち越す欄(面の運動量 × 3・面の運動のエネルギー × 3・位置のエネルギー)の寄与 + 帳簿の寄与(区画の番号 0 のスレッド)を、
+    // S(t + 1) の欄の hash へ足す(common/probe_region_hash.hlsli。CPU は ProbeLiquidField::HashTerm)
+    [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void LiquidHash(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const ProbeLiquidHeader header = Header();
+    const uint32_t region = dispatchThreadId.x;
+    uint64_t hash = 0;
+    if (region < header.regionCellCount) {
+        uint64_t term = ProbeRegionHashBegin(PROBE_LIQUID_CELL_HASH_SEED, region);
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis)
+            term = ProbeRegionHashAdd(term, LoadSigned(FaceAddress(header, header.facesOffset, axis, region)));
+
+        [unroll] for (uint32_t kineticAxis = 0; kineticAxis < 3; ++kineticAxis)
+            term = ProbeRegionHashAdd(term, LoadSigned(FaceAddress(header, header.kineticOffset, kineticAxis, region)));
+
+        term = ProbeRegionHashAdd(term, LoadSigned(CellAddress(header.potentialOffset, region)));
+        hash = ProbeRegionHashEnd(term);
+    }
+
+    // 帳簿: 外から入った運動量 × 3 → 位置のエネルギーの出入り
+    if (region == 0) {
+        uint64_t term = ProbeRegionHashBegin(PROBE_LIQUID_LEDGER_HASH_SEED, 0);
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis)
+            term = ProbeRegionHashAdd(term, LoadSigned(PROBE_LIQUID_LEDGER_EXTERNAL + axis * 8));
+
+        hash += ProbeRegionHashEnd(ProbeRegionHashAdd(term, LoadSigned(PROBE_LIQUID_LEDGER_ENERGY)));
+    }
+
+    const uint64_t sum = WaveActiveSum(hash);
+    if (WaveIsFirstLane()) {
+        uint64_t original;
+        hashes.InterlockedAdd64(HashEntryAddress(CurrentTick() + 1) + PROBE_HASH_OFFSET_HASH, sum, original);
+    }
 }

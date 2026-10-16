@@ -35,11 +35,15 @@ namespace bicameral::sim {
                                                             const ProbeSimOptions& options) {
         // 初めの世界は写す元の状態で上書きするので空でよい(表の世界の組み立てを作り直さない)
         const std::vector<reaction::RxCell> blank = MakeBlankProbeWorld();
-        auto simulation = ProbeSim::Create(device, listType, table,
-                                           {.physicsScene = options.physicsScene,
-                                            .physicsOptions = options.physicsOptions,
-                                            .physicsParameters = options.physicsParameters,
-                                            .initialWorld = blank});
+        auto simulation = ProbeSim::Create(
+            device, listType, table,
+            {.physicsScene = options.physicsScene,
+             .physicsOptions = options.physicsOptions,
+             .physicsParameters = options.physicsParameters,
+             .initialWorld = blank,
+             // 区画(T-0620): 同じ区画を作る(区画の欄も写す元から写す。見出しが違えば写せない)
+             .gas = options.gas,
+             .liquid = options.liquid});
         if (!simulation)
             return std::unexpected(std::format("写しの世界を作れない: {}", simulation.error()));
 

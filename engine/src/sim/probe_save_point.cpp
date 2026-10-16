@@ -7,7 +7,9 @@
 // どちらもフレームのリストの先頭(単位とコマンドを足す前)で記録する。リストの間はどのバッファも COMMON(バッファは
 // ExecuteCommandLists の後で COMMON に戻る)なので、COMMON → コピー → COMMON の明示の遷移で囲めば、後ろの単位の状態の扱いは変わらない。
 // 写すもの: セルと熱のキャッシュ(S(t) の世代だけ)・予定の印・活性の一覧 2 組・ハッシュの表・刻みのイベントの一時置き場・
-// 物理の u0〜u13。
+// 物理の u0〜u13・区画の持ち越す欄(気体: 欄 gasState と作業場 gasWork の全部〔帳簿・通しの数を含む〕/ 液体: 作業場 liquidWork の
+// 刻みの中だけの作業の値より前〔制御・帳簿・見出し・物質ごとの値・面の運動量・面の運動のエネルギー・位置のエネルギー〕。T-0620)。
+// 区画の欄は世代を持たない(1 組。刻み t の境界では S(t) の値)。
 // 写さないもの: コマンドキュー(戻すと空にし、呼ぶ側が足し直す)・抽出・イベントのリング・カウンタ・トレース(どれも出力。世界の結果に入らない)。
 // 同じ道で、別の ProbeSim(本物の世界)の S(t) をこの世界へ写す(写しの早送り。T-0412・ADR-0198。sim/world_copy)。
 #include <algorithm>
@@ -81,7 +83,8 @@ namespace bicameral::sim {
         };
 
         for (const ComPtr<ID3D12Resource>& buffer :
-             {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue, m_tickEvents, m_blockSchedule, m_speciesRemap})
+             {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue, m_tickEvents, m_blockSchedule, m_speciesRemap,
+              m_gasState, m_gasWork, m_liquidWork})
             add(buffer);
 
         rng::for_each(m_activeLists, add);
@@ -124,6 +127,15 @@ namespace bicameral::sim {
             for (const ComPtr<ID3D12Resource>& buffer : m_physics->StateBuffers())
                 regions.push_back({.resource = buffer.Get(), .bytes = buffer->GetDesc().Width});
         }
+
+        // 区画(T-0620): 気体の箱のセルと 1 刻みの帳簿(GpuGas)は毎刻み区画から作り直すので写さない
+        if (m_gas) {
+            regions.push_back({.resource = m_gasState.Get(), .bytes = m_gasState->GetDesc().Width});
+            regions.push_back({.resource = m_gasWork.Get(), .bytes = m_gasWork->GetDesc().Width});
+        }
+
+        if (m_liquidWork)
+            regions.push_back({.resource = m_liquidWork.Get(), .bytes = m_liquidHeader.snapshotOffset});
 
         return regions;
     }

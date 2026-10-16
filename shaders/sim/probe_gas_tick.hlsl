@@ -11,10 +11,12 @@
 //   GasScatter 気体の箱 → 区画のセル(凝縮相の成分 + 0 でない気体の成分を ID の順に)。変わったセルは熱のキャッシュを作り直し、
 //              ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(物理の熱と同じ。後ろの WakeDueBlocks が一覧へ足す)
 //   GasFinish  帳簿(物質 ID ごと・格子の軸)へ足す
+// ハッシュの単位(HashCells の後)では GasHash が区画の気体の欄と帳簿を状態のハッシュへ足す(T-0620)。
 // 区画の中の番号 = x + 幅 × (z + 奥行き × y)(気体の箱の並び。箱の z = 格子の y = 上)。整数だけ(D-205)。
 // 気体の箱のセルは頭の並び + 成分ごとの面(欄の数 header.slotCapacity)、外は「頭 + 物質量 × 欄の数」の件(gas_gpu.hlsli)。
 // 回す欄はこの刻みの欄の物質の数だけ。
 #include "common/probe_gas_gpu.hlsli"
+#include "common/probe_region_hash.hlsli"
 #include "sim/probe_bindings.hlsli"
 
 RWStructuredBuffer<ProbeGasCellState> gasState : register(u15);  // 区画のセルごとの気体の欄
@@ -517,4 +519,35 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
     }
 
     gasWork.Store(PROBE_GAS_CONTROL_STEPPED, gasWork.Load(PROBE_GAS_CONTROL_STEPPED) + 1);
+}
+
+// --- 状態のハッシュ(T-0620。ハッシュの単位の HashCells の後。区画があるときだけ)---
+// 区画のセルの気体の欄の寄与 + 帳簿の寄与(区画の番号 0 のスレッド)を、S(t + 1) の欄の hash へ足す(common/probe_region_hash.hlsli。
+// CPU は ProbeGasField::HashTerm)。気体の欄は 1 組だけ持つので、刻み t の気体の段の後の値 = S(t + 1) の値
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void GasHash(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const ProbeGasHeader header = GasHeader();
+    const uint32_t region = dispatchThreadId.x;
+    uint64_t hash = 0;
+    if (region < header.regionCellCount) {
+        const ProbeGasCellState state = gasState[region];
+        uint64_t term = ProbeRegionHashBegin(PROBE_GAS_CELL_HASH_SEED, region);
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis) term = ProbeRegionHashAdd(term, state.momentum[axis]);
+
+        hash = ProbeRegionHashEnd(ProbeRegionHashAdd(term, state.kinetic));
+    }
+
+    // 帳簿: 物質 ID ごとの量 → エネルギー → 運動量 × 3(格子の軸)の順に並んだ int64
+    if (region == 0) {
+        uint64_t term = ProbeRegionHashBegin(PROBE_GAS_LEDGER_HASH_SEED, header.speciesCount);
+        for (uint32_t word = 0; word < header.speciesCount + 4; ++word)
+            term = ProbeRegionHashAdd(term, gasWork.Load<int64_t>(header.ledgerOffset + word * 8));
+
+        hash += ProbeRegionHashEnd(term);
+    }
+
+    const uint64_t sum = WaveActiveSum(hash);
+    if (WaveIsFirstLane()) {
+        uint64_t original;
+        hashes.InterlockedAdd64(HashEntryAddress(CurrentTick() + 1) + PROBE_HASH_OFFSET_HASH, sum, original);
+    }
 }

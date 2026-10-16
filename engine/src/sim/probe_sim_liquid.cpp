@@ -4,7 +4,8 @@
 // (コマンド → 物理の熱 → 表の作り直し → 気体 → **液体** → 起こす刻みの来たブロックを一覧へ)で、shaders/sim/probe_liquid_tick.hlsl の
 // 10 段を投げる。置き場所の形は shaders/common/probe_liquid_gpu.hlsli(バッファは 1 つ。ルート署名の u19)。
 // 作る時に CPU が決めるのは、区画の形・模型の値・物質ごとの値(液体か・凝縮相か・モル質量・モル体積)と欄の場所だけ。状態は 0(静止)から。
-// 今の制限(分けたチケット): 表の差し替え・保存点・写しの早送り・状態のハッシュに液体の欄が無い(気体の T-0620 と一緒に。区画のある世界は断る)。
+// 保存点・写しの早送りは作業場の持ち越す部分を写し、状態のハッシュは LiquidHash が持ち越す欄と帳簿を足す(T-0620)。
+// 今の制限(分けたチケット): 表の差し替えは区画の欄の作りが変わらない表だけ(付け替えと作り直しは T-0670)。
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -19,11 +20,11 @@ namespace bicameral::sim {
     namespace {
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(呼ぶ順。m_liquidPipelines の並び)
-        constexpr std::array<const char*, 10> LIQUID_SHADER_NAMES = {
-            "sim/probe_liquid_read.cso",        "sim/probe_liquid_pressure.cso",   "sim/probe_liquid_forces.cso",
-            "sim/probe_liquid_outgoing.cso",    "sim/probe_liquid_move_faces.cso", "sim/probe_liquid_apply.cso",
-            "sim/probe_liquid_leaving.cso",     "sim/probe_liquid_advect.cso",     "sim/probe_liquid_settle_faces.cso",
-            "sim/probe_liquid_settle_cells.cso"};
+        constexpr std::array<const char*, 11> LIQUID_SHADER_NAMES = {
+            "sim/probe_liquid_read.cso",         "sim/probe_liquid_pressure.cso",   "sim/probe_liquid_forces.cso",
+            "sim/probe_liquid_outgoing.cso",     "sim/probe_liquid_move_faces.cso", "sim/probe_liquid_apply.cso",
+            "sim/probe_liquid_leaving.cso",      "sim/probe_liquid_advect.cso",     "sim/probe_liquid_settle_faces.cso",
+            "sim/probe_liquid_settle_cells.cso", "sim/probe_liquid_hash.cso"};
 
         enum LiquidPass : uint8_t {
             Read,
@@ -35,7 +36,8 @@ namespace bicameral::sim {
             Leaving,
             Advect,
             SettleFaces,
-            SettleCells
+            SettleCells,
+            Hash
         };
 
         constexpr uint32_t RX_CELL_BYTES = 112;  // probe_liquid_tick.hlsl の RX_CELL_BYTES
@@ -198,18 +200,32 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &toUav);
     }
 
-    // 区画のある世界でまだ断るもの(気体と同じ。T-0620): 表の差し替え・保存点・写しの早送り
-    bool ProbeSim::ValidateLiquid(const ProbeFrameInput& input) const {
+    // 表の差し替え(T-0620・ADR-0300): 物質ごとの値と重力は作る時に作業場へ書いたので、それが変わらない表だけ通す(T-0670)
+    std::expected<void, std::string> ProbeSim::CheckLiquidTableSwap(const BakedReactionTable& table) const {
         if (!m_liquidWork)
-            return true;
+            return {};
 
-        const bool valid = input.tableSwaps.empty() && input.saveTo == NO_SAVE_POINT &&
-                           input.restoreFrom == NO_SAVE_POINT && input.adoptFrom == nullptr;
-        if (!valid)
-            Log(Channel::Sim, Level::Error,
-                "液体の区画のある世界は、まだ表の差し替え・保存点・写しの早送りができない(T-0620)");
+        const BakedReactionTable& current = m_tableCopy;
+        if (table.environment.gravityMicrometersPerSecond2 != current.environment.gravityMicrometersPerSecond2)
+            return std::unexpected("液体の区画のある世界で、重力が変わる表(T-0670)");
 
-        return valid;
+        for (uint32_t id = 0; id < m_liquidHeader.speciesCount; ++id) {
+            const ProbeLiquidSpecies before = MakeLiquidSpecies(current, id);
+            const ProbeLiquidSpecies after = MakeLiquidSpecies(table, id);
+            if (std::memcmp(&before, &after, sizeof(ProbeLiquidSpecies)) != 0) {
+                return std::unexpected(std::format(
+                    "液体の区画のある世界で、物質 {} の液体の値(モル体積・モル質量・液体と凝縮相)が変わる表(T-0670)",
+                    table.speciesNames[id]));
+            }
+        }
+
+        return {};
+    }
+
+    // 状態のハッシュの単位: HashCells と同じ欄へ液体の持ち越す欄と帳簿の寄与を足す
+    void ProbeSim::RecordLiquidHash(ID3D12GraphicsCommandList10* list) const {
+        list->SetPipelineState(m_liquidPipelines[LiquidPass::Hash].Get());
+        list->Dispatch(GroupsFor(m_liquidHeader.regionCellCount), 1, 1);
     }
 
     // 液体の 10 段(ProbeSim のルート署名と単位の定数が結んである所で。気体の段の後)

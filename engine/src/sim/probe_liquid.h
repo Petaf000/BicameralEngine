@@ -133,6 +133,10 @@ namespace bicameral::sim {
         // 面の運動量・エネルギー・帳簿のハッシュ(決定性の検査。セルは呼ぶ側が別に)
         [[nodiscard]] uint64_t Hash() const;
 
+        // 世界の状態のハッシュに足す寄与(区画のセルごとの面の運動量・面の運動のエネルギー・位置のエネルギーの寄与の和 + 帳簿の寄与。
+        // GPU の LiquidHash と同じ値。common/probe_region_hash.hlsli・T-0620)
+        [[nodiscard]] uint64_t HashTerm() const;
+
         // セルの液体の質量(ng = µmol × mg/mol)と体積(pL = µmol × mm³/mol)
         [[nodiscard]] static uint64_t LiquidMass(const BakedReactionTable& table, const reaction::RxCell& cell);
         [[nodiscard]] static uint64_t LiquidVolume(const BakedReactionTable& table, const reaction::RxCell& cell);

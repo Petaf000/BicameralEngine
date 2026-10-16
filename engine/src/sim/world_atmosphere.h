@@ -74,6 +74,7 @@ namespace bicameral::sim {
         uint32_t surfacePressurePascals = 0;  // 一番低い点の高さの圧力
 
         [[nodiscard]] bool Empty() const { return points.empty(); }
+        [[nodiscard]] bool operator==(const WorldAtmosphere&) const = default;
     };
 
     // ある高さの基準の大気(点の間を直線でつないだ値)

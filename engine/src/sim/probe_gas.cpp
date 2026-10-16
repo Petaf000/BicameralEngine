@@ -5,6 +5,7 @@
 #include <cassert>
 
 #include "common/fixed.hlsli"
+#include "common/probe_region_hash.hlsli"
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
 #include "sim/cell_volume.h"
@@ -461,6 +462,28 @@ namespace bicameral::sim {
             mix((uint64_t)momentum);
 
         return hash;
+    }
+
+    uint64_t ProbeGasField::HashTerm() const {
+        uint64_t sum = 0;
+        for (uint32_t region = 0; region < RegionCellCount(); ++region) {
+            uint64_t term = ProbeRegionHashBegin(PROBE_GAS_CELL_HASH_SEED, region);
+            for (const int64_t momentum : m_momentum[region])
+                term = ProbeRegionHashAdd(term, momentum);
+
+            sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, m_kinetic[region]));
+        }
+
+        // 帳簿: 物質 ID ごとの量 → エネルギー → 運動量 × 3(GPU の作業場の帳簿の並び)
+        uint64_t ledger = ProbeRegionHashBegin(PROBE_GAS_LEDGER_HASH_SEED, (uint32_t)m_ledger.amounts.size());
+        for (const int64_t amount : m_ledger.amounts)
+            ledger = ProbeRegionHashAdd(ledger, amount);
+
+        ledger = ProbeRegionHashAdd(ledger, m_ledger.energy);
+        for (const int64_t momentum : m_ledger.momentum)
+            ledger = ProbeRegionHashAdd(ledger, momentum);
+
+        return sum + ProbeRegionHashEnd(ledger);
     }
 
 }  // namespace bicameral::sim
