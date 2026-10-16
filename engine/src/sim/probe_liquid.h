@@ -18,6 +18,10 @@
 //     位置は液体と一緒に、運動は運動量と一緒に同じ比で運び、刻みの終わりの状態から計算し直した値との差をセルの熱にする
 //     (落ちる水・摩擦・速さの上限で失った分が熱になる。数値の誤差で増えた分は熱から引く)。区画の外の段(反応・置いた水)で液体が現れた・
 //     消えた分の位置のエネルギーは帳簿へ。→ Σ セルのエネルギー + 位置 + 運動 − 帳簿 は毎刻みビット単位で一定。
+//   - **面の運動量は液体に付く**(T-0656・T-0648・ADR-0286 の液体の版): 区画の外の段(蒸発・凝縮・凍る・溶ける・反応・置く操作)で
+//     面の両側の液体の質量が前の刻みの終わりより減っていたら速さを保つ(運動量 × 今 ÷ 前。減った液体は同じ速さで気体・固体へ移ったものとし、
+//     その運動量は帳簿へ)。増えていたら運動量を保つ(増えた液体は静止して現れる)。どちらも運動のエネルギーは前の値を超えないので、
+//     差は熱になり、質量の増減が熱を負にすることはない。気体の区画(sim/probe_gas)と同じ決まり。
 //   - **速さの上限**: 面の速さを maxSpeedMillimetersPerSecond で止める(1 刻みに面のまわりの液体の半分まで動く = 15 m/s が既定)。超えた運動量は帳簿へ。
 //   - **質量・成分・エネルギー**: 面の運動量から 1 刻みに動く質量を決め(上流のセルから。出る合計がセルの液体を超えれば比で縮める)、
 //     上流の液体の成分の比で物質量を、液体のぶんのエネルギー(熱 × 動く熱容量 ÷ セルの熱容量 + 動く化学)を一緒に動かす。
@@ -87,6 +91,7 @@ namespace bicameral::sim {
         std::array<int64_t, 3> friction = {};  // 摩擦(底と粘り)
         std::array<int64_t, 3> dropped = {};   // まわりが空になった面の運動量(移流なしでは上流が空の面も)
         std::array<int64_t, 3> capped = {};    // 速さの上限で止めた運動量
+        std::array<int64_t, 3> vanished = {};  // 区画の外の段で液体が減った面の、減った液体が持って出た運動量(T-0656)
 
         // --- エネルギー(mJ)---
         int64_t heat = 0;              // 位置と運動のエネルギーから熱になった分(負は熱から戻った分)
@@ -138,6 +143,7 @@ namespace bicameral::sim {
         std::array<std::vector<int64_t>, 3> m_faces;    // 区画のセルの + 側の面の運動量(格子の軸 x・y・z)
         std::array<std::vector<int64_t>, 3> m_kinetic;  // 面の運動のエネルギー(mJ。セルのエネルギーの外)
         std::vector<int64_t> m_potential;  // セルの液体の位置のエネルギー(mJ。区画の床から。セルのエネルギーの外)
+        std::vector<uint64_t> m_mass;      // セルの液体の質量(mg。前の刻みの終わり。段の外での増減を見る。T-0656)
         ProbeLiquidLedger m_ledger;
 
         [[nodiscard]] uint32_t RegionIndex(uint32_t x, uint32_t y, uint32_t z) const;
@@ -150,6 +156,7 @@ namespace bicameral::sim {
         // Step の段(probe_liquid.cpp)
         struct StepWork;
         [[nodiscard]] uint32_t FaceOpenQ16At(const StepWork& work, uint32_t region, uint32_t axis) const;
+        void FollowMassChange(const StepWork& work, ProbeLiquidStepReport& report);
         void ComputePressure(StepWork& work, ProbeLiquidStepReport& report) const;
         void ApplyForces(StepWork& work, ProbeLiquidStepReport& report);
         void MoveMass(const BakedReactionTable& table, std::span<reaction::RxCell> cells, StepWork& work,

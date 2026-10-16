@@ -233,6 +233,7 @@ namespace bicameral::sim {
         }
 
         field.m_potential.assign(cells, 0);
+        field.m_mass.assign(cells, 0);
 
         return field;
     }
@@ -356,6 +357,9 @@ namespace bicameral::sim {
         for (const int64_t value : m_potential)
             hash = Mix(hash, (uint64_t)value);
 
+        for (const uint64_t value : m_mass)
+            hash = Mix(hash, value);
+
         for (uint32_t axis = 0; axis < 3; ++axis)
             hash = Mix(hash, (uint64_t)m_ledger.external[axis]);
 
@@ -416,8 +420,10 @@ namespace bicameral::sim {
                 ++report.wetCells;
         }
 
-        if (report.wetCells == 0 && AtRest())
+        if (report.wetCells == 0 && AtRest()) {
+            rng::fill(m_mass, uint64_t{0});
             return report;  // 液体が無く、動いている面もエネルギーも無い(ブランクの世界・液体の無い表)
+        }
 
         // --- 区画の外の段(反応・置いた水)で液体が現れた・消えた分の位置のエネルギーを帳簿へ ---
         for (uint32_t region = 0; region < count; ++region) {
@@ -427,6 +433,7 @@ namespace bicameral::sim {
         }
 
         m_ledger.energy += report.potentialEntered;
+        FollowMassChange(work, report);
 
         // --- 圧力 → 面の力 → 質量を動かす → 運動量を運ぶ → エネルギーを熱へ ---
         work.kineticCarried = m_kinetic;
@@ -440,7 +447,7 @@ namespace bicameral::sim {
 
         for (uint32_t axis = 0; axis < 3; ++axis)
             m_ledger.external[axis] += report.wall[axis] + report.gravity[axis] + report.friction[axis] +
-                                       report.dropped[axis] + report.capped[axis];
+                                       report.dropped[axis] + report.capped[axis] + report.vanished[axis];
 
         for (uint32_t region = 0; region < count; ++region) {
             if (work.changed[region] == 0)
@@ -460,6 +467,31 @@ namespace bicameral::sim {
             return 0;
 
         return FaceOpenQ16(work.states[region].open, work.states[region + work.stride[axis]].open);
+    }
+
+    // 区画の外の段(蒸発・凝縮・凍る・溶ける・反応・置く操作)で液体の質量が変わった面の運動量を合わせ直す(T-0656・ADR-0286 の液体の版)。
+    // 面の質量 = 両側のセルの液体の質量の和(前の刻みの終わり m_mass → 今)。減った時は速さを保つ(運動量 × 今 ÷ 前。0 の向きへ切り捨て。
+    // 減った液体の運動量は帳簿へ)。増えた時は運動量を保つ。運動のエネルギー(m_kinetic)は前の値のまま運び、SettleEnergy で今の質量から
+    // 計算し直すので、増減で減った分は熱になる(速さを保てば運動のエネルギーは増えない = 熱を負にしない)
+    void ProbeLiquidField::FollowMassChange(const StepWork& work, ProbeLiquidStepReport& report) {
+        const uint32_t count = RegionCellCount();
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            for (uint32_t region = 0; region < count; ++region) {
+                int64_t& face = m_faces[axis][region];
+                if (face == 0 || RegionCoordinates(region)[axis] + 1 >= m_options.sizeCells[axis])
+                    continue;
+
+                const uint32_t neighbor = region + work.stride[axis];
+                const uint64_t before = m_mass[region] + m_mass[neighbor];
+                const uint64_t now = work.states[region].mass + work.states[neighbor].mass;
+                if (now >= before)
+                    continue;
+
+                const int64_t kept = ScaleSigned(face, now, before);
+                report.vanished[axis] -= face - kept;
+                face = kept;
+            }
+        }
     }
 
     // 圧力(質量の単位。P = 2 × 支えている上の液体 + 自分 + 溢れ)。列ごとに上から
@@ -670,6 +702,7 @@ namespace bicameral::sim {
                 work.changed[region] = 1;
 
             mass[region] = LiquidMass(table, cell) / 1000000;  // ng → mg(ReadState と同じ)
+            m_mass[region] = mass[region];
         }
 
         // --- 面: まわりが空になった面・速さの上限・運動のエネルギー(差は両側のセルへ半分ずつ)---
