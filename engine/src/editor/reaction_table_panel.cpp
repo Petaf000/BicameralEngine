@@ -98,7 +98,13 @@ namespace bicameral::editor {
             constexpr double MILLI = 1e-6;  // mJ/mol → kJ/mol
             switch (slope.state) {
                 case sim::RuleSlopeState::Uphill:
-                    ImGui::TextColored(ERROR_COLOR, "上る %u〜%u K", slope.uphill.lowKelvin, slope.uphill.highKelvin);
+                    // 逆向きの対(T-0611)は向きを速さの比で決めるので、警告の赤ではなく黄
+                    if (slope.reverseRule != sim::NO_REVERSE_RULE)
+                        ImGui::TextColored(WARNING_COLOR, "対・上る %u〜%u K", slope.uphill.lowKelvin,
+                                           slope.uphill.highKelvin);
+                    else
+                        ImGui::TextColored(ERROR_COLOR, "上る %u〜%u K", slope.uphill.lowKelvin,
+                                           slope.uphill.highKelvin);
                     break;
                 case sim::RuleSlopeState::Downhill:
                     if (slope.nearBalance.count != 0)

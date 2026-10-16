@@ -88,7 +88,8 @@ namespace {
         for (size_t id = 1; id < table.species.size(); ++id) {
             thermo[id].zeroKelvinEnthalpy = static_cast<double>(table.species[id].h0);
             thermo[id].heatCapacity = static_cast<double>(table.species[id].heatCapacity) * MILLI;
-            thermo[id].condensed = table.speciesNames[id] == "cellulose" || table.speciesNames[id] == "carbon";
+            thermo[id].condensed = table.speciesNames[id] == "cellulose" || table.speciesNames[id] == "carbon" ||
+                                   table.speciesNames[id] == "water" || table.speciesNames[id] == "ice";  // T-0611
         }
 
         for (const SpeciesDefinition& species : definition.species) {

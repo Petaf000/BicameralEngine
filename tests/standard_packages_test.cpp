@@ -176,9 +176,9 @@ namespace {
 
         const sim::BakedReactionTable& table = loaded->table;
         EXPECT(table.elementNames.size() == 5);
-        EXPECT(table.speciesNames.size() == 1 + 8);  // 0 番は使わない
-        EXPECT(table.rules.size() == 5);
-        EXPECT(table.SpeciesId("mana_test") == 0);  // 魔素は標準パッケージに無い(サンプルの試験の物質)
+        EXPECT(table.speciesNames.size() == 1 + 10);  // 0 番は使わない(液体の水と氷を T-0611 で足した)
+        EXPECT(table.rules.size() == 9);              // 水の相変化 4(T-0611)
+        EXPECT(table.SpeciesId("mana_test") == 0);    // 魔素は標準パッケージに無い(サンプルの試験の物質)
 
         // 地球の環境 = 試験の写し(tests/standard_world_physics.h)
         EXPECT(table.environment.gravityMicrometersPerSecond2 ==
@@ -408,7 +408,7 @@ namespace {
         source.addedPackages = folders.value_or(std::vector<fs::path>{});
         const HotReloadResult added = reload.Replace(source);
         EXPECT(added.state == HotReloadState::Reloaded && added.table &&
-               added.table->table.speciesNames.size() == 1 + 8);
+               added.table->table.speciesNames.size() == 1 + 10);
         EXPECT(reload.Source().addedPackages.size() == 2);
 
         // 読めない読む元は落とし、読む元も表も元のまま

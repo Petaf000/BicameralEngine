@@ -10,6 +10,8 @@
 //     エンジンのエネルギーと同じ比熱一定の近似。触媒は両辺で消える)を整数で数え、速さが 0 でない温度だけを見る
 //   → RuleSlope(BakedReactionTable::ruleSlopes。パネルの「坂」の欄)と警告の文(BakedReactionTable::warnings。頭に SLOPE_WARNING_PREFIX)
 //   → ログ(起動・ホットリロード)とエディタの反応表のパネル(ホットリロードで表が変われば作り直す)。
+// 逆向きの対(正味の係数がちょうど符号違いの 2 本。相変化の蒸発と凝縮など。ADR-0272)は、向きを 2 本の速さの比で決めるので
+// 「一方向の規則が坂を上る」警告を出さない(坂の欄は 1 本ずつのまま。T-0611)。対の速さの比が釣り合い K(T) と合うかは見ない(T-0623)。
 // 捕まえられるのは「標準の状態で坂を上る温度がある」規則まで。成分しだいで釣り合いを越える行き過ぎ(T-0491 の boudouard の
 // 1645〜1738 K)は刻みごとの数え上げ(開発ビルドの計器。T-0518)が要る。ここは「釣り合いに近い(成分しだいで上りうる)」の注意を出すだけ。
 // GPU の表とハッシュは変えない(CPU だけ)。浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
@@ -31,6 +33,9 @@ namespace bicameral::reaction {
 namespace bicameral::sim {
 
     struct BakedReactionTable;
+
+    // 逆向きの規則が無い(RuleSlope::reverseRule)
+    inline constexpr uint32_t NO_REVERSE_RULE = UINT32_MAX;
 
     // 坂の警告の文の頭(ほかのベイクの警告と見分けるため。試験とパネルが使う)
     inline constexpr std::string_view SLOPE_WARNING_PREFIX = "坂: ";
@@ -56,6 +61,8 @@ namespace bicameral::sim {
         uint32_t balanceKelvin = 0;        // ΔG° の符号が変わる最初の温度(2〜4095 K。無ければ 0)
         int64_t gibbs300MilliJoules = 0;   // ΔG°(300 K)(mJ/mol。表示用)
         int64_t gibbs1000MilliJoules = 0;  // ΔG°(1000 K)
+        uint32_t
+            reverseRule = NO_REVERSE_RULE;  // 正味の係数がちょうど逆の規則(逆向きの対。あれば一方向の警告を出さない)
 
         // --- Unevaluated の理由 ---
         std::vector<std::string> missingEntropy;  // 標準エントロピーの無い物質(正味の係数が 0 でないもの)
@@ -77,7 +84,8 @@ namespace bicameral::sim {
     // 規則ごとの坂(添字 = 規則 ID)。baked の物質・規則・速度の表・standardEntropies を読む
     [[nodiscard]] std::vector<RuleSlope> CheckReactionSlopes(const BakedReactionTable& baked);
 
-    // 坂の警告の文(坂を上る規則ごとに 1 行・調べられない規則をまとめて 1 行)。頭は SLOPE_WARNING_PREFIX
+    // 坂の警告の文(坂を上る一方向の規則ごとに 1 行・調べられない規則をまとめて 1 行)。頭は SLOPE_WARNING_PREFIX。
+    // 逆向きの対の規則(reverseRule がある)は、坂を上る温度があっても警告しない
     [[nodiscard]] std::vector<std::string> SlopeWarnings(const BakedReactionTable& baked,
                                                          const std::vector<RuleSlope>& slopes);
 

@@ -114,8 +114,8 @@ namespace {
         ExpectBakeFails("知らない元素", [](auto& d) { SpeciesOf(d, "cellulose").composition[0].element = "X"; });
         ExpectBakeFails("係数 0",
                         [](auto& d) { TermOf(RuleOf(d, "carbon_combustion").reactants, "carbon").coefficient = 0; });
-        ExpectBakeFails("次数 1 の反応物なし", [](auto& d) {
-            TermOf(RuleOf(d, "cellulose_pyrolysis").reactants, "cellulose").firstOrder = false;
+        ExpectBakeFails("次数 1 の反応物が 3 個", [](auto& d) {
+            TermOf(RuleOf(d, "mana_test_catalyzed_cellulose_combustion").reactants, "mana_test").firstOrder = true;
         });
         ExpectBakeFails("規則の名前の重なり",
                         [](auto& d) { RuleOf(d, "cellulose_combustion").name = "cellulose_pyrolysis"; });

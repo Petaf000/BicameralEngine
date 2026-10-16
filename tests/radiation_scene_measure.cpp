@@ -6,7 +6,8 @@
 //   w=<川の幅のセル>(既定 4 = 2 m。向こう岸 x 44〜63 は変えず、手前の岸を伸び縮みさせる)・gap=1(川の代わりに草の無い土の隙間)
 //   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。既定 0)・rad=0(放射の段を入れない)
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)
-// 出力(1 行 1 回): 向こう岸に火が移った時刻(向こう岸の草が 1% 減った)・向こう岸に残った草・火が消えた時刻・1 刻みの時間(放射の段の分も)。
+// 出力(1 行 1 回): 向こう岸に火が移った時刻(向こう岸の草が 1% 減った)・向こう岸に残った草・火が消えた時刻・1 刻みの時間(放射の段の分も)・
+//   川の水(液体の water)の始めと終わり・終わりの湯気(water_vapor。燃焼の生成物も入る)。川の水が減った分が蒸発(潜熱を吸う。T-0611)。
 // 設定はスレッドで並べて走らせる(それぞれ独立の世界。結果は決定的)。
 #include <algorithm>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -57,6 +59,9 @@ namespace {
         double radiationMillisecondsPerTick = 0;
         uint64_t pairsPerTick = 0;
         uint32_t hottestMk = 0;
+        uint64_t riverWaterStart = 0;  // µmol(川の列の液体の水)
+        uint64_t riverWaterEnd = 0;
+        uint64_t vaporEnd = 0;  // µmol(世界全部の湯気)
     };
 
     Setting ParseSetting(std::string_view text) {
@@ -167,6 +172,31 @@ namespace {
         return amount;
     }
 
+    // 列 x の範囲 [firstX, endX) にある物質 name の合計(µmol。全部の y・z)
+    uint64_t AmountInColumns(const BakedReactionTable& table, std::span<const reaction::RxCell> cells,
+                             std::string_view name, uint32_t firstX, uint32_t endX) {
+        uint32_t wanted = UINT32_MAX;
+        for (size_t id = 0; id < table.speciesNames.size(); ++id) {
+            if (table.speciesNames[id] == name)
+                wanted = static_cast<uint32_t>(id);
+        }
+
+        uint64_t amount = 0;
+        for (uint32_t z = 0; z < PROBE_GRID_SIZE; ++z) {
+            for (uint32_t y = 0; y < PROBE_GRID_SIZE; ++y) {
+                for (uint32_t x = firstX; x < endX; ++x) {
+                    const reaction::RxCell& cell = cells[ProbeCellIndex(x, y, z)];
+                    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                        if (cell.species[i] == wanted)
+                            amount += cell.amounts[i];
+                    }
+                }
+            }
+        }
+
+        return amount;
+    }
+
     Outcome Run(const BakedReactionTable& baseTable, const Setting& setting) {
         BakedReactionTable table = baseTable;
         SetAbsorption(table, "cellulose", setting.absorptionCellulose);
@@ -181,7 +211,9 @@ namespace {
 
         const uint64_t farStart = FarGrass(table, reference.State(0));
         const std::vector<ProbeCommand> ignite = {MakePokeCommand(0, 0, 4, GRASS_Y, 32)};
+        const uint32_t riverStart = FAR_FIRST_X - setting.riverCells;
         Outcome outcome;
+        outcome.riverWaterStart = AmountInColumns(table, reference.State(0), "water", riverStart, FAR_FIRST_X);
         chr::nanoseconds total{};
         uint64_t pairs = 0;
         const uint64_t lastTick = setting.seconds * TICKS_PER_SECOND;
@@ -233,6 +265,8 @@ namespace {
 
         outcome.farLeftPercent = 100.0 * static_cast<double>(FarGrass(table, reference.State(tick))) /
                                  static_cast<double>(farStart == 0 ? 1 : farStart);
+        outcome.riverWaterEnd = AmountInColumns(table, reference.State(tick), "water", riverStart, FAR_FIRST_X);
+        outcome.vaporEnd = AmountInColumns(table, reference.State(tick), "water_vapor", 0, PROBE_GRID_SIZE);
         outcome.millisecondsPerTick = chr::duration<double, std::milli>(total).count() / static_cast<double>(tick);
         outcome.pairsPerTick = pairs / (tick == 0 ? 1 : tick);
 
@@ -277,9 +311,11 @@ int main(int argc, char** argv) {
         const Outcome& outcome = outcomes[i];
         std::printf(
             "%-48s 向こう岸に火 %6.0f 秒・向こう岸の草 %6.2f%%・火が消えた %6.0f 秒・最高 %7u mK・%7.1f ms/刻み・対 "
-            "%llu/刻み\n",
+            "%llu/刻み・川の水 %.1f → %.1f mol・湯気 %.1f mol\n",
             settings[i].text.c_str(), outcome.farIgnitionSeconds, outcome.farLeftPercent, outcome.fireOutSeconds,
-            outcome.hottestMk, outcome.millisecondsPerTick, static_cast<unsigned long long>(outcome.pairsPerTick));
+            outcome.hottestMk, outcome.millisecondsPerTick, static_cast<unsigned long long>(outcome.pairsPerTick),
+            static_cast<double>(outcome.riverWaterStart) * 1e-6, static_cast<double>(outcome.riverWaterEnd) * 1e-6,
+            static_cast<double>(outcome.vaporEnd) * 1e-6);
     }
 
     return 0;
