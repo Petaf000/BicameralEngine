@@ -777,13 +777,8 @@ namespace bicameral::sim {
         const uint64_t limit = soundSpeedLimitMmPerS;
         assert(soundSpeedMmPerS > 0 && soundSpeedMmPerS <= limit && limit < ((uint64_t)1 << 32));
 
-        // T_基準 × 上限² ÷ c̃²(128bit。商が 64bit を超える〔c̃ がとても小さい〕なら頭打ちなし)
-        const uint64_t soundSquared = (uint64_t)soundSpeedMmPerS * soundSpeedMmPerS;
-        const fx::FxU128 numerator = fx::FxMulU64Full(referenceTemperature, limit * limit);
-        if (numerator.hi >= soundSquared)
-            return UINT32_MAX;
-
-        const uint64_t cap = fx::FxDivU128By64(numerator, soundSquared).quotient;
+        // T_基準 × 上限 ÷ c̃(圧力の拡散の数で決める。T-0631。上限 < 2^32 なので 64bit に収まる)
+        const uint64_t cap = (uint64_t)referenceTemperature * limit / soundSpeedMmPerS;
         return (uint32_t)std::min<uint64_t>(cap, UINT32_MAX);
     }
 

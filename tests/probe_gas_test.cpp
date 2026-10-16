@@ -336,6 +336,94 @@ namespace {
                     REGION_SIZE[0] * REGION_SIZE[1] * REGION_SIZE[2]);
     }
 
+    // --- 9. 市松模様の物差し(T-0631): 隣り合うセルが交互に熱い・冷たい ---
+    // 区画の x・z の軸に沿った 3 つ組(両端も区画で気体がある)のうち、真ん中が両隣より 100 K 以上熱い・冷たい(谷か山)の数。
+    // なめらかな煙の柱は山が 1 つだけなので、数は少ない(柱の芯の列ほど)。市松は区画の大半が谷か山
+    struct CheckerMeasure {
+        uint32_t zigzags = 0;    // 谷か山の 3 つ組の数
+        uint32_t coldCells = 0;  // 250 K 未満のセル(熱が負のセルは 0 K)
+        uint32_t hotCells = 0;   // 800 K 超のセル
+    };
+
+    CheckerMeasure MeasureChecker(std::span<const reaction::HcThermalCache> caches,
+                                  std::span<const reaction::RxCell> cells) {
+        CheckerMeasure measure;
+        const auto inRegion = [](uint32_t x, uint32_t y, uint32_t z) {
+            return x >= REGION_MIN[0] && x < REGION_MIN[0] + REGION_SIZE[0] && y < REGION_SIZE[1] &&
+                   z >= REGION_MIN[2] && z < REGION_MIN[2] + REGION_SIZE[2];
+        };
+        const auto index = [](uint32_t x, uint32_t y, uint32_t z) {
+            return x + (PROBE_GRID_SIZE * y) + (PROBE_SLICE_CELL_COUNT * z);
+        };
+
+        for (uint32_t z = REGION_MIN[2]; z < REGION_MIN[2] + REGION_SIZE[2]; ++z) {
+            for (uint32_t y = 0; y < REGION_SIZE[1]; ++y) {
+                for (uint32_t x = REGION_MIN[0]; x < REGION_MIN[0] + REGION_SIZE[0]; ++x) {
+                    const auto temperature = (int64_t)caches[index(x, y, z)].temperature;
+                    measure.coldCells += temperature < 250000 ? 1 : 0;
+                    measure.hotCells += temperature > 800000 ? 1 : 0;
+                    for (uint32_t axis = 0; axis < 2; ++axis) {
+                        const uint32_t lowX = axis == 0 ? x - 1 : x;
+                        const uint32_t lowZ = axis == 0 ? z : z - 1;
+                        const uint32_t highX = axis == 0 ? x + 1 : x;
+                        const uint32_t highZ = axis == 0 ? z : z + 1;
+                        if (!inRegion(lowX, y, lowZ) || !inRegion(highX, y, highZ) ||
+                            cells[index(lowX, y, lowZ)].speciesCount == 0 ||
+                            cells[index(highX, y, highZ)].speciesCount == 0)
+                            continue;
+
+                        const int64_t low = temperature - (int64_t)caches[index(lowX, y, lowZ)].temperature;
+                        const int64_t high = temperature - (int64_t)caches[index(highX, y, highZ)].temperature;
+                        if ((low > 100000 && high > 100000) || (low < -100000 && high < -100000))
+                            ++measure.zigzags;
+                    }
+                }
+            }
+        }
+
+        return measure;
+    }
+
+    // z = 32 の断面の温度(100 K 単位の数字。1000 K 以上は *)を上の層から
+    void PrintSlice(std::span<const reaction::HcThermalCache> caches) {
+        for (uint32_t row = 0; row < REGION_SIZE[1]; ++row) {
+            const uint32_t y = REGION_SIZE[1] - 1 - row;
+            char line[64] = {};
+            for (uint32_t i = 0; i < REGION_SIZE[0]; ++i) {
+                const uint32_t index = REGION_MIN[0] + i + (PROBE_GRID_SIZE * y) + (PROBE_SLICE_CELL_COUNT * 32);
+                const uint32_t hundreds = caches[index].temperature / 100000;
+                line[i] = hundreds >= 10 ? '*' : (char)('0' + hundreds);
+            }
+
+            std::printf("  y%02u %s\n", y, line);
+        }
+    }
+
+    CheckerMeasure TestCheckerboard(const BakedReactionTable& table, ProbeGasPressure pressure) {
+        const auto field = ProbeGasField::Create(table, MakeOptions(pressure));
+        EXPECT(field.has_value());
+        CheckerMeasure last;
+        if (!field)
+            return last;
+
+        ProbeReference reference(table, MakeWorld(table, *field, true));
+        EXPECT(reference.EnableGas(MakeOptions(pressure)).has_value());
+        const char* name = pressure == ProbeGasPressure::Explicit ? "陽解法" : "投影";
+        for (uint64_t tick = 0; tick < SMOKE_TICKS; ++tick) {
+            reference.Advance(tick, {});
+            const uint64_t done = tick + 1;
+            if (done != 1 && done != 2 && done != 5 && done % 20 != 0)
+                continue;
+
+            last = MeasureChecker(reference.Caches(done), reference.State(done));
+            std::printf("市松(%s・%llu 刻み): 谷か山 %u・250 K 未満 %u・800 K 超 %u\n", name, (unsigned long long)done,
+                        last.zigzags, last.coldCells, last.hotCells);
+        }
+
+        PrintSlice(reference.Caches(SMOKE_TICKS));
+        return last;
+    }
+
     // --- 6. 成分の数の上限なし(T-0591)---
     void TestManySpecies(const BakedReactionTable& table) {
         const FireResult still = RunFire(table, false, ProbeGasPressure::Explicit, SMOKE_TICKS);
@@ -434,6 +522,8 @@ int main() {
     TestDeterminism(table, ProbeGasPressure::Explicit);
     TestDeterminism(table, ProbeGasPressure::Projection);
     TestSmokeRises(table);
+    TestCheckerboard(table, ProbeGasPressure::Explicit);
+    TestCheckerboard(table, ProbeGasPressure::Projection);
 
     const BakedReactionTable earth = MakeEarthAirTable();
     TestHeatCapacityAtConstantVolume(table, earth);
