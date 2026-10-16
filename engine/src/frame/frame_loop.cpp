@@ -1212,12 +1212,12 @@ namespace bicameral::frame {
         }
 
         // Shift + 左クリックの光線(と --auto-push)を押すコマンドに(T-0098)。光線は格子の座標なので物理の座標へ直す
-        // (probe_sim.hlsli の対応: y を裏返し、1 セル = 0.5 m)。どの物に当たるかは GPU が決める(CPU は物の場所を知らない。D-107)
+        // (probe_sim.hlsli の対応: 3 軸とも同じ向きで 1 セル = 0.5 m。T-0619)。どの物に当たるかは GPU が決める(CPU は物の場所を知らない。D-107)
         void FrameLoop::QueuePushes() {
             std::vector<render::CameraRay> rays = m_viewController.TakePushRays();
             if (m_options.autoPush && m_frameNumber == AUTO_PUSH_FRAME) {
-                // 積み木の 5 段目(物理の座標 x = 10 m・y = 5.5 m・z = 16.25 m。格子の (20, 53, 32.5))を −z の側から
-                rays.push_back({.origin = {20.0f, 53.0f, 0.0f}, .direction = {0.0f, 0.0f, 1.0f}});
+                // 積み木の 5 段目(物理の座標 x = 10 m・y = 5.5 m・z = 16.25 m。格子の (20, 11, 32.5))を −z の側から
+                rays.push_back({.origin = {20.0f, 11.0f, 0.0f}, .direction = {0.0f, 0.0f, 1.0f}});
             }
 
             for (const render::CameraRay& ray : rays) {
@@ -1229,13 +1229,12 @@ namespace bicameral::frame {
 
                 constexpr auto UNITS_PER_CELL = static_cast<double>(1u << sim::PROBE_PHYSICS_CELL_SHIFT);
                 constexpr auto DIRECTION_ONE = static_cast<double>(1u << 30);
-                const std::array<int64_t, 3> origin = {
-                    std::llround(ray.origin.x * UNITS_PER_CELL),
-                    std::llround((static_cast<double>(sim::PROBE_GRID_SIZE) - ray.origin.y) * UNITS_PER_CELL),
-                    std::llround(ray.origin.z * UNITS_PER_CELL)};
+                const std::array<int64_t, 3> origin = {std::llround(ray.origin.x * UNITS_PER_CELL),
+                                                       std::llround(ray.origin.y * UNITS_PER_CELL),
+                                                       std::llround(ray.origin.z * UNITS_PER_CELL)};
                 const std::array<int32_t, 3> direction = {
                     static_cast<int32_t>(std::lround(ray.direction.x / length * DIRECTION_ONE)),
-                    static_cast<int32_t>(std::lround(-ray.direction.y / length * DIRECTION_ONE)),
+                    static_cast<int32_t>(std::lround(ray.direction.y / length * DIRECTION_ONE)),
                     static_cast<int32_t>(std::lround(ray.direction.z / length * DIRECTION_ONE))};
 
                 m_pendingCommands.push_back(

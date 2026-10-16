@@ -8,8 +8,8 @@
 // 表示は 3 通り: 吸収と発光・光線の上の最大値・断面。重ね書き: 格子の枠・断面の枠(クリックがつつく面)・活性なブロック・色の凡例。
 // 覗き窓(T-0096): 抽出の覗きの欄に影の鎖があれば、断面の上では各点で一番細かい段のセルの色を描き(段の枠と、大きく見えるセルの線も)、
 // 立体の表示では段の箱の枠だけを重ねる。潜っている段(flags のビット 16〜19)の枠は明るく。
-// 物(T-0098): 抽出の物の欄の動く物を、回った箱として描く(立体では不透明な面と辺、断面では切り口)。物理の座標は y が上なので、
-// 格子の座標(y が画面の下向き)へ y を裏返して置く(probe_sim.hlsli の対応)。
+// 物(T-0098): 抽出の物の欄の動く物を、回った箱として描く(立体では不透明な面と辺、断面では切り口)。物理の座標も格子の座標も y が上なので、
+// 1 セル = 0.5 m の倍率だけで置く(probe_sim.hlsli の対応。T-0619)。
 // 浮動小数点はここ(描画)だけ。決定性は求めない(10 の目的)。
 #include "common/probe_sim.hlsli"
 
@@ -44,7 +44,7 @@ static const float3 PEEK_FRAME_COLOR = float3(0.25, 0.8, 0.45);  // 覗きの段
 static const float3 PEEK_DIVE_COLOR = float3(0.6, 1.0, 0.7);     // 潜っている段の枠
 static const float3 BODY_COLOR = float3(0.62, 0.6, 0.56);        // 物の面(熱の色と混ざらない灰色)
 static const float3 BODY_EDGE_COLOR = float3(0.12, 0.12, 0.14);  // 物の辺・切り口の縁
-static const float3 BODY_LIGHT = float3(0.35, -0.8, -0.48);      // 面の明るさの向き(格子の座標。上 = −y)
+static const float3 BODY_LIGHT = float3(0.35, 0.8, -0.48);       // 面の明るさの向き(格子の座標。上 = +y)
 
 // 断面の熱の無いセル(面の広がりが見えるように)
 static const float3 COLD_SLICE_COLOR = float3(0.05, 0.06, 0.1);
@@ -322,17 +322,14 @@ BodyView LoadBodyView(uint32_t extraction, uint32_t index) {
                      1073741824.0;
     const uint32_t flags = LoadExtraction(extraction, base + 13);
 
-    // 物理の回転の行列(行 i・列 j)。y を裏返すので、y の行か列の片方だけに当たる成分の符号を変える
-    float3x3 r = float3x3(1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y - q.w * q.z), 2 * (q.x * q.z + q.w * q.y),
-                          2 * (q.x * q.y + q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z - q.w * q.x),
-                          2 * (q.x * q.z - q.w * q.y), 2 * (q.y * q.z + q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y));
-    r[0][1] = -r[0][1];
-    r[1][0] = -r[1][0];
-    r[1][2] = -r[1][2];
-    r[2][1] = -r[2][1];
+    // 物理の回転の行列(行 i・列 j)。格子と物理は同じ向きなので、そのまま局所 → 格子
+    const float3x3 r = float3x3(
+        1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y - q.w * q.z), 2 * (q.x * q.z + q.w * q.y),
+        2 * (q.x * q.y + q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z - q.w * q.x),
+        2 * (q.x * q.z - q.w * q.y), 2 * (q.y * q.z + q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y));
 
     BodyView body;
-    body.center = float3(position.x, (float)PROBE_GRID_SIZE - position.y, position.z);
+    body.center = position;
     body.rotation = r;
     body.halfExtent = float3(asint(LoadExtraction(extraction, base + 10)), asint(LoadExtraction(extraction, base + 11)),
                              asint(LoadExtraction(extraction, base + 12))) *

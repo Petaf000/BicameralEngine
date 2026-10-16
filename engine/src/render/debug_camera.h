@@ -3,8 +3,8 @@
 // データの流れ: 入力(render/debug_view_controller)→ OrbitCamera の状態を変える → Basis() が描画の定数へ
 //   (render/probe_view.hlsl が同じ式で画素ごとの光線を作る)。クリックは RayThroughPixel → PickSliceCell でセルにして、つつきのコマンドへ。
 // カメラは View の状態(D-107)。世界には入らない。浮動小数点を使ってよい(描画側。04 §4 の検査の外)。
-// 座標: 世界 = セルの番号の空間(格子は [0, 1 辺)³)。回る軸は −y(既定の向きで画面の右 = +x・上 = −y・奥 = +z。
-//   今までの z = 32 の面の見え方と同じ)。
+// 座標: 世界 = セルの番号の空間(格子は [0, 1 辺)³)。回る軸は +y(既定の向きで画面の右 = +x・上 = +y・奥 = +z。
+//   格子の y は上〔world_cells・物理と同じ。T-0619〕)。
 #pragma once
 
 #include <array>
@@ -45,7 +45,7 @@ namespace bicameral::render {
     };
 
     struct OrbitCameraState {
-        float yawDegrees = 35.0f;    // −y の軸の周りの向き(0 で +z を向く)
+        float yawDegrees = 35.0f;    // y の軸の周りの向き(0 で +z を向く)
         float pitchDegrees = 25.0f;  // 上下(正で上から見下ろす)
         float distance = 150.0f;     // 注視点からの距離(セル)
         Vector3 target{32.0f, 32.0f, 32.0f};

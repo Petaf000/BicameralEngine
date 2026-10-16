@@ -65,7 +65,7 @@ namespace {
 
     // --- カメラ ---
 
-    // 既定の向き(0°・0°)で、画面の右 = +x・下 = +y・真ん中 = 注視点
+    // 既定の向き(0°・0°)で、画面の右 = +x・下 = −y(格子の y は上。T-0619)・真ん中 = 注視点
     void TestFrontView() {
         const OrbitCamera camera({.yawDegrees = 0.0f, .pitchDegrees = 0.0f, .distance = 80.0f});
         const CameraBasis basis = camera.Basis(WIDTH, HEIGHT);
@@ -73,12 +73,13 @@ namespace {
             return PickSliceCell(RayThroughPixel(basis, x, y, WIDTH, HEIGHT), 2, 32, GRID_SIZE);
         };
 
-        const auto center = pick(WIDTH * 0.5f + 0.5f, HEIGHT * 0.5f + 0.5f);
+        // 真ん中の少し右上の画素(格子の y が上なので、上へ半画素ずらすとセル 32 の中。T-0619)
+        const auto center = pick(WIDTH * 0.5f + 0.5f, HEIGHT * 0.5f - 0.5f);
         EXPECT(center && *center == (CellCoordinate{.x = 32, .y = 32, .z = 32}));
         const auto right = pick(WIDTH * 0.5f + 100.0f, HEIGHT * 0.5f);
         const auto below = pick(WIDTH * 0.5f, HEIGHT * 0.5f + 100.0f);
         EXPECT(right && right->x > 32 && right->y == 32);
-        EXPECT(below && below->y > 32 && below->x == 32);
+        EXPECT(below && below->y < 32 && below->x == 32);
         EXPECT(!pick(2.0f, 2.0f));  // 画面の隅は格子の外(横長の画面の左端)
     }
 
@@ -198,7 +199,7 @@ namespace {
         DebugViewController front(GRID_SIZE, {.sliceAxis = 2, .slicePosition = 32},
                                   {.yawDegrees = 0.0f, .pitchDegrees = 0.0f, .distance = 80.0f});
         const std::vector<InputEvent> click = {
-            {.kind = InputKind::ButtonDown, .button = PointerButton::Left, .x = WIDTH / 2, .y = HEIGHT / 2}};
+            {.kind = InputKind::ButtonDown, .button = PointerButton::Left, .x = WIDTH / 2, .y = (HEIGHT / 2) - 1}};
         const auto pokes = front.HandleInput(click, WIDTH, HEIGHT);
         EXPECT(pokes.size() == 1 && pokes[0] == (CellCoordinate{.x = 32, .y = 32, .z = 32}));
         const std::vector<InputEvent> drag = {
@@ -218,7 +219,7 @@ namespace {
 
         // 覗き窓(T-0096): P はポインタの下の断面のセルを覗く。PageDown で潜るとカメラが寄り、段が flags に入る。Shift + P でやめる
         const std::vector<InputEvent> peek = {
-            {.kind = InputKind::PointerMove, .x = WIDTH / 2, .y = HEIGHT / 2}, Key('P'), Key(0x22), Key(0x22)};
+            {.kind = InputKind::PointerMove, .x = WIDTH / 2, .y = (HEIGHT / 2) - 1}, Key('P'), Key(0x22), Key(0x22)};
         DebugViewController peeker(GRID_SIZE, {.sliceAxis = 2, .slicePosition = 32},
                                    {.yawDegrees = 0.0f, .pitchDegrees = 0.0f, .distance = 80.0f});
         EXPECT(peeker.HandleInput(peek, WIDTH, HEIGHT).empty());

@@ -64,7 +64,7 @@ namespace {
     int64_t EnergyAround(std::span<const reaction::RxCell> cells, uint32_t centerX, uint32_t centerZ) {
         int64_t sum = 0;
         for (uint32_t z = centerZ - 4; z <= centerZ + 4; ++z) {
-            for (uint32_t y = PROBE_GRID_SIZE - 5; y < PROBE_GRID_SIZE; ++y) {
+            for (uint32_t y = 0; y < 5; ++y) {  // 格子の底(物理の地面の上の面。T-0619)
                 for (uint32_t x = centerX - 4; x <= centerX + 4; ++x)
                     sum += cells[ProbeCellIndex(x, y, z)].energy;
             }
