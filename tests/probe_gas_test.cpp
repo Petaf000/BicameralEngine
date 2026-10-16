@@ -309,7 +309,7 @@ namespace {
         uint64_t hash = 0;
         int64_t heatCentroid = 0;   // ミリセル
         int64_t smokeCentroid = 0;  // CO2 の重心(ミリセル)
-        uint64_t smokeTop = 0;      // CO2 が 1 mol 以上ある最も高い層
+        uint64_t smokeTop = 0;      // CO2 の合計の 5% 以上がある最も高い層(格子の y)
         uint64_t celluloseLeft = 0;
         bool conserved = true;
         uint64_t brokenTick = 0;   // 保存が最初に崩れた刻み(0 = 崩れない)
@@ -359,14 +359,25 @@ namespace {
         result.heatCentroid = HeatCentroidMilliCells(reference.Caches(ticks), state, *field);
         const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
         result.smokeCentroid = CentroidMilliCells(state, carbonDioxide);
+        // 煙の届いた高さ: 層ごとの CO2 の和が合計の 5% 以上の最も高い層(セルごとの量の閾値〔前は 1 mol〕は、流れが煙を薄く広げると
+        // どのセルも届かなくなる。T-0631・T-0646 の後で 0 になった)
+        std::array<uint64_t, PROBE_GRID_SIZE> layerSmoke = {};
+        uint64_t smokeTotal = 0;
         for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
             for (uint32_t i = 0; i < state[index].speciesCount; ++i) {
-                if (state[index].species[i] == carbonDioxide && state[index].amounts[i] >= 1000000)
-                    result.smokeTop = std::max<uint64_t>(result.smokeTop, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE);
+                if (state[index].species[i] == carbonDioxide) {
+                    layerSmoke[(index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE] += state[index].amounts[i];
+                    smokeTotal += state[index].amounts[i];
+                }
 
                 if (state[index].species[i] == table.SpeciesId("cellulose"))
                     result.celluloseLeft += state[index].amounts[i];
             }
+        }
+
+        for (uint32_t layer = 0; layer < PROBE_GRID_SIZE; ++layer) {
+            if (smokeTotal != 0 && layerSmoke[layer] * 20 >= smokeTotal)
+                result.smokeTop = layer;
         }
 
         return result;
@@ -377,7 +388,8 @@ namespace {
         const FireResult flow = RunFire(table, true, ProbeGasPressure::Explicit, SMOKE_TICKS);
         std::printf(
             "燃える木箱 2 秒(陽解法): 熱の重心 伝導だけ %lld → 気体あり %lld ミリセル・CO2 の重心 %lld → %lld・"
-            "CO2 1 mol 以上の最も高い層 %llu → %llu・残りのセルロース %llu → %llu µmol・保存 %s・物質の無いエネルギー "
+            "CO2 の 5%% 以上がある最も高い層 %llu → %llu・残りのセルロース %llu → %llu µmol・保存 "
+            "%s・物質の無いエネルギー "
             "%u・"
             "熱が負のセル %u(最も負 %lld mJ)・流さなかった刻み %u\n",
             (long long)still.heatCentroid, (long long)flow.heatCentroid, (long long)still.smokeCentroid,
