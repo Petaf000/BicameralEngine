@@ -8,7 +8,7 @@
 //   T-0234(断熱の仕事 pdV・運動エネルギーの散逸を熱へ): 全エネルギー(熱 + 化学 + 運動)が毎刻み「初め + 帳簿(重さの仕事)」とビット一致・
 //   弱い圧縮の波と膨張の波の温度が T ∝ p^((γ−1)/γ)・強い段差の衝撃波の速さと後ろの温度が Rankine–Hugoniot・膨張の波の温度が断熱の理論・
 //   動きが止まると失った運動エネルギーが熱になる。等温の形(T-0226 まで)も設定で残し、等温の衝撃波の試験で確かめる。
-//   T-0269(D-461): 熱いセルの音速の頭打ちの温度が安定の上限(ν = 0.6)の約 473 K・既定の設定(頭打ちあり)のまま衝撃波が理論どおり・
+//   T-0269(D-461): 熱いセルの音速の頭打ちの温度が安定の上限の約 372 K(T-0631 で圧力の拡散の数 0.6 から。前は音の速さの数で約 473 K)・既定の設定(頭打ちあり)のまま衝撃波が理論どおり・
 //   1500 K のセルと 1500 K の 5 倍の物質量の爆発で真空のセルができず保存が保たれる。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。測った値も表示する(07 §2.1 に書いた数字の出どころ)。
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 #include "sim/gas_reference.h"
@@ -463,7 +464,7 @@ namespace {
         config.gravity = false;
         config.thermodynamics = thermodynamics;
         config.soundSpeedMmPerS = soundSpeedMmPerS;
-        // 頭打ちは既定のまま(D-461・T-0269。約 463〜473 K から上。5 倍の段差でも衝撃波の後ろは 368 K なので掛からない)
+        // 頭打ちは既定のまま(D-461・T-0269。約 372 K から上〔T-0631〕。5 倍の段差でも衝撃波の後ろは 368 K なので掛からない)
 
         GasBox box = MakeAirBox(config);
         for (uint32_t x = 0; x < TUBE_LENGTH / 2; ++x) {
@@ -648,20 +649,23 @@ namespace {
     }
 
     // 熱いセルの音速の頭打ちの温度(T-0269・D-461〔Q32 案 D〕): 既定(340 m/s・小刻み 24・293.15 K)で、実効の音速
-    // c̃ √(T ÷ T_基準)が安定の上限 432 m/s(ν = 0.6)に届く約 473 K。c̃ が上限なら地面の温度、とても小さい c̃ なら頭打ちなし
+    // 圧力の拡散の数 ν_c̃ × T ÷ T_基準 が 0.6 に届く約 372 K(T-0631。実効の音速 約 383 m/s)。c̃ が上限なら地面の温度、とても小さい c̃ なら頭打ちなし
     void TestSoundCapTemperature() {
         const GasBox box = MakeAirBox(MakeAirConfig(2, 2, 2));
         const uint32_t ground = box.referenceDerived.front().temperature;
         const uint64_t limit = GasSoundSpeedLimitMmPerS(box.config.substeps);
         const uint32_t cap = box.coefficients.soundTemperature;
+        // 圧力の拡散の数 = ν_c̃ × T ÷ T_基準(Δp̃ ÷ 4c̃ の c̃ は基準のまま。T-0631)。音の速さの数はこれより小さい
         const double capSpeed = 340.0 * std::sqrt((double)cap / ground);
         const double nu = capSpeed * 1000.0 / (30000.0 * box.config.substeps);
-        std::printf("sound cap: %u mK (ground %u mK), sound speed at cap %.2f m/s, nu %.4f\n", cap, ground, capSpeed,
-                    nu);
+        const double diffusionNu = 340000.0 * ((double)cap / ground) / (30000.0 * box.config.substeps);
+        std::printf("sound cap: %u mK (ground %u mK), sound speed at cap %.2f m/s, nu %.4f, diffusion nu %.4f\n", cap,
+                    ground, capSpeed, nu, diffusionNu);
         EXPECT(cap == GasSoundCapTemperature(box.config.soundSpeedMmPerS, limit, ground));
-        EXPECT(cap >= 470000 && cap <= 476000);
+        EXPECT(cap >= 370000 && cap <= 375000);
         EXPECT(nu <= 0.6);
-        EXPECT(340.0 * std::sqrt((double)(cap + 2) / ground) * 1000.0 > (double)limit);  // 切り捨て(上限のすぐ下)
+        EXPECT(diffusionNu <= 0.6);
+        EXPECT(340000.0 * ((double)(cap + 2) / ground) > (double)limit);  // 切り捨て(上限のすぐ下)
         EXPECT(GasSoundCapTemperature((uint32_t)limit, limit, ground) == ground);
         EXPECT(GasSoundCapTemperature(1, limit, ground) == UINT32_MAX);
     }
@@ -801,7 +805,7 @@ namespace {
     }
 
     // 1 セルだけ強い圧力(5 倍の物質量・1500 K・その両方〔熱い爆発。25 倍の圧力〕)を放す: 真空のセルができず、保存が保たれ、2 秒後に落ち着く。
-    // 頭打ちの温度が約 473 K になり(T-0269)、1500 K のセルの実効の音速は 340 → 432 m/s(ν 0.47 → 0.6)
+    // 頭打ちの温度が約 372 K になり(T-0269・T-0631)、1500 K のセルの実効の音速は 340 → 383 m/s(拡散の数 0.47 → 0.6)
     void TestStrongPressureStable() {
         for (const uint32_t kind : {0u, 1u, 2u}) {
             const bool dense = kind != 1;
@@ -837,6 +841,102 @@ namespace {
             // 熱い爆発は膨らみ過ぎてもっと軽くなる)
             EXPECT(lightest >= (uint64_t)ROUGH_CELL_MASS / (kind == 2 ? 16 : 8));
             EXPECT(speed <= 10 * METER_PER_SECOND);
+        }
+    }
+
+    // --- 市松模様(T-0631): 等圧の熱い塊の中で、隣り合うセルが交互に熱い・冷たいにならない ---
+    // 箱の x・y の軸に沿った 3 つ組のうち、真ん中が両隣より 50 K 以上熱い・冷たい(谷か山)の数
+    uint32_t CountZigzags(const GasBox& box) {
+        std::vector<int64_t> temperature(box.cells.size());
+        for (uint32_t index = 0; index < box.cells.size(); ++index)
+            temperature[index] = DeriveGasCell(box, box.cells[index], CellZ(box, index)).temperature;
+
+        uint32_t zigzags = 0;
+        const GasConfig& config = box.config;
+        for (uint32_t z = 0; z < config.sizeZ; ++z) {
+            for (uint32_t y = 1; y + 1 < config.sizeY; ++y) {
+                for (uint32_t x = 1; x + 1 < config.sizeX; ++x) {
+                    const int64_t middle = temperature[box.Index(x, y, z)];
+                    for (const auto& [low, high] : {std::pair{box.Index(x - 1, y, z), box.Index(x + 1, y, z)},
+                                                    std::pair{box.Index(x, y - 1, z), box.Index(x, y + 1, z)}}) {
+                        const int64_t down = middle - temperature[low];
+                        const int64_t up = middle - temperature[high];
+                        if ((down > 50000 && up > 50000) || (down < -50000 && up < -50000))
+                            ++zigzags;
+                    }
+                }
+            }
+        }
+
+        return zigzags;
+    }
+
+    // 熱い塊の気体(3 つめの欄の物質を替える。空気の印・湯気・CO2)
+    struct BlockGas {
+        const char* name;
+        uint32_t molarMass;     // mg/mol
+        uint32_t heatCapacity;  // 定積(mJ/(mol·K))
+    };
+
+    // 12 × 12 × 12 の閉じた箱の真ん中 6 × 6 × 6 を、同じ圧力のまま熱い別の気体(全物質量 × T_基準 ÷ T)に替えて 1 秒流す。
+    // 圧力の拡散の数が安定の条件を超えるセルがあると、1 セルおきの縞(奇偶のモード。陽解法の拡散の最も不安定な波)が育ち、
+    // 出ていく割合の上限で止まるまで抜けて真空のセル(0 mg)ができる。谷か山の数は塊の縁の 16 が普通(縞ではない)
+    uint32_t HotBlockZigzags(const BlockGas& gas, uint32_t temperature, uint32_t soundCapTemperature,
+                             uint64_t& lightest) {
+        GasConfig config = MakeAirConfig(12, 12, 12);
+        config.species[2] = {.molarMass = gas.molarMass, .heatCapacity = gas.heatCapacity, .formationEnergy = 0};
+        config.soundCapTemperature = soundCapTemperature;
+        GasBox box = MakeAirBox(config);
+        for (uint32_t z = 3; z < 9; ++z) {
+            for (uint32_t y = 3; y < 9; ++y) {
+                for (uint32_t x = 3; x < 9; ++x) {
+                    GasCell& cell = box.cells[box.Index(x, y, z)];
+                    const uint32_t reference = box.referenceDerived[z].temperature;
+                    const uint64_t total = cell.amounts[0] + cell.amounts[1] + cell.amounts[2];
+                    const std::array<uint64_t, 3> amounts = {0, 0, total * reference / temperature};
+                    cell = MakeGasCell(box.config, amounts, temperature);
+                }
+            }
+        }
+
+        const GasTotals before = SumGas(box);
+        lightest = UINT64_MAX;
+        for (uint32_t tick = 0; tick < 60; ++tick) {
+            StepGas(box);
+            lightest = std::min(lightest, MinimumMass(box));
+        }
+
+        const GasTotals after = SumGas(box);
+        EXPECT(after.amounts == before.amounts);
+        EXPECT(after.energy == before.energy + box.ledger.energy);
+
+        return CountZigzags(box);
+    }
+
+    // T-0269 の頭打ちの温度(T_基準 ×(432 ÷ 340)²。音の速さの数だけを見ていた。比べるためだけ)
+    constexpr uint32_t OLD_SOUND_CAP = 473258;
+
+    void TestHotBlockNoCheckerboard() {
+        const uint32_t ground = MakeAirBox(MakeAirConfig(2, 2, 2)).referenceDerived.front().temperature;
+        constexpr std::array<BlockGas, 3> GASES = {BlockGas{"air", 28013, 20810}, BlockGas{"steam", 18015, 25300},
+                                                   BlockGas{"co2", 44010, 28800}};
+        for (const BlockGas& gas : GASES) {
+            for (const uint32_t temperature : {600000u, 1000000u}) {
+                uint64_t lightest = 0;
+                uint64_t lightestGround = 0;
+                uint64_t lightestOld = 0;
+                const uint32_t zigzags = HotBlockZigzags(gas, temperature, 0, lightest);
+                const uint32_t cappedAtGround = HotBlockZigzags(gas, temperature, ground, lightestGround);
+                const uint32_t oldCap = HotBlockZigzags(gas, temperature, OLD_SOUND_CAP, lightestOld);
+                std::printf(
+                    "hot block %s %u K (same pressure, 1 s): zigzags %u (default cap) / %u (cap = ground) / "
+                    "%u (T-0269 cap 473 K), lightest cell %llu / %llu / %llu mg\n",
+                    gas.name, temperature / 1000, zigzags, cappedAtGround, oldCap, (unsigned long long)lightest,
+                    (unsigned long long)lightestGround, (unsigned long long)lightestOld);
+                // 真空のセルができない(T-0269 の頭打ちでは湯気の塊が奇偶のモードで 0 mg まで抜けた)
+                EXPECT(lightest >= 10000);
+                EXPECT(lightestGround >= 10000);
+            }
         }
     }
 
@@ -999,6 +1099,7 @@ int main() {
     TestEnergyEveryTick();
     TestNoiseStaysSmall();
     TestStrongPressureStable();
+    TestHotBlockNoCheckerboard();
     TestHydrostaticScalesWithGravity();
     TestClosedBoxAnyGravity();
     TestEnvironmentCheck();

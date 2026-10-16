@@ -173,7 +173,7 @@ namespace bicameral::sim {
         GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
 
         // これより熱いセルは実効の音速をそこで頭打ちにする(mK。安定の条件を守る)。0 = 安定の上限から求める(GasSoundCapTemperature。
-        // D-461〔Q32 案 D〕・T-0269。既定の 340 m/s・小刻み 24 で約 473 K)。UINT32_MAX = 頭打ちなし(試験だけ)。
+        // D-461〔Q32 案 D〕・T-0269。既定の 340 m/s・小刻み 24 で約 372 K。T-0631)。UINT32_MAX = 頭打ちなし(試験だけ)。
         // 地面の層の基準の温度を入れると T-0234 までの形(Q32 の案 A。熱いセルの音速を c̃ に抑える)
         uint32_t soundCapTemperature = 0;
 
@@ -194,9 +194,13 @@ namespace bicameral::sim {
         return (uint64_t)substeps * 18000;
     }
 
-    // 熱いセルの音速の頭打ちの温度(mK。D-461〔Q32 案 D〕・T-0269・07 §2.4): 実効の音速 c̃ √(T ÷ T_基準)(c_iso² ∝ T)が
-    // 安定の上限(mm/s。1 レベルの箱は GasSoundSpeedLimitMmPerS = ν 0.6。多重解像度の木は細かいレベルの分だけ小さい)に届く温度
-    // T_基準 ×(上限 ÷ c̃)²(切り捨て。これ以下なら ν ≤ 0.6)。既定の 340 m/s・小刻み 24・293.15 K で約 473 K。
+    // 熱いセルの音速の頭打ちの温度(mK。D-461〔Q32 案 D〕・T-0269・T-0631・07 §2.4): 圧力の拡散の数が安定の上限に届く温度。
+    // 圧力の拡散は Δp̃ ÷ 4c̃(c̃ は世界の基準で決まった値)なので、実効の音速 c_eff = c̃ √(T ÷ T_基準)(c_iso² ∝ T)のセルの
+    // 拡散の数は c_eff² ÷ c̃ × Δt ÷ Δx = ν_c̃ × T ÷ T_基準(音の速さの数 c_eff Δt ÷ Δx より大きい。熱いセルではこちらが縛る)。
+    // これが上限 ÷ c̃ 倍の ν(1 レベルの箱は GasSoundSpeedLimitMmPerS = ν 0.6。多重解像度の木は細かいレベルの分だけ小さい)に届く温度
+    // T_基準 × 上限 ÷ c̃(切り捨て)。既定の 340 m/s・小刻み 24・293.15 K で約 372 K(実効の音速 約 383 m/s)。
+    // T-0269 の T_基準 ×(上限 ÷ c̃)²(約 473 K)は音の速さの数だけを見ていて、373〜473 K のセルで拡散の数が 2/3 を超え、
+    // 1 セルおきの縞(奇偶のモード。陽解法の拡散の最も不安定な波)が育った(T-0631)。
     // c̃ が上限なら T_基準。uint32 を超えるなら UINT32_MAX(頭打ちなし)
     [[nodiscard]] uint32_t GasSoundCapTemperature(uint32_t soundSpeedMmPerS, uint64_t soundSpeedLimitMmPerS,
                                                   uint32_t referenceTemperature);

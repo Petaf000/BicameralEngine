@@ -493,9 +493,9 @@ namespace {
                HashTicks(MakeDisturbedTwoLevelBox(), 12));
     }
 
-    // 熱いセルの頭打ちの温度(T-0269): 木は ν がいちばん大きいレベル(k − σ が最大)で安定の上限に届く温度。
-    // 小刻み 48・分けない 2 レベル(レベル 1 の上限 432 m/s)と小刻み 24・分ける 2 レベル(どのレベルも 432 m/s)はどちらも約 473 K で、
-    // 1 レベルの箱(小刻み 24)と同じ。小刻み 48 の 1 レベルなら上限 864 m/s で約 1893 K
+    // 熱いセルの頭打ちの温度(T-0269・T-0631): 木は ν がいちばん大きいレベル(k − σ が最大)で圧力の拡散の数が安定の上限に届く温度
+    // (T_基準 × 上限 ÷ c̃。ADR-0292)。小刻み 48・分けない 2 レベル(レベル 1 の上限 432 m/s)と小刻み 24・分ける 2 レベル(どのレベルも 432 m/s)は
+    // どちらも約 372 K で、1 レベルの箱(小刻み 24)と同じ。小刻み 48 の 1 レベルなら上限 864 m/s で約 745 K
     void TestSoundCapTemperatureAcrossLevels() {
         const uint32_t
             sameSubsteps = MakeAirTree(TwoLevelConfig(), MIDDLE_REGION).levels[0].coefficients.soundTemperature;
@@ -505,9 +505,9 @@ namespace {
         const uint32_t singleLevel = MakeAirTree(TwoLevelConfig(), {}).levels[0].coefficients.soundTemperature;
         std::printf("sound cap temperature: two levels (48) %u mK, subcycled (24/48) %u mK, single level (48) %u mK\n",
                     sameSubsteps, subcycled, singleLevel);
-        EXPECT(sameSubsteps >= 470000 && sameSubsteps <= 476000);
+        EXPECT(sameSubsteps >= 370000 && sameSubsteps <= 375000);
         EXPECT(subcycled == sameSubsteps);
-        EXPECT(singleLevel >= 1880000 && singleLevel <= 1900000);
+        EXPECT(singleLevel >= 740000 && singleLevel <= 750000);
     }
 
     // --- 環境の値のホットリロード(T-0470・ADR-0200): 刻みの境目で重力・音速の基準・基準の大気を替える ---

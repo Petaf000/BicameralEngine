@@ -4,7 +4,7 @@
 // 微量の成分(乱数の丸め)・minmod と切り捨て。刻みごとに GPU のセルと帳簿を読み戻し、CPU の状態のハッシュと帳簿を比べる。
 // T-0226(本物の音速。D-440): 細い管の音の波(340 m/s)・衝撃波・1 セルの 5 倍の圧力(整数の範囲)。
 // T-0234(断熱の仕事 pdV・運動エネルギーの散逸): 既定は断熱(衝撃波は断熱の理論 398.6 m/s)。等温の形も場面 shock_isothermal(404 m/s)で確かめる。
-// T-0269(D-461): 熱いセルの音速の頭打ちが約 473 K から(ν ≤ 0.6)。1500 K のセル(hot_cell)と 1500 K・5 倍の物質量の爆発(blast_hot)。
+// T-0269(D-461): 熱いセルの音速の頭打ちが約 372 K から(圧力の拡散の数 ≤ 0.6。T-0631)。1500 K のセル(hot_cell)と 1500 K・5 倍の物質量の爆発(blast_hot)。
 // T-0444(環境の値のホットリロード): 途中の刻みで重力・音速の基準・層の基準を替えても毎刻みビット一致(closed_environment_change・
 //   open_environment_change)。
 // 引数: gpu_test_options.h(--warp・--queue)と
@@ -257,7 +257,7 @@ namespace {
     }
 
     // 閉じた 12³ の箱の 1 セルだけ 1500 K(hot_cell)・1500 K で 5 倍の物質量(blast_hot。熱い爆発。25 倍の圧力)。
-    // 頭打ちの温度(約 473 K。T-0269)より熱いセルの音速が安定の上限 432 m/s(ν = 0.6)で走る
+    // 頭打ちの温度(約 372 K。T-0269・T-0631)より熱いセルの音速が約 383 m/s(圧力の拡散の数 0.6)で走る
     Scene MakeHotScene(const char* name, bool dense) {
         GasBox box = MakeAirBox(MakeAirConfig(12, 12, 12));
         const uint32_t center = box.Index(6, 6, 3);
