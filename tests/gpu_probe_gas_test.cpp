@@ -8,7 +8,10 @@
 //   3. 6 種の空気(N2・O2・Ar・CO2・H2O・CO。GPU の成分の欄に上限が無いこと。T-0598)の静かな大気と燃える木箱: 同じく毎刻み一致
 //   4. 湯気の塊が露になる(T-0646): 水蒸気が凝縮相になる試験の規則で、反応が気体の質量を減らすセルの運動量の合わせ直し
 //      (速さを保つ)と、出ていく割合の上限(引く側の熱を負にしない)が CPU と毎刻み一致・気体の欄(質量も)と帳簿も同じ
-//   5. シェーダーの assert・debug layer のエラーが 0 件
+//   5. 密度のある固体が気体を塞ぐ(T-0617・ADR-0268): 試験の表の固体は密度を持つ(木箱のセルロースはセルの 3.3 %。1〜4 も空きを読む刻み)。
+//      区画の中ほどに石(密度 2000)の床を張る(満ちた石は気体を通さず、真ん中の 2 × 2 は半分の石〔一部だけ開く〕)。
+//      燃える木箱の煙が石の床に当たり、孔を通る。同じく毎刻み一致
+//   6. シェーダーの assert・debug layer のエラーが 0 件
 // 気体の段(適用の単位の中)の GPU 時間を出す(docs/perf.md)。
 // 走らせ方: ctest(gpu_probe_gas・gpu_probe_gas_warp)か `job.py run -Preset release -Exe gpu_probe_gas_test`。引数は gpu_test_options.h
 #include <algorithm>
@@ -48,6 +51,11 @@ namespace {
     constexpr int32_t WOOD_TEMPERATURE = 1000000;
     constexpr int32_t AIR_TEMPERATURE = 300000;
 
+    // 石の床(T-0617): 高さ STONE_LAYER の全面。真ん中の 2 × 2(木箱の真上)は半分の石。石 1 mol = 6000 mm³(C・密度 2000)
+    constexpr uint32_t STONE_LAYER = 8;
+    constexpr uint64_t STONE_FULL_AMOUNT = 21000000000;  // 21,000 mol(0.126 m³ > セルの 0.125 m³)
+    constexpr uint64_t STONE_HALF_AMOUNT = 10400000000;  // 10,400 mol(0.0624 m³。空き 50.08%)
+
     struct Failures {
         int count = 0;
 
@@ -60,8 +68,9 @@ namespace {
         }
     };
 
-    // 基準の大気: N2 79%・O2 21%、six なら 6 種(N2・O2・Ar・CO2・H2O・CO。T-0598)。dewRatePerSecond が 0 でなければ露の試験の規則(T-0646)
-    BakedReactionTable MakeTable(bool six, uint64_t dewRatePerSecond = 0) {
+    // 基準の大気: N2 79%・O2 21%、six なら 6 種(N2・O2・Ar・CO2・H2O・CO。T-0598)。dewRatePerSecond が 0 でなければ露の試験の規則(T-0646)。
+    // stone なら密度のある石を足す(T-0617)
+    BakedReactionTable MakeTable(bool six, uint64_t dewRatePerSecond = 0, bool stone = false) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         if (dewRatePerSecond != 0)
             AddDewCondensationForTest(definition, dewRatePerSecond);
@@ -70,13 +79,6 @@ namespace {
             return std::ranges::any_of(rule.products,
                                        [](const RuleTerm& term) { return term.species == "carbon_monoxide"; });
         });
-
-        // 固体の密度を外す: GPU の気体の段はセルの空き(ADR-0268)をまだ読まない(T-0617)。real_matter のセルロースと炭に密度が入った
-        // (T-0616)ので、外さないと CPU リファレンスだけが木箱の空き(セルロースが 3.3 %)を読んで食い違う。T-0617 で外すのをやめる
-        for (SpeciesDefinition& species : definition.species) {
-            if (species.condensed && !species.liquid)
-                species.density = 0;
-        }
 
         definition.environment = StandardWorldPhysics();
         definition.atmosphere = {
@@ -95,6 +97,16 @@ namespace {
                                                          {.species = "carbon_monoxide", .partsPerMillion = 100}};
         }
 
+        if (stone) {
+            definition.species.push_back({.name = "stone",
+                                          .composition = {{.element = "C", .count = 1}},
+                                          .formationEnthalpy = 0,
+                                          .heatCapacity = 8500,
+                                          .thermalConductivity = 2000,
+                                          .condensed = true,
+                                          .density = 2000});
+        }
+
         auto baked = BakeReactionTable(definition);
         FX_ASSERT(baked.has_value());
 
@@ -110,10 +122,28 @@ namespace {
                y >= WOOD_BOTTOM && y < WOOD_BOTTOM + WOOD_SIZE;
     }
 
+    bool InStoneHole(uint32_t x, uint32_t z) {
+        return x >= WOOD_MIN && x < WOOD_MIN + WOOD_SIZE && z >= WOOD_MIN && z < WOOD_MIN + WOOD_SIZE;
+    }
+
+    // 石の床のセル(満ちた石は気体なし、半分の石は基準の大気の半分と)
+    reaction::RxCell MakeStoneCell(const BakedReactionTable& table, const reaction::RxCell& air, bool half) {
+        std::vector<SpeciesAmount> amounts = {
+            {.species = table.SpeciesId("stone"), .amount = half ? STONE_HALF_AMOUNT : STONE_FULL_AMOUNT}};
+        if (half) {
+            for (uint32_t i = 0; i < air.speciesCount; ++i)
+                amounts.push_back({.species = air.species[i], .amount = air.amounts[i] / 2});
+        }
+
+        std::ranges::sort(amounts, {}, &SpeciesAmount::species);
+
+        return MakeReactionCell(table, amounts, AIR_TEMPERATURE);
+    }
+
     // 区画を基準の大気で満たした世界(区画の外は空)。wood なら底に燃える木箱(steam なら木箱の代わりに同じ圧力の熱い湯気の塊。
-    // 水蒸気 9 割・空気 1 割。probe_gas_test と同じ)
+    // 水蒸気 9 割・空気 1 割。probe_gas_test と同じ)。stone なら石の床(T-0617)
     std::vector<reaction::RxCell> MakeWorld(const BakedReactionTable& table, const ProbeGasField& field, bool wood,
-                                            bool steam = false) {
+                                            bool steam = false, bool stone = false) {
         std::vector<reaction::RxCell> cells = MakeBlankProbeWorld();
         for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
             const uint32_t index = field.GridIndex(region);
@@ -121,6 +151,11 @@ namespace {
             const uint32_t y = (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE;
             const uint32_t z = index / PROBE_SLICE_CELL_COUNT;
             const reaction::RxCell air = field.ReferenceCell(table, y);
+            if (stone && y == STONE_LAYER) {
+                cells[index] = MakeStoneCell(table, air, InStoneHole(x, z));
+                continue;
+            }
+
             if (!wood || !InWood(x, y, z)) {
                 cells[index] = air;
                 continue;
@@ -215,14 +250,14 @@ namespace {
 
     // --- 走らせる(1 フレーム = 1 刻み。毎刻み CPU と比べる)---
     void CheckScene(ID3D12Device5* device, const BakedReactionTable& table, std::string_view name, bool wood,
-                    uint64_t ticks, Failures& failures, bool steam = false) {
+                    uint64_t ticks, Failures& failures, bool steam = false, bool stone = false) {
         const auto field = ProbeGasField::Create(table, MakeOptions());
         if (!field) {
             failures.Check(false, std::format("{}: 区画を作れる({})", name, field.error()));
             return;
         }
 
-        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, wood, steam);
+        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, wood, steam, stone);
         ProbeReference reference(table, world);
         failures.Check(reference.EnableGas(MakeOptions()).has_value(), std::format("{}: CPU の区画", name));
 
@@ -240,6 +275,8 @@ namespace {
         uint32_t debugAssertCount = 0;
         uint64_t matched = 0;
         uint32_t cpuSkipped = 0;
+        uint32_t blockedCells = 0;
+        uint32_t partialCells = 0;
         double applyMicroseconds = 0.0;
         bool hashesMatch = true;
         for (uint64_t tick = 0; tick < ticks && hashesMatch; ++tick) {
@@ -257,6 +294,8 @@ namespace {
 
             reference.Advance(tick, {});
             cpuSkipped += reference.LastGasReport().skippedCellOverflow ? 1 : 0;
+            blockedCells = std::max(blockedCells, reference.LastGasReport().blockedCells);
+            partialCells = std::max(partialCells, reference.LastGasReport().partialCells);
             hashesMatch = readback.hashes.size() == 1 && readback.hashes[0].hash == reference.StateHash(tick + 1);
             if (!hashesMatch)
                 Log(Channel::Sim, Level::Error, "{}: 刻み {} のハッシュが食い違う(GPU {:016x} CPU {:016x})", name,
@@ -276,14 +315,18 @@ namespace {
         Log(Channel::Sim, Level::Info,
             "{}: {} 刻みのうち {} 刻みハッシュ一致・気体の欄と帳簿 {}・流した刻み {}(欄を超えた {}・溢れ {}・CPU "
             "の溢れ {})・"
-            "適用の単位(気体の段を含む){:.1f} µs/刻み",
+            "適用の単位(気体の段を含む){:.1f} µs/刻み・塞がったセル {}・一部だけ開いたセル {}",
             name, ticks, matched, gasSame ? "一致" : "NG", stepped, tooMany, overflow, cpuSkipped,
-            applyMicroseconds / static_cast<double>(std::max<uint64_t>(matched, 1)));
+            applyMicroseconds / static_cast<double>(std::max<uint64_t>(matched, 1)), blockedCells, partialCells);
         failures.Check(hashesMatch && matched == ticks, std::format("{}: 刻みごとのハッシュが CPU と同じ", name));
         failures.Check(gasSame, std::format("{}: 気体の欄と帳簿が CPU と同じ", name));
         failures.Check(tooMany == 0 && overflow == (uint32_t)cpuSkipped && stepped + overflow == ticks,
                        std::format("{}: 流さなかった刻みが CPU と同じ", name));
         failures.Check(debugAssertCount == 0, std::format("{}: シェーダーの assert が 0 件", name));
+        if (stone) {
+            failures.Check(blockedCells > 0 && partialCells > 0,
+                           std::format("{}: 塞がったセルと一部だけ開いたセルがある(空きを読む刻み)", name));
+        }
     }
 
     // --- 画像: 刻み tick の状態の z = 32 の縦の断面(y が上)。左 = 温度(300〜800 K を黒 → 赤 → 黄)・右 = CO2(0〜2 mol を黒 → 緑)。PPM ---
@@ -390,18 +433,20 @@ namespace {
         return total / static_cast<double>(MEASURE_TICKS - TICKS_PER_FRAME);
     }
 
-    void Measure(ID3D12Device5* device, const BakedReactionTable& table) {
+    // stone なら石の床(塞がったセル・一部だけ開いたセルのある刻み。T-0617)
+    void Measure(ID3D12Device5* device, const BakedReactionTable& table, bool stone) {
         const auto field = ProbeGasField::Create(table, MakeOptions());
         if (!field)
             return;
 
-        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, true);
-        const double without = MeasureApply(device, table, world, {}, "gpu_probe_gas_without.ppm");
-        const double with = MeasureApply(device, table, world, MakeOptions(), "gpu_probe_gas_with.ppm");
+        const std::vector<reaction::RxCell> world = MakeWorld(table, *field, true, false, stone);
+        const std::string prefix = stone ? "gpu_probe_gas_stone" : "gpu_probe_gas";
+        const double without = MeasureApply(device, table, world, {}, prefix + "_without.ppm");
+        const double with = MeasureApply(device, table, world, MakeOptions(), prefix + "_with.ppm");
         Log(Channel::Sim, Level::Info,
-            "費用(燃える木箱・区画 {} セル・小刻み 24): 適用の単位 気体なし {:.1f} µs/刻み → 気体あり {:.1f} "
+            "費用({}・区画 {} セル・小刻み 24): 適用の単位 気体なし {:.1f} µs/刻み → 気体あり {:.1f} "
             "µs/刻み(気体の段 約 {:.1f} µs)",
-            field->RegionCellCount(), without, with, with - without);
+            stone ? "燃える木箱と石の床" : "燃える木箱", field->RegionCellCount(), without, with, with - without);
     }
 
 }  // namespace
@@ -433,9 +478,13 @@ int main(int argc, char** argv) {
     CheckScene(device->Get(), sixTable, "6 種の空気・静か", false, warp ? 2 : 10, failures);
     CheckScene(device->Get(), sixTable, "6 種の空気・燃える木箱", true, warp ? 3 : 60, failures);
     CheckScene(device->Get(), MakeTable(false, 100), "湯気の塊が露になる", true, warp ? 4 : 60, failures, true);
+    const BakedReactionTable stoneTable = MakeTable(false, 0, true);
+    CheckScene(device->Get(), stoneTable, "燃える木箱と石の床", true, warp ? 3 : 60, failures, false, true);
 
-    if (!warp)
-        Measure(device->Get(), table);
+    if (!warp) {
+        Measure(device->Get(), table, false);
+        Measure(device->Get(), stoneTable, true);
+    }
 
     const bool passed = failures.count == 0 && test::PassesValidation(*device, "gpu_probe_gas_test");
     Log(Channel::Sim, passed ? Level::Info : Level::Error, "gpu_probe_gas_test({}): {}",

@@ -4,6 +4,7 @@
 #include "sim/gpu_gas.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 #include "common/gas_gpu.hlsli"
@@ -18,9 +19,9 @@ namespace bicameral::sim {
         constexpr uint32_t ROOT_CONSTANT_COUNT = 4;
         constexpr uint32_t MAX_GROUPS = 65535;  // Dispatch の 1 次元の上限
 
-        // u0〜u5 / b0 / デバッグのリング / t0〜t2
+        // u0〜u5 / b0 / デバッグのリング / t0〜t3
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-            .uavCount = 6, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 3};
+            .uavCount = 6, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(Pass の順)
         constexpr std::array<const char*, 9> SHADER_NAMES = {
@@ -36,6 +37,8 @@ namespace bicameral::sim {
         static_assert(sizeof(GasGpuFace) == GAS_GPU_FACE_BYTES);
         static_assert(sizeof(GasGpuCellSums) == GAS_GPU_SUMS_BYTES);
         static_assert(sizeof(GasGpuParameters) == GAS_GPU_PARAMETERS_BYTES);
+        static_assert(offsetof(GasGpuParameters, openness) == GAS_GPU_PARAMETERS_OPENNESS);
+        static_assert(GAS_GPU_OPEN_FULL == GAS_OPEN_FULL);
         static_assert(sizeof(GasGpuSpecies) == GAS_GPU_SPECIES_BYTES);
         static_assert((uint32_t)GasBoundary::Wall == GAS_GPU_BOUNDARY_WALL &&
                       (uint32_t)GasBoundary::Periodic == GAS_GPU_BOUNDARY_PERIODIC &&
@@ -246,11 +249,16 @@ namespace bicameral::sim {
         return {};
     }
 
-    // t0〜t2(設定・層ごとの基準の導く値・開いた境界の外)の既定のヒープの写し。写すのは RecordResidentUploads
-    std::array<gpu::ResidentBuffer, 3> GpuGas::CreateLayerBuffers(ID3D12Device* device, const GasBox& box,
+    // t0〜t3(設定・層ごとの基準の導く値・開いた境界の外・セルの空き)の既定のヒープの写し。写すのは RecordResidentUploads
+    std::array<gpu::ResidentBuffer, 4> GpuGas::CreateLayerBuffers(ID3D12Device* device, const GasBox& box,
                                                                   uint32_t reservedSpecies) {
         const uint32_t speciesStride = GasGpuSpeciesStride(box.config.speciesCount, reservedSpecies);
-        const std::vector<std::byte> parameters = PackGasGpuParameters(box.config, box.coefficients, speciesStride);
+        std::vector<std::byte> parameters = PackGasGpuParameters(box.config, box.coefficients, speciesStride);
+
+        // セルの空き(T-0617。空 = 読まない。読まない時も t3 に結ぶ小さい表を置く)
+        const uint32_t openness = box.openQ16.empty() ? 0u : 1u;
+        WriteRecord(std::span(parameters), GAS_GPU_PARAMETERS_OPENNESS, openness);
+        const std::vector<uint32_t> open = box.openQ16.empty() ? std::vector<uint32_t>(1, GAS_OPEN_FULL) : box.openQ16;
         std::vector<GasGpuDerived> referenceDerived;
         referenceDerived.reserve(box.referenceDerived.size());
         for (const GasDerived& layer : box.referenceDerived)
@@ -260,10 +268,11 @@ namespace bicameral::sim {
 
         return {gpu::CreateResidentBuffer(device, parameters),
                 gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuDerived>(referenceDerived))),
-                gpu::CreateResidentBuffer(device, ghost)};
+                gpu::CreateResidentBuffer(device, ghost),
+                gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const uint32_t>(open)))};
     }
 
-    // 環境の値のホットリロード(T-0444): 新しい t0〜t2 を作って写し、前のものは呼ぶ側に持たせる(記録済みの刻みがまだ読む)。
+    // 環境の値のホットリロード(T-0444): 新しい t0〜t3 を作って写し、前のものは呼ぶ側に持たせる(記録済みの刻みがまだ読む)。
     // 新しいバッファは作った直後で COMMON なので、同じリストで前の刻みが読んだ後でも写せる(RecordResidentUploads の約束)
     bool GpuGas::RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasBox& box,
                                    std::vector<ComPtr<ID3D12Resource>>& keepAlive) {
@@ -275,7 +284,7 @@ namespace bicameral::sim {
         if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
 
-        std::array<gpu::ResidentBuffer, 3> buffers = CreateLayerBuffers(device.Get(), box, m_speciesStride);
+        std::array<gpu::ResidentBuffer, 4> buffers = CreateLayerBuffers(device.Get(), box, m_speciesStride);
         if (!std::ranges::all_of(buffers, &gpu::ResidentBuffer::Valid))
             return false;
 
@@ -309,7 +318,7 @@ namespace bicameral::sim {
                 return std::unexpected("気体のバッファを作れない");
         }
 
-        // --- t0〜t2(設定・層ごとの基準と外)---
+        // --- t0〜t3(設定・層ごとの基準と外・セルの空き)---
         m_srvs = CreateLayerBuffers(device, box, stride);
 
         // --- 初めの箱 ---
@@ -339,7 +348,7 @@ namespace bicameral::sim {
 
     // 1 つの段を投げ、全部の UAV の書き込みを次の段より前に終わらせる
     void GpuGas::RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
-                            const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const {
+                            const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const {
         static_assert(sizeof(Constants) == ROOT_CONSTANT_COUNT * sizeof(uint32_t));
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(m_pipelines[(size_t)pass].Get());
@@ -357,14 +366,14 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &barrier);
     }
 
-    std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3> GpuGas::OwnSrvs() const {
+    std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4> GpuGas::OwnSrvs() const {
         return {m_srvs[0].buffer->GetGPUVirtualAddress(), m_srvs[1].buffer->GetGPUVirtualAddress(),
-                m_srvs[2].buffer->GetGPUVirtualAddress()};
+                m_srvs[2].buffer->GetGPUVirtualAddress(), m_srvs[3].buffer->GetGPUVirtualAddress()};
     }
 
     // 刻み tick の小刻み × 9 段(乱数の丸めの小刻みの通し番号は gas_reference.cpp の StepGas と同じ)
     void GpuGas::RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
-                                const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const {
+                                const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const {
         for (uint32_t substep = 0; substep < m_substeps; ++substep) {
             const uint64_t roundingTick = (tick * m_substeps) + substep;
             const Constants constants{.roundingTickLow = (uint32_t)roundingTick,
@@ -382,8 +391,9 @@ namespace bicameral::sim {
     }
 
     void GpuGas::RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
-                              D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost) const {
-        RecordSubsteps(list, debugRing, tick, {parameters, m_srvs[1].buffer->GetGPUVirtualAddress(), ghost});
+                              D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost,
+                              D3D12_GPU_VIRTUAL_ADDRESS open) const {
+        RecordSubsteps(list, debugRing, tick, {parameters, m_srvs[1].buffer->GetGPUVirtualAddress(), ghost, open});
     }
 
     void GpuGas::RecordReadback(ID3D12GraphicsCommandList10* list) const {

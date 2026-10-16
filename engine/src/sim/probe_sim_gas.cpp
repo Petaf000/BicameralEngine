@@ -34,7 +34,7 @@ namespace bicameral::sim {
 
         static_assert(sizeof(ProbeGasCellState) == PROBE_GAS_CELL_STATE_BYTES);
         static_assert(sizeof(ProbeGasSpecies) == PROBE_GAS_SPECIES_BYTES);
-        static_assert(sizeof(ProbeGasHeader) == 88);
+        static_assert(sizeof(ProbeGasHeader) == 96);
         static_assert(PROBE_GAS_HEADER_OFFSET - PROBE_GAS_TEMPLATE_OFFSET >= sizeof(GasGpuParameters));
         static_assert(PROBE_GAS_DYNAMIC_OFFSET - PROBE_GAS_HEADER_OFFSET >= sizeof(ProbeGasHeader));
 
@@ -99,6 +99,7 @@ namespace bicameral::sim {
             header.atmosphereOffset = place(std::max(1u, header.atmosphereCount) * 4);
             header.ledgerOffset = place((header.speciesCount + 4) * 8);
             header.condensedOffset = place(header.regionCellCount * 8);
+            header.openOffset = place(header.regionCellCount * 4);
             totalBytes = offset;
 
             return header;
@@ -107,12 +108,18 @@ namespace bicameral::sim {
         // 物質ごとの気体の値(probe_gas.cpp の MakeConfig・gas_reference.cpp の MakeGasCoefficients と同じ式)
         ProbeGasSpecies MakeGasSpecies(const BakedReactionTable& table, uint32_t id) {
             const bool condensed = IsCondensed(table, id);
+            const bool liquid = id < table.speciesLiquid.size() && table.speciesLiquid[id] != 0;
+            const uint64_t molarVolume = condensed && id < table.speciesMolarVolume.size()
+                                             ? table.speciesMolarVolume[id]
+                                             : 0;
 
             return {.massPerAmount = ((uint64_t)table.molarMasses[id] << 32) / MICRO,
                     .formationEnergy = table.species[id].h0,
+                    .molarVolume = molarVolume,
                     .heatCapacity = table.species[id].heatCapacity,
                     .isGas = condensed ? 0u : 1u,
-                    .unused = {0, 0}};
+                    .isLiquid = liquid ? 1u : 0u,
+                    .unused = 0};
         }
 
     }  // namespace
@@ -237,7 +244,7 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &allUavs);
     }
 
-    // 気体の箱の 1 刻み(GpuGas のルート署名。設定と開いた境界の外は作業場から読むので、その間だけ読む状態にする)
+    // 気体の箱の 1 刻み(GpuGas のルート署名。設定・開いた境界の外・セルの空きは作業場から読むので、その間だけ読む状態にする)
     void ProbeSim::RecordGasStep(ID3D12GraphicsCommandList10* list, uint64_t tick) const {
         const D3D12_RESOURCE_BARRIER toRead = gpu::Transition(m_gasWork.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -245,7 +252,7 @@ namespace bicameral::sim {
 
         const D3D12_GPU_VIRTUAL_ADDRESS work = m_gasWork->GetGPUVirtualAddress();
         m_gas->RecordStepAt(list, m_debugRing.GpuAddress(), tick, work + m_gasHeader.parametersOffset,
-                            work + m_gasHeader.ghostOffset);
+                            work + m_gasHeader.ghostOffset, work + m_gasHeader.openOffset);
 
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(
             m_gasWork.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

@@ -23,6 +23,7 @@ RWByteAddressBuffer g_ledger : register(u5);
 ByteAddressBuffer g_parameters : register(t0);                      // 設定の頭 + 成分ごとの値
 StructuredBuffer<GasGpuDerived> g_referenceDerived : register(t1);  // 層ごとの基準の導く値(p̃ = 0)
 ByteAddressBuffer g_ghost : register(t2);                           // 層ごとの開いた境界の外(基準 + 風。セルの件)
+ByteAddressBuffer g_open : register(t3);  // セルの空き(uint32 Q16 × セル。設定の openness が 1 の時だけ読む。T-0617)
 
 cbuffer RootConstants : register(b0) {
     uint32_t g_roundingTickLow;  // 小刻みの通し番号(乱数の丸め。R6)
@@ -236,11 +237,42 @@ GasGpuDerived SideDerived(GasSide side) {
     return g_derived[side.index];
 }
 
+// --- セルの空き(gas_reference.cpp の SideOpen・FaceOpen。T-0593・T-0617)---
+
+// セルの空き(Q16)。空きを読まない箱は全部
+uint32_t CellOpen(uint32_t index) {
+    if (GAS_P.openness == 0)
+        return GAS_GPU_OPEN_FULL;
+
+    return g_open.Load(index * 4);
+}
+
+// 面の片側の空き。箱の外(開いた境界の外・壁)は全部
+uint32_t SideOpen(GasSide side) {
+    if (side.kind != SIDE_CELL)
+        return GAS_GPU_OPEN_FULL;
+
+    return CellOpen(side.index);
+}
+
+// 面の開き = 両側の空きの小さい方
+uint32_t FaceOpen(GasFaceSides sides) {
+    return min(SideOpen(sides.left), SideOpen(sides.right));
+}
+
+// 基準との質量の差(mg)。空きを読む箱では基準 × 空き と比べ、気体の無いセルは 0(gas_reference.cpp の Excess)
 int64_t Excess(GasSide side) {
     if (side.kind != SIDE_CELL)
         return 0;
 
-    return (int64_t)g_derived[side.index].mass - (int64_t)g_referenceDerived[CellLayer(side.index)].mass;
+    const int64_t reference = (int64_t)g_referenceDerived[CellLayer(side.index)].mass;
+    if (GAS_P.openness == 0)
+        return (int64_t)g_derived[side.index].mass - reference;
+
+    if (g_derived[side.index].mass == 0)
+        return 0;
+
+    return (int64_t)g_derived[side.index].mass - GasScaleTowardZero(reference, CellOpen(side.index), GAS_GPU_OPEN_FULL);
 }
 
 int64_t HalfHydrostatic(int64_t excess) {
@@ -299,12 +331,52 @@ bool IsDonor(bool right, int64_t flow) {
     for (uint32_t s = 0; s < speciesCount; ++s)
         GasAddSpecies(totals, s, g_cells.Load<uint64_t>(CellAmountAddress(index, s)));
 
+    // 空きが一部のセルは、本物の圧力を空きの体積で読む(gas_reference.cpp の DeriveOpenCell)
     const GasGpuCell cell = g_cells.Load<GasGpuCell>(CellAddress(index));
-    g_derived[index] = DeriveCellFromReference(cell, totals, g_referenceDerived[CellLayer(index)].pressure);
+    const int64_t referencePressure = g_referenceDerived[CellLayer(index)].pressure;
+    const uint32_t open = CellOpen(index);
+    if (open == GAS_GPU_OPEN_FULL)
+        g_derived[index] = DeriveCellFromReference(cell, totals, referencePressure);
+    else
+        g_derived[index] = DeriveOpenCellFromReference(cell, totals, referencePressure, open);
 }
 
-    // --- 段 2: 面の力(gas_reference.cpp の ComputeFaceWeight・ComputeFaceForce)。箱の外の側の力は帳簿へ ---
-    [numthreads(64, 1, 1)] void GasFaceForce(uint32_t faceId : SV_DispatchThreadID) {
+// 一部だけ開いた面の 1 つの側が受ける力積: 開いた所は両側の平均の圧力(fullImpulse = 全面の時の力積)、塞がった所は
+// その側のセル自身の圧力(壁と同じ鏡。縦の面は半セルの静水圧で延ばす)。above = その側が面の上(+ 側)にある
+// (gas_reference.cpp の PartialImpulse)
+int64_t PartialImpulse(GasFaceSides sides, GasSide side, bool above, int64_t fullImpulse, uint32_t open) {
+    int64_t pressure = SideDerived(side).scaledPressure;
+    if (sides.axis == 2 && GAS_P.gravity != 0) {
+        const int64_t hydrostatic = HalfHydrostatic(Excess(side));
+        pressure += above ? hydrostatic : -hydrostatic;
+    }
+
+    const int64_t wall = FxMulShiftS64(pressure * 2, (int64_t)GAS_P.pressureImpulse, 16);
+
+    return GasScaleTowardZero(fullImpulse, open, GAS_GPU_OPEN_FULL) +
+           GasScaleTowardZero(wall, GAS_GPU_OPEN_FULL - open, GAS_GPU_OPEN_FULL);
+}
+
+// 空きを読む箱の面の力積(gas_reference.cpp の ComputeFaceForce の後半): 一部だけ開いた面は両側が違う力積を受け、
+// 気体の無いセルは押さない。face.impulse は全面の時の力積が入っている
+void ApplyFaceOpenness(GasFaceSides sides, inout GasGpuFace face) {
+    const bool wall = sides.left.kind == SIDE_WALL || sides.right.kind == SIDE_WALL;
+    const uint32_t open = FaceOpen(sides);
+    if (!wall && open != GAS_GPU_OPEN_FULL) {
+        const int64_t fullImpulse = face.impulse;
+        face.impulse = PartialImpulse(sides, sides.left, false, fullImpulse, open);
+        face.impulseRight = PartialImpulse(sides, sides.right, true, fullImpulse, open);
+    }
+
+    if (sides.left.kind == SIDE_CELL && g_derived[sides.left.index].mass == 0)
+        face.impulse = 0;
+
+    if (sides.right.kind == SIDE_CELL && g_derived[sides.right.index].mass == 0)
+        face.impulseRight = 0;
+}
+
+// --- 段 2: 面の力(gas_reference.cpp の ComputeFaceWeight・ComputeFaceForce)。箱の外の側の力は帳簿へ ---
+[numthreads(64, 1, 1)] void GasFaceForce(uint32_t faceId : SV_DispatchThreadID) {
     GasFaceSides sides;
     if (!FaceSidesOf(faceId, sides))
         return;
@@ -345,6 +417,10 @@ bool IsDonor(bool right, int64_t flow) {
         face.impulse = FxMulShiftS64(pressureSum, impulseCoefficient, 16);
     }
 
+    face.impulseRight = face.impulse;
+    if (GAS_P.openness != 0)
+        ApplyFaceOpenness(sides, face);
+
     g_faces.Store<GasGpuFace>(FaceAddress(faceId), face);
 
     // --- 帳簿(gas_reference.cpp の ApplyImpulse の箱の外の側)---
@@ -354,15 +430,19 @@ bool IsDonor(bool right, int64_t flow) {
     if (sides.right.kind == SIDE_CELL)
         LedgerAdd(GAS_GPU_LEDGER_MOMENTUM + 16, -face.weightRight);
 
-    if (sides.left.kind != SIDE_CELL)
-        LedgerAdd(GAS_GPU_LEDGER_MOMENTUM + (sides.axis * 8), face.impulse);
+    // 帳簿 = セルが受けた力積の和(両側が同じなら 0。一部だけ開いた面の差は塞いだ物が受けた。T-0593)
+    int64_t received = 0;
+    if (sides.left.kind == SIDE_CELL)
+        received -= face.impulse;
 
-    if (sides.right.kind != SIDE_CELL)
-        LedgerAdd(GAS_GPU_LEDGER_MOMENTUM + (sides.axis * 8), -face.impulse);
+    if (sides.right.kind == SIDE_CELL)
+        received += face.impulseRight;
+
+    LedgerAdd(GAS_GPU_LEDGER_MOMENTUM + (sides.axis * 8), received);
 }
 
-// --- 段 3: 力を当てたセル(自分が右の面の力積は足し、左の面の力積は引く。重さはどちらも引く)。成分はそのまま写す ---
-[numthreads(64, 1, 1)] void GasApplyForce(uint32_t index : SV_DispatchThreadID) {
+    // --- 段 3: 力を当てたセル(自分が右の面の力積は足し、左の面の力積は引く。重さはどちらも引く)。成分はそのまま写す ---
+    [numthreads(64, 1, 1)] void GasApplyForce(uint32_t index : SV_DispatchThreadID) {
     if (index >= g_cellCount)
         return;
 
@@ -374,7 +454,7 @@ bool IsDonor(bool right, int64_t flow) {
 
         const GasGpuFace low = LoadFace(lowFace);
         const GasGpuFace high = LoadFace(highFace);
-        cell.momentum[axis] += low.impulse - high.impulse;
+        cell.momentum[axis] += low.impulseRight - high.impulse;
         cell.momentum[2] -= low.weightRight + high.weightLeft;
     }
 
@@ -386,18 +466,28 @@ bool IsDonor(bool right, int64_t flow) {
     }
 }
 
-    // --- 段 4: 面の質量の流れと、抑える前の割合(gas_reference.cpp の ComputeFaceFlow・RawFraction)---
-    [numthreads(64, 1, 1)] void GasFaceFlow(uint32_t faceId : SV_DispatchThreadID) {
+// --- 段 4: 面の質量の流れと、抑える前の割合(gas_reference.cpp の ComputeFaceFlow・RawFraction)---
+[numthreads(64, 1, 1)] void GasFaceFlow(uint32_t faceId : SV_DispatchThreadID) {
     GasFaceSides sides;
     if (!FaceSidesOf(faceId, sides))
         return;
 
     int64_t flow = 0;
-    if (sides.left.kind != SIDE_WALL && sides.right.kind != SIDE_WALL) {
-        const int64_t momentumSum = ForcedSideCell(sides.left).momentum[sides.axis] +
-                                    ForcedSideCell(sides.right).momentum[sides.axis];
+    const uint32_t open = FaceOpen(sides);
+    if (sides.left.kind != SIDE_WALL && sides.right.kind != SIDE_WALL && open != 0) {
+        // 一部だけ開いた面は、各側の運動量を「面の開き ÷ その側の空き」倍、圧力の拡散を開きの倍(gas_reference.cpp の ComputeFaceFlow)
+        const int64_t leftMomentum = ForcedSideCell(sides.left).momentum[sides.axis];
+        const int64_t rightMomentum = ForcedSideCell(sides.right).momentum[sides.axis];
+        int64_t momentumSum = leftMomentum + rightMomentum;
+        int64_t driving = DrivingPressure(sides);
+        if (open != GAS_GPU_OPEN_FULL) {
+            momentumSum = GasScaleTowardZero(leftMomentum, open, SideOpen(sides.left)) +
+                          GasScaleTowardZero(rightMomentum, open, SideOpen(sides.right));
+            driving = GasScaleTowardZero(driving, open, GAS_GPU_OPEN_FULL);
+        }
+
         const int64_t central = FxMulShiftS64(momentumSum, (int64_t)GAS_P.centralFlow, 52);
-        const int64_t diffusion = FxMulShiftS64(DrivingPressure(sides), (int64_t)GAS_P.pressureFlow, 40);
+        const int64_t diffusion = FxMulShiftS64(driving, (int64_t)GAS_P.pressureFlow, 40);
         flow = central + diffusion;
     }
 

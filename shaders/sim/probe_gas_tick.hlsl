@@ -6,6 +6,7 @@
 //   GasCollect 区画のセルの凝縮相でない物質に印(1 スレッド = 1 セル)
 //   GasPrepare 印 + 基準の大気から欄の物質(ID の順。数の上限なし。T-0598)を決め、設定(gas_step の t0)と開いた境界の外(t2)を作る
 //   GasGather  区画のセル → 気体の箱のセル(成分を欄へ・エネルギーの気体のぶん + 運動エネルギーのぶん・運動量)。凝縮相のぶんは残す
+//              セルの気体の空き(固体と液体が占めない割合。T-0617)を t3 へ書き、一部のセルがあれば設定の openness を立てる
 //   (気体の箱の 1 刻み: gas_step.hlsl の小刻み × 9 段。sim/gpu_gas の RecordStepAt)
 //   GasCheck   書き戻すと 1 セルの成分がインラインの数を超えるか(超えるセルが 1 つでもあれば、この刻みは流さない)
 //   GasScatter 気体の箱 → 区画のセル(凝縮相の成分 + 0 でない気体の成分を ID の順に)。変わったセルは熱のキャッシュを作り直し、
@@ -150,6 +151,39 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     return DivideDown(gasHeat + gasChemical, 1000);
 }
 
+// --- セルの気体の空き(sim/cell_volume の ShareCellVolume・GasOpenQ16。T-0593・T-0617・ADR-0268)---
+static const uint64_t PROBE_CELL_VOLUME_PICOLITERS = (uint64_t)125000000 * 1000000;  // 0.5 m 角 = 1.25e14 pL
+static const uint64_t VOLUME_CAP = (uint64_t)1 << 62;  // 占める体積の頭打ち(sim/cell_volume)
+
+// 凝縮相が占める体積(固体と液体は別々に頭打ち)を除いた残りの割合(Q16。切り捨て。占める分がセル以上なら 0)。
+// 64bit の「0 で止める引き算」は NVIDIA のドライバが誤って下ろすので(T-0185)、符号付きの差を出して 0 以下を 0 にする
+uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
+    uint64_t solid = 0;
+    uint64_t liquid = 0;
+    [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        if (i < cell.speciesCount && cell.species[i] < header.speciesCount) {
+            const ProbeGasSpecies species = GasSpecies(header, cell.species[i]);
+            if (species.isGas == 0) {
+                const FxU128 product = FxMulU64Full(cell.amounts[i], species.molarVolume);
+                const uint64_t volume = product.hi != 0 ? VOLUME_CAP : min(product.lo, VOLUME_CAP);
+                if (species.isLiquid != 0)
+                    liquid = min(liquid + volume, VOLUME_CAP);
+                else
+                    solid = min(solid + volume, VOLUME_CAP);
+            }
+        }
+    }
+
+    const uint64_t occupied = min(solid + liquid, VOLUME_CAP);
+    const int64_t room = (int64_t)PROBE_CELL_VOLUME_PICOLITERS - (int64_t)occupied;
+    if (room <= 0)
+        return 0;
+
+    const FxU128 product = FxMulU64Full((uint64_t)room, GAS_GPU_OPEN_FULL);
+
+    return (uint32_t)FxDivU128By64(product, PROBE_CELL_VOLUME_PICOLITERS).quotient;
+}
+
 // --- 段 ---
 
 // 1 スレッド = 物質の印の 1 語(その語の 32 個の物質の「物質 → 欄」も空に。スレッド 0 は制御も)
@@ -276,6 +310,14 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     g_gasSpeciesOffset = header.parametersOffset + GAS_GPU_PARAMETERS_BYTES;
     const uint32_t slotCount = SlotCount();
     const RxCell cell = cells[GenerationBase(CurrentTick()) + RegionGridCell(header, region)];
+
+    // --- セルの気体の空き(gas_step の t3)。一部のセルが 1 つでもあれば、この刻みの箱は空きを読む(probe_gas.cpp の CollectGasOpen)---
+    const uint32_t open = GasOpenOf(header, cell);
+    gasWork.Store(header.openOffset + region * 4, open);
+    if (open != GAS_GPU_OPEN_FULL) {
+        uint32_t before;
+        gasWork.InterlockedOr(header.parametersOffset + GAS_GPU_PARAMETERS_OPENNESS, 1u, before);
+    }
 
     // --- 成分を欄へ(欄の物質の成分だけ。ほかの欄は 0)---
     for (uint32_t clear = 0; clear < slotCount; ++clear)
