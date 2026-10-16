@@ -19,6 +19,8 @@ local species: { [string]: Species } = {
         thermal_conductivity_mw_per_m_k = 1400,
         standard_entropy_mj_per_mol_k = 41460,
         condensed = true,
+        -- α 石英の密度 2648 kg/m³(CRC Handbook の 2.648 g/cm³。未確認)。土のセルの砂 3121 mol は 56.6 % を占め、残りが孔(T-0616)
+        density_kg_per_m3 = 2648,
     },
 }
 

@@ -112,7 +112,7 @@ namespace bicameral::sim {
             if (definition.heatCapacity == 0 || molarMass == 0 || molarMass > UINT32_MAX)
                 return std::unexpected(std::format("物質 {}: 比熱かモル質量が 0 か大きすぎる", definition.name));
 
-            // 気体の比熱を定圧で書く表は、セルが読む定積の比熱 c_v = c_p − R にする(T-0591・ADR-0258。H0 は書いた c_p から)
+            // 気体の比熱を定圧で書く表(既定)は、セルが読む定積の比熱 c_v = c_p − R にする(T-0591・ADR-0259・T-0597。H0 は書いた c_p から)
             uint32_t heatCapacity = definition.heatCapacity;
             if (table.gasHeatCapacityAtConstantPressure && !definition.condensed) {
                 if (heatCapacity <= GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN)
@@ -163,6 +163,12 @@ namespace bicameral::sim {
                 // 液体(T-0609・ADR-0266): 密度が要る。モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数
                 if (entry.liquid && entry.density == 0)
                     return std::unexpected(std::format("物質 {}: 液体には密度(density_kg_per_m3)が要る", entry.name));
+
+                // 密度の無い固体は場所を取らない(気体も液体も素通し。ADR-0268)。書き忘れを読み込みで知らせる(T-0616。表は当たる)
+                if (entry.condensed && entry.density == 0)
+                    baked.warnings.push_back(std::format(
+                        "物質 {}: 凝縮相に密度(density_kg_per_m3)が無い(セルの場所を取らず、気体も液体も素通しする)",
+                        entry.name));
 
                 const uint64_t molarVolume = entry.density == 0
                                                  ? 0

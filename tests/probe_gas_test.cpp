@@ -86,7 +86,7 @@ namespace {
         return std::move(*baked);
     }
 
-    // 試験の表のまま(CO を作る規則も)+ 地球の乾いた空気(N2・O2・Ar・CO2。300 K・1 気圧)+ 気体の比熱は定圧(T-0591)
+    // 試験の表のまま(CO を作る規則も)+ 地球の乾いた空気(N2・O2・Ar・CO2。300 K・1 気圧)。気体の比熱は定圧(既定。T-0591・T-0597)
     BakedReactionTable MakeEarthAirTable() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.environment = StandardWorldPhysics();
@@ -99,7 +99,6 @@ namespace {
                                       {.species = "carbon_dioxide", .partsPerMillion = 360}}}},
             .surfacePressurePascals = 101325,
         };
-        definition.gasHeatCapacityAtConstantPressure = true;
 
         auto baked = BakeReactionTable(definition);
         if (!baked) {
@@ -535,8 +534,18 @@ namespace {
     }
 
     // --- 7. 定積の比熱(T-0591・ADR-0258)---
-    void TestHeatCapacityAtConstantVolume(const BakedReactionTable& constantVolume, const BakedReactionTable& earth) {
-        // 書いた値(NIST-JANAF の c_p)。N2 29124 → 20810・Ar 20786 → 12472・セルロース(凝縮相)はそのまま
+    void TestHeatCapacityAtConstantVolume(const BakedReactionTable& earth) {
+        // 書いた値(NIST-JANAF の c_p)。N2 29124 → 20810・Ar 20786 → 12472・セルロース(凝縮相)はそのまま。
+        // 既定(T-0597)で定圧として読む。比べる相手は「書いた値をそのまま定積として読む」C++ だけの表
+        ReactionTableDefinition writtenAsIs = MakeCombustionTestTable();
+        writtenAsIs.gasHeatCapacityAtConstantPressure = false;
+        const auto bakedAsIs = BakeReactionTable(writtenAsIs);
+        if (!bakedAsIs) {
+            EXPECT(bakedAsIs.has_value());
+            return;
+        }
+
+        const BakedReactionTable& constantVolume = *bakedAsIs;
         const auto capacity = [](const BakedReactionTable& table, const char* name) {
             return table.species[table.SpeciesId(name)].heatCapacity;
         };
@@ -553,7 +562,6 @@ namespace {
 
         // 気体の c_p が R 以下なら断る(凝縮相の書き忘れの多く)
         ReactionTableDefinition broken = MakeCombustionTestTable();
-        broken.gasHeatCapacityAtConstantPressure = true;
         for (SpeciesDefinition& species : broken.species) {
             if (species.name == "nitrogen")
                 species.heatCapacity = 8000;
@@ -650,7 +658,7 @@ int main() {
     TestCheckerboard(table, ProbeGasPressure::Projection);
 
     const BakedReactionTable earth = MakeEarthAirTable();
-    TestHeatCapacityAtConstantVolume(table, earth);
+    TestHeatCapacityAtConstantVolume(earth);
     TestManySpecies(earth);
     TestMassChangedByReaction();
 

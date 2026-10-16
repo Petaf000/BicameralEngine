@@ -27,13 +27,13 @@ export type Element = {
 export type Species = {
     composition: { [string]: number }, -- 元素 → 個数
     formation_enthalpy_j_per_mol: number,
-    heat_capacity_mj_per_mol_k: number,
+    heat_capacity_mj_per_mol_k: number, -- 比熱(一定と置く)。気体は資料の定圧の比熱 c_p をそのまま書く(ベイクがセルの読む定積の c_v = c_p − R を作る。R 以下は断る。T-0597)。凝縮相はそのまま
     thermal_conductivity_mw_per_m_k: number,
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
     condensed: boolean?, -- 凝縮相(固体・液体)。省ける(既定 気体)。坂の計器が活量を 1 と置く(T-0518。相が入るまでの仮の欄)
     radiation_absorption_mm2_per_mol: number?, -- 1 mol が放射を遮る面積(mm²/mol)。省ける(既定 0 = 放射しない・吸わない)。セルの放射率 = 1 − e^−Σ a·n ÷ 面(T-0583・ADR-0252)
     phase: string?, -- 相("gas"・"solid"・"liquid")。省ける(既定 気体。condensed と書いたら同じ向き)。液体は液体の区画が流す(T-0609・ADR-0266)
-    density_kg_per_m3: number?, -- 密度。液体には要る(T-0609)
+    density_kg_per_m3: number?, -- 密度。液体には要る(T-0609)。固体も書く(セルの場所を取る。書かない凝縮相はベイクが警告する。ADR-0268・T-0616)
 }
 
 export type ReactionRate = {

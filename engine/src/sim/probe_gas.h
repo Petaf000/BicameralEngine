@@ -25,8 +25,8 @@
 //   圧力はその体積で読み、面は両側の空きの小さい方だけ開く(GasBox::openQ16)。空きが 0 のセルは気体を通さない。
 //   密度を書いた物質が無い世界・どのセルも空きが全部の刻みは今までとビット単位で同じ。
 //   → 区画のセルのエネルギーの合計 + 運動エネルギーのぶん − 帳簿、元素の数 − 帳簿、運動量 − 帳簿 は毎刻みビット単位で一定。
-// 比熱: 気体の段は表の比熱(RxSpecies.heatCapacity)を定積の比熱として読む。表が定圧で書くなら、ベイクが c_v = c_p − R を作る
-//   (ReactionTableDefinition::gasHeatCapacityAtConstantPressure。T-0591・ADR-0258)。
+// 比熱: 気体の段は表の比熱(RxSpecies.heatCapacity)を定積の比熱として読む。パッケージは定圧の c_p を書き、ベイクが c_v = c_p − R を作る
+//   (ReactionTableDefinition::gasHeatCapacityAtConstantPressure。既定 true。T-0591・ADR-0259・T-0597)。
 // 今の制限(分けたチケット): 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超える刻みは流さずに数える
 //   (溢れのセルは R-MULTI-4)・投影の解き方はセルの空きを読まない(T-0617)・
 //   GPU と保存点・写しの早送り・状態のハッシュへの組み込み(T-0592。GPU の段は成分 GAS_MAX_SPECIES 個まで)。

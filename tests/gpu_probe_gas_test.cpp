@@ -71,6 +71,13 @@ namespace {
                                        [](const RuleTerm& term) { return term.species == "carbon_monoxide"; });
         });
 
+        // 固体の密度を外す: GPU の気体の段はセルの空き(ADR-0268)をまだ読まない(T-0617)。real_matter のセルロースと炭に密度が入った
+        // (T-0616)ので、外さないと CPU リファレンスだけが木箱の空き(セルロースが 3.3 %)を読んで食い違う。T-0617 で外すのをやめる
+        for (SpeciesDefinition& species : definition.species) {
+            if (species.condensed && !species.liquid)
+                species.density = 0;
+        }
+
         definition.environment = StandardWorldPhysics();
         definition.atmosphere = {
             .points = {{.heightMillimeters = 0,

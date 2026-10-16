@@ -77,6 +77,10 @@ namespace bicameral::sim {
 
     [[nodiscard]] std::vector<RuleNetTerm> RuleNetTerms(const reaction::RxRule& rule);
 
+    // 物質の定圧の比熱(mJ/(mol·K))。坂は定圧の H・S で見る: 気体 = 表の定積の比熱 c_v + R(パッケージに書いた c_p。T-0597)、
+    // 凝縮相 = 表の値。表が気体の比熱を定積で読む(gasHeatCapacityAtConstantPressure = false の C++ の試験)なら、書いた値 + R
+    [[nodiscard]] uint32_t SpeciesPressureHeatCapacity(const BakedReactionTable& baked, uint32_t id);
+
     // 規則の標準の坂 ΔG°(T)(mJ/mol。添字 = K、0 K は 0)。CheckReactionSlopes と同じ値(坂の計器 sim/slope_gauge が使う)。
     // 調べられない規則(正味の物質に標準エントロピーが無い・値が大きすぎる)は空
     [[nodiscard]] std::vector<int64_t> RuleStandardGibbs(const BakedReactionTable& baked, uint32_t ruleId);

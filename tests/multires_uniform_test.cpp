@@ -407,7 +407,9 @@ namespace {
         for (uint32_t i = 0; i < folded.speciesCount; ++i)
             foldedOxygen += folded.species[i] == oxygen ? folded.amounts[i] : 0;
 
-        Expect(folded.energy == energySum / MR_BLOCK_CELLS && foldedOxygen == oxygenSum / MR_BLOCK_CELLS,
+        // 平均は床への切り捨て(MrFloorDivideEnergy)。空気のセルのエネルギーは負になりうる(気体の比熱が定積。T-0597)
+        const int64_t floorEnergy = (energySum / MR_BLOCK_CELLS) - (energySum % MR_BLOCK_CELLS < 0 ? 1 : 0);
+        Expect(folded.energy == floorEnergy && foldedOxygen == oxygenSum / MR_BLOCK_CELLS,
                "ほぼ同じ頁(許容差つき): 畳んだ値はエネルギーと O2 の平均の切り捨て");
 
         // --- 負のエネルギーの床の割り算(-11 ÷ 2 = -6 余り 1)---
