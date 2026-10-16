@@ -171,10 +171,11 @@ return {
     }
 
     void TestDocument(const ReactionTableDocument& document) {
-        // 標準パッケージの現実の 5 元素・10 物質・9 規則(水の 3 相と相変化。T-0611)+ 触るための仮の魔素(元素 1・物質 1・規則 2。T-0225・T-0498)
+        // 標準パッケージの現実の 5 元素・10 物質・7 規則(水の 3 相と相変化は釣り合いの規則 2 本。逆向きはベイクが作り、書いた規則の表には出ない。
+        // T-0611・T-0623)+ 触るための仮の魔素(元素 1・物質 1・規則 2。T-0225・T-0498)
         EXPECT(document.elements.size() == 6);
         EXPECT(document.species.size() == 11);
-        EXPECT(document.rules.size() == 11);
+        EXPECT(document.rules.size() == 9);
 
         // サンプルのパッケージが書いた値だけ書き戻せる。棚の標準パッケージの値は探すが書き戻さない(T-0498)
         for (const ElementRow& row : document.elements) {
