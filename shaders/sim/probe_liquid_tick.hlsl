@@ -145,12 +145,19 @@ uint32_t LoadOpen(ProbeLiquidHeader header, uint32_t region) {
     return LoadState(header, region).open;
 }
 
-// 占める体積の割合を除いた残り(Q16。切り捨て。占める分がセル以上なら 0)
-uint32_t RemainingQ16(uint64_t occupied) {
-    if (occupied >= CELL_VOLUME_PICOLITERS)
+// セルの体積から占める分を引いた残り(pL。0 で止める)。64bit の「0 で止める引き算」(a > b ? a − b : 0 の形)は NVIDIA のドライバが
+// 誤って下ろすので(T-0185)、符号付きの差を出して 0 以下を 0 にする。occupied は VOLUME_CAP(2^62)まで
+uint64_t RoomLeft(uint64_t occupied) {
+    const int64_t room = (int64_t)CELL_VOLUME_PICOLITERS - (int64_t)occupied;
+    if (room <= 0)
         return 0;
 
-    return (uint32_t)MulDiv(CELL_VOLUME_PICOLITERS - occupied, OPEN_FULL, CELL_VOLUME_PICOLITERS);
+    return (uint64_t)room;
+}
+
+// 占める体積の割合を除いた残り(Q16。切り捨て。占める分がセル以上なら 0)
+uint32_t RemainingQ16(uint64_t occupied) {
+    return (uint32_t)MulDiv(RoomLeft(occupied), OPEN_FULL, CELL_VOLUME_PICOLITERS);
 }
 
 ProbeLiquidCellState ReadState(ProbeLiquidHeader header, uint32_t region, RxCell cell) {
@@ -189,7 +196,7 @@ ProbeLiquidCellState ReadState(ProbeLiquidHeader header, uint32_t region, RxCell
     state.volume = volume;
     state.open = RemainingQ16(solid);
     state.wall = state.open == 0 ? 1u : 0u;
-    state.room = CELL_VOLUME_PICOLITERS - min(solid, CELL_VOLUME_PICOLITERS);
+    state.room = RoomLeft(solid);
     state.equivalent = state.open == OPEN_FULL || state.open == 0 ? state.mass
                                                                   : MulDiv(state.mass, OPEN_FULL, state.open);
     state.heat = (cell.energy * 1000) - chemical;
@@ -295,9 +302,11 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
             above = 0;
         } else {
             // 圧力は空きの体積と「セル全部の液体に直した質量」で書く(孔の中の水の圧力 = 開けた水と同じ高さの圧力)
+            // 溢れ = 体積 − 空き(0 で止める引き算を符号付きの差で。T-0185。体積は 2^63 未満)
             uint64_t overfill = 0;
-            if (state.volume > state.room)
-                overfill = MulDiv(state.equivalent * header.overfillStiffness, state.volume - state.room, state.volume);
+            const int64_t excess = (int64_t)state.volume - (int64_t)state.room;
+            if (excess > 0)
+                overfill = MulDiv(state.equivalent * header.overfillStiffness, (uint64_t)excess, state.volume);
 
             // 満ちていないセルは上の液体を満ち具合の分だけ支える
             const uint64_t filled = min(state.volume, state.room);

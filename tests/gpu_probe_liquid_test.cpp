@@ -210,6 +210,51 @@ namespace {
         return queue->ExecuteAndWait() && gpu::ReadBuffer(readback.Get(), std::span(readout.work));
     }
 
+    // 食い違った刻みの、区画のセルの GPU と CPU の違いを最初の数個だけ出す(調べる時の手がかり)
+    void LogCellDifferences(ID3D12Device5* device, const ProbeSim& simulation, const ProbeReference& reference,
+                            const ProbeLiquidField& field, uint64_t stateTick, std::string_view name) {
+        const uint64_t bytes = simulation.Cells()->GetDesc().Width;
+        std::vector<reaction::RxCell> gpu(bytes / sizeof(reaction::RxCell));
+        auto queue = gpu::ImmediateQueue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE);
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, bytes, gpu::BufferKind::Readback);
+        ID3D12GraphicsCommandList10* list = queue && readback ? queue->Begin() : nullptr;
+        if (list == nullptr)
+            return;
+
+        list->CopyBufferRegion(readback.Get(), 0, simulation.Cells(), 0, bytes);
+        if (!queue->ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(gpu))))
+            return;
+
+        const std::span<const reaction::RxCell> cpu = reference.State(stateTick);
+        const size_t base = (stateTick & 1) * PROBE_CELL_COUNT;
+        uint32_t shown = 0;
+        uint32_t differing = 0;
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            const reaction::RxCell& a = gpu[base + index];
+            const reaction::RxCell& b = cpu[index];
+            bool same = a.energy == b.energy && a.speciesCount == b.speciesCount;
+            for (uint32_t i = 0; same && i < a.speciesCount; ++i)
+                same = a.species[i] == b.species[i] && a.amounts[i] == b.amounts[i];
+
+            if (same)
+                continue;
+
+            ++differing;
+            if (shown++ >= 6)
+                continue;
+
+            std::string text;
+            for (uint32_t i = 0; i < std::max(a.speciesCount, b.speciesCount) && i < reaction::RX_MAX_CELL_SPECIES; ++i)
+                text += std::format(" [{}: {}/{} {}/{}]", i, a.species[i], b.species[i], a.amounts[i], b.amounts[i]);
+
+            Log(Channel::Sim, Level::Error, "{}: セル ({}, {}, {}) エネルギー GPU {} CPU {} 成分 {}/{}{}", name,
+                index % PROBE_GRID_SIZE, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE, index / PROBE_SLICE_CELL_COUNT,
+                a.energy, b.energy, a.speciesCount, b.speciesCount, text);
+        }
+
+        Log(Channel::Sim, Level::Error, "{}: 違うセル {} 個(区画 {} セル)", name, differing, field.RegionCellCount());
+    }
+
     // 並びは ProbeLiquidField::Hash と同じ(面の運動量 → 運動のエネルギー → 位置のエネルギー → 帳簿)
     uint64_t GpuLiquidHash(const ProbeLiquidHeader& header, const LiquidReadout& readout) {
         const uint32_t count = header.regionCellCount;
@@ -274,6 +319,9 @@ namespace {
                     tick + 1, readback.hashes.empty() ? 0 : readback.hashes[0].hash, reference.StateHash(tick + 1));
             else
                 ++matched;
+
+            if (!hashesMatch)
+                LogCellDifferences(device, *simulation, reference, *reference.LiquidField(), tick + 1, name);
         }
 
         LiquidReadout readout;

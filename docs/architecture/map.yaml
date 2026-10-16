@@ -296,6 +296,9 @@ views:
       - { id: probeliquid, group: simlib, label: "ProbeLiquidField::Step<br/>仮の世界に液体を載せる(CPU。T-0609・T-0610)<br/>列の静水圧 → 面の運動量 → 上流から動かす → 運動量を運ぶ → エネルギーを熱へ",
           code: "engine/src/sim/probe_liquid.cpp::ProbeLiquidField::Step", ticket: T-0609, doc: docs/design/07-transport.md,
           note: "セルが唯一の真実(液体の成分 = phase が liquid の物質)。足した欄は面の運動量だけ。3D のパイプ模型 + 列の静水圧(満ち具合と下の支えで重み)。運動量は内側の力が整数で打ち消し合い、外から入った分は帳簿。運動量は面のまわりの体積の質量の流れで風上に運び、位置と運動のエネルギーはセルの外に持って差を熱に(T-0610・ADR-0276)。固体と体積を分け合う(空きで満ち具合と圧力・閉じた面の判定は FaceOpenQ16At の 1 か所。T-0612)。気体の後・伝導と反応の前の段。ADR-0266" }
+      - { id: probesimliquid, group: simlib, label: "ProbeSim::RecordLiquid<br/>仮の世界の GPU の刻みに液体の区画(T-0613)<br/>適用の単位の中・気体の後: 10 段で面とセルごとに集める",
+          code: "engine/src/sim/probe_sim_liquid.cpp::ProbeSim::RecordLiquid", ticket: T-0613, doc: docs/design/07-transport.md,
+          note: "CPU の ProbeLiquidField::Step の段(圧力 → 面の力 → 質量 → 移流 → 熱)を、面から配る所をセル・面ごとに集める形に直した 10 段の compute(shaders/sim/probe_liquid_tick.hlsl)。上流の成分は刻みの初めの写しから読む。帳簿は波の和 + 64bit の原子的な足し算。置き場所はバッファ 1 つ(u19)。CPU と毎刻みビット一致(gpu_probe_liquid_test)。表の差し替え・保存点・写しの早送りはまだ断る(T-0620)。ADR-0266" }
       - { id: cellvolume, group: simlib, label: "ShareCellVolume<br/>1 セルの体積を相で分け合う(T-0593・T-0612)<br/>固体 + 液体 + 残り = 気体の空き",
           code: "engine/src/sim/cell_volume.cpp::ShareCellVolume", ticket: T-0593, doc: docs/design/07-transport.md,
           note: "占める体積は物質の密度から(モル体積。書かなければ 0)。液体の空き = セル − 固体、気体の空き = セル − 固体 − 液体。面の開き = 両側の空きの小さい方。気体は空きの体積で圧力を読み(GasBox::openQ16)、液体は空きで満ち具合と圧力を数える。ADR-0268" }
@@ -566,6 +569,7 @@ views:
       - [probegas, gasreference, "陽解法"]
       - [probegas, gasprojection, "投影"]
       - [probesimgas, probegas, "毎刻みビット一致"]
+      - [probesimliquid, probeliquid, "毎刻みビット一致"]
       - [probereference, probeliquid, "気体の後"]
       - [probegas, cellvolume, "気体の空き"]
       - [probeliquid, cellvolume, "液体の空き"]
