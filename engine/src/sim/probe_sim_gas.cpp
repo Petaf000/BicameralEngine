@@ -5,8 +5,8 @@
 // 気体の箱の 1 刻み(sim/gpu_gas の gas_step.hlsl)を投げる。段の中身と並びは shaders/common/probe_gas_gpu.hlsli。
 // 作る時に CPU が決めるのは、区画の形・基準の大気だけの静かな箱(層の基準の導く値・開いた境界の外・設定の型)・物質ごとの値だけ。
 // 刻みごとの欄の物質(区画にある気体の物質。ID の順)と、それに合う設定は GPU が決める(D-107)。
-// 今の制限(分けたチケット): 陽解法だけ(投影は T-0621)・区画の気体の物質 4 つまで(超えた刻みは流さずに数える。T-0598)・
-// 表の差し替え・保存点・写しの早送り・状態のハッシュに気体の欄が無い(T-0620)。
+// 区画の気体の物質の数に上限は無い(気体の箱の件の欄の数 = 表の気体の物質の数。T-0598)。
+// 今の制限(分けたチケット): 陽解法だけ(投影は T-0621)・表の差し替え・保存点・写しの早送り・状態のハッシュに気体の欄が無い(T-0620)。
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -34,9 +34,9 @@ namespace bicameral::sim {
 
         static_assert(sizeof(ProbeGasCellState) == PROBE_GAS_CELL_STATE_BYTES);
         static_assert(sizeof(ProbeGasSpecies) == PROBE_GAS_SPECIES_BYTES);
-        static_assert(sizeof(ProbeGasHeader) == 96);
-        static_assert(PROBE_GAS_TEMPLATE_OFFSET - PROBE_GAS_PARAMETERS_OFFSET >= sizeof(GasGpuParameters));
+        static_assert(sizeof(ProbeGasHeader) == 88);
         static_assert(PROBE_GAS_HEADER_OFFSET - PROBE_GAS_TEMPLATE_OFFSET >= sizeof(GasGpuParameters));
+        static_assert(PROBE_GAS_DYNAMIC_OFFSET - PROBE_GAS_HEADER_OFFSET >= sizeof(ProbeGasHeader));
 
         uint32_t AlignUp(uint32_t value) {
             return (value + PROBE_GAS_ALIGNMENT - 1) / PROBE_GAS_ALIGNMENT * PROBE_GAS_ALIGNMENT;
@@ -49,6 +49,21 @@ namespace bicameral::sim {
         template <typename T>
         void WriteAt(std::vector<std::byte>& bytes, uint32_t offset, const T& value) {
             std::memcpy(bytes.data() + offset, &value, sizeof(T));
+        }
+
+        bool IsCondensed(const BakedReactionTable& table, uint32_t id) {
+            return id < table.speciesCondensed.size() && table.speciesCondensed[id] != 0;
+        }
+
+        // 気体の箱の件の欄の数 = 区画に現れうる気体の物質の数(表の凝縮相でない物質と基準の大気。T-0598)
+        uint32_t SlotCapacity(const BakedReactionTable& table, std::span<const uint32_t> atmosphere) {
+            uint32_t capacity = 0;
+            for (uint32_t id = 0; id < table.species.size(); ++id) {
+                if (!IsCondensed(table, id) || rng::contains(atmosphere, id))
+                    ++capacity;
+            }
+
+            return std::max(1u, capacity);
         }
 
         // 見出しの場所を決める(区画の形と表の物質の数から)
@@ -65,8 +80,7 @@ namespace bicameral::sim {
             header.speciesCount = (uint32_t)table.species.size();
             header.maskWords = std::max(1u, (header.speciesCount + 31) / 32);
             header.atmosphereCount = (uint32_t)atmosphere.size();
-            for (uint32_t a = 0; a < atmosphere.size(); ++a)
-                header.atmosphereSpecies[a] = atmosphere[a];
+            header.slotCapacity = SlotCapacity(table, atmosphere);
 
             uint32_t offset = PROBE_GAS_DYNAMIC_OFFSET;
             const auto place = [&offset](uint32_t bytes) {
@@ -74,10 +88,15 @@ namespace bicameral::sim {
                 offset = AlignUp(offset + bytes);
                 return at;
             };
-            header.ghostOffset = place(header.layerCount * (uint32_t)sizeof(GasGpuCell));
-            header.ghostAtmosphereOffset = place(header.layerCount * (uint32_t)sizeof(GasGpuCell));
+            const uint32_t cellStride = GasGpuCellStride(header.slotCapacity);
+            header.parametersOffset = place(GasGpuParametersBytes(header.slotCapacity));
+            header.ghostOffset = place(header.layerCount * cellStride);
+            header.ghostAtmosphereOffset = place(header.layerCount * cellStride);
             header.speciesOffset = place(header.speciesCount * PROBE_GAS_SPECIES_BYTES);
             header.maskOffset = place(header.maskWords * 4);
+            header.slotsOffset = place(header.slotCapacity * 4);
+            header.slotOfOffset = place(header.speciesCount * 4);
+            header.atmosphereOffset = place(std::max(1u, header.atmosphereCount) * 4);
             header.ledgerOffset = place((header.speciesCount + 4) * 8);
             header.condensedOffset = place(header.regionCellCount * 8);
             totalBytes = offset;
@@ -87,7 +106,7 @@ namespace bicameral::sim {
 
         // 物質ごとの気体の値(probe_gas.cpp の MakeConfig・gas_reference.cpp の MakeGasCoefficients と同じ式)
         ProbeGasSpecies MakeGasSpecies(const BakedReactionTable& table, uint32_t id) {
-            const bool condensed = id < table.speciesCondensed.size() && table.speciesCondensed[id] != 0;
+            const bool condensed = IsCondensed(table, id);
 
             return {.massPerAmount = ((uint64_t)table.molarMasses[id] << 32) / MICRO,
                     .formationEnergy = table.species[id].h0,
@@ -98,7 +117,7 @@ namespace bicameral::sim {
 
     }  // namespace
 
-    // 区画を作る(区画が無ければ何もしない)。断る: 投影・基準の大気の物質が GPU の欄の数を超える・ProbeGasField が断るもの
+    // 区画を作る(区画が無ければ何もしない)。断る: 投影・ProbeGasField が断るもの
     std::expected<void, std::string> ProbeSim::CreateGas(ID3D12Device5* device, const BakedReactionTable& table) {
         const ProbeGasOptions& options = m_options.gas;
         if (!options.Enabled())
@@ -112,27 +131,30 @@ namespace bicameral::sim {
             return std::unexpected("気体の区画を作れない: " + field.error());
 
         const std::span<const uint32_t> atmosphere = field->AtmosphereSpecies();
-        if (atmosphere.size() > PROBE_GAS_MAX_ATMOSPHERE)
-            return std::unexpected("GPU の気体の区画は基準の大気の物質 4 つまで(T-0598)");
+        uint32_t totalBytes = 0;
+        m_gasHeader = MakeHeader(options, table, atmosphere, totalBytes);
 
-        // --- 気体の箱(基準の大気だけの欄。層の基準の導く値は欄の並びによらない)---
+        // --- 気体の箱(基準の大気だけの設定。件の欄は表の気体の物質の数だけ取る。層の基準の導く値は欄の並びによらない)---
         const GasBox box = field->MakeAtmosphereBox(table);
-        auto gas = GpuGas::Create(device, box);
+        auto gas = GpuGas::Create(device, box, m_gasHeader.slotCapacity);
         if (!gas)
             return std::unexpected("気体の箱を GPU に作れない: " + gas.error());
 
         m_gas = std::make_unique<GpuGas>(std::move(*gas));
 
-        // --- 作業場の初めの中身(設定の型・見出し・開いた境界の外の元・物質ごとの値。ほかは 0)---
-        uint32_t totalBytes = 0;
-        m_gasHeader = MakeHeader(options, table, atmosphere, totalBytes);
+        // --- 作業場の初めの中身(設定の型・見出し・開いた境界の外の元・物質ごとの値・基準の大気の物質。ほかは 0)---
         std::vector<std::byte> bytes(totalBytes);
         WriteAt(bytes, PROBE_GAS_TEMPLATE_OFFSET, MakeGasGpuParameters(box.config, box.coefficients));
         WriteAt(bytes, PROBE_GAS_HEADER_OFFSET, m_gasHeader);
+        const uint32_t cellStride = GasGpuCellStride(m_gasHeader.slotCapacity);
         for (uint32_t layer = 0; layer < m_gasHeader.layerCount; ++layer) {
-            WriteAt(bytes, m_gasHeader.ghostAtmosphereOffset + (layer * (uint32_t)sizeof(GasGpuCell)),
-                    ToGasGpuCell(box.ghost[layer]));
+            PackGasGpuCell(
+                box.ghost[layer], m_gasHeader.slotCapacity,
+                std::span(bytes).subspan(m_gasHeader.ghostAtmosphereOffset + (layer * cellStride), cellStride));
         }
+
+        for (uint32_t a = 0; a < atmosphere.size(); ++a)
+            WriteAt(bytes, m_gasHeader.atmosphereOffset + (a * 4), atmosphere[a]);
 
         for (uint32_t id = 0; id < m_gasHeader.speciesCount; ++id)
             WriteAt(bytes, m_gasHeader.speciesOffset + (id * PROBE_GAS_SPECIES_BYTES), MakeGasSpecies(table, id));
@@ -167,9 +189,10 @@ namespace bicameral::sim {
                 return std::unexpected(std::format("パイプラインを作れない: {}", GAS_SHADER_NAMES[pass]));
         }
 
-        Log(Channel::Sim, Level::Info, "気体の区画: ({}, {}, {}) から {} × {} × {} セル・基準の大気の物質 {} つ",
-            options.minCell[0], options.minCell[1], options.minCell[2], options.sizeCells[0], options.sizeCells[1],
-            options.sizeCells[2], atmosphere.size());
+        Log(Channel::Sim, Level::Info,
+            "気体の区画: ({}, {}, {}) から {} × {} × {} セル・基準の大気の物質 {} つ・欄 {} 個", options.minCell[0],
+            options.minCell[1], options.minCell[2], options.sizeCells[0], options.sizeCells[1], options.sizeCells[2],
+            atmosphere.size(), m_gasHeader.slotCapacity);
 
         return {};
     }
@@ -221,7 +244,7 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &toRead);
 
         const D3D12_GPU_VIRTUAL_ADDRESS work = m_gasWork->GetGPUVirtualAddress();
-        m_gas->RecordStepAt(list, m_debugRing.GpuAddress(), tick, work + PROBE_GAS_PARAMETERS_OFFSET,
+        m_gas->RecordStepAt(list, m_debugRing.GpuAddress(), tick, work + m_gasHeader.parametersOffset,
                             work + m_gasHeader.ghostOffset);
 
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(

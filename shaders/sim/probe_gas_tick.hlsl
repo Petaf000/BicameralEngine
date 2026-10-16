@@ -4,7 +4,7 @@
 // RecordGas が次の順に投げる(段の間は全部の UAV の書き込みを待つ):
 //   GasBegin   制御と物質の印を空に
 //   GasCollect 区画のセルの凝縮相でない物質に印(1 スレッド = 1 セル)
-//   GasPrepare 印 + 基準の大気から欄の物質(ID の順。GPU は 4 つまで。T-0598)を決め、設定(gas_step の t0)と開いた境界の外(t2)を作る
+//   GasPrepare 印 + 基準の大気から欄の物質(ID の順。数の上限なし。T-0598)を決め、設定(gas_step の t0)と開いた境界の外(t2)を作る
 //   GasGather  区画のセル → 気体の箱のセル(成分を欄へ・エネルギーの気体のぶん + 運動エネルギーのぶん・運動量)。凝縮相のぶんは残す
 //   (気体の箱の 1 刻み: gas_step.hlsl の小刻み × 9 段。sim/gpu_gas の RecordStepAt)
 //   GasCheck   書き戻すと 1 セルの成分がインラインの数を超えるか(超えるセルが 1 つでもあれば、この刻みは流さない)
@@ -12,19 +12,28 @@
 //              ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(物理の熱と同じ。後ろの WakeDueBlocks が一覧へ足す)
 //   GasFinish  帳簿(物質 ID ごと・格子の軸)へ足す
 // 区画の中の番号 = x + 幅 × (z + 奥行き × y)(気体の箱の並び。箱の z = 格子の y = 上)。整数だけ(D-205)。
+// 気体の箱のセルは頭の並び + 成分ごとの面(欄の数 header.slotCapacity)、外は「頭 + 物質量 × 欄の数」の件(gas_gpu.hlsli)。
+// 回す欄はこの刻みの欄の物質の数だけ。
 #include "common/probe_gas_gpu.hlsli"
 #include "sim/probe_bindings.hlsli"
 
 RWStructuredBuffer<ProbeGasCellState> gasState : register(u15);  // 区画のセルごとの気体の欄
 RWByteAddressBuffer gasWork : register(u16);                     // 制御・設定・見出し・帳簿など(probe_gas_gpu.hlsli)
-RWStructuredBuffer<GasGpuCell> gasCells : register(u17);         // 気体の箱のセル(gas_step の u0)
+RWByteAddressBuffer gasCells : register(u17);                    // 気体の箱のセルの件(gas_step の u0)
 RWByteAddressBuffer gasBoxLedger : register(u18);                // 気体の箱の 1 刻みの帳簿(gas_step の u5)
 
+// 気体のセルの部品(gas_cell.hlsli)が読む設定の頭と欄ごとの物質の値(この刻みの設定。読む段の初めに入れる)
 static GasGpuParameters g_gasParameters;
+static uint32_t g_gasSpeciesOffset;
+
+GasGpuSpecies GasSlotSpecies(uint32_t s) {
+    return gasWork.Load<GasGpuSpecies>(g_gasSpeciesOffset + (s * GAS_GPU_SPECIES_BYTES));
+}
+
 #define GAS_P g_gasParameters
+#define GAS_SPECIES(s) GasSlotSpecies(s)
 #include "common/gas_cell.hlsli"
 
-static const uint32_t NO_SLOT = GAS_GPU_MAX_SPECIES;
 static const uint32_t NO_SPECIES = 0xFFFFFFFFu;
 
 // --- 読み書き ---
@@ -46,23 +55,27 @@ uint32_t SlotCount() {
     return gasWork.Load(PROBE_GAS_CONTROL_SLOT_COUNT);
 }
 
-uint4 Slots() {
-    return gasWork.Load4(PROBE_GAS_CONTROL_SLOTS);
+// 欄 s の物質 ID
+uint32_t SlotSpecies(ProbeGasHeader header, uint32_t s) {
+    return gasWork.Load(header.slotsOffset + s * 4);
+}
+
+// 物質 ID の欄(この刻みに無ければ PROBE_GAS_NO_SLOT)
+uint32_t SlotOf(ProbeGasHeader header, uint32_t id) {
+    return id < header.speciesCount ? gasWork.Load(header.slotOfOffset + id * 4) : PROBE_GAS_NO_SLOT;
 }
 
 bool Skipped() {
     return gasWork.Load(PROBE_GAS_CONTROL_TOO_MANY) != 0 || gasWork.Load(PROBE_GAS_CONTROL_OVERFLOW) != 0;
 }
 
-// 物質 ID の欄(無ければ NO_SLOT)
-uint32_t SlotOf(uint4 slots, uint32_t slotCount, uint32_t id) {
-    uint32_t result = NO_SLOT;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        if (s < slotCount && slots[s] == id)
-            result = s;
-    }
+// 気体の箱のセル(頭の並び + 成分ごとの面。gas_step と同じ)の区画の中の番号 region の頭と、欄 s の物質量の場所
+uint32_t GasCellAddress(uint32_t region) {
+    return region * GAS_GPU_CELL_BYTES;
+}
 
-    return result;
+uint32_t GasAmountAddress(ProbeGasHeader header, uint32_t region, uint32_t s) {
+    return GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, header.regionCellCount, region, s);
 }
 
 // 区画の中の番号 → 格子のセルの番号
@@ -139,18 +152,23 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
 
 // --- 段 ---
 
-// 1 スレッド = 物質の印の 1 語(スレッド 0 は制御も)
+// 1 スレッド = 物質の印の 1 語(その語の 32 個の物質の「物質 → 欄」も空に。スレッド 0 は制御も)
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void GasBegin(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const ProbeGasHeader header = GasHeader();
     const uint32_t word = dispatchThreadId.x;
-    if (word < header.maskWords)
+    if (word < header.maskWords) {
         gasWork.Store(header.maskOffset + word * 4, 0);
+        for (uint32_t bit = 0; bit < 32; ++bit) {
+            const uint32_t id = word * 32 + bit;
+            if (id < header.speciesCount)
+                gasWork.Store(header.slotOfOffset + id * 4, PROBE_GAS_NO_SLOT);
+        }
+    }
 
     if (word != 0)
         return;
 
     gasWork.Store4(PROBE_GAS_CONTROL_SLOT_COUNT, uint4(0, 0, 0, 0));  // 数・多すぎ・溢れ・変わったセル
-    gasWork.Store4(PROBE_GAS_CONTROL_SLOTS, uint4(0, 0, 0, 0));
     gasWork.Store<int64_t>(PROBE_GAS_CONTROL_LOST, 0);
     gasWork.Store<int64_t>(PROBE_GAS_CONTROL_LOST + 8, 0);
     gasWork.Store<int64_t>(PROBE_GAS_CONTROL_LOST + 16, 0);
@@ -179,76 +197,71 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
 [numthreads(1, 1, 1)] void GasPrepare() {
     const ProbeGasHeader header = GasHeader();
 
-    // --- 欄の物質(印 + 基準の大気。ID の順。GPU の欄の数を超えたら流さない)---
+    // --- 欄の物質(印 + 基準の大気。ID の順。欄の数を超えたら流さない〔欄の数 = 表の気体の物質の数なので起きない〕)---
     uint32_t count = 0;
     for (uint32_t word = 0; word < header.maskWords; ++word) {
         uint32_t bits = gasWork.Load(header.maskOffset + word * 4);
-        [unroll] for (uint32_t a = 0; a < PROBE_GAS_MAX_ATMOSPHERE; ++a) {
-            const uint32_t id = header.atmosphereSpecies[a];
-            if (a < header.atmosphereCount && id / 32 == word)
+        for (uint32_t a = 0; a < header.atmosphereCount; ++a) {
+            const uint32_t id = gasWork.Load(header.atmosphereOffset + a * 4);
+            if (id / 32 == word)
                 bits |= 1u << (id % 32);
         }
 
         while (bits != 0) {
             const uint32_t id = word * 32 + firstbitlow(bits);
             bits &= bits - 1;
-            if (count < GAS_GPU_MAX_SPECIES)
-                gasWork.Store(PROBE_GAS_CONTROL_SLOTS + count * 4, id);
+            if (count < header.slotCapacity) {
+                gasWork.Store(header.slotsOffset + count * 4, id);
+                gasWork.Store(header.slotOfOffset + id * 4, count);
+            }
 
             ++count;
         }
     }
 
-    const uint32_t slotCount = min(count, GAS_GPU_MAX_SPECIES);
+    const uint32_t slotCount = min(count, header.slotCapacity);
     gasWork.Store(PROBE_GAS_CONTROL_SLOT_COUNT, slotCount);
-    gasWork.Store(PROBE_GAS_CONTROL_TOO_MANY, count > GAS_GPU_MAX_SPECIES ? 1u : 0u);
+    gasWork.Store(PROBE_GAS_CONTROL_TOO_MANY, count > header.slotCapacity ? 1u : 0u);
     gasWork.Store(PROBE_GAS_CONTROL_SPECIES_SEEN, count);
-    const uint4 slots = Slots();
 
     // --- 設定(型 + 欄ごとの物質の値。丸めの鍵は物質 ID)---
     GasGpuParameters parameters = gasWork.Load<GasGpuParameters>(PROBE_GAS_TEMPLATE_OFFSET);
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        parameters.massPerAmount[s] = 0;
-        parameters.formationEnergy[s] = 0;
-        parameters.heatCapacity[s] = 0;
-        parameters.roundingKey[s] = s;
-        if (s < slotCount) {
-            const ProbeGasSpecies species = GasSpecies(header, slots[s]);
-            parameters.massPerAmount[s] = species.massPerAmount;
-            parameters.formationEnergy[s] = species.formationEnergy;
-            parameters.heatCapacity[s] = species.heatCapacity;
-            parameters.roundingKey[s] = slots[s];
-        }
+    parameters.speciesCount = slotCount;
+    gasWork.Store<GasGpuParameters>(header.parametersOffset, parameters);
+    for (uint32_t s = 0; s < slotCount; ++s) {
+        const uint32_t id = SlotSpecies(header, s);
+        const ProbeGasSpecies species = GasSpecies(header, id);
+        GasGpuSpecies slot;
+        slot.massPerAmount = species.massPerAmount;
+        slot.formationEnergy = species.formationEnergy;
+        slot.heatCapacity = species.heatCapacity;
+        slot.roundingKey = id;
+        gasWork.Store<GasGpuSpecies>(header.parametersOffset + GAS_GPU_PARAMETERS_BYTES + s * GAS_GPU_SPECIES_BYTES,
+                                     slot);
     }
 
-    parameters.speciesCount = slotCount;
-    gasWork.Store<GasGpuParameters>(PROBE_GAS_PARAMETERS_OFFSET, parameters);
-
     // --- 開いた境界の外(基準の大気の並び → 欄の並び)---
-    uint32_t atmosphereSlots[PROBE_GAS_MAX_ATMOSPHERE];
-    [unroll] for (uint32_t a = 0; a < PROBE_GAS_MAX_ATMOSPHERE; ++a)
-        atmosphereSlots[a] = a < header.atmosphereCount ? SlotOf(slots, slotCount, header.atmosphereSpecies[a])
-                                                        : NO_SLOT;
-
+    const uint32_t ghostStride = GasGpuCellStride(header.slotCapacity);
     for (uint32_t layer = 0; layer < header.layerCount; ++layer) {
-        const GasGpuCell source = gasWork.Load<GasGpuCell>(header.ghostAtmosphereOffset + layer * 64);
-        GasGpuCell ghost = source;
-        [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-            ghost.amounts[s] = 0;
-            [unroll] for (uint32_t b = 0; b < PROBE_GAS_MAX_ATMOSPHERE; ++b) {
-                if (atmosphereSlots[b] == s)
-                    ghost.amounts[s] = source.amounts[b];
+        const uint32_t source = header.ghostAtmosphereOffset + layer * ghostStride;
+        const uint32_t target = header.ghostOffset + layer * ghostStride;
+        gasWork.Store<GasGpuCell>(target, gasWork.Load<GasGpuCell>(source));
+        for (uint32_t clear = 0; clear < slotCount; ++clear)
+            gasWork.Store<uint64_t>(target + GAS_GPU_CELL_BYTES + clear * 8, 0);
+
+        for (uint32_t b = 0; b < header.atmosphereCount; ++b) {
+            const uint32_t slot = SlotOf(header, gasWork.Load(header.atmosphereOffset + b * 4));
+            if (slot < slotCount) {
+                gasWork.Store<uint64_t>(target + GAS_GPU_CELL_BYTES + slot * 8,
+                                        gasWork.Load<uint64_t>(source + GAS_GPU_CELL_BYTES + b * 8));
             }
         }
-
-        gasWork.Store<GasGpuCell>(header.ghostOffset + layer * 64, ghost);
     }
 
     // --- 箱の帳簿(この刻みのぶん)---
-    gasBoxLedger.Store4(0, uint4(0, 0, 0, 0));
-    gasBoxLedger.Store4(16, uint4(0, 0, 0, 0));
-    gasBoxLedger.Store4(32, uint4(0, 0, 0, 0));
-    gasBoxLedger.Store4(48, uint4(0, 0, 0, 0));
+    const uint32_t ledgerWords = GasGpuLedgerBytes(header.slotCapacity) / 8;
+    for (uint32_t ledgerWord = 0; ledgerWord < ledgerWords; ++ledgerWord)
+        gasBoxLedger.Store2(ledgerWord * 8, uint2(0, 0));
 }
 
     // 1 スレッド = 区画の 1 セル
@@ -259,31 +272,33 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
         return;
 
     const uint32_t slotCount = SlotCount();
-    const uint4 slots = Slots();
     const RxCell cell = cells[GenerationBase(CurrentTick()) + RegionGridCell(header, region)];
 
-    // --- 成分を欄へ ---
-    GasGpuCell gas;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        gas.amounts[s] = 0;
-        [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
-            if (s < slotCount && i < cell.speciesCount && cell.species[i] == slots[s])
-                gas.amounts[s] = cell.amounts[i];
+    // --- 成分を欄へ(欄の物質の成分だけ。ほかの欄は 0)---
+    for (uint32_t clear = 0; clear < slotCount; ++clear)
+        gasCells.Store<uint64_t>(GasAmountAddress(header, region, clear), 0);
+
+    bool empty = true;
+    [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        if (i < cell.speciesCount) {
+            const uint32_t slot = SlotOf(header, cell.species[i]);
+            if (slot < slotCount) {
+                gasCells.Store<uint64_t>(GasAmountAddress(header, region, slot), cell.amounts[i]);
+                empty = empty && cell.amounts[i] == 0;
+            }
         }
     }
 
     // --- エネルギーと運動量(気体が無いセルの運動量は外へ出たものとして帳簿へ、運動エネルギーのぶんは凝縮相の熱へ)---
     const int64_t gasPart = GasEnergyPart(header, cell);
     int64_t condensed = cell.energy - gasPart;
+    GasGpuCell gas;
     gas.energy = gasPart;
     gas.momentum[0] = 0;
     gas.momentum[1] = 0;
     gas.momentum[2] = 0;
 
     const ProbeGasCellState state = gasState[region];
-    bool empty = true;
-    [unroll] for (uint32_t t = 0; t < GAS_GPU_MAX_SPECIES; ++t) empty = empty && gas.amounts[t] == 0;
-
     if (empty) {
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
             if (state.momentum[axis] != 0) {
@@ -300,7 +315,7 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     }
 
     gasWork.Store<int64_t>(header.condensedOffset + region * 8, condensed);
-    gasCells[region] = gas;
+    gasCells.Store<GasGpuCell>(GasCellAddress(region), gas);
 }
 
 // 1 スレッド = 区画の 1 セル: 書き戻した成分の数がインラインの数を超えるか
@@ -311,15 +326,15 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
         return;
 
     const RxCell cell = cells[GenerationBase(CurrentTick()) + RegionGridCell(header, region)];
-    const GasGpuCell gas = gasCells[region];
     uint32_t count = 0;
     [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
         if (i < cell.speciesCount && !IsGasSpecies(header, cell.species[i]))
             ++count;
     }
 
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        if (gas.amounts[s] != 0)
+    const uint32_t slotCount = SlotCount();
+    for (uint32_t s = 0; s < slotCount; ++s) {
+        if (gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)) != 0)
             ++count;
     }
 
@@ -327,28 +342,41 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
         gasWork.InterlockedOr(PROBE_GAS_CONTROL_OVERFLOW, 1u);
 }
 
-    // 1 スレッド = 区画の 1 セル: 気体の箱 → セル
-    [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void GasScatter(uint3 dispatchThreadId : SV_DispatchThreadID) {
+// 欄 from から先で、物質量が 0 でない最初の欄(無ければ slotCount)
+uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint32_t slotCount) {
+    uint32_t slot = from;
+    while (slot < slotCount && gasCells.Load<uint64_t>(GasAmountAddress(header, region, slot)) == 0)
+        ++slot;
+
+    return slot;
+}
+
+// 1 スレッド = 区画の 1 セル: 気体の箱 → セル
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void GasScatter(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const ProbeGasHeader header = GasHeader();
     const uint32_t region = dispatchThreadId.x;
     if (region >= header.regionCellCount || Skipped())
         return;
 
-    g_gasParameters = gasWork.Load<GasGpuParameters>(PROBE_GAS_PARAMETERS_OFFSET);
+    g_gasParameters = gasWork.Load<GasGpuParameters>(header.parametersOffset);
+    g_gasSpeciesOffset = header.parametersOffset + GAS_GPU_PARAMETERS_BYTES;
     const uint32_t slotCount = SlotCount();
-    const uint4 slots = Slots();
     const uint64_t tick = CurrentTick();
     const uint32_t grid = RegionGridCell(header, region);
     const uint32_t index = GenerationBase(tick) + grid;
     const RxCell before = cells[index];
-    const GasGpuCell gas = gasCells[region];
+    const GasGpuCell gas = gasCells.Load<GasGpuCell>(GasCellAddress(region));
 
     // --- 運動エネルギーのぶん(µJ → mJ。最も近い整数。負にならない)---
-    const int64_t kineticMicroJoule = KineticEnergy(gas, CellMass(gas));
+    GasGpuTotals totals = GasZeroTotals();
+    for (uint32_t s = 0; s < slotCount; ++s)
+        GasAddSpecies(totals, s, gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)));
+
+    const int64_t kineticMicroJoule = KineticEnergy(gas, totals.mass);
     const int64_t kinetic = (int64_t)(((uint64_t)kineticMicroJoule + 500) / 1000);
     const int64_t condensed = gasWork.Load<int64_t>(header.condensedOffset + region * 8);
 
-    // --- 凝縮相の成分 + 0 でない気体の成分を ID の順に(どちらも ID の順で、重ならない)---
+    // --- 凝縮相の成分 + 0 でない気体の成分を ID の順に(どちらも ID の順で、重ならない。気体は欄の順 = ID の順に進む)---
     uint32_t gasInBefore = 0;  // before の成分のうち気体の印
     [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
         if (i < before.speciesCount && IsGasSpecies(header, before.species[i]))
@@ -358,6 +386,7 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     RxCell after = RxMakeEmptyCell(condensed + gas.energy - kinetic);
     uint32_t last = 0;
     bool first = true;
+    uint32_t nextGas = NextGasSlot(header, region, 0, slotCount);
     [unroll] for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
         uint32_t bestId = NO_SPECIES;
         uint64_t bestAmount = 0;
@@ -369,11 +398,13 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
             }
         }
 
-        [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-            const uint32_t id = slots[s];
-            if (s < slotCount && gas.amounts[s] != 0 && (first || id > last) && id < bestId) {
+        bool takesGas = false;
+        if (nextGas < slotCount) {
+            const uint32_t id = SlotSpecies(header, nextGas);
+            if (id < bestId) {
                 bestId = id;
-                bestAmount = gas.amounts[s];
+                bestAmount = gasCells.Load<uint64_t>(GasAmountAddress(header, region, nextGas));
+                takesGas = true;
             }
         }
 
@@ -384,6 +415,9 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
             last = bestId;
             first = false;
         }
+
+        if (takesGas)
+            nextGas = NextGasSlot(header, region, nextGas + 1, slotCount);
     }
 
     // --- 気体の欄 ---
@@ -414,8 +448,8 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     gasWork.InterlockedAdd(PROBE_GAS_CONTROL_CHANGED, 1, changed);
 }
 
-// 1 スレッド: 帳簿へ(流さなかった刻みは数えるだけ)
-[numthreads(1, 1, 1)] void GasFinish() {
+    // 1 スレッド: 帳簿へ(流さなかった刻みは数えるだけ)
+    [numthreads(1, 1, 1)] void GasFinish() {
     if (gasWork.Load(PROBE_GAS_CONTROL_TOO_MANY) != 0) {
         gasWork.Store(PROBE_GAS_CONTROL_SKIPPED_TOO_MANY, gasWork.Load(PROBE_GAS_CONTROL_SKIPPED_TOO_MANY) + 1);
         return;
@@ -428,10 +462,9 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
 
     const ProbeGasHeader header = GasHeader();
     const uint32_t slotCount = SlotCount();
-    const uint4 slots = Slots();
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        if (s < slotCount)
-            AddLedger(header.ledgerOffset + slots[s] * 8, gasBoxLedger.Load<int64_t>(GAS_GPU_LEDGER_AMOUNTS + s * 8));
+    for (uint32_t s = 0; s < slotCount; ++s) {
+        AddLedger(header.ledgerOffset + SlotSpecies(header, s) * 8,
+                  gasBoxLedger.Load<int64_t>(GAS_GPU_LEDGER_AMOUNTS + s * 8));
     }
 
     const uint32_t energyAddress = header.ledgerOffset + header.speciesCount * 8;

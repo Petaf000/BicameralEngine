@@ -223,6 +223,61 @@ namespace {
         return {.name = "subcycled_fast", .tree = tree, .ticks = 4, .expectLimits = true};
     }
 
+    // --- T-0598: 成分 6 つ(N2・O2・Ar・CO2・H2O・CO。木の成分の欄に上限が無いこと)。丸めの鍵は欄の番号でない番号
+    // (世界のセルに載せる時の物質 ID の代わり)、生成のエネルギーも入れる ---
+    constexpr std::array<uint32_t, 6> SIX_AIR_FRACTIONS_Q32 = {3336244695u, 899623850u, 40114995u,
+                                                               1803886u,    17179869u,  0u};
+
+    GasConfig WithSixSpecies(GasConfig config) {
+        config.speciesCount = 6;
+        config.species[0] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0, .roundingKey = 11};
+        config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0, .roundingKey = 4};
+        config.species[2] = {.molarMass = 39948, .heatCapacity = 12472, .formationEnergy = 0, .roundingKey = 17};
+        config.species[3] = {.molarMass = 44010, .heatCapacity = 28460, .formationEnergy = -393509, .roundingKey = 23};
+        config.species[4] = {.molarMass = 18015, .heatCapacity = 25300, .formationEnergy = -241826, .roundingKey = 30};
+        config.species[5] = {.molarMass = 28010, .heatCapacity = 20800, .formationEnergy = -110525, .roundingKey = 9};
+
+        return config;
+    }
+
+    GasTree MakeSixTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
+                        const GasTreeOptions& options = {}) {
+        return MakeGasTree(config, regions, SIX_AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE, options);
+    }
+
+    // 湯気と CO の混じった暖かい塊(N2 の 1/3 を H2O と CO へ)
+    void AddVapor(const GasConfig& config, GasCell& cell) {
+        GasPerSpecies<uint64_t> amounts = cell.amounts;
+        const uint64_t third = amounts[0] / 3;
+        amounts[0] -= third;
+        amounts[4] += third - (third / 4);
+        amounts[5] += third / 4;
+        GasCell vapor = MakeGasCell(config, amounts, AIR_TEMPERATURE + 50000);
+        vapor.momentum = cell.momentum;
+        cell = vapor;
+    }
+
+    Scene MakeSixClosedScene() {
+        const GasConfig config = WithSixSpecies(MakeAirConfig(8, 4, 8));
+        GasTree tree = MakeSixTree(config, MIDDLE_REGION);
+        AddVapor(config, tree.cells[tree.Find(1, 5, 5, 6)]);
+        AddVapor(config, tree.cells[tree.Find(0, 6, 2, 6)]);
+        SetMoving(tree.cells[tree.Find(0, 6, 1, 3)], -2, -1);
+        return {.name = "six_closed", .tree = tree, .ticks = 6, .expectConserved = true};
+    }
+
+    Scene MakeSixSubcycledWindScene() {
+        GasConfig config = WithSixSpecies(MakeSubcycledConfig());
+        config.boundary = {GasBoundary::Open, GasBoundary::Periodic, GasBoundary::Wall};
+        config.windVelocity = {(int32_t)(2 * METER_PER_SECOND), 0, 0};
+        config.randomSeed = 0x5EED;
+        const std::array<GasTreeRegion, 1> region = {GasTreeRegion{.level = 1, .origin = {0, 0, 2}, .size = {6, 8, 6}}};
+        GasTree tree = MakeSixTree(config, region, SUBCYCLED);
+        AddVapor(config, tree.cells[tree.Find(1, 1, 3, 3)]);
+        AddVapor(config, tree.cells[tree.Find(0, 4, 2, 2)]);
+        return {.name = "six_subcycled_wind", .tree = tree, .ticks = 6};
+    }
+
     // --- 環境の値のホットリロード(T-0470)---
 
     constexpr uint32_t MOON_GRAVITY = 1620000;  // µm/s²
@@ -277,6 +332,8 @@ namespace {
         scenes.push_back(MakeClosedEnvironmentChangeScene());
         scenes.push_back(MakeSubcycledEnvironmentChangeScene());
         scenes.push_back(MakeOpenEnvironmentChangeScene());
+        scenes.push_back(MakeSixClosedScene());
+        scenes.push_back(MakeSixSubcycledWindScene());
 
         return scenes;
     }

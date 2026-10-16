@@ -4,8 +4,9 @@
 // 確かめること(区画 12 × 24 × 12・閉じた壁・陽解法。表は probe_gas_test の 1〜4 と同じ〔試験の表から CO を作る規則を除き、
 // 基準の大気 N2 79%・O2 21%〕):
 //   1. 静かな大気: 刻みごとのハッシュが CPU と同じ・気体の欄(運動量・運動エネルギーのぶん)と帳簿も同じ
-//   2. 燃える木箱: 同じく毎刻み一致し、流さなかった刻みが 0(GPU の欄の数 4 に収まる)
-//   3. シェーダーの assert・debug layer のエラーが 0 件
+//   2. 燃える木箱: 同じく毎刻み一致し、流さなかった刻みが 0
+//   3. 6 種の空気(N2・O2・Ar・CO2・H2O・CO。GPU の成分の欄に上限が無いこと。T-0598)の静かな大気と燃える木箱: 同じく毎刻み一致
+//   4. シェーダーの assert・debug layer のエラーが 0 件
 // 気体の段(適用の単位の中)の GPU 時間を出す(docs/perf.md)。
 // 走らせ方: ctest(gpu_probe_gas・gpu_probe_gas_warp)か `job.py run -Preset release -Exe gpu_probe_gas_test`。引数は gpu_test_options.h
 #include <algorithm>
@@ -57,7 +58,8 @@ namespace {
         }
     };
 
-    BakedReactionTable MakeTable() {
+    // 基準の大気: N2 79%・O2 21%、six なら 6 種(N2・O2・Ar・CO2・H2O・CO。T-0598)
+    BakedReactionTable MakeTable(bool six) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         std::erase_if(definition.rules, [](const RuleDefinition& rule) {
             return std::ranges::any_of(rule.products,
@@ -72,6 +74,14 @@ namespace {
                                       {.species = "oxygen", .partsPerMillion = 210000}}}},
             .surfacePressurePascals = 101325,
         };
+        if (six) {
+            definition.atmosphere.points[0].fractions = {{.species = "nitrogen", .partsPerMillion = 780000},
+                                                         {.species = "oxygen", .partsPerMillion = 209000},
+                                                         {.species = "argon", .partsPerMillion = 9300},
+                                                         {.species = "carbon_dioxide", .partsPerMillion = 400},
+                                                         {.species = "water_vapor", .partsPerMillion = 1200},
+                                                         {.species = "carbon_monoxide", .partsPerMillion = 100}};
+        }
 
         auto baked = BakeReactionTable(definition);
         FX_ASSERT(baked.has_value());
@@ -386,10 +396,13 @@ int main(int argc, char** argv) {
 
     // WARP は遅いので刻みを減らす
     const bool warp = options->adapter == gpu::AdapterKind::Warp;
-    const BakedReactionTable table = MakeTable();
+    const BakedReactionTable table = MakeTable(false);
+    const BakedReactionTable sixTable = MakeTable(true);
     Failures failures;
     CheckScene(device->Get(), table, "静かな大気", false, warp ? 3 : 10, failures);
     CheckScene(device->Get(), table, "燃える木箱", true, warp ? 4 : 60, failures);
+    CheckScene(device->Get(), sixTable, "6 種の空気・静か", false, warp ? 2 : 10, failures);
+    CheckScene(device->Get(), sixTable, "6 種の空気・燃える木箱", true, warp ? 3 : 60, failures);
 
     if (!warp)
         Measure(device->Get(), table);

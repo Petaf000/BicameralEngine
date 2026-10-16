@@ -13,8 +13,9 @@
 //   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
 //     HW と WARP で書き出して diff すると、どの面のどの欄が違うかが分かる。T-0185)
 //   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120。
-//              --isothermal で T-0234 の前の等温の形と比べる)
+//              --isothermal で T-0234 の前の等温の形と比べる。--six で成分 6 つの箱〔T-0598〕)
 #include "sim/gpu_gas.h"
+#include "common/gas_gpu.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -271,6 +272,60 @@ namespace {
         return {.name = name, .box = box, .ticks = 30};
     }
 
+    // --- T-0598: 成分 6 つ(N2・O2・Ar・CO2・H2O・CO。GPU の成分の欄に上限が無いこと)。丸めの鍵は欄の番号でない番号
+    // (世界のセルに載せる時の物質 ID の代わり)、生成のエネルギーも入れる ---
+    constexpr std::array<uint32_t, 6> SIX_AIR_FRACTIONS_Q32 = {3336244695u, 899623850u, 40114995u,
+                                                               1803886u,    17179869u,  0u};
+
+    GasConfig MakeSixAirConfig(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ) {
+        GasConfig config = MakeAirConfig(sizeX, sizeY, sizeZ);
+        config.speciesCount = 6;
+        config.species[0] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0, .roundingKey = 11};
+        config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0, .roundingKey = 4};
+        config.species[2] = {.molarMass = 39948, .heatCapacity = 12472, .formationEnergy = 0, .roundingKey = 17};
+        config.species[3] = {.molarMass = 44010, .heatCapacity = 28460, .formationEnergy = -393509, .roundingKey = 23};
+        config.species[4] = {.molarMass = 18015, .heatCapacity = 25300, .formationEnergy = -241826, .roundingKey = 30};
+        config.species[5] = {.molarMass = 28010, .heatCapacity = 20800, .formationEnergy = -110525, .roundingKey = 9};
+
+        return config;
+    }
+
+    // 風(six_wind。開いた境界・MC)か閉じた箱の熱い濃いセル(six_blast)。真ん中あたりに湯気と CO の混じった暖かい塊
+    Scene MakeSixSpeciesScene(const char* name, bool blast) {
+        GasConfig config = blast ? MakeSixAirConfig(8, 8, 8) : MakeSixAirConfig(16, 4, 6);
+        if (!blast) {
+            config.boundary = {GasBoundary::Open, GasBoundary::Periodic, GasBoundary::Wall};
+            config.windVelocity = {(int32_t)(2 * METER_PER_SECOND), 0, 0};
+            config.randomSeed = 0x5EED;
+        }
+
+        GasBox box = MakeGasBox(
+            config, MakeHydrostaticReference(config, SIX_AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE));
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const uint32_t x = CellX(box, index);
+            const uint32_t z = CellZ(box, index);
+            if (x < 3 || x > 5 || z < 2 || z > 3)
+                continue;
+
+            const GasCell old = box.cells[index];
+            GasPerSpecies<uint64_t> amounts = old.amounts;
+            const uint64_t third = amounts[0] / 3;
+            amounts[0] -= third;
+            amounts[4] += third - (third / 4);
+            amounts[5] += third / 4;
+            if (blast && x == 4 && z == 2) {
+                for (uint64_t& amount : amounts)
+                    amount *= 4;
+            }
+
+            GasCell cell = MakeGasCell(box.config, amounts, blast ? 900000 : AIR_TEMPERATURE + 60000);
+            cell.momentum = old.momentum;
+            box.cells[index] = cell;
+        }
+
+        return {.name = name, .box = box, .ticks = blast ? 20ull : 60ull};
+    }
+
     // 環境の値のホットリロード(T-0444・ADR-0194): 途中の刻みで重力と音速の基準を替える(基準の大気は同じで、層の基準は作り直す)
     Scene WithEnvironmentChange(Scene scene, std::string name, uint64_t tick, uint32_t gravity, uint32_t soundSpeed) {
         GasConfig config = scene.box.config;
@@ -302,6 +357,8 @@ namespace {
         scenes.push_back(MakeBlastScene());
         scenes.push_back(MakeHotScene("hot_cell", false));
         scenes.push_back(MakeHotScene("blast_hot", true));
+        scenes.push_back(MakeSixSpeciesScene("six_wind", false));
+        scenes.push_back(MakeSixSpeciesScene("six_blast", true));
 
         // 重力を変えた世界(T-0423): 無重力・月・上限 100 m/s²
         scenes.push_back(MakeClosedScene("closed_zero_gravity", 0));
@@ -354,8 +411,9 @@ namespace {
             return;
 
         std::ofstream out(dumpPath);
-        constexpr size_t FACE_WORDS = 13;  // GasGpuFace(gas_gpu.hlsli)の 104 バイト
-        constexpr size_t SUM_WORDS = 5;    // GasGpuCellSums の 40 バイト
+        // 面・セルごとの合計は頭の並びの後ろに成分ごとの面(gas_gpu.hlsli)。成分の面の語は頭の続きの番号で出る
+        constexpr size_t FACE_WORDS = GAS_GPU_FACE_BYTES / 8;
+        constexpr size_t SUM_WORDS = GAS_GPU_SUMS_BYTES / 8;
         for (size_t i = 0; i < faceWords.size(); ++i)
             out << std::format("face {} {} {}\n", i / FACE_WORDS, i % FACE_WORDS, (int64_t)faceWords[i]);
 
@@ -625,14 +683,16 @@ namespace {
     }
 
     // --- 計測: CPU と比べず、大きい箱で 1 刻みの GPU 時間 ---
-    int Profile(ID3D12Device5* device, GpuParts& parts, uint32_t size, uint64_t ticks, bool isothermal) {
-        GasConfig config = MakeAirConfig(size, size, size);
+    int Profile(ID3D12Device5* device, GpuParts& parts, uint32_t size, uint64_t ticks, bool isothermal, bool six) {
+        GasConfig config = six ? MakeSixAirConfig(size, size, size) : MakeAirConfig(size, size, size);
         if (isothermal)
             config.thermodynamics = GasThermodynamics::Isothermal;  // T-0234 の前の形と比べる
 
         config.boundary = {GasBoundary::Open, GasBoundary::Periodic, GasBoundary::Wall};
         config.windVelocity = {(int32_t)(2 * METER_PER_SECOND), 0, 0};
-        GasBox box = MakeAirBox(config);
+        GasBox box = six ? MakeGasBox(config, MakeHydrostaticReference(config, SIX_AIR_FRACTIONS_Q32, AIR_TEMPERATURE,
+                                                                       SURFACE_PRESSURE))
+                         : MakeAirBox(config);
         for (uint32_t index = 0; index < box.cells.size(); index += 7)
             AddSmoke(box, index);
 
@@ -669,8 +729,9 @@ namespace {
                 return 1;
 
             const double milliseconds = (double)*elapsed * 1000.0 / (double)frequency / (double)ticks;
-            Log(Channel::Sim, Level::Info, "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・小刻み {}・{}: 1 刻み {:.3f} ms",
-                round, size, box.cells.size(), config.substeps, isothermal ? "等温" : "断熱", milliseconds);
+            Log(Channel::Sim, Level::Info,
+                "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・成分 {}・小刻み {}・{}: 1 刻み {:.3f} ms", round, size,
+                box.cells.size(), config.speciesCount, config.substeps, isothermal ? "等温" : "断熱", milliseconds);
         }
 
         return 0;
@@ -680,6 +741,7 @@ namespace {
         std::vector<std::string> scenes;  // 空なら全部
         bool profile = false;
         bool isothermal = false;
+        bool six = false;
         uint32_t size = 32;
         uint64_t ticks = 120;
     };
@@ -698,6 +760,8 @@ namespace {
                 options.profile = true;
             else if (argument == "--isothermal")
                 options.isothermal = true;
+            else if (argument == "--six")
+                options.six = true;
             else if (argument == "--size" && hasValue)
                 options.size = (uint32_t)std::stoul(arguments[++index]);
             else if (argument == "--substeps" && hasValue)
@@ -723,7 +787,7 @@ namespace {
             Log(Channel::Sim, Level::Error,
                 "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前[,名前...]] [--substeps n] "
                 "[--passes n] "
-                "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal]]");
+                "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal] [--six]]");
             return 2;
         }
 
@@ -742,7 +806,8 @@ namespace {
 
         GpuParts parts{.queue = std::move(*queue), .debugRing = std::move(*debugRing)};
         if (gasOptions->profile)
-            return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks, gasOptions->isothermal);
+            return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks, gasOptions->isothermal,
+                           gasOptions->six);
 
         std::vector<std::pair<std::string, GasBox>> results;
         uint32_t sceneCount = 0;

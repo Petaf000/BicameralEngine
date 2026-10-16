@@ -25,7 +25,9 @@ namespace bicameral::sim {
 
     class GpuGas {
     public:
-        [[nodiscard]] static std::expected<GpuGas, std::string> Create(ID3D12Device5* device, const GasBox& box);
+        // 成分の数に上限は無い(T-0598)。reservedSpecies = 箱の成分の数より多く欄を取る数(仮の世界は刻みごとに欄の物質が変わる。T-0592)
+        [[nodiscard]] static std::expected<GpuGas, std::string> Create(ID3D12Device5* device, const GasBox& box,
+                                                                       uint32_t reservedSpecies = 0);
 
         // 初めの箱(Create に渡したセルと帳簿)を GPU へ写す
         void RecordUpload(ID3D12GraphicsCommandList10* list);
@@ -39,10 +41,11 @@ namespace bicameral::sim {
         void RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
                           D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost) const;
 
-        // 箱のセル(u0。GasGpuCell × セル)と帳簿(u5。GAS_GPU_LEDGER_BYTES)。仮の世界の段が読み書きする(T-0592)
+        // 箱のセル(u0。頭 + 欄 × SpeciesStride の件 × セル)と帳簿(u5。GasGpuLedgerBytes)。仮の世界の段が読み書きする(T-0592)
         [[nodiscard]] ID3D12Resource* CellBuffer() const { return m_uavs[0].Get(); }
         [[nodiscard]] ID3D12Resource* LedgerBuffer() const { return m_uavs[5].Get(); }
         [[nodiscard]] uint32_t Substeps() const { return m_substeps; }
+        [[nodiscard]] uint32_t SpeciesStride() const { return m_speciesStride; }
 
         // 環境の値のホットリロード(T-0444・ADR-0194): box(SetGasEnvironment で環境を替えた後の設定・係数・層の基準)から
         // t0〜t2 を作り直して写す。次に記録する RecordStep から新しい値で刻む(刻みの境目で呼ぶ)。前の t0〜t2 と写しの元は keepAlive へ
@@ -89,7 +92,7 @@ namespace bicameral::sim {
             uint32_t roundingTickLow = 0;
             uint32_t roundingTickHigh = 0;
             uint32_t cellCount = 0;
-            uint32_t unused = 0;
+            uint32_t speciesStride = 0;
         };
 
         GpuGas() = default;
@@ -97,7 +100,8 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
         [[nodiscard]] std::expected<void, std::string> CreateBuffers(ID3D12Device5* device, const GasBox& box);
         [[nodiscard]] static std::array<gpu::ResidentBuffer, 3> CreateLayerBuffers(ID3D12Device* device,
-                                                                                   const GasBox& box);
+                                                                                   const GasBox& box,
+                                                                                   uint32_t reservedSpecies);
         void RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
                         const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const;
         void RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
@@ -105,6 +109,8 @@ namespace bicameral::sim {
         [[nodiscard]] std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3> OwnSrvs() const;
 
         uint32_t m_cellCount = 0;
+        uint32_t m_speciesCount = 0;   // 箱の成分の数(読み戻す欄)
+        uint32_t m_speciesStride = 1;  // 1 件の成分の欄の数(gas_step.hlsl の g_speciesStride)
         uint32_t m_substeps = 0;
         uint64_t m_tick = 0;
         uint32_t m_debugPassLimit = 9;

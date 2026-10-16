@@ -53,7 +53,7 @@ namespace bicameral::sim {
             uint64_t fraction = 0;
             int64_t weightLeft = 0;  // 面のレベルの単位
             int64_t weightRight = 0;
-            std::array<uint64_t, GAS_MAX_SPECIES> moved = {};  // 面のレベルの単位
+            GasPerSpecies<uint64_t> moved;  // 面のレベルの単位
         };
 
         // 小刻みの中の状態(力を当てた後・移した後)
@@ -69,8 +69,8 @@ namespace bicameral::sim {
             TreeState next;                   // forced + 移した塊 + 細かい小刻みの面の力積
 
             // --- 粗い小刻み 1 回の間に出した量(細かい面が何度も引くため。T-0320)---
-            std::vector<uint64_t> committedOutflow;                    // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
-            std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> taken;  // 出した物質量(風上のレベル + 1 の単位)
+            std::vector<uint64_t> committedOutflow;      // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
+            std::vector<GasPerSpecies<uint64_t>> taken;  // 出した物質量(風上のレベル + 1 の単位)
 
             GasTreeStepStats* stats = nullptr;  // 抑えを通った回数(試験だけ。T-0356)
         };
@@ -497,7 +497,8 @@ namespace bicameral::sim {
             return whole + ((hash >> 32) < (amountQ32.lo & gd::LOW_32_BITS) ? 1 : 0);
         }
 
-        // 乱数は(世界のシード, そのレベルの小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分。レベル 0 は gas_reference と同じ
+        // 乱数は(世界のシード, そのレベルの小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分の鍵(既定は欄の番号。T-0598)。
+        // レベル 0 は gas_reference と同じ
         void ComputeMovedAmounts(const GasTree& tree, const std::vector<GasCell>& cells,
                                  const std::vector<GasDerived>& derived, uint64_t micro, std::vector<TreeFace>& faces) {
             for (TreeFace& face : faces) {
@@ -509,7 +510,9 @@ namespace bicameral::sim {
                                                        gd::GAS_ROUNDING_PURPOSE + face.level);
                 for (uint32_t s = 0; s < tree.config.speciesCount; ++s) {
                     const fx::FxU128 amountQ32 = MovedAmountQ32(tree, cells, derived, face, s);
-                    face.moved[s] = RoundAmount(tree, amountQ32, fx::FxHashCombine(faceHash, s));
+                    const uint32_t key = tree.config.species[s].roundingKey;
+                    face.moved[s] = RoundAmount(tree, amountQ32,
+                                                fx::FxHashCombine(faceHash, key == GAS_ROUNDING_KEY_SLOT ? s : key));
                 }
             }
         }
@@ -520,7 +523,7 @@ namespace bicameral::sim {
         void LimitMovedAmounts(const GasTree& tree, TreeWork& work, std::vector<TreeFace>& faces) {
             const std::vector<GasCell>& cells = work.forced.cells;
             const uint32_t speciesCount = tree.config.speciesCount;
-            std::vector<std::array<uint64_t, GAS_MAX_SPECIES>> outgoing(tree.cells.size());
+            std::vector<GasPerSpecies<uint64_t>> outgoing(tree.cells.size());
             for (const TreeFace& face : faces) {
                 const TreeSide& donor = Donor(face);
                 if (face.fraction == 0 || donor.kind != SideKind::Cell)
@@ -807,7 +810,7 @@ namespace bicameral::sim {
                 const uint64_t divisor = gd::PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 * temperature;
                 const uint64_t total = fx::FxDivU128By64(fx::FxMulU64Full(pressure, gd::ONE_Q32), divisor).quotient;
 
-                std::array<uint64_t, GAS_MAX_SPECIES> amounts = {};
+                GasPerSpecies<uint64_t> amounts;
                 for (uint32_t s = 0; s < config.speciesCount && s < fractionsQ32.size(); ++s)
                     amounts[s] = gd::MulShiftU64(total, fractionsQ32[s], 32);
 
@@ -929,10 +932,7 @@ namespace bicameral::sim {
             maxLevel = std::max(maxLevel, region.level);
         }
 
-        // 木の成分の欄は GAS_MAX_SPECIES 個・丸めの鍵は欄の番号(物質 ID の鍵と 5 つ目からの成分は 1 レベルの箱だけ。T-0591)
-        assert(config.speciesCount <= GAS_MAX_SPECIES);
-        assert(std::ranges::all_of(
-            config.species, [](const GasSpecies& species) { return species.roundingKey == GAS_ROUNDING_KEY_SLOT; }));
+        // 木の成分の数に上限は無い(GasPerSpecies)。丸めの鍵は設定のまま(欄の番号か物質 ID。T-0598)
 
         // --- 木の形: レベルごとの大きさ・小刻みの指数 σ(T-0320)・セルの表 ---
         assert(maxLevel <= MAX_TREE_LEVEL);

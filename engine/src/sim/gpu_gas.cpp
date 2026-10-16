@@ -3,6 +3,9 @@
 // 小刻みの数は設定で決まる(1 刻み = substeps × 9 段)。反復の回数が決まっているので Work Graph にしても結果は同じ(D-302。T-0208 で測る)。
 #include "sim/gpu_gas.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include "common/gas_gpu.hlsli"
 #include "gpu/resources.h"
 #include "sim/gpu_gas_internal.h"
@@ -28,19 +31,12 @@ namespace bicameral::sim {
         // 面の段か(面の番号 = セル × 6 ごとに 1 スレッド)
         constexpr std::array<bool, 9> FACE_PASS = {false, true, false, true, false, true, false, true, false};
 
-        static_assert(sizeof(GasGpuCell) == 64);
+        static_assert(sizeof(GasGpuCell) == GAS_GPU_CELL_BYTES);
         static_assert(sizeof(GasGpuDerived) == 48);
-        static_assert(sizeof(GasGpuFace) == 112);
-        static_assert(sizeof(GasGpuCellSums) == 40);
-        static_assert(sizeof(GasGpuParameters) == 208);
-        // 帳簿の GPU の形(sim::GasLedger の成分は GasPerSpecies〔数の上限なし。T-0591〕なので、GPU の欄の数の配列へ写す)
-        struct GpuLedger {
-            std::array<int64_t, GAS_MAX_SPECIES> amounts = {};
-            int64_t energy = 0;
-            std::array<int64_t, GAS_AXES> momentum = {};
-        };
-        static_assert(sizeof(GpuLedger) == GAS_GPU_LEDGER_BYTES);
-        static_assert(GAS_GPU_MAX_SPECIES == GAS_MAX_SPECIES);
+        static_assert(sizeof(GasGpuFace) == GAS_GPU_FACE_BYTES);
+        static_assert(sizeof(GasGpuCellSums) == GAS_GPU_SUMS_BYTES);
+        static_assert(sizeof(GasGpuParameters) == GAS_GPU_PARAMETERS_BYTES);
+        static_assert(sizeof(GasGpuSpecies) == GAS_GPU_SPECIES_BYTES);
         static_assert((uint32_t)GasBoundary::Wall == GAS_GPU_BOUNDARY_WALL &&
                       (uint32_t)GasBoundary::Periodic == GAS_GPU_BOUNDARY_PERIODIC &&
                       (uint32_t)GasBoundary::Open == GAS_GPU_BOUNDARY_OPEN);
@@ -50,9 +46,7 @@ namespace bicameral::sim {
         static_assert((uint32_t)GasThermodynamics::Isothermal == GAS_GPU_THERMODYNAMICS_ISOTHERMAL &&
                       (uint32_t)GasThermodynamics::Adiabatic == GAS_GPU_THERMODYNAMICS_ADIABATIC);
 
-        template <typename T>
-        ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, std::span<const T> data) {
-            const auto bytes = std::as_bytes(data);
+        ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device* device, std::span<const std::byte> bytes) {
             ComPtr<ID3D12Resource> buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
             void* mapped = nullptr;
             const D3D12_RANGE noRead{.Begin = 0, .End = 0};
@@ -69,32 +63,84 @@ namespace bicameral::sim {
             return (uint32_t)((threadCount + THREADS_PER_GROUP - 1) / THREADS_PER_GROUP);
         }
 
+        template <typename T>
+        void WriteRecord(std::span<std::byte> bytes, size_t offset, const T& value) {
+            std::memcpy(bytes.data() + offset, &value, sizeof(T));
+        }
+
+        template <typename T>
+        T ReadRecord(std::span<const std::byte> bytes, size_t offset) {
+            T value;
+            std::memcpy(&value, bytes.data() + offset, sizeof(T));
+            return value;
+        }
+
+        // 帳簿(頭 + 物質量 × 欄の数。gas_gpu.hlsli の GAS_GPU_LEDGER_*)
+        std::vector<std::byte> PackLedger(const GasLedger& ledger, uint32_t speciesStride) {
+            std::vector<std::byte> bytes(GasGpuLedgerBytes(speciesStride));
+            WriteRecord(std::span(bytes), GAS_GPU_LEDGER_ENERGY, ledger.energy);
+            WriteRecord(std::span(bytes), GAS_GPU_LEDGER_MOMENTUM, ledger.momentum);
+            for (uint32_t s = 0; s < speciesStride; ++s)
+                WriteRecord(std::span(bytes), GAS_GPU_LEDGER_AMOUNTS + (s * 8), ledger.amounts[s]);
+
+            return bytes;
+        }
+
     }  // namespace
 
     // --- CPU の形と GPU の形の写し(gpu_gas_internal.h。木の GPU〔gpu_gas_tree.cpp〕も使う)---
 
-    GasGpuCell ToGasGpuCell(const GasCell& cell) {
-        GasGpuCell result{};
-        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-            result.amounts[s] = cell.amounts[s];
-
-        result.energy = cell.energy;
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            result.momentum[axis] = cell.momentum[axis];
-
-        return result;
+    uint32_t GasGpuSpeciesStride(uint32_t speciesCount, uint32_t reserved) {
+        return std::max({1u, speciesCount, reserved});
     }
 
-    GasCell FromGasGpuCell(const GasGpuCell& cell) {
-        GasCell result;
-        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-            result.amounts[s] = cell.amounts[s];
+    void PackGasGpuCell(const GasCell& cell, uint32_t speciesStride, std::span<std::byte> record) {
+        const GasGpuCell head{.energy = cell.energy,
+                              .momentum = {cell.momentum[0], cell.momentum[1], cell.momentum[2]}};
+        WriteRecord(record, 0, head);
+        for (uint32_t s = 0; s < speciesStride; ++s)
+            WriteRecord(record, GAS_GPU_CELL_BYTES + (s * 8), cell.amounts[s]);
+    }
 
-        result.energy = cell.energy;
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            result.momentum[axis] = cell.momentum[axis];
+    std::vector<std::byte> PackGasGpuCellRecords(std::span<const GasCell> cells, uint32_t speciesStride) {
+        const size_t stride = GasGpuCellStride(speciesStride);
+        std::vector<std::byte> bytes(cells.size() * stride);
+        for (size_t i = 0; i < cells.size(); ++i)
+            PackGasGpuCell(cells[i], speciesStride, std::span(bytes).subspan(i * stride, stride));
 
-        return result;
+        return bytes;
+    }
+
+    std::vector<std::byte> PackGasGpuCellPlanes(std::span<const GasCell> cells, uint32_t speciesStride) {
+        const auto count = (uint32_t)cells.size();
+        std::vector<std::byte> bytes((size_t)count * GasGpuCellStride(speciesStride));
+        for (uint32_t i = 0; i < count; ++i) {
+            const GasCell& cell = cells[i];
+            const GasGpuCell head{.energy = cell.energy,
+                                  .momentum = {cell.momentum[0], cell.momentum[1], cell.momentum[2]}};
+            WriteRecord(std::span(bytes), (size_t)i * GAS_GPU_CELL_BYTES, head);
+            for (uint32_t s = 0; s < speciesStride; ++s)
+                WriteRecord(std::span(bytes), GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, count, i, s), cell.amounts[s]);
+        }
+
+        return bytes;
+    }
+
+    std::vector<GasCell> UnpackGasGpuCellPlanes(std::span<const std::byte> bytes, uint32_t cellCount,
+                                                uint32_t speciesCount) {
+        std::vector<GasCell> cells(cellCount);
+        for (uint32_t i = 0; i < cellCount; ++i) {
+            const auto head = ReadRecord<GasGpuCell>(bytes, (size_t)i * GAS_GPU_CELL_BYTES);
+            GasCell& cell = cells[i];
+            for (uint32_t s = 0; s < speciesCount; ++s)
+                cell.amounts[s] = ReadRecord<uint64_t>(bytes, GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, cellCount, i, s));
+
+            cell.energy = head.energy;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                cell.momentum[axis] = head.momentum[axis];
+        }
+
+        return cells;
     }
 
     GasGpuDerived ToGasGpuDerived(const GasDerived& derived) {
@@ -109,14 +155,6 @@ namespace bicameral::sim {
 
     GasGpuParameters MakeGasGpuParameters(const GasConfig& config, const GasCoefficients& coefficients) {
         GasGpuParameters parameters{};
-        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s) {
-            parameters.massPerAmount[s] = coefficients.massPerAmount[s];
-            parameters.formationEnergy[s] = config.species[s].formationEnergy;
-            parameters.heatCapacity[s] = config.species[s].heatCapacity;
-            const uint32_t key = config.species[s].roundingKey;
-            parameters.roundingKey[s] = key == GAS_ROUNDING_KEY_SLOT ? s : key;  // 使わない欄も欄の番号(読まれない)
-        }
-
         parameters.centralFlow = coefficients.centralFlow;
         parameters.pressureFlow = coefficients.pressureFlow;
         parameters.pressureImpulse = coefficients.pressureImpulse;
@@ -142,25 +180,44 @@ namespace bicameral::sim {
         return parameters;
     }
 
-    std::expected<GpuGas, std::string> GpuGas::Create(ID3D12Device5* device, const GasBox& box) {
+    GasGpuSpecies MakeGasGpuSpecies(const GasConfig& config, const GasCoefficients& coefficients, uint32_t slot) {
+        const uint32_t key = config.species[slot].roundingKey;
+
+        return {.massPerAmount = coefficients.massPerAmount[slot],
+                .formationEnergy = config.species[slot].formationEnergy,
+                .heatCapacity = config.species[slot].heatCapacity,
+                .roundingKey = key == GAS_ROUNDING_KEY_SLOT ? slot : key};  // 使わない欄も欄の番号(読まれない)
+    }
+
+    std::vector<std::byte> PackGasGpuParameters(const GasConfig& config, const GasCoefficients& coefficients,
+                                                uint32_t speciesStride) {
+        std::vector<std::byte> bytes(GasGpuParametersBytes(speciesStride));
+        WriteRecord(std::span(bytes), 0, MakeGasGpuParameters(config, coefficients));
+        for (uint32_t s = 0; s < speciesStride; ++s) {
+            WriteRecord(std::span(bytes), GAS_GPU_PARAMETERS_BYTES + (s * GAS_GPU_SPECIES_BYTES),
+                        MakeGasGpuSpecies(config, coefficients, s));
+        }
+
+        return bytes;
+    }
+
+    std::expected<GpuGas, std::string> GpuGas::Create(ID3D12Device5* device, const GasBox& box,
+                                                      uint32_t reservedSpecies) {
         GpuGas result;
         result.m_cellCount = (uint32_t)box.cells.size();
+        result.m_speciesCount = box.config.speciesCount;
+        result.m_speciesStride = GasGpuSpeciesStride(box.config.speciesCount, reservedSpecies);
         result.m_substeps = box.config.substeps;
         result.m_tick = box.tick;
         if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) > MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
 
-        // GPU は成分の欄を GAS_MAX_SPECIES 個とも回す(回数を定数にして展開する)。使わない欄は 0 の前提。
-        // 丸めの鍵は設定のまま(欄の番号か物質 ID。T-0592)。5 つ目からの成分は CPU だけ(T-0598)
-        if (box.config.speciesCount > GAS_MAX_SPECIES)
-            return std::unexpected("GPU の気体の段は成分 GAS_MAX_SPECIES 個まで(T-0598)");
-
-        for (const GasCell& cell : box.cells) {
-            for (uint32_t s = box.config.speciesCount; s < GAS_MAX_SPECIES; ++s) {
-                if (cell.amounts[s] != 0)
-                    return std::unexpected("使わない成分の欄に物質量がある");
-            }
-        }
+        // 成分の数に上限は無い(1 件 = 頭 + 欄 × m_speciesStride。T-0598)。丸めの鍵は設定のまま(欄の番号か物質 ID。T-0592)。
+        // 件の大きさが 32bit の番地に収まること(ByteAddressBuffer の番地)
+        const uint64_t faceBytes = (uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL *
+                                   GasGpuFaceStride(result.m_speciesStride);
+        if (faceBytes > UINT32_MAX)
+            return std::unexpected("気体の箱が大きすぎる(面の件の番地が 32bit を超える)");
 
         if (auto created = result.CreatePipelines(device); !created)
             return std::unexpected(created.error());
@@ -190,35 +247,35 @@ namespace bicameral::sim {
     }
 
     // t0〜t2(設定・層ごとの基準の導く値・開いた境界の外)の既定のヒープの写し。写すのは RecordResidentUploads
-    std::array<gpu::ResidentBuffer, 3> GpuGas::CreateLayerBuffers(ID3D12Device* device, const GasBox& box) {
-        const std::array<GasGpuParameters, 1> parameters = {MakeGasGpuParameters(box.config, box.coefficients)};
+    std::array<gpu::ResidentBuffer, 3> GpuGas::CreateLayerBuffers(ID3D12Device* device, const GasBox& box,
+                                                                  uint32_t reservedSpecies) {
+        const uint32_t speciesStride = GasGpuSpeciesStride(box.config.speciesCount, reservedSpecies);
+        const std::vector<std::byte> parameters = PackGasGpuParameters(box.config, box.coefficients, speciesStride);
         std::vector<GasGpuDerived> referenceDerived;
-        std::vector<GasGpuCell> ghost;
         referenceDerived.reserve(box.referenceDerived.size());
-        ghost.reserve(box.ghost.size());
         for (const GasDerived& layer : box.referenceDerived)
             referenceDerived.push_back(ToGasGpuDerived(layer));
 
-        for (const GasCell& layer : box.ghost)
-            ghost.push_back(ToGasGpuCell(layer));
+        const std::vector<std::byte> ghost = PackGasGpuCellRecords(box.ghost, speciesStride);
 
-        return {gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuParameters>(parameters))),
+        return {gpu::CreateResidentBuffer(device, parameters),
                 gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuDerived>(referenceDerived))),
-                gpu::CreateResidentBuffer(device, std::as_bytes(std::span<const GasGpuCell>(ghost)))};
+                gpu::CreateResidentBuffer(device, ghost)};
     }
 
     // 環境の値のホットリロード(T-0444): 新しい t0〜t2 を作って写し、前のものは呼ぶ側に持たせる(記録済みの刻みがまだ読む)。
     // 新しいバッファは作った直後で COMMON なので、同じリストで前の刻みが読んだ後でも写せる(RecordResidentUploads の約束)
     bool GpuGas::RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasBox& box,
                                    std::vector<ComPtr<ID3D12Resource>>& keepAlive) {
-        if ((uint32_t)box.cells.size() != m_cellCount || box.config.substeps != m_substeps)
+        if ((uint32_t)box.cells.size() != m_cellCount || box.config.substeps != m_substeps ||
+            GasGpuSpeciesStride(box.config.speciesCount, m_speciesStride) != m_speciesStride)
             return false;
 
         ComPtr<ID3D12Device> device;
         if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
             return false;
 
-        std::array<gpu::ResidentBuffer, 3> buffers = CreateLayerBuffers(device.Get(), box);
+        std::array<gpu::ResidentBuffer, 3> buffers = CreateLayerBuffers(device.Get(), box, m_speciesStride);
         if (!std::ranges::all_of(buffers, &gpu::ResidentBuffer::Valid))
             return false;
 
@@ -239,12 +296,13 @@ namespace bicameral::sim {
     // バッファ(gas_step.hlsl の結び付けの順)・初めの箱の写し・読み戻し
     std::expected<void, std::string> GpuGas::CreateBuffers(ID3D12Device5* device, const GasBox& box) {
         const uint64_t n = m_cellCount;
-        const std::array<uint64_t, 6> uavBytes = {n * sizeof(GasGpuCell),     // u0 セル
-                                                  n * sizeof(GasGpuCell),     // u1 力を当てた後のセル
-                                                  n * sizeof(GasGpuDerived),  // u2 導く値
-                                                  n * GAS_GPU_FACES_PER_CELL * sizeof(GasGpuFace),  // u3 面
-                                                  n * sizeof(GasGpuCellSums),                       // u4 セルごとの合計
-                                                  GAS_GPU_LEDGER_BYTES};                            // u5 帳簿
+        const uint32_t stride = m_speciesStride;
+        const std::array<uint64_t, 6> uavBytes = {n * GasGpuCellStride(stride),  // u0 セル
+                                                  n * GasGpuCellStride(stride),  // u1 力を当てた後のセル
+                                                  n * sizeof(GasGpuDerived),     // u2 導く値
+                                                  n * GAS_GPU_FACES_PER_CELL * GasGpuFaceStride(stride),  // u3 面
+                                                  n * GasGpuSumsStride(stride),  // u4 セルごとの合計
+                                                  GasGpuLedgerBytes(stride)};    // u5 帳簿
         for (size_t i = 0; i < uavBytes.size(); ++i) {
             m_uavs[i] = gpu::CreateBuffer(device, uavBytes[i], gpu::BufferKind::UnorderedAccess);
             if (!m_uavs[i])
@@ -252,24 +310,13 @@ namespace bicameral::sim {
         }
 
         // --- t0〜t2(設定・層ごとの基準と外)---
-        m_srvs = CreateLayerBuffers(device, box);
+        m_srvs = CreateLayerBuffers(device, box, stride);
 
         // --- 初めの箱 ---
-        std::vector<GasGpuCell> cells;
-        cells.reserve(box.cells.size());
-        for (const GasCell& cell : box.cells)
-            cells.push_back(ToGasGpuCell(cell));
-
-        std::array<GpuLedger, 1> ledger = {};
-        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-            ledger[0].amounts[s] = box.ledger.amounts[s];
-
-        ledger[0].energy = box.ledger.energy;
-        ledger[0].momentum = box.ledger.momentum;
-        m_cellUpload = CreateUploadBuffer(device, std::span<const GasGpuCell>(cells));
-        m_ledgerUpload = CreateUploadBuffer(device, std::span<const GpuLedger>(ledger));
+        m_cellUpload = CreateUploadBuffer(device, PackGasGpuCellPlanes(box.cells, stride));
+        m_ledgerUpload = CreateUploadBuffer(device, PackLedger(box.ledger, stride));
         m_cellReadback = gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback);
-        m_ledgerReadback = gpu::CreateBuffer(device, GAS_GPU_LEDGER_BYTES, gpu::BufferKind::Readback);
+        m_ledgerReadback = gpu::CreateBuffer(device, uavBytes[5], gpu::BufferKind::Readback);
         m_faceReadback = gpu::CreateBuffer(device, uavBytes[3], gpu::BufferKind::Readback);
         m_sumReadback = gpu::CreateBuffer(device, uavBytes[4], gpu::BufferKind::Readback);
         if (!std::ranges::all_of(m_srvs, &gpu::ResidentBuffer::Valid) || !m_cellUpload || !m_ledgerUpload ||
@@ -323,7 +370,7 @@ namespace bicameral::sim {
             const Constants constants{.roundingTickLow = (uint32_t)roundingTick,
                                       .roundingTickHigh = (uint32_t)(roundingTick >> 32),
                                       .cellCount = m_cellCount,
-                                      .unused = 0};
+                                      .speciesStride = m_speciesStride};
             for (size_t pass = 0; pass < std::min((size_t)m_debugPassLimit, (size_t)Pass::Count); ++pass)
                 RecordPass(list, debugRing, (Pass)pass, constants, srvs);
         }
@@ -345,24 +392,19 @@ namespace bicameral::sim {
     }
 
     bool GpuGas::Read(std::vector<GasCell>& cells, GasLedger& ledger) const {
-        std::vector<GasGpuCell> gpuCells(m_cellCount);
-        if (!gpu::ReadBuffer(m_cellReadback.Get(), std::as_writable_bytes(std::span(gpuCells))))
-            return false;
-
-        GpuLedger gpuLedger;
-        if (!gpu::ReadBuffer(m_ledgerReadback.Get(), std::as_writable_bytes(std::span(&gpuLedger, 1))))
+        const size_t stride = GasGpuCellStride(m_speciesStride);
+        std::vector<std::byte> cellBytes((size_t)m_cellCount * stride);
+        std::vector<std::byte> ledgerBytes(GasGpuLedgerBytes(m_speciesStride));
+        if (!gpu::ReadBuffer(m_cellReadback.Get(), cellBytes) || !gpu::ReadBuffer(m_ledgerReadback.Get(), ledgerBytes))
             return false;
 
         ledger = {};
-        for (uint32_t s = 0; s < GAS_MAX_SPECIES; ++s)
-            ledger.amounts[s] = gpuLedger.amounts[s];
+        for (uint32_t s = 0; s < m_speciesCount; ++s)
+            ledger.amounts[s] = ReadRecord<int64_t>(ledgerBytes, GAS_GPU_LEDGER_AMOUNTS + (s * 8));
 
-        ledger.energy = gpuLedger.energy;
-        ledger.momentum = gpuLedger.momentum;
-        cells.clear();
-        cells.reserve(gpuCells.size());
-        for (const GasGpuCell& cell : gpuCells)
-            cells.push_back(FromGasGpuCell(cell));
+        ledger.energy = ReadRecord<int64_t>(ledgerBytes, GAS_GPU_LEDGER_ENERGY);
+        ledger.momentum = ReadRecord<std::array<int64_t, GAS_AXES>>(ledgerBytes, GAS_GPU_LEDGER_MOMENTUM);
+        cells = UnpackGasGpuCellPlanes(cellBytes, m_cellCount, m_speciesCount);
 
         return true;
     }
@@ -375,8 +417,9 @@ namespace bicameral::sim {
     }
 
     bool GpuGas::ReadDebug(std::vector<uint64_t>& faceWords, std::vector<uint64_t>& sumWords) const {
-        faceWords.assign((size_t)m_cellCount * GAS_GPU_FACES_PER_CELL * sizeof(GasGpuFace) / sizeof(uint64_t), 0);
-        sumWords.assign((size_t)m_cellCount * sizeof(GasGpuCellSums) / sizeof(uint64_t), 0);
+        faceWords.assign(
+            (size_t)m_cellCount * GAS_GPU_FACES_PER_CELL * GasGpuFaceStride(m_speciesStride) / sizeof(uint64_t), 0);
+        sumWords.assign((size_t)m_cellCount * GasGpuSumsStride(m_speciesStride) / sizeof(uint64_t), 0);
 
         return gpu::ReadBuffer(m_faceReadback.Get(), std::as_writable_bytes(std::span(faceWords))) &&
                gpu::ReadBuffer(m_sumReadback.Get(), std::as_writable_bytes(std::span(sumWords)));

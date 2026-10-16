@@ -1,7 +1,8 @@
 // gas_tree_gpu.hlsli — 気体の多重解像度の木の GPU 版(T-0209。07 §2.5・ADR-0117)が C++ と HLSL で共有する置き場所の形:
 // 面の形(どのセル・外・壁が面の両側か)・レベルごとの係数と小刻みの指数・セルの場所(レベル・層・自分の面の並びの範囲)・セルの端数・粗い小刻みの間に出した量(T-0356)・帳簿の並び。
 // C++ では engine/src/sim/gpu_gas_tree.cpp が GasTree(sim/gas_tree.h)から詰めて写し、HLSL では shaders/sim/gas_tree_step.hlsl が読む。
-// セル・導く値・面の動く値・セルごとの合計・設定は 1 レベルの形(common/gas_gpu.hlsli)をそのまま使う。
+// セル・導く値・面の動く値・セルごとの合計・設定は 1 レベルの形(common/gas_gpu.hlsli)をそのまま使う。成分ごとの欄を持つもの(端数・出した量・帳簿)も
+// 「頭 + 欄 × 欄の数」の件(成分の数に上限なし。T-0598)。
 // 64bit の値を先に・32bit の値を後に置き、32bit の数は偶数にそろえる(gas_gpu.hlsli と同じ約束)。浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_GAS_TREE_GPU_HLSLI
 #define BICAMERAL_GAS_TREE_GPU_HLSLI
@@ -57,27 +58,32 @@ namespace bicameral::sim {
         uint32_t faceEnd;
     };
 
-    // セルの端数(sim::GasTreeFraction と同じ並び。2^-64 × そのセルのレベルの単位。64 バイト)
+    // セルの端数の頭(2^-64 × そのセルのレベルの単位。32 バイト。後ろに物質量の端数 uint64 × 欄の数。件の大きさはセルと同じ GasGpuCellStride)
     struct GasTreeGpuFraction {
-        uint64_t amounts[GAS_GPU_MAX_SPECIES];
         uint64_t energy;
         uint64_t momentum[3];
     };
 
-    // 粗い小刻み 1 回の間に出した量(セルごと。gas_tree.cpp の TreeWork の committedOutflow・taken。T-0356)。
-    // セルの小刻みの初めに 0 にし、細かい面が何度も引く時の抑えに使う。40 バイト
+    // 粗い小刻み 1 回の間に出した量の頭(セルごと。gas_tree.cpp の TreeWork の committedOutflow・taken。T-0356)。
+    // セルの小刻みの初めに 0 にし、細かい面が何度も引く時の抑えに使う。8 バイト。後ろに出した物質量(風上のレベル + 1 の単位)uint64 × 欄の数。
+    // 件の大きさはセルごとの合計と同じ GasGpuSumsStride
     struct GasTreeGpuCarry {
-        uint64_t committedOutflow;            // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
-        uint64_t taken[GAS_GPU_MAX_SPECIES];  // 出した物質量(風上のレベル + 1 の単位)
+        uint64_t committedOutflow;  // 同じ小刻みの面が出す割合の和(Q32。抑えた後)
     };
 
-    // 帳簿(RWByteAddressBuffer。sim::GasTreeTotals と同じ並び = whole(int64)+ fraction(uint64)× 8。レベル 0 の単位)。
+    FX_CONST uint32_t GAS_TREE_GPU_FRACTION_BYTES = 32;
+    FX_CONST uint32_t GAS_TREE_GPU_CARRY_BYTES = 8;
+
+    // 帳簿(RWByteAddressBuffer。whole(int64)+ fraction(uint64)の GasQ64 を エネルギー・運動量 × 3・物質量 × 欄の数 の順。レベル 0 の単位)。
     // 足し込みは下位(fraction)へ 64bit の原子的な足し算 → 繰り上がりと上位を whole へ(どちらも足し算なので順に依存しない)
-    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_AMOUNTS = 0;    // GasQ64 × GAS_GPU_MAX_SPECIES
-    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_ENERGY = 64;    // GasQ64
-    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_MOMENTUM = 80;  // GasQ64 × 3
+    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_ENERGY = 0;     // GasQ64
+    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_MOMENTUM = 16;  // GasQ64 × 3
+    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_AMOUNTS = 64;   // GasQ64 × 欄の数
     FX_CONST uint32_t GAS_TREE_GPU_LEDGER_STRIDE = 16;    // GasQ64 の大きさ
-    FX_CONST uint32_t GAS_TREE_GPU_LEDGER_BYTES = 128;
+
+    FX_FN uint32_t GasTreeGpuLedgerBytes(uint32_t speciesStride) {
+        return GAS_TREE_GPU_LEDGER_AMOUNTS + (speciesStride * GAS_TREE_GPU_LEDGER_STRIDE);
+    }
 
 #ifdef __cplusplus
 }  // namespace bicameral::sim

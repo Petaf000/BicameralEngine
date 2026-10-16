@@ -14,21 +14,24 @@
 // 64bit の「0 で止める引き算」(a > b ? a − b : 0)は書かない(NVIDIA のドライバが誤って下ろす。T-0185)。繰り上がりも比べずにビットで出す。
 #include "common/gas_tree_gpu.hlsli"
 
-RWStructuredBuffer<GasGpuCell> g_cells : register(u0);                    // 状態(小刻みの初め → 終わり)
-RWStructuredBuffer<GasTreeGpuFraction> g_fractions : register(u1);        // 状態の端数
-RWStructuredBuffer<GasGpuCell> g_forced : register(u2);                   // 力を当てた後のセル
-RWStructuredBuffer<GasTreeGpuFraction> g_forcedFractions : register(u3);  // その端数
-RWStructuredBuffer<GasGpuDerived> g_derived : register(u4);               // 小刻みの初めの導く値(整数部だけから)
-RWStructuredBuffer<GasGpuFace> g_faces : register(u5);                    // 面の動く値(g_layout と同じ順)
-RWStructuredBuffer<GasGpuCellSums> g_sums : register(u6);
+// 成分ごとの欄を持つもの(gas_gpu.hlsli・gas_tree_gpu.hlsli。成分の数に上限なし。T-0598)は ByteAddressBuffer: セル・端数・面・
+// セルごとの合計・出した量は頭の並び + 成分ごとの面(件の数はセルの数か面の数)、設定・外・帳簿は「頭 + 欄 × g_speciesStride」の件。
+// 回す成分の数は設定の speciesCount
+RWByteAddressBuffer g_cells : register(u0);                  // 状態(小刻みの初め → 終わり)
+RWByteAddressBuffer g_fractions : register(u1);              // 状態の端数
+RWByteAddressBuffer g_forced : register(u2);                 // 力を当てた後のセル
+RWByteAddressBuffer g_forcedFractions : register(u3);        // その端数
+RWStructuredBuffer<GasGpuDerived> g_derived : register(u4);  // 小刻みの初めの導く値(整数部だけから)
+RWByteAddressBuffer g_faces : register(u5);                  // 面の動く値(g_layout と同じ順)
+RWByteAddressBuffer g_sums : register(u6);
 RWByteAddressBuffer g_ledger : register(u7);
-RWStructuredBuffer<GasGpuCell> g_next : register(u8);  // 小刻みの終わりの値(粗い小刻みの間は持ち越す。T-0356)
-RWStructuredBuffer<GasTreeGpuFraction> g_nextFractions : register(u9);  // その端数
-RWStructuredBuffer<GasTreeGpuCarry> g_carry : register(u10);            // 粗い小刻みの間に出した量
-StructuredBuffer<GasGpuParameters> g_parameters : register(t0);         // 設定とレベル 0 の係数
+RWByteAddressBuffer g_next : register(u8);           // 小刻みの終わりの値(粗い小刻みの間は持ち越す。T-0356)
+RWByteAddressBuffer g_nextFractions : register(u9);  // その端数
+RWByteAddressBuffer g_carry : register(u10);         // 粗い小刻みの間に出した量
+ByteAddressBuffer g_parameters : register(t0);       // 設定の頭 + 成分ごとの値(レベル 0 の係数)
 StructuredBuffer<GasTreeGpuLevel> g_levels : register(t1);
 StructuredBuffer<GasGpuDerived> g_referenceDerived : register(t2);  // 層の表(レベルごとの層を続けて)の基準の導く値
-StructuredBuffer<GasGpuCell> g_ghost : register(t3);                // 層の表の開いた境界の外(基準 + 風)
+ByteAddressBuffer g_ghost : register(t3);                           // 層の表の開いた境界の外(基準 + 風。セルの件)
 StructuredBuffer<GasTreeGpuFace> g_layout : register(t4);
 StructuredBuffer<GasTreeGpuPlace> g_places : register(t5);
 StructuredBuffer<uint32_t> g_cellFaces : register(t6);  // 面の番号 × 2 + 自分が右側なら 1
@@ -41,12 +44,67 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_maxExponent;  // σmax
     uint32_t g_cellCount;
     uint32_t g_faceCount;
-    uint32_t g_unused;
+    uint32_t g_speciesStride;  // 1 件の成分の欄の数(木を作る時に決まる)
 };
 
-#define GAS_P g_parameters[0]
+GasGpuParameters GasParameters() {
+    return g_parameters.Load<GasGpuParameters>(0);
+}
+
+GasGpuSpecies GasSpeciesAt(uint32_t s) {
+    return g_parameters.Load<GasGpuSpecies>(GAS_GPU_PARAMETERS_BYTES + (s * GAS_GPU_SPECIES_BYTES));
+}
+
+#define GAS_P GasParameters()
+#define GAS_SPECIES(s) GasSpeciesAt(s)
 
 #include "common/gas_cell.hlsli"
+
+// --- 件の読み書き(頭の並び + 成分ごとの面。セルと端数は同じ形、セルごとの合計と出した量も同じ形)---
+
+static const uint32_t FACE_FLOW = 24;  // GasGpuFace の flow・fraction の場所
+static const uint32_t FACE_FRACTION = 32;
+
+uint32_t SpeciesCount() {
+    return GAS_P.speciesCount;
+}
+
+uint32_t CellAddress(uint32_t index) {
+    return index * GAS_GPU_CELL_BYTES;
+}
+
+uint32_t CellAmountAddress(uint32_t index, uint32_t s) {
+    return GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, g_cellCount, index, s);
+}
+
+uint32_t FaceAddress(uint32_t faceIndex) {
+    return faceIndex * GAS_GPU_FACE_BYTES;
+}
+
+uint32_t FaceMovedAddress(uint32_t faceIndex, uint32_t s) {
+    return GasGpuPlaneAddress(GAS_GPU_FACE_BYTES, g_faceCount, faceIndex, s);
+}
+
+uint32_t SumsAddress(uint32_t index) {
+    return index * GAS_GPU_SUMS_BYTES;
+}
+
+uint32_t SumsAmountAddress(uint32_t index, uint32_t s) {
+    return GasGpuPlaneAddress(GAS_GPU_SUMS_BYTES, g_cellCount, index, s);
+}
+
+// 開いた境界の外(層の表の件 = 頭 + 欄 × g_speciesStride)
+uint32_t GhostAddress(uint32_t layer) {
+    return layer * GasGpuCellStride(g_speciesStride);
+}
+
+GasGpuFace LoadFace(uint32_t faceIndex) {
+    return g_faces.Load<GasGpuFace>(FaceAddress(faceIndex));
+}
+
+uint64_t FaceMoved(uint32_t faceIndex, uint32_t s) {
+    return g_faces.Load<uint64_t>(FaceMovedAddress(faceIndex, s));
+}
 
 // --- レベルごとの小刻み(gas_tree.cpp の Exponent・Starts・Ends・RoundingTick・SubcycleGap。T-0356)---
 
@@ -131,9 +189,16 @@ int64_t HeightFactor(GasTreeGpuFace layout, TreeSide side) {
 
 GasGpuCell ForcedSideCell(TreeSide side) {
     if (side.kind == GAS_TREE_GPU_SIDE_GHOST)
-        return g_ghost[side.index];
+        return g_ghost.Load<GasGpuCell>(GhostAddress(side.index));
 
-    return g_forced[side.index];
+    return g_forced.Load<GasGpuCell>(CellAddress(side.index));
+}
+
+uint64_t ForcedSideAmount(TreeSide side, uint32_t s) {
+    if (side.kind == GAS_TREE_GPU_SIDE_GHOST)
+        return g_ghost.Load<uint64_t>(GhostAddress(side.index) + GAS_GPU_CELL_BYTES + (s * 8));
+
+    return g_forced.Load<uint64_t>(CellAmountAddress(side.index, s));
 }
 
 GasGpuDerived SideDerived(TreeSide side) {
@@ -267,18 +332,24 @@ bool IsDonor(CellFace cellFace, int64_t flow) {
     if (!Starts(place.level))
         return;
 
-    const GasGpuCell cell = g_cells[index];
-    g_derived[index] = DeriveCellFromReference(cell, g_referenceDerived[place.layer].pressure);
-    g_forced[index] = cell;
-    g_forcedFractions[index] = g_fractions[index];
-
-    GasTreeGpuCarry carry;
-    carry.committedOutflow = 0;
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        carry.taken[s] = 0;
+    // --- 成分(導く値の和・forced へ写す・出した量を 0 に)---
+    GasGpuTotals totals = GasZeroTotals();
+    const uint32_t speciesCount = SpeciesCount();
+    for (uint32_t s = 0; s < speciesCount; ++s) {
+        const uint32_t address = CellAmountAddress(index, s);
+        const uint64_t amount = g_cells.Load<uint64_t>(address);
+        GasAddSpecies(totals, s, amount);
+        g_forced.Store<uint64_t>(address, amount);
+        g_forcedFractions.Store<uint64_t>(address, g_fractions.Load<uint64_t>(address));
+        g_carry.Store<uint64_t>(SumsAmountAddress(index, s), 0);
     }
 
-    g_carry[index] = carry;
+    const GasGpuCell cell = g_cells.Load<GasGpuCell>(CellAddress(index));
+    g_derived[index] = DeriveCellFromReference(cell, totals, g_referenceDerived[place.layer].pressure);
+    g_forced.Store<GasGpuCell>(CellAddress(index), cell);
+    g_forcedFractions.Store<GasTreeGpuFraction>(CellAddress(index),
+                                                g_fractions.Load<GasTreeGpuFraction>(CellAddress(index)));
+    g_carry.Store<uint64_t>(SumsAddress(index), 0);
 }
 
     // --- 段 2: 面の力(gas_tree.cpp の ComputeFaceWeight・ComputeFaceForce)。箱の外の側の力と重さは帳簿へ(ApplyImpulse)---
@@ -293,7 +364,7 @@ bool IsDonor(CellFace cellFace, int64_t flow) {
     const GasTreeGpuLevel level = g_levels[layout.level];
     const TreeSide left = LeftSide(layout);
     const TreeSide right = RightSide(layout);
-    GasGpuFace face = g_faces[faceIndex];
+    GasGpuFace face = LoadFace(faceIndex);
     face.impulse = 0;
     face.weightLeft = 0;
     face.weightRight = 0;
@@ -329,7 +400,7 @@ bool IsDonor(CellFace cellFace, int64_t flow) {
         face.impulse = FxMulShiftS64(pressureSum, impulseCoefficient, 16);
     }
 
-    g_faces[faceIndex] = face;
+    g_faces.Store<GasGpuFace>(FaceAddress(faceIndex), face);
 
     // --- 帳簿(重さはセルの側の分・圧力の力積は箱の外の側の分)---
     const uint32_t ledgerShift = 3 * layout.level;
@@ -370,7 +441,7 @@ void AddFaceForces(GasTreeGpuPlace place, bool immediate, bool starts, inout Gas
             multiplier = starts ? 1 - predicted : 1;
         }
 
-        const GasGpuFace face = g_faces[cellFace.faceIndex];
+        const GasGpuFace face = LoadFace(cellFace.faceIndex);
         const uint32_t axis = g_layout[cellFace.faceIndex].axis;
         const int64_t weight = cellFace.right ? face.weightRight : face.weightLeft;
         AddScaled(cell.momentum[2], fraction.momentum[2], -weight * multiplier, cellFace.shift);
@@ -385,25 +456,34 @@ void AddFaceForces(GasTreeGpuPlace place, bool immediate, bool starts, inout Gas
         return;
 
     const GasTreeGpuPlace place = g_places[index];
+    const uint32_t address = CellAddress(index);
     GasGpuCell next;
     GasTreeGpuFraction nextFraction;
     const bool starts = Starts(place.level);
     if (starts) {
-        GasGpuCell cell = g_forced[index];
-        GasTreeGpuFraction fraction = g_forcedFractions[index];
+        GasGpuCell cell = g_forced.Load<GasGpuCell>(address);
+        GasTreeGpuFraction fraction = g_forcedFractions.Load<GasTreeGpuFraction>(address);
         AddFaceForces(place, true, true, cell, fraction);
-        g_forced[index] = cell;
-        g_forcedFractions[index] = fraction;
+        g_forced.Store<GasGpuCell>(address, cell);
+        g_forcedFractions.Store<GasTreeGpuFraction>(address, fraction);
         next = cell;
         nextFraction = fraction;
+
+        // 成分は力で変わらないので forced のまま next へ
+        const uint32_t speciesCount = SpeciesCount();
+        for (uint32_t s = 0; s < speciesCount; ++s) {
+            const uint32_t amountAddress = CellAmountAddress(index, s);
+            g_next.Store<uint64_t>(amountAddress, g_forced.Load<uint64_t>(amountAddress));
+            g_nextFractions.Store<uint64_t>(amountAddress, g_forcedFractions.Load<uint64_t>(amountAddress));
+        }
     } else {
-        next = g_next[index];
-        nextFraction = g_nextFractions[index];
+        next = g_next.Load<GasGpuCell>(address);
+        nextFraction = g_nextFractions.Load<GasTreeGpuFraction>(address);
     }
 
     AddFaceForces(place, false, starts, next, nextFraction);
-    g_next[index] = next;
-    g_nextFractions[index] = nextFraction;
+    g_next.Store<GasGpuCell>(address, next);
+    g_nextFractions.Store<GasTreeGpuFraction>(address, nextFraction);
 }
 
     // --- 段 4: 面の質量の流れと、抑える前の割合(gas_tree.cpp の ComputeFaceFlow・RawFraction)---
@@ -440,8 +520,8 @@ void AddFaceForces(GasTreeGpuPlace place, bool immediate, bool starts, inout Gas
         fraction = MulShiftU64(FxAbsU64(flow), inverseMass, 32);
     }
 
-    g_faces[faceIndex].flow = flow;
-    g_faces[faceIndex].fraction = fraction;
+    g_faces.Store<int64_t>(FaceAddress(faceIndex) + FACE_FLOW, flow);
+    g_faces.Store<uint64_t>(FaceAddress(faceIndex) + FACE_FRACTION, fraction);
 }
 
 // --- 段 5: 風上として出ていく割合の合計(セル。gas_tree.cpp の LimitOutflow の 1 回目の走査)。
@@ -457,57 +537,85 @@ void AddFaceForces(GasTreeGpuPlace place, bool immediate, bool starts, inout Gas
         if (!cellFace.active)
             continue;
 
-        const GasGpuFace face = g_faces[cellFace.faceIndex];
+        const GasGpuFace face = LoadFace(cellFace.faceIndex);
         if (face.fraction != 0 && IsDonor(cellFace, face.flow))
             outflow += face.fraction << cellFace.gap;
     }
 
-    g_sums[index].outflow = outflow;
+    g_sums.Store<uint64_t>(SumsAddress(index), outflow);
 }
 
 // --- 移す成分の物質量(gas_tree.cpp の SpeciesRatio・HalfSlope・MovedAmountQ32・RoundAmount)---
 
-int64_t SpeciesRatio(TreeSide side, uint32_t s) {
-    return (int64_t)MulShiftU64(ForcedSideCell(side).amounts[s], SideDerived(side).inverseAmount, 32);
+// MUSCL の 3 つ並び(風上の外側・風上・風下)と、それぞれの 1 ÷ 物質量。同じレベルの 3 つ並びだけ(外側の隣が壁・Mixed なら勾配 0)
+struct MusclSides {
+    bool usable;
+    TreeSide outer;
+    TreeSide donor;
+    TreeSide receiver;
+    uint64_t outerInverse;
+    uint64_t donorInverse;
+    uint64_t receiverInverse;
+};
+
+MusclSides MusclSidesOf(GasTreeGpuFace layout, TreeSide left, TreeSide right, int64_t flow) {
+    const bool forward = flow > 0;
+    MusclSides muscl;
+    muscl.outer = OuterSide(layout, forward);
+    muscl.donor = PickSide(forward, left, right);
+    muscl.receiver = PickSide(forward, right, left);
+    const bool outerUsable = muscl.outer.kind != GAS_TREE_GPU_SIDE_WALL && muscl.outer.kind != GAS_TREE_GPU_SIDE_MIXED;
+    muscl.usable = GAS_P.reconstruction != GAS_GPU_RECONSTRUCTION_UPWIND &&
+                   muscl.donor.kind == GAS_TREE_GPU_SIDE_CELL && outerUsable &&
+                   muscl.receiver.kind != GAS_TREE_GPU_SIDE_WALL;
+    muscl.outerInverse = 0;
+    muscl.donorInverse = 0;
+    muscl.receiverInverse = 0;
+    if (muscl.usable) {
+        muscl.outerInverse = SideDerived(muscl.outer).inverseAmount;
+        muscl.donorInverse = SideDerived(muscl.donor).inverseAmount;
+        muscl.receiverInverse = SideDerived(muscl.receiver).inverseAmount;
+    }
+
+    return muscl;
 }
 
-// MUSCL は同じレベルの 3 つ並びだけ(外側の隣が壁・Mixed なら勾配 0)
-int64_t HalfSlope(GasTreeGpuFace layout, TreeSide left, TreeSide right, int64_t flow, uint64_t fraction, uint32_t s) {
-    const bool forward = flow > 0;
-    const TreeSide outer = OuterSide(layout, forward);
-    const TreeSide donor = PickSide(forward, left, right);
-    const TreeSide receiver = PickSide(forward, right, left);
-    const bool outerUsable = outer.kind != GAS_TREE_GPU_SIDE_WALL && outer.kind != GAS_TREE_GPU_SIDE_MIXED;
-    if (donor.kind != GAS_TREE_GPU_SIDE_CELL || !outerUsable || receiver.kind == GAS_TREE_GPU_SIDE_WALL)
+int64_t SpeciesRatio(TreeSide side, uint64_t inverseAmount, uint32_t s) {
+    return (int64_t)MulShiftU64(ForcedSideAmount(side, s), inverseAmount, 32);
+}
+
+int64_t HalfSlope(MusclSides muscl, uint64_t fraction, uint32_t s) {
+    if (!muscl.usable)
         return 0;
 
-    const int64_t donorRatio = SpeciesRatio(donor, s);
-    const int64_t slope = LimitedSlope(donorRatio - SpeciesRatio(outer, s), SpeciesRatio(receiver, s) - donorRatio);
+    const int64_t donorRatio = SpeciesRatio(muscl.donor, muscl.donorInverse, s);
+    const int64_t outerRatio = SpeciesRatio(muscl.outer, muscl.outerInverse, s);
+    const int64_t receiverRatio = SpeciesRatio(muscl.receiver, muscl.receiverInverse, s);
+    const int64_t slope = LimitedSlope(donorRatio - outerRatio, receiverRatio - donorRatio);
 
     return FxMulShiftS64(slope, (int64_t)(ONE_Q32 - fraction), 33);
 }
 
 // 移す成分 s の物質量(Q32 の面の単位。128bit)。粗い風上は中身 × 8^d(1 次の風上)、同じ単位なら gas_step.hlsl の MovedAmountQ32 と同じ
-// (引く側は「0 で止める引き算」を書かず、符号付きの差を出してから 0 以下を 0 にする。T-0185)
-FxU128 MovedAmountQ32(GasTreeGpuFace layout, TreeSide left, TreeSide right, TreeSide donor, GasGpuCell source,
-                      int64_t flow, uint64_t fraction, uint32_t s) {
+// (引く側は「0 で止める引き算」を書かず、符号付きの差を出してから 0 以下を 0 にする。T-0185)。sourceTotal = 風上の物質量の合計
+FxU128 MovedAmountQ32(MusclSides muscl, uint32_t shift, uint64_t sourceAmount, uint64_t sourceTotal, uint64_t fraction,
+                      uint32_t s) {
     FxU128 result;
-    const uint32_t shift = ContentShift(layout, donor);
     if (shift != 0) {
-        const FxU128 product = FxMulU64Full(source.amounts[s], fraction);
+        const FxU128 product = FxMulU64Full(sourceAmount, fraction);
         result.hi = (product.hi << shift) | (product.lo >> (64 - shift));
         result.lo = product.lo << shift;
         return result;
     }
 
     result.hi = 0;
-    const uint64_t moved = source.amounts[s] * fraction;
+    const uint64_t moved = sourceAmount * fraction;
     result.lo = moved;
     if (GAS_P.reconstruction == GAS_GPU_RECONSTRUCTION_UPWIND)
         return result;
 
-    const int64_t halfSlope = HalfSlope(layout, left, right, flow, fraction, s);
-    const uint64_t total = TotalAmount(source) * fraction;
+    const int64_t halfSlope = HalfSlope(muscl, fraction, s);
+    const uint64_t total = sourceTotal * fraction;
     const uint64_t correction = MulShiftU64(total, FxAbsU64(halfSlope), 32);
     if (halfSlope >= 0) {
         result.lo = moved + correction;
@@ -543,33 +651,43 @@ uint64_t RoundAmount128(FxU128 amountQ32, uint64_t hash) {
 
     const TreeSide left = LeftSide(layout);
     const TreeSide right = RightSide(layout);
-    GasGpuFace face = g_faces[faceIndex];
+    const GasGpuFace face = LoadFace(faceIndex);
     const TreeSide donor = PickSide(face.flow > 0, left, right);
-    if (face.fraction != 0 && donor.kind == GAS_TREE_GPU_SIDE_CELL) {
+    uint64_t fraction = face.fraction;
+    if (fraction != 0 && donor.kind == GAS_TREE_GPU_SIDE_CELL) {
         // 使える分 = 1 − 風上の小刻みの初めに同じ小刻みの面が出した分(抑えた後なので 1 以下。0 で止める引き算は要らない)
-        const uint64_t outflow = g_sums[donor.index].outflow;
-        const uint64_t available = ONE_Q32 - g_carry[donor.index].committedOutflow;
+        const uint64_t outflow = g_sums.Load<uint64_t>(SumsAddress(donor.index));
+        const uint64_t available = ONE_Q32 - g_carry.Load<uint64_t>(SumsAddress(donor.index));
         if (outflow > available)
-            face.fraction = FxDivU128By64(FxMulU64Full(face.fraction, available), outflow).quotient;
+            fraction = FxDivU128By64(FxMulU64Full(fraction, available), outflow).quotient;
     }
 
-    [unroll] for (uint32_t clear = 0; clear < GAS_GPU_MAX_SPECIES; ++clear) {
-        face.moved[clear] = 0;
+    g_faces.Store<uint64_t>(FaceAddress(faceIndex) + FACE_FRACTION, fraction);
+    const uint32_t speciesCount = SpeciesCount();
+    if (fraction == 0) {
+        for (uint32_t clear = 0; clear < speciesCount; ++clear)
+            g_faces.Store<uint64_t>(FaceMovedAddress(faceIndex, clear), 0);
+
+        return;
     }
 
-    // 乱数は(世界のシード, そのレベルの小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分。レベル 0 は gas_step.hlsl と同じ
-    if (face.fraction != 0) {
-        const GasGpuCell source = ForcedSideCell(donor);
-        const uint64_t roundingTick = RoundingTick(layout.level);
-        const uint64_t faceHash = FxHash64(GAS_P.randomSeed, roundingTick, layout.id,
-                                           GAS_ROUNDING_PURPOSE + layout.level);
-        [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-            const FxU128 amountQ32 = MovedAmountQ32(layout, left, right, donor, source, face.flow, face.fraction, s);
-            face.moved[s] = RoundAmount128(amountQ32, FxHashCombine(faceHash, s));
-        }
+    // --- 風上の物質量の合計(同じ単位の MUSCL の補正)---
+    const uint32_t shift = ContentShift(layout, donor);
+    uint64_t sourceTotal = 0;
+    if (shift == 0 && GAS_P.reconstruction != GAS_GPU_RECONSTRUCTION_UPWIND) {
+        for (uint32_t t = 0; t < speciesCount; ++t)
+            sourceTotal += ForcedSideAmount(donor, t);
     }
 
-    g_faces[faceIndex] = face;
+    // 乱数は(世界のシード, そのレベルの小刻みの通し番号, 面の番号, 用途 + レベル)+ 成分の鍵。レベル 0 は gas_step.hlsl と同じ
+    const MusclSides muscl = MusclSidesOf(layout, left, right, face.flow);
+    const uint64_t roundingTick = RoundingTick(layout.level);
+    const uint64_t faceHash = FxHash64(GAS_P.randomSeed, roundingTick, layout.id, GAS_ROUNDING_PURPOSE + layout.level);
+    for (uint32_t s = 0; s < speciesCount; ++s) {
+        const FxU128 amountQ32 = MovedAmountQ32(muscl, shift, ForcedSideAmount(donor, s), sourceTotal, fraction, s);
+        const uint64_t moved = RoundAmount128(amountQ32, FxHashCombine(faceHash, GAS_SPECIES(s).roundingKey));
+        g_faces.Store<uint64_t>(FaceMovedAddress(faceIndex, s), moved);
+    }
 }
 
     // --- 段 7: 成分ごとの移す量の合計(セル。gas_tree.cpp の LimitMovedAmounts の 1 回目の走査。風上のレベル + 1 の単位で数える)---
@@ -578,48 +696,49 @@ uint64_t RoundAmount128(FxU128 amountQ32, uint64_t hash) {
         return;
 
     const GasTreeGpuPlace place = g_places[index];
-    GasGpuCellSums sums = g_sums[index];
-    [unroll] for (uint32_t clear = 0; clear < GAS_GPU_MAX_SPECIES; ++clear) {
-        sums.outgoing[clear] = 0;
-    }
+    const uint32_t speciesCount = SpeciesCount();
+    for (uint32_t clear = 0; clear < speciesCount; ++clear)
+        g_sums.Store<uint64_t>(SumsAmountAddress(index, clear), 0);
 
+    // 面ごとに自分の件へ足す(自分のスレッドだけが書くので、足す順は結果に関わらない)
     for (uint32_t entry = place.faceBegin; entry < place.faceEnd; ++entry) {
         const CellFace cellFace = CellFaceAt(entry, place.level);
         if (!cellFace.active)
             continue;
 
-        const GasGpuFace face = g_faces[cellFace.faceIndex];
+        const GasGpuFace face = LoadFace(cellFace.faceIndex);
         if (face.fraction == 0 || !IsDonor(cellFace, face.flow))
             continue;
 
         const uint32_t unitShift = 3 - cellFace.shift;
-        [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-            sums.outgoing[s] += face.moved[s] << unitShift;
+        for (uint32_t s = 0; s < speciesCount; ++s) {
+            const uint32_t address = SumsAmountAddress(index, s);
+            g_sums.Store<uint64_t>(address,
+                                   g_sums.Load<uint64_t>(address) + (FaceMoved(cellFace.faceIndex, s) << unitShift));
         }
     }
-
-    g_sums[index] = sums;
 }
 
-// 重さの仕事(µJ。gas_tree.cpp の GravityWork。1 mg が 1 セル〔0.5 m × 2^-k〕上がる仕事)
-int64_t GravityWork(GasTreeGpuFace layout, int64_t flow, GasGpuCell moved) {
+// 重さの仕事(µJ。gas_tree.cpp の GravityWork。1 mg が 1 セル〔0.5 m × 2^-k〕上がる仕事。movedMass = 移す塊の質量)
+int64_t GravityWork(GasTreeGpuFace layout, int64_t flow, uint64_t movedMass) {
     if (layout.axis != 2 || GAS_P.gravity == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
         return 0;
 
-    const int64_t work = (int64_t)(CellMass(moved) * GAS_P.gravityWork / (MICRO << layout.level));
+    const int64_t work = (int64_t)(movedMass * GAS_P.gravityWork / (MICRO << layout.level));
 
     return flow > 0 ? work : -work;
 }
 
-// 風上の中身を面の単位へ(粗い風上は × 8^d。gas_tree.cpp の Transfer の前半)
-void ScaleSource(inout GasGpuCell source, inout GasGpuDerived sourceDerived, uint32_t shift) {
+// 風上の中身を面の単位へ(粗い風上は × 8^d。gas_tree.cpp の Transfer の前半)。成分の和は物質量・比熱・化学のエネルギーを 2^shift 倍
+// (成分ごとにずらしてから足すのと同じ値。整数の掛け算と足し算は 2^64 を法として分配する。質量は使わないのでそのまま)
+void ScaleSource(inout GasGpuCell source, inout GasGpuDerived sourceDerived, inout GasGpuTotals sourceTotals,
+                 uint32_t shift) {
     if (shift == 0)
         return;
 
-    [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-        source.amounts[s] = source.amounts[s] << shift;
-    }
-
+    sourceTotals.amount = sourceTotals.amount << shift;
+    sourceTotals.capacity = sourceTotals.capacity << shift;
+    sourceTotals.chemical = sourceTotals.chemical * ((int64_t)1 << shift);
     source.energy = source.energy * ((int64_t)1 << shift);
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
         source.momentum[axis] = source.momentum[axis] * ((int64_t)1 << shift);
@@ -637,56 +756,59 @@ void ScaleSource(inout GasGpuCell source, inout GasGpuDerived sourceDerived, uin
     if (!Starts(layout.level))
         return;
 
-    GasGpuFace face = g_faces[faceIndex];
+    GasGpuFace face = LoadFace(faceIndex);
     if (face.fraction == 0)
         return;
 
     const bool forward = face.flow > 0;
     const TreeSide donor = PickSide(forward, LeftSide(layout), RightSide(layout));
     const TreeSide receiver = PickSide(forward, RightSide(layout), LeftSide(layout));
-    GasGpuCell source = ForcedSideCell(donor);
-    if (donor.kind == GAS_TREE_GPU_SIDE_CELL) {
-        // 中身からは風上の小刻みの間にもう出した分を引く(細かい面が何度も引く時。T-0320。出した分は中身を超えない)
-        const GasGpuCellSums sums = g_sums[donor.index];
-        const GasTreeGpuCarry carry = g_carry[donor.index];
-        [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-            const uint64_t total = sums.outgoing[s];
-            const uint64_t content = (source.amounts[s] << 3) - carry.taken[s];
-            if (total > content)
-                face.moved[s] = FxDivU128By64(FxMulU64Full(face.moved[s], content), total).quotient;
+    const bool inside = donor.kind == GAS_TREE_GPU_SIDE_CELL && receiver.kind == GAS_TREE_GPU_SIDE_CELL;
+    const int64_t sign = donor.kind == GAS_TREE_GPU_SIDE_CELL ? -1 : 1;
+    const uint32_t ledgerShift = 3 * layout.level;
+
+    // --- 成分(中身からは風上の小刻みの間にもう出した分を引く。細かい面が何度も引く時。T-0320。出した分は中身を超えない)。
+    // 風上の中身と移す塊の和を作り、箱の外との出入りは帳簿へ ---
+    GasGpuTotals sourceTotals = GasZeroTotals();
+    GasGpuTotals movedTotals = GasZeroTotals();
+    const uint32_t speciesCount = SpeciesCount();
+    for (uint32_t s = 0; s < speciesCount; ++s) {
+        const uint64_t amount = ForcedSideAmount(donor, s);
+        uint64_t moved = FaceMoved(faceIndex, s);
+        if (donor.kind == GAS_TREE_GPU_SIDE_CELL) {
+            const uint64_t total = g_sums.Load<uint64_t>(SumsAmountAddress(donor.index, s));
+            const uint64_t content = (amount << 3) - g_carry.Load<uint64_t>(SumsAmountAddress(donor.index, s));
+            if (total > content) {
+                moved = FxDivU128By64(FxMulU64Full(moved, content), total).quotient;
+                g_faces.Store<uint64_t>(FaceMovedAddress(faceIndex, s), moved);
+            }
+        }
+
+        GasAddSpecies(sourceTotals, s, amount);
+        GasAddSpecies(movedTotals, s, moved);
+        if (!inside) {
+            LedgerAddScaled(GAS_TREE_GPU_LEDGER_AMOUNTS + (s * GAS_TREE_GPU_LEDGER_STRIDE), sign * (int64_t)moved,
+                            ledgerShift);
         }
     }
 
-    // --- 移す塊(成分・エネルギー・運動量。面の単位)---
+    // --- 移す塊(エネルギー・運動量。面の単位)---
+    GasGpuCell source = ForcedSideCell(donor);
     GasGpuDerived sourceDerived = SideDerived(donor);
-    ScaleSource(source, sourceDerived, ContentShift(layout, donor));
-    GasGpuCell moved;
-    [unroll] for (uint32_t copy = 0; copy < GAS_GPU_MAX_SPECIES; ++copy) {
-        moved.amounts[copy] = face.moved[copy];
-    }
-
-    moved.energy = 0;
+    ScaleSource(source, sourceDerived, sourceTotals, ContentShift(layout, donor));
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
-        moved.momentum[axis] = FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
-        face.movedMomentum[axis] = moved.momentum[axis];
+        face.movedMomentum[axis] = FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
     }
 
-    const int64_t energy = MovedEnergy(source, sourceDerived, moved, face.fraction);
+    const int64_t energy = MovedEnergy(source, sourceTotals, sourceDerived, movedTotals, face.fraction);
     face.movedEnergy = DivideNearest(energy, 1000);
-    face.receivedEnergy = DivideNearest(energy - GravityWork(layout, face.flow, moved), 1000);
-    g_faces[faceIndex] = face;
+    face.receivedEnergy = DivideNearest(energy - GravityWork(layout, face.flow, movedTotals.mass), 1000);
+    g_faces.Store<GasGpuFace>(FaceAddress(faceIndex), face);
 
     // --- 帳簿(開いた境界の外から入る物は正、出る物は負。エネルギーは重さの仕事〔受けた − 引いた〕も)---
-    const uint32_t ledgerShift = 3 * layout.level;
-    if (donor.kind == GAS_TREE_GPU_SIDE_CELL && receiver.kind == GAS_TREE_GPU_SIDE_CELL) {
+    if (inside) {
         LedgerAddScaled(GAS_TREE_GPU_LEDGER_ENERGY, face.receivedEnergy - face.movedEnergy, ledgerShift);
         return;
-    }
-
-    const int64_t sign = donor.kind == GAS_TREE_GPU_SIDE_CELL ? -1 : 1;
-    [unroll] for (uint32_t species = 0; species < GAS_GPU_MAX_SPECIES; ++species) {
-        LedgerAddScaled(GAS_TREE_GPU_LEDGER_AMOUNTS + (species * GAS_TREE_GPU_LEDGER_STRIDE),
-                        sign * (int64_t)face.moved[species], ledgerShift);
     }
 
     LedgerAddScaled(GAS_TREE_GPU_LEDGER_ENERGY,
@@ -697,39 +819,51 @@ void ScaleSource(inout GasGpuCell source, inout GasGpuDerived sourceDerived, uin
     }
 }
 
-    // --- 段 9: 移す(セル。gas_tree.cpp の Transfer・AddParcel。自分の面の出入りを、面の単位から自分の単位へ端数つきで next へ)。
-    // 出した量を数える欄(LimitOutflow・LimitMovedAmounts の 3 回目の走査)を足し、小刻みを終えるレベルのセルは next を状態へ ---
-    [numthreads(64, 1, 1)] void GasTreeTransfer(uint32_t index : SV_DispatchThreadID) {
+// 端数つきの足し算を件の欄へ(whole はセルの件、fraction は端数の件の同じ場所)
+void AddScaledAmount(uint32_t address, int64_t value, uint32_t shift) {
+    uint64_t whole = g_next.Load<uint64_t>(address);
+    uint64_t fraction = g_nextFractions.Load<uint64_t>(address);
+    AddScaledUnsigned(whole, fraction, value, shift);
+    g_next.Store<uint64_t>(address, whole);
+    g_nextFractions.Store<uint64_t>(address, fraction);
+}
+
+// --- 段 9: 移す(セル。gas_tree.cpp の Transfer・AddParcel。自分の面の出入りを、面の単位から自分の単位へ端数つきで next へ)。
+// 出した量を数える欄(LimitOutflow・LimitMovedAmounts の 3 回目の走査)を足し、小刻みを終えるレベルのセルは next を状態へ ---
+[numthreads(64, 1, 1)] void GasTreeTransfer(uint32_t index : SV_DispatchThreadID) {
     if (index >= g_cellCount)
         return;
 
     const GasTreeGpuPlace place = g_places[index];
-    GasGpuCell cell = g_next[index];
-    GasTreeGpuFraction fraction = g_nextFractions[index];
-    GasTreeGpuCarry carry = g_carry[index];
+    const uint32_t address = CellAddress(index);
+    const uint32_t speciesCount = SpeciesCount();
+    GasGpuCell cell = g_next.Load<GasGpuCell>(address);
+    GasTreeGpuFraction fraction = g_nextFractions.Load<GasTreeGpuFraction>(address);
+    uint64_t committedOutflow = g_carry.Load<uint64_t>(SumsAddress(index));
     for (uint32_t entry = place.faceBegin; entry < place.faceEnd; ++entry) {
         const CellFace cellFace = CellFaceAt(entry, place.level);
         if (!cellFace.active)
             continue;
 
-        const GasGpuFace face = g_faces[cellFace.faceIndex];
+        const GasGpuFace face = LoadFace(cellFace.faceIndex);
         if (face.fraction == 0)
             continue;
 
         const bool donor = IsDonor(cellFace, face.flow);
-        if (donor) {
-            if (cellFace.gap == 0)
-                carry.committedOutflow += face.fraction;
+        const uint32_t unitShift = 3 - cellFace.shift;
+        if (donor && cellFace.gap == 0)
+            committedOutflow += face.fraction;
 
-            const uint32_t unitShift = 3 - cellFace.shift;
-            [unroll] for (uint32_t species = 0; species < GAS_GPU_MAX_SPECIES; ++species) {
-                carry.taken[species] += face.moved[species] << unitShift;
-            }
-        }
-
+        // --- 成分(自分のスレッドだけが書く件なので、面ごとに足し込む)---
         const int64_t sign = donor ? -1 : 1;
-        [unroll] for (uint32_t s = 0; s < GAS_GPU_MAX_SPECIES; ++s) {
-            AddScaledUnsigned(cell.amounts[s], fraction.amounts[s], sign * (int64_t)face.moved[s], cellFace.shift);
+        for (uint32_t s = 0; s < speciesCount; ++s) {
+            const uint64_t moved = FaceMoved(cellFace.faceIndex, s);
+            if (donor) {
+                const uint32_t takenAddress = SumsAmountAddress(index, s);
+                g_carry.Store<uint64_t>(takenAddress, g_carry.Load<uint64_t>(takenAddress) + (moved << unitShift));
+            }
+
+            AddScaledAmount(CellAmountAddress(index, s), sign * (int64_t)moved, cellFace.shift);
         }
 
         AddScaled(cell.energy, fraction.energy, donor ? -face.movedEnergy : face.receivedEnergy, cellFace.shift);
@@ -738,12 +872,18 @@ void ScaleSource(inout GasGpuCell source, inout GasGpuDerived sourceDerived, uin
         }
     }
 
-    g_next[index] = cell;
-    g_nextFractions[index] = fraction;
-    g_carry[index] = carry;
+    g_next.Store<GasGpuCell>(address, cell);
+    g_nextFractions.Store<GasTreeGpuFraction>(address, fraction);
+    g_carry.Store<uint64_t>(SumsAddress(index), committedOutflow);
     if (!Ends(place.level))
         return;
 
-    g_cells[index] = cell;
-    g_fractions[index] = fraction;
+    // --- 小刻みを終えるレベルのセルは next を状態へ ---
+    g_cells.Store<GasGpuCell>(address, cell);
+    g_fractions.Store<GasTreeGpuFraction>(address, fraction);
+    for (uint32_t s = 0; s < speciesCount; ++s) {
+        const uint32_t amountAddress = CellAmountAddress(index, s);
+        g_cells.Store<uint64_t>(amountAddress, g_next.Load<uint64_t>(amountAddress));
+        g_fractions.Store<uint64_t>(amountAddress, g_nextFractions.Load<uint64_t>(amountAddress));
+    }
 }
