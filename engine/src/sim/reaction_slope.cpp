@@ -22,6 +22,7 @@ namespace bicameral::sim {
         constexpr int64_t MILLIJOULES_PER_JOULE = 1000;
         constexpr int64_t NANOJOULES_PER_MILLIJOULE = 1000000;
         constexpr uint32_t Q32_SHIFT = 32;
+        constexpr uint32_t GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN = 8314;  // R(ベイクが c_v = c_p − R に使う値と同じ)
 
         // 値の上限。|G| ≤ 2^49 mJ/mol・正味の係数 ≤ 2^8・項 ≤ 6 で、和が 64bit に収まる(現実の値は 4 桁以上小さい)
         constexpr int64_t ENTHALPY_LIMIT_JOULES = int64_t{1} << 36;
@@ -68,11 +69,12 @@ namespace bicameral::sim {
             return ratios;
         }
 
-        // 物質 1 mol の G(T) = H − T S = h0 + Cp T − T S° − Cp T ln(T / 298.15)(mJ/mol)
-        int64_t SpeciesGibbs(const RxSpecies& species, int64_t entropy, uint32_t kelvin, int64_t logRatio) {
-            const int64_t heat = int64_t{species.heatCapacity} * kelvin;
+        // 物質 1 mol の G(T) = H − T S = h0 + Cp T − T S° − Cp T ln(T / 298.15)(mJ/mol)。Cp は定圧の比熱(SpeciesPressureHeatCapacity)
+        int64_t SpeciesGibbs(const BakedReactionTable& baked, uint32_t id, int64_t entropy, uint32_t kelvin,
+                             int64_t logRatio) {
+            const int64_t heat = int64_t{SpeciesPressureHeatCapacity(baked, id)} * kelvin;
 
-            return (species.h0 * MILLIJOULES_PER_JOULE) + heat - (entropy * kelvin) -
+            return (baked.species[id].h0 * MILLIJOULES_PER_JOULE) + heat - (entropy * kelvin) -
                    FxMulShiftS64(heat, logRatio, Q32_SHIFT);
         }
 
@@ -104,7 +106,7 @@ namespace bicameral::sim {
             int64_t sum = 0;
             for (const NetTerm& term : terms) {
                 const int64_t entropy = *baked.standardEntropies[term.species];
-                sum += term.coefficient * SpeciesGibbs(baked.species[term.species], entropy, kelvin, logRatio);
+                sum += term.coefficient * SpeciesGibbs(baked, term.species, entropy, kelvin, logRatio);
             }
 
             return sum;
@@ -210,6 +212,13 @@ namespace bicameral::sim {
 
     std::vector<RuleNetTerm> RuleNetTerms(const RxRule& rule) {
         return NetTerms(rule);
+    }
+
+    uint32_t SpeciesPressureHeatCapacity(const BakedReactionTable& baked, uint32_t id) {
+        const bool condensed = id < baked.speciesCondensed.size() && baked.speciesCondensed[id] != 0;
+        const uint32_t gasConstant = condensed ? 0 : GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN;
+
+        return baked.species[id].heatCapacity + gasConstant;
     }
 
     std::vector<int64_t> RuleStandardGibbs(const BakedReactionTable& baked, uint32_t ruleId) {

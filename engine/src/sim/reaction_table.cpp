@@ -112,7 +112,7 @@ namespace bicameral::sim {
             if (definition.heatCapacity == 0 || molarMass == 0 || molarMass > UINT32_MAX)
                 return std::unexpected(std::format("物質 {}: 比熱かモル質量が 0 か大きすぎる", definition.name));
 
-            // 気体の比熱を定圧で書く表は、セルが読む定積の比熱 c_v = c_p − R にする(T-0591・ADR-0258。H0 は書いた c_p から)
+            // 気体の比熱を定圧で書く表(既定)は、セルが読む定積の比熱 c_v = c_p − R にする(T-0591・ADR-0259・T-0597。H0 は書いた c_p から)
             uint32_t heatCapacity = definition.heatCapacity;
             if (table.gasHeatCapacityAtConstantPressure && !definition.condensed) {
                 if (heatCapacity <= GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN)

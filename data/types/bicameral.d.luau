@@ -27,7 +27,7 @@ export type Element = {
 export type Species = {
     composition: { [string]: number }, -- 元素 → 個数
     formation_enthalpy_j_per_mol: number,
-    heat_capacity_mj_per_mol_k: number,
+    heat_capacity_mj_per_mol_k: number, -- 比熱(一定と置く)。気体は資料の定圧の比熱 c_p をそのまま書く(ベイクがセルの読む定積の c_v = c_p − R を作る。R 以下は断る。T-0597)。凝縮相はそのまま
     thermal_conductivity_mw_per_m_k: number,
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
     condensed: boolean?, -- 凝縮相(固体・液体)。省ける(既定 気体)。坂の計器が活量を 1 と置く(T-0518。相が入るまでの仮の欄)

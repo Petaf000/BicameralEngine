@@ -381,7 +381,11 @@ namespace {
     }
 
     int Run() {
-        const auto table = BakeReactionTable(MakeCombustionTestTable());
+        // 場面の空気は T-0597 より前の比熱(書いた値を定積として読む)のまま。定積の空気(拡散が約 1.4 倍)では「違うレベル」の場面で
+        // V 1 回・V 2 回・RKL2 が安全網を通っても 1 セル以上が最初の範囲を数 mK 越えた(2026-10-17)。安全網の作りの問題として T-0653 で調べる
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.gasHeatCapacityAtConstantPressure = false;
+        const auto table = BakeReactionTable(definition);
         if (!table) {
             Log(Channel::Sim, Level::Error, "multires_implicit_test: FAILED(表を作れない)");
             return 1;

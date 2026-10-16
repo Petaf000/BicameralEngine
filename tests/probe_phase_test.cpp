@@ -20,12 +20,14 @@
 #include <cstdio>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "reaction_test_table.h"
 #include "sim/probe_gas.h"
 #include "sim/probe_liquid.h"
 #include "sim/probe_sim.h"
+#include "sim/reaction_slope.h"
 #include "standard_world_physics.h"
 
 using namespace bicameral;
@@ -50,8 +52,10 @@ namespace {
     constexpr uint64_t STONE = 28000000000;
     constexpr uint64_t TICKS_PER_SECOND = 60;
 
-    BakedReactionTable MakeTable() {
+    // writtenHeatCapacity: 気体の比熱を書いた値のまま定積として読む(T-0597 より前と比べる測り。`--written-heat-capacity`)
+    BakedReactionTable MakeTable(bool writtenHeatCapacity) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.gasHeatCapacityAtConstantPressure = !writtenHeatCapacity;
         definition.environment = StandardWorldPhysics();
         definition.atmosphere = {
             .points = {{.heightMillimeters = 0,
@@ -127,12 +131,16 @@ namespace {
             EXPECT(std::abs(equilibrium / expected - 1.0) < 0.05);
         }
 
-        // 潜熱(mJ/mol)= h0 の差 × 1000 + 比熱の差 × 温度
+        // 潜熱(定圧。mJ/mol)= h0 の差 × 1000 + 定圧の比熱の差 × 温度。セルは体積一定なので、閉じたセルで湯気になる時に
+        // 吸う熱は内部エネルギーの差 = 潜熱 − RT(298.15 K で 41.5 kJ/mol。気体の比熱が定積。T-0597)
         auto latent = [&](std::string_view from, std::string_view to, int64_t milliKelvin) {
-            const reaction::RxSpecies a = table.species[table.SpeciesId(from)];
-            const reaction::RxSpecies b = table.species[table.SpeciesId(to)];
+            const uint32_t a = table.SpeciesId(from);
+            const uint32_t b = table.SpeciesId(to);
+            const auto capacityA = (int64_t)SpeciesPressureHeatCapacity(table, a);
+            const auto capacityB = (int64_t)SpeciesPressureHeatCapacity(table, b);
 
-            return ((b.h0 - a.h0) * 1000) + (((int64_t)b.heatCapacity - (int64_t)a.heatCapacity) * milliKelvin / 1000);
+            return ((table.species[b].h0 - table.species[a].h0) * 1000) +
+                   ((capacityB - capacityA) * milliKelvin / 1000);
         };
         const int64_t fusion = latent("ice", "water", 273150);
         const int64_t vaporization = latent("water", "water_vapor", 298150);
@@ -499,8 +507,10 @@ namespace {
 
 }  // namespace
 
-int main() {
-    const BakedReactionTable table = MakeTable();
+int main(int argc, char** argv) {
+    const std::span<char*> args(argv, static_cast<size_t>(argc));
+    const bool writtenHeatCapacity = args.size() >= 2 && std::string_view(args[1]) == "--written-heat-capacity";
+    const BakedReactionTable table = MakeTable(writtenHeatCapacity);
     TestTable(table);
     TestSteam(table, false);
     TestSteam(table, true);

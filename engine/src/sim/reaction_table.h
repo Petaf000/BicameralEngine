@@ -109,11 +109,12 @@ namespace bicameral::sim {
         std::vector<PlayMetricDefinition> playMetrics;  // 遊びの指標(分類 play_metrics。T-0432・ADR-0206)
         std::vector<CouplingDefinition> couplings;      // 流れどうしの結合(分類 drags・machines。T-0536・ADR-0238)
 
-        // 気体(condensed でない物質)の比熱を定圧の値 c_p として読み、ベイクが定積の比熱 c_v = c_p − R を作る(T-0591・ADR-0258。
-        // 仮・ユーザー未確認)。セルは体積が一定なので、反応・伝導・気体の段の温度は c_v で読むのが正しい(H0 は書いた c_p から。
-        // 298.15 K の内部エネルギー = 生成エンタルピー − RT)。既定 false = 書いた値をそのまま定積の比熱として読む(今まで)。
-        // パッケージから書く場所と既定を替えるかは T-0597
-        bool gasHeatCapacityAtConstantPressure = false;
+        // 気体(condensed でない物質)の比熱を定圧の値 c_p として読み、ベイクが定積の比熱 c_v = c_p − R を作る(T-0591・ADR-0259。
+        // ユーザーの決定 F 2026-10-17 で既定 true。T-0597)。セルは体積が一定なので、反応・伝導・気体の段の温度は c_v で読むのが正しい
+        // (H0 は書いた c_p から。298.15 K の内部エネルギー = 生成エンタルピー − RT)。作り手は資料の c_p をそのまま書く。
+        // パッケージには切り替えを置かない(heat_capacity_mj_per_mol_k の意味は 1 つ。ADR-0259 の追記)。
+        // false は C++ の試験だけ(書いた値をそのまま定積の比熱として読む = T-0597 より前)
+        bool gasHeatCapacityAtConstantPressure = true;
     };
 
     // --- ベイクした表 ---

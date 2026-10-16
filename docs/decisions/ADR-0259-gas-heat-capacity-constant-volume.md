@@ -27,3 +27,15 @@
 ## 追記 1(2026-10-17・ユーザー決定 D-506)
 - 案 A に決めた: **既定を true にする**(作り手は資料の定圧の比熱 c_p をそのまま書き、ベイクが c_v = c_p − R を作る)。
   パッケージの書き場所・型・読み込み・既定の切り替えと、場面の数値・GPU の試験の期待値の測り直しは T-0597。
+
+## 追記 2(2026-10-17・T-0597。D-506 の実装)
+- **既定を true にした**(`ReactionTableDefinition::gasHeatCapacityAtConstantPressure = true`)。パッケージの `heat_capacity_mj_per_mol_k` は、
+  気体なら資料の定圧の比熱 c_p をそのまま書く(型 data/types/bicameral.d.luau の注に書いた)。凝縮相(condensed・phase が solid / liquid)はそのまま。
+- **パッケージには切り替えを置かない(仮・ユーザー未確認)**: 欄の意味を 1 つにする(案 C の「表ごとに意味が変わる」を作らない)。
+  作り手から見た違い: 定積の値しか手元に無い作り手は R(8.314 J/(mol·K))を足して書く。切り替えを置く案は、混ぜたパッケージで同じ欄の意味が
+  パッケージごとに違い、読み手が取り違える。false は C++ の試験だけ(書いた値をそのまま定積として読む比べ)。
+- **坂の検査は定圧の比熱で見る**: sim/reaction_slope の G(T) = h0 + c_p T − T(S° + c_p ln(T / 298.15))の c_p を `SpeciesPressureHeatCapacity`
+  (気体 = 表の c_v + R = 書いた c_p、凝縮相 = 表の値)にした。表の比熱(c_v)のままだと、気体の数の増える規則(boudouard など)の釣り合いの温度がずれる。
+  既定 true では今までの坂の判定・警告と同じ値(試験 slope_check・reaction_package の静的な一覧)。
+- 数の動いた試験と理由は docs/tickets/T-0597-gas-heat-capacity-basis-package.md。
+

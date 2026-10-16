@@ -17,7 +17,8 @@
 //     エンジンの物質は相を持たないので、固体の名前は試験が知っている(M2 で相を持ったら表から読む)。
 //   - セルの中の反応は熱がそのセルに残る(体積一定)が、坂は定圧の ΔG で見る(近似。符号の判定には十分)。
 // 使い方: 引数なし = ctest(短い刻み。伝導で坂を上る流れが 0・なぞりが一致・規則の一覧が出る)。
-//         `--burn [刻み]` = 燃え方の計器を長く測る(既定 18000 刻み。ctest では流さない)。結果と「同じく動く」の幅は
+//         `--burn [刻み]` = 燃え方の計器を長く測る(既定 18000 刻み。ctest では流さない)。`--burn 刻み --written-heat-capacity` は
+//         気体の比熱を書いた値のまま定積として読む(T-0597 より前と比べる)。結果と「同じく動く」の幅は
 //         docs/tickets/T-0491-slope-check-gauge.md と docs/design/19 §8。
 // 開発ビルドの坂の計器(sim/slope_gauge。整数。T-0518)を同じ木箱に並べて走らせ、この倍精度の数え上げと進行度・坂を上った回が
 // 同じことを確かめる(合成のセルでも ΔG を 1 J/mol の中で比べる)。
@@ -87,7 +88,9 @@ namespace {
         std::vector<SpeciesThermo> thermo(table.species.size());
         for (size_t id = 1; id < table.species.size(); ++id) {
             thermo[id].zeroKelvinEnthalpy = static_cast<double>(table.species[id].h0);
-            thermo[id].heatCapacity = static_cast<double>(table.species[id].heatCapacity) * MILLI;
+            thermo[id].heatCapacity = static_cast<double>(
+                                          SpeciesPressureHeatCapacity(table, static_cast<uint32_t>(id))) *
+                                      MILLI;  // 定圧(T-0597)
             thermo[id].condensed = table.speciesNames[id] == "cellulose" || table.speciesNames[id] == "carbon" ||
                                    table.speciesNames[id] == "water" || table.speciesNames[id] == "ice";  // T-0611
         }
@@ -689,8 +692,11 @@ int main(int argc, char** argv) {
     const std::span<char*> args(argv, static_cast<size_t>(argc));
     const bool burn = args.size() >= 2 && std::string_view(args[1]) == "--burn";
     const uint64_t ticks = burn ? (args.size() >= 3 ? std::strtoull(args[2], nullptr, 10) : BURN_TICKS) : SHORT_TICKS;
+    // --burn 刻み --written-heat-capacity: 気体の比熱を書いた値のまま定積として読む(T-0597 より前の木箱と比べる測り)
+    const bool writtenHeatCapacity = args.size() >= 4 && std::string_view(args[3]) == "--written-heat-capacity";
 
-    const ReactionTableDefinition definition = MakeCombustionTestTable();
+    ReactionTableDefinition definition = MakeCombustionTestTable();
+    definition.gasHeatCapacityAtConstantPressure = !writtenHeatCapacity;
     const auto table = BakeReactionTable(definition);
     if (!table) {
         std::printf("FAILED: 表を作れない: %s\n", table.error().c_str());
