@@ -43,6 +43,8 @@ namespace bicameral::sim {
     // 1 レベルの箱の CPU リファレンスは上限なし(GasPerSpecies。5 つ目から外の配列。T-0591・D-401)
     inline constexpr uint32_t GAS_MAX_SPECIES = 4;
     inline constexpr uint32_t GAS_AXES = 3;
+    // セルの空きの 1(Q16。GasBox::openQ16。T-0593)
+    inline constexpr uint32_t GAS_OPEN_FULL = 1u << 16;
 
     // 丸めの乱数の鍵を欄の番号にする印(GasSpecies::roundingKey の既定)
     inline constexpr uint32_t GAS_ROUNDING_KEY_SLOT = UINT32_MAX;
@@ -256,6 +258,12 @@ namespace bicameral::sim {
         std::vector<GasCell> cells;  // x が最も速く回る(x + sizeX × (y + sizeY × z))
         GasLedger ledger;
         uint64_t tick = 0;
+
+        // セルの空き(気体が使える体積の割合。Q16。GAS_OPEN_FULL = セルの全部。T-0593・ADR-0268)。空 = 全部のセルが全部(今まで通り。
+        // ビット単位で同じ)。圧力は空きの体積で読み(p = nRT ÷ 空きの体積)、面は両側の空きの小さい方だけ開く(残りは壁として押し返し、
+        // 帳簿へ)。基準との質量の差は「基準 × 空き」から数える(固体の多いセルの静かな大気は動かない)。
+        // 陽解法(StepGas)だけが読む(投影は T-0617)。世界のセルから毎刻み作る(sim/cell_volume。sim/probe_gas)
+        std::vector<uint32_t> openQ16;
 
         [[nodiscard]] uint32_t Index(uint32_t x, uint32_t y, uint32_t z) const {
             return x + config.sizeX * (y + config.sizeY * z);

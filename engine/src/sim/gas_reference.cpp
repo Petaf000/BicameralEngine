@@ -42,9 +42,11 @@ namespace bicameral::sim {
             FaceSide leftOuter;   // left のさらにマイナス側(MUSCL の勾配)
             FaceSide rightOuter;  // right のさらにプラス側
             uint32_t axis = 0;
-            uint32_t id = 0;        // 面の番号(乱数の丸めの ID。並べた順ではなく場所から決める。R6)
-            int64_t flow = 0;       // 質量の流れ(mg/小刻み。左 → 右が正)
-            int64_t impulse = 0;    // 面の圧力の力積(左のセルから引き、右のセルへ足す)
+            uint32_t id = 0;      // 面の番号(乱数の丸めの ID。並べた順ではなく場所から決める。R6)
+            int64_t flow = 0;     // 質量の流れ(mg/小刻み。左 → 右が正)
+            int64_t impulse = 0;  // 面の圧力の力積(左のセルから引き、右のセルへ足す)
+            // 右のセルへ足す力積(面が一部だけ開いた時は左と違う。差は塞いだ物が受けて帳簿へ。T-0593。ふつうは impulse と同じ)
+            int64_t impulseRight = 0;
             uint64_t fraction = 0;  // 風上の中身のうち移す割合(Q32)
 
             // --- 重さ(縦の面だけ。基準との質量の差 × g を面の両側の半分ずつのセルで受ける)---
@@ -225,12 +227,40 @@ namespace bicameral::sim {
             return side.kind == SideKind::Ghost ? box.referenceDerived[side.index] : derived[side.index];
         }
 
-        // 基準との質量の差(mg)。開いた境界の外は基準そのもの(0)
+        // セルの空き(Q16。T-0593)。空きを読まない箱・箱の外は全部
+        uint32_t SideOpen(const GasBox& box, FaceSide side) {
+            if (box.openQ16.empty() || side.kind != SideKind::Cell)
+                return GAS_OPEN_FULL;
+
+            return box.openQ16[side.index];
+        }
+
+        // 面の開き(Q16)= 両側の空きの小さい方
+        uint32_t FaceOpen(const GasBox& box, const GasFace& face) {
+            return std::min(SideOpen(box, face.left), SideOpen(box, face.right));
+        }
+
+        // value × numerator ÷ denominator(0 の向きへ切り捨て)
+        int64_t ScaleSigned(int64_t value, uint64_t numerator, uint64_t denominator) {
+            const uint64_t magnitude = fx::FxAbsU64(value);
+            return fx::FxApplySign(fx::FxDivU128By64(fx::FxMulU64Full(magnitude, numerator), denominator).quotient,
+                                   value < 0);
+        }
+
+        // 基準との質量の差(mg)。開いた境界の外は基準そのもの(0)。
+        // 空きを読む箱では基準 × 空き と比べ(固体の多いセルの静かな大気に浮力を作らない)、気体の無いセルは 0(力を受ける物が無い)
         int64_t Excess(const GasBox& box, const std::vector<GasDerived>& derived, FaceSide side) {
             if (side.kind != SideKind::Cell)
                 return 0;
 
-            return (int64_t)derived[side.index].mass - (int64_t)box.referenceDerived[CellLayer(box, side.index)].mass;
+            const auto reference = (int64_t)box.referenceDerived[CellLayer(box, side.index)].mass;
+            if (box.openQ16.empty())
+                return (int64_t)derived[side.index].mass - reference;
+
+            if (derived[side.index].mass == 0)
+                return 0;
+
+            return (int64_t)derived[side.index].mass - ScaleSigned(reference, box.openQ16[side.index], GAS_OPEN_FULL);
         }
 
         // 質量の差 Δm(mg)が 1 セルの高さで作る静水圧の差の半分(µPa)= Δm × 層の重さの係数(標準の重力で 39.2266)÷ 2
@@ -275,7 +305,7 @@ namespace bicameral::sim {
         }
 
         // 面の力: 圧力の力積と重さ(小刻みの初めの導く値だけから)
-        void ComputeFaceForce(const GasBox& box, const std::vector<GasDerived>& derived, GasFace& face) {
+        void ComputeFaceForceFull(const GasBox& box, const std::vector<GasDerived>& derived, GasFace& face) {
             const GasCoefficients& coefficients = box.coefficients;
             ComputeFaceWeight(box, derived, face);
 
@@ -299,19 +329,69 @@ namespace bicameral::sim {
             face.impulse = fx::FxMulShiftS64(pressureSum, (int64_t)coefficients.pressureImpulse, 16);
         }
 
-        // 面の質量の流れ(力を当てた後の運動量 + 小刻みの初めの圧力。前進・後退の順〔forward-backward〕)。壁は 0
+        // 一部だけ開いた面の 1 つの側が受ける力積: 開いた所は両側の平均の圧力(shared = 全面の時の力積)、塞がった所は
+        // その側のセル自身の圧力(壁と同じ鏡。縦の面は半セルの静水圧で延ばす)。above = その側が面の上(+ 側)にある
+        int64_t PartialImpulse(const GasBox& box, const std::vector<GasDerived>& derived, const GasFace& face,
+                               FaceSide side, bool above, int64_t shared, uint32_t open) {
+            int64_t pressure = SideDerived(box, derived, side).scaledPressure;
+            if (face.axis == 2 && box.config.gravity) {
+                const int64_t hydrostatic = HalfHydrostatic(box, Excess(box, derived, side));
+                pressure += above ? hydrostatic : -hydrostatic;
+            }
+
+            const int64_t wall = fx::FxMulShiftS64(pressure * 2, (int64_t)box.coefficients.pressureImpulse, 16);
+
+            return ScaleSigned(shared, open, GAS_OPEN_FULL) + ScaleSigned(wall, GAS_OPEN_FULL - open, GAS_OPEN_FULL);
+        }
+
+        // 面の力: 圧力の力積と重さ(小刻みの初めの導く値だけから)。
+        // 空きを読む箱(T-0593): 一部だけ開いた面は両側が違う力積を受け(差は塞いだ物が受けて帳簿へ)、気体の無いセルは押さない
+        void ComputeFaceForce(const GasBox& box, const std::vector<GasDerived>& derived, GasFace& face) {
+            ComputeFaceForceFull(box, derived, face);
+            face.impulseRight = face.impulse;
+            if (box.openQ16.empty())
+                return;
+
+            const bool wall = face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall;
+            const uint32_t open = FaceOpen(box, face);
+            if (!wall && open != GAS_OPEN_FULL) {
+                const int64_t shared = face.impulse;
+                face.impulse = PartialImpulse(box, derived, face, face.left, false, shared, open);
+                face.impulseRight = PartialImpulse(box, derived, face, face.right, true, shared, open);
+            }
+
+            if (face.left.kind == SideKind::Cell && derived[face.left.index].mass == 0)
+                face.impulse = 0;
+
+            if (face.right.kind == SideKind::Cell && derived[face.right.index].mass == 0)
+                face.impulseRight = 0;
+        }
+
+        // 面の質量の流れ(力を当てた後の運動量 + 小刻みの初めの圧力。前進・後退の順〔forward-backward〕)。壁は 0。
+        // 空きを読む箱(T-0593): 開き 0 の面は流さない。一部だけ開いた面は、各側の運動量を「面の開き ÷ その側の空き」倍
+        // (孔の中の速さ × 開いた面積)、圧力の拡散を開きの倍にする(どちらも 1 以下なので安定の条件は今より緩い)
         void ComputeFaceFlow(const GasBox& box, const std::vector<GasDerived>& derived,
                              const std::vector<GasCell>& forced, GasFace& face) {
             if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
                 return;
 
-            const int64_t momentumSum = SideCell(box, forced, face.left).momentum[face.axis] +
-                                        SideCell(box, forced, face.right).momentum[face.axis];
+            const int64_t leftMomentum = SideCell(box, forced, face.left).momentum[face.axis];
+            const int64_t rightMomentum = SideCell(box, forced, face.right).momentum[face.axis];
+            int64_t momentumSum = leftMomentum + rightMomentum;
+            int64_t driving = DrivingPressure(box, derived, face);
+            const uint32_t open = FaceOpen(box, face);
+            if (open == 0)
+                return;
+
+            if (open != GAS_OPEN_FULL) {
+                momentumSum = ScaleSigned(leftMomentum, open, SideOpen(box, face.left)) +
+                              ScaleSigned(rightMomentum, open, SideOpen(box, face.right));
+                driving = ScaleSigned(driving, open, GAS_OPEN_FULL);
+            }
 
             // --- 中心の流れ + 圧力の拡散(Rusanov の散逸を圧力の差にかける: 接触面〔温度・成分の境〕を散らさず、静止大気では 0)---
             const int64_t central = fx::FxMulShiftS64(momentumSum, (int64_t)box.coefficients.centralFlow, 52);
-            const int64_t diffusion = fx::FxMulShiftS64(DrivingPressure(box, derived, face),
-                                                        (int64_t)box.coefficients.pressureFlow, 40);
+            const int64_t diffusion = fx::FxMulShiftS64(driving, (int64_t)box.coefficients.pressureFlow, 40);
             face.flow = central + diffusion;
         }
 
@@ -456,18 +536,19 @@ namespace bicameral::sim {
                 box.ledger.momentum[2] -= face.weightRight;
             }
 
-            if (face.impulse == 0)
+            if (face.impulse == 0 && face.impulseRight == 0)
                 return;
 
-            if (face.left.kind == SideKind::Cell)
+            // 帳簿 = セルが受けた力積の和(両側が同じなら 0。一部だけ開いた面の差は塞いだ物が受けた。T-0593)
+            if (face.left.kind == SideKind::Cell) {
                 next[face.left.index].momentum[face.axis] -= face.impulse;
-            else
-                box.ledger.momentum[face.axis] += face.impulse;
-
-            if (face.right.kind == SideKind::Cell)
-                next[face.right.index].momentum[face.axis] += face.impulse;
-            else
                 box.ledger.momentum[face.axis] -= face.impulse;
+            }
+
+            if (face.right.kind == SideKind::Cell) {
+                next[face.right.index].momentum[face.axis] += face.impulseRight;
+                box.ledger.momentum[face.axis] += face.impulseRight;
+            }
         }
 
         // 出ていく割合の合計が 1 を超えるセルは、その面の割合を比例して縮める(07「共通の形」。負の中身を作らない)
@@ -618,10 +699,38 @@ namespace bicameral::sim {
             }
         }
 
+        // p̃ = α(p − p_基準)。頭打ちの温度 T_頭 より熱いセルは α × T_頭 ÷ T(実効の音速を安定の上限に抑える。c_iso² ∝ T。T-0269)
+        void ScalePressure(const GasBox& box, GasDerived& derived, uint32_t z) {
+            const int64_t deviation = derived.pressure - box.referenceDerived[z].pressure;
+            int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
+            const uint32_t soundTemperature = box.coefficients.soundTemperature;
+            if (derived.temperature > soundTemperature)
+                scaled = fx::FxDivS64(fx::FxMulShiftS64(scaled, soundTemperature, 0), derived.temperature);
+
+            derived.scaledPressure = scaled;
+        }
+
+        // 空きを読む圧力の下限の空き(Q16。1/256。塞がったセルに気体ができても圧力が 64bit を溢れない。そのセルの面は閉じている)
+        constexpr uint32_t GAS_OPEN_PRESSURE_FLOOR = 256;
+
+        // 空きが一部のセルの導く値: 本物の圧力 = n R T ÷ (セルの体積 × 空き)(T-0593)
+        GasDerived DeriveOpenCell(const GasBox& box, const GasCell& cell, uint32_t z, uint32_t open) {
+            GasDerived derived = DeriveRaw(box.config, box.coefficients, cell);
+            const uint32_t volume = std::max(open, GAS_OPEN_PRESSURE_FLOOR);
+            derived.pressure = ScaleSigned(derived.pressure, GAS_OPEN_FULL, volume);
+            ScalePressure(box, derived, z);
+
+            return derived;
+        }
+
         std::vector<GasDerived> DeriveAll(const GasBox& box) {
             std::vector<GasDerived> derived(box.cells.size());
-            for (uint32_t index = 0; index < box.cells.size(); ++index)
-                derived[index] = DeriveGasCell(box, box.cells[index], CellLayer(box, index));
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                const uint32_t open = box.openQ16.empty() ? GAS_OPEN_FULL : box.openQ16[index];
+                derived[index] = open == GAS_OPEN_FULL
+                                     ? DeriveGasCell(box, box.cells[index], CellLayer(box, index))
+                                     : DeriveOpenCell(box, box.cells[index], CellLayer(box, index), open);
+            }
 
             return derived;
         }
@@ -870,15 +979,7 @@ namespace bicameral::sim {
 
     GasDerived DeriveGasCell(const GasBox& box, const GasCell& cell, uint32_t z) {
         GasDerived derived = DeriveRaw(box.config, box.coefficients, cell);
-
-        // p̃ = α(p − p_基準)。頭打ちの温度 T_頭 より熱いセルは α × T_頭 ÷ T(実効の音速を安定の上限に抑える。c_iso² ∝ T。T-0269)
-        const int64_t deviation = derived.pressure - box.referenceDerived[z].pressure;
-        int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
-        const uint32_t soundTemperature = box.coefficients.soundTemperature;
-        if (derived.temperature > soundTemperature)
-            scaled = fx::FxDivS64(fx::FxMulShiftS64(scaled, soundTemperature, 0), derived.temperature);
-
-        derived.scaledPressure = scaled;
+        ScalePressure(box, derived, z);
 
         return derived;
     }
