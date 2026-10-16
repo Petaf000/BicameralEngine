@@ -173,7 +173,7 @@ namespace bicameral::sim {
         GasThermodynamics thermodynamics = GasThermodynamics::Adiabatic;
 
         // これより熱いセルは実効の音速をそこで頭打ちにする(mK。安定の条件を守る)。0 = 安定の上限から求める(GasSoundCapTemperature。
-        // D-461〔Q32 案 D〕・T-0269。既定の 340 m/s・小刻み 24 で約 473 K)。UINT32_MAX = 頭打ちなし(試験だけ)。
+        // D-461〔Q32 案 D〕・T-0269。既定の 340 m/s・小刻み 24 で約 372 K。T-0631)。UINT32_MAX = 頭打ちなし(試験だけ)。
         // 地面の層の基準の温度を入れると T-0234 までの形(Q32 の案 A。熱いセルの音速を c̃ に抑える)
         uint32_t soundCapTemperature = 0;
 
