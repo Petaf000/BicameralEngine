@@ -63,7 +63,7 @@ namespace bicameral::sim {
         // 放射率も同じ値(灰色体)。GPU の表にはまだ入らない(放射の CPU リファレンス sim/radiation_reference だけが読む。T-0583・ADR-0252)
         uint32_t radiationAbsorption = 0;
         // 液体か(パッケージの phase = "liquid"。T-0609・ADR-0266 Proposed)。任意(既定 false)。液体は凝縮相(condensed)でもあり、
-        // 液体の場(sim/probe_liquid)が低い方へ流す。密度(density)が要る。GPU の表にはまだ入らない
+        // 液体の場(sim/probe_liquid・GPU は ProbeSim の液体の段 T-0613)が低い方へ流す。密度(density)が要る
         bool liquid = false;
         // 密度(kg/m³。パッケージの density_kg_per_m3)。任意(既定 0 = 書かない)。液体には要る(セルに入る量 = セルの体積 ÷ モル体積)。
         // 固体の密度は、気体と体積を分け合う所(T-0612・T-0593)が読む予定

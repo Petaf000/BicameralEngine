@@ -36,6 +36,7 @@
 
 #include "common/physics_heat.hlsli"
 #include "common/probe_gas_gpu.hlsli"
+#include "common/probe_liquid_gpu.hlsli"
 #include "common/probe_place.hlsli"
 #include "common/probe_sim.hlsli"
 #include "common/probe_world.hlsli"
@@ -269,6 +270,10 @@ namespace bicameral::sim {
         // GPU は陽解法だけ・区画の気体の物質は 4 つまで(超えた刻みは流さずに数える。T-0598)。
         // 区画のある世界では、まだ表の差し替え・保存点・写しの早送りを断る(T-0620)
         ProbeGasOptions gas;
+
+        // 液体の区画(T-0613・ADR-0266。既定は無い = 今までと同じ)。CPU の ProbeReference::EnableLiquid と同じ値を渡すと毎刻みビット一致する
+        // (段の順も CPU と同じ: 気体 → 液体)。区画のある世界では、気体と同じく表の差し替え・保存点・写しの早送りを断る(T-0620)
+        ProbeLiquidOptions liquid;
     };
 
     // --- GPU で走らせる ---
@@ -351,6 +356,12 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12Resource* GasWork() const { return m_gasWork.Get(); }
         [[nodiscard]] const ProbeGasHeader& GasHeader() const { return m_gasHeader; }
 
+        // 液体の区画(T-0613。無ければ HasLiquid() が false)。テストが読み戻すだけ(フレームの間は COMMON)。
+        // LiquidWork = 制御・帳簿・見出し・面の運動量などの状態(並びは common/probe_liquid_gpu.hlsli と LiquidHeader)
+        [[nodiscard]] bool HasLiquid() const { return m_liquidWork != nullptr; }
+        [[nodiscard]] ID3D12Resource* LiquidWork() const { return m_liquidWork.Get(); }
+        [[nodiscard]] const ProbeLiquidHeader& LiquidHeader() const { return m_liquidHeader; }
+
         // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
         [[nodiscard]] const GpuPhysics* Physics() const { return m_physics.get(); }
 
@@ -417,6 +428,8 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> CreatePhysics(ID3D12Device5* device);
         [[nodiscard]] std::expected<void, std::string> CreateGas(ID3D12Device5* device,
                                                                  const BakedReactionTable& table);
+        [[nodiscard]] std::expected<void, std::string> CreateLiquid(ID3D12Device5* device,
+                                                                    const BakedReactionTable& table);
 
         // --- 入力とコマンド ---
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
@@ -448,6 +461,10 @@ namespace bicameral::sim {
         void RecordGasScatter(ID3D12GraphicsCommandList10* list) const;
         void RecordGasInitialization(ID3D12GraphicsCommandList10* list) const;
         [[nodiscard]] bool ValidateGas(const ProbeFrameInput& input) const;
+        // 液体の段(sim/probe_sim_liquid.cpp。気体の段の後・起こす刻みの来たブロックの前。CPU の (1c))
+        void RecordLiquid(ID3D12GraphicsCommandList10* list) const;
+        void RecordLiquidInitialization(ID3D12GraphicsCommandList10* list) const;
+        [[nodiscard]] bool ValidateLiquid(const ProbeFrameInput& input) const;
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
         void RecordActiveListStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
                                     D3D12_RESOURCE_STATES after) const;
@@ -540,6 +557,12 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_gasUpload;  // gasWork の初めの中身(最初のフレームで写す)
         ProbeGasHeader m_gasHeader{};
         std::array<ComPtr<ID3D12PipelineState>, 7> m_gasPipelines;  // GasBegin〜GasFinish(呼ぶ順)
+
+        // --- 液体の区画(T-0613。shaders/sim/probe_liquid_tick.hlsl。区画が無ければ m_liquidWork は nullptr)---
+        ComPtr<ID3D12Resource> m_liquidWork;    // 制御・帳簿・見出し・状態・作業の値(probe_liquid_gpu.hlsli)
+        ComPtr<ID3D12Resource> m_liquidUpload;  // liquidWork の見出しと物質ごとの値(最初のフレームで写す)
+        ProbeLiquidHeader m_liquidHeader{};
+        std::array<ComPtr<ID3D12PipelineState>, 10> m_liquidPipelines;  // LiquidRead〜LiquidSettleCells(呼ぶ順)
 
         // --- 刻みの道具(表・キュー・イベント・活性)---
         ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
