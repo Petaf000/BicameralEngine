@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <format>
+#include <optional>
 #include <span>
 
 #include "sim/reaction_table.h"
@@ -200,6 +201,76 @@ namespace bicameral::sim {
             }
         }
 
+        // --- 釣り合いの規則(T-0623・ADR-0290)---
+        // 作り手が書いた釣り合い K(T_eq) と、物質の値(生成エンタルピー・標準エントロピー)から出る K = exp(−ΔG°/RT) を比べる。
+        // 食い違う対は、物質の値で見た坂の上の状態で止まる(ほかの規則と組むと坂の上へ運び続けうる)。表はこのまま当てる(D-487 ②)
+        constexpr int64_t CELL_VOLUME_LOG2 = -3;  // レベル 0 のセルの体積 2^-3 m³(reaction_table.cpp と同じ)
+        constexpr uint64_t STANDARD_PRESSURE_PASCAL = 100000;  // 標準エントロピーの圧力(1 bar)
+        constexpr int64_t PER_CELL_LOG10 = 15;                 // 1e6 µmol/mol × 1e9 nJ/J の 10 の桁
+
+        std::optional<std::string> BalanceWarning(const BakedReactionTable& baked, uint32_t ruleId) {
+            const RxRule& rule = baked.rules[ruleId];
+            if (rule.balanceKelvin == 0)
+                return std::nullopt;
+
+            // 逆向き(ベイクが作った)は元の規則と同じ食い違いなので、元の規則でだけ言う
+            const std::string& name = baked.ruleNames[ruleId];
+            if (name.ends_with(REVERSE_RULE_SUFFIX))
+                return std::nullopt;
+
+            // 反応熱は 0 K 基準の h0 の差なので、釣り合いの温度での値(+ 比熱の変化 × T_eq)と比べる(融解は 0 K では発熱に見える)
+            const bool rising = rule.balanceSlope > 0;
+            const int64_t enthalpyAtBalance = rule.reactionEnthalpy +
+                                              (rule.heatCapacityChange * int64_t{rule.balanceKelvin} / 1000000);
+            if (rule.balanceSlope != 0 && enthalpyAtBalance != 0 && rising != (enthalpyAtBalance > 0))
+                return std::format(
+                    "{}釣り合いの規則 {} は ΔH_eq の符号が反応熱と逆(温めた時に釣り合いが反応熱と逆へ動く。"
+                    "釣り合いまでの距離が一意に決まらないことがある)",
+                    SLOPE_WARNING_PREFIX, name);
+
+            const std::vector<int64_t> gibbs = RuleStandardGibbs(baked, ruleId);
+            if (gibbs.empty())
+                return std::nullopt;
+
+            // --- 物質の値の log2 K(気体は 1 bar 基準)を、セルの µmol の単位へ(Δn × log2(p° V 1e6 / RT))---
+            const uint32_t kelvin = rule.balanceKelvin / 1000;
+            const uint64_t gasEnergy = GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN * kelvin;
+            const int64_t gibbsMilliJoules = gibbs[kelvin];
+            const uint64_t magnitude = static_cast<uint64_t>(gibbsMilliJoules < 0 ? -gibbsMilliJoules
+                                                                                  : gibbsMilliJoules) *
+                                       NANOJOULES_PER_MILLIJOULE;
+            const FxU128 numerator = {.hi = magnitude >> 32, .lo = magnitude << 32};
+            const auto lnMagnitude = static_cast<int64_t>(FxDivU128By64(numerator, gasEnergy).quotient);
+            const int64_t log2Standard = FxMulShiftS64(gibbsMilliJoules > 0 ? -lnMagnitude : lnMagnitude,
+                                                       static_cast<int64_t>(FX_LOG2E_Q62), 62);
+            int64_t gasChange = 0;
+            for (uint32_t i = 0; i < rule.reactantCount; ++i)
+                gasChange -= ((rule.balanceGasMask >> i) & 1) != 0 ? int64_t{rule.reactantCoefficients[i]} : 0;
+
+            for (uint32_t i = 0; i < rule.productCount; ++i)
+                gasChange += ((rule.balanceGasMask >> (RX_BALANCE_PRODUCT_SHIFT + i)) & 1) != 0
+                                 ? int64_t{rule.productCoefficients[i]}
+                                 : 0;
+
+            const int64_t log2PerCell = (PER_CELL_LOG10 * FxLog2U64(10)) + FxLog2U64(STANDARD_PRESSURE_PASCAL) +
+                                        (CELL_VOLUME_LOG2 * (int64_t{1} << 32)) - FxLog2U64(gasEnergy);
+            const int64_t log2Substance = log2Standard + (gasChange * log2PerCell);
+            const int64_t difference = rule.balanceLog2Constant - log2Substance;
+            const int64_t tolerance = FxLog2U64(10);
+            if (difference >= -tolerance && difference <= tolerance)
+                return std::nullopt;
+
+            // 10 の桁(log2 の差 ÷ log2 10。表示用)
+            const int64_t decades = difference / tolerance;
+
+            return std::format(
+                "{}釣り合いの規則 {} の釣り合い({} K で書いた "
+                "K)が、物質の値(生成エンタルピー・標準エントロピー)から出る"
+                "釣り合いと 10^{} 倍ほど違う。この規則は物質の値で見た坂の上の状態で止まる"
+                "(ほかの規則と組むと坂の上へ運び続けうる)。表はこのまま当てる",
+                SLOPE_WARNING_PREFIX, name, kelvin, decades == 0 ? (difference > 0 ? 1 : -1) : decades);
+        }
+
         std::string Join(const std::vector<std::string>& names) {
             std::string text;
             for (const std::string& name : names)
@@ -265,6 +336,9 @@ namespace bicameral::sim {
                     "直すなら逆向きの規則を足すか、この温度の速さを小さくする",
                     SLOPE_WARNING_PREFIX, name, slope.uphill.lowKelvin, slope.uphill.highKelvin, balance));
             }
+
+            if (auto balance = BalanceWarning(baked, ruleId))
+                warnings.push_back(*balance);
 
             if (slope.state != RuleSlopeState::Unevaluated)
                 continue;

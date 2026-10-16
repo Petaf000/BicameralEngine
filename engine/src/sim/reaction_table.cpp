@@ -46,6 +46,30 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // --- 釣り合いの規則の逆向き(T-0623・ADR-0290)---
+
+        // 釣り合いの規則ごとに逆向きの規則(反応物と生成物を入れ替え、釣り合いの急さの符号を変えたもの)を足す。
+        // 逆向きは自分の反応物(元の生成物)の索引に入るので、元の反応物が無いセル(水だけ・湯気だけ)でも釣り合いへ向かえる
+        ReactionTableDefinition WithReverseRules(const ReactionTableDefinition& definition) {
+            ReactionTableDefinition expanded = definition;
+            for (const RuleDefinition& rule : definition.rules) {
+                if (!rule.balance)
+                    continue;
+
+                RuleDefinition reverse = rule;
+                reverse.name = rule.name + std::string(REVERSE_RULE_SUFFIX);
+                reverse.reactants = rule.products;
+                reverse.products = rule.reactants;
+                reverse.balance->enthalpy = -rule.balance->enthalpy;
+                if (rule.declaredReactionEnthalpy)
+                    reverse.declaredReactionEnthalpy = -*rule.declaredReactionEnthalpy;
+
+                expanded.rules.push_back(std::move(reverse));
+            }
+
+            return expanded;
+        }
+
         // --- 並び(T-0021・ADR-0032)---
 
         // 元素・物質・規則・規則の項を名前のバイト順に並べた写し。ID はこの順で振るので、定義の並びに依らない。
@@ -255,6 +279,73 @@ namespace bicameral::sim {
             return enthalpy;
         }
 
+        // 釣り合いの欄(T-0623・ADR-0290)。log2 K(T_eq) を µmol とセルの体積に直し(Q は気体の項の µmol で数える)、
+        // 急さ = ΔH_eq ÷ (R ln 2)(K。Q32)。比熱の変化は進めた後の温度に使う
+        std::expected<void, std::string> BakeBalance(const RuleDefinition& definition, const BakedReactionTable& baked,
+                                                     RxRule& rule) {
+            if (!definition.balance)
+                return {};
+
+            constexpr int64_t BALANCE_ENTHALPY_MAX = 10000000;  // J/mol(急さを 64bit に収める)
+            constexpr uint32_t BALANCE_KELVIN_MIN = 1000;       // mK
+            constexpr uint32_t BALANCE_KELVIN_MAX = (RX_RATE_TABLE_KELVINS - 1) * 1000;
+            const BalanceDefinition& balance = *definition.balance;
+            if (balance.temperatureMilliKelvin < BALANCE_KELVIN_MIN ||
+                balance.temperatureMilliKelvin > BALANCE_KELVIN_MAX)
+                return std::unexpected(
+                    std::format("規則 {}: 釣り合いの温度は 1〜{} K", definition.name, RX_RATE_TABLE_KELVINS - 1));
+
+            if (balance.enthalpy < -BALANCE_ENTHALPY_MAX || balance.enthalpy > BALANCE_ENTHALPY_MAX)
+                return std::unexpected(
+                    std::format("規則 {}: 釣り合いの ΔH は ±{} J/mol まで", definition.name, BALANCE_ENTHALPY_MAX));
+
+            // --- 気体の項と Δn・比熱の変化 ---
+            int64_t gasChange = 0;
+            int64_t heatCapacityChange = 0;
+            for (uint32_t i = 0; i < rule.reactantCount; ++i) {
+                const bool gas = baked.speciesCondensed[rule.reactants[i]] == 0;
+                rule.balanceGasMask |= gas ? 1u << i : 0u;
+                gasChange -= gas ? int64_t{rule.reactantCoefficients[i]} : 0;
+                heatCapacityChange -= int64_t{rule.reactantCoefficients[i]} *
+                                      baked.species[rule.reactants[i]].heatCapacity;
+            }
+
+            for (uint32_t i = 0; i < rule.productCount; ++i) {
+                const bool gas = baked.speciesCondensed[rule.products[i]] == 0;
+                rule.balanceGasMask |= gas ? 1u << (RX_BALANCE_PRODUCT_SHIFT + i) : 0u;
+                gasChange += gas ? int64_t{rule.productCoefficients[i]} : 0;
+                heatCapacityChange += int64_t{rule.productCoefficients[i]} *
+                                      baked.species[rule.products[i]].heatCapacity;
+            }
+
+            if (gasChange != 0 && balance.concentrationMantissa == 0)
+                return std::unexpected(
+                    std::format("規則 {}: 気体の係数が両辺で違う釣り合いには濃さ(concentration_mol_per_m3)が要る",
+                                definition.name));
+
+            // --- log2 K(T_eq)(µmol の単位)= Δn × (log2 c + log2 1e6 + log2 V)---
+            const int64_t log2Ten = FxLog2U64(10);
+            const int64_t log2Concentration = balance.concentrationMantissa == 0
+                                                  ? 0
+                                                  : FxLog2U64(balance.concentrationMantissa) +
+                                                        (int64_t{balance.concentrationExponent10} * log2Ten);
+            const int64_t log2PerCell = log2Concentration + (6 * log2Ten) + (CELL_VOLUME_LOG2 * (int64_t{1} << 32));
+            rule.balanceLog2Constant = gasChange * log2PerCell;
+
+            // --- 急さ = ΔH ÷ R(K。Q32)× log2 e ---
+            const uint64_t magnitude = static_cast<uint64_t>(balance.enthalpy < 0 ? -balance.enthalpy
+                                                                                  : balance.enthalpy) *
+                                       NANOJOULES_PER_JOULE;
+            const FxU128 numerator = {.hi = magnitude >> 32, .lo = magnitude << 32};
+            const auto overR = static_cast<int64_t>(FxDivU128By64(numerator, GAS_CONSTANT_NANOJOULES).quotient);
+            const int64_t slope = FxMulShiftS64(overR, static_cast<int64_t>(FX_LOG2E_Q62), 62);
+            rule.balanceSlope = balance.enthalpy < 0 ? -slope : slope;
+            rule.heatCapacityChange = heatCapacityChange;
+            rule.balanceKelvin = balance.temperatureMilliKelvin;
+
+            return {};
+        }
+
         std::expected<RxRule, std::string> BakeRule(const RuleDefinition& definition, const NameIndex& species,
                                                     const BakedReactionTable& baked) {
             RxRule rule{};
@@ -269,19 +360,21 @@ namespace bicameral::sim {
                 return std::unexpected(products.error());
 
             // 次数 1 の反応物は 0〜2 個。0 個 = 反応物が全部次数 0(あれば効く)の規則で、進みはセルの体積あたり一定
-            // (凝縮相は量によらず活量 1: 蒸発・融解。A は mol/(m³·s)。T-0611・ADR-0272)
+            // (凝縮相は量によらず活量 1: 蒸発・融解。A は mol/(m³·s)。T-0611・ADR-0272)。釣り合いの規則は次数を使わない(0)
             const int firstOrderCount = std::popcount(reactants->firstOrderMask);
-            if (firstOrderCount > 2)
+            if (firstOrderCount > 2 && !definition.balance)
                 return std::unexpected(std::format("規則 {}: 次数 1 の反応物は 0〜2 個", definition.name));
 
             rule.reactantCount = reactants->count;
             rule.productCount = products->count;
-            rule.firstOrderMask = reactants->firstOrderMask;
+            rule.firstOrderMask = definition.balance ? 0u : reactants->firstOrderMask;
             if (auto balance = CheckElementBalance(definition, rule, baked); !balance)
                 return std::unexpected(balance.error());
 
             rule.reactionEnthalpy = ReactionEnthalpy(rule, baked);
             rule.key = HashName(definition.name);
+            if (auto balance = BakeBalance(definition, baked, rule); !balance)
+                return std::unexpected(balance.error());
 
             // 魔法の触媒が下げられる上限(T-0288)。範囲の外の Ea は BakeRates が断る
             const int64_t activationEnergy = definition.rate.activationEnergy;
@@ -376,7 +469,8 @@ namespace bicameral::sim {
             const int64_t lnPreExponential = FxLnU64(mantissa) + (exponent10 * ln10);
             const int64_t lnPerTick = -FxLnU64(TICKS_PER_SECOND);
             const int64_t lnAmountPerVolume = (-6 * ln10) - (CELL_VOLUME_LOG2 * ln2);
-            const int64_t order = std::popcount(rule.firstOrderMask);
+            // 釣り合いの規則の速さは「釣り合いまでの距離の 1 秒あたりの割合」なので、量の換算は無い(次数 1 として焼く)
+            const int64_t order = definition.balance ? 1 : std::popcount(rule.firstOrderMask);
             const int64_t lnConstantPart = lnPreExponential + lnPerTick + ((order - 1) * lnAmountPerVolume);
             for (uint32_t kelvin = 0; kelvin < RX_RATE_TABLE_KELVINS; ++kelvin) {
                 const auto rate = BakeRate(definition, lnConstantPart, kelvin);
@@ -419,7 +513,7 @@ namespace bicameral::sim {
     }
 
     std::expected<BakedReactionTable, std::string> BakeReactionTable(const ReactionTableDefinition& definition) {
-        const ReactionTableDefinition ordered = CanonicalOrder(definition);
+        const ReactionTableDefinition ordered = CanonicalOrder(WithReverseRules(definition));
         BakedReactionTable baked;
         const auto elements = IndexElements(ordered, baked);
         if (!elements)

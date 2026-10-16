@@ -268,6 +268,37 @@ namespace bicameral::script {
                                       .activationEnergy = *activation};
         }
 
+        // balance = { temperature_mk, enthalpy_j_per_mol, concentration_mol_per_m3(気体の係数が両辺で違う時)}(T-0623・ADR-0290)
+        std::expected<sim::BalanceDefinition, std::string> ReadBalance(const ScriptValue& value,
+                                                                       const std::string& path) {
+            static constexpr std::string_view FIELDS[] = {"temperature_mk", "enthalpy_j_per_mol",
+                                                          "concentration_mol_per_m3"};
+            if (auto record = CheckRecord(value, FIELDS, path); !record)
+                return std::unexpected(record.error());
+
+            const auto temperature = ReadIntegerField(value, "temperature_mk", path, 1, UINT32_LIMIT);
+            if (!temperature)
+                return std::unexpected(temperature.error());
+
+            const auto enthalpy = ReadIntegerField(value, "enthalpy_j_per_mol", path, -EXACT_INTEGER_LIMIT,
+                                                   EXACT_INTEGER_LIMIT);
+            if (!enthalpy)
+                return std::unexpected(enthalpy.error());
+
+            sim::BalanceDefinition balance{.temperatureMilliKelvin = static_cast<uint32_t>(*temperature),
+                                           .enthalpy = *enthalpy};
+            if (const ScriptValue* concentration = value.Find("concentration_mol_per_m3")) {
+                const auto parsed = ReadPreExponential(*concentration, path + ".concentration_mol_per_m3");
+                if (!parsed)
+                    return std::unexpected(parsed.error());
+
+                balance.concentrationMantissa = parsed->mantissa;
+                balance.concentrationExponent10 = parsed->exponent10;
+            }
+
+            return balance;
+        }
+
         // reactants・products を読む
         std::expected<void, std::string> ReadRuleTerms(const ScriptValue& value, const std::string& path,
                                                        RuleDefinition& rule) {
@@ -288,12 +319,24 @@ namespace bicameral::script {
 
         std::expected<RuleDefinition, std::string> ReadRule(const std::string& name, const ScriptValue& value,
                                                             const std::string& path) {
-            static constexpr std::string_view FIELDS[] = {"reactants", "products", "rate", "orders",
-                                                          "reaction_enthalpy_j_per_mol"};
+            static constexpr std::string_view FIELDS[] = {
+                "reactants", "products", "rate", "orders", "reaction_enthalpy_j_per_mol", "balance"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
             RuleDefinition rule{.name = name};
+            if (const ScriptValue* balance = value.Find("balance")) {
+                if (value.Find("orders") != nullptr)
+                    return std::unexpected(
+                        std::format("{}: 釣り合いの規則に orders は書けない(濃さは物質の相で決まる)", path));
+
+                auto read = ReadBalance(*balance, path + ".balance");
+                if (!read)
+                    return std::unexpected(read.error());
+
+                rule.balance = *read;
+            }
+
             if (auto terms = ReadRuleTerms(value, path, rule); !terms)
                 return std::unexpected(terms.error());
 

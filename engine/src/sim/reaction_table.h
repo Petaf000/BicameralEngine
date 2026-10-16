@@ -83,6 +83,18 @@ namespace bicameral::sim {
         int64_t activationEnergy = 0;  // J/mol
     };
 
+    // 釣り合い(T-0623・ADR-0290)。その温度で気体の項の濃さの比 Q が concentration^Δn で釣り合い(Δn = 気体の生成物 − 気体の反応物の係数)、
+    // 温度で ΔH_eq の急さ(van 't Hoff)で動く。凝縮相の項は活量 1(Q に入らない)。ベイクが逆向きの規則(名前 + REVERSE_RULE_SUFFIX)を作る
+    struct BalanceDefinition {
+        uint32_t temperatureMilliKelvin = 0;  // 釣り合いの温度 T_eq(mK。1〜4095 K)
+        uint64_t
+            concentrationMantissa = 0;  // 釣り合いの濃さ(mol/m³)= 仮数 × 10^指数。0 = 書いていない(Δn = 0 の時だけよい)
+        int32_t concentrationExponent10 = 0;
+        int64_t enthalpy = 0;  // ΔH_eq(J/mol)。正なら温めると生成物の側へ
+    };
+
+    inline constexpr std::string_view REVERSE_RULE_SUFFIX = "~逆";
+
     struct RuleDefinition {
         std::string name;
         std::vector<RuleTerm> reactants;
@@ -92,6 +104,7 @@ namespace bicameral::sim {
         // --- 検査だけに使う(表には入らない)---
         // 文献の反応熱 ΔH(298.15 K、J/mol)。書いたら、生成エンタルピーの差との食い違いを警告する(02 §2 の 2)
         std::optional<int64_t> declaredReactionEnthalpy;
+        std::optional<BalanceDefinition> balance;  // 釣り合いの規則(T-0623)。rate は釣り合いへ近づく速さ(1/s)
     };
 
     struct ReactionTableDefinition {
@@ -120,7 +133,7 @@ namespace bicameral::sim {
     // --- ベイクした表 ---
 
     static_assert(sizeof(reaction::RxSpecies) == 24);
-    static_assert(sizeof(reaction::RxRule) == 80);
+    static_assert(sizeof(reaction::RxRule) == 112);
     static_assert(sizeof(reaction::RxCell) == 112);
 
     // CPU の RxStepCellWait に渡す表の読み方(reaction.hlsli の Table の約束)
