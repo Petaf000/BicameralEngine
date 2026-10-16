@@ -16,6 +16,7 @@ T-0611 の湯気の場面で、気体の区画のエネルギーの合計が +54
 - [x] 根っこ: 出ていく割合の上限を、押し出す仕事のぶん引く側の熱が負にならない値に(CPU gas_reference の EffectiveOutflow・GPU gas_step の GasOutflow)
 - [x] 段の外で気体の質量が変わった時の運動量(減ったら速さを保つ・増えたら運動量を保つ・気体の無いセルの運動量は帳簿へ。CPU probe_gas・GPU probe_gas_tick)
 - [x] probe_gas・gas_reference・gas_projection・gas_tree・drag_model(CPU。release)
+- [x] probe_phase: 湯気の場面(液体の区画なし・あり)と氷の場面で、毎刻みエネルギーがビット単位で一定・物質の無いセルはエネルギー 0
 - [ ] gpu_gas・gpu_probe_gas(GPU。毎刻み CPU とビット一致・気体の欄の質量も)
 - [x] release のビルド(警告 0)・archmap --check
 
@@ -53,6 +54,20 @@ T-0611 の湯気の場面で、気体の区画のエネルギーの合計が +54
    (+2 mJ → 600 刻みで −2509 mJ。気体の段は保存)。原因: Sum が液体の位置・運動のエネルギーと液体の帳簿(T-0610 で足した)を数えていない。
    `totals.energy += liquid->KineticEnergySum() + liquid->PotentialEnergySum() - liquid->Ledger().energy` を足すと、このチケットの直しと合わせて probe_phase が全部通った。
 
+## main への載せ直し(2026-10-17。T-0598・T-0611・T-0593・T-0619 の後)
+- gas_step.hlsl: 成分の欄が頭の並び + 成分ごとの面になった(T-0598)ので、GPU の EffectiveOutflow はセルの番号を取り、小刻みの初めのセル
+  (g_cells)の成分から熱容量と物質量を数える(CPU は box.cells。同じ値)。
+- probe_gas_tick.hlsl: GasGather は設定を見出しの parametersOffset から読み(刻みごとの欄の物質。GasPrepare の後)、質量は欄の成分から
+  GasAddSpecies で数える(CellMass は無くなった)。GasScatter も同じ。
+- gpu_probe_gas_test: 6 種の空気(T-0598)の場面と湯気の塊の場面の両方。MakeTable(six, dewRatePerSecond)。
+- probe_phase_test: 湯気の場面の `energyHolds = false` と記録(ReportSteamBreak)を外し、**毎刻み**エネルギーがビット単位で一定・
+  物質の無いセルがエネルギーを持たないことを確かめる(湯気は液体の区画なし・ありの 2 つ。氷も同じ Run)。Sum は物質の無いセルも数える。
+- **main の probe_phase の氷の場面が落ちていた(このチケットとは別の根っこ)**: 液体の区画を載せると、氷と水が 1.5 秒で全部湯気になり、
+  ほぼ空のセルに +58 MJ が残った(エネルギーの合計は保存)。T-0593・T-0612 で「密度を書かない固体は場所を取らない」になり、試験の表の石
+  (密度なし)のセルへ水が流れ込んで、500 K・700 K の石の中で沸いていた。試験の石に密度 2000 kg/m³(probe_liquid_test と同じ)を書いて直した。
+  熱い石のセルが壁になったので、湯気の場面の蒸発は 20 秒で 4 割 → 3 割 3 分(EXPECT を 3 割に)。
+- wt4 T-0631(市松模様)と重なる関数: gas_reference.cpp の LimitOutflow・EffectiveOutflow、gas_step.hlsl の GasOutflow・EffectiveOutflow。
+
 ## 分けたもの
 - T-0647: 熱が負のセルを 0 に(上限を力積の後の熱と押し出す仕事の同じ式〔MovedEnergy〕で数える・熱が 0 以下のセルの扱い)と、
   木(gas_tree.cpp・gas_tree_step.hlsl。多重解像度)の出ていく割合の上限も同じ換算に(T-0598 のマージの後。木と箱が一致する試験は普段の流れなので今は変わらない)。
@@ -62,3 +77,5 @@ T-0611 の湯気の場面で、気体の区画のエネルギーの合計が +54
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-15(wt6): 再現の場面(露の試験の規則)を足し、t-0611 の probe_phase に診断を足して根っこを特定(押し出す仕事で引く側の熱が負になる・
   物質の無いセルに負のエネルギーが残る。見立ての運動量は従)。出ていく割合の上限(CPU・GPU)と、段の外で質量が変わった時の運動量の合わせ直し(CPU・GPU)。ADR-0286。
+- 2026-10-17(wt6): main(T-0598・T-0611・T-0593・T-0619)へ載せ直し(GPU の換算と質量を欄の成分から)。probe_phase の湯気の場面を
+  毎刻みの保存の試験にし(液体の区画も重ねた版を足した)、main で落ちていた氷の場面の根っこ(試験の石に密度が無く、水が熱い石へ染みて沸く)を直した。
