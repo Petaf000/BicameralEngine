@@ -830,6 +830,30 @@ namespace bicameral::sim {
         return nest.capacity.ledgerColumns - NestConservedComponents(nest);
     }
 
+    int64_t WorldLedgerNetUnits(const MultiresNest& nest, uint32_t reason, uint32_t column, int32_t level) {
+        const uint32_t columns = nest.capacity.ledgerColumns;
+        Wide256 net{};
+        for (uint32_t direction = 0; direction < 2; ++direction) {
+            const uint32_t slot = WlSlot(reason, direction);
+            for (uint32_t row = 0; row < MR_LEDGER_LEVELS; ++row) {
+                const int32_t rowLevel = MR_LEDGER_LEVEL_MIN + static_cast<int32_t>(row);
+                const uint32_t address = WlAddress(slot, rowLevel, column, columns);
+                if (address == MR_NO_BLOCK || nest.ledger[address] == 0)
+                    continue;
+
+                FX_ASSERT(rowLevel <= level);
+                if (rowLevel > level)
+                    continue;
+
+                const Wide256 amount = LedgerValue(nest.ledger[address], rowLevel, level);
+                AddTo(net, WlSlotIsIn(slot) ? amount : Negate(amount));
+            }
+        }
+
+        // net = (入 − 出) × 2^64(2 の補数)。丸ごとの数は 2 語目
+        return static_cast<int64_t>(net[1]);
+    }
+
     ConservedTotals ComputeConservedTotals(const MultiresNest& nest, const BakedReactionTable& table,
                                            int32_t finestLevel) {
         ConservedTotals totals;

@@ -368,6 +368,11 @@ namespace bicameral::sim {
     // 丸ごとの量 units(レベル level の単位)を足す(WlSplitWholeUnits の 2 つの段へ)
     void AddWorldLedgerUnits(MultiresNest& nest, uint32_t slot, int32_t level, uint32_t column, uint64_t units);
 
+    // 帳簿の理由 reason・列 column の「入 − 出」をレベル level の単位の丸ごとの数で(端数は −∞ 向きに切り捨て。
+    // level より細かい段は 0 のはず。液体の帳簿の読み出し〔MultiresLiquid::Ledger〕。T-0769)
+    [[nodiscard]] int64_t WorldLedgerNetUnits(const MultiresNest& nest, uint32_t reason, uint32_t column,
+                                              int32_t level);
+
     // レベル level のセル 1 つの中身全部(エネルギー・インラインの物質)を理由 reason の向き direction で載せる
     // (改造で消した中身は出・置いた中身は入。負のエネルギーは逆の向き。GPU は multires_bindings.hlsli の AddWorldLedgerCell)
     void AddWorldLedgerCell(MultiresNest& nest, uint32_t reason, uint32_t direction, int32_t level,
