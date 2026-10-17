@@ -14,6 +14,7 @@
 #define BICAMERAL_PROBE_LIQUID_GPU_HLSLI
 
 #include "common/fixed.hlsli"
+#include "common/liquid_flow.hlsli"
 
 #ifdef __cplusplus
 namespace bicameral::sim {
@@ -29,17 +30,12 @@ namespace bicameral::sim {
     FX_CONST uint32_t PROBE_LIQUID_SPECIES_LIQUID = 1;     // phase = "liquid"(流れる)
     FX_CONST uint32_t PROBE_LIQUID_SPECIES_CONDENSED = 2;  // 凝縮相(固体と液体。場所を取る)
 
-    // 刻みの初めのセルから読んだ値(probe_liquid.cpp の LiquidCellState と同じ。56 バイト)
-    struct ProbeLiquidCellState {
-        uint64_t mass;        // mg(液体)
-        uint64_t volume;      // pL(液体)
-        uint64_t room;        // pL(液体が入れる体積 = セル − 固体)
-        uint64_t equivalent;  // mg(空きが液体で満ちた時の質量をセル全部に直したもの = 質量 ÷ 空き)
-        int64_t heat;         // µJ(= エネルギー × 1000 − 化学)
-        uint64_t capacity;    // nJ/K(セルの全部の成分)
-        uint32_t open;        // Q16(液体の空き)
-        uint32_t wall;        // 1 = 固体で満ちている(空き 0)
-    };
+    // 刻みの初めのセルから読んだ値 = 液体の見立て(common/liquid_flow.hlsli の LqCellView。56 バイト。T-0716)
+#ifdef __cplusplus
+    using ProbeLiquidCellState = ::bicameral::liquid::LqCellView;
+#else
+typedef LqCellView ProbeLiquidCellState;
+#endif
 
     // 見出し(CPU が作る時に書く。場所は liquidWork の先頭からのバイト)
     struct ProbeLiquidHeader {

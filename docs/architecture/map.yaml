@@ -170,6 +170,9 @@ views:
       - { id: heatconduction, group: shared, label: "heat_conduction.hlsli<br/>温度の差の面の流れ(min の係数・1/8 の上限)",
           code: "shaders/common/heat_conduction.hlsli::HcFaceFlow", ticket: T-0089, doc: docs/design/07-transport.md,
           note: "両側が同じ大きさで逆向きを計算するのでエネルギーは構造的に保存。伝導率は物質の値(試験の表は大きくしてある)" }
+      - { id: liquidflow, group: shared, label: "liquid_flow.hlsli<br/>液体の流れの芯(柱の静水圧・面の力・移流・速さの上限・位置/運動のエネルギー)",
+          code: "shaders/common/liquid_flow.hlsli::LqOpenFaceForce", ticket: T-0716, doc: docs/design/07-transport.md,
+          note: "CPU(ProbeLiquidField)と GPU(probe_liquid_tick.hlsl)が同じ関数を呼ぶ(二重書きをやめた。土台の段 2 ①)。入力はセルの見立て LqCellView・面の欄・見立ての値 LqParams に分け、多重解像度の 1 段の液体(T-0717)がそのまま呼べる形" }
       - { id: radiation, group: shared, status: research, label: "radiation.hlsli<br/>放射の対の交換(σT⁴ を因数分解・対称な係数)",
           code: "shaders/common/radiation.hlsli::RdPairCoefficient", ticket: T-0583, doc: docs/decisions/ADR-0252-radiation-pair-exchange.md,
           note: "物質の a(1 mol が遮る面積)→ 吸収率 1 − e^−τ。対ごとに 1 つの整数で保存・坂を下る。CPU リファレンス sim/radiation_reference。光線で対を見つけるのは T-0584、刻みへは T-0585" }
@@ -755,6 +758,8 @@ views:
       - [commandqueue, probeplace, "ApplyPlace"]
       - [probereference, probeplace, "同じ関数"]
       - [probeworld, heatconduction]
+      - [probeliquid, liquidflow, "同じ関数"]
+      - [probesimliquid, liquidflow, "同じ関数"]
       - [probeworld, reactionhlsl, "RxStepCellWait"]
       - [probesimtest, replaysession, "記録 → 書く → 読む → 再生"]
       - [probetick, commandqueue]
