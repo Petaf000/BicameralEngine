@@ -247,9 +247,9 @@ namespace {
         fields.amount = RegisterNestField(nest, "test_amount",
                                           SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_VOLUME,
                                                           SF_FLAG_CONSERVED | SF_FLAG_HASHED, 1));
-        fields.face = RegisterNestField(
-            nest, "test_face",
-            SfMakeFieldDesc(SF_PLACE_FACE, SF_TYPE_I32, SF_PHASE_LIQUID, SF_SCALE_VOLUME, SF_FLAG_HASHED, 3));
+        fields.face = RegisterNestField(nest, "test_face",
+                                        SfMakeFieldDesc(SF_PLACE_FACE, SF_TYPE_I32, SF_PHASE_LIQUID, SF_SCALE_VOLUME,
+                                                        SF_FLAG_CONSERVED | SF_FLAG_HASHED, 3));
         fields.tag = RegisterNestField(nest, "test_tag",
                                        SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_U32, SF_PHASE_GAS, SF_SCALE_SAME, 0, 1));
         fields.block = RegisterNestField(
@@ -280,27 +280,23 @@ namespace {
         StoreNestBlockField(nest, fields.block, slot, 0, VariedValue(slot, 0, 6));
     }
 
-    // 量の欄の合計: 本物の刻むセルの値 × 8^(finest − レベル) + 帳簿(レベル k の値 × 8^(finest − k))
-    int64_t FieldTotal(const MultiresNest& nest, uint32_t field, uint32_t component, int32_t finestLevel) {
-        int64_t total = 0;
-        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
-            const MrBlock& block = nest.blocks[slot];
-            if (block.kind != MR_BLOCK_REAL)
-                continue;
+    // 量の欄の合計(保存の検査の 1 関数の欄の列。本物の刻むセルの値 × 8^(finest − レベル) − 世界の帳簿のその欄の列。T-0762)
+    Wide256 FieldTotal(const MultiresNest& nest, const BakedReactionTable& table, uint32_t field, uint32_t component,
+                       int32_t finestLevel) {
+        return ComputeConservedTotals(nest, table, finestLevel).fields[NestConservedIndex(nest, field) + component];
+    }
 
-            const auto shift = static_cast<uint32_t>(finestLevel - block.level) * MR_LEVEL_SHIFT;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (MrIsSteppedCell(block, index))
-                    total += LoadNestField(nest, field, slot, index, component) * (int64_t{1} << shift);
-            }
+    // 欄の値 component の、世界の帳簿の「粗くした端数・出」の列に何か載っているか
+    bool FieldRemainderBooked(const MultiresNest& nest, uint32_t field, uint32_t component) {
+        const uint32_t column = NestFieldLedgerBase(nest) + NestConservedIndex(nest, field) + component;
+        const uint32_t slot = WlSlot(WL_REASON_COARSEN_REMAINDER, WL_DIRECTION_OUT);
+        for (uint32_t row = 0; row < MR_LEDGER_LEVELS; ++row) {
+            const int32_t level = MR_LEDGER_LEVEL_MIN + static_cast<int32_t>(row);
+            if (nest.ledger[WlAddress(slot, level, column, nest.capacity.ledgerColumns)] != 0)
+                return true;
         }
 
-        for (int32_t level = nest.capacity.rootLevel; level <= finestLevel; ++level) {
-            const auto shift = static_cast<uint32_t>(finestLevel - level) * MR_LEVEL_SHIFT;
-            total += LoadNestFieldLedger(nest, field, level, component) * (int64_t{1} << shift);
-        }
-
-        return total;
+        return false;
     }
 
     // 本物の鎖に欄を付けた世界
@@ -323,16 +319,26 @@ namespace {
         Expect(fields.amount == 0 && fields.world == 4, "欄: 登録の順に番号");
         Expect(RegisterNestField(nest, "test_amount", nest.fields[0].desc) == MULTIRES_NO_FIELD,
                "欄: 同じ名前は登録しない");
+        Expect(nest.capacity.ledgerColumns == 1 + table.species.size() + 4 &&
+                   NestFieldLedgerBase(nest) == 1 + table.species.size() &&
+                   NestConservedIndex(nest, fields.face) == 1 &&
+                   NestConservedIndex(nest, fields.tag) == MULTIRES_NO_FIELD,
+               "欄: 保存量の欄の値の数だけ帳簿の列が増える(量 1 + 面 3)");
+        MultiresNest other = MakeMultiresNest(nest.capacity);
+        Expect(RegisterNestField(other, "volume_only",
+                                 SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_VOLUME, 0, 1)) ==
+                   MULTIRES_NO_FIELD,
+               "欄: 保存量でない量の欄は登録しない(量の欄 = 保存量)");
 
         constexpr int32_t FINEST = static_cast<int32_t>(test::MULTIRES_LEVELS);
-        const int64_t initialAmount = FieldTotal(nest, fields.amount, 0, FINEST);
-        const int64_t initialFace = FieldTotal(nest, fields.face, 2, FINEST);
+        const Wide256 initialAmount = FieldTotal(nest, table, fields.amount, 0, FINEST);
+        const Wide256 initialFace = FieldTotal(nest, table, fields.face, 2, FINEST);
         int lostTicks = 0;
         bool checkedRefine = false;
         for (uint64_t tick = 0; tick < test::MULTIRES_END_TICK; ++tick) {
             test::StepMultiresScene(nest, table, test::MultiresScenario::Real, tick);
-            lostTicks += FieldTotal(nest, fields.amount, 0, FINEST) == initialAmount ? 0 : 1;
-            lostTicks += FieldTotal(nest, fields.face, 2, FINEST) == initialFace ? 0 : 1;
+            lostTicks += FieldTotal(nest, table, fields.amount, 0, FINEST) == initialAmount ? 0 : 1;
+            lostTicks += FieldTotal(nest, table, fields.face, 2, FINEST) == initialFace ? 0 : 1;
             if (tick != test::MULTIRES_REFINE_TICK)
                 continue;
 
@@ -405,18 +411,16 @@ namespace {
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
             StoreNestField(nest, fields.amount, child, index, 0, VariedValue(child, index, 9));
 
-        const int64_t before = FieldTotal(nest, fields.amount, 0, FINEST);
+        const Wide256 before = FieldTotal(nest, table, fields.amount, 0, FINEST);
         const MrRequest coarsen = test::MakeMultiresRequest(MR_REQUEST_COARSEN, point, 1);
         SubmitRequests(nest, std::span(&coarsen, 1));
         ProcessRequests(nest);
 
-        int64_t ledger = 0;
-        for (int32_t level = 0; level <= FINEST; ++level)
-            ledger += LoadNestFieldLedger(nest, fields.amount, level, 0);
-
         Expect(nest.blocks[child].kind == MR_BLOCK_UNUSED, "余り: 粗くした");
-        Expect(ledger > 0, "余り: 粗くした余りが欄の帳簿へ");
-        Expect(FieldTotal(nest, fields.amount, 0, FINEST) == before, "余り: 「値 + 帳簿」が粗くする前とビット一致");
+        Expect(FieldRemainderBooked(nest, fields.amount, 0) && !FieldRemainderBooked(nest, fields.face, 0),
+               "余り: 粗くした余りが世界の帳簿のその欄の列へ");
+        Expect(FieldTotal(nest, table, fields.amount, 0, FINEST) == before,
+               "余り: 「値 + 帳簿」が粗くする前とビット一致");
     }
 
     // --- 3. 一様なブロック: 頁に広げる・畳む・違う値の一様な子を粗くすると親が頁に広がる ---
@@ -443,14 +447,14 @@ namespace {
     void TestUniformFields(const BakedReactionTable& table) {
         uint32_t amount = MULTIRES_NO_FIELD;
         MultiresNest nest = MakeUniformFieldNest(table, amount);
-        const int64_t initial = FieldTotal(nest, amount, 0, test::UNIFORM_CHAIN_DEPTH);
+        const Wide256 initial = FieldTotal(nest, table, amount, 0, test::UNIFORM_CHAIN_DEPTH);
         bool expanded = false;
         bool expandedValues = true;
         int lostTicks = 0;
         for (uint64_t tick = 0; tick < test::UNIFORM_TICKS; ++tick) {
             test::BeginUniformTick(nest, tick);
             StepActive(nest, table, test::STRESS_SEED, tick);
-            lostTicks += FieldTotal(nest, amount, 0, test::UNIFORM_CHAIN_DEPTH) == initial ? 0 : 1;
+            lostTicks += FieldTotal(nest, table, amount, 0, test::UNIFORM_CHAIN_DEPTH) == initial ? 0 : 1;
             if (MrIsUniform(nest.blocks[0]))
                 continue;
 
@@ -494,7 +498,7 @@ namespace {
                    LoadNestField(chain, amount, deepest, 0, 0) == 47,
                "一様: 一様な親の子は一様で、欄は親の値");
         StoreNestFieldUniform(chain, amount, deepest, 0, 50);
-        const int64_t before = FieldTotal(chain, amount, 0, test::UNIFORM_CHAIN_DEPTH);
+        const Wide256 before = FieldTotal(chain, table, amount, 0, test::UNIFORM_CHAIN_DEPTH);
         const uint32_t parent = chain.blocks[deepest].parent;
         const uint32_t octant = chain.blocks[deepest].parentOctant;
         const MrRequest coarsen = test::MakeUniformChainRequest(MR_REQUEST_COARSEN, test::UNIFORM_CHAIN_DEPTH);
@@ -504,7 +508,7 @@ namespace {
         Expect(LoadNestField(chain, amount, parent, MrOctantCell(octant, 0), 0) == 50 &&
                    LoadNestField(chain, amount, parent, MrOctantCell(octant ^ 1u, 0), 0) == 47,
                "一様: 八分の一は子の値・残りは親の値");
-        Expect(FieldTotal(chain, amount, 0, test::UNIFORM_CHAIN_DEPTH) == before,
+        Expect(FieldTotal(chain, table, amount, 0, test::UNIFORM_CHAIN_DEPTH) == before,
                "一様: 粗くしても「値 + 帳簿」が同じ");
     }
 

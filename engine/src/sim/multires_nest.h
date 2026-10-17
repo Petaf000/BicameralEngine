@@ -40,8 +40,9 @@ namespace bicameral::sim {
         uint32_t fractions = 0;       // 端数の枠の数
         uint32_t pages = 0;           // 世界の頁の数(観察の枠の頁は別に観察の枠の数だけ。T-0102)
         uint32_t indexEntries = 0;    // 索引の大きさ(2 の冪。世界の枠の 2 倍以上を勧める)
-        uint32_t ledgerColumns = 1;   // 帳簿の列(1 + 物質の数 + 登録した欄の保存量の数。world_ledger.hlsli)
-        int32_t rootLevel = 0;        // 根のレベル
+        // 帳簿の列(world_ledger.hlsli)。作る時は 1 + 物質の数で、登録した欄の保存量の列は RegisterNestField が足す(T-0762)
+        uint32_t ledgerColumns = 1;
+        int32_t rootLevel = 0;  // 根のレベル
     };
 
     // 頁(または端数の枠)1 つぶんの溢れ(T-0187): インライン(RX_MAX_CELL_SPECIES 個)に入りきらない成分を、セルの番号の順に詰めて持つ。
@@ -66,9 +67,7 @@ namespace bicameral::sim {
     struct MultiresField {
         std::string name;
         state_field::SfFieldDesc desc{};
-        std::vector<int64_t> values;
-        // 粗くした時の余り(VOLUME の欄だけ。子のレベルの単位)[MR_LEDGER_LEVELS × 値の数]。世界の帳簿の 1 型(T-0712)に入るまでの置き場
-        std::vector<int64_t> ledger;
+        std::vector<int64_t> values;  // 粗くした余りは世界の帳簿(MultiresNest::ledger)のこの欄の列へ(T-0762)
     };
 
     struct MultiresNest {
@@ -196,6 +195,7 @@ namespace bicameral::sim {
     struct ConservedTotals {
         std::vector<Wide256> elements;  // 添字 = 元素
         Wide256 energy{};
+        std::vector<Wide256> fields;  // 添字 = 登録した保存量の欄の値の通し番号(NestConservedIndex。T-0762)
 
         bool operator==(const ConservedTotals&) const = default;
     };
@@ -349,8 +349,15 @@ namespace bicameral::sim {
     void AddWorldLedgerCell(MultiresNest& nest, uint32_t reason, uint32_t direction, int32_t level,
                             const reaction::RxCell& cell);
 
-    // 保存の検査の 1 関数(T-0712): 本物の葉のセルの元素の数とエネルギーの合計 − 帳簿(入 − 出。全部の理由)を
-    // finestLevel の単位 × 2^-64 で(finestLevel は使っている最も細かいレベルと、帳簿に載った最も細かいレベル以上)。
+    // 登録した保存量の欄の値の数(帳簿の列のうち欄の分。T-0762)
+    [[nodiscard]] uint32_t NestConservedComponents(const MultiresNest& nest);
+
+    // 帳簿の列のうち、登録した保存量の欄の最初の列(= ledgerColumns − NestConservedComponents。前は 1 + 物質の列)
+    [[nodiscard]] uint32_t NestFieldLedgerBase(const MultiresNest& nest);
+
+    // 保存の検査の 1 関数(T-0712・T-0762): Σ 登録した保存量(本物の葉のセルの元素の数とエネルギー + 登録した保存量の欄の値)
+    // − 帳簿(入 − 出。全部の理由)を finestLevel の単位 × 2^-64 で(finestLevel は使っている最も細かいレベルと、
+    // 帳簿に載った最も細かいレベル以上。欄の値はレベルの単位なので × 8^(finestLevel − レベル))。
     // 外との出入りを全部帳簿に載せていれば、刻んでも改造しても変わらない
     [[nodiscard]] ConservedTotals ComputeConservedTotals(const MultiresNest& nest, const BakedReactionTable& table,
                                                          int32_t finestLevel);

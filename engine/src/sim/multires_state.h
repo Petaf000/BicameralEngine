@@ -45,12 +45,10 @@ namespace bicameral::sim {
         visit(NestStateRegion{.name = "seeds", .hashed = false}, nest.seeds);
         visit(NestStateRegion{.name = "index", .hashed = false}, nest.index);
 
-        // --- 登録した欄(登録の順。値と、VOLUME の欄の帳簿)---
-        for (auto& field : nest.fields) {
-            const bool hashed = state_field::SfHashed(field.desc);
-            visit(NestStateRegion{.name = "field:" + field.name, .hashed = hashed}, field.values);
-            visit(NestStateRegion{.name = "field_ledger:" + field.name, .hashed = hashed}, field.ledger);
-        }
+        // --- 登録した欄(登録の順。粗くした余りは上の世界の帳簿の欄の列に入っている。T-0762)---
+        for (auto& field : nest.fields)
+            visit(NestStateRegion{.name = "field:" + field.name, .hashed = state_field::SfHashed(field.desc)},
+                  field.values);
     }
 
     // 保存点(CPU。区画ごとの値の写し)。GPU の保存点は段 6

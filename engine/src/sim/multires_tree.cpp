@@ -505,7 +505,7 @@ namespace bicameral::sim {
                 }
             }
 
-            // --- 登録した欄: 和 ÷ 8(VOLUME の欄の余りは欄の帳簿へ。T-0711)---
+            // --- 登録した欄: 和 ÷ 8(VOLUME の欄の余りは世界の帳簿へ。T-0711・T-0762)---
             nest_fields::Coarsen(nest, childSlot);
 
             // --- 見出し・返す枠・索引 ---

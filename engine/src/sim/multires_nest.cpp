@@ -172,9 +172,14 @@ namespace bicameral::sim {
             return ShiftLeft(Wide256{value, 0, 0, 0}, static_cast<uint32_t>(finestLevel - level) * MR_LEVEL_SHIFT);
         }
 
-        // 帳簿の 1 つの列(0 = エネルギー、1 + 物質 ID)の量を合計に足す
+        // 帳簿の 1 つの列(0 = エネルギー、1 + 物質 ID、fieldBase から登録した保存量の欄の値)の量を合計に足す
         void AddLedgerColumn(ConservedTotals& totals, const BakedReactionTable& table, uint32_t column,
-                             const Wide256& amount) {
+                             uint32_t fieldBase, const Wide256& amount) {
+            if (column >= fieldBase) {
+                AddTo(totals.fields[column - fieldBase], amount);
+                return;
+            }
+
             if (column == 0) {
                 AddTo(totals.energy, amount);
                 return;
@@ -205,6 +210,7 @@ namespace bicameral::sim {
         void AddLedgerTotals(ConservedTotals& totals, const MultiresNest& nest, const BakedReactionTable& table,
                              int32_t finestLevel) {
             const uint32_t columns = nest.capacity.ledgerColumns;
+            const uint32_t fieldBase = NestFieldLedgerBase(nest);
             for (uint32_t slot = 0; slot < WL_SLOT_COUNT; ++slot) {
                 for (uint32_t row = 0; row < MR_LEDGER_LEVELS; ++row) {
                     const int32_t level = MR_LEDGER_LEVEL_MIN + static_cast<int32_t>(row);
@@ -214,9 +220,38 @@ namespace bicameral::sim {
                             continue;
 
                         const Wide256 amount = LedgerValue(value, level, finestLevel);
-                        AddLedgerColumn(totals, table, column, WlSlotIsIn(slot) ? Negate(amount) : amount);
+                        AddLedgerColumn(totals, table, column, fieldBase, WlSlotIsIn(slot) ? Negate(amount) : amount);
                     }
                 }
+            }
+        }
+
+        // 本物の刻むセルの、登録した保存量の欄の値の合計(値 × 8^(finestLevel − レベル)。T-0762)
+        void AddFieldTotals(ConservedTotals& totals, const MultiresNest& nest, int32_t finestLevel) {
+            for (uint32_t f = 0, first = 0; f < nest.fields.size(); ++f) {
+                const MultiresField& field = nest.fields[f];
+                if (!state_field::SfConserved(field.desc))
+                    continue;
+
+                for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+                    const MrBlock& block = nest.blocks[slot];
+                    if (block.kind != MR_BLOCK_REAL)
+                        continue;
+
+                    const auto shiftBits = static_cast<uint32_t>(finestLevel - block.level) * MR_LEVEL_SHIFT;
+                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                        if (!MrIsSteppedCell(block, index))
+                            continue;
+
+                        for (uint32_t c = 0; c < field.desc.components; ++c) {
+                            const int64_t value = LoadNestField(nest, f, slot, index, c);
+                            AddTo(totals.fields[first + c],
+                                  ShiftLeft(MakeWide256(static_cast<uint64_t>(value), 0, value < 0), shiftBits));
+                        }
+                    }
+                }
+
+                first += field.desc.components;
             }
         }
 
@@ -752,10 +787,25 @@ namespace bicameral::sim {
             AddWorldLedgerUnits(nest, slot, level, WL_COLUMN_SPECIES_BASE + cell.species[i], cell.amounts[i]);
     }
 
+    uint32_t NestConservedComponents(const MultiresNest& nest) {
+        uint32_t components = 0;
+        for (const MultiresField& field : nest.fields) {
+            if (state_field::SfConserved(field.desc))
+                components += field.desc.components;
+        }
+
+        return components;
+    }
+
+    uint32_t NestFieldLedgerBase(const MultiresNest& nest) {
+        return nest.capacity.ledgerColumns - NestConservedComponents(nest);
+    }
+
     ConservedTotals ComputeConservedTotals(const MultiresNest& nest, const BakedReactionTable& table,
                                            int32_t finestLevel) {
         ConservedTotals totals;
         totals.elements.assign(table.elementNames.size(), Wide256{});
+        totals.fields.assign(NestConservedComponents(nest), Wide256{});
         for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
             const MrBlock& block = nest.blocks[slot];
             if (block.kind != MR_BLOCK_REAL)
@@ -778,6 +828,7 @@ namespace bicameral::sim {
             }
         }
 
+        AddFieldTotals(totals, nest, finestLevel);
         AddLedgerTotals(totals, nest, table, finestLevel);
 
         return totals;
