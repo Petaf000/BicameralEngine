@@ -1099,14 +1099,50 @@ namespace bicameral::sim {
             return ((uint64_t)1 << 47) / (3600 * (uint64_t)substeps * substeps);
         }
 
-        // 面の予測の流れ F*(mg。左 → 右が正): 今の運動量の中心の流れ − K × 縦の面の両側の質量の差の静水圧(陽解法の圧力の拡散と同じ釣り合い)
-        int64_t PredictedFlow(const GasBox& box, const std::vector<GasDerived>& derived,
-                              const GasCoefficients& coefficients, uint64_t link, const GasFace& face) {
+        // 面の係数 K_f = K × 面の開き(Q16。0 の向きへ切り捨て)。壁は 0(T-0667)
+        uint64_t PressureFaceCoefficient(const GasBox& box, uint64_t link, const GasFace& face) {
             if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
                 return 0;
 
-            const int64_t momentumSum = SideCell(box, box.cells, face.left).momentum[face.axis] +
-                                        SideCell(box, box.cells, face.right).momentum[face.axis];
+            const uint32_t open = FaceOpen(box, face);
+            if (open == GAS_OPEN_FULL)
+                return link;
+
+            return fx::FxDivU128By64(fx::FxMulU64Full(link, open), GAS_OPEN_FULL).quotient;
+        }
+
+        // 圧力の式の V の割合(Q16)= セルの空き(下限 1/256。陽解法の DeriveOpenCell と同じ体積で圧力を読む)
+        uint32_t PressureVolumeShare(const GasBox& box, uint32_t index) {
+            if (box.openQ16.empty())
+                return GAS_OPEN_FULL;
+
+            return std::max(box.openQ16[index], GAS_OPEN_PRESSURE_FLOOR);
+        }
+
+        // 容量 × V の割合(1 以上。塞がったセルも対角を 0 にしない)
+        uint64_t ShareCapacity(uint64_t capacity, uint32_t share) {
+            if (share == GAS_OPEN_FULL)
+                return capacity;
+
+            return std::max<uint64_t>(fx::FxDivU128By64(fx::FxMulU64Full(capacity, share), GAS_OPEN_FULL).quotient, 1);
+        }
+
+        // 面の予測の流れ F*(mg。左 → 右が正): 今の運動量の中心の流れ − K_f × 縦の面の両側の質量の差の静水圧(陽解法の圧力の拡散と同じ釣り合い)。
+        // 一部だけ開いた面は各側の運動量を「開き ÷ 空き」倍(陽解法の ComputeFaceFlow と同じ。孔の中の速さ × 開いた面積)。link = K_f(0 なら流さない)
+        int64_t PredictedFlow(const GasBox& box, const std::vector<GasDerived>& derived,
+                              const GasCoefficients& coefficients, uint64_t link, const GasFace& face) {
+            if (link == 0)
+                return 0;
+
+            const int64_t leftMomentum = SideCell(box, box.cells, face.left).momentum[face.axis];
+            const int64_t rightMomentum = SideCell(box, box.cells, face.right).momentum[face.axis];
+            int64_t momentumSum = leftMomentum + rightMomentum;
+            const uint32_t open = FaceOpen(box, face);
+            if (open != GAS_OPEN_FULL) {
+                momentumSum = ScaleSigned(leftMomentum, open, SideOpen(box, face.left)) +
+                              ScaleSigned(rightMomentum, open, SideOpen(box, face.right));
+            }
+
             const int64_t central = fx::FxMulShiftS64(momentumSum, (int64_t)coefficients.centralFlow, 52);
             if (face.axis != 2 || !box.config.gravity)
                 return central;
@@ -1137,20 +1173,26 @@ namespace bicameral::sim {
         for (uint32_t index = 0; index < count; ++index) {
             const uint32_t temperature = derived[index].temperature;
             const int64_t deviation = derived[index].pressure - box.referenceDerived[CellLayer(box, index)].pressure;
-            system.capacities[index] = PressureCapacity(options.soundSpeedMmPerS, ground, temperature);
-            system.stateCapacities[index] = PressureCapacity(box.config.soundSpeedMmPerS, ground, temperature);
+            const uint32_t share = PressureVolumeShare(box, index);
+            system.capacities[index] = ShareCapacity(PressureCapacity(options.soundSpeedMmPerS, ground, temperature),
+                                                     share);
+            system.stateCapacities[index] = ShareCapacity(
+                PressureCapacity(box.config.soundSpeedMmPerS, ground, temperature), share);
             system.statePressures[index] = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
         }
 
         system.cellCapacities = system.capacities;
 
-        // --- 面: F* と出ていく量の合計。開いた境界の面は外を x = 0 として対角へ ---
+        // --- 面: F* と出ていく量の合計。開いた境界の面は外を x = 0 として対角へ。壁・閉じた面(開き 0)は式に入れない ---
         system.predictedFlows.resize(faces.size());
+        system.faceCoefficients.resize(faces.size());
         for (size_t f = 0; f < faces.size(); ++f) {
             const GasFace& face = faces[f];
-            const int64_t flow = PredictedFlow(box, derived, coefficients, system.linkCoefficient, face);
+            const uint64_t link = PressureFaceCoefficient(box, system.linkCoefficient, face);
+            const int64_t flow = PredictedFlow(box, derived, coefficients, link, face);
+            system.faceCoefficients[f] = link;
             system.predictedFlows[f] = flow;
-            if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
+            if (link == 0)
                 continue;
 
             const bool leftCell = face.left.kind == SideKind::Cell;
@@ -1162,9 +1204,9 @@ namespace bicameral::sim {
                 system.divergences[face.right.index] -= flow;
 
             if (leftCell && rightCell)
-                system.links.push_back({.left = face.left.index, .right = face.right.index});
+                system.links.push_back({.left = face.left.index, .right = face.right.index, .coefficient = link});
             else
-                system.capacities[leftCell ? face.left.index : face.right.index] += system.linkCoefficient;
+                system.capacities[leftCell ? face.left.index : face.right.index] += link;
         }
 
         return system;
@@ -1191,11 +1233,11 @@ namespace bicameral::sim {
         for (const GasFace& face : faces)
             ApplyImpulse(box, forced, face);
 
-        // --- (3) 面の流れ F = F* + K (x_左 − x_右)(開いた境界の外は x = 0)。出ていく割合を抑える ---
-        const auto link = (int64_t)system.linkCoefficient;
+        // --- (3) 面の流れ F = F* + K_f (x_左 − x_右)(開いた境界の外は x = 0。壁・閉じた面は 0)。出ていく割合を抑える ---
         for (size_t f = 0; f < faces.size(); ++f) {
             GasFace& face = faces[f];
-            if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
+            const auto link = (int64_t)system.faceCoefficients[f];
+            if (link == 0)
                 continue;
 
             const int64_t left = face.left.kind == SideKind::Cell ? pressures[face.left.index] : 0;

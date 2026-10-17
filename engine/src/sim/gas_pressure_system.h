@@ -7,6 +7,8 @@
 //   → C_i x_i + Σ_f K (x_i − x_j) = E_i − Σ_f F*_f(C_i = V ÷ c_i²・E_i = V p̃_i ÷ c_箱,i²〔c̃ によらない。断熱の基準からの質量の差〕)
 // これは熱の陰解法 C (T − T0) = Σ g (Tj − Ti) と同じ形なので、熱の多重格子(ImplicitGrid)で解ける(T-0494 の手がかり。解くのは gas_projection.cpp)。
 // 解いた x で、面の流れ・面の圧力の力積(両側の平均。陽解法と同じ部品)・重さを当て、風上の中身を移す(G2 の部品をそのまま)。
+// セルの空き(GasBox::openQ16。T-0667・07 §2.8)は陽解法と同じ数え方で読む: V を空きの倍(C_i・E_i。圧力の下限の空き 1/256 も同じ)、
+// 面の係数を開き(両側の空きの小さい方)の倍(K_f)、F* の運動量を各側の「開き ÷ 空き」倍。開き 0 の面は式に入れない(壁と同じ)。
 // x が近似(V サイクルを途中で止めた)でも、保存はビット単位のまま(面ごとに 1 つの値を両側で逆向きに足し引きする形。近似が効くのは速さだけ)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #pragma once
@@ -32,6 +34,7 @@ namespace bicameral::sim {
     struct GasPressureLink {
         uint32_t left = 0;
         uint32_t right = 0;
+        uint64_t coefficient = 0;  // K_f(mg/µPa の Q48)= K × 面の開き(T-0667)
     };
 
     struct GasPressureSystem {
@@ -44,8 +47,10 @@ namespace bicameral::sim {
 
         // --- 面 ---
         std::vector<GasPressureLink> links;
-        uint64_t linkCoefficient = 0;         // K(mg/µPa の Q48)
-        std::vector<int64_t> predictedFlows;  // F*(mg。面の一覧の順〔gas_reference の EnumerateFaces〕。壁は 0)
+        uint64_t linkCoefficient = 0;            // K(mg/µPa の Q48。全部開いた面)
+        std::vector<uint64_t> faceCoefficients;  // K_f(面の一覧の順。壁・閉じた面は 0。T-0667)
+        std::vector<int64_t>
+            predictedFlows;  // F*(mg。面の一覧の順〔gas_reference の EnumerateFaces〕。壁・閉じた面は 0)
     };
 
     // 今の状態から圧力の式を作る

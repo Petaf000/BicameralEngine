@@ -4,6 +4,7 @@
 // 同じ系(CPU の BuildImplicitGrid が作った段・右辺・初めの近似)を GPU で解き直して、解いた値と V の回数がビット一致するかを確かめる。
 // 式を作る段・当てる段・外側の反復の GPU 版はまだ(T-0531 の引き継ぎ)。
 // 場面: 閉じた箱(一辺 n。重さあり)の 熱い泡(+30 K・同じ圧力)/ 扉(x の半分が 2% 高い圧力・同じ温度)/ 強い爆発(真ん中 1 セル 5 倍の圧力・1500 K)。
+//       セルの空き(T-0667): 孔のある壁(塞がった板に 1/2 と 1/256 の孔・扉と同じ圧力の差)/ 細孔の板(1 層を全部 1/256・下が 2% 高い)。
 // 音速は最速(0)と 340 m/s。外側の反復は既定(上限 4・100 mg。ADR-0234)。
 //
 // 引数: [--edge n](既定 16)[--ticks n](既定 3)[--measure](GPU の時間を表に出す)[--breakdown](解きを固定費・V・止めた後の回に分ける)
@@ -77,9 +78,11 @@ namespace {
         box.cells[index] = sim::MakeGasCell(box.config, amounts, temperature);
     }
 
-    enum class Scene : uint8_t { Bubble, Door, Blast };
+    // 壁 = x の真ん中の板を塞ぎ(空き 0)、孔 4 セル(空き 1/2 が 2・1/256 が 2)。左が 2% 高い圧力(T-0667)。
+    // 板 = z = 一辺 ÷ 4 の層を全部 空き 1/256(細い孔の板)。下が 2% 高い圧力
+    enum class Scene : uint8_t { Bubble, Door, Blast, Wall, Plate };
 
-    constexpr std::array<Scene, 3> SCENES = {Scene::Bubble, Scene::Door, Scene::Blast};
+    constexpr std::array<Scene, 5> SCENES = {Scene::Bubble, Scene::Door, Scene::Blast, Scene::Wall, Scene::Plate};
     constexpr std::array<uint32_t, 2> SPEEDS = {0, REAL_SOUND};
 
     std::string_view SceneName(Scene scene) {
@@ -87,9 +90,40 @@ namespace {
             case Scene::Bubble: return "泡";
             case Scene::Door: return "扉";
             case Scene::Blast: return "爆発";
+            case Scene::Wall: return "孔のある壁";
+            case Scene::Plate: return "細孔の板";
         }
 
         return "";
+    }
+
+    // セルの空きを share にし、気体を基準 × share に減らす(固体が占めた分の空気は無い。T-0667)
+    void Occupy(sim::GasBox& box, uint32_t index, uint32_t share) {
+        if (box.openQ16.empty())
+            box.openQ16.assign(box.cells.size(), sim::GAS_OPEN_FULL);
+
+        box.openQ16[index] = share;
+        sim::GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
+        for (uint64_t& amount : amounts)
+            amount = amount * share / sim::GAS_OPEN_FULL;
+
+        box.cells[index] = sim::MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
+    }
+
+    // 壁・板の空き(Q16。全部開いたセルは GAS_OPEN_FULL)
+    uint32_t SceneShare(Scene scene, uint32_t edge, int32_t x, int32_t y, int32_t z) {
+        const auto center = (int32_t)(edge / 2);
+        if (scene == Scene::Plate)
+            return z == center / 2 ? sim::GAS_OPEN_FULL / 256 : sim::GAS_OPEN_FULL;
+
+        if (scene != Scene::Wall || x != center)
+            return sim::GAS_OPEN_FULL;
+
+        const bool holeY = y == center - 1 || y == center;
+        if (!holeY || (z != center - 1 && z != center))
+            return 0;
+
+        return z == center - 1 ? sim::GAS_OPEN_FULL / 2 : sim::GAS_OPEN_FULL / 256;
     }
 
     sim::GasBox MakeScene(Scene scene, uint32_t edge) {
@@ -105,8 +139,11 @@ namespace {
                 const int32_t dz = z - (center / 2);
                 if ((dx * dx) + (dy * dy) + (dz * dz) <= 2)
                     SetTemperature(box, index, AIR_TEMPERATURE + BUBBLE_HEAT, 100);
-            } else if (scene == Scene::Door) {
+            } else if (scene == Scene::Door || scene == Scene::Wall) {
                 if (x < center)
+                    SetTemperature(box, index, AIR_TEMPERATURE, 102);
+            } else if (scene == Scene::Plate) {
+                if (z < center / 2)
                     SetTemperature(box, index, AIR_TEMPERATURE, 102);
             } else if (x == center && y == center && z == center) {
                 SetTemperature(box, index, BLAST_TEMPERATURE, 500);
@@ -115,6 +152,18 @@ namespace {
                 cell.amounts[SPECIES_N2] -= moved;
                 cell.amounts[SPECIES_SMOKE] += moved;
             }
+        }
+
+        if (scene != Scene::Wall && scene != Scene::Plate)
+            return box;
+
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const auto x = (int32_t)(index % edge);
+            const auto y = (int32_t)((index / edge) % edge);
+            const auto z = (int32_t)(index / (edge * edge));
+            const uint32_t share = SceneShare(scene, edge, x, y, z);
+            if (share != sim::GAS_OPEN_FULL)
+                Occupy(box, index, share);
         }
 
         return box;

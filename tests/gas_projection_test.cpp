@@ -6,6 +6,8 @@
 //   圧力の前線・熱い所・煙の広がりが刻みごとにどう見えるか(gas_reference の小刻み 24 と比べる。D-487 ⑥)。
 // 外側の反復(T-0530): 最速で 5 倍の爆発が 1 刻み目の終わりに中心の近くの圧力の差 1 kPa 以下・外側の反復ありでも保存はビット単位・ハッシュ一致・
 //   熱い泡は同じ桁。測る値: 外側の反復の回数 × V サイクル(弱い差〔泡・扉〕と強い爆発)・許容差と上限の違い。
+// セルの空き(T-0667): 塞がった壁の向こうへ 0 µmol・孔の大きさの順に渡る量が減る(陽解法と同じ向き)・保存・ハッシュ一致。
+//   測る値: 空き 1/256 のセルを含む 12 × 24 × 12 の箱で内側の解きが上限 8 の V に入るか(研究の打ち切り条件)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <array>
@@ -631,6 +633,185 @@ namespace {
         summary.PrintOuter(SpeedName(speed));
     }
 
+    // --- セルの空き(T-0667・07 §2.8): 投影も陽解法と同じ数え方で、塞がった所を気体が通らない ---
+    // 壁の場面: 12 × 4 × 8 の閉じた箱の x = 6 の板を塞ぎ(空き 0)、真ん中 2 × 2 を孔(空き share)に。左が 2% 高い圧力
+    constexpr uint32_t WALL_X = 6;
+    constexpr uint32_t SHARE_NONE = 0xFFFFFFFFu;  // 壁なし
+
+    // セルの空きを share にし、気体を基準 × share に減らす(同じ温度。固体が占めた分の空気は無い)
+    void Occupy(GasBox& box, uint32_t index, uint32_t share) {
+        if (box.openQ16.empty())
+            box.openQ16.assign(box.cells.size(), GAS_OPEN_FULL);
+
+        box.openQ16[index] = share;
+        GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
+        for (uint64_t& amount : amounts)
+            amount = amount * share / GAS_OPEN_FULL;
+
+        box.cells[index] = MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
+    }
+
+    void RaiseLeft(GasBox& box, uint32_t limitX) {
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[0] >= limitX)
+                continue;
+
+            GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount = amount * 102 / 100;
+
+            box.cells[index] = MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
+        }
+    }
+
+    GasBox MakeWallBox(uint32_t holeShare) {
+        GasBox box = MakeAirBox(MakeAirConfig(12, 4, 8));
+        RaiseLeft(box, WALL_X);
+        if (holeShare == SHARE_NONE)
+            return box;
+
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const auto [x, y, z] = Coordinate(box, index);
+            if (x != WALL_X)
+                continue;
+
+            const bool hole = (y == 1 || y == 2) && (z == 3 || z == 4);
+            Occupy(box, index, hole ? holeShare : 0);
+        }
+
+        return box;
+    }
+
+    // 壁の右(x > WALL_X)の物質量の合計(µmol)
+    uint64_t RightAmount(const GasBox& box) {
+        uint64_t total = 0;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[0] <= WALL_X)
+                continue;
+
+            for (const uint64_t amount : box.cells[index].amounts)
+                total += amount;
+        }
+
+        return total;
+    }
+
+    // 30 刻みで右へ渡った物質量(µmol)。projection = false は陽解法(StepGas)。保存とハッシュも返す
+    struct WallRun {
+        int64_t crossed = 0;
+        bool conserved = true;
+        uint64_t hash = 0;
+        CostSummary cost;
+    };
+
+    WallRun RunWall(uint32_t holeShare, bool projection, uint32_t speed) {
+        GasBox box = MakeWallBox(holeShare);
+        const GasTotals before = SumGas(box);
+        const uint64_t start = RightAmount(box);
+        GasProjection state;
+        GasProjectionOptions options;
+        options.pressure.soundSpeedMmPerS = speed;
+        WallRun run;
+        for (int tick = 0; tick < 30; ++tick) {
+            if (projection)
+                run.cost.Add(StepGasProjection(box, state, options));
+            else
+                StepGas(box);
+
+            run.conserved = run.conserved && ConservedAgainst(box, before);
+        }
+
+        run.crossed = (int64_t)RightAmount(box) - (int64_t)start;
+        run.hash = HashGas(box);
+        return run;
+    }
+
+    const char* ShareName(uint32_t share) {
+        if (share == SHARE_NONE)
+            return "no wall";
+
+        if (share == 0)
+            return "closed wall";
+
+        return share == GAS_OPEN_FULL / 2 ? "hole 1/2" : "hole 1/256";
+    }
+
+    void TestWall() {
+        constexpr std::array<uint32_t, 4> SHARES = {SHARE_NONE, GAS_OPEN_FULL / 2, GAS_OPEN_FULL / 256, 0};
+        for (const int method : {0, 1, 2}) {
+            const bool projection = method != 0;
+            const uint32_t speed = method == 2 ? 0 : REAL_SOUND;
+            const char* name = projection ? (speed == 0 ? "projection fastest" : "projection 340 m/s") : "explicit";
+            std::array<int64_t, 4> crossed = {};
+            for (size_t s = 0; s < SHARES.size(); ++s) {
+                const WallRun first = RunWall(SHARES[s], projection, speed);
+                const WallRun second = RunWall(SHARES[s], projection, speed);
+                crossed[s] = first.crossed;
+                std::printf("wall (%s, %s): crossed %lld umol in 30 ticks, conserved %d, hash %016llx / %016llx\n",
+                            name, ShareName(SHARES[s]), (long long)first.crossed, first.conserved ? 1 : 0,
+                            (unsigned long long)first.hash, (unsigned long long)second.hash);
+                if (projection)
+                    first.cost.PrintOuter(ShareName(SHARES[s]));
+
+                EXPECT(first.conserved && second.conserved);
+                EXPECT(first.hash == second.hash);
+            }
+
+            // 陽解法と同じ向き: 壁なし > 孔 1/2 > 孔 1/256 > 塞がった壁 = 0(塞がった壁の向こうはビット単位で動かない)
+            EXPECT(crossed[0] > crossed[1]);
+            EXPECT(crossed[1] > crossed[2]);
+            EXPECT(crossed[2] > 0);
+            EXPECT(crossed[3] == 0);
+        }
+    }
+
+    // 研究(T-0667 の打ち切り条件): 空き 1/256 のセルを含む 12 × 24 × 12 の箱で内側の解き(V の上限 8)が許容差に入るか。
+    // 板 = z = 6 の層を全部 1/256(細い孔の板。下が 2% 高い圧力)・点 = 7 セルに 1 つを 1/256(散らばった小さな空き)
+    void RunPorous(bool plate, uint32_t speed) {
+        GasBox box = MakeAirBox(MakeAirConfig(12, 24, 12));
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[2] >= 6)
+                continue;
+
+            GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount = amount * 102 / 100;
+
+            box.cells[index] = MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
+        }
+
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            const bool porous = plate ? Coordinate(box, index)[2] == 6 : index % 7 == 3;
+            if (porous)
+                Occupy(box, index, GAS_OPEN_FULL / 256);
+        }
+
+        const GasTotals before = SumGas(box);
+        GasProjection state;
+        GasProjectionOptions options;
+        options.pressure.soundSpeedMmPerS = speed;
+        CostSummary summary;
+        bool conserved = true;
+        for (int tick = 0; tick < 10; ++tick) {
+            summary.Add(StepGasProjection(box, state, options));
+            conserved = conserved && ConservedAgainst(box, before);
+        }
+
+        std::printf(
+            "porous %s (%s, 12x24x12, 10 ticks): inner unconverged %u, worst inner error %lld mg, conserved %d\n",
+            plate ? "plate" : "points", SpeedName(speed), summary.unconverged, (long long)summary.worstError,
+            conserved ? 1 : 0);
+        summary.PrintOuter(SpeedName(speed));
+        EXPECT(conserved);
+    }
+
+    void TestPorous() {
+        for (const bool plate : {true, false}) {
+            RunPorous(plate, 0);
+            RunPorous(plate, REAL_SOUND);
+        }
+    }
+
 }  // namespace
 
 // 引数 --sweep で、外側の反復の止め方の違いを測る(遅い。ctest では回さない)
@@ -648,6 +829,8 @@ int main(int argc, char** argv) {
         TestBlastVisibility();
         TestBlastSettles(REAL_SOUND);
         TestBlastSettles(0);
+        TestWall();
+        TestPorous();
     }
 
     // --- 外側の反復(T-0530。既定の止め方)---
