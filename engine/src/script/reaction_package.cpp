@@ -73,7 +73,7 @@ namespace bicameral::script {
             return composition;
         }
 
-        // 物質の相(phase)を読む。condensed も書いてあれば同じ向きであること
+        // 物質の相(phase)を読む。廃止した condensed も書いてあれば同じ向きであること(食い違いは誤り。T-0710)
         std::expected<void, std::string> ReadPhase(const ScriptValue& phase, const ScriptValue* condensed,
                                                    const std::string& path, SpeciesDefinition& species) {
             if (!phase.IsString() || (phase.text != "gas" && phase.text != "solid" && phase.text != "liquid"))
@@ -83,8 +83,89 @@ namespace bicameral::script {
             if (condensed != nullptr && condensed->IsBoolean() && condensed->boolean != phaseCondensed)
                 return std::unexpected(std::format("{}: phase と condensed が食い違う", path));
 
-            species.condensed = phaseCondensed;
-            species.liquid = phase.text == "liquid";
+            species.phase = phase.text == "gas"      ? sim::SpeciesPhase::Gas
+                            : phase.text == "liquid" ? sim::SpeciesPhase::Liquid
+                                                     : sim::SpeciesPhase::Solid;
+
+            return {};
+        }
+
+        // --- 物質の動き方の任意の値(T-0710・土台の決定 3。相に合うかはベイクが確かめる)---
+
+        // 孔の通しやすさの上限(µm²。1e-5 m²。砂利でも 1e-7 m² ほど)と、持つ単位(1 µm² = 10^6 nm²)
+        constexpr int64_t PERMEABILITY_MAX_SQUARE_MICROMETERS = 10000000;
+        constexpr uint64_t SQUARE_NANOMETERS_PER_SQUARE_MICROMETER = 1000000;
+
+        // 孔の通しやすさ(µm²)を nm² の整数に。整数か 10 進の文字列("1e-6"・"0.001")。1 nm² より細かい端数は誤り
+        std::expected<uint64_t, std::string> ReadPermeability(const ScriptValue& value, const std::string& path) {
+            const std::string range = std::format("{}: 0 から {} µm² までを 1e-6 µm² 刻みで書く", path,
+                                                  PERMEABILITY_MAX_SQUARE_MICROMETERS);
+            if (!value.IsString()) {
+                const auto integer = ReadInteger(value, path, 0, PERMEABILITY_MAX_SQUARE_MICROMETERS);
+                if (!integer)
+                    return std::unexpected(integer.error());
+
+                return static_cast<uint64_t>(*integer) * SQUARE_NANOMETERS_PER_SQUARE_MICROMETER;
+            }
+
+            const auto decimal = ParseDecimal(value.text);
+            if (!decimal)
+                return std::unexpected(std::format("{}: {}", path, decimal.error()));
+
+            // nm² = 仮数 × 10^(指数 + 6)
+            uint64_t squareNanometers = decimal->mantissa;
+            const uint64_t limit = static_cast<uint64_t>(PERMEABILITY_MAX_SQUARE_MICROMETERS) *
+                                   SQUARE_NANOMETERS_PER_SQUARE_MICROMETER;
+            for (int32_t shift = decimal->exponent10 + 6; shift != 0; shift += shift < 0 ? 1 : -1) {
+                if (shift < 0 && squareNanometers % 10 != 0)
+                    return std::unexpected(range);
+
+                if (shift > 0 && squareNanometers > limit)
+                    return std::unexpected(range);
+
+                squareNanometers = shift < 0 ? squareNanometers / 10 : squareNanometers * 10;
+            }
+
+            if (squareNanometers > limit)
+                return std::unexpected(range);
+
+            return squareNanometers;
+        }
+
+        // 粘り・混ざる速さ・孔・吸い上げ(どれも任意。書かない値は無し = 今と同じ動き)
+        std::expected<void, std::string> ReadTransport(const ScriptValue& value, const std::string& path,
+                                                       sim::SpeciesTransport& transport) {
+            if (const ScriptValue* declared = value.Find("viscosity_upa_s")) {
+                const auto viscosity = ReadInteger(*declared, path + ".viscosity_upa_s", 1, EXACT_INTEGER_LIMIT);
+                if (!viscosity)
+                    return std::unexpected(viscosity.error());
+
+                transport.viscosityMicroPascalSeconds = static_cast<uint64_t>(*viscosity);
+            }
+
+            if (const ScriptValue* declared = value.Find("diffusivity_mm2_per_s")) {
+                const auto diffusivity = ReadInteger(*declared, path + ".diffusivity_mm2_per_s", 0, UINT32_LIMIT);
+                if (!diffusivity)
+                    return std::unexpected(diffusivity.error());
+
+                transport.diffusivityMm2PerS = static_cast<uint32_t>(*diffusivity);
+            }
+
+            if (const ScriptValue* declared = value.Find("permeability_um2")) {
+                const auto permeability = ReadPermeability(*declared, path + ".permeability_um2");
+                if (!permeability)
+                    return std::unexpected(permeability.error());
+
+                transport.permeabilityNm2 = *permeability;
+            }
+
+            if (const ScriptValue* declared = value.Find("suction_pa")) {
+                const auto suction = ReadInteger(*declared, path + ".suction_pa", 0, UINT32_LIMIT);
+                if (!suction)
+                    return std::unexpected(suction.error());
+
+                transport.suctionPascals = static_cast<uint32_t>(*suction);
+            }
 
             return {};
         }
@@ -99,7 +180,11 @@ namespace bicameral::script {
                                                           "condensed",
                                                           "radiation_absorption_mm2_per_mol",
                                                           "phase",
-                                                          "density_kg_per_m3"};
+                                                          "density_kg_per_m3",
+                                                          "viscosity_upa_s",
+                                                          "diffusivity_mm2_per_s",
+                                                          "permeability_um2",
+                                                          "suction_pa"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -136,12 +221,13 @@ namespace bicameral::script {
                 species.standardEntropy = *entropy;
             }
 
-            // 凝縮相(任意。坂の計器だけが読む。T-0518・ADR-0230)
+            // 廃止した condensed(T-0710): true は固体・false は気体と読み替え、ベイクが警告する(phase で書く)
             if (const ScriptValue* condensed = value.Find("condensed")) {
                 if (condensed->kind != ScriptValue::Kind::Boolean)
                     return std::unexpected(std::format("{}.condensed: true か false で書く", path));
 
-                species.condensed = condensed->boolean;
+                species.phase = condensed->boolean ? sim::SpeciesPhase::Solid : sim::SpeciesPhase::Gas;
+                species.legacyCondensed = true;
             }
 
             // 1 mol が放射を遮る面積(任意。既定 0 = 放射しない。放射の CPU リファレンスだけが読む。T-0583・ADR-0252)
@@ -154,7 +240,7 @@ namespace bicameral::script {
                 species.radiationAbsorption = static_cast<uint32_t>(*absorption);
             }
 
-            // 相(任意。T-0609・ADR-0266 Proposed): "gas" / "solid" / "liquid"。solid と liquid は凝縮相。condensed と食い違えば断る
+            // 相(任意。既定 gas。T-0609・T-0710): "gas" / "solid" / "liquid"。condensed と食い違えば断る
             if (const ScriptValue* phase = value.Find("phase")) {
                 if (auto result = ReadPhase(*phase, value.Find("condensed"), path, species); !result)
                     return std::unexpected(result.error());
@@ -168,6 +254,9 @@ namespace bicameral::script {
 
                 species.density = static_cast<uint32_t>(*density);
             }
+
+            if (auto transport = ReadTransport(value, path, species.transport); !transport)
+                return std::unexpected(transport.error());
 
             return species;
         }

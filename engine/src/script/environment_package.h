@@ -39,6 +39,8 @@ namespace bicameral::script {
     constexpr std::string_view ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY = "atmosphere_temperature_mk";
     constexpr std::string_view ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY = "atmosphere_surface_pressure_pa";
     constexpr std::string_view ENVIRONMENT_ATMOSPHERE_PROFILE_KEY = "atmosphere_profile";
+    constexpr std::string_view
+        ENVIRONMENT_WORLD_EDGES_KEY = "world_edges";  // { top, bottom, sides } = "open" か "wall"(T-0710)
     constexpr std::string_view ATMOSPHERE_CATEGORY = "atmosphere";
 
     // 合わせた表から世界の物理の値を作る。分類が無ければブランク(全部 0)。誤りは「パッケージ X: environment.鍵: 何が違うか」。

@@ -77,7 +77,7 @@ namespace {
              .formationEnthalpy = 0,
              .heatCapacity = 8500,
              .thermalConductivity = 2000000,
-             .condensed = true,
+             .phase = SpeciesPhase::Solid,
              .density = 2000});  // セルを満たす石は液体と気体の壁(T-0593・ADR-0268。密度を書かない固体は場所を取らない)
         if (stoneWithoutDensity)
             definition.species.back().density = 0;

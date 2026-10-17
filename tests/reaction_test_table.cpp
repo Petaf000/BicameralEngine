@@ -122,7 +122,7 @@ namespace bicameral::sim {
                                       .formationEnthalpy = -285830,
                                       .heatCapacity = 75300,
                                       .thermalConductivity = 600,
-                                      .condensed = true});
+                                      .phase = SpeciesPhase::Solid});
         definition.rules.push_back(
             {.name = "test_dew_condensation",
              .reactants = {{.species = "water_vapor", .coefficient = 1, .firstOrder = true}},

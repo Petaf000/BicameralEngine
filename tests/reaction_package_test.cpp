@@ -310,7 +310,7 @@ namespace {
     void TestMissingDensityWarning() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         EXPECT(std::ranges::all_of(definition.species, [](const SpeciesDefinition& species) {
-            return !species.condensed || species.density != 0;
+            return species.phase != SpeciesPhase::Solid || species.density != 0;
         }));
 
         const auto cellulose = std::ranges::find(definition.species, "cellulose", &SpeciesDefinition::name);
@@ -345,6 +345,133 @@ namespace {
     }
 
     // 坂を上る規則はベイクが警告し、表はそのまま当てる。GPU の表は物質のエントロピーに依らない(T-0492・D-487 ②)
+    // --- 相と動き方の欄(T-0710・土台の決定 3)---
+
+    // 試験のパッケージに物質を足してベイクする
+    std::expected<BakedReactionTable, std::string> BakeWithSpecies(std::string_view species) {
+        std::vector<PackageSource> packages = BasePackages();
+        packages.push_back(ModPackage("phase_mod", "return { species = { " + std::string(species) + " } }"));
+
+        return BakePackages(packages);
+    }
+
+    bool HasWarning(const BakedReactionTable& table, std::string_view part) {
+        return std::ranges::any_of(table.warnings,
+                                   [&](const std::string& warning) { return warning.find(part) != std::string::npos; });
+    }
+
+    // 密度を書いた試験の物質(相と動き方の欄は fields で足す)
+    std::string Stone(std::string_view fields) {
+        return "test_stone = { composition = { C = 1 }, formation_enthalpy_j_per_mol = 0, "
+               "heat_capacity_mj_per_mol_k = 30000, thermal_conductivity_mw_per_m_k = 2000, density_kg_per_m3 = "
+               "2000, " +
+               std::string(fields) + " }";
+    }
+
+    // condensed(廃止)で書いた表と phase で書いた表は、ベイクの結果(GPU の表・相の表)が同じ。condensed だけが警告される
+    void TestLegacyCondensed() {
+        const auto legacy = BakeWithSpecies(Stone("condensed = true"));
+        const auto solid = BakeWithSpecies(Stone("phase = \"solid\""));
+        EXPECT(legacy && solid);
+        if (!legacy || !solid)
+            return;
+
+        PrintWarnings(*legacy);
+        EXPECT(SameTable(*legacy, *solid));
+        EXPECT(legacy->speciesPhase == solid->speciesPhase && legacy->speciesCondensed == solid->speciesCondensed &&
+               legacy->speciesLiquid == solid->speciesLiquid &&
+               legacy->speciesMolarVolume == solid->speciesMolarVolume);
+        EXPECT(solid->speciesPhase[solid->SpeciesId("test_stone")] == SpeciesPhase::Solid);
+        EXPECT(HasWarning(*legacy, "condensed は廃止") && !HasWarning(*solid, "condensed"));
+
+        // condensed = false は気体(phase を書かないのと同じ)
+        const auto gas = BakeWithSpecies(Stone("condensed = false"));
+        const auto unwritten = BakeWithSpecies(Stone(""));
+        EXPECT(gas && unwritten && SameTable(*gas, *unwritten) && gas->speciesPhase == unwritten->speciesPhase);
+        EXPECT(gas && gas->speciesPhase[gas->SpeciesId("test_stone")] == SpeciesPhase::Gas);
+    }
+
+    // 標準パッケージの相の表は condensed を phase に直す前と同じ(凝縮相 = 炭・セルロース・氷・水、液体 = 水)と、見本の動き方の値
+    void TestShippedPhases() {
+        const auto baked = BakePackages(BasePackages());
+        if (!baked) {
+            std::printf("FAILED: ベイクできない: %s\n", baked.error().c_str());
+            ++failureCount;
+
+            return;
+        }
+
+        EXPECT(baked->speciesPhase.size() == baked->species.size() &&
+               baked->speciesTransport.size() == baked->species.size());
+        EXPECT(baked->speciesPhase[0] == SpeciesPhase::Gas);
+        for (uint32_t id = 1; id < baked->speciesPhase.size(); ++id) {
+            const std::string& name = baked->speciesNames[id];
+            const bool solid = name == "carbon" || name == "cellulose" || name == "ice";
+            const bool liquid = name == "water";
+            const SpeciesPhase expected = solid    ? SpeciesPhase::Solid
+                                          : liquid ? SpeciesPhase::Liquid
+                                                   : SpeciesPhase::Gas;
+            EXPECT(baked->speciesPhase[id] == expected);
+            EXPECT(baked->speciesCondensed[id] == (solid || liquid ? 1 : 0));
+            EXPECT(baked->speciesLiquid[id] == (liquid ? 1 : 0));
+        }
+
+        EXPECT(!HasWarning(*baked, "condensed") && !HasWarning(*baked, "粘り"));
+        const SpeciesTransport& water = baked->speciesTransport[baked->SpeciesId("water")];
+        const SpeciesTransport& vapor = baked->speciesTransport[baked->SpeciesId("water_vapor")];
+        EXPECT(water.viscosityMicroPascalSeconds == 890 && vapor.diffusivityMm2PerS == 25);
+    }
+
+    // 動き方の 4 つの欄: 整数で持つ形(孔は nm²)・相に合わない欄と範囲の外は誤り・液体の粘りの書き忘れは警告
+    void TestTransportFields() {
+        const auto read = BakeWithSpecies(
+            Stone("phase = \"solid\", permeability_um2 = \"1e-6\", suction_pa = 5000") +
+            ", test_clay = { composition = { C = 1 }, formation_enthalpy_j_per_mol = 0, heat_capacity_mj_per_mol_k = "
+            "30000, thermal_conductivity_mw_per_m_k = 2000, density_kg_per_m3 = 2000, phase = \"solid\", "
+            "permeability_um2 = \"0.001\" }, test_gravel = { composition = { C = 1 }, formation_enthalpy_j_per_mol = "
+            "0, "
+            "heat_capacity_mj_per_mol_k = 30000, thermal_conductivity_mw_per_m_k = 2000, density_kg_per_m3 = 2000, "
+            "phase = \"solid\", permeability_um2 = 10 }, test_oil = { composition = { C = 1 }, "
+            "formation_enthalpy_j_per_mol = 0, heat_capacity_mj_per_mol_k = 30000, thermal_conductivity_mw_per_m_k = "
+            "200, phase = \"liquid\", density_kg_per_m3 = 900, viscosity_upa_s = 50000 }, test_mist = { composition = "
+            "{ C = 1 }, formation_enthalpy_j_per_mol = 0, heat_capacity_mj_per_mol_k = 30000, "
+            "thermal_conductivity_mw_per_m_k = 20, diffusivity_mm2_per_s = 5 }");
+        EXPECT(read.has_value());
+        if (!read) {
+            std::printf("  %s\n", read.error().c_str());
+
+            return;
+        }
+
+        const auto transport = [&](std::string_view name) {
+            return read->speciesTransport[read->SpeciesId(name)];
+        };
+        EXPECT(transport("test_stone").permeabilityNm2 == 1 && transport("test_stone").suctionPascals == 5000);
+        EXPECT(transport("test_clay").permeabilityNm2 == 1000 && !transport("test_clay").suctionPascals);
+        EXPECT(transport("test_gravel").permeabilityNm2 == 10000000);
+        EXPECT(transport("test_oil").viscosityMicroPascalSeconds == 50000);
+        EXPECT(transport("test_mist").diffusivityMm2PerS == 5 && !transport("test_mist").permeabilityNm2);
+        EXPECT(!HasWarning(*read, "test_oil"));
+
+        // 液体の粘りの書き忘れは警告(表は当たる)
+        const auto thin = BakeWithSpecies(
+            "test_oil = { composition = { C = 1 }, formation_enthalpy_j_per_mol = 0, heat_capacity_mj_per_mol_k = "
+            "30000, "
+            "thermal_conductivity_mw_per_m_k = 200, phase = \"liquid\", density_kg_per_m3 = 900 }");
+        EXPECT(thin && HasWarning(*thin, "test_oil") && HasWarning(*thin, "viscosity_upa_s"));
+
+        // 相に合わない欄・範囲の外は誤り
+        ExpectModFails("気体に孔", Stone("permeability_um2 = 10"), "", "permeability_um2");
+        ExpectModFails("気体に吸い上げ", Stone("suction_pa = 10"), "", "suction_pa");
+        ExpectModFails("固体に粘り", Stone("phase = \"solid\", viscosity_upa_s = 1000"), "", "viscosity_upa_s");
+        ExpectModFails("固体に混ざる速さ", Stone("phase = \"solid\", diffusivity_mm2_per_s = 5"), "",
+                       "diffusivity_mm2_per_s");
+        ExpectModFails("細かすぎる孔", Stone("phase = \"solid\", permeability_um2 = \"1e-7\""), "", "1e-6 µm² 刻み");
+        ExpectModFails("大きすぎる孔", Stone("phase = \"solid\", permeability_um2 = \"1e8\""), "", "1e-6 µm² 刻み");
+        ExpectModFails("孔の小数", Stone("phase = \"solid\", permeability_um2 = 0.5"), "", "整数");
+        ExpectModFails("粘り 0", Stone("phase = \"liquid\", viscosity_upa_s = 0"), "", "範囲");
+    }
+
     void TestSlopeWarnings() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         const auto with = BakeReactionTable(definition);
@@ -508,6 +635,9 @@ int main() {
     TestModAddsSpeciesAndRule();
     TestDeclaredEnthalpyWarning();
     TestMissingDensityWarning();
+    TestLegacyCondensed();
+    TestShippedPhases();
+    TestTransportFields();
     TestSlopeWarnings();
     TestParseDecimal();
     TestLoaderReadsShippedTable();

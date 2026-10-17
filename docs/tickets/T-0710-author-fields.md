@@ -32,5 +32,19 @@
 - [ ] 試験: luau_type_check・reaction_package・standard_packages・environment_package・world_layout が通る・release のビルドの警告 0・archmap --check
 
 ## メモ・参考
+- 決めたこと(仮・ユーザー未確認。名前と単位は設計の仮のまま):
+  - 孔は µm² で書き、1e-6 µm²(= 1 nm²)刻みの整数で持つ(上限 1e7 µm²)。小さい値は 10 進の文字列("1e-6"・"0.001")。
+  - 粘りは 1 以上(0 は書けない。書かない = 粘りで減らない)・混ざる速さと吸い上げは 0 以上。
+  - 「液体があるのに重力 0」は、世界の初めのセルに液体を置いた時だけ(物質の表に液体があるだけの部品のパッケージでは言わない)。
+  - 「端が全部 wall で大気が無い(注意)」は、セルを置いた世界で、基準の大気もセルの気体も無い時だけ(閉じた真空の箱)。
+    earth_air だけの組(空気で満たして基準の大気なし)は言わない。ブランクの世界も言わない。
+  - 標準の earth_environment には world_edges を書いていない(既定の全部 wall のまま。世界ごとに書く物と見た)。
+  - 見本の値: real_matter の水の粘り 890・湯気の混ざる速さ 25。砂は real_matter に無いので、場面 grass_fire_river の silica に
+    孔 10 µm²・吸い上げ 5000 Pa(どれも出典はファイルの注。未確認)。
+- T-0713(wt5)の相の表 `CvSpeciesPhase.phase` の並び(gas 0 / liquid 1 / solid 2)は `sim::SpeciesPhase` と同じ。マージ後は
+  `MakeSpeciesPhases` が `speciesPhase` を写すだけにできる。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-17 作業役(wt2): 相を `SpeciesPhase` 1 本に(定義の condensed・liquid を消し、試験の C++ の表も直した)・動き方の 4 欄・
+  world_edges を型・読み手・ベイクの検査へ。condensed は読み替えて警告。標準と場面を phase だけに。ベイクの知らせ(§1.4)。
+  試験: reaction_package に condensed と phase の同じ表・標準の相の表・4 欄の形と誤り、environment_package に端と知らせ。

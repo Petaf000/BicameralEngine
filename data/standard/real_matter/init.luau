@@ -13,7 +13,10 @@
 --     H2O(気)188.835・黒鉛 5.740 J/(mol·K))。セルロースの 170 J/(mol·K)(C6H10O5 の 1 単位)は推定で**未確認**
 --     (結晶のグルコース 209.2 J/(mol·K) から見積もった。照合先の候補: Goldberg et al., J. Chem. Thermodyn. 81 (2015) 184)。
 --     セルロースの値を ±100 J/(mol·K) 動かしても、セルロースの規則が坂を下る向きは変わらない(T-0491 の試験の表)。
---   凝縮相(任意の欄 condensed。坂の計器〔T-0518〕が活量を 1 と置く。気体は分圧): 炭(黒鉛)とセルロース。
+--   相(任意の欄 phase。省けば気体。T-0710 で condensed から直した): 固体は炭(黒鉛)・セルロース・氷、液体は水。
+--   動き方の任意の値(T-0710・土台の決定 3。まだ刻みは読まない。名前と単位は設計の仮):
+--     液体の水の粘り 890 µPa·s: 25 ℃ の 0.8900 mPa·s(IAPWS 2008 の水の粘性の式の 25 ℃・0.1 MPa の値を丸めた。未確認)。
+--     湯気の混ざる速さ 25 mm²/s: 空気の中の水蒸気の拡散係数 0.24〜0.28 cm²/s(25 ℃・1 atm。教科書により幅がある。未確認)の中ほど。
 --   密度(density_kg_per_m3。凝縮相は全部に書く。セルの場所を取る量 = 物質量 × モル体積。ADR-0268・T-0616。書き忘れはベイクが警告する):
 --     炭(黒鉛)2260 kg/m³: 理想的な黒鉛の結晶の X 線密度 2.266 g/cm³(CRC Handbook of Chemistry and Physics の黒鉛 2.2〜2.27 の上端)を丸めた。
 --       木炭の骨格の密度(1.4〜2.0)より大きいが、炭は黒鉛として扱う(孔は物質量の少なさで出る)。
@@ -72,6 +75,7 @@ return {
             heat_capacity_mj_per_mol_k = 33580,
             thermal_conductivity_mw_per_m_k = 25,
             standard_entropy_mj_per_mol_k = 188835,
+            diffusivity_mm2_per_s = 25,
         },
         -- 炭(黒鉛として扱う)
         carbon = {
@@ -80,7 +84,7 @@ return {
             heat_capacity_mj_per_mol_k = 8520,
             thermal_conductivity_mw_per_m_k = 100,
             standard_entropy_mj_per_mol_k = 5740,
-            condensed = true,
+            phase = "solid",
             density_kg_per_m3 = 2260,
         },
         -- 液体の水(T-0611。低い方へ流れるのは液体の区画〔T-0609〕。湯気・氷との行き来は real_reactions の規則)
@@ -92,6 +96,7 @@ return {
             standard_entropy_mj_per_mol_k = 69950,
             phase = "liquid",
             density_kg_per_m3 = 1000,
+            viscosity_upa_s = 890,
         },
         -- 氷(T-0611。値は 298.15 K へ戻したもの。上の出典)
         ice = {
@@ -110,7 +115,7 @@ return {
             heat_capacity_mj_per_mol_k = 211000,
             thermal_conductivity_mw_per_m_k = 120,
             standard_entropy_mj_per_mol_k = 170000,
-            condensed = true,
+            phase = "solid",
             density_kg_per_m3 = 1500,
         },
     },
