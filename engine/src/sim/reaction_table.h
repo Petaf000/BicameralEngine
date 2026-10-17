@@ -56,8 +56,9 @@ namespace bicameral::sim {
         // 標準モルエントロピー(mJ/(mol·K)。298.15 K・1 bar)。任意。GPU の表に入らない(表とハッシュは変わらない)。
         // 坂の検査だけが使う(ベイクの警告 sim/reaction_slope・T-0492。試験 slope_check・T-0491。D-487)
         std::optional<int64_t> standardEntropy;
-        // 凝縮相(固体・液体)か。任意(既定 false = 気体)。GPU の表に入らない。坂の計器(sim/slope_gauge・T-0518)が
-        // 活量を 1 と置くのに使う(気体は分圧)。エンジンの物質は相を持たない(M2)ので、相が入るまでの仮の欄(ADR-0230)
+        // 凝縮相(固体・液体)か。任意(既定 false = 気体)。坂の計器(sim/slope_gauge・T-0518)が活量を 1 と置くのに使う(気体は分圧)。
+        // GPU の表には気体の印(RxSpecies::flags の RX_SPECIES_GAS = 凝縮相でも液体でもない)として入り、セルの気体の器を数える
+        // (気体を増やす規則を器の残りまでに縮める。T-0622・ADR-0316)。エンジンの物質は相を持たない(M2)ので、相が入るまでの仮の欄(ADR-0230)
         bool condensed = false;
         // 1 mol が放射を遮る面積(mm²/mol)。任意(既定 0 = 放射しない・吸わない)。セルの吸収率 = 1 − e^−Σ a·n ÷ 面の面積で、
         // 放射率も同じ値(灰色体)。GPU の表にはまだ入らない(放射の CPU リファレンス sim/radiation_reference だけが読む。T-0583・ADR-0252)
@@ -132,8 +133,8 @@ namespace bicameral::sim {
 
     // --- ベイクした表 ---
 
-    static_assert(sizeof(reaction::RxSpecies) == 24);
-    static_assert(sizeof(reaction::RxRule) == 112);
+    static_assert(sizeof(reaction::RxSpecies) == 32);
+    static_assert(sizeof(reaction::RxRule) == 120);
     static_assert(sizeof(reaction::RxCell) == 112);
 
     // CPU の RxStepCellWait に渡す表の読み方(reaction.hlsli の Table の約束)

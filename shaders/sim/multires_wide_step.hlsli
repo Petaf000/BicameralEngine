@@ -39,6 +39,7 @@ struct RxGpuMidCell {
 struct RxGpuMidUsage {
     uint64_t amounts[RX_GPU_MID_SPECIES];
     uint64_t heat;
+    uint64_t gas;
 };
 
 // --- 速い形の道具 ---
@@ -77,6 +78,7 @@ RxGpuMidUsage RxEmptyUsage(RxGpuMidCell cell) {
         usage.amounts[i] = 0;
 
     usage.heat = 0;
+    usage.gas = 0;
 
     return usage;
 }
@@ -112,6 +114,7 @@ struct RxGpuSpaceCell {
 struct RxGpuSpaceUsage {
     uint32_t word;  // 成分 i の使う量は SpaceWord(word, 2i)(下位・上位)
     uint64_t heat;
+    uint64_t gas;
 };
 
 uint32_t SpaceCapacity() {
@@ -243,6 +246,7 @@ RxGpuSpaceUsage RxEmptyUsage(RxGpuSpaceCell cell) {
     RxGpuSpaceUsage usage;
     usage.word = SpaceWord(cell.lane, MR_WIDE_ENTRY_WORDS * SpaceCapacity());
     usage.heat = 0;
+    usage.gas = 0;
     for (uint32_t w = 0; w < 2 * cell.speciesCount; ++w)
         g_treeWords[SpaceWord(usage.word, w)] = 0;
 

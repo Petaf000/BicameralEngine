@@ -162,6 +162,25 @@ namespace {
                        "足す: 合計がちょうどセルの器なら足す(1 物質 2147 mol を超えてよい)");
         failures.Check(addAmount(PROBE_PLACE_MAX_AMOUNT - airTotal + 1).applied == 0,
                        "足す: 合計がセルの器を超えるセルは飛ばす");
+
+        // --- 気体のぶん: 置いた後の気体のぶんが気体の器(2^31 µmol 未満。T-0622)に入らないセルは飛ばす。凝縮相は数えない ---
+        const uint64_t gasLimit = fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
+        const uint64_t airGas = ProbeCellGasAmount(view, air);
+        const uint32_t gasSpecies = air.species[0];
+        const auto placeGas = [&](uint64_t amount, bool replace) {
+            const std::vector<SpeciesAmount> contents = {{.species = gasSpecies, .amount = amount}};
+            return ProbePlaceCell(view, air,
+                                  Decode(MakePlaceCommand(0, 0, {.radius = 0, .replace = replace}, contents), table));
+        };
+        const ProbePlaced gasFits = placeGas(gasLimit - 1 - airGas, false);
+        failures.Check((table.species[gasSpecies].flags & reaction::RX_SPECIES_GAS) != 0 &&
+                           (table.species[woodSpecies].flags & reaction::RX_SPECIES_GAS) == 0 && airGas == airTotal,
+                       "気体のぶん: 空気は気体・木は凝縮相として数える");
+        failures.Check(gasFits.applied == 1 && ProbeCellGasAmount(view, gasFits.cell) == gasLimit - 1,
+                       "足す: 気体のぶんが器 − 1 までなら足す");
+        failures.Check(placeGas(gasLimit - airGas, false).applied == 0, "足す: 気体のぶんが器に届くセルは飛ばす");
+        failures.Check(placeGas(gasLimit - 1, true).applied == 1 && placeGas(gasLimit, true).applied == 0,
+                       "置き換え: 材料の気体のぶんが器に届くと飛ばす");
     }
 
     // 球以外の形(T-0245・ADR-0089): 直方体・円柱のセルの数・格子の端・当てられない大きさ。形の欄が 0 の(T-0222 の)コマンドは球のまま
