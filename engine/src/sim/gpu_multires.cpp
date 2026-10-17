@@ -599,7 +599,7 @@ namespace bicameral::sim {
         sizes[BufferCounters] = uint64_t{MR_COUNTER_COUNT} * sizeof(uint32_t);
         sizes[BufferTreeWords] = (uint64_t{OverflowBaseWord()} * sizeof(uint32_t)) + OverflowBytes();
         sizes[BufferFreeFractions] = uint64_t{m_capacity.fractions} * sizeof(uint32_t);
-        sizes[BufferLedger] = uint64_t{MR_LEDGER_LEVELS} * m_capacity.ledgerColumns * sizeof(uint64_t);
+        sizes[BufferLedger] = uint64_t{WlLedgerWords(m_capacity.ledgerColumns)} * sizeof(uint64_t);
         sizes[BufferRequests] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequest);
         sizes[BufferStates] = uint64_t{MR_MAX_REQUESTS} * sizeof(MrRequestState);
         sizes[BufferConduction] = (uint64_t{m_blockCapacity} * CONDUCT_MARK_BYTES) +

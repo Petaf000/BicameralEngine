@@ -400,6 +400,9 @@ views:
           note: "解決 → 確定 → 割り当て → 適用 → 解放 → 索引の作り直し。枠の番号は要求の順の累積和で決まる(CPU と GPU で配列のまま一致)" }
       - { id: multirestreehlsl, group: shared, label: "multires_tree.hlsli<br/>要求・索引の番地・帳簿の約束",
           code: "shaders/common/multires_tree.hlsli::MrIndexHome", ticket: T-0018, doc: docs/design/17-multiresolution.md }
+      - { id: worldledgerhlsl, group: shared, label: "world_ledger.hlsli<br/>世界の帳簿の 1 つの型(理由 × 向き × レベル × 量)",
+          code: "shaders/common/world_ledger.hlsli::WlAddress", ticket: T-0712, doc: docs/decisions/ADR-0331-world-ledger-one-type.md,
+          note: "保存の検査は ComputeConservedTotals の 1 つ(Σ 保存量 − (入 − 出))。CPU は AddWorldLedgerBits、GPU は multires_bindings.hlsli の AddWorldLedgerCarrying。欄 0(粗くした端数・出)は前の MR の帳簿と同じ番地" }
       - { id: multiresactivity, group: simlib, label: "StepActive<br/>木の上の活性: 種と面の隣だけ刻む",
           code: "engine/src/sim/multires_activity.cpp::StepActive", ticket: T-0100, doc: docs/design/17-multiresolution.md,
           note: "種 = 前の刻みに進める反応があった・木の変更でつつかれた。印(activeTick)を付けて刻む。全部を刻む StepNest とビット一致" }
@@ -611,6 +614,8 @@ views:
       - [multiresnest, multireshlsl]
       - [multirestree, multirestreehlsl]
       - [multirestreehlsl, multireshlsl]
+      - [worldledgerhlsl, multirestreehlsl]
+      - [multirestree, worldledgerhlsl, "帳簿に載せる"]
       - [gpumultires, multirestreehlsl, "GPU の段と CPU で同じ関数"]
       - [gpumultires, multireshlsl, "GPU(.cso)と CPU で同じ関数"]
       - [multirestest, multiresnest]

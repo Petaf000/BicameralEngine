@@ -137,9 +137,10 @@ namespace {
             const std::span<const Command> now = CommandsOf(commands, tick);
             const ConservedTotals before = ComputeConservedTotals(nest, table, 0);
             StepLabBox(nest, table, tick, now);
-            if (now.empty())
-                EXPECT(ComputeConservedTotals(nest, table, 0) ==
-                       before);  // 箱は閉じている: コマンドの無い刻みは合計が同じ
+
+            // 箱は閉じていて、置く・温度を決めるコマンドは世界の帳簿の「改造」に載る(T-0712): コマンドのある刻みも
+            // 「保存量 − 帳簿」が同じ。改造の帳簿はコマンドのある刻みだけ変わる
+            EXPECT(ComputeConservedTotals(nest, table, 0) == before);
 
             hashes.push_back(HashWholeNest(nest));
         }
@@ -588,6 +589,7 @@ namespace {
             StepLabBox(burn, table, tick, {}, SHAPE);
 
         EXPECT(ComputeConservedTotals(burn, table, FINEST) == lit);
+        EXPECT(ComputeConservedTotals(burn, table, FINEST) == initial);  // 細かくする・置く・火を付けるを通して(T-0712)
         const auto burnt = LabBoxFineCell(burn, {.x = 9, .y = 9, .z = 9, .level = 2});
         EXPECT(burnt.has_value() && AmountOf(*burnt, cellulose) < wood->contents[0].amount);
 

@@ -151,7 +151,13 @@ namespace bicameral::sim {
                     return false;
 
                 RxCell& target = nest_detail::CellAt(*nest, slot, local);
+                const RxCell before = target;
                 target = lab::LabApplyCommand(table, target, command);
+
+                // --- 改造の帳簿(T-0712): 消した中身は出・置いた中身は入(lab_box.hlsl の LabCells と同じ)---
+                const int32_t level = nest->blocks[slot].level;
+                AddWorldLedgerCell(*nest, WL_REASON_EDIT, WL_DIRECTION_OUT, level, before);
+                AddWorldLedgerCell(*nest, WL_REASON_EDIT, WL_DIRECTION_IN, level, target);
 
                 return true;
             }

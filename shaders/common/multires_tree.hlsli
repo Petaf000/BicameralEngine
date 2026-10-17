@@ -20,9 +20,11 @@ FX_CONST uint32_t MR_INDEX_EMPTY = 0xFFFFFFFFu;
 FX_CONST uint32_t MR_INDEX_TOMBSTONE = 0xFFFFFFFEu;
 FX_CONST uint32_t MR_MAX_LEVEL_SPAN = 62;  // 要求のレベルと根のレベルの差の最大(64bit の座標をずらすため)
 
-// 世界の帳簿: [レベル − MR_LEDGER_LEVEL_MIN][列]。列 0 = エネルギー、1 + 物質 ID。値は子のレベルの単位 × 2^-64 の数
-FX_CONST int32_t MR_LEDGER_LEVEL_MIN = -16;
-FX_CONST uint32_t MR_LEDGER_LEVELS = 80;
+// 世界の帳簿の 1 つの欄: [レベル − MR_LEDGER_LEVEL_MIN][列]。列 0 = エネルギー、1 + 物質 ID。値はそのレベルの単位 × 2^-64 の数。
+// 帳簿全体(理由 × 向きの欄)は world_ledger.hlsli(T-0712)。MrLedgerAddress は欄 0(粗くした端数・出)の番地。
+// 段の下限は丸ごとの量(world_ledger.hlsli の WlSplitWholeUnits。22 段粗い段)をレベル 0 から置けるように -24(T-0712。前は -16)
+FX_CONST int32_t MR_LEDGER_LEVEL_MIN = -24;
+FX_CONST uint32_t MR_LEDGER_LEVELS = 88;
 
 // 要求の種類
 FX_CONST uint32_t MR_REQUEST_REFINE = 1;   // 点を含むレベル L の本物のブロックを作る(途中の段も)

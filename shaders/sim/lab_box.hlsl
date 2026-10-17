@@ -37,7 +37,13 @@ struct LabCells {
             return false;
 
         const uint32_t address = PageCellAddress(block.page, local);
-        g_cells[address] = LabApplyCommand(MakeTable(), g_cells[address], command);
+        const RxCell before = g_cells[address];
+        const RxCell after = LabApplyCommand(MakeTable(), before, command);
+        g_cells[address] = after;
+
+        // --- 改造の帳簿(T-0712): 消した中身は出・置いた中身は入(CPU の sim/lab_box.cpp の NestCells と同じ)---
+        AddWorldLedgerCell(WL_REASON_EDIT, WL_DIRECTION_OUT, block.level, before);
+        AddWorldLedgerCell(WL_REASON_EDIT, WL_DIRECTION_IN, block.level, after);
 
         return true;
     }

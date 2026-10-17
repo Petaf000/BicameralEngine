@@ -105,18 +105,9 @@ namespace bicameral::sim {
         }
 
         // 帳簿の段 ledgerLevel に bits(その段の単位 × 2^-64)を足す。桁あふれ(= その段の 1 単位 = 1 段粗い段の 2^61)は粗い段へ繰り上げる
+        // (世界の帳簿の「粗くした端数・出」の欄。T-0712)
         void AddLedgerBits(MultiresNest& nest, int32_t ledgerLevel, uint32_t column, uint64_t bits) {
-            for (; bits != 0; --ledgerLevel) {
-                const uint32_t address = MrLedgerAddress(ledgerLevel, column, nest.capacity.ledgerColumns);
-                if (address == MR_NO_BLOCK) {
-                    nest.counters[MR_COUNTER_LEDGER_OUTSIDE] += 1;
-                    return;
-                }
-
-                uint64_t& value = nest.ledger[address];
-                value += bits;
-                bits = value < bits ? uint64_t{1} << 61u : 0;
-            }
+            AddWorldLedgerBits(nest, WlSlot(WL_REASON_COARSEN_REMAINDER, WL_DIRECTION_OUT), ledgerLevel, column, bits);
         }
 
         // レベル level の units 単位(units < 512。畳んだ平均の切り捨ての余り)を帳簿へ: 3 段粗い段の units × 2^55

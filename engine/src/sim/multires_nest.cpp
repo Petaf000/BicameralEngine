@@ -185,15 +185,33 @@ namespace bicameral::sim {
             }
         }
 
+        // 2 の補数で符号を変える
+        Wide256 Negate(const Wide256& value) {
+            Wide256 result{};
+            uint64_t carry = 1;
+            for (size_t i = 0; i < value.size(); ++i) {
+                result[i] = ~value[i] + carry;
+                carry = (carry != 0 && result[i] == 0) ? 1u : 0u;
+            }
+
+            return result;
+        }
+
+        // 帳簿の全部の欄を「− (入 − 出)」で足す(出 = セルから減った量を足し戻す・入 = セルに増えた量を引く。T-0712)
         void AddLedgerTotals(ConservedTotals& totals, const MultiresNest& nest, const BakedReactionTable& table,
                              int32_t finestLevel) {
             const uint32_t columns = nest.capacity.ledgerColumns;
-            for (uint32_t row = 0; row < MR_LEDGER_LEVELS; ++row) {
-                const int32_t level = MR_LEDGER_LEVEL_MIN + static_cast<int32_t>(row);
-                for (uint32_t column = 0; column < columns; ++column) {
-                    const uint64_t value = nest.ledger[(size_t{row} * columns) + column];
-                    if (value != 0)
-                        AddLedgerColumn(totals, table, column, LedgerValue(value, level, finestLevel));
+            for (uint32_t slot = 0; slot < WL_SLOT_COUNT; ++slot) {
+                for (uint32_t row = 0; row < MR_LEDGER_LEVELS; ++row) {
+                    const int32_t level = MR_LEDGER_LEVEL_MIN + static_cast<int32_t>(row);
+                    for (uint32_t column = 0; column < columns; ++column) {
+                        const uint64_t value = nest.ledger[WlAddress(slot, level, column, columns)];
+                        if (value == 0)
+                            continue;
+
+                        const Wide256 amount = LedgerValue(value, level, finestLevel);
+                        AddLedgerColumn(totals, table, column, WlSlotIsIn(slot) ? Negate(amount) : amount);
+                    }
                 }
             }
         }
@@ -491,7 +509,7 @@ namespace bicameral::sim {
         nest.blocks.assign(blockCount, MrMakeUnusedBlock());
         nest.cells.assign(blockCount + (pageCount * MR_BLOCK_CELLS), RxMakeEmptyCell(0));
         nest.fractions.assign(size_t{capacity.fractions} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
-        nest.ledger.assign(size_t{MR_LEDGER_LEVELS} * capacity.ledgerColumns, 0);
+        nest.ledger.assign(WlLedgerWords(capacity.ledgerColumns), 0);
         nest.index.assign(capacity.indexEntries, MR_INDEX_EMPTY);
         nest.requests.assign(MR_MAX_REQUESTS, MrMakeRequest(0, 0, 0, 0, 0));
         nest.states.assign(MR_MAX_REQUESTS, MrMakeRequestState());
@@ -552,8 +570,8 @@ namespace bicameral::sim {
             stepped[slot] = kind != MR_BLOCK_UNUSED && kind != MR_BLOCK_MIRROR ? 1 : 0;
         }
 
-        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
-            nest, table.View(), stepped, worldSeed, tick, options, 0);
+        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(nest, table.View(), stepped,
+                                                                                          worldSeed, tick, options, 0);
         nest_detail::RecordWaitResults(nest, results, tick);
     }
 
@@ -637,6 +655,38 @@ namespace bicameral::sim {
         }
 
         return hash;
+    }
+
+    // --- 世界の帳簿(T-0712)---
+
+    void AddWorldLedgerBits(MultiresNest& nest, uint32_t slot, int32_t level, uint32_t column, uint64_t bits) {
+        for (; bits != 0; --level) {
+            const uint32_t address = WlAddress(slot, level, column, nest.capacity.ledgerColumns);
+            if (address == MR_NO_BLOCK) {
+                nest.counters[MR_COUNTER_LEDGER_OUTSIDE] += 1;
+                return;
+            }
+
+            uint64_t& value = nest.ledger[address];
+            value += bits;
+            bits = value < bits ? WlCarryBits() : 0;
+        }
+    }
+
+    void AddWorldLedgerUnits(MultiresNest& nest, uint32_t slot, int32_t level, uint32_t column, uint64_t units) {
+        const WlWholeSplit split = WlSplitWholeUnits(units);
+        AddWorldLedgerBits(nest, slot, level - WL_WHOLE_LOW_LEVELS, column, split.low);
+        AddWorldLedgerBits(nest, slot, level - WL_WHOLE_HIGH_LEVELS, column, split.high);
+    }
+
+    void AddWorldLedgerCell(MultiresNest& nest, uint32_t reason, uint32_t direction, int32_t level,
+                            const RxCell& cell) {
+        const WlSignedEntry energy = WlEnergyEntry(cell.energy, direction);
+        AddWorldLedgerUnits(nest, WlSlot(reason, energy.direction), level, WL_COLUMN_ENERGY, energy.magnitude);
+
+        const uint32_t slot = WlSlot(reason, direction);
+        for (uint32_t i = 0; i < cell.speciesCount; ++i)
+            AddWorldLedgerUnits(nest, slot, level, WL_COLUMN_SPECIES_BASE + cell.species[i], cell.amounts[i]);
     }
 
     ConservedTotals ComputeConservedTotals(const MultiresNest& nest, const BakedReactionTable& table,
