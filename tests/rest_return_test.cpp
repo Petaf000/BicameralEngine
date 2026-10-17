@@ -636,6 +636,7 @@ int main(int argc, char** argv) {
         [&] { return RunPond(liquidTable, pondScene, 1, true, 1000, "池に石・静止の丸め 1 mm/s"); },
         [&] { return RunPond(liquidTable, deepScene, 3, false, 0, "積んだ水(3 層)が落ち着く・丸めなし"); },
         [&] { return RunPond(liquidTable, deepScene, 3, false, 1000, "積んだ水(3 層)が落ち着く・静止の丸め 1 mm/s"); },
+        [&] { return RunPond(liquidTable, deepScene, 3, true, 0, "積んだ水(3 層)に石・丸めなし"); },
     };
     if (longRun)
         jobs.push_back(
@@ -661,6 +662,9 @@ int main(int argc, char** argv) {
 
     // 浅い池(1 層)に石: 揺れは育たずに静まる(T-0757。前は面の運動量が 60 秒育ち続けた)
     EXPECT(PeakMomentum(results[5], results[5].series.size() - 60) * 4 < PeakMomentum(results[5], 0));
+
+    // 水に沈んだ石の真下の柱: 回り続けずに静まる(T-0759。前は面の運動量 9.5 × 10^8 が速さの上限に当たったまま一定)
+    EXPECT(PeakMomentum(results[10], results[10].series.size() - 60) * 2 < PeakMomentum(results[10], 0));
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
