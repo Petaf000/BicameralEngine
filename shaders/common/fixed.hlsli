@@ -258,6 +258,14 @@ FX_FN int64_t FxDivS64(int64_t a, int64_t b) {
     return FxApplySign(FxAbsU64(a) / FxAbsU64(b), (a < 0) != (b < 0));
 }
 
+// a × numerator ÷ denominator(0 方向の切り捨て)。積は 128bit のまま割るので、a × numerator が 64bit を超えてもよい
+// (商は 64bit に収まること。numerator ≤ denominator なら必ず収まる)。64bit の積を作ってから割ると、大きい a で積が溢れて符号が反転する
+// (気体の頭打ち p̃ × T_頭 ÷ T が 25 MPa を超える爆発で負の圧力になり、周りを吸い込んでいた。T-0676)
+FX_FN int64_t FxMulDivS64(int64_t a, uint64_t numerator, uint64_t denominator) {
+    FX_ASSERT(denominator != 0);
+    return FxApplySign(FxDivU128By64(FxMulU64Full(FxAbsU64(a), numerator), denominator).quotient, a < 0);
+}
+
 // --- 逆数の掛け算(同じ除数で何度も割る所の割り算を、掛け算とシフトに置き換える)--------------------------
 // Granlund & Montgomery(1994)の「除数が不変な割り算」の方法。除数 d から逆数(乗数とシフト)を 1 回作っておけば、
 // どの被除数 n でも floor(n / d) を**厳密に**返す(近似ではない。FxDivS64 などと結果がビット単位で同じ)。

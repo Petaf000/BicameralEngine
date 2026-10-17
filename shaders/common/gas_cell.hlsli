@@ -87,7 +87,7 @@ void GasScalePressure(inout GasGpuDerived derived, int64_t referencePressure) {
     const int64_t deviation = derived.pressure - referencePressure;
     int64_t scaled = FxMulShiftS64(deviation, (int64_t)GAS_P.soundScale, 32);
     if (derived.temperature > GAS_P.soundTemperature)
-        scaled = FxDivS64(FxMulShiftS64(scaled, (int64_t)GAS_P.soundTemperature, 0), (int64_t)derived.temperature);
+        scaled = FxMulDivS64(scaled, GAS_P.soundTemperature, derived.temperature);  // 積は 128bit(T-0676)
 
     derived.scaledPressure = scaled;
 }
