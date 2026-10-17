@@ -7,6 +7,7 @@
 //     捨てずに刻みごとに選ぶ。どちらも毎刻み元素とエネルギーがビット単位で保存される
 //   - 成分の数に上限が無いセル(RxWideCell。T-0175): 同じ場面で 9 種目の生成物を待たずに作り、16 種以上のセルも進む(保存はビット単位)。
 //     成分が 8 種以下の間は、インラインのセル(RxCell)と毎刻みビット一致する
+//   - セルの気体の器(T-0622・ADR-0316): 気体を増やす規則は器(2^31 µmol)の残りまでに縮められ、気体のぶんは器を超えない
 //   セルは 1 セルだけのブロックとして待ちの丸め(ADR-0018)で進める(初めの状態 = 刻み 0 に変わった。刻みは 1 から)。
 //   待ちの丸めそのものの試験は reaction_wait_test。今までの丸めと D-424 の下限の試験は T-0130 で消した
 #include <algorithm>
@@ -464,6 +465,63 @@ namespace {
         Expect(reached == CELLS, "16 種のセルが 17 種まで進まない");
     }
 
+    // セルの気体のぶん(RX_SPECIES_GAS の物質の合計。µmol)
+    template <typename Cell>
+    uint64_t GasPart(const BakedReactionTable& table, const Cell& cell) {
+        uint64_t gas = 0;
+        for (uint32_t i = 0; i < cell.speciesCount; ++i)
+            gas += (table.species[cell.species[i]].flags & RX_SPECIES_GAS) != 0 ? cell.amounts[i] : 0;
+
+        return gas;
+    }
+
+    // 気体の器(T-0622・ADR-0316): 気体のぶんが器の少し下のセルで、気体を増やす規則(蒸発・crust → 2 vapor)が器の残りまでに縮められ、
+    // 毎刻み気体のぶんが器(2^31 µmol)未満のまま・元素とエネルギーはビット単位で保存・凝縮相は残る(器が止めた)。
+    // 気体を減らす規則(凝縮)が空けた分だけ毎刻み進み、気体のぶんは器の 1 mol 以内に張り付く。インラインと上限の無いセルは毎刻み一致
+    void TestGasRoom() {
+        constexpr uint32_t CELLS = 64;
+        constexpr uint32_t TICKS = 400;
+        constexpr uint64_t LIMIT = fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
+        const BakedReactionTable table = BakeLimitsTable();
+        const uint32_t brine = table.SpeciesId("brine");
+        bool conserved = true;
+        bool below = true;
+        uint32_t held = 0;
+        uint32_t same = 0;
+        uint64_t lowest = LIMIT;
+        for (uint32_t index = 0; index < CELLS; ++index) {
+            const RxCell initial = test::MakeGasRoomCell(table, index);
+            const std::vector<uint64_t> elements = CountElements(table, initial);
+            RxLoneCell lone = RxMakeLoneCell(initial, 0);
+            WideLone wide{.cell = RxWidenCell(initial), .changedTick = 0, .limits = 0};
+            bool matches = true;
+            for (uint32_t tick = 1; tick <= TICKS; ++tick) {
+                lone = AdvanceLoneReactionCell(table, lone, test::REACTION_TEST_SEED, tick, 1, index);
+                wide = StepWideLone(table, wide, tick, index);
+                conserved = conserved && CountElements(table, lone.cell) == elements &&
+                            lone.cell.energy == initial.energy && RxComputeThermal(table.View(), lone.cell).heat >= 0;
+                below = below && GasPart(table, lone.cell) < LIMIT;
+                matches = matches && RxFitsInline(wide.cell) && RxSameCell(RxNarrowCell(wide.cell), lone.cell) &&
+                          wide.changedTick == lone.changedTick;
+            }
+
+            const uint64_t gas = GasPart(table, lone.cell);
+            lowest = gas < lowest ? gas : lowest;
+            const uint32_t slot = RxFindSlot(lone.cell, brine);
+            held += slot != RX_NO_SLOT && lone.cell.amounts[slot] > 2000000000 && gas > LIMIT - 1000000 ? 1u : 0u;
+            same += matches ? 1u : 0u;
+        }
+
+        Log(Channel::Reaction, Level::Info,
+            "  気体の器: {}/{} が器の 1 mol 以内で止まり凝縮相が残った(最後の気体のぶんの最小 {} µmol・器 {})・"
+            "上限の無いセル {}/{} が毎刻み一致",
+            held, CELLS, lowest, LIMIT, same, CELLS);
+        Expect(conserved, "気体の器の場面で元素かエネルギーが保存されない");
+        Expect(below, "気体のぶんがセルの気体の器(2^31 µmol)に届いた");
+        Expect(held == CELLS, "気体を増やす規則が器の残りまでに縮められていない(器の 1 mol 以内に止まらない)");
+        Expect(same == CELLS, "気体の器の場面で上限の無いセルがインラインのセルと毎刻み一致しない");
+    }
+
     // 試験の表(燃焼)のいろいろなセルを、インラインと上限の無いセルで同じに進める(8 種以下なら毎刻みビット一致)
     void TestWideMatchesInline(const BakedReactionTable& table) {
         constexpr uint32_t CELLS = 512;
@@ -494,6 +552,7 @@ namespace {
         TestLimits();
         TestWideLimits();
         TestWideCrowdedCell();
+        TestGasRoom();
         TestBakeRejectsBrokenRules();
         const BakedReactionTable table = BakeTestTable();
         TestBakedValues(table);

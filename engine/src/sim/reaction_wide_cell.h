@@ -28,6 +28,7 @@ namespace bicameral::reaction {
     struct RxWideUsage {
         std::vector<uint64_t> amounts;
         uint64_t heat = 0;
+        uint64_t gas = 0;
     };
 
     using RxWideWaitStep = RxWaitStepOf<RxWideCell>;
@@ -53,7 +54,7 @@ namespace bicameral::reaction {
     }
 
     inline RxWideUsage RxEmptyUsage(const RxWideCell& cell) {
-        return {.amounts = std::vector<uint64_t>(cell.speciesCount, 0), .heat = 0};
+        return {.amounts = std::vector<uint64_t>(cell.speciesCount, 0), .heat = 0, .gas = 0};
     }
 
     // --- 行き来と比べる ---

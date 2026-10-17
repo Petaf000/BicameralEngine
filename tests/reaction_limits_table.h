@@ -4,6 +4,8 @@
 //   - 込み合う場面(p01〜p08): p_i → p_j(i ≠ j)の 56 本。8 種が揃ったセルでは毎刻み 56 本が進もうとし、RX_MAX_CANDIDATES(16)を超える
 //   - 入りきらない場面(q01〜q09): q01 → q09(9 種目を作る)と、q08 → q07(速い。q08 を使い切ると 1 枠空く)。
 //     q01〜q08 が揃ったセルでは、q08 が無くなるまで q01 → q09 を待たせる(RX_LIMIT_PRODUCTS)
+//   - 気体の器の場面(T-0622・ADR-0316。MakeGasRoomCell): 凝縮相 brine・crust と気体 vapor。brine → vapor(吸熱)・crust → 2 vapor・
+//     vapor → brine(遅い)。気体のぶんが器(2^31 µmol)の少し下から始まり、気体を増やす 2 本が器の残りまでに縮められる
 #pragma once
 
 #include <cstdint>
@@ -19,6 +21,7 @@ namespace bicameral::test {
     constexpr uint32_t LIMITS_CROWD_SPECIES = 8;
     constexpr uint32_t LIMITS_HELD_SPECIES = 9;
     constexpr int32_t LIMITS_TEMPERATURE_MILLIKELVIN = 300000;
+    constexpr int32_t GAS_ROOM_TEMPERATURE_MILLIKELVIN = 600000;
 
     inline std::string LimitsCrowdName(uint32_t i) {
         return std::format("p{:02}", i);
@@ -71,7 +74,34 @@ namespace bicameral::test {
         definition.rules.push_back(LimitsRule("held_make_ninth", LimitsHeldName(1), LimitsHeldName(9), 1, 0));
         definition.rules.push_back(LimitsRule("held_free_slot", LimitsHeldName(8), LimitsHeldName(7), 1, 1));
 
+        // --- 気体の器: 凝縮相 2 つと気体 1 つ(元素 X。crust は X 2 個)---
+        sim::SpeciesDefinition brine = LimitsSpecies("brine", -3000);
+        brine.condensed = true;
+        definition.species.push_back(brine);
+        sim::SpeciesDefinition crust = LimitsSpecies("crust", -5000);
+        crust.composition = {{.element = "X", .count = 2}};
+        crust.condensed = true;
+        definition.species.push_back(crust);
+        definition.species.push_back(LimitsSpecies("vapor", -2000));
+        definition.rules.push_back(LimitsRule("gas_room_evaporate", "brine", "vapor", 1, 0));  // 1 /s・吸熱 1 kJ/mol
+        sim::RuleDefinition crack = LimitsRule("gas_room_crack", "crust", "vapor", 5, -1);  // 0.5 /s・crust → 2 vapor
+        crack.products.front().coefficient = 2;
+        definition.rules.push_back(crack);
+        definition.rules.push_back(LimitsRule("gas_room_condense", "vapor", "brine", 1, -2));  // 0.01 /s(気体を減らす)
+
         return definition;
+    }
+
+    // 気体の器の場面のセル: brine 3000 mol・crust 500 mol・vapor は器(2147.48 mol)より 1〜100 mol 少ない(セルごとに違う)
+    inline reaction::RxCell MakeGasRoomCell(const sim::BakedReactionTable& table, uint32_t index) {
+        const uint64_t below = 1000000 + fx::FxRandomBelow(fx::FxHash64(REACTION_TEST_SEED, index, 7, 3), 99000000);
+        const std::vector<sim::SpeciesAmount> amounts = {
+            {.species = table.SpeciesId("brine"), .amount = 3000000000},
+            {.species = table.SpeciesId("crust"), .amount = 500000000},
+            {.species = table.SpeciesId("vapor"), .amount = fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES - below},
+        };
+
+        return sim::MakeReactionCell(table, amounts, GAS_ROOM_TEMPERATURE_MILLIKELVIN);
     }
 
     // 試験のセル: 偶数は込み合う(p01〜p08)、奇数は入りきらない(q01〜q08)。量はセルごとに 1〜2 mol

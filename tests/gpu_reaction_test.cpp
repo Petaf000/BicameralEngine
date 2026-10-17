@@ -3,7 +3,9 @@
 // 区間ごとに全部のセルを読み戻して CPU と比べる。反応は待ちの丸め(1 セルだけのブロック。区間の初めに変わったとみなす。T-0130)。
 // --limits: 上限に当たる場面(tests/reaction_limits_table.h。9 種目の生成物・進む規則 56 本。T-0022)を 512 セルで同じく比べ、
 // 上限に当たった刻みの数(u1)も CPU と一致し、元素とエネルギーが初めとビット単位で同じことを確かめる。
-// 引数は gpu_test_options.h と --limits。
+// --gas-room: セルの気体の器の場面(T-0622・ADR-0316。reaction_limits_table.h の MakeGasRoomCell。気体を増やす規則を器の残りまでに縮める)を
+// 256 セルで同じく比べ、気体のぶんが毎区間 器(2^31 µmol)未満であることも確かめる。
+// 引数は gpu_test_options.h と --limits・--gas-room。
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -25,6 +27,7 @@ namespace {
 
     constexpr uint32_t CELL_COUNT = 4096;
     constexpr uint32_t LIMITS_CELL_COUNT = 512;  // 込み合うセルは 56 本の規則を毎刻み評価するので CPU が重い
+    constexpr uint32_t GAS_ROOM_CELL_COUNT = 256;
     constexpr uint32_t LIMIT_COUNTER_COUNT = 2;  // reaction_cells.hlsl の u1
     constexpr uint32_t THREADS_PER_GROUP = 64;   // reaction_cells.hlsl の numthreads
     constexpr uint32_t TICKS_PER_SEGMENT = 50;
@@ -192,14 +195,33 @@ namespace {
         return mismatchCount;
     }
 
+    // どのセルも気体のぶん(RX_SPECIES_GAS の物質の合計)が器(2^31 µmol)未満か(T-0622)
+    bool GasPartsBelowLimit(const sim::BakedReactionTable& table, std::span<const RxCell> cells) {
+        for (const RxCell& cell : cells) {
+            uint64_t gas = 0;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                gas += (table.species[cell.species[i]].flags & RX_SPECIES_GAS) != 0 ? cell.amounts[i] : 0;
+
+            if (gas >= fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES)
+                return false;
+        }
+
+        return true;
+    }
+
     std::expected<uint64_t, std::string> RunAndCompare(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType,
                                                        const sim::BakedReactionTable& table, uint32_t cellCount,
-                                                       bool limits) {
+                                                       bool limits, bool gasRoom) {
         CpuState cpu;
         std::vector<RxCell>& cpuCells = cpu.cells;
         cpuCells.resize(cellCount);
         for (uint32_t index = 0; index < cellCount; ++index) {
-            cpuCells[index] = limits ? test::MakeLimitsCell(table, index) : test::MakeVariedReactionCell(table, index);
+            if (gasRoom)
+                cpuCells[index] = test::MakeGasRoomCell(table, index);
+            else
+                cpuCells[index] = limits ? test::MakeLimitsCell(table, index)
+                                         : test::MakeVariedReactionCell(table, index);
+
             cpu.elements.push_back(sim::CountElements(table, cpuCells[index]));
             cpu.energies.push_back(cpuCells[index].energy);
         }
@@ -230,6 +252,9 @@ namespace {
                 return std::unexpected(std::format("区間 {}(刻み {}〜)で {} セルが食い違う", segment,
                                                    SegmentTickBegin(segment), mismatches));
 
+            if (gasRoom && !GasPartsBelowLimit(table, cpu.cells))
+                return std::unexpected(std::format("区間 {}: 気体のぶんがセルの気体の器に届いた", segment));
+
             if (gpuResult->limitTicks != cpu.limitTicks)
                 return std::unexpected(std::format("区間 {}: 上限に当たった刻みの数が食い違う(cpu {}・{} / gpu {}・{})",
                                                    segment, cpu.limitTicks[0], cpu.limitTicks[1],
@@ -251,32 +276,37 @@ namespace {
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool limits = false;
+        bool gasRoom = false;
         for (char* argument : arguments) {
             if (std::string_view(argument) == "--limits")
                 limits = true;
+            else if (std::string_view(argument) == "--gas-room")
+                gasRoom = true;
             else
                 rest.push_back(argument);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
-            Log(Channel::Gpu, Level::Error, "使い方: gpu_reaction_test [--warp] [--queue direct|compute] [--limits]");
+            Log(Channel::Gpu, Level::Error,
+                "使い方: gpu_reaction_test [--warp] [--queue direct|compute] [--limits | --gas-room]");
             return 2;
         }
 
         Log(Channel::Gpu, Level::Info, "gpu_reaction_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
         // WARP では GPU-based validation を切る(gpu_test_options.h の TestDeviceOptions)
-        const auto table = sim::BakeReactionTable(limits ? test::MakeLimitsTestTable()
-                                                         : sim::MakeCombustionTestTable());
+        const auto table = sim::BakeReactionTable(limits || gasRoom ? test::MakeLimitsTestTable()
+                                                                    : sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_reaction_test: FAILED(表かデバイスを作れない)");
             return 1;
         }
 
-        const uint32_t cellCount = limits ? LIMITS_CELL_COUNT : CELL_COUNT;
-        const auto digest = RunAndCompare(device->Get(), options->queueType, *table, cellCount, limits);
+        uint32_t cellCount = limits ? LIMITS_CELL_COUNT : CELL_COUNT;
+        cellCount = gasRoom ? GAS_ROOM_CELL_COUNT : cellCount;
+        const auto digest = RunAndCompare(device->Get(), options->queueType, *table, cellCount, limits, gasRoom);
         if (!digest) {
             Log(Channel::Gpu, Level::Error, "gpu_reaction_test: FAILED ({})", digest.error());
             return 1;

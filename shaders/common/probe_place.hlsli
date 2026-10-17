@@ -235,6 +235,19 @@ FX_FN uint64_t ProbeCellTotalAmount(RxCell cell) {
     return total;
 }
 
+// セルの気体のぶん(RX_SPECIES_GAS の物質の合計。気体の器 CELL_GAS_AMOUNT_LIMIT で止める。決まった数の回しで読む。T-0622)
+template <typename Table>
+FX_FN uint64_t ProbeCellGasAmount(Table table, RxCell cell) {
+    uint64_t gas = 0;
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        const bool counted = i < cell.speciesCount && (table.Species(cell.species[i]).flags & RX_SPECIES_GAS) != 0;
+        const uint64_t amount = counted ? cell.amounts[i] : (uint64_t)0;
+        gas = amount < CELL_GAS_AMOUNT_LIMIT_MICROMOLES - gas ? gas + amount : CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
+    }
+
+    return gas;
+}
+
 // コマンドの材料だけのセル(成分は 3 つまでなので必ず入る)
 FX_FN RxCell ProbePlaceMaterial(ProbePlace place) {
     RxCell material = RxMakeEmptyCell(0);
@@ -253,6 +266,12 @@ FX_FN ProbePlaced ProbePlaceCell(Table table, RxCell cell, ProbePlace place) {
     ProbePlaced result;
     result.cell = cell;
     result.applied = 0;
+
+    // --- 気体のぶん: 気体を足して、置いた後のセルの気体のぶんが気体の器(2^31 µmol 未満。ADR-0260)に入らないセルは飛ばす(T-0622)---
+    const uint64_t materialGas = ProbeCellGasAmount(table, material);
+    const uint64_t keptGas = place.mode == PROBE_PLACE_MODE_REPLACE ? (uint64_t)0 : ProbeCellGasAmount(table, cell);
+    if (materialGas != 0 && materialGas >= CELL_GAS_AMOUNT_LIMIT_MICROMOLES - keptGas)
+        return result;
 
     // --- 置き換え ---
     if (place.mode == PROBE_PLACE_MODE_REPLACE) {

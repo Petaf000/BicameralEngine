@@ -182,6 +182,7 @@ namespace bicameral::sim {
 
                 baked.standardEntropies.push_back(entry.standardEntropy);
                 baked.speciesCondensed.push_back(entry.condensed || entry.liquid ? 1 : 0);
+                baked.species.back().flags = entry.condensed || entry.liquid ? 0u : RX_SPECIES_GAS;  // T-0622
                 baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
 
                 // 液体(T-0609・ADR-0266): 密度が要る。モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数
@@ -346,6 +347,18 @@ namespace bicameral::sim {
             return {};
         }
 
+        // 進行度 1 µmol で増える気体のぶん(µmol。減るか同じなら 0)。取り合いでセルの気体の器の残りまでに縮める(T-0622・ADR-0316)
+        uint32_t GasGrowth(const RxRule& rule, const BakedReactionTable& baked) {
+            int64_t change = 0;
+            for (uint32_t i = 0; i < rule.reactantCount; ++i)
+                change -= baked.speciesCondensed[rule.reactants[i]] == 0 ? int64_t{rule.reactantCoefficients[i]} : 0;
+
+            for (uint32_t i = 0; i < rule.productCount; ++i)
+                change += baked.speciesCondensed[rule.products[i]] == 0 ? int64_t{rule.productCoefficients[i]} : 0;
+
+            return change > 0 ? static_cast<uint32_t>(change) : 0u;
+        }
+
         std::expected<RxRule, std::string> BakeRule(const RuleDefinition& definition, const NameIndex& species,
                                                     const BakedReactionTable& baked) {
             RxRule rule{};
@@ -372,6 +385,7 @@ namespace bicameral::sim {
                 return std::unexpected(balance.error());
 
             rule.reactionEnthalpy = ReactionEnthalpy(rule, baked);
+            rule.gasGrowth = GasGrowth(rule, baked);
             rule.key = HashName(definition.name);
             if (auto balance = BakeBalance(definition, baked, rule); !balance)
                 return std::unexpected(balance.error());

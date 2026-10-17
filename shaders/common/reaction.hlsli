@@ -65,6 +65,9 @@ FX_CONST uint32_t RX_LIMIT_CANDIDATES = 2u;
 // 温度が下がれば速さも指数的に落ちるので、刻みごとに少しずつ冷えて自然に止まる。R-REACT-1(細分)で見直す
 FX_CONST uint32_t RX_ENDOTHERMIC_HEAT_SHIFT = 3;
 
+// 物質の印(RxSpecies::flags)。RX_SPECIES_GAS = 気体のぶんに数える物質(condensed でも liquid でもない。気体の区画が流す物質。ADR-0256)
+FX_CONST uint32_t RX_SPECIES_GAS = 1u;
+
 // 望む進行度の上限。望む量は保存量ではないので飽和させてよく、この後で反応物の量に縮める
 FX_CONST uint64_t RX_EXTENT_SATURATION = FX_U64(0x40000000u, 0u);
 
@@ -81,6 +84,8 @@ struct RxSpecies {
     uint32_t ruleBegin;     // 索引(この物質を「ID が最小の反応物」に持つ規則)の始まり
     uint32_t ruleCount;
     uint32_t conductivity;  // 熱伝導率(mW/(m·K))。セルの値は物質量で重み付けた平均(heat_conduction.hlsli。T-0089)
+    uint32_t flags;         // RX_SPECIES_*(気体のぶんに数えるか。T-0622)
+    uint32_t padding;
 };
 
 // 反応の規則
@@ -108,6 +113,11 @@ struct RxRule {
     uint32_t balanceKelvin;       // 釣り合いの温度 T_eq(mK)。0 = 釣り合いの規則ではない
     uint32_t
         balanceGasMask;  // 釣り合いの式に入る項(ビット i = reactants[i]、ビット RX_BALANCE_PRODUCT_SHIFT + i = products[i])
+
+    // --- セルの気体の器(T-0622・ADR-0316)---
+    uint32_t
+        gasGrowth;  // 進行度 1 µmol で増える気体のぶん(µmol。Σ 気体の生成物の係数 − Σ 気体の反応物の係数。減るか同じなら 0)
+    uint32_t padding;
 };
 
 // セル(レベル 0)。成分は物質 ID の昇順、物質量が 0 になったものは消す(同じ中身なら同じ並び = 同じハッシュ)
@@ -773,6 +783,7 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, Cell cell, uint32_t 
 struct RxUsage {
     uint64_t amounts[RX_MAX_CELL_SPECIES];
     uint64_t heat;
+    uint64_t gas;  // 気体を増やす規則が増やす気体のぶん(µmol。減らす規則の分は差し引かない)
 };
 
 // 0 の使う量(セルの形の道具。RxCell はインラインの数だけ)
@@ -785,6 +796,7 @@ FX_FN RxUsage RxEmptyUsage(RxCell cell) {
         usage.amounts[i] = 0;
 
     usage.heat = 0;
+    usage.gas = 0;
 
     return usage;
 }
@@ -793,9 +805,10 @@ FX_FN RxUsage RxEmptyUsage(RxCell cell) {
 template <typename Table, typename Cell, typename Usage>
 FX_FN Usage RxSumUsage(Table table, Cell cell, RxCandidates candidates, Usage usage) {
     for (uint32_t c = 0; c < candidates.count; ++c) {
-        // 反応物は RateRule から、反応熱だけを Rule から読む(規則の構造体を丸ごと動的な添字で読まない。T-0397)
+        // 反応物は RateRule から、反応熱と気体の増え方だけを Rule から読む(規則の構造体を丸ごと動的な添字で読まない。T-0397)
         const RxRule rule = table.RateRule(candidates.rules[c]);
         const int64_t reactionEnthalpy = table.Rule(candidates.rules[c]).reactionEnthalpy;
+        const uint32_t gasGrowth = table.Rule(candidates.rules[c]).gasGrowth;
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
             const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
             const uint64_t amount = candidates.extents[c] * (uint64_t)rule.reactantCoefficients[i];
@@ -807,6 +820,12 @@ FX_FN Usage RxSumUsage(Table table, Cell cell, RxCandidates candidates, Usage us
             const FxU128 heat = FxMulU64Full(candidates.extents[c], (uint64_t)reactionEnthalpy);
             FX_ASSERT(heat.hi == 0 && usage.heat + heat.lo >= usage.heat);
             usage.heat += heat.lo;
+        }
+
+        if (gasGrowth > 0) {
+            const FxU128 gas = FxMulU64Full(candidates.extents[c], (uint64_t)gasGrowth);
+            FX_ASSERT(gas.hi == 0 && usage.gas + gas.lo >= usage.gas);
+            usage.gas += gas.lo;
         }
     }
 
@@ -841,17 +860,38 @@ FX_FN RxShrunk RxShrink(uint64_t extent, uint64_t available, uint64_t demand, ui
     return shrunk;
 }
 
-// 規則が、ある量を超えて使われている資源(物質か、吸熱なら熱)を使うか。反応物は rule(RateRule)、反応熱は reactionEnthalpy
-// (Rule)
+// 物質でない資源の、この刻みに使える量: 吸熱の規則が使える熱(µJ)と、気体を増やす規則が使えるセルの気体の器の残り(µmol)
+struct RxAvailable {
+    uint64_t heat;
+    uint64_t gas;
+};
+
+// セルの気体の器の残り(µmol)= 器(CELL_GAS_AMOUNT_LIMIT。気体の式の Q32 の器。units.hlsli・ADR-0260)− 1 − 今の気体のぶん。
+// 気体のぶんが器に届いていれば 0(T-0622・ADR-0316)
+template <typename Table, typename Cell>
+FX_FN uint64_t RxGasRoom(Table table, Cell cell) {
+    uint64_t gas = 0;
+    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+        const bool counted = (table.Species(RX_SPECIES_AT(cell, i)).flags & RX_SPECIES_GAS) != 0;
+        const uint64_t amount = counted ? RX_AMOUNT_AT(cell, i) : (uint64_t)0;
+        gas = amount < CELL_GAS_AMOUNT_LIMIT_MICROMOLES - gas ? gas + amount : CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
+    }
+
+    return gas < CELL_GAS_AMOUNT_LIMIT_MICROMOLES ? CELL_GAS_AMOUNT_LIMIT_MICROMOLES - 1 - gas : (uint64_t)0;
+}
+
+// 規則が、ある量を超えて使われている資源(物質か、吸熱なら熱か、気体を増やすなら気体の器)を使うか。
+// 反応物は rule(RateRule)、反応熱は reactionEnthalpy・気体の増え方は gasGrowth(Rule)
 template <typename Cell, typename Usage>
-FX_FN bool RxOverdraws(RxRule rule, int64_t reactionEnthalpy, Cell cell, Usage used, uint64_t heatAvailable) {
+FX_FN bool RxOverdraws(RxRule rule, int64_t reactionEnthalpy, uint32_t gasGrowth, Cell cell, Usage used,
+                       RxAvailable available) {
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
         const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
         if (RX_USAGE_AT(used, slot) > RX_AMOUNT_AT(cell, slot))
             return true;
     }
 
-    return reactionEnthalpy > 0 && used.heat > heatAvailable;
+    return (reactionEnthalpy > 0 && used.heat > available.heat) || (gasGrowth > 0 && used.gas > available.gas);
 }
 
 // 丸め上げた規則(roundedUp のビット)のせいで足りなくなった資源があれば、その資源を使う丸め上げた規則のうち
@@ -860,14 +900,15 @@ FX_FN bool RxOverdraws(RxRule rule, int64_t reactionEnthalpy, Cell cell, Usage u
 // used = resolved の使う量(RxSumUsage。型をセルの形に合わせるため引数で受け取る)
 template <typename Table, typename Cell, typename Usage>
 FX_FN RxCandidates RxRevokeRoundUps(Table table, Cell cell, RxCandidates resolved, uint32_t roundedUp,
-                                    uint64_t heatAvailable, Usage used) {
+                                    RxAvailable available, Usage used) {
     for (uint32_t step = 0; step < RX_MAX_CANDIDATES && roundedUp != 0; ++step) {
         uint32_t pick = RX_NO_SLOT;
         uint64_t pickKey = 0;
         for (uint32_t c = 0; c < resolved.count; ++c) {
             const RxRule rule = table.RateRule(resolved.rules[c]);
-            if (((roundedUp >> c) & 1) == 0 ||
-                !RxOverdraws(rule, table.Rule(resolved.rules[c]).reactionEnthalpy, cell, used, heatAvailable))
+            const int64_t reactionEnthalpy = table.Rule(resolved.rules[c]).reactionEnthalpy;
+            const uint32_t gasGrowth = table.Rule(resolved.rules[c]).gasGrowth;
+            if (((roundedUp >> c) & 1) == 0 || !RxOverdraws(rule, reactionEnthalpy, gasGrowth, cell, used, available))
                 continue;
 
             const bool larger = pick == RX_NO_SLOT || resolved.extents[c] > resolved.extents[pick] ||
@@ -891,14 +932,18 @@ FX_FN RxCandidates RxRevokeRoundUps(Table table, Cell cell, RxCandidates resolve
 }
 
 // 物質ごとに「要求の合計」と「ある量」を比べ、足りない資源を使う規則を min(ある量 ÷ 要求) の比で縮める。
-// 吸熱の規則は熱(の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)も資源として同じく縮める(熱が負にならない)。どの規則も元の進行度に同じ比を掛けるので、並び順は結果に影響しない。
+// 吸熱の規則は熱(の 1/8。RX_ENDOTHERMIC_HEAT_SHIFT)も資源として同じく縮める(熱が負にならない)。
+// 気体を増やす規則はセルの気体の器の残り(RxGasRoom)も資源として同じく縮める(気体のぶんが気体の式の器を超えない。T-0622・ADR-0316)。
+// どの規則も元の進行度に同じ比を掛けるので、並び順は結果に影響しない。
 // 縮めた値は確率的に丸める(規則ごとに 1 つの乱数を、足りない資源のどれにも使う。丸めは単調なので、資源ごとに丸めた最小 = 比の最小を丸めた値)。
 // 丸め上げで足りなくなった資源があれば RxRevokeRoundUps が戻すので、縮めた後の消費の合計は必ずある量以下
 // demand = 候補の使う量の合計(RxSumUsage。型をセルの形に合わせるため引数で受け取る)
 template <typename Table, typename Cell, typename Usage>
 FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, RxCandidates candidates,
                                     uint64_t randomSeed, Usage demand) {
-    const uint64_t heatAvailable = thermal.heat > 0 ? (uint64_t)thermal.heat >> RX_ENDOTHERMIC_HEAT_SHIFT : (uint64_t)0;
+    RxAvailable available;
+    available.heat = thermal.heat > 0 ? (uint64_t)thermal.heat >> RX_ENDOTHERMIC_HEAT_SHIFT : (uint64_t)0;
+    available.gas = demand.gas > 0 ? RxGasRoom(table, cell) : (uint64_t)0;  // 気体を増やす候補が無ければ数えない
 
     // --- 縮める(元の進行度から、足りない資源ごとの比の最小)---
     RxCandidates resolved = candidates;
@@ -906,6 +951,7 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
     for (uint32_t c = 0; c < candidates.count; ++c) {
         const RxRule rule = table.RateRule(candidates.rules[c]);  // 反応物と鍵
         const int64_t reactionEnthalpy = table.Rule(candidates.rules[c]).reactionEnthalpy;
+        const uint32_t gasGrowth = table.Rule(candidates.rules[c]).gasGrowth;
         const uint64_t extent = candidates.extents[c];
         const uint32_t random = RxShrinkRandom(randomSeed, rule);
         uint64_t result = extent;
@@ -920,8 +966,14 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
             truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
         }
 
-        if (reactionEnthalpy > 0 && demand.heat > heatAvailable) {
-            const RxShrunk shrunk = RxShrink(extent, heatAvailable, demand.heat, random);
+        if (reactionEnthalpy > 0 && demand.heat > available.heat) {
+            const RxShrunk shrunk = RxShrink(extent, available.heat, demand.heat, random);
+            result = shrunk.rounded < result ? shrunk.rounded : result;
+            truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
+        }
+
+        if (gasGrowth > 0 && demand.gas > available.gas) {
+            const RxShrunk shrunk = RxShrink(extent, available.gas, demand.gas, random);
             result = shrunk.rounded < result ? shrunk.rounded : result;
             truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
         }
@@ -933,7 +985,7 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
     if (roundedUp == 0)
         return resolved;
 
-    return RxRevokeRoundUps(table, cell, resolved, roundedUp, heatAvailable,
+    return RxRevokeRoundUps(table, cell, resolved, roundedUp, available,
                             RxSumUsage(table, cell, resolved, RxEmptyUsage(cell)));
 }
 

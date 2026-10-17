@@ -14,6 +14,8 @@
 //   6. 場所を取らない石(`--stone-without-density`。ctest の probe_phase_porous_stone。T-0654): 石の密度を書かない(場所を取らない固体)と、
 //      水たまり・池・溶けた水が熱い石のセルへ染み込んで湯気になる。場面の結果(湯気の高さ・池・流れ落ち)は見ず、4 の保存だけを確かめる
 //   5. 記録(試験ではなく表示): 静かな池の計算したブロックの数(釣り合ったセルは眠れる。ADR-0290)
+//   7. 溶岩の上の水(T-0622・ADR-0316): 1500 K の石の上の 1 セルいっぱいの 1200 K の水が湯気になっても、どのセルの気体のぶんも
+//      気体の器(2^31 µmol)未満で、4 の保存が崩れない(湯気を増やす規則は器の残りまでに縮められる)
 // 表は試験の表(combustion_test。real_matter・real_reactions を写して熱伝導率に試験の倍率)+ 地球の環境 + 基準の大気(N2・O2)+ 石。
 #include <algorithm>
 #include <array>
@@ -495,6 +497,68 @@ namespace {
         EXPECT_OUTCOME(pondAfter > pondBefore);  // 池の水が増えた(湯気が冷たい池で凝縮した)
     }
 
+    // --- 7: 溶岩の上の水(T-0622): 熱い石の上の 1 セルいっぱいの熱い水が湯気になっても、セルの気体のぶんは気体の器を超えない ---
+    //   区画 5 × 5 × 3。y 0 は 1500 K の石(溶岩の代わり)。y 1: x 2 に 1 セルいっぱいの水(6917 mol・1200 K)・x 1 と x 3 は石の堤。ほかは空気。
+    //   見本の釣り合いの湯気は 1200 K で約 2.9 万 mol / セル(器 2147 mol の 14 倍)。器が無ければ数刻みで超える(気体の式の Q32 が溢れる)
+    constexpr Region LAVA_REGION = {.minCell = {26, 30, 30}, .sizeCells = {5, 5, 3}};
+    constexpr uint64_t LAVA_TICKS = 600;         // 10 秒
+    constexpr uint64_t FULL_WATER = 6917000000;  // µmol(0.5 m 角の水。T-0558)
+
+    CellSpec LavaCell(uint32_t x, uint32_t y) {
+        if (y == 0)
+            return {.temperature = 1500000, .stone = STONE};
+
+        if (y == 1 && (x == 1 || x == 3))
+            return {.temperature = 1500000, .stone = STONE};
+
+        if (y == 1 && x == 2)
+            return {.temperature = 1200000, .water = FULL_WATER};
+
+        return {};
+    }
+
+    // 区画のセルの気体のぶん(凝縮相でない物質の合計)の最大(µmol)
+    uint64_t MaxGasPart(const BakedReactionTable& table, const ProbeReference& reference, uint64_t tick) {
+        uint64_t most = 0;
+        for (const reaction::RxCell& cell : reference.State(tick)) {
+            uint64_t gas = 0;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                gas += table.speciesCondensed[cell.species[i]] == 0 ? cell.amounts[i] : 0;
+
+            most = std::max(most, gas);
+        }
+
+        return most;
+    }
+
+    void TestLavaWater(const BakedReactionTable& table) {
+        std::printf("溶岩の上の水(1 セルいっぱいの 1200 K の水。気体の器 %.0f mol)\n",
+                    (double)fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES * 1e-6);
+        const Region& region = LAVA_REGION;
+        ProbeReference reference = MakeReference(table, region, LavaCell);
+
+        uint64_t gasMax = 0;
+        uint64_t gasMaxTick = 0;
+        Run(table, reference, LAVA_TICKS, [&](uint64_t tick) {
+            const uint64_t water = AmountIn(table, reference, tick, region, "water", {0, 5}, {0, 5});
+            const uint64_t vapor = AmountIn(table, reference, tick, region, "water_vapor", {0, 5}, {0, 5});
+            const uint64_t cellVapor = AmountIn(table, reference, tick, region, "water_vapor", {2, 3}, {1, 2});
+            const uint64_t gas = MaxGasPart(table, reference, tick);
+            if (gas > gasMax) {
+                gasMax = gas;
+                gasMaxTick = tick;
+            }
+
+            if (tick % (TICKS_PER_SECOND * 2) == 0)
+                std::printf("  %2llu 秒: 水 %.1f mol・湯気 %.1f mol(水のセル %.1f)・セルの気体のぶんの最大 %.1f mol\n",
+                            (unsigned long long)(tick / TICKS_PER_SECOND), (double)water * 1e-6, (double)vapor * 1e-6,
+                            (double)cellVapor * 1e-6, (double)gas * 1e-6);
+        });
+
+        std::printf("  気体のぶんの最大 %.3f mol(%llu 刻み)\n", (double)gasMax * 1e-6, (unsigned long long)gasMaxTick);
+        EXPECT(gasMax < fx::CELL_GAS_AMOUNT_LIMIT_MICROMOLES);
+    }
+
     // --- 3: 暖かい台の上の氷が溶けて流れ落ちる ---
     //   区画 12 × 6 × 3。y 0 は石(300 K)。x 0〜3 は台(石 y 1〜2・500 K)で、その上 y 3 に氷(400 mol/セル・270 K)。x 4〜11 は低い床
     constexpr Region ICE_REGION = {.minCell = {26, 10, 30}, .sizeCells = {12, 6, 3}};
@@ -601,6 +665,7 @@ int main(int argc, char** argv) {
     TestSteam(table, false);
     TestSteam(table, true);
     TestIce(table);
+    TestLavaWater(table);
     TestDeterminism(table);
     ReportQuietPond(table);
 
