@@ -546,6 +546,15 @@ namespace {
         return activity;
     }
 
+    // 刻み first から 60 刻みの間の、面の運動量の最大(液体)
+    uint64_t PeakMomentum(const RunResult& result, size_t first) {
+        uint64_t peak = 0;
+        for (size_t tick = first; tick < first + 60 && tick < result.series.size(); ++tick)
+            peak = std::max(peak, result.series[tick].maxSpeed);
+
+        return peak;
+    }
+
     // 池(深さ depth)に石を落として(dropStone)quietTicks 刻み流す(液体だけ)
     RunResult RunPond(const BakedReactionTable& table, const Scene& scene, uint32_t depth, bool dropStone,
                       uint32_t restMicrometersPerSecond, std::string name) {
@@ -649,6 +658,9 @@ int main(int argc, char** argv) {
 
     if (!longRun)
         EXPECT(results[3].hash == results.back().hash);  // 静止の丸めも決定的
+
+    // 浅い池(1 層)に石: 揺れは育たずに静まる(T-0757。前は面の運動量が 60 秒育ち続けた)
+    EXPECT(PeakMomentum(results[5], results[5].series.size() - 60) * 4 < PeakMomentum(results[5], 0));
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
