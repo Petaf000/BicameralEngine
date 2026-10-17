@@ -423,7 +423,8 @@ namespace bicameral::sim {
         }
 
         // --- 安全網: 近似が収束していない時に、温度が刻みの初めの範囲から出るセルの面を陽解法の流れに戻す ---
-        // 範囲 = 全部のセルの T0 の最小〜最大(上は 1 mK の切り上げ)。新しい最低・最高の温度(負のエネルギー・行き過ぎ)は「嘘」なので止める。
+        // 範囲 = 全部のセルの T0 の最小〜最大(mK × 2^16 のまま。セルの温度は T0 + 変化 ÷ C と見る。mK に丸めると範囲が刻みごとに
+        // 1〜2 mK ずつ外へずれた。T-0653)。新しい最低・最高の温度(負のエネルギー・行き過ぎ)は「嘘」なので止める。
         // 近所の範囲(自分と隣)にすると、細かいレベルでは D/C ≈ 4^Δk 倍に増幅された反復の残差(0.1 mK 程度)で外に出て、
         // 安全網が連鎖して全部が陽解法(= 遅い)に戻ってしまった(T-0110 の計測)。局所の小さな揺れは精度の問題として物差しで見る。外に出たセルは、
         // 全部の面を陽解法の流れ(係数を熱容量の上限で頭打ち。T-0019 と同じ。1 面 ≤ C/8 なので 6 面でも凸結合 → 範囲の中)にする。
@@ -456,16 +457,15 @@ namespace bicameral::sim {
         // T* は範囲に入れない(多重格子の直しは単調でなく、T* が T0 の範囲の外に出ることがある)
         Bounds MakeBounds(const ImplicitGrid& grid, const std::vector<int64_t>& start, int64_t slackMillikelvin) {
             const auto [lowestStart, highestStart] = std::ranges::minmax(start);
-            const int64_t lowest = lowestStart >> TEMPERATURE_SHIFT;
-            const int64_t highest = (highestStart >> TEMPERATURE_SHIFT) + 1;
             Bounds bounds;
             bounds.lowest.resize(grid.cells.size());
             bounds.highest.resize(grid.cells.size());
             bounds.slack.resize(grid.cells.size());
             for (size_t i = 0; i < grid.cells.size(); ++i) {
                 const uint64_t capacity = grid.cells[i].heatCapacity;
-                bounds.lowest[i] = ImplicitEnergyFor(capacity, lowest);
-                bounds.highest[i] = ImplicitEnergyFor(capacity, highest);
+                const int64_t startEnergy = grid.cells[i].energy;
+                bounds.lowest[i] = ImLowestEnergy(startEnergy, start[i], lowestStart, capacity);
+                bounds.highest[i] = ImHighestEnergy(startEnergy, start[i], highestStart, capacity);
                 bounds.slack[i] = ImplicitEnergyFor(capacity, slackMillikelvin);
             }
 

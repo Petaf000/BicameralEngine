@@ -93,7 +93,9 @@ namespace bicameral::sim {
         uint32_t coarsestSweeps = 4;  // Multigrid: 最も粗い段の掃き出し
         int64_t correctionScale =
             256;  // Multigrid: 親の直しを子へ足す倍率(Q8。区分的に一定の補間は直しが足りないので 1 より大きくする)
-        uint32_t limitSlackMillikelvin = 1;  // 安全網: 刻みの初めの温度の範囲の外へ、これだけは出てよい
+        // 安全網: 刻みの初めの温度の範囲の外へ、これだけは出てよい。0 でないと範囲の端のセルが刻みごとにこれだけ外へ動けて、
+        // 範囲が刻みをまたいで広がる(熱が冷たい方から熱い方へ流れたのと同じ。坂の原理 P2。T-0653 で 1 → 0)。比べる試験用
+        uint32_t limitSlackMillikelvin = 0;
     };
 
     // 1 刻みの費用

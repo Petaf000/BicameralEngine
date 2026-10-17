@@ -11,6 +11,8 @@
 //      運動エネルギーのぶん − 気体の帳簿 + 液体の位置と運動のエネルギー − 液体の帳簿。潜熱は化学のエネルギーに入っている)が
 //      ビット単位で一定で、物質の無いセルはエネルギーを持たない(T-0646・ADR-0286)。1 秒ごとに元素の数 − 気体の帳簿も一定。
 //      決定性: 2 回の実行でセル・気体・液体のハッシュが一致
+//   6. 場所を取らない石(`--stone-without-density`。ctest の probe_phase_porous_stone。T-0654): 石の密度を書かない(場所を取らない固体)と、
+//      水たまり・池・溶けた水が熱い石のセルへ染み込んで湯気になる。場面の結果(湯気の高さ・池・流れ落ち)は見ず、4 の保存だけを確かめる
 //   5. 記録(試験ではなく表示): 水と湯気が釣り合ったセルは眠らない(蒸発と凝縮が毎刻み行き来する。ADR-0272 の注)
 // 表は試験の表(combustion_test。real_matter・real_reactions を写して熱伝導率に試験の倍率)+ 地球の環境 + 基準の大気(N2・O2)+ 石。
 #include <algorithm>
@@ -36,6 +38,7 @@ using namespace bicameral::sim;
 namespace {
 
     int failureCount = 0;
+    bool outcomeChecks = true;  // 場面の結果も確かめる(場所を取らない石の時は保存だけ。T-0654)
 
     void Expect(bool condition, const char* text, int line) {
         if (condition)
@@ -46,6 +49,7 @@ namespace {
     }
 
 #define EXPECT(condition) Expect((condition), #condition, __LINE__)
+#define EXPECT_OUTCOME(condition) Expect(!outcomeChecks || (condition), #condition, __LINE__)
 
     constexpr int32_t AIR_TEMPERATURE = 300000;  // mK
     // µmol(0.125 m³ の岩 ≒ 337 kg を C の 12 g/mol で数えたもの。密度 2000 でセルを満たす)
@@ -53,7 +57,8 @@ namespace {
     constexpr uint64_t TICKS_PER_SECOND = 60;
 
     // writtenHeatCapacity: 気体の比熱を書いた値のまま定積として読む(T-0597 より前と比べる測り。`--written-heat-capacity`)
-    BakedReactionTable MakeTable(bool writtenHeatCapacity) {
+    // stoneWithoutDensity: 石の密度を書かない(場所を取らない固体の中へ水が入る。T-0654 の再現。`--stone-without-density`)
+    BakedReactionTable MakeTable(bool writtenHeatCapacity, bool stoneWithoutDensity) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.gasHeatCapacityAtConstantPressure = !writtenHeatCapacity;
         definition.environment = StandardWorldPhysics();
@@ -72,6 +77,8 @@ namespace {
              .thermalConductivity = 2000000,
              .condensed = true,
              .density = 2000});  // セルを満たす石は液体と気体の壁(T-0593・ADR-0268。密度を書かない固体は場所を取らない)
+        if (stoneWithoutDensity)
+            definition.species.back().density = 0;
 
         auto baked = BakeReactionTable(definition);
         if (!baked) {
@@ -420,10 +427,10 @@ namespace {
         const uint64_t pondAfter = AmountIn(table, reference, STEAM_TICKS, region, "water", {8, 12}, {0, 8});
         // 水たまりの 3 割より多くが湯気になった(T-0593 のマージで石が気体を塞ぎ、熱い石の中を通る空気が水たまりを温めなくなった。
         // 20 秒で 3600 → 2428 mol。前は 1865 mol)
-        EXPECT(puddleAfter < puddleBefore / 10 * 7);
-        EXPECT(vaporHighMax > 0);        // 湯気が y 4(2 m)より上へ
-        EXPECT(centroidMax > 2500);      // 湯気の重心が水たまり(y 1)より 1.5 セル以上高い
-        EXPECT(pondAfter > pondBefore);  // 池の水が増えた(湯気が冷たい池で凝縮した)
+        EXPECT_OUTCOME(puddleAfter < puddleBefore / 10 * 7);
+        EXPECT_OUTCOME(vaporHighMax > 0);        // 湯気が y 4(2 m)より上へ
+        EXPECT_OUTCOME(centroidMax > 2500);      // 湯気の重心が水たまり(y 1)より 1.5 セル以上高い
+        EXPECT_OUTCOME(pondAfter > pondBefore);  // 池の水が増えた(湯気が冷たい池で凝縮した)
     }
 
     // --- 3: 暖かい台の上の氷が溶けて流れ落ちる ---
@@ -465,8 +472,8 @@ namespace {
 
         const uint64_t iceAfter = AmountIn(table, reference, ICE_TICKS, region, "ice", {0, 12}, {0, 6});
         const uint64_t floorAfter = AmountIn(table, reference, ICE_TICKS, region, "water", {4, 12}, {0, 6});
-        EXPECT(iceAfter < iceBefore / 10);   // 9 割より多く溶けた
-        EXPECT(floorAfter > iceBefore / 2);  // 溶けた水の半分より多くが台から流れ落ちた
+        EXPECT_OUTCOME(iceAfter < iceBefore / 10);   // 9 割より多く溶けた
+        EXPECT_OUTCOME(floorAfter > iceBefore / 2);  // 溶けた水の半分より多くが台から流れ落ちた
     }
 
     // --- 4: 決定性 ---
@@ -509,8 +516,25 @@ namespace {
 
 int main(int argc, char** argv) {
     const std::span<char*> args(argv, static_cast<size_t>(argc));
-    const bool writtenHeatCapacity = args.size() >= 2 && std::string_view(args[1]) == "--written-heat-capacity";
-    const BakedReactionTable table = MakeTable(writtenHeatCapacity);
+    const auto hasArgument = [&](std::string_view name) {
+        return std::ranges::any_of(args.subspan(1), [&](const char* arg) { return std::string_view(arg) == name; });
+    };
+    const bool stoneWithoutDensity = hasArgument("--stone-without-density");
+    const BakedReactionTable table = MakeTable(hasArgument("--written-heat-capacity"), stoneWithoutDensity);
+    if (stoneWithoutDensity) {
+        // --- 6: 場所を取らない石へ水が染み込む場面の保存だけ ---
+        outcomeChecks = false;
+        TestSteam(table, true);
+        TestIce(table);
+        if (failureCount != 0) {
+            std::printf("%d 件失敗\n", failureCount);
+            return 1;
+        }
+
+        std::printf("すべて通った\n");
+        return 0;
+    }
+
     TestTable(table);
     TestSteam(table, false);
     TestSteam(table, true);

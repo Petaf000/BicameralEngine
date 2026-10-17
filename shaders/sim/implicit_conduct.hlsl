@@ -731,14 +731,16 @@ int64_t EnergyAfter(uint32_t cell) {
     return energy;
 }
 
-// 刻みの初めの全部のセルの温度の範囲(上は 1 mK の切り上げ)の外に出るセルに印を付ける。最初の回は範囲を超えた最大も記録する
+// 刻みの初めの全部のセルの温度の範囲(mK × 2^16 のまま。ImLowestEnergy・ImHighestEnergy。T-0653)の外に出るセルに印を付ける。最初の回は範囲を超えた最大も記録する
 [numthreads(IM_THREADS, 1, 1)] void ImMark(uint32_t cell : SV_DispatchThreadID) {
     if (cell >= CellCount() || g_state[IM_STATE_LIMIT_DONE] != 0)
         return;
 
     const uint64_t capacity = g_cells[cell].heatCapacity;
-    const int64_t lowest = ImEnergyFor(capacity, g_wide[IM_WIDE_LOWEST] >> IM_TEMPERATURE_SHIFT);
-    const int64_t highest = ImEnergyFor(capacity, (g_wide[IM_WIDE_HIGHEST] >> IM_TEMPERATURE_SHIFT) + 1);
+    const int64_t startEnergy = g_cells[cell].energy;
+    const int64_t start = g_work[Start(cell)];
+    const int64_t lowest = ImLowestEnergy(startEnergy, start, g_wide[IM_WIDE_LOWEST], capacity);
+    const int64_t highest = ImHighestEnergy(startEnergy, start, g_wide[IM_WIDE_HIGHEST], capacity);
     const int64_t over = ImOverrun(EnergyAfter(cell), lowest, highest);
     if (g_state[IM_STATE_LIMIT_ROUNDS] == 0)
         InterlockedMax(g_wide[IM_WIDE_WORST_EXCESS], ImExcessMillikelvin(over, capacity));

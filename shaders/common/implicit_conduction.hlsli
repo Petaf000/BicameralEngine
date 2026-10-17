@@ -254,6 +254,29 @@ FX_FN int64_t ImEnergyFor(uint64_t heatCapacity, int64_t millikelvin) {
     return FxApplySign(energy, millikelvin < 0);
 }
 
+// --- 温度の範囲をエネルギーの範囲に(安全網。T-0653)---
+// セルの温度を「刻みの初めの温度 T0 + (E − E0) × 2^48 ÷ C」と見て(系を作る所が変化 E − E0 を世界へ足すのと同じ見方)、
+// 温度の範囲 [lowest, highest](mK × 2^16)に収まるエネルギーの境を出す。範囲の端のセルは変化 0 で必ず中にいる。
+// 前は範囲を mK に丸めて(下は切り捨て・上は + 1 mK)境をエネルギーにしていたので、範囲の端のセルが刻みごとに 1〜2 mK ずつ外へ動けて、
+// 範囲そのものが刻みをまたいで広がった(T-0653)。
+
+// ⌊温度差 × C ÷ 2^48⌋(温度差は 0 以上)
+FX_FN int64_t ImEnergyWithin(uint64_t heatCapacity, int64_t temperatureDifference) {
+    const FxU128 product = FxMulU64Full(heatCapacity, (uint64_t)temperatureDifference);
+
+    return (int64_t)ImWideShiftRight(product, IM_FLOW_SHIFT).lo;
+}
+
+// 温度が lowest 以上に留まる最小のエネルギー(T0 ≥ lowest)
+FX_FN int64_t ImLowestEnergy(int64_t startEnergy, int64_t startTemperature, int64_t lowest, uint64_t heatCapacity) {
+    return startEnergy - ImEnergyWithin(heatCapacity, startTemperature - lowest);
+}
+
+// 温度が highest 以下に留まる最大のエネルギー(T0 ≤ highest)
+FX_FN int64_t ImHighestEnergy(int64_t startEnergy, int64_t startTemperature, int64_t highest, uint64_t heatCapacity) {
+    return startEnergy + ImEnergyWithin(heatCapacity, highest - startTemperature);
+}
+
 // 面の流れ(細かい側の単位。細かい → 粗いが正)= 係数 × 温度差 ÷ 2^48
 FX_FN int64_t ImFaceFlow(FxU128 coefficient, int64_t difference) {
     const uint64_t magnitude = FxAbsU64(difference);
