@@ -8,8 +8,8 @@
 //      安定の条件で足りる種類(伝導の C/8)は使わない
 //   3. 当てる: 変化を世界の変化の表へ(違うレベルの面は粗い側に端数ごと。ADR-0017。MrSplitCrossFlow)
 //   4. 欄が物質に付く: 運ぶ欄(運動量など)を持つ種類だけ(段 2・3。伝導は欄を持たないので空)
-//   5. 帳簿: 世界の外へ出た・入った分を世界の帳簿へ(伝導は断熱の端で外へ出ないので書かない。開いた端を流す種類〔段 3〕が
-//      TxFlowCell の 4 の後に足す)。書く時の約束(T-0762): 列は手で数えず 0 = エネルギー・1 + 物質 ID・
+//   5. 帳簿: 世界の外へ出た・入った分を世界の帳簿へ(開いた世界の端の面〔MR_NEIGHBOR_EDGE。world_edge.hlsli・T-0721〕の流れを
+//      World::AddEdge で「世界の端」の列へ。外のセルは変わらない)。書く時の約束(T-0762): 列は手で数えず 0 = エネルギー・1 + 物質 ID・
 //      NestFieldLedgerBase + NestConservedIndex(欄)+ 値の番号 / レベルの単位の丸ごとの数は AddWorldLedgerUnits・2^-64 の端数は
 //      AddWorldLedgerBits / 符号付きの量は正 → 出・負 → 入(WlEnergyEntry)/ 保存の検査は ComputeConservedTotals の 1 つ(欄の量も含む)
 //   6. 起こす: 変化の 0 でないセルのブロックを次の小刻み・刻みの種に(TxWakes。面の隣を起こすのは世界の側 = MR の WakeAround)
@@ -29,11 +29,15 @@
 //   - TxLimit Limit(uint32_t slot, uint32_t index)(2 の倍率。LimitsOutflow の種類だけ読む)
 //   - void Add(uint32_t slot, uint32_t index, MrEnergyDelta delta)(3 の書き足し。順に依存しない 128bit の和。GPU は 64bit の atomic)
 //   - void FollowFields(uint32_t slot, uint32_t index)(4。FieldCount が 0 でない種類だけ。中身は段 2・3)
+//   - CvCellView Outside(uint32_t row, int32_t level)(開いた世界の端の外のセル = 外の柱の行 row を自分と同じレベルで見立てたもの。
+//     種類は外のセルを読むだけで端の場合分けを持たない。T-0721)
+//   - void AddEdge(uint32_t slot, uint32_t index, int64_t flow)(5。開いた端の面の流れ〔出ていくのが正〕を帳簿の「世界の端」へ)
 // 浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_TRANSPORT_APPLY_HLSLI
 #define BICAMERAL_TRANSPORT_APPLY_HLSLI
 
 #include "cell_view.hlsli"
+#include "world_edge.hlsli"
 
 MR_NAMESPACE_BEGIN
 
@@ -109,14 +113,21 @@ FX_FN bool TxWakes(MrEnergyDelta delta) {
 
 // --- 1 流す(面 1 つ)----------------------------------------------------------------------------
 
-// 自分(見立て self・レベル level)から面の隣 neighbor(SAME か COARSER)への生の流れ(自分 → 隣が正。自分のレベルの単位)。
+// 自分(見立て self・レベル level)から面の隣 neighbor(SAME・COARSER・EDGE)への生の流れ(自分 → 隣が正。自分のレベルの単位)。
 // 同じレベル: 両側が同じ式で逆向きの値。粗い隣: 細かい側(自分)だけが計算する(粗い側の係数は種類の CoarseSideCoefficient)
 template <typename Kind, typename World>
 FX_FN int64_t TxFaceFlow(Kind kind, World world, CvCellView self, int32_t level, MrFaceNeighbor neighbor) {
-    const CvCellView other = world.View(neighbor.slot, neighbor.index);
     const uint32_t shift = kind.SubcycleShift(level);
     const uint64_t selfCoefficient = kind.SideCoefficient(self, level, shift);
-    if (neighbor.kind == MR_NEIGHBOR_SAME)
+
+    // 開いた世界の端: 相手は外のセル(自分と同じレベルの見立て)で、同じレベルの面と同じ式(T-0721)
+    CvCellView other;
+    if (neighbor.kind == MR_NEIGHBOR_EDGE)
+        other = world.Outside(neighbor.index, level);
+    else
+        other = world.View(neighbor.slot, neighbor.index);
+
+    if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_EDGE)
         return kind.FaceFlow(kind.Slope(self), selfCoefficient, kind.Slope(other),
                              kind.SideCoefficient(other, level, shift));
 
@@ -134,7 +145,9 @@ FX_FN int64_t TxLimitFaceFlow(Kind kind, World world, uint32_t slot, uint32_t in
         return flow;
 
     const TxLimit selfLimit = world.Limit(slot, index);
-    const TxLimit otherLimit = world.Limit(neighbor.slot, neighbor.index);
+    TxLimit otherLimit = TxNoLimit();  // 開いた世界の端の外は無限の溜め(縮めるのは自分の側の倍率だけ。T-0721)
+    if (neighbor.kind != MR_NEIGHBOR_EDGE)
+        otherLimit = world.Limit(neighbor.slot, neighbor.index);
 
     return TxScaleFlow(flow, flow > 0 ? TxFaceScale(selfLimit, otherLimit) : TxFaceScale(otherLimit, selfLimit));
 }
@@ -150,12 +163,20 @@ FX_FN bool TxFlowCell(Kind kind, World world, uint32_t slot, MrBlock block, uint
     bool crossMoved = false;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
         const MrFaceNeighbor neighbor = world.Neighbor(slot, block, index, face);
-        if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
+        if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER &&
+            neighbor.kind != MR_NEIGHBOR_EDGE)
             continue;
 
         // --- 1 流す・2 上限 ---
         const int64_t raw = TxFaceFlow(kind, world, self, block.level, neighbor);
         const int64_t flow = TxLimitFaceFlow(kind, world, slot, index, neighbor, raw);
+
+        // --- 3 当てる・5 帳簿(開いた世界の端: 外のセルは変わらず、流れた分は帳簿の「世界の端」へ。T-0721)---
+        if (neighbor.kind == MR_NEIGHBOR_EDGE) {
+            own.whole -= flow;
+            world.AddEdge(slot, index, flow);
+            continue;
+        }
 
         // --- 3 当てる(同じレベルは自分の分だけ。相手は相手が同じ値を逆向きに足す)---
         if (neighbor.kind == MR_NEIGHBOR_SAME) {
@@ -173,7 +194,7 @@ FX_FN bool TxFlowCell(Kind kind, World world, uint32_t slot, MrBlock block, uint
         crossMoved = true;
     }
 
-    // --- 4 欄が物質に付く(使う種類だけ)・5 帳簿(伝導は書かない。先頭の 5)---
+    // --- 4 欄が物質に付く(使う種類だけ。5 帳簿は開いた端の面ごとに上で)---
     if (kind.FieldCount() != 0)
         world.FollowFields(slot, index);
 

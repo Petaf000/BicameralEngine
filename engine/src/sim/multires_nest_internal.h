@@ -129,6 +129,9 @@ namespace bicameral::sim::nest_detail {
         [[nodiscard]] multires::MrThermal At(uint32_t slot, uint32_t index) { return View(slot, index).thermal; }
         void Invalidate(uint32_t slot);
 
+        // 世界の端の外の柱の行 row のセルの見立て(レベル level。T-0721。外のセルは変わらないので作るだけ)
+        [[nodiscard]] multires::CvCellView Outside(uint32_t row, int32_t level) const;
+
     private:
         const MultiresNest* m_nest;
         CellViewTable m_table;

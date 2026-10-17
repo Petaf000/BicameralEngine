@@ -19,6 +19,7 @@
 
 #include "common/multires_tree.hlsli"
 #include "common/state_field.hlsli"
+#include "common/world_edge.hlsli"
 #include "common/world_ledger.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_wide_cell.h"
@@ -70,8 +71,21 @@ namespace bicameral::sim {
         std::vector<int64_t> values;  // 粗くした余りは世界の帳簿(MultiresNest::ledger)のこの欄の列へ(T-0762)
     };
 
+    // 世界の端(T-0721・ADR-0337。shaders/common/world_edge.hlsli)。世界のデータ(環境の world_edges と基準の大気)で、状態に入らない。
+    // 既定は全部 wall(端を流さない = T-0721 より前と同じ)
+    struct MultiresWorldEdges {
+        multires::WeWorld world{};  // 世界の箱(根のレベルのセル)と端の種類(上・下・横)
+        // 外の柱: レベル 0 のセルの z が columnBaseZ + 行 の高さの外のセル(基準の大気をその高さで読んだもの。同じ密度・温度なら
+        // どのレベルでも同じ数なので、どのレベルの端もこの 1 列を読む)。上下の外は端の行のまま。空なら外は真空(熱は伝わらない)
+        int64_t columnBaseZ = 0;
+        std::vector<reaction::RxCell> column;
+    };
+
     struct MultiresNest {
         MultiresCapacity capacity;
+
+        // --- 世界の端(T-0721。状態に入らない。既定は全部 wall)---
+        MultiresWorldEdges edges;
 
         // --- セルの溢れ(T-0187。EnableWideCells で使う。既定は使わない = GPU と同じ「インライン 8」で、上限は QUESTIONS Q19 の当座のふるまい)。
         //     使うと 9 種目の生成物を待たせず・入りきらない子を粗くするのも断らない(CPU だけ。GPU は T-0176)---

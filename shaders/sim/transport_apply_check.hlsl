@@ -28,6 +28,10 @@ struct CheckWorld {
     TxLimit Limit(uint32_t slot, uint32_t index) { return TxNoLimit(); }
     void FollowFields(uint32_t slot, uint32_t index) {}
 
+    // 開いた世界の端(T-0721): 外のセルの見立て(確かめるだけなので見立ての表の行 row)・帳簿(確かめるだけなので書かない)
+    CvCellView Outside(uint32_t row, int32_t level) { return g_views[row]; }
+    void AddEdge(uint32_t slot, uint32_t index, int64_t flow) {}
+
     // 確かめるだけなので書き足しは順に依存する形(GPU の段は 64bit の atomic の足し算にする)
     void Add(uint32_t slot, uint32_t index, MrEnergyDelta delta) {
         const uint32_t address = slot * MR_BLOCK_CELLS + index;
