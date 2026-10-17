@@ -63,3 +63,6 @@
   最初は縦を y にしたが、司令塔の指示(上の軸はユーザーに確認中・仮は z・1 か所で切り替え)で WE_UP_AXIS の 1 か所に寄せ、T-0764 の気体の半分
   (端を WeWorld から・軸の写し)も入れた。外の柱は t-0720 が入れた GasAtmosphereLayers を使う形に替え、ファイルを bicameral_sim へ移した。
   device_bash が何度も切れて時間を使った(書き込みはクラウド側で作って base64 で送った)。
+  試験: release のビルド警告 0・^multires_ 12 本(multires_gas 492 秒・multires_liquid を含む)・multires_edge・environment_package
+  (open で大気が無い時に注意が出るように期待を直した)・world_atmosphere・world_layout・archmap --check。
+  気づいたこと: 基準の大気の静かなセルはエネルギーが負(化学のぶん)なので、試験で温めるのはエネルギーの大きさを足す形にした。

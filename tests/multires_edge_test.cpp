@@ -310,7 +310,9 @@ namespace {
         std::vector<RxCell> cells(MR_BLOCK_CELLS);
         for (uint32_t index = 0; index < MR_BLOCK_CELLS && edges->column.size() == MR_BLOCK_EDGE; ++index) {
             cells[index] = edges->column[WeCellAxis(index, WE_UP_AXIS)];
-            cells[index].energy += cells[index].energy / 4;
+            // 温める: エネルギーの大きさの 1/4 を足す(基準の大気のセルのエネルギーは負のことがある = 化学のぶん。足すのは大きさ)
+            const int64_t energy = cells[index].energy;
+            cells[index].energy += (energy < 0 ? -energy : energy) / 4;
         }
 
         PlaceRootBlock(nest, 0, 0, 0, cells);
@@ -318,14 +320,15 @@ namespace {
 
         const ReactionTableView view = table.View();
         const int64_t warm = LayerTemperature(nest, view, 0);
+        const int64_t topBefore = LayerTemperature(nest, view, MR_BLOCK_EDGE - 1);
         const uint32_t drifts = StepAndCountDrifts(nest, table, TICKS, 0);
         const int64_t top = LayerTemperature(nest, view, MR_BLOCK_EDGE - 1);
         const int64_t bottom = LayerTemperature(nest, view, 0);
         Expect(drifts == 0, "パッケージの端: 保存量(帳簿込み)が毎刻み一定");
-        Expect(top < bottom && top < warm, "パッケージの端: 上の層が冷えて下の層より冷たい");
+        Expect(top < topBefore && top < bottom, "パッケージの端: 上の層が冷えて下の層より冷たい");
         Expect(OnlyEdgeOutUsed(nest), "パッケージの端: 帳簿は世界の端・出にだけ載る");
-        Log(Channel::Sim, Level::Info, "パッケージの端: 初め {} mK → {} 刻みで上の層 {} mK・下の層 {} mK", warm, TICKS,
-            top, bottom);
+        Log(Channel::Sim, Level::Info, "パッケージの端: 初め 下 {} mK・上 {} mK → {} 刻みで上の層 {} mK・下の層 {} mK",
+            warm, topBefore, TICKS, top, bottom);
     }
 
     // 端を替える: 開いた端に接するブロックだけが種になる

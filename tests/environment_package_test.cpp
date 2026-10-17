@@ -171,7 +171,7 @@ namespace {
     }
 
     // ベイクの知らせ(T-0710・土台の設計 §1.4): 液体を置いて重力 0 は警告・端が全部 wall で基準の大気が無いのは注意。
-    // セルを置かない世界(ブランク)は知らせない
+    // open があるのに基準の大気が無い(外は真空)のも注意(T-0772・ADR-0338)。セルを置かない世界(ブランク)は知らせない
     void TestWorldNotices() {
         sim::ReactionTableDefinition definition = sim::MakeCombustionTestTable();
         definition.environment = {};
@@ -190,7 +190,8 @@ namespace {
         definition.environment.gravityMicrometersPerSecond2 = 9806650;
         definition.environment.edges.top = sim::WorldEdge::Open;
         const auto open = sim::BakeReactionTable(definition);
-        EXPECT(open && !HasWarning(*open, "重力") && !HasWarning(*open, "世界の端"));
+        EXPECT(open && !HasWarning(*open, "重力") && !HasWarning(*open, "全部 wall") &&
+               HasWarning(*open, "基準の大気が無い"));
 
         definition.environment = {};
         definition.worldLayout = {};
