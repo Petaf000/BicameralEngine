@@ -30,10 +30,15 @@ export type Species = {
     heat_capacity_mj_per_mol_k: number, -- 比熱(一定と置く)。気体は資料の定圧の比熱 c_p をそのまま書く(ベイクがセルの読む定積の c_v = c_p − R を作る。R 以下は断る。T-0597)。凝縮相はそのまま
     thermal_conductivity_mw_per_m_k: number,
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
-    condensed: boolean?, -- 凝縮相(固体・液体)。省ける(既定 気体)。坂の計器が活量を 1 と置く(T-0518。相が入るまでの仮の欄)
+    condensed: boolean?, -- 廃止(T-0710。phase で書く)。読み込みが true = "solid"・false = "gas" と読み替えて警告する。phase と食い違えば誤り
     radiation_absorption_mm2_per_mol: number?, -- 1 mol が放射を遮る面積(mm²/mol)。省ける(既定 0 = 放射しない・吸わない)。セルの放射率 = 1 − e^−Σ a·n ÷ 面(T-0583・ADR-0252)
-    phase: string?, -- 相("gas"・"solid"・"liquid")。省ける(既定 気体。condensed と書いたら同じ向き)。液体は液体の区画が流す(T-0609・ADR-0266)
-    density_kg_per_m3: number?, -- 密度。液体には要る(T-0609)。固体も書く(セルの場所を取る。書かない凝縮相はベイクが警告する。ADR-0268・T-0616)
+    phase: string?, -- 相("gas"・"solid"・"liquid" の 1 本。省ける = 気体)。どの流れがこの物質を運ぶかを決める(T-0609・T-0710)
+    density_kg_per_m3: number?, -- 密度。液体には要る(無ければ誤り)。固体も書く(セルの場所を取る。書かないとベイクが警告する。ADR-0268・T-0616)
+    -- 動き方の任意の値(T-0710・土台の決定 3。名前と単位は仮)。書かなければ今と同じ動き。相に合わない欄はベイクが誤りにする
+    viscosity_upa_s: number?, -- 液体の粘り(µPa·s。1 以上の整数。水 890)。液体に書かないとベイクが警告する
+    diffusivity_mm2_per_s: number?, -- 気体の混ざる速さ(mm²/s。0 以上の整数。湯気 25)
+    permeability_um2: (number | string)?, -- 固体の孔の通しやすさ(µm²。0〜1e7 を 1e-6 刻み。小さい値は 10 進の文字列 "1e-6"・"0.001"。砂 10)
+    suction_pa: number?, -- 固体の吸い上げ(Pa。0 以上の整数。乾いた砂 5000)
 }
 
 export type ReactionRate = {
@@ -66,7 +71,7 @@ export type WorldCellRegion = {
     min_cell: { number }?, -- { x, y, z }(セル)。size_cells と両方書くか両方省く
     size_cells: { number }?, -- { x, y, z }(セルの数)
     shell_cells: number?, -- 外側の殻の厚さ(セル。既定 0 = 中まで埋める)
-    amounts_umol: { [string]: number }, -- 物質 → 1 セルの量(µmol)。合計 2^36(約 68,719 mol)まで・condensed でない物質の合計は 2^31(約 2147 mol)未満(ADR-0260)
+    amounts_umol: { [string]: number }, -- 物質 → 1 セルの量(µmol)。合計 2^36(約 68,719 mol)まで・気体(phase が gas)の物質の合計は 2^31(約 2147 mol)未満(ADR-0260)
     temperature_mk: number, -- 温度(mK)
 }
 
@@ -142,6 +147,14 @@ export type Environment = {
     -- 欄の誤り(知らない欄・整数でない・範囲の外)は読み込み(environment_package.cpp)が場所付きで止める
     atmosphere_profile: { any }?,
     atmosphere_temperature_mk: number?, -- 一様な大気の温度(mK。T-0373 の書き方。分類 atmosphere と一緒に。atmosphere_profile とは書けない)
+    world_edges: WorldEdges?, -- 世界の端(T-0710・土台の決定 5。外との境は世界の端だけ。書かない面は wall)
+}
+
+-- 世界の端の面: "open"(外は基準の大気。流れが出入りする)か "wall"(閉じた壁。既定)
+export type WorldEdges = {
+    top: string?, -- 上(空)
+    bottom: string?, -- 下(地の底)
+    sides: string?, -- 横の 4 面
 }
 
 -- --- 遊びの指標(分類 play_metrics。T-0432・ADR-0206。1 つの鍵 = 1 つの指標。読み手は engine/src/script/play_metrics_package.h)---

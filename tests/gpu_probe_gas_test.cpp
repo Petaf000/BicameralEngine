@@ -103,7 +103,7 @@ namespace {
                                           .formationEnthalpy = 0,
                                           .heatCapacity = 8500,
                                           .thermalConductivity = 2000,
-                                          .condensed = true,
+                                          .phase = SpeciesPhase::Solid,
                                           .density = 2000});
         }
 

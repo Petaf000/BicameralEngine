@@ -82,8 +82,16 @@ namespace {
     }
 
     bool SameWorld(const sim::WorldPhysics& left, const sim::WorldPhysics& right) {
-        return left.gravityMicrometersPerSecond2 == right.gravityMicrometersPerSecond2 &&
-               left.soundSpeedMillimetersPerSecond == right.soundSpeedMillimetersPerSecond;
+        return left == right;  // 重力・音速の基準・世界の端(T-0710)
+    }
+
+    bool HasWarning(const sim::BakedReactionTable& table, std::string_view part) {
+        for (const std::string& warning : table.warnings) {
+            if (warning.find(part) != std::string::npos)
+                return true;
+        }
+
+        return false;
     }
 
     // --- 試験 ---
@@ -145,6 +153,49 @@ namespace {
         ExpectRejected("return { environment = { gravity_um_per_s2 = 100000001 } }", "範囲");
         ExpectRejected("return { environment = { sound_speed_mm_per_s = 432001 } }", "sound_speed_mm_per_s");
         ExpectRejected("return { environment = { sound_speed_mm_per_s = \"340000\" } }", "整数");
+    }
+
+    // 世界の端(T-0710・土台の決定 5): 書かない面は wall・値は "open" か "wall"・知らない面や表でない値は誤り
+    void TestWorldEdges() {
+        const auto blank = ReadEnvironmentInit("return { elements = {} }");
+        EXPECT(blank && blank->edges.AllWall());
+
+        const auto field = ReadEnvironmentInit(
+            "return { environment = { world_edges = { top = \"open\", sides = \"open\" } } }");
+        EXPECT(field && field->edges.top == sim::WorldEdge::Open && field->edges.bottom == sim::WorldEdge::Wall &&
+               field->edges.sides == sim::WorldEdge::Open);
+
+        ExpectRejected("return { environment = { world_edges = { top = \"sky\" } } }", "\"open\" か \"wall\"");
+        ExpectRejected("return { environment = { world_edges = { up = \"open\" } } }", "world_edges");
+        ExpectRejected("return { environment = { world_edges = \"open\" } }", "world_edges");
+    }
+
+    // ベイクの知らせ(T-0710・土台の設計 §1.4): 液体を置いて重力 0 は警告・端が全部 wall で基準の大気が無いのは注意。
+    // セルを置かない世界(ブランク)は知らせない
+    void TestWorldNotices() {
+        sim::ReactionTableDefinition definition = sim::MakeCombustionTestTable();
+        definition.environment = {};
+        definition.atmosphere = {};
+        definition.worldLayout = {};
+        definition.playMetrics = {};
+        definition.worldLayout.cellRegions.push_back({.name = "pond",
+                                                      .contents = {{.species = "water", .micromoles = 1000000}},
+                                                      .temperatureMilliKelvin = 293150});
+
+        const auto still = sim::BakeReactionTable(definition);
+        EXPECT(still && HasWarning(*still, "重力") && HasWarning(*still, "注意: 世界の端"));
+        if (!still)
+            std::printf("FAILED: ベイクできない: %s\n", still.error().c_str());
+
+        definition.environment.gravityMicrometersPerSecond2 = 9806650;
+        definition.environment.edges.top = sim::WorldEdge::Open;
+        const auto open = sim::BakeReactionTable(definition);
+        EXPECT(open && !HasWarning(*open, "重力") && !HasWarning(*open, "世界の端"));
+
+        definition.environment = {};
+        definition.worldLayout = {};
+        const auto empty = sim::BakeReactionTable(definition);
+        EXPECT(empty && !HasWarning(*empty, "重力") && !HasWarning(*empty, "世界の端"));
     }
 
     // ランタイムの入り口: ベイクした表の environment(窓の物理の重力はここから。frame_loop.cpp)
@@ -209,6 +260,8 @@ int main() {
     TestBlankWithoutCategory();
     TestCustomEnvironment();
     TestRejectsBrokenEnvironment();
+    TestWorldEdges();
+    TestWorldNotices();
     TestBakedTableCarriesEnvironment();
     TestHotReloadChecksEnvironment();
     if (failureCount != 0) {

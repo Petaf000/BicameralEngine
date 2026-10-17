@@ -71,7 +71,7 @@ namespace {
                                       .formationEnthalpy = -285830,
                                       .heatCapacity = 75300,
                                       .thermalConductivity = 600,
-                                      .liquid = true,
+                                      .phase = SpeciesPhase::Liquid,
                                       .density = withDensity ? 1000u : 0u});
         definition.species.push_back(
             {.name = "stone",
@@ -79,7 +79,7 @@ namespace {
              .formationEnthalpy = 0,
              .heatCapacity = 8500,
              .thermalConductivity = 2000,
-             .condensed = true,
+             .phase = SpeciesPhase::Solid,
              .density = 2000});  // セルを満たす石は液体の壁(T-0612。密度を書かない固体は場所を取らない)
 
         auto baked = BakeReactionTable(definition);
@@ -406,7 +406,7 @@ namespace {
                                       .composition = {{.element = "H", .count = 2}, {.element = "O", .count = 1}},
                                       .formationEnthalpy = -285830,
                                       .heatCapacity = 75300,
-                                      .liquid = true});
+                                      .phase = SpeciesPhase::Liquid});
         EXPECT(!BakeReactionTable(definition).has_value());
 
         ProbeLiquidField field = MakeField(table);

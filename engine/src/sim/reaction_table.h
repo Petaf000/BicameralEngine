@@ -47,6 +47,26 @@ namespace bicameral::sim {
         uint32_t count = 0;
     };
 
+    // 物質の相(パッケージの phase。T-0710・土台の決定 3)。物質ごとに 1 本で、どの流れがその物質を運ぶかを決める。
+    // 前の condensed(凝縮相か)は Liquid か Solid、前の liquid は Liquid に当たる
+    enum class SpeciesPhase : uint8_t {
+        Gas = 0,  // 既定(書かない物質)
+        Liquid = 1,
+        Solid = 2,
+    };
+
+    // 物質の動き方の任意の値(T-0710・土台の決定 3。名前と単位は設計の仮)。書かない値は「今と同じ動き」で、0 と書いたのとは違う。
+    // どれも相の決まった物質だけに書ける(ベイクが確かめる)。まだ刻みは読まない(土台の段 1 以降)。GPU の表には入らない
+    struct SpeciesTransport {
+        std::optional<uint64_t> viscosityMicroPascalSeconds;  // 液体の粘り(µPa·s。水 890)
+        std::optional<uint32_t> diffusivityMm2PerS;           // 気体の混ざる速さ(mm²/s。湯気 25)
+        std::optional<uint64_t>
+            permeabilityNm2;                     // 固体の孔の通しやすさ(nm²。パッケージは µm² で書く。1e-6 µm² = 1 nm²)
+        std::optional<uint32_t> suctionPascals;  // 固体の吸い上げ(Pa。乾いた砂 5000)
+
+        [[nodiscard]] bool operator==(const SpeciesTransport&) const = default;
+    };
+
     struct SpeciesDefinition {
         std::string name;
         std::vector<ElementCount> composition;  // 物質 1 mol あたりの元素の数
@@ -56,19 +76,20 @@ namespace bicameral::sim {
         // 標準モルエントロピー(mJ/(mol·K)。298.15 K・1 bar)。任意。GPU の表に入らない(表とハッシュは変わらない)。
         // 坂の検査だけが使う(ベイクの警告 sim/reaction_slope・T-0492。試験 slope_check・T-0491。D-487)
         std::optional<int64_t> standardEntropy;
-        // 凝縮相(固体・液体)か。任意(既定 false = 気体)。坂の計器(sim/slope_gauge・T-0518)が活量を 1 と置くのに使う(気体は分圧)。
-        // GPU の表には気体の印(RxSpecies::flags の RX_SPECIES_GAS = 凝縮相でも液体でもない)として入り、セルの気体の器を数える
-        // (気体を増やす規則を器の残りまでに縮める。T-0622・ADR-0316)。エンジンの物質は相を持たない(M2)ので、相が入るまでの仮の欄(ADR-0230)
-        bool condensed = false;
+        // 相(パッケージの phase。既定 Gas)。液体は液体の場が低い方へ流し、密度(density)が要る。
+        // 固体と液体は凝縮相(坂の計器 sim/slope_gauge が活量を 1 と置く。T-0518)。GPU の表には気体の印
+        // (RxSpecies::flags の RX_SPECIES_GAS = Gas)としてだけ入り、セルの気体の器を数える(T-0622・ADR-0316)
+        SpeciesPhase phase = SpeciesPhase::Gas;
+        // パッケージが廃止した欄 condensed で相を書いた(読み手が phase へ読み替えた印。ベイクが警告する。T-0710)
+        bool legacyCondensed = false;
         // 1 mol が放射を遮る面積(mm²/mol)。任意(既定 0 = 放射しない・吸わない)。セルの吸収率 = 1 − e^−Σ a·n ÷ 面の面積で、
         // 放射率も同じ値(灰色体)。GPU の表にはまだ入らない(放射の CPU リファレンス sim/radiation_reference だけが読む。T-0583・ADR-0252)
         uint32_t radiationAbsorption = 0;
-        // 液体か(パッケージの phase = "liquid"。T-0609・ADR-0266 Proposed)。任意(既定 false)。液体は凝縮相(condensed)でもあり、
-        // 液体の場(sim/probe_liquid・GPU は ProbeSim の液体の段 T-0613)が低い方へ流す。密度(density)が要る
-        bool liquid = false;
         // 密度(kg/m³。パッケージの density_kg_per_m3)。任意(既定 0 = 書かない)。液体には要る(セルに入る量 = セルの体積 ÷ モル体積)。
-        // 固体の密度はセルの体積を分け合う所(sim/cell_volume。ADR-0268)が読む。凝縮相に書かないとベイクが警告する(T-0616)
+        // 固体の密度はセルの体積を分け合う所(sim/cell_volume。ADR-0268)が読む。固体に書かないとベイクが警告する(T-0616)
         uint32_t density = 0;
+        // 動き方の任意の値(粘り・混ざる速さ・孔・吸い上げ。T-0710)
+        SpeciesTransport transport;
     };
 
     struct RuleTerm {
@@ -175,6 +196,10 @@ namespace bicameral::sim {
         std::vector<std::optional<int64_t>> standardEntropies;  // mJ/(mol·K)。添字 = 物質 ID(書いていなければ無し)
         std::vector<RuleSlope> ruleSlopes;                      // 規則ごとの坂(添字 = 規則 ID。パネルの「坂」の欄)
         std::vector<uint8_t> speciesCondensed;  // 1 = 凝縮相(活量 1。坂の計器 sim/slope_gauge・T-0518)。添字 = 物質 ID
+
+        // --- CPU だけ: 相と動き方(T-0710。相の表の源。speciesCondensed・speciesLiquid はここから作る写し〔段 1 で読み手を移して消す〕)---
+        std::vector<SpeciesPhase> speciesPhase;          // 添字 = 物質 ID(ID 0 は Gas)
+        std::vector<SpeciesTransport> speciesTransport;  // 添字 = 物質 ID(書かない値は無し)
 
         // --- CPU だけ(GPU の表に入るのは T-0586): 放射(sim/radiation_reference。T-0583・ADR-0252)---
         std::vector<uint32_t> speciesRadiationAbsorption;  // mm²/mol(1 mol が放射を遮る面積)。添字 = 物質 ID

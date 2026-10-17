@@ -3,7 +3,7 @@
 //
 // 一つの芯: 刻みごとに 1 か所で、セル(成分 + エネルギー)と相の表 1 つから「流れが読む値」を全部作る。永続しない(保存点・ハッシュに入らない。
 // 段の外でセルを変えても作り直しの後始末が要らない)。作る値:
-//   - 相ごとの物質量・質量・体積・熱容量(気体 / 液体 / 固体。相は表の phase 1 本。ベイクの speciesCondensed・speciesLiquid から作る)
+//   - 相ごとの物質量・質量・体積・熱容量(気体 / 液体 / 固体。相は表の phase 1 本。ベイクの speciesPhase〔T-0710〕を写す)
 //   - 体積の分け合い: セル = 固体 + 液体 + 残り(気体)。液体の空き・気体の空き・液体の入れる体積・液体の満ち具合
 //     (sim/cell_volume の ShareCellVolume・LiquidOpenQ16・GasOpenQ16 とビット単位で同じ。T-0713 の試験)
 //   - セル全体の熱(熱・熱容量・温度)と伝導の係数(multires_conduction.hlsli の MrCellThermal・MrFaceLimit と同じ値。

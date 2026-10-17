@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <format>
+#include <iterator>
 
 #include "script/package_fields.h"
 #include "sim/gas_reference.h"
@@ -134,6 +135,41 @@ namespace bicameral::script {
             return point;
         }
 
+        // 世界の端の 1 面("open" か "wall")
+        std::expected<sim::WorldEdge, std::string> ReadEdge(const ScriptValue& value, const std::string& path) {
+            if (value.IsString() && value.text == "open")
+                return sim::WorldEdge::Open;
+
+            if (value.IsString() && value.text == "wall")
+                return sim::WorldEdge::Wall;
+
+            return std::unexpected(std::format("{}: \"open\" か \"wall\" で書く", path));
+        }
+
+        // environment.world_edges = { top, bottom, sides }(T-0710・土台の決定 5)。書かない面は wall
+        std::expected<sim::WorldEdges, std::string> ReadEdges(const TableEntry& entry) {
+            const std::string path = std::format("{}.{}", ENVIRONMENT_CATEGORY, ENVIRONMENT_WORLD_EDGES_KEY);
+            static constexpr std::string_view FIELDS[] = {"top", "bottom", "sides"};
+            if (auto record = CheckRecord(entry.value, FIELDS, path); !record)
+                return std::unexpected(std::format("パッケージ {}: {}", entry.package, record.error()));
+
+            sim::WorldEdges edges;
+            sim::WorldEdge* const targets[] = {&edges.top, &edges.bottom, &edges.sides};
+            for (size_t i = 0; i < std::size(FIELDS); ++i) {
+                const ScriptValue* value = entry.value.Find(FIELDS[i]);
+                if (value == nullptr)
+                    continue;
+
+                const auto edge = ReadEdge(*value, std::format("{}.{}", path, FIELDS[i]));
+                if (!edge)
+                    return std::unexpected(std::format("パッケージ {}: {}", entry.package, edge.error()));
+
+                *targets[i] = *edge;
+            }
+
+            return edges;
+        }
+
     }  // namespace
 
     std::expected<sim::WorldPhysics, std::string> ReadWorldEnvironment(const PackageSetResult& packages) {
@@ -158,6 +194,12 @@ namespace bicameral::script {
                     return std::unexpected(soundSpeed.error());
 
                 world.soundSpeedMillimetersPerSecond = *soundSpeed;
+            } else if (key == ENVIRONMENT_WORLD_EDGES_KEY) {
+                const auto edges = ReadEdges(entry);
+                if (!edges)
+                    return std::unexpected(edges.error());
+
+                world.edges = *edges;
             } else if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY || key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY ||
                        key == ENVIRONMENT_ATMOSPHERE_PROFILE_KEY) {
                 continue;  // 基準の大気の値(ReadWorldAtmosphere が読む)

@@ -24,6 +24,27 @@
 
 namespace bicameral::sim {
 
+    // --- 世界の端(T-0710・土台の決定 5。外との境は世界の端だけ)---
+
+    // 端の 1 つの面の種類
+    enum class WorldEdge : uint8_t {
+        Wall = 0,  // 閉じた壁(既定。何も出入りしない)
+        Open = 1,  // 開いた端(外は基準の大気。流れが出入りし、帳簿の「外へ」の列に載る)
+    };
+
+    // 環境の world_edges = { top, bottom, sides }。既定は全部 wall。まだ刻みは読まない(土台の段 1 以降)
+    struct WorldEdges {
+        WorldEdge top = WorldEdge::Wall;     // 上(空)
+        WorldEdge bottom = WorldEdge::Wall;  // 下(地の底)
+        WorldEdge sides = WorldEdge::Wall;   // 横の 4 面
+
+        [[nodiscard]] bool AllWall() const {
+            return top == WorldEdge::Wall && bottom == WorldEdge::Wall && sides == WorldEdge::Wall;
+        }
+
+        [[nodiscard]] bool operator==(const WorldEdges&) const = default;
+    };
+
     // --- 世界の物理の値 ---
     struct WorldPhysics {
         // 重力の強さ(µm/s²。0 = 無重力。上限 fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)。ブランクの世界は 0(D-480)
@@ -32,6 +53,9 @@ namespace bicameral::sim {
         // 気体の音速の基準 c̃(mm/s。ADR-0176)。気体の圧力の波・衝撃波の速さの基準で、気体の箱を作るのに要る。
         // 0 = 無い(ブランクの世界。気体を使う世界は環境で渡す)。上限は気体の小刻みの数で決まる(GasSoundSpeedLimitMmPerS)
         uint32_t soundSpeedMillimetersPerSecond = 0;
+
+        // 世界の端(既定は全部 wall。T-0710)
+        WorldEdges edges;
 
         [[nodiscard]] bool operator==(const WorldPhysics&) const = default;
     };

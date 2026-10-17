@@ -60,7 +60,7 @@ namespace {
                                       .formationEnthalpy = -285830,
                                       .heatCapacity = 75300,
                                       .thermalConductivity = 600,
-                                      .liquid = true,
+                                      .phase = SpeciesPhase::Liquid,
                                       .density = 1000});
         const auto solid = [](const char* name, uint32_t density) {
             return SpeciesDefinition{.name = name,
@@ -68,7 +68,7 @@ namespace {
                                      .formationEnthalpy = 0,
                                      .heatCapacity = 8500,
                                      .thermalConductivity = 2000,
-                                     .condensed = true,
+                                     .phase = SpeciesPhase::Solid,
                                      .density = density};
         };
         definition.species.push_back(solid("grain", 2650));

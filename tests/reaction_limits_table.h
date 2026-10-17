@@ -76,11 +76,11 @@ namespace bicameral::test {
 
         // --- 気体の器: 凝縮相 2 つと気体 1 つ(元素 X。crust は X 2 個)---
         sim::SpeciesDefinition brine = LimitsSpecies("brine", -3000);
-        brine.condensed = true;
+        brine.phase = sim::SpeciesPhase::Solid;
         definition.species.push_back(brine);
         sim::SpeciesDefinition crust = LimitsSpecies("crust", -5000);
         crust.composition = {{.element = "X", .count = 2}};
-        crust.condensed = true;
+        crust.phase = sim::SpeciesPhase::Solid;
         definition.species.push_back(crust);
         definition.species.push_back(LimitsSpecies("vapor", -2000));
         definition.rules.push_back(LimitsRule("gas_room_evaporate", "brine", "vapor", 1, 0));  // 1 /s・吸熱 1 kJ/mol

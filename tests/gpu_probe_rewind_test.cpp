@@ -317,14 +317,14 @@ namespace {
                                       .formationEnthalpy = -285830,
                                       .heatCapacity = 75300,
                                       .thermalConductivity = 600,
-                                      .liquid = true,
+                                      .phase = SpeciesPhase::Liquid,
                                       .density = 1000});
         definition.species.push_back({.name = "stone",
                                       .composition = {{.element = "C", .count = 1}},
                                       .formationEnthalpy = 0,
                                       .heatCapacity = 8500,
                                       .thermalConductivity = 2000,
-                                      .condensed = true,
+                                      .phase = SpeciesPhase::Solid,
                                       .density = 2000});
 
         return definition;

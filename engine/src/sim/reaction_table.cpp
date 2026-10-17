@@ -138,10 +138,10 @@ namespace bicameral::sim {
 
             // 気体の比熱を定圧で書く表(既定)は、セルが読む定積の比熱 c_v = c_p − R にする(T-0591・ADR-0259・T-0597。H0 は書いた c_p から)
             uint32_t heatCapacity = definition.heatCapacity;
-            if (table.gasHeatCapacityAtConstantPressure && !definition.condensed) {
+            if (table.gasHeatCapacityAtConstantPressure && definition.phase == SpeciesPhase::Gas) {
                 if (heatCapacity <= GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN)
                     return std::unexpected(std::format(
-                        "物質 {}: 気体の定圧の比熱が気体定数 R(8314 mJ/(mol·K))以下(凝縮相なら condensed = true)",
+                        "物質 {}: 気体の定圧の比熱が気体定数 R(8314 mJ/(mol·K))以下(固体・液体なら phase を書く)",
                         definition.name));
 
                 heatCapacity -= GAS_CONSTANT_MILLIJOULES_PER_MOLE_KELVIN;
@@ -158,6 +158,63 @@ namespace bicameral::sim {
             return {};
         }
 
+        // --- 相と動き方の欄(T-0710・土台の設計 §1.4。相に合わない欄は誤り・書き忘れは警告して動かす D-487 ②)---
+
+        std::string_view PhaseName(SpeciesPhase phase) {
+            switch (phase) {
+                case SpeciesPhase::Liquid: return "liquid";
+                case SpeciesPhase::Solid: return "solid";
+                case SpeciesPhase::Gas: break;
+            }
+
+            return "gas";
+        }
+
+        // 相に合わない欄(気体に孔など)と、液体の密度の書き忘れ(セルに入る量が決まらない)は誤り
+        std::expected<void, std::string> CheckPhaseFields(const SpeciesDefinition& entry) {
+            struct PhaseField {
+                bool written = false;
+                std::string_view key;
+                SpeciesPhase phase = SpeciesPhase::Gas;
+            };
+
+            const SpeciesTransport& transport = entry.transport;
+            const PhaseField fields[] = {
+                {transport.viscosityMicroPascalSeconds.has_value(), "viscosity_upa_s", SpeciesPhase::Liquid},
+                {transport.diffusivityMm2PerS.has_value(), "diffusivity_mm2_per_s", SpeciesPhase::Gas},
+                {transport.permeabilityNm2.has_value(), "permeability_um2", SpeciesPhase::Solid},
+                {transport.suctionPascals.has_value(), "suction_pa", SpeciesPhase::Solid},
+            };
+            for (const PhaseField& field : fields) {
+                if (field.written && entry.phase != field.phase)
+                    return std::unexpected(
+                        std::format("物質 {}: {} は phase = \"{}\" の物質だけに書ける(この物質は \"{}\")", entry.name,
+                                    field.key, PhaseName(field.phase), PhaseName(entry.phase)));
+            }
+
+            if (entry.phase == SpeciesPhase::Liquid && entry.density == 0)
+                return std::unexpected(std::format("物質 {}: 液体には密度(density_kg_per_m3)が要る", entry.name));
+
+            return {};
+        }
+
+        // 廃止した欄と書き忘れの警告(表は当たる)
+        void WarnPhaseFields(const SpeciesDefinition& entry, std::vector<std::string>& warnings) {
+            if (entry.legacyCondensed)
+                warnings.push_back(std::format("物質 {}: condensed は廃止(phase = \"{}\" と読んだ。phase で書く)",
+                                               entry.name, PhaseName(entry.phase)));
+
+            // 密度の無い固体は場所を取らない(気体も液体も素通し。ADR-0268)。表は当たる(T-0616)
+            if (entry.phase == SpeciesPhase::Solid && entry.density == 0)
+                warnings.push_back(std::format(
+                    "物質 {}: 固体に密度(density_kg_per_m3)が無い(セルの場所を取らず、気体も液体も素通しする)",
+                    entry.name));
+
+            if (entry.phase == SpeciesPhase::Liquid && !entry.transport.viscosityMicroPascalSeconds)
+                warnings.push_back(std::format(
+                    "物質 {}: 液体に粘り(viscosity_upa_s)が無い(粘りで減らず、速さの上限だけで流れる)", entry.name));
+        }
+
         std::expected<NameIndex, std::string> BakeAllSpecies(const ReactionTableDefinition& definition,
                                                              const NameIndex& elements, BakedReactionTable& baked) {
             // ID 0 は「無し」
@@ -170,6 +227,8 @@ namespace bicameral::sim {
             baked.speciesRadiationAbsorption.push_back(0);
             baked.speciesLiquid.push_back(0);
             baked.speciesMolarVolume.push_back(0);
+            baked.speciesPhase.push_back(SpeciesPhase::Gas);
+            baked.speciesTransport.emplace_back();
 
             NameIndex species;
             for (const SpeciesDefinition& entry : definition.species) {
@@ -180,26 +239,24 @@ namespace bicameral::sim {
                 if (auto result = BakeSpecies(entry, elements, definition, baked); !result)
                     return std::unexpected(result.error());
 
+                if (auto fields = CheckPhaseFields(entry); !fields)
+                    return std::unexpected(fields.error());
+
+                WarnPhaseFields(entry, baked.warnings);
+
                 baked.standardEntropies.push_back(entry.standardEntropy);
-                baked.speciesCondensed.push_back(entry.condensed || entry.liquid ? 1 : 0);
-                baked.species.back().flags = entry.condensed || entry.liquid ? 0u : RX_SPECIES_GAS;  // T-0622
+                baked.speciesPhase.push_back(entry.phase);
+                baked.speciesTransport.push_back(entry.transport);
+                baked.speciesCondensed.push_back(entry.phase != SpeciesPhase::Gas ? 1 : 0);
+                baked.species.back().flags = entry.phase != SpeciesPhase::Gas ? 0u : RX_SPECIES_GAS;  // T-0622
                 baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
 
-                // 液体(T-0609・ADR-0266): 密度が要る。モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数
-                if (entry.liquid && entry.density == 0)
-                    return std::unexpected(std::format("物質 {}: 液体には密度(density_kg_per_m3)が要る", entry.name));
-
-                // 密度の無い固体は場所を取らない(気体も液体も素通し。ADR-0268)。書き忘れを読み込みで知らせる(T-0616。表は当たる)
-                if (entry.condensed && entry.density == 0)
-                    baked.warnings.push_back(std::format(
-                        "物質 {}: 凝縮相に密度(density_kg_per_m3)が無い(セルの場所を取らず、気体も液体も素通しする)",
-                        entry.name));
-
+                // モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数(液体は密度が要る。T-0609・ADR-0266)
                 const uint64_t molarVolume = entry.density == 0
                                                  ? 0
                                                  : ((uint64_t{baked.molarMasses.back()} * 1000) + (entry.density / 2)) /
                                                        entry.density;
-                baked.speciesLiquid.push_back(entry.liquid ? 1 : 0);
+                baked.speciesLiquid.push_back(entry.phase == SpeciesPhase::Liquid ? 1 : 0);
                 baked.speciesMolarVolume.push_back(molarVolume);
             }
 
@@ -518,6 +575,42 @@ namespace bicameral::sim {
                 baked.ruleIndex.push_back(0);
         }
 
+        // --- 世界の組み立てと環境の知らせ(T-0710・土台の設計 §1.4。警告して動かす)---
+
+        // 世界の初めのセルに置いた液体の名前(無ければ空)
+        // 世界の初めのセルに置いた相 phase の物質の名前(無ければ空)
+        std::string_view PlacedSpecies(const BakedReactionTable& baked, SpeciesPhase phase) {
+            for (const WorldCellRegion& region : baked.worldLayout.cellRegions) {
+                for (uint32_t i = 0; i < region.cell.speciesCount; ++i) {
+                    const uint32_t id = region.cell.species[i];
+                    if (id < baked.speciesPhase.size() && baked.speciesPhase[id] == phase)
+                        return baked.speciesNames[id];
+                }
+            }
+
+            return {};
+        }
+
+        // 液体を置いたのに重力が 0(溜まらない)・端が全部 wall で大気(基準の大気もセルの気体も)が無い(閉じた真空の箱。注意)。
+        // ブランクの世界(セルを置かない)は知らせない(D-455)
+        void WarnWorldSetting(BakedReactionTable& baked) {
+            if (baked.worldLayout.cellRegions.empty())
+                return;
+
+            const std::string_view liquid = PlacedSpecies(baked, SpeciesPhase::Liquid);
+            if (!liquid.empty() && baked.environment.gravityMicrometersPerSecond2 == 0)
+                baked.warnings.push_back(std::format(
+                    "世界に液体 {} を置いたが重力(environment.gravity_um_per_s2)が 0(液体が低い方へ溜まらない)",
+                    liquid));
+
+            if (baked.environment.edges.AllWall() && baked.atmosphere.Empty() &&
+                PlacedSpecies(baked, SpeciesPhase::Gas).empty())
+                baked.warnings.push_back(
+                    "注意: 世界の端(environment.world_edges)が全部 wall "
+                    "で大気(基準の大気もセルの気体も)が無い(閉じた真空の箱。"
+                    "空へ抜けるなら top = \"open\"、空気は environment.atmosphere_profile か atmosphere)");
+        }
+
     }  // namespace
 
     uint32_t BakedReactionTable::SpeciesId(std::string_view name) const {
@@ -584,6 +677,7 @@ namespace bicameral::sim {
             return std::unexpected(layout.error());
 
         baked.worldLayout = std::move(*layout);
+        WarnWorldSetting(baked);
 
         auto playMetrics = BakePlayMetrics(definition.playMetrics, baked);
         if (!playMetrics)
