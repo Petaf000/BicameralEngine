@@ -759,6 +759,27 @@ set_tests_properties(window_play_record PROPERTIES LABELS gpu FIXTURES_SETUP win
   PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
 set_tests_properties(window_play_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_play TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
+# 区画のある世界(T-0672・ADR-0310): ⑤ の場面(川の水 = 液体の区画・その上の空気 = 気体の区画)で --auto-play(置く物は気体の区画の真ん中)。
+# プレイ前の世界へ戻すのも、2 回のプレイのハッシュ列が同じなのも、区画の欄(保存点・状態のハッシュ。ADR-0300)まで含む。記録を別の起動で再生して同じハッシュ列
+set(WINDOW_REGIONS_SCENE ${PROJECT_SOURCE_DIR}/data/scenes/grass_fire_river)
+set(WINDOW_REGIONS_PLAY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_regions_play.bcreplay)
+add_test(NAME window_regions_play_record
+         COMMAND bicameral --packages ${WINDOW_REGIONS_SCENE} --editor --auto-play --frames 1200 --record ${WINDOW_REGIONS_PLAY_FILE})
+add_test(NAME window_regions_play_play COMMAND bicameral --replay ${WINDOW_REGIONS_PLAY_FILE} --target-fps 30)
+set_tests_properties(window_regions_play_record PROPERTIES LABELS gpu FIXTURES_SETUP window_regions_play TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
+set_tests_properties(window_regions_play_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_regions_play TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK")
+# 区画のある世界の写しの早送り(T-0672): 刻み 60 に写しを取り早送りし、写しの刻みごとのハッシュ(区画の寄与を含む)が本物と同じ(--auto-copy)
+set(WINDOW_REGIONS_COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_regions_copy.bcreplay)
+add_test(NAME window_regions_copy_record
+         COMMAND bicameral --packages ${WINDOW_REGIONS_SCENE} --editor --play --auto-ignite --auto-copy --frames 20000
+                 --record ${WINDOW_REGIONS_COPY_FILE})
+add_test(NAME window_regions_copy_play COMMAND bicameral --replay ${WINDOW_REGIONS_COPY_FILE} --target-fps 30)
+set_tests_properties(window_regions_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP window_regions_copy TIMEOUT 600
+  PASS_REGULAR_EXPRESSION "--auto-copy: OK")
+set_tests_properties(window_regions_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_regions_copy TIMEOUT 240
+  PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
 # 表の差し替えを編集として扱う(T-0548・ADR-0246): パッケージの写しの表(物質と重力を足す)を、編集の状態で書き換えると時間を進めずに
 # 当たり・元に戻す・やり直すでも残り・プレイをやめるとプレイ前の世界とファイルの今の中身の表に戻る(--auto-play-table。手順は frame/auto_play.h)。
 # 記録(最後の流れ。刻み 0 の始めに表の印)を、写しのフォルダが無くても再生ファイルの表だけで再生して同じハッシュ列

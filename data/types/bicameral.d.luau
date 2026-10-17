@@ -78,6 +78,20 @@ export type WorldBody = {
     mass_g: number, -- 質量(g)。0 = 動かない物(地面・壁)
 }
 
+-- 流れる区画(分類 gas_regions・liquid_regions。T-0671・ADR-0310 仮)。箱の中だけ気体・液体が流れる。書かなければ流れない。
+-- 今は世界に 1 つずつまで・格子(64 セル角)の中。気体は基準の大気が、液体は重力が要る
+export type GasRegion = {
+    min_cell: { number }, -- { x, y, z }(セル)
+    size_cells: { number }, -- { x, y, z }(セルの数)
+    boundary: { string }?, -- 箱の外の面 { x, y, z }: "wall"(既定)・"open"(外は基準の大気)・"periodic"
+}
+
+export type LiquidRegion = {
+    min_cell: { number }, -- { x, y, z }(セル)
+    size_cells: { number }, -- { x, y, z }(セルの数)
+    advection: boolean?, -- 運動量を液体と一緒に運ぶ(既定 true)
+}
+
 -- --- 材料のひな形・抽出の物質・既定(分類 material_templates・view_quantities・editor_defaults。T-0399)---
 -- 読み手は engine/src/script/material_templates_package.h。量は 1 セル(0.5 m 角)あたりの µmol
 export type MaterialAmount = {
@@ -176,6 +190,8 @@ export type PackageEntry = {
     reactions: { [string]: Reaction }?,
     world_cells: { [string]: WorldCellRegion }?,
     world_bodies: { [string]: WorldBody }?,
+    gas_regions: { [string]: GasRegion }?, -- 気体の区画(T-0671)
+    liquid_regions: { [string]: LiquidRegion }?, -- 液体の区画(T-0671)
     material_templates: { [string]: MaterialTemplate }?,
     view_quantities: ViewQuantities?,
     editor_defaults: EditorDefaults?,

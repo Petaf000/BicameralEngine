@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -68,6 +69,11 @@ namespace bicameral::script {
 
         [[nodiscard]] const std::shared_ptr<const LoadedReactionTable>& Current() const { return m_current; }
 
+        // 当てる前に世界に聞く検査(区画のある世界で区画の欄の作りが変わる表を断る。sim::ProbeSim::CheckRegionTableSwap。
+        // T-0672・ADR-0300)。断った表は Failed(理由付き)で、今の表のまま(ファイルの正本も古い表のまま。直せば次の Poll で読む)
+        using WorldCheck = std::function<std::expected<void, std::string>(const sim::BakedReactionTable&)>;
+        void SetWorldCheck(WorldCheck check) { m_worldCheck = std::move(check); }
+
     private:
         [[nodiscard]] uint64_t Fingerprint() const;
         [[nodiscard]] HotReloadResult Reload();
@@ -75,6 +81,7 @@ namespace bicameral::script {
         ReactionTableSource m_source;
         std::shared_ptr<const LoadedReactionTable> m_current;
         SpeciesChangePolicy m_policy = SpeciesChangePolicy::Reject;
+        WorldCheck m_worldCheck;  // 無ければ聞かない
         uint64_t m_seen = 0;     // 最後に読み直した(か作った時の)指紋
         uint64_t m_pending = 0;  // 変わったのを見た指紋(次の Poll で同じなら読み直す)
     };

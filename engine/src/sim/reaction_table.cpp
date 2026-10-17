@@ -550,12 +550,6 @@ namespace bicameral::sim {
 
         // --- 同じ読み込みに足した分類(世界のデータ。T-0398〜T-0400)。物質の名前を ID に直して確かめる(知らない物質は誤り)。
         // 分類ごとに別のファイルで行い、ここで 1 行ずつつなぐ ---
-        auto layout = BakeWorldLayout(ordered.worldLayout, baked);
-        if (!layout)
-            return std::unexpected(layout.error());
-
-        baked.worldLayout = std::move(*layout);
-
         auto templates = BakeMaterialTemplates(definition.templates, baked);
         if (!templates)
             return std::unexpected(templates.error());
@@ -569,6 +563,13 @@ namespace bicameral::sim {
             return std::unexpected(atmosphere.error());
 
         baked.atmosphere = std::move(*atmosphere);
+
+        // 世界の組み立て(流れる区画は環境の値と基準の大気を読むので、その後。T-0671)
+        auto layout = BakeWorldLayout(ordered.worldLayout, baked);
+        if (!layout)
+            return std::unexpected(layout.error());
+
+        baked.worldLayout = std::move(*layout);
 
         auto playMetrics = BakePlayMetrics(definition.playMetrics, baked);
         if (!playMetrics)

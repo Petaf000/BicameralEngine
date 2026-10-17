@@ -156,7 +156,9 @@ namespace bicameral::sim {
                                                                               const ProbeSimOptions& options) {
         const ProbeSimOptions shape{.physicsScene = options.physicsScene,
                                     .physicsOptions = options.physicsOptions,
-                                    .physicsParameters = options.physicsParameters};
+                                    .physicsParameters = options.physicsParameters,
+                                    .gas = options.gas,
+                                    .liquid = options.liquid};
         auto source = ProbeSim::Create(device, listType, table, shape);  // 初めの世界は表の世界の組み立て
         if (!source)
             return std::unexpected(std::format("指標の元の世界を作れない: {}", source.error()));
