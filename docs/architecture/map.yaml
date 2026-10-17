@@ -308,6 +308,9 @@ views:
       - { id: cellview, group: simlib, label: "MakeCellView<br/>セルの見立て(土台の段 1 ③。T-0713)<br/>相ごとの量・空き・熱・伝導の係数・圧力を 1 か所で",
           code: "shaders/common/cell_view.hlsli::MakeCellView", ticket: T-0713, doc: docs/decisions/ADR-0333-cell-view.md,
           note: "CPU と GPU が同じ関数。刻みごとに作り永続しない。今の熱のキャッシュ・MrCellThermal・ShareCellVolume・液体と気体の区画の数え方とビット一致(cell_view_test)。相の表は sim::MakeSpeciesPhases の 1 か所。置き換えは T-0714。ADR-0333" }
+      - { id: transportapply, group: simlib, label: "TxFlowCell<br/>面の帳簿と当てる段(土台の段 1 ④。T-0714)<br/>流す → 上限 → 当てる → 欄 → 帳簿 → 起こす",
+          code: "shaders/common/transport_apply.hlsli::TxFlowCell", ticket: T-0714, doc: docs/decisions/ADR-0334-transport-apply.md,
+          note: "種類は坂・面の式・安定の条件の 3 つだけを渡す(最初の種類は陽の伝導 TxConduction。transport_conduction.hlsli)。世界は面の隣・見立て・端数の置き場・変化の表を渡す。MR の CPU の伝導がこれを呼び、今の MR の試験とビット一致。上限は出る側・入る側の倍率(Q32。Jacobi)。ADR-0334" }
       - { id: gasprojection, group: simlib, label: "StepGasProjection<br/>気体の圧力を刻みの中で解く投影の模型(研究)<br/>陰的な音 = 熱の陰解法と同じ形の式を多重格子で",
           code: "engine/src/sim/gas_projection.cpp::StepGasProjection", ticket: T-0503, doc: docs/design/07-transport.md,
           note: "式を作る・当てるのは gas_reference の部品(BeginGasPressure / FinishGasPressure)。圧力が近似でも保存はビット単位。音速 340 m/s〜最速で V サイクル 1〜3 回/刻み。外側の反復(T-0530・ADR-0234): 仮に当てた状態の食い違いを右辺に足して解き直し、強い爆発も同じ刻みで釣り合う(上限 4)。07 §2.6" }

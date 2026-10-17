@@ -41,7 +41,7 @@ namespace bicameral::sim {
 
     namespace {
 
-        using nest_detail::CellThermals;
+        using nest_detail::CellViews;
         using nest_detail::CpuTree;
 
         constexpr uint32_t NOT_IN_SYSTEM = std::numeric_limits<uint32_t>::max();
@@ -68,7 +68,7 @@ namespace bicameral::sim {
         }
 
         // セルを系に足す(熱容量 0 なら足さない)。番号を返す
-        uint32_t AddCell(ImplicitSystem& system, const MultiresNest& nest, CellThermals& thermals, uint32_t slot,
+        uint32_t AddCell(ImplicitSystem& system, const MultiresNest& nest, CellViews& thermals, uint32_t slot,
                          uint32_t index) {
             const size_t address = (size_t{slot} * MR_BLOCK_CELLS) + index;
             if (system.ids[address] != NOT_IN_SYSTEM)
@@ -110,7 +110,7 @@ namespace bicameral::sim {
         }
 
         // 未知数のセル(基準より細かい)の 6 面。同じレベルの面は番号の小さい側が 1 回だけ足す。粗い側は境のセルとして足す
-        void AddCellFaces(ImplicitSystem& system, const MultiresNest& nest, CellThermals& thermals,
+        void AddCellFaces(ImplicitSystem& system, const MultiresNest& nest, CellViews& thermals,
                           std::span<const uint8_t> frozen, uint32_t id) {
             const CpuTree tree{.nest = &nest};
             const uint32_t slot = system.slots[id];
@@ -138,7 +138,7 @@ namespace bicameral::sim {
         }
 
         // 系を作る: まず未知数のセル(MarkImplicitBlocks が選んだブロック)を枠の順に全部足し(番号を先に決める)、次にその面と境のセル
-        ImplicitSystem MakeSystem(const MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
+        ImplicitSystem MakeSystem(const MultiresNest& nest, CellViews& thermals, std::span<const uint8_t> frozen,
                                   std::span<const uint8_t> implicitBlocks) {
             ImplicitSystem system;
             system.ids.assign(nest.blocks.size() * MR_BLOCK_CELLS, NOT_IN_SYSTEM);
@@ -182,7 +182,7 @@ namespace bicameral::sim {
         }
 
         // ブロックの未知数のセルの数(刻むセルで熱容量のあるもの。AddCell が足すものと同じ)
-        uint32_t CountUnknowns(const MultiresNest& nest, CellThermals& thermals, uint32_t slot) {
+        uint32_t CountUnknowns(const MultiresNest& nest, CellViews& thermals, uint32_t slot) {
             uint32_t count = 0;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (MrIsSteppedCell(nest.blocks[slot], index) && thermals.At(slot, index).capacityLimit != 0)
@@ -219,7 +219,7 @@ namespace bicameral::sim {
             return slot < implicitBlocks.size() && implicitBlocks[slot] != 0;
         }
 
-        std::vector<uint8_t> MarkImplicitBlocks(MultiresNest& nest, CellThermals& thermals,
+        std::vector<uint8_t> MarkImplicitBlocks(MultiresNest& nest, CellViews& thermals,
                                                 std::span<const uint8_t> frozen, const MultiresStepOptions& options) {
             std::vector<uint8_t> marks(nest.blocks.size(), 0);
             nest.implicitDeferredBlocks = 0;
@@ -249,7 +249,7 @@ namespace bicameral::sim {
             return marks;
         }
 
-        void AddImplicitConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
+        void AddImplicitConduction(MultiresNest& nest, CellViews& thermals, std::span<const uint8_t> frozen,
                                    std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
                                    std::span<MrEnergyDelta> deltas) {
             nest.implicitCost = {};

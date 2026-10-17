@@ -509,8 +509,9 @@ namespace bicameral::sim {
         }
 
         std::vector<BlockStepResult> StepBlocks(MultiresNest& nest, const ReactionTableView& view,
-                                                std::span<uint8_t> stepped, uint64_t worldSeed, uint64_t tick,
-                                                const MultiresStepOptions& options, uint32_t wakeMark) {
+                                                std::span<const CvSpeciesPhase> phases, std::span<uint8_t> stepped,
+                                                uint64_t worldSeed, uint64_t tick, const MultiresStepOptions& options,
+                                                uint32_t wakeMark) {
             const auto blockCount = static_cast<uint32_t>(nest.blocks.size());
             std::vector<BlockStepResult> results(blockCount);
 
@@ -546,7 +547,7 @@ namespace bicameral::sim {
             //     (刻まず、面の流れも 0)---
             std::vector<MrEnergyDelta> deltas;
             if (options.conduction)
-                deltas = StepConduction(nest, view, stepped, options, wakeMark, results);
+                deltas = StepConduction(nest, view, phases, stepped, options, wakeMark, results);
             else
                 ExpandForStep(nest, results);
 
@@ -710,8 +711,10 @@ namespace bicameral::sim {
             stepped[slot] = kind != MR_BLOCK_UNUSED && kind != MR_BLOCK_MIRROR ? 1 : 0;
         }
 
-        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(nest, table.View(), stepped,
-                                                                                          worldSeed, tick, options, 0);
+        // 伝導が読む見立ての相の表(表を差し替えても刻みごとに作るので後始末は要らない。T-0714)
+        const std::vector<CvSpeciesPhase> phases = MakeSpeciesPhases(table);
+        const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
+            nest, table.View(), phases, stepped, worldSeed, tick, options, 0);
         nest_detail::RecordWaitResults(nest, results, tick);
     }
 

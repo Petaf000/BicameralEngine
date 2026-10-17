@@ -7,7 +7,9 @@
 //   3. ComputeConduction: 端数の枠を枠の順に配り、刻むブロックのセルの面の流れを変化の表に足す
 //   4. (呼ぶ側)変化を足してから反応
 // 流れはどれも刻みの初めのセルから計算する(Jacobi 型。順に依存しない)。頁に広げても論理のセルは変わらないので、
-// セルの熱は刻みの中で 1 回だけ作って使い回す(CellThermals)。
+// セルの見立て(cell_view.hlsli の MakeCellView)は刻みの中で 1 回だけ作って使い回す(CellViews。永続しない)。
+// 面の流れと当てる順(流す → 上限 → 当てる → 欄 → 帳簿 → 起こす)は運ぶ計算の共通の土台の当てる段(common/transport_apply.hlsli の
+// TxFlowCell。T-0714・ADR-0334)、伝導の式は流れの種類 TxConduction(common/transport_conduction.hlsli)。ここは回し方(世界の約束)だけ。
 // 同じレベルの面は両側が同じ式で逆向きの値を出す(どちらも刻むことは活性が保証する。17 §5「活性」)。違うレベルの面は細かい側だけが
 // 計算して、粗いセルの変化(整数部 + 端数)を表に足す。浮動小数点は使わない(engine/src/sim は検査の対象)。
 // 細かいレベルの刻み(T-0108。StepConduction): レベル k の伝導を 1 刻みに 4^σ(k) 回の小刻みに分け、上の 1〜3 を小刻みごとに繰り返す。
@@ -19,7 +21,7 @@
 #include <algorithm>
 #include <array>
 
-#include "common/multires_conduction.hlsli"
+#include "common/transport_conduction.hlsli"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
 
@@ -30,7 +32,7 @@ namespace bicameral::sim {
 
     namespace {
 
-        using nest_detail::CellThermals;
+        using nest_detail::CellViews;
         using nest_detail::CpuTree;
 
         // レベル level の小刻みの数の指数(4^σ 回。T-0108)
@@ -38,64 +40,64 @@ namespace bicameral::sim {
             return MrSubcycleShift(level, options.subcycleBaseLevel, options.maxSubcycleGap);
         }
 
-        // セル 1 つの面の流れ
-        struct CellFaces {
-            int64_t sameLevelOutflow = 0;  // 同じレベルの面の流れの和(出ていくのが正。自分のレベルの単位)
-
-            // --- 粗い側への面(細かい単位の流れ。細かい → 粗いが正)---
-            uint32_t crossCount = 0;
-            std::array<MrFaceNeighbor, MR_FACES> crossNeighbors{};
-            std::array<int64_t, MR_FACES> crossFlows{};
-        };
+        // 伝導の流れの種類(安定の条件の値は options の小刻み。T-0108)
+        TxConduction MakeConductionKind(const MultiresStepOptions& options) {
+            return TxMakeConduction(options.subcycleBaseLevel, options.maxSubcycleGap);
+        }
 
         bool IsFrozen(std::span<const uint8_t> frozen, uint32_t slot) {
             return !frozen.empty() && frozen[slot] != 0;
         }
 
-        // 枠 slot のセル index の 6 面。細かい側の面(相手が計算する)・外(断熱)・凍らせたブロックとの面は流れない
-        CellFaces CollectCellFaces(const MultiresNest& nest, CellThermals& thermals, uint32_t slot, uint32_t index,
-                                   std::span<const uint8_t> frozen, std::span<const uint8_t> implicitBlocks,
-                                   const MultiresStepOptions& options) {
-            const CpuTree tree{.nest = &nest};
-            const MrBlock& block = nest.blocks[slot];
-            const bool joinsImplicit = slot < nest.capacity.worldBlocks && block.kind == MR_BLOCK_REAL;
-            const MrThermal self = thermals.At(slot, index);
-            const uint32_t shift = SubcycleShift(options, block.level);
+        // 伝導の世界(transport_apply.hlsli の World の約束): 面の隣・刻みの初めの見立て・端数の置き場・変化の表。
+        // 印の回(MarkConductionWants)は凍らせ・陰解法の印・変化の表を持たない
+        struct ConductionWorld {
+            const MultiresNest* nest = nullptr;
+            CellViews* views = nullptr;
+            std::span<const uint8_t> frozen;
+            std::span<const uint8_t> implicitBlocks;
+            std::span<MrEnergyDelta> deltas;
 
-            CellFaces faces;
-            for (uint32_t face = 0; face < MR_FACES; ++face) {
+            // 細かい側の面(相手が計算する)・外(断熱)は種類のまま返す。凍らせたブロックとの面と、陰解法で解くブロックとの同じレベルの面
+            // (こちらのセルが境のセルとして陰解法の系で受ける。T-0178)は流さない
+            [[nodiscard]] MrFaceNeighbor Neighbor(uint32_t slot, const MrBlock& block, uint32_t index,
+                                                  uint32_t face) const {
+                const CpuTree tree{.nest = nest};
                 const MrFaceNeighbor neighbor = MrFindFaceNeighbor(tree, slot, block, index, face,
-                                                                   nest.capacity.rootLevel);
+                                                                   nest->capacity.rootLevel);
                 if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
-                    continue;
+                    return neighbor;
 
+                const MrFaceNeighbor none = MrMakeFaceNeighbor(MR_NEIGHBOR_NONE, MR_NO_BLOCK, 0, 0);
                 if (IsFrozen(frozen, neighbor.slot))
-                    continue;
+                    return none;
 
-                // 陰解法で解くブロックとの同じレベルの面は、こちらのセルが境のセルとして陰解法の系で受ける(T-0178。上限で選ばれなかった側)
+                const bool joinsImplicit = slot < nest->capacity.worldBlocks && block.kind == MR_BLOCK_REAL;
                 if (neighbor.kind == MR_NEIGHBOR_SAME && joinsImplicit &&
                     nest_detail::IsImplicitBlock(implicitBlocks, neighbor.slot))
-                    continue;
+                    return none;
 
-                const MrThermal other = thermals.At(neighbor.slot, neighbor.index);
-                if (neighbor.kind == MR_NEIGHBOR_SAME) {
-                    faces.sameLevelOutflow += MrSubstepSameLevelFlow(self, other, block.level, shift);
-                    continue;
-                }
-
-                const uint32_t coarseShift = SubcycleShift(options, nest.blocks[neighbor.slot].level);
-                const int64_t flow = MrSubstepCrossLevelFlow(self, other, block.level, neighbor.gap, shift,
-                                                             coarseShift);
-                if (flow == 0)
-                    continue;
-
-                faces.crossNeighbors[faces.crossCount] = neighbor;
-                faces.crossFlows[faces.crossCount] = flow;
-                faces.crossCount += 1;
+                return neighbor;
             }
 
-            return faces;
-        }
+            [[nodiscard]] CvCellView View(uint32_t slot, uint32_t index) const { return views->View(slot, index); }
+            [[nodiscard]] int32_t Level(uint32_t slot) const { return nest->blocks[slot].level; }
+            [[nodiscard]] bool HasFraction(uint32_t slot) const {
+                return nest->blocks[slot].fraction != MR_NO_FRACTION;
+            }
+
+            // 伝導は上限の段を使わない(C/8 の安定の条件で行き過ぎない)・欄を持たない
+            [[nodiscard]] TxLimit Limit(uint32_t /*slot*/, uint32_t /*index*/) const { return TxNoLimit(); }
+            void FollowFields(uint32_t /*slot*/, uint32_t /*index*/) const {}
+
+            // 当てる: 頁のセルの変化の表に書き足す(粗い側も頁に広げてある。MarkConductionWants の印)
+            void Add(uint32_t slot, uint32_t index, const MrEnergyDelta& delta) const {
+                const MrBlock& block = nest->blocks[slot];
+                FX_ASSERT(!MrIsUniform(block));
+                MrEnergyDelta& entry = deltas[nest_detail::PageCellAddress(*nest, block.page, index)];
+                entry = MrAddEnergyDelta(entry, delta);
+            }
+        };
 
         bool IsSteppedSlot(std::span<const uint8_t> stepped, uint32_t slot) {
             return stepped[slot] != 0;
@@ -111,39 +113,53 @@ namespace bicameral::sim {
             return x == 0 || x == LAST || y == 0 || y == LAST || z == 0 || z == LAST;
         }
 
-        // 粗い側へ送る面を印にする(送るなら相手も変わるので一様なら頁に広げる。端数が要るなら相手に印)。送る面があれば true
-        bool MarkCrossSends(MultiresNest& nest, const CellFaces& faces, std::span<uint8_t> wantsFraction) {
+        // セル 1 つの面の流れを調べ、粗い側へ送る面を印にする(送るなら相手も変わるので一様なら頁に広げる。端数が要るなら相手に印)。
+        // 自分が変わるなら true(同じレベルの面の流れの和が 0 でないか、粗い側へ送る)。流れは端数の枠があるとした場合
+        bool MarkCellWants(MultiresNest& nest, const TxConduction& kind, const ConductionWorld& world, uint32_t slot,
+                           uint32_t index, std::span<uint8_t> wantsFraction) {
+            const MrBlock block = nest.blocks[slot];
+            const CvCellView self = world.View(slot, index);
+            int64_t sameLevelOutflow = 0;
             bool sends = false;
-            for (uint32_t i = 0; i < faces.crossCount; ++i) {
-                const MrCrossTransfer transfer = MrSplitCrossFlow(faces.crossFlows[i], faces.crossNeighbors[i].gap,
-                                                                  true);
+            for (uint32_t face = 0; face < MR_FACES; ++face) {
+                const MrFaceNeighbor neighbor = world.Neighbor(slot, block, index, face);
+                if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
+                    continue;
+
+                const int64_t flow = TxFaceFlow(kind, world, self, block.level, neighbor);
+                if (neighbor.kind == MR_NEIGHBOR_SAME) {
+                    sameLevelOutflow += flow;
+                    continue;
+                }
+
+                const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, true);
                 if (transfer.fineDelta == 0)
                     continue;
 
                 sends = true;
-                const uint32_t coarseSlot = faces.crossNeighbors[i].slot;
-                if (nest.blocks[coarseSlot].page == MR_NO_PAGE)
-                    nest.blocks[coarseSlot].page = MR_PAGE_WANTED;
+                if (nest.blocks[neighbor.slot].page == MR_NO_PAGE)
+                    nest.blocks[neighbor.slot].page = MR_PAGE_WANTED;
 
                 if (transfer.coarseDelta.fraction != 0)
-                    wantsFraction[coarseSlot] = 1;
+                    wantsFraction[neighbor.slot] = 1;
             }
 
-            return sends;
+            return sends || sameLevelOutflow != 0;
         }
 
         // 刻むブロック 1 つの面の流れを調べ、印を付ける。一様で流れがあれば自分も頁に広げる
-        void MarkBlockWants(MultiresNest& nest, CellThermals& thermals, uint32_t slot, std::span<uint8_t> wantsFraction,
+        void MarkBlockWants(MultiresNest& nest, CellViews& views, uint32_t slot, std::span<uint8_t> wantsFraction,
                             const MultiresStepOptions& options) {
+            const TxConduction kind = MakeConductionKind(options);
+            const ConductionWorld world{.nest = &nest, .views = &views};
             const bool uniform = MrIsUniform(nest.blocks[slot]);
             bool flows = false;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(nest.blocks[slot], index) || (uniform && !OnBlockSurface(index)))
                     continue;
 
-                const CellFaces faces = CollectCellFaces(nest, thermals, slot, index, {}, {}, options);
-                const bool sends = MarkCrossSends(nest, faces, wantsFraction);
-                flows = flows || sends || faces.sameLevelOutflow != 0;
+                const bool changes = MarkCellWants(nest, kind, world, slot, index, wantsFraction);
+                flows = flows || changes;
             }
 
             if (flows && nest.blocks[slot].page == MR_NO_PAGE)
@@ -170,31 +186,6 @@ namespace bicameral::sim {
             }
         }
 
-        // セル 1 つの面の流れを変化の表に足す(自分と、粗い側へ送った先)
-        void AddCellFlows(const MultiresNest& nest, CellThermals& thermals, uint32_t slot, uint32_t index,
-                          std::span<const uint8_t> frozen, std::span<const uint8_t> implicitBlocks,
-                          const MultiresStepOptions& options, std::span<MrEnergyDelta> deltas) {
-            const CellFaces faces = CollectCellFaces(nest, thermals, slot, index, frozen, implicitBlocks, options);
-            MrEnergyDelta own = MrMakeEnergyDelta();
-            own.whole = -faces.sameLevelOutflow;
-            for (uint32_t i = 0; i < faces.crossCount; ++i) {
-                const MrFaceNeighbor& coarse = faces.crossNeighbors[i];
-                const MrBlock& coarseBlock = nest.blocks[coarse.slot];
-                const MrCrossTransfer transfer = MrSplitCrossFlow(faces.crossFlows[i], coarse.gap,
-                                                                  coarseBlock.fraction != MR_NO_FRACTION);
-                if (transfer.fineDelta == 0)
-                    continue;
-
-                FX_ASSERT(!MrIsUniform(coarseBlock));
-                own.whole += transfer.fineDelta;
-                MrEnergyDelta& target = deltas[nest_detail::PageCellAddress(nest, coarseBlock.page, coarse.index)];
-                target = MrAddEnergyDelta(target, transfer.coarseDelta);
-            }
-
-            MrEnergyDelta& entry = deltas[nest_detail::PageCellAddress(nest, nest.blocks[slot].page, index)];
-            entry = MrAddEnergyDelta(entry, own);
-        }
-
         // 小刻み substep に小刻みが始まるブロックだけを刻む印
         void MarkSubstepBlocks(const MultiresNest& nest, std::span<const uint8_t> stepped, uint32_t substep,
                                const MultiresStepOptions& options, std::span<uint8_t> active) {
@@ -206,7 +197,7 @@ namespace bicameral::sim {
         }
 
         // 小刻み substep に小刻みが終わるレベルの頁のブロックに、溜めた変化を足して表を 0 に戻す。変わったブロックの枠を返す(枠の順)
-        std::vector<uint32_t> ApplyEndingDeltas(MultiresNest& nest, CellThermals& thermals, uint32_t substep,
+        std::vector<uint32_t> ApplyEndingDeltas(MultiresNest& nest, CellViews& views, uint32_t substep,
                                                 const MultiresStepOptions& options, std::span<MrEnergyDelta> deltas) {
             std::vector<uint32_t> changed;
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
@@ -218,7 +209,7 @@ namespace bicameral::sim {
                 bool blockChanged = false;
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     MrEnergyDelta& delta = deltas[nest_detail::PageCellAddress(nest, block.page, index)];
-                    if (!MrIsSteppedCell(block, index) || MrEnergyDeltaIsZero(delta))
+                    if (!MrIsSteppedCell(block, index) || !TxWakes(delta))
                         continue;
 
                     nest_detail::ApplyEnergyDelta(nest, slot, index, nest_detail::CellAt(nest, slot, index), delta);
@@ -229,7 +220,7 @@ namespace bicameral::sim {
                 if (!blockChanged)
                     continue;
 
-                thermals.Invalidate(slot);
+                views.Invalidate(slot);
                 changed.push_back(slot);
             }
 
@@ -254,48 +245,59 @@ namespace bicameral::sim {
 
     namespace nest_detail {
 
-        CellThermals::CellThermals(const MultiresNest& nest, const ReactionTableView& view)
+        CellViews::CellViews(const MultiresNest& nest, const ReactionTableView& view,
+                             std::span<const CvSpeciesPhase> phases)
             : m_nest(&nest),
-              m_view(view),
-              m_values(nest.blocks.size() * (MR_BLOCK_CELLS + 1)),
-              m_known(nest.blocks.size() * (MR_BLOCK_CELLS + 1), 0) {}
+              m_table{.reaction = view, .phases = phases},
+              m_values(nest.blocks.size()),
+              m_known(nest.blocks.size()) {}
 
-        MrThermal CellThermals::At(uint32_t slot, uint32_t index) {
-            const bool uniform = MrIsUniform(m_nest->blocks[slot]);
-            const size_t address = (size_t{slot} * (MR_BLOCK_CELLS + 1)) + (uniform ? MR_BLOCK_CELLS : index);
-            if (m_known[address] == 0) {
-                // 溢れを使う世界は溢れの成分の熱容量・伝導率も入れる(T-0187)
-                m_values[address] = m_nest->wideCells ? MrCellThermal(m_view, LoadWideNestCell(*m_nest, slot, index))
-                                                      : MrCellThermal(m_view, LoadNestCell(*m_nest, slot, index));
-                m_known[address] = 1;
+        const CvCellView& CellViews::View(uint32_t slot, uint32_t index) {
+            const MrBlock& block = m_nest->blocks[slot];
+            const size_t position = MrIsUniform(block) ? MR_BLOCK_CELLS : index;
+            std::vector<CvCellView>& values = m_values[slot];
+            std::vector<uint8_t>& known = m_known[slot];
+            if (values.empty()) {
+                values.resize(MR_BLOCK_CELLS + 1);
+                known.assign(MR_BLOCK_CELLS + 1, 0);
             }
 
-            return m_values[address];
+            if (known[position] == 0) {
+                // 溢れを使う世界は溢れの成分も入れる(T-0187)。伝導は圧力を読まないので基準の圧力は 0
+                values[position] = m_nest->wideCells
+                                       ? MakeCellView(m_table, LoadWideNestCell(*m_nest, slot, index), block.level, 0)
+                                       : MakeCellView(m_table, LoadNestCell(*m_nest, slot, index), block.level, 0);
+                known[position] = 1;
+            }
+
+            return values[position];
         }
 
-        void CellThermals::Invalidate(uint32_t slot) {
-            const auto first = static_cast<std::ptrdiff_t>(size_t{slot} * (MR_BLOCK_CELLS + 1));
-            std::fill(m_known.begin() + first, m_known.begin() + first + MR_BLOCK_CELLS + 1, uint8_t{0});
+        void CellViews::Invalidate(uint32_t slot) {
+            std::ranges::fill(m_known[slot], uint8_t{0});
         }
 
-        std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellThermals& thermals,
-                                                 std::span<const uint8_t> stepped, const MultiresStepOptions& options) {
+        std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellViews& views, std::span<const uint8_t> stepped,
+                                                 const MultiresStepOptions& options) {
             std::vector<uint8_t> wantsFraction(nest.blocks.size(), 0);
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
                 if (IsSteppedSlot(stepped, slot))
-                    MarkBlockWants(nest, thermals, slot, wantsFraction, options);
+                    MarkBlockWants(nest, views, slot, wantsFraction, options);
             }
 
             return wantsFraction;
         }
 
-        void ComputeConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> stepped,
+        void ComputeConduction(MultiresNest& nest, CellViews& views, std::span<const uint8_t> stepped,
                                std::span<const uint8_t> frozen, std::span<const uint8_t> wantsFraction,
                                std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
                                std::span<MrEnergyDelta> deltas) {
             AllocateConductionFractions(nest, frozen, wantsFraction);
 
-            // --- 刻む頁のブロック(凍らせたものを除く)のセルの面の流れ ---
+            // --- 刻む頁のブロック(凍らせたものを除く)のセルの面の流れを当てる段で(transport_apply.hlsli の TxFlowCell)---
+            const TxConduction kind = MakeConductionKind(options);
+            const ConductionWorld world{
+                .nest = &nest, .views = &views, .frozen = frozen, .implicitBlocks = implicitBlocks, .deltas = deltas};
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
                 const MrBlock& block = nest.blocks[slot];
                 if (!IsSteppedSlot(stepped, slot) || IsFrozen(frozen, slot) || MrIsUniform(block) ||
@@ -304,36 +306,37 @@ namespace bicameral::sim {
 
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     if (MrIsSteppedCell(block, index))
-                        AddCellFlows(nest, thermals, slot, index, frozen, implicitBlocks, options, deltas);
+                        TxFlowCell(kind, world, slot, block, index);
                 }
             }
         }
 
         std::vector<MrEnergyDelta> StepConduction(MultiresNest& nest, const ReactionTableView& view,
-                                                  std::span<uint8_t> stepped, const MultiresStepOptions& options,
-                                                  uint32_t wakeMark, std::span<BlockStepResult> results) {
+                                                  std::span<const CvSpeciesPhase> phases, std::span<uint8_t> stepped,
+                                                  const MultiresStepOptions& options, uint32_t wakeMark,
+                                                  std::span<BlockStepResult> results) {
             FX_ASSERT(options.maxSubcycleGap <= MULTIRES_MAX_SUBCYCLE_GAP);
             FX_ASSERT(!options.implicitConduction || options.maxSubcycleGap == 0);
             const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
-            CellThermals thermals(nest, view);
+            CellViews views(nest, view, phases);
             std::vector<MrEnergyDelta> deltas(nest.cells.size(), MrMakeEnergyDelta());
             std::vector<uint8_t> active(nest.blocks.size(), 0);
             for (uint32_t substep = 0;; ++substep) {
                 // --- 印 → 頁 → 端数の枠と流れ(T-0019 の 1 刻みと同じ順)---
                 MarkSubstepBlocks(nest, stepped, substep, options, active);
-                const std::vector<uint8_t> wantsFraction = MarkConductionWants(nest, thermals, active, options);
+                const std::vector<uint8_t> wantsFraction = MarkConductionWants(nest, views, active, options);
                 const std::vector<uint8_t> frozen = ExpandForStep(nest, results);
-                const std::vector<uint8_t> implicitBlocks = MarkImplicitBlocks(nest, thermals, frozen, options);
-                ComputeConduction(nest, thermals, active, frozen, wantsFraction, implicitBlocks, options, deltas);
+                const std::vector<uint8_t> implicitBlocks = MarkImplicitBlocks(nest, views, frozen, options);
+                ComputeConduction(nest, views, active, frozen, wantsFraction, implicitBlocks, options, deltas);
                 if (substep + 1 == substeps) {
                     if (options.implicitConduction)
-                        AddImplicitConduction(nest, thermals, frozen, implicitBlocks, options, deltas);
+                        AddImplicitConduction(nest, views, frozen, implicitBlocks, options, deltas);
 
                     return deltas;
                 }
 
                 // --- 小刻みが終わるレベルに変化を足す。変わったブロックの隣を起こす(活性)---
-                const std::vector<uint32_t> changed = ApplyEndingDeltas(nest, thermals, substep, options, deltas);
+                const std::vector<uint32_t> changed = ApplyEndingDeltas(nest, views, substep, options, deltas);
                 for (const uint32_t slot : changed)
                     results[slot].changed = true;
 

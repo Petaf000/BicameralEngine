@@ -145,6 +145,7 @@ bicameral_add_shader(sim/probe_surface.hlsl PROFILE cs_6_8 ENTRY BuildSurfaceMas
 bicameral_add_shader(sim/probe_conduct.hlsl PROFILE lib_6_8)  # 伝導の Work Graph(T-0005)
 bicameral_add_shader(sim/work_graph_limits_probe.hlsl PROFILE lib_6_8)  # ノードのカウンタと上限の試験(T-0008)
 bicameral_add_shader(sim/reaction_cells.hlsl PROFILE cs_6_8 ENTRY Main)  # 1 セルの反応の評価(T-0014)
+bicameral_add_shader(sim/transport_apply_check.hlsl PROFILE cs_6_8 ENTRY Main)  # 当てる段と伝導の種類が HLSL でコンパイルできるかだけ(T-0714。実行しない)
 bicameral_add_shader(sim/cell_view_check.hlsl PROFILE cs_6_8 ENTRY Main)  # セルの見立てが HLSL でコンパイルできるかだけ(T-0713。実行しない)
 # 物理の 1 刻みの Compute のパス(T-0090。呼ぶ順は engine/src/sim/gpu_physics.cpp)
 foreach(_entry IN ITEMS Initialize BeginSubstep Broadphase Narrowphase PrepareManifolds ColorRound FinishColoring Recollide SolveColor UpdateDuals UpdateVelocity Finish BuildManifolds CollectHeat HeatSum HeatShare HeatFinish)
