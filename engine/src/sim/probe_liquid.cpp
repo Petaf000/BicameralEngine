@@ -377,7 +377,9 @@ namespace bicameral::sim {
             for (const auto& kinetic : m_kinetic)
                 term = ProbeRegionHashAdd(term, kinetic[region]);
 
-            sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, m_potential[region]));
+            term = ProbeRegionHashAdd(term, m_potential[region]);
+            const uint64_t mass = region < m_mass.size() ? m_mass[region] : 0;  // GPU の欄は作った時 0
+            sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, (int64_t)mass));
         }
 
         // 帳簿: 外から入った運動量 × 3 → 位置のエネルギーの出入り

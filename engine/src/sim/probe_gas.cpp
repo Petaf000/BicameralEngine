@@ -471,7 +471,9 @@ namespace bicameral::sim {
             for (const int64_t momentum : m_momentum[region])
                 term = ProbeRegionHashAdd(term, momentum);
 
-            sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, m_kinetic[region]));
+            term = ProbeRegionHashAdd(term, m_kinetic[region]);
+            const uint64_t mass = region < m_mass.size() ? m_mass[region] : 0;  // GPU の欄は作った時 0
+            sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, (int64_t)mass));
         }
 
         // 帳簿: 物質 ID ごとの量 → エネルギー → 運動量 × 3(GPU の作業場の帳簿の並び)

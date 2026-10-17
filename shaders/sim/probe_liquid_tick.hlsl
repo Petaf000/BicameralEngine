@@ -861,7 +861,7 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
 }
 
     // --- 状態のハッシュ(T-0620。ハッシュの単位の HashCells の後。区画があるときだけ)---
-    // 区画のセルの持ち越す欄(面の運動量 × 3・面の運動のエネルギー × 3・位置のエネルギー)の寄与 + 帳簿の寄与(区画の番号 0 のスレッド)を、
+    // 区画のセルの持ち越す欄(面の運動量 × 3・面の運動のエネルギー × 3・位置のエネルギー・液体の質量)の寄与 + 帳簿の寄与(区画の番号 0 のスレッド)を、
     // S(t + 1) の欄の hash へ足す(common/probe_region_hash.hlsli。CPU は ProbeLiquidField::HashTerm)
     [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void LiquidHash(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const ProbeLiquidHeader header = Header();
@@ -876,7 +876,7 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
             term = ProbeRegionHashAdd(term, LoadSigned(FaceAddress(header, header.kineticOffset, kineticAxis, region)));
 
         term = ProbeRegionHashAdd(term, LoadSigned(CellAddress(header.potentialOffset, region)));
-        hash = ProbeRegionHashEnd(term);
+        hash = ProbeRegionHashEnd(ProbeRegionHashAdd(term, LoadSigned(CellAddress(header.massOffset, region))));
     }
 
     // 帳簿: 外から入った運動量 × 3 → 位置のエネルギーの出入り

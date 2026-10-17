@@ -533,7 +533,8 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
         uint64_t term = ProbeRegionHashBegin(PROBE_GAS_CELL_HASH_SEED, region);
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) term = ProbeRegionHashAdd(term, state.momentum[axis]);
 
-        hash = ProbeRegionHashEnd(ProbeRegionHashAdd(term, state.kinetic));
+        term = ProbeRegionHashAdd(term, state.kinetic);
+        hash = ProbeRegionHashEnd(ProbeRegionHashAdd(term, (int64_t)state.mass));
     }
 
     // 帳簿: 物質 ID ごとの量 → エネルギー → 運動量 × 3(格子の軸)の順に並んだ int64
