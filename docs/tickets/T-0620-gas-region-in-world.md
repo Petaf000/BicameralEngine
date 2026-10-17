@@ -32,6 +32,8 @@ T-0592 で仮の世界の GPU の刻みに気体の区画が載った(陽解法�
 - gpu_probe_rewind・gpu_probe_gas(と WARP)・gpu_probe_liquid(と WARP)・gpu_world_copy・gpu_play_metric・probe_gas・probe_liquid が通過
   (gpu_probe_gas は区画の寄与を含む毎刻みのハッシュが CPU と一致)。1 回だけ gpu_probe_gas が他の作業ツリーと GPU を取り合って 11 ms/刻みになり
   ctest の上限(300 秒)に当たった(ハッシュは全部一致。同じ組をもう 2 回流して通過)。release のビルド警告 0・archmap --check 通過。
+- main(T-0646・T-0656 の質量の欄)へ載せ直した後: gpu_probe_rewind・gpu_probe_rewind_regions・gpu_probe_gas(と WARP)・gpu_probe_liquid(と WARP)が通過
+  (載せ直した直後は、液体の質量が保存点の外にあって戻した後に食い違った → 液体の保存点を作業場の全部にし、質量をハッシュに足して直した)。
 
 ## 判断待ち(ユーザー。仮で進めたもの)
 1. **区画のある世界の表の差し替え(ADR-0300 の 3)**(作り手から見た違い):
