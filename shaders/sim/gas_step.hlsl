@@ -1,6 +1,7 @@
 // gas_step.hlsl — 気体の流れの 1 小刻みを GPU の Compute で(G3 の第 1 段。T-0185・07 §2.3)。1 レベルの箱だけ。
-// CPU リファレンスは engine/src/sim/gas_reference.cpp(G1・G2)で、各段はその関数を同じ式で写したもの。毎刻みビット一致を
-// tests/gpu_gas_test.cpp が確かめる。呼ぶ順は engine/src/sim/gpu_gas.cpp(段の間は UAV バリア)。
+// CPU リファレンスは engine/src/sim/gas_reference.cpp(G1・G2)。式は両方が shaders/common/gas_flow.hlsli の同じ関数を呼ぶ(T-0719。
+// GPU の欄の並びからの包みは gas_cell.hlsli)。ここにあるのは面とセルの回し方・欄の読み書き・帳簿だけ。毎刻みビット一致を
+// tests/gpu_gas_test.cpp が確かめる(回し方・atomic の取りこぼしの検査)。呼ぶ順は engine/src/sim/gpu_gas.cpp(段の間は UAV バリア)。
 //
 // 1 小刻み = 9 段。面の段は面の番号(セル × 6 + 軸 × 2 + 端の境界の面)ごとに 1 スレッド、セルの段はセルごとに 1 スレッド。
 //   GasDerive(セル): 導く値 → GasFaceForce(面): 力積と重さ → GasApplyForce(セル): 自分の面の力を集めて「力の後」のセル
@@ -260,31 +261,28 @@ uint32_t FaceOpen(GasFaceSides sides) {
     return min(SideOpen(sides.left), SideOpen(sides.right));
 }
 
-// 基準との質量の差(mg)。空きを読む箱では基準 × 空き と比べ、気体の無いセルは 0(gas_reference.cpp の Excess)
+// 基準との質量の差(mg。gas_flow.hlsli の GfExcess)。開いた境界の外・壁は 0
 int64_t Excess(GasSide side) {
     if (side.kind != SIDE_CELL)
         return 0;
 
-    const int64_t reference = (int64_t)g_referenceDerived[CellLayer(side.index)].mass;
-    if (GAS_P.openness == 0)
-        return (int64_t)g_derived[side.index].mass - reference;
+    return GfExcess(GasFlowParams(), g_derived[side.index].mass, g_referenceDerived[CellLayer(side.index)].mass,
+                    CellOpen(side.index));
+}
 
-    if (g_derived[side.index].mass == 0)
+// 縦の面で重さが働く側の質量の差(横の面・重さの無い箱は 0。gas_reference.cpp の VerticalExcess)
+int64_t VerticalExcess(GasFaceSides sides, GasSide side) {
+    if (sides.axis != 2 || GAS_P.gravity == 0)
         return 0;
 
-    return (int64_t)g_derived[side.index].mass - GasScaleTowardZero(reference, CellOpen(side.index), GAS_GPU_OPEN_FULL);
+    return Excess(side);
 }
 
-int64_t HalfHydrostatic(int64_t excess) {
-    return excess * (int64_t)GAS_P.hydrostatic / 20000;
-}
-
+// 圧力の拡散を起こす圧力の差(gas_flow.hlsli の GfDrivingPressure)
 int64_t DrivingPressure(GasFaceSides sides) {
-    const int64_t difference = SideDerived(sides.left).scaledPressure - SideDerived(sides.right).scaledPressure;
-    if (sides.axis != 2 || GAS_P.gravity == 0)
-        return difference;
-
-    return difference - HalfHydrostatic(Excess(sides.left) + Excess(sides.right));
+    return GfDrivingPressure(GasFlowParams(), sides.axis, SideDerived(sides.left).scaledPressure,
+                             SideDerived(sides.right).scaledPressure, VerticalExcess(sides, sides.left),
+                             VerticalExcess(sides, sides.right));
 }
 
 void LedgerAdd(uint32_t offset, int64_t value) {
@@ -345,16 +343,8 @@ bool IsDonor(bool right, int64_t flow) {
 // その側のセル自身の圧力(壁と同じ鏡。縦の面は半セルの静水圧で延ばす)。above = その側が面の上(+ 側)にある
 // (gas_reference.cpp の PartialImpulse)
 int64_t PartialImpulse(GasFaceSides sides, GasSide side, bool above, int64_t fullImpulse, uint32_t open) {
-    int64_t pressure = SideDerived(side).scaledPressure;
-    if (sides.axis == 2 && GAS_P.gravity != 0) {
-        const int64_t hydrostatic = HalfHydrostatic(Excess(side));
-        pressure += above ? hydrostatic : -hydrostatic;
-    }
-
-    const int64_t wall = FxMulShiftS64(pressure * 2, (int64_t)GAS_P.pressureImpulse, 16);
-
-    return GasScaleTowardZero(fullImpulse, open, GAS_GPU_OPEN_FULL) +
-           GasScaleTowardZero(wall, GAS_GPU_OPEN_FULL - open, GAS_GPU_OPEN_FULL);
+    return GfPartialImpulse(GasFlowParams(), sides.axis, SideDerived(side).scaledPressure, VerticalExcess(sides, side),
+                            above, fullImpulse, open);
 }
 
 // 空きを読む箱の面の力積(gas_reference.cpp の ComputeFaceForce の後半): 一部だけ開いた面は両側が違う力積を受け、
@@ -381,40 +371,25 @@ void ApplyFaceOpenness(GasFaceSides sides, inout GasGpuFace face) {
     if (!FaceSidesOf(faceId, sides))
         return;
 
+    const GfParams params = GasFlowParams();
     GasGpuFace face = LoadFace(faceId);
-    face.impulse = 0;
-    face.weightLeft = 0;
-    face.weightRight = 0;
 
-    // --- 重さ(縦の面。両側の質量の差の平均 × g を 1/4 ずつ。壁の面は手前のセルだけ)---
-    if (sides.axis == 2 && GAS_P.gravity != 0) {
-        const int64_t coefficient = (int64_t)GAS_P.gravityImpulse;
-        if (sides.left.kind == SIDE_WALL)
-            face.weightRight = FxMulShiftS64(Excess(sides.right), coefficient, 17);
-        else if (sides.right.kind == SIDE_WALL)
-            face.weightLeft = FxMulShiftS64(Excess(sides.left), coefficient, 17);
-        else {
-            const int64_t quarter = FxMulShiftS64(Excess(sides.left) + Excess(sides.right), coefficient, 18);
-            face.weightLeft = quarter;
-            face.weightRight = quarter;
-        }
-    }
+    // --- 重さ(縦の面。両側の質量の差の平均 × g を 1/4 ずつ。壁の面は手前のセルだけ。gas_flow.hlsli の GfFaceWeight)---
+    const bool leftWall = sides.left.kind == SIDE_WALL;
+    const bool rightWall = sides.right.kind == SIDE_WALL;
+    const GfWeights weights = GfFaceWeight(params, sides.axis, leftWall, rightWall, VerticalExcess(sides, sides.left),
+                                           VerticalExcess(sides, sides.right));
+    face.weightLeft = weights.left;
+    face.weightRight = weights.right;
 
     // --- 圧力の力積(壁は手前のセルの p̃ を鏡に映す。縦の壁は半セル分の静水圧で延ばす)---
-    const int64_t impulseCoefficient = (int64_t)GAS_P.pressureImpulse;
-    if (sides.left.kind == SIDE_WALL || sides.right.kind == SIDE_WALL) {
-        const bool wallBelow = sides.left.kind == SIDE_WALL;
-        const GasSide inside = PickSide(wallBelow, sides.right, sides.left);
-        int64_t pressure = g_derived[inside.index].scaledPressure;
-        if (sides.axis == 2 && GAS_P.gravity != 0) {
-            const int64_t hydrostatic = HalfHydrostatic(Excess(inside));
-            pressure += wallBelow ? hydrostatic : -hydrostatic;
-        }
-
-        face.impulse = FxMulShiftS64(pressure * 2, impulseCoefficient, 16);
+    if (leftWall || rightWall) {
+        const GasSide inside = PickSide(leftWall, sides.right, sides.left);
+        face.impulse = GfMirrorImpulse(params, sides.axis, g_derived[inside.index].scaledPressure,
+                                       VerticalExcess(sides, inside), leftWall);
     } else {
-        const int64_t pressureSum = SideDerived(sides.left).scaledPressure + SideDerived(sides.right).scaledPressure;
-        face.impulse = FxMulShiftS64(pressureSum, impulseCoefficient, 16);
+        face.impulse = GfSharedImpulse(params, SideDerived(sides.left).scaledPressure,
+                                       SideDerived(sides.right).scaledPressure);
     }
 
     face.impulseRight = face.impulse;
@@ -473,28 +448,16 @@ void ApplyFaceOpenness(GasFaceSides sides, inout GasGpuFace face) {
         return;
 
     int64_t flow = 0;
-    const uint32_t open = FaceOpen(sides);
-    if (sides.left.kind != SIDE_WALL && sides.right.kind != SIDE_WALL && open != 0) {
-        // 一部だけ開いた面は、各側の運動量を「面の開き ÷ その側の空き」倍、圧力の拡散を開きの倍(gas_reference.cpp の ComputeFaceFlow)
-        const int64_t leftMomentum = ForcedSideCell(sides.left).momentum[sides.axis];
-        const int64_t rightMomentum = ForcedSideCell(sides.right).momentum[sides.axis];
-        int64_t momentumSum = leftMomentum + rightMomentum;
-        int64_t driving = DrivingPressure(sides);
-        if (open != GAS_GPU_OPEN_FULL) {
-            momentumSum = GasScaleTowardZero(leftMomentum, open, SideOpen(sides.left)) +
-                          GasScaleTowardZero(rightMomentum, open, SideOpen(sides.right));
-            driving = GasScaleTowardZero(driving, open, GAS_GPU_OPEN_FULL);
-        }
-
-        const int64_t central = FxMulShiftS64(momentumSum, (int64_t)GAS_P.centralFlow, 52);
-        const int64_t diffusion = FxMulShiftS64(driving, (int64_t)GAS_P.pressureFlow, 40);
-        flow = central + diffusion;
+    if (sides.left.kind != SIDE_WALL && sides.right.kind != SIDE_WALL && FaceOpen(sides) != 0) {
+        flow = GfFaceFlow(GasFlowParams(), ForcedSideCell(sides.left).momentum[sides.axis],
+                          ForcedSideCell(sides.right).momentum[sides.axis], SideOpen(sides.left), SideOpen(sides.right),
+                          DrivingPressure(sides));
     }
 
     uint64_t fraction = 0;
     if (flow != 0) {
         const GasSide donor = PickSide(flow > 0, sides.left, sides.right);
-        fraction = MulShiftU64(FxAbsU64(flow), SideDerived(donor).inverseMass, 32);
+        fraction = GfRawFraction(flow, SideDerived(donor).inverseMass);
     }
 
     g_faces.Store<int64_t>(FaceAddress(faceId) + FACE_FLOW, flow);
@@ -564,42 +527,14 @@ MusclSides MusclSidesOf(GasFaceSides sides, int64_t flow) {
     return muscl;
 }
 
-int64_t SpeciesRatio(GasSide side, uint64_t inverseAmount, uint32_t s) {
-    return (int64_t)MulShiftU64(ForcedSideAmount(side, s), inverseAmount, 32);
-}
-
+// 風上のセルの割合から面へ延ばす差(gas_flow.hlsli の GfHalfSlope)。使えない並びは 0
 int64_t HalfSlope(MusclSides muscl, uint64_t fraction, uint32_t s) {
     if (!muscl.usable)
         return 0;
 
-    const int64_t donorRatio = SpeciesRatio(muscl.donor, muscl.donorInverse, s);
-    const int64_t outerRatio = SpeciesRatio(muscl.outer, muscl.outerInverse, s);
-    const int64_t receiverRatio = SpeciesRatio(muscl.receiver, muscl.receiverInverse, s);
-    const int64_t slope = LimitedSlope(donorRatio - outerRatio, receiverRatio - donorRatio);
-
-    return FxMulShiftS64(slope, (int64_t)(ONE_Q32 - fraction), 33);
-}
-
-// 引く側は「0 で止める引き算」(a > b ? a − b : 0)の形を書かない: NVIDIA のドライバ(RTX 3070 Ti)が 64bit のこの形を誤って下ろし、
-// 上位 32bit がでたらめな値になった(debug の DXIL。WARP は一致。T-0124 の飽和する足し算と同じ類い。T-0185)。
-// 符号付きの差を出してから 0 以下を 0 にする(同じ値: moved < 2^63・correction < 2^63。物質量 < 2^31 と割合 ≤ 2^32 から)。
-// sourceTotal = 風上の物質量の合計
-uint64_t MovedAmountQ32(MusclSides muscl, uint64_t sourceAmount, uint64_t sourceTotal, uint64_t fraction, uint32_t s) {
-    const uint64_t moved = sourceAmount * fraction;
-    if (GAS_P.reconstruction == GAS_GPU_RECONSTRUCTION_UPWIND)
-        return moved;
-
-    const int64_t halfSlope = HalfSlope(muscl, fraction, s);
-    const uint64_t total = sourceTotal * fraction;
-    const uint64_t correction = MulShiftU64(total, FxAbsU64(halfSlope), 32);
-    if (halfSlope >= 0)
-        return moved + correction;
-
-    const int64_t remaining = (int64_t)moved - (int64_t)correction;
-    if (remaining <= 0)
-        return 0;
-
-    return (uint64_t)remaining;
+    return GfHalfSlope(GasFlowParams(), GfSpeciesRatio(ForcedSideAmount(muscl.outer, s), muscl.outerInverse),
+                       GfSpeciesRatio(ForcedSideAmount(muscl.donor, s), muscl.donorInverse),
+                       GfSpeciesRatio(ForcedSideAmount(muscl.receiver, s), muscl.receiverInverse), fraction);
 }
 
 // --- 段 6: 割合を抑え、移す成分の物質量(面。gas_reference.cpp の LimitOutflow の 2 回目・ComputeMovedAmounts)---
@@ -611,11 +546,8 @@ uint64_t MovedAmountQ32(MusclSides muscl, uint64_t sourceAmount, uint64_t source
     const GasGpuFace face = LoadFace(faceId);
     const GasSide donor = PickSide(face.flow > 0, sides.left, sides.right);
     uint64_t fraction = face.fraction;
-    if (fraction != 0 && donor.kind == SIDE_CELL) {
-        const uint64_t outflow = g_sums.Load<uint64_t>(SumsAddress(donor.index));
-        if (outflow > ONE_Q32)
-            fraction = FxDivU128By64(FxMulU64Full(fraction, ONE_Q32), outflow).quotient;
-    }
+    if (donor.kind == SIDE_CELL)
+        fraction = GfLimitFraction(fraction, g_sums.Load<uint64_t>(SumsAddress(donor.index)));
 
     g_faces.Store<uint64_t>(FaceAddress(faceId) + FACE_FRACTION, fraction);
     const uint32_t speciesCount = SpeciesCount();
@@ -633,12 +565,14 @@ uint64_t MovedAmountQ32(MusclSides muscl, uint64_t sourceAmount, uint64_t source
             sourceTotal += ForcedSideAmount(donor, t);
     }
 
+    const GfParams params = GasFlowParams();
     const MusclSides muscl = MusclSidesOf(sides, face.flow);
     const uint64_t roundingTick = FX_U64(g_roundingTickHigh, g_roundingTickLow);
-    const uint64_t faceHash = FxHash64(GAS_P.randomSeed, roundingTick, faceId, GAS_ROUNDING_PURPOSE);
+    const uint64_t faceHash = GfFaceHash(GAS_P.randomSeed, roundingTick, faceId);
     for (uint32_t s = 0; s < speciesCount; ++s) {
-        const uint64_t amountQ32 = MovedAmountQ32(muscl, ForcedSideAmount(donor, s), sourceTotal, fraction, s);
-        const uint64_t moved = RoundAmount(amountQ32, FxHashCombine(faceHash, GAS_SPECIES(s).roundingKey));
+        const uint64_t amountQ32 = GfMovedAmountQ32(params, ForcedSideAmount(donor, s), sourceTotal, fraction,
+                                                    HalfSlope(muscl, fraction, s));
+        const uint64_t moved = GfRoundAmount(params, amountQ32, FxHashCombine(faceHash, GAS_SPECIES(s).roundingKey));
         g_faces.Store<uint64_t>(FaceMovedAddress(faceId, s), moved);
     }
 }
@@ -668,16 +602,6 @@ uint64_t MovedAmountQ32(MusclSides muscl, uint64_t sourceAmount, uint64_t source
     }
 }
 
-// 重さの仕事(µJ。gas_reference.cpp の GravityWork): 縦の面を上へ動く塊が失う m g Δx(movedMass = 移す塊の質量)
-int64_t GravityWork(uint32_t axis, int64_t flow, uint64_t movedMass) {
-    if (axis != 2 || GAS_P.gravity == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
-        return 0;
-
-    const int64_t work = (int64_t)(movedMass * GAS_P.gravityWork / MICRO);
-
-    return flow > 0 ? work : -work;
-}
-
 // --- 段 8: 中身を超えた成分を抑え、移すエネルギーと運動量(面。gas_reference.cpp の LimitMovedAmounts の 2 回目・Transfer の前半)---
 [numthreads(64, 1, 1)] void GasFaceFinal(uint32_t faceId : SV_DispatchThreadID) {
     GasFaceSides sides;
@@ -704,7 +628,7 @@ int64_t GravityWork(uint32_t axis, int64_t flow, uint64_t movedMass) {
         if (donor.kind == SIDE_CELL) {
             const uint64_t total = g_sums.Load<uint64_t>(OutgoingAddress(donor.index, s));
             if (total > content) {
-                moved = FxDivU128By64(FxMulU64Full(moved, content), total).quotient;
+                moved = GfLimitMovedAmount(moved, content, total);
                 g_faces.Store<uint64_t>(FaceMovedAddress(faceId, s), moved);
             }
         }
@@ -719,9 +643,10 @@ int64_t GravityWork(uint32_t axis, int64_t flow, uint64_t movedMass) {
     const GasGpuCell source = ForcedSideCell(donor);
     const int64_t energy = MovedEnergy(source, sourceTotals, SideDerived(donor), movedTotals, face.fraction);
     face.movedEnergy = DivideNearest(energy, 1000);
-    face.receivedEnergy = DivideNearest(energy - GravityWork(sides.axis, face.flow, movedTotals.mass), 1000);
+    face.receivedEnergy = DivideNearest(
+        energy - GfGravityWork(GasFlowParams(), sides.axis, face.flow, movedTotals.mass), 1000);
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis)
-        face.movedMomentum[axis] = FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
+        face.movedMomentum[axis] = GfMovedMomentum(source.momentum[axis], face.fraction);
 
     g_faces.Store<GasGpuFace>(FaceAddress(faceId), face);
 
