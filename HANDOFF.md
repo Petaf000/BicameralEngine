@@ -9,6 +9,7 @@
 
 ## この仕事でしたこと(2026-10-17・③' 段 0〜4 のマージの確かめと記録)
 - 確かめ(release・RTX 3070 Ti。組み合わせの試験): ビルド警告 0 / CPU 82 本(^[a-fhj-vx-z] 76・^gas 3・^w[eo] 3)・GPU 71 本(gpu_probe_gas/liquid と warp 4・gpu_gas 系 6・gpu_lab_box/gpu_reaction 系 8・gpu_multires の 1 語の組 10・2 語の組〔near_fold・subcycle_stress・wide_* 6〕8・陰解法の HW 16・gpu_probe_ph 4・gpu_probe_[st][ir] 6・gpu_probe_[bfpr][eilr] 9)・窓 46 本(9 組)・image 5 本・archmap --check。全部通った(直したものは無い)。GPU の待ち(gpuwait)で 1 巡 約 2 時間 20 分。
+- マージ: **t-0757**(T-0757 浅い池の揺れが育つ不具合。liquid_flow.hlsli の横の面の力・ADR-0327・T-0759 を分けた)。自動で合わさった。確かめ: release ビルド警告 0・probe_liquid・probe_phase(_porous_stone)・cell_volume・rest_return・gpu_probe_liquid(_warp)・archmap --check が通った。ADR-0327 は一旦の決定として Accepted(D-517)。
 - 決定: **D-516**(T-0723 の研究の答え。案 A + C + 静止の丸め)・**D-517**(T-0757。液体の横の面は触れる高さだけ押す。ADR-0327 を一旦の決定として Accepted)。ADR-0326 の「未確認: 活性」と T-0723 のチケットに答えを書いた。
 - 文書: ROADMAP ③' の行(済み 11 本 + T-0762・足した行 T-0757・T-0758・T-0760・T-0761・T-0766・T-0767・T-0769・T-0770・T-0772・T-0773・作業中の印)・QUESTIONS Q114〜Q118(ADR-0329・0331・0333・0334・0337 の仮を作り手から見た違いで)・NEXT・COMMANDER の番号(次は T-0774・ADR-0338・D-518・Q119)。
 
