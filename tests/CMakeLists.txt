@@ -169,6 +169,13 @@ target_link_libraries(probe_liquid_test PRIVATE bicameral_test_reaction_table bi
 add_test(NAME probe_liquid COMMAND probe_liquid_test)
 set_tests_properties(probe_liquid PROPERTIES TIMEOUT 1800)
 
+# 乱した気体・液体が眠りに戻るか(T-0723。研究): 静止の丸めを入れても保存と決定性・活性のブロックの推移(--long は打ち切り条件の場面)
+add_executable(rest_return_test rest_return_test.cpp)
+target_precompile_headers(rest_return_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(rest_return_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME rest_return COMMAND rest_return_test)
+set_tests_properties(rest_return PROPERTIES TIMEOUT 1800)
+
 add_executable(probe_phase_test probe_phase_test.cpp)  # 水の相変化を反応表の規則で(T-0611・ADR-0272。CPU だけ)
 target_precompile_headers(probe_phase_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(probe_phase_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)

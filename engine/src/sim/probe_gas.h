@@ -70,6 +70,11 @@ namespace bicameral::sim {
             projection;           // 投影の設定(音速は projection.pressure.soundSpeedMmPerS。既定 0 = 最速。D-467)
         uint64_t randomSeed = 0;  // 移す物質量の乱数の丸めの種(世界のシード。R6)
 
+        // --- 静止の丸め(T-0723。研究・CPU だけ。0 = 切る〔既定。今までとビット単位で同じ〕)---
+        // 刻みの終わりに、速さがどの軸も restSpeedUnits 単位(2^-20 m/s)未満のセルの運動量を 0 にし、運動エネルギーのぶんを
+        // そのセルの熱へ移す(エネルギーの和は変わらない)。消した運動量は帳簿へ(世界の帳簿の列「静止の丸め」WL_REASON_REST_ROUNDING)
+        uint32_t restSpeedUnits = 0;
+
         [[nodiscard]] bool Enabled() const { return sizeCells[0] != 0 && sizeCells[1] != 0 && sizeCells[2] != 0; }
     };
 
@@ -78,6 +83,10 @@ namespace bicameral::sim {
         std::vector<int64_t> amounts;                 // µmol。添字 = 物質 ID
         int64_t energy = 0;                           // mJ(開いた境界の出入り + 重さの仕事。07 §2.4)
         std::array<int64_t, GAS_AXES> momentum = {};  // 格子の軸 x・y・z の順
+
+        // 内訳: 静止の丸め(T-0723)で消した運動量(momentum に含む)と熱へ移した運動エネルギー(mJ。セルの中で移すので energy には入れない)
+        std::array<int64_t, GAS_AXES> restMomentum = {};
+        int64_t restEnergy = 0;
     };
 
     // 1 刻みの報告
@@ -86,6 +95,7 @@ namespace bicameral::sim {
         // 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超えるので流さなかった(何も変えない。溢れのセルは R-MULTI-4)
         bool skippedCellOverflow = false;
         uint32_t changedCells = 0;     // 値が変わったセルの数
+        uint32_t restedCells = 0;      // 静止の丸めで止めたセルの数(T-0723)
         GasProjectionCost projection;  // 投影の費用(投影のときだけ)
 
         // --- セルの空き(固体と液体が占めない体積。T-0593・ADR-0268)---
