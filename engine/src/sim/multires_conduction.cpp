@@ -18,6 +18,8 @@
 // 活性(StepActive)では、小刻みで変わったブロックの面の隣を起こし、以後の小刻みから刻む(流れのある面は両側とも刻む、を小刻みでも保つ)。
 // 細かいレベルの熱の陰解法(T-0119。options.implicitConduction): 基準より細かい本物のブロックの面はここでは計算せず、最後に
 // AddImplicitConduction(multires_implicit_conduction.cpp)が陰解法の 1 刻みで解いて変化の表に足す(印と頁・端数の枠はここと同じ)。
+// 世界の端(T-0721・ADR-0337。common/world_edge.hlsli): 面の先が開いた端なら面の隣は MR_NEIGHBOR_EDGE(外の柱の行)で、当てる段が
+// 外のセル(World::Outside)を同じレベルの相手として流し、流れた分を世界の帳簿の「世界の端」へ載せる(World::AddEdge)。
 #include <algorithm>
 #include <array>
 
@@ -57,14 +59,21 @@ namespace bicameral::sim {
             std::span<const uint8_t> frozen;
             std::span<const uint8_t> implicitBlocks;
             std::span<MrEnergyDelta> deltas;
+            MultiresNest* ledger = nullptr;  // 帳簿を書く世界(当てる回だけ。印の回は帳簿を書かない)
 
-            // 細かい側の面(相手が計算する)・外(断熱)は種類のまま返す。凍らせたブロックとの面と、陰解法で解くブロックとの同じレベルの面
+            // 細かい側の面(相手が計算する)は種類のまま、世界の外は開いた端なら MR_NEIGHBOR_EDGE(外の柱の行)・wall なら NONE を返す(T-0721)。凍らせたブロックとの面と、陰解法で解くブロックとの同じレベルの面
             // (こちらのセルが境のセルとして陰解法の系で受ける。T-0178)は流さない
             [[nodiscard]] MrFaceNeighbor Neighbor(uint32_t slot, const MrBlock& block, uint32_t index,
                                                   uint32_t face) const {
                 const CpuTree tree{.nest = nest};
                 const MrFaceNeighbor neighbor = MrFindFaceNeighbor(tree, slot, block, index, face,
                                                                    nest->capacity.rootLevel);
+                if (neighbor.kind == MR_NEIGHBOR_NONE) {
+                    const MultiresWorldEdges& edges = nest->edges;
+                    return WeEdgeNeighbor(edges.world, edges.columnBaseZ, static_cast<uint32_t>(edges.column.size()),
+                                          block, index, face);
+                }
+
                 if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
                     return neighbor;
 
@@ -81,6 +90,9 @@ namespace bicameral::sim {
             }
 
             [[nodiscard]] CvCellView View(uint32_t slot, uint32_t index) const { return views->View(slot, index); }
+
+            // 開いた世界の端の外のセルの見立て(外の柱の行 row を自分と同じレベル level で。T-0721)
+            [[nodiscard]] CvCellView Outside(uint32_t row, int32_t level) const { return views->Outside(row, level); }
             [[nodiscard]] int32_t Level(uint32_t slot) const { return nest->blocks[slot].level; }
             [[nodiscard]] bool HasFraction(uint32_t slot) const {
                 return nest->blocks[slot].fraction != MR_NO_FRACTION;
@@ -96,6 +108,18 @@ namespace bicameral::sim {
                 FX_ASSERT(!MrIsUniform(block));
                 MrEnergyDelta& entry = deltas[nest_detail::PageCellAddress(*nest, block.page, index)];
                 entry = MrAddEnergyDelta(entry, delta);
+            }
+
+            // 5 帳簿: 開いた端の面の流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
+            // (出 = 外へ出た・入 = 外から入った。T-0762 の帳簿の書き方の約束)
+            void AddEdge(uint32_t slot, uint32_t /*index*/, int64_t outflow) const {
+                if (outflow == 0)
+                    return;
+
+                FX_ASSERT(ledger != nullptr);
+                const WlSignedEntry entry = WlEnergyEntry(outflow, WL_DIRECTION_OUT);
+                AddWorldLedgerUnits(*ledger, WlSlot(WL_REASON_WORLD_EDGE, entry.direction), nest->blocks[slot].level,
+                                    WL_COLUMN_ENERGY, entry.magnitude);
             }
         };
 
@@ -123,11 +147,13 @@ namespace bicameral::sim {
             bool sends = false;
             for (uint32_t face = 0; face < MR_FACES; ++face) {
                 const MrFaceNeighbor neighbor = world.Neighbor(slot, block, index, face);
-                if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
+                if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER &&
+                    neighbor.kind != MR_NEIGHBOR_EDGE)
                     continue;
 
+                // 開いた世界の端の面も自分だけが変わる(同じレベルの面と同じ数え方。T-0721)
                 const int64_t flow = TxFaceFlow(kind, world, self, block.level, neighbor);
-                if (neighbor.kind == MR_NEIGHBOR_SAME) {
+                if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_EDGE) {
                     sameLevelOutflow += flow;
                     continue;
                 }
@@ -273,6 +299,10 @@ namespace bicameral::sim {
             return values[position];
         }
 
+        CvCellView CellViews::Outside(uint32_t row, int32_t level) const {
+            return MakeCellView(m_table, m_nest->edges.column[row], level, 0);
+        }
+
         void CellViews::Invalidate(uint32_t slot) {
             std::ranges::fill(m_known[slot], uint8_t{0});
         }
@@ -296,8 +326,12 @@ namespace bicameral::sim {
 
             // --- 刻む頁のブロック(凍らせたものを除く)のセルの面の流れを当てる段で(transport_apply.hlsli の TxFlowCell)---
             const TxConduction kind = MakeConductionKind(options);
-            const ConductionWorld world{
-                .nest = &nest, .views = &views, .frozen = frozen, .implicitBlocks = implicitBlocks, .deltas = deltas};
+            const ConductionWorld world{.nest = &nest,
+                                        .views = &views,
+                                        .frozen = frozen,
+                                        .implicitBlocks = implicitBlocks,
+                                        .deltas = deltas,
+                                        .ledger = &nest};
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
                 const MrBlock& block = nest.blocks[slot];
                 if (!IsSteppedSlot(stepped, slot) || IsFrozen(frozen, slot) || MrIsUniform(block) ||

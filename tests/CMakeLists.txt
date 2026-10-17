@@ -295,6 +295,10 @@ add_executable(multires_conduction_test multires_conduction_test.cpp)  # 木の�
 target_link_libraries(multires_conduction_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_conduction COMMAND multires_conduction_test)
 
+add_executable(multires_edge_test multires_edge_test.cpp)  # 世界の端(open / wall・外のセル・帳簿。T-0721)
+target_link_libraries(multires_edge_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_edge COMMAND multires_edge_test)
+
 add_executable(lab_box_test lab_box_test.cpp)  # 実験室の箱の CPU 側(T-0142)
 target_link_libraries(lab_box_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME lab_box COMMAND lab_box_test)
@@ -956,7 +960,7 @@ foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
     multires_state_test
-    multires_conduction_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
+    multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test

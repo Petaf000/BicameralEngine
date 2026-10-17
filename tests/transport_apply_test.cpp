@@ -106,6 +106,8 @@ namespace {
 
         [[nodiscard]] CvCellView View(uint32_t /*slot*/, uint32_t /*index*/) const { return other; }
         [[nodiscard]] int32_t Level(uint32_t /*slot*/) const { return otherLevel; }
+        // 開いた世界の端の外のセル(T-0721。この試験では端を流さないが、TxFaceFlow が読む約束)
+        [[nodiscard]] CvCellView Outside(uint32_t /*row*/, int32_t /*level*/) const { return other; }
     };
 
     MrThermal RandomThermal(Random& random) {
