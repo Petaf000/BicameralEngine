@@ -1,6 +1,6 @@
 # T-0762 状態の登録と世界の帳簿の合流(欄の余りを帳簿の列へ・列を登録から・保存の検査に欄の和)
 
-- Status: Doing
+- Status: Done(CPU。GPU の欄は T-0760 で、この列の約束のまま)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分(2 時間)
@@ -16,7 +16,7 @@
 - [x] b. ledgerColumns は登録から: 作る時は 1 + 物質の数、RegisterNestField が保存量の欄の値の数だけ足す(帳簿はまだ空なので並べ直さない)。
       NestConservedComponents・NestFieldLedgerBase(multires_nest.h)・NestConservedIndex(multires_fields.h)
 - [x] c. ComputeConservedTotals に欄の和(ConservedTotals::fields。本物の刻むセルの値 × 8^(finest − レベル) − 帳簿のその列)
-- [ ] release のビルド警告 0・^multires_ 全部・multires_state・lab_box・gpu_lab_box・gpu_multires_quiet
+- [x] release のビルド警告 0・^multires_ 9 本(multires_state を含む)・lab_box・gpu_lab_box(gpu・warp)・gpu_multires_quiet(gpu・warp)・archmap --check
 
 ## 作り(要点)
 - 余りは切り捨て(SfCoarsenRemainder は 0〜7)なのでいつも 0 以上 = セルから減った量 = 「出」だけ。符号付きの欄の値でも余りは負にならない
@@ -38,3 +38,4 @@
 
 ## 作業ログ
 - 2026-10-17(wt3): a〜c を入れ、multires_state_test の欄の合計を ComputeConservedTotals の欄の列に替えた(面の欄も保存量に。列の数・登録を断る場合の試験を足した)。
+  release 警告 0・^multires_ 9 本・lab_box・gpu_lab_box・gpu_multires_quiet が通った(欄の無い世界は帳簿の大きさが前と同じなので GPU は変わらない)。
