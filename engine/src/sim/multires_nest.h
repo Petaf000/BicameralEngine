@@ -14,9 +14,11 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "common/multires_tree.hlsli"
+#include "common/state_field.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_wide_cell.h"
 #include "sim/reaction_table.h"
@@ -57,6 +59,17 @@ namespace bicameral::sim {
         std::vector<uint64_t> amounts;
     };
 
+    // 登録した欄 1 つ(T-0711。ADR-0329。sim/multires_fields.h の RegisterNestField で足す。登録の形は common/state_field.hlsli)。
+    // セル・面の欄の値の並びはセルと同じ [一様の値 × 枠][頁 × MR_BLOCK_CELLS] × 値の数(頁と同じ番号の「欄の頁」。設計 §3)。
+    // ブロックの欄は [枠] × 値の数、世界の欄は値の数だけ
+    struct MultiresField {
+        std::string name;
+        state_field::SfFieldDesc desc{};
+        std::vector<int64_t> values;
+        // 粗くした時の余り(VOLUME の欄だけ。子のレベルの単位)[MR_LEDGER_LEVELS × 値の数]。世界の帳簿の 1 型(T-0712)に入るまでの置き場
+        std::vector<int64_t> ledger;
+    };
+
     struct MultiresNest {
         MultiresCapacity capacity;
 
@@ -77,6 +90,9 @@ namespace bicameral::sim {
         std::vector<uint32_t> freeFractions;  // 端数の枠の空きのスタック(数は counters[MR_COUNTER_FREE_FRACTIONS])
         std::vector<uint64_t> ledger;         // 世界の帳簿 [MR_LEDGER_LEVELS × ledgerColumns]
         std::array<uint32_t, multires::MR_COUNTER_COUNT> counters{};
+
+        // --- 登録した欄(T-0711。状態に入る。区画の一覧は sim/multires_state.h の VisitNestState)---
+        std::vector<MultiresField> fields;
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
         //     GPU は順の決まらない一覧で持つので、集合として比べる(状態の要約に入れない)---
@@ -311,11 +327,11 @@ namespace bicameral::sim {
     // 待ちの丸め(T-0115)で刻み tick の種になる世界の本物のブロックの枠の一覧(枠の順): 種の印があるか、起こす刻み(wakeTick)が来た
     [[nodiscard]] std::vector<uint32_t> WaitSeedSlots(const MultiresNest& nest, uint64_t tick);
 
-    // 世界(本物の葉のセルと端数)の要約。影は入らない
+    // 世界(本物の葉のセルと端数・ハッシュに入る登録した欄)の要約。影は入らない。欄が無ければ T-0711 より前と同じ値
     [[nodiscard]] uint64_t HashRealLeaves(const MultiresNest& nest);
 
-    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄・効いている魔法のパッチ)の要約。CPU と GPU を比べるため。
-    // 索引・要求・種は入らない。パッチの列が空なら、パッチを入れる前(T-0024 より前)と同じ値
+    // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄・溢れ・ハッシュに入る登録した欄)の要約。CPU と GPU を比べるため。
+    // 区画の一覧(sim/multires_state.h の VisitNestState)を回るだけ(T-0711)。索引・要求・種は入らない。欄が無ければ T-0711 より前と同じ値
     [[nodiscard]] uint64_t HashWholeNest(const MultiresNest& nest);
 
     // 本物の葉のセルと世界の帳簿の、元素の数とエネルギーの合計を finestLevel の単位 × 2^-64 で

@@ -1,0 +1,80 @@
+// multires_fields.h — 多重解像度の世界の登録した欄(運ぶ計算の共通の土台の段 1 ①。T-0711。ADR-0329。設計 §2.1・§3)。
+// 欄はセル(成分 + エネルギー)の外に持ち越す値。登録の形は shaders/common/state_field.hlsli(GPU と 1 つの源)。
+// セル・面の欄は「欄の頁」に置く: 並びはセルと同じ [一様の値 × 枠][頁 × MR_BLOCK_CELLS](頁と同じ番号)× 値の数。
+// 木の操作(根を置く・頁に広げる・畳む・細かく・粗く)は nest_fields の関数を呼んで欄を付いて行かせる。
+// 状態のハッシュ・保存点・写しは multires_state.h の一覧を回る(欄を登録すると一覧に入る)。
+// まだ欄を持たない所(仮。ADR-0329): 観察の枠(影・写し)の頁・溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6)。
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+#include "common/state_field.hlsli"
+#include "sim/multires_nest.h"
+
+namespace bicameral::sim {
+
+    inline constexpr uint32_t MULTIRES_NO_FIELD = UINT32_MAX;
+
+    // 欄を登録する(作った直後・根を置く前に)。返すのは欄の番号(登録の順)。名前が空・重なる・登録が不正なら MULTIRES_NO_FIELD
+    [[nodiscard]] uint32_t RegisterNestField(MultiresNest& nest, std::string name,
+                                             const state_field::SfFieldDesc& desc);
+
+    // 名前で欄を引く(無ければ MULTIRES_NO_FIELD)
+    [[nodiscard]] uint32_t FindNestField(const MultiresNest& nest, std::string_view name);
+
+    // --- セル・面の欄 ---
+
+    // 枠 slot のセル index の値(一様なら値 1 つ・覆われたセルは 0)
+    [[nodiscard]] int64_t LoadNestField(const MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t index,
+                                        uint32_t component);
+
+    // 頁を持つ枠のセルに書く(値は型の範囲の中)
+    void StoreNestField(MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t index, uint32_t component,
+                        int64_t value);
+
+    // 一様な枠の値 1 つを書く
+    void StoreNestFieldUniform(MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t component, int64_t value);
+
+    // --- ブロック・世界の欄 ---
+
+    [[nodiscard]] int64_t LoadNestBlockField(const MultiresNest& nest, uint32_t field, uint32_t slot,
+                                             uint32_t component);
+    void StoreNestBlockField(MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t component, int64_t value);
+    [[nodiscard]] int64_t LoadNestWorldField(const MultiresNest& nest, uint32_t field, uint32_t component);
+    void StoreNestWorldField(MultiresNest& nest, uint32_t field, uint32_t component, int64_t value);
+
+    // 欄の帳簿(VOLUME の欄を粗くした時の余り。レベル level の単位。帳簿の外なら 0)
+    [[nodiscard]] int64_t LoadNestFieldLedger(const MultiresNest& nest, uint32_t field, int32_t level,
+                                              uint32_t component);
+
+    // --- 木の操作が呼ぶ(multires_tree・multires_nest・multires_activity)---
+    namespace nest_fields {
+
+        // 根を置いた枠 slot の欄を 0 に(一様なら値 1 つ、頁を持つなら頁を全部。前に使った枠・頁の値を残さない)
+        void PlaceRoot(MultiresNest& nest, uint32_t slot);
+
+        // 一様な枠 slot を頁 page に広げる前に、欄の頁を一様の値で埋める(覆われたセルは 0)
+        void ExpandPage(MultiresNest& nest, uint32_t slot, uint32_t page);
+
+        // 頁を持つ枠 slot の欄の頁が一様か(覆われていないセルが全部同じ・覆われたセルは 0)。欄が無ければ true
+        [[nodiscard]] bool PageFoldable(const MultiresNest& nest, uint32_t slot);
+
+        // 頁を持つ枠 slot の欄を値 1 つに戻す(頁を返す前に。PageFoldable の後)
+        void FoldPage(MultiresNest& nest, uint32_t slot);
+
+        // 親 parentSlot の八分の一 octant を子 childSlot(頁 childPage。一様なら MR_NO_PAGE)に細かくする: 子は親と同じ数。
+        // 頁を持つ親の覆われたセルは 0 に。子の見出しを書く前に呼ぶ
+        void Refine(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot, uint32_t childPage);
+
+        // 一様な親 parentSlot へ子 childSlot を粗くしても、欄が一様のままか(違えば親を頁に広げる)
+        [[nodiscard]] bool CoarsenKeepsUniform(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot);
+
+        // 子 childSlot を親の八分の一へ粗くする(和 ÷ 8。VOLUME の欄の余りは欄の帳簿へ)。親の頁(要るなら広げた後)に書き、
+        // 子の見出しを消す前に呼ぶ
+        void Coarsen(MultiresNest& nest, uint32_t childSlot);
+
+    }  // namespace nest_fields
+
+}  // namespace bicameral::sim

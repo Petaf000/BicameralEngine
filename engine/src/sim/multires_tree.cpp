@@ -9,6 +9,7 @@
 #include <type_traits>
 
 #include "common/multires_activity.hlsli"
+#include "sim/multires_fields.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
 
@@ -254,6 +255,12 @@ namespace bicameral::sim {
                                      ? CoarsenWidePageNeed(nest, state.target, parent)
                                      : MrCoarsenPageNeed(nest.blocks[state.target], UniformAt(nest, state.target),
                                                          nest.blocks[parent], UniformAt(nest, parent));
+
+                // 一様な親のまま粗くできても、登録した欄の値が違えば頁に広げる(T-0711)
+                if (state.pageNeed == 0 && MrIsUniform(nest.blocks[parent]) &&
+                    !nest_fields::CoarsenKeepsUniform(nest, state.target, parent))
+                    state.pageNeed = 1;
+
                 return;
             }
 
@@ -364,6 +371,9 @@ namespace bicameral::sim {
                 }
             }
 
+            // --- 登録した欄: 子は親と同じ数・頁を持つ親の覆われたセルは 0(T-0711)---
+            nest_fields::Refine(nest, parentSlot, octant, childSlot, childPage);
+
             // --- 親を覆う(覆われた親のセルと端数は空。一様な親は覆われた所を空と読むので書かない)---
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t index = MrOctantCell(octant, local);
@@ -455,6 +465,7 @@ namespace bicameral::sim {
             // --- 一様な親: 子が同じ値に戻らなければ頁に広げる(T-0102)---
             if (state.pageNeed != 0) {
                 const uint32_t page = PoppedPage(nest, state, 0);
+                nest_fields::ExpandPage(nest, child.parent, page);
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     if (nest.wideCells)  // 一様の値の溢れごと(返された頁の溢れは空。T-0199)
                         StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, child.parent, index));
@@ -493,6 +504,9 @@ namespace bicameral::sim {
                     SetFraction(nest, parent.fraction, index, results[local].fraction);
                 }
             }
+
+            // --- 登録した欄: 和 ÷ 8(VOLUME の欄の余りは欄の帳簿へ。T-0711)---
+            nest_fields::Coarsen(nest, childSlot);
 
             // --- 見出し・返す枠・索引 ---
             if (!octantFraction && !restFraction) {
@@ -583,6 +597,7 @@ namespace bicameral::sim {
         }
 
         nest.blocks[slot] = block;
+        nest_fields::PlaceRoot(nest, slot);
         IndexInsert(nest, slot);
         nest_detail::PokeBlock(nest, slot);
 

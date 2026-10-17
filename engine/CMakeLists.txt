@@ -67,8 +67,10 @@ add_library(bicameral_multires STATIC
   src/sim/lab_gauge.cpp
   src/sim/multires_activity.cpp
   src/sim/multires_conduction.cpp
+  src/sim/multires_fields.cpp
   src/sim/multires_implicit_conduction.cpp
   src/sim/multires_nest.cpp
+  src/sim/multires_state.cpp
   src/sim/multires_tree.cpp
   src/sim/multires_wide_cell.cpp
 )
