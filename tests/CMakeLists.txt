@@ -198,6 +198,12 @@ add_executable(transport_apply_test transport_apply_test.cpp)  # 当てる段の
 target_precompile_headers(transport_apply_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)
 target_link_libraries(transport_apply_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME transport_apply COMMAND transport_apply_test)
+
+add_executable(multires_liquid_test multires_liquid_test.cpp)  # 多重解像度の 1 段の液体が仮の世界の液体と毎刻みビット一致(T-0717)
+target_precompile_headers(multires_liquid_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(multires_liquid_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME multires_liquid COMMAND multires_liquid_test)
+
 set_tests_properties(cell_volume PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)

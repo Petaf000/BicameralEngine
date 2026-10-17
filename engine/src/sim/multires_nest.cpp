@@ -635,6 +635,32 @@ namespace bicameral::sim {
         return nest.cells[nest.blocks.size() + (size_t{block.page} * MR_BLOCK_CELLS) + index];
     }
 
+    bool ExpandNestPage(MultiresNest& nest, uint32_t slot) {
+        FX_ASSERT(slot < nest.capacity.worldBlocks);
+        MrBlock& block = nest.blocks[slot];
+        if (!MrIsUniform(block))
+            return true;
+
+        if (nest.counters[MR_COUNTER_FREE_PAGES] == 0)
+            return false;
+
+        // 刻みの外では頁に広げる途中の枠は無いので、広げるのはこの枠だけ(数え方も刻みの中と同じ)
+        block.page = MR_PAGE_WANTED;
+        const std::vector<uint32_t> expanded = nest_detail::ExpandWantedPages(nest);
+        FX_ASSERT(expanded.size() == 1 && expanded[0] == slot);
+
+        return !expanded.empty();
+    }
+
+    void StoreNestCell(MultiresNest& nest, uint32_t slot, uint32_t index, const RxCell& cell) {
+        FX_ASSERT(!nest.wideCells);
+        CellAt(nest, slot, index) = cell;
+    }
+
+    void PokeNestBlock(MultiresNest& nest, uint32_t slot) {
+        nest_detail::PokeBlock(nest, slot);
+    }
+
     uint32_t UsedWorldPages(const MultiresNest& nest) {
         return nest.capacity.pages - nest.counters[MR_COUNTER_FREE_PAGES];
     }
