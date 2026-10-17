@@ -119,6 +119,7 @@ add_library(bicameral_sim STATIC
   src/sim/cell_volume.cpp  # 1 セルの体積を相で分け合う(固体・液体・気体の空き。T-0593・T-0612)
   src/sim/probe_gas.cpp  # 仮の世界に気体の流れを載せる CPU リファレンス(T-0590)
   src/sim/probe_liquid.cpp  # 仮の世界に液体の流れを載せる CPU リファレンス(T-0609)
+  src/sim/multires_liquid.cpp  # 多重解像度の世界の 1 段で液体を流す CPU(土台の段 2 ②。T-0717)
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp

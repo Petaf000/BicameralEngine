@@ -207,6 +207,16 @@ namespace bicameral::sim {
     // 枠 slot のセル index(一様なら値か、覆われていれば空。頁なら頁のセル)
     [[nodiscard]] reaction::RxCell LoadNestCell(const MultiresNest& nest, uint32_t slot, uint32_t index);
 
+    // 世界の枠 slot を頁に広げる(一様なら頁を取り、一様の値と欄で埋める。もう頁なら何もしない)。頁が足りなければ false。
+    // 刻みの段の外からセルに書く流れ(液体の 1 段。T-0717)が書く前に呼ぶ(刻みの中の広げ方は ExpandWantedPages)
+    [[nodiscard]] bool ExpandNestPage(MultiresNest& nest, uint32_t slot);
+
+    // 頁を持つ枠 slot のセル index に書く(溢れを使わない世界。T-0717)
+    void StoreNestCell(MultiresNest& nest, uint32_t slot, uint32_t index, const reaction::RxCell& cell);
+
+    // 枠 slot をつつく(次の刻みに反応を評価する。刻みの段の外でセルを変えた時。T-0717)
+    void PokeNestBlock(MultiresNest& nest, uint32_t slot);
+
     // --- セルの溢れ(T-0187)---
 
     // 溢れを使う(作った直後に呼ぶ)。頁と端数の枠ごとの溢れの領域を取る

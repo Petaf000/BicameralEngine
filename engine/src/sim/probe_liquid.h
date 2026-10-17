@@ -138,6 +138,12 @@ namespace bicameral::sim {
         // GPU の LiquidHash と同じ値。common/probe_region_hash.hlsli・T-0620)
         [[nodiscard]] uint64_t HashTerm() const;
 
+        // 区画のセル region の欄の値(多重解像度の 1 段の液体〔sim/multires_liquid〕と比べる試験用。T-0717)
+        [[nodiscard]] int64_t FaceMomentum(uint32_t axis, uint32_t region) const { return m_faces[axis][region]; }
+        [[nodiscard]] int64_t FaceKinetic(uint32_t axis, uint32_t region) const { return m_kinetic[axis][region]; }
+        [[nodiscard]] int64_t Potential(uint32_t region) const { return m_potential[region]; }
+        [[nodiscard]] uint64_t MassBefore(uint32_t region) const { return m_mass[region]; }
+
         // セルの液体の質量(ng = µmol × mg/mol)と体積(pL = µmol × mm³/mol)
         [[nodiscard]] static uint64_t LiquidMass(const BakedReactionTable& table, const reaction::RxCell& cell);
         [[nodiscard]] static uint64_t LiquidVolume(const BakedReactionTable& table, const reaction::RxCell& cell);
