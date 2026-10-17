@@ -336,8 +336,9 @@ namespace bicameral::sim {
         for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot)
             stepped[slot] = slot >= worldBlocks || nest.blocks[slot].activeTick == mark ? 1 : 0;
 
+        const std::vector<multires::CvSpeciesPhase> phases = MakeSpeciesPhases(table);
         const std::vector<nest_detail::BlockStepResult> results = nest_detail::StepBlocks(
-            nest, table.View(), stepped, worldSeed, tick, options, mark);
+            nest, table.View(), phases, stepped, worldSeed, tick, options, mark);
 
         // --- 待ちの丸め: 変わったブロックは忙しさの印(= tc)を書いて次の刻みに起こし、評価したブロックは起こす刻みを書く ---
         nest_detail::RecordWaitResults(nest, results, tick);

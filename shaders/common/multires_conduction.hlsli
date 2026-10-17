@@ -194,6 +194,16 @@ FX_FN uint64_t MrFaceLimit(MrThermal thermal, int32_t level) {
     return MrSubstepFaceLimit(thermal, level, 0);
 }
 
+// 面の片側(温度と係数だけ。HcFaceFlow はコンダクタンスを読まない)。当てる段の伝導の種類(transport_conduction.hlsli)も使う
+FX_FN HcThermalCache MrFlowSide(uint32_t temperature, uint64_t faceLimit) {
+    HcThermalCache side;
+    side.temperature = temperature;
+    side.conductance = 0;
+    side.faceLimit = faceLimit;
+
+    return side;
+}
+
 FX_FN HcThermalCache MrMakeFlowSide(MrThermal thermal, uint64_t faceLimit) {
     HcThermalCache side;
     side.temperature = thermal.temperature;
@@ -217,11 +227,18 @@ FX_FN int64_t MrSameLevelFlow(MrThermal self, MrThermal neighbor, int32_t level)
 // 細かいセル(レベル fineLevel、小刻み 4^fineShift 回)→ 粗いセル(fineLevel − gap、4^coarseShift 回)の面の、細かい側の小刻み 1 回の流れ
 // (細かい単位。細かい → 粗いが正)。粗い側の値は粗い刻みの初めのまま、細かい側が粗い刻み 1 回の間に 4^(fineShift − coarseShift) 回引くので、
 // 粗い側の熱容量の上限はその回数で割って掛ける(粗いセルの 1 面の重みの和が、粗い刻み 1 回の合計で 1/8 以下のまま。T-0108)
+// 粗い側の面の係数の上限(細かい単位。上の式。当てる段の伝導の種類も同じ関数を呼ぶ)
+FX_FN uint64_t MrSubstepCoarseLimit(MrThermal coarse, int32_t fineLevel, uint32_t gap, uint32_t fineShift,
+                                    uint32_t coarseShift) {
+    const uint32_t repeatShift = 2 * (fineShift - coarseShift);
+
+    return MrMin64(MrConductanceLimit(coarse.conductance, fineLevel - (int32_t)fineShift),
+                   MrSaturatingShiftLeft(coarse.capacityLimit, gap) >> repeatShift);
+}
+
 FX_FN int64_t MrSubstepCrossLevelFlow(MrThermal fine, MrThermal coarse, int32_t fineLevel, uint32_t gap,
                                       uint32_t fineShift, uint32_t coarseShift) {
-    const uint32_t repeatShift = 2 * (fineShift - coarseShift);
-    const uint64_t coarseLimit = MrMin64(MrConductanceLimit(coarse.conductance, fineLevel - (int32_t)fineShift),
-                                         MrSaturatingShiftLeft(coarse.capacityLimit, gap) >> repeatShift);
+    const uint64_t coarseLimit = MrSubstepCoarseLimit(coarse, fineLevel, gap, fineShift, coarseShift);
 
     return HcFaceFlow(MrMakeFlowSide(fine, MrSubstepFaceLimit(fine, fineLevel, fineShift)),
                       MrMakeFlowSide(coarse, coarseLimit));

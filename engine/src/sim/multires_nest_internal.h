@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "common/multires_conduction.hlsli"
+#include "sim/cell_view.h"
 #include "sim/multires_nest.h"
 
 namespace bicameral::sim::nest_detail {
@@ -100,6 +101,7 @@ namespace bicameral::sim::nest_detail {
     // 伝導を小刻みに分ける時(T-0108)、wakeMark が 0 でなければ(活性)、小刻みで変わったブロックの面の隣にその印を付けて
     // 以後の小刻みから刻む(stepped を書き足す)。0 なら(全部を刻む)起こさない
     std::vector<BlockStepResult> StepBlocks(MultiresNest& nest, const ReactionTableView& view,
+                                            std::span<const multires::CvSpeciesPhase> phases,
                                             std::span<uint8_t> stepped, uint64_t worldSeed, uint64_t tick,
                                             const MultiresStepOptions& options, uint32_t wakeMark);
 
@@ -113,32 +115,36 @@ namespace bicameral::sim::nest_detail {
 
     // --- 熱の伝導(multires_conduction.cpp。T-0019・T-0108)---
 
-    // 刻みの初めの論理のセルの熱(初めて読んだ時に作る)。一様なブロックは覆われていないセルが全部同じなので枠ごとに 1 つ
-    // (読むのは刻むセルと、その面の先の覆われていないセルだけ)。頁に広げても論理のセルは変わらないので使い回せる。
-    // 小刻み(T-0108)でセルが変わったブロックは Invalidate で作り直させる
-    class CellThermals {
+    // 刻みの初めの論理のセルの見立て(cell_view.hlsli の MakeCellView。初めて読んだ時に作る。永続しない = 刻みの外の後始末は要らない)。
+    // 一様なブロックは覆われていないセルが全部同じなので枠ごとに 1 つ(読むのは刻むセルと、その面の先の覆われていないセルだけ)。
+    // 頁に広げても論理のセルは変わらないので使い回せる。小刻み(T-0108)でセルが変わったブロックは Invalidate で作り直させる
+    // (見立ては変わったセルだけ作り直す。土台 §2.5)。枠ごとの置き場は初めて読んだ時に取る(読まない枠は場所を取らない)
+    class CellViews {
     public:
-        CellThermals(const MultiresNest& nest, const ReactionTableView& view);
+        CellViews(const MultiresNest& nest, const ReactionTableView& view,
+                  std::span<const multires::CvSpeciesPhase> phases);
 
-        [[nodiscard]] multires::MrThermal At(uint32_t slot, uint32_t index);
+        [[nodiscard]] const multires::CvCellView& View(uint32_t slot, uint32_t index);
+        // 伝導のセルの熱(陰解法が読む。見立ての thermal = MrCellThermal と同じ値。T-0713)
+        [[nodiscard]] multires::MrThermal At(uint32_t slot, uint32_t index) { return View(slot, index).thermal; }
         void Invalidate(uint32_t slot);
 
     private:
         const MultiresNest* m_nest;
-        ReactionTableView m_view;
-        std::vector<multires::MrThermal> m_values;  // 枠ごとに [セル × 512][一様の値]
-        std::vector<uint8_t> m_known;
+        CellViewTable m_table;
+        std::vector<std::vector<multires::CvCellView>> m_values;  // 枠ごとに [セル × 512][一様の値]
+        std::vector<std::vector<uint8_t>> m_known;
     };
 
     // 刻むブロック(stepped)のセルの面の流れを調べ、流れのある一様なブロック(自分の面か、細かい側から送られてくる面)に MR_PAGE_WANTED を付ける。
     // 粗い側で端数が要るブロックの印(枠ごとの 0 / 1)を返す。面の係数は options の小刻みの 1 回分(T-0108)
-    std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellThermals& thermals,
-                                             std::span<const uint8_t> stepped, const MultiresStepOptions& options);
+    std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellViews& thermals, std::span<const uint8_t> stepped,
+                                             const MultiresStepOptions& options);
 
     // 端数が要るブロックに端数の枠を枠の順に配り(足りなければ数える)、刻むブロック(凍らせたものを除く)のセルの面の流れを
     // 頁のセルの添字(PageCellAddress)ごとの変化 deltas に足す。凍らせたブロックとの面は流れない
     // implicitBlocks = MarkImplicitBlocks の印(陰解法で解くブロックは流れを計算せず、それと同じレベルの面も計算しない。T-0178)
-    void ComputeConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> stepped,
+    void ComputeConduction(MultiresNest& nest, CellViews& thermals, std::span<const uint8_t> stepped,
                            std::span<const uint8_t> frozen, std::span<const uint8_t> wantsFraction,
                            std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
                            std::span<multires::MrEnergyDelta> deltas);
@@ -149,17 +155,18 @@ namespace bicameral::sim::nest_detail {
                                             const MultiresStepOptions& options);
     // この刻みに陰解法の系に入れるブロックの印(枠ごとの 0 / 1。T-0178): 入れられる(頁があり凍っていない)基準より細かいブロックを
     // 枠の順に、系の大きさが options.implicitLimits の予算に入る所まで。入らなかったブロックはこの刻み陽解法(Q22 の案 A)
-    [[nodiscard]] std::vector<uint8_t> MarkImplicitBlocks(MultiresNest& nest, CellThermals& thermals,
+    [[nodiscard]] std::vector<uint8_t> MarkImplicitBlocks(MultiresNest& nest, CellViews& thermals,
                                                           std::span<const uint8_t> frozen,
                                                           const MultiresStepOptions& options);
     [[nodiscard]] bool IsImplicitBlock(std::span<const uint8_t> implicitBlocks, uint32_t slot);
-    void AddImplicitConduction(MultiresNest& nest, CellThermals& thermals, std::span<const uint8_t> frozen,
+    void AddImplicitConduction(MultiresNest& nest, CellViews& thermals, std::span<const uint8_t> frozen,
                                std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options,
                                std::span<multires::MrEnergyDelta> deltas);
 
     // 伝導の小刻み(T-0108)を最後の 1 回の手前まで進め、最後の小刻みの変化を返す(呼ぶ側が反応と一緒に足す。分けない時は T-0019 と同じ順)。
     // 途中で変化を足したブロックは results の changed に、頁に広げたブロックは expanded に書く(multires_conduction.cpp)
     std::vector<multires::MrEnergyDelta> StepConduction(MultiresNest& nest, const ReactionTableView& view,
+                                                        std::span<const multires::CvSpeciesPhase> phases,
                                                         std::span<uint8_t> stepped, const MultiresStepOptions& options,
                                                         uint32_t wakeMark, std::span<BlockStepResult> results);
 

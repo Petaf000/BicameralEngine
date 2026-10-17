@@ -62,6 +62,7 @@ target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 # --- multires: 多重解像度の入れ子の細分の CPU リファレンス(17。T-0017)。GPU を知らない。浮動小数点は禁止 ---
 # 細かくする・粗くする・影の引き戻しの本体は shaders/common/multires.hlsli(HLSL と共通)。
 add_library(bicameral_multires STATIC
+  src/sim/cell_view.cpp  # セルの見立ての相の表(MakeCellView を CPU で呼ぶ。T-0713。MR の伝導の当てる段が読む。T-0714)
   src/sim/implicit_conduction.cpp
   src/sim/lab_box.cpp
   src/sim/lab_gauge.cpp
@@ -116,7 +117,6 @@ add_library(bicameral_sim STATIC
   src/sim/lab_session.cpp
   src/sim/probe_peek.cpp
   src/sim/cell_volume.cpp  # 1 セルの体積を相で分け合う(固体・液体・気体の空き。T-0593・T-0612)
-  src/sim/cell_view.cpp  # セルの見立ての相の表(MakeCellView を CPU で呼ぶ。T-0713)
   src/sim/probe_gas.cpp  # 仮の世界に気体の流れを載せる CPU リファレンス(T-0590)
   src/sim/probe_liquid.cpp  # 仮の世界に液体の流れを載せる CPU リファレンス(T-0609)
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)

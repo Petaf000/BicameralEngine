@@ -186,6 +186,11 @@ add_executable(cell_view_test cell_view_test.cpp)  # セルの見立てが今の
 target_precompile_headers(cell_view_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)
 target_link_libraries(cell_view_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME cell_view COMMAND cell_view_test)
+
+add_executable(transport_apply_test transport_apply_test.cpp)  # 当てる段の上限と伝導の種類が今の式とビット一致(T-0714)
+target_precompile_headers(transport_apply_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)
+target_link_libraries(transport_apply_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME transport_apply COMMAND transport_apply_test)
 set_tests_properties(cell_volume PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
