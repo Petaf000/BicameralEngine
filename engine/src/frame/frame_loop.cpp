@@ -309,6 +309,11 @@ namespace bicameral::frame {
                 for (const auto& table : parts.replayTables)
                     m_tableReload.AddKnown(table);
 
+                // 区画のある世界の表の差し替え: 区画の欄の作りが変わる表は、読み直した時に理由付きで断る(古い表のまま。
+                // 理由はエディタの反応表の行とログ。差し替えの刻みで RecordFrame が断って止まらないように前もって聞く。T-0672・ADR-0300)
+                m_tableReload.SetWorldCheck(
+                    [this](const sim::BakedReactionTable& table) { return m_sim.CheckRegionTableSwap(table); });
+
                 // --screenshot-tick: その刻みの始めで世界を止める(写すのは S(その刻み)。T-0025)
                 if (options.screenshotTick)
                     m_scheduler.SetStopTick(*options.screenshotTick);
@@ -437,6 +442,15 @@ namespace bicameral::frame {
             void UpdateEditHold();
             [[nodiscard]] uint64_t UndoFloor() const;
             void UpdateAutoPlay();
+            // --auto-play の置く物(形と材料。MakeAutoPlayStrokes)
+            struct AutoPlayStrokes {
+                sim::ProbePlaceShape a;
+                sim::ProbePlaceShape b;
+                sim::ProbePlaceShape c;
+                std::string_view solid;  // A・C の材料
+                std::string_view extra;  // B の材料(足す)
+            };
+            [[nodiscard]] AutoPlayStrokes MakeAutoPlayStrokes() const;
             void ApplyAutoPlayAction(AutoPlayAction action);
 
             // --- 計測 ---
@@ -592,6 +606,24 @@ namespace bicameral::frame {
             return deviceOptions;
         }
 
+        // 流れる区画をログに(箱とセルの数。気体の区画の重さは 1 刻み 1〜2 ms/3456 セル〔T-0592〕なので作り手が大きさを見られるように)
+        void LogLayoutRegions(const sim::WorldLayout& layout) {
+            const auto cells = [](const std::array<uint32_t, 3>& size) {
+                return uint64_t{size[0]} * size[1] * size[2];
+            };
+            if (const auto& gas = layout.gasRegion) {
+                Log(Channel::Sim, Level::Info, "気体の区画 {}: 角 ({}, {}, {})・大きさ {} × {} × {}({} セル)",
+                    gas->name, gas->minCell[0], gas->minCell[1], gas->minCell[2], gas->sizeCells[0], gas->sizeCells[1],
+                    gas->sizeCells[2], cells(gas->sizeCells));
+            }
+
+            if (const auto& liquid = layout.liquidRegion) {
+                Log(Channel::Sim, Level::Info, "液体の区画 {}: 角 ({}, {}, {})・大きさ {} × {} × {}({} セル)",
+                    liquid->name, liquid->minCell[0], liquid->minCell[1], liquid->minCell[2], liquid->sizeCells[0],
+                    liquid->sizeCells[1], liquid->sizeCells[2], cells(liquid->sizeCells));
+            }
+        }
+
         // 仮の世界の刻み。初めのセルと物は表の世界の組み立て(パッケージの world_cells・world_bodies。T-0398)から作る。
         // サンプルの世界は空気の中の木箱と積み木(T-0089・T-0098)、ブランクの世界は全部空のセルで物なし(T-0371)。
         // ProbeSim は作るときに読むだけ
@@ -601,17 +633,21 @@ namespace bicameral::frame {
             const sim::PhysicsScene physicsScene = sim::MakeLayoutPhysicsScene(reactionTable.worldLayout);
             const std::vector<reaction::RxCell> initialWorld = sim::MakeProbeInitialWorld(reactionTable);
 
-            return sim::ProbeSim::Create(
-                device, D3D12_COMMAND_LIST_TYPE_COMPUTE, reactionTable,
-                {.busyIterations = options.simLoad,
-                 .busyPieces = options.simSplit,
-                 .trace = options.trace,
-                 .traceCapacity = TRACE_CAPACITY_PER_FRAME,
-                 .physicsScene = HasStackScene(options, reactionTable) ? &physicsScene : nullptr,
-                 .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
-                 // 世界の環境の値(表の分類 environment。ブランクは重力 0。ADR-0171・ADR-0176)
-                 .physicsParameters = sim::PhysicsParametersFor(reactionTable.environment),
-                 .initialWorld = initialWorld});
+            sim::ProbeSimOptions simOptions{
+                .busyIterations = options.simLoad,
+                .busyPieces = options.simSplit,
+                .trace = options.trace,
+                .traceCapacity = TRACE_CAPACITY_PER_FRAME,
+                .physicsScene = HasStackScene(options, reactionTable) ? &physicsScene : nullptr,
+                .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
+                // 世界の環境の値(表の分類 environment。ブランクは重力 0。ADR-0171・ADR-0176)
+                .physicsParameters = sim::PhysicsParametersFor(reactionTable.environment),
+                .initialWorld = initialWorld};
+            // 流れる区画(表の gas_regions・liquid_regions。書かなければ流れない。T-0671・ADR-0310)
+            sim::SetLayoutRegions(reactionTable.worldLayout, simOptions);
+            LogLayoutRegions(reactionTable.worldLayout);
+
+            return sim::ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, reactionTable, simOptions);
         }
 
         // 世界の反応表: データのフォルダのパッケージ(既定は exe の横の data/packages)からベイクする(T-0157・ADR-0033)。
@@ -1893,11 +1929,12 @@ namespace bicameral::frame {
                     broadphaseGraph = !m_options.physicsComputeBroadphase]() {
                 const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(table.worldLayout);
                 const bool stack = physics && !table.worldLayout.bodies.empty();
-                return sim::PlayMetricMeasurer::Create(
-                    device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-                    {.physicsScene = stack ? &scene : nullptr,
-                     .physicsOptions = {.broadphaseGraph = broadphaseGraph},
-                     .physicsParameters = sim::PhysicsParametersFor(table.environment)});
+                sim::ProbeSimOptions simOptions{.physicsScene = stack ? &scene : nullptr,
+                                                .physicsOptions = {.broadphaseGraph = broadphaseGraph},
+                                                .physicsParameters = sim::PhysicsParametersFor(table.environment)};
+                sim::SetLayoutRegions(table.worldLayout, simOptions);  // 流れる区画(T-0671)
+
+                return sim::PlayMetricMeasurer::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table, simOptions);
             };
         }
 
@@ -1910,10 +1947,12 @@ namespace bicameral::frame {
                 [device = m_device.Get(), table = m_sim.Table(), layout = initial.worldLayout,
                  stack = HasStackScene(m_options, initial), broadphaseGraph = !m_options.physicsComputeBroadphase]() {
                     const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(layout);
-                    return sim::WorldCopy::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-                                                  {.physicsScene = stack ? &scene : nullptr,
-                                                   .physicsOptions = {.broadphaseGraph = broadphaseGraph},
-                                                   .physicsParameters = sim::PhysicsParametersFor(table.environment)});
+                    sim::ProbeSimOptions simOptions{.physicsScene = stack ? &scene : nullptr,
+                                                    .physicsOptions = {.broadphaseGraph = broadphaseGraph},
+                                                    .physicsParameters = sim::PhysicsParametersFor(table.environment)};
+                    sim::SetLayoutRegions(layout, simOptions);  // 世界を作った時と同じ区画(T-0671)
+
+                    return sim::WorldCopy::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table, simOptions);
                 };
         }
 
@@ -2561,22 +2600,51 @@ namespace bicameral::frame {
             ApplyAutoPlayAction(m_autoPlay.Update(state));
         }
 
+        // --auto-play の置く物 A・B・C(T-0497)。気体の区画のある世界(⑤ の場面。T-0672)では、置いた物が区画の欄に届くように
+        // 区画の真ん中(C は x の向きに区画の 1/4 ずらす)へ、場面の材料(木が無ければ草・木炭が無ければ水)で置く
+        FrameLoop::AutoPlayStrokes FrameLoop::MakeAutoPlayStrokes() const {
+            const auto& materials = m_sim.Table().templates.materials;
+            const auto pick = [&](std::string_view preferred, std::string_view fallback) {
+                return rng::contains(materials, preferred, &sim::MaterialTemplate::key) ? preferred : fallback;
+            };
+            const std::string_view solid = pick("wood", "grass");
+            const std::string_view extra = pick("charcoal", "water");
+
+            const auto& gas = m_sim.Table().worldLayout.gasRegion;
+            if (!gas) {
+                return {.a = {.x = 20, .y = 32, .z = sim::PROBE_VIEW_Z, .radius = 3},
+                        .b = {.x = 20, .y = 32, .z = sim::PROBE_VIEW_Z, .radius = 1, .replace = false},
+                        .c = {.x = 44, .y = 20, .z = sim::PROBE_VIEW_Z, .radius = 3},
+                        .solid = solid,
+                        .extra = extra};
+            }
+
+            const auto center = [&](uint32_t axis) {
+                return gas->minCell[axis] + (gas->sizeCells[axis] / 2);
+            };
+            const uint32_t x = center(0);
+            const uint32_t y = center(1);
+            const uint32_t z = center(2);
+            const uint32_t shift = gas->sizeCells[0] / 4;
+
+            return {.a = {.x = x, .y = y, .z = z, .radius = 2},
+                    .b = {.x = x, .y = y, .z = z, .radius = 1, .replace = false},
+                    .c = {.x = x + shift, .y = y, .z = z, .radius = 2},
+                    .solid = solid,
+                    .extra = extra};
+        }
+
         void FrameLoop::ApplyAutoPlayAction(AutoPlayAction action) {
             editor::BrushPanel& brush = m_editor->Brush();
             const auto stroke = [&](const sim::ProbePlaceShape& shape, std::string_view material) {
                 rng::move(brush.StrokeOnce(shape, material, m_nextSequence), std::back_inserter(m_pendingCommands));
             };
 
+            const AutoPlayStrokes strokes = MakeAutoPlayStrokes();
             switch (action) {
-                case AutoPlayAction::StrokeA:
-                    stroke({.x = 20, .y = 32, .z = sim::PROBE_VIEW_Z, .radius = 3}, "wood");
-                    break;
-                case AutoPlayAction::StrokeB:
-                    stroke({.x = 20, .y = 32, .z = sim::PROBE_VIEW_Z, .radius = 1, .replace = false}, "charcoal");
-                    break;
-                case AutoPlayAction::StrokeC:
-                    stroke({.x = 44, .y = 20, .z = sim::PROBE_VIEW_Z, .radius = 3}, "wood");
-                    break;
+                case AutoPlayAction::StrokeA: stroke(strokes.a, strokes.solid); break;
+                case AutoPlayAction::StrokeB: stroke(strokes.b, strokes.extra); break;
+                case AutoPlayAction::StrokeC: stroke(strokes.c, strokes.solid); break;
                 case AutoPlayAction::Undo: brush.RequestUndo(); break;
                 case AutoPlayAction::Redo: brush.RequestRedo(); break;
                 case AutoPlayAction::Play: m_autoPlayRequest.play = true; break;

@@ -1298,6 +1298,22 @@ namespace bicameral::sim {
         return std::vector<reaction::RxCell>(PROBE_CELL_COUNT, reaction::RxMakeEmptyCell(0));
     }
 
+    void SetLayoutRegions(const WorldLayout& layout, ProbeSimOptions& options) {
+        options.gas = {};
+        options.liquid = {};
+        if (layout.gasRegion) {
+            options.gas.minCell = layout.gasRegion->minCell;
+            options.gas.sizeCells = layout.gasRegion->sizeCells;
+            options.gas.boundary = layout.gasRegion->boundary;
+        }
+
+        if (layout.liquidRegion) {
+            options.liquid.minCell = layout.liquidRegion->minCell;
+            options.liquid.sizeCells = layout.liquidRegion->sizeCells;
+            options.liquid.advection = layout.liquidRegion->advection;
+        }
+    }
+
     std::array<uint32_t, PROBE_VIEW_SPECIES_COUNT> ProbeViewSpecies(const BakedReactionTable& table) {
         static_assert(PROBE_VIEW_SPECIES_COUNT == VIEW_QUANTITY_SLOT_COUNT);
         const auto& slots = table.templates.viewQuantities;

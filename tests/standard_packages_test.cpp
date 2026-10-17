@@ -305,11 +305,14 @@ namespace {
 
         EXPECT(scene->gamePackage == "grass_fire_river" && scene->loadOrder.back() == "grass_fire_river");
         EXPECT(scene->rejected.empty() && !scene->modifiedWorld && !scene->overrides.empty());
+        // 場面は川の水を液体の区画・その上の空気を気体の区画に書く(T-0671)。サンプルの世界は区画なし(今まで通り)
+        EXPECT(scene->table.worldLayout.gasRegion && scene->table.worldLayout.liquidRegion);
 
         // サンプルの世界も同じ印でゲーム本体
         const auto sample = LoadReactionTable(
             {.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR), .requireGame = false, .standardRoot = standardRoot});
         EXPECT(sample && sample->gamePackage == "combustion_test");
+        EXPECT(sample && !sample->table.worldLayout.gasRegion && !sample->table.worldLayout.liquidRegion);
 
         // 標準パッケージだけ(game = true なし)はゲーム本体なし。ゲーム本体が要る読み方(サンプルの世界)なら止まる
         const std::vector<fs::path> elements{standardRoot / "real_elements"};

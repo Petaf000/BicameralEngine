@@ -8,6 +8,8 @@
 //     (RebuildReactionTable)でも同じ初めの世界と物になる
 //   - ブランクの表は組み立てが空(セルは全部空・物なし)
 //   - Mod が領域と物を鍵で足せる(層の順に重ね書き・番号は order の順)。綴りの誤り・知らない物質・半端な場所・小数は誤りになる
+//   - 流れる区画(gas_regions・liquid_regions。T-0671): 読んだ箱と面が ProbeSimOptions の gas・liquid に載る(SetLayoutRegions)。
+//     2 つ目・格子からはみ出す・綴り・基準の大気が無い(気体)・重力が 0(液体)は区画の名前の付いた誤り
 // GPU の刻みは今まで通り gpu_probe_* が同じ初めの世界で確かめる(初めの世界の作り方だけが変わった)。
 #include <cstdio>
 #include <cstring>
@@ -240,6 +242,67 @@ namespace {
                       "x, y, z"));
     }
 
+    // 流れる区画(T-0671・ADR-0310): 試験のパッケージは地球の環境(基準の大気・重力)に依るので、区画を足せば流れる世界になる
+    void TestFlowRegions() {
+        const auto baked = BakeWithMod(R"(return {
+            gas_regions = { smoke = { min_cell = { 24, 26, 24 }, size_cells = { 16, 14, 16 }, boundary = { "wall", "open", "periodic" } } },
+            liquid_regions = { pond = { min_cell = { 44, 0, 44 }, size_cells = { 12, 8, 3 }, advection = false } },
+        })");
+        if (!baked)
+            std::printf("読めない: %s\n", baked.error().c_str());
+
+        EXPECT(baked.has_value());
+        if (baked) {
+            ProbeSimOptions options;
+            SetLayoutRegions(baked->worldLayout, options);
+            EXPECT(options.gas.Enabled() && options.liquid.Enabled());
+            EXPECT((options.gas.minCell == std::array<uint32_t, 3>{24, 26, 24}));
+            EXPECT((options.gas.sizeCells == std::array<uint32_t, 3>{16, 14, 16}));
+            EXPECT(options.gas.boundary[0] == GasBoundary::Wall && options.gas.boundary[1] == GasBoundary::Open &&
+                   options.gas.boundary[2] == GasBoundary::Periodic);
+            EXPECT((options.liquid.minCell == std::array<uint32_t, 3>{44, 0, 44}));
+            EXPECT((options.liquid.sizeCells == std::array<uint32_t, 3>{12, 8, 3}) && !options.liquid.advection);
+        }
+
+        // 書かなければ流れない(D-455)
+        const auto plain = BakeWithMod("return {}");
+        EXPECT(plain && !plain->worldLayout.gasRegion && !plain->worldLayout.liquidRegion);
+        if (plain) {
+            ProbeSimOptions options;
+            options.gas.sizeCells = {1, 1, 1};
+            SetLayoutRegions(plain->worldLayout, options);
+            EXPECT(!options.gas.Enabled() && !options.liquid.Enabled());
+        }
+
+        // --- 誤り ---
+        const std::string box = "min_cell = { 0, 0, 0 }, size_cells = { 4, 4, 4 }";
+        EXPECT(FailsWith("return { gas_regions = { a = { " + box + " }, b = { " + box + " } } }", "1 つまで"));
+        EXPECT(FailsWith("return { liquid_regions = { a = { min_cell = { 60, 0, 0 }, size_cells = { 8, 1, 1 } } } }",
+                         "はみ出す"));
+        EXPECT(
+            FailsWith("return { gas_regions = { a = { " + box + ", boundary = { \"wall\", \"wind\", \"wall\" } } } }",
+                      "gas_regions.a.boundary[2]"));
+        EXPECT(FailsWith("return { gas_regions = { a = { min_cell = { 0, 0, 0 } } } }", "size_cells"));
+        EXPECT(FailsWith("return { liquid_regions = { a = { " + box + ", advection = 1 } } }", "true か false"));
+        EXPECT(FailsWith("return { gas_regions = { a = { " + box + ", colour = 1 } } }", "知らない欄"));
+
+        // 基準の大気・重力の無い世界(ブランクの表)
+        const auto blank = script::LoadBlankReactionTable();
+        EXPECT(blank.has_value());
+        if (!blank)
+            return;
+
+        WorldLayoutDefinition gasOnly;
+        gasOnly.gasRegions.push_back({.name = "a", .minCell = {0, 0, 0}, .sizeCells = {4, 4, 4}});
+        const auto noAtmosphere = BakeWorldLayout(gasOnly, blank->table);
+        EXPECT(!noAtmosphere && noAtmosphere.error().find("gas_regions.a: 基準の大気") != std::string::npos);
+
+        WorldLayoutDefinition liquidOnly;
+        liquidOnly.liquidRegions.push_back({.name = "b", .minCell = {0, 0, 0}, .sizeCells = {4, 4, 4}});
+        const auto noGravity = BakeWorldLayout(liquidOnly, blank->table);
+        EXPECT(!noGravity && noGravity.error().find("liquid_regions.b: 重力") != std::string::npos);
+    }
+
     // セルの器(T-0558・ADR-0260): 凝縮相は合計 2^36 µmol まで書ける(0.5 m 角の水 6917 mol も)。合計と気体のぶんを超えたら誤り
     void TestCellAmountLimits() {
         constexpr uint64_t LIMIT = fx::CELL_AMOUNT_LIMIT_MICROMOLES;
@@ -290,6 +353,7 @@ int main() {
     TestBlank();
     TestModAddsAndErrors();
     TestCellAmountLimits();
+    TestFlowRegions();
 
     std::printf("world_layout_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
 

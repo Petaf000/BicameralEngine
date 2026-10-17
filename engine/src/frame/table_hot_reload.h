@@ -55,6 +55,11 @@ namespace bicameral::frame {
         [[nodiscard]] bool ReplaceSource(script::ReactionTableSource source);
         [[nodiscard]] const script::ReactionTableSource& Source() const { return m_reload->Source(); }
 
+        // 読み直した表を当てる前に世界に聞く(区画のある世界の表の差し替え。script::ReactionTableHotReload::SetWorldCheck。T-0672)
+        void SetWorldCheck(script::ReactionTableHotReload::WorldCheck check) {
+            m_reload->SetWorldCheck(std::move(check));
+        }
+
         // このフレームの単位 [firstUnit, firstUnit + unitCount)(通しの単位の番号)で当てる差し替え。
         // 生の操作(再生でない): 待っている表があり、このフレームに適用の単位 applyTick があれば、印のコマンドを commands に足す
         // (sequence は nextSequence から。commands は (targetTick, sequence) の順に並べ直す。canAddCommand でなければ次のフレームへ)。

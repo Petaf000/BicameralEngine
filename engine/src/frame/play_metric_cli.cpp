@@ -64,11 +64,12 @@ namespace bicameral::frame {
             // 物理の場面は本物の世界と同じ形(--no-physics なら無し)
             const sim::PhysicsScene scene = sim::MakeLayoutPhysicsScene(table.worldLayout);
             const bool stack = options.physics && !table.worldLayout.bodies.empty();
-            auto measurer = sim::PlayMetricMeasurer::Create(
-                device->Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-                {.physicsScene = stack ? &scene : nullptr,
-                 .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
-                 .physicsParameters = sim::PhysicsParametersFor(table.environment)});
+            sim::ProbeSimOptions simOptions{.physicsScene = stack ? &scene : nullptr,
+                                            .physicsOptions = {.broadphaseGraph = !options.physicsComputeBroadphase},
+                                            .physicsParameters = sim::PhysicsParametersFor(table.environment)};
+            sim::SetLayoutRegions(table.worldLayout, simOptions);  // 流れる区画も本物と同じ(T-0671)
+            auto measurer = sim::PlayMetricMeasurer::Create(device->Get(), D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+                                                            simOptions);
             if (!measurer)
                 return std::unexpected(measurer.error());
 

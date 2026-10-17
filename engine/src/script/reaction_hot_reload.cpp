@@ -195,6 +195,11 @@ namespace bicameral::script {
         if (const auto compatible = CheckHotReloadCompatible(m_current->table, loaded->table, m_policy); !compatible)
             return {.state = HotReloadState::Failed, .message = compatible.error()};
 
+        if (m_worldCheck) {
+            if (const auto accepted = m_worldCheck(loaded->table); !accepted)
+                return {.state = HotReloadState::Failed, .message = "今の世界に当てられない表: " + accepted.error()};
+        }
+
         std::string message;
         for (const PackageRejection& rejection : loaded->rejected)
             message += std::format("{}パッケージ {} を読まなかった: {}", message.empty() ? "" : " / ",
