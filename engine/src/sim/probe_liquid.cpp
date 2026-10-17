@@ -400,7 +400,8 @@ namespace bicameral::sim {
 
         for (uint32_t axis = 0; axis < 3; ++axis)
             m_ledger.external[axis] += report.wall[axis] + report.gravity[axis] + report.friction[axis] +
-                                       report.dropped[axis] + report.capped[axis] + report.vanished[axis];
+                                       report.dropped[axis] + report.capped[axis] + report.vanished[axis] +
+                                       report.rested[axis];
 
         for (uint32_t region = 0; region < count; ++region) {
             if (work.changed[region] == 0)
@@ -595,6 +596,25 @@ namespace bicameral::sim {
         }
     }
 
+    // 静止の丸め(T-0723。既定は切る): 速さが restSpeedMicrometersPerSecond 未満の面の運動量を 0 にする(帳簿へ)。
+    // 運動のエネルギーは released に足して両側のセルの熱へ(速さの上限で止めた分と同じ道)
+    void ProbeLiquidField::RestFace(liquid::LqSettledFace& settled, uint64_t doubledMass, int64_t& rested,
+                                    uint32_t& restedFaces) const {
+        if (m_options.restSpeedMicrometersPerSecond == 0 || settled.face == 0)
+            return;
+
+        const uint64_t limit = liquid::LqMulDiv((uint64_t)m_options.restSpeedMicrometersPerSecond * TICKS_PER_SECOND,
+                                                doubledMass, m_params.gravityMicrometersPerSecond2);
+        if (fx::FxAbsU64(settled.face) >= limit)
+            return;
+
+        rested -= settled.face;
+        settled.face = 0;
+        settled.released += settled.kinetic;
+        settled.kinetic = 0;
+        ++restedFaces;
+    }
+
     // 液体を当て、まわりが空の面・速さの上限を直し、位置と運動のエネルギーを計算し直して差をセルの熱にする
     void ProbeLiquidField::SettleEnergy(const BakedReactionTable& table, std::span<reaction::RxCell> cells,
                                         StepWork& work, ProbeLiquidStepReport& report) {
@@ -620,8 +640,9 @@ namespace bicameral::sim {
                 const bool inside = RegionCoordinates(region)[axis] + 1 < size[axis];
                 const uint32_t neighbor = region + work.stride[axis];
                 const uint64_t doubled = inside ? mass[region] + mass[neighbor] : 0;
-                const liquid::LqSettledFace settled = liquid::LqSettleFace(face, doubled,
-                                                                           work.kineticCarried[axis][region], m_params);
+                liquid::LqSettledFace settled = liquid::LqSettleFace(face, doubled, work.kineticCarried[axis][region],
+                                                                     m_params);
+                RestFace(settled, doubled, report.rested[axis], report.restedFaces);
                 face = settled.face;
                 report.dropped[axis] += settled.dropped;
                 report.capped[axis] += settled.capped;

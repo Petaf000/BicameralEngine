@@ -391,6 +391,23 @@ namespace bicameral::sim {
                 m_momentum[region] = {0, 0, 0};
             }
 
+            // 静止の丸め(T-0723。既定は切る): 速さがどの軸も restSpeedUnits 未満なら運動量を 0 に(帳簿へ)、運動エネルギーのぶんは熱へ
+            if (m_options.restSpeedUnits != 0 && mass != 0 && m_momentum[region] != std::array<int64_t, GAS_AXES>{} &&
+                rng::all_of(m_momentum[region], [&](int64_t momentum) {
+                    return fx::FxAbsU64(momentum) < mass * m_options.restSpeedUnits;
+                })) {
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                    m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= m_momentum[region][axis];
+                    m_ledger.restMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= m_momentum[region][axis];
+                }
+
+                after.energy += m_kinetic[region];
+                m_ledger.restEnergy += m_kinetic[region];
+                m_kinetic[region] = 0;
+                m_momentum[region] = {0, 0, 0};
+                ++report.restedCells;
+            }
+
             if (SameCell(after, before))
                 continue;
 

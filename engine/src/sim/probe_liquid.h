@@ -73,6 +73,11 @@ namespace bicameral::sim {
         bool advection = true;                          // 運動量を液体と一緒に運ぶ(false は T-0609 の形。比べるため)
         uint32_t maxSpeedMillimetersPerSecond = 15000;  // 面の速さの上限(30000 = 1 刻みに 1 セル が最大)
 
+        // --- 静止の丸め(T-0723。研究・CPU だけ。0 = 切る〔既定。今までとビット単位で同じ〕)---
+        // 刻みの終わりに、速さが restSpeedMicrometersPerSecond 未満の面の運動量を 0 にし(帳簿へ。列「静止の丸め」)、
+        // 運動のエネルギーを両側のセルの熱へ(速さの上限で止めた分と同じ道)
+        uint32_t restSpeedMicrometersPerSecond = 0;
+
         [[nodiscard]] bool Enabled() const { return sizeCells[0] != 0 && sizeCells[1] != 0 && sizeCells[2] != 0; }
     };
 
@@ -93,11 +98,13 @@ namespace bicameral::sim {
         std::array<int64_t, 3> dropped = {};   // まわりが空になった面の運動量(移流なしでは上流が空の面も)
         std::array<int64_t, 3> capped = {};    // 速さの上限で止めた運動量
         std::array<int64_t, 3> vanished = {};  // 区画の外の段で液体が減った面の、減った液体が持って出た運動量(T-0656)
+        std::array<int64_t, 3> rested = {};    // 静止の丸めで 0 にした運動量(T-0723)
 
         // --- エネルギー(mJ)---
         int64_t heat = 0;              // 位置と運動のエネルギーから熱になった分(負は熱から戻った分)
         int64_t potentialEntered = 0;  // 区画の外の段で液体が現れた・消えた分の位置のエネルギー(帳簿の増え)
         uint32_t cappedFaces = 0;      // 速さの上限で止めた面
+        uint32_t restedFaces = 0;      // 静止の丸めで止めた面(T-0723)
 
         uint32_t wetCells = 0;         // 液体のあるセル
         uint32_t changedCells = 0;     // 値が変わったセル
@@ -121,6 +128,9 @@ namespace bicameral::sim {
 
         // 面の運動量の和(格子の軸)。Σ − 帳簿 が一定(保存の検査)
         [[nodiscard]] int64_t MomentumSum(uint32_t axis) const;
+
+        // 区画のセルの + 側の面の運動量(格子の軸 axis。区画の中の番号の並び。T-0723 の測り)
+        [[nodiscard]] std::span<const int64_t> FaceMomentum(uint32_t axis) const { return m_faces[axis]; }
 
         // 区画の中の番号(x + 幅 × (z + 奥行き × y))→ 格子の全部のセルの中の番号
         [[nodiscard]] uint32_t GridIndex(uint32_t region) const;
@@ -166,6 +176,8 @@ namespace bicameral::sim {
         void MoveMass(const BakedReactionTable& table, std::span<reaction::RxCell> cells, StepWork& work,
                       ProbeLiquidStepReport& report);
         void AdvectMomentum(StepWork& work, ProbeLiquidStepReport& report);
+        void RestFace(liquid::LqSettledFace& settled, uint64_t doubledMass, int64_t& rested,
+                      uint32_t& restedFaces) const;
         void SettleEnergy(const BakedReactionTable& table, std::span<reaction::RxCell> cells, StepWork& work,
                           ProbeLiquidStepReport& report);
     };
