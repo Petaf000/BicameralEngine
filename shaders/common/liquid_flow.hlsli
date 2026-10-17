@@ -182,6 +182,25 @@ FX_FN LqColumnStep LqColumnPressure(LqCellView self, uint64_t above, uint32_t ha
 
 // --- 面の力(圧力の差・重さ・壁・摩擦)と望む動く質量 ---
 
+// 横の面で、セルの圧力が掛かる高さの割合(Q16。T-0757・ADR-0327)= 液体が空きを満たす割合(体積 ÷ 空き。1 で止める)。
+// 液体はセルの底から溜まるので、横の面のうち液体が触れるのは下からこの高さだけ。満ちたセル(と溢れたセル)は 1
+FX_FN uint64_t LqWetHeight(LqCellView view) {
+    if (view.room == 0)
+        return 0;
+
+    const uint64_t filled = view.volume < view.room ? view.volume : view.room;
+
+    return LqMulDiv(filled, LQ_OPEN_FULL, view.room);
+}
+
+// 横の面を押す力 = 両側の「圧力 × 濡れた高さの割合」の差(T-0757・ADR-0327)。
+// 薄い層(満ち具合 φ)では φ² × 満ちた質量 の差になり、位置のエネルギー Σ 満ちた質量 × φ²(底に溜まった水の重心)の勾配と
+// 一致する(浅い水の静水圧 ρ g h² ÷ 2)。満ちたセルどうしは今までの圧力の差と同じ。縦の面は割合を掛けない(床と天井は全部が濡れる)
+FX_FN int64_t LqSidePush(LqCellView a, int64_t pressureA, LqCellView b, int64_t pressureB) {
+    return LqScaleSigned(pressureA, LqWetHeight(a), LQ_OPEN_FULL) -
+           LqScaleSigned(pressureB, LqWetHeight(b), LQ_OPEN_FULL);
+}
+
 // 面の力の結果。外から入った運動量の内訳(格子の軸の向き。和が帳簿の増え)
 struct LqFaceForce {
     int64_t face;      // 力の後の面の運動量
@@ -224,11 +243,14 @@ FX_FN LqFaceForce LqClosedFace(int64_t face, LqCellView self, int64_t pressure) 
 }
 
 // + 側の開いた面(faceOpen > 0)。a = − 側(自分)・b = + 側の隣。vertical = 1 は縦の面(重さが掛かる)。
+// 横の面は液体が触れる高さだけ押す(LqSidePush。濡れていない高さの分の圧力の差は壁の列へ: 帳簿の圧力の和は区画の端の押し返しで閉じる)。
 // 一部だけ開いた面(孔)は力も重さも開いた割合だけ(押し切れない分は固体が受けて壁へ。T-0612)
 FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vertical, LqCellView a, int64_t pressureA,
                                   LqCellView b, int64_t pressureB, LqParams params) {
     LqFaceForce force = LqEmptyFaceForce(face);
-    const int64_t push = pressureA - pressureB;
+    const int64_t fullPush = pressureA - pressureB;
+    const int64_t push = vertical != 0 ? fullPush : LqSidePush(a, pressureA, b, pressureB);
+    force.wall = push - fullPush;
     const int64_t weight = vertical != 0 ? (int64_t)(a.equivalent + b.equivalent) : 0;
     if (faceOpen == LQ_OPEN_FULL) {
         force.face += push - weight;
@@ -238,7 +260,7 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
         const int64_t change = LqScaleSigned(push - weight, faceOpen, LQ_OPEN_FULL);
         force.face += change;
         force.gravity = -openWeight;
-        force.wall = change - push + openWeight;
+        force.wall += change - push + openWeight;
     }
 
     // まわりに液体が無い面の運動量は行き場が無い。移流なし(T-0609 の形)では上流が空の面も
