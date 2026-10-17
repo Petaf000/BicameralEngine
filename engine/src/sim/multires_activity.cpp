@@ -16,6 +16,7 @@
 #include <type_traits>
 
 #include "common/multires_activity.hlsli"
+#include "sim/multires_fields.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
 
@@ -65,6 +66,7 @@ namespace bicameral::sim {
 
         // 頁を空きのスタックに積む(枠の順)。頁の溢れは空にしてから返す(次に使う所に古い溢れを残さない。T-0199)
         void ReleaseFoldedPage(MultiresNest& nest, uint32_t slot) {
+            nest_fields::FoldPage(nest, slot);  // 登録した欄も値 1 つに(T-0711)
             MrBlock& block = nest.blocks[slot];
             ClearPageOverflow(nest, block.page);
             FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = block.page;
@@ -89,6 +91,9 @@ namespace bicameral::sim {
 
         // ビット単位で一様なら畳む(溢れのある頁は溢れまで同じ時だけ)。畳んだら true
         bool FoldExact(MultiresNest& nest, uint32_t slot) {
+            if (!nest_fields::PageFoldable(nest, slot))  // 登録した欄が一様でなければ畳まない(T-0711)
+                return false;
+
             if (PageHasOverflow(nest, nest.blocks[slot].page)) {
                 const std::optional<RxWideCell> wide = ExactWideFoldValue(nest, slot);
                 if (wide)
@@ -240,6 +245,9 @@ namespace bicameral::sim {
         // ほぼ同じなら平均の値で畳む。畳んだら true(溢れを使う世界は上限の無い集計で。成分が 8 種を超えても畳める。T-0199)
         bool FoldNear(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
                       const MrFoldTolerance& tolerance) {
+            if (!nest_fields::PageFoldable(nest, slot))  // 欄はビット単位で一様な時だけ畳む(仮。T-0711)
+                return false;
+
             if (nest.wideCells) {
                 const MrWideFoldStats stats = CollectWideFoldStats(nest, view, slot);
                 if (!MrFoldStatsWithin(stats, tolerance))

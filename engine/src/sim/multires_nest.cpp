@@ -4,9 +4,13 @@
 #include "sim/multires_nest.h"
 
 #include <algorithm>
+#include <concepts>
+#include <ranges>
 #include <span>
 
+#include "sim/multires_fields.h"
 #include "sim/multires_nest_internal.h"
+#include "sim/multires_state.h"
 
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
@@ -260,6 +264,79 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // --- 状態の区画の要約(HashWholeNest。区画の一覧の順に。T-0711 より前の HashWholeNest と同じ並び・同じ値)---
+
+        // 見出し(活性と忙しさの印も)
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MrBlock>& blocks);
+
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<RxCell>& cells) {
+            for (const RxCell& cell : cells)
+                hash = FxHashCombine(hash, HashReactionCell(cell));
+
+            return hash;
+        }
+
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MrFraction>& fractions);
+
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MultiresOverflowArea>& areas);
+
+        // 一様の値の溢れ(T-0199。使っている一様のブロックだけ。頁を持つ枠・空きの枠に残った古い値は読まないので入れない)
+        uint64_t HashRegion(uint64_t hash, const MultiresNest& nest,
+                            const std::vector<MultiresUniformOverflow>& tails) {
+            for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+                if (!MrIsUniform(nest.blocks[slot]) || nest.blocks[slot].kind == MR_BLOCK_UNUSED)
+                    continue;
+
+                const MultiresUniformOverflow& tail = tails[slot];
+                hash = FxHashCombine(hash, tail.species.size());
+                for (size_t i = 0; i < tail.species.size(); ++i) {
+                    hash = FxHashCombine(hash, tail.species[i]);
+                    hash = FxHashCombine(hash, tail.amounts[i]);
+                }
+            }
+
+            return hash;
+        }
+
+        // 整数の並び(空きのスタック・帳簿・数える欄・登録した欄。符号付きは 2 の補数のまま)
+        template <typename Values>
+            requires std::integral<std::ranges::range_value_t<Values>>
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const Values& values) {
+            for (const auto value : values)
+                hash = FxHashCombine(hash, static_cast<uint64_t>(value));
+
+            return hash;
+        }
+
+        // 本物の葉のセル index の登録した欄(ハッシュに入るセル・面の欄。欄が無ければ hash のまま。T-0711)
+        uint64_t HashCellFields(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint32_t index) {
+            for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+                const MultiresField& field = nest.fields[f];
+                if (!state_field::SfHashed(field.desc) || !state_field::SfOnCells(field.desc))
+                    continue;
+
+                for (uint32_t c = 0; c < field.desc.components; ++c)
+                    hash = FxHashCombine(hash, static_cast<uint64_t>(LoadNestField(nest, f, slot, index, c)));
+            }
+
+            return hash;
+        }
+
+        // 本物のブロック slot のブロックの欄と、世界の欄(slot = MR_NO_BLOCK)の要約
+        uint64_t HashOtherFields(uint64_t hash, const MultiresNest& nest, uint32_t slot) {
+            const uint32_t place = slot == MR_NO_BLOCK ? state_field::SF_PLACE_WORLD : state_field::SF_PLACE_BLOCK;
+            for (const MultiresField& field : nest.fields) {
+                if (!state_field::SfHashed(field.desc) || field.desc.place != place)
+                    continue;
+
+                const size_t first = slot == MR_NO_BLOCK ? 0 : size_t{slot} * field.desc.components;
+                for (uint32_t c = 0; c < field.desc.components; ++c)
+                    hash = FxHashCombine(hash, static_cast<uint64_t>(field.values[first + c]));
+            }
+
+            return hash;
+        }
+
         uint64_t HashBlock(const MrBlock& block) {
             uint64_t hash = FxHashCombine(0, static_cast<uint64_t>(block.originX));
             hash = FxHashCombine(hash, static_cast<uint64_t>(block.originY));
@@ -271,6 +348,33 @@ namespace bicameral::sim {
             hash = FxHashCombine(hash, block.fraction);
             for (const uint32_t child : block.children)
                 hash = FxHashCombine(hash, child);
+
+            return hash;
+        }
+
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MrBlock>& blocks) {
+            for (const MrBlock& block : blocks) {
+                hash = FxHashCombine(hash, HashBlock(block));
+                hash = FxHashCombine(hash, block.activeTick);
+                hash = FxHashCombine(hash, block.busyTick);
+                hash = FxHashCombine(hash, block.wakeTick);
+                hash = FxHashCombine(hash, block.page);
+                hash = FxHashCombine(hash, block.quietCheck);
+            }
+
+            return hash;
+        }
+
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MrFraction>& fractions) {
+            for (const MrFraction& fraction : fractions)
+                hash = FxHashCombine(hash, HashFraction(fraction));
+
+            return hash;
+        }
+
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MultiresOverflowArea>& areas) {
+            for (const MultiresOverflowArea& area : areas)
+                hash = HashOverflowArea(hash, area);
 
             return hash;
         }
@@ -468,6 +572,7 @@ namespace bicameral::sim {
 
                 // --- 一様の値で埋める(溢れを使う世界は一様の値の溢れごと。返された頁の溢れは空。T-0199)---
                 const uint32_t page = PopPage(nest);
+                nest_fields::ExpandPage(nest, slot, page);
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     if (nest.wideCells)
                         StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, slot, index));
@@ -590,6 +695,7 @@ namespace bicameral::sim {
                 continue;
 
             hash = FxHashCombine(hash, HashBlock(block));
+            hash = HashOtherFields(hash, nest, slot);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsSteppedCell(block, index))
                     continue;
@@ -597,62 +703,19 @@ namespace bicameral::sim {
                 hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
                 hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
                 hash = HashCellOverflow(hash, nest, slot, index);
+                hash = HashCellFields(hash, nest, slot, index);
             }
         }
 
-        return hash;
+        return HashOtherFields(hash, nest, MR_NO_BLOCK);
     }
 
     uint64_t HashWholeNest(const MultiresNest& nest) {
         uint64_t hash = 0;
-        for (const MrBlock& block : nest.blocks) {
-            hash = FxHashCombine(hash, HashBlock(block));
-            hash = FxHashCombine(hash, block.activeTick);
-            hash = FxHashCombine(hash, block.busyTick);
-            hash = FxHashCombine(hash, block.wakeTick);
-            hash = FxHashCombine(hash, block.page);
-            hash = FxHashCombine(hash, block.quietCheck);
-        }
-
-        for (const RxCell& cell : nest.cells)
-            hash = FxHashCombine(hash, HashReactionCell(cell));
-
-        for (const MrFraction& fraction : nest.fractions)
-            hash = FxHashCombine(hash, HashFraction(fraction));
-
-        for (const uint32_t slot : nest.freeBlocks)
-            hash = FxHashCombine(hash, slot);
-
-        for (const uint32_t slot : nest.freeFractions)
-            hash = FxHashCombine(hash, slot);
-
-        for (const uint64_t value : nest.ledger)
-            hash = FxHashCombine(hash, value);
-
-        for (const uint32_t counter : nest.counters)
-            hash = FxHashCombine(hash, counter);
-
-        // --- 溢れ(T-0187。使う世界だけ。使わない世界の要約は前と同じ)---
-        if (nest.wideCells) {
-            for (const MultiresOverflowArea& area : nest.cellOverflow)
-                hash = HashOverflowArea(hash, area);
-
-            for (const MultiresOverflowArea& area : nest.fractionOverflow)
-                hash = HashOverflowArea(hash, area);
-
-            // 一様の値の溢れ(T-0199。使っている一様のブロックだけ。頁を持つ枠・空きの枠に残った古い値は読まないので入れない)
-            for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
-                if (!MrIsUniform(nest.blocks[slot]) || nest.blocks[slot].kind == MR_BLOCK_UNUSED)
-                    continue;
-
-                const MultiresUniformOverflow& tail = nest.uniformOverflow[slot];
-                hash = FxHashCombine(hash, tail.species.size());
-                for (size_t i = 0; i < tail.species.size(); ++i) {
-                    hash = FxHashCombine(hash, tail.species[i]);
-                    hash = FxHashCombine(hash, tail.amounts[i]);
-                }
-            }
-        }
+        VisitNestState(nest, [&](const NestStateRegion& region, const auto& values) {
+            if (region.hashed)
+                hash = HashRegion(hash, nest, values);
+        });
 
         return hash;
     }
