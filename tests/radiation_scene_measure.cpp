@@ -10,6 +10,7 @@
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
 //   gxb・gyb・gzb=<0 壁 / 1 周期 / 2 開いた>(区画の外の面。軸ごと。既定は全部壁)
+//   gk=<割る数>・ck=<割る数>(気体・凝縮相の物質の熱伝導率を割る。gk=5000・ck=20000 で場面の試験の倍率を外す。砂は割らない)
 //   liq=1(液体の区画: 川の列・y 1〜5。gap では入れない)
 //   slow=<s>(草〔セルロース〕の 2 本の規則の速さを 1/2^s に。今の値は 1 セルが 1 秒足らずで燃え尽きる。T-0570 の文献の値の代わりの試し)
 //   wet=<µmol>(川の両岸 4 列〔2 m〕の草のセルに液体の水を足す。湿った岸の試し。川から水が染みる道は無い)
@@ -66,6 +67,9 @@ namespace {
         uint64_t wetWater = 0;     // 岸の草のセルに足す液体の水(µmol)
         uint32_t gasDepth = 32;    // 気体の区画の z の奥行き(z = 32 を中に。CPU の気体の段は 50〜70 µs/セル/刻み)
         uint32_t gasHeight = 8;    // 気体の区画の高さ(y 4 から)
+        uint32_t gasConductivityDivisor = 1;  // 気体の物質の熱伝導率を割る(5000 = 場面の倍率を外す)
+        uint32_t
+            condensedConductivityDivisor = 1;  // 凝縮相の熱伝導率を割る(20000 = 倍率を外す。砂は倍率が無いので割らない)
         std::array<GasBoundary, 3> gasBoundary = {GasBoundary::Wall, GasBoundary::Wall, GasBoundary::Wall};
     };
 
@@ -133,6 +137,10 @@ namespace {
                     setting.slowShift = static_cast<uint32_t>(value);
                 else if (key == "wet")
                     setting.wetWater = value;
+                else if (key == "gk")
+                    setting.gasConductivityDivisor = static_cast<uint32_t>(std::max<uint64_t>(value, 1));
+                else if (key == "ck")
+                    setting.condensedConductivityDivisor = static_cast<uint32_t>(std::max<uint64_t>(value, 1));
                 else if (key == "gh")
                     setting.gasHeight = static_cast<uint32_t>(
                         std::clamp<uint64_t>(value, 1, PROBE_GRID_SIZE - GRASS_Y));
@@ -170,6 +178,18 @@ namespace {
                 const int32_t exponent = static_cast<int32_t>(static_cast<uint32_t>(rate & 0xffffffffULL));
                 rate = (rate & ~0xffffffffULL) | static_cast<uint32_t>(exponent - static_cast<int32_t>(shift));
             }
+        }
+    }
+
+    // 場面の熱伝導率の試験の倍率(units.luau: 気体 ×5000・凝縮相 ×20000。砂には掛けない)を割って外す(T-0697)。
+    // 気体の区画は流れで熱を運ぶので、倍率(流れが無い間の代わり)と二重に数えていないかを比べる
+    void DivideConductivity(BakedReactionTable& table, uint32_t gasDivisor, uint32_t condensedDivisor) {
+        for (size_t id = 0; id < table.species.size(); ++id) {
+            const bool condensed = id < table.speciesCondensed.size() && table.speciesCondensed[id] != 0;
+            if (condensed && table.speciesNames[id] == "silica")
+                continue;
+
+            table.species[id].conductivity /= condensed ? condensedDivisor : gasDivisor;
         }
     }
 
@@ -329,6 +349,7 @@ namespace {
         SetAbsorption(table, "silica", setting.absorptionSilica);
         SetAbsorption(table, "water", setting.absorptionWater);
         SlowGrass(table, setting.slowShift);
+        DivideConductivity(table, setting.gasConductivityDivisor, setting.condensedConductivityDivisor);
 
         const std::vector<reaction::RxCell> world = MakeWorld(table, setting);
         ProbeReference reference(table, world);
