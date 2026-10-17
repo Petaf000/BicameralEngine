@@ -936,6 +936,8 @@ namespace bicameral::sim {
     GasTree MakeGasTree(const GasConfig& config, std::span<const GasTreeRegion> regions,
                         std::span<const uint32_t> fractionsQ32, uint32_t temperatureMilliKelvin,
                         uint64_t surfacePressureMicroPascal, const GasTreeOptions& options) {
+        assert(config.eddyViscosityMm2PerS ==
+               0);  // 気体の粘り(T-0758)は 1 レベルの箱と多重解像度の 1 段だけ(凍結の木には入れない)
         uint32_t maxLevel = 0;
         for (const GasTreeRegion& region : regions) {
             assert(region.origin[0] % 2 == 0 && region.origin[1] % 2 == 0 && region.origin[2] % 2 == 0);

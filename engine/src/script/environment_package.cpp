@@ -194,6 +194,13 @@ namespace bicameral::script {
                     return std::unexpected(soundSpeed.error());
 
                 world.soundSpeedMillimetersPerSecond = *soundSpeed;
+            } else if (key == ENVIRONMENT_GAS_EDDY_VISCOSITY_KEY) {
+                const auto viscosity = ReadValue(key, entry, 0,
+                                                 static_cast<int64_t>(gas::GF_VISCOSITY_LIMIT_MM2_PER_S));
+                if (!viscosity)
+                    return std::unexpected(viscosity.error());
+
+                world.gasEddyViscosityMm2PerS = *viscosity;
             } else if (key == ENVIRONMENT_WORLD_EDGES_KEY) {
                 const auto edges = ReadEdges(entry);
                 if (!edges)

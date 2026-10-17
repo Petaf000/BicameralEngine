@@ -182,7 +182,7 @@ namespace bicameral::sim {
         void MoveMass(const BakedReactionTable& table, std::span<reaction::RxCell> cells, StepWork& work,
                       ProbeLiquidStepReport& report);
         void AdvectMomentum(StepWork& work, ProbeLiquidStepReport& report);
-        void RestFace(liquid::LqSettledFace& settled, uint64_t doubledMass, int64_t& rested,
+        void RestFace(liquid::LqSettledFace& settled, int64_t before, uint64_t doubledMass, int64_t& rested,
                       uint32_t& restedFaces) const;
         void SettleEnergy(const BakedReactionTable& table, std::span<reaction::RxCell> cells, StepWork& work,
                           ProbeLiquidStepReport& report);

@@ -126,6 +126,9 @@ namespace bicameral::sim {
         // 移す物質量の乱数の丸めの鍵(R6)。既定は欄の番号。世界のセルに載せる時は物質 ID(欄の並びが変わっても同じ乱数。T-0591)。
         // GPU の段は欄の番号だけ(GpuGas は既定でない鍵を断る)
         uint32_t roundingKey = GAS_ROUNDING_KEY_SLOT;
+        // 物質の粘り(µPa·s。パッケージの viscosity_upa_s。0 = 書かない。上限 gas::GF_SPECIES_VISCOSITY_LIMIT)。気体の粘り(静まる性質)の
+        // 分子の分(T-0758・D-516)。0.5 m のセルでは空気〔18 µPa·s〕の効きはごく小さく、静まる分の主は世界の値 GasConfig::eddyViscosityMm2PerS
+        uint32_t viscosityMicroPascalSeconds = 0;
 
         [[nodiscard]] bool operator==(const GasSpecies&) const = default;
     };
@@ -184,6 +187,12 @@ namespace bicameral::sim {
         GasReconstruction reconstruction = GasReconstruction::MonotonizedCentral;
         bool stochasticRounding = true;  // 移す物質量の端数を決定的な乱数で丸める(R6)。false は切り捨て(G1)
         uint64_t randomSeed = 0;         // 丸めの乱数の種(世界のシード。R6)
+
+        // --- 粘り(静まる性質。T-0758・D-516)---
+        // 格子で解けない乱れの粘り(動粘性 mm²/s。世界の値 WorldPhysics::gasEddyViscosityMm2PerS を ApplyWorldPhysics が入れる)。
+        // 0 = 無い(既定。今までとビット単位で同じ)。上限 gas::GF_VISCOSITY_LIMIT_MM2_PER_S(面の係数 1/8)。
+        // 1 刻みの小刻みの後に 1 回、隣のセルと運動量を分け合う(gas_flow.hlsli の GfViscousMomentum)。壁と開いた境界の外とは分け合わない(滑る)
+        uint32_t eddyViscosityMm2PerS = 0;
 
         [[nodiscard]] bool operator==(const GasConfig&) const = default;
     };

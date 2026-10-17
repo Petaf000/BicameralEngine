@@ -176,17 +176,18 @@ namespace bicameral::sim {
                 bool written = false;
                 std::string_view key;
                 SpeciesPhase phase = SpeciesPhase::Gas;
+                bool gasToo = false;  // 気体にも書ける(粘り。T-0758・D-516)
             };
 
             const SpeciesTransport& transport = entry.transport;
             const PhaseField fields[] = {
-                {transport.viscosityMicroPascalSeconds.has_value(), "viscosity_upa_s", SpeciesPhase::Liquid},
+                {transport.viscosityMicroPascalSeconds.has_value(), "viscosity_upa_s", SpeciesPhase::Liquid, true},
                 {transport.diffusivityMm2PerS.has_value(), "diffusivity_mm2_per_s", SpeciesPhase::Gas},
                 {transport.permeabilityNm2.has_value(), "permeability_um2", SpeciesPhase::Solid},
                 {transport.suctionPascals.has_value(), "suction_pa", SpeciesPhase::Solid},
             };
             for (const PhaseField& field : fields) {
-                if (field.written && entry.phase != field.phase)
+                if (field.written && entry.phase != field.phase && !(field.gasToo && entry.phase == SpeciesPhase::Gas))
                     return std::unexpected(
                         std::format("物質 {}: {} は phase = \"{}\" の物質だけに書ける(この物質は \"{}\")", entry.name,
                                     field.key, PhaseName(field.phase), PhaseName(entry.phase)));

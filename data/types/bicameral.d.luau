@@ -35,7 +35,7 @@ export type Species = {
     phase: string?, -- 相("gas"・"solid"・"liquid" の 1 本。省ける = 気体)。どの流れがこの物質を運ぶかを決める(T-0609・T-0710)
     density_kg_per_m3: number?, -- 密度。液体には要る(無ければ誤り)。固体も書く(セルの場所を取る。書かないとベイクが警告する。ADR-0268・T-0616)
     -- 動き方の任意の値(T-0710・土台の決定 3。名前と単位は仮)。書かなければ今と同じ動き。相に合わない欄はベイクが誤りにする
-    viscosity_upa_s: number?, -- 液体の粘り(µPa·s。1 以上の整数。水 890)。液体に書かないとベイクが警告する
+    viscosity_upa_s: number?, -- 粘り(µPa·s。1 以上の整数。水 890・空気 18)。液体と気体に書ける。液体に書かないとベイクが警告する
     diffusivity_mm2_per_s: number?, -- 気体の混ざる速さ(mm²/s。0 以上の整数。湯気 25)
     permeability_um2: (number | string)?, -- 固体の孔の通しやすさ(µm²。0〜1e7 を 1e-6 刻み。小さい値は 10 進の文字列 "1e-6"・"0.001"。砂 10)
     suction_pa: number?, -- 固体の吸い上げ(Pa。0 以上の整数。乾いた砂 5000)
@@ -141,6 +141,9 @@ export type AtmospherePoint = {
 export type Environment = {
     gravity_um_per_s2: number?, -- 重力の強さ(µm/s²。地球 9806650)
     sound_speed_mm_per_s: number?, -- 気体の音速の基準(mm/s。D-440 の本物の音速 340000)
+    -- 気体の格子で解けない乱れの粘り(動粘性 mm²/s。0〜1875000。T-0758・D-516。名前と単位は仮)。乱れた風と残響が静まる速さ。
+    -- 書かない = 0(静まらない)。6 m の部屋の揺れが e 分の 1 になる時間 ≒ 3.6 s ÷ (値 ÷ 10^6)。一様な風は減らない
+    gas_eddy_viscosity_mm2_per_s: number?,
     atmosphere_surface_pressure_pa: number?, -- 基準の大気の一番低い点の圧力(Pa。ほかの高さはエンジンが重力と温度から静水圧で出す)
     -- 基準の大気の高さの点の列(低い順。T-0499)。点の形は AtmospherePoint だが、ここでは any で受ける: 点を表の中にそのまま書くと
     -- 型検査が点ごとに別の型を作り({ nitrogen: number } は { [string]: number } と「ちょうど同じ」でない)誤りにするため。

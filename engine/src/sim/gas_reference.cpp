@@ -622,6 +622,78 @@ namespace bicameral::sim {
             box.cells = std::move(next);
         }
 
+        // --- 粘り(静まる性質。T-0758・D-516。小刻みの後に 1 刻みに 1 回。式は gas_flow.hlsli)---
+
+        bool HasViscosity(const GasConfig& config) {
+            if (config.eddyViscosityMm2PerS != 0)
+                return true;
+
+            for (uint32_t s = 0; s < config.speciesCount; ++s) {
+                if (config.species[s].viscosityMicroPascalSeconds != 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // セルの物質の粘りの動粘性(mm²/s。成分の物質量で重みを付けた μ ÷ 空きの体積の密度)
+        uint64_t CellMolecularViscosity(const GasBox& box, const GasCell& cell, uint64_t mass, uint32_t open) {
+            uint64_t weighted = 0;
+            uint64_t amount = 0;
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
+                weighted += cell.amounts[s] * box.config.species[s].viscosityMicroPascalSeconds;
+                amount += cell.amounts[s];
+            }
+
+            return gas::GfMolecularViscosity(weighted, amount, mass, open);
+        }
+
+        // 面ごとに運動量を分け合う(Jacobi: 刻みの小刻みの後の値だけから決め、整数で足し引き)。運動量は保存し、減った運動のエネルギーは両側の熱へ。
+        // 壁・開いた境界の外とは分け合わない(滑る面。運動量を外へ出さない)。面の開きの割合だけ効く
+        void ApplyViscosity(GasBox& box, const std::vector<GasFace>& layout) {
+            if (!HasViscosity(box.config))
+                return;
+
+            const gas::GfParams params = FlowParams(box);
+            const auto count = (uint32_t)box.cells.size();
+            std::vector<uint64_t> mass(count, 0);
+            std::vector<uint64_t> viscosity(count, 0);
+            for (uint32_t index = 0; index < count; ++index) {
+                mass[index] = CellMass(box.config, box.coefficients, box.cells[index]);
+                viscosity[index] = CellMolecularViscosity(box, box.cells[index], mass[index],
+                                                          SideOpen(box, {.index = index}));
+            }
+
+            std::vector<GasCell> next = box.cells;
+            for (const GasFace& face : layout) {
+                if (face.left.kind != SideKind::Cell || face.right.kind != SideKind::Cell)
+                    continue;
+
+                const uint32_t open = FaceOpen(box, face);
+                if (open == 0)
+                    continue;
+
+                const uint32_t a = face.left.index;
+                const uint32_t b = face.right.index;
+                const uint64_t total = box.config.eddyViscosityMm2PerS + ((viscosity[a] + viscosity[b]) / 2);
+                const uint64_t coefficient = (gas::GfViscosityQ32(total) * open) >> 16;
+                int64_t energy = 0;
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                    const int64_t pa = box.cells[a].momentum[axis];
+                    const int64_t pb = box.cells[b].momentum[axis];
+                    const int64_t moved = gas::GfViscousMomentum(pa, mass[a], pb, mass[b], coefficient);
+                    next[a].momentum[axis] -= moved;
+                    next[b].momentum[axis] += moved;
+                    energy += gas::GfViscousEnergy(params, moved, pa, mass[a], pb, mass[b]);
+                }
+
+                next[a].energy -= energy;
+                next[b].energy += energy;
+            }
+
+            box.cells = std::move(next);
+        }
+
     }  // namespace gas_detail
 
     using namespace gas_detail;  // 下の公開の関数から小刻みの部品を使う
@@ -858,6 +930,7 @@ namespace bicameral::sim {
         for (uint32_t substep = 0; substep < box.config.substeps; ++substep)
             Substep(box, layout, (box.tick * box.config.substeps) + substep);
 
+        ApplyViscosity(box, layout);
         ++box.tick;
     }
 
@@ -876,6 +949,7 @@ namespace bicameral::sim {
         for (uint32_t substep = 0; substep < box.config.substeps; ++substep)
             Substep(box, layout, (box.tick * box.config.substeps) + substep);
 
+        ApplyViscosity(box, layout);
         ++box.tick;
     }
 

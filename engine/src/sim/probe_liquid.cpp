@@ -10,6 +10,7 @@
 #include "common/liquid_flow.hlsli"
 #include "common/probe_region_hash.hlsli"
 #include "common/probe_sim.hlsli"
+#include "common/rest_rounding.hlsli"
 #include "core/aliases.h"
 #include "sim/cell_volume.h"
 
@@ -330,6 +331,7 @@ namespace bicameral::sim {
         std::vector<CellDelta> deltas;
         std::vector<int64_t> potentialCarried;               // 液体と一緒に運んだ後の位置のエネルギー(mJ)
         std::array<std::vector<int64_t>, 3> kineticCarried;  // 運動量と一緒に運んだ後の運動のエネルギー(mJ)
+        std::array<std::vector<int64_t>, 3> facesBefore;     // 刻みの初めの面の運動量(静止の丸めが比べる。T-0758)
         std::vector<uint8_t> changed;
     };
 
@@ -387,6 +389,7 @@ namespace bicameral::sim {
 
         m_ledger.energy += report.potentialEntered;
         FollowMassChange(work, report);
+        work.facesBefore = m_faces;  // 刻みの初めの面の運動量(合わせ直しの後。静止の丸めが比べる。T-0758)
 
         // --- 圧力 → 面の力 → 質量を動かす → 運動量を運ぶ → エネルギーを熱へ ---
         work.kineticCarried = m_kinetic;
@@ -596,16 +599,17 @@ namespace bicameral::sim {
         }
     }
 
-    // 静止の丸め(T-0723。既定は切る): 速さが restSpeedMicrometersPerSecond 未満の面の運動量を 0 にする(帳簿へ)。
+    // 静止の丸め(T-0723・T-0758。既定は切る。形は common/rest_rounding.hlsli = 気体のセルと同じ): 速さが restSpeedMicrometersPerSecond 未満で、
+    // この刻みで速くなっていない(|運動量| が刻みの初め before 以下)面の運動量を 0 にする(帳簿へ)。押されて動き出した遅い流れ(薄い膜)は止めない。
     // 運動のエネルギーは released に足して両側のセルの熱へ(速さの上限で止めた分と同じ道)
-    void ProbeLiquidField::RestFace(liquid::LqSettledFace& settled, uint64_t doubledMass, int64_t& rested,
-                                    uint32_t& restedFaces) const {
+    void ProbeLiquidField::RestFace(liquid::LqSettledFace& settled, int64_t before, uint64_t doubledMass,
+                                    int64_t& rested, uint32_t& restedFaces) const {
         if (m_options.restSpeedMicrometersPerSecond == 0 || settled.face == 0)
             return;
 
         const uint64_t limit = liquid::LqMulDiv((uint64_t)m_options.restSpeedMicrometersPerSecond * TICKS_PER_SECOND,
                                                 doubledMass, m_params.gravityMicrometersPerSecond2);
-        if (fx::FxAbsU64(settled.face) >= limit)
+        if (!rest::RrShouldRest(fx::FxAbsU64(settled.face), fx::FxAbsU64(before), limit))
             return;
 
         rested -= settled.face;
@@ -642,7 +646,7 @@ namespace bicameral::sim {
                 const uint64_t doubled = inside ? mass[region] + mass[neighbor] : 0;
                 liquid::LqSettledFace settled = liquid::LqSettleFace(face, doubled, work.kineticCarried[axis][region],
                                                                      m_params);
-                RestFace(settled, doubled, report.rested[axis], report.restedFaces);
+                RestFace(settled, work.facesBefore[axis][region], doubled, report.rested[axis], report.restedFaces);
                 face = settled.face;
                 report.dropped[axis] += settled.dropped;
                 report.capped[axis] += settled.capped;
