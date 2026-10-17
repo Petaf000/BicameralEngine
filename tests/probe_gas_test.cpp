@@ -12,7 +12,7 @@
 //   8. 物質の無いエネルギーを作らない(T-0646・ADR-0286): 反応が気体の質量を変える場面(水蒸気が露になる試験の規則。燃える木箱・
 //      熱い湯気の塊)でも、毎刻み 2〜3 に加えて、区画のどのセルも熱(エネルギー − 化学)が負にならず、物質の無いセルはエネルギーを
 //      持たない(強い流れが 1 小刻みでセルの中身を押し出すと、押し出す仕事のぶん負のエネルギーが残っていた)。2・6 の木箱も同じく確かめる。
-//      熱が負のセルの数と最も負の熱は表示だけ(強い爆発でまだ少し残る。力積の後の熱で上限を決めるのは T-0647)
+//      熱が負のセルの数と最も負の熱は表示だけ(強い爆発でまだ残る。出ていく割合の上限では直らない〔T-0647〕。根っこは T-0676)
 // 表は 1〜4 が試験の表(combustion_test)から CO を作る規則を除いたもの(区画の気体の物質 4 つ〔N2・O2・CO2・H2O〕。T-0590 の形)、
 // 6・7 が試験の表のまま + 地球の空気 + 定圧の比熱。
 #include <algorithm>
@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "reaction_test_table.h"
@@ -651,21 +652,45 @@ namespace {
 
 }  // namespace
 
-int main() {
-    const BakedReactionTable table = MakeTable();
-    TestBlankWorldHasNoGas();
-    TestQuietAtmosphere(table, ProbeGasPressure::Explicit);
-    TestQuietAtmosphere(table, ProbeGasPressure::Projection);
-    TestDeterminism(table, ProbeGasPressure::Explicit);
-    TestDeterminism(table, ProbeGasPressure::Projection);
-    TestSmokeRises(table);
-    TestCheckerboard(table, ProbeGasPressure::Explicit);
-    TestCheckerboard(table, ProbeGasPressure::Projection);
+// 引数で組を選べる(無ければ全部。fire = 2 の燃える木箱・checker = 9 の市松・dew = 8 の露の場面。測り直す時に。T-0647)
+int main(int argc, char** argv) {
+    const auto wants = [&](std::string_view name) {
+        if (argc < 2)
+            return true;
 
-    const BakedReactionTable earth = MakeEarthAirTable();
-    TestHeatCapacityAtConstantVolume(earth);
-    TestManySpecies(earth);
-    TestMassChangedByReaction();
+        for (int i = 1; i < argc; ++i) {
+            if (name == argv[i])
+                return true;
+        }
+
+        return false;
+    };
+
+    const BakedReactionTable table = MakeTable();
+    if (argc < 2) {
+        TestBlankWorldHasNoGas();
+        TestQuietAtmosphere(table, ProbeGasPressure::Explicit);
+        TestQuietAtmosphere(table, ProbeGasPressure::Projection);
+        TestDeterminism(table, ProbeGasPressure::Explicit);
+        TestDeterminism(table, ProbeGasPressure::Projection);
+    }
+
+    if (wants("fire"))
+        TestSmokeRises(table);
+
+    if (wants("checker")) {
+        TestCheckerboard(table, ProbeGasPressure::Explicit);
+        TestCheckerboard(table, ProbeGasPressure::Projection);
+    }
+
+    if (argc < 2) {
+        const BakedReactionTable earth = MakeEarthAirTable();
+        TestHeatCapacityAtConstantVolume(earth);
+        TestManySpecies(earth);
+    }
+
+    if (wants("dew"))
+        TestMassChangedByReaction();
 
     std::printf("probe_gas_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
     return failureCount == 0 ? 0 : 1;

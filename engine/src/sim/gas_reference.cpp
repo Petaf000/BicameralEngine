@@ -554,7 +554,8 @@ namespace bicameral::sim {
         // 出ていく割合の合計の、引く側の熱を負にしない換算(T-0646・ADR-0286): 出ていく塊は熱の分け前(熱容量の比)に加えて
         // 押し出す仕事 n R T を持って出る(MovedEnergy)ので、引く側の熱が残るのは 割合の合計 × (C + n R) ≤ C の時(C = 熱容量)。
         // 割合の合計を (C + n R) ÷ C 倍した値を返す(1 を超えたら縮める。空気なら合計が約 0.71 まで。等温は押し出す仕事が無いのでそのまま)。
-        // これが無いと、強い流れが 1 小刻みでセルの中身をほぼ全部押し出し、物質の無い負のエネルギーが残る(T-0646。gas_step.hlsl の GasOutflow も同じ)
+        // これが無いと、強い流れが 1 小刻みでセルの中身をほぼ全部押し出し、物質の無い負のエネルギーが残る(T-0646)。
+        // 木(gas_tree.cpp の LimitOutflow)・GPU(gas_cell.hlsli の EffectiveOutflow。箱と木の段)も同じ換算(T-0647)
         uint64_t EffectiveOutflow(const GasConfig& config, const GasCell& cell, uint64_t outflow) {
             if (outflow == 0 || config.thermodynamics != GasThermodynamics::Adiabatic)
                 return outflow;

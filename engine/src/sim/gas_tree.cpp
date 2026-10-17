@@ -406,7 +406,9 @@ namespace bicameral::sim {
 
         // 出ていく割合の合計が 1 を超えるセルは比例して縮める(割合はどれも同じ中身に対する値なので、レベルをまたぐ面もそのまま足せる)。
         // 小刻みの細かい面(風上の小刻み 1 回の間に 2^g 回引く)は × 2^g で数え、使える分は 1 − 風上の小刻みの初めに同じ小刻みの面が出した分
-        // → 風上の小刻み 1 回の合計が 1 以下(T-0320。熱の C/8 ÷ 引く回数と同じ考え。全部同じ小刻みなら T-0208 と同じ値)
+        // → 風上の小刻み 1 回の合計が 1 以下(T-0320。熱の C/8 ÷ 引く回数と同じ考え。全部同じ小刻みなら T-0208 と同じ値)。
+        // 合計はどちらも箱と同じ換算(gas_reference.cpp の EffectiveOutflow。押し出す仕事 n R T のぶん × (C + n R) ÷ C。T-0647・ADR-0286)で
+        // 数える(引く側の熱を負にしない。換算の倍率は風上の物質だけで決まり、粗い小刻みの間は同じ)
         void LimitOutflow(const GasTree& tree, TreeWork& work, std::vector<TreeFace>& faces) {
             std::vector<uint64_t> outflow(tree.cells.size(), 0);
             for (TreeFace& face : faces) {
@@ -416,18 +418,27 @@ namespace bicameral::sim {
                     outflow[donor.index] += face.fraction << SubcycleGap(tree, face, donor);
             }
 
+            std::vector<uint64_t> available(tree.cells.size(), gd::ONE_Q32);
+            for (uint32_t index = 0; index < tree.cells.size(); ++index) {
+                if (outflow[index] == 0)
+                    continue;
+
+                const GasCell& source = work.forced.cells[index];
+                const uint64_t committed = gd::EffectiveOutflow(tree.config, source, work.committedOutflow[index]);
+                available[index] = gd::ONE_Q32 - std::min(committed, gd::ONE_Q32);
+                outflow[index] = gd::EffectiveOutflow(tree.config, source, outflow[index]);
+            }
+
             for (TreeFace& face : faces) {
                 const TreeSide& donor = Donor(face);
-                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                if (face.fraction == 0 || donor.kind != SideKind::Cell ||
+                    outflow[donor.index] <= available[donor.index])
                     continue;
 
-                const uint64_t available = gd::ONE_Q32 - work.committedOutflow[donor.index];
-                if (outflow[donor.index] <= available)
-                    continue;
+                NoteOutflowLimit(work, SubcycleGap(tree, face, donor), available[donor.index]);
 
-                NoteOutflowLimit(work, SubcycleGap(tree, face, donor), available);
-
-                face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, available), outflow[donor.index])
+                face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, available[donor.index]),
+                                                  outflow[donor.index])
                                     .quotient;
             }
 

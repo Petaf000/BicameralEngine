@@ -501,26 +501,18 @@ void ApplyFaceOpenness(GasFaceSides sides, inout GasGpuFace face) {
     g_faces.Store<uint64_t>(FaceAddress(faceId) + FACE_FRACTION, fraction);
 }
 
-// 出ていく割合の合計の、引く側の熱を負にしない換算(gas_reference.cpp の EffectiveOutflow。T-0646・ADR-0286):
-// 割合の合計 × (C + n R) ÷ C(C = 熱容量。押し出す仕事 n R T のぶん)。等温はそのまま
-// 熱容量と物質量は小刻みの初めのセル(g_cells)の成分から(CPU は box.cells)
-uint64_t EffectiveOutflow(uint32_t index, uint64_t outflow) {
-    if (outflow == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
-        return outflow;
+// 出ていく割合の合計の換算(gas_cell.hlsli の EffectiveOutflow。T-0646・ADR-0286)。熱容量と物質量は小刻みの初めのセル(g_cells)の
+// 成分から(CPU は box.cells)
+uint64_t CellEffectiveOutflow(uint32_t index, uint64_t outflow) {
+    if (outflow == 0)
+        return 0;
 
     GasGpuTotals totals = GasZeroTotals();
     const uint32_t speciesCount = SpeciesCount();
     for (uint32_t s = 0; s < speciesCount; ++s)
         GasAddSpecies(totals, s, g_cells.Load<uint64_t>(CellAmountAddress(index, s)));
 
-    const uint64_t capacity = totals.capacity;
-    if (capacity == 0)
-        return outflow;
-
-    const FxDivResult push = FxDivU128By64(FxMulU64Full(totals.amount, GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN), MICRO);
-    const uint64_t pushCapacity = push.quotient + (push.remainder != 0 ? 1 : 0);  // n R(nJ/K。切り上げ)
-
-    return FxDivU128By64(FxMulU64Full(outflow, capacity + pushCapacity), capacity).quotient;
+    return EffectiveOutflow(totals, outflow);
 }
 
 // --- 段 5: 風上として出ていく割合の合計(セル。gas_reference.cpp の LimitOutflow の 1 回目の走査。EffectiveOutflow で換算)---
@@ -536,7 +528,7 @@ uint64_t EffectiveOutflow(uint32_t index, uint64_t outflow) {
             outflow += face.fraction;
     }
 
-    g_sums.Store<uint64_t>(SumsAddress(index), EffectiveOutflow(index, outflow));
+    g_sums.Store<uint64_t>(SumsAddress(index), CellEffectiveOutflow(index, outflow));
 }
 
 // --- 移す成分の物質量(gas_reference.cpp の LimitedSlope・SpeciesRatio・HalfSlope・MovedAmountQ32・RoundAmount)---

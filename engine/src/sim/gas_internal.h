@@ -54,5 +54,6 @@ namespace bicameral::sim::gas_detail {
     [[nodiscard]] int64_t LimitedSlope(GasReconstruction reconstruction, int64_t a, int64_t b);
     [[nodiscard]] int64_t MovedEnergy(const GasConfig& config, const GasCell& source, const GasDerived& sourceDerived,
                                       const GasCell& moved, uint64_t fraction);
+    [[nodiscard]] uint64_t EffectiveOutflow(const GasConfig& config, const GasCell& cell, uint64_t outflow);
 
 }  // namespace bicameral::sim::gas_detail

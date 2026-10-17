@@ -655,9 +655,18 @@ uint64_t RoundAmount128(FxU128 amountQ32, uint64_t hash) {
     const TreeSide donor = PickSide(face.flow > 0, left, right);
     uint64_t fraction = face.fraction;
     if (fraction != 0 && donor.kind == GAS_TREE_GPU_SIDE_CELL) {
-        // 使える分 = 1 − 風上の小刻みの初めに同じ小刻みの面が出した分(抑えた後なので 1 以下。0 で止める引き算は要らない)
-        const uint64_t outflow = g_sums.Load<uint64_t>(SumsAddress(donor.index));
-        const uint64_t available = ONE_Q32 - g_carry.Load<uint64_t>(SumsAddress(donor.index));
+        // 箱と同じ換算(gas_cell.hlsli の EffectiveOutflow。gas_tree.cpp の LimitOutflow。T-0647)。使える分 = 1 − 風上の小刻みの初めに
+        // 同じ小刻みの面が出した分(換算した値。換算しても 2^63 より十分小さい)。「0 で止める引き算」は書かず、符号付きの差を出してから
+        // 0 以下を 0 に(T-0185。1 で頭打ちにしてから引く形〔1 − min(c, 1)〕では subcycled_fast が CPU と食い違った。下ろし方は未確認)
+        GasGpuTotals donorTotals = GasZeroTotals();
+        const uint32_t donorSpeciesCount = SpeciesCount();
+        for (uint32_t t = 0; t < donorSpeciesCount; ++t)
+            GasAddSpecies(donorTotals, t, ForcedSideAmount(donor, t));
+
+        const uint64_t outflow = EffectiveOutflow(donorTotals, g_sums.Load<uint64_t>(SumsAddress(donor.index)));
+        const uint64_t committed = EffectiveOutflow(donorTotals, g_carry.Load<uint64_t>(SumsAddress(donor.index)));
+        const int64_t room = (int64_t)ONE_Q32 - (int64_t)committed;
+        const uint64_t available = room > 0 ? (uint64_t)room : 0;
         if (outflow > available)
             fraction = FxDivU128By64(FxMulU64Full(fraction, available), outflow).quotient;
     }
