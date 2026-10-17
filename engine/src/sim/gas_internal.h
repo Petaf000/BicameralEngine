@@ -4,6 +4,7 @@
 
 #include <cstdint>
 
+#include "common/gas_flow.hlsli"
 #include "common/units.hlsli"
 #include "sim/gas_reference.h"
 

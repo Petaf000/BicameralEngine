@@ -96,26 +96,7 @@ void AddLedger(uint32_t address, int64_t value) {
     gasWork.Store<int64_t>(address, gasWork.Load<int64_t>(address) + value);
 }
 
-// --- エネルギーの気体のぶん(probe_gas.cpp の GasEnergyPart)---
-
-// 床で割る(負の数も下へ)
-int64_t DivideDown(int64_t value, uint64_t divisor) {
-    FxU128 magnitude;
-    magnitude.hi = 0;
-    magnitude.lo = FxAbsU64(value);
-    const FxDivResult result = FxDivU128By64(magnitude, divisor);
-    if (value >= 0)
-        return (int64_t)result.quotient;
-
-    return -(int64_t)(result.quotient + (result.remainder != 0 ? 1 : 0));
-}
-
-// value × numerator ÷ denominator(0 の向きへ切り捨て)
-int64_t ScaleToward0(int64_t value, uint64_t numerator, uint64_t denominator) {
-    const uint64_t scaled = FxDivU128By64(FxMulU64Full(FxAbsU64(value), numerator), denominator).quotient;
-
-    return FxApplySign(scaled, value < 0);
-}
+// --- エネルギーの気体のぶん(probe_gas.cpp の GasEnergyPart。式は gas_flow.hlsli の GfGasEnergyPart)---
 
 int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
     int64_t chemical = 0;
@@ -141,16 +122,7 @@ int64_t GasEnergyPart(ProbeGasHeader header, RxCell cell) {
         }
     }
 
-    if (!hasGas)
-        return 0;
-
-    if (!hasCondensed || capacity == 0)
-        return cell.energy;
-
-    const int64_t heat = (cell.energy * 1000) - chemical;  // µJ
-    const int64_t gasHeat = ScaleToward0(heat, gasCapacity, capacity);
-
-    return DivideDown(gasHeat + gasChemical, 1000);
+    return GfGasEnergyPart(cell.energy, chemical, capacity, gasChemical, gasCapacity, hasGas, hasCondensed);
 }
 
 // --- セルの気体の空き(sim/cell_volume の ShareCellVolume・GasOpenQ16。T-0593・T-0617・ADR-0268)---
@@ -358,18 +330,14 @@ uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
         condensed += state.kinetic;
     } else {
         // 段の外(反応・相変化・置く操作)で気体の質量が減ったセルは速さを保つ(減った気体の運動量は帳簿へ。運動のエネルギーの減った分は熱へ。
-        // CPU の MomentumAfterMassChange。T-0646・ADR-0286)
+        // gas_flow.hlsli の GfMomentumAfterMassChange。T-0646・ADR-0286)
         GasGpuTotals totals = GasZeroTotals();
         for (uint32_t s = 0; s < slotCount; ++s)
             GasAddSpecies(totals, s, gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)));
 
         const uint64_t mass = totals.mass;
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
-            int64_t kept = state.momentum[axis];
-            if (mass < state.mass) {
-                const uint64_t magnitude = FxDivU128By64(FxMulU64Full(FxAbsU64(kept), mass), state.mass).quotient;
-                kept = FxApplySign(magnitude, kept < 0);
-            }
+            const int64_t kept = GfMomentumAfterMassChange(state.momentum[axis], state.mass, mass);
 
             const int64_t lost = state.momentum[axis] - kept;
             if (lost != 0) {
@@ -442,8 +410,7 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
         GasAddSpecies(totals, s, gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)));
 
     const uint64_t mass = totals.mass;
-    const int64_t kineticMicroJoule = KineticEnergy(gas, mass);
-    const int64_t kinetic = (int64_t)(((uint64_t)kineticMicroJoule + 500) / 1000);
+    const int64_t kinetic = GfKineticMilliJoule(KineticEnergy(gas, mass));
     const int64_t condensed = gasWork.Load<int64_t>(header.condensedOffset + region * 8);
 
     // --- 凝縮相の成分 + 0 でない気体の成分を ID の順に(どちらも ID の順で、重ならない。気体は欄の順 = ID の順に進む)---

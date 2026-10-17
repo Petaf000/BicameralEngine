@@ -5,6 +5,7 @@
 #include <cassert>
 
 #include "common/fixed.hlsli"
+#include "common/gas_flow.hlsli"
 #include "common/probe_region_hash.hlsli"
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
@@ -17,19 +18,6 @@ namespace bicameral::sim {
     namespace {
 
         constexpr uint64_t PARTS_TO_Q32_DIVISOR = ATMOSPHERE_PARTS_PER_WHOLE;
-
-        // 床で割る(負の数も下へ)
-        int64_t DivideDown(int64_t value, int64_t divisor) {
-            const int64_t quotient = value / divisor;
-            return (value % divisor != 0 && (value < 0) != (divisor < 0)) ? quotient - 1 : quotient;
-        }
-
-        // value × numerator ÷ denominator(0 の向きへ切り捨て。value は符号付き・numerator ≤ denominator)
-        int64_t ScaleToward0(int64_t value, uint64_t numerator, uint64_t denominator) {
-            const uint64_t magnitude = fx::FxAbsU64(value);
-            const uint64_t scaled = fx::FxDivU128By64(fx::FxMulU64Full(magnitude, numerator), denominator).quotient;
-            return value < 0 ? -(int64_t)scaled : (int64_t)scaled;
-        }
 
         bool SameCell(const reaction::RxCell& a, const reaction::RxCell& b) {
             if (a.energy != b.energy || a.speciesCount != b.speciesCount)
@@ -47,8 +35,8 @@ namespace bicameral::sim {
             return species < table.speciesCondensed.size() ? table.speciesCondensed[species] == 0 : true;
         }
 
-        // セルのエネルギーのうち気体のぶん(mJ)= 熱 × 気体の熱容量 ÷ セルの熱容量 + 気体の化学(セルの温度を気体と凝縮相で同じと置く。
-        // 局所の熱の釣り合い。反応と伝導の温度と同じ 1 つの温度)。セルが気体だけなら全部
+        // セルのエネルギーのうち気体のぶん(mJ。式は gas_flow.hlsli の GfGasEnergyPart。GPU の probe_gas_tick.hlsl と同じ関数)。
+        // セルの温度を気体と凝縮相で同じと置く(局所の熱の釣り合い。反応と伝導の温度と同じ 1 つの温度)。セルが気体だけなら全部
         int64_t GasEnergyPart(const BakedReactionTable& table, const reaction::RxCell& cell) {
             int64_t chemical = 0;
             int64_t gasChemical = 0;
@@ -71,16 +59,8 @@ namespace bicameral::sim {
                 }
             }
 
-            if (!hasGas)
-                return 0;
-
-            if (!hasCondensed || capacity == 0)
-                return cell.energy;
-
-            const int64_t heat = (cell.energy * 1000) - chemical;  // µJ
-            const int64_t gasHeat = ScaleToward0(heat, gasCapacity, capacity);
-
-            return DivideDown(gasHeat + gasChemical, 1000);
+            return gas::GfGasEnergyPart(cell.energy, chemical, capacity, gasChemical, gasCapacity, hasGas,
+                                        hasCondensed);
         }
 
         // 区画の気体の物質: 基準の大気の物質と、区画のセルにある凝縮相でない物質(ID の順)
@@ -150,17 +130,13 @@ namespace bicameral::sim {
         // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
         constexpr std::array<uint32_t, GAS_AXES> GRID_AXIS_OF_GAS_AXIS = {0, 2, 1};
 
-        // 気体の段の外(反応・相変化・置く操作)で、セルの気体の質量が前の段の終わりの before から now に変わった後の運動量(T-0646・ADR-0286)。
-        // 減った時: 減った気体は同じ速さのまま凝縮相へ移った = 速さを保つ(運動量 × now ÷ before。0 の向きへ切り捨て)。
-        // 増えた時: 増えた気体は静止して現れた = 運動量を保つ(速さが下がる)。どちらも運動のエネルギーは前の値を超えない
+        // 気体の段の外(反応・相変化・置く操作)で、セルの気体の質量が前の段の終わりの before から now に変わった後の運動量
+        // (gas_flow.hlsli の GfMomentumAfterMassChange。減れば速さを保つ・増えれば運動量を保つ。T-0646・ADR-0286)
         std::array<int64_t, GAS_AXES> MomentumAfterMassChange(const std::array<int64_t, GAS_AXES>& momentum,
                                                               uint64_t before, uint64_t now) {
-            if (now >= before)
-                return momentum;
-
             std::array<int64_t, GAS_AXES> kept = {};
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                kept[axis] = ScaleToward0(momentum[axis], now, before);
+                kept[axis] = gas::GfMomentumAfterMassChange(momentum[axis], before, now);
 
             return kept;
         }
@@ -392,7 +368,7 @@ namespace bicameral::sim {
             const uint32_t index = GridIndex(region);
             const reaction::RxCell& before = cells[index];
             const GasCell& gas = box.cells[region];
-            const int64_t kinetic = (GasKineticEnergy(box, gas) + 500) / 1000;  // µJ → mJ(最も近い整数。負にならない)
+            const int64_t kinetic = gas::GfKineticMilliJoule(GasKineticEnergy(box, gas));  // µJ → mJ(最も近い整数)
             const uint64_t mass = GasCellMass(box, gas);
 
             const std::vector<SpeciesAmount>& amounts = merged[region];

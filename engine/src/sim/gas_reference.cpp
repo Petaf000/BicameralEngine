@@ -57,8 +57,64 @@ namespace bicameral::sim {
             GasPerSpecies<uint64_t> moved;
         };
 
+        // 共有の芯(shaders/common/gas_flow.hlsli。GPU と同じ関数。T-0719)へ渡す見立ての値。係数の要らない部品(運動・移す塊のエネルギー・
+        // 出ていく割合の換算)は config だけから(係数は 0)
+        gas::GfParams FlowParams(const GasConfig& config, const GasCoefficients* coefficients, bool openness) {
+            gas::GfParams params = {};
+            if (coefficients != nullptr) {
+                params.centralFlow = coefficients->centralFlow;
+                params.pressureFlow = coefficients->pressureFlow;
+                params.pressureImpulse = coefficients->pressureImpulse;
+                params.gravityImpulse = coefficients->gravityImpulse;
+                params.hydrostatic = coefficients->hydrostatic;
+                params.gravityWork = coefficients->gravityWork;
+                params.soundScale = coefficients->soundScale;
+                params.soundTemperature = coefficients->soundTemperature;
+            }
+
+            params.gravity = config.gravity ? 1 : 0;
+            params.reconstruction = (uint32_t)config.reconstruction;
+            params.stochasticRounding = config.stochasticRounding ? 1 : 0;
+            params.adiabatic = config.thermodynamics == GasThermodynamics::Adiabatic ? 1 : 0;
+            params.openness = openness ? 1 : 0;
+
+            return params;
+        }
+
+        gas::GfParams FlowParams(const GasBox& box) {
+            return FlowParams(box.config, &box.coefficients, !box.openQ16.empty());
+        }
+
+        static_assert((uint32_t)GasReconstruction::Upwind == gas::GF_RECONSTRUCTION_UPWIND &&
+                      (uint32_t)GasReconstruction::Minmod == gas::GF_RECONSTRUCTION_MINMOD &&
+                      (uint32_t)GasReconstruction::MonotonizedCentral == gas::GF_RECONSTRUCTION_MC);
+        static_assert(GAS_OPEN_FULL == gas::GF_OPEN_FULL &&
+                      PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 == gas::GF_PRESSURE_PER_AMOUNT_TEMPERATURE_Q32);
+
+        // セルの見立て: 成分の和(物質量・熱容量・化学・質量)。coefficients が無ければ質量は 0
+        gas::GfTotals CellTotals(const GasConfig& config, const GasCoefficients* coefficients, const GasCell& cell) {
+            gas::GfTotals totals = gas::GfZeroTotals();
+            for (uint32_t s = 0; s < config.speciesCount; ++s) {
+                const GasSpecies& species = config.species[s];
+                const uint64_t massPerAmount = coefficients == nullptr ? 0 : coefficients->massPerAmount[s];
+                totals = gas::GfAddSpecies(totals, cell.amounts[s], species.heatCapacity, species.formationEnergy,
+                                           massPerAmount);
+            }
+
+            return totals;
+        }
+
+        GasDerived ToGasDerived(const gas::GfDerived& flow) {
+            return {.mass = flow.mass,
+                    .inverseMass = flow.inverseMass,
+                    .inverseAmount = flow.inverseAmount,
+                    .temperature = flow.temperature,
+                    .pressure = flow.pressure,
+                    .scaledPressure = flow.scaledPressure};
+        }
+
         uint64_t MulShiftU64(uint64_t a, uint64_t b, uint32_t shift) {
-            return fx::FxShiftRightU128(fx::FxMulU64Full(a, b), shift);
+            return gas::GfMulShiftU64(a, b, shift);
         }
 
         uint64_t TotalAmount(const GasConfig& config, const GasCell& cell) {
@@ -71,79 +127,29 @@ namespace bicameral::sim {
 
         // 熱容量(nJ/K)= Σ 物質量(µmol)× 比熱(mJ/(mol·K))
         uint64_t HeatCapacity(const GasConfig& config, const GasCell& cell) {
-            uint64_t capacity = 0;
-            for (uint32_t s = 0; s < config.speciesCount; ++s)
-                capacity += cell.amounts[s] * config.species[s].heatCapacity;
-
-            return capacity;
+            return CellTotals(config, nullptr, cell).capacity;
         }
 
         // 化学のエネルギー(µJ)= Σ 物質量 × H0
         int64_t ChemicalEnergy(const GasConfig& config, const GasCell& cell) {
-            int64_t chemical = 0;
-            for (uint32_t s = 0; s < config.speciesCount; ++s)
-                chemical += (int64_t)cell.amounts[s] * config.species[s].formationEnergy;
-
-            return chemical;
+            return CellTotals(config, nullptr, cell).chemical;
         }
 
         uint64_t CellMass(const GasConfig& config, const GasCoefficients& coefficients, const GasCell& cell) {
-            uint64_t mass = 0;
-            for (uint32_t s = 0; s < config.speciesCount; ++s)
-                mass += MulShiftU64(cell.amounts[s], coefficients.massPerAmount[s], 32);
-
-            return mass;
+            return CellTotals(config, &coefficients, cell).mass;
         }
 
-        // 運動エネルギー(µJ)= Σ (P² >> 41)÷ m(軸ごとに切り捨ててから足す。GPU も同じ形)。等温は 0(エネルギーに数えない)
+        // 運動エネルギー(µJ。gas_flow.hlsli の GfKineticEnergy)。等温は 0
         int64_t KineticEnergy(const GasConfig& config, const GasCell& cell, uint64_t mass) {
-            if (config.thermodynamics != GasThermodynamics::Adiabatic || mass == 0)
-                return 0;
-
-            uint64_t scaledSquare = 0;
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
-                const uint64_t magnitude = fx::FxAbsU64(cell.momentum[axis]);
-                assert(magnitude < MAX_MOMENTUM);
-                scaledSquare += fx::FxShiftRightU128(fx::FxMulU64Full(magnitude, magnitude), KINETIC_SHIFT);
-            }
-
-            return (int64_t)(scaledSquare / mass);
-        }
-
-        // 温度(mK)= 熱(µJ)× 1e6 ÷ 熱容量(nJ/K)。熱 = エネルギー − 化学 − 運動(µJ)。熱が 0 以下なら 0
-        uint32_t CellTemperature(const GasConfig& config, const GasCell& cell, int64_t kineticMicroJoule) {
-            const int64_t heat = cell.energy * 1000 - ChemicalEnergy(config, cell) - kineticMicroJoule;
-            const uint64_t capacity = HeatCapacity(config, cell);
-            if (heat <= 0 || capacity == 0)
-                return 0;
-
-            const uint64_t temperature = fx::FxDivU128By64(fx::FxMulU64Full((uint64_t)heat, MICRO), capacity).quotient;
-            assert(temperature <= std::numeric_limits<uint32_t>::max());
-
-            return (uint32_t)temperature;
-        }
-
-        // 本物の圧力(µPa)= n × T × R ÷ V
-        int64_t CellPressure(const GasConfig& config, const GasCell& cell, uint32_t temperature) {
-            const fx::FxU128 amountTemperature = fx::FxMulU64Full(TotalAmount(config, cell), temperature);
-            assert(amountTemperature.hi == 0);
-
-            return (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 32);
+            return gas::GfKineticEnergy(FlowParams(config, nullptr, false), cell.momentum[0], cell.momentum[1],
+                                        cell.momentum[2], mass);
         }
 
         // 質量・温度・本物の圧力(p̃ は基準が要るので呼ぶ側で)
         GasDerived DeriveRaw(const GasConfig& config, const GasCoefficients& coefficients, const GasCell& cell) {
-            const uint64_t amount = TotalAmount(config, cell);
-            assert(amount < MAX_CELL_AMOUNT);
-
-            GasDerived derived;
-            derived.mass = CellMass(config, coefficients, cell);
-            derived.inverseMass = derived.mass == 0 ? 0 : std::numeric_limits<uint64_t>::max() / derived.mass;
-            derived.inverseAmount = amount == 0 ? 0 : std::numeric_limits<uint64_t>::max() / amount;
-            derived.temperature = CellTemperature(config, cell, KineticEnergy(config, cell, derived.mass));
-            derived.pressure = CellPressure(config, cell, derived.temperature);
-
-            return derived;
+            return ToGasDerived(gas::GfDeriveRaw(FlowParams(config, &coefficients, false), cell.energy,
+                                                 cell.momentum[0], cell.momentum[1], cell.momentum[2],
+                                                 CellTotals(config, &coefficients, cell), GAS_OPEN_FULL));
         }
 
         // --- 小刻みの部品 ---
@@ -240,108 +246,69 @@ namespace bicameral::sim {
             return std::min(SideOpen(box, face.left), SideOpen(box, face.right));
         }
 
-        // value × numerator ÷ denominator(0 の向きへ切り捨て)
+        // value × numerator ÷ denominator(0 の向きへ切り捨て。投影も使う)
         int64_t ScaleSigned(int64_t value, uint64_t numerator, uint64_t denominator) {
-            const uint64_t magnitude = fx::FxAbsU64(value);
-            return fx::FxApplySign(fx::FxDivU128By64(fx::FxMulU64Full(magnitude, numerator), denominator).quotient,
-                                   value < 0);
+            return gas::GfScaleTowardZero(value, numerator, denominator);
         }
 
-        // 基準との質量の差(mg)。開いた境界の外は基準そのもの(0)。
-        // 空きを読む箱では基準 × 空き と比べ(固体の多いセルの静かな大気に浮力を作らない)、気体の無いセルは 0(力を受ける物が無い)
+        // 基準との質量の差(mg。gas_flow.hlsli の GfExcess)。開いた境界の外・壁は 0
         int64_t Excess(const GasBox& box, const std::vector<GasDerived>& derived, FaceSide side) {
             if (side.kind != SideKind::Cell)
                 return 0;
 
-            const auto reference = (int64_t)box.referenceDerived[CellLayer(box, side.index)].mass;
-            if (box.openQ16.empty())
-                return (int64_t)derived[side.index].mass - reference;
+            const uint64_t reference = box.referenceDerived[CellLayer(box, side.index)].mass;
+            return gas::GfExcess(FlowParams(box), derived[side.index].mass, reference, SideOpen(box, side));
+        }
 
-            if (derived[side.index].mass == 0)
+        // 縦の面で重さが働く側の質量の差(横の面・重さの無い箱は 0。要らない所では数えない)
+        int64_t VerticalExcess(const GasBox& box, const std::vector<GasDerived>& derived, const GasFace& face,
+                               FaceSide side) {
+            if (face.axis != 2 || !box.config.gravity)
                 return 0;
 
-            return (int64_t)derived[side.index].mass - ScaleSigned(reference, box.openQ16[side.index], GAS_OPEN_FULL);
+            return Excess(box, derived, side);
         }
 
-        // 質量の差 Δm(mg)が 1 セルの高さで作る静水圧の差の半分(µPa)= Δm × 層の重さの係数(標準の重力で 39.2266)÷ 2
         int64_t HalfHydrostatic(const GasBox& box, int64_t excess) {
-            return excess * (int64_t)box.coefficients.hydrostatic / 20000;
+            return gas::GfHalfHydrostatic(FlowParams(box), excess);
         }
 
-        // 圧力の拡散を起こす圧力の差: p̃_左 − p̃_右。縦の面では、両側の質量の差の平均が作る静水圧の差を引く
-        // (釣り合った重い層・軽い層を拡散が押し上げ続けると、重力と引き合って偽の循環が回る。力の釣り合いをそろえる。07 §2.1)
+        // 圧力の拡散を起こす圧力の差(gas_flow.hlsli の GfDrivingPressure)
         int64_t DrivingPressure(const GasBox& box, const std::vector<GasDerived>& derived, const GasFace& face) {
-            const int64_t difference = SideDerived(box, derived, face.left).scaledPressure -
-                                       SideDerived(box, derived, face.right).scaledPressure;
-            if (face.axis != 2 || !box.config.gravity)
-                return difference;
-
-            return difference -
-                   HalfHydrostatic(box, Excess(box, derived, face.left) + Excess(box, derived, face.right));
+            return gas::GfDrivingPressure(
+                FlowParams(box), face.axis, SideDerived(box, derived, face.left).scaledPressure,
+                SideDerived(box, derived, face.right).scaledPressure, VerticalExcess(box, derived, face, face.left),
+                VerticalExcess(box, derived, face, face.right));
         }
 
-        // 縦の面の重さ: 面の両側の質量の差の平均 × g を、両側のセルが 1/4 ずつ受ける(セルから見ると 1/4・1/2・1/4 で均した重さ。
-        // 1 セルおきの温度の縞が作る重さの縞は面の平均で消える〔中心の流れが応じない縞を力で育てない〕。
-        // 圧力の差の中心差分と同じ形なので、静水圧の釣り合いが離散の式でそろう。07 §2.1)
-        void ComputeFaceWeight(const GasBox& box, const std::vector<GasDerived>& derived, GasFace& face) {
-            if (face.axis != 2 || !box.config.gravity)
-                return;
-
-            const auto coefficient = (int64_t)box.coefficients.gravityImpulse;
-            if (face.left.kind == SideKind::Wall) {
-                face.weightRight = fx::FxMulShiftS64(Excess(box, derived, face.right), coefficient, 17);
-                return;
-            }
-
-            if (face.right.kind == SideKind::Wall) {
-                face.weightLeft = fx::FxMulShiftS64(Excess(box, derived, face.left), coefficient, 17);
-                return;
-            }
-
-            const int64_t quarter = fx::FxMulShiftS64(
-                Excess(box, derived, face.left) + Excess(box, derived, face.right), coefficient, 18);
-            face.weightLeft = quarter;
-            face.weightRight = quarter;
-        }
-
-        // 面の力: 圧力の力積と重さ(小刻みの初めの導く値だけから)
+        // 面の力: 圧力の力積と重さ(小刻みの初めの導く値だけから。gas_flow.hlsli の GfFaceWeight・GfMirrorImpulse・GfSharedImpulse)
         void ComputeFaceForceFull(const GasBox& box, const std::vector<GasDerived>& derived, GasFace& face) {
-            const GasCoefficients& coefficients = box.coefficients;
-            ComputeFaceWeight(box, derived, face);
+            const gas::GfParams params = FlowParams(box);
+            const bool leftWall = face.left.kind == SideKind::Wall;
+            const bool rightWall = face.right.kind == SideKind::Wall;
+            const gas::GfWeights weights = gas::GfFaceWeight(params, face.axis, leftWall, rightWall,
+                                                             VerticalExcess(box, derived, face, face.left),
+                                                             VerticalExcess(box, derived, face, face.right));
+            face.weightLeft = weights.left;
+            face.weightRight = weights.right;
 
-            // --- 壁: 鏡に映した圧力(両側とも壁の手前のセルの p̃)---
-            if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall) {
-                // 縦の壁は、壁の手前のセルの圧力を半セル分の静水圧で壁まで延ばす(床は高く・天井は低く。重さの釣り合いとそろえる)
-                const bool wallBelow = face.left.kind == SideKind::Wall;
-                const FaceSide inside = wallBelow ? face.right : face.left;
-                int64_t pressure = derived[inside.index].scaledPressure;
-                if (face.axis == 2 && box.config.gravity) {
-                    const int64_t hydrostatic = HalfHydrostatic(box, Excess(box, derived, inside));
-                    pressure += wallBelow ? hydrostatic : -hydrostatic;
-                }
-
-                face.impulse = fx::FxMulShiftS64(pressure * 2, (int64_t)coefficients.pressureImpulse, 16);
+            // --- 壁: 壁の手前のセルの p̃ を鏡に映す(縦の壁は半セル分の静水圧で壁まで延ばす)---
+            if (leftWall || rightWall) {
+                const FaceSide inside = leftWall ? face.right : face.left;
+                face.impulse = gas::GfMirrorImpulse(params, face.axis, derived[inside.index].scaledPressure,
+                                                    VerticalExcess(box, derived, face, inside), leftWall);
                 return;
             }
 
-            const int64_t pressureSum = SideDerived(box, derived, face.left).scaledPressure +
-                                        SideDerived(box, derived, face.right).scaledPressure;
-            face.impulse = fx::FxMulShiftS64(pressureSum, (int64_t)coefficients.pressureImpulse, 16);
+            face.impulse = gas::GfSharedImpulse(params, SideDerived(box, derived, face.left).scaledPressure,
+                                                SideDerived(box, derived, face.right).scaledPressure);
         }
 
-        // 一部だけ開いた面の 1 つの側が受ける力積: 開いた所は両側の平均の圧力(shared = 全面の時の力積)、塞がった所は
-        // その側のセル自身の圧力(壁と同じ鏡。縦の面は半セルの静水圧で延ばす)。above = その側が面の上(+ 側)にある
+        // 一部だけ開いた面の 1 つの側が受ける力積(gas_flow.hlsli の GfPartialImpulse)。above = その側が面の上(+ 側)
         int64_t PartialImpulse(const GasBox& box, const std::vector<GasDerived>& derived, const GasFace& face,
                                FaceSide side, bool above, int64_t shared, uint32_t open) {
-            int64_t pressure = SideDerived(box, derived, side).scaledPressure;
-            if (face.axis == 2 && box.config.gravity) {
-                const int64_t hydrostatic = HalfHydrostatic(box, Excess(box, derived, side));
-                pressure += above ? hydrostatic : -hydrostatic;
-            }
-
-            const int64_t wall = fx::FxMulShiftS64(pressure * 2, (int64_t)box.coefficients.pressureImpulse, 16);
-
-            return ScaleSigned(shared, open, GAS_OPEN_FULL) + ScaleSigned(wall, GAS_OPEN_FULL - open, GAS_OPEN_FULL);
+            return gas::GfPartialImpulse(FlowParams(box), face.axis, SideDerived(box, derived, side).scaledPressure,
+                                         VerticalExcess(box, derived, face, side), above, shared, open);
         }
 
         // 面の力: 圧力の力積と重さ(小刻みの初めの導く値だけから)。
@@ -367,97 +334,44 @@ namespace bicameral::sim {
                 face.impulseRight = 0;
         }
 
-        // 面の質量の流れ(力を当てた後の運動量 + 小刻みの初めの圧力。前進・後退の順〔forward-backward〕)。壁は 0。
-        // 空きを読む箱(T-0593): 開き 0 の面は流さない。一部だけ開いた面は、各側の運動量を「面の開き ÷ その側の空き」倍
-        // (孔の中の速さ × 開いた面積)、圧力の拡散を開きの倍にする(どちらも 1 以下なので安定の条件は今より緩い)
+        // 面の質量の流れ(力を当てた後の運動量 + 小刻みの初めの圧力。前進・後退の順〔forward-backward〕。gas_flow.hlsli の GfFaceFlow)。壁は 0
         void ComputeFaceFlow(const GasBox& box, const std::vector<GasDerived>& derived,
                              const std::vector<GasCell>& forced, GasFace& face) {
             if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
                 return;
 
-            const int64_t leftMomentum = SideCell(box, forced, face.left).momentum[face.axis];
-            const int64_t rightMomentum = SideCell(box, forced, face.right).momentum[face.axis];
-            int64_t momentumSum = leftMomentum + rightMomentum;
-            int64_t driving = DrivingPressure(box, derived, face);
-            const uint32_t open = FaceOpen(box, face);
-            if (open == 0)
-                return;
-
-            if (open != GAS_OPEN_FULL) {
-                momentumSum = ScaleSigned(leftMomentum, open, SideOpen(box, face.left)) +
-                              ScaleSigned(rightMomentum, open, SideOpen(box, face.right));
-                driving = ScaleSigned(driving, open, GAS_OPEN_FULL);
-            }
-
-            // --- 中心の流れ + 圧力の拡散(Rusanov の散逸を圧力の差にかける: 接触面〔温度・成分の境〕を散らさず、静止大気では 0)---
-            const int64_t central = fx::FxMulShiftS64(momentumSum, (int64_t)box.coefficients.centralFlow, 52);
-            const int64_t diffusion = fx::FxMulShiftS64(driving, (int64_t)box.coefficients.pressureFlow, 40);
-            face.flow = central + diffusion;
+            face.flow = gas::GfFaceFlow(FlowParams(box), SideCell(box, forced, face.left).momentum[face.axis],
+                                        SideCell(box, forced, face.right).momentum[face.axis], SideOpen(box, face.left),
+                                        SideOpen(box, face.right), DrivingPressure(box, derived, face));
         }
 
         // 風上のセルの中身のうち移す割合(Q32。抑える前)
         uint64_t RawFraction(const GasBox& box, const std::vector<GasDerived>& derived, const GasFace& face) {
-            if (face.flow == 0)
-                return 0;
-
             const FaceSide donor = face.flow > 0 ? face.left : face.right;
-            const uint64_t inverseMass = SideDerived(box, derived, donor).inverseMass;
-
-            return MulShiftU64(fx::FxAbsU64(face.flow), inverseMass, 32);
+            return gas::GfRawFraction(face.flow, SideDerived(box, derived, donor).inverseMass);
         }
 
         // a ÷ b を最も近い整数に(ちょうど半分は 0 から遠い側へ)。b > 0
         int64_t DivideNearest(int64_t a, uint64_t b) {
-            const uint64_t magnitude = fx::FxAbsU64(a);
-            const fx::FxU128 product = {.hi = 0, .lo = magnitude};
-            const fx::FxDivResult result = fx::FxDivU128By64(product, b);
-            const uint64_t quotient = result.quotient + (result.remainder * 2 >= b ? 1 : 0);
-
-            return fx::FxApplySign(quotient, a < 0);
+            return gas::GfDivideNearest(a, b);
         }
 
-        // 移す塊のエネルギー(µJ。丸める前): 熱は風上の熱を熱容量の比で分け(塊の温度 = 風上の温度)、化学のエネルギーは移す物質量から。
-        // 物質量の切り捨てとエネルギーの切り捨てが別々だと、塊の温度が少しずつ偏り、流れに沿って熱が運ばれる偽の温度の縞が
-        // 浮力で対流を育てる(試作で見た。07 §2.1)。
-        // 断熱(T-0234): + 押し出す仕事 pV = n R T(塊を押し出す風上の気体が失い、受ける側が得る = 熱 + これがエンタルピー。
-        // 風上は膨張で冷え、風下は圧縮で温まる。07 §2.4)+ 運動エネルギーの分け前(運動量と同じ割合)
+        // 移す塊のエネルギー(µJ。丸める前。gas_flow.hlsli の GfMovedEnergy: 熱の分け前 + 化学 + 断熱では押し出す仕事 n R T と運動エネルギーの分け前)
         int64_t MovedEnergy(const GasConfig& config, const GasCell& source, const GasDerived& sourceDerived,
                             const GasCell& moved, uint64_t fraction) {
-            const uint64_t sourceCapacity = HeatCapacity(config, source);
-            const int64_t movedChemical = ChemicalEnergy(config, moved);
-            if (sourceCapacity == 0)
-                return movedChemical;
-
-            const int64_t sourceKinetic = KineticEnergy(config, source, sourceDerived.mass);
-            const int64_t sourceHeat = source.energy * 1000 - ChemicalEnergy(config, source) - sourceKinetic;
-            const fx::FxU128 numerator = fx::FxMulU64Full(fx::FxAbsU64(sourceHeat), HeatCapacity(config, moved));
-            const fx::FxDivResult share = fx::FxDivU128By64(numerator, sourceCapacity);
-            const uint64_t heat = share.quotient + (share.remainder * 2 >= sourceCapacity ? 1 : 0);
-            const int64_t movedHeat = fx::FxApplySign(heat, sourceHeat < 0);
-            int64_t energy = movedHeat + movedChemical;
-            if (config.thermodynamics != GasThermodynamics::Adiabatic)
-                return energy;
-
-            // --- 押し出す仕事 n R T(µJ)= n × T × (圧力の係数)÷ 8(V = 0.125 m³)と運動エネルギーの分け前 ---
-            const fx::FxU128 amountTemperature = fx::FxMulU64Full(TotalAmount(config, moved),
-                                                                  sourceDerived.temperature);
-            assert(amountTemperature.hi == 0);
-            energy += (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 35);
-            energy += (int64_t)MulShiftU64((uint64_t)sourceKinetic, fraction, 32);
-
-            return energy;
+            return gas::GfMovedEnergy(FlowParams(config, nullptr, false), source.energy,
+                                      CellTotals(config, nullptr, source),
+                                      KineticEnergy(config, source, sourceDerived.mass), sourceDerived.temperature,
+                                      CellTotals(config, nullptr, moved), fraction);
         }
 
-        // 重さの仕事(µJ): 縦の面を上へ動く塊は m g Δx を失い、下へ動く塊は得る(位置のエネルギーは数えないので帳簿へ。断熱のときだけ。
-        // 上がる空気が冷える〔約 10 mK/m〕のは、押し出す仕事とこれの差)
+        // 重さの仕事(µJ。gas_flow.hlsli の GfGravityWork)
         int64_t GravityWork(const GasBox& box, const GasFace& face, const GasCell& moved) {
             if (face.axis != 2 || !box.config.gravity || box.config.thermodynamics != GasThermodynamics::Adiabatic)
                 return 0;
 
-            const uint64_t mass = CellMass(box.config, box.coefficients, moved);
-            const auto work = (int64_t)(mass * box.coefficients.gravityWork / MICRO);
-
-            return face.flow > 0 ? work : -work;
+            return gas::GfGravityWork(FlowParams(box), face.axis, face.flow,
+                                      CellMass(box.config, box.coefficients, moved));
         }
 
         // 中身の一部を移す(風上 → 風下)。どちらかが開いた境界の外なら帳簿へ
@@ -475,7 +389,7 @@ namespace bicameral::sim {
             GasCell moved;
             moved.amounts = face.moved;
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                moved.momentum[axis] = fx::FxMulShiftS64(source.momentum[axis], (int64_t)face.fraction, 32);
+                moved.momentum[axis] = gas::GfMovedMomentum(source.momentum[axis], face.fraction);
 
             // --- エネルギー: 引く側は塊のエネルギー、足す側はそこから重さの仕事を引いた値(差は帳簿へ。丸めは最も近い整数で偏りなし)---
             const int64_t energy = MovedEnergy(box.config, source, SideDerived(box, derived, donor), moved,
@@ -551,24 +465,14 @@ namespace bicameral::sim {
             }
         }
 
-        // 出ていく割合の合計の、引く側の熱を負にしない換算(T-0646・ADR-0286): 出ていく塊は熱の分け前(熱容量の比)に加えて
-        // 押し出す仕事 n R T を持って出る(MovedEnergy)ので、引く側の熱が残るのは 割合の合計 × (C + n R) ≤ C の時(C = 熱容量)。
-        // 割合の合計を (C + n R) ÷ C 倍した値を返す(1 を超えたら縮める。空気なら合計が約 0.71 まで。等温は押し出す仕事が無いのでそのまま)。
-        // これが無いと、強い流れが 1 小刻みでセルの中身をほぼ全部押し出し、物質の無い負のエネルギーが残る(T-0646)。
-        // 木(gas_tree.cpp の LimitOutflow)・GPU(gas_cell.hlsli の EffectiveOutflow。箱と木の段)も同じ換算(T-0647)
+        // 出ていく割合の合計の、引く側の熱を負にしない換算(T-0646・ADR-0286。gas_flow.hlsli の GfEffectiveOutflow)。
+        // 木(gas_tree.cpp の LimitOutflow)・GPU(箱と木の段)も同じ関数(T-0647)
         uint64_t EffectiveOutflow(const GasConfig& config, const GasCell& cell, uint64_t outflow) {
-            if (outflow == 0 || config.thermodynamics != GasThermodynamics::Adiabatic)
-                return outflow;
+            if (outflow == 0)
+                return 0;
 
-            const uint64_t capacity = HeatCapacity(config, cell);
-            if (capacity == 0)
-                return outflow;
-
-            const fx::FxDivResult push = fx::FxDivU128By64(
-                fx::FxMulU64Full(TotalAmount(config, cell), fx::GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN), MICRO);
-            const uint64_t pushCapacity = push.quotient + (push.remainder != 0 ? 1 : 0);  // n R(nJ/K。切り上げ)
-
-            return fx::FxDivU128By64(fx::FxMulU64Full(outflow, capacity + pushCapacity), capacity).quotient;
+            return gas::GfEffectiveOutflow(FlowParams(config, nullptr, false), CellTotals(config, nullptr, cell),
+                                           outflow);
         }
 
         // 出ていく割合の合計(EffectiveOutflow で換算)が 1 を超えるセルは、その面の割合を比例して縮める(07「共通の形」。負の中身と
@@ -587,85 +491,43 @@ namespace bicameral::sim {
 
             for (GasFace& face : faces) {
                 const FaceSide donor = face.flow > 0 ? face.left : face.right;
-                if (face.fraction == 0 || donor.kind != SideKind::Cell || outflow[donor.index] <= ONE_Q32)
-                    continue;
-
-                face.fraction = fx::FxDivU128By64(fx::FxMulU64Full(face.fraction, ONE_Q32), outflow[donor.index])
-                                    .quotient;
+                if (donor.kind == SideKind::Cell)
+                    face.fraction = gas::GfLimitFraction(face.fraction, outflow[donor.index]);
             }
         }
 
-        // --- 移す成分の物質量(G2。07 §2.2)---
+        // --- 移す成分の物質量(G2。07 §2.2。式は gas_flow.hlsli)---
 
-        // 制限した勾配(a = 風上 − その外側、b = 風下 − 風上)。符号が違うか 0 なら 0(山と谷では延ばさず、新しい山と谷を作らない)。
-        // minmod は絶対値の小さい方、MC(monotonized central)は minmod(2a, 2b, (a + b) ÷ 2)。どちらも TVD(07 §2.2)
+        // 制限した勾配(gas_flow.hlsli の GfLimitedSlope。木も使う)
         int64_t LimitedSlope(GasReconstruction reconstruction, int64_t a, int64_t b) {
-            if (a == 0 || b == 0 || (a > 0) != (b > 0))
-                return 0;
+            gas::GfParams params = {};
+            params.reconstruction = (uint32_t)reconstruction;
 
-            const int64_t sign = a > 0 ? 1 : -1;
-            const int64_t smaller = std::min(a * sign, b * sign);
-            if (reconstruction == GasReconstruction::Minmod)
-                return smaller * sign;
-
-            const int64_t central = ((a * sign) + (b * sign)) / 2;
-            return std::min(2 * smaller, central) * sign;
+            return gas::GfLimitedSlope(params, a, b);
         }
 
-        // 側の成分 s の割合(Q32。物質量 ÷ 全物質量。割り算は導く値の逆数 1 つ。ADR-0010)
+        // 側の成分 s の割合(Q32)
         int64_t SpeciesRatio(const GasBox& box, const std::vector<GasCell>& cells,
                              const std::vector<GasDerived>& derived, FaceSide side, uint32_t s) {
-            const uint64_t inverseAmount = SideDerived(box, derived, side).inverseAmount;
-
-            return (int64_t)MulShiftU64(SideCell(box, cells, side).amounts[s], inverseAmount, 32);
+            return gas::GfSpeciesRatio(SideCell(box, cells, side).amounts[s],
+                                       SideDerived(box, derived, side).inverseAmount);
         }
 
-        // 風上のセルの割合から面へ延ばす差 ½(1 − ν)σ(Q32)。σ = 制限した勾配、ν = 出ていく割合。
-        // (1 − ν)は小刻みの間に面を通る塊の平均にするため(van Leer の 1 段の MUSCL。ν ≤ 1 で新しい山と谷を作らない)。
-        // 風上が開いた境界の外(一様)か、外側が壁なら 0(1 次の風上)
+        // 風上のセルの割合から面へ延ばす差 ½(1 − ν)σ(Q32。gas_flow.hlsli の GfHalfSlope)。
+        // 1 次の風上・風上が開いた境界の外(一様)・外側か風下が壁なら 0
         int64_t HalfSlope(const GasBox& box, const std::vector<GasCell>& cells, const std::vector<GasDerived>& derived,
                           const GasFace& face, uint32_t s) {
             const bool forward = face.flow > 0;
             const FaceSide outer = forward ? face.leftOuter : face.rightOuter;
             const FaceSide donor = forward ? face.left : face.right;
             const FaceSide receiver = forward ? face.right : face.left;
-            if (donor.kind != SideKind::Cell || outer.kind == SideKind::Wall || receiver.kind == SideKind::Wall)
+            if (box.config.reconstruction == GasReconstruction::Upwind || donor.kind != SideKind::Cell ||
+                outer.kind == SideKind::Wall || receiver.kind == SideKind::Wall)
                 return 0;
 
-            const int64_t donorRatio = SpeciesRatio(box, cells, derived, donor, s);
-            const int64_t slope = LimitedSlope(box.config.reconstruction,
-                                               donorRatio - SpeciesRatio(box, cells, derived, outer, s),
-                                               SpeciesRatio(box, cells, derived, receiver, s) - donorRatio);
-
-            return fx::FxMulShiftS64(slope, (int64_t)(ONE_Q32 - face.fraction), 33);
-        }
-
-        // 面で移す成分 s の物質量(Q32 の µmol)= 割合 × 風上の物質量 + 延ばした差 × 割合 × 風上の全物質量。
-        // 延ばした割合は制限で風上の 0〜2 倍に収まるので負にならない(丸めの分は 0 で止める)
-        uint64_t MovedAmountQ32(const GasBox& box, const std::vector<GasCell>& cells,
-                                const std::vector<GasDerived>& derived, const GasFace& face, uint32_t s) {
-            const GasCell& source = SideCell(box, cells, face.flow > 0 ? face.left : face.right);
-            const uint64_t moved = source.amounts[s] * face.fraction;
-            if (box.config.reconstruction == GasReconstruction::Upwind)
-                return moved;
-
-            const int64_t halfSlope = HalfSlope(box, cells, derived, face, s);
-            const uint64_t total = TotalAmount(box.config, source) * face.fraction;
-            const uint64_t correction = MulShiftU64(total, fx::FxAbsU64(halfSlope), 32);
-            if (halfSlope >= 0)
-                return moved + correction;
-
-            return moved > correction ? moved - correction : 0;
-        }
-
-        // Q32 の物質量を整数へ。端数は決定的な乱数と比べて丸める(期待値が端数どおり。切り捨てだと割合 × 物質量 < 1 の微量の成分が
-        // 永久に動かない〔D-428 の嘘〕。R6・D-431 と同じ考え)。乱数の丸めを切った設定なら切り捨て(G1)
-        uint64_t RoundAmount(const GasBox& box, uint64_t amountQ32, uint64_t hash) {
-            const uint64_t whole = amountQ32 >> 32;
-            if (!box.config.stochasticRounding)
-                return whole;
-
-            return whole + ((hash >> 32) < (amountQ32 & LOW_32_BITS) ? 1 : 0);
+            return gas::GfHalfSlope(FlowParams(box), SpeciesRatio(box, cells, derived, outer, s),
+                                    SpeciesRatio(box, cells, derived, donor, s),
+                                    SpeciesRatio(box, cells, derived, receiver, s), face.fraction);
         }
 
         // 成分 s の丸めの鍵(既定は欄の番号。世界のセルに載せる時は物質 ID。T-0591)
@@ -674,25 +536,29 @@ namespace bicameral::sim {
             return key == GAS_ROUNDING_KEY_SLOT ? s : key;
         }
 
-        // 面ごとに移す成分の物質量。乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途)+ 成分の鍵(R6。並べた順に依存しない)
+        // 面ごとに移す成分の物質量(MUSCL で面へ延ばした割合 × 風上の中身・乱数の丸め。gas_flow.hlsli の GfMovedAmountQ32・GfRoundAmount)。
+        // 乱数は(世界のシード, 小刻みの通し番号, 面の番号, 用途)+ 成分の鍵(R6。並べた順に依存しない)
         void ComputeMovedAmounts(const GasBox& box, const std::vector<GasCell>& cells,
                                  const std::vector<GasDerived>& derived, uint64_t roundingTick,
                                  std::vector<GasFace>& faces) {
+            const gas::GfParams params = FlowParams(box);
             for (GasFace& face : faces) {
                 if (face.fraction == 0)
                     continue;
 
-                const uint64_t faceHash = fx::FxHash64(box.config.randomSeed, roundingTick, face.id,
-                                                       GAS_ROUNDING_PURPOSE);
+                const GasCell& source = SideCell(box, cells, face.flow > 0 ? face.left : face.right);
+                const uint64_t sourceTotal = TotalAmount(box.config, source);
+                const uint64_t faceHash = gas::GfFaceHash(box.config.randomSeed, roundingTick, face.id);
                 for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
-                    const uint64_t amountQ32 = MovedAmountQ32(box, cells, derived, face, s);
-                    face.moved[s] = RoundAmount(box, amountQ32,
-                                                fx::FxHashCombine(faceHash, RoundingKey(box.config, s)));
+                    const uint64_t amountQ32 = gas::GfMovedAmountQ32(
+                        params, source.amounts[s], sourceTotal, face.fraction, HalfSlope(box, cells, derived, face, s));
+                    face.moved[s] = gas::GfRoundAmount(params, amountQ32,
+                                                       fx::FxHashCombine(faceHash, RoundingKey(box.config, s)));
                 }
             }
         }
 
-        // 風上のセルごとに、成分ごとの移す物質量の合計が中身を超えたら比例して縮める(切り捨て)。
+        // 風上のセルごとに、成分ごとの移す物質量の合計が中身を超えたら比例して縮める(切り捨て。gas_flow.hlsli の GfLimitMovedAmount)。
         // 延ばした割合(風上の最大 2 倍)と丸め上げで、出ていく割合の合計が 1 に近いセルでは超えうる
         void LimitMovedAmounts(const GasBox& box, const std::vector<GasCell>& cells, std::vector<GasFace>& faces) {
             const uint32_t speciesCount = box.config.speciesCount;
@@ -712,49 +578,23 @@ namespace bicameral::sim {
                     continue;
 
                 const GasCell& source = cells[donor.index];
-                for (uint32_t s = 0; s < speciesCount; ++s) {
-                    const uint64_t total = outgoing[donor.index][s];
-                    if (total <= source.amounts[s])
-                        continue;
-
-                    face.moved[s] = fx::FxDivU128By64(fx::FxMulU64Full(face.moved[s], source.amounts[s]), total)
-                                        .quotient;
-                }
+                for (uint32_t s = 0; s < speciesCount; ++s)
+                    face.moved[s] = gas::GfLimitMovedAmount(face.moved[s], source.amounts[s], outgoing[donor.index][s]);
             }
         }
 
-        // p̃ = α(p − p_基準)。頭打ちの温度 T_頭 より熱いセルは α × T_頭 ÷ T(実効の音速を安定の上限に抑える。c_iso² ∝ T。T-0269)
-        void ScalePressure(const GasBox& box, GasDerived& derived, uint32_t z) {
-            const int64_t deviation = derived.pressure - box.referenceDerived[z].pressure;
-            int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
-            const uint32_t soundTemperature = box.coefficients.soundTemperature;
-            if (derived.temperature > soundTemperature)
-                scaled = fx::FxMulDivS64(scaled, soundTemperature, derived.temperature);  // 積は 128bit(T-0676)
-
-            derived.scaledPressure = scaled;
-        }
-
-        // 空きを読む圧力の下限の空き(Q16。1/256。塞がったセルに気体ができても圧力が 64bit を溢れない。そのセルの面は閉じている)
-        constexpr uint32_t GAS_OPEN_PRESSURE_FLOOR = 256;
-
-        // 空きが一部のセルの導く値: 本物の圧力 = n R T ÷ (セルの体積 × 空き)(T-0593)
-        GasDerived DeriveOpenCell(const GasBox& box, const GasCell& cell, uint32_t z, uint32_t open) {
-            GasDerived derived = DeriveRaw(box.config, box.coefficients, cell);
-            const uint32_t volume = std::max(open, GAS_OPEN_PRESSURE_FLOOR);
-            derived.pressure = ScaleSigned(derived.pressure, GAS_OPEN_FULL, volume);
-            ScalePressure(box, derived, z);
-
-            return derived;
+        // セルの導く値(層 z の基準。空きが一部のセルは本物の圧力を空きの体積で読む。gas_flow.hlsli の GfDerive。T-0593)
+        GasDerived DeriveCell(const GasBox& box, const GasCell& cell, uint32_t z, uint32_t open) {
+            return ToGasDerived(gas::GfDerive(FlowParams(box), cell.energy, cell.momentum[0], cell.momentum[1],
+                                              cell.momentum[2], CellTotals(box.config, &box.coefficients, cell),
+                                              box.referenceDerived[z].pressure, open));
         }
 
         std::vector<GasDerived> DeriveAll(const GasBox& box) {
             std::vector<GasDerived> derived(box.cells.size());
-            for (uint32_t index = 0; index < box.cells.size(); ++index) {
-                const uint32_t open = box.openQ16.empty() ? GAS_OPEN_FULL : box.openQ16[index];
-                derived[index] = open == GAS_OPEN_FULL
-                                     ? DeriveGasCell(box, box.cells[index], CellLayer(box, index))
-                                     : DeriveOpenCell(box, box.cells[index], CellLayer(box, index), open);
-            }
+            for (uint32_t index = 0; index < box.cells.size(); ++index)
+                derived[index] = DeriveCell(box, box.cells[index], CellLayer(box, index),
+                                            SideOpen(box, {.index = index}));
 
             return derived;
         }
@@ -997,10 +837,7 @@ namespace bicameral::sim {
     }
 
     GasDerived DeriveGasCell(const GasBox& box, const GasCell& cell, uint32_t z) {
-        GasDerived derived = DeriveRaw(box.config, box.coefficients, cell);
-        ScalePressure(box, derived, z);
-
-        return derived;
+        return DeriveCell(box, cell, z, GAS_OPEN_FULL);
     }
 
     int64_t GasKineticEnergy(const GasBox& box, const GasCell& cell) {
@@ -1116,7 +953,7 @@ namespace bicameral::sim {
             if (box.openQ16.empty())
                 return GAS_OPEN_FULL;
 
-            return std::max(box.openQ16[index], GAS_OPEN_PRESSURE_FLOOR);
+            return std::max(box.openQ16[index], gas::GF_OPEN_PRESSURE_FLOOR);
         }
 
         // 容量 × V の割合(1 以上。塞がったセルも対角を 0 にしない)
