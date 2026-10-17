@@ -17,9 +17,9 @@
 //     エンジンの物質は相を持たないので、固体の名前は試験が知っている(M2 で相を持ったら表から読む)。
 //   - セルの中の反応は熱がそのセルに残る(体積一定)が、坂は定圧の ΔG で見る(近似。符号の判定には十分)。
 // 使い方: 引数なし = ctest(短い刻み。伝導で坂を上る流れが 0・なぞりが一致・規則の一覧が出る)。
-//         `--burn [刻み]` = 燃え方の計器を長く測る(既定 18000 刻み。ctest では流さない)。`--burn 刻み --written-heat-capacity` は
+//         `--burn [刻み]` = 燃え方の計器を長く測る(既定 24000 刻み。ctest では流さない)。`--burn 刻み --written-heat-capacity` は
 //         気体の比熱を書いた値のまま定積として読む(T-0597 より前と比べる)。結果と「同じく動く」の幅は
-//         docs/tickets/T-0491-slope-check-gauge.md と docs/design/19 §8。
+//         docs/tickets/T-0491-slope-check-gauge.md と docs/design/19 §8(基準は D-507 で定圧の比熱の既定で取り直した)。
 // 開発ビルドの坂の計器(sim/slope_gauge。整数。T-0518)を同じ木箱に並べて走らせ、この倍精度の数え上げと進行度・坂を上った回が
 // 同じことを確かめる(合成のセルでも ΔG を 1 J/mol の中で比べる)。
 #include <algorithm>
@@ -44,8 +44,9 @@ using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
 
 namespace {
 
-    constexpr uint64_t SHORT_TICKS = 600;      // ctest: 火がついて燃え広がる所まで(10 秒)
-    constexpr uint64_t BURN_TICKS = 18000;     // --burn の既定(5 分。火が消えるまで。CPU で約 30 分)
+    constexpr uint64_t SHORT_TICKS = 600;  // ctest: 火がついて燃え広がる所まで(10 秒)
+    // --burn の既定(400 秒。火が消える 20,540 刻み〔D-507 の基準〕の +10 % より長く。CPU で約 35 分)
+    constexpr uint64_t BURN_TICKS = 24000;
     constexpr uint64_t PROGRESS_TICKS = 1000;  // 途中経過を出す間隔
 
     // --- 物理の定数(試験の中だけ。倍精度)---
