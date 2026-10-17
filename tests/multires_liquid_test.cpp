@@ -1,7 +1,7 @@
 // multires_liquid_test.cpp — 多重解像度の世界の 1 段の液体(sim/multires_liquid。T-0717)が、仮の世界の液体(sim/probe_liquid。
 // 区画 = 世界いっぱい)と毎刻みビット単位で同じか(運ぶ計算の共通の土台の段 2 ② の答え合わせ。設計 20 §3)。
 // 場面: 池に溜まる → 堤を消すと抜ける / ダムを壊す + 段の外で水を半分・2 倍(欄が物質に付く)/ 液体の無い世界(何も変えない)。
-// 世界の広さ: 16³(区画も 16³。刻みは長く)・24 × 16 × 8(ダム)・仮の世界の格子いっぱいの 64³(レベル 0 のブロック 8³。刻みは短く)。
+// 世界の広さ: 16³(区画も 16³。刻みは長く)・24 × 16 × 8(ダム)・仮の世界の格子いっぱいの 64³(レベル 0 のブロック 8³。1 刻み 1〜2 秒なので 30 + 30 刻み)。
 // 比べるもの: 全部のセル・面の運動量・面の運動のエネルギー・位置のエネルギー・前の質量・帳簿・刻みの報告。
 #include <algorithm>
 #include <array>
@@ -417,6 +417,7 @@ namespace {
         EXPECT(Run(table, *worlds, 3, "液体の無い世界", tick));
         EXPECT(UsedWorldPages(worlds->nest) == pagesBefore);
         EXPECT(HashWholeNest(worlds->nest) == hashBefore);
+        stepCost = {};
     }
 
 }  // namespace
@@ -427,7 +428,7 @@ int main() {
     TestDamAndMassChange(table);
     TestDryWorld(table);
     // 仮の世界の格子いっぱい(区画 = 世界いっぱい)。池は probe_liquid_test と同じ所(x 24〜・z 30〜32)
-    TestPondAndDrain(table, {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE}, 24, {30, 33}, 45, 45);
+    TestPondAndDrain(table, {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE}, 24, {30, 33}, 30, 30);
 
     if (failureCount != 0) {
         std::printf("失敗 %d 件\n", failureCount);

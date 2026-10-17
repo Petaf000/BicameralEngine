@@ -1,6 +1,6 @@
 # T-0717 MR の 1 段で液体(運ぶ計算の共通の土台の段 2 ②)
 
-- Status: Doing
+- Status: Done(2026-10-17。載せ替えは T-0714・T-0718・T-0762)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -14,11 +14,11 @@
 ## 完了条件(チェックできる形で)
 - [x] `engine/src/sim/multires_liquid.{h,cpp}`: `MultiresLiquid::Create`(欄の登録)・`Step`・保存の和と帳簿
 - [x] 木の公開の口: `ExpandNestPage`・`StoreNestCell`・`PokeNestBlock`(sim/multires_nest.h。段の外からセルに書く流れが使う)
-- [ ] `multires_liquid_test`(release): 池に溜まる → 堤を消すと抜ける(16³・1800 + 1800 刻み / 64³ = 仮の世界の格子いっぱい・45 + 45 刻み)・
+- [x] `multires_liquid_test`(release): 池に溜まる → 堤を消すと抜ける(16³・1800 + 1800 刻み / 64³ = 仮の世界の格子いっぱい・30 + 30 刻み)・
       ダムを壊す + 段の外で水を半分 / 2 倍(24 × 16 × 8・360 刻み)・液体の無い 64³ の世界(頁もハッシュも変えない)で、
-      全部のセル・面の運動量・面の運動のエネルギー・位置のエネルギー・前の質量・帳簿・刻みの報告が毎刻みビット一致
-- [ ] probe_liquid・cell_view・multires_state(release)が今まで通り
-- [ ] release のビルド 警告 0・archmap --check
+      全部のセル・面の運動量・面の運動のエネルギー・位置のエネルギー・前の質量・帳簿・刻みの報告が毎刻みビット一致。保存点に戻して進めると同じハッシュ
+- [x] probe_liquid・probe_phase・cell_view・multires_state・multires_uniform(release)が今まで通り
+- [x] release のビルド 警告 0・archmap --check
 
 ## メモ・参考
 - **形**: 刻むブロック = 根のレベルの本物のブロック全部(活性を見ない)。面の隣は索引(LookupBlock)で引き、無ければ世界の端 = 閉じた面
@@ -46,3 +46,7 @@
   レベル ≠ 0 のセルの 1 辺は `LiquidCellEdgeMillimeters(level)`(0.5 m × 2^-k)にしたが、レベルの単位の質量と柱の圧力の合わせ方は未確認(違うレベルの面と一緒に段 2 の後)。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-17(wt6・作業役): sim/multires_liquid(MultiresLiquid。欄の登録・1 刻み・保存の和)と木の公開の口(ExpandNestPage・StoreNestCell・PokeNestBlock)を足した。
+  multires_liquid_test が最初の版から全部の場面で毎刻みビット一致(池 16³ 3600 刻み・ダム + 水を半分 / 2 倍 360 刻み・64³ の池・液体の無い 64³・保存点に戻して同じハッシュ)。
+  費用(CPU 1 スレッド): 池 16³ 仮の世界 4.2 → 5.7 ms/刻み・64³ 1.54 → 1.68 s/刻み(perf.md)。見立ての equivalent・open は液体の芯の値と同じ式(FX_ASSERT)。
+  release のビルド 警告 0・probe_liquid・probe_phase・cell_view・multires_state・multires_uniform 通過・archmap OK。GPU の試験は回していない(GPU のコードは変えていない)。
