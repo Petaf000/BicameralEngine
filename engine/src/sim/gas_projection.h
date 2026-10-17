@@ -44,6 +44,8 @@ namespace bicameral::sim {
         // 止める判定: 全部のセルで、式の誤差(残差 × 対角)= 刻みの終わりの質量のずれがこれ以下(mg。1 mg は面の速さで約 0.2 mm/s)。
         // 0 なら外側の許容差 ÷ INNER_TOLERANCE_DIVISOR(GasInnerToleranceMilligrams。既定 100 mg → 10 mg)
         uint32_t toleranceMilligrams = 0;
+        // 粗い段の面の係数を子の和のまま(Galerkin)にする(既定は熱と同じ ÷ 2。T-0667 の研究の比べだけ)
+        bool galerkinCoarse = false;
 
         // --- 外側の反復(T-0530。上限に届いたら、その時の仮の状態を採り、残りの食い違いは次の刻みへ持ち越す〔回数は決まった上限まで。D-468〕)---
         // 上限(1 = 解き直さない〔T-0503 の線形の 1 回〕)。既定の 4・100 mg・傾きで割るは仮(ユーザー未確認。ADR-0234)

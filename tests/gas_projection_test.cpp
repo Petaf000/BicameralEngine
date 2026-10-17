@@ -757,9 +757,12 @@ namespace {
                 EXPECT(first.hash == second.hash);
             }
 
-            // 陽解法と同じ向き: 壁なし > 孔 1/2 > 孔 1/256 > 塞がった壁 = 0(塞がった壁の向こうはビット単位で動かない)
-            EXPECT(crossed[0] > crossed[1]);
-            EXPECT(crossed[1] > crossed[2]);
+            // 塞がった壁の向こうはビット単位で動かない・孔は渡す。陽解法と音速を選んだ投影は 孔 1/2 > 孔 1/256(同じ向き)。
+            // 最速は刻みの中で釣り合うまで流す(D-467)ので、孔の大きさによらず 1 刻み目で釣り合う(30 刻み目は揺れの位相の差だけ。比べない)。
+            // 壁なしとは比べない(壁の列〔空き 0〕の分だけ箱の体積が減り、釣り合いで右へ渡る量が 12/11 倍になる)
+            if (!projection || speed != 0)
+                EXPECT(crossed[1] > crossed[2]);
+
             EXPECT(crossed[2] > 0);
             EXPECT(crossed[3] == 0);
         }
@@ -767,7 +770,7 @@ namespace {
 
     // 研究(T-0667 の打ち切り条件): 空き 1/256 のセルを含む 12 × 24 × 12 の箱で内側の解き(V の上限 8)が許容差に入るか。
     // 板 = z = 6 の層を全部 1/256(細い孔の板。下が 2% 高い圧力)・点 = 7 セルに 1 つを 1/256(散らばった小さな空き)
-    void RunPorous(bool plate, uint32_t speed) {
+    void RunPorous(bool plate, uint32_t speed, bool galerkin) {
         GasBox box = MakeAirBox(MakeAirConfig(12, 24, 12));
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             if (Coordinate(box, index)[2] >= 6)
@@ -790,6 +793,7 @@ namespace {
         GasProjection state;
         GasProjectionOptions options;
         options.pressure.soundSpeedMmPerS = speed;
+        options.galerkinCoarse = galerkin;
         CostSummary summary;
         bool conserved = true;
         for (int tick = 0; tick < 10; ++tick) {
@@ -798,17 +802,19 @@ namespace {
         }
 
         std::printf(
-            "porous %s (%s, 12x24x12, 10 ticks): inner unconverged %u, worst inner error %lld mg, conserved %d\n",
-            plate ? "plate" : "points", SpeedName(speed), summary.unconverged, (long long)summary.worstError,
-            conserved ? 1 : 0);
+            "porous %s (%s%s, 12x24x12, 10 ticks): inner unconverged %u, worst inner error %lld mg, conserved %d\n",
+            plate ? "plate" : "points", SpeedName(speed), galerkin ? ", galerkin" : "", summary.unconverged,
+            (long long)summary.worstError, conserved ? 1 : 0);
         summary.PrintOuter(SpeedName(speed));
         EXPECT(conserved);
     }
 
     void TestPorous() {
-        for (const bool plate : {true, false}) {
-            RunPorous(plate, 0);
-            RunPorous(plate, REAL_SOUND);
+        for (const bool galerkin : {false, true}) {
+            for (const bool plate : {true, false}) {
+                RunPorous(plate, 0, galerkin);
+                RunPorous(plate, REAL_SOUND, galerkin);
+            }
         }
     }
 

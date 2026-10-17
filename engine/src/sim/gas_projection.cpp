@@ -34,7 +34,7 @@ namespace bicameral::sim {
         }
 
         // セルを節に、面をつながりにした多重格子
-        ImplicitGrid MakePressureGrid(const GasBox& box, const GasPressureSystem& system) {
+        ImplicitGrid MakePressureGrid(const GasBox& box, const GasPressureSystem& system, bool galerkin) {
             const uint32_t sizeX = box.config.sizeX;
             const uint32_t sizeY = box.config.sizeY;
             std::vector<ImplicitCell> cells(box.cells.size());
@@ -56,7 +56,7 @@ namespace bicameral::sim {
                 faces.push_back(face);
             }
 
-            return BuildImplicitGrid(std::move(cells), std::move(faces));
+            return BuildImplicitGrid(std::move(cells), std::move(faces), galerkin);
         }
 
         // 右辺(値の単位 µPa)=(V p̃ ÷ c_箱² − Σ F* × 2^48)÷ D
@@ -187,7 +187,7 @@ namespace bicameral::sim {
         void Project(GasBox& box, GasProjection& state, const GasProjectionOptions& options, uint64_t roundingTick,
                      GasProjectionCost& cost) {
             const GasPressureSystem system = BeginGasPressure(box, options.pressure);
-            const ImplicitGrid grid = MakePressureGrid(box, system);
+            const ImplicitGrid grid = MakePressureGrid(box, system, options.galerkinCoarse);
             std::vector<int64_t> rhs = PressureRhs(grid, system);
             state.pressures.resize(box.cells.size(), 0);
             cost.gridLevels = (uint32_t)grid.levels.size();
