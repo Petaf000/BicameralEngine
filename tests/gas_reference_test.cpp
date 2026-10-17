@@ -916,6 +916,25 @@ namespace {
     // T-0269 の頭打ちの温度(T_基準 ×(432 ÷ 340)²。音の速さの数だけを見ていた。比べるためだけ)
     constexpr uint32_t OLD_SOUND_CAP = 473258;
 
+    // 熱く濃いセル(燃える木箱の爆発。40 倍の空気・2600 K ≒ 35 MPa)の p̃ は正で、頭打ちの式 α(p − p_基準)× T_頭 ÷ T と合う
+    // (前は p̃ × T_頭 を 64bit の積で作ってから割っていて、25 MPa を超えると積が溢れて負の圧力になり、周りを吸い込んでいた。T-0676)
+    void TestHotDenseCellPushes() {
+        const GasBox box = MakeAirBox(MakeAirConfig(2, 2, 2));
+        GasCell cell = box.reference.front();
+        for (uint64_t& amount : cell.amounts)
+            amount *= 40;
+
+        cell = MakeGasCell(box.config, cell.amounts, 2600000);
+        const GasDerived derived = DeriveGasCell(box, cell, 0);
+        const double expected = ((double)derived.pressure - (double)box.referenceDerived.front().pressure) *
+                                ((double)box.coefficients.soundScale / 4294967296.0) *
+                                ((double)box.coefficients.soundTemperature / (double)derived.temperature);
+        std::printf("hot dense cell: p %.3f MPa, scaled %.3f MPa (expected %.3f)\n", (double)derived.pressure * 1e-12,
+                    (double)derived.scaledPressure * 1e-12, expected * 1e-12);
+        EXPECT(derived.scaledPressure > 0);
+        EXPECT(std::abs((double)derived.scaledPressure - expected) <= expected * 1e-6);
+    }
+
     void TestHotBlockNoCheckerboard() {
         const uint32_t ground = MakeAirBox(MakeAirConfig(2, 2, 2)).referenceDerived.front().temperature;
         constexpr std::array<BlockGas, 3> GASES = {BlockGas{"air", 28013, 20810}, BlockGas{"steam", 18015, 25300},
@@ -1099,6 +1118,7 @@ int main() {
     TestEnergyEveryTick();
     TestNoiseStaysSmall();
     TestStrongPressureStable();
+    TestHotDenseCellPushes();
     TestHotBlockNoCheckerboard();
     TestHydrostaticScalesWithGravity();
     TestClosedBoxAnyGravity();

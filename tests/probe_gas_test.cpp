@@ -12,7 +12,8 @@
 //   8. 物質の無いエネルギーを作らない(T-0646・ADR-0286): 反応が気体の質量を変える場面(水蒸気が露になる試験の規則。燃える木箱・
 //      熱い湯気の塊)でも、毎刻み 2〜3 に加えて、区画のどのセルも熱(エネルギー − 化学)が負にならず、物質の無いセルはエネルギーを
 //      持たない(強い流れが 1 小刻みでセルの中身を押し出すと、押し出す仕事のぶん負のエネルギーが残っていた)。2・6 の木箱も同じく確かめる。
-//      熱が負のセルの数と最も負の熱は表示だけ(強い爆発でまだ残る。出ていく割合の上限では直らない〔T-0647〕。根っこは T-0676)
+//      熱が負のセルも 0(T-0676: 強い爆発の熱いセルで頭打ちの p̃ × T_頭 が 64bit を溢れて負の圧力になり、周りを吸い込んでいた。
+//      fixed.hlsli の FxMulDivS64 で直した)
 // 表は 1〜4 が試験の表(combustion_test)から CO を作る規則を除いたもの(区画の気体の物質 4 つ〔N2・O2・CO2・H2O〕。T-0590 の形)、
 // 6・7 が試験の表のまま + 地球の空気 + 定圧の比熱。
 #include <algorithm>
@@ -406,6 +407,7 @@ namespace {
         EXPECT(still.conserved);
         EXPECT(flow.conserved);
         EXPECT(flow.heat.emptyWithEnergy == 0);
+        EXPECT(flow.heat.negativeHeat == 0);  // T-0676
         EXPECT(flow.skipped == 0);
         EXPECT(flow.heatCentroid > still.heatCentroid + 1000);          // 熱が 1 セル以上高く運ばれる
         EXPECT(flow.smokeCentroid > (WOOD_BOTTOM + WOOD_SIZE) * 1000);  // 煙の重心が木箱の上
@@ -521,6 +523,7 @@ namespace {
         EXPECT(still.conserved);
         EXPECT(flow.conserved);
         EXPECT(flow.heat.emptyWithEnergy == 0);
+        EXPECT(flow.heat.negativeHeat == 0);  // T-0676
         EXPECT(flow.skipped == 0);
         EXPECT(flow.heatCentroid > still.heatCentroid + 1000);
         EXPECT(flow.smokeCentroid > (WOOD_BOTTOM + WOOD_SIZE) * 1000);
@@ -638,6 +641,7 @@ namespace {
                     result.heat.negativeHeat, (long long)result.heat.lowestHeatMilliJoules, result.skipped);
                 EXPECT(result.conserved);
                 EXPECT(result.heat.emptyWithEnergy == 0);
+                EXPECT(result.heat.negativeHeat == 0);  // T-0676
                 EXPECT(result.momentumHeld);
                 EXPECT(result.skipped == 0);
             }

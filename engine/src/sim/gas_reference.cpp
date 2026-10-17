@@ -729,7 +729,7 @@ namespace bicameral::sim {
             int64_t scaled = fx::FxMulShiftS64(deviation, (int64_t)box.coefficients.soundScale, 32);
             const uint32_t soundTemperature = box.coefficients.soundTemperature;
             if (derived.temperature > soundTemperature)
-                scaled = fx::FxDivS64(fx::FxMulShiftS64(scaled, soundTemperature, 0), derived.temperature);
+                scaled = fx::FxMulDivS64(scaled, soundTemperature, derived.temperature);  // 積は 128bit(T-0676)
 
             derived.scaledPressure = scaled;
         }
