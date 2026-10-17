@@ -1,10 +1,10 @@
-// probe_phase_test.cpp — 水の相変化を反応表の規則で書く(T-0611・ADR-0272)の試験。仮の世界の CPU リファレンス
+// probe_phase_test.cpp — 水の相変化を釣り合いの規則で書く(T-0611・ADR-0272 → T-0623・ADR-0290)の試験。仮の世界の CPU リファレンス
 // (ProbeReference に気体と液体の区画)で、標準パッケージ real_matter・real_reactions の水の 3 相の見本を走らせる。
 //
 // 確かめること:
-//   1. 表: 反応物が全部次数 0 の規則がベイクできる。融解と凝固の速さが 273〜274 K で入れ替わる・蒸発と凝縮の釣り合いの湯気が
-//      飽和水蒸気の濃さ(373 K で 1 気圧 = 0.125 m³ に 4.07 mol)の 5% 以内・潜熱(物質の生成エンタルピーと比熱から)が
-//      融解 6.010 kJ/mol(273.15 K)・蒸発 44.004 kJ/mol(298.15 K)
+//   1. 表と 1 セル: 釣り合いの規則と逆向き(~逆)がベイクされ、坂の警告が出ない。①融点がちょうど(275 K の氷 → 273.150 K で止まる)
+//      ②釣り合えば眠る ③霧(水の無い空気の湯気が凝縮)④種なしで凍り始める(270 K の水だけ)・沸点のまわりの湯気が釣り合いの濃さ・
+//      潜熱(物質の生成エンタルピーと比熱から)が融解 6.010 kJ/mol(273.15 K)・蒸発 44.004 kJ/mol(298.15 K)
 //   2. 湯気: 熱い石の上の水たまりが湯気になり、湯気が気体の区画で上がる。湯気は冷たい池まで運ばれて凝縮する(池の水が増える)
 //   3. 氷: 暖かい台の上の氷が溶け、溶けた水が液体の区画で台から流れ落ちる
 //   4. 保存(湯気の場面は気体の区画だけと、液体の区画も重ねた時・氷の場面は気体と液体の区画): 毎刻み、エネルギー(セル + 気体の
@@ -13,7 +13,7 @@
 //      決定性: 2 回の実行でセル・気体・液体のハッシュが一致
 //   6. 場所を取らない石(`--stone-without-density`。ctest の probe_phase_porous_stone。T-0654): 石の密度を書かない(場所を取らない固体)と、
 //      水たまり・池・溶けた水が熱い石のセルへ染み込んで湯気になる。場面の結果(湯気の高さ・池・流れ落ち)は見ず、4 の保存だけを確かめる
-//   5. 記録(試験ではなく表示): 水と湯気が釣り合ったセルは眠らない(蒸発と凝縮が毎刻み行き来する。ADR-0272 の注)
+//   5. 記録(試験ではなく表示): 静かな池の計算したブロックの数(釣り合ったセルは眠れる。ADR-0290)
 // 表は試験の表(combustion_test。real_matter・real_reactions を写して熱伝導率に試験の倍率)+ 地球の環境 + 基準の大気(N2・O2)+ 石。
 #include <algorithm>
 #include <array>
@@ -99,44 +99,107 @@ namespace {
         return (uint32_t)(found - table.ruleNames.begin());
     }
 
-    // 速さの表の値(仮数 × 2^指数。1 刻みあたり)を倍精度に(試験の表示と比べだけ)
-    double RateValue(const BakedReactionTable& table, uint32_t rule, uint32_t kelvin) {
-        const uint64_t packed = table.View().Rate(rule, kelvin);
-        const auto exponent = (int32_t)(uint32_t)(packed & 0xFFFFFFFFull);
-
-        return std::ldexp((double)(packed >> 32), exponent);
+    // 1 セルを n 刻み進める(セルだけのブロック。待ちの丸め)
+    reaction::RxLoneCell AdvanceCell(const BakedReactionTable& table, const reaction::RxCell& cell, uint32_t ticks) {
+        return AdvanceLoneReactionCell(table, reaction::RxMakeLoneCell(cell, 0), 11, 1, ticks, 5);
     }
 
-    // --- 1: 表 ---
-    void TestTable(const BakedReactionTable& table) {
-        std::printf("表\n");
-        const uint32_t melting = RuleId(table, "ice_melting");
-        const uint32_t freezing = RuleId(table, "water_freezing");
-        const uint32_t evaporation = RuleId(table, "water_evaporation");
-        const uint32_t condensation = RuleId(table, "water_condensation");
-        EXPECT(table.rules[melting].firstOrderMask != 0 && table.rules[freezing].firstOrderMask != 0);
-        EXPECT(table.rules[evaporation].firstOrderMask == 0);
-
-        // 融点: 273 K までは凝固、274 K からは融解が速い(表は 1 K ごと)
-        EXPECT(RateValue(table, melting, 273) < RateValue(table, freezing, 273));
-        EXPECT(RateValue(table, melting, 274) > RateValue(table, freezing, 274));
-        std::printf("  融解 ÷ 凝固: 272 K %.3f・273 K %.3f・274 K %.3f・275 K %.3f\n",
-                    RateValue(table, melting, 272) / RateValue(table, freezing, 272),
-                    RateValue(table, melting, 273) / RateValue(table, freezing, 273),
-                    RateValue(table, melting, 274) / RateValue(table, freezing, 274),
-                    RateValue(table, melting, 275) / RateValue(table, freezing, 275));
-
-        // 釣り合いの湯気(µmol / セル)= 蒸発(µmol/刻み)÷ 凝縮(1/刻み)。飽和水蒸気の濃さ P_sat / RT × 0.125 m³ と比べる
-        // 飽和水蒸気圧(IAPWS-95 の 298.15・323.15・373.15 K の値を、表の 1 K の温度へ Clausius–Clapeyron で直したもの)
-        constexpr std::array<std::pair<uint32_t, double>, 3> SATURATION = {
-            {{298, 3141.7}, {323, 12261.0}, {373, 100885.0}}};
-        for (const auto& [kelvin, pascals] : SATURATION) {
-            const double equilibrium = RateValue(table, evaporation, kelvin) / RateValue(table, condensation, kelvin);
-            const double expected = pascals / (8.314462618 * kelvin) * 0.125 * 1e6;
-            std::printf("  釣り合いの湯気 %u K: %.4f mol(飽和 %.4f mol)\n", kelvin, equilibrium * 1e-6,
-                        expected * 1e-6);
-            EXPECT(std::abs(equilibrium / expected - 1.0) < 0.05);
+    uint64_t CellAmount(const BakedReactionTable& table, const reaction::RxCell& cell, std::string_view name) {
+        const uint32_t id = table.SpeciesId(name);
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            if (cell.species[i] == id)
+                return cell.amounts[i];
         }
+
+        return 0;
+    }
+
+    int32_t CellTemperature(const BakedReactionTable& table, const reaction::RxCell& cell) {
+        return reaction::RxComputeThermal(table.View(), cell).temperature;
+    }
+
+    // 釣り合ったセルは眠る: 次の刻みに進む規則が無く、起こす刻みも無い
+    bool Sleeps(const BakedReactionTable& table, const reaction::RxLoneCell& lone, uint64_t tick) {
+        const reaction::RxWaitStep step = StepReactionCellWait(table, lone.cell, 11, tick, lone.changedTick, 5);
+
+        return step.wakeTick == reaction::RX_WAIT_NEVER && reaction::RxSameCell(step.cell, lone.cell);
+    }
+
+    // 釣り合いの湯気の濃さ(mol / セル)。real_reactions の water_evaporation の balance と同じ式(試験の比べだけ倍精度)
+    double BalanceVapor(int32_t milliKelvin) {
+        const double kelvin = milliKelvin * 1e-3;
+
+        return 32.688 * std::exp(-39975.0 / 8.314462618 * ((1.0 / kelvin) - (1.0 / 373.15))) * 0.125;
+    }
+
+    // --- 1: 表と 1 セルの釣り合い(T-0623・ADR-0290)---
+    void TestTable(const BakedReactionTable& table) {
+        std::printf("表と 1 セルの釣り合い\n");
+        for (const char* name : {"ice_melting", "ice_melting~逆", "water_evaporation", "water_evaporation~逆"}) {
+            const reaction::RxRule& rule = table.rules[RuleId(table, name)];
+            EXPECT(rule.balanceKelvin != 0 && rule.firstOrderMask == 0);
+        }
+
+        for (const std::string& warning : table.warnings) {
+            std::printf("  警告: %s\n", warning.c_str());
+            EXPECT(warning.find("ice_melting") == std::string::npos);
+            EXPECT(warning.find("water_evaporation") == std::string::npos);
+        }
+
+        constexpr uint32_t SETTLE_TICKS = 3600;  // 60 秒(近づく速さは 1 /s。距離の端数まで)
+        constexpr int32_t MELTING_POINT = 273150;
+        const uint32_t water = table.SpeciesId("water");
+        const uint32_t ice = table.SpeciesId("ice");
+        const uint32_t vapor = table.SpeciesId("water_vapor");
+        const uint32_t nitrogen = table.SpeciesId("nitrogen");
+        const uint32_t stone = table.SpeciesId("stone");
+
+        // ① 融点がちょうど: 275 K の氷だけ → 熱の分だけ溶けて 273.150 K で止まる
+        const reaction::RxLoneCell melted = AdvanceCell(
+            table, MakeReactionCell(table, std::vector<SpeciesAmount>{{ice, 100000000}}, 275000), SETTLE_TICKS);
+        std::printf("  氷 100 mol(275 K)→ %.3f K・氷 %.3f mol・水 %.3f mol\n",
+                    CellTemperature(table, melted.cell) * 1e-3, CellAmount(table, melted.cell, "ice") * 1e-6,
+                    CellAmount(table, melted.cell, "water") * 1e-6);
+        EXPECT(std::abs(CellTemperature(table, melted.cell) - MELTING_POINT) <= 1);
+        EXPECT(CellAmount(table, melted.cell, "ice") > 0 && CellAmount(table, melted.cell, "water") > 0);
+
+        // ② 釣り合えば眠る
+        EXPECT(Sleeps(table, melted, 1 + SETTLE_TICKS));
+
+        // ④ 種が無くても凍り始める: 270 K の水だけ → 凍って 273.150 K で止まる
+        const reaction::RxLoneCell frozen = AdvanceCell(
+            table, MakeReactionCell(table, std::vector<SpeciesAmount>{{water, 100000000}}, 270000), SETTLE_TICKS);
+        std::printf("  水 100 mol(270 K)→ %.3f K・氷 %.3f mol\n", CellTemperature(table, frozen.cell) * 1e-3,
+                    CellAmount(table, frozen.cell, "ice") * 1e-6);
+        EXPECT(std::abs(CellTemperature(table, frozen.cell) - MELTING_POINT) <= 1);
+        EXPECT(CellAmount(table, frozen.cell, "ice") > 0);
+        EXPECT(Sleeps(table, frozen, 1 + SETTLE_TICKS));
+
+        // ③ 霧: 水の無い 300 K の空気(石で熱を受ける)に飽和を超える湯気 → 水ができ、湯気は釣り合いの濃さへ
+        std::vector<SpeciesAmount> fogAmounts = {{nitrogen, 4000000}, {vapor, 1000000}, {stone, STONE}};
+        std::ranges::sort(fogAmounts, {}, &SpeciesAmount::species);
+        const reaction::RxLoneCell fog = AdvanceCell(table, MakeReactionCell(table, fogAmounts, AIR_TEMPERATURE),
+                                                     SETTLE_TICKS);
+        const double fogVapor = CellAmount(table, fog.cell, "water_vapor") * 1e-6;
+        const double fogExpected = BalanceVapor(CellTemperature(table, fog.cell));
+        std::printf("  湯気 1 mol の空気(300 K)→ 水 %.4f mol・湯気 %.4f mol(釣り合い %.4f)・%.3f K\n",
+                    CellAmount(table, fog.cell, "water") * 1e-6, fogVapor, fogExpected,
+                    CellTemperature(table, fog.cell) * 1e-3);
+        EXPECT(CellAmount(table, fog.cell, "water") > 0);
+        EXPECT(std::abs(fogVapor / fogExpected - 1.0) < 0.01);
+        EXPECT(Sleeps(table, fog, 1 + SETTLE_TICKS));
+
+        // 沸点のまわり: 373.15 K の水 → 湯気が釣り合いの濃さ(1 気圧 ≒ 4.086 mol / セル)へ。蒸発で冷えるので少し下
+        std::vector<SpeciesAmount> boilAmounts = {{nitrogen, 1000000}, {water, 100000000}, {stone, STONE}};
+        std::ranges::sort(boilAmounts, {}, &SpeciesAmount::species);
+        const reaction::RxLoneCell boiled = AdvanceCell(table, MakeReactionCell(table, boilAmounts, 373150),
+                                                        SETTLE_TICKS);
+        const double boilVapor = CellAmount(table, boiled.cell, "water_vapor") * 1e-6;
+        const double boilExpected = BalanceVapor(CellTemperature(table, boiled.cell));
+        std::printf("  水 100 mol(373.15 K)→ 湯気 %.4f mol(釣り合い %.4f)・%.3f K\n", boilVapor, boilExpected,
+                    CellTemperature(table, boiled.cell) * 1e-3);
+        EXPECT(std::abs(boilVapor / boilExpected - 1.0) < 0.01);
+        EXPECT(Sleeps(table, boiled, 1 + SETTLE_TICKS));
 
         // 潜熱(定圧。mJ/mol)= h0 の差 × 1000 + 定圧の比熱の差 × 温度。セルは体積一定なので、閉じたセルで湯気になる時に
         // 吸う熱は内部エネルギーの差 = 潜熱 − RT(298.15 K で 41.5 kJ/mol。気体の比熱が定積。T-0597)
@@ -151,9 +214,8 @@ namespace {
         };
         const int64_t fusion = latent("ice", "water", 273150);
         const int64_t vaporization = latent("water", "water_vapor", 298150);
-        const int64_t boiling = latent("water", "water_vapor", 373150);
-        std::printf("  潜熱: 融解 %lld mJ/mol(273.15 K)・蒸発 %lld(298.15 K)・%lld(373.15 K)\n", (long long)fusion,
-                    (long long)vaporization, (long long)boiling);
+        std::printf("  潜熱: 融解 %lld mJ/mol(273.15 K)・蒸発 %lld(298.15 K)\n", (long long)fusion,
+                    (long long)vaporization);
         EXPECT(fusion > 6009000 && fusion < 6011000);
         EXPECT(vaporization > 44003000 && vaporization < 44005000);
     }

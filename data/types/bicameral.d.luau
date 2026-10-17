@@ -41,10 +41,20 @@ export type ReactionRate = {
     activation_energy_j_per_mol: number,
 }
 
+-- 釣り合い(T-0623・ADR-0290)。書いた規則は 1 本で両向きに進み、釣り合えば止まる(ベイクが逆向き「名前~逆」を作る)。
+-- その温度で、気体の項の濃さの比(生成物 ÷ 反応物。係数乗)が concentration^Δn で釣り合う(Δn = 気体の係数の差)。凝縮相の項は入らない。
+-- 温度で ΔH_eq の急さで動く(van 't Hoff)。rate は「釣り合いへ近づく速さ」(1/s)
+export type ReactionBalance = {
+    temperature_mk: number, -- 釣り合いの温度(mK)。凝縮相だけの規則(融解)なら融点
+    enthalpy_j_per_mol: number, -- ΔH_eq(正なら温めると生成物の側へ)
+    concentration_mol_per_m3: (number | string)?, -- 釣り合いの濃さ。気体の係数が両辺で違う時に要る
+}
+
 export type Reaction = {
     reactants: { [string]: number }, -- 物質 → 係数
     products: { [string]: number },
     rate: ReactionRate,
+    balance: ReactionBalance?, -- 釣り合いの規則(orders は書けない)
     orders: { [string]: number }?, -- 物質 → 次数(0 か 1)。省けば反応物は全部 1。書かない反応物は 0。全部 0 なら A は mol/(m³·s)(T-0611)
     reaction_enthalpy_j_per_mol: number?, -- 文献の反応熱(検査用。食い違えばベイクが警告)
 }

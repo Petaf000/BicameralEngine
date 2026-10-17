@@ -98,6 +98,16 @@ struct RxRule {
     uint32_t activationEnergy;  // J/mol(Arrhenius の Ea。速さの表はベイク済み。表を読む道具が見るだけ)
     int64_t reactionEnthalpy;   // 進行度 1 µmol あたりの µJ(= J/mol)。Σ 生成物の H0 − Σ 反応物の H0。正なら吸熱
     uint64_t key;               // 規則の名前のハッシュ。乱数の入力に使い、表の並び(規則の ID)に結果を依存させない
+
+    // --- 釣り合い(T-0623・ADR-0290。釣り合いの規則だけ。ほかは 0)---
+    // 釣り合いの規則は「自分の向きに釣り合いへ向かう時だけ」進む(逆向きはベイクが作る別の規則)。
+    // log2 K(T) = balanceLog2Constant + balanceSlope × (1/T_eq − 1/T)。Q は気体の項の µmol で数える(セルの体積の換算は定数に入れてある)
+    int64_t balanceLog2Constant;  // log2 K(T_eq)(µmol の単位。Q32)
+    int64_t balanceSlope;         // ΔH_eq ÷ (R ln 2)(K。Q32)。正なら温めると生成物の側へ
+    int64_t heatCapacityChange;   // Σ 生成物の比熱 − Σ 反応物の比熱(mJ/(mol·K) = nJ/(µmol·K))。進めた後の温度に使う
+    uint32_t balanceKelvin;       // 釣り合いの温度 T_eq(mK)。0 = 釣り合いの規則ではない
+    uint32_t
+        balanceGasMask;  // 釣り合いの式に入る項(ビット i = reactants[i]、ビット RX_BALANCE_PRODUCT_SHIFT + i = products[i])
 };
 
 // セル(レベル 0)。成分は物質 ID の昇順、物質量が 0 になったものは消す(同じ中身なら同じ並び = 同じハッシュ)
@@ -480,6 +490,128 @@ FX_FN uint64_t RxWaitTicks(uint64_t fraction, uint64_t hash) {
     return ticks > 1 ? ticks : (uint64_t)1;
 }
 
+// --- 釣り合いの規則(T-0623・ADR-0290)---------------------------------------------------------------
+// 釣り合いの規則は、今の成分と温度から「釣り合いまであとどれだけ進めるか」(距離)を整数で求め、1 刻みに距離 × min(1, k(T)/60) だけ進む。
+// 距離は g(ξ) = log2 Q(ξ) − log2 K(T(ξ)) が負のままの最大の ξ(ξ だけ進めた後の成分と温度。温度は反応熱と比熱の変化を入れる)。
+// g は ξ について増える(Q は生成物が増えて上がり、K は ΔH_eq と反応熱が同じ符号なら温度の変化で下がる)ので、整数の二分法で決まる。
+// 凝縮相だけの規則(Q = 1)は「温度がちょうど T_eq になる所」まで進む = 融点が mK でちょうど。距離 0 なら進まない(眠れる)
+
+FX_CONST uint32_t RX_BALANCE_PRODUCT_SHIFT = 4;       // balanceGasMask の生成物のビットの位置
+FX_CONST uint32_t RX_BALANCE_MIN_MILLIKELVIN = 1000;  // K(T) を数える温度の下限(1/T が大きくなりすぎないように)
+FX_CONST uint32_t RX_BALANCE_SEARCH_STEPS = 66;       // 二分法の回数の上限(0 と上限を見る 2 回 + 63 回)
+FX_CONST uint64_t RX_BALANCE_GAP_LIMIT = FX_U64(0x40000000u, 0u);  // g の「無限」(物質が 0 になる)と、熱の変化の上限
+
+// 温度(mK)= 熱(µJ)× 1e6 ÷ 熱容量(nJ/K)。熱が 0 以下なら 0(RxThermalFromSums と同じ割り算)
+FX_FN uint32_t RxTemperatureOfHeat(int64_t heat, int64_t heatCapacity) {
+    if (heat <= 0 || heatCapacity <= 0)
+        return 0;
+
+    const FxU128 numerator = FxMulU64Full((uint64_t)heat, RX_MILLIKELVIN_NUMERATOR);
+    if (numerator.hi >= (uint64_t)heatCapacity)
+        return (uint32_t)TEMPERATURE_MAX_MILLIKELVIN;
+
+    const uint64_t temperature = FxDivU128By64(numerator, (uint64_t)heatCapacity).quotient;
+
+    return (uint32_t)(temperature < (uint64_t)TEMPERATURE_MAX_MILLIKELVIN ? temperature
+                                                                          : (uint64_t)TEMPERATURE_MAX_MILLIKELVIN);
+}
+
+// log2 K(T)(Q32)= 定数 + 急さ × (1/T_eq − 1/T)。1/T_eq − 1/T = (T − T_eq) × 1000 ÷ (T × T_eq)(mK で)
+FX_FN int64_t RxBalanceLog2K(RxRule rule, uint32_t milliKelvin) {
+    const uint64_t temperature = milliKelvin > RX_BALANCE_MIN_MILLIKELVIN ? (uint64_t)milliKelvin
+                                                                          : (uint64_t)RX_BALANCE_MIN_MILLIKELVIN;
+    const uint64_t balance = (uint64_t)rule.balanceKelvin;
+    const bool warmer = temperature >= balance;
+    const uint64_t difference = warmer ? temperature - balance : balance - temperature;
+    const bool rising = rule.balanceSlope >= 0;
+    const uint64_t slope = rising ? (uint64_t)rule.balanceSlope : (uint64_t)(-rule.balanceSlope);
+
+    // 商 ≤ 急さ × 1000 ÷ min(T, T_eq) ≤ 急さ(T・T_eq ≥ 1 K)なので 64bit に収まる
+    const FxU128 numerator = FxMulU64Full(slope, difference * 1000);
+    const int64_t term = (int64_t)FxDivU128By64(numerator, temperature * balance).quotient;
+
+    return rule.balanceLog2Constant + (warmer == rising ? term : -term);
+}
+
+// g(ξ) = log2 Q(ξ) − log2 K(T(ξ))(Q32)。extent ≤ 反応物の「ある量 ÷ 係数」の最小。
+// 気体の反応物が 0 になれば +∞(それ以上進めない)、気体の生成物が 0 なら −∞(まだ進める)
+template <typename Cell>
+FX_FN int64_t RxBalanceGap(Cell cell, RxThermal thermal, RxRule rule, int64_t reactionEnthalpy, uint64_t extent) {
+    int64_t log2Quotient = 0;
+    bool reactantEmpty = false;
+    bool productEmpty = false;
+    FX_UNROLL for (uint32_t i = 0; i < RX_MAX_REACTANTS; ++i) {
+        if (i >= rule.reactantCount || ((rule.balanceGasMask >> i) & 1) == 0)
+            continue;
+
+        const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
+        const uint64_t amount = slot == RX_NO_SLOT ? (uint64_t)0 : RX_AMOUNT_AT(cell, slot);
+        const uint64_t left = amount - (extent * (uint64_t)rule.reactantCoefficients[i]);
+        reactantEmpty = reactantEmpty || left == 0;
+        log2Quotient -= left == 0 ? (int64_t)0 : (int64_t)rule.reactantCoefficients[i] * FxLog2U64(left);
+    }
+
+    FX_UNROLL for (uint32_t i = 0; i < RX_MAX_PRODUCTS; ++i) {
+        if (i >= rule.productCount || ((rule.balanceGasMask >> (RX_BALANCE_PRODUCT_SHIFT + i)) & 1) == 0)
+            continue;
+
+        const uint32_t slot = RxFindSlot(cell, rule.products[i]);
+        const uint64_t amount = slot == RX_NO_SLOT ? (uint64_t)0 : RX_AMOUNT_AT(cell, slot);
+        const uint64_t made = amount + (extent * (uint64_t)rule.productCoefficients[i]);
+        productEmpty = productEmpty || made == 0;
+        log2Quotient += made == 0 ? (int64_t)0 : (int64_t)rule.productCoefficients[i] * FxLog2U64(made);
+    }
+
+    if (reactantEmpty)
+        return (int64_t)RX_BALANCE_GAP_LIMIT;
+
+    if (productEmpty)
+        return -(int64_t)RX_BALANCE_GAP_LIMIT;
+
+    // --- ξ だけ進めた後の温度(熱 = 今の熱 − ξ × 反応熱・熱容量 = 今 + ξ × 比熱の変化。どちらも成分の和なので負にならない)---
+    const bool endothermic = reactionEnthalpy >= 0;
+    const FxU128 heatChange = FxMulU64Full(extent,
+                                           endothermic ? (uint64_t)reactionEnthalpy : (uint64_t)(-reactionEnthalpy));
+    const bool rising = rule.heatCapacityChange >= 0;
+    const FxU128 capacityChange = FxMulU64Full(
+        extent, rising ? (uint64_t)rule.heatCapacityChange : (uint64_t)(-rule.heatCapacityChange));
+    const bool huge = heatChange.hi != 0 || heatChange.lo >= RX_BALANCE_GAP_LIMIT || capacityChange.hi != 0 ||
+                      capacityChange.lo >= RX_BALANCE_GAP_LIMIT;
+    const int64_t heat = endothermic ? thermal.heat - (int64_t)heatChange.lo : thermal.heat + (int64_t)heatChange.lo;
+    const int64_t capacity = rising ? (int64_t)thermal.heatCapacity + (int64_t)capacityChange.lo
+                                    : (int64_t)thermal.heatCapacity - (int64_t)capacityChange.lo;
+    const uint32_t temperature = huge ? (endothermic ? 0u : (uint32_t)TEMPERATURE_MAX_MILLIKELVIN)
+                                      : RxTemperatureOfHeat(heat, capacity);
+
+    return log2Quotient - RxBalanceLog2K(rule, temperature);
+}
+
+// 釣り合いまでの距離(µmol の進行度。0〜ownLimit)。g(0) ≥ 0 なら 0(この向きには進まない)。
+// 呼ぶ所を 1 か所にするため、0 と上限を見る 2 回と二分法を 1 つの回しで行う(HW の Work Graph の核を小さく。T-0397)
+template <typename Table, typename Cell>
+FX_FN uint64_t RxBalanceDistance(Table table, Cell cell, RxRule rule, int64_t reactionEnthalpy, uint64_t ownLimit) {
+    const RxThermal thermal = RxComputeThermal(table, cell);
+    uint64_t low = 0;
+    uint64_t high = ownLimit;
+    bool searching = true;
+    for (uint32_t step = 0; step < RX_BALANCE_SEARCH_STEPS && searching; ++step) {
+        const uint64_t probe = step == 0 ? (uint64_t)0 : (step == 1 ? ownLimit : low + ((high - low) >> 1));
+        const bool below = RxBalanceGap(cell, thermal, rule, reactionEnthalpy, probe) < 0;
+        if (step == 0) {
+            searching = below;
+        } else if (step == 1) {
+            low = below ? ownLimit : low;
+            searching = !below && high - low > 1;
+        } else {
+            low = below ? probe : low;
+            high = below ? high : probe;
+            searching = high - low > 1;
+        }
+    }
+
+    return low;
+}
+
 // 規則 rule のこのセルでの 1 刻みの進みの期待値(反応物が 1 つでも無ければ 0)と、反応物それぞれの「ある量 ÷ 係数」の最小
 struct RxRuleRate {
     RxRate rate;
@@ -512,8 +644,19 @@ FX_FN RxRuleRate RxComputeRuleRate(Table table, Cell cell, uint32_t ruleId, RxRu
     }
 
     const uint64_t packed = table.Rate(ruleId, kelvin);
-    result.rate = RxSplitRate(FxMulU64Full(factors[0], factors[1]), RxRateMantissa(packed), RxRateExponent(packed));
-    result.ownLimit = ownLimit;
+    if (rule.balanceKelvin == 0 || ownLimit == 0) {
+        result.rate = RxSplitRate(FxMulU64Full(factors[0], factors[1]), RxRateMantissa(packed), RxRateExponent(packed));
+        result.ownLimit = ownLimit;
+
+        return result;
+    }
+
+    // --- 釣り合いの規則: 距離 × k(T)/60(k は 1/s。表は次数に依らず 1 刻みの割合)。距離を越えない ---
+    const uint64_t distance = RxBalanceDistance(table, cell, rule, table.Rule(ruleId).reactionEnthalpy, ownLimit);
+    const RxRate approach = RxSplitRate(FxMulU64Full(distance, 1), RxRateMantissa(packed), RxRateExponent(packed));
+    const bool reaches = approach.integerPart >= distance;
+    result.rate = RxMakeRate(reaches ? distance : approach.integerPart, reaches ? (uint64_t)0 : approach.fraction);
+    result.ownLimit = distance;
 
     return result;
 }
