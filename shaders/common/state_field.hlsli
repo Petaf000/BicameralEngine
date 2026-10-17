@@ -46,14 +46,14 @@ FX_CONST uint32_t SF_PHASE_COUNT = 3;
 
 // --- 細かく/粗くする時の規則 --------------------------------------------------------------------
 // SAME:   細かく = 子は親と同じ数。粗く = 子 8 つの平均(和 ÷ 8 の切り捨て。余りは捨てる。量でない欄)
-// VOLUME: 細かく = 子は親と同じ数。粗く = 和 ÷ 8 + 端数(余りは欄の帳簿のレベルごとの列へ。量の欄)
+// VOLUME: 細かく = 子は親と同じ数。粗く = 和 ÷ 8 + 端数(余りは世界の帳簿の「粗くした端数・出」の、その欄の列へ。量の欄 = 保存量。T-0762)
 // ブロック・世界の欄は SAME だけ(ブロック: 細かく = 子のブロックは親の値・粗く = 親は自分の値のまま)
 FX_CONST uint32_t SF_SCALE_SAME = 0;
 FX_CONST uint32_t SF_SCALE_VOLUME = 1;
 FX_CONST uint32_t SF_SCALE_COUNT = 2;
 
 // --- 印 ----------------------------------------------------------------------------------------
-FX_CONST uint32_t SF_FLAG_CONSERVED = 1u;  // 保存量(世界の帳簿の列に入る。T-0712)
+FX_CONST uint32_t SF_FLAG_CONSERVED = 1u;  // 保存量(世界の帳簿の列に入る。VOLUME の欄と同じもの。T-0712・T-0762)
 FX_CONST uint32_t SF_FLAG_HASHED = 2u;     // 状態のハッシュに入る
 FX_CONST uint32_t SF_FLAG_MASK = 3u;
 
@@ -98,6 +98,11 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
     if (desc.place == SF_PLACE_FACE && desc.components != 3u)
         return false;
 
+    // 量の欄(VOLUME)と保存量は同じもの: 粗くした余りを載せる帳簿の列は保存量の欄だけが持ち、
+    // 保存量の検査(ComputeConservedTotals)は和を取る欄だけを数える(T-0762。仮)
+    if (((desc.flags & SF_FLAG_CONSERVED) != 0u) != (desc.scale == SF_SCALE_VOLUME))
+        return false;
+
     // ブロック・世界の欄は細かく/粗くで和を取らない
     return desc.scale == SF_SCALE_SAME || desc.place == SF_PLACE_CELL || desc.place == SF_PLACE_FACE;
 }
@@ -105,6 +110,11 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
 // セルの頁に置く欄か(セル・面)
 FX_FN bool SfOnCells(SfFieldDesc desc) {
     return desc.place == SF_PLACE_CELL || desc.place == SF_PLACE_FACE;
+}
+
+// 保存量の欄か(世界の帳簿に値の数だけ列を持つ)
+FX_FN bool SfConserved(SfFieldDesc desc) {
+    return (desc.flags & SF_FLAG_CONSERVED) != 0u;
 }
 
 FX_FN bool SfHashed(SfFieldDesc desc) {
@@ -154,7 +164,7 @@ FX_FN int64_t SfCoarsenValue(SfCoarsenSum sum) {
     return sum.whole + (int64_t)(sum.low >> 3u);
 }
 
-// 余り(子のレベルの単位で 0〜7)。VOLUME の欄は欄の帳簿へ・SAME の欄は捨てる
+// 余り(子のレベルの単位で 0〜7。切り捨てなのでいつも 0 以上 = セルから減った量)。VOLUME の欄は世界の帳簿の「粗くした端数・出」へ・SAME の欄は捨てる
 FX_FN uint32_t SfCoarsenRemainder(SfCoarsenSum sum) {
     return sum.low & 7u;
 }

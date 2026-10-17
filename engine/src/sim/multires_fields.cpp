@@ -37,19 +37,13 @@ namespace bicameral::sim {
             return desc.components;
         }
 
-        // 粗くした余りを欄の帳簿の (レベル, 値) へ。帳簿の外なら数える(セルの帳簿と同じ扱い)
-        void AddFieldLedger(MultiresNest& nest, MultiresField& field, int32_t level, uint32_t component,
-                            uint32_t remainder) {
+        // 粗くした余り(子のレベル level の単位の丸ごとの数。切り捨てなのでいつも 0 以上 = セルから減った)を
+        // 世界の帳簿の「粗くした端数・出」の列 column へ(T-0762。帳簿の外なら AddWorldLedgerBits が数える)
+        void AddFieldRemainder(MultiresNest& nest, int32_t level, uint32_t column, uint32_t remainder) {
             if (remainder == 0)
                 return;
 
-            const uint32_t address = MrLedgerAddress(level, component, field.desc.components);
-            if (address == MR_NO_BLOCK) {
-                nest.counters[MR_COUNTER_LEDGER_OUTSIDE] += 1;
-                return;
-            }
-
-            field.ledger[address] += remainder;
+            AddWorldLedgerUnits(nest, WlSlot(WL_REASON_COARSEN_REMAINDER, WL_DIRECTION_OUT), level, column, remainder);
         }
 
         // 枠 slot(頁を持つ)の欄の頁を畳む時の値(MrFoldValueCell のセル。全部覆われていれば 0)
@@ -75,8 +69,13 @@ namespace bicameral::sim {
         field.name = std::move(name);
         field.desc = desc;
         field.values.assign(ValueCount(nest, desc), 0);
-        if (desc.scale == SF_SCALE_VOLUME)
-            field.ledger.assign(size_t{MR_LEDGER_LEVELS} * desc.components, 0);
+
+        // --- 保存量の欄: 世界の帳簿の後ろに値の数だけ列を足す(帳簿はまだ空なので並べ直しは要らない。T-0762)---
+        if (SfConserved(desc)) {
+            FX_ASSERT(std::ranges::all_of(nest.ledger, [](uint64_t value) { return value == 0; }));
+            nest.capacity.ledgerColumns += desc.components;
+            nest.ledger.assign(WlLedgerWords(nest.capacity.ledgerColumns), 0);
+        }
 
         nest.fields.push_back(std::move(field));
 
@@ -151,13 +150,17 @@ namespace bicameral::sim {
         entry.values[component] = value;
     }
 
-    int64_t LoadNestFieldLedger(const MultiresNest& nest, uint32_t field, int32_t level, uint32_t component) {
-        const MultiresField& entry = nest.fields[field];
-        const uint32_t address = MrLedgerAddress(level, component, entry.desc.components);
-        if (entry.ledger.empty() || address == MR_NO_BLOCK)
-            return 0;
+    uint32_t NestConservedIndex(const MultiresNest& nest, uint32_t field) {
+        if (!SfConserved(nest.fields[field].desc))
+            return MULTIRES_NO_FIELD;
 
-        return entry.ledger[address];
+        uint32_t index = 0;
+        for (uint32_t f = 0; f < field; ++f) {
+            if (SfConserved(nest.fields[f].desc))
+                index += nest.fields[f].desc.components;
+        }
+
+        return index;
     }
 
     // --- 木の操作が呼ぶ ---
@@ -311,6 +314,9 @@ namespace bicameral::sim {
                 if (!SfOnCells(field.desc))
                     continue;  // ブロック・世界の欄: 親は自分の値のまま
 
+                // 保存量(= VOLUME)の欄の余りを載せる帳簿の列(値 0 の列)
+                const bool conserved = SfConserved(field.desc);
+                const uint32_t column = conserved ? NestFieldLedgerBase(nest) + NestConservedIndex(nest, f) : 0;
                 for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                     const uint32_t parentCell = MrOctantCell(child.parentOctant, local);
                     for (uint32_t c = 0; c < field.desc.components; ++c) {
@@ -319,8 +325,8 @@ namespace bicameral::sim {
                             sum = SfAddCoarsenChild(sum, LoadNestField(nest, f, childSlot, MrChildCell(local, j), c));
 
                         const int64_t value = SfCoarsenValue(sum);
-                        if (field.desc.scale == SF_SCALE_VOLUME)
-                            AddFieldLedger(nest, field, child.level, c, SfCoarsenRemainder(sum));
+                        if (conserved)
+                            AddFieldRemainder(nest, child.level, column + c, SfCoarsenRemainder(sum));
 
                         if (parentUniform) {
                             FX_ASSERT(value == field.values[UniformAddress(field, child.parent, c)]);

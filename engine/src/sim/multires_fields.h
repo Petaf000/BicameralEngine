@@ -45,9 +45,9 @@ namespace bicameral::sim {
     [[nodiscard]] int64_t LoadNestWorldField(const MultiresNest& nest, uint32_t field, uint32_t component);
     void StoreNestWorldField(MultiresNest& nest, uint32_t field, uint32_t component, int64_t value);
 
-    // 欄の帳簿(VOLUME の欄を粗くした時の余り。レベル level の単位。帳簿の外なら 0)
-    [[nodiscard]] int64_t LoadNestFieldLedger(const MultiresNest& nest, uint32_t field, int32_t level,
-                                              uint32_t component);
+    // 保存量の欄 field の値 0 の通し番号(登録の順に保存量の欄の値を数える。ConservedTotals::fields の添字で、
+    // 世界の帳簿の列は NestFieldLedgerBase + これ。T-0762)。保存量の欄でなければ MULTIRES_NO_FIELD
+    [[nodiscard]] uint32_t NestConservedIndex(const MultiresNest& nest, uint32_t field);
 
     // --- 木の操作が呼ぶ(multires_tree・multires_nest・multires_activity)---
     namespace nest_fields {
@@ -71,7 +71,7 @@ namespace bicameral::sim {
         // 一様な親 parentSlot へ子 childSlot を粗くしても、欄が一様のままか(違えば親を頁に広げる)
         [[nodiscard]] bool CoarsenKeepsUniform(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot);
 
-        // 子 childSlot を親の八分の一へ粗くする(和 ÷ 8。VOLUME の欄の余りは欄の帳簿へ)。親の頁(要るなら広げた後)に書き、
+        // 子 childSlot を親の八分の一へ粗くする(和 ÷ 8。VOLUME の欄の余りは世界の帳簿の「粗くした端数・出」のその欄の列へ)。親の頁(要るなら広げた後)に書き、
         // 子の見出しを消す前に呼ぶ
         void Coarsen(MultiresNest& nest, uint32_t childSlot);
 
