@@ -17,6 +17,8 @@
 #define FX_FN constexpr inline
 #define FX_CONST inline constexpr
 #define FX_UNROLL
+// 大きい構造体を読むだけで渡す引数・受け取る局所(C++ は参照で写さない。HLSL は値 = インライン後はレジスタのまま。T-0767)
+#define FX_IN(type) const type&
 #define FX_NAMESPACE_BEGIN namespace bicameral::fx {
 #define FX_NAMESPACE_END }
 #ifndef FX_ASSERT
@@ -35,6 +37,7 @@
 #define FX_FN
 #define FX_CONST static const
 #define FX_UNROLL [unroll]  // 決まった数の回しを開く(配列を動的な添字で読まずにレジスタのままにする。T-0397)
+#define FX_IN(type) type
 #define FX_NAMESPACE_BEGIN
 #define FX_NAMESPACE_END
 #ifndef FX_ASSERT

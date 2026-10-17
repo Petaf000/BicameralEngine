@@ -22,6 +22,7 @@
 // 外のセル(World::Outside)を同じレベルの相手として流し、流れた分を世界の帳簿の「世界の端」へ載せる(World::AddEdge)。
 #include <algorithm>
 #include <array>
+#include <memory>
 
 #include "common/transport_conduction.hlsli"
 #include "sim/multires_nest.h"
@@ -89,7 +90,10 @@ namespace bicameral::sim {
                 return neighbor;
             }
 
-            [[nodiscard]] CvCellView View(uint32_t slot, uint32_t index) const { return views->View(slot, index); }
+            // 見立ては置き場の参照で渡す(面ごとに写さない。T-0767)
+            [[nodiscard]] const CvCellView& View(uint32_t slot, uint32_t index) const {
+                return views->View(slot, index);
+            }
 
             // 開いた世界の端の外のセルの見立て(外の柱の行 row を自分と同じレベル level で。T-0721)
             [[nodiscard]] CvCellView Outside(uint32_t row, int32_t level) const { return views->Outside(row, level); }
@@ -142,7 +146,7 @@ namespace bicameral::sim {
         bool MarkCellWants(MultiresNest& nest, const TxConduction& kind, const ConductionWorld& world, uint32_t slot,
                            uint32_t index, std::span<uint8_t> wantsFraction) {
             const MrBlock block = nest.blocks[slot];
-            const CvCellView self = world.View(slot, index);
+            const CvCellView& self = world.View(slot, index);
             int64_t sameLevelOutflow = 0;
             bool sends = false;
             for (uint32_t face = 0; face < MR_FACES; ++face) {
@@ -272,27 +276,32 @@ namespace bicameral::sim {
     namespace nest_detail {
 
         CellViews::CellViews(const MultiresNest& nest, const ReactionTableView& view,
-                             std::span<const CvSpeciesPhase> phases)
+                             std::span<const CvSpeciesPhase> phases, uint32_t parts)
             : m_nest(&nest),
               m_table{.reaction = view, .phases = phases},
+              m_parts(parts),
               m_values(nest.blocks.size()),
               m_known(nest.blocks.size()) {}
 
         const CvCellView& CellViews::View(uint32_t slot, uint32_t index) {
             const MrBlock& block = m_nest->blocks[slot];
             const size_t position = MrIsUniform(block) ? MR_BLOCK_CELLS : index;
-            std::vector<CvCellView>& values = m_values[slot];
+            std::unique_ptr<CvCellView[]>& values = m_values[slot];
             std::vector<uint8_t>& known = m_known[slot];
-            if (values.empty()) {
-                values.resize(MR_BLOCK_CELLS + 1);
+            if (!values) {
+                // 0 で埋めない(作ったかは known。1 枠 約 100 KiB を刻みごとに埋めていた。T-0767)
+                values = std::make_unique_for_overwrite<CvCellView[]>(MR_BLOCK_CELLS + 1);
                 known.assign(MR_BLOCK_CELLS + 1, 0);
             }
 
             if (known[position] == 0) {
-                // 溢れを使う世界は溢れの成分も入れる(T-0187)。伝導は圧力を読まないので基準の圧力は 0
+                // 溢れを使う世界は溢れの成分も入れる(T-0187)。伝導は圧力を読まないので基準の圧力は 0。
+                // 作るのは読む種類の部分だけ(m_parts。伝導はセル全体の熱だけ。T-0767)
                 values[position] = m_nest->wideCells
-                                       ? MakeCellView(m_table, LoadWideNestCell(*m_nest, slot, index), block.level, 0)
-                                       : MakeCellView(m_table, LoadNestCell(*m_nest, slot, index), block.level, 0);
+                                       ? MakeCellViewParts(m_table, LoadWideNestCell(*m_nest, slot, index), block.level,
+                                                           0, m_parts)
+                                       : MakeCellViewParts(m_table, LoadNestCell(*m_nest, slot, index), block.level, 0,
+                                                           m_parts);
                 known[position] = 1;
             }
 
@@ -300,7 +309,7 @@ namespace bicameral::sim {
         }
 
         CvCellView CellViews::Outside(uint32_t row, int32_t level) const {
-            return MakeCellView(m_table, m_nest->edges.column[row], level, 0);
+            return MakeCellViewParts(m_table, m_nest->edges.column[row], level, 0, m_parts);
         }
 
         void CellViews::Invalidate(uint32_t slot) {
@@ -352,7 +361,7 @@ namespace bicameral::sim {
             FX_ASSERT(options.maxSubcycleGap <= MULTIRES_MAX_SUBCYCLE_GAP);
             FX_ASSERT(!options.implicitConduction || options.maxSubcycleGap == 0);
             const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
-            CellViews views(nest, view, phases);
+            CellViews views(nest, view, phases, MakeConductionKind(options).ViewParts());
             std::vector<MrEnergyDelta> deltas(nest.cells.size(), MrMakeEnergyDelta());
             std::vector<uint8_t> active(nest.blocks.size(), 0);
             for (uint32_t substep = 0;; ++substep) {

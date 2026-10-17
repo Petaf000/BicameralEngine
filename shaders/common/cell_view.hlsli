@@ -15,6 +15,11 @@
 // セルの体積はどのレベルでも同じ数 CV_CELL_VOLUME_LEVEL_UNITS(= レベル 0 の 0.125 m³)になる。空き・満ち具合・圧力はレベルによらない。
 // レベルが効くのは面の係数(コンダクタンス × 4^k)と、体積を本当の pL で要る時(CvCellVolumePicoliters)だけ。
 //
+// 作る部分(T-0767): 種類が読む部分だけを作る(parts。CV_VIEW_*)。セル全体の熱と伝導の係数はいつも作る(相の表を読まない 1 回の和)。
+// 相ごとの和・体積の分け合い・気体の圧力・液体の質量は要る種類だけ(割り算 5 つと相の表の読みが要らない種類は払わない)。
+// 作らない欄は 0(読まない約束)。作った欄の値は parts によらず同じ(全部作った MakeCellView とビット一致。cell_view_test)。
+// GPU では parts を定数で渡し、インラインの後で作らない部分が消える(レジスタも増えない)。
+//
 // まだ入れないもの(後のチケット): 運動のエネルギー(気体の運動量は登録の欄。T-0711)・下の支え・孔の詰まり・吸い上げ(隣と物質の欄が要る。段 9)。
 // 浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_CELL_VIEW_HLSLI
@@ -36,6 +41,19 @@ struct CvSpeciesPhase {
     uint32_t molarMass;    // mg/mol
     uint32_t phase;        // CV_PHASE_*
 };
+
+// --- 作る部分(ビットの和。CV_VIEW_THERMAL = セル全体の熱と伝導の係数だけ)---------------------------------
+
+FX_CONST uint32_t CV_VIEW_THERMAL = 0;       // heat・heatCapacity・thermal・faceLimit(いつも作る)
+FX_CONST uint32_t CV_VIEW_PHASES = 1;        // 相ごとの和・液体と気体の空き・液体の入れる体積・満ち具合
+FX_CONST uint32_t CV_VIEW_GAS_PRESSURE = 2;  // 気体の圧力と基準との差(相ごとの和を含む)
+FX_CONST uint32_t CV_VIEW_LIQUID_MASS = 4;   // 液体の質量(mg)と空きで直した質量(相ごとの和を含む)
+FX_CONST uint32_t CV_VIEW_ALL = 7;
+
+// 圧力・液体の質量は相ごとの和から作るので、どちらかを読むなら相ごとの和も作る
+FX_FN uint32_t CvViewPartsClosure(uint32_t parts) {
+    return parts != CV_VIEW_THERMAL ? (parts | CV_VIEW_PHASES) : parts;
+}
 
 // --- 体積の定数 ----------------------------------------------------------------------------------
 
@@ -178,10 +196,12 @@ FX_FN CvViewSums CvMakeViewSums() {
     return sums;
 }
 
-// 1 成分を足す(足す順に依らない。整数の和)
+// 1 成分を足す(足す順に依らない。整数の和)。相ごとの和は parts が CV_VIEW_PHASES を含む時だけ(相の表を読まない)
 template <typename Table>
-FX_FN CvViewSums CvAddSpecies(Table table, CvViewSums sums, uint32_t species, uint64_t amount) {
+FX_FN CvViewSums CvAddSpeciesParts(Table table, CvViewSums sums, uint32_t species, uint64_t amount, uint32_t parts) {
     sums.thermal = MrAddThermalSpecies(table, sums.thermal, species, amount);
+    if ((CvViewPartsClosure(parts) & CV_VIEW_PHASES) == 0)
+        return sums;
 
     const CvSpeciesPhase phase = table.Phase(species);
     const uint32_t heatCapacity = table.Species(species).heatCapacity;
@@ -195,6 +215,11 @@ FX_FN CvViewSums CvAddSpecies(Table table, CvViewSums sums, uint32_t species, ui
     return sums;
 }
 
+template <typename Table>
+FX_FN CvViewSums CvAddSpecies(Table table, CvViewSums sums, uint32_t species, uint64_t amount) {
+    return CvAddSpeciesParts(table, sums, species, amount, CV_VIEW_ALL);
+}
+
 // 液体の満ち具合(Q16)= min(液体, 入れる体積) ÷ 入れる体積(入れる体積が 0 なら 0)
 FX_FN uint32_t CvLiquidFillQ16(uint64_t liquidVolume, uint64_t room) {
     if (room == 0)
@@ -205,12 +230,33 @@ FX_FN uint32_t CvLiquidFillQ16(uint64_t liquidVolume, uint64_t room) {
     return (uint32_t)FxDivU128By64(FxMulU64Full(filled, (uint64_t)CV_OPEN_FULL), room).quotient;
 }
 
-// 和から見立て。energy = セルのエネルギー(mJ。レベルの単位)・level = セルのレベル・referencePressure = このセルの基準の大気の圧力(µPa)
-FX_FN CvCellView CvViewFromSums(int64_t energy, CvViewSums sums, int32_t level, int64_t referencePressure) {
+// 和から見立て(parts の部分だけ。作らない欄は 0)。energy = セルのエネルギー(mJ。レベルの単位)・level = セルのレベル・
+// referencePressure = このセルの基準の大気の圧力(µPa)
+FX_FN CvCellView CvViewFromSumsParts(int64_t energy, FX_IN(CvViewSums) sums, int32_t level, int64_t referencePressure,
+                                     uint32_t parts) {
+    const uint32_t built = CvViewPartsClosure(parts);
+
     CvCellView view;
-    view.gas = sums.gas;
+    view.gas = sums.gas;  // 相ごとの和を作らない時は CvMakeViewSums の 0 のまま
     view.liquid = sums.liquid;
     view.solid = sums.solid;
+    view.liquidOpen = 0;
+    view.gasOpen = 0;
+    view.liquidRoom = 0;
+    view.liquidFill = 0;
+    view.padding = 0;
+    view.gasPressure = 0;
+    view.gasPressureDeviation = 0;
+    view.liquidMass = 0;
+    view.liquidEquivalentMass = 0;
+
+    // --- セル全体の熱と伝導の係数(MrCellThermal・RxComputeThermal と同じ式。いつも作る)---
+    view.heat = RxMulS64Checked(energy, (int64_t)RX_MICROJOULES_PER_MILLIJOULE) - sums.thermal.chemical;
+    view.heatCapacity = sums.thermal.heatCapacity;
+    view.thermal = MrThermalFromSums(energy, sums.thermal);
+    view.faceLimit = MrFaceLimit(view.thermal, level);
+    if ((built & CV_VIEW_PHASES) == 0)
+        return view;
 
     // --- 体積の分け合い(セルの体積はレベルの単位で同じ数)---
     const uint64_t cellVolume = CV_CELL_VOLUME_LEVEL_UNITS;
@@ -218,17 +264,15 @@ FX_FN CvCellView CvViewFromSums(int64_t energy, CvViewSums sums, int32_t level, 
     view.gasOpen = CvRemainingQ16(view.solid.volume + view.liquid.volume, cellVolume);
     view.liquidRoom = cellVolume - MrMin64(view.solid.volume, cellVolume);
     view.liquidFill = CvLiquidFillQ16(view.liquid.volume, view.liquidRoom);
-    view.padding = 0;
-
-    // --- セル全体の熱と伝導の係数(MrCellThermal・RxComputeThermal と同じ式)---
-    view.heat = RxMulS64Checked(energy, (int64_t)RX_MICROJOULES_PER_MILLIJOULE) - sums.thermal.chemical;
-    view.heatCapacity = sums.thermal.heatCapacity;
-    view.thermal = MrThermalFromSums(energy, sums.thermal);
-    view.faceLimit = MrFaceLimit(view.thermal, level);
 
     // --- 気体の圧力 ---
-    view.gasPressure = CvGasPressure(view.gas.amount, view.thermal.temperature, view.gasOpen);
-    view.gasPressureDeviation = view.gasPressure - referencePressure;
+    if ((built & CV_VIEW_GAS_PRESSURE) != 0) {
+        view.gasPressure = CvGasPressure(view.gas.amount, view.thermal.temperature, view.gasOpen);
+        view.gasPressureDeviation = view.gasPressure - referencePressure;
+    }
+
+    if ((built & CV_VIEW_LIQUID_MASS) == 0)
+        return view;
 
     // --- 液体(空きで割って、セル全部が同じ割合で満ちた時の質量に直す。sim/probe_liquid の ReadState)---
     view.liquidMass = view.liquid.mass / CV_NANOGRAMS_PER_MILLIGRAM;
@@ -241,14 +285,33 @@ FX_FN CvCellView CvViewFromSums(int64_t energy, CvViewSums sums, int32_t level, 
     return view;
 }
 
-// セルの見立て。Table は Species(id)(RxSpecies)と Phase(id)(CvSpeciesPhase)を持つ。Cell は RxCell・C++ の RxWideCell
-template <typename Table, typename Cell>
-FX_FN CvCellView MakeCellView(Table table, Cell cell, int32_t level, int64_t referencePressure) {
-    CvViewSums sums = CvMakeViewSums();
-    for (uint32_t i = 0; i < cell.speciesCount; ++i)
-        sums = CvAddSpecies(table, sums, cell.species[i], cell.amounts[i]);
+FX_FN CvCellView CvViewFromSums(int64_t energy, CvViewSums sums, int32_t level, int64_t referencePressure) {
+    return CvViewFromSumsParts(energy, sums, level, referencePressure, CV_VIEW_ALL);
+}
 
-    return CvViewFromSums(cell.energy, sums, level, referencePressure);
+// セルの見立ての parts の部分だけ(種類が読む部分。transport_apply.hlsli の世界が種類の ViewParts で呼ぶ)
+template <typename Table, typename Cell>
+FX_FN CvCellView MakeCellViewParts(Table table, FX_IN(Cell) cell, int32_t level, int64_t referencePressure,
+                                   uint32_t parts) {
+    CvViewSums sums = CvMakeViewSums();
+    if ((CvViewPartsClosure(parts) & CV_VIEW_PHASES) == 0) {
+        // 熱だけ: 熱の和の 1 回の回し(相の表を読まない。MrCellThermal と同じ手間)
+        for (uint32_t i = 0; i < cell.speciesCount; ++i)
+            sums.thermal = MrAddThermalSpecies(table, sums.thermal, cell.species[i], cell.amounts[i]);
+
+        return CvViewFromSumsParts(cell.energy, sums, level, referencePressure, parts);
+    }
+
+    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+        sums = CvAddSpeciesParts(table, sums, cell.species[i], cell.amounts[i], parts);
+
+    return CvViewFromSumsParts(cell.energy, sums, level, referencePressure, parts);
+}
+
+// セルの見立て(全部)。Table は Species(id)(RxSpecies)と Phase(id)(CvSpeciesPhase)を持つ。Cell は RxCell・C++ の RxWideCell
+template <typename Table, typename Cell>
+FX_FN CvCellView MakeCellView(Table table, FX_IN(Cell) cell, int32_t level, int64_t referencePressure) {
+    return MakeCellViewParts(table, cell, level, referencePressure, CV_VIEW_ALL);
 }
 
 MR_NAMESPACE_END

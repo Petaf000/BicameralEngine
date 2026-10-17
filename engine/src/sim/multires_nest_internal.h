@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -121,8 +122,9 @@ namespace bicameral::sim::nest_detail {
     // (見立ては変わったセルだけ作り直す。土台 §2.5)。枠ごとの置き場は初めて読んだ時に取る(読まない枠は場所を取らない)
     class CellViews {
     public:
+        // parts = 作る見立ての部分(読む種類の ViewParts。cell_view.hlsli の CV_VIEW_*。T-0767)
         CellViews(const MultiresNest& nest, const ReactionTableView& view,
-                  std::span<const multires::CvSpeciesPhase> phases);
+                  std::span<const multires::CvSpeciesPhase> phases, uint32_t parts = multires::CV_VIEW_ALL);
 
         [[nodiscard]] const multires::CvCellView& View(uint32_t slot, uint32_t index);
         // 伝導のセルの熱(陰解法が読む。見立ての thermal = MrCellThermal と同じ値。T-0713)
@@ -135,7 +137,9 @@ namespace bicameral::sim::nest_detail {
     private:
         const MultiresNest* m_nest;
         CellViewTable m_table;
-        std::vector<std::vector<multires::CvCellView>> m_values;  // 枠ごとに [セル × 512][一様の値]
+        uint32_t m_parts;
+        // 枠ごとに [セル × 512][一様の値]。初めて読んだ枠だけ場所を取る(0 で埋めない。作ったかは m_known)
+        std::vector<std::unique_ptr<multires::CvCellView[]>> m_values;
         std::vector<std::vector<uint8_t>> m_known;
     };
 
