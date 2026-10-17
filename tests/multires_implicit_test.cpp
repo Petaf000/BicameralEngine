@@ -102,8 +102,9 @@ namespace {
 
     // --- 刻んで見張る(保存・行き過ぎ・費用)---
 
-    // 行き過ぎの判定の余裕(mK): 安全網の余裕 1 mK + エネルギーと温度の切り捨ての 1 mK
-    constexpr int64_t OVERSHOOT_TOLERANCE = 2;
+    // 行き過ぎの判定の余裕(mK): 0。安全網は刻みの初めの温度(mK × 2^16)の範囲から 2^-16 mK も出さないので、mK に切り捨てた温度も
+    // 最初の範囲(最小〜最大の切り捨て)の中に留まる。前は安全網の余裕 1 mK と mK への丸めで、範囲が刻みごとに広がれた(T-0653)
+    constexpr int64_t OVERSHOOT_TOLERANCE = 0;
 
     struct Watch {
         fx::FxU128 initial{};
@@ -125,7 +126,7 @@ namespace {
         for (const ImplicitCell& cell : grid.cells) {
             const int64_t temperature = ImplicitTemperature(cell) >> TEMPERATURE_SHIFT;
             watch.lowest = std::min(watch.lowest, temperature - OVERSHOOT_TOLERANCE);
-            watch.highest = std::max(watch.highest, temperature + 1 + OVERSHOOT_TOLERANCE);
+            watch.highest = std::max(watch.highest, temperature + OVERSHOOT_TOLERANCE);
         }
 
         return watch;
@@ -381,10 +382,9 @@ namespace {
     }
 
     int Run() {
-        // 場面の空気は T-0597 より前の比熱(書いた値を定積として読む)のまま。定積の空気(拡散が約 1.4 倍)では「違うレベル」の場面で
-        // V 1 回・V 2 回・RKL2 が安全網を通っても 1 セル以上が最初の範囲を数 mK 越えた(2026-10-17)。安全網の作りの問題として T-0653 で調べる
+        // 場面の空気は既定の比熱(定圧の値を書き、定積で読む。T-0597)。拡散が約 1.4 倍になって「違うレベル」の場面で範囲の端のセルが
+        // 安全網の余裕と mK への丸めのぶん刻みごとに外へ動けたのを、安全網の範囲を丸めない形に直した(T-0653)
         ReactionTableDefinition definition = MakeCombustionTestTable();
-        definition.gasHeatCapacityAtConstantPressure = false;
         const auto table = BakeReactionTable(definition);
         if (!table) {
             Log(Channel::Sim, Level::Error, "multires_implicit_test: FAILED(表を作れない)");
