@@ -1,6 +1,6 @@
 # T-0716 液体の芯を共有 .hlsli へ(土台の段 2 ①)
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,10 +12,10 @@
 CPU(probe_liquid.cpp)と GPU(probe_liquid_tick.hlsl)が同じ関数を呼ぶ(heat_conduction.hlsli と同じ形)。値は今とビット単位で同じ。
 
 ## 完了条件(チェックできる形で)
-- [ ] release のビルド(警告 0)
-- [ ] probe_liquid・probe_phase・cell_volume が通る(CPU)
-- [ ] gpu_probe_liquid(HW・WARP)が通る = CPU と GPU が毎刻みビット一致
-- [ ] archmap --check
+- [x] release のビルド(警告 0)
+- [x] probe_liquid・probe_phase・cell_volume が通る(CPU)
+- [x] gpu_probe_liquid(HW・WARP)が通る = CPU と GPU が毎刻みビット一致
+- [x] archmap --check
 
 ## メモ・参考
 - 入力の分け方(T-0717 の MR の 1 段がそのまま呼べるように):
@@ -28,3 +28,11 @@ CPU(probe_liquid.cpp)と GPU(probe_liquid_tick.hlsl)が同じ関数を呼ぶ(hea
 - 区画をやめる・MR へ載せるのは T-0717 以降。セルの体積の分け合い(sim/cell_volume の ShareCellVolume・GPU の固体の体積の数え)は T-0713 の見立てに任せて触らない。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-17(wt6・作業役): shaders/common/liquid_flow.hlsli を作り、CPU と GPU の式を全部そこへ寄せた(LqMakeCellView・LqColumnPressure・
+  LqClosedFace / LqOpenFaceForce / LqMinusWallPush・LqFollowMassChange・LqLimitOutflow・LqMovedShare / LqMovedEnergy・LqAdvectShare・
+  LqSettleFace / LqReleasedShare・LqPotentialEnergy / LqKineticEnergy / LqMaxMomentum)。ProbeLiquidCellState は LqCellView の別名(56 バイトのまま)。
+  二重書きの減り(空行・コメントを除くコード行): probe_liquid.cpp 598 → 510(−88)・probe_liquid_tick.hlsl 681 → 571(−110)・probe_liquid_gpu.hlsli −4。
+  共有 .hlsli は 256 行(式は 1 か所)。移す前に旧 CPU の式と新しい関数を 200 万回の乱数入力で比べてビット一致を確かめた(コンテナの g++)。
+  HLSL は構造体の三項演算子が使えない(DXC: conditional operator only supports ... numeric)ので if で選ぶ。
+  試験(release): probe_liquid・probe_phase・probe_phase_porous_stone・cell_volume・gpu_probe_liquid(HW)・gpu_probe_liquid_warp が通る。警告 0。archmap OK。
+  次(T-0717): MR の 1 段の液体は、T-0713 の見立てから LqMakeCellView を作り、LqParams のセルの 1 辺・体積をレベルの値にして同じ関数を呼ぶ。
