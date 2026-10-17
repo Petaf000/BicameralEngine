@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "reaction_test_table.h"
@@ -646,21 +647,45 @@ namespace {
 
 }  // namespace
 
-int main() {
-    const BakedReactionTable table = MakeTable();
-    TestBlankWorldHasNoGas();
-    TestQuietAtmosphere(table, ProbeGasPressure::Explicit);
-    TestQuietAtmosphere(table, ProbeGasPressure::Projection);
-    TestDeterminism(table, ProbeGasPressure::Explicit);
-    TestDeterminism(table, ProbeGasPressure::Projection);
-    TestSmokeRises(table);
-    TestCheckerboard(table, ProbeGasPressure::Explicit);
-    TestCheckerboard(table, ProbeGasPressure::Projection);
+// 引数で組を選べる(無ければ全部。fire = 2 の燃える木箱・checker = 9 の市松・dew = 8 の露の場面。測り直す時に。T-0647)
+int main(int argc, char** argv) {
+    const auto wants = [&](std::string_view name) {
+        if (argc < 2)
+            return true;
 
-    const BakedReactionTable earth = MakeEarthAirTable();
-    TestHeatCapacityAtConstantVolume(earth);
-    TestManySpecies(earth);
-    TestMassChangedByReaction();
+        for (int i = 1; i < argc; ++i) {
+            if (name == argv[i])
+                return true;
+        }
+
+        return false;
+    };
+
+    const BakedReactionTable table = MakeTable();
+    if (argc < 2) {
+        TestBlankWorldHasNoGas();
+        TestQuietAtmosphere(table, ProbeGasPressure::Explicit);
+        TestQuietAtmosphere(table, ProbeGasPressure::Projection);
+        TestDeterminism(table, ProbeGasPressure::Explicit);
+        TestDeterminism(table, ProbeGasPressure::Projection);
+    }
+
+    if (wants("fire"))
+        TestSmokeRises(table);
+
+    if (wants("checker")) {
+        TestCheckerboard(table, ProbeGasPressure::Explicit);
+        TestCheckerboard(table, ProbeGasPressure::Projection);
+    }
+
+    if (argc < 2) {
+        const BakedReactionTable earth = MakeEarthAirTable();
+        TestHeatCapacityAtConstantVolume(earth);
+        TestManySpecies(earth);
+    }
+
+    if (wants("dew"))
+        TestMassChangedByReaction();
 
     std::printf("probe_gas_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
     return failureCount == 0 ? 0 : 1;

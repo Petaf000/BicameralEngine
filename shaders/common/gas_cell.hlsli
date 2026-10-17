@@ -7,6 +7,7 @@
 #define BICAMERAL_GAS_CELL_HLSLI
 
 #include "common/gas_gpu.hlsli"
+#include "common/units.hlsli"
 
 // --- 物理の定数(gas_reference.cpp と同じ)---
 static const uint64_t PRESSURE_PER_AMOUNT_TEMPERATURE_Q32 = 285682760;
@@ -166,6 +167,22 @@ int64_t MovedEnergy(GasGpuCell source, GasGpuTotals sourceTotals, GasGpuDerived 
     energy += (int64_t)MulShiftU64((uint64_t)sourceKinetic, fraction, 32);
 
     return energy;
+}
+
+// 出ていく割合の合計の、引く側の熱を負にしない換算(gas_reference.cpp の EffectiveOutflow。T-0646・T-0647・ADR-0286):
+// 割合の合計 × (C + n R) ÷ C(C = 熱容量。押し出す仕事 n R T のぶん)。等温はそのまま。totals = 風上の成分の和(1 レベルの箱の段と木の段)
+uint64_t EffectiveOutflow(GasGpuTotals totals, uint64_t outflow) {
+    if (outflow == 0 || GAS_P.thermodynamics != GAS_GPU_THERMODYNAMICS_ADIABATIC)
+        return outflow;
+
+    const uint64_t capacity = totals.capacity;
+    if (capacity == 0)
+        return outflow;
+
+    const FxDivResult push = FxDivU128By64(FxMulU64Full(totals.amount, GAS_CONSTANT_NANOJOULES_PER_MOLE_KELVIN), MICRO);
+    const uint64_t pushCapacity = push.quotient + (push.remainder != 0 ? 1 : 0);  // n R(nJ/K。切り上げ)
+
+    return FxDivU128By64(FxMulU64Full(outflow, capacity + pushCapacity), capacity).quotient;
 }
 
 #endif  // BICAMERAL_GAS_CELL_HLSLI
