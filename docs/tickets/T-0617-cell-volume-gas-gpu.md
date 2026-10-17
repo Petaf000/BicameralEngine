@@ -33,6 +33,16 @@ CPU の気体の段(probe_gas → gas_reference の GasBox::openQ16)は固体・
   塞がったセル 140・一部だけ開いたセル 12(石の孔 4 + 木箱 8)。gpu_probe_gas_warp(3 刻み)も通る。
 - 既存の GPU の気体: gpu_gas・gpu_gas_flow・gpu_gas_blast・gpu_gas_species・gpu_gas_tree・gpu_gas_projection が通る(空きを読まない箱は今まで通り)。
 - 費用: 気体の段 空きを読まない 1475〜1493 µs/刻み・空きを読む 1424 µs/刻み(差は測れる大きさでない。docs/perf.md)。
+- main(T-0616・T-0597・T-0646)の上に載せ直した後: gpu_probe_gas の表から「固体の密度を外す」を消した(T-0616 が仮に入れていたもの)。
+  燃える木箱の場面もセルロースの密度で一部だけ開いたセル 8 を持ち、静かな大気・燃える木箱・6 種・湯気の塊の 5 場面は HW で毎刻み一致。
+  gpu_gas_flow・blast・species・tree(HW と WARP)も通る。
+  「燃える木箱と石の床」も HW 60 刻み一致(塞がったセル 140・一部だけ開いたセル 12)・WARP 3 刻みも通る。
+- **気になること(未確認)**: ctest の gpu_probe_gas が 1 回だけ 80 秒で 0xc0000409(落ちた)。出力は石の床の場面の途中で切れていたが、
+  標準出力がパイプで溜まっていた分が失われたと見られ、全体の所要(77 秒で通る)から見て終わり際(計測・後片付け)で落ちた見込み。
+  同じ版で `job.py run -Exe gpu_probe_gas_test` と ctest の再実行は通った(3 回中 1 回)。続けて起きたら debug(`--no-gbv`)で場所を見る。
+- **main の CPU の試験が落ちている(このチケットの変更ではない。CPU の式は触っていない)**: probe_gas の
+  `flow.smokeTop > still.smokeTop`(tests/probe_gas_test.cpp 406 行。燃える木箱 2 秒で CO2 の 5% 以上がある最も高い層 2 → 2・
+  CO2 の重心は 2000 → 10807)。T-0616(セルロースに密度)か T-0597(気体の比熱を c_p)の後から。
 
 ## 並走との重なり
 - wt6(気体の区画のエネルギー。gas_reference・probe_gas): gas_reference.cpp の式(ComputeFaceForce・ComputeFaceFlow・ApplyImpulse・DeriveOpenCell)を
