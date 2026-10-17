@@ -19,7 +19,7 @@
 - [x] `multires_gas_test`(release): 静かな大気(閉じた端・開いた端。20 刻み)・燃える木箱(段の外で O2 → CO2 + 熱・N2 を除く = 気体の質量が増える/減る。60 刻み)・
       熱い泡(開いた端・閉じた端。60 刻み)で、全部のセル・運動量の欄・前の質量・運動エネルギーの和・帳簿(エネルギー・運動量)・刻みの報告が毎刻みビット一致。保存点に戻して進めると同じハッシュ
 - [x] probe_gas・gas_reference・gas_projection・gas_tree・cell_volume・probe_phase・multires_liquid(release)が今まで通り
-- [ ] gpu_probe_gas(probe_gas.cpp を触ったので。CPU の値は変わらないはず)→ 結果は作業ログ
+- [x] gpu_probe_gas(probe_gas.cpp を触ったので。GPU と CPU の仮の世界が毎刻みビット一致のまま。rebase の前に確かめた)
 - [x] release のビルド 警告 0・archmap --check
 
 ## メモ・参考
@@ -60,4 +60,7 @@
 - 2026-10-17(wt4・作業役): t-0717(液体)をこのブランチにマージしてから始めた(木の公開の口 ExpandNestPage・StoreNestCell・PokeNestBlock と同じ形にそろえるため)。
   gas_reference に面の一覧の口(StepGasLinks)、gas_cells(仮の世界から写しを移した)、multires_gas と試験を足した。最初の版から全部の場面で毎刻みビット一致。
   release のビルド 警告 0・multires_gas・multires_liquid・probe_gas・probe_phase・cell_volume・gas_reference・gas_projection・gas_tree が通る・archmap OK。
-  gpu_probe_gas(probe_gas.cpp を触ったので)は GPU の順番待ちに積んだ(結果は返答に)。
+  gpu_probe_gas(probe_gas.cpp を触ったので)も通った。
+- 2026-10-17(続き): main(T-0714・T-0717・T-0721・T-0723)へ rebase。T-0723 が仮の世界の気体に足した静止の丸め(restSpeedUnits)を、
+  移した写し(gas_cells の StoreGasCells)へ入れ、多重解像度の気体にも同じ設定を足した(帳簿は gas.ledger_momentum に含む。列を分けるのは T-0763)。
+  試験に「熱い泡 + 静止の丸め」を足した。rebase 後に release のビルド 警告 0・multires_gas・rest_return・multires_liquid・gas_reference・probe_gas を回した(結果は返答)。
