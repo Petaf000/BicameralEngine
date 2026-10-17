@@ -564,6 +564,9 @@ target_link_libraries(gpu_probe_rewind_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_rewind gpu_probe_rewind_test gpu)
 # 物理のパイプラインの作成が、ほかの作業ツリーと GPU を分けている間は debug で 4 分を超えることがある
 set_tests_properties(gpu_probe_rewind PROPERTIES TIMEOUT 900)
+# 区画のある世界(T-0620): 気体と液体の区画の持ち越す欄も保存点が写し、状態のハッシュに入る
+bicameral_add_gpu_test_case(gpu_probe_rewind_regions gpu_probe_rewind_test gpu --regions)
+set_tests_properties(gpu_probe_rewind_regions PROPERTIES TIMEOUT 900)
 
 # 世界の写しの早送り(T-0412・ADR-0198): 写しを取っても本物のハッシュ列が変わらない・同じコマンドなら写し = 本物 = CPU リファレンス・
 # 使い直した写しが条件(木の量)で CPU と同じ刻みに止まる

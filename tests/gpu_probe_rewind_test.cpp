@@ -17,8 +17,14 @@
 //       (刻み 0 のつつきも戻すとキューから捨てられ、足し直した分だけが効く。起動直後の筆の運びを元に戻す道の土台)
 //   - フレームの単位の数はばらばら(刻みの途中で切れる)。保存点の刻みでだけ、境界で切ってから写す
 //   - シェーダーの assert と debug layer のエラーが 0 件
+//   - --regions(T-0620): 同じことを、気体の区画(木箱を囲む 16 × 14 × 16。基準の大気で満たす)と液体の区画(ダムの水が押し寄せる
+//       12 × 8 × 3)のある世界で。区画の持ち越す欄(気体の運動量・液体の面の運動量・位置と運動のエネルギー・帳簿)も保存点が写し、
+//       状態のハッシュに入る(入っていなければ、戻した後に区画の欄だけ違っても気づけない)。差し替える表は反応の速さだけが違う
+//       (区画のある世界で通る差し替え。区画の欄の作りが変わる表は断る = CheckRegionTableSwap も確かめる)。
+//       写しの早送り(sim/world_copy。T-0412): 刻み COPY_TICK の写しに同じコマンドを当てて TICKS まで → 基準と全部一致
+//       (区画の欄も写る)
 // 保存点 1 つの大きさと、写す・戻すフレームの GPU の時間をログに出す(docs/perf.md)。
-// 引数: gpu_test_options.h(--warp)
+// 引数: gpu_test_options.h(--warp)・--regions
 #include <algorithm>
 #include <array>
 #include <map>
@@ -36,7 +42,9 @@
 #include "gpu/queue.h"
 #include "gpu_test_options.h"
 #include "reaction_test_table.h"
+#include "sim/probe_gas.h"
 #include "sim/probe_sim.h"
+#include "sim/world_copy.h"
 #include "sim/world_physics.h"
 #include "standard_world_physics.h"
 
@@ -239,12 +247,24 @@ namespace {
         std::unique_ptr<ProbeSim> simulation;
     };
 
-    std::optional<Created> Create(ID3D12Device5* device, const BakedReactionTable& table, const PhysicsScene& scene,
-                                  uint32_t savePoints) {
+    // 試す世界(区画なし = 仮の世界 + 積み木。--regions なら気体と液体の区画を足す)
+    struct Scenario {
+        BakedReactionTable table;
+        BakedReactionTable swapped;           // 刻み SWAP_TICK に差し替える表(木の燃焼の速さ 100 倍)
+        std::vector<reaction::RxCell> world;  // 空なら表の世界の組み立て
+        PhysicsScene scene;
+        ProbeGasOptions gas;
+        ProbeLiquidOptions liquid;
+    };
+
+    std::optional<Created> Create(ID3D12Device5* device, const Scenario& scenario, uint32_t savePoints) {
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"RewindTestSim");
-        auto simulation = ProbeSim::Create(
-            device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-            {.physicsScene = &scene, .physicsParameters = PhysicsParametersFor(StandardWorldPhysics())});
+        auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, scenario.table,
+                                           {.physicsScene = &scenario.scene,
+                                            .physicsParameters = PhysicsParametersFor(StandardWorldPhysics()),
+                                            .initialWorld = scenario.world,
+                                            .gas = scenario.gas,
+                                            .liquid = scenario.liquid});
         if (!queue || !simulation) {
             Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
                 simulation ? "" : simulation.error());
@@ -258,33 +278,134 @@ namespace {
                        .simulation = std::make_unique<ProbeSim>(std::move(*simulation))};
     }
 
-    // 木の燃焼の速さを 100 倍にした表(物質の一覧は同じ。gpu_probe_sim_test の差し替えと同じ作り方)
-    std::optional<BakedReactionTable> MakeSwappedTable() {
-        ReactionTableDefinition definition = MakeCombustionTestTable();
+    // 木の燃焼の速さを 100 倍にした定義(物質の一覧は同じ。gpu_probe_sim_test の差し替えと同じ作り方)
+    ReactionTableDefinition SpeedUpCombustion(ReactionTableDefinition definition) {
         for (RuleDefinition& rule : definition.rules) {
             if (rule.name == "cellulose_combustion")
                 rule.rate.preExponentialMantissa *= 100;
         }
 
-        auto baked = BakeReactionTable(definition);
-        if (!baked)
+        return definition;
+    }
+
+    // --- 区画のある世界(--regions。T-0620)---
+    constexpr std::array<uint32_t, 3> GAS_MIN = {24, 26, 24};  // 木箱(つつく 28・36, 32, 32)を囲む
+    constexpr std::array<uint32_t, 3> GAS_SIZE = {16, 14, 16};
+    constexpr std::array<uint32_t, 3> LIQUID_MIN = {44, 0, 44};  // 積み木(x 20 前後)から離す
+    constexpr std::array<uint32_t, 3> LIQUID_SIZE = {12, 8, 3};
+    constexpr uint32_t DAM_WATER_END = 5;  // 水は区画の x 0〜4・y 1〜4(y 0 は石の床)
+    constexpr uint32_t DAM_WATER_TOP = 4;
+    constexpr uint64_t FULL_WATER = 6900000000;  // µmol(gpu_probe_liquid_test と同じ)
+    constexpr uint64_t NITROGEN = 4000000;
+    constexpr uint64_t OXYGEN = 1000000;
+    constexpr uint64_t STONE = 21000000000;
+    constexpr int32_t TEMPERATURE = 300000;
+
+    // 燃焼の表 + 地球の環境の値 + 基準の大気(N2 79%・O2 21%)+ 水と石(gpu_probe_gas_test・gpu_probe_liquid_test と同じ)
+    ReactionTableDefinition MakeRegionDefinition() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        definition.environment = StandardWorldPhysics();
+        definition.atmosphere = {
+            .points = {{.heightMillimeters = 0,
+                        .temperatureMilliKelvin = (uint32_t)TEMPERATURE,
+                        .fractions = {{.species = "nitrogen", .partsPerMillion = 790000},
+                                      {.species = "oxygen", .partsPerMillion = 210000}}}},
+            .surfacePressurePascals = 101325,
+        };
+        definition.species.push_back({.name = "liquid_water",
+                                      .composition = {{.element = "H", .count = 2}, {.element = "O", .count = 1}},
+                                      .formationEnthalpy = -285830,
+                                      .heatCapacity = 75300,
+                                      .thermalConductivity = 600,
+                                      .liquid = true,
+                                      .density = 1000});
+        definition.species.push_back({.name = "stone",
+                                      .composition = {{.element = "C", .count = 1}},
+                                      .formationEnthalpy = 0,
+                                      .heatCapacity = 8500,
+                                      .thermalConductivity = 2000,
+                                      .condensed = true,
+                                      .density = 2000});
+
+        return definition;
+    }
+
+    bool HasCondensed(const BakedReactionTable& table, const reaction::RxCell& cell) {
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            if (table.speciesCondensed[cell.species[i]] != 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    // 気体の区画の凝縮相の無いセルを基準の大気に(木箱はそのまま)、液体の区画をダムの場面に
+    std::vector<reaction::RxCell> MakeRegionWorld(const BakedReactionTable& table, const ProbeGasField& gas,
+                                                  const ProbeLiquidOptions& liquid) {
+        std::vector<reaction::RxCell> cells = MakeProbeInitialWorld(table);
+        for (uint32_t region = 0; region < gas.RegionCellCount(); ++region) {
+            const uint32_t index = gas.GridIndex(region);
+            if (!HasCondensed(table, cells[index]))
+                cells[index] = gas.ReferenceCell(table, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE);
+        }
+
+        for (uint32_t y = 0; y < liquid.sizeCells[1]; ++y) {
+            for (uint32_t z = 0; z < liquid.sizeCells[2]; ++z) {
+                for (uint32_t x = 0; x < liquid.sizeCells[0]; ++x) {
+                    std::vector<SpeciesAmount> amounts = {{.species = table.SpeciesId("nitrogen"), .amount = NITROGEN},
+                                                          {.species = table.SpeciesId("oxygen"), .amount = OXYGEN}};
+                    if (y == 0)
+                        amounts = {{.species = table.SpeciesId("stone"), .amount = STONE}};
+                    else if (x < DAM_WATER_END && y <= DAM_WATER_TOP)
+                        amounts.push_back({.species = table.SpeciesId("liquid_water"), .amount = FULL_WATER});
+
+                    std::ranges::sort(amounts, {}, &SpeciesAmount::species);
+                    const uint32_t index = ProbeCellIndex(liquid.minCell[0] + x, liquid.minCell[1] + y,
+                                                          liquid.minCell[2] + z);
+                    cells[index] = MakeReactionCell(table, amounts, TEMPERATURE);
+                }
+            }
+        }
+
+        return cells;
+    }
+
+    std::optional<Scenario> MakeScenario(bool regions) {
+        const ReactionTableDefinition definition = regions ? MakeRegionDefinition() : MakeCombustionTestTable();
+        auto table = BakeReactionTable(definition);
+        auto swapped = BakeReactionTable(SpeedUpCombustion(definition));
+        if (!table || !swapped)
             return std::nullopt;
 
-        return std::move(*baked);
+        Scenario scenario{.table = std::move(*table), .swapped = std::move(*swapped)};
+        scenario.scene = MakeLayoutPhysicsScene(scenario.table.worldLayout);
+        if (!regions)
+            return scenario;
+
+        scenario.gas = {.minCell = GAS_MIN, .sizeCells = GAS_SIZE, .randomSeed = 12345};
+        scenario.liquid = {.minCell = LIQUID_MIN, .sizeCells = LIQUID_SIZE, .advection = true};
+        const auto gas = ProbeGasField::Create(scenario.table, scenario.gas);
+        if (!gas) {
+            Log(Channel::Sim, Level::Error, "気体の区画を作れない: {}", gas.error());
+            return std::nullopt;
+        }
+
+        scenario.world = MakeRegionWorld(scenario.table, *gas, scenario.liquid);
+
+        return scenario;
     }
 
     // 反応表の差し替えと巻き戻し(T-0299)。unswapped は差し替えなしの基準
-    void RunTableSwapTest(ID3D12Device5* device, const BakedReactionTable& table, const PhysicsScene& scene,
+    void RunTableSwapTest(ID3D12Device5* device, const Scenario& scenario,
                           const std::map<uint64_t, uint64_t>& unswapped, Failures& failures) {
-        const std::optional<BakedReactionTable> swapped = MakeSwappedTable();
-        std::optional<Created> base = Create(device, table, scene, 0);
-        std::optional<Created> rewind = Create(device, table, scene, static_cast<uint32_t>(SAVE_TICKS.size()));
-        failures.Check(swapped && base && rewind, "差し替え: 作れた");
-        if (!swapped || !base || !rewind)
+        std::optional<Created> base = Create(device, scenario, 0);
+        std::optional<Created> rewind = Create(device, scenario, static_cast<uint32_t>(SAVE_TICKS.size()));
+        failures.Check(base && rewind, "差し替え: 作れた");
+        if (!base || !rewind)
             return;
 
         const std::vector<ProbeCommand> commands = MakeCommands();
-        const ProbeTableSwap swap{.tick = SWAP_TICK, .table = &*swapped};
+        const ProbeTableSwap swap{.tick = SWAP_TICK, .table = &scenario.swapped};
 
         // --- 基準(差し替えあり)---
         Driver baseDriver(*base->queue, *base->simulation);
@@ -331,9 +452,9 @@ namespace {
     }
 
     // 刻み 0 の保存点(T-0411・D-474)。baseline は差し替えなしの基準
-    void RunTickZeroTest(ID3D12Device5* device, const BakedReactionTable& table, const PhysicsScene& scene,
-                         const std::map<uint64_t, uint64_t>& baseline, Failures& failures) {
-        std::optional<Created> rewind = Create(device, table, scene, 1);
+    void RunTickZeroTest(ID3D12Device5* device, const Scenario& scenario, const std::map<uint64_t, uint64_t>& baseline,
+                         Failures& failures) {
+        std::optional<Created> rewind = Create(device, scenario, 1);
         failures.Check(rewind.has_value(), "刻み 0: 作れた");
         if (!rewind)
             return;
@@ -363,18 +484,81 @@ namespace {
         failures.Check(driver.DebugAssertCount() == 0, "刻み 0: シェーダーの assert が 0 件");
     }
 
-    int RunTest(ID3D12Device5* device, const BakedReactionTable& table) {
-        const PhysicsScene scene = MakeLayoutPhysicsScene(table.worldLayout);
+    // 写しの早送り(T-0412・T-0620): 本物を COPY_TICK まで流し、その境界の写しに同じコマンドを当てて TICKS まで早送りする
+    void RunCopyTest(ID3D12Device5* device, const Scenario& scenario, const std::map<uint64_t, uint64_t>& baseline,
+                     Failures& failures) {
+        constexpr uint64_t COPY_TICK = 60;
+        std::optional<Created> real = Create(device, scenario, 0);
+        auto copy = real ? WorldCopy::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, real->simulation->Table(),
+                                             {.physicsScene = &scenario.scene,
+                                              .physicsParameters = PhysicsParametersFor(StandardWorldPhysics()),
+                                              .gas = scenario.gas,
+                                              .liquid = scenario.liquid})
+                         : std::unexpected(std::string("本物を作れない"));
+        failures.Check(real && copy, "写し: 作れた");
+        if (!real || !copy)
+            return;
+
+        gpu::Queue& queue = *real->queue;
+        const auto run = [&](const std::vector<ID3D12CommandList*>& lists) {
+            const bool ran = lists.empty() || queue.WaitCpu(queue.Submit(lists));
+            copy->Complete();
+
+            return ran;
+        };
+
+        Driver driver(queue, *real->simulation);
+        failures.Check(run(copy->RecordInitialization()), "写し: 写しの世界を初期化した");
+        failures.Check(driver.Advance(COPY_TICK, MakeCommands(), NO_SAVE_POINT, false), "写し: 本物を流した");
+        failures.Check(run(copy->RecordStart(*real->simulation, COPY_TICK,
+                                             {.maxTicks = TICKS - COPY_TICK, .commands = CommandsFrom(COPY_TICK)})),
+                       "写し: 写しを取った");
+        for (uint32_t frame = 0; frame < 100 && !copy->Finished(); ++frame)
+            failures.Check(run(copy->RecordNext(TICKS)), "写し: 早送りした");
+
+        std::map<uint64_t, uint64_t> hashes;
+        for (const ProbeTickHash& hash : copy->Result().hashes)
+            hashes[hash.tick] = hash.WorldHash();
+
+        failures.Check(copy->Finished() && !copy->Result().failed &&
+                           MatchesBaseline(hashes, baseline, COPY_TICK, TICKS, "写し: 早送り"),
+                       "写し: 写しに同じコマンドを当てた早送りが、本物を最初から流した世界と同じ");
+        failures.Check(driver.DebugAssertCount() == 0 && copy->Result().debugAssertCount == 0,
+                       "写し: シェーダーの assert が 0 件");
+    }
+
+    // 区画のある世界の表の差し替えの約束(T-0620・ADR-0300): 速さだけ違う表は通り、区画が読む物質の値が違う表は断る
+    void CheckRegionTableSwaps(const Scenario& scenario, const ProbeSim& simulation, Failures& failures) {
+        failures.Check(simulation.CheckRegionTableSwap(scenario.swapped).has_value(),
+                       "区画: 反応の速さだけが違う表へは差し替えられる");
+
+        ReactionTableDefinition denser = MakeRegionDefinition();
+        for (SpeciesDefinition& species : denser.species) {
+            if (species.name == "liquid_water")
+                species.density = 1100;
+        }
+
+        auto table = BakeReactionTable(denser);
+        const auto refused = table ? simulation.CheckRegionTableSwap(*table) : std::expected<void, std::string>();
+        failures.Check(table && !refused.has_value(), "区画: 液体の値(密度)が違う表は断る");
+        if (table && !refused)
+            Log(Channel::Sim, Level::Info, "断った理由: {}", refused.error());
+    }
+
+    int RunTest(ID3D12Device5* device, const Scenario& scenario) {
         const std::vector<ProbeCommand> commands = MakeCommands();
-        std::optional<Created> base = Create(device, table, scene, 0);
-        std::optional<Created> rewind = Create(device, table, scene, static_cast<uint32_t>(SAVE_TICKS.size()));
+        std::optional<Created> base = Create(device, scenario, 0);
+        std::optional<Created> rewind = Create(device, scenario, static_cast<uint32_t>(SAVE_TICKS.size()));
         Failures failures;
         failures.Check(base && rewind, "作れた");
         if (!base || !rewind)
             return failures.count;
 
-        Log(Channel::Sim, Level::Info, "保存点 1 つ: {:.1f} MiB(物 {})",
-            static_cast<double>(rewind->simulation->SavePointBytes()) / (1024.0 * 1024.0), scene.bodies.size());
+        Log(Channel::Sim, Level::Info, "保存点 1 つ: {:.1f} MiB(物 {}・気体の区画 {}・液体の区画 {})",
+            static_cast<double>(rewind->simulation->SavePointBytes()) / (1024.0 * 1024.0), scenario.scene.bodies.size(),
+            rewind->simulation->HasGas(), rewind->simulation->HasLiquid());
+        if (rewind->simulation->HasGas())
+            CheckRegionTableSwaps(scenario, *rewind->simulation, failures);
 
         // --- 基準 ---
         Driver baseDriver(*base->queue, *base->simulation);
@@ -415,8 +599,9 @@ namespace {
 
         failures.Check(baseDriver.DebugAssertCount() == 0 && driver.DebugAssertCount() == 0,
                        "シェーダーの assert が 0 件");
-        RunTableSwapTest(device, table, scene, baseline, failures);
-        RunTickZeroTest(device, table, scene, baseline, failures);
+        RunTableSwapTest(device, scenario, baseline, failures);
+        RunTickZeroTest(device, scenario, baseline, failures);
+        RunCopyTest(device, scenario, baseline, failures);
         Log(Channel::Sim, Level::Info, "写す・戻すフレームの単位以外の GPU 時間: 平均 {:.0f} µs({} フレーム。暖機なし)",
             driver.SaveRestoreMicroseconds() / std::max(1u, driver.SaveRestoreFrames()), driver.SaveRestoreFrames());
 
@@ -427,10 +612,13 @@ namespace {
 
 int main(int argc, char** argv) {
     std::vector<char*> arguments(argv, argv + argc);
+    const bool regions = std::erase_if(arguments, [](const char* argument) {
+                             return std::string_view(argument) == "--regions";
+                         }) != 0;
     const std::optional<test::GpuTestOptions> options = test::ParseGpuTestOptions(std::span(arguments));
-    const auto table = BakeReactionTable(MakeCombustionTestTable());
-    if (!options || !table) {
-        Log(Channel::Sim, Level::Error, "使い方: gpu_probe_rewind_test [--warp] [--no-gbv]");
+    const std::optional<Scenario> scenario = MakeScenario(regions);
+    if (!options || !scenario) {
+        Log(Channel::Sim, Level::Error, "使い方: gpu_probe_rewind_test [--warp] [--no-gbv] [--regions]");
         bicameral::SingletonFinalizer::Finalize();
 
         return 2;
@@ -447,9 +635,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Log(Channel::Sim, Level::Info, "仮の世界 + 積み木を {} 刻み。保存点 {} {} {}", TICKS, SAVE_TICKS[0], SAVE_TICKS[1],
-        SAVE_TICKS[2]);
-    const int failures = RunTest(device->Get(), *table);
+    Log(Channel::Sim, Level::Info, "仮の世界 + 積み木{}を {} 刻み。保存点 {} {} {}",
+        regions ? " + 気体と液体の区画" : "", TICKS, SAVE_TICKS[0], SAVE_TICKS[1], SAVE_TICKS[2]);
+    const int failures = RunTest(device->Get(), *scenario);
     const bool passed = failures == 0 && test::PassesValidation(*device, "gpu_probe_rewind_test");
     bicameral::SingletonFinalizer::Finalize();
 

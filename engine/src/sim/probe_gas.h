@@ -128,6 +128,10 @@ namespace bicameral::sim {
         // 気体の欄(運動量・運動エネルギーのぶん・帳簿)のハッシュ(決定性の検査。セルは ProbeStateHash)
         [[nodiscard]] uint64_t Hash() const;
 
+        // 世界の状態のハッシュに足す寄与(区画のセルごとの寄与の和 + 帳簿の寄与。GPU の GasHash と同じ値。
+        // common/probe_region_hash.hlsli・T-0620)
+        [[nodiscard]] uint64_t HashTerm() const;
+
     private:
         ProbeGasOptions m_options;
         uint32_t m_soundSpeedMmPerS = 0;
