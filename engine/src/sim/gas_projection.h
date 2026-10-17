@@ -6,6 +6,7 @@
 // G が許容差以下になった(または上限に届いた)仮の状態をそのまま採る。当てるのは 1 回分なので保存はビット単位のまま。
 // 気体の箱(GasBox)と帳簿は gas_reference のまま。前の回の x を初めの近似に使う(GasProjection に持つ)。
 // データの流れ: GasBox(セル)→ 圧力の式 → ImplicitGrid(C_i を熱容量・K を面の係数として)→ x → GasBox(セル・帳簿)
+// セルの空き(GasBox::openQ16)は式が陽解法と同じ数え方で読む(T-0667・ADR-0312。gas_pressure_system.h)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #pragma once
 

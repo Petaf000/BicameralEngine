@@ -809,6 +809,47 @@ namespace {
         EXPECT(conserved);
     }
 
+    // 調べ(T-0667。T-0689 の再現。表示だけで合否に使わない): gpu_gas_projection の細孔の板(16³・z = 4 の層を全部 1/256・下が 2% 高い)の最速で、刻みごとの食い違いと |x| の最大
+    void ProbePlate16() {
+        GasBox box = MakeAirBox(MakeAirConfig(16, 16, 16));
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[2] >= 4)
+                continue;
+
+            GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
+            for (uint64_t& amount : amounts)
+                amount = amount * 102 / 100;
+
+            box.cells[index] = MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
+        }
+
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[2] == 4)
+                Occupy(box, index, GAS_OPEN_FULL / 256);
+        }
+
+        GasProjection state;
+        const GasProjectionOptions options;
+        for (int tick = 0; tick < 3; ++tick) {
+            const GasProjectionCost cost = StepGasProjection(box, state, options);
+            int64_t largest = 0;
+            uint32_t where = 0;
+            for (uint32_t index = 0; index < state.pressures.size(); ++index) {
+                if (std::abs(state.pressures[index]) > largest) {
+                    largest = std::abs(state.pressures[index]);
+                    where = index;
+                }
+            }
+
+            const auto [x, y, z] = Coordinate(box, where);
+            std::printf(
+                "plate16 fastest tick %d: outer %u, mismatch first %lld / kept %lld mg, max |x| %lld uPa at (%u, %u, "
+                "%u)\n",
+                tick, cost.outerIterations, (long long)cost.firstMismatch, (long long)cost.worstMismatch,
+                (long long)largest, x, y, z);
+        }
+    }
+
     void TestPorous() {
         for (const bool galerkin : {false, true}) {
             for (const bool plate : {true, false}) {
@@ -837,6 +878,7 @@ int main(int argc, char** argv) {
         TestBlastSettles(0);
         TestWall();
         TestPorous();
+        ProbePlate16();
     }
 
     // --- 外側の反復(T-0530。既定の止め方)---
