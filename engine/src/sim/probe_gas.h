@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "common/reaction.hlsli"
+#include "sim/gas_cells.h"
 #include "sim/gas_projection.h"
 #include "sim/gas_reference.h"
 #include "sim/reaction_table.h"
@@ -121,18 +122,18 @@ namespace bicameral::sim {
         [[nodiscard]] const ProbeGasLedger& Ledger() const { return m_ledger; }
 
         // 区画のセル(区画の中の x + 幅 × (z + 奥行き × y)。気体の箱と同じ並び)の運動量と運動エネルギーのぶん
-        [[nodiscard]] std::span<const std::array<int64_t, GAS_AXES>> Momentum() const { return m_momentum; }
+        [[nodiscard]] std::span<const std::array<int64_t, GAS_AXES>> Momentum() const { return m_fields.momentum; }
         [[nodiscard]] int64_t KineticEnergySum() const;
         [[nodiscard]] std::span<const uint64_t> Mass() const {
-            return m_mass;
+            return m_fields.mass;
         }  // 前の段の終わりの気体の質量(mg。T-0646)
 
         // 区画のセルの番号(格子の全部のセルの中の番号)。region は区画の中の番号
         [[nodiscard]] uint32_t GridIndex(uint32_t region) const;
-        [[nodiscard]] uint32_t RegionCellCount() const { return (uint32_t)m_momentum.size(); }
+        [[nodiscard]] uint32_t RegionCellCount() const { return (uint32_t)m_fields.momentum.size(); }
 
         // 基準の大気の物質(ID の順)と、それだけを欄にした静かな箱(GPU の段の設定の型・層の基準・開いた境界の外を作る。T-0592)
-        [[nodiscard]] std::span<const uint32_t> AtmosphereSpecies() const { return m_atmosphereSpecies; }
+        [[nodiscard]] std::span<const uint32_t> AtmosphereSpecies() const { return m_layers.Species(); }
         [[nodiscard]] GasBox MakeAtmosphereBox(const BakedReactionTable& table) const;
 
         // 気体の欄(運動量・運動エネルギーのぶん・帳簿)のハッシュ(決定性の検査。セルは ProbeStateHash)
@@ -144,23 +145,13 @@ namespace bicameral::sim {
 
     private:
         ProbeGasOptions m_options;
-        uint32_t m_soundSpeedMmPerS = 0;
-        uint32_t m_gravityMicrometersPerSecond2 = 0;
-        std::vector<std::vector<std::array<uint32_t, 2>>> m_layerAtmosphere;  // 層ごとの (物質 ID, ppm)
-        std::vector<uint32_t> m_layerTemperatures;                            // 層ごとの基準の温度(mK)
-        uint64_t m_surfacePressureMicroPascal = 0;                            // 区画の一番下の層の圧力
-        std::vector<uint32_t> m_atmosphereSpecies;                            // 基準の大気の物質(ID の順)
-
-        std::vector<std::array<int64_t, GAS_AXES>> m_momentum;  // 区画のセル(気体の箱の並び。軸は気体の箱の x・y・z)
-        std::vector<int64_t> m_kinetic;                         // 運動エネルギーのぶん(mJ。セルのエネルギーの外)
-        std::vector<uint64_t> m_mass;  // 前の気体の段の終わりの気体の質量(mg。段の外で変わった分を見る。T-0646)
-        GasProjection m_projection;    // 前の刻みの圧力(投影の初めの近似)
+        GasAtmosphereLayers m_layers;               // 層ごとの基準の大気(区画の層 = 格子の y)
+        GasCellFields m_fields;                     // 区画のセルの気体の欄(気体の箱の並び。軸は気体の箱の x・y・z)
+        GasProjection m_projection;                 // 前の刻みの圧力(投影の初めの近似)
         std::vector<uint32_t> m_projectionSpecies;  // m_projection を作った時の物質(変わったら捨てる)
         ProbeGasLedger m_ledger;
 
         [[nodiscard]] GasConfig MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const;
-        [[nodiscard]] std::vector<GasCell> MakeReference(const BakedReactionTable& table, const GasConfig& config,
-                                                         std::span<const uint32_t> slots) const;
     };
 
 }  // namespace bicameral::sim
