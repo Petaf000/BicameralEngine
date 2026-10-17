@@ -9,7 +9,7 @@
 > - 試験: reaction_test に TestGasRoom・gpu_reaction_test に `--gas-room`(ctest gpu_reaction_gas_room・_warp を足した)・gpu_probe_place に気体のぶん・
 >   probe_phase に 7「溶岩の上の水」。
 
-- Status: Doing(司令塔の指示で 2026-10-17 に区切った。実装と GPU の試験は済み・CPU の全部の試験の結果待ち。判断待ち A は仮)
+- Status: Done(2026-10-17 T-0709 で main へ。main の上で release の CPU の全部の試験・gpu_reaction・gpu_probe_place を通した。判断待ち = QUESTIONS Q113。表の形が変わったので gpu_probe_sim・gpu_probe_gas・gpu_probe_liquid・gpu_multires〔HW〕も通した。warp と多重解像度の大きい組は流していない)/ 前: Doing(司令塔の指示で 2026-10-17 に区切った。実装と GPU の試験は済み・CPU の全部の試験の結果待ち。判断待ち A は仮)
 - 種類: 工学 + 設計
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -74,3 +74,4 @@
 - 2026-10-17(wt2): main(T-0623・T-0653 の後)から。熱い石の上の 1 セルいっぱいの水で再現(気体のぶん最大 6332 mol = 器の 2.9 倍)。
   案 A を仮で入れた(表に気体の印と規則の気体の増え方・取り合いに器の残り・置くコマンド)。release のビルド警告 0・archmap OK・
   gpu_reaction の 6 本(--gas-room を足した)・gpu_probe_place の 2 本が通った。CPU の全部の試験の途中で、司令塔の指示(運ぶ計算の土台の設計し直し)で区切った。
+- 2026-10-17(本体の作業役 T-0709): ADR-0326 の決定どおり main へマージ(衝突なし)。main の上で release のビルド警告 0・CPU の全部の試験(^[^gwi]・^gas_)・gpu_reaction・gpu_probe_place・gpu_probe_sim/gas/liquid・gpu_multires を確かめた。判断待ち A〜C を Q113 に。
