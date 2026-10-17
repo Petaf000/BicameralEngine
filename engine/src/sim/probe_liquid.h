@@ -33,7 +33,7 @@
 //   - **段の順**: 適用 → 物理の熱 → 表の差し替え → 気体 → **液体** → 伝導と反応(ProbeReference::Advance の (1c))。
 // 今の制限(分けたチケット): 粘りは区画の設定(物質に書くのは T-0628)・相変化は反応表(T-0611)・
 //   閉じた所の空気の圧力を液体の圧力に足さない(T-0618)・保存点・状態のハッシュへの組み込みは T-0620。
-//   GPU は ProbeSim の液体の段(T-0613。shaders/sim/probe_liquid_tick.hlsl が式を 1 行ずつ写す。ここを変えたらそちらも)。
+//   GPU は ProbeSim の液体の段(T-0613。shaders/sim/probe_liquid_tick.hlsl)。式は common/liquid_flow.hlsli の 1 つの源を両方が呼ぶ(T-0716)。
 //   (液体が入ったセルの空気は、気体の空きが減って圧力が上がり、気体の段で押し出される。sim/probe_gas)
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
@@ -45,6 +45,7 @@
 #include <string>
 #include <vector>
 
+#include "common/liquid_flow.hlsli"
 #include "common/reaction.hlsli"
 #include "sim/reaction_table.h"
 
@@ -143,7 +144,8 @@ namespace bicameral::sim {
 
     private:
         ProbeLiquidOptions m_options;
-        uint64_t m_gravityMicrometersPerSecond2 = 0;
+        liquid::LqParams m_params =
+            {};  // 見立ての値(重力・セルの 1 辺・摩擦・溢れの倍率・速さの上限・移流。Create で作る)
         std::array<std::vector<int64_t>, 3> m_faces;    // 区画のセルの + 側の面の運動量(格子の軸 x・y・z)
         std::array<std::vector<int64_t>, 3> m_kinetic;  // 面の運動のエネルギー(mJ。セルのエネルギーの外)
         std::vector<int64_t> m_potential;  // セルの液体の位置のエネルギー(mJ。区画の床から。セルのエネルギーの外)
@@ -154,8 +156,6 @@ namespace bicameral::sim {
         [[nodiscard]] std::array<uint32_t, 3> RegionCoordinates(uint32_t region) const;
         [[nodiscard]] bool AtRest() const;
         [[nodiscard]] int64_t PotentialOf(uint32_t region, uint64_t massMilligrams) const;
-        [[nodiscard]] int64_t KineticOf(int64_t momentum, uint64_t doubledMass) const;
-        [[nodiscard]] uint64_t MaxMomentum(uint64_t doubledMass) const;
 
         // Step の段(probe_liquid.cpp)
         struct StepWork;

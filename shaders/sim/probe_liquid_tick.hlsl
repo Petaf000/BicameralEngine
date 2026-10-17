@@ -1,5 +1,7 @@
 // probe_liquid_tick.hlsl — 仮の世界の GPU の液体の段(T-0613・ADR-0266・ADR-0276・ADR-0268)。
-// CPU リファレンスは engine/src/sim/probe_liquid.cpp の ProbeLiquidField::Step(ProbeReference::Advance の (1c))。式はそこと 1 行ずつ同じ。
+// CPU リファレンスは engine/src/sim/probe_liquid.cpp の ProbeLiquidField::Step(ProbeReference::Advance の (1c))。
+// 式(柱の静水圧・面の力・摩擦・移流・速さの上限・位置/運動のエネルギー)は common/liquid_flow.hlsli の 1 つの源を CPU と同じく呼ぶ(T-0716)。
+// ここに残るのは段の分け方(面やセルごとに「集める」形)・作業場の置き場・成分の書き戻し・帳簿への足し方。
 //
 // 適用の単位の中(コマンド → 物理の熱 → 表の作り直し → 気体 → **液体** → 起こす刻みの来たブロックを一覧へ)で、engine/src/sim/probe_sim_liquid.cpp の
 // RecordLiquid が次の順に投げる(段の間は全部の UAV の書き込みを待つ。CPU の 1 刻みの段を、面やセルごとに「集める」形に直した):
@@ -25,11 +27,7 @@ RWByteAddressBuffer liquidWork : register(u19);  // 制御・帳簿・見出し�
 // --- 定数(probe_liquid.cpp と同じ)---
 static const uint64_t CELL_EDGE_MILLIMETERS = 500;
 static const uint64_t CELL_VOLUME_PICOLITERS = (uint64_t)125000000 * 1000000;  // 0.5 m 角 = 1.25e14 pL
-static const uint32_t OPEN_FULL = 65536;               // 割合の 1(Q16。sim/cell_volume の CELL_OPEN_FULL)
-static const uint64_t VOLUME_CAP = (uint64_t)1 << 62;  // 占める体積の頭打ち(sim/cell_volume)
-static const uint64_t FLUX_DENOMINATOR = (uint64_t)2 * 60 * 60 * 500 * 1000;         // 2 × 60² × 1 辺(µm)
-static const uint64_t KINETIC_DENOMINATOR = (uint64_t)144 * 100000000 * 1000000000;  // 14400 × 1e15
-static const uint64_t POTENTIAL_DENOMINATOR = (uint64_t)1000000 * 1000000;           // 1e12
+static const uint64_t VOLUME_CAP = (uint64_t)1 << 62;                          // 占める体積の頭打ち(sim/cell_volume)
 static const uint64_t NANOGRAMS_PER_MILLIGRAM = 1000000;
 static const uint32_t RX_CELL_BYTES = 112;  // RxCell(エネルギー 8・数 4・空き 4・物質 ID 4 × 8・物質量 8 × 8)
 static const uint32_t NO_SPECIES = 0xFFFFFFFFu;
@@ -37,29 +35,8 @@ static const uint32_t NO_SPECIES = 0xFFFFFFFFu;
 // 約束が崩れた種類(DebugFormat::ProbeLiquidInvariant の 2 つ目の引数)
 static const uint32_t INVARIANT_NEGATIVE_HEAT = 1;
 static const uint32_t INVARIANT_NEGATIVE_AMOUNT = 2;
-static const uint32_t INVARIANT_KINETIC_RANGE = 3;
 
 // --- 整数の道具 ---
-
-// a × b ÷ c(切り捨て。結果が 64bit に収まること)
-uint64_t MulDiv(uint64_t a, uint64_t b, uint64_t c) {
-    return FxDivU128By64(FxMulU64Full(a, b), c).quotient;
-}
-
-// value × numerator ÷ denominator(0 の向きへ切り捨て)
-int64_t ScaleSigned(int64_t value, uint64_t numerator, uint64_t denominator) {
-    return FxApplySign(MulDiv(FxAbsU64(value), numerator, denominator), value < 0);
-}
-
-// 床で割る(負の数も下へ。divisor は正)
-int64_t DivideDown(int64_t value, uint64_t divisor) {
-    const uint64_t magnitude = FxAbsU64(value);
-    const uint64_t quotient = magnitude / divisor;
-    if (value >= 0)
-        return (int64_t)quotient;
-
-    return -(int64_t)(quotient + (magnitude % divisor != 0 ? 1 : 0));
-}
 
 uint32_t Component(uint3 value, uint32_t axis) {
     return axis == 0 ? value.x : (axis == 1 ? value.y : value.z);
@@ -78,6 +55,12 @@ void AddLedger(uint32_t address, int64_t value) {
 
 ProbeLiquidHeader Header() {
     return liquidWork.Load<ProbeLiquidHeader>(PROBE_LIQUID_HEADER_OFFSET);
+}
+
+// 見立ての値(common/liquid_flow.hlsli。CPU は ProbeLiquidField::Create で同じ値を作る)
+LqParams Params(ProbeLiquidHeader header) {
+    return LqMakeParams(header.gravityMicrometersPerSecond2, CELL_EDGE_MILLIMETERS, header.frictionShift,
+                        header.overfillStiffness, header.maxSpeedMillimetersPerSecond, header.advection);
 }
 
 uint32_t RegionSize(ProbeLiquidHeader header, uint32_t axis) {
@@ -147,21 +130,6 @@ uint32_t LoadOpen(ProbeLiquidHeader header, uint32_t region) {
     return LoadState(header, region).open;
 }
 
-// セルの体積から占める分を引いた残り(pL。0 で止める)。64bit の「0 で止める引き算」(a > b ? a − b : 0 の形)は NVIDIA のドライバが
-// 誤って下ろすので(T-0185)、符号付きの差を出して 0 以下を 0 にする。occupied は VOLUME_CAP(2^62)まで
-uint64_t RoomLeft(uint64_t occupied) {
-    const int64_t room = (int64_t)CELL_VOLUME_PICOLITERS - (int64_t)occupied;
-    if (room <= 0)
-        return 0;
-
-    return (uint64_t)room;
-}
-
-// 占める体積の割合を除いた残り(Q16。切り捨て。占める分がセル以上なら 0)
-uint32_t RemainingQ16(uint64_t occupied) {
-    return (uint32_t)MulDiv(RoomLeft(occupied), OPEN_FULL, CELL_VOLUME_PICOLITERS);
-}
-
 ProbeLiquidCellState ReadState(ProbeLiquidHeader header, uint32_t region, RxCell cell) {
     int64_t chemical = 0;
     uint64_t capacity = 0;
@@ -193,19 +161,11 @@ ProbeLiquidCellState ReadState(ProbeLiquidHeader header, uint32_t region, RxCell
         }
     }
 
-    ProbeLiquidCellState state;
-    state.mass = massNanograms / NANOGRAMS_PER_MILLIGRAM;
-    state.volume = volume;
-    state.open = RemainingQ16(solid);
-    state.wall = state.open == 0 ? 1u : 0u;
-    state.room = RoomLeft(solid);
-    state.equivalent = state.open == OPEN_FULL || state.open == 0 ? state.mass
-                                                                  : MulDiv(state.mass, OPEN_FULL, state.open);
-    state.heat = (cell.energy * 1000) - chemical;
-    state.capacity = capacity;
-    DEBUG_ASSERT(state.heat >= 0, DebugFormat::ProbeLiquidInvariant, region, INVARIANT_NEGATIVE_HEAT);
+    const int64_t heat = (cell.energy * 1000) - chemical;
+    DEBUG_ASSERT(heat >= 0, DebugFormat::ProbeLiquidInvariant, region, INVARIANT_NEGATIVE_HEAT);
 
-    return state;
+    return LqMakeCellView(massNanograms / NANOGRAMS_PER_MILLIGRAM, volume, solid, CELL_VOLUME_PICOLITERS, heat,
+                          capacity);
 }
 
 // 区画のセル region の + 側の面(格子の軸 axis)の開き(Q16。両側の空きの小さい方。区画の外は 0)
@@ -213,34 +173,15 @@ uint32_t FaceOpenAt(ProbeLiquidHeader header, uint32_t region, uint32_t axis) {
     if (Component(RegionAt(header, region), axis) + 1 >= RegionSize(header, axis))
         return 0;
 
-    return min(LoadOpen(header, region), LoadOpen(header, region + Stride(header, axis)));
+    return LqFaceOpen(LoadOpen(header, region), LoadOpen(header, region + Stride(header, axis)));
 }
 
-// --- 位置と運動のエネルギー(mJ。セルのエネルギーの外)---
+// --- 位置のエネルギー(mJ。セルのエネルギーの外)---
 
 int64_t PotentialOf(ProbeLiquidHeader header, uint32_t region, uint64_t massMilligrams) {
-    const uint64_t heightMillimeters = (RegionAt(header, region).y * CELL_EDGE_MILLIMETERS) +
-                                       (CELL_EDGE_MILLIMETERS / 2);
+    const LqParams params = Params(header);
 
-    return (int64_t)MulDiv(massMilligrams * heightMillimeters, header.gravityMicrometersPerSecond2,
-                           POTENTIAL_DENOMINATOR);
-}
-
-int64_t KineticOf(ProbeLiquidHeader header, uint32_t region, int64_t momentum, uint64_t doubledMass) {
-    if (momentum == 0 || doubledMass == 0)
-        return 0;
-
-    const FxU128 scaled = FxMulU64Full(FxAbsU64(momentum), header.gravityMicrometersPerSecond2);
-    DEBUG_ASSERT(scaled.hi == 0, DebugFormat::ProbeLiquidInvariant, region, INVARIANT_KINETIC_RANGE);
-    const FxU128 squared = FxMulU64Full(scaled.lo, scaled.lo);
-
-    return (int64_t)(FxDivU128By64(squared, KINETIC_DENOMINATOR).quotient / doubledMass);
-}
-
-uint64_t MaxMomentum(ProbeLiquidHeader header, uint64_t doubledMass) {
-    const uint64_t speedMicrometers = (uint64_t)header.maxSpeedMillimetersPerSecond * 1000;
-
-    return MulDiv(speedMicrometers * (uint64_t)TICKS_PER_SECOND, doubledMass, header.gravityMicrometersPerSecond2);
+    return LqPotentialEnergy(massMilligrams, LqCellHeightMillimeters(RegionAt(header, region).y, params), params);
 }
 
 // --- 刻みの初めのセルの写し(上流のセルの成分を、動的な添字でバッファから読むため)---
@@ -294,43 +235,19 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
     const uint32_t x = column % width;
     const uint32_t z = column / width;
     const uint32_t height = header.regionSize[1];
+    const LqParams params = Params(header);
     uint64_t above = 0;
     for (uint32_t k = 0; k < height; ++k) {
         const uint32_t y = height - 1 - k;
         const uint32_t region = RegionIndex(header, x, y, z);
         const ProbeLiquidCellState state = LoadState(header, region);
-        int64_t pressure = 0;
-        if (state.wall != 0 || state.mass == 0) {
-            above = 0;
-        } else {
-            // 圧力は空きの体積と「セル全部の液体に直した質量」で書く(孔の中の水の圧力 = 開けた水と同じ高さの圧力)
-            // 溢れ = 体積 − 空き(0 で止める引き算を符号付きの差で。T-0185。体積は 2^63 未満)
-            uint64_t overfill = 0;
-            const int64_t excess = (int64_t)state.volume - (int64_t)state.room;
-            if (excess > 0)
-                overfill = MulDiv(state.equivalent * header.overfillStiffness, (uint64_t)excess, state.volume);
+        ProbeLiquidCellState below = state;  // 床(y = 0)では読まない
+        if (y != 0)
+            below = LoadState(header, RegionIndex(header, x, y - 1, z));
 
-            // 満ちていないセルは上の液体を満ち具合の分だけ支える
-            const uint64_t filled = min(state.volume, state.room);
-            const uint64_t supported = MulDiv(above, filled, state.room);
-
-            // 下に支えられている分だけ圧力になる(固体で満ちたセル・区画の床は全部・液体は空きの満ち具合・空は 0)
-            uint64_t supportNumerator = 1;
-            uint64_t supportDenominator = 1;
-            if (y != 0) {
-                const ProbeLiquidCellState below = LoadState(header, RegionIndex(header, x, y - 1, z));
-                if (below.wall == 0) {
-                    supportNumerator = min(below.volume, below.room);
-                    supportDenominator = below.room;
-                }
-            }
-
-            pressure = (int64_t)MulDiv((2 * supported) + state.equivalent + overfill, supportNumerator,
-                                       supportDenominator);
-            above = supported + state.equivalent;
-        }
-
-        liquidWork.Store<int64_t>(CellAddress(header.pressureOffset, region), pressure);
+        const LqColumnStep cellPressure = LqColumnPressure(state, above, y != 0 ? 1u : 0u, below, params);
+        above = cellPressure.above;
+        liquidWork.Store<int64_t>(CellAddress(header.pressureOffset, region), cellPressure.pressure);
     }
 }
 
@@ -343,15 +260,11 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
         const uint3 at = RegionAt(header, region);
         const ProbeLiquidCellState a = LoadState(header, region);
         const int64_t pressure = LoadSigned(CellAddress(header.pressureOffset, region));
+        const LqParams params = Params(header);
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
             const uint32_t step = Stride(header, axis);
             int64_t face = LoadSigned(FaceAddress(header, header.facesOffset, axis, region));
-            int64_t wall = 0;
-            int64_t gravity = 0;
-            int64_t friction = 0;
-            int64_t dropped = 0;
             int64_t vanished = 0;
-            uint64_t desired = 0;
 
             // 区画の外の段で液体の質量が変わった面の運動量を合わせ直す(CPU の FollowMassChange。T-0656・ADR-0286)。
             // massOffset は前の刻みの終わりの質量(この段では誰も書かない。LiquidApply が書き直す)
@@ -360,61 +273,28 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
                 const uint64_t before = LoadUnsigned(CellAddress(header.massOffset, region)) +
                                         LoadUnsigned(CellAddress(header.massOffset, other));
                 const uint64_t now = a.mass + LoadState(header, other).mass;
-                if (now < before) {
-                    const int64_t kept = ScaleSigned(face, now, before);
-                    vanished -= face - kept;
-                    face = kept;
-                }
+                const int64_t kept = LqFollowMassChange(face, before, now);
+                vanished -= face - kept;
+                face = kept;
             }
 
             // − 側が区画の外か閉じた面なら、その面の押し返しは壁から(+ 向き)
-            const bool minusClosed = Component(at, axis) == 0 || min(LoadOpen(header, region - step), a.open) == 0;
-            if (a.wall == 0 && minusClosed)
-                wall += pressure;
+            const bool minusClosed = Component(at, axis) == 0 ||
+                                     LqFaceOpen(LoadOpen(header, region - step), a.open) == 0;
+            const int64_t minusWall = LqMinusWallPush(a, pressure, minusClosed ? 1u : 0u);
 
-            // + 側の面(一部だけ開いた面 = 孔は、力も重さも開いた割合だけ)
+            // + 側の面(閉じた面・開いた面。式は common/liquid_flow.hlsli)
             const uint32_t faceOpen = FaceOpenAt(header, region, axis);
-            if (faceOpen == 0) {
-                if (a.wall == 0)
-                    wall -= pressure;
-
-                wall -= face;  // 閉じた面に残った運動量は壁が受ける
-                face = 0;
-            } else {
+            LqFaceForce force = LqClosedFace(face, a, pressure);
+            if (faceOpen != 0) {
                 const uint32_t neighbor = region + step;
-                const ProbeLiquidCellState b = LoadState(header, neighbor);
-                const int64_t push = pressure - LoadSigned(CellAddress(header.pressureOffset, neighbor));
-                const int64_t weight = axis == 1 ? (int64_t)(a.equivalent + b.equivalent) : 0;
-                if (faceOpen == OPEN_FULL) {
-                    face += push - weight;
-                    gravity -= weight;
-                } else {
-                    const int64_t openWeight = ScaleSigned(weight, faceOpen, OPEN_FULL);
-                    const int64_t change = ScaleSigned(push - weight, faceOpen, OPEN_FULL);
-                    face += change;
-                    gravity -= openWeight;
-                    wall += change - push + openWeight;
-                }
-
-                // まわりに液体が無い面の運動量は行き場が無い。移流なしでは上流が空の面も
-                const uint64_t upwindMass = face > 0 ? a.mass : b.mass;
-                if (a.mass + b.mass == 0 || (header.advection == 0 && upwindMass == 0)) {
-                    dropped -= face;
-                    face = 0;
-                } else {
-                    const int64_t slowed = FxApplySign(FxAbsU64(face) >> header.frictionShift, face < 0);
-                    face -= slowed;
-                    friction -= slowed;
-
-                    // 上流が空: 運動量は残し(移流が運ぶ)、この面は流れない
-                    if (upwindMass != 0)
-                        desired = MulDiv(FxAbsU64(face), header.gravityMicrometersPerSecond2, FLUX_DENOMINATOR);
-                }
+                force = LqOpenFaceForce(face, faceOpen, axis == 1 ? 1u : 0u, a, pressure, LoadState(header, neighbor),
+                                        LoadSigned(CellAddress(header.pressureOffset, neighbor)), params);
             }
 
-            liquidWork.Store<int64_t>(FaceAddress(header, header.forcedOffset, axis, region), face);
-            liquidWork.Store<uint64_t>(FaceAddress(header, header.desiredOffset, axis, region), desired);
-            external[axis] = wall + gravity + friction + dropped + vanished;
+            liquidWork.Store<int64_t>(FaceAddress(header, header.forcedOffset, axis, region), force.face);
+            liquidWork.Store<uint64_t>(FaceAddress(header, header.desiredOffset, axis, region), force.desired);
+            external[axis] = minusWall + force.wall + force.gravity + force.friction + force.dropped + vanished;
         }
     }
 
@@ -460,7 +340,7 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
             const uint32_t from = forward ? region : region + Stride(header, axis);
             const uint64_t fromMass = LoadState(header, from).mass;
             const uint64_t outgoing = LoadUnsigned(CellAddress(header.outgoingOffset, from));
-            const uint64_t mass = outgoing > fromMass ? MulDiv(flux, fromMass, outgoing) : flux;
+            const uint64_t mass = LqLimitOutflow(flux, fromMass, outgoing);
             moved = forward ? (int64_t)mass : -(int64_t)mass;
         }
 
@@ -511,7 +391,7 @@ void MoveLiquid(ProbeLiquidHeader header, uint32_t self, uint32_t from, uint64_t
         if (!IsLiquid(header, species))
             continue;
 
-        const uint64_t moved = MulDiv(LoadUnsigned(snapshot + 48 + i * 8), mass, state.mass);
+        const uint64_t moved = LqMovedShare(LoadUnsigned(snapshot + 48 + i * 8), mass, state.mass);
         if (moved == 0)
             continue;
 
@@ -527,9 +407,7 @@ void MoveLiquid(ProbeLiquidHeader header, uint32_t self, uint32_t from, uint64_t
     if (movedCapacity == 0)
         return;
 
-    // 熱は動く熱容量の比で(液体とセルの温度を同じと置く)。mJ へは床で(渡す側の熱が負にならない)
-    const int64_t movedHeat = (int64_t)MulDiv((uint64_t)state.heat, movedCapacity, state.capacity);
-    const int64_t movedEnergy = DivideDown(movedHeat + movedChemical, 1000);
+    const int64_t movedEnergy = LqMovedEnergy(state, movedCapacity, movedChemical);
     energy += selfIsFrom ? -movedEnergy : movedEnergy;
 }
 
@@ -581,7 +459,7 @@ void MoveLiquid(ProbeLiquidHeader header, uint32_t self, uint32_t from, uint64_t
             MoveLiquid(header, region, from, mass, selfIsFrom, count, energy, touched, overflow);
 
             const uint64_t fromPotential = (uint64_t)LoadSigned(CellAddress(header.potentialOffset, from));
-            const int64_t potential = (int64_t)MulDiv(fromPotential, mass, LoadState(header, from).mass);
+            const int64_t potential = (int64_t)LqMovedShare(fromPotential, mass, LoadState(header, from).mass);
             potentialCarried += selfIsFrom ? -potential : potential;
         }
     }
@@ -700,18 +578,13 @@ int64_t UpperFlow(ProbeLiquidHeader header, uint3 at, uint32_t region, uint32_t 
 // 面 from から境を通って運ぶ運動量と運動のエネルギー(share = 境の 2 倍の流れの大きさ)
 void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_t share, out int64_t momentum,
                  out int64_t energy) {
-    momentum = 0;
-    energy = 0;
     const int64_t before = LoadSigned(FaceAddress(header, header.forcedOffset, axis, from));
-    if (before == 0)
-        return;
-
     const uint64_t doubledMass = LoadState(header, from).mass + LoadState(header, from + Stride(header, axis)).mass;
-    const uint64_t denominator = max(doubledMass, LoadUnsigned(FaceAddress(header, header.leavingOffset, axis, from)));
-    const int64_t magnitude = (int64_t)MulDiv(FxAbsU64(before), share, denominator);
-    momentum = before > 0 ? magnitude : -magnitude;
-    energy = (int64_t)MulDiv((uint64_t)LoadSigned(FaceAddress(header, header.kineticOffset, axis, from)), share,
-                             denominator);
+    const LqCarried carried = LqAdvectShare(before, LoadSigned(FaceAddress(header, header.kineticOffset, axis, from)),
+                                            share, doubledMass,
+                                            LoadUnsigned(FaceAddress(header, header.leavingOffset, axis, from)));
+    momentum = carried.momentum;
+    energy = carried.energy;
 }
 
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void LiquidAdvect(uint3 dispatchThreadId : SV_DispatchThreadID) {
@@ -772,6 +645,7 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
     int64_t3 external = int64_t3(0, 0, 0);  // 行き場なし・速さの上限
     if (region < header.regionCellCount) {
         const uint3 at = RegionAt(header, region);
+        const LqParams params = Params(header);
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
             const uint32_t faceAddress = FaceAddress(header, header.facesOffset, axis, region);
             int64_t face = LoadSigned(faceAddress);
@@ -780,25 +654,12 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
                                                   LoadUnsigned(
                                                       CellAddress(header.massOffset, region + Stride(header, axis)))
                                             : 0;
-            int64_t lost = 0;
-            if (face != 0 && doubled == 0) {
-                lost -= face;
-                face = 0;
-            }
-
-            const uint64_t limit = MaxMomentum(header, doubled);
-            if (FxAbsU64(face) > limit) {
-                const int64_t kept = face > 0 ? (int64_t)limit : -(int64_t)limit;
-                lost -= face - kept;
-                face = kept;
-            }
-
-            const int64_t kinetic = KineticOf(header, region, face, doubled);
-            const int64_t released = LoadSigned(FaceAddress(header, header.carriedOffset, axis, region)) - kinetic;
-            liquidWork.Store<int64_t>(faceAddress, face);
-            liquidWork.Store<int64_t>(FaceAddress(header, header.kineticOffset, axis, region), kinetic);
-            liquidWork.Store<int64_t>(FaceAddress(header, header.releasedOffset, axis, region), released);
-            external[axis] = lost;
+            const LqSettledFace settled = LqSettleFace(
+                face, doubled, LoadSigned(FaceAddress(header, header.carriedOffset, axis, region)), params);
+            liquidWork.Store<int64_t>(faceAddress, settled.face);
+            liquidWork.Store<int64_t>(FaceAddress(header, header.kineticOffset, axis, region), settled.kinetic);
+            liquidWork.Store<int64_t>(FaceAddress(header, header.releasedOffset, axis, region), settled.released);
+            external[axis] = settled.dropped + settled.capped;
         }
     }
 
@@ -821,13 +682,13 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
     [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
         const int64_t released = LoadSigned(FaceAddress(header, header.releasedOffset, axis, region));
         if (Component(at, axis) + 1 < RegionSize(header, axis))
-            heat += released - DivideDown(released, 2);
+            heat += released - LqReleasedShare(released);
         else
             heat += released;
 
         if (Component(at, axis) != 0) {
             const uint32_t minus = region - Stride(header, axis);
-            heat += DivideDown(LoadSigned(FaceAddress(header, header.releasedOffset, axis, minus)), 2);
+            heat += LqReleasedShare(LoadSigned(FaceAddress(header, header.releasedOffset, axis, minus)));
         }
     }
 
