@@ -313,7 +313,7 @@ views:
           note: "種類は坂・面の式・安定の条件の 3 つだけを渡す(最初の種類は陽の伝導 TxConduction。transport_conduction.hlsli)。世界は面の隣・見立て・端数の置き場・変化の表を渡す。MR の CPU の伝導がこれを呼び、今の MR の試験とビット一致。上限は出る側・入る側の倍率(Q32。Jacobi)。ADR-0334" }
       - { id: worldedges, group: simlib, label: "MakeMultiresWorldEdges<br/>世界の端を環境から作る(T-0772)<br/>world_edges + 基準の大気 + 世界の箱 → 外の柱",
           code: "engine/src/sim/multires_world_edges.cpp::MakeMultiresWorldEdges", ticket: T-0772, doc: docs/decisions/ADR-0338-world-edges-environment.md,
-          note: "縦は y。外の柱は箱の中の層ごとの基準の大気(仮の世界の気体の区画の層の基準と同じ道・ビット一致)。SetWorldEdges が替えて、開いた端に接するブロックを種にする。大気の無い open は真空(ベイクの注意)。当てる段の World::Neighbor・Outside が読む(world_edge.hlsli。ADR-0337)。multires_edge_test" }
+          note: "上の軸は world_edge.hlsli の WE_UP_AXIS の 1 か所(仮 z)。外の柱は箱の中の層ごとの基準の大気(GasAtmosphereLayers。仮の世界の気体の区画の層の基準とビット一致)。MR の気体も端の種類を nest.edges.world から読む。SetWorldEdges が替えて、開いた端に接するブロックを種にする。大気の無い open は真空(ベイクの注意)。当てる段の World::Neighbor・Outside が読む(world_edge.hlsli。ADR-0337)。multires_edge_test" }
       - { id: multiresliquid, group: simlib, label: "MultiresLiquid::Step<br/>多重解像度の 1 段で液体(土台の段 2 ②。T-0717)<br/>見立て → 液体の芯 → 上限と当てる(仮)→ 欄に書き戻す",
           code: "engine/src/sim/multires_liquid.cpp::MultiresLiquid::Step", ticket: T-0717, doc: docs/design/20-transport-substrate.md,
           note: "根のレベルだけ・子なしの木(仮の世界と同じ形)。セルは MakeCellView から、面の運動量・運動のエネルギー・位置のエネルギー・前の質量は登録した欄(T-0711)、帳簿は世界の欄。仮の世界の液体(区画 = 世界いっぱい)と毎刻みビット一致(multires_liquid_test)。上限・当てる・帳簿は当てる段(T-0714)へ載せ替える" }

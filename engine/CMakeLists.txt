@@ -74,10 +74,9 @@ add_library(bicameral_multires STATIC
   src/sim/multires_state.cpp
   src/sim/multires_tree.cpp
   src/sim/multires_wide_cell.cpp
-  src/sim/multires_world_edges.cpp  # 世界の端を環境から作る・替える(外の柱は気体の層の基準と同じ道。T-0772)
 )
 target_include_directories(bicameral_multires PUBLIC src)
-target_link_libraries(bicameral_multires PUBLIC bicameral_reaction bicameral_gas)
+target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
 
 # --- gas: 気体の流れの CPU リファレンス(1 レベルの箱 G1・G2〔07 §2.1・T-0026・ADR-0043〕と多重解像度の木〔07 §2.5・T-0208・ADR-0117〕)。GPU を知らない。浮動小数点は禁止 ---
 add_library(bicameral_gas STATIC
@@ -123,6 +122,7 @@ add_library(bicameral_sim STATIC
   src/sim/probe_liquid.cpp  # 仮の世界に液体の流れを載せる CPU リファレンス(T-0609)
   src/sim/multires_liquid.cpp  # 多重解像度の世界の 1 段で液体を流す CPU(土台の段 2 ②。T-0717)
   src/sim/multires_gas.cpp  # 多重解像度の世界の 1 段で気体を流す CPU(土台の段 3 ②。T-0720)
+  src/sim/multires_world_edges.cpp  # 世界の端を環境から作る・替える(外の柱は気体の層の基準 GasAtmosphereLayers と同じ。T-0772)
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp

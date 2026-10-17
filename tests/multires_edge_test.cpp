@@ -6,12 +6,13 @@
 //   - 外の柱の高さの読み方: 冷たい行が世界の中の高さ(z = 7)なら上の外(z = 8 の行 = 400 K)とは釣り合っていて流れない
 //   - 上の端に接して 2 段細かくした場面(端の面がレベル 0〜2): 保存量が毎刻み一定・活性だけ刻んでも全部刻んだ時とビット一致
 //   - 横が open で外の柱が空(真空): 熱は伝わらず、全部 wall と同じ
-// 環境から作る端(T-0772。sim/multires_world_edges.h。縦は y):
+// 環境から作る端(T-0772。sim/multires_world_edges.h。縦は world_edge.hlsli の WE_UP_AXIS。試験は縦の軸を替えてもそのまま通る形):
 //   - パッケージの world_edges = { top = "open" }(earth_environment の上)から MakeMultiresWorldEdges: 上だけ open・外の柱は箱の中の 8 層で、
 //     仮の世界の気体の区画の層の基準(ProbeGasField::ReferenceCell)とビット単位で同じ。温めた世界の熱が上の端から逃げ、保存量が一定
 //   - 端を替える(SetWorldEdges): 開いた端に接するブロックだけが種になる・同じなら種にしない・外の温度が変わる / wall に戻すと種になる
 //   - 基準の大気の無い世界の open: ベイクの「注意」と、外は真空(柱が空)
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <expected>
@@ -54,9 +55,26 @@ namespace {
     constexpr uint64_t EDGE_SEED = 20261017;
     constexpr int32_t WORLD_MK = 400000;  // 世界の空気の温度
     constexpr int32_t COLD_MK = 250000;   // 冷たい外の行の温度
-    constexpr uint32_t COLUMN_ROWS = 10;  // 外の柱の行(レベル 0 の y = 0〜9。世界は 0〜7・上の外は 8)
+    constexpr uint32_t COLUMN_ROWS = 10;  // 外の柱の行(レベル 0 の縦 = 0〜9。世界は 0〜7・上の外は 8)
     constexpr int64_t TOP_OUTSIDE_ROW = 8;
     constexpr int32_t REFINED_LEVELS = 2;
+
+    // 横 2 つ(縦でない軸の順。WeAxisUpLast)と縦(WE_UP_AXIS)の座標を世界の軸 x・y・z に並べる
+    std::array<int64_t, 3> WorldPoint(int64_t first, int64_t second, int64_t up) {
+        std::array<int64_t, 3> point = {};
+        point[WeAxisUpLast(0)] = first;
+        point[WeAxisUpLast(1)] = second;
+        point[WE_UP_AXIS] = up;
+
+        return point;
+    }
+
+    uint32_t CellIndexUp(uint32_t first, uint32_t second, uint32_t up) {
+        const std::array<int64_t, 3> point = WorldPoint(first, second, up);
+
+        return MrCellIndex(static_cast<uint32_t>(point[0]), static_cast<uint32_t>(point[1]),
+                           static_cast<uint32_t>(point[2]));
+    }
 
     // --- 場面の道具 ---
 
@@ -88,7 +106,7 @@ namespace {
 
     // 外の柱(行 coldRow だけ 250 K・ほかは世界と同じ 400 K)
     void SetColumn(MultiresNest& nest, const BakedReactionTable& table, int64_t coldRow) {
-        nest.edges.columnBaseY = 0;
+        nest.edges.columnBaseUp = 0;
         nest.edges.column.assign(COLUMN_ROWS, MakeAir(table, WORLD_MK));
         nest.edges.column[static_cast<size_t>(coldRow)] = MakeAir(table, COLD_MK);
     }
@@ -112,13 +130,13 @@ namespace {
         return LedgerSlotUsed(nest, edgeOut);
     }
 
-    // 根の層 y(レベル 0。縦は y)の平均の温度(mK)
-    int64_t LayerTemperature(const MultiresNest& nest, const ReactionTableView& view, uint32_t y) {
+    // 根の層 up(レベル 0 の縦の座標)の平均の温度(mK)
+    int64_t LayerTemperature(const MultiresNest& nest, const ReactionTableView& view, uint32_t up) {
         const uint32_t root = LookupBlock(nest, 0, 0, 0, 0);
         int64_t sum = 0;
         for (uint32_t z = 0; z < MR_BLOCK_EDGE; ++z) {
             for (uint32_t x = 0; x < MR_BLOCK_EDGE; ++x)
-                sum += MrCellThermal(view, LoadNestCell(nest, root, MrCellIndex(x, y, z))).temperature;
+                sum += MrCellThermal(view, LoadNestCell(nest, root, CellIndexUp(x, z, up))).temperature;
         }
 
         return sum / (MR_BLOCK_EDGE * MR_BLOCK_EDGE);
@@ -180,7 +198,7 @@ namespace {
         for (uint64_t tick = 0; tick < TICKS; ++tick)
             StepNest(nest, table, EDGE_SEED, tick, CONDUCTION);
 
-        Expect(HashRealLeaves(nest) == start, "外の柱の高さ: 上の外は y = 8 の行(400 K)を読み、流れない");
+        Expect(HashRealLeaves(nest) == start, "外の柱の高さ: 上の外は縦 = 8 の行(400 K)を読み、流れない");
         Expect(!LedgerSlotUsed(nest, WlSlot(WL_REASON_WORLD_EDGE, WL_DIRECTION_OUT)), "外の柱の高さ: 帳簿は 0");
     }
 
@@ -190,7 +208,8 @@ namespace {
         nest.edges.world.top = WE_OPEN;
         SetColumn(nest, table, TOP_OUTSIDE_ROW);
         const int64_t topCell = (int64_t{MR_BLOCK_EDGE} << REFINED_LEVELS) - 1;
-        const MrRequest request = MrMakeRequest(MR_REQUEST_REFINE, REFINED_LEVELS, 13, topCell, 14);
+        const std::array<int64_t, 3> at = WorldPoint(13, 14, topCell);
+        const MrRequest request = MrMakeRequest(MR_REQUEST_REFINE, REFINED_LEVELS, at[0], at[1], at[2]);
         SubmitRequests(nest, std::span(&request, 1));
         ProcessRequests(nest);
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot)
@@ -204,7 +223,8 @@ namespace {
         constexpr uint64_t TICKS = 40;
         MultiresNest full = MakeRefinedNest(table);
         MultiresNest active = MakeRefinedNest(table);
-        Expect(LookupBlock(full, REFINED_LEVELS, 8, 24, 8) != MR_NO_BLOCK,
+        const std::array<int64_t, 3> topBlock = WorldPoint(8, 8, 24);
+        Expect(LookupBlock(full, REFINED_LEVELS, topBlock[0], topBlock[1], topBlock[2]) != MR_NO_BLOCK,
                "細かくした場面: レベル 2 のブロックが上の端に接する");
 
         const ConservedTotals initial = ComputeConservedTotals(full, table, REFINED_LEVELS);
@@ -271,7 +291,7 @@ namespace {
 
         Expect(edges->world.top == WE_OPEN && edges->world.bottom == WE_WALL && edges->world.sides == WE_WALL,
                "パッケージの端: 世界の端の種類が環境のまま");
-        Expect(edges->columnBaseY == 0 && edges->column.size() == MR_BLOCK_EDGE,
+        Expect(edges->columnBaseUp == 0 && edges->column.size() == MR_BLOCK_EDGE,
                "パッケージの端: 外の柱は箱の中の 8 層");
 
         // --- 仮の世界の気体の区画(床 0・同じ箱)の層の基準とビット単位で同じ ---
@@ -289,7 +309,7 @@ namespace {
         MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 1, 0, 0));
         std::vector<RxCell> cells(MR_BLOCK_CELLS);
         for (uint32_t index = 0; index < MR_BLOCK_CELLS && edges->column.size() == MR_BLOCK_EDGE; ++index) {
-            cells[index] = edges->column[MrCellY(index)];
+            cells[index] = edges->column[WeCellAxis(index, WE_UP_AXIS)];
             cells[index].energy += cells[index].energy / 4;
         }
 

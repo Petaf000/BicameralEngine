@@ -1,34 +1,36 @@
-# ADR-0338 世界の端を環境から作る(縦は y・外の柱は気体の層の基準と同じ道・替えたら端のブロックを種に)
+# ADR-0338 世界の端を環境から作る(上の軸は 1 か所・外の柱は気体の層の基準と同じ道・替えたら端のブロックを種に)
 
-- Status: Proposed(2026-10-17。T-0772。ADR-0337 の続き。細部は仮〔ユーザー未確認〕)
+- Status: Proposed(2026-10-17。T-0772。ADR-0337 の続き。上の軸はユーザーに確認中・細部は仮〔ユーザー未確認〕)
 - 日付: 2026-10-17
 - 決めた人: Claude(T-0772 の作業役)
-- 関係: ADR-0337(世界の端)・ADR-0182 / D-494(基準の大気の高さの分布)・T-0710(world_edges の欄)・T-0619 / ADR-0256 の 5(格子の y が上)・D-513(PS は答え合わせの基準)・D-514
+- 関係: ADR-0337(世界の端)・ADR-0182 / D-494(基準の大気の高さの分布)・T-0710(world_edges の欄)・T-0619 / ADR-0256 の 5(格子の y が上)・
+  D-513(PS は答え合わせの基準)・D-514・T-0720(MR の気体)・T-0717(MR の液体)
 
 ## 背景
 - T-0721 は MultiresNest::edges(世界の箱・端の種類・外の柱)を試験で直接置いていた。環境の world_edges と基準の大気から作る道が無かった。
-- T-0721 は縦を z にした(気体の木・気体の箱に合わせた)が、PS の格子・world_cells・物理・描画(T-0619)と main の MR の液体(T-0717)は y が上。
+- MR の液体は y が上、MR の気体と世界の端は z が上で食い違っている(PS の格子・world_cells・物理・描画は y)。
 
 ## 決定(仮)
-1. **世界の上は +y**(world_edge.hlsli の WE_UP_AXIS = 1。ADR-0337 の 3「縦は z」を改める)。気体の箱の「z が上」は気体の解き方の中の軸で、
-   MR の気体は T-0764 で y にそろえる。PS(1 段の MR)と MR の座標が入れ替えなしで同じ。
-2. **高さ**: レベル 0 のセルの y = Y は海面から Y × 0.5 m(セルの下の面。PS の気体の区画の床 0 と同じ)。
-3. **外の柱 = 世界の箱の中の層ごとの基準の大気**(sim::MakeAtmosphereColumn): SampleAtmosphere → 一番下の層の静水圧(AtmospherePressureMicroPascal)
-   → MakeHydrostaticReference → 静かなセル。PS の気体の区画の層の基準(ProbeGasField::ReferenceCell)と同じ箱ならビット単位で同じ。
+1. **世界の上の軸は world_edge.hlsli の WE_UP_AXIS の 1 か所**(仮は 2 = z。ユーザーに確認中)。端・外の柱・MR の気体はこれを読む。
+   縦が z の箱(気体の箱 GasConfig)へは WeAxisUpLast で(横 1・横 2・縦)の順に写す(上が z なら恒等、y なら x・z・y = PS の GRID_AXIS_OF_GAS_AXIS)。
+   MR の液体を従わせるのは T-0774。上を替えるのは定数 1 行。
+2. **高さ**: レベル 0 のセルの縦の座標 U は海面から U × 0.5 m(セルの下の面。PS の気体の区画の床 0 と同じ)。
+3. **外の柱 = 世界の箱の中の層ごとの基準の大気**(sim::MakeAtmosphereColumn): PS と MR の気体と同じ GasAtmosphereLayers
+   (SampleAtmosphere → 一番下の層の静水圧 → MakeHydrostaticReference)→ 静かなセル。PS の層の基準(ProbeGasField::ReferenceCell)とビット一致。
    上下の外は端の層の基準(PS の開いた境界の外と同じ。気体の式では外の p̃ = 0)。風は入れない(D-514)。
 4. **環境から作る**: sim::MakeMultiresWorldEdges(表, 世界の箱)。端の種類は environment.world_edges、柱は基準の大気(全部 wall か大気が無ければ空)。
-   世界の箱は世界を作る側が決める(パッケージに箱の値は無い。T-0774)。
+   世界の箱は世界を作る側が決める(パッケージに箱の値は無い)。MR の気体の端の種類も nest.edges.world から読む(MultiresGasOptions から消した)。
 5. **替える**: sim::SetWorldEdges(nest, 端)。前と違えば(箱・種類・柱のどれか)、前か後で開いた端に接する本物のブロックを種にする。
    環境のホットリロードで外の値が変わったら、次の StepActive で端のブロックが刻まれ、一様なブロックは流れがあれば頁に広がる。
 6. **大気の無い open は真空のまま + ベイクの注意**(WarnWorldSetting。端を書いたのは作り手なので、セルを置かない世界でも出す)。
 
 ## 代案
-- 縦を z のまま(気体の箱と同じ): 場面の書き方・物理・描画・MR の液体・PS の格子を全部 z に直すことになる(T-0619 の逆)。採らない。
+- 上の軸を種類ごとに持つ(液体 y・気体 z のまま): 端の「上」がどちらか決まらず、場面を載せる所ごとに入れ替えが要る。採らない。
 - 外の柱に箱の外の 1 層上・下を足す(上の外は 1 層上の高さの大気): PS の開いた境界の外(端の層の基準)と値が変わり、答え合わせがずれる。
   気体の式では外が基準から外れて静かな大気が端で動く。採らない。
 - 替えた時に全部のブロックを種にする: 端に接しないブロックまで起こす(費用)。採らない。
 
 ## 影響
-- 作り手: 環境に world_edges を書けば、MR の世界の端が基準の大気を外として効く(呼ぶ口は T-0774)。大気を書かずに open なら注意が出る。
-- 並走: world_edge.hlsli の名前(WeLevelZeroY・WeOutsideY・columnBaseY)。MR の気体(T-0720)の縦の軸は T-0764 でそろえる。
-- ライブラリ: bicameral_multires が bicameral_gas を読む。
+- 作り手: 環境に world_edges を書けば、MR の世界の端が基準の大気を外として効く(呼ぶ口は縦切りの段)。大気を書かずに open なら注意が出る。
+- 上の軸の答えが y なら WE_UP_AXIS = 1 + T-0774(液体)。z なら T-0774 で液体を z へ。どちらでも端と気体は直さない。
+- 名前: WeLevelZeroUp・WeOutsideUp・columnBaseUp。MultiresGasOptions の端の欄は消した。

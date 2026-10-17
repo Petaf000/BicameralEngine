@@ -76,9 +76,9 @@ namespace bicameral::sim {
     // 替えるのは SetWorldEdges(外が変わったら端に接するブロックを種にする。T-0772)
     struct MultiresWorldEdges {
         multires::WeWorld world{};  // 世界の箱(根のレベルのセル)と端の種類(上・下・横)
-        // 外の柱: レベル 0 のセルの y が columnBaseY + 行 の高さの外のセル(基準の大気をその高さで読んだもの。同じ密度・温度なら
+        // 外の柱: レベル 0 のセルの縦の座標(WE_UP_AXIS)が columnBaseUp + 行 の高さの外のセル(基準の大気をその高さで読んだもの。同じ密度・温度なら
         // どのレベルでも同じ数なので、どのレベルの端もこの 1 列を読む)。柱の外の高さは端の行のまま。空なら外は真空(熱は伝わらない)
-        int64_t columnBaseY = 0;
+        int64_t columnBaseUp = 0;
         std::vector<reaction::RxCell> column;
     };
 

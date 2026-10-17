@@ -4,12 +4,13 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <span>
 #include <utility>
 
 #include "core/aliases.h"
+#include "sim/gas_cells.h"
 #include "sim/gas_reference.h"
 #include "sim/world_atmosphere.h"
-#include "sim/world_physics.h"
 
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
@@ -17,13 +18,6 @@ using namespace bicameral::reaction;
 namespace bicameral::sim {
 
     namespace {
-
-        // 割合(ppm)→ Q32(仮の世界の気体の区画 ProbeGasField::MakeReference と同じ換算)
-        uint32_t PartsToQ32(uint32_t partsPerMillion) {
-            const uint64_t q32 = (uint64_t{partsPerMillion} << 32) / ATMOSPHERE_PARTS_PER_WHOLE;
-
-            return static_cast<uint32_t>(std::min<uint64_t>(q32, UINT32_MAX));
-        }
 
         // 根のレベルの座標 → レベル 0 の座標(下の端は下へ・上の端は上へ丸める。根がレベル 0 より細かい時だけ丸めが効く)
         int64_t LevelZeroLow(int32_t rootLevel, int64_t coordinate) {
@@ -46,32 +40,8 @@ namespace bicameral::sim {
             return edge == WorldEdge::Open ? WE_OPEN : WE_WALL;
         }
 
-        // 気体の設定(層の基準に効くのは物質の値と重力だけ。仮の世界の気体の区画 ProbeGasField::MakeConfig と同じ物質の値)。
-        // 音速は層の基準に効かないので、0(気体を流さない世界)なら係数の検査を通す 1 を入れる
-        GasConfig MakeColumnConfig(const BakedReactionTable& table, const std::vector<uint32_t>& species,
-                                   uint32_t layers) {
-            GasConfig config;
-            config.sizeX = 1;
-            config.sizeY = 1;
-            config.sizeZ = layers;
-            config.speciesCount = static_cast<uint32_t>(species.size());
-            for (uint32_t s = 0; s < species.size(); ++s) {
-                const RxSpecies& entry = table.species[species[s]];
-                config.species[s] = {.molarMass = table.molarMasses[species[s]],
-                                     .heatCapacity = entry.heatCapacity,
-                                     .formationEnergy = entry.h0,
-                                     .roundingKey = species[s]};
-            }
-
-            ApplyWorldPhysics(table.environment, config);
-            if (config.soundSpeedMmPerS == 0)
-                config.soundSpeedMmPerS = 1;
-
-            return config;
-        }
-
         // 静かな基準のセル(気体の物質の順 species → 物質 ID の順のインライン。0 の成分は載せない。ProbeGasField::ReferenceCell と同じ)
-        RxCell ToReactionCell(const GasCell& gas, const std::vector<uint32_t>& species) {
+        RxCell ToReactionCell(const GasCell& gas, std::span<const uint32_t> species) {
             RxCell cell = RxMakeEmptyCell(gas.energy);
             for (uint32_t s = 0; s < species.size(); ++s) {
                 if (gas.amounts[s] == 0)
@@ -94,7 +64,7 @@ namespace bicameral::sim {
 
         // RxCell は詰め物の欄まで値を持つ(RxMakeEmptyCell)ので、バイトで比べてよい
         bool SameEdges(const MultiresWorldEdges& left, const MultiresWorldEdges& right) {
-            if (!SameWorld(left.world, right.world) || left.columnBaseY != right.columnBaseY ||
+            if (!SameWorld(left.world, right.world) || left.columnBaseUp != right.columnBaseUp ||
                 left.column.size() != right.column.size())
                 return false;
 
@@ -110,7 +80,7 @@ namespace bicameral::sim {
 
             const uint32_t shift = static_cast<uint32_t>(block.level - world.rootLevel);
             for (uint32_t axis = 0; axis < 3; ++axis) {
-                const int64_t origin = axis == 0 ? block.originX : (axis == 1 ? block.originY : block.originZ);
+                const int64_t origin = WeOriginAxis(block, axis);
                 const int64_t low = WeLow(world, axis) * (int64_t{1} << shift);
                 const int64_t high = WeHigh(world, axis) * (int64_t{1} << shift);
                 const uint32_t lowEdge = axis == WE_UP_AXIS ? WE_EDGE_BOTTOM : WE_EDGE_SIDES;
@@ -128,46 +98,27 @@ namespace bicameral::sim {
     }  // namespace
 
     std::expected<std::vector<RxCell>, std::string> MakeAtmosphereColumn(const BakedReactionTable& table,
-                                                                         int64_t firstY, uint32_t layers) {
-        const WorldAtmosphere& atmosphere = table.atmosphere;
-        if (atmosphere.Empty() || layers == 0)
+                                                                         int64_t firstUp, uint32_t layers) {
+        if (table.atmosphere.Empty() || layers == 0)
             return std::vector<RxCell>{};
 
-        // --- 層ごとの温度と成分(層の高さ = y × 0.5 m。仮の世界の気体の区画と同じ読み方)---
-        std::vector<AtmosphereSample> samples;
-        std::vector<uint32_t> species;  // 全部の層の物質(ID の順)
-        for (uint32_t layer = 0; layer < layers; ++layer) {
-            const int64_t height = (firstY + layer) * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS;
-            samples.push_back(SampleAtmosphere(atmosphere, height));
-            for (const AtmosphereFraction& fraction : samples.back().fractions)
-                species.push_back(fraction.species);
-        }
-
-        rng::sort(species);
-        species.erase(std::unique(species.begin(), species.end()), species.end());
+        // --- 層ごとの基準の大気(仮の世界と MR の気体と同じ GasAtmosphereLayers。層 k の高さ = (firstUp + k) × 0.5 m)---
+        const GasAtmosphereLayers atmosphere = GasAtmosphereLayers::Create(
+            table, firstUp * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS, layers);
+        const std::span<const uint32_t> species = atmosphere.Species();
         if (species.size() > RX_MAX_CELL_SPECIES) {
             return std::unexpected(std::format("基準の大気の物質が {} 種(外のセルのインラインの数 {} を超える)",
                                                species.size(), RX_MAX_CELL_SPECIES));
         }
 
-        // --- 層の基準(一番下の層の静水圧から、層の重さの分だけ下げる)---
-        const GasConfig config = MakeColumnConfig(table, species, layers);
-        std::vector<GasReferenceLayer> profile;
-        for (const AtmosphereSample& sample : samples) {
-            GasReferenceLayer layer{.temperatureMilliKelvin = sample.temperatureMilliKelvin};
-            for (const AtmosphereFraction& fraction : sample.fractions) {
-                const auto slot = rng::find(species, fraction.species);
-                layer.fractionsQ32[static_cast<uint32_t>(slot - species.begin())] = PartsToQ32(
-                    fraction.partsPerMillion);
-            }
+        // --- 層の基準(一番下の層の静水圧から、層の重さの分だけ下げる)。効くのは物質の値と重力だけで、
+        //     音速は効かないので 0(気体を流さない世界)なら係数の検査を通す 1 を入れる ---
+        constexpr std::array<GasBoundary, GAS_AXES> walls = {GasBoundary::Wall, GasBoundary::Wall, GasBoundary::Wall};
+        GasConfig config = atmosphere.MakeConfig(table, species, {1, 1, layers}, walls, GasConfig{}.substeps, 0);
+        if (config.soundSpeedMmPerS == 0)
+            config.soundSpeedMmPerS = 1;
 
-            profile.push_back(layer);
-        }
-
-        const uint64_t surface = AtmospherePressureMicroPascal(atmosphere, table,
-                                                               table.environment.gravityMicrometersPerSecond2,
-                                                               firstY * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS);
-        const std::vector<GasCell> reference = MakeHydrostaticReference(config, profile, surface);
+        const std::vector<GasCell> reference = atmosphere.MakeReference(config, species);
 
         // --- 静かなセル ---
         std::vector<RxCell> column;
@@ -214,7 +165,7 @@ namespace bicameral::sim {
         if (!column)
             return std::unexpected(column.error());
 
-        edges.columnBaseY = bottom;
+        edges.columnBaseUp = bottom;
         edges.column = std::move(*column);
 
         return edges;

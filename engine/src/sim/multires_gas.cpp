@@ -23,7 +23,7 @@ namespace bicameral::sim {
         namespace sf = state_field;
 
         constexpr uint32_t NO_CELL = UINT32_MAX;
-        constexpr uint32_t UP_AXIS = 2;  // 縦(上 = +z)
+        constexpr uint32_t UP_AXIS = 2;  // 気体の箱の縦(z)。世界の上の軸(WE_UP_AXIS)は BuildGrid がここへ写す
 
         // --- 1 段の世界のセルの並び(刻むブロックの順 × ブロックの中の番号)と世界の箱の座標 ---
         struct GasGrid {
@@ -40,6 +40,15 @@ namespace bicameral::sim {
             }
         };
 
+        // ブロックの原点を気体の箱の軸の順に(横 1・横 2・縦。世界の上の軸 WE_UP_AXIS を縦へ。world_edge.hlsli の WeAxisUpLast)
+        std::array<int64_t, GAS_AXES> GasOrigin(const multires::MrBlock& block) {
+            std::array<int64_t, GAS_AXES> origin = {};
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                origin[axis] = multires::WeOriginAxis(block, multires::WeAxisUpLast(axis));
+
+            return origin;
+        }
+
         // 刻むブロックの一覧(根のレベルの本物のブロック全部)。1 段の世界だけ(子・違うレベルは断る)
         GasGrid BuildGrid(const MultiresNest& nest) {
             GasGrid grid;
@@ -53,7 +62,7 @@ namespace bicameral::sim {
                 FX_ASSERT(block.level == nest.capacity.rootLevel);
                 FX_ASSERT(rng::all_of(block.children, [](uint32_t child) { return child == multires::MR_NO_BLOCK; }));
                 grid.slots.push_back(slot);
-                const std::array<int64_t, GAS_AXES> origin = {block.originX, block.originY, block.originZ};
+                const std::array<int64_t, GAS_AXES> origin = GasOrigin(block);
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
                     low[axis] = std::min(low[axis], origin[axis]);
                     high[axis] = std::max(high[axis], origin[axis] + (int64_t)MR_BLOCK_EDGE);
@@ -69,12 +78,13 @@ namespace bicameral::sim {
             grid.boxToCell.assign((size_t)grid.size[0] * grid.size[1] * grid.size[2], NO_CELL);
             for (uint32_t order = 0; order < grid.slots.size(); ++order) {
                 const multires::MrBlock& block = nest.blocks[grid.slots[order]];
-                const std::array<int64_t, GAS_AXES> origin = {block.originX, block.originY, block.originZ};
+                const std::array<int64_t, GAS_AXES> origin = GasOrigin(block);
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    // ブロックの中の番号 = x + 8 y + 64 z(MrCellIndex)
-                    const std::array<uint32_t, GAS_AXES> local = {index % MR_BLOCK_EDGE,
-                                                                  (index / MR_BLOCK_EDGE) % MR_BLOCK_EDGE,
-                                                                  index / (MR_BLOCK_EDGE * MR_BLOCK_EDGE)};
+                    // ブロックの中の座標を気体の箱の軸の順に(GasOrigin と同じ写し)
+                    std::array<uint32_t, GAS_AXES> local = {};
+                    for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                        local[axis] = multires::WeCellAxis(index, multires::WeAxisUpLast(axis));
+
                     std::array<uint32_t, GAS_AXES> place = {};
                     for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                         place[axis] = (uint32_t)(origin[axis] - low[axis]) + local[axis];
@@ -90,12 +100,12 @@ namespace bicameral::sim {
         // --- 面の一覧(gas_reference の EnumerateFaces と同じ面・同じ番号。端は世界の端の種類から)---
         struct LinkMaker {
             const GasGrid& grid;
-            const MultiresGasOptions& options;
+            const multires::WeWorld& edges;  // 世界の端の種類(MultiresNest::edges.world。T-0721・T-0772)
 
             // 箱の外の側: 端が開いていれば外の層(面を作ったセルの層。仮の世界と同じ)・閉じていれば壁
             [[nodiscard]] GasFaceSide EdgeSide(uint32_t axis, bool high, uint32_t layer) const {
-                const uint32_t edge = axis == UP_AXIS ? (high ? options.top : options.bottom) : options.sides;
-                if (edge == MULTIRES_GAS_EDGE_OPEN)
+                const uint32_t edge = axis == UP_AXIS ? (high ? edges.top : edges.bottom) : edges.sides;
+                if (edge == multires::WE_OPEN)
                     return {.kind = GasSideKind::Ghost, .index = layer};
 
                 return {.kind = GasSideKind::Wall, .index = 0};
@@ -312,11 +322,6 @@ namespace bicameral::sim {
         if (nest.capacity.pages < nest.capacity.worldBlocks)
             return std::unexpected("頁が世界の枠より少ない(気体はどのブロックにも書くことがある)");
 
-        for (const uint32_t edge : {options.top, options.bottom, options.sides}) {
-            if (edge != MULTIRES_GAS_EDGE_WALL && edge != MULTIRES_GAS_EDGE_OPEN)
-                return std::unexpected("世界の端の種類は wall(0)か open(1)");
-        }
-
         MultiresGas result;
         result.m_options = options;
 
@@ -373,7 +378,7 @@ namespace bicameral::sim {
         LoadGasCells(table, read.cells, read.fields, step);
 
         // --- 1 刻み(陽解法の小刻み。面の一覧は世界の箱の座標から)---
-        const std::vector<GasFaceLink> links = LinkMaker{.grid = grid, .options = m_options}.All();
+        const std::vector<GasFaceLink> links = LinkMaker{.grid = grid, .edges = nest.edges.world}.All();
         StepGasLinks(step.box, links);
 
         // --- 気体の箱 → セル・欄・帳簿 → 書き戻す(起こす)---
