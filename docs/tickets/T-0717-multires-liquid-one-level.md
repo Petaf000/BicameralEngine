@@ -25,7 +25,7 @@
   (仮の世界の区画の外と同じ扱い)。セルの並びは「ブロックの順 × ブロックの中の番号」で仮の世界と違うが、回し方が Jacobi 型(刻みの初めの値だけから決め、
   足し引きは整数)なので順によらずビット単位で同じ。位置のエネルギーの高さは刻むブロックの一番下の段から(仮の世界の「区画の床から」)。
 - **欄**(T-0711 の登録): `liquid.momentum`(面 ×3・液体・VOLUME・保存量)・`liquid.kinetic_energy`(面 ×3・同)・`liquid.potential_energy`(セル・同)・
-  `liquid.mass_before`(セル・液体・VOLUME・ハッシュに入る)・`liquid.ledger_momentum`(世界 ×3)・`liquid.ledger_energy`(世界)。
+  `liquid.mass_before`(セル・液体・SAME・ハッシュに入る。保存量ではないので T-0762 の「VOLUME ⇔ 保存量」で SAME)・`liquid.ledger_momentum`(世界 ×3)・`liquid.ledger_energy`(世界)。
   保存点・写し・状態のハッシュは登録を回るので、液体の分は直さずに入る。
 - **見立て**: `MakeLiquidCellView(cv) = LqMakeCellView(cv.liquidMass, cv.liquid.volume, cv.solid.volume, CV_CELL_VOLUME_LEVEL_UNITS, cv.heat, cv.heatCapacity)`。
   前任のメモの `CvCellVolumePicoliters(level)` ではなくレベルの単位の体積を渡す(見立ての体積は物質量 = レベルの単位から作るので、セルの体積もレベルの単位。

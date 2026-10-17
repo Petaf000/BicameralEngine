@@ -700,7 +700,8 @@ namespace bicameral::sim {
         fields.kinetic = Register(nest, "liquid.kinetic_energy", sf::SF_PLACE_FACE, sf::SF_SCALE_VOLUME, conserved, 3);
         fields.potential = Register(nest, "liquid.potential_energy", sf::SF_PLACE_CELL, sf::SF_SCALE_VOLUME, conserved,
                                     1);
-        fields.massBefore = Register(nest, "liquid.mass_before", sf::SF_PLACE_CELL, sf::SF_SCALE_VOLUME,
+        // 前の質量は保存量ではない(セルの液体の写し)ので余りを帳簿へ出さない SAME(レベルの単位なので、粗くした平均 = 和 ÷ 8 は量の規則と同じ数)
+        fields.massBefore = Register(nest, "liquid.mass_before", sf::SF_PLACE_CELL, sf::SF_SCALE_SAME,
                                      sf::SF_FLAG_HASHED, 1);
         fields.ledgerMomentum = Register(nest, "liquid.ledger_momentum", sf::SF_PLACE_WORLD, sf::SF_SCALE_SAME,
                                          sf::SF_FLAG_HASHED, 3);
