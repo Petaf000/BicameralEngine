@@ -53,6 +53,10 @@ namespace bicameral::sim {
         uint32_t reconstruction;      // GAS_GPU_RECONSTRUCTION_*
         uint32_t stochasticRounding;  // 0 / 1
         uint32_t thermodynamics;      // GAS_GPU_THERMODYNAMICS_*(T-0234)
+        // セルの空きを読むか(0 / 1。GasBox::openQ16 が空でない = どこかのセルの空きが一部。T-0593・T-0617・ADR-0268)。
+        // 読む時はセルごとの空き(Q16)を t3 から。読まない箱は全部のセルが全部(今まで通り)
+        uint32_t openness;
+        uint32_t unused;
     };
 
     // 成分ごとの値(パラメータの頭の後ろに欄の数だけ。24 バイト)
@@ -80,7 +84,7 @@ namespace bicameral::sim {
         int64_t scaledPressure;
     };
 
-    // 面の頭(80 バイト。後ろに移す成分の物質量 uint64 × 欄の数〔µmol〕。番号は GAS_GPU_FACES_PER_CELL × セル。端の境界の面のうち、
+    // 面の頭(88 バイト。後ろに移す成分の物質量 uint64 × 欄の数〔µmol〕。番号は GAS_GPU_FACES_PER_CELL × セル。端の境界の面のうち、
     // 無い所は使わない)
     struct GasGpuFace {
         int64_t impulse;           // 面の圧力の力積(左のセルから引き、右のセルへ足す)
@@ -91,6 +95,9 @@ namespace bicameral::sim {
         int64_t movedEnergy;       // 風上から引くエネルギー(mJ)
         int64_t receivedEnergy;    // 風下へ足すエネルギー(mJ。断熱では重さの仕事を引いた値。T-0234)
         int64_t movedMomentum[3];  // 移す運動量
+        // 右のセルへ足す力積(面が一部だけ開いた時は impulse と違う。差は塞いだ物が受けて帳簿へ。T-0593・T-0617。
+        // 空きを読まない箱では impulse と同じ。多重解像度の木〔gas_tree_step.hlsl〕は読まない)
+        int64_t impulseRight;
     };
 
     // セルごとの合計の頭(8 バイト。風上のセルとして出ていく割合の合計。後ろに成分ごとの移す量の合計 uint64 × 欄の数)
@@ -98,10 +105,16 @@ namespace bicameral::sim {
         uint64_t outflow;  // Q32
     };
 
-    FX_CONST uint32_t GAS_GPU_PARAMETERS_BYTES = 112;
+    FX_CONST uint32_t GAS_GPU_PARAMETERS_BYTES = 120;
+    FX_CONST uint32_t
+        GAS_GPU_PARAMETERS_OPENNESS = 112;  // GasGpuParameters::openness の場所(仮の世界の GPU が刻みごとに立てる)
     FX_CONST uint32_t GAS_GPU_SPECIES_BYTES = 24;
     FX_CONST uint32_t GAS_GPU_CELL_BYTES = 32;
-    FX_CONST uint32_t GAS_GPU_FACE_BYTES = 80;
+    FX_CONST uint32_t GAS_GPU_FACE_BYTES = 88;
+
+    // セルの空き(Q16。sim::GAS_OPEN_FULL = セルの全部)と、圧力を読む体積の下限(gas_reference.cpp の GAS_OPEN_PRESSURE_FLOOR)
+    FX_CONST uint32_t GAS_GPU_OPEN_FULL = 65536;
+    FX_CONST uint32_t GAS_GPU_OPEN_PRESSURE_FLOOR = 256;
     FX_CONST uint32_t GAS_GPU_SUMS_BYTES = 8;
 
     // 帳簿(RWByteAddressBuffer。外から入った量を正。64bit の原子的な足し算で足す)

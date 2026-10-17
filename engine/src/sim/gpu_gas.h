@@ -36,10 +36,11 @@ namespace bicameral::sim {
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
         // 外から刻みを決めて 1 刻み(仮の世界の気体の段。T-0592): 小刻みの通し番号は tick × substeps から(内の刻みの数は進めない)。
-        // parameters・ghost は t0(設定)・t2(開いた境界の外)に結ぶ別のバッファ(呼ぶ側が段ごとに作る。NON_PIXEL_SHADER_RESOURCE の状態)。
-        // t1(層の基準の導く値)は作った時の箱のまま(成分の並びによらない)
+        // parameters・ghost・open は t0(設定)・t2(開いた境界の外)・t3(セルの空き。T-0617)に結ぶ別のバッファ
+        // (呼ぶ側が段ごとに作る。NON_PIXEL_SHADER_RESOURCE の状態)。t1(層の基準の導く値)は作った時の箱のまま(成分の並びによらない)
         void RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
-                          D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost) const;
+                          D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost,
+                          D3D12_GPU_VIRTUAL_ADDRESS open) const;
 
         // 箱のセル(u0。頭 + 欄 × SpeciesStride の件 × セル)と帳簿(u5。GasGpuLedgerBytes)。仮の世界の段が読み書きする(T-0592)
         [[nodiscard]] ID3D12Resource* CellBuffer() const { return m_uavs[0].Get(); }
@@ -48,7 +49,7 @@ namespace bicameral::sim {
         [[nodiscard]] uint32_t SpeciesStride() const { return m_speciesStride; }
 
         // 環境の値のホットリロード(T-0444・ADR-0194): box(SetGasEnvironment で環境を替えた後の設定・係数・層の基準)から
-        // t0〜t2 を作り直して写す。次に記録する RecordStep から新しい値で刻む(刻みの境目で呼ぶ)。前の t0〜t2 と写しの元は keepAlive へ
+        // t0〜t3 を作り直して写す。次に記録する RecordStep から新しい値で刻む(刻みの境目で呼ぶ)。前の t0〜t3 と写しの元は keepAlive へ
         // (呼ぶ側がこのリストが GPU で終わるまで持つ)。箱の作りは同じであること(CheckGasEnvironment)。作れなければ false
         [[nodiscard]] bool RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasBox& box,
                                              std::vector<ComPtr<ID3D12Resource>>& keepAlive);
@@ -99,14 +100,14 @@ namespace bicameral::sim {
 
         [[nodiscard]] std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
         [[nodiscard]] std::expected<void, std::string> CreateBuffers(ID3D12Device5* device, const GasBox& box);
-        [[nodiscard]] static std::array<gpu::ResidentBuffer, 3> CreateLayerBuffers(ID3D12Device* device,
+        [[nodiscard]] static std::array<gpu::ResidentBuffer, 4> CreateLayerBuffers(ID3D12Device* device,
                                                                                    const GasBox& box,
                                                                                    uint32_t reservedSpecies);
         void RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
-                        const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const;
+                        const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const;
         void RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
-                            const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3>& srvs) const;
-        [[nodiscard]] std::array<D3D12_GPU_VIRTUAL_ADDRESS, 3> OwnSrvs() const;
+                            const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const;
+        [[nodiscard]] std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4> OwnSrvs() const;
 
         uint32_t m_cellCount = 0;
         uint32_t m_speciesCount = 0;   // 箱の成分の数(読み戻す欄)
@@ -118,8 +119,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
         std::array<ComPtr<ID3D12Resource>, 6> m_uavs;  // u0〜u5(gas_step.hlsl の結び付け)
-        // t0 パラメータ・t1 層の基準の導く値・t2 層の開いた境界の外。既定のヒープの写し(T-0410。写すのは RecordUpload)
-        std::array<gpu::ResidentBuffer, 3> m_srvs;
+        // t0 パラメータ・t1 層の基準の導く値・t2 層の開いた境界の外・t3 セルの空き(T-0617)。既定のヒープの写し(T-0410。写すのは RecordUpload)
+        std::array<gpu::ResidentBuffer, 4> m_srvs;
         ComPtr<ID3D12Resource> m_cellUpload;    // 初めのセル
         ComPtr<ID3D12Resource> m_ledgerUpload;  // 初めの帳簿
         ComPtr<ID3D12Resource> m_cellReadback;

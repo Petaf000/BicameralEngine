@@ -8,7 +8,7 @@
 //   - 気体の作業場(gasWork。RWByteAddressBuffer): 先頭から 制御(欄の物質の数・断った印・運動量の失せ分・数)・
 //     設定の型(CPU が書く。設定の頭の物質に依らない欄)・見出し(ProbeGasHeader)、その後ろに見出しが場所を持つ
 //     設定(頭 + 欄ごとの物質の値。刻みごとに欄の物質で作る。gas_step の t0)・開いた境界の外(gas_step の t2。刻みごと)・その基準の大気の並びの元・
-//     物質ごとの値・物質の印・欄の物質・物質 → 欄・基準の大気の物質・帳簿・凝縮相のエネルギー
+//     物質ごとの値・物質の印・欄の物質・物質 → 欄・基準の大気の物質・帳簿・凝縮相のエネルギー・セルの気体の空き(gas_step の t3。T-0617)
 //   - 気体の箱のセル・外は「頭 + 物質量 × 欄の数」の件(gas_gpu.hlsli)。欄の数 = 表の気体の物質の数(区画に現れうる気体の物質の数。T-0598)
 // 構造化バッファの並びが C++ と同じになるよう、64bit の値を先に・32bit の値を後に置き、32bit の数は偶数にそろえる。
 // 浮動小数点は使わない(shaders/common は検査の対象。04 §4)。
@@ -28,13 +28,17 @@ namespace bicameral::sim {
         uint64_t mass;        // その時の気体の質量(mg。段の外で質量が変わった分を見る。T-0646・ADR-0286)
     };
 
-    // 物質ごとの気体の値(物質 ID の順。表から CPU が作る。32 バイト)
+    // 物質ごとの気体の値(物質 ID の順。表から CPU が作る。40 バイト)
     struct ProbeGasSpecies {
         uint64_t massPerAmount;   // mg/µmol の Q32(gas_reference.cpp の MakeGasCoefficients と同じ式)
         int64_t formationEnergy;  // J/mol(表の h0)
-        uint32_t heatCapacity;    // mJ/(mol·K)(表の比熱)
-        uint32_t isGas;           // 凝縮相でない(表の condensed = false)
-        uint32_t unused[2];
+        // 凝縮相が占める体積(mm³/mol。BakedReactionTable::speciesMolarVolume。気体の物質・密度を書いていない物質は 0。
+        // セルの気体の空き〔sim/cell_volume の GasOpenQ16〕を作る。T-0617)
+        uint64_t molarVolume;
+        uint32_t heatCapacity;  // mJ/(mol·K)(表の比熱)
+        uint32_t isGas;         // 凝縮相でない(表の condensed = false)
+        uint32_t isLiquid;      // 液体(表の liquid。空きの頭打ちを固体と液体で別々に数える)
+        uint32_t unused;
     };
 
     // 見出し(CPU が作る時に書く。場所は gasWork の先頭からのバイト)
@@ -57,6 +61,8 @@ namespace bicameral::sim {
         uint32_t parametersOffset;       // 設定の頭 + GasGpuSpecies × 欄の数(刻みごと。gas_step の t0)
         uint32_t slotsOffset;            // uint32 × 欄の数(この刻みの欄の物質。ID の順)
         uint32_t slotOfOffset;  // uint32 × speciesCount(物質 ID → 欄。この刻みに欄が無ければ PROBE_GAS_NO_SLOT)
+        uint32_t openOffset;    // uint32 × regionCellCount(セルの気体の空き Q16。刻みごと。gas_step の t3。T-0617)
+        uint32_t unused;
     };
 
     FX_CONST uint32_t PROBE_GAS_NO_SLOT = 0xFFFFFFFFu;
@@ -78,7 +84,7 @@ namespace bicameral::sim {
     FX_CONST uint32_t PROBE_GAS_HEADER_OFFSET = 768;    // ProbeGasHeader
     FX_CONST uint32_t PROBE_GAS_DYNAMIC_OFFSET = 1024;  // ここから見出しが場所を持つ欄
     FX_CONST uint32_t PROBE_GAS_ALIGNMENT = 256;
-    FX_CONST uint32_t PROBE_GAS_SPECIES_BYTES = 32;
+    FX_CONST uint32_t PROBE_GAS_SPECIES_BYTES = 40;
     FX_CONST uint32_t PROBE_GAS_CELL_STATE_BYTES = 40;
 
     // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)

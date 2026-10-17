@@ -81,6 +81,16 @@ uint32_t CellTemperature(GasGpuCell cell, GasGpuTotals totals, int64_t kineticMi
     return (uint32_t)temperature;
 }
 
+// p̃ = α(p − p_基準)。頭打ちの温度より熱いセルは α × T_頭 ÷ T(T-0269。gas_reference.cpp の ScalePressure)
+void GasScalePressure(inout GasGpuDerived derived, int64_t referencePressure) {
+    const int64_t deviation = derived.pressure - referencePressure;
+    int64_t scaled = FxMulShiftS64(deviation, (int64_t)GAS_P.soundScale, 32);
+    if (derived.temperature > GAS_P.soundTemperature)
+        scaled = FxDivS64(FxMulShiftS64(scaled, (int64_t)GAS_P.soundTemperature, 0), (int64_t)derived.temperature);
+
+    derived.scaledPressure = scaled;
+}
+
 GasGpuDerived DeriveCellFromReference(GasGpuCell cell, GasGpuTotals totals, int64_t referencePressure) {
     const uint64_t amount = totals.amount;
     FX_ASSERT(amount < MAX_CELL_AMOUNT);
@@ -96,14 +106,26 @@ GasGpuDerived DeriveCellFromReference(GasGpuCell cell, GasGpuTotals totals, int6
     const FxU128 amountTemperature = FxMulU64Full(amount, derived.temperature);
     FX_ASSERT(amountTemperature.hi == 0);
     derived.pressure = (int64_t)MulShiftU64(amountTemperature.lo, PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 32);
+    GasScalePressure(derived, referencePressure);
 
-    // --- p̃ = α(p − p_基準)。頭打ちの温度より熱いセルは α × T_頭 ÷ T(T-0269)---
-    const int64_t deviation = derived.pressure - referencePressure;
-    int64_t scaled = FxMulShiftS64(deviation, (int64_t)GAS_P.soundScale, 32);
-    if (derived.temperature > GAS_P.soundTemperature)
-        scaled = FxDivS64(FxMulShiftS64(scaled, (int64_t)GAS_P.soundTemperature, 0), (int64_t)derived.temperature);
+    return derived;
+}
 
-    derived.scaledPressure = scaled;
+// value × numerator ÷ denominator(0 の向きへ切り捨て。gas_reference.cpp の ScaleSigned)
+int64_t GasScaleTowardZero(int64_t value, uint64_t numerator, uint64_t denominator) {
+    const uint64_t magnitude = FxAbsU64(value);
+
+    return FxApplySign(FxDivU128By64(FxMulU64Full(magnitude, numerator), denominator).quotient, value < 0);
+}
+
+// 気体の空き open(Q16。GAS_GPU_OPEN_FULL 未満)のセルの導く値(gas_reference.cpp の DeriveOpenCell。T-0593・T-0617):
+// 本物の圧力はセル × 空きの体積で読む(空きは下限 GAS_GPU_OPEN_PRESSURE_FLOOR で頭打ち)
+GasGpuDerived DeriveOpenCellFromReference(GasGpuCell cell, GasGpuTotals totals, int64_t referencePressure,
+                                          uint32_t open) {
+    GasGpuDerived derived = DeriveCellFromReference(cell, totals, referencePressure);
+    const uint32_t volume = max(open, GAS_GPU_OPEN_PRESSURE_FLOOR);
+    derived.pressure = GasScaleTowardZero(derived.pressure, GAS_GPU_OPEN_FULL, volume);
+    GasScalePressure(derived, referencePressure);
 
     return derived;
 }
