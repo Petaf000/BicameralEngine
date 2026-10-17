@@ -10,6 +10,7 @@
 #include "common/probe_sim.hlsli"
 #include "core/aliases.h"
 #include "sim/cell_volume.h"
+#include "sim/gas_cells.h"
 #include "sim/world_atmosphere.h"
 #include "sim/world_physics.h"
 
@@ -17,99 +18,15 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint64_t PARTS_TO_Q32_DIVISOR = ATMOSPHERE_PARTS_PER_WHOLE;
-
-        bool SameCell(const reaction::RxCell& a, const reaction::RxCell& b) {
-            if (a.energy != b.energy || a.speciesCount != b.speciesCount)
-                return false;
-
-            for (uint32_t i = 0; i < a.speciesCount; ++i) {
-                if (a.species[i] != b.species[i] || a.amounts[i] != b.amounts[i])
-                    return false;
-            }
-
-            return true;
-        }
-
-        bool IsGas(const BakedReactionTable& table, uint32_t species) {
-            return species < table.speciesCondensed.size() ? table.speciesCondensed[species] == 0 : true;
-        }
-
-        // セルのエネルギーのうち気体のぶん(mJ。式は gas_flow.hlsli の GfGasEnergyPart。GPU の probe_gas_tick.hlsl と同じ関数)。
-        // セルの温度を気体と凝縮相で同じと置く(局所の熱の釣り合い。反応と伝導の温度と同じ 1 つの温度)。セルが気体だけなら全部
-        int64_t GasEnergyPart(const BakedReactionTable& table, const reaction::RxCell& cell) {
-            int64_t chemical = 0;
-            int64_t gasChemical = 0;
-            uint64_t capacity = 0;
-            uint64_t gasCapacity = 0;
-            bool hasCondensed = false;
-            bool hasGas = false;
-            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-                const reaction::RxSpecies& species = table.species[cell.species[i]];
-                const int64_t amountChemical = (int64_t)cell.amounts[i] * species.h0;
-                const uint64_t amountCapacity = cell.amounts[i] * species.heatCapacity;
-                chemical += amountChemical;
-                capacity += amountCapacity;
-                if (IsGas(table, cell.species[i])) {
-                    hasGas = true;
-                    gasChemical += amountChemical;
-                    gasCapacity += amountCapacity;
-                } else {
-                    hasCondensed = true;
-                }
-            }
-
-            return gas::GfGasEnergyPart(cell.energy, chemical, capacity, gasChemical, gasCapacity, hasGas,
-                                        hasCondensed);
-        }
-
-        // 区画の気体の物質: 基準の大気の物質と、区画のセルにある凝縮相でない物質(ID の順)
-        std::vector<uint32_t> CollectGasSpecies(const BakedReactionTable& table,
-                                                std::span<const reaction::RxCell> cells, const ProbeGasField& field,
-                                                std::span<const uint32_t> atmosphere) {
-            std::vector<uint32_t> species(atmosphere.begin(), atmosphere.end());
-            for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
-                const reaction::RxCell& cell = cells[field.GridIndex(region)];
-                for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-                    if (cell.amounts[i] != 0 && IsGas(table, cell.species[i]))
-                        species.push_back(cell.species[i]);
-                }
-            }
-
-            rng::sort(species);
-            species.erase(std::unique(species.begin(), species.end()), species.end());
-
-            return species;
-        }
-
-        // 書き戻すセルの成分(物質 ID の順): 前のセルの凝縮相の成分 + 気体の箱の 0 でない成分
-        std::vector<SpeciesAmount> MergeCellSpecies(const BakedReactionTable& table, const reaction::RxCell& before,
-                                                    const GasCell& gas, std::span<const uint32_t> slots) {
-            std::vector<SpeciesAmount> amounts;
-            for (uint32_t i = 0; i < before.speciesCount; ++i) {
-                if (!IsGas(table, before.species[i]))
-                    amounts.push_back({.species = before.species[i], .amount = before.amounts[i]});
-            }
-
-            for (uint32_t s = 0; s < slots.size(); ++s) {
-                if (gas.amounts[s] != 0)
-                    amounts.push_back({.species = slots[s], .amount = gas.amounts[s]});
-            }
-
-            rng::sort(amounts, {}, &SpeciesAmount::species);
-
-            return amounts;
-        }
-
         static_assert(CELL_OPEN_FULL == GAS_OPEN_FULL);
 
         // 区画のセルの気体の空き(Q16。固体と液体が占めない体積の割合。T-0593・ADR-0268)。全部のセルが全部なら空(今まで通り)
         std::vector<uint32_t> CollectGasOpen(const BakedReactionTable& table, std::span<const reaction::RxCell> cells,
-                                             const ProbeGasField& field, ProbeGasStepReport& report) {
-            std::vector<uint32_t> open(field.RegionCellCount(), CELL_OPEN_FULL);
+                                             ProbeGasStepReport& report) {
+            std::vector<uint32_t> open(cells.size(), CELL_OPEN_FULL);
             bool partial = false;
-            for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
-                const CellVolumeShare share = ShareCellVolume(table, cells[field.GridIndex(region)]);
+            for (uint32_t region = 0; region < cells.size(); ++region) {
+                const CellVolumeShare share = ShareCellVolume(table, cells[region]);
                 open[region] = GasOpenQ16(share, PROBE_CELL_VOLUME_PICOLITERS);
                 if (open[region] == CELL_OPEN_FULL)
                     continue;
@@ -129,17 +46,6 @@ namespace bicameral::sim {
 
         // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
         constexpr std::array<uint32_t, GAS_AXES> GRID_AXIS_OF_GAS_AXIS = {0, 2, 1};
-
-        // 気体の段の外(反応・相変化・置く操作)で、セルの気体の質量が前の段の終わりの before から now に変わった後の運動量
-        // (gas_flow.hlsli の GfMomentumAfterMassChange。減れば速さを保つ・増えれば運動量を保つ。T-0646・ADR-0286)
-        std::array<int64_t, GAS_AXES> MomentumAfterMassChange(const std::array<int64_t, GAS_AXES>& momentum,
-                                                              uint64_t before, uint64_t now) {
-            std::array<int64_t, GAS_AXES> kept = {};
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                kept[axis] = gas::GfMomentumAfterMassChange(momentum[axis], before, now);
-
-            return kept;
-        }
 
     }  // namespace
 
@@ -166,38 +72,15 @@ namespace bicameral::sim {
 
         ProbeGasField field;
         field.m_options = options;
-        field.m_soundSpeedMmPerS = table.environment.soundSpeedMillimetersPerSecond;
-        field.m_gravityMicrometersPerSecond2 = table.environment.gravityMicrometersPerSecond2;
 
         // --- 層ごとの基準の大気(区画の層 = 格子の y。高さ = 床 + y × 0.5 m)---
-        const uint32_t layers = options.sizeCells[1];
-        for (uint32_t layer = 0; layer < layers; ++layer) {
-            const int64_t height = options.floorHeightMillimeters +
-                                   ((int64_t)(options.minCell[1] + layer) * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS);
-            const AtmosphereSample sample = SampleAtmosphere(table.atmosphere, height);
-            std::vector<std::array<uint32_t, 2>> fractions;
-            for (const AtmosphereFraction& fraction : sample.fractions) {
-                fractions.push_back({fraction.species, fraction.partsPerMillion});
-                field.m_atmosphereSpecies.push_back(fraction.species);
-            }
-
-            field.m_layerAtmosphere.push_back(std::move(fractions));
-            field.m_layerTemperatures.push_back(sample.temperatureMilliKelvin);
-        }
-
-        rng::sort(field.m_atmosphereSpecies);
-        field.m_atmosphereSpecies.erase(std::unique(field.m_atmosphereSpecies.begin(), field.m_atmosphereSpecies.end()),
-                                        field.m_atmosphereSpecies.end());
         const int64_t bottom = options.floorHeightMillimeters +
                                ((int64_t)options.minCell[1] * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS);
-        field.m_surfacePressureMicroPascal = AtmospherePressureMicroPascal(
-            table.atmosphere, table, field.m_gravityMicrometersPerSecond2, bottom);
+        field.m_layers = GasAtmosphereLayers::Create(table, bottom, options.sizeCells[1]);
 
         // --- 区画の気体の欄(静止)---
         const uint32_t cells = options.sizeCells[0] * options.sizeCells[1] * options.sizeCells[2];
-        field.m_momentum.assign(cells, {0, 0, 0});
-        field.m_kinetic.assign(cells, 0);
-        field.m_mass.assign(cells, 0);
+        field.m_fields.Assign(cells);
         field.m_ledger.amounts.assign(table.species.size(), 0);
 
         return field;
@@ -214,66 +97,34 @@ namespace bicameral::sim {
     }
 
     GasConfig ProbeGasField::MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const {
-        GasConfig config;
-        config.sizeX = m_options.sizeCells[0];
-        config.sizeY = m_options.sizeCells[2];
-        config.sizeZ = m_options.sizeCells[1];
+        std::array<GasBoundary, GAS_AXES> boundary = {};
         for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            config.boundary[axis] = m_options.boundary[GRID_AXIS_OF_GAS_AXIS[axis]];
+            boundary[axis] = m_options.boundary[GRID_AXIS_OF_GAS_AXIS[axis]];
 
-        config.speciesCount = (uint32_t)slots.size();
-        for (uint32_t s = 0; s < slots.size(); ++s) {
-            const reaction::RxSpecies& species = table.species[slots[s]];
-            config.species[s] = {.molarMass = table.molarMasses[slots[s]],
-                                 .heatCapacity = species.heatCapacity,
-                                 .formationEnergy = species.h0,
-                                 .roundingKey = slots[s]};  // 物質 ID(区画の物質が増えても他の成分の丸めは変わらない)
-        }
-
-        config.substeps =
-            m_options.substeps;  // 投影は使わない(projection.pressure.substeps)。係数の安定の検査のために陽解法の値
-        config.gravity = m_gravityMicrometersPerSecond2 != 0;
-        ApplyWorldPhysics(table.environment, config);
-        config.randomSeed = m_options.randomSeed;
-
-        return config;
-    }
-
-    std::vector<GasCell> ProbeGasField::MakeReference(const BakedReactionTable& /*table*/, const GasConfig& config,
-                                                      std::span<const uint32_t> slots) const {
-        std::vector<GasReferenceLayer> layers;
-        for (uint32_t layer = 0; layer < config.sizeZ; ++layer) {
-            GasReferenceLayer reference{.temperatureMilliKelvin = m_layerTemperatures[layer]};
-            for (const std::array<uint32_t, 2>& fraction : m_layerAtmosphere[layer]) {
-                const auto slot = rng::find(slots, fraction[0]);
-                assert(slot != slots.end());
-                const uint64_t q32 = ((uint64_t)fraction[1] << 32) / PARTS_TO_Q32_DIVISOR;
-                reference.fractionsQ32[slot - slots.begin()] = (uint32_t)std::min<uint64_t>(q32, UINT32_MAX);
-            }
-
-            layers.push_back(reference);
-        }
-
-        return MakeHydrostaticReference(config, layers, m_surfacePressureMicroPascal);
+        // 投影は使わない(projection.pressure.substeps)。係数の安定の検査のために陽解法の値
+        return m_layers.MakeConfig(table, slots,
+                                   {m_options.sizeCells[0], m_options.sizeCells[2], m_options.sizeCells[1]}, boundary,
+                                   m_options.substeps, m_options.randomSeed);
     }
 
     GasBox ProbeGasField::MakeAtmosphereBox(const BakedReactionTable& table) const {
-        const GasConfig config = MakeConfig(table, m_atmosphereSpecies);
+        const GasConfig config = MakeConfig(table, m_layers.Species());
 
-        return MakeGasBox(config, MakeReference(table, config, m_atmosphereSpecies));
+        return MakeGasBox(config, m_layers.MakeReference(config, m_layers.Species()));
     }
 
     reaction::RxCell ProbeGasField::ReferenceCell(const BakedReactionTable& table, uint32_t gridY) const {
         assert(gridY >= m_options.minCell[1] && gridY < m_options.minCell[1] + m_options.sizeCells[1]);
-        const GasConfig config = MakeConfig(table, m_atmosphereSpecies);
-        const GasCell reference = MakeReference(table, config, m_atmosphereSpecies)[gridY - m_options.minCell[1]];
+        const std::span<const uint32_t> atmosphere = m_layers.Species();
+        const GasConfig config = MakeConfig(table, atmosphere);
+        const GasCell reference = m_layers.MakeReference(config, atmosphere)[gridY - m_options.minCell[1]];
 
         reaction::RxCell cell = reaction::RxMakeEmptyCell(reference.energy);
         for (uint32_t s = 0; s < config.speciesCount; ++s) {
             if (reference.amounts[s] == 0)
                 continue;
 
-            cell.species[cell.speciesCount] = m_atmosphereSpecies[s];
+            cell.species[cell.speciesCount] = atmosphere[s];
             cell.amounts[cell.speciesCount] = reference.amounts[s];
             ++cell.speciesCount;
         }
@@ -284,135 +135,59 @@ namespace bicameral::sim {
     ProbeGasStepReport ProbeGasField::Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells,
                                            uint64_t tick, std::vector<uint32_t>& changed) {
         ProbeGasStepReport report;
-        const std::vector<uint32_t> slots = CollectGasSpecies(table, cells, *this, m_atmosphereSpecies);
-        report.gasSpecies = (uint32_t)slots.size();
-        if (slots != m_projectionSpecies) {
+        std::vector<reaction::RxCell> region(RegionCellCount());
+        for (uint32_t index = 0; index < RegionCellCount(); ++index)
+            region[index] = cells[GridIndex(index)];
+
+        // --- 区画のセル → 気体の箱(sim/gas_cells。多重解像度の世界と同じ写し)---
+        GasCellsStep step;
+        step.slots = CollectGasSpecies(table, region, m_layers.Species());
+        report.gasSpecies = (uint32_t)step.slots.size();
+        if (step.slots != m_projectionSpecies) {
             m_projection = {};
-            m_projectionSpecies = slots;
+            m_projectionSpecies = step.slots;
         }
 
-        // --- 区画のセル → 気体の箱 ---
-        const GasConfig config = MakeConfig(table, slots);
-        GasBox box = MakeGasBox(config, MakeReference(table, config, slots));
-        box.tick = tick;
-        box.openQ16 = CollectGasOpen(table, cells, *this, report);
-        std::vector<int64_t> condensedEnergy(RegionCellCount(), 0);
-        std::array<int64_t, GAS_AXES> lostMomentum = {};  // 気体が無くなったセルの運動量(格子の軸。書き戻す時に帳簿へ)
-        for (uint32_t region = 0; region < RegionCellCount(); ++region) {
-            const reaction::RxCell& cell = cells[GridIndex(region)];
-            GasCell& gas = box.cells[region];
-            gas = {};
-            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-                const auto slot = rng::find(slots, cell.species[i]);
-                if (slot != slots.end())
-                    gas.amounts[slot - slots.begin()] = cell.amounts[i];
-            }
-
-            const int64_t gasPart = GasEnergyPart(table, cell);
-            condensedEnergy[region] = cell.energy - gasPart;
-            gas.energy = gasPart;
-
-            // 気体が無くなったセル(反応が使い切った)の運動量は外へ出たものとして帳簿へ、運動エネルギーのぶんは凝縮相の熱へ
-            // (欄と帳簿は書き戻す時に替える。流さない刻みは何も変えない)
-            const bool empty = std::ranges::all_of(gas.amounts, [](uint64_t amount) { return amount == 0; });
-            if (empty) {
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    lostMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] += m_momentum[region][axis];
-
-                condensedEnergy[region] += m_kinetic[region];
-                continue;
-            }
-
-            // 段の外で質量が減ったセルは速さを保つ(減った気体の運動量は帳簿へ)。運動のエネルギーの減った分は、箱のエネルギーに
-            // 前の運動エネルギーのぶんを足すので熱になる(T-0646)
-            const std::array<int64_t, GAS_AXES> kept = MomentumAfterMassChange(m_momentum[region], m_mass[region],
-                                                                               GasCellMass(box, gas));
-            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                lostMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] += m_momentum[region][axis] - kept[axis];
-
-            gas.momentum = kept;
-            gas.energy += m_kinetic[region];
-        }
+        const GasConfig config = MakeConfig(table, step.slots);
+        step.box = MakeGasBox(config, m_layers.MakeReference(config, step.slots));
+        step.box.tick = tick;
+        step.box.openQ16 = CollectGasOpen(table, region, report);
+        LoadGasCells(table, region, m_fields, step);
 
         // --- 1 刻み(圧力の解き方を選ぶ)---
         const GasProjection projectionBefore = m_projection;
         if (m_options.pressure == ProbeGasPressure::Explicit)
-            StepGas(box);
+            StepGas(step.box);
         else
-            report.projection = StepGasProjection(box, m_projection, m_options.projection);
+            report.projection = StepGasProjection(step.box, m_projection, m_options.projection);
 
-        // --- 書き戻せるか(1 セルの成分がインラインの数に収まる。収まらなければ流さない)---
-        std::vector<std::vector<SpeciesAmount>> merged(RegionCellCount());
-        for (uint32_t region = 0; region < RegionCellCount(); ++region) {
-            merged[region] = MergeCellSpecies(table, cells[GridIndex(region)], box.cells[region], slots);
-            if (merged[region].size() > reaction::RX_MAX_CELL_SPECIES) {
-                m_projection = projectionBefore;
-                report.skippedCellOverflow = true;
-                return report;
-            }
+        // --- 気体の箱 → 区画のセル・欄・帳簿(帳簿は格子の軸)---
+        GasCellsLedger ledger{.amounts = std::vector<int64_t>(m_ledger.amounts.size(), 0)};
+        std::vector<uint8_t> regionChanged;
+        if (!StoreGasCells(table, step, m_options.restSpeedUnits, region, m_fields, ledger, regionChanged)) {
+            m_projection = projectionBefore;
+            report.skippedCellOverflow = true;
+            return report;
         }
 
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            m_ledger.momentum[axis] -= lostMomentum[axis];
+        for (uint32_t id = 0; id < ledger.amounts.size(); ++id)
+            m_ledger.amounts[id] += ledger.amounts[id];
 
-        // --- 帳簿(物質 ID ごと・格子の軸)---
-        for (uint32_t s = 0; s < slots.size(); ++s)
-            m_ledger.amounts[slots[s]] += box.ledger.amounts[s];
+        m_ledger.energy += ledger.energy;
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+            m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] += ledger.momentum[axis];
+            m_ledger.restMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] += ledger.restMomentum[axis];
+        }
 
-        m_ledger.energy += box.ledger.energy;
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] += box.ledger.momentum[axis];
+        m_ledger.restEnergy += ledger.restEnergy;
+        report.restedCells = ledger.restedCells;
 
-        // --- 気体の箱 → 区画のセル(凝縮相の成分とエネルギーはそのまま)---
-        for (uint32_t region = 0; region < RegionCellCount(); ++region) {
-            const uint32_t index = GridIndex(region);
-            const reaction::RxCell& before = cells[index];
-            const GasCell& gas = box.cells[region];
-            const int64_t kinetic = gas::GfKineticMilliJoule(GasKineticEnergy(box, gas));  // µJ → mJ(最も近い整数)
-            const uint64_t mass = GasCellMass(box, gas);
-
-            const std::vector<SpeciesAmount>& amounts = merged[region];
-            reaction::RxCell after = reaction::RxMakeEmptyCell(condensedEnergy[region] + gas.energy - kinetic);
-            for (uint32_t i = 0; i < amounts.size(); ++i) {
-                after.species[i] = amounts[i].species;
-                after.amounts[i] = amounts[i].amount;
-            }
-
-            after.speciesCount = (uint32_t)amounts.size();
-            m_momentum[region] = gas.momentum;
-            m_kinetic[region] = kinetic;
-            m_mass[region] = mass;
-
-            // 気体が残らなかったセルの運動量は帳簿へ(質量の無い運動量は持たない。次に現れる気体は静止して現れる。T-0646)
-            if (mass == 0) {
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= gas.momentum[axis];
-
-                m_momentum[region] = {0, 0, 0};
-            }
-
-            // 静止の丸め(T-0723。既定は切る): 速さがどの軸も restSpeedUnits 未満なら運動量を 0 に(帳簿へ)、運動エネルギーのぶんは熱へ
-            if (m_options.restSpeedUnits != 0 && mass != 0 && m_momentum[region] != std::array<int64_t, GAS_AXES>{} &&
-                rng::all_of(m_momentum[region], [&](int64_t momentum) {
-                    return fx::FxAbsU64(momentum) < mass * m_options.restSpeedUnits;
-                })) {
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
-                    m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= m_momentum[region][axis];
-                    m_ledger.restMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] -= m_momentum[region][axis];
-                }
-
-                after.energy += m_kinetic[region];
-                m_ledger.restEnergy += m_kinetic[region];
-                m_kinetic[region] = 0;
-                m_momentum[region] = {0, 0, 0};
-                ++report.restedCells;
-            }
-
-            if (SameCell(after, before))
+        for (uint32_t index = 0; index < RegionCellCount(); ++index) {
+            if (regionChanged[index] == 0)
                 continue;
 
-            cells[index] = after;
-            changed.push_back(index);
+            cells[GridIndex(index)] = region[index];
+            changed.push_back(GridIndex(index));
             ++report.changedCells;
         }
 
@@ -421,7 +196,7 @@ namespace bicameral::sim {
 
     int64_t ProbeGasField::KineticEnergySum() const {
         int64_t sum = 0;
-        for (const int64_t kinetic : m_kinetic)
+        for (const int64_t kinetic : m_fields.kinetic)
             sum += kinetic;
 
         return sum;
@@ -436,11 +211,11 @@ namespace bicameral::sim {
         };
 
         for (uint32_t region = 0; region < RegionCellCount(); ++region) {
-            for (const int64_t momentum : m_momentum[region])
+            for (const int64_t momentum : m_fields.momentum[region])
                 mix((uint64_t)momentum);
 
-            mix((uint64_t)m_kinetic[region]);
-            mix(m_mass[region]);
+            mix((uint64_t)m_fields.kinetic[region]);
+            mix(m_fields.mass[region]);
         }
 
         for (const int64_t amount : m_ledger.amounts)
@@ -457,11 +232,11 @@ namespace bicameral::sim {
         uint64_t sum = 0;
         for (uint32_t region = 0; region < RegionCellCount(); ++region) {
             uint64_t term = ProbeRegionHashBegin(PROBE_GAS_CELL_HASH_SEED, region);
-            for (const int64_t momentum : m_momentum[region])
+            for (const int64_t momentum : m_fields.momentum[region])
                 term = ProbeRegionHashAdd(term, momentum);
 
-            term = ProbeRegionHashAdd(term, m_kinetic[region]);
-            const uint64_t mass = region < m_mass.size() ? m_mass[region] : 0;  // GPU の欄は作った時 0
+            term = ProbeRegionHashAdd(term, m_fields.kinetic[region]);
+            const uint64_t mass = region < m_fields.mass.size() ? m_fields.mass[region] : 0;  // GPU の欄は作った時 0
             sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, (int64_t)mass));
         }
 

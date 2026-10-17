@@ -203,6 +203,10 @@ add_executable(multires_liquid_test multires_liquid_test.cpp)  # 多重解像度
 target_precompile_headers(multires_liquid_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(multires_liquid_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME multires_liquid COMMAND multires_liquid_test)
+add_executable(multires_gas_test multires_gas_test.cpp)  # 多重解像度の 1 段の気体が仮の世界の気体と毎刻みビット一致(T-0720)
+target_precompile_headers(multires_gas_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(multires_gas_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME multires_gas COMMAND multires_gas_test)
 
 set_tests_properties(cell_volume PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)

@@ -237,6 +237,32 @@ namespace bicameral::sim {
         int64_t scaledPressure = 0;  // p̃ = α(p − p_基準)(µPa)
     };
 
+    // --- 面のつながり(T-0720)---
+    // 小刻みは面の一覧だけを回す(箱の形は面の一覧を作る時だけ)。箱の並びの外のセル(多重解像度の世界のブロックの順)でも、
+    // 呼ぶ側が面の一覧とセルの層(GasBox::cellLayers)を渡せば同じ小刻みが回る(sim/multires_gas。箱の面は MakeGasBoxLinks)
+
+    // 面の片側(箱の中のセル・開いた境界の外・壁)
+    enum class GasSideKind : uint8_t {
+        Cell,
+        Ghost,
+        Wall,
+    };
+
+    struct GasFaceSide {
+        GasSideKind kind = GasSideKind::Cell;
+        uint32_t index = 0;  // Cell: セルの番号 / Ghost: 層 z(面を作ったセルの層)
+    };
+
+    // 1 つの面の両側と、その外側の隣(MUSCL の勾配)。軸のマイナス側が left
+    struct GasFaceLink {
+        GasFaceSide left;        // 軸のマイナス側
+        GasFaceSide right;       // 軸のプラス側
+        GasFaceSide leftOuter;   // left のさらにマイナス側
+        GasFaceSide rightOuter;  // right のさらにプラス側
+        uint32_t axis = 0;
+        uint32_t id = 0;  // 面の番号(乱数の丸めの ID。並べた順ではなく場所から決める。R6)
+    };
+
     // 箱の外との出入りの帳簿(外から入った量を正)。閉じた箱の検査はこれを差し引く(07 §4)
     struct GasLedger {
         GasPerSpecies<int64_t> amounts;
@@ -268,6 +294,10 @@ namespace bicameral::sim {
         // 帳簿へ)。基準との質量の差は「基準 × 空き」から数える(固体の多いセルの静かな大気は動かない)。
         // 陽解法(StepGas)だけが読む(投影は T-0617)。世界のセルから毎刻み作る(sim/cell_volume。sim/probe_gas)
         std::vector<uint32_t> openQ16;
+
+        // セルの番号 → 層 z(基準と開いた境界の外を読む層)。空 = 箱の並び(番号 ÷ (sizeX × sizeY))。
+        // 箱の並びの外のセルを面の一覧で回す時(StepGasLinks(box, links))に呼ぶ側が書く(T-0720)
+        std::vector<uint32_t> cellLayers;
 
         [[nodiscard]] uint32_t Index(uint32_t x, uint32_t y, uint32_t z) const {
             return x + config.sizeX * (y + config.sizeY * z);
@@ -331,6 +361,13 @@ namespace bicameral::sim {
 
     // 1 刻み(substeps 回の小刻み)
     void StepGas(GasBox& box);
+
+    // 箱の面の一覧(どの面も 1 回。境界は config.boundary。StepGas(box) が回す面)
+    [[nodiscard]] std::vector<GasFaceLink> MakeGasBoxLinks(const GasBox& box);
+
+    // 面の一覧 links で 1 刻み(T-0720)。呼ぶ側の約束: links のセルの番号は box.cells の番号・層は box.cellLayers(空なら箱の並び)・
+    // 開いた境界の外の層は config.sizeZ 層の中。周期的な面は links に両側のセルとして書く
+    void StepGasLinks(GasBox& box, std::span<const GasFaceLink> links);
 
     [[nodiscard]] GasTotals SumGas(const GasBox& box);
 

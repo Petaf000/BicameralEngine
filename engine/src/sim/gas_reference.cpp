@@ -24,25 +24,12 @@ namespace bicameral::sim {
 
         namespace fx = bicameral::fx;
 
-        // 面の片側(箱の中のセル・開いた境界の外・壁)
-        enum class SideKind : uint8_t {
-            Cell,
-            Ghost,
-            Wall,
-        };
+        // 面の片側と面のつながり(gas_reference.h。T-0720)
+        using SideKind = GasSideKind;
+        using FaceSide = GasFaceSide;
 
-        struct FaceSide {
-            SideKind kind = SideKind::Cell;
-            uint32_t index = 0;  // Cell: セルの番号 / Ghost: 層 z
-        };
-
-        struct GasFace {
-            FaceSide left;        // 軸のマイナス側
-            FaceSide right;       // 軸のプラス側
-            FaceSide leftOuter;   // left のさらにマイナス側(MUSCL の勾配)
-            FaceSide rightOuter;  // right のさらにプラス側
-            uint32_t axis = 0;
-            uint32_t id = 0;      // 面の番号(乱数の丸めの ID。並べた順ではなく場所から決める。R6)
+        // 面のつながり + 小刻みの中の作業の値
+        struct GasFace : GasFaceLink {
             int64_t flow = 0;     // 質量の流れ(mg/小刻み。左 → 右が正)
             int64_t impulse = 0;  // 面の圧力の力積(左のセルから引き、右のセルへ足す)
             // 右のセルへ足す力積(面が一部だけ開いた時は左と違う。差は塞いだ物が受けて帳簿へ。T-0593。ふつうは impulse と同じ)
@@ -222,6 +209,9 @@ namespace bicameral::sim {
         }
 
         uint32_t CellLayer(const GasBox& box, uint32_t index) {
+            if (!box.cellLayers.empty())
+                return box.cellLayers[index];
+
             return index / (box.config.sizeX * box.config.sizeY);
         }
 
@@ -865,6 +855,24 @@ namespace bicameral::sim {
 
     void StepGas(GasBox& box) {
         const std::vector<GasFace> layout = EnumerateFaces(box);
+        for (uint32_t substep = 0; substep < box.config.substeps; ++substep)
+            Substep(box, layout, (box.tick * box.config.substeps) + substep);
+
+        ++box.tick;
+    }
+
+    std::vector<GasFaceLink> MakeGasBoxLinks(const GasBox& box) {
+        const std::vector<GasFace> faces = EnumerateFaces(box);
+
+        return {faces.begin(), faces.end()};
+    }
+
+    void StepGasLinks(GasBox& box, std::span<const GasFaceLink> links) {
+        assert(box.cellLayers.empty() || box.cellLayers.size() == box.cells.size());
+        std::vector<GasFace> layout(links.size());
+        for (size_t face = 0; face < links.size(); ++face)
+            static_cast<GasFaceLink&>(layout[face]) = links[face];
+
         for (uint32_t substep = 0; substep < box.config.substeps; ++substep)
             Substep(box, layout, (box.tick * box.config.substeps) + substep);
 
