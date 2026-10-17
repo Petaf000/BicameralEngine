@@ -39,7 +39,12 @@
 ## 状態の登録(T-0711・wt3)との合わせ方
 - 登録の欄の「保存量か(帳簿の列)」が true の欄は、帳簿の列 1 + 物質の数 + k(登録の順)を持つ。列の数 = MultiresCapacity::ledgerColumns は登録から作る。
 - 登録が欄ごとに「その欄の保存量の和」を出す関数を 1 つ持てば、ComputeConservedTotals は セル(エネルギー・元素)+ 登録の欄 − 帳簿 を回るだけ(ConservedTotals に欄の列を足す)。
-- 2026-10-17 の時点で wt3 の t-0711 にはまだ登録のコードが無かった(読んだ時点)。マージの後に、本体か段 1 ③〜④ の作業役が上の 2 点で合わせる。
+- wt3 の t-0711(2026-10-17 16:55 に読んだ作業中の版): 登録 SfFieldDesc に SF_FLAG_CONSERVED があり、VOLUME の欄を粗くした余りを
+  欄ごとの「欄の帳簿」(MultiresField::ledger。int64・[MR_LEDGER_LEVELS × 値の数]・MrLedgerAddress)に置いている(「T-0712 に入るまでの置き場」とコメントあり)。
+  **合わせ方(マージの後に 1 本)**: SF_FLAG_CONSERVED の欄の値 c を世界の帳簿の列 1 + 物質の数 + (欄の保存量の通し番号)に。余りは符号つきなので
+  WlEnergyEntry と同じく正 → 粗くした端数・出、負 → 粗くした端数・入(WlSlot(WL_REASON_COARSEN_REMAINDER, 向き))、
+  余りは子のレベルの単位の丸ごとの数なので AddWorldLedgerUnits で。MultiresField::ledger と LoadNestFieldLedger は消す。
+  ledgerColumns は「1 + 物質の数 + 保存量の欄の値の数」を登録から作る。両方とも MR_LEDGER_LEVELS を使うので、この版の段の下限 -24 はそのまま効く。
 
 ## 判断待ち(仮〔ユーザー未確認〕で進めたもの。どれも取り消しやすい)
 1. **欄はいつも 16 本持つ**(作り手から見た違い: なし。費用だけ。実験室の箱で帳簿が約 230 KB・毎刻み読み戻してハッシュする)。重ければ「使う理由の欄だけ持つ」に変える(番地の関数 1 つ)。おすすめ: 今のまま測ってから。
@@ -47,9 +52,10 @@
 3. **表の差し替えで帳簿を付け替えない**(作り手から見た違い: 物質の一覧が変わる表に替えた刻みの前後で保存の検査を比べられない〔元素の定義が変わるので元々比べられない〕)。名前で付け替えるのは段 8。
 
 ## 残り(司令塔へ)
-- GPU は畳む段(AddLedgerCarrying)と実験室の箱の改造だけがこの型を書く。GPU の確かめは gpu_lab_box・gpu_multires_[qu] の 2 組だけ回した(結果は作業ログ)。
+- GPU は畳む段(AddLedgerCarrying)と実験室の箱の改造だけがこの型を書く。GPU の確かめは gpu_lab_box・gpu_multires_[qu] の 2 組だけ回した(通った)。gpu_multires の鎖・wide の組は回していない(欄 0 の番地は前と同じ・帳簿の大きさだけ変わった)。
 - 読み戻し・ハッシュの費用(帳簿が 16 × 88 × 列 語)は未計測。
 
 ## 作業ログ
 - 2026-10-17(wt4・作業役): world_ledger.hlsli を作り、MR の帳簿を欄 0 に・保存の検査を Σ − (入 − 出) に・実験室の箱の改造を CPU と GPU で載せた。
   段の下限 -24。release のビルド警告 0・^multires_ 8 本・lab_box が通った。ADR-0331。
+- 同: GPU(release)gpu_lab_box(gpu・warp)・gpu_multires_quiet / uniform(gpu・warp)が通った(CPU とビット一致。改造の欄と畳む段の繰り上げ)。wt3 の登録との合わせ方を書いた。
