@@ -29,3 +29,6 @@ multires_implicit_test の場面の空気だけ、T-0597 より前の比熱(`gas
   冷たい一様な所の端のセルが刻みごとに 1〜2 mK ずつ外へ動け、次の刻みはそこが範囲の端になった(拡散が 1.4 倍で V の揺れが端に届いた)。
   直し: 温度を T0 + (E − E0) ÷ C と見て範囲(mK × 2^16 のまま)に収まるエネルギーの境を出す(ImLowestEnergy・ImHighestEnergy。CPU と GPU の ImMark)・
   余裕の既定 1 → 0。安全網で戻したセルの数はほぼ同じ(ADR-0019 の追記)。試験の空気を既定の比熱に戻し、行き過ぎの判定の余裕を 2 → 0 mK に。
+  試験(2026-10-17 release・main f0d6ecc の上): multires_* 9 本・probe_phase・probe_phase_porous_stone・lab_box・gpu_multires_implicit(HW・WARP)・
+  _tree・_tree_stress・_build・_conduction(熱い点・_chain・_stress)が通った。ビルドの警告 0・archmap --check OK。
+  並走との重なり: wt6(T-0647 熱が負のセル)が陰解法の温度を触るなら、境の式は T0 − 最小・最大 − T0(どちらも 0 以上)だけを使うので負の温度でも同じに働く。
