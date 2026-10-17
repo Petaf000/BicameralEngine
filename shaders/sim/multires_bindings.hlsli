@@ -7,6 +7,7 @@
 
 #include "common/multires_activity.hlsli"
 #include "common/multires_conduction.hlsli"
+#include "common/world_ledger.hlsli"
 
 // --- 結び付け ---
 // u0 ブロックの見出し [枠] / u1 セル [一様の値 × 枠][頁 × 512](T-0102)/ u2 端数 [端数の枠 × 512] / u3 数える欄(MR_COUNTER_*)/
@@ -301,6 +302,44 @@ void AddToLedger(int32_t level, uint32_t column, uint32_t lostBits) {
     }
 
     InterlockedAdd(g_ledger[address], (uint64_t)lostBits);
+}
+
+// --- 世界の帳簿の 1 つの型(common/world_ledger.hlsli。T-0712。CPU は sim/multires_nest.cpp の AddWorldLedgerBits)---
+
+// 欄 slot・レベル level・列 column に bits(そのレベルの単位 × 2^-64)を足す。桁あふれは粗い段へ繰り上げる
+// (atomic の前の値で自分の足し算の桁あふれが分かるので、足した値の和も繰り上がりの回数も順によらない)
+void AddWorldLedgerCarrying(uint32_t slot, int32_t level, uint32_t column, uint64_t bits) {
+    for (; bits != 0; --level) {
+        const uint32_t address = WlAddress(slot, level, column, g_ledgerColumns);
+        if (address == MR_NO_BLOCK) {
+            InterlockedAdd(g_counters[MR_COUNTER_LEDGER_OUTSIDE], 1u);
+            return;
+        }
+
+        uint64_t before = 0;
+        InterlockedAdd(g_ledger[address], bits, before);
+        bits = before + bits < bits ? WlCarryBits() : 0;
+    }
+}
+
+// 丸ごとの量 units(レベル level の単位)
+void AddWorldLedgerUnits(uint32_t slot, int32_t level, uint32_t column, uint64_t units) {
+    const WlWholeSplit split = WlSplitWholeUnits(units);
+    AddWorldLedgerCarrying(slot, level - WL_WHOLE_LOW_LEVELS, column, split.low);
+    AddWorldLedgerCarrying(slot, level - WL_WHOLE_HIGH_LEVELS, column, split.high);
+}
+
+// レベル level のセル 1 つの中身全部(エネルギー・インラインの物質)を理由 reason の向き direction で(負のエネルギーは逆の向き)
+void AddWorldLedgerCell(uint32_t reason, uint32_t direction, int32_t level, RxCell cell) {
+    const WlSignedEntry energy = WlEnergyEntry(cell.energy, direction);
+    AddWorldLedgerUnits(WlSlot(reason, energy.direction), level, WL_COLUMN_ENERGY, energy.magnitude);
+
+    const uint32_t slot = WlSlot(reason, direction);
+    FX_UNROLL
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        if (i < cell.speciesCount)
+            AddWorldLedgerUnits(slot, level, WL_COLUMN_SPECIES_BASE + cell.species[i], cell.amounts[i]);
+    }
 }
 
 // --- 頁に広げて刻むブロックの一覧(T-0102)---

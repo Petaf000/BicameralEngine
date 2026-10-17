@@ -613,18 +613,9 @@ RxCell FoldValue(MrBlock block) {
 
 // 帳簿の段 ledgerLevel に bits(その段の単位 × 2^-64)を足す。桁あふれ(= 1 段粗い段の 2^61)は粗い段へ繰り上げる
 // (multires_activity.cpp の AddLedgerBits と同じ結果。atomic の前の値で自分の足し算の桁あふれが分かる)
+// (世界の帳簿の「粗くした端数・出」の欄。T-0712)
 void AddLedgerCarrying(int32_t ledgerLevel, uint32_t column, uint64_t bits) {
-    for (; bits != 0; --ledgerLevel) {
-        const uint32_t address = MrLedgerAddress(ledgerLevel, column, g_ledgerColumns);
-        if (address == MR_NO_BLOCK) {
-            InterlockedAdd(g_counters[MR_COUNTER_LEDGER_OUTSIDE], 1u);
-            return;
-        }
-
-        uint64_t before = 0;
-        InterlockedAdd(g_ledger[address], bits, before);
-        bits = before + bits < bits ? FX_U64(1u << 29, 0u) : 0;
-    }
+    AddWorldLedgerCarrying(WlSlot(WL_REASON_COARSEN_REMAINDER, WL_DIRECTION_OUT), ledgerLevel, column, bits);
 }
 
 // 端数の枠のセル index の端数を帳簿の同じ段へ(ReturnFractionsToLedger の 1 セル分)。

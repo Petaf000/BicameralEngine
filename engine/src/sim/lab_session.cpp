@@ -323,7 +323,7 @@ namespace bicameral::sim {
         // 箱は 1 レベルで帳簿を使わない(いつも 0)。物質の数の違う表で作り直しても、GPU の箱の大きさ(作った時の列)に合わせる
         m_initial = MakeLabBoxNest(m_table, Shape());
         m_initial.capacity.ledgerColumns = m_ledgerColumns;
-        m_initial.ledger.assign(size_t{multires::MR_LEDGER_LEVELS} * m_ledgerColumns, 0);
+        m_initial.ledger.assign(multires::WlLedgerWords(m_ledgerColumns), 0);
         m_cpu = m_initial;
         m_read = m_initial;
         m_uploaded = false;  // 次の刻みのリストの先頭で、初めの箱を写し直す

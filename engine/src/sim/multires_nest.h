@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "common/multires_tree.hlsli"
+#include "common/world_ledger.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_wide_cell.h"
 #include "sim/reaction_table.h"
@@ -37,7 +38,7 @@ namespace bicameral::sim {
         uint32_t fractions = 0;       // 端数の枠の数
         uint32_t pages = 0;           // 世界の頁の数(観察の枠の頁は別に観察の枠の数だけ。T-0102)
         uint32_t indexEntries = 0;    // 索引の大きさ(2 の冪。世界の枠の 2 倍以上を勧める)
-        uint32_t ledgerColumns = 1;   // 帳簿の列(1 + 物質の数)
+        uint32_t ledgerColumns = 1;   // 帳簿の列(1 + 物質の数 + 登録した欄の保存量の数。world_ledger.hlsli)
         int32_t rootLevel = 0;        // 根のレベル
     };
 
@@ -75,7 +76,7 @@ namespace bicameral::sim {
         // [世界の枠の空きのスタック(数は counters[MR_COUNTER_FREE_BLOCKS])][世界の頁の空きのスタック(MR_COUNTER_FREE_PAGES)]
         std::vector<uint32_t> freeBlocks;
         std::vector<uint32_t> freeFractions;  // 端数の枠の空きのスタック(数は counters[MR_COUNTER_FREE_FRACTIONS])
-        std::vector<uint64_t> ledger;         // 世界の帳簿 [MR_LEDGER_LEVELS × ledgerColumns]
+        std::vector<uint64_t> ledger;         // 世界の帳簿 [WlLedgerWords(ledgerColumns)](world_ledger.hlsli。T-0712)
         std::array<uint32_t, multires::MR_COUNTER_COUNT> counters{};
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
@@ -318,8 +319,23 @@ namespace bicameral::sim {
     // 索引・要求・種は入らない。パッチの列が空なら、パッチを入れる前(T-0024 より前)と同じ値
     [[nodiscard]] uint64_t HashWholeNest(const MultiresNest& nest);
 
-    // 本物の葉のセルと世界の帳簿の、元素の数とエネルギーの合計を finestLevel の単位 × 2^-64 で
-    // (finestLevel は使っている最も細かいレベルと、帳簿に落ちた最も細かいレベル以上)
+    // --- 世界の帳簿(world_ledger.hlsli。T-0712)---
+
+    // 帳簿の欄 slot(WlSlot)・レベル level・列 column に bits(そのレベルの単位 × 2^-64)を足す。桁あふれは粗い段へ繰り上げる
+    // (GPU の multires_bindings.hlsli の AddWorldLedgerCarrying と同じ結果)。帳簿の外は MR_COUNTER_LEDGER_OUTSIDE を数える
+    void AddWorldLedgerBits(MultiresNest& nest, uint32_t slot, int32_t level, uint32_t column, uint64_t bits);
+
+    // 丸ごとの量 units(レベル level の単位)を足す(WlSplitWholeUnits の 2 つの段へ)
+    void AddWorldLedgerUnits(MultiresNest& nest, uint32_t slot, int32_t level, uint32_t column, uint64_t units);
+
+    // レベル level のセル 1 つの中身全部(エネルギー・インラインの物質)を理由 reason の向き direction で載せる
+    // (改造で消した中身は出・置いた中身は入。負のエネルギーは逆の向き。GPU は multires_bindings.hlsli の AddWorldLedgerCell)
+    void AddWorldLedgerCell(MultiresNest& nest, uint32_t reason, uint32_t direction, int32_t level,
+                            const reaction::RxCell& cell);
+
+    // 保存の検査の 1 関数(T-0712): 本物の葉のセルの元素の数とエネルギーの合計 − 帳簿(入 − 出。全部の理由)を
+    // finestLevel の単位 × 2^-64 で(finestLevel は使っている最も細かいレベルと、帳簿に載った最も細かいレベル以上)。
+    // 外との出入りを全部帳簿に載せていれば、刻んでも改造しても変わらない
     [[nodiscard]] ConservedTotals ComputeConservedTotals(const MultiresNest& nest, const BakedReactionTable& table,
                                                          int32_t finestLevel);
 
