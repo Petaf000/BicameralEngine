@@ -181,6 +181,11 @@ add_executable(cell_volume_test cell_volume_test.cpp)
 target_precompile_headers(cell_volume_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(cell_volume_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME cell_volume COMMAND cell_volume_test)
+
+add_executable(cell_view_test cell_view_test.cpp)  # セルの見立てが今の熱・空き・液体・気体の値とビット一致(T-0713)
+target_precompile_headers(cell_view_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)
+target_link_libraries(cell_view_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME cell_view COMMAND cell_view_test)
 set_tests_properties(cell_volume PROPERTIES TIMEOUT 1800)
 set_tests_properties(physics_heat PROPERTIES TIMEOUT 900)
 set_tests_properties(reaction_replay_table PROPERTIES TIMEOUT 600)
