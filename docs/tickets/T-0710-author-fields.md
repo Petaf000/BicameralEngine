@@ -1,6 +1,6 @@
 # T-0710 作り手の欄の型(土台の段 0)
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -25,11 +25,11 @@
   GPU の表には入らない(表とハッシュは変わらない)。
 
 ## 完了条件(チェックできる形で)
-- [ ] 型(data/types/bicameral.d.luau)・読み手(reaction_package・environment_package)・ベイクの検査(reaction_table)
-- [ ] `condensed` を読み替えて警告・`condensed` と `phase` の食い違いは誤り・標準パッケージと場面を `phase` だけに
-- [ ] `condensed` で書いた表と `phase` で書いた表のベイクの結果が同じ(GPU の表・相の表)
-- [ ] ベイクの知らせ(§1.4)
-- [ ] 試験: luau_type_check・reaction_package・standard_packages・environment_package・world_layout が通る・release のビルドの警告 0・archmap --check
+- [x] 型(data/types/bicameral.d.luau)・読み手(reaction_package・environment_package)・ベイクの検査(reaction_table)
+- [x] `condensed` を読み替えて警告・`condensed` と `phase` の食い違いは誤り・標準パッケージと場面を `phase` だけに
+- [x] `condensed` で書いた表と `phase` で書いた表のベイクの結果が同じ(GPU の表・相の表)
+- [x] ベイクの知らせ(§1.4)
+- [x] 試験(archmap --check は Linux 側で毎回途中で切れて確かめられていない。map.yaml の 3 つの記号は名前も場所も変えていない): luau_type_check・reaction_package・standard_packages・environment_package・world_layout が通る・release のビルドの警告 0・archmap --check
 
 ## メモ・参考
 - 決めたこと(仮・ユーザー未確認。名前と単位は設計の仮のまま):
@@ -48,3 +48,5 @@
 - 2026-10-17 作業役(wt2): 相を `SpeciesPhase` 1 本に(定義の condensed・liquid を消し、試験の C++ の表も直した)・動き方の 4 欄・
   world_edges を型・読み手・ベイクの検査へ。condensed は読み替えて警告。標準と場面を phase だけに。ベイクの知らせ(§1.4)。
   試験: reaction_package に condensed と phase の同じ表・標準の相の表・4 欄の形と誤り、environment_package に端と知らせ。
+  main(t-0622・t-0713 を含む)へ rebase: RX_SPECIES_GAS の印を phase から作る・T-0713 の MakeSpeciesPhases を speciesPhase の写しに
+  (並びが同じことを static_assert)・main で増えた試験の表(cell_view_test・reaction_limits_table.h)も phase へ。

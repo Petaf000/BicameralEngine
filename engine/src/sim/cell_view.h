@@ -2,7 +2,7 @@
 //
 // データの流れ: ベイクの表(BakedReactionTable)→ 物質ごとの相の表(MakeSpeciesPhases。表を差し替えた時だけ作る)
 //   → CellViewTable(反応の表の読み方 + 相の表)→ MakeCellView(セル, レベル, 表, 基準の圧力)→ 流れが読む値(CvCellView。永続しない)
-// 相の表の作り方はここ 1 か所(今はベイクの speciesCondensed・speciesLiquid から。物質の相が phase 1 本になったら〔T-0710〕ここだけ直す)。
+// 相の表の作り方はここ 1 か所(ベイクの相の表 speciesPhase〔T-0710〕を写す。値の並びは同じ)。
 #pragma once
 
 #include <cstdint>
