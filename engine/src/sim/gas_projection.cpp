@@ -34,7 +34,7 @@ namespace bicameral::sim {
         }
 
         // セルを節に、面をつながりにした多重格子
-        ImplicitGrid MakePressureGrid(const GasBox& box, const GasPressureSystem& system) {
+        ImplicitGrid MakePressureGrid(const GasBox& box, const GasPressureSystem& system, bool galerkin) {
             const uint32_t sizeX = box.config.sizeX;
             const uint32_t sizeY = box.config.sizeY;
             std::vector<ImplicitCell> cells(box.cells.size());
@@ -52,11 +52,11 @@ namespace bicameral::sim {
                 ImplicitFace face;
                 face.fine = std::min(link.left, link.right);
                 face.coarse = std::max(link.left, link.right);
-                face.coefficient = {.hi = 0, .lo = system.linkCoefficient};
+                face.coefficient = {.hi = 0, .lo = link.coefficient};
                 faces.push_back(face);
             }
 
-            return BuildImplicitGrid(std::move(cells), std::move(faces));
+            return BuildImplicitGrid(std::move(cells), std::move(faces), galerkin);
         }
 
         // 右辺(値の単位 µPa)=(V p̃ ÷ c_箱² − Σ F* × 2^48)÷ D
@@ -187,7 +187,7 @@ namespace bicameral::sim {
         void Project(GasBox& box, GasProjection& state, const GasProjectionOptions& options, uint64_t roundingTick,
                      GasProjectionCost& cost) {
             const GasPressureSystem system = BeginGasPressure(box, options.pressure);
-            const ImplicitGrid grid = MakePressureGrid(box, system);
+            const ImplicitGrid grid = MakePressureGrid(box, system, options.galerkinCoarse);
             std::vector<int64_t> rhs = PressureRhs(grid, system);
             state.pressures.resize(box.cells.size(), 0);
             cost.gridLevels = (uint32_t)grid.levels.size();
@@ -247,7 +247,6 @@ namespace bicameral::sim {
     }
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options) {
-        assert(box.openQ16.empty());  // セルの空き(T-0593)は陽解法だけ。投影は T-0617
         GasProjectionCost cost;
         const uint32_t substeps = options.pressure.substeps;
         for (uint32_t substep = 0; substep < substeps; ++substep)

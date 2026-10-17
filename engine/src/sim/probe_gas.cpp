@@ -320,10 +320,6 @@ namespace bicameral::sim {
         GasBox box = MakeGasBox(config, MakeReference(table, config, slots));
         box.tick = tick;
         box.openQ16 = CollectGasOpen(table, cells, *this, report);
-        if (m_options.pressure == ProbeGasPressure::Projection && !box.openQ16.empty()) {
-            report.opennessIgnored = true;  // 投影は空きを読まない(T-0617)
-            box.openQ16.clear();
-        }
         std::vector<int64_t> condensedEnergy(RegionCellCount(), 0);
         std::array<int64_t, GAS_AXES> lostMomentum = {};  // 気体が無くなったセルの運動量(格子の軸。書き戻す時に帳簿へ)
         for (uint32_t region = 0; region < RegionCellCount(); ++region) {

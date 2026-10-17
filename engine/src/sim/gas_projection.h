@@ -6,6 +6,7 @@
 // G が許容差以下になった(または上限に届いた)仮の状態をそのまま採る。当てるのは 1 回分なので保存はビット単位のまま。
 // 気体の箱(GasBox)と帳簿は gas_reference のまま。前の回の x を初めの近似に使う(GasProjection に持つ)。
 // データの流れ: GasBox(セル)→ 圧力の式 → ImplicitGrid(C_i を熱容量・K を面の係数として)→ x → GasBox(セル・帳簿)
+// セルの空き(GasBox::openQ16)は式が陽解法と同じ数え方で読む(T-0667・ADR-0312。gas_pressure_system.h)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #pragma once
 
@@ -44,6 +45,8 @@ namespace bicameral::sim {
         // 止める判定: 全部のセルで、式の誤差(残差 × 対角)= 刻みの終わりの質量のずれがこれ以下(mg。1 mg は面の速さで約 0.2 mm/s)。
         // 0 なら外側の許容差 ÷ INNER_TOLERANCE_DIVISOR(GasInnerToleranceMilligrams。既定 100 mg → 10 mg)
         uint32_t toleranceMilligrams = 0;
+        // 粗い段の面の係数を子の和のまま(Galerkin)にする(既定は熱と同じ ÷ 2。T-0667 の研究の比べだけ)
+        bool galerkinCoarse = false;
 
         // --- 外側の反復(T-0530。上限に届いたら、その時の仮の状態を採り、残りの食い違いは次の刻みへ持ち越す〔回数は決まった上限まで。D-468〕)---
         // 上限(1 = 解き直さない〔T-0503 の線形の 1 回〕)。既定の 4・100 mg・傾きで割るは仮(ユーザー未確認。ADR-0234)
