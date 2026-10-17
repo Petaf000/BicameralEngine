@@ -74,9 +74,10 @@ add_library(bicameral_multires STATIC
   src/sim/multires_state.cpp
   src/sim/multires_tree.cpp
   src/sim/multires_wide_cell.cpp
+  src/sim/multires_world_edges.cpp  # 世界の端を環境から作る・替える(外の柱は気体の層の基準と同じ道。T-0772)
 )
 target_include_directories(bicameral_multires PUBLIC src)
-target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
+target_link_libraries(bicameral_multires PUBLIC bicameral_reaction bicameral_gas)
 
 # --- gas: 気体の流れの CPU リファレンス(1 レベルの箱 G1・G2〔07 §2.1・T-0026・ADR-0043〕と多重解像度の木〔07 §2.5・T-0208・ADR-0117〕)。GPU を知らない。浮動小数点は禁止 ---
 add_library(bicameral_gas STATIC

@@ -11,7 +11,9 @@
 // 端の場合分けを持たない)。熱は外の温度へ、気体は外の大気と出入り、液体は外のセルが空なので出ていくだけ、が同じ式から出る。
 // 基準の大気の無い世界(ブランク)で開いた端は真空(外のセルが空 = 熱は伝わらない・気体は出ていくだけ)。
 //
-// 縦は z(MR の気体の木 gas_tree と同じ。上 = +z)。世界の箱は根のレベルのセルの座標(low を含み high を含まない)。
+// 縦は y(上 = +y。仮の世界の格子・world_cells・物理・描画・MR の液体と同じ。T-0619・T-0772・ADR-0338 仮)。
+// レベル 0 のセルの y = Y の高さは海面から Y × 0.5 m(セルの下の面。仮の世界の気体の区画の床 0 と同じ)。
+// 世界の箱は根のレベルのセルの座標(low を含み high を含まない)。
 // 浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_WORLD_EDGE_HLSLI
 #define BICAMERAL_WORLD_EDGE_HLSLI
@@ -26,15 +28,15 @@ FX_CONST uint32_t
 
 // --- 端の 3 つ(どの端の外か)---
 FX_CONST uint32_t WE_EDGE_INSIDE = 0;  // 世界の中(端ではない)
-FX_CONST uint32_t WE_EDGE_TOP = 1;     // 上(空。+z)
-FX_CONST uint32_t WE_EDGE_BOTTOM = 2;  // 下(地の底。−z)
-FX_CONST uint32_t WE_EDGE_SIDES = 3;   // 横の 4 面(±x・±y)
+FX_CONST uint32_t WE_EDGE_TOP = 1;     // 上(空。+y)
+FX_CONST uint32_t WE_EDGE_BOTTOM = 2;  // 下(地の底。−y)
+FX_CONST uint32_t WE_EDGE_SIDES = 3;   // 横の 4 面(±x・±z)
 
 // --- 端の種類(sim::WorldEdge と同じ値)---
 FX_CONST uint32_t WE_WALL = 0;
 FX_CONST uint32_t WE_OPEN = 1;
 
-FX_CONST uint32_t WE_UP_AXIS = 2;  // 縦の軸(z)
+FX_CONST uint32_t WE_UP_AXIS = 1;  // 縦の軸(y)
 
 // 世界の箱と端の種類(世界のデータ = 環境。状態に入らない)。既定(全部 0)は全部 wall = 端を流さない
 struct WeWorld {
@@ -100,29 +102,31 @@ FX_FN bool WeIsOpenFace(WeWorld world, MrBlock block, uint32_t index, uint32_t f
     return WeEdgeKind(world, WeFaceEdge(world, block, index, face)) == WE_OPEN;
 }
 
-// 外のセルの高さ: レベル level のセルの z 座標 z の中心を含む、レベル 0 のセルの z 座標(外の柱の行を選ぶ)。
+// 外のセルの高さ: レベル level のセルの y 座標 y の中心を含む、レベル 0 のセルの y 座標(外の柱の行を選ぶ)。
 // レベルの単位は 8^-level なので、同じ密度・温度の外のセルはどのレベルでも同じ数(柱はレベル 0 の 1 列で足りる。設計 20 §3)
-FX_FN int64_t WeLevelZeroZ(int32_t level, int64_t z) {
+FX_FN int64_t WeLevelZeroY(int32_t level, int64_t y) {
     if (level >= 0)
-        return z >> (uint32_t)level;
+        return y >> (uint32_t)level;
 
     const uint32_t up = (uint32_t)(-level);
 
-    return (z * ((int64_t)1 << up)) + ((int64_t)1 << (up - 1));
+    return (y * ((int64_t)1 << up)) + ((int64_t)1 << (up - 1));
 }
 
-// 面 face の先の外のセルの z 座標(レベル block.level の単位。横の面は自分と同じ高さ)
-FX_FN int64_t WeOutsideZ(MrBlock block, uint32_t index, uint32_t face) {
-    const int64_t z = block.originZ + (int64_t)MrCellZ(index);
+// 面 face の先の外のセルの y 座標(レベル block.level の単位。横の面は自分と同じ高さ)
+FX_FN int64_t WeOutsideY(MrBlock block, uint32_t index, uint32_t face) {
+    const int64_t y = block.originY + (int64_t)MrCellY(index);
     if ((face >> 1) != WE_UP_AXIS)
-        return z;
+        return y;
 
-    return z + ((face & 1u) != 0 ? 1 : -1);
+    return y + ((face & 1u) != 0 ? 1 : -1);
 }
 
-// 外の柱の行(base = 柱の 0 行目のレベル 0 の z・rows = 行の数。上下の外は端の行の値のまま。呼ぶ側の約束: rows ≥ 1)
-FX_FN uint32_t WeColumnRow(int64_t levelZeroZ, int64_t base, uint32_t rows) {
-    const int64_t row = levelZeroZ - base;
+// 外の柱の行(base = 柱の 0 行目のレベル 0 の y・rows = 行の数。柱の外の高さは端の行の値のまま。呼ぶ側の約束: rows ≥ 1)。
+// 環境から作る柱(sim::MakeMultiresWorldEdges)は世界の箱の中の層だけを持つので、上下の外は端の層の基準を読む
+// (仮の世界の気体の開いた境界の外と同じ。T-0772)
+FX_FN uint32_t WeColumnRow(int64_t levelZeroY, int64_t base, uint32_t rows) {
+    const int64_t row = levelZeroY - base;
     if (row < 0)
         return 0;
 
@@ -136,7 +140,7 @@ FX_FN MrFaceNeighbor WeEdgeNeighbor(WeWorld world, int64_t columnBase, uint32_t 
     if (columnRows == 0 || !WeIsOpenFace(world, block, index, face))
         return MrMakeFaceNeighbor(MR_NEIGHBOR_NONE, MR_NO_BLOCK, 0, 0);
 
-    const int64_t height = WeLevelZeroZ(block.level, WeOutsideZ(block, index, face));
+    const int64_t height = WeLevelZeroY(block.level, WeOutsideY(block, index, face));
 
     return MrMakeFaceNeighbor(MR_NEIGHBOR_EDGE, MR_NO_BLOCK, WeColumnRow(height, columnBase, columnRows), 0);
 }

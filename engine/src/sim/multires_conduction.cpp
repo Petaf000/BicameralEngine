@@ -70,7 +70,7 @@ namespace bicameral::sim {
                                                                    nest->capacity.rootLevel);
                 if (neighbor.kind == MR_NEIGHBOR_NONE) {
                     const MultiresWorldEdges& edges = nest->edges;
-                    return WeEdgeNeighbor(edges.world, edges.columnBaseZ, static_cast<uint32_t>(edges.column.size()),
+                    return WeEdgeNeighbor(edges.world, edges.columnBaseY, static_cast<uint32_t>(edges.column.size()),
                                           block, index, face);
                 }
 
