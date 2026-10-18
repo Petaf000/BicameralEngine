@@ -594,6 +594,13 @@ namespace bicameral::sim {
         // 液体を置いたのに重力が 0(溜まらない)・端が全部 wall で大気(基準の大気もセルの気体も)が無い(閉じた真空の箱。注意)。
         // ブランクの世界(セルを置かない)は知らせない(D-455)
         void WarnWorldSetting(BakedReactionTable& baked) {
+            // 開いた端があるのに基準の大気が無い: 外は真空(熱は逃げない・気体は出ていくだけ。T-0772・ADR-0338 仮)。
+            // 端を書いたのは作り手なので、セルを置かない世界でも知らせる
+            if (!baked.environment.edges.AllWall() && baked.atmosphere.Empty())
+                baked.warnings.push_back(
+                    "注意: 世界の端(environment.world_edges)に open があるが基準の大気が無い"
+                    "(外は真空: 熱は逃げず、気体は出ていくだけ。空気は environment.atmosphere_profile か atmosphere)");
+
             if (baked.worldLayout.cellRegions.empty())
                 return;
 

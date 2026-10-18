@@ -8,3 +8,5 @@
 | settled | earth_environment を写し、補助 atmosphere.settled で重い物が下に溜まる点を作り、set_point で海面の点を書き直す |
 | conflict | earth_environment(高さの点の列)の上に一様な書き方を足す(一緒に書けないので読み込みの誤り) |
 | unsorted | 高さが低い順に並んでいない点の列(ベイクの誤り) |
+| edges_open_top | earth_environment の上で world_edges の上だけ open(multires_edge_test。T-0772) |
+| edges_vacuum | 基準の大気を書かずに上だけ open(外は真空・ベイクの注意。multires_edge_test。T-0772) |

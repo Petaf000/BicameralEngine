@@ -127,8 +127,14 @@ namespace {
     };
 
     // 多重解像度の座標(x・y・z = 上)
+    // 仮の世界の格子 (gx, gy〔上〕, gz) → 多重解像度の世界の座標(上は WE_UP_AXIS。横は WeAxisUpLast の順に格子の x・z)
     std::array<uint32_t, 3> NestPlace(uint32_t gx, uint32_t gy, uint32_t gz) {
-        return {gx - REGION_MIN[0], gz - REGION_MIN[2], gy - REGION_MIN[1]};
+        std::array<uint32_t, 3> place = {};
+        place[multires::WeAxisUpLast(0)] = gx - REGION_MIN[0];
+        place[multires::WeAxisUpLast(1)] = gz - REGION_MIN[2];
+        place[multires::WE_UP_AXIS] = gy - REGION_MIN[1];
+
+        return place;
     }
 
     std::unique_ptr<Worlds> MakeWorlds(const BakedReactionTable& table, Scene scene, bool open, uint32_t rest = 0) {
@@ -143,7 +149,8 @@ namespace {
             std::exit(1);
         }
 
-        const std::array<uint32_t, 3> size = {REGION_SIZE[0], REGION_SIZE[2], REGION_SIZE[1]};
+        const std::array<uint32_t, 3> size = NestPlace(REGION_MIN[0] + REGION_SIZE[0], REGION_MIN[1] + REGION_SIZE[1],
+                                                       REGION_MIN[2] + REGION_SIZE[2]);
         const uint32_t blocks = (size[0] / 8) * (size[1] / 8) * (size[2] / 8);
         uint32_t indexEntries = 1;
         while (indexEntries < 2 * blocks)
@@ -155,14 +162,19 @@ namespace {
                                               .pages = blocks,
                                               .indexEntries = indexEntries,
                                               .ledgerColumns = 1 + (uint32_t)table.species.size()});
-        const uint32_t edge = open ? MULTIRES_GAS_EDGE_OPEN : MULTIRES_GAS_EDGE_WALL;
+        const uint32_t edge = open ? multires::WE_OPEN : multires::WE_WALL;
+        nest.edges.world = {.rootLevel = 0,
+                            .lowX = 0,
+                            .lowY = 0,
+                            .lowZ = 0,
+                            .highX = size[0],
+                            .highY = size[1],
+                            .highZ = size[2],
+                            .top = edge,
+                            .bottom = edge,
+                            .sides = edge};
         auto gas = MultiresGas::Create(nest, table,
-                                       {.randomSeed = SEED,
-                                        .floorHeightMillimeters = 0,
-                                        .restSpeedUnits = rest,
-                                        .top = edge,
-                                        .bottom = edge,
-                                        .sides = edge});
+                                       {.randomSeed = SEED, .floorHeightMillimeters = 0, .restSpeedUnits = rest});
         if (!gas) {
             std::printf("気体を作れない: %s\n", gas.error().c_str());
             std::exit(1);
@@ -182,13 +194,11 @@ namespace {
                 for (uint32_t bx = 0; bx < size[0]; bx += 8) {
                     std::vector<reaction::RxCell> cells(multires::MR_BLOCK_CELLS);
                     for (uint32_t index = 0; index < cells.size(); ++index) {
-                        const uint32_t x = bx + (index % 8);
-                        const uint32_t y = by + ((index / 8) % 8);
-                        const uint32_t z = bz + (index / 64);
-                        cells[multires::MrCellIndex(index % 8, (index / 8) % 8,
-                                                    index / 64)] = worlds->grid[ProbeCellIndex(REGION_MIN[0] + x,
-                                                                                               REGION_MIN[1] + z,
-                                                                                               REGION_MIN[2] + y)];
+                        const std::array<uint32_t, 3> place = {bx + (index % 8), by + ((index / 8) % 8),
+                                                               bz + (index / 64)};
+                        cells[index] = worlds->grid[ProbeCellIndex(REGION_MIN[0] + place[multires::WeAxisUpLast(0)],
+                                                                   REGION_MIN[1] + place[multires::WE_UP_AXIS],
+                                                                   REGION_MIN[2] + place[multires::WeAxisUpLast(1)])];
                     }
 
                     PlaceRootBlock(worlds->nest, bx, by, bz, cells);

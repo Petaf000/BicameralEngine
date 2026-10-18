@@ -312,8 +312,12 @@ add_executable(multires_conduction_test multires_conduction_test.cpp)  # 木の�
 target_link_libraries(multires_conduction_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_conduction COMMAND multires_conduction_test)
 
-add_executable(multires_edge_test multires_edge_test.cpp)  # 世界の端(open / wall・外のセル・帳簿。T-0721)
-target_link_libraries(multires_edge_test PRIVATE bicameral_multires bicameral_core)
+add_executable(multires_edge_test multires_edge_test.cpp)  # 世界の端(open / wall・外のセル・帳簿。T-0721。環境から作る端 T-0772)
+target_link_libraries(multires_edge_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_multires bicameral_core)
+target_compile_definitions(multires_edge_test PRIVATE
+  BICAMERAL_DATA_STANDARD_DIR="${PROJECT_SOURCE_DIR}/data/standard"
+  BICAMERAL_ATMOSPHERE_PACKAGES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/packages_atmosphere")
+add_dependencies(multires_edge_test bicameral_data)  # 型の定義は exe の横の data/types を読む
 add_test(NAME multires_edge COMMAND multires_edge_test)
 
 add_executable(lab_box_test lab_box_test.cpp)  # 実験室の箱の CPU 側(T-0142)
