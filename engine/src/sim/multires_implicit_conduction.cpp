@@ -3,8 +3,9 @@
 // 陽解法(multires_conduction.cpp の ComputeConduction)、基準より細かい(Δk 1〜implicitMaxGap)セルの面はここで陰解法の
 // 1 刻み(StepImplicit)に入れる。それより細かいセルは陽解法のまま(温度の端数の精度で 1 mK の判定に届かない。下の「約束」)。
 // データの流れ: 頁のある・凍っていない本物のブロックのセル(MrCellThermal: 刻みの初めの温度と熱容量)→ 陰解法のセルと面
-//   (面の隣は陽解法と同じ MrFindFaceNeighbor)→ StepImplicit(V サイクル → 面の流れ → 安全網 → 両側に足す)→ 変化の表 deltas
-//   (呼ぶ側の StepPagedBlock が反応の前に足す)
+//   (面の隣は陽解法と同じ MrFindFaceNeighbor)→ SolveImplicitFlows(V サイクル → 面の流れ → 安全網)→ 面の流れを運ぶ計算の
+//   当てる段 TxApplyFaceFlow(transport_apply.hlsli。陽の面の TxFlowCell と同じ世界の Add・HasFraction。T-0715)で変化の表 deltas の
+//   両側へ(呼ぶ側の StepPagedBlock が反応の前に足す)
 // 約束:
 //   - 系の未知数は基準より細かいセル。その面の粗い側の基準以下のセルも「境のセル」として入れる(境のセルの基準以下の面は陽解法のまま、
 //     境の面だけこの系で受ける = 面で分けた分割)。どちらも頁のある・凍っていない・熱容量のあるセルだけ。一様なブロック・凍らせた
@@ -30,6 +31,7 @@
 
 #include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
+#include "common/transport_apply.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
@@ -51,10 +53,9 @@ namespace bicameral::sim {
             std::vector<ImplicitCell> cells;
             std::vector<ImplicitFace> faces;
 
-            // --- セルごと: 木のどこか・足す前の仮のエネルギー ---
+            // --- セルごと: 木のどこか ---
             std::vector<uint32_t> slots;
             std::vector<uint32_t> indices;
-            std::vector<int64_t> startEnergies;
 
             std::vector<uint32_t> ids;  // [枠 × 512] → セルの番号(無ければ NOT_IN_SYSTEM)
         };
@@ -96,7 +97,6 @@ namespace bicameral::sim {
             system.cells.push_back(cell);
             system.slots.push_back(slot);
             system.indices.push_back(index);
-            system.startEnergies.push_back(cell.energy);
 
             return id;
         }
@@ -158,6 +158,20 @@ namespace bicameral::sim {
 
             return system;
         }
+
+        // 陰の伝導の面の流れを当てる世界(transport_apply.hlsli の Add・HasFraction。陽の面の ConductionWorld と同じ変化の表。T-0715)
+        struct ImplicitApplyWorld {
+            const MultiresNest* nest = nullptr;
+            std::span<MrEnergyDelta> deltas;
+
+            [[nodiscard]] bool HasFraction(uint32_t slot) const {
+                return nest->blocks[slot].fraction != MR_NO_FRACTION;
+            }
+
+            void Add(uint32_t slot, uint32_t index, const MrEnergyDelta& delta) const {
+                nest_detail::AddConductionDelta(*nest, deltas, slot, index, delta);
+            }
+        };
 
         // 多重格子の段ごとの節の数と隣の最大(計測用。GPU の ImTail の境〔節 1024・隣 32〕を見る。T-0120)
         void RecordLevels(MultiresNest& nest, const ImplicitGrid& grid) {
@@ -264,26 +278,24 @@ namespace bicameral::sim {
             if (nest.captureImplicitNest)
                 CaptureNest(nest, frozen);
 
-            // --- 1 刻み解いて、足した後と仮のエネルギーの差を変化の表へ ---
+            // --- 1 刻み解いて、面の流れを当てる段で変化の表へ ---
             const ImplicitGridLimits gridLimits{.nodes = options.implicitLimits.nodes,
                                                 .links = options.implicitLimits.links};
             ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces), false, gridLimits);
             if (nest.captureImplicitGrid)
                 nest.implicitGrid = grid;
 
-            nest.implicitCost = StepImplicit(grid, MakeImplicitOptions(options));
+            std::vector<int64_t> flows;
+            nest.implicitCost = SolveImplicitFlows(grid, MakeImplicitOptions(options), flows);
             nest.implicitCells = static_cast<uint32_t>(grid.cells.size());
             RecordLevels(nest, grid);
-            for (size_t id = 0; id < grid.cells.size(); ++id) {
-                const ImplicitCell& cell = grid.cells[id];
-                const MrEnergyDelta change = {.whole = cell.energy - system.startEnergies[id],
-                                              .fraction = cell.fraction};
-                if (MrEnergyDeltaIsZero(change))
-                    continue;
 
-                const MrBlock& block = nest.blocks[system.slots[id]];
-                MrEnergyDelta& entry = deltas[PageCellAddress(nest, block.page, system.indices[id])];
-                entry = MrAddEnergyDelta(entry, change);
+            // --- 3 当てる: 面の流れを両側へ(同じレベルは逆向きに同じ値・違うレベルは粗い側に整数部 + 端数。陽の面と同じ当てる段)---
+            const ImplicitApplyWorld world{.nest = &nest, .deltas = deltas};
+            for (size_t f = 0; f < grid.faces.size(); ++f) {
+                const ImplicitFace& face = grid.faces[f];
+                TxApplyFaceFlow(world, system.slots[face.fine], system.indices[face.fine], system.slots[face.coarse],
+                                system.indices[face.coarse], face.gap, flows[f]);
             }
         }
 

@@ -1,6 +1,7 @@
 // multires_nest_internal.h — multires_nest.cpp・multires_tree.cpp・multires_activity.cpp・multires_conduction.cpp・lab_box.cpp が共有する、配列の読み書きと 1 刻みの小さな道具(bicameral_multires の外からは使わない)。
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -79,6 +80,15 @@ namespace bicameral::sim::nest_detail {
         return nest.blocks.size() + (size_t{page} * multires::MR_BLOCK_CELLS) + index;
     }
 
+    // 伝導の変化の表 deltas(頁のセルの添字ごと)に書き足す(当てる段の世界の Add。陽の面・陰の面が同じ 1 つを使う。T-0715)
+    inline void AddConductionDelta(const MultiresNest& nest, std::span<multires::MrEnergyDelta> deltas, uint32_t slot,
+                                   uint32_t index, const multires::MrEnergyDelta& delta) {
+        const multires::MrBlock& block = nest.blocks[slot];
+        FX_ASSERT(!multires::MrIsUniform(block));
+        multires::MrEnergyDelta& entry = deltas[PageCellAddress(nest, block.page, index)];
+        entry = multires::MrAddEnergyDelta(entry, delta);
+    }
+
     // --- 1 刻み(multires_nest.cpp の StepBlocks。StepNest と StepActive が使う)---
 
     struct BlockStepResult {
@@ -120,27 +130,56 @@ namespace bicameral::sim::nest_detail {
     // 一様なブロックは覆われていないセルが全部同じなので枠ごとに 1 つ(読むのは刻むセルと、その面の先の覆われていないセルだけ)。
     // 頁に広げても論理のセルは変わらないので使い回せる。小刻み(T-0108)でセルが変わったブロックは Invalidate で作り直させる
     // (見立ては変わったセルだけ作り直す。土台 §2.5)。枠ごとの置き場は初めて読んだ時に取る(読まない枠は場所を取らない)
+    // 見立ての置き場の枠 1 つ分の塊: [セル × 512][一様の値] と作ったかの印(引くのは枠の塊の指し先 1 回。T-0768)
+    struct CellViewPage {
+        std::array<multires::CvCellView, multires::MR_BLOCK_CELLS + 1> views;
+        std::array<uint8_t, multires::MR_BLOCK_CELLS + 1> known;
+    };
+
+    // 刻みをまたいで使い回す塊(MultiresNest::conductionViewPool。状態に入らない。持つのは 1 刻みに使った塊の数まで)
+    struct CellViewPool {
+        std::vector<std::unique_ptr<CellViewPage>> free;
+    };
+
     class CellViews {
     public:
-        // parts = 作る見立ての部分(読む種類の ViewParts。cell_view.hlsli の CV_VIEW_*。T-0767)
-        CellViews(const MultiresNest& nest, const ReactionTableView& view,
-                  std::span<const multires::CvSpeciesPhase> phases, uint32_t parts = multires::CV_VIEW_ALL);
+        // parts = 作る見立ての部分(読む種類の ViewParts。cell_view.hlsli の CV_VIEW_*。T-0767)。
+        // 枠の塊は nest の取っておきから借り、終わったら返す(1 塊 約 100 KiB を刻みごとに OS から取り直さない。T-0768)
+        CellViews(MultiresNest& nest, const ReactionTableView& view, std::span<const multires::CvSpeciesPhase> phases,
+                  uint32_t parts = multires::CV_VIEW_ALL);
+        ~CellViews();
+        CellViews(const CellViews&) = delete;
+        CellViews& operator=(const CellViews&) = delete;
+        CellViews(CellViews&&) = delete;
+        CellViews& operator=(CellViews&&) = delete;
 
-        [[nodiscard]] const multires::CvCellView& View(uint32_t slot, uint32_t index);
+        // 刻みの初めの見立て(置き場の参照。面ごとに写さない。T-0767)
+        [[nodiscard]] const multires::CvCellView& View(uint32_t slot, uint32_t index) {
+            const uint32_t position = multires::MrIsUniform(m_nest->blocks[slot]) ? multires::MR_BLOCK_CELLS : index;
+            const CellViewPage* page = m_pages[slot].get();
+            if (page == nullptr || page->known[position] == 0) [[unlikely]]
+                Build(slot, index, position);
+
+            return m_pages[slot]->views[position];
+        }
+
         // 伝導のセルの熱(陰解法が読む。見立ての thermal = MrCellThermal と同じ値。T-0713)
         [[nodiscard]] multires::MrThermal At(uint32_t slot, uint32_t index) { return View(slot, index).thermal; }
+
         void Invalidate(uint32_t slot);
 
         // 世界の端の外の柱の行 row のセルの見立て(レベル level。T-0721。外のセルは変わらないので作るだけ)
         [[nodiscard]] multires::CvCellView Outside(uint32_t row, int32_t level) const;
 
     private:
+        // 見立てを作って置き場の position に入れる(読む種類の部分だけ)
+        void Build(uint32_t slot, uint32_t index, uint32_t position);
+
         const MultiresNest* m_nest;
         CellViewTable m_table;
         uint32_t m_parts;
-        // 枠ごとに [セル × 512][一様の値]。初めて読んだ枠だけ場所を取る(0 で埋めない。作ったかは m_known)
-        std::vector<std::unique_ptr<multires::CvCellView[]>> m_values;
-        std::vector<std::vector<uint8_t>> m_known;
+        CellViewPool* m_pool;
+        std::vector<std::unique_ptr<CellViewPage>> m_pages;  // 枠ごと(初めて読んだ枠だけ塊を借りる)
     };
 
     // 刻むブロック(stepped)のセルの面の流れを調べ、流れのある一様なブロック(自分の面か、細かい側から送られてくる面)に MR_PAGE_WANTED を付ける。
