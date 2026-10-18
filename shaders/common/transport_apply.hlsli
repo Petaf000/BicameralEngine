@@ -34,6 +34,8 @@
 //   - CvCellView Outside(uint32_t row, int32_t level)(開いた世界の端の外のセル = 外の柱の行 row を自分と同じレベルで見立てたもの。
 //     種類は外のセルを読むだけで端の場合分けを持たない。T-0721)
 //   - void AddEdge(uint32_t slot, uint32_t index, int64_t flow)(5。開いた端の面の流れ〔出ていくのが正〕を帳簿の「世界の端」へ)
+//   - void AddPacket(uint32_t slot, uint32_t index, TxPacket packet, uint32_t incoming)(3。物質を運ぶ種類〔液体・気体〕の包み。T-0770)
+//   上限 Limit の倍率は分数(TxScale)。器の残りで切らない種類は room = TX_ROOM_UNLIMITED。
 // 浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_TRANSPORT_APPLY_HLSLI
 #define BICAMERAL_TRANSPORT_APPLY_HLSLI
@@ -43,30 +45,68 @@
 
 MR_NAMESPACE_BEGIN
 
-// --- 2 上限(順に依存しない倍率。Q32)-------------------------------------------------------------
+// --- 2 上限(順に依存しない倍率。分数のまま持つ = 丸めは流れに掛ける 1 回だけ。T-0770)-------------------------
+// 倍率は「分子 ÷ 分母」(1 以下。1 = 1/1)。仮の世界の液体(LqLimitOutflow)・気体(GfLimitMovedAmount)の
+// 「流れ × 中身 ÷ 出る合計」と同じ 1 回の切り捨てになる(Q32 の倍率に丸めてから掛けると 2 回切り捨てて値が変わる)。
 
-FX_CONST uint32_t TX_SCALE_SHIFT = 32;
-FX_CONST uint64_t TX_SCALE_ONE = FX_U64(1u, 0u);  // 倍率の 1(2^32)
-
-// セル 1 つの倍率(Q32。1 以下)
-struct TxLimit {
-    uint64_t outScale;  // 出る側 = min(1, 中身 ÷ 出る合計)
-    uint64_t inScale;   // 入る側 = min(1, 器の残り ÷ 入る合計)
+// 倍率 1 つ(numerator ≤ denominator。denominator は 0 でない)
+struct TxScale {
+    uint64_t numerator;
+    uint64_t denominator;
 };
 
-// min(1, available ÷ total)(切り捨て = 縮めすぎる側。total = 0 なら 1)
-FX_FN uint64_t TxSideScale(uint64_t available, uint64_t total) {
-    if (total <= available)
-        return TX_SCALE_ONE;
+// セル 1 つの倍率(1 以下)
+struct TxLimit {
+    TxScale outScale;  // 出る側 = min(1, 中身 ÷ 出る合計)
+    TxScale inScale;   // 入る側 = min(1, 器の残り ÷ 入る合計)
+};
 
-    // available < total なので商 < 2^32
-    return FxDivU128By64(FxMulU64Full(available, TX_SCALE_ONE), total).quotient;
+// 器の残りが無限(入る側を縮めない種類。液体は溢れの圧力が入る側の安定の条件なので、器で切らない。T-0770)
+FX_CONST uint64_t TX_ROOM_UNLIMITED = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
+
+FX_FN TxScale TxScaleOne() {
+    TxScale scale;
+    scale.numerator = 1;
+    scale.denominator = 1;
+
+    return scale;
+}
+
+// a < b(どちらも分数。128bit の掛け算で比べる)
+FX_FN bool TxScaleLess(TxScale a, TxScale b) {
+    const FxU128 left = FxMulU64Full(a.numerator, b.denominator);
+    const FxU128 right = FxMulU64Full(b.numerator, a.denominator);
+
+    return left.hi < right.hi || (left.hi == right.hi && left.lo < right.lo);
+}
+
+FX_FN TxScale TxMinScale(TxScale a, TxScale b) {
+    if (TxScaleLess(b, a))
+        return b;
+
+    return a;
+}
+
+FX_FN bool TxScaleIsOne(TxScale scale) {
+    return scale.numerator >= scale.denominator;
+}
+
+// min(1, available ÷ total)(total = 0 なら 1)
+FX_FN TxScale TxSideScale(uint64_t available, uint64_t total) {
+    if (total <= available)
+        return TxScaleOne();
+
+    TxScale scale;
+    scale.numerator = available;
+    scale.denominator = total;
+
+    return scale;
 }
 
 FX_FN TxLimit TxNoLimit() {
     TxLimit limit;
-    limit.outScale = TX_SCALE_ONE;
-    limit.inScale = TX_SCALE_ONE;
+    limit.outScale = TxScaleOne();
+    limit.inScale = TxScaleOne();
 
     return limit;
 }
@@ -82,28 +122,108 @@ FX_FN TxLimit TxMakeLimit(uint64_t content, uint64_t outTotal, uint64_t room, ui
 
 FX_FN TxLimit TxMinLimit(TxLimit a, TxLimit b) {
     TxLimit limit;
-    limit.outScale = MrMin64(a.outScale, b.outScale);
-    limit.inScale = MrMin64(a.inScale, b.inScale);
+    limit.outScale = TxMinScale(a.outScale, b.outScale);
+    limit.inScale = TxMinScale(a.inScale, b.inScale);
 
     return limit;
 }
 
 // 面の倍率 = min(出ていく側の出る倍率, 入る側の入る倍率)。両側が同じ 2 つの値から同じ倍率を出す
-FX_FN uint64_t TxFaceScale(TxLimit source, TxLimit target) {
-    return MrMin64(source.outScale, target.inScale);
+FX_FN TxScale TxFaceScale(TxLimit source, TxLimit target) {
+    return TxMinScale(source.outScale, target.inScale);
+}
+
+// 大きさを倍率で縮める(切り捨て 1 回)
+FX_FN uint64_t TxScaleAmount(uint64_t amount, TxScale scale) {
+    if (TxScaleIsOne(scale) || amount == 0)
+        return amount;
+
+    // numerator < denominator なので商 < amount
+    return FxDivU128By64(FxMulU64Full(amount, scale.numerator), scale.denominator).quotient;
 }
 
 // 流れを倍率で縮める(大きさを切り捨て。符号は保つ = 両側で同じ大きさ)。包みの列はどれも同じ倍率で縮める
-FX_FN int64_t TxScaleFlow(int64_t flow, uint64_t scale) {
-    if (scale >= TX_SCALE_ONE)
-        return flow;
-
+FX_FN int64_t TxScaleFlow(int64_t flow, TxScale scale) {
     const bool negative = flow < 0;
     const uint64_t magnitude = negative ? (uint64_t)0 - (uint64_t)flow : (uint64_t)flow;
-    const FxU128 product = FxMulU64Full(magnitude, scale);
-    const uint64_t scaled = (product.hi << TX_SCALE_SHIFT) | (product.lo >> TX_SCALE_SHIFT);
+    const uint64_t scaled = TxScaleAmount(magnitude, scale);
 
     return negative ? -(int64_t)scaled : (int64_t)scaled;
+}
+
+// --- 包み(面を通って動くもの。熱だけの種類は MrEnergyDelta、物質を運ぶ種類〔液体・気体〕は TxPacket。T-0770)-----------
+// 物質を運ぶ種類は「主の量」(液体 = 質量・気体 = 物質量など、種類が決める 1 つの数)を面ごとに流し、上限は主の量に掛ける。
+// 包みは上限の後の主の量から種類が作る(Pack: 上流のセルの成分の比で物質量・一緒に動くエネルギー・運ぶ欄の値)。
+// 列ごとに別の上限が要る種類(気体の成分ごとの中身)は、包みを作ってから TxScalePacket で同じ倍率を全部の列に掛けてもよい。
+// 包みはいつも上流 → 下流の向きの大きさ(物質量は符号なし。エネルギーと運ぶ欄は符号つき)。当てる時に上流は引き、下流は足す。
+
+FX_CONST uint32_t TX_PACKET_SPECIES = RX_MAX_CELL_SPECIES;  // 包みの物質の数(上流のセルのインラインの成分の数まで)
+FX_CONST uint32_t TX_PACKET_CARRIED = 4;  // 運ぶ欄の値の数(液体 = 位置のエネルギー 1。気体 = 面の運動量など)
+
+struct TxPacket {
+    uint32_t speciesCount;
+    uint32_t species[TX_PACKET_SPECIES];
+    uint64_t amounts[TX_PACKET_SPECIES];  // 動く物質量(セルの単位)
+    int64_t energy;                       // 一緒に動くエネルギー(セルの単位)
+    int64_t carried[TX_PACKET_CARRIED];   // 運ぶ欄の値(種類が宣言した順。使わない値は 0)
+};
+
+FX_FN TxPacket TxMakePacket() {
+    TxPacket packet;
+    packet.speciesCount = 0;
+    packet.energy = 0;
+    FX_UNROLL
+    for (uint32_t i = 0; i < TX_PACKET_SPECIES; ++i) {
+        packet.species[i] = 0;
+        packet.amounts[i] = 0;
+    }
+
+    FX_UNROLL
+    for (uint32_t c = 0; c < TX_PACKET_CARRIED; ++c)
+        packet.carried[c] = 0;
+
+    return packet;
+}
+
+// 物質 species の量 amount を包みの後ろに足す(0 は足さない。同じ物質を 2 回足さない = 上流のセルの成分を 1 回ずつ回す)
+FX_FN TxPacket TxPacketWithSpecies(TxPacket packet, uint32_t species, uint64_t amount) {
+    if (amount == 0 || packet.speciesCount >= TX_PACKET_SPECIES)
+        return packet;
+
+    FX_UNROLL
+    for (uint32_t i = 0; i < TX_PACKET_SPECIES; ++i) {
+        if (i == packet.speciesCount) {
+            packet.species[i] = species;
+            packet.amounts[i] = amount;
+        }
+    }
+
+    packet.speciesCount += 1;
+
+    return packet;
+}
+
+FX_FN bool TxPacketIsEmpty(TxPacket packet) {
+    bool empty = packet.speciesCount == 0 && packet.energy == 0;
+    FX_UNROLL
+    for (uint32_t c = 0; c < TX_PACKET_CARRIED; ++c)
+        empty = empty && packet.carried[c] == 0;
+
+    return empty;
+}
+
+// 包みの全部の列に同じ倍率を掛ける(列ごとの上限を包みの後に掛ける種類)
+FX_FN TxPacket TxScalePacket(TxPacket packet, TxScale scale) {
+    FX_UNROLL
+    for (uint32_t i = 0; i < TX_PACKET_SPECIES; ++i)
+        packet.amounts[i] = TxScaleAmount(packet.amounts[i], scale);
+
+    packet.energy = TxScaleFlow(packet.energy, scale);
+    FX_UNROLL
+    for (uint32_t c = 0; c < TX_PACKET_CARRIED; ++c)
+        packet.carried[c] = TxScaleFlow(packet.carried[c], scale);
+
+    return packet;
 }
 
 // --- 6 起こす ----------------------------------------------------------------------------------
@@ -154,7 +274,10 @@ FX_FN int64_t TxLimitFaceFlow(Kind kind, World world, uint32_t slot, uint32_t in
     if (neighbor.kind != MR_NEIGHBOR_EDGE)
         otherLimit = world.Limit(neighbor.slot, neighbor.index);
 
-    return TxScaleFlow(flow, flow > 0 ? TxFaceScale(selfLimit, otherLimit) : TxFaceScale(otherLimit, selfLimit));
+    if (flow > 0)
+        return TxScaleFlow(flow, TxFaceScale(selfLimit, otherLimit));
+
+    return TxScaleFlow(flow, TxFaceScale(otherLimit, selfLimit));
 }
 
 // --- 当てる段(セル 1 つの 6 面。1 流す → 2 上限 → 3 当てる → 4 欄 → 5 帳簿 → 6 起こす)-----------------
@@ -207,6 +330,35 @@ FX_FN bool TxFlowCell(Kind kind, World world, uint32_t slot, MrBlock block, uint
 
     // --- 6 起こす ---
     return crossMoved || TxWakes(own);
+}
+
+// --- 当てる段(面に状態を持つ種類〔液体〕の面 1 つ。2 上限 → 包み → 3 当てる。T-0770)----------------------------
+// 面の生の流れ(主の量)は種類が刻みの初めの値から面ごとに作り(液体は面の運動量から)、世界は出る合計・入る合計から
+// セルごとの Limit を先に数えておく(Jacobi)。面ごとに: TxLimitAmount で縮める → 種類が上流のセルから包みを作る(Pack)→ TxApplyPacket。
+// 世界が渡すもの(TxFlowCell の世界に足す 1 つ): void AddPacket(uint32_t slot, uint32_t index, TxPacket packet, uint32_t incoming)
+// (incoming = 0 なら上流 = 引く、1 なら下流 = 足す。順に依存しない整数の和)。
+
+// 上流 (fromSlot, fromIndex) から下流 (toSlot, toIndex) への主の量 raw を、両側の倍率の min で縮める
+template <typename World>
+FX_FN uint64_t TxLimitAmount(World world, uint32_t fromSlot, uint32_t fromIndex, uint32_t toSlot, uint32_t toIndex,
+                             uint64_t raw) {
+    if (raw == 0)
+        return 0;
+
+    return TxScaleAmount(raw, TxFaceScale(world.Limit(fromSlot, fromIndex), world.Limit(toSlot, toIndex)));
+}
+
+// 包みを上流から引き、下流に足す(3 当てる)。変化があれば true(6 起こす)
+template <typename World>
+FX_FN bool TxApplyPacket(World world, uint32_t fromSlot, uint32_t fromIndex, uint32_t toSlot, uint32_t toIndex,
+                         TxPacket packet) {
+    if (TxPacketIsEmpty(packet))
+        return false;
+
+    world.AddPacket(fromSlot, fromIndex, packet, 0u);
+    world.AddPacket(toSlot, toIndex, packet, 1u);
+
+    return true;
 }
 
 MR_NAMESPACE_END

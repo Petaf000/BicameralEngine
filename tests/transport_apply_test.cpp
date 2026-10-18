@@ -18,6 +18,7 @@
 #include "multires_conduction_scene.h"
 #include "reaction_test_table.h"
 #include "sim/multires_nest.h"
+#include "sim/transport_packet.h"
 
 using namespace bicameral;
 using namespace bicameral::multires;
@@ -55,12 +56,54 @@ namespace {
     };
 
     // --- 1. 上限 ---
+
+    bool SameScale(TxScale a, TxScale b) {
+        return !TxScaleLess(a, b) && !TxScaleLess(b, a);
+    }
+
+    // 包み(T-0770): 物質を足す・倍率を掛ける・セルに当てる
+    void TestPacket() {
+        TxPacket packet = TxMakePacket();
+        EXPECT(TxPacketIsEmpty(packet));
+        packet = TxPacketWithSpecies(packet, 3, 40);
+        packet = TxPacketWithSpecies(packet, 1, 0);  // 0 は足さない
+        packet = TxPacketWithSpecies(packet, 1, 10);
+        packet.energy = -9;
+        packet.carried[0] = 21;
+        EXPECT(packet.speciesCount == 2 && !TxPacketIsEmpty(packet));
+
+        const TxPacket half = TxScalePacket(packet, TxSideScale(1, 2));
+        EXPECT(half.amounts[0] == 20 && half.amounts[1] == 5 && half.energy == -4 && half.carried[0] == 10);
+
+        // 上流から引き、下流に足す(成分は物質 ID の順・0 の成分は消える)
+        reaction::RxCell from = reaction::RxMakeEmptyCell(100);
+        from.speciesCount = 2;
+        from.species[0] = 1;
+        from.amounts[0] = 10;
+        from.species[1] = 3;
+        from.amounts[1] = 50;
+        reaction::RxCell to = reaction::RxMakeEmptyCell(0);
+        TxCellChange fromChange;
+        TxCellChange toChange;
+        AddPacket(fromChange, packet, false);
+        AddPacket(toChange, packet, true);
+        EXPECT(ApplyCellChange(from, fromChange) && ApplyCellChange(to, toChange));
+        EXPECT(from.speciesCount == 1 && from.species[0] == 3 && from.amounts[0] == 10 && from.energy == 109);
+        EXPECT(to.speciesCount == 2 && to.species[0] == 1 && to.amounts[0] == 10 && to.species[1] == 3 &&
+               to.amounts[1] == 40 && to.energy == -9);
+        EXPECT(fromChange.carried[0] == -21 && toChange.carried[0] == 21);
+    }
     void TestLimits() {
-        EXPECT(TxSideScale(10, 0) == TX_SCALE_ONE);
-        EXPECT(TxSideScale(10, 10) == TX_SCALE_ONE);
-        EXPECT(TxSideScale(5, 10) == TX_SCALE_ONE / 2);
-        EXPECT(TxSideScale(0, 10) == 0);
-        EXPECT(TxScaleFlow(-7, TX_SCALE_ONE) == -7);
+        EXPECT(TxScaleIsOne(TxSideScale(10, 0)));
+        EXPECT(TxScaleIsOne(TxSideScale(10, 10)));
+        EXPECT(TxScaleAmount(1000, TxSideScale(5, 10)) == 500);
+        EXPECT(TxScaleAmount(1000, TxSideScale(0, 10)) == 0);
+        EXPECT(TxScaleFlow(-7, TxScaleOne()) == -7);
+        EXPECT(TxScaleIsOne(TxMakeLimit(0, 0, TX_ROOM_UNLIMITED, ~uint64_t{0}).inScale));
+
+        // 倍率は分数のまま = 切り捨ては流れに掛ける 1 回(仮の世界の液体 LqLimitOutflow・気体 GfLimitMovedAmount と同じ式)
+        EXPECT(TxScaleAmount(7, TxSideScale(1, 3)) == 2);
+        EXPECT(TxScaleAmount(~uint64_t{0}, TxSideScale(~uint64_t{0} - 1, ~uint64_t{0})) == ~uint64_t{0} - 1);
 
         Random random;
         for (uint32_t i = 0; i < 20000; ++i) {
@@ -76,24 +119,31 @@ namespace {
             const uint64_t content = random.Below(outTotal + 2);
             const uint64_t room = random.Below(uint64_t{1} << 40);
             const TxLimit limit = TxMakeLimit(content, outTotal, room, 0);
-            EXPECT(limit.outScale <= TX_SCALE_ONE && limit.inScale == TX_SCALE_ONE);
+            EXPECT(!TxScaleLess(TxScaleOne(), limit.outScale) && TxScaleIsOne(limit.inScale));
 
             uint64_t scaledTotal = 0;
             for (uint32_t f = 0; f < faces; ++f) {
-                const uint64_t scale = TxFaceScale(limit, TxNoLimit());
+                const TxScale scale = TxFaceScale(limit, TxNoLimit());
                 const int64_t forward = TxScaleFlow(flows[f], scale);
                 const int64_t backward = TxScaleFlow(-flows[f], scale);
                 EXPECT(forward == -backward);
                 EXPECT(forward >= 0 && forward <= flows[f]);
                 scaledTotal += static_cast<uint64_t>(forward);
+
+                // 1 回の切り捨て = 流れ × 中身 ÷ 出る合計
+                if (outTotal > content)
+                    EXPECT(static_cast<uint64_t>(forward) ==
+                           FxDivU128By64(FxMulU64Full(static_cast<uint64_t>(flows[f]), content), outTotal).quotient);
             }
 
             EXPECT(scaledTotal <= content || outTotal <= content);
 
             // 入る側の倍率と出る側の倍率の小さい方
             const TxLimit target = TxMakeLimit(0, 0, room, outTotal);
-            EXPECT(TxFaceScale(limit, target) == std::min(limit.outScale, target.inScale));
-            EXPECT(TxMinLimit(limit, target).outScale == std::min(limit.outScale, target.outScale));
+            EXPECT(SameScale(TxFaceScale(limit, target),
+                             TxScaleLess(target.inScale, limit.outScale) ? target.inScale : limit.outScale));
+            EXPECT(SameScale(TxMinLimit(limit, target).outScale,
+                             TxScaleLess(target.outScale, limit.outScale) ? target.outScale : limit.outScale));
         }
     }
 
@@ -180,6 +230,7 @@ int main() {
     const BakedReactionTable table = BakeReactionTable(MakeCombustionTestTable()).value();
 
     TestLimits();
+    TestPacket();
     TestConductionKind();
     MeasureCost(table);
 

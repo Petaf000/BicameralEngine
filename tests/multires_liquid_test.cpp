@@ -273,9 +273,16 @@ namespace {
             std::vector<uint32_t> changedSlots;
             const auto start = std::chrono::steady_clock::now();
             const ProbeLiquidStepReport probe = worlds.probe.Step(table, worlds.grid, changed);
+            // 保存の検査(T-0769): 液体の 1 刻みの前後で Σ 保存量 − 帳簿(エネルギー・元素・液体の欄の列)が変わらない
+            const ConservedTotals before = ComputeConservedTotals(worlds.nest, table, worlds.nest.capacity.rootLevel);
             const auto middle = std::chrono::steady_clock::now();
             const ProbeLiquidStepReport nest = worlds.liquid.Step(worlds.nest, table, changedSlots);
             const auto end = std::chrono::steady_clock::now();
+            if (ComputeConservedTotals(worlds.nest, table, worlds.nest.capacity.rootLevel) != before) {
+                std::printf("  %s: 刻み %llu で Σ 保存量 − 帳簿が変わった\n", scene, (unsigned long long)tick);
+                return false;
+            }
+
             stepCost.probeNanoseconds += std::chrono::duration_cast<std::chrono::nanoseconds>(middle - start).count();
             stepCost.nestNanoseconds += std::chrono::duration_cast<std::chrono::nanoseconds>(end - middle).count();
             ++stepCost.ticks;

@@ -6,7 +6,8 @@
 // 保存の検査は 1 つ: Σ 登録した保存量 − (入 − 出) = 一定(engine/src/sim/multires_nest.h の ComputeConservedTotals)。
 //   量(列): 0 = エネルギー、1 + 物質 ID(元素は物質の組成から数える)。この後ろに、状態の登録(T-0711)が「保存量」とした欄
 //           (運動量 ×3・位置/運動のエネルギー)の列を足す(今の MR は 0 本。列の数は MultiresCapacity::ledgerColumns)。
-//   理由: 下の WL_REASON_*。向き: 出(セルから減った)・入(セルに増えた)。どちらも足すだけの符号なしの数で、差は検査の時に取る
+//   理由: 下の WL_REASON_*(運ぶ欄のエネルギー ⇔ セルの熱は、位置が「重さの仕事」・運動が「物理の熱」。欄の列は出・
+//         エネルギーの列は入。T-0769)。向き: 出(セルから減った)・入(セルに増えた)。どちらも足すだけの符号なしの数で、差は検査の時に取る
 //         (GPU は 64bit の atomic の足し算だけ。順によらない)。
 //   レベル: 値はそのレベルの単位 × 2^-64 の数(MR の端数と同じ)。桁あふれ(= そのレベルの 1 単位)は 1 段粗い段の 2^61 へ繰り上げる
 //         (レベルが 1 段粗いと単位は 8 倍)。丸ごとの量 units(そのレベルの単位)は 21 段粗い段の 2 × units と 22 段粗い段へ(WlSplitWholeUnits)。
@@ -28,7 +29,12 @@ FX_CONST uint32_t WL_REASON_WALL_IMPULSE = 4;       // 壁の力積(閉じた端
 FX_CONST uint32_t WL_REASON_GRAVITY_WORK = 5;       // 重さの仕事(位置のエネルギーとの出入り。段 2〜3)
 FX_CONST uint32_t WL_REASON_SPEED_LIMIT = 6;        // 速さの上限(頭打ちで消した運動量・運動のエネルギー。段 2〜3)
 FX_CONST uint32_t WL_REASON_REST_ROUNDING = 7;      // 静止の丸め(1 単位未満の速さを 0 にした分。段 4)
-FX_CONST uint32_t WL_REASON_COUNT = 8;
+// 流れの運ぶ欄の理由(段 2〜3。T-0769)。摩擦 = 摩擦が止めた面の運動量・行き場なし = まわりが空になった面の運動量を捨てた分・
+// 段の外の質量の変化 = 反応・相変化・置く操作で物質が現れた・消えた時の運ぶ欄の合わせ直し(欄が物質に付く)
+FX_CONST uint32_t WL_REASON_FRICTION = 8;
+FX_CONST uint32_t WL_REASON_NO_OUTLET = 9;
+FX_CONST uint32_t WL_REASON_FOLLOW_MASS = 10;
+FX_CONST uint32_t WL_REASON_COUNT = 11;
 
 // --- 向きと欄 ---
 FX_CONST uint32_t WL_DIRECTION_OUT = 0;  // セルから減った(世界の外へ出た)

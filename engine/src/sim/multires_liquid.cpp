@@ -11,6 +11,7 @@
 #include "core/aliases.h"
 #include "sim/cell_view.h"
 #include "sim/multires_fields.h"
+#include "sim/transport_packet.h"
 
 namespace bicameral::sim {
 
@@ -122,67 +123,23 @@ namespace bicameral::sim {
             return mass / multires::CV_NANOGRAMS_PER_MILLIGRAM;
         }
 
-        // --- 当てる(仮。段 1 ④ の当てる段 T-0714 の生の包みと当て方に載せ替える所)---
+        // 液体の包みの運ぶ欄(TxPacket::carried の番号)
+        constexpr uint32_t CARRIED_POTENTIAL = 0;  // 動く液体の位置のエネルギー(mJ)
 
-        // 物質量の増減(セルごと。物質 ID → 増減)
-        struct CellDelta {
-            std::vector<std::pair<uint32_t, int64_t>> amounts;
-            int64_t energy = 0;  // mJ
-            bool touched = false;
-        };
+        // 帳簿の 1 つの量を載せる(符号つき: 正 → direction・負 → 逆の向き。T-0762 の書き方の約束)
+        void AddLedgerSigned(MultiresNest& nest, uint32_t reason, uint32_t direction, int32_t level, uint32_t column,
+                             int64_t amount) {
+            if (amount == 0)
+                return;
 
-        void AddAmount(CellDelta& delta, uint32_t species, int64_t amount) {
-            delta.touched = true;
-            for (auto& entry : delta.amounts) {
-                if (entry.first == species) {
-                    entry.second += amount;
-                    return;
-                }
-            }
-
-            delta.amounts.emplace_back(species, amount);
+            const multires::WlSignedEntry entry = multires::WlEnergyEntry(amount, direction);
+            AddWorldLedgerUnits(nest, multires::WlSlot(reason, entry.direction), level, column, entry.magnitude);
         }
 
-        // 増減をセルに当てる(成分は物質 ID の順・0 の成分は消す)。値が変わったら true
-        bool ApplyDelta(reaction::RxCell& cell, const CellDelta& delta) {
-            if (!delta.touched)
-                return false;
-
-            std::vector<SpeciesAmount> amounts;
-            for (uint32_t i = 0; i < cell.speciesCount; ++i)
-                amounts.push_back({.species = cell.species[i], .amount = cell.amounts[i]});
-
-            for (const auto& [species, change] : delta.amounts) {
-                auto found = rng::find(amounts, species, &SpeciesAmount::species);
-                if (found == amounts.end()) {
-                    FX_ASSERT(change >= 0);
-                    amounts.push_back({.species = species, .amount = (uint64_t)change});
-                    continue;
-                }
-
-                FX_ASSERT(change >= 0 || found->amount >= (uint64_t)-change);
-                found->amount = (uint64_t)((int64_t)found->amount + change);
-            }
-
-            std::erase_if(amounts, [](const SpeciesAmount& entry) { return entry.amount == 0; });
-            rng::sort(amounts, {}, &SpeciesAmount::species);
-            FX_ASSERT(amounts.size() <= reaction::RX_MAX_CELL_SPECIES);  // 溢れのセルは断っている(Create)
-
-            reaction::RxCell after = reaction::RxMakeEmptyCell(cell.energy + delta.energy);
-            for (uint32_t i = 0; i < amounts.size() && i < reaction::RX_MAX_CELL_SPECIES; ++i) {
-                after.species[i] = amounts[i].species;
-                after.amounts[i] = amounts[i].amount;
-                after.speciesCount = i + 1;
-            }
-
-            bool same = after.energy == cell.energy && after.speciesCount == cell.speciesCount;
-            for (uint32_t i = 0; same && i < after.speciesCount; ++i)
-                same = after.species[i] == cell.species[i] && after.amounts[i] == cell.amounts[i];
-
-            cell = after;
-
-            return !same;
-        }
+        // 運動量の列に載せる理由(報告の内訳の順。和が仮の世界の帳簿 external)
+        constexpr std::array<uint32_t, 6> MOMENTUM_REASONS = {
+            multires::WL_REASON_WALL_IMPULSE, multires::WL_REASON_GRAVITY_WORK, multires::WL_REASON_FRICTION,
+            multires::WL_REASON_NO_OUTLET,    multires::WL_REASON_SPEED_LIMIT,  multires::WL_REASON_FOLLOW_MASS};
 
         // --- 1 刻み ---
 
@@ -199,15 +156,18 @@ namespace bicameral::sim {
             std::array<std::vector<int64_t>, 3> kinetic;  // 面の運動のエネルギー(mJ)
             std::vector<int64_t> potential;               // 位置のエネルギー(mJ)
             std::vector<int64_t> massBefore;              // 前の刻みの終わりの液体の質量(mg)
-            ProbeLiquidLedger ledger;
 
             // --- 作業 ---
             std::vector<int64_t> pressure;                 // 質量の単位(mg)
             std::array<std::vector<uint64_t>, 3> desired;  // 面の望む動く質量(mg)
             std::vector<uint64_t> outgoing;                // セルから出る望む質量の合計
+            std::vector<uint64_t> incoming;                // セルに入る望む質量の合計(入る側の上限。液体は器で切らない)
+            std::vector<multires::TxLimit> limits;         // 当てる段の上限(セルごとの倍率)
             std::array<std::vector<int64_t>, 3> moved;     // 面を通って実際に動いた質量(mg。+ 向きが正)
-            std::vector<CellDelta> deltas;
+            std::vector<TxCellChange> changes;             // 当てる段の包みの和(セルごと)
             std::vector<int64_t> potentialCarried;
+            int64_t potentialHeat = 0;             // 位置のエネルギー → セルの熱(帳簿の「重さの仕事」)
+            std::array<int64_t, 3> kineticHeat{};  // 運動のエネルギー → セルの熱(軸ごと。帳簿の「物理の熱」)
             std::array<std::vector<int64_t>, 3> kineticCarried;
             std::vector<uint8_t> changed;
 
@@ -243,10 +203,11 @@ namespace bicameral::sim {
             void ComputePressure(ProbeLiquidStepReport& report);
             void ApplyForces(ProbeLiquidStepReport& report);
             void LimitAndApply(ProbeLiquidStepReport& report);
-            void MoveLiquid(uint32_t from, uint32_t to, uint64_t mass);
+            [[nodiscard]] multires::TxPacket Pack(uint32_t from, uint64_t mass) const;
             void AdvectMomentum(ProbeLiquidStepReport& report);
             void SettleEnergy(ProbeLiquidStepReport& report);
-            void AddLedger(const ProbeLiquidStepReport& report);
+            void AddLedger(MultiresNest& nest, const MultiresLiquidFields& fields,
+                           const ProbeLiquidStepReport& report) const;
             void Write(MultiresNest& nest, const MultiresLiquidFields& fields,
                        std::vector<uint32_t>& changedSlots) const;
 
@@ -308,11 +269,6 @@ namespace bicameral::sim {
                     massBefore[cell] = LoadNestField(nest, fields.massBefore, slot, index, 0);
                 }
             }
-
-            for (uint32_t axis = 0; axis < 3; ++axis)
-                ledger.external[axis] = LoadNestWorldField(nest, fields.ledgerMomentum, axis);
-
-            ledger.energy = LoadNestWorldField(nest, fields.ledgerEnergy, 0);
         }
 
         // 段の外(蒸発・凝縮・反応・置く操作)で液体の質量が変わった面の運動量を合わせ直す(仮の世界の FollowMassChange。T-0656。
@@ -364,6 +320,7 @@ namespace bicameral::sim {
         void LiquidStep::ApplyForces(ProbeLiquidStepReport& report) {
             const uint32_t count = grid.Count();
             outgoing.assign(count, 0);
+            incoming.assign(count, 0);
             for (uint32_t axis = 0; axis < 3; ++axis) {
                 desired[axis].assign(count, 0);
                 for (uint32_t cell = 0; cell < count; ++cell) {
@@ -393,14 +350,28 @@ namespace bicameral::sim {
 
                     desired[axis][cell] = force.desired;
                     outgoing[face > 0 ? cell : neighbor] += force.desired;
+                    incoming[face > 0 ? neighbor : cell] += force.desired;
                 }
             }
         }
 
-        // 上流 from から質量 mass(mg)の液体を下流 to へ(成分の比で物質量・液体のぶんのエネルギー)
-        void LiquidStep::MoveLiquid(uint32_t from, uint32_t to, uint64_t mass) {
+        // 当てる段の世界(液体の 1 段。枠は使わず、番号 = 1 段の世界のセルの並び。T-0770)
+        struct LiquidApplyWorld {
+            LiquidStep* step = nullptr;
+
+            [[nodiscard]] multires::TxLimit Limit(uint32_t /*slot*/, uint32_t cell) const { return step->limits[cell]; }
+            void AddPacket(uint32_t /*slot*/, uint32_t cell, const multires::TxPacket& packet,
+                           uint32_t incoming) const {
+                sim::AddPacket(step->changes[cell], packet, incoming != 0);
+            }
+        };
+
+        // 液体の種類の包み: 上流 from から質量 mass(mg)の液体 = 成分の比で物質量・液体のぶんのエネルギー・位置のエネルギーの比
+        // (運ぶ欄 CARRIED_POTENTIAL。速さ〔面の運動量〕は面の欄なので AdvectMomentum が運ぶ)
+        multires::TxPacket LiquidStep::Pack(uint32_t from, uint64_t mass) const {
             const reaction::RxCell& cell = cells[from];
             const LqCellView& state = states[from];
+            multires::TxPacket packet = multires::TxMakePacket();
             uint64_t movedCapacity = 0;
             int64_t movedChemical = 0;
             for (uint32_t i = 0; i < cell.speciesCount; ++i) {
@@ -412,31 +383,35 @@ namespace bicameral::sim {
                 if (amount == 0)
                     continue;
 
-                AddAmount(deltas[from], species, -(int64_t)amount);
-                AddAmount(deltas[to], species, (int64_t)amount);
+                packet = multires::TxPacketWithSpecies(packet, species, amount);
                 movedCapacity += amount * table.species[species].heatCapacity;
                 movedChemical += (int64_t)amount * table.species[species].h0;
             }
 
-            if (movedCapacity == 0)
-                return;
+            if (movedCapacity != 0)
+                packet.energy = liquid::LqMovedEnergy(state, movedCapacity, movedChemical);
 
-            const int64_t movedEnergy = liquid::LqMovedEnergy(state, movedCapacity, movedChemical);
-            deltas[from].energy -= movedEnergy;
-            deltas[to].energy += movedEnergy;
+            packet.carried[CARRIED_POTENTIAL] = (int64_t)liquid::LqMovedShare((uint64_t)potential[from], mass,
+                                                                              state.mass);
+
+            return packet;
         }
 
-        // 上限(出る合計が中身を超えるセルは比で縮める)と当てる(成分・エネルギー・位置のエネルギーの増減を包みに)。
-        // 段 1 ④ の当てる段(T-0714。上限は出る側と入る側の倍率の min)へ載せ替える所
+        // 当てる段(T-0714・T-0770): 上限(出る側 = 中身 ÷ 出る合計・入る側 = 器の残り ÷ 入る合計。液体は器で切らない)→
+        // 包み(Pack)→ 当てる(TxApplyPacket)。望む流れは刻みの初めの面の運動量から(Jacobi)
         void LiquidStep::LimitAndApply(ProbeLiquidStepReport& report) {
             const uint32_t count = grid.Count();
-            deltas.assign(count, {});
-            potentialCarried = potential;
+            changes.assign(count, {});
+            limits.resize(count);
             for (uint32_t cell = 0; cell < count; ++cell) {
                 if (outgoing[cell] > states[cell].mass)
                     ++report.limitedCells;
+
+                limits[cell] = multires::TxMakeLimit(states[cell].mass, outgoing[cell], multires::TX_ROOM_UNLIMITED,
+                                                     incoming[cell]);
             }
 
+            const LiquidApplyWorld world{.step = this};
             for (uint32_t axis = 0; axis < 3; ++axis) {
                 moved[axis].assign(count, 0);
                 for (uint32_t cell = 0; cell < count; ++cell) {
@@ -448,20 +423,19 @@ namespace bicameral::sim {
                     const bool forward = faces[axis][cell] > 0;
                     const uint32_t from = forward ? cell : neighbor;
                     const uint32_t to = forward ? neighbor : cell;
-                    const uint64_t fromMass = states[from].mass;
-                    const uint64_t mass = liquid::LqLimitOutflow(flux, fromMass, outgoing[from]);
+                    const uint64_t mass = multires::TxLimitAmount(world, 0, from, 0, to, flux);
                     if (mass == 0)
                         continue;
 
                     report.movedMilligrams += mass;
                     moved[axis][cell] = forward ? (int64_t)mass : -(int64_t)mass;
-                    MoveLiquid(from, to, mass);
-
-                    const auto share = (int64_t)liquid::LqMovedShare((uint64_t)potential[from], mass, fromMass);
-                    potentialCarried[from] -= share;
-                    potentialCarried[to] += share;
+                    multires::TxApplyPacket(world, 0, from, 0, to, Pack(from, mass));
                 }
             }
+
+            potentialCarried = potential;
+            for (uint32_t cell = 0; cell < count; ++cell)
+                potentialCarried[cell] += changes[cell].carried[CARRIED_POTENTIAL];
         }
 
         // 面の運動量(と運動のエネルギー)を、面のまわりの体積の境を通る質量の流れで風上に運ぶ(T-0610・ADR-0276)
@@ -511,10 +485,10 @@ namespace bicameral::sim {
             changed.assign(count, 0);
             std::vector<uint64_t> mass(count, 0);
             for (uint32_t cell = 0; cell < count; ++cell) {
-                if (ApplyDelta(cells[cell], deltas[cell]))
+                if (ApplyCellChange(cells[cell], changes[cell]))
                     changed[cell] = 1;
 
-                mass[cell] = deltas[cell].touched ? LiquidMassMilligrams(phases, cells[cell]) : states[cell].mass;
+                mass[cell] = changes[cell].touched ? LiquidMassMilligrams(phases, cells[cell]) : states[cell].mass;
                 massBefore[cell] = (int64_t)mass[cell];
             }
 
@@ -538,6 +512,8 @@ namespace bicameral::sim {
                     if (released == 0)
                         continue;
 
+                    kineticHeat[axis] += released;
+
                     if (!inside) {
                         heat[cell] += released;
                         continue;
@@ -553,6 +529,7 @@ namespace bicameral::sim {
             for (uint32_t cell = 0; cell < count; ++cell) {
                 const int64_t settledPotential = PotentialOf(cell, mass[cell]);
                 heat[cell] += potentialCarried[cell] - settledPotential;
+                potentialHeat += potentialCarried[cell] - settledPotential;
                 potential[cell] = settledPotential;
                 if (heat[cell] == 0)
                     continue;
@@ -563,11 +540,36 @@ namespace bicameral::sim {
             }
         }
 
-        // 外から入った運動量を帳簿へ(世界の帳簿の 1 型への合流 T-0762 で列 = 量 × 理由へ移す所)
-        void LiquidStep::AddLedger(const ProbeLiquidStepReport& report) {
-            for (uint32_t axis = 0; axis < 3; ++axis)
-                ledger.external[axis] += report.wall[axis] + report.gravity[axis] + report.friction[axis] +
-                                         report.dropped[axis] + report.capped[axis] + report.vanished[axis];
+        // 帳簿(世界の帳簿の列 = 量 × 理由。T-0769・T-0762 の書き方の約束): 面の運動量の列に外から入った運動量を理由ごとに
+        // (正 → 入・負 → 出)、位置と運動のエネルギーの欄の列に「熱になった分」を出し、同じ量をエネルギーの列(セルの熱)に入れる。
+        // 段の外で液体が現れた・消えた分の位置のエネルギーは「段の外の質量の変化」の入。
+        // これで ComputeConservedTotals(Σ 保存量 − 帳簿)が液体の刻みで列ごとに変わらない
+        void LiquidStep::AddLedger(MultiresNest& nest, const MultiresLiquidFields& fields,
+                                   const ProbeLiquidStepReport& report) const {
+            const int32_t level = nest.capacity.rootLevel;
+            const uint32_t base = NestFieldLedgerBase(nest);
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const uint32_t column = base + NestConservedIndex(nest, fields.momentum) + axis;
+                const std::array<int64_t, 6> parts = {report.wall[axis],     report.gravity[axis],
+                                                      report.friction[axis], report.dropped[axis],
+                                                      report.capped[axis],   report.vanished[axis]};
+                for (uint32_t part = 0; part < parts.size(); ++part)
+                    AddLedgerSigned(nest, MOMENTUM_REASONS[part], multires::WL_DIRECTION_IN, level, column,
+                                    parts[part]);
+
+                AddLedgerSigned(nest, multires::WL_REASON_PHYSICS_HEAT, multires::WL_DIRECTION_OUT, level,
+                                base + NestConservedIndex(nest, fields.kinetic) + axis, kineticHeat[axis]);
+                AddLedgerSigned(nest, multires::WL_REASON_PHYSICS_HEAT, multires::WL_DIRECTION_IN, level,
+                                multires::WL_COLUMN_ENERGY, kineticHeat[axis]);
+            }
+
+            const uint32_t potentialColumn = base + NestConservedIndex(nest, fields.potential);
+            AddLedgerSigned(nest, multires::WL_REASON_FOLLOW_MASS, multires::WL_DIRECTION_IN, level, potentialColumn,
+                            report.potentialEntered);
+            AddLedgerSigned(nest, multires::WL_REASON_GRAVITY_WORK, multires::WL_DIRECTION_OUT, level, potentialColumn,
+                            potentialHeat);
+            AddLedgerSigned(nest, multires::WL_REASON_GRAVITY_WORK, multires::WL_DIRECTION_IN, level,
+                            multires::WL_COLUMN_ENERGY, potentialHeat);
         }
 
         // セルと欄を木へ書き戻す。変わったブロックだけ(一様なら頁に広げる)。セルが変わったブロックはつつく
@@ -620,11 +622,6 @@ namespace bicameral::sim {
                 PokeNestBlock(nest, slot);
                 changedSlots.push_back(slot);
             }
-
-            for (uint32_t axis = 0; axis < 3; ++axis)
-                StoreNestWorldField(nest, fields.ledgerMomentum, axis, ledger.external[axis]);
-
-            StoreNestWorldField(nest, fields.ledgerEnergy, 0, ledger.energy);
         }
 
         uint32_t Register(MultiresNest& nest, const char* name, uint32_t place, uint32_t scale, uint32_t flags,
@@ -693,7 +690,7 @@ namespace bicameral::sim {
                                                options.frictionShift, options.overfillStiffness,
                                                options.maxSpeedMillimetersPerSecond, options.advection ? 1u : 0u);
 
-        // --- 欄(面の運動量・運動のエネルギー・位置のエネルギーは保存量。前の質量は合わせ直しの元。帳簿は世界の欄)---
+        // --- 欄(面の運動量・運動のエネルギー・位置のエネルギーは保存量 = 世界の帳簿に列がある。前の質量は合わせ直しの元)---
         constexpr uint32_t conserved = sf::SF_FLAG_CONSERVED | sf::SF_FLAG_HASHED;
         MultiresLiquidFields& fields = result.m_fields;
         fields.momentum = Register(nest, "liquid.momentum", sf::SF_PLACE_FACE, sf::SF_SCALE_VOLUME, conserved, 3);
@@ -703,12 +700,7 @@ namespace bicameral::sim {
         // 前の質量は保存量ではない(セルの液体の写し)ので余りを帳簿へ出さない SAME(レベルの単位なので、粗くした平均 = 和 ÷ 8 は量の規則と同じ数)
         fields.massBefore = Register(nest, "liquid.mass_before", sf::SF_PLACE_CELL, sf::SF_SCALE_SAME,
                                      sf::SF_FLAG_HASHED, 1);
-        fields.ledgerMomentum = Register(nest, "liquid.ledger_momentum", sf::SF_PLACE_WORLD, sf::SF_SCALE_SAME,
-                                         sf::SF_FLAG_HASHED, 3);
-        fields.ledgerEnergy = Register(nest, "liquid.ledger_energy", sf::SF_PLACE_WORLD, sf::SF_SCALE_SAME,
-                                       sf::SF_FLAG_HASHED, 1);
-        for (const uint32_t field : {fields.momentum, fields.kinetic, fields.potential, fields.massBefore,
-                                     fields.ledgerMomentum, fields.ledgerEnergy}) {
+        for (const uint32_t field : {fields.momentum, fields.kinetic, fields.potential, fields.massBefore}) {
             if (field == MULTIRES_NO_FIELD)
                 return std::unexpected("液体の欄を登録できない(名前が重なる・根を置いた後)");
         }
@@ -741,7 +733,6 @@ namespace bicameral::sim {
             step.potential[cell] = potential;
         }
 
-        step.ledger.energy += report.potentialEntered;
         step.FollowMassChange(report);
 
         // --- 圧力 → 面の力 → 上限と当てる → 運動量を運ぶ → エネルギーを熱へ → 帳簿 → 書き戻す(起こす)---
@@ -753,7 +744,7 @@ namespace bicameral::sim {
             step.AdvectMomentum(report);
 
         step.SettleEnergy(report);
-        step.AddLedger(report);
+        step.AddLedger(nest, m_fields, report);
         report.changedCells = (uint32_t)rng::count(step.changed, uint8_t{1});
         step.Write(nest, m_fields, changedSlots);
 
@@ -777,11 +768,18 @@ namespace bicameral::sim {
     }
 
     ProbeLiquidLedger MultiresLiquid::Ledger(const MultiresNest& nest) const {
+        // 世界の帳簿の列から(運動量の列の理由ごとの入 − 出の和・位置のエネルギーの列の「段の外の質量の変化」。T-0769)
         ProbeLiquidLedger ledger;
-        for (uint32_t axis = 0; axis < 3; ++axis)
-            ledger.external[axis] = LoadNestWorldField(nest, m_fields.ledgerMomentum, axis);
+        const int32_t level = nest.capacity.rootLevel;
+        const uint32_t base = NestFieldLedgerBase(nest);
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            const uint32_t column = base + NestConservedIndex(nest, m_fields.momentum) + axis;
+            for (const uint32_t reason : MOMENTUM_REASONS)
+                ledger.external[axis] += WorldLedgerNetUnits(nest, reason, column, level);
+        }
 
-        ledger.energy = LoadNestWorldField(nest, m_fields.ledgerEnergy, 0);
+        ledger.energy = WorldLedgerNetUnits(nest, multires::WL_REASON_FOLLOW_MASS,
+                                            base + NestConservedIndex(nest, m_fields.potential), level);
 
         return ledger;
     }

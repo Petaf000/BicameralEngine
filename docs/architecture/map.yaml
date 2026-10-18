@@ -316,7 +316,7 @@ views:
           note: "上の軸は world_edge.hlsli の WE_UP_AXIS の 1 か所(仮 z)。外の柱は箱の中の層ごとの基準の大気(GasAtmosphereLayers。仮の世界の気体の区画の層の基準とビット一致)。MR の気体も端の種類を nest.edges.world から読む。SetWorldEdges が替えて、開いた端に接するブロックを種にする。大気の無い open は真空(ベイクの注意)。当てる段の World::Neighbor・Outside が読む(world_edge.hlsli。ADR-0337)。multires_edge_test" }
       - { id: multiresliquid, group: simlib, label: "MultiresLiquid::Step<br/>多重解像度の 1 段で液体(土台の段 2 ②。T-0717)<br/>見立て → 液体の芯 → 上限と当てる(仮)→ 欄に書き戻す",
           code: "engine/src/sim/multires_liquid.cpp::MultiresLiquid::Step", ticket: T-0717, doc: docs/design/20-transport-substrate.md,
-          note: "根のレベルだけ・子なしの木(仮の世界と同じ形)。セルは MakeCellView から、面の運動量・運動のエネルギー・位置のエネルギー・前の質量は登録した欄(T-0711)、帳簿は世界の欄。仮の世界の液体(区画 = 世界いっぱい)と毎刻みビット一致(multires_liquid_test)。上限・当てる・帳簿は当てる段(T-0714)へ載せ替える" }
+          note: "根のレベルだけ・子なしの木(仮の世界と同じ形)。セルは MakeCellView から、面の運動量・運動のエネルギー・位置のエネルギー・前の質量は登録した欄(T-0711)、帳簿は世界の帳簿の列(T-0769)。上限・包み・当てるは当てる段(TxLimitAmount・TxApplyPacket。T-0770)。仮の世界の液体(区画 = 世界いっぱい)と毎刻みビット一致・ComputeConservedTotals が毎刻み一定(multires_liquid_test)" }
       - { id: gascells, group: simlib, label: "LoadGasCells / StoreGasCells<br/>世界のセル ⇔ 気体の箱の写し(T-0720)<br/>仮の世界と多重解像度の世界が共有",
           code: "engine/src/sim/gas_cells.cpp::StoreGasCells", ticket: T-0720, doc: docs/design/20-transport-substrate.md,
           note: "気体の成分 = 凝縮相でない物質・エネルギーは気体のぶん(GfGasEnergyPart)・欄が物質に付く(ADR-0286)・層ごとの基準の大気(GasAtmosphereLayers)。probe_gas.cpp から移した(値は同じ)" }
