@@ -946,7 +946,7 @@ namespace {
         return speed;
     }
 
-    void ProbeHeat(uint32_t amount, uint32_t temperature, uint32_t keepShift = 0) {
+    GasBox MakeBlastBox(uint32_t amount, uint32_t temperature) {
         GasBox box = MakeAirBox(MakeAirConfig(12, 12, 12));
         const uint32_t center = box.Index(6, 6, 3);
         GasCell cell = box.cells[center];
@@ -954,8 +954,13 @@ namespace {
             value *= amount;
 
         box.cells[center] = MakeGasCell(box.config, cell.amounts, temperature);
+        return box;
+    }
+
+    void ProbeHeat(uint32_t amount, uint32_t temperature, uint32_t pushForm = 0) {
+        GasBox box = MakeBlastBox(amount, temperature);
         GasHeatProbe probe;
-        probe.keepShift = keepShift;
+        probe.pushForm = pushForm;
         box.heatProbe = &probe;
         uint32_t coldest = UINT32_MAX;
         uint32_t zeroCells = 0;
@@ -989,6 +994,42 @@ namespace {
 
         std::printf("heat probe x%u %u mK: coldest %u mK, max speed %lld, energy-limited faces %llu\n", amount,
                     temperature, coldest, (long long)MaxSpeed(box), (unsigned long long)box.energyLimitedFaces);
+    }
+
+    // 強い爆発(陽解法)でも、どの小刻みの終わりにもどのセルの熱も負にならない(当てる段の上限の熱の列。T-0787・ADR-0355)・保存は
+    // ビット単位。ふつうの強さ(5 倍・1500 K)では熱の列は縮めない(値は前と同じ)
+    void TestStrongBlastHeatStaysPositive() {
+        struct Blast {
+            uint32_t amount;
+            uint32_t temperature;
+        };
+
+        for (const Blast blast : {Blast{5, 1500000}, Blast{40, 2600000}}) {
+            GasBox box = MakeBlastBox(blast.amount, blast.temperature);
+            GasHeatProbe probe;
+            box.heatProbe = &probe;
+            const GasTotals before = SumGas(box);
+            Run(box, 30);
+            const GasTotals after = SumGas(box);
+
+            EXPECT(probe.impulseCells == 0);
+            EXPECT(probe.outflowCells == 0);
+            EXPECT(probe.otherCells == 0);
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+                EXPECT(after.amounts[s] == before.amounts[s]);
+
+            EXPECT(after.energy == before.energy + box.ledger.energy);
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                EXPECT(after.momentum[axis] == before.momentum[axis] + box.ledger.momentum[axis]);
+
+            if (blast.amount == 5)
+                EXPECT(box.energyLimitedFaces == 0);
+            else
+                EXPECT(box.energyLimitedFaces > 0);
+
+            std::printf("strong blast x%u %u K: energy-limited faces %llu, max speed %lld\n", blast.amount,
+                        blast.temperature / 1000, (unsigned long long)box.energyLimitedFaces, (long long)MaxSpeed(box));
+        }
     }
 
     void TestHotBlockNoCheckerboard() {
@@ -1157,15 +1198,17 @@ namespace {
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--heat-probe") {  // T-0787 の調べ
-        for (const uint32_t keep : {63u, 2u, 3u, 4u, 5u}) {
-            std::printf("--- keep 1/2^%u ---\n", keep);
-            ProbeHeat(5, 1500000, keep);
-            ProbeHeat(40, 2600000, keep);
+        // 案 2(押し出す仕事の温度: 0 = 初め〔既定〕・1 = 初めと終わりの平均・2 = 終わり。熱の列は既定で入る)
+        for (const uint32_t form : {0u, 1u, 2u}) {
+            std::printf("--- push form %u ---\n", form);
+            ProbeHeat(5, 1500000, form);
+            ProbeHeat(40, 2600000, form);
         }
         return 0;
     }
 
     TestClosedBoxConservation();
+    TestStrongBlastHeatStaysPositive();
     TestPeriodicMomentum();
     TestStaticAtmosphere();
     TestDisturbedAtmosphereSettles();

@@ -513,6 +513,30 @@ FX_FN int64_t GfGravityWork(GfParams params, uint32_t axis, int64_t flow, uint64
     return flow > 0 ? work : -work;
 }
 
+// --- 当てる段の上限の熱の列(陽解法の安全網。D-508・T-0787・ADR-0355)---
+// 風上のセルは、自分の熱より多くの熱を塊で持ち出せない。出ていく面の「塊の熱のぶん」の和が「持ち出せる熱」を超えるセルは、
+// 出ていく面の割合と成分の量を同じ倍率で縮める(当てる段の TxMakeLimit・TxFaceScale・TxScaleAmount。入る側は縮めない)。
+// 熱が負にならないことを式の形で保証する(0 K に着くことはある。1 小刻みの強い膨張の離散の冷え過ぎ。T-0787 の測り)。断熱のときだけ
+
+// 余裕(µJ): 面ごとの丸め(最も近い mJ)× 6 面
+FX_CONST int64_t GF_HEAT_LIMIT_MARGIN_MICROJOULES = 6000;
+
+// 塊の熱のぶん(µJ)= 塊のエネルギー(GfMovedEnergy)− 化学 − 運動の分け前(= 熱の分け前 + 押し出す仕事 n R T)。
+// 0 以下の塊も 1 と数える(力で熱が一時的に負になったセルは負の熱を下流へ持ち出さない = 出ていく面を 0 に縮める)
+FX_FN uint64_t GfMovedHeatPart(int64_t movedEnergy, int64_t movedChemical, int64_t sourceKinetic, uint64_t fraction) {
+    const uint64_t kinetic = sourceKinetic > 0 ? (uint64_t)sourceKinetic : 0;
+    const int64_t heat = movedEnergy - movedChemical - (int64_t)GfMulShiftU64(kinetic, fraction, 32);
+
+    return heat > 0 ? (uint64_t)heat : 1;
+}
+
+// 風上が塊で持ち出せる熱(µJ)= 熱(力を当てた後)− 余裕。0 以下は 0
+FX_FN uint64_t GfHeatRoom(int64_t heat) {
+    const int64_t room = heat - GF_HEAT_LIMIT_MARGIN_MICROJOULES;
+
+    return room > 0 ? (uint64_t)room : 0;
+}
+
 // --- 仮の世界のセルとの出し入れ(式だけ。区画と書き戻しは呼ぶ側)---
 
 // セルのエネルギーのうち気体のぶん(mJ)= 熱 × 気体の熱容量 ÷ セルの熱容量 + 気体の化学(セルの温度を気体と凝縮相で同じと置く。

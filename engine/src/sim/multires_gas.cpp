@@ -460,6 +460,7 @@ namespace bicameral::sim {
 
         AddLedger(nest, m_fields, ledger, kineticBefore - SumKinetic(read.fields));
         report.restedCells = ledger.restedCells;
+        report.energyLimitedFaces = step.box.energyLimitedFaces;
         report.changedCells = (uint32_t)rng::count(changed, uint8_t{1});
         WriteCells(nest, grid, m_fields, read, changed, changedSlots);
 

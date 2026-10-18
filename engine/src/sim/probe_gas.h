@@ -96,8 +96,10 @@ namespace bicameral::sim {
         uint32_t gasSpecies = 0;  // 区画の気体の物質の数
         // 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超えるので流さなかった(何も変えない。溢れのセルは R-MULTI-4)
         bool skippedCellOverflow = false;
-        uint32_t changedCells = 0;     // 値が変わったセルの数
-        uint32_t restedCells = 0;      // 静止の丸めで止めたセルの数(T-0723)
+        uint32_t changedCells = 0;  // 値が変わったセルの数
+        uint32_t restedCells = 0;   // 静止の丸めで止めたセルの数(T-0723)
+        // 当てる段の上限の熱の列で縮めた面の数(陽解法の小刻みの合計。T-0787・ADR-0355。ふつうは 0。強い爆発の目安 = 開発の計器の警告)
+        uint64_t energyLimitedFaces = 0;
         GasProjectionCost projection;  // 投影の費用(投影のときだけ)
 
         // --- セルの空き(固体と液体が占めない体積。T-0593・ADR-0268)---

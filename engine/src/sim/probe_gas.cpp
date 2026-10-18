@@ -246,6 +246,7 @@ namespace bicameral::sim {
 
         m_ledger.restEnergy += ledger.restEnergy;
         report.restedCells = ledger.restedCells;
+        report.energyLimitedFaces = step.box.energyLimitedFaces;
 
         for (uint32_t index = 0; index < RegionCellCount(); ++index) {
             if (regionChanged[index] == 0)
