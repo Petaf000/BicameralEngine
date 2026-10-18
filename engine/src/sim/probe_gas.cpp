@@ -161,10 +161,11 @@ namespace bicameral::sim {
         else
             report.projection = StepGasProjection(step.box, m_projection, m_options.projection);
 
-        // --- 気体の箱 → 区画のセル・欄・帳簿(帳簿は格子の軸)---
+        // --- 静止の丸め(当てる段の後)→ 気体の箱 → 区画のセル・欄・帳簿(帳簿は格子の軸)---
         GasCellsLedger ledger{.amounts = std::vector<int64_t>(m_ledger.amounts.size(), 0)};
+        RestGasCells(step, m_options.restSpeedUnits, ledger);
         std::vector<uint8_t> regionChanged;
-        if (!StoreGasCells(table, step, m_options.restSpeedUnits, region, m_fields, ledger, regionChanged)) {
+        if (!StoreGasCells(table, step, region, m_fields, ledger, regionChanged)) {
             m_projection = projectionBefore;
             report.skippedCellOverflow = true;
             return report;

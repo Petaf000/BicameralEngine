@@ -5,6 +5,8 @@
 // どの段も前の段の結果を読み、次の配列へ整数の足し引きだけで書く(順番に依存しない。04 R2・R3)。
 // 断熱(T-0234・07 §2.4): セルのエネルギーは全エネルギー(熱 + 化学 + 運動)。温度は運動エネルギーを引いた熱から導き、
 // (5) で移す塊は風上の熱の分け前 + 押し出す仕事 n R T + 運動エネルギーの分け前を運ぶ(上へ動けば重さの仕事を失い、帳簿へ)。
+// (3)〜(5) の上限と当てるは運ぶ計算の共通の土台の当てる段(common/transport_apply.hlsli の TxLimit・TxLimitAmount・TxPacket・
+// TxApplyPacket。T-0765・ADR-0345)。帳簿は理由ごと(世界の端・壁の力積・重さ。T-0763)。
 #include "sim/gas_reference.h"
 
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <limits>
 
 #include "common/fixed.hlsli"
+#include "common/transport_apply.hlsli"
 #include "sim/gas_internal.h"
 #include "sim/gas_pressure_system.h"
 #include "sim/world_physics.h"
@@ -364,9 +367,78 @@ namespace bicameral::sim {
                                       CellMass(box.config, box.coefficients, moved));
         }
 
-        // 中身の一部を移す(風上 → 風下)。どちらかが開いた境界の外なら帳簿へ
-        void Transfer(GasBox& box, const std::vector<GasCell>& forced, const std::vector<GasDerived>& derived,
-                      std::vector<GasCell>& next, const GasFace& face) {
+        // --- 当てる段の世界(運ぶ計算の共通の土台 common/transport_apply.hlsli。T-0765・ADR-0345)---
+        // 枠 = 側の種類(セル・開いた境界の外)・番号 = セルの番号(外は層)。上限はセルごとの倍率(外は無限の溜め = 縮めない)、
+        // 包みは次の値(next)へ当て、外の側は帳簿の「世界の端」へ(外から入った量が正)
+        constexpr uint32_t APPLY_CELL = 0;
+        constexpr uint32_t APPLY_OUTSIDE = 1;
+
+        uint32_t ApplySlot(FaceSide side) {
+            return side.kind == SideKind::Cell ? APPLY_CELL : APPLY_OUTSIDE;
+        }
+
+        struct GasApplyWorld {
+            GasLedger* ledger = nullptr;
+            std::vector<GasCell>* next = nullptr;
+            const std::vector<multires::TxLimit>* limits = nullptr;
+
+            [[nodiscard]] multires::TxLimit Limit(uint32_t slot, uint32_t index) const {
+                return slot == APPLY_CELL ? (*limits)[index] : multires::TxNoLimit();
+            }
+
+            // 包みを引く(incoming = 0。上流)・足す(1。下流)。包みの物質は箱の欄の番号・運ぶ欄 0〜2 は運動量
+            void AddPacket(uint32_t slot, uint32_t index, const multires::TxPacket& packet, uint32_t incoming) const {
+                const int64_t sign = incoming != 0 ? 1 : -1;
+                if (slot == APPLY_CELL) {
+                    GasCell& cell = (*next)[index];
+                    for (uint32_t i = 0; i < packet.speciesCount; ++i) {
+                        uint64_t& amount = cell.amounts[packet.species[i]];
+                        assert(incoming != 0 || amount >= packet.amounts[i]);
+                        amount = incoming != 0 ? amount + packet.amounts[i] : amount - packet.amounts[i];
+                    }
+
+                    cell.energy += sign * packet.energy;
+                    for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                        cell.momentum[axis] += sign * packet.carried[axis];
+
+                    return;
+                }
+
+                // 開いた境界の外: 外が受けた(incoming)= 箱から出た(帳簿は負)
+                for (uint32_t i = 0; i < packet.speciesCount; ++i)
+                    ledger->amounts[packet.species[i]] -= sign * (int64_t)packet.amounts[i];
+
+                ledger->energy -= sign * packet.energy;
+                ledger->edgeEnergy -= sign * packet.energy;
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                    ledger->momentum[axis] -= sign * packet.carried[axis];
+                    ledger->edgeMomentum[axis] -= sign * packet.carried[axis];
+                }
+            }
+
+            // 重さの仕事 work(mJ。上へ動いた塊が失う分)を下流の側で引き、帳簿の「重さの仕事」へ。下流が外なら、外が受ける量が減る
+            // (= 世界の端の出が減る)。気体の種類だけが持つ当て方(位置のエネルギーを数えない)
+            void AddGravityWork(uint32_t slot, uint32_t index, int64_t work) const {
+                if (work == 0)
+                    return;
+
+                ledger->energy -= work;
+                ledger->gravityEnergy -= work;
+                if (slot == APPLY_CELL) {
+                    (*next)[index].energy -= work;
+                    return;
+                }
+
+                ledger->energy += work;
+                ledger->edgeEnergy += work;
+            }
+        };
+
+        // 中身の一部を移す(風上 → 風下)。塊を包み(TxPacket: 成分の物質量・引く側のエネルギー・運ぶ欄 = 運動量)にして当てる段で当て
+        // (TxApplyPacket)、上へ動いた塊は下流で重さの仕事を失う(丸めは最も近い整数で偏りなし)。包みの物質の数を超える成分は包みを分ける
+        // (箱は物質の数に上限なし。D-401。エネルギーと運動量は最初の包み)
+        void Transfer(const GasBox& box, const std::vector<GasCell>& forced, const std::vector<GasDerived>& derived,
+                      const GasApplyWorld& world, const GasFace& face) {
             if (face.fraction == 0)
                 return;
 
@@ -374,85 +446,74 @@ namespace bicameral::sim {
             const FaceSide donor = forward ? face.left : face.right;
             const FaceSide receiver = forward ? face.right : face.left;
             const GasCell& source = SideCell(box, forced, donor);
-            const uint32_t speciesCount = box.config.speciesCount;
 
             GasCell moved;
             moved.amounts = face.moved;
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                 moved.momentum[axis] = gas::GfMovedMomentum(source.momentum[axis], face.fraction);
 
-            // --- エネルギー: 引く側は塊のエネルギー、足す側はそこから重さの仕事を引いた値(差は帳簿へ。丸めは最も近い整数で偏りなし)---
             const int64_t energy = MovedEnergy(box.config, source, SideDerived(box, derived, donor), moved,
                                                face.fraction);
             const int64_t sent = DivideNearest(energy, 1000);
             const int64_t received = DivideNearest(energy - GravityWork(box, face, moved), 1000);
-            box.ledger.energy += received - sent;
 
-            // --- 引く側 ---
-            if (donor.kind == SideKind::Cell) {
-                GasCell& cell = next[donor.index];
-                for (uint32_t s = 0; s < speciesCount; ++s) {
-                    assert(cell.amounts[s] >= moved.amounts[s]);
-                    cell.amounts[s] -= moved.amounts[s];
+            // --- 包み(上流 → 下流)---
+            const uint32_t fromSlot = ApplySlot(donor);
+            const uint32_t toSlot = ApplySlot(receiver);
+            multires::TxPacket packet = multires::TxMakePacket();
+            packet.energy = sent;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                packet.carried[axis] = moved.momentum[axis];
+
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s) {
+                if (packet.speciesCount == multires::TX_PACKET_SPECIES) {
+                    (void)multires::TxApplyPacket(world, fromSlot, donor.index, toSlot, receiver.index, packet);
+                    packet = multires::TxMakePacket();
                 }
 
-                cell.energy -= sent;
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    cell.momentum[axis] -= moved.momentum[axis];
-            } else {
-                for (uint32_t s = 0; s < speciesCount; ++s)
-                    box.ledger.amounts[s] += (int64_t)moved.amounts[s];
-
-                box.ledger.energy += sent;
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    box.ledger.momentum[axis] += moved.momentum[axis];
+                packet = multires::TxPacketWithSpecies(packet, s, moved.amounts[s]);
             }
 
-            // --- 足す側 ---
-            if (receiver.kind == SideKind::Cell) {
-                GasCell& cell = next[receiver.index];
-                for (uint32_t s = 0; s < speciesCount; ++s)
-                    cell.amounts[s] += moved.amounts[s];
-
-                cell.energy += received;
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    cell.momentum[axis] += moved.momentum[axis];
-            } else {
-                for (uint32_t s = 0; s < speciesCount; ++s)
-                    box.ledger.amounts[s] -= (int64_t)moved.amounts[s];
-
-                box.ledger.energy -= received;
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    box.ledger.momentum[axis] -= moved.momentum[axis];
-            }
+            (void)multires::TxApplyPacket(world, fromSlot, donor.index, toSlot, receiver.index, packet);
+            world.AddGravityWork(toSlot, receiver.index, sent - received);
         }
 
-        // 面の力積: 左のセルから引き、右のセルへ足す。箱の外(壁・開いた境界)の側は帳簿へ
+        // 面の力積: 左のセルから引き、右のセルへ足す。箱の外(壁・開いた境界)の側は帳簿へ(理由ごと。T-0763)
         void ApplyImpulse(GasBox& box, std::vector<GasCell>& next, const GasFace& face) {
-            // --- 重さ(箱の外から働く力なので帳簿へ)---
+            GasLedger& ledger = box.ledger;
+
+            // --- 重さ(箱の外から働く力なので帳簿の「重さの力積」)---
             if (face.left.kind == SideKind::Cell && face.weightLeft != 0) {
                 next[face.left.index].momentum[2] -= face.weightLeft;
-                box.ledger.momentum[2] -= face.weightLeft;
+                ledger.momentum[2] -= face.weightLeft;
+                ledger.gravityMomentum[2] -= face.weightLeft;
             }
 
             if (face.right.kind == SideKind::Cell && face.weightRight != 0) {
                 next[face.right.index].momentum[2] -= face.weightRight;
-                box.ledger.momentum[2] -= face.weightRight;
+                ledger.momentum[2] -= face.weightRight;
+                ledger.gravityMomentum[2] -= face.weightRight;
             }
 
             if (face.impulse == 0 && face.impulseRight == 0)
                 return;
 
-            // 帳簿 = セルが受けた力積の和(両側が同じなら 0。一部だけ開いた面の差は塞いだ物が受けた。T-0593)
+            // 帳簿 = セルが受けた力積の和(両側が同じなら 0)。開いた境界の外の大気が押した分は「世界の端」、壁・一部だけ開いた面の
+            // 塞いだ物(T-0593)・気体の無い側が受けた分は「壁の力積」
+            int64_t received = 0;
             if (face.left.kind == SideKind::Cell) {
                 next[face.left.index].momentum[face.axis] -= face.impulse;
-                box.ledger.momentum[face.axis] -= face.impulse;
+                received -= face.impulse;
             }
 
             if (face.right.kind == SideKind::Cell) {
                 next[face.right.index].momentum[face.axis] += face.impulseRight;
-                box.ledger.momentum[face.axis] += face.impulseRight;
+                received += face.impulseRight;
             }
+
+            const bool edge = face.left.kind == SideKind::Ghost || face.right.kind == SideKind::Ghost;
+            ledger.momentum[face.axis] += received;
+            (edge ? ledger.edgeMomentum : ledger.wallMomentum)[face.axis] += received;
         }
 
         // 出ていく割合の合計の、引く側の熱を負にしない換算(T-0646・ADR-0286。gas_flow.hlsli の GfEffectiveOutflow)。
@@ -476,13 +537,21 @@ namespace bicameral::sim {
                     outflow[donor.index] += face.fraction;
             }
 
-            for (uint32_t index = 0; index < box.cells.size(); ++index)
-                outflow[index] = EffectiveOutflow(box.config, box.cells[index], outflow[index]);
+            // 当てる段の上限(T-0765): 出る側の倍率 = min(1, 1 ÷ 換算した合計)・入る側は縮めない(気体は器で切らない。圧縮できる)。
+            // 外(開いた境界)から入る面は縮めない。式は gas_flow.hlsli の GfLimitFraction と同じ切り捨て 1 回(GPU の段とビット一致)
+            std::vector<multires::TxLimit> limits(box.cells.size());
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                limits[index] = multires::TxMakeLimit(ONE_Q32,
+                                                      EffectiveOutflow(box.config, box.cells[index], outflow[index]),
+                                                      multires::TX_ROOM_UNLIMITED, 0);
+            }
 
+            const GasApplyWorld world{.limits = &limits};
             for (GasFace& face : faces) {
                 const FaceSide donor = face.flow > 0 ? face.left : face.right;
-                if (donor.kind == SideKind::Cell)
-                    face.fraction = gas::GfLimitFraction(face.fraction, outflow[donor.index]);
+                const FaceSide receiver = face.flow > 0 ? face.right : face.left;
+                face.fraction = multires::TxLimitAmount(world, ApplySlot(donor), donor.index, ApplySlot(receiver),
+                                                        receiver.index, face.fraction);
             }
         }
 
@@ -567,9 +636,13 @@ namespace bicameral::sim {
                 if (face.fraction == 0 || donor.kind != SideKind::Cell)
                     continue;
 
+                // 列(成分)ごとの当てる段の上限(T-0765。gas_flow.hlsli の GfLimitMovedAmount と同じ切り捨て 1 回)
                 const GasCell& source = cells[donor.index];
-                for (uint32_t s = 0; s < speciesCount; ++s)
-                    face.moved[s] = gas::GfLimitMovedAmount(face.moved[s], source.amounts[s], outgoing[donor.index][s]);
+                for (uint32_t s = 0; s < speciesCount; ++s) {
+                    const multires::TxLimit limit = multires::TxMakeLimit(source.amounts[s], outgoing[donor.index][s],
+                                                                          multires::TX_ROOM_UNLIMITED, 0);
+                    face.moved[s] = multires::TxLimitColumn(limit, multires::TxNoLimit(), face.moved[s]);
+                }
             }
         }
 
@@ -616,8 +689,9 @@ namespace bicameral::sim {
 
             // --- (5) 風上の中身(力を当てた後)を移す ---
             std::vector<GasCell> next = forced;
+            const GasApplyWorld world{.ledger = &box.ledger, .next = &next};
             for (const GasFace& face : faces)
-                Transfer(box, forced, derived, next, face);
+                Transfer(box, forced, derived, world, face);
 
             box.cells = std::move(next);
         }
@@ -648,6 +722,15 @@ namespace bicameral::sim {
             return gas::GfMolecularViscosity(weighted, amount, mass, open);
         }
 
+        // 粘りの面の係数 κ = ν Δt ÷ Δx² をセルのレベルに(× 4^k。T-0765)。gas_flow.hlsli の GfViscosityQ32 は 0.5 m のセルの式なので、
+        // ν を 4^k 倍して渡す(上限 1/8 は GfViscosityQ32 の頭打ちのまま)。レベル 0 はそのまま
+        uint64_t LevelViscosity(uint64_t viscosity, int32_t level) {
+            if (level <= 0)
+                return viscosity >> (2 * (uint32_t)(-level));
+
+            return std::min<uint64_t>(viscosity << (2 * (uint32_t)level), gas::GF_VISCOSITY_LIMIT_MM2_PER_S);
+        }
+
         // 面ごとに運動量を分け合う(Jacobi: 刻みの小刻みの後の値だけから決め、整数で足し引き)。運動量は保存し、減った運動のエネルギーは両側の熱へ。
         // 壁・開いた境界の外とは分け合わない(滑る面。運動量を外へ出さない)。面の開きの割合だけ効く
         void ApplyViscosity(GasBox& box, const std::vector<GasFace>& layout) {
@@ -676,7 +759,9 @@ namespace bicameral::sim {
                 const uint32_t a = face.left.index;
                 const uint32_t b = face.right.index;
                 const uint64_t total = box.config.eddyViscosityMm2PerS + ((viscosity[a] + viscosity[b]) / 2);
-                const uint64_t coefficient = (gas::GfViscosityQ32(total) * open) >> 16;
+                const uint64_t coefficient = (gas::GfViscosityQ32(LevelViscosity(total, box.config.cellLevel)) *
+                                              open) >>
+                                             16;
                 int64_t energy = 0;
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
                     const int64_t pa = box.cells[a].momentum[axis];
@@ -708,15 +793,32 @@ namespace bicameral::sim {
         return (uint32_t)std::min<uint64_t>(cap, UINT32_MAX);
     }
 
+    namespace {
+
+        // 2^(exponent + level)(面の式の × 2^k。level は GAS_MIN_CELL_LEVEL〜GAS_MAX_CELL_LEVEL)
+        uint64_t LevelPower(int32_t exponent, int32_t level) {
+            return (uint64_t)1 << (uint32_t)(exponent + level);
+        }
+
+        // value × 2^-level(層の重さ・重さの仕事。1 段細かいと 1 層の厚さが半分。切り捨て)
+        uint64_t PerLevelLayer(uint64_t value, int32_t level) {
+            return level >= 0 ? value >> (uint32_t)level : value << (uint32_t)(-level);
+        }
+
+    }  // namespace
+
     GasCoefficients MakeGasCoefficients(const GasConfig& config) {
         // 音速の基準は世界の環境の値(ADR-0176)。0 = 無い世界(ブランク)では気体の箱を作れない
         assert(config.substeps > 0 && config.soundSpeedMmPerS > 0);
         assert(config.gravityMicrometersPerSecond2 <= fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2);
+        assert(config.cellLevel >= GAS_MIN_CELL_LEVEL && config.cellLevel <= GAS_MAX_CELL_LEVEL);
 
         // 安定の条件: ν = c̃ Δt_小刻み ÷ Δx = c̃(mm/s)÷ (30000 × 小刻み)。圧力の拡散(陽解法の 3 次元の拡散)で ν ≤ 約 2/3、
-        // 余裕を見て 0.6 まで(既定の 340 m/s・小刻み 24 で 0.47。T-0226 で 1% の乱れが育つ境を測った: 小刻み 16 で発散・18 で安定)
-        assert(config.soundSpeedMmPerS <= GasSoundSpeedLimitMmPerS(config.substeps));
+        // 余裕を見て 0.6 まで(既定の 340 m/s・小刻み 24 で 0.47。T-0226 で 1% の乱れが育つ境を測った: 小刻み 16 で発散・18 で安定)。
+        // レベル k のセルは Δx = 0.5 m × 2^-k(T-0765。下の面の式の × 2^k・層の × 2^-k。レベル 0 は今までとビット単位で同じ)
+        assert(config.soundSpeedMmPerS <= GasSoundSpeedLimitMmPerS(config.substeps, config.cellLevel));
         const uint64_t substeps = config.substeps;
+        const int32_t level = config.cellLevel;
         GasCoefficients coefficients;
 
         // mg/µmol = M(mg/mol)÷ 1e6
@@ -724,23 +826,26 @@ namespace bicameral::sim {
             coefficients.massPerAmount[s] = ((uint64_t)config.species[s].molarMass << 32) / MICRO;
 
         // 中心の流れ: F(mg)=(P_左 + P_右)÷ 2 × 2^-20 × Δt ÷ Δx、Δt ÷ Δx = 1 ÷ (30 × 小刻み)(s/m)
-        coefficients.centralFlow = ((uint64_t)1 << 31) / (30 * substeps);
+        coefficients.centralFlow = LevelPower(31, level) / (30 * substeps);
 
         // 圧力の拡散: F(mg)= Δp̃(µPa)× 1e-6 × A × Δt ÷ (4 c̃)× 1e6 = Δp̃ × 25 ÷ (24 × 小刻み × c̃(mm/s))
         // 素の Rusanov(÷ 2c̃)の半分。÷ 2c̃ だと 3 次元で ν ≤ 1/3(本物の音速で小刻み 34 以上)になり、1% の乱れが
         // 小刻み 32 でも育った(T-0226)。半分でも音の波の速さ・衝撃波の速さは理論どおり(gas_reference_test の管の試験)
-        coefficients.pressureFlow = (25 * ((uint64_t)1 << 40)) / (24 * substeps * config.soundSpeedMmPerS);
+        coefficients.pressureFlow = (25 * LevelPower(40, level)) / (24 * substeps * config.soundSpeedMmPerS);
 
         // 面の力積: (p̃_左 + p̃_右)÷ 2 × 1e-6 × A × Δt × 1e6(mg/kg)× 2^20 =(和)× 2^15 ÷ (15 × 小刻み)
-        coefficients.pressureImpulse = ((uint64_t)1 << 31) / (15 * substeps);
+        coefficients.pressureImpulse = LevelPower(31, level) / (15 * substeps);
 
-        // 浮力: Δm(mg)× g × Δt × 2^20 = Δm × g(µm/s²)× 2^36 ÷ (60 × 小刻み × 10^6)(2^36 は 2^20 と mg ÷ kg の 2^16 の分)
+        // 浮力: Δm(mg)× g × Δt × 2^20 = Δm × g(µm/s²)× 2^36 ÷ (60 × 小刻み × 10^6)(2^36 は 2^20 と mg ÷ kg の 2^16 の分)。
+        // セルの大きさによらない(量がレベルの単位 = 密度なので)
         const uint64_t gravity = config.gravityMicrometersPerSecond2;
         coefficients.gravityImpulse = (gravity << 36) / (60 * substeps * MICRO);
 
-        // 層の重さの圧力・重さの仕事(換算は world_physics.hlsli。標準の重力で 392266・4903325)
-        coefficients.hydrostatic = fx::GasHydrostaticFromMicrometers(config.gravityMicrometersPerSecond2);
-        coefficients.gravityWork = fx::GasGravityWorkFromMicrometers(config.gravityMicrometersPerSecond2);
+        // 層の重さの圧力・重さの仕事(換算は world_physics.hlsli。標準の重力で 392266・4903325。レベル 0 の 1 層 = 0.5 m。× 2^-k)
+        coefficients.hydrostatic = PerLevelLayer(fx::GasHydrostaticFromMicrometers(config.gravityMicrometersPerSecond2),
+                                                 level);
+        coefficients.gravityWork = PerLevelLayer(fx::GasGravityWorkFromMicrometers(config.gravityMicrometersPerSecond2),
+                                                 level);
 
         return coefficients;
     }
@@ -844,9 +949,10 @@ namespace bicameral::sim {
 
             // 頭打ちの温度(D-461・T-0269): 既定は安定の上限まで本物の音速(T_基準 ×(上限 ÷ c̃)²)
             box.coefficients.soundTemperature = config.soundCapTemperature == 0
-                                                    ? GasSoundCapTemperature(config.soundSpeedMmPerS,
-                                                                             GasSoundSpeedLimitMmPerS(config.substeps),
-                                                                             ground.temperature)
+                                                    ? GasSoundCapTemperature(
+                                                          config.soundSpeedMmPerS,
+                                                          GasSoundSpeedLimitMmPerS(config.substeps, config.cellLevel),
+                                                          ground.temperature)
                                                     : config.soundCapTemperature;
         }
 
@@ -1171,8 +1277,9 @@ namespace bicameral::sim {
         LimitMovedAmounts(box, forced, faces);
 
         std::vector<GasCell> next = forced;
+        const GasApplyWorld world{.ledger = &box.ledger, .next = &next};
         for (const GasFace& face : faces)
-            Transfer(box, forced, derived, next, face);
+            Transfer(box, forced, derived, world, face);
 
         box.cells = std::move(next);
         box.coefficients = saved;

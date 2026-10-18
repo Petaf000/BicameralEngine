@@ -194,13 +194,30 @@ namespace bicameral::sim {
         // 1 刻みの小刻みの後に 1 回、隣のセルと運動量を分け合う(gas_flow.hlsli の GfViscousMomentum)。壁と開いた境界の外とは分け合わない(滑る)
         uint32_t eddyViscosityMm2PerS = 0;
 
+        // --- セルの大きさ(T-0765。設計 20 §3「レベルの係数と小刻みを 1 つに」)---
+        // セルのレベル(多重解像度の世界のレベル。0 = 0.5 m 角・1 段細かいごとに 1 辺が半分・負は粗い)。量・エネルギー・運動量は
+        // レベルの単位(8^-k。体積と同じ比 = 0.125 m³ あたりの数)なので、圧力・密度の式はレベル 0 のまま。面の式(流れ・拡散・力積)は × 2^k、
+        // 層の重さ・重さの仕事は × 2^-k、粘りの面の係数は × 4^k。小刻みの数(substeps)は呼ぶ側がレベルに合わせて渡す(多重解像度は × 2^σ)
+        int32_t cellLevel = 0;
+
         [[nodiscard]] bool operator==(const GasConfig&) const = default;
     };
+
+    // セルのレベルの範囲(GasConfig::cellLevel。係数の 2^(31 + k) が 64bit に収まり、層の重さが 0 にならない所)
+    inline constexpr int32_t GAS_MIN_CELL_LEVEL = -8;
+    inline constexpr int32_t GAS_MAX_CELL_LEVEL = 8;
 
     // 音速の基準の上限(mm/s。器の決まり。ADR-0176): 安定の条件 ν = c̃ Δt_小刻み ÷ Δx ≤ 0.6(Δx = 0.5 m・Δt_小刻み = 1/60 s ÷ 小刻み)。
     // 圧力の拡散(陽解法の 3 次元の拡散)の境は約 2/3 で、余裕を見て 0.6(T-0226)。既定の小刻み 24 で 432 m/s
     [[nodiscard]] constexpr uint64_t GasSoundSpeedLimitMmPerS(uint32_t substeps) {
         return (uint64_t)substeps * 18000;
+    }
+
+    // レベル level のセル(1 辺 0.5 m × 2^-level)の音速の基準の上限(同じ ν 0.6。1 段細かいと同じ小刻みで半分。T-0765)
+    [[nodiscard]] constexpr uint64_t GasSoundSpeedLimitMmPerS(uint32_t substeps, int32_t level) {
+        const uint64_t limit = GasSoundSpeedLimitMmPerS(substeps);
+
+        return level >= 0 ? limit >> (uint32_t)level : limit << (uint32_t)(-level);
     }
 
     // 熱いセルの音速の頭打ちの温度(mK。D-461〔Q32 案 D〕・T-0269・T-0631・07 §2.4): 圧力の拡散の数が安定の上限に届く温度。
@@ -272,11 +289,19 @@ namespace bicameral::sim {
         uint32_t id = 0;  // 面の番号(乱数の丸めの ID。並べた順ではなく場所から決める。R6)
     };
 
-    // 箱の外との出入りの帳簿(外から入った量を正)。閉じた箱の検査はこれを差し引く(07 §4)
+    // 箱の外との出入りの帳簿(外から入った量を正)。閉じた箱の検査はこれを差し引く(07 §4)。
+    // 合計(amounts・energy・momentum)と理由ごとの内訳(T-0763。世界の帳簿の理由の列へ移す。和 = 合計)を持つ
     struct GasLedger {
-        GasPerSpecies<int64_t> amounts;
-        int64_t energy = 0;  // 開いた境界の出入り + 重さの仕事(断熱。上へ動いた塊が失う m g Δx。T-0234)
+        GasPerSpecies<int64_t> amounts;  // 全部が開いた境界の出入り(物質を変えるのは開いた境界だけ)
+        int64_t energy = 0;              // 開いた境界の出入り + 重さの仕事(断熱。上へ動いた塊が失う m g Δx。T-0234)
         std::array<int64_t, GAS_AXES> momentum = {};
+
+        // --- 理由ごと(T-0763。edge + gravity = energy・edge + wall + gravity = momentum)---
+        int64_t edgeEnergy = 0;                              // 開いた境界を出入りした塊
+        int64_t gravityEnergy = 0;                           // 重さの仕事
+        std::array<int64_t, GAS_AXES> edgeMomentum = {};     // 開いた境界を出入りした塊と、外の大気の圧力の力積
+        std::array<int64_t, GAS_AXES> wallMomentum = {};     // 壁・塞いだ物(一部だけ開いた面・気体の無い側)が受けた力積
+        std::array<int64_t, GAS_AXES> gravityMomentum = {};  // 重さの力積
     };
 
     struct GasTotals {
