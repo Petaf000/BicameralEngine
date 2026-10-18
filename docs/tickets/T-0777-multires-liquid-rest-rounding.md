@@ -1,6 +1,6 @@
 # T-0777 多重解像度の液体に静止の丸め(T-0758 から分けた)
 
-- Status: Todo
+- Status: Done(2026-10-18。wt6。ADR-0349 ⑤)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,12 +12,16 @@ T-0758 で仮の世界の液体の面(probe_liquid の RestFace)と気体のセ�
 多重解像度の 1 段の液体(T-0717。T-0770 で当てる段に載せた)にも入れる。丸めは当てる段の後へ置き、消した運動量は帳簿の理由「静止の丸め」に載せる。
 
 ## 完了条件(チェックできる形で)
-- [ ] MR の液体の面に RrShouldRest(仮の世界と同じ閾値・既定は切る)。当てる段の後・帳簿の理由「静止の丸め」(無ければ足す。ADR-0331 の欄の数に注意)
-- [ ] multires_liquid: 丸めを入れた場面でも仮の世界と毎刻みビット一致・ComputeConservedTotals が一定
-- [ ] 既定(丸めを切る)の場面はビット単位で前と同じ・release 警告 0・archmap --check
+- [x] MR の液体の面に静止の丸め(MultiresLiquidOptions::restSpeedMicrometersPerSecond。仮の世界と同じ閾値・既定 0 = 切る)。当てる段の後
+      (SettleEnergy の速さの上限の直後)・帳簿の理由「静止の丸め」(WL_REASON_REST_ROUNDING は既にあった。運動量の列と、運動のエネルギー → 熱)
+- [x] multires_liquid: 丸め 1 mm/s の池(16³ 600 + 600 刻み)で仮の世界と毎刻みビット一致(報告の rested・restedFaces も)・ComputeConservedTotals が一定
+- [x] 既定(丸めを切る)の場面はビット単位で前と同じ・release 警告 0・archmap --check
 
 ## メモ・参考
 - 気体を当てる段に載せる T-0765 でも同じ置き方にする(丸めは当てる段の後)。
 - 液体の摩擦の切り捨て(T-0776)が先にあると、積んだ水が丸めで眠るのを確かめやすい。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-10-18(wt6・作業役): 置き場の共通の形を rest_rounding.hlsli の RrRestMomentum(結果 RrRested = 丸めの後の運動量と運動のエネルギー・帳簿の運動量・熱)にし、
+  仮の世界の液体の面(probe_liquid の RestFace)もこれを呼ぶ形に替えた(値は同じ)。気体のセルは 3 軸の最大で RrShouldRest のまま(wt4 の T-0765 が当てる段の後へ
+  置く時に RrRested の形を使える)。MR の帳簿は「静止の丸め」の熱を「物理の熱」と分けた(仮の世界の帳簿は運動量だけなので比べには出ない)。

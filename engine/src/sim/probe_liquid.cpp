@@ -609,13 +609,14 @@ namespace bicameral::sim {
 
         const uint64_t limit = liquid::LqMulDiv((uint64_t)m_options.restSpeedMicrometersPerSecond * TICKS_PER_SECOND,
                                                 doubledMass, m_params.gravityMicrometersPerSecond2);
-        if (!rest::RrShouldRest(fx::FxAbsU64(settled.face), fx::FxAbsU64(before), limit))
+        const rest::RrRested result = rest::RrRestMomentum(settled.face, before, settled.kinetic, limit);
+        if (result.rested == 0)
             return;
 
-        rested -= settled.face;
-        settled.face = 0;
-        settled.released += settled.kinetic;
-        settled.kinetic = 0;
+        rested += result.ledgerMomentum;
+        settled.face = result.momentum;
+        settled.released += result.heat;
+        settled.kinetic = result.kinetic;
         ++restedFaces;
     }
 

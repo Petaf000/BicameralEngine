@@ -35,6 +35,8 @@
 //     種類は外のセルを読むだけで端の場合分けを持たない。T-0721)
 //   - void AddEdge(uint32_t slot, uint32_t index, int64_t flow)(5。開いた端の面の流れ〔出ていくのが正〕を帳簿の「世界の端」へ)
 //   - void AddPacket(uint32_t slot, uint32_t index, TxPacket packet, uint32_t incoming)(3。物質を運ぶ種類〔液体・気体〕の包み。T-0770)
+//   - void AddEdgePacket(uint32_t slot, uint32_t index, TxPacket packet, uint32_t incoming)(5。物質を運ぶ種類の開いた端の面の包みを
+//     帳簿の「世界の端」へ。TxApplyPacketSide が呼ぶ。T-0774)
 //   上限 Limit の倍率は分数(TxScale)。器の残りで切らない種類は room = TX_ROOM_UNLIMITED。
 // 浮動小数点は使わない(04 §4)。
 #ifndef BICAMERAL_TRANSPORT_APPLY_HLSLI
@@ -346,6 +348,29 @@ FX_FN uint64_t TxLimitAmount(World world, uint32_t fromSlot, uint32_t fromIndex,
         return 0;
 
     return TxScaleAmount(raw, TxFaceScale(world.Limit(fromSlot, fromIndex), world.Limit(toSlot, toIndex)));
+}
+
+// 面の欄(state_field の SF_PLACE_FACE = セルの + 側 3 面)の持ち主: セルの面 face が + の面なら自分の欄(軸 face / 2)、
+// − の面なら − 側の隣の同じ欄(開いた世界の端の − の面は持ち主のセルが無い。種類が刻みの中だけの値で持つ。T-0771・T-0774)
+FX_FN bool TxFaceFieldIsOwn(uint32_t face) {
+    return (face & 1u) != 0;
+}
+
+// 面に状態を持つ種類の面 1 つを、セル (slot, index) の側だけ当てる(TxFlowCell の 6 面の回し方。T-0771)。incoming = 1 なら
+// 自分が下流(足す)・0 なら上流(引く)。相手のセルは相手の回で同じ包みを逆向きに当てる(包みは両側が同じ上流の刻みの初めの値から
+// 同じに作る)。開いた世界の端の面(edge = 1)は外のセルが変わらないので、外の側の分を世界の帳簿へ
+// (World::AddEdgePacket(slot, index, packet, incoming)。自分が上流 = 外へ出た)
+template <typename World>
+FX_FN bool TxApplyPacketSide(World world, uint32_t slot, uint32_t index, uint32_t incoming, uint32_t edge,
+                             TxPacket packet) {
+    if (TxPacketIsEmpty(packet))
+        return false;
+
+    world.AddPacket(slot, index, packet, incoming);
+    if (edge != 0)
+        world.AddEdgePacket(slot, index, packet, incoming);
+
+    return true;
 }
 
 // 包みを上流から引き、下流に足す(3 当てる)。変化があれば true(6 起こす)
