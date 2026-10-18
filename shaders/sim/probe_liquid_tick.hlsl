@@ -273,7 +273,7 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
                 const uint64_t before = LoadUnsigned(CellAddress(header.massOffset, region)) +
                                         LoadUnsigned(CellAddress(header.massOffset, other));
                 const uint64_t now = a.mass + LoadState(header, other).mass;
-                const int64_t kept = LqFollowMassChange(face, before, now);
+                const int64_t kept = FmMomentumAfterMassChange(face, before, now);
                 vanished -= face - kept;
                 face = kept;
             }

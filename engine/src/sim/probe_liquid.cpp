@@ -444,7 +444,7 @@ namespace bicameral::sim {
                 if (now >= before)
                     continue;
 
-                const int64_t kept = liquid::LqFollowMassChange(face, before, now);
+                const int64_t kept = follow::FmMomentumAfterMassChange(face, before, now);
                 report.vanished[axis] -= face - kept;
                 face = kept;
             }

@@ -9,7 +9,8 @@
 //   - 面とセルの欄: 持ち越す状態(面の運動量・面の運動のエネルギー・セルの位置のエネルギー・前の刻みの質量)。関数は値で受けて値で返す
 //   - 見立ての値 LqParams: 環境・レベル・模型の値(重力・セルの 1 辺・摩擦・溢れの倍率・速さの上限・移流)
 // 周りの決まり(区画・面の列挙・成分の書き戻し・帳簿への足し方)は呼ぶ側に残す(段 1 ④ の面の帳簿と当てる段へ移すのは後)。
-// 出ていく上限(LqLimitOutflow)と欄が物質に付く(LqFollowMassChange)は式だけここに置く(当てる段ができたらそちらへ)。
+// 出ていく上限(LqLimitOutflow)は式だけここに置く(当てる段ができたらそちらへ)。欄が物質に付く式は気体と共通の
+// follow_matter.hlsli の FmMomentumAfterMassChange(T-0718)。
 //
 // 単位: 質量 mg・体積 pL(= µmol × mm³/mol)・面の運動量は質量の単位(本当の運動量 kg·m/s = 値 × 1e-6 × g × dt ÷ 2)・
 // エネルギー mJ(セルの熱は µJ)・開き Q16(LQ_OPEN_FULL = 全部)。浮動小数点は使わない(04 §4)。
@@ -17,6 +18,7 @@
 #define BICAMERAL_LIQUID_FLOW_HLSLI
 
 #include "common/fixed.hlsli"
+#include "common/follow_matter.hlsli"
 #include "common/units.hlsli"
 
 #ifdef __cplusplus
@@ -307,15 +309,6 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
 // 出ていく上限: 出る望む合計 outgoing が上流の中身 fromMass を超えれば、面の望む質量を比で縮める
 FX_FN uint64_t LqLimitOutflow(uint64_t desired, uint64_t fromMass, uint64_t outgoing) {
     return outgoing > fromMass ? LqMulDiv(desired, fromMass, outgoing) : desired;
-}
-
-// 欄が物質に付く(T-0656・ADR-0286 の液体の版): 面の両側の液体の質量が前の刻みの終わり before より減っていたら速さを保つ
-// (運動量 × 今 ÷ 前。0 の向きへ切り捨て)。増えていたら運動量を保つ。戻り値は合わせ直した面の運動量(差は呼ぶ側が帳簿へ)
-FX_FN int64_t LqFollowMassChange(int64_t face, uint64_t before, uint64_t now) {
-    if (face == 0 || now >= before)
-        return face;
-
-    return LqScaleSigned(face, now, before);
 }
 
 // --- 液体と一緒に動くもの ---
