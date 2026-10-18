@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -935,6 +936,61 @@ namespace {
         EXPECT(std::abs((double)derived.scaledPressure - expected) <= expected * 1e-6);
     }
 
+    // 調べ(T-0787 の研究。--heat-probe。合否に使わない): 強い爆発の陽解法で、小刻みの中で熱が負になるセルがどこで負になるか
+    // (力積の側・運ぶ側〔風上で中身を超えて持ち出す〕・その他)。12³ の閉じた箱の 1 セルを amount 倍・temperature にして 30 刻み
+    int64_t MaxSpeedOf(const GasBox& box, const GasCell& cell) {
+        int64_t speed = 0;
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+            speed = std::max(speed, std::abs(GasVelocity(box, cell, axis)));
+
+        return speed;
+    }
+
+    void ProbeHeat(uint32_t amount, uint32_t temperature, uint32_t keepShift = 0) {
+        GasBox box = MakeAirBox(MakeAirConfig(12, 12, 12));
+        const uint32_t center = box.Index(6, 6, 3);
+        GasCell cell = box.cells[center];
+        for (uint64_t& value : cell.amounts)
+            value *= amount;
+
+        box.cells[center] = MakeGasCell(box.config, cell.amounts, temperature);
+        GasHeatProbe probe;
+        probe.keepShift = keepShift;
+        box.heatProbe = &probe;
+        uint32_t coldest = UINT32_MAX;
+        uint32_t zeroCells = 0;
+        for (uint32_t tick = 0; tick < 30; ++tick) {
+            StepGas(box);
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                const uint32_t t = DeriveGasCell(box, box.cells[index], CellZ(box, index)).temperature;
+                coldest = std::min(coldest, t);
+                zeroCells += t == 0 ? 1 : 0;
+                if (t == 0 && tick == 0 && zeroCells <= 6) {
+                    const GasCell& zero = box.cells[index];
+                    const uint64_t mass = GasCellMass(box, zero);
+                    std::printf(
+                        "  zero-temperature cell %u: mass %llu mg, energy %lld mJ, kinetic %lld uJ, speed %lld\n",
+                        index, (unsigned long long)mass, (long long)zero.energy, (long long)GasKineticEnergy(box, zero),
+                        (long long)MaxSpeedOf(box, zero));
+                }
+            }
+
+            if (tick < 3 || tick % 10 == 9) {
+                std::printf(
+                    "heat probe x%u %u mK tick %u: impulse %llu (worst %lld uJ), outflow %llu (worst %lld uJ, "
+                    "cooler after force %llu), other %llu (worst %lld uJ), transient %llu, zero-temperature cells so "
+                    "far %u\n",
+                    amount, temperature, tick, (unsigned long long)probe.impulseCells, (long long)probe.worstImpulse,
+                    (unsigned long long)probe.outflowCells, (long long)probe.worstOutflow,
+                    (unsigned long long)probe.coolerAfterForce, (unsigned long long)probe.otherCells,
+                    (long long)probe.worstOther, (unsigned long long)probe.transientCells, zeroCells);
+            }
+        }
+
+        std::printf("heat probe x%u %u mK: coldest %u mK, max speed %lld, energy-limited faces %llu\n", amount,
+                    temperature, coldest, (long long)MaxSpeed(box), (unsigned long long)box.energyLimitedFaces);
+    }
+
     void TestHotBlockNoCheckerboard() {
         const uint32_t ground = MakeAirBox(MakeAirConfig(2, 2, 2)).referenceDerived.front().temperature;
         constexpr std::array<BlockGas, 3> GASES = {BlockGas{"air", 28013, 20810}, BlockGas{"steam", 18015, 25300},
@@ -1099,7 +1155,16 @@ namespace {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--heat-probe") {  // T-0787 の調べ
+        for (const uint32_t keep : {63u, 2u, 3u, 4u, 5u}) {
+            std::printf("--- keep 1/2^%u ---\n", keep);
+            ProbeHeat(5, 1500000, keep);
+            ProbeHeat(40, 2600000, keep);
+        }
+        return 0;
+    }
+
     TestClosedBoxConservation();
     TestPeriodicMomentum();
     TestStaticAtmosphere();
