@@ -25,13 +25,17 @@
 //     粗い側・細かい側の面は、今までの境のセル・Δk > implicitMaxGap と同じ形。多重格子の 2 段目からの節・隣が上限に入らなければ、
 //     その段を作らずに縮約を止める(BuildImplicitGrid の limits。反復は遅くなりうるが、保存と安全網は同じ)
 //   - 保存は面ごとに 1 つの値(ADR-0017 の形)なのでビット単位。端数の枠が無い粗い側へは整数の単位の倍数だけ送る
+//   - 開いた世界の端(T-0790・ADR-0347。world_edge.hlsli の MR_NEIGHBOR_EDGE): 未知数のセルの端の面は、外のセル(自分と同じレベルの見立て。
+//     陽の端 T-0721 と同じ CellViews::Outside)を温度を固定した境として系に入れる(段 0 の対角と右辺に入る。implicit_conduction.hlsli の
+//     ImEdgeRhs)。流れ g_端 (T* − T_外) は当てる段 TxApplyEdgeFlow で自分から引き、帳簿の「世界の端」へ。安全網で戻す時は陽の端と同じ流れ。
+//     陽解法は陰解法のブロックの面を流さないので、前はここを誰も流さず端が wall と同じだった
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
 #include <limits>
 
 #include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
-#include "common/transport_apply.hlsli"
+#include "common/transport_conduction.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
@@ -57,7 +61,8 @@ namespace bicameral::sim {
             std::vector<uint32_t> slots;
             std::vector<uint32_t> indices;
 
-            std::vector<uint32_t> ids;  // [枠 × 512] → セルの番号(無ければ NOT_IN_SYSTEM)
+            std::vector<uint32_t> ids;        // [枠 × 512] → セルの番号(無ければ NOT_IN_SYSTEM)
+            std::vector<ImplicitEdge> edges;  // 開いた世界の端の面(未知数のセルの。T-0790)
         };
 
         // 系に入れられるブロックか: 世界の本物のブロックで、頁があり、凍っていない
@@ -102,16 +107,36 @@ namespace bicameral::sim {
         }
 
         // 面の係数(細かい側の単位。頭打ちなし)= min(G) × G の係数 × 4^kf(ADR-0019。陽解法の MrConductanceLimit と同じ値)
-        fx::FxU128 FaceCoefficient(const ImplicitCell& fine, const ImplicitCell& coarse) {
-            const uint64_t conductance = fine.conductance < coarse.conductance ? fine.conductance : coarse.conductance;
+        fx::FxU128 FaceCoefficient(uint32_t fineConductance, uint32_t otherConductance, int32_t fineLevel) {
+            const uint64_t conductance = std::min(fineConductance, otherConductance);
 
             return ImWideShiftLeft(ImWide(conductance * HC_LIMIT_PER_CONDUCTANCE),
-                                   2 * static_cast<uint32_t>(fine.level));
+                                   2 * static_cast<uint32_t>(fineLevel));
+        }
+
+        // 未知数のセル id の面 face が開いた世界の端なら、外のセル(自分と同じレベルの見立て。world_edge.hlsli)を温度を固定した境として
+        // 系に入れる(T-0790)。係数は面と同じ式・外の温度は外の見立て・安全網で戻す流れは陽の端(T-0721。当てる段の TxEdgeFaceFlow)と同じ
+        void AddCellEdge(ImplicitSystem& system, const MultiresNest& nest, CellViews& thermals,
+                         const TxConduction& kind, uint32_t id, const MrBlock& block, uint32_t face) {
+            const MultiresWorldEdges& edges = nest.edges;
+            const uint32_t index = system.indices[id];
+            const MrFaceNeighbor edge = WeEdgeNeighbor(edges.world, edges.columnBaseUp,
+                                                       static_cast<uint32_t>(edges.column.size()), block, index, face);
+            if (edge.kind != MR_NEIGHBOR_EDGE)
+                return;
+
+            const CvCellView outside = thermals.Outside(edge.index, block.level);
+            const TxSelfSide side = TxMakeSelfSide(kind, thermals.View(system.slots[id], index), block.level);
+            system.edges.push_back(
+                {.cell = id,
+                 .coefficient = FaceCoefficient(system.cells[id].conductance, outside.thermal.conductance, block.level),
+                 .temperature = int64_t{outside.thermal.temperature} << IM_TEMPERATURE_SHIFT,
+                 .explicitFlow = TxEdgeFaceFlow(kind, side, outside)});
         }
 
         // 未知数のセル(基準より細かい)の 6 面。同じレベルの面は番号の小さい側が 1 回だけ足す。粗い側は境のセルとして足す
         void AddCellFaces(ImplicitSystem& system, const MultiresNest& nest, CellViews& thermals,
-                          std::span<const uint8_t> frozen, uint32_t id) {
+                          std::span<const uint8_t> frozen, const TxConduction& kind, uint32_t id) {
             const CpuTree tree{.nest = &nest};
             const uint32_t slot = system.slots[id];
             const uint32_t index = system.indices[id];
@@ -119,6 +144,11 @@ namespace bicameral::sim {
             for (uint32_t face = 0; face < MR_FACES; ++face) {
                 const MrFaceNeighbor neighbor = MrFindFaceNeighbor(tree, slot, block, index, face,
                                                                    nest.capacity.rootLevel);
+                if (neighbor.kind == MR_NEIGHBOR_NONE) {
+                    AddCellEdge(system, nest, thermals, kind, id, block, face);
+                    continue;
+                }
+
                 if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
                     continue;
 
@@ -133,13 +163,14 @@ namespace bicameral::sim {
                 system.faces.push_back({.fine = id,
                                         .coarse = other,
                                         .gap = gap,
-                                        .coefficient = FaceCoefficient(system.cells[id], system.cells[other])});
+                                        .coefficient = FaceCoefficient(system.cells[id].conductance,
+                                                                       system.cells[other].conductance, block.level)});
             }
         }
 
         // 系を作る: まず未知数のセル(MarkImplicitBlocks が選んだブロック)を枠の順に全部足し(番号を先に決める)、次にその面と境のセル
         ImplicitSystem MakeSystem(const MultiresNest& nest, CellViews& thermals, std::span<const uint8_t> frozen,
-                                  std::span<const uint8_t> implicitBlocks) {
+                                  std::span<const uint8_t> implicitBlocks, const MultiresStepOptions& options) {
             ImplicitSystem system;
             system.ids.assign(nest.blocks.size() * MR_BLOCK_CELLS, NOT_IN_SYSTEM);
             for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
@@ -152,16 +183,18 @@ namespace bicameral::sim {
                 }
             }
 
+            const TxConduction kind = TxMakeConduction(options.subcycleBaseLevel, options.maxSubcycleGap);
             const auto unknowns = static_cast<uint32_t>(system.cells.size());
             for (uint32_t id = 0; id < unknowns; ++id)
-                AddCellFaces(system, nest, thermals, frozen, id);
+                AddCellFaces(system, nest, thermals, frozen, kind, id);
 
             return system;
         }
 
-        // 陰の伝導の面の流れを当てる世界(transport_apply.hlsli の Add・HasFraction。陽の面の ConductionWorld と同じ変化の表。T-0715)
+        // 陰の伝導の面の流れを当てる世界(transport_apply.hlsli の Add・HasFraction・AddEdge。陽の面の ConductionWorld と同じ変化の表と
+        // 帳簿。T-0715・T-0790)
         struct ImplicitApplyWorld {
-            const MultiresNest* nest = nullptr;
+            MultiresNest* nest = nullptr;
             std::span<MrEnergyDelta> deltas;
 
             [[nodiscard]] bool HasFraction(uint32_t slot) const {
@@ -170,6 +203,10 @@ namespace bicameral::sim {
 
             void Add(uint32_t slot, uint32_t index, const MrEnergyDelta& delta) const {
                 nest_detail::AddConductionDelta(*nest, deltas, slot, index, delta);
+            }
+
+            void AddEdge(uint32_t slot, uint32_t /*index*/, int64_t outflow) const {
+                nest_detail::AddConductionEdge(*nest, slot, outflow);
             }
         };
 
@@ -271,8 +308,8 @@ namespace bicameral::sim {
             nest.implicitLevels.clear();
             nest.implicitGrid = {};
             nest.implicitNest.reset();
-            ImplicitSystem system = MakeSystem(nest, thermals, frozen, implicitBlocks);
-            if (system.faces.empty())
+            ImplicitSystem system = MakeSystem(nest, thermals, frozen, implicitBlocks, options);
+            if (system.faces.empty() && system.edges.empty())
                 return;
 
             if (nest.captureImplicitNest)
@@ -281,12 +318,14 @@ namespace bicameral::sim {
             // --- 1 刻み解いて、面の流れを当てる段で変化の表へ ---
             const ImplicitGridLimits gridLimits{.nodes = options.implicitLimits.nodes,
                                                 .links = options.implicitLimits.links};
-            ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces), false, gridLimits);
+            ImplicitGrid grid = BuildImplicitGrid(std::move(system.cells), std::move(system.faces), false, gridLimits,
+                                                  std::move(system.edges));
             if (nest.captureImplicitGrid)
                 nest.implicitGrid = grid;
 
             std::vector<int64_t> flows;
-            nest.implicitCost = SolveImplicitFlows(grid, MakeImplicitOptions(options), flows);
+            std::vector<int64_t> edgeFlows;
+            nest.implicitCost = SolveImplicitFlows(grid, MakeImplicitOptions(options), flows, edgeFlows);
             nest.implicitCells = static_cast<uint32_t>(grid.cells.size());
             RecordLevels(nest, grid);
 
@@ -296,6 +335,12 @@ namespace bicameral::sim {
                 const ImplicitFace& face = grid.faces[f];
                 TxApplyFaceFlow(world, system.slots[face.fine], system.indices[face.fine], system.slots[face.coarse],
                                 system.indices[face.coarse], face.gap, flows[f]);
+            }
+
+            // --- 3 当てる・5 帳簿: 開いた世界の端の面(外のセルは変わらず、流れた分は帳簿の「世界の端」へ。陽の端と同じ。T-0790)---
+            for (size_t e = 0; e < grid.edges.size(); ++e) {
+                const uint32_t cell = grid.edges[e].cell;
+                TxApplyEdgeFlow(world, system.slots[cell], system.indices[cell], edgeFlows[e]);
             }
         }
 

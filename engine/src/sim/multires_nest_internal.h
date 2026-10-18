@@ -89,6 +89,10 @@ namespace bicameral::sim::nest_detail {
         entry = multires::MrAddEnergyDelta(entry, delta);
     }
 
+    // 開いた世界の端の面から外へ出た流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
+    // (当てる段の世界の AddEdge。陽の面・陰の面が同じ 1 つを使う。T-0762 の帳簿の書き方の約束。multires_conduction.cpp。T-0790)
+    void AddConductionEdge(MultiresNest& nest, uint32_t slot, int64_t outflow);
+
     // --- 1 刻み(multires_nest.cpp の StepBlocks。StepNest と StepActive が使う)---
 
     struct BlockStepResult {

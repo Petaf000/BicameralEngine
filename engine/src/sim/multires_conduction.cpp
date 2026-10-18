@@ -114,13 +114,8 @@ namespace bicameral::sim {
             // 5 帳簿: 開いた端の面の流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
             // (出 = 外へ出た・入 = 外から入った。T-0762 の帳簿の書き方の約束)
             void AddEdge(uint32_t slot, uint32_t /*index*/, int64_t outflow) const {
-                if (outflow == 0)
-                    return;
-
                 FX_ASSERT(ledger != nullptr);
-                const WlSignedEntry entry = WlEnergyEntry(outflow, WL_DIRECTION_OUT);
-                AddWorldLedgerUnits(*ledger, WlSlot(WL_REASON_WORLD_EDGE, entry.direction), nest->blocks[slot].level,
-                                    WL_COLUMN_ENERGY, entry.magnitude);
+                nest_detail::AddConductionEdge(*ledger, slot, outflow);
             }
         };
 
@@ -369,6 +364,16 @@ namespace bicameral::sim {
         void CellViews::Invalidate(uint32_t slot) {
             if (m_pages[slot])
                 m_pages[slot]->known.fill(0);
+        }
+
+        void AddConductionEdge(MultiresNest& nest, uint32_t slot, int64_t outflow) {
+            if (outflow == 0)
+                return;
+
+            // 出 = 外へ出た・入 = 外から入った(T-0762 の帳簿の書き方の約束)
+            const WlSignedEntry entry = WlEnergyEntry(outflow, WL_DIRECTION_OUT);
+            AddWorldLedgerUnits(nest, WlSlot(WL_REASON_WORLD_EDGE, entry.direction), nest.blocks[slot].level,
+                                WL_COLUMN_ENERGY, entry.magnitude);
         }
 
         std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellViews& views, std::span<const uint8_t> stepped,

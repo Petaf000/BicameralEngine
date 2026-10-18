@@ -34,6 +34,8 @@ namespace bicameral::sim {
         // --- 状態 ---
         int64_t energy = 0;     // そのレベルの単位(8^-k mJ)
         uint64_t fraction = 0;  // 2^-64 単位の端数(違うレベルの面の粗い側が受ける。ADR-0017)
+        int64_t
+            edgeOutflow = 0;  // 開いた世界の端から外へ出た分の和(そのレベルの単位。StepImplicit の保存の検査用。T-0790)
 
         // --- 木につなぐ時(T-0119。multires_implicit_conduction.cpp)---
         // 0 以上なら刻みの初めの温度(mK × 2^16)はこの値(エネルギー ÷ 熱容量でなく、木のセルの温度 MrCellThermal から。
@@ -50,6 +52,17 @@ namespace bicameral::sim {
         uint32_t gap = 0;  // レベルの差 d
         fx::FxU128
             coefficient{};  // 面の係数(2^-32 × 細かい側の単位 / mK)= min(G) × HC_LIMIT_PER_CONDUCTANCE × 4^kf(上限なし)
+    };
+
+    // 開いた世界の端の面(T-0790。木の世界の端 world_edge.hlsli の MR_NEIGHBOR_EDGE)。外のセルは変わらない = 温度を固定した境
+    // (系の未知数でない)。後退 Euler の式に g_端 (T_外 − T_i) が足され、段 0 の対角と自分の重みに g_端 が入る
+    // (implicit_conduction.hlsli の ImEdgeRhs)。流れ F = g_端 (T*_i − T_外)(外へ出るのが正。ImEdgeFlow)は呼ぶ側の帳簿の「世界の端」へ
+    struct ImplicitEdge {
+        uint32_t cell = 0;         // 系のセルの番号
+        fx::FxU128 coefficient{};  // 面の係数(セルの単位。面と同じ min(G) × HC_LIMIT_PER_CONDUCTANCE × 4^k。上限なし)
+        int64_t temperature = 0;   // 外の温度(mK × 2^16。外のセルの見立ての温度)
+        int64_t
+            explicitFlow = 0;  // 安全網で陽解法に戻す時の流れ(刻みの初めの値から。陽の端〔T-0721〕の当てる段と同じ値)
     };
 
     // 多重格子の 1 段(段 0 = セルそのもの。段 ℓ + 1 = 段 ℓ の最も細かいレベルの節を親のセルへ縮約したもの = 木の覆われた親のセル)
@@ -112,6 +125,7 @@ namespace bicameral::sim {
     struct ImplicitGrid {
         std::vector<ImplicitCell> cells;
         std::vector<ImplicitFace> faces;
+        std::vector<ImplicitEdge> edges;        // 開いた世界の端の面(T-0790。木の世界から。段 0 の対角に入る)
         std::vector<ImplicitGridLevel> levels;  // 多重格子の段
     };
 
@@ -127,16 +141,19 @@ namespace bicameral::sim {
     };
 
     // 面を呼ぶ側が作って渡す(木の隣 MrFindFaceNeighbor から。T-0119)。座標は多重格子の段を作るのに使う(負でもよい)
+    // edges = 開いた世界の端の面(T-0790。無ければ空)
     ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces,
-                                   bool galerkin = false, const ImplicitGridLimits& limits = {});
+                                   bool galerkin = false, const ImplicitGridLimits& limits = {},
+                                   std::vector<ImplicitEdge> edges = {});
 
     // 1 刻み進める(SolveImplicitFlows の流れを当てる段 TxApplyFaceFlow で両側に足す)
     ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options);
 
-    // 1 刻み解いて、面ごとの流れ flows(grid.faces の順。細かい側 → 相手が正。安全網の後)を返す。セルには足さない
-    // (足すのは呼ぶ側の当てる段。多重解像度の木は変化の表へ。T-0715)
+    // 1 刻み解いて、面ごとの流れ flows(grid.faces の順。細かい側 → 相手が正。安全網の後)と、開いた世界の端の面ごとの流れ edgeFlows
+    // (grid.edges の順。外へ出るのが正。T-0790)を返す。セルには足さない(足すのは呼ぶ側の当てる段。多重解像度の木は変化の表へ。T-0715)。
+    // 端の面は Multigrid・RedBlack だけ(Rkl2 は端を持たない系だけ)
     ImplicitCost SolveImplicitFlows(const ImplicitGrid& grid, const ImplicitOptions& options,
-                                    std::vector<int64_t>& flows);
+                                    std::vector<int64_t>& flows, std::vector<int64_t>& edgeFlows);
 
     // 温度(mK × 2^16。整数部のエネルギーだけから)と、温度からエネルギー
     int64_t ImplicitTemperature(const ImplicitCell& cell);
@@ -152,7 +169,7 @@ namespace bicameral::sim {
     int64_t ImplicitGridResidual(const ImplicitGrid& grid, const std::vector<int64_t>& rhs,
                                  const std::vector<int64_t>& values, size_t node);
 
-    // 保存量: 全部のセルのエネルギー + 端数(最も細かいレベルの単位 × 2^64。2 の補数で 2^128 を法とする。等しいかを比べる用)
+    // 保存量: 全部のセルのエネルギー + 世界の端から外へ出た分(edgeOutflow)+ 端数(最も細かいレベルの単位 × 2^64。2 の補数で 2^128 を法とする。等しいかを比べる用)
     fx::FxU128 ImplicitConservedTotal(const ImplicitGrid& grid);
 
 }  // namespace bicameral::sim

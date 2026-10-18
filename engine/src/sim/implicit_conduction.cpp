@@ -217,11 +217,21 @@ namespace bicameral::sim {
             }
         }
 
-        // 段 0: セルそのもの。粗い側の行の係数は細かい側の係数 ÷ 8^d(粗い側の単位)
+        // 段 0: セルそのもの。粗い側の行の係数は細かい側の係数 ÷ 8^d(粗い側の単位)。自分だけの係数は熱容量 + 開いた世界の端の面の係数
+        // (外は温度を固定した境。implicit_conduction.hlsli の ImEdgeRhs。T-0790)
         ImplicitGridLevel MakeCellLevel(const ImplicitGrid& grid) {
+            std::vector<FxU128> own(grid.cells.size());
+            for (size_t i = 0; i < grid.cells.size(); ++i)
+                own[i] = Wide(grid.cells[i].heatCapacity);
+
+            for (const ImplicitEdge& edge : grid.edges)
+                own[edge.cell] = WideAdd(own[edge.cell], edge.coefficient);
+
             ImplicitGridLevel level;
-            for (const ImplicitCell& cell : grid.cells)
-                PushNode(level, CellKey{cell.level, cell.x, cell.y, cell.z}, Wide(cell.heatCapacity));
+            for (size_t i = 0; i < grid.cells.size(); ++i) {
+                const ImplicitCell& cell = grid.cells[i];
+                PushNode(level, CellKey{cell.level, cell.x, cell.y, cell.z}, own[i]);
+            }
 
             Rows rows(grid.cells.size());
             for (const ImplicitFace& face : grid.faces) {
@@ -416,15 +426,54 @@ namespace bicameral::sim {
                 target.energy = sum.whole;
                 target.fraction = sum.fraction;
             }
+
+            // 開いた世界の端から外へ出た分(系は帳簿を持たないので、保存の検査用にセルごとに数える。T-0790)
+            void AddEdge(uint32_t cell, uint32_t /*index*/, int64_t outflow) const {
+                grid->cells[cell].edgeOutflow += outflow;
+            }
         };
 
+        // 開いた世界の端の面の流れ(外へ出るのが正。T-0790)
+        std::vector<int64_t> EdgeFlows(const ImplicitGrid& grid, const std::vector<int64_t>& temperatures) {
+            std::vector<int64_t> flows(grid.edges.size());
+            for (size_t e = 0; e < grid.edges.size(); ++e) {
+                const ImplicitEdge& edge = grid.edges[e];
+                flows[e] = ImEdgeFlow(edge.coefficient, temperatures[edge.cell], edge.temperature);
+            }
+
+            return flows;
+        }
+
+        // 段 0 の右辺 = 自分の重み × 刻みの初めの温度。開いた世界の端の面を持つセルは熱容量の分と端の分に分けて作る(T-0790)
+        std::vector<int64_t> RightHandSide(const ImplicitGrid& grid, const std::vector<int64_t>& start) {
+            const ImplicitGridLevel& cells = grid.levels[0];
+            std::vector<int64_t> rhs(start.size());
+            for (size_t i = 0; i < start.size(); ++i)
+                rhs[i] = ImMulWeight(cells.selfWeights[i], start[i]);
+
+            for (const ImplicitEdge& edge : grid.edges) {
+                const uint32_t i = edge.cell;
+                rhs[i] = ImEdgeRhsStart(Wide(grid.cells[i].heatCapacity), cells.diagonals[i], start[i]);
+            }
+
+            for (const ImplicitEdge& edge : grid.edges) {
+                const uint32_t i = edge.cell;
+                rhs[i] += ImEdgeRhsTerm(edge.coefficient, cells.diagonals[i], edge.temperature);
+            }
+
+            return rhs;
+        }
+
         // 流れを両側に(同じレベル: 逆向きに同じ値 / 違うレベル: 粗い側は整数部 + 端数。当てる段の TxApplyFaceFlow)
-        void ApplyFlows(ImplicitGrid& grid, const std::vector<int64_t>& flows) {
+        void ApplyFlows(ImplicitGrid& grid, const std::vector<int64_t>& flows, const std::vector<int64_t>& edgeFlows) {
             const ImplicitGridWorld world{.grid = &grid};
             for (size_t f = 0; f < grid.faces.size(); ++f) {
                 const ImplicitFace& face = grid.faces[f];
                 TxApplyFaceFlow(world, face.fine, 0, face.coarse, 0, face.gap, flows[f]);
             }
+
+            for (size_t e = 0; e < grid.edges.size(); ++e)
+                TxApplyEdgeFlow(world, grid.edges[e].cell, 0, edgeFlows[e]);
         }
 
         // --- 安全網: 近似が収束していない時に、温度が刻みの初めの範囲から出るセルの面を陽解法の流れに戻す ---
@@ -460,8 +509,14 @@ namespace bicameral::sim {
         };
 
         // T* は範囲に入れない(多重格子の直しは単調でなく、T* が T0 の範囲の外に出ることがある)
+        // 開いた世界の端の外の温度も範囲に入れる(外から熱が入る・出るのは範囲の中の動き。T-0790)
         Bounds MakeBounds(const ImplicitGrid& grid, const std::vector<int64_t>& start, int64_t slackMillikelvin) {
-            const auto [lowestStart, highestStart] = std::ranges::minmax(start);
+            auto [lowestStart, highestStart] = std::ranges::minmax(start);
+            for (const ImplicitEdge& edge : grid.edges) {
+                lowestStart = std::min(lowestStart, edge.temperature);
+                highestStart = std::max(highestStart, edge.temperature);
+            }
+
             Bounds bounds;
             bounds.lowest.resize(grid.cells.size());
             bounds.highest.resize(grid.cells.size());
@@ -478,7 +533,8 @@ namespace bicameral::sim {
         }
 
         // 流れを足した後のエネルギー(粗い側は整数部だけ。範囲の判定用)
-        std::vector<int64_t> EnergiesAfter(const ImplicitGrid& grid, const std::vector<int64_t>& flows) {
+        std::vector<int64_t> EnergiesAfter(const ImplicitGrid& grid, const std::vector<int64_t>& flows,
+                                           const std::vector<int64_t>& edgeFlows) {
             std::vector<int64_t> energies(grid.cells.size());
             for (size_t i = 0; i < grid.cells.size(); ++i)
                 energies[i] = grid.cells[i].energy;
@@ -489,6 +545,9 @@ namespace bicameral::sim {
                 energies[face.coarse] = AddClamped(energies[face.coarse],
                                                    ShiftRightSigned(flows[f], ENERGY_BITS_PER_LEVEL * face.gap));
             }
+
+            for (size_t e = 0; e < grid.edges.size(); ++e)
+                energies[grid.edges[e].cell] = AddClamped(energies[grid.edges[e].cell], -edgeFlows[e]);
 
             return energies;
         }
@@ -521,12 +580,12 @@ namespace bicameral::sim {
         }
 
         void LimitFlows(const ImplicitGrid& grid, const std::vector<int64_t>& start, int64_t slackMillikelvin,
-                        std::vector<int64_t>& flows, ImplicitCost& cost) {
+                        std::vector<int64_t>& flows, std::vector<int64_t>& edgeFlows, ImplicitCost& cost) {
             const Bounds bounds = MakeBounds(grid, start, slackMillikelvin);
             std::vector<int64_t> explicitFlows;
             std::vector<uint8_t> limited(grid.cells.size(), 0);
             while (true) {
-                const bool changed = MarkOutside(grid, bounds, EnergiesAfter(grid, flows), limited, cost);
+                const bool changed = MarkOutside(grid, bounds, EnergiesAfter(grid, flows, edgeFlows), limited, cost);
                 cost.passes += 1;
                 if (!changed)
                     return;
@@ -539,6 +598,12 @@ namespace bicameral::sim {
                     const ImplicitFace& face = grid.faces[f];
                     if (limited[face.fine] != 0 || limited[face.coarse] != 0)
                         flows[f] = explicitFlows[f];
+                }
+
+                // 開いた世界の端の面は陽の端(T-0721)と同じ流れに
+                for (size_t e = 0; e < grid.edges.size(); ++e) {
+                    if (limited[grid.edges[e].cell] != 0)
+                        edgeFlows[e] = grid.edges[e].explicitFlow;
                 }
 
                 cost.passes += 1;
@@ -687,12 +752,13 @@ namespace bicameral::sim {
     }
 
     ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces, bool galerkin,
-                                   const ImplicitGridLimits& limits) {
+                                   const ImplicitGridLimits& limits, std::vector<ImplicitEdge> edges) {
         const uint64_t maxNodes = limits.nodes == 0 ? UINT64_MAX : limits.nodes;
         const uint64_t maxLinks = limits.links == 0 ? UINT64_MAX : limits.links;
         ImplicitGrid grid;
         grid.cells = std::move(cells);
         grid.faces = std::move(faces);
+        grid.edges = std::move(edges);
         grid.levels.push_back(MakeCellLevel(grid));
         uint64_t nodes = grid.levels.back().levels.size();
         uint64_t links = grid.levels.back().neighbors.size();
@@ -715,21 +781,21 @@ namespace bicameral::sim {
     }
 
     ImplicitCost SolveImplicitFlows(const ImplicitGrid& grid, const ImplicitOptions& options,
-                                    std::vector<int64_t>& flows) {
+                                    std::vector<int64_t>& flows, std::vector<int64_t>& edgeFlows) {
         ImplicitCost cost;
         const std::vector<int64_t> start = Temperatures(grid);
         if (options.method == ImplicitMethod::Rkl2) {
+            FX_ASSERT(grid.edges.empty());  // RKL2 は端を持たない系だけ(比べる試作)
             flows = Rkl2Flows(grid, start, cost);
-            LimitFlows(grid, start, options.limitSlackMillikelvin, flows, cost);
+            edgeFlows.clear();
+            LimitFlows(grid, start, options.limitSlackMillikelvin, flows, edgeFlows, cost);
 
             return cost;
         }
 
-        // --- 段 0 の右辺 = 自分の重み × 刻みの初めの温度。初めの近似 = 刻みの初めの温度 ---
+        // --- 段 0 の右辺(自分の重み × 刻みの初めの温度 + 開いた世界の端の分)。初めの近似 = 刻みの初めの温度 ---
         const ImplicitGridLevel& cells = grid.levels[0];
-        std::vector<int64_t> rhs(start.size());
-        for (size_t i = 0; i < start.size(); ++i)
-            rhs[i] = MulWeight(cells.selfWeights[i], start[i]);
+        const std::vector<int64_t> rhs = RightHandSide(grid, start);
 
         std::vector<int64_t> solution = start;
         if (options.method == ImplicitMethod::RedBlack)
@@ -745,7 +811,8 @@ namespace bicameral::sim {
         }
 
         flows = Flows(grid, solution);
-        LimitFlows(grid, start, options.limitSlackMillikelvin, flows, cost);
+        edgeFlows = EdgeFlows(grid, solution);
+        LimitFlows(grid, start, options.limitSlackMillikelvin, flows, edgeFlows, cost);
         cost.passes += 2;
 
         return cost;
@@ -753,8 +820,9 @@ namespace bicameral::sim {
 
     ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options) {
         std::vector<int64_t> flows;
-        const ImplicitCost cost = SolveImplicitFlows(grid, options, flows);
-        ApplyFlows(grid, flows);
+        std::vector<int64_t> edgeFlows;
+        const ImplicitCost cost = SolveImplicitFlows(grid, options, flows, edgeFlows);
+        ApplyFlows(grid, flows, edgeFlows);
 
         return cost;
     }
@@ -788,7 +856,7 @@ namespace bicameral::sim {
         for (const ImplicitCell& cell : grid.cells) {
             const auto shift = static_cast<uint32_t>(finest - cell.level) * ENERGY_BITS_PER_LEVEL;
             FX_ASSERT(shift < 64);
-            const auto whole = static_cast<uint64_t>(cell.energy);
+            const auto whole = static_cast<uint64_t>(cell.energy) + static_cast<uint64_t>(cell.edgeOutflow);
             const FxU128 value = shift == 0 ? FxU128{.hi = whole, .lo = cell.fraction}
                                             : FxU128{.hi = (whole << shift) | (cell.fraction >> (64 - shift)),
                                                      .lo = cell.fraction << shift};
