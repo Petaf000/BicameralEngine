@@ -527,8 +527,10 @@ namespace bicameral::sim {
         }
 
         // 出ていく割合の合計(EffectiveOutflow で換算)が 1 を超えるセルは、その面の割合を比例して縮める(07「共通の形」。負の中身と
-        // 物質の無いエネルギーを作らない)
-        void LimitOutflow(const GasBox& box, const std::vector<GasDerived>& derived, std::vector<GasFace>& faces) {
+        // 物質の無いエネルギーを作らない)。cuts が null でなければ、縮めた質量(mg。上流のセルに残った分 = 正・下流に届かなかった分 = 負)を
+        // セルの順に書く(投影の外側の反復が食い違いから除く。T-0722・ADR-0346)
+        void LimitOutflow(const GasBox& box, const std::vector<GasDerived>& derived, std::vector<GasFace>& faces,
+                          std::vector<int64_t>* cuts = nullptr) {
             std::vector<uint64_t> outflow(box.cells.size(), 0);
             for (GasFace& face : faces) {
                 face.fraction = RawFraction(box, derived, face);
@@ -546,12 +548,23 @@ namespace bicameral::sim {
                                                       multires::TX_ROOM_UNLIMITED, 0);
             }
 
+            if (cuts != nullptr)
+                cuts->assign(box.cells.size(), 0);
+
             const GasApplyWorld world{.limits = &limits};
             for (GasFace& face : faces) {
                 const FaceSide donor = face.flow > 0 ? face.left : face.right;
                 const FaceSide receiver = face.flow > 0 ? face.right : face.left;
+                const uint64_t raw = face.fraction;
                 face.fraction = multires::TxLimitAmount(world, ApplySlot(donor), donor.index, ApplySlot(receiver),
-                                                        receiver.index, face.fraction);
+                                                        receiver.index, raw);
+                if (cuts == nullptr || raw == face.fraction || donor.kind != SideKind::Cell)
+                    continue;
+
+                const auto mass = (int64_t)MulShiftU64(raw - face.fraction, derived[donor.index].mass, 32);
+                (*cuts)[donor.index] += mass;
+                if (receiver.kind == SideKind::Cell)
+                    (*cuts)[receiver.index] -= mass;
             }
         }
 
@@ -1242,7 +1255,7 @@ namespace bicameral::sim {
     }
 
     void FinishGasPressure(GasBox& box, const GasPressureOptions& options, const GasPressureSystem& system,
-                           std::span<const int64_t> pressures, uint64_t roundingTick) {
+                           std::span<const int64_t> pressures, uint64_t roundingTick, std::vector<int64_t>* cuts) {
         assert(pressures.size() == box.cells.size());
         const GasCoefficients saved = box.coefficients;
         box.coefficients = PressureCoefficients(box, options.substeps);
@@ -1274,7 +1287,7 @@ namespace bicameral::sim {
             face.flow = system.predictedFlows[f] + fx::FxMulShiftS64(link, left - right, 48);
         }
 
-        LimitOutflow(box, derived, faces);
+        LimitOutflow(box, derived, faces, cuts);
 
         // --- (4)(5) 移す成分の物質量と、風上の中身(力を当てた後)を移す(小刻みと同じ部品)---
         ComputeMovedAmounts(box, forced, derived, roundingTick, faces);

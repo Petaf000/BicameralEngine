@@ -142,14 +142,16 @@ namespace bicameral::sim {
 
         // 食い違い G_i = E_真,i − C_i x_i(mg の Q16)。式が仮定した刻みの終わりの圧力 x と、仮の状態の本当の圧力の差を質量で測る。
         // 最大の |G|(mg)を返す
+        // 切った面の質量 cuts(mg。空なら除かない)は、式の x によらない流れなので食い違いから除く(T-0722・ADR-0346)
         int64_t Mismatch(const OuterState& trial, const GasPressureSystem& system, const std::vector<int64_t>& values,
-                         std::vector<int64_t>& mismatches) {
+                         const std::vector<int64_t>& cuts, std::vector<int64_t>& mismatches) {
             mismatches.resize(values.size());
             uint64_t worst = 0;
             for (size_t index = 0; index < values.size(); ++index) {
                 const int64_t assumed = fx::FxMulShiftS64(values[index], (int64_t)system.cellCapacities[index],
                                                           MISMATCH_SHIFT);
-                mismatches[index] = trial.excesses[index] - assumed;
+                const int64_t cut = cuts.empty() ? 0 : cuts[index] * ((int64_t)1 << (CAPACITY_SHIFT - MISMATCH_SHIFT));
+                mismatches[index] = trial.excesses[index] - assumed - cut;
                 worst = std::max(worst, fx::FxAbsU64(mismatches[index]) >> (CAPACITY_SHIFT - MISMATCH_SHIFT));
             }
 
@@ -194,6 +196,7 @@ namespace bicameral::sim {
 
             std::vector<int64_t>& values = state.pressures;
             std::vector<int64_t> mismatches;
+            std::vector<int64_t> cuts;
             OuterState previous = MeasureState(box, system);
             const uint32_t limit = std::max<uint32_t>(options.outerIterations, 1);
             for (uint32_t outer = 1;; ++outer) {
@@ -201,9 +204,10 @@ namespace bicameral::sim {
 
                 // --- 仮に当てて、食い違いを測る ---
                 GasBox trial = box;
-                FinishGasPressure(trial, options.pressure, system, values, roundingTick);
+                FinishGasPressure(trial, options.pressure, system, values, roundingTick,
+                                  options.pressure.excludeCutFlows ? &cuts : nullptr);
                 OuterState measured = MeasureState(trial, BeginGasPressure(trial, options.pressure));
-                const int64_t mismatch = Mismatch(measured, system, values, mismatches);
+                const int64_t mismatch = Mismatch(measured, system, values, cuts, mismatches);
                 if (outer == 1)
                     cost.firstMismatch = std::max(cost.firstMismatch, mismatch);
 
