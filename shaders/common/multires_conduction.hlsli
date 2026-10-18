@@ -151,14 +151,15 @@ FX_FN MrThermalSums MrMakeThermalSums() {
 
 template <typename Table>
 FX_FN MrThermalSums MrAddThermalSpecies(Table table, MrThermalSums sums, uint32_t species, uint64_t amount) {
-    // --- 化学のエネルギー・熱容量(RxChemicalEnergy・RxHeatCapacity の 1 項)---
-    const int64_t chemicalTerm = RxMulS64Checked((int64_t)amount, table.Species(species).h0);
+    // --- 化学のエネルギー・熱容量(RxChemicalEnergy・RxHeatCapacity の 1 項。表は 1 回だけ読む。T-0767)---
+    const RxSpecies entry = table.Species(species);
+    const int64_t chemicalTerm = RxMulS64Checked((int64_t)amount, entry.h0);
     FX_ASSERT(!FxAddOverflowsS64(sums.chemical, chemicalTerm));
     sums.chemical += chemicalTerm;
-    sums.heatCapacity += amount * (uint64_t)table.Species(species).heatCapacity;
+    sums.heatCapacity += amount * (uint64_t)entry.heatCapacity;
 
     // --- 伝導率の重み付きの和(HcCellConductance の 1 項)---
-    const FxU128 term = FxMulU64Full(amount, (uint64_t)table.Species(species).conductivity);
+    const FxU128 term = FxMulU64Full(amount, (uint64_t)entry.conductivity);
     const uint64_t low = sums.weighted.lo + term.lo;
     sums.weighted.hi += term.hi + (low < sums.weighted.lo ? (uint64_t)1 : (uint64_t)0);
     sums.weighted.lo = low;

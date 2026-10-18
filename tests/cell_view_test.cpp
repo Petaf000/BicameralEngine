@@ -102,6 +102,40 @@ namespace {
         return (int64_t)fx::FxDivU128By64(fx::FxMulU64Full(full, CELL_OPEN_FULL), volume).quotient;
     }
 
+    bool SamePhaseSums(const CvPhaseSums& a, const CvPhaseSums& b) {
+        return a.amount == b.amount && a.mass == b.mass && a.volume == b.volume && a.heatCapacity == b.heatCapacity;
+    }
+
+    // 部分だけ作った見立て(MakeCellViewParts。T-0767): 作った欄は全部作った見立てと同じ・作らない欄は 0
+    void CompareParts(const CellViewTable& viewTable, const reaction::RxCell& cell, int32_t level,
+                      const CvCellView& full) {
+        const CvPhaseSums zero = CvMakePhaseSums();
+        for (const uint32_t parts : {CV_VIEW_THERMAL, CV_VIEW_PHASES, CV_VIEW_GAS_PRESSURE, CV_VIEW_LIQUID_MASS}) {
+            const CvCellView view = MakeCellViewParts(viewTable, cell, level, REFERENCE_PRESSURE, parts);
+            EXPECT(view.heat == full.heat && view.heatCapacity == full.heatCapacity);
+            EXPECT(view.thermal.temperature == full.thermal.temperature);
+            EXPECT(view.thermal.conductance == full.thermal.conductance);
+            EXPECT(view.thermal.capacityLimit == full.thermal.capacityLimit);
+            EXPECT(view.faceLimit == full.faceLimit);
+
+            const bool phases = parts != CV_VIEW_THERMAL;
+            EXPECT(SamePhaseSums(view.gas, phases ? full.gas : zero));
+            EXPECT(SamePhaseSums(view.liquid, phases ? full.liquid : zero));
+            EXPECT(SamePhaseSums(view.solid, phases ? full.solid : zero));
+            EXPECT(view.liquidOpen == (phases ? full.liquidOpen : 0));
+            EXPECT(view.gasOpen == (phases ? full.gasOpen : 0));
+            EXPECT(view.liquidRoom == (phases ? full.liquidRoom : 0));
+            EXPECT(view.liquidFill == (phases ? full.liquidFill : 0));
+
+            const bool pressure = parts == CV_VIEW_GAS_PRESSURE;
+            EXPECT(view.gasPressure == (pressure ? full.gasPressure : 0));
+            EXPECT(view.gasPressureDeviation == (pressure ? full.gasPressureDeviation : 0));
+            const bool liquid = parts == CV_VIEW_LIQUID_MASS;
+            EXPECT(view.liquidMass == (liquid ? full.liquidMass : 0));
+            EXPECT(view.liquidEquivalentMass == (liquid ? full.liquidEquivalentMass : 0));
+        }
+    }
+
     // 1 セル × 1 レベルの見立てを、今の仕組みの値と比べる
     void CompareView(const BakedReactionTable& table, const CellViewTable& viewTable, const reaction::RxCell& cell,
                      int32_t level) {
@@ -169,6 +203,7 @@ namespace {
         const int64_t pressure = ReferenceGasPressure(gasAmount, thermal.temperature, view.gasOpen);
         EXPECT(view.gasPressure == pressure);
         EXPECT(view.gasPressureDeviation == pressure - REFERENCE_PRESSURE);
+        CompareParts(viewTable, cell, level, view);
     }
 
     // --- いろいろなセル ---
@@ -324,16 +359,39 @@ namespace {
         }
 
         const Clock::time_point oldEnd = Clock::now();
+
+        // 伝導が読む部分だけ(T-0767)と、置き換える前の伝導の熱(MrCellThermal)
+        for (uint32_t round = 0; round < ROUNDS; ++round) {
+            for (const reaction::RxCell& cell : cells) {
+                const CvCellView view = MakeCellViewParts(viewTable, cell, 0, REFERENCE_PRESSURE, CV_VIEW_THERMAL);
+                sink += view.faceLimit + view.thermal.temperature;
+            }
+        }
+
+        const Clock::time_point thermalViewEnd = Clock::now();
+        for (uint32_t round = 0; round < ROUNDS; ++round) {
+            for (const reaction::RxCell& cell : cells) {
+                const MrThermal thermal = MrCellThermal(reactionView, cell);
+                sink += MrFaceLimit(thermal, 0) + thermal.temperature;
+            }
+        }
+
+        const Clock::time_point thermalEnd = Clock::now();
         const uint64_t calls = uint64_t{ROUNDS} * cells.size();
         const auto perCell = [&](Clock::duration duration) {
             return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count() * 10 / calls;
         };
         const uint64_t viewTenths = perCell(viewEnd - viewBegin);
         const uint64_t oldTenths = perCell(oldEnd - viewEnd);
+        const uint64_t thermalViewTenths = perCell(thermalViewEnd - oldEnd);
+        const uint64_t thermalTenths = perCell(thermalEnd - thermalViewEnd);
         std::printf("費用: 見立て %llu.%llu ns/セル・今の別々の数え方 %llu.%llu ns/セル(%llu 回。sink %llu)\n",
                     (unsigned long long)(viewTenths / 10), (unsigned long long)(viewTenths % 10),
                     (unsigned long long)(oldTenths / 10), (unsigned long long)(oldTenths % 10),
                     (unsigned long long)calls, (unsigned long long)(sink & 0xff));
+        std::printf("費用: 見立ての熱だけ(CV_VIEW_THERMAL)%llu.%llu ns/セル・MrCellThermal %llu.%llu ns/セル\n",
+                    (unsigned long long)(thermalViewTenths / 10), (unsigned long long)(thermalViewTenths % 10),
+                    (unsigned long long)(thermalTenths / 10), (unsigned long long)(thermalTenths % 10));
     }
 
 }  // namespace

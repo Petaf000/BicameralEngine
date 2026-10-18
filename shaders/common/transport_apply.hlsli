@@ -20,11 +20,13 @@
 //     uint64_t CoarseSideCoefficient(CvCellView coarse, int32_t fineLevel, uint32_t gap, uint32_t fineShift, uint32_t coarseShift)・
 //     int64_t FaceFlow(int64_t slopeA, uint64_t coefficientA, int64_t slopeB, uint64_t coefficientB)(A → B が正)
 //   - 安定の条件: uint32_t SubcycleShift(int32_t level)(小刻みの数の指数。拡散型は 4^σ)・bool LimitsOutflow()(2 を使うか)
-//   ほかに読む欄の宣言: uint32_t FieldCount()(0 なら 4 を飛ばす)
+//   ほかに読む欄の宣言: uint32_t FieldCount()(0 なら 4 を飛ばす)・uint32_t ViewParts()(見立てのどの部分を読むか。CV_VIEW_*。
+//   当てる段は呼ばない。世界が見立てを作る時に読む = 読まない部分を作らない。T-0767)
 //
 // 世界(World)が渡すもの(土台 §3「土台が世界に求めるもの 4 つ」。CPU と GPU で回し方だけが違う):
 //   - MrFaceNeighbor Neighbor(uint32_t slot, MrBlock block, uint32_t index, uint32_t face)(面の隣。流さない面は MR_NEIGHBOR_NONE)
-//   - CvCellView View(uint32_t slot, uint32_t index)(刻みの初めの見立て。cell_view.hlsli の MakeCellView)
+//   - CvCellView View(uint32_t slot, uint32_t index)(刻みの初めの見立て。cell_view.hlsli の MakeCellViewParts。C++ は const& で返してよい =
+//     面ごとに写さない。作るのは種類の ViewParts() の部分だけでよい〔T-0767〕)
 //   - int32_t Level(uint32_t slot)・bool HasFraction(uint32_t slot)(端数の置き場があるか)
 //   - TxLimit Limit(uint32_t slot, uint32_t index)(2 の倍率。LimitsOutflow の種類だけ読む)
 //   - void Add(uint32_t slot, uint32_t index, MrEnergyDelta delta)(3 の書き足し。順に依存しない 128bit の和。GPU は 64bit の atomic)
@@ -116,18 +118,21 @@ FX_FN bool TxWakes(MrEnergyDelta delta) {
 // 自分(見立て self・レベル level)から面の隣 neighbor(SAME・COARSER・EDGE)への生の流れ(自分 → 隣が正。自分のレベルの単位)。
 // 同じレベル: 両側が同じ式で逆向きの値。粗い隣: 細かい側(自分)だけが計算する(粗い側の係数は種類の CoarseSideCoefficient)
 template <typename Kind, typename World>
-FX_FN int64_t TxFaceFlow(Kind kind, World world, CvCellView self, int32_t level, MrFaceNeighbor neighbor) {
+FX_FN int64_t TxFaceFlow(Kind kind, World world, FX_IN(CvCellView) self, int32_t level, MrFaceNeighbor neighbor) {
     const uint32_t shift = kind.SubcycleShift(level);
     const uint64_t selfCoefficient = kind.SideCoefficient(self, level, shift);
 
     // 開いた世界の端: 相手は外のセル(自分と同じレベルの見立て)で、同じレベルの面と同じ式(T-0721)
-    CvCellView other;
-    if (neighbor.kind == MR_NEIGHBOR_EDGE)
-        other = world.Outside(neighbor.index, level);
-    else
-        other = world.View(neighbor.slot, neighbor.index);
+    if (neighbor.kind == MR_NEIGHBOR_EDGE) {
+        FX_IN(CvCellView) outside = world.Outside(neighbor.index, level);
 
-    if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_EDGE)
+        return kind.FaceFlow(kind.Slope(self), selfCoefficient, kind.Slope(outside),
+                             kind.SideCoefficient(outside, level, shift));
+    }
+
+    // 見立ては世界の置き場から参照で読む(C++。面ごとに写さない。T-0767)
+    FX_IN(CvCellView) other = world.View(neighbor.slot, neighbor.index);
+    if (neighbor.kind == MR_NEIGHBOR_SAME)
         return kind.FaceFlow(kind.Slope(self), selfCoefficient, kind.Slope(other),
                              kind.SideCoefficient(other, level, shift));
 
@@ -158,7 +163,7 @@ FX_FN int64_t TxLimitFaceFlow(Kind kind, World world, uint32_t slot, uint32_t in
 // 流れはどれも刻み(小刻み)の初めの見立てから(Jacobi)。足す順に依らない(128bit の整数の和)
 template <typename Kind, typename World>
 FX_FN bool TxFlowCell(Kind kind, World world, uint32_t slot, MrBlock block, uint32_t index) {
-    const CvCellView self = world.View(slot, index);
+    FX_IN(CvCellView) self = world.View(slot, index);
     MrEnergyDelta own = MrMakeEnergyDelta();
     bool crossMoved = false;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
