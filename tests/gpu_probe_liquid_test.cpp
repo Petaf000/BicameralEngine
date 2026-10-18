@@ -6,6 +6,8 @@
 //   2. 堤を消すと抜ける: 水で満ちた池の堤が無い世界で、水が低い土地(床の上に半分を占める砂 = 一部だけ開いた面)へ流れ出る
 //   3. ダムの水が押し寄せる: 区画 24 × 8 × 1 の端の水の柱が、運動量の移流で押し寄せる
 //   4. 移流なし(T-0609 の形): 1 と同じ場面を advection = false で
+//   5. 表の差し替え(T-0670): ダムの水が押し寄せる途中で、重力が月になり・水の密度が変わり・物質が 1 つ増える(ID がずれる)表へ。
+//      GPU は区画の作業場の見出しと物質ごとの値を書き直し(欄の場所が変われば作り直して持ち越す欄を写す)、CPU は見立ての重力を替える
 //   各場面で、刻みごとの状態のハッシュが CPU と同じ・最後の液体の状態(面の運動量・運動と位置のエネルギー・帳簿)が同じ・
 //   流した刻みの数・成分の溢れ 0・シェーダーの assert 0・debug layer のエラー 0。
 // 液体の段(適用の単位の中)の GPU 時間を出す(docs/perf.md)。
@@ -71,16 +73,28 @@ namespace {
     };
 
     // evaporation: 水が湯気になる試験の規則(1 次・毎秒 5%・吸熱。流れている液体の質量が区画の外の段で減る場面。T-0656)
-    BakedReactionTable MakeTable(bool evaporation = false) {
+    // changed: 差し替える先の表(T-0670。重力が月・水の密度 1100・粘土を足す〔名前の順で後ろの物質の ID がずれる〕)
+    BakedReactionTable MakeTable(bool evaporation = false, bool changed = false) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.environment = StandardWorldPhysics();
+        if (changed) {
+            definition.environment.gravityMicrometersPerSecond2 = 1620000;
+            definition.species.push_back({.name = "clay",
+                                          .composition = {{.element = "C", .count = 1}},
+                                          .formationEnthalpy = 0,
+                                          .heatCapacity = 8500,
+                                          .thermalConductivity = 500,
+                                          .phase = SpeciesPhase::Solid,
+                                          .density = 1500});
+        }
+
         definition.species.push_back({.name = "liquid_water",
                                       .composition = {{.element = "H", .count = 2}, {.element = "O", .count = 1}},
                                       .formationEnthalpy = -285830,
                                       .heatCapacity = 75300,
                                       .thermalConductivity = 600,
                                       .phase = SpeciesPhase::Liquid,
-                                      .density = 1000});
+                                      .density = changed ? 1100u : 1000u});
         definition.species.push_back({.name = "stone",
                                       .composition = {{.element = "C", .count = 1}},
                                       .formationEnthalpy = 0,
@@ -284,8 +298,14 @@ namespace {
     }
 
     // --- 走らせる(1 フレーム = 1 刻み。毎刻み CPU と比べる)---
+    // 表の差し替え(T-0670): 刻み tick の始めに table へ
+    struct SceneSwap {
+        const BakedReactionTable* table = nullptr;
+        uint64_t tick = 0;
+    };
+
     void CheckScene(ID3D12Device5* device, const BakedReactionTable& table, std::string_view name, Scene scene,
-                    bool advection, uint64_t ticks, Failures& failures) {
+                    bool advection, uint64_t ticks, Failures& failures, SceneSwap swap = {}) {
         const ProbeLiquidOptions options = MakeOptions(scene, advection);
         const auto field = ProbeLiquidField::Create(table, options);
         if (!field) {
@@ -313,7 +333,13 @@ namespace {
         bool hashesMatch = true;
         for (uint64_t tick = 0; tick < ticks && hashesMatch; ++tick) {
             const auto slot = static_cast<uint32_t>(tick % ProbeSim::FRAME_SLOT_COUNT);
-            ID3D12CommandList* list = simulation->RecordFrame(slot, {.firstTick = tick, .unitCount = unitsPerTick});
+            const bool swapping = swap.table != nullptr && tick == swap.tick;
+            const std::array<ProbeTableSwap, 1> swaps = {ProbeTableSwap{.tick = tick, .table = swap.table}};
+            ProbeFrameInput input{.firstTick = tick, .unitCount = unitsPerTick};
+            if (swapping)
+                input.tableSwaps = swaps;
+
+            ID3D12CommandList* list = simulation->RecordFrame(slot, input);
             if (list == nullptr || !queue->WaitCpu(queue->Submit(list))) {
                 failures.Check(false, std::format("{}: 刻み {} を投げられる", name, tick));
                 return;
@@ -321,7 +347,7 @@ namespace {
 
             const ProbeFrameReadback readback = simulation->ReadFrame(slot);
             debugAssertCount += readback.debugAssertCount;
-            reference.Advance(tick, {});
+            reference.Advance(tick, {}, swapping ? swap.table : nullptr);
             moved += reference.LastLiquidReport().movedMilligrams;
             hashesMatch = readback.hashes.size() == 1 && readback.hashes[0].hash == reference.StateHash(tick + 1);
             if (!hashesMatch)
@@ -431,6 +457,11 @@ int main(int argc, char** argv) {
     const BakedReactionTable evaporating = MakeTable(true);
     CheckScene(device->Get(), evaporating, "ダムの水が押し寄せながら湯気になる", Scene::DamBreak, true, warp ? 4 : 180,
                failures);
+
+    // 表の差し替え(T-0670): 押し寄せる途中で重力・水の密度・物質の一覧が変わる表へ
+    const BakedReactionTable changed = MakeTable(false, true);
+    CheckScene(device->Get(), table, "ダムの水が押し寄せる → 月の重力の表へ差し替え", Scene::DamBreak, true,
+               warp ? 4 : 120, failures, {.table = &changed, .tick = warp ? 2u : 30u});
 
     if (!warp) {
         Measure(device->Get(), table, "池に溜まる", Scene::Pool);

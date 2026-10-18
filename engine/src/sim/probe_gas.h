@@ -47,6 +47,7 @@
 #include "sim/gas_projection.h"
 #include "sim/gas_reference.h"
 #include "sim/reaction_table.h"
+#include "sim/species_remap.h"
 
 namespace bicameral::sim {
 
@@ -123,6 +124,11 @@ namespace bicameral::sim {
         // 値が変わったセルの番号を changed に足す(呼ぶ側が熱のキャッシュを作り直し、活性の種にする)
         ProbeGasStepReport Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells, uint64_t tick,
                                 std::vector<uint32_t>& changed);
+
+        // 表の差し替え(T-0670。表は CheckGasTableSwap が通したもの = Create が断らない表): 層の基準の大気を新しい表で作り直し、
+        // 帳簿の物質ごとの量を名前で付け替える(消えた物質の量は捨てる)。運動量・質量の欄は物質に依らないのでそのまま
+        // (GPU の ProbeSim::RecordGasTableSwap と同じ)
+        void ApplyTable(const BakedReactionTable& table, const SpeciesRemap& remap);
 
         [[nodiscard]] const ProbeGasOptions& Options() const { return m_options; }
 

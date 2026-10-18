@@ -362,10 +362,10 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12Resource* LiquidWork() const { return m_liquidWork.Get(); }
         [[nodiscard]] const ProbeLiquidHeader& LiquidHeader() const { return m_liquidHeader; }
 
-        // 区画(気体・液体)のある世界で、表 table へ差し替えられるか(T-0620・ADR-0300)。今は、区画の欄の作りが変わらない表だけ:
-        // 物質の一覧が同じ・区画が読む物質ごとの値(気体: モル質量・h0・比熱・凝縮相 / 液体: モル体積・モル質量・液体と凝縮相)が同じ・
-        // 環境の値(重力・音速の基準)と基準の大気が同じ。反応の規則と速さだけを替えるホットリロードは通る。
-        // 断ったら理由(付け替えと作り直しは T-0670)。区画の無い世界はいつも通る。RecordFrame の表の差し替えもこれで検査する
+        // 区画(気体・液体)のある世界で、表 table へ差し替えられるか(T-0620・T-0670)。区画の作業場は新しい表で作り直し、持ち越す欄は
+        // 物質の名前で付け替えるので、物質を足す・消す・物質の値・環境の値・基準の大気が変わる表も通る。断るのは新しい表で区画を
+        // 作れない時だけ(気体: 基準の大気が無い・音速の基準が 0 か上限を超える / 液体: 重力が 0 など。理由を返す)。
+        // 区画の無い世界はいつも通る。RecordFrame の表の差し替えもこれで検査する
         [[nodiscard]] std::expected<void, std::string> CheckRegionTableSwap(const BakedReactionTable& table) const;
 
         // 物理(物理なしなら nullptr。T-0098)。テストが読み戻しを読むだけ(記録はフレームのリストの中で ProbeSim がする)
@@ -405,6 +405,8 @@ namespace bicameral::sim {
 
             // 反応表を差し替えたフレームの、表のアップロードと差し替える前の表(このリストを GPU が終えるまで持つ。T-0139)
             std::vector<ComPtr<ID3D12Resource>> keepAlive;
+            // 表の差し替えで作り直す前の気体の箱(同じく、このリストを GPU が終えるまで持つ。T-0670)
+            std::vector<std::unique_ptr<GpuGas>> retiredGas;
 
             // 最後に記録した範囲(ReadFrame が、どの刻みのハッシュとどの単位の時間かを知るため)
             uint64_t firstTick = 0;
@@ -434,8 +436,12 @@ namespace bicameral::sim {
         [[nodiscard]] std::expected<void, std::string> CreatePhysics(ID3D12Device5* device);
         [[nodiscard]] std::expected<void, std::string> CreateGas(ID3D12Device5* device,
                                                                  const BakedReactionTable& table);
+        [[nodiscard]] std::expected<void, std::string> BuildGasWork(ID3D12Device5* device,
+                                                                    const BakedReactionTable& table);
         [[nodiscard]] std::expected<void, std::string> CreateLiquid(ID3D12Device5* device,
                                                                     const BakedReactionTable& table);
+        [[nodiscard]] std::expected<void, std::string> UploadLiquidHeader(ID3D12Device5* device,
+                                                                          const BakedReactionTable& table);
 
         // --- 入力とコマンド ---
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
@@ -468,13 +474,34 @@ namespace bicameral::sim {
         void RecordGasInitialization(ID3D12GraphicsCommandList10* list) const;
         // 状態のハッシュの単位(HashCells の後)で、気体の欄と帳簿の寄与を足す(T-0620)
         void RecordGasHash(ID3D12GraphicsCommandList10* list) const;
-        // 区画のある世界の表の差し替え(CheckRegionTableSwap の気体・液体の分。物質の一覧が同じことは呼ぶ側が見る)
+        // 区画のある世界の表の差し替え(CheckRegionTableSwap の気体・液体の分。新しい表で区画を作れるか)
         [[nodiscard]] std::expected<void, std::string> CheckGasTableSwap(const BakedReactionTable& table) const;
         // 液体の段(sim/probe_sim_liquid.cpp。気体の段の後・起こす刻みの来たブロックの前。CPU の (1c))
         void RecordLiquid(ID3D12GraphicsCommandList10* list) const;
         void RecordLiquidInitialization(ID3D12GraphicsCommandList10* list) const;
         void RecordLiquidHash(ID3D12GraphicsCommandList10* list) const;
         [[nodiscard]] std::expected<void, std::string> CheckLiquidTableSwap(const BakedReactionTable& table) const;
+        // 表の差し替えで区画の作業場を作り直す(T-0670。sim/probe_sim_gas.cpp・probe_sim_liquid.cpp)。差し替えは持ち越す欄を写し、
+        // 表の違う保存点へ戻す時は作り直すだけ(中身は保存点が写す)。どれも m_tableCopy が今の表のうちに呼ぶ
+        [[nodiscard]] bool RecordRegionTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                                 const BakedReactionTable& table, const SpeciesRemap& remap);
+        [[nodiscard]] bool RecordRegionsForRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                                   const BakedReactionTable& table);
+        void RecordRegionWorkStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
+                                    D3D12_RESOURCE_STATES after) const;
+        [[nodiscard]] bool GasWorkChanges(const BakedReactionTable& table, const SpeciesRemap& remap) const;
+        [[nodiscard]] bool RecordGasTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                              const BakedReactionTable& table, const SpeciesRemap& remap);
+        [[nodiscard]] bool RecordGasForRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                               const BakedReactionTable& table, const SpeciesRemap& remap);
+        void RetireGas(FrameSlot& frame);
+        [[nodiscard]] bool LiquidWorkChanges(const BakedReactionTable& table, const SpeciesRemap& remap) const;
+        [[nodiscard]] std::expected<ComPtr<ID3D12Resource>, std::string> RebuildLiquidWork(
+            ID3D12Device5* device, FrameSlot& frame, const BakedReactionTable& table);
+        [[nodiscard]] bool RecordLiquidTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                                 const BakedReactionTable& table, const SpeciesRemap& remap);
+        [[nodiscard]] bool RecordLiquidForRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                                  const BakedReactionTable& table, const SpeciesRemap& remap);
         // 区画のある世界の表の差し替え(CheckRegionTableSwap)と写しの早送り(写す元が同じ区画)の約束
         [[nodiscard]] bool ValidateRegions(const ProbeFrameInput& input) const;
         void RecordPhysicsInitialization(ID3D12GraphicsCommandList10* list, ID3D12Resource* input);
@@ -509,7 +536,8 @@ namespace bicameral::sim {
 
         [[nodiscard]] std::vector<StateRegion> StateRegions(uint64_t tick) const;
         [[nodiscard]] bool ValidateSavePoints(const ProbeFrameInput& input) const;
-        void RecordSave(ID3D12GraphicsCommandList10* list, uint32_t index, uint64_t tick);
+        [[nodiscard]] bool RecordSave(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint32_t index,
+                                      uint64_t tick);
         [[nodiscard]] bool RecordRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint32_t index);
         [[nodiscard]] bool ValidateAdopt(const ProbeFrameInput& input) const;
         void RecordAdopt(ID3D12GraphicsCommandList10* list, const ProbeSim& source, uint64_t tick);

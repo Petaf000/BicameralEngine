@@ -9,7 +9,8 @@
 // 写すもの: セルと熱のキャッシュ(S(t) の世代だけ)・予定の印・活性の一覧 2 組・ハッシュの表・刻みのイベントの一時置き場・
 // 物理の u0〜u13・区画の持ち越す欄(気体: 欄 gasState と作業場 gasWork の全部〔帳簿・通しの数を含む〕/ 液体: 作業場 liquidWork の全部
 // 〔持ち越す欄が作業の値の間にもある: 液体の質量 massOffset。T-0656〕。T-0620)。
-// 区画の欄は世代を持たない(1 組。刻み t の境界では S(t) の値)。
+// 区画の欄は世代を持たない(1 組。刻み t の境界では S(t) の値)。区画の作業場の大きさは表で変わる(T-0670): 写す時は写し先を
+// 今の大きさに作り直し、表の違う保存点へ戻す時は作業場をその表の大きさに作り直してから写す。
 // 写さないもの: コマンドキュー(戻すと空にし、呼ぶ側が足し直す)・抽出・イベントのリング・カウンタ・トレース(どれも出力。世界の結果に入らない)。
 // 同じ道で、別の ProbeSim(本物の世界)の S(t) をこの世界へ写す(写しの早送り。T-0412・ADR-0198。sim/world_copy)。
 #include <algorithm>
@@ -193,9 +194,29 @@ namespace bicameral::sim {
 
     // --- 写す・戻す ---
 
-    void ProbeSim::RecordSave(ID3D12GraphicsCommandList10* list, uint32_t index, uint64_t tick) {
+    bool ProbeSim::RecordSave(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint32_t index, uint64_t tick) {
         SavePoint& savePoint = m_savePoints[index];
         const std::vector<StateRegion> regions = StateRegions(tick);
+        // 区画の作業場の大きさは表で変わる(T-0670)。保存点の写し先が今の大きさと違えば作り直す(前の写し先はこのリストが終わるまで持つ)
+        for (size_t region = 0; region < regions.size(); ++region) {
+            if (savePoint.buffers[region]->GetDesc().Width == regions[region].bytes)
+                continue;
+
+            ComPtr<ID3D12Device5> device;
+            ComPtr<ID3D12Resource> buffer;
+            if (SUCCEEDED(list->GetDevice(IID_PPV_ARGS(&device))))
+                buffer = gpu::CreateBuffer(device.Get(), regions[region].bytes, gpu::BufferKind::UnorderedAccess);
+            if (!buffer) {
+                Log(Channel::Sim, Level::Error, "保存点 {} の写し先を作り直せない({} バイト)", index,
+                    regions[region].bytes);
+                return false;
+            }
+
+            buffer->SetName(std::format(L"ProbeSim.savePoint{}.{}", index, region).c_str());
+            frame.keepAlive.push_back(std::move(savePoint.buffers[region]));
+            savePoint.buffers[region] = std::move(buffer);
+        }
+
         std::vector<ID3D12Resource*> sources;
         std::vector<ID3D12Resource*> destinations;
         for (size_t region = 0; region < regions.size(); ++region) {
@@ -218,12 +239,19 @@ namespace bicameral::sim {
             savePoint.table = m_tableCopy;
             savePoint.tableSerial = m_tableSerial;
         }
+
+        return true;
     }
 
     // 世界を保存点の状態へ。その境界の表が今の表と違えば、表も結び直す(セルと熱のキャッシュは保存点がその表で作ったもの。
     // 差し替えをまたいで戻れる。T-0548・ADR-0246)
+    // 区画の作業場は保存点の表の大きさに作り直してから写す(T-0670)
     bool ProbeSim::RecordRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame, uint32_t index) {
         const SavePoint& savePoint = m_savePoints[index];
+        const bool changesTable = savePoint.tableSerial != m_tableSerial;
+        if (changesTable && !RecordRegionsForRestore(list, frame, savePoint.table))
+            return false;
+
         std::vector<StateRegion> from = StateRegions(savePoint.tick);
         for (size_t region = 0; region < from.size(); ++region)
             from[region] = {.resource = savePoint.buffers[region].Get(), .bytes = from[region].bytes};
@@ -232,7 +260,7 @@ namespace bicameral::sim {
         if (m_physics)
             m_physics->SetCursor(savePoint.physics);
 
-        if (savePoint.tableSerial == m_tableSerial)
+        if (!changesTable)
             return true;
 
         Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {} の保存点の表へ戻す", savePoint.tick);
@@ -242,6 +270,21 @@ namespace bicameral::sim {
         m_tableSerial = savePoint.tableSerial;
 
         return true;
+    }
+
+    // 表の違う保存点へ戻す前に、区画の作業場をその表の大きさに作り直す(T-0670。m_tableCopy はまだ今の表。中身は保存点が写す)
+    bool ProbeSim::RecordRegionsForRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                           const BakedReactionTable& table) {
+        if (!m_gas && !m_liquidWork)
+            return true;
+
+        const auto remap = BuildSpeciesRemap(m_tableCopy, table);
+        if (!remap) {
+            Log(Channel::Sim, Level::Error, "保存点の表へ物質を付け替えられない: {}", remap.error());
+            return false;
+        }
+
+        return RecordGasForRestore(list, frame, table, *remap) && RecordLiquidForRestore(list, frame, table, *remap);
     }
 
     // 写しの早送り(T-0412): 写す元の S(tick)(その世代の位置)を、この世界へ。写す元のバッファは読むだけ

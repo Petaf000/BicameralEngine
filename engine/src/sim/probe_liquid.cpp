@@ -188,6 +188,12 @@ namespace bicameral::sim {
         return field;
     }
 
+    void ProbeLiquidField::ApplyTable(const BakedReactionTable& table) {
+        m_params = liquid::LqMakeParams(
+            table.environment.gravityMicrometersPerSecond2, PROBE_LIQUID_CELL_EDGE_MILLIMETERS, m_options.frictionShift,
+            m_options.overfillStiffness, m_options.maxSpeedMillimetersPerSecond, m_options.advection ? 1u : 0u);
+    }
+
     uint32_t ProbeLiquidField::RegionIndex(uint32_t x, uint32_t y, uint32_t z) const {
         return x + (m_options.sizeCells[0] * (z + (m_options.sizeCells[2] * y)));
     }
