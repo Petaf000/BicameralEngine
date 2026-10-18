@@ -3,6 +3,8 @@
 // (sim::StepNest・StepActive)と毎刻みビット一致することを確かめる(T-0107)。
 // 場面: 鎖(tests/multires_conduction_scene.h。熱が 6 段をまたいで根へ流れる)を全部刻む・活性だけ刻む、
 // たくさんの要求の場面(tests/multires_activity_scene.h。深さ 26 段・木箱が燃える・影・端数の枠が足りなくなる)を活性だけ・全部。
+// 端の鎖(T-0773): 鎖の世界の箱の端を全部 open にし、外の柱(高さで温度が変わる)と熱が出入りする(世界の端・帳簿の「世界の端」。
+// 伝導の段は当てる段 TxFlowCell。T-0766)。
 // 状態の全部(見出し・セル・端数・空きのスタック・帳簿・数える欄)と次の刻みの種(活性)を毎刻み比べる。活性の場面は、伝導の段を
 // Compute で投げる版と Work Graph で投げる版(GpuMultiresOptions::conductionGraph)の両方で走らせ、結果が同じことも確かめる
 // (WARP は Compute 版だけ。Work Graph 版でデバイスが失われる。RunAll)。
@@ -16,6 +18,7 @@
 // 引数は gpu_test_options.h と --subcycle・--measure-only(計測だけで抜ける。T-0111)・--near-fold・--scenes all|chain|stress
 // (鎖だけ・たくさんの要求だけ。Compute 版と Work Graph 版の組は分けない。ctest の小刻みは 1 本を GPU の順番待ち〔D-460〕に合う
 // 10 分に収めるよう 2 本に分ける。T-0426。計測は鎖の組〔と all〕だけ)。
+#include "common/world_edge.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -58,6 +61,7 @@ namespace {
         bool replay = false;  // CPU を刻まず、前の版の時に刻んだ CPU の結果(TickCheck)と比べる
         uint64_t ticks = 0;
         sim::MultiresStepOptions step = CONDUCTION;
+        bool edges = false;  // 鎖の世界の端を open にする(T-0773。鎖だけ)
     };
 
     // 1 刻みの CPU の結果(Work Graph 版を、Compute 版の時に刻んだ CPU と比べるため)
@@ -226,12 +230,36 @@ namespace {
         return {};
     }
 
+    // 端の鎖(T-0773): 鎖の世界の箱(根 2 × 2 × 2 = レベル 0 の 16 セル角)の端を全部 open にする。外の柱は縦の座標 −1〜16 の行で、
+    // 高さごとに 245〜330 K(世界の空気は 300 K)。熱が 6 面の端から出入りし、帳簿の「世界の端」に載る
+    void SetChainEdges(sim::MultiresNest& nest, const sim::BakedReactionTable& table) {
+        constexpr int64_t BOX_CELLS = 2 * MR_BLOCK_EDGE;
+        nest.edges.world = {.rootLevel = nest.capacity.rootLevel,
+                            .lowX = 0,
+                            .lowY = 0,
+                            .lowZ = 0,
+                            .highX = BOX_CELLS,
+                            .highY = BOX_CELLS,
+                            .highZ = BOX_CELLS,
+                            .top = WE_OPEN,
+                            .bottom = WE_OPEN,
+                            .sides = WE_OPEN};
+        nest.edges.columnBaseUp = -1;
+        nest.edges.column.clear();
+        for (int64_t up = -1; up <= BOX_CELLS; ++up)
+            nest.edges.column.push_back(test::MakeConductionAir(table, static_cast<int32_t>(250000 + (5000 * up))));
+    }
+
     sim::MultiresNest MakeSceneNest(const sim::BakedReactionTable& table, const SceneRun& run) {
         if (run.stress)
             return test::MakeActivityNest(table);
 
         // 鎖も、たくさんの要求の場面と同じ大きさの木に置く(GpuMultires を使い回すため)
-        return test::MakeChainNest(table, test::MakeActivityNest(table).capacity);
+        sim::MultiresNest nest = test::MakeChainNest(table, test::MakeActivityNest(table).capacity);
+        if (run.edges)
+            SetChainEdges(nest, table);
+
+        return nest;
     }
 
     // 1 刻みを GPU で投げて読み戻し、CPU と比べる(replay なら CPU を刻まず checks と比べる。そうでなければ checks に書く)
@@ -370,7 +398,7 @@ namespace {
 
     // 版の並び(活性の場面は伝導の段が Compute の版〔偶数番〕と Work Graph の版〔奇数番〕を並べる。subcycle なら Work Graph 版は
     // Compute 版の CPU の結果と比べる)
-    std::array<SceneRun, 6> MakeRuns(const sim::BakedReactionTable& table, bool subcycle) {
+    std::array<SceneRun, 9> MakeRuns(const sim::BakedReactionTable& table, bool subcycle) {
         if (!subcycle) {
             return {SceneRun{.name = "鎖(活性・Compute)", .active = true, .ticks = CHAIN_TICKS},
                     SceneRun{.name = "鎖(活性・Work Graph)", .active = true, .graph = true, .ticks = CHAIN_TICKS},
@@ -384,7 +412,14 @@ namespace {
                              .graph = true,
                              .ticks = STRESS_ACTIVE_TICKS},
                     SceneRun{.name = "鎖(全部)", .ticks = CHAIN_TICKS},
-                    SceneRun{.name = "たくさんの要求(全部)", .stress = true, .ticks = STRESS_FULL_TICKS}};
+                    SceneRun{.name = "たくさんの要求(全部)", .stress = true, .ticks = STRESS_FULL_TICKS},
+                    SceneRun{.name = "端の鎖(活性・Compute)", .active = true, .ticks = CHAIN_TICKS, .edges = true},
+                    SceneRun{.name = "端の鎖(活性・Work Graph)",
+                             .active = true,
+                             .graph = true,
+                             .ticks = CHAIN_TICKS,
+                             .edges = true},
+                    SceneRun{.name = "端の鎖(全部)", .ticks = CHAIN_TICKS, .edges = true}};
         }
 
         const sim::MultiresStepOptions split = test::SubcycleTestOptions(table, sim::MULTIRES_MAX_SUBCYCLE_GAP);
@@ -412,7 +447,20 @@ namespace {
             SceneRun{.name = "小刻みのたくさんの要求(全部)",
                      .stress = true,
                      .ticks = SUBCYCLE_STRESS_FULL_TICKS,
-                     .step = split}};
+                     .step = split},
+            SceneRun{.name = "小刻みの端の鎖(活性・Compute)",
+                     .active = true,
+                     .ticks = SUBCYCLE_CHAIN_TICKS,
+                     .step = split,
+                     .edges = true},
+            SceneRun{.name = "小刻みの端の鎖(活性・Work Graph)",
+                     .active = true,
+                     .graph = true,
+                     .replay = true,
+                     .ticks = SUBCYCLE_CHAIN_TICKS,
+                     .step = split,
+                     .edges = true},
+            SceneRun{.name = "小刻みの端の鎖(全部)", .ticks = SUBCYCLE_CHAIN_TICKS, .step = split, .edges = true}};
     }
 
     // 流す場面(--scenes。既定は全部)
@@ -444,7 +492,7 @@ namespace {
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        const std::array<SceneRun, 6> runs = MakeRuns(table, subcycle);
+        const std::array<SceneRun, 9> runs = MakeRuns(table, subcycle);
         std::array<uint64_t, runs.size()> hashes{};
         std::vector<TickCheck> checks;
         for (size_t i = 0; i < runs.size(); ++i) {
@@ -467,8 +515,12 @@ namespace {
                 chr::duration<double>(chr::steady_clock::now() - start).count());
         }
 
-        if (hashes[0] != hashes[1] || hashes[2] != hashes[3])
+        if (hashes[0] != hashes[1] || hashes[2] != hashes[3] || hashes[6] != hashes[7])
             return std::unexpected("伝導の段の Compute 版と Work Graph 版が食い違う");
+
+        // 端の鎖は端の無い鎖と違う結果になる(熱が世界の端から出入りした = 場面の確認。T-0773)
+        if (selection.chain && hashes[6] == hashes[0])
+            return std::unexpected("場面の確認: 端の鎖が端の無い鎖と同じ(端から熱が出入りしていない)");
 
         return {};
     }

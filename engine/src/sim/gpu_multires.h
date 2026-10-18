@@ -8,6 +8,8 @@
 // 面の流れ → 変化を足して反応)。活性の刻みでは Work Graph が刻むブロックを伝導の一覧に足し、段はその一覧のブロックだけを受け持つ。
 // 細かいレベルの小刻み(subcycleBaseLevel・maxSubcycleGap。T-0109)は、印 〜 流れを小刻みごとに積み、小刻みの終わりに変化を足して
 // (ConductEnd)変わったブロックの隣を活性のグラフで起こす。
+// 伝導の面の流れは運ぶ計算の共通の土台の当てる段(common/transport_apply.hlsli の TxFlowCell。CPU と同じ関数。T-0766)。世界の端
+// (MultiresNest::edges。T-0773)は RecordUpload が表の語(t2。common/multires_table_words.hlsli)に写し、開いた端の面は外の柱と流れる。
 // 細かいレベルの熱の陰解法(MultiresStepOptions::implicitConduction。T-0132)は、流れの段が基準より細かいブロックを飛ばし、流れの後に
 // 陰解法の段(sim/gpu_multires_implicit。EnableImplicitConduction で作る)が系を作って解き、変化を伝導の表へ足す(ConductApply が足す)。
 //
@@ -32,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "common/cell_view.hlsli"
 #include "gpu/com_ptr.h"
 #include "gpu/pipeline_cache.h"
 #include "gpu/resources.h"
@@ -86,7 +89,9 @@ namespace bicameral::sim {
                                                                             const MultiresCapacity& capacity,
                                                                             const GpuMultiresOptions& options = {});
 
-        // CPU の木(状態・索引・取り合いの印)を GPU へ写す。大きさは Create と同じでなければならない
+        // CPU の木(状態・索引・取り合いの印)を GPU へ写す。大きさは Create と同じでなければならない。世界の端(nest.edges)が前に写したものと
+        // 違えば表の語(t2)を作り直す(前の表の語は次の RecordUpload まで持つ。写しの元を毎回書き換えるのと同じく、前のリストが GPU で
+        // 終わってから呼ぶ約束)
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest);
 
         // --- 世界の木(multires_nest.h の SubmitRequests・ProcessRequests と同じ結果)---
@@ -243,7 +248,8 @@ namespace bicameral::sim {
             BufferCount
         };
 
-        static constexpr uint32_t TABLE_COUNT = 4;  // 物質・規則・索引・速度
+        static constexpr uint32_t TABLE_COUNT = 4;  // 物質・規則・表の語(索引 + 相の表 + 世界の端。T-0766)・速度
+        static constexpr uint32_t TABLE_WORDS = 2;  // t2
         static constexpr uint32_t ACTIVITY_LISTS = 2;
         static constexpr uint32_t TREE_PASS_COUNT = 12;
         static constexpr uint32_t CONDUCT_PASS_COUNT = 6;
@@ -255,6 +261,8 @@ namespace bicameral::sim {
                                                                        const GpuMultiresOptions& options);
         [[nodiscard]] std::expected<void, std::string> CreateBuffers(ID3D12Device5* device,
                                                                      const BakedReactionTable& table);
+        // 表の語を edges で作り直す(違わなければ何もしない。作れなければ false)
+        [[nodiscard]] bool UpdateTableWords(const MultiresWorldEdges& edges);
         void BindRoot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) const;
         void SetGraphProgram(ID3D12GraphicsCommandList10* list);
         void SetActivityProgram(ID3D12GraphicsCommandList10* list);
@@ -354,7 +362,13 @@ namespace bicameral::sim {
         uint32_t m_requestUploadCursor = 0;
         // 反応の表(t0〜t3)。既定のヒープの写しで、作った・替えた後の最初の BindRoot が写す(T-0410。BindRoot は const なので mutable)
         std::array<gpu::ResidentBuffer, TABLE_COUNT> m_tables;
-        mutable bool m_tablesPending = false;
+        mutable std::array<bool, TABLE_COUNT> m_tablesPending{};
+        // 表の語(t2)の元: 反応の索引・相の表(表から)と世界の端(RecordUpload の nest.edges から)。今の語と、作り直して外した前の表の語
+        std::vector<uint32_t> m_ruleIndex;
+        std::vector<multires::CvSpeciesPhase> m_phases;
+        MultiresWorldEdges m_edges;
+        std::vector<uint32_t> m_tableWords;
+        std::vector<ComPtr<ID3D12Resource>> m_retiredTables;
         std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> m_externalViews{};  // u4・u5(0 なら代わりにセル)
 
         // --- 活性の種の一覧(T-0100。MR_ACTIVITY_*)---

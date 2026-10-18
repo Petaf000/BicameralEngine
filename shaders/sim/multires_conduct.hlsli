@@ -10,8 +10,12 @@
 //      どれも「端数の枠がある」とした場合の流れで決める
 //   3. TreeExpand(頁を枠の順に。足りなければ凍らせる印)→ TreeFractions(端数の枠を枠の順に)(multires_tree.hlsl)
 //   4. ConductPrepareBlock: 配った頁を一様の値で埋め、配った端数の枠を空にする
-//   5. ConductFlowsBlock: 刻むブロックのセルの面の流れを変化に足す(刻みの初めのセルから。Jacobi 型)。陰解法を入れる刻み(T-0132)は、
-//      基準より細かいブロック(InImplicitConduction)を飛ばし、続けて陰解法の段(gpu_multires_implicit.cpp)が解いた変化を表に足す
+//   5. ConductFlowsBlock: 刻むブロックのセルの面の流れを変化に足す(刻みの初めのセルから。Jacobi 型)。面の流れと当てる順は運ぶ計算の
+//      共通の土台の当てる段(common/transport_apply.hlsli の TxFlowCell)と流れの種類 TxConduction(common/transport_conduction.hlsli)で、
+//      CPU と同じ関数(T-0766・ADR-0334)。ここは回し方と世界の約束(GpuConductionWorld: 見立ての写し・64bit の atomic の足し算)だけ。
+//      開いた世界の端(common/world_edge.hlsli。箱・外の柱は表の語)の面は外のセルと流し、帳簿の「世界の端」へ(T-0773・ADR-0337)。
+//      陰解法を入れる刻み(T-0132)は、基準より細かいブロック(InImplicitConduction)を飛ばし、続けて陰解法の段(gpu_multires_implicit.cpp)が
+//      解いた変化を表に足す(陰解法で解くブロックの外の端はまだ wall と同じ。CPU も同じ。T-0784)
 //   6. ConductApplyBlock: 変化を足してから反応(待ちの丸め)。見出しの busyTick(tc)・wakeTick を CPU の RecordWaitResults と同じに書く
 // 反応は待ちの丸めだけ(ADR-0018。T-0125)。刻む前に起こす段(multires_step.hlsl の WakeDue)がつつかれたブロックの印を直してある。
 // 次の刻みの種は書かない(変わったブロックは wakeTick = 次の刻みで、起こす段が種にする)。
@@ -25,6 +29,8 @@
 #define BICAMERAL_MULTIRES_CONDUCT_HLSLI
 
 #include "common/multires_conduction.hlsli"
+#include "common/multires_table_words.hlsli"
+#include "common/transport_conduction.hlsli"
 #include "sim/multires_bindings.hlsli"
 #include "sim/multires_wait_step.hlsli"
 
@@ -40,10 +46,10 @@ groupshared uint32_t gs_conductReacts;    // 一様なブロックの反応で�
 groupshared uint32_t gs_conductWakeHigh;  // 起こす刻みのグループの最小(上位・下位 32bit。GroupMinTick)
 groupshared uint32_t gs_conductWakeLow;
 
-// 自分のブロックのセルの熱と、ブロックの外の面の先(T-0111)。印と流れの段の初めに、セルの熱(MrCellThermal)を 1 セル 1 回、
-// ブロックの面の外の隣(MrFindFaceNeighbor の索引引きとその熱)を面のセル 1 つに 1 回だけ、別々のスレッドで計算し、面ごとの計算はここを読む。
-// 段の間はセルも木も変わらないので、毎回計算するのと同じ値。熱は x 温度・y コンダクタンス・zw 熱容量の上限の下位・上位、
-// 外の隣は x kind・y 枠・z セル・w レベルの差。外の隣の番号 = 面 × 64 + 面の上の位置(HaloEntry)
+// 自分のブロックのセルの見立てと、ブロックの外の面の先(T-0111)。印と流れの段の初めに、セルの見立て(MakeCellViewParts の種類が読む部分)を
+// 1 セル 1 回、ブロックの面の外の隣(MrFindFaceNeighbor の索引引き・開いた世界の端とその見立て)を面のセル 1 つに 1 回だけ、別々のスレッドで
+// 計算し、面ごとの計算はここを読む。段の間はセルも木も変わらないので、毎回計算するのと同じ値。見立ての写しは PackView(伝導はセル全体の熱)、
+// 外の隣は x kind・y 枠・z セル(開いた端なら外の柱の行)・w レベルの差。外の隣の番号 = 面 × 64 + 面の上の位置(HaloEntry)
 static const uint32_t CONDUCT_FACE_CELLS = MR_BLOCK_EDGE * MR_BLOCK_EDGE;
 static const uint32_t CONDUCT_HALO_CELLS = MR_FACES * CONDUCT_FACE_CELLS;
 
@@ -151,61 +157,123 @@ bool OnBlockSurface(uint32_t index) {
     return x == 0 || x == last || y == 0 || y == last || z == 0 || z == last;
 }
 
-#ifdef MR_WIDE_CELLS
-// 溢れを持つセルの熱: インライン → 溢れ(今の面 side)の順に 1 成分ずつ読んで足す(T-0272)。上限の無い形のセル(RxGpuWideCell)を
-// 作らないので、1 スレッドのスクラッチが上限(RX_GPU_WIDE_SPECIES)に依らない(512 スレッドの段で上限 56 以上が HW で止まった。T-0290)。
-// 和の式・順は MrCellThermal(上限の無い形)と同じ(MrThermalSums)
-MrThermal WideTailThermal(RxCell inlineCell, uint32_t page, uint32_t side, uint32_t index) {
-    const GpuReactionTable table = MakeTable();
-    MrThermalSums sums = MrMakeThermalSums();
-    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
-        sums = MrAddThermalSpecies(table, sums, inlineCell.species[i], inlineCell.amounts[i]);
+// --- 表の語(t2。common/multires_table_words.hlsli の Words の約束)の相の表と世界の端(T-0766・T-0773)---
 
-    const uint2 range = WideRange(page, side, index);
+struct GpuTableWords {
+    uint32_t unused;
+
+    uint32_t Word(uint32_t at) { return g_tableWords[at]; }
+};
+
+GpuTableWords MakeGpuTableWords() {
+    GpuTableWords words;
+    words.unused = 0;
+
+    return words;
+}
+
+// 見立ての表の約束(cell_view.hlsli: 物質の Species と相の Phase。CPU は sim::CellViewTable)
+struct GpuViewTable {
+    uint32_t unused;
+
+    RxSpecies Species(uint32_t id) { return g_species[id]; }
+    CvSpeciesPhase Phase(uint32_t id) { return TwPhase(MakeGpuTableWords(), id); }
+};
+
+GpuViewTable MakeViewTable() {
+    GpuViewTable table;
+    table.unused = 0;
+
+    return table;
+}
+
+// 世界の端(world_edge.hlsli。CPU は MultiresNest::edges)
+WeWorld GpuWorldEdges() {
+    return TwWorldEdges(MakeGpuTableWords());
+}
+
+int64_t GpuColumnBaseUp() {
+    return TwColumnBaseUp(MakeGpuTableWords());
+}
+
+uint32_t GpuColumnRows() {
+    return TwColumnRows(MakeGpuTableWords());
+}
+
+RxCell GpuColumnCell(uint32_t row) {
+    return TwColumnCell(MakeGpuTableWords(), row);
+}
+
+// --- セルの見立て(cell_view.hlsli の MakeCellViewParts。CPU の CellViews と同じ関数・同じ部分。T-0766)---
+
+// 伝導の流れの種類(当てる段に渡す 3 つ。安定の条件の値は stepFlags の小刻み)
+TxConduction MakeConductionKind() {
+    return TxMakeConduction(SubcycleBaseLevel(), SubcycleGap());
+}
+
+// 見立てを作る部分 = 種類の ViewParts(定数。作らない部分〔相ごとの和・割り算・相の表の読み〕はインラインの後で消える。T-0767)
+uint32_t ConductViewParts() {
+    return MakeConductionKind().ViewParts();
+}
+
+#ifdef MR_WIDE_CELLS
+// 溢れを持つセルの見立て: インライン → 溢れ(今の面 side)の順に 1 成分ずつ読んで足す(T-0272)。上限の無い形のセル(RxGpuWideCell)を
+// 作らないので、1 スレッドのスクラッチが上限(RX_GPU_WIDE_SPECIES)に依らない(512 スレッドの段で上限 56 以上が HW で止まった。T-0290)。
+// 和は整数なので足す順によらず、上限の無い形のセルを MakeCellViewParts で見立てたものと同じ値(CPU の CellViews の LoadWideNestCell)
+CvCellView WideTailView(RxCell inlineCell, MrBlock block, uint32_t side, uint32_t index, uint32_t parts) {
+    const GpuViewTable table = MakeViewTable();
+    CvViewSums sums = CvMakeViewSums();
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i)
+        sums = CvAddSpeciesParts(table, sums, inlineCell.species[i], inlineCell.amounts[i], parts);
+
+    const uint2 range = WideRange(block.page, side, index);
     for (uint32_t e = range.x; e < range.y; ++e) {
         const uint32_t word = MrWideEntryWord(e);
-        const uint64_t amount = FX_U64(g_treeWords[WideWord(page, side, word + 2)],
-                                       g_treeWords[WideWord(page, side, word + 1)]);
-        sums = MrAddThermalSpecies(table, sums, g_treeWords[WideWord(page, side, word)], amount);
+        const uint64_t amount = FX_U64(g_treeWords[WideWord(block.page, side, word + 2)],
+                                       g_treeWords[WideWord(block.page, side, word + 1)]);
+        sums = CvAddSpeciesParts(table, sums, g_treeWords[WideWord(block.page, side, word)], amount, parts);
     }
 
-    return MrThermalFromSums(inlineCell.energy, sums);
+    return CvViewFromSumsParts(inlineCell.energy, sums, block.level, 0, parts);
 }
 #endif
 
-// セルの熱(CPU の CellThermals)。溢れを使う変種(MR_WIDE_CELLS。T-0211)は、溢れを持つセルだけ溢れまで足す(WideTailThermal)
-// (8 種以下のセルは同じ成分の並びなので、インラインのまま計算してもビット単位で同じ)
-MrThermal BlockCellThermal(MrBlock block, uint32_t slot, uint32_t index) {
+// 枠 slot(見出し block)のセル index の見立て(伝導は圧力を読まないので基準の圧力は 0。CPU の CellViews::View)。
+// 溢れを使う変種(MR_WIDE_CELLS。T-0211)は、溢れを持つセルだけ溢れまで足す(8 種以下のセルは同じ成分の並びなので同じ値)
+CvCellView BlockCellView(MrBlock block, uint32_t slot, uint32_t index, uint32_t parts) {
 #ifdef MR_WIDE_CELLS
     if (!MrIsUniform(block)) {
         const RxCell inlineCell = g_cells[PageCellAddress(block.page, index)];
         const uint32_t side = WideCurrentSide(block.page);
         if (WideHasTail(inlineCell, block.page, side, index))
-            return WideTailThermal(inlineCell, block.page, side, index);
+            return WideTailView(inlineCell, block, side, index, parts);
     }
 #endif
 
-    return MrCellThermal(MakeTable(), LoadBlockCell(block, slot, index));
+    return MakeCellViewParts(MakeViewTable(), LoadBlockCell(block, slot, index), block.level, 0, parts);
 }
 
-MrThermal ThermalAt(uint32_t slot, uint32_t index) {
-    return BlockCellThermal(g_blocks[slot], slot, index);
+// 開いた世界の端の外のセル(外の柱の行 row)を自分と同じレベル level で見立てたもの(CPU の CellViews::Outside。T-0773)
+CvCellView OutsideView(uint32_t row, int32_t level, uint32_t parts) {
+    return MakeCellViewParts(MakeViewTable(), GpuColumnCell(row), level, 0, parts);
 }
 
-// --- 自分のブロックのセルの熱(T-0111)---
+// --- 見立ての写し(T-0111 の形のまま。groupshared に入るのは種類が読む部分だけ)---
+// 伝導の種類が読むのはセル全体の熱(view.thermal。CV_VIEW_THERMAL)だけなので、写しは MrThermal の 4 語
+// (見立て全部は 1 セル約 200 バイトで 512 + 384 セル分は groupshared に入らない)。x 温度・y コンダクタンス・zw 熱容量の上限の下位・上位
 
-uint4 PackThermal(MrThermal thermal) {
-    return uint4(thermal.temperature, thermal.conductance, (uint32_t)thermal.capacityLimit,
-                 (uint32_t)(thermal.capacityLimit >> 32));
+uint4 PackView(CvCellView view) {
+    return uint4(view.thermal.temperature, view.thermal.conductance, (uint32_t)view.thermal.capacityLimit,
+                 (uint32_t)(view.thermal.capacityLimit >> 32));
 }
 
-MrThermal UnpackThermal(uint4 packed) {
-    MrThermal thermal;
-    thermal.temperature = packed.x;
-    thermal.conductance = packed.y;
-    thermal.capacityLimit = FX_U64(packed.w, packed.z);
+CvCellView UnpackView(uint4 packed) {
+    CvCellView view = (CvCellView)0;
+    view.thermal.temperature = packed.x;
+    view.thermal.conductance = packed.y;
+    view.thermal.capacityLimit = FX_U64(packed.w, packed.z);
 
-    return thermal;
+    return view;
 }
 
 // セル index の面 face がブロックの外を向くか
@@ -241,13 +309,24 @@ uint32_t HaloCell(uint32_t entry) {
     return MrCellIndex(u, v, along);
 }
 
-// 刻むセルの熱を gs_thermals に、刻むセルの外を向く面の隣とその熱を gs_halo* に書く(グループの全部のスレッドが呼び、
-// 後で GroupMemoryBarrierWithGroupSync)。外の隣の熱は流れのある隣(同じレベル・粗い)だけ
+// 面の先(CPU の ConductionWorld::Neighbor の前半): 木の隣か、世界の外で開いた端なら MR_NEIGHBOR_EDGE(index = 外の柱の行。T-0773)
+MrFaceNeighbor FindConductNeighbor(uint32_t slot, MrBlock block, uint32_t index, uint32_t face) {
+    const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+    if (neighbor.kind != MR_NEIGHBOR_NONE)
+        return neighbor;
+
+    return WeEdgeNeighbor(GpuWorldEdges(), GpuColumnBaseUp(), GpuColumnRows(), block, index, face);
+}
+
+// 刻むセルの見立てを gs_thermals に、刻むセルの外を向く面の隣とその見立てを gs_halo* に書く(グループの全部のスレッドが呼び、
+// 後で GroupMemoryBarrierWithGroupSync)。外の隣の見立ては流れのある隣(同じレベル・粗い・開いた端の外のセル)だけ。
+// 段の間はセルも木も変わらないので、面ごとに作るのと同じ値
 void CacheBlockFaces(uint32_t slot, MrBlock block, uint32_t thread) {
+    const uint32_t parts = ConductViewParts();
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
         if (MrIsSteppedCell(block, index))
-            gs_thermals[index] = PackThermal(BlockCellThermal(block, slot, index));
+            gs_thermals[index] = PackView(BlockCellView(block, slot, index, parts));
     }
 
     for (uint32_t entry = thread; entry < CONDUCT_HALO_CELLS; entry += CONDUCT_THREADS) {
@@ -256,34 +335,112 @@ void CacheBlockFaces(uint32_t slot, MrBlock block, uint32_t thread) {
             continue;
 
         const uint32_t face = entry / CONDUCT_FACE_CELLS;
-        const MrFaceNeighbor neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+        const MrFaceNeighbor neighbor = FindConductNeighbor(slot, block, index, face);
         gs_haloNeighbors[entry] = uint4(neighbor.kind, neighbor.slot, neighbor.index, neighbor.gap);
         if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_COARSER)
-            gs_haloThermals[entry] = PackThermal(ThermalAt(neighbor.slot, neighbor.index));
+            gs_haloThermals[entry] = PackView(
+                BlockCellView(g_blocks[neighbor.slot], neighbor.slot, neighbor.index, parts));
+        else if (neighbor.kind == MR_NEIGHBOR_EDGE)
+            gs_haloThermals[entry] = PackView(OutsideView(neighbor.index, block.level, parts));
     }
 }
 
-MrThermal CachedThermal(uint32_t index) {
-    return UnpackThermal(gs_thermals[index]);
-}
+// --- 伝導の段の世界(transport_apply.hlsli の World の約束。CPU は multires_conduction.cpp の ConductionWorld)----------------
+// 刻むセル 1 つ(self)ごとに作る。見立ては CacheBlockFaces の写しから読む: 自分の枠のセルは gs_thermals、ブロックの外は自分のセルの
+// 外を向く面の写し(当てる段は面の番号を渡さないので、面の先のセルが合う写しを探す。同じセルなら同じ値)。
+// filters: 流れの回は、凍らせたブロックとの面と、陰解法で解くブロックとの同じレベルの面(こちらのセルが境のセルとして陰解法の系で受ける。
+// T-0178)を流さない。印の回は流す(CPU の印の回の世界は凍らせ・陰解法の印を持たない)。変化は 64bit の atomic の足し算(順によらない)
+struct GpuConductionWorld {
+    uint32_t selfSlot;
+    uint32_t selfIndex;
+    bool filters;
 
-// 刻むセル index の面 face の先(CacheBlockFaces の後。外を向く面は gs_haloNeighbors、中は MrFindFaceNeighbor の中の枝)
-MrFaceNeighbor ConductFaceNeighbor(uint32_t slot, MrBlock block, uint32_t index, uint32_t face) {
-    if (!FaceLeavesBlock(index, face))
-        return MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+    MrFaceNeighbor Neighbor(uint32_t slot, MrBlock block, uint32_t index, uint32_t face) {
+        MrFaceNeighbor neighbor;
+        if (FaceLeavesBlock(index, face)) {
+            const uint4 packed = gs_haloNeighbors[HaloEntry(index, face)];
+            neighbor = MrMakeFaceNeighbor(packed.x, packed.y, packed.z, packed.w);
+        } else {
+            neighbor = MrFindFaceNeighbor(MakeTree(), slot, block, index, face, g_rootLevel);
+        }
 
-    const uint4 packed = gs_haloNeighbors[HaloEntry(index, face)];
+        if (!filters || (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER))
+            return neighbor;
 
-    return MrMakeFaceNeighbor(packed.x, packed.y, packed.z, packed.w);
-}
+        const MrFaceNeighbor none = MrMakeFaceNeighbor(MR_NEIGHBOR_NONE, MR_NO_BLOCK, 0, 0);
+        if (IsFrozenSlot(neighbor.slot))
+            return none;
 
-// 面の先のセルの熱(流れのある隣だけ。同じブロックなら gs_thermals〔同じブロックの隣は刻むセル。覆われたセルは子の側を指す〕、
-// 外なら gs_haloThermals)
-MrThermal NeighborThermal(uint32_t index, uint32_t face, MrFaceNeighbor neighbor) {
-    if (FaceLeavesBlock(index, face))
-        return UnpackThermal(gs_haloThermals[HaloEntry(index, face)]);
+        const bool joinsImplicit = slot < g_worldBlocks && block.kind == MR_BLOCK_REAL;
+        if (neighbor.kind == MR_NEIGHBOR_SAME && joinsImplicit &&
+            InImplicitConduction(neighbor.slot, g_blocks[neighbor.slot]))
+            return none;
 
-    return CachedThermal(neighbor.index);
+        return neighbor;
+    }
+
+    CvCellView View(uint32_t slot, uint32_t index) {
+        if (slot == selfSlot)
+            return UnpackView(gs_thermals[index]);
+
+        uint4 packed = uint4(0, 0, 0, 0);
+        for (uint32_t face = 0; face < MR_FACES; ++face) {
+            const uint32_t entry = HaloEntry(selfIndex, face);
+            const uint4 neighbor = gs_haloNeighbors[entry];
+            if (FaceLeavesBlock(selfIndex, face) && neighbor.x != MR_NEIGHBOR_EDGE && neighbor.y == slot &&
+                neighbor.z == index)
+                packed = gs_haloThermals[entry];
+        }
+
+        return UnpackView(packed);
+    }
+
+    // 開いた世界の端の外のセル(外の柱の行 row。level は自分のレベル = 写しを作った時と同じ)
+    CvCellView Outside(uint32_t row, int32_t level) {
+        uint4 packed = uint4(0, 0, 0, 0);
+        for (uint32_t face = 0; face < MR_FACES; ++face) {
+            const uint32_t entry = HaloEntry(selfIndex, face);
+            const uint4 neighbor = gs_haloNeighbors[entry];
+            if (FaceLeavesBlock(selfIndex, face) && neighbor.x == MR_NEIGHBOR_EDGE && neighbor.z == row)
+                packed = gs_haloThermals[entry];
+        }
+
+        return UnpackView(packed);
+    }
+
+    int32_t Level(uint32_t slot) { return g_blocks[slot].level; }
+    bool HasFraction(uint32_t slot) { return g_blocks[slot].fraction != MR_NO_FRACTION; }
+
+    // 伝導は上限の段を使わない(C/8 の安定の条件で行き過ぎない)・欄を持たない
+    TxLimit Limit(uint32_t slot, uint32_t index) { return TxNoLimit(); }
+    void FollowFields(uint32_t slot, uint32_t index) {}
+
+    // 当てる: 頁のセルの変化に足す(粗い側も印の段で頁に広げてある)
+    void Add(uint32_t slot, uint32_t index, MrEnergyDelta delta) {
+        const MrBlock block = g_blocks[slot];
+        FX_ASSERT(!MrIsUniform(block));
+        AddConductDelta(block.page, index, delta);
+    }
+
+    // 5 帳簿: 開いた端の面の流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
+    // (CPU の ConductionWorld::AddEdge。T-0762 の帳簿の書き方の約束・繰り上げは AddWorldLedgerCarrying)
+    void AddEdge(uint32_t slot, uint32_t index, int64_t outflow) {
+        if (outflow == 0)
+            return;
+
+        const WlSignedEntry entry = WlEnergyEntry(outflow, WL_DIRECTION_OUT);
+        AddWorldLedgerUnits(WlSlot(WL_REASON_WORLD_EDGE, entry.direction), g_blocks[slot].level, WL_COLUMN_ENERGY,
+                            entry.magnitude);
+    }
+};
+
+GpuConductionWorld MakeConductWorld(uint32_t slot, uint32_t index, bool filters) {
+    GpuConductionWorld world;
+    world.selfSlot = slot;
+    world.selfIndex = index;
+    world.filters = filters;
+
+    return world;
 }
 
 // --- 2. 印 --------------------------------------------------------------------------------------
@@ -300,28 +457,25 @@ void MarkCoarseTarget(uint32_t coarseSlot, bool wantsFraction) {
         ConductAppend(coarseSlot);
 }
 
-// セル 1 つの面を調べて印を付ける。流れがあれば true(CPU の CollectCellFaces + MarkCrossSends)
+// セル 1 つの面を調べて印を付ける。流れがあれば true(CPU の MarkCellWants。面の流れは当てる段の TxFaceFlow。
+// 開いた世界の端の面も自分だけが変わる = 同じレベルの面と同じ数え方。T-0773)
 bool MarkCell(uint32_t slot, MrBlock block, uint32_t index) {
-    const MrThermal self = CachedThermal(index);
-    const uint32_t shift = LevelSubcycleShift(block.level);
+    const TxConduction kind = MakeConductionKind();
+    GpuConductionWorld world = MakeConductWorld(slot, index, false);
+    const CvCellView self = world.View(slot, index);
     int64_t sameLevelOutflow = 0;
     bool sends = false;
     for (uint32_t face = 0; face < MR_FACES; ++face) {
-        const MrFaceNeighbor neighbor = ConductFaceNeighbor(slot, block, index, face);
-        if (neighbor.kind == MR_NEIGHBOR_SAME) {
-            sameLevelOutflow += MrSubstepSameLevelFlow(self, NeighborThermal(index, face, neighbor), block.level,
-                                                       shift);
+        const MrFaceNeighbor neighbor = world.Neighbor(slot, block, index, face);
+        if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER &&
+            neighbor.kind != MR_NEIGHBOR_EDGE)
+            continue;
+
+        const int64_t flow = TxFaceFlow(kind, world, self, block.level, neighbor);
+        if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_EDGE) {
+            sameLevelOutflow += flow;
             continue;
         }
-
-        if (neighbor.kind != MR_NEIGHBOR_COARSER)
-            continue;
-
-        const uint32_t coarseShift = LevelSubcycleShift(g_blocks[neighbor.slot].level);
-        const int64_t flow = MrSubstepCrossLevelFlow(self, NeighborThermal(index, face, neighbor), block.level,
-                                                     neighbor.gap, shift, coarseShift);
-        if (flow == 0)
-            continue;
 
         const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, true);
         if (transfer.fineDelta == 0)
@@ -437,52 +591,8 @@ void ConductPrepareBlock(uint32_t slot, uint32_t thread) {
 
 // --- 5. 面の流れ ---------------------------------------------------------------------------------
 
-// セル 1 つの面の流れを変化に足す(自分と、粗い側へ送った先。CPU の AddCellFlows)。凍らせたブロックとの面は流れない
-void AddCellFlows(uint32_t slot, MrBlock block, uint32_t index) {
-    const MrThermal self = CachedThermal(index);
-    const bool joinsImplicit = slot < g_worldBlocks && block.kind == MR_BLOCK_REAL;
-    const uint32_t shift = LevelSubcycleShift(block.level);
-    int64_t own = 0;
-    for (uint32_t face = 0; face < MR_FACES; ++face) {
-        const MrFaceNeighbor neighbor = ConductFaceNeighbor(slot, block, index, face);
-        if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER)
-            continue;
-
-        if (IsFrozenSlot(neighbor.slot))
-            continue;
-
-        // 陰解法で解くブロックとの同じレベルの面は、こちらのセルが境のセルとして陰解法の系で受ける(T-0178。上限で選ばれなかった側。
-        // CPU の CollectCellFaces)
-        if (neighbor.kind == MR_NEIGHBOR_SAME && joinsImplicit &&
-            InImplicitConduction(neighbor.slot, g_blocks[neighbor.slot]))
-            continue;
-
-        const MrThermal other = NeighborThermal(index, face, neighbor);
-        if (neighbor.kind == MR_NEIGHBOR_SAME) {
-            own -= MrSubstepSameLevelFlow(self, other, block.level, shift);
-            continue;
-        }
-
-        const MrBlock coarse = g_blocks[neighbor.slot];
-        const int64_t flow = MrSubstepCrossLevelFlow(self, other, block.level, neighbor.gap, shift,
-                                                     LevelSubcycleShift(coarse.level));
-        if (flow == 0)
-            continue;
-
-        const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, coarse.fraction != MR_NO_FRACTION);
-        if (transfer.fineDelta == 0)
-            continue;
-
-        FX_ASSERT(!MrIsUniform(coarse));
-        own += transfer.fineDelta;
-        AddConductDelta(coarse.page, neighbor.index, transfer.coarseDelta);
-    }
-
-    MrEnergyDelta delta = MrMakeEnergyDelta();
-    delta.whole = own;
-    AddConductDelta(block.page, index, delta);
-}
-
+// 刻むブロックのセルの面の流れを、運ぶ計算の共通の土台の当てる段(common/transport_apply.hlsli の TxFlowCell。T-0766・ADR-0334)で
+// 変化に足す(自分と、粗い側へ送った先。開いた世界の端の面は帳簿の「世界の端」へ。T-0773)。CPU の ComputeConduction と同じ関数
 void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
     const MrBlock block = g_blocks[slot];
     if (!IsConductStepped(slot, block) || !SubstepBegins(block.level) || MrIsUniform(block) || IsFrozenSlot(slot) ||
@@ -491,10 +601,11 @@ void ConductFlowsBlock(uint32_t slot, uint32_t thread) {
 
     CacheBlockFaces(slot, block, thread);
     GroupMemoryBarrierWithGroupSync();
+    const TxConduction kind = MakeConductionKind();
     for (uint32_t k = 0; k < CONDUCT_CELLS_PER_THREAD; ++k) {
         const uint32_t index = thread + (CONDUCT_THREADS * k);
         if (MrIsSteppedCell(block, index))
-            AddCellFlows(slot, block, index);
+            TxFlowCell(kind, MakeConductWorld(slot, index, true), slot, block, index);
     }
 }
 

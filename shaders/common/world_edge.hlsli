@@ -1,6 +1,7 @@
 // world_edge.hlsli — 世界の端(運ぶ計算の共通の土台の段 3。T-0721・ADR-0337 Proposed。設計 20 §1・§2.6・D-514)。
 // HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。世界(World)の面の隣が開いた端を MR_NEIGHBOR_EDGE で返し(WeEdgeNeighbor)、
-// 当てる段(transport_apply.hlsli の TxFlowCell)が外のセル(World::Outside)と流して帳簿へ(World::AddEdge)。GPU の段は後のチケット。
+// 当てる段(transport_apply.hlsli の TxFlowCell)が外のセル(World::Outside)と流して帳簿へ(World::AddEdge)。GPU の伝導の段も同じ
+// (箱と外の柱は表の語 t2。common/multires_table_words.hlsli。T-0773)。
 //
 // 外との境は世界の端だけ(区画の箱は無い)。端は 3 つ(上 = 空・下 = 地の底・横の 4 面)で、作り手が環境の world_edges に
 // open / wall を書く(T-0710。sim::WorldEdges)。

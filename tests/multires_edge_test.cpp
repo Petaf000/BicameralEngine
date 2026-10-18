@@ -11,6 +11,8 @@
 //     仮の世界の気体の区画の層の基準(ProbeGasField::ReferenceCell)とビット単位で同じ。温めた世界の熱が上の端から逃げ、保存量が一定
 //   - 端を替える(SetWorldEdges): 開いた端に接するブロックだけが種になる・同じなら種にしない・外の温度が変わる / wall に戻すと種になる
 //   - 基準の大気の無い世界の open: ベイクの「注意」と、外は真空(柱が空)
+// GPU の表の語(T-0766・T-0773。common/multires_table_words.hlsli): 反応の索引・相の表・世界の端・外の柱を写し、GPU と同じ読む関数で
+// 読み戻すとビット単位で同じ(GPU の伝導の段が端を読む元。端の流れの CPU と GPU のビット一致は gpu_multires_conduction の端の場面)
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -21,6 +23,7 @@
 #include <string_view>
 #include <vector>
 
+#include "common/multires_table_words.hlsli"
 #include "common/world_edge.hlsli"
 #include "common/world_ledger.hlsli"
 #include "core/aliases.h"
@@ -30,6 +33,7 @@
 #include "multires_test_scene.h"
 #include "reaction_test_table.h"
 #include "script/reaction_table_loader.h"
+#include "sim/cell_view.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_world_edges.h"
 #include "sim/probe_gas.h"
@@ -398,6 +402,46 @@ namespace {
                "大気の無い open: 外は真空(柱が空)");
     }
 
+    // GPU の表の語: 写して同じ関数で読み戻す
+    void CheckTableWords(const BakedReactionTable& table) {
+        const auto edges = MakeMultiresWorldEdges(table, ROOT_BOX);
+        Expect(edges.has_value() && !edges->column.empty(), "表の語: 外の柱のある端を作れる");
+        if (!edges)
+            return;
+
+        const std::vector<CvSpeciesPhase> phases = MakeSpeciesPhases(table);
+        const std::vector<uint32_t> words = MakeTableWords(table.ruleIndex, phases, edges->world, edges->columnBaseUp,
+                                                           edges->column);
+        const TwVectorWords read{.words = words};
+
+        // --- 反応の索引・相の表 ---
+        bool same = true;
+        for (uint32_t i = 0; i < table.ruleIndex.size(); ++i)
+            same = same && TwRuleIndex(read, i) == table.ruleIndex[i];
+
+        for (uint32_t id = 0; id < phases.size(); ++id) {
+            const CvSpeciesPhase phase = TwPhase(read, id);
+            same = same && phase.molarVolume == phases[id].molarVolume && phase.molarMass == phases[id].molarMass &&
+                   phase.phase == phases[id].phase;
+        }
+
+        Expect(same, "表の語: 反応の索引と相の表が同じ");
+
+        // --- 世界の端と外の柱 ---
+        const WeWorld world = TwWorldEdges(read);
+        const WeWorld& expected = edges->world;
+        Expect(world.rootLevel == expected.rootLevel && world.lowX == expected.lowX && world.lowY == expected.lowY &&
+                   world.lowZ == expected.lowZ && world.highX == expected.highX && world.highY == expected.highY &&
+                   world.highZ == expected.highZ && world.top == expected.top && world.bottom == expected.bottom &&
+                   world.sides == expected.sides,
+               "表の語: 世界の箱と端の種類が同じ");
+        bool column = TwColumnRows(read) == edges->column.size() && TwColumnBaseUp(read) == edges->columnBaseUp;
+        for (uint32_t row = 0; column && row < edges->column.size(); ++row)
+            column = SameCell(TwColumnCell(read, row), edges->column[row]);
+
+        Expect(column, "表の語: 外の柱が同じ");
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -421,6 +465,7 @@ namespace {
                    "大気のある open: 真空の注意は出ない");
             CheckPackageEdges(open->table);
             CheckReloadSeeds(open->table);
+            CheckTableWords(open->table);
         } else {
             Log(Channel::Sim, Level::Error, "  {}", open.error());
         }
