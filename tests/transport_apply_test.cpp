@@ -5,9 +5,12 @@
 //   1. 上限: 倍率は 1 以下・中身(器の残り)を超えない・両向きで同じ大きさに縮む(順に依存しない・保存)
 //   2. 伝導の種類: 当てる段の 1 面の流れ(TxFaceFlow)が、今の式(MrSubstepSameLevelFlow・MrSubstepCrossLevelFlow)とビット一致
 //      (いろいろな温度・コンダクタンス・熱容量 × レベル × 小刻み × レベルの差)
-//   3. 費用: 多重解像度の CPU の木(鎖の場面)を当てる段で 20 刻み進める時間(docs/perf.md。置き換えの前後は ctest の時間で比べる)
+//   3. 面の並びの当てる段(TxApplyFaceFlow。陰の伝導の流れを当てる形。T-0715): 同じレベルは逆向きに同じ値、違うレベルは
+//      細かい側が送った分 = 粗い側の整数部 + 端数(端数の置き場が無ければ整数の単位の倍数だけ)。保存はビット単位
+//   4. 費用: 多重解像度の CPU の木(鎖の場面)を当てる段で 20 刻み進める時間(docs/perf.md。置き換えの前後は ctest の時間で比べる)
 //   今の MR の伝導とのビット一致(置き換えた形)は、今の試験(multires_conduction・multires_subcycle・multires_activity など)が確かめる。
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -207,7 +210,51 @@ namespace {
         std::printf("伝導の種類: %u 面を今の式と比べた\n", compared);
     }
 
-    // --- 3. 費用 ---
+    // --- 3. 面の並びの当てる段 ---
+
+    // 2 つのセル(枠 0 = 持ち主・枠 1 = 相手)の変化を書き足す世界
+    struct PairWorld {
+        MrEnergyDelta* deltas = nullptr;  // [2]
+        bool otherHasFraction = true;
+
+        [[nodiscard]] bool HasFraction(uint32_t /*slot*/) const { return otherHasFraction; }
+        void Add(uint32_t slot, uint32_t /*index*/, const MrEnergyDelta& delta) const {
+            deltas[slot] = MrAddEnergyDelta(deltas[slot], delta);
+        }
+    };
+
+    void TestFaceList() {
+        Random random;
+        for (uint32_t i = 0; i < 20000; ++i) {
+            const auto magnitude = static_cast<int64_t>(random.Below(uint64_t{1} << (random.Below(40) + 1)));
+            const int64_t flow = random.Below(2) == 0 ? magnitude : -magnitude;
+            const auto gap = static_cast<uint32_t>(random.Below(4));
+            std::array<MrEnergyDelta, 2> deltas = {MrMakeEnergyDelta(), MrMakeEnergyDelta()};
+            const PairWorld world{.deltas = deltas.data(), .otherHasFraction = random.Below(2) == 0};
+            const bool moved = TxApplyFaceFlow(world, 0, 0, 1, 0, gap, flow);
+            if (gap == 0) {
+                EXPECT(deltas[0].whole == -flow && deltas[0].fraction == 0);
+                EXPECT(deltas[1].whole == flow && deltas[1].fraction == 0);
+                EXPECT(moved == (flow != 0));
+                continue;
+            }
+
+            // 細かい側が送った分(細かい単位)= 粗い側が受けた分 × 8^gap(端数の下の桁は 0 = 切り捨てずに全部載る)
+            const uint32_t shift = 3 * gap;
+            const int64_t sent = -deltas[0].whole;
+            const auto coarseInFine = static_cast<int64_t>((static_cast<uint64_t>(deltas[1].whole) << shift) +
+                                                           (deltas[1].fraction >> (64 - shift)));
+            EXPECT(deltas[0].fraction == 0);
+            EXPECT((deltas[1].fraction & ((uint64_t{1} << (64 - shift)) - 1)) == 0);
+            EXPECT(sent == coarseInFine);
+            EXPECT(world.otherHasFraction ? sent == flow : deltas[1].fraction == 0);
+            EXPECT(moved == (sent != 0));
+        }
+
+        std::printf("面の並びの当てる段: 20000 面\n");
+    }
+
+    // --- 4. 費用 ---
     void MeasureCost(const BakedReactionTable& table) {
         constexpr uint64_t TICKS = 20;
         MultiresNest nest = test::MakeChainNest(table, 16);
@@ -232,6 +279,7 @@ int main() {
     TestLimits();
     TestPacket();
     TestConductionKind();
+    TestFaceList();
     MeasureCost(table);
 
     if (failureCount != 0) {

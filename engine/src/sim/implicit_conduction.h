@@ -130,8 +130,13 @@ namespace bicameral::sim {
     ImplicitGrid BuildImplicitGrid(std::vector<ImplicitCell> cells, std::vector<ImplicitFace> faces,
                                    bool galerkin = false, const ImplicitGridLimits& limits = {});
 
-    // 1 刻み進める
+    // 1 刻み進める(SolveImplicitFlows の流れを当てる段 TxApplyFaceFlow で両側に足す)
     ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options);
+
+    // 1 刻み解いて、面ごとの流れ flows(grid.faces の順。細かい側 → 相手が正。安全網の後)を返す。セルには足さない
+    // (足すのは呼ぶ側の当てる段。多重解像度の木は変化の表へ。T-0715)
+    ImplicitCost SolveImplicitFlows(const ImplicitGrid& grid, const ImplicitOptions& options,
+                                    std::vector<int64_t>& flows);
 
     // 温度(mK × 2^16。整数部のエネルギーだけから)と、温度からエネルギー
     int64_t ImplicitTemperature(const ImplicitCell& cell);

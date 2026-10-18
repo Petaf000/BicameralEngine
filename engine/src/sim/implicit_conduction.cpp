@@ -3,7 +3,8 @@
 //   1. 温度 T0 をエネルギーから(mK × 2^16。1 mK より細かい端数も持つので、温度の丸めで反復が止まらない)
 //   2. 近似解 T*: 赤黒の掃き出し(Smooth)/ 木の多重格子の V サイクル(VCycle)。RKL2 は段ごとの面の流れを積算する(Rkl2Flows)
 //   3. 面の流れ F = g (T*_細かい側 − T*_粗い側)。収束していなくて温度が近所の範囲から出るセルは、面を陽解法の流れに戻す(LimitFlows)
-//   4. 流れを両側に足す(ApplyFlows。ADR-0017 の形なので保存はビット単位)
+//   4. 流れを両側に足す(ApplyFlows。運ぶ計算の当てる段 TxApplyFaceFlow〔transport_apply.hlsli。T-0715〕。ADR-0017 の形なので保存はビット単位)。
+//      多重解像度の木(multires_implicit_conduction.cpp)は 3 までの SolveImplicitFlows の流れを、木の変化の表へ同じ当てる段で足す
 // 数の幅(04 R8): 面の係数は 4^k で大きくなる(レベル 20 で 2^40 倍)ので 128bit で持ち、反復は「係数 ÷ 対角」の重み(Q48)だけを使う
 // (割り算は段を作る時に 1 回。T-0110 の注意「1/(C + Σc) を刻みの初めに 1 回」)。重みの積は 128bit の途中の値から戻す。
 // 多重格子の段(BuildImplicitGrid): 段 ℓ の最も細かいレベルの節を親のセル(レベル − 1、座標 ÷ 2)へ縮約する = 木の覆われた親のセル。
@@ -20,6 +21,7 @@
 
 #include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
+#include "common/transport_apply.hlsli"
 
 using namespace bicameral::fx;
 using namespace bicameral::multires;
@@ -401,24 +403,27 @@ namespace bicameral::sim {
             return flows;
         }
 
-        // 流れを両側に(同じレベル: 逆向きに同じ値 / 違うレベル: 粗い側は整数部 + 端数。MrSplitCrossFlow)
+        // 系のセルを当てる段の世界にしたもの(transport_apply.hlsli の Add・HasFraction。枠 = セルの番号・添字は使わない。T-0715)
+        struct ImplicitGridWorld {
+            ImplicitGrid* grid = nullptr;
+
+            [[nodiscard]] bool HasFraction(uint32_t cell) const { return grid->cells[cell].coarseFraction; }
+
+            void Add(uint32_t cell, uint32_t /*index*/, const MrEnergyDelta& delta) const {
+                ImplicitCell& target = grid->cells[cell];
+                const MrEnergyDelta sum = MrAddEnergyDelta({.whole = target.energy, .fraction = target.fraction},
+                                                           delta);
+                target.energy = sum.whole;
+                target.fraction = sum.fraction;
+            }
+        };
+
+        // 流れを両側に(同じレベル: 逆向きに同じ値 / 違うレベル: 粗い側は整数部 + 端数。当てる段の TxApplyFaceFlow)
         void ApplyFlows(ImplicitGrid& grid, const std::vector<int64_t>& flows) {
+            const ImplicitGridWorld world{.grid = &grid};
             for (size_t f = 0; f < grid.faces.size(); ++f) {
                 const ImplicitFace& face = grid.faces[f];
-                ImplicitCell& fine = grid.cells[face.fine];
-                ImplicitCell& coarse = grid.cells[face.coarse];
-                if (face.gap == 0) {
-                    fine.energy -= flows[f];
-                    coarse.energy += flows[f];
-                    continue;
-                }
-
-                const MrCrossTransfer transfer = MrSplitCrossFlow(flows[f], face.gap, coarse.coarseFraction);
-                const MrEnergyDelta sum = MrAddEnergyDelta({.whole = coarse.energy, .fraction = coarse.fraction},
-                                                           transfer.coarseDelta);
-                fine.energy += transfer.fineDelta;
-                coarse.energy = sum.whole;
-                coarse.fraction = sum.fraction;
+                TxApplyFaceFlow(world, face.fine, 0, face.coarse, 0, face.gap, flows[f]);
             }
         }
 
@@ -709,13 +714,13 @@ namespace bicameral::sim {
         return grid;
     }
 
-    ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options) {
+    ImplicitCost SolveImplicitFlows(const ImplicitGrid& grid, const ImplicitOptions& options,
+                                    std::vector<int64_t>& flows) {
         ImplicitCost cost;
         const std::vector<int64_t> start = Temperatures(grid);
         if (options.method == ImplicitMethod::Rkl2) {
-            std::vector<int64_t> flows = Rkl2Flows(grid, start, cost);
+            flows = Rkl2Flows(grid, start, cost);
             LimitFlows(grid, start, options.limitSlackMillikelvin, flows, cost);
-            ApplyFlows(grid, flows);
 
             return cost;
         }
@@ -739,10 +744,17 @@ namespace bicameral::sim {
             }
         }
 
-        std::vector<int64_t> flows = Flows(grid, solution);
+        flows = Flows(grid, solution);
         LimitFlows(grid, start, options.limitSlackMillikelvin, flows, cost);
-        ApplyFlows(grid, flows);
         cost.passes += 2;
+
+        return cost;
+    }
+
+    ImplicitCost StepImplicit(ImplicitGrid& grid, const ImplicitOptions& options) {
+        std::vector<int64_t> flows;
+        const ImplicitCost cost = SolveImplicitFlows(grid, options, flows);
+        ApplyFlows(grid, flows);
 
         return cost;
     }

@@ -108,10 +108,7 @@ namespace bicameral::sim {
 
             // 当てる: 頁のセルの変化の表に書き足す(粗い側も頁に広げてある。MarkConductionWants の印)
             void Add(uint32_t slot, uint32_t index, const MrEnergyDelta& delta) const {
-                const MrBlock& block = nest->blocks[slot];
-                FX_ASSERT(!MrIsUniform(block));
-                MrEnergyDelta& entry = deltas[nest_detail::PageCellAddress(*nest, block.page, index)];
-                entry = MrAddEnergyDelta(entry, delta);
+                nest_detail::AddConductionDelta(*nest, deltas, slot, index, delta);
             }
 
             // 5 帳簿: 開いた端の面の流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
@@ -141,12 +138,38 @@ namespace bicameral::sim {
             return x == 0 || x == LAST || y == 0 || y == LAST || z == 0 || z == LAST;
         }
 
-        // セル 1 つの面の流れを調べ、粗い側へ送る面を印にする(送るなら相手も変わるので一様なら頁に広げる。端数が要るなら相手に印)。
-        // 自分が変わるなら true(同じレベルの面の流れの和が 0 でないか、粗い側へ送る)。流れは端数の枠があるとした場合
+        // 面の先が自分のブロックの外か(ブロックの中の面の隣はいつも同じレベル。粗い隣は外にしかない。MrFindFaceNeighbor)
+        bool LeavesBlock(uint32_t index, uint32_t face) {
+            constexpr uint32_t LAST = MR_BLOCK_EDGE - 1;
+            const uint32_t axis = face >> 1;
+            const uint32_t coordinate = axis == 0 ? MrCellX(index) : (axis == 1 ? MrCellY(index) : MrCellZ(index));
+
+            return (face & 1u) != 0 ? coordinate == LAST : coordinate == 0;
+        }
+
+        // 粗い側へ送る面 1 つの印(送るなら相手も変わるので一様なら頁に広げる。端数が要るなら相手に印)。送るなら true。
+        // 流れは端数の枠があるとした場合
+        bool MarkCoarseSend(MultiresNest& nest, int64_t flow, const MrFaceNeighbor& neighbor,
+                            std::span<uint8_t> wantsFraction) {
+            const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, true);
+            if (transfer.fineDelta == 0)
+                return false;
+
+            if (nest.blocks[neighbor.slot].page == MR_NO_PAGE)
+                nest.blocks[neighbor.slot].page = MR_PAGE_WANTED;
+
+            if (transfer.coarseDelta.fraction != 0)
+                wantsFraction[neighbor.slot] = 1;
+
+            return true;
+        }
+
+        // 頁の無い(一様な)ブロックのセル 1 つの面の流れを全部調べ、粗い側へ送る面を印にする。
+        // 自分が変わるなら true(同じレベルの面の流れの和が 0 でないか、粗い側へ送る)
         bool MarkCellWants(MultiresNest& nest, const TxConduction& kind, const ConductionWorld& world, uint32_t slot,
                            uint32_t index, std::span<uint8_t> wantsFraction) {
             const MrBlock block = nest.blocks[slot];
-            const CvCellView& self = world.View(slot, index);
+            const TxSelfSide side = TxMakeSelfSide(kind, world.View(slot, index), block.level);
             int64_t sameLevelOutflow = 0;
             bool sends = false;
             for (uint32_t face = 0; face < MR_FACES; ++face) {
@@ -156,43 +179,65 @@ namespace bicameral::sim {
                     continue;
 
                 // 開いた世界の端の面も自分だけが変わる(同じレベルの面と同じ数え方。T-0721)
-                const int64_t flow = TxFaceFlow(kind, world, self, block.level, neighbor);
+                const int64_t flow = TxSideFaceFlow(kind, world, side, neighbor);
                 if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_EDGE) {
                     sameLevelOutflow += flow;
                     continue;
                 }
 
-                const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, true);
-                if (transfer.fineDelta == 0)
-                    continue;
-
-                sends = true;
-                if (nest.blocks[neighbor.slot].page == MR_NO_PAGE)
-                    nest.blocks[neighbor.slot].page = MR_PAGE_WANTED;
-
-                if (transfer.coarseDelta.fraction != 0)
-                    wantsFraction[neighbor.slot] = 1;
+                const bool sent = MarkCoarseSend(nest, flow, neighbor, wantsFraction);
+                sends = sends || sent;
             }
 
             return sends || sameLevelOutflow != 0;
         }
 
-        // 刻むブロック 1 つの面の流れを調べ、印を付ける。一様で流れがあれば自分も頁に広げる
+        // 頁のあるブロックのセル 1 つ: ブロックの外へ出る面のうち粗い隣の面だけを流して印にする。頁のあるブロックは自分が変わるかを
+        // 数えなくてよい(頁はもうある)ので、同じレベルの面・世界の端の面は流さない(同じ印を、面の約 1/8 の手間で。T-0768)
+        void MarkCellCoarseSends(MultiresNest& nest, const TxConduction& kind, const ConductionWorld& world,
+                                 uint32_t slot, uint32_t index, std::span<uint8_t> wantsFraction) {
+            const MrBlock block = nest.blocks[slot];
+            TxSelfSide side{};
+            bool sideMade = false;
+            for (uint32_t face = 0; face < MR_FACES; ++face) {
+                if (!LeavesBlock(index, face))
+                    continue;
+
+                const MrFaceNeighbor neighbor = world.Neighbor(slot, block, index, face);
+                if (neighbor.kind != MR_NEIGHBOR_COARSER)
+                    continue;
+
+                if (!sideMade) {
+                    side = TxMakeSelfSide(kind, world.View(slot, index), block.level);
+                    sideMade = true;
+                }
+
+                MarkCoarseSend(nest, TxSideFaceFlow(kind, world, side, neighbor), neighbor, wantsFraction);
+            }
+        }
+
+        // 刻むブロック 1 つの面の流れを調べ、印を付ける。頁が無くて(一様で)流れがあれば自分も頁に広げる。
+        // 調べるのは面に接するセルだけ(一様なブロックの中のセルどうしは同じ値・粗い隣はブロックの外にしかない)
         void MarkBlockWants(MultiresNest& nest, CellViews& views, uint32_t slot, std::span<uint8_t> wantsFraction,
                             const MultiresStepOptions& options) {
             const TxConduction kind = MakeConductionKind(options);
             const ConductionWorld world{.nest = &nest, .views = &views};
-            const bool uniform = MrIsUniform(nest.blocks[slot]);
+            const bool needsPage = nest.blocks[slot].page == MR_NO_PAGE;
             bool flows = false;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrIsSteppedCell(nest.blocks[slot], index) || (uniform && !OnBlockSurface(index)))
+                if (!MrIsSteppedCell(nest.blocks[slot], index) || !OnBlockSurface(index))
                     continue;
+
+                if (!needsPage) {
+                    MarkCellCoarseSends(nest, kind, world, slot, index, wantsFraction);
+                    continue;
+                }
 
                 const bool changes = MarkCellWants(nest, kind, world, slot, index, wantsFraction);
                 flows = flows || changes;
             }
 
-            if (flows && nest.blocks[slot].page == MR_NO_PAGE)
+            if (flows)
                 nest.blocks[slot].page = MR_PAGE_WANTED;
         }
 
@@ -275,37 +320,46 @@ namespace bicameral::sim {
 
     namespace nest_detail {
 
-        CellViews::CellViews(const MultiresNest& nest, const ReactionTableView& view,
-                             std::span<const CvSpeciesPhase> phases, uint32_t parts)
-            : m_nest(&nest),
-              m_table{.reaction = view, .phases = phases},
-              m_parts(parts),
-              m_values(nest.blocks.size()),
-              m_known(nest.blocks.size()) {}
+        CellViews::CellViews(MultiresNest& nest, const ReactionTableView& view, std::span<const CvSpeciesPhase> phases,
+                             uint32_t parts)
+            : m_nest(&nest), m_table{.reaction = view, .phases = phases}, m_parts(parts), m_pages(nest.blocks.size()) {
+            // 取っておきは木の写しどうしで共有しない(写した木は自分の取っておきを作る)
+            if (!nest.conductionViewPool || nest.conductionViewPool.use_count() != 1)
+                nest.conductionViewPool = std::make_shared<CellViewPool>();
 
-        const CvCellView& CellViews::View(uint32_t slot, uint32_t index) {
+            m_pool = nest.conductionViewPool.get();
+        }
+
+        CellViews::~CellViews() {
+            for (std::unique_ptr<CellViewPage>& page : m_pages) {
+                if (page)
+                    m_pool->free.push_back(std::move(page));
+            }
+        }
+
+        void CellViews::Build(uint32_t slot, uint32_t index, uint32_t position) {
+            std::unique_ptr<CellViewPage>& page = m_pages[slot];
+            if (!page) {
+                // 前の刻みの塊を使い回す(無ければ取る。0 で埋めない = 作ったかは known。T-0767・T-0768)
+                if (m_pool->free.empty())
+                    page = std::make_unique_for_overwrite<CellViewPage>();
+                else {
+                    page = std::move(m_pool->free.back());
+                    m_pool->free.pop_back();
+                }
+
+                page->known.fill(0);
+            }
+
+            // 溢れを使う世界は溢れの成分も入れる(T-0187)。伝導は圧力を読まないので基準の圧力は 0。
+            // 作るのは読む種類の部分だけ(m_parts。伝導はセル全体の熱だけ。T-0767)
             const MrBlock& block = m_nest->blocks[slot];
-            const size_t position = MrIsUniform(block) ? MR_BLOCK_CELLS : index;
-            std::unique_ptr<CvCellView[]>& values = m_values[slot];
-            std::vector<uint8_t>& known = m_known[slot];
-            if (!values) {
-                // 0 で埋めない(作ったかは known。1 枠 約 100 KiB を刻みごとに埋めていた。T-0767)
-                values = std::make_unique_for_overwrite<CvCellView[]>(MR_BLOCK_CELLS + 1);
-                known.assign(MR_BLOCK_CELLS + 1, 0);
-            }
-
-            if (known[position] == 0) {
-                // 溢れを使う世界は溢れの成分も入れる(T-0187)。伝導は圧力を読まないので基準の圧力は 0。
-                // 作るのは読む種類の部分だけ(m_parts。伝導はセル全体の熱だけ。T-0767)
-                values[position] = m_nest->wideCells
-                                       ? MakeCellViewParts(m_table, LoadWideNestCell(*m_nest, slot, index), block.level,
-                                                           0, m_parts)
-                                       : MakeCellViewParts(m_table, LoadNestCell(*m_nest, slot, index), block.level, 0,
-                                                           m_parts);
-                known[position] = 1;
-            }
-
-            return values[position];
+            page->views[position] = m_nest->wideCells
+                                        ? MakeCellViewParts(m_table, LoadWideNestCell(*m_nest, slot, index),
+                                                            block.level, 0, m_parts)
+                                        : MakeCellViewParts(m_table, LoadNestCell(*m_nest, slot, index), block.level, 0,
+                                                            m_parts);
+            page->known[position] = 1;
         }
 
         CvCellView CellViews::Outside(uint32_t row, int32_t level) const {
@@ -313,7 +367,8 @@ namespace bicameral::sim {
         }
 
         void CellViews::Invalidate(uint32_t slot) {
-            std::ranges::fill(m_known[slot], uint8_t{0});
+            if (m_pages[slot])
+                m_pages[slot]->known.fill(0);
         }
 
         std::vector<uint8_t> MarkConductionWants(MultiresNest& nest, CellViews& views, std::span<const uint8_t> stepped,

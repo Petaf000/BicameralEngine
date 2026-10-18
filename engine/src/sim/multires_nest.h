@@ -27,6 +27,10 @@
 
 namespace bicameral::sim {
 
+    namespace nest_detail {
+        struct CellViewPool;  // 伝導の見立ての置き場の取っておき(multires_nest_internal.h)
+    }
+
     // 細かくする先の点(pointLevel のセルの単位の世界の座標)
     struct MultiresPoint {
         int64_t x = 0;
@@ -136,6 +140,11 @@ namespace bicameral::sim {
         bool captureImplicitNest = false;
         std::shared_ptr<const MultiresNest> implicitNest;
         std::vector<uint8_t> implicitFrozen;
+
+        // --- 伝導の見立ての置き場の取っておき(T-0768。状態に入らない。multires_nest_internal.h の CellViews が借りて返す)---
+        // 枠ごとの見立ての塊(約 100 KiB)を刻みをまたいで使い回す(刻みごとに取り直すと、OS がページを用意し直す手間が伝導の時間の
+        // 約 1 割を占めた)。持つのは 1 刻みに使った塊の数まで。写した木とは共有しない(使う時に自分の取っておきを作る)
+        std::shared_ptr<nest_detail::CellViewPool> conductionViewPool;
     };
 
     // 細かい所の熱の陰解法の系の大きさの上限(T-0178。GPU では VRAM に先に取るバッファの大きさ = GpuMultiresImplicitLimits)。
