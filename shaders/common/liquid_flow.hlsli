@@ -207,9 +207,17 @@ FX_FN uint64_t LqWetHeight(LqCellView view) {
 // 横の面を押す力 = 両側の「圧力 × 濡れた高さの割合」の差(T-0757・ADR-0327)。
 // 薄い層(満ち具合 φ)では φ² × 満ちた質量 の差になり、位置のエネルギー Σ 満ちた質量 × φ²(底に溜まった水の重心)の勾配と
 // 一致する(浅い水の静水圧 ρ g h² ÷ 2)。満ちたセルどうしは今までの圧力の差と同じ。縦の面は割合を掛けない(床と天井は全部が濡れる)
+FX_FN int64_t LqWetPressure(LqCellView view, int64_t pressure) {
+    if (view.room == 0)
+        return 0;
+
+    const uint64_t filled = view.volume < view.room ? view.volume : view.room;
+
+    return LqScaleSigned(pressure, filled, view.room);
+}
+
 FX_FN int64_t LqSidePush(LqCellView a, int64_t pressureA, LqCellView b, int64_t pressureB) {
-    return LqScaleSigned(pressureA, LqWetHeight(a), LQ_OPEN_FULL) -
-           LqScaleSigned(pressureB, LqWetHeight(b), LQ_OPEN_FULL);
+    return LqWetPressure(a, pressureA) - LqWetPressure(b, pressureB);
 }
 
 // 面の力の結果。外から入った運動量の内訳(格子の軸の向き。和が帳簿の増え)
