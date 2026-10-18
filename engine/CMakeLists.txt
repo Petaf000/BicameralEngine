@@ -90,6 +90,7 @@ target_link_libraries(bicameral_gas PUBLIC bicameral_fixed)
 # --- gas_projection: 気体の圧力を刻みの中で解く投影の CPU 模型(T-0503 研究・07 §2.6)。熱の陰解法の多重格子(multires)を流用する。浮動小数点は禁止 ---
 add_library(bicameral_gas_projection STATIC
   src/sim/gas_projection.cpp
+  src/sim/gas_fastest_check.cpp
 )
 target_include_directories(bicameral_gas_projection PUBLIC src)
 target_link_libraries(bicameral_gas_projection PUBLIC bicameral_gas bicameral_multires)

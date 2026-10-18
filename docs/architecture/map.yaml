@@ -326,6 +326,9 @@ views:
       - { id: gasprojection, group: simlib, label: "StepGasProjection<br/>気体の圧力を刻みの中で解く投影の模型(研究)<br/>陰的な音 = 熱の陰解法と同じ形の式を多重格子で",
           code: "engine/src/sim/gas_projection.cpp::StepGasProjection", ticket: T-0503, doc: docs/design/07-transport.md,
           note: "式を作る・当てるのは gas_reference の部品(BeginGasPressure / FinishGasPressure)。圧力が近似でも保存はビット単位。音速 340 m/s〜最速で V サイクル 1〜3 回/刻み。外側の反復(T-0530・ADR-0234): 仮に当てた状態の食い違いを右辺に足して解き直し、強い爆発も同じ刻みで釣り合う(上限 4)。07 §2.6" }
+      - { id: gasfastestcheck, group: simlib, label: "FindGasSmallOpenJoints<br/>最速 × 小さい空きの検査(T-0788・D-519)<br/>小さい空きだけでつながった気体の部分の組 → 警告",
+          code: "engine/src/sim/gas_fastest_check.cpp::FindGasSmallOpenJoints", ticket: T-0788, doc: docs/design/07-transport.md,
+          note: "最速の投影は孔のセルに 1 刻みで中身の何倍もを通して壊れる(ADR-0346)。空き 1/2 未満を小さいとし(T-0788 の板の測り)、大きいセルの部分と開いた境界の外を互いに素な集合でまとめ、2 つ以上の部分に接する小さいセルのまとまりを組にする。値は変えない(D-487 ②)。ProbeGasField が置いた時(CheckFastestOpenings)と空きの変わった刻みに呼ぶ" }
       - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
           code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordSolve", ticket: T-0531, doc: docs/design/07-transport.md,
           note: "止める判定はセルごとの閾値 ⌈(許容差 + 1) 2^48 ÷ D⌉(GasPressureThresholds)で CPU と整数で同じ。gpu_gas_projection_test が CPU の模型の解きを GPU で解き直してビット一致を確かめる。式を作る・当てる・外側の反復の GPU 版は T-0531 の残り" }
@@ -595,6 +598,7 @@ views:
       - [probereference, probegas, "伝導と反応の前"]
       - [probegas, gasreference, "陽解法"]
       - [probegas, gasprojection, "投影"]
+      - [probegas, gasfastestcheck, "最速の時の警告"]
       - [probesimgas, probegas, "毎刻みビット一致"]
       - [probesimliquid, probeliquid, "毎刻みビット一致"]
       - [probereference, probeliquid, "気体の後"]

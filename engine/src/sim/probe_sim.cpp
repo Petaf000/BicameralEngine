@@ -1597,6 +1597,10 @@ namespace bicameral::sim {
             std::vector<uint32_t> gasChanged;
             m_gasReport = m_gas->Step(*m_table, std::span(m_cells).subspan(currentBase, PROBE_CELL_COUNT), tick,
                                       gasChanged);
+            // 最速 × 小さい空き(T-0788・D-519): 新しく見つかった組を作り手へ警告する(値はそのまま流す。D-487 ②)
+            for (const std::string& warning : m_gasReport.warnings)
+                Log(Channel::Sim, Level::Warning, "刻み {}: {}", tick, warning);
+
             for (const uint32_t index : gasChanged) {
                 m_caches[currentBase + index] = ProbeMakeCache(table, m_cells[currentBase + index]);
                 const uint32_t block = BlockOfCellIndex(index);
