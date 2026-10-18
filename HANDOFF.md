@@ -1,20 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-17(本体の作業役・③' 段 0〜4 のマージの確かめと記録)/ t-0712〜t-0721 の 11 本のマージを release で確かめ、D-516(T-0723 の研究の答え)・Q114〜Q118 を記録
+最終更新: 2026-10-18(本体の作業役・T-0767・T-0772・T-0770・T-0759・T-0758 のマージの確かめと記録)/ 5 本を 1 本ずつ release で確かめ、ユーザーの決定 D-518(上の軸は y)を WE_UP_AXIS に入れ、Q120〜Q123・T-0775〜T-0777 を記録
 
 ## 状態(3 行以内)
-- main = d2a10a2(段 0 の記録)+ 司令塔のマージ 11 本(t-0712・t-0713・t-0711・t-0716・t-0710・t-0762・t-0719・t-0714・t-0723・t-0717・t-0721)+ この記録。release で確かめた(下の「この仕事でしたこと」)。
-- **③' 運ぶ計算の共通の土台(D-509)**: 段 0〜1・段 2 ①②・段 3 ①②③・段 4 ① と T-0757(浅い池の不具合・D-517)は済み。作業中 wt3 T-0772・wt5 T-0767・wt6 T-0770。
-- **2026-10-17 ユーザーが T-0723 の問いに答えた(D-516)**: 気体にも静まる性質 + 静まりきらない所は粗くして計器で見る + 静止の丸め。作るのは T-0758(T-0720 の後)。「続き」は司令塔として並走(COMMANDER.md)。
+- main = 59ef841 + マージ 5 本(t-0767・t-0772・t-0770・t-0759・t-0758)+ D-518 の 1 行(db98f9e)+ この記録。release で確かめた(下の「この仕事でしたこと」)。
+- **③' 運ぶ計算の共通の土台(D-509)**: 段 0〜1・段 2 ①②・段 3 ①②③・段 4 ①・T-0757・T-0767・T-0772・T-0770/T-0769・T-0759・T-0758(芯と丸め。GPU と既定値は T-0775)は済み。作業中なし。
+- **2026-10-18 ユーザーの決定 D-518: 場面・パッケージの座標の「上」は y**(WE_UP_AXIS = 1)。T-0764 の気体の半分は済み・液体は T-0774。「続き」は司令塔として並走(COMMANDER.md)。
 
-## この仕事でしたこと(2026-10-17・③' 段 0〜4 のマージの確かめと記録)
-- 確かめ(release・RTX 3070 Ti。組み合わせの試験): ビルド警告 0 / CPU 82 本(^[a-fhj-vx-z] 76・^gas 3・^w[eo] 3)・GPU 71 本(gpu_probe_gas/liquid と warp 4・gpu_gas 系 6・gpu_lab_box/gpu_reaction 系 8・gpu_multires の 1 語の組 10・2 語の組〔near_fold・subcycle_stress・wide_* 6〕8・陰解法の HW 16・gpu_probe_ph 4・gpu_probe_[st][ir] 6・gpu_probe_[bfpr][eilr] 9)・窓 46 本(9 組)・image 5 本・archmap --check。全部通った(直したものは無い)。GPU の待ち(gpuwait)で 1 巡 約 2 時間 20 分。
-- マージ: **t-0757**(T-0757 浅い池の揺れが育つ不具合。liquid_flow.hlsli の横の面の力・ADR-0327・T-0759 を分けた)。自動で合わさった。確かめ: release ビルド警告 0・probe_liquid・probe_phase(_porous_stone)・cell_volume・rest_return・gpu_probe_liquid(_warp)・archmap --check が通った。ADR-0327 は一旦の決定として Accepted(D-517)。
-- マージ: **t-0720**(T-0720 MR の 1 段で気体。仮の世界と 6 場面でビット一致。T-0763〜T-0765 を分けた)。確かめ: release ビルド警告 0・multires_gas・multires_liquid・probe_gas・probe_phase(_porous_stone)・gas_reference・rest_return・gpu_probe_gas・archmap --check が通った(multires_gas 約 8 分・probe_gas 約 13 分)。
-- 決定: **D-516**(T-0723 の研究の答え。案 A + C + 静止の丸め)・**D-517**(T-0757。液体の横の面は触れる高さだけ押す。ADR-0327 を一旦の決定として Accepted)。ADR-0326 の「未確認: 活性」と T-0723 のチケットに答えを書いた。
-- 文書: ROADMAP ③' の行(済み 11 本 + T-0762・足した行 T-0757・T-0758・T-0760・T-0761・T-0766・T-0767・T-0769・T-0770・T-0772・T-0773・作業中の印)・QUESTIONS Q114〜Q118(ADR-0329・0331・0333・0334・0337 の仮を作り手から見た違いで)・NEXT・COMMANDER の番号(次は T-0774・ADR-0338・D-518・Q120)。QUESTIONS に Q119(縦の軸 y / z。ユーザーに聞いている)。
+## この仕事でしたこと(2026-10-18・5 本のマージの確かめと記録)
+- マージ(1 本ずつ release ビルド警告 0 + 試験): **t-0767**(見立ての費用。docs/perf.md の行が t-0720 の行と重なった → 両方の行を残した)→ ^multires 16 本・cell_view・transport_apply・cell_volume。 **t-0772**(世界の端を環境から。自動)→ ^multires_ 12 本・environment_package・world_atmosphere・world_layout。 **t-0770**(液体を当てる段へ + T-0769 の帳簿。自動。transport_apply.hlsli・multires_conduction.cpp を t-0767 と両方触ったが、t-0767 の参照渡し〔FX_IN〕と t-0770 の分数の倍率が別の所なので両方残ったのを読んで確かめた)→ ^multires_・transport_apply・cell_view・probe_liquid・lab_box・gpu_lab_box(_warp)。 **t-0759**(沈んだ石の下の渦。自動)→ rest_return・probe_liquid・probe_phase(_porous_stone)・cell_volume・cell_view・multires_liquid・transport_apply・lab_box・gpu_probe_liquid(_warp)。t-0770 側に固定のハッシュは無く(multires_liquid は仮の世界と同じ実行の中で比べる)、取り直しは要らなかった。 **t-0758**(気体の粘り + 静止の丸め。tests/rest_return_test.cpp の場面の列で t-0759 の「積んだ水に石」と衝突 → t-0759 の場面を 10 番、t-0758 の気体の 3 場面を 11〜13 番に並べ、粘りの検査の添字を 10・11 → 11・12 に直した)→ reaction_package・environment_package・standard_packages・probe_gas・probe_liquid・rest_return・multires_liquid・multires_gas・gas_reference。
+- D-518: world_edge.hlsli の WE_UP_AXIS = 1(y)+ コメントと map.yaml の注(db98f9e)。
+- 全部入った状態: release ビルド警告 0・archmap --check OK・試験の和集合 CPU 28 本(^multires の 16 本・cell_view・transport_apply・cell_volume・environment_package・world_atmosphere・world_layout・probe_liquid・lab_box・rest_return・probe_phase(_porous_stone)・reaction_package・standard_packages・probe_gas・gas_reference)+ GPU 3 本(gpu_probe_liquid・gpu_probe_gas・gpu_lab_box)が全部通った(-Filter は「^(a|b|...)$」の形で 1 本に書けた。RTX 3070 Ti)。上の軸 y でも multires_gas・multires_edge は写し WeAxisUpLast でそのまま通った。
+- 文書: DECISIONS D-518 / QUESTIONS Q119 を D-518 へ移し Q120〜Q123(ADR-0328・0332・0335・0338 ②③)/ ADR-0338 ① を y で確定 / ADR-0331 に「欄は 22 本」の注 / ROADMAP ③'(T-0767・T-0772・T-0770・T-0769・T-0759・T-0758・T-0764 を Done、T-0768・T-0771・T-0774〜T-0777 の行)/ チケット T-0775〜T-0777(T-0758 の分けたもの)/ NEXT / COMMANDER(次は T-0778・ADR-0339・D-519・Q124)。
 
-## 前の仕事(2026-10-17・T-0709。③' 段 0 の記録)
+## 前の仕事(2026-10-17)
+- 2026-10-17 ③' 段 0〜4 のマージの確かめと記録(t-0712〜t-0721 の 11 本 + t-0757・t-0720。D-516・D-517・Q114〜Q119)。詳しい節は 59ef841 の HANDOFF.md。
 - ユーザーの決定 D-509〜D-515・ADR-0326・docs/design/20・ROADMAP ③'(段 0〜9)を記録し、t-0414b(T-0697)・t-0622(T-0622)を main へ。t-0689・t-0668・t-0686 は捨てた(ブランチは残す)。詳しい節は d2a10a2 の HANDOFF.md。
 - 第 9 巡の終わり(d105aa6): 第 9 巡の続き(T-0647・T-0653・T-0654・T-0623・T-0667・T-0676・T-0671・T-0672)のマージを release で確かめ、D-508 と止めたブランチ 5 本を記録。詳しい節は d105aa6 の HANDOFF.md。
 - 第 9 巡の前半: T-0613 液体の GPU 版 / T-0631 気体の市松の根っこ(音速の頭打ち 約 372 K)/ T-0646・T-0656 流れの欄は物質に付く / T-0616 固体・液体に密度(D-505)/
@@ -64,6 +64,7 @@
 - (前から)取り合いの丸めの残る偏り・「一様」はビット単位・頁の不足は「刻まない」だけ・反応の核のセルが変わらない種・観察の影の親も粗くなる・活性の固定費・PIX・セーブ・AMD は未確認/未着手。
 
 ## このチャットで決めたこと(ADR にしたなら番号)
+- 2026-10-18 5 本のマージの記録: ユーザーの決定 D-518(上の軸は y)。本体の作業役が決めた細部: rest_return の場面の並び(t-0759 → t-0758)・Q120〜Q123 の問いの立て方・T-0775〜T-0777 の番号。
 - 2026-10-17 ③' 段 0〜4 のマージの記録: ユーザーの決定 D-516(T-0723)。本体の作業役が決めた細部: Q114〜Q118 の問いの立て方(ADR ごとに 1 問)・ROADMAP の新しい行の置き場所(分けた元の行の後。T-0758 は T-0723 の後で「T-0720 の後」の印)。
 - 2026-10-17 T-0709: ユーザーの決定 D-509〜D-515(ADR-0326)。本体の作業役が決めた細部: 段 0〜9 のチケット番号の割り振り(T-0709〜T-0756。設計 §6 の表どおり。段 9 は 9 本に分けた)・公開側の例 5 の物質名(drift_mist・seep_stone・Xa)。
 - 2026-10-17 第 9 巡の終わり: ユーザーの決定 D-508(T-0691 = 案 C + A)。ユーザーの指示で実装を止め、運ぶ計算の共通の土台を設計中。本体の作業役が決めた細部は無い(記録だけ)。
@@ -76,9 +77,9 @@
   (この節の前の版は aa3e55c の HANDOFF.md)。
 
 ## 次にやること
-NEXT.md の先頭(**③' 運ぶ計算の共通の土台**: 作業中の 3 本〔T-0772・T-0767・T-0770〕のマージ → T-0715・T-0718・T-0769・T-0766・T-0773・T-0759・T-0763・T-0765・T-0764(Q119 の後)→ T-0758(D-516)・T-0722 → T-0724 → 段 5 の最初の縦切り)。
+NEXT.md の先頭(**③' 運ぶ計算の共通の土台**: T-0715・T-0718・T-0766・T-0773・T-0763・T-0765・T-0774・T-0771・T-0768・T-0776・T-0777・T-0775 → T-0722 → T-0724 → 段 5 の縦切り)。
 ③ の残り(T-0531・T-0625・T-0539〜T-0541・T-0537・T-0504・T-0533)は土台の段の空きで。⑤ の場面は段 5 の後。
-判断待ちは QUESTIONS の Q119(縦の軸)・Q114〜Q118(③' の仮)・Q113(T-0622 の仮)・Q110(T-0722 の後に見直す)・Q105〜Q108・Q93・Q95・Q88・Q89・Q81〜Q83・Q85・Q75・Q76・Q78 と、聞いた Q64・Q65・Q67〜Q69・Q71・Q73・Q74。
+判断待ちは QUESTIONS の Q120〜Q123(2026-10-18 の 5 本の仮)・Q114〜Q118(③' の仮)・Q113(T-0622 の仮)・Q110(T-0722 の後に見直す)・Q105〜Q108・Q93・Q95・Q88・Q89・Q81〜Q83・Q85・Q75・Q76・Q78 と、聞いた Q64・Q65・Q67〜Q69・Q71・Q73・Q74。
 エンジンの仕組みは作り手から見た違いで、ゲームの中身ならプレイヤーと遊びへの影響で聞く(CLAUDE.md §5・D-476)。
 
 ## 注意(次の Claude がハマりそうな所)

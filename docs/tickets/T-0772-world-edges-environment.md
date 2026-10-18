@@ -27,7 +27,7 @@
       外の温度を変える / wall に戻すと 9 / edges_vacuum で注意と真空
 - [x] release のビルド警告 0・multires_edge・multires_gas・environment_package・world_atmosphere・world_layout・^multires_・archmap --check
 
-## 世界の上の軸(判断。ユーザーに確認中。仮 = z〔司令塔の指示〕)
+## 世界の上の軸(判断。**2026-10-18 ユーザーが y に決めた = D-518**。WE_UP_AXIS = 1 にした。下は決める前の記録)
 今は MR の液体(T-0717)が y、MR の気体(T-0720)・世界の端(T-0721)が z で食い違っている。このチケットで「上はどこか」を WE_UP_AXIS の 1 か所にし、
 端・外の柱・気体はそれを読む形にした(液体は T-0774)。作り手から見た違い:
 - 案 z(仮): MR の世界の座標の z が高さ。気体の箱(GasConfig は z が上)と同じ並び。場面の書き方(world_cells)・物理・描画・PS の格子は y が上なので、
@@ -66,3 +66,4 @@
   試験: release のビルド警告 0・^multires_ 12 本(multires_gas 492 秒・multires_liquid を含む)・multires_edge・environment_package
   (open で大気が無い時に注意が出るように期待を直した)・world_atmosphere・world_layout・archmap --check。
   気づいたこと: 基準の大気の静かなセルはエネルギーが負(化学のぶん)なので、試験で温めるのはエネルギーの大きさを足す形にした。
+- 2026-10-18(本体の作業役): main へマージ。ユーザーの決定 D-518(上は y)で WE_UP_AXIS = 1 にし、^multires_・environment_package・world_atmosphere・world_layout が通った。ADR-0338 の ① を確定、②③ は Q123。
