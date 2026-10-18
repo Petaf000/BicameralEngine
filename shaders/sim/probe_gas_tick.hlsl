@@ -349,14 +349,14 @@ uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
         condensed += state.kinetic;
     } else {
         // 段の外(反応・相変化・置く操作)で気体の質量が減ったセルは速さを保つ(減った気体の運動量は帳簿へ。運動のエネルギーの減った分は熱へ。
-        // gas_flow.hlsli の GfMomentumAfterMassChange。T-0646・ADR-0286)
+        // follow_matter.hlsli の FmMomentumAfterMassChange = 液体の面と同じ式。T-0646・ADR-0286・T-0718)
         GasGpuTotals totals = GasZeroTotals();
         for (uint32_t s = 0; s < slotCount; ++s)
             GasAddSpecies(totals, s, gasCells.Load<uint64_t>(GasAmountAddress(header, region, s)));
 
         const uint64_t mass = totals.mass;
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
-            const int64_t kept = GfMomentumAfterMassChange(state.momentum[axis], state.mass, mass);
+            const int64_t kept = FmMomentumAfterMassChange(state.momentum[axis], state.mass, mass);
 
             const int64_t lost = state.momentum[axis] - kept;
             if (lost != 0) {

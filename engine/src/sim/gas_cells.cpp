@@ -87,12 +87,12 @@ namespace bicameral::sim {
         }
 
         // 気体の段の外(反応・相変化・置く操作)で、セルの気体の質量が前の段の終わりの before から now に変わった後の運動量
-        // (gas_flow.hlsli の GfMomentumAfterMassChange。減れば速さを保つ・増えれば運動量を保つ。T-0646・ADR-0286)
+        // (follow_matter.hlsli の FmMomentumAfterMassChange = 液体の面と同じ式。減れば速さを保つ・増えれば運動量を保つ。T-0646・ADR-0286・T-0718)
         std::array<int64_t, GAS_AXES> MomentumAfterMassChange(const std::array<int64_t, GAS_AXES>& momentum,
                                                               uint64_t before, uint64_t now) {
             std::array<int64_t, GAS_AXES> kept = {};
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                kept[axis] = gas::GfMomentumAfterMassChange(momentum[axis], before, now);
+                kept[axis] = follow::FmMomentumAfterMassChange(momentum[axis], before, now);
 
             return kept;
         }

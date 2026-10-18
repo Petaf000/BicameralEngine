@@ -11,7 +11,8 @@
 //   - セルの欄: 持ち越す状態(エネルギー・運動量 ×3)。関数は値で受けて値で返す
 //   - 見立ての値 GfParams: 環境・レベル・模型の値(係数・α・頭打ちの温度・重力・MUSCL・乱数の丸め・断熱)。係数はレベルの関数にできる
 // 周りの決まり(箱・面の列挙・壁と開いた境界・帳簿・区画・出ていく上限の集め方)は呼ぶ側に残す(段 1 ④ の面の帳簿と当てる段へ移すのは後)。
-// 出ていく上限の換算(GfEffectiveOutflow・GfLimitFraction・GfLimitMovedAmount)と欄が物質に付く(GfMomentumAfterMassChange)は式だけここに置く。
+// 出ていく上限の換算(GfEffectiveOutflow・GfLimitFraction・GfLimitMovedAmount)は式だけここに置く。欄が物質に付く式は液体と共通の
+// follow_matter.hlsli の FmMomentumAfterMassChange(T-0718)。
 // D-508 の力積の上限はまだ無い(入ったらここに足す)。
 //
 // 単位(レベル 0。04 §2): 物質量 µmol・質量 mg・エネルギー mJ(熱は µJ)・運動量 mg·2^-20 m/s・圧力 µPa・温度 mK・割合 Q32・空き Q16。
@@ -20,6 +21,7 @@
 #define BICAMERAL_GAS_FLOW_HLSLI
 
 #include "common/fixed.hlsli"
+#include "common/follow_matter.hlsli"
 #include "common/units.hlsli"
 
 #ifdef __cplusplus
@@ -527,16 +529,6 @@ FX_FN int64_t GfGasEnergyPart(int64_t cellEnergy, int64_t chemical, uint64_t cap
     const int64_t gasHeat = GfScaleTowardZero(heat, gasCapacity, capacity);
 
     return GfDivideDown(gasHeat + gasChemical, 1000);
-}
-
-// 気体の段の外(反応・相変化・置く操作)で、セルの気体の質量が前の段の終わりの before から now に変わった後の運動量(1 軸。T-0646・ADR-0286)。
-// 減った時: 減った気体は同じ速さのまま凝縮相へ移った = 速さを保つ(運動量 × now ÷ before。0 の向きへ切り捨て)。
-// 増えた時: 増えた気体は静止して現れた = 運動量を保つ。どちらも運動のエネルギーは前の値を超えない
-FX_FN int64_t GfMomentumAfterMassChange(int64_t momentum, uint64_t before, uint64_t now) {
-    if (now >= before)
-        return momentum;
-
-    return GfScaleTowardZero(momentum, now, before);
 }
 
 // --- 粘り(静まる性質。T-0758・D-516)--------------------------------------------------------------------

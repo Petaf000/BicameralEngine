@@ -7,7 +7,10 @@
 //      (Jacobi。順に依存しない)、面の流れを min(出る側の倍率, 入る側の倍率) で縮める(両側が同じ値を同じく縮めるので保存はそのまま)。
 //      安定の条件で足りる種類(伝導の C/8)は使わない
 //   3. 当てる: 変化を世界の変化の表へ(違うレベルの面は粗い側に端数ごと。ADR-0017。MrSplitCrossFlow)
-//   4. 欄が物質に付く: 運ぶ欄(運動量など)を持つ種類だけ(段 2・3。伝導は欄を持たないので空)
+//   4. 欄が物質に付く: 運ぶ欄(運動量など)を持つ種類だけ(段 2・3。伝導は欄を持たないので空)。段の外で欄の持ち主の質量が前の刻みの
+//      終わり(登録の欄「前の質量」)から変わっていたら、減れば速さを保つ・増えれば運動量を保つ(ADR-0286)。式は follow_matter.hlsli の
+//      FmMomentumAfterMassChange の 1 か所(気体のセル・液体の面・CPU と GPU が同じ関数。T-0718)。差の運動量は帳簿の「段の外の質量の変化」、
+//      運動のエネルギーは今の質量から計算し直して差を熱へ、位置のエネルギーは今の質量から計算し直して差を同じ理由で帳簿へ
 //   5. 帳簿: 世界の外へ出た・入った分を世界の帳簿へ(開いた世界の端の面〔MR_NEIGHBOR_EDGE。world_edge.hlsli・T-0721〕の流れを
 //      World::AddEdge で「世界の端」の列へ。外のセルは変わらない)。書く時の約束(T-0762): 列は手で数えず 0 = エネルギー・1 + 物質 ID・
 //      NestFieldLedgerBase + NestConservedIndex(欄)+ 値の番号 / レベルの単位の丸ごとの数は AddWorldLedgerUnits・2^-64 の端数は
@@ -47,6 +50,7 @@
 #define BICAMERAL_TRANSPORT_APPLY_HLSLI
 
 #include "cell_view.hlsli"
+#include "follow_matter.hlsli"
 #include "world_edge.hlsli"
 
 MR_NAMESPACE_BEGIN
