@@ -35,7 +35,9 @@
 #include <thread>
 #include <vector>
 
+#include "common/liquid_flow.hlsli"
 #include "reaction_test_table.h"
+#include "sim/cell_volume.h"
 #include "sim/probe_gas.h"
 #include "sim/probe_liquid.h"
 #include "sim/probe_sim.h"
@@ -622,6 +624,181 @@ namespace {
         }
     }
 
+    // --- 動き続ける面の調べ(T-0782・T-0783。`--diagnose`)---
+    // 面ごとの運動量・この刻みに動く質量の見込み(運動量 × g ÷ 流れの分母)・両側の質量・濡れた高さ・圧力・押す力を出し、
+    // 最後の window 刻みで面ごとに「動いた質量の差し引き(net)と合計(gross)・向きが変わった数」を数えて、一方向の流れか往復かを分ける
+    struct DiagnoseFace {
+        int64_t net = 0;
+        uint64_t gross = 0;
+        uint32_t flips = 0;
+        int sign = 0;
+    };
+
+    std::vector<liquid::LqCellView> ReadViews(const BakedReactionTable& table, const ProbeLiquidField& field,
+                                              std::span<const reaction::RxCell> cells) {
+        std::vector<liquid::LqCellView> views(field.RegionCellCount());
+        for (uint32_t region = 0; region < views.size(); ++region) {
+            const reaction::RxCell& cell = cells[field.GridIndex(region)];
+            views[region] = liquid::LqMakeCellView(
+                ProbeLiquidField::LiquidMass(table, cell) / 1000000, ProbeLiquidField::LiquidVolume(table, cell),
+                ShareCellVolume(table, cell).solid, PROBE_LIQUID_CELL_VOLUME_PICOLITERS, 0, 0);
+        }
+
+        return views;
+    }
+
+    void Diagnose(const BakedReactionTable& table, const Scene& scene, uint32_t depth, const char* name, uint64_t ticks,
+                  uint64_t window) {
+        auto field = ProbeLiquidField::Create(table, {.minCell = scene.minCell, .sizeCells = scene.size});
+        if (!field)
+            return;
+
+        const ProbeLiquidOptions& options = field->Options();
+        const liquid::LqParams params = liquid::LqMakeParams(
+            table.environment.gravityMicrometersPerSecond2, PROBE_LIQUID_CELL_EDGE_MILLIMETERS, options.frictionShift,
+            options.overfillStiffness, options.maxSpeedMillimetersPerSecond, options.advection ? 1u : 0u);
+        const uint64_t fluxDenominator = liquid::LqFluxDenominator(params);
+        const auto [sx, sy, sz] = scene.size;
+        const auto region = [&](uint32_t x, uint32_t y, uint32_t z) {
+            return x + (sx * (z + (sz * y)));
+        };
+        const std::array<uint32_t, 3> stride = {1, sx * sz, sx};
+        const auto flux = [&](int64_t face) {
+            const auto mass = (int64_t)liquid::LqMulDiv(fx::FxAbsU64(face), params.gravityMicrometersPerSecond2,
+                                                        fluxDenominator);
+            return face < 0 ? -mass : mass;
+        };
+
+        std::vector<reaction::RxCell> cells = MakePond(table, scene, depth, true);
+        const uint32_t count = field->RegionCellCount();
+        std::array<std::vector<DiagnoseFace>, 3> stats;
+        for (auto& axisStats : stats)
+            axisStats.assign(count, {});
+
+        std::printf(
+            "== %s(%u × %u × %u・深さ %u)\n  刻み  最大 x y z  動く面(層 y ごと。横/縦)  動いた mg  膜(y = "
+            "%u)の最小/最大 mg\n",
+            name, sx, sy, sz, depth, depth + 1);
+        for (uint64_t tick = 0; tick < ticks; ++tick) {
+            std::vector<uint32_t> changed;
+            const ProbeLiquidStepReport report = field->Step(table, cells, changed);
+            if (tick + window >= ticks) {
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    for (uint32_t r = 0; r < count; ++r) {
+                        const int64_t moved = flux(field->FaceMomentum(axis)[r]);
+                        DiagnoseFace& stat = stats[axis][r];
+                        stat.net += moved;
+                        stat.gross += fx::FxAbsU64(moved);
+                        const int sign = moved > 0 ? 1 : (moved < 0 ? -1 : 0);
+                        stat.flips += sign != 0 && stat.sign != 0 && sign != stat.sign ? 1 : 0;
+                        stat.sign = sign != 0 ? sign : stat.sign;
+                    }
+                }
+            }
+
+            if ((tick + 1) % 1800 != 0)
+                continue;
+
+            std::array<uint64_t, 3> peak = {};
+            std::vector<std::array<uint32_t, 2>> moving(sy, {0, 0});
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                for (uint32_t r = 0; r < count; ++r) {
+                    const int64_t face = field->FaceMomentum(axis)[r];
+                    peak[axis] = std::max(peak[axis], fx::FxAbsU64(face));
+                    if (face != 0)
+                        ++moving[r / (sx * sz)][axis == 1 ? 1 : 0];
+                }
+            }
+
+            const std::vector<liquid::LqCellView> views = ReadViews(table, *field, cells);
+            uint64_t filmMin = UINT64_MAX;
+            uint64_t filmMax = 0;
+            for (uint32_t z = 0; z < sz; ++z) {
+                for (uint32_t x = 0; x < sx; ++x) {
+                    const uint64_t mass = views[region(x, depth + 1, z)].mass;
+                    filmMin = std::min(filmMin, mass);
+                    filmMax = std::max(filmMax, mass);
+                }
+            }
+
+            std::printf("  %5llu  %llu %llu %llu  ", (unsigned long long)tick + 1, (unsigned long long)peak[0],
+                        (unsigned long long)peak[1], (unsigned long long)peak[2]);
+            for (uint32_t y = 0; y < sy; ++y)
+                std::printf("%u/%u ", moving[y][0], moving[y][1]);
+
+            std::printf(" %llu  %llu/%llu\n", (unsigned long long)report.movedMilligrams, (unsigned long long)filmMin,
+                        (unsigned long long)filmMax);
+        }
+
+        // --- 最後の状態の面(運動量の大きい順)---
+        const std::vector<liquid::LqCellView> views = ReadViews(table, *field, cells);
+        std::vector<int64_t> pressure(count, 0);
+        for (uint32_t z = 0; z < sz; ++z) {
+            for (uint32_t x = 0; x < sx; ++x) {
+                uint64_t above = 0;
+                for (uint32_t y = sy; y-- > 0;) {
+                    const uint32_t r = region(x, y, z);
+                    const liquid::LqCellView& below = y == 0 ? views[r] : views[region(x, y - 1, z)];
+                    const liquid::LqColumnStep step = liquid::LqColumnPressure(views[r], above, y == 0 ? 0u : 1u, below,
+                                                                               params);
+                    pressure[r] = step.pressure;
+                    above = step.above;
+                }
+            }
+        }
+
+        struct Entry {
+            uint64_t magnitude;
+            uint32_t axis;
+            uint32_t region;
+        };
+        std::vector<Entry> entries;
+        uint32_t steady = 0;
+        uint32_t back = 0;
+        uint64_t steadyGross = 0;
+        uint64_t backGross = 0;
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            for (uint32_t r = 0; r < count; ++r) {
+                const DiagnoseFace& stat = stats[axis][r];
+                if (stat.gross != 0) {
+                    const bool oneWay = fx::FxAbsU64(stat.net) * 2 > stat.gross;
+                    (oneWay ? steady : back) += 1;
+                    (oneWay ? steadyGross : backGross) += stat.gross;
+                }
+
+                if (field->FaceMomentum(axis)[r] != 0)
+                    entries.push_back({fx::FxAbsU64(field->FaceMomentum(axis)[r]), axis, r});
+            }
+        }
+
+        std::printf("  最後の %llu 刻み: 一方向の面 %u(動いた合計 %llu mg)・往復の面 %u(%llu mg)\n",
+                    (unsigned long long)window, steady, (unsigned long long)steadyGross, back,
+                    (unsigned long long)backGross);
+        std::ranges::sort(entries, std::greater{}, &Entry::magnitude);
+        std::printf(
+            "  面(x y z 軸)  運動量  動く mg/刻み  net/gross(%llu 刻み)  向きの変わり  質量 a/b  濡れ a/b(Q16)  圧力 "
+            "a/b  押す力\n",
+            (unsigned long long)window);
+        for (size_t i = 0; i < std::min<size_t>(entries.size(), 16); ++i) {
+            const Entry& entry = entries[i];
+            const uint32_t a = entry.region;
+            const uint32_t b = a + stride[entry.axis];
+            const uint32_t x = a % sx;
+            const uint32_t z = (a / sx) % sz;
+            const uint32_t y = a / (sx * sz);
+            const int64_t face = field->FaceMomentum(entry.axis)[a];
+            const DiagnoseFace& stat = stats[entry.axis][a];
+            const int64_t push = liquid::LqNetPush(entry.axis == 1 ? 1u : 0u, views[a], pressure[a], views[b],
+                                                   pressure[b]);
+            std::printf("  (%u %u %u %c)  %lld  %lld  %lld/%llu  %u  %llu/%llu  %llu/%llu  %lld/%lld  %lld\n", x, y, z,
+                        "xyz"[entry.axis], (long long)face, (long long)flux(face), (long long)stat.net,
+                        (unsigned long long)stat.gross, stat.flips, (unsigned long long)views[a].mass,
+                        (unsigned long long)views[b].mass, (unsigned long long)liquid::LqWetHeight(views[a]),
+                        (unsigned long long)liquid::LqWetHeight(views[b]), (long long)pressure[a],
+                        (long long)pressure[b], (long long)push);
+        }
+    }
+
     // 石を落とさない池は 1 刻め から静止(物差しの確かめ)
     void TestStillPond(const BakedReactionTable& table, const Scene& scene) {
         auto field = ProbeLiquidField::Create(table, {.minCell = scene.minCell, .sizeCells = scene.size});
@@ -643,6 +820,14 @@ namespace {
 // ============================================================================================
 int main(int argc, char** argv) {
     const bool longRun = argc > 1 && std::string_view(argv[1]) == "--long";
+    if (argc > 1 && std::string_view(argv[1]) == "--diagnose") {
+        const BakedReactionTable table = MakeLiquidTable();
+        const uint64_t seconds = argc > 2 ? std::stoull(argv[2]) : 60;
+        Diagnose(table, Scene{{16, 0, 16}, {16, 6, 16}, 0, 0}, 3, "積んだ水(3 層)に石", seconds * 60, 300);
+        Diagnose(table, Scene{{16, 0, 16}, {32, 4, 32}, 0, 0}, 1, "池に石", seconds * 60, 300);
+        return 0;
+    }
+
     if (argc > 1 && std::string_view(argv[1]) == "--trace") {
         const BakedReactionTable table = MakeLiquidTable();
         TraceColumn(table, 0, 3600);
