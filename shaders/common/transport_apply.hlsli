@@ -15,7 +15,8 @@
 //   6. 起こす: 変化の 0 でないセルのブロックを次の小刻み・刻みの種に(TxWakes。面の隣を起こすのは世界の側 = MR の WakeAround)
 //   当てる段の後の仕上げ(慣性の欄を持つ種類だけ。1 刻みに 1 回・全部の小刻みの後・書き戻しの前): 静まる性質(粘り)→ 静止の丸め
 //   (rest_rounding.hlsli の RrShouldRest。刻みの初めの値と比べる。消した運動量は帳簿の「静止の丸め」)。気体 = gas_reference の
-//   ApplyViscosity → gas_cells の RestGasCells(T-0765・ADR-0345)・液体 = T-0777
+//   ApplyViscosity → gas_cells の RestGasCells(T-0765・ADR-0345)・液体 = multires_liquid の SettleEnergy の速さの上限の直後
+//   (面ごとに RrRestMomentum。粘りは面の式の摩擦の中。T-0777・ADR-0349)
 //
 // 種類(Kind)が固有に持つのは 3 つだけ(土台 §0 の 3)。メンバー関数で渡す(HLSL 2021 と C++ のテンプレート):
 //   - 坂: int64_t Slope(CvCellView view)
