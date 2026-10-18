@@ -267,17 +267,21 @@ FX_FN TxSelfSide TxMakeSelfSide(Kind kind, FX_IN(CvCellView) self, int32_t level
     return side;
 }
 
+// 自分の側 side から開いた世界の端の外のセル outside(自分と同じレベルの見立て)への生の流れ(外へ出るのが正。同じレベルの面と同じ式。
+// T-0721。陰の伝導が安全網で陽に戻す端の流れもこれ。T-0790)
+template <typename Kind>
+FX_FN int64_t TxEdgeFaceFlow(Kind kind, TxSelfSide side, FX_IN(CvCellView) outside) {
+    return kind.FaceFlow(side.slope, side.coefficient, kind.Slope(outside),
+                         kind.SideCoefficient(outside, side.level, side.shift));
+}
+
 // 自分の側 side から面の隣 neighbor(SAME・COARSER・EDGE)への生の流れ(自分 → 隣が正。自分のレベルの単位)。
 // 同じレベル: 両側が同じ式で逆向きの値。粗い隣: 細かい側(自分)だけが計算する(粗い側の係数は種類の CoarseSideCoefficient)
 template <typename Kind, typename World>
 FX_FN int64_t TxSideFaceFlow(Kind kind, World world, TxSelfSide side, MrFaceNeighbor neighbor) {
     // 開いた世界の端: 相手は外のセル(自分と同じレベルの見立て)で、同じレベルの面と同じ式(T-0721)
-    if (neighbor.kind == MR_NEIGHBOR_EDGE) {
-        FX_IN(CvCellView) outside = world.Outside(neighbor.index, side.level);
-
-        return kind.FaceFlow(side.slope, side.coefficient, kind.Slope(outside),
-                             kind.SideCoefficient(outside, side.level, side.shift));
-    }
+    if (neighbor.kind == MR_NEIGHBOR_EDGE)
+        return TxEdgeFaceFlow(kind, side, world.Outside(neighbor.index, side.level));
 
     // 見立ては世界の置き場から(C++ は種類の部分だけ詰めた置き場から組む。T-0767・T-0768)
     FX_IN(CvCellView) other = world.View(neighbor.slot, neighbor.index);
@@ -392,6 +396,22 @@ FX_FN bool TxApplyFaceFlow(World world, uint32_t fineSlot, uint32_t fineIndex, u
 
     world.Add(fineSlot, fineIndex, fine);
     world.Add(otherSlot, otherIndex, other);
+
+    return true;
+}
+
+// 開いた世界の端の面 1 つの流れ flow(外へ出るのが正。セルのレベルの単位)を当てる(3 当てる・5 帳簿: 外のセルは変わらず、流れた分は
+// 帳簿の「世界の端」へ。TxFlowCell の端の面と同じ。流れを面の並びで解く種類〔陰の伝導〕が使う。T-0790)。世界の約束は Add・AddEdge。
+// 変化があれば true(6 起こす)
+template <typename World>
+FX_FN bool TxApplyEdgeFlow(World world, uint32_t slot, uint32_t index, int64_t flow) {
+    if (flow == 0)
+        return false;
+
+    MrEnergyDelta delta = MrMakeEnergyDelta();
+    delta.whole = -flow;
+    world.Add(slot, index, delta);
+    world.AddEdge(slot, index, flow);
 
     return true;
 }

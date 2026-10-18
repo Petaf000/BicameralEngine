@@ -293,6 +293,28 @@ FX_FN int64_t ImFaceFlow(FxU128 coefficient, int64_t difference) {
     return FxApplySign(flow, difference < 0);
 }
 
+// --- 開いた世界の端の面(T-0790。world_edge.hlsli の MR_NEIGHBOR_EDGE)---------------------------------
+// 外のセルは変わらない = 温度 T_外 を固定した境(系の未知数でない)。後退 Euler の式は
+//   (C + Σ g + Σ g_端) T* = C T0 + Σ g T*_j + Σ g_端 T_外
+// なので、段 0 の節の「自分だけの係数」(capacity)は C + Σ g_端(対角 D・自分の重み・粗い段の縮約に入る)、右辺は
+//   (C ÷ D) × T0 + Σ (g_端 ÷ D) × T_外
+// 流れは面と同じ形で F = g_端 (T* − T_外)(外へ出るのが正)。外の側は帳簿の「世界の端」(当てる段 TxApplyEdgeFlow)。
+// 端の面を持たない節は今まで通り 右辺 = 自分の重み × T0(ビット一致)
+
+// 端の面を持つ節の右辺(capacity = セルの熱容量 C・diagonal = 端の面の係数も含む対角 D)。端の面ごとに ImEdgeRhsTerm を足す
+FX_FN int64_t ImEdgeRhsStart(FxU128 capacity, FxU128 diagonal, int64_t startTemperature) {
+    return ImMulWeight(ImWeight(capacity, diagonal), startTemperature);
+}
+
+FX_FN int64_t ImEdgeRhsTerm(FxU128 edgeCoefficient, FxU128 diagonal, int64_t outsideTemperature) {
+    return ImMulWeight(ImWeight(edgeCoefficient, diagonal), outsideTemperature);
+}
+
+// 端の面の流れ(セルの単位。外へ出るのが正)
+FX_FN int64_t ImEdgeFlow(FxU128 coefficient, int64_t temperature, int64_t outsideTemperature) {
+    return ImFaceFlow(coefficient, temperature - outsideTemperature);
+}
+
 // 陽解法の面の係数(細かい側の単位)= min(係数, 細かい側の C/8, 粗い側の C/8 × 2^d)(ADR-0017。安全網が使う)
 FX_FN FxU128 ImExplicitCoefficient(FxU128 coefficient, uint64_t fineCapacity, uint64_t coarseCapacity, uint32_t gap) {
     const FxU128 fineLimit = ImWide(fineCapacity >> IM_ENERGY_BITS_PER_LEVEL);

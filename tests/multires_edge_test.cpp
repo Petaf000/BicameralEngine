@@ -6,6 +6,8 @@
 //   - 外の柱の高さの読み方: 冷たい行が世界の中の高さ(z = 7)なら上の外(z = 8 の行 = 400 K)とは釣り合っていて流れない
 //   - 上の端に接して 2 段細かくした場面(端の面がレベル 0〜2): 保存量が毎刻み一定・活性だけ刻んでも全部刻んだ時とビット一致
 //   - 横が open で外の柱が空(真空): 熱は伝わらず、全部 wall と同じ
+//   - 陰解法で解くブロックの端の面(T-0790): 上だけ open の根を全部陰解法で解いても熱が上の端から逃げる・保存量が一定・帳簿は世界の端・出だけ。
+//     細かくした場面を陰解法で(レベル 1・2 が陰解法・根は陽解法): 保存量が一定・活性 = 全部
 // 環境から作る端(T-0772。sim/multires_world_edges.h。縦は world_edge.hlsli の WE_UP_AXIS。試験は縦の軸を替えてもそのまま通る形):
 //   - パッケージの world_edges = { top = "open" }(earth_environment の上)から MakeMultiresWorldEdges: 上だけ open・外の柱は箱の中の 8 層で、
 //     仮の世界の気体の区画の層の基準(ProbeGasField::ReferenceCell)とビット単位で同じ。温めた世界の熱が上の端から逃げ、保存量が一定
@@ -257,6 +259,69 @@ namespace {
         Expect(HashWholeNest(walls) == HashWholeNest(vacuum), "真空の外: 熱は伝わらず全部 wall とビット一致");
     }
 
+    // --- 陰解法で解くブロックの端の面(T-0790)---
+
+    // 陰解法の刻み(基準のレベル = base。base より細かいブロックを陰解法で解く)
+    MultiresStepOptions ImplicitEdgeOptions(int32_t base) {
+        MultiresStepOptions options = CONDUCTION;
+        options.implicitConduction = true;
+        options.subcycleBaseLevel = base;
+
+        return options;
+    }
+
+    // 上だけ open の根 1 つを全部陰解法で解く(基準 −1): 熱が上の端から逃げ、保存量(帳簿込み)が一定・帳簿は世界の端・出だけ
+    void CheckImplicitTopOpen(const BakedReactionTable& table) {
+        constexpr uint64_t TICKS = 60;
+        const MultiresStepOptions options = ImplicitEdgeOptions(-1);
+        MultiresNest nest = MakeRootNest(table, 1, 0, false);
+        nest.edges.world.top = WE_OPEN;
+        SetColumn(nest, table, TOP_OUTSIDE_ROW);
+
+        const ReactionTableView view = table.View();
+        const ConservedTotals initial = ComputeConservedTotals(nest, table, 0);
+        uint32_t drifts = 0;
+        uint32_t implicitTicks = 0;
+        for (uint64_t tick = 0; tick < TICKS; ++tick) {
+            StepNest(nest, table, EDGE_SEED, tick, options);
+            drifts += ComputeConservedTotals(nest, table, 0) == initial ? 0 : 1;
+            implicitTicks += nest.implicitCells != 0 ? 1 : 0;
+        }
+
+        const int64_t top = LayerTemperature(nest, view, MR_BLOCK_EDGE - 1);
+        const int64_t bottom = LayerTemperature(nest, view, 0);
+        Expect(implicitTicks != 0, "陰解法の上だけ open: 根を陰解法の系で解いた");
+        Expect(drifts == 0, "陰解法の上だけ open: 保存量(帳簿込み)が毎刻み一定");
+        Expect(top < bottom && top < WORLD_MK, "陰解法の上だけ open: 上の層が冷えて下の層より冷たい");
+        Expect(OnlyEdgeOutUsed(nest), "陰解法の上だけ open: 帳簿は世界の端・出にだけ載る");
+        Log(Channel::Sim, Level::Info, "陰解法の上だけ open: {} 刻みで上の層 {} mK・下の層 {} mK(陰解法の刻み {})",
+            TICKS, top, bottom, implicitTicks);
+    }
+
+    // 上の端に接して 2 段細かくした場面を陰解法で(基準 0 = レベル 1・2 が陰解法・根は陽解法): 保存量・活性 = 全部
+    void CheckImplicitRefined(const BakedReactionTable& table) {
+        constexpr uint64_t TICKS = 30;
+        const MultiresStepOptions options = ImplicitEdgeOptions(0);
+        MultiresNest full = MakeRefinedNest(table);
+        MultiresNest active = MakeRefinedNest(table);
+        const ConservedTotals initial = ComputeConservedTotals(full, table, REFINED_LEVELS);
+        uint32_t drifts = 0;
+        uint32_t differences = 0;
+        uint32_t implicitTicks = 0;
+        for (uint64_t tick = 0; tick < TICKS; ++tick) {
+            StepNest(full, table, EDGE_SEED, tick, options);
+            StepActive(active, table, EDGE_SEED, tick, options);
+            drifts += ComputeConservedTotals(full, table, REFINED_LEVELS) == initial ? 0 : 1;
+            differences += test::SameWorld(full, active) ? 0 : 1;
+            implicitTicks += full.implicitCells != 0 ? 1 : 0;
+        }
+
+        Expect(implicitTicks != 0, "陰解法の細かくした場面: 陰解法の系で解いた");
+        Expect(drifts == 0, "陰解法の細かくした場面: 保存量(帳簿込み)が毎刻み一定");
+        Expect(differences == 0, "陰解法の細かくした場面: 活性だけ刻んでも全部刻んだ時とビット一致");
+        Expect(OnlyEdgeOutUsed(full), "陰解法の細かくした場面: 帳簿は世界の端・出にだけ載る");
+    }
+
     // --- 環境から作る端(T-0772)---
 
     const fs::path STANDARD_DIR = fs::path(BICAMERAL_DATA_STANDARD_DIR);
@@ -409,6 +474,8 @@ namespace {
         CheckTopOpen(*table);
         CheckColumnHeight(*table);
         CheckRefined(*table);
+        CheckImplicitTopOpen(*table);
+        CheckImplicitRefined(*table);
         CheckVacuum(*table);
 
         const auto open = LoadWorld("edges_open_top");
