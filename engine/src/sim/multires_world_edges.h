@@ -8,7 +8,7 @@
 // 層の基準と同じ道(SampleAtmosphere → 一番下の層の静水圧 AtmospherePressureMicroPascal → MakeHydrostaticReference)で、
 // 同じ区画ならビット単位で同じセル(試験 multires_edge)。柱の外の高さ(上下の外)は端の層の基準を読む(world_edge.hlsli の WeColumnRow。
 // 仮の世界の気体の開いた境界の外と同じ)。風は入れない(D-514)。
-// 縦は world_edge.hlsli の WE_UP_AXIS(仮は z)。レベル 0 のセルの縦の座標 U の高さは海面から U × 0.5 m(セルの下の面。仮の世界の区画の床 0 と同じ)。
+// 縦は world_edge.hlsli の WE_UP_AXIS(y。D-518)。レベル 0 のセルの縦の座標 U の高さは海面から U × 0.5 m(セルの下の面。仮の世界の区画の床 0 と同じ)。
 // 基準の大気が無い世界の開いた端は真空(柱が空。熱は伝わらない。ベイクが「注意」を出す。reaction_table.cpp の WarnWorldSetting)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once

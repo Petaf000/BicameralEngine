@@ -4,7 +4,7 @@
 //   → セル ⇔ 気体の箱の写し(sim/gas_cells。仮の世界 sim/probe_gas と同じ関数)→ 面の一覧で小刻み(gas_reference の StepGasLinks(box, links)。
 //   式は common/gas_flow.hlsli = GPU と同じ関数。T-0719)→ セルへ書き戻す・登録した欄(運動量 ×3・運動のエネルギー・前の質量。T-0711)・帳簿。
 // 世界に求めるもの(設計 20 §3): 刻むブロックの一覧(根のレベルの本物のブロック全部)/ セルの読み書き / 面の隣(座標から引く)。
-// 縦は世界の上の軸(world_edge.hlsli の WE_UP_AXIS。仮は z)。気体の箱は z が上なので、世界の軸を WeAxisUpLast で(横 1・横 2・縦)の順に
+// 縦は世界の上の軸(world_edge.hlsli の WE_UP_AXIS。y = D-518)。気体の箱は z が上なので、世界の軸を WeAxisUpLast で(横 1・横 2・縦)の順に
 // 写す。運動量の欄と帳簿の値の並びは気体の箱の軸の順(上が z なら x・y・z)。
 //
 // 模型の形と約束は仮の世界と同じ(sim/probe_gas.h。ADR-0256・ADR-0268・ADR-0286)。違うのは回し方だけで、仮の世界の区画を世界いっぱいに
