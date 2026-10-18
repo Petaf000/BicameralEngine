@@ -76,8 +76,10 @@ namespace bicameral::sim {
     // 1 刻みの写しの作業場(呼ぶ側が box を物質 slots の設定と基準で作り、openQ16・cellLayers・tick を書いてから LoadGasCells)
     struct GasCellsStep {
         GasBox box;
-        std::vector<uint32_t> slots;              // 箱の欄の物質(ID の順)
-        std::vector<int64_t> condensedEnergy;     // セルのエネルギーのうち凝縮相のぶん(mJ)
+        std::vector<uint32_t> slots;           // 箱の欄の物質(ID の順)
+        std::vector<int64_t> condensedEnergy;  // セルのエネルギーのうち凝縮相のぶん(mJ)
+        std::vector<std::array<int64_t, GAS_AXES>>
+            momentumBefore;                       // 刻みの初めの運動量(合わせ直しの後。静止の丸めが比べる)
         std::array<int64_t, GAS_AXES> lost = {};  // 段の外で減った・無くなった気体の運動量(書き戻す時に帳簿から引く)
     };
 
@@ -94,8 +96,8 @@ namespace bicameral::sim {
 
     // 箱 → セル・欄・帳簿。流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超えるなら false(何も変えない)。
     // 値が変わったセルの changed を 1 に(呼ぶ側が起こす・熱のキャッシュを作り直す)。
-    // 静止の丸め(T-0723。restSpeedUnits = 0 で切る): 速さがどの軸も restSpeedUnits 単位(2^-20 m/s)未満のセルの運動量を 0 に(帳簿へ)、
-    // 運動エネルギーのぶんをそのセルの熱へ
+    // 静止の丸め(T-0723・T-0758。restSpeedUnits = 0 で切る): 速さがどの軸も restSpeedUnits 単位(2^-20 m/s)未満で、この刻みで速くなっていない
+    // セルの運動量を 0 に(帳簿へ)、運動エネルギーのぶんをそのセルの熱へ(common/rest_rounding.hlsli。液体の面と同じ形)
     [[nodiscard]] bool StoreGasCells(const BakedReactionTable& table, const GasCellsStep& step, uint32_t restSpeedUnits,
                                      std::span<reaction::RxCell> cells, GasCellFields& fields, GasCellsLedger& ledger,
                                      std::vector<uint8_t>& changed);

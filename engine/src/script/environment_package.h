@@ -36,6 +36,8 @@ namespace bicameral::script {
     constexpr std::string_view ENVIRONMENT_CATEGORY = "environment";
     constexpr std::string_view ENVIRONMENT_GRAVITY_KEY = "gravity_um_per_s2";
     constexpr std::string_view ENVIRONMENT_SOUND_SPEED_KEY = "sound_speed_mm_per_s";
+    constexpr std::string_view
+        ENVIRONMENT_GAS_EDDY_VISCOSITY_KEY = "gas_eddy_viscosity_mm2_per_s";  // T-0758・D-516(仮)
     constexpr std::string_view ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY = "atmosphere_temperature_mk";
     constexpr std::string_view ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY = "atmosphere_surface_pressure_pa";
     constexpr std::string_view ENVIRONMENT_ATMOSPHERE_PROFILE_KEY = "atmosphere_profile";

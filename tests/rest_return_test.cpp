@@ -610,6 +610,10 @@ namespace {
 int main(int argc, char** argv) {
     const bool longRun = argc > 1 && std::string_view(argv[1]) == "--long";
     const BakedReactionTable gasTable = MakeGasTable();
+    BakedReactionTable viscousTable = MakeGasTable();
+    viscousTable.environment.gasEddyViscosityMm2PerS = 200000;  // 0.2 m²/s(6 m の部屋の揺れが約 18 秒で e 分の 1)
+    BakedReactionTable stillTable = MakeGasTable();
+    stillTable.environment.gasEddyViscosityMm2PerS = 1000000;  // 1 m²/s(同じく約 3.6 秒)
     const BakedReactionTable liquidTable = MakeLiquidTable();
 
     // 区画 = 世界(端は壁)。小さい場面は ctest、--long
@@ -637,6 +641,13 @@ int main(int argc, char** argv) {
         [&] { return RunPond(liquidTable, deepScene, 3, false, 0, "積んだ水(3 層)が落ち着く・丸めなし"); },
         [&] { return RunPond(liquidTable, deepScene, 3, false, 1000, "積んだ水(3 層)が落ち着く・静止の丸め 1 mm/s"); },
         [&] { return RunPond(liquidTable, deepScene, 3, true, 0, "積んだ水(3 層)に石・丸めなし"); },
+        // 気体の粘り(T-0758・D-516): 格子で解けない乱れの粘り 0.2 m²/s(世界の値)で乱れが静まり、静止の丸めで眠るか
+        [&] { return RunGasOnly(viscousTable, gasScene, 0, "気体だけ・粘り 0.2 m²/s・丸めなし"); },
+        [&] { return RunGasOnly(stillTable, gasScene, 1024, "気体だけ・粘り 1 m²/s・静止の丸め 1024 単位"); },
+        [&] {
+            return RunGasReference(viscousTable, gasScene, 1024,
+                                   "気体 + 伝導 + 反応・粘り 0.2 m²/s・静止の丸め 1024 単位");
+        },
     };
     if (longRun)
         jobs.push_back(
@@ -659,6 +670,14 @@ int main(int argc, char** argv) {
 
     if (!longRun)
         EXPECT(results[3].hash == results.back().hash);  // 静止の丸めも決定的
+
+    // 気体の粘り(T-0758): 揺れが静まる(最後の最大の速さが粘りなしより小さい。長い場面は 4 分の 1 未満)。
+    // 60 秒で眠りきらない(熱の残りの自然の対流が数 cm/s 残る。T-0758 の作業ログ)ので、眠る数は出すだけ
+    const auto finalSpeed = [](const RunResult& result) {
+        return result.series.back().maxSpeed;
+    };
+    EXPECT(finalSpeed(results[11]) * (longRun ? 4 : 1) < finalSpeed(results[2]));
+    EXPECT(finalSpeed(results[12]) * (longRun ? 4 : 1) < finalSpeed(results[2]));
 
     // 浅い池(1 層)に石: 揺れは育たずに静まる(T-0757。前は面の運動量が 60 秒育ち続けた)
     EXPECT(PeakMomentum(results[5], results[5].series.size() - 60) * 4 < PeakMomentum(results[5], 0));

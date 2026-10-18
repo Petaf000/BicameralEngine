@@ -7,6 +7,7 @@
 
 #include "common/fixed.hlsli"
 #include "common/gas_flow.hlsli"
+#include "common/rest_rounding.hlsli"
 #include "core/aliases.h"
 #include "sim/world_atmosphere.h"
 #include "sim/world_physics.h"
@@ -14,6 +15,15 @@
 namespace bicameral::sim {
 
     namespace {
+
+        // 運動量のいちばん大きい軸の大きさ(静止の丸めが比べる大きさ)
+        uint64_t LargestAxis(const std::array<int64_t, GAS_AXES>& momentum) {
+            uint64_t largest = 0;
+            for (const int64_t value : momentum)
+                largest = std::max(largest, fx::FxAbsU64(value));
+
+            return largest;
+        }
 
         constexpr uint64_t PARTS_TO_Q32_DIVISOR = ATMOSPHERE_PARTS_PER_WHOLE;
 
@@ -131,6 +141,11 @@ namespace bicameral::sim {
                                  .heatCapacity = species.heatCapacity,
                                  .formationEnergy = species.h0,
                                  .roundingKey = slots[s]};  // 物質 ID(物質が増えても他の成分の丸めは変わらない)
+            if (slots[s] < table.speciesTransport.size()) {
+                const uint64_t viscosity = table.speciesTransport[slots[s]].viscosityMicroPascalSeconds.value_or(0);
+                config.species[s].viscosityMicroPascalSeconds = (uint32_t)std::min<uint64_t>(
+                    viscosity, gas::GF_SPECIES_VISCOSITY_LIMIT);  // 気体の粘り(T-0758)
+            }
         }
 
         config.substeps = substeps;
@@ -187,6 +202,7 @@ namespace bicameral::sim {
         GasBox& box = step.box;
         assert(box.cells.size() == cells.size());
         step.condensedEnergy.assign(cells.size(), 0);
+        step.momentumBefore.assign(cells.size(), {0, 0, 0});
         step.lost = {};
         for (uint32_t index = 0; index < cells.size(); ++index) {
             const reaction::RxCell& cell = cells[index];
@@ -221,6 +237,7 @@ namespace bicameral::sim {
                 step.lost[axis] += fields.momentum[index][axis] - kept[axis];
 
             gas.momentum = kept;
+            step.momentumBefore[index] = kept;
             gas.energy += fields.kinetic[index];
         }
     }
@@ -273,10 +290,12 @@ namespace bicameral::sim {
                 fields.momentum[index] = {0, 0, 0};
             }
 
-            // 静止の丸め(T-0723。既定は切る): 速さがどの軸も restSpeedUnits 未満なら運動量を 0 に(帳簿へ)、運動エネルギーのぶんは熱へ
+            // 静止の丸め(T-0723・T-0758。既定は切る。形は common/rest_rounding.hlsli = 液体の面と同じ): どの軸の速さも restSpeedUnits 未満で、
+            // この刻みで速くなっていない(運動量の最大の軸の大きさが刻みの初め以下)なら運動量を 0 に(帳簿へ)、運動エネルギーのぶんは熱へ
             std::array<int64_t, GAS_AXES>& momentum = fields.momentum[index];
-            if (restSpeedUnits != 0 && mass != 0 && momentum != std::array<int64_t, GAS_AXES>{} &&
-                rng::all_of(momentum, [&](int64_t value) { return fx::FxAbsU64(value) < mass * restSpeedUnits; })) {
+            if (restSpeedUnits != 0 && mass != 0 &&
+                rest::RrShouldRest(LargestAxis(momentum), LargestAxis(step.momentumBefore[index]),
+                                   mass * restSpeedUnits)) {
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
                     ledger.momentum[axis] -= momentum[axis];
                     ledger.restMomentum[axis] -= momentum[axis];

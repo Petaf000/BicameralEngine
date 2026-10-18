@@ -215,6 +215,16 @@ namespace bicameral::sim {
         if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) > MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
 
+        // 気体の粘り(静まる性質。T-0758・D-516)はまだ CPU だけ(GPU の段に無い。黙って違う結果にしない)
+        bool viscous = box.config.eddyViscosityMm2PerS != 0;
+        for (uint32_t slot = 0; slot < box.config.speciesCount; ++slot)
+            viscous = viscous || box.config.species[slot].viscosityMicroPascalSeconds != 0;
+
+        if (viscous)
+            return std::unexpected(
+                "GPU の気体はまだ粘り(gas_eddy_viscosity_mm2_per_s・気体の viscosity_upa_s)を持たない(CPU "
+                "だけ。T-0758)");
+
         // 成分の数に上限は無い(1 件 = 頭 + 欄 × m_speciesStride。T-0598)。丸めの鍵は設定のまま(欄の番号か物質 ID。T-0592)。
         // 件の大きさが 32bit の番地に収まること(ByteAddressBuffer の番地)
         const uint64_t faceBytes = (uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL *

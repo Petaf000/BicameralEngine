@@ -16,6 +16,7 @@
 #include "core/aliases.h"
 #include "core/log.h"
 #include "gpu/resources.h"
+#include "sim/gas_cells.h"
 #include "sim/gpu_gas_internal.h"
 #include "sim/probe_sim.h"
 
@@ -133,6 +134,17 @@ namespace bicameral::sim {
 
         if (options.pressure != ProbeGasPressure::Explicit)
             return std::unexpected("GPU の気体の区画は陽解法だけ(投影は T-0621)");
+
+        // 気体の粘り(T-0758・D-516)は GPU の段に無い(区画の物質は刻みごとに変わるので、表の気体の物質の全部を見る)
+        bool viscous = table.environment.gasEddyViscosityMm2PerS != 0;
+        for (uint32_t id = 0; id < table.speciesTransport.size() && !viscous; ++id)
+            viscous = IsGasSpecies(table, id) &&
+                      table.speciesTransport[id].viscosityMicroPascalSeconds.value_or(0) != 0;
+
+        if (viscous)
+            return std::unexpected(
+                "GPU の気体はまだ粘り(gas_eddy_viscosity_mm2_per_s・気体の viscosity_upa_s)を持たない(CPU "
+                "だけ。T-0758)");
 
         auto field = ProbeGasField::Create(table, options);
         if (!field)

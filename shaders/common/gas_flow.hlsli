@@ -539,6 +539,65 @@ FX_FN int64_t GfMomentumAfterMassChange(int64_t momentum, uint64_t before, uint6
     return GfScaleTowardZero(momentum, now, before);
 }
 
+// --- 粘り(静まる性質。T-0758・D-516)--------------------------------------------------------------------
+// 気体の運動量を隣のセルと分け合って速さの差を減らす(運動量の拡散 = 粘り)。面ごとに 1 つの ΔP を片方から引き他方へ足すので運動量はビット単位で保存し、
+// 一様な流れ(風)は減らない。減った運動のエネルギーは熱になる(面を通して運ぶ仕事 ΔP × (u_A + u_B) ÷ 2 を同じ向きへ動かすと、両側の熱が
+// ΔP(u_A − u_B)÷ 2 ずつ増える = どちらも負にならない)。
+// 動粘性 ν(mm²/s)= 世界の値「格子で解けない乱れの粘り」(WorldPhysics::gasEddyViscosityMm2PerS)+ 物質の粘り(viscosity_upa_s)÷ 密度。
+// 面の係数 κ = ν Δt ÷ Δx²(Δt = 1/60 s・Δx = 0.5 m のセル)。安定の条件として 1/8 で頭打ち(6 面の陽の拡散。伝導の C/8 と同じ形)。
+
+FX_CONST uint64_t GF_VISCOSITY_DIVISOR = 15000000;                       // 60 × 500²(mm²)
+FX_CONST uint64_t GF_VISCOSITY_LIMIT_Q32 = FX_U64(0u, 0x20000000u);      // 1/8
+FX_CONST uint64_t GF_VISCOSITY_LIMIT_MM2_PER_S = 1875000;                // κ が 1/8 になる ν(世界の値の上限)
+FX_CONST uint64_t GF_CELL_VOLUME_MILLILITERS = 125000;                   // 0.125 m³(物質の粘りの密度を読む体積)
+FX_CONST uint64_t GF_SPECIES_VISCOSITY_LIMIT = FX_U64(0u, 0x40000000u);  // 物質の粘りの上限(µPa·s。和が 64bit に収まる)
+
+// 面の係数 κ(Q32)。ν は 2^31 mm²/s 未満(呼ぶ側が頭打ち)
+FX_FN uint64_t GfViscosityQ32(uint64_t viscosityMm2PerS) {
+    const uint64_t capped = viscosityMm2PerS < GF_VISCOSITY_LIMIT_MM2_PER_S ? viscosityMm2PerS
+                                                                            : GF_VISCOSITY_LIMIT_MM2_PER_S;
+
+    return (capped << 32) / GF_VISCOSITY_DIVISOR;
+}
+
+// セルの物質の粘りの動粘性(mm²/s)= μ(µPa·s。成分の物質量で重みを付けた平均)× 空きの体積 ÷ 質量。
+// μ × 0.125 m³ × 空き ÷ (質量 mg × 10^-6)= μ × 125000 × 空き(Q16)÷ (質量 << 16)。質量 0 は 0
+FX_FN uint64_t GfMolecularViscosity(uint64_t viscosityAmountSum, uint64_t amount, uint64_t mass, uint32_t open) {
+    if (amount == 0 || mass == 0)
+        return 0;
+
+    const uint64_t mixture = viscosityAmountSum / amount;  // µPa·s(物質の値は GF_SPECIES_VISCOSITY_LIMIT まで)
+    const FxU128 numerator = FxMulU64Full(mixture * GF_CELL_VOLUME_MILLILITERS, (uint64_t)open);
+    const uint64_t viscosity = FxDivU128By64(numerator, mass << 16).quotient;
+
+    return viscosity < GF_VISCOSITY_LIMIT_MM2_PER_S ? viscosity : GF_VISCOSITY_LIMIT_MM2_PER_S;
+}
+
+// 面の 1 軸の運動量の受け渡し(A → B が正。mg·2^-20 m/s)= κ × 換算質量 × (u_A − u_B)。速さが同じなら 0
+FX_FN int64_t GfViscousMomentum(int64_t momentumA, uint64_t massA, int64_t momentumB, uint64_t massB,
+                                uint64_t coefficientQ32) {
+    if (massA == 0 || massB == 0 || coefficientQ32 == 0)
+        return 0;
+
+    const int64_t speedDifference = FxDivS64(momentumA, (int64_t)massA) - FxDivS64(momentumB, (int64_t)massB);
+    const int64_t scaled = FxMulShiftS64(speedDifference, (int64_t)coefficientQ32, 32);
+    const uint64_t reduced = FxDivU128By64(FxMulU64Full(massA, massB), massA + massB).quotient;
+
+    return FxMulDivS64(scaled, reduced, 1);
+}
+
+// 面を通して運ぶ運動のエネルギー(A → B が正。mJ。断熱のときだけ)= ΔP × (u_A + u_B)÷ 2(µJ = P × u × 2^-40)を mJ へ(0 の向きへ切り捨て)
+FX_FN int64_t GfViscousEnergy(GfParams params, int64_t moved, int64_t momentumA, uint64_t massA, int64_t momentumB,
+                              uint64_t massB) {
+    if (params.adiabatic == 0u || moved == 0)
+        return 0;
+
+    const int64_t speedSum = FxDivS64(momentumA, (int64_t)massA) + FxDivS64(momentumB, (int64_t)massB);
+    const int64_t microJoules = FxMulShiftS64(moved, speedSum, GF_KINETIC_SHIFT);
+
+    return microJoules / 1000;
+}
+
 GF_NAMESPACE_END
 
 #endif  // BICAMERAL_GAS_FLOW_HLSLI
