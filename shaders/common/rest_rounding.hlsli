@@ -21,6 +21,37 @@ namespace bicameral::rest {
         return after != 0u && after < limit && after <= before;
     }
 
+    // 運動量 1 つ(液体の面)の丸めの結果。置き場は当てる段の後(上限・当てる・運ぶの後、運動のエネルギーを熱へ直す所。T-0777)
+    struct RrRested {
+        int64_t momentum;  // 丸めの後の運動量
+        int64_t kinetic;   // 丸めの後の運動のエネルギー
+        // 帳簿の「静止の丸め」に載せる運動量(外から入った向きが正 = 消した運動量の符号を返したもの)
+        int64_t ledgerMomentum;
+        int64_t heat;     // 熱になる運動のエネルギー(帳簿の「静止の丸め」でエネルギーの列へ)
+        uint32_t rested;  // 1 = 丸めた
+    };
+
+    // 運動量 momentum(刻みの初め before・運動のエネルギー kinetic)を閾値 limit(運動量の単位。0 = 切る)で丸める。
+    // 閾値を種類の単位へ直すのは種類(液体の面: 速さ × 刻みの数 × 両側の質量 ÷ 重力)。気体のセルは 3 軸の最大で RrShouldRest を呼ぶ
+    FX_FN RrRested RrRestMomentum(int64_t momentum, int64_t before, int64_t kinetic, uint64_t limit) {
+        RrRested result;
+        result.momentum = momentum;
+        result.kinetic = kinetic;
+        result.ledgerMomentum = 0;
+        result.heat = 0;
+        result.rested = 0;
+        if (!RrShouldRest(FxAbsU64(momentum), FxAbsU64(before), limit))
+            return result;
+
+        result.ledgerMomentum = -momentum;
+        result.heat = kinetic;
+        result.momentum = 0;
+        result.kinetic = 0;
+        result.rested = 1;
+
+        return result;
+    }
+
 #ifdef __cplusplus
 }  // namespace bicameral::rest
 #endif
