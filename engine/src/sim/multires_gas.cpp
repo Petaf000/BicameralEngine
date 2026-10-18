@@ -1,5 +1,6 @@
-// multires_gas.cpp — 多重解像度の世界の 1 段で気体を流す CPU(運ぶ計算の共通の土台の段 3 ②。T-0720)。約束は multires_gas.h。
-// 1 刻み = 一覧と面の一覧(座標から)→ 見立て(セルと欄を読む・気体の空き)→ セル ⇔ 気体の箱の写し(sim/gas_cells)→ 小刻み → 書き戻す(起こす)。
+// multires_gas.cpp — 多重解像度の世界の 1 段で気体を流す CPU(運ぶ計算の共通の土台の段 3 ②。T-0720・T-0763・T-0765)。約束は multires_gas.h。
+// 1 刻み = 一覧と面の一覧(座標から)→ 見立て(セルと欄を読む・気体の空き)→ セル ⇔ 気体の箱の写し(sim/gas_cells)→ 小刻み(当てる段)
+// → 粘り → 静止の丸め → 書き戻す(起こす)・世界の帳簿。
 // 小刻みは仮の世界と同じ関数(gas_reference の Substep。面の一覧を渡すだけ)で、回し方も同じ Jacobi 型なので、セルを並べる順
 // (ブロックの順 × ブロックの中の番号)が仮の世界と違っても値はビット単位で同じ。
 #include "sim/multires_gas.h"
@@ -257,25 +258,92 @@ namespace bicameral::sim {
             }
         }
 
-        // 帳簿: 物質は世界の帳簿の「世界の端」の列(開いた端の出入りだけが物質を変える)。エネルギーと運動量は世界の欄(仮。T-0763)
-        void AddLedger(MultiresNest& nest, const MultiresGasFields& ids, const GasCellsLedger& ledger) {
+        // --- 帳簿(世界の帳簿の列 = 量 × 理由。T-0763・T-0762 の書き方の約束)---
+
+        // 帳簿の 1 つの量を載せる(符号つき: 正 → direction・負 → 逆の向き)
+        void AddLedgerSigned(MultiresNest& nest, uint32_t reason, uint32_t direction, uint32_t column, int64_t amount) {
+            if (amount == 0)
+                return;
+
+            const multires::WlSignedEntry entry = multires::WlEnergyEntry(amount, direction);
+            AddWorldLedgerUnits(nest, multires::WlSlot(reason, entry.direction), nest.capacity.rootLevel, column,
+                                entry.magnitude);
+        }
+
+        // エネルギーの列・運動量の列に気体が載せる理由(LedgerEnergy・LedgerMomentum が足す。運動のエネルギーの欄 ⇔ セルの熱の
+        // 物理の熱・静止の丸めは中の移し替えなので数えない)
+        constexpr std::array<uint32_t, 2> ENERGY_REASONS = {multires::WL_REASON_WORLD_EDGE,
+                                                            multires::WL_REASON_GRAVITY_WORK};
+        constexpr std::array<uint32_t, 5> MOMENTUM_REASONS = {
+            multires::WL_REASON_WORLD_EDGE, multires::WL_REASON_WALL_IMPULSE, multires::WL_REASON_GRAVITY_WORK,
+            multires::WL_REASON_FOLLOW_MASS, multires::WL_REASON_REST_ROUNDING};
+
+        // 物質 = 世界の端(開いた端の出入りだけが物質を変える)。エネルギーの列 = 世界の端・重さの仕事(正 → 入)。
+        // 運動のエネルギーの欄から熱になった分 kineticHeat(刻みの初めの欄の和 − 終わりの欄の和。粘り・衝撃・欄が物質に付く・静止の丸め)は
+        // 欄の列の出 + エネルギーの列の入(静止の丸めの分は「静止の丸め」、残りは「物理の熱」。液体の T-0769 と同じ形)。
+        // 運動量の列 = 世界の端・壁の力積・重さ・欄が物質に付く・静止の丸め(正 → 入)。
+        // これで ComputeConservedTotals(Σ 保存量 − 帳簿)が気体の刻みで列ごとに変わらない
+        void AddLedger(MultiresNest& nest, const MultiresGasFields& ids, const GasCellsLedger& ledger,
+                       int64_t kineticHeat) {
             for (uint32_t id = 0; id < ledger.amounts.size(); ++id) {
-                const int64_t amount = ledger.amounts[id];
-                if (amount == 0)
-                    continue;
-
-                const uint32_t direction = amount > 0 ? multires::WL_DIRECTION_IN : multires::WL_DIRECTION_OUT;
-                const uint64_t units = amount > 0 ? (uint64_t)amount : (uint64_t)0 - (uint64_t)amount;
-                AddWorldLedgerUnits(nest, multires::WlSlot(multires::WL_REASON_WORLD_EDGE, direction),
-                                    nest.capacity.rootLevel, multires::WL_COLUMN_SPECIES_BASE + id, units);
+                AddLedgerSigned(nest, multires::WL_REASON_WORLD_EDGE, multires::WL_DIRECTION_IN,
+                                multires::WL_COLUMN_SPECIES_BASE + id, ledger.amounts[id]);
             }
 
-            StoreNestWorldField(nest, ids.ledgerEnergy, 0,
-                                LoadNestWorldField(nest, ids.ledgerEnergy, 0) + ledger.energy);
+            AddLedgerSigned(nest, multires::WL_REASON_WORLD_EDGE, multires::WL_DIRECTION_IN, multires::WL_COLUMN_ENERGY,
+                            ledger.edgeEnergy);
+            AddLedgerSigned(nest, multires::WL_REASON_GRAVITY_WORK, multires::WL_DIRECTION_IN,
+                            multires::WL_COLUMN_ENERGY, ledger.gravityEnergy);
+
+            // --- 運動のエネルギーの欄 → セルの熱 ---
+            const uint32_t base = NestFieldLedgerBase(nest);
+            const uint32_t kineticColumn = base + NestConservedIndex(nest, ids.kinetic);
+            const std::array<int64_t, 2> heats = {kineticHeat - ledger.restEnergy, ledger.restEnergy};
+            const std::array<uint32_t, 2> heatReasons = {multires::WL_REASON_PHYSICS_HEAT,
+                                                         multires::WL_REASON_REST_ROUNDING};
+            for (uint32_t part = 0; part < heats.size(); ++part) {
+                AddLedgerSigned(nest, heatReasons[part], multires::WL_DIRECTION_OUT, kineticColumn, heats[part]);
+                AddLedgerSigned(nest, heatReasons[part], multires::WL_DIRECTION_IN, multires::WL_COLUMN_ENERGY,
+                                heats[part]);
+            }
+
+            // --- 運動量の列(気体の箱の軸 = 欄の値の番号)---
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
-                StoreNestWorldField(nest, ids.ledgerMomentum, axis,
-                                    LoadNestWorldField(nest, ids.ledgerMomentum, axis) + ledger.momentum[axis]);
+                const uint32_t column = base + NestConservedIndex(nest, ids.momentum) + axis;
+                const std::array<int64_t, MOMENTUM_REASONS.size()> parts = {
+                    ledger.edgeMomentum[axis], ledger.wallMomentum[axis], ledger.gravityMomentum[axis],
+                    ledger.followMomentum[axis], ledger.restMomentum[axis]};
+                for (uint32_t part = 0; part < parts.size(); ++part)
+                    AddLedgerSigned(nest, MOMENTUM_REASONS[part], multires::WL_DIRECTION_IN, column, parts[part]);
             }
+        }
+
+        int64_t SumKinetic(const GasCellFields& fields) {
+            int64_t sum = 0;
+            for (const int64_t kinetic : fields.kinetic)
+                sum += kinetic;
+
+            return sum;
+        }
+
+        // 層ごとの基準の大気(層の数 layerCount・厚さ = 根のレベルのセルの 1 辺。層 k の値は下の層だけで決まる)
+        GasAtmosphereLayers MakeLayers(const MultiresNest& nest, const BakedReactionTable& table, uint32_t layerCount,
+                                       const MultiresGasOptions& options) {
+            return GasAtmosphereLayers::Create(table, options.floorHeightMillimeters, layerCount,
+                                               nest.capacity.rootLevel);
+        }
+
+        // 気体の箱の設定(物質 slots・大きさ size〔気体の箱の軸〕・小刻み substeps〔× 2^σ 済み〕・セルのレベル = 根のレベル)
+        GasConfig MakeBoxConfig(const MultiresNest& nest, const BakedReactionTable& table,
+                                const GasAtmosphereLayers& layers, std::span<const uint32_t> slots,
+                                std::array<uint32_t, GAS_AXES> size, const MultiresGasOptions& options,
+                                uint32_t substeps) {
+            constexpr std::array<GasBoundary, GAS_AXES> unused = {GasBoundary::Wall, GasBoundary::Wall,
+                                                                  GasBoundary::Wall};  // 端は面の一覧が持つ
+            GasConfig config = layers.MakeConfig(table, slots, size, unused, substeps, options.randomSeed);
+            config.cellLevel = nest.capacity.rootLevel;
+
+            return config;
         }
 
         uint32_t Register(MultiresNest& nest, const char* name, uint32_t place, uint32_t scale, uint32_t flags,
@@ -309,12 +377,19 @@ namespace bicameral::sim {
         if (table.environment.soundSpeedMillimetersPerSecond == 0)
             return std::unexpected("音速の基準が 0(環境の値 environment.sound_speed_mm_per_s が要る)");
 
-        if (options.substeps == 0 ||
-            table.environment.soundSpeedMillimetersPerSecond > GasSoundSpeedLimitMmPerS(options.substeps))
-            return std::unexpected("音速の基準が小刻みの安定の上限を超える");
+        // --- レベルと小刻み(T-0765): 根のレベル k のセルは 1 辺 0.5 m × 2^-k。小刻みは substeps × 2^σ(σ = max(0, k)。
+        //     細かいセルでも音の速さの数 ν をレベル 0 と同じに保つ。粗いセルは同じ小刻みのまま = ν が小さく安定)---
+        const int32_t level = nest.capacity.rootLevel;
+        if (level < GAS_MIN_CELL_LEVEL || level > GAS_MAX_CELL_LEVEL)
+            return std::unexpected("根のレベルが気体のセルの範囲(GAS_MIN_CELL_LEVEL〜GAS_MAX_CELL_LEVEL)の外");
 
-        if (nest.capacity.rootLevel != 0)
-            return std::unexpected("根のレベルが 0 でない(係数は 0.5 m のセル。レベルの関数にするのは T-0765)");
+        const uint32_t sigma = level > 0 ? (uint32_t)level : 0;
+        if (options.substeps == 0 || options.substeps > (UINT32_MAX >> sigma))
+            return std::unexpected("小刻みの数が 0 か、レベルの 2^σ 倍が 32bit を超える");
+
+        const uint32_t substeps = options.substeps << sigma;
+        if (table.environment.soundSpeedMillimetersPerSecond > GasSoundSpeedLimitMmPerS(substeps, level))
+            return std::unexpected("音速の基準が小刻みの安定の上限を超える");
 
         if (nest.wideCells)
             return std::unexpected("溢れのセルを使う世界の気体はまだ無い");
@@ -324,8 +399,9 @@ namespace bicameral::sim {
 
         MultiresGas result;
         result.m_options = options;
+        result.m_substeps = substeps;
 
-        // --- 欄(運動量・運動のエネルギーは保存量。前の質量は合わせ直しの元。帳簿は世界の欄)---
+        // --- 欄(運動量・運動のエネルギーは保存量 = 世界の帳簿に列がある。前の質量は合わせ直しの元。T-0763)---
         constexpr uint32_t conserved = sf::SF_FLAG_CONSERVED | sf::SF_FLAG_HASHED;
         MultiresGasFields& fields = result.m_fields;
         fields.momentum = Register(nest, "gas.momentum", sf::SF_PLACE_CELL, sf::SF_SCALE_VOLUME, conserved, 3);
@@ -333,12 +409,7 @@ namespace bicameral::sim {
         // 前の質量は保存量ではない(セルの気体の写し)ので余りを帳簿へ出さない SAME(液体の liquid.mass_before と同じ)
         fields.massBefore = Register(nest, "gas.mass_before", sf::SF_PLACE_CELL, sf::SF_SCALE_SAME, sf::SF_FLAG_HASHED,
                                      1);
-        fields.ledgerMomentum = Register(nest, "gas.ledger_momentum", sf::SF_PLACE_WORLD, sf::SF_SCALE_SAME,
-                                         sf::SF_FLAG_HASHED, 3);
-        fields.ledgerEnergy = Register(nest, "gas.ledger_energy", sf::SF_PLACE_WORLD, sf::SF_SCALE_SAME,
-                                       sf::SF_FLAG_HASHED, 1);
-        for (const uint32_t field :
-             {fields.momentum, fields.kinetic, fields.massBefore, fields.ledgerMomentum, fields.ledgerEnergy}) {
+        for (const uint32_t field : {fields.momentum, fields.kinetic, fields.massBefore}) {
             if (field == MULTIRES_NO_FIELD)
                 return std::unexpected("気体の欄を登録できない(名前が重なる・根を置いた後)");
         }
@@ -356,17 +427,13 @@ namespace bicameral::sim {
         // --- 刻みの初めの値(セル・気体の空き・欄)---
         GasRead read = ReadCells(nest, table, grid, m_fields, report);
 
-        // --- セル → 気体の箱(層 = 世界の箱の z。基準の大気は一番下の層の高さから)---
-        const GasAtmosphereLayers layers = GasAtmosphereLayers::Create(table, m_options.floorHeightMillimeters,
-                                                                       grid.size[UP_AXIS]);
+        // --- セル → 気体の箱(層 = 世界の箱の z。基準の大気は一番下の層の高さから。層の厚さ・係数は根のレベル)---
+        const GasAtmosphereLayers layers = MakeLayers(nest, table, grid.size[UP_AXIS], m_options);
         GasCellsStep step;
         step.slots = CollectGasSpecies(table, read.cells, layers.Species());
         report.gasSpecies = (uint32_t)step.slots.size();
 
-        constexpr std::array<GasBoundary, GAS_AXES> unused = {GasBoundary::Wall, GasBoundary::Wall,
-                                                              GasBoundary::Wall};  // 端は面の一覧が持つ
-        const GasConfig config = layers.MakeConfig(table, step.slots, grid.size, unused, m_options.substeps,
-                                                   m_options.randomSeed);
+        const GasConfig config = MakeBoxConfig(nest, table, layers, step.slots, grid.size, m_options, m_substeps);
         step.box = MakeGasBox(config, layers.MakeReference(config, step.slots));
         step.box.cells.resize(grid.Count());  // 抜けのある世界は箱より少ない
         step.box.tick = tick;
@@ -381,15 +448,17 @@ namespace bicameral::sim {
         const std::vector<GasFaceLink> links = LinkMaker{.grid = grid, .edges = nest.edges.world}.All();
         StepGasLinks(step.box, links);
 
-        // --- 気体の箱 → セル・欄・帳簿 → 書き戻す(起こす)---
+        // --- 静止の丸め(当てる段・粘りの後)→ 気体の箱 → セル・欄・帳簿 → 書き戻す(起こす)---
         GasCellsLedger ledger{.amounts = std::vector<int64_t>(table.species.size(), 0)};
+        RestGasCells(step, m_options.restSpeedUnits, ledger);
+        const int64_t kineticBefore = SumKinetic(read.fields);
         std::vector<uint8_t> changed;
-        if (!StoreGasCells(table, step, m_options.restSpeedUnits, read.cells, read.fields, ledger, changed)) {
+        if (!StoreGasCells(table, step, read.cells, read.fields, ledger, changed)) {
             report.skippedCellOverflow = true;
             return report;
         }
 
-        AddLedger(nest, m_fields, ledger);  // 静止の丸めで消した運動量は ledger.momentum に含む(列を分けるのは T-0763)
+        AddLedger(nest, m_fields, ledger, kineticBefore - SumKinetic(read.fields));
         report.restedCells = ledger.restedCells;
         report.changedCells = (uint32_t)rng::count(changed, uint8_t{1});
         WriteCells(nest, grid, m_fields, read, changed, changedSlots);
@@ -406,15 +475,43 @@ namespace bicameral::sim {
     }
 
     int64_t MultiresGas::LedgerEnergy(const MultiresNest& nest) const {
-        return LoadNestWorldField(nest, m_fields.ledgerEnergy, 0);
+        int64_t energy = 0;
+        for (const uint32_t reason : ENERGY_REASONS)
+            energy += WorldLedgerNetUnits(nest, reason, multires::WL_COLUMN_ENERGY, nest.capacity.rootLevel);
+
+        return energy;
     }
 
     std::array<int64_t, GAS_AXES> MultiresGas::LedgerMomentum(const MultiresNest& nest) const {
         std::array<int64_t, GAS_AXES> momentum = {};
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            momentum[axis] = LoadNestWorldField(nest, m_fields.ledgerMomentum, axis);
+        const uint32_t first = NestFieldLedgerBase(nest) + NestConservedIndex(nest, m_fields.momentum);
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+            for (const uint32_t reason : MOMENTUM_REASONS)
+                momentum[axis] += WorldLedgerNetUnits(nest, reason, first + axis, nest.capacity.rootLevel);
+        }
 
         return momentum;
+    }
+
+    reaction::RxCell MultiresGas::ReferenceCell(const MultiresNest& nest, const BakedReactionTable& table,
+                                                uint32_t layer) const {
+        const GasAtmosphereLayers layers = MakeLayers(nest, table, layer + 1, m_options);
+        const std::span<const uint32_t> atmosphere = layers.Species();
+        const GasConfig config = MakeBoxConfig(nest, table, layers, atmosphere, {1, 1, layer + 1}, m_options,
+                                               m_substeps);
+        const GasCell reference = layers.MakeReference(config, atmosphere)[layer];
+
+        reaction::RxCell cell = reaction::RxMakeEmptyCell(reference.energy);
+        for (uint32_t s = 0; s < config.speciesCount; ++s) {
+            if (reference.amounts[s] == 0)
+                continue;
+
+            cell.species[cell.speciesCount] = atmosphere[s];
+            cell.amounts[cell.speciesCount] = reference.amounts[s];
+            ++cell.speciesCount;
+        }
+
+        return cell;
     }
 
 }  // namespace bicameral::sim

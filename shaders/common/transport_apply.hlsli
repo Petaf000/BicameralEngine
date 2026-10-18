@@ -13,6 +13,9 @@
 //      NestFieldLedgerBase + NestConservedIndex(欄)+ 値の番号 / レベルの単位の丸ごとの数は AddWorldLedgerUnits・2^-64 の端数は
 //      AddWorldLedgerBits / 符号付きの量は正 → 出・負 → 入(WlEnergyEntry)/ 保存の検査は ComputeConservedTotals の 1 つ(欄の量も含む)
 //   6. 起こす: 変化の 0 でないセルのブロックを次の小刻み・刻みの種に(TxWakes。面の隣を起こすのは世界の側 = MR の WakeAround)
+//   当てる段の後の仕上げ(慣性の欄を持つ種類だけ。1 刻みに 1 回・全部の小刻みの後・書き戻しの前): 静まる性質(粘り)→ 静止の丸め
+//   (rest_rounding.hlsli の RrShouldRest。刻みの初めの値と比べる。消した運動量は帳簿の「静止の丸め」)。気体 = gas_reference の
+//   ApplyViscosity → gas_cells の RestGasCells(T-0765・ADR-0345)・液体 = T-0777
 //
 // 種類(Kind)が固有に持つのは 3 つだけ(土台 §0 の 3)。メンバー関数で渡す(HLSL 2021 と C++ のテンプレート):
 //   - 坂: int64_t Slope(CvCellView view)
@@ -82,15 +85,19 @@ FX_FN bool TxScaleLess(TxScale a, TxScale b) {
     return left.hi < right.hi || (left.hi == right.hi && left.lo < right.lo);
 }
 
-FX_FN TxScale TxMinScale(TxScale a, TxScale b) {
-    if (TxScaleLess(b, a))
-        return b;
-
-    return a;
-}
-
 FX_FN bool TxScaleIsOne(TxScale scale) {
     return scale.numerator >= scale.denominator;
+}
+
+// min(a, b)。どちらかが 1 なら掛け算をせずに他方(倍率は 1 以下なので同じ値。面の多くは縮めないので速い。T-0765)
+FX_FN TxScale TxMinScale(TxScale a, TxScale b) {
+    if (TxScaleIsOne(a))
+        return b;
+
+    if (TxScaleIsOne(b) || !TxScaleLess(b, a))
+        return a;
+
+    return b;
 }
 
 // min(1, available ÷ total)(total = 0 なら 1)
@@ -340,6 +347,15 @@ FX_FN bool TxFlowCell(Kind kind, World world, uint32_t slot, MrBlock block, uint
 // 世界が渡すもの(TxFlowCell の世界に足す 1 つ): void AddPacket(uint32_t slot, uint32_t index, TxPacket packet, uint32_t incoming)
 // (incoming = 0 なら上流 = 引く、1 なら下流 = 足す。順に依存しない整数の和)。
 
+// 列 1 つの量 raw を、上流の出る側と下流の入る側の倍率の min で縮める(切り捨て 1 回)。主の量は TxLimitAmount、
+// 列ごとに別の上限が要る種類(気体の成分ごとの中身。T-0765)は列ごとの TxLimit を渡す
+FX_FN uint64_t TxLimitColumn(TxLimit source, TxLimit target, uint64_t raw) {
+    if (raw == 0)
+        return 0;
+
+    return TxScaleAmount(raw, TxFaceScale(source, target));
+}
+
 // 上流 (fromSlot, fromIndex) から下流 (toSlot, toIndex) への主の量 raw を、両側の倍率の min で縮める
 template <typename World>
 FX_FN uint64_t TxLimitAmount(World world, uint32_t fromSlot, uint32_t fromIndex, uint32_t toSlot, uint32_t toIndex,
@@ -347,7 +363,7 @@ FX_FN uint64_t TxLimitAmount(World world, uint32_t fromSlot, uint32_t fromIndex,
     if (raw == 0)
         return 0;
 
-    return TxScaleAmount(raw, TxFaceScale(world.Limit(fromSlot, fromIndex), world.Limit(toSlot, toIndex)));
+    return TxLimitColumn(world.Limit(fromSlot, fromIndex), world.Limit(toSlot, toIndex), raw);
 }
 
 // 面の欄(state_field の SF_PLACE_FACE = セルの + 側 3 面)の持ち主: セルの面 face が + の面なら自分の欄(軸 face / 2)、

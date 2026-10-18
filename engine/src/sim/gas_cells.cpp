@@ -102,10 +102,13 @@ namespace bicameral::sim {
     // --- 層ごとの基準の大気 ---
 
     GasAtmosphereLayers GasAtmosphereLayers::Create(const BakedReactionTable& table, int64_t bottomHeightMillimeters,
-                                                    uint32_t layerCount) {
+                                                    uint32_t layerCount, int32_t level) {
         GasAtmosphereLayers layers;
         for (uint32_t layer = 0; layer < layerCount; ++layer) {
-            const int64_t height = bottomHeightMillimeters + ((int64_t)layer * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS);
+            // 層の高さ(mm。レベル level の 1 辺 = 0.5 m × 2^-level。細かいレベルは層ごとに切り捨て)
+            const int64_t steps = (int64_t)layer * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS;
+            const int64_t height = bottomHeightMillimeters +
+                                   (level >= 0 ? steps >> (uint32_t)level : steps * ((int64_t)1 << (uint32_t)(-level)));
             const AtmosphereSample sample = SampleAtmosphere(table.atmosphere, height);
             std::vector<std::array<uint32_t, 2>> fractions;
             for (const AtmosphereFraction& fraction : sample.fractions) {
@@ -242,9 +245,31 @@ namespace bicameral::sim {
         }
     }
 
-    bool StoreGasCells(const BakedReactionTable& table, const GasCellsStep& step, uint32_t restSpeedUnits,
-                       std::span<reaction::RxCell> cells, GasCellFields& fields, GasCellsLedger& ledger,
-                       std::vector<uint8_t>& changed) {
+    void RestGasCells(GasCellsStep& step, uint32_t restSpeedUnits, GasCellsLedger& ledger) {
+        if (restSpeedUnits == 0)
+            return;
+
+        GasBox& box = step.box;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            GasCell& gas = box.cells[index];
+            const uint64_t mass = GasCellMass(box, gas);
+            if (mass == 0 || !rest::RrShouldRest(LargestAxis(gas.momentum), LargestAxis(step.momentumBefore[index]),
+                                                 mass * restSpeedUnits))
+                continue;
+
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                ledger.momentum[axis] -= gas.momentum[axis];
+                ledger.restMomentum[axis] -= gas.momentum[axis];
+            }
+
+            ledger.restEnergy += gas::GfKineticMilliJoule(GasKineticEnergy(box, gas));  // µJ → mJ(書き戻しと同じ丸め)
+            gas.momentum = {0, 0, 0};
+            ++ledger.restedCells;
+        }
+    }
+
+    bool StoreGasCells(const BakedReactionTable& table, const GasCellsStep& step, std::span<reaction::RxCell> cells,
+                       GasCellFields& fields, GasCellsLedger& ledger, std::vector<uint8_t>& changed) {
         const GasBox& box = step.box;
 
         // --- 書き戻せるか(1 セルの成分がインラインの数に収まる。収まらなければ流さない)---
@@ -255,13 +280,20 @@ namespace bicameral::sim {
                 return false;
         }
 
-        // --- 帳簿(物質 ID ごと)---
+        // --- 帳簿(物質 ID ごと・理由ごと。T-0763)---
         for (uint32_t s = 0; s < step.slots.size(); ++s)
             ledger.amounts[step.slots[s]] += box.ledger.amounts[s];
 
         ledger.energy += box.ledger.energy;
-        for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+        ledger.edgeEnergy += box.ledger.edgeEnergy;
+        ledger.gravityEnergy += box.ledger.gravityEnergy;
+        for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
             ledger.momentum[axis] += box.ledger.momentum[axis] - step.lost[axis];
+            ledger.edgeMomentum[axis] += box.ledger.edgeMomentum[axis];
+            ledger.wallMomentum[axis] += box.ledger.wallMomentum[axis];
+            ledger.gravityMomentum[axis] += box.ledger.gravityMomentum[axis];
+            ledger.followMomentum[axis] -= step.lost[axis];
+        }
 
         // --- 気体の箱 → セル(凝縮相の成分とエネルギーはそのまま)---
         changed.assign(cells.size(), 0);
@@ -282,30 +314,14 @@ namespace bicameral::sim {
             fields.kinetic[index] = kinetic;
             fields.mass[index] = mass;
 
-            // 気体が残らなかったセルの運動量は帳簿へ(質量の無い運動量は持たない。次に現れる気体は静止して現れる。T-0646)
+            // 気体が残らなかったセルの運動量は帳簿へ(欄が物質に付く: 質量の無い運動量は持たない。次に現れる気体は静止して現れる。T-0646)
             if (mass == 0) {
-                for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-                    ledger.momentum[axis] -= gas.momentum[axis];
-
-                fields.momentum[index] = {0, 0, 0};
-            }
-
-            // 静止の丸め(T-0723・T-0758。既定は切る。形は common/rest_rounding.hlsli = 液体の面と同じ): どの軸の速さも restSpeedUnits 未満で、
-            // この刻みで速くなっていない(運動量の最大の軸の大きさが刻みの初め以下)なら運動量を 0 に(帳簿へ)、運動エネルギーのぶんは熱へ
-            std::array<int64_t, GAS_AXES>& momentum = fields.momentum[index];
-            if (restSpeedUnits != 0 && mass != 0 &&
-                rest::RrShouldRest(LargestAxis(momentum), LargestAxis(step.momentumBefore[index]),
-                                   mass * restSpeedUnits)) {
                 for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
-                    ledger.momentum[axis] -= momentum[axis];
-                    ledger.restMomentum[axis] -= momentum[axis];
+                    ledger.momentum[axis] -= gas.momentum[axis];
+                    ledger.followMomentum[axis] -= gas.momentum[axis];
                 }
 
-                after.energy += fields.kinetic[index];
-                ledger.restEnergy += fields.kinetic[index];
-                fields.kinetic[index] = 0;
-                momentum = {0, 0, 0};
-                ++ledger.restedCells;
+                fields.momentum[index] = {0, 0, 0};
             }
 
             if (SameCell(after, cells[index]))
