@@ -15,9 +15,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "sim/gas_fastest_check.h"
 #include "sim/gas_projection.h"
 #include "sim/gas_reference.h"
 #include "sim/world_physics.h"
@@ -827,7 +829,18 @@ namespace {
         uint64_t hash = 0;
     };
 
-    GasBox MakePlate16() {
+    // 板の層(z = 4)のセルの形(T-0788 の調べ)。All = 全部を share・ClosedBetween = every セルに 1 つを share・残りを塞ぐ(孔のある壁)・
+    // OpenBetween = every セルに 1 つを開けたまま・残りを share(大きな孔のある多孔の板)
+    enum class PlateHoles : uint8_t { All, ClosedBetween, OpenBetween };
+
+    struct PlateShape {
+        uint32_t share = GAS_OPEN_FULL / 256;
+        PlateHoles holes = PlateHoles::All;
+        uint32_t every = 1;
+        uint32_t raisePercent = 102;  // 板の下の気体の量(%)
+    };
+
+    GasBox MakePlate(const PlateShape& shape) {
         GasBox box = MakeAirBox(MakeAirConfig(16, 16, 16));
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             if (Coordinate(box, index)[2] >= 4)
@@ -835,21 +848,33 @@ namespace {
 
             GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
             for (uint64_t& amount : amounts)
-                amount = amount * 102 / 100;
+                amount = amount * shape.raisePercent / 100;
 
             box.cells[index] = MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
         }
 
+        uint32_t layerIndex = 0;
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
-            if (Coordinate(box, index)[2] == 4)
-                Occupy(box, index, GAS_OPEN_FULL / 256);
+            if (Coordinate(box, index)[2] != 4)
+                continue;
+
+            const bool marked = layerIndex++ % shape.every == 0;
+            if (shape.holes == PlateHoles::All || (shape.holes == PlateHoles::ClosedBetween && marked))
+                Occupy(box, index, shape.share);
+            else if (shape.holes == PlateHoles::ClosedBetween)
+                Occupy(box, index, 0);
+            else if (!marked)
+                Occupy(box, index, shape.share);
         }
 
         return box;
     }
 
-    Plate16Run RunPlate16(uint32_t speed, int ticks, bool print, bool exclude = GasPressureOptions{}.excludeCutFlows) {
-        GasBox box = MakePlate16();
+    GasBox MakePlate16() {
+        return MakePlate({});
+    }
+
+    Plate16Run RunPlate(GasBox box, uint32_t speed, int ticks, bool print, bool exclude) {
         const GasTotals before = SumGas(box);
         GasProjection state;
         GasProjectionOptions options;
@@ -863,8 +888,14 @@ namespace {
             run.outerUnconverged += cost.outerUnconverged;
             run.maxSpeed = std::max(run.maxSpeed, MaxSpeed(box));
             int64_t largest = 0;
-            for (const int64_t value : state.pressures)
+            for (uint32_t index = 0; index < state.pressures.size(); ++index) {
+                // 塞がったセル(空き 0)は式の面を持たず、x は値に効かない(T-0788 の調べで、孔のある壁の塞がったセルの x だけが育った)
+                if (!box.openQ16.empty() && box.openQ16[index] == 0)
+                    continue;
+
+                const int64_t value = state.pressures[index];
                 largest = std::max(largest, value == INT64_MIN ? INT64_MAX : std::abs(value));
+            }
 
             run.largest = std::max(run.largest, largest);
             if (print && (tick < 4 || tick % 10 == 9)) {
@@ -879,6 +910,53 @@ namespace {
 
         run.hash = HashGas(box);
         return run;
+    }
+
+    Plate16Run RunPlate16(uint32_t speed, int ticks, bool print, bool exclude = GasPressureOptions{}.excludeCutFlows) {
+        return RunPlate(MakePlate16(), speed, ticks, print, exclude);
+    }
+
+    // T-0788 の調べ(--plates): 板の空き・形・圧力の差を変えて最速で流し、外側の反復が |x| の上限の中で収まるかを表にする
+    void SweepPlates() {
+        const auto report = [](const char* label, const PlateShape& shape) {
+            const GasBox box = MakePlate(shape);
+            const size_t joints = FindGasSmallOpenJoints(box.config, box.openQ16).size();
+            const Plate16Run run = RunPlate(box, 0, 40, false, GasPressureOptions{}.excludeCutFlows);
+            // 警告の閾値の根拠: 壊れた板は必ず警告する(警告しない板は壊れない)
+            EXPECT(run.conserved);
+            EXPECT(run.largest < PLATE16_PRESSURE_BOUND || joints != 0);
+            std::printf(
+                "plates %s share 1/%u every %u raise %u%%: warned %d, max |x| %lld uPa, kept mismatch %lld mg, "
+                "outer at limit %u, max speed %lld, conserved %d, %s\n",
+                label, shape.share == 0 ? 0 : GAS_OPEN_FULL / shape.share, shape.every, shape.raisePercent,
+                joints != 0 ? 1 : 0, (long long)run.largest, (long long)run.worstMismatch, run.outerUnconverged,
+                (long long)run.maxSpeed, run.conserved ? 1 : 0,
+                run.largest < PLATE16_PRESSURE_BOUND ? "bounded" : "DIVERGED");
+        };
+
+        for (const uint32_t divisor : {2u, 4u, 8u, 16u, 32u, 64u, 128u, 256u}) {
+            report("all", {.share = GAS_OPEN_FULL / divisor});
+            report("all", {.share = GAS_OPEN_FULL / divisor, .raisePercent = 120});
+        }
+
+        for (const uint32_t every : {2u, 4u, 16u, 64u}) {
+            report("closed-between", {.holes = PlateHoles::ClosedBetween, .every = every});
+            report("open-between", {.holes = PlateHoles::OpenBetween, .every = every});
+        }
+
+        for (const uint32_t raise : {150u, 200u, 500u}) {
+            report("none", {.share = GAS_OPEN_FULL, .raisePercent = raise});
+            for (const uint32_t divisor : {2u, 4u, 8u, 16u})
+                report("all", {.share = GAS_OPEN_FULL / divisor, .raisePercent = raise});
+        }
+
+        report("closed", {.share = 0});
+        report("closed-between", {.share = GAS_OPEN_FULL / 2, .holes = PlateHoles::ClosedBetween, .every = 4});
+        for (const uint32_t divisor : {16u, 32u, 64u}) {
+            report("closed-between",
+                   {.share = GAS_OPEN_FULL / divisor, .holes = PlateHoles::ClosedBetween, .every = 4});
+            report("open-between", {.share = GAS_OPEN_FULL / divisor, .holes = PlateHoles::OpenBetween, .every = 16});
+        }
     }
 
     void TestPlate16() {
@@ -899,6 +977,67 @@ namespace {
         }
     }
 
+    // T-0788(D-519): 最速 × 小さい空きの検査。小さい空き(1/2 未満)のセルだけでつながった気体の部分の組を見つけるか
+    size_t JointsOf(const GasBox& box) {
+        return FindGasSmallOpenJoints(box.config, box.openQ16).size();
+    }
+
+    GasBox MakeLayerBox(uint32_t axis, uint32_t layer, uint32_t share, GasBoundary boundary) {
+        GasBox box = MakeAirBox(MakeAirConfig(8, 8, 8));
+        box.config.boundary[axis] = boundary;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[axis] == layer)
+                Occupy(box, index, share);
+        }
+
+        return box;
+    }
+
+    void TestFastestCheck() {
+        // 16³ の板(z = 4 の層を全部 1/256): 下の 4 層と上の 11 層を 256 セルの孔だけでつなぐ
+        const GasBox plate = MakePlate16();
+        const std::vector<GasSmallOpenJoint> joints = FindGasSmallOpenJoints(plate.config, plate.openQ16);
+        EXPECT(joints.size() == 1);
+        if (joints.size() == 1) {
+            const GasSmallOpenJoint& joint = joints[0];
+            EXPECT(joint.parts == 2 && !joint.outside && joint.smallCells == 256);
+            EXPECT(joint.smallestOpenQ16 == GAS_OPEN_FULL / 256 && joint.smallestPartCells == 16 * 16 * 4);
+            EXPECT((joint.minCell == std::array<uint32_t, 3>{0, 0, 4}));
+            EXPECT((joint.maxCell == std::array<uint32_t, 3>{15, 15, 4}));
+            const std::string warning = GasSmallOpenJointWarning(joint, "箱", "z = 4");
+            std::printf("fastest check: %s\n", warning.c_str());
+            EXPECT(warning.starts_with(GAS_FASTEST_SMALL_OPEN_WARNING_PREFIX));
+            EXPECT(warning.find("0.39%") != std::string::npos && warning.find("2% 高いだけで") != std::string::npos);
+        }
+
+        EXPECT(JointsOf(MakePlate({.share = GAS_OPEN_FULL / 2})) == 0);  // 1/2 は小さくない(測った 5 倍の差でも収まる)
+        EXPECT(JointsOf(MakePlate({.share = (GAS_OPEN_FULL / 2) - 1})) == 1);
+        EXPECT(JointsOf(MakePlate({.share = 0})) == 0);  // 塞がった板は分けるだけ(つながない)
+        EXPECT(JointsOf(MakePlate({.holes = PlateHoles::OpenBetween, .every = 64})) ==
+               0);  // 開いた孔が 4 つあれば部分は 1 つ
+        // 孔のある壁: 64 の孔(それぞれ塞がったセルに囲まれる)は同じ 2 つの部分をつなぐので 1 つの組
+        const GasBox holes = MakePlate({.share = GAS_OPEN_FULL / 16, .holes = PlateHoles::ClosedBetween, .every = 4});
+        const std::vector<GasSmallOpenJoint> holeJoints = FindGasSmallOpenJoints(holes.config, holes.openQ16);
+        EXPECT(holeJoints.size() == 1 && holeJoints[0].smallCells == 64);
+        EXPECT(JointsOf(MakeWallBox(GAS_OPEN_FULL / 256)) == 1);
+        EXPECT(JointsOf(MakeWallBox(GAS_OPEN_FULL / 2)) == 0);
+        EXPECT(JointsOf(MakeAirBox(MakeAirConfig(8, 8, 8))) == 0);  // 空きが全部(openQ16 が空)
+
+        // 端の層: 閉じた床は部分を 1 つにしか接しない。開いた天井は箱の中と外をつなぐ
+        EXPECT(JointsOf(MakeLayerBox(2, 0, GAS_OPEN_FULL / 16, GasBoundary::Wall)) == 0);
+        GasBox roof = MakeLayerBox(2, 7, GAS_OPEN_FULL / 16, GasBoundary::Open);  // 上と下が開く。下の層は塞ぐ
+        for (uint32_t index = 0; index < roof.cells.size(); ++index) {
+            if (Coordinate(roof, index)[2] == 0)
+                Occupy(roof, index, 0);
+        }
+
+        const std::vector<GasSmallOpenJoint> roofJoints = FindGasSmallOpenJoints(roof.config, roof.openQ16);
+        EXPECT(roofJoints.size() == 1 && roofJoints[0].outside && roofJoints[0].parts == 2);
+        // 周期の境界: 真ん中の層は、壁なら 2 つに分けるが、周期なら端を回ってつながる
+        EXPECT(JointsOf(MakeLayerBox(0, 3, GAS_OPEN_FULL / 16, GasBoundary::Wall)) == 1);
+        EXPECT(JointsOf(MakeLayerBox(0, 3, GAS_OPEN_FULL / 16, GasBoundary::Periodic)) == 0);
+    }
+
     void TestPorous() {
         for (const bool galerkin : {false, true}) {
             for (const bool plate : {true, false}) {
@@ -913,6 +1052,12 @@ namespace {
 // 引数 --sweep で、外側の反復の止め方の違いを測る(遅い。ctest では回さない)
 int main(int argc, char** argv) {
     const bool sweep = argc > 1 && std::string_view(argv[1]) == "--sweep";
+    if (argc > 1 && std::string_view(argv[1]) == "--plates") {  // T-0788 の調べ(最速 × 小さい空きの板の形と空き)
+        SweepPlates();
+        std::printf("plates: %d failure(s)\n", failureCount);
+        return failureCount == 0 ? 0 : 1;
+    }
+
     if (argc > 1 && std::string_view(argv[1]) == "--plate16") {  // T-0722 の調べ(細孔の板と孔の壁だけ)
         (void)RunPlate16(0, 4, true, false);                     // 前(切った流れを外側の反復の食い違いから除かない)
 
@@ -937,6 +1082,7 @@ int main(int argc, char** argv) {
         TestWall();
         TestPorous();
         TestPlate16();
+        TestFastestCheck();
     }
 
     // --- 外側の反復(T-0530。既定の止め方)---

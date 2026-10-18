@@ -265,6 +265,8 @@ add_executable(gas_projection_test gas_projection_test.cpp)  # 気体の圧力�
 target_link_libraries(gas_projection_test PRIVATE bicameral_gas_projection bicameral_core)
 add_test(NAME gas_projection COMMAND gas_projection_test)
 set_tests_properties(gas_projection PROPERTIES TIMEOUT 1800)
+add_test(NAME gas_projection_plates COMMAND gas_projection_test --plates)  # T-0788: 最速 × 小さい空きの板の警告の閾値の根拠
+set_tests_properties(gas_projection_plates PROPERTIES TIMEOUT 1800)
 # 引きずりの一般の形の模型(D-487 ④・T-0493): 交差の引きずり(結合の強さ q)と、気体の箱の中の燃える木箱で煙が熱を運ぶ(CPU)
 add_executable(drag_model_test drag_model_test.cpp)
 target_link_libraries(drag_model_test PRIVATE bicameral_gas bicameral_reaction bicameral_core)

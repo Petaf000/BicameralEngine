@@ -306,6 +306,72 @@ namespace {
         return run;
     }
 
+    // 最速 × 小さい空き(T-0788・D-519): 壁の層の砂を num/den にする(孔の空気は基準 × 残りの割合 = 同じ圧力)
+    void FillBarrier(const BakedReactionTable& table, const ProbeGasField& field, std::span<reaction::RxCell> cells,
+                     uint64_t num, uint64_t den) {
+        for (uint32_t region = 0; region < field.RegionCellCount(); ++region) {
+            const auto at = RegionCoordinates(region, GAS_SIZE);
+            if (at[0] != GAS_BARRIER_X)
+                continue;
+
+            const reaction::RxCell air = field.ReferenceCell(table, GAS_MIN[1] + at[1]);
+            std::vector<SpeciesAmount> amounts;
+            for (uint32_t i = 0; i < air.speciesCount; ++i)
+                amounts.push_back({.species = air.species[i], .amount = air.amounts[i] * (den - num) / den});
+
+            amounts.push_back({.species = table.SpeciesId("grain"), .amount = FillAmount(table, num, den)});
+            cells[field.GridIndex(region)] = MakeCell(table, amounts);
+        }
+    }
+
+    // 置いた時の検査(CheckFastestOpenings)と刻みの中の検査(Step の report)。最速の投影だけ警告し、値は変えない(D-487 ②)
+    void TestFastestSmallOpenings(const BakedReactionTable& table) {
+        ProbeGasOptions fastestOptions = GasOptions(GAS_MIN, GAS_SIZE);
+        fastestOptions.pressure = ProbeGasPressure::Projection;  // 音速は既定の 0 = 最速
+        auto fastest = ProbeGasField::Create(table, fastestOptions);
+        auto explicitField = ProbeGasField::Create(table, GasOptions(GAS_MIN, GAS_SIZE));
+        EXPECT(fastest.has_value() && explicitField.has_value());
+        if (!fastest || !explicitField)
+            return;
+
+        EXPECT(fastest->FastestProjection() && !explicitField->FastestProjection());
+
+        // --- 置いた時: 壁の層の空きが 1/2 なら警告しない・1/16 は最速だけ警告する ---
+        std::vector<reaction::RxCell> cells = MakeGasWorld(table, *fastest, Barrier::Half);
+        std::vector<reaction::RxCell> explicitCells = cells;
+        EXPECT(fastest->CheckFastestOpenings(table, cells).empty());
+        FillBarrier(table, *fastest, cells, 15, 16);
+        FillBarrier(table, *explicitField, explicitCells, 15, 16);
+        const std::vector<std::string> placed = fastest->CheckFastestOpenings(table, cells);
+        EXPECT(placed.size() == 1);
+        EXPECT(explicitField->CheckFastestOpenings(table, cells).empty());
+        if (placed.size() == 1) {
+            std::printf("fastest x small openings (placed): %s\n", placed[0].c_str());
+            EXPECT(placed[0].starts_with(GAS_FASTEST_SMALL_OPEN_WARNING_PREFIX));
+            EXPECT(placed[0].find("格子の x 24〜24・y 0〜1・z 20〜21") != std::string::npos);
+            EXPECT(placed[0].find("4 セル") != std::string::npos);
+        }
+
+        // --- 刻みの中: 1 刻み目に警告・同じ空きの刻みは繰り返さない・1/2 に燃えると組は 0・また詰まると警告 ---
+        std::vector<uint32_t> changed;
+        for (uint64_t tick = 0; tick < 6; ++tick) {
+            if (tick == 2)
+                FillBarrier(table, *fastest, cells, 1, 2);
+
+            if (tick == 4)
+                FillBarrier(table, *fastest, cells, 15, 16);
+
+            const ProbeGasStepReport report = fastest->Step(table, cells, tick, changed);
+            const bool tight = tick < 2 || tick >= 4;
+            const bool fresh = tick == 0 || tick == 4;
+            EXPECT(report.smallOpenJoints == (tight ? 1u : 0u));
+            EXPECT(report.warnings.size() == (fresh ? 1u : 0u));
+
+            const ProbeGasStepReport quiet = explicitField->Step(table, explicitCells, tick, changed);
+            EXPECT(quiet.smallOpenJoints == 0 && quiet.warnings.empty());
+        }
+    }
+
     void TestGasThroughGrain(const BakedReactionTable& table) {
         std::array<GasRun, 5> runs;
         for (uint32_t b = 0; b < runs.size(); ++b) {
@@ -602,6 +668,7 @@ int main() {
     const BakedReactionTable table = MakeTable();
     TestShare(table);
     TestGasThroughGrain(table);
+    TestFastestSmallOpenings(table);
     TestLiquidThroughGrain(table);
     TestSoak(table);
     TestDisplacement(table);

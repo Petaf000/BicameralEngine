@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <format>
 
 #include "common/fixed.hlsli"
 #include "common/gas_flow.hlsli"
@@ -107,6 +108,67 @@ namespace bicameral::sim {
                                    m_options.substeps, m_options.randomSeed);
     }
 
+    // --- 最速 × 小さい空き(T-0788・D-519・ADR-0346。sim/gas_fastest_check)---
+
+    bool ProbeGasField::FastestProjection() const {
+        return m_options.pressure == ProbeGasPressure::Projection &&
+               m_options.projection.pressure.soundSpeedMmPerS == 0;
+    }
+
+    std::string ProbeGasField::JointWarning(const GasSmallOpenJoint& joint) const {
+        // 気体の箱の座標(x・y・z が上)→ 格子の座標(x・y が上・z)
+        const auto grid = [&](const std::array<uint32_t, GAS_AXES>& at, uint32_t gridAxis) {
+            const uint32_t gasAxis = GRID_AXIS_OF_GAS_AXIS[gridAxis];
+            return m_options.minCell[gridAxis] + at[gasAxis];
+        };
+        const std::string range = std::format("格子の x {}〜{}・y {}〜{}・z {}〜{}", grid(joint.minCell, 0),
+                                              grid(joint.maxCell, 0), grid(joint.minCell, 1), grid(joint.maxCell, 1),
+                                              grid(joint.minCell, 2), grid(joint.maxCell, 2));
+
+        return GasSmallOpenJointWarning(joint, "気体の区画", range);
+    }
+
+    std::vector<std::string> ProbeGasField::CheckFastestOpenings(const BakedReactionTable& table,
+                                                                 std::span<const reaction::RxCell> cells) const {
+        if (!FastestProjection())
+            return {};
+
+        std::vector<reaction::RxCell> region(RegionCellCount());
+        for (uint32_t index = 0; index < RegionCellCount(); ++index)
+            region[index] = cells[GridIndex(index)];
+
+        ProbeGasStepReport counts;
+        const std::vector<uint32_t> open = CollectGasOpen(table, region, counts);
+        const GasConfig config = MakeConfig(table, m_layers.Species());
+        std::vector<std::string> warnings;
+        for (const GasSmallOpenJoint& joint : FindGasSmallOpenJoints(config, open))
+            warnings.push_back(JointWarning(joint));
+
+        return warnings;
+    }
+
+    void ProbeGasField::CheckOpeningsOnStep(const GasConfig& config, std::span<const uint32_t> openQ16,
+                                            ProbeGasStepReport& report) {
+        if (!m_openingsChecked || !rng::equal(openQ16, m_checkedOpen)) {
+            std::vector<GasSmallOpenJoint> joints = FindGasSmallOpenJoints(config, openQ16);
+            // 新しい組(前の組と範囲・部分の数が違う)だけ警告する(燃えて空きが少しずつ変わる刻みごとに同じ文を繰り返さない)
+            for (const GasSmallOpenJoint& joint : joints) {
+                const bool known = rng::any_of(m_joints, [&](const GasSmallOpenJoint& before) {
+                    return before.minCell == joint.minCell && before.maxCell == joint.maxCell &&
+                           before.parts == joint.parts && before.outside == joint.outside;
+                });
+                if (!known)
+                    report.warnings.push_back(JointWarning(joint));
+            }
+
+            m_joints = std::move(joints);
+            m_checkedOpen.assign(openQ16.begin(), openQ16.end());
+            m_openingsChecked = true;
+        }
+
+        report.smallOpenJoints = static_cast<uint32_t>(m_joints.size());
+    }
+
     GasBox ProbeGasField::MakeAtmosphereBox(const BakedReactionTable& table) const {
         const GasConfig config = MakeConfig(table, m_layers.Species());
 
@@ -152,6 +214,8 @@ namespace bicameral::sim {
         step.box = MakeGasBox(config, m_layers.MakeReference(config, step.slots));
         step.box.tick = tick;
         step.box.openQ16 = CollectGasOpen(table, region, report);
+        if (FastestProjection())
+            CheckOpeningsOnStep(config, step.box.openQ16, report);
         LoadGasCells(table, region, m_fields, step);
 
         // --- 1 刻み(圧力の解き方を選ぶ)---

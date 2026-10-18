@@ -43,6 +43,7 @@
 
 #include "common/reaction.hlsli"
 #include "sim/gas_cells.h"
+#include "sim/gas_fastest_check.h"
 #include "sim/gas_projection.h"
 #include "sim/gas_reference.h"
 #include "sim/reaction_table.h"
@@ -102,6 +103,11 @@ namespace bicameral::sim {
         // --- セルの空き(固体と液体が占めない体積。T-0593・ADR-0268)---
         uint32_t blockedCells = 0;  // 空きが 0(気体が入れない・面は全部閉じる)
         uint32_t partialCells = 0;  // 空きが一部
+
+        // --- 最速 × 小さい空き(T-0788・D-519・ADR-0346。最速の投影のときだけ数える。値は変えない = D-487 ②)---
+        uint32_t smallOpenJoints = 0;  // 小さい空きのセルだけでつながった気体の部分の組の数(この刻みのセルの空き)
+        std::vector<std::string>
+            warnings;  // この刻みに新しく見つかった組の警告の文(頭は GAS_FASTEST_SMALL_OPEN_WARNING_PREFIX)
     };
 
     class ProbeGasField {
@@ -119,6 +125,15 @@ namespace bicameral::sim {
                                 std::vector<uint32_t>& changed);
 
         [[nodiscard]] const ProbeGasOptions& Options() const { return m_options; }
+
+        // 最速の投影(音速 0)で解くか(最速 × 小さい空きの検査をするのはこのときだけ。T-0788)
+        [[nodiscard]] bool FastestProjection() const;
+
+        // 置き方の検査(T-0788・D-519): 最速の投影なら、cells(格子の全部のセル)の区画のセルの空きを読み、小さい空きのセルだけで
+        // つながった気体の部分の組ごとに警告の文を返す(最速でなければ空)。世界を置いた時・ベイクした世界を渡す時に呼ぶ。
+        // 刻みの中は Step が空きの変わった刻みに同じ検査をし、新しく見つかった組を ProbeGasStepReport::warnings に入れる
+        [[nodiscard]] std::vector<std::string> CheckFastestOpenings(const BakedReactionTable& table,
+                                                                    std::span<const reaction::RxCell> cells) const;
         [[nodiscard]] const ProbeGasLedger& Ledger() const { return m_ledger; }
 
         // 区画のセル(区画の中の x + 幅 × (z + 奥行き × y)。気体の箱と同じ並び)の運動量と運動エネルギーのぶん
@@ -151,7 +166,15 @@ namespace bicameral::sim {
         std::vector<uint32_t> m_projectionSpecies;  // m_projection を作った時の物質(変わったら捨てる)
         ProbeGasLedger m_ledger;
 
+        // --- 最速 × 小さい空き(T-0788)。前に検査したセルの空きと見つけた組(空きが変わった刻みだけ検査し、新しい組だけ警告する)---
+        bool m_openingsChecked = false;
+        std::vector<uint32_t> m_checkedOpen;
+        std::vector<GasSmallOpenJoint> m_joints;
+
         [[nodiscard]] GasConfig MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const;
+        [[nodiscard]] std::string JointWarning(const GasSmallOpenJoint& joint) const;
+        void CheckOpeningsOnStep(const GasConfig& config, std::span<const uint32_t> openQ16,
+                                 ProbeGasStepReport& report);
     };
 
 }  // namespace bicameral::sim
