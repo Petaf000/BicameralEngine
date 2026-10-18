@@ -721,7 +721,8 @@ namespace bicameral::sim {
         // 塊のエネルギーは Transfer と同じ MovedEnergy)。超えるセルは出ていく面の割合と成分の量を同じ倍率で縮める(当てる段の TxMakeLimit・
         // TxFaceScale・TxScaleAmount。入る側は縮めない)。物質の量の上限(LimitOutflow・LimitMovedAmounts)の後に掛ける。
         // 根(T-0787 の測り): 強い爆発の 1 小刻みの終わりに熱が負のセルは、押し出す仕事を小刻みの初めの温度で数えて自分の熱より多く持ち出していた。
-        // ふつうの流れでは届かない(値は前とビット単位で同じ)。断熱のときだけ。縮めた面の数を返す
+        // 空気の箱の 5 倍・1500 K では届かないが、燃える木箱では刻み 1 に多く縮む(T-0787 の続き)ので今は GasBox::limitMovedHeat の時だけ。
+        // 断熱のときだけ。縮めた面の数を返す
         uint32_t LimitMovedEnergy(const GasBox& box, const std::vector<GasCell>& forced,
                                   const std::vector<GasDerived>& derived, std::vector<GasFace>& faces) {
             if (box.config.thermodynamics != GasThermodynamics::Adiabatic)
@@ -881,7 +882,8 @@ namespace bicameral::sim {
             // --- (4) 移す成分の物質量(MUSCL で面へ延ばした割合・乱数の丸め。G2)---
             ComputeMovedAmounts(box, forced, derived, roundingTick, faces);
             LimitMovedAmounts(box, forced, faces);
-            box.energyLimitedFaces += LimitMovedEnergy(box, forced, derived, faces);  // 熱の列(T-0787・ADR-0355)
+            if (box.limitMovedHeat)  // 熱の列(T-0787・ADR-0355。今は既定で切る。GasBox::limitMovedHeat)
+                box.energyLimitedFaces += LimitMovedEnergy(box, forced, derived, faces);
 
             if (box.heatProbe != nullptr && box.heatProbe->pushForm != 0)
                 PreparePushForm(box, forced, derived, faces);

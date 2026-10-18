@@ -957,8 +957,9 @@ namespace {
         return box;
     }
 
-    void ProbeHeat(uint32_t amount, uint32_t temperature, uint32_t pushForm = 0) {
+    void ProbeHeat(uint32_t amount, uint32_t temperature, uint32_t pushForm = 0, bool limitMovedHeat = true) {
         GasBox box = MakeBlastBox(amount, temperature);
+        box.limitMovedHeat = limitMovedHeat;
         GasHeatProbe probe;
         probe.pushForm = pushForm;
         box.heatProbe = &probe;
@@ -1006,6 +1007,7 @@ namespace {
 
         for (const Blast blast : {Blast{5, 1500000}, Blast{40, 2600000}}) {
             GasBox box = MakeBlastBox(blast.amount, blast.temperature);
+            box.limitMovedHeat = true;  // 今は既定で切る(T-0787 の続き)
             GasHeatProbe probe;
             box.heatProbe = &probe;
             const GasTotals before = SumGas(box);
@@ -1198,7 +1200,7 @@ namespace {
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--heat-probe") {  // T-0787 の調べ
-        // 案 2(押し出す仕事の温度: 0 = 初め〔既定〕・1 = 初めと終わりの平均・2 = 終わり。熱の列は既定で入る)
+        // 案 2(押し出す仕事の温度: 0 = 初め〔既定〕・1 = 初めと終わりの平均・2 = 終わり。熱の列は入れて測る)
         for (const uint32_t form : {0u, 1u, 2u}) {
             std::printf("--- push form %u ---\n", form);
             ProbeHeat(5, 1500000, form);
