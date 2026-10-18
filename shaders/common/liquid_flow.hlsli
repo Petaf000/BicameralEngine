@@ -129,6 +129,17 @@ FX_FN LqCellView LqMakeCellView(uint64_t massMilligrams, uint64_t volume, uint64
     return view;
 }
 
+// セルの液体の重さ(質量の単位。T-0759・ADR-0328)= 空きに収まる分だけ(体積が空きを超えたら 質量 × 空き ÷ 体積)。
+// 溢れて縮んだ分は圧力を伝えるばね(溢れの圧力)で、重さを足さない。縮んだ分まで重さに数えると、蓋の下で圧力を運ぶために縮んだ柱は
+// 隣の柱より段ごとに重くなり、どの段でも横に釣り合う静止の形が無くなる(蓋の下の柱が回り続ける)。重さを収まる分にすると、
+// 満ちた柱どうしの段の間の重さの差は縮みによらず同じなので、溢れの圧力を 1 つの値にすればどの段でも釣り合う(静止の形がある)
+FX_FN uint64_t LqWeight(LqCellView view) {
+    if (view.volume <= view.room)
+        return view.equivalent;
+
+    return LqMulDiv(view.equivalent, view.room, view.volume);
+}
+
 // 面の開き(Q16): 両側の空きの小さい方(孔の形は読まない。T-0616)
 FX_FN uint32_t LqFaceOpen(uint32_t openA, uint32_t openB) {
     return openA < openB ? openA : openB;
@@ -173,9 +184,9 @@ FX_FN LqColumnStep LqColumnPressure(LqCellView self, uint64_t above, uint32_t ha
         supportDenominator = below.room;
     }
 
-    result.pressure = (int64_t)LqMulDiv((2 * supported) + self.equivalent + overfill, supportNumerator,
-                                        supportDenominator);
-    result.above = supported + self.equivalent;
+    const uint64_t weight = LqWeight(self);
+    result.pressure = (int64_t)LqMulDiv((2 * supported) + weight + overfill, supportNumerator, supportDenominator);
+    result.above = supported + weight;
 
     return result;
 }
@@ -251,7 +262,7 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
     const int64_t fullPush = pressureA - pressureB;
     const int64_t push = vertical != 0 ? fullPush : LqSidePush(a, pressureA, b, pressureB);
     force.wall = push - fullPush;
-    const int64_t weight = vertical != 0 ? (int64_t)(a.equivalent + b.equivalent) : 0;
+    const int64_t weight = vertical != 0 ? (int64_t)(LqWeight(a) + LqWeight(b)) : 0;
     if (faceOpen == LQ_OPEN_FULL) {
         force.face += push - weight;
         force.gravity = -weight;
