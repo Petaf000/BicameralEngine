@@ -387,6 +387,9 @@ namespace bicameral::sim {
     // 質量(mg)= Σ 物質量 × モル質量(小刻みの導く値・運動エネルギーと同じ式。T-0646)
     [[nodiscard]] uint64_t GasCellMass(const GasBox& box, const GasCell& cell);
 
+    // 粘り(世界の乱れの粘りか、どれかの成分の物質の粘り)があるか。無い箱の刻みは粘りの段を飛ばす(T-0758。GPU は T-0775)
+    [[nodiscard]] bool GasHasViscosity(const GasConfig& config);
+
     // 運動量を替え、運動エネルギーの差をエネルギーへ足す(熱を変えずに動かす。断熱のとき)
     void SetGasMomentum(const GasBox& box, GasCell& cell, const std::array<int64_t, GAS_AXES>& momentum);
 

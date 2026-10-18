@@ -32,15 +32,16 @@ namespace bicameral::sim {
         // 初めの箱(Create に渡したセルと帳簿)を GPU へ写す
         void RecordUpload(ID3D12GraphicsCommandList10* list);
 
-        // 1 刻み(config.substeps 回の小刻み × 9 段)
+        // 1 刻み(config.substeps 回の小刻み × 9 段。粘りのある箱は刻みの終わりに粘りの 2 段。T-0775)
         void RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
         // 外から刻みを決めて 1 刻み(仮の世界の気体の段。T-0592): 小刻みの通し番号は tick × substeps から(内の刻みの数は進めない)。
         // parameters・ghost・open は t0(設定)・t2(開いた境界の外)・t3(セルの空き。T-0617)に結ぶ別のバッファ
-        // (呼ぶ側が段ごとに作る。NON_PIXEL_SHADER_RESOURCE の状態)。t1(層の基準の導く値)は作った時の箱のまま(成分の並びによらない)
+        // (呼ぶ側が段ごとに作る。NON_PIXEL_SHADER_RESOURCE の状態)。t1(層の基準の導く値)は作った時の箱のまま(成分の並びによらない)。
+        // viscous = 粘りの 2 段を投げるか(設定は t0 から読むので、呼ぶ側が表から決める。T-0775)
         void RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
                           D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost,
-                          D3D12_GPU_VIRTUAL_ADDRESS open) const;
+                          D3D12_GPU_VIRTUAL_ADDRESS open, bool viscous) const;
 
         // 箱のセル(u0。頭 + 欄 × SpeciesStride の件 × セル)と帳簿(u5。GasGpuLedgerBytes)。仮の世界の段が読み書きする(T-0592)
         [[nodiscard]] ID3D12Resource* CellBuffer() const { return m_uavs[0].Get(); }
@@ -85,8 +86,12 @@ namespace bicameral::sim {
             MovedSum,
             FaceFinal,
             Transfer,
+            Viscosity,  // 刻みの終わりに 1 回(粘りのある箱だけ。T-0775)
+            ViscosityApply,
             Count,
         };
+
+        static constexpr size_t SUBSTEP_PASS_COUNT = (size_t)Pass::Viscosity;  // 小刻みごとの段の数
 
         // b0 のルート定数(gas_step.hlsl の RootConstants と同じ順)
         struct Constants {
@@ -106,7 +111,7 @@ namespace bicameral::sim {
         void RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
                         const Constants& constants, const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const;
         void RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
-                            const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const;
+                            const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs, bool viscous) const;
         [[nodiscard]] std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4> OwnSrvs() const;
 
         uint32_t m_cellCount = 0;
@@ -115,6 +120,7 @@ namespace bicameral::sim {
         uint32_t m_substeps = 0;
         uint64_t m_tick = 0;
         uint32_t m_debugPassLimit = 9;
+        bool m_viscous = false;  // 粘りのある箱(GasHasViscosity。T-0775)
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;

@@ -1016,6 +1016,10 @@ namespace bicameral::sim {
         return CellMass(box.config, box.coefficients, cell);
     }
 
+    bool GasHasViscosity(const GasConfig& config) {
+        return HasViscosity(config);
+    }
+
     void SetGasMomentum(const GasBox& box, GasCell& cell, const std::array<int64_t, GAS_AXES>& momentum) {
         const uint64_t mass = CellMass(box.config, box.coefficients, cell);
         const int64_t before = KineticEnergy(box.config, cell, mass);

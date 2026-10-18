@@ -69,8 +69,8 @@ namespace {
     };
 
     // 基準の大気: N2 79%・O2 21%、six なら 6 種(N2・O2・Ar・CO2・H2O・CO。T-0598)。dewRatePerSecond が 0 でなければ露の試験の規則(T-0646)。
-    // stone なら密度のある石を足す(T-0617)
-    BakedReactionTable MakeTable(bool six, uint64_t dewRatePerSecond = 0, bool stone = false) {
+    // stone なら密度のある石を足す(T-0617)。eddy が 0 でなければ気体の粘り(世界の乱れの粘り mm²/s + N2・O2 の物質の粘り。T-0775)
+    BakedReactionTable MakeTable(bool six, uint64_t dewRatePerSecond = 0, bool stone = false, uint32_t eddy = 0) {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         if (dewRatePerSecond != 0)
             AddDewCondensationForTest(definition, dewRatePerSecond);
@@ -81,6 +81,16 @@ namespace {
         });
 
         definition.environment = StandardWorldPhysics();
+        definition.environment.gasEddyViscosityMm2PerS = eddy;
+        if (eddy != 0) {
+            for (SpeciesDefinition& species : definition.species) {
+                if (species.name == "nitrogen")
+                    species.transport.viscosityMicroPascalSeconds = 17800;
+                else if (species.name == "oxygen")
+                    species.transport.viscosityMicroPascalSeconds = 20600;
+            }
+        }
+
         definition.atmosphere = {
             .points = {{.heightMillimeters = 0,
                         .temperatureMilliKelvin = (uint32_t)AIR_TEMPERATURE,
@@ -113,8 +123,9 @@ namespace {
         return std::move(*baked);
     }
 
-    ProbeGasOptions MakeOptions() {
-        return {.minCell = REGION_MIN, .sizeCells = REGION_SIZE, .randomSeed = 12345};
+    // restSpeedUnits = 静止の丸め(2^-20 m/s。0 = 切る。T-0775)
+    ProbeGasOptions MakeOptions(uint32_t restSpeedUnits = 0) {
+        return {.minCell = REGION_MIN, .sizeCells = REGION_SIZE, .randomSeed = 12345, .restSpeedUnits = restSpeedUnits};
     }
 
     bool InWood(uint32_t x, uint32_t y, uint32_t z) {
@@ -242,16 +253,21 @@ namespace {
 
         const uint32_t energy = header.ledgerOffset + (header.speciesCount * 8);
         same = same && readout.At<int64_t>(energy) == ledger.energy;
-        for (uint32_t axis = 0; axis < 3; ++axis)
+        for (uint32_t axis = 0; axis < 3; ++axis) {
             same = same && readout.At<int64_t>(energy + 8 + (axis * 8)) == ledger.momentum[axis];
+            same = same &&
+                   readout.At<int64_t>(energy + 32 + (axis * 8)) == ledger.restMomentum[axis];  // 静止の丸めの内訳
+        }
 
-        return same;
+        return same && readout.At<int64_t>(energy + 56) == ledger.restEnergy;
     }
 
     // --- 走らせる(1 フレーム = 1 刻み。毎刻み CPU と比べる)---
     void CheckScene(ID3D12Device5* device, const BakedReactionTable& table, std::string_view name, bool wood,
-                    uint64_t ticks, Failures& failures, bool steam = false, bool stone = false) {
-        const auto field = ProbeGasField::Create(table, MakeOptions());
+                    uint64_t ticks, Failures& failures, bool steam = false, bool stone = false,
+                    uint32_t restSpeedUnits = 0) {
+        const ProbeGasOptions options = MakeOptions(restSpeedUnits);
+        const auto field = ProbeGasField::Create(table, options);
         if (!field) {
             failures.Check(false, std::format("{}: 区画を作れる({})", name, field.error()));
             return;
@@ -259,11 +275,11 @@ namespace {
 
         const std::vector<reaction::RxCell> world = MakeWorld(table, *field, wood, steam, stone);
         ProbeReference reference(table, world);
-        failures.Check(reference.EnableGas(MakeOptions()).has_value(), std::format("{}: CPU の区画", name));
+        failures.Check(reference.EnableGas(options).has_value(), std::format("{}: CPU の区画", name));
 
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"GasTestSim");
         auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-                                           {.initialWorld = world, .gas = MakeOptions()});
+                                           {.initialWorld = world, .gas = options});
         if (!queue || !simulation) {
             failures.Check(false, std::format("{}: GPU の世界を作れる({}{})", name, queue ? "" : queue.error(),
                                               simulation ? "" : simulation.error()));
@@ -277,6 +293,7 @@ namespace {
         uint32_t cpuSkipped = 0;
         uint32_t blockedCells = 0;
         uint32_t partialCells = 0;
+        uint32_t restedCells = 0;  // CPU が静止の丸めで止めたセルの数(全部の刻みの和)
         double applyMicroseconds = 0.0;
         bool hashesMatch = true;
         for (uint64_t tick = 0; tick < ticks && hashesMatch; ++tick) {
@@ -296,6 +313,7 @@ namespace {
             cpuSkipped += reference.LastGasReport().skippedCellOverflow ? 1 : 0;
             blockedCells = std::max(blockedCells, reference.LastGasReport().blockedCells);
             partialCells = std::max(partialCells, reference.LastGasReport().partialCells);
+            restedCells += reference.LastGasReport().restedCells;
             hashesMatch = readback.hashes.size() == 1 && readback.hashes[0].hash == reference.StateHash(tick + 1);
             if (!hashesMatch)
                 Log(Channel::Sim, Level::Error, "{}: 刻み {} のハッシュが食い違う(GPU {:016x} CPU {:016x})", name,
@@ -311,6 +329,7 @@ namespace {
         const uint32_t stepped = read ? readout.At<uint32_t>(PROBE_GAS_CONTROL_STEPPED) : 0;
         const uint32_t tooMany = read ? readout.At<uint32_t>(PROBE_GAS_CONTROL_SKIPPED_TOO_MANY) : 0;
         const uint32_t overflow = read ? readout.At<uint32_t>(PROBE_GAS_CONTROL_SKIPPED_OVERFLOW) : 0;
+        const uint32_t lastRested = read ? readout.At<uint32_t>(PROBE_GAS_CONTROL_RESTED) : 0;
 
         Log(Channel::Sim, Level::Info,
             "{}: {} 刻みのうち {} 刻みハッシュ一致・気体の欄と帳簿 {}・流した刻み {}(欄を超えた {}・溢れ {}・CPU "
@@ -323,6 +342,16 @@ namespace {
         failures.Check(tooMany == 0 && overflow == (uint32_t)cpuSkipped && stepped + overflow == ticks,
                        std::format("{}: 流さなかった刻みが CPU と同じ", name));
         failures.Check(debugAssertCount == 0, std::format("{}: シェーダーの assert が 0 件", name));
+        failures.Check(lastRested == reference.LastGasReport().restedCells,
+                       std::format("{}: 最後の刻みに静止の丸めで止めたセルの数が CPU と同じ({} / {})", name, lastRested,
+                                   reference.LastGasReport().restedCells));
+        if (restSpeedUnits != 0) {
+            Log(Channel::Sim, Level::Info, "{}: 静止の丸めで止めたセル(全部の刻みの和){}", name, restedCells);
+            if (ticks >=
+                30)  // WARP の短い回しでは当たる前に終わることがある(GPU の値は帳簿の内訳と最後の刻みの数で比べてある)
+                failures.Check(restedCells > 0, std::format("{}: 静止の丸めが当たる", name));
+        }
+
         if (stone) {
             failures.Check(blockedCells > 0 && partialCells > 0,
                            std::format("{}: 塞がったセルと一部だけ開いたセルがある(空きを読む刻み)", name));
@@ -480,6 +509,15 @@ int main(int argc, char** argv) {
     CheckScene(device->Get(), MakeTable(false, 100), "湯気の塊が露になる", true, warp ? 4 : 60, failures, true);
     const BakedReactionTable stoneTable = MakeTable(false, 0, true);
     CheckScene(device->Get(), stoneTable, "燃える木箱と石の床", true, warp ? 3 : 60, failures, false, true);
+
+    // 気体の粘り(0.2 m²/s + N2・O2 の物質の粘り)と静止の丸め 1 m/s(火の柱の縁の遅くなるセルに当たる大きさ。T-0775。GPU の粘りの段・丸めが CPU と毎刻みビット一致)
+    constexpr uint32_t EDDY_MM2_PER_S = 200000;
+    constexpr uint32_t REST_SPEED_UNITS = 1u << 20;  // 1 m/s
+    const BakedReactionTable viscousTable = MakeTable(false, 0, false, EDDY_MM2_PER_S);
+    CheckScene(device->Get(), viscousTable, "燃える木箱・粘りと静止の丸め", true, warp ? 4 : 120, failures, false,
+               false, REST_SPEED_UNITS);
+    CheckScene(device->Get(), MakeTable(false, 0, true, EDDY_MM2_PER_S), "燃える木箱と石の床・粘り", true,
+               warp ? 3 : 60, failures, false, true);
 
     if (!warp) {
         Measure(device->Get(), table, false);

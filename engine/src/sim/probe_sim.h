@@ -568,6 +568,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_gasWork;    // 制御・設定・見出し・帳簿など(probe_gas_gpu.hlsli)
         ComPtr<ID3D12Resource> m_gasUpload;  // gasWork の初めの中身(最初のフレームで写す)
         ProbeGasHeader m_gasHeader{};
+        bool m_gasViscous = false;  // 気体の粘りの段を投げるか(表の環境の値と気体の物質の粘りから。T-0775)
         std::array<ComPtr<ID3D12PipelineState>, 8> m_gasPipelines;  // GasBegin〜GasFinish(呼ぶ順)・GasHash
 
         // --- 液体の区画(T-0613。shaders/sim/probe_liquid_tick.hlsl。区画が無ければ m_liquidWork は nullptr)---

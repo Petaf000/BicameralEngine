@@ -339,6 +339,19 @@ namespace {
         return scene;
     }
 
+    // 気体の粘り(T-0758・T-0775): 世界の乱れの粘り eddy(mm²/s)と、成分の物質の粘り(µPa·s。空気の値の桁。N2・O2 と、3 つ目以降も同じ値)。
+    // GPU の刻みの終わりの粘りの 2 段が CPU の ApplyViscosity と毎刻みビット一致すること(周期的な面・開いた境界の外・壁は分け合わない)
+    Scene WithViscosity(Scene scene, std::string name, uint32_t eddy) {
+        constexpr std::array<uint32_t, 2> AIR_VISCOSITY = {17800, 20600};
+        GasConfig& config = scene.box.config;
+        config.eddyViscosityMm2PerS = eddy;
+        for (uint32_t s = 0; s < config.speciesCount; ++s)
+            config.species[s].viscosityMicroPascalSeconds = AIR_VISCOSITY[std::min<uint32_t>(s, 1)];
+
+        scene.name = std::move(name);
+        return scene;
+    }
+
     std::vector<Scene> MakeScenes() {
         std::vector<Scene> scenes;
         scenes.push_back(MakeClosedScene());
@@ -372,6 +385,11 @@ namespace {
             WithEnvironmentChange(MakeClosedScene(), "closed_environment_change", 30, MOON_GRAVITY, 300000));
         scenes.push_back(WithEnvironmentChange(MakeWindScene("wind_mc", GasReconstruction::MonotonizedCentral, true),
                                                "open_environment_change", 90, MOON_GRAVITY, 380000));
+
+        // 粘り(T-0775): 閉じた箱に 1 m²/s・周期的と開いた境界の風の 6 成分に 0.2 m²/s・爆発に上限(面の係数 1/8)
+        scenes.push_back(WithViscosity(MakeClosedScene(), "viscous_closed", 1000000));
+        scenes.push_back(WithViscosity(MakeSixSpeciesScene("six_wind", false), "viscous_wind", 200000));
+        scenes.push_back(WithViscosity(MakeBlastScene(), "viscous_blast", (uint32_t)gas::GF_VISCOSITY_LIMIT_MM2_PER_S));
 
         return scenes;
     }

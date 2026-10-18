@@ -185,6 +185,7 @@ namespace {
                sim::StandardWorldPhysics().gravityMicrometersPerSecond2);
         EXPECT(table.environment.soundSpeedMillimetersPerSecond ==
                sim::StandardWorldPhysics().soundSpeedMillimetersPerSecond);
+        EXPECT(table.environment.gasEddyViscosityMm2PerS == sim::STANDARD_GAS_EDDY_VISCOSITY_MM2_PER_S);  // 仮(T-0775)
 
         // 基準の大気: ISA の層の境 8 点(T-0499)・どの点も 4 つの成分で足して 1・海面 15 ℃・1 気圧
         EXPECT(table.atmosphere.points.size() == 8);

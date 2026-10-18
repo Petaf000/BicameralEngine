@@ -38,7 +38,8 @@ namespace bicameral::sim {
         uint32_t heatCapacity;  // mJ/(mol·K)(表の比熱)
         uint32_t isGas;         // 凝縮相でない(表の condensed = false)
         uint32_t isLiquid;      // 液体(表の liquid。空きの頭打ちを固体と液体で別々に数える)
-        uint32_t unused;
+        uint32_t
+            viscosity;  // 物質の粘り(µPa·s。表の viscosity_upa_s を GF_SPECIES_VISCOSITY_LIMIT で頭打ち。T-0758・T-0775)
     };
 
     // 見出し(CPU が作る時に書く。場所は gasWork の先頭からのバイト)
@@ -50,10 +51,12 @@ namespace bicameral::sim {
         uint32_t speciesCount;  // 表の物質の数
         uint32_t maskWords;     // 物質の印の語の数
         uint32_t atmosphereCount;
-        uint32_t slotCapacity;           // 欄の数(気体の箱の件の欄。表の気体の物質の数。T-0598)
-        uint32_t speciesOffset;          // ProbeGasSpecies × speciesCount
-        uint32_t maskOffset;             // uint32 × maskWords
-        uint32_t ledgerOffset;           // int64 × speciesCount(物質 ID ごと)+ エネルギー + 運動量 × 3(格子の軸)
+        uint32_t slotCapacity;   // 欄の数(気体の箱の件の欄。表の気体の物質の数。T-0598)
+        uint32_t speciesOffset;  // ProbeGasSpecies × speciesCount
+        uint32_t maskOffset;     // uint32 × maskWords
+        // int64 × speciesCount(物質 ID ごと)+ エネルギー + 運動量 × 3(格子の軸)+ 内訳: 静止の丸めの運動量 × 3(格子の軸。運動量に含む)
+        // + 静止の丸めで熱へ移した運動エネルギー(mJ。セルの中で移すのでエネルギーには入れない。T-0775)
+        uint32_t ledgerOffset;
         uint32_t condensedOffset;        // int64 × regionCellCount(凝縮相のぶんのエネルギー。刻みの中だけ)
         uint32_t ghostOffset;            // セルの件 × layerCount(欄の物質の並び。刻みごと。gas_step の t2)
         uint32_t ghostAtmosphereOffset;  // セルの件 × layerCount(基準の大気の並び。CPU が書く)
@@ -62,6 +65,10 @@ namespace bicameral::sim {
         uint32_t slotsOffset;            // uint32 × 欄の数(この刻みの欄の物質。ID の順)
         uint32_t slotOfOffset;  // uint32 × speciesCount(物質 ID → 欄。この刻みに欄が無ければ PROBE_GAS_NO_SLOT)
         uint32_t openOffset;    // uint32 × regionCellCount(セルの気体の空き Q16。刻みごと。gas_step の t3。T-0617)
+        // 静止の丸め(ProbeGasOptions::restSpeedUnits。2^-20 m/s。0 = 切る。T-0723・T-0758・T-0775)
+        uint32_t restSpeedUnits;
+        uint32_t
+            restBeforeOffset;  // uint64 × regionCellCount(刻みの初めの運動量のいちばん大きい軸の大きさ。静止の丸めが比べる)
         uint32_t unused;
     };
 
@@ -79,6 +86,12 @@ namespace bicameral::sim {
     FX_CONST uint32_t PROBE_GAS_CONTROL_SKIPPED_OVERFLOW = 60;  // 数(通し)
     FX_CONST uint32_t PROBE_GAS_CONTROL_STEPPED = 64;           // 流した刻みの数(通し)
     FX_CONST uint32_t PROBE_GAS_CONTROL_SPECIES_SEEN = 68;      // この刻みの区画の気体の物質の数(欄に入らなかった分も)
+    // 静止の丸め(この刻み。T-0775): 消した運動量 int64 × 3(格子の軸)・熱へ移した運動エネルギー int64(mJ)・止めたセルの数
+    FX_CONST uint32_t PROBE_GAS_CONTROL_REST_MOMENTUM = 72;
+    FX_CONST uint32_t PROBE_GAS_CONTROL_REST_ENERGY = 96;
+    FX_CONST uint32_t PROBE_GAS_CONTROL_RESTED = 104;
+    FX_CONST uint32_t PROBE_GAS_LEDGER_WORDS_AFTER_SPECIES =
+        8;  // 帳簿の物質 ID ごとの後ろの語(エネルギー・運動量 × 3・丸めの内訳 × 4)
 
     FX_CONST uint32_t PROBE_GAS_TEMPLATE_OFFSET = 512;  // GasGpuParameters の型(設定の頭。物質に依らない欄)
     FX_CONST uint32_t PROBE_GAS_HEADER_OFFSET = 768;    // ProbeGasHeader

@@ -36,7 +36,7 @@ namespace bicameral::sim {
 
         static_assert(sizeof(ProbeGasCellState) == PROBE_GAS_CELL_STATE_BYTES);
         static_assert(sizeof(ProbeGasSpecies) == PROBE_GAS_SPECIES_BYTES);
-        static_assert(sizeof(ProbeGasHeader) == 96);
+        static_assert(sizeof(ProbeGasHeader) == 104);
         static_assert(PROBE_GAS_HEADER_OFFSET - PROBE_GAS_TEMPLATE_OFFSET >= sizeof(GasGpuParameters));
         static_assert(PROBE_GAS_DYNAMIC_OFFSET - PROBE_GAS_HEADER_OFFSET >= sizeof(ProbeGasHeader));
 
@@ -99,9 +99,11 @@ namespace bicameral::sim {
             header.slotsOffset = place(header.slotCapacity * 4);
             header.slotOfOffset = place(header.speciesCount * 4);
             header.atmosphereOffset = place(std::max(1u, header.atmosphereCount) * 4);
-            header.ledgerOffset = place((header.speciesCount + 4) * 8);
+            header.ledgerOffset = place((header.speciesCount + PROBE_GAS_LEDGER_WORDS_AFTER_SPECIES) * 8);
             header.condensedOffset = place(header.regionCellCount * 8);
             header.openOffset = place(header.regionCellCount * 4);
+            header.restBeforeOffset = place(header.regionCellCount * 8);
+            header.restSpeedUnits = options.restSpeedUnits;
             totalBytes = offset;
 
             return header;
@@ -114,6 +116,10 @@ namespace bicameral::sim {
             const uint64_t molarVolume = condensed && id < table.speciesMolarVolume.size()
                                              ? table.speciesMolarVolume[id]
                                              : 0;
+            // 気体の粘り(T-0758。gas_cells.cpp の GasAtmosphereLayers::MakeConfig と同じ値)
+            const uint64_t viscosity = id < table.speciesTransport.size()
+                                           ? table.speciesTransport[id].viscosityMicroPascalSeconds.value_or(0)
+                                           : 0;
 
             return {.massPerAmount = ((uint64_t)table.molarMasses[id] << 32) / MICRO,
                     .formationEnergy = table.species[id].h0,
@@ -121,7 +127,7 @@ namespace bicameral::sim {
                     .heatCapacity = table.species[id].heatCapacity,
                     .isGas = condensed ? 0u : 1u,
                     .isLiquid = liquid ? 1u : 0u,
-                    .unused = 0};
+                    .viscosity = (uint32_t)std::min<uint64_t>(viscosity, gas::GF_SPECIES_VISCOSITY_LIMIT)};
         }
 
     }  // namespace
@@ -135,16 +141,12 @@ namespace bicameral::sim {
         if (options.pressure != ProbeGasPressure::Explicit)
             return std::unexpected("GPU の気体の区画は陽解法だけ(投影は T-0621)");
 
-        // 気体の粘り(T-0758・D-516)は GPU の段に無い(区画の物質は刻みごとに変わるので、表の気体の物質の全部を見る)
-        bool viscous = table.environment.gasEddyViscosityMm2PerS != 0;
-        for (uint32_t id = 0; id < table.speciesTransport.size() && !viscous; ++id)
-            viscous = IsGasSpecies(table, id) &&
-                      table.speciesTransport[id].viscosityMicroPascalSeconds.value_or(0) != 0;
-
-        if (viscous)
-            return std::unexpected(
-                "GPU の気体はまだ粘り(gas_eddy_viscosity_mm2_per_s・気体の viscosity_upa_s)を持たない(CPU "
-                "だけ。T-0758)");
+        // 気体の粘り(T-0758・D-516)があれば刻みの終わりに粘りの段を投げる(T-0775)。区画の物質は刻みごとに変わるので、
+        // 表の気体の物質の全部を見る(粘りの無い物質しか区画に無い刻みも投げる。値は粘りの段を飛ばした時と同じ)
+        m_gasViscous = table.environment.gasEddyViscosityMm2PerS != 0;
+        for (uint32_t id = 0; id < table.speciesTransport.size() && !m_gasViscous; ++id)
+            m_gasViscous = IsGasSpecies(table, id) &&
+                           table.speciesTransport[id].viscosityMicroPascalSeconds.value_or(0) != 0;
 
         auto field = ProbeGasField::Create(table, options);
         if (!field)
@@ -244,7 +246,7 @@ namespace bicameral::sim {
             const ProbeGasSpecies after = MakeGasSpecies(table, id);
             if (std::memcmp(&before, &after, sizeof(ProbeGasSpecies)) != 0) {
                 return std::unexpected(std::format(
-                    "気体の区画のある世界で、物質 {} の気体の値(モル質量・h0・比熱・凝縮相)が変わる表(T-0670)",
+                    "気体の区画のある世界で、物質 {} の気体の値(モル質量・h0・比熱・凝縮相・粘り)が変わる表(T-0670)",
                     table.speciesNames[id]));
             }
         }
@@ -274,7 +276,7 @@ namespace bicameral::sim {
 
         const D3D12_GPU_VIRTUAL_ADDRESS work = m_gasWork->GetGPUVirtualAddress();
         m_gas->RecordStepAt(list, m_debugRing.GpuAddress(), tick, work + m_gasHeader.parametersOffset,
-                            work + m_gasHeader.ghostOffset, work + m_gasHeader.openOffset);
+                            work + m_gasHeader.ghostOffset, work + m_gasHeader.openOffset, m_gasViscous);
 
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(
             m_gasWork.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

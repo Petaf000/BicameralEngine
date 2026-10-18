@@ -24,13 +24,14 @@ namespace bicameral::sim {
             .uavCount = 6, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
 
         // shaders/CMakeLists.txt で入口ごとに作る .cso(Pass の順)
-        constexpr std::array<const char*, 9> SHADER_NAMES = {
-            "sim/gas_derive.cso",    "sim/gas_face_force.cso", "sim/gas_apply_force.cso",
-            "sim/gas_face_flow.cso", "sim/gas_outflow.cso",    "sim/gas_face_moved.cso",
-            "sim/gas_moved_sum.cso", "sim/gas_face_final.cso", "sim/gas_transfer.cso"};
+        constexpr std::array<const char*, 11> SHADER_NAMES = {
+            "sim/gas_derive.cso",   "sim/gas_face_force.cso", "sim/gas_apply_force.cso",    "sim/gas_face_flow.cso",
+            "sim/gas_outflow.cso",  "sim/gas_face_moved.cso", "sim/gas_moved_sum.cso",      "sim/gas_face_final.cso",
+            "sim/gas_transfer.cso", "sim/gas_viscosity.cso",  "sim/gas_viscosity_apply.cso"};
 
         // 面の段か(面の番号 = セル × 6 ごとに 1 スレッド)
-        constexpr std::array<bool, 9> FACE_PASS = {false, true, false, true, false, true, false, true, false};
+        constexpr std::array<bool, 11> FACE_PASS = {false, true, false, true,  false, true,
+                                                    false, true, false, false, false};
 
         static_assert(sizeof(GasGpuCell) == GAS_GPU_CELL_BYTES);
         static_assert(sizeof(GasGpuDerived) == 48);
@@ -179,6 +180,7 @@ namespace bicameral::sim {
         parameters.reconstruction = (uint32_t)config.reconstruction;
         parameters.stochasticRounding = config.stochasticRounding ? 1 : 0;
         parameters.thermodynamics = (uint32_t)config.thermodynamics;
+        parameters.eddyViscosity = config.eddyViscosityMm2PerS;
 
         return parameters;
     }
@@ -189,7 +191,9 @@ namespace bicameral::sim {
         return {.massPerAmount = coefficients.massPerAmount[slot],
                 .formationEnergy = config.species[slot].formationEnergy,
                 .heatCapacity = config.species[slot].heatCapacity,
-                .roundingKey = key == GAS_ROUNDING_KEY_SLOT ? slot : key};  // 使わない欄も欄の番号(読まれない)
+                .roundingKey = key == GAS_ROUNDING_KEY_SLOT ? slot : key,  // 使わない欄も欄の番号(読まれない)
+                .viscosity = config.species[slot].viscosityMicroPascalSeconds,
+                .unused = 0};
     }
 
     std::vector<std::byte> PackGasGpuParameters(const GasConfig& config, const GasCoefficients& coefficients,
@@ -215,15 +219,11 @@ namespace bicameral::sim {
         if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) > MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
 
-        // 気体の粘り(静まる性質。T-0758・D-516)はまだ CPU だけ(GPU の段に無い。黙って違う結果にしない)
-        bool viscous = box.config.eddyViscosityMm2PerS != 0;
-        for (uint32_t slot = 0; slot < box.config.speciesCount; ++slot)
-            viscous = viscous || box.config.species[slot].viscosityMicroPascalSeconds != 0;
-
-        if (viscous)
+        // 気体の粘り(静まる性質。T-0758・D-516)がある箱だけ、刻みの終わりに粘りの 2 段を投げる(T-0775)
+        result.m_viscous = GasHasViscosity(box.config);
+        if (result.m_viscous && box.config.cellLevel != 0)
             return std::unexpected(
-                "GPU の気体はまだ粘り(gas_eddy_viscosity_mm2_per_s・気体の viscosity_upa_s)を持たない(CPU "
-                "だけ。T-0758)");
+                "GPU の気体の粘りの段はレベル 0 の箱だけ(CPU の LevelViscosity は GPU に無い。T-0765・T-0775)");
 
         // 成分の数に上限は無い(1 件 = 頭 + 欄 × m_speciesStride。T-0598)。丸めの鍵は設定のまま(欄の番号か物質 ID。T-0592)。
         // 件の大きさが 32bit の番地に収まること(ByteAddressBuffer の番地)
@@ -287,7 +287,8 @@ namespace bicameral::sim {
     bool GpuGas::RecordEnvironment(ID3D12GraphicsCommandList10* list, const GasBox& box,
                                    std::vector<ComPtr<ID3D12Resource>>& keepAlive) {
         if ((uint32_t)box.cells.size() != m_cellCount || box.config.substeps != m_substeps ||
-            GasGpuSpeciesStride(box.config.speciesCount, m_speciesStride) != m_speciesStride)
+            GasGpuSpeciesStride(box.config.speciesCount, m_speciesStride) != m_speciesStride ||
+            (GasHasViscosity(box.config) && box.config.cellLevel != 0))  // 粘りの段はレベル 0 だけ(Create と同じ)
             return false;
 
         ComPtr<ID3D12Device> device;
@@ -308,6 +309,7 @@ namespace bicameral::sim {
             keepAlive.push_back(buffer.upload);
 
         m_srvs = std::move(buffers);
+        m_viscous = GasHasViscosity(box.config);
 
         return true;
     }
@@ -381,29 +383,36 @@ namespace bicameral::sim {
                 m_srvs[2].buffer->GetGPUVirtualAddress(), m_srvs[3].buffer->GetGPUVirtualAddress()};
     }
 
-    // 刻み tick の小刻み × 9 段(乱数の丸めの小刻みの通し番号は gas_reference.cpp の StepGas と同じ)
+    // 刻み tick の小刻み × 9 段(乱数の丸めの小刻みの通し番号は gas_reference.cpp の StepGas と同じ)。
+    // viscous なら小刻みの後に粘りの 2 段(gas_reference.cpp の ApplyViscosity。T-0775)
     void GpuGas::RecordSubsteps(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
-                                const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs) const {
+                                const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4>& srvs, bool viscous) const {
+        Constants constants{.cellCount = m_cellCount, .speciesStride = m_speciesStride};
         for (uint32_t substep = 0; substep < m_substeps; ++substep) {
             const uint64_t roundingTick = (tick * m_substeps) + substep;
-            const Constants constants{.roundingTickLow = (uint32_t)roundingTick,
-                                      .roundingTickHigh = (uint32_t)(roundingTick >> 32),
-                                      .cellCount = m_cellCount,
-                                      .speciesStride = m_speciesStride};
-            for (size_t pass = 0; pass < std::min((size_t)m_debugPassLimit, (size_t)Pass::Count); ++pass)
+            constants.roundingTickLow = (uint32_t)roundingTick;
+            constants.roundingTickHigh = (uint32_t)(roundingTick >> 32);
+            for (size_t pass = 0; pass < std::min((size_t)m_debugPassLimit, SUBSTEP_PASS_COUNT); ++pass)
                 RecordPass(list, debugRing, (Pass)pass, constants, srvs);
         }
+
+        if (!viscous || m_debugPassLimit < SUBSTEP_PASS_COUNT)
+            return;
+
+        RecordPass(list, debugRing, Pass::Viscosity, constants, srvs);
+        RecordPass(list, debugRing, Pass::ViscosityApply, constants, srvs);
     }
 
     void GpuGas::RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
-        RecordSubsteps(list, debugRing, m_tick, OwnSrvs());
+        RecordSubsteps(list, debugRing, m_tick, OwnSrvs(), m_viscous);
         ++m_tick;
     }
 
     void GpuGas::RecordStepAt(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
                               D3D12_GPU_VIRTUAL_ADDRESS parameters, D3D12_GPU_VIRTUAL_ADDRESS ghost,
-                              D3D12_GPU_VIRTUAL_ADDRESS open) const {
-        RecordSubsteps(list, debugRing, tick, {parameters, m_srvs[1].buffer->GetGPUVirtualAddress(), ghost, open});
+                              D3D12_GPU_VIRTUAL_ADDRESS open, bool viscous) const {
+        RecordSubsteps(list, debugRing, tick, {parameters, m_srvs[1].buffer->GetGPUVirtualAddress(), ghost, open},
+                       viscous);
     }
 
     void GpuGas::RecordReadback(ID3D12GraphicsCommandList10* list) const {

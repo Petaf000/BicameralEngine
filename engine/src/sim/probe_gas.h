@@ -71,7 +71,7 @@ namespace bicameral::sim {
             projection;           // 投影の設定(音速は projection.pressure.soundSpeedMmPerS。既定 0 = 最速。D-467)
         uint64_t randomSeed = 0;  // 移す物質量の乱数の丸めの種(世界のシード。R6)
 
-        // --- 静止の丸め(T-0723。研究・CPU だけ。0 = 切る〔既定。今までとビット単位で同じ〕)---
+        // --- 静止の丸め(T-0723。研究。0 = 切る〔既定。今までとビット単位で同じ〕。GPU の区画も同じ形で丸める。T-0775)---
         // 刻みの終わりに、速さがどの軸も restSpeedUnits 単位(2^-20 m/s)未満のセルの運動量を 0 にし、運動エネルギーのぶんを
         // そのセルの熱へ移す(エネルギーの和は変わらない)。消した運動量は帳簿へ(世界の帳簿の列「静止の丸め」WL_REASON_REST_ROUNDING)
         uint32_t restSpeedUnits = 0;

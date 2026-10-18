@@ -56,15 +56,18 @@ namespace bicameral::sim {
         // セルの空きを読むか(0 / 1。GasBox::openQ16 が空でない = どこかのセルの空きが一部。T-0593・T-0617・ADR-0268)。
         // 読む時はセルごとの空き(Q16)を t3 から。読まない箱は全部のセルが全部(今まで通り)
         uint32_t openness;
-        uint32_t unused;
+        // 格子で解けない乱れの粘り(動粘性 mm²/s。GasConfig::eddyViscosityMm2PerS。0 = 無い。T-0758・T-0775)
+        uint32_t eddyViscosity;
     };
 
-    // 成分ごとの値(パラメータの頭の後ろに欄の数だけ。24 バイト)
+    // 成分ごとの値(パラメータの頭の後ろに欄の数だけ。32 バイト)
     struct GasGpuSpecies {
         uint64_t massPerAmount;   // mg/µmol の Q32
         int64_t formationEnergy;  // J/mol
         uint32_t heatCapacity;    // mJ/(mol·K)
         uint32_t roundingKey;     // 丸めの乱数の鍵(既定は欄の番号。世界のセルに載せる時は物質 ID。T-0591・T-0592)
+        uint32_t viscosity;  // 物質の粘り(µPa·s。gas_flow.hlsli の GF_SPECIES_VISCOSITY_LIMIT まで。T-0758・T-0775)
+        uint32_t unused;
     };
 
     // セルの頭(32 バイト。後ろに物質量 uint64 × 欄の数〔µmol〕)
@@ -108,7 +111,7 @@ namespace bicameral::sim {
     FX_CONST uint32_t GAS_GPU_PARAMETERS_BYTES = 120;
     FX_CONST uint32_t
         GAS_GPU_PARAMETERS_OPENNESS = 112;  // GasGpuParameters::openness の場所(仮の世界の GPU が刻みごとに立てる)
-    FX_CONST uint32_t GAS_GPU_SPECIES_BYTES = 24;
+    FX_CONST uint32_t GAS_GPU_SPECIES_BYTES = 32;
     FX_CONST uint32_t GAS_GPU_CELL_BYTES = 32;
     FX_CONST uint32_t GAS_GPU_FACE_BYTES = 88;
 

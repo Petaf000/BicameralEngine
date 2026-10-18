@@ -9,7 +9,7 @@
 //              セルの気体の空き(固体と液体が占めない割合。T-0617)を t3 へ書き、一部のセルがあれば設定の openness を立てる
 //   (気体の箱の 1 刻み: gas_step.hlsl の小刻み × 9 段。sim/gpu_gas の RecordStepAt)
 //   GasCheck   書き戻すと 1 セルの成分がインラインの数を超えるか(超えるセルが 1 つでもあれば、この刻みは流さない)
-//   GasScatter 気体の箱 → 区画のセル(凝縮相の成分 + 0 でない気体の成分を ID の順に)。変わったセルは熱のキャッシュを作り直し、
+//   GasScatter 気体の箱 → 区画のセル(凝縮相の成分 + 0 でない気体の成分を ID の順に。静止の丸め〔既定は切る〕もここ)。変わったセルは熱のキャッシュを作り直し、
 //              ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(物理の熱と同じ。後ろの WakeDueBlocks が一覧へ足す)
 //   GasFinish  帳簿(物質 ID ごと・格子の軸)へ足す
 // ハッシュの単位(HashCells の後)では GasHash が区画の気体の欄と帳簿を状態のハッシュへ足す(T-0620)。
@@ -18,6 +18,7 @@
 // 回す欄はこの刻みの欄の物質の数だけ。
 #include "common/probe_gas_gpu.hlsli"
 #include "common/probe_region_hash.hlsli"
+#include "common/rest_rounding.hlsli"
 #include "sim/probe_bindings.hlsli"
 
 RWStructuredBuffer<ProbeGasCellState> gasState : register(u15);  // 区画のセルごとの気体の欄
@@ -94,6 +95,17 @@ uint32_t RegionGridCell(ProbeGasHeader header, uint32_t region) {
 
 void AddLedger(uint32_t address, int64_t value) {
     gasWork.Store<int64_t>(address, gasWork.Load<int64_t>(address) + value);
+}
+
+// 運動量のいちばん大きい軸の大きさ(gas_cells.cpp の LargestAxis。静止の丸めが比べる)
+uint64_t LargestAxis(int64_t momentum[3]) {
+    uint64_t largest = 0;
+    [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+        const uint64_t size = FxAbsU64(momentum[axis]);
+        largest = size > largest ? size : largest;
+    }
+
+    return largest;
 }
 
 // --- エネルギーの気体のぶん(probe_gas.cpp の GasEnergyPart。式は gas_flow.hlsli の GfGasEnergyPart)---
@@ -181,6 +193,9 @@ uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
     gasWork.Store<int64_t>(PROBE_GAS_CONTROL_LOST + 8, 0);
     gasWork.Store<int64_t>(PROBE_GAS_CONTROL_LOST + 16, 0);
     gasWork.Store(PROBE_GAS_CONTROL_SPECIES_SEEN, 0);
+    gasWork.Store4(PROBE_GAS_CONTROL_REST_MOMENTUM, uint4(0, 0, 0, 0));
+    gasWork.Store4(PROBE_GAS_CONTROL_REST_MOMENTUM + 16, uint4(0, 0, 0, 0));
+    gasWork.Store(PROBE_GAS_CONTROL_RESTED, 0);
 }
 
     // 1 スレッド = 区画の 1 セル
@@ -244,6 +259,8 @@ uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
         slot.formationEnergy = species.formationEnergy;
         slot.heatCapacity = species.heatCapacity;
         slot.roundingKey = id;
+        slot.viscosity = species.viscosity;
+        slot.unused = 0;
         gasWork.Store<GasGpuSpecies>(header.parametersOffset + GAS_GPU_PARAMETERS_BYTES + s * GAS_GPU_SPECIES_BYTES,
                                      slot);
     }
@@ -318,6 +335,8 @@ uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
     gas.momentum[2] = 0;
 
     const ProbeGasCellState state = gasState[region];
+    gasWork.Store<uint64_t>(header.restBeforeOffset + region * 8,
+                            0);  // 静止の丸めが比べる刻みの初めの大きさ(気体の無いセルは 0)
     if (empty) {
         [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
             if (state.momentum[axis] != 0) {
@@ -349,10 +368,40 @@ uint32_t GasOpenOf(ProbeGasHeader header, RxCell cell) {
         }
 
         gas.energy += state.kinetic;
+        gasWork.Store<uint64_t>(header.restBeforeOffset + region * 8, LargestAxis(gas.momentum));
     }
 
     gasWork.Store<int64_t>(header.condensedOffset + region * 8, condensed);
     gasCells.Store<GasGpuCell>(GasCellAddress(region), gas);
+}
+
+// GasScatter の 1 セルの静止の丸め(T-0723・T-0758・T-0775。CPU は gas_cells.cpp の StoreGasCells。形は rest_rounding.hlsli)。
+// 速さがどの軸も restSpeedUnits 未満で、この刻みで速くなっていない(運動量の最大の軸の大きさが刻みの初め以下)なら止める。
+// 消す運動量は帳簿へ(失せ分と同じ道 + 内訳)、運動エネルギーのぶんはセルの熱へ(呼ぶ側がセルのエネルギーから引かない)
+bool RestGasCell(ProbeGasHeader header, uint32_t region, GasGpuCell gas, uint64_t mass, int64_t kinetic) {
+    if (header.restSpeedUnits == 0 || mass == 0)
+        return false;
+
+    const uint64_t before = gasWork.Load<uint64_t>(header.restBeforeOffset + region * 8);
+    if (!RrShouldRest(LargestAxis(gas.momentum), before, mass * header.restSpeedUnits))
+        return false;
+
+    int64_t original;
+    [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+        if (gas.momentum[axis] != 0) {
+            const uint32_t grid = ProbeGasGridAxis(axis) * 8;
+            gasWork.InterlockedAdd64(PROBE_GAS_CONTROL_LOST + grid, gas.momentum[axis], original);
+            gasWork.InterlockedAdd64(PROBE_GAS_CONTROL_REST_MOMENTUM + grid, gas.momentum[axis], original);
+        }
+    }
+
+    if (kinetic != 0)
+        gasWork.InterlockedAdd64(PROBE_GAS_CONTROL_REST_ENERGY, kinetic, original);
+
+    uint32_t rested;
+    gasWork.InterlockedAdd(PROBE_GAS_CONTROL_RESTED, 1, rested);
+
+    return true;
 }
 
 // 1 スレッド = 区画の 1 セル: 書き戻した成分の数がインラインの数を超えるか
@@ -412,6 +461,7 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
     const uint64_t mass = totals.mass;
     const int64_t kinetic = GfKineticMilliJoule(KineticEnergy(gas, mass));
     const int64_t condensed = gasWork.Load<int64_t>(header.condensedOffset + region * 8);
+    const bool rested = RestGasCell(header, region, gas, mass, kinetic);
 
     // --- 凝縮相の成分 + 0 でない気体の成分を ID の順に(どちらも ID の順で、重ならない。気体は欄の順 = ID の順に進む)---
     uint32_t gasInBefore = 0;  // before の成分のうち気体の印
@@ -420,7 +470,7 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
             gasInBefore |= 1u << i;
     }
 
-    RxCell after = RxMakeEmptyCell(condensed + gas.energy - kinetic);
+    RxCell after = RxMakeEmptyCell(condensed + gas.energy - (rested ? 0 : kinetic));
     uint32_t last = 0;
     bool first = true;
     uint32_t nextGas = NextGasSlot(header, region, 0, slotCount);
@@ -460,8 +510,11 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
     // --- 気体の欄 ---
     ProbeGasCellState state;
     state.momentum = gas.momentum;
-    state.kinetic = kinetic;
+    state.kinetic = rested ? 0 : kinetic;
     state.mass = mass;
+    if (rested) {
+        [unroll] for (uint32_t restAxis = 0; restAxis < 3; ++restAxis) state.momentum[restAxis] = 0;
+    }
 
     // 気体が残らなかったセルの運動量は帳簿へ(質量の無い運動量は持たない。CPU と同じ。T-0646)
     if (mass == 0) {
@@ -525,7 +578,10 @@ uint32_t NextGasSlot(ProbeGasHeader header, uint32_t region, uint32_t from, uint
         AddLedger(energyAddress + 8 + ProbeGasGridAxis(axis) * 8,
                   gasBoxLedger.Load<int64_t>(GAS_GPU_LEDGER_MOMENTUM + axis * 8));
         AddLedger(energyAddress + 8 + axis * 8, -gasWork.Load<int64_t>(PROBE_GAS_CONTROL_LOST + axis * 8));
+        AddLedger(energyAddress + 32 + axis * 8, -gasWork.Load<int64_t>(PROBE_GAS_CONTROL_REST_MOMENTUM + axis * 8));
     }
+
+    AddLedger(energyAddress + 56, gasWork.Load<int64_t>(PROBE_GAS_CONTROL_REST_ENERGY));
 
     gasWork.Store(PROBE_GAS_CONTROL_STEPPED, gasWork.Load(PROBE_GAS_CONTROL_STEPPED) + 1);
 }

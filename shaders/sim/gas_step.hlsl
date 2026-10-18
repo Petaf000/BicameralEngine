@@ -8,6 +8,8 @@
 //   → GasFaceFlow(面): 質量の流れと抑える前の割合 → GasOutflow(セル): 風上として出ていく割合の合計
 //   → GasFaceMoved(面): 割合を抑え、移す成分の物質量(MUSCL・乱数の丸め)→ GasMovedSum(セル): 成分ごとの移す量の合計
 //   → GasFaceFinal(面): 中身を超えた成分を抑え、移すエネルギーと運動量 → GasTransfer(セル): 自分の面の出入りを集めて次のセル。
+// 1 刻みの小刻みの後に、粘り(T-0758・T-0775。粘りのある箱だけ)の 2 段: GasViscosity(セル): 自分の 6 面で隣と分け合う運動量と熱を集めて
+//   g_forced の頭へ → GasViscosityApply(セル): 頭を g_cells へ写す(Jacobi = 刻みの値だけから決める。CPU の ApplyViscosity と同じ値)。
 // CPU は面ごとに両側へ足し引きする(散らす形)が、GPU はセルが自分の 6 面を集める(集める形)。足し引きは整数なので順番に依存せず、
 // 同じ値になる(04 R2・R3)。箱の外との出入り(壁の力積・重さ・開いた境界の物)は帳簿へ 64bit の原子的な足し算で(整数なので順番に依存しない)。
 #include "common/gas_gpu.hlsli"
@@ -701,4 +703,82 @@ int64_t HalfSlope(MusclSides muscl, uint64_t fraction, uint32_t s) {
 
         g_cells.Store<uint64_t>(CellAmountAddress(index, s), amount);
     }
+}
+
+// --- 粘り(1 刻みに 1 回。gas_reference.cpp の ApplyViscosity。式は gas_flow.hlsli の GfViscousMomentum・GfViscousEnergy)---
+
+// セルの質量と物質の粘りの動粘性(gas_reference.cpp の CellMass・CellMolecularViscosity)
+struct ViscousSide {
+    uint64_t mass;
+    uint64_t viscosity;  // mm²/s
+};
+
+ViscousSide ViscousSideOf(uint32_t index) {
+    GasGpuTotals totals = GasZeroTotals();
+    uint64_t weighted = 0;
+    const uint32_t speciesCount = SpeciesCount();
+    for (uint32_t s = 0; s < speciesCount; ++s) {
+        const uint64_t amount = g_cells.Load<uint64_t>(CellAmountAddress(index, s));
+        GasAddSpecies(totals, s, amount);
+        weighted += amount * (uint64_t)GAS_SPECIES(s).viscosity;
+    }
+
+    ViscousSide side;
+    side.mass = totals.mass;
+    side.viscosity = GfMolecularViscosity(weighted, totals.amount, totals.mass, CellOpen(index));
+
+    return side;
+}
+
+// 段 10: 自分の 6 面(両側が箱の中のセルで、開きが 0 でない面)で隣と運動量を分け合い、運動のエネルギーの減った分を熱へ。
+// 面の左 = a・右 = b として CPU と同じ ΔP・ΔE を作り、自分が左なら引き、右なら足す(散らす形と同じ値。整数の足し算)。結果は g_forced の頭へ
+[numthreads(64, 1, 1)] void GasViscosity(uint32_t index : SV_DispatchThreadID) {
+    if (index >= g_cellCount)
+        return;
+
+    const GfParams params = GasFlowParams();
+    const uint64_t eddy = GAS_P.eddyViscosity;
+    const CellFaceSet faces = CellFaceSetOf(index);
+    const ViscousSide self = ViscousSideOf(index);
+    const GasGpuCell selfCell = g_cells.Load<GasGpuCell>(CellAddress(index));
+    GasGpuCell next = selfCell;
+    for (uint32_t f = 0; f < 6; ++f) {
+        GasFaceSides sides;
+        if (!FaceSidesOf(faces.ids[f], sides) || sides.left.kind != SIDE_CELL || sides.right.kind != SIDE_CELL)
+            continue;
+
+        const uint32_t open = FaceOpen(sides);
+        if (open == 0)
+            continue;
+
+        // 自分が右の面なら隣は左(a)、左の面なら隣は右(b)
+        const bool right = faces.right[f];
+        const uint32_t other = right ? sides.left.index : sides.right.index;
+        const ViscousSide otherSide = ViscousSideOf(other);
+        const GasGpuCell otherCell = g_cells.Load<GasGpuCell>(CellAddress(other));
+        const uint64_t massA = right ? otherSide.mass : self.mass;
+        const uint64_t massB = right ? self.mass : otherSide.mass;
+        const uint64_t total = eddy + ((otherSide.viscosity + self.viscosity) / 2);
+        const uint64_t coefficient = (GfViscosityQ32(total) * open) >> 16;
+        int64_t energy = 0;
+        [unroll] for (uint32_t axis = 0; axis < 3; ++axis) {
+            const int64_t pa = right ? otherCell.momentum[axis] : selfCell.momentum[axis];
+            const int64_t pb = right ? selfCell.momentum[axis] : otherCell.momentum[axis];
+            const int64_t moved = GfViscousMomentum(pa, massA, pb, massB, coefficient);
+            next.momentum[axis] += right ? moved : -moved;
+            energy += GfViscousEnergy(params, moved, pa, massA, pb, massB);
+        }
+
+        next.energy += right ? energy : -energy;
+    }
+
+    g_forced.Store<GasGpuCell>(CellAddress(index), next);
+}
+
+    // 段 11: 粘りの後の頭(エネルギーと運動量)を状態へ。成分は変わらない
+    [numthreads(64, 1, 1)] void GasViscosityApply(uint32_t index : SV_DispatchThreadID) {
+    if (index >= g_cellCount)
+        return;
+
+    g_cells.Store<GasGpuCell>(CellAddress(index), g_forced.Load<GasGpuCell>(CellAddress(index)));
 }

@@ -12,6 +12,9 @@ namespace bicameral::sim {
 
     inline constexpr uint32_t STANDARD_GRAVITY_MICROMETERS_PER_SECOND2 = 9806650;    // 標準の重力の定義値
     inline constexpr uint32_t STANDARD_SOUND_SPEED_MILLIMETERS_PER_SECOND = 340000;  // D-440: 地面の近くの空気の音速
+    // earth_environment の気体の乱れの粘り(仮の値。T-0775・Q121 ②)。StandardWorldPhysics() には入れない: 気体の試験の場面は
+    // 粘りの無い世界で取った基準(gas_reference・probe_gas・rest_return など)と比べるので、粘りを試す場面だけが値を書く
+    inline constexpr uint32_t STANDARD_GAS_EDDY_VISCOSITY_MM2_PER_S = 200000;
 
     [[nodiscard]] constexpr WorldPhysics StandardWorldPhysics() {
         return {.gravityMicrometersPerSecond2 = STANDARD_GRAVITY_MICROMETERS_PER_SECOND2,

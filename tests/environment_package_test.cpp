@@ -85,6 +85,13 @@ namespace {
         return left == right;  // 重力・音速の基準・世界の端(T-0710)
     }
 
+    // earth_environment の値 = 標準の値 + 気体の乱れの粘りの仮の値(T-0775。気体の試験の場面は粘りを書かない)
+    sim::WorldPhysics EarthWorldPhysics() {
+        sim::WorldPhysics world = sim::StandardWorldPhysics();
+        world.gasEddyViscosityMm2PerS = sim::STANDARD_GAS_EDDY_VISCOSITY_MM2_PER_S;
+        return world;
+    }
+
     bool HasWarning(const sim::BakedReactionTable& table, std::string_view part) {
         for (const std::string& warning : table.warnings) {
             if (warning.find(part) != std::string::npos)
@@ -96,7 +103,8 @@ namespace {
 
     // --- 試験 ---
 
-    // サンプルの世界のパッケージの環境 = 標準の値(試験の場面が StandardWorldPhysics で書いた結果がサンプルの世界と同じになる)
+    // サンプルの世界のパッケージの環境 = 標準の値(試験の場面が StandardWorldPhysics で書いた結果がサンプルの世界と同じになる)。
+    // 気体の乱れの粘りだけは違う: earth_environment の仮の値(T-0775)を、気体の試験の場面は書かない(粘りの無い基準で比べる)
     void TestSamplePackageIsStandard() {
         // 試験のパッケージは環境の値を書かず、依存の標準パッケージ earth_environment が書く(T-0498)
         const auto world = ReadEnvironment(sim::ReadCombustionTestPackages(), "combustion_test");
@@ -109,7 +117,7 @@ namespace {
 
         std::printf("sample environment: gravity %u um/s^2, sound speed %u mm/s\n", world->gravityMicrometersPerSecond2,
                     world->soundSpeedMillimetersPerSecond);
-        EXPECT(SameWorld(*world, sim::StandardWorldPhysics()));
+        EXPECT(SameWorld(*world, EarthWorldPhysics()));
     }
 
     // 分類が無い世界 = ブランク(重力 0・音速の基準なし。D-455・D-480)
@@ -209,10 +217,10 @@ namespace {
             return;
         }
 
-        EXPECT(SameWorld(loaded->table.environment, sim::StandardWorldPhysics()));
+        EXPECT(SameWorld(loaded->table.environment, EarthWorldPhysics()));
 
         const auto rebuilt = RebuildReactionTable(loaded->tableBytes, loaded->tableVersion);
-        EXPECT(rebuilt && SameWorld(rebuilt->table.environment, sim::StandardWorldPhysics()));
+        EXPECT(rebuilt && SameWorld(rebuilt->table.environment, EarthWorldPhysics()));
 
         const auto blank = LoadBlankReactionTable();
         EXPECT(blank && SameWorld(blank->table.environment, sim::WorldPhysics{}));

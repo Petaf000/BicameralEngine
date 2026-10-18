@@ -61,7 +61,8 @@ namespace bicameral::sim {
         // 気体の格子で解けない乱れの粘り(動粘性 mm²/s。T-0758・D-516。名前と単位は仮)。乱された気体(火・爆発の後の風と残響)が、
         // 隣のセルと運動量を分け合って値で決まる時間で静まる(一様な風は減らない)。0 = 無い(ブランクの世界・既定。今までとビット単位で同じ)。
         // 上限 gas::GF_VISCOSITY_LIMIT_MM2_PER_S(0.5 m のセルで面の係数 1/8)。物質の粘り(viscosity_upa_s)は気体の物質にも書け、足し合わせる。
-        // 6 m の部屋のいちばん大きい揺れ(波長 12 m)が e 分の 1 になる時間 ≒ 3.6 s ÷ (ν ÷ 10^6)。CPU だけ(GPU の気体は断る)
+        // 6 m の部屋のいちばん大きい揺れ(波長 12 m)が e 分の 1 になる時間 ≒ 3.6 s ÷ (ν ÷ 10^6)。GPU の気体も同じ式(T-0775)。
+        // 凍結の多重解像度の気体の木(gas_tree)には無い(MakeGasTree が 0 を求める)
         uint32_t gasEddyViscosityMm2PerS = 0;
 
         [[nodiscard]] bool operator==(const WorldPhysics&) const = default;

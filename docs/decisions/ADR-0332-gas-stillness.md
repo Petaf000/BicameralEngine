@@ -45,3 +45,20 @@
 - 追記(2026-10-18・T-0776): 液体の摩擦を「少なくとも 1 減らす」に直した(liquid_flow.hlsli の LqFrictionCut)。浅い池の膜は抜けたまま(7.9 × 10^3)だが、
   **積んだ水は丸め 1 mm/s でまだ眠らない**(15 秒の周期)。根は摩擦ではなく、満ちたセルと満ちきらないセルの境で力が 0 になる整数の状態が無いこと(仮説)。
   丸めの形(速くなっている面を止めない)は、その残りの力で 0 から速くなる面を止めない → T-0781(研究。整数の釣り合い〔離散の坂〕を一つの芯で)。
+
+## 追記 1(2026-10-18・T-0775。本体の作業役)GPU の気体にも同じ粘りと丸め・earth_environment に仮の値
+- **GPU の 1 レベルの箱(gas_step.hlsl)**: 小刻みの後に 2 段。`GasViscosity`(セルごと。自分の 6 面のうち両側が箱の中のセルで開きが 0 でない面について、
+  隣のセルの質量と物質の粘りをその場で数え、CPU と同じ「左 = a・右 = b」の ΔP・ΔE を作って自分が左なら引き・右なら足す。結果は g_forced の頭へ)→
+  `GasViscosityApply`(頭を g_cells へ)。Jacobi(刻みの値だけから決める)なので CPU の散らす形と同じ整数になる。atomic なし。粘りの無い箱は 2 段を投げない(`GasHasViscosity`)。
+  設定の頭の空き欄を `eddyViscosity` に、成分の値に `viscosity`(µPa·s)を足した(GasGpuSpecies 24 → 32 バイト)。
+- **仮の世界の GPU の区画(probe_gas_tick.hlsl)**: 物質ごとの値に粘り(表の viscosity_upa_s を CPU と同じ上限で)・粘りの段を投げるかは表から(ProbeSim)。
+  静止の丸め(`ProbeGasOptions::restSpeedUnits`)も GPU に入れた(前は GPU が黙って無視していた): 集める段で刻みの初めの運動量のいちばん大きい軸を覚え、
+  書き戻す段で RrShouldRest。消した運動量は帳簿の運動量と内訳(静止の丸めの運動量 × 3・熱へ移した運動エネルギー)へ。値を書いた世界を断るのはやめた。
+- **試験**: gpu_gas_test に粘りの 3 場面(閉じた箱 1 m²/s・周期的と開いた境界の 6 成分の風 0.2 m²/s・爆発に上限 1.875 m²/s)、gpu_probe_gas_test に
+  粘り + 静止の丸め 1 m/s の燃える木箱(120 刻み)と、粘り + 石の床(空きが一部・0 の面)。HW・WARP とも毎刻みビット一致・帳簿の内訳も一致。
+- **earth_environment に仮の値 `gas_eddy_viscosity_mm2_per_s = 200000`(0.2 m²/s)**: 根拠は T-0758 の測り(6 m の部屋の火の 60 秒後 0.24 m/s → 22 mm/s)。
+  地球の定数ではなく 0.5 m のセルの模型の値(コメントに書いた)。値は ⑤ の場面で決める(Q121 ②)。
+  値が変わるもの: 地球の標準パッケージに乗る世界(試験のパッケージ combustion_test を使うゲーム本体・草原の延焼の場面)。
+  気体の試験は環境を StandardWorldPhysics(粘り 0)で書き直しているので値は変わらない(standard_world_physics.h に仮の値の写し
+  STANDARD_GAS_EDDY_VISCOSITY_MM2_PER_S を足し、StandardWorldPhysics() には入れない)。standard_packages・environment_package の比べ方だけ直した。
+- 凍結の多重解像度の気体の木(gas_tree・gpu_gas_tree)は粘りを持たないまま(MakeGasTree の assert。エンジンの中で表の環境から木を作る所は無い)。
