@@ -17,7 +17,8 @@
 // u7 端数の枠の空きのスタック / u8 世界の帳簿 / u9 要求 / u10 要求の途中の値 /
 // u11 伝導の作業場(枠ごとの刻みの印 + 頁のセルごとのエネルギーの変化。multires_conduct.hlsli。T-0107)/
 // u12 Work Graph の GPU の入力(MR_GRAPH_INPUT_*。T-0018)/
-// u13 書き足す活性の一覧(MR_ACTIVITY_*。要求の処理の間はこの刻みの種、刻む間は次の刻みの種。T-0100)/ t0〜t3 反応の表(物質・規則・索引・速度)
+// u13 書き足す活性の一覧(MR_ACTIVITY_*。要求の処理の間はこの刻みの種、刻む間は次の刻みの種。T-0100)/ t0〜t3 反応の表(物質・規則・表の語・速度)。
+// t2 の表の語は反応の索引 + セルの見立ての相の表 + 世界の端と外の柱(common/multires_table_words.hlsli。T-0766・T-0773。ルート署名に空きが無いので 1 本)
 globallycoherent RWStructuredBuffer<MrBlock> g_blocks : register(u0);
 globallycoherent RWStructuredBuffer<RxCell> g_cells : register(u1);
 globallycoherent RWStructuredBuffer<MrFraction> g_fractions : register(u2);
@@ -32,7 +33,7 @@ RWByteAddressBuffer g_graphInput : register(u12);
 RWByteAddressBuffer g_activity : register(u13);
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<RxRule> g_rules : register(t1);
-StructuredBuffer<uint32_t> g_ruleIndex : register(t2);
+StructuredBuffer<uint32_t> g_tableWords : register(t2);
 ByteAddressBuffer g_rates : register(t3);
 
 // gpu_multires.cpp の RootConstants と同じ並び(64bit は下位・上位の順)
@@ -153,6 +154,11 @@ struct MrRefineRecord {
     uint32_t depth;       // 要求の鎖の何段目か(0 から)
 };
 
+// 表の語(t2)の反応の索引の始まり(common/multires_table_words.hlsli の TW_HEADER_WORDS。gpu_multires.cpp の static_assert)。
+// 相の表と世界の端の読みは伝導の段だけが include する(shaders/sim/multires_conduct.hlsli。ほかの段のコードを変えない: 足すと
+// 引き戻しのノードの局所の配列が増えた。T-0766)
+static const uint32_t MR_TABLE_WORDS_RULE_INDEX = 4;
+
 // reaction.hlsli の Table の約束(表の読み方)
 struct GpuReactionTable {
     uint32_t unused;
@@ -162,7 +168,7 @@ struct GpuReactionTable {
     RxRule Rule(uint32_t id) { return g_rules[id]; }
     RxRule RateRule(uint32_t id) { return g_rules[id]; }
 
-    uint32_t RuleIndex(uint32_t position) { return g_ruleIndex[position]; }
+    uint32_t RuleIndex(uint32_t position) { return g_tableWords[MR_TABLE_WORDS_RULE_INDEX + position]; }
 
     uint64_t Rate(uint32_t rule, uint32_t kelvin) {
         return g_rates.Load<uint64_t>((rule * RX_RATE_TABLE_KELVINS + kelvin) * 8);

@@ -1,5 +1,6 @@
 // transport_apply.hlsli — 面の帳簿と当てる段(運ぶ計算の共通の土台の段 1 ④。T-0714・ADR-0334 Proposed。設計 20 §2.3〜§2.4)。
-// HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU(engine/src/sim/multires_conduction.cpp)が呼ぶ。GPU の段は後のチケット。
+// HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU(engine/src/sim/multires_conduction.cpp)と GPU の伝導の段
+// (shaders/sim/multires_conduct.hlsli の GpuConductionWorld。T-0766・ADR-0343)が呼ぶ。
 //
 // 一つの芯: 運ぶ計算のどの種類(熱の伝導・気体・液体・混ざる…)も「面を通る流れ = 坂 × 通しやすさ」で、1 刻み(小刻み)の中の順は同じ 6 つ:
 //   1. 流す: 種類が面ごとに生の流れ(包み)を作る。同じレベルの面は両側が同じ式で逆向きの値を出し、違うレベルの面は細かい側だけが計算する

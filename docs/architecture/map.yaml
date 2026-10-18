@@ -310,7 +310,7 @@ views:
           note: "CPU と GPU が同じ関数。刻みごとに作り永続しない。今の熱のキャッシュ・MrCellThermal・ShareCellVolume・液体と気体の区画の数え方とビット一致(cell_view_test)。相の表は sim::MakeSpeciesPhases の 1 か所。置き換えは T-0714。ADR-0333" }
       - { id: transportapply, group: simlib, label: "TxFlowCell<br/>面の帳簿と当てる段(土台の段 1 ④。T-0714)<br/>流す → 上限 → 当てる → 欄 → 帳簿 → 起こす",
           code: "shaders/common/transport_apply.hlsli::TxFlowCell", ticket: T-0714, doc: docs/decisions/ADR-0334-transport-apply.md,
-          note: "種類は坂・面の式・安定の条件の 3 つだけを渡す(最初の種類は陽の伝導 TxConduction。transport_conduction.hlsli)。世界は面の隣・見立て・端数の置き場・変化の表を渡す。MR の CPU の伝導がこれを呼び、今の MR の試験とビット一致。上限は出る側・入る側の倍率(Q32。Jacobi)。自分の側の坂・係数はセルごとに 1 回(TxMakeSelfSide。T-0768)。流れを面の並びで解く種類(陰の伝導)は同じ当てる段の面 1 つの形 TxApplyFaceFlow で両側へ(T-0715)。ADR-0334" }
+          note: "種類は坂・面の式・安定の条件の 3 つだけを渡す(最初の種類は陽の伝導 TxConduction。transport_conduction.hlsli)。世界は面の隣・見立て・端数の置き場・変化の表を渡す。MR の CPU の伝導と GPU の伝導の段(T-0766)がこれを呼び、今の MR の試験とビット一致。上限は出る側・入る側の倍率(Q32。Jacobi)。自分の側の坂・係数はセルごとに 1 回(TxMakeSelfSide。T-0768)。流れを面の並びで解く種類(陰の伝導)は同じ当てる段の面 1 つの形 TxApplyFaceFlow で両側へ(T-0715)。ADR-0334" }
       - { id: worldedges, group: simlib, label: "MakeMultiresWorldEdges<br/>世界の端を環境から作る(T-0772)<br/>world_edges + 基準の大気 + 世界の箱 → 外の柱",
           code: "engine/src/sim/multires_world_edges.cpp::MakeMultiresWorldEdges", ticket: T-0772, doc: docs/decisions/ADR-0338-world-edges-environment.md,
           note: "上の軸は world_edge.hlsli の WE_UP_AXIS の 1 か所(y。D-518)。外の柱は箱の中の層ごとの基準の大気(GasAtmosphereLayers。仮の世界の気体の区画の層の基準とビット一致)。MR の気体も端の種類を nest.edges.world から読む。SetWorldEdges が替えて、開いた端に接するブロックを種にする。大気の無い open は真空(ベイクの注意)。当てる段の World::Neighbor・Outside が読む(world_edge.hlsli。ADR-0337)。multires_edge_test" }
@@ -488,7 +488,11 @@ views:
           code: "engine/src/sim/gpu_multires.cpp::GpuMultires::RecordSubstepEnd", ticket: T-0109, doc: docs/design/17-multiresolution.md,
           note: "RecordConduction が小刻みを 4^maxSubcycleGap 回積む(印 → 頁 → 端数の枠 → 埋める → 流れ。始まるレベルが無ければ段は空)。小刻みの終わりは ConductEnd が終わるレベルに足し、活性なら変わったブロックの一覧で活性のグラフ(ActivitySeedNode)を投げて面の隣を起こす" }
       - { id: gpuconductionhlsl, group: shared, label: "multires_conduct.hlsli<br/>1 ブロックの印・流れ・足す(Compute と Work Graph で共有)",
-          code: "shaders/sim/multires_conduct.hlsli::AddCellFlows", ticket: T-0107, doc: docs/design/17-multiresolution.md }
+          code: "shaders/sim/multires_conduct.hlsli::ConductFlowsBlock", ticket: T-0107, doc: docs/design/17-multiresolution.md,
+          note: "面の流れは当てる段 TxFlowCell(CPU と同じ関数。T-0766・ADR-0334)。世界の約束は GpuConductionWorld(見立ての写しは groupshared に種類が読む部分だけ・変化は 64bit の atomic)。開いた世界の端は外の柱と流して帳簿の「世界の端」へ(AddWorldLedgerCarrying。T-0773)" }
+      - { id: gputablewords, group: shared, label: "multires_table_words.hlsli<br/>GPU の表の語(t2)<br/>反応の索引 + 相の表 + 世界の端と外の柱",
+          code: "shaders/common/multires_table_words.hlsli::MakeTableWords", ticket: T-0766, doc: docs/decisions/ADR-0343-gpu-apply-stage.md,
+          note: "ルート署名が 64/64 語で表を足せないので 1 本に。C++ が書き GPU が同じ関数(Tw*)で読む。相の表は表の差し替えで、世界の端は RecordUpload が nest.edges と違えば作り直す。multires_edge_test が読み戻しを確かめる" }
       - { id: gpuconductiontest, group: tests, label: "gpu_multires_conduction_test<br/>鎖・たくさんの要求の伝導を毎刻み GPU と CPU で比べる",
           code: "tests/gpu_multires_conduction_test.cpp::RunScene", ticket: T-0107,
           note: "全部 / 活性(伝導の段が Compute / Work Graph)。HW・WARP。release では Compute と Work Graph の時間も測る(D-302)。--subcycle で小刻み 64 回(T-0109)" }

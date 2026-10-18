@@ -6,7 +6,8 @@
 // 熱の伝導(T-0107)は Compute の段(multires_conduct.hlsl)を刻みの中で順に投げる(RecordConduction)。細かいレベルの小刻み(T-0109)は
 // 小刻みごとに段を積み、小刻みの終わりに変わったブロックの隣を活性のグラフで起こす。
 // 結び付けは shaders/sim/multires_bindings.hlsli と同じ順(u0 見出し・u1 セル・u2 端数・u3 数える欄・u4 u5 外のバッファ・
-// u6〜u10 木の管理・u11 伝導の作業場・u12 GPU の入力・u13 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表)。
+// u6〜u10 木の管理・u11 伝導の作業場・u12 GPU の入力・u13 書き足す活性の一覧、b0、デバッグのリング、t0〜t3 表。
+// t2 は表の語 = 反応の索引 + セルの見立ての相の表 + 世界の端と外の柱〔common/multires_table_words.hlsli。T-0766・T-0773〕)。
 // ルート署名は 64 / 64 語(UAV 14 × 2・定数 26・リング 2・表 4 × 2。T-0107 で uint32 の表を u6 にまとめて空けた。最後の 1 語は
 // 成分の二段の溢れの始まり〔T-0176〕。溢れは新しい UAV を足さず u6 の後ろに置く)。
 #include "sim/gpu_multires.h"
@@ -15,11 +16,13 @@
 #include <utility>
 
 #include "common/multires_activity.hlsli"
+#include "common/multires_table_words.hlsli"
 #include "common/multires_wide.hlsli"
 
 #include "core/log.h"
 #include "gpu/creation_timer.h"
 #include "gpu/resources.h"
+#include "sim/cell_view.h"
 #include "sim/gpu_multires_implicit.h"
 
 using namespace bicameral::multires;
@@ -194,15 +197,25 @@ namespace bicameral::sim {
             uint32_t levelsLeft;
         };
 
-        // 反応の表(t0〜t3)を既定のヒープの写しにする(T-0410。写すのは次の BindRoot)
-        constexpr size_t REACTION_TABLE_COUNT = 4;  // 物質・規則・索引・速度(GpuMultires::TABLE_COUNT)
+        // 反応の表(t0〜t3)を既定のヒープの写しにする(T-0410。写すのは次の BindRoot)。t2 は表の語(反応の索引 + 相の表 + 世界の端)
+        constexpr size_t REACTION_TABLE_COUNT = 4;  // 物質・規則・表の語・速度(GpuMultires::TABLE_COUNT)
 
         std::array<gpu::ResidentBuffer, REACTION_TABLE_COUNT> CreateTables(ID3D12Device* device,
-                                                                           const BakedReactionTable& table) {
+                                                                           const BakedReactionTable& table,
+                                                                           std::span<const uint32_t> tableWords) {
             return {gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.species))),
                     gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.rules))),
-                    gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.ruleIndex))),
+                    gpu::CreateResidentBuffer(device, std::as_bytes(tableWords)),
                     gpu::CreateResidentBuffer(device, std::as_bytes(std::span(table.rates)))};
+        }
+
+        // 表の語(common/multires_table_words.hlsli の並び)。反応の索引の始まりは multires_bindings.hlsli の MR_TABLE_WORDS_RULE_INDEX
+        static_assert(TW_HEADER_WORDS == 4);
+
+        std::vector<uint32_t> MakeMultiresTableWords(std::span<const uint32_t> ruleIndex,
+                                                     std::span<const CvSpeciesPhase> phases,
+                                                     const MultiresWorldEdges& edges) {
+            return MakeTableWords(ruleIndex, phases, edges.world, edges.columnBaseUp, edges.column);
         }
 
         bool WriteUpload(ID3D12Resource* upload, std::span<const std::byte> bytes) {
@@ -573,8 +586,12 @@ namespace bicameral::sim {
         m_constants.graphInputHigh = static_cast<uint32_t>(graphInput >> 32);
 
         static_assert(TABLE_COUNT == REACTION_TABLE_COUNT);
-        m_tables = CreateTables(device, table);
-        m_tablesPending = true;
+        m_ruleIndex = table.ruleIndex;
+        m_phases = MakeSpeciesPhases(table);
+        m_tableWords = MakeMultiresTableWords(m_ruleIndex, m_phases,
+                                              {});  // 世界の端は RecordUpload で(既定は全部 wall)
+        m_tables = CreateTables(device, table, m_tableWords);
+        m_tablesPending.fill(true);
         if (!std::ranges::all_of(m_tables, &gpu::ResidentBuffer::Valid))
             return std::unexpected("反応の表のバッファを作れない");
 
@@ -917,6 +934,11 @@ namespace bicameral::sim {
             return false;
         }
 
+        // --- 世界の端(表の語。前のリストは GPU で終わっている約束なので、前に外した表の語はもう読まれない)---
+        m_retiredTables.clear();
+        if (!UpdateTableWords(nest.edges))
+            return false;
+
         // 要求の途中の値・伝導の作業場(印と変化は 0 から)・GPU の入力は写さない(毎回の処理が書いてから読む)
         const std::vector<std::byte> zeros(std::max(BufferSizes()[BufferStates], BufferSizes()[BufferConduction]));
         const std::vector<std::byte> graphInput = MakeGraphInputImage();
@@ -998,9 +1020,12 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
 
         // --- 反応の表: 作った・替えた後の最初の結び付けで既定のヒープへ写す(T-0410。それより前に記録した段は前の表を読む)---
-        if (m_tablesPending) {
-            gpu::RecordResidentUploads(list, m_tables);
-            m_tablesPending = false;
+        for (uint32_t i = 0; i < TABLE_COUNT; ++i) {
+            if (!m_tablesPending[i])
+                continue;
+
+            gpu::RecordResidentUploads(list, std::span(&m_tables[i], 1));
+            m_tablesPending[i] = false;
         }
 
         for (uint32_t i = 0; i < TABLE_COUNT; ++i)
@@ -1529,6 +1554,32 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &toUav);
     }
 
+    // 表の語を世界の端 edges で作り直す(T-0773)。写すのは次の BindRoot(T-0410 と同じ)
+    bool GpuMultires::UpdateTableWords(const MultiresWorldEdges& edges) {
+        std::vector<uint32_t> words = MakeMultiresTableWords(m_ruleIndex, m_phases, edges);
+        if (words == m_tableWords)
+            return true;
+
+        ComPtr<ID3D12Device> device;
+        if (!m_tables[TABLE_WORDS].buffer || FAILED(m_tables[TABLE_WORDS].buffer->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        gpu::ResidentBuffer resident = gpu::CreateResidentBuffer(device.Get(), std::as_bytes(std::span(words)));
+        if (!resident.Valid()) {
+            Log(Channel::Gpu, Level::Error, "世界の端の表の語のバッファを作れない");
+            return false;
+        }
+
+        m_retiredTables.push_back(m_tables[TABLE_WORDS].buffer);
+        m_retiredTables.push_back(m_tables[TABLE_WORDS].upload);
+        m_tables[TABLE_WORDS] = std::move(resident);
+        m_tablesPending[TABLE_WORDS] = true;
+        m_edges = edges;
+        m_tableWords = std::move(words);
+
+        return true;
+    }
+
     // --- 外のバッファとパイプライン ---
 
     // 反応表の差し替え(T-0194): BindRoot が記録のたびに結ぶので、持ち替えるだけで次の結び付けから効く(写しもその時。T-0410)
@@ -1538,7 +1589,11 @@ namespace bicameral::sim {
         if (!m_tables[0].buffer || FAILED(m_tables[0].buffer->GetDevice(IID_PPV_ARGS(&device))))
             return std::unexpected("反応の表のバッファが無い");
 
-        std::array<gpu::ResidentBuffer, TABLE_COUNT> tables = CreateTables(device.Get(), table);
+        // 表の語は新しい表の索引と相の表 + 今の世界の端
+        std::vector<uint32_t> ruleIndex = table.ruleIndex;
+        std::vector<CvSpeciesPhase> phases = MakeSpeciesPhases(table);
+        std::vector<uint32_t> words = MakeMultiresTableWords(ruleIndex, phases, m_edges);
+        std::array<gpu::ResidentBuffer, TABLE_COUNT> tables = CreateTables(device.Get(), table, words);
         if (!std::ranges::all_of(tables, &gpu::ResidentBuffer::Valid))
             return std::unexpected("差し替える反応の表のバッファを作れない");
 
@@ -1550,7 +1605,10 @@ namespace bicameral::sim {
         }
 
         m_tables = std::move(tables);
-        m_tablesPending = true;
+        m_tablesPending.fill(true);
+        m_ruleIndex = std::move(ruleIndex);
+        m_phases = std::move(phases);
+        m_tableWords = std::move(words);
 
         return retired;
     }
