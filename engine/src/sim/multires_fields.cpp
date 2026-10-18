@@ -339,6 +339,69 @@ namespace bicameral::sim {
             }
         }
 
+        void RefineShadow(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot,
+                          uint32_t childPage) {
+            for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+                MultiresField& field = nest.fields[f];
+                const uint32_t components = field.desc.components;
+
+                // --- ブロックの欄: 影のブロックは親の値 ---
+                if (field.desc.place == SF_PLACE_BLOCK) {
+                    for (uint32_t c = 0; c < components; ++c)
+                        field.values[UniformAddress(field, childSlot, c)] = field.values[UniformAddress(field,
+                                                                                                        parentSlot, c)];
+                    continue;
+                }
+
+                if (!SfOnCells(field.desc))
+                    continue;
+
+                // --- セル・面の欄: 子は親と同じ数(影はいつも頁を持つ。親は一様でも頁でも LoadNestField で読む)---
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    const uint32_t parentCell = MrParentCellOfChild(octant, index);
+                    for (uint32_t c = 0; c < components; ++c)
+                        field.values[PageAddress(nest, field, childPage, index, c)] = SfRefineValue(
+                            LoadNestField(nest, f, parentSlot, parentCell, c));
+                }
+            }
+        }
+
+        void PullBackShadow(MultiresNest& nest, uint32_t shadowSlot) {
+            const MrBlock& shadow = nest.blocks[shadowSlot];
+            FX_ASSERT(shadow.kind == MR_BLOCK_SHADOW && !MrIsUniform(shadow));
+            for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+                MultiresField& field = nest.fields[f];
+                const uint32_t components = field.desc.components;
+
+                // --- ブロックの欄: 親の値に戻す ---
+                if (field.desc.place == SF_PLACE_BLOCK) {
+                    for (uint32_t c = 0; c < components; ++c)
+                        field.values[UniformAddress(field, shadowSlot, c)] = field.values[UniformAddress(
+                            field, shadow.parent, c)];
+                    continue;
+                }
+
+                if (!SfOnCells(field.desc))
+                    continue;
+
+                // --- セル・面の欄: 親のセルごとに子 2³ の和を親 × 8 に ---
+                for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                    const uint32_t parentCell = MrOctantCell(shadow.parentOctant, local);
+                    for (uint32_t c = 0; c < components; ++c) {
+                        const int64_t parentValue = LoadNestField(nest, f, shadow.parent, parentCell, c);
+                        SfFamily family{};
+                        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+                            family.values[j] = field.values[PageAddress(nest, field, shadow.page, MrChildCell(local, j),
+                                                                        c)];
+
+                        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+                            field.values[PageAddress(nest, field, shadow.page, MrChildCell(local, j),
+                                                     c)] = SfPullBackChild(parentValue, family, j);
+                    }
+                }
+            }
+        }
+
     }  // namespace nest_fields
 
 }  // namespace bicameral::sim

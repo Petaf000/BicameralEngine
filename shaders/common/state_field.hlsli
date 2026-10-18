@@ -48,6 +48,7 @@ FX_CONST uint32_t SF_PHASE_COUNT = 3;
 // SAME:   細かく = 子は親と同じ数。粗く = 子 8 つの平均(和 ÷ 8 の切り捨て。余りは捨てる。量でない欄)
 // VOLUME: 細かく = 子は親と同じ数。粗く = 和 ÷ 8 + 端数(余りは世界の帳簿の「粗くした端数・出」の、その欄の列へ。量の欄 = 保存量。T-0762)
 // ブロック・世界の欄は SAME だけ(ブロック: 細かく = 子のブロックは親の値・粗く = 親は自分の値のまま)
+// 観察の影(親を覆わない・世界に返さない。D-403): 細かく = 子は親と同じ数。引き戻す = 子の和を親 × 8 に(SfPullBackChild。ADR-0361)
 FX_CONST uint32_t SF_SCALE_SAME = 0;
 FX_CONST uint32_t SF_SCALE_VOLUME = 1;
 FX_CONST uint32_t SF_SCALE_COUNT = 2;
@@ -167,6 +168,84 @@ FX_FN int64_t SfCoarsenValue(SfCoarsenSum sum) {
 // 余り(子のレベルの単位で 0〜7。切り捨てなのでいつも 0 以上 = セルから減った量)。VOLUME の欄は世界の帳簿の「粗くした端数・出」へ・SAME の欄は捨てる
 FX_FN uint32_t SfCoarsenRemainder(SfCoarsenSum sum) {
     return sum.low & 7u;
+}
+
+// --- 観察の影を親に引き戻す(T-0761。ADR-0361)-------------------------------------------------------
+// 影の子 2³ の値を、子の和が「親 × 8」(子のレベルの単位)になるように合わせる = 影を粗くすると親と同じ値・余り 0。
+// セルの引き戻し(multires.hlsli の MrPullBackShadow)と同じ芯: 影は親に従って細部を動かすだけで、世界に返さない(D-403)。
+//   親と子 8 つが全部 0 以上(2^60 未満。質量・エネルギーなど負にならない量。今その値の所): 親 × 8 を子の今の値の比で配る
+//     (切り捨て。余りは 0 でない子に番号の順に 1 ずつ。全部 0 なら親と同じ数。セルの物質と同じ配り方 = 負にならない・偏りの形を保つ)。
+//   そのほか(負の値がある。運動量など): 足りない分(負もある)を 8 つに等しく足す(余りは子の番号の順に 1 ずつ。影の中の違いはそのまま)。
+// 型(I64・I32・U32)にも SAME / VOLUME にもよらない 1 つの規則(SAME を粗くした平均も親と同じになる)。
+// 子の値は読むだけ(書き換えた配列を動的な添字で読まない。T-0397)
+FX_CONST uint32_t SF_CHILDREN = 8;  // 1 つの親のセルの子のセルの数(MR_CHILDREN_PER_CELL と同じ)
+
+// 影の子 2³ の 1 つの値(子の番号は MrChildCell の j)
+struct SfFamily {
+    int64_t values[SF_CHILDREN];
+};
+
+// 負の値がある: 子の値 + 等しく足す分(8 × 親 − 和 = 8 × (親 − Σ(v >> 3)) − Σ(v & 7) を「8 × 足す分 + 余り」に分ける。64bit を越えない)
+FX_FN int64_t SfPullBackShiftedChild(int64_t parentValue, SfFamily family, uint32_t child) {
+    SfCoarsenSum sum = SfMakeCoarsenSum();
+    FX_UNROLL
+    for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+        sum = SfAddCoarsenChild(sum, family.values[j]);
+
+    const uint32_t lowCeil = (sum.low + 7u) & ~7u;  // Σ(v & 7) を 8 の倍数に切り上げ
+    const int64_t share = parentValue - sum.whole - (int64_t)(lowCeil >> 3u);
+    const uint32_t rest = lowCeil - sum.low;  // 0〜7
+
+    return family.values[child] + share + (child < rest ? (int64_t)1 : (int64_t)0);
+}
+
+// 親と子が全部 0 以上か(比で配る方を使うか)。2^60 以上の値がある時も等しく足す方(親 × 8 と子の和が 63bit に入る範囲だけ比で配る)
+FX_FN bool SfPullBackNonNegative(int64_t parentValue, SfFamily family) {
+    bool nonNegative = (parentValue >> 60) == 0;
+    FX_UNROLL
+    for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+        nonNegative = nonNegative && (family.values[j] >> 60) == 0;
+
+    return nonNegative;
+}
+
+// 負にならない: 親 × 8 を子の今の値の比で配った child の分(multires.hlsli の MrDistribute と同じ配り方)
+FX_FN int64_t SfPullBackSharedChild(int64_t parentValue, SfFamily family, uint32_t child) {
+    FX_ASSERT(SfPullBackNonNegative(parentValue, family));
+    const uint64_t total = (uint64_t)parentValue << 3u;
+    uint64_t weightSum = 0;
+    FX_UNROLL
+    for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+        weightSum += (uint64_t)family.values[j];
+
+    if (weightSum == 0)
+        return parentValue;
+
+    // --- 切り捨ての分・その和・child より前の 0 でない子の数 ---
+    uint64_t given = 0;
+    uint64_t mine = 0;
+    uint32_t rank = 0;
+    FX_UNROLL
+    for (uint32_t k = 0; k < SF_CHILDREN; ++k) {
+        const uint64_t share = FxDivU128By64(FxMulU64Full(total, (uint64_t)family.values[k]), weightSum).quotient;
+        given += share;
+        mine = k == child ? share : mine;
+        rank += k < child && family.values[k] != 0 ? 1u : 0u;
+    }
+
+    // 切り捨てで足りない分(0 でない子の数より少ない)を 0 でない子に番号順に 1 ずつ
+    const uint64_t rest = total - given;
+    const bool bonus = family.values[child] != 0 && (uint64_t)rank < rest;
+
+    return (int64_t)(mine + (bonus ? 1u : 0u));
+}
+
+// 影の子 child の引き戻した値(親 parentValue は親のセルの値。子の和 = 親 × 8 になる)
+FX_FN int64_t SfPullBackChild(int64_t parentValue, SfFamily family, uint32_t child) {
+    if (SfPullBackNonNegative(parentValue, family))
+        return SfPullBackSharedChild(parentValue, family, child);
+
+    return SfPullBackShiftedChild(parentValue, family, child);
 }
 
 SF_NAMESPACE_END

@@ -8,10 +8,15 @@
 //     粗くすると和 ÷ 8 で余りは欄の帳簿へ。量の欄の「値 × 8^(最も細かい − レベル) + 帳簿」が毎刻み最初とビット一致。
 //     一様なブロックは頁に広がる時に欄も広がり、欄が一様なら畳まれ・一様でなければ畳まれない。違う値の一様な子を粗くすると親が頁に広がる。
 //     ハッシュに入る欄を変えると要約が変わり、入らない欄では変わらない
+//   - 観察の枠(影・写し)の欄(T-0761。ADR-0361): 運ぶ計算と同じ形の欄(気体の運動量・液体の面の運動量など)を持つ世界で、
+//     影を細かくする/引き戻す・写しを置くの前後で本物の葉の要約と保存量(帳簿込み)がビット単位で同じ・覗かない世界と毎刻み同じ。
+//     影は細かくすると親と同じ数・引き戻すと親のセルごとに子の和 = 親 × 8(負にならない欄は比で配る・負の値がある欄は等しく足す)
 #include <algorithm>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/log.h"
@@ -576,6 +581,272 @@ namespace {
         Expect(!RestoreNestState(other, save) && HashWholeNest(other) == otherHash, "保存点: 形の違う世界へは戻さない");
     }
 
+    // --- 5. 観察の枠(影・写し)の欄(T-0761。ADR-0361)---
+
+    // 運ぶ計算が登録する欄と同じ形(気体の運動量・運動のエネルギー・前の質量・液体の面の運動量。名前と形は multires_gas.cpp・
+    // multires_liquid.cpp の登録と同じ。試験の表は基準の大気を持たないので形だけ借りる)
+    struct TransportFields {
+        uint32_t gasMomentum = MULTIRES_NO_FIELD;     // セル ×3・符号付き・保存量
+        uint32_t gasKinetic = MULTIRES_NO_FIELD;      // セル・負にならない・保存量
+        uint32_t gasMassBefore = MULTIRES_NO_FIELD;   // セル・SAME・負にならない
+        uint32_t liquidMomentum = MULTIRES_NO_FIELD;  // 面 ×3・符号付き・保存量
+    };
+
+    constexpr uint32_t OBSERVER_MIRROR_SLOT = test::MULTIRES_SHADOW_SLOT + test::MULTIRES_LEVELS;  // 影の鎖の後ろ
+    constexpr uint64_t OBSERVER_REFINE_TICK = 12;  // 本物の鎖(刻み 10)の後に覗き始める
+    constexpr uint64_t OBSERVER_REMOVE_TICK = 66;  // 本物の鎖を戻している途中で覗きをやめる
+
+    TransportFields RegisterTransportFields(MultiresNest& nest) {
+        constexpr uint32_t CONSERVED = SF_FLAG_CONSERVED | SF_FLAG_HASHED;
+        const auto cell = [&](const char* name, uint32_t phase, uint32_t scale, uint32_t flags, uint32_t components) {
+            return RegisterNestField(nest, name,
+                                     SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, phase, scale, flags, components));
+        };
+
+        TransportFields fields;
+        fields.gasMomentum = cell("gas.momentum", SF_PHASE_GAS, SF_SCALE_VOLUME, CONSERVED, 3);
+        fields.gasKinetic = cell("gas.kinetic_energy", SF_PHASE_GAS, SF_SCALE_VOLUME, CONSERVED, 1);
+        fields.gasMassBefore = cell("gas.mass_before", SF_PHASE_GAS, SF_SCALE_SAME, SF_FLAG_HASHED, 1);
+        fields.liquidMomentum = RegisterNestField(
+            nest, "liquid.momentum",
+            SfMakeFieldDesc(SF_PLACE_FACE, SF_TYPE_I64, SF_PHASE_LIQUID, SF_SCALE_VOLUME, CONSERVED, 3));
+
+        return fields;
+    }
+
+    // 欄が負にならない量か(引き戻しで比で配る方になる欄。試験の値の作り方を分ける)
+    bool NonNegativeField(const MultiresNest& nest, uint32_t field) {
+        const std::string& name = nest.fields[field].name;
+
+        return nest.fields[field].desc.type == SF_TYPE_U32 || name == "gas.kinetic_energy" || name == "gas.mass_before";
+    }
+
+    // 頁を持つ枠 slot のセル・面の欄を全部いろいろな値で(負にならない欄は 0〜2000)、ブロックの欄も。salt で値を変える
+    void FillAllPageFields(MultiresNest& nest, uint32_t slot, uint64_t salt) {
+        for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+            const SfFieldDesc& desc = nest.fields[f].desc;
+            const int64_t offset = NonNegativeField(nest, f) ? 1000 : 0;
+            if (desc.place == SF_PLACE_BLOCK)
+                StoreNestBlockField(nest, f, slot, 0, VariedValue(salt, slot, 40 + f));
+
+            if (!SfOnCells(desc))
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                for (uint32_t c = 0; c < desc.components; ++c)
+                    StoreNestField(nest, f, slot, index, c, VariedValue(salt + slot, index, (f * 4) + c) + offset);
+            }
+        }
+    }
+
+    // 根に試験の欄と運ぶ計算の欄を付けた世界(観察の枠 = 影の鎖 9 段 + 写し 1)
+    MultiresNest MakeObserverFieldNest(const BakedReactionTable& table) {
+        MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(
+            table, test::MULTIRES_WORLD_BLOCKS, test::MULTIRES_LEVELS + 1, test::MULTIRES_FRACTION_CAPACITY));
+        const TestFields fields = RegisterTestFields(nest);
+        RegisterTransportFields(nest);
+        PlaceRootBlock(nest, 0, 0, 0, test::MakeMultiresRootCells(table));
+        FillAllPageFields(nest, test::MULTIRES_ROOT_SLOT, 0);
+        StoreNestWorldField(nest, fields.world, 1, -77);
+
+        return nest;
+    }
+
+    // 世界の姿(本物の葉の要約と、帳簿込みの保存量)
+    struct WorldView {
+        uint64_t leaves = 0;
+        ConservedTotals totals;
+
+        bool operator==(const WorldView&) const = default;
+    };
+
+    WorldView ViewWorld(const MultiresNest& nest, const BakedReactionTable& table) {
+        return {.leaves = HashRealLeaves(nest),
+                .totals = ComputeConservedTotals(nest, table, static_cast<int32_t>(test::MULTIRES_LEVELS))};
+    }
+
+    // 影 shadow のセル・面の欄が親と同じ数で、ブロックの欄が親の値か(細かくした直後)
+    bool ShadowCopiesParent(const MultiresNest& nest, uint32_t shadow) {
+        const MrBlock& block = nest.blocks[shadow];
+        for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+            const SfFieldDesc& desc = nest.fields[f].desc;
+            if (desc.place == SF_PLACE_BLOCK &&
+                LoadNestBlockField(nest, f, shadow, 0) != LoadNestBlockField(nest, f, block.parent, 0))
+                return false;
+
+            if (!SfOnCells(desc))
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const uint32_t parentCell = MrParentCellOfChild(block.parentOctant, index);
+                for (uint32_t c = 0; c < desc.components; ++c) {
+                    if (LoadNestField(nest, f, shadow, index, c) != LoadNestField(nest, f, block.parent, parentCell, c))
+                        return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // 影 shadow の欄が引き戻されているか: 親のセルごとに子 2³ の和 = 親 × 8・負にならない欄は 0 以上・ブロックの欄は親の値
+    bool ShadowPulledBack(const MultiresNest& nest, uint32_t shadow) {
+        const MrBlock& block = nest.blocks[shadow];
+        for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+            const SfFieldDesc& desc = nest.fields[f].desc;
+            if (desc.place == SF_PLACE_BLOCK &&
+                LoadNestBlockField(nest, f, shadow, 0) != LoadNestBlockField(nest, f, block.parent, 0))
+                return false;
+
+            if (!SfOnCells(desc))
+                continue;
+
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                for (uint32_t c = 0; c < desc.components; ++c) {
+                    int64_t sum = 0;
+                    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+                        const int64_t value = LoadNestField(nest, f, shadow, MrChildCell(local, j), c);
+                        if (NonNegativeField(nest, f) && value < 0)
+                            return false;
+
+                        sum += value;
+                    }
+
+                    const uint32_t parentCell = MrOctantCell(block.parentOctant, local);
+                    if (sum != 8 * LoadNestField(nest, f, block.parent, parentCell, c))
+                        return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // 影の鎖の欄を揺らして(影が自分で動いた代わり)から引き戻し、世界が変わらず・影が親に従ったか
+    void ShakeAndPullBack(MultiresNest& nest, const BakedReactionTable& table, uint32_t levels, uint64_t tick,
+                          int& worldChanged, int& notPulled) {
+        for (uint32_t i = 0; i < levels; ++i)
+            FillAllPageFields(nest, test::MULTIRES_SHADOW_SLOT + i, 1000 + tick);
+
+        const WorldView before = ViewWorld(nest, table);
+        PullBackShadowChain(nest, table, test::MULTIRES_SHADOW_SLOT, levels);
+        worldChanged += ViewWorld(nest, table) == before ? 0 : 1;
+        for (uint32_t i = 0; i < levels; ++i)
+            notPulled += ShadowPulledBack(nest, test::MULTIRES_SHADOW_SLOT + i) ? 0 : 1;
+    }
+
+    // 本物の鎖の場面を、覗く世界と覗かない世界で並べて進める: 影を細かくする/引き戻すの前後で世界の姿がビット単位で同じ・
+    // 覗かない世界とも毎刻み同じ(見るだけなら世界は変わらない。D-403)
+    void TestShadowFields(const BakedReactionTable& table) {
+        MultiresNest watched = MakeObserverFieldNest(table);
+        MultiresNest plain = MakeObserverFieldNest(table);
+        // 影の点は本物の鎖と別の八分の一(根のセル (6, 1, 1)。覆われていない親から細かくする)
+        const MultiresPoint point{.x = (6 << 9) | 100, .y = (1 << 9) | 7, .z = (1 << 9) | 300, .level = 9};
+        int worldChanged = 0;
+        int notCopied = 0;
+        int notPulled = 0;
+        int diverged = 0;
+        for (uint64_t tick = 0; tick < test::MULTIRES_END_TICK; ++tick) {
+            test::StepMultiresScene(plain, table, test::MultiresScenario::Real, tick);
+            test::StepMultiresScene(watched, table, test::MultiresScenario::Real, tick);
+            if (tick == OBSERVER_REFINE_TICK) {
+                const WorldView before = ViewWorld(watched, table);
+                RefineShadowChain(watched, test::MULTIRES_ROOT_SLOT, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS,
+                                  point);
+                worldChanged += ViewWorld(watched, table) == before ? 0 : 1;
+                for (uint32_t i = 0; i < test::MULTIRES_LEVELS; ++i)
+                    notCopied += ShadowCopiesParent(watched, test::MULTIRES_SHADOW_SLOT + i) ? 0 : 1;
+            } else if (tick > OBSERVER_REFINE_TICK && tick < OBSERVER_REMOVE_TICK) {
+                ShakeAndPullBack(watched, table, test::MULTIRES_LEVELS, tick, worldChanged, notPulled);
+            } else if (tick == OBSERVER_REMOVE_TICK) {
+                RemoveShadowChain(watched, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
+            }
+
+            diverged += ViewWorld(watched, table) == ViewWorld(plain, table) ? 0 : 1;
+        }
+
+        Expect(notCopied == 0, "影の欄: 細かくすると子は親と同じ数・ブロックの欄は親の値(親は覆わない)");
+        Expect(notPulled == 0,
+               "影の欄: 引き戻すと親のセルごとに子の和 = 親 × 8・負にならない欄は 0 以上・ブロックの欄は親の値");
+        Expect(worldChanged == 0,
+               "影の欄: 細かくする/引き戻すの前後で本物の葉の要約と保存量(帳簿込み)がビット単位で同じ");
+        Expect(diverged == 0, "影の欄: 覗く世界と覗かない世界の本物の葉の要約・保存量が毎刻み同じ");
+    }
+
+    // 世界の写し: 置くと欄は 0 から・呼ぶ側が書いた欄に影が付いて行く・世界は変わらない
+    void TestMirrorFields(const BakedReactionTable& table) {
+        constexpr uint32_t LEVELS = 3;
+        constexpr int64_t MIRROR_X = 8;  // 根の隣の 0.5 m のブロック(写す元は木の形をしていない世界)
+        MultiresNest nest = MakeObserverFieldNest(table);
+        const std::vector<RxCell> cells = test::MakeMultiresRootCells(table);
+        const WorldView before = ViewWorld(nest, table);
+
+        // --- 置き直すと前の値を残さない ---
+        PlaceMirrorBlock(nest, OBSERVER_MIRROR_SLOT, 0, MIRROR_X, 0, 0, cells);
+        FillAllPageFields(nest, OBSERVER_MIRROR_SLOT, 7);
+        PlaceMirrorBlock(nest, OBSERVER_MIRROR_SLOT, 0, MIRROR_X, 0, 0, cells);
+        bool cleared = true;
+        for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+            const SfFieldDesc& desc = nest.fields[f].desc;
+            if (desc.place == SF_PLACE_BLOCK)
+                cleared = cleared && LoadNestBlockField(nest, f, OBSERVER_MIRROR_SLOT, 0) == 0;
+
+            for (uint32_t index = 0; SfOnCells(desc) && index < MR_BLOCK_CELLS; ++index) {
+                for (uint32_t c = 0; c < desc.components; ++c)
+                    cleared = cleared && LoadNestField(nest, f, OBSERVER_MIRROR_SLOT, index, c) == 0;
+            }
+        }
+
+        Expect(cleared, "写しの欄: 置くと 0 から(前の写しの値を残さない)");
+
+        // --- 写す元の欄を書き、影を細かくして引き戻す ---
+        FillAllPageFields(nest, OBSERVER_MIRROR_SLOT, 9);
+        const MultiresPoint point{.x = ((MIRROR_X + 2) << 9) | 5, .y = (5 << 9) | 60, .z = (2 << 9) | 9, .level = 9};
+        RefineShadowChain(nest, OBSERVER_MIRROR_SLOT, test::MULTIRES_SHADOW_SLOT, LEVELS, point);
+        bool copied = true;
+        for (uint32_t i = 0; i < LEVELS; ++i)
+            copied = copied && ShadowCopiesParent(nest, test::MULTIRES_SHADOW_SLOT + i);
+
+        Expect(copied, "写しの欄: 写しから細かくした影は写しと同じ数");
+        int worldChanged = 0;
+        int notPulled = 0;
+        ShakeAndPullBack(nest, table, LEVELS, 0, worldChanged, notPulled);
+        Expect(notPulled == 0, "写しの欄: 引き戻すと影は写しに従う(子の和 = 親 × 8)");
+        Expect(worldChanged == 0 && ViewWorld(nest, table) == before,
+               "写しの欄: 写しを置く・影を細かくする/引き戻すで世界の姿がビット単位で同じ");
+    }
+
+    // 引き戻しの 1 つの規則(state_field.hlsli)の境目: 負の値がある組は等しく足す・負にならない組は比で配る
+    void TestPullBackRule() {
+        const auto pull = [](int64_t parent, const SfFamily& family) {
+            SfFamily result{};
+            int64_t sum = 0;
+            for (uint32_t j = 0; j < SF_CHILDREN; ++j) {
+                result.values[j] = SfPullBackChild(parent, family, j);
+                sum += result.values[j];
+            }
+
+            return std::pair{result, sum};
+        };
+
+        // 負の値がある: 足りない分 8 × 3 − 1 = 23 = 8 × 2 + 7 → 2 ずつ + 先頭の 7 つに 1
+        const SfFamily signedFamily{{-10, 5, -3, 0, 7, -1, 2, 1}};
+        const auto [shifted, shiftedSum] = pull(3, signedFamily);
+        Expect(shiftedSum == 24 && shifted.values[0] == -7 && shifted.values[1] == 8 && shifted.values[2] == 0 &&
+                   shifted.values[7] == 3,
+               "引き戻しの規則: 負の値がある組は等しく足す(影の中の違いはそのまま)");
+
+        // 負にならない: 親 × 8 = 80 を 1:0:3:0:0:0:0:0 で → 20・0・60
+        const SfFamily massFamily{{1, 0, 3, 0, 0, 0, 0, 0}};
+        const auto [shared, sharedSum] = pull(10, massFamily);
+        Expect(sharedSum == 80 && shared.values[0] == 20 && shared.values[1] == 0 && shared.values[2] == 60,
+               "引き戻しの規則: 負にならない組は比で配る(0 の子は 0 のまま)");
+
+        // 負にならない・全部 0: 親と同じ数
+        const auto [even, evenSum] = pull(6, SfFamily{});
+        Expect(evenSum == 48 && even.values[0] == 6 && even.values[7] == 6, "引き戻しの規則: 全部 0 の子は親と同じ数");
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -589,6 +860,9 @@ namespace {
         TestUniformFields(*table);
         TestSaveRestore(*table, false);
         TestSaveRestore(*table, true);
+        TestShadowFields(*table);
+        TestMirrorFields(*table);
+        TestPullBackRule();
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_state_test: FAILED ({} 件)", failureCount);
