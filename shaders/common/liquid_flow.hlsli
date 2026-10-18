@@ -230,6 +230,8 @@ struct LqFaceForce {
     int64_t gravity;   // 重さ
     int64_t friction;  // 摩擦(底と粘り)
     int64_t dropped;   // まわりが空の面の運動量(行き場なし)
+    int64_t
+        carry;  // 持ち越す 1 mg 未満の流れの端数(流れの分母の単位。符号は運動量の向き。坂がある 1 mg までの面だけ。T-0778)
 };
 
 FX_FN LqFaceForce LqEmptyFaceForce(int64_t face) {
@@ -240,6 +242,7 @@ FX_FN LqFaceForce LqEmptyFaceForce(int64_t face) {
     force.gravity = 0;
     force.friction = 0;
     force.dropped = 0;
+    force.carry = 0;
 
     return force;
 }
@@ -319,6 +322,25 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
 // 今の力との和(台形の近似で、動かした時のエネルギーの減り × 2 ÷ 1 mg)が動く向きに正でなければ、そこが整数の釣り合い(坂が無い)。
 // 面の運動量は 0 にする(帳簿は摩擦の列。運動のエネルギーは刻みの終わりの計算し直しで熱へ)。1 mg の大きさでは勢いで坂を登る動き(波)を
 // 格子が表せない(1 mg を動かす運動量は 0.5 m のセルで約 0.24 µm/s)ので、そこで止める。動いている水(1 刻みに 2 mg 以上動かす面)には触らない。
+// 坂がある面は、1 刻みに動く質量の 1 mg 未満の端数を面の欄に持ち越す(T-0778・ADR-0357)。軽い水(宙の数 mg・満ちきらないセルの上の数 mg)は
+// 摩擦と釣り合う運動量が 1 刻みに 1 mg に届かず、端数を毎刻み捨てると運動量だけ残って落ちきらなかった。端数を持つのは坂がある 1 mg までの面だけ
+// (釣り合い・2 mg 以上動かす面・向きが変わった面は 0 から数え直す)なので、釣り合いの判定と組んで行き来しない。
+// 1 mg までの面の 1 mg は、面ごとの判定が正しいように 1 刻みに各セルで 1 つの面だけが動かす(LqHoldTurn。Jacobi の同時の動きで、
+// 3 mg 足りないセルへ 4 つの隣が 1 mg ずつ入って溢れ、押し返されて戻るのを繰り返した。T-0778)。判定は丸めの幅を越えて下がる時だけ
+// (LQ_BALANCE_MARGIN。1 mg の入れ替えは丸めで両向きとも「下がる」と出て、余った 1 mg が行き来した)。
+
+// 1 mg までの面が 1 mg を動かせる刻みの巡り(軸 3 × 偶奇 2)。ある刻みに動かせるのは、軸の組 group の面のうち − 側のセルの
+// その軸の座標の偶奇が合う面だけ = どのセルも、その刻みに動かせる面がちょうど 1 つ(その軸の + か − の面)
+FX_CONST uint32_t LQ_HOLD_TURNS = 6;
+
+// 判定の丸めの幅: 今の力と動かした後の力はどちらも切り捨ての差で 1 未満ずれるので、和(動く向き)が 2 以上の時だけ下がると見る
+FX_CONST int64_t LQ_BALANCE_MARGIN = 2;
+
+// 世界の刻み tick に、軸の組 group(0〜2。仮の世界の格子の x・y・z の順)の面で − 側のセルの座標 coordinate が 1 mg を動かせるか。
+// 順番は世界の時計で決める(液体の状態に数を足さない: 何も無い世界・眠った区画の状態はビット単位で同じのまま)
+FX_FN uint32_t LqHoldTurn(uint64_t tick, uint32_t group, uint32_t coordinate) {
+    return (uint32_t)(tick % LQ_HOLD_TURNS) == (group * 2u) + (coordinate & 1u) ? 1u : 0u;
+}
 
 // 釣り合いを見る面の片側: 見立て・圧力・上から支えている液体(LqColumnPressure の above に渡した値)・下のセル(hasBelow = 0 は区画の床)
 struct LqBalanceSide {
@@ -379,12 +401,14 @@ FX_FN int64_t LqPushAfterShift(uint32_t vertical, LqBalanceSide a, LqBalanceSide
 }
 
 // 開いた面の力の後(LqOpenFaceForce の結果)に呼ぶ。運動量がこの刻みに 1 mg までしか動かさない大きさの面で、1 mg 動かしてもエネルギーが下がらなければ
-// (今の力 + 動かした後の力 が動く向きに正でない・上流に 1 mg も無い)運動量を 0 にする(摩擦の列へ。望む動く質量も 0)
-FX_FN LqFaceForce LqHoldAtBalance(LqFaceForce force, uint32_t vertical, LqBalanceSide a, LqBalanceSide b,
-                                  LqParams params) {
+// (今の力 + 動かした後の力 が動く向きに正でない・上流に 1 mg も無い)運動量を 0 にする(摩擦の列へ。望む動く質量も 0)。
+// 坂があれば、前の刻みの端数 carry(force.carry と同じ形)を足し、1 mg に届いていて順番の刻み(turn = LqHoldTurn)なら 1 mg を動かす。
+// 残りを force.carry に返す(1 mg で止める: 届いた面は順番を待つ)
+FX_FN LqFaceForce LqHoldAtBalance(LqFaceForce force, int64_t carry, uint32_t turn, uint32_t vertical, LqBalanceSide a,
+                                  LqBalanceSide b, LqParams params) {
     // 運動量の大きさで見る(上流が空で望む質量が 0 の面も、大きな運動量は移流が運ぶので触らない。T-0610)
-    const uint64_t reach = LqMulDiv(FxAbsU64(force.face), params.gravityMicrometersPerSecond2,
-                                    LqFluxDenominator(params));
+    const uint64_t denominator = LqFluxDenominator(params);
+    const uint64_t reach = LqMulDiv(FxAbsU64(force.face), params.gravityMicrometersPerSecond2, denominator);
     if (reach > 1 || force.face == 0)
         return force;
 
@@ -394,8 +418,22 @@ FX_FN LqFaceForce LqHoldAtBalance(LqFaceForce force, uint32_t vertical, LqBalanc
         const int64_t now = LqNetPush(vertical, a.view, a.pressure, b.view, b.pressure);
         const int64_t after = LqPushAfterShift(vertical, a, b, forward, params);
         const int64_t along = forward != 0 ? now + after : -(now + after);
-        if (along > 0)
-            return force;  // 坂がある(動かすとエネルギーが下がる): 運動量を積んで、いずれ 1 mg 動かす(薄い膜が抜ける)
+        if (along >= LQ_BALANCE_MARGIN) {
+            // 坂がある(動かすとエネルギーが下がる): 同じ向きの端数を足し、1 mg に届いて順番の刻みなら 1 mg を動かす。
+            // reach ≤ 1 なので 運動量 × 重力加速度 < 2 × 分母(端数を足しても 64bit に収まる)。端数は 1 mg で止める(粗く/細かくした後も)
+            const uint64_t magnitude = FxAbsU64(carry);
+            const bool sameWay = carry != 0 && (carry > 0) == (force.face > 0);
+            const uint64_t kept = sameWay ? (magnitude < denominator ? magnitude : denominator) : (uint64_t)0;
+            uint64_t flux = (FxAbsU64(force.face) * params.gravityMicrometersPerSecond2) + kept;
+            force.desired = 0;
+            if (turn != 0 && flux >= denominator) {
+                force.desired = 1;
+                flux -= denominator;
+            }
+
+            force.carry = FxApplySign(flux < denominator ? flux : denominator, force.face < 0);
+            return force;
+        }
     }
 
     force.friction -= force.face;

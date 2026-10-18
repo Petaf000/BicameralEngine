@@ -511,7 +511,7 @@ namespace {
             }
 
             const LiquidBook before = MeasureLiquidBook(*field, cells);  // 燃やした後(燃えた分は区画の外の段)
-            (void)field->Step(table, cells, changed);
+            (void)field->Step(table, cells, tick, changed);
             run.conserved = run.conserved && LiquidConserved(table, *field, cells, water, before);
             const uint64_t crossed = WaterWhere(table, *field, cells, LIQUID_SIZE, LIQUID_BARRIER_X + 1, 0);
             if (run.reachTick == 0 && crossed >= LIQUID_REACH_MICROMOLES)
@@ -579,7 +579,7 @@ namespace {
         bool conserved = true;
         std::vector<uint32_t> changed;
         for (uint64_t tick = 0; tick < 600; ++tick) {
-            (void)field->Step(table, cells, changed);
+            (void)field->Step(table, cells, tick, changed);
             conserved = conserved && MeasureLiquidBook(*field, cells) == baseline;
         }
 
@@ -627,7 +627,7 @@ namespace {
         std::vector<uint32_t> changed;
         for (uint64_t tick = 0; tick < 600; ++tick) {
             (void)gas->Step(table, cells, tick, changed);
-            (void)liquid->Step(table, cells, changed);
+            (void)liquid->Step(table, cells, tick, changed);
             conserved = conserved && Sum(table, cells, *gas).elements == baseline.elements;
         }
 

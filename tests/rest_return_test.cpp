@@ -574,7 +574,7 @@ namespace {
             const std::vector<reaction::RxCell> before = cells;
             const FaceCopy facesBefore = CopyFaces(*field);
             std::vector<uint32_t> changed;
-            const ProbeLiquidStepReport report = field->Step(table, cells, changed);
+            const ProbeLiquidStepReport report = field->Step(table, cells, tick, changed);
             const LiquidTotals totals = SumLiquid(table, *field, cells);
             if (tick == 0)
                 first = totals;  // 石を置いた分(区画の外の段の変化)は最初の刻みで帳簿に入る
@@ -607,7 +607,7 @@ namespace {
             restMicrometersPerSecond);
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             std::vector<uint32_t> changed;
-            const ProbeLiquidStepReport report = field->Step(table, cells, changed);
+            const ProbeLiquidStepReport report = field->Step(table, cells, tick, changed);
             if (report.movedMilligrams == 0 && tick % 300 != 0)
                 continue;
 
@@ -647,11 +647,12 @@ namespace {
         return views;
     }
 
-    void Diagnose(const BakedReactionTable& table, const Scene& scene, uint32_t depth, const char* name, uint64_t ticks,
-                  uint64_t window) {
+    // 戻り値: 最後の刻みまでに全部静止した(面の運動量・流れの端数がどれも 0 で、セルが変わらない刻みが最後まで続く。T-0778)
+    bool Diagnose(const BakedReactionTable& table, const Scene& scene, uint32_t depth, bool stone, const char* name,
+                  uint64_t ticks, uint64_t window) {
         auto field = ProbeLiquidField::Create(table, {.minCell = scene.minCell, .sizeCells = scene.size});
         if (!field)
-            return;
+            return false;
 
         const ProbeLiquidOptions& options = field->Options();
         const liquid::LqParams params = liquid::LqMakeParams(
@@ -669,8 +670,9 @@ namespace {
             return face < 0 ? -mass : mass;
         };
 
-        std::vector<reaction::RxCell> cells = MakePond(table, scene, depth, true);
+        std::vector<reaction::RxCell> cells = MakePond(table, scene, depth, stone);
         const uint32_t count = field->RegionCellCount();
+        uint64_t lastActive = 0;  // 最後に動いていた刻み(1 から)
         std::array<std::vector<DiagnoseFace>, 3> stats;
         for (auto& axisStats : stats)
             axisStats.assign(count, {});
@@ -681,7 +683,14 @@ namespace {
             name, sx, sy, sz, depth, depth + 1);
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             std::vector<uint32_t> changed;
-            const ProbeLiquidStepReport report = field->Step(table, cells, changed);
+            const ProbeLiquidStepReport report = field->Step(table, cells, tick, changed);
+            bool active = report.changedCells != 0;
+            for (uint32_t axis = 0; axis < 3 && !active; ++axis) {
+                for (uint32_t r = 0; r < count && !active; ++r)
+                    active = field->FaceMomentum(axis)[r] != 0 || field->FaceCarry(axis, r) != 0;
+            }
+
+            lastActive = active ? tick + 1 : lastActive;
             if (tick + window >= ticks) {
                 for (uint32_t axis = 0; axis < 3; ++axis) {
                     for (uint32_t r = 0; r < count; ++r) {
@@ -797,6 +806,60 @@ namespace {
                         (unsigned long long)liquid::LqWetHeight(views[b]), (long long)pressure[a],
                         (long long)pressure[b], (long long)push);
         }
+
+        // 運動量の大きい 2 つの面を、さらに 240 刻み追う(値が変わった刻みだけ。運動量・端数・両側の質量・押す力)
+        for (size_t i = 0; i < std::min<size_t>(entries.size(), 2); ++i) {
+            const uint32_t axis = entries[i].axis;
+            const uint32_t a = entries[i].region;
+            const uint32_t b = a + stride[axis];
+            std::printf("  面 (%u %u %u %c) を追う: 刻み  運動量  端数  質量 a/b  押す力\n", a % sx, a / (sx * sz),
+                        (a / sx) % sz, "xyz"[axis]);
+            std::vector<reaction::RxCell> traced = cells;
+            ProbeLiquidField copy = *field;
+            int64_t lastFace = INT64_MIN;
+            uint64_t lastA = 0;
+            uint64_t lastB = 0;
+            for (uint32_t tick = 0; tick < 240; ++tick) {
+                std::vector<uint32_t> changed;
+                (void)copy.Step(table, traced, ticks + tick, changed);
+                const std::vector<liquid::LqCellView> now = ReadViews(table, copy, traced);
+                const int64_t face = copy.FaceMomentum(axis)[a];
+                if (face == lastFace && now[a].mass == lastA && now[b].mass == lastB)
+                    continue;
+
+                lastFace = face;
+                lastA = now[a].mass;
+                lastB = now[b].mass;
+                std::vector<int64_t> p(count, 0);
+                for (uint32_t z = 0; z < sz; ++z) {
+                    for (uint32_t x = 0; x < sx; ++x) {
+                        uint64_t above = 0;
+                        for (uint32_t y = sy; y-- > 0;) {
+                            const uint32_t r = region(x, y, z);
+                            const liquid::LqCellView& below = y == 0 ? now[r] : now[region(x, y - 1, z)];
+                            const liquid::LqColumnStep step = liquid::LqColumnPressure(now[r], above, y == 0 ? 0u : 1u,
+                                                                                       below, params);
+                            p[r] = step.pressure;
+                            above = step.above;
+                        }
+                    }
+                }
+
+                std::printf("    %u  %lld  %lld  %llu/%llu  %lld\n", tick + 1, (long long)face,
+                            (long long)copy.FaceCarry(axis, a), (unsigned long long)now[a].mass,
+                            (unsigned long long)now[b].mass,
+                            (long long)liquid::LqNetPush(axis == 1 ? 1u : 0u, now[a], p[a], now[b], p[b]));
+            }
+        }
+
+        const bool rested = lastActive < ticks;
+        if (rested)
+            std::printf("  全部静止: %.2f 秒(刻み %llu から)\n", (double)lastActive / TICKS_PER_SECOND,
+                        (unsigned long long)lastActive + 1);
+        else
+            std::printf("  %llu 秒で静止しない\n", (unsigned long long)(ticks / TICKS_PER_SECOND));
+
+        return rested;
     }
 
     // 石を落とさない池は 1 刻め から静止(物差しの確かめ)
@@ -810,7 +873,7 @@ namespace {
         const std::vector<reaction::RxCell> before = cells;
         const FaceCopy faces = CopyFaces(*field);
         std::vector<uint32_t> changed;
-        (void)field->Step(table, cells, changed);
+        (void)field->Step(table, cells, 0, changed);
         const Activity activity = MeasureLiquid(scene, *field, before, cells, faces, 0);
         EXPECT(activity.activeCells == 0);
     }
@@ -823,9 +886,15 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--diagnose") {
         const BakedReactionTable table = MakeLiquidTable();
         const uint64_t seconds = argc > 2 ? std::stoull(argv[2]) : 60;
-        Diagnose(table, Scene{{16, 0, 16}, {16, 6, 16}, 0, 0}, 3, "積んだ水(3 層)に石", seconds * 60, 300);
-        Diagnose(table, Scene{{16, 0, 16}, {32, 4, 32}, 0, 0}, 1, "池に石", seconds * 60, 300);
-        return 0;
+        // T-0778 の確かめ: 3 つの場面が全部静止して眠る(静止の丸めなし)
+        bool rested = Diagnose(table, Scene{{16, 0, 16}, {16, 6, 16}, 0, 0}, 3, true, "積んだ水(3 層)に石",
+                               seconds * 60, 300);
+        rested = Diagnose(table, Scene{{16, 0, 16}, {32, 4, 32}, 0, 0}, 1, true, "池に石", seconds * 60, 300) && rested;
+        rested = Diagnose(table, Scene{{16, 0, 16}, {16, 6, 16}, 0, 0}, 3, false, "積んだ水(3 層)", seconds * 60,
+                          300) &&
+                 rested;
+        std::printf(rested ? "3 つの場面が全部静止\n" : "静止しない場面がある\n");
+        return rested ? 0 : 1;
     }
 
     if (argc > 1 && std::string_view(argv[1]) == "--trace") {

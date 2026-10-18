@@ -286,7 +286,9 @@ namespace {
                         same = worlds.probe.FaceMomentum(axis, region) ==
                                    LoadNestField(worlds.nest, fields.momentum, slot, index, NestAxis(axis)) &&
                                worlds.probe.FaceKinetic(axis, region) ==
-                                   LoadNestField(worlds.nest, fields.kinetic, slot, index, NestAxis(axis));
+                                   LoadNestField(worlds.nest, fields.kinetic, slot, index, NestAxis(axis)) &&
+                               worlds.probe.FaceCarry(axis, region) ==
+                                   LoadNestField(worlds.nest, fields.carry, slot, index, NestAxis(axis));
                     }
 
                     same = same &&
@@ -319,11 +321,11 @@ namespace {
             std::vector<uint32_t> changed;
             std::vector<uint32_t> changedSlots;
             const auto start = std::chrono::steady_clock::now();
-            const ProbeLiquidStepReport probe = worlds.probe.Step(table, worlds.grid, changed);
+            const ProbeLiquidStepReport probe = worlds.probe.Step(table, worlds.grid, tick, changed);
             // 保存の検査(T-0769): 液体の 1 刻みの前後で Σ 保存量 − 帳簿(エネルギー・元素・液体の欄の列)が変わらない
             const ConservedTotals before = ComputeConservedTotals(worlds.nest, table, worlds.nest.capacity.rootLevel);
             const auto middle = std::chrono::steady_clock::now();
-            const MultiresLiquidStepReport nest = worlds.liquid.Step(worlds.nest, table, changedSlots);
+            const MultiresLiquidStepReport nest = worlds.liquid.Step(worlds.nest, table, tick, changedSlots);
             const auto end = std::chrono::steady_clock::now();
             if (ComputeConservedTotals(worlds.nest, table, worlds.nest.capacity.rootLevel) != before) {
                 std::printf("  %s: 刻み %llu で Σ 保存量 − 帳簿が変わった\n", scene, (unsigned long long)tick);
@@ -457,7 +459,7 @@ namespace {
         const auto runNest = [&] {
             for (uint32_t i = 0; i < 30; ++i) {
                 std::vector<uint32_t> changedSlots;
-                (void)worlds->liquid.Step(worlds->nest, table, changedSlots);
+                (void)worlds->liquid.Step(worlds->nest, table, i, changedSlots);
             }
 
             return HashWholeNest(worlds->nest);
@@ -504,7 +506,7 @@ namespace {
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             std::vector<uint32_t> changedSlots;
             const ConservedTotals before = ComputeConservedTotals(worlds->nest, table, 0);
-            const MultiresLiquidStepReport report = worlds->liquid.Step(worlds->nest, table, changedSlots);
+            const MultiresLiquidStepReport report = worlds->liquid.Step(worlds->nest, table, tick, changedSlots);
             movedOut += report.edgeMilligrams;
             if (ComputeConservedTotals(worlds->nest, table, 0) != before) {
                 std::printf("  刻み %llu で Σ 保存量 − 帳簿が変わった\n", (unsigned long long)tick);

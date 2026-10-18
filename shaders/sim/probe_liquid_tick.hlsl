@@ -63,6 +63,10 @@ LqParams Params(ProbeLiquidHeader header) {
                         header.overfillStiffness, header.maxSpeedMillimetersPerSecond, header.advection);
 }
 
+uint32_t RegionMin(ProbeLiquidHeader header, uint32_t axis) {
+    return axis == 0 ? header.regionMin[0] : (axis == 1 ? header.regionMin[1] : header.regionMin[2]);
+}
+
 uint32_t RegionSize(ProbeLiquidHeader header, uint32_t axis) {
     return axis == 0 ? header.regionSize[0] : (axis == 1 ? header.regionSize[1] : header.regionSize[2]);
 }
@@ -302,10 +306,14 @@ LqBalanceSide BalanceSide(ProbeLiquidHeader header, uint32_t region) {
                 const uint32_t vertical = axis == 1 ? 1u : 0u;
                 force = LqOpenFaceForce(face, faceOpen, vertical, a, pressure, LoadState(header, neighbor),
                                         LoadSigned(CellAddress(header.pressureOffset, neighbor)), params);
-                force = LqHoldAtBalance(force, vertical, BalanceSide(header, region), BalanceSide(header, neighbor),
-                                        params);
+                // 1 mg までの面の順番(世界の刻みと格子の座標。CPU の ProbeLiquidField と同じ。T-0778)
+                const uint32_t turn = LqHoldTurn(CurrentTick(), axis, RegionMin(header, axis) + Component(at, axis));
+                force = LqHoldAtBalance(force, LoadSigned(FaceAddress(header, header.carryOffset, axis, region)), turn,
+                                        vertical, BalanceSide(header, region), BalanceSide(header, neighbor), params);
             }
 
+            // 1 mg 未満の端数(持ち越す。この面を書くのはこのスレッドだけ。T-0778)
+            liquidWork.Store<int64_t>(FaceAddress(header, header.carryOffset, axis, region), force.carry);
             liquidWork.Store<int64_t>(FaceAddress(header, header.forcedOffset, axis, region), force.face);
             liquidWork.Store<uint64_t>(FaceAddress(header, header.desiredOffset, axis, region), force.desired);
             external[axis] = minusWall + force.wall + force.gravity + force.friction + force.dropped + vanished;
@@ -736,7 +744,7 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
 }
 
     // --- 状態のハッシュ(T-0620。ハッシュの単位の HashCells の後。区画があるときだけ)---
-    // 区画のセルの持ち越す欄(面の運動量 × 3・面の運動のエネルギー × 3・位置のエネルギー・液体の質量)の寄与 + 帳簿の寄与(区画の番号 0 のスレッド)を、
+    // 区画のセルの持ち越す欄(面の運動量 × 3・面の運動のエネルギー × 3・流れの端数 × 3・位置のエネルギー・液体の質量)の寄与 + 帳簿の寄与(区画の番号 0 のスレッド)を、
     // S(t + 1) の欄の hash へ足す(common/probe_region_hash.hlsli。CPU は ProbeLiquidField::HashTerm)
     [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void LiquidHash(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const ProbeLiquidHeader header = Header();
@@ -749,6 +757,9 @@ void CarriedFrom(ProbeLiquidHeader header, uint32_t axis, uint32_t from, uint64_
 
         [unroll] for (uint32_t kineticAxis = 0; kineticAxis < 3; ++kineticAxis)
             term = ProbeRegionHashAdd(term, LoadSigned(FaceAddress(header, header.kineticOffset, kineticAxis, region)));
+
+        [unroll] for (uint32_t carryAxis = 0; carryAxis < 3; ++carryAxis)
+            term = ProbeRegionHashAdd(term, LoadSigned(FaceAddress(header, header.carryOffset, carryAxis, region)));
 
         term = ProbeRegionHashAdd(term, LoadSigned(CellAddress(header.potentialOffset, region)));
         hash = ProbeRegionHashEnd(ProbeRegionHashAdd(term, LoadSigned(CellAddress(header.massOffset, region))));

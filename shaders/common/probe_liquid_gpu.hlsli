@@ -5,7 +5,7 @@
 // バッファは 1 つ(liquidWork。RWByteAddressBuffer。ルート署名の u19): 先頭から 制御(数)・帳簿(外から入った運動量 × 3・位置のエネルギー)・
 // 見出し(ProbeLiquidHeader。CPU が作る時に書く)、その後ろに見出しが場所を持つ欄:
 //   - 物質ごとの値(ProbeLiquidSpecies。CPU が書く)
-//   - 持ち越す状態(ProbeLiquidField の m_faces・m_kinetic・m_potential と同じ並び。作った時は 0 = 静止)
+//   - 持ち越す状態(ProbeLiquidField の m_faces・m_kinetic・m_carry・m_potential と同じ並び。作った時は 0 = 静止)
 //   - 刻みの中だけの作業の値(刻みの初めのセルの写し・セルの値・圧力・面の力の後の運動量・流れ・移流・熱など。毎刻み書き直す)
 // 区画の中の番号 = x + 幅 × (z + 奥行き × y)(ProbeLiquidField と同じ。y が上)。面の軸は格子の x・y・z。
 // 構造化した値の並びが C++ と同じになるよう、64bit の値を先に・32bit の値を後に置く。
@@ -68,6 +68,7 @@ typedef LqCellView ProbeLiquidCellState;
         uint32_t changedOffset;           // uint32 × 区画のセル(液体を動かして値が変わった)
         uint32_t listOffset;              // 区画のセルごとに PROBE_LIQUID_LIST_ENTRIES 件(成分の増減の作業場)
         uint32_t aboveOffset;             // uint64 × 区画のセル(上から支えている液体。整数の釣り合いが使う。T-0781)
+        uint32_t carryOffset;             // int64 × 3 × 区画のセル(1 mg 未満の流れの端数。持ち越す。T-0778)
     };
 
     // --- 制御と帳簿(liquidWork の先頭)---

@@ -57,6 +57,7 @@ namespace bicameral::sim {
         uint32_t kinetic = 0;     // 面 ×3: 面の運動のエネルギー(mJ)
         uint32_t potential = 0;   // セル: 位置のエネルギー(mJ)
         uint32_t massBefore = 0;  // セル: 前の刻みの終わりの液体の質量(mg。欄が物質に付く。T-0656)
+        uint32_t carry = 0;  // 面 ×3: 1 刻みに動く質量の 1 mg 未満の端数(流れの分母の単位。仮の世界の m_carry。T-0778)
     };
 
     // 1 刻みの報告は仮の世界と同じ形 + 開いた世界の端(比べるため。仮の世界を退かせる時に名前を移す)
@@ -74,7 +75,7 @@ namespace bicameral::sim {
                                                                                const MultiresLiquidOptions& options);
 
         // 液体の 1 刻み(世界の根のブロックを全部)。セルが変わったブロックはつつき(次の刻みに反応を評価)、枠を changedSlots に足す
-        MultiresLiquidStepReport Step(MultiresNest& nest, const BakedReactionTable& table,
+        MultiresLiquidStepReport Step(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                                       std::vector<uint32_t>& changedSlots) const;
 
         [[nodiscard]] const MultiresLiquidFields& Fields() const { return m_fields; }

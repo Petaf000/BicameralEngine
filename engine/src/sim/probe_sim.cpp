@@ -1612,7 +1612,7 @@ namespace bicameral::sim {
         // (1c) 液体(区画があるときだけ。T-0609・ADR-0266): 気体の後・伝導と反応の前。変わったセルの扱いは気体と同じ
         if (m_liquid) {
             std::vector<uint32_t> liquidChanged;
-            m_liquidReport = m_liquid->Step(*m_table, std::span(m_cells).subspan(currentBase, PROBE_CELL_COUNT),
+            m_liquidReport = m_liquid->Step(*m_table, std::span(m_cells).subspan(currentBase, PROBE_CELL_COUNT), tick,
                                             liquidChanged);
             for (const uint32_t index : liquidChanged) {
                 m_caches[currentBase + index] = ProbeMakeCache(table, m_cells[currentBase + index]);

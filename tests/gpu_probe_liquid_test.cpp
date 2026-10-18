@@ -262,11 +262,11 @@ namespace {
         Log(Channel::Sim, Level::Error, "{}: 違うセル {} 個(区画 {} セル)", name, differing, field.RegionCellCount());
     }
 
-    // 並びは ProbeLiquidField::Hash と同じ(面の運動量 → 運動のエネルギー → 位置のエネルギー → 液体の質量 → 帳簿)
+    // 並びは ProbeLiquidField::Hash と同じ(面の運動量 → 運動のエネルギー → 流れの端数 → 位置のエネルギー → 液体の質量 → 帳簿)
     uint64_t GpuLiquidHash(const ProbeLiquidHeader& header, const LiquidReadout& readout) {
         const uint32_t count = header.regionCellCount;
         uint64_t hash = FNV_OFFSET;
-        for (const uint32_t offset : {header.facesOffset, header.kineticOffset}) {
+        for (const uint32_t offset : {header.facesOffset, header.kineticOffset, header.carryOffset}) {
             for (uint32_t index = 0; index < 3 * count; ++index)
                 hash = Mix(hash, readout.At<uint64_t>(offset + (index * 8)));
         }
