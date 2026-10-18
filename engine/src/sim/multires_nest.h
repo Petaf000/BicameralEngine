@@ -300,19 +300,21 @@ namespace bicameral::sim {
     // --- 観察の枠(呼ぶ側が枠を決める)---
 
     // 世界の写し(MR_BLOCK_MIRROR。刻まない・世界のハッシュに入らない)を置く。写し直すときも同じ。cells は MR_BLOCK_CELLS 個。
-    // 木の形をしていない世界(仮の世界の 64³)の 1 ブロックを、影の鎖の根の親にするため(T-0096)
+    // 木の形をしていない世界(仮の世界の 64³)の 1 ブロックを、影の鎖の根の親にするため(T-0096)。
+    // 登録した欄は 0 から(写す元が欄を持つなら置いた後に StoreNestField・StoreNestBlockField で書く。T-0761)
     void PlaceMirrorBlock(MultiresNest& nest, uint32_t slot, int32_t level, int64_t originX, int64_t originY,
                           int64_t originZ, std::span<const reaction::RxCell> cells);
 
     // parentSlot の、点を含む八分の一を観察の影 firstChildSlot に細かくし、それを levelCount 段続ける(子の枠は firstChildSlot から順)。
-    // 親に触れない(世界に返さない)
+    // 親に触れない(世界に返さない)。登録した欄も子は親と同じ数・ブロックの欄は親の値(T-0761)
     void RefineShadowChain(MultiresNest& nest, uint32_t parentSlot, uint32_t firstChildSlot, uint32_t levelCount,
                            const MultiresPoint& point);
 
     // 影の鎖を捨てる(世界に返さない)
     void RemoveShadowChain(MultiresNest& nest, uint32_t firstSlot, uint32_t levelCount);
 
-    // 影の鎖を上から順に親へ引き戻す(firstShadowSlot の親は本物か写しのブロック)
+    // 影の鎖を上から順に親へ引き戻す(firstShadowSlot の親は本物か写しのブロック)。登録した欄は親のセルごとに
+    // 子 2³ の和を親 × 8 に(影を粗くすると親と同じ値。ADR-0361)・ブロックの欄は親の値に
     void PullBackShadowChain(MultiresNest& nest, const BakedReactionTable& table, uint32_t firstShadowSlot,
                              uint32_t levelCount);
 

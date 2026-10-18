@@ -47,6 +47,9 @@ namespace bicameral::sim {
                     PageCellAt(nest, page, index) = LoadNestCell(nest, parentSlot, parentCell);
             }
 
+            // --- 登録した欄も子は親と同じ数(親は変えない。T-0761)---
+            nest_fields::RefineShadow(nest, parentSlot, octant, childSlot, page);
+
             nest.blocks[childSlot] = MrMakeChildBlock(parent, parentSlot, octant, MR_BLOCK_SHADOW, MR_NO_FRACTION,
                                                       page);
         }
@@ -91,6 +94,9 @@ namespace bicameral::sim {
                 PullBackWideLevel(nest, table, shadowSlot);
             else
                 PullBackInlineLevel(nest, table, shadowSlot);
+
+            // --- 登録した欄: 子 2³ の和を親 × 8 に(T-0761。ADR-0361)---
+            nest_fields::PullBackShadow(nest, shadowSlot);
 
             // --- セルの値が変わりうるので、つついた印にして次の刻みに tc を書き直す(ADR-0018 追記 T-0125)。
             //     観察の枠は種の一覧に入れない(活性でも全部刻む。D-403)---
@@ -711,6 +717,9 @@ namespace bicameral::sim {
         ClearPageOverflow(nest, page);
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
             PageCellAt(nest, page, index) = cells[index];
+
+        // 登録した欄は 0 から(前の影・写しの値を残さない。写す元の欄は呼ぶ側が StoreNestField で書く。T-0761)
+        nest_fields::PlaceRoot(nest, slot);
     }
 
     void RefineShadowChain(MultiresNest& nest, uint32_t parentSlot, uint32_t firstChildSlot, uint32_t levelCount,

@@ -3,7 +3,8 @@
 // セル・面の欄は「欄の頁」に置く: 並びはセルと同じ [一様の値 × 枠][頁 × MR_BLOCK_CELLS](頁と同じ番号)× 値の数。
 // 木の操作(根を置く・頁に広げる・畳む・細かく・粗く)は nest_fields の関数を呼んで欄を付いて行かせる。
 // 状態のハッシュ・保存点・写しは multires_state.h の一覧を回る(欄を登録すると一覧に入る)。
-// まだ欄を持たない所(仮。ADR-0329): 観察の枠(影・写し)の頁・溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6)。
+// 観察の枠(影・写し)も欄の頁を持ち、影を細かくする/引き戻す・写しを置くに欄が付いて行く(T-0761。ADR-0361。世界の値には触れない。D-403)。
+// まだ欄を持たない所(仮。ADR-0329): 溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6)。
 #pragma once
 
 #include <cstdint>
@@ -52,7 +53,8 @@ namespace bicameral::sim {
     // --- 木の操作が呼ぶ(multires_tree・multires_nest・multires_activity)---
     namespace nest_fields {
 
-        // 根を置いた枠 slot の欄を 0 に(一様なら値 1 つ、頁を持つなら頁を全部。前に使った枠・頁の値を残さない)
+        // 根・世界の写しを置いた枠 slot の欄を 0 に(一様なら値 1 つ、頁を持つなら頁を全部。前に使った枠・頁の値を残さない)。
+        // 写しの欄の値は呼ぶ側が置いた後に StoreNestField・StoreNestBlockField で書く(写す元の世界が欄を持つ時)
         void PlaceRoot(MultiresNest& nest, uint32_t slot);
 
         // 一様な枠 slot を頁 page に広げる前に、欄の頁を一様の値で埋める(覆われたセルは 0)
@@ -74,6 +76,17 @@ namespace bicameral::sim {
         // 子 childSlot を親の八分の一へ粗くする(和 ÷ 8。VOLUME の欄の余りは世界の帳簿の「粗くした端数・出」のその欄の列へ)。親の頁(要るなら広げた後)に書き、
         // 子の見出しを消す前に呼ぶ
         void Coarsen(MultiresNest& nest, uint32_t childSlot);
+
+        // --- 観察の影(親を覆わない・世界に返さない。D-403。ADR-0361)---
+
+        // 親 parentSlot の八分の一 octant から影 childSlot(頁 childPage)の欄を作る: 子は親と同じ数・ブロックの欄は親の値。
+        // 親の欄は変えない(覆われた親のセルは 0 のまま読む)
+        void RefineShadow(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot,
+                          uint32_t childPage);
+
+        // 影 shadowSlot の欄を親へ引き戻す: 親のセルごとに子 2³ の和を親 × 8 に(state_field.hlsli の SfPullBackChild)・
+        // ブロックの欄は親の値に。親・世界の欄・世界の帳簿には触れない
+        void PullBackShadow(MultiresNest& nest, uint32_t shadowSlot);
 
     }  // namespace nest_fields
 
