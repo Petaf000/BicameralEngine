@@ -87,8 +87,8 @@ namespace {
         uint32_t heatOnlyCells = 0;   // 運動量が前も後も 0
                                       // で、物質は同じでエネルギーだけ変わった(伝導・熱の小さな流れ)
         uint32_t stillMoveCells = 0;  // 運動量が前も後も 0 なのに物質が変わった(丸めの往復)
-        uint32_t
-            smallMomentum = 0;  // 液体: 摩擦の効かない(|p| < 2^frictionShift)0 でない面・気体: 1 cm/s 未満で動くセル
+        // 液体: |p| < 2^frictionShift の 0 でない面(T-0776 の前は摩擦が効かなかった)・気体: 1 cm/s 未満で動くセル
+        uint32_t smallMomentum = 0;
         uint64_t maxSpeed = 0;  // 気体: µm/s・液体: 面の運動量の最大(mg)
         uint32_t rested = 0;    // 静止の丸めで止めたセル・面
     };
