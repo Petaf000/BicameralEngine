@@ -324,7 +324,8 @@ namespace bicameral::sim {
     struct ProbeLiquidField::StepWork {
         std::array<uint32_t, 3> stride = {};  // 区画の中の隣(格子の軸 x・y・z)
         std::vector<LqCellView> states;
-        std::vector<int64_t> pressure;                 // 質量の単位(mg)
+        std::vector<int64_t> pressure;  // 質量の単位(mg)
+        std::vector<uint64_t> above;    // 上から支えている液体(LqColumnPressure に渡した値。整数の釣り合いが使う)
         std::array<std::vector<uint64_t>, 3> desired;  // 面の望む動く質量(mg)
         std::vector<uint64_t> outgoing;                // セルから出る望む質量の合計
         std::array<std::vector<int64_t>, 3> moved;     // 面を通って実際に動いた質量(mg。+ 向きが正)
@@ -456,6 +457,7 @@ namespace bicameral::sim {
         const auto size = m_options.sizeCells;
         const auto& states = work.states;
         work.pressure.assign(states.size(), 0);
+        work.above.assign(states.size(), 0);
         for (uint32_t z = 0; z < size[2]; ++z) {
             for (uint32_t x = 0; x < size[0]; ++x) {
                 uint64_t above = 0;
@@ -465,6 +467,7 @@ namespace bicameral::sim {
                     const liquid::LqColumnStep cellPressure = liquid::LqColumnPressure(
                         states[region], above, y == 0 ? 0u : 1u, below, m_params);
                     work.pressure[region] = cellPressure.pressure;
+                    work.above[region] = above;
                     report.overfilledCells += cellPressure.overfilled;
                     above = cellPressure.above;
                 }
@@ -493,11 +496,15 @@ namespace bicameral::sim {
                 // + 側の面(閉じた面・開いた面。式は common/liquid_flow.hlsli)
                 const uint32_t faceOpen = FaceOpenQ16At(work, region, axis);
                 const uint32_t neighbor = region + step;
-                const liquid::LqFaceForce force = faceOpen == 0
-                                                      ? liquid::LqClosedFace(face, a, pressure[region])
-                                                      : liquid::LqOpenFaceForce(face, faceOpen, axis == 1 ? 1u : 0u, a,
-                                                                                pressure[region], states[neighbor],
-                                                                                pressure[neighbor], m_params);
+                liquid::LqFaceForce force = liquid::LqClosedFace(face, a, pressure[region]);
+                if (faceOpen != 0) {
+                    const uint32_t vertical = axis == 1 ? 1u : 0u;
+                    force = liquid::LqOpenFaceForce(face, faceOpen, vertical, a, pressure[region], states[neighbor],
+                                                    pressure[neighbor], m_params);
+                    force = liquid::LqHoldAtBalance(force, vertical, BalanceSide(work, region),
+                                                    BalanceSide(work, neighbor), m_params);
+                }
+
                 face = force.face;
                 report.wall[axis] += force.wall;
                 report.gravity[axis] += force.gravity;
@@ -510,6 +517,15 @@ namespace bicameral::sim {
                 work.outgoing[face > 0 ? region : neighbor] += force.desired;
             }
         }
+    }
+
+    // 整数の釣り合いを見る面の片側(T-0781): 見立て・圧力・上から支えている液体・下のセル(区画の床は無し)
+    liquid::LqBalanceSide ProbeLiquidField::BalanceSide(const StepWork& work, uint32_t region) const {
+        const bool onFloor = RegionCoordinates(region)[1] == 0;
+        const uint32_t below = onFloor ? region : region - work.stride[1];
+
+        return liquid::LqMakeBalanceSide(work.states[region], work.pressure[region], work.above[region],
+                                         onFloor ? 0u : 1u, work.states[below]);
     }
 
     // 望む質量を動かす(出る合計が中身を超えるセルは比で縮める)。成分・液体のぶんのエネルギー・位置のエネルギーも一緒に

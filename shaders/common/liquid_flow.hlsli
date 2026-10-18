@@ -302,6 +302,99 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
     return force;
 }
 
+// --- 整数の釣り合い(離散の坂。T-0781・ADR-0341)---
+// 質量は 1 mg 刻みでしか動かないので、力がちょうど 0 になる整数の状態が無い所がある(満ちたセルと満ちきらないセルの境: 1 mg 動かすと
+// 「上の水が落ちる力」と「溢れの圧力」の間を行き来する)。そこでは残った力が面に積もり、1 mg 動いては行き過ぎて戻るのを繰り返した(T-0776 の測り)。
+// 坂の原理の整数の版: 面の運動量がこの刻みに最小の量(1 mg)までしか動かさない大きさの時、1 mg をその向きに動かした後の力を計算し直し、
+// 今の力との和(台形の近似で、動かした時のエネルギーの減り × 2 ÷ 1 mg)が動く向きに正でなければ、そこが整数の釣り合い(坂が無い)。
+// 面の運動量は 0 にする(帳簿は摩擦の列。運動のエネルギーは刻みの終わりの計算し直しで熱へ)。1 mg の大きさでは勢いで坂を登る動き(波)を
+// 格子が表せない(1 mg を動かす運動量は 0.5 m のセルで約 0.24 µm/s)ので、そこで止める。動いている水(1 刻みに 2 mg 以上動かす面)には触らない。
+
+// 釣り合いを見る面の片側: 見立て・圧力・上から支えている液体(LqColumnPressure の above に渡した値)・下のセル(hasBelow = 0 は区画の床)
+struct LqBalanceSide {
+    LqCellView view;
+    LqCellView below;
+    uint64_t above;
+    int64_t pressure;
+    uint32_t hasBelow;
+};
+
+FX_FN LqBalanceSide LqMakeBalanceSide(LqCellView view, int64_t pressure, uint64_t above, uint32_t hasBelow,
+                                      LqCellView below) {
+    LqBalanceSide side;
+    side.view = view;
+    side.below = below;
+    side.above = above;
+    side.pressure = pressure;
+    side.hasBelow = hasBelow;
+
+    return side;
+}
+
+// 1 mg 増やした(gain = 1)・減らした見立て。体積は動く液体の上流の密度で(movedVolume)。空き・開きは変わらない
+FX_FN LqCellView LqShiftedView(LqCellView view, uint32_t gain, uint64_t movedVolume) {
+    view.mass = gain != 0 ? view.mass + 1 : view.mass - 1;
+    view.volume = gain != 0 ? view.volume + movedVolume : view.volume - movedVolume;
+    view.equivalent = view.open == LQ_OPEN_FULL || view.open == 0 ? view.mass
+                                                                  : LqMulDiv(view.mass, LQ_OPEN_FULL, view.open);
+
+    return view;
+}
+
+// 面を押す力(+ 向き。開いた割合は掛けない: 符号だけを見る)。縦は圧力の差 − 重さ、横は濡れた高さの分の圧力の差
+FX_FN int64_t LqNetPush(uint32_t vertical, LqCellView a, int64_t pressureA, LqCellView b, int64_t pressureB) {
+    if (vertical != 0)
+        return pressureA - pressureB - (int64_t)(LqWeight(a) + LqWeight(b));
+
+    return LqSidePush(a, pressureA, b, pressureB);
+}
+
+// 1 mg を forward(1 = a から b へ)に動かした後の面の力(+ 向き)。縦の面は b が a の真上(b の下 = a・a の上から支える液体 = b が渡す値)
+FX_FN int64_t LqPushAfterShift(uint32_t vertical, LqBalanceSide a, LqBalanceSide b, uint32_t forward, LqParams params) {
+    const uint64_t fromVolume = forward != 0 ? a.view.volume : b.view.volume;  // HLSL の ?: は構造体を選べない
+    const uint64_t fromMass = forward != 0 ? a.view.mass : b.view.mass;
+    const uint64_t movedVolume = LqMulDiv(fromVolume, 1, fromMass);
+    const LqCellView shiftedA = LqShiftedView(a.view, forward != 0 ? 0u : 1u, movedVolume);
+    const LqCellView shiftedB = LqShiftedView(b.view, forward != 0 ? 1u : 0u, movedVolume);
+    if (vertical != 0) {
+        const LqColumnStep upper = LqColumnPressure(shiftedB, b.above, 1u, shiftedA, params);
+        const LqColumnStep lower = LqColumnPressure(shiftedA, upper.above, a.hasBelow, a.below, params);
+        return LqNetPush(1u, shiftedA, lower.pressure, shiftedB, upper.pressure);
+    }
+
+    const LqColumnStep columnA = LqColumnPressure(shiftedA, a.above, a.hasBelow, a.below, params);
+    const LqColumnStep columnB = LqColumnPressure(shiftedB, b.above, b.hasBelow, b.below, params);
+
+    return LqNetPush(0u, shiftedA, columnA.pressure, shiftedB, columnB.pressure);
+}
+
+// 開いた面の力の後(LqOpenFaceForce の結果)に呼ぶ。運動量がこの刻みに 1 mg までしか動かさない大きさの面で、1 mg 動かしてもエネルギーが下がらなければ
+// (今の力 + 動かした後の力 が動く向きに正でない・上流に 1 mg も無い)運動量を 0 にする(摩擦の列へ。望む動く質量も 0)
+FX_FN LqFaceForce LqHoldAtBalance(LqFaceForce force, uint32_t vertical, LqBalanceSide a, LqBalanceSide b,
+                                  LqParams params) {
+    // 運動量の大きさで見る(上流が空で望む質量が 0 の面も、大きな運動量は移流が運ぶので触らない。T-0610)
+    const uint64_t reach = LqMulDiv(FxAbsU64(force.face), params.gravityMicrometersPerSecond2,
+                                    LqFluxDenominator(params));
+    if (reach > 1 || force.face == 0)
+        return force;
+
+    const uint32_t forward = force.face > 0 ? 1u : 0u;
+    const uint64_t fromMass = forward != 0 ? a.view.mass : b.view.mass;
+    if (fromMass != 0) {
+        const int64_t now = LqNetPush(vertical, a.view, a.pressure, b.view, b.pressure);
+        const int64_t after = LqPushAfterShift(vertical, a, b, forward, params);
+        const int64_t along = forward != 0 ? now + after : -(now + after);
+        if (along > 0)
+            return force;  // 坂がある(動かすとエネルギーが下がる): 運動量を積んで、いずれ 1 mg 動かす(薄い膜が抜ける)
+    }
+
+    force.friction -= force.face;
+    force.face = 0;
+    force.desired = 0;
+
+    return force;
+}
+
 // --- 周りの決まり(式だけ。段 1 ④ の当てる段へ移す)---
 
 // 出ていく上限: 出る望む合計 outgoing が上流の中身 fromMass を超えれば、面の望む質量を比で縮める

@@ -588,6 +588,40 @@ namespace {
         return result;
     }
 
+    // 1 列の積んだ水の刻みごとの値(T-0781 の測り。`--trace`): 質量が動いた刻みと 5 秒ごとに、y = 1〜3 の液体の質量・縦の面の運動量・
+    // 縦の外からの運動量の内訳を出す
+    void TraceColumn(const BakedReactionTable& table, uint32_t restMicrometersPerSecond, uint64_t ticks) {
+        const Scene scene{{16, 0, 16}, {1, 6, 1}, ticks, 300};
+        auto field = ProbeLiquidField::Create(table, {.minCell = scene.minCell,
+                                                      .sizeCells = scene.size,
+                                                      .restSpeedMicrometersPerSecond = restMicrometersPerSecond});
+        if (!field)
+            return;
+
+        std::vector<reaction::RxCell> cells = MakePond(table, scene, 3, false);
+        std::printf(
+            "== 1 列の積んだ水・丸め %u µm/s\n  刻み  質量 y1 y2 y3(mg)  面 0-1 1-2 2-3 3-4  壁 重さ 摩擦 丸め  "
+            "動いた\n",
+            restMicrometersPerSecond);
+        for (uint64_t tick = 0; tick < ticks; ++tick) {
+            std::vector<uint32_t> changed;
+            const ProbeLiquidStepReport report = field->Step(table, cells, changed);
+            if (report.movedMilligrams == 0 && tick % 300 != 0)
+                continue;
+
+            const auto mass = [&](uint32_t y) {
+                return (unsigned long long)ProbeLiquidField::LiquidMass(table, cells[GridIndexOf(scene, 0, y, 0)]);
+            };
+            const auto face = [&](uint32_t y) {
+                return (long long)field->FaceMomentum(1)[y];  // 1 列なので区画の番号 = y
+            };
+            std::printf("  %5llu  %llu %llu %llu  %lld %lld %lld %lld  %lld %lld %lld %lld  %llu\n",
+                        (unsigned long long)tick, mass(1), mass(2), mass(3), face(0), face(1), face(2), face(3),
+                        (long long)report.wall[1], (long long)report.gravity[1], (long long)report.friction[1],
+                        (long long)report.rested[1], (unsigned long long)report.movedMilligrams);
+        }
+    }
+
     // 石を落とさない池は 1 刻め から静止(物差しの確かめ)
     void TestStillPond(const BakedReactionTable& table, const Scene& scene) {
         auto field = ProbeLiquidField::Create(table, {.minCell = scene.minCell, .sizeCells = scene.size});
@@ -609,6 +643,13 @@ namespace {
 // ============================================================================================
 int main(int argc, char** argv) {
     const bool longRun = argc > 1 && std::string_view(argv[1]) == "--long";
+    if (argc > 1 && std::string_view(argv[1]) == "--trace") {
+        const BakedReactionTable table = MakeLiquidTable();
+        TraceColumn(table, 0, 3600);
+        TraceColumn(table, 1000, 3600);
+        return 0;
+    }
+
     const BakedReactionTable gasTable = MakeGasTable();
     BakedReactionTable viscousTable = MakeGasTable();
     viscousTable.environment.gasEddyViscosityMm2PerS = 200000;  // 0.2 m²/s(6 m の部屋の揺れが約 18 秒で e 分の 1)
@@ -684,6 +725,12 @@ int main(int argc, char** argv) {
 
     // 水に沈んだ石の真下の柱: 回り続けずに静まる(T-0759。前は面の運動量 9.5 × 10^8 が速さの上限に当たったまま一定)
     EXPECT(PeakMomentum(results[10], results[10].series.size() - 60) * 2 < PeakMomentum(results[10], 0));
+
+    // 積んだ水は静止の丸めを書かなくても整数の釣り合いで眠る(T-0781・ADR-0341。長い場面: 丸めなし 47.9 秒・1 mm/s 19.9 秒)
+    if (longRun) {
+        EXPECT(results[8].series.back().activeCells == 0);
+        EXPECT(results[9].series.back().activeCells == 0);
+    }
 
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
