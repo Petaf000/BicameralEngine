@@ -24,6 +24,9 @@ namespace bicameral::sim {
     struct GasPressureOptions {
         uint32_t substeps = 1;          // 1 刻みを何回の投影で進めるか(音速の安定の条件は無い)
         uint32_t soundSpeedMmPerS = 0;  // 圧力の伝わる速さ c̃(mm/s)。0 = 最速(C を下限 GAS_PRESSURE_MIN_CAPACITY にする)
+        // 外側の反復の食い違いから、出ていく量の上限で切った面の質量を除く(T-0722・ADR-0346。ADR-0320 の案 1 を当てる段の上限の上で)。
+        // 切った流れは式の x によらない(中身で頭打ち)ので、除かないと外側の反復が流れない分を足し続けて x が育つ(T-0689)
+        bool excludeCutFlows = true;
     };
 
     // 最速のときの C_i(Q48)。0 にすると閉じた箱の最も粗い段の対角が 0 になるので、小さい下限を残す
@@ -57,8 +60,10 @@ namespace bicameral::sim {
     [[nodiscard]] GasPressureSystem BeginGasPressure(const GasBox& box, const GasPressureOptions& options);
 
     // 解いた圧力 pressures(µPa。セルの順)で 1 回の投影を当てる。roundingTick は乱数の丸めの通し番号(刻み × substeps + 何回目)。
-    // box.tick は進めない(呼ぶ側が 1 刻みの終わりに進める)
+    // box.tick は進めない(呼ぶ側が 1 刻みの終わりに進める)。cuts が null でなければ、出ていく量の上限で切った質量(mg。セルの順。
+    // 上流に残った分が正・下流に届かなかった分が負)を書く(外側の反復が食い違いから除く。T-0722)
     void FinishGasPressure(GasBox& box, const GasPressureOptions& options, const GasPressureSystem& system,
-                           std::span<const int64_t> pressures, uint64_t roundingTick);
+                           std::span<const int64_t> pressures, uint64_t roundingTick,
+                           std::vector<int64_t>* cuts = nullptr);
 
 }  // namespace bicameral::sim

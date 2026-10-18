@@ -809,8 +809,25 @@ namespace {
         EXPECT(conserved);
     }
 
-    // 調べ(T-0667。T-0689 の再現。表示だけで合否に使わない): gpu_gas_projection の細孔の板(16³・z = 4 の層を全部 1/256・下が 2% 高い)の最速で、刻みごとの食い違いと |x| の最大
-    void ProbePlate16() {
+    // T-0722(T-0689 の再現。ADR-0346): gpu_gas_projection の細孔の板(16³・z = 4 の層を全部 1/256・下が 2% 高い)。
+    // 音速(340 m/s)は外側の反復が上限の中で収まる。最速はまだ発散する(研究の打ち切り: 通り抜け・切った流れを除く・力積の上限の
+    // 3 つを試して収まらなかった。最速 × 細孔は既定にしない〔D-515〕。答えは ADR-0346)。
+    // 前は最速で、出ていく量の上限で切られた孔の流れを式が K で数え続け、外側の反復が流れない分を足し続けて、
+    // 3 刻みで |x| が 5.2 × 10^18 µPa(int64 の上限 9.2 × 10^18 の手前)まで育った(T-0667 で見つけた)。
+    // |x| の上限(µPa): 釣り合った式は |x| ≤ max |右辺の質量| ÷ C_i(C_i の最小 = 最速の下限 2^20 × 空き 1/256 = 2^12 の Q48。
+    // 右辺の質量はセル数個分の質量 = 10^6 mg 程度)なので 10^6 × 2^36 ≈ 7 × 10^16。それより 1 桁上を上限にする
+    constexpr int64_t PLATE16_PRESSURE_BOUND = (int64_t)1 << 59;
+
+    struct Plate16Run {
+        int64_t largest = 0;        // 全部の刻みの |x| の最大(µPa)
+        int64_t worstMismatch = 0;  // 採った状態の食い違いの最大(mg)
+        uint32_t outerUnconverged = 0;
+        int64_t maxSpeed = 0;
+        bool conserved = true;
+        uint64_t hash = 0;
+    };
+
+    GasBox MakePlate16() {
         GasBox box = MakeAirBox(MakeAirConfig(16, 16, 16));
         for (uint32_t index = 0; index < box.cells.size(); ++index) {
             if (Coordinate(box, index)[2] >= 4)
@@ -828,25 +845,57 @@ namespace {
                 Occupy(box, index, GAS_OPEN_FULL / 256);
         }
 
-        GasProjection state;
-        const GasProjectionOptions options;
-        for (int tick = 0; tick < 3; ++tick) {
-            const GasProjectionCost cost = StepGasProjection(box, state, options);
-            int64_t largest = 0;
-            uint32_t where = 0;
-            for (uint32_t index = 0; index < state.pressures.size(); ++index) {
-                if (std::abs(state.pressures[index]) > largest) {
-                    largest = std::abs(state.pressures[index]);
-                    where = index;
-                }
-            }
+        return box;
+    }
 
-            const auto [x, y, z] = Coordinate(box, where);
+    Plate16Run RunPlate16(uint32_t speed, int ticks, bool print, bool exclude = GasPressureOptions{}.excludeCutFlows) {
+        GasBox box = MakePlate16();
+        const GasTotals before = SumGas(box);
+        GasProjection state;
+        GasProjectionOptions options;
+        options.pressure.soundSpeedMmPerS = speed;
+        options.pressure.excludeCutFlows = exclude;
+        Plate16Run run;
+        for (int tick = 0; tick < ticks; ++tick) {
+            const GasProjectionCost cost = StepGasProjection(box, state, options);
+            run.conserved = run.conserved && ConservedAgainst(box, before);
+            run.worstMismatch = std::max(run.worstMismatch, cost.worstMismatch);
+            run.outerUnconverged += cost.outerUnconverged;
+            run.maxSpeed = std::max(run.maxSpeed, MaxSpeed(box));
+            int64_t largest = 0;
+            for (const int64_t value : state.pressures)
+                largest = std::max(largest, value == INT64_MIN ? INT64_MAX : std::abs(value));
+
+            run.largest = std::max(run.largest, largest);
+            if (print && (tick < 4 || tick % 10 == 9)) {
+                std::printf(
+                    "plate16 %s%s tick %d: outer %u, mismatch first %lld / kept %lld mg, max |x| %lld uPa, "
+                    "max speed %lld\n",
+                    SpeedName(speed), exclude ? "" : " (cut not excluded)", tick, cost.outerIterations,
+                    (long long)cost.firstMismatch, (long long)cost.worstMismatch, (long long)largest,
+                    (long long)MaxSpeed(box));
+            }
+        }
+
+        run.hash = HashGas(box);
+        return run;
+    }
+
+    void TestPlate16() {
+        for (const uint32_t speed : {0u, REAL_SOUND}) {
+            const Plate16Run first = RunPlate16(speed, 30, true);
+            const Plate16Run second = RunPlate16(speed, 30, false);
             std::printf(
-                "plate16 fastest tick %d: outer %u, mismatch first %lld / kept %lld mg, max |x| %lld uPa at (%u, %u, "
-                "%u)\n",
-                tick, cost.outerIterations, (long long)cost.firstMismatch, (long long)cost.worstMismatch,
-                (long long)largest, x, y, z);
+                "plate16 %s (30 ticks): max |x| %lld uPa, worst kept mismatch %lld mg, outer at limit %u, "
+                "max speed %lld, conserved %d, hash %016llx / %016llx\n",
+                SpeedName(speed), (long long)first.largest, (long long)first.worstMismatch, first.outerUnconverged,
+                (long long)first.maxSpeed, first.conserved ? 1 : 0, (unsigned long long)first.hash,
+                (unsigned long long)second.hash);
+            EXPECT(first.conserved && second.conserved);
+            EXPECT(first.hash == second.hash);
+            // 最速はまだ発散する(T-0722 の研究の答え。ADR-0346: 打ち切り。最速 × 細孔は既定にしない〔D-515〕)。音速は上限の中
+            if (speed != 0)
+                EXPECT(first.largest < PLATE16_PRESSURE_BOUND);
         }
     }
 
@@ -864,6 +913,15 @@ namespace {
 // 引数 --sweep で、外側の反復の止め方の違いを測る(遅い。ctest では回さない)
 int main(int argc, char** argv) {
     const bool sweep = argc > 1 && std::string_view(argv[1]) == "--sweep";
+    if (argc > 1 && std::string_view(argv[1]) == "--plate16") {  // T-0722 の調べ(細孔の板と孔の壁だけ)
+        (void)RunPlate16(0, 4, true, false);                     // 前(切った流れを外側の反復の食い違いから除かない)
+
+        TestPlate16();
+        TestWall();
+        std::printf("plate16: %d failure(s)\n", failureCount);
+        return failureCount == 0 ? 0 : 1;
+    }
+
     if (!sweep) {
         TestStaticAtmosphere(REAL_SOUND);
         TestStaticAtmosphere(0);
@@ -878,7 +936,7 @@ int main(int argc, char** argv) {
         TestBlastSettles(0);
         TestWall();
         TestPorous();
-        ProbePlate16();
+        TestPlate16();
     }
 
     // --- 外側の反復(T-0530。既定の止め方)---
