@@ -177,6 +177,7 @@ namespace bicameral::sim {
         // Step の段(probe_liquid.cpp)
         struct StepWork;
         [[nodiscard]] uint32_t FaceOpenQ16At(const StepWork& work, uint32_t region, uint32_t axis) const;
+        [[nodiscard]] liquid::LqBalanceSide BalanceSide(const StepWork& work, uint32_t region) const;
         void FollowMassChange(const StepWork& work, ProbeLiquidStepReport& report);
         void ComputePressure(StepWork& work, ProbeLiquidStepReport& report) const;
         void ApplyForces(StepWork& work, ProbeLiquidStepReport& report);

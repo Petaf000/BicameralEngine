@@ -98,6 +98,7 @@ namespace bicameral::sim {
             header.snapshotOffset = place(cells * RX_CELL_BYTES);
             header.stateOffset = place(cells * PROBE_LIQUID_CELL_STATE_BYTES);
             header.pressureOffset = place(cells * 8);
+            header.aboveOffset = place(cells * 8);
             header.forcedOffset = place(cells * 3 * 8);
             header.desiredOffset = place(cells * 3 * 8);
             header.outgoingOffset = place(cells * 8);

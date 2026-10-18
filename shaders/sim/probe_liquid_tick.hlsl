@@ -246,9 +246,20 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
             below = LoadState(header, RegionIndex(header, x, y - 1, z));
 
         const LqColumnStep cellPressure = LqColumnPressure(state, above, y != 0 ? 1u : 0u, below, params);
+        liquidWork.Store<uint64_t>(CellAddress(header.aboveOffset, region), above);
         above = cellPressure.above;
         liquidWork.Store<int64_t>(CellAddress(header.pressureOffset, region), cellPressure.pressure);
     }
+}
+
+// 整数の釣り合いを見る面の片側(T-0781。CPU の ProbeLiquidField::BalanceSide と同じ)
+LqBalanceSide BalanceSide(ProbeLiquidHeader header, uint32_t region) {
+    const bool onFloor = RegionAt(header, region).y == 0;
+    const uint32_t below = onFloor ? region : region - Stride(header, 1);
+
+    return LqMakeBalanceSide(LoadState(header, region), LoadSigned(CellAddress(header.pressureOffset, region)),
+                             LoadUnsigned(CellAddress(header.aboveOffset, region)), onFloor ? 0u : 1u,
+                             LoadState(header, below));
 }
 
 // === 3. 面の力(圧力の差・重さ・壁・摩擦)と望む動く質量。1 スレッド = 1 セルの + 側の面 ×3 ===
@@ -288,8 +299,11 @@ void StoreSnapshot(uint32_t address, RxCell cell) {
             LqFaceForce force = LqClosedFace(face, a, pressure);
             if (faceOpen != 0) {
                 const uint32_t neighbor = region + step;
-                force = LqOpenFaceForce(face, faceOpen, axis == 1 ? 1u : 0u, a, pressure, LoadState(header, neighbor),
+                const uint32_t vertical = axis == 1 ? 1u : 0u;
+                force = LqOpenFaceForce(face, faceOpen, vertical, a, pressure, LoadState(header, neighbor),
                                         LoadSigned(CellAddress(header.pressureOffset, neighbor)), params);
+                force = LqHoldAtBalance(force, vertical, BalanceSide(header, region), BalanceSide(header, neighbor),
+                                        params);
             }
 
             liquidWork.Store<int64_t>(FaceAddress(header, header.forcedOffset, axis, region), force.face);

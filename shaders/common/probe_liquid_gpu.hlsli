@@ -67,7 +67,7 @@ typedef LqCellView ProbeLiquidCellState;
         uint32_t potentialCarriedOffset;  // int64 × 区画のセル(液体と一緒に運んだ後の位置のエネルギー)
         uint32_t changedOffset;           // uint32 × 区画のセル(液体を動かして値が変わった)
         uint32_t listOffset;              // 区画のセルごとに PROBE_LIQUID_LIST_ENTRIES 件(成分の増減の作業場)
-        uint32_t unused;
+        uint32_t aboveOffset;             // uint64 × 区画のセル(上から支えている液体。整数の釣り合いが使う。T-0781)
     };
 
     // --- 制御と帳簿(liquidWork の先頭)---

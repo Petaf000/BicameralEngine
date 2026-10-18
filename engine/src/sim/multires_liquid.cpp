@@ -199,6 +199,7 @@ namespace bicameral::sim {
 
             // --- 作業 ---
             std::vector<int64_t> pressure;                 // 質量の単位(mg)
+            std::vector<uint64_t> above;                   // 上から支えている液体(整数の釣り合いが使う。T-0781)
             std::array<std::vector<uint64_t>, 3> desired;  // 面の望む動く質量(mg)
             // − 側が開いた端の面の運動量(この刻みだけ。+ 側のセルが持つ)
             std::array<std::vector<int64_t>, 3> edgeFaces;
@@ -237,6 +238,16 @@ namespace bicameral::sim {
                     return liquid::LqFaceOpen(states[cell].open, other.open);
 
                 return liquid::LqFaceOpen(other.open, states[cell].open);
+            }
+
+            // 整数の釣り合いを見る面の片側(T-0781。sim/probe_liquid の BalanceSide と同じ)
+            // 下は ComputePressure と同じ(開いた世界の端なら外のセル)
+            [[nodiscard]] liquid::LqBalanceSide BalanceSide(uint32_t cell) const {
+                const uint32_t below = grid.Link(cell, MinusFace(UP_AXIS));
+                const uint32_t hasBelow = below == NO_CELL ? 0u : 1u;
+
+                return liquid::LqMakeBalanceSide(states[cell], pressure[cell], above[cell], hasBelow,
+                                                 hasBelow != 0 ? StateOf(below) : states[cell]);
             }
 
             [[nodiscard]] int64_t PotentialOf(uint32_t cell, uint64_t massMilligrams) const {
@@ -376,19 +387,21 @@ namespace bicameral::sim {
         void LiquidStep::ComputePressure(MultiresLiquidStepReport& report) {
             const uint32_t count = grid.Count();
             pressure.assign(count, 0);
+            above.assign(count, 0);
             for (uint32_t top = 0; top < count; ++top) {
                 if (grid.Plus(top, UP_AXIS) != NO_CELL)
                     continue;
 
-                uint64_t above = 0;
+                uint64_t supported = 0;
                 for (uint32_t cell = top; cell != NO_CELL; cell = grid.Minus(cell, UP_AXIS)) {
                     const uint32_t below = grid.Link(cell, MinusFace(UP_AXIS));
                     const uint32_t hasBelow = below == NO_CELL ? 0u : 1u;
                     const liquid::LqColumnStep column = liquid::LqColumnPressure(
-                        states[cell], above, hasBelow, hasBelow != 0 ? StateOf(below) : states[cell], params);
+                        states[cell], supported, hasBelow, hasBelow != 0 ? StateOf(below) : states[cell], params);
                     pressure[cell] = column.pressure;
+                    above[cell] = supported;
                     report.overfilledCells += column.overfilled;
-                    above = column.above;
+                    supported = column.above;
                 }
             }
         }
@@ -439,10 +452,17 @@ namespace bicameral::sim {
                     }
 
                     const uint32_t faceOpen = FaceOpenQ16(cell, PlusFace(axis));
-                    const liquid::LqFaceForce force = faceOpen == 0 ? liquid::LqClosedFace(face, a, pressure[cell])
-                                                                    : liquid::LqOpenFaceForce(
-                                                                          face, faceOpen, vertical, a, pressure[cell],
-                                                                          StateOf(plus), PressureOf(plus), params);
+                    liquid::LqFaceForce force = liquid::LqClosedFace(face, a, pressure[cell]);
+                    if (faceOpen != 0) {
+                        force = liquid::LqOpenFaceForce(face, faceOpen, vertical, a, pressure[cell], StateOf(plus),
+                                                        PressureOf(plus), params);
+
+                        // 整数の釣り合い(T-0781・ADR-0341)。開いた端の外のセルとの面は見ない(外は柱を持たない無限の溜め)
+                        if (LiquidGrid::IsCell(plus))
+                            force = liquid::LqHoldAtBalance(force, vertical, BalanceSide(cell), BalanceSide(plus),
+                                                            params);
+                    }
+
                     face = force.face;
                     AddForce(report, axis, force);
                     if (force.desired == 0)
