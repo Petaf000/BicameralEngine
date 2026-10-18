@@ -622,8 +622,8 @@ namespace bicameral::sim {
     // ブランクの世界(D-455・T-0371): 1 世代ぶんのセルが全部空(物質なし・エネルギー 0)。どの表でも何も起きない
     [[nodiscard]] std::vector<reaction::RxCell> MakeBlankProbeWorld();
 
-    // 表の世界の組み立ての流れる区画(パッケージの gas_regions・liquid_regions。T-0671・ADR-0310)を options の gas・liquid に書く。
-    // 区画が無ければ gas・liquid を空(流れない)にする。アプリの世界・写しの世界・指標の写しが同じ区画で作るように、作る所は全部これを通す。
+    // 表の世界の組み立ての流れる所(D-510・T-0724: 基準の大気があれば気体・重力があれば液体が世界いっぱい)を options の gas・liquid に書く。
+    // 流れない(基準の大気・重力が無い)なら gas・liquid を空にする。アプリの世界・写しの世界・指標の写しが同じ区画で作るように、作る所は全部これを通す。
     // 気体の乱数の丸めの種は 0(アプリにはまだ世界のシードが無い。同じ表なら同じ世界)
     void SetLayoutRegions(const WorldLayout& layout, ProbeSimOptions& options);
 

@@ -306,14 +306,17 @@ namespace {
 
         EXPECT(scene->gamePackage == "grass_fire_river" && scene->loadOrder.back() == "grass_fire_river");
         EXPECT(scene->rejected.empty() && !scene->modifiedWorld && !scene->overrides.empty());
-        // 場面は川の水を液体の区画・その上の空気を気体の区画に書く(T-0671)。サンプルの世界は区画なし(今まで通り)
+        // 区画の箱はやめた(D-510・T-0724): 地球の環境(基準の大気・重力)に依る世界は、気体も液体も世界いっぱいで流れる。前の分類の注意は無い
         EXPECT(scene->table.worldLayout.gasRegion && scene->table.worldLayout.liquidRegion);
+        EXPECT(rng::none_of(scene->table.warnings, [](const std::string& warning) {
+            return warning.find("は読まない(D-510") != std::string::npos;
+        }));
 
         // サンプルの世界も同じ印でゲーム本体
         const auto sample = LoadReactionTable(
             {.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR), .requireGame = false, .standardRoot = standardRoot});
         EXPECT(sample && sample->gamePackage == "combustion_test");
-        EXPECT(sample && !sample->table.worldLayout.gasRegion && !sample->table.worldLayout.liquidRegion);
+        EXPECT(sample && sample->table.worldLayout.gasRegion && sample->table.worldLayout.liquidRegion);
 
         // 標準パッケージだけ(game = true なし)はゲーム本体なし。ゲーム本体が要る読み方(サンプルの世界)なら止まる
         const std::vector<fs::path> elements{standardRoot / "real_elements"};

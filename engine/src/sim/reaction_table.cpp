@@ -686,6 +686,8 @@ namespace bicameral::sim {
 
         baked.worldLayout = std::move(*layout);
         WarnWorldSetting(baked);
+        baked.warnings.insert(baked.warnings.end(), ordered.worldLayout.retiredCategories.begin(),
+                              ordered.worldLayout.retiredCategories.end());  // 読まない分類(D-510。T-0724)
 
         auto playMetrics = BakePlayMetrics(definition.playMetrics, baked);
         if (!playMetrics)
