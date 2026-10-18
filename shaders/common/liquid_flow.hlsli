@@ -253,6 +253,15 @@ FX_FN LqFaceForce LqClosedFace(int64_t face, LqCellView self, int64_t pressure) 
     return force;
 }
 
+// 摩擦で減らす運動量の大きさ(T-0776)= 大きさ ÷ 2^frictionShift を切り捨て、ただし 0 でない大きさは少なくとも 1 減らす(0 は越えない)。
+// 切り捨てだけでは 2^frictionShift 未満の運動量が減らず、釣り合いの近くの小さな運動量が行き来し続けた(積んだ水が静止の丸めで眠らない・
+// 蓋の下の小さな揺れ。T-0758・T-0759 の残り)。少なくとも 1 減らすので、力が掛からない面はどの大きさからも有限の刻みで 0 に着く
+FX_FN uint64_t LqFrictionCut(uint64_t magnitude, uint32_t frictionShift) {
+    const uint64_t cut = magnitude >> frictionShift;
+
+    return cut == 0u && magnitude != 0u ? (uint64_t)1 : cut;
+}
+
 // + 側の開いた面(faceOpen > 0)。a = − 側(自分)・b = + 側の隣。vertical = 1 は縦の面(重さが掛かる)。
 // 横の面は液体が触れる高さだけ押す(LqSidePush。濡れていない高さの分の圧力の差は壁の列へ: 帳簿の圧力の和は区画の端の押し返しで閉じる)。
 // 一部だけ開いた面(孔)は力も重さも開いた割合だけ(押し切れない分は固体が受けて壁へ。T-0612)
@@ -282,7 +291,7 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
         return force;
     }
 
-    const int64_t slowed = FxApplySign(FxAbsU64(force.face) >> params.frictionShift, force.face < 0);
+    const int64_t slowed = FxApplySign(LqFrictionCut(FxAbsU64(force.face), params.frictionShift), force.face < 0);
     force.face -= slowed;
     force.friction = -slowed;
 
