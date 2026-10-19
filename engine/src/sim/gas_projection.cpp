@@ -99,11 +99,19 @@ namespace bicameral::sim {
 
             const auto tolerance = (int64_t)GasInnerToleranceMilligrams(options);
             uint32_t cycles = 0;
-            int64_t error = WorstMassError(grid, rhs, values);
-            while (error > tolerance && cycles < options.solver.cycles) {
-                CycleImplicitGrid(grid, rhs, values, options.solver, cost.solver);
-                ++cycles;
+            int64_t error = 0;
+            if (options.fixedCycles) {
+                for (; cycles < options.solver.cycles; ++cycles)
+                    CycleImplicitGrid(grid, rhs, values, options.solver, cost.solver);
+
                 error = WorstMassError(grid, rhs, values);
+            } else {
+                error = WorstMassError(grid, rhs, values);
+                while (error > tolerance && cycles < options.solver.cycles) {
+                    CycleImplicitGrid(grid, rhs, values, options.solver, cost.solver);
+                    ++cycles;
+                    error = WorstMassError(grid, rhs, values);
+                }
             }
 
             cost.cycles += cycles;
@@ -197,8 +205,16 @@ namespace bicameral::sim {
             std::vector<int64_t>& values = state.pressures;
             std::vector<int64_t> mismatches;
             std::vector<int64_t> cuts;
-            OuterState previous = MeasureState(box, system);
             const uint32_t limit = std::max<uint32_t>(options.outerIterations, 1);
+            if (options.fixedCycles && limit == 1) {  // T-0842: 解き直さないので食い違いを測らない
+                Solve(grid, rhs, values, options, cost);
+                FinishGasPressure(box, options.pressure, system, values, roundingTick);
+                cost.outerIterations += 1;
+                cost.maxOuterIterations = std::max(cost.maxOuterIterations, 1u);
+                return;
+            }
+
+            OuterState previous = MeasureState(box, system);
             for (uint32_t outer = 1;; ++outer) {
                 Solve(grid, rhs, values, options, cost);
 
