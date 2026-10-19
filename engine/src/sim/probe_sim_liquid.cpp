@@ -5,7 +5,9 @@
 // 10 段を投げる。置き場所の形は shaders/common/probe_liquid_gpu.hlsli(バッファは 1 つ。ルート署名の u19)。
 // 作る時に CPU が決めるのは、区画の形・模型の値・物質ごとの値(液体か・凝縮相か・モル質量・モル体積)と欄の場所だけ。状態は 0(静止)から。
 // 保存点・写しの早送りは作業場の持ち越す部分を写し、状態のハッシュは LiquidHash が持ち越す欄と帳簿を足す(T-0620)。
-// 今の制限(分けたチケット): 表の差し替えは区画の欄の作りが変わらない表だけ(付け替えと作り直しは T-0670)。
+// 表の差し替え(T-0670): 見出し(重力・物質の数・欄の場所)と物質ごとの値を新しい表で書き直す。欄の場所が変わる時(物質の数で
+// 物質ごとの値の欄が伸び縮みする時)は作業場を作り直し、持ち越す欄(制御・帳簿・面の運動量・面の運動のエネルギー・位置のエネルギー・
+// 液体の質量)を写す。持ち越す欄は物質に依らない。断るのは新しい表で区画を作れない時(重力が 0 など)だけ。
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -14,6 +16,7 @@
 #include "core/log.h"
 #include "gpu/resources.h"
 #include "sim/probe_sim.h"
+#include "sim/species_remap.h"
 
 namespace bicameral::sim {
 
@@ -145,23 +148,8 @@ namespace bicameral::sim {
             return std::unexpected(header.error());
 
         m_liquidHeader = *header;
-
-        // --- 作業場の初めの中身(見出し・物質ごとの値。状態と帳簿は 0 = 静止)---
-        std::vector<std::byte> bytes(m_liquidHeader.speciesOffset +
-                                     (m_liquidHeader.speciesCount * PROBE_LIQUID_SPECIES_BYTES));
-        WriteAt(bytes, PROBE_LIQUID_HEADER_OFFSET, m_liquidHeader);
-        for (uint32_t id = 0; id < m_liquidHeader.speciesCount; ++id)
-            WriteAt(bytes, m_liquidHeader.speciesOffset + (id * PROBE_LIQUID_SPECIES_BYTES),
-                    MakeLiquidSpecies(table, id));
-
-        m_liquidUpload = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
-        void* mapped = nullptr;
-        const D3D12_RANGE noRead{.Begin = 0, .End = 0};
-        if (!m_liquidUpload || FAILED(m_liquidUpload->Map(0, &noRead, &mapped)))
-            return std::unexpected("液体の作業場のアップロードを作れない");
-
-        std::memcpy(mapped, bytes.data(), bytes.size());
-        m_liquidUpload->Unmap(0, nullptr);
+        if (auto uploaded = UploadLiquidHeader(device, table); !uploaded)
+            return uploaded;
 
         m_liquidWork = gpu::CreateBuffer(device, totalBytes, gpu::BufferKind::UnorderedAccess);
         if (!m_liquidWork)
@@ -187,6 +175,28 @@ namespace bicameral::sim {
         return {};
     }
 
+    // 作業場の初めの中身(見出し・物質ごとの値。状態と帳簿は 0 = 静止)のアップロードを m_liquidHeader と表から作る
+    std::expected<void, std::string> ProbeSim::UploadLiquidHeader(ID3D12Device5* device,
+                                                                  const BakedReactionTable& table) {
+        std::vector<std::byte> bytes(m_liquidHeader.speciesOffset +
+                                     (m_liquidHeader.speciesCount * PROBE_LIQUID_SPECIES_BYTES));
+        WriteAt(bytes, PROBE_LIQUID_HEADER_OFFSET, m_liquidHeader);
+        for (uint32_t id = 0; id < m_liquidHeader.speciesCount; ++id)
+            WriteAt(bytes, m_liquidHeader.speciesOffset + (id * PROBE_LIQUID_SPECIES_BYTES),
+                    MakeLiquidSpecies(table, id));
+
+        m_liquidUpload = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Upload);
+        void* mapped = nullptr;
+        const D3D12_RANGE noRead{.Begin = 0, .End = 0};
+        if (!m_liquidUpload || FAILED(m_liquidUpload->Map(0, &noRead, &mapped)))
+            return std::unexpected("液体の作業場のアップロードを作れない");
+
+        std::memcpy(mapped, bytes.data(), bytes.size());
+        m_liquidUpload->Unmap(0, nullptr);
+
+        return {};
+    }
+
     // 最初のフレーム: 作業場の見出しと物質ごとの値を写す(残りは作った時の 0)
     void ProbeSim::RecordLiquidInitialization(ID3D12GraphicsCommandList10* list) const {
         if (!m_liquidWork)
@@ -201,26 +211,146 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &toUav);
     }
 
-    // 表の差し替え(T-0620・ADR-0300): 物質ごとの値と重力は作る時に作業場へ書いたので、それが変わらない表だけ通す(T-0670)
+    // 表の差し替えの検査(T-0670): 作業場は新しい表で書き直すので、断るのは新しい表で区画を作れない時だけ
+    // (重力が 0・速さや摩擦の設定・作業場が 4 GB を超える。ProbeLiquidField::Create・MakeHeader と同じ理由)
     std::expected<void, std::string> ProbeSim::CheckLiquidTableSwap(const BakedReactionTable& table) const {
         if (!m_liquidWork)
             return {};
 
+        if (auto field = ProbeLiquidField::Create(table, m_options.liquid); !field)
+            return std::unexpected("液体の流れる世界に当てられない表: " + field.error());
+
+        uint32_t totalBytes = 0;
+        if (auto header = MakeHeader(m_options.liquid, table, totalBytes); !header)
+            return std::unexpected("液体の流れる世界に当てられない表: " + header.error());
+
+        return {};
+    }
+
+    // 作業場に表から書いた部分(重力・物質の数・物質ごとの値)が変わるか
+    bool ProbeSim::LiquidWorkChanges(const BakedReactionTable& table, const SpeciesRemap& remap) const {
         const BakedReactionTable& current = m_tableCopy;
-        if (table.environment.gravityMicrometersPerSecond2 != current.environment.gravityMicrometersPerSecond2)
-            return std::unexpected("液体の区画のある世界で、重力が変わる表(T-0670)");
+        if (!remap.identity ||
+            table.environment.gravityMicrometersPerSecond2 != current.environment.gravityMicrometersPerSecond2)
+            return true;
 
         for (uint32_t id = 0; id < m_liquidHeader.speciesCount; ++id) {
             const ProbeLiquidSpecies before = MakeLiquidSpecies(current, id);
             const ProbeLiquidSpecies after = MakeLiquidSpecies(table, id);
-            if (std::memcmp(&before, &after, sizeof(ProbeLiquidSpecies)) != 0) {
-                return std::unexpected(std::format(
-                    "液体の区画のある世界で、物質 {} の液体の値(モル体積・モル質量・液体と凝縮相)が変わる表(T-0670)",
-                    table.speciesNames[id]));
-            }
+            if (std::memcmp(&before, &after, sizeof(ProbeLiquidSpecies)) != 0)
+                return true;
         }
 
-        return {};
+        return false;
+    }
+
+    // 見出しと物質ごとの値を新しい表で作り直す。欄の場所が変わる(作業場を作り直す)なら古い作業場を返す(変わらなければ nullptr)
+    std::expected<ComPtr<ID3D12Resource>, std::string> ProbeSim::RebuildLiquidWork(ID3D12Device5* device,
+                                                                                   FrameSlot& frame,
+                                                                                   const BakedReactionTable& table) {
+        uint32_t totalBytes = 0;
+        auto header = MakeHeader(m_options.liquid, table, totalBytes);
+        if (!header)
+            return std::unexpected(header.error());
+
+        // 欄の場所が同じか(物質の数と重力のほかが同じ見出し)
+        ProbeLiquidHeader layout = m_liquidHeader;
+        layout.speciesCount = header->speciesCount;
+        layout.gravityMicrometersPerSecond2 = header->gravityMicrometersPerSecond2;
+        const bool sameLayout = std::memcmp(&layout, &*header, sizeof(ProbeLiquidHeader)) == 0 &&
+                                totalBytes == m_liquidWork->GetDesc().Width;
+
+        frame.keepAlive.push_back(std::move(m_liquidUpload));
+        m_liquidHeader = *header;
+        if (auto uploaded = UploadLiquidHeader(device, table); !uploaded)
+            return std::unexpected(uploaded.error());
+
+        if (sameLayout)
+            return ComPtr<ID3D12Resource>();
+
+        ComPtr<ID3D12Resource> oldWork = std::move(m_liquidWork);
+        m_liquidWork = gpu::CreateBuffer(device, totalBytes, gpu::BufferKind::UnorderedAccess);
+        if (!m_liquidWork)
+            return std::unexpected("液体の作業場を作れない");
+
+        m_liquidWork->SetName(L"ProbeSim.liquidWork");
+        frame.keepAlive.push_back(oldWork);
+
+        return oldWork;
+    }
+
+    // 表の差し替え(T-0670。適用の単位の前・RecordTableBuffers の前 = m_tableCopy は今の表): 見出しと物質ごとの値を書き直す。
+    // 作業場を作り直した時は持ち越す欄を古い作業場から写す(物質に依らないので付け替えは要らない。重力が変わった分の位置の
+    // エネルギーは次の刻みの入口で帳簿へ入る = CPU の ProbeLiquidField と同じ)。古い作業場は UAV の状態(RecordFrame が揃える)
+    bool ProbeSim::RecordLiquidTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                         const BakedReactionTable& table, const SpeciesRemap& remap) {
+        if (!m_liquidWork || !LiquidWorkChanges(table, remap))
+            return true;
+
+        ComPtr<ID3D12Device5> device;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        const ProbeLiquidHeader oldHeader = m_liquidHeader;
+        auto oldWork = RebuildLiquidWork(device.Get(), frame, table);
+        if (!oldWork) {
+            Log(Channel::Sim, Level::Error, "表の差し替えで液体の区画を作り直せない: {}", oldWork.error());
+            return false;
+        }
+
+        const uint64_t uploadBytes = m_liquidUpload->GetDesc().Width;
+        if (!*oldWork) {
+            const D3D12_RESOURCE_BARRIER toCopy = gpu::Transition(
+                m_liquidWork.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+            list->ResourceBarrier(1, &toCopy);
+        }
+
+        list->CopyBufferRegion(m_liquidWork.Get(), PROBE_LIQUID_HEADER_OFFSET, m_liquidUpload.Get(),
+                               PROBE_LIQUID_HEADER_OFFSET, uploadBytes - PROBE_LIQUID_HEADER_OFFSET);
+        if (*oldWork) {
+            ID3D12Resource* from = oldWork->Get();
+            const D3D12_RESOURCE_BARRIER toSource = gpu::Transition(from, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->ResourceBarrier(1, &toSource);
+            list->CopyBufferRegion(m_liquidWork.Get(), 0, from, 0, PROBE_LIQUID_HEADER_OFFSET);
+
+            const uint64_t cells = oldHeader.regionCellCount;
+            const std::array<std::array<uint64_t, 3>, 4> carried = {{
+                {m_liquidHeader.facesOffset, oldHeader.facesOffset, cells * 3 * 8},
+                {m_liquidHeader.kineticOffset, oldHeader.kineticOffset, cells * 3 * 8},
+                {m_liquidHeader.potentialOffset, oldHeader.potentialOffset, cells * 8},
+                {m_liquidHeader.massOffset, oldHeader.massOffset, cells * 8},
+            }};
+            for (const auto& [to, at, bytes] : carried)
+                list->CopyBufferRegion(m_liquidWork.Get(), to, from, at, bytes);
+        }
+
+        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(m_liquidWork.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &toUav);
+        Log(Channel::Sim, Level::Info, "液体の区画を新しい表で書き直した(物質 {} → {}・作業場を{})",
+            oldHeader.speciesCount, m_liquidHeader.speciesCount, *oldWork ? "作り直した" : "そのまま使う");
+
+        return true;
+    }
+
+    // 表の違う保存点へ戻す時(T-0670。フレームの先頭・状態を写す前): その表の欄の場所に合わせる。中身は保存点が全部を写す
+    // (見出しと物質ごとの値も保存点の表のもの)ので、ここでは写さない
+    bool ProbeSim::RecordLiquidForRestore(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                          const BakedReactionTable& table, const SpeciesRemap& remap) {
+        if (!m_liquidWork || !LiquidWorkChanges(table, remap))
+            return true;
+
+        ComPtr<ID3D12Device5> device;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        if (auto oldWork = RebuildLiquidWork(device.Get(), frame, table); !oldWork) {
+            Log(Channel::Sim, Level::Error, "保存点の表で液体の区画を作り直せない: {}", oldWork.error());
+            return false;
+        }
+
+        return true;
     }
 
     // 状態のハッシュの単位: HashCells と同じ欄へ液体の持ち越す欄と帳簿の寄与を足す

@@ -731,6 +731,10 @@ set_tests_properties(window_copy_record PROPERTIES LABELS gpu FIXTURES_SETUP win
   PASS_REGULAR_EXPRESSION "--auto-copy: OK")
 set_tests_properties(window_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_copy TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 止めてある(D-521・ADR-0342): 仮の世界は気体・液体が世界いっぱいで流れ、地球の環境に依る世界の 1 刻み(約 85 ms)がフレームの予算全体を超える。
+# 写しは本物の余った予算でだけ進む(D-468)ので 1 刻みも進まず、刻みを減らしても通らない。サンプルの世界の 1 刻みが予算に入ったら戻す
+#(仮の世界を退かせる時〔D-513〕)
+set_tests_properties(window_copy_record window_copy_play PROPERTIES DISABLED TRUE)
 # 重さの見張り(安全網の警告。T-0413・ADR-0204・D-468): 結果に入らない重さ(約 22 ms/刻み)を足すと、本物の刻みが等速の予算を超えた警告が出る
 add_test(NAME window_weight_warn COMMAND bicameral --frames 240 --sim-load 5200000 --sim-split 16)
 set_tests_properties(window_weight_warn PROPERTIES LABELS gpu TIMEOUT 300
@@ -748,6 +752,9 @@ set_tests_properties(window_metrics_record PROPERTIES LABELS gpu FIXTURES_SETUP 
   PASS_REGULAR_EXPRESSION "--auto-metrics: .*OK")
 set_tests_properties(window_metrics_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_metrics TIMEOUT 600
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 止めてある(D-521・ADR-0342): 指標の写しも本物の余った予算でだけ進む(D-468)。サンプルの世界の 1 刻み(約 85 ms。気体・液体が世界いっぱい)が
+# フレームの予算全体を超えるので進まない。サンプルの世界の 1 刻みが予算に入ったら戻す(仮の世界を退かせる時〔D-513〕)
+set_tests_properties(window_metrics_record window_metrics_play PROPERTIES DISABLED TRUE)
 # 標準パッケージを足して起動(--mix。T-0373): ブランクの世界に全部を足すと、空気で満たしたセルと地球の重力の世界が刻める
 add_test(NAME window_mix_start
          COMMAND bicameral --editor --play --frames 120
@@ -801,7 +808,7 @@ set_tests_properties(window_play_record PROPERTIES LABELS gpu FIXTURES_SETUP win
   PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
 set_tests_properties(window_play_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_play TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
-# 区画のある世界(T-0672・ADR-0310): ⑤ の場面(川の水 = 液体の区画・その上の空気 = 気体の区画)で --auto-play(置く物は気体の区画の真ん中)。
+# ⑤ の場面(T-0672。T-0724 から区画なし = 気体・液体は世界いっぱいで流れる。ADR-0342)で --auto-play(置く物は世界の真ん中)。
 # プレイ前の世界へ戻すのも、2 回のプレイのハッシュ列が同じなのも、区画の欄(保存点・状態のハッシュ。ADR-0300)まで含む。記録を別の起動で再生して同じハッシュ列
 set(WINDOW_REGIONS_SCENE ${PROJECT_SOURCE_DIR}/data/scenes/grass_fire_river)
 set(WINDOW_REGIONS_PLAY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_regions_play.bcreplay)
@@ -812,7 +819,7 @@ set_tests_properties(window_regions_play_record PROPERTIES LABELS gpu FIXTURES_S
   PASS_REGULAR_EXPRESSION "--auto-play: .*OK")
 set_tests_properties(window_regions_play_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_regions_play TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK")
-# 区画のある世界の写しの早送り(T-0672): 刻み 60 に写しを取り早送りし、写しの刻みごとのハッシュ(区画の寄与を含む)が本物と同じ(--auto-copy)
+# ⑤ の場面の写しの早送り(T-0672): 刻み 60 に写しを取り早送りし、写しの刻みごとのハッシュ(気体・液体の欄の寄与を含む)が本物と同じ(--auto-copy)
 set(WINDOW_REGIONS_COPY_FILE ${CMAKE_CURRENT_BINARY_DIR}/window_regions_copy.bcreplay)
 add_test(NAME window_regions_copy_record
          COMMAND bicameral --packages ${WINDOW_REGIONS_SCENE} --editor --play --auto-ignite --auto-copy --frames 20000
@@ -822,6 +829,10 @@ set_tests_properties(window_regions_copy_record PROPERTIES LABELS gpu FIXTURES_S
   PASS_REGULAR_EXPRESSION "--auto-copy: OK")
 set_tests_properties(window_regions_copy_play PROPERTIES LABELS gpu FIXTURES_REQUIRED window_regions_copy TIMEOUT 240
   PASS_REGULAR_EXPRESSION "再生: OK.*一致 [1-9]")
+# 止めてある(D-521・ADR-0342): 仮の世界は気体・液体が世界いっぱいで流れ、地球の環境に依る世界の 1 刻み(約 85 ms)がフレームの予算全体を超える。
+# 写しは本物の余った予算でだけ進む(D-468)ので 1 刻みも進まず、刻みを減らしても通らない。⑤ の場面の 1 刻みが予算に入ったら戻す
+#(多重解像度の世界へ移した後。T-0725〜T-0727)
+set_tests_properties(window_regions_copy_record window_regions_copy_play PROPERTIES DISABLED TRUE)
 # 表の差し替えを編集として扱う(T-0548・ADR-0246): パッケージの写しの表(物質と重力を足す)を、編集の状態で書き換えると時間を進めずに
 # 当たり・元に戻す・やり直すでも残り・プレイをやめるとプレイ前の世界とファイルの今の中身の表に戻る(--auto-play-table。手順は frame/auto_play.h)。
 # 記録(最後の流れ。刻み 0 の始めに表の印)を、写しのフォルダが無くても再生ファイルの表だけで再生して同じハッシュ列

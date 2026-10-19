@@ -51,68 +51,18 @@ namespace bicameral::sim {
             return offset < shell || size - offset <= shell;
         }
 
-        // --- 流れる区画(T-0671)---
+        // --- 流れる所(D-510・T-0724)---
 
-        // 箱が仮の世界の格子(PROBE_GRID_SIZE³)に収まるか
-        std::expected<void, std::string> CheckInGrid(const std::string& path, const std::array<uint32_t, 3>& minCell,
-                                                     const std::array<uint32_t, 3>& sizeCells) {
-            for (uint32_t axis = 0; axis < 3; ++axis) {
-                if (uint64_t{minCell[axis]} + sizeCells[axis] > PROBE_GRID_SIZE) {
-                    return std::unexpected(std::format("{}: 箱が格子({} セル角)からはみ出す(軸 {}: {} + {})", path,
-                                                       PROBE_GRID_SIZE, "xyz"[axis], minCell[axis], sizeCells[axis]));
-                }
-            }
+        // 区画の箱はやめた(D-510): 気体・液体は世界のどこでも流れる。仮の世界では「世界いっぱいの区画 1 つ」で表す
+        // (端は閉じた壁。世界の端の種類〔environment.world_edges〕は多重解像度の世界が読む。D-514)。
+        // 気体は基準の大気がある世界(層ごとの基準の状態が要る)、液体は重力がある世界で流れる
+        void BakeFlowAreas(const BakedReactionTable& table, WorldLayout& layout) {
+            const std::array<uint32_t, 3> whole = {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE};
+            if (!table.atmosphere.Empty())
+                layout.gasRegion = WorldGasRegion{.name = "world", .minCell = {}, .sizeCells = whole};
 
-            return {};
-        }
-
-        // 区画は今は世界に 1 つまで(ProbeSim の区画が 1 つ。T-0671)。無ければ nullopt
-        template <typename Region>
-        std::expected<std::optional<Region>, std::string> OnlyRegion(std::string_view category,
-                                                                     const std::vector<Region>& regions) {
-            if (regions.empty())
-                return std::nullopt;
-
-            if (regions.size() > 1) {
-                return std::unexpected(std::format("{}: 区画は今は世界に 1 つまで({} と {} がある)", category,
-                                                   regions[0].name, regions[1].name));
-            }
-
-            const std::string path = std::format("{}.{}", category, regions[0].name);
-            if (auto inGrid = CheckInGrid(path, regions[0].minCell, regions[0].sizeCells); !inGrid)
-                return std::unexpected(inGrid.error());
-
-            return regions[0];
-        }
-
-        // 気体は基準の大気(層ごとの基準の状態)、液体は重力が要る
-        std::expected<void, std::string> BakeFlowRegions(const WorldLayoutDefinition& definition,
-                                                         const BakedReactionTable& table, WorldLayout& layout) {
-            auto gas = OnlyRegion("gas_regions", definition.gasRegions);
-            if (!gas)
-                return std::unexpected(gas.error());
-
-            if (*gas && table.atmosphere.Empty()) {
-                return std::unexpected(
-                    std::format("gas_regions.{}: 基準の大気が無い世界では気体を流せない"
-                                "(environment.atmosphere_profile か atmosphere を書く)",
-                                (*gas)->name));
-            }
-
-            auto liquid = OnlyRegion("liquid_regions", definition.liquidRegions);
-            if (!liquid)
-                return std::unexpected(liquid.error());
-
-            if (*liquid && table.environment.gravityMicrometersPerSecond2 == 0) {
-                return std::unexpected(std::format(
-                    "liquid_regions.{}: 重力が 0 の世界では液体を流せない(environment.gravity_um_per_s2 を書く)",
-                    (*liquid)->name));
-            }
-
-            layout.gasRegion = std::move(*gas);
-            layout.liquidRegion = std::move(*liquid);
-
-            return {};
+            if (table.environment.gravityMicrometersPerSecond2 != 0)
+                layout.liquidRegion = WorldLiquidRegion{.name = "world", .minCell = {}, .sizeCells = whole};
         }
 
     }  // namespace
@@ -165,9 +115,8 @@ namespace bicameral::sim {
             return left.order != right.order ? left.order < right.order : left.name < right.name;
         });
 
-        // --- 流れる区画 ---
-        if (auto flow = BakeFlowRegions(definition, table, layout); !flow)
-            return std::unexpected(flow.error());
+        // --- 流れる所(世界いっぱい。D-510)---
+        BakeFlowAreas(table, layout);
 
         return layout;
     }

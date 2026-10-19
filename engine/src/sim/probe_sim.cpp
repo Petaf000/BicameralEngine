@@ -575,14 +575,13 @@ namespace bicameral::sim {
                ValidateRegions(input);
     }
 
-    // 区画のある世界の表の差し替え(T-0620・ADR-0300): 物質の一覧が同じで、区画の欄の作りが変わらない表だけ
+    // 区画のある世界の表の差し替え(T-0620・T-0670): 区画の作業場は新しい表で作り直すので、新しい表で区画を作れない時だけ断る
     std::expected<void, std::string> ProbeSim::CheckRegionTableSwap(const BakedReactionTable& table) const {
         if (!m_gas && !m_liquidWork)
             return {};
 
-        const auto remap = BuildSpeciesRemap(m_tableCopy, table);
-        if (!remap || !remap->identity)
-            return std::unexpected("区画(気体・液体)のある世界で、物質の一覧が変わる表(付け替えは T-0670)");
+        if (const auto remap = BuildSpeciesRemap(m_tableCopy, table); !remap)
+            return std::unexpected("物質を付け替えられない表: " + remap.error());
 
         if (auto gas = CheckGasTableSwap(table); !gas)
             return gas;
@@ -590,7 +589,7 @@ namespace bicameral::sim {
         return CheckLiquidTableSwap(table);
     }
 
-    // 区画のある世界の約束: 表の差し替えは CheckRegionTableSwap が通す表だけ(どの差し替えも今の表と区画の欄の作りが同じなので、
+    // 区画のある世界の約束: 表の差し替えは CheckRegionTableSwap が通す表だけ(新しい表で区画を作れるかは表だけで決まるので、
     // 前の差し替えの表と比べなくてよい)。写しの早送りの写す元は同じ区画(見出しが同じ = 写す欄の並びと大きさが同じ)
     bool ProbeSim::ValidateRegions(const ProbeFrameInput& input) const {
         for (const ProbeTableSwap& swap : input.tableSwaps) {
@@ -705,6 +704,7 @@ namespace bicameral::sim {
 
         FrameSlot& frame = m_slots[slot];
         frame.keepAlive.clear();  // この枠の前のリストは GPU が終えている(呼ぶ側の約束)
+        frame.retiredGas.clear();
 
         // 差し替えがあれば、フレームの終わりの抽出は最後の表の ID で物質を読む(物質の一覧が変わると ID がずれる。T-0223)。
         // 表の違う保存点へ戻すなら、まずその表の ID で(T-0548)
@@ -721,7 +721,8 @@ namespace bicameral::sim {
         ID3D12GraphicsCommandList10* list = frame.list.Get();
         const uint32_t firstQuery = slot * TIMESTAMPS_PER_SLOT;
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
-        if (!m_initialized)
+        const bool initializing = !m_initialized;
+        if (initializing)
             RecordInitialization(list);
 
         // 巻き戻し(T-0143): 刻みの境界から始まるフレームの先頭で、保存点へ写すか保存点から戻す(コマンドを足す前)
@@ -730,8 +731,13 @@ namespace bicameral::sim {
             RecordAdopt(list, *input.adoptFrom, input.firstTick);
         else if (input.restoreFrom != NO_SAVE_POINT && !RecordRestore(list, frame, input.restoreFrom))
             return nullptr;
-        else if (input.saveTo != NO_SAVE_POINT)
-            RecordSave(list, input.saveTo, input.firstTick);
+        else if (input.saveTo != NO_SAVE_POINT && !RecordSave(list, frame, input.saveTo, input.firstTick))
+            return nullptr;
+
+        // 表の差し替えのあるフレーム(T-0670): 区画の作業場を UAV に揃える(差し替えで作業場を作り直す時、古い作業場から持ち越す欄を
+        // 写すので、その時の状態を決めておく。ここまではどのバッファも COMMON。初期化のフレームは初期化が UAV にしてある)
+        if (!initializing && !input.tableSwaps.empty())
+            RecordRegionWorkStates(list, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         BindRootArguments(list, frame.input.Get());
         m_events.RecordBegin(list);
@@ -992,8 +998,7 @@ namespace bicameral::sim {
     // このフレームの前の単位と、まだ GPU にある前のフレームが読むので、このリストが終わるまで持つ(状態を追わないよう、毎回新しく作る)
     // 環境の値のホットリロード(T-0444・ADR-0194): 新しい表の重力が今の表と違えば、この刻みの物理の単位から新しい重力で刻む
     // (物理の単位は同じ刻みの適用の後ろ。記録の順 = 刻みの順)。同じなら触らない(作った時の physicsParameters の重力のまま)。
-    // 気体・液体の区画のある世界は、環境の値が変わる表を CheckRegionTableSwap が断る(作り直し = 同じ所で GpuGas::RecordEnvironment
-    // と作業場の設定の型・液体の重力を書き直すのは T-0670)
+    // 気体・液体の区画の環境の値(設定の型・層の基準・液体の重力)は、区画の作業場を作り直して合わせる(RecordRegionTableSwap。T-0670)
     void ProbeSim::ApplyEnvironment(const WorldPhysics& environment, uint64_t tick) {
         const WorldPhysics& current = m_tableCopy.environment;
         if (!m_physics || environment.gravityMicrometersPerSecond2 == current.gravityMicrometersPerSecond2)
@@ -1018,12 +1023,32 @@ namespace bicameral::sim {
                 "刻み {} の表の差し替えで、単体が新しい表に無い元素の原子を捨てる(改造による出入り): {}", tick,
                 remap->dropped);
 
-        if (!RecordTableBuffers(list, frame, table, tick))
+        // 区画の作業場は今の表(m_tableCopy)と比べて作り直すので、表を写す前に
+        if (!RecordRegionTableSwap(list, frame, table, *remap) || !RecordTableBuffers(list, frame, table, tick))
             return false;
 
         BindRootViews(list, frame.input.Get());
 
         return remap->identity || RecordSpeciesRemap(list, frame, *remap, tick);
+    }
+
+    // 表の差し替えで区画(気体・液体)の作業場を作り直す(T-0670)。区画の段はルートの結び先を読むので、呼ぶ側が後で結び直す
+    bool ProbeSim::RecordRegionTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                         const BakedReactionTable& table, const SpeciesRemap& remap) {
+        return RecordGasTableSwap(list, frame, table, remap) && RecordLiquidTableSwap(list, frame, table, remap);
+    }
+
+    // 区画の作業場(気体・液体)の状態を明示に移す(表の差し替えのあるフレームの初め。T-0670)
+    void ProbeSim::RecordRegionWorkStates(ID3D12GraphicsCommandList10* list, D3D12_RESOURCE_STATES before,
+                                          D3D12_RESOURCE_STATES after) const {
+        std::vector<D3D12_RESOURCE_BARRIER> barriers;
+        for (ID3D12Resource* work : {m_gas ? m_gasWork.Get() : nullptr, m_liquidWork.Get()}) {
+            if (work != nullptr)
+                barriers.push_back(gpu::Transition(work, before, after));
+        }
+
+        if (!barriers.empty())
+            list->ResourceBarrier((uint32_t)barriers.size(), barriers.data());
     }
 
     // 表 4 つを写して結び直し、環境の値(重力)を合わせる(差し替えと、表の違う保存点へ戻す時。世界のセルには触れない。T-0548)
@@ -1725,13 +1750,24 @@ namespace bicameral::sim {
         return {};
     }
 
-    // 物質の一覧が変わる差し替え(T-0223・ADR-0065): 2 世代のセルを名前で付け替える(熱のキャッシュは Advance が新しい表で作り直す)。
+    // 表の差し替え: 区画の欄を新しい表に合わせ(T-0670)、物質の一覧が変わるなら(T-0223・ADR-0065)2 世代のセルを名前で付け替える
+    // (熱のキャッシュは Advance が新しい表で作り直す)。
     // 報告は刻み tick の始めの世代(この刻みが進める世代)の分だけ数える
     void ProbeReference::RemapSpecies(uint64_t tick, const BakedReactionTable& newTable) {
         m_remapReport = {};
         const auto remap = BuildSpeciesRemap(*m_table, newTable);
         FX_ASSERT(remap.has_value());  // 呼ぶ側の約束(script::CheckHotReloadCompatible が通した表)
-        if (!remap || remap->identity)
+        if (!remap)
+            return;
+
+        // 区画の欄を新しい表に合わせる(T-0670。GPU の RecordRegionTableSwap と同じ)
+        if (m_gas)
+            m_gas->ApplyTable(newTable, *remap);
+
+        if (m_liquid)
+            m_liquid->ApplyTable(newTable);
+
+        if (remap->identity)
             return;
 
         const size_t currentBase = static_cast<size_t>(tick & 1) * PROBE_CELL_COUNT;

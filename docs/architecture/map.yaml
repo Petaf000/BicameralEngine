@@ -331,7 +331,7 @@ views:
           note: "最速の投影は孔のセルに 1 刻みで中身の何倍もを通して壊れる(ADR-0346)。空き 1/2 未満を小さいとし(T-0788 の板の測り)、大きいセルの部分と開いた境界の外を互いに素な集合でまとめ、2 つ以上の部分に接する小さいセルのまとまりを組にする。値は変えない(D-487 ②)。ProbeGasField が置いた時(CheckFastestOpenings)と空きの変わった刻みに呼ぶ" }
       - { id: gasfastestlayout, group: simlib, label: "CheckLayoutFastestOpenings<br/>最速を選んだ世界の読み込みの検査(T-0804・D-526)<br/>環境 gas_pressure_speed = instant × 置いた世界の気体の区画",
           code: "engine/src/sim/gas_fastest_layout.cpp::CheckLayoutFastestOpenings", ticket: T-0804, doc: docs/design/20-transport-substrate.md,
-          note: "世界の組み立ての gas_regions と world_cells の初めの中身で、刻みの中と同じ FindGasSmallOpenJoints と同じ文(ProbeRegionJointWarning)。読み込み(LoadReactionTable・RebuildReactionTable)がベイクの後に呼び、表の warnings へ。多重解像度と GPU の気体は陽解法だけなので、最速の世界では作った時に「まだ効かない」と知らせる(GasInstantNotYetNotice)" }
+          note: "世界の組み立ての気体の区画(世界いっぱい)と world_cells の初めの中身で、刻みの中と同じ FindGasSmallOpenJoints と同じ文(ProbeRegionJointWarning)。読み込み(LoadReactionTable・RebuildReactionTable)がベイクの後に呼び、表の warnings へ。多重解像度と GPU の気体は陽解法だけなので、最速の世界では作った時に「まだ効かない」と知らせる(GasInstantNotYetNotice)" }
       - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
           code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordSolve", ticket: T-0531, doc: docs/design/07-transport.md,
           note: "止める判定はセルごとの閾値 ⌈(許容差 + 1) 2^48 ÷ D⌉(GasPressureThresholds)で CPU と整数で同じ。gpu_gas_projection_test が CPU の模型の解きを GPU で解き直してビット一致を確かめる。式を作る・当てる・外側の反復の GPU 版は T-0531 の残り" }

@@ -611,17 +611,12 @@ namespace bicameral::frame {
             const auto cells = [](const std::array<uint32_t, 3>& size) {
                 return uint64_t{size[0]} * size[1] * size[2];
             };
-            if (const auto& gas = layout.gasRegion) {
-                Log(Channel::Sim, Level::Info, "気体の区画 {}: 角 ({}, {}, {})・大きさ {} × {} × {}({} セル)",
-                    gas->name, gas->minCell[0], gas->minCell[1], gas->minCell[2], gas->sizeCells[0], gas->sizeCells[1],
-                    gas->sizeCells[2], cells(gas->sizeCells));
-            }
+            // 区画の箱はやめた(D-510): 流れるなら世界いっぱい(基準の大気があれば気体・重力があれば液体)
+            if (const auto& gas = layout.gasRegion)
+                Log(Channel::Sim, Level::Info, "気体は世界のどこでも流れる({} セル)", cells(gas->sizeCells));
 
-            if (const auto& liquid = layout.liquidRegion) {
-                Log(Channel::Sim, Level::Info, "液体の区画 {}: 角 ({}, {}, {})・大きさ {} × {} × {}({} セル)",
-                    liquid->name, liquid->minCell[0], liquid->minCell[1], liquid->minCell[2], liquid->sizeCells[0],
-                    liquid->sizeCells[1], liquid->sizeCells[2], cells(liquid->sizeCells));
-            }
+            if (const auto& liquid = layout.liquidRegion)
+                Log(Channel::Sim, Level::Info, "液体は世界のどこでも流れる({} セル)", cells(liquid->sizeCells));
         }
 
         // 仮の世界の刻み。初めのセルと物は表の世界の組み立て(パッケージの world_cells・world_bodies。T-0398)から作る。
@@ -643,7 +638,7 @@ namespace bicameral::frame {
                 // 世界の環境の値(表の分類 environment。ブランクは重力 0。ADR-0171・ADR-0176)
                 .physicsParameters = sim::PhysicsParametersFor(reactionTable.environment),
                 .initialWorld = initialWorld};
-            // 流れる区画(表の gas_regions・liquid_regions。書かなければ流れない。T-0671・ADR-0310)
+            // 流れる所(世界いっぱい。基準の大気があれば気体・重力があれば液体。D-510・T-0724)
             sim::SetLayoutRegions(reactionTable.worldLayout, simOptions);
             LogLayoutRegions(reactionTable.worldLayout);
 

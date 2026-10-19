@@ -56,6 +56,22 @@ namespace bicameral::sim {
         return field;
     }
 
+    void ProbeGasField::ApplyTable(const BakedReactionTable& table, const SpeciesRemap& remap) {
+        const int64_t bottom = m_options.floorHeightMillimeters +
+                               ((int64_t)m_options.minCell[1] * ATMOSPHERE_PRESSURE_STEP_MILLIMETERS);
+        m_layers = GasAtmosphereLayers::Create(table, bottom, m_options.sizeCells[1]);
+        if (remap.identity)
+            return;
+
+        std::vector<int64_t> amounts(table.species.size(), 0);
+        for (uint32_t oldId = 1; oldId < m_ledger.amounts.size() && oldId < remap.newIds.size(); ++oldId) {
+            if (remap.newIds[oldId] != 0)
+                amounts[remap.newIds[oldId]] = m_ledger.amounts[oldId];
+        }
+
+        m_ledger.amounts = std::move(amounts);
+    }
+
     uint32_t ProbeGasField::GridIndex(uint32_t region) const {
         const uint32_t width = m_options.sizeCells[0];
         const uint32_t depth = m_options.sizeCells[2];

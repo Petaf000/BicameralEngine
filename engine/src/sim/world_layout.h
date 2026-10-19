@@ -6,8 +6,9 @@
 // エンジンは組み立ての「書き方」だけを持ち、何をどこに置くか(空気・木箱・積み木)はパッケージが決める(D-454・ADR-0151 の 2)。
 // 分類が無ければ空(ブランクの世界。D-455): セルは全部空・物なし。
 // 表の中身(TableBytes)に入るので、再生ファイルは表の中身だけから同じ初めの世界を作り直す(T-0193)。
-// 流れる区画(分類 gas_regions・liquid_regions。T-0671・ADR-0310 仮): 気体と液体を流す箱。書かなければ流れない(D-455)。
-//   → WorldLayout::gasRegion・liquidRegion → ProbeSimOptionsForLayout(probe_sim.h)が ProbeSimOptions::gas・liquid に。
+// 流れる所(D-510・T-0724・ADR-0342 仮): 区画の箱はやめた。気体は基準の大気がある世界、液体は重力がある世界で、世界のどこでも流れる。
+//   仮の世界では世界いっぱいの区画 1 つ(WorldLayout::gasRegion・liquidRegion)→ SetLayoutRegions(probe_sim.h)が ProbeSimOptions::gas・liquid に。
+//   前の分類 gas_regions・liquid_regions は読まず、書いてあれば注意を出す(retiredCategories → 表の警告)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
@@ -59,8 +60,7 @@ namespace bicameral::sim {
         uint64_t massGrams = 0;                        // 0 = 動かない物(地面・壁)
     };
 
-    // 気体の区画(分類 gas_regions の 1 つの鍵。T-0671): 箱の中の気体を流す(07 §2.7)。仮の世界の格子(PROBE_GRID_SIZE³)の中。
-    // 基準の大気(environment.atmosphere_profile か atmosphere)が要る。今は世界に 1 つまで(ProbeSim の区画が 1 つ)
+    // 仮の世界で気体が流れる所(D-510 からは世界いっぱい。ベイクが作る。作り手は書かない)
     struct WorldGasRegion {
         std::string name;
         std::array<uint32_t, 3> minCell{};
@@ -69,7 +69,7 @@ namespace bicameral::sim {
         std::array<GasBoundary, 3> boundary = {GasBoundary::Wall, GasBoundary::Wall, GasBoundary::Wall};
     };
 
-    // 液体の区画(分類 liquid_regions の 1 つの鍵。T-0671): 箱の中の液体を低い方へ流す(07 §3)。重力が要る。今は世界に 1 つまで
+    // 仮の世界で液体が流れる所(D-510 からは世界いっぱい。ベイクが作る。作り手は書かない)
     struct WorldLiquidRegion {
         std::string name;
         std::array<uint32_t, 3> minCell{};
@@ -80,8 +80,8 @@ namespace bicameral::sim {
     struct WorldLayoutDefinition {
         std::vector<WorldCellRegionDefinition> cellRegions;
         std::vector<WorldBodyDefinition> bodies;
-        std::vector<WorldGasRegion> gasRegions;        // 鍵の順
-        std::vector<WorldLiquidRegion> liquidRegions;  // 鍵の順
+        std::vector<std::string>
+            retiredCategories;  // 書いてあったが読まない分類(gas_regions・liquid_regions。D-510。注意を出す)
     };
 
     // --- ベイクしたもの(物質は ID。並びは書く順)---
@@ -97,16 +97,15 @@ namespace bicameral::sim {
     struct WorldLayout {
         std::vector<WorldCellRegion> cellRegions;       // 層の順
         std::vector<WorldBodyDefinition> bodies;        // 番号の順(物質を指さないので定義のまま)
-        std::optional<WorldGasRegion> gasRegion;        // 無ければ気体は流れない(D-455)
-        std::optional<WorldLiquidRegion> liquidRegion;  // 無ければ液体は流れない
+        std::optional<WorldGasRegion> gasRegion;        // 世界いっぱい。基準の大気が無ければ無し(気体は流れない)
+        std::optional<WorldLiquidRegion> liquidRegion;  // 世界いっぱい。重力が 0 なら無し(液体は流れない)
 
         // セル (x, y, z) が region に入るか(箱の中で、殻なら外側の厚さ shellCells の中)
         [[nodiscard]] static bool Contains(const WorldCellRegion& region, uint32_t x, uint32_t y, uint32_t z);
     };
 
     // 名前を ID に直し、領域ごとのセルを作る(table は物質・環境の値・基準の大気までベイクした表)。知らない物質・1 セルの成分の数の上限
-    // (RX_MAX_CELL_SPECIES)を超える中身・同じ物質が 2 回は誤り。流れる区画は、2 つ以上・格子からはみ出す・
-    // 基準の大気が無い(気体)・重力が 0(液体)が誤り(区画の名前の付いた理由)
+    // (RX_MAX_CELL_SPECIES)を超える中身・同じ物質が 2 回は誤り。流れる所は表の基準の大気と重力から作る(D-510)
     [[nodiscard]] std::expected<WorldLayout, std::string> BakeWorldLayout(const WorldLayoutDefinition& definition,
                                                                           const BakedReactionTable& table);
 

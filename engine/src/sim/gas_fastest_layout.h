@@ -1,6 +1,6 @@
 // gas_fastest_layout.h — 最速 × 小さい空きの検査を、仮の世界の格子の区画(区画のセルの並び・格子の座標)で呼ぶ道具と、
 // 置いた世界(世界の組み立て)の読み込みの検査(T-0804・D-526 ①。T-0788 の検査 gas_fastest_check と同じ関数)。
-// データの流れ: 表の環境(gas_pressure_speed = "instant")・世界の組み立て(gas_regions・world_cells)→ 区画のセルの空き(sim/cell_volume)
+// データの流れ: 表の環境(gas_pressure_speed = "instant")・世界の組み立て(気体の区画 = 仮の世界では世界いっぱい〔D-510〕・world_cells)→ 区画のセルの空き(sim/cell_volume)
 //   → FindGasSmallOpenJoints → 文(仮の世界の刻みの中の警告 sim/probe_gas と同じ文)→ 読み込み(script/reaction_table_loader)が表の warnings へ。
 // GPU を知らない(読み込みの層から呼べる)。浮動小数点は使わない(engine/src/sim は検査の対象)。
 #pragma once
@@ -36,7 +36,7 @@ namespace bicameral::sim {
                                                       const std::array<uint32_t, 3>& minCell);
 
     // 読み込みの検査(T-0804・D-526 ①): 世界が最速を選び(環境の gas_pressure_speed = "instant")、世界の組み立てに気体の区画
-    // (gas_regions)があれば、区画の初めのセル(world_cells。後に書いた箱が上書きする = MakeProbeInitialWorld と同じ)の空きで、
+    // (仮の世界では世界いっぱい。D-510)があれば、区画の初めのセル(world_cells。後に書いた箱が上書きする = MakeProbeInitialWorld と同じ)の空きで、
     // 刻みの中と同じ検査をした警告の文。音速の世界・区画が無いなら空
     [[nodiscard]] std::vector<std::string> CheckLayoutFastestOpenings(const BakedReactionTable& table);
 

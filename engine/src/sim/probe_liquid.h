@@ -124,6 +124,11 @@ namespace bicameral::sim {
         ProbeLiquidStepReport Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells,
                                    std::vector<uint32_t>& changed);
 
+        // 表の差し替え(T-0670。表は CheckLiquidTableSwap が通したもの = 重力が 0 でない): 見立ての値(重力)を新しい表で作り直す。
+        // 物質ごとの値は刻みごとに表から読み、持ち越す欄は物質に依らない。重力が変わった分の位置のエネルギーは次の刻みの入口で
+        // 帳簿へ入る(GPU の ProbeSim::RecordLiquidTableSwap と同じ)
+        void ApplyTable(const BakedReactionTable& table);
+
         [[nodiscard]] const ProbeLiquidOptions& Options() const { return m_options; }
         [[nodiscard]] const ProbeLiquidLedger& Ledger() const { return m_ledger; }
 

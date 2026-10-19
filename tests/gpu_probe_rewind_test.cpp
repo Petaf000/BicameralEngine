@@ -19,8 +19,9 @@
 //   - シェーダーの assert と debug layer のエラーが 0 件
 //   - --regions(T-0620): 同じことを、気体の区画(木箱を囲む 16 × 14 × 16。基準の大気で満たす)と液体の区画(ダムの水が押し寄せる
 //       12 × 8 × 3)のある世界で。区画の持ち越す欄(気体の運動量・液体の面の運動量・位置と運動のエネルギー・帳簿)も保存点が写し、
-//       状態のハッシュに入る(入っていなければ、戻した後に区画の欄だけ違っても気づけない)。差し替える表は反応の速さだけが違う
-//       (区画のある世界で通る差し替え。区画の欄の作りが変わる表は断る = CheckRegionTableSwap も確かめる)。
+//       状態のハッシュに入る(入っていなければ、戻した後に区画の欄だけ違っても気づけない)。差し替える表は反応の速さのほかに
+//       重力(月)・水の密度・物質の一覧(粘土を足す)も違う(T-0670: 区画の作業場を作り直し、保存点の写し先も作り直す。差し替えの前の
+//       保存点へ戻すと作業場も前の表の大きさに戻る)。新しい表で区画を作れない表(重力 0)は断る = CheckRegionTableSwap も確かめる。
 //       写しの早送り(sim/world_copy。T-0412): 刻み COPY_TICK の写しに同じコマンドを当てて TICKS まで → 基準と全部一致
 //       (区画の欄も写る)
 // 保存点 1 つの大きさと、写す・戻すフレームの GPU の時間をログに出す(docs/perf.md)。
@@ -370,10 +371,30 @@ namespace {
         return cells;
     }
 
+    // 区画のある世界の差し替える先(T-0670): 重力を月に・水の密度を 1100 に・粘土を足す(名前の順で後ろの物質の ID がずれる)
+    ReactionTableDefinition ChangeRegionValues(ReactionTableDefinition definition) {
+        definition.environment.gravityMicrometersPerSecond2 = 1620000;
+        for (SpeciesDefinition& species : definition.species) {
+            if (species.name == "liquid_water")
+                species.density = 1100;
+        }
+
+        definition.species.push_back({.name = "clay",
+                                      .composition = {{.element = "C", .count = 1}},
+                                      .formationEnthalpy = 0,
+                                      .heatCapacity = 8500,
+                                      .thermalConductivity = 500,
+                                      .phase = SpeciesPhase::Solid,
+                                      .density = 1500});
+
+        return definition;
+    }
+
     std::optional<Scenario> MakeScenario(bool regions) {
         const ReactionTableDefinition definition = regions ? MakeRegionDefinition() : MakeCombustionTestTable();
         auto table = BakeReactionTable(definition);
-        auto swapped = BakeReactionTable(SpeedUpCombustion(definition));
+        auto swapped = BakeReactionTable(regions ? ChangeRegionValues(SpeedUpCombustion(definition))
+                                                 : SpeedUpCombustion(definition));
         if (!table || !swapped)
             return std::nullopt;
 
@@ -527,20 +548,17 @@ namespace {
                        "写し: シェーダーの assert が 0 件");
     }
 
-    // 区画のある世界の表の差し替えの約束(T-0620・ADR-0300): 速さだけ違う表は通り、区画が読む物質の値が違う表は断る
+    // 区画のある世界の表の差し替えの約束(T-0670): 物質の一覧・物質の値・環境の値が違う表も通り(区画の作業場を作り直す)、
+    // 新しい表で区画を作れない表(重力が 0 = 液体を流せない)だけ断る
     void CheckRegionTableSwaps(const Scenario& scenario, const ProbeSim& simulation, Failures& failures) {
         failures.Check(simulation.CheckRegionTableSwap(scenario.swapped).has_value(),
-                       "区画: 反応の速さだけが違う表へは差し替えられる");
+                       "区画: 重力・水の密度・物質の一覧が違う表へも差し替えられる");
 
-        ReactionTableDefinition denser = MakeRegionDefinition();
-        for (SpeciesDefinition& species : denser.species) {
-            if (species.name == "liquid_water")
-                species.density = 1100;
-        }
-
-        auto table = BakeReactionTable(denser);
+        ReactionTableDefinition weightless = MakeRegionDefinition();
+        weightless.environment.gravityMicrometersPerSecond2 = 0;
+        auto table = BakeReactionTable(weightless);
         const auto refused = table ? simulation.CheckRegionTableSwap(*table) : std::expected<void, std::string>();
-        failures.Check(table && !refused.has_value(), "区画: 液体の値(密度)が違う表は断る");
+        failures.Check(table && !refused.has_value(), "区画: 重力が 0 の表(液体を流せない)は断る");
         if (table && !refused)
             Log(Channel::Sim, Level::Info, "断った理由: {}", refused.error());
     }

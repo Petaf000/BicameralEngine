@@ -11,7 +11,10 @@
 //   5. 密度のある固体が気体を塞ぐ(T-0617・ADR-0268): 試験の表の固体は密度を持つ(木箱のセルロースはセルの 3.3 %。1〜4 も空きを読む刻み)。
 //      区画の中ほどに石(密度 2000)の床を張る(満ちた石は気体を通さず、真ん中の 2 × 2 は半分の石〔一部だけ開く〕)。
 //      燃える木箱の煙が石の床に当たり、孔を通る。同じく毎刻み一致
-//   6. シェーダーの assert・debug layer のエラーが 0 件
+//   6. 表の差し替え(T-0670): 燃える木箱の途中で、物質を足し(石)・物質の値(粘り)と環境の値(乱れの粘り)が変わる表へ /
+//      基準の大気が変わる表(6 種の空気)へ差し替える。GPU は区画の作業場を作り直して帳簿を名前で付け替え、CPU は層の基準と帳簿を
+//      付け替える。差し替えの刻みからも毎刻み一致・気体の欄と帳簿も同じ
+//   7. シェーダーの assert・debug layer のエラーが 0 件
 // 気体の段(適用の単位の中)の GPU 時間を出す(docs/perf.md)。
 // 走らせ方: ctest(gpu_probe_gas・gpu_probe_gas_warp)か `job.py run -Preset release -Exe gpu_probe_gas_test`。引数は gpu_test_options.h
 #include <algorithm>
@@ -263,9 +266,15 @@ namespace {
     }
 
     // --- 走らせる(1 フレーム = 1 刻み。毎刻み CPU と比べる)---
+    // 表の差し替え(T-0670): 刻み tick の始めに table へ
+    struct SceneSwap {
+        const BakedReactionTable* table = nullptr;
+        uint64_t tick = 0;
+    };
+
     void CheckScene(ID3D12Device5* device, const BakedReactionTable& table, std::string_view name, bool wood,
                     uint64_t ticks, Failures& failures, bool steam = false, bool stone = false,
-                    uint32_t restSpeedUnits = 0) {
+                    uint32_t restSpeedUnits = 0, SceneSwap swap = {}) {
         const ProbeGasOptions options = MakeOptions(restSpeedUnits);
         const auto field = ProbeGasField::Create(table, options);
         if (!field) {
@@ -298,7 +307,13 @@ namespace {
         bool hashesMatch = true;
         for (uint64_t tick = 0; tick < ticks && hashesMatch; ++tick) {
             const auto slot = static_cast<uint32_t>(tick % ProbeSim::FRAME_SLOT_COUNT);
-            ID3D12CommandList* list = simulation->RecordFrame(slot, {.firstTick = tick, .unitCount = unitsPerTick});
+            const bool swapping = swap.table != nullptr && tick == swap.tick;
+            const std::array<ProbeTableSwap, 1> swaps = {ProbeTableSwap{.tick = tick, .table = swap.table}};
+            ProbeFrameInput input{.firstTick = tick, .unitCount = unitsPerTick};
+            if (swapping)
+                input.tableSwaps = swaps;
+
+            ID3D12CommandList* list = simulation->RecordFrame(slot, input);
             if (list == nullptr || !queue->WaitCpu(queue->Submit(list))) {
                 failures.Check(false, std::format("{}: 刻み {} を投げられる", name, tick));
                 return;
@@ -309,7 +324,7 @@ namespace {
             if (!readback.unitGpuTicks.empty())
                 applyMicroseconds += static_cast<double>(readback.unitGpuTicks[PROBE_UNIT_APPLY]) * usPerTimestamp;
 
-            reference.Advance(tick, {});
+            reference.Advance(tick, {}, swapping ? swap.table : nullptr);
             cpuSkipped += reference.LastGasReport().skippedCellOverflow ? 1 : 0;
             blockedCells = std::max(blockedCells, reference.LastGasReport().blockedCells);
             partialCells = std::max(partialCells, reference.LastGasReport().partialCells);
@@ -518,6 +533,14 @@ int main(int argc, char** argv) {
                false, REST_SPEED_UNITS);
     CheckScene(device->Get(), MakeTable(false, 0, true, EDDY_MM2_PER_S), "燃える木箱と石の床・粘り", true,
                warp ? 3 : 60, failures, false, true);
+
+    // 表の差し替え(T-0670): 物質を足す・物質と環境の値が変わる表へ / 基準の大気が変わる表へ(区画の作業場を作り直す)
+    const BakedReactionTable stoneViscousTable = MakeTable(false, 0, true, EDDY_MM2_PER_S);
+    const uint64_t swapTick = warp ? 2 : 20;
+    CheckScene(device->Get(), table, "燃える木箱 → 石と粘りの表へ差し替え", true, warp ? 4 : 60, failures, false, false,
+               0, {.table = &stoneViscousTable, .tick = swapTick});
+    CheckScene(device->Get(), table, "燃える木箱 → 6 種の空気の表へ差し替え", true, warp ? 4 : 60, failures, false,
+               false, 0, {.table = &sixTable, .tick = swapTick});
 
     if (!warp) {
         Measure(device->Get(), table, false);

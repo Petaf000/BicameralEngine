@@ -1,4 +1,4 @@
-// world_layout_package.cpp — 分類 world_cells・world_bodies・gas_regions・liquid_regions を読む(world_layout_package.h。T-0398・T-0671)。
+// world_layout_package.cpp — 分類 world_cells・world_bodies を読む(world_layout_package.h。T-0398)。gas_regions・liquid_regions は読まず注意だけ(D-510・T-0724)。
 // ここで落とすのは「形」の誤り(欄の綴り・型・整数でない数・範囲の外)。物質の名前はベイク(sim::BakeWorldLayout)が確かめる。
 #include "script/world_layout_package.h"
 
@@ -14,12 +14,9 @@ namespace bicameral::script {
 
     namespace {
 
-        using sim::GasBoundary;
         using sim::WorldBodyDefinition;
         using sim::WorldCellAmount;
         using sim::WorldCellRegionDefinition;
-        using sim::WorldGasRegion;
-        using sim::WorldLiquidRegion;
 
         constexpr int64_t CELL_COORDINATE_MAX = int64_t{1}
                                                 << 20;  // セルの位置・大きさの上限(格子の大きさの器より十分大きい)
@@ -172,98 +169,20 @@ namespace bicameral::script {
                                        .massGrams = static_cast<uint64_t>(*mass)};
         }
 
-        // --- 流れる区画(T-0671)---
+        // --- 読まない分類(D-510・T-0724)---
 
-        // 箱(min_cell・size_cells。両方要る)。格子に収まるかはベイク(sim::BakeWorldLayout)が確かめる
-        std::expected<std::array<std::array<uint32_t, 3>, 2>, std::string> ReadFlowBox(const ScriptValue& value,
-                                                                                       const std::string& path) {
-            const auto minCell = ReadVector3Field(value, "min_cell", path, 0, CELL_COORDINATE_MAX);
-            if (!minCell)
-                return std::unexpected(minCell.error());
+        // 区画の箱(gas_regions・liquid_regions)はやめた。書いてあれば読まずに注意を出す(どのパッケージが書いたかを付ける)
+        void NoteRetiredCategory(const PackageSetResult& packages, std::string_view category,
+                                 std::vector<std::string>& notes) {
+            const auto found = packages.tables.find(std::string(category));
+            if (found == packages.tables.end() || found->second.empty())
+                return;
 
-            const auto sizeCells = ReadVector3Field(value, "size_cells", path, 1, CELL_COORDINATE_MAX);
-            if (!sizeCells)
-                return std::unexpected(sizeCells.error());
-
-            return std::array{ToCells(*minCell), ToCells(*sizeCells)};
-        }
-
-        std::expected<GasBoundary, std::string> ReadBoundary(const ScriptValue& value, const std::string& path) {
-            if (value.IsString() && value.text == "wall")
-                return GasBoundary::Wall;
-
-            if (value.IsString() && value.text == "open")
-                return GasBoundary::Open;
-
-            if (value.IsString() && value.text == "periodic")
-                return GasBoundary::Periodic;
-
-            return std::unexpected(std::format("{}: \"wall\"・\"open\"・\"periodic\" のどれかで書く", path));
-        }
-
-        // boundary = { x, y, z }(省けば全部 "wall")
-        std::expected<std::array<GasBoundary, 3>, std::string> ReadBoundaries(const ScriptValue& table,
-                                                                              const std::string& path) {
-            std::array<GasBoundary, 3> boundaries = {GasBoundary::Wall, GasBoundary::Wall, GasBoundary::Wall};
-            const ScriptValue* value = table.Find("boundary");
-            if (value == nullptr)
-                return boundaries;
-
-            const std::string boundaryPath = path + ".boundary";
-            if (!value->IsTable() || value->fields.size() != 3)
-                return std::unexpected(std::format("{}: {{ x, y, z }} の 3 つで書く", boundaryPath));
-
-            for (uint32_t axis = 0; axis < 3; ++axis) {
-                const ScriptField& field = value->fields[axis];
-                if (!field.key.IsNumber() || field.key.number != static_cast<double>(axis + 1))
-                    return std::unexpected(std::format("{}: {{ x, y, z }} の 3 つで書く", boundaryPath));
-
-                const auto boundary = ReadBoundary(field.value, std::format("{}[{}]", boundaryPath, axis + 1));
-                if (!boundary)
-                    return std::unexpected(boundary.error());
-
-                boundaries[axis] = *boundary;
-            }
-
-            return boundaries;
-        }
-
-        std::expected<WorldGasRegion, std::string> ReadGasRegion(const std::string& name, const ScriptValue& value,
-                                                                 const std::string& path) {
-            static constexpr std::string_view FIELDS[] = {"min_cell", "size_cells", "boundary"};
-            if (auto record = CheckRecord(value, FIELDS, path); !record)
-                return std::unexpected(record.error());
-
-            const auto box = ReadFlowBox(value, path);
-            if (!box)
-                return std::unexpected(box.error());
-
-            const auto boundary = ReadBoundaries(value, path);
-            if (!boundary)
-                return std::unexpected(boundary.error());
-
-            return WorldGasRegion{.name = name, .minCell = (*box)[0], .sizeCells = (*box)[1], .boundary = *boundary};
-        }
-
-        std::expected<WorldLiquidRegion, std::string> ReadLiquidRegion(const std::string& name,
-                                                                       const ScriptValue& value,
-                                                                       const std::string& path) {
-            static constexpr std::string_view FIELDS[] = {"min_cell", "size_cells", "advection"};
-            if (auto record = CheckRecord(value, FIELDS, path); !record)
-                return std::unexpected(record.error());
-
-            const auto box = ReadFlowBox(value, path);
-            if (!box)
-                return std::unexpected(box.error());
-
-            const ScriptValue* advection = value.Find("advection");
-            if (advection != nullptr && !advection->IsBoolean())
-                return std::unexpected(std::format("{}.advection: true か false で書く", path));
-
-            return WorldLiquidRegion{.name = name,
-                                     .minCell = (*box)[0],
-                                     .sizeCells = (*box)[1],
-                                     .advection = advection == nullptr || advection->boolean};
+            const auto& [key, entry] = *found->second.begin();
+            notes.push_back(
+                std::format("注意: パッケージ {}: {} は読まない(D-510: 区画の箱はやめ、気体は基準の大気があれば・"
+                            "液体は重力があれば世界のどこでも流れる。{}.{} などを消す)",
+                            entry.package, category, category, key));
         }
 
     }  // namespace
@@ -276,12 +195,8 @@ namespace bicameral::script {
         if (auto result = ReadCategory(packages, WORLD_BODIES_CATEGORY, ReadBody, layout.bodies); !result)
             return std::unexpected(result.error());
 
-        if (auto result = ReadCategory(packages, GAS_REGIONS_CATEGORY, ReadGasRegion, layout.gasRegions); !result)
-            return std::unexpected(result.error());
-
-        if (auto result = ReadCategory(packages, LIQUID_REGIONS_CATEGORY, ReadLiquidRegion, layout.liquidRegions);
-            !result)
-            return std::unexpected(result.error());
+        NoteRetiredCategory(packages, GAS_REGIONS_CATEGORY, layout.retiredCategories);
+        NoteRetiredCategory(packages, LIQUID_REGIONS_CATEGORY, layout.retiredCategories);
 
         return layout;
     }

@@ -423,18 +423,18 @@ namespace {
         EXPECT(reloaded->FastestProjection());
     }
 
-    // 読み込みの警告(T-0804・D-526 ①): 最速を選んだ世界の組み立て(気体の区画 + 1/16 の空きの砂の壁)は名前付きで警告する。
+    // 読み込みの警告(T-0804・D-526 ①): 最速を選んだ世界の組み立て(気体は世界いっぱい〔D-510・T-0724〕+ 世界を二つに分ける 1/16 の空きの
+    // 砂の壁)は名前付きで警告する。
     // 音速の世界・壁の空きが 1/2 の世界は載らない
     void TestBakeWarnsInstant(const BakedReactionTable& table) {
         const auto bake = [&](GasPressureSpeed speed, uint64_t num, uint64_t den) {
             ReactionTableDefinition definition = MakeDefinition();
             definition.environment.gasPressureSpeed = speed;
-            definition.worldLayout.gasRegions.push_back({.name = "room", .minCell = GAS_MIN, .sizeCells = GAS_SIZE});
             definition.worldLayout.cellRegions.push_back(
                 {.name = "wall",
                  .wholeWorld = false,
-                 .minCell = {GAS_BARRIER_X + GAS_MIN[0], GAS_MIN[1], GAS_MIN[2]},
-                 .sizeCells = {1, GAS_SIZE[1], GAS_SIZE[2]},
+                 .minCell = {GAS_BARRIER_X + GAS_MIN[0], 0, 0},
+                 .sizeCells = {1, PROBE_GRID_SIZE, PROBE_GRID_SIZE},
                  .contents = {{.species = "grain", .micromoles = FillAmount(table, num, den)}},
                  .temperatureMilliKelvin = AIR_TEMPERATURE});
 
