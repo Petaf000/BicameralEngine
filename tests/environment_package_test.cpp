@@ -3,6 +3,7 @@
 //           分類が無い世界はブランク(全部 0)/ 環境だけのパッケージで別の重力・音速の基準を渡せる /
 //           知らない鍵・整数でない数・範囲の外(重力の上限・音速の基準の安定の上限)を、鍵と書いたパッケージの名前付きで落とす /
 //           ランタイムの入り口(LoadReactionTable)のベイクした表が環境を持ち、ブランクの表は 0、再生の作り直しでも同じ /
+//           気体の圧力の伝わる速さ gas_pressure_speed("sound" / "instant"。T-0804)の読み込みと誤り /
 //           ホットリロードの検査(CheckHotReloadCompatible)が、器の範囲の外の環境(コードで作った表)を理由付きで当てない(T-0444)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include "script/environment_package.h"
@@ -178,6 +179,32 @@ namespace {
         ExpectRejected("return { environment = { world_edges = \"open\" } }", "world_edges");
     }
 
+    // 気体の圧力の伝わる速さ(T-0804・D-526 ②): 書かない世界は本物の音速(D-519)・"sound" / "instant"・ほかの文字や数は名前付きで誤り。
+    // 最速がまだ効かない置き場の知らせは最速の世界だけ
+    void TestGasPressureSpeed() {
+        const auto blank = ReadEnvironmentInit("return { elements = {} }");
+        EXPECT(blank && blank->gasPressureSpeed == sim::GasPressureSpeed::Sound);
+
+        const auto sound = ReadEnvironmentInit("return { environment = { gas_pressure_speed = \"sound\" } }");
+        EXPECT(sound && sound->gasPressureSpeed == sim::GasPressureSpeed::Sound);
+        EXPECT(sound && *sound == sim::WorldPhysics{});  // 書かないのと同じ(表の値は全部同じ)
+
+        const auto instant = ReadEnvironmentInit("return { environment = { gas_pressure_speed = \"instant\" } }");
+        EXPECT(instant && instant->gasPressureSpeed == sim::GasPressureSpeed::Instant);
+
+        ExpectRejected("return { environment = { gas_pressure_speed = \"fast\" } }", "environment.gas_pressure_speed");
+        ExpectRejected("return { environment = { gas_pressure_speed = 0 } }", "\"sound\"(本物の音速)か \"instant\"");
+        ExpectRejected("return { environment = { gas_pressure_speed = { \"instant\" } } }", "gas_pressure_speed");
+
+        EXPECT(sim::GasInstantNotYetNotice(sim::WorldPhysics{}, "多重解像度の世界の気体").empty());
+        if (instant) {
+            const std::string notice = sim::GasInstantNotYetNotice(*instant, "多重解像度の世界の気体");
+            std::printf("notice: %s\n", notice.c_str());
+            EXPECT(notice.starts_with(sim::GAS_INSTANT_NOT_YET_PREFIX));
+            EXPECT(Contains(notice, "多重解像度の世界の気体"));
+        }
+    }
+
     // ベイクの知らせ(T-0710・土台の設計 §1.4): 液体を置いて重力 0 は警告・端が全部 wall で基準の大気が無いのは注意。
     // open があるのに基準の大気が無い(外は真空)のも注意(T-0772・ADR-0338)。セルを置かない世界(ブランク)は知らせない
     void TestWorldNotices() {
@@ -270,6 +297,7 @@ int main() {
     TestCustomEnvironment();
     TestRejectsBrokenEnvironment();
     TestWorldEdges();
+    TestGasPressureSpeed();
     TestWorldNotices();
     TestBakedTableCarriesEnvironment();
     TestHotReloadChecksEnvironment();

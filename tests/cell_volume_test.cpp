@@ -7,16 +7,20 @@
 //   2. 液体: 水の溜まりと空き地の間の砂の壁で同じ比べ方(満ちた壁は 0 µmol)。孔のある砂の床に水が染み込む。毎刻み 水の量と運動量が一定
 //   3. 燃えて固体が減る: 満ちた壁を途中で半分に減らす(反応が固体を使った時と同じくセルの成分が変わる)と、気体も水も渡り始める
 //   4. 液体が入ると空気が押し出される: 気体と液体の区画を重ね、上の水が下へ落ちると、下のセルの空気が上へ移る
+//   5. 最速を環境で選ぶ(T-0804): gas_pressure_speed = "instant" の表は C++ で最速を選んだのと同じ値・同じ警告。ベイクも警告する
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <span>
 #include <string>
 #include <vector>
 
+#include "core/aliases.h"
 #include "reaction_test_table.h"
 #include "sim/cell_volume.h"
+#include "sim/gas_fastest_layout.h"
 #include "sim/probe_gas.h"
 #include "sim/probe_liquid.h"
 #include "sim/probe_sim.h"
@@ -45,7 +49,7 @@ namespace {
     constexpr uint64_t OXYGEN = 1000000;
 
     // 試験の表 + 基準の大気(N2・O2)+ 水(液体)・砂(密度あり)・密度を書かない砂・石(密度あり)
-    BakedReactionTable MakeTable() {
+    ReactionTableDefinition MakeDefinition() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.environment = StandardWorldPhysics();
         definition.atmosphere = {
@@ -75,7 +79,11 @@ namespace {
         definition.species.push_back(solid("loose_grain", 0));
         definition.species.push_back(solid("stone", 2000));
 
-        auto baked = BakeReactionTable(definition);
+        return definition;
+    }
+
+    BakedReactionTable MakeTable() {
+        auto baked = BakeReactionTable(MakeDefinition());
         if (!baked) {
             std::printf("表を作れない: %s\n", baked.error().c_str());
             std::exit(1);
@@ -370,6 +378,87 @@ namespace {
             const ProbeGasStepReport quiet = explicitField->Step(table, explicitCells, tick, changed);
             EXPECT(quiet.smallOpenJoints == 0 && quiet.warnings.empty());
         }
+    }
+
+    // 環境で最速を選んだ世界(T-0804・D-526 ②。environment.gas_pressure_speed = "instant"): options が陽解法でも最速の投影で解き、
+    // C++ で最速の投影を選んだのとビット単位で同じ・同じ検査で警告。ホットリロードで最速に替わると、その刻みに警告する
+    void TestWorldChoosesInstant(const BakedReactionTable& table) {
+        BakedReactionTable instantTable = table;
+        instantTable.environment.gasPressureSpeed = GasPressureSpeed::Instant;
+        ProbeGasOptions fastestOptions = GasOptions(GAS_MIN, GAS_SIZE);
+        fastestOptions.pressure = ProbeGasPressure::Projection;
+        auto world = ProbeGasField::Create(instantTable, GasOptions(GAS_MIN, GAS_SIZE));
+        auto chosen = ProbeGasField::Create(table, fastestOptions);
+        auto reloaded = ProbeGasField::Create(table, GasOptions(GAS_MIN, GAS_SIZE));
+        EXPECT(world.has_value() && chosen.has_value() && reloaded.has_value());
+        if (!world || !chosen || !reloaded)
+            return;
+
+        EXPECT(world->FastestProjection() && !reloaded->FastestProjection());
+
+        std::vector<reaction::RxCell> cells = MakeGasWorld(table, *world, Barrier::Half);
+        FillBarrier(table, *world, cells, 15, 16);
+        std::vector<reaction::RxCell> chosenCells = cells;
+        std::vector<reaction::RxCell> reloadedCells = cells;
+        EXPECT(world->CheckFastestOpenings(instantTable, cells).size() == 1);
+
+        std::vector<uint32_t> changed;
+        for (uint64_t tick = 0; tick < 4; ++tick) {
+            const ProbeGasStepReport report = world->Step(instantTable, cells, tick, changed);
+            const ProbeGasStepReport same = chosen->Step(table, chosenCells, tick, changed);
+            EXPECT(report.warnings.size() == (tick == 0 ? 1u : 0u));
+            EXPECT(report.warnings == same.warnings);
+            EXPECT(report.projection.outerIterations == same.projection.outerIterations);
+
+            // 2 刻み目から表を最速に差し替える(その刻みに初めて警告する)
+            const ProbeGasStepReport swapped = reloaded->Step(tick < 2 ? table : instantTable, reloadedCells, tick,
+                                                              changed);
+            EXPECT(swapped.warnings.size() == (tick == 2 ? 1u : 0u));
+        }
+
+        EXPECT(world->Hash() == chosen->Hash());
+        EXPECT(rng::equal(cells, chosenCells, [](const reaction::RxCell& a, const reaction::RxCell& b) {
+            return HashReactionCell(a) == HashReactionCell(b);
+        }));
+        EXPECT(reloaded->FastestProjection());
+    }
+
+    // 読み込みの警告(T-0804・D-526 ①): 最速を選んだ世界の組み立て(気体の区画 + 1/16 の空きの砂の壁)は名前付きで警告する。
+    // 音速の世界・壁の空きが 1/2 の世界は載らない
+    void TestBakeWarnsInstant(const BakedReactionTable& table) {
+        const auto bake = [&](GasPressureSpeed speed, uint64_t num, uint64_t den) {
+            ReactionTableDefinition definition = MakeDefinition();
+            definition.environment.gasPressureSpeed = speed;
+            definition.worldLayout.gasRegions.push_back({.name = "room", .minCell = GAS_MIN, .sizeCells = GAS_SIZE});
+            definition.worldLayout.cellRegions.push_back(
+                {.name = "wall",
+                 .wholeWorld = false,
+                 .minCell = {GAS_BARRIER_X + GAS_MIN[0], GAS_MIN[1], GAS_MIN[2]},
+                 .sizeCells = {1, GAS_SIZE[1], GAS_SIZE[2]},
+                 .contents = {{.species = "grain", .micromoles = FillAmount(table, num, den)}},
+                 .temperatureMilliKelvin = AIR_TEMPERATURE});
+
+            return BakeReactionTable(definition);
+        };
+        const auto count = [](const std::expected<BakedReactionTable, std::string>& baked) {
+            if (!baked) {
+                std::printf("FAILED: ベイクできない: %s\n", baked.error().c_str());
+                return -1;
+            }
+
+            // 読み込み(LoadReactionTable)はベイクの後にこれを呼んで表の warnings に足す
+            const std::vector<std::string> warnings = CheckLayoutFastestOpenings(*baked);
+            for (const std::string& warning : warnings)
+                std::printf("bake: %s\n", warning.c_str());
+
+            return (int)rng::count_if(warnings, [](const std::string& warning) {
+                return warning.starts_with(GAS_FASTEST_SMALL_OPEN_WARNING_PREFIX);
+            });
+        };
+
+        EXPECT(count(bake(GasPressureSpeed::Instant, 15, 16)) == 1);
+        EXPECT(count(bake(GasPressureSpeed::Sound, 15, 16)) == 0);
+        EXPECT(count(bake(GasPressureSpeed::Instant, 1, 2)) == 0);
     }
 
     void TestGasThroughGrain(const BakedReactionTable& table) {
@@ -669,6 +758,8 @@ int main() {
     TestShare(table);
     TestGasThroughGrain(table);
     TestFastestSmallOpenings(table);
+    TestWorldChoosesInstant(table);
+    TestBakeWarnsInstant(table);
     TestLiquidThroughGrain(table);
     TestSoak(table);
     TestDisplacement(table);

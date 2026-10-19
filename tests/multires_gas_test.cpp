@@ -10,6 +10,7 @@
 //      エネルギーの欄の列)が変わらない(1〜4 の全部の場面で毎刻み)
 //   7. レベル(T-0765): 根のレベル 1(0.25 m)と −1(1 m)の世界でも静かな大気は動かない。レベル 1 とレベル 0 で同じ物理
 //      (音の波の先の位置・熱い泡の昇り方)
+//   8. 最速を選んだ世界(T-0804)は作った時に「最速はまだ効かない」と知らせる
 // 比べるもの: 全部のセル・運動量の欄・前の質量・運動エネルギーのぶんの和・帳簿(エネルギーと運動量。多重解像度は世界の帳簿の列)・刻みの報告。
 // 多重解像度の世界の上は WE_UP_AXIS(y。D-518)。仮の世界の格子(y が上)から NestPlace で写す(上が y なら恒等。z なら (x, z, y))。
 #include <algorithm>
@@ -665,6 +666,24 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+    // 最速を選んだ世界(T-0804・D-526 ②): 多重解像度の気体は陽解法だけなので、作った時に「まだ効かない」と知らせる(音速の世界は静か)
+    void TestInstantNotYet(const BakedReactionTable& table) {
+        BakedReactionTable instantTable = table;
+        instantTable.environment.gasPressureSpeed = GasPressureSpeed::Instant;
+        const std::unique_ptr<Worlds> sound = MakeWorlds(table, Scene::Quiet, false);
+        const std::unique_ptr<Worlds> instant = MakeWorlds(instantTable, Scene::Quiet, false);
+        EXPECT(sound->gas.Notices().empty());
+        EXPECT(instant->gas.Notices().size() == 1);
+        if (instant->gas.Notices().size() == 1) {
+            std::printf("notice: %s\n", instant->gas.Notices()[0].c_str());
+            EXPECT(instant->gas.Notices()[0].starts_with(GAS_INSTANT_NOT_YET_PREFIX));
+        }
+    }
+
+}  // namespace
+
 int main() {
     const BakedReactionTable table = MakeTable();
     TestScene(table, Scene::Quiet, false, 20, "静かな大気");
@@ -680,6 +699,7 @@ int main() {
     }
 
     TestLevelPhysics(table);
+    TestInstantNotYet(table);
 
     if (failureCount != 0) {
         std::printf("multires_gas_test: %d 件失敗\n", failureCount);

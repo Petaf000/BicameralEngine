@@ -170,6 +170,19 @@ namespace bicameral::script {
             return edges;
         }
 
+        // environment.gas_pressure_speed = "sound" か "instant"(T-0804・D-526 ②。docs/design/20 §1.1)
+        std::expected<sim::GasPressureSpeed, std::string> ReadPressureSpeed(const TableEntry& entry) {
+            if (entry.value.IsString() && entry.value.text == "sound")
+                return sim::GasPressureSpeed::Sound;
+
+            if (entry.value.IsString() && entry.value.text == "instant")
+                return sim::GasPressureSpeed::Instant;
+
+            return std::unexpected(std::format("パッケージ {}: {}.{}: \"sound\"(本物の音速)か \"instant\"(最速)で書く",
+                                               entry.package, ENVIRONMENT_CATEGORY,
+                                               ENVIRONMENT_GAS_PRESSURE_SPEED_KEY));
+        }
+
     }  // namespace
 
     std::expected<sim::WorldPhysics, std::string> ReadWorldEnvironment(const PackageSetResult& packages) {
@@ -207,6 +220,12 @@ namespace bicameral::script {
                     return std::unexpected(edges.error());
 
                 world.edges = *edges;
+            } else if (key == ENVIRONMENT_GAS_PRESSURE_SPEED_KEY) {
+                const auto speed = ReadPressureSpeed(entry);
+                if (!speed)
+                    return std::unexpected(speed.error());
+
+                world.gasPressureSpeed = *speed;
             } else if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY || key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY ||
                        key == ENVIRONMENT_ATMOSPHERE_PROFILE_KEY) {
                 continue;  // 基準の大気の値(ReadWorldAtmosphere が読む)

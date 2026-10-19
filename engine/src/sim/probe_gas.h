@@ -126,7 +126,8 @@ namespace bicameral::sim {
 
         [[nodiscard]] const ProbeGasOptions& Options() const { return m_options; }
 
-        // 最速の投影(音速 0)で解くか(最速 × 小さい空きの検査をするのはこのときだけ。T-0788)
+        // 最速の投影(音速 0)で解くか(最速 × 小さい空きの検査をするのはこのときだけ。T-0788)。
+        // 世界が最速を選んだ(環境の gas_pressure_speed = "instant"。T-0804・D-526 ②)か、options が音速 0 の投影
         [[nodiscard]] bool FastestProjection() const;
 
         // 置き方の検査(T-0788・D-519): 最速の投影なら、cells(格子の全部のセル)の区画のセルの空きを読み、小さい空きのセルだけで
@@ -134,6 +135,10 @@ namespace bicameral::sim {
         // 刻みの中は Step が空きの変わった刻みに同じ検査をし、新しく見つかった組を ProbeGasStepReport::warnings に入れる
         [[nodiscard]] std::vector<std::string> CheckFastestOpenings(const BakedReactionTable& table,
                                                                     std::span<const reaction::RxCell> cells) const;
+
+        // 区画のセル region(区画の中の並び)で同じ検査(最速でなくても検査する)
+        [[nodiscard]] std::vector<std::string> CheckRegionOpenings(const BakedReactionTable& table,
+                                                                   std::span<const reaction::RxCell> region) const;
         [[nodiscard]] const ProbeGasLedger& Ledger() const { return m_ledger; }
 
         // 区画のセル(区画の中の x + 幅 × (z + 奥行き × y)。気体の箱と同じ並び)の運動量と運動エネルギーのぶん
@@ -160,6 +165,8 @@ namespace bicameral::sim {
 
     private:
         ProbeGasOptions m_options;
+        bool m_worldInstant =
+            false;  // 表の環境が最速を選んだ(T-0804。刻みごとに表から読み直す = ホットリロードで替わる)
         GasAtmosphereLayers m_layers;               // 層ごとの基準の大気(区画の層 = 格子の y)
         GasCellFields m_fields;                     // 区画のセルの気体の欄(気体の箱の並び。軸は気体の箱の x・y・z)
         GasProjection m_projection;                 // 前の刻みの圧力(投影の初めの近似)
@@ -173,6 +180,7 @@ namespace bicameral::sim {
 
         [[nodiscard]] GasConfig MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const;
         [[nodiscard]] std::string JointWarning(const GasSmallOpenJoint& joint) const;
+        void SyncWorldPressure(const BakedReactionTable& table);
         void CheckOpeningsOnStep(const GasConfig& config, std::span<const uint32_t> openQ16,
                                  ProbeGasStepReport& report);
     };

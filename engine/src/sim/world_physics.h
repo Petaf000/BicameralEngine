@@ -17,6 +17,7 @@
 #include <expected>
 #include <format>
 #include <string>
+#include <string_view>
 
 #include "common/gas_flow.hlsli"
 #include "common/physics_solver.hlsli"
@@ -46,6 +47,17 @@ namespace bicameral::sim {
         [[nodiscard]] bool operator==(const WorldEdges&) const = default;
     };
 
+    // --- 気体の圧力の伝わる速さ(T-0804・D-526 ②・D-519。docs/design/20 §1.1。世界ごとに 1 つ)---
+
+    // 環境の gas_pressure_speed = "sound" / "instant"(名前は仮。Q131)。既定は本物の音速(D-519)
+    enum class GasPressureSpeed : uint8_t {
+        Sound = 0,    // 本物の音速(既定。陽解法の小刻み。今までと同じ)
+        Instant = 1,  // 最速(刻みの中で圧力を解く投影・音速 0。D-467)。今効くのは仮の世界の CPU(ProbeGasField)だけ
+    };
+
+    // 最速を選んだのに効かない置き場の知らせの頭(試験が使う)
+    inline constexpr std::string_view GAS_INSTANT_NOT_YET_PREFIX = "最速はまだ効かない: ";
+
     // --- 世界の物理の値 ---
     struct WorldPhysics {
         // 重力の強さ(µm/s²。0 = 無重力。上限 fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)。ブランクの世界は 0(D-480)
@@ -65,8 +77,24 @@ namespace bicameral::sim {
         // 凍結の多重解像度の気体の木(gas_tree)には無い(MakeGasTree が 0 を求める)
         uint32_t gasEddyViscosityMm2PerS = 0;
 
+        // 気体の圧力の伝わる速さ(T-0804・D-526 ②)。Instant は仮の世界の CPU の気体(ProbeGasField)を最速の投影で解き、
+        // 小さい空きの層を警告する(ベイク・実行時。D-526 ①)。多重解像度と GPU の気体は陽解法だけなので本物の音速のまま流し、知らせる
+        GasPressureSpeed gasPressureSpeed = GasPressureSpeed::Sound;
+
         [[nodiscard]] bool operator==(const WorldPhysics&) const = default;
     };
+
+    // 最速を選んだ世界で、最速がまだ効かない置き場 where(「多重解像度の世界の気体」など)の知らせ(音速の世界は空)。
+    // 値は本物の音速(陽解法)のまま流す(黙って無視しない。D-487 ②)
+    [[nodiscard]] inline std::string GasInstantNotYetNotice(const WorldPhysics& world, std::string_view where) {
+        if (world.gasPressureSpeed != GasPressureSpeed::Instant)
+            return {};
+
+        return std::format(
+            "{}{}は陽解法だけ(投影は T-0621・T-0531)。environment.gas_pressure_speed = \"instant\" は"
+            "効かず、本物の音速で流す",
+            GAS_INSTANT_NOT_YET_PREFIX, where);
+    }
 
     // --- 器が受けられる値か(T-0444)---
 

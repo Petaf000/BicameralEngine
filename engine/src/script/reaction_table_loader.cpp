@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <iterator>
 #include <utility>
 
 #include "core/paths.h"
@@ -11,6 +12,7 @@
 #include "script/luau_type_check.h"
 #include "script/reaction_package.h"
 #include "script/standard_packages.h"
+#include "sim/gas_fastest_layout.h"
 
 namespace bicameral::script {
 
@@ -91,6 +93,16 @@ namespace bicameral::script {
             return packages;
         }
 
+        // ベイク + 置いた世界の読み込みの検査(最速 × 小さい空き。T-0804・D-526 ①。仮の世界の刻みの中と同じ関数で、警告は表の warnings へ)
+        std::expected<sim::BakedReactionTable, std::string> BakeWithLayoutChecks(
+            const sim::ReactionTableDefinition& definition) {
+            auto baked = sim::BakeReactionTable(definition);
+            if (baked)
+                std::ranges::move(sim::CheckLayoutFastestOpenings(*baked), std::back_inserter(baked->warnings));
+
+            return baked;
+        }
+
     }  // namespace
 
     fs::path DefaultPackageRoot() {
@@ -122,7 +134,7 @@ namespace bicameral::script {
         if (!definition)
             return std::unexpected(std::format("{}: {}", where, definition.error()));
 
-        auto baked = sim::BakeReactionTable(*definition);
+        auto baked = BakeWithLayoutChecks(*definition);
         if (!baked)
             return std::unexpected(std::format("{}: ベイクの検査で落ちた: {}", where, baked.error()));
 
@@ -171,7 +183,7 @@ namespace bicameral::script {
         if (!definition)
             return std::unexpected(std::format("{}: {}", where, definition.error()));
 
-        auto baked = sim::BakeReactionTable(*definition);
+        auto baked = BakeWithLayoutChecks(*definition);
         if (!baked)
             return std::unexpected(std::format("{}: ベイクの検査で落ちた: {}", where, baked.error()));
 

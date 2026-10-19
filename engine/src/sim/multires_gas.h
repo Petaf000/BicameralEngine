@@ -73,6 +73,9 @@ namespace bicameral::sim {
 
         [[nodiscard]] const MultiresGasFields& Fields() const { return m_fields; }
 
+        // 作った時の作り手への知らせ(T-0804: 最速を選んだ世界の「まだ効かない」。GAS_INSTANT_NOT_YET_PREFIX。無ければ空。ログにも出す)
+        [[nodiscard]] const std::vector<std::string>& Notices() const { return m_notices; }
+
         // 1 刻みの小刻みの数(options.substeps × 2^σ。σ = max(0, 根のレベル))
         [[nodiscard]] uint32_t Substeps() const { return m_substeps; }
 
@@ -93,6 +96,7 @@ namespace bicameral::sim {
         MultiresGasOptions m_options;
         MultiresGasFields m_fields;
         uint32_t m_substeps = 0;
+        std::vector<std::string> m_notices;
     };
 
 }  // namespace bicameral::sim

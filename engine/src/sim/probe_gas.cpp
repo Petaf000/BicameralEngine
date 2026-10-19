@@ -12,43 +12,11 @@
 #include "core/aliases.h"
 #include "sim/cell_volume.h"
 #include "sim/gas_cells.h"
+#include "sim/gas_fastest_layout.h"
 #include "sim/world_atmosphere.h"
 #include "sim/world_physics.h"
 
 namespace bicameral::sim {
-
-    namespace {
-
-        static_assert(CELL_OPEN_FULL == GAS_OPEN_FULL);
-
-        // 区画のセルの気体の空き(Q16。固体と液体が占めない体積の割合。T-0593・ADR-0268)。全部のセルが全部なら空(今まで通り)
-        std::vector<uint32_t> CollectGasOpen(const BakedReactionTable& table, std::span<const reaction::RxCell> cells,
-                                             ProbeGasStepReport& report) {
-            std::vector<uint32_t> open(cells.size(), CELL_OPEN_FULL);
-            bool partial = false;
-            for (uint32_t region = 0; region < cells.size(); ++region) {
-                const CellVolumeShare share = ShareCellVolume(table, cells[region]);
-                open[region] = GasOpenQ16(share, PROBE_CELL_VOLUME_PICOLITERS);
-                if (open[region] == CELL_OPEN_FULL)
-                    continue;
-
-                partial = true;
-                if (open[region] == 0)
-                    ++report.blockedCells;
-                else
-                    ++report.partialCells;
-            }
-
-            if (!partial)
-                open.clear();
-
-            return open;
-        }
-
-        // 気体の箱の軸(x・y・z = 上)→ 格子の軸(x・z・y)
-        constexpr std::array<uint32_t, GAS_AXES> GRID_AXIS_OF_GAS_AXIS = {0, 2, 1};
-
-    }  // namespace
 
     std::expected<ProbeGasField, std::string> ProbeGasField::Create(const BakedReactionTable& table,
                                                                     const ProbeGasOptions& options) {
@@ -73,6 +41,7 @@ namespace bicameral::sim {
 
         ProbeGasField field;
         field.m_options = options;
+        field.m_worldInstant = table.environment.gasPressureSpeed == GasPressureSpeed::Instant;
 
         // --- 層ごとの基準の大気(区画の層 = 格子の y。高さ = 床 + y × 0.5 m)---
         const int64_t bottom = options.floorHeightMillimeters +
@@ -100,7 +69,7 @@ namespace bicameral::sim {
     GasConfig ProbeGasField::MakeConfig(const BakedReactionTable& table, std::span<const uint32_t> slots) const {
         std::array<GasBoundary, GAS_AXES> boundary = {};
         for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
-            boundary[axis] = m_options.boundary[GRID_AXIS_OF_GAS_AXIS[axis]];
+            boundary[axis] = m_options.boundary[PROBE_GRID_AXIS_OF_GAS_AXIS[axis]];
 
         // 投影は使わない(projection.pressure.substeps)。係数の安定の検査のために陽解法の値
         return m_layers.MakeConfig(table, slots,
@@ -111,21 +80,23 @@ namespace bicameral::sim {
     // --- 最速 × 小さい空き(T-0788・D-519・ADR-0346。sim/gas_fastest_check)---
 
     bool ProbeGasField::FastestProjection() const {
-        return m_options.pressure == ProbeGasPressure::Projection &&
-               m_options.projection.pressure.soundSpeedMmPerS == 0;
+        return m_worldInstant || (m_options.pressure == ProbeGasPressure::Projection &&
+                                  m_options.projection.pressure.soundSpeedMmPerS == 0);
+    }
+
+    // 表の環境の圧力の伝わる速さを読み直す(T-0804。ホットリロードで替わったら、小さい空きの検査を初めからやり直す)
+    void ProbeGasField::SyncWorldPressure(const BakedReactionTable& table) {
+        const bool instant = table.environment.gasPressureSpeed == GasPressureSpeed::Instant;
+        if (instant == m_worldInstant)
+            return;
+
+        m_worldInstant = instant;
+        m_openingsChecked = false;
+        m_joints.clear();
     }
 
     std::string ProbeGasField::JointWarning(const GasSmallOpenJoint& joint) const {
-        // 気体の箱の座標(x・y・z が上)→ 格子の座標(x・y が上・z)
-        const auto grid = [&](const std::array<uint32_t, GAS_AXES>& at, uint32_t gridAxis) {
-            const uint32_t gasAxis = GRID_AXIS_OF_GAS_AXIS[gridAxis];
-            return m_options.minCell[gridAxis] + at[gasAxis];
-        };
-        const std::string range = std::format("格子の x {}〜{}・y {}〜{}・z {}〜{}", grid(joint.minCell, 0),
-                                              grid(joint.maxCell, 0), grid(joint.minCell, 1), grid(joint.maxCell, 1),
-                                              grid(joint.minCell, 2), grid(joint.maxCell, 2));
-
-        return GasSmallOpenJointWarning(joint, "気体の区画", range);
+        return ProbeRegionJointWarning(joint, m_options.minCell);
     }
 
     std::vector<std::string> ProbeGasField::CheckFastestOpenings(const BakedReactionTable& table,
@@ -137,8 +108,13 @@ namespace bicameral::sim {
         for (uint32_t index = 0; index < RegionCellCount(); ++index)
             region[index] = cells[GridIndex(index)];
 
-        ProbeGasStepReport counts;
-        const std::vector<uint32_t> open = CollectGasOpen(table, region, counts);
+        return CheckRegionOpenings(table, region);
+    }
+
+    std::vector<std::string> ProbeGasField::CheckRegionOpenings(const BakedReactionTable& table,
+                                                                std::span<const reaction::RxCell> region) const {
+        GasOpenCounts counts;
+        const std::vector<uint32_t> open = CollectProbeGasOpen(table, region, counts);
         const GasConfig config = MakeConfig(table, m_layers.Species());
         std::vector<std::string> warnings;
         for (const GasSmallOpenJoint& joint : FindGasSmallOpenJoints(config, open))
@@ -197,6 +173,7 @@ namespace bicameral::sim {
     ProbeGasStepReport ProbeGasField::Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells,
                                            uint64_t tick, std::vector<uint32_t>& changed) {
         ProbeGasStepReport report;
+        SyncWorldPressure(table);
         std::vector<reaction::RxCell> region(RegionCellCount());
         for (uint32_t index = 0; index < RegionCellCount(); ++index)
             region[index] = cells[GridIndex(index)];
@@ -213,17 +190,25 @@ namespace bicameral::sim {
         const GasConfig config = MakeConfig(table, step.slots);
         step.box = MakeGasBox(config, m_layers.MakeReference(config, step.slots));
         step.box.tick = tick;
-        step.box.openQ16 = CollectGasOpen(table, region, report);
+        GasOpenCounts counts;
+        step.box.openQ16 = CollectProbeGasOpen(table, region, counts);
+        report.blockedCells = counts.blockedCells;
+        report.partialCells = counts.partialCells;
         if (FastestProjection())
             CheckOpeningsOnStep(config, step.box.openQ16, report);
         LoadGasCells(table, region, m_fields, step);
 
         // --- 1 刻み(圧力の解き方を選ぶ)---
         const GasProjection projectionBefore = m_projection;
-        if (m_options.pressure == ProbeGasPressure::Explicit)
+        // 世界が最速を選んだら(T-0804)、options の投影の設定のまま音速だけ 0 にして解く
+        GasProjectionOptions projection = m_options.projection;
+        if (m_worldInstant)
+            projection.pressure.soundSpeedMmPerS = 0;
+
+        if (!m_worldInstant && m_options.pressure == ProbeGasPressure::Explicit)
             StepGas(step.box);
         else
-            report.projection = StepGasProjection(step.box, m_projection, m_options.projection);
+            report.projection = StepGasProjection(step.box, m_projection, projection);
 
         // --- 静止の丸め(当てる段の後)→ 気体の箱 → 区画のセル・欄・帳簿(帳簿は格子の軸)---
         GasCellsLedger ledger{.amounts = std::vector<int64_t>(m_ledger.amounts.size(), 0)};
@@ -240,8 +225,8 @@ namespace bicameral::sim {
 
         m_ledger.energy += ledger.energy;
         for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
-            m_ledger.momentum[GRID_AXIS_OF_GAS_AXIS[axis]] += ledger.momentum[axis];
-            m_ledger.restMomentum[GRID_AXIS_OF_GAS_AXIS[axis]] += ledger.restMomentum[axis];
+            m_ledger.momentum[PROBE_GRID_AXIS_OF_GAS_AXIS[axis]] += ledger.momentum[axis];
+            m_ledger.restMomentum[PROBE_GRID_AXIS_OF_GAS_AXIS[axis]] += ledger.restMomentum[axis];
         }
 
         m_ledger.restEnergy += ledger.restEnergy;

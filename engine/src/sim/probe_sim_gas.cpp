@@ -19,6 +19,7 @@
 #include "sim/gas_cells.h"
 #include "sim/gpu_gas_internal.h"
 #include "sim/probe_sim.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
 
@@ -140,6 +141,11 @@ namespace bicameral::sim {
 
         if (options.pressure != ProbeGasPressure::Explicit)
             return std::unexpected("GPU の気体の区画は陽解法だけ(投影は T-0621)");
+
+        // 世界が最速を選んだ(T-0804・D-526 ②): GPU の気体は陽解法だけなので本物の音速で流し、作り手へ知らせる(黙って無視しない)
+        if (const std::string notice = GasInstantNotYetNotice(table.environment, "GPU の仮の世界の気体");
+            !notice.empty())
+            Log(Channel::Sim, Level::Warning, "{}", notice);
 
         // 気体の粘り(T-0758・D-516)があれば刻みの終わりに粘りの段を投げる(T-0775)。区画の物質は刻みごとに変わるので、
         // 表の気体の物質の全部を見る(粘りの無い物質しか区画に無い刻みも投げる。値は粘りの段を飛ばした時と同じ)

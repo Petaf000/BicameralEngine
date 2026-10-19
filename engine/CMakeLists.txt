@@ -91,6 +91,8 @@ target_link_libraries(bicameral_gas PUBLIC bicameral_fixed)
 add_library(bicameral_gas_projection STATIC
   src/sim/gas_projection.cpp
   src/sim/gas_fastest_check.cpp
+  src/sim/gas_fastest_layout.cpp  # 最速 × 小さい空きを仮の世界の区画・置いた世界で検査(読み込みから呼ぶ。T-0804)
+  src/sim/cell_volume.cpp  # 1 セルの体積を相で分け合う(固体・液体・気体の空き。T-0593・T-0612。読み込みの検査も使うのでここ)
 )
 target_include_directories(bicameral_gas_projection PUBLIC src)
 target_link_libraries(bicameral_gas_projection PUBLIC bicameral_gas bicameral_multires)
@@ -118,7 +120,6 @@ add_library(bicameral_sim STATIC
   src/sim/lab_comparison.cpp
   src/sim/lab_session.cpp
   src/sim/probe_peek.cpp
-  src/sim/cell_volume.cpp  # 1 セルの体積を相で分け合う(固体・液体・気体の空き。T-0593・T-0612)
   src/sim/gas_cells.cpp  # 世界のセルと気体の箱の間の写し(仮の世界と多重解像度の世界が共有。T-0720)
   src/sim/probe_gas.cpp  # 仮の世界に気体の流れを載せる CPU リファレンス(T-0590)
   src/sim/probe_liquid.cpp  # 仮の世界に液体の流れを載せる CPU リファレンス(T-0609)
@@ -182,7 +183,8 @@ add_library(bicameral_reaction_script STATIC
   src/script/standard_packages.cpp  # 標準パッケージの棚と、環境ミキサーで足す一覧(T-0373・ADR-0183)
 )
 target_include_directories(bicameral_reaction_script PUBLIC src)
-target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction)
+# 読み込みの検査(最速 × 小さい空き。T-0804)が gas_projection の検査を呼ぶ
+target_link_libraries(bicameral_reaction_script PUBLIC bicameral_script bicameral_reaction bicameral_gas_projection)
 
 # --- frame: フレームの歩調の計算(GPU を知らない。CPU だけのテストがある)---
 add_library(bicameral_frame STATIC

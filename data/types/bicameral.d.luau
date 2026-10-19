@@ -152,6 +152,10 @@ export type Environment = {
     atmosphere_profile: { any }?,
     atmosphere_temperature_mk: number?, -- 一様な大気の温度(mK。T-0373 の書き方。分類 atmosphere と一緒に。atmosphere_profile とは書けない)
     world_edges: WorldEdges?, -- 世界の端(T-0710・土台の決定 5。外との境は世界の端だけ。書かない面は wall)
+    -- 気体の圧力の伝わる速さ(T-0804・D-526。世界ごとに 1 つ。名前は仮): "sound"(本物の音速。書かない時。D-519)か "instant"(最速)。
+    -- 最速は爆風の先端が見えず、結果がその刻みに出る。小さい空き(1/2 未満)のセルだけでつながった気体はベイクと実行時に警告する。
+    -- 今効くのは仮の世界の CPU だけ(多重解像度・GPU の気体は本物の音速のまま流し、「まだ効かない」と知らせる)
+    gas_pressure_speed: string?,
 }
 
 -- 世界の端の面: "open"(外は基準の大気。流れが出入りする)か "wall"(閉じた壁。既定)

@@ -12,8 +12,10 @@
 #include "common/fixed.hlsli"
 #include "common/world_ledger.hlsli"
 #include "core/aliases.h"
+#include "core/log.h"
 #include "sim/cell_view.h"
 #include "sim/multires_fields.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
 
@@ -400,6 +402,12 @@ namespace bicameral::sim {
         MultiresGas result;
         result.m_options = options;
         result.m_substeps = substeps;
+
+        // 世界が最速を選んだ(T-0804・D-526 ②): 多重解像度の気体は陽解法だけなので本物の音速で流し、作り手へ知らせる
+        if (std::string notice = GasInstantNotYetNotice(table.environment, "多重解像度の世界の気体"); !notice.empty()) {
+            Log(Channel::Sim, Level::Warning, "{}", notice);
+            result.m_notices.push_back(std::move(notice));
+        }
 
         // --- 欄(運動量・運動のエネルギーは保存量 = 世界の帳簿に列がある。前の質量は合わせ直しの元。T-0763)---
         constexpr uint32_t conserved = sf::SF_FLAG_CONSERVED | sf::SF_FLAG_HASHED;
