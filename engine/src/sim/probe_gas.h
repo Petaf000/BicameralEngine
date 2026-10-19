@@ -78,6 +78,10 @@ namespace bicameral::sim {
         // そのセルの熱へ移す(エネルギーの和は変わらない)。消した運動量は帳簿へ(世界の帳簿の列「静止の丸め」WL_REASON_REST_ROUNDING)
         uint32_t restSpeedUnits = 0;
 
+        // 陽解法の安全網の熱の列(GasBox::limitMovedHeat。T-0787・ADR-0355。既定で入れる)。false は GPU の区画(まだ列が無い。T-0813)と
+        // 比べる試験だけ(gpu_probe_gas_test)。T-0813 で GPU に入ったら外す
+        bool limitMovedHeat = true;
+
         [[nodiscard]] bool Enabled() const { return sizeCells[0] != 0 && sizeCells[1] != 0 && sizeCells[2] != 0; }
     };
 
@@ -97,8 +101,10 @@ namespace bicameral::sim {
         uint32_t gasSpecies = 0;  // 区画の気体の物質の数
         // 流すと 1 セルの成分がインラインの数(RX_MAX_CELL_SPECIES)を超えるので流さなかった(何も変えない。溢れのセルは R-MULTI-4)
         bool skippedCellOverflow = false;
-        uint32_t changedCells = 0;     // 値が変わったセルの数
-        uint32_t restedCells = 0;      // 静止の丸めで止めたセルの数(T-0723)
+        uint32_t changedCells = 0;  // 値が変わったセルの数
+        uint32_t restedCells = 0;   // 静止の丸めで止めたセルの数(T-0723)
+        // 当てる段の上限の熱の列で縮めた面の数(陽解法の小刻みの合計。T-0787・ADR-0355。ふつうは 0。強い爆発の目安 = 開発の計器の警告)
+        uint64_t energyLimitedFaces = 0;
         GasProjectionCost projection;  // 投影の費用(投影のときだけ)
 
         // --- セルの空き(固体と液体が占めない体積。T-0593・ADR-0268)---

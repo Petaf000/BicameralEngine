@@ -126,9 +126,14 @@ namespace {
         return std::move(*baked);
     }
 
-    // restSpeedUnits = 静止の丸め(2^-20 m/s。0 = 切る。T-0775)
+    // restSpeedUnits = 静止の丸め(2^-20 m/s。0 = 切る。T-0775)。熱の列(T-0787・ADR-0355)は CPU の比べの側だけ切る:
+    // GPU の区画にはまだ列が無く(T-0813)、燃える木箱(約 440 気圧の爆発)では列が縮めるので、入れたままでは刻み 2 から一致しない(仮。T-0813 で外す)
     ProbeGasOptions MakeOptions(uint32_t restSpeedUnits = 0) {
-        return {.minCell = REGION_MIN, .sizeCells = REGION_SIZE, .randomSeed = 12345, .restSpeedUnits = restSpeedUnits};
+        return {.minCell = REGION_MIN,
+                .sizeCells = REGION_SIZE,
+                .randomSeed = 12345,
+                .restSpeedUnits = restSpeedUnits,
+                .limitMovedHeat = false};
     }
 
     bool InWood(uint32_t x, uint32_t y, uint32_t z) {

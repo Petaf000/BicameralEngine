@@ -310,6 +310,27 @@ namespace bicameral::sim {
         std::array<int64_t, GAS_AXES> momentum = {};
     };
 
+    // 調べの口(T-0787 の研究。試験だけが付ける。GasBox::heatProbe が null なら何もしない): 陽解法の小刻みの中で熱が負になったセルを、
+    // どこで負になったかで数える
+    struct GasHeatProbe {
+        uint64_t substeps = 0;
+        uint64_t impulseCells = 0;    // 力(圧力の力積・重さ)を当てた後の熱が負(力積の側)
+        uint64_t outflowCells = 0;    // 力の後は正で、出ていく塊を引いただけで負(運ぶ側: 風上で中身を超えて持ち出す)
+        uint64_t otherCells = 0;      // 引く・足すの全部の後で初めて負
+        uint64_t transientCells = 0;  // 途中(力の後か引いた後)だけ負で、小刻みの終わりには正に戻ったセル
+        // 調べ(案 2): 押し出す仕事 n R T の温度。0 = 小刻みの初めの温度(既定)・1 = 初めと終わりの平均(台形)・2 = 終わりの温度。
+        // 終わり = 出ていく側だけ引いた後の風上の温度(出ていく面の全部で同じ倍率。式を閉じた形で解く)
+        uint32_t pushForm = 0;
+        std::vector<int64_t> pushNumerator;  // セルごとの倍率 = 分子 ÷ 分母(小刻みの中だけ使う)
+        std::vector<int64_t> pushDenominator;
+        // 上の 3 つは小刻みの終わりに熱が負のセルだけ(最初に負になった所で分ける。worst は終わりの熱)
+        uint64_t coolerAfterForce =
+            0;  // 運ぶ側のうち、力の後の温度が小刻みの初めより低いセル(初めの温度で押し出す仕事を数える分)
+        int64_t worstImpulse = 0;  // 最も負の熱(µJ)
+        int64_t worstOutflow = 0;
+        int64_t worstOther = 0;
+    };
+
     struct GasBox {
         // --- 設定と基準 ---
         GasConfig config;
@@ -322,6 +343,14 @@ namespace bicameral::sim {
         std::vector<GasCell> cells;  // x が最も速く回る(x + sizeX × (y + sizeY × z))
         GasLedger ledger;
         uint64_t tick = 0;
+        GasHeatProbe* heatProbe = nullptr;  // 調べの口(T-0787。試験だけ)
+        // 当てる段の上限の熱の列(T-0787・ADR-0355。風上が熱より多くの熱を持ち出さない。陽解法の小刻み)で縮めた面の数
+        // (作ってからの合計。ふつうの場面では 0。強い爆発の目安で、刻みの報告と開発の計器の警告へ)
+        uint64_t energyLimitedFaces = 0;
+        // 熱の列を入れるか(T-0787・ADR-0355。既定で入れる)。ふつうの煙・風・5 倍の爆発・衝撃波の管では縮めない(値は入れない時とビット単位で同じ)。
+        // 燃える木箱の試験(セルロース 50 mol が 1 刻みで約 2600 K・約 440 気圧の湯気になる = 40 倍の試験より強い爆発)では縮める
+        // (入れないと小刻みの終わりに熱が負のセルが出ていた。T-0787 の測り)。false は GPU の段に列が入るまでの比べだけ(T-0813)
+        bool limitMovedHeat = true;
 
         // セルの空き(気体が使える体積の割合。Q16。GAS_OPEN_FULL = セルの全部。T-0593・ADR-0268)。空 = 全部のセルが全部(今まで通り。
         // ビット単位で同じ)。圧力は空きの体積で読み(p = nRT ÷ 空きの体積)、面は両側の空きの小さい方だけ開く(残りは壁として押し返し、

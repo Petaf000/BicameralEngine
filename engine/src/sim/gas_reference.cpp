@@ -367,6 +367,34 @@ namespace bicameral::sim {
                                       CellMass(box.config, box.coefficients, moved));
         }
 
+        // 押し出す仕事 n R T(µJ。GfMovedEnergy と同じ式。温度は風上の小刻みの初め)
+        int64_t PushWork(const GasConfig& config, const GasDerived& sourceDerived, const GasCell& moved) {
+            if (config.thermodynamics != GasThermodynamics::Adiabatic)
+                return 0;
+
+            const fx::FxU128 amountTemperature = fx::FxMulU64Full(CellTotals(config, nullptr, moved).amount,
+                                                                  sourceDerived.temperature);
+            return (int64_t)MulShiftU64(amountTemperature.lo, gas::GF_PRESSURE_PER_AMOUNT_TEMPERATURE_Q32, 35);
+        }
+
+        // 調べ(T-0787 の案 2): 押し出す仕事を風上のセルの倍率(分子 ÷ 分母)で数え直した塊のエネルギー
+        int64_t ScaledPushEnergy(const GasBox& box, const GasHeatProbe& probe, const GasDerived& sourceDerived,
+                                 uint32_t donor, const GasCell& moved, int64_t energy) {
+            const int64_t push = PushWork(box.config, sourceDerived, moved);
+            const int64_t numerator = probe.pushNumerator[donor];
+            const int64_t denominator = probe.pushDenominator[donor];
+            if (push == 0 || denominator <= 0)
+                return energy;
+
+            if (numerator <= 0)
+                return energy - push;
+
+            const fx::FxDivResult scaled = fx::FxDivU128By64(fx::FxMulU64Full((uint64_t)push, (uint64_t)numerator),
+                                                             (uint64_t)denominator);
+            const auto kept = (int64_t)(scaled.quotient + (scaled.remainder * 2 >= (uint64_t)denominator ? 1 : 0));
+            return energy - push + kept;
+        }
+
         // --- 当てる段の世界(運ぶ計算の共通の土台 common/transport_apply.hlsli。T-0765・ADR-0345)---
         // 枠 = 側の種類(セル・開いた境界の外)・番号 = セルの番号(外は層)。上限はセルごとの倍率(外は無限の溜め = 縮めない)、
         // 包みは次の値(next)へ当て、外の側は帳簿の「世界の端」へ(外から入った量が正)
@@ -381,6 +409,7 @@ namespace bicameral::sim {
             GasLedger* ledger = nullptr;
             std::vector<GasCell>* next = nullptr;
             const std::vector<multires::TxLimit>* limits = nullptr;
+            bool outgoingOnly = false;  // 調べの口(T-0787): 上流から引く分だけ当てる
 
             [[nodiscard]] multires::TxLimit Limit(uint32_t slot, uint32_t index) const {
                 return slot == APPLY_CELL ? (*limits)[index] : multires::TxNoLimit();
@@ -388,6 +417,9 @@ namespace bicameral::sim {
 
             // 包みを引く(incoming = 0。上流)・足す(1。下流)。包みの物質は箱の欄の番号・運ぶ欄 0〜2 は運動量
             void AddPacket(uint32_t slot, uint32_t index, const multires::TxPacket& packet, uint32_t incoming) const {
+                if (outgoingOnly && (incoming != 0 || slot != APPLY_CELL))
+                    return;
+
                 const int64_t sign = incoming != 0 ? 1 : -1;
                 if (slot == APPLY_CELL) {
                     GasCell& cell = (*next)[index];
@@ -419,7 +451,7 @@ namespace bicameral::sim {
             // 重さの仕事 work(mJ。上へ動いた塊が失う分)を下流の側で引き、帳簿の「重さの仕事」へ。下流が外なら、外が受ける量が減る
             // (= 世界の端の出が減る)。気体の種類だけが持つ当て方(位置のエネルギーを数えない)
             void AddGravityWork(uint32_t slot, uint32_t index, int64_t work) const {
-                if (work == 0)
+                if (work == 0 || outgoingOnly)
                     return;
 
                 ledger->energy -= work;
@@ -452,8 +484,11 @@ namespace bicameral::sim {
             for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
                 moved.momentum[axis] = gas::GfMovedMomentum(source.momentum[axis], face.fraction);
 
-            const int64_t energy = MovedEnergy(box.config, source, SideDerived(box, derived, donor), moved,
-                                               face.fraction);
+            int64_t energy = MovedEnergy(box.config, source, SideDerived(box, derived, donor), moved, face.fraction);
+            if (box.heatProbe != nullptr && box.heatProbe->pushForm != 0 && donor.kind == SideKind::Cell)
+                energy = ScaledPushEnergy(box, *box.heatProbe, SideDerived(box, derived, donor), donor.index, moved,
+                                          energy);
+
             const int64_t sent = DivideNearest(energy, 1000);
             const int64_t received = DivideNearest(energy - GravityWork(box, face, moved), 1000);
 
@@ -675,6 +710,154 @@ namespace bicameral::sim {
             return derived;
         }
 
+        // セルの熱(µJ)= エネルギー − 化学 − 運動
+        int64_t CellHeat(const GasBox& box, const GasCell& cell) {
+            const uint64_t mass = CellMass(box.config, box.coefficients, cell);
+            return (cell.energy * 1000) - ChemicalEnergy(box.config, cell) - KineticEnergy(box.config, cell, mass);
+        }
+
+        // --- 当てる段の上限の熱の列(T-0787・ADR-0355。D-508 の安全網。設計 20 §2.4 ②「量・エネルギー〔押し出す仕事込み〕の列ごとの最小」)---
+        // 風上のセルは、自分の熱(力を当てた後)− 余裕より多くの熱を塊で持ち出せない(式は gas_flow.hlsli の GfMovedHeatPart・GfHeatRoom。
+        // 塊のエネルギーは Transfer と同じ MovedEnergy)。超えるセルは出ていく面の割合と成分の量を同じ倍率で縮める(当てる段の TxMakeLimit・
+        // TxFaceScale・TxScaleAmount。入る側は縮めない)。物質の量の上限(LimitOutflow・LimitMovedAmounts)の後に掛ける。
+        // 根(T-0787 の測り): 強い爆発の 1 小刻みの終わりに熱が負のセルは、押し出す仕事を小刻みの初めの温度で数えて自分の熱より多く持ち出していた。
+        // 空気の箱の 5 倍・1500 K では届かない。燃える木箱の試験(約 440 気圧の爆発)では力の後の熱が一時負のセルの出ていく面を 0 に縮める。
+        // 断熱のときだけ。縮めた面の数を返す
+        uint32_t LimitMovedEnergy(const GasBox& box, const std::vector<GasCell>& forced,
+                                  const std::vector<GasDerived>& derived, std::vector<GasFace>& faces) {
+            if (box.config.thermodynamics != GasThermodynamics::Adiabatic)
+                return 0;
+
+            const auto count = (uint32_t)box.cells.size();
+            std::vector<uint64_t> outgoing(count, 0);
+            for (const GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const GasCell& source = forced[donor.index];
+                const GasDerived& sourceDerived = derived[donor.index];
+                GasCell moved;
+                moved.amounts = face.moved;
+                const int64_t energy = MovedEnergy(box.config, source, sourceDerived, moved, face.fraction);
+                outgoing[donor.index] += gas::GfMovedHeatPart(energy, ChemicalEnergy(box.config, moved),
+                                                              KineticEnergy(box.config, source, sourceDerived.mass),
+                                                              face.fraction);
+            }
+
+            std::vector<multires::TxLimit> limits(count, multires::TxNoLimit());
+            bool any = false;
+            for (uint32_t index = 0; index < count; ++index) {
+                if (outgoing[index] == 0)
+                    continue;
+
+                limits[index] = multires::TxMakeLimit(gas::GfHeatRoom(CellHeat(box, forced[index])), outgoing[index],
+                                                      multires::TX_ROOM_UNLIMITED, 0);
+                any = any || !multires::TxScaleIsOne(limits[index].outScale);
+            }
+
+            if (!any)
+                return 0;
+
+            uint32_t limited = 0;
+            for (GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const multires::TxScale scale = multires::TxFaceScale(limits[donor.index], multires::TxNoLimit());
+                if (multires::TxScaleIsOne(scale))
+                    continue;
+
+                face.fraction = multires::TxScaleAmount(face.fraction, scale);
+                for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+                    face.moved[s] = multires::TxScaleAmount(face.moved[s], scale);
+
+                ++limited;
+            }
+
+            return limited;
+        }
+
+        // 調べの口(T-0787): 熱が負になったセルをどこで負になったかで数える
+        void ProbeHeat(GasBox& box, const std::vector<GasDerived>& derived, const std::vector<GasCell>& forced,
+                       const std::vector<GasFace>& faces, const std::vector<GasCell>& next) {
+            GasHeatProbe& probe = *box.heatProbe;
+            ++probe.substeps;
+            std::vector<GasCell> outOnly = forced;
+            GasLedger unused;
+            const GasApplyWorld world{.ledger = &unused, .next = &outOnly, .outgoingOnly = true};
+            for (const GasFace& face : faces)
+                Transfer(box, forced, derived, world, face);
+
+            // 小刻みの終わりに熱が負のセルだけ、最初に負になった所で数える(途中だけ負で終わりに戻るセルは transient)
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                const int64_t afterForce = CellHeat(box, forced[index]);
+                const int64_t afterOut = CellHeat(box, outOnly[index]);
+                const int64_t after = CellHeat(box, next[index]);
+                if (after >= 0) {
+                    if (afterForce < 0 || afterOut < 0)
+                        ++probe.transientCells;
+
+                    continue;
+                }
+
+                if (afterForce < 0) {
+                    ++probe.impulseCells;
+                    probe.worstImpulse = std::min(probe.worstImpulse, after);
+                } else if (afterOut < 0) {
+                    ++probe.outflowCells;
+                    probe.worstOutflow = std::min(probe.worstOutflow, after);
+                    if (DeriveCell(box, forced[index], CellLayer(box, index), SideOpen(box, {.index = index}))
+                            .temperature < derived[index].temperature)
+                        ++probe.coolerAfterForce;
+                } else {
+                    ++probe.otherCells;
+                    probe.worstOther = std::min(probe.worstOther, after);
+                }
+            }
+        }
+
+        // 調べ(T-0787 の案 2): 風上のセルごとに、出ていく塊の熱の分け前の和 S と押し出す仕事の和 W(初めの温度)を集め、
+        // 残る熱 A = 熱(力の後)− S から倍率を閉じた形で出す。終わりの温度 ÷ 初めの温度 = 1 − (W ÷ A) × x(x = 数える温度 ÷ 初めの温度)なので
+        // 平均(台形): x = 2A ÷ (2A + W)・終わり: x = A ÷ (A + W)(残る熱 = A² ÷ (A + W) ≥ 0)
+        void PreparePushForm(GasBox& box, const std::vector<GasCell>& forced, const std::vector<GasDerived>& derived,
+                             const std::vector<GasFace>& faces) {
+            GasHeatProbe& probe = *box.heatProbe;
+            const auto count = (uint32_t)box.cells.size();
+            std::vector<int64_t> shares(count, 0);
+            std::vector<int64_t> pushes(count, 0);
+            for (const GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.fraction == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const GasCell& source = forced[donor.index];
+                const GasDerived& sourceDerived = derived[donor.index];
+                GasCell moved;
+                moved.amounts = face.moved;
+                const int64_t energy = MovedEnergy(box.config, source, sourceDerived, moved, face.fraction);
+                const int64_t push = PushWork(box.config, sourceDerived, moved);
+                const int64_t kineticShare = (int64_t)MulShiftU64(
+                    (uint64_t)std::max<int64_t>(KineticEnergy(box.config, source, sourceDerived.mass), 0),
+                    face.fraction, 32);
+                shares[donor.index] += energy - ChemicalEnergy(box.config, moved) - kineticShare - push;
+                pushes[donor.index] += push;
+            }
+
+            probe.pushNumerator.assign(count, 0);
+            probe.pushDenominator.assign(count, 0);
+            for (uint32_t index = 0; index < count; ++index) {
+                if (pushes[index] == 0)
+                    continue;
+
+                const int64_t remaining = CellHeat(box, forced[index]) - shares[index];
+                const int64_t weight = probe.pushForm == 1 ? 2 : 1;
+                probe.pushNumerator[index] = remaining > 0 ? remaining * weight : 0;
+                probe.pushDenominator[index] = (remaining > 0 ? remaining * weight : 0) + pushes[index];
+            }
+        }
+
         void Substep(GasBox& box, const std::vector<GasFace>& layout, uint64_t roundingTick) {
             // --- (1) 導く値 ---
             const std::vector<GasDerived> derived = DeriveAll(box);
@@ -699,12 +882,20 @@ namespace bicameral::sim {
             // --- (4) 移す成分の物質量(MUSCL で面へ延ばした割合・乱数の丸め。G2)---
             ComputeMovedAmounts(box, forced, derived, roundingTick, faces);
             LimitMovedAmounts(box, forced, faces);
+            if (box.limitMovedHeat)  // 熱の列(T-0787・ADR-0355。既定で入れる。GasBox::limitMovedHeat)
+                box.energyLimitedFaces += LimitMovedEnergy(box, forced, derived, faces);
+
+            if (box.heatProbe != nullptr && box.heatProbe->pushForm != 0)
+                PreparePushForm(box, forced, derived, faces);
 
             // --- (5) 風上の中身(力を当てた後)を移す ---
             std::vector<GasCell> next = forced;
             const GasApplyWorld world{.ledger = &box.ledger, .next = &next};
             for (const GasFace& face : faces)
                 Transfer(box, forced, derived, world, face);
+
+            if (box.heatProbe != nullptr)
+                ProbeHeat(box, derived, forced, faces, next);
 
             box.cells = std::move(next);
         }

@@ -206,6 +206,7 @@ namespace bicameral::sim {
         const GasConfig config = MakeConfig(table, step.slots);
         step.box = MakeGasBox(config, m_layers.MakeReference(config, step.slots));
         step.box.tick = tick;
+        step.box.limitMovedHeat = m_options.limitMovedHeat;
         GasOpenCounts counts;
         step.box.openQ16 = CollectProbeGasOpen(table, region, counts);
         report.blockedCells = counts.blockedCells;
@@ -247,6 +248,7 @@ namespace bicameral::sim {
 
         m_ledger.restEnergy += ledger.restEnergy;
         report.restedCells = ledger.restedCells;
+        report.energyLimitedFaces = step.box.energyLimitedFaces;
 
         for (uint32_t index = 0; index < RegionCellCount(); ++index) {
             if (regionChanged[index] == 0)

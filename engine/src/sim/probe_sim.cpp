@@ -1626,6 +1626,11 @@ namespace bicameral::sim {
             for (const std::string& warning : m_gasReport.warnings)
                 Log(Channel::Sim, Level::Warning, "刻み {}: {}", tick, warning);
 
+            // 熱の列で縮めた(T-0787・ADR-0355。D-508 の安全網が効いた = 1 小刻みに熱を持ち出しきるほど強い膨張)
+            if (m_gasReport.energyLimitedFaces != 0)
+                Log(Channel::Sim, Level::Warning,
+                    "刻み {} の気体: 風上の熱を超えて持ち出す面を {} 面縮めた(陽解法の安全網。強い爆発の目安)", tick,
+                    m_gasReport.energyLimitedFaces);
             for (const uint32_t index : gasChanged) {
                 m_caches[currentBase + index] = ProbeMakeCache(table, m_cells[currentBase + index]);
                 const uint32_t block = BlockOfCellIndex(index);
