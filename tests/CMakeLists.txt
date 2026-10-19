@@ -68,7 +68,8 @@ target_link_libraries(luau_type_check_test PRIVATE bicameral_script)
 target_compile_definitions(luau_type_check_test PRIVATE BICAMERAL_DATA_DIR="${PROJECT_SOURCE_DIR}/data")
 add_test(NAME luau_type_check COMMAND luau_type_check_test)
 add_executable(reaction_package_test reaction_package_test.cpp)  # Luau の反応表 → ベイク(T-0021)
-target_link_libraries(reaction_package_test PRIVATE bicameral_reaction_script bicameral_core)
+# 相の表(sim::MakeSpeciesPhases。固体の動き方の欄が写るか。T-0819)のために bicameral_multires も
+target_link_libraries(reaction_package_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
 target_compile_definitions(reaction_package_test PRIVATE
   BICAMERAL_DATA_PACKAGES_DIR="${PROJECT_SOURCE_DIR}/data/packages")
 add_dependencies(reaction_package_test bicameral_data)  # ランタイムの入り口は exe の横の data/packages を読む(T-0157)

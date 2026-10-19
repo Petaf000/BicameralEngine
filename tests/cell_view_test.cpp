@@ -8,6 +8,8 @@
 //   2. 多重解像度の世界の CPU の木(鎖の場面を伝導で 20 刻み)の本物のブロックの全部のセルを、ブロックのレベルで同じく比べる
 //   3. 成分の数に上限の無い形のセル(RxWideCell)でも同じ見立て(9 成分は熱を MrCellThermal と比べる)
 //   4. 費用: 見立て 1 つを作る時間と、今の別々の数え方(MrCellThermal + ShareCellVolume + 空き + 液体の質量と体積)の時間(docs/perf.md)
+//   5. ばらける固体(T-0819・ADR-0359 §2): solid_motion = "loose" の物質の和(物質量・質量・体積・熱容量)が固体の和の一部として出る・
+//      ばらける固体の無い表では 0・ばらけるを据わるに変えた表と、ばらける固体の和の外の欄が全部同じ(ばらけるは見立ての他を変えない)
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -56,8 +58,18 @@ namespace {
     static_assert(CvCellVolumePicoliters(1) == PROBE_CELL_VOLUME_PICOLITERS / 8);
     static_assert(CvCellVolumePicoliters(-1) == PROBE_CELL_VOLUME_PICOLITERS * 8);
 
+    BakedReactionTable Bake(const ReactionTableDefinition& definition) {
+        auto baked = BakeReactionTable(definition);
+        if (!baked) {
+            std::printf("表を作れない: %s\n", baked.error().c_str());
+            std::exit(1);
+        }
+
+        return std::move(*baked);
+    }
+
     // 試験の表(燃焼の試験の表)+ 基準の大気 + 水(液体)・砂(密度あり)・密度を書かない砂・石(cell_volume_test と同じ)
-    BakedReactionTable MakeTable() {
+    ReactionTableDefinition MakeDefinition() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.environment = StandardWorldPhysics();
         definition.species.push_back({.name = "liquid_water",
@@ -80,13 +92,33 @@ namespace {
         definition.species.push_back(solid("loose_grain", 0));
         definition.species.push_back(solid("stone", 2000));
 
-        auto baked = BakeReactionTable(definition);
-        if (!baked) {
-            std::printf("表を作れない: %s\n", baked.error().c_str());
-            std::exit(1);
-        }
+        return definition;
+    }
 
-        return std::move(*baked);
+    BakedReactionTable MakeTable() {
+        return Bake(MakeDefinition());
+    }
+
+    // 5 の表: 上の表 + ばらける砂(34°)とばらける氷(90° = 横に崩れない)。ほかの物質は同じ
+    BakedReactionTable MakeLooseTable() {
+        ReactionTableDefinition definition = MakeDefinition();
+        const auto loose = [](const char* name, uint32_t density, uint32_t reposeAngle) {
+            SpeciesDefinition species{.name = name,
+                                      .composition = {{.element = "C", .count = 1}},
+                                      .formationEnthalpy = 0,
+                                      .heatCapacity = 9000,
+                                      .thermalConductivity = 300,
+                                      .phase = SpeciesPhase::Solid,
+                                      .density = density};
+            species.transport.solidMotion = SolidMotion::Loose;
+            species.transport.reposeAngleDegrees = reposeAngle;
+
+            return species;
+        };
+        definition.species.push_back(loose("loose_sand", 1600, 34));
+        definition.species.push_back(loose("drift_ice", 917, 90));
+
+        return Bake(definition);
     }
 
     // 今の仕組みの気体の圧力(gas_reference.cpp の DeriveRaw → DeriveOpenCell の式。温度は渡した値)
@@ -106,11 +138,23 @@ namespace {
         return a.amount == b.amount && a.mass == b.mass && a.volume == b.volume && a.heatCapacity == b.heatCapacity;
     }
 
+    // ばらける固体の和の外の欄が全部同じか(T-0819: ばらけるは見立ての他を変えない)
+    bool SameOutsideLoose(const CvCellView& a, const CvCellView& b) {
+        return SamePhaseSums(a.gas, b.gas) && SamePhaseSums(a.liquid, b.liquid) && SamePhaseSums(a.solid, b.solid) &&
+               a.liquidOpen == b.liquidOpen && a.gasOpen == b.gasOpen && a.liquidRoom == b.liquidRoom &&
+               a.liquidFill == b.liquidFill && a.heat == b.heat && a.heatCapacity == b.heatCapacity &&
+               a.thermal.temperature == b.thermal.temperature && a.thermal.conductance == b.thermal.conductance &&
+               a.thermal.capacityLimit == b.thermal.capacityLimit && a.faceLimit == b.faceLimit &&
+               a.gasPressure == b.gasPressure && a.gasPressureDeviation == b.gasPressureDeviation &&
+               a.liquidMass == b.liquidMass && a.liquidEquivalentMass == b.liquidEquivalentMass;
+    }
+
     // 部分だけ作った見立て(MakeCellViewParts。T-0767): 作った欄は全部作った見立てと同じ・作らない欄は 0
     void CompareParts(const CellViewTable& viewTable, const reaction::RxCell& cell, int32_t level,
                       const CvCellView& full) {
         const CvPhaseSums zero = CvMakePhaseSums();
-        for (const uint32_t parts : {CV_VIEW_THERMAL, CV_VIEW_PHASES, CV_VIEW_GAS_PRESSURE, CV_VIEW_LIQUID_MASS}) {
+        for (const uint32_t parts :
+             {CV_VIEW_THERMAL, CV_VIEW_PHASES, CV_VIEW_GAS_PRESSURE, CV_VIEW_LIQUID_MASS, CV_VIEW_LOOSE}) {
             const CvCellView view = MakeCellViewParts(viewTable, cell, level, REFERENCE_PRESSURE, parts);
             EXPECT(view.heat == full.heat && view.heatCapacity == full.heatCapacity);
             EXPECT(view.thermal.temperature == full.thermal.temperature);
@@ -122,6 +166,7 @@ namespace {
             EXPECT(SamePhaseSums(view.gas, phases ? full.gas : zero));
             EXPECT(SamePhaseSums(view.liquid, phases ? full.liquid : zero));
             EXPECT(SamePhaseSums(view.solid, phases ? full.solid : zero));
+            EXPECT(SamePhaseSums(view.loose, parts == CV_VIEW_LOOSE ? full.loose : zero));
             EXPECT(view.liquidOpen == (phases ? full.liquidOpen : 0));
             EXPECT(view.gasOpen == (phases ? full.gasOpen : 0));
             EXPECT(view.liquidRoom == (phases ? full.liquidRoom : 0));
@@ -200,6 +245,24 @@ namespace {
         EXPECT(view.gas.amount == gasAmount);
         EXPECT(view.gas.amount + view.liquid.amount + view.solid.amount == total);
         EXPECT(view.gas.heatCapacity + view.liquid.heatCapacity + view.solid.heatCapacity == view.heatCapacity);
+
+        // --- ばらける固体(固体の和の一部。相の表の motion の物質だけ。T-0819)---
+        uint64_t looseAmount = 0;
+        uint64_t looseMass = 0;
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            const CvSpeciesPhase phase = viewTable.Phase(cell.species[i]);
+            if (phase.motion != CV_MOTION_LOOSE)
+                continue;
+
+            EXPECT(phase.phase == CV_PHASE_SOLID);
+            looseAmount += cell.amounts[i];
+            looseMass += cell.amounts[i] * phase.molarMass;
+        }
+
+        EXPECT(view.loose.amount == looseAmount && view.loose.mass == looseMass);
+        EXPECT(view.loose.amount <= view.solid.amount && view.loose.volume <= view.solid.volume &&
+               view.loose.heatCapacity <= view.solid.heatCapacity);
+        EXPECT(looseAmount != 0 || SamePhaseSums(view.loose, CvMakePhaseSums()));
         const int64_t pressure = ReferenceGasPressure(gasAmount, thermal.temperature, view.gasOpen);
         EXPECT(view.gasPressure == pressure);
         EXPECT(view.gasPressureDeviation == pressure - REFERENCE_PRESSURE);
@@ -394,6 +457,70 @@ namespace {
                     (unsigned long long)(thermalTenths / 10), (unsigned long long)(thermalTenths % 10));
     }
 
+    // --- 5. ばらける固体 ---
+    void TestLooseSolids(const BakedReactionTable& plainTable, std::span<const CvSpeciesPhase> plainPhases) {
+        // ばらける固体の無い表は相の表が全部据わる(今と同じ表)
+        for (const CvSpeciesPhase& phase : plainPhases)
+            EXPECT(phase.motion == CV_MOTION_FIXED && phase.reposeSlopeQ16 == 0);
+
+        const BakedReactionTable table = MakeLooseTable();
+        const std::vector<CvSpeciesPhase> phases = MakeSpeciesPhases(table);
+        const CellViewTable viewTable{.reaction = table.View(), .phases = phases};
+        const CvSpeciesPhase sand = phases[table.SpeciesId("loose_sand")];
+        const CvSpeciesPhase ice = phases[table.SpeciesId("drift_ice")];
+        EXPECT(sand.phase == CV_PHASE_SOLID && sand.motion == CV_MOTION_LOOSE && sand.reposeSlopeQ16 == 44205);
+        EXPECT(ice.motion == CV_MOTION_LOOSE && ice.reposeSlopeQ16 == CV_REPOSE_VERTICAL);
+        EXPECT(phases[table.SpeciesId("grain")].motion == CV_MOTION_FIXED);
+        EXPECT(plainTable.species.size() + 2 == table.species.size());
+
+        // ばらけるを据わるに変えた相の表(ほかは同じ)
+        std::vector<CvSpeciesPhase> fixedPhases = phases;
+        for (CvSpeciesPhase& phase : fixedPhases) {
+            phase.motion = CV_MOTION_FIXED;
+            phase.reposeSlopeQ16 = 0;
+        }
+
+        const CellViewTable fixedTable{.reaction = table.View(), .phases = fixedPhases};
+
+        // 決まったセル: 砂だけ・砂と石と水・水に浮く氷と空気
+        std::vector<reaction::RxCell> cells = MakeVariedCells(table, 3000);
+        const auto add = [&](std::vector<SpeciesAmount> amounts, int32_t millikelvin) {
+            rng::sort(amounts, {}, &SpeciesAmount::species);
+            cells.push_back(MakeReactionCell(table, amounts, millikelvin));
+        };
+        const uint32_t sandId = table.SpeciesId("loose_sand");
+        const uint32_t iceId = table.SpeciesId("drift_ice");
+        add({{sandId, 30000000000}}, 300000);
+        add({{sandId, 10000000000},
+             {table.SpeciesId("stone"), 5000000000},
+             {table.SpeciesId("liquid_water"), 2000000000}},
+            290000);
+        add({{iceId, 20000000000},
+             {table.SpeciesId("liquid_water"), 3000000000},
+             {table.SpeciesId("nitrogen"), 1000000}},
+            270000);
+
+        uint32_t withLoose = 0;
+        for (const reaction::RxCell& cell : cells) {
+            for (const int32_t level : LEVELS) {
+                CompareView(table, viewTable, cell, level);
+                const CvCellView view = MakeCellView(viewTable, cell, level, REFERENCE_PRESSURE);
+                const CvCellView fixed = MakeCellView(fixedTable, cell, level, REFERENCE_PRESSURE);
+                EXPECT(SameOutsideLoose(view, fixed));
+                EXPECT(SamePhaseSums(fixed.loose, CvMakePhaseSums()));
+            }
+
+            withLoose += MakeCellView(viewTable, cell, 0, REFERENCE_PRESSURE).loose.amount != 0 ? 1 : 0;
+        }
+
+        // 砂だけのセル: ばらける固体の和 = 固体の和
+        const CvCellView sandOnly = MakeCellView(viewTable, cells[cells.size() - 3], 0, REFERENCE_PRESSURE);
+        EXPECT(SamePhaseSums(sandOnly.loose, sandOnly.solid) && sandOnly.loose.volume != 0);
+        EXPECT(withLoose > 100);
+        std::printf("ばらける固体: %zu セル(ばらける固体を含む %u)× %zu レベル\n", cells.size(), withLoose,
+                    std::size(LEVELS));
+    }
+
 }  // namespace
 
 int main() {
@@ -411,6 +538,7 @@ int main() {
     TestMultiresNest(table, viewTable);
     TestWideCells(table, viewTable);
     MeasureCost(table, viewTable);
+    TestLooseSolids(table, phases);
 
     if (failureCount != 0) {
         std::printf("cell_view_test: %d 件の失敗\n", failureCount);

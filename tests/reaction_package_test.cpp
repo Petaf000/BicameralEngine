@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <map>
 #include <string>
@@ -22,6 +23,7 @@
 #include "reaction_test_table.h"
 #include "script/luau_sandbox.h"
 #include "script/reaction_table_loader.h"
+#include "sim/cell_view.h"
 
 namespace {
 
@@ -472,6 +474,101 @@ namespace {
         ExpectModFails("粘り 0", Stone("phase = \"liquid\", viscosity_upa_s = 0"), "", "範囲");
     }
 
+    // --- 固体の動き方(T-0819・ADR-0359 §1・§2)---
+
+    // 試験の固体(密度 density。欄は fields で足す。density が 0 なら密度を書かない)
+    std::string Grain(std::string_view name, uint32_t density, std::string_view fields) {
+        const std::string densityField = density == 0 ? "" : std::format("density_kg_per_m3 = {}, ", density);
+
+        return std::string(name) +
+               " = { composition = { C = 1 }, formation_enthalpy_j_per_mol = 0, heat_capacity_mj_per_mol_k = 30000, "
+               "thermal_conductivity_mw_per_m_k = 2000, phase = \"solid\", " +
+               densityField + std::string(fields) + " }";
+    }
+
+    bool SamePhases(const BakedReactionTable& left, const BakedReactionTable& right) {
+        return SameBytes(MakeSpeciesPhases(left), MakeSpeciesPhases(right));
+    }
+
+    // 読んだ形と相の表(動く 1 bit・安息角の tan θ の Q16)。"fixed" と書いた表・書かない表は同じ表と同じ相の表
+    void TestSolidMotionRead() {
+        const auto read = BakeWithSpecies(Grain("test_sand", 1600, "solid_motion = \"loose\", repose_angle_deg = 34") +
+                                          ", " +
+                                          Grain("test_ice", 917, "solid_motion = \"loose\", repose_angle_deg = 90") +
+                                          ", " + Grain("test_rock", 2600, "solid_motion = \"fixed\""));
+        EXPECT(read.has_value());
+        if (!read) {
+            std::printf("  %s\n", read.error().c_str());
+
+            return;
+        }
+
+        const auto transport = [&](std::string_view name) {
+            return read->speciesTransport[read->SpeciesId(name)];
+        };
+        EXPECT(transport("test_sand").solidMotion == SolidMotion::Loose &&
+               transport("test_sand").reposeAngleDegrees == 34);
+        EXPECT(transport("test_ice").reposeAngleDegrees == 90);
+        EXPECT(transport("test_rock").solidMotion == SolidMotion::Fixed && !transport("test_rock").reposeAngleDegrees);
+        EXPECT(!HasWarning(*read, "test_sand") && !HasWarning(*read, "test_ice") && !HasWarning(*read, "test_rock"));
+
+        // 相の表: 相は固体のまま・ばらけるは 1 bit・tan 34° = 0.6745 → 44205(Q16)・90° は横に崩れない
+        const std::vector<multires::CvSpeciesPhase> phases = MakeSpeciesPhases(*read);
+        const multires::CvSpeciesPhase sand = phases[read->SpeciesId("test_sand")];
+        const multires::CvSpeciesPhase ice = phases[read->SpeciesId("test_ice")];
+        const multires::CvSpeciesPhase rock = phases[read->SpeciesId("test_rock")];
+        EXPECT(sand.phase == multires::CV_PHASE_SOLID && sand.motion == multires::CV_MOTION_LOOSE &&
+               sand.reposeSlopeQ16 == 44205);
+        EXPECT(ice.motion == multires::CV_MOTION_LOOSE && ice.reposeSlopeQ16 == multires::CV_REPOSE_VERTICAL);
+        EXPECT(rock.phase == multires::CV_PHASE_SOLID && rock.motion == multires::CV_MOTION_FIXED &&
+               rock.reposeSlopeQ16 == 0);
+
+        // "fixed" と書く = 書かない(反応の表・相の表がバイト単位で同じ。警告も無い)
+        const auto fixedWritten = BakeWithSpecies(Grain("test_rock", 2600, "solid_motion = \"fixed\""));
+        const auto unwritten = BakeWithSpecies(Grain("test_rock", 2600, ""));
+        EXPECT(fixedWritten && unwritten && SameTable(*fixedWritten, *unwritten) &&
+               SamePhases(*fixedWritten, *unwritten) && fixedWritten->warnings == unwritten->warnings);
+
+        // 標準パッケージ(固体の欄を書かない)の相の表は全部据わる・傾き 0
+        const auto shipped = BakePackages(BasePackages());
+        EXPECT(shipped.has_value());
+        if (shipped) {
+            for (const multires::CvSpeciesPhase& phase : MakeSpeciesPhases(*shipped))
+                EXPECT(phase.motion == multires::CV_MOTION_FIXED && phase.reposeSlopeQ16 == 0);
+        }
+    }
+
+    // 警告 2 つ(表は当たる)と誤り 2 つ + 書き方の誤り(ADR-0359 §1。D-487 ②)
+    void TestSolidMotionChecks() {
+        // ばらける固体の安息角の書き忘れ → 35 度として警告
+        const auto defaulted = BakeWithSpecies(Grain("test_sand", 1600, "solid_motion = \"loose\""));
+        EXPECT(defaulted && HasWarning(*defaulted, "test_sand") && HasWarning(*defaulted, "repose_angle_deg") &&
+               HasWarning(*defaulted, "35 度"));
+        if (defaulted)
+            EXPECT(MakeSpeciesPhases(*defaulted)[defaulted->SpeciesId("test_sand")].reposeSlopeQ16 == 45889);
+
+        // 据わる固体の安息角 → 効かないと警告(相の表は据わる・傾き 0)
+        const auto ignored = BakeWithSpecies(Grain("test_rock", 2600, "repose_angle_deg = 30"));
+        EXPECT(ignored && HasWarning(*ignored, "test_rock") && HasWarning(*ignored, "だけに効く"));
+        if (ignored) {
+            const multires::CvSpeciesPhase rock = MakeSpeciesPhases(*ignored)[ignored->SpeciesId("test_rock")];
+            EXPECT(rock.motion == multires::CV_MOTION_FIXED && rock.reposeSlopeQ16 == 0);
+        }
+
+        // 誤り: 固体の外の固体の欄・密度の無いばらける固体・知らない値・範囲の外
+        ExpectModFails("気体に固体の動き方", Stone("solid_motion = \"loose\""), "", "solid_motion");
+        ExpectModFails("液体に安息角", Stone("phase = \"liquid\", viscosity_upa_s = 1000, repose_angle_deg = 30"), "",
+                       "repose_angle_deg");
+        ExpectModFails("密度の無いばらける固体",
+                       Grain("test_dust", 0, "solid_motion = \"loose\", repose_angle_deg = 30"), "",
+                       "density_kg_per_m3");
+        ExpectModFails("知らない動き方", Grain("test_sand", 1600, "solid_motion = \"granular\""), "", "solid_motion");
+        ExpectModFails("安息角 91", Grain("test_sand", 1600, "solid_motion = \"loose\", repose_angle_deg = 91"), "",
+                       "範囲");
+        ExpectModFails("安息角の小数", Grain("test_sand", 1600, "solid_motion = \"loose\", repose_angle_deg = 34.5"),
+                       "", "整数");
+    }
+
     void TestSlopeWarnings() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         const auto with = BakeReactionTable(definition);
@@ -638,6 +735,8 @@ int main() {
     TestLegacyCondensed();
     TestShippedPhases();
     TestTransportFields();
+    TestSolidMotionRead();
+    TestSolidMotionChecks();
     TestSlopeWarnings();
     TestParseDecimal();
     TestLoaderReadsShippedTable();

@@ -39,6 +39,9 @@ export type Species = {
     diffusivity_mm2_per_s: number?, -- 気体の混ざる速さ(mm²/s。0 以上の整数。湯気 25)
     permeability_um2: (number | string)?, -- 固体の孔の通しやすさ(µm²。0〜1e7 を 1e-6 刻み。小さい値は 10 進の文字列 "1e-6"・"0.001"。砂 10)
     suction_pa: number?, -- 固体の吸い上げ(Pa。0 以上の整数。乾いた砂 5000)
+    -- 固体が動くか(T-0819・ADR-0359。名前は仮)。固体だけに書ける(気体・液体に書くとベイクが誤りにする)
+    solid_motion: string?, -- "fixed"(据わる。省ける = これ)・"loose"(ばらける。崩れる・沈む・浮く)。"loose" には密度が要る(無ければ誤り)
+    repose_angle_deg: number?, -- ばらける固体の安息角(度。0〜90 の整数。砂 34。90 = 横には崩れない)。"loose" に書かないと 35 として警告・"fixed" に書くと効かないと警告
 }
 
 export type ReactionRate = {

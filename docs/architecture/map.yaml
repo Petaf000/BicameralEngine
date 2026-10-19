@@ -307,7 +307,7 @@ views:
           note: "占める体積は物質の密度から(モル体積。書かなければ 0)。液体の空き = セル − 固体、気体の空き = セル − 固体 − 液体。面の開き = 両側の空きの小さい方。気体は空きの体積で圧力を読み(GasBox::openQ16)、液体は空きで満ち具合と圧力を数える。ADR-0268" }
       - { id: cellview, group: simlib, label: "MakeCellView<br/>セルの見立て(土台の段 1 ③。T-0713)<br/>相ごとの量・空き・熱・伝導の係数・圧力を 1 か所で",
           code: "shaders/common/cell_view.hlsli::MakeCellView", ticket: T-0713, doc: docs/decisions/ADR-0333-cell-view.md,
-          note: "CPU と GPU が同じ関数。刻みごとに作り永続しない。今の熱のキャッシュ・MrCellThermal・ShareCellVolume・液体と気体の区画の数え方とビット一致(cell_view_test)。相の表は sim::MakeSpeciesPhases の 1 か所。置き換えは T-0714。ADR-0333" }
+          note: "CPU と GPU が同じ関数。刻みごとに作り永続しない。今の熱のキャッシュ・MrCellThermal・ShareCellVolume・液体と気体の区画の数え方とビット一致(cell_view_test)。相の表は sim::MakeSpeciesPhases の 1 か所(固体の動く 1 bit と安息角の tan θ。ばらける固体の和 CV_VIEW_LOOSE。T-0819・ADR-0359)。置き換えは T-0714。ADR-0333" }
       - { id: transportapply, group: simlib, label: "TxFlowCell<br/>面の帳簿と当てる段(土台の段 1 ④。T-0714)<br/>流す → 上限 → 当てる → 欄 → 帳簿 → 起こす",
           code: "shaders/common/transport_apply.hlsli::TxFlowCell", ticket: T-0714, doc: docs/decisions/ADR-0334-transport-apply.md,
           note: "種類は坂・面の式・安定の条件の 3 つだけを渡す(最初の種類は陽の伝導 TxConduction。transport_conduction.hlsli)。世界は面の隣・見立て・端数の置き場・変化の表を渡す。MR の CPU の伝導と GPU の伝導の段(T-0766)がこれを呼び、今の MR の試験とビット一致。上限は出る側・入る側の倍率(Q32。Jacobi)。自分の側の坂・係数はセルごとに 1 回(TxMakeSelfSide。T-0768)。流れを面の並びで解く種類(陰の伝導)は同じ当てる段の面 1 つの形 TxApplyFaceFlow で両側へ(T-0715)。ADR-0334" }
