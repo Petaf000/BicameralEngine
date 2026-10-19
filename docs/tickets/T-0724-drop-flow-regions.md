@@ -1,6 +1,6 @@
 # T-0724 区画をやめる: gas_regions・liquid_regions を読まない・場面を直す(D-510)
 
-- Status: Review(2026-10-19 wt2。D-521 = ADR-0342 Accepted。ホットリロードの 4 本が落ちる = 判断待ち。下の「続き」)
+- Status: Done(2026-10-19 main へ〔T-0670 と一緒に〕。D-521 = ADR-0342 Accepted。ホットリロードの 4 本が落ちる = 判断待ち。下の「続き」)
 - 種類: 工学
 - PC: 必須
 - マイルストーン: ③' 運ぶ計算の共通の土台 段 4 ②(ROADMAP)
