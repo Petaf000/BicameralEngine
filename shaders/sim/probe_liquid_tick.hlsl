@@ -312,7 +312,7 @@ LqBalanceSide BalanceSide(ProbeLiquidHeader header, uint32_t region) {
                                         vertical, BalanceSide(header, region), BalanceSide(header, neighbor), params);
             }
 
-            // 1 mg 未満の端数(持ち越す。この面を書くのはこのスレッドだけ。T-0778)
+            // 1 mg までの面の流れ(持ち越す。この面を書くのはこのスレッドだけ。T-0778)
             liquidWork.Store<int64_t>(FaceAddress(header, header.carryOffset, axis, region), force.carry);
             liquidWork.Store<int64_t>(FaceAddress(header, header.forcedOffset, axis, region), force.face);
             liquidWork.Store<uint64_t>(FaceAddress(header, header.desiredOffset, axis, region), force.desired);

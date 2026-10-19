@@ -230,8 +230,7 @@ struct LqFaceForce {
     int64_t gravity;   // 重さ
     int64_t friction;  // 摩擦(底と粘り)
     int64_t dropped;   // まわりが空の面の運動量(行き場なし)
-    int64_t
-        carry;  // 持ち越す 1 mg 未満の流れの端数(流れの分母の単位。符号は運動量の向き。坂がある 1 mg までの面だけ。T-0778)
+    int64_t carry;     // 持ち越す流れ(流れの分母の単位。符号は運動量の向き。坂がある 1 mg までの面だけ。T-0778)
 };
 
 FX_FN LqFaceForce LqEmptyFaceForce(int64_t face) {
@@ -325,18 +324,22 @@ FX_FN LqFaceForce LqOpenFaceForce(int64_t face, uint32_t faceOpen, uint32_t vert
 // 坂がある面は、1 刻みに動く質量の 1 mg 未満の端数を面の欄に持ち越す(T-0778・ADR-0357)。軽い水(宙の数 mg・満ちきらないセルの上の数 mg)は
 // 摩擦と釣り合う運動量が 1 刻みに 1 mg に届かず、端数を毎刻み捨てると運動量だけ残って落ちきらなかった。端数を持つのは坂がある 1 mg までの面だけ
 // (釣り合い・2 mg 以上動かす面・向きが変わった面は 0 から数え直す)なので、釣り合いの判定と組んで行き来しない。
-// 1 mg までの面の 1 mg は、面ごとの判定が正しいように 1 刻みに各セルで 1 つの面だけが動かす(LqHoldTurn。Jacobi の同時の動きで、
-// 3 mg 足りないセルへ 4 つの隣が 1 mg ずつ入って溢れ、押し返されて戻るのを繰り返した。T-0778)。判定は丸めの幅を越えて下がる時だけ
-// (LQ_BALANCE_MARGIN。1 mg の入れ替えは丸めで両向きとも「下がる」と出て、余った 1 mg が行き来した)。
+// 1 mg までの面の質量は、面ごとの判定が正しいように 1 刻みに各セルで 1 つの面だけが動かす(LqHoldTurn。Jacobi の同時の動きで、
+// 3 mg 足りないセルへ 4 つの隣が 1 mg ずつ入って溢れ、押し返されて戻るのを繰り返した。T-0778)。順番の刻みには持ち越した流れの整数の mg を
+// まとめて動かすので、流れの速さは運動量のまま(順番は速さに上限を作らない。6 刻み = 0.1 秒の粒にまとめるだけ)。判定は丸めの幅を越えて
+// 下がる時だけ(LQ_BALANCE_MARGIN。1 mg の入れ替えは丸めで両向きとも「下がる」と出て、余った 1 mg が行き来した)。
 
-// 1 mg までの面が 1 mg を動かせる刻みの巡り(軸 3 × 偶奇 2)。ある刻みに動かせるのは、軸の組 group の面のうち − 側のセルの
+// 1 mg までの面が質量を動かせる刻みの巡り(軸 3 × 偶奇 2)。ある刻みに動かせるのは、軸の組 group の面のうち − 側のセルの
 // その軸の座標の偶奇が合う面だけ = どのセルも、その刻みに動かせる面がちょうど 1 つ(その軸の + か − の面)
 FX_CONST uint32_t LQ_HOLD_TURNS = 6;
 
 // 判定の丸めの幅: 今の力と動かした後の力はどちらも切り捨ての差で 1 未満ずれるので、和(動く向き)が 2 以上の時だけ下がると見る
 FX_CONST int64_t LQ_BALANCE_MARGIN = 2;
 
-// 世界の刻み tick に、軸の組 group(0〜2。仮の世界の格子の x・y・z の順)の面で − 側のセルの座標 coordinate が 1 mg を動かせるか。
+// 1 mg までの面が持ち越せる流れの上限(mg)。1 刻みの流れ < 2 mg を順番の 1 巡(6 刻み)溜めた量 < 12 mg(粗く/細かくした後も)
+FX_CONST uint64_t LQ_HOLD_CARRY_MG = 2 * LQ_HOLD_TURNS;
+
+// 世界の刻み tick に、軸の組 group(0〜2。仮の世界の格子の x・y・z の順)の面で − 側のセルの座標 coordinate が質量を動かせるか。
 // 順番は世界の時計で決める(液体の状態に数を足さない: 何も無い世界・眠った区画の状態はビット単位で同じのまま)
 FX_FN uint32_t LqHoldTurn(uint64_t tick, uint32_t group, uint32_t coordinate) {
     return (uint32_t)(tick % LQ_HOLD_TURNS) == (group * 2u) + (coordinate & 1u) ? 1u : 0u;
@@ -363,9 +366,9 @@ FX_FN LqBalanceSide LqMakeBalanceSide(LqCellView view, int64_t pressure, uint64_
     return side;
 }
 
-// 1 mg 増やした(gain = 1)・減らした見立て。体積は動く液体の上流の密度で(movedVolume)。空き・開きは変わらない
-FX_FN LqCellView LqShiftedView(LqCellView view, uint32_t gain, uint64_t movedVolume) {
-    view.mass = gain != 0 ? view.mass + 1 : view.mass - 1;
+// amount mg 増やした(gain = 1)・減らした見立て。体積は動く液体の上流の密度で(movedVolume)。空き・開きは変わらない
+FX_FN LqCellView LqShiftedView(LqCellView view, uint32_t gain, uint64_t amount, uint64_t movedVolume) {
+    view.mass = gain != 0 ? view.mass + amount : view.mass - amount;
     view.volume = gain != 0 ? view.volume + movedVolume : view.volume - movedVolume;
     view.equivalent = view.open == LQ_OPEN_FULL || view.open == 0 ? view.mass
                                                                   : LqMulDiv(view.mass, LQ_OPEN_FULL, view.open);
@@ -381,13 +384,15 @@ FX_FN int64_t LqNetPush(uint32_t vertical, LqCellView a, int64_t pressureA, LqCe
     return LqSidePush(a, pressureA, b, pressureB);
 }
 
-// 1 mg を forward(1 = a から b へ)に動かした後の面の力(+ 向き)。縦の面は b が a の真上(b の下 = a・a の上から支える液体 = b が渡す値)
-FX_FN int64_t LqPushAfterShift(uint32_t vertical, LqBalanceSide a, LqBalanceSide b, uint32_t forward, LqParams params) {
+// amount mg(上流の中身以下)を forward(1 = a から b へ)に動かした後の面の力(+ 向き)。
+// 縦の面は b が a の真上(b の下 = a・a の上から支える液体 = b が渡す値)
+FX_FN int64_t LqPushAfterShift(uint32_t vertical, LqBalanceSide a, LqBalanceSide b, uint32_t forward, uint64_t amount,
+                               LqParams params) {
     const uint64_t fromVolume = forward != 0 ? a.view.volume : b.view.volume;  // HLSL の ?: は構造体を選べない
     const uint64_t fromMass = forward != 0 ? a.view.mass : b.view.mass;
-    const uint64_t movedVolume = LqMulDiv(fromVolume, 1, fromMass);
-    const LqCellView shiftedA = LqShiftedView(a.view, forward != 0 ? 0u : 1u, movedVolume);
-    const LqCellView shiftedB = LqShiftedView(b.view, forward != 0 ? 1u : 0u, movedVolume);
+    const uint64_t movedVolume = LqMulDiv(fromVolume, amount, fromMass);
+    const LqCellView shiftedA = LqShiftedView(a.view, forward != 0 ? 0u : 1u, amount, movedVolume);
+    const LqCellView shiftedB = LqShiftedView(b.view, forward != 0 ? 1u : 0u, amount, movedVolume);
     if (vertical != 0) {
         const LqColumnStep upper = LqColumnPressure(shiftedB, b.above, 1u, shiftedA, params);
         const LqColumnStep lower = LqColumnPressure(shiftedA, upper.above, a.hasBelow, a.below, params);
@@ -402,8 +407,8 @@ FX_FN int64_t LqPushAfterShift(uint32_t vertical, LqBalanceSide a, LqBalanceSide
 
 // 開いた面の力の後(LqOpenFaceForce の結果)に呼ぶ。運動量がこの刻みに 1 mg までしか動かさない大きさの面で、1 mg 動かしてもエネルギーが下がらなければ
 // (今の力 + 動かした後の力 が動く向きに正でない・上流に 1 mg も無い)運動量を 0 にする(摩擦の列へ。望む動く質量も 0)。
-// 坂があれば、前の刻みの端数 carry(force.carry と同じ形)を足し、1 mg に届いていて順番の刻み(turn = LqHoldTurn)なら 1 mg を動かす。
-// 残りを force.carry に返す(1 mg で止める: 届いた面は順番を待つ)
+// 坂があれば、前の刻みの持ち越し carry(force.carry と同じ形)を足し、順番の刻み(turn = LqHoldTurn)なら溜まった整数の mg を動かす。
+// 残りを force.carry に返す(LQ_HOLD_CARRY_MG で止める)
 FX_FN LqFaceForce LqHoldAtBalance(LqFaceForce force, int64_t carry, uint32_t turn, uint32_t vertical, LqBalanceSide a,
                                   LqBalanceSide b, LqParams params) {
     // 運動量の大きさで見る(上流が空で望む質量が 0 の面も、大きな運動量は移流が運ぶので触らない。T-0610)
@@ -416,22 +421,33 @@ FX_FN LqFaceForce LqHoldAtBalance(LqFaceForce force, int64_t carry, uint32_t tur
     const uint64_t fromMass = forward != 0 ? a.view.mass : b.view.mass;
     if (fromMass != 0) {
         const int64_t now = LqNetPush(vertical, a.view, a.pressure, b.view, b.pressure);
-        const int64_t after = LqPushAfterShift(vertical, a, b, forward, params);
+        const int64_t after = LqPushAfterShift(vertical, a, b, forward, 1u, params);
         const int64_t along = forward != 0 ? now + after : -(now + after);
         if (along >= LQ_BALANCE_MARGIN) {
-            // 坂がある(動かすとエネルギーが下がる): 同じ向きの端数を足し、1 mg に届いて順番の刻みなら 1 mg を動かす。
-            // reach ≤ 1 なので 運動量 × 重力加速度 < 2 × 分母(端数を足しても 64bit に収まる)。端数は 1 mg で止める(粗く/細かくした後も)
+            // 坂がある(動かすとエネルギーが下がる): 同じ向きの持ち越しを足し、順番の刻みに溜まった整数の mg を動かす
+            // (流れの速さは運動量のまま。順番は同時に動く面を各セル 1 つにするだけで、速さに上限を作らない。T-0778 の 2 回目)。
+            // reach ≤ 1 なので 1 刻みの流れ < 2 mg、順番の 1 巡で < 2 × 6 mg(持ち越しの上限 LQ_HOLD_CARRY_MG。64bit に収まる)
+            const uint64_t limit = LQ_HOLD_CARRY_MG * denominator;
             const uint64_t magnitude = FxAbsU64(carry);
             const bool sameWay = carry != 0 && (carry > 0) == (force.face > 0);
-            const uint64_t kept = sameWay ? (magnitude < denominator ? magnitude : denominator) : (uint64_t)0;
+            const uint64_t kept = sameWay ? (magnitude < limit ? magnitude : limit) : (uint64_t)0;
             uint64_t flux = (FxAbsU64(force.face) * params.gravityMicrometersPerSecond2) + kept;
             force.desired = 0;
             if (turn != 0 && flux >= denominator) {
+                // 溜まった amount mg(上流の中身まで)を動かしても下がるなら全部、下がらなければ 1 mg(上で確かめた)
+                const uint64_t whole = flux / denominator;
+                const uint64_t amount = whole < fromMass ? whole : fromMass;
                 force.desired = 1;
-                flux -= denominator;
+                if (amount > 1) {
+                    const int64_t afterAll = LqPushAfterShift(vertical, a, b, forward, amount, params);
+                    const int64_t alongAll = forward != 0 ? now + afterAll : -(now + afterAll);
+                    force.desired = alongAll >= LQ_BALANCE_MARGIN ? amount : (uint64_t)1;
+                }
+
+                flux -= force.desired * denominator;
             }
 
-            force.carry = FxApplySign(flux < denominator ? flux : denominator, force.face < 0);
+            force.carry = FxApplySign(flux < limit ? flux : limit, force.face < 0);
             return force;
         }
     }

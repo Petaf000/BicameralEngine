@@ -191,7 +191,7 @@ namespace bicameral::sim {
             std::vector<LqCellView> states;
             std::array<std::vector<int64_t>, 3> faces;    // 面の運動量(mg)
             std::array<std::vector<int64_t>, 3> kinetic;  // 面の運動のエネルギー(mJ)
-            std::array<std::vector<int64_t>, 3> carry;    // 面の 1 mg 未満の流れの端数(T-0778)
+            std::array<std::vector<int64_t>, 3> carry;    // 面の持ち越す流れ(T-0778)
             std::vector<int64_t> potential;               // 位置のエネルギー(mJ)
             std::vector<int64_t> massBefore;              // 前の刻みの終わりの液体の質量(mg)
             std::vector<LqCellView> outside;              // 外の柱の行の見立て(開いた世界の端の相手。T-0774)
@@ -976,8 +976,8 @@ namespace bicameral::sim {
         // 前の質量は保存量ではない(セルの液体の写し)ので余りを帳簿へ出さない SAME(レベルの単位なので、粗くした平均 = 和 ÷ 8 は量の規則と同じ数)
         fields.massBefore = Register(nest, "liquid.mass_before", sf::SF_PLACE_CELL, sf::SF_SCALE_SAME,
                                      sf::SF_FLAG_HASHED, 1);
-        // 1 mg 未満の流れの端数(T-0778・ADR-0357)は量でない(まだ動いていない質量の割合)ので SAME。粗く = 子の平均・細かく = 親と同じ
-        // (どちらも次の刻みに LqHoldAtBalance が 1 mg で止める)
+        // 1 mg までの面の持ち越す流れ(T-0778・ADR-0357)は量でない(まだ動いていない質量の割合)ので SAME。粗く = 子の平均・細かく = 親と同じ
+        // (どちらも次の刻みに LqHoldAtBalance が LQ_HOLD_CARRY_MG で止める)
         fields.carry = Register(nest, "liquid.flux_carry", sf::SF_PLACE_FACE, sf::SF_SCALE_SAME, sf::SF_FLAG_HASHED, 3);
         for (const uint32_t field :
              {fields.momentum, fields.kinetic, fields.potential, fields.massBefore, fields.carry}) {
