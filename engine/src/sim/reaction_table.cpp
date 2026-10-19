@@ -185,6 +185,8 @@ namespace bicameral::sim {
                 {transport.diffusivityMm2PerS.has_value(), "diffusivity_mm2_per_s", SpeciesPhase::Gas},
                 {transport.permeabilityNm2.has_value(), "permeability_um2", SpeciesPhase::Solid},
                 {transport.suctionPascals.has_value(), "suction_pa", SpeciesPhase::Solid},
+                {transport.solidMotion.has_value(), "solid_motion", SpeciesPhase::Solid},             // T-0819
+                {transport.reposeAngleDegrees.has_value(), "repose_angle_deg", SpeciesPhase::Solid},  // T-0819
             };
             for (const PhaseField& field : fields) {
                 if (field.written && entry.phase != field.phase && !(field.gasToo && entry.phase == SpeciesPhase::Gas))
@@ -196,7 +198,28 @@ namespace bicameral::sim {
             if (entry.phase == SpeciesPhase::Liquid && entry.density == 0)
                 return std::unexpected(std::format("物質 {}: 液体には密度(density_kg_per_m3)が要る", entry.name));
 
+            // ばらける固体は密度で坂(重さ × 密度の差)が決まる(ADR-0359 §1・§3)
+            if (transport.solidMotion == SolidMotion::Loose && entry.density == 0)
+                return std::unexpected(std::format(
+                    "物質 {}: solid_motion = \"loose\" には密度(density_kg_per_m3)が要る(沈むか浮くかが決まらない)",
+                    entry.name));
+
             return {};
+        }
+
+        // 固体の動き方の警告(T-0819・ADR-0359 §1。表は当たる): 据わる固体の安息角は効かない・ばらける固体の安息角の書き忘れは既定の角
+        void WarnSolidMotion(const SpeciesDefinition& entry, std::vector<std::string>& warnings) {
+            const SpeciesTransport& transport = entry.transport;
+            const bool loose = transport.solidMotion == SolidMotion::Loose;
+            if (!loose && transport.reposeAngleDegrees)
+                warnings.push_back(std::format(
+                    "物質 {}: repose_angle_deg は solid_motion = \"loose\" の固体だけに効く(この固体は動かない)",
+                    entry.name));
+
+            if (loose && !transport.reposeAngleDegrees)
+                warnings.push_back(
+                    std::format("物質 {}: ばらける固体に安息角(repose_angle_deg)が無い({} 度として崩れる)", entry.name,
+                                DEFAULT_REPOSE_ANGLE_DEGREES));
         }
 
         // 廃止した欄と書き忘れの警告(表は当たる)
@@ -214,6 +237,8 @@ namespace bicameral::sim {
             if (entry.phase == SpeciesPhase::Liquid && !entry.transport.viscosityMicroPascalSeconds)
                 warnings.push_back(std::format(
                     "物質 {}: 液体に粘り(viscosity_upa_s)が無い(粘りで減らず、速さの上限だけで流れる)", entry.name));
+
+            WarnSolidMotion(entry, warnings);
         }
 
         std::expected<NameIndex, std::string> BakeAllSpecies(const ReactionTableDefinition& definition,

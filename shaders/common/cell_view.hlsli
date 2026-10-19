@@ -4,6 +4,7 @@
 // 一つの芯: 刻みごとに 1 か所で、セル(成分 + エネルギー)と相の表 1 つから「流れが読む値」を全部作る。永続しない(保存点・ハッシュに入らない。
 // 段の外でセルを変えても作り直しの後始末が要らない)。作る値:
 //   - 相ごとの物質量・質量・体積・熱容量(気体 / 液体 / 固体。相は表の phase 1 本。ベイクの speciesPhase〔T-0710〕を写す)
+//   - そのうちばらける固体の和(固体の欄 solid_motion = "loose" の物質。固体の和はばらける分も含む全部。T-0819・ADR-0359 §2)
 //   - 体積の分け合い: セル = 固体 + 液体 + 残り(気体)。液体の空き・気体の空き・液体の入れる体積・液体の満ち具合
 //     (sim/cell_volume の ShareCellVolume・LiquidOpenQ16・GasOpenQ16 とビット単位で同じ。T-0713 の試験)
 //   - セル全体の熱(熱・熱容量・温度)と伝導の係数(multires_conduction.hlsli の MrCellThermal・MrFaceLimit と同じ値。
@@ -35,11 +36,20 @@ FX_CONST uint32_t CV_PHASE_GAS = 0;     // 体積を取らない(圧力で決ま
 FX_CONST uint32_t CV_PHASE_LIQUID = 1;  // 流れる凝縮相
 FX_CONST uint32_t CV_PHASE_SOLID = 2;   // 流れない凝縮相
 
+// 固体が動くか(物質の欄 solid_motion。T-0819・ADR-0359 §2)。相は 3 つのまま、固体だけがこの 1 bit を持つ(気体・液体はいつも据わる = 0)
+FX_CONST uint32_t CV_MOTION_FIXED = 0;  // 据わる(誰も動かさない。書かない固体)
+FX_CONST uint32_t CV_MOTION_LOOSE = 1;  // ばらける(固体の流れが動かす。T-0797)
+
+// 安息角の傾き tan θ(Q16)の「横には崩れない」(90°。落ちる・浮くだけ)
+FX_CONST uint32_t CV_REPOSE_VERTICAL = 0xFFFFFFFFu;
+
 // 物質 1 つの相の値。Table の約束に Phase(uint32_t id) を足す(Species と並ぶ。C++ は sim::CellViewTable)
 struct CvSpeciesPhase {
-    uint64_t molarVolume;  // mm³/mol(= モル質量 ÷ 密度。密度を書いていなければ 0 = 場所を取らない)
-    uint32_t molarMass;    // mg/mol
-    uint32_t phase;        // CV_PHASE_*
+    uint64_t molarVolume;     // mm³/mol(= モル質量 ÷ 密度。密度を書いていなければ 0 = 場所を取らない)
+    uint32_t molarMass;       // mg/mol
+    uint32_t phase;           // CV_PHASE_*
+    uint32_t motion;          // CV_MOTION_*(CV_PHASE_SOLID の物質だけが LOOSE になれる)
+    uint32_t reposeSlopeQ16;  // ばらける固体の安息角の tan θ(Q16。90° は CV_REPOSE_VERTICAL。据わる物質は 0)
 };
 
 // --- 作る部分(ビットの和。CV_VIEW_THERMAL = セル全体の熱と伝導の係数だけ)---------------------------------
@@ -48,9 +58,10 @@ FX_CONST uint32_t CV_VIEW_THERMAL = 0;       // heat・heatCapacity・thermal・
 FX_CONST uint32_t CV_VIEW_PHASES = 1;        // 相ごとの和・液体と気体の空き・液体の入れる体積・満ち具合
 FX_CONST uint32_t CV_VIEW_GAS_PRESSURE = 2;  // 気体の圧力と基準との差(相ごとの和を含む)
 FX_CONST uint32_t CV_VIEW_LIQUID_MASS = 4;   // 液体の質量(mg)と空きで直した質量(相ごとの和を含む)
-FX_CONST uint32_t CV_VIEW_ALL = 7;
+FX_CONST uint32_t CV_VIEW_LOOSE = 8;         // ばらける固体の和(相ごとの和を含む。T-0819)
+FX_CONST uint32_t CV_VIEW_ALL = 15;
 
-// 圧力・液体の質量は相ごとの和から作るので、どちらかを読むなら相ごとの和も作る
+// 圧力・液体の質量・ばらける固体は相ごとの和から作るので、どれかを読むなら相ごとの和も作る
 FX_FN uint32_t CvViewPartsClosure(uint32_t parts) {
     return parts != CV_VIEW_THERMAL ? (parts | CV_VIEW_PHASES) : parts;
 }
@@ -99,6 +110,7 @@ struct CvViewSums {
     CvPhaseSums gas;
     CvPhaseSums liquid;
     CvPhaseSums solid;
+    CvPhaseSums loose;  // 固体のうちばらける分(CV_VIEW_LOOSE の時だけ)
 };
 
 // セルの見立て(刻みごとに作り、永続しない)
@@ -106,7 +118,8 @@ struct CvCellView {
     // --- 相ごと ---
     CvPhaseSums gas;
     CvPhaseSums liquid;
-    CvPhaseSums solid;
+    CvPhaseSums solid;  // 固体の全部(据わる + ばらける)
+    CvPhaseSums loose;  // 固体のうちばらける分(T-0819。solid_motion = "loose" の物質が無ければ 0)
 
     // --- 体積の分け合い(固体 + 液体 + 残り = 気体)---
     uint32_t liquidOpen;  // 液体の空き: 固体が占めない割合(Q16。0 = 固体で満ちて液体は入れない)
@@ -192,11 +205,13 @@ FX_FN CvViewSums CvMakeViewSums() {
     sums.gas = CvMakePhaseSums();
     sums.liquid = CvMakePhaseSums();
     sums.solid = CvMakePhaseSums();
+    sums.loose = CvMakePhaseSums();
 
     return sums;
 }
 
-// 1 成分を足す(足す順に依らない。整数の和)。相ごとの和は parts が CV_VIEW_PHASES を含む時だけ(相の表を読まない)
+// 1 成分を足す(足す順に依らない。整数の和)。相ごとの和は parts が CV_VIEW_PHASES を含む時だけ(相の表を読まない)。
+// ばらける固体の和は parts が CV_VIEW_LOOSE を含む時だけ(固体の和にも同じ成分を足す)
 template <typename Table>
 FX_FN CvViewSums CvAddSpeciesParts(Table table, CvViewSums sums, uint32_t species, uint64_t amount, uint32_t parts) {
     sums.thermal = MrAddThermalSpecies(table, sums.thermal, species, amount);
@@ -211,6 +226,10 @@ FX_FN CvViewSums CvAddSpeciesParts(Table table, CvViewSums sums, uint32_t specie
         sums.solid = CvAddPhaseSpecies(sums.solid, phase, heatCapacity, amount);
     else
         sums.gas = CvAddPhaseSpecies(sums.gas, phase, heatCapacity, amount);
+
+    // ばらける固体(LOOSE は固体だけ。固体の和にも入っている)
+    if ((parts & CV_VIEW_LOOSE) != 0 && phase.motion == CV_MOTION_LOOSE)
+        sums.loose = CvAddPhaseSpecies(sums.loose, phase, heatCapacity, amount);
 
     return sums;
 }
@@ -240,6 +259,7 @@ FX_FN CvCellView CvViewFromSumsParts(int64_t energy, FX_IN(CvViewSums) sums, int
     view.gas = sums.gas;  // 相ごとの和を作らない時は CvMakeViewSums の 0 のまま
     view.liquid = sums.liquid;
     view.solid = sums.solid;
+    view.loose = sums.loose;  // CV_VIEW_LOOSE を作らない時は 0 のまま
     view.liquidOpen = 0;
     view.gasOpen = 0;
     view.liquidRoom = 0;

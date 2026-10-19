@@ -14,7 +14,8 @@
 
 namespace bicameral::sim {
 
-    // 物質ごとの相の値(添字 = 物質 ID。0 は使わない)。凝縮相で液体 → 液体・凝縮相で液体でない → 固体・それ以外 → 気体
+    // 物質ごとの相の値(添字 = 物質 ID。0 は使わない)。凝縮相で液体 → 液体・凝縮相で液体でない → 固体・それ以外 → 気体。
+    // 固体の solid_motion = "loose" は動く 1 bit と安息角の tan θ(Q16)。書かない物質は据わる・0(今と同じ表。T-0819・ADR-0359 §2)
     [[nodiscard]] std::vector<multires::CvSpeciesPhase> MakeSpeciesPhases(const BakedReactionTable& table);
 
     // MakeCellView に渡す表(reaction.hlsli の Table の約束 + Phase)

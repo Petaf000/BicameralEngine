@@ -55,14 +55,28 @@ namespace bicameral::sim {
         Solid = 2,
     };
 
+    // 固体が動くか(パッケージの solid_motion。T-0819・ADR-0359 §1・D-525。名前は仮)。書かない固体は Fixed(今と同じ)
+    enum class SolidMotion : uint8_t {
+        Fixed = 0,  // 据わる(誰も動かさない)
+        Loose = 1,  // ばらける(土台の流れの種類「固体の流れ」が動かす。流れそのものは T-0797)
+    };
+
+    // ばらける固体の安息角(度)の範囲と、書き忘れた時の値(ベイクが警告して使う。ADR-0359 §1 の仮)。90 = 横には崩れない
+    constexpr uint32_t REPOSE_ANGLE_MAX_DEGREES = 90;
+    constexpr uint32_t DEFAULT_REPOSE_ANGLE_DEGREES = 35;
+
     // 物質の動き方の任意の値(T-0710・土台の決定 3。名前と単位は設計の仮)。書かない値は「今と同じ動き」で、0 と書いたのとは違う。
-    // どれも相の決まった物質だけに書ける(ベイクが確かめる)。まだ刻みは読まない(土台の段 1 以降)。GPU の表には入らない
+    // どれも相の決まった物質だけに書ける(ベイクが確かめる)。まだ刻みは読まない(土台の段 1 以降)。GPU の反応の表には入らない
+    // (固体の動き方と安息角だけは見立ての相の表 CvSpeciesPhase に写る。sim::MakeSpeciesPhases。T-0819)
     struct SpeciesTransport {
         std::optional<uint64_t> viscosityMicroPascalSeconds;  // 液体の粘り(µPa·s。水 890)
         std::optional<uint32_t> diffusivityMm2PerS;           // 気体の混ざる速さ(mm²/s。湯気 25)
         std::optional<uint64_t>
             permeabilityNm2;                     // 固体の孔の通しやすさ(nm²。パッケージは µm² で書く。1e-6 µm² = 1 nm²)
         std::optional<uint32_t> suctionPascals;  // 固体の吸い上げ(Pa。乾いた砂 5000)
+        std::optional<SolidMotion> solidMotion;  // 固体が動くか(T-0819。書かない = Fixed)
+        std::optional<uint32_t>
+            reposeAngleDegrees;  // ばらける固体の安息角(度。0〜90。砂 34。書かない Loose は 35 と警告)
 
         [[nodiscard]] bool operator==(const SpeciesTransport&) const = default;
     };

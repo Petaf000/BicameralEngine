@@ -132,7 +132,29 @@ namespace bicameral::script {
             return squareNanometers;
         }
 
-        // 粘り・混ざる速さ・孔・吸い上げ(どれも任意。書かない値は無し = 今と同じ動き)
+        // 固体が動くか(solid_motion = "fixed" | "loose")と安息角(repose_angle_deg。0〜90 の整数)。T-0819・ADR-0359 §1。
+        // どちらも任意(書かない値は無し = 今と同じ)。固体だけに書けるか・書き忘れはベイクが確かめる
+        std::expected<void, std::string> ReadSolidMotion(const ScriptValue& value, const std::string& path,
+                                                         sim::SpeciesTransport& transport) {
+            if (const ScriptValue* declared = value.Find("solid_motion")) {
+                if (!declared->IsString() || (declared->text != "fixed" && declared->text != "loose"))
+                    return std::unexpected(std::format("{}.solid_motion: \"fixed\"・\"loose\" のどちらかで書く", path));
+
+                transport.solidMotion = declared->text == "loose" ? sim::SolidMotion::Loose : sim::SolidMotion::Fixed;
+            }
+
+            if (const ScriptValue* declared = value.Find("repose_angle_deg")) {
+                const auto angle = ReadInteger(*declared, path + ".repose_angle_deg", 0, sim::REPOSE_ANGLE_MAX_DEGREES);
+                if (!angle)
+                    return std::unexpected(angle.error());
+
+                transport.reposeAngleDegrees = static_cast<uint32_t>(*angle);
+            }
+
+            return {};
+        }
+
+        // 粘り・混ざる速さ・孔・吸い上げ・固体の動き方(どれも任意。書かない値は無し = 今と同じ動き)
         std::expected<void, std::string> ReadTransport(const ScriptValue& value, const std::string& path,
                                                        sim::SpeciesTransport& transport) {
             if (const ScriptValue* declared = value.Find("viscosity_upa_s")) {
@@ -167,7 +189,7 @@ namespace bicameral::script {
                 transport.suctionPascals = static_cast<uint32_t>(*suction);
             }
 
-            return {};
+            return ReadSolidMotion(value, path, transport);
         }
 
         std::expected<SpeciesDefinition, std::string> ReadSpecies(const std::string& name, const ScriptValue& value,
@@ -184,7 +206,9 @@ namespace bicameral::script {
                                                           "viscosity_upa_s",
                                                           "diffusivity_mm2_per_s",
                                                           "permeability_um2",
-                                                          "suction_pa"};
+                                                          "suction_pa",
+                                                          "solid_motion",
+                                                          "repose_angle_deg"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
