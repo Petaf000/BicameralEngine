@@ -28,8 +28,8 @@
   画像の基準 2 枚を置き換え(熱い気体が上がる・世界いっぱいが活性)。window_* の残りは通った。ただしホットリロードの 4 本が落ちる(T-0670 が未。判断待ち)。
 
 ## 続き(司令塔・後のチケットへ)
-- **判断待ち(マージの前)**: 表の差し替え(物質の一覧・重力・基準の大気が変わる表)のホットリロードが、地球の環境に依る世界で断られる(区画の作り直し T-0670 が未)。
-  window_hot_reload_record・window_hot_reload_game_record・window_gravity_reload_record・window_play_table_record が落ちる(止めていない)。案とおすすめは ADR-0342。
+- ~~判断待ち(マージの前)~~: 表の差し替えのホットリロードが断られた件は、司令塔が案 (1) を選び、T-0670 を同じブランチに積んで直した(2026-10-19)。
+  window_hot_reload_record・window_hot_reload_game_record・window_gravity_reload_record・window_play_table_record は通る。
 - 写しの窓の試験を戻す: ⑤ の場面は多重解像度へ移した後(T-0725〜T-0727)・サンプルの世界は仮の世界を退かせる時(D-513)。
 - --auto-play の置く場所(気体の区画の真ん中 = 今は世界の真ん中)を場面に合う決め方に(frame_loop.cpp の MakeAutoPlayStrokes)。
 - docs/design/20・07 の区画の記述の整理・ROADMAP の T-0724 の行(本体)。
