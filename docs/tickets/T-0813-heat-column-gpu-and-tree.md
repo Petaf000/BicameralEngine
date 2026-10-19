@@ -14,6 +14,7 @@ CPU の木(gas_tree.cpp)・GPU の木の段にも同じ式(gas_flow.hlsli の Gf
 ## 完了条件(チェックできる形で)
 - [ ] GPU の箱: 強い爆発(1 セル 40 倍・2600 K。gas_reference_test の MakeBlastBox と同じ)で CPU の箱とビット一致・縮めた面の数も一致
 - [ ] GPU の気体の試験(gpu_gas_*・gpu_probe_gas・gpu_multires の気体)がそのまま通る(ふつうの場面では縮めない)
+- [ ] gpu_probe_gas_test の MakeOptions の `.limitMovedHeat = false`(T-0787 の仮)を外し、燃える木箱(約 440 気圧の爆発で列が縮める)も CPU と一致
 - [ ] CPU の木・GPU の木も同じ(木は粗い風上が何度も引くので「出した熱」を taken と同じく小刻みをまたいで数える)
 - [ ] 縮めた面の数を GPU の段からも読み戻せる(帳簿の欄か数える欄)
 

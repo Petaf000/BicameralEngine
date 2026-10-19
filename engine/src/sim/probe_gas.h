@@ -77,6 +77,10 @@ namespace bicameral::sim {
         // そのセルの熱へ移す(エネルギーの和は変わらない)。消した運動量は帳簿へ(世界の帳簿の列「静止の丸め」WL_REASON_REST_ROUNDING)
         uint32_t restSpeedUnits = 0;
 
+        // 陽解法の安全網の熱の列(GasBox::limitMovedHeat。T-0787・ADR-0355。既定で入れる)。false は GPU の区画(まだ列が無い。T-0813)と
+        // 比べる試験だけ(gpu_probe_gas_test)。T-0813 で GPU に入ったら外す
+        bool limitMovedHeat = true;
+
         [[nodiscard]] bool Enabled() const { return sizeCells[0] != 0 && sizeCells[1] != 0 && sizeCells[2] != 0; }
     };
 

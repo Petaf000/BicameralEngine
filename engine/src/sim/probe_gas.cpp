@@ -213,6 +213,7 @@ namespace bicameral::sim {
         const GasConfig config = MakeConfig(table, step.slots);
         step.box = MakeGasBox(config, m_layers.MakeReference(config, step.slots));
         step.box.tick = tick;
+        step.box.limitMovedHeat = m_options.limitMovedHeat;
         step.box.openQ16 = CollectGasOpen(table, region, report);
         if (FastestProjection())
             CheckOpeningsOnStep(config, step.box.openQ16, report);
