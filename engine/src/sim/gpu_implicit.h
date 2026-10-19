@@ -90,6 +90,9 @@ namespace bicameral::sim {
         // (128³ の 1 グループの V サイクルを数十回で 2 秒を超えた。T-0494)ので、ShapeFrom は節が多い段をここに入れる。
         // 下りが止まる段より深くは下りない(値は同じ)
         uint32_t cheapLevels = 0;
+        // V サイクルを判定で止めず、ちょうど options.cycles 回まわす(T-0843。CPU の GasProjectionOptions::fixedCycles と同じ)。
+        // V の前と各 V の後の止める判定(ImSolveConverged)を積まないので、閾値の欄は読まない。RecordSolve だけが見る
+        bool fixedCycles = false;
     };
 
     class GpuImplicit {
@@ -184,6 +187,8 @@ namespace bicameral::sim {
         void UsePredication(bool use) { m_predication = use; }
         // ImTail が節の値を groupshared に置くか(既定 true。T-0587。false は前の形〔全体のメモリとバリア〕。値は同じ。計測で比べる用)
         void UseSharedTail(bool use) { m_constants.tailShared = use ? 1 : 0; }
+        // 次の解きで段ごとの計画の表を作り直させる(計測用。系の形が刻みごとに変わる時の固定費を測る。T-0843)
+        void InvalidatePlan() { m_planReady = false; }
 
         // --- 段ごとの時間(計測用。T-0587)---
         // BeginStageStamps から EndStageStamps まで、Dispatch のたびに(バリアの後に)タイムスタンプを firstIndex + 1 から打つ

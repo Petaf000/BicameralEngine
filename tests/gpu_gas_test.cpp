@@ -13,7 +13,8 @@
 //   --substeps n・--passes n・--dump <ファイル>: 食い違いを調べる用(小刻みの数・小刻みの段をどこで止めるか・最初の刻みの後の中身を書き出す。
 //     HW と WARP で書き出して diff すると、どの面のどの欄が違うかが分かる。T-0185)
 //   --profile: CPU とは比べず、大きい箱(--size n、既定 32 → n × n × n)で 1 刻みの GPU 時間(タイムスタンプ)を測る(--ticks 既定 120。
-//              --isothermal で T-0234 の前の等温の形と比べる。--six で成分 6 つの箱〔T-0598〕)
+//              --isothermal で T-0234 の前の等温の形と比べる。--six で成分 6 つの箱〔T-0598〕。--passes n で小刻みの段を前から n 段だけ)
+//   --t0843: 32³・64³ の小刻み 24 と、小刻み 1 つの段 1・3・9 を続けて測る(T-0843。投影の 1 刻みの見積もり)
 #include "sim/gpu_gas.h"
 #include "common/gas_gpu.hlsli"
 #include "core/aliases.h"
@@ -27,6 +28,7 @@
 #include "sim/world_physics.h"
 #include "standard_world_physics.h"
 
+#include <array>
 #include <cmath>
 #include <ranges>
 #include <string_view>
@@ -720,6 +722,8 @@ namespace {
             return 1;
         }
 
+        gas->SetDebugPassLimit(passLimit);  // --passes(小刻みの段の費用を前から足して分ける。T-0843。既定 9 = 全部)
+
         uint64_t frequency = 0;
         parts.queue.Native()->GetTimestampFrequency(&frequency);
         for (uint32_t round = 0; round < 3; ++round) {  // 1 回目はパイプラインの初回の分を含むので捨てる
@@ -748,8 +752,33 @@ namespace {
 
             const double milliseconds = (double)*elapsed * 1000.0 / (double)frequency / (double)ticks;
             Log(Channel::Sim, Level::Info,
-                "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・成分 {}・小刻み {}・{}: 1 刻み {:.3f} ms", round, size,
-                box.cells.size(), config.speciesCount, config.substeps, isothermal ? "等温" : "断熱", milliseconds);
+                "gpu_gas_test: 計測 {} 回目 {}³ = {} セル・成分 {}・小刻み {}・段 {}・{}: 1 刻み {:.3f} ms({:.2f} "
+                "ns/セル)",
+                round, size, box.cells.size(), config.speciesCount, config.substeps, passLimit,
+                isothermal ? "等温" : "断熱", milliseconds, milliseconds * 1e6 / (double)box.cells.size());
+        }
+
+        return 0;
+    }
+
+    // T-0843: 陽解法の 1 刻み(小刻み 24)と、小刻み 1 つの段を前から足した費用(段 1 = 導く値・3 = 面の力まで・9 = 全部)を
+    // 32³・64³ で続けて測る(投影の 1 刻みの「式を作る・当てる・運ぶ」の見積もりに使う。GPU の順番待ちが 1 回で済むように 1 本で)
+    int ProfileT0843(ID3D12Device5* device, GpuParts& parts) {
+        struct Shape {
+            uint32_t substeps = 0;
+            uint32_t passes = 0;
+            uint64_t ticks = 0;  // 64³ の小刻み 24 は 1 リスト 10 刻みまで(T-0234 の TDR)
+        };
+
+        constexpr std::array<Shape, 4> SHAPES = {Shape{24, 9, 10}, Shape{1, 9, 100}, Shape{1, 3, 100},
+                                                 Shape{1, 1, 100}};
+        for (const uint32_t size : {32u, 64u}) {
+            for (const Shape& shape : SHAPES) {
+                substepsOverride = shape.substeps;
+                passLimit = shape.passes;
+                if (Profile(device, parts, size, shape.ticks, false, false) != 0)
+                    return 1;
+            }
         }
 
         return 0;
@@ -758,6 +787,7 @@ namespace {
     struct GasTestOptions {
         std::vector<std::string> scenes;  // 空なら全部
         bool profile = false;
+        bool t0843 = false;  // ProfileT0843
         bool isothermal = false;
         bool six = false;
         uint32_t size = 32;
@@ -776,6 +806,8 @@ namespace {
                     options.scenes.emplace_back(std::string_view(part));
             } else if (argument == "--profile")
                 options.profile = true;
+            else if (argument == "--t0843")
+                options.t0843 = true;
             else if (argument == "--isothermal")
                 options.isothermal = true;
             else if (argument == "--six")
@@ -805,7 +837,7 @@ namespace {
             Log(Channel::Sim, Level::Error,
                 "使い方: gpu_gas_test [--warp] [--queue direct|compute] [--scene 名前[,名前...]] [--substeps n] "
                 "[--passes n] "
-                "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal] [--six]]");
+                "[--dump ファイル] [--profile [--size n] [--ticks n] [--isothermal] [--six]] [--t0843]");
             return 2;
         }
 
@@ -823,6 +855,9 @@ namespace {
         }
 
         GpuParts parts{.queue = std::move(*queue), .debugRing = std::move(*debugRing)};
+        if (gasOptions->t0843)
+            return ProfileT0843(device->Get(), parts);
+
         if (gasOptions->profile)
             return Profile(device->Get(), parts, gasOptions->size, gasOptions->ticks, gasOptions->isothermal,
                            gasOptions->six);
