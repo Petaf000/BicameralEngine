@@ -1,13 +1,24 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-19(本体の作業役・第 11 巡: D-521〜D-526・t-0766・t-0790・t-0796・t-0788・t-0761 を main へ)
+最終更新: 2026-10-19(本体の作業役・第 11 巡の続き: T-0804 を main で作り、t-0724・t-0819・t-0778・t-0787 を main へ)
 
 ## 状態(3 行以内)
+- **2026-10-19 第 11 巡の続き**: main = T-0804(最速を選ぶ欄)+ t-0724(T-0724 + T-0670)+ t-0819 + t-0778 + t-0787 + 記録。**注意: t-0819・t-0778・t-0787 のマージ後の release ビルドと試験はまだ**(H: の空きが約 470 MB でビルドを止めた。空いたら下の「残り」を流す)。
 - **2026-10-19 第 11 巡(再開)**: main = 第 10 巡の締め + D-521〜D-525 + t-0766(T-0766・T-0773)+ t-0790(T-0790)+ t-0796(T-0796。設計だけ)+ t-0788(T-0788)+ t-0761(T-0761)+ この記録。作業中(マージしない): wt2 t-0724(仕上げ済み 5a27c72。T-0670 を上に入れてからマージ)/ wt3 T-0807 / wt4 T-0787 / wt5 T-0778 / wt6 T-0819。
 - ユーザーの決定 D-521(T-0725・T-0726 を前倒し。それまで仮の世界は世界いっぱいで遅いまま)・D-522(T-0778 は端数の持ち越し)・D-523(ADR-0347 Accepted)・D-524(T-0787 は 2 本試してから閉じる)・D-525(ADR-0359・0360 は全部案 1)・D-526(ADR-0353 Accepted。最速を選ぶ欄は環境に 1 行 = T-0804)。
 - **③' 運ぶ計算の共通の土台(D-509)**: 段 0〜4 はほぼ済み(残り T-0724・T-0784・T-0778・T-0787・T-0804)。次は段 5 の縦切り(T-0807 → T-0725・T-0726)。「続き」は司令塔として並走(COMMANDER.md)。
 
-## この仕事でしたこと(2026-10-19 第 11 巡・本体の作業役)
+## この仕事でしたこと(2026-10-19 第 11 巡の続き・本体の作業役)
+- **T-0804**(main で直接): 環境の `gas_pressure_speed = "sound" | "instant"`。仮の世界の CPU は instant で最速の投影・読み込み(LoadReactionTable・RebuildReactionTable)が
+  CheckLayoutFastestOpenings(sim/gas_fastest_layout。cell_volume.cpp を bicameral_gas_projection へ移した。BakeReactionTable の中からは層の向きで呼べない)で警告・
+  MR と GPU は「最速はまだ効かない」と知らせる。release 警告 0・environment_package・standard_packages・probe_gas・gas_projection(_plates)・multires_gas・reaction_package(_scene・_runtime_stops)・cell_volume が通った(マージ前)。仮は Q131。
+- マージ: **t-0724**(衝突 probe_sim_gas.cpp: GPU の「まだ効かない」を BuildGasWork へ = 表の差し替えでも出る。区画が世界いっぱいになったので cell_volume の読み込みの試験は世界を分ける壁に)→ release 警告 0 まで。
+  **t-0819**(衝突なし)・**t-0778**(perf.md の行を両方)・**t-0787**(probe_gas.cpp: 熱の列の行と CollectProbeGasOpen を両方)。
+- 記録: ROADMAP(T-0804・T-0724・T-0670・T-0819・T-0778・T-0787 を Done・T-0687 の読み替え・T-0813・T-0814 の行)・DECISIONS(D-507 に取り直しの説明・D-522 に ADR-0357・D-524 に ADR-0355)・QUESTIONS Q131〜Q136。
+- **残り(空きができたら)**: release ビルド(警告 0)→ CPU: ^multires・cell_view・cell_volume・transport_apply・reaction_package・environment_package・standard_packages・luau_type_check・probe_liquid・rest_return・probe_phase・gas_reference・gas_projection(_plates)・gas_tree・probe_gas
+  → GPU(4〜8 本ずつ): window_hot_reload_*・window_gravity_reload_*・window_play_table_*・window_play_record/play・window_rebuild_*・window_blank_*・window_mixer_*・gpu_world_copy・gpu_probe_rewind(_regions)・gpu_probe_gas(_warp)・gpu_probe_liquid(_warp)・gpu_probe_sim(_warp)・gpu_probe_sim_tables(_warp)・gpu_gas$・gpu_gas_flow・_blast・_species・_tree・_projection(warp も)。archmap --check は通った。
+
+## 前の仕事(2026-10-19 第 11 巡・本体の作業役)
 - 文書: DECISIONS D-521〜D-526・QUESTIONS に「①〜④ は D-521〜D-524 で答え済み」の注・ROADMAP ③'(T-0725・T-0726 を前倒し・T-0807 を T-0725 の前・T-0819〜T-0821 の置き場所・T-0766・T-0773・T-0790・T-0796 を Done)・ADR-0347・0359・0360・0353 を Accepted・ROADMAP に T-0804・NEXT・COMMANDER(第 11 巡の配り)。
 - マージ(int-12 で 1 本ずつ → main へ早送り): **t-0766**(衝突は map.yaml の注と perf.md の行だけ。両方残した)→ release 警告 0・^multires 13 本・GPU 17 本(gpu_multires_conduction(_warp)・subcycle 4 本・wide 7 本・stress・limits・near_fold(_warp))。**t-0790**(自動。transport_apply.hlsli は両方の足し分が別の所)→ 和集合 CPU 16 本(^multires・cell_view・transport_apply・cell_volume を 1 本の -Filter「^(multires.*|cell_view|transport_apply|cell_volume)$」で)+ GPU の 4 組(上の 17 本 + gpu_multires_implicit_conduction(_levels)(_chain) の 4 本)・archmap --check。**t-0796**(設計だけ)→ archmap --check。**t-0788**(自動。map.yaml)→ gas_projection・gas_projection_plates・cell_volume・probe_gas・multires_gas・rest_return・archmap --check。GPU の和集合は t-0788 を入れた後のビルドで流した。**t-0761**(自動)→ CPU の和集合をもう一度(^multires・gas_projection(_plates)・cell_volume・cell_view・transport_apply・probe_gas・rest_return)+ debug の multires_state。
 - 運転: 1 回目の release ビルドが bicameral.exe のリンクで「別のプロセスが使用中」で落ちた(一時的。もう一度で通った)。順番待ちの間に git を先に通すときは runner/queue の試験のファイルを runner/hold へ退かせて戻した。
