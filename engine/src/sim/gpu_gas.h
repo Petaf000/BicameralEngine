@@ -63,6 +63,20 @@ namespace bicameral::sim {
 
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
 
+        // --- 圧力の投影の 1 回(GpuGasProjection。T-0845)が使う段とバッファ ---
+        // 段の組: Derive(導く値)/ Force(面の力・力を当てる)/ Carry(出ていく割合 〜 移す。面の流れは呼ぶ側の段が先に書く)
+        enum class ProjectionPhase : uint8_t { Derive, Force, Carry };
+        // 段の組を、小刻みの通し番号 roundingTick・t0 = parameters(投影の係数。GasPressureCoefficients の設定)で投げる。内の刻みは進めない
+        void RecordProjectionPhase(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                   ProjectionPhase phase, uint64_t roundingTick,
+                                   D3D12_GPU_VIRTUAL_ADDRESS parameters) const;
+        // u0〜u5(gas_step.hlsl の結び付けの順)・t1〜t3 の番地(t0 は呼ぶ側が持つ)
+        [[nodiscard]] ID3D12Resource* Uav(uint32_t index) const { return m_uavs[index].Get(); }
+        [[nodiscard]] D3D12_GPU_VIRTUAL_ADDRESS SrvAddress(uint32_t index) const {
+            return m_srvs[index].buffer->GetGPUVirtualAddress();
+        }
+        [[nodiscard]] uint32_t CellCount() const { return m_cellCount; }
+
         // --- 調べる用(HW と WARP の食い違いの切り分け。T-0185)。面(u3)とセルごとの合計(u4)を 64bit の語の並びで読み戻す ---
         void RecordDebugReadback(ID3D12GraphicsCommandList10* list) const;
         void SetDebugPassLimit(uint32_t passCount) { m_debugPassLimit = passCount; }  // 小刻みの段をここまでで止める

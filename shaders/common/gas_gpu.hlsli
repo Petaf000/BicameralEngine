@@ -21,6 +21,9 @@ namespace bicameral::sim {
 
     FX_CONST uint32_t
         GAS_GPU_FACES_PER_CELL = 6;  // 面の番号 = (セル × 3 + 軸) × 2 + 端の境界の面(gas_reference.cpp の MakeFace)
+    // 面の段の Dispatch の 1 行のグループの数(T-0845)。面の数 ÷ 64 がこれを超える箱(128³ 以上)は 2 次元で投げ、
+    // 面の番号 = x + y × (これ × 64)(gas_step.hlsl の GasFaceThread)。1 行に収まる箱は今まで通り 1 次元
+    FX_CONST uint32_t GAS_GPU_FACE_ROW_GROUPS = 32768;
 
     // --- 境界・面の片側・成分の延ばし方(gas_reference.h の enum と同じ値)---
     FX_CONST uint32_t GAS_GPU_BOUNDARY_WALL = 0;

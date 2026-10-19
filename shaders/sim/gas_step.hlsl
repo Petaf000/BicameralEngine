@@ -33,6 +33,9 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_roundingTickHigh;
     uint32_t g_cellCount;
     uint32_t g_speciesStride;  // 1 件の成分の欄の数(箱を作る時に決まる)
+#ifdef GAS_STEP_EXTRA_CONSTANTS
+    GAS_STEP_EXTRA_CONSTANTS  // 同じ形の段を足す入れ物(投影の段 gas_projection.hlsl。T-0845)
+#endif
 };
 
 GasGpuParameters GasParameters() {
@@ -321,6 +324,11 @@ bool IsDonor(bool right, int64_t flow) {
     return right ? flow < 0 : flow > 0;
 }
 
+// 面の段のスレッドの面の番号(1 行に収まらない箱は 2 次元で投げる。gas_gpu.hlsli の GAS_GPU_FACE_ROW_GROUPS。T-0845)
+uint32_t GasFaceThread(uint3 thread) {
+    return thread.x + (thread.y * GAS_GPU_FACE_ROW_GROUPS * 64);
+}
+
 // --- 段 1: 導く値(セル)---
 [numthreads(64, 1, 1)] void GasDerive(uint32_t index : SV_DispatchThreadID) {
     if (index >= g_cellCount)
@@ -368,7 +376,8 @@ void ApplyFaceOpenness(GasFaceSides sides, inout GasGpuFace face) {
 }
 
 // --- 段 2: 面の力(gas_reference.cpp の ComputeFaceWeight・ComputeFaceForce)。箱の外の側の力は帳簿へ ---
-[numthreads(64, 1, 1)] void GasFaceForce(uint32_t faceId : SV_DispatchThreadID) {
+[numthreads(64, 1, 1)] void GasFaceForce(uint3 thread : SV_DispatchThreadID) {
+    const uint32_t faceId = GasFaceThread(thread);
     GasFaceSides sides;
     if (!FaceSidesOf(faceId, sides))
         return;
@@ -444,7 +453,8 @@ void ApplyFaceOpenness(GasFaceSides sides, inout GasGpuFace face) {
 }
 
 // --- 段 4: 面の質量の流れと、抑える前の割合(gas_reference.cpp の ComputeFaceFlow・RawFraction)---
-[numthreads(64, 1, 1)] void GasFaceFlow(uint32_t faceId : SV_DispatchThreadID) {
+[numthreads(64, 1, 1)] void GasFaceFlow(uint3 thread : SV_DispatchThreadID) {
+    const uint32_t faceId = GasFaceThread(thread);
     GasFaceSides sides;
     if (!FaceSidesOf(faceId, sides))
         return;
@@ -540,7 +550,8 @@ int64_t HalfSlope(MusclSides muscl, uint64_t fraction, uint32_t s) {
 }
 
 // --- 段 6: 割合を抑え、移す成分の物質量(面。gas_reference.cpp の LimitOutflow の 2 回目・ComputeMovedAmounts)---
-[numthreads(64, 1, 1)] void GasFaceMoved(uint32_t faceId : SV_DispatchThreadID) {
+[numthreads(64, 1, 1)] void GasFaceMoved(uint3 thread : SV_DispatchThreadID) {
+    const uint32_t faceId = GasFaceThread(thread);
     GasFaceSides sides;
     if (!FaceSidesOf(faceId, sides))
         return;
@@ -605,7 +616,8 @@ int64_t HalfSlope(MusclSides muscl, uint64_t fraction, uint32_t s) {
 }
 
 // --- 段 8: 中身を超えた成分を抑え、移すエネルギーと運動量(面。gas_reference.cpp の LimitMovedAmounts の 2 回目・Transfer の前半)---
-[numthreads(64, 1, 1)] void GasFaceFinal(uint32_t faceId : SV_DispatchThreadID) {
+[numthreads(64, 1, 1)] void GasFaceFinal(uint3 thread : SV_DispatchThreadID) {
+    const uint32_t faceId = GasFaceThread(thread);
     GasFaceSides sides;
     if (!FaceSidesOf(faceId, sides))
         return;

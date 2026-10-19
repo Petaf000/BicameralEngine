@@ -110,6 +110,7 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 add_library(bicameral_sim STATIC
   src/sim/gpu_gas.cpp
   src/sim/gpu_gas_tree.cpp  # 気体の多重解像度の木の GPU(T-0209)
+  src/sim/gpu_gas_projection.cpp  # 気体の圧力の投影の 1 刻みの GPU(T-0845。計測と比べる口)
   src/sim/gpu_lab_box.cpp
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp

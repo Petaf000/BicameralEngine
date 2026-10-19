@@ -38,9 +38,16 @@ namespace bicameral::sim {
         bool scaleCutMomentum = false;
     };
 
-    // 最速のときの C_i(Q48)。0 にすると閉じた箱の最も粗い段の対角が 0 になるので、小さい下限を残す
-    // (2^20 は c̃ 約 5.8 km/s = 1 刻みに約 190 セル伝わる速さ。0.5 m のセル・1/60 s)
+    // 最速のときの C_i(Q48。gas_flow.hlsli の GF_PRESSURE_MIN_CAPACITY と同じ)
     inline constexpr uint64_t GAS_PRESSURE_MIN_CAPACITY = (uint64_t)1 << 20;
+
+    // --- 式の部品(GPU の投影〔gpu_gas_projection。T-0845〕も同じ値を使う)---
+    // 1 回の投影の係数(中心の流れ・面の力積・重さの力積を Δt = 1/60 s ÷ substeps で作り直したもの。ほかは箱の係数のまま)
+    [[nodiscard]] GasCoefficients GasPressureCoefficients(const GasBox& box, uint32_t substeps);
+    // 2^45 × 10^6 × T_地面 ÷ c̃²(c̃ mm/s。0 なら 0 = 最速)。C_i = gas_flow.hlsli の GfPressureCapacity(これ, T_i)
+    [[nodiscard]] uint64_t GasPressurePerSound(uint64_t soundMmPerS, uint32_t groundTemperature);
+    // K = A Δt² ÷ Δx(mg/µPa の Q48。全部開いた面)
+    [[nodiscard]] uint64_t GasPressureLinkCoefficient(uint32_t substeps);
 
     // 箱の中のセルどうしの面(周期の面も)
     struct GasPressureLink {

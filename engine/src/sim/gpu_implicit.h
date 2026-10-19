@@ -156,6 +156,11 @@ namespace bicameral::sim {
         [[nodiscard]] bool ReadSolution(std::span<int64_t> values, GpuImplicitCost& cost) const;
         // 作業場(64bit。並びは implicit_conduct.hlsl の先頭: 値 A × 節・値 B × 節・右辺 × 節・刻みの初めの温度 × セル…)
         [[nodiscard]] ID3D12Resource* WorkBuffer() const { return m_buffers[BufferWork].Get(); }
+
+        // 段の節・隣・面と子の一覧(UAV の状態。気体の投影〔GpuGasProjection。T-0845〕が段の形を写した後に重みだけを毎刻み書き直す)
+        [[nodiscard]] ID3D12Resource* NodesBuffer() const { return m_buffers[BufferNodes].Get(); }
+        [[nodiscard]] ID3D12Resource* LinksBuffer() const { return m_buffers[BufferLinks].Get(); }
+        [[nodiscard]] ID3D12Resource* ListsBuffer() const { return m_buffers[BufferLists].Get(); }
         [[nodiscard]] const GpuImplicitLimits& Limits() const { return m_limits; }
 
         // バッファを COMMON に戻す(RecordStep の後。同じリストで次の刻みに RecordReset をもう一度呼ぶため。T-0132)
