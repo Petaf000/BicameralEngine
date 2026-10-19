@@ -48,7 +48,7 @@ namespace bicameral::sim {
         static_assert(sizeof(reaction::RxCell) == RX_CELL_BYTES);
         static_assert(sizeof(ProbeLiquidSpecies) == PROBE_LIQUID_SPECIES_BYTES);
         static_assert(sizeof(ProbeLiquidCellState) == PROBE_LIQUID_CELL_STATE_BYTES);
-        static_assert(sizeof(ProbeLiquidHeader) == 128);
+        static_assert(sizeof(ProbeLiquidHeader) == 132);
         static_assert(PROBE_LIQUID_DYNAMIC_OFFSET - PROBE_LIQUID_HEADER_OFFSET >= sizeof(ProbeLiquidHeader));
 
         uint32_t AlignUp(uint32_t value) {
@@ -97,6 +97,7 @@ namespace bicameral::sim {
             header.speciesOffset = place((uint64_t)header.speciesCount * PROBE_LIQUID_SPECIES_BYTES);
             header.facesOffset = place(cells * 3 * 8);
             header.kineticOffset = place(cells * 3 * 8);
+            header.carryOffset = place(cells * 3 * 8);
             header.potentialOffset = place(cells * 8);
             header.snapshotOffset = place(cells * RX_CELL_BYTES);
             header.stateOffset = place(cells * PROBE_LIQUID_CELL_STATE_BYTES);

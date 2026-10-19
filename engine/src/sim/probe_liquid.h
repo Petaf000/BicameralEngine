@@ -120,8 +120,8 @@ namespace bicameral::sim {
         [[nodiscard]] static std::expected<ProbeLiquidField, std::string> Create(const BakedReactionTable& table,
                                                                                  const ProbeLiquidOptions& options);
 
-        // 液体の 1 刻み。cells は格子の全部のセル(その場で書き換える)。値が変わったセルの番号を changed に足す
-        ProbeLiquidStepReport Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells,
+        // 液体の 1 刻み。cells は格子の全部のセル(その場で書き換える)。tick は世界の刻み(1 mg までの面の順番。T-0778)。値が変わったセルの番号を changed に足す
+        ProbeLiquidStepReport Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells, uint64_t tick,
                                    std::vector<uint32_t>& changed);
 
         // 表の差し替え(T-0670。表は CheckLiquidTableSwap が通したもの = 重力が 0 でない): 見立ての値(重力)を新しい表で作り直す。
@@ -147,7 +147,7 @@ namespace bicameral::sim {
         [[nodiscard]] int64_t PotentialEnergySum() const;
         [[nodiscard]] int64_t KineticEnergySum() const;
 
-        // 面の運動量・エネルギー・帳簿のハッシュ(決定性の検査。セルは呼ぶ側が別に)
+        // 面の運動量・エネルギー・流れの端数・帳簿のハッシュ(決定性の検査。セルは呼ぶ側が別に)
         [[nodiscard]] uint64_t Hash() const;
 
         // 世界の状態のハッシュに足す寄与(区画のセルごとの面の運動量・面の運動のエネルギー・位置のエネルギーの寄与の和 + 帳簿の寄与。
@@ -157,6 +157,7 @@ namespace bicameral::sim {
         // 区画のセル region の欄の値(多重解像度の 1 段の液体〔sim/multires_liquid〕と比べる試験用。T-0717)
         [[nodiscard]] int64_t FaceMomentum(uint32_t axis, uint32_t region) const { return m_faces[axis][region]; }
         [[nodiscard]] int64_t FaceKinetic(uint32_t axis, uint32_t region) const { return m_kinetic[axis][region]; }
+        [[nodiscard]] int64_t FaceCarry(uint32_t axis, uint32_t region) const { return m_carry[axis][region]; }
         [[nodiscard]] int64_t Potential(uint32_t region) const { return m_potential[region]; }
         [[nodiscard]] uint64_t MassBefore(uint32_t region) const { return m_mass[region]; }
 
@@ -170,6 +171,8 @@ namespace bicameral::sim {
             {};  // 見立ての値(重力・セルの 1 辺・摩擦・溢れの倍率・速さの上限・移流。Create で作る)
         std::array<std::vector<int64_t>, 3> m_faces;    // 区画のセルの + 側の面の運動量(格子の軸 x・y・z)
         std::array<std::vector<int64_t>, 3> m_kinetic;  // 面の運動のエネルギー(mJ。セルのエネルギーの外)
+        // 面の持ち越す流れ(順番の刻みにまとめて動かす質量。流れの分母の単位。坂がある 1 mg までの面だけ。T-0778・ADR-0357)
+        std::array<std::vector<int64_t>, 3> m_carry;
         std::vector<int64_t> m_potential;  // セルの液体の位置のエネルギー(mJ。区画の床から。セルのエネルギーの外)
         std::vector<uint64_t> m_mass;      // セルの液体の質量(mg。前の刻みの終わり。段の外での増減を見る。T-0656)
         ProbeLiquidLedger m_ledger;

@@ -180,6 +180,7 @@ namespace bicameral::sim {
         for (uint32_t axis = 0; axis < 3; ++axis) {
             field.m_faces[axis].assign(cells, 0);
             field.m_kinetic[axis].assign(cells, 0);
+            field.m_carry[axis].assign(cells, 0);
         }
 
         field.m_potential.assign(cells, 0);
@@ -210,7 +211,8 @@ namespace bicameral::sim {
             return value == 0;
         };
         for (uint32_t axis = 0; axis < 3; ++axis) {
-            if (!rng::all_of(m_faces[axis], zero) || !rng::all_of(m_kinetic[axis], zero))
+            if (!rng::all_of(m_faces[axis], zero) || !rng::all_of(m_kinetic[axis], zero) ||
+                !rng::all_of(m_carry[axis], zero))
                 return false;
         }
 
@@ -291,6 +293,11 @@ namespace bicameral::sim {
                 hash = Mix(hash, (uint64_t)value);
         }
 
+        for (const auto& carry : m_carry) {
+            for (const int64_t value : carry)
+                hash = Mix(hash, (uint64_t)value);
+        }
+
         for (const int64_t value : m_potential)
             hash = Mix(hash, (uint64_t)value);
 
@@ -313,6 +320,9 @@ namespace bicameral::sim {
             for (const auto& kinetic : m_kinetic)
                 term = ProbeRegionHashAdd(term, kinetic[region]);
 
+            for (const auto& carry : m_carry)
+                term = ProbeRegionHashAdd(term, carry[region]);
+
             term = ProbeRegionHashAdd(term, m_potential[region]);
             const uint64_t mass = region < m_mass.size() ? m_mass[region] : 0;  // GPU の欄は作った時 0
             sum += ProbeRegionHashEnd(ProbeRegionHashAdd(term, (int64_t)mass));
@@ -329,6 +339,7 @@ namespace bicameral::sim {
     // 1 刻みの作業の値(Jacobi 型: 力と流れは刻みの初めの値 states だけから決める)
     struct ProbeLiquidField::StepWork {
         std::array<uint32_t, 3> stride = {};  // 区画の中の隣(格子の軸 x・y・z)
+        uint64_t tick = 0;                    // 世界の刻み(1 mg までの面の順番 LqHoldTurn。T-0778)
         std::vector<LqCellView> states;
         std::vector<int64_t> pressure;  // 質量の単位(mg)
         std::vector<uint64_t> above;    // 上から支えている液体(LqColumnPressure に渡した値。整数の釣り合いが使う)
@@ -367,7 +378,7 @@ namespace bicameral::sim {
     }  // namespace
 
     ProbeLiquidStepReport ProbeLiquidField::Step(const BakedReactionTable& table, std::span<reaction::RxCell> cells,
-                                                 std::vector<uint32_t>& changed) {
+                                                 uint64_t tick, std::vector<uint32_t>& changed) {
         ProbeLiquidStepReport report;
         const auto size = m_options.sizeCells;
         const uint32_t count = RegionCellCount();
@@ -375,6 +386,7 @@ namespace bicameral::sim {
         // --- 刻みの初めの値 ---
         StepWork work;
         work.stride = {1, size[0] * size[2], size[0]};
+        work.tick = tick;
         work.states.resize(count);
         for (uint32_t region = 0; region < count; ++region) {
             work.states[region] = ReadState(table, cells[GridIndex(region)]);
@@ -507,11 +519,13 @@ namespace bicameral::sim {
                     const uint32_t vertical = axis == 1 ? 1u : 0u;
                     force = liquid::LqOpenFaceForce(face, faceOpen, vertical, a, pressure[region], states[neighbor],
                                                     pressure[neighbor], m_params);
-                    force = liquid::LqHoldAtBalance(force, vertical, BalanceSide(work, region),
-                                                    BalanceSide(work, neighbor), m_params);
+                    const uint32_t turn = liquid::LqHoldTurn(work.tick, axis, m_options.minCell[axis] + at[axis]);
+                    force = liquid::LqHoldAtBalance(force, m_carry[axis][region], turn, vertical,
+                                                    BalanceSide(work, region), BalanceSide(work, neighbor), m_params);
                 }
 
                 face = force.face;
+                m_carry[axis][region] = force.carry;
                 report.wall[axis] += force.wall;
                 report.gravity[axis] += force.gravity;
                 report.friction[axis] += force.friction;

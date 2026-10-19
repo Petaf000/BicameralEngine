@@ -248,7 +248,7 @@ namespace {
         bool conserved = true;
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             std::vector<uint32_t> changed;
-            report = field.Step(table, cells, changed);
+            report = field.Step(table, cells, tick, changed);
             Accumulate(runTotals, report);
             if (checkConservation && conserved && !(MeasureTotals(table, field, cells) == before)) {
                 std::printf("  保存が崩れた刻み %llu\n", (unsigned long long)tick);
@@ -533,7 +533,7 @@ namespace {
         for (uint64_t tick = 1; tick <= DAM_TICKS; ++tick) {
             std::vector<uint32_t> changed;
             const auto start = std::chrono::steady_clock::now();
-            const ProbeLiquidStepReport report = field.Step(table, cells, changed);
+            const ProbeLiquidStepReport report = field.Step(table, cells, tick, changed);
             elapsed += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
                            .count();
             Accumulate(&result.totals, report);
@@ -643,9 +643,10 @@ namespace {
 
         const Totals before = MeasureTotals(table, field, cells);
         bool conserved = true;
+        uint64_t stepTick = 0;
         const auto step = [&] {
             std::vector<uint32_t> changed;
-            const ProbeLiquidStepReport report = field.Step(table, cells, changed);
+            const ProbeLiquidStepReport report = field.Step(table, cells, stepTick++, changed);
             const Totals now = MeasureTotals(table, field, cells);
             conserved = conserved && now.energy == before.energy && now.momentum == before.momentum;
 

@@ -184,12 +184,14 @@ namespace bicameral::sim {
             const liquid::LqParams& params;
             const LiquidGrid& grid;
             uint32_t restSpeed = 0;  // 静止の丸めの速さ(µm/s。0 = 切る。T-0777)
+            uint64_t tick = 0;       // 世界の刻み(1 mg までの面の順番 LqHoldTurn。T-0778)
 
             // --- 刻みの初めの値(セルと欄。書き戻すまで木は変えない)---
             std::vector<reaction::RxCell> cells;
             std::vector<LqCellView> states;
             std::array<std::vector<int64_t>, 3> faces;    // 面の運動量(mg)
             std::array<std::vector<int64_t>, 3> kinetic;  // 面の運動のエネルギー(mJ)
+            std::array<std::vector<int64_t>, 3> carry;    // 面の持ち越す流れ(T-0778)
             std::vector<int64_t> potential;               // 位置のエネルギー(mJ)
             std::vector<int64_t> massBefore;              // 前の刻みの終わりの液体の質量(mg)
             std::vector<LqCellView> outside;              // 外の柱の行の見立て(開いた世界の端の相手。T-0774)
@@ -256,12 +258,21 @@ namespace bicameral::sim {
                 return liquid::LqPotentialEnergy(massMilligrams, height, params);
             }
 
+            // 1 mg までの面の順番(LqHoldTurn)。軸の組は仮の世界の格子の x・y・z の順(上 = y)、座標の偶奇はブロックの中の座標
+            // (ブロックの原点はそのレベルの 8 セルの倍数)
+            [[nodiscard]] uint32_t HoldTurn(uint32_t cell, uint32_t axis) const {
+                const uint32_t group = axis == UP_AXIS ? 1u : (axis == multires::WeAxisUpLast(0) ? 0u : 2u);
+
+                return liquid::LqHoldTurn(tick, group, (uint32_t)multires::WeCellAxis(cell % MR_BLOCK_CELLS, axis));
+            }
+
             [[nodiscard]] bool AtRest() const {
                 const auto zero = [](int64_t value) {
                     return value == 0;
                 };
                 for (uint32_t axis = 0; axis < 3; ++axis) {
-                    if (!rng::all_of(faces[axis], zero) || !rng::all_of(kinetic[axis], zero))
+                    if (!rng::all_of(faces[axis], zero) || !rng::all_of(kinetic[axis], zero) ||
+                        !rng::all_of(carry[axis], zero))
                         return false;
                 }
 
@@ -316,6 +327,7 @@ namespace bicameral::sim {
             for (uint32_t axis = 0; axis < 3; ++axis) {
                 faces[axis].resize(count);
                 kinetic[axis].resize(count);
+                carry[axis].resize(count);
             }
 
             potential.resize(count);
@@ -341,6 +353,7 @@ namespace bicameral::sim {
                     for (uint32_t axis = 0; axis < 3; ++axis) {
                         faces[axis][cell] = LoadNestField(nest, fields.momentum, slot, index, axis);
                         kinetic[axis][cell] = LoadNestField(nest, fields.kinetic, slot, index, axis);
+                        carry[axis][cell] = LoadNestField(nest, fields.carry, slot, index, axis);
                     }
 
                     potential[cell] = LoadNestField(nest, fields.potential, slot, index, 0);
@@ -459,11 +472,12 @@ namespace bicameral::sim {
 
                         // 整数の釣り合い(T-0781・ADR-0341)。開いた端の外のセルとの面は見ない(外は柱を持たない無限の溜め)
                         if (LiquidGrid::IsCell(plus))
-                            force = liquid::LqHoldAtBalance(force, vertical, BalanceSide(cell), BalanceSide(plus),
-                                                            params);
+                            force = liquid::LqHoldAtBalance(force, carry[axis][cell], HoldTurn(cell, axis), vertical,
+                                                            BalanceSide(cell), BalanceSide(plus), params);
                     }
 
                     face = force.face;
+                    carry[axis][cell] = force.carry;
                     AddForce(report, axis, force);
                     if (force.desired == 0)
                         continue;
@@ -846,7 +860,8 @@ namespace bicameral::sim {
                     for (uint32_t axis = 0; axis < 3; ++axis) {
                         fieldsChanged = fieldsChanged ||
                                         LoadNestField(nest, fields.momentum, slot, index, axis) != faces[axis][cell] ||
-                                        LoadNestField(nest, fields.kinetic, slot, index, axis) != kinetic[axis][cell];
+                                        LoadNestField(nest, fields.kinetic, slot, index, axis) != kinetic[axis][cell] ||
+                                        LoadNestField(nest, fields.carry, slot, index, axis) != carry[axis][cell];
                     }
 
                     fieldsChanged = fieldsChanged ||
@@ -870,6 +885,7 @@ namespace bicameral::sim {
                     for (uint32_t axis = 0; axis < 3; ++axis) {
                         StoreNestField(nest, fields.momentum, slot, index, axis, faces[axis][cell]);
                         StoreNestField(nest, fields.kinetic, slot, index, axis, kinetic[axis][cell]);
+                        StoreNestField(nest, fields.carry, slot, index, axis, carry[axis][cell]);
                     }
 
                     StoreNestField(nest, fields.potential, slot, index, 0, potential[cell]);
@@ -960,7 +976,11 @@ namespace bicameral::sim {
         // 前の質量は保存量ではない(セルの液体の写し)ので余りを帳簿へ出さない SAME(レベルの単位なので、粗くした平均 = 和 ÷ 8 は量の規則と同じ数)
         fields.massBefore = Register(nest, "liquid.mass_before", sf::SF_PLACE_CELL, sf::SF_SCALE_SAME,
                                      sf::SF_FLAG_HASHED, 1);
-        for (const uint32_t field : {fields.momentum, fields.kinetic, fields.potential, fields.massBefore}) {
+        // 1 mg までの面の持ち越す流れ(T-0778・ADR-0357)は量でない(まだ動いていない質量の割合)ので SAME。粗く = 子の平均・細かく = 親と同じ
+        // (どちらも次の刻みに LqHoldAtBalance が LQ_HOLD_CARRY_MG で止める)
+        fields.carry = Register(nest, "liquid.flux_carry", sf::SF_PLACE_FACE, sf::SF_SCALE_SAME, sf::SF_FLAG_HASHED, 3);
+        for (const uint32_t field :
+             {fields.momentum, fields.kinetic, fields.potential, fields.massBefore, fields.carry}) {
             if (field == MULTIRES_NO_FIELD)
                 return std::unexpected("液体の欄を登録できない(名前が重なる・根を置いた後)");
         }
@@ -968,7 +988,7 @@ namespace bicameral::sim {
         return result;
     }
 
-    MultiresLiquidStepReport MultiresLiquid::Step(MultiresNest& nest, const BakedReactionTable& table,
+    MultiresLiquidStepReport MultiresLiquid::Step(MultiresNest& nest, const BakedReactionTable& table, uint64_t tick,
                                                   std::vector<uint32_t>& changedSlots) const {
         MultiresLiquidStepReport report;
         const LiquidGrid grid = BuildGrid(nest);
@@ -982,6 +1002,7 @@ namespace bicameral::sim {
                         .grid = grid,
                         .restSpeed = m_options.restSpeedMicrometersPerSecond};
         step.Read(nest, m_fields, report);
+        step.tick = tick;
         if (report.wetCells == 0 && step.AtRest()) {
             // 液体が無く、動いている面もエネルギーも無い(ブランクの世界・液体の無い表)。前の質量だけ 0 に
             rng::fill(step.massBefore, int64_t{0});
