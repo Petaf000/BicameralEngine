@@ -154,6 +154,35 @@ namespace bicameral::sim {
         return GAS_GPU_LEDGER_AMOUNTS + (speciesStride * 8);
     }
 
+    // --- 面の件の置き場(T-0918)---
+    // 面の番号(セル × GAS_GPU_FACES_PER_CELL。乱数の丸めの鍵と面の両側の決め方はこの番号のまま)のうち、本当にあるのは
+    // 「セルのマイナス側の面」と「箱の端のプラス側の境界の面」だけなので、件はその数だけ置く(前は番号の数 = セル × 6 を取り、半分が空いていた):
+    //   [マイナス側の面 × 3 × セル][x の端の面 × sy·sz][y の端の面 × sx·sz][z の端の面 × sx·sy]
+    // 周期的な軸の端の面は無いが、置き場は軸によらず取る(箱の表面の分だけで小さい)。
+    FX_FN uint32_t GasGpuFaceSlotCount(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ) {
+        return (3 * sizeX * sizeY * sizeZ) + (sizeY * sizeZ) + (sizeX * sizeZ) + (sizeX * sizeY);
+    }
+
+    // 面の番号 → 件の置き場の番号(端の境界の面は、端のセルの残りの 2 軸の座標で並べる)
+    FX_FN uint32_t GasGpuFaceSlot(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ, uint32_t faceId) {
+        const uint32_t cell = faceId / GAS_GPU_FACES_PER_CELL;
+        const uint32_t axis = (faceId / 2) % 3;
+        if ((faceId & 1) == 0)
+            return (cell * 3) + axis;
+
+        const uint32_t x = cell % sizeX;
+        const uint32_t y = (cell / sizeX) % sizeY;
+        const uint32_t z = cell / (sizeX * sizeY);
+        const uint32_t base = 3 * sizeX * sizeY * sizeZ;
+        if (axis == 0)
+            return base + y + (sizeY * z);
+
+        if (axis == 1)
+            return base + (sizeY * sizeZ) + x + (sizeX * z);
+
+        return base + (sizeY * sizeZ) + (sizeX * sizeZ) + x + (sizeX * y);
+    }
+
 #ifdef __cplusplus
 }  // namespace bicameral::sim
 #endif

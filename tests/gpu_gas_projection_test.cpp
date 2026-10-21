@@ -857,6 +857,7 @@ namespace {
         if (!recorded || !replay.queue->ExecuteAndWait() || !projection->ReadCost(cost))
             return std::unexpected("1 刻み目の記録か実行に失敗");
 
+        projection->ReleaseStaging();  // 形の写しの元は写した後は要らない(T-0918。形が変わる刻みで作り直す)
         if (replay.shapeFromCost)
             projection->SetSolveShape(sim::GpuImplicit::ShapeFrom(cost));
 
@@ -934,10 +935,12 @@ namespace {
             Log(Channel::Sim, Level::Info,
                 "| T-0845 時間 | {}³ | {} | 通し {:.3f} ms(中央 {:.3f})| {:.2f} ns/セル | 式 {:.2f} | 段の重み {:.2f} "
                 "| "
-                "V 2 回 {:.2f} | 当てる {:.2f} | 運ぶ {:.2f} | VRAM {:.0f} B/セル(部品 {:.0f})|",
+                "V 2 回 {:.2f} | 当てる {:.2f} | 運ぶ {:.2f} | バッファ {:.0f} B/セル(部品 {:.0f})| LOCAL の差 {:.0f} "
+                "B/セル |",
                 edge, SceneName(scene), timing->total, timing->median, ns(timing->total), ns(timing->parts[0]),
                 ns(timing->parts[1]), ns(timing->parts[2]), ns(timing->parts[3]), ns(timing->parts[4]),
-                (double)timing->deviceBytes / cells, (double)timing->equilibriumBytes / cells);
+                (double)timing->deviceBytes / cells, (double)timing->equilibriumBytes / cells,
+                (double)timing->vramBytes / cells);
         }
 
         return {};

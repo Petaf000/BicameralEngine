@@ -40,6 +40,9 @@ namespace bicameral::sim {
 
         constexpr uint32_t SWEEP_BITS = 8;
 
+        constexpr uint64_t ZERO_UPLOAD_BYTES = uint64_t{1}
+                                               << 20;  // RecordZeroValues の 0 の写しの元(これを繰り返して写す)
+
         constexpr uint32_t UAV_COUNT = 11;
         constexpr uint32_t ARGS_BYTES = 3 * sizeof(uint32_t);  // D3D12_DISPATCH_ARGUMENTS
 
@@ -282,18 +285,21 @@ namespace bicameral::sim {
     }
 
     // バッファの大きさ(上限から。空にならないように 1 つ分は持つ)
+    // solveOnly はセルと安全網の印を 1 つ分だけ(面は上限 0 なので面の欄も無い。T-0918)
     uint64_t GpuImplicit::BufferBytes(Buffer buffer) const {
         const uint64_t nodes = m_limits.nodes;
         const uint64_t cells = m_limits.cells;
         const uint64_t faces = m_limits.faces;
+        const uint64_t cellRecords = m_limits.solveOnly ? 1 : cells;
         switch (buffer) {
-            case BufferCells: return cells * sizeof(ImGpuCell);
+            case BufferCells: return cellRecords * sizeof(ImGpuCell);
             case BufferFaces: return std::max<uint64_t>(1, faces) * sizeof(ImGpuFace);
             case BufferLists: return ((2 * faces) + nodes + 1) * sizeof(uint32_t);
             case BufferNodes: return nodes * sizeof(ImGpuNode);
             case BufferLinks: return std::max<uint64_t>(1, m_limits.links) * sizeof(ImGpuLink);
-            case BufferWork: return ((3 * nodes) + cells + (2 * faces) + 1) * sizeof(int64_t);
-            case BufferState: return (STATE_WORDS + cells) * sizeof(uint32_t);
+            case BufferWork:
+                return ((3 * nodes) + (m_limits.solveOnly ? 0 : cells) + (2 * faces) + 1) * sizeof(int64_t);
+            case BufferState: return (STATE_WORDS + cellRecords) * sizeof(uint32_t);
             case BufferWide: return uint64_t{WIDE_WORDS} * sizeof(int64_t);
             case BufferPredicate: return uint64_t{PREDICATE_WORDS} * sizeof(uint64_t);
             case BufferPlan: return (IM_PLAN_FLAGS_BASE + (4 * nodes)) * sizeof(uint32_t);
@@ -309,14 +315,16 @@ namespace bicameral::sim {
             if (resource != nullptr)
                 total += resource->GetDesc().Width;
         };
-        for (uint32_t i = 0; i < BufferCount; ++i) {
+        for (uint32_t i = 0; i < BufferCount; ++i)
             add(m_buffers[i].Get());
-            add(m_uploads[i].Get());
-        }
+
+        add(m_staging.Get());
+        for (const ComPtr<ID3D12Resource>& retired : m_retiredStaging)
+            add(retired.Get());
 
         for (ID3D12Resource* resource :
              {m_cellsReadback.Get(), m_stateReadback.Get(), m_wideReadback.Get(), m_planReadback.Get(),
-              m_solveUpload.Get(), m_solutionReadback.Get(), m_timestampReadback.Get()})
+              m_solveUpload.Get(), m_solutionReadback.Get(), m_timestampReadback.Get(), m_zeroUpload.Get()})
             add(resource);
 
         return total;
@@ -353,15 +361,6 @@ namespace bicameral::sim {
             m_buffers[i] = gpu::CreateBuffer(device, BufferBytes(buffer), gpu::BufferKind::UnorderedAccess);
             if (!m_buffers[i])
                 return std::unexpected("陰解法のバッファを作れない");
-
-            if (!UPLOADED[i])
-                continue;
-
-            const uint64_t uploadBytes = buffer == BufferPlan ? uint64_t{IM_PLAN_HEADER_WORDS} * sizeof(uint32_t)
-                                                              : BufferBytes(buffer);
-            m_uploads[i] = gpu::CreateBuffer(device, uploadBytes, gpu::BufferKind::Upload);
-            if (!m_uploads[i])
-                return std::unexpected("陰解法の写すバッファを作れない");
         }
 
         m_cellsReadback = gpu::CreateBuffer(device, BufferBytes(BufferCells), gpu::BufferKind::Readback);
@@ -371,13 +370,23 @@ namespace bicameral::sim {
                                            gpu::BufferKind::Readback);
         m_timestampReadback = gpu::CreateBuffer(device, uint64_t{MAX_TIMESTAMPS} * sizeof(uint64_t),
                                                 gpu::BufferKind::Readback);
-        m_solveUpload = gpu::CreateBuffer(device, uint64_t{3} * m_limits.cells * sizeof(int64_t),
-                                          gpu::BufferKind::Upload);
-        m_solutionReadback = gpu::CreateBuffer(device, uint64_t{m_limits.cells} * sizeof(int64_t),
-                                               gpu::BufferKind::Readback);
-        if (!m_cellsReadback || !m_stateReadback || !m_wideReadback || !m_planReadback || !m_timestampReadback ||
-            !m_solveUpload || !m_solutionReadback)
+        if (!m_cellsReadback || !m_stateReadback || !m_wideReadback || !m_planReadback || !m_timestampReadback)
             return std::unexpected("陰解法の読み戻しを作れない");
+
+        // --- 一般の右辺で解く形の写し(試験と計測。solveOnly は持たない)と 0 の写しの元 ---
+        if (!m_limits.solveOnly) {
+            m_solveUpload = gpu::CreateBuffer(device, uint64_t{3} * m_limits.cells * sizeof(int64_t),
+                                              gpu::BufferKind::Upload);
+            m_solutionReadback = gpu::CreateBuffer(device, uint64_t{m_limits.cells} * sizeof(int64_t),
+                                                   gpu::BufferKind::Readback);
+            if (!m_solveUpload || !m_solutionReadback)
+                return std::unexpected("陰解法の解きの写しを作れない");
+        }
+
+        const uint64_t zeroBytes = std::min(ZERO_UPLOAD_BYTES, uint64_t{m_limits.cells} * sizeof(int64_t));
+        m_zeroUpload = gpu::CreateBuffer(device, zeroBytes, gpu::BufferKind::Upload);
+        if (!m_zeroUpload || !WriteUpload(m_zeroUpload.Get(), std::vector<std::byte>(zeroBytes)))
+            return std::unexpected("陰解法の 0 の写しの元を作れない");
 
         const D3D12_QUERY_HEAP_DESC queryDesc{
             .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = MAX_TIMESTAMPS, .NodeMask = 0};
@@ -388,9 +397,13 @@ namespace bicameral::sim {
     }
 
     // CPU の系を GPU の並びに: 節は段 0(= セル)から順に全部を 1 本に、隣・親・子は全体の番号に。
-    // 番号の一覧は面の一覧(面の数 × 2)→ 面の上限 × 2 まで空き → 子の一覧。計画の見出しに段の表と面の数
+    // 番号の一覧は面の一覧(面の数 × 2)→ 面の上限 × 2 まで空き → 子の一覧。計画の見出しに段の表と面の数。
+    // solveOnly は面とセルを写さない(面の数 0 として子の一覧を番号の一覧の先頭から。T-0918)
     bool GpuImplicit::RecordUpload(ID3D12GraphicsCommandList* list, const ImplicitGrid& grid) {
-        const GpuImplicitLimits need = LimitsOf(grid);
+        GpuImplicitLimits need = LimitsOf(grid);
+        if (m_limits.solveOnly)
+            need.faces = 0;
+
         if (grid.cells.empty() || need.cells > m_limits.cells || need.faces > m_limits.faces ||
             need.nodes > m_limits.nodes || need.links > m_limits.links || need.levels > m_limits.levels)
             return false;
@@ -399,12 +412,42 @@ namespace bicameral::sim {
         for (const ImplicitGridLevel& level : grid.levels)
             levelOffsets.push_back(levelOffsets.back() + static_cast<uint32_t>(level.levels.size()));
 
-        auto [lists, faceStarts] = MakeCellFaces(grid);
+        std::array<std::vector<std::byte>, BufferCount> images = MakeImages(grid, levelOffsets, need);
+
+        return RecordImages(list, images);
+    }
+
+    std::array<std::vector<std::byte>, GpuImplicit::BufferCount> GpuImplicit::MakeImages(
+        const ImplicitGrid& grid, const std::vector<uint32_t>& levelOffsets, const GpuImplicitLimits& need) const {
+        std::vector<uint32_t> lists;
+        std::vector<uint32_t> faceStarts;
+        if (!m_limits.solveOnly) {
+            auto cellFaces = MakeCellFaces(grid);
+            lists = std::move(cellFaces.first);
+            faceStarts = std::move(cellFaces.second);
+        }
+
         auto [nodes, links] = MakeNodes(grid, levelOffsets, lists);
-        lists.insert(lists.begin() + static_cast<std::ptrdiff_t>(2 * grid.faces.size()),
+        lists.insert(lists.begin() + static_cast<std::ptrdiff_t>(2 * need.faces),
                      size_t{2} * (m_limits.faces - need.faces), 0u);
         if (links.empty())
             links.push_back({});
+
+        std::vector<uint32_t> plan(IM_PLAN_HEADER_WORDS, 0);
+        plan[IM_PLAN_LEVEL_COUNT] = need.levels;
+        plan[IM_PLAN_FACES] = need.faces;
+        for (uint32_t depth = 0; depth < grid.levels.size(); ++depth) {
+            plan[PlanDepthWord(IM_PLAN_NODE_OFFSET, depth)] = levelOffsets[depth];
+            plan[PlanDepthWord(IM_PLAN_NODE_COUNT, depth)] = levelOffsets[depth + 1] - levelOffsets[depth];
+        }
+
+        std::array<std::vector<std::byte>, BufferCount> images;
+        images[BufferLists] = ToBytes(lists);
+        images[BufferNodes] = ToBytes(nodes);
+        images[BufferLinks] = ToBytes(links);
+        images[BufferPlan] = ToBytes(plan);
+        if (m_limits.solveOnly)
+            return images;
 
         std::vector<ImGpuFace> faces(std::max<size_t>(1, grid.faces.size()));
         for (size_t f = 0; f < grid.faces.size(); ++f) {
@@ -417,39 +460,79 @@ namespace bicameral::sim {
                         .coarseFraction = grid.cells[face.coarse].coarseFraction ? 1u : 0u};
         }
 
-        std::vector<uint32_t> plan(IM_PLAN_HEADER_WORDS, 0);
-        plan[IM_PLAN_LEVEL_COUNT] = need.levels;
-        plan[IM_PLAN_FACES] = need.faces;
-        for (uint32_t depth = 0; depth < grid.levels.size(); ++depth) {
-            plan[PlanDepthWord(IM_PLAN_NODE_OFFSET, depth)] = levelOffsets[depth];
-            plan[PlanDepthWord(IM_PLAN_NODE_COUNT, depth)] = levelOffsets[depth + 1] - levelOffsets[depth];
-        }
-
-        std::array<std::vector<std::byte>, BufferCount> images;
         images[BufferCells] = ToBytes(MakeCellImage(grid, faceStarts));
         images[BufferFaces] = ToBytes(faces);
-        images[BufferLists] = ToBytes(lists);
-        images[BufferNodes] = ToBytes(nodes);
-        images[BufferLinks] = ToBytes(links);
-        images[BufferPlan] = ToBytes(plan);
 
-        // --- 写すものは COMMON から暗黙に COPY_DEST へ昇格して写し、ほかは COMMON から。どれも UAV へ ---
+        return images;
+    }
+
+    // 像を 1 つの写しの元(足りなければ作り直し、ReleaseStaging で捨てる。T-0918)に詰め、写すものは COMMON から暗黙に
+    // COPY_DEST へ昇格して写し、ほかは COMMON から。どれも UAV へ。写しの元は前の写しのリストが GPU で終わってから書き直す(前と同じ約束)
+    bool GpuImplicit::RecordImages(ID3D12GraphicsCommandList* list,
+                                   const std::array<std::vector<std::byte>, BufferCount>& images) {
+        uint64_t totalBytes = 0;
+        for (const std::vector<std::byte>& image : images)
+            totalBytes += image.size();
+
+        if (!m_staging || m_staging->GetDesc().Width < totalBytes) {
+            ComPtr<ID3D12Device> device;
+            if (totalBytes == 0 || FAILED(list->GetDevice(IID_PPV_ARGS(&device))))
+                return false;
+
+            // 前の写しの元はまだ走っていないリストが読むかもしれないので、ReleaseStaging まで持つ
+            if (m_staging)
+                m_retiredStaging.push_back(std::move(m_staging));
+
+            m_staging = gpu::CreateBuffer(device.Get(), totalBytes, gpu::BufferKind::Upload);
+        }
+
+        ID3D12Resource* staging = m_staging.Get();
+        std::vector<std::byte> packed;
+        packed.reserve(totalBytes);
+        for (const std::vector<std::byte>& image : images)
+            packed.insert(packed.end(), image.begin(), image.end());
+
+        if (staging == nullptr || !WriteUpload(staging, packed))
+            return false;
+
         std::array<D3D12_RESOURCE_BARRIER, BufferCount> barriers{};
+        uint64_t offset = 0;
         for (uint32_t i = 0; i < BufferCount; ++i) {
             barriers[i] = gpu::Transition(m_buffers[i].Get(), D3D12_RESOURCE_STATE_COMMON,
                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            if (!UPLOADED[i])
+            if (!UPLOADED[i] || images[i].empty())
                 continue;
 
-            if (!WriteUpload(m_uploads[i].Get(), images[i]))
-                return false;
-
-            list->CopyBufferRegion(m_buffers[i].Get(), 0, m_uploads[i].Get(), 0, images[i].size());
+            list->CopyBufferRegion(m_buffers[i].Get(), 0, staging, offset, images[i].size());
+            offset += images[i].size();
             barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         }
 
         list->ResourceBarrier(BufferCount, barriers.data());
         m_planReady = false;
+
+        return true;
+    }
+
+    bool GpuImplicit::RecordZeroValues(ID3D12GraphicsCommandList* list, uint32_t cellCount) {
+        if (cellCount > m_limits.cells)
+            return false;
+
+        ID3D12Resource* work = m_buffers[BufferWork].Get();
+        D3D12_RESOURCE_BARRIER barrier = gpu::Transition(work, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                         D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &barrier);
+
+        // --- 値 A(先頭)と値 B(節の上限の後ろ)を、0 の写しの元を繰り返して ---
+        const uint64_t zeroBytes = m_zeroUpload->GetDesc().Width;
+        const uint64_t bytes = uint64_t{cellCount} * sizeof(int64_t);
+        for (const uint64_t base : {uint64_t{0}, uint64_t{m_limits.nodes} * sizeof(int64_t)}) {
+            for (uint64_t done = 0; done < bytes; done += zeroBytes)
+                list->CopyBufferRegion(work, base + done, m_zeroUpload.Get(), 0, std::min(zeroBytes, bytes - done));
+        }
+
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
 
         return true;
     }
@@ -697,7 +780,7 @@ namespace bicameral::sim {
 
     bool GpuImplicit::RecordStep(ID3D12GraphicsCommandList* list, uint64_t debugRing, const ImplicitOptions& options,
                                  uint32_t maxLimitRounds, const GpuImplicitRecordShape& shape) {
-        if (options.method != ImplicitMethod::Multigrid)
+        if (options.method != ImplicitMethod::Multigrid || m_limits.solveOnly)
             return false;
 
         // 記録の形(T-0154)。計画(ImPlanArgs)も同じ段の数で ImTail の境を切る
@@ -783,7 +866,8 @@ namespace bicameral::sim {
 
     bool GpuImplicit::RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing, const ImplicitOptions& options,
                                   const GpuImplicitRecordShape& shape) {
-        if (options.method != ImplicitMethod::Multigrid)
+        // solveOnly は刻みの初めの欄(閾値)を持たないので、回数を固定する形だけ(T-0918)
+        if (options.method != ImplicitMethod::Multigrid || (m_limits.solveOnly && !shape.fixedCycles))
             return false;
 
         const uint32_t requested = shape.dispatchLevels == 0 ? m_maxDispatchLevels : shape.dispatchLevels;
@@ -838,7 +922,8 @@ namespace bicameral::sim {
     bool GpuImplicit::RecordUploadSolve(ID3D12GraphicsCommandList* list, std::span<const int64_t> rhs,
                                         std::span<const int64_t> values, std::span<const int64_t> thresholds) {
         const size_t cells = rhs.size();
-        if (cells == 0 || cells > m_limits.cells || values.size() != cells || thresholds.size() != cells)
+        if (m_limits.solveOnly || cells == 0 || cells > m_limits.cells || values.size() != cells ||
+            thresholds.size() != cells)
             return false;
 
         // --- 写すバッファ: [右辺][初めの近似][閾値] ---
@@ -939,7 +1024,7 @@ namespace bicameral::sim {
     }
 
     bool GpuImplicit::Read(ImplicitGrid& grid, GpuImplicitCost& cost) const {
-        if (grid.cells.size() > m_limits.cells)
+        if (m_limits.solveOnly || grid.cells.size() > m_limits.cells)
             return false;
 
         std::vector<ImGpuCell> cells(grid.cells.size());

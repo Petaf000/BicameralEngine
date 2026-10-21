@@ -5,7 +5,9 @@
 //   NodesBuffer・LinksBuffer・ListsBuffer・WorkBuffer・ScratchBuffer と上限 MaxNodes・MaxLinks)と、解いた値(作業場の値 A)を当てる段。
 // 1 回の解き = 法則の段 0 → RecordLevels(粗い段の重み)→ RecordSolve(V サイクルをちょうど solver.cycles 回)→ RecordMeter(残差の計器。任意)。
 // 今は節がどれも同じレベルの系(気体の箱)と、閉じない解き(全部の節が未知数)だけ。閉じた領域の GPU 版は T-0939・
-// 違うレベルの節(木のセル)と GPU で段を作るのは T-0918 の作業場の詰めと一緒に。
+// 違うレベルの節(木のセル)と GPU で段を作るのは T-0939。
+// VRAM(T-0918): GpuImplicit は解くだけの形(solveOnly。セル・面・面の一覧・閾値の欄を持たない)で、上限は段の形の構造の上限
+// (ShapeLimits。節は段 0 の座標を親へ縮めた鎖の全部・隣は節 × 6)。形の写しの元(アップロード)は写した後に ReleaseStaging で捨てられる。
 // データの流れ: 法則の状態(VRAM)→ 法則の段 0 → この部品の段 → 作業場の値 A → 法則の当てる段。CPU は記録だけ(D-107)。
 #pragma once
 
@@ -24,15 +26,19 @@ namespace bicameral::sim {
     struct GpuEquilibriumOptions {
         ImplicitOptions solver = {.method = ImplicitMethod::Multigrid, .cycles = 2};  // V サイクルの回数(ちょうど)
         GpuImplicitRecordShape shape = {.fixedCycles = true};  // V の記録の形(値は同じ。fixedCycles は必ず立てる)
-        // 段の形は刻みで変わりうる(段の数・粗い段の隣)ので、上限を「最初の形 × headroomPercent ÷ 100 + 64」にする(T-0845 の 2 倍。詰めは T-0918)
-        uint32_t headroomPercent = 200;
-        bool meterResiduals = false;  // 残差の計器の段を積む(試験と記録。既定は積まない)
+        bool meterResiduals =
+            false;  // 残差の計器の段を積む(試験と記録。既定は積まない。節ごとの計器の語は積む時だけ持つ)
     };
 
     class GpuEquilibrium {
     public:
         // 部品の GPU 版が解ける系か(どの段も節が同じレベル・粗い段の行は ROW_MAX まで)
         [[nodiscard]] static bool Supports(const ImplicitGrid& grid);
+
+        // 段 0 の節が同じなら、刻みで段の形が変わってもこれに収まる上限(T-0918): 節 = 段 0 の座標を親へ 1 段ずつ縮めた鎖の
+        // どの段の数も足したもの(同じレベルの系は段 k の節 = 段 0 の座標 >> k の異なるものの数。止まる段だけが刻みで変わる)、
+        // 隣 = 節 × 6(段 0 は面の数 EQ_GPU_FACES_MAX、粗い段は行の上限 ROW_MAX まで。Supports が確かめる)
+        [[nodiscard]] static GpuImplicitLimits ShapeLimits(const ImplicitGrid& grid);
 
         [[nodiscard]] static std::expected<GpuEquilibrium, std::string> Create(ID3D12Device5* device,
                                                                                const ImplicitGrid& grid,
@@ -44,11 +50,13 @@ namespace bicameral::sim {
         void RecordBegin(ID3D12GraphicsCommandList* list) { m_implicit.RecordReset(list); }
         // リストの終わり(バッファを COMMON へ。読み戻しの後に)
         void RecordEnd(ID3D12GraphicsCommandList* list) { m_implicit.RecordRelease(list); }
+        // 形の写しの元を捨てる(RecordUpload を積んだリストが GPU で終わった後。次の RecordUpload が作り直す)
+        void ReleaseStaging() { m_implicit.ReleaseStaging(); }
 
         // 粗い段(段 1 から 1 段 1 Dispatch)→ V サイクル → 残差の計器(meterResiduals の時)。法則の段 0 の後に
         void RecordLevels(ID3D12GraphicsCommandList* list, uint64_t debugRing) const;
         [[nodiscard]] bool RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing);
-        void RecordMeter(ID3D12GraphicsCommandList* list, uint64_t debugRing) const;
+        void RecordMeter(ID3D12GraphicsCommandList* list, uint64_t debugRing) const;  // meterResiduals の時だけ積む
 
         // 残差の計器の最大(式の単位)を読み戻す(RecordMeter の後。RecordEnd の前)
         void RecordResidualReadback(ID3D12GraphicsCommandList* list);

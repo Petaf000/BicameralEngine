@@ -7,6 +7,7 @@
 #include <format>
 
 #include "common/equilibrium.hlsli"
+#include "core/aliases.h"
 #include "gpu/resources.h"
 
 namespace bicameral::sim {
@@ -15,8 +16,8 @@ namespace bicameral::sim {
 
         constexpr uint32_t THREADS_PER_GROUP = 64;  // equilibrium.hlsl の numthreads
         constexpr uint32_t ROOT_CONSTANT_COUNT = 5;
-        constexpr uint32_t MIN_HEADROOM = 64;  // 段の上限の余裕(節・隣)
-        constexpr uint32_t MAX_LEVELS = 64;    // 段の数の上限(CPU の MAX_GRID_LEVELS)
+        constexpr uint32_t MAX_LEVELS = 64;     // 段の数の上限(CPU の MAX_GRID_LEVELS)
+        constexpr uint32_t LINKS_PER_NODE = 6;  // 段 0 の面の数・粗い段の行の上限(EQ_GPU_FACES_MAX・ROW_MAX)
 
         // u0 節・u1 隣・u2 子の一覧・u3 作業場・u4 作業用の 128bit / b0 / デバッグのリング
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
@@ -36,8 +37,18 @@ namespace bicameral::sim {
             return offsets;
         }
 
-        uint32_t WithHeadroom(uint32_t count, uint32_t percent) {
-            return (uint32_t)(((uint64_t)count * percent) / 100) + MIN_HEADROOM;
+        using CellKey = std::array<int64_t, 3>;
+
+        // 座標を 1 段縮めて(算術シフト = CPU の Coarsen の >> 1)同じものをまとめる
+        std::vector<CellKey> CoarserKeys(const std::vector<CellKey>& keys) {
+            std::vector<CellKey> coarser(keys.size());
+            for (size_t i = 0; i < keys.size(); ++i)
+                coarser[i] = {keys[i][0] >> 1, keys[i][1] >> 1, keys[i][2] >> 1};
+
+            rng::sort(coarser);
+            coarser.erase(std::unique(coarser.begin(), coarser.end()), coarser.end());
+
+            return coarser;
         }
 
     }  // namespace
@@ -63,15 +74,32 @@ namespace bicameral::sim {
         return true;
     }
 
+    GpuImplicitLimits GpuEquilibrium::ShapeLimits(const ImplicitGrid& grid) {
+        const ImplicitGridLevel& cells = grid.levels.front();
+        std::vector<CellKey> keys(cells.x.size());
+        for (size_t i = 0; i < keys.size(); ++i)
+            keys[i] = {cells.x[i], cells.y[i], cells.z[i]};
+
+        uint64_t nodes = keys.size();
+        for (uint32_t depth = 1; depth < MAX_LEVELS && keys.size() > 1; ++depth) {
+            keys = CoarserKeys(keys);
+            nodes += keys.size();
+        }
+
+        return {.cells = (uint32_t)grid.cells.size(),
+                .faces = 0,
+                .nodes = (uint32_t)nodes,
+                .links = (uint32_t)(nodes * LINKS_PER_NODE),
+                .levels = MAX_LEVELS,
+                .solveOnly = true};
+    }
+
     std::expected<GpuEquilibrium, std::string> GpuEquilibrium::Create(ID3D12Device5* device, const ImplicitGrid& grid,
                                                                       const GpuEquilibriumOptions& options) {
         if (!Supports(grid))
             return std::unexpected("部品の GPU 版で解けない段の形(違うレベルの節・長い行。T-0939)");
 
-        GpuImplicitLimits limits = GpuImplicit::LimitsOf(grid);
-        limits.nodes = WithHeadroom(limits.nodes, options.headroomPercent);
-        limits.links = WithHeadroom(limits.links, options.headroomPercent);
-        limits.levels = MAX_LEVELS;
+        const GpuImplicitLimits limits = ShapeLimits(grid);
         auto implicit = GpuImplicit::Create(device, limits);
         if (!implicit)
             return std::unexpected(implicit.error());
@@ -98,7 +126,8 @@ namespace bicameral::sim {
         }
 
         // --- 作業用の 128bit の語(容量・対角・面の係数)と残差の計器 ---
-        const uint64_t words = multires::EqGpuScratchWords(result.MaxNodes(), result.MaxLinks(), result.m_cells);
+        const uint32_t meteredNodes = options.meterResiduals ? result.m_cells : 0;
+        const uint64_t words = multires::EqGpuScratchWords(result.MaxNodes(), result.MaxLinks(), meteredNodes);
         result.m_scratch = gpu::CreateBuffer(device, words * sizeof(uint64_t), gpu::BufferKind::UnorderedAccess);
         result.m_readback = gpu::CreateBuffer(device, sizeof(uint64_t), gpu::BufferKind::Readback);
         if (!result.m_scratch || !result.m_readback)
@@ -115,10 +144,8 @@ namespace bicameral::sim {
         if (!zeroValues)
             return true;
 
-        // 前の答え(値 A・B)を 0 に。右辺は法則の段が書き、閾値は fixedCycles なので読まない
-        const std::vector<int64_t> zeros(m_cells, 0);
-
-        return m_implicit.RecordUploadSolve(list, zeros, zeros, zeros);
+        // 前の答え(値 A・B)を 0 に。右辺は法則の段が書き、閾値は fixedCycles なので読まない(solveOnly は閾値の欄を持たない)
+        return m_implicit.RecordZeroValues(list, m_cells);
     }
 
     void GpuEquilibrium::RecordPass(ID3D12GraphicsCommandList* list, uint64_t debugRing, Pass pass,
@@ -161,6 +188,9 @@ namespace bicameral::sim {
     }
 
     void GpuEquilibrium::RecordMeter(ID3D12GraphicsCommandList* list, uint64_t debugRing) const {
+        if (!m_options.meterResiduals)
+            return;  // 節ごとの計器の語は meterResiduals の時だけ持つ
+
         const Constants constants{.maxNodes = MaxNodes(), .maxLinks = MaxLinks(), .cellCount = m_cells};
         RecordPass(list, debugRing, Pass::Meter, constants, m_cells);
     }

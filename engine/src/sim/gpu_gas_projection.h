@@ -68,6 +68,9 @@ namespace bicameral::sim {
         // リストの終わり(陰解法のバッファを COMMON へ。読み戻しの後に)
         void RecordEnd(ID3D12GraphicsCommandList10* list) { m_equilibrium.RecordEnd(list); }
 
+        // 段の形の写しの元(アップロードのヒープ)を捨てる。形を写したリストが GPU で終わった後に呼ぶ(T-0918。次に写す時に作り直す)
+        void ReleaseStaging() { m_equilibrium.ReleaseStaging(); }
+
         // 1 刻み。timed なら部分の区切りにタイムスタンプを打つ(EnableTiming の後。MAX_TIMED_STEPS 刻みまで)
         [[nodiscard]] bool RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                       bool timed = false);
