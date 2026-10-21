@@ -5,6 +5,8 @@
 //     (∓ は x の面で −・上の面で +。φ = 角 × dx ÷ 2 は反時計回りが正)
 //   固定した面(半分の長さの梁で動かない壁へ): ½ 2ka n²  +  ½ 8ka (t ± φ/2)²  +  ½ (2ka/3) φ²
 //   PerComponent: 面ごとに伸び縮み ka とずれ ka/2 のばね(回りなし)。固定した面は 2ka と ka。
+//   段の斜めの棒(stairBraces。T-0944): 下のセル a → 斜め上のセル c(横の向き s = ±1)に ½ (ka/24) (s Δx + Δup)²
+//     (斜めの長さ √2 dx・軸の硬さ ka/12 の棒。Δ = c − a)。x と上の面に ka/24・x ⇄ 上の結合は遅らせる。
 // 成分ごとの式の対角と負の非対角(C-0 が解く形)は面と固定した面に、成分の間の項と φ どうしの正の非対角は遅らせて右辺の項へ。
 #include "sim/support_law.h"
 
@@ -64,6 +66,7 @@ namespace bicameral::sim {
         m_bondX = BondUnit(m_scene.stiffnessKpa, m_scene.cellMm) / 6;
         const uint64_t upKpa = m_scene.stiffnessUpKpa != 0 ? m_scene.stiffnessUpKpa : m_scene.stiffnessKpa;
         m_bondUp = BondUnit(upKpa, m_scene.cellMm) / 6;
+        m_brace = (m_bondX + m_bondUp) / 8;
         m_weight = CellWeight(m_scene);
 
         m_index.assign((size_t)width * height, (uint32_t)NO_CELL);
@@ -100,6 +103,22 @@ namespace bicameral::sim {
 
             if ((clamps & SUPPORT_CLAMP_BOTTOM) != 0)
                 AddClamp({.cell = cell, .axis = 1, .side = -1});
+
+            if (!m_options.stairBraces || m_options.form != SupportForm::BeamLattice || up + 1 >= height)
+                continue;
+
+            // 斜め上の隣があり、間の 2 セル(横の隣・上の隣)の片方だけがある = 階段の段
+            for (const int32_t across : {-1, 1}) {
+                const int64_t sideX = (int64_t)x + across;
+                if (sideX < 0 || sideX >= (int64_t)width)
+                    continue;
+
+                const uint32_t diagonal = m_index[(size_t)sideX + (size_t)width * (up + 1)];
+                const bool side = m_index[(size_t)sideX + (size_t)width * up] != NO_CELL;
+                const bool above = m_index[x + (size_t)width * (up + 1)] != NO_CELL;
+                if (diagonal != NO_CELL && side != above)
+                    AddBrace({.low = cell, .high = diagonal, .across = across});
+            }
         }
     }
 
@@ -153,6 +172,22 @@ namespace bicameral::sim {
         const int64_t sign = clamp.axis == 0 ? clamp.side : -clamp.side;
         AddLag(across, clamp.cell, SUPPORT_TURN, clamp.cell, sign, 24 * b);
         AddLag(SUPPORT_TURN, clamp.cell, across, clamp.cell, sign, 24 * b);
+    }
+
+    // ½ q (s Δx + Δup)²: x と上の面に q・x ⇄ 上の項(同じセルに +s q・相手のセルに −s q)は遅らせる
+    void SupportLaw::AddBrace(const Brace& brace) {
+        m_braces.push_back(brace);
+        const uint64_t q = m_brace;
+        for (const uint32_t c : {SUPPORT_X, SUPPORT_UP})
+            m_systems[c].faces.push_back({.fine = brace.low, .coarse = brace.high, .gap = 0, .coefficient = ImWide(q)});
+
+        for (const uint32_t row : {SUPPORT_X, SUPPORT_UP}) {
+            const uint32_t column = row == SUPPORT_X ? SUPPORT_UP : SUPPORT_X;
+            AddLag(row, brace.low, column, brace.low, brace.across, q);
+            AddLag(row, brace.low, column, brace.high, -brace.across, q);
+            AddLag(row, brace.high, column, brace.high, brace.across, q);
+            AddLag(row, brace.high, column, brace.low, -brace.across, q);
+        }
     }
 
     void SupportLaw::AddLag(uint32_t rowComponent, uint32_t row, uint32_t columnComponent, uint32_t column,
@@ -226,6 +261,15 @@ namespace bicameral::sim {
         return -Flow(6 * m_bondX, difference - turns);
     }
 
+    int64_t SupportLaw::UpForceOnBrace(const Brace& brace) const {
+        const auto [lowX, lowUp] = m_cells[brace.low];
+        const auto [highX, highUp] = m_cells[brace.high];
+        const int64_t slide = Value(highX, highUp, SUPPORT_X) - Value(lowX, lowUp, SUPPORT_X);
+        const int64_t lift = Value(highX, highUp, SUPPORT_UP) - Value(lowX, lowUp, SUPPORT_UP);
+
+        return -Flow(m_brace, brace.across * slide + lift);
+    }
+
     int64_t SupportLaw::UpForceOnClamp(const Clamp& clamp) const {
         const auto [x, up] = m_cells[clamp.cell];
         const int64_t lift = Value(x, up, SUPPORT_UP);
@@ -239,6 +283,37 @@ namespace bicameral::sim {
         return -Flow(24 * m_bondX, 2 * lift + clamp.side * Value(x, up, SUPPORT_TURN));
     }
 
+    // 面の力(梁の切り口。dx = セル・ka = 6b): N = ka Δn・ずれ = ka (Δt ∓ (φ_a + φ_b))・6M/dx = ka (φ_b − φ_a)。
+    // 縁の力 = N ± 6M/dx(回り φ は反時計回りが正なので、x の面は下の縁が +・上の面は +x の縁が +)
+    SupportFaceForces SupportLaw::FaceForces(uint32_t x, uint32_t up, uint32_t axis) const {
+        const uint32_t highX = axis == 0 ? x + 1 : x;
+        const uint32_t highUp = axis == 0 ? up : up + 1;
+        if (m_options.form != SupportForm::BeamLattice || highX >= m_scene.width || highUp >= m_scene.height)
+            return {};
+
+        if (m_index[x + (size_t)m_scene.width * up] == NO_CELL ||
+            m_index[highX + (size_t)m_scene.width * highUp] == NO_CELL)
+            return {};
+
+        const uint64_t b = axis == 0 ? m_bondX : m_bondUp;
+        const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
+        const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
+        const int64_t turnLow = Value(x, up, SUPPORT_TURN);
+        const int64_t turnHigh = Value(highX, highUp, SUPPORT_TURN);
+        const int64_t stretch = Value(highX, highUp, along) - Value(x, up, along);
+        const int64_t slide = Value(highX, highUp, across) - Value(x, up, across);
+        const int64_t turns = axis == 0 ? -(turnLow + turnHigh) : turnLow + turnHigh;
+
+        SupportFaceForces forces;
+        forces.axialMn = Flow(6 * b, stretch);
+        forces.shearMn = Flow(6 * b, slide + turns);
+        const int64_t bend = Flow(6 * b, turnHigh - turnLow);
+        forces.lowSideMn = axis == 0 ? forces.axialMn + bend : forces.axialMn - bend;
+        forces.highSideMn = axis == 0 ? forces.axialMn - bend : forces.axialMn + bend;
+
+        return forces;
+    }
+
     SupportLedger SupportLaw::Ledger() const {
         SupportLedger ledger;
         std::vector<int64_t> net(m_cells.size(), -m_weight);
@@ -247,6 +322,12 @@ namespace bicameral::sim {
             const int64_t force = UpForceOnBond(bond);
             net[bond.high] += force;
             net[bond.low] -= force;
+        }
+
+        for (const Brace& brace : m_braces) {
+            const int64_t force = UpForceOnBrace(brace);
+            net[brace.high] += force;
+            net[brace.low] -= force;
         }
 
         for (const Clamp& clamp : m_clamps) {

@@ -54,6 +54,10 @@ namespace bicameral::sim {
     struct SupportOptions {
         SupportForm form = SupportForm::BeamLattice;
         EquilibriumOptions equilibrium;  // 成分 1 つの解き(V の回数は法則の定数)
+        // 段の斜めの棒(T-0944 の 2 本目。BeamLattice だけ): 角だけで接する斜めの隣のうち、間の 2 セルの片方だけがある所(階段の段)に、
+        // 2 つのセルの中心を結ぶ軸の棒(係数 ka/12。斜めの向きの伸び縮みだけ)を足す。斜めの階段(アーチ・傾いた柱)が回りでしか
+        // つながらず柔らかすぎる分(内径 4 m のアーチで +14 %)を埋める。真っすぐな物(段が無い)では何も変わらない
+        bool stairBraces = false;
     };
 
     // 帳簿(上向きの力。mN)
@@ -63,6 +67,15 @@ namespace bicameral::sim {
         int64_t netMn = 0;  // セルごとの上向きの力(重さ・面の力・固定した面の力)の和。面の力は両側に同じ値で当たるので
                             // netMn == reactionMn − weightMn が解の精度によらず成り立つ(帳簿)
         uint64_t worstCellMn = 0;  // セルに残る上向きの力の絶対値の最大(釣り合いの誤差)
+    };
+
+    // 面の力(面 1 つ。セル (x, up) と +軸の隣の間。mN)。表面の引きの応力(割れの判定 R-B2 が読む)は側の力 ÷ 面積 dx²
+    // (梁の N/A ± 6M/(A·dx)。M = 曲げの力の回り。1 セルの厚さで梁の式と一致・T-0944)
+    struct SupportFaceForces {
+        int64_t axialMn = 0;     // 軸の力 N(引きが正)
+        int64_t shearMn = 0;     // ずれの力(横の向きの正へ +軸の側のセルを押し返す向き)
+        int64_t lowSideMn = 0;   // −横の側の縁の力(x の面 = 下の縁・上の面 = −x の縁)。N ± 6M/dx
+        int64_t highSideMn = 0;  // +横の側の縁の力(x の面 = 上の縁・上の面 = +x の縁)
     };
 
     class SupportLaw {
@@ -79,6 +92,8 @@ namespace bicameral::sim {
         // セル (x, up) の成分 component の値(2^-16 nm)。セルが無ければ 0
         int64_t Value(uint32_t x, uint32_t up, uint32_t component) const;
         SupportLedger Ledger() const;
+        // セル (x, up) と +軸(0 = x・1 = 上)の隣の間の面の力。面が無い(どちらかのセルが無い)・成分ごとの形なら全部 0
+        SupportFaceForces FaceForces(uint32_t x, uint32_t up, uint32_t axis) const;
         uint64_t Hash() const;
         uint32_t CellCount() const { return (uint32_t)m_cells.size(); }
 
@@ -87,6 +102,13 @@ namespace bicameral::sim {
             uint32_t low = 0;   // −軸の側のセル
             uint32_t high = 0;  // +軸の側のセル
             uint32_t axis = 0;  // 0 = x・1 = 上
+        };
+
+        // 段の斜めの棒: low = 下のセル・high = 斜め上のセル・across = 横の向き(+1 = +x へ・−1 = −x へ)
+        struct Brace {
+            uint32_t low = 0;
+            uint32_t high = 0;
+            int32_t across = 0;
         };
 
         struct Clamp {
@@ -107,6 +129,8 @@ namespace bicameral::sim {
         void Build();
         void AddBond(const Bond& bond);
         void AddClamp(const Clamp& clamp);
+        void AddBrace(const Brace& brace);
+        int64_t UpForceOnBrace(const Brace& brace) const;  // high のセルへ(low へは同じ値の逆)
         void AddLag(uint32_t rowComponent, uint32_t row, uint32_t columnComponent, uint32_t column, int64_t sign,
                     uint64_t magnitude);
         int64_t UpForceOnClamp(const Clamp& clamp) const;
@@ -117,12 +141,14 @@ namespace bicameral::sim {
         SupportOptions m_options;
         uint64_t m_bondX = 0;   // b = ka ÷ 6(ka = E × セル。2^-32 mN/nm)。x の面
         uint64_t m_bondUp = 0;  // 上の面
+        uint64_t m_brace = 0;   // 段の斜めの棒の b/4(= ka/24。横と上の硬さの平均)
         int64_t m_weight = 0;   // セル 1 つの重さ(mN)
 
         std::vector<std::array<uint32_t, 2>> m_cells;  // セルの (x, up)
         std::vector<uint32_t> m_index;                 // [x + width × up] → セル(無ければ UINT32_MAX)
         std::vector<Bond> m_bonds;
         std::vector<Clamp> m_clamps;
+        std::vector<Brace> m_braces;
 
         std::array<EquilibriumSystem, SUPPORT_COMPONENTS> m_systems;
         std::array<std::vector<Lag>, SUPPORT_COMPONENTS> m_lags;
