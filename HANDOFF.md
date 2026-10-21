@@ -1,13 +1,22 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-21(本体の作業役・試作 B0・B1 と C-1 のマージ)
+最終更新: 2026-10-21(本体の作業役・C-0 の CPU 版と M-0/M-1 のマージ)
 
 ## 状態(3 行以内)
-- **試作 B0・B1(t-0866-b0b1)と C-1 の 1 チャット目(t-0854-c1)を main へ入れた**(衝突なし)。確かめの結果は下の「この仕事でしたこと」。M-0・M-1(wt4 t-0900-m1)は Done(t-0845 の上なので C-0 の後にマージ)。
-- **作業中**: wt2 t-0853-c0(C-0)・wt6 t-0910-rr0(R-R0)・wt3 R1(T-0868)・wt5 T-0921(疎な頁)・wt4 R-T1(T-0879)。
-- **次**: C-0 のマージ(→ t-0900-m1・T-0922)→ 最低機 Q11(M-0・M-1 の結果が揃った)→ T-0858 棚卸し。判断待ち Q137〜Q140・Q142(どれも仮で進めている)。
+- **C-0 の CPU 版(t-0853-c0。t-0845 = T-0842〜T-0845 を含む)と測り M-0・M-1(t-0900-m1)を main へ入れた**。確かめは下の「この仕事でしたこと」。
+- **作業中**: wt2 T-0915(C-0 の GPU 版)・wt6 t-0910-rr0(R-R0)・wt3 R1(T-0868)・wt5 T-0921(疎な頁)・wt4 R-T1(T-0879)。
+- **次**: R-B1 支え(T-0871)・R2/R3(T-0869)・R-T2(T-0856)は C-0 の CPU 版の上で始められる・T-0922(温めた始まりの付け替え)→ 最低機 Q11 → T-0858 棚卸し。判断待ち Q137〜Q140・Q142・Q143。
 
-## この仕事でしたこと(2026-10-21・本体の作業役・t-0866-b0b1 と t-0854-c1 のマージ)
+## この仕事でしたこと(2026-10-21・本体の作業役・t-0853-c0 と t-0900-m1 のマージ)
+- **マージ**(`--no-ff`): t-0853-c0(5b3a546。部品 engine/src/sim/equilibrium・shaders/common/equilibrium.hlsli・陰の圧力を部品の上へ・tests/gas_projection_scenes.h・equilibrium_test・20 §13.1・ADR-0397 Proposed)→ t-0900-m1(1bead7c。docs/perf.md・T-0900・tests/gpu_test_memory.h)。
+  衝突は t-0853-c0 の 2 か所だけ(map.yaml の案 B の箱の辺と C-0 の部品の辺・tests/CMakeLists.txt の case_b_box と equilibrium)= 両方残した。t-0900-m1 は自動で合わさった。
+- **確かめ**: release のビルド警告 0・CPU 34 本が通った(equilibrium 521 秒・gas_projection・case_b_*・field_storage・multires_*・gas_*・probe_*ほか。約 38 分)・GPU 11 本が通った(gpu_gas_projection・gpu_gas・gpu_gas_flow・gpu_probe_gas・gpu_probe_liquid・gpu_probe_sim・gpu_probe_rewind*・gpu_world_copy・gpu_multires_conduction・gpu_multires_implicit_conduction)・archmap --check OK・float_check(sim・common)OK。
+- **記録**: ROADMAP(T-0853 を CPU 版済み + 残り T-0915〜T-0919 の行・T-0842〜T-0845 を Done・T-0851 の注・R-B1 に「C-0 の上で始められる」)・QUESTIONS **Q143【エンジン】支えの値を 1 つの硬さか向きごとの硬さか(R-B1 の結果待ち。T-0919)**・
+  COMMANDER(wt2 の T-0939〜T-0941・ADR-0406・ADR-0398 は未使用・次の番号 **D-608・ADR-0407・T-0942・Q144**)。
+- **司令塔へ**: C-0 の部品の道は今は既定で切ってある(`equilibrium = false`)。T-0915 の GPU の比べが通ったら既定にして前の道(Project の fixedCycles の枝)を消す(T-0853 の仮)。
+  B0 の陰の圧力は `PressureSolver` を返す関数を 1 つ足して部品へ差し替えられる(T-0866 の注)。T-0922(C-1 の温めた始まりの付け替え)は始められる。t-0842・t-0843・t-0845 のブランチは中身が main に入った(t-0844・t-0846・t-0847 は入っていない = 下の表のまま)。
+
+## 前の仕事(2026-10-21・本体の作業役・t-0866-b0b1 と t-0854-c1 のマージ)
 - **マージ**(`--no-ff`・衝突なし): t-0866-b0b1(d5b23ec。engine/src/sim/case_b/〔ライブラリ bicameral_case_b〕・tests/case_b_box_test〔ctest case_b_box・case_b_gauge〕・21 §5.4・map.yaml のノード 2 つ)→
   t-0854-c1(87da3ee。state_field.hlsli の印 SF_FLAG_DERIVED・SF_FLAG_WARM_START・nest_fields の眠る/起こすの分岐・multires_state の保存点は SfSaved の欄だけ・HashTruthLeaves・tests/field_storage_test・ADR-0399)。
 - **確かめ**: release のビルド警告 0・CPU 33 本(case_b_box・case_b_gauge・field_storage・multires_*・gas_*・probe_*・cell_view・cell_volume・transport_apply・rest_return・各パッケージ)が通った(約 29 分)・GPU 8 本(gpu_world_copy・gpu_probe_rewind・gpu_probe_rewind_regions・gpu_probe_gas・gpu_probe_liquid・gpu_probe_sim・gpu_multires_conduction・gpu_multires_implicit_conduction)が通った(state_field.hlsli を GPU と共有しているため)・archmap --check OK。直したものなし
@@ -57,10 +66,10 @@ main に入っていないブランチは 21 本(ahead = main に無いコミッ
 | t-0820 | (wt6 が 10/21 に WIP 保存) | 5/3 | T-0820 占める層(物の占める体積を見立ての入力に。ADR-0360) | **仕上げて入れる**(T-0858。claude/28 §3)。物と場の口 = 列 3 / 案 B の前提 |
 | t-0838 | 215090c | 2/0 | 広さの見積もり S1 の測り(perf.md 4 行・チケット・tests の --scale・gpu_test_memory.h) | **結果を記録して閉じる**(main へ入れる案: 測りの道具が M-0 で再び使える)→ 列 1a M-0 |
 | t-0840 | 0e5a90f | 2/0 | 描画が乗った時の取り分(--render-load・perf.md の表・チケット。engine/src/render/render_load) | **結果を記録して閉じる**(main へ入れる案: --render-load は M-0・Q11 で使う)→ 列 1a M-0 |
-| t-0842 | 0327f9c | 1/0 | 本物の音速の陰解法の賭けを CPU で(研究) | 結果を記録して閉じる(圧力の解き方 = Q1 の根拠)→ C-0 の入力 |
-| t-0843 | 80f1804 | 3/0 | 本物の音速の投影の GPU 1 刻みの測り | 同上 → C-0・M-1 の入力 |
+| t-0842 | 0327f9c | **2026-10-21 C-0 の中で main へ入った** · 1/0 | 本物の音速の陰解法の賭けを CPU で(研究) | 結果を記録して閉じる(圧力の解き方 = Q1 の根拠)→ C-0 の入力 |
+| t-0843 | 80f1804 | **2026-10-21 C-0 の中で main へ入った** · 3/0 | 本物の音速の投影の GPU 1 刻みの測り | 同上 → C-0・M-1 の入力 |
 | t-0844 | 1cad3ec | 2/0 | 陰解法と陽解法の 3 つの違いの根(研究。Q1b の押し出す仕事の直し) | 同上 → C-0(Q1b の口) |
-| t-0845 | c707f36 | 5/0 | 陰の圧力の通しの計測(32³ 32〜34・64³ 20〜23・128³ 18〜22 ns/セル。CPU と毎刻みビット一致) | **C-0 の最初の使い手の元**(T-0853 で移す)・M-1 の入力。マージするかは C-0 の設計で |
+| t-0845 | c707f36 | **2026-10-21 C-0 の中で main へ入った** · 5/0 | 陰の圧力の通しの計測(32³ 32〜34・64³ 20〜23・128³ 18〜22 ns/セル。CPU と毎刻みビット一致) | **C-0 の最初の使い手の元**(T-0853 で移す)・M-1 の入力。マージするかは C-0 の設計で |
 | t-0846 | 404a771 | 3/0 | 陰解法で 10〜20 m の波を保つ形(研究。θ を状態で・TR-BDF2) | 結果を記録して閉じる(Q1c。波は消えたまま進める)→ 2 周目で再開の元 |
 | t-0847 | 357ee56 | 4/0 | 陰解法(CN)の育ちの根(研究) | 同上 |
 | t-0807 | c3e46dd | 4/22 | T-0807 MR の気体と液体を活性のブロックだけで(途中) | **案 B の判定まで保留**(列 7。C-1 欄の持ち方と重なる) |
