@@ -349,11 +349,17 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // 要約に入る欄か(truthOnly なら真実の欄だけ = 温めた始まりも除く。T-0854)
+        bool FieldInHash(const MultiresField& field, bool truthOnly) {
+            return truthOnly ? state_field::SfTruthHashed(field.desc) : state_field::SfHashed(field.desc);
+        }
+
         // 本物の葉のセル index の登録した欄(ハッシュに入るセル・面の欄。欄が無ければ hash のまま。T-0711)
-        uint64_t HashCellFields(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint32_t index) {
+        uint64_t HashCellFields(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint32_t index,
+                                bool truthOnly) {
             for (uint32_t f = 0; f < nest.fields.size(); ++f) {
                 const MultiresField& field = nest.fields[f];
-                if (!state_field::SfHashed(field.desc) || !state_field::SfOnCells(field.desc))
+                if (!FieldInHash(field, truthOnly) || !state_field::SfOnCells(field.desc))
                     continue;
 
                 for (uint32_t c = 0; c < field.desc.components; ++c)
@@ -364,10 +370,10 @@ namespace bicameral::sim {
         }
 
         // 本物のブロック slot のブロックの欄と、世界の欄(slot = MR_NO_BLOCK)の要約
-        uint64_t HashOtherFields(uint64_t hash, const MultiresNest& nest, uint32_t slot) {
+        uint64_t HashOtherFields(uint64_t hash, const MultiresNest& nest, uint32_t slot, bool truthOnly) {
             const uint32_t place = slot == MR_NO_BLOCK ? state_field::SF_PLACE_WORLD : state_field::SF_PLACE_BLOCK;
             for (const MultiresField& field : nest.fields) {
-                if (!state_field::SfHashed(field.desc) || field.desc.place != place)
+                if (!FieldInHash(field, truthOnly) || field.desc.place != place)
                     continue;
 
                 const size_t first = slot == MR_NO_BLOCK ? 0 : size_t{slot} * field.desc.components;
@@ -760,27 +766,40 @@ namespace bicameral::sim {
             PullBackLevel(nest, view, firstShadowSlot + i);
     }
 
-    uint64_t HashRealLeaves(const MultiresNest& nest) {
-        uint64_t hash = 0;
-        for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
-            const MrBlock& block = nest.blocks[slot];
-            if (block.kind != MR_BLOCK_REAL)
-                continue;
+    namespace {
 
-            hash = FxHashCombine(hash, HashBlock(block));
-            hash = HashOtherFields(hash, nest, slot);
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrIsSteppedCell(block, index))
+        // 本物の葉の要約(truthOnly なら真実の欄だけ。T-0854)
+        uint64_t HashLeaves(const MultiresNest& nest, bool truthOnly) {
+            uint64_t hash = 0;
+            for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+                const MrBlock& block = nest.blocks[slot];
+                if (block.kind != MR_BLOCK_REAL)
                     continue;
 
-                hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
-                hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
-                hash = HashCellOverflow(hash, nest, slot, index);
-                hash = HashCellFields(hash, nest, slot, index);
+                hash = FxHashCombine(hash, HashBlock(block));
+                hash = HashOtherFields(hash, nest, slot, truthOnly);
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    if (!MrIsSteppedCell(block, index))
+                        continue;
+
+                    hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
+                    hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
+                    hash = HashCellOverflow(hash, nest, slot, index);
+                    hash = HashCellFields(hash, nest, slot, index, truthOnly);
+                }
             }
+
+            return HashOtherFields(hash, nest, MR_NO_BLOCK, truthOnly);
         }
 
-        return HashOtherFields(hash, nest, MR_NO_BLOCK);
+    }  // namespace
+
+    uint64_t HashRealLeaves(const MultiresNest& nest) {
+        return HashLeaves(nest, false);
+    }
+
+    uint64_t HashTruthLeaves(const MultiresNest& nest) {
+        return HashLeaves(nest, true);
     }
 
     uint64_t HashWholeNest(const MultiresNest& nest) {

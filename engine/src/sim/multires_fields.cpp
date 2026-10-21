@@ -56,6 +56,18 @@ namespace bicameral::sim {
             return field.values[PageAddress(nest, field, block.page, valueCell, component)];
         }
 
+        // 導かれる値の頁を眠らせる時の値: 覆われていないセルの平均(−∞ 向きの切り捨て。全部覆われていれば 0。T-0854・20 §10.3)
+        int64_t SleepMean(const MultiresNest& nest, const MultiresField& field, uint32_t slot, uint32_t component) {
+            const MrBlock& block = nest.blocks[slot];
+            SfMeanSum sum = SfMakeMeanSum();
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (!MrIsCoveredCell(block, index))
+                    sum = SfAddMeanValue(sum, field.values[PageAddress(nest, field, block.page, index, component)]);
+            }
+
+            return SfMeanValue(sum);
+        }
+
     }  // namespace
 
     uint32_t RegisterNestField(MultiresNest& nest, std::string name, const SfFieldDesc& desc) {
@@ -212,7 +224,8 @@ namespace bicameral::sim {
             const MrBlock& block = nest.blocks[slot];
             FX_ASSERT(!MrIsUniform(block));
             for (const MultiresField& field : nest.fields) {
-                if (!SfOnCells(field.desc))
+                // 導かれる値は畳むのを止めない(眠る時に平均して残す。T-0854・20 §10.3)
+                if (!SfOnCells(field.desc) || SfDerived(field.desc))
                     continue;
 
                 for (uint32_t c = 0; c < field.desc.components; ++c) {
@@ -233,8 +246,11 @@ namespace bicameral::sim {
                 if (!SfOnCells(field.desc))
                     continue;
 
-                for (uint32_t c = 0; c < field.desc.components; ++c)
-                    field.values[UniformAddress(field, slot, c)] = FoldValue(nest, field, slot, c);
+                for (uint32_t c = 0; c < field.desc.components; ++c) {
+                    const int64_t value = SfDerived(field.desc) ? SfSleepValue(SleepMean(nest, field, slot, c))
+                                                                : FoldValue(nest, field, slot, c);
+                    field.values[UniformAddress(field, slot, c)] = value;
+                }
             }
         }
 
@@ -288,7 +304,8 @@ namespace bicameral::sim {
             // 頁を持つ子は控えめに「広げる」(欄の頁を 64 組ずつ調べる手間を取らない。欄のある世界だけの扱い)
             const bool childUniform = MrIsUniform(nest.blocks[childSlot]);
             for (const MultiresField& field : nest.fields) {
-                if (!SfOnCells(field.desc))
+                // 導かれる値は木の形・頁の使い方を変えない(一様な親は自分の値のまま。T-0854)
+                if (!SfOnCells(field.desc) || SfDerived(field.desc))
                     continue;
 
                 if (!childUniform)
@@ -313,6 +330,10 @@ namespace bicameral::sim {
                 MultiresField& field = nest.fields[f];
                 if (!SfOnCells(field.desc))
                     continue;  // ブロック・世界の欄: 親は自分の値のまま
+
+                // 一様な親の導かれる値は親の値のまま(眠った所の粗い値。CoarsenKeepsUniform も見ない。T-0854)
+                if (parentUniform && SfDerived(field.desc))
+                    continue;
 
                 // 保存量(= VOLUME)の欄の余りを載せる帳簿の列(値 0 の列)
                 const bool conserved = SfConserved(field.desc);

@@ -4,7 +4,10 @@
 // 木の操作(根を置く・頁に広げる・畳む・細かく・粗く)は nest_fields の関数を呼んで欄を付いて行かせる。
 // 状態のハッシュ・保存点・写しは multires_state.h の一覧を回る(欄を登録すると一覧に入る)。
 // 観察の枠(影・写し)も欄の頁を持ち、影を細かくする/引き戻す・写しを置くに欄が付いて行く(T-0761。ADR-0361。世界の値には触れない。D-403)。
-// まだ欄を持たない所(仮。ADR-0329): 溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6)。
+// 欄の種類(T-0854。ADR-0399): 真実 / 導かれる値 / 温めた始まり(state_field.hlsli の SF_FLAG_DERIVED・SF_FLAG_WARM_START)。
+// 導かれる値は眠る(頁を畳む)時に平均して残し、保存点に入らない(温めた始まりは D-549 の仮 (A) で入る)。
+// まだ欄を持たない所(仮。ADR-0329): 溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6。T-0920)・
+// ある所にだけ持つ(疎な頁。T-0921)。
 #pragma once
 
 #include <cstdint>
@@ -60,17 +63,19 @@ namespace bicameral::sim {
         // 一様な枠 slot を頁 page に広げる前に、欄の頁を一様の値で埋める(覆われたセルは 0)
         void ExpandPage(MultiresNest& nest, uint32_t slot, uint32_t page);
 
-        // 頁を持つ枠 slot の欄の頁が一様か(覆われていないセルが全部同じ・覆われたセルは 0)。欄が無ければ true
+        // 頁を持つ枠 slot の欄の頁が一様か(覆われていないセルが全部同じ・覆われたセルは 0)。欄が無ければ true。
+        // 導かれる値(SF_FLAG_DERIVED)は調べない(眠る時に平均して残すので、畳むのを止めない。T-0854)
         [[nodiscard]] bool PageFoldable(const MultiresNest& nest, uint32_t slot);
 
-        // 頁を持つ枠 slot の欄を値 1 つに戻す(頁を返す前に。PageFoldable の後)
+        // 頁を持つ枠 slot の欄を値 1 つに戻す(頁を返す前に。PageFoldable の後)。導かれる値は覆われていないセルの平均を
+        // 残す(SfSleepValue。20 §10.3 の (b)。起きた時は ExpandPage が子は親と同じ数で配る)
         void FoldPage(MultiresNest& nest, uint32_t slot);
 
         // 親 parentSlot の八分の一 octant を子 childSlot(頁 childPage。一様なら MR_NO_PAGE)に細かくする: 子は親と同じ数。
         // 頁を持つ親の覆われたセルは 0 に。子の見出しを書く前に呼ぶ
         void Refine(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot, uint32_t childPage);
 
-        // 一様な親 parentSlot へ子 childSlot を粗くしても、欄が一様のままか(違えば親を頁に広げる)
+        // 一様な親 parentSlot へ子 childSlot を粗くしても、欄が一様のままか(違えば親を頁に広げる)。導かれる値は見ない(T-0854)
         [[nodiscard]] bool CoarsenKeepsUniform(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot);
 
         // 子 childSlot を親の八分の一へ粗くする(和 ÷ 8。VOLUME の欄の余りは世界の帳簿の「粗くした端数・出」のその欄の列へ)。親の頁(要るなら広げた後)に書き、

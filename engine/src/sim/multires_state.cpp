@@ -1,4 +1,5 @@
 // multires_state.cpp — 保存点と写し(multires_state.h)。区画の一覧(VisitNestState)を回るだけ(T-0711。ADR-0329)。
+#include <algorithm>
 #include <ranges>
 #include <type_traits>
 #include <utility>
@@ -65,6 +66,12 @@ namespace bicameral::sim {
             values = std::any_cast<const std::remove_cvref_t<decltype(values)>&>(save.regions[position]);
             ++position;
         });
+
+        // --- 保存点に入らない導かれる値は 0 から(前の値を残さない。T-0854)---
+        for (MultiresField& field : nest.fields) {
+            if (!state_field::SfSaved(field.desc))
+                std::ranges::fill(field.values, 0);
+        }
 
         return true;
     }

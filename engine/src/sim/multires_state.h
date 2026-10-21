@@ -45,10 +45,15 @@ namespace bicameral::sim {
         visit(NestStateRegion{.name = "seeds", .hashed = false}, nest.seeds);
         visit(NestStateRegion{.name = "index", .hashed = false}, nest.index);
 
-        // --- 登録した欄(登録の順。粗くした余りは上の世界の帳簿の欄の列に入っている。T-0762)---
-        for (auto& field : nest.fields)
+        // --- 登録した欄(登録の順。粗くした余りは上の世界の帳簿の欄の列に入っている。T-0762)。
+        //     導かれる値は状態に入らない(真実から解き直す。温めた始まりは D-549 の仮 (A) で入る。T-0854)---
+        for (auto& field : nest.fields) {
+            if (!state_field::SfSaved(field.desc))
+                continue;
+
             visit(NestStateRegion{.name = "field:" + field.name, .hashed = state_field::SfHashed(field.desc)},
                   field.values);
+        }
     }
 
     // 保存点(CPU。区画ごとの値の写し)。GPU の保存点は段 6
@@ -61,7 +66,8 @@ namespace bicameral::sim {
     // 刻みの境の状態を写す
     [[nodiscard]] MultiresSaveState SaveNestState(const MultiresNest& nest);
 
-    // 保存点に戻す。形(区画の名前と大きさ・溢れの有無・登録した欄)が違えば何もせず false
+    // 保存点に戻す。形(区画の名前と大きさ・溢れの有無・登録した欄)が違えば何もせず false。
+    // 保存点に入らない導かれる値は 0 にする(起きている所は次に計算する時に真実から解き直す。T-0854)
     [[nodiscard]] bool RestoreNestState(MultiresNest& nest, const MultiresSaveState& save);
 
     // from の状態を、同じ形で作った to へ写す(写しの早送りの元)。形が違えば何もせず false

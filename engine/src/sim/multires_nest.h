@@ -367,6 +367,10 @@ namespace bicameral::sim {
     // 世界(本物の葉のセルと端数・ハッシュに入る登録した欄)の要約。影は入らない。欄が無ければ T-0711 より前と同じ値
     [[nodiscard]] uint64_t HashRealLeaves(const MultiresNest& nest);
 
+    // 世界の真実の要約(T-0854。20 §10・§13.2): HashRealLeaves から温めた始まりの欄を除いたもの(導かれる値はどちらにも入らない)。
+    // 眠らせて起こしても、眠らせなかった場合とビット単位で同じになるはずのもの
+    [[nodiscard]] uint64_t HashTruthLeaves(const MultiresNest& nest);
+
     // 状態の全部(見出し〔活性と忙しさの印も〕・セル・端数・空きのスタック・帳簿・数える欄・溢れ・ハッシュに入る登録した欄)の要約。CPU と GPU を比べるため。
     // 区画の一覧(sim/multires_state.h の VisitNestState)を回るだけ(T-0711)。索引・要求・種は入らない。欄が無ければ T-0711 より前と同じ値
     [[nodiscard]] uint64_t HashWholeNest(const MultiresNest& nest);
