@@ -279,6 +279,11 @@ target_precompile_headers(surface_detail_test PRIVATE ${PROJECT_SOURCE_DIR}/engi
 target_link_libraries(surface_detail_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME surface_detail COMMAND surface_detail_test)
 set_tests_properties(surface_detail PROPERTIES TIMEOUT 900)
+add_executable(face_opening_test face_opening_test.cpp)  # セルの面の開き具合の欄を液体が読む・溝に沿って流れる(T-0937)
+target_precompile_headers(face_opening_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(face_opening_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME face_opening COMMAND face_opening_test)
+set_tests_properties(face_opening PROPERTIES TIMEOUT 900)
 
 add_executable(case_b_box_test case_b_box_test.cpp)
 target_link_libraries(case_b_box_test PRIVATE bicameral_case_b bicameral_core)

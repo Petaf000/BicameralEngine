@@ -24,6 +24,8 @@
 //     (流れ出しの境界 = 速さの勾配 0)、力を足して流し、刻みの終わりの値は帳簿の「世界の端」へ(ADR-0349 Proposed)。
 //     外の柱が無い(真空)の開いた端は閉じた面(WeEdgeNeighbor・伝導と同じ)。
 //   - 静止の丸め(restSpeedMicrometersPerSecond。既定 0 = 切る)は仮の世界の液体の面と同じ形(common/rest_rounding.hlsli の RrRestMomentum。T-0777)。
+// 面の開き具合(T-0937): 世界が面の開き具合の欄(sim/face_opening の FACE_BLOCKED_FIELD_NAME)を登録していれば、面の開きを
+//   min(両側のセルの空きの小さい方, 1 − 塞ぐ割合)にする(face_opening.hlsli の FoFaceOpen)。登録していない・塞ぐ割合 0 なら今とビット単位で同じ。
 // 浮動小数点は使わない(engine/src/sim は検査の対象。04 §4)。
 #pragma once
 
