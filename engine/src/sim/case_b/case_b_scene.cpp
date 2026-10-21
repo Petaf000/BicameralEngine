@@ -376,9 +376,39 @@ namespace bicameral::sim::case_b {
         return scene;
     }
 
+    Scene MakeStillPondScene() {
+        Scene scene = BaseScene(
+            "still_pond",
+            "水深 2 m の静かな池(幅 12 m)。R1: 水面のセルの圧力の揺れが大気の 0.1 % 未満・ほぼ止まる・水位が動かない");
+        Canvas canvas(24, 8);
+        canvas.Fill(0, 23, 0, 0, '#');
+        canvas.Fill(0, 23, 1, 4, '~');
+        scene.rows = canvas.Rows();
+        scene.regions = {{.name = "pond", .xBegin = 0, .xEnd = 24, .yBegin = 1, .yEnd = 8}};
+
+        return scene;
+    }
+
+    Scene MakeConnectedVesselsScene() {
+        // 左の池 10 列 × 8 段・右の池 10 列 × 2 段・間の石の壁(x 10〜13・y 3〜10)の下の 2 段が管。上の空気はつながっている。
+        // 水の量 = 80 + 8 + 20 = 108 セル → 釣り合いは両側とも 5 段(2.5 m)
+        Scene scene = BaseScene("connected_vessels",
+                                "連通管(左 4 m・右 1 m)。R1: 両側の水位が 2.5 m にそろう(±2 %)・揺り戻しが収まる");
+        Canvas canvas(24, 12);
+        canvas.Fill(0, 23, 0, 0, '#');
+        canvas.Fill(0, 9, 1, 8, '~');
+        canvas.Fill(10, 23, 1, 2, '~');
+        canvas.Fill(10, 13, 3, 10, '#');
+        scene.rows = canvas.Rows();
+        scene.regions = {{.name = "left", .xBegin = 0, .xEnd = 10, .yBegin = 1, .yEnd = 12},
+                         {.name = "right", .xBegin = 14, .xEnd = 24, .yBegin = 1, .yEnd = 12}};
+
+        return scene;
+    }
+
     std::vector<Scene> AllScenes() {
-        return {MakeSandPileScene(), MakeSandLeveeScene(),  MakeDamBreakScene(),
-                MakeSiphonScene(),   MakeTrappedAirScene(), MakePressureRelaxScene()};
+        return {MakeSandPileScene(),   MakeSandLeveeScene(),     MakeDamBreakScene(),  MakeSiphonScene(),
+                MakeTrappedAirScene(), MakePressureRelaxScene(), MakeStillPondScene(), MakeConnectedVesselsScene()};
     }
 
 }  // namespace bicameral::sim::case_b

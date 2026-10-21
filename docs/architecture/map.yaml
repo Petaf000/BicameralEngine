@@ -341,6 +341,9 @@ views:
       - { id: casebgauge, group: simlib, label: "RunScene(案 B の試作の場面と計器)<br/>0.25 m・0.5 m・2 m の箱を同じ絵から<br/>水位・角度・揺り戻し・戻る時間(B1・T-0867)",
           code: "engine/src/sim/case_b/case_b_gauge.cpp::RunScene", ticket: T-0867, doc: docs/design/21-motion-case-b.md, status: research,
           note: "場面(砂山・砂の堤・ダムの決壊・サイフォン・閉じた空気の下の水・弱い差の戻り)は case_b_scene.cpp の BuildScene。計器は刻みごとの GaugeSample と列の関数(CountReversals・SettleTick・FirstTickAtLeast・PeakOf・DifferencePermille)。21 §5.2 の合格を測る" }
+      - { id: casebflow, group: simlib, label: "MakeFlowStages(案 B の研究 R1)<br/>気体と硬い液体を 1 つの陰の圧力で<br/>状態式・柱・陰の圧力・運ぶ(T-0868)",
+          code: "engine/src/sim/case_b/case_b_flow.cpp::MakeFlowStages", ticket: T-0868, doc: docs/design/21-motion-case-b.md, status: research,
+          note: "箱の Stages の pressure・transport・apply に入れる。セルの状態式(液体の硬さ + 理想気体が空きを満たす圧力・真空)・流体の柱(重さの軸の面は打ち消して 0)・残り y を口 PressureSolver で陰に解く・解いた面の流れで風上の流体を運ぶ・MAC の運動量の運び・物の粘り(隣の面との受け渡し。T-0927)。置き場 ④。試験 case_b_r1(液体の段 (1)・(2) を並べる。連通管・閉じた空気は揺れの中心で見る。ADR-0409)" }
       - { id: gasfastestcheck, group: simlib, label: "FindGasSmallOpenJoints<br/>最速 × 小さい空きの検査(T-0788・D-519)<br/>小さい空きだけでつながった気体の部分の組 → 警告",
           code: "engine/src/sim/gas_fastest_check.cpp::FindGasSmallOpenJoints", ticket: T-0788, doc: docs/design/07-transport.md,
           note: "最速の投影は孔のセルに 1 刻みで中身の何倍もを通して壊れる(ADR-0346)。空き 1/2 未満を小さいとし(T-0788 の板の測り)、大きいセルの部分と開いた境界の外を互いに素な集合でまとめ、2 つ以上の部分に接する小さいセルのまとまりを組にする。値は変えない(D-487 ②)。ProbeGasField が置いた時(CheckFastestOpenings)と空きの変わった刻みに呼ぶ" }
