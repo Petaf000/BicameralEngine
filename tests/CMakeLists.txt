@@ -269,6 +269,13 @@ set_tests_properties(gas_projection PROPERTIES TIMEOUT 1800)
 add_test(NAME gas_projection_plates COMMAND gas_projection_test --plates)  # T-0788: 最速 × 小さい空きの板の警告の閾値の根拠
 set_tests_properties(gas_projection_plates PROPERTIES TIMEOUT 1800)
 # 案 B の試作の箱(B0。T-0866)と場面・計器(B1。T-0867)。docs/design/21 §5.2(CPU)
+# 表面の細かい形(研究 R-T1・T-0879。23 §7・§10): 当たり・開き具合の費用・整数と小数のずれ・溝に水が流れる・差分のセーブ
+add_executable(surface_detail_test surface_detail_test.cpp)
+target_precompile_headers(surface_detail_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(surface_detail_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME surface_detail COMMAND surface_detail_test)
+set_tests_properties(surface_detail PROPERTIES TIMEOUT 900)
+
 add_executable(case_b_box_test case_b_box_test.cpp)
 target_link_libraries(case_b_box_test PRIVATE bicameral_case_b bicameral_core)
 add_test(NAME case_b_box COMMAND case_b_box_test)
@@ -659,6 +666,12 @@ target_link_libraries(gpu_probe_gas_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_gas gpu_probe_gas_test gpu --no-gbv)
 bicameral_add_gpu_test_case(gpu_probe_gas_warp gpu_probe_gas_test warp --warp)
 # 仮の世界の GPU の刻みに液体の区画(T-0613): 池に溜まる・堤を消すと抜ける・ダムの水が押し寄せる・移流なしが CPU リファレンス(probe_liquid)と毎刻みビット一致
+# 表面の細かい形の整数の関数を GPU で(R-T1・T-0879): 当たりと開き具合が CPU と 1 値ずつビット一致・費用
+bicameral_add_gpu_test(gpu_surface_detail_test)
+target_link_libraries(gpu_surface_detail_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_surface_detail gpu_surface_detail_test gpu)
+bicameral_add_gpu_test_case(gpu_surface_detail_warp gpu_surface_detail_test warp --warp)
+
 bicameral_add_gpu_test(gpu_probe_liquid_test)
 target_link_libraries(gpu_probe_liquid_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_liquid gpu_probe_liquid_test gpu --no-gbv)

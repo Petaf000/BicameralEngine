@@ -140,6 +140,7 @@ add_library(bicameral_sim STATIC
   src/sim/multires_gas.cpp  # 多重解像度の世界の 1 段で気体を流す CPU(土台の段 3 ②。T-0720)
   src/sim/multires_world_edges.cpp  # 世界の端を環境から作る・替える(外の柱は気体の層の基準 GasAtmosphereLayers と同じ。T-0772)
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
+  src/sim/surface_detail.cpp  # 表面の細かい形の区画・差分の 2 つの候補(研究 R-T1・T-0879)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_sim_gas.cpp  # 仮の世界の GPU の刻みに気体の区画(T-0592)

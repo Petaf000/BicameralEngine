@@ -179,6 +179,9 @@ views:
       - { id: radiationlines, group: shared, status: research, label: "radiation_lines<br/>放射の対を平行な線の束で見つける",
           code: "engine/src/sim/radiation_lines.cpp::FindRadiationPairs", ticket: T-0584, doc: docs/decisions/ADR-0262-radiation-parallel-lines.md,
           note: "刻みごとに半球 32 本の向きの組・線の間隔 2 セル(どのセルも 1 本の向きで線 1 本)・整数の DDA・途中の透過。受け手の分け前の合計 ≤ 1。仮の世界の CPU の刻みの段(ProbeReference::StepRadiation。T-0585)。GPU は T-0586" }
+      - { id: surfacedetail, group: shared, status: research, label: "surface_detail.hlsli<br/>表面の細かい形(整数の関数・当たり・開き具合)",
+          code: "shaders/common/surface_detail.hlsli::SdGroundHeightUm", ticket: T-0879, doc: docs/design/23-radiation.md,
+          note: "研究 R-T1(23 §7・§10)。下地 + 肌理の値の雑音 + 彫った深さ(候補 B 一覧 / 候補 A 格子)。CPU の区画は sim/surface_detail、GPU は sim/surface_detail.hlsl、描画の小数の版は render/surface_detail_float.hlsli" }
       - { id: firetest, group: tests, label: "gpu_probe_fire_test<br/>木箱に火をつけて 10 分",
           code: "tests/gpu_probe_fire_test.cpp::RunFire", ticket: T-0089,
           note: "刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる(1 秒ごとの経過)。ctest は 1 分、10 分は release で" }
