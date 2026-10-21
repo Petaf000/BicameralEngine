@@ -135,7 +135,8 @@ namespace bicameral::sim::case_b {
     };
 
     // --- 帳簿(04 R2: 外との出入りと外からの力積だけを書く)---
-    enum class ImpulseSource : uint8_t { Gravity, Wall, FixedPhase, Body, Outside, Count };
+    // Pressure = 圧力の力積(閉じた箱では壁の反力の和に当たる。R1 の段。T-0868)
+    enum class ImpulseSource : uint8_t { Gravity, Wall, FixedPhase, Body, Outside, Pressure, Count };
     enum class EnergySource : uint8_t { Outside, Work, Count };
 
     inline constexpr uint32_t IMPULSE_SOURCE_COUNT = (uint32_t)ImpulseSource::Count;

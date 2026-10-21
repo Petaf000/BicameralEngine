@@ -80,7 +80,7 @@ species = {
 
 **例 3 泥流**
 ```lua
-species = { soil = { ..., phase = "solid", grain_size_um = 20, repose_angle_deg = 30, density_kg_per_m3 = 1800,
+species = { soil = { ..., phase = "solid", grain_size_um = 20, repose_angle_deg = 30, density_kg_per_m3 = 2650,
                      cohesion_pa = 5000, suction_pa = 30000 } }
 ```
 - 細かい土は水との引きずりがとても強い。満ちると、水と土が一緒に「重くて粘る流れ」になる。水が抜けると止まる。
@@ -520,6 +520,8 @@ environment = { shock_zone_pa = 10000, pressure_relax_ms_per_m = 3 }   -- 既定
 - 1 刻み(`StepBox`): 見立て(相ごとの質量・体積の割合・詰まり・空き・柱)→ `Stages` の段を §2.14 の順(引きずり → 陰の圧力 → 衝撃の区 → 面の運動量 → 粒の降伏 → 運ぶ → 当てる)。
   **R1 以降はこの段に式を入れる**。陰の圧力は口 `PressureSolver`(C_i x_i + Σ K (x_i − x_j) = b_i)から呼び、C-0 ができるまでは熱の陰解法の多重格子を包んだもの。
 - 場面(`case_b_scene.h`): 0.5 m の絵 + 凡例 + 物質 + 見る範囲。同じ場面から 0.25 m・0.5 m・2 m の箱を作る(B-c)。§5.2 の B1 の 5 場面 + 弱い差の戻り。
+- **R1 の式**(T-0868): `case_b_flow.h` の `MakeFlowStages`(状態式・柱・陰の圧力・運ぶ・MAC の運動量の運び。置き場 ④)。試験は `tests/case_b_r1_test.cpp`(ctest `case_b_r1`)。
+  結果と液体の段の判断は T-0868(静かな池は (1) か (2) で合格・連通管・閉じた空気・ダムは硬さによらず不合格 → T-0926・T-0927)。
 - 計器(`case_b_gauge.h`): 刻みごとに保存・ハッシュ・動く面・最大の速さ・費用・範囲ごとの相の質量・水位・粒の高さと崩れる角度・水面のセルの圧力の幅。
   列から揺り戻しの回数・戻る時間・届いた時・最大・2 つの細かさの差。
 

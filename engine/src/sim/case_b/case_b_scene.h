@@ -88,6 +88,10 @@ namespace bicameral::sim::case_b {
     [[nodiscard]] Scene MakeTrappedAirScene();     // 閉じた空気の下の水(潜水鐘。R1)
     [[nodiscard]] Scene MakePressureRelaxScene();  // 弱い圧力の差が戻る(閉じた空気の箱。R1 の B-c)
 
+    // R1(T-0868)で足した場面
+    [[nodiscard]] Scene MakeStillPondScene();         // 静かな池(静水圧・水面の圧力の揺れ・ほぼ止まる)
+    [[nodiscard]] Scene MakeConnectedVesselsScene();  // 連通管(左 4 m・右 1 m の水位が下の管でそろう。釣り合いは 2.5 m)
+
     [[nodiscard]] std::vector<Scene> AllScenes();
 
 }  // namespace bicameral::sim::case_b

@@ -102,6 +102,7 @@ target_link_libraries(bicameral_gas_projection PUBLIC bicameral_gas bicameral_mu
 # 判定(21 §5.1)で案 A に戻る時は、このライブラリと src/sim/case_b ごと捨てる。陰の圧力は C-0 ができるまで熱の陰解法の多重格子(multires)を呼ぶ
 add_library(bicameral_case_b STATIC
   src/sim/case_b/case_b_box.cpp
+  src/sim/case_b/case_b_flow.cpp
   src/sim/case_b/case_b_gauge.cpp
   src/sim/case_b/case_b_pressure.cpp
   src/sim/case_b/case_b_scene.cpp
