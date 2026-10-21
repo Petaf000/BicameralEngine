@@ -257,6 +257,10 @@ namespace bicameral::sim {
     // 物質 1 つの光の値(書かない値の決め方は SpeciesDefinition の光の値の注。D-610・T-0910)
     [[nodiscard]] reaction::LtSpeciesLight BakeSpeciesLight(const SpeciesDefinition& definition);
 
+    // 光の値の書き忘れの警告の文の頭(固体・液体で光の値を 1 つも書かない・片方の帯だけ書いた。表は当たる。T-0942・D-610)。
+    // 標準パッケージの凝縮相は光の値を書いていないので出る(値はゲーム・サンプルの中身)。試験とパネルがほかの警告と見分けるのに使う
+    inline constexpr std::string_view LIGHT_WARNING_PREFIX = "光: ";
+
     // --- セルを作る・調べる(テストと、T-0089 の初期状態)---
 
     struct SpeciesAmount {

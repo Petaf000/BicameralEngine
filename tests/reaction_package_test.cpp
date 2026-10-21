@@ -116,8 +116,31 @@ namespace {
             table.warnings, [](const std::string& warning) { return warning.starts_with(SLOPE_WARNING_PREFIX); }));
     }
 
+    // 光の値の書き忘れの警告(T-0942。頭が LIGHT_WARNING_PREFIX)。標準パッケージの凝縮相は光の値を書いていないので出る
+    size_t LightWarningCount(const BakedReactionTable& table) {
+        return static_cast<size_t>(std::ranges::count_if(
+            table.warnings, [](const std::string& warning) { return warning.starts_with(LIGHT_WARNING_PREFIX); }));
+    }
+
+    bool HasLightWarning(const BakedReactionTable& table, std::string_view part) {
+        return std::ranges::any_of(table.warnings, [&](const std::string& warning) {
+            return warning.starts_with(LIGHT_WARNING_PREFIX) && warning.find(part) != std::string::npos;
+        });
+    }
+
+    // 坂と光の書き忘れ以外の警告(文献の反応熱との食い違い・密度の書き忘れなど)
+    std::vector<std::string> OtherWarnings(const BakedReactionTable& table) {
+        std::vector<std::string> others;
+        for (const std::string& warning : table.warnings) {
+            if (!warning.starts_with(SLOPE_WARNING_PREFIX) && !warning.starts_with(LIGHT_WARNING_PREFIX))
+                others.push_back(warning);
+        }
+
+        return others;
+    }
+
     size_t OtherWarningCount(const BakedReactionTable& table) {
-        return table.warnings.size() - SlopeWarningCount(table);
+        return OtherWarnings(table).size();
     }
 
     bool HasSlopeWarning(const BakedReactionTable& table, std::string_view part) {
@@ -302,7 +325,7 @@ namespace {
 
         burn->declaredReactionEnthalpy = -350000;  // 差 43.5 kJ/mol: 警告(ベイクは通す。表は生成エンタルピーの差)
         const auto far = BakeReactionTable(definition);
-        EXPECT(far && OtherWarningCount(*far) == 1 && Contains(far->warnings.front(), "carbon_combustion"));
+        EXPECT(far && OtherWarningCount(*far) == 1 && Contains(OtherWarnings(*far).front(), "carbon_combustion"));
         EXPECT(far && close && SameTable(*far, *close));
         if (far)
             PrintWarnings(*far);
@@ -318,8 +341,8 @@ namespace {
         const auto cellulose = std::ranges::find(definition.species, "cellulose", &SpeciesDefinition::name);
         cellulose->density = 0;
         const auto missing = BakeReactionTable(definition);
-        EXPECT(missing && OtherWarningCount(*missing) == 1 && Contains(missing->warnings.front(), "cellulose") &&
-               Contains(missing->warnings.front(), "density_kg_per_m3"));
+        EXPECT(missing && OtherWarningCount(*missing) == 1 && Contains(OtherWarnings(*missing).front(), "cellulose") &&
+               Contains(OtherWarnings(*missing).front(), "density_kg_per_m3"));
         if (missing)
             PrintWarnings(*missing);
 
@@ -329,6 +352,50 @@ namespace {
         EXPECT(gas->density == 0);
         const auto written = BakeReactionTable(definition);
         EXPECT(written && OtherWarningCount(*written) == 0);
+    }
+
+    // 光の値の書き忘れはベイクが警告する(表は当たる。T-0942・D-610・ADR-0395): 固体・液体で 1 つも書かない・片方の帯だけ書いた。
+    // 気体は書かなくても透明が自然なので知らせない。標準パッケージの凝縮相(炭・セルロース・液体の水・氷)は光の値を書いていないので出る
+    void TestMissingLightWarning() {
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        const auto condensed = static_cast<size_t>(std::ranges::count_if(
+            definition.species, [](const SpeciesDefinition& species) { return species.phase != SpeciesPhase::Gas; }));
+        const auto unwritten = BakeReactionTable(definition);
+        EXPECT(condensed > 0 && unwritten && LightWarningCount(*unwritten) == condensed);
+        EXPECT(unwritten && HasLightWarning(*unwritten, "物質 cellulose: 固体") &&
+               HasLightWarning(*unwritten, "灰色で光を通さない") && !HasLightWarning(*unwritten, "oxygen") &&
+               !HasLightWarning(*unwritten, "mana_test"));
+        if (unwritten)
+            PrintWarnings(*unwritten);
+
+        // 両方の帯を書けば知らせない(照り返しは書かなくてよい: 吸い込みだけで光の値を書いた物質)
+        const auto cellulose = std::ranges::find(definition.species, "cellulose", &SpeciesDefinition::name);
+        cellulose->lightAbsorptionShort = 50000;
+        cellulose->lightAbsorptionLong = 80000;
+        const auto written = BakeReactionTable(definition);
+        EXPECT(written && LightWarningCount(*written) == condensed - 1 && !HasLightWarning(*written, "cellulose"));
+
+        // 片方の帯だけ: その欄の名前で 1 つ(もう片方も同じ値として動かす)
+        cellulose->lightAbsorptionLong.reset();
+        cellulose->lightReflectanceLongPermille = 300;
+        const auto alone = BakeReactionTable(definition);
+        EXPECT(alone && LightWarningCount(*alone) == condensed + 1 &&
+               HasLightWarning(*alone, "cellulose: light_absorption_short_mm2_per_mol を片方の帯だけ") &&
+               HasLightWarning(*alone, "cellulose: light_reflectance_long_permille を片方の帯だけ"));
+
+        // 前の欄(radiation_absorption_mm2_per_mol)だけ: 光の値は無いので警告し、その値で動かすことを書く
+        cellulose->lightAbsorptionShort.reset();
+        cellulose->lightReflectanceLongPermille.reset();
+        cellulose->radiationAbsorption = 900;
+        const auto legacy = BakeReactionTable(definition);
+        EXPECT(legacy && HasLightWarning(*legacy, "radiation_absorption_mm2_per_mol = 900"));
+
+        // 気体: 1 つも書かないのは知らせない(透明)が、片方の帯だけ書いたら知らせる(もう片方も同じ値になるので)
+        const auto oxygen = std::ranges::find(definition.species, "oxygen", &SpeciesDefinition::name);
+        oxygen->lightAbsorptionLong = 1;
+        const auto gas = BakeReactionTable(definition);
+        EXPECT(gas && HasLightWarning(*gas, "oxygen: light_absorption_long_mm2_per_mol を片方の帯だけ") &&
+               LightWarningCount(*gas) == condensed + 1);
     }
 
     // --- 10 進の数 ---
@@ -357,9 +424,11 @@ namespace {
         return BakePackages(packages);
     }
 
+    // 光の値の書き忘れ(T-0942)は除いて探す(この節の試験の物質は光の値を書かないので、名前で探すと必ず当たる)
     bool HasWarning(const BakedReactionTable& table, std::string_view part) {
-        return std::ranges::any_of(table.warnings,
-                                   [&](const std::string& warning) { return warning.find(part) != std::string::npos; });
+        return std::ranges::any_of(table.warnings, [&](const std::string& warning) {
+            return !warning.starts_with(LIGHT_WARNING_PREFIX) && warning.find(part) != std::string::npos;
+        });
     }
 
     // 密度を書いた試験の物質(相と動き方の欄は fields で足す)
@@ -732,6 +801,7 @@ int main() {
     TestModAddsSpeciesAndRule();
     TestDeclaredEnthalpyWarning();
     TestMissingDensityWarning();
+    TestMissingLightWarning();
     TestLegacyCondensed();
     TestShippedPhases();
     TestTransportFields();

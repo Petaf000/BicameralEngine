@@ -222,6 +222,40 @@ namespace bicameral::sim {
                                 DEFAULT_REPOSE_ANGLE_DEGREES));
         }
 
+        // 光の値の書き忘れの警告(T-0942・D-610・ADR-0395。表は当たる。頭は LIGHT_WARNING_PREFIX):
+        // 固体・液体で光の値を 1 つも書かない(灰色で光を通さないとして動かす)・片方の帯だけ書いた(もう片方も同じ値として動かす)。
+        // 気体は書かなければ透明が自然なので、1 つも書かなくても知らせない
+        void WarnLightFields(const SpeciesDefinition& entry, std::vector<std::string>& warnings) {
+            const bool anyLight = entry.lightAbsorptionShort || entry.lightAbsorptionLong ||
+                                  entry.lightReflectanceShortPermille || entry.lightReflectanceLongPermille;
+            if (!anyLight && entry.phase != SpeciesPhase::Gas) {
+                const std::string assumed =
+                    entry.radiationAbsorption != 0
+                        ? std::format("両帯の吸い込みに radiation_absorption_mm2_per_mol = {}・照り返し 0 として動かす",
+                                      entry.radiationAbsorption)
+                        : std::string("灰色で光を通さない〔両帯とも吸い込みは上限・照り返し 0.5〕として動かす");
+                warnings.push_back(std::format(
+                    "{}物質 {}: {}に光の値(light_absorption_*・light_reflectance_*)が無い({}。D-610)",
+                    LIGHT_WARNING_PREFIX, entry.name, entry.phase == SpeciesPhase::Solid ? "固体" : "液体", assumed));
+
+                return;
+            }
+
+            std::vector<std::string_view> alone;
+            if (entry.lightAbsorptionShort.has_value() != entry.lightAbsorptionLong.has_value())
+                alone.push_back(entry.lightAbsorptionShort ? "light_absorption_short_mm2_per_mol"
+                                                           : "light_absorption_long_mm2_per_mol");
+
+            if (entry.lightReflectanceShortPermille.has_value() != entry.lightReflectanceLongPermille.has_value())
+                alone.push_back(entry.lightReflectanceShortPermille ? "light_reflectance_short_permille"
+                                                                    : "light_reflectance_long_permille");
+
+            for (const std::string_view field : alone)
+                warnings.push_back(
+                    std::format("{}物質 {}: {} を片方の帯だけ書いた(もう片方の帯も同じ値〔灰色〕として動かす。D-610)",
+                                LIGHT_WARNING_PREFIX, entry.name, field));
+        }
+
         // 廃止した欄と書き忘れの警告(表は当たる)
         void WarnPhaseFields(const SpeciesDefinition& entry, std::vector<std::string>& warnings) {
             if (entry.legacyCondensed)
@@ -239,6 +273,7 @@ namespace bicameral::sim {
                     "物質 {}: 液体に粘り(viscosity_upa_s)が無い(粘りで減らず、速さの上限だけで流れる)", entry.name));
 
             WarnSolidMotion(entry, warnings);
+            WarnLightFields(entry, warnings);
         }
 
         std::expected<NameIndex, std::string> BakeAllSpecies(const ReactionTableDefinition& definition,
