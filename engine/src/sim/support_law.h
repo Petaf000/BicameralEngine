@@ -5,8 +5,11 @@
 // 2 つの形(どちらも節 = セルの中心):
 //   - PerComponent: 変位の成分ごとに独立に解く(今の C-0 の口のまま。面ごとに伸び縮みとずれのばね。22 §3.2 ①)
 //   - BeamLattice: 節が変位 2 成分と回り φ(= 角 × セルの大きさ ÷ 2。長さの単位)を持ち、面ごとに梁のばね(伸び・ずれ・曲げ)を置く。
-//     成分の間の結合(ずれ ⇄ 回り)は C-0 の口に無いので、前の値を右辺の項へ遅らせて成分ごとに C-0 で解く
-//     (刻みごとに x → 上 → 回り の順に 1 回ずつ。釣り合いに着くまで刻みが要る。成分を持つ節の口 T-0919 が入れば 1 つの系で解ける)。
+//     解き方は 2 つ(SupportSolve):
+//       - Coupled(既定。T-0919): 節が 3 成分を持つ C-0 の口(equilibrium_block)で 1 つの系として解く。面の係数は 3 × 3(ずれ ⇄ 回り・
+//         段の斜めの棒の x ⇄ 上の非対角も面の中)。延ばし方は剛体の動き(粗い節の変位 + 回り × 位置の差)
+//       - Lagged(T-0871。比べ用): 成分ごとに C-0(スカラー)で解き、成分の間の結合は前の値を右辺の項へ遅らせる
+//         (刻みごとに x → 上 → 回り の順に 1 回ずつ。釣り合いに着くまで刻みが要る)
 // 単位: 変位 2^-16 nm(int64)・力 mN・係数 2^-32 mN/nm(係数 × 変位 ÷ 2^48 = mN。ImFaceFlow と同じ桁)。
 // データの流れ: SupportScene(セル・固定した面・硬さ・密度)→ 成分ごとの EquilibriumSystem(節・面・固定した面)と刻みごとの右辺の項
 //   (重さ・遅らせた結合)→ SolveEquilibrium → 変位(次の刻みの温めた始まり)→ 帳簿(重さ・固定した面が支える力・セルに残る力)
@@ -17,6 +20,7 @@
 #include <vector>
 
 #include "sim/equilibrium.h"
+#include "sim/equilibrium_block.h"
 
 namespace bicameral::sim {
 
@@ -33,6 +37,11 @@ namespace bicameral::sim {
     enum class SupportForm : uint8_t {
         PerComponent,  // 成分ごと(結合なし)
         BeamLattice,   // 格子の梁(回りを持つ。結合は遅らせる)
+    };
+
+    enum class SupportSolve : uint8_t {
+        Coupled,  // 成分を持つ節で 1 つの系(T-0919。BeamLattice だけ。PerComponent は結合が無いので Lagged と同じ)
+        Lagged,   // 成分ごと + 結合を遅らせる(T-0871)
     };
 
     struct SupportScene {
@@ -59,6 +68,13 @@ namespace bicameral::sim {
         // つながらず柔らかすぎる分(内径 4 m のアーチで +14 %)を埋める。真っすぐな物(段が無い)では何も変わらない。
         // 既定 true は司令塔の仮(2026-10-21・ADR-0415。係数 ka/12 は合わせ込みの値なので T-0919 の後に測り直す)
         bool stairBraces = true;
+        // 棒の硬さ = ka × braceNumerator ÷ braceDenominator(既定 1/12。T-0919 で測り直す値)
+        uint64_t braceNumerator = 1;
+        uint64_t braceDenominator = 12;
+
+        // --- 解き方(T-0919)---
+        SupportSolve solve = SupportSolve::Coupled;
+        EquilibriumBlockOptions blocks;  // Coupled の V の回数など(法則の定数)
     };
 
     // 帳簿(上向きの力。mN)
@@ -96,6 +112,8 @@ namespace bicameral::sim {
         // セル (x, up) と +軸(0 = x・1 = 上)の隣の間の面の力。面が無い(どちらかのセルが無い)・成分ごとの形なら全部 0
         SupportFaceForces FaceForces(uint32_t x, uint32_t up, uint32_t axis) const;
         uint64_t Hash() const;
+        // 前の Step で節の値を解いた回数(全部の段。Lagged は成分ごとの和。費用の比べ)
+        uint64_t LastNodeUpdates() const { return m_lastNodeUpdates; }
         uint32_t CellCount() const { return (uint32_t)m_cells.size(); }
 
     private:
@@ -128,6 +146,9 @@ namespace bicameral::sim {
         };
 
         void Build();
+        void BuildBlocks();
+        void StepCoupled();
+        bool Coupled() const;
         void AddBond(const Bond& bond);
         void AddClamp(const Clamp& clamp);
         void AddBrace(const Brace& brace);
@@ -142,7 +163,7 @@ namespace bicameral::sim {
         SupportOptions m_options;
         uint64_t m_bondX = 0;   // b = ka ÷ 6(ka = E × セル。2^-32 mN/nm)。x の面
         uint64_t m_bondUp = 0;  // 上の面
-        uint64_t m_brace = 0;   // 段の斜めの棒の b/4(= ka/24。横と上の硬さの平均)
+        uint64_t m_brace = 0;   // 段の斜めの棒の式の係数(棒の硬さの半分。既定 ka/24。横と上の硬さの平均)
         int64_t m_weight = 0;   // セル 1 つの重さ(mN)
 
         std::vector<std::array<uint32_t, 2>> m_cells;  // セルの (x, up)
@@ -154,6 +175,12 @@ namespace bicameral::sim {
         std::array<EquilibriumSystem, SUPPORT_COMPONENTS> m_systems;
         std::array<std::vector<Lag>, SUPPORT_COMPONENTS> m_lags;
         std::array<EquilibriumState, SUPPORT_COMPONENTS> m_states;
+
+        // --- 成分を持つ節(Coupled)---
+        EquilibriumBlockSystem m_blockSystem;
+        EquilibriumBlockGrid m_blockGrid;
+        EquilibriumBlockState m_blockState;
+        uint64_t m_lastNodeUpdates = 0;
     };
 
 }  // namespace bicameral::sim

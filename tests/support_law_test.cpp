@@ -8,8 +8,12 @@
 //   5. (T-0944)アーチ(内径 4 m・厚さ 1 m の半円の階段。0.5 / 0.25 m)と洞窟の天井(幅 24 × 高さ 10 m・8 × 4 m の空洞。2 / 1 / 0.5 / 0.25 m)を
 //      同じ階段の形を細かく刻んだ連続体(浮動小数点の捨てる試作で求めた値。下の表)と比べる。釣り合いに着く刻みと頂のたわみの道筋も記録
 //   6. (T-0944)表面の引きの応力: 面の力(FaceForces)の縁の力 ÷ dx² を片持ち梁の梁の式 6M/(b h²) と比べる
+//   7. (T-0919)解き方 2 つ(成分を持つ節で 1 つの系 Coupled / 結合を遅らせる Lagged)で 1〜5 を並べる: 着く刻み・答えの比(Coupled ÷ Lagged)。
+//      すぐ折れるはずの棚: 1 セルの張り出しの根の面の引きの応力が「割れの値」(最後の値の 1/2・9/10 と置く)を超える刻み
+//      (割れの本体 R-B2 がまだ無いので、超える刻みを 2 つの解き方で比べる)。段の斜めの棒の硬さ(ka/8・ka/12・ka/16・ka/24)の測り直し
 // 合格の数値(22 §6: ±5 %)の判定は記録としてログに出し、試験が落ちるのは帳簿・決定性・符号だけ(研究の測り。T-0871 に結果)。
-// 引数: [--ticks n](既定 2000)[--record](掘った場面の分布をログへ)
+// 引数: [--ticks n](Lagged の刻み。既定 2000)[--coupled-ticks n](既定 300)[--cycles n](1 つの系の V の回数。既定 2)[--record](掘った場面の分布をログへ)
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -40,6 +44,20 @@ namespace {
     constexpr uint64_t STONE_KPA = 50000000;
     constexpr uint64_t STONE_DENSITY = 2600;
     constexpr double NM_UNITS = 65536.0;  // 2^-16 nm
+
+    const char* SolveName(sim::SupportSolve solve) {
+        return solve == sim::SupportSolve::Coupled ? "1 つの系" : "遅らせる";
+    }
+
+    // 1 つの系の V の回数(--cycles。既定は部品の既定 2)
+    uint32_t coupledCycles = 2;
+
+    sim::EquilibriumBlockOptions Blocks() {
+        return {.cycles = coupledCycles};
+    }
+
+    // 解き方ごとの最後の値(答えの比 Coupled ÷ Lagged の記録)
+    std::vector<double> lastFinals;
 
     // --- 場面 ---
     sim::SupportScene Beam(uint32_t width, uint32_t height, uint64_t cellMm, bool bothEnds) {
@@ -205,9 +223,9 @@ namespace {
         return -sum / count / NM_UNITS / 1.0e6;
     }
 
-    void TestShape(const ShapeCase& shape, uint32_t ticks, bool record) {
+    void TestShape(const ShapeCase& shape, sim::SupportSolve solve, uint32_t ticks, bool record) {
         const sim::SupportScene scene = shape.arch ? Arch(shape.cellMm) : Cave(shape.cellMm);
-        sim::SupportLaw law(scene, {.stairBraces = shape.braces});
+        sim::SupportLaw law(scene, {.stairBraces = shape.braces, .solve = solve, .blocks = Blocks()});
         std::vector<double> path(ticks);
         bool ledgerOk = true;
         for (uint32_t tick = 0; tick < ticks; ++tick) {
@@ -234,14 +252,13 @@ namespace {
         const double reference = shape.continuumRef * STONE_SAG_PER_UNIT_MM;
         const double solved = shape.latticeSolved * STONE_SAG_PER_UNIT_MM;
         const double ratio = finalMm / reference;
+        lastFinals.push_back(finalMm);
         Log(Channel::Sim, Level::Info,
-            "{}{} {} m({} セル): たわみ {:.5f} mm / 連続体 {:.5f} mm = {:.3f}({})・解けきった格子の梁の "
-            "{:.4f}・着く刻み "
-            "±5 % "
-            "{}・±1 % {}・{} 刻み",
-            shape.name, shape.braces ? "(段の斜めの棒)" : "", (double)shape.cellMm / 1000.0, law.CellCount(), finalMm,
-            reference, ratio, std::abs(ratio - 1) <= 0.05 ? "±5 % 合格" : "±5 % 不合格", finalMm / solved, ticksTo5,
-            ticksTo1, ticks);
+            "[{}] {}{} {} m({} セル): たわみ {:.5f} mm / 連続体 {:.5f} mm = {:.3f}({})・解けきった格子の梁の "
+            "{:.4f}・着く刻み ±5 % {}・±1 % {}・{} 刻み",
+            SolveName(solve), shape.name, shape.braces ? "(段の斜めの棒)" : "", (double)shape.cellMm / 1000.0,
+            law.CellCount(), finalMm, reference, ratio, std::abs(ratio - 1) <= 0.05 ? "±5 % 合格" : "±5 % 不合格",
+            finalMm / solved, ticksTo5, ticksTo1, ticks);
         Expect(ledgerOk, std::string("帳簿: ") + shape.name);
         Expect(finalMm > 0, std::string("重さで下がる: ") + shape.name);
         if (!record)
@@ -253,11 +270,11 @@ namespace {
                 row += std::format(" {}:{:.3f}", tick, path[tick - 1] / finalMm);
         }
 
-        Log(Channel::Sim, Level::Info, "{}{} {} m: 見る所のたわみの道筋(刻み:最後の値との比){}", shape.name,
-            shape.braces ? "(段の斜めの棒)" : "", (double)shape.cellMm / 1000.0, row);
+        Log(Channel::Sim, Level::Info, "[{}] {}{} {} m: 見る所のたわみの道筋(刻み:最後の値との比){}", SolveName(solve),
+            shape.name, shape.braces ? "(段の斜めの棒)" : "", (double)shape.cellMm / 1000.0, row);
     }
 
-    void TestShapes(uint32_t ticks, bool record) {
+    void TestShapes(sim::SupportSolve solve, uint32_t ticks, bool record) {
         const ShapeCase cases[] = {
             {"アーチ 内径 4 m・厚さ 1 m", true, 500, 119.00, 135.380},
             {"アーチ 内径 4 m・厚さ 1 m", true, 250, 94.29, 99.651},
@@ -273,10 +290,10 @@ namespace {
             {"洞窟の天井 24 × 10 m", false, 250, 179.94, 179.482, true},
         };
         for (const ShapeCase& shape : cases)
-            TestShape(shape, ticks, record);
+            TestShape(shape, solve, ticks, record);
 
-        sim::SupportLaw first(Arch(500), {.stairBraces = true});
-        sim::SupportLaw again(Arch(500), {.stairBraces = true});
+        sim::SupportLaw first(Arch(500), {.stairBraces = true, .solve = solve, .blocks = Blocks()});
+        sim::SupportLaw again(Arch(500), {.stairBraces = true, .solve = solve, .blocks = Blocks()});
         for (uint32_t tick = 0; tick < 200; ++tick) {
             first.Step();
             again.Step();
@@ -286,9 +303,9 @@ namespace {
     }
 
     // --- 6. 表面の引きの応力(T-0944): 片持ち梁 4 m の根から 1 m の切り口の上の縁 ---
-    void TestSurfaceStress(uint64_t cellMm, uint32_t height, uint32_t ticks) {
+    void TestSurfaceStress(uint64_t cellMm, uint32_t height, sim::SupportSolve solve, uint32_t ticks) {
         const auto width = (uint32_t)(4000 / cellMm);
-        sim::SupportLaw law(Beam(width, height, cellMm, false), {});
+        sim::SupportLaw law(Beam(width, height, cellMm, false), {.solve = solve, .blocks = Blocks()});
         for (uint32_t tick = 0; tick < ticks; ++tick)
             law.Step();
 
@@ -305,10 +322,9 @@ namespace {
         const double topKpa = (double)top.highSideMn / 1000.0 / areaM2 / 1000.0;
         const double bottomKpa = (double)bottom.lowSideMn / 1000.0 / areaM2 / 1000.0;
         Log(Channel::Sim, Level::Info,
-            "表面の引きの応力 片持ち梁 4 m(厚さ {} セル・{} m)根から 1 m: 上の縁 {:.2f} kPa・下の縁 {:.2f} kPa / "
-            "梁の式 ±{:.2f} "
-            "kPa = {:.3f} / {:.3f}",
-            height, cellM, topKpa, bottomKpa, beamKpa, topKpa / beamKpa, -bottomKpa / beamKpa);
+            "[{}] 表面の引きの応力 片持ち梁 4 m(厚さ {} セル・{} m)根から 1 m: 上の縁 {:.2f} kPa・下の縁 {:.2f} kPa / "
+            "梁の式 ±{:.2f} kPa = {:.3f} / {:.3f}",
+            SolveName(solve), height, cellM, topKpa, bottomKpa, beamKpa, topKpa / beamKpa, -bottomKpa / beamKpa);
         Expect(topKpa > 0 && bottomKpa < 0, "片持ち梁の上の縁が引かれ下の縁が押される");
         Expect(std::abs(topKpa / beamKpa - 1) <= 0.05 || height > 1, "1 セルの厚さで表面の応力が梁の式と ±5 %");
     }
@@ -326,11 +342,12 @@ namespace {
         bool bothEnds;
     };
 
-    void TestBeam(const BeamCase& beam, sim::SupportForm form, uint32_t ticks) {
+    void TestBeam(const BeamCase& beam, sim::SupportForm form, sim::SupportSolve solve, uint32_t ticks) {
         const double cellM = (double)beam.cellMm / 1000.0;
         const auto width = (uint32_t)std::lround(beam.lengthM / cellM);
         const auto height = (uint32_t)std::lround(beam.heightM / cellM);
-        sim::SupportLaw law(Beam(width, height, beam.cellMm, beam.bothEnds), {.form = form});
+        sim::SupportLaw law(Beam(width, height, beam.cellMm, beam.bothEnds),
+                            {.form = form, .solve = solve, .blocks = Blocks()});
         const uint32_t probe = beam.bothEnds ? width / 2 : width - 1;
         Settle settle = Run(law, probe, height, ticks);
         if (beam.bothEnds)
@@ -339,15 +356,19 @@ namespace {
         const double theory = beam.bothEnds ? ClampedMidMm(beam.lengthM, beam.heightM, cellM)
                                             : CantileverMm(beam.lengthM, beam.heightM, cellM, beam.lengthM - cellM / 2);
         const double ratio = settle.finalMm / theory;
+        lastFinals.push_back(settle.finalMm);
         Log(Channel::Sim, Level::Info,
-            "{} {} {} m: たわみ {:.4f} mm / 梁の式(Timoshenko){:.4f} mm = {:.3f}({})・着く刻み ±5 % {}・±1 % {}・{} "
-            "刻み",
-            beam.name, FormName(form), cellM, settle.finalMm, theory, ratio,
-            std::abs(ratio - 1) <= 0.05 ? "±5 % 合格" : "±5 % 不合格", settle.ticksTo5, settle.ticksTo1, ticks);
+            "[{}] {} {} {} m: たわみ {:.4f} mm / 梁の式(Timoshenko){:.4f} mm = {:.3f}({})・着く刻み ±5 % {}・±1 % "
+            "{}・{} "
+            "刻み・1 刻みの節の解き {}",
+            SolveName(solve), beam.name, FormName(form), cellM, settle.finalMm, theory, ratio,
+            std::abs(ratio - 1) <= 0.05 ? "±5 % 合格" : "±5 % 不合格", settle.ticksTo5, settle.ticksTo1, ticks,
+            law.LastNodeUpdates());
         Expect(settle.ledgerOk, std::string("帳簿: ") + beam.name);
         Expect(settle.finalMm > 0, std::string("重さで下がる: ") + beam.name);
 
-        sim::SupportLaw again(Beam(width, height, beam.cellMm, beam.bothEnds), {.form = form});
+        sim::SupportLaw again(Beam(width, height, beam.cellMm, beam.bothEnds),
+                              {.form = form, .solve = solve, .blocks = Blocks()});
         for (uint32_t tick = 0; tick < ticks; ++tick)
             again.Step();
 
@@ -355,30 +376,31 @@ namespace {
     }
 
     // --- 4. 大きな岩の塊を掘った直後(16 × 8 m・0.5 m。下を地面に固定。真ん中の下 8 × 3 m を掘る)---
-    void TestDig(uint32_t ticks, bool record) {
+    void TestDig(sim::SupportSolve solve, uint32_t ticks, bool record) {
         constexpr uint32_t WIDTH = 32;
         constexpr uint32_t HEIGHT = 16;
         sim::SupportScene scene = Beam(WIDTH, HEIGHT, 500, false);
         for (uint32_t i = 0; i < WIDTH * HEIGHT; ++i)
             scene.clamps[i] = i < WIDTH ? sim::SUPPORT_CLAMP_BOTTOM : 0;
 
-        sim::SupportLaw block(scene, {});
+        sim::SupportLaw block(scene, {.solve = solve, .blocks = Blocks()});
         Run(block, WIDTH / 2, HEIGHT, ticks);
         for (uint32_t up = 4; up < 10; ++up) {
             for (uint32_t x = 8; x < 24; ++x)
                 scene.solid[x + WIDTH * up] = 0;
         }
 
-        sim::SupportLaw dug(scene, {});
+        sim::SupportLaw dug(scene, {.solve = solve, .blocks = Blocks()});
         dug.CarryFrom(block);
         const Settle settle = Run(dug, WIDTH / 2, HEIGHT, ticks);
-        Log(Channel::Sim, Level::Info, "掘った直後: 真ん中の列の平均のたわみ {:.4f} mm・着く刻み ±5 % {}・±1 % {}",
-            settle.finalMm, settle.ticksTo5, settle.ticksTo1);
+        lastFinals.push_back(settle.finalMm);
+        Log(Channel::Sim, Level::Info, "[{}] 掘った直後: 真ん中の列の平均のたわみ {:.4f} mm・着く刻み ±5 % {}・±1 % {}",
+            SolveName(solve), settle.finalMm, settle.ticksTo5, settle.ticksTo1);
         Expect(settle.ledgerOk, "帳簿: 掘った場面");
         if (!record)
             return;
 
-        sim::SupportLaw view(scene, {});
+        sim::SupportLaw view(scene, {.solve = solve, .blocks = Blocks()});
         view.CarryFrom(block);
         for (uint32_t tick = 1; tick <= ticks; ++tick) {
             view.Step();
@@ -389,13 +411,118 @@ namespace {
             for (uint32_t x = 8; x < 24; ++x)
                 row += std::format(" {:.3f}", -(double)view.Value(x, 10, sim::SUPPORT_UP) / NM_UNITS / 1.0e6);
 
-            Log(Channel::Sim, Level::Info, "掘った後 {} 刻み: 天井の下の面のたわみ(mm。左から 0.5 m ごと){}", tick,
+            Log(Channel::Sim, Level::Info, "[{}] 掘った後 {} 刻み: 天井の下の面のたわみ(mm。左から 0.5 m ごと){}",
+                SolveName(solve), tick, row);
+        }
+    }
+
+    // --- 7. すぐ折れるはずの棚(T-0919): 1 セルの張り出しの根の面(壁から 0.5 m)の上の縁の引きの応力の道筋 ---
+    // 割れの値を最後の応力の 1/2・9/10 と置き、初めて超える刻みを返す(割れの本体 R-B2 がまだ無いので、超える刻みで比べる)
+    std::vector<double> ShelfStressPath(uint64_t lengthMm, sim::SupportSolve solve, uint32_t ticks) {
+        const auto width = (uint32_t)(lengthMm / 500);
+        sim::SupportLaw law(Beam(width, 1, 500, false), {.solve = solve, .blocks = Blocks()});
+        std::vector<double> path(ticks);
+        for (uint32_t tick = 0; tick < ticks; ++tick) {
+            law.Step();
+            path[tick] = (double)law.FaceForces(0, 0, 0).highSideMn / 1000.0 / 0.25 / 1000.0;
+        }
+
+        return path;
+    }
+
+    uint32_t FirstOver(const std::vector<double>& path, double limit) {
+        for (uint32_t tick = 0; tick < path.size(); ++tick) {
+            if (path[tick] >= limit)
+                return tick + 1;
+        }
+
+        return 0;
+    }
+
+    void TestShelfCrack(uint32_t laggedTicks, uint32_t coupledTicks) {
+        for (const uint64_t lengthMm : {4000ull, 8000ull}) {
+            const std::vector<double> lagged = ShelfStressPath(lengthMm, sim::SupportSolve::Lagged, laggedTicks);
+            const std::vector<double> coupled = ShelfStressPath(lengthMm, sim::SupportSolve::Coupled, coupledTicks);
+            // 割れの値の元は 1 つの系の最後の応力(遅らせる解き方は 8 m で決まった刻みの内に着かないことがある)
+            const double finalKpa = coupled.back();
+            for (const double share : {0.5, 0.9}) {
+                const uint32_t before = FirstOver(lagged, share * finalKpa);
+                const uint32_t after = FirstOver(coupled, share * finalKpa);
+                Log(Channel::Sim, Level::Info,
+                    "すぐ折れるはずの棚 {} m(1 セルの張り出し・壁から 0.5 m の面の上の縁): 割れの値 = 最後の応力 "
+                    "{:.1f} kPa の "
+                    "{:.0f} % を超える刻み: 遅らせる {}(0 = {} 刻みの内に超えない)→ 1 つの系 "
+                    "{}・遅らせるの最後の応力の比 {:.4f}",
+                    (double)lengthMm / 1000.0, finalKpa, share * 100, before, laggedTicks, after,
+                    lagged.back() / finalKpa);
+                Expect(after != 0 && (before == 0 || after <= before), "棚が遅れて折れない(1 つの系で早いか同じ)");
+            }
+        }
+    }
+
+    // --- 7. 段の斜めの棒の硬さの測り直し(T-0919。1 つの系で解けきった答え)---
+    void TestBraceSweep(uint32_t ticks) {
+        const ShapeCase cases[] = {
+            {"アーチ 0.5 m", true, 500, 119.00, 0},
+            {"アーチ 0.25 m", true, 250, 94.29, 0},
+            {"洞窟 2 m", false, 2000, 169.94, 0},
+            {"洞窟 0.5 m", false, 500, 179.43, 0},
+        };
+        for (const uint64_t denominator : {8ull, 12ull, 16ull, 24ull}) {
+            std::string row;
+            for (const ShapeCase& shape : cases) {
+                const sim::SupportScene scene = shape.arch ? Arch(shape.cellMm) : Cave(shape.cellMm);
+                sim::SupportLaw law(scene, {.stairBraces = true, .braceDenominator = denominator, .blocks = Blocks()});
+                for (uint32_t tick = 0; tick < ticks; ++tick)
+                    law.Step();
+
+                const double ratio = ShapeSagMm(law, scene, shape.arch) / (shape.continuumRef * STONE_SAG_PER_UNIT_MM);
+                row += std::format("・{} {:.3f}", shape.name, ratio);
+            }
+
+            Log(Channel::Sim, Level::Info, "段の斜めの棒の硬さ ka/{}(1 つの系・{} 刻み)/ 連続体{}", denominator, ticks,
                 row);
         }
     }
 
+    // 答えの比(同じ場面の Coupled ÷ Lagged の最後の値。同じ式なので解けきれば 1)
+    void LogFinalRatios(const std::vector<double>& coupled, const std::vector<double>& lagged) {
+        std::string row;
+        double worst = 0;
+        for (size_t i = 0; i < coupled.size() && i < lagged.size(); ++i) {
+            const double ratio = coupled[i] / lagged[i];
+            worst = std::max(worst, std::abs(ratio - 1));
+            row += std::format(" {:.4f}", ratio);
+        }
+
+        Log(Channel::Sim, Level::Info, "答えの比(1 つの系 ÷ 遅らせる。場面の順){}・最大のずれ {:.4f}", row, worst);
+        Expect(worst <= 0.01, "1 つの系と遅らせる解き方が同じ釣り合いに着く(±1 %)");
+    }
+
+    void RunSolve(sim::SupportSolve solve, uint32_t ticks, bool record) {
+        const BeamCase cases[] = {
+            {"1 セルの張り出し 4 m", 4.0, 0.5, 500, false},    {"張り出し 4 m(厚さ 0.5 m)", 4.0, 0.5, 250, false},
+            {"片持ち梁 16 × 4 m", 16.0, 4.0, 500, false},      {"片持ち梁 16 × 4 m", 16.0, 4.0, 2000, false},
+            {"片持ち梁 16 × 4 m", 16.0, 4.0, 250, false},      {"両端を固定した梁 8 × 1 m", 8.0, 1.0, 500, true},
+            {"両端を固定した梁 8 × 1 m", 8.0, 1.0, 250, true},
+        };
+        lastFinals.clear();
+        for (const BeamCase& beam : cases) {
+            if (solve == sim::SupportSolve::Lagged)
+                TestBeam(beam, sim::SupportForm::PerComponent, solve, 200);
+
+            TestBeam(beam, sim::SupportForm::BeamLattice, solve, ticks);
+        }
+
+        TestDig(solve, ticks, record);
+        TestShapes(solve, ticks, record);
+        TestSurfaceStress(500, 1, solve, ticks);
+        TestSurfaceStress(250, 2, solve, ticks);
+    }
+
     int RunAll(std::span<char*> arguments) {
         uint32_t ticks = 2000;
+        uint32_t coupledTicks = 300;
         bool record = false;
         for (size_t i = 1; i < arguments.size(); ++i) {
             const std::string_view name = arguments[i];
@@ -403,23 +530,28 @@ namespace {
                 record = true;
             else if (name == "--ticks" && i + 1 < arguments.size())
                 ticks = (uint32_t)std::atoi(arguments[++i]);
+            else if (name == "--cycles" && i + 1 < arguments.size())
+                coupledCycles = (uint32_t)std::atoi(arguments[++i]);
+            else if (name == "--coupled-ticks" && i + 1 < arguments.size())
+                coupledTicks = (uint32_t)std::atoi(arguments[++i]);
         }
 
-        const BeamCase cases[] = {
-            {"1 セルの張り出し 4 m", 4.0, 0.5, 500, false},    {"張り出し 4 m(厚さ 0.5 m)", 4.0, 0.5, 250, false},
-            {"片持ち梁 16 × 4 m", 16.0, 4.0, 500, false},      {"片持ち梁 16 × 4 m", 16.0, 4.0, 2000, false},
-            {"片持ち梁 16 × 4 m", 16.0, 4.0, 250, false},      {"両端を固定した梁 8 × 1 m", 8.0, 1.0, 500, true},
-            {"両端を固定した梁 8 × 1 m", 8.0, 1.0, 250, true},
-        };
-        for (const BeamCase& beam : cases) {
-            TestBeam(beam, sim::SupportForm::PerComponent, 200);
-            TestBeam(beam, sim::SupportForm::BeamLattice, ticks);
+        RunSolve(sim::SupportSolve::Coupled, coupledTicks, record);
+        const std::vector<double> coupled = lastFinals;
+        RunSolve(sim::SupportSolve::Lagged, ticks, record);
+        std::vector<double> lagged;
+        for (size_t i = 0; i < lastFinals.size(); ++i) {
+            // Lagged は PerComponent の行も持つ(梁の場面ごとに 1 つ前)。BeamLattice の行だけ取る
+            if (i < 14 && i % 2 == 0)
+                continue;
+
+            lagged.push_back(lastFinals[i]);
         }
 
-        TestDig(ticks, record);
-        TestShapes(ticks, record);
-        TestSurfaceStress(500, 1, ticks);
-        TestSurfaceStress(250, 2, ticks);
+        LogFinalRatios(coupled, lagged);
+        TestShelfCrack(ticks, coupledTicks);
+        TestBraceSweep(coupledTicks);
+
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "support_law_test: FAILED ({} 件)", failureCount);
             return 1;

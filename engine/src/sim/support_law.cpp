@@ -7,7 +7,9 @@
 //   PerComponent: 面ごとに伸び縮み ka とずれ ka/2 のばね(回りなし)。固定した面は 2ka と ka。
 //   段の斜めの棒(stairBraces。T-0944): 下のセル a → 斜め上のセル c(横の向き s = ±1)に ½ (ka/24) (s Δx + Δup)²
 //     (斜めの長さ √2 dx・軸の硬さ ka/12 の棒。Δ = c − a)。x と上の面に ka/24・x ⇄ 上の結合は遅らせる。
-// 成分ごとの式の対角と負の非対角(C-0 が解く形)は面と固定した面に、成分の間の項と φ どうしの正の非対角は遅らせて右辺の項へ。
+// Lagged: 成分ごとの式の対角と負の非対角(C-0 が解く形)は面と固定した面に、成分の間の項と φ どうしの正の非対角は遅らせて右辺の項へ。
+// Coupled(T-0919): 同じエネルギーの各項 ½ c (g · [x_a; x_b])² を 3 × 3 の面のブロック c g gᵀ にそのまま入れ(成分の間の項も面の中)、
+//   成分を持つ節の C-0(equilibrium_block)で 1 つの系として解く。延ばし方は剛体の動き(RigidProlongation)。
 #include "sim/support_law.h"
 
 #include <algorithm>
@@ -27,6 +29,52 @@ namespace bicameral::sim {
         constexpr uint32_t UNIT_SHIFT = 32;   // 係数の Q(2^-32 mN/nm)
         constexpr uint32_t FORCE_SHIFT = 48;  // 力 mN → 右辺(2^-16 nm × 2^-32 mN/nm)
         constexpr uint64_t NO_CELL = UINT32_MAX;
+        constexpr uint32_t
+            BLOCK_COEFFICIENT_SHIFT = 32;           // Coupled の右辺の単位 2^-16 mN(係数 2^-32 × 変位 2^-16 ÷ 2^32)
+        constexpr uint32_t BLOCK_FORCE_SHIFT = 16;  // mN → 2^-16 mN
+
+        // 項 ½ c (g_low · x_low + g_high · x_high)² の勾配(成分ごとの -1〜2)
+        using Gradient = std::array<int64_t, SUPPORT_COMPONENTS>;
+
+        void AddTerm(EquilibriumBlockFace& face, uint64_t coefficient, const Gradient& low, const Gradient& high) {
+            const auto c = (int64_t)coefficient;
+            for (uint32_t row = 0; row < SUPPORT_COMPONENTS; ++row) {
+                for (uint32_t column = 0; column < SUPPORT_COMPONENTS; ++column) {
+                    const uint32_t at = row * EQ_MAX_COMPONENTS + column;
+                    face.lowLow[at] += c * low[row] * low[column];
+                    face.lowHigh[at] += c * low[row] * high[column];
+                    face.highHigh[at] += c * high[row] * high[column];
+                }
+            }
+        }
+
+        void AddFixedTerm(EquilibriumBlockFixed& fixed, uint64_t coefficient, const Gradient& gradient) {
+            const auto c = (int64_t)coefficient;
+            for (uint32_t row = 0; row < SUPPORT_COMPONENTS; ++row) {
+                for (uint32_t column = 0; column < SUPPORT_COMPONENTS; ++column)
+                    fixed.block[row * EQ_MAX_COMPONENTS + column] += c * gradient[row] * gradient[column];
+            }
+        }
+
+        // 剛体の動きの延ばし方(子の八分割ごと。Q16): 子の変位 = 親の変位 + 親の回り × (−位置の差の上, 位置の差の x)。
+        // 位置の差は ±dx/2、親の φ = 角 × 2dx ÷ 2 = 角 × dx なので、回りの係数は ±1/2・子の φ = 親の φ ÷ 2
+        std::array<EquilibriumBlock, EQ_OCTANTS> RigidProlongation() {
+            constexpr int64_t PROLONG_ONE = int64_t{1} << EQ_PROLONG_SHIFT;
+            constexpr int64_t PROLONG_HALF = PROLONG_ONE / 2;
+            std::array<EquilibriumBlock, EQ_OCTANTS> prolongation{};
+            for (uint32_t octant = 0; octant < EQ_OCTANTS; ++octant) {
+                const int64_t acrossX = (octant & 1) != 0 ? PROLONG_HALF : -PROLONG_HALF;  // 位置の差の x ÷ dx
+                const int64_t acrossUp = (octant & 2) != 0 ? PROLONG_HALF : -PROLONG_HALF;
+                EquilibriumBlock& block = prolongation[octant];
+                block[SUPPORT_X * EQ_MAX_COMPONENTS + SUPPORT_X] = PROLONG_ONE;
+                block[SUPPORT_X * EQ_MAX_COMPONENTS + SUPPORT_TURN] = -acrossUp;
+                block[SUPPORT_UP * EQ_MAX_COMPONENTS + SUPPORT_UP] = PROLONG_ONE;
+                block[SUPPORT_UP * EQ_MAX_COMPONENTS + SUPPORT_TURN] = acrossX;
+                block[SUPPORT_TURN * EQ_MAX_COMPONENTS + SUPPORT_TURN] = PROLONG_HALF;
+            }
+
+            return prolongation;
+        }
 
         // ka = E × dx(kPa × mm = N/m = 10^-6 mN/nm)を 2^-32 mN/nm で
         uint64_t BondUnit(uint64_t stiffnessKpa, uint64_t cellMm) {
@@ -53,6 +101,12 @@ namespace bicameral::sim {
         : m_scene(scene), m_options(options) {
         m_options.equilibrium.faceValues = false;
         Build();
+        if (Coupled())
+            BuildBlocks();
+    }
+
+    bool SupportLaw::Coupled() const {
+        return m_options.solve == SupportSolve::Coupled && m_options.form == SupportForm::BeamLattice;
     }
 
     uint32_t SupportLaw::ComponentCount() const {
@@ -66,7 +120,8 @@ namespace bicameral::sim {
         m_bondX = BondUnit(m_scene.stiffnessKpa, m_scene.cellMm) / 6;
         const uint64_t upKpa = m_scene.stiffnessUpKpa != 0 ? m_scene.stiffnessUpKpa : m_scene.stiffnessKpa;
         m_bondUp = BondUnit(upKpa, m_scene.cellMm) / 6;
-        m_brace = (m_bondX + m_bondUp) / 8;
+        // 式の係数 = 棒の硬さ ÷ 2 = 6b × 分子 ÷ (2 × 分母)(既定 1/12 で (b_x + b_上) / 8)
+        m_brace = (m_bondX + m_bondUp) * 3 * m_options.braceNumerator / (2 * m_options.braceDenominator);
         m_weight = CellWeight(m_scene);
 
         m_index.assign((size_t)width * height, (uint32_t)NO_CELL);
@@ -120,6 +175,74 @@ namespace bicameral::sim {
                     AddBrace({.low = cell, .high = diagonal, .across = across});
             }
         }
+    }
+
+    // --- 成分を持つ節の系(Coupled。T-0919): Lagged と同じエネルギーの項を 3 × 3 の面のブロックへ ---
+    void SupportLaw::BuildBlocks() {
+        EquilibriumBlockSystem& system = m_blockSystem;
+        system.components = SUPPORT_COMPONENTS;
+        system.coefficientShift = BLOCK_COEFFICIENT_SHIFT;
+        system.prolongation = RigidProlongation();
+        for (const auto& [x, up] : m_cells)
+            system.nodes.push_back({.level = 0, .x = x, .y = up, .z = 0});
+
+        // 面: ½ 6b Δn² + ½ 6b (Δt ∓ (φ_a + φ_b))² + ½ 2b Δφ²(∓ は x の面で −・上の面で +)
+        for (const Bond& bond : m_bonds) {
+            const uint64_t b = bond.axis == 0 ? m_bondX : m_bondUp;
+            const uint32_t along = bond.axis == 0 ? SUPPORT_X : SUPPORT_UP;
+            const uint32_t across = bond.axis == 0 ? SUPPORT_UP : SUPPORT_X;
+            const int64_t turnSign = bond.axis == 0 ? -1 : 1;
+            EquilibriumBlockFace face{.low = bond.low, .high = bond.high};
+            Gradient low{};
+            Gradient high{};
+            low[along] = -1;
+            high[along] = 1;
+            AddTerm(face, 6 * b, low, high);
+
+            low = {};
+            high = {};
+            low[across] = -1;
+            high[across] = 1;
+            low[SUPPORT_TURN] = turnSign;
+            high[SUPPORT_TURN] = turnSign;
+            AddTerm(face, 6 * b, low, high);
+
+            AddTerm(face, 2 * b, {0, 0, -1}, {0, 0, 1});
+            system.faces.push_back(face);
+        }
+
+        // 段の斜めの棒: ½ q (s Δx + Δup)²(同じレベルの斜めの 2 節の面。x ⇄ 上の非対角も面の中)
+        for (const Brace& brace : m_braces) {
+            EquilibriumBlockFace face{.low = brace.low, .high = brace.high};
+            AddTerm(face, m_brace, {-brace.across, -1, 0}, {brace.across, 1, 0});
+            system.faces.push_back(face);
+        }
+
+        // 固定した面: ½ 12b n² + ½ 12b (2t + s φ)² + ½ 4b φ²(s は Lagged の AddClamp と同じ)
+        for (const Clamp& clamp : m_clamps) {
+            const uint64_t b = clamp.axis == 0 ? m_bondX : m_bondUp;
+            const uint32_t along = clamp.axis == 0 ? SUPPORT_X : SUPPORT_UP;
+            const uint32_t across = clamp.axis == 0 ? SUPPORT_UP : SUPPORT_X;
+            EquilibriumBlockFixed fixed{.node = clamp.cell};
+            Gradient gradient{};
+            gradient[along] = 1;
+            AddFixedTerm(fixed, 12 * b, gradient);
+
+            gradient = {};
+            gradient[across] = 2;
+            gradient[SUPPORT_TURN] = clamp.axis == 0 ? clamp.side : -clamp.side;
+            AddFixedTerm(fixed, 12 * b, gradient);
+
+            AddFixedTerm(fixed, 4 * b, {0, 0, 1});
+            system.fixedFaces.push_back(fixed);
+        }
+
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            system.sources.push_back(
+                {.node = cell, .component = SUPPORT_UP, .value = -(m_weight << BLOCK_FORCE_SHIFT)});
+        }
+
+        m_blockGrid = BuildEquilibriumBlockGrid(system);
     }
 
     void SupportLaw::AddBond(const Bond& bond) {
@@ -200,6 +323,18 @@ namespace bicameral::sim {
     }
 
     void SupportLaw::CarryFrom(const SupportLaw& before) {
+        if (Coupled()) {
+            m_blockState.values.assign(m_cells.size() * SUPPORT_COMPONENTS, 0);
+            for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+                for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
+                    m_blockState.values[cell * SUPPORT_COMPONENTS + c] = before.Value(m_cells[cell][0],
+                                                                                      m_cells[cell][1], c);
+                }
+            }
+
+            return;
+        }
+
         for (uint32_t c = 0; c < ComponentCount(); ++c) {
             m_states[c].values.assign(m_cells.size(), 0);
             for (uint32_t cell = 0; cell < m_cells.size(); ++cell)
@@ -207,8 +342,21 @@ namespace bicameral::sim {
         }
     }
 
-    // --- 1 刻み: x → 上 → 回り の順に、ほかの成分の今の値を右辺の項へ入れて C-0 で解く ---
+    // --- 1 刻み(Coupled): 成分を持つ節で 1 つの系を決まった回数の V で ---
+    void SupportLaw::StepCoupled() {
+        const EquilibriumBlockResult result = SolveEquilibriumBlocks(m_blockSystem, m_blockGrid, m_options.blocks,
+                                                                     m_blockState);
+        m_lastNodeUpdates = result.nodeUpdates;
+    }
+
+    // --- 1 刻み(Lagged): x → 上 → 回り の順に、ほかの成分の今の値を右辺の項へ入れて C-0 で解く ---
     void SupportLaw::Step() {
+        if (Coupled()) {
+            StepCoupled();
+            return;
+        }
+
+        m_lastNodeUpdates = 0;
         for (uint32_t c = 0; c < ComponentCount(); ++c) {
             EquilibriumSystem& system = m_systems[c];
             system.sources.clear();
@@ -229,7 +377,7 @@ namespace bicameral::sim {
                     {.node = lag.row, .value = lag.negative ? value : -value, .factor = ImWide(lag.magnitude)});
             }
 
-            SolveEquilibrium(system, m_options.equilibrium, m_states[c]);
+            m_lastNodeUpdates += SolveEquilibrium(system, m_options.equilibrium, m_states[c]).cost.cellUpdates;
         }
     }
 
@@ -239,6 +387,11 @@ namespace bicameral::sim {
             return 0;
 
         const uint32_t cell = m_index[x + (size_t)m_scene.width * up];
+        if (Coupled()) {
+            const size_t at = (size_t)cell * SUPPORT_COMPONENTS + component;
+            return cell == NO_CELL || at >= m_blockState.values.size() ? 0 : m_blockState.values[at];
+        }
+
         const std::vector<int64_t>& values = m_states[component].values;
         if (cell == NO_CELL || cell >= values.size())
             return 0;
@@ -346,6 +499,17 @@ namespace bicameral::sim {
 
     uint64_t SupportLaw::Hash() const {
         uint64_t hash = 14695981039346656037ull;
+        if (Coupled()) {
+            for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
+                for (const auto& [x, up] : m_cells) {
+                    hash ^= (uint64_t)Value(x, up, c);
+                    hash *= 1099511628211ull;
+                }
+            }
+
+            return hash;
+        }
+
         for (uint32_t c = 0; c < ComponentCount(); ++c) {
             for (const int64_t value : m_states[c].values) {
                 hash ^= (uint64_t)value;
