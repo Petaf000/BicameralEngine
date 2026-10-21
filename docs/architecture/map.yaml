@@ -364,6 +364,11 @@ views:
       - { id: supportlaw, group: simlib, label: "SupportLaw::Step<br/>支えの法則の試作(R-B1・T-0871)<br/>格子の梁・成分ごとに C-0 で解き結合は遅らせる",
           code: "engine/src/sim/support_law.cpp::SupportLaw::Step", ticket: T-0871, doc: docs/design/22-support-law.md,
           note: "縦の面・ν = 0・1 つの細かさ。節 = セル(横・上・回り φ)。既定は成分を持つ節で 1 つの系(SupportSolve::Coupled。T-0919)、成分の間の結合を右辺の項へ遅らせる形(Lagged)は比べ用に残す。階段の段に斜めの棒(ADR-0415・T-0944)。面の力と縁の力(FaceForces。表面の引きの応力 R-B2 へ)。support_law_test が梁の式・アーチ・洞窟の天井の連続体と比べ・帳簿・決定性・釣り合いに着く刻みを記録" }
+      - { id: timesteplab, group: simlib, label: "StepTimeStepLab<br/>研究 R-T2 の試作(T-0856)<br/>状態が変わる速さで刻みの長さ 2^e を選ぶ",
+          code: "engine/src/sim/time_step_lab.cpp::StepTimeStepLab", ticket: T-0856, doc: docs/decisions/ADR-0410-step-length-rule-trial.md,
+          note: "捨てる試作(CPU・1 本の列)。歩の終わりの刻みだけを回すので早送り = 待ったがビット一致。運ぶ・広がるは後ろ向きの Euler(長さを C・g・源に)・反応は閉じた形。式は shaders/common/time_step.hlsli" }
+      - { id: timesteplabtest, group: tests, label: "time_step_lab_test<br/>長い刻みと毎刻みが計器の精度の内・0.5 m と 2 m で同じ e・早送りのビット一致",
+          code: "tests/time_step_lab_test.cpp::CheckRiver", ticket: T-0856 }
       - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
           code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordSolve", ticket: T-0531, doc: docs/design/07-transport.md,
           note: "止める判定はセルごとの閾値 ⌈(許容差 + 1) 2^48 ÷ D⌉(GasPressureThresholds)で CPU と整数で同じ。gpu_gas_projection_test が CPU の模型の解きを GPU で解き直してビット一致を確かめる。式を作る・当てる・外側の反復の GPU 版は T-0531 の残り" }
@@ -659,6 +664,7 @@ views:
       - [equilibriumtest, equilibrium, "ビット一致"]
       - [supportlaw, equilibrium, "成分ごとに解く(使い手)"]
       - [supportlaw, equilibriumblock, "成分を持つ節で 1 つの系(既定。T-0919)"]
+      - [timesteplabtest, timesteplab, "精度・細かさ・早送り"]
       - [gpugasprojection, gasprojection, "同じ解きをビット一致で"]
       - [gpugasprojection, gpuimplicit, "V サイクルの段を使い回す"]
       - [gpugasprojectionstep, gpuequilibrium, "部品の上で解く(T-0915)"]
