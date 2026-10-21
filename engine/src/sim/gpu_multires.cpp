@@ -920,7 +920,7 @@ namespace bicameral::sim {
 
     bool GpuMultires::RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest) {
         if (nest.blocks.size() != m_blockCapacity || nest.seeds.size() != m_capacity.worldBlocks ||
-            nest.cells.size() * sizeof(RxCell) != BufferSizes()[BufferCells] ||
+            DenseCellCount(nest) * sizeof(RxCell) != BufferSizes()[BufferCells] ||
             nest.freeBlocks.size() != size_t{m_capacity.worldBlocks} + m_capacity.pages ||
             nest.claims.size() != m_capacity.worldBlocks ||
             nest.fractions.size() != size_t{m_capacity.fractions} * MR_BLOCK_CELLS ||
@@ -943,9 +943,11 @@ namespace bicameral::sim {
         const std::vector<std::byte> zeros(std::max(BufferSizes()[BufferStates], BufferSizes()[BufferConduction]));
         const std::vector<std::byte> graphInput = MakeGraphInputImage();
         const std::vector<std::byte> treeWords = MakeTreeWordsImage(nest);
+        const std::vector<RxCell> cells = DenseCellImage(
+            nest);  // GPU は RxCell の密な並びのまま(T-0931。GPU の疎は T-0966)
         const std::array<std::span<const std::byte>, BufferCount> sources = {
             std::as_bytes(std::span(nest.blocks)),
-            std::as_bytes(std::span(nest.cells)),
+            std::as_bytes(std::span(cells)),
             std::as_bytes(std::span(nest.fractions)),
             std::as_bytes(std::span(nest.counters)),
             std::span(treeWords),
@@ -1649,8 +1651,9 @@ namespace bicameral::sim {
             nest = MakeMultiresNest(m_capacity);
 
         std::vector<uint32_t> treeWords(BufferSizes()[BufferTreeWords] / sizeof(uint32_t));
+        std::vector<RxCell> cells(DenseCellCount(nest));
         const std::array<std::span<std::byte>, BufferLedger + 1> destinations = {
-            std::as_writable_bytes(std::span(nest.blocks)),    std::as_writable_bytes(std::span(nest.cells)),
+            std::as_writable_bytes(std::span(nest.blocks)),    std::as_writable_bytes(std::span(cells)),
             std::as_writable_bytes(std::span(nest.fractions)), std::as_writable_bytes(std::span(nest.counters)),
             std::as_writable_bytes(std::span(treeWords)),      std::as_writable_bytes(std::span(nest.freeFractions)),
             std::as_writable_bytes(std::span(nest.ledger))};
@@ -1658,6 +1661,8 @@ namespace bicameral::sim {
             if (!gpu::ReadBuffer(m_readbacks[i].Get(), destinations[i]))
                 return false;
         }
+
+        StoreDenseCellImage(nest, cells);
 
         // --- u6 を CPU の配列に分ける(取り合いの印は読まない: 要求の処理の外では全部 MR_NO_CLAIM)---
         const uint32_t worldBlocks = m_capacity.worldBlocks;

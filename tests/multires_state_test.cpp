@@ -138,7 +138,7 @@ namespace {
             hash = FxHashCombine(hash, block.quietCheck);
         }
 
-        for (const RxCell& cell : nest.cells)
+        for (const RxCell& cell : DenseCellImage(nest))  // 前の RxCell の密な並びと同じ列(T-0931)
             hash = FxHashCombine(hash, HashReactionCell(cell));
 
         for (const MrFraction& fraction : nest.fractions)

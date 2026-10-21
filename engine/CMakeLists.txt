@@ -73,6 +73,7 @@ add_library(bicameral_multires STATIC
   src/sim/transport_packet.cpp  # 当てる段の包みをセルに当てる CPU(液体・気体。T-0770)
   src/sim/multires_fields.cpp
   src/sim/multires_implicit_conduction.cpp
+  src/sim/multires_cell_store.cpp  # セルの頁を成分の数に合わせた幅で持つ(T-0931)
   src/sim/multires_nest.cpp
   src/sim/multires_state.cpp
   src/sim/multires_tree.cpp

@@ -250,7 +250,7 @@ namespace bicameral::sim {
         // --- 物質の一覧が変わった刻み: コマンドの前に箱の全部のセルを付け替える(GPU と CPU が同じ RxRemapCell。T-0242)---
         std::optional<SpeciesRemap> boxRemap = std::exchange(m_boxRemap, std::nullopt);
         if (boxRemap && !m_box.RecordSpeciesRemap(list, m_ring.GpuAddress(), PackSpeciesRemap(*boxRemap),
-                                                  static_cast<uint32_t>(m_cpu.cells.size())))
+                                                  static_cast<uint32_t>(DenseCellCount(m_cpu))))
             return std::unexpected("箱の物質の付け替えを記録できない");
 
         if (!m_box.RecordTick(list, m_ring.GpuAddress(), tick, commands))

@@ -7,6 +7,7 @@
 //   3. 液体(sim/multires_liquid): 地面と水と空気(左半分の水が右へ流れる)
 //   4. 保存点: 疎の世界で途中の保存点に戻して進めると、続けた場合と毎刻み同じ要約
 // 記録(M-0 へ。docs/perf.md): 場面ごとの 1 セルあたりのバイト(セルの状態 + 欄。欄は密 / 疎)。
+// T-0931: セルの頁を成分の数に合わせた幅で持つ形(ADR-0417)の前後のセルの状態のバイトも出し、場面ごとの要約の束が T-0931 の前と同じことを確かめる。
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -91,12 +92,40 @@ namespace {
                ComputeConservedTotals(sparse, table, finestLevel) == ComputeConservedTotals(dense, table, finestLevel);
     }
 
+    // --- 前とビット一致(T-0931): 場面ごとに毎刻みの状態の要約・世界の要約を 1 つに束ね、セルの持ち方を変える前の値と比べる ---
+    // 値は T-0931 の前(main d35b5c4。セル = RxCell 112 B の密な並び)で測った。0 は「まだ無い」(出すだけ)
+    enum Scene : uint32_t { SceneStress, SceneShadow, SceneReal, SceneAir, SceneBurning, SceneLiquid, SceneCount };
+    constexpr std::array<uint64_t, SceneCount> GOLDEN_DIGESTS = {0xcf8ee04b11cfb313, 0x33d63cfb8ecc3101,
+                                                                 0x18b67f0d77dea1d0, 0xbdae7d98a6a1fb69,
+                                                                 0xe9aae7d44564f3d4, 0x606acadec1f56d5f};
+
+    uint64_t AddDigest(uint64_t digest, const MultiresNest& nest) {
+        digest = fx::FxHashCombine(digest, HashWholeNest(nest));
+
+        return fx::FxHashCombine(digest, HashRealLeaves(nest));
+    }
+
+    void CheckDigest(const char* scene, Scene index, uint64_t digest) {
+        std::printf("%s: 要約の束 0x%016llx(前 0x%016llx)\n", scene, static_cast<unsigned long long>(digest),
+                    static_cast<unsigned long long>(GOLDEN_DIGESTS[index]));
+        EXPECT(GOLDEN_DIGESTS[index] == 0 || digest == GOLDEN_DIGESTS[index]);
+    }
+
     // 1 セルあたりのバイト(使っている所だけ。確保した容量ではない)
     struct CellBytes {
         uint64_t cells = 0;       // 本物の刻むセル(覆われていない)の数
         uint64_t stateBytes = 0;  // 見出し + セル(一様なら値 1 つ・頁なら 512)+ 端数の枠
+        uint64_t fixedBytes = 0;  // 同じ、ただし頁のセルを前の持ち方(RxCell 112 B 固定)で数えたもの(T-0931 の前)
+        uint64_t pageWidths = 0;  // 頁の幅の和(平均の幅を出す)
+        uint64_t pages = 0;       // 頁を持つ枠の数
         NestFieldMemory fields;
     };
+
+    // セルの頁 1 つのバイト(T-0931: エネルギー 8 B + 成分の数 1 B + 幅 × 12 B を 512 セル。持たない頁は 0)
+    uint64_t CellPageBytes(const MultiresCellPage& page) {
+        return page.energy.empty() ? 0
+                                   : uint64_t{MR_BLOCK_CELLS} * (sizeof(int64_t) + sizeof(uint8_t) + (12 * page.width));
+    }
 
     CellBytes MeasureBytes(const MultiresNest& nest) {
         CellBytes bytes;
@@ -104,9 +133,19 @@ namespace {
             if (block.kind == MR_BLOCK_UNUSED)
                 continue;
 
-            bytes.stateBytes += sizeof(MrBlock) + sizeof(reaction::RxCell);
-            bytes.stateBytes += MrIsUniform(block) ? 0 : uint64_t{MR_BLOCK_CELLS} * sizeof(reaction::RxCell);
-            bytes.stateBytes += block.fraction == MR_NO_FRACTION ? 0 : uint64_t{MR_BLOCK_CELLS} * sizeof(MrFraction);
+            const uint64_t common = sizeof(MrBlock) + sizeof(reaction::RxCell) +
+                                    (block.fraction == MR_NO_FRACTION ? 0
+                                                                      : uint64_t{MR_BLOCK_CELLS} * sizeof(MrFraction));
+            bytes.stateBytes += common;
+            bytes.fixedBytes += common;
+            if (!MrIsUniform(block)) {
+                const MultiresCellPage& page = nest.cells.pages[block.page];
+                bytes.stateBytes += CellPageBytes(page);
+                bytes.fixedBytes += uint64_t{MR_BLOCK_CELLS} * sizeof(reaction::RxCell);
+                bytes.pageWidths += page.width;
+                bytes.pages += 1;
+            }
+
             if (block.kind != MR_BLOCK_REAL)
                 continue;
 
@@ -131,6 +170,16 @@ namespace {
             return s.cells == 0 ? 0 : value * 100 / s.cells;
         };
         const uint64_t state = perCell(s.stateBytes);
+        const uint64_t fixed = perCell(s.fixedBytes);
+        const uint64_t width = s.pages == 0 ? 0 : s.pageWidths * 100 / s.pages;
+        std::printf(
+            "1 セルあたり %s: セルの状態 前(RxCell 112 B 固定)%llu.%02llu B → 後(成分の数に合わせた幅)%llu.%02llu B"
+            "・頁 %llu・頁の幅の平均 %llu.%02llu\n",
+            scene, static_cast<unsigned long long>(fixed / 100), static_cast<unsigned long long>(fixed % 100),
+            static_cast<unsigned long long>(state / 100), static_cast<unsigned long long>(state % 100),
+            static_cast<unsigned long long>(s.pages), static_cast<unsigned long long>(width / 100),
+            static_cast<unsigned long long>(width % 100));
+        EXPECT(s.stateBytes <= s.fixedBytes);
         const uint64_t denseFields = perCell(FieldBytes(d.fields));
         const uint64_t sparseFields = perCell(FieldBytes(s.fields));
         std::printf(
@@ -211,8 +260,9 @@ namespace {
     using TreeStep = std::function<void(MultiresNest&, uint64_t)>;
 
     // 木の場面を疎と密で並べて刻み、毎刻み比べる(根 roots 個。8 なら 2×2×2・1 なら原点だけ)
-    void RunTreeScene(const BakedReactionTable& table, const char* scene, const std::function<MultiresNest()>& make,
-                      uint32_t roots, const TreeStep& step, uint64_t ticks, int32_t finestLevel) {
+    void RunTreeScene(const BakedReactionTable& table, const char* scene, Scene sceneIndex,
+                      const std::function<MultiresNest()>& make, uint32_t roots, const TreeStep& step, uint64_t ticks,
+                      int32_t finestLevel) {
         std::array<MultiresNest, 2> worlds;
         for (uint32_t i = 0; i < 2; ++i) {
             MultiresNest nest = make();
@@ -231,9 +281,11 @@ namespace {
 
         int mismatches = SameState(worlds[0], worlds[1], table, finestLevel) ? 0 : 1;
         uint64_t firstMismatch = mismatches == 0 ? UINT64_MAX : 0;
+        uint64_t digest = AddDigest(0, worlds[0]);
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             step(worlds[0], tick);
             step(worlds[1], tick);
+            digest = AddDigest(digest, worlds[0]);
             if (!SameState(worlds[0], worlds[1], table, finestLevel)) {
                 ++mismatches;
                 firstMismatch = std::min(firstMismatch, tick);
@@ -245,13 +297,14 @@ namespace {
                     firstMismatch == UINT64_MAX ? -1LL : static_cast<long long>(firstMismatch),
                     worlds[0].counters[MR_COUNTER_FOLDED]);
         EXPECT(mismatches == 0);
+        CheckDigest(scene, sceneIndex, digest);
         PrintBytes(scene, worlds[0], worlds[1]);
     }
 
     void TestTreeScenes(const BakedReactionTable& table) {
         // --- たくさんの要求(細かく・粗く・無効)+ 静かな頁を畳む ---
         RunTreeScene(
-            table, "木: たくさんの要求",
+            table, "木: たくさんの要求", SceneStress,
             [&] {
                 return MakeMultiresNest(
                     test::MakeMultiresCapacity(table, test::STRESS_WORLD_BLOCKS, 0, test::STRESS_FRACTIONS));
@@ -269,6 +322,7 @@ namespace {
         for (const test::MultiresScenario scenario : {test::MultiresScenario::Shadow, test::MultiresScenario::Real}) {
             RunTreeScene(
                 table, scenario == test::MultiresScenario::Shadow ? "木: 影の鎖" : "木: 本物の鎖",
+                scenario == test::MultiresScenario::Shadow ? SceneShadow : SceneReal,
                 [&] {
                     return MakeMultiresNest(test::MakeMultiresCapacity(
                         table, test::MULTIRES_WORLD_BLOCKS, test::MULTIRES_LEVELS, test::MULTIRES_FRACTION_CAPACITY));
@@ -413,11 +467,13 @@ namespace {
         const std::unique_ptr<GasWorld> sparse = MakeGasWorld(table, true, burning);
         const std::unique_ptr<GasWorld> dense = MakeGasWorld(table, false, burning);
         int mismatches = SameState(sparse->nest, dense->nest, table, 0) ? 0 : 1;
+        uint64_t digest = AddDigest(0, sparse->nest);
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             MultiresGasStepReport sparseReport;
             MultiresGasStepReport denseReport;
             StepGas(table, *sparse, burning, tick, sparseReport);
             StepGas(table, *dense, burning, tick, denseReport);
+            digest = AddDigest(digest, sparse->nest);
             mismatches += SameGasReport(sparseReport, denseReport) && SameState(sparse->nest, dense->nest, table, 0)
                               ? 0
                               : 1;
@@ -429,6 +485,8 @@ namespace {
         EXPECT(mismatches == 0);
         if (burning)
             EXPECT(sparse->gas.KineticEnergySum(sparse->nest) > 0);
+
+        CheckDigest(scene, burning ? SceneBurning : SceneAir, digest);
 
         PrintBytes(scene, sparse->nest, dense->nest);
     }
@@ -503,6 +561,7 @@ namespace {
         const std::unique_ptr<LiquidWorld> sparse = MakeLiquidWorld(table, true);
         const std::unique_ptr<LiquidWorld> dense = MakeLiquidWorld(table, false);
         int mismatches = SameState(sparse->nest, dense->nest, table, 0) ? 0 : 1;
+        uint64_t digest = AddDigest(0, sparse->nest);
         uint64_t moved = 0;
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             std::vector<uint32_t> changedSlots;
@@ -510,6 +569,7 @@ namespace {
             const MultiresLiquidStepReport b = dense->liquid.Step(dense->nest, table, tick, changedSlots);
             FoldQuietPages(sparse->nest, tick);
             FoldQuietPages(dense->nest, tick);
+            digest = AddDigest(digest, sparse->nest);
             moved += a.movedMilligrams;
             mismatches += SameLiquidReport(a, b) && SameState(sparse->nest, dense->nest, table, 0) ? 0 : 1;
         }
@@ -519,6 +579,7 @@ namespace {
                     static_cast<unsigned long long>(moved));
         EXPECT(mismatches == 0);
         EXPECT(moved > 0);
+        CheckDigest(scene, SceneLiquid, digest);
         PrintBytes(scene, sparse->nest, dense->nest);
     }
 

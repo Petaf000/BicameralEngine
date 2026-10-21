@@ -43,7 +43,7 @@ namespace bicameral::sim {
                 return store;
 
             store.sparse = nest.sparseFields;
-            store.cellPages = static_cast<uint32_t>((nest.cells.size() - nest.blocks.size()) / MR_BLOCK_CELLS);
+            store.cellPages = static_cast<uint32_t>(nest.cells.pages.size());
             if (store.sparse)
                 store.pageOf.assign(store.cellPages, MULTIRES_NO_FIELD_PAGE);
             else

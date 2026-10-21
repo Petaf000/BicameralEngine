@@ -136,12 +136,14 @@ namespace {
             }
         }
 
-        for (size_t i = 0; i < cpu.cells.size(); ++i) {
-            if (sim::HashReactionCell(cpu.cells[i]) == sim::HashReactionCell(gpu.cells[i]))
+        const std::vector<RxCell> cpuCells = sim::DenseCellImage(cpu);  // GPU と同じ並び(T-0931)
+        const std::vector<RxCell> gpuCells = sim::DenseCellImage(gpu);
+        for (size_t i = 0; i < cpuCells.size(); ++i) {
+            if (sim::HashReactionCell(cpuCells[i]) == sim::HashReactionCell(gpuCells[i]))
                 continue;
 
             Log(Channel::Sim, Level::Error, "刻み {}: セル {} が違う(エネルギー cpu {} / gpu {})", tick, i,
-                cpu.cells[i].energy, gpu.cells[i].energy);
+                cpuCells[i].energy, gpuCells[i].energy);
             break;
         }
 

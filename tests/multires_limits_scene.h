@@ -11,6 +11,7 @@
 
 #include "multires_test_scene.h"
 #include "reaction_limits_table.h"
+#include "sim/multires_nest_internal.h"
 
 namespace bicameral::test {
 
@@ -47,11 +48,8 @@ namespace bicameral::test {
         if (slot == multires::MR_NO_BLOCK || multires::MrIsUniform(nest.blocks[slot]))
             return nest;  // 場面が作れていない(テストが子の数で確かめる)
 
-        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
-            const size_t address = nest.blocks.size() + (size_t{nest.blocks[slot].page} * multires::MR_BLOCK_CELLS) +
-                                   index;
-            nest.cells[address] = MakeLimitsCell(table, index);
-        }
+        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index)
+            sim::nest_detail::StoreCellAt(nest, slot, index, MakeLimitsCell(table, index));
 
         return nest;
     }

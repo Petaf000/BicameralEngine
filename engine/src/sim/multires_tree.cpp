@@ -20,12 +20,13 @@ namespace bicameral::sim {
 
     namespace {
 
-        using nest_detail::CellAt;
         using nest_detail::FractionAt;
         using nest_detail::FreePageAt;
-        using nest_detail::PageCellAt;
+        using nest_detail::LoadCellAt;
         using nest_detail::PokeBlock;
         using nest_detail::SetFraction;
+        using nest_detail::StoreCellAt;
+        using nest_detail::StorePageCell;
         using nest_detail::UniformAt;
 
         // --- 索引 ---
@@ -364,7 +365,7 @@ namespace bicameral::sim {
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const uint32_t parentCell = MrParentCellOfChild(octant, index);
                     if (!uniform)
-                        PageCellAt(nest, childPage, index) = CellAt(nest, parentSlot, parentCell);
+                        StorePageCell(nest, childPage, index, LoadCellAt(nest, parentSlot, parentCell));
 
                     if (childFraction != MR_NO_FRACTION)
                         SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
@@ -470,7 +471,7 @@ namespace bicameral::sim {
                     if (nest.wideCells)  // 一様の値の溢れごと(返された頁の溢れは空。T-0199)
                         StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, child.parent, index));
                     else
-                        PageCellAt(nest, page, index) = MrUniformCell(parent, UniformAt(nest, child.parent), index);
+                        StorePageCell(nest, page, index, MrUniformCell(parent, UniformAt(nest, child.parent), index));
                 }
 
                 parent.page = page;
@@ -499,7 +500,7 @@ namespace bicameral::sim {
                     StoreWideFraction(nest, parent.fraction, index, results[local].fraction);
                 } else {
                     if (!MrIsUniform(parent))
-                        CellAt(nest, child.parent, index) = results[local].cell;
+                        StoreCellAt(nest, child.parent, index, results[local].cell);
 
                     SetFraction(nest, parent.fraction, index, results[local].fraction);
                 }
@@ -593,7 +594,7 @@ namespace bicameral::sim {
         } else {
             block.page = nest_detail::PopPage(nest);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                PageCellAt(nest, block.page, index) = cells[index];
+                StorePageCell(nest, block.page, index, cells[index]);
         }
 
         nest.blocks[slot] = block;

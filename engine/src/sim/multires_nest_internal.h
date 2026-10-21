@@ -25,25 +25,40 @@ namespace bicameral::sim::nest_detail {
         }
     };
 
-    // --- セル(nest.cells = [一様の値 × 枠][頁 × 512]。T-0102)---
+    // --- セル(nest.cells = 一様の値 × 枠 + 頁。T-0102。頁は成分の数に合わせた幅で持つので、頁のセルは値で読み書きする。T-0931)---
 
     inline reaction::RxCell& UniformAt(MultiresNest& nest, uint32_t slot) {
-        return nest.cells[slot];
+        return nest.cells.uniform[slot];
     }
 
     inline const reaction::RxCell& UniformAt(const MultiresNest& nest, uint32_t slot) {
-        return nest.cells[slot];
+        return nest.cells.uniform[slot];
     }
 
-    inline reaction::RxCell& PageCellAt(MultiresNest& nest, uint32_t page, uint32_t index) {
-        return nest.cells[nest.blocks.size() + (size_t{page} * multires::MR_BLOCK_CELLS) + index];
-    }
+    // 頁 page のセル index(multires_cell_store.cpp)
+    [[nodiscard]] reaction::RxCell LoadPageCell(const MultiresNest& nest, uint32_t page, uint32_t index);
+
+    // 頁 page のセル index に書く(成分の数が頁の幅を超えれば頁を広げる)
+    void StorePageCell(MultiresNest& nest, uint32_t page, uint32_t index, const reaction::RxCell& cell);
+
+    // 頁 page の幅を、頁の中のセルの成分の数の最大まで詰める(眠る判定で。読む値は変わらない)
+    void NarrowPageCells(MultiresNest& nest, uint32_t page);
 
     // 頁を持つ枠のセル
-    inline reaction::RxCell& CellAt(MultiresNest& nest, uint32_t slot, uint32_t index) {
+    inline reaction::RxCell LoadCellAt(const MultiresNest& nest, uint32_t slot, uint32_t index) {
         FX_ASSERT(!multires::MrIsUniform(nest.blocks[slot]));
 
-        return PageCellAt(nest, nest.blocks[slot].page, index);
+        return LoadPageCell(nest, nest.blocks[slot].page, index);
+    }
+
+    inline void StoreCellAt(MultiresNest& nest, uint32_t slot, uint32_t index, const reaction::RxCell& cell) {
+        FX_ASSERT(!multires::MrIsUniform(nest.blocks[slot]));
+        StorePageCell(nest, nest.blocks[slot].page, index, cell);
+    }
+
+    // 伝導の変化の表など「頁のセルの添字」で引く並びの大きさ(PageCellAddress の上限)
+    inline size_t CellAddressCount(const MultiresNest& nest) {
+        return nest.cells.uniform.size() + (nest.cells.pages.size() * multires::MR_BLOCK_CELLS);
     }
 
     // 世界の頁の空きのスタック(nest.freeBlocks の後ろ)
@@ -75,7 +90,7 @@ namespace bicameral::sim::nest_detail {
     // 頁が足りなければ一様に戻して数え、種にする(次の刻みにまた試す)。広げた枠を枠の順に返す(multires_nest.cpp。T-0102)
     std::vector<uint32_t> ExpandWantedPages(MultiresNest& nest);
 
-    // 頁のセルの nest.cells の添字
+    // 頁のセルの添字(GPU と同じ並びの列 DenseCellImage の添字)
     inline size_t PageCellAddress(const MultiresNest& nest, uint32_t page, uint32_t index) {
         return nest.blocks.size() + (size_t{page} * multires::MR_BLOCK_CELLS) + index;
     }
@@ -120,7 +135,8 @@ namespace bicameral::sim::nest_detail {
                                             std::span<uint8_t> stepped, uint64_t worldSeed, uint64_t tick,
                                             const MultiresStepOptions& options, uint32_t wakeMark);
 
-    // 伝導の変化をセル(と端数)に足す。端数の枠が無いブロックへの変化は整数の単位だけ(multires_nest.cpp)
+    // 伝導の変化をセル(と端数)に足す。端数の枠が無いブロックへの変化は整数の単位だけ(multires_nest.cpp)。
+    // cell は値(頁へは呼ぶ側が StoreCellAt で書く。T-0931)
     void ApplyEnergyDelta(MultiresNest& nest, uint32_t slot, uint32_t index, reaction::RxCell& cell,
                           const multires::MrEnergyDelta& delta);
 

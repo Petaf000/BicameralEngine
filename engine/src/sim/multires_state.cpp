@@ -26,6 +26,14 @@ namespace bicameral::sim {
                    copy->cellPages == store.cellPages && copy->uniform.size() == store.uniform.size();
         }
 
+        // セルの置き場(T-0931): 一様の値の枠と頁の数が同じ(頁の幅は値で決まるので比べない)
+        bool SameShape(const std::any& saved, const MultiresCellStore& cells) {
+            const auto* copy = std::any_cast<MultiresCellStore>(&saved);
+
+            return copy != nullptr && copy->uniform.size() == cells.uniform.size() &&
+                   copy->pages.size() == cells.pages.size();
+        }
+
         bool SameFields(const MultiresNest& nest, const MultiresSaveState& save) {
             if (save.fieldDescs.size() != nest.fields.size())
                 return false;

@@ -30,6 +30,7 @@
 #include "reaction_test_table.h"
 #include "sim/lab_box.h"
 #include "sim/lab_gauge.h"
+#include "sim/multires_nest_internal.h"
 
 namespace {
 
@@ -237,8 +238,7 @@ namespace {
         const uint32_t index = multires::MrCellIndex(5, 1, 2);
         reaction::RxCell cell = LabBoxCell(broken, index);
         cell.energy += 1;
-        broken.cells[broken.blocks.size() + (size_t{broken.blocks[LAB_BOX_SLOT].page} * multires::MR_BLOCK_CELLS) +
-                     index] = cell;
+        sim::nest_detail::StoreCellAt(broken, LAB_BOX_SLOT, index, cell);
         const auto mismatch = FindLabMismatch(first, broken, 7);
         EXPECT(mismatch.has_value() && mismatch->cell == index && mismatch->tick == 7);
         if (mismatch)
@@ -317,13 +317,13 @@ namespace {
         EXPECT(!LabTableVersionOf(MakeLabTemperatureCommand(0, 0, {}, 300000)).has_value());
 
         MultiresNest nest = MakeLabBoxNest(table);
-        const std::vector<reaction::RxCell> cellsBefore = nest.cells;
+        const std::vector<reaction::RxCell> cellsBefore = DenseCellImage(nest);
         EXPECT(ApplyLabCommands(nest, table, std::span(&mark, 1)) == 1);
         EXPECT(nest.blocks[LAB_BOX_SLOT].busyTick == multires::MR_BUSY_POKED);
         const auto sameCell = [](const reaction::RxCell& a, const reaction::RxCell& b) {
             return reaction::RxSameCell(a, b);
         };
-        EXPECT(std::ranges::equal(nest.cells, cellsBefore, sameCell));
+        EXPECT(std::ranges::equal(DenseCellImage(nest), cellsBefore, sameCell));
 
         // --- 刻み SWAP_TICK の始めに速い表へ: その前は替えない時と同じ、後は違う ---
         std::vector<Command> commands = MakeFireCommands(materials);
