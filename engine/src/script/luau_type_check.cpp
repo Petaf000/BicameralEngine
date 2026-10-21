@@ -10,6 +10,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -220,6 +221,9 @@ namespace bicameral::script {
         std::string TypeText(Luau::TypeId type) {
             Luau::ToStringOptions options;
             options.exhaustive = true;
+            // 長さで切らない(切ると「... *TRUNCATED*」が型の文に入り、検査の Luau が文法の誤りになる。物質の欄が 19 に増えて超えた。T-0910)
+            options.maxTableLength = std::numeric_limits<size_t>::max();
+            options.maxTypeLength = std::numeric_limits<size_t>::max();
 
             return Luau::toString(type, options);
         }

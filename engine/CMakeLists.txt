@@ -76,6 +76,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_state.cpp
   src/sim/multires_tree.cpp
   src/sim/multires_wide_cell.cpp
+  src/sim/sun_column.cpp  # 太陽の影の柱の CPU リファレンス(T-0910・ADR-0396)
 )
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
@@ -125,6 +126,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_equilibrium.cpp  # 釣り合う家族の共通部品の GPU 版(T-0915)
   src/sim/gpu_gas_projection.cpp  # 気体の圧力の投影の 1 刻みの GPU(T-0845。計測と比べる口)
   src/sim/gpu_lab_box.cpp
+  src/sim/gpu_sun_column.cpp  # 太陽の影の柱の GPU(T-0910)
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp
   src/sim/gpu_implicit_build.cpp

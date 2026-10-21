@@ -23,6 +23,7 @@
 #include <string_view>
 #include <vector>
 
+#include "common/light.hlsli"
 #include "common/reaction.hlsli"
 #include "sim/coupling_table.h"
 #include "sim/material_templates.h"
@@ -99,6 +100,13 @@ namespace bicameral::sim {
         // 1 mol が放射を遮る面積(mm²/mol)。任意(既定 0 = 放射しない・吸わない)。セルの吸収率 = 1 − e^−Σ a·n ÷ 面の面積で、
         // 放射率も同じ値(灰色体)。GPU の表にはまだ入らない(放射の CPU リファレンス sim/radiation_reference だけが読む。T-0583・ADR-0252)
         uint32_t radiationAbsorption = 0;
+        // 光の値(2 つの帯。docs/design/23-radiation.md §2・ADR-0395。名前は仮。T-0910)。どれも任意。書かない値はベイクが決める
+        // (BakeSpeciesLight: 片方の帯だけなら同じ値〔灰色〕→ radiation_absorption_mm2_per_mol → 相の既定〔D-610: 固体・液体は灰色で通さない・
+        // 気体は透明〕)。CPU の表 speciesLight に入り、太陽の影の柱(sim/sun_column・sim/gpu_sun_column)が読む。GPU の反応の表には入らない
+        std::optional<uint32_t> lightAbsorptionShort;           // 1 mol が短い帯(見える光)を遮る面積(mm²/mol)
+        std::optional<uint32_t> lightAbsorptionLong;            // 1 mol が長い帯(赤外)を遮る面積(mm²/mol)
+        std::optional<uint32_t> lightReflectanceShortPermille;  // 当たった短い帯を吸わずに返す割合(千分率)
+        std::optional<uint32_t> lightReflectanceLongPermille;
         // 密度(kg/m³。パッケージの density_kg_per_m3)。任意(既定 0 = 書かない)。液体には要る(セルに入る量 = セルの体積 ÷ モル体積)。
         // 固体の密度はセルの体積を分け合う所(sim/cell_volume。ADR-0268)が読む。固体に書かないとベイクが警告する(T-0616)
         uint32_t density = 0;
@@ -218,6 +226,9 @@ namespace bicameral::sim {
         // --- CPU だけ(GPU の表に入るのは T-0586): 放射(sim/radiation_reference。T-0583・ADR-0252)---
         std::vector<uint32_t> speciesRadiationAbsorption;  // mm²/mol(1 mol が放射を遮る面積)。添字 = 物質 ID
 
+        // --- CPU だけ: 光の値(2 つの帯。太陽の影の柱が GPU へ自分で写す。T-0910・ADR-0395)---
+        std::vector<reaction::LtSpeciesLight> speciesLight;  // 添字 = 物質 ID(ID 0 は全部 0)
+
         // --- CPU だけ(GPU は T-0612 の後): 液体(sim/probe_liquid。T-0609・ADR-0266)---
         std::vector<uint8_t> speciesLiquid;  // 1 = 液体(流れる。凝縮相でもある)。添字 = 物質 ID
         std::vector<uint64_t>
@@ -242,6 +253,9 @@ namespace bicameral::sim {
 
     [[nodiscard]] std::expected<BakedReactionTable, std::string> BakeReactionTable(
         const ReactionTableDefinition& definition);
+
+    // 物質 1 つの光の値(書かない値の決め方は SpeciesDefinition の光の値の注。D-610・T-0910)
+    [[nodiscard]] reaction::LtSpeciesLight BakeSpeciesLight(const SpeciesDefinition& definition);
 
     // --- セルを作る・調べる(テストと、T-0089 の初期状態)---
 

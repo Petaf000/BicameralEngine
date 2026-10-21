@@ -32,6 +32,12 @@ export type Species = {
     standard_entropy_mj_per_mol_k: number?, -- 標準モルエントロピー(298.15 K・1 bar)。省ける。坂の検査だけが読む(T-0491)
     condensed: boolean?, -- 廃止(T-0710。phase で書く)。読み込みが true = "solid"・false = "gas" と読み替えて警告する。phase と食い違えば誤り
     radiation_absorption_mm2_per_mol: number?, -- 1 mol が放射を遮る面積(mm²/mol)。省ける(既定 0 = 放射しない・吸わない)。セルの放射率 = 1 − e^−Σ a·n ÷ 面(T-0583・ADR-0252)
+    -- 光の値(2 つの帯。名前は仮。docs/design/23-radiation.md §2・T-0910)。どれも省ける。片方の帯だけ書けばもう片方も同じ値(灰色)。
+    -- 吸い込みを両方省くと radiation_absorption_mm2_per_mol、それも無ければ固体・液体は灰色で光を通さない・気体は透明(D-610)
+    light_absorption_short_mm2_per_mol: number?, -- 1 mol が短い帯(見える光)を遮る面積(mm²/mol)。通しやすさは 1 − 吸い込みで導く
+    light_absorption_long_mm2_per_mol: number?, -- 1 mol が長い帯(赤外)を遮る面積(mm²/mol)
+    light_reflectance_short_permille: number?, -- 当たった短い帯のうち吸わずに返す割合(千分率 0〜1000。光の値を 1 つも書かない固体・液体は 500)
+    light_reflectance_long_permille: number?, -- 同じく長い帯
     phase: string?, -- 相("gas"・"solid"・"liquid" の 1 本。省ける = 気体)。どの流れがこの物質を運ぶかを決める(T-0609・T-0710)
     density_kg_per_m3: number?, -- 密度。液体には要る(無ければ誤り)。固体も書く(セルの場所を取る。書かないとベイクが警告する。ADR-0268・T-0616)
     -- 動き方の任意の値(T-0710・土台の決定 3。名前と単位は仮)。書かなければ今と同じ動き。相に合わない欄はベイクが誤りにする
