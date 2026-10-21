@@ -7,6 +7,7 @@
 - マイルストーン: 列 4(ROADMAP の R-R1 の行)
 - 設計: docs/design/23-radiation.md §3.3・§3.4・§10 R-R1 / 決定: D-570〜D-572・ADR-0382・ADR-0413(Proposed)・ADR-0419(この回の作り方の直し)
 - 親: T-0877(共通の核 shaders/common/cascade_light.hlsli)。GPU は T-0959
+- 2026-10-21 T-0972: 研究の続きは合格せず、退く道(決めた数の向きで掃く)へ移った(ADR-0424・T-0987)
 
 ## 目的
 共通の核をビルドに入れ、CPU リファレンス(engine/src/sim/cascade_light.{h,cpp})と 23 §10 の合格 6 項目の試験(tests/cascade_light_test.cpp)を作る。
