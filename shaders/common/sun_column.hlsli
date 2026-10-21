@@ -5,7 +5,7 @@
 // データの流れ:
 //   太陽(向き・帯ごとの強さ。天候の層・環境の値。今は呼ぶ側が渡す)+ 世界の箱 → SunParams(engine/src/sim/sun_column.cpp の MakeSunParams)
 //   → 光線 1 本ごとに SunWalkRay: 光の向きの一番大きい軸 A の板(光線の細かさ = rayLevel のセル 1 枚)ごとに、板の真ん中の点を含む葉のセルを
-//     木で引き(MrFindContaining)、同じ葉が続く間を 1 区間にまとめる → 区間の光学的な厚さ τ = 吸い込みの和 × 道のり → 通す割合 e^−τ(Q16)
+//     出し(今いるブロックの中は座標から。出たら木で引く: MrFindContaining。T-0957)、同じ葉が続く間を 1 区間にまとめる → 区間の光学的な厚さ τ = 吸い込みの和 × 道のり → 通す割合 e^−τ(Q16)
 //   → 減った分のうち照り返しの割合は「返す」、残りは「吸う」(Sink の Deposit。セルごとに足す)。残りは先へ。箱を出た分は「外へ」
 // 約束:
 //   - 光線は rayLevel のセルの間隔の格子(A に垂直な面の上。セルの真ん中を通る)。1 本の持つ量 = 強さ × 面 × 刻み × cos(整数に切り捨て)。
@@ -137,19 +137,18 @@ struct SunSegment {
     uint64_t reflected;
 };
 
-// 1 区間を通す(energy < 2^47: MakeSunParams が確かめる。× 2^16 が 64bit に収まる): 減った分 = 入った − 通した、返す = 減った × 照り返し、吸う = 減った − 返す
-template <typename Cells, typename Lights, typename Sink>
-FX_FN SunSegment SunPassSegment(Cells cells, Lights lights, Sink sink, uint32_t slot, uint32_t index, uint32_t slabs,
+// 1 区間を通す(energy < 2^47: MakeSunParams が確かめる。× 2^16 が 64bit に収まる): 減った分 = 入った − 通した、返す = 減った × 照り返し、吸う = 減った − 返す。
+// 吸い込みが 0 なら e^−0 = 1 で全部通すので、e^−τ を計算せずに同じ値を返す(T-0957)
+template <typename Sink>
+FX_FN SunSegment SunPassSegment(Sink sink, LtCellBand values, uint32_t slot, uint32_t index, uint32_t slabs,
                                 uint32_t band, uint64_t energy, SunParams params) {
     SunSegment result;
     result.passed = energy;
     result.absorbed = 0;
     result.reflected = 0;
-    if (energy == 0)
+    if (energy == 0 || (values.absorption.hi == 0 && values.absorption.lo == 0))
         return result;
 
-    const RxCell cell = cells.Cell(slot, index);
-    const LtCellBand values = LtCellBandOf(lights, cell, band);
     const uint32_t transmittance = SunTransmittanceQ16(SunSegmentDepthQ32(values.absorption, slabs, params));
     result.passed = (energy * (uint64_t)transmittance) >> 16;
 
@@ -176,12 +175,46 @@ FX_FN int64_t SunCellAcross(int64_t ray, int64_t slab, int32_t step, int32_t ste
     return -(int64_t)((magnitude + denominator - 1) / denominator);
 }
 
+// 横の軸 1 つ(B か C)の歩み: SunCellAcross と同じ番号を、割り算なしで板 1 枚ずつ進める(T-0957)。
+// 分子 = cell × denominator + rest(0 ≤ rest < denominator)。板 1 枚で分子に 2 D_B を足す。|D_B| ≤ |D_A| なので桁の繰り上がりは 1 回まで
+struct SunAcross {
+    int64_t cell;
+    int64_t rest;
+    int64_t twiceStep;
+    int64_t denominator;
+};
+
+FX_FN SunAcross SunStartAcross(int64_t ray, int32_t step, int32_t stepA) {
+    SunAcross across;
+    across.cell = SunCellAcross(ray, 0, step, stepA);
+    across.twiceStep = 2 * (int64_t)step;
+    across.denominator = 2 * (int64_t)stepA;
+    const int64_t numerator = ((2 * ray + 1) * (int64_t)stepA) + (int64_t)step;
+    across.rest = numerator - (across.cell * across.denominator);
+
+    return across;
+}
+
+FX_FN SunAcross SunNextAcross(SunAcross across) {
+    SunAcross next = across;
+    next.rest += across.twiceStep;
+    if (next.rest >= next.denominator) {
+        next.rest -= next.denominator;
+        next.cell += 1;
+    } else if (next.rest < 0) {
+        next.rest += next.denominator;
+        next.cell -= 1;
+    }
+
+    return next;
+}
+
 // 世界の座標(rayLevel のセル)の軸 axis の値を、A・B・C の 3 つから選ぶ
 FX_FN int64_t SunWorldAxis(uint32_t axis, SunParams params, int64_t a, int64_t b, int64_t c) {
     return axis == params.axisA ? a : (axis == params.axisB ? b : c);
 }
 
-// 葉のセル(見つからなければ slot = MR_NO_BLOCK = 箱の中でも木の無い所。透明として扱う)
+// 葉のセル(見つからなければ slot = MR_NO_BLOCK = 箱の中でも木の無い所か、一様で光を吸わないブロック。どちらも素通し)
 struct SunLeaf {
     uint32_t slot;
     uint32_t index;
@@ -200,22 +233,92 @@ FX_FN uint32_t SunFindContaining(Tree tree, int32_t level, int64_t x, int64_t y,
     return found;
 }
 
-template <typename Tree>
-FX_FN SunLeaf SunFindLeaf(Tree tree, SunParams params, int64_t a, int64_t b, int64_t c) {
-    const int64_t x = SunWorldAxis(0, params, a, b, c);
-    const int64_t y = SunWorldAxis(1, params, a, b, c);
-    const int64_t z = SunWorldAxis(2, params, a, b, c);
+// 光線が今いるブロック(T-0957: 板ごとに索引を引かず、同じブロックの中は座標から葉を出す)。
+// 点がこのブロックの中で、その八分の一が本物の子に覆われていなければ、点を含む最も細かい本物のブロックはこのブロック
+// (細かい本物のブロックは必ず親の children に載る)。一様で 2 つの帯とも吸わないブロックは丸ごと素通し(clear)
+struct SunBlockView {
+    int64_t lowX;  // ブロックの低い角(光線の細かさのセル)
+    int64_t lowY;
+    int64_t lowZ;
+    int64_t extent;  // 8 << shift
+    uint32_t slot;   // MR_NO_BLOCK = 持っていない
+    uint32_t shift;  // rayLevel − ブロックのレベル
+    uint32_t coveredMask;
+    uint32_t clear;
+};
 
+template <typename Tree, typename Cells, typename Lights>
+FX_FN SunBlockView SunViewBlock(Tree tree, Cells cells, Lights lights, SunParams params, uint32_t slot) {
+    SunBlockView view;
+    view.lowX = 0;
+    view.lowY = 0;
+    view.lowZ = 0;
+    view.extent = 0;
+    view.slot = slot;
+    view.shift = 0;
+    view.coveredMask = 0;
+    view.clear = 0;
+    if (slot == MR_NO_BLOCK)
+        return view;
+
+    const MrBlock block = tree.Block(slot);
+    view.shift = (uint32_t)(params.rayLevel - block.level);
+    view.lowX = block.originX << view.shift;
+    view.lowY = block.originY << view.shift;
+    view.lowZ = block.originZ << view.shift;
+    view.extent = (int64_t)MR_BLOCK_EDGE << view.shift;
+
+    // --- 覆われた八分の一と、一様なら値を見るセル(覆われていない最初の八分の一の最初のセル)---
+    uint32_t firstOpen = MR_BLOCK_CELLS;
+    FX_UNROLL
+    for (uint32_t octant = 0; octant < 8; ++octant) {
+        const bool covered = block.children[octant] != MR_NO_BLOCK;
+        view.coveredMask |= covered ? (1u << octant) : 0u;
+        firstOpen = (!covered && firstOpen == MR_BLOCK_CELLS) ? MrOctantCell(octant, 0) : firstOpen;
+    }
+
+    if (!MrIsUniform(block) || firstOpen == MR_BLOCK_CELLS)
+        return view;
+
+    const RxCell cell = cells.Cell(slot, firstOpen);
+    const LtCellBand shortBand = LtCellBandOf(lights, cell, LT_BAND_SHORT);
+    const LtCellBand longBand = LtCellBandOf(lights, cell, LT_BAND_LONG);
+    const bool clearShort = shortBand.absorption.hi == 0 && shortBand.absorption.lo == 0;
+    const bool clearLong = longBand.absorption.hi == 0 && longBand.absorption.lo == 0;
+    view.clear = clearShort && clearLong ? 1u : 0u;
+
+    return view;
+}
+
+// 点(光線の細かさの座標)がこのブロックの覆われていない所にあるか
+FX_FN bool SunViewHolds(SunBlockView view, int64_t x, int64_t y, int64_t z) {
+    if (view.slot == MR_NO_BLOCK)
+        return false;
+
+    const int64_t dx = x - view.lowX;
+    const int64_t dy = y - view.lowY;
+    const int64_t dz = z - view.lowZ;
+    const bool inside = dx >= 0 && dx < view.extent && dy >= 0 && dy < view.extent && dz >= 0 && dz < view.extent;
+    if (!inside)
+        return false;
+
+    const uint32_t octantShift = view.shift + 2;
+    const uint32_t octant = (uint32_t)(dx >> octantShift) | ((uint32_t)(dy >> octantShift) << 1) |
+                            ((uint32_t)(dz >> octantShift) << 2);
+
+    return ((view.coveredMask >> octant) & 1u) == 0;
+}
+
+// ブロックの中の点の葉(素通しのブロックは MR_NO_BLOCK)
+FX_FN SunLeaf SunLeafIn(SunBlockView view, int64_t x, int64_t y, int64_t z) {
     SunLeaf leaf;
-    leaf.slot = SunFindContaining(tree, params.rayLevel, x, y, z, params.rootLevel);
+    leaf.slot = view.clear != 0 ? MR_NO_BLOCK : view.slot;
     leaf.index = 0;
     if (leaf.slot == MR_NO_BLOCK)
         return leaf;
 
-    const MrBlock block = tree.Block(leaf.slot);
-    const uint32_t shift = (uint32_t)(params.rayLevel - block.level);
-    leaf.index = MrCellIndex((uint32_t)((x >> shift) - block.originX), (uint32_t)((y >> shift) - block.originY),
-                             (uint32_t)((z >> shift) - block.originZ));
+    leaf.index = MrCellIndex((uint32_t)((x - view.lowX) >> view.shift), (uint32_t)((y - view.lowY) >> view.shift),
+                             (uint32_t)((z - view.lowZ) >> view.shift));
 
     return leaf;
 }
@@ -250,16 +353,19 @@ FX_FN SunRay SunMakeRay(SunParams params) {
     return ray;
 }
 
-// 2 つの帯を同じ区間で通す(木の無い所・空の区間は素通し)
+// 2 つの帯を同じ区間で通す(木の無い所・素通しのブロック・空の区間は何もしない。セルは 1 回だけ読む)
 template <typename Cells, typename Lights, typename Sink>
 FX_FN SunRay SunPassBoth(Cells cells, Lights lights, Sink sink, SunLeaf leaf, uint32_t slabs, SunParams params,
                          SunRay ray) {
-    if (leaf.slot == MR_NO_BLOCK || slabs == 0)
+    if (leaf.slot == MR_NO_BLOCK || slabs == 0 || (ray.energyShort == 0 && ray.energyLong == 0))
         return ray;
 
-    const SunSegment shortBand = SunPassSegment(cells, lights, sink, leaf.slot, leaf.index, slabs, LT_BAND_SHORT,
+    const RxCell cell = cells.Cell(leaf.slot, leaf.index);
+    const LtCellBand shortValues = LtCellBandOf(lights, cell, LT_BAND_SHORT);
+    const LtCellBand longValues = LtCellBandOf(lights, cell, LT_BAND_LONG);
+    const SunSegment shortBand = SunPassSegment(sink, shortValues, leaf.slot, leaf.index, slabs, LT_BAND_SHORT,
                                                 ray.energyShort, params);
-    const SunSegment longBand = SunPassSegment(cells, lights, sink, leaf.slot, leaf.index, slabs, LT_BAND_LONG,
+    const SunSegment longBand = SunPassSegment(sink, longValues, leaf.slot, leaf.index, slabs, LT_BAND_LONG,
                                                ray.energyLong, params);
 
     SunRay result = ray;
@@ -278,20 +384,23 @@ FX_FN SunRay SunPassBoth(Cells cells, Lights lights, Sink sink, SunLeaf leaf, ui
 template <typename Tree, typename Cells, typename Lights, typename Sink>
 FX_FN SunRay SunWalkRay(Tree tree, Cells cells, Lights lights, Sink sink, SunParams params, uint32_t rayB,
                         uint32_t rayC) {
-    const int64_t lineB = params.firstRayB + (int64_t)rayB;
-    const int64_t lineC = params.firstRayC + (int64_t)rayC;
+    SunAcross acrossB = SunStartAcross(params.firstRayB + (int64_t)rayB, params.stepB, params.stepA);
+    SunAcross acrossC = SunStartAcross(params.firstRayC + (int64_t)rayC, params.stepC, params.stepA);
     SunRay ray = SunMakeRay(params);
     bool entered = false;
     bool walking = true;
+    SunBlockView view = SunViewBlock(tree, cells, lights, params, MR_NO_BLOCK);
     SunLeaf current;
     current.slot = MR_NO_BLOCK;
     current.index = 0;
     uint32_t slabs = 0;
 
-    // --- 板ごとに: 箱の中なら葉を引き、同じ葉が続く間は区間を伸ばす ---
+    // --- 板ごとに: 箱の中なら葉を出し(同じブロックの中は座標から)、同じ葉が続く間は区間を伸ばす ---
     for (int64_t slab = 0; walking && slab < params.sizeA; ++slab) {
-        const int64_t b = SunCellAcross(lineB, slab, params.stepB, params.stepA);
-        const int64_t c = SunCellAcross(lineC, slab, params.stepC, params.stepA);
+        const int64_t b = acrossB.cell;
+        const int64_t c = acrossC.cell;
+        acrossB = SunNextAcross(acrossB);
+        acrossC = SunNextAcross(acrossC);
         const bool inside = b >= 0 && b < params.sizeB && c >= 0 && c < params.sizeC;
         if (!inside) {
             walking = !entered;  // 入った後に出たら終わり(箱は凸なので戻らない)
@@ -305,7 +414,14 @@ FX_FN SunRay SunWalkRay(Tree tree, Cells cells, Lights lights, Sink sink, SunPar
         }
 
         const int64_t a = params.signA > 0 ? params.lowA + slab : params.lowA + params.sizeA - 1 - slab;
-        const SunLeaf leaf = SunFindLeaf(tree, params, a, params.lowB + b, params.lowC + c);
+        const int64_t x = SunWorldAxis(0, params, a, params.lowB + b, params.lowC + c);
+        const int64_t y = SunWorldAxis(1, params, a, params.lowB + b, params.lowC + c);
+        const int64_t z = SunWorldAxis(2, params, a, params.lowB + b, params.lowC + c);
+        if (!SunViewHolds(view, x, y, z))
+            view = SunViewBlock(tree, cells, lights, params,
+                                SunFindContaining(tree, params.rayLevel, x, y, z, params.rootLevel));
+
+        const SunLeaf leaf = SunLeafIn(view, x, y, z);
         if (leaf.slot == current.slot && leaf.index == current.index) {
             slabs += 1;
             continue;
