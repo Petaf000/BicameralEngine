@@ -5,6 +5,9 @@
 //   2. 帳簿: 毎刻み Σ セルの上向きの力 = 固定した面の力 − 重さ(解けきらなくても厳密)
 //   3. 決定性: 2 回の実行でハッシュ一致
 //   4. 釣り合いに着くまでの刻みの数(先のたわみが最後の値の ±5 %・±1 % に入る刻み)と、掘った直後の見た目(たわみの分布)の記録
+//   5. (T-0944)アーチ(内径 4 m・厚さ 1 m の半円の階段。0.5 / 0.25 m)と洞窟の天井(幅 24 × 高さ 10 m・8 × 4 m の空洞。2 / 1 / 0.5 / 0.25 m)を
+//      同じ階段の形を細かく刻んだ連続体(浮動小数点の捨てる試作で求めた値。下の表)と比べる。釣り合いに着く刻みと頂のたわみの道筋も記録
+//   6. (T-0944)表面の引きの応力: 面の力(FaceForces)の縁の力 ÷ dx² を片持ち梁の梁の式 6M/(b h²) と比べる
 // 合格の数値(22 §6: ±5 %)の判定は記録としてログに出し、試験が落ちるのは帳簿・決定性・符号だけ(研究の測り。T-0871 に結果)。
 // 引数: [--ticks n](既定 2000)[--record](掘った場面の分布をログへ)
 #include <cmath>
@@ -129,6 +132,187 @@ namespace {
         return settle;
     }
 
+    // --- 5. アーチと洞窟の天井(T-0944)---
+    // 基準(浮動小数点の捨てる試作 T-0944。E = 1・ρg = 1 の単位〔たわみ = 値 × ρg/E〕):
+    //   continuumRef = 同じ階段の形を各セル 16・32 × 16・32(洞窟の 2 m は 64)の非適合モードの四辺形(Q6)で解き、刻みの細かさへ外挿した値
+    //   latticeSolved = 同じ格子の梁を直接解いた値(この試験の整数の解きが着く先。解けきったかの確かめ)
+    struct ShapeCase {
+        const char* name;
+        bool arch;
+        uint64_t cellMm;
+        double continuumRef;
+        double latticeSolved;
+        bool braces = false;  // 段の斜めの棒(2 本目)
+    };
+
+    constexpr double STONE_SAG_PER_UNIT_MM = STONE_DENSITY * 9.80665 / (STONE_KPA * 1000.0) * 1000.0;
+
+    // アーチ: 内径 4 m・厚さ 1 m の半円。セルの中心が内径〜外径にあるセル。下の段を地面に固定
+    sim::SupportScene Arch(uint64_t cellMm) {
+        const auto inner = (int64_t)(4000 / cellMm);
+        const auto outer = (int64_t)(5000 / cellMm);
+        sim::SupportScene scene = Beam((uint32_t)(2 * outer), (uint32_t)outer, cellMm, false);
+        for (int64_t up = 0; up < outer; ++up) {
+            for (int64_t x = 0; x < 2 * outer; ++x) {
+                // 中心の 2 倍の座標(セルの大きさ ÷ 2 の単位)
+                const int64_t cx = 2 * x - 2 * outer + 1;
+                const int64_t cy = 2 * up + 1;
+                const int64_t radius = cx * cx + cy * cy;
+                const bool inside = radius >= 4 * inner * inner && radius <= 4 * outer * outer;
+                const size_t i = (size_t)x + (size_t)(2 * outer) * (size_t)up;
+                scene.solid[i] = inside ? 1 : 0;
+                scene.clamps[i] = inside && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0;
+            }
+        }
+
+        return scene;
+    }
+
+    // 洞窟: 幅 24 × 高さ 10 m の岩・x 8〜16 m・高さ 4〜8 m の空洞(天井の厚さ 2 m)。下を地面に固定
+    sim::SupportScene Cave(uint64_t cellMm) {
+        const auto width = (uint32_t)(24000 / cellMm);
+        const auto height = (uint32_t)(10000 / cellMm);
+        sim::SupportScene scene = Beam(width, height, cellMm, false);
+        for (uint32_t up = 0; up < height; ++up) {
+            for (uint32_t x = 0; x < width; ++x) {
+                const uint64_t cx = (2 * x + 1) * cellMm;
+                const uint64_t cy = (2 * up + 1) * cellMm;
+                const bool hollow = cx > 16000 && cx < 32000 && cy > 8000 && cy < 16000;
+                scene.solid[x + (size_t)width * up] = hollow ? 0 : 1;
+                scene.clamps[x + (size_t)width * up] = !hollow && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0;
+            }
+        }
+
+        return scene;
+    }
+
+    // 見る所: アーチは頂(真ん中の 2 列の全部のセル)・洞窟は天井の下の面(x 12 m を挟む 2 セル)。下向きを正(mm)
+    double ShapeSagMm(const sim::SupportLaw& law, const sim::SupportScene& scene, bool arch) {
+        double sum = 0;
+        int count = 0;
+        const uint32_t middle = arch ? scene.width / 2 : (uint32_t)(12000 / scene.cellMm);
+        const auto ceiling = (uint32_t)(8000 / scene.cellMm);
+        for (const uint32_t x : {middle - 1, middle}) {
+            for (uint32_t up = 0; up < scene.height; ++up) {
+                if (scene.solid[x + (size_t)scene.width * up] == 0 || (!arch && up != ceiling))
+                    continue;
+
+                sum += (double)law.Value(x, up, sim::SUPPORT_UP);
+                ++count;
+            }
+        }
+
+        return -sum / count / NM_UNITS / 1.0e6;
+    }
+
+    void TestShape(const ShapeCase& shape, uint32_t ticks, bool record) {
+        const sim::SupportScene scene = shape.arch ? Arch(shape.cellMm) : Cave(shape.cellMm);
+        sim::SupportLaw law(scene, {.stairBraces = shape.braces});
+        std::vector<double> path(ticks);
+        bool ledgerOk = true;
+        for (uint32_t tick = 0; tick < ticks; ++tick) {
+            law.Step();
+            path[tick] = ShapeSagMm(law, scene, shape.arch);
+            const sim::SupportLedger ledger = law.Ledger();
+            ledgerOk = ledgerOk && ledger.netMn == ledger.reactionMn - ledger.weightMn;
+        }
+
+        const double finalMm = path.back();
+        uint32_t ticksTo5 = 0;
+        uint32_t ticksTo1 = 0;
+        for (uint32_t tick = ticks; tick-- > 0;) {
+            const double error = std::abs(path[tick] / finalMm - 1.0);
+            if (error <= 0.01)
+                ticksTo1 = tick + 1;
+
+            if (error > 0.05)
+                break;
+
+            ticksTo5 = tick + 1;
+        }
+
+        const double reference = shape.continuumRef * STONE_SAG_PER_UNIT_MM;
+        const double solved = shape.latticeSolved * STONE_SAG_PER_UNIT_MM;
+        const double ratio = finalMm / reference;
+        Log(Channel::Sim, Level::Info,
+            "{}{} {} m({} セル): たわみ {:.5f} mm / 連続体 {:.5f} mm = {:.3f}({})・解けきった格子の梁の "
+            "{:.4f}・着く刻み "
+            "±5 % "
+            "{}・±1 % {}・{} 刻み",
+            shape.name, shape.braces ? "(段の斜めの棒)" : "", (double)shape.cellMm / 1000.0, law.CellCount(), finalMm,
+            reference, ratio, std::abs(ratio - 1) <= 0.05 ? "±5 % 合格" : "±5 % 不合格", finalMm / solved, ticksTo5,
+            ticksTo1, ticks);
+        Expect(ledgerOk, std::string("帳簿: ") + shape.name);
+        Expect(finalMm > 0, std::string("重さで下がる: ") + shape.name);
+        if (!record)
+            return;
+
+        std::string row;
+        for (const uint32_t tick : {1u, 10u, 30u, 60u, 120u, 300u, 600u, 1200u, ticks}) {
+            if (tick <= ticks)
+                row += std::format(" {}:{:.3f}", tick, path[tick - 1] / finalMm);
+        }
+
+        Log(Channel::Sim, Level::Info, "{}{} {} m: 見る所のたわみの道筋(刻み:最後の値との比){}", shape.name,
+            shape.braces ? "(段の斜めの棒)" : "", (double)shape.cellMm / 1000.0, row);
+    }
+
+    void TestShapes(uint32_t ticks, bool record) {
+        const ShapeCase cases[] = {
+            {"アーチ 内径 4 m・厚さ 1 m", true, 500, 119.00, 135.380},
+            {"アーチ 内径 4 m・厚さ 1 m", true, 250, 94.29, 99.651},
+            {"アーチ 内径 4 m・厚さ 1 m", true, 500, 119.00, 114.096, true},
+            {"アーチ 内径 4 m・厚さ 1 m", true, 250, 94.29, 92.761, true},
+            {"洞窟の天井 24 × 10 m", false, 2000, 169.94, 180.741},
+            {"洞窟の天井 24 × 10 m", false, 1000, 177.45, 183.991},
+            {"洞窟の天井 24 × 10 m", false, 500, 179.43, 182.856},
+            {"洞窟の天井 24 × 10 m", false, 250, 179.94, 181.657},
+            {"洞窟の天井 24 × 10 m", false, 2000, 169.94, 162.936, true},
+            {"洞窟の天井 24 × 10 m", false, 1000, 177.45, 174.479, true},
+            {"洞窟の天井 24 × 10 m", false, 500, 179.43, 178.265, true},
+            {"洞窟の天井 24 × 10 m", false, 250, 179.94, 179.482, true},
+        };
+        for (const ShapeCase& shape : cases)
+            TestShape(shape, ticks, record);
+
+        sim::SupportLaw first(Arch(500), {.stairBraces = true});
+        sim::SupportLaw again(Arch(500), {.stairBraces = true});
+        for (uint32_t tick = 0; tick < 200; ++tick) {
+            first.Step();
+            again.Step();
+        }
+
+        Expect(first.Hash() == again.Hash(), "決定性: アーチ");
+    }
+
+    // --- 6. 表面の引きの応力(T-0944): 片持ち梁 4 m の根から 1 m の切り口の上の縁 ---
+    void TestSurfaceStress(uint64_t cellMm, uint32_t height, uint32_t ticks) {
+        const auto width = (uint32_t)(4000 / cellMm);
+        sim::SupportLaw law(Beam(width, height, cellMm, false), {});
+        for (uint32_t tick = 0; tick < ticks; ++tick)
+            law.Step();
+
+        // 切り口 x = 1 m は、セル (1 m ÷ dx − 1) と右の隣の間の面
+        const uint32_t cut = (uint32_t)(1000 / cellMm) - 1;
+        const sim::SupportFaceForces top = law.FaceForces(cut, height - 1, 0);
+        const sim::SupportFaceForces bottom = law.FaceForces(cut, 0, 0);
+        const double cellM = (double)cellMm / 1000.0;
+        const double areaM2 = cellM * cellM;
+        const double heightM = cellM * height;
+        const double load = STONE_DENSITY * 9.80665 * heightM * cellM;
+        const double moment = load * 3.0 * 3.0 / 2;
+        const double beamKpa = 6 * moment / (cellM * heightM * heightM) / 1000.0;
+        const double topKpa = (double)top.highSideMn / 1000.0 / areaM2 / 1000.0;
+        const double bottomKpa = (double)bottom.lowSideMn / 1000.0 / areaM2 / 1000.0;
+        Log(Channel::Sim, Level::Info,
+            "表面の引きの応力 片持ち梁 4 m(厚さ {} セル・{} m)根から 1 m: 上の縁 {:.2f} kPa・下の縁 {:.2f} kPa / "
+            "梁の式 ±{:.2f} "
+            "kPa = {:.3f} / {:.3f}",
+            height, cellM, topKpa, bottomKpa, beamKpa, topKpa / beamKpa, -bottomKpa / beamKpa);
+        Expect(topKpa > 0 && bottomKpa < 0, "片持ち梁の上の縁が引かれ下の縁が押される");
+        Expect(std::abs(topKpa / beamKpa - 1) <= 0.05 || height > 1, "1 セルの厚さで表面の応力が梁の式と ±5 %");
+    }
+
     const char* FormName(sim::SupportForm form) {
         return form == sim::SupportForm::BeamLattice ? "格子の梁" : "成分ごと";
     }
@@ -233,6 +417,9 @@ namespace {
         }
 
         TestDig(ticks, record);
+        TestShapes(ticks, record);
+        TestSurfaceStress(500, 1, ticks);
+        TestSurfaceStress(250, 2, ticks);
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "support_law_test: FAILED ({} 件)", failureCount);
             return 1;
