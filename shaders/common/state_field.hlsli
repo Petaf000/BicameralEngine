@@ -8,6 +8,10 @@
 //
 // 値はどれも 64bit の符号付き整数で持つ(型は範囲の約束。I32 / U32 は 64bit の中の範囲を書く側が守る)。
 // 量の単位はセルと同じくレベル k で 8^-k(細かくすると子は親と同じ数 = 和が 8 倍の単位で保たれる)。
+//
+// 欄の種類(T-0854。20 §10・ADR-0373・ADR-0399): 真実(状態そのもの。既定)/ 導かれる値(真実から計算できる。SF_FLAG_DERIVED)/
+// 温めた始まり(解き始めに使う導かれる値。SF_FLAG_DERIVED | SF_FLAG_WARM_START)。ハッシュ・保存点・保存量・粗くする規則・眠る時の扱いは
+// 種類から決まる(SfHashed・SfSaved・SfDescValid・SfSleepValue)。作業役は欄ごとに考えない。
 #ifndef BICAMERAL_STATE_FIELD_HLSLI
 #define BICAMERAL_STATE_FIELD_HLSLI
 
@@ -55,8 +59,27 @@ FX_CONST uint32_t SF_SCALE_COUNT = 2;
 
 // --- 印 ----------------------------------------------------------------------------------------
 FX_CONST uint32_t SF_FLAG_CONSERVED = 1u;  // 保存量(世界の帳簿の列に入る。VOLUME の欄と同じもの。T-0712・T-0762)
-FX_CONST uint32_t SF_FLAG_HASHED = 2u;     // 状態のハッシュに入る
-FX_CONST uint32_t SF_FLAG_MASK = 3u;
+FX_CONST uint32_t SF_FLAG_HASHED = 2u;     // 状態のハッシュに入る(真実の欄だけが書く。導かれる値は種類から決まる)
+// 導かれる値(T-0854。20 §10.1): 真実から計算できる(圧力・たわみと力・電位・磁場・放射の場など)。起きている所でだけ計算して書く。
+// セル・面の欄だけ・SAME だけ・保存量でない。眠る(頁を畳む)時は一様の値の枠へ平均して残す(SF_DERIVED_SLEEP_KEEP_COARSE)
+FX_CONST uint32_t SF_FLAG_DERIVED = 4u;
+// 温めた始まり(T-0854。20 §10.4): 決まった回数で解く法則の解き始め(前の刻みの答え)。導かれる値だが答えを変えるので、
+// SF_WARM_START_IN_STATE なら真実と同じくハッシュと保存点に入る。SF_FLAG_DERIVED と一緒に書く
+FX_CONST uint32_t SF_FLAG_WARM_START = 8u;
+FX_CONST uint32_t SF_FLAG_MASK = 15u;
+
+// --- 欄の種類(印から決まる。SfFieldKind)---
+FX_CONST uint32_t SF_KIND_TRUTH = 0;       // 真実(状態そのもの)
+FX_CONST uint32_t SF_KIND_DERIVED = 1;     // 導かれる値(状態に入らない。読み込んだ後・起きた時に真実から解き直す)
+FX_CONST uint32_t SF_KIND_WARM_START = 2;  // 温めた始まり(SF_WARM_START_IN_STATE なら状態に入る)
+
+// D-549(仮・ユーザー未確認。おすすめ (A)): 温めた始まりをハッシュと保存点に入れる。(B)(真実だけ)に戻すならここを false にするだけ
+// (読み込んだ直後の数刻みの導かれる値が、続けて遊んだ場合とビット単位で一致しなくなる)
+FX_CONST bool SF_WARM_START_IN_STATE = true;
+
+// D-542(ユーザー決定 (b)): 眠った所の導かれる値は粗くして残す(ブロックの一様の値の枠へ平均)。研究 R-F1 で使えなければ
+// (a) 捨てる(0 にして、起きた時に解き直す)へ下げる = ここを false にするだけ
+FX_CONST bool SF_DERIVED_SLEEP_KEEP_COARSE = true;
 
 FX_CONST uint32_t SF_MAX_COMPONENTS = 3;  // セル・ブロック・世界の欄の値の数の上限(面は 3 つ決まり)
 
@@ -104,8 +127,38 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
     if (((desc.flags & SF_FLAG_CONSERVED) != 0u) != (desc.scale == SF_SCALE_VOLUME))
         return false;
 
+    // 温めた始まりは導かれる値の一つ
+    const bool derived = (desc.flags & SF_FLAG_DERIVED) != 0u;
+    if ((desc.flags & SF_FLAG_WARM_START) != 0u && !derived)
+        return false;
+
+    // 導かれる値: セル・面の欄・量でない(SAME)・保存量でない。ハッシュに入るかは種類から決まるので HASHED を書かない(T-0854)
+    if (derived && (desc.scale != SF_SCALE_SAME || (desc.flags & (SF_FLAG_CONSERVED | SF_FLAG_HASHED)) != 0u ||
+                    (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
+        return false;
+
     // ブロック・世界の欄は細かく/粗くで和を取らない
     return desc.scale == SF_SCALE_SAME || desc.place == SF_PLACE_CELL || desc.place == SF_PLACE_FACE;
+}
+
+// 導かれる値の登録 1 行(T-0854): セル・面・SAME・保存量でない。warmStart なら温めた始まり
+FX_FN SfFieldDesc SfMakeDerivedDesc(uint32_t place, uint32_t type, uint32_t phase, bool warmStart,
+                                    uint32_t components) {
+    const uint32_t flags = SF_FLAG_DERIVED | (warmStart ? SF_FLAG_WARM_START : 0u);
+
+    return SfMakeFieldDesc(place, type, phase, SF_SCALE_SAME, flags, components);
+}
+
+// 欄の種類(SF_KIND_*)
+FX_FN uint32_t SfFieldKind(SfFieldDesc desc) {
+    if ((desc.flags & SF_FLAG_DERIVED) == 0u)
+        return SF_KIND_TRUTH;
+
+    return (desc.flags & SF_FLAG_WARM_START) != 0u ? SF_KIND_WARM_START : SF_KIND_DERIVED;
+}
+
+FX_FN bool SfDerived(SfFieldDesc desc) {
+    return (desc.flags & SF_FLAG_DERIVED) != 0u;
 }
 
 // セルの頁に置く欄か(セル・面)
@@ -118,8 +171,26 @@ FX_FN bool SfConserved(SfFieldDesc desc) {
     return (desc.flags & SF_FLAG_CONSERVED) != 0u;
 }
 
+// 状態のハッシュに入るか: 真実は HASHED の印・温めた始まりは SF_WARM_START_IN_STATE・導かれる値は入らない(T-0854)
 FX_FN bool SfHashed(SfFieldDesc desc) {
-    return (desc.flags & SF_FLAG_HASHED) != 0u;
+    const uint32_t kind = SfFieldKind(desc);
+    if (kind == SF_KIND_TRUTH)
+        return (desc.flags & SF_FLAG_HASHED) != 0u;
+
+    return kind == SF_KIND_WARM_START && SF_WARM_START_IN_STATE;
+}
+
+// 保存点・写しに入るか: 真実はいつも・温めた始まりは SF_WARM_START_IN_STATE・導かれる値は入らない
+// (戻した時は 0 にして、起きている所は次に計算する時に真実から解き直す。15 §1「差分に入るのは真実だけ」)
+FX_FN bool SfSaved(SfFieldDesc desc) {
+    const uint32_t kind = SfFieldKind(desc);
+
+    return kind == SF_KIND_TRUTH || (kind == SF_KIND_WARM_START && SF_WARM_START_IN_STATE);
+}
+
+// 真実の要約(眠らせても変わらないはずのもの)に入るか: 真実でハッシュに入る欄だけ
+FX_FN bool SfTruthHashed(SfFieldDesc desc) {
+    return SfFieldKind(desc) == SF_KIND_TRUTH && (desc.flags & SF_FLAG_HASHED) != 0u;
 }
 
 // 値が型の範囲に入るか(書く側の約束を確かめる)
@@ -168,6 +239,56 @@ FX_FN int64_t SfCoarsenValue(SfCoarsenSum sum) {
 // 余り(子のレベルの単位で 0〜7。切り捨てなのでいつも 0 以上 = セルから減った量)。VOLUME の欄は世界の帳簿の「粗くした端数・出」へ・SAME の欄は捨てる
 FX_FN uint32_t SfCoarsenRemainder(SfCoarsenSum sum) {
     return sum.low & 7u;
+}
+
+// --- 眠る時の導かれる値: 覆われていないセルの平均(T-0854。20 §10.3)----------------------------------------
+// 頁を畳む(眠る)時、導かれる値はブロックの一様の値の枠へ、覆われていないセルの値の平均(−∞ 向きの切り捨て)を 1 つ残す。
+// 起きる(頁に広げる)時は一様の値を覆われていないセルへ配る(SAME: 子は親と同じ数 = 今の ExpandPage と同じ)。
+// 和は 512 個の 64bit で 64bit を越えうるので 128bit(2 の補数)で足す。余りは捨てる(保存量でない)
+struct SfMeanSum {
+    int64_t high;    // 上の 64bit(符号付き)
+    uint64_t low;    // 下の 64bit
+    uint32_t count;  // 足した値の数
+};
+
+FX_FN SfMeanSum SfMakeMeanSum() {
+    SfMeanSum sum;
+    sum.high = 0;
+    sum.low = 0;
+    sum.count = 0u;
+
+    return sum;
+}
+
+FX_FN SfMeanSum SfAddMeanValue(SfMeanSum sum, int64_t value) {
+    const uint64_t low = sum.low + (uint64_t)value;
+    const int64_t carry = low < sum.low ? (int64_t)1 : (int64_t)0;
+    sum.high += (value < 0 ? (int64_t)-1 : (int64_t)0) + carry;
+    sum.low = low;
+    sum.count += 1u;
+
+    return sum;
+}
+
+// 平均(−∞ 向きの切り捨て)。値が無ければ 0。|和| ≤ 数 × 2^63 なので、絶対値の上の 64bit は数より小さい(FxDivU128By64 の約束)
+FX_FN int64_t SfMeanValue(SfMeanSum sum) {
+    if (sum.count == 0u)
+        return 0;
+
+    const bool negative = sum.high < 0;
+    const uint64_t magnitudeLow = negative ? ~sum.low + 1u : sum.low;
+    const uint64_t magnitudeHigh = negative ? ~(uint64_t)sum.high + (magnitudeLow == 0 ? (uint64_t)1 : (uint64_t)0)
+                                            : (uint64_t)sum.high;
+    const FxU128 magnitude = {magnitudeHigh, magnitudeLow};
+    const FxDivResult division = FxDivU128By64(magnitude, (uint64_t)sum.count);
+    const uint64_t rounded = division.quotient + (negative && division.remainder != 0 ? (uint64_t)1 : (uint64_t)0);
+
+    return FxApplySign(rounded, negative);
+}
+
+// 眠る時に一様の値の枠へ残す値(平均 mean。(a) 捨てるなら 0)
+FX_FN int64_t SfSleepValue(int64_t mean) {
+    return SF_DERIVED_SLEEP_KEEP_COARSE ? mean : (int64_t)0;
 }
 
 // --- 観察の影を親に引き戻す(T-0761。ADR-0361)-------------------------------------------------------

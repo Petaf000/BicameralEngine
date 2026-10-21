@@ -295,6 +295,9 @@ add_test(NAME multires COMMAND multires_test)
 add_executable(multires_state_test multires_state_test.cpp)  # 状態の登録・欄・ハッシュと保存点が登録を回る(T-0711)
 target_link_libraries(multires_state_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_state COMMAND multires_state_test)
+add_executable(field_storage_test field_storage_test.cpp)  # 欄の持ち方: 真実 / 導かれる値 / 温めた始まり・眠らせて起こす往復(T-0854)
+target_link_libraries(field_storage_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME field_storage COMMAND field_storage_test)
 add_executable(multires_wide_test multires_wide_test.cpp)  # 溢れを使う世界の影・畳む・端数・静かな葉(T-0199)
 target_link_libraries(multires_wide_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_wide COMMAND multires_wide_test)
@@ -994,7 +997,7 @@ add_test(NAME float_check_source_accepts
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test
+    multires_state_test field_storage_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
