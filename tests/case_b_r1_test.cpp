@@ -1,4 +1,5 @@
-// case_b_r1_test.cpp — 案 B の研究 R1(T-0868。docs/design/21 §5.2): 硬い液体を気体と同じ陰の圧力で(case_b_flow)。CPU だけ。
+// case_b_r1_test.cpp — 案 B の研究 R1(T-0868・T-0926・T-0927。docs/design/21 §5.2・ADR-0409): 硬い液体を気体と同じ陰の圧力で(case_b_flow)。CPU だけ。
+// T-0926 の後: 連通管・閉じた空気は 60 秒走らせ、40〜60 秒の揺れの中心で見る(20 秒の 1 点は前の合格として並べる)。主の組は (1) 本物の水・V 4 + 物の粘り。
 // 1 本目 = 本物の水(音の速さ 1483 m/s)・V サイクル 2 回。2 本目 = 液体の段 (2) 水を柔らかく(100 m/s・30 m/s)と (1) 回数を増やす(4 回)を
 // 同じ試験の中で並べて測る。場面: 静かな池・連通管・閉じた空気の下の水(潜水鐘)・ダムの決壊・サイフォン(頂上 4 m・9 m・11 m)・弱い差の戻り(0.5 m と 2 m)。
 // 合否の目安は 21 §5.2(仮)。この試験は**研究の記録**なので、落ちて止まるのは保存・決定性・式の壊れ(負の質量など)だけで、
@@ -36,18 +37,24 @@ namespace {
     constexpr int64_t TOLERANCE_NL = 256;  // 陰の圧力の口の止める誤差(V サイクルの上限が先に来ることが多い)
 
     // 試す組(液体の硬さ × V サイクルの上限)
+    // 粘り(T-0927): 物の粘り(viscosity_upa_s)と格子より小さい渦の粘り(T-0926 の仮説 2。C_s² × 10000)
     struct Trial {
         const char* name;
         uint32_t soundMmPerS;
         uint32_t cycles;
+        bool materialViscosity;
+        uint32_t eddyPer10000;
     };
 
+    // 主は (1) 本物の水・V 4 + 物の粘り(T-0926・T-0927 の後の R1。司令塔のおすすめ)
     constexpr Trial TRIALS[] = {
-        {"1 本目 本物の水 1483 m/s・V 2", WATER_SOUND_SPEED_MM_PER_S, 2},
-        {"(1) 本物の水・V 4", WATER_SOUND_SPEED_MM_PER_S, 4},
-        {"(2) 柔らかい水 100 m/s・V 2", 100000, 2},
-        {"(2)+(1) 100 m/s・V 4", 100000, 4},
-        {"(2) 柔らかい水 30 m/s・V 2", 30000, 2},
+        {"(1) 本物の水・V 4 + 物の粘り(主)", WATER_SOUND_SPEED_MM_PER_S, 4, true, 0},
+        {"1 本目 本物の水・V 2(粘り無し。T-0868 の表の 1 本目)", WATER_SOUND_SPEED_MM_PER_S, 2, false, 0},
+        {"(1) 本物の水・V 8 + 物の粘り(真空のセルが解き残りから出るかを見る。T-0926)", WATER_SOUND_SPEED_MM_PER_S, 8,
+         true, 0},
+        {"(1) 本物の水・V 4 + 物の粘り + 渦の粘り C_s 0.17(T-0926 仮説 2・記録)", WATER_SOUND_SPEED_MM_PER_S, 4, true,
+         289},
+        {"(2) 柔らかい水 100 m/s・V 2 + 物の粘り", 100000, 2, true, 0},
     };
 
     struct Run {
@@ -65,7 +72,9 @@ namespace {
         for (const std::string_view name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages({.liquidSoundSpeedMmPerS = trial.soundMmPerS});
+        const FlowStages flow = MakeFlowStages({.liquidSoundSpeedMmPerS = trial.soundMmPerS,
+                                                .materialViscosity = trial.materialViscosity,
+                                                .eddyCoefficientPer10000 = trial.eddyPer10000});
         run.recording = RunScene(run.box, flow.stages, MakeImplicitGridSolver(trial.cycles, TOLERANCE_NL), ticks,
                                  regions);
         run.stats = *flow.stats;
@@ -90,10 +99,32 @@ namespace {
         std::printf(
             "    費用 %lld ns/セル/刻み(計器込み)・V サイクル 最後 %u 最大 %u・式の誤差 最大 %lld nL・出る量を縮めた "
             "%llu・"
-            "真空のセル %llu・軽い面 %llu\n",
+            "真空のセル %llu・軽い面 %llu・粘りの組 %llu\n",
             (long long)run.recording.NanosecondsPerCellTick(), run.stats.lastCycles, run.stats.maxCycles,
             (long long)run.stats.maxErrorNl, (unsigned long long)run.stats.limitedCells,
-            (unsigned long long)run.stats.voidCells, (unsigned long long)run.stats.lightFaces);
+            (unsigned long long)run.stats.voidCells, (unsigned long long)run.stats.lightFaces,
+            (unsigned long long)run.stats.viscousPairs);
+    }
+
+    // 列の窓(from 以降)の最小・最大・平均。揺れているのか、ずれて止まっているのかを分ける(T-0926)
+    struct Window {
+        int64_t low = 0;
+        int64_t high = 0;
+        int64_t mean = 0;
+    };
+
+    Window WindowOf(const std::vector<int64_t>& series, size_t from) {
+        Window window{.low = INT64_MAX, .high = INT64_MIN, .mean = 0};
+        int64_t total = 0;
+        for (size_t tick = from; tick < series.size(); ++tick) {
+            window.low = std::min(window.low, series[tick]);
+            window.high = std::max(window.high, series[tick]);
+            total += series[tick];
+        }
+
+        window.mean = series.size() > from ? total / (int64_t)(series.size() - from) : 0;
+
+        return window;
     }
 
     // --- 静かな池(#13・#27・#90): 水面のセルの圧力の揺れ < 大気の 0.1 %・ほぼ止まる・水位が動かない ---
@@ -126,53 +157,104 @@ namespace {
         }
     }
 
-    // --- 連通管(#13・#14): 両側の水位が 2.5 m にそろう(±2 %)・揺り戻しが収まる ---
-    void ConnectedVessels(const Trial& trial) {
-        const Scene scene = MakeConnectedVesselsScene();
-        const Run run = RunTrial(scene, 0, trial, 1200, {"left", "right"});
-        const auto left = RegionSeries(run.recording, 0, &RegionSample::liquidLevelUm);
-        const auto right = RegionSeries(run.recording, 1, &RegionSample::liquidLevelUm);
-        constexpr int64_t TARGET = 2500000;
-        const bool level = DifferencePermille(left.back(), TARGET) <= 20 &&
-                           DifferencePermille(right.back(), TARGET) <= 20;
-        const auto settled = SettleTick(right, TARGET, TARGET / 50);
-        std::printf("  連通管: 20 秒後 左 %s・右 %s m(釣り合い 2.500。%s)・右の揺り戻し %u 回・±2 %% に入った刻み %s\n",
-                    Meters(left.back()).c_str(), Meters(right.back()).c_str(), Verdict(level),
-                    CountReversals(right, 20000), settled.has_value() ? std::to_string(*settled).c_str() : "入らない");
-        PrintCost(run);
+    // 揺れの中心と幅(T-0926): 窓 [from, to) の平均(窓はほぼ揺れの周期の整数倍に取る)と、窓の中の最大 − 最小の半分
+    struct Swing {
+        int64_t center = 0;
+        int64_t amplitude = 0;
+    };
+
+    Swing SwingOf(const std::vector<int64_t>& series, size_t from, size_t to) {
+        const Window window = WindowOf(std::vector<int64_t>(series.begin(), series.begin() + (ptrdiff_t)to), from);
+        return {.center = window.mean, .amplitude = (window.high - window.low) / 2};
     }
 
-    // --- 閉じた空気の下の水(#9): 鐘の中の水位が釣り合いの計算と ±2 % ---
+    // 10 秒ごとの揺れの幅(減り方。本物の水の形の損失の見積もりと比べる)
+    std::string Envelope(const std::vector<int64_t>& series, uint32_t ticksPerSecond) {
+        std::string text;
+        for (size_t begin = 0; begin + (10 * ticksPerSecond) < series.size(); begin += 10 * ticksPerSecond) {
+            const Swing swing = SwingOf(series, begin, begin + (10 * ticksPerSecond));
+            text += "±" + FormatFixed(swing.amplitude / 1000, 3) + " ";
+        }
+
+        return text;
+    }
+
+    // --- 連通管(#13・#14): 揺れの中心が 2.5 m(±2 %)・揺れが減る(T-0926 で合格を取り直した。チケット T-0926)---
+    // 本物の水でも、この形(幅 5 m の池・高さ 1 m の管)は 20 秒では止まらない(形の損失 K ≈ 1〜3 で ±0.1〜0.2 m。T-0926)。
+    // だから 20 秒の 1 点ではなく、40〜60 秒(周期 約 6.5 秒の約 3 回)の平均を揺れの中心として見る。
+    void ConnectedVessels(const Trial& trial) {
+        const Scene scene = MakeConnectedVesselsScene();
+        for (const int32_t level : {0, 1}) {
+            const Run run = RunTrial(scene, level, trial, 3600, {"left", "right"});
+            const auto left = RegionSeries(run.recording, 0, &RegionSample::liquidLevelUm);
+            const auto right = RegionSeries(run.recording, 1, &RegionSample::liquidLevelUm);
+            constexpr int64_t TARGET = 2500000;
+            const Swing swing = SwingOf(right, 2400, 3601);
+            const bool level20 = DifferencePermille(left[1200], TARGET) <= 20 &&
+                                 DifferencePermille(right[1200], TARGET) <= 20;
+            const bool centered = DifferencePermille(swing.center, TARGET) <= 20;
+            std::printf(
+                "  連通管 %s m: 20 秒の 1 点 左 %s・右 %s m(前の合格 %s)・右の揺れの中心(40〜60 秒)%s m(%s・差 %lld "
+                "‰)・60 秒 %s m\n",
+                level == 0 ? "0.5" : "0.25", Meters(left[1200]).c_str(), Meters(right[1200]).c_str(), Verdict(level20),
+                Meters(swing.center).c_str(), Verdict(centered), (long long)DifferencePermille(swing.center, TARGET),
+                Meters(right.back()).c_str());
+            std::printf("    右の揺れの幅 10 秒ごと %s\n", Envelope(right, 60).c_str());
+            PrintCost(run);
+        }
+    }
+
+    // --- 閉じた空気の下の水(#9): 鐘の中の水位(揺れの中心)が釣り合いの計算と ±2 % ---
     // 釣り合い(等温・外の閉じた空気 144 セルも膨らむ): 鐘の空気 36 セル・口は水面の 4 段下・外の水面 16 列。
     // P0 × 6 ÷ (6 − d) = P0 × 144 ÷ (144 + 6d) + ρ g × 0.5 m × (4 − d − 6d/16) を解いて d = 0.6578 段 = 0.3289 m(T-0868 の計算)
     void TrappedAir(const Trial& trial) {
         const Scene scene = MakeTrappedAirScene();
-        const Run run = RunTrial(scene, 0, trial, 900, {"bell", "outside"});
+        const Run run = RunTrial(scene, 0, trial, 3600, {"bell", "outside"});
         const auto bell = RegionSeries(run.recording, 0, &RegionSample::liquidLevelUm);
         constexpr int64_t EXPECTED = 328882;
-        const bool within = DifferencePermille(bell.back(), EXPECTED) <= 20;
-        std::printf("  閉じた空気の下の水: 15 秒後 鐘の中の水位 %s m(計算 %s。%s・差 %lld ‰)・揺り戻し %u 回\n",
-                    Meters(bell.back()).c_str(), Meters(EXPECTED).c_str(), Verdict(within),
-                    (long long)DifferencePermille(bell.back(), EXPECTED), CountReversals(bell, 10000));
+        const Swing swing = SwingOf(bell, 2400, 3601);
+        const bool point = DifferencePermille(bell[900], EXPECTED) <= 20;
+        const bool centered = DifferencePermille(swing.center, EXPECTED) <= 20;
+        std::printf(
+            "  閉じた空気の下の水: 15 秒の 1 点 %s m(前の合格 %s)・揺れの中心(40〜60 秒)%s m(計算 %s。%s・差 %lld "
+            "‰)\n",
+            Meters(bell[900]).c_str(), Verdict(point), Meters(swing.center).c_str(), Meters(EXPECTED).c_str(),
+            Verdict(centered), (long long)DifferencePermille(swing.center, EXPECTED));
+        std::printf("    鐘の揺れの幅 10 秒ごと %s\n", Envelope(bell, 60).c_str());
         PrintCost(run);
     }
 
-    // --- ダムの決壊(#16): 向こうの壁に届く 2.13 秒 ±5 %・壁際の最高 1.82 セル ±0.1(液体の模型 T-0610 の値)---
+    // --- ダムの決壊(#16): 向こうの壁に届く時・壁際の最高(T-0927 で基準を取り直した)---
+    // 前の基準 2.13 秒・1.82 セルは液体の模型 T-0610 の面の摩擦 1/128 の値。司令塔の一旦の決定(T-0927): 基準は物の値から出る値。
+    // 水の粘り 890 µPa·s では Re ≈ 10^7 で粘りは効かないので、物の値から出る値 = 粘りの無い水の解。
+    // 浅い水の理論(Ritter の形・壁で跳ね返る。有限体積で 0.005 m まで細かくして収束: 届く 1.31 秒・壁の列の最高 1.60 m = 3.2 セル。T-0927)。
+    // 届く時は ±5 %。最高は浅い水の理論が壁を駆け上がる水の舌を持たないので**記録だけ**(0.5 m と 0.25 m の差を見る)。
     void DamBreak(const Trial& trial) {
         const Scene scene = MakeDamBreakScene();
-        const Run run = RunTrial(scene, 0, trial, 480, {"wall_column", "reservoir"});
-        const auto wall = RegionSeries(run.recording, 0, &RegionSample::liquidLevelUm);
-        // 届いた = 壁の列の水が全体(24 セル)の 1 %(0.24 セル)を超えた(probe_liquid_test と同じ)
-        const auto arrival = FirstTickAtLeast(wall, 120000);
-        const Peak peak = PeakOf(wall);
-        const int64_t arrivalMs = arrival.has_value() ? (int64_t)*arrival * 1000 / 60 : -1;
-        const bool arrivalOk = arrival.has_value() && DifferencePermille(arrivalMs, 2130) <= 50;
-        const bool peakOk = peak.value >= 860000 && peak.value <= 960000;
-        std::printf("  ダムの決壊: 壁に届く %s 秒(%s)・壁際の最高 %s セル(%s 秒。%s)・8 秒後の最大の速さ %lld mm/s\n",
-                    arrival.has_value() ? FormatFixed(arrivalMs, 3).c_str() : "届かない", Verdict(arrivalOk),
-                    FormatFixed(peak.value / 500, 3).c_str(), FormatFixed((int64_t)peak.tick * 1000 / 60, 3).c_str(),
-                    Verdict(peakOk), (long long)((run.recording.samples.back().maxSpeed * 1000) >> 20));
-        PrintCost(run);
+        std::vector<int64_t> peaks;
+        for (const int32_t level : {0, 1}) {
+            const Run run = RunTrial(scene, level, trial, 480, {"wall_column", "reservoir"});
+            const auto wall = RegionSeries(run.recording, 0, &RegionSample::liquidLevelUm);
+            // 届いた = 壁の列(0.5 m)の水の深さが 0.12 m(元の深さの 6 %)を超えた(probe_liquid_test と同じ)
+            const auto arrival = FirstTickAtLeast(wall, 120000);
+            const Peak peak = PeakOf(wall);
+            peaks.push_back(peak.value);
+            const int64_t arrivalMs = arrival.has_value() ? (int64_t)*arrival * 1000 / 60 : -1;
+            const bool arrivalOk = arrival.has_value() && DifferencePermille(arrivalMs, 1310) <= 50;
+            const bool oldArrival = arrival.has_value() && DifferencePermille(arrivalMs, 2130) <= 50;
+            std::printf(
+                "  ダムの決壊 %s m: 壁に届く %s 秒(基準 1.31。%s・前の基準 2.13 は %s)・壁際の最高 %s セル(%s "
+                "秒。浅い水の理論 "
+                "3.2・記録)・8 秒後の最大の速さ %lld mm/s\n",
+                level == 0 ? "0.5" : "0.25", arrival.has_value() ? FormatFixed(arrivalMs, 3).c_str() : "届かない",
+                Verdict(arrivalOk), Verdict(oldArrival), FormatFixed(peak.value / 500, 3).c_str(),
+                FormatFixed((int64_t)peak.tick * 1000 / 60, 3).c_str(),
+                (long long)((run.recording.samples.back().maxSpeed * 1000) >> 20));
+            PrintCost(run);
+        }
+
+        std::printf("  ダムの決壊 壁際の最高 0.5 m と 0.25 m の差 %lld ‰(記録)\n",
+                    (long long)DifferencePermille(peaks[0], peaks[1]));
     }
 
     // --- サイフォン(#18): 頂上 4 m は流れ続け、約 10 m を超えると切れる ---

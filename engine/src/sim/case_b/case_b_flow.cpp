@@ -47,6 +47,7 @@ namespace bicameral::sim::case_b {
             std::vector<uint64_t> heatCapacityQ16;  // セルの全部の物質の熱容量(mJ/K の Q16)
             std::vector<int64_t> columnMicroPascal;
             std::vector<FlowFace> faces;
+            std::vector<uint32_t> viscosityMicroPascalSec;  // セルの流体の粘り(体積の割合の平均)
         };
 
         // --- 単位の換算 ---
@@ -294,12 +295,46 @@ namespace bicameral::sim::case_b {
             return {.axis = axis, .cell = cell, .slot = MomentumSlot(box.config.layout, Phase::Gas)};
         }
 
+        // セルの流体の粘り μ(µPa·s)= 液体の物質は体積で・気体は質量の割合で平均し、液体と気体の体積で重みを付ける
+        uint32_t CellViscosity(const Box& box, uint32_t cell, const FlowCell& flow) {
+            uint64_t liquidSum = 0;
+            uint64_t liquidVolume = 0;
+            uint64_t gasSum = 0;
+            uint64_t gasMass = 0;
+            for (uint32_t index = 0; index < box.materials.size(); ++index) {
+                const Material& material = box.materials[index];
+                const int64_t mass = CellMass(box, cell, index);
+                if (mass <= 0)
+                    continue;
+
+                if (material.phase == Phase::Liquid) {
+                    const uint64_t volume = MaterialVolumeNl(mass, material.densityKgPerM3);
+                    liquidSum += (volume >> 16) * material.viscosityMicroPascalSec;
+                    liquidVolume += volume >> 16;
+                } else if (material.phase == Phase::Gas) {
+                    gasSum += ((uint64_t)mass >> 8) * material.viscosityMicroPascalSec;
+                    gasMass += (uint64_t)mass >> 8;
+                }
+            }
+
+            const uint64_t liquid = liquidVolume == 0 ? 0 : liquidSum / liquidVolume;
+            const uint64_t gas = gasMass == 0 ? 0 : gasSum / gasMass;
+            const uint64_t liquidPart = (uint64_t)std::max<int64_t>(flow.liquidNl, 0) >> 16;
+            const uint64_t gasPart = (uint64_t)std::max<int64_t>(flow.gasNl, 0) >> 16;
+            if (liquidPart + gasPart == 0)
+                return (uint32_t)std::max(liquid, gas);
+
+            return (uint32_t)(((liquid * liquidPart) + (gas * gasPart)) / (liquidPart + gasPart));
+        }
+
         // --- 段の間で渡すもの ---
         struct FlowRuntime {
             FlowOptions options;
             std::shared_ptr<FlowStats> stats;
             FlowScratch scratch;
         };
+
+        void ApplyViscosity(FlowRuntime& runtime, Box& box);
 
         // --- 陰の圧力の段 ---
         // 横の面に柱の差の力積を足し(重さの軸の面は重さと柱が打ち消すので何も足さない)、陰の圧力で残り y を解いて力積を足す
@@ -350,15 +385,19 @@ namespace bicameral::sim::case_b {
             const uint32_t count = CellCount(box);
             scratch.cells.resize(count);
             scratch.heatCapacityQ16.resize(count);
+            scratch.viscosityMicroPascalSec.resize(count);
             for (uint32_t cell = 0; cell < count; ++cell) {
                 scratch.cells[cell] = MeasureFlowCell(box, context.view, cell, runtime.options);
                 scratch.heatCapacityQ16[cell] = CellHeatCapacityQ16(box, cell);
+                scratch.viscosityMicroPascalSec[cell] = CellViscosity(box, cell, scratch.cells[cell]);
                 stats.voidCells += scratch.cells[cell].voidNl > 0 ? 1u : 0u;
             }
 
             scratch.columnMicroPascal = BuildFluidColumns(box, context.view, scratch.cells);
             scratch.faces = BuildFaces(box, scratch.cells, stats);
             ApplyColumnImpulses(box, context.view, scratch);
+            // 粘りは陰の圧力の前に(面の運動量を受け渡してから、その流れで圧力の式を組む。運ぶ段の流れと食い違わない)
+            ApplyViscosity(runtime, box);
 
             std::vector<int64_t> values;
             const PressureSystem system = BuildPressureSystem(box, scratch, values);
@@ -595,6 +634,79 @@ namespace bicameral::sim::case_b {
                 const int64_t momentum = start[from.axis][FaceIndex(box, from.left, 0)];
                 MoveMomentum(box, FluidFace(box, from.axis, from.left), FluidFace(box, to.axis, to.left),
                              fx::FxMulDivS64(momentum, mass, faceMass));
+            }
+        }
+
+        // --- 粘り(T-0927・T-0926 の仮説 2。陰の圧力の段の中で、系を組む前に)---
+        // 面 F の速さ v = M ÷ m(m は面の流体の質量)。隣の面 G(同じ軸・セルを e_b ずらす)との間で
+        //   物の粘り: ΔM = μ A Δt (v_G − v_F) ÷ Δ = μ × 辺 × Δv ÷ 刻み/秒(µPa·s × mm × 2^-20 m/s ÷ 1000 で mg·2^-20 m/s)
+        //   渦の粘り: ΔM = m C_s² Δt |Δv| Δv ÷ Δ(m は 2 つの面の小さい方の質量)
+        // 1 つの組で渡すのは、2 つの面の速さをそろえる量の 1/12 まで(1 つの面は隣が 6 つ。順によらず行き過ぎない)
+        int64_t ViscousTransfer(const Box& box, const FlowOptions& options, uint32_t viscosity, const FlowFace& first,
+                                const FlowFace& second, int64_t firstMomentum, int64_t secondMomentum) {
+            const int64_t firstVelocity = firstMomentum / first.massMg;
+            const int64_t secondVelocity = secondMomentum / second.massMg;
+            const int64_t difference = secondVelocity - firstVelocity;
+            if (difference == 0)
+                return 0;
+
+            const uint64_t magnitude = fx::FxAbsU64(difference);
+            const uint64_t edgeMm = CellEdgeUm(box.config.level) / 1000;
+            const uint64_t ticks = box.config.ticksPerSecond;
+            const auto lighter = (uint64_t)std::min(first.massMg, second.massMg);
+            uint64_t amount = 0;
+            if (options.materialViscosity)
+                amount += fx::FxDivU128By64(fx::FxMulU64Full(magnitude, (uint64_t)viscosity * edgeMm), 1000 * ticks)
+                              .quotient;
+
+            if (options.eddyCoefficientPer10000 != 0) {
+                // m × C_s² × |Δv|² × 10^6 ÷ (2^20 × 辺 µm × 刻み/秒 × 10^4)
+                const fx::FxU128 product = fx::FxMulU64Full(lighter * options.eddyCoefficientPer10000,
+                                                            std::min<uint64_t>(magnitude, (uint64_t)1 << 30) *
+                                                                std::min<uint64_t>(magnitude, (uint64_t)1 << 30));
+                const uint64_t denominator = ((uint64_t)CellEdgeUm(box.config.level) << 20) * ticks / 100;
+                amount += product.hi >= denominator ? UINT64_MAX / 2 : fx::FxDivU128By64(product, denominator).quotient;
+            }
+
+            const auto limit = (uint64_t)fx::FxMulDivS64((int64_t)magnitude, lighter, 12);
+            const auto moved = (int64_t)std::min(amount, limit);
+
+            return difference > 0 ? moved : -moved;
+        }
+
+        void ApplyViscosity(FlowRuntime& runtime, Box& box) {
+            const FlowOptions& options = runtime.options;
+            if (!options.materialViscosity && options.eddyCoefficientPer10000 == 0)
+                return;
+
+            const FlowScratch& scratch = runtime.scratch;
+            const FaceTable table = IndexFaces(scratch, CellCount(box));
+            // 運ぶ量は段の初めの面の運動量から決める(受け渡す順に結果がよらない)
+            const std::array<std::vector<int64_t>, 3> start = box.faceMomentum;
+            for (uint32_t index = 0; index < scratch.faces.size(); ++index) {
+                const FlowFace& face = scratch.faces[index];
+                if (!face.open)
+                    continue;
+
+                for (uint32_t side = 0; side < 3; ++side) {
+                    const std::optional<uint32_t> beside = Neighbor(box, face.left, side);
+                    if (!beside.has_value() || table[face.axis][*beside] < 0)
+                        continue;
+
+                    const FlowFace& other = scratch.faces[(size_t)table[face.axis][*beside]];
+                    const uint32_t viscosity = std::min(
+                        {scratch.viscosityMicroPascalSec[face.left], scratch.viscosityMicroPascalSec[face.right],
+                         scratch.viscosityMicroPascalSec[other.left], scratch.viscosityMicroPascalSec[other.right]});
+                    const int64_t moved = ViscousTransfer(box, options, viscosity, face, other,
+                                                          start[face.axis][FaceIndex(box, face.left, 0)],
+                                                          start[other.axis][FaceIndex(box, other.left, 0)]);
+                    if (moved == 0)
+                        continue;
+
+                    MoveMomentum(box, FluidFace(box, other.axis, other.left), FluidFace(box, face.axis, face.left),
+                                 moved);
+                    ++runtime.stats->viscousPairs;
+                }
             }
         }
 
