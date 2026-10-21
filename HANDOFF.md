@@ -1,13 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-21(本体の作業役・C-1 の疎な頁 t-0921-sparse のマージ)
+最終更新: 2026-10-21(本体の作業役・表面の細かい形 R-T1 t-0879-rt1 のマージ)
 
 ## 状態(3 行以内)
-- **C-1 の疎な頁(t-0921-sparse・T-0921・ADR-0403)を main へ入れた**(欄の頁は値がある所にだけ。既定は疎)。確かめは下の「この仕事でしたこと」。
-- **作業中**: wt2 T-0915(C-0 の GPU 版)・wt3 R1(T-0868)・wt4 R-T1(T-0879)・wt5 R-B1(T-0871)・wt6 R-R0(t-0910-rr0)。
-- **次**: R2/R3(T-0869)・R-T2(T-0856)は C-0 の CPU 版の上で始められる・T-0922(温めた始まりの付け替え)・T-0920(C-1 GPU 側。T-0930 を含む)→ 最低機 Q11 → T-0858 棚卸し。判断待ち Q143。
+- **表面の細かい形 R-T1(t-0879-rt1・T-0879・ADR-0405 Proposed)を main へ入れた**(1 本目で 23 §10 の合格 5 つが通った)。確かめは下の「この仕事でしたこと」。
+- **作業中**: wt2 T-0915(C-0 の GPU 版)・wt3 T-0926/T-0927(R1 の根 t-0926-r1-root)・wt4 R-T2(t-0856-rt2)・wt5 R-B1(T-0871)・wt6 R-R0(t-0910-rr0)。
+- **次**: R2/R3(T-0869)・T-0922(温めた始まりの付け替え)・T-0920(C-1 GPU 側)・R-T1 の残り T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。判断待ち Q143・Q144。
 
-## この仕事でしたこと(2026-10-21・本体の作業役・t-0921-sparse のマージ)
+## この仕事でしたこと(2026-10-21・本体の作業役・t-0879-rt1 のマージ)
+- **マージ**(`--no-ff`・衝突なし。perf.md は自動で合わさった): t-0879-rt1(671b86a。shaders/common/surface_detail.hlsli〔整数の関数〕・shaders/render/surface_detail_float.hlsli〔小数の版〕・shaders/sim/surface_detail.hlsl・engine/src/sim/surface_detail〔差分の候補 A 格子・B 一覧〕・tests/surface_detail_test・gpu_surface_detail_test〔+ _warp〕・ADR-0405 Proposed・docs/perf.md・map.yaml)。
+- **確かめ**: release のビルド警告 0・CPU 20 本が通った(surface_detail 24 秒・probe_liquid・field_storage・multires_* 13 本・equilibrium・case_b_box・case_b_gauge。約 19 分)・GPU 4 本が通った(gpu_surface_detail・gpu_surface_detail_warp・gpu_probe_liquid・gpu_world_copy)・archmap --check OK・float_check(sim・common・engine/src/sim)OK。直したものなし。
+- **記録**: ROADMAP(T-0879 を「1 本目合格(23 §10 の 5 つ)」・T-0936 物の物理の接触から地面の当たりの関数を呼ぶ口・T-0937 21 §2.7 の塞ぐ面の欄・T-0938 溝を掘った時の真実/彫った形の重なり/掘った土の行き先/セーブの差分の行・R1 と R-T2 を作業中に)・
+  QUESTIONS **Q144【エンジン】溝を掘った時の真実を (a) セルの固い物の量 か (b) 形の差分 か(仮で (a))**・COMMANDER(wt3 の T-0947〜T-0949・ADR-0409、wt4 の T-0856 + T-0950〜T-0952・ADR-0410、次の番号 **D-614・ADR-0411・T-0953・Q145**)。
+- **司令塔へ**: 肌理の値(石・土・木の振れ幅・割れ目)の既定はゲームの中身なので claude/19 へ回す(T-0879「問い」)。差分の持ち方は候補 B(彫った形の一覧。差分が約 1/120)を仮のおすすめ(ADR-0405)。
+
+## 前の仕事(2026-10-21・本体の作業役・t-0921-sparse のマージ)
 - **マージ**(`--no-ff`・衝突なし): t-0921-sparse(488bd88。`MultiresField::store`〔MultiresFieldStore〕・`MultiresNest::sparseFields`〔既定は疎〕・眠る判定で全部 0 の頁を返す・tests/multires_sparse_test・ADR-0403・perf.md の 1 セルのバイト)。
 - **確かめ**: release のビルド警告 0・CPU 35 本が通った(multires_sparse 60 秒・equilibrium 562 秒・field_storage・multires_*・gas_*・probe_*・case_b_*ほか。約 40 分)・GPU 15 本が通った(gpu_world_copy・gpu_probe_rewind・gpu_probe_rewind_regions・gpu_probe_gas・gpu_probe_liquid・gpu_probe_sim・gpu_multires_conduction・gpu_multires_implicit_conduction・gpu_multires_wide_* 7 本。約 12 分)・archmap --check OK・float_check OK。
 - **記録**: ROADMAP(T-0921 Done・T-0930 GPU の疎な欄の頁〔T-0920 の中〕・T-0931 セルの真実の量を疎に・T-0932 セルごとの疎〔研究〕の行)・CLAUDE.md §4 に「欄の値は `LoadNestField` か `FieldPageValues(store, page)` で読む」・
