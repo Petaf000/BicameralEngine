@@ -344,6 +344,9 @@ views:
       - { id: casebflow, group: simlib, label: "MakeFlowStages(案 B の研究 R1)<br/>気体と硬い液体を 1 つの陰の圧力で<br/>状態式・柱・陰の圧力・運ぶ(T-0868)",
           code: "engine/src/sim/case_b/case_b_flow.cpp::MakeFlowStages", ticket: T-0868, doc: docs/design/21-motion-case-b.md, status: research,
           note: "箱の Stages の pressure・transport・apply に入れる。セルの状態式(液体の硬さ + 理想気体が空きを満たす圧力・真空)・流体の柱(重さの軸の面は打ち消して 0)・残り y を口 PressureSolver で陰に解く・解いた面の流れで風上の流体を運ぶ・MAC の運動量の運び・物の粘り(隣の面との受け渡し。T-0927)。置き場 ④。試験 case_b_r1(液体の段 (1)・(2) を並べる。連通管・閉じた空気は揺れの中心で見る。ADR-0409)" }
+      - { id: casebdrag, group: simlib, label: "PrepareCoupledFace(案 B の研究 R2)<br/>引きずりを陰の圧力と一緒に解く<br/>流体 ↔ 粒・流体 ↔ 孔(T-0869)",
+          code: "engine/src/sim/case_b/case_b_flow.cpp::PrepareCoupledFace", ticket: T-0869, doc: docs/design/21-motion-case-b.md, status: research,
+          note: "FlowOptions::drag。面ごとに流体 ↔ 粒(散らばった粒 = 18 μ/d² + 4/√Re の項 + ¾ C₂ ρ |Δv|/d・詰まった粒 = Kozeny–Carman の大きい方)と流体 ↔ 据わる孔(Darcy)の引きずりを、粒を消去した形(EliminateGrain・CoupledSystemTerms)で陰の圧力の式に入れ、解いた後に SolveCoupledFace で圧力 → 相どうしの受け渡し → 孔の引きずりを当てる(保存は受け渡しで)。粒は質量の流れ + 面の持ち越しで運ぶ(TransportGrains)。粒・孔が無ければ R1 とビット一致。試験 case_b_r2" }
       - { id: gasfastestcheck, group: simlib, label: "FindGasSmallOpenJoints<br/>最速 × 小さい空きの検査(T-0788・D-519)<br/>小さい空きだけでつながった気体の部分の組 → 警告",
           code: "engine/src/sim/gas_fastest_check.cpp::FindGasSmallOpenJoints", ticket: T-0788, doc: docs/design/07-transport.md,
           note: "最速の投影は孔のセルに 1 刻みで中身の何倍もを通して壊れる(ADR-0346)。空き 1/2 未満を小さいとし(T-0788 の板の測り)、大きいセルの部分と開いた境界の外を互いに素な集合でまとめ、2 つ以上の部分に接する小さいセルのまとまりを組にする。値は変えない(D-487 ②)。ProbeGasField が置いた時(CheckFastestOpenings)と空きの変わった刻みに呼ぶ" }

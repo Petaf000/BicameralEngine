@@ -40,6 +40,32 @@ namespace bicameral::sim::case_b {
             uint64_t coefficientQ48 = 0;
             int64_t flowNl = 0;       // 解いた後の体積の流れ(left → right が正)
             int64_t movedMassMg = 0;  // 運ぶ段が実際に移した質量(left → right が正)
+
+            // --- 引きずり(R2。drag の時だけ)---
+            bool coupled = false;          // 引きずりを圧力と一緒に解く面(粒か孔がある)
+            bool locked = false;           // 両側が詰まった粒(粒は動かさず、引きずりは孔と同じに。R3 まで・仮)
+            uint64_t grainAreaMm2 = 0;     // 粒の面積(風上のセルの粒そのものの割合 × 面積)
+            int64_t grainNl = 0;           // 面の粒そのものの体積(両側の平均)
+            int64_t grainInertiaQ16 = 0;   // b = 粒の質量 + K(mg の Q16。下限つき)
+            int64_t fluidInertiaMg = 0;    // a' = 流体の質量 + K_x + K 粒の質量 ÷ b
+            uint64_t couplingAreaMm2 = 0;  // c' = 流体の面積 + 粒の面積 × K ÷ b
+            std::array<uint64_t, 2> grainSideAreaMm2{};  // 左右のセルの粒の面積(粒そのものの体積 ÷ 辺。風上で取る)
+            int64_t grainMassMg = 0;                     // 面の粒の質量(両側の平均)
+            uint64_t dragQ16 = 0;          // 流体 ↔ 粒の引きずり K(1 刻みぶん。mg の Q16。1 mg の粒で 0 に丸まらない)
+            uint64_t porousMg = 0;         // 流体 ↔ 据わる孔の引きずり K_x(同上)
+            int64_t predictedNl = 0;       // 圧力の式の予測の流れ(引きずりを消去した形)
+            int64_t grainFlowNl = 0;       // 解いた後の粒の質量の流れ(mg の Q32。持ち越しと一緒に運ぶ)
+            int64_t grainMovedMassMg = 0;  // 運ぶ段が移した粒の質量
+        };
+
+        // セルの粒と孔(R2)
+        struct GrainCell {
+            int64_t massMg = 0;
+            uint32_t grainUm = 0;          // 粒の大きさ(質量の平均)
+            uint32_t permeabilityUm2 = 0;  // 据わる固体の孔の通しやすさ(質量の平均。0 = 孔の引きずり無し)
+            bool packed = false;           // 粒が詰まっている(grainPackedQ16 がほぼ 1)
+            bool noRoom = false;           // 粒が入れない(詰まった・据わる固体か物がある。穴の大きさ S8 は 2 周目。仮)
+            uint64_t porousMg = 0;         // 孔の引きずり K_x(1 刻みぶん)
         };
 
         struct FlowScratch {
@@ -48,6 +74,8 @@ namespace bicameral::sim::case_b {
             std::vector<int64_t> columnMicroPascal;
             std::vector<FlowFace> faces;
             std::vector<uint32_t> viscosityMicroPascalSec;  // セルの流体の粘り(体積の割合の平均)
+
+            std::vector<GrainCell> grains;  // 引きずり(R2。drag の時だけ)
         };
 
         // --- 単位の換算 ---
@@ -295,6 +323,15 @@ namespace bicameral::sim::case_b {
             return {.axis = axis, .cell = cell, .slot = MomentumSlot(box.config.layout, Phase::Gas)};
         }
 
+        FaceRef GrainFace(const Box& box, uint32_t axis, uint32_t cell) {
+            return {.axis = axis, .cell = cell, .slot = MomentumSlot(box.config.layout, Phase::Grain)};
+        }
+
+        int64_t& GrainMomentum(Box& box, const FlowFace& face) {
+            return box
+                .faceMomentum[face.axis][FaceIndex(box, face.left, MomentumSlot(box.config.layout, Phase::Grain))];
+        }
+
         // セルの流体の粘り μ(µPa·s)= 液体の物質は体積で・気体は質量の割合で平均し、液体と気体の体積で重みを付ける
         uint32_t CellViscosity(const Box& box, uint32_t cell, const FlowCell& flow) {
             uint64_t liquidSum = 0;
@@ -327,6 +364,113 @@ namespace bicameral::sim::case_b {
             return (uint32_t)(((liquid * liquidPart) + (gas * gasPart)) / (liquidPart + gasPart));
         }
 
+        // --- 引きずり(R2・T-0869。drag の時だけ)---
+        // 係数 K(mg)= β(kg/(m³ s)の Q8)× 体積(nL)÷(10^6 × 刻み/秒 × 2^8)。面の K は両側のセルの K の平均(界面で半分ずつ)
+        constexpr uint32_t BETA_SHIFT = 8;
+        constexpr uint64_t DRAG_LIMIT_Q16 = (uint64_t)1 << 62;  // 引きずりの頭打ち(約 7×10^13 mg。数える)
+        constexpr uint64_t KOZENY_CARMAN = 180;                 // 詰まった粒の通しやすさの定数(Kozeny–Carman)
+        constexpr uint64_t STOKES = 18;                         // 1 粒の粘りの抗力(C_d = 24/Re の項)
+        constexpr uint64_t MIDDLE_DRAG = 4;                     // C_d = 4/√Re の項(仮。中間の Re をつなぐ)
+
+        // K(mg の Q16)= β(Q8)× 体積(nL)× 2^8 ÷(10^6 × 刻み/秒)
+        uint64_t DragFromBeta(const Box& box, uint64_t betaQ8, int64_t volumeNl) {
+            if (betaQ8 == 0 || volumeNl <= 0)
+                return 0;
+
+            const uint64_t denominator = (uint64_t)box.config.ticksPerSecond * 1000000;
+            const fx::FxU128 product = fx::FxMulU64Full(betaQ8 << (16 - BETA_SHIFT), (uint64_t)volumeNl);
+            if (product.hi >= denominator)
+                return DRAG_LIMIT_Q16;
+
+            return std::min(fx::FxDivU128By64(product, denominator).quotient, DRAG_LIMIT_Q16);
+        }
+
+        // μ ÷ d²(µPa·s ÷ µm² → kg/(m³ s)。× 10^6)の Q8
+        uint64_t ViscousPerSquareQ8(uint32_t viscosity, uint64_t lengthSquaredUm2) {
+            if (lengthSquaredUm2 == 0)
+                return 0;
+
+            return fx::FxDivU128By64(fx::FxMulU64Full((uint64_t)viscosity * 1000000, (uint64_t)1 << BETA_SHIFT),
+                                     lengthSquaredUm2)
+                .quotient;
+        }
+
+        // a × b ÷ d を上限 cap で(引きずりの係数。頭打ちは数える側が見る)
+        uint64_t MulDivCap(uint64_t a, uint64_t b, uint64_t d, uint64_t cap) {
+            const fx::FxU128 product = fx::FxMulU64Full(a, b);
+            if (product.hi >= d)
+                return cap;
+
+            return std::min(fx::FxDivU128By64(product, d).quotient, cap);
+        }
+
+        // 1 粒の抗力(粒の体積あたり。C_d = 24/Re + 4/√Re + C₂ の形)を |Δv|(2^-20 m/s)・流体の密度 ρ(g/m³)で:
+        //   18 μ/d² + 3 √(ρ μ |Δv| / d³) + ¾ C₂ ρ |Δv| / d
+        // 中の項は 24/Re と C₂ の間をつなぐ(Ferguson & Church 2004 の終端の速さと砂・粉で数 % 以内。T-0869 の表)
+        uint64_t DispersedBetaQ8(uint32_t viscosity, uint32_t grainUm, uint64_t fluidDensityGPerM3, uint64_t slip,
+                                 uint32_t shapePermille) {
+            const uint64_t diameter = grainUm;
+            // 速さの差は 128 m/s で頭打ち(積が 64bit に収まる。それより速い粒は衝撃の区の側)
+            const uint64_t speed = std::min<uint64_t>(slip, (uint64_t)1 << 27);
+            uint64_t beta = STOKES * ViscousPerSquareQ8(viscosity, diameter * diameter);
+
+            // 中の項: ρ_g μ |Δv| × 10^9 ÷ (2^20 d³) の Q16(= ÷ 2^4)の平方根 = Q8
+            const uint64_t densityViscosity = fluidDensityGPerM3 * viscosity;
+            const uint64_t scaled = fx::FxShiftRightU128(fx::FxMulU64Full(densityViscosity, speed), 4);
+            const uint64_t middle = MulDivCap(scaled, 1000000000ull, diameter * diameter * diameter, (uint64_t)1 << 62);
+            beta += MIDDLE_DRAG * 3 / 4 * fx::FxSqrtU64(middle);
+
+            // Newton の項: 750 C₂‰ ρ_g |Δv| ÷ (1000 × 2^20 d) の Q8
+            beta += MulDivCap(750ull * shapePermille * fluidDensityGPerM3, speed, (1000ull * diameter) << 12,
+                              (uint64_t)1 << 62);
+
+            return beta;
+        }
+
+        // 詰まった粒(Kozeny–Carman。粒の体積あたり)= 180 μ φ_s ÷ (d² φ_f)
+        uint64_t PackedBetaQ8(uint32_t viscosity, uint32_t grainUm, uint32_t solidQ16, uint32_t openQ16) {
+            if (openQ16 == 0)
+                return 0;
+
+            const uint64_t base = KOZENY_CARMAN * ViscousPerSquareQ8(viscosity, (uint64_t)grainUm * grainUm);
+            return fx::FxMulDivS64((int64_t)base, solidQ16, openQ16);
+        }
+
+        // 据わる固体の孔(Darcy。全体の体積あたり)= μ φ_f² ÷ k
+        uint64_t PorousBetaQ8(uint32_t viscosity, uint32_t permeabilityUm2, uint32_t openQ16) {
+            if (permeabilityUm2 == 0)
+                return 0;
+
+            const uint64_t base = ViscousPerSquareQ8(viscosity, permeabilityUm2);
+            return fx::FxMulDivS64(fx::FxMulDivS64((int64_t)base, openQ16, Q16_ONE), openQ16, Q16_ONE);
+        }
+
+        // 面の流体の密度(g/m³ = mg/nL × 10^9)
+        uint64_t FaceFluidDensity(const FlowCell& left, const FlowCell& right) {
+            const int64_t mass = left.fluidMassMg + right.fluidMassMg;
+            const int64_t volume = left.liquidNl + left.gasNl + right.liquidNl + right.gasNl;
+            if (mass <= 0 || volume <= 0)
+                return 0;
+
+            return (uint64_t)fx::FxMulDivS64(mass, 1000000000, (uint64_t)volume);
+        }
+
+        // 面の運動量 M の 1 刻みの体積の流れ(nL)を大きい質量でも溢れない形で(M A 10^6 ÷ (m 刻み/秒) ÷ 2^20)
+        int64_t CoupledFlowNl(const Box& box, int64_t momentum, uint64_t areaMm2, int64_t massMg) {
+            if (massMg <= 0 || areaMm2 == 0)
+                return 0;
+
+            const int64_t scaled = fx::FxMulDivS64(momentum, areaMm2 * 1000000,
+                                                   (uint64_t)massMg * box.config.ticksPerSecond);
+            return scaled / ((int64_t)1 << 20);
+        }
+
+        // 重さの加速 a(µm/s²)が質量 m に 1 刻みに与える力積(mg·2^-20 m/s)
+        int64_t GravityImpulse(const Box& box, uint32_t axis, int64_t massMg) {
+            return fx::FxMulDivS64(box.config.accelerationUmPerS2[axis], (uint64_t)massMg << 20,
+                                   (uint64_t)box.config.ticksPerSecond * 1000000);
+        }
+
         // --- 段の間で渡すもの ---
         struct FlowRuntime {
             FlowOptions options;
@@ -335,6 +479,271 @@ namespace bicameral::sim::case_b {
         };
 
         void ApplyViscosity(FlowRuntime& runtime, Box& box);
+
+        // --- 引きずりを圧力と一緒に解く(R2・T-0869)---
+        constexpr uint32_t PACKED_MARGIN_Q16 = 1u << 10;  // 詰まりの 98.4 % で詰まったとみなす(仮)
+
+        void MeasureGrains(FlowRuntime& runtime, const Box& box, const View& view) {
+            FlowScratch& scratch = runtime.scratch;
+            const uint32_t count = CellCount(box);
+            const auto cellNl = (int64_t)CellVolumeNl(box);
+            scratch.grains.assign(count, {});
+            for (uint32_t cell = 0; cell < count; ++cell) {
+                GrainCell& grain = scratch.grains[cell];
+                uint64_t grainSum = 0;
+                uint64_t permeabilitySum = 0;
+                uint64_t fixedMass = 0;
+                for (uint32_t index = 0; index < box.materials.size(); ++index) {
+                    const Material& material = box.materials[index];
+                    const int64_t mass = std::max<int64_t>(CellMass(box, cell, index), 0);
+                    if (material.phase == Phase::Grain) {
+                        grain.massMg += mass;
+                        grainSum += (uint64_t)mass * material.grainSizeUm;
+                    } else if (material.phase == Phase::Fixed) {
+                        permeabilitySum += (uint64_t)mass * material.permeabilityUm2;
+                        fixedMass += (uint64_t)mass;
+                    }
+                }
+
+                const CellView& cellView = view.cells[cell];
+                grain.grainUm = grain.massMg == 0 ? 0 : (uint32_t)(grainSum / (uint64_t)grain.massMg);
+                grain.permeabilityUm2 = fixedMass == 0 ? 0 : (uint32_t)(permeabilitySum / fixedMass);
+                grain.packed = cellView.grainPackedQ16 + PACKED_MARGIN_Q16 >= Q16_ONE;
+                grain.noRoom = grain.packed || cellView.fixedQ16 > 0 || cellView.bodyQ16 > 0;
+                const uint64_t beta = PorousBetaQ8(scratch.viscosityMicroPascalSec[cell], grain.permeabilityUm2,
+                                                   scratch.cells[cell].openQ16);
+                grain.porousMg = DragFromBeta(box, beta, cellNl) >> 16;
+            }
+        }
+
+        // 粒の重さと浮力を陽に当てる。流体の重さは R1 のまま(重さの軸は柱と打ち消して 0・横は柱の差)。
+        // 浮力 = 押しのけた流体の重さで、流体 → 粒の受け渡し(和 0)。粒の重さの浮力を引いた残りは引きずりで流体へ渡り、陰の圧力が支える
+        void ApplyGrainWeight(Box& box, const View& view, const FlowScratch& scratch, const FlowFace& face) {
+            if (face.grainMassMg <= 0)
+                return;
+
+            const FaceRef grain = GrainFace(box, face.axis, face.left);
+            ApplyImpulse(box, grain, GravityImpulse(box, face.axis, face.grainMassMg), ImpulseSource::Gravity);
+            const uint64_t density = FaceFluidDensity(scratch.cells[face.left], scratch.cells[face.right]);
+            // 押しのけた流体の質量(mg の Q20)= 体積(nL)× 密度(g/m³)÷ 10^9
+            const int64_t displacedQ20 = fx::FxMulDivS64(face.grainNl, density << 20, 1000000000);
+            const int64_t buoyancy = -fx::FxMulDivS64(box.config.accelerationUmPerS2[face.axis], (uint64_t)displacedQ20,
+                                                      (uint64_t)box.config.ticksPerSecond * 1000000);
+            MoveMomentum(box, FluidFace(box, face.axis, face.left), grain, buoyancy);
+            if (face.axis == view.gravityAxis)
+                return;
+
+            const int64_t column = scratch.columnMicroPascal[face.left] - scratch.columnMicroPascal[face.right];
+            ApplyImpulse(box, grain, PressureImpulse(box, column, face.grainAreaMm2), ImpulseSource::Pressure);
+        }
+
+        // 粒の面積は風上のセルの粒そのものの割合で(運ぶ量と圧力の式を合わせる。平均だと先端で半分の速さになった。T-0869)
+        uint64_t UpwindGrainArea(const FlowFace& face, int64_t momentum) {
+            return face.grainSideAreaMm2[momentum >= 0 ? 0 : 1];
+        }
+
+        // 粒が動く面か(粒があり、詰まり・据わる物で止めていない)。粒の面積は 1 mm² 未満で 0 になることがある
+        bool GrainMoves(const FlowFace& face) {
+            return face.grainMassMg > 0 && !face.locked;
+        }
+
+        // 粒の 1 刻みの質量の流れ(mg の Q32)= 風上の粒の質量 × v Δt ÷ Δx(面積を通さない。1 mg の粒でも丸めで膨らまない。T-0869)
+        int64_t GrainFlowQ32(const Box& box, const FlowFace& face, int64_t momentum, int64_t upwindGrainMg) {
+            if (face.grainMassMg <= 0 || upwindGrainMg <= 0)
+                return 0;
+
+            // v Δt ÷ Δx の Q32 = M × 10^6 × 2^12 ÷ (m × 刻み/秒 × 辺 µm)
+            const uint64_t denominator = (uint64_t)face.grainMassMg * box.config.ticksPerSecond *
+                                         CellEdgeUm(box.config.level);
+            const int64_t fractionQ32 = fx::FxMulDivS64(momentum, 1000000ull << 12, denominator);
+            const int64_t bounded = std::clamp<int64_t>(fractionQ32, -((int64_t)1 << 32), (int64_t)1 << 32);
+
+            return bounded * upwindGrainMg;
+        }
+
+        void StopGrain(Box& box, const FlowFace& face) {
+            const int64_t momentum = GrainMomentum(box, face);
+            if (momentum != 0)
+                ApplyImpulse(box, GrainFace(box, face.axis, face.left), -momentum, ImpulseSource::Wall);
+        }
+
+        // 面の流体 ↔ 粒の引きずり K(刻みの初めの速さの差で。Picard の 1 回)
+        uint64_t FaceDragMg(const Box& box, const FlowOptions& options, const FlowScratch& scratch,
+                            const FlowFace& face, int64_t fluidMomentum, int64_t grainMomentum) {
+            const GrainCell& left = scratch.grains[face.left];
+            const GrainCell& right = scratch.grains[face.right];
+            const uint32_t grainUm = std::max(left.grainUm, right.grainUm);
+            if (grainUm == 0)
+                return 0;
+
+            const int64_t slip = (grainMomentum / face.grainMassMg) - (fluidMomentum / face.massMg);
+            const uint32_t viscosity = (scratch.viscosityMicroPascalSec[face.left] +
+                                        scratch.viscosityMicroPascalSec[face.right]) /
+                                       2;
+            const uint64_t density = FaceFluidDensity(scratch.cells[face.left], scratch.cells[face.right]);
+            const uint64_t dispersed = DispersedBetaQ8(viscosity, grainUm, density, fx::FxAbsU64(slip),
+                                                       options.grainShapeDragPermille);
+            const uint64_t cellArea = CellAreaMm2(box);
+            const auto solidQ16 = (uint32_t)(((face.grainSideAreaMm2[0] + face.grainSideAreaMm2[1]) << 15) / cellArea);
+            const auto openQ16 = (uint32_t)((face.areaMm2 << 16) / cellArea);
+            const uint64_t packed = PackedBetaQ8(viscosity, grainUm, solidQ16, openQ16);
+
+            return DragFromBeta(box, std::max(dispersed, packed), face.grainNl);
+        }
+
+        // 1 つの面の引きずりの係数と、粒を消去した形(a'・b・c')を作る。粒が動けない面は粒を据わる孔として扱う
+        void PrepareCoupledFace(FlowRuntime& runtime, Box& box, const View& view, FlowFace& face) {
+            FlowScratch& scratch = runtime.scratch;
+            FlowStats& stats = *runtime.stats;
+            const GrainCell& left = scratch.grains[face.left];
+            const GrainCell& right = scratch.grains[face.right];
+            // 切り上げ(1 mg の粒が面で 0 にならない。相が消える所)
+            face.grainMassMg = (left.massMg + right.massMg + 1) / 2;
+            // 体積は切り上げた質量にそろえる(重さ・浮力・引きずりが同じ質量を見る。終端の速さが丸めで変わらない)
+            const int64_t grainSum = left.massMg + right.massMg;
+            const int64_t volumeSum = scratch.cells[face.left].grainNl + scratch.cells[face.right].grainNl;
+            face.grainNl = grainSum <= 0 ? 0
+                                         : fx::FxMulDivS64(volumeSum, (uint64_t)face.grainMassMg, (uint64_t)grainSum);
+            if (!face.open) {
+                StopGrain(box, face);
+                return;
+            }
+
+            const int64_t grainMomentum = GrainMomentum(box, face);
+            if (face.grainMassMg <= 0 && grainMomentum != 0) {
+                // 相が消える所: 粒の居ない面の運動量は流体へ
+                MoveMomentum(box, GrainFace(box, face.axis, face.left), FluidFace(box, face.axis, face.left),
+                             grainMomentum);
+                ++stats.vanishedGrainFaces;
+            }
+
+            face.porousMg = (left.porousMg + right.porousMg) / 2;
+            face.coupled = face.porousMg > 0 || face.grainMassMg > 0;
+            if (!face.coupled)
+                return;
+
+            // 粒の面積 = 粒そのものの体積 ÷ 辺(Q16 の割合では 0.001 % の粉が 0 に丸まった。T-0869)
+            const uint64_t edgeNlPerMm2 = (uint64_t)CellEdgeUm(box.config.level);
+            face.grainSideAreaMm2 = {(uint64_t)scratch.cells[face.left].grainNl / edgeNlPerMm2,
+                                     (uint64_t)scratch.cells[face.right].grainNl / edgeNlPerMm2};
+            const uint64_t meanArea = (face.grainSideAreaMm2[0] + face.grainSideAreaMm2[1]) / 2;
+            face.grainAreaMm2 = face.grainMassMg > 0 ? meanArea : 0;
+            const int64_t fluidStart = FluidMomentum(box, face);
+            const int64_t grainStart = GrainMomentum(box, face);
+            ApplyGrainWeight(box, view, scratch, face);
+            if (face.grainMassMg > 0)
+                face.grainAreaMm2 = UpwindGrainArea(face, GrainMomentum(box, face));
+
+            if (face.grainMassMg <= 0) {
+                ++stats.porousFaces;
+                return;
+            }
+
+            uint64_t drag = FaceDragMg(box, runtime.options, scratch, face, fluidStart, grainStart);
+            stats.cappedDragFaces += drag >= DRAG_LIMIT_Q16 ? 1u : 0u;
+            const int64_t grainNow = GrainMomentum(box, face);
+            const bool intoLeft = grainNow < 0;
+            const bool locked = (left.packed && right.packed) || (intoLeft ? left.noRoom : right.noRoom);
+            if (locked) {
+                // 粒は動けない(押し合いは R3)。流体から見た粒は据わる孔
+                StopGrain(box, face);
+                face.porousMg += drag >> 16;
+                face.locked = true;
+                face.grainAreaMm2 = 0;
+                drag = 0;
+                ++stats.blockedGrainFaces;
+            }
+
+            face.dragQ16 = drag;
+            ++stats.dragFaces;
+        }
+
+        // 粒を消去した形: b = m_s + K・a' = m_f + K_x + K m_s ÷ b・c' = A_f + A_s K ÷ b(K・b は mg の Q16)
+        void EliminateGrain(const Box& box, FlowFace& face) {
+            const auto drag = (int64_t)face.dragQ16;
+            const bool moving = GrainMoves(face);
+            const int64_t minimum = MinimumFaceMassMg(box, face.grainAreaMm2) << 16;
+            face.grainInertiaQ16 = moving ? std::max((face.grainMassMg << 16) + drag, minimum) : 0;
+            int64_t fluid = face.massMg + (int64_t)face.porousMg;
+            uint64_t area = face.areaMm2;
+            if (moving) {
+                fluid += fx::FxMulDivS64(face.grainMassMg, (uint64_t)drag, (uint64_t)face.grainInertiaQ16);
+                area += (uint64_t)fx::FxMulDivS64((int64_t)face.grainAreaMm2, (uint64_t)drag,
+                                                  (uint64_t)face.grainInertiaQ16);
+            }
+
+            face.couplingAreaMm2 = area;
+            face.fluidInertiaMg = std::max(fluid, MinimumFaceMassMg(box, area));
+        }
+
+        // 粒の慣性(mg。係数と予測の流れの式に。1 mg 未満は 1)
+        int64_t GrainInertiaMg(const FlowFace& face) {
+            return std::max<int64_t>(face.grainInertiaQ16 >> 16, 1);
+        }
+
+        // 圧力の式の係数と予測の流れ(c'² ÷ a' + A_s² ÷ b と c' (M_f + r M_s) ÷ a' + A_s M_s ÷ b)
+        void CoupledSystemTerms(Box& box, FlowFace& face) {
+            EliminateGrain(box, face);
+            const int64_t fluidMomentum = FluidMomentum(box, face);
+            int64_t combined = fluidMomentum;
+            face.coefficientQ48 = CoefficientQ48(box, face.couplingAreaMm2, face.fluidInertiaMg);
+            face.predictedNl = 0;
+            if (GrainMoves(face)) {
+                const int64_t grainMomentum = GrainMomentum(box, face);
+                combined += fx::FxMulDivS64(grainMomentum, face.dragQ16, (uint64_t)face.grainInertiaQ16);
+                if (face.grainAreaMm2 > 0) {
+                    face.coefficientQ48 += CoefficientQ48(box, face.grainAreaMm2, GrainInertiaMg(face));
+                    face.predictedNl += CoupledFlowNl(box, grainMomentum, face.grainAreaMm2, GrainInertiaMg(face));
+                }
+            }
+
+            face.coefficientQ48 = ClampCapacity(face.coefficientQ48);
+            face.predictedNl += CoupledFlowNl(box, combined, face.couplingAreaMm2, face.fluidInertiaMg);
+        }
+
+        // 解いた y から、圧力の力積 → 相どうしの受け渡し → 孔の引きずり(残り)を当てる。足し合わせて保存
+        void SolveCoupledFace(FlowRuntime& runtime, Box& box, FlowFace& face, int64_t deltaMicroPascal) {
+            const int64_t fluidImpulse = PressureImpulse(box, deltaMicroPascal, face.areaMm2);
+            const int64_t grainImpulse = PressureImpulse(box, deltaMicroPascal, face.grainAreaMm2);
+            const int64_t fluidBefore = FluidMomentum(box, face) + fluidImpulse;
+            const int64_t grainBefore = GrainMomentum(box, face) + grainImpulse;
+            int64_t combined = fluidBefore;
+            if (GrainMoves(face))
+                combined += fx::FxMulDivS64(grainBefore, face.dragQ16, (uint64_t)face.grainInertiaQ16);
+
+            const int64_t fluidAfter = fx::FxMulDivS64(combined, (uint64_t)face.massMg, (uint64_t)face.fluidInertiaMg);
+            int64_t transfer = 0;
+            if (GrainMoves(face)) {
+                // m_s v_s = m_s (M_s + I_s + K v_f) ÷ b
+                // m_s v_s = M_s m_s ÷ b + v_f K m_s ÷ b(K m_s ÷ b ≤ m_s なので 64bit に収まる)
+                const auto grainQ16 = (uint64_t)face.grainMassMg << 16;
+                const auto pulledQ16 = (uint64_t)fx::FxMulDivS64((int64_t)face.dragQ16, (uint64_t)face.grainMassMg,
+                                                                 (uint64_t)face.grainInertiaQ16);
+                const int64_t grainAfter = fx::FxMulDivS64(grainBefore, grainQ16, (uint64_t)face.grainInertiaQ16) +
+                                           fx::FxMulDivS64(fluidAfter, pulledQ16, (uint64_t)face.massMg << 16);
+                transfer = grainAfter - grainBefore;
+                ApplyImpulse(box, GrainFace(box, face.axis, face.left), grainImpulse, ImpulseSource::Pressure);
+                MoveMomentum(box, FluidFace(box, face.axis, face.left), GrainFace(box, face.axis, face.left), transfer);
+            }
+
+            ApplyImpulse(box, FluidFace(box, face.axis, face.left), fluidImpulse, ImpulseSource::Pressure);
+            const int64_t porous = fluidBefore - transfer - fluidAfter;
+            ApplyImpulse(box, FluidFace(box, face.axis, face.left), -porous, ImpulseSource::FixedPhase);
+            face.flowNl = CoupledFlowNl(box, FluidMomentum(box, face), face.areaMm2, face.massMg);
+            face.grainFlowNl = 0;
+            if (!GrainMoves(face))
+                return;
+
+            const int64_t grainMomentum = GrainMomentum(box, face);
+            const uint32_t upwind = grainMomentum >= 0 ? face.left : face.right;
+            face.grainFlowNl = GrainFlowQ32(box, face, grainMomentum, runtime.scratch.grains[upwind].massMg);
+            const GrainCell& target = runtime.scratch.grains[face.grainFlowNl > 0 ? face.right : face.left];
+            if (target.noRoom && face.grainFlowNl != 0) {
+                StopGrain(box, face);
+                face.grainFlowNl = 0;
+                ++runtime.stats->blockedGrainFaces;
+            }
+        }
 
         // --- 陰の圧力の段 ---
         // 横の面に柱の差の力積を足し(重さの軸の面は重さと柱が打ち消すので何も足さない)、陰の圧力で残り y を解いて力積を足す
@@ -370,7 +779,9 @@ namespace bicameral::sim::case_b {
                 if (!face.open)
                     continue;
 
-                const int64_t predicted = FlowNl(box, FluidMomentum(box, face), face.areaMm2, face.massMg);
+                const int64_t predicted = face.coupled
+                                              ? face.predictedNl
+                                              : FlowNl(box, FluidMomentum(box, face), face.areaMm2, face.massMg);
                 system.sources[face.left] -= predicted;
                 system.sources[face.right] += predicted;
                 system.links.push_back({.left = face.left, .right = face.right, .coefficient = face.coefficientQ48});
@@ -396,8 +807,18 @@ namespace bicameral::sim::case_b {
             scratch.columnMicroPascal = BuildFluidColumns(box, context.view, scratch.cells);
             scratch.faces = BuildFaces(box, scratch.cells, stats);
             ApplyColumnImpulses(box, context.view, scratch);
+            if (runtime.options.drag) {
+                MeasureGrains(runtime, box, context.view);
+                for (FlowFace& face : scratch.faces)
+                    PrepareCoupledFace(runtime, box, context.view, face);
+            }
+
             // 粘りは陰の圧力の前に(面の運動量を受け渡してから、その流れで圧力の式を組む。運ぶ段の流れと食い違わない)
             ApplyViscosity(runtime, box);
+            for (FlowFace& face : scratch.faces) {
+                if (face.coupled)
+                    CoupledSystemTerms(box, face);
+            }
 
             std::vector<int64_t> values;
             const PressureSystem system = BuildPressureSystem(box, scratch, values);
@@ -411,6 +832,11 @@ namespace bicameral::sim::case_b {
             for (FlowFace& face : scratch.faces) {
                 if (!face.open)
                     continue;
+
+                if (face.coupled) {
+                    SolveCoupledFace(runtime, box, face, values[face.left] - values[face.right]);
+                    continue;
+                }
 
                 const int64_t impulse = PressureImpulse(box, values[face.left] - values[face.right], face.areaMm2);
                 ApplyImpulse(box, FluidFace(box, face.axis, face.left), impulse, ImpulseSource::Pressure);
@@ -429,6 +855,7 @@ namespace bicameral::sim::case_b {
         struct Take {
             int64_t liquidNl = 0;
             int64_t gasNl = 0;
+            int64_t grainNl = 0;  // 粒そのものの体積(R2。粒の面だけ)
         };
 
         // 面が風上のセルから取る体積(重さの軸は、上へ出るなら気体から・下へ出るなら液体から。横は体積の割合)
@@ -503,8 +930,10 @@ namespace bicameral::sim::case_b {
             for (uint32_t material = 0; material < materials; ++material) {
                 const Phase phase = box.materials[material].phase;
                 const bool liquid = phase == Phase::Liquid;
-                const int64_t share = liquid ? take.liquidNl : (phase == Phase::Gas ? take.gasNl : 0);
-                const int64_t phaseVolume = liquid ? cell.liquidNl : cell.gasNl;
+                const bool grain = phase == Phase::Grain;
+                const int64_t fluidShare = liquid ? take.liquidNl : (phase == Phase::Gas ? take.gasNl : 0);
+                const int64_t share = grain ? take.grainNl : fluidShare;
+                const int64_t phaseVolume = grain ? cell.grainNl : (liquid ? cell.liquidNl : cell.gasNl);
                 if (share <= 0 || phaseVolume <= 0)
                     continue;
 
@@ -526,6 +955,89 @@ namespace bicameral::sim::case_b {
             }
 
             return moved;
+        }
+
+        // 粒の運び(R2): 粒の質量の流れ(Q32)に面の持ち越し(端数。21 §2.10。faceCarry の粒の置き場・mg の Q32)を足し、
+        // 整数の mg だけを移して残りを持ち越す(1 mg の粒・薄い粉が丸めで止まらない)。出る量が中の粒を超えたら同じ割合で縮める。
+        // 物質は風上のセルの粒の質量の割合で分け(端は最後の物質へ)、エネルギーは熱容量の割合で一緒に
+        int64_t MoveGrainMass(Box& box, const StartContent& start, const FlowScratch& scratch, uint32_t from,
+                              uint32_t to, int64_t massMg) {
+            const auto materials = (uint32_t)box.materials.size();
+            const int64_t total = scratch.grains[from].massMg;
+            int64_t left = massMg;
+            uint64_t heatCapacity = 0;
+            uint32_t last = materials;
+            for (uint32_t material = 0; material < materials; ++material) {
+                if (box.materials[material].phase == Phase::Grain &&
+                    start.massMg[((size_t)from * materials) + material] > 0)
+                    last = material;
+            }
+
+            for (uint32_t material = 0; material < materials && left > 0; ++material) {
+                const int64_t startMass = start.massMg[((size_t)from * materials) + material];
+                if (box.materials[material].phase != Phase::Grain || startMass <= 0)
+                    continue;
+
+                const int64_t share = material == last ? left
+                                                       : fx::FxMulDivS64(massMg, (uint64_t)startMass, (uint64_t)total);
+                const int64_t mass = std::min({share, left, CellMass(box, from, material)});
+                if (mass <= 0)
+                    continue;
+
+                heatCapacity += HeatCapacityQ16(box, material, mass);
+                left -= mass;
+                MoveMass(box, from, to, material, mass);
+            }
+
+            const uint64_t capacity = scratch.heatCapacityQ16[from];
+            if (heatCapacity > 0 && capacity > 0) {
+                const int64_t energy = std::max<int64_t>(start.energyMillijoules[from], 0);
+                MoveEnergy(box, from, to, fx::FxMulDivS64(energy, std::min(heatCapacity, capacity), capacity));
+            }
+
+            return massMg - left;
+        }
+
+        void TransportGrains(FlowRuntime& runtime, Box& box, const StartContent& start) {
+            FlowScratch& scratch = runtime.scratch;
+            std::vector<uint64_t> demand(scratch.cells.size(), 0);
+            for (const FlowFace& face : scratch.faces)
+                demand[face.grainFlowNl > 0 ? face.left : face.right] += fx::FxAbsU64(face.grainFlowNl);
+
+            for (size_t cell = 0; cell < demand.size(); ++cell) {
+                const auto have = (uint64_t)scratch.grains[cell].massMg << 32;
+                runtime.stats->grainLimitedCells += demand[cell] > have ? 1u : 0u;
+            }
+
+            const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
+            for (FlowFace& face : scratch.faces) {
+                face.grainMovedMassMg = 0;
+                int64_t& carry = box.faceCarry[face.axis][FaceIndex(box, face.left, slot)];
+                if (!GrainMoves(face)) {
+                    carry = 0;
+                    continue;
+                }
+
+                const uint32_t upwind = face.grainFlowNl > 0 ? face.left : face.right;
+                const auto have = (uint64_t)scratch.grains[upwind].massMg << 32;
+                int64_t flow = face.grainFlowNl;
+                if (demand[upwind] > have)
+                    flow = fx::FxMulDivS64(flow, have, demand[upwind]);
+
+                // 持ち越しは向きが変わったら捨てる(戻る粒を前の端数で押さない)
+                carry = (carry > 0) == (flow > 0) ? carry : 0;
+                const int64_t wanted = flow + carry;
+                const int64_t whole = wanted / ((int64_t)1 << 32);
+                carry = wanted - (whole * ((int64_t)1 << 32));
+                if (whole == 0)
+                    continue;
+
+                const bool forward = whole > 0;
+                const uint32_t from = forward ? face.left : face.right;
+                const uint32_t to = forward ? face.right : face.left;
+                const int64_t moved = MoveGrainMass(box, start, scratch, from, to, forward ? whole : -whole);
+                face.grainMovedMassMg = forward ? moved : -moved;
+            }
         }
 
         void TransportStage(FlowRuntime& runtime, Box& box, const StepContext& context) {
@@ -554,6 +1066,9 @@ namespace bicameral::sim::case_b {
                 const int64_t moved = MoveTake(box, start, scratch, from, to, takes[index]);
                 face.movedMassMg = forward ? moved : -moved;
             }
+
+            if (runtime.options.drag)
+                TransportGrains(runtime, box, start);
         }
 
         // --- 当てる段: 面の運動量を運ぶ(MAC の格子の運び)---
@@ -583,8 +1098,12 @@ namespace bicameral::sim::case_b {
             return table;
         }
 
+        int64_t MovedMass(const FlowFace& face, bool grain) {
+            return grain ? face.grainMovedMassMg : face.movedMassMg;
+        }
+
         void CollectTransfers(const Box& box, const FlowScratch& scratch, const FaceTable& table, uint32_t index,
-                              std::vector<MomentumTransfer>& transfers) {
+                              bool grain, std::vector<MomentumTransfer>& transfers) {
             const FlowFace& face = scratch.faces[index];
             for (uint32_t side = 0; side < 3; ++side) {
                 const std::optional<uint32_t> beside = Neighbor(box, face.left, side);
@@ -596,8 +1115,8 @@ namespace bicameral::sim::case_b {
                 if (first < 0 || second < 0)
                     continue;
 
-                const int64_t flux = (scratch.faces[(size_t)first].movedMassMg +
-                                      scratch.faces[(size_t)second].movedMassMg) /
+                const int64_t flux = (MovedMass(scratch.faces[(size_t)first], grain) +
+                                      MovedMass(scratch.faces[(size_t)second], grain)) /
                                      2;
                 if (flux == 0)
                     continue;
@@ -608,13 +1127,12 @@ namespace bicameral::sim::case_b {
             }
         }
 
-        void ApplyStage(FlowRuntime& runtime, Box& box, const StepContext&) {
-            const FlowScratch& scratch = runtime.scratch;
-            const FaceTable table = IndexFaces(scratch, CellCount(box));
+        // 1 つの置き場(流体か粒)の面の運動量を運ぶ
+        void AdvectSlot(const FlowScratch& scratch, Box& box, const FaceTable& table, bool grain) {
             std::vector<MomentumTransfer> transfers;
             for (uint32_t index = 0; index < scratch.faces.size(); ++index) {
                 if (scratch.faces[index].open)
-                    CollectTransfers(box, scratch, table, index, transfers);
+                    CollectTransfers(box, scratch, table, index, grain, transfers);
             }
 
             std::vector<uint64_t> demand(scratch.faces.size(), 0);
@@ -622,19 +1140,33 @@ namespace bicameral::sim::case_b {
                 demand[transfer.from] += transfer.massMg;
 
             // 運ぶ量は刻みの初めの面の運動量から決める(移す順に結果がよらない)
+            const uint32_t slot = grain ? MomentumSlot(box.config.layout, Phase::Grain) : 0;
             const std::array<std::vector<int64_t>, 3> start = box.faceMomentum;
             for (const MomentumTransfer& transfer : transfers) {
                 const FlowFace& from = scratch.faces[transfer.from];
                 const FlowFace& to = scratch.faces[transfer.to];
-                const uint64_t faceMass = (uint64_t)from.massMg;
+                const auto faceMass = (uint64_t)(grain ? from.grainMassMg : from.massMg);
+                if (faceMass == 0)
+                    continue;
+
                 const uint64_t mass = demand[transfer.from] > faceMass
                                           ? (uint64_t)fx::FxMulDivS64((int64_t)transfer.massMg, faceMass,
                                                                       demand[transfer.from])
                                           : transfer.massMg;
-                const int64_t momentum = start[from.axis][FaceIndex(box, from.left, 0)];
-                MoveMomentum(box, FluidFace(box, from.axis, from.left), FluidFace(box, to.axis, to.left),
-                             fx::FxMulDivS64(momentum, mass, faceMass));
+                const int64_t momentum = start[from.axis][FaceIndex(box, from.left, slot)];
+                const FaceRef source = grain ? GrainFace(box, from.axis, from.left)
+                                             : FluidFace(box, from.axis, from.left);
+                const FaceRef target = grain ? GrainFace(box, to.axis, to.left) : FluidFace(box, to.axis, to.left);
+                MoveMomentum(box, source, target, fx::FxMulDivS64(momentum, mass, faceMass));
             }
+        }
+
+        void ApplyStage(FlowRuntime& runtime, Box& box, const StepContext&) {
+            const FlowScratch& scratch = runtime.scratch;
+            const FaceTable table = IndexFaces(scratch, CellCount(box));
+            AdvectSlot(scratch, box, table, false);
+            if (runtime.options.drag)
+                AdvectSlot(scratch, box, table, true);
         }
 
         // --- 粘り(T-0927・T-0926 の仮説 2。陰の圧力の段の中で、系を組む前に)---
@@ -718,6 +1250,12 @@ namespace bicameral::sim::case_b {
         result.fluidMassMg = content.fluidMassMg;
         result.openQ16 = OpenQ16(view.cells[cell]);
         result.availableNl = (int64_t)((CellVolumeNl(box) * result.openQ16) >> 16);
+        for (uint32_t index = 0; index < box.materials.size(); ++index) {
+            if (box.materials[index].phase == Phase::Grain)
+                result.grainNl += (int64_t)MaterialVolumeNl(CellMass(box, cell, index),
+                                                            box.materials[index].densityKgPerM3);
+        }
+
         result.closed = result.availableNl == 0;
         if (result.closed)
             return result;
