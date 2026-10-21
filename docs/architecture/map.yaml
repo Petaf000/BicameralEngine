@@ -358,9 +358,12 @@ views:
           note: "法則が渡すのは節(C_i)・面(g)・値を固定した面・右辺の項だけ(EquilibriumSystem)。式は shaders/common/equilibrium.hlsli(GPU と共有。GPU の回し方は T-0915)。最初の使い手は陰の圧力(MakeGasEquilibriumSystem。GasProjectionOptions::equilibrium で T-0845 の CPU の答えと毎刻みビット一致。equilibrium_test)" }
       - { id: equilibriumtest, group: tests, label: "equilibrium_test<br/>陰の圧力を部品の上へ: 5 場面 × 300 刻み毎刻みビット一致・保存・決定性・閉じた領域",
           code: "tests/equilibrium_test.cpp::TestGasOnEquilibrium", ticket: T-0853 }
+      - { id: equilibriumblock, group: simlib, label: "SolveEquilibriumBlocks<br/>成分を持つ節の釣り合い(T-0919)<br/>k × k の面・8 色のブロックの解き・剛体の動きの延ばし方",
+          code: "engine/src/sim/equilibrium_block.cpp::SolveEquilibriumBlocks", ticket: T-0919, doc: docs/decisions/ADR-0418-balance-family-vector-nodes.md,
+          note: "節が k 成分(支えの 2 次元は 3)・面と固定した面の係数が k × k(斜めの 2 節の面も同じ形)。粗い段は Galerkin(Pᵀ A P を 128bit で足して 1 回ずらす)で斜めの面も子の面の和になる。延ばし方 P は法則が渡す(支えは剛体の動き)。成分 1 の法則は SolveEquilibrium のまま(ビット一致)。同じレベルの節・閉じない解きだけ(違うレベル・閉じた領域は T-0969、GPU は T-0970)" }
       - { id: supportlaw, group: simlib, label: "SupportLaw::Step<br/>支えの法則の試作(R-B1・T-0871)<br/>格子の梁・成分ごとに C-0 で解き結合は遅らせる",
           code: "engine/src/sim/support_law.cpp::SupportLaw::Step", ticket: T-0871, doc: docs/design/22-support-law.md,
-          note: "縦の面・ν = 0・1 つの細かさ。節 = セル(横・上・回り φ)。成分の間の結合は右辺の項へ遅らせる(成分を持つ節の口 T-0919 が入れば 1 つの系)。階段の段に斜めの棒(ADR-0415・T-0944)。面の力と縁の力(FaceForces。表面の引きの応力 R-B2 へ)。support_law_test が梁の式・アーチ・洞窟の天井の連続体と比べ・帳簿・決定性・釣り合いに着く刻みを記録" }
+          note: "縦の面・ν = 0・1 つの細かさ。節 = セル(横・上・回り φ)。既定は成分を持つ節で 1 つの系(SupportSolve::Coupled。T-0919)、成分の間の結合を右辺の項へ遅らせる形(Lagged)は比べ用に残す。階段の段に斜めの棒(ADR-0415・T-0944)。面の力と縁の力(FaceForces。表面の引きの応力 R-B2 へ)。support_law_test が梁の式・アーチ・洞窟の天井の連続体と比べ・帳簿・決定性・釣り合いに着く刻みを記録" }
       - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
           code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordSolve", ticket: T-0531, doc: docs/design/07-transport.md,
           note: "止める判定はセルごとの閾値 ⌈(許容差 + 1) 2^48 ÷ D⌉(GasPressureThresholds)で CPU と整数で同じ。gpu_gas_projection_test が CPU の模型の解きを GPU で解き直してビット一致を確かめる。式を作る・当てる・外側の反復の GPU 版は T-0531 の残り" }
@@ -655,6 +658,7 @@ views:
       - [equilibrium, implicitcpu, "段の作りと V サイクル"]
       - [equilibriumtest, equilibrium, "ビット一致"]
       - [supportlaw, equilibrium, "成分ごとに解く(使い手)"]
+      - [supportlaw, equilibriumblock, "成分を持つ節で 1 つの系(既定。T-0919)"]
       - [gpugasprojection, gasprojection, "同じ解きをビット一致で"]
       - [gpugasprojection, gpuimplicit, "V サイクルの段を使い回す"]
       - [gpugasprojectionstep, gpuequilibrium, "部品の上で解く(T-0915)"]
