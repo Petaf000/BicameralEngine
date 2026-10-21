@@ -91,6 +91,7 @@ namespace bicameral::sim {
 
         // ビット単位で一様なら畳む(溢れのある頁は溢れまで同じ時だけ)。畳んだら true
         bool FoldExact(MultiresNest& nest, uint32_t slot) {
+            nest_fields::ReleaseZeroPages(nest, slot);   // 眠る判定で全部 0 の欄の頁を返す(疎。T-0921)
             if (!nest_fields::PageFoldable(nest, slot))  // 登録した欄が一様でなければ畳まない(T-0711)
                 return false;
 

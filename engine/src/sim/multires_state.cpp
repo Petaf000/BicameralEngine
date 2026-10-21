@@ -18,6 +18,14 @@ namespace bicameral::sim {
             return copy != nullptr && std::ranges::size(*copy) == std::ranges::size(values);
         }
 
+        // 欄の置き場(T-0921): 疎か密か・値の数・頁の数が同じ(欄の頁の数は値で決まるので比べない)
+        bool SameShape(const std::any& saved, const MultiresFieldStore& store) {
+            const auto* copy = std::any_cast<MultiresFieldStore>(&saved);
+
+            return copy != nullptr && copy->sparse == store.sparse && copy->components == store.components &&
+                   copy->cellPages == store.cellPages && copy->uniform.size() == store.uniform.size();
+        }
+
         bool SameFields(const MultiresNest& nest, const MultiresSaveState& save) {
             if (save.fieldDescs.size() != nest.fields.size())
                 return false;
@@ -70,7 +78,7 @@ namespace bicameral::sim {
         // --- 保存点に入らない導かれる値は 0 から(前の値を残さない。T-0854)---
         for (MultiresField& field : nest.fields) {
             if (!state_field::SfSaved(field.desc))
-                std::ranges::fill(field.values, 0);
+                ClearFieldStore(field.store);
         }
 
         return true;

@@ -15,26 +15,103 @@ namespace bicameral::sim {
 
         // --- 値の番号 ---
 
-        // セル・面の欄: 一様の値は枠 slot、頁のセルは「枠の数 + 頁 × 512 + セル」(nest.cells と同じ並び)× 値の数
+        // 一様の値(セル・面の欄の一様なブロック・ブロックの欄は枠 slot、世界の欄は slot = 0)× 値の数
         size_t UniformAddress(const MultiresField& field, uint32_t slot, uint32_t component) {
             return (size_t{slot} * field.desc.components) + component;
         }
 
-        size_t PageAddress(const MultiresNest& nest, const MultiresField& field, uint32_t page, uint32_t index,
-                           uint32_t component) {
-            const size_t cell = nest.blocks.size() + (size_t{page} * MR_BLOCK_CELLS) + index;
-
-            return (cell * field.desc.components) + component;
+        // 欄の頁の中の番号(セル × 値の数。T-0711 からの並び)
+        size_t InPage(const MultiresFieldStore& store, uint32_t index, uint32_t component) {
+            return (size_t{index} * store.components) + component;
         }
 
-        size_t ValueCount(const MultiresNest& nest, const SfFieldDesc& desc) {
-            if (SfOnCells(desc))
-                return nest.cells.size() * desc.components;
+        size_t PageValueCount(const MultiresFieldStore& store) {
+            return size_t{MR_BLOCK_CELLS} * store.components;
+        }
 
-            if (desc.place == SF_PLACE_BLOCK)
-                return nest.blocks.size() * desc.components;
+        // 登録した時の置き場(密: 欄の頁をセルの頁の数だけ・疎: 頁の表だけ。T-0921)
+        MultiresFieldStore MakeStore(const MultiresNest& nest, const SfFieldDesc& desc) {
+            MultiresFieldStore store;
+            store.components = desc.components;
+            if (desc.place == SF_PLACE_WORLD) {
+                store.uniform.assign(desc.components, 0);
+                return store;
+            }
 
-            return desc.components;
+            store.uniform.assign(nest.blocks.size() * desc.components, 0);
+            if (!SfOnCells(desc))
+                return store;
+
+            store.sparse = nest.sparseFields;
+            store.cellPages = static_cast<uint32_t>((nest.cells.size() - nest.blocks.size()) / MR_BLOCK_CELLS);
+            if (store.sparse)
+                store.pageOf.assign(store.cellPages, MULTIRES_NO_FIELD_PAGE);
+            else
+                store.pages.assign(size_t{store.cellPages} * PageValueCount(store), 0);
+
+            return store;
+        }
+
+        // セルの頁 page に全部の値を書き始める前に: 疎なら前の欄の頁を返す(0 を書かない所に前の値を残さない。密は全部書くので要らない)
+        void StartPage(MultiresFieldStore& store, uint32_t page);
+
+        // --- 欄の頁(疎: 無い頁は全部 0 と読む・0 でない値を最初に書く時に作る。T-0921・20 §10.2)---
+
+        int64_t LoadPage(const MultiresFieldStore& store, uint32_t page, uint32_t index, uint32_t component) {
+            const int64_t* values = FieldPageValues(store, page);
+
+            return values == nullptr ? 0 : values[InPage(store, index, component)];
+        }
+
+        // セルの頁 page の欄の頁を作る(疎で無ければ、返された欄の頁か新しい欄の頁を 0 で埋めて)
+        int64_t* EnsurePage(MultiresFieldStore& store, uint32_t page) {
+            if (!store.sparse)
+                return store.pages.data() + (size_t{page} * PageValueCount(store));
+
+            uint32_t& fieldPage = store.pageOf[page];
+            if (fieldPage == MULTIRES_NO_FIELD_PAGE) {
+                const size_t count = PageValueCount(store);
+                if (store.freePages.empty()) {
+                    fieldPage = static_cast<uint32_t>(store.pages.size() / count);
+                    store.pages.resize(store.pages.size() + count, 0);
+                } else {
+                    fieldPage = store.freePages.back();
+                    store.freePages.pop_back();
+                    std::fill_n(store.pages.begin() + static_cast<ptrdiff_t>(fieldPage * count), count, 0);
+                }
+            }
+
+            return store.pages.data() + (size_t{fieldPage} * PageValueCount(store));
+        }
+
+        // 書く(疎で無い頁に 0 を書くなら頁を作らない)
+        void StorePage(MultiresFieldStore& store, uint32_t page, uint32_t index, uint32_t component, int64_t value) {
+            if (value == 0 && FieldPageValues(store, page) == nullptr)
+                return;
+
+            EnsurePage(store, page)[InPage(store, index, component)] = value;
+        }
+
+        // セルの頁 page の欄を全部 0 に(疎なら欄の頁を返す)。セルの頁を返す・置き直す時に呼ぶので、
+        // 使っていないセルの頁の欄はいつも 0(密と疎で状態の要約が同じになる約束)
+        void ReleasePage(MultiresFieldStore& store, uint32_t page) {
+            if (!store.sparse) {
+                std::fill_n(store.pages.begin() + static_cast<ptrdiff_t>(size_t{page} * PageValueCount(store)),
+                            PageValueCount(store), 0);
+                return;
+            }
+
+            uint32_t& fieldPage = store.pageOf[page];
+            if (fieldPage == MULTIRES_NO_FIELD_PAGE)
+                return;
+
+            store.freePages.push_back(fieldPage);
+            fieldPage = MULTIRES_NO_FIELD_PAGE;
+        }
+
+        void StartPage(MultiresFieldStore& store, uint32_t page) {
+            if (store.sparse)
+                ReleasePage(store, page);
         }
 
         // 粗くした余り(子のレベル level の単位の丸ごとの数。切り捨てなのでいつも 0 以上 = セルから減った)を
@@ -53,7 +130,7 @@ namespace bicameral::sim {
             if (valueCell >= MR_BLOCK_CELLS)
                 return 0;
 
-            return field.values[PageAddress(nest, field, block.page, valueCell, component)];
+            return LoadPage(field.store, block.page, valueCell, component);
         }
 
         // 導かれる値の頁を眠らせる時の値: 覆われていないセルの平均(−∞ 向きの切り捨て。全部覆われていれば 0。T-0854・20 §10.3)
@@ -62,7 +139,7 @@ namespace bicameral::sim {
             SfMeanSum sum = SfMakeMeanSum();
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 if (!MrIsCoveredCell(block, index))
-                    sum = SfAddMeanValue(sum, field.values[PageAddress(nest, field, block.page, index, component)]);
+                    sum = SfAddMeanValue(sum, LoadPage(field.store, block.page, index, component));
             }
 
             return SfMeanValue(sum);
@@ -80,7 +157,7 @@ namespace bicameral::sim {
         MultiresField field;
         field.name = std::move(name);
         field.desc = desc;
-        field.values.assign(ValueCount(nest, desc), 0);
+        field.store = MakeStore(nest, desc);
 
         // --- 保存量の欄: 世界の帳簿の後ろに値の数だけ列を足す(帳簿はまだ空なので並べ直しは要らない。T-0762)---
         if (SfConserved(desc)) {
@@ -110,9 +187,9 @@ namespace bicameral::sim {
         FX_ASSERT(SfOnCells(entry.desc) && component < entry.desc.components);
         const MrBlock& block = nest.blocks[slot];
         if (MrIsUniform(block))
-            return MrIsCoveredCell(block, index) ? 0 : entry.values[UniformAddress(entry, slot, component)];
+            return MrIsCoveredCell(block, index) ? 0 : entry.store.uniform[UniformAddress(entry, slot, component)];
 
-        return entry.values[PageAddress(nest, entry, block.page, index, component)];
+        return LoadPage(entry.store, block.page, index, component);
     }
 
     void StoreNestField(MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t index, uint32_t component,
@@ -121,7 +198,7 @@ namespace bicameral::sim {
         FX_ASSERT(SfOnCells(entry.desc) && component < entry.desc.components);
         FX_ASSERT(SfValueFits(entry.desc, value));
         FX_ASSERT(!MrIsUniform(nest.blocks[slot]));
-        entry.values[PageAddress(nest, entry, nest.blocks[slot].page, index, component)] = value;
+        StorePage(entry.store, nest.blocks[slot].page, index, component, value);
     }
 
     void StoreNestFieldUniform(MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t component, int64_t value) {
@@ -129,7 +206,7 @@ namespace bicameral::sim {
         FX_ASSERT(SfOnCells(entry.desc) && component < entry.desc.components);
         FX_ASSERT(SfValueFits(entry.desc, value));
         FX_ASSERT(MrIsUniform(nest.blocks[slot]));
-        entry.values[UniformAddress(entry, slot, component)] = value;
+        entry.store.uniform[UniformAddress(entry, slot, component)] = value;
     }
 
     // --- ブロック・世界の欄 ---
@@ -138,28 +215,28 @@ namespace bicameral::sim {
         const MultiresField& entry = nest.fields[field];
         FX_ASSERT(entry.desc.place == SF_PLACE_BLOCK && component < entry.desc.components);
 
-        return entry.values[UniformAddress(entry, slot, component)];
+        return entry.store.uniform[UniformAddress(entry, slot, component)];
     }
 
     void StoreNestBlockField(MultiresNest& nest, uint32_t field, uint32_t slot, uint32_t component, int64_t value) {
         MultiresField& entry = nest.fields[field];
         FX_ASSERT(entry.desc.place == SF_PLACE_BLOCK && component < entry.desc.components);
         FX_ASSERT(SfValueFits(entry.desc, value));
-        entry.values[UniformAddress(entry, slot, component)] = value;
+        entry.store.uniform[UniformAddress(entry, slot, component)] = value;
     }
 
     int64_t LoadNestWorldField(const MultiresNest& nest, uint32_t field, uint32_t component) {
         const MultiresField& entry = nest.fields[field];
         FX_ASSERT(entry.desc.place == SF_PLACE_WORLD && component < entry.desc.components);
 
-        return entry.values[component];
+        return entry.store.uniform[component];
     }
 
     void StoreNestWorldField(MultiresNest& nest, uint32_t field, uint32_t component, int64_t value) {
         MultiresField& entry = nest.fields[field];
         FX_ASSERT(entry.desc.place == SF_PLACE_WORLD && component < entry.desc.components);
         FX_ASSERT(SfValueFits(entry.desc, value));
-        entry.values[component] = value;
+        entry.store.uniform[component] = value;
     }
 
     uint32_t NestConservedIndex(const MultiresNest& nest, uint32_t field) {
@@ -175,31 +252,94 @@ namespace bicameral::sim {
         return index;
     }
 
+    void ClearFieldStore(MultiresFieldStore& store) {
+        std::ranges::fill(store.uniform, 0);
+        if (!store.sparse) {
+            std::ranges::fill(store.pages, 0);
+            return;
+        }
+
+        store.pages.clear();
+        store.freePages.clear();
+        std::ranges::fill(store.pageOf, MULTIRES_NO_FIELD_PAGE);
+    }
+
+    NestFieldMemory MeasureNestFields(const MultiresNest& nest) {
+        uint64_t usedBlocks = 0;
+        uint64_t pagedBlocks = 0;
+        for (const MrBlock& block : nest.blocks) {
+            usedBlocks += block.kind != MR_BLOCK_UNUSED ? 1 : 0;
+            pagedBlocks += block.kind != MR_BLOCK_UNUSED && !MrIsUniform(block) ? 1 : 0;
+        }
+
+        NestFieldMemory memory;
+        for (const MultiresField& field : nest.fields) {
+            const MultiresFieldStore& store = field.store;
+            const uint64_t valueBytes = uint64_t{store.components} * sizeof(int64_t);
+            memory.uniformBytes += (field.desc.place == SF_PLACE_WORLD ? 1 : usedBlocks) * valueBytes;
+            if (!SfOnCells(field.desc))
+                continue;
+
+            // --- 密: 頁を持つブロックの数だけ(セルの頁と同じだけ要る)/ 疎: 値のある頁 + 頁の表 ---
+            const uint64_t pageBytes = PageValueCount(store) * sizeof(int64_t);
+            if (!store.sparse) {
+                memory.pageBytes += pagedBlocks * pageBytes;
+                continue;
+            }
+
+            memory.tableBytes += pagedBlocks * sizeof(uint32_t);
+            for (const uint32_t fieldPage : store.pageOf)
+                memory.pageBytes += fieldPage == MULTIRES_NO_FIELD_PAGE ? 0 : pageBytes;
+        }
+
+        return memory;
+    }
+
     // --- 木の操作が呼ぶ ---
     namespace nest_fields {
+
+        void ReleaseBlockPages(MultiresNest& nest, uint32_t slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (MrIsUniform(block))
+                return;
+
+            for (MultiresField& field : nest.fields) {
+                if (SfOnCells(field.desc))
+                    ReleasePage(field.store, block.page);
+            }
+        }
+
+        void ReleaseZeroPages(MultiresNest& nest, uint32_t slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (MrIsUniform(block))
+                return;
+
+            for (MultiresField& field : nest.fields) {
+                if (!SfOnCells(field.desc) || !field.store.sparse)
+                    continue;
+
+                const int64_t* values = FieldPageValues(field.store, block.page);
+                if (values != nullptr &&
+                    std::all_of(values, values + PageValueCount(field.store), [](int64_t value) { return value == 0; }))
+                    ReleasePage(field.store, block.page);
+            }
+        }
 
         void PlaceRoot(MultiresNest& nest, uint32_t slot) {
             const MrBlock& block = nest.blocks[slot];
             for (MultiresField& field : nest.fields) {
-                const uint32_t components = field.desc.components;
-                if (field.desc.place == SF_PLACE_BLOCK) {
-                    std::fill_n(field.values.begin() + static_cast<ptrdiff_t>(UniformAddress(field, slot, 0)),
-                                components, 0);
+                if (field.desc.place == SF_PLACE_WORLD)
+                    continue;
+
+                // --- ブロックの欄・一様なブロックのセル・面の欄: 一様の値を 0 に ---
+                if (!SfOnCells(field.desc) || MrIsUniform(block)) {
+                    std::fill_n(field.store.uniform.begin() + static_cast<ptrdiff_t>(UniformAddress(field, slot, 0)),
+                                field.desc.components, 0);
                     continue;
                 }
 
-                if (!SfOnCells(field.desc))
-                    continue;
-
-                if (MrIsUniform(block)) {
-                    std::fill_n(field.values.begin() + static_cast<ptrdiff_t>(UniformAddress(field, slot, 0)),
-                                components, 0);
-                    continue;
-                }
-
-                const size_t first = PageAddress(nest, field, block.page, 0, 0);
-                std::fill_n(field.values.begin() + static_cast<ptrdiff_t>(first), size_t{MR_BLOCK_CELLS} * components,
-                            0);
+                // --- 頁を持つ: 欄の頁を 0 に(疎なら返す)---
+                ReleasePage(field.store, block.page);
             }
         }
 
@@ -210,11 +350,13 @@ namespace bicameral::sim {
                 if (!SfOnCells(field.desc))
                     continue;
 
+                // 0 は疎の無い頁に書かない(全部 0 の一様なブロックを広げても欄の頁を作らない。T-0921)
+                StartPage(field.store, page);
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const bool covered = MrIsCoveredCell(block, index);
                     for (uint32_t c = 0; c < field.desc.components; ++c) {
-                        const int64_t value = covered ? 0 : field.values[UniformAddress(field, slot, c)];
-                        field.values[PageAddress(nest, field, page, index, c)] = value;
+                        const int64_t value = covered ? 0 : field.store.uniform[UniformAddress(field, slot, c)];
+                        StorePage(field.store, page, index, c, value);
                     }
                 }
             }
@@ -232,7 +374,7 @@ namespace bicameral::sim {
                     const int64_t value = FoldValue(nest, field, slot, c);
                     for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                         const int64_t expected = MrIsCoveredCell(block, index) ? 0 : value;
-                        if (field.values[PageAddress(nest, field, block.page, index, c)] != expected)
+                        if (LoadPage(field.store, block.page, index, c) != expected)
                             return false;
                     }
                 }
@@ -249,8 +391,11 @@ namespace bicameral::sim {
                 for (uint32_t c = 0; c < field.desc.components; ++c) {
                     const int64_t value = SfDerived(field.desc) ? SfSleepValue(SleepMean(nest, field, slot, c))
                                                                 : FoldValue(nest, field, slot, c);
-                    field.values[UniformAddress(field, slot, c)] = value;
+                    field.store.uniform[UniformAddress(field, slot, c)] = value;
                 }
+
+                // 呼ぶ側がセルの頁を返すので、欄の頁も返す(T-0921)
+                ReleasePage(field.store, nest.blocks[slot].page);
             }
         }
 
@@ -264,8 +409,8 @@ namespace bicameral::sim {
                 // --- ブロックの欄: 子のブロックは親の値 ---
                 if (field.desc.place == SF_PLACE_BLOCK) {
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[UniformAddress(field, childSlot, c)] = field.values[UniformAddress(field,
-                                                                                                        parentSlot, c)];
+                        field.store.uniform[UniformAddress(field, childSlot, c)] = field.store.uniform[UniformAddress(
+                            field, parentSlot, c)];
                     continue;
                 }
 
@@ -273,25 +418,27 @@ namespace bicameral::sim {
                     continue;
 
                 // --- セル・面の欄: 子は親と同じ数(一様なら値 1 つ)---
+                MultiresFieldStore& store = field.store;
                 if (uniform) {
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[UniformAddress(field, childSlot, c)] = SfRefineValue(
-                            field.values[UniformAddress(field, parentSlot, c)]);
+                        store.uniform[UniformAddress(field, childSlot, c)] = SfRefineValue(
+                            store.uniform[UniformAddress(field, parentSlot, c)]);
                     continue;
                 }
 
+                StartPage(store, childPage);
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const uint32_t parentCell = MrParentCellOfChild(octant, index);
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[PageAddress(nest, field, childPage, index, c)] = SfRefineValue(
-                            field.values[PageAddress(nest, field, parent.page, parentCell, c)]);
+                        StorePage(store, childPage, index, c,
+                                  SfRefineValue(LoadPage(store, parent.page, parentCell, c)));
                 }
 
                 // --- 親を覆う(覆われた親のセルは 0。一様な親は覆われた所を 0 と読むので書かない)---
                 for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                     const uint32_t index = MrOctantCell(octant, local);
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[PageAddress(nest, field, parent.page, index, c)] = 0;
+                        StorePage(store, parent.page, index, c, 0);
                 }
             }
         }
@@ -313,8 +460,8 @@ namespace bicameral::sim {
 
                 // 同じ値 8 つの和 ÷ 8 は同じ値・余り 0
                 for (uint32_t c = 0; c < field.desc.components; ++c) {
-                    if (field.values[UniformAddress(field, childSlot, c)] !=
-                        field.values[UniformAddress(field, parentSlot, c)])
+                    if (field.store.uniform[UniformAddress(field, childSlot, c)] !=
+                        field.store.uniform[UniformAddress(field, parentSlot, c)])
                         return false;
                 }
             }
@@ -350,13 +497,22 @@ namespace bicameral::sim {
                             AddFieldRemainder(nest, child.level, column + c, SfCoarsenRemainder(sum));
 
                         if (parentUniform) {
-                            FX_ASSERT(value == field.values[UniformAddress(field, child.parent, c)]);
+                            FX_ASSERT(value == field.store.uniform[UniformAddress(field, child.parent, c)]);
                             continue;
                         }
 
-                        field.values[PageAddress(nest, field, parent.page, parentCell, c)] = value;
+                        StorePage(field.store, parent.page, parentCell, c, value);
                     }
                 }
+            }
+
+            // --- 呼ぶ側が子のセルの頁を返すので、欄の頁も返す(T-0921)---
+            if (MrIsUniform(child))
+                return;
+
+            for (MultiresField& field : nest.fields) {
+                if (SfOnCells(field.desc))
+                    ReleasePage(field.store, child.page);
             }
         }
 
@@ -369,8 +525,8 @@ namespace bicameral::sim {
                 // --- ブロックの欄: 影のブロックは親の値 ---
                 if (field.desc.place == SF_PLACE_BLOCK) {
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[UniformAddress(field, childSlot, c)] = field.values[UniformAddress(field,
-                                                                                                        parentSlot, c)];
+                        field.store.uniform[UniformAddress(field, childSlot, c)] = field.store.uniform[UniformAddress(
+                            field, parentSlot, c)];
                     continue;
                 }
 
@@ -378,11 +534,12 @@ namespace bicameral::sim {
                     continue;
 
                 // --- セル・面の欄: 子は親と同じ数(影はいつも頁を持つ。親は一様でも頁でも LoadNestField で読む)---
+                StartPage(field.store, childPage);
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const uint32_t parentCell = MrParentCellOfChild(octant, index);
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[PageAddress(nest, field, childPage, index, c)] = SfRefineValue(
-                            LoadNestField(nest, f, parentSlot, parentCell, c));
+                        StorePage(field.store, childPage, index, c,
+                                  SfRefineValue(LoadNestField(nest, f, parentSlot, parentCell, c)));
                 }
             }
         }
@@ -397,7 +554,7 @@ namespace bicameral::sim {
                 // --- ブロックの欄: 親の値に戻す ---
                 if (field.desc.place == SF_PLACE_BLOCK) {
                     for (uint32_t c = 0; c < components; ++c)
-                        field.values[UniformAddress(field, shadowSlot, c)] = field.values[UniformAddress(
+                        field.store.uniform[UniformAddress(field, shadowSlot, c)] = field.store.uniform[UniformAddress(
                             field, shadow.parent, c)];
                     continue;
                 }
@@ -412,12 +569,11 @@ namespace bicameral::sim {
                         const int64_t parentValue = LoadNestField(nest, f, shadow.parent, parentCell, c);
                         SfFamily family{};
                         for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-                            family.values[j] = field.values[PageAddress(nest, field, shadow.page, MrChildCell(local, j),
-                                                                        c)];
+                            family.values[j] = LoadPage(field.store, shadow.page, MrChildCell(local, j), c);
 
                         for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-                            field.values[PageAddress(nest, field, shadow.page, MrChildCell(local, j),
-                                                     c)] = SfPullBackChild(parentValue, family, j);
+                            StorePage(field.store, shadow.page, MrChildCell(local, j), c,
+                                      SfPullBackChild(parentValue, family, j));
                     }
                 }
             }

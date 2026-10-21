@@ -6,8 +6,9 @@
 // 観察の枠(影・写し)も欄の頁を持ち、影を細かくする/引き戻す・写しを置くに欄が付いて行く(T-0761。ADR-0361。世界の値には触れない。D-403)。
 // 欄の種類(T-0854。ADR-0399): 真実 / 導かれる値 / 温めた始まり(state_field.hlsli の SF_FLAG_DERIVED・SF_FLAG_WARM_START)。
 // 導かれる値は眠る(頁を畳む)時に平均して残し、保存点に入らない(温めた始まりは D-549 の仮 (A) で入る)。
-// まだ欄を持たない所(仮。ADR-0329): 溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6。T-0920)・
-// ある所にだけ持つ(疎な頁。T-0921)。
+// ある所にだけ持つ(疎な頁。T-0921・ADR-0403。20 §10.2): セル・面の欄の頁は 0 でない値を最初に書く時に作り、眠る判定で全部 0 なら・
+// セルの頁を返す時に返す。無い頁は全部 0 と読む。疎か密かは MultiresNest::sparseFields で、どちらも結果はビット単位で同じ。
+// まだ欄を持たない所(仮。ADR-0329): 溢れを使う世界の特別扱い(欄は溢れと関係しない)・GPU(段 6。T-0920)。
 #pragma once
 
 #include <cstdint>
@@ -53,8 +54,24 @@ namespace bicameral::sim {
     // 世界の帳簿の列は NestFieldLedgerBase + これ。T-0762)。保存量の欄でなければ MULTIRES_NO_FIELD
     [[nodiscard]] uint32_t NestConservedIndex(const MultiresNest& nest, uint32_t field);
 
+    // 登録した欄の置き場の使っている大きさ(T-0921。M-0 の 1 セルの大きさの見積もり用。確保した容量ではない)。
+    // 一様の値は使っている枠の数だけ・密の頁は頁を持つブロックの数だけ・疎の頁は値のある欄の頁だけ + 頁の表(頁を持つブロック × 4 バイト)
+    struct NestFieldMemory {
+        uint64_t uniformBytes = 0;  // 一様の値(セル・面の欄の枠ごと + ブロック・世界の欄)
+        uint64_t pageBytes = 0;     // 欄の頁
+        uint64_t tableBytes = 0;    // 疎の頁の表
+    };
+
+    [[nodiscard]] NestFieldMemory MeasureNestFields(const MultiresNest& nest);
+
     // --- 木の操作が呼ぶ(multires_tree・multires_nest・multires_activity)---
     namespace nest_fields {
+
+        // 頁を持つ枠 slot の疎な欄の頁のうち、全部 0 のものを返す(眠る判定で。読む値は変わらない。T-0921)
+        void ReleaseZeroPages(MultiresNest& nest, uint32_t slot);
+
+        // 頁を持つ枠 slot の欄の頁を返す(枠を捨てる前に。影の鎖を捨てる時。T-0921)
+        void ReleaseBlockPages(MultiresNest& nest, uint32_t slot);
 
         // 根・世界の写しを置いた枠 slot の欄を 0 に(一様なら値 1 つ、頁を持つなら頁を全部。前に使った枠・頁の値を残さない)。
         // 写しの欄の値は呼ぶ側が置いた後に StoreNestField・StoreNestBlockField で書く(写す元の世界が欄を持つ時)

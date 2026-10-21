@@ -349,6 +349,22 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // 登録した欄の置き場(T-0921): 密の並び(一様の値 → セルの頁ごとの値。疎で無い頁は 0)で要約する。疎と密で同じ値。
+        // 並びは T-0921 より前と同じ。違うのは返したセルの頁の欄が 0 になったこと(前は古い値が残って要約に入っていた)
+        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const MultiresFieldStore& store) {
+            for (const int64_t value : store.uniform)
+                hash = FxHashCombine(hash, static_cast<uint64_t>(value));
+
+            const size_t pageValues = size_t{MR_BLOCK_CELLS} * store.components;
+            for (uint32_t page = 0; page < store.cellPages; ++page) {
+                const int64_t* values = FieldPageValues(store, page);
+                for (size_t i = 0; i < pageValues; ++i)
+                    hash = FxHashCombine(hash, values == nullptr ? 0 : static_cast<uint64_t>(values[i]));
+            }
+
+            return hash;
+        }
+
         // 要約に入る欄か(truthOnly なら真実の欄だけ = 温めた始まりも除く。T-0854)
         bool FieldInHash(const MultiresField& field, bool truthOnly) {
             return truthOnly ? state_field::SfTruthHashed(field.desc) : state_field::SfHashed(field.desc);
@@ -378,7 +394,7 @@ namespace bicameral::sim {
 
                 const size_t first = slot == MR_NO_BLOCK ? 0 : size_t{slot} * field.desc.components;
                 for (uint32_t c = 0; c < field.desc.components; ++c)
-                    hash = FxHashCombine(hash, static_cast<uint64_t>(field.values[first + c]));
+                    hash = FxHashCombine(hash, static_cast<uint64_t>(field.store.uniform[first + c]));
             }
 
             return hash;
@@ -740,6 +756,7 @@ namespace bicameral::sim {
     void RemoveShadowChain(MultiresNest& nest, uint32_t firstSlot, uint32_t levelCount) {
         for (uint32_t i = 0; i < levelCount; ++i) {
             FX_ASSERT(nest.blocks[firstSlot + i].kind == MR_BLOCK_SHADOW);
+            nest_fields::ReleaseBlockPages(nest, firstSlot + i);  // 影の欄の頁も返す(疎。T-0921)
             nest.blocks[firstSlot + i] = MrMakeUnusedBlock();
         }
     }
