@@ -14,6 +14,7 @@
 // 引数: [--edge n](既定 16)[--ticks n](既定 3)[--measure](GPU の時間を表に出す)[--breakdown](解きを固定費・V・止めた後の回に分ける)
 //       [--stages](場面ごとに 1 回、V 1 回の段ごとの時間。T-0587)[--global-tail](ImTail を前の形で。T-0587)
 // [--inner-tolerance mg][--inner-cycles n](内側の止め方を変えて比べる。ADR-0254)と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
+// T-0900(--t0900): 測り M-1。投影の 1 刻みの ns/セル・VRAM の差(作った前後)・V 2/4/8 回の費用を一辺 32・64・128 で(値は比べない)。
 // ctest は一辺 16・3 刻み(gpu_gas_projection)。計測は `job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32`。
 // 合わなければ失敗(どの場面・何回目の解き・何番のセルか)。
 #include <algorithm>
@@ -32,6 +33,7 @@
 #include "gpu/debug_ring.h"
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
+#include "gpu_test_memory.h"
 #include "gpu_test_options.h"
 #include "sim/gas_projection.h"
 #include "sim/gas_reference.h"
@@ -825,13 +827,15 @@ namespace {
         std::array<double, (size_t)sim::GpuGasProjectionPart::Count> parts{};
         double total = 0;
         double median = 0;
+        uint64_t vramBytes = 0;  // 投影を作った前後のプロセスの VRAM の差(T-0900。桁を知る値)
+        uint32_t levels = 0;     // 刻み 0 の段の数
     };
 
-    std::expected<FullTiming, std::string> MeasureFullScene(Replay& replay, Scene scene, uint32_t edge) {
+    std::expected<FullTiming, std::string> MeasureFullScene(Replay& replay, Scene scene, uint32_t edge,
+                                                            sim::GasProjectionOptions options = FullOptions()) {
         const sim::GasBox box = MakeScene(scene, edge);
         sim::GasBox copy = box;
         sim::GasProjection state;
-        sim::GasProjectionOptions options = FullOptions();
         std::optional<sim::ImplicitGrid> grid;
         const sim::GasPressureSolveObserver observer = [&grid](const sim::GasPressureSolve& solve) {
             grid = solve.grid;
@@ -841,7 +845,10 @@ namespace {
         if (!grid)
             return std::unexpected("CPU の模型が解かなかった");
 
+        const uint64_t vramBefore = test::LocalVideoMemoryUsage(replay.device);
         auto projection = sim::GpuGasProjection::Create(replay.device, box, *grid, FullGpuOptions(options));
+        const uint64_t vramAfter = test::LocalVideoMemoryUsage(replay.device);
+        const auto levels = (uint32_t)grid->levels.size();
         if (!projection || !projection->EnableTiming(replay.device))
             return std::unexpected(projection ? "タイムスタンプを作れない" : projection.error());
 
@@ -883,6 +890,8 @@ namespace {
             return std::unexpected("時間を読めない");
 
         FullTiming timing;
+        timing.vramBytes = test::VideoMemoryGrowth(vramBefore, vramAfter);
+        timing.levels = levels;
         std::vector<double> totals;
         const auto toMs = [&replay](uint64_t ticks) {
             return (double)ticks * 1000.0 / (double)replay.frequency;
@@ -941,6 +950,40 @@ namespace {
         return {};
     }
 
+    // --- T-0900(--t0900。測り M-1): 今の陰の圧力の 1 セルの費用(ms・VRAM)と、V の回数を増やした時の 1 回あたりの費用 ---
+    // 液体を同じ陰の圧力に入れた時の見込み(R1)は、費用の形が同じ(式・段・当てるはセルの値によらない)なので
+    // 「V 1 回あたりの費用 × 要る V の回数」で出す。要る V の回数は CPU の gas_projection_test --t0900 が測る
+    std::expected<void, std::string> RunCostStudy(Replay& replay, uint32_t edge) {
+        const double cells = (double)edge * edge * edge;
+        const auto ns = [cells](double ms) {
+            return ms * 1e6 / cells;
+        };
+        for (const uint32_t cycles : {2u, 4u, 8u}) {
+            for (const Scene scene : SCENES) {
+                if (cycles != 2 && scene != Scene::Door)
+                    continue;  // V の回数の比べは扉だけ(費用はセルの値によらない)
+
+                sim::GasProjectionOptions options = FullOptions();
+                options.solver.cycles = cycles;
+                const auto timing = MeasureFullScene(replay, scene, edge, options);
+                if (!timing)
+                    return std::unexpected(
+                        std::format("{}³ {} V {}: {}", edge, SceneName(scene), cycles, timing.error()));
+
+                Log(Channel::Sim, Level::Info,
+                    "| T-0900 費用 | {}³ | {} | V {} 回 | 段 {} | 通し {:.3f} ms(中央 {:.3f})| {:.2f} ns/セル | 式 "
+                    "{:.2f} | "
+                    "段の重み {:.2f} | V {:.2f} | 当てる {:.2f} | 運ぶ {:.2f} | VRAM の差 {:.1f} MiB = {:.0f} B/セル |",
+                    edge, SceneName(scene), cycles, timing->levels, timing->total, timing->median, ns(timing->total),
+                    ns(timing->parts[0]), ns(timing->parts[1]), ns(timing->parts[2]), ns(timing->parts[3]),
+                    ns(timing->parts[4]), (double)timing->vramBytes / (1024.0 * 1024.0),
+                    (double)timing->vramBytes / cells);
+            }
+        }
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         uint32_t edge = 16;
@@ -953,6 +996,7 @@ namespace {
         uint32_t innerCycles = 0;
         bool t0843 = false;
         bool t0845 = false;
+        bool t0900 = false;
         bool defaultShape = false;
         uint32_t checkEvery = 1;
         bool edgeGiven = false;
@@ -965,6 +1009,8 @@ namespace {
                 measure = t0843 = true;
             else if (argument == "--t0845")
                 t0845 = true;
+            else if (argument == "--t0900")
+                t0900 = true;
             else if (argument == "--default-shape")
                 defaultShape = true;
             else if (argument == "--check-every" && index + 1 < arguments.size())
@@ -988,11 +1034,11 @@ namespace {
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options || edge < 4 || (ticks == 0 && !t0845)) {
+        if (!options || edge < 4 || (ticks == 0 && !t0845 && !t0900)) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_gas_projection_test [--warp] [--queue direct|compute] [--no-gbv] [--edge N] [--ticks N] "
                 "[--measure] [--breakdown] [--stages] [--global-tail] [--inner-tolerance mg] [--inner-cycles n] "
-                "[--t0843] [--t0845 [--check-every n]]");
+                "[--t0843] [--t0845 [--check-every n]] [--t0900]");
             return 2;
         }
 
@@ -1026,9 +1072,13 @@ namespace {
         if ((t0843 || t0845) && !edgeGiven)
             edges = {32, 64};
 
+        if (t0900 && !edgeGiven)
+            edges = {32, 64, 128};
+
         for (const uint32_t each : edges) {
-            const auto ran = t0845 ? RunFull(replay, each, ticks, checkEvery, measure)
-                                   : RunAll(replay, each, ticks, measure);
+            const auto ran = t0900   ? RunCostStudy(replay, each)
+                             : t0845 ? RunFull(replay, each, ticks, checkEvery, measure)
+                                     : RunAll(replay, each, ticks, measure);
             if (!ran) {
                 Log(Channel::Gpu, Level::Error, "gpu_gas_projection_test: FAILED({})", ran.error());
                 return 1;
