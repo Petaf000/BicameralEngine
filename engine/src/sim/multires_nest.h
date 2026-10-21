@@ -66,13 +66,43 @@ namespace bicameral::sim {
         std::vector<uint64_t> amounts;
     };
 
+    inline constexpr uint32_t MULTIRES_NO_FIELD_PAGE = UINT32_MAX;
+
+    // 登録した欄 1 つの値の置き場(T-0921。20 §10.2・ADR-0403)。
+    // セル・面の欄: 一様の値 [枠 × 値の数] と、セルの頁と同じ番号の「欄の頁」[MR_BLOCK_CELLS × 値の数]。
+    //   密(sparse = false): 欄の頁はセルの頁の数だけ全部ある(欄の頁の番号 = セルの頁の番号)。
+    //   疎(sparse = true): 欄の頁は 0 でない値を持つ所にだけある。pageOf[セルの頁] が欄の頁の番号で、無ければ
+    //   MULTIRES_NO_FIELD_PAGE(全部 0 と読む)。頁は 0 でない値を最初に書く時に作り、眠る判定で全部 0 なら・セルの頁を返す時に返す。
+    //   どちらも読む値・ハッシュ・保存点・刻みの結果はビット単位で同じ(使っていないセルの頁の欄は 0。試験 multires_sparse)。
+    // ブロックの欄は uniform = [枠 × 値の数]、世界の欄は uniform = [値の数] だけ
+    struct MultiresFieldStore {
+        bool sparse = false;
+        uint32_t components = 0;          // 値の数(desc.components)
+        uint32_t cellPages = 0;           // セルの頁の数(観察の枠の頁 + 世界の頁。セル・面の欄だけ)
+        std::vector<int64_t> uniform;     // 一様の値(ブロック・世界の欄はここだけ)
+        std::vector<int64_t> pages;       // 欄の頁 [欄の頁 × MR_BLOCK_CELLS × 値の数]
+        std::vector<uint32_t> pageOf;     // 疎: セルの頁 → 欄の頁(MULTIRES_NO_FIELD_PAGE = 無い)
+        std::vector<uint32_t> freePages;  // 疎: 返された欄の頁(後ろから使う)
+    };
+
+    // セルの頁 page の欄の頁の値の先頭(MR_BLOCK_CELLS × 値の数。疎で無い頁は nullptr = 全部 0)
+    [[nodiscard]] inline const int64_t* FieldPageValues(const MultiresFieldStore& store, uint32_t page) {
+        const uint32_t fieldPage = store.sparse ? store.pageOf[page] : page;
+        if (fieldPage == MULTIRES_NO_FIELD_PAGE)
+            return nullptr;
+
+        return store.pages.data() + (size_t{fieldPage} * multires::MR_BLOCK_CELLS * store.components);
+    }
+
+    // 置き場の値を全部 0 に(疎なら欄の頁を全部返す。保存点に入らない欄を戻す時)
+    void ClearFieldStore(MultiresFieldStore& store);
+
     // 登録した欄 1 つ(T-0711。ADR-0329。sim/multires_fields.h の RegisterNestField で足す。登録の形は common/state_field.hlsli)。
-    // セル・面の欄の値の並びはセルと同じ [一様の値 × 枠][頁 × MR_BLOCK_CELLS] × 値の数(頁と同じ番号の「欄の頁」。設計 §3)。
-    // ブロックの欄は [枠] × 値の数、世界の欄は値の数だけ
+    // セル・面の欄の値は「一様の値 × 枠」と「欄の頁」(頁と同じ番号。設計 §3)に置く。疎か密かは MultiresNest::sparseFields(T-0921)
     struct MultiresField {
         std::string name;
         state_field::SfFieldDesc desc{};
-        std::vector<int64_t> values;  // 粗くした余りは世界の帳簿(MultiresNest::ledger)のこの欄の列へ(T-0762)
+        MultiresFieldStore store;  // 粗くした余りは世界の帳簿(MultiresNest::ledger)のこの欄の列へ(T-0762)
     };
 
     // 世界の端(T-0721・ADR-0337。shaders/common/world_edge.hlsli)。世界のデータ(環境の world_edges と基準の大気)で、状態に入らない。
@@ -110,7 +140,9 @@ namespace bicameral::sim {
         std::vector<uint64_t> ledger;         // 世界の帳簿 [WlLedgerWords(ledgerColumns)](world_ledger.hlsli。T-0712)
         std::array<uint32_t, multires::MR_COUNTER_COUNT> counters{};
 
-        // --- 登録した欄(T-0711。状態に入る。区画の一覧は sim/multires_state.h の VisitNestState)---
+        // --- 登録した欄(T-0711。状態に入る。区画の一覧は sim/multires_state.h の VisitNestState)。
+        //     sparseFields: 欄の頁を値のある所にだけ持つ(疎。T-0921・ADR-0403。仮の既定 = 疎)。欄を登録する前に決める ---
+        bool sparseFields = true;
         std::vector<MultiresField> fields;
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。

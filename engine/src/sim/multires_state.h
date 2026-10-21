@@ -22,7 +22,8 @@ namespace bicameral::sim {
         bool hashed = true;
     };
 
-    // nest(const でも可)の区画を順に visit(区画, 値の並び) で回る。値の並びは std::vector か std::array。
+    // nest(const でも可)の区画を順に visit(区画, 値の並び) で回る。値の並びは std::vector か std::array、登録した欄は
+    // MultiresFieldStore(疎なら頁の表ごと。T-0921)。
     // 状態に入らないもの: 1 刻みの要求・取り合いの印(刻みの境では空)・陰解法の費用と写し(計測用)
     template <typename Nest, typename Visit>
     void VisitNestState(Nest& nest, Visit&& visit) {
@@ -46,13 +47,14 @@ namespace bicameral::sim {
         visit(NestStateRegion{.name = "index", .hashed = false}, nest.index);
 
         // --- 登録した欄(登録の順。粗くした余りは上の世界の帳簿の欄の列に入っている。T-0762)。
-        //     導かれる値は状態に入らない(真実から解き直す。温めた始まりは D-549 の仮 (A) で入る。T-0854)---
+        //     導かれる値は状態に入らない(真実から解き直す。温めた始まりは D-549 の仮 (A) で入る。T-0854)。
+        //     値は置き場ごと(疎なら頁の表も)写し、要約は密の並び〔一様の値・セルの頁ごとの値。無い頁は 0〕で取る(T-0921)---
         for (auto& field : nest.fields) {
             if (!state_field::SfSaved(field.desc))
                 continue;
 
             visit(NestStateRegion{.name = "field:" + field.name, .hashed = state_field::SfHashed(field.desc)},
-                  field.values);
+                  field.store);
         }
     }
 
