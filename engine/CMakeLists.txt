@@ -149,6 +149,7 @@ add_library(bicameral_sim STATIC
   src/sim/multires_world_edges.cpp  # 世界の端を環境から作る・替える(外の柱は気体の層の基準 GasAtmosphereLayers と同じ。T-0772)
   src/sim/probe_surface.cpp  # 筆の面に沿って置く物の印(T-0332)
   src/sim/surface_detail.cpp  # 表面の細かい形の区画・差分の 2 つの候補(研究 R-T1・T-0879)
+  src/sim/face_opening.cpp  # セルの面の開き具合の欄(21 §2.7 の塞ぐ面。形から導く。T-0937)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
   src/sim/probe_sim_gas.cpp  # 仮の世界の GPU の刻みに気体の区画(T-0592)

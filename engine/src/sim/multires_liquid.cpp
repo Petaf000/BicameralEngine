@@ -12,6 +12,7 @@
 #include "common/rest_rounding.hlsli"
 #include "core/aliases.h"
 #include "sim/cell_view.h"
+#include "sim/face_opening.h"
 #include "sim/multires_fields.h"
 #include "sim/multires_nest_internal.h"
 #include "sim/transport_packet.h"
@@ -194,8 +195,10 @@ namespace bicameral::sim {
             std::array<std::vector<int64_t>, 3> carry;    // 面の持ち越す流れ(T-0778)
             std::vector<int64_t> potential;               // 位置のエネルギー(mJ)
             std::vector<int64_t> massBefore;              // 前の刻みの終わりの液体の質量(mg)
-            std::vector<LqCellView> outside;              // 外の柱の行の見立て(開いた世界の端の相手。T-0774)
-            std::vector<int64_t> outsidePressure;         // 外の柱の行の圧力(液体が無いので 0。式は内側と同じ)
+            // 面の塞ぐ割合(Q16。面の開き具合の欄〔sim/face_opening〕を登録した世界だけ。空 = 塞がない。T-0937)
+            std::array<std::vector<uint32_t>, 3> blocked;
+            std::vector<LqCellView> outside;       // 外の柱の行の見立て(開いた世界の端の相手。T-0774)
+            std::vector<int64_t> outsidePressure;  // 外の柱の行の圧力(液体が無いので 0。式は内側と同じ)
             // 刻みの初めの面の運動量(合わせ直しの後。静止の丸め・開いた端が読む)
             std::array<std::vector<int64_t>, 3> facesBefore;
 
@@ -229,17 +232,24 @@ namespace bicameral::sim {
                 return LiquidGrid::IsEdge(link) ? outsidePressure[LiquidGrid::EdgeRow(link)] : pressure[link];
             }
 
-            // セル cell の面 face の開き(Q16。0 = 閉じている〔wall の端・どちらかが固体で満ちている〕)
+            // セル cell の面 face の開き(Q16。0 = 閉じている〔wall の端・どちらかが固体で満ちている・形が面を塞いでいる〕)。
+            // 両側のセルの空きの小さい方と、面の開き具合の欄の 1 − 塞ぐ割合の小さい方(face_opening.hlsli の FoFaceOpen。T-0937)。
+            // 欄の持ち主は + 側の面なら自分・− 側の面なら − 側の隣(開いた世界の端の外は欄を持たないので塞がない)
             [[nodiscard]] uint32_t FaceOpenQ16(uint32_t cell, uint32_t face) const {
                 const uint32_t link = grid.Link(cell, face);
                 if (link == NO_CELL)
                     return 0;
 
                 const LqCellView& other = StateOf(link);
-                if (multires::TxFaceFieldIsOwn(face))
-                    return liquid::LqFaceOpen(states[cell].open, other.open);
+                const bool own = multires::TxFaceFieldIsOwn(face);
+                const uint32_t cellsOpen = own ? liquid::LqFaceOpen(states[cell].open, other.open)
+                                               : liquid::LqFaceOpen(other.open, states[cell].open);
+                const std::vector<uint32_t>& axisBlocked = blocked[face / 2];
+                const uint32_t owner = own ? cell : LiquidGrid::CellOf(link);
+                if (axisBlocked.empty() || owner == NO_CELL)
+                    return cellsOpen;
 
-                return liquid::LqFaceOpen(other.open, states[cell].open);
+                return face_opening::FoFaceOpen(cellsOpen, axisBlocked[owner]);
             }
 
             // 整数の釣り合いを見る面の片側(T-0781。sim/probe_liquid の BalanceSide と同じ)
@@ -280,6 +290,7 @@ namespace bicameral::sim {
             }
 
             void Read(const MultiresNest& nest, const MultiresLiquidFields& fields, MultiresLiquidStepReport& report);
+            void ReadBlocked(const MultiresNest& nest);
             void FollowMassChange(MultiresLiquidStepReport& report);
             void ComputePressure(MultiresLiquidStepReport& report);
             void ApplyForces(MultiresLiquidStepReport& report);
@@ -369,6 +380,25 @@ namespace bicameral::sim {
                     multires::MakeCellView(viewTable, cell, nest.capacity.rootLevel, 0));
                 outside.push_back(view);
                 outsidePressure.push_back(liquid::LqColumnPressure(view, 0, 0, view, params).pressure);
+            }
+        }
+
+        // 面の開き具合の欄(登録した世界だけ。名前で引く。T-0937)を刻みの初めに読む
+        void LiquidStep::ReadBlocked(const MultiresNest& nest) {
+            const uint32_t field = FindNestField(nest, FACE_BLOCKED_FIELD_NAME);
+            if (field == MULTIRES_NO_FIELD)
+                return;
+
+            const uint32_t count = grid.Count();
+            for (uint32_t axis = 0; axis < 3; ++axis)
+                blocked[axis].resize(count);
+
+            for (uint32_t order = 0; order < grid.slots.size(); ++order) {
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    const uint32_t cell = (order * MR_BLOCK_CELLS) + index;
+                    for (uint32_t axis = 0; axis < 3; ++axis)
+                        blocked[axis][cell] = LoadFaceBlockedQ16(nest, field, grid.slots[order], index, axis);
+                }
             }
         }
 
@@ -1002,6 +1032,7 @@ namespace bicameral::sim {
                         .grid = grid,
                         .restSpeed = m_options.restSpeedMicrometersPerSecond};
         step.Read(nest, m_fields, report);
+        step.ReadBlocked(nest);
         step.tick = tick;
         if (report.wetCells == 0 && step.AtRest()) {
             // 液体が無く、動いている面もエネルギーも無い(ブランクの世界・液体の無い表)。前の質量だけ 0 に

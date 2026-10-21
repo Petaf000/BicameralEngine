@@ -487,6 +487,80 @@ FX_FN SdColumnOpenness SdColumnOpennessAt(SD_SCENE FX_IN(SdConfig) config, uint3
     return SdFinishOpenness(sums);
 }
 
+// --- 開き具合: 1 辺を選べるセル 1 つ(T-0937。多重解像度のレベル k のセル = 0.5 m ÷ 2^k)---
+// SdColumnOpennessAt と同じ数え方(中 16 × 16 点・+ x と + z の面の上 16 点ずつ)を、角 (x0Um, bottomUm, z0Um)・1 辺 edgeUm のセルで。
+// 違いは面の上の点の高さ: 面の両側(面の 1 µm 手前と面の上)の高い方を取る(面は両側のどちらかの固い物が触れていれば塞がる。
+// SdColumnOpennessAt は + 側の柱だけを見る)。区画の端の面は、外の形を知らないので手前の側だけ(SdGroundHeightUm が端に寄せる)。
+// セルの面の開き具合の欄(common/face_opening.hlsli)を形から導く時に読む(CPU は sim/face_opening)。
+struct SdCellOpenness {
+    uint32_t fillQ16;     // 固い物の割合(地面の下の体積 ÷ セル)
+    uint32_t openXQ16;    // + x の面の開き(区画の端の面は手前の側の形だけで)
+    uint32_t openZQ16;    // + z の面
+    uint32_t openTopQ16;  // 上の面(地面がセルの上に届かない所の割合)
+};
+
+// 1 辺 edgeUm を SD_SAMPLE_SIDE 個に分けた k 番目の小さな区間の中心(セルの角から)
+FX_FN uint32_t SdSampleOffsetUm(uint32_t edgeUm, uint32_t k) {
+    return (uint32_t)(((uint64_t)((2 * k) + 1) * edgeUm) / (2 * SD_SAMPLE_SIDE));
+}
+
+// 面の上の点の地面の高さ(面の 1 µm 手前と面の上の高い方)
+FX_FN int64_t SdFaceSideMaxUm(SD_SCENE FX_IN(SdConfig) config, uint32_t mode, uint32_t xUm, uint32_t zUm,
+                              uint32_t axisZ) {
+    const int64_t onFace = SdGroundHeightUm(SD_PASS config, mode, xUm, zUm);
+    const int64_t before = axisZ == 0 ? SdGroundHeightUm(SD_PASS config, mode, xUm - 1, zUm)
+                                      : SdGroundHeightUm(SD_PASS config, mode, xUm, zUm - 1);
+
+    return onFace > before ? onFace : before;
+}
+
+// 地面が 1 辺 edgeUm のセルの中を埋める高さ(0〜edgeUm)
+FX_FN uint64_t SdFilledInUm(int64_t groundUm, int64_t bottomUm, uint32_t edgeUm) {
+    const int64_t filled = groundUm - bottomUm;
+    if (filled <= 0)
+        return 0;
+
+    return filled >= (int64_t)edgeUm ? (uint64_t)edgeUm : (uint64_t)filled;
+}
+
+// 面の上の SD_SAMPLE_SIDE 点の埋まりの和から、面の開き(Q16)
+FX_FN uint32_t SdCellFaceOpenQ16(uint64_t filledSumUm, uint32_t edgeUm) {
+    const uint64_t filledQ16 = (filledSumUm << 16) / ((uint64_t)SD_SAMPLE_SIDE * edgeUm);
+
+    return (uint32_t)((uint64_t)SD_ONE_Q16 - filledQ16);
+}
+
+FX_FN SdCellOpenness SdCellOpennessAt(SD_SCENE FX_IN(SdConfig) config, uint32_t mode, uint32_t x0Um, uint32_t z0Um,
+                                      int64_t bottomUm, uint32_t edgeUm) {
+    uint64_t fill = 0;
+    uint32_t openTop = 0;
+    for (uint32_t j = 0; j < SD_SAMPLE_SIDE; ++j) {
+        for (uint32_t i = 0; i < SD_SAMPLE_SIDE; ++i) {
+            const int64_t ground = SdGroundHeightUm(SD_PASS config, mode, x0Um + SdSampleOffsetUm(edgeUm, i),
+                                                    z0Um + SdSampleOffsetUm(edgeUm, j));
+            const uint64_t filled = SdFilledInUm(ground, bottomUm, edgeUm);
+            fill += filled;
+            openTop += filled < edgeUm ? 1u : 0u;
+        }
+    }
+
+    uint64_t faceX = 0;
+    uint64_t faceZ = 0;
+    for (uint32_t k = 0; k < SD_SAMPLE_SIDE; ++k) {
+        const uint32_t offset = SdSampleOffsetUm(edgeUm, k);
+        faceX += SdFilledInUm(SdFaceSideMaxUm(SD_PASS config, mode, x0Um + edgeUm, z0Um + offset, 0), bottomUm, edgeUm);
+        faceZ += SdFilledInUm(SdFaceSideMaxUm(SD_PASS config, mode, x0Um + offset, z0Um + edgeUm, 1), bottomUm, edgeUm);
+    }
+
+    SdCellOpenness result;
+    result.fillQ16 = (uint32_t)((fill << 16) / ((uint64_t)SD_INTERIOR_SAMPLES * edgeUm));
+    result.openXQ16 = SdCellFaceOpenQ16(faceX, edgeUm);
+    result.openZQ16 = SdCellFaceOpenQ16(faceZ, edgeUm);
+    result.openTopQ16 = (uint32_t)(((uint64_t)openTop << 16) / SD_INTERIOR_SAMPLES);
+
+    return result;
+}
+
 SD_NAMESPACE_END
 
 #endif  // BICAMERAL_SURFACE_DETAIL_HLSLI
