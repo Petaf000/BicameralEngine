@@ -222,6 +222,8 @@ namespace bicameral::sim {
         if (m_worldInstant)
             projection.pressure.soundSpeedMmPerS = 0;
 
+        ApplyBalanceCycles(table.environment, projection);  // 決まった回数の道だけ(T-0955)
+
         if (!m_worldInstant && m_options.pressure == ProbeGasPressure::Explicit)
             StepGas(step.box);
         else

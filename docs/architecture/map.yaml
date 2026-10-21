@@ -370,6 +370,9 @@ views:
       - { id: gpuequilibriumblock, group: simlib, label: "GpuEquilibriumBlock<br/>成分を持つ節の釣り合いの GPU 版(T-0970)<br/>8 色の Dispatch・Galerkin の粗い段を GPU で",
           code: "engine/src/sim/gpu_equilibrium_block.cpp::GpuEquilibriumBlock::RecordSolve", ticket: T-0970, doc: docs/decisions/ADR-0422-balance-family-vector-gpu.md,
           note: "式は shaders/common/equilibrium_block.hlsli で CPU の SolveEquilibriumBlocks と共有(1 つの源)。段は shaders/sim/equilibrium_block.hlsl(k = 1・2・3・6 ごとのシェーダー)。段の形は CPU から写し、粗い段の係数と LDLᵀ は GPU が作る。段 0 は今は写す(支えの段 0 を GPU で組むのは T-0981)。gpu_equilibrium_block_test が支えの 10 場面と k 成分の箱で毎刻みビット一致を確かめる" }
+      - { id: equilibriumfields, group: simlib, label: "StoreWarmStart / LoadWarmStart<br/>部品の温めた始まりを C-1 の欄に置く(T-0922)<br/>節 → ブロック → セルの欄",
+          code: "engine/src/sim/equilibrium_fields.cpp::StoreWarmStart", ticket: T-0922, doc: docs/decisions/ADR-0427-warm-start-on-field.md,
+          note: "EquilibriumOptions・EquilibriumBlockOptions・GasProjectionOptions・SupportOptions の warmStart に欄を渡すと、前の答えを欄から読み・解いた後に書く(SfMakeDerivedDesc(..., true, k))。ハッシュ・保存点に入るかは SF_WARM_START_IN_STATE(D-608 (A))。warm_start_save_test が気体と支えで保存点から続けてハッシュ一致・セーブの大きさと費用を測る" }
       - { id: supportlaw, group: simlib, label: "SupportLaw::Step<br/>支えの法則の試作(R-B1・T-0871)<br/>格子の梁・成分ごとに C-0 で解き結合は遅らせる",
           code: "engine/src/sim/support_law.cpp::SupportLaw::Step", ticket: T-0871, doc: docs/design/22-support-law.md,
           note: "縦の面・ν = 0・1 つの細かさ。節 = セル(横・上・回り φ)。既定は成分を持つ節で 1 つの系(SupportSolve::Coupled。T-0919)、成分の間の結合を右辺の項へ遅らせる形(Lagged)は比べ用に残す。階段の段に斜めの棒(ADR-0415・T-0944)。面の力と縁の力(FaceForces。表面の引きの応力 R-B2 へ)。support_law_test が梁の式・アーチ・洞窟の天井の連続体と比べ・帳簿・決定性・釣り合いに着く刻みを記録" }
@@ -673,6 +676,8 @@ views:
       - [equilibriumtest, equilibrium, "ビット一致"]
       - [supportlaw, equilibrium, "成分ごとに解く(使い手)"]
       - [supportlaw, equilibriumblock, "成分を持つ節で 1 つの系(既定。T-0919)"]
+      - [equilibrium, equilibriumfields, "温めた始まりを欄から読む・書く(T-0922)"]
+      - [equilibriumblock, equilibriumfields, "同(k 成分)"]
       - [timesteplabtest, timesteplab, "精度・細かさ・早送り"]
       - [gpugasprojection, gasprojection, "同じ解きをビット一致で"]
       - [gpugasprojection, gpuimplicit, "V サイクルの段を使い回す"]

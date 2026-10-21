@@ -12,6 +12,8 @@
 #include <map>
 #include <tuple>
 
+#include "sim/equilibrium_fields.h"
+
 using namespace bicameral::fx;
 using namespace bicameral::equilibrium_block;
 
@@ -391,7 +393,9 @@ namespace bicameral::sim {
         const uint32_t k = system.components;
         const size_t count = system.nodes.size();
         EquilibriumBlockResult result;
-        if (state.values.size() != count * k)
+        if (options.warmStart.nest != nullptr)
+            state.values = LoadWarmStart(options.warmStart, system.nodes, k);  // 前の答えは欄から(T-0922)
+        else if (state.values.size() != count * k)
             state.values.assign(count * k, 0);
 
         // --- 右辺 = 右辺の項 + 固定した面の block × value ---
@@ -411,6 +415,9 @@ namespace bicameral::sim {
 
         for (uint32_t cycle = 0; cycle < options.cycles; ++cycle)
             VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
+
+        if (options.warmStart.nest != nullptr)
+            (void)StoreWarmStart(options.warmStart, system.nodes, state.values, k);
 
         // --- 残差の計器 ---
         const EquilibriumBlockLevel& cells = grid.levels[0];

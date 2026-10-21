@@ -183,6 +183,31 @@ namespace bicameral::script {
                                                ENVIRONMENT_GAS_PRESSURE_SPEED_KEY));
         }
 
+        // environment.balance_cycles = { gas_pressure, liquid_pressure, support }(T-0955)。書かない法則は既定の 2
+        std::expected<sim::BalanceCycles, std::string> ReadBalanceCycles(const TableEntry& entry) {
+            const std::string path = std::format("{}.{}", ENVIRONMENT_CATEGORY, ENVIRONMENT_BALANCE_CYCLES_KEY);
+            static constexpr std::string_view FIELDS[] = {"gas_pressure", "liquid_pressure", "support"};
+            if (auto record = CheckRecord(entry.value, FIELDS, path); !record)
+                return std::unexpected(std::format("パッケージ {}: {}", entry.package, record.error()));
+
+            sim::BalanceCycles cycles;
+            uint32_t* const targets[] = {&cycles.gasPressure, &cycles.liquidPressure, &cycles.support};
+            for (size_t i = 0; i < std::size(FIELDS); ++i) {
+                const ScriptValue* value = entry.value.Find(FIELDS[i]);
+                if (value == nullptr)
+                    continue;
+
+                const auto count = ReadInteger(*value, std::format("{}.{}", path, FIELDS[i]), 1,
+                                               sim::BALANCE_CYCLES_MAX);
+                if (!count)
+                    return std::unexpected(std::format("パッケージ {}: {}", entry.package, count.error()));
+
+                *targets[i] = static_cast<uint32_t>(*count);
+            }
+
+            return cycles;
+        }
+
     }  // namespace
 
     std::expected<sim::WorldPhysics, std::string> ReadWorldEnvironment(const PackageSetResult& packages) {
@@ -226,6 +251,12 @@ namespace bicameral::script {
                     return std::unexpected(speed.error());
 
                 world.gasPressureSpeed = *speed;
+            } else if (key == ENVIRONMENT_BALANCE_CYCLES_KEY) {
+                const auto cycles = ReadBalanceCycles(entry);
+                if (!cycles)
+                    return std::unexpected(cycles.error());
+
+                world.balanceCycles = *cycles;
             } else if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY || key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY ||
                        key == ENVIRONMENT_ATMOSPHERE_PROFILE_KEY) {
                 continue;  // 基準の大気の値(ReadWorldAtmosphere が読む)

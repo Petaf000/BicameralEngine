@@ -19,6 +19,7 @@
 #include "script/luau_sandbox.h"
 #include "script/reaction_hot_reload.h"
 #include "script/reaction_table_loader.h"
+#include "sim/gas_projection.h"
 #include "standard_world_physics.h"
 
 namespace {
@@ -179,6 +180,47 @@ namespace {
         ExpectRejected("return { environment = { world_edges = \"open\" } }", "world_edges");
     }
 
+    // 釣り合う家族の V の回数(T-0955): 書かない世界・書かない法則は 2。1〜16 の整数。外・知らない法則・小数は名前付きで誤り。
+    // 決まった回数の道の陰の圧力の solver.cycles へ入る(許容差で止める道は変えない)
+    void TestBalanceCycles() {
+        const auto blank = ReadEnvironmentInit("return { elements = {} }");
+        EXPECT(blank && blank->balanceCycles == sim::BalanceCycles{});
+        EXPECT(blank && blank->balanceCycles.gasPressure == 2 && blank->balanceCycles.support == 2);
+
+        const auto water = ReadEnvironmentInit("return { environment = { balance_cycles = { liquid_pressure = 4 } } }");
+        EXPECT(water && water->balanceCycles.liquidPressure == 4 && water->balanceCycles.gasPressure == 2 &&
+               water->balanceCycles.support == 2);
+
+        const auto all = ReadEnvironmentInit(
+            "return { environment = { balance_cycles = { gas_pressure = 1, liquid_pressure = 16, support = 3 } } }");
+        EXPECT(all && all->balanceCycles.gasPressure == 1 && all->balanceCycles.liquidPressure == 16 &&
+               all->balanceCycles.support == 3);
+
+        ExpectRejected("return { environment = { balance_cycles = { gas_pressure = 17 } } }", "範囲");
+        ExpectRejected("return { environment = { balance_cycles = { gas_pressure = 0 } } }", "範囲");
+        ExpectRejected("return { environment = { balance_cycles = { support = 2.5 } } }", "整数");
+        ExpectRejected("return { environment = { balance_cycles = { water = 4 } } }", "balance_cycles");
+        ExpectRejected("return { environment = { balance_cycles = 4 } }", "balance_cycles");
+
+        if (all) {
+            sim::GasProjectionOptions fixed;
+            fixed.fixedCycles = true;
+            sim::ApplyBalanceCycles(*all, fixed);
+            EXPECT(fixed.solver.cycles == 1);
+
+            sim::GasProjectionOptions tolerance;  // 許容差で止める道(上限 8)は変えない
+            sim::ApplyBalanceCycles(*all, tolerance);
+            EXPECT(tolerance.solver.cycles == 8);
+        }
+
+        sim::WorldPhysics tooMany;
+        tooMany.balanceCycles.support = sim::BALANCE_CYCLES_MAX + 1;
+        const auto checked = sim::CheckWorldPhysics(tooMany);
+        EXPECT(!checked);
+        if (!checked)
+            EXPECT(Contains(checked.error(), "V の回数"));
+    }
+
     // 気体の圧力の伝わる速さ(T-0804・D-526 ②): 書かない世界は本物の音速(D-519)・"sound" / "instant"・ほかの文字や数は名前付きで誤り。
     // 最速がまだ効かない置き場の知らせは最速の世界だけ
     void TestGasPressureSpeed() {
@@ -298,6 +340,7 @@ int main() {
     TestRejectsBrokenEnvironment();
     TestWorldEdges();
     TestGasPressureSpeed();
+    TestBalanceCycles();
     TestWorldNotices();
     TestBakedTableCarriesEnvironment();
     TestHotReloadChecksEnvironment();

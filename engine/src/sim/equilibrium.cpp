@@ -14,6 +14,7 @@
 
 #include "common/equilibrium.hlsli"
 #include "common/implicit_conduction.hlsli"
+#include "sim/equilibrium_fields.h"
 
 using namespace bicameral::fx;
 using namespace bicameral::multires;
@@ -301,6 +302,10 @@ namespace bicameral::sim {
         // --- 1・2. 対角・源の項・種・未知数 ---
         std::vector<FxU128> diagonals = Diagonals(system);
         std::vector<int64_t> sourceRhs = SourceRhs(system, diagonals);
+        const EquilibriumWarmStart& warm = options.warmStart;
+        if (warm.nest != nullptr)
+            state.values = LoadWarmStart(warm, system.nodes, 1);  // 前の答えは欄から(T-0922)
+
         const std::vector<uint8_t> seeds = Seeds(state, sourceRhs, diagonals, options);
         if (state.values.size() != count)
             state.values.assign(count, 0);
@@ -333,6 +338,9 @@ namespace bicameral::sim {
             for (size_t k = 0; k < unknowns.size(); ++k)
                 state.values[unknowns[k]] = solution[k];
         }
+
+        if (warm.nest != nullptr)
+            (void)StoreWarmStart(warm, system.nodes, state.values, 1);
 
         // --- 5. 面の値と、次の刻みの種のための控え ---
         if (options.faceValues)

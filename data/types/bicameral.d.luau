@@ -154,6 +154,15 @@ export type Environment = {
     -- 最速は爆風の先端が見えず、結果がその刻みに出る。小さい空き(1/2 未満)のセルだけでつながった気体はベイクと実行時に警告する。
     -- 今効くのは仮の世界の CPU だけ(多重解像度・GPU の気体は本物の音速のまま流し、「まだ効かない」と知らせる)
     gas_pressure_speed: string?,
+    -- 釣り合う家族の V サイクルの回数(T-0955。名前は仮)。法則ごとに 1〜16 の整数。書かない法則は 2。
+    -- 回数は 1 刻みの費用に比例し、解けきらない所が釣り合いに着くまでの刻みを減らす(水と空気の境で 2 は 69 Pa・4 は 2.7 Pa のずれ)
+    balance_cycles: BalanceCycles?,
+}
+
+export type BalanceCycles = {
+    gas_pressure: number?, -- 気体の陰の圧力
+    liquid_pressure: number?, -- 液体の陰の圧力
+    support: number?, -- 支えの法則(固い物のたわみ)
 }
 
 -- 世界の端の面: "open"(外は基準の大気。流れが出入りする)か "wall"(閉じた壁。既定)

@@ -20,6 +20,17 @@
 
 namespace bicameral::sim {
 
+    struct MultiresNest;
+
+    // 温めた始まりを置く欄(T-0922・ADR-0427。C-1 の温めた始まりの印 SF_FLAG_WARM_START の欄。sim/equilibrium_fields.h)。
+    // nest が null でなければ、解く前に前の答えを欄の値 component〜(値の数ぶん)から読み、解いた後に書く(法則の控え state.values は写し)。
+    // 欄に置くと、ハッシュと保存点に入るか(D-608 (A)・SF_WARM_START_IN_STATE)・眠る時の平均が印から決まる。null は前のまま(控えだけ)
+    struct EquilibriumWarmStart {
+        MultiresNest* nest = nullptr;
+        uint32_t field = UINT32_MAX;
+        uint32_t component = 0;  // 欄の中の最初の値(成分ごとに解く法則が 1 つの欄を分けて使う)
+    };
+
     // 節(法則の未知数 1 つ。木のセル 1 つ。物の箱でも同じ)
     struct EquilibriumNode {
         int32_t level = 0;  // 木のレベル(0 = 0.5 m・細かいほど大きい。0 以上)
@@ -78,6 +89,10 @@ namespace bicameral::sim {
         bool meterResiduals = false;  // 節ごとの残差(式の単位)を結果に入れる(残差の計器。法則がブロックにまとめる)
         // 面の値を出す(法則が面の値を自分の当てる段で作る間は切ってよい。陰の圧力は FinishGasPressure が同じ K (x_左 − x_右) を作る)
         bool faceValues = true;
+
+        // 温めた始まりを欄に置く(T-0922。既定は置かない)。閉じた領域(closeLengthMm・residualSeed)の種の控え
+        // (EquilibriumState の sourceRhs・diagonals・residuals)は欄に入らない: 保存点から続けると最初の刻みは全部が種になる(T-0993)
+        EquilibriumWarmStart warmStart;
     };
 
     // 温めた始まり(節の順。法則は刻みをまたいで節の順を保つ。数が変わったら全部が種・値 0 から)

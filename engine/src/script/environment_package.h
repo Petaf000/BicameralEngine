@@ -46,6 +46,8 @@ namespace bicameral::script {
         ENVIRONMENT_WORLD_EDGES_KEY = "world_edges";  // { top, bottom, sides } = "open" か "wall"(T-0710)
     // 気体の圧力の伝わる速さ = "sound"(本物の音速。既定)か "instant"(最速。T-0804・D-526 ②。名前は仮 = Q131)
     constexpr std::string_view ENVIRONMENT_GAS_PRESSURE_SPEED_KEY = "gas_pressure_speed";
+    // 釣り合う家族の V の回数 = { gas_pressure, liquid_pressure, support }(1〜16。書かない法則は 2。T-0955。名前は仮)
+    constexpr std::string_view ENVIRONMENT_BALANCE_CYCLES_KEY = "balance_cycles";
     constexpr std::string_view ATMOSPHERE_CATEGORY = "atmosphere";
 
     // 合わせた表から世界の物理の値を作る。分類が無ければブランク(全部 0)。誤りは「パッケージ X: environment.鍵: 何が違うか」。

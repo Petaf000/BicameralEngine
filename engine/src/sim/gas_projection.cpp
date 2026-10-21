@@ -241,7 +241,8 @@ namespace bicameral::sim {
             EquilibriumOptions solve = {.solver = options.solver,
                                         .galerkinCoarse = options.galerkinCoarse,
                                         .closeLengthMm = options.closeLengthMm,
-                                        .faceValues = false};
+                                        .faceValues = false,
+                                        .warmStart = options.warmStart};
             if (state.equilibrium.values.empty() && state.pressures.size() == box.cells.size())
                 state.equilibrium.values = state.pressures;
 

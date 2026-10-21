@@ -565,13 +565,16 @@ namespace {
     }
 
     // CPU の模型は釣り合う家族の部品の上の道(T-0853。前の道とビット一致は equilibrium_test)。GPU も部品の上(T-0915)
+    // V の回数は世界のデータ(環境の balance_cycles.gas_pressure)から入れる口を通す(T-0955。CPU と GPU が同じ値を読む)
     sim::GasProjectionOptions FullOptions(uint32_t cycles = 2) {
         sim::GasProjectionOptions options;
         options.pressure.soundSpeedMmPerS = REAL_SOUND;
         options.fixedCycles = true;
-        options.solver.cycles = cycles;
         options.outerIterations = 1;
         options.equilibrium = true;
+        sim::WorldPhysics world;
+        world.balanceCycles.gasPressure = cycles;
+        sim::ApplyBalanceCycles(world, options);
 
         return options;
     }

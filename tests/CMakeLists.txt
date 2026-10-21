@@ -296,6 +296,12 @@ target_link_libraries(equilibrium_test PRIVATE bicameral_gas_projection bicamera
 add_test(NAME equilibrium COMMAND equilibrium_test)
 set_tests_properties(equilibrium PROPERTIES TIMEOUT 3000)
 
+# 部品の温めた始まりを C-1 の欄に置く: 保存点から続けてハッシュ一致・セーブの大きさと費用(T-0922・ADR-0427。CPU だけ)
+add_executable(warm_start_save_test warm_start_save_test.cpp)
+target_link_libraries(warm_start_save_test PRIVATE bicameral_gas_projection bicameral_core)
+add_test(NAME warm_start_save COMMAND warm_start_save_test)
+set_tests_properties(warm_start_save PROPERTIES TIMEOUT 1800)
+
 # 支えの法則の試作(研究 R-B1・T-0871。C-0 の使い手。CPU だけ)
 add_executable(support_law_test support_law_test.cpp)
 target_link_libraries(support_law_test PRIVATE bicameral_multires bicameral_core)

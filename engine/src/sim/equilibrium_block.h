@@ -76,6 +76,8 @@ namespace bicameral::sim {
         uint32_t preSmooth = 2;       // 下る前の掃き出し(8 色で 1 回)
         uint32_t postSmooth = 2;      // 上った後の掃き出し
         uint32_t coarsestSweeps = 8;  // 最も粗い段の掃き出し
+        // 温めた始まりを欄に置く(T-0922。欄の値の数 ≥ component + k)。既定は置かない(state.values だけ)
+        EquilibriumWarmStart warmStart;
     };
 
     // 節の対角のブロックの LDLᵀ(L の対角は 1。pivots ≤ 0 の成分は解かない = 支えの無い向き。lower は Q30)

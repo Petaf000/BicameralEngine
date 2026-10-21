@@ -58,6 +58,22 @@ namespace bicameral::sim {
     // 最速を選んだのに効かない置き場の知らせの頭(試験が使う)
     inline constexpr std::string_view GAS_INSTANT_NOT_YET_PREFIX = "最速はまだ効かない: ";
 
+    // --- 釣り合う家族の V サイクルの回数(T-0955・ADR-0427。20 §9.2: 法則ごとの定数・判定で早く止めない)---
+    // 環境の balance_cycles = { gas_pressure, liquid_pressure, support }(名前は仮)。書かない法則は既定の 2(T-0845・T-0919 の今の値)。
+    // 回数は 1 刻みの費用に比例し、解けきらない所が釣り合いに着くまでの刻みを減らす(M-1: 水と空気の境で V 2 は 69 Pa・V 4 は 2.7 Pa)
+    inline constexpr uint32_t BALANCE_CYCLES_DEFAULT = 2;
+    inline constexpr uint32_t BALANCE_CYCLES_MAX = 16;  // 上限(書き間違いの知らせ。20 §1.4)。費用は回数に比例
+
+    struct BalanceCycles {
+        uint32_t gasPressure = BALANCE_CYCLES_DEFAULT;  // 気体の陰の圧力(GasProjectionOptions::solver.cycles)
+        uint32_t
+            liquidPressure = BALANCE_CYCLES_DEFAULT;  // 液体の陰の圧力(案 B の R1。読む所は C-0 の部品へ移る時。T-0868)
+        uint32_t
+            support = BALANCE_CYCLES_DEFAULT;  // 支えの法則(SupportOptions の blocks.cycles・equilibrium.solver.cycles)
+
+        [[nodiscard]] bool operator==(const BalanceCycles&) const = default;
+    };
+
     // --- 世界の物理の値 ---
     struct WorldPhysics {
         // 重力の強さ(µm/s²。0 = 無重力。上限 fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)。ブランクの世界は 0(D-480)
@@ -80,6 +96,9 @@ namespace bicameral::sim {
         // 気体の圧力の伝わる速さ(T-0804・D-526 ②)。Instant は仮の世界の CPU の気体(ProbeGasField)を最速の投影で解き、
         // 小さい空きの層を警告する(ベイク・実行時。D-526 ①)。多重解像度と GPU の気体は陽解法だけなので本物の音速のまま流し、知らせる
         GasPressureSpeed gasPressureSpeed = GasPressureSpeed::Sound;
+
+        // 釣り合う家族の V の回数(T-0955。既定は全部 2 = 今まで通り)
+        BalanceCycles balanceCycles;
 
         [[nodiscard]] bool operator==(const WorldPhysics&) const = default;
     };
@@ -119,6 +138,14 @@ namespace bicameral::sim {
             return std::unexpected(std::format("音速の基準 {} mm/s は気体の小刻み {}{} の安定の上限 {} mm/s を超える",
                                                world.soundSpeedMillimetersPerSecond, gasSubsteps, tree,
                                                soundSpeedLimit));
+        }
+
+        const BalanceCycles& cycles = world.balanceCycles;
+        for (const uint32_t count : {cycles.gasPressure, cycles.liquidPressure, cycles.support}) {
+            if (count == 0 || count > BALANCE_CYCLES_MAX) {
+                return std::unexpected(std::format("釣り合う家族の V の回数 {} は 1〜{} で書く(費用は回数に比例)",
+                                                   count, BALANCE_CYCLES_MAX));
+            }
         }
 
         if (world.gasEddyViscosityMm2PerS > gas::GF_VISCOSITY_LIMIT_MM2_PER_S) {

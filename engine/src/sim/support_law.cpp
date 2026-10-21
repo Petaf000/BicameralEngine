@@ -16,6 +16,7 @@
 
 #include "common/equilibrium.hlsli"
 #include "common/implicit_conduction.hlsli"
+#include "sim/equilibrium_fields.h"
 
 using namespace bicameral::fx;
 using namespace bicameral::multires;
@@ -100,6 +101,7 @@ namespace bicameral::sim {
     SupportLaw::SupportLaw(const SupportScene& scene, const SupportOptions& options)
         : m_scene(scene), m_options(options) {
         m_options.equilibrium.faceValues = false;
+        m_options.blocks.warmStart = m_options.warmStart;
         Build();
         if (Coupled())
             BuildBlocks();
@@ -356,6 +358,16 @@ namespace bicameral::sim {
             return;
         }
 
+        // 欄に置いた時は、成分の間の結合が読む今の値も欄から(保存点から続けた最初の刻みも同じ値。T-0922)
+        const EquilibriumWarmStart& warm = m_options.warmStart;
+        if (warm.nest != nullptr) {
+            for (uint32_t c = 0; c < ComponentCount(); ++c) {
+                const EquilibriumWarmStart part = {
+                    .nest = warm.nest, .field = warm.field, .component = warm.component + c};
+                m_states[c].values = LoadWarmStart(part, m_systems[c].nodes, 1);
+            }
+        }
+
         m_lastNodeUpdates = 0;
         for (uint32_t c = 0; c < ComponentCount(); ++c) {
             EquilibriumSystem& system = m_systems[c];
@@ -377,7 +389,11 @@ namespace bicameral::sim {
                     {.node = lag.row, .value = lag.negative ? value : -value, .factor = ImWide(lag.magnitude)});
             }
 
-            m_lastNodeUpdates += SolveEquilibrium(system, m_options.equilibrium, m_states[c]).cost.cellUpdates;
+            EquilibriumOptions solve = m_options.equilibrium;
+            if (warm.nest != nullptr)
+                solve.warmStart = {.nest = warm.nest, .field = warm.field, .component = warm.component + c};
+
+            m_lastNodeUpdates += SolveEquilibrium(system, solve, m_states[c]).cost.cellUpdates;
         }
     }
 
