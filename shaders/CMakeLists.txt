@@ -243,5 +243,9 @@ foreach(_entry IN ITEMS GasTreeDerive GasTreeFaceForce GasTreeApplyForce GasTree
   bicameral_add_shader(sim/gas_tree_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
 endforeach()
 
+# 表面の細かい形の整数の関数(研究 R-T1・T-0879。23 §7): 当たりと開き具合
+bicameral_add_shader(sim/surface_detail.hlsl PROFILE cs_6_8 ENTRY Contacts NAME surface_detail_contacts)
+bicameral_add_shader(sim/surface_detail.hlsl PROFILE cs_6_8 ENTRY Openness NAME surface_detail_openness)
+
 get_property(BICAMERAL_SHADER_OUTPUTS GLOBAL PROPERTY BICAMERAL_SHADER_OUTPUTS)
 add_custom_target(bicameral_shaders ALL DEPENDS ${BICAMERAL_SHADER_OUTPUTS} ${BICAMERAL_FLOAT_SOURCE_STAMP})
