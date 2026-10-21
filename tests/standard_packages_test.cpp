@@ -154,10 +154,9 @@ namespace {
 
             EXPECT(loaded->rejected.empty());
             // 坂の警告(T-0492)は除く: 標準の real_reactions の boudouard は一方向で 949 K 以下で坂を上る(D-487 ②。警告して動かす)。
-            // 光の値の書き忘れ(T-0942)も除く: real_matter の凝縮相は光の値を書いていない(灰色で通さないとして動く。D-610。値はサンプルの中身)
+            // 光の値の書き忘れ(T-0942)は除かない: real_matter の凝縮相は光の値を書いてある(現実の値。real_matter の出典)
             EXPECT(std::ranges::none_of(loaded->table.warnings, [](const std::string& warning) {
-                return !warning.starts_with(sim::SLOPE_WARNING_PREFIX) &&
-                       !warning.starts_with(sim::LIGHT_WARNING_PREFIX);
+                return !warning.starts_with(sim::SLOPE_WARNING_PREFIX);
             }));
             EXPECT(loaded->loadOrder.size() == mix->size());
         }
@@ -313,6 +312,9 @@ namespace {
         EXPECT(rng::none_of(scene->table.warnings, [](const std::string& warning) {
             return warning.find("は読まない(D-510") != std::string::npos;
         }));
+        // 光の値の書き忘れ(T-0942)は出ない: 場面の砂(silica)も real_matter の凝縮相も現実の値を書いてある(2026-10-22)
+        EXPECT(rng::none_of(scene->table.warnings,
+                            [](const std::string& warning) { return warning.starts_with(sim::LIGHT_WARNING_PREFIX); }));
 
         // サンプルの世界も同じ印でゲーム本体
         const auto sample = LoadReactionTable(

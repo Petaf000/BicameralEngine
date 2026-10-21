@@ -116,7 +116,7 @@ namespace {
             table.warnings, [](const std::string& warning) { return warning.starts_with(SLOPE_WARNING_PREFIX); }));
     }
 
-    // 光の値の書き忘れの警告(T-0942。頭が LIGHT_WARNING_PREFIX)。標準パッケージの凝縮相は光の値を書いていないので出る
+    // 光の値の書き忘れの警告(T-0942。頭が LIGHT_WARNING_PREFIX)。標準パッケージの凝縮相は光の値を書いてある(出ない)
     size_t LightWarningCount(const BakedReactionTable& table) {
         return static_cast<size_t>(std::ranges::count_if(
             table.warnings, [](const std::string& warning) { return warning.starts_with(LIGHT_WARNING_PREFIX); }));
@@ -128,11 +128,11 @@ namespace {
         });
     }
 
-    // 坂と光の書き忘れ以外の警告(文献の反応熱との食い違い・密度の書き忘れなど)
+    // 坂以外の警告(文献の反応熱との食い違い・密度や光の値の書き忘れなど)
     std::vector<std::string> OtherWarnings(const BakedReactionTable& table) {
         std::vector<std::string> others;
         for (const std::string& warning : table.warnings) {
-            if (!warning.starts_with(SLOPE_WARNING_PREFIX) && !warning.starts_with(LIGHT_WARNING_PREFIX))
+            if (!warning.starts_with(SLOPE_WARNING_PREFIX))
                 others.push_back(warning);
         }
 
@@ -355,13 +355,20 @@ namespace {
     }
 
     // 光の値の書き忘れはベイクが警告する(表は当たる。T-0942・D-610・ADR-0395): 固体・液体で 1 つも書かない・片方の帯だけ書いた。
-    // 気体は書かなくても透明が自然なので知らせない。標準パッケージの凝縮相(炭・セルロース・液体の水・氷)は光の値を書いていないので出る
+    // 気体は書かなくても透明が自然なので知らせない。標準パッケージの凝縮相(炭・セルロース・液体の水・氷)は光の値を書いてある(出ない)
     void TestMissingLightWarning() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
-        const auto condensed = static_cast<size_t>(std::ranges::count_if(
-            definition.species, [](const SpeciesDefinition& species) { return species.phase != SpeciesPhase::Gas; }));
+        const auto standard = BakeReactionTable(definition);
+        EXPECT(standard && LightWarningCount(*standard) == 0);
+
+        // セルロースの光の値を全部消す: 1 行(灰色で通さないとして動かす)
+        const auto cellulose = std::ranges::find(definition.species, "cellulose", &SpeciesDefinition::name);
+        cellulose->lightAbsorptionShort.reset();
+        cellulose->lightAbsorptionLong.reset();
+        cellulose->lightReflectanceShortPermille.reset();
+        cellulose->lightReflectanceLongPermille.reset();
         const auto unwritten = BakeReactionTable(definition);
-        EXPECT(condensed > 0 && unwritten && LightWarningCount(*unwritten) == condensed);
+        EXPECT(unwritten && LightWarningCount(*unwritten) == 1);
         EXPECT(unwritten && HasLightWarning(*unwritten, "物質 cellulose: 固体") &&
                HasLightWarning(*unwritten, "灰色で光を通さない") && !HasLightWarning(*unwritten, "oxygen") &&
                !HasLightWarning(*unwritten, "mana_test"));
@@ -369,17 +376,16 @@ namespace {
             PrintWarnings(*unwritten);
 
         // 両方の帯を書けば知らせない(照り返しは書かなくてよい: 吸い込みだけで光の値を書いた物質)
-        const auto cellulose = std::ranges::find(definition.species, "cellulose", &SpeciesDefinition::name);
         cellulose->lightAbsorptionShort = 50000;
         cellulose->lightAbsorptionLong = 80000;
         const auto written = BakeReactionTable(definition);
-        EXPECT(written && LightWarningCount(*written) == condensed - 1 && !HasLightWarning(*written, "cellulose"));
+        EXPECT(written && LightWarningCount(*written) == 0 && !HasLightWarning(*written, "cellulose"));
 
         // 片方の帯だけ: その欄の名前で 1 つ(もう片方も同じ値として動かす)
         cellulose->lightAbsorptionLong.reset();
         cellulose->lightReflectanceLongPermille = 300;
         const auto alone = BakeReactionTable(definition);
-        EXPECT(alone && LightWarningCount(*alone) == condensed + 1 &&
+        EXPECT(alone && LightWarningCount(*alone) == 2 &&
                HasLightWarning(*alone, "cellulose: light_absorption_short_mm2_per_mol を片方の帯だけ") &&
                HasLightWarning(*alone, "cellulose: light_reflectance_long_permille を片方の帯だけ"));
 
@@ -388,14 +394,15 @@ namespace {
         cellulose->lightReflectanceLongPermille.reset();
         cellulose->radiationAbsorption = 900;
         const auto legacy = BakeReactionTable(definition);
-        EXPECT(legacy && HasLightWarning(*legacy, "radiation_absorption_mm2_per_mol = 900"));
+        EXPECT(legacy && LightWarningCount(*legacy) == 1 &&
+               HasLightWarning(*legacy, "radiation_absorption_mm2_per_mol = 900"));
 
         // 気体: 1 つも書かないのは知らせない(透明)が、片方の帯だけ書いたら知らせる(もう片方も同じ値になるので)
         const auto oxygen = std::ranges::find(definition.species, "oxygen", &SpeciesDefinition::name);
         oxygen->lightAbsorptionLong = 1;
         const auto gas = BakeReactionTable(definition);
         EXPECT(gas && HasLightWarning(*gas, "oxygen: light_absorption_long_mm2_per_mol を片方の帯だけ") &&
-               LightWarningCount(*gas) == condensed + 1);
+               LightWarningCount(*gas) == 2);
     }
 
     // --- 10 進の数 ---

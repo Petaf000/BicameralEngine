@@ -25,6 +25,14 @@ local species: { [string]: Species } = {
         -- 乾いた砂の吸い上げ 5000 Pa(毛管の上がり 0.5 m ほどに当たる)。どちらも目安で未確認
         permeability_um2 = 10,
         suction_pa = 5000,
+        -- 光の値(ADR-0395。決め方の式は real_matter の出典): 砂の層として決めた。石英の結晶は見える光を通すが、粒の砂は散らして数 mm で止める
+        -- (乾いた砂に入る見える光の深さ 1 mm ほど → 散らしも吸い込みに入れて µ ≈ 1e3 /m)。土のセルの砂の濃さ 44071 × 0.566 ≈ 24944 mol/m³ で割って a 4e4。
+        -- 照り返し 35 %(乾いた砂の見える光のアルベド 30〜40 %)。赤外は石英の 8〜10 µm の強い帯で吸い(µ ≈ 1e5 /m)→ a 4e6、
+        -- 照り返し 8 %(砂の 8〜14 µm の放射率 0.92 ほど。石英の結晶の残留線の帯は強く返すが、粒の面では放射率が高い)。どれも目安で未確認
+        light_absorption_short_mm2_per_mol = 40000,
+        light_absorption_long_mm2_per_mol = 4000000,
+        light_reflectance_short_permille = 350,
+        light_reflectance_long_permille = 80,
     },
 }
 

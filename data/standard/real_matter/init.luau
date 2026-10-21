@@ -32,6 +32,23 @@
 --       エンジンは比熱を一定と置くので、273.15 K で融解熱 6.010 kJ/mol・ΔS 22.00 になるように 298.15 K の値へ戻して書く
 --       (生成エンタルピー = −285.830 − 6.010 − (75.33 − 38.09) × 25.00 / 1000 = −292.771 kJ/mol、
 --        S° = 69.95 − 22.00 − 37.24 × ln(298.15 / 273.15) = 44.686 J/(mol·K)。273.15 K の S は 41.4 で、文献の 41.0 と合う)。
+--   光の値(凝縮相の 4 つ。2 つの帯〔短い = 見える光と紫外・長い = 赤外。境は約 0.7 µm〕。ADR-0395・T-0942 の後の本体 2026-10-22):
+--     吸い込み a(mm²/mol)= 物の吸収係数 µ(1/m)÷ モル濃度 c(mol/m³)× 10^6。厚さ L の層は e^−µL を通す(セルの式 1 − e^−Σa·n/面 と同じ)。
+--     照り返しは「当たった光のうち吸わずに返す割合」(千分率)。長い帯は熱の赤外(8〜14 µm)の値で決めた(太陽の近赤外 0.7〜2.5 µm では
+--     水も氷もずっと通し、木は半分ほど返す。帯を 2 つにまとめた丸め。未確認)。どの値も教科書の目安から決めた丸めで、表と一つずつは照合していない(未確認)。
+--     炭(黒鉛。c = 2260 ÷ 0.012011 = 188160 mol/m³): 見える光で n 2.7・k 1.4(550 nm)→ µ = 4πk/λ ≈ 3.2e7 /m → a 1.7e8。
+--       赤外(10 µm)で k ≈ 6 → µ ≈ 7.5e6 /m → a 4.0e7。どちらも 1 µm も入らず真っ黒。照り返しは木炭・煤の 5 %(放射率 0.95 ほど)。
+--       磨いた黒鉛の結晶は見える光を 25〜30 % 返すが、炭は孔の多い面として煤の値にした。
+--     セルロース(c = 1500 ÷ 0.16214 = 9251 mol/m³): 乾いた木は見える光を 0.3 mm ほどで止め(µ ≈ 3e3 /m。散らしも吸い込みに入れた目安)→ a 3.2e5、
+--       照り返し 40 %(乾いた木・わら 30〜50 %。純粋なセルロース〔紙・綿〕は白く 80 % ほど)。赤外は C−O の吸収帯で強く吸う(µ ≈ 1e5 /m)→ a 1.1e7、
+--       照り返し 10 %(木の放射率 0.9 ほど)。
+--     液体の水(c = 1000 ÷ 0.018015 = 55508 mol/m³): 見える光の吸収係数は 400 nm 0.007・500 nm 0.03・600 nm 0.22・700 nm 0.65 /m
+--       (Pope & Fry 1997 の純水の値の目安)。太陽の光で重みを付けた平均を µ ≈ 0.15 /m と置いた → a 3(1 m で 85 % を通す)。
+--       赤外(10 µm)で k ≈ 0.05 → µ ≈ 6e4 /m(0.1 mm で止まる)→ a 1.08e6。照り返しは面のフレネルの値: 見える光 n 1.333 で 2 %・赤外は放射率 0.98 で 2 %。
+--       ※ エンジンの照り返しは止めた光(吸った + 返した)を分ける割合なので、通る光の多い水では面のきらめきは小さく出る(今の式の限り)。
+--     氷(Ih。c = 917 ÷ 0.018015 = 50902 mol/m³): 見える光は水と同じくほぼ透明(Warren & Brandt 2008 の目安。µ ≈ 0.15 /m)→ a 3。
+--       赤外は水と同じ µ ≈ 6e4 /m と置いた → a 1.18e6。照り返し: 見える光 n 1.31 で 1.8 %・赤外は放射率 0.97 で 3 %。
+--       雪(白い・照り返し 80〜90 %)は粒の間の散らしで、ここの氷(透き通った塊)とは別の物として書く。
 return {
     species = {
         oxygen = {
@@ -86,6 +103,10 @@ return {
             standard_entropy_mj_per_mol_k = 5740,
             phase = "solid",
             density_kg_per_m3 = 2260,
+            light_absorption_short_mm2_per_mol = 170000000,
+            light_absorption_long_mm2_per_mol = 40000000,
+            light_reflectance_short_permille = 50,
+            light_reflectance_long_permille = 50,
         },
         -- 液体の水(T-0611。低い方へ流れるのは液体の区画〔T-0609〕。湯気・氷との行き来は real_reactions の規則)
         water = {
@@ -97,6 +118,10 @@ return {
             phase = "liquid",
             density_kg_per_m3 = 1000,
             viscosity_upa_s = 890,
+            light_absorption_short_mm2_per_mol = 3,
+            light_absorption_long_mm2_per_mol = 1080000,
+            light_reflectance_short_permille = 20,
+            light_reflectance_long_permille = 20,
         },
         -- 氷(T-0611。値は 298.15 K へ戻したもの。上の出典)
         ice = {
@@ -107,6 +132,10 @@ return {
             standard_entropy_mj_per_mol_k = 44686,
             phase = "solid",
             density_kg_per_m3 = 917,
+            light_absorption_short_mm2_per_mol = 3,
+            light_absorption_long_mm2_per_mol = 1180000,
+            light_reflectance_short_permille = 18,
+            light_reflectance_long_permille = 30,
         },
         -- 木・草の燃える部分(セルロース C6H10O5 の 1 単位)
         cellulose = {
@@ -117,6 +146,10 @@ return {
             standard_entropy_mj_per_mol_k = 170000,
             phase = "solid",
             density_kg_per_m3 = 1500,
+            light_absorption_short_mm2_per_mol = 320000,
+            light_absorption_long_mm2_per_mol = 11000000,
+            light_reflectance_short_permille = 400,
+            light_reflectance_long_permille = 100,
         },
     },
 }

@@ -173,7 +173,10 @@ namespace {
         EXPECT(rock.absorptionShort == rx::LT_OPAQUE_ABSORPTION_MM2_PER_MOL &&
                rock.absorptionLong == rx::LT_OPAQUE_ABSORPTION_MM2_PER_MOL);
         EXPECT(rock.reflectanceShortQ16 == 32768 && rock.reflectanceLongQ16 == 32768);
-        EXPECT(cellulose.absorptionShort == rx::LT_OPAQUE_ABSORPTION_MM2_PER_MOL);
+        // 標準の real_matter の現実の値(セルロース: 見える光 3.2e5・赤外 1.1e7 mm²/mol・照り返し 400・100 ‰)を読む。
+        // 2026-10-22 に値を書いた(前は書いていないので灰色で通さない = LT_OPAQUE_ABSORPTION_MM2_PER_MOL だった。意図した変化)
+        EXPECT(cellulose.absorptionShort == 320000 && cellulose.absorptionLong == 11000000);
+        EXPECT(cellulose.reflectanceShortQ16 == 26214 && cellulose.reflectanceLongQ16 == 6554);
         EXPECT(oxygen.absorptionShort == 0 && oxygen.absorptionLong == 0 && oxygen.reflectanceShortQ16 == 0);
 
         // 片方の帯だけ書いた: もう片方も同じ値(灰色)。照り返しも同じ

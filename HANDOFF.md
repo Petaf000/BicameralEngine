@@ -1,13 +1,28 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-21(本体の作業役・T-0942・t-0918-c0-compact・t-0957-rr0-fast のマージ)
+最終更新: 2026-10-22(本体の作業役・t-0931-sparse-cell のマージ・サンプルの世界の光の値)
 
 ## 状態(3 行以内)
-- **T-0942(光の値の書き忘れの警告)を main へ・C-0 の作業場の詰め(t-0918-c0-compact・ADR-0411)と太陽の影の柱の費用(t-0957-rr0-fast)をマージした**。判断待ちに Q145(照り返しの持ち越しのセーブ。一旦 = 入れる)。
-- **作業中**: wt2 T-0919(t-0919-c0-components)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 T-0931・wt6 R-R1(T-0958。t-0877-rr1)。
-- **次**: T-0939(C-0 GPU の閉じた領域)・T-0953〜T-0955・R1 の残り T-0947/T-0948・R-B1 の残り T-0946/T-0960・T-0922・T-0920・T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。
+- **T-0931 の 1 チャット目(CPU。セルの頁を成分の数に合わせた幅で持つ・ADR-0417)を main へ**。サンプルの世界の凝縮相 5 つに光の現実の値を書き、T-0942 で緩めた試験 2 本を戻した。
+- **作業中**: wt2 T-0919(t-0919-c0-components)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 T-0937(t-0937-face-opening)・wt6 R-R1(T-0958。t-0877-rr1)。
+- **次**: T-0966(T-0931 の GPU)・T-0939(C-0 GPU の閉じた領域)・T-0953〜T-0955・R1 の残り T-0947/T-0948・R-B1 の残り T-0946/T-0960・T-0922・T-0920・T-0936/T-0938 → 最低機 Q11 → T-0858 棚卸し。
 
-## この仕事でしたこと(2026-10-21・本体の作業役・T-0942・t-0918-c0-compact・t-0957-rr0-fast のマージ)
+## この仕事でしたこと(2026-10-22・本体の作業役・t-0931-sparse-cell のマージ・サンプルの世界の光の値)
+- **マージ**(`--no-ff`・衝突なし): t-0931-sparse-cell(7193072。`MultiresNest::cells` を `MultiresCellStore`〔一様の値 + 成分の数に合わせた幅の頁〕に・`DenseCellImage`・ADR-0417)。
+  main の今に `nest.cells[...]`・`CellAt`・`PageCellAt` を使う所は残っておらず、口の直しは要らなかった(release のビルドが通った・警告 0)。
+- **確かめ(release)**: CPU 19 本(field_storage・multires* 17 本・lab_box・equilibrium・support_law・case_b_box)・
+  **GPU 5 本(gpu_multires・gpu_multires_activity・gpu_lab_box〔T-0931 の作業役が比べ方だけ直して流していなかった 3 本〕・gpu_world_copy・gpu_probe_sim)** が通った。
+- **サンプルの世界の光の値**(T-0942 の続き。サンプルの世界は現実の科学で D-006 に当たらない): real_matter の carbon・cellulose・water・ice と場面 grass_fire_river の silica に
+  ADR-0395 の 4 欄を現実の値で書いた(炭 = 両帯真っ黒・水と氷 = 見える光はほぼ透明〔a 3〕・赤外はよく吸う・セルロース = 見える光 40 % 返す・砂 = 見える光 35 % 返す。
+  決め方と未確認の所は real_matter の出典・場面の species.luau・T-0942 のチケットの表)。標準とサンプルの世界に光の警告は出なくなった。
+  試験を元の厳しさに戻した: reaction_package(`OtherWarnings` は坂だけ除く・`TestMissingLightWarning` は「標準 0 件 → 消すと 1 件」)・standard_packages(坂以外の警告が無い +
+  場面 grass_fire_river に光の警告が無い)。sun_column の掃きの場面は試験の石・ガラス・空気だけなので結果は変わらない(`TestLightFields` のセルロースの期待だけ書いた値に。意図した変化)。
+  試験: reaction_package・standard_packages・environment_package・luau_type_check・reaction_package_scene・sun_column・gpu_sun_column が通った。
+  警告の数に触れうる 8 本(blank_world・probe_phase・cell_volume・cell_view・world_layout・case_b_box・coupling_table・multires_edge)も通った。archmap --check OK。
+- **記録**: ROADMAP(T-0931 = 1 チャット目済み・T-0966〜T-0968 の行・T-0937 作業中・T-0942 の値)・perf.md の M-0 の節に詰めた後の値(空気 41.5・燃えている所 81.5・地面と水と空気 94.4 B/セル)・
+  COMMANDER(次の番号 **D-616・ADR-0421・T-0978・Q146**)。
+
+## 前の仕事(2026-10-21・本体の作業役・T-0942・t-0918-c0-compact・t-0957-rr0-fast のマージ)
 - **T-0942**(80c626c。docs/tickets/T-0942): ベイクが固体・液体で光の値(light_absorption_*・light_reflectance_*)を 1 つも書かない物質と、片方の帯だけ書いた欄を警告する
   (`sim::LIGHT_WARNING_PREFIX` = `"光: "`。表は当たる。気体の書き忘れは知らせない)。game = true でも警告のまま(密度・粘りに合わせた。仮。T-0836 の道で上げられる)。
   **標準の凝縮相 4 つ(carbon・cellulose・water・ice)と場面の砂 silica に出る**(値はサンプルの中身なので書いていない)。試験: reaction_package に TestMissingLightWarning、標準の「坂以外の警告が無い」は光の警告も除く。
