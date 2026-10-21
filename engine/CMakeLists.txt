@@ -64,6 +64,7 @@ target_link_libraries(bicameral_reaction PUBLIC bicameral_fixed)
 add_library(bicameral_multires STATIC
   src/sim/cell_view.cpp  # セルの見立ての相の表(MakeCellView を CPU で呼ぶ。T-0713。MR の伝導の当てる段が読む。T-0714)
   src/sim/implicit_conduction.cpp
+  src/sim/equilibrium.cpp  # 釣り合う家族の共通部品(多重格子の段・決まった回数・面の形・閉じた領域。T-0853)
   src/sim/lab_box.cpp
   src/sim/lab_gauge.cpp
   src/sim/multires_activity.cpp
@@ -121,6 +122,7 @@ target_link_libraries(bicameral_physics PUBLIC bicameral_fixed)
 add_library(bicameral_sim STATIC
   src/sim/gpu_gas.cpp
   src/sim/gpu_gas_tree.cpp  # 気体の多重解像度の木の GPU(T-0209)
+  src/sim/gpu_gas_projection.cpp  # 気体の圧力の投影の 1 刻みの GPU(T-0845。計測と比べる口)
   src/sim/gpu_lab_box.cpp
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp

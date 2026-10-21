@@ -614,6 +614,45 @@ FX_FN int64_t GfViscousEnergy(GfParams params, int64_t moved, int64_t momentumA,
     return microJoules / 1000;
 }
 
+// --- 圧力の投影の式(T-0503・T-0845。CPU の gas_reference.cpp の BeginGasPressure と GPU の shaders/sim/gas_projection.hlsl が呼ぶ)---
+
+// 最速(c̃ = 0)のときの C_i(Q48)。0 にすると閉じた箱の最も粗い段の対角が 0 になるので、小さい下限を残す
+// (2^20 は c̃ 約 5.8 km/s = 1 刻みに約 190 セル伝わる速さ。0.5 m のセル・1/60 s)
+FX_CONST uint64_t GF_PRESSURE_MIN_CAPACITY = FX_U64(0u, 0x100000u);
+
+// V ÷ c_i²(mg/µPa の Q48)= perSound ÷ T(perSound = 2^45 × 10^6 × T_地面 ÷ c̃²〔GasPressurePerSound〕。c̃ = 0 は perSound 0 で下限)
+FX_FN uint64_t GfPressureCapacity(uint64_t perSound, uint32_t temperature) {
+    FxU128 numerator;
+    numerator.hi = 0;
+    numerator.lo = perSound;
+    const uint64_t capacity = FxDivU128By64(numerator, temperature > 1u ? temperature : 1u).quotient;
+
+    return capacity > GF_PRESSURE_MIN_CAPACITY ? capacity : GF_PRESSURE_MIN_CAPACITY;
+}
+
+// 容量 × V の割合(Q16。1 以上。塞がったセルも対角を 0 にしない)
+FX_FN uint64_t GfShareCapacity(uint64_t capacity, uint32_t share) {
+    if (share == GF_OPEN_FULL)
+        return capacity;
+
+    const uint64_t scaled = FxDivU128By64(FxMulU64Full(capacity, share), GF_OPEN_FULL).quotient;
+
+    return scaled > 1u ? scaled : 1u;
+}
+
+// 面の係数 K_f = K × 面の開き(Q16。0 の向きへ切り捨て)。壁の面は呼ぶ側で 0
+FX_FN uint64_t GfPressureFaceCoefficient(uint64_t link, uint32_t open) {
+    if (open == GF_OPEN_FULL)
+        return link;
+
+    return FxDivU128By64(FxMulU64Full(link, open), GF_OPEN_FULL).quotient;
+}
+
+// 符号付きの (|a| × b)÷ d(128bit の積。0 方向へ切り捨て。右辺 = (V p̃ ÷ c_箱² − Σ F* × 2^48)÷ D)
+FX_FN int64_t GfMulDivSigned(int64_t a, uint64_t b, uint64_t d) {
+    return FxApplySign(FxDivU128By64(FxMulU64Full(FxAbsU64(a), b), d).quotient, a < 0);
+}
+
 GF_NAMESPACE_END
 
 #endif  // BICAMERAL_GAS_FLOW_HLSLI

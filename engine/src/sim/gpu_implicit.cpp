@@ -776,7 +776,8 @@ namespace bicameral::sim {
             list->SetComputeRootUnorderedAccessView(i, m_buffers[i]->GetGPUVirtualAddress());
 
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
-        m_constants.tolerance = 1;  // ImCycleEnd が止める判定を見る印(値は閾値の欄から)
+        // ImCycleEnd が止める判定を見る印(値は閾値の欄から)。回数を固定する時は 0(数えるだけ。T-0843)
+        m_constants.tolerance = shape.fixedCycles ? 0 : 1;
         m_constants.correctionScale = static_cast<int32_t>(options.correctionScale);
         m_constants.sweeps = options.preSmooth | (options.postSmooth << SWEEP_BITS) |
                              (options.coarsestSweeps << (2 * SWEEP_BITS));
@@ -786,8 +787,11 @@ namespace bicameral::sim {
         const uint32_t cheapLevels = std::min(shape.cheapLevels, m_constants.dispatchLevels - 1);
         RecordPlan(list);
         Dispatch(list, PassBegin, 1);
-        DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
-        Dispatch(list, PassSolveCheckEnd, 1);
+        if (!shape.fixedCycles) {
+            DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
+            Dispatch(list, PassSolveCheckEnd, 1);
+        }
+
         for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
             BeginSkippable(list, PREDICATE_CYCLES);
             if (cycle < dispatchCycles)
@@ -795,9 +799,12 @@ namespace bicameral::sim {
             else
                 RecordCheapCycle(list, options, cheapLevels);
 
-            m_constants.checkColor = CheckLastColorOnly(options);
-            DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
-            m_constants.checkColor = 0;
+            if (!shape.fixedCycles) {
+                m_constants.checkColor = CheckLastColorOnly(options);
+                DispatchIndirect(list, PassSolveConverged, IM_SLOT_CONVERGED);
+                m_constants.checkColor = 0;
+            }
+
             Dispatch(list, PassCycleEnd, 1);
             EndSkippable(list);
         }

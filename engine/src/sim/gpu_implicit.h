@@ -90,6 +90,9 @@ namespace bicameral::sim {
         // (128³ の 1 グループの V サイクルを数十回で 2 秒を超えた。T-0494)ので、ShapeFrom は節が多い段をここに入れる。
         // 下りが止まる段より深くは下りない(値は同じ)
         uint32_t cheapLevels = 0;
+        // V サイクルを判定で止めず、ちょうど options.cycles 回まわす(T-0843。CPU の GasProjectionOptions::fixedCycles と同じ)。
+        // V の前と各 V の後の止める判定(ImSolveConverged)を積まないので、閾値の欄は読まない。RecordSolve だけが見る
+        bool fixedCycles = false;
     };
 
     class GpuImplicit {
@@ -153,6 +156,11 @@ namespace bicameral::sim {
         [[nodiscard]] bool ReadSolution(std::span<int64_t> values, GpuImplicitCost& cost) const;
         // 作業場(64bit。並びは implicit_conduct.hlsl の先頭: 値 A × 節・値 B × 節・右辺 × 節・刻みの初めの温度 × セル…)
         [[nodiscard]] ID3D12Resource* WorkBuffer() const { return m_buffers[BufferWork].Get(); }
+
+        // 段の節・隣・面と子の一覧(UAV の状態。気体の投影〔GpuGasProjection。T-0845〕が段の形を写した後に重みだけを毎刻み書き直す)
+        [[nodiscard]] ID3D12Resource* NodesBuffer() const { return m_buffers[BufferNodes].Get(); }
+        [[nodiscard]] ID3D12Resource* LinksBuffer() const { return m_buffers[BufferLinks].Get(); }
+        [[nodiscard]] ID3D12Resource* ListsBuffer() const { return m_buffers[BufferLists].Get(); }
         [[nodiscard]] const GpuImplicitLimits& Limits() const { return m_limits; }
 
         // バッファを COMMON に戻す(RecordStep の後。同じリストで次の刻みに RecordReset をもう一度呼ぶため。T-0132)
@@ -184,6 +192,8 @@ namespace bicameral::sim {
         void UsePredication(bool use) { m_predication = use; }
         // ImTail が節の値を groupshared に置くか(既定 true。T-0587。false は前の形〔全体のメモリとバリア〕。値は同じ。計測で比べる用)
         void UseSharedTail(bool use) { m_constants.tailShared = use ? 1 : 0; }
+        // 次の解きで段ごとの計画の表を作り直させる(計測用。系の形が刻みごとに変わる時の固定費を測る。T-0843)
+        void InvalidatePlan() { m_planReady = false; }
 
         // --- 段ごとの時間(計測用。T-0587)---
         // BeginStageStamps から EndStageStamps まで、Dispatch のたびに(バリアの後に)タイムスタンプを firstIndex + 1 から打つ

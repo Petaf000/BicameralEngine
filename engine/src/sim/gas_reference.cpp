@@ -1299,49 +1299,24 @@ namespace bicameral::sim {
 
     namespace {
 
-        // 1 回の投影の係数: 中心の流れ・面の力積・重さの力積を Δt = 1/60 s ÷ substeps で作り直す(式は MakeGasCoefficients と同じ。
-        // 陰的な圧力には音速の安定の条件が無いので、検査を通すだけの音速 1 mm/s で作る。圧力の拡散の係数は使わない)
         GasCoefficients PressureCoefficients(const GasBox& box, uint32_t substeps) {
-            GasConfig config = box.config;
-            config.substeps = substeps;
-            config.soundSpeedMmPerS = 1;
-            const GasCoefficients step = MakeGasCoefficients(config);
-
-            GasCoefficients coefficients = box.coefficients;
-            coefficients.centralFlow = step.centralFlow;
-            coefficients.pressureImpulse = step.pressureImpulse;
-            coefficients.gravityImpulse = step.gravityImpulse;
-
-            return coefficients;
+            return GasPressureCoefficients(box, substeps);
         }
 
         // V ÷ c_i²(mg/µPa の Q48)= 2^45 × 10^6 × T_地面 ÷ (c̃² × T)(V = 0.125 m³ = 2^-3。c_i² = c̃² T ÷ T_地面)。c̃ = 0 は最速の下限
+        // (式は gas_flow.hlsli の GfPressureCapacity。GPU の投影と共通。T-0845)
         uint64_t PressureCapacity(uint64_t soundMmPerS, uint32_t groundTemperature, uint32_t temperature) {
-            if (soundMmPerS == 0)
-                return GAS_PRESSURE_MIN_CAPACITY;
-
-            const fx::FxU128 numerator = fx::FxMulU64Full((uint64_t)1 << 45, MICRO * groundTemperature);
-            const uint64_t perSound = fx::FxDivU128By64(numerator, soundMmPerS * soundMmPerS).quotient;
-            const uint64_t capacity = perSound / std::max<uint32_t>(temperature, 1);
-
-            return std::max(capacity, GAS_PRESSURE_MIN_CAPACITY);
+            return gas::GfPressureCapacity(GasPressurePerSound(soundMmPerS, groundTemperature), temperature);
         }
 
-        // K = A Δt² ÷ Δx(mg/µPa の Q48)= 0.5 ÷ (3600 × substeps²)× 2^48
-        uint64_t PressureLinkCoefficient(uint32_t substeps) {
-            return ((uint64_t)1 << 47) / (3600 * (uint64_t)substeps * substeps);
-        }
+        static_assert(GAS_PRESSURE_MIN_CAPACITY == gas::GF_PRESSURE_MIN_CAPACITY);
 
         // 面の係数 K_f = K × 面の開き(Q16。0 の向きへ切り捨て)。壁は 0(T-0667)
         uint64_t PressureFaceCoefficient(const GasBox& box, uint64_t link, const GasFace& face) {
             if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
                 return 0;
 
-            const uint32_t open = FaceOpen(box, face);
-            if (open == GAS_OPEN_FULL)
-                return link;
-
-            return fx::FxDivU128By64(fx::FxMulU64Full(link, open), GAS_OPEN_FULL).quotient;
+            return gas::GfPressureFaceCoefficient(link, FaceOpen(box, face));
         }
 
         // 圧力の式の V の割合(Q16)= セルの空き(下限 1/256。陽解法の DeriveOpenCell と同じ体積で圧力を読む)
@@ -1352,12 +1327,9 @@ namespace bicameral::sim {
             return std::max(box.openQ16[index], gas::GF_OPEN_PRESSURE_FLOOR);
         }
 
-        // 容量 × V の割合(1 以上。塞がったセルも対角を 0 にしない)
+        // 容量 × V の割合(1 以上。塞がったセルも対角を 0 にしない。gas_flow.hlsli の GfShareCapacity)
         uint64_t ShareCapacity(uint64_t capacity, uint32_t share) {
-            if (share == GAS_OPEN_FULL)
-                return capacity;
-
-            return std::max<uint64_t>(fx::FxDivU128By64(fx::FxMulU64Full(capacity, share), GAS_OPEN_FULL).quotient, 1);
+            return gas::GfShareCapacity(capacity, share);
         }
 
         // 面の予測の流れ F*(mg。左 → 右が正): 今の運動量の中心の流れ − K_f × 縦の面の両側の質量の差の静水圧(陽解法の圧力の拡散と同じ釣り合い)。
@@ -1386,7 +1358,182 @@ namespace bicameral::sim {
             return central - fx::FxMulShiftS64((int64_t)link, hydrostatic, 48);
         }
 
+        // --- 版 2(T-0842 研究): 運ぶ側の局所の小刻みと、切った面の運動量 ---
+
+        // 面ごとの運ぶ回数: 出ていく割合の合計(EffectiveOutflow で換算)÷ 中身 > 0.9 のセルは n = ceil(比)(上限 limit)。
+        // ブロック(block³ セル)の中の最大をブロックの回数にし、面は両側のブロックの大きい方
+        std::vector<uint32_t> LocalSubstepCounts(const GasBox& box, const std::vector<GasDerived>& derived,
+                                                 const std::vector<GasFace>& faces, uint32_t limit, uint32_t block) {
+            const auto count = (uint32_t)box.cells.size();
+            std::vector<uint64_t> outflow(count, 0);
+            for (const GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.flow != 0 && donor.kind == SideKind::Cell)
+                    outflow[donor.index] += RawFraction(box, derived, face);
+            }
+
+            const uint32_t blocksX = (box.config.sizeX + block - 1) / block;
+            const uint32_t blocksY = (box.config.sizeY + block - 1) / block;
+            const uint32_t blocksZ = (box.config.sizeZ + block - 1) / block;
+            const auto blockOf = [&](uint32_t index) {
+                const std::array<uint32_t, GAS_AXES> c = CellCoordinate(box, index);
+                return ((c[2] / block) * blocksY + (c[1] / block)) * blocksX + (c[0] / block);
+            };
+
+            std::vector<uint32_t> blockCounts((size_t)blocksX * blocksY * blocksZ, 1);
+            for (uint32_t index = 0; index < count; ++index) {
+                const uint64_t ratio = EffectiveOutflow(box.config, box.cells[index], outflow[index]);  // Q32
+                if (ratio * 10 <= ONE_Q32 * 9)
+                    continue;
+
+                const auto turns = (uint32_t)std::min<uint64_t>((ratio + ONE_Q32 - 1) >> 32, limit);
+                uint32_t& blockCount = blockCounts[blockOf(index)];
+                blockCount = std::max(blockCount, turns);
+            }
+
+            std::vector<uint32_t> counts(faces.size(), 1);
+            for (size_t f = 0; f < faces.size(); ++f) {
+                for (const FaceSide side : {faces[f].left, faces[f].right}) {
+                    if (side.kind == SideKind::Cell)
+                        counts[f] = std::max(counts[f], blockCounts[blockOf(side.index)]);
+                }
+            }
+
+            return counts;
+        }
+
+        // 面の流れ total を turns 回に分けた turn 回目(切り捨てた等分。残りは最後の回。和は total と同じ)
+        int64_t SharedFlow(int64_t total, uint32_t turns, uint32_t turn) {
+            const int64_t part = total / (int64_t)turns;
+            return turn + 1 < turns ? part : total - (part * (int64_t)(turns - 1));
+        }
+
+        // 出ていく量の上限で切った面の風上のセルの運動量(面の向きの成分)を、運んだ割合(上限の後 ÷ 前)に縮める。
+        // エネルギーはそのまま(運動のエネルギーの差は熱へ)。運動量の差は帳簿の壁の力積(塞いだ物が受ける)
+        void ScaleCutMomentum(GasBox& box, const std::vector<GasDerived>& derived, const std::vector<GasFace>& faces,
+                              std::vector<GasCell>& cells) {
+            struct CellCut {
+                uint64_t kept = 0;
+                uint64_t raw = 0;
+                uint32_t axes = 0;
+            };
+
+            std::vector<CellCut> cellCuts(box.cells.size());
+            for (const GasFace& face : faces) {
+                const FaceSide donor = face.flow > 0 ? face.left : face.right;
+                if (face.flow == 0 || donor.kind != SideKind::Cell)
+                    continue;
+
+                const uint64_t raw = RawFraction(box, derived, face);
+                if (raw == 0 || raw == face.fraction)
+                    continue;
+
+                CellCut& cut = cellCuts[donor.index];
+                if (cut.raw == 0) {
+                    cut.raw = raw;
+                    cut.kept = face.fraction;
+                }
+
+                cut.axes |= 1u << face.axis;
+            }
+
+            for (uint32_t index = 0; index < cellCuts.size(); ++index) {
+                const CellCut& cut = cellCuts[index];
+                for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                    if ((cut.axes & (1u << axis)) == 0)
+                        continue;
+
+                    int64_t& momentum = cells[index].momentum[axis];
+                    const int64_t scaled = ScaleSigned(momentum, cut.kept, cut.raw);
+                    box.ledger.momentum[axis] += scaled - momentum;
+                    box.ledger.wallMomentum[axis] += scaled - momentum;
+                    momentum = scaled;
+                }
+            }
+        }
+
+        // 面の流れ(faces[f].flow)を局所の小刻みに分けて運ぶ(版 2)。回ごとに中身・導く値を読み直す(圧力は解いた x のまま)。
+        // cuts は回ごとの切った質量の和。cells は力を当てた後のセル(運んだ後のセルになる)
+        void AdvectLocalSubsteps(GasBox& box, const GasPressureOptions& options, std::span<const int64_t> pressures,
+                                 std::vector<GasDerived> derived, std::vector<GasFace>& faces,
+                                 std::vector<GasCell>& cells, uint64_t roundingTick, std::vector<int64_t>* cuts) {
+            const std::vector<uint32_t> counts = options.localSubsteps > 1
+                                                     ? LocalSubstepCounts(box, derived, faces, options.localSubsteps,
+                                                                          options.localSubstepBlock)
+                                                     : std::vector<uint32_t>(faces.size(), 1);
+            const uint32_t turns = *std::max_element(counts.begin(), counts.end());
+            std::vector<int64_t> totals(faces.size());
+            for (size_t f = 0; f < faces.size(); ++f)
+                totals[f] = faces[f].flow;
+
+            if (cuts != nullptr)
+                cuts->assign(box.cells.size(), 0);
+
+            std::vector<int64_t> turnCuts;
+            for (uint32_t turn = 0; turn < turns; ++turn) {
+                if (turn > 0) {
+                    box.cells = cells;
+                    derived = DeriveAll(box);
+                    for (size_t index = 0; index < derived.size(); ++index)
+                        derived[index].scaledPressure = pressures[index];
+                }
+
+                for (size_t f = 0; f < faces.size(); ++f)
+                    faces[f].flow = turn < counts[f] ? SharedFlow(totals[f], counts[f], turn) : 0;
+
+                LimitOutflow(box, derived, faces, cuts != nullptr ? &turnCuts : nullptr);
+                if (cuts != nullptr) {
+                    for (size_t index = 0; index < turnCuts.size(); ++index)
+                        (*cuts)[index] += turnCuts[index];
+                }
+
+                if (options.scaleCutMomentum)
+                    ScaleCutMomentum(box, derived, faces, cells);
+
+                const uint64_t tick = turn == 0 ? roundingTick : fx::FxHashCombine(roundingTick, turn);
+                ComputeMovedAmounts(box, cells, derived, tick, faces);
+                LimitMovedAmounts(box, cells, faces);
+
+                std::vector<GasCell> next = cells;
+                const GasApplyWorld world{.ledger = &box.ledger, .next = &next};
+                for (const GasFace& face : faces)
+                    Transfer(box, cells, derived, world, face);
+
+                cells = std::move(next);
+            }
+        }
+
     }  // namespace
+
+    // 1 回の投影の係数: 中心の流れ・面の力積・重さの力積を Δt = 1/60 s ÷ substeps で作り直す(式は MakeGasCoefficients と同じ。
+    // 陰的な圧力には音速の安定の条件が無いので、検査を通すだけの音速 1 mm/s で作る。圧力の拡散の係数は使わない)
+    GasCoefficients GasPressureCoefficients(const GasBox& box, uint32_t substeps) {
+        GasConfig config = box.config;
+        config.substeps = substeps;
+        config.soundSpeedMmPerS = 1;
+        const GasCoefficients step = MakeGasCoefficients(config);
+
+        GasCoefficients coefficients = box.coefficients;
+        coefficients.centralFlow = step.centralFlow;
+        coefficients.pressureImpulse = step.pressureImpulse;
+        coefficients.gravityImpulse = step.gravityImpulse;
+
+        return coefficients;
+    }
+
+    uint64_t GasPressurePerSound(uint64_t soundMmPerS, uint32_t groundTemperature) {
+        if (soundMmPerS == 0)
+            return 0;
+
+        const fx::FxU128 numerator = fx::FxMulU64Full((uint64_t)1 << 45, MICRO * groundTemperature);
+
+        return fx::FxDivU128By64(numerator, soundMmPerS * soundMmPerS).quotient;
+    }
+
+    // K = A Δt² ÷ Δx(mg/µPa の Q48)= 0.5 ÷ (3600 × substeps²)× 2^48
+    uint64_t GasPressureLinkCoefficient(uint32_t substeps) {
+        return ((uint64_t)1 << 47) / (3600 * (uint64_t)substeps * substeps);
+    }
 
     GasPressureSystem BeginGasPressure(const GasBox& box, const GasPressureOptions& options) {
         assert(options.substeps > 0);
@@ -1398,7 +1545,7 @@ namespace bicameral::sim {
 
         // --- 節: C_i・E_i の係数と p̃(頭打ちなし。陰的なので熱いセルの音速を抑えなくてよい)---
         GasPressureSystem system;
-        system.linkCoefficient = PressureLinkCoefficient(options.substeps);
+        system.linkCoefficient = GasPressureLinkCoefficient(options.substeps);
         system.capacities.resize(count);
         system.stateCapacities.resize(count);
         system.statePressures.resize(count);
@@ -1476,6 +1623,14 @@ namespace bicameral::sim {
             const int64_t left = face.left.kind == SideKind::Cell ? pressures[face.left.index] : 0;
             const int64_t right = face.right.kind == SideKind::Cell ? pressures[face.right.index] : 0;
             face.flow = system.predictedFlows[f] + fx::FxMulShiftS64(link, left - right, 48);
+        }
+
+        // 版 2(T-0842 研究。既定は切ってある): 局所の小刻み・切った面の運動量
+        if (options.localSubsteps > 1 || options.scaleCutMomentum) {
+            AdvectLocalSubsteps(box, options, pressures, derived, faces, forced, roundingTick, cuts);
+            box.cells = std::move(forced);
+            box.coefficients = saved;
+            return;
         }
 
         LimitOutflow(box, derived, faces, cuts);
