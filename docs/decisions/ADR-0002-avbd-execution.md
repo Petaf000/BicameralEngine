@@ -1,6 +1,6 @@
 # ADR-0002 AVBD の実行形態(Work Graphs か Compute か)
 
-- Status: Accepted(2026-09-30、D-302)
+- Status: Accepted(2026-09-30、D-302)。**2026-10-21 D-546 で置き換え**(GPU は Compute を既定・Work Graphs は測って速い所だけ。ADR-0373)
 - 日付: 2026-09-29
 - 決めた人: ユーザー
 
