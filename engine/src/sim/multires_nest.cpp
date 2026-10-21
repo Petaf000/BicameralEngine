@@ -19,9 +19,10 @@ namespace bicameral::sim {
 
     namespace {
 
-        using nest_detail::CellAt;
         using nest_detail::FractionAt;
-        using nest_detail::PageCellAt;
+        using nest_detail::LoadCellAt;
+        using nest_detail::StoreCellAt;
+        using nest_detail::StorePageCell;
         using nest_detail::UniformAt;
 
         // --- 1 段ぶんの操作 ---
@@ -44,7 +45,7 @@ namespace bicameral::sim {
                 if (nest.wideCells)
                     StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, parentSlot, parentCell));
                 else
-                    PageCellAt(nest, page, index) = LoadNestCell(nest, parentSlot, parentCell);
+                    StorePageCell(nest, page, index, LoadNestCell(nest, parentSlot, parentCell));
             }
 
             // --- 登録した欄も子は親と同じ数(親は変えない。T-0761)---
@@ -79,12 +80,12 @@ namespace bicameral::sim {
                 const RxCell parentCell = LoadNestCell(nest, shadow.parent, MrOctantCell(shadow.parentOctant, local));
                 MrShadowFamily family{};
                 for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-                    family.cells[j] = CellAt(nest, shadowSlot, MrChildCell(local, j));
+                    family.cells[j] = LoadCellAt(nest, shadowSlot, MrChildCell(local, j));
 
                 const MrShadowFamily pulled = MrPullBackShadow(table, parentCell, family);
                 nest.counters[MR_COUNTER_SHADOW_CLAMPED] += pulled.clamped;
                 for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-                    CellAt(nest, shadowSlot, MrChildCell(local, j)) = pulled.cells[j];
+                    StoreCellAt(nest, shadowSlot, MrChildCell(local, j), pulled.cells[j]);
             }
         }
 
@@ -310,9 +311,15 @@ namespace bicameral::sim {
         // 見出し(活性と忙しさの印も)
         uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<MrBlock>& blocks);
 
-        uint64_t HashRegion(uint64_t hash, const MultiresNest&, const std::vector<RxCell>& cells) {
-            for (const RxCell& cell : cells)
+        // セル(T-0931): GPU と同じ並びの列(一様の値 → 頁ごとの 512 セル)の順・同じ値で要約する(前の RxCell の密な並びと同じ値)
+        uint64_t HashRegion(uint64_t hash, const MultiresNest& nest, const MultiresCellStore& cells) {
+            for (const RxCell& cell : cells.uniform)
                 hash = FxHashCombine(hash, HashReactionCell(cell));
+
+            for (uint32_t page = 0; page < cells.pages.size(); ++page) {
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                    hash = FxHashCombine(hash, HashReactionCell(nest_detail::LoadPageCell(nest, page, index)));
+            }
 
             return hash;
         }
@@ -461,15 +468,17 @@ namespace bicameral::sim {
                 if (!MrIsSteppedCell(block, index))
                     continue;
 
-                RxCell& cell = CellAt(nest, slot, index);
+                RxCell cell = LoadCellAt(nest, slot, index);
                 const RxCell before = cell;
                 const uint64_t fractionBefore = FractionEnergy(nest, block.fraction, index);
 
                 // --- 伝導 ---
                 if (!deltas.empty()) {
                     const MrEnergyDelta& delta = deltas[nest_detail::PageCellAddress(nest, block.page, index)];
-                    if (!MrEnergyDeltaIsZero(delta))
+                    if (!MrEnergyDeltaIsZero(delta)) {
                         nest_detail::ApplyEnergyDelta(nest, slot, index, cell, delta);
+                        StoreCellAt(nest, slot, index, cell);
+                    }
                 }
 
                 // --- 反応(溢れを使う世界は上限の無い形で読み書きする。T-0187)---
@@ -481,10 +490,12 @@ namespace bicameral::sim {
                     tally = MrAddLimits(tally, step.limits);
                     wideChanged = !RxSameCell(wide, step.cell);
                     StoreWidePageCell(nest, block.page, index, step.cell);
+                    cell = LoadCellAt(nest, slot, index);
                 } else if (react) {
                     const RxWaitStep step = MrStepCellWait(view, cell, worldSeed, tick, block, index);
                     result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     cell = step.cell;
+                    StoreCellAt(nest, slot, index, cell);
                     tally = MrAddLimits(tally, step.limits);
                 }
 
@@ -641,7 +652,7 @@ namespace bicameral::sim {
                     if (nest.wideCells)
                         StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, slot, index));
                     else
-                        PageCellAt(nest, page, index) = MrUniformCell(block, UniformAt(nest, slot), index);
+                        StorePageCell(nest, page, index, MrUniformCell(block, UniformAt(nest, slot), index));
                 }
 
                 block.page = page;
@@ -660,7 +671,7 @@ namespace bicameral::sim {
         if (MrIsUniform(block))
             return MrUniformCell(block, UniformAt(nest, slot), index);
 
-        return nest.cells[nest.blocks.size() + (size_t{block.page} * MR_BLOCK_CELLS) + index];
+        return nest_detail::LoadPageCell(nest, block.page, index);
     }
 
     bool ExpandNestPage(MultiresNest& nest, uint32_t slot) {
@@ -682,7 +693,7 @@ namespace bicameral::sim {
 
     void StoreNestCell(MultiresNest& nest, uint32_t slot, uint32_t index, const RxCell& cell) {
         FX_ASSERT(!nest.wideCells);
-        CellAt(nest, slot, index) = cell;
+        StoreCellAt(nest, slot, index, cell);
     }
 
     void PokeNestBlock(MultiresNest& nest, uint32_t slot) {
@@ -702,7 +713,8 @@ namespace bicameral::sim {
         MultiresNest nest;
         nest.capacity = capacity;
         nest.blocks.assign(blockCount, MrMakeUnusedBlock());
-        nest.cells.assign(blockCount + (pageCount * MR_BLOCK_CELLS), RxMakeEmptyCell(0));
+        nest.cells.uniform.assign(blockCount, RxMakeEmptyCell(0));
+        nest.cells.pages.assign(pageCount, MultiresCellPage{});
         nest.fractions.assign(size_t{capacity.fractions} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
         nest.ledger.assign(WlLedgerWords(capacity.ledgerColumns), 0);
         nest.index.assign(capacity.indexEntries, MR_INDEX_EMPTY);
@@ -738,7 +750,7 @@ namespace bicameral::sim {
         nest.blocks[slot] = MrMakeMirrorBlock(level, originX, originY, originZ, page);
         ClearPageOverflow(nest, page);
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-            PageCellAt(nest, page, index) = cells[index];
+            StorePageCell(nest, page, index, cells[index]);
 
         // 登録した欄は 0 から(前の影・写しの値を残さない。写す元の欄は呼ぶ側が StoreNestField で書く。T-0761)
         nest_fields::PlaceRoot(nest, slot);

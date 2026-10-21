@@ -59,11 +59,30 @@ namespace bicameral::sim {
         std::vector<uint64_t> amounts;
     };
 
-    // 一様なブロックの値 1 つの溢れ(T-0199): インラインの値(nest.cells の先頭の枠ごとの値)の続きの成分(物質 ID の昇順)。
+    // 一様なブロックの値 1 つの溢れ(T-0199): インラインの値(nest.cells.uniform の枠ごとの値)の続きの成分(物質 ID の昇順)。
     // 溢れのある頁を畳むと、値 1 つ + ここに戻す。頁に広げる・粗くする・細かくする時は値ごと(溢れまで)写す
     struct MultiresUniformOverflow {
         std::vector<uint32_t> species;
         std::vector<uint64_t> amounts;
+    };
+
+    // セルの頁 1 つ(T-0931。ADR-0417。20 §10.1「真実はある所にだけ」): 512 セルのエネルギー・成分の数と、成分(物質 ID の昇順)を
+    // 「頁の幅」ずつ並べる。頁の幅 = 頁の中のセルの成分の数の最大(書く時に足りなければ広げ、眠る判定で詰める)。
+    // 読むと RxCell と同じ値(成分の数の外は 0)。1 セル = 8 + 1 + 12 × 幅 B(前は RxCell の 112 B 固定)。
+    // 一度も空でない値を書いていない頁は何も持たない(全部空のセル = 作った時の値)
+    struct MultiresCellPage {
+        uint32_t width = 0;
+        std::vector<int64_t> energy;    // [セル](空 = 持たない)
+        std::vector<uint8_t> counts;    // [セル] 成分の数
+        std::vector<uint32_t> species;  // [セル × width]
+        std::vector<uint64_t> amounts;  // [セル × width]
+    };
+
+    // セルの置き場(T-0931): 一様の値(枠ごと。GPU と同じ RxCell)+ セルの頁(観察の枠の頁 + 世界の頁)。
+    // GPU と同じ並びの列(DenseCellImage)は [一様の値 × 枠][頁 × MR_BLOCK_CELLS]。状態の要約・保存点はこの列の順・同じ値
+    struct MultiresCellStore {
+        std::vector<reaction::RxCell> uniform;
+        std::vector<MultiresCellPage> pages;
     };
 
     inline constexpr uint32_t MULTIRES_NO_FIELD_PAGE = UINT32_MAX;
@@ -132,7 +151,8 @@ namespace bicameral::sim {
 
         // --- 状態(CPU と GPU で配列のまま一致する)---
         std::vector<multires::MrBlock> blocks;  // 世界の枠 + 観察の枠
-        std::vector<reaction::RxCell> cells;  // [一様の値 × 枠][頁 × MR_BLOCK_CELLS](頁 = 観察の枠の数 + pages。T-0102)
+        MultiresCellStore
+            cells;  // 一様の値 × 枠・頁(頁 = 観察の枠の数 + pages。T-0102)。頁は成分の数に合わせた幅(T-0931)
         std::vector<multires::MrFraction> fractions;  // 端数の枠 × MR_BLOCK_CELLS
         // [世界の枠の空きのスタック(数は counters[MR_COUNTER_FREE_BLOCKS])][世界の頁の空きのスタック(MR_COUNTER_FREE_PAGES)]
         std::vector<uint32_t> freeBlocks;
@@ -272,6 +292,15 @@ namespace bicameral::sim {
 
     // 枠 slot をつつく(次の刻みに反応を評価する。刻みの段の外でセルを変えた時。T-0717)
     void PokeNestBlock(MultiresNest& nest, uint32_t slot);
+
+    // GPU と同じ並びのセルの列([一様の値 × 枠][頁 × MR_BLOCK_CELLS] の RxCell。成分の数の外は 0)。GPU へ上げる・試験で比べる時(T-0931)
+    [[nodiscard]] std::vector<reaction::RxCell> DenseCellImage(const MultiresNest& nest);
+
+    // 同じ並びの列からセルを全部書く(GPU から読んだ時。T-0931)
+    void StoreDenseCellImage(MultiresNest& nest, std::span<const reaction::RxCell> image);
+
+    // 列のセルの数(一様の値の枠の数 + 頁の数 × MR_BLOCK_CELLS)
+    [[nodiscard]] size_t DenseCellCount(const MultiresNest& nest);
 
     // --- セルの溢れ(T-0187)---
 

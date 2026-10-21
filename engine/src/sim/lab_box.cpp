@@ -150,9 +150,9 @@ namespace bicameral::sim {
                 if (MrIsUniform(nest->blocks[slot]))
                     return false;
 
-                RxCell& target = nest_detail::CellAt(*nest, slot, local);
-                const RxCell before = target;
-                target = lab::LabApplyCommand(table, target, command);
+                const RxCell before = nest_detail::LoadCellAt(*nest, slot, local);
+                const RxCell target = lab::LabApplyCommand(table, before, command);
+                nest_detail::StoreCellAt(*nest, slot, local, target);
 
                 // --- 改造の帳簿(T-0712): 消した中身は出・置いた中身は入(lab_box.hlsl の LabCells と同じ)---
                 const int32_t level = nest->blocks[slot].level;
@@ -363,7 +363,7 @@ namespace bicameral::sim {
                                                          int64_t{rootY} * LAB_BOX_EDGE, int64_t{rootZ} * LAB_BOX_EDGE,
                                                          cells);
                     FX_ASSERT(slot == lab::LabRootSlot(shape, rootX, rootY, rootZ) && !MrIsUniform(nest.blocks[slot]));
-                    nest_detail::CellAt(nest, slot, 0) = fill;
+                    nest_detail::StoreCellAt(nest, slot, 0, fill);
                 }
             }
         }
@@ -426,8 +426,12 @@ namespace bicameral::sim {
         if (remap.identity)
             return report;
 
-        for (RxCell& cell : nest.cells)
+        // セル(一様の値と頁。GPU と同じ並びの列で 1 つずつ。T-0931)
+        std::vector<RxCell> cells = DenseCellImage(nest);
+        for (RxCell& cell : cells)
             report.Add(RemapReactionCell(remap, next, cell));
+
+        StoreDenseCellImage(nest, cells);
 
         return report;
     }

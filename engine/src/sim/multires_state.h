@@ -22,8 +22,8 @@ namespace bicameral::sim {
         bool hashed = true;
     };
 
-    // nest(const でも可)の区画を順に visit(区画, 値の並び) で回る。値の並びは std::vector か std::array、登録した欄は
-    // MultiresFieldStore(疎なら頁の表ごと。T-0921)。
+    // nest(const でも可)の区画を順に visit(区画, 値の並び) で回る。値の並びは std::vector か std::array、セルは
+    // MultiresCellStore(頁は成分の数に合わせた幅。要約は GPU と同じ並びの列で。T-0931)、登録した欄は MultiresFieldStore(疎なら頁の表ごと。T-0921)。
     // 状態に入らないもの: 1 刻みの要求・取り合いの印(刻みの境では空)・陰解法の費用と写し(計測用)
     template <typename Nest, typename Visit>
     void VisitNestState(Nest& nest, Visit&& visit) {

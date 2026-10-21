@@ -98,7 +98,7 @@ namespace bicameral::test {
         // --- 2 段目の一様の値を変える(テストのための直接の書き換え。保存量は合わなくなる)---
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             if (nest.blocks[slot].kind == multires::MR_BLOCK_REAL && nest.blocks[slot].level == 2)
-                nest.cells[slot].energy += energyDelta;
+                nest.cells.uniform[slot].energy += energyDelta;
         }
 
         return nest;

@@ -282,7 +282,9 @@ namespace bicameral::sim {
                     if (!MrIsSteppedCell(block, index) || !TxWakes(delta))
                         continue;
 
-                    nest_detail::ApplyEnergyDelta(nest, slot, index, nest_detail::CellAt(nest, slot, index), delta);
+                    RxCell cell = nest_detail::LoadCellAt(nest, slot, index);
+                    nest_detail::ApplyEnergyDelta(nest, slot, index, cell, delta);
+                    nest_detail::StoreCellAt(nest, slot, index, cell);
                     delta = MrMakeEnergyDelta();
                     blockChanged = true;
                 }
@@ -422,7 +424,7 @@ namespace bicameral::sim {
             FX_ASSERT(!options.implicitConduction || options.maxSubcycleGap == 0);
             const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
             CellViews views(nest, view, phases, MakeConductionKind(options).ViewParts());
-            std::vector<MrEnergyDelta> deltas(nest.cells.size(), MrMakeEnergyDelta());
+            std::vector<MrEnergyDelta> deltas(nest_detail::CellAddressCount(nest), MrMakeEnergyDelta());
             std::vector<uint8_t> active(nest.blocks.size(), 0);
             for (uint32_t substep = 0;; ++substep) {
                 // --- 印 → 頁 → 端数の枠と流れ(T-0019 の 1 刻みと同じ順)---

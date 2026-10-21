@@ -15,6 +15,7 @@
 
 #include "common/multires_activity.hlsli"
 #include "multires_activity_scene.h"
+#include "sim/multires_nest_internal.h"
 
 namespace bicameral::test {
 
@@ -105,9 +106,12 @@ namespace bicameral::test {
         return nest.blocks[0].children[leaf];
     }
 
-    // 頁のセル(nest.cells の並びは [一様の値 × 枠][頁 × MR_BLOCK_CELLS])
-    inline reaction::RxCell& LinePageCell(sim::MultiresNest& nest, uint32_t slot, uint32_t index) {
-        return nest.cells[nest.blocks.size() + (size_t{nest.blocks[slot].page} * multires::MR_BLOCK_CELLS) + index];
+    // 頁のセルを書き換える(頁は成分の数に合わせた幅で持つので値で読んで書く。T-0931)
+    template <typename Edit>
+    void EditLinePageCell(sim::MultiresNest& nest, uint32_t slot, uint32_t index, Edit&& edit) {
+        reaction::RxCell cell = sim::nest_detail::LoadCellAt(nest, slot, index);
+        edit(cell);
+        sim::nest_detail::StoreCellAt(nest, slot, index, cell);
     }
 
     // セルの物質 species の量(無ければ 0)
@@ -147,23 +151,25 @@ namespace bicameral::test {
             if (slot == multires::MR_NO_BLOCK || multires::MrIsUniform(nest.blocks[slot]))
                 continue;  // 場面が作れていない(テストが LineNestReady で確かめる)
 
-            const reaction::RxCell base = LinePageCell(nest, slot, 0);
+            const reaction::RxCell base = sim::nest_detail::LoadCellAt(nest, slot, 0);
             const int64_t hot = TwoKelvinEnergy(table, base);
             for (uint32_t x = 0; x < multires::MR_BLOCK_EDGE; ++x) {
-                reaction::RxCell& cell = LinePageCell(nest, slot, multires::MrCellIndex(x, 3, 3));
-                if (leaf == 0)
-                    cell.energy += hot;
-                else if (leaf == 1)
-                    cell.energy += 1;
-                else if (leaf == 3)
-                    cell = reaction::RxAddSpecies(cell, oxygen, SpeciesAmountOf(cell, oxygen));
+                EditLinePageCell(nest, slot, multires::MrCellIndex(x, 3, 3), [&](reaction::RxCell& cell) {
+                    if (leaf == 0)
+                        cell.energy += hot;
+                    else if (leaf == 1)
+                        cell.energy += 1;
+                    else if (leaf == 3)
+                        cell = reaction::RxAddSpecies(cell, oxygen, SpeciesAmountOf(cell, oxygen));
+                });
             }
 
             if (leaf != 1 && leaf != 2)
                 continue;
 
             for (uint32_t member = 0; member < multires::MR_CHILDREN_PER_CELL; ++member)
-                LinePageCell(nest, slot, multires::MrCoarsenGroupCell(0, member)).energy += hot;
+                EditLinePageCell(nest, slot, multires::MrCoarsenGroupCell(0, member),
+                                 [&](reaction::RxCell& cell) { cell.energy += hot; });
         }
 
         return nest;

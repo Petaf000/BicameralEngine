@@ -43,7 +43,7 @@ namespace bicameral::test {
         // --- いちばん細かいブロック(一様)の値を熱くして、種にする ---
         const uint32_t finest = sim::LookupBlock(nest, CHAIN_LEVELS, CHAIN_CORNER, CHAIN_CORNER, CHAIN_CORNER);
         FX_ASSERT(finest != multires::MR_NO_BLOCK && multires::MrIsUniform(nest.blocks[finest]));
-        nest.cells[finest] = MakeConductionAir(table, 1500000);
+        nest.cells.uniform[finest] = MakeConductionAir(table, 1500000);
         nest.seeds[finest] = 1;
 
         return nest;

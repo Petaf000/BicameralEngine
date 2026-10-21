@@ -362,7 +362,7 @@ namespace {
                 return RxSameCell(a, b);
             };
             const bool same = HashRealLeaves(narrow) == HashRealLeaves(wide) &&
-                              std::ranges::equal(narrow.cells, wide.cells, sameCell) &&
+                              std::ranges::equal(DenseCellImage(narrow), DenseCellImage(wide), sameCell) &&
                               narrow.counters == wide.counters && narrow.ledger == wide.ledger;
             mismatchedTicks += same ? 0 : 1;
         }

@@ -1,5 +1,5 @@
 // multires_wide_cell.cpp — 多重解像度の世界のセルの溢れ(multires_nest.h の「セルの溢れ」。T-0187・02 §3・17)。
-// セルと端数は「インライン RX_MAX_CELL_SPECIES 個(nest.cells・nest.fractions。GPU と同じ並び)+ 頁・端数の枠ごとの溢れ」に分けて持つ。
+// セルと端数は「インライン RX_MAX_CELL_SPECIES 個(nest.cells〔頁は成分の数に合わせた幅。T-0931〕・nest.fractions)+ 頁・端数の枠ごとの溢れ」に分けて持つ。
 // 読む時は合わせて上限の無い形(RxWideCell・MrWideFraction)にし、書く時は先頭をインラインへ・残りを溢れへ。
 // 溢れはセルの番号の順に詰める(1 セルを書き直すと後ろのセルの位置がずれる)。並びは書いた順に依らず、内容だけで決まる。
 #include <algorithm>
@@ -137,13 +137,14 @@ namespace bicameral::sim {
 
     void StoreWidePageCell(MultiresNest& nest, uint32_t page, uint32_t index, const RxWideCell& cell) {
         FX_ASSERT(nest.wideCells || RxFitsInline(cell));
-        RxCell& narrow = nest_detail::PageCellAt(nest, page, index);
-        narrow = RxMakeEmptyCell(cell.energy);
+        RxCell narrow = RxMakeEmptyCell(cell.energy);
         narrow.speciesCount = std::min(cell.speciesCount, RX_MAX_CELL_SPECIES);
         for (uint32_t i = 0; i < narrow.speciesCount; ++i) {
             narrow.species[i] = cell.species[i];
             narrow.amounts[i] = cell.amounts[i];
         }
+
+        nest_detail::StorePageCell(nest, page, index, narrow);
 
         if (nest.wideCells)
             WriteTail(nest.cellOverflow[page], index, cell.species, cell.amounts, cell.speciesCount);

@@ -108,12 +108,14 @@ namespace {
                     tick, slot, a.kind, b.kind, a.page, b.page, a.busyTick, b.busyTick, a.wakeTick, b.wakeTick);
         }
 
-        for (size_t i = 0; i < cpu.cells.size(); ++i) {
-            if (sim::HashReactionCell(cpu.cells[i]) == sim::HashReactionCell(gpu.cells[i]))
+        const std::vector<RxCell> cpuCells = sim::DenseCellImage(cpu);  // GPU と同じ並び(T-0931)
+        const std::vector<RxCell> gpuCells = sim::DenseCellImage(gpu);
+        for (size_t i = 0; i < cpuCells.size(); ++i) {
+            if (sim::HashReactionCell(cpuCells[i]) == sim::HashReactionCell(gpuCells[i]))
                 continue;
 
             Log(Channel::Sim, Level::Error, "刻み {}: 枠 {} セル {} が違う(エネルギー cpu {} / gpu {})", tick,
-                i / MR_BLOCK_CELLS, i % MR_BLOCK_CELLS, cpu.cells[i].energy, gpu.cells[i].energy);
+                i / MR_BLOCK_CELLS, i % MR_BLOCK_CELLS, cpuCells[i].energy, gpuCells[i].energy);
             break;
         }
 
@@ -1242,7 +1244,8 @@ namespace {
                 }
 
                 Log(Channel::Gpu, Level::Info,
-                    "計測 {}(伝導 {}・根 {}・{} 刻み・1 リスト {} 刻み): {:.2f} ns/セル(1 回目 {:.2f})・バッファ {} KiB・"
+                    "計測 {}(伝導 {}・根 {}・{} 刻み・1 リスト {} 刻み): {:.2f} ns/セル(1 回目 {:.2f})・バッファ {} "
+                    "KiB・"
                     "溢れ {} KiB・待たせた {}",
                     item.name, conduction ? "あり" : "なし", test::MEASURE_ROOTS, MEASURE_TICKS, cost->ticksPerList,
                     cost->nsPerCell, first->nsPerCell, cost->bufferBytes / 1024, cost->overflowBytes / 1024,

@@ -224,8 +224,8 @@ namespace {
 
             const uint32_t parent = nest.blocks[child].parent;
             const uint32_t octant = nest.blocks[child].parentOctant;
-            const RxCell childValue = nest.cells[child];
-            const RxCell parentValue = nest.cells[parent];
+            const RxCell childValue = nest.cells.uniform[child];
+            const RxCell parentValue = nest.cells.uniform[parent];
             const uint32_t pagesBefore = UsedWorldPages(nest);
             const MrRequest coarsen = test::ExpandParentCoarsenRequest();
             SubmitRequests(nest, std::span(&coarsen, 1));

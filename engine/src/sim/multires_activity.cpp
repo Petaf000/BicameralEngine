@@ -27,9 +27,9 @@ namespace bicameral::sim {
 
     namespace {
 
-        using nest_detail::CellAt;
         using nest_detail::CpuTree;
         using nest_detail::FreePageAt;
+        using nest_detail::LoadCellAt;
         using nest_detail::UniformAt;
 
         // --- 頁を畳む(T-0103・T-0104)---
@@ -39,9 +39,9 @@ namespace bicameral::sim {
             const MrBlock& block = nest.blocks[slot];
             FX_ASSERT(!PageHasOverflow(nest, block.page));
             const uint32_t valueCell = MrFoldValueCell(block);
-            const RxCell value = valueCell < MR_BLOCK_CELLS ? CellAt(nest, slot, valueCell) : RxMakeEmptyCell(0);
+            const RxCell value = valueCell < MR_BLOCK_CELLS ? LoadCellAt(nest, slot, valueCell) : RxMakeEmptyCell(0);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (!MrFoldsCell(block, value, index, CellAt(nest, slot, index)))
+                if (!MrFoldsCell(block, value, index, LoadCellAt(nest, slot, index)))
                     return std::nullopt;
             }
 
@@ -91,8 +91,9 @@ namespace bicameral::sim {
 
         // ビット単位で一様なら畳む(溢れのある頁は溢れまで同じ時だけ)。畳んだら true
         bool FoldExact(MultiresNest& nest, uint32_t slot) {
-            nest_fields::ReleaseZeroPages(nest, slot);   // 眠る判定で全部 0 の欄の頁を返す(疎。T-0921)
-            if (!nest_fields::PageFoldable(nest, slot))  // 登録した欄が一様でなければ畳まない(T-0711)
+            nest_fields::ReleaseZeroPages(nest, slot);                   // 眠る判定で全部 0 の欄の頁を返す(疎。T-0921)
+            nest_detail::NarrowPageCells(nest, nest.blocks[slot].page);  // セルの頁の幅を詰める(T-0931)
+            if (!nest_fields::PageFoldable(nest, slot))                  // 登録した欄が一様でなければ畳まない(T-0711)
                 return false;
 
             if (PageHasOverflow(nest, nest.blocks[slot].page)) {
