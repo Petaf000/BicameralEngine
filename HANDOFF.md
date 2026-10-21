@@ -1,13 +1,30 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-21(本体の作業役・表面の細かい形 R-T1 t-0879-rt1 のマージ)
+最終更新: 2026-10-21(本体の作業役・C-0 GPU・R-R0・R-B1・R1 のマージ)
 
 ## 状態(3 行以内)
-- **表面の細かい形 R-T1(t-0879-rt1・T-0879・ADR-0405 Proposed)を main へ入れた**(1 本目で 23 §10 の合格 5 つが通った)。確かめは下の「この仕事でしたこと」。
-- **作業中**: wt2 T-0915(C-0 の GPU 版)・wt3 T-0926/T-0927(R1 の根 t-0926-r1-root)・wt4 R-T2(t-0856-rt2)・wt5 R-B1(T-0871)・wt6 R-R0(t-0910-rr0)。
-- **次**: R2/R3(T-0869)・T-0922(温めた始まりの付け替え)・T-0920(C-1 GPU 側)・R-T1 の残り T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。判断待ち Q143・Q144。
+- **C-0 の GPU 版(t-0915-c0-gpu・ADR-0406)・R-R0 太陽の影の柱(t-0910-rr0・ADR-0395/0396)・R-B1 梁(t-0871-rb1・ADR-0407 Proposed)・R1 の式と根(t-0926-r1-root・ADR-0409)を main へ入れた**。**image_probe_slice が落ちる(下。R-R0 の前から)**。
+- **作業中**: wt2 T-0918(t-0918-c0-compact)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 R-B1 のアーチと洞窟(T-0944)・wt6 R-R1(t-0877-rr1)と R-R0 の費用(T-0957)。
+- **次**: T-0939(C-0 GPU の閉じた領域)・R1 の残り T-0947/T-0948・T-0922・T-0920・T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。判断待ち Q143(材料を足した)・Q144。
 
-## この仕事でしたこと(2026-10-21・本体の作業役・t-0879-rt1 のマージ)
+## この仕事でしたこと(2026-10-21・本体の作業役・t-0915-c0-gpu・t-0910-rr0・t-0871-rb1・t-0926-r1-root のマージ)
+- **マージ**(`--no-ff`): t-0915-c0-gpu(93673f2。GpuEquilibrium〔shaders/sim/equilibrium.hlsl・equilibrium_core.hlsli・engine/src/sim/gpu_equilibrium〕・陰の圧力の GPU を部品の上へ・既定を部品の道に・前の fixedCycles の枝を消した・gpu_gas_projection_t0915・ADR-0406)= 衝突なし →
+  t-0910-rr0(6f6786d。sun_column・gpu_sun_column〔_warp〕・D-610 の光の既定を shaders/common/light.hlsli・luau_type_check の型の文の長さの上限を外した)= 衝突なし →
+  t-0871-rb1(325b411。engine/src/sim/support_law・support_law_test・ADR-0407)= perf.md の行が衝突 → 両方残した →
+  t-0926-r1-root(3cc9227。case_b_flow・物の粘り・case_b_r1・T-0868 5e6da13 を含む・ADR-0409)= tests/CMakeLists.txt の support_law と case_b_r1 が衝突 → 両方残した。
+- **確かめ(release・警告 0・archmap --check OK・float_check 5 本)**: t-0915 の後に CPU 25 本(gas_projection・gas_projection_plates・equilibrium・case_b_*・field_storage・multires_* 15 本・surface_detail・probe_* 4 本)・
+  GPU 20 本(gpu_gas_projection・gpu_gas_projection_t0915・gpu_probe_gas・gpu_probe_sim・gpu_world_copy・gpu_gas〔_flow/_blast/_species/_tree〕と各 _warp)が通った。
+  4 つのマージの後に CPU 11 本(sun_column・support_law・equilibrium・luau_type_check・reaction_package〔_scene〕・radiation_reference・standard_packages・environment_package・blank_world・world_layout)・
+  GPU gpu_sun_column・gpu_sun_column_warp・case_b_box・case_b_gauge・case_b_r1(1 本ずつ。case_b_r1 254 秒)が通った。
+- **image_probe_slice が落ちる(未解決)**: ずれた画素 1045 / 921600(0.1134 %。許容 0.1 %・色の差の最大 19・範囲 (338,36)-(974,510))。main の t-0915 マージ後・R-R0 の前に 2 回・R-R0 等の後に 1 回、
+  wt6 の t-0910-rr0(t-0915 を含まない)でも**同じ 1045 画素**。→ R-R0 でも t-0915 でもなく、その前から(最後に通ったのは 2026-10-17 の本体)。10-17〜10-21 のどのマージかは未確認(image の試験を流していなかった)。
+  基準の置き換え(`tools/image_compare/image_compare.py update`)はしていない。原因のマージを探すか、意図した変化なら基準を置き換えるかを司令塔が決める。
+- **-Filter の「|」**: 崩れていなかった。main・wt2 の `^(a|b.*|c)$` 形の 10 本のログを `ctest -N` の今の一覧と突き合わせ、流れた本数がすべて一致(崩れて見えたのは runner/out/main_tests.txt が 10-15 の古い一覧だったため)。
+  test.ps1 は直していない。worker-common.md の書き方を直した。前の巡目の確かめの流し直しは要らない。
+- **記録**: ROADMAP(T-0915 Done・T-0939 の行・T-0918 作業中・T-0876 R-R0 Done〔費用 2.09〜2.61 ms > 仮の線 1 ms → T-0957〕・T-0877 作業中・T-0871 梁 3 つ合格・T-0919 に R-B1 で要る・T-0868 ほぼ合格・T-0869 R2 作業中)・
+  QUESTIONS Q143 に材料(格子の梁なら軸にそろった 3 値はそのまま入る・おすすめ 1 値で始めて 3 値は後から足せる欄)・COMMANDER(次の番号 **D-614・ADR-0417・T-0966・Q145**)。
+
+## 前の仕事(2026-10-21・本体の作業役・t-0879-rt1 のマージ)
 - **マージ**(`--no-ff`・衝突なし。perf.md は自動で合わさった): t-0879-rt1(671b86a。shaders/common/surface_detail.hlsli〔整数の関数〕・shaders/render/surface_detail_float.hlsli〔小数の版〕・shaders/sim/surface_detail.hlsl・engine/src/sim/surface_detail〔差分の候補 A 格子・B 一覧〕・tests/surface_detail_test・gpu_surface_detail_test〔+ _warp〕・ADR-0405 Proposed・docs/perf.md・map.yaml)。
 - **確かめ**: release のビルド警告 0・CPU 20 本が通った(surface_detail 24 秒・probe_liquid・field_storage・multires_* 13 本・equilibrium・case_b_box・case_b_gauge。約 19 分)・GPU 4 本が通った(gpu_surface_detail・gpu_surface_detail_warp・gpu_probe_liquid・gpu_world_copy)・archmap --check OK・float_check(sim・common・engine/src/sim)OK。直したものなし。
 - **記録**: ROADMAP(T-0879 を「1 本目合格(23 §10 の 5 つ)」・T-0936 物の物理の接触から地面の当たりの関数を呼ぶ口・T-0937 21 §2.7 の塞ぐ面の欄・T-0938 溝を掘った時の真実/彫った形の重なり/掘った土の行き先/セーブの差分の行・R1 と R-T2 を作業中に)・
