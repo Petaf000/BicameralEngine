@@ -97,6 +97,17 @@ add_library(bicameral_gas_projection STATIC
 target_include_directories(bicameral_gas_projection PUBLIC src)
 target_link_libraries(bicameral_gas_projection PUBLIC bicameral_gas bicameral_multires)
 
+# --- case_b: 案 B(多流体の運動量)を CPU で確かめる試作の箱・場面・計器(docs/design/21 §5・T-0866・T-0867)。GPU を知らない。浮動小数点は禁止 ---
+# 判定(21 §5.1)で案 A に戻る時は、このライブラリと src/sim/case_b ごと捨てる。陰の圧力は C-0 ができるまで熱の陰解法の多重格子(multires)を呼ぶ
+add_library(bicameral_case_b STATIC
+  src/sim/case_b/case_b_box.cpp
+  src/sim/case_b/case_b_gauge.cpp
+  src/sim/case_b/case_b_pressure.cpp
+  src/sim/case_b/case_b_scene.cpp
+)
+target_include_directories(bicameral_case_b PUBLIC src)
+target_link_libraries(bicameral_case_b PUBLIC bicameral_multires)
+
 # --- physics: 物理の場面の定義と整数のソルバーの CPU 側(08。T-0016)。GPU を知らない。浮動小数点は禁止 ---
 add_library(bicameral_physics STATIC
   src/sim/physics_scene.cpp
