@@ -1,6 +1,6 @@
 // equilibrium.hlsli — 釣り合う家族の共通部品(docs/design/20-transport-substrate.md §9・§13.1。T-0853・ADR-0397)の式。
-// HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU の回し方は engine/src/sim/equilibrium.cpp、GPU は T-0915 で
-// shaders/sim/equilibrium_*.hlsl がこの関数を呼ぶ(1 つの源。20 §2.7)。
+// HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU の回し方は engine/src/sim/equilibrium.cpp、GPU の回し方は
+// engine/src/sim/gpu_equilibrium.cpp と shaders/sim/equilibrium.hlsl・equilibrium_core.hlsli(T-0915)。どちらもこの関数を呼ぶ(1 つの源。20 §2.7)。
 //
 // 解く式(段 0 の節 i。x は法則の値〔圧力・温度・電位など。レベルによらない強さの量〕):
 //   (C_i + Σ g_f + Σ g_固定) x_i − Σ g_f x_j = Σ 源の項 + Σ g_固定 × x_固定
@@ -74,6 +74,36 @@ FX_FN uint64_t EqResidualMagnitude(int64_t residual, FxU128 diagonal) {
     FX_ASSERT(shifted.hi == 0);
 
     return shifted.lo;
+}
+
+// --- GPU の作業用の 128bit の語の並び(T-0915。uint64 の 2 語で 128bit、上・下の順)-------------------
+// [容量 × 節][対角 × 節][面の係数 × 隣][残差の計器の最大 1 語][残差の計器 × 段 0 の節]。節・隣の数は GpuImplicit の上限
+// (作業場の値 A・B・右辺の番地と同じ数え方)。法則の段(陰の圧力なら GasProjectCell)が段 0 の容量と隣の係数を書き、
+// 部品の段(shaders/sim/equilibrium.hlsl・equilibrium_core.hlsli)が対角・重み・粗い段・残差の計器を作る。
+
+FX_FN uint32_t EqGpuCapacityWord(uint32_t node) {
+    return 2 * node;
+}
+
+FX_FN uint32_t EqGpuDiagonalWord(uint32_t maxNodes, uint32_t node) {
+    return (2 * maxNodes) + (2 * node);
+}
+
+FX_FN uint32_t EqGpuCoefficientWord(uint32_t maxNodes, uint32_t link) {
+    return (4 * maxNodes) + (2 * link);
+}
+
+FX_FN uint32_t EqGpuWorstResidualWord(uint32_t maxNodes, uint32_t maxLinks) {
+    return (4 * maxNodes) + (2 * maxLinks);
+}
+
+FX_FN uint32_t EqGpuResidualWord(uint32_t maxNodes, uint32_t maxLinks, uint32_t node) {
+    return EqGpuWorstResidualWord(maxNodes, maxLinks) + 1 + node;
+}
+
+// 作業用の語の数(段 0 の節 cells)
+FX_FN uint64_t EqGpuScratchWords(uint32_t maxNodes, uint32_t maxLinks, uint32_t cells) {
+    return (uint64_t)EqGpuResidualWord(maxNodes, maxLinks, 0) + cells;
 }
 
 // --- 閉じた領域(物理の長さ)-------------------------------------------------------------------

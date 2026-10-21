@@ -266,6 +266,9 @@ namespace bicameral::sim {
             cost.unknowns = result.unknowns;
             cost.worstResidual = std::max(cost.worstResidual, result.worstResidual);
             cost.worstMassError = std::max(cost.worstMassError, (int64_t)result.worstResidual);
+            cost.unconverged += result.worstResidual > GasInnerToleranceMilligrams(options)
+                                    ? 1
+                                    : 0;  // 前の道の Solve と同じ数え方
             cost.solver.cellUpdates += result.cost.cellUpdates;
             cost.solver.passes += result.cost.passes;
             cost.solver.cycles += result.cost.cycles;
@@ -285,14 +288,6 @@ namespace bicameral::sim {
             std::vector<int64_t> mismatches;
             std::vector<int64_t> cuts;
             const uint32_t limit = std::max<uint32_t>(options.outerIterations, 1);
-            if (options.fixedCycles && limit == 1) {  // T-0842: 解き直さないので食い違いを測らない
-                Solve(grid, rhs, values, options, cost);
-                FinishGasPressure(box, options.pressure, system, values, roundingTick);
-                cost.outerIterations += 1;
-                cost.maxOuterIterations = std::max(cost.maxOuterIterations, 1u);
-                return;
-            }
-
             OuterState previous = MeasureState(box, system);
             for (uint32_t outer = 1;; ++outer) {
                 Solve(grid, rhs, values, options, cost);
@@ -352,11 +347,14 @@ namespace bicameral::sim {
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options) {
         GasProjectionCost cost;
         const uint32_t substeps = options.pressure.substeps;
-        for (uint32_t substep = 0; substep < substeps; ++substep)
-            if (options.equilibrium)
+        // T-0842 の形(V 固定・解き直さない)は釣り合う家族の部品の上で(T-0853・T-0915)。外側の反復の道は前のまま
+        const bool onEquilibrium = options.equilibrium && options.fixedCycles && options.outerIterations <= 1;
+        for (uint32_t substep = 0; substep < substeps; ++substep) {
+            if (onEquilibrium)
                 ProjectOnEquilibrium(box, state, options, (box.tick * substeps) + substep, cost);
             else
                 Project(box, state, options, (box.tick * substeps) + substep, cost);
+        }
 
         ++box.tick;
 

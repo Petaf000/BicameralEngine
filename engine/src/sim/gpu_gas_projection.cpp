@@ -1,6 +1,6 @@
 // gpu_gas_projection.cpp — 気体の圧力の投影の 1 刻みを GPU で(gpu_gas_projection.h)。段の順は shaders/sim/gas_projection.hlsl の先頭の表と同じ。
-// CPU リファレンスの順(gas_projection.cpp の Project の fixedCycles・外側 1 の道):
-//   BeginGasPressure(導く値・C_i・F*・K_f)→ MakePressureGrid・BuildImplicitGrid(段の重み)→ PressureRhs → Solve(V を固定の回数)
+// CPU リファレンスの順(gas_projection.cpp の ProjectOnEquilibrium。部品の上の道):
+//   BeginGasPressure(導く値・C_i・F*・K_f)→ MakeGasEquilibriumSystem → SolveEquilibrium(対角・右辺 ÷ D・段の重み・V を固定の回数)
 //   → FinishGasPressure(x の力積・力を当てる・面の流れ・出ていく割合・移す)。段の間は全部の UAV の書き込みを待つ。
 #include "sim/gpu_gas_projection.h"
 
@@ -17,19 +17,16 @@ namespace bicameral::sim {
     namespace {
 
         constexpr uint32_t THREADS_PER_GROUP = 64;  // gas_projection.hlsl の numthreads
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 14;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 12;
         constexpr uint32_t GAS_UAV_COUNT = 6;  // u0〜u5 は GpuGas のバッファ
-        constexpr uint32_t MIN_HEADROOM = 64;  // 段の上限の余裕(節・隣)
-        constexpr uint32_t MAX_LEVELS = 64;    // 段の数の上限(CPU の MAX_GRID_LEVELS)
-        constexpr uint32_t ROW_MAX = 6;        // 粗い段の行の上限(gas_projection.hlsl の PJ_ROW_MAX)
 
-        // u0〜u5 気体・u6 節・u7 隣・u8 子の一覧・u9 作業場・u10 作業用の 128bit / b0 / デバッグのリング / t0〜t3
+        // u0〜u5 気体・u6〜u10 部品(節・隣・子の一覧・作業場・作業用の 128bit)/ b0 / デバッグのリング / t0〜t3
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = 11, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
 
-        constexpr std::array<const char*, 5> SHADER_NAMES = {
-            "sim/gas_project_face.cso", "sim/gas_project_cell.cso", "sim/gas_project_level.cso",
-            "sim/gas_project_pressure.cso", "sim/gas_project_flow.cso"};
+        constexpr std::array<const char*, 4> SHADER_NAMES = {"sim/gas_project_face.cso", "sim/gas_project_cell.cso",
+                                                             "sim/gas_project_pressure.cso",
+                                                             "sim/gas_project_flow.cso"};
 
         uint32_t GroupsFor(uint64_t threadCount) {
             return (uint32_t)((threadCount + THREADS_PER_GROUP - 1) / THREADS_PER_GROUP);
@@ -46,56 +43,26 @@ namespace bicameral::sim {
                            1);
         }
 
-        // 段ごとの節の始まり(段の数 + 1)
-        std::vector<uint32_t> LevelOffsets(const ImplicitGrid& grid) {
-            std::vector<uint32_t> offsets(1, 0);
-            for (const ImplicitGridLevel& level : grid.levels)
-                offsets.push_back(offsets.back() + (uint32_t)level.levels.size());
-
-            return offsets;
-        }
-
-        // 気体の箱の系か(どの節も同じレベル = 縮約はいつも親のセル。粗い段の行は ROW_MAX まで。gas_projection.hlsl の GasProjectLevel の前提)
-        bool UniformLevels(const ImplicitGrid& grid) {
-            for (size_t depth = 0; depth < grid.levels.size(); ++depth) {
-                const ImplicitGridLevel& level = grid.levels[depth];
-                if (!level.levels.empty() &&
-                    !std::ranges::all_of(level.levels, [&](int32_t value) { return value == level.levels.front(); }))
-                    return false;
-
-                for (size_t i = 0; depth > 0 && i + 1 < level.rowStarts.size(); ++i) {
-                    if (level.rowStarts[i + 1] - level.rowStarts[i] > ROW_MAX)
-                        return false;
-                }
-            }
-
-            return true;
-        }
-
     }  // namespace
 
     std::expected<GpuGasProjection, std::string> GpuGasProjection::Create(ID3D12Device5* device, const GasBox& box,
                                                                           const ImplicitGrid& grid,
                                                                           const GpuGasProjectionOptions& options) {
-        if (grid.levels.empty() || grid.levels.front().levels.size() != box.cells.size() || !UniformLevels(grid))
+        if (grid.levels.empty() || grid.levels.front().levels.size() != box.cells.size() ||
+            !GpuEquilibrium::Supports(grid))
             return std::unexpected("投影の段の形が気体の箱と合わない");
 
         auto gas = GpuGas::Create(device, box);
         if (!gas)
             return std::unexpected(gas.error());
 
-        // 段の形は刻みで変わりうる(段の数・粗い段の隣)ので、上限に余裕を持たせる(作業場の番地は上限で決まる)
-        GpuImplicitLimits limits = GpuImplicit::LimitsOf(grid);
-        limits.nodes = (2 * limits.nodes) + MIN_HEADROOM;
-        limits.links = (2 * limits.links) + MIN_HEADROOM;
-        limits.levels = MAX_LEVELS;
-        auto implicit = GpuImplicit::Create(device, limits);
-        if (!implicit)
-            return std::unexpected(implicit.error());
+        // 部品(段の形は刻みで変わりうるので、上限に余裕を持たせる。作業場の番地は上限で決まる)
+        auto equilibrium = GpuEquilibrium::Create(
+            device, grid, {.solver = options.solver, .shape = options.shape, .meterResiduals = options.meterResiduals});
+        if (!equilibrium)
+            return std::unexpected(equilibrium.error());
 
-        GpuGasProjection result(std::move(*gas), std::move(*implicit));
-        result.m_options = options;
-        result.m_options.shape.fixedCycles = true;
+        GpuGasProjection result(std::move(*gas), std::move(*equilibrium));
         result.m_tick = box.tick;
         if (auto created = result.CreatePipelines(device); !created)
             return std::unexpected(created.error());
@@ -106,12 +73,7 @@ namespace bicameral::sim {
         const uint32_t openness = box.openQ16.empty() ? 0u : 1u;
         std::memcpy(parameters.data() + GAS_GPU_PARAMETERS_OPENNESS, &openness, sizeof(openness));
         result.m_parameters = gpu::CreateResidentBuffer(device, parameters);
-
-        // --- u10: 容量・対角(節)と面の係数(隣)の 128bit ---
-        const GpuImplicitLimits& implicitLimits = result.m_implicit.Limits();
-        const uint64_t scratchWords = (4 * (uint64_t)implicitLimits.nodes) + (2 * (uint64_t)implicitLimits.links);
-        result.m_scratch = gpu::CreateBuffer(device, scratchWords * sizeof(uint64_t), gpu::BufferKind::UnorderedAccess);
-        if (!result.m_parameters.Valid() || !result.m_scratch)
+        if (!result.m_parameters.Valid())
             return std::unexpected("投影のバッファを作れない");
 
         // --- 刻みで変わらないルート定数 ---
@@ -121,15 +83,14 @@ namespace bicameral::sim {
         const uint64_t link = GasPressureLinkCoefficient(1);
         result.m_constants = {.cellCount = (uint32_t)box.cells.size(),
                               .speciesStride = stride,
-                              .maxNodes = implicitLimits.nodes,
-                              .maxLinks = implicitLimits.links,
+                              .maxNodes = result.m_equilibrium.MaxNodes(),
+                              .maxLinks = result.m_equilibrium.MaxLinks(),
                               .perSoundLow = (uint32_t)perSound,
                               .perSoundHigh = (uint32_t)(perSound >> 32),
                               .statePerSoundLow = (uint32_t)statePerSound,
                               .statePerSoundHigh = (uint32_t)(statePerSound >> 32),
                               .linkLow = (uint32_t)link,
                               .linkHigh = (uint32_t)(link >> 32)};
-        result.SetLevels(grid);
 
         return result;
     }
@@ -152,40 +113,19 @@ namespace bicameral::sim {
         return {};
     }
 
-    void GpuGasProjection::SetLevels(const ImplicitGrid& grid) {
-        m_levelOffsets = LevelOffsets(grid);
-    }
-
     bool GpuGasProjection::RecordUpload(ID3D12GraphicsCommandList10* list, const ImplicitGrid& grid) {
         m_gas.RecordUpload(list);
         gpu::RecordResidentUploads(list, std::span(&m_parameters, 1));
-        if (!UploadShape(list, grid))
-            return false;
 
-        // 前の解(値 A・B)を 0 に(CPU の模型の GasProjection::pressures の初め)。右辺と閾値は段が書く・読まない
-        const std::vector<int64_t> zeros(grid.levels.front().levels.size(), 0);
-
-        return m_implicit.RecordUploadSolve(list, zeros, zeros, zeros);
+        // 段の形と、前の解(値 A・B)を 0 に(CPU の模型の GasProjection::pressures の初め)
+        return m_equilibrium.RecordUpload(list, grid, true);
     }
 
     bool GpuGasProjection::RecordBegin(ID3D12GraphicsCommandList10* list, const ImplicitGrid* shape) {
         if (shape != nullptr)
-            return UploadShape(list, *shape);
+            return m_equilibrium.RecordUpload(list, *shape, false);
 
-        m_implicit.RecordReset(list);
-
-        return true;
-    }
-
-    // 段の形を写す(陰解法のバッファが COMMON の時。作業場〔前の解〕は消えない: GpuImplicit::RecordUpload は系と段の形だけを写す)
-    bool GpuGasProjection::UploadShape(ID3D12GraphicsCommandList10* list, const ImplicitGrid& grid) {
-        if (grid.levels.empty() || grid.levels.front().levels.size() != m_constants.cellCount || !UniformLevels(grid))
-            return false;
-
-        if (!m_implicit.RecordUpload(list, grid))
-            return false;
-
-        SetLevels(grid);
+        m_equilibrium.RecordBegin(list);
 
         return true;
     }
@@ -199,9 +139,9 @@ namespace bicameral::sim {
         for (uint32_t i = 0; i < GAS_UAV_COUNT; ++i)
             list->SetComputeRootUnorderedAccessView(i, m_gas.Uav(i)->GetGPUVirtualAddress());
 
-        const std::array<ID3D12Resource*, 5> implicitBuffers = {m_implicit.NodesBuffer(), m_implicit.LinksBuffer(),
-                                                                m_implicit.ListsBuffer(), m_implicit.WorkBuffer(),
-                                                                m_scratch.Get()};
+        const std::array<ID3D12Resource*, 5> implicitBuffers = {
+            m_equilibrium.NodesBuffer(), m_equilibrium.LinksBuffer(), m_equilibrium.ListsBuffer(),
+            m_equilibrium.WorkBuffer(), m_equilibrium.ScratchBuffer()};
         for (uint32_t i = 0; i < implicitBuffers.size(); ++i)
             list->SetComputeRootUnorderedAccessView(GAS_UAV_COUNT + i, implicitBuffers[i]->GetGPUVirtualAddress());
 
@@ -243,21 +183,12 @@ namespace bicameral::sim {
         RecordPass(list, debugRing, Pass::Cell, constants, cells);
         RecordStamp(list, timed, 1);
 
-        // --- 粗い段の重み(段 1 から順に。細かい段の容量・対角・係数を読む)---
-        for (size_t depth = 1; depth + 1 < m_levelOffsets.size(); ++depth) {
-            constants.levelStart = m_levelOffsets[depth];
-            constants.levelCount = m_levelOffsets[depth + 1] - m_levelOffsets[depth];
-            RecordPass(list, debugRing, Pass::Level, constants, constants.levelCount);
-        }
-
+        // --- 部品: 粗い段の重み(段 1 から順に)→ V サイクル(ちょうど solver.cycles 回)→ 残差の計器(積む時)---
+        m_equilibrium.RecordLevels(list, debugRing);
         RecordStamp(list, timed, 2);
-
-        // --- V サイクル(ちょうど solver.cycles 回)---
-        if (!m_implicit.RecordSolve(list, debugRing, m_options.solver, m_options.shape))
+        if (!m_equilibrium.RecordSolve(list, debugRing))
             return false;
 
-        const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
-        list->ResourceBarrier(1, &barrier);
         RecordStamp(list, timed, 3);
 
         // --- 当てる: x を p̃ へ → 面の力・力を当てる → 面の流れ ---
@@ -276,6 +207,14 @@ namespace bicameral::sim {
         ++m_tick;
 
         return true;
+    }
+
+    uint64_t GpuGasProjection::DeviceBytes() const {
+        uint64_t total = m_equilibrium.DeviceBytes() + m_parameters.buffer->GetDesc().Width;
+        for (uint32_t i = 0; i < GAS_UAV_COUNT; ++i)
+            total += m_gas.Uav(i)->GetDesc().Width;
+
+        return total;
     }
 
     // --- 計測 ---

@@ -162,6 +162,8 @@ namespace bicameral::sim {
         [[nodiscard]] ID3D12Resource* LinksBuffer() const { return m_buffers[BufferLinks].Get(); }
         [[nodiscard]] ID3D12Resource* ListsBuffer() const { return m_buffers[BufferLists].Get(); }
         [[nodiscard]] const GpuImplicitLimits& Limits() const { return m_limits; }
+        // VRAM(既定のヒープのバッファ・アップロード・読み戻しの合計。T-0918 の測り)
+        [[nodiscard]] uint64_t DeviceBytes() const;
 
         // バッファを COMMON に戻す(RecordStep の後。同じリストで次の刻みに RecordReset をもう一度呼ぶため。T-0132)
         void RecordRelease(ID3D12GraphicsCommandList* list);
