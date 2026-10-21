@@ -1,13 +1,23 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-21(本体の作業役・image_probe_slice の基準の置き換え・t-0944-rb1-arch のマージ)
+最終更新: 2026-10-21(本体の作業役・T-0942・t-0918-c0-compact・t-0957-rr0-fast のマージ)
 
 ## 状態(3 行以内)
-- **image_probe_slice の基準を置き換えた(原因 ee2802e・意図した変化)・R-B1 のアーチと洞窟(t-0944-rb1-arch・ADR-0415。`stairBraces` 既定 true = 司令塔の仮)を main へ入れた**。Q143・Q144 はユーザーが答えた(D-614・D-615)。
-- **作業中**: wt2 T-0918(t-0918-c0-compact)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 T-0931(セルの真実の量を疎に)・wt6 T-0957(R-R0 の費用)→ R-R1(t-0877-rr1)。
-- **次**: T-0939(C-0 GPU の閉じた領域)・R1 の残り T-0947/T-0948・R-B1 の残り T-0946/T-0960/T-0919・T-0922・T-0920・T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。
+- **T-0942(光の値の書き忘れの警告)を main へ・C-0 の作業場の詰め(t-0918-c0-compact・ADR-0411)と太陽の影の柱の費用(t-0957-rr0-fast)をマージした**。判断待ちに Q145(照り返しの持ち越しのセーブ。一旦 = 入れる)。
+- **作業中**: wt2 T-0919(t-0919-c0-components)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 T-0931・wt6 R-R1(T-0958。t-0877-rr1)。
+- **次**: T-0939(C-0 GPU の閉じた領域)・T-0953〜T-0955・R1 の残り T-0947/T-0948・R-B1 の残り T-0946/T-0960・T-0922・T-0920・T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。
 
-## この仕事でしたこと(2026-10-21・本体の作業役・image_probe_slice の基準・t-0944-rb1-arch のマージ)
+## この仕事でしたこと(2026-10-21・本体の作業役・T-0942・t-0918-c0-compact・t-0957-rr0-fast のマージ)
+- **T-0942**(80c626c。docs/tickets/T-0942): ベイクが固体・液体で光の値(light_absorption_*・light_reflectance_*)を 1 つも書かない物質と、片方の帯だけ書いた欄を警告する
+  (`sim::LIGHT_WARNING_PREFIX` = `"光: "`。表は当たる。気体の書き忘れは知らせない)。game = true でも警告のまま(密度・粘りに合わせた。仮。T-0836 の道で上げられる)。
+  **標準の凝縮相 4 つ(carbon・cellulose・water・ice)と場面の砂 silica に出る**(値はサンプルの中身なので書いていない)。試験: reaction_package に TestMissingLightWarning、標準の「坂以外の警告が無い」は光の警告も除く。
+- **マージ**(`--no-ff`・衝突なし): t-0918-c0-compact(0d5161c。部品の作業場と気体の箱の面を詰める。M-1 の数え方で 1775〜1787 → 883〜902 B/セル・起きた所の上限 約 50 万 → 約 100 万セル〔VRAM〕・
+  128³ で 16.4〜19.4 ns/セル。今の時間の線 10 ms では 53〜61 万セルで時間が先に効く)・t-0957-rr0-fast(b35e1b1。64³ で斜め 2.61 → 0.59 ms・真上 0.93 → 0.22 ms。ビット一致は前と同じ)。
+- **確かめ(release・警告 0)**: T-0942 の後に reaction_package・standard_packages・environment_package・luau_type_check と光の警告に触れうる 7 本(probe_phase・sun_column・world_layout・coupling_table・cell_view・multires_edge・blank_world)。
+  マージの後に CPU 5 本(reaction_package・standard_packages・sun_column・gas_projection・equilibrium〔約 10 分〕)・GPU 5 本(gpu_gas・gpu_gas_warp・gpu_probe_gas・gpu_gas_projection・gpu_gas_projection_t0915)・GPU 3 本(gpu_sun_column・gpu_sun_column_warp・gpu_probe_sim)。全部通った(本数はログの N で数えた)。archmap --check OK。
+- **記録**: ROADMAP(T-0918 = 1 済み・2〜4 は T-0953〜T-0955 の行・T-0919 作業中・T-0957 Done・T-0877 の状態・T-0942 Done)・perf.md の M-0 の節に詰めた後の値・QUESTIONS に Q145・COMMANDER(次の番号 **D-616・ADR-0420・T-0975・Q146**)。
+
+## 前の仕事(2026-10-21・本体の作業役・image_probe_slice の基準・t-0944-rb1-arch のマージ)
 - **image_probe_slice の基準を置き換えた**: `tests/images/probe_slice.png` を今の main(81a6e50)の release の出力から `tools/image_compare/image_compare.py update` で作り直した。
   原因は ee2802e(t-0778。1 mg 未満の液体の端数の持ち越し)による**意図した変化**(前の節の二分)。司令塔の判断で案 (1)(基準の置き換え)。案 (2)(断面の色を量 0 で連続に)はしない(エディタの見せ方の決め事を試験の都合で変えない)。
   **注意**: probe_view.hlsl の SliceColor は量 0 の直上に色の段差(差 19)があるので、300 K すれすれのセルの mK の違いで画像の試験が揺れやすい。シミュの小さな変化で落ちたら、まず二分して意図した変化かを見る。
