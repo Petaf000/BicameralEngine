@@ -44,6 +44,8 @@ namespace {
         uint32_t cycles;
         bool materialViscosity;
         uint32_t eddyPer10000;
+        MomentumLayout layout = MomentumLayout::GrainSeparate;  // 運動量の置き場(T-0963 で ① を並べる)
+        bool splitSurfaceLayer = false;                         // ① で水面の層の横の面を分けるか
     };
 
     // 主は (1) 本物の水・V 4 + 物の粘り(T-0926・T-0927 の後の R1。司令塔のおすすめ)
@@ -55,6 +57,10 @@ namespace {
         {"(1) 本物の水・V 4 + 物の粘り + 渦の粘り C_s 0.17(T-0926 仮説 2・記録)", WATER_SOUND_SPEED_MM_PER_S, 4, true,
          289},
         {"(2) 柔らかい水 100 m/s・V 2 + 物の粘り", 100000, 2, true, 0},
+        {"(1) 本物の水・V 4 + 物の粘り・置き場 ①(T-0963 の既定。しずく・霧を別の速さで)", WATER_SOUND_SPEED_MM_PER_S, 4,
+         true, 0, MomentumLayout::PerPhase},
+        {"(1) 本物の水・V 4 + 物の粘り・置き場 ① + 水面の層も分ける(T-0963 の 2 本目の 1 回目・落ちた記録)",
+         WATER_SOUND_SPEED_MM_PER_S, 4, true, 0, MomentumLayout::PerPhase, true},
     };
 
     struct Run {
@@ -65,7 +71,7 @@ namespace {
 
     Run RunTrial(const Scene& scene, int32_t level, const Trial& trial, uint64_t ticks,
                  const std::vector<std::string_view>& regionNames) {
-        auto created = BuildScene(scene, level, MomentumLayout::GrainSeparate);
+        auto created = BuildScene(scene, level, trial.layout);
         EXPECT(created.has_value());
         Run run{.recording = {}, .stats = {}, .box = std::move(*created)};
         std::vector<BoxRegion> regions;
@@ -74,7 +80,8 @@ namespace {
 
         const FlowStages flow = MakeFlowStages({.liquidSoundSpeedMmPerS = trial.soundMmPerS,
                                                 .materialViscosity = trial.materialViscosity,
-                                                .eddyCoefficientPer10000 = trial.eddyPer10000});
+                                                .eddyCoefficientPer10000 = trial.eddyPer10000,
+                                                .splitSurfaceLayer = trial.splitSurfaceLayer});
         run.recording = RunScene(run.box, flow.stages, MakeImplicitGridSolver(trial.cycles, TOLERANCE_NL), ticks,
                                  regions);
         run.stats = *flow.stats;
@@ -320,7 +327,7 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // 引数で組を 1 つに絞れる(0〜4)。無ければ全部
+    // 引数で組を 1 つに絞れる(0〜6。5 = 置き場 ①・6 = ① + 水面の層も分ける)。無ければ全部
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
     Determinism();
     for (int index = 0; index < (int)std::size(TRIALS); ++index) {

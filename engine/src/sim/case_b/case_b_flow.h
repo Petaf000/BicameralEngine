@@ -29,6 +29,15 @@
 //   K_x は Darcy(μ φ_f² ÷ k。全体の体積あたり)。粒の重さと浮力は重さの軸の面に陽で(浮力は流体の密度 × 粒の体積)。
 //   粒が詰まった所(grainPackedQ16 ≥ 1)へ入る粒の面は止める(帳簿 Wall。押し合いは R3 の仕事・仮)。
 //   粒・孔が無ければ R1 とビット単位で同じ(r = 0・K_x = 0)。気体 ↔ 液体の引きずり(しずく・泡・水面の風)は置き場 ① が要る(T-0963)。
+//
+// 置き場 ①(T-0963。箱の layout = PerPhase なら同じ段がこちらを通る。④ の計算は変えない):
+//   気体と液体を別の面の運動量で持ち、面ごとに体積の大きい相を主の流体、もう一方を主でない流体として、粒と同じ形で消去する
+//   (主でない流体・粒は主の流体とだけつながる星の形なので、消去を足し合わせられる。系の形は ④ と同じ)。
+//   水面のセル(気体と液体があり、下が液体だけか閉じている)は相ごとの柱(気体が上・液体が下の層)で支え、
+//   層の面の気体 ↔ 液体は境の剪断 K = ρ_g C_f |Δv| A Δt(C_f = surfaceShearPer10000。21 §2.4 の「水面のセルでは弱める」)。
+//   混ざった面(しずく・泡)は、重さの軸で浮力(重さ − 押しのけた混ざりの重さ)を相どうしで受け渡し(和 0。柱は混ざりを支える)、
+//   しずく・泡の抗力(粒と同じ式。大きさ drop_size_um・形の定数 dropShapeDragPermille)× 主でない流体の体積でつなぐ。
+//   運びは相ごとに、風上のセルのその相の割合を移す(主は解いた体積の流れ・主でない流体は面の速さ × Δt ÷ Δx)。
 
 #pragma once
 
@@ -54,6 +63,15 @@ namespace bicameral::sim::case_b {
         bool drag = false;
         // 粒の形の抗力の定数 C₂(‰。C_d ≈ 24/Re + C₂。自然の砂 1000・滑らかな球 400。Ferguson & Church 2004)。法則の定数(仮)
         uint32_t grainShapeDragPermille = 1000;
+
+        // --- 置き場 ①(T-0963)---
+        // しずく・泡の形の抗力の定数 C₂(‰)。2 mm の雨粒は滑らかな球に近い 400(仮。法則の定数)
+        uint32_t dropShapeDragPermille = 400;
+        // 水面のセルの境の剪断の係数 C_f × 10^4(30 = 0.003。21 §2.6 の面の剪断と同じ値。仮。法則の定数)
+        uint32_t surfaceShearPer10000 = 30;
+        // 水面の層の横の面を別の速さで解く(T-0963 の 2 本目)。true にすると水面の風は 1/120 で合格するが、
+        // 連通管・閉じた空気・ダムが崩れ、1/60 の風洞が暴れた。既定 false = しずく・霧だけ分ける(R1 は ④ と同じ値。仮)
+        bool splitSurfaceLayer = false;
     };
 
     // 1 つのセルの状態式の結果(刻みの初めの中身から)
@@ -89,6 +107,12 @@ namespace bicameral::sim::case_b {
         uint64_t grainLimitedCells = 0;   // 出る粒の体積を中の粒で縮めたセル
         uint64_t blockedGrainFaces = 0;   // 詰まった所へ入る粒の面を止めた数(R3 まで・仮)
         uint64_t vanishedGrainFaces = 0;  // 粒が消えた面の運動量を流体へ渡した数(相が消える所)
+
+        // --- 置き場 ①(T-0963)---
+        uint64_t fluidPairFaces = 0;     // 気体と液体を別の速さで解いた面
+        uint64_t surfaceFaces = 0;       // そのうち層の面(境の剪断)
+        uint64_t mergedFluidFaces = 0;   // 気体と液体があるが 1 つの速さで解いた面(主の流体が片側に無い)
+        uint64_t stoppedFluidFaces = 0;  // 主でない流体が、その相の無いセルから出る向きなので止めた面
     };
 
     struct FlowStages {
@@ -98,7 +122,7 @@ namespace bicameral::sim::case_b {
 
     [[nodiscard]] FlowCell MeasureFlowCell(const Box& box, const View& view, uint32_t cell, const FlowOptions& options);
 
-    // 置き場は ④(MomentumLayout::GrainSeparate)の箱だけ。段は pressure・transport・apply を使う(drag なら粒も動かす)
+    // 置き場は ④(GrainSeparate)と ①(PerPhase。T-0963)。段は pressure・transport・apply を使う(drag なら粒も動かす)
     [[nodiscard]] FlowStages MakeFlowStages(const FlowOptions& options);
 
 }  // namespace bicameral::sim::case_b
