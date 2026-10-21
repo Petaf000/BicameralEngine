@@ -5,9 +5,11 @@
 #include "script/reaction_package.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <limits>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -192,6 +194,43 @@ namespace bicameral::script {
             return ReadSolidMotion(value, path, transport);
         }
 
+        // 光の値の欄 1 つ(任意。0〜上限の整数)
+        std::expected<void, std::string> ReadOptionalLight(const ScriptValue& value, std::string_view field,
+                                                           const std::string& path, int64_t limit,
+                                                           std::optional<uint32_t>& destination) {
+            const ScriptValue* declared = value.Find(field);
+            if (declared == nullptr)
+                return {};
+
+            const auto read = ReadInteger(*declared, path + "." + std::string(field), 0, limit);
+            if (!read)
+                return std::unexpected(read.error());
+
+            destination = static_cast<uint32_t>(*read);
+
+            return {};
+        }
+
+        std::expected<void, std::string> ReadSpeciesLight(const ScriptValue& value, const std::string& path,
+                                                          sim::SpeciesDefinition& species) {
+            constexpr int64_t PERMILLE_LIMIT = 1000;
+            const std::array<std::expected<void, std::string>, 4> results = {
+                ReadOptionalLight(value, "light_absorption_short_mm2_per_mol", path, UINT32_LIMIT,
+                                  species.lightAbsorptionShort),
+                ReadOptionalLight(value, "light_absorption_long_mm2_per_mol", path, UINT32_LIMIT,
+                                  species.lightAbsorptionLong),
+                ReadOptionalLight(value, "light_reflectance_short_permille", path, PERMILLE_LIMIT,
+                                  species.lightReflectanceShortPermille),
+                ReadOptionalLight(value, "light_reflectance_long_permille", path, PERMILLE_LIMIT,
+                                  species.lightReflectanceLongPermille)};
+            for (const auto& result : results) {
+                if (!result)
+                    return std::unexpected(result.error());
+            }
+
+            return {};
+        }
+
         std::expected<SpeciesDefinition, std::string> ReadSpecies(const std::string& name, const ScriptValue& value,
                                                                   const std::string& path) {
             static constexpr std::string_view FIELDS[] = {"composition",
@@ -201,6 +240,10 @@ namespace bicameral::script {
                                                           "standard_entropy_mj_per_mol_k",
                                                           "condensed",
                                                           "radiation_absorption_mm2_per_mol",
+                                                          "light_absorption_short_mm2_per_mol",
+                                                          "light_absorption_long_mm2_per_mol",
+                                                          "light_reflectance_short_permille",
+                                                          "light_reflectance_long_permille",
                                                           "phase",
                                                           "density_kg_per_m3",
                                                           "viscosity_upa_s",
@@ -263,6 +306,10 @@ namespace bicameral::script {
 
                 species.radiationAbsorption = static_cast<uint32_t>(*absorption);
             }
+
+            // 光の値(任意。2 つの帯。名前は仮。書かない値はベイクが決める: sim::BakeSpeciesLight・D-610。T-0910)
+            if (auto light = ReadSpeciesLight(value, path, species); !light)
+                return std::unexpected(light.error());
 
             // 相(任意。既定 gas。T-0609・T-0710): "gas" / "solid" / "liquid"。condensed と食い違えば断る
             if (const ScriptValue* phase = value.Find("phase")) {

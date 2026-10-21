@@ -79,6 +79,10 @@ add_executable(radiation_reference_test radiation_reference_test.cpp)
 target_link_libraries(radiation_reference_test PRIVATE bicameral_test_reaction_table bicameral_reaction_script bicameral_core)
 add_test(NAME radiation_reference COMMAND radiation_reference_test)
 # 放射の対を平行な線の束で見つける(T-0584・ADR-0262): 平行な板の解析解・陰・受け手の分け前・保存・膜
+# 太陽の影の柱の CPU リファレンス(T-0910・23 §10 R-R0): 光の値の欄・壁の陰・保存・細かさ・温室・多重解像度・決定的
+add_executable(sun_column_test sun_column_test.cpp)
+target_link_libraries(sun_column_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
+add_test(NAME sun_column COMMAND sun_column_test)
 add_executable(radiation_lines_test radiation_lines_test.cpp)
 target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME radiation_lines COMMAND radiation_lines_test)
@@ -501,6 +505,12 @@ bicameral_add_gpu_test(gpu_multires_quiet_test)  # 静かなブロックを粗�
 target_link_libraries(gpu_multires_quiet_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_quiet gpu_multires_quiet_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_multires_quiet_warp gpu_multires_quiet_test warp --warp --queue compute)
+
+bicameral_add_gpu_test(gpu_sun_column_test)  # 太陽の影の柱の GPU と CPU のビット一致・費用(T-0910)
+target_link_libraries(gpu_sun_column_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_sun_column gpu_sun_column_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_sun_column_warp gpu_sun_column_test warp --warp --queue compute)
+set_tests_properties(gpu_sun_column gpu_sun_column_warp PROPERTIES TIMEOUT 900)
 
 bicameral_add_gpu_test(gpu_multires_uniform_test)  # 一様なブロックの GPU と CPU のビット一致(T-0102)
 target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
@@ -1028,9 +1038,9 @@ add_test(NAME float_check_source_accepts
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test field_storage_test
+    multires_state_test field_storage_test sun_column_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
-    gpu_reaction_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
+    gpu_reaction_test gpu_sun_column_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test

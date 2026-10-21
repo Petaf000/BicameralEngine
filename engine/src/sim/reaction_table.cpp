@@ -251,6 +251,7 @@ namespace bicameral::sim {
             baked.standardEntropies.emplace_back();
             baked.speciesCondensed.push_back(0);
             baked.speciesRadiationAbsorption.push_back(0);
+            baked.speciesLight.push_back({});
             baked.speciesLiquid.push_back(0);
             baked.speciesMolarVolume.push_back(0);
             baked.speciesPhase.push_back(SpeciesPhase::Gas);
@@ -276,6 +277,7 @@ namespace bicameral::sim {
                 baked.speciesCondensed.push_back(entry.phase != SpeciesPhase::Gas ? 1 : 0);
                 baked.species.back().flags = entry.phase != SpeciesPhase::Gas ? 0u : RX_SPECIES_GAS;  // T-0622
                 baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
+                baked.speciesLight.push_back(BakeSpeciesLight(entry));
 
                 // モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数(液体は密度が要る。T-0609・ADR-0266)
                 const uint64_t molarVolume = entry.density == 0
@@ -650,6 +652,34 @@ namespace bicameral::sim {
         const auto found = std::find(speciesNames.begin() + 1, speciesNames.end(), name);
 
         return found == speciesNames.end() ? 0 : static_cast<uint32_t>(found - speciesNames.begin());
+    }
+
+    // 光の値(T-0910・23 §2.3・D-610)。吸い込み: 帯の値 → もう片方の帯の値(灰色)→ radiation_absorption_mm2_per_mol(0 でなければ)→
+    // 相の既定(固体・液体は通さない上限・気体は 0 = 透明)。照り返し: 帯の値 → もう片方の帯の値 → 光の値を 1 つも書かない固体・液体は 0.5(値は仮)・ほかは 0
+    reaction::LtSpeciesLight BakeSpeciesLight(const SpeciesDefinition& definition) {
+        const bool condensed = definition.phase != SpeciesPhase::Gas;
+        const bool anyWritten = definition.lightAbsorptionShort || definition.lightAbsorptionLong ||
+                                definition.lightReflectanceShortPermille || definition.lightReflectanceLongPermille ||
+                                definition.radiationAbsorption != 0;
+        const uint32_t phaseAbsorption = condensed ? reaction::LT_OPAQUE_ABSORPTION_MM2_PER_MOL : 0u;
+        const uint32_t fallbackAbsorption = definition.radiationAbsorption != 0 ? definition.radiationAbsorption
+                                                                                : phaseAbsorption;
+        const uint32_t phaseReflectance = condensed && !anyWritten ? reaction::LT_DEFAULT_CONDENSED_REFLECTANCE_PERMILLE
+                                                                   : 0u;
+
+        const auto pick = [](const std::optional<uint32_t>& own, const std::optional<uint32_t>& other,
+                             uint32_t fallback) {
+            return own ? *own : (other ? *other : fallback);
+        };
+
+        return {
+            .absorptionShort = pick(definition.lightAbsorptionShort, definition.lightAbsorptionLong,
+                                    fallbackAbsorption),
+            .absorptionLong = pick(definition.lightAbsorptionLong, definition.lightAbsorptionShort, fallbackAbsorption),
+            .reflectanceShortQ16 = reaction::LtPermilleToQ16(pick(
+                definition.lightReflectanceShortPermille, definition.lightReflectanceLongPermille, phaseReflectance)),
+            .reflectanceLongQ16 = reaction::LtPermilleToQ16(pick(
+                definition.lightReflectanceLongPermille, definition.lightReflectanceShortPermille, phaseReflectance))};
     }
 
     std::expected<BakedReactionTable, std::string> BakeReactionTable(const ReactionTableDefinition& definition) {

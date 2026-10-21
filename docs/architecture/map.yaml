@@ -182,6 +182,12 @@ views:
       - { id: surfacedetail, group: shared, status: research, label: "surface_detail.hlsli<br/>表面の細かい形(整数の関数・当たり・開き具合)",
           code: "shaders/common/surface_detail.hlsli::SdGroundHeightUm", ticket: T-0879, doc: docs/design/23-radiation.md,
           note: "研究 R-T1(23 §7・§10)。下地 + 肌理の値の雑音 + 彫った深さ(候補 B 一覧 / 候補 A 格子)。CPU の区画は sim/surface_detail、GPU は sim/surface_detail.hlsl、描画の小数の版は render/surface_detail_float.hlsli" }
+      - { id: suncolumn, group: shared, label: "sun_column.hlsli<br/>太陽の影の柱(向き 1 つの光線の束で木の葉を掃く)",
+          code: "shaders/common/sun_column.hlsli::SunWalkRay", ticket: T-0910, doc: docs/decisions/ADR-0396-sun-shadow-column-sweep.md,
+          note: "光線の細かさの格子・板の真ん中の点で葉を引き同じ葉を 1 区間に・e^−τ で通す・照り返しを返す。CPU リファレンス sim/sun_column(SweepSunColumn)と GPU sim/gpu_sun_column(sun_column.hlsl の SunSweep。1 スレッド = 光線 1 本・64bit の atomic)がビット一致。出力はセルごとの吸った・返した(当たる面へ渡す口)" }
+      - { id: lightvalues, group: shared, label: "light.hlsli<br/>物質の光の値(2 つの帯の吸い込み・照り返し)",
+          code: "shaders/common/light.hlsli::LtCellBandOf", ticket: T-0910, doc: docs/decisions/ADR-0395-species-light-values-two-bands.md,
+          note: "ベイク sim::BakeSpeciesLight(書かない固体・液体は灰色で通さない・気体は透明。D-610)→ BakedReactionTable::speciesLight → セルの帯ごとの Σ a·n と照り返し" }
       - { id: firetest, group: tests, label: "gpu_probe_fire_test<br/>木箱に火をつけて 10 分",
           code: "tests/gpu_probe_fire_test.cpp::RunFire", ticket: T-0089,
           note: "刻みごとのエネルギー・最後の元素・もう一度走らせて同じ・燃え広がる(1 秒ごとの経過)。ctest は 1 分、10 分は release で" }
@@ -578,6 +584,7 @@ views:
     edges:
       - [main, caps, "--caps"]
       - [radiationlines, radiation, "対(見え方・分け前)"]
+      - [suncolumn, lightvalues, "セルの帯ごとの吸い込み・照り返し"]
       - [caps, d3d12, "D3D12CreateDevice"]
       - [d3d12, sdkver, "起動時に読む"]
       - [d3d12, core, "bin/D3D12 から読み込む"]
