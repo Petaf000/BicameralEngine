@@ -1298,6 +1298,122 @@ namespace {
         std::printf("bet: %d case(s) not passed (research; not counted as test failures)\n", failures);
     }
 
+    // --- T-0900(測り M-1): 硬い液体を同じ陰の圧力に入れた時、V サイクルが何回要るか(費用の見込みの入力)---
+    // 陰の圧力の式は (C_i + Σ K_f) x_i − Σ K_f x_j = 右辺(C = V ÷ c²〔mg/µPa の Q48〕、K = A Δt² ÷ Δx)。
+    // K は密度によらない(質量の流れ = 運動量の形)ので、水が空気と違うのは C だけ(c² の比 = (1500 ÷ 340)² ≈ 19.5 倍)。
+    // 同じ解き方(BuildImplicitGrid・CycleImplicitGrid。今の陰の圧力と同じ段と回し方)に、空気・水・水の上に空気・柔らかい水を入れ、
+    // 段の扉(片側 +2 % の圧力)と 1 セルの湧き出しで、V の回数ごとの「解き切った値とのずれ(Pa)」と式の誤差(mg)を出す。値は浮動小数点で表示だけ
+    constexpr uint64_t T0900_LINK = ((uint64_t)1 << 47) / 3600;  // K(GasPressureLinkCoefficient(1))
+
+    uint64_t T0900Capacity(double soundMetersPerSecond) {  // C = V ÷ c²(mg/µPa の Q48)= 2^45 × 10^6 ÷ c(mm/s)²
+        const double soundMm = soundMetersPerSecond * 1000.0;
+        return (uint64_t)(35184372088832.0 * 1e6 / (soundMm * soundMm));
+    }
+
+    struct T0900Material {
+        const char* name = "";
+        double lower = 340;  // z < 半分のセルの音速(m/s)
+        double upper = 340;  // 上半分
+    };
+
+    struct T0900Row {
+        std::vector<double> pressureErrorPa;  // V k 回の後の max |x − x_解き切った| (Pa)
+        std::vector<double> massErrorMg;      // V k 回の後の max |残差 × D|(mg)
+        size_t levels = 0;
+    };
+
+    T0900Row RunLiquidSolve(uint32_t edge, const T0900Material& material, bool step, uint32_t maxCycles) {
+        const size_t count = (size_t)edge * edge * edge;
+        std::vector<ImplicitCell> cells(count);
+        std::vector<ImplicitFace> faces;
+        for (uint32_t index = 0; index < count; ++index) {
+            const uint32_t x = index % edge;
+            const uint32_t y = (index / edge) % edge;
+            const uint32_t z = index / (edge * edge);
+            cells[index].x = x;
+            cells[index].y = y;
+            cells[index].z = z;
+            cells[index].heatCapacity = T0900Capacity(z < edge / 2 ? material.lower : material.upper);
+            const std::array<uint32_t, 3> coordinate = {x, y, z};
+            const std::array<uint32_t, 3> stride = {1, edge, edge * edge};
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                if (coordinate[axis] + 1 < edge)
+                    faces.push_back({.fine = index,
+                                     .coarse = index + stride[axis],
+                                     .gap = 0,
+                                     .coefficient = {.hi = 0, .lo = T0900_LINK}});
+            }
+        }
+
+        const ImplicitGrid grid = BuildImplicitGrid(cells, faces);
+        const ImplicitGridLevel& level = grid.levels[0];
+
+        // 右辺: 扉 = 左半分の状態の圧力 +2 %(2026 Pa)/ 湧き出し = 真ん中の 1 セルに 1 g の質量の食い違い
+        std::vector<int64_t> rhs(count, 0);
+        for (uint32_t index = 0; index < count; ++index) {
+            const double diagonal = (double)level.diagonals[index].lo;
+            if (step && index % edge < edge / 2)
+                rhs[index] = (int64_t)((double)cells[index].heatCapacity * 2026.0e6 / diagonal);
+        }
+
+        if (!step) {
+            const uint32_t center = edge / 2;
+            const size_t index = center + ((size_t)center * edge) + ((size_t)center * edge * edge);
+            rhs[index] = (int64_t)(1000.0 * 281474976710656.0 /
+                                   (double)level.diagonals[index].lo);  // 1000 mg × 2^48 ÷ D
+        }
+
+        ImplicitOptions options;
+        options.method = ImplicitMethod::Multigrid;
+        ImplicitCost cost;
+        std::vector<int64_t> exact(count, 0);
+        for (uint32_t cycle = 0; cycle < 4 * maxCycles; ++cycle)
+            CycleImplicitGrid(grid, rhs, exact, options, cost);
+
+        T0900Row row;
+        row.levels = grid.levels.size();
+        std::vector<int64_t> values(count, 0);
+        for (uint32_t cycle = 1; cycle <= maxCycles; ++cycle) {
+            CycleImplicitGrid(grid, rhs, values, options, cost);
+            double pressure = 0;
+            double mass = 0;
+            for (size_t index = 0; index < count; ++index) {
+                pressure = std::max(pressure, std::abs((double)(values[index] - exact[index])) * 1e-6);
+                const double residual = (double)ImplicitGridResidual(grid, rhs, values, index);
+                mass = std::max(mass, std::abs(residual) * (double)level.diagonals[index].lo / 281474976710656.0);
+            }
+
+            row.pressureErrorPa.push_back(pressure);
+            row.massErrorMg.push_back(mass);
+        }
+
+        return row;
+    }
+
+    void RunLiquidStudy(uint32_t maxEdge) {
+        constexpr std::array<T0900Material, 5> MATERIALS = {{{"air 340", 340, 340},
+                                                             {"water 1500", 1500, 1500},
+                                                             {"water+air", 1500, 340},
+                                                             {"soft water 474", 474, 474},
+                                                             {"soft water+air", 474, 340}}};
+        constexpr std::array<uint32_t, 6> SHOWN = {1, 2, 4, 8, 16, 32};
+        constexpr uint32_t MAX_CYCLES = 32;
+        for (uint32_t edge = 16; edge <= maxEdge; edge *= 2) {
+            for (const bool step : {true, false}) {
+                for (const T0900Material& material : MATERIALS) {
+                    const T0900Row row = RunLiquidSolve(edge, material, step, MAX_CYCLES);
+                    std::string line = std::format("t0900 | {}^3 | {:<5} | {:<15} | levels {:>2} |", edge,
+                                                   step ? "step" : "point", material.name, row.levels);
+                    for (const uint32_t cycles : SHOWN)
+                        line += std::format(" V{} {:.3g} Pa / {:.3g} mg |", cycles, row.pressureErrorPa[cycles - 1],
+                                            row.massErrorMg[cycles - 1]);
+
+                    std::printf("%s\n", line.c_str());
+                }
+            }
+        }
+    }
+
 }  // namespace
 
 // 引数 --sweep で、外側の反復の止め方の違いを測る(遅い。ctest では回さない)
@@ -1313,6 +1429,12 @@ int main(int argc, char** argv) {
         const int ticks = argc > 2 ? std::atoi(argv[2]) : 300;
         const int explicitTicks = argc > 3 ? std::atoi(argv[3]) : 30;
         RunBetStudy(ticks, explicitTicks);
+        return 0;
+    }
+
+    if (argc > 1 &&
+        std::string_view(argv[1]) == "--t0900") {  // T-0900(測り M-1。液体を同じ陰の圧力に入れた時の V の回数)
+        RunLiquidStudy(argc > 2 ? (uint32_t)std::atoi(argv[2]) : 64);
         return 0;
     }
 
