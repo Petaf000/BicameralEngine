@@ -3,7 +3,7 @@
 最終更新: 2026-10-21(本体の作業役・C-0 GPU・R-R0・R-B1・R1 のマージ)
 
 ## 状態(3 行以内)
-- **C-0 の GPU 版(t-0915-c0-gpu・ADR-0406)・R-R0 太陽の影の柱(t-0910-rr0・ADR-0395/0396)・R-B1 梁(t-0871-rb1・ADR-0407 Proposed)・R1 の式と根(t-0926-r1-root・ADR-0409)を main へ入れた**。**image_probe_slice が落ちる(下。R-R0 の前から)**。
+- **C-0 の GPU 版(t-0915-c0-gpu・ADR-0406)・R-R0 太陽の影の柱(t-0910-rr0・ADR-0395/0396)・R-B1 梁(t-0871-rb1・ADR-0407 Proposed)・R1 の式と根(t-0926-r1-root・ADR-0409)を main へ入れた**。**image_probe_slice が落ちる(下。原因は t-0778・意図した変化。基準の置き換え待ち)**。
 - **作業中**: wt2 T-0918(t-0918-c0-compact)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 R-B1 のアーチと洞窟(T-0944)・wt6 R-R1(t-0877-rr1)と R-R0 の費用(T-0957)。
 - **次**: T-0939(C-0 GPU の閉じた領域)・R1 の残り T-0947/T-0948・T-0922・T-0920・T-0936〜T-0938 → 最低機 Q11 → T-0858 棚卸し。判断待ち Q143(材料を足した)・Q144。
 
@@ -16,9 +16,16 @@
   GPU 20 本(gpu_gas_projection・gpu_gas_projection_t0915・gpu_probe_gas・gpu_probe_sim・gpu_world_copy・gpu_gas〔_flow/_blast/_species/_tree〕と各 _warp)が通った。
   4 つのマージの後に CPU 11 本(sun_column・support_law・equilibrium・luau_type_check・reaction_package〔_scene〕・radiation_reference・standard_packages・environment_package・blank_world・world_layout)・
   GPU gpu_sun_column・gpu_sun_column_warp・case_b_box・case_b_gauge・case_b_r1(1 本ずつ。case_b_r1 254 秒)が通った。
-- **image_probe_slice が落ちる(未解決)**: ずれた画素 1045 / 921600(0.1134 %。許容 0.1 %・色の差の最大 19・範囲 (338,36)-(974,510))。main の t-0915 マージ後・R-R0 の前に 2 回・R-R0 等の後に 1 回、
-  wt6 の t-0910-rr0(t-0915 を含まない)でも**同じ 1045 画素**。→ R-R0 でも t-0915 でもなく、その前から(最後に通ったのは 2026-10-17 の本体)。10-17〜10-21 のどのマージかは未確認(image の試験を流していなかった)。
-  基準の置き換え(`tools/image_compare/image_compare.py update`)はしていない。原因のマージを探すか、意図した変化なら基準を置き換えるかを司令塔が決める。
+- **image_probe_slice が落ちる(原因が分かった・基準はまだ置き換えていない)**: ずれた画素 1045 / 921600(0.1134 %。許容 0.1 %・色の差の最大 19・範囲 (338,36)-(974,510))。
+  **原因は ee2802e(Merge t-0778: 1 mg 未満の液体の端数を面の欄で持ち越す。D-522 案 b・ADR-0357 Proposed)**。本体で手で二分(release・`^image_probe_slice$`):
+  7f5d11e 通る・06722c2(t-0819)通る・**ee2802e 落ちる(1045)**・51f6a9b 落ちる・d35b5c4 落ちる(どれも同じ 1045 画素)。06722c2..ee2802e の間は t-0778 の 2 コミット(d460ec3・7ec1034)だけ。image_probe_volume は main でも通る。
+  **意図した変化(不具合ではない)と判断**: t-0778 は液体の流れ方を変えた(1 mg までの面の流れを持ち越して順番の刻みにまとめて動かす)ので、燃える木箱の世界の 4 秒後の温度がわずかに変わる。描画・シェーダー・物質の値は触っていない。
+  ずれ方: ずれた画素はすべて断面の「活性なブロック」の上の数セル(1 セル約 11×13 画素 × 約 7 セル)。色は 2 つだけで、(10,48,61)〔温度が 300 K をごくわずかに超える = HeatColor の小さな赤〕と
+  (19,59,80)〔300 K 以下 = COLD_SLICE_COLOR〕が入れ替わった(前は小さな赤 → 今は冷たい色 814 画素・逆 231 画素)。色の差 8 以下の小さな違いが 33951 画素(赤の 22〜26 の揺れ = 温い所の温度のわずかな差)。
+  **根(見せ方の段差)**: probe_view.hlsl の SliceColor は `amount > 0 ? HeatColor(amount) : COLD_SLICE_COLOR` で、量 0 とごくわずかの間に色の段差(差 19)がある。だから 300 K すれすれのセルの mK の違いで画像の試験が落ちる。
+  案: (1) 基準を置き換える(`python3 tools/image_compare/image_compare.py update out/build/release/tests/images/probe_slice.bmp tests/images/probe_slice.png` 相当。変わるのは上の数セルの色だけ)/
+  (2) (1) に加えて、断面の色を量 0 で連続にする(HeatColor(0) を COLD_SLICE_COLOR に合わせるなど。両方の画像の基準が変わる)と、シミュの小さな変化で画像の試験が落ちにくくなる。おすすめは (1)。(2) は見せ方の決め事なので司令塔・ユーザーが決める。
+  **基準の置き換えはまだしていない**(司令塔が決める)。二分の後、本体は main(d35b5c4)に戻して release でビルドし直した。
 - **-Filter の「|」**: 崩れていなかった。main・wt2 の `^(a|b.*|c)$` 形の 10 本のログを `ctest -N` の今の一覧と突き合わせ、流れた本数がすべて一致(崩れて見えたのは runner/out/main_tests.txt が 10-15 の古い一覧だったため)。
   test.ps1 は直していない。worker-common.md の書き方を直した。前の巡目の確かめの流し直しは要らない。
 - **記録**: ROADMAP(T-0915 Done・T-0939 の行・T-0918 作業中・T-0876 R-R0 Done〔費用 2.09〜2.61 ms > 仮の線 1 ms → T-0957〕・T-0877 作業中・T-0871 梁 3 つ合格・T-0919 に R-B1 で要る・T-0868 ほぼ合格・T-0869 R2 作業中)・
