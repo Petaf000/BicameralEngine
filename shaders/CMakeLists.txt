@@ -229,6 +229,13 @@ foreach(_entry IN ITEMS GasDerive GasFaceForce GasApplyForce GasFaceFlow GasOutf
   bicameral_add_shader(sim/gas_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
 endforeach()
 
+# 気体の圧力の投影の 1 刻みの段(T-0845。本物の音速の陰解法の式を作る・段の重み・当てる。呼ぶ順は engine/src/sim/gpu_gas_projection.cpp)
+foreach(_entry IN ITEMS GasProjectFace GasProjectCell GasProjectLevel GasProjectPressure GasProjectFlow)
+  string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
+  string(TOLOWER "${_snake}" _snake)
+  bicameral_add_shader(sim/gas_projection.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
+endforeach()
+
 # 気体の多重解像度の木の 1 小刻みの Compute の段(T-0209。呼ぶ順は engine/src/sim/gpu_gas_tree.cpp)
 foreach(_entry IN ITEMS GasTreeDerive GasTreeFaceForce GasTreeApplyForce GasTreeFaceFlow GasTreeOutflow GasTreeFaceMoved GasTreeMovedSum GasTreeFaceFinal GasTreeTransfer)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")

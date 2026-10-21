@@ -67,6 +67,17 @@ namespace bicameral::sim {
             return (uint32_t)((threadCount + THREADS_PER_GROUP - 1) / THREADS_PER_GROUP);
         }
 
+        // 面の段は 1 行(GAS_GPU_FACE_ROW_GROUPS グループ)を超えたら 2 次元で投げる(128³ 以上。gas_step.hlsl の GasFaceThread。T-0845)。
+        void DispatchRows(ID3D12GraphicsCommandList* list, uint32_t groups) {
+            if (groups <= GAS_GPU_FACE_ROW_GROUPS) {
+                list->Dispatch(groups, 1, 1);
+                return;
+            }
+
+            list->Dispatch(GAS_GPU_FACE_ROW_GROUPS, (groups + GAS_GPU_FACE_ROW_GROUPS - 1) / GAS_GPU_FACE_ROW_GROUPS,
+                           1);
+        }
+
         template <typename T>
         void WriteRecord(std::span<std::byte> bytes, size_t offset, const T& value) {
             std::memcpy(bytes.data() + offset, &value, sizeof(T));
@@ -216,8 +227,12 @@ namespace bicameral::sim {
         result.m_speciesStride = GasGpuSpeciesStride(box.config.speciesCount, reservedSpecies);
         result.m_substeps = box.config.substeps;
         result.m_tick = box.tick;
-        if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) > MAX_GROUPS)
+        if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) >
+            (uint64_t)GAS_GPU_FACE_ROW_GROUPS * MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
+
+        if (GroupsFor(result.m_cellCount) > MAX_GROUPS)
+            return std::unexpected("気体の箱が大きすぎる(セルの段の Dispatch の上限)");
 
         // 気体の粘り(静まる性質。T-0758・D-516)がある箱だけ、刻みの終わりに粘りの 2 段を投げる(T-0775)
         result.m_viscous = GasHasViscosity(box.config);
@@ -372,8 +387,11 @@ namespace bicameral::sim {
         for (uint32_t i = 0; i < srvs.size(); ++i)
             list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), srvs[i]);
 
-        const uint64_t threads = FACE_PASS[(size_t)pass] ? (uint64_t)m_cellCount * GAS_GPU_FACES_PER_CELL : m_cellCount;
-        list->Dispatch(GroupsFor(threads), 1, 1);
+        if (FACE_PASS[(size_t)pass])
+            DispatchRows(list, GroupsFor((uint64_t)m_cellCount * GAS_GPU_FACES_PER_CELL));
+        else
+            list->Dispatch(GroupsFor(m_cellCount), 1, 1);
+
         const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
         list->ResourceBarrier(1, &barrier);
     }
@@ -413,6 +431,29 @@ namespace bicameral::sim {
                               D3D12_GPU_VIRTUAL_ADDRESS open, bool viscous) const {
         RecordSubsteps(list, debugRing, tick, {parameters, m_srvs[1].buffer->GetGPUVirtualAddress(), ghost, open},
                        viscous);
+    }
+
+    // 投影の段の組(T-0845。gpu_gas_projection.cpp が呼ぶ。面の流れ〔FaceFlow〕は投影の段が書くので積まない)
+    void GpuGas::RecordProjectionPhase(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       ProjectionPhase phase, uint64_t roundingTick,
+                                       D3D12_GPU_VIRTUAL_ADDRESS parameters) const {
+        const Constants constants{.roundingTickLow = (uint32_t)roundingTick,
+                                  .roundingTickHigh = (uint32_t)(roundingTick >> 32),
+                                  .cellCount = m_cellCount,
+                                  .speciesStride = m_speciesStride};
+        const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4> srvs = {parameters, SrvAddress(1), SrvAddress(2), SrvAddress(3)};
+        switch (phase) {
+            case ProjectionPhase::Derive: RecordPass(list, debugRing, Pass::Derive, constants, srvs); break;
+            case ProjectionPhase::Force:
+                RecordPass(list, debugRing, Pass::FaceForce, constants, srvs);
+                RecordPass(list, debugRing, Pass::ApplyForce, constants, srvs);
+                break;
+            case ProjectionPhase::Carry:
+                for (const Pass pass :
+                     {Pass::Outflow, Pass::FaceMoved, Pass::MovedSum, Pass::FaceFinal, Pass::Transfer})
+                    RecordPass(list, debugRing, pass, constants, srvs);
+                break;
+        }
     }
 
     void GpuGas::RecordReadback(ID3D12GraphicsCommandList10* list) const {

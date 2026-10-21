@@ -11,10 +11,12 @@
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1047,6 +1049,255 @@ namespace {
         }
     }
 
+    // --- T-0842(研究): 本物の音速の陰解法を 1 刻みに 1 回・V 固定 2・外側 0(と 1)で解く賭け ---
+    // 版 1 = 音速 340 m/s(C = V/c²)・V サイクル 2 回ちょうど・excludeCutFlows。版 2 = 版 1 + 運ぶ側の局所の小刻み(上限 8)+ 切った面の運動量を縮める。
+    // 合格: 300 刻みで |x| ≤ 初めの差 × 10・最大の速さ ≤ 2√(2Δp/ρ)・保存がビット一致・2 回の実行でハッシュ一致・泡の重心が陽解法と ±10 %
+    struct BetVariant {
+        const char* name = "";
+        uint32_t outer = 1;  // 外側の反復の上限(1 = 解き直さない = 外側 0)
+        bool local = false;  // 版 2
+    };
+
+    constexpr std::array<BetVariant, 4> BET_VARIANTS = {{{.name = "v1 outer0", .outer = 1, .local = false},
+                                                         {.name = "v1 outer1", .outer = 2, .local = false},
+                                                         {.name = "v2 outer0", .outer = 1, .local = true},
+                                                         {.name = "v2 outer1", .outer = 2, .local = true}}};
+    constexpr double AIR_DENSITY = 1.204;  // kg/m³(293 K・1 気圧)
+    constexpr int64_t BET_OVERFLOW = (int64_t)1 << 59;
+
+    GasProjectionOptions MakeBetOptions(const BetVariant& variant) {
+        GasProjectionOptions options;
+        options.pressure.soundSpeedMmPerS = REAL_SOUND;
+        options.pressure.excludeCutFlows = true;
+        options.outerIterations = variant.outer;
+        options.solver.cycles = 2;
+        options.fixedCycles = true;
+        if (variant.local) {
+            options.pressure.localSubsteps = 8;
+            options.pressure.scaleCutMomentum = true;
+        }
+
+        return options;
+    }
+
+    // 初めの差(µPa。x と同じ p̃)= 空きのあるセルの p̃ の最大 − 最小
+    int64_t InitialSpread(const GasBox& box) {
+        const GasPressureSystem system = BeginGasPressure(box, {});
+        int64_t low = INT64_MAX;
+        int64_t high = INT64_MIN;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (!box.openQ16.empty() && box.openQ16[index] == 0)
+                continue;
+
+            low = std::min(low, system.statePressures[index]);
+            high = std::max(high, system.statePressures[index]);
+        }
+
+        return high - low;
+    }
+
+    struct BetRun {
+        int64_t largest = 0;  // |x| の最大(µPa。塞がったセルを除く)
+        int64_t maxSpeed = 0;
+        int overTick = -1;  // |x| が上限を超えた最初の刻み
+        bool conserved = true;
+        uint64_t hash = 0;
+        double seconds = 0;  // 刻みの呼び出しだけの時間
+        int ticks = 0;
+        int64_t crossedEarly = 0;  // 30 刻みで下流へ渡った物質量(µmol)
+        int64_t crossed = 0;       // 終わりまでに下流へ渡った物質量(µmol)
+    };
+
+    // 下流(軸 axis の座標が from 以上)の物質量の合計(µmol)。axis が GAS_AXES なら 0
+    struct BetRegion {
+        uint32_t axis = GAS_AXES;
+        uint32_t from = 0;
+    };
+
+    int64_t DownstreamAmount(const GasBox& box, BetRegion region) {
+        if (region.axis >= GAS_AXES)
+            return 0;
+
+        int64_t total = 0;
+        for (uint32_t index = 0; index < box.cells.size(); ++index) {
+            if (Coordinate(box, index)[region.axis] < region.from)
+                continue;
+
+            for (const uint64_t amount : box.cells[index].amounts)
+                total += (int64_t)amount;
+        }
+
+        return total;
+    }
+
+    // options が null なら陽解法(gas_reference の小刻み)
+    BetRun RunBet(GasBox box, const GasProjectionOptions* options, int ticks, int64_t bound, BetRegion region) {
+        const GasTotals before = SumGas(box);
+        const int64_t startAmount = DownstreamAmount(box, region);
+        GasProjection state;
+        BetRun run;
+        for (int tick = 0; tick < ticks; ++tick) {
+            const auto start = std::chrono::steady_clock::now();
+            if (options != nullptr)
+                (void)StepGasProjection(box, state, *options);
+            else
+                StepGas(box);
+
+            run.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            run.ticks = tick + 1;
+            run.conserved = run.conserved && ConservedAgainst(box, before);
+            run.maxSpeed = std::max(run.maxSpeed, MaxSpeed(box));
+            for (uint32_t index = 0; index < state.pressures.size(); ++index) {
+                if (!box.openQ16.empty() && box.openQ16[index] == 0)
+                    continue;
+
+                const int64_t value = state.pressures[index];
+                run.largest = std::max(run.largest, value == INT64_MIN ? INT64_MAX : std::abs(value));
+            }
+
+            if (run.overTick < 0 && run.largest > bound)
+                run.overTick = tick;
+
+            if (tick + 1 == 30)
+                run.crossedEarly = DownstreamAmount(box, region) - startAmount;
+
+            if (run.largest > BET_OVERFLOW)  // int64 の手前で止める(発散)
+                break;
+        }
+
+        run.hash = HashGas(box);
+        run.crossed = DownstreamAmount(box, region) - startAmount;
+        return run;
+    }
+
+    struct BetScene {
+        std::string name;
+        GasBox box;
+        bool still = false;  // 静止大気(速さがちょうど 0)
+        BetRegion region;    // 渡った量を数える下流
+    };
+
+    GasBox MakeDoorBox() {
+        GasBox box = MakeAirBox(MakeAirConfig(16, 8, 8));
+        RaiseLeft(box, 8);
+        return box;
+    }
+
+    std::vector<BetScene> MakeBetScenes() {
+        std::vector<BetScene> scenes;
+        for (const uint32_t divisor : {256u, 16u, 4u}) {
+            for (const uint32_t raise : {102u, 120u}) {
+                scenes.push_back({.name = std::format("plate 1/{} x{}.{:02}", divisor, raise / 100, raise % 100),
+                                  .box = MakePlate({.share = GAS_OPEN_FULL / divisor, .raisePercent = raise}),
+                                  .region = {.axis = 2, .from = 5}});
+            }
+        }
+
+        scenes.push_back({.name = "wall hole 1/256",
+                          .box = MakeWallBox(GAS_OPEN_FULL / 256),
+                          .region = {.axis = 0, .from = WALL_X + 1}});
+        scenes.push_back(
+            {.name = "wall 64 holes 1/16",
+             .box = MakePlate({.share = GAS_OPEN_FULL / 16, .holes = PlateHoles::ClosedBetween, .every = 4}),
+             .region = {.axis = 2, .from = 5}});
+        scenes.push_back({.name = "door x1.02", .box = MakeDoorBox(), .region = {.axis = 0, .from = 8}});
+        scenes.push_back({.name = "hot column (blast)", .box = MakeBlastBox()});
+        scenes.push_back({.name = "static", .box = MakeAirBox(MakeAirConfig(4, 4, 16)), .still = true});
+        return scenes;
+    }
+
+    double NanosecondsPerCellTick(const BetRun& run, size_t cells) {
+        return run.ticks == 0 ? 0.0 : run.seconds * 1e9 / ((double)run.ticks * (double)cells);
+    }
+
+    // 1 つの場面・1 つの版。合格なら true
+    bool ReportBet(const BetScene& scene, const BetVariant& variant, int ticks, const BetRun& reference) {
+        const double explicitNs = NanosecondsPerCellTick(reference, scene.box.cells.size());
+        const int64_t spread = InitialSpread(scene.box);
+        const int64_t bound = scene.still ? 0 : spread * 10;
+        const double deltaPascal = (double)spread * 1e-6;
+        const double speedBound = 2.0 * std::sqrt(2.0 * deltaPascal / AIR_DENSITY);
+        const GasProjectionOptions options = MakeBetOptions(variant);
+        const BetRun first = RunBet(scene.box, &options, ticks, bound, scene.region);
+        const BetRun second = RunBet(scene.box, &options, ticks, bound, scene.region);
+        const double speed = (double)first.maxSpeed / (double)METER_PER_SECOND;
+        const bool bounded = first.ticks == ticks && (scene.still ? first.maxSpeed == 0 : first.largest <= bound);
+        const bool slow = scene.still ? first.maxSpeed == 0 : speed <= speedBound;
+        const bool same = first.hash == second.hash;
+        const bool pass = bounded && slow && first.conserved && second.conserved && same;
+        std::printf(
+            "bet | %-20s | %-9s | dp %8.1f Pa | max|x|/dp %8.2f (over at %d) | speed %8.2f / bound %7.2f m/s | "
+            "conserved %d | hash %d | %7.0f ns/cell/tick (explicit %7.0f) | ticks %d | crossed 30: %lld (explicit "
+            "%lld) end: %lld (explicit %lld) | %s\n",
+            scene.name.c_str(), variant.name, deltaPascal, spread == 0 ? 0.0 : (double)first.largest / (double)spread,
+            first.overTick, speed, speedBound, first.conserved && second.conserved ? 1 : 0, same ? 1 : 0,
+            NanosecondsPerCellTick(first, scene.box.cells.size()), explicitNs, first.ticks,
+            (long long)first.crossedEarly, (long long)reference.crossedEarly, (long long)first.crossed,
+            (long long)reference.crossed, pass ? "PASS" : "FAIL");
+        return pass;
+    }
+
+    // 泡: 2 秒(120 刻み)の熱の重心の上がりを陽解法と比べる(±10 %)
+    bool ReportBetBubble(const BetVariant& variant, int64_t explicitRise) {
+        GasBox box = MakeAirBox(MakeAirConfig(10, 10, 20));
+        HeatBubble(box);
+        const int64_t start = HeatCentroidZ(box);
+        const GasTotals before = SumGas(box);
+        const GasProjectionOptions options = MakeBetOptions(variant);
+        GasProjection state;
+        bool conserved = true;
+        for (int tick = 0; tick < 120; ++tick) {
+            (void)StepGasProjection(box, state, options);
+            conserved = conserved && ConservedAgainst(box, before);
+        }
+
+        const int64_t rise = HeatCentroidZ(box) - start;
+        const bool pass = conserved && rise * 10 >= explicitRise * 9 && rise * 10 <= explicitRise * 11;
+        std::printf("bet | bubble 2 s | %-9s | rise %lld (explicit %lld, %.1f%%) | conserved %d | %s\n", variant.name,
+                    (long long)rise, (long long)explicitRise,
+                    explicitRise == 0 ? 0.0 : 100.0 * (double)(rise - explicitRise) / (double)explicitRise,
+                    conserved ? 1 : 0, pass ? "PASS" : "FAIL");
+        return pass;
+    }
+
+    void RunBetStudy(int ticks, int explicitTicks) {
+        GasBox bubble = MakeAirBox(MakeAirConfig(10, 10, 20));
+        HeatBubble(bubble);
+        const int64_t bubbleStart = HeatCentroidZ(bubble);
+        for (int tick = 0; tick < 120; ++tick)
+            StepGas(bubble);
+
+        const int64_t explicitRise = HeatCentroidZ(bubble) - bubbleStart;
+        int failures = 0;
+        for (const BetVariant& variant : BET_VARIANTS)
+            failures += ReportBetBubble(variant, explicitRise) ? 0 : 1;
+
+        for (const BetScene& scene : MakeBetScenes()) {
+            const BetRun reference = RunBet(scene.box, nullptr, explicitTicks, INT64_MAX, scene.region);
+            std::printf(
+                "bet | %-20s | explicit  | max speed %.2f m/s in %d ticks | conserved %d | %.0f ns/cell/tick | "
+                "crossed 30: %lld end: %lld\n",
+                scene.name.c_str(), (double)reference.maxSpeed / (double)METER_PER_SECOND, reference.ticks,
+                reference.conserved ? 1 : 0, NanosecondsPerCellTick(reference, scene.box.cells.size()),
+                (long long)reference.crossedEarly, (long long)reference.crossed);
+            for (const BetVariant& variant : BET_VARIANTS)
+                failures += ReportBet(scene, variant, ticks, reference) ? 0 : 1;
+
+            // 対照(ADR-0346 の形): 最速・外側 4(既定)。細孔の板だけ
+            if (scene.name.starts_with("plate 1/256")) {
+                GasProjectionOptions fastest;
+                const BetRun control = RunBet(scene.box, &fastest, std::min(ticks, 40), InitialSpread(scene.box) * 10,
+                                              scene.region);
+                std::printf(
+                    "bet | %-20s | control fastest outer 4 (ADR-0346) | max|x|/dp %.2e (over at %d) | ticks %d\n",
+                    scene.name.c_str(), (double)control.largest / (double)InitialSpread(scene.box), control.overTick,
+                    control.ticks);
+            }
+        }
+
+        std::printf("bet: %d case(s) not passed (research; not counted as test failures)\n", failures);
+    }
+
 }  // namespace
 
 // 引数 --sweep で、外側の反復の止め方の違いを測る(遅い。ctest では回さない)
@@ -1056,6 +1307,13 @@ int main(int argc, char** argv) {
         SweepPlates();
         std::printf("plates: %d failure(s)\n", failureCount);
         return failureCount == 0 ? 0 : 1;
+    }
+
+    if (argc > 1 && std::string_view(argv[1]) == "--t0842") {  // T-0842 の賭け(本物の音速の陰解法・V 固定 2・外側 0/1)
+        const int ticks = argc > 2 ? std::atoi(argv[2]) : 300;
+        const int explicitTicks = argc > 3 ? std::atoi(argv[3]) : 30;
+        RunBetStudy(ticks, explicitTicks);
+        return 0;
     }
 
     if (argc > 1 && std::string_view(argv[1]) == "--plate16") {  // T-0722 の調べ(細孔の板と孔の壁だけ)
