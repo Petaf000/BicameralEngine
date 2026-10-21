@@ -51,9 +51,10 @@ namespace bicameral::sim {
         // V サイクルを許容差で止めず、ちょうど solver.cycles 回まわす(T-0842 研究。費用を決まった回数に固定する)。
         // 外側の反復が 1(解き直さない)のときは、仮の状態の食い違いも測らない(費用に入れない。cost の食い違いは 0)
         bool fixedCycles = false;
-        // 釣り合う家族の共通部品(equilibrium.h。T-0853)の上で解く。fixedCycles と outerIterations = 1(T-0845 の形)だけ。
-        // 前の道(熱の多重格子を直に呼ぶ)とビット単位で同じ(gas_projection_test --t0853)。既定は前の道(GPU の比べ T-0915 の後で替える)
-        bool equilibrium = false;
+        // 釣り合う家族の共通部品(equilibrium.h。T-0853)の上で解く。fixedCycles と outerIterations = 1(T-0845 の形)の時だけ効く
+        // (外側の反復・許容差で止める道は前のまま)。前の道(熱の多重格子を直に呼ぶ)とビット単位で同じだった(T-0853 の equilibrium_test)・
+        // GPU の部品とも同じ(T-0915)ので既定にし、前の道の fixedCycles の枝は消した(T-0915)。false は外側の反復の道で解く(比べる用)
+        bool equilibrium = true;
         // 部品の閉じた領域の長さ(mm。0 = 閉じない。20 §9.3 の陰の圧力 = 音の速さ × 刻みの倍数。equilibrium の時だけ)
         uint64_t closeLengthMm = 0;
 

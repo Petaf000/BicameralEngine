@@ -229,8 +229,15 @@ foreach(_entry IN ITEMS GasDerive GasFaceForce GasApplyForce GasFaceFlow GasOutf
   bicameral_add_shader(sim/gas_step.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
 endforeach()
 
-# 気体の圧力の投影の 1 刻みの段(T-0845。本物の音速の陰解法の式を作る・段の重み・当てる。呼ぶ順は engine/src/sim/gpu_gas_projection.cpp)
-foreach(_entry IN ITEMS GasProjectFace GasProjectCell GasProjectLevel GasProjectPressure GasProjectFlow)
+# 釣り合う家族の共通部品の GPU 版の段(T-0915。粗い段の重み・残差の計器。呼ぶ順は engine/src/sim/gpu_equilibrium.cpp)
+foreach(_entry IN ITEMS EquilibriumLevel EquilibriumMeter)
+  string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
+  string(TOLOWER "${_snake}" _snake)
+  bicameral_add_shader(sim/equilibrium.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
+endforeach()
+
+# 気体の圧力の投影の 1 刻みの段(T-0845。本物の音速の陰解法の式を作る・当てる。段の重みと V は部品〔T-0915〕。呼ぶ順は engine/src/sim/gpu_gas_projection.cpp)
+foreach(_entry IN ITEMS GasProjectFace GasProjectCell GasProjectPressure GasProjectFlow)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/gas_projection.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})

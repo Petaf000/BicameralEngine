@@ -9,6 +9,9 @@
 //
 // T-0845(--t0845): 投影の 1 刻み(式を作る・段の重み・V 2 回・当てる・運ぶ)を通しで GPU で回し(GpuGasProjection)、CPU の模型と
 //   --check-every 刻みごと(既定 毎刻み)に箱のセルと帳簿をビット一致で比べる。--measure で通しの時間と部分の内訳(暖機の後 16 刻みの最小)。
+// T-0915(--t0915): 釣り合う家族の部品の GPU 版(GpuEquilibrium)の上の投影を、CPU の部品の上の道(GasProjectionOptions::equilibrium)と
+//   32³ × 5 場面 × --ticks(既定 300)刻み毎刻みビット一致(箱・帳簿・残差の計器)・前の GPU の道(T-0845)の 300 刻みのハッシュ・
+//   保存(16³・V 1・2・4)・決定性(16³・2 回 + 1 本のリストに 8 刻み・段ごとの Dispatch 2 段まで)で確かめる。T-0845 の試験も部品の上で回る。
 // T-0843(--t0843): 本物の音速(340 m/s。C = V/c²)・V サイクル 2 回ちょうど(fixedCycles。判定を積まない)・外側の反復 0 回(上限 1)で、
 //   同じ場面を一辺 32・64(--edge で 1 つだけ)の 3 刻み回し、V 2 回の解き・V を積まない形・計画の表を毎回作り直す形を測る(CPU とビット一致)。
 // 引数: [--edge n](既定 16)[--ticks n](既定 3)[--measure](GPU の時間を表に出す)[--breakdown](解きを固定費・V・止めた後の回に分ける)
@@ -561,22 +564,35 @@ namespace {
         return true;
     }
 
-    sim::GasProjectionOptions FullOptions() {
+    // CPU の模型は釣り合う家族の部品の上の道(T-0853。前の道とビット一致は equilibrium_test)。GPU も部品の上(T-0915)
+    sim::GasProjectionOptions FullOptions(uint32_t cycles = 2) {
         sim::GasProjectionOptions options;
         options.pressure.soundSpeedMmPerS = REAL_SOUND;
         options.fixedCycles = true;
-        options.solver.cycles = 2;
+        options.solver.cycles = cycles;
         options.outerIterations = 1;
+        options.equilibrium = true;
 
         return options;
     }
 
-    sim::GpuGasProjectionOptions FullGpuOptions(const sim::GasProjectionOptions& options) {
+    sim::GpuGasProjectionOptions FullGpuOptions(const sim::GasProjectionOptions& options, bool meter = false) {
         sim::GpuGasProjectionOptions gpuOptions;
         gpuOptions.soundSpeedMmPerS = options.pressure.soundSpeedMmPerS;
         gpuOptions.solver = options.solver;
+        gpuOptions.meterResiduals = meter;
 
         return gpuOptions;
+    }
+
+    // 保存: Σ 保存量 − 帳簿 が刻みの初めと同じ(equilibrium_test の Conserved と同じ)
+    bool Conserved(const sim::GasBox& box, const sim::GasTotals& before) {
+        const sim::GasTotals now = sim::SumGas(box);
+        bool ok = now.amounts == before.amounts && now.energy == before.energy + box.ledger.energy;
+        for (uint32_t axis = 0; axis < sim::GAS_AXES; ++axis)
+            ok = ok && now.momentum[axis] == before.momentum[axis] + box.ledger.momentum[axis];
+
+        return ok;
     }
 
     // GPU の箱を読み、CPU の箱とセル・帳簿を比べる(合わなければ最初に違うセル)
@@ -612,87 +628,186 @@ namespace {
     struct FullRun {
         uint32_t ticks = 0;
         uint32_t checked = 0;
-        uint32_t reshapes = 0;  // 段の形が変わって写し直した刻み
-        uint32_t levels = 0;    // 刻み 0 の段の数
-        uint64_t hash = 0;      // 最後の刻みの CPU の箱のハッシュ(= GPU)
+        uint32_t reshapes = 0;       // 段の形が変わって写し直した刻み
+        uint32_t levels = 0;         // 刻み 0 の段の数
+        uint32_t lists = 0;          // 投げたコマンドリストの数
+        uint64_t hash = 0;           // 最後の刻みの CPU の箱のハッシュ(= GPU)
+        uint64_t worstResidual = 0;  // 部品の残差の計器の最大(mg。GPU = CPU)
+        bool conserved = true;       // CPU の箱で毎刻み 保存量 − 帳簿 が一定(GPU は CPU とビット一致)
+        uint64_t deviceBytes = 0;    // VRAM(気体の箱 + 部品)
     };
 
-    // CPU の模型と GPU を 1 刻みずつ進め、checkEvery 刻みごと(と最後)に箱を比べる
-    std::expected<FullRun, std::string> RunFullScene(Replay& replay, Scene scene, uint32_t edge, uint32_t ticks,
-                                                     uint32_t checkEvery) {
-        sim::GasBox box = MakeScene(scene, edge);
-        sim::GasProjection state;
-        sim::GasProjectionOptions options = FullOptions();
-        std::optional<sim::ImplicitGrid> grid;
-        const sim::GasPressureSolveObserver observer = [&grid](const sim::GasPressureSolve& solve) {
-            grid = solve.grid;
-        };
-        options.solveObserver = &observer;
+    // 回し方(T-0915): V の回数・1 本のリストに積む刻みの数・V の記録の形(段ごとの Dispatch の段。0 = 既定)。値はどれでも同じはず
+    struct FullVariant {
+        uint32_t cycles = 2;
+        uint32_t ticksPerList = 1;
+        uint32_t dispatchLevels = 0;
+        bool meter = true;  // 部品の残差の計器を積み、比べる時に CPU の計器と比べる
+    };
 
-        FullRun run;
-        std::optional<sim::GpuGasProjection> projection;
-        std::optional<sim::ImplicitGrid> shape;  // GPU に写してある段の形
-        for (uint32_t tick = 0; tick < ticks; ++tick) {
-            const sim::GasBox start = box;
-            sim::StepGasProjection(box, state, options);
-            if (!grid)
+    // CPU の模型と GPU を 1 刻みずつ進め、リストを投げるたび(checkEvery 刻みごとと最後)に箱と残差の計器を比べる。
+    // 段の形が変わる刻みの前でリストを切る(形を写し直すのはリストの初めだけ)
+    class FullScene {
+    public:
+        FullScene(Replay& replay, Scene scene, uint32_t edge, uint32_t ticks, uint32_t checkEvery,
+                  const FullVariant& variant)
+            : m_replay(replay),
+              m_box(MakeScene(scene, edge)),
+              m_ticks(ticks),
+              m_checkEvery(checkEvery),
+              m_variant(variant),
+              m_options(FullOptions(variant.cycles)) {
+            m_totals = sim::SumGas(m_box);
+            m_observer = [this](const sim::GasPressureSolve& solve) {
+                m_grid = solve.grid;
+            };
+            m_options.solveObserver = &m_observer;
+        }
+
+        std::expected<FullRun, std::string> Run() {
+            for (uint32_t tick = 0; tick < m_ticks; ++tick) {
+                if (auto stepped = Step(tick); !stepped)
+                    return std::unexpected(std::format("刻み {}: {}", tick, stepped.error()));
+            }
+
+            m_run.hash = sim::HashGas(m_box);
+
+            return m_run;
+        }
+
+    private:
+        std::expected<void, std::string> Step(uint32_t tick) {
+            const sim::GasBox start = m_box;
+            const sim::GasProjectionCost cost = sim::StepGasProjection(m_box, m_state, m_options);
+            if (!m_grid)
                 return std::unexpected("CPU の模型が解かなかった");
 
-            ID3D12GraphicsCommandList10* list = replay.queue->Begin();
-            if (list == nullptr)
+            m_lastResidual = cost.worstResidual;
+            m_run.worstResidual = std::max(m_run.worstResidual, cost.worstResidual);
+            m_run.conserved = m_run.conserved && Conserved(m_box, m_totals);
+            const bool reshape = m_projection && !SameShape(*m_shape, *m_grid);
+            if (reshape && m_list != nullptr) {
+                if (auto flushed = Flush(false); !flushed)
+                    return flushed;
+            }
+
+            if (auto begun = Begin(start, reshape); !begun)
+                return begun;
+
+            m_grid.reset();
+            if (!m_projection->RecordStep(m_list, m_replay.ring->GpuAddress()))
+                return std::unexpected("記録できない(段が上限を超えた)");
+
+            m_run.ticks += 1;
+            m_pending += 1;
+            const bool check = (tick + 1) % m_checkEvery == 0 || tick + 1 == m_ticks;
+            if (check || m_pending >= m_variant.ticksPerList)
+                return Flush(check);
+
+            return {};
+        }
+
+        // リストを始める(最初は GPU を作って写す。形が変わった刻みは写し直す)
+        std::expected<void, std::string> Begin(const sim::GasBox& start, bool reshape) {
+            if (m_list != nullptr)
+                return {};
+
+            m_list = m_replay.queue->Begin();
+            if (m_list == nullptr)
                 return std::unexpected("コマンドリストを始められない");
 
-            replay.ring->RecordBegin(list);
-            bool recorded = true;
-            if (!projection) {
-                auto created = sim::GpuGasProjection::Create(replay.device, start, *grid, FullGpuOptions(options));
+            m_replay.ring->RecordBegin(m_list);
+            if (!m_projection) {
+                auto created = sim::GpuGasProjection::Create(m_replay.device, start, *m_grid,
+                                                             FullGpuOptions(m_options, m_variant.meter));
                 if (!created)
                     return std::unexpected(created.error());
 
-                projection.emplace(std::move(*created));
-                recorded = projection->RecordUpload(list, *grid);
-                shape = std::move(grid);
-                run.levels = (uint32_t)shape->levels.size();
-            } else if (!SameShape(*shape, *grid)) {
-                recorded = projection->RecordBegin(list, &*grid);
-                shape = std::move(grid);
-                run.reshapes += 1;
-            } else {
-                recorded = projection->RecordBegin(list, nullptr);
+                m_projection.emplace(std::move(*created));
+                if (m_variant.dispatchLevels != 0)
+                    m_projection->SetSolveShape({.dispatchLevels = m_variant.dispatchLevels});
+
+                m_run.levels = (uint32_t)m_grid->levels.size();
+                m_run.deviceBytes = m_projection->DeviceBytes();
+                m_shape = *m_grid;
+
+                return m_projection->RecordUpload(m_list, *m_grid) ? std::expected<void, std::string>{}
+                                                                   : std::unexpected("写せない");
             }
 
-            grid.reset();
-            recorded = recorded && projection->RecordStep(list, replay.ring->GpuAddress());
-            const bool check = (tick + 1) % checkEvery == 0 || tick + 1 == ticks;
-            if (check)
-                projection->RecordReadback(list);
+            const bool recorded = m_projection->RecordBegin(m_list, reshape ? &*m_grid : nullptr);
+            if (reshape) {
+                m_shape = *m_grid;
+                m_run.reshapes += 1;
+            }
 
-            projection->RecordEnd(list);
-            replay.ring->RecordReadbackAndReset(list);
-            if (!recorded)
-                return std::unexpected(std::format("刻み {}: 記録できない(段が上限を超えた)", tick));
-
-            if (!replay.queue->ExecuteAndWait())
-                return std::unexpected(std::format("刻み {}: GPU での実行に失敗", tick));
-
-            const gpu::DebugRingContents debugOutput = replay.ring->Drain();
-            if (debugOutput.assertCount > 0)
-                return std::unexpected(
-                    std::format("刻み {}: GPU の FX_ASSERT が {} 件", tick, debugOutput.assertCount));
-
-            run.ticks += 1;
-            if (!check)
-                continue;
-
-            if (auto compared = CompareBoxes(*projection, box); !compared)
-                return std::unexpected(std::format("刻み {}: {}", tick, compared.error()));
-
-            run.checked += 1;
+            return recorded ? std::expected<void, std::string>{} : std::unexpected("段の形を写せない");
         }
 
-        run.hash = sim::HashGas(box);
+        // リストを投げて待つ。check なら箱と残差の計器を CPU と比べる
+        std::expected<void, std::string> Flush(bool check) {
+            if (check) {
+                m_projection->RecordReadback(m_list);
+                if (m_variant.meter)
+                    m_projection->Equilibrium().RecordResidualReadback(m_list);
+            }
 
-        return run;
+            m_projection->RecordEnd(m_list);
+            m_replay.ring->RecordReadbackAndReset(m_list);
+            m_list = nullptr;
+            m_pending = 0;
+            m_run.lists += 1;
+            if (!m_replay.queue->ExecuteAndWait())
+                return std::unexpected("GPU での実行に失敗");
+
+            const gpu::DebugRingContents debugOutput = m_replay.ring->Drain();
+            if (debugOutput.assertCount > 0)
+                return std::unexpected(std::format("GPU の FX_ASSERT が {} 件", debugOutput.assertCount));
+
+            if (!check)
+                return {};
+
+            if (auto compared = CompareBoxes(*m_projection, m_box); !compared)
+                return compared;
+
+            // 残差の計器: GPU の語はリストの最後の解きの最大(CPU はその刻みの cost)
+            uint64_t worst = 0;
+            if (m_variant.meter) {
+                if (!m_projection->Equilibrium().ReadWorstResidual(worst))
+                    return std::unexpected("残差の計器を読めない");
+
+                if (worst != m_lastResidual)
+                    return std::unexpected(std::format("残差の計器 GPU {}・CPU {} mg", worst, m_lastResidual));
+            }
+
+            m_run.checked += 1;
+
+            return {};
+        }
+
+        Replay& m_replay;
+        sim::GasBox m_box;
+        uint32_t m_ticks = 0;
+        uint32_t m_checkEvery = 1;
+        FullVariant m_variant;
+        sim::GasProjectionOptions m_options;
+        sim::GasTotals m_totals;
+        sim::GasProjection m_state;
+        sim::GasPressureSolveObserver m_observer;
+        std::optional<sim::ImplicitGrid> m_grid;   // CPU の模型がこの刻みに解いた系
+        std::optional<sim::ImplicitGrid> m_shape;  // GPU に写してある段の形
+        std::optional<sim::GpuGasProjection> m_projection;
+        ID3D12GraphicsCommandList10* m_list = nullptr;
+        uint32_t m_pending = 0;       // 開いているリストに積んだ刻み
+        uint64_t m_lastResidual = 0;  // 最後の刻みの CPU の残差の計器(mg)
+        FullRun m_run;
+    };
+
+    std::expected<FullRun, std::string> RunFullScene(Replay& replay, Scene scene, uint32_t edge, uint32_t ticks,
+                                                     uint32_t checkEvery, const FullVariant& variant = {}) {
+        FullScene run(replay, scene, edge, ticks, checkEvery, variant);
+
+        return run.Run();
     }
 
     // 時間: 刻み 0 の段の形のまま、暖機 MEASURE_WARMUP 刻みの後 MEASURE_REPEATS 刻みを 1 本のリストに積み、部分ごとの最小(ms)と通しの最小
@@ -700,8 +815,10 @@ namespace {
         std::array<double, (size_t)sim::GpuGasProjectionPart::Count> parts{};
         double total = 0;
         double median = 0;
-        uint64_t vramBytes = 0;  // 投影を作った前後のプロセスの VRAM の差(T-0900。桁を知る値)
-        uint32_t levels = 0;     // 刻み 0 の段の数
+        uint64_t vramBytes = 0;         // 投影を作った前後のプロセスの VRAM の差(T-0900。桁を知る値)
+        uint32_t levels = 0;            // 刻み 0 の段の数
+        uint64_t deviceBytes = 0;       // VRAM(気体の箱 + 部品)
+        uint64_t equilibriumBytes = 0;  // そのうち部品
     };
 
     std::expected<FullTiming, std::string> MeasureFullScene(Replay& replay, Scene scene, uint32_t edge,
@@ -759,10 +876,12 @@ namespace {
             return std::unexpected("記録か実行に失敗");
 
         const auto steps = projection->ReadTiming();
+        const uint64_t deviceBytes = projection->DeviceBytes();
+        const uint64_t equilibriumBytes = projection->Equilibrium().DeviceBytes();
         if (steps.size() != MEASURE_REPEATS)
             return std::unexpected("時間を読めない");
 
-        FullTiming timing;
+        FullTiming timing{.deviceBytes = deviceBytes, .equilibriumBytes = equilibriumBytes};
         timing.vramBytes = test::VideoMemoryGrowth(vramBefore, vramAfter);
         timing.levels = levels;
         std::vector<double> totals;
@@ -815,9 +934,80 @@ namespace {
             Log(Channel::Sim, Level::Info,
                 "| T-0845 時間 | {}³ | {} | 通し {:.3f} ms(中央 {:.3f})| {:.2f} ns/セル | 式 {:.2f} | 段の重み {:.2f} "
                 "| "
-                "V 2 回 {:.2f} | 当てる {:.2f} | 運ぶ {:.2f} |",
+                "V 2 回 {:.2f} | 当てる {:.2f} | 運ぶ {:.2f} | VRAM {:.0f} B/セル(部品 {:.0f})|",
                 edge, SceneName(scene), timing->total, timing->median, ns(timing->total), ns(timing->parts[0]),
-                ns(timing->parts[1]), ns(timing->parts[2]), ns(timing->parts[3]), ns(timing->parts[4]));
+                ns(timing->parts[1]), ns(timing->parts[2]), ns(timing->parts[3]), ns(timing->parts[4]),
+                (double)timing->deviceBytes / cells, (double)timing->equilibriumBytes / cells);
+        }
+
+        return {};
+    }
+
+    // --- T-0915(--t0915): 釣り合う家族の部品の GPU 版。CPU の部品と毎刻みビット一致・前の GPU の道(T-0845)のハッシュ・保存・決定性 ---
+
+    // 32³・300 刻み・V 2 の最後のハッシュ(前の GPU の道 = T-0845 の作り と CPU の前の道・部品の道。T-0853 のチケットの表。2026-10-21 に
+    // 前の GPU の道でも同じ値を確かめた)。部品の GPU 版もこの値になること
+    constexpr std::array<uint64_t, 5> T0845_HASHES_32 = {0xa4b6928b6f05e940ull, 0x884686f097eafbb2ull,
+                                                         0x04811f98601a371dull, 0xd53f653207a2cfb6ull,
+                                                         0x4b9e31f213adcd63ull};
+
+    std::expected<void, std::string> RunT0915(Replay& replay, uint32_t ticks) {
+        // --- 1. 5 場面 × ticks 刻み(32³・V 2):毎刻み CPU の部品と箱・帳簿・残差の計器がビット一致・保存・前の GPU の道のハッシュ ---
+        for (size_t s = 0; s < SCENES.size(); ++s) {
+            const Scene scene = SCENES[s];
+            const auto run = RunFullScene(replay, scene, 32, ticks, 1);
+            if (!run)
+                return std::unexpected(std::format("32³ {}: {}", SceneName(scene), run.error()));
+
+            const bool known = ticks == 300;
+            if (known && run->hash != T0845_HASHES_32[s])
+                return std::unexpected(std::format("32³ {}: 前の GPU の道のハッシュ {:016x} と違う {:016x}",
+                                                   SceneName(scene), T0845_HASHES_32[s], run->hash));
+
+            if (!run->conserved)
+                return std::unexpected(std::format("32³ {}: 保存が崩れた", SceneName(scene)));
+
+            Log(Channel::Sim, Level::Info,
+                "| T-0915 一致 | 32³ | {} | {} 刻み毎刻み CPU の部品とビット一致 | 前の GPU の道 {} | 保存 0 | 段 "
+                "{}・写し直し {} | "
+                "残差の計器の最大 {} mg | ハッシュ {:016x} | VRAM {:.0f} B/セル |",
+                SceneName(scene), run->ticks, known ? "一致" : "(300 刻みで比べる)", run->levels, run->reshapes,
+                run->worstResidual, run->hash, (double)run->deviceBytes / (32.0 * 32.0 * 32.0));
+        }
+
+        // --- 2. 保存(V 1・2・4。16³ の爆発・孔のある壁 × 60 刻み。毎刻み CPU と一致)---
+        for (const uint32_t cycles : {1u, 2u, 4u}) {
+            for (const Scene scene : {Scene::Blast, Scene::Wall}) {
+                const auto run = RunFullScene(replay, scene, 16, 60, 1, {.cycles = cycles});
+                if (!run || !run->conserved)
+                    return std::unexpected(
+                        std::format("16³ {} V {}: {}", SceneName(scene), cycles, run ? "保存が崩れた" : run.error()));
+
+                Log(Channel::Sim, Level::Info,
+                    "| T-0915 保存 | 16³ | {} | V {} | 60 刻み毎刻み一致・保存 0 | {:016x} |", SceneName(scene), cycles,
+                    run->hash);
+            }
+        }
+
+        // --- 3. 決定性: 2 回の実行と積み方を変えた実行(1 本のリストに 8 刻み・段ごとの Dispatch を 2 段まで)でハッシュが同じ ---
+        for (const Scene scene : SCENES) {
+            const auto first = RunFullScene(replay, scene, 16, 120, 120, {.meter = false});
+            const auto second = RunFullScene(replay, scene, 16, 120, 120, {.meter = false});
+            const auto stacked = RunFullScene(replay, scene, 16, 120, 120,
+                                              {.ticksPerList = 8, .dispatchLevels = 2, .meter = false});
+            if (!first || !second || !stacked)
+                return std::unexpected(std::format("16³ {} の決定性: {}", SceneName(scene),
+                                                   !first    ? first.error()
+                                                   : !second ? second.error()
+                                                             : stacked.error()));
+
+            if (first->hash != second->hash || first->hash != stacked->hash)
+                return std::unexpected(std::format("16³ {} の決定性: {:016x} / {:016x} / {:016x}", SceneName(scene),
+                                                   first->hash, second->hash, stacked->hash));
+
+            Log(Channel::Sim, Level::Info,
+                "| T-0915 決定性 | 16³ | {} | 120 刻み | 2 回 + 積み方を変えて(リスト {} 本)同じ {:016x} |",
+                SceneName(scene), stacked->lists, first->hash);
         }
 
         return {};
@@ -870,6 +1060,7 @@ namespace {
         bool t0843 = false;
         bool t0845 = false;
         bool t0900 = false;
+        bool t0915 = false;
         bool defaultShape = false;
         uint32_t checkEvery = 1;
         bool edgeGiven = false;
@@ -884,6 +1075,8 @@ namespace {
                 t0845 = true;
             else if (argument == "--t0900")
                 t0900 = true;
+            else if (argument == "--t0915")
+                t0915 = true;
             else if (argument == "--default-shape")
                 defaultShape = true;
             else if (argument == "--check-every" && index + 1 < arguments.size())
@@ -907,11 +1100,11 @@ namespace {
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options || edge < 4 || (ticks == 0 && !t0845 && !t0900)) {
+        if (!options || edge < 4 || (ticks == 0 && !t0845 && !t0900 && !t0915)) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_gas_projection_test [--warp] [--queue direct|compute] [--no-gbv] [--edge N] [--ticks N] "
                 "[--measure] [--breakdown] [--stages] [--global-tail] [--inner-tolerance mg] [--inner-cycles n] "
-                "[--t0843] [--t0845 [--check-every n]] [--t0900]");
+                "[--t0843] [--t0845 [--check-every n]] [--t0900] [--t0915 [--ticks n]]");
             return 2;
         }
 
@@ -941,6 +1134,21 @@ namespace {
                       .innerCycles = innerCycles,
                       .t0843 = t0843,
                       .shapeFromCost = !defaultShape};
+        if (t0915) {
+            const auto ran = RunT0915(replay, ticks);
+            if (!ran) {
+                Log(Channel::Gpu, Level::Error, "gpu_gas_projection_test: FAILED({})", ran.error());
+                return 1;
+            }
+
+            if (!test::PassesValidation(*device, "gpu_gas_projection_test"))
+                return 1;
+
+            Log(Channel::Gpu, Level::Info, "gpu_gas_projection_test: OK");
+
+            return 0;
+        }
+
         std::vector<uint32_t> edges = {edge};
         if ((t0843 || t0845) && !edgeGiven)
             edges = {32, 64};

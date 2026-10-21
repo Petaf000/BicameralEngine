@@ -303,6 +303,25 @@ namespace bicameral::sim {
         }
     }
 
+    uint64_t GpuImplicit::DeviceBytes() const {
+        uint64_t total = 0;
+        const auto add = [&total](ID3D12Resource* resource) {
+            if (resource != nullptr)
+                total += resource->GetDesc().Width;
+        };
+        for (uint32_t i = 0; i < BufferCount; ++i) {
+            add(m_buffers[i].Get());
+            add(m_uploads[i].Get());
+        }
+
+        for (ID3D12Resource* resource :
+             {m_cellsReadback.Get(), m_stateReadback.Get(), m_wideReadback.Get(), m_planReadback.Get(),
+              m_solveUpload.Get(), m_solutionReadback.Get(), m_timestampReadback.Get()})
+            add(resource);
+
+        return total;
+    }
+
     std::expected<void, std::string> GpuImplicit::CreatePipelines(ID3D12Device5* device) {
         m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
         if (!m_rootSignature)

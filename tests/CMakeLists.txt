@@ -699,6 +699,9 @@ target_link_libraries(gpu_implicit_box_bench PRIVATE bicameral_sim)
 bicameral_add_gpu_test(gpu_gas_projection_test)
 target_link_libraries(gpu_gas_projection_test PRIVATE bicameral_sim bicameral_gas_projection)
 bicameral_add_gpu_test_case(gpu_gas_projection gpu_gas_projection_test gpu --queue compute)
+# 釣り合う家族の部品の GPU 版(T-0915): CPU の部品と 32³ × 5 場面 × 300 刻み毎刻みビット一致・前の GPU の道のハッシュ・保存・決定性
+bicameral_add_gpu_test_case(gpu_gas_projection_t0915 gpu_gas_projection_test gpu --queue compute --no-gbv --t0915 --ticks 300)
+set_tests_properties(gpu_gas_projection_t0915 PROPERTIES TIMEOUT 1800)
 
 # 置くコマンドが 1 刻みにたくさん来た時の適用の単位の時間(T-0280。ctest には登録しない。docs/perf.md)。
 # 走らせ方: job.py run -Preset release -Exe gpu_place_bench

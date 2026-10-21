@@ -1,8 +1,10 @@
 // gpu_gas_projection.h — 気体の圧力の投影(本物の音速の陰解法。V サイクル固定・外側の反復 0。T-0842・T-0845)の 1 刻みを GPU で走らせる。
 // CPU リファレンスは sim/gas_projection の StepGasProjection(GasProjectionOptions の fixedCycles・outerIterations = 1・substeps = 1)。
-// 1 刻み = 導く値 → 式を作る(面の K_f・F*、セルの C_i・右辺、多重格子の段の重み)→ V サイクル(GpuImplicit::RecordSolve)→ 当てる(x の力積・面の流れ)
-// → 運ぶ(陽解法の気体の段 5〜9 をそのまま)。段の中身は shaders/sim/gas_projection.hlsl と gas_step.hlsl、呼ぶ順はこのファイルの .cpp。
-// 箱のセルと帳簿は GpuGas が持つ(D-107)。多重格子の段の形(節・隣・親子)は CPU の BuildImplicitGrid の系を写し(RecordUploadShape)、
+// 1 刻み = 導く値 → 式を作る(面の K_f・F*、セルの C_i・右辺 = 釣り合う家族の部品の系の段 0)→ 部品(GpuEquilibrium: 段の重み・
+// V サイクル・残差の計器。T-0915)→ 当てる(x の力積・面の流れ)→ 運ぶ(陽解法の気体の段 5〜9 をそのまま)。
+// 段の中身は shaders/sim/gas_projection.hlsl・equilibrium.hlsl と gas_step.hlsl、呼ぶ順はこのファイルの .cpp。
+// CPU リファレンスは部品の上の道(GasProjectionOptions::equilibrium。前の道とビット一致は T-0853)。
+// 箱のセルと帳簿は GpuGas が持つ(D-107)。多重格子の段の形(節・隣・親子)は CPU の BuildImplicitGrid の系を写し、
 // 値(容量・対角・重み・右辺)は毎刻み GPU が作る。形は系の形(セルの空き・つながり)と段の数で決まり、刻みの値で段の数が変わることがあるので、
 // 形が変わった刻みは呼ぶ側が写し直す(試験は CPU の模型の系と比べて決める。形が変わる刻みを GPU で見つける形は残り。T-0845 のチケット)。
 // 既定の道(陽解法の気体 GpuGas::RecordStep)は変えない。これは計測と比べる口(切ってあるのが既定)。
@@ -24,6 +26,7 @@
 #include "gpu/com_ptr.h"
 #include "gpu/resources.h"
 #include "sim/gas_reference.h"
+#include "sim/gpu_equilibrium.h"
 #include "sim/gpu_gas.h"
 #include "sim/gpu_implicit.h"
 #include "sim/implicit_conduction.h"
@@ -34,6 +37,7 @@ namespace bicameral::sim {
         uint32_t soundSpeedMmPerS = 340000;  // 式の音速 c̃(C_i = V ÷ c̃²。0 = 最速)
         ImplicitOptions solver = {.method = ImplicitMethod::Multigrid, .cycles = 2};  // V サイクルの回数(ちょうど)
         GpuImplicitRecordShape shape = {.fixedCycles = true};  // V の記録の形(fixedCycles は必ず立てる)
+        bool meterResiduals = false;                           // 部品の残差の計器を積む(GpuEquilibriumOptions。試験)
     };
 
     // 1 刻みの部分(タイムスタンプの区切り。計測の表の順)
@@ -62,7 +66,7 @@ namespace bicameral::sim {
         [[nodiscard]] bool RecordBegin(ID3D12GraphicsCommandList10* list, const ImplicitGrid* shape);
 
         // リストの終わり(陰解法のバッファを COMMON へ。読み戻しの後に)
-        void RecordEnd(ID3D12GraphicsCommandList10* list) { m_implicit.RecordRelease(list); }
+        void RecordEnd(ID3D12GraphicsCommandList10* list) { m_equilibrium.RecordEnd(list); }
 
         // 1 刻み。timed なら部分の区切りにタイムスタンプを打つ(EnableTiming の後。MAX_TIMED_STEPS 刻みまで)
         [[nodiscard]] bool RecordStep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -76,14 +80,17 @@ namespace bicameral::sim {
         [[nodiscard]] uint64_t Tick() const { return m_tick; }
 
         // V の記録の形(GpuImplicit::ShapeFrom で前の刻みの数から選ぶ。値は同じで費用だけ変わる。fixedCycles は立てたまま)
-        void SetSolveShape(GpuImplicitRecordShape shape) {
-            shape.fixedCycles = true;
-            m_options.shape = shape;
-        }
+        void SetSolveShape(GpuImplicitRecordShape shape) { m_equilibrium.SetSolveShape(shape); }
 
         // V の数と段の形の読み戻し(RecordStep の後。RecordEnd の前)
-        void RecordCostReadback(ID3D12GraphicsCommandList10* list) { m_implicit.RecordCostReadback(list); }
-        [[nodiscard]] bool ReadCost(GpuImplicitCost& cost) const { return m_implicit.ReadCost(cost); }
+        void RecordCostReadback(ID3D12GraphicsCommandList10* list) { m_equilibrium.RecordCostReadback(list); }
+        [[nodiscard]] bool ReadCost(GpuImplicitCost& cost) const { return m_equilibrium.ReadCost(cost); }
+
+        // 部品(残差の計器の読み戻し・VRAM)
+        [[nodiscard]] GpuEquilibrium& Equilibrium() { return m_equilibrium; }
+        [[nodiscard]] const GpuEquilibrium& Equilibrium() const { return m_equilibrium; }
+        // VRAM(気体の箱 + 部品。T-0918 の測り)
+        [[nodiscard]] uint64_t DeviceBytes() const;
 
         // --- 計測 ---
         [[nodiscard]] bool EnableTiming(ID3D12Device* device);
@@ -94,7 +101,7 @@ namespace bicameral::sim {
 
     private:
         // shaders/sim/gas_projection.hlsl の入口(.cso の名前と同じ順)
-        enum class Pass : uint8_t { Face, Cell, Level, Pressure, Flow, Count };
+        enum class Pass : uint8_t { Face, Cell, Pressure, Flow, Count };
 
         // b0 のルート定数(gas_step.hlsl の RootConstants + gas_projection.hlsl の GAS_STEP_EXTRA_CONSTANTS と同じ順)
         struct Constants {
@@ -104,8 +111,6 @@ namespace bicameral::sim {
             uint32_t speciesStride = 0;
             uint32_t maxNodes = 0;
             uint32_t maxLinks = 0;
-            uint32_t levelStart = 0;
-            uint32_t levelCount = 0;
             uint32_t perSoundLow = 0;
             uint32_t perSoundHigh = 0;
             uint32_t statePerSoundLow = 0;
@@ -114,26 +119,22 @@ namespace bicameral::sim {
             uint32_t linkHigh = 0;
         };
 
-        GpuGasProjection(GpuGas gas, GpuImplicit implicit) : m_gas(std::move(gas)), m_implicit(std::move(implicit)) {}
+        GpuGasProjection(GpuGas gas, GpuEquilibrium equilibrium)
+            : m_gas(std::move(gas)), m_equilibrium(std::move(equilibrium)) {}
 
         [[nodiscard]] std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
-        void SetLevels(const ImplicitGrid& grid);
-        [[nodiscard]] bool UploadShape(ID3D12GraphicsCommandList10* list, const ImplicitGrid& grid);
         void RecordPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, Pass pass,
                         const Constants& constants, uint32_t threads) const;
         void RecordStamp(ID3D12GraphicsCommandList10* list, bool timed, uint32_t part) const;
 
         GpuGas m_gas;
-        GpuImplicit m_implicit;
-        GpuGasProjectionOptions m_options;
-        Constants m_constants;  // 刻みで変わらない欄(通し番号・段は RecordStep が埋める)
+        GpuEquilibrium m_equilibrium;
+        Constants m_constants;  // 刻みで変わらない欄(通し番号は RecordStep が埋める)
         uint64_t m_tick = 0;
-        std::vector<uint32_t> m_levelOffsets;  // 段ごとの節の始まり(段の数 + 1。今の段の形)
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, (size_t)Pass::Count> m_pipelines;
         gpu::ResidentBuffer m_parameters;  // t0: 投影の係数の設定(GasPressureCoefficients)
-        ComPtr<ID3D12Resource> m_scratch;  // u10: 容量・対角・面の係数(128bit)
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
         uint32_t m_timedSteps = 0;
