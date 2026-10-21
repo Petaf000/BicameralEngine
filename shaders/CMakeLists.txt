@@ -238,6 +238,15 @@ foreach(_entry IN ITEMS EquilibriumLevel EquilibriumMeter)
   bicameral_add_shader(sim/equilibrium.hlsl PROFILE cs_6_8 ENTRY ${_entry} NAME ${_snake})
 endforeach()
 
+# 成分を持つ節の釣り合いの GPU の段(T-0970。成分の数 k = 1・2・3・6 ごとに別々に作る。呼ぶ順は engine/src/sim/gpu_equilibrium_block.cpp)
+foreach(_k IN ITEMS 1 2 3 6)
+  foreach(_entry IN ITEMS Finish Coarsen Smooth Restrict Prolong)
+    string(TOLOWER "${_entry}" _lower)
+    bicameral_add_shader(sim/equilibrium_block.hlsl PROFILE cs_6_8 ENTRY EquilibriumBlock${_entry}
+                         NAME equilibrium_block_k${_k}_${_lower} DEFINES EQB_K=${_k})
+  endforeach()
+endforeach()
+
 # 気体の圧力の投影の 1 刻みの段(T-0845。本物の音速の陰解法の式を作る・当てる。段の重みと V は部品〔T-0915〕。呼ぶ順は engine/src/sim/gpu_gas_projection.cpp)
 foreach(_entry IN ITEMS GasProjectFace GasProjectCell GasProjectPressure GasProjectFlow)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")

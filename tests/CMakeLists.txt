@@ -727,6 +727,13 @@ bicameral_add_gpu_test(gpu_implicit_box_bench)
 target_link_libraries(gpu_implicit_box_bench PRIVATE bicameral_sim)
 
 # 気体の圧力の投影(T-0531)の GPU 版と CPU の模型(gas_projection)のビット一致。今は解く部分(GpuImplicit::RecordSolve)。
+# 成分を持つ節の釣り合いの GPU 版と CPU のビット一致(T-0970。支えの場面・k = 1・2・3・6 の箱・逆順)。
+# 計測は job.py run -Preset release -Exe gpu_equilibrium_block_test -- --no-gbv --measure
+bicameral_add_gpu_test(gpu_equilibrium_block_test)
+target_link_libraries(gpu_equilibrium_block_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_equilibrium_block gpu_equilibrium_block_test gpu --queue compute --no-gbv)
+set_tests_properties(gpu_equilibrium_block PROPERTIES TIMEOUT 900)
+
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)
 target_link_libraries(gpu_gas_projection_test PRIVATE bicameral_sim bicameral_gas_projection)
