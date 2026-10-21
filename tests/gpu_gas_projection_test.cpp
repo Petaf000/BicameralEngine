@@ -29,6 +29,7 @@
 
 #include "core/log.h"
 #include "core/singleton.h"
+#include "gas_projection_scenes.h"
 #include "gpu/debug_ring.h"
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
@@ -44,135 +45,7 @@ using namespace bicameral;
 
 namespace {
 
-    // --- 試験の空気(gas_projection_test と同じ。N2 79% + O2 21% と煙の印)---
-    constexpr uint32_t SPECIES_N2 = 0;
-    constexpr uint32_t SPECIES_SMOKE = 2;
-    constexpr std::array<uint32_t, 3> AIR_FRACTIONS_Q32 = {3393024163u, 901943132u, 0u};
-    constexpr uint32_t AIR_TEMPERATURE = 293150;                   // mK
-    constexpr uint64_t SURFACE_PRESSURE = 101325ull * 1000000ull;  // µPa
-    constexpr uint32_t REAL_SOUND = 340000;                        // mm/s
-    constexpr uint32_t BUBBLE_HEAT = 30000;                        // mK
-    constexpr uint32_t BLAST_TEMPERATURE = 1500000;                // mK
-
-    sim::GasConfig MakeAirConfig(uint32_t edge) {
-        sim::GasConfig config;
-        config.sizeX = edge;
-        config.sizeY = edge;
-        config.sizeZ = edge;
-        config.speciesCount = 3;
-        config.species[0] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};  // N2
-        config.species[1] = {.molarMass = 31999, .heatCapacity = 21064, .formationEnergy = 0};  // O2
-        config.species[2] = {.molarMass = 28013, .heatCapacity = 20810, .formationEnergy = 0};  // 煙の印
-        sim::ApplyWorldPhysics(sim::StandardWorldPhysics(), config);
-
-        return config;
-    }
-
-    sim::GasBox MakeAirBox(uint32_t edge) {
-        const sim::GasConfig config = MakeAirConfig(edge);
-        return sim::MakeGasBox(
-            config, sim::MakeHydrostaticReference(config, AIR_FRACTIONS_Q32, AIR_TEMPERATURE, SURFACE_PRESSURE));
-    }
-
-    // 同じ圧力のまま温度を変える(物質量を温度に反比例させる)
-    void SetTemperature(sim::GasBox& box, uint32_t index, uint32_t temperature, uint64_t pressurePercent) {
-        sim::GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
-        for (uint64_t& amount : amounts)
-            amount = amount * pressurePercent * AIR_TEMPERATURE / (100 * (uint64_t)temperature);
-
-        box.cells[index] = sim::MakeGasCell(box.config, amounts, temperature);
-    }
-
-    // 壁 = x の真ん中の板を塞ぎ(空き 0)、孔 4 セル(空き 1/2 が 2・1/256 が 2)。左が 2% 高い圧力(T-0667)。
-    // 板 = z = 一辺 ÷ 4 の層を全部 空き 1/256(細い孔の板)。下が 2% 高い圧力
-    enum class Scene : uint8_t { Bubble, Door, Blast, Wall, Plate };
-
-    constexpr std::array<Scene, 5> SCENES = {Scene::Bubble, Scene::Door, Scene::Blast, Scene::Wall, Scene::Plate};
-    constexpr std::array<uint32_t, 2> SPEEDS = {0, REAL_SOUND};
-
-    std::string_view SceneName(Scene scene) {
-        switch (scene) {
-            case Scene::Bubble: return "泡";
-            case Scene::Door: return "扉";
-            case Scene::Blast: return "爆発";
-            case Scene::Wall: return "孔のある壁";
-            case Scene::Plate: return "細孔の板";
-        }
-
-        return "";
-    }
-
-    // セルの空きを share にし、気体を基準 × share に減らす(固体が占めた分の空気は無い。T-0667)
-    void Occupy(sim::GasBox& box, uint32_t index, uint32_t share) {
-        if (box.openQ16.empty())
-            box.openQ16.assign(box.cells.size(), sim::GAS_OPEN_FULL);
-
-        box.openQ16[index] = share;
-        sim::GasPerSpecies<uint64_t> amounts = box.cells[index].amounts;
-        for (uint64_t& amount : amounts)
-            amount = amount * share / sim::GAS_OPEN_FULL;
-
-        box.cells[index] = sim::MakeGasCell(box.config, amounts, AIR_TEMPERATURE);
-    }
-
-    // 壁・板の空き(Q16。全部開いたセルは GAS_OPEN_FULL)
-    uint32_t SceneShare(Scene scene, uint32_t edge, int32_t x, int32_t y, int32_t z) {
-        const auto center = (int32_t)(edge / 2);
-        if (scene == Scene::Plate)
-            return z == center / 2 ? sim::GAS_OPEN_FULL / 256 : sim::GAS_OPEN_FULL;
-
-        if (scene != Scene::Wall || x != center)
-            return sim::GAS_OPEN_FULL;
-
-        const bool holeY = y == center - 1 || y == center;
-        if (!holeY || (z != center - 1 && z != center))
-            return 0;
-
-        return z == center - 1 ? sim::GAS_OPEN_FULL / 2 : sim::GAS_OPEN_FULL / 256;
-    }
-
-    sim::GasBox MakeScene(Scene scene, uint32_t edge) {
-        sim::GasBox box = MakeAirBox(edge);
-        const auto center = (int32_t)(edge / 2);
-        for (uint32_t index = 0; index < box.cells.size(); ++index) {
-            const auto x = (int32_t)(index % edge);
-            const auto y = (int32_t)((index / edge) % edge);
-            const auto z = (int32_t)(index / (edge * edge));
-            if (scene == Scene::Bubble) {
-                const int32_t dx = x - center;
-                const int32_t dy = y - center;
-                const int32_t dz = z - (center / 2);
-                if ((dx * dx) + (dy * dy) + (dz * dz) <= 2)
-                    SetTemperature(box, index, AIR_TEMPERATURE + BUBBLE_HEAT, 100);
-            } else if (scene == Scene::Door || scene == Scene::Wall) {
-                if (x < center)
-                    SetTemperature(box, index, AIR_TEMPERATURE, 102);
-            } else if (scene == Scene::Plate) {
-                if (z < center / 2)
-                    SetTemperature(box, index, AIR_TEMPERATURE, 102);
-            } else if (x == center && y == center && z == center) {
-                SetTemperature(box, index, BLAST_TEMPERATURE, 500);
-                sim::GasCell& cell = box.cells[index];
-                const uint64_t moved = cell.amounts[SPECIES_N2] / 2;
-                cell.amounts[SPECIES_N2] -= moved;
-                cell.amounts[SPECIES_SMOKE] += moved;
-            }
-        }
-
-        if (scene != Scene::Wall && scene != Scene::Plate)
-            return box;
-
-        for (uint32_t index = 0; index < box.cells.size(); ++index) {
-            const auto x = (int32_t)(index % edge);
-            const auto y = (int32_t)((index / edge) % edge);
-            const auto z = (int32_t)(index / (edge * edge));
-            const uint32_t share = SceneShare(scene, edge, x, y, z);
-            if (share != sim::GAS_OPEN_FULL)
-                Occupy(box, index, share);
-        }
-
-        return box;
-    }
+    using namespace gas_scenes;  // 試験の場面(gas_projection_scenes.h。T-0853 で移した)
 
     // --- GPU で解き直す ---
 

@@ -332,6 +332,11 @@ views:
       - { id: gasfastestlayout, group: simlib, label: "CheckLayoutFastestOpenings<br/>最速を選んだ世界の読み込みの検査(T-0804・D-526)<br/>環境 gas_pressure_speed = instant × 置いた世界の気体の区画",
           code: "engine/src/sim/gas_fastest_layout.cpp::CheckLayoutFastestOpenings", ticket: T-0804, doc: docs/design/20-transport-substrate.md,
           note: "世界の組み立ての気体の区画(世界いっぱい)と world_cells の初めの中身で、刻みの中と同じ FindGasSmallOpenJoints と同じ文(ProbeRegionJointWarning)。読み込み(LoadReactionTable・RebuildReactionTable)がベイクの後に呼び、表の warnings へ。多重解像度と GPU の気体は陽解法だけなので、最速の世界では作った時に「まだ効かない」と知らせる(GasInstantNotYetNotice)" }
+      - { id: equilibrium, group: simlib, label: "SolveEquilibrium<br/>釣り合う家族の共通部品(T-0853)<br/>木を多重格子の段に・決まった回数・面の形・物理の長さで閉じる",
+          code: "engine/src/sim/equilibrium.cpp::SolveEquilibrium", ticket: T-0853, doc: docs/decisions/ADR-0397-balance-family-core.md,
+          note: "法則が渡すのは節(C_i)・面(g)・値を固定した面・右辺の項だけ(EquilibriumSystem)。式は shaders/common/equilibrium.hlsli(GPU と共有。GPU の回し方は T-0915)。最初の使い手は陰の圧力(MakeGasEquilibriumSystem。GasProjectionOptions::equilibrium で T-0845 の CPU の答えと毎刻みビット一致。equilibrium_test)" }
+      - { id: equilibriumtest, group: tests, label: "equilibrium_test<br/>陰の圧力を部品の上へ: 5 場面 × 300 刻み毎刻みビット一致・保存・決定性・閉じた領域",
+          code: "tests/equilibrium_test.cpp::TestGasOnEquilibrium", ticket: T-0853 }
       - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
           code: "engine/src/sim/gpu_implicit.cpp::GpuImplicit::RecordSolve", ticket: T-0531, doc: docs/design/07-transport.md,
           note: "止める判定はセルごとの閾値 ⌈(許容差 + 1) 2^48 ÷ D⌉(GasPressureThresholds)で CPU と整数で同じ。gpu_gas_projection_test が CPU の模型の解きを GPU で解き直してビット一致を確かめる。式を作る・当てる・外側の反復の GPU 版は T-0531 の残り" }
@@ -616,6 +621,9 @@ views:
       - [probeliquid, cellvolume, "液体の空き"]
       - [gasprojection, gasreference, "式を作る・当てる"]
       - [gasprojection, implicitcpu, "多重格子を流用"]
+      - [gasprojection, equilibrium, "部品の上で解く(T-0853)"]
+      - [equilibrium, implicitcpu, "段の作りと V サイクル"]
+      - [equilibriumtest, equilibrium, "ビット一致"]
       - [gpugasprojection, gasprojection, "同じ解きをビット一致で"]
       - [gpugasprojection, gpuimplicit, "V サイクルの段を使い回す"]
       - [gpugasprojectionstep, gpugasprojection, "V 2 回固定で解く"]

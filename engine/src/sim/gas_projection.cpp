@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cstdlib>
 
+#include "common/equilibrium.hlsli"
 #include "common/fixed.hlsli"
 
 namespace bicameral::sim {
@@ -22,6 +23,7 @@ namespace bicameral::sim {
         namespace fx = bicameral::fx;
 
         constexpr uint32_t CAPACITY_SHIFT = 48;  // C・K の Q(mg/µPa)
+        constexpr uint32_t EQ_EXACT_ROUNDING = multires::EQ_ROUNDING_EXACT;
         constexpr uint32_t MISMATCH_SHIFT =
             32;  // 食い違い G を mg の Q16 で持つ(C × x の Q48 から 32 ずらす。最速の大きな x でも 64bit に入る)
 
@@ -193,6 +195,83 @@ namespace bicameral::sim {
             }
         }
 
+        // --- 釣り合う家族の共通部品の上で(T-0853)。式の作りだけがここに残る: 節 = セル(C_i)・面 = 箱の中の面(K_f)・
+        //     開いた境界の面 = 外の x = 0 を固定した面・右辺の項 = E_i と −Σ F*(どちらも値 × 係数 ÷ D の形)---
+        EquilibriumSystem MakeEquilibriumSystemImpl(const GasBox& box, const GasPressureSystem& system) {
+            const uint32_t sizeX = box.config.sizeX;
+            const uint32_t sizeY = box.config.sizeY;
+            EquilibriumSystem equilibrium;
+            equilibrium.rounding = EQ_EXACT_ROUNDING;
+            equilibrium.nodes.resize(box.cells.size());
+            for (uint32_t index = 0; index < box.cells.size(); ++index) {
+                EquilibriumNode& node = equilibrium.nodes[index];
+                node.x = index % sizeX;
+                node.y = (index / sizeX) % sizeY;
+                node.z = index / (sizeX * sizeY);
+                node.capacity = system.cellCapacities[index];
+                const uint64_t boundary = system.capacities[index] - system.cellCapacities[index];
+                if (boundary != 0)
+                    equilibrium.fixedFaces.push_back(
+                        {.node = index, .coefficient = {.hi = 0, .lo = boundary}, .value = 0});
+
+                equilibrium.sources.push_back({.node = index,
+                                               .value = system.statePressures[index],
+                                               .factor = {.hi = 0, .lo = system.stateCapacities[index]}});
+                equilibrium.sources.push_back({.node = index,
+                                               .value = -system.divergences[index],
+                                               .factor = {.hi = 0, .lo = (uint64_t)1 << CAPACITY_SHIFT}});
+            }
+
+            equilibrium.faces.reserve(system.links.size());
+            for (const GasPressureLink& link : system.links) {
+                equilibrium.faces.push_back({.fine = std::min(link.left, link.right),
+                                             .coarse = std::max(link.left, link.right),
+                                             .gap = 0,
+                                             .coefficient = {.hi = 0, .lo = link.coefficient}});
+            }
+
+            return equilibrium;
+        }
+
+        void ProjectOnEquilibrium(GasBox& box, GasProjection& state, const GasProjectionOptions& options,
+                                  uint64_t roundingTick, GasProjectionCost& cost) {
+            assert(options.fixedCycles && options.outerIterations <= 1);
+            const GasPressureSystem system = BeginGasPressure(box, options.pressure);
+            const EquilibriumSystem equilibrium = MakeEquilibriumSystemImpl(box, system);
+            EquilibriumOptions solve = {.solver = options.solver,
+                                        .galerkinCoarse = options.galerkinCoarse,
+                                        .closeLengthMm = options.closeLengthMm,
+                                        .faceValues = false};
+            if (state.equilibrium.values.empty() && state.pressures.size() == box.cells.size())
+                state.equilibrium.values = state.pressures;
+
+            // 解きを見る口(GPU の比べ)は前の道と同じ形で渡す
+            const EquilibriumObserver observer = [&options](const EquilibriumSolveView& view) {
+                (*options.solveObserver)({.grid = view.grid,
+                                          .rhs = view.rhs,
+                                          .before = view.before,
+                                          .after = view.after,
+                                          .cycles = options.solver.cycles,
+                                          .massError = 0});
+            };
+            const EquilibriumResult result = SolveEquilibrium(equilibrium, solve, state.equilibrium,
+                                                              options.solveObserver != nullptr ? &observer : nullptr);
+            state.pressures = state.equilibrium.values;
+
+            cost.cycles += options.solver.cycles;
+            cost.maxCycles = std::max(cost.maxCycles, options.solver.cycles);
+            cost.gridLevels = result.gridLevels;
+            cost.outerIterations += 1;
+            cost.maxOuterIterations = std::max(cost.maxOuterIterations, 1u);
+            cost.unknowns = result.unknowns;
+            cost.worstResidual = std::max(cost.worstResidual, result.worstResidual);
+            cost.worstMassError = std::max(cost.worstMassError, (int64_t)result.worstResidual);
+            cost.solver.cellUpdates += result.cost.cellUpdates;
+            cost.solver.passes += result.cost.passes;
+            cost.solver.cycles += result.cost.cycles;
+            FinishGasPressure(box, options.pressure, system, state.pressures, roundingTick);
+        }
+
         // 1 回の投影(外側の反復を含む)
         void Project(GasBox& box, GasProjection& state, const GasProjectionOptions& options, uint64_t roundingTick,
                      GasProjectionCost& cost) {
@@ -244,6 +323,10 @@ namespace bicameral::sim {
 
     }  // namespace
 
+    EquilibriumSystem MakeGasEquilibriumSystem(const GasBox& box, const GasPressureSystem& system) {
+        return MakeEquilibriumSystemImpl(box, system);
+    }
+
     uint32_t GasInnerToleranceMilligrams(const GasProjectionOptions& options) {
         if (options.toleranceMilligrams != 0)
             return options.toleranceMilligrams;
@@ -270,7 +353,10 @@ namespace bicameral::sim {
         GasProjectionCost cost;
         const uint32_t substeps = options.pressure.substeps;
         for (uint32_t substep = 0; substep < substeps; ++substep)
-            Project(box, state, options, (box.tick * substeps) + substep, cost);
+            if (options.equilibrium)
+                ProjectOnEquilibrium(box, state, options, (box.tick * substeps) + substep, cost);
+            else
+                Project(box, state, options, (box.tick * substeps) + substep, cost);
 
         ++box.tick;
 

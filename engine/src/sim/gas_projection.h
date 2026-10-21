@@ -15,6 +15,7 @@
 #include <span>
 #include <vector>
 
+#include "sim/equilibrium.h"
 #include "sim/gas_pressure_system.h"
 #include "sim/gas_reference.h"
 #include "sim/implicit_conduction.h"
@@ -50,6 +51,11 @@ namespace bicameral::sim {
         // V サイクルを許容差で止めず、ちょうど solver.cycles 回まわす(T-0842 研究。費用を決まった回数に固定する)。
         // 外側の反復が 1(解き直さない)のときは、仮の状態の食い違いも測らない(費用に入れない。cost の食い違いは 0)
         bool fixedCycles = false;
+        // 釣り合う家族の共通部品(equilibrium.h。T-0853)の上で解く。fixedCycles と outerIterations = 1(T-0845 の形)だけ。
+        // 前の道(熱の多重格子を直に呼ぶ)とビット単位で同じ(gas_projection_test --t0853)。既定は前の道(GPU の比べ T-0915 の後で替える)
+        bool equilibrium = false;
+        // 部品の閉じた領域の長さ(mm。0 = 閉じない。20 §9.3 の陰の圧力 = 音の速さ × 刻みの倍数。equilibrium の時だけ)
+        uint64_t closeLengthMm = 0;
 
         // --- 外側の反復(T-0530。上限に届いたら、その時の仮の状態を採り、残りの食い違いは次の刻みへ持ち越す〔回数は決まった上限まで。D-468〕)---
         // 上限(1 = 解き直さない〔T-0503 の線形の 1 回〕)。既定の 4・100 mg・傾きで割るは仮(ユーザー未確認。ADR-0234)
@@ -68,6 +74,7 @@ namespace bicameral::sim {
     // 前の回の圧力(µPa。セルの順。初めの近似)
     struct GasProjection {
         std::vector<int64_t> pressures;
+        EquilibriumState equilibrium;  // 部品の上で解く時の温めた始まり(T-0853。pressures はその値の写し)
     };
 
     // 1 刻みの費用
@@ -85,9 +92,17 @@ namespace bicameral::sim {
         int64_t worstMismatch = 0;        // 採った状態の食い違い |E_真 − C_i x_i| の最大(mg)
         int64_t firstMismatch = 0;        // 1 回目(解き直す前)の食い違いの最大(mg。線形にした誤差の大きさ)
         ImplicitCost solver;              // 節の計算の数・直列の段の数
+
+        // --- 部品の上で解いた時(T-0853)---
+        uint32_t unknowns = 0;       // 未知数にしたセル(閉じた領域)
+        uint64_t worstResidual = 0;  // 残差の計器(mg。刻みの終わりの質量のずれの最大)
     };
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options);
+
+    // 圧力の式を釣り合う家族の部品の系にする(T-0853。節 = セル・面 = 箱の中の面・開いた境界 = 外の x = 0 を固定した面・
+    // 右辺の項 = E_i と −Σ F*〔値 × 係数 ÷ D〕)。options.equilibrium の道と試験・GPU の比べ(T-0915)が使う
+    [[nodiscard]] EquilibriumSystem MakeGasEquilibriumSystem(const GasBox& box, const GasPressureSystem& system);
 
     // セルごとの止める閾値(T-0531。GPU の止める判定): |残差| がこれ以上のセルが 1 つでもあれば、式の誤差 floor(|残差| × D_i ÷ 2^48)が
     // 許容差を超える(⌈(許容差 + 1)× 2^48 ÷ D_i⌉。CPU の判定と整数で同じ)
