@@ -1,11 +1,18 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-22(本体の作業役・番号の表の直し・Q147・Q148・t-0970-block-gpu・t-0963-r2-place1 のマージ)
+最終更新: 2026-10-22(本体の作業役・t-0937-face-opening のマージ)
 
 ## 状態(3 行以内)
 - **T-0931 の 1 チャット目(CPU・ADR-0417)・R2 の 1 本目(t-0869-r2)・T-0919 成分を持つ節(t-0919-c0-components・ADR-0418)・R-T2 の 1 本の列(t-0856-rt2・ADR-0410)を main へ**。サンプルの世界の光の現実の値。Q146 → D-616(歩の途中のセーブは歩の記録も保存)・D-617(支えは 1 つの系)をユーザーが決めた。判断待ちは Q145。
-- **作業中**: wt2 T-0922/T-0955(t-0922-warmstart)・wt3 R3 T-0996(t-0996-r3-granular)・wt4 T-0950(t-0950-rt2-tree)・wt5 T-0937(t-0937-face-opening)・wt6 T-0878(R-R2。t-0878-rr2-lens)。R-R1 は Q147 の答え待ち(t-0958-rr1-cpu・t-0972-rr1-fix はマージしない)。
+- **T-0937 面の開き具合の欄(t-0937-face-opening・ADR-0420 Proposed)を main へ**(CPU 済み。D-615 の溝に沿って流れる要望が満たされた)。
+- **作業中**: wt2 T-0922/T-0955(t-0922-warmstart)・wt3 R3 T-0996(t-0996-r3-granular)・wt4 T-0950(t-0950-rt2-tree)・wt5 T-0976(t-0976-face-open-families)・wt6 T-0878(R-R2。t-0878-rr2-lens)。R-R1 は Q147 の答え待ち(t-0958-rr1-cpu・t-0972-rr1-fix はマージしない)。
 - **次**: T-0966(T-0931 の GPU)・T-0969・T-0971・T-0951・T-0952・T-0939(C-0 GPU の閉じた領域)・T-0953〜T-0955・R1 の残り T-0947/T-0948・R-B1 の残り T-0960・T-0981/T-0982(支えの GPU の残り)・T-0978(R2 の水面の層)・T-0922・T-0920・T-0936/T-0938 → 最低機 Q11 → T-0858 棚卸し。
+
+## この仕事でしたこと(2026-10-22・本体の作業役・t-0937-face-opening のマージ)
+- **マージ**(`--no-ff`・衝突なし): t-0937-face-opening(eb2ea78。面の開き具合の欄 `face.blocked`〔導かれる値〕・`FoFaceOpen` を MultiresLiquid が読む・粒が穴を通る口 `FoGrainFaceOpen`・試験 face_opening・ADR-0420 Proposed)。
+  release のビルドが通った(警告 0)。確かめ: CPU `^(face_opening|probe_liquid|surface_detail|multires.*|field_storage)$` 18 本(multires.* 14 本。face_opening 36.7 秒・multires_gas 227 秒・計 648 秒)・GPU gpu_probe_liquid(22.2 秒。順番待ち 226 秒)・gpu_surface_detail(1.3 秒。順番待ち 598 秒)。全部合格。archmap --check・float_check OK。
+- 記録: ROADMAP の T-0937(CPU 済み)と T-0975〜T-0977 の行(T-0976 は wt5 作業中)・COMMANDER(wt5 に T-1000〜T-1002・ADR-0429。次は **D-618・ADR-0430・T-1003・Q149**)・
+  runner/worker-common.md に「試験の時間を比べる時は、ほかの作業ツリーのビルドとの重なりも見る」。
 
 ## この仕事でしたこと(2026-10-22・本体の作業役・番号の表と作業中の行の直し)
 - COMMANDER の番号の表: wt6 t-0972-rr1-fix が T-0987・ADR-0424 を使った・wt6 に T-0878 + T-0990〜T-0992・ADR-0425〜0426・wt2 に T-0993〜T-0995・ADR-0427。T-0983・T-0988・T-0989 は使わない。次は **D-618・ADR-0428・T-0996・Q148**(下で進めた)。
