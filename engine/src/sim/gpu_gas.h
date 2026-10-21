@@ -77,8 +77,9 @@ namespace bicameral::sim {
         }
         [[nodiscard]] uint32_t CellCount() const { return m_cellCount; }
 
-        // --- 調べる用(HW と WARP の食い違いの切り分け。T-0185)。面(u3)とセルごとの合計(u4)を 64bit の語の並びで読み戻す ---
-        void RecordDebugReadback(ID3D12GraphicsCommandList10* list) const;
+        // --- 調べる用(HW と WARP の食い違いの切り分け。T-0185)。面(u3)とセルごとの合計(u4)を 64bit の語の並びで読み戻す
+        // (面の件は置き場の番号 GasGpuFaceSlot の順。T-0918)---
+        void RecordDebugReadback(ID3D12GraphicsCommandList10* list);                  // 読み戻しは初めて呼んだ時に作る
         void SetDebugPassLimit(uint32_t passCount) { m_debugPassLimit = passCount; }  // 小刻みの段をここまでで止める
         [[nodiscard]] bool ReadDebug(std::vector<uint64_t>& faceWords, std::vector<uint64_t>& sumWords) const;
 
@@ -129,6 +130,7 @@ namespace bicameral::sim {
         [[nodiscard]] std::array<D3D12_GPU_VIRTUAL_ADDRESS, 4> OwnSrvs() const;
 
         uint32_t m_cellCount = 0;
+        uint32_t m_faceSlots = 0;      // 面の件の数(GasGpuFaceSlotCount。番号の数 = セル × 6 の約半分。T-0918)
         uint32_t m_speciesCount = 0;   // 箱の成分の数(読み戻す欄)
         uint32_t m_speciesStride = 1;  // 1 件の成分の欄の数(gas_step.hlsl の g_speciesStride)
         uint32_t m_substeps = 0;
@@ -145,7 +147,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_ledgerUpload;  // 初めの帳簿
         ComPtr<ID3D12Resource> m_cellReadback;
         ComPtr<ID3D12Resource> m_ledgerReadback;
-        ComPtr<ID3D12Resource> m_faceReadback;  // 調べる用
+        ComPtr<ID3D12Resource> m_faceReadback;  // 調べる用(RecordDebugReadback が初めて作る)
         ComPtr<ID3D12Resource> m_sumReadback;
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;

@@ -20,6 +20,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <span>
@@ -56,6 +57,10 @@ namespace bicameral::sim {
         uint32_t nodes = 0;    // 全部の段の節
         uint32_t links = 0;    // 全部の段の隣
         uint32_t levels = 64;  // 段の数(CPU の MAX_GRID_LEVELS)
+        // 一般の右辺で解く形(RecordSolve)だけに使う(T-0918。釣り合う家族の部品 GpuEquilibrium): セル(ImGpuCell)・面・セルの面の一覧・
+        // 安全網の印・面の流れの欄を持たない(faces は 0 にする)。RecordStep・RecordReadback・RecordCopySystem・RecordUploadSolve・
+        // RecordSolutionReadback は使えない(前の答えを 0 にするのは RecordZeroValues)
+        bool solveOnly = false;
     };
 
     // 段の分け方の調整(計測で選ぶ。既定は T-0120 の値、T-0127 で木につないだ場面で測り直した。docs/perf.md)
@@ -151,6 +156,8 @@ namespace bicameral::sim {
         // CPU から右辺・初めの近似・閾値(どれもセルの順)を作業場へ写す(RecordUpload の後。試験と計測用)
         [[nodiscard]] bool RecordUploadSolve(ID3D12GraphicsCommandList* list, std::span<const int64_t> rhs,
                                              std::span<const int64_t> values, std::span<const int64_t> thresholds);
+        // 作業場の値 A・B の先頭 cellCount 個を 0 に(RecordUpload の後。小さい 0 の写しを繰り返す。solveOnly でも使える。T-0918)
+        [[nodiscard]] bool RecordZeroValues(ID3D12GraphicsCommandList* list, uint32_t cellCount);
         // 解いた値(セルの数)と数を読み戻す(RecordSolve の後)
         void RecordSolutionReadback(ID3D12GraphicsCommandList* list, uint32_t cellCount);
         [[nodiscard]] bool ReadSolution(std::span<int64_t> values, GpuImplicitCost& cost) const;
@@ -164,6 +171,12 @@ namespace bicameral::sim {
         [[nodiscard]] const GpuImplicitLimits& Limits() const { return m_limits; }
         // VRAM(既定のヒープのバッファ・アップロード・読み戻しの合計。T-0918 の測り)
         [[nodiscard]] uint64_t DeviceBytes() const;
+        // 段の形の写しの元(アップロードのヒープ。RecordUpload が要る大きさで作る)を捨てる。写したリストが GPU で終わった後に呼ぶ。
+        // 次の RecordUpload が作り直す(T-0918。形が変わらない間はシステムのメモリを持たない)
+        void ReleaseStaging() {
+            m_staging.Reset();
+            m_retiredStaging.clear();
+        }
 
         // バッファを COMMON に戻す(RecordStep の後。同じリストで次の刻みに RecordReset をもう一度呼ぶため。T-0132)
         void RecordRelease(ID3D12GraphicsCommandList* list);
@@ -280,6 +293,11 @@ namespace bicameral::sim {
         std::expected<void, std::string> CreatePipelines(ID3D12Device5* device);
         std::expected<void, std::string> CreateBuffers(ID3D12Device5* device);
         [[nodiscard]] uint64_t BufferBytes(Buffer buffer) const;
+        // CPU の系を写すバッファの像(UPLOADED の順。solveOnly はセル・面を作らない)と、その写し(T-0918)
+        [[nodiscard]] std::array<std::vector<std::byte>, BufferCount> MakeImages(
+            const ImplicitGrid& grid, const std::vector<uint32_t>& levelOffsets, const GpuImplicitLimits& need) const;
+        [[nodiscard]] bool RecordImages(ID3D12GraphicsCommandList* list,
+                                        const std::array<std::vector<std::byte>, BufferCount>& images);
         void Dispatch(ID3D12GraphicsCommandList* list, Pass pass, uint32_t groups);
         void DispatchIndirect(ID3D12GraphicsCommandList* list, Pass pass, uint32_t slot);
         void RecordPlan(ID3D12GraphicsCommandList* list);
@@ -306,13 +324,15 @@ namespace bicameral::sim {
         ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // ExecuteIndirect の Dispatch だけの引数
         std::array<ComPtr<ID3D12PipelineState>, PassCount> m_pipelines;
         std::array<ComPtr<ID3D12Resource>, BufferCount> m_buffers;
-        std::array<ComPtr<ID3D12Resource>, BufferCount> m_uploads;
+        ComPtr<ID3D12Resource> m_staging;  // 段の形の写しの元(全部の像を 1 本に。ReleaseStaging で捨てる。T-0918)
+        std::vector<ComPtr<ID3D12Resource>> m_retiredStaging;  // 大きくする前の写しの元(ReleaseStaging まで持つ)
         ComPtr<ID3D12Resource> m_cellsReadback;
         ComPtr<ID3D12Resource> m_stateReadback;
         ComPtr<ID3D12Resource> m_wideReadback;
         ComPtr<ID3D12Resource> m_planReadback;      // 計画の見出し(段の数・ImTail の境)
         ComPtr<ID3D12Resource> m_solveUpload;       // 一般の右辺で解く形の右辺・初めの近似・閾値(セル × 3。T-0531)
         ComPtr<ID3D12Resource> m_solutionReadback;  // 解いた値(セル)
+        ComPtr<ID3D12Resource> m_zeroUpload;        // 0 の写しの元(RecordZeroValues。大きさは決まった小ささ)
         ComPtr<ID3D12QueryHeap> m_timestamps;
         ComPtr<ID3D12Resource> m_timestampReadback;
         uint32_t m_timestampCount = 0;

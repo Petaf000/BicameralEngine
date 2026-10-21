@@ -227,6 +227,7 @@ namespace bicameral::sim {
         result.m_speciesStride = GasGpuSpeciesStride(box.config.speciesCount, reservedSpecies);
         result.m_substeps = box.config.substeps;
         result.m_tick = box.tick;
+        result.m_faceSlots = GasGpuFaceSlotCount(box.config.sizeX, box.config.sizeY, box.config.sizeZ);
         if (GroupsFor((uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL) >
             (uint64_t)GAS_GPU_FACE_ROW_GROUPS * MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(面の段の Dispatch の上限)");
@@ -242,8 +243,7 @@ namespace bicameral::sim {
 
         // 成分の数に上限は無い(1 件 = 頭 + 欄 × m_speciesStride。T-0598)。丸めの鍵は設定のまま(欄の番号か物質 ID。T-0592)。
         // 件の大きさが 32bit の番地に収まること(ByteAddressBuffer の番地)
-        const uint64_t faceBytes = (uint64_t)result.m_cellCount * GAS_GPU_FACES_PER_CELL *
-                                   GasGpuFaceStride(result.m_speciesStride);
+        const uint64_t faceBytes = (uint64_t)result.m_faceSlots * GasGpuFaceStride(result.m_speciesStride);
         if (faceBytes > UINT32_MAX)
             return std::unexpected("気体の箱が大きすぎる(面の件の番地が 32bit を超える)");
 
@@ -336,7 +336,7 @@ namespace bicameral::sim {
         const std::array<uint64_t, 6> uavBytes = {n * GasGpuCellStride(stride),  // u0 セル
                                                   n * GasGpuCellStride(stride),  // u1 力を当てた後のセル
                                                   n * sizeof(GasGpuDerived),     // u2 導く値
-                                                  n * GAS_GPU_FACES_PER_CELL * GasGpuFaceStride(stride),  // u3 面
+                                                  uint64_t{m_faceSlots} * GasGpuFaceStride(stride),  // u3 面(T-0918)
                                                   n * GasGpuSumsStride(stride),  // u4 セルごとの合計
                                                   GasGpuLedgerBytes(stride)};    // u5 帳簿
         for (size_t i = 0; i < uavBytes.size(); ++i) {
@@ -353,10 +353,8 @@ namespace bicameral::sim {
         m_ledgerUpload = CreateUploadBuffer(device, PackLedger(box.ledger, stride));
         m_cellReadback = gpu::CreateBuffer(device, uavBytes[0], gpu::BufferKind::Readback);
         m_ledgerReadback = gpu::CreateBuffer(device, uavBytes[5], gpu::BufferKind::Readback);
-        m_faceReadback = gpu::CreateBuffer(device, uavBytes[3], gpu::BufferKind::Readback);
-        m_sumReadback = gpu::CreateBuffer(device, uavBytes[4], gpu::BufferKind::Readback);
         if (!std::ranges::all_of(m_srvs, &gpu::ResidentBuffer::Valid) || !m_cellUpload || !m_ledgerUpload ||
-            !m_cellReadback || !m_ledgerReadback || !m_faceReadback || !m_sumReadback)
+            !m_cellReadback || !m_ledgerReadback)
             return std::unexpected("気体のアップロード・読み戻しのバッファを作れない");
 
         return {};
@@ -481,14 +479,26 @@ namespace bicameral::sim {
 
     // --- 調べる用 ---
 
-    void GpuGas::RecordDebugReadback(ID3D12GraphicsCommandList10* list) const {
+    // 読み戻しは調べる時だけ作る(面の件と同じ大きさのシステムのメモリを持ち続けない。T-0918)
+    void GpuGas::RecordDebugReadback(ID3D12GraphicsCommandList10* list) {
+        ComPtr<ID3D12Device> device;
+        if (!m_faceReadback && SUCCEEDED(list->GetDevice(IID_PPV_ARGS(&device)))) {
+            m_faceReadback = gpu::CreateBuffer(device.Get(), m_uavs[3]->GetDesc().Width, gpu::BufferKind::Readback);
+            m_sumReadback = gpu::CreateBuffer(device.Get(), m_uavs[4]->GetDesc().Width, gpu::BufferKind::Readback);
+        }
+
+        if (!m_faceReadback || !m_sumReadback)
+            return;
+
         gpu::RecordCopyToReadback(list, m_uavs[3].Get(), m_faceReadback.Get());
         gpu::RecordCopyToReadback(list, m_uavs[4].Get(), m_sumReadback.Get());
     }
 
     bool GpuGas::ReadDebug(std::vector<uint64_t>& faceWords, std::vector<uint64_t>& sumWords) const {
-        faceWords.assign(
-            (size_t)m_cellCount * GAS_GPU_FACES_PER_CELL * GasGpuFaceStride(m_speciesStride) / sizeof(uint64_t), 0);
+        if (!m_faceReadback || !m_sumReadback)
+            return false;
+
+        faceWords.assign((size_t)m_faceSlots * GasGpuFaceStride(m_speciesStride) / sizeof(uint64_t), 0);
         sumWords.assign((size_t)m_cellCount * GasGpuSumsStride(m_speciesStride) / sizeof(uint64_t), 0);
 
         return gpu::ReadBuffer(m_faceReadback.Get(), std::as_writable_bytes(std::span(faceWords))) &&

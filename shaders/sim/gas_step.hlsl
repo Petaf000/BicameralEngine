@@ -68,12 +68,25 @@ uint32_t CellAmountAddress(uint32_t index, uint32_t s) {
     return GasGpuPlaneAddress(GAS_GPU_CELL_BYTES, g_cellCount, index, s);
 }
 
+// 面の件は置き場の番号で並ぶ(gas_gpu.hlsli の GasGpuFaceSlot。T-0918)。面の番号は乱数の丸めの鍵と両側の決め方に使う
+uint32_t FaceSlot(uint32_t faceId) {
+    const GasGpuParameters parameters = GAS_P;
+
+    return GasGpuFaceSlot(parameters.size[0], parameters.size[1], parameters.size[2], faceId);
+}
+
+uint32_t FaceSlotCount() {
+    const GasGpuParameters parameters = GAS_P;
+
+    return GasGpuFaceSlotCount(parameters.size[0], parameters.size[1], parameters.size[2]);
+}
+
 uint32_t FaceAddress(uint32_t faceId) {
-    return faceId * GAS_GPU_FACE_BYTES;
+    return FaceSlot(faceId) * GAS_GPU_FACE_BYTES;
 }
 
 uint32_t FaceMovedAddress(uint32_t faceId, uint32_t s) {
-    return GasGpuPlaneAddress(GAS_GPU_FACE_BYTES, g_cellCount * GAS_GPU_FACES_PER_CELL, faceId, s);
+    return GasGpuPlaneAddress(GAS_GPU_FACE_BYTES, FaceSlotCount(), FaceSlot(faceId), s);
 }
 
 uint32_t SumsAddress(uint32_t index) {
