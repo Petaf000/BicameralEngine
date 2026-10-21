@@ -1,13 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-21(本体の作業役・C-0 の CPU 版と M-0/M-1 のマージ)
+最終更新: 2026-10-21(本体の作業役・C-1 の疎な頁 t-0921-sparse のマージ)
 
 ## 状態(3 行以内)
-- **C-0 の CPU 版(t-0853-c0。t-0845 = T-0842〜T-0845 を含む)と測り M-0・M-1(t-0900-m1)を main へ入れた**。確かめは下の「この仕事でしたこと」。
-- **作業中**: wt2 T-0915(C-0 の GPU 版)・wt6 t-0910-rr0(R-R0)・wt3 R1(T-0868)・wt5 T-0921(疎な頁)・wt4 R-T1(T-0879)。
-- **次**: R-B1 支え(T-0871)・R2/R3(T-0869)・R-T2(T-0856)は C-0 の CPU 版の上で始められる・T-0922(温めた始まりの付け替え)→ 最低機 Q11 → T-0858 棚卸し。判断待ち Q143。**Q137〜Q142 はユーザー決定 D-608〜D-613**(2026-10-21 14:19)。
+- **C-1 の疎な頁(t-0921-sparse・T-0921・ADR-0403)を main へ入れた**(欄の頁は値がある所にだけ。既定は疎)。確かめは下の「この仕事でしたこと」。
+- **作業中**: wt2 T-0915(C-0 の GPU 版)・wt3 R1(T-0868)・wt4 R-T1(T-0879)・wt5 R-B1(T-0871)・wt6 R-R0(t-0910-rr0)。
+- **次**: R2/R3(T-0869)・R-T2(T-0856)は C-0 の CPU 版の上で始められる・T-0922(温めた始まりの付け替え)・T-0920(C-1 GPU 側。T-0930 を含む)→ 最低機 Q11 → T-0858 棚卸し。判断待ち Q143。
 
-## この仕事でしたこと(2026-10-21・本体の作業役・t-0853-c0 と t-0900-m1 のマージ)
+## この仕事でしたこと(2026-10-21・本体の作業役・t-0921-sparse のマージ)
+- **マージ**(`--no-ff`・衝突なし): t-0921-sparse(488bd88。`MultiresField::store`〔MultiresFieldStore〕・`MultiresNest::sparseFields`〔既定は疎〕・眠る判定で全部 0 の頁を返す・tests/multires_sparse_test・ADR-0403・perf.md の 1 セルのバイト)。
+- **確かめ**: release のビルド警告 0・CPU 35 本が通った(multires_sparse 60 秒・equilibrium 562 秒・field_storage・multires_*・gas_*・probe_*・case_b_*ほか。約 40 分)・GPU 15 本が通った(gpu_world_copy・gpu_probe_rewind・gpu_probe_rewind_regions・gpu_probe_gas・gpu_probe_liquid・gpu_probe_sim・gpu_multires_conduction・gpu_multires_implicit_conduction・gpu_multires_wide_* 7 本。約 12 分)・archmap --check OK・float_check OK。
+- **記録**: ROADMAP(T-0921 Done・T-0930 GPU の疎な欄の頁〔T-0920 の中〕・T-0931 セルの真実の量を疎に・T-0932 セルごとの疎〔研究〕の行)・CLAUDE.md §4 に「欄の値は `LoadNestField` か `FieldPageValues(store, page)` で読む」・
+  perf.md の M-0 の節に要点(セルの状態 112 B が一番大きい・静かな空気の欄は疎で 40 → 8 B)・COMMANDER(wt5 の T-0871 + T-0944〜T-0946・ADR-0407〜0408、次の番号 **D-614・ADR-0409・T-0947・Q144**)。
+- **司令塔へ**: C-0 の GPU 版(wt2)のマージで `field.values` を直接読む所があれば `LoadNestField` か `FieldPageValues(field.store, page)` に(T-0921「司令塔へ」)。返したセルの頁の欄は 0 になる(前は古い値が要約に残っていた)。
+
+## 前の仕事(2026-10-21・本体の作業役・t-0853-c0 と t-0900-m1 のマージ)
 - **マージ**(`--no-ff`): t-0853-c0(5b3a546。部品 engine/src/sim/equilibrium・shaders/common/equilibrium.hlsli・陰の圧力を部品の上へ・tests/gas_projection_scenes.h・equilibrium_test・20 §13.1・ADR-0397 Proposed)→ t-0900-m1(1bead7c。docs/perf.md・T-0900・tests/gpu_test_memory.h)。
   衝突は t-0853-c0 の 2 か所だけ(map.yaml の案 B の箱の辺と C-0 の部品の辺・tests/CMakeLists.txt の case_b_box と equilibrium)= 両方残した。t-0900-m1 は自動で合わさった。
 - **確かめ**: release のビルド警告 0・CPU 34 本が通った(equilibrium 521 秒・gas_projection・case_b_*・field_storage・multires_*・gas_*・probe_*ほか。約 38 分)・GPU 11 本が通った(gpu_gas_projection・gpu_gas・gpu_gas_flow・gpu_probe_gas・gpu_probe_liquid・gpu_probe_sim・gpu_probe_rewind*・gpu_world_copy・gpu_multires_conduction・gpu_multires_implicit_conduction)・archmap --check OK・float_check(sim・common)OK。
