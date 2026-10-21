@@ -1,5 +1,5 @@
 // cascade_light.hlsli — 世界の中の光: 距離ごとの段(Radiance Cascades の型)の共通の核(docs/design/23-radiation.md §3.3・ADR-0413。T-0877 R-R1)。
-// HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU リファレンス(engine/src/sim/cascade_light.cpp)が呼ぶ。GPU 版は T-0958。
+// HLSL と C++ の両方でコンパイルする(fixed.hlsli の約束)。CPU リファレンス(engine/src/sim/cascade_light.cpp。T-0958)が呼ぶ。GPU 版は T-0959。
 //
 // データの流れ:
 //   セルの温度・帯ごとの吸い込み(light.hlsli の LtCellBandOf → RdOpticalDepthQ32)→ 面ごとに RcFaceEmission(σT⁴ × 帯の割合 × α(1 − ρ)。Kirchhoff)
@@ -9,8 +9,9 @@
 // 約束:
 //   - 段 k の場所の粗さ = 世界の木のレベル −k のブロック(2^k セル)。向きの升目 = 1 面 n 2^k(1 つの升目を次の段で 4 つに分ける)。
 //     区間の長さはおよそ 2^k(intervalBlocks で決まる)なので、区間の終わりの光線の間隔がどの段でも同じ(Radiance Cascades の型)。
-//   - 段 k から k + 1 へは、区間の終わりに残った量を (段 k + 1 のブロック・升目) の袋に足す。袋は量で重み付けた出どころの重心も持ち、
-//     段 k + 1 の光線は重心から出る(1 つの焚き火なら焚き火から。ブロックの真ん中へずらさないので遠くの受け手の量が場所でずれない)。
+//   - 段 k から k + 1 へは、区間の終わりに残った量を (段 k + 1 のブロック・升目) の袋に足す。段 k + 1 の光線は、袋に入った光線から
+//     量に比例して 1 本選んだ出どころから出る(1 つの焚き火なら焚き火から。ADR-0419。重心から出す ADR-0413 の形は閉じた箱で焦点を作った)。
+//   - 段 0 の出どころは面の上で散らし、升目の重みはずらした向きの cos(RcAimedFaceWeight。ADR-0419)。
 //   - 保存: 光線ごとに 入った = 吸った + 返した + 区間の終わりに残った + 外へ(整数の引き算で分けるのでビット単位)。
 //   - 透過が入った量の 1/16 未満になったら、残りをそのセルの「吸った」へ足して止める(ADR-0262 と同じ止め方)。
 //   - 向きの升目の中の位置は (種・刻み・袋・升目) のハッシュでずらす(R6)。刻みごとに筋の場所が変わり、熱容量で均される(D-443 ②)。
@@ -260,6 +261,47 @@ FX_FN RcRay RcAimRay(RcRay ray, uint32_t face, uint32_t texels, uint32_t i, uint
     aimed.lengthQ16 = (uint32_t)((uint64_t)FxSqrtU64(((a * a) + (u * u) + (v * v)) << 32) / a);  // [2^16, √3 × 2^16]
 
     return aimed;
+}
+
+// 向けた光線(RcAimRay の後)の、面 sourceFace から放つ重み(Lambert × 升目の中の位置の密度)= |D_A| × max(0, D·法線) ÷ |D|⁴(× 2^64)。
+// 升目の中は升目の面の上で一様にずらすので、立体角の密度 |D_A| ÷ |D|³ を掛けると、ずらした向きの cos で重みが決まり、
+// 同じ温度の閉じた箱で受ける量と放つ量が期待値で揃う(升目の真ん中の重みのままだと、粗い升目で斜めの面どうしに 17 % の正味の流れが残った。T-0958)。
+// D·法線 ≤ |D|、|D_A| ≤ |D| なので分子 < |D|⁴(|D| > 1)で商は 64bit に収まる。|D|² < 2^30(升目の 1 辺 2^10 × RC_JITTER)
+FX_FN uint64_t RcAimedFaceWeight(RcRay aimed, uint32_t sourceFace) {
+    const uint32_t axis = sourceFace >> 1;
+    const int64_t alongA = (int64_t)aimed.stepA * (int64_t)aimed.sign;
+    const int64_t component = axis == aimed.axis
+                                  ? alongA
+                                  : (axis == (aimed.axis + 1) % 3 ? (int64_t)aimed.stepU : (int64_t)aimed.stepV);
+    const int64_t outward = (sourceFace & 1u) == 0 ? component : -component;
+    if (outward <= 0)
+        return 0;
+
+    const uint64_t a = (uint64_t)aimed.stepA;
+    const uint64_t u = RcMagnitude(aimed.stepU);
+    const uint64_t v = RcMagnitude(aimed.stepV);
+    const uint64_t radiusSquared = (a * a) + (u * u) + (v * v);
+    FxU128 numerator;
+    numerator.hi = a * (uint64_t)outward;
+    numerator.lo = 0;
+
+    return FxDivU128By64(numerator, radiusSquared * radiusSquared).quotient;
+}
+
+// 向けた光線の立体角の密度 |D_A| ÷ |D|³(× 2^56)。段 k の光線を段 k + 1 の子の升目 4 つへ分ける時の重み:
+// 子の光線は升目の面の上で一様にずらすので、ずらした向きの密度で分けると、親の升目の中で立体角あたり一様になる(T-0958)。
+// |D_A| < 2^15、|D|² < 2^30、|D| × 2^16 < 2^31 なので分母 < 2^61、分子 < 2^71(128bit)、商 < 2^56
+FX_FN uint64_t RcAimedSolidAngleWeight(RcRay aimed) {
+    const uint64_t a = (uint64_t)aimed.stepA;
+    const uint64_t u = RcMagnitude(aimed.stepU);
+    const uint64_t v = RcMagnitude(aimed.stepV);
+    const uint64_t radiusSquared = (a * a) + (u * u) + (v * v);
+    const uint64_t radiusQ16 = FxSqrtU64(radiusSquared << 32);
+    FxU128 numerator;
+    numerator.hi = a >> 8;
+    numerator.lo = a << 56;
+
+    return FxDivU128By64(numerator, radiusSquared * radiusQ16).quotient;
 }
 
 FX_FN int64_t RcOriginOn(uint32_t want, RcRay ray) {

@@ -91,6 +91,11 @@ add_test(NAME sun_lens COMMAND sun_lens_test)
 add_executable(object_heat_test object_heat_test.cpp)
 target_link_libraries(object_heat_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
 add_test(NAME object_heat COMMAND object_heat_test)
+# 世界の中の光: 距離ごとの段の CPU リファレンス(T-0958・23 §10 R-R1): 保存・決定的・壁の陰・解析解・筋と坂と費用の記録
+add_executable(cascade_light_test cascade_light_test.cpp)
+target_link_libraries(cascade_light_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
+add_test(NAME cascade_light COMMAND cascade_light_test)
+set_tests_properties(cascade_light PROPERTIES TIMEOUT 600)
 add_executable(radiation_lines_test radiation_lines_test.cpp)
 target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME radiation_lines COMMAND radiation_lines_test)
@@ -1102,7 +1107,7 @@ add_test(NAME float_check_source_accepts
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test
+    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test cascade_light_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_sun_column_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test

@@ -191,6 +191,9 @@ views:
       - { id: sunlens, group: shared, status: research, label: "sun_lens.hlsli<br/>日の光を物で集める(レンズの光線を整数で曲げる)",
           code: "shaders/common/sun_lens.hlsli::LnTraceLens", ticket: T-0878, doc: docs/decisions/ADR-0425-sunlight-lens-rays.md,
           note: "研究 R-R2(23 §5・§6)。影の柱が SunWalkRayCaught でレンズに入った量を取り、物の格子の点の光線を µm・Q30 の整数で屈折させて世界のセルへ(LnWalkWorld)。当たった面の強さは 2 mm の升。燃え始めの仮の行 LnHeatDoseStep(ADR-0426)。CPU リファレンス sim/sun_lens(FocusSunLight)。GPU は T-0990" }
+      - { id: cascadelight, group: shared, status: research, label: "cascade_light.hlsli<br/>世界の中の光: 距離ごとの段(Radiance Cascades の型)",
+          code: "shaders/common/cascade_light.hlsli::RcWalkRay", ticket: T-0958, doc: docs/decisions/ADR-0419-cascade-light-reciprocity.md,
+          note: "研究 R-R1。面から放つ(面の上で散らす・ずらした向きの cos)→ 整数の DDA で区間を歩く → 段 k + 1 の袋(ブロック × 升目。溜めから出どころを 1 本選ぶ)。CPU リファレンス sim/cascade_light(StepCascadeLight)。保存はビット単位・照り返しは次の刻みへ持ち越す(CascadeCarry)。GPU は T-0959" }
       - { id: lightvalues, group: shared, label: "light.hlsli<br/>物質の光の値(2 つの帯の吸い込み・照り返し)",
           code: "shaders/common/light.hlsli::LtCellBandOf", ticket: T-0910, doc: docs/decisions/ADR-0395-species-light-values-two-bands.md,
           note: "ベイク sim::BakeSpeciesLight(書かない固体・液体は灰色で通さない・気体は透明。D-610)→ BakedReactionTable::speciesLight → セルの帯ごとの Σ a·n と照り返し" }
@@ -618,6 +621,7 @@ views:
       - [radiationlines, radiation, "対(見え方・分け前)"]
       - [suncolumn, lightvalues, "セルの帯ごとの吸い込み・照り返し"]
       - [sunlens, suncolumn, "レンズに入った量(SunWalkRayCaught)"]
+      - [cascadelight, lightvalues, "セルの帯ごとの吸い込み・照り返し"]
       - [caps, d3d12, "D3D12CreateDevice"]
       - [d3d12, sdkver, "起動時に読む"]
       - [d3d12, core, "bin/D3D12 から読み込む"]
