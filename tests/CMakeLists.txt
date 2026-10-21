@@ -301,6 +301,12 @@ add_executable(case_b_r1_test case_b_r1_test.cpp)
 target_link_libraries(case_b_r1_test PRIVATE bicameral_case_b bicameral_core)
 add_test(NAME case_b_r1 COMMAND case_b_r1_test)
 set_tests_properties(case_b_r1 PROPERTIES TIMEOUT 1800)
+
+# 案 B の研究 R2(T-0869): 引きずりを陰の圧力と一緒に解く(水中の砂・空気中の粉・Darcy・1 mg)。CPU だけ・研究の記録
+add_executable(case_b_r2_test case_b_r2_test.cpp)
+target_link_libraries(case_b_r2_test PRIVATE bicameral_case_b bicameral_core)
+add_test(NAME case_b_r2 COMMAND case_b_r2_test)
+set_tests_properties(case_b_r2 PROPERTIES TIMEOUT 1800)
 # 引きずりの一般の形の模型(D-487 ④・T-0493): 交差の引きずり(結合の強さ q)と、気体の箱の中の燃える木箱で煙が熱を運ぶ(CPU)
 add_executable(drag_model_test drag_model_test.cpp)
 target_link_libraries(drag_model_test PRIVATE bicameral_gas bicameral_reaction bicameral_core)
