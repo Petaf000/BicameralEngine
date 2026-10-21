@@ -38,10 +38,25 @@
 //   混ざった面(しずく・泡)は、重さの軸で浮力(重さ − 押しのけた混ざりの重さ)を相どうしで受け渡し(和 0。柱は混ざりを支える)、
 //   しずく・泡の抗力(粒と同じ式。大きさ drop_size_um・形の定数 dropShapeDragPermille)× 主でない流体の体積でつなぐ。
 //   運びは相ごとに、風上のセルのその相の割合を移す(主は解いた体積の流れ・主でない流体は面の速さ × Δt ÷ Δx)。
+//
+// 粒の降伏(R3・T-0996。FlowOptions::grainYield。21 §2.5・B-b): 段 grainYield(陰の圧力の後・運ぶの前)。
+//   支え: 粒は下が「詰まった粒(支えられている)・据わる固体・物・床」の時だけ支えられる。支えられた粒だけが、上の粒の
+//         浮力を引いた重さを柱で持つ(有効応力 σ'。セルの中心の値 = 上の支えられた粒の重さ + 自分の半分)。舞う粒・落ちる粒は持たない(押し合わない)。
+//   降伏(2 本目・既定 yieldPerFace): 横の面ごとに、押す力 D = (σ'_L f_L − σ'_R f_R) A Δt と上限 F = (tan φ W̄' + c_eff f̄) A Δt で
+//         P' = P + D。|P'| ≤ F なら 0・超えたら F だけ減らす。向かう側が詰まった面は 0。表面の段では「段の高さ ÷ Δx > tan φ」で崩れる。
+//   降伏(1 本目 yieldPerFace = false): 横の面を重さの軸に沿って積んだ「面の柱」(隣り合う 2 本のセルの柱の間)ごとに、
+//         押す力 D = Σ (σ'_L − σ'_R) A Δt・摩擦の上限 F = Σ (tan φ × 面の粒の有効な重さ + c_eff A) Δt(21 §2.5 の τ_max の面の和)。
+//         深さで和をとるので、崩れるのは「2 本の柱の高さの差 ÷ Δx > tan φ」の時(Δx によらない。崩れる角度は φ から出る)。
+//         面の柱の運動量 P' = P + D が |P'| ≤ F なら 0(ちょうど止まる)・超えたら F だけ減らす(降伏の後の運動量は持ち越す)。
+//         P' は、向かう側のセルに空きがある面(詰まっていない・据わる物が無い)だけに質量の割合で載せる(表面を流れる)。差は帳簿 Wall。
+//   くっつく強さ c_eff = cohesion + suction × 4S(1−S)(S = 孔の満ち具合 = 液体 ÷ 流体の体積)。混ざった粒は体積の平均(S9)。
+//   詰まり: 詰まった粒へ入る面は止める(R2 のまま。押し返しの形は接触で、共有の陰の圧力には粒そのものの体積で入る)。
+//   穴を通る口(S8): FlowOptions::faceHoleSizeUm が穴の大きさを返したら、粒の大きさ ÷ 穴 > grain_pass_ratio_pct の面は流さない(口だけ。既定は穴なし)。
 
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "sim/case_b/case_b_box.h"
@@ -72,6 +87,14 @@ namespace bicameral::sim::case_b {
         // 水面の層の横の面を別の速さで解く(T-0963 の 2 本目)。true にすると水面の風は 1/120 で合格するが、
         // 連通管・閉じた空気・ダムが崩れ、1/60 の風洞が暴れた。既定 false = しずく・霧だけ分ける(R1 は ④ と同じ値。仮)
         bool splitSurfaceLayer = false;
+
+        // --- 粒の降伏(R3・T-0996。drag が要る)---
+        bool grainYield = false;
+        // 降伏を面ごとに決める(2 本目・既定)。false = 面の柱(重さの軸に沿って続いた面)の和で決め、表面の面に載せる(1 本目。
+        // 柱の深さ ÷ Δx に比例して表面が速くなり、山が平らになりすぎた。T-0996)
+        bool yieldPerFace = true;
+        // 面の穴の大きさ(µm。S8 の口。T-0937 の面の開き具合を後で読む所)。null か 0 = 穴の情報なし(通す)
+        std::function<uint32_t(const Box&, uint32_t axis, uint32_t cell)> faceHoleSizeUm;
     };
 
     // 1 つのセルの状態式の結果(刻みの初めの中身から)
@@ -113,6 +136,15 @@ namespace bicameral::sim::case_b {
         uint64_t surfaceFaces = 0;       // そのうち層の面(境の剪断)
         uint64_t mergedFluidFaces = 0;   // 気体と液体があるが 1 つの速さで解いた面(主の流体が片側に無い)
         uint64_t stoppedFluidFaces = 0;  // 主でない流体が、その相の無いセルから出る向きなので止めた面
+
+        // --- 粒の降伏(R3・T-0996)---
+        uint64_t yieldMovingPairs = 0;         // 降伏して動いた面の柱(刻みの累計)
+        uint64_t yieldHeldPairs = 0;           // 摩擦で止めた面の柱(運動量か押す力があったもの)
+        uint64_t yieldBlockedPairs = 0;        // 降伏したが向かう側に空きが無く止めた面の柱
+        uint64_t holeBlockedFaces = 0;         // 穴より大きい粒で止めた面(S8 の口)
+        uint64_t overpackedCells = 0;          // 詰まりを 1/16 より多く超えたセル(刻みの累計)
+        uint32_t maxPackedQ16 = 0;             // 詰まりの最大(2^16 = ちょうど詰まった)
+        int64_t lastMaxStressMicroPascal = 0;  // 直近の刻みの有効応力 σ' の最大(µPa)
     };
 
     struct FlowStages {

@@ -359,6 +359,9 @@ views:
       - { id: casebplace1, group: simlib, label: "PrepareFluidPhases(案 B の研究 R2 の 2 本目)<br/>置き場 ①: 気体と液体を別の速さで<br/>しずく・霧を主の流体と一緒に消去(T-0963)",
           code: "engine/src/sim/case_b/case_b_flow.cpp::PrepareFluidPhases", ticket: T-0963, doc: docs/design/21-motion-case-b.md, status: research,
           note: "箱の layout = PerPhase で同じ段が通る。面ごとに主の流体を決め、主でない流体(しずく)と粒を主とだけつながる星の形で消去して陰の圧力の式へ(EliminateGrain・CoupledSystemTerms・SolveCoupledFace を共用)。しずくの引きずりは粒と同じ抗力の式(drop_size_um)。ほかの面は 1 つの速さで解いて質量の割合で置き場へ分ける(SplitMergedFace)。運びは相ごとの割合(TransportPerPhase)。水面の層を分ける形は splitSurfaceLayer(既定 false)。ADR-0421。試験 case_b_r1 の組 5・6・case_b_r2 の 5〜8" }
+      - { id: casebyield, group: simlib, label: "GrainYieldStage(案 B の研究 R3)<br/>粒の降伏: 詰まった時だけ押し返す<br/>崩れる角度は φ から(T-0996)",
+          code: "engine/src/sim/case_b/case_b_flow.cpp::GrainYieldStage", ticket: T-0996, doc: docs/design/21-motion-case-b.md, status: research,
+          note: "FlowOptions::grainYield(drag が要る)。支えられた粒だけが浮力を引いた重さを柱で持ち(有効応力)、横の面で押す力が tan φ × 重さ + c_eff を超えた分だけ動く(面ごと = 2 本目・既定 / 面の柱の和 = 1 本目)。詰まりを超えて入る粒は運ぶ段で縮め、入れなかった分の運動量は押し返しで消す。穴を通る口(S8)は faceHoleSizeUm。ADR-0428。試験 case_b_r3" }
       - { id: gasfastestcheck, group: simlib, label: "FindGasSmallOpenJoints<br/>最速 × 小さい空きの検査(T-0788・D-519)<br/>小さい空きだけでつながった気体の部分の組 → 警告",
           code: "engine/src/sim/gas_fastest_check.cpp::FindGasSmallOpenJoints", ticket: T-0788, doc: docs/design/07-transport.md,
           note: "最速の投影は孔のセルに 1 刻みで中身の何倍もを通して壊れる(ADR-0346)。空き 1/2 未満を小さいとし(T-0788 の板の測り)、大きいセルの部分と開いた境界の外を互いに素な集合でまとめ、2 つ以上の部分に接する小さいセルのまとまりを組にする。値は変えない(D-487 ②)。ProbeGasField が置いた時(CheckFastestOpenings)と空きの変わった刻みに呼ぶ" }

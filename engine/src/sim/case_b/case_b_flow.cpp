@@ -4,6 +4,7 @@
 #include "sim/case_b/case_b_flow.h"
 
 #include <algorithm>
+#include <span>
 #include <vector>
 
 #include "common/fixed.hlsli"
@@ -100,6 +101,10 @@ namespace bicameral::sim::case_b {
             std::vector<int64_t> liquidColumnMicroPascal;
             std::vector<uint32_t> gasViscosity;  // セルの相ごとの粘り(µPa·s。質量の平均。無ければ 0)
             std::vector<uint32_t> liquidViscosity;
+
+            // --- 粒の降伏(R3・T-0996)---
+            std::vector<uint32_t> grainRoomQ16;       // 詰まりまでの残り(2^16 = セル全部)
+            std::vector<int64_t> grainMassPerFillMg;  // 詰まったセル 1 つぶんの粒の質量(セルの粒の混ざり方で)
         };
 
         // --- 単位の換算 ---
@@ -1438,6 +1443,47 @@ namespace bicameral::sim::case_b {
             return massMg - left;
         }
 
+        // 粒の降伏(R3)の時だけ: 面の粒の流れが向かうセルに入れる詰まりの割合(Q48。2^48 = セル全部)の和。
+        // 詰まったセル 1 つぶんの質量は風上のセルの混ざり方で数える
+        uint64_t FlowFillQ48(const FlowScratch& scratch, const FlowFace& face) {
+            const uint32_t upwind = face.grainFlowNl > 0 ? face.left : face.right;
+            const int64_t perFill = scratch.grainMassPerFillMg[upwind];
+            if (perFill <= 0 || face.grainFlowNl == 0)
+                return 0;
+
+            return (uint64_t)fx::FxMulDivS64((int64_t)fx::FxAbsU64(face.grainFlowNl), Q16_ONE, (uint64_t)perFill);
+        }
+
+        std::vector<uint64_t> IncomingFill(const FlowRuntime& runtime) {
+            const FlowScratch& scratch = runtime.scratch;
+            std::vector<uint64_t> incoming(scratch.cells.size(), 0);
+            if (!runtime.options.grainYield || scratch.grainRoomQ16.size() != scratch.cells.size())
+                return incoming;
+
+            for (const FlowFace& face : scratch.faces) {
+                if (GrainMoves(face))
+                    incoming[face.grainFlowNl > 0 ? face.right : face.left] += FlowFillQ48(scratch, face);
+            }
+
+            return incoming;
+        }
+
+        // 入る粒の和が詰まりの残りを超えるセルへは、同じ割合で縮める(粒は詰まりを超えて入らない = 詰まった時だけ押し返す)
+        int64_t LimitIntoRoom(const FlowRuntime& runtime, const FlowFace& face, int64_t flow,
+                              const std::vector<uint64_t>& incoming) {
+            const FlowScratch& scratch = runtime.scratch;
+            if (!runtime.options.grainYield || flow == 0 || scratch.grainRoomQ16.size() != scratch.cells.size())
+                return flow;
+
+            const uint32_t target = face.grainFlowNl > 0 ? face.right : face.left;
+            const uint64_t room = (uint64_t)scratch.grainRoomQ16[target] << 32;
+            if (incoming[target] <= room)
+                return flow;
+
+            ++runtime.stats->grainLimitedCells;
+            return fx::FxMulDivS64(flow, room, incoming[target]);
+        }
+
         void TransportGrains(FlowRuntime& runtime, Box& box, const StartContent& start) {
             FlowScratch& scratch = runtime.scratch;
             std::vector<uint64_t> demand(scratch.cells.size(), 0);
@@ -1449,6 +1495,7 @@ namespace bicameral::sim::case_b {
                 runtime.stats->grainLimitedCells += demand[cell] > have ? 1u : 0u;
             }
 
+            const std::vector<uint64_t> incoming = IncomingFill(runtime);
             const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
             for (FlowFace& face : scratch.faces) {
                 face.grainMovedMassMg = 0;
@@ -1463,6 +1510,16 @@ namespace bicameral::sim::case_b {
                 int64_t flow = face.grainFlowNl;
                 if (demand[upwind] > have)
                     flow = fx::FxMulDivS64(flow, have, demand[upwind]);
+
+                const int64_t allowed = LimitIntoRoom(runtime, face, flow, incoming);
+                if (allowed != flow) {
+                    // 詰まりで入れなかった分の運動量は押し返しで消える(粒は詰まった時だけ押し返す。帳簿 Wall)。
+                    // 残すと、入れない面の運動量が重さで溜まり続け、山の表面が這い続けた(T-0996 の 2 回目)
+                    const int64_t momentum = GrainMomentum(box, face);
+                    const int64_t kept = fx::FxMulDivS64(momentum, fx::FxAbsU64(allowed), fx::FxAbsU64(flow));
+                    ApplyImpulse(box, GrainFace(box, face.axis, face.left), kept - momentum, ImpulseSource::Wall);
+                    flow = allowed;
+                }
 
                 // 持ち越しは向きが変わったら捨てる(戻る粒を前の端数で押さない)
                 carry = (carry > 0) == (flow > 0) ? carry : 0;
@@ -1788,6 +1845,351 @@ namespace bicameral::sim::case_b {
                 AdvectSlot(scratch, box, table, Phase::Grain);
         }
 
+        // --- 粒の降伏(R3・T-0996。grainYield の時だけ。式は case_b_flow.h の「粒の降伏」)---
+        struct YieldCell {
+            bool rests = false;               // 粒が支えられている(下が支えられた詰まった粒・据わる固体・物・床)
+            uint32_t fillQ16 = 0;             // 詰まりの割合(2^16 で詰まった。上限 2^16)
+            int64_t weightMicroPascal = 0;    // 粒の浮力を引いた重さ ÷ 面積
+            int64_t stressMicroPascal = 0;    // 有効応力 σ'(セルの中心。支えられた粒だけ)
+            int64_t frictionQ16 = 0;          // tan φ(体積の割合で平均した崩れる角度から。S9)
+            int64_t cohesionMicroPascal = 0;  // c_eff = cohesion + suction × 4S(1−S)(21 §2.5)
+        };
+
+        // 面の柱の 1 つの面の押す力と摩擦の上限(1 刻みの力積。+ = left → right)
+        struct YieldFace {
+            uint32_t index = 0;
+            int64_t push = 0;
+            int64_t friction = 0;
+        };
+
+        constexpr uint32_t DEGREE_Q8_TO_TURN32_SHIFT = 24;  // 度の Q8 × 2^24 ÷ 360 = 1 周 2^32 の角度
+
+        // tan(角度)の Q16(角度は度の Q8)
+        int64_t TangentQ16(uint64_t degreesQ8) {
+            const auto turn = (uint32_t)((degreesQ8 << DEGREE_Q8_TO_TURN32_SHIFT) / 360);
+            const fx::FxSinCos value = fx::FxSinCosTurn32(turn);
+            if (value.cosine <= 0)
+                return (int64_t)1 << 32;
+
+            return ((int64_t)value.sine << 16) / value.cosine;
+        }
+
+        // 粒の欄の体積の平均(崩れる角度・くっつく強さ・吸い上げ)と重さ。支えは列で決める(SupportColumn)
+        YieldCell MeasureYieldCell(const Box& box, const FlowScratch& scratch, const View& view, uint32_t cell) {
+            YieldCell result;
+            const FlowCell& flow = scratch.cells[cell];
+            const int64_t grainMass = scratch.grains[cell].massMg;
+            if (grainMass <= 0 || flow.grainNl <= 0)
+                return result;
+
+            uint64_t volumeSum = 0;
+            uint64_t angleSum = 0;
+            uint64_t cohesionSum = 0;
+            uint64_t suctionSum = 0;
+            for (uint32_t index = 0; index < box.materials.size(); ++index) {
+                const Material& material = box.materials[index];
+                if (material.phase != Phase::Grain)
+                    continue;
+
+                const uint64_t volume = MaterialVolumeNl(CellMass(box, cell, index), material.densityKgPerM3);
+                volumeSum += volume;
+                angleSum += volume * ((uint64_t)material.reposeAngleDegrees << 8);
+                cohesionSum += volume * material.cohesionPa;
+                suctionSum += volume * material.suctionPa;
+            }
+
+            if (volumeSum == 0)
+                return result;
+
+            result.fillQ16 = std::min(view.cells[cell].grainPackedQ16, Q16_ONE);
+            result.frictionQ16 = TangentQ16(angleSum / volumeSum);
+
+            // 孔の満ち具合 S = 液体 ÷ 流体(Q16)。くっつく強さの山形 4S(1−S)
+            const int64_t fluidNl = flow.liquidNl + flow.gasNl;
+            const int64_t wetQ16 = fluidNl <= 0 ? 0 : fx::FxMulDivS64(flow.liquidNl, Q16_ONE, (uint64_t)fluidNl);
+            const int64_t humpQ16 = (4 * wetQ16 * ((int64_t)Q16_ONE - wetQ16)) >> 16;
+            const auto cohesion = (int64_t)(cohesionSum / volumeSum);
+            const auto suction = (int64_t)(suctionSum / volumeSum);
+            result.cohesionMicroPascal = (cohesion + ((suction * humpQ16) >> 16)) * 1000000;
+
+            // 浮力を引いた重さ = (粒の質量 − 押しのけた流体の質量)× g ÷ 面積(押しのけた流体はセルの流体の密度で)
+            const int64_t displaced = fluidNl <= 0 ? 0
+                                                   : fx::FxMulDivS64(flow.grainNl, (uint64_t)flow.fluidMassMg,
+                                                                     (uint64_t)fluidNl);
+            const int64_t buoyant = std::max<int64_t>(grainMass - displaced, 0);
+            result.weightMicroPascal = buoyant * view.gravityUmPerS2 / (int64_t)CellAreaMm2(box);
+
+            return result;
+        }
+
+        // 重さの軸に沿った列のセル(下から上へ)。at は列の 1 つのセルの座標
+        std::vector<uint32_t> ColumnFromBottom(const Box& box, const View& view, std::array<uint32_t, 3> at) {
+            const std::array<uint32_t, 3> size = {box.config.sizeX, box.config.sizeY, box.config.sizeZ};
+            const uint32_t axis = view.gravityAxis;
+            std::vector<uint32_t> column(size[axis]);
+            for (uint32_t step = 0; step < size[axis]; ++step) {
+                at[axis] = view.gravityDown ? step : size[axis] - 1 - step;
+                column[step] = CellIndex(box, at[0], at[1], at[2]);
+            }
+
+            return column;
+        }
+
+        // 支え(下から)と有効応力(上から)。支えられていない粒(舞う・落ちる)は押し合いを持たない
+        void SupportColumn(const FlowScratch& scratch, const View& view, std::span<const uint32_t> column,
+                           std::vector<YieldCell>& cells) {
+            bool supported = true;  // 床(箱の端)
+            for (const uint32_t cell : column) {
+                const CellView& cellView = view.cells[cell];
+                YieldCell& yield = cells[cell];
+                yield.rests = supported && scratch.grains[cell].massMg > 0 && yield.fillQ16 > 0;
+                const bool solid = scratch.cells[cell].closed || cellView.fixedQ16 > 0 || cellView.bodyQ16 > 0;
+                supported = solid || (scratch.grains[cell].packed && yield.rests);
+            }
+
+            int64_t above = 0;
+            for (size_t step = column.size(); step-- > 0;) {
+                YieldCell& yield = cells[column[step]];
+                if (!yield.rests) {
+                    yield.weightMicroPascal = 0;
+                    yield.frictionQ16 = 0;
+                    yield.cohesionMicroPascal = 0;
+                    above = 0;
+                    continue;
+                }
+
+                yield.stressMicroPascal = above + (yield.weightMicroPascal / 2);
+                above += yield.weightMicroPascal;
+            }
+        }
+
+        // 1 つの面の押す力 (σ'_L f_L − σ'_R f_R) A と摩擦の上限 (tan φ W' + c_eff f の両側の平均) A(1 刻みの力積)。
+        // 深さによらず「両側の粒の高さの差 ÷ Δx > tan φ」で押す力が上限を超える(崩れる角度が φ から出る。Δx によらない)
+        YieldFace MeasureYieldFace(const Box& box, const std::vector<YieldCell>& cells, uint32_t index,
+                                   const FlowFace& face) {
+            const YieldCell& left = cells[face.left];
+            const YieldCell& right = cells[face.right];
+            const uint64_t area = CellAreaMm2(box);
+            const int64_t leftPush = fx::FxMulShiftS64(left.stressMicroPascal, left.fillQ16, 16);
+            const int64_t rightPush = fx::FxMulShiftS64(right.stressMicroPascal, right.fillQ16, 16);
+            const int64_t frictionHold = (fx::FxMulShiftS64(left.weightMicroPascal, left.frictionQ16, 16) +
+                                          fx::FxMulShiftS64(right.weightMicroPascal, right.frictionQ16, 16)) /
+                                         2;
+            const int64_t cohesionHold = (fx::FxMulShiftS64(left.cohesionMicroPascal, left.fillQ16, 16) +
+                                          fx::FxMulShiftS64(right.cohesionMicroPascal, right.fillQ16, 16)) /
+                                         2;
+
+            return {.index = index,
+                    .push = PressureImpulse(box, leftPush - rightPush, area),
+                    .friction = PressureImpulse(box, frictionHold + cohesionHold, area)};
+        }
+
+        // 降伏した運動量を載せられる面か(風上に粒があり、向かう側に空きがある)
+        bool YieldTarget(const FlowScratch& scratch, const FlowFace& face, bool forward) {
+            const GrainCell& upwind = scratch.grains[forward ? face.left : face.right];
+            const GrainCell& downwind = scratch.grains[forward ? face.right : face.left];
+            return face.open && upwind.massMg > 0 && !downwind.noRoom;
+        }
+
+        // 解いた後の粒の流れを、面の運動量から作り直す(SolveCoupledFace の終わりと同じ)
+        void RefreshGrainFlow(FlowRuntime& runtime, Box& box, FlowFace& face) {
+            face.grainFlowNl = 0;
+            if (!GrainMoves(face))
+                return;
+
+            const int64_t momentum = GrainMomentum(box, face);
+            const uint32_t upwind = momentum >= 0 ? face.left : face.right;
+            face.grainFlowNl = GrainFlowQ32(box, face, momentum, runtime.scratch.grains[upwind].massMg);
+            const GrainCell& target = runtime.scratch.grains[face.grainFlowNl > 0 ? face.right : face.left];
+            if (target.noRoom && face.grainFlowNl != 0) {
+                StopGrain(box, face);
+                face.grainFlowNl = 0;
+                ++runtime.stats->blockedGrainFaces;
+            }
+        }
+
+        // 面の柱(隣り合う 2 本の列の間の、重さの軸に沿って続いた面)の降伏: 押す力の和 D と摩擦の上限の和 F で
+        // P' = P + D。|P'| ≤ F なら 0(ちょうど止まる)、超えたら F だけ減らす(降伏の後の運動量は持ち越す)。
+        // 和をとるので「2 本の列の粒の高さの差 ÷ Δx > tan φ」で崩れる(深さ・Δx によらない)。
+        // P' は向かう側に空きのある面(表面)に、風上の粒の質量の割合で載せる。足りない差は帳簿 Wall
+        void YieldSegment(FlowRuntime& runtime, Box& box, std::span<const YieldFace> segment) {
+            if (segment.empty())
+                return;
+
+            FlowScratch& scratch = runtime.scratch;
+            FlowStats& stats = *runtime.stats;
+            int64_t total = 0;
+            int64_t friction = 0;
+            for (const YieldFace& yield : segment) {
+                const FlowFace& face = scratch.faces[yield.index];
+                ApplyImpulse(box, GrainFace(box, face.axis, face.left), yield.push, ImpulseSource::Pressure);
+                total += GrainMomentum(box, face);
+                friction += yield.friction;
+            }
+
+            int64_t moving = 0;
+            if (total > friction)
+                moving = total - friction;
+            else if (total < -friction)
+                moving = total + friction;
+
+            const bool forward = moving > 0;
+            int64_t weightSum = 0;
+            for (const YieldFace& yield : segment) {
+                const FlowFace& face = scratch.faces[yield.index];
+                if (moving != 0 && YieldTarget(scratch, face, forward))
+                    weightSum += scratch.grains[forward ? face.left : face.right].massMg;
+            }
+
+            if (moving != 0 && weightSum == 0) {
+                ++stats.yieldBlockedPairs;
+                moving = 0;
+            }
+
+            stats.yieldMovingPairs += moving != 0 ? 1u : 0u;
+            stats.yieldHeldPairs += moving == 0 && total != 0 ? 1u : 0u;
+            int64_t remaining = moving;
+            int64_t remainingWeight = weightSum;
+            for (const YieldFace& yield : segment) {
+                FlowFace& face = scratch.faces[yield.index];
+                int64_t target = 0;
+                if (moving != 0 && YieldTarget(scratch, face, forward)) {
+                    const int64_t mass = scratch.grains[forward ? face.left : face.right].massMg;
+                    target = mass == remainingWeight
+                                 ? remaining
+                                 : fx::FxMulDivS64(remaining, (uint64_t)mass, (uint64_t)remainingWeight);
+                    remaining -= target;
+                    remainingWeight -= mass;
+                    face.locked = false;
+                }
+
+                const int64_t current = GrainMomentum(box, face);
+                if (target != current)
+                    ApplyImpulse(box, GrainFace(box, face.axis, face.left), target - current, ImpulseSource::Wall);
+
+                RefreshGrainFlow(runtime, box, face);
+            }
+        }
+
+        // 穴を通る口(S8): 粒の大きさ ÷ 穴の大きさが grain_pass_ratio_pct を超える面は流さない(既定が未確認の間は、穴より大きい粒だけ)
+        bool HoleBlocks(const FlowRuntime& runtime, const Box& box, const FlowFace& face) {
+            if (!runtime.options.faceHoleSizeUm)
+                return false;
+
+            const uint32_t hole = runtime.options.faceHoleSizeUm(box, face.axis, face.left);
+            const uint32_t grain = std::max(runtime.scratch.grains[face.left].grainUm,
+                                            runtime.scratch.grains[face.right].grainUm);
+            if (hole == 0 || grain == 0)
+                return false;
+
+            const uint64_t ratioPct = (uint64_t)grain * 100 / hole;
+            const uint32_t pass = box.environment.grainPassRatioPct;
+
+            return pass == 0 ? ratioPct >= 100 : ratioPct > pass;
+        }
+
+        // 計器と、運ぶ段が使う詰まりの残り(入る粒を詰まりまでに縮める。粒は詰まった時だけ押し返す = 詰まりを超えて入らない)
+        void MeasureYieldRoom(FlowRuntime& runtime, const View& view, const std::vector<YieldCell>& cells) {
+            FlowScratch& scratch = runtime.scratch;
+            FlowStats& stats = *runtime.stats;
+            const auto count = (uint32_t)cells.size();
+            scratch.grainRoomQ16.assign(count, 0);
+            scratch.grainMassPerFillMg.assign(count, 0);
+            stats.lastMaxStressMicroPascal = 0;
+            for (uint32_t cell = 0; cell < count; ++cell) {
+                const uint32_t packed = view.cells[cell].grainPackedQ16;
+                stats.maxPackedQ16 = std::max(stats.maxPackedQ16, packed);
+                stats.overpackedCells += packed > Q16_ONE + (Q16_ONE / 16) ? 1u : 0u;
+                stats.lastMaxStressMicroPascal = std::max(stats.lastMaxStressMicroPascal,
+                                                          cells[cell].stressMicroPascal);
+                scratch.grainRoomQ16[cell] = packed >= Q16_ONE ? 0 : Q16_ONE - packed;
+                const int64_t mass = scratch.grains[cell].massMg;
+                scratch.grainMassPerFillMg[cell] = packed == 0 ? 0 : fx::FxMulDivS64(mass, Q16_ONE, packed);
+            }
+        }
+
+        void GrainYieldStage(FlowRuntime& runtime, Box& box, const StepContext& context) {
+            if (!runtime.options.drag)
+                return;
+
+            const View& view = context.view;
+            FlowScratch& scratch = runtime.scratch;
+            const uint32_t count = CellCount(box);
+            const uint32_t gravity = view.gravityAxis;
+            std::vector<YieldCell> cells(count);
+            for (uint32_t cell = 0; cell < count; ++cell)
+                cells[cell] = MeasureYieldCell(box, scratch, view, cell);
+
+            for (uint32_t cell = 0; cell < count; ++cell) {
+                if (CellCoordinates(box, cell)[gravity] == 0)
+                    SupportColumn(scratch, view, ColumnFromBottom(box, view, CellCoordinates(box, cell)), cells);
+            }
+
+            MeasureYieldRoom(runtime, view, cells);
+
+            // 横の面を、重さの軸に沿って続いた「面の柱」に分けて降伏を決める(支えられた粒のある面だけ)。
+            // どの面の柱も刻みの初めの応力から決め、自分の面の運動量だけを変える(順によらない)
+            const FaceTable table = IndexFaces(scratch, count);
+            std::vector<YieldFace> segment;
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                if (axis == gravity)
+                    continue;
+
+                for (uint32_t cell = 0; cell < count; ++cell) {
+                    if (CellCoordinates(box, cell)[gravity] != 0)
+                        continue;
+
+                    segment.clear();
+                    for (const uint32_t lower : ColumnFromBottom(box, view, CellCoordinates(box, cell))) {
+                        const int32_t index = table[axis][lower];
+                        const FlowFace* face = index < 0 ? nullptr : &scratch.faces[(size_t)index];
+                        if (face == nullptr || !(cells[face->left].rests || cells[face->right].rests)) {
+                            YieldSegment(runtime, box, segment);
+                            segment.clear();
+                            continue;
+                        }
+
+                        const YieldFace yield = MeasureYieldFace(box, cells, (uint32_t)index, *face);
+                        if (runtime.options.yieldPerFace) {
+                            // 2 本目(既定): 面ごとに降伏を決める(深い面は向かう先に空きが無く 0 になり、表面の面だけが流れる)
+                            YieldSegment(runtime, box, std::span<const YieldFace>(&yield, 1));
+                            continue;
+                        }
+
+                        segment.push_back(yield);
+                    }
+
+                    YieldSegment(runtime, box, segment);
+                }
+            }
+
+            // 支えられた粒へ「粒の無いセルから」向かう運動量は持たない(表面のセルの上の面が重さだけで加速し、
+            // 1 粒の終端の速さで止まらなかった。T-0996 の 1 回目)。舞う粒の雲の後ろの面(向かう先が支えられていない)はそのまま
+            for (FlowFace& face : scratch.faces) {
+                const int64_t momentum = face.open ? GrainMomentum(box, face) : 0;
+                if (momentum == 0)
+                    continue;
+
+                const bool forward = momentum > 0;
+                const uint32_t upwind = forward ? face.left : face.right;
+                const uint32_t downwind = forward ? face.right : face.left;
+                if (scratch.grains[upwind].massMg > 0 || !cells[downwind].rests)
+                    continue;
+
+                StopGrain(box, face);
+                face.grainFlowNl = 0;
+            }
+
+            for (FlowFace& face : scratch.faces) {
+                if (!face.open || face.grainMassMg <= 0 || !HoleBlocks(runtime, box, face))
+                    continue;
+
+                StopGrain(box, face);
+                face.grainFlowNl = 0;
+                ++runtime.stats->holeBlockedFaces;
+            }
+        }
+
         // --- 粘り(T-0927・T-0926 の仮説 2。陰の圧力の段の中で、系を組む前に)---
         // 面 F の速さ v = M ÷ m(m は面の流体の質量)。隣の面 G(同じ軸・セルを e_b ずらす)との間で
         //   物の粘り: ΔM = μ A Δt (v_G − v_F) ÷ Δ = μ × 辺 × Δv ÷ 刻み/秒(µPa·s × mm × 2^-20 m/s ÷ 1000 で mg·2^-20 m/s)
@@ -1945,6 +2347,11 @@ namespace bicameral::sim::case_b {
         result.stages.apply = [runtime](Box& box, const StepContext& context) {
             ApplyStage(*runtime, box, context);
         };
+        if (options.grainYield) {
+            result.stages.grainYield = [runtime](Box& box, const StepContext& context) {
+                GrainYieldStage(*runtime, box, context);
+            };
+        }
 
         return result;
     }

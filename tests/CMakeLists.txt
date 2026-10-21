@@ -347,6 +347,12 @@ add_executable(case_b_r2_test case_b_r2_test.cpp)
 target_link_libraries(case_b_r2_test PRIVATE bicameral_case_b bicameral_core)
 add_test(NAME case_b_r2 COMMAND case_b_r2_test)
 set_tests_properties(case_b_r2 PROPERTIES TIMEOUT 1800)
+
+# 案 B の研究 R3(T-0996): 粒の降伏(詰まった時だけ押し返す・崩れる角度・砂時計)。CPU だけ
+add_executable(case_b_r3_test case_b_r3_test.cpp)
+target_link_libraries(case_b_r3_test PRIVATE bicameral_case_b bicameral_core)
+add_test(NAME case_b_r3 COMMAND case_b_r3_test)
+set_tests_properties(case_b_r3 PROPERTIES TIMEOUT 1800)
 # 引きずりの一般の形の模型(D-487 ④・T-0493): 交差の引きずり(結合の強さ q)と、気体の箱の中の燃える木箱で煙が熱を運ぶ(CPU)
 add_executable(drag_model_test drag_model_test.cpp)
 target_link_libraries(drag_model_test PRIVATE bicameral_gas bicameral_reaction bicameral_core)
