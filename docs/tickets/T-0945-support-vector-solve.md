@@ -1,6 +1,6 @@
 # T-0945 支えを成分を持つ節(T-0919)の上で 1 つの系として解く
 
-- Status: Todo(T-0919 の後)
+- Status: Done(2026-10-22 本体: 中身は T-0919〔t-0919-c0-components・ADR-0418。`SupportSolve::Coupled` 既定〕で済んだ)
 - 種類: 研究
 - PC: 必須
 - 見積もり: チャット 1 回分

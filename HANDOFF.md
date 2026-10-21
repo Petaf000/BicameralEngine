@@ -1,11 +1,11 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-22(本体の作業役・t-0931-sparse-cell のマージ・サンプルの世界の光の値)
+最終更新: 2026-10-22(本体の作業役・t-0931-sparse-cell・t-0869-r2・t-0919-c0-components・t-0856-rt2 のマージ・サンプルの世界の光の値)
 
 ## 状態(3 行以内)
-- **T-0931 の 1 チャット目(CPU。セルの頁を成分の数に合わせた幅で持つ・ADR-0417)を main へ**。サンプルの世界の凝縮相 5 つに光の現実の値を書き、T-0942 で緩めた試験 2 本を戻した。
-- **作業中**: wt2 T-0919(t-0919-c0-components)・wt3 R2(t-0869-r2)・wt4 R-T2(t-0856-rt2)・wt5 T-0937(t-0937-face-opening)・wt6 R-R1(T-0958。t-0877-rr1)。
-- **次**: T-0966(T-0931 の GPU)・T-0939(C-0 GPU の閉じた領域)・T-0953〜T-0955・R1 の残り T-0947/T-0948・R-B1 の残り T-0946/T-0960・T-0922・T-0920・T-0936/T-0938 → 最低機 Q11 → T-0858 棚卸し。
+- **T-0931 の 1 チャット目(CPU・ADR-0417)・R2 の 1 本目(t-0869-r2)・T-0919 成分を持つ節(t-0919-c0-components・ADR-0418)・R-T2 の 1 本の列(t-0856-rt2・ADR-0410)を main へ**。サンプルの世界の光の現実の値。Q146 → D-616(歩の途中のセーブは歩の記録も保存)・D-617(支えは 1 つの系)をユーザーが決めた。判断待ちは Q145。
+- **作業中**: wt2 T-0970(t-0970-block-gpu)・wt3 T-0963(R2 の 2 本目)・wt4 T-0950(t-0950-rt2-tree)・wt5 T-0937(t-0937-face-opening)・wt6 R-R1(T-0958。t-0877-rr1)。
+- **次**: T-0966(T-0931 の GPU)・T-0969・T-0971・T-0951・T-0952・T-0939(C-0 GPU の閉じた領域)・T-0953〜T-0955・R1 の残り T-0947/T-0948・R-B1 の残り T-0946/T-0960・T-0922・T-0920・T-0936/T-0938 → 最低機 Q11 → T-0858 棚卸し。
 
 ## この仕事でしたこと(2026-10-22・本体の作業役・t-0931-sparse-cell のマージ・サンプルの世界の光の値)
 - **マージ**(`--no-ff`・衝突なし): t-0931-sparse-cell(7193072。`MultiresNest::cells` を `MultiresCellStore`〔一様の値 + 成分の数に合わせた幅の頁〕に・`DenseCellImage`・ADR-0417)。
@@ -19,8 +19,17 @@
   場面 grass_fire_river に光の警告が無い)。sun_column の掃きの場面は試験の石・ガラス・空気だけなので結果は変わらない(`TestLightFields` のセルロースの期待だけ書いた値に。意図した変化)。
   試験: reaction_package・standard_packages・environment_package・luau_type_check・reaction_package_scene・sun_column・gpu_sun_column が通った。
   警告の数に触れうる 8 本(blank_world・probe_phase・cell_volume・cell_view・world_layout・case_b_box・coupling_table・multires_edge)も通った。archmap --check OK。
-- **記録**: ROADMAP(T-0931 = 1 チャット目済み・T-0966〜T-0968 の行・T-0937 作業中・T-0942 の値)・perf.md の M-0 の節に詰めた後の値(空気 41.5・燃えている所 81.5・地面と水と空気 94.4 B/セル)・
-  COMMANDER(次の番号 **D-616・ADR-0421・T-0978・Q146**)。
+- **記録**: ROADMAP(T-0931 = 1 チャット目済み・T-0966〜T-0968 の行・T-0937 作業中・T-0942 の値)・perf.md の M-0 の節に詰めた後の値(空気 41.5・燃えている所 81.5・地面と水と空気 94.4 B/セル)。
+  ここまでを c96cf3d で push。
+- **続けてマージ**(`--no-ff`・衝突なし): t-0869-r2(9b6a20d。案 B の R2 の 1 本目: 流体 ↔ 粒・孔の引きずり。測った行が全部合格・ADR-0416)・
+  t-0919-c0-components(f841f1d。成分を持つ節 equilibrium_block と支えを 1 つの系で解く〔`SupportSolve::Coupled` 既定〕・ADR-0418。T-0945 の中身も済んだ → Done)・
+  t-0856-rt2(8499224。R-T2 の 1 本の列の試作 time_step_lab。試し 1 が合格の項目を通った・ADR-0410 Proposed)。
+  確かめ(release・警告 0): t-0869-r2・t-0919 の後に CPU 7 本(case_b_box・case_b_gauge・case_b_r1〔252 秒〕・case_b_r2・equilibrium〔915 秒〕・support_law・gas_projection)・GPU gpu_gas_projection_t0915(成分 1 の道)。
+  t-0856-rt2 の後に time_step_lab。archmap --check OK。
+- **記録**: ROADMAP(R2 = 1 本目合格・2 本目 T-0963 作業中・T-0919 CPU 済み〔着く刻みと割れの判定の前後〕・T-0945 Done・T-0969〜T-0971 の行〔T-0970 作業中 wt2〕・
+  R-T2 = 1 本の列で試し 1 合格〔川 1 晩 124 → 6.7 秒・火事 18 分 26 → 1.9 秒。CPU 試作〕・T-0950 作業中 wt4・T-0951・T-0952 の行)・
+  QUESTIONS **Q146【エンジン】**(刻みの長さの歩の途中のセーブ)→ 2026-10-22 02:46 ユーザーが答えた: DECISIONS **D-616**(= (A) 歩の記録も保存)・**D-617**(支えは `SupportSolve::Coupled` の 1 つの系。ADR-0418 の該当の仮を外した。V の回数と棒の硬さは T-0971 で測ってから Claude が決める)・
+  COMMANDER(次の番号 **D-618・ADR-0424・T-0987・Q147**)。
 
 ## 前の仕事(2026-10-21・本体の作業役・T-0942・t-0918-c0-compact・t-0957-rr0-fast のマージ)
 - **T-0942**(80c626c。docs/tickets/T-0942): ベイクが固体・液体で光の値(light_absorption_*・light_reflectance_*)を 1 つも書かない物質と、片方の帯だけ書いた欄を警告する
