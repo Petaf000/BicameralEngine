@@ -66,10 +66,11 @@ C-0 = 釣り合う家族の共通部品(claude/35。多重解像度の木を多�
 **例 1 砂山が崩れる・掘ると崩れる・勢いで走る**
 ```lua
 species = {
-  sand  = { ..., phase = "solid", grain_size_um = 300, repose_angle_deg = 34, density_kg_per_m3 = 1600 },
+  sand  = { ..., phase = "solid", grain_size_um = 300, repose_angle_deg = 34, density_kg_per_m3 = 2650 },
   stone = { ..., phase = "solid", density_kg_per_m3 = 2600 },          -- 粒の大きさが無い = 据わる
 }
 ```
+- 粒の密度は粒そのもの(砂 2650)を書く。**積もった密度は導かれる値**(粒の密度 × 詰まり `packed_fraction_pct`。詰まり 60 % の砂は 1590。D-613)。
 - 横の面の押し合いが tan 34° を超えた分だけ運動量になる。止まる所では摩擦が面の運動量をちょうど 0 にする。山は「ほぼ止まり」、T-0833 で眠る。
 - 下を消すと勢いで少し行き過ぎて、また 34° に戻る。
 
@@ -86,7 +87,7 @@ species = { soil = { ..., phase = "solid", grain_size_um = 20, repose_angle_deg 
 
 **例 4 雪崩**
 ```lua
-species = { snow = { ..., phase = "solid", grain_size_um = 1000, repose_angle_deg = 40, density_kg_per_m3 = 300, cohesion_pa = 1500 } }
+species = { snow = { ..., phase = "solid", grain_size_um = 1000, repose_angle_deg = 40, density_kg_per_m3 = 917, cohesion_pa = 1500 } }  -- 粒(氷)そのもの。積もった雪は詰まりから導く
 ```
 - くっつく強さで少し急でも保ち、爆発や掘削で超えると流れ出し、勢いで平地まで走る。板のように割れて滑る雪は 0.5 m では出ない(物にした時だけ)。
 
