@@ -9,6 +9,7 @@
 //   - 粗い段: Galerkin(Pᵀ A P)。斜めの面も軸の面も、子の面の和として粗い段の面になる。段の木は節の木の座標から(親 = 座標 ÷ 2)
 //   - 決まった回数・前の答えから始める(温めた始まり)。閉じた領域・違うレベルの節が混ざる系は持たない(T-0969)
 // 単位: 値 x と右辺は法則の単位。係数 A は「A × x ÷ 2^coefficientShift = 右辺の単位」になる整数
+// 式(LDLᵀ・ブロックの残差・延ばし方と縮約・固定した面の右辺)は shaders/common/equilibrium_block.hlsli で GPU 版(gpu_equilibrium_block。T-0970)と共有。
 // データの流れ: 法則 → EquilibriumBlockSystem → BuildEquilibriumBlockGrid(段。系の形が変わった時だけ)→ SolveEquilibriumBlocks
 //   → 節の値(state.values。節 × k)→ 法則が面の力を作る(当てる段・帳簿)。浮動小数点は使わない(04 §4)。
 #pragma once
@@ -17,18 +18,20 @@
 #include <cstdint>
 #include <vector>
 
+#include "common/equilibrium_block.hlsli"
 #include "sim/equilibrium.h"
 
 namespace bicameral::sim {
 
-    inline constexpr uint32_t EQ_MAX_COMPONENTS = 6;       // 3 次元の支え(変位 3 + 回り 3)まで
-    inline constexpr uint32_t EQ_PROLONG_SHIFT = 16;       // 延ばし方の行列の Q
-    inline constexpr uint32_t EQ_OCTANTS = 8;              // 子の八分割(x の奇偶 + 2 × y の奇偶 + 4 × z の奇偶)
-    inline constexpr uint32_t EQ_BLOCK_FACTOR_SHIFT = 30;  // LDLᵀ の L の Q
+    inline constexpr uint32_t
+        EQ_MAX_COMPONENTS = equilibrium_block::EQB_MAX_COMPONENTS;  // 3 次元の支え(変位 3 + 回り 3)まで
+    inline constexpr uint32_t EQ_PROLONG_SHIFT = equilibrium_block::EQB_PROLONG_SHIFT;      // 延ばし方の行列の Q
+    inline constexpr uint32_t EQ_OCTANTS = equilibrium_block::EQB_OCTANTS;                  // 子の八分割
+    inline constexpr uint32_t EQ_BLOCK_FACTOR_SHIFT = equilibrium_block::EQB_FACTOR_SHIFT;  // LDLᵀ の L の Q
 
-    // k × k の係数([行 × EQ_MAX_COMPONENTS + 列]。k を超える所は 0)と k 成分の値
-    using EquilibriumBlock = std::array<int64_t, EQ_MAX_COMPONENTS * EQ_MAX_COMPONENTS>;
-    using EquilibriumVector = std::array<int64_t, EQ_MAX_COMPONENTS>;
+    // k × k の係数([行 × EQ_MAX_COMPONENTS + 列]。k を超える所は 0)と k 成分の値(GPU と共有する式の型)
+    using EquilibriumBlock = equilibrium_block::EqbBlock;
+    using EquilibriumVector = equilibrium_block::EqbVector;
 
     // 面(2 つの節のつながり)。エネルギー ½ [x_low; x_high]ᵀ [[lowLow, lowHigh], [lowHighᵀ, highHigh]] [x_low; x_high]。
     // 同じレベルの節どうし(軸の隣・斜めの隣のどちらでも。各軸の座標の差は 1 以内)
@@ -75,11 +78,8 @@ namespace bicameral::sim {
         uint32_t coarsestSweeps = 8;  // 最も粗い段の掃き出し
     };
 
-    // 節の対角のブロックの LDLᵀ(L の対角は 1。pivots ≤ 0 の成分は解かない = 支えの無い向き)
-    struct EquilibriumBlockFactor {
-        EquilibriumBlock lower{};  // Q30
-        EquilibriumVector pivots{};
-    };
+    // 節の対角のブロックの LDLᵀ(L の対角は 1。pivots ≤ 0 の成分は解かない = 支えの無い向き。lower は Q30)
+    using EquilibriumBlockFactor = equilibrium_block::EqbFactor;
 
     // 多重格子の 1 段
     struct EquilibriumBlockLevel {

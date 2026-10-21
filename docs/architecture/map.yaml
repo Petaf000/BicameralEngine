@@ -360,7 +360,10 @@ views:
           code: "tests/equilibrium_test.cpp::TestGasOnEquilibrium", ticket: T-0853 }
       - { id: equilibriumblock, group: simlib, label: "SolveEquilibriumBlocks<br/>成分を持つ節の釣り合い(T-0919)<br/>k × k の面・8 色のブロックの解き・剛体の動きの延ばし方",
           code: "engine/src/sim/equilibrium_block.cpp::SolveEquilibriumBlocks", ticket: T-0919, doc: docs/decisions/ADR-0418-balance-family-vector-nodes.md,
-          note: "節が k 成分(支えの 2 次元は 3)・面と固定した面の係数が k × k(斜めの 2 節の面も同じ形)。粗い段は Galerkin(Pᵀ A P を 128bit で足して 1 回ずらす)で斜めの面も子の面の和になる。延ばし方 P は法則が渡す(支えは剛体の動き)。成分 1 の法則は SolveEquilibrium のまま(ビット一致)。同じレベルの節・閉じない解きだけ(違うレベル・閉じた領域は T-0969、GPU は T-0970)" }
+          note: "節が k 成分(支えの 2 次元は 3)・面と固定した面の係数が k × k(斜めの 2 節の面も同じ形)。粗い段は Galerkin(Pᵀ A P を 128bit で足して 1 回ずらす)で斜めの面も子の面の和になる。延ばし方 P は法則が渡す(支えは剛体の動き)。成分 1 の法則は SolveEquilibrium のまま(ビット一致)。同じレベルの節・閉じない解きだけ(違うレベル・閉じた領域は T-0969。GPU 版は GpuEquilibriumBlock〔T-0970〕)" }
+      - { id: gpuequilibriumblock, group: simlib, label: "GpuEquilibriumBlock<br/>成分を持つ節の釣り合いの GPU 版(T-0970)<br/>8 色の Dispatch・Galerkin の粗い段を GPU で",
+          code: "engine/src/sim/gpu_equilibrium_block.cpp::GpuEquilibriumBlock::RecordSolve", ticket: T-0970, doc: docs/decisions/ADR-0422-balance-family-vector-gpu.md,
+          note: "式は shaders/common/equilibrium_block.hlsli で CPU の SolveEquilibriumBlocks と共有(1 つの源)。段は shaders/sim/equilibrium_block.hlsl(k = 1・2・3・6 ごとのシェーダー)。段の形は CPU から写し、粗い段の係数と LDLᵀ は GPU が作る。段 0 は今は写す(支えの段 0 を GPU で組むのは T-0981)。gpu_equilibrium_block_test が支えの 10 場面と k 成分の箱で毎刻みビット一致を確かめる" }
       - { id: supportlaw, group: simlib, label: "SupportLaw::Step<br/>支えの法則の試作(R-B1・T-0871)<br/>格子の梁・成分ごとに C-0 で解き結合は遅らせる",
           code: "engine/src/sim/support_law.cpp::SupportLaw::Step", ticket: T-0871, doc: docs/design/22-support-law.md,
           note: "縦の面・ν = 0・1 つの細かさ。節 = セル(横・上・回り φ)。既定は成分を持つ節で 1 つの系(SupportSolve::Coupled。T-0919)、成分の間の結合を右辺の項へ遅らせる形(Lagged)は比べ用に残す。階段の段に斜めの棒(ADR-0415・T-0944)。面の力と縁の力(FaceForces。表面の引きの応力 R-B2 へ)。support_law_test が梁の式・アーチ・洞窟の天井の連続体と比べ・帳簿・決定性・釣り合いに着く刻みを記録" }
@@ -670,6 +673,7 @@ views:
       - [gpugasprojectionstep, gpuequilibrium, "部品の上で解く(T-0915)"]
       - [gpuequilibrium, gpugasprojection, "V 固定で解く"]
       - [gpuequilibrium, equilibrium, "式を共有・ビット一致"]
+      - [gpuequilibriumblock, equilibriumblock, "式を共有・ビット一致(T-0970)"]
       - [gpugasprojectionstep, gpugas, "導く値・力・運ぶの段を使い回す"]
       - [gpugasprojectionstep, gasprojection, "1 刻みをビット一致で"]
       - [gpugas, gasstephlsl, "9 段 × 小刻み"]

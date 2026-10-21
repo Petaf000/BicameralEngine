@@ -26,12 +26,19 @@
 #include "core/log.h"
 #include "core/singleton.h"
 #include "sim/support_law.h"
+#include "support_scenes.h"
 
 using namespace bicameral;
 
 namespace {
 
     int failureCount = 0;
+
+    using test::Arch;
+    using test::Beam;
+    using test::Cave;
+    using test::STONE_DENSITY;
+    using test::STONE_KPA;
 
     void Expect(bool condition, std::string_view text) {
         if (condition)
@@ -41,8 +48,6 @@ namespace {
         ++failureCount;
     }
 
-    constexpr uint64_t STONE_KPA = 50000000;
-    constexpr uint64_t STONE_DENSITY = 2600;
     constexpr double NM_UNITS = 65536.0;  // 2^-16 nm
 
     const char* SolveName(sim::SupportSolve solve) {
@@ -60,24 +65,6 @@ namespace {
     std::vector<double> lastFinals;
 
     // --- 場面 ---
-    sim::SupportScene Beam(uint32_t width, uint32_t height, uint64_t cellMm, bool bothEnds) {
-        sim::SupportScene scene;
-        scene.width = width;
-        scene.height = height;
-        scene.cellMm = cellMm;
-        scene.stiffnessKpa = STONE_KPA;
-        scene.densityKgPerM3 = STONE_DENSITY;
-        scene.solid.assign((size_t)width * height, 1);
-        scene.clamps.assign((size_t)width * height, 0);
-        for (uint32_t up = 0; up < height; ++up) {
-            scene.clamps[(size_t)width * up] |= sim::SUPPORT_CLAMP_LEFT;
-            if (bothEnds)
-                scene.clamps[width - 1 + (size_t)width * up] |= sim::SUPPORT_CLAMP_RIGHT;
-        }
-
-        return scene;
-    }
-
     // 列 x の上の変位の平均(mm。下向きを正)
     double SagMm(const sim::SupportLaw& law, uint32_t x, uint32_t height) {
         double sum = 0;
@@ -164,45 +151,6 @@ namespace {
     };
 
     constexpr double STONE_SAG_PER_UNIT_MM = STONE_DENSITY * 9.80665 / (STONE_KPA * 1000.0) * 1000.0;
-
-    // アーチ: 内径 4 m・厚さ 1 m の半円。セルの中心が内径〜外径にあるセル。下の段を地面に固定
-    sim::SupportScene Arch(uint64_t cellMm) {
-        const auto inner = (int64_t)(4000 / cellMm);
-        const auto outer = (int64_t)(5000 / cellMm);
-        sim::SupportScene scene = Beam((uint32_t)(2 * outer), (uint32_t)outer, cellMm, false);
-        for (int64_t up = 0; up < outer; ++up) {
-            for (int64_t x = 0; x < 2 * outer; ++x) {
-                // 中心の 2 倍の座標(セルの大きさ ÷ 2 の単位)
-                const int64_t cx = 2 * x - 2 * outer + 1;
-                const int64_t cy = 2 * up + 1;
-                const int64_t radius = cx * cx + cy * cy;
-                const bool inside = radius >= 4 * inner * inner && radius <= 4 * outer * outer;
-                const size_t i = (size_t)x + (size_t)(2 * outer) * (size_t)up;
-                scene.solid[i] = inside ? 1 : 0;
-                scene.clamps[i] = inside && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0;
-            }
-        }
-
-        return scene;
-    }
-
-    // 洞窟: 幅 24 × 高さ 10 m の岩・x 8〜16 m・高さ 4〜8 m の空洞(天井の厚さ 2 m)。下を地面に固定
-    sim::SupportScene Cave(uint64_t cellMm) {
-        const auto width = (uint32_t)(24000 / cellMm);
-        const auto height = (uint32_t)(10000 / cellMm);
-        sim::SupportScene scene = Beam(width, height, cellMm, false);
-        for (uint32_t up = 0; up < height; ++up) {
-            for (uint32_t x = 0; x < width; ++x) {
-                const uint64_t cx = (2 * x + 1) * cellMm;
-                const uint64_t cy = (2 * up + 1) * cellMm;
-                const bool hollow = cx > 16000 && cx < 32000 && cy > 8000 && cy < 16000;
-                scene.solid[x + (size_t)width * up] = hollow ? 0 : 1;
-                scene.clamps[x + (size_t)width * up] = !hollow && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0;
-            }
-        }
-
-        return scene;
-    }
 
     // 見る所: アーチは頂(真ん中の 2 列の全部のセル)・洞窟は天井の下の面(x 12 m を挟む 2 セル)。下向きを正(mm)
     double ShapeSagMm(const sim::SupportLaw& law, const sim::SupportScene& scene, bool arch) {

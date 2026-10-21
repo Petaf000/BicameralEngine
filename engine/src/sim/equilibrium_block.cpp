@@ -5,6 +5,7 @@
 // 3. V サイクル: 8 色のブロックの Gauss–Seidel(節ごとの対角のブロックを LDLᵀ で解く)→ 残差を Pᵀ で親へ → 親で直しを解く
 //    → P で子へ足す → 8 色の Gauss–Seidel。色の中の節どうしは隣でないので、同じ色の中の順は結果に効かない(R2)
 // 数の幅(04 R8): 係数 × 値は 128bit で足してから右へずらす(0 方向へ切り捨て)。桁あふれは FX_ASSERT。
+// 節の LDLᵀ・解き・ブロックの残差・延ばし方と縮約・固定した面の右辺は shaders/common/equilibrium_block.hlsli(GPU 版と同じ関数。T-0970)。
 #include "sim/equilibrium_block.h"
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <tuple>
 
 using namespace bicameral::fx;
+using namespace bicameral::equilibrium_block;
 
 namespace bicameral::sim {
 
@@ -19,8 +21,6 @@ namespace bicameral::sim {
 
         constexpr uint32_t COLOR_COUNT = 8;
         constexpr size_t MAX_LEVELS = 32;
-        constexpr uint32_t
-            PIVOT_FLOOR_SHIFT = 20;  // 対角のこの分の 1 より小さい消去の後の対角は、支えの無い向きとして解かない
         constexpr uint32_t ROW_WIDTH = EQ_MAX_COMPONENTS;  // ブロックの行の幅
 
         // --- 符号つきの 128bit(2 の補数。和を厳密に持ってから 1 回だけずらす)---
@@ -129,60 +129,9 @@ namespace bicameral::sim {
             return block;
         }
 
-        // --- 節の対角のブロックの LDLᵀ(L は Q30。消去の後の対角が小さすぎる向きは解かない)---
+        // --- 節の対角のブロックの LDLᵀ と解き(common/equilibrium_block.hlsli の EqbFactorize・EqbSolveFactor)---
         EquilibriumBlockFactor Factor(const EquilibriumBlock& diagonal, uint32_t k) {
-            EquilibriumBlockFactor factor;
-            EquilibriumBlock scaled{};  // u_ij = L_ij × p_j(係数の単位)
-            for (uint32_t i = 0; i < k; ++i) {
-                for (uint32_t j = 0; j < i; ++j) {
-                    int64_t value = Entry(diagonal, i, j);
-                    for (uint32_t m = 0; m < j; ++m)
-                        value -= FxMulShiftS64(factor.lower[i * ROW_WIDTH + m], scaled[j * ROW_WIDTH + m],
-                                               EQ_BLOCK_FACTOR_SHIFT);
-
-                    scaled[i * ROW_WIDTH + j] = value;
-                    factor.lower[i * ROW_WIDTH + j] = factor.pivots[j] == 0 ? 0
-                                                                            : FxDivShiftS64(value, factor.pivots[j],
-                                                                                            EQ_BLOCK_FACTOR_SHIFT);
-                }
-
-                int64_t pivot = Entry(diagonal, i, i);
-                for (uint32_t m = 0; m < i; ++m)
-                    pivot -= FxMulShiftS64(factor.lower[i * ROW_WIDTH + m], scaled[i * ROW_WIDTH + m],
-                                           EQ_BLOCK_FACTOR_SHIFT);
-
-                const int64_t pivotMinimum = Entry(diagonal, i, i) >> PIVOT_FLOOR_SHIFT;
-                factor.pivots[i] = pivot > 0 && pivot > pivotMinimum ? pivot : 0;
-            }
-
-            return factor;
-        }
-
-        // D δ = r を解く(r は右辺の単位・δ は値の単位)
-        EquilibriumVector SolveFactor(const EquilibriumBlockFactor& factor, const EquilibriumVector& residual,
-                                      uint32_t k, uint32_t coefficientShift) {
-            EquilibriumVector forward{};
-            for (uint32_t i = 0; i < k; ++i) {
-                int64_t value = residual[i];
-                for (uint32_t j = 0; j < i; ++j)
-                    value -= FxMulShiftS64(factor.lower[i * ROW_WIDTH + j], forward[j], EQ_BLOCK_FACTOR_SHIFT);
-
-                forward[i] = value;
-            }
-
-            EquilibriumVector delta{};
-            for (uint32_t i = k; i-- > 0;) {
-                if (factor.pivots[i] == 0)
-                    continue;
-
-                int64_t value = FxDivShiftS64(forward[i], factor.pivots[i], coefficientShift);
-                for (uint32_t j = i + 1; j < k; ++j)
-                    value -= FxMulShiftS64(factor.lower[j * ROW_WIDTH + i], delta[j], EQ_BLOCK_FACTOR_SHIFT);
-
-                delta[i] = value;
-            }
-
-            return delta;
+            return EqbFactorize(diagonal, k);
         }
 
         // --- 段の行 ---
@@ -325,31 +274,23 @@ namespace bicameral::sim {
 
         // --- 反復 ---
 
-        // 節 i の残差 r = b − A x(右辺の単位)
+        EquilibriumVector NodeValues(const std::vector<int64_t>& values, size_t node, uint32_t k) {
+            EquilibriumVector result{};
+            for (uint32_t c = 0; c < k; ++c)
+                result[c] = values[node * k + c];
+
+            return result;
+        }
+
+        // 節 i の残差 r = b − A x(右辺の単位。EqbAddProduct・EqbResidual)
         EquilibriumVector NodeResidual(const EquilibriumBlockLevel& level, const std::vector<int64_t>& rhs,
                                        const std::vector<int64_t>& values, size_t i, uint32_t k, uint32_t shift) {
-            std::array<FxU128, ROW_WIDTH> sums;
-            sums.fill(WideZero());
-            const auto addProduct = [&](const EquilibriumBlock& block, size_t node) {
-                for (uint32_t row = 0; row < k; ++row) {
-                    for (uint32_t column = 0; column < k; ++column) {
-                        const int64_t coefficient = block[row * ROW_WIDTH + column];
-                        const int64_t value = values[node * k + column];
-                        if (coefficient != 0 && value != 0)
-                            sums[row] = SignedAdd(sums[row], SignedProduct(coefficient, value));
-                    }
-                }
-            };
-
-            addProduct(level.diagonals[i], i);
+            EqbWideVector sums = EqbZeroWideVector();
+            sums = EqbAddProduct(sums, level.diagonals[i], NodeValues(values, i, k), k);
             for (uint32_t link = level.rowStarts[i]; link < level.rowStarts[i + 1]; ++link)
-                addProduct(level.blocks[link], level.neighbors[link]);
+                sums = EqbAddProduct(sums, level.blocks[link], NodeValues(values, level.neighbors[link], k), k);
 
-            EquilibriumVector residual{};
-            for (uint32_t row = 0; row < k; ++row)
-                residual[row] = rhs[i * k + row] - SignedShift(sums[row], shift);
-
-            return residual;
+            return EqbResidual(NodeValues(rhs, i, k), sums, k, shift);
         }
 
         // 8 色のブロックの Gauss–Seidel。同じ色の節は隣どうしでないので、色の中の順は結果に効かない
@@ -363,7 +304,7 @@ namespace bicameral::sim {
                             continue;
 
                         const EquilibriumVector residual = NodeResidual(level, rhs, values, i, k, shift);
-                        const EquilibriumVector delta = SolveFactor(level.factors[i], residual, k, shift);
+                        const EquilibriumVector delta = EqbSolveFactor(level.factors[i], residual, k, shift);
                         for (uint32_t c = 0; c < k; ++c)
                             values[i * k + c] += delta[c];
                     }
@@ -388,40 +329,28 @@ namespace bicameral::sim {
             // --- 残差を Pᵀ で親へ(128bit で足してから ÷ 2^16)---
             const EquilibriumBlockLevel& coarse = grid.levels[depth + 1];
             const size_t count = level.x.size();
-            std::vector<FxU128> sums(coarse.x.size() * k, WideZero());
+            std::vector<EqbWideVector> sums(coarse.x.size(), EqbZeroWideVector());
             for (size_t i = 0; i < count; ++i) {
                 const EquilibriumVector residual = NodeResidual(level, rhs, values, i, k, shift);
-                const EquilibriumBlock& restriction = grid.restriction[level.octants[i]];
                 const size_t parent = level.parents[i];
-                for (uint32_t row = 0; row < k; ++row) {
-                    for (uint32_t column = 0; column < k; ++column) {
-                        const int64_t weight = restriction[row * ROW_WIDTH + column];
-                        if (weight != 0 && residual[column] != 0) {
-                            sums[parent * k + row] = SignedAdd(sums[parent * k + row],
-                                                               SignedProduct(weight, residual[column]));
-                        }
-                    }
-                }
+                sums[parent] = EqbAddProduct(sums[parent], grid.restriction[level.octants[i]], residual, k);
             }
 
-            std::vector<int64_t> coarseRhs(sums.size());
-            for (size_t i = 0; i < sums.size(); ++i)
-                coarseRhs[i] = SignedShift(sums[i], EQ_PROLONG_SHIFT);
+            std::vector<int64_t> coarseRhs(coarse.x.size() * k);
+            for (size_t parent = 0; parent < sums.size(); ++parent) {
+                const EquilibriumVector narrowed = EqbNarrow(sums[parent], k, EQ_PROLONG_SHIFT);
+                for (uint32_t c = 0; c < k; ++c)
+                    coarseRhs[parent * k + c] = narrowed[c];
+            }
 
             // --- 親で直しを解き、P で子へ足す ---
             std::vector<int64_t> correction(coarseRhs.size(), 0);
             VCycle(grid, depth + 1, coarseRhs, correction, options, updates);
             for (size_t i = 0; i < count; ++i) {
-                const EquilibriumBlock& prolong = grid.prolongation[level.octants[i]];
-                const size_t parent = level.parents[i];
-                for (uint32_t row = 0; row < k; ++row) {
-                    FxU128 sum = WideZero();
-                    for (uint32_t column = 0; column < k; ++column)
-                        sum = SignedAdd(
-                            sum, SignedProduct(prolong[row * ROW_WIDTH + column], correction[parent * k + column]));
-
-                    values[i * k + row] += SignedShift(sum, EQ_PROLONG_SHIFT);
-                }
+                const EquilibriumVector added = EqbProlong(grid.prolongation[level.octants[i]],
+                                                           NodeValues(correction, level.parents[i], k), k);
+                for (uint32_t c = 0; c < k; ++c)
+                    values[i * k + c] += added[c];
             }
 
             Smooth(level, rhs, values, options.postSmooth, k, shift, updates);
@@ -471,13 +400,10 @@ namespace bicameral::sim {
             rhs[source.node * k + source.component] += source.value;
 
         for (const EquilibriumBlockFixed& fixed : system.fixedFaces) {
-            for (uint32_t row = 0; row < k; ++row) {
-                FxU128 sum = WideZero();
-                for (uint32_t column = 0; column < k; ++column)
-                    sum = SignedAdd(sum, SignedProduct(fixed.block[row * ROW_WIDTH + column], fixed.value[column]));
-
-                rhs[fixed.node * k + row] += SignedShift(sum, system.coefficientShift);
-            }
+            const EquilibriumVector added = EqbNarrow(EqbAddProduct(EqbZeroWideVector(), fixed.block, fixed.value, k),
+                                                      k, system.coefficientShift);
+            for (uint32_t row = 0; row < k; ++row)
+                rhs[fixed.node * k + row] += added[row];
         }
 
         if (count == 0)

@@ -116,6 +116,11 @@ namespace bicameral::sim {
         uint64_t LastNodeUpdates() const { return m_lastNodeUpdates; }
         uint32_t CellCount() const { return (uint32_t)m_cells.size(); }
 
+        // 成分を持つ節の系と段と今の値(Coupled の時。GPU 版〔gpu_equilibrium_block。T-0970〕が同じ系を解いて比べる)
+        const EquilibriumBlockSystem& BlockSystem() const { return m_blockSystem; }
+        const EquilibriumBlockGrid& BlockGrid() const { return m_blockGrid; }
+        const std::vector<int64_t>& BlockValues() const { return m_blockState.values; }
+
     private:
         struct Bond {
             uint32_t low = 0;   // −軸の側のセル
