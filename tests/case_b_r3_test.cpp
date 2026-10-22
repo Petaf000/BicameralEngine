@@ -246,10 +246,12 @@ namespace {
 
     // 動いている粒の速さのしきい値(T-1004。mm/s)。引数で替えて測る時だけ(無ければ FlowOptions の既定)
     std::optional<uint32_t> movingSpeedOverride;
+    std::shared_ptr<FlowStats> currentStats;  // 走っている場面の段の数え(刻みの後の操作から読む。T-1003 の測り)
     bool movingByCellOverride = false;
-    bool vacuumOverride = false;  // 空気を抜く(粒と空気の引きずりの影響を見る。T-1019)。引数のどこかに vacuum
+    uint32_t dragScaleOverride = 1000;  // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
+    bool vacuumOverride = false;        // 空気を抜く(粒と空気の引きずりの影響を見る。T-1046)。引数のどこかに vacuum
     bool impactTurnOverride =
-        false;  // 受け止めた縦の運動量を横へ向け直す(T-1019)。引数のどこかに turn  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
+        false;  // 受け止めた縦の運動量を横へ向け直す(T-1046)。引数のどこかに turn  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
 
     struct RunOptions {
         int32_t level = 0;
@@ -296,8 +298,10 @@ namespace {
 
         flowOptions.grainMovingByCell = movingByCellOverride;
         flowOptions.grainImpactTurn = impactTurnOverride;
+        flowOptions.dragScalePermille = dragScaleOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
+        currentStats = flow.stats;
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         uint64_t tick = 0;
         run.recording = RunScene(run.box, flow.stages, solver, options.seconds * options.ticksPerSecond, regions,
@@ -945,6 +949,93 @@ namespace {
         }
     }
 
+    // --- 11. 落ちる塊(T-1003。記録): 空気の中で濃い砂の塊(2 m × 3 m)を放し、塊の粒と塊の中の空気の下向きの速さを自由落下と比べる ---
+    // 濃い粒の流れでは粒の間の空気も一緒に落ち、速さの差が小さく、ほぼ自由に落ちる(1 粒の終端の速さ約 2 m/s に張り付かない)見込み
+    struct FallSample {
+        int64_t grainMmPerS = 0;  // 塊の縦の面の粒の下向きの速さ(粒の質量の重み)
+        int64_t airMmPerS = 0;    // 同じ面の空気の下向きの速さ(空気の質量の重み)
+    };
+
+    FallSample MeasureFall(const Box& box) {
+        const uint32_t grainSlot = MomentumSlot(box.config.layout, Phase::Grain);
+        const uint32_t gasSlot = MomentumSlot(box.config.layout, Phase::Gas);
+        int64_t grainMomentum = 0;
+        int64_t grainMass = 0;
+        int64_t airMomentum = 0;
+        int64_t airMass = 0;
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            const std::optional<uint32_t> above = Neighbor(box, cell, 1);
+            if (!above.has_value())
+                continue;
+
+            int64_t grain = 0;
+            int64_t gas = 0;
+            for (uint32_t index = 0; index < box.materials.size(); ++index) {
+                const int64_t both = CellMass(box, cell, index) + CellMass(box, *above, index);
+                if (box.materials[index].phase == Phase::Grain)
+                    grain += both / 2;
+                else if (box.materials[index].phase == Phase::Gas)
+                    gas += both / 2;
+            }
+
+            if (grain < 1000000)  // 1 kg 未満の面は塊の外
+                continue;
+
+            grainMomentum += box.faceMomentum[1][FaceIndex(box, cell, grainSlot)];
+            grainMass += grain;
+            airMomentum += box.faceMomentum[1][FaceIndex(box, cell, gasSlot)];
+            airMass += gas;
+        }
+
+        return {.grainMmPerS = grainMass == 0 ? 0 : -MillimetersPerSecond(grainMomentum / grainMass),
+                .airMmPerS = airMass == 0 ? 0 : -MillimetersPerSecond(airMomentum / airMass)};
+    }
+
+    void FallingBlock(int32_t level, MomentumLayout layout, char symbol) {
+        Scene scene = BaseR3Scene("fall", 12, 24);
+        Fill(scene, 0, 11, 0, 0, '#');
+        Fill(scene, 4, 7, 14, 19, symbol);
+        scene.regions = {{.name = "all", .xBegin = 0, .xEnd = 12, .yBegin = 1, .yEnd = 24}};
+        std::string series;
+        const auto sample = [&](Box& box, uint64_t tick) {
+            if (tick % 15 != 0 || tick > 45)
+                return;
+
+            const FallSample fall = MeasureFall(box);
+            if (tick == 30) {
+                // 塊の真ん中の列の圧力(Pa。地面の 1 つ上のセルとの差)と粒の詰まり(‰)を下から
+                const View view = BuildView(box);
+                const uint32_t x = box.config.sizeX / 2;
+                const int64_t base = MeasureFlowCell(box, view, CellIndex(box, x, 1, 0), {}).pressureMicroPascal;
+                std::string column;
+                for (uint32_t y = 1; y < box.config.sizeY; y += (box.config.sizeY / 24)) {
+                    const uint32_t cell = CellIndex(box, x, y, 0);
+                    column += std::format(" {}:{}/{}", y,
+                                          (MeasureFlowCell(box, view, cell, {}).pressureMicroPascal - base) / 1000000,
+                                          (view.cells[cell].grainPackedQ16 * 1000) >> 16);
+                }
+
+                std::printf("    0.5 秒の列(段:圧力の差 Pa/詰まり ‰)%s\n", column.c_str());
+                // 縦の帳簿(0.5 秒までの和。mg·m/s)Gravity・Wall・FixedPhase・Body・Outside・Pressure
+                std::string ledger;
+                for (uint32_t source = 0; source < IMPULSE_SOURCE_COUNT; ++source)
+                    ledger += std::format(" {}", box.ledger.impulses[source][1] >> 20);
+
+                std::printf("    0.5 秒の縦の帳簿(重さ・壁・据わる孔・物・外・圧力)%s\n", ledger.c_str());
+                std::printf("    面の孔の引きずり(0.5 秒までの和): 動けない面 %llu・孔の無い面の残り %llu\n",
+                            (unsigned long long)(currentStats->lockedPorousImpulse >> 20),
+                            (unsigned long long)(currentStats->residualPorousImpulse >> 20));
+            }
+
+            series += std::format(" {} 秒 粒 {} / 空気 {} mm/s(自由落下 {})・", Fixed3((int64_t)tick * 1000 / 60),
+                                  fall.grainMmPerS, fall.airMmPerS, (int64_t)tick * 9807 / 60);
+        };
+        const Run run = RunR3(scene, {.level = level, .layout = layout, .seconds = 1, .afterTick = sample}, {"all"});
+        std::printf("  落ちる塊 %s m %s 「%c」%s:%s 最大の速さ %lld mm/s\n", level == 0 ? "0.5" : "0.25",
+                    LayoutName(layout), symbol, vacuumOverride ? "・真空" : "", series.c_str(),
+                    (long long)MillimetersPerSecond(run.grainSpeed.back()));
+    }
+
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
@@ -960,7 +1051,7 @@ int main(int argc, char** argv) {
     // 6 = 詰めると重い・7 = 穴の口・8 = 置き場 ①・9 = 斜面 25° と 45°)。無ければ全部
     // 10 = 止まる角度と崩れ始める角度(T-0997。全部には入れない。2 つ目の引数 = 差の度)
     // 動いている粒の速さのしきい値(T-1004): 場面 1〜9 は 2 つ目の引数・場面 10 は 3 つ目の引数(mm/s。0 = 分けない)
-    // 引数の turn(受け止めた縦の運動量を横へ。T-1019)・vacuum(空気を抜く)は数えずに取り除く
+    // 引数の turn(受け止めた縦の運動量を横へ。T-1046)・vacuum(空気を抜く)は数えずに取り除く
     int kept = 1;
     for (int index = 1; index < argc; ++index) {
         const std::string word = argv[index];
@@ -968,6 +1059,8 @@ int main(int argc, char** argv) {
             impactTurnOverride = true;
         else if (word == "vacuum")
             vacuumOverride = true;
+        else if (word.starts_with("drag="))
+            dragScaleOverride = (uint32_t)std::stoi(word.substr(5));
         else
             argv[kept++] = argv[index];
     }
@@ -983,6 +1076,19 @@ int main(int argc, char** argv) {
 
     if (only == 10) {
         ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 11) {
+        // 落ちる塊(T-1003。全部には入れない): 詰まり 60 %・30 %・12 % を ④ と ①・0.5 m と 0.25 m で
+        for (const char symbol : {':', '5', '2'}) {
+            for (const MomentumLayout layout : {MomentumLayout::GrainSeparate, MomentumLayout::PerPhase})
+                FallingBlock(0, layout, symbol);
+        }
+
+        FallingBlock(1, MomentumLayout::GrainSeparate, ':');
         std::printf("case_b r3: %d failure(s)\n", failureCount);
 
         return failureCount == 0 ? 0 : 1;

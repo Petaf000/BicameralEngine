@@ -662,7 +662,9 @@ namespace bicameral::sim::case_b {
                                      PackedCellDragQ16(box, scratch, face.right, grainUm)) /
                                     2;
 
-            return std::max(DragFromBeta(box, dispersed, face.grainNl), packed);
+            const uint64_t drag = std::max(DragFromBeta(box, dispersed, face.grainNl), packed);
+            return options.dragScalePermille == 1000 ? drag
+                                                     : MulDivCap(drag, options.dragScalePermille, 1000, DRAG_LIMIT_Q16);
         }
 
         // 1 つの面の引きずりの係数と、粒を消去した形(a'・b・c')を作る。粒が動けない面は粒を据わる孔として扱う
@@ -828,9 +830,11 @@ namespace bicameral::sim::case_b {
             int64_t transfer = 0;
             if (GrainMoves(face)) {
                 // m_s v_s = m_s (M_s + I_s + K v_f) ÷ b
-                // m_s v_s = M_s m_s ÷ b + v_f K m_s ÷ b(K m_s ÷ b ≤ m_s なので 64bit に収まる)
+                // m_s v_s = M_s m_s ÷ b + v_f K m_s ÷ b(K m_s ÷ b ≤ m_s なので 64bit に収まる)。K m_s ÷ b は mg の Q16
+                // (T-1003: mg のまま 2^16 で割っていて、流体と一緒に動く粒が流体から受け取る分が 1/65536 になり、
+                // 残りが帳簿 FixedPhase へ消えていた。濃い粒の流れが 1 粒の終端の速さに張り付いた根)
                 const auto grainQ16 = (uint64_t)face.grainMassMg << 16;
-                const auto pulledQ16 = (uint64_t)fx::FxMulDivS64((int64_t)face.dragQ16, (uint64_t)face.grainMassMg,
+                const auto pulledQ16 = (uint64_t)fx::FxMulDivS64((int64_t)face.dragQ16, grainQ16,
                                                                  (uint64_t)face.grainInertiaQ16);
                 const int64_t grainAfter = fx::FxMulDivS64(grainBefore, grainQ16, (uint64_t)face.grainInertiaQ16) +
                                            fx::FxMulDivS64(fluidAfter, pulledQ16, (uint64_t)face.massMg << 16);
@@ -843,8 +847,8 @@ namespace bicameral::sim::case_b {
             int64_t otherTransfer = 0;
             if (face.twoFluid) {
                 const auto otherQ16 = (uint64_t)face.otherMassMg << 16;
-                const auto pulledQ16 = (uint64_t)fx::FxMulDivS64((int64_t)face.otherDragQ16, (uint64_t)face.otherMassMg,
-                                                                 (uint64_t)face.otherInertiaQ16);
+                const auto pulledQ16 = (uint64_t)fx::FxMulDivS64((int64_t)face.otherDragQ16, otherQ16,
+                                                                 (uint64_t)face.otherInertiaQ16);  // mg の Q16(T-1003)
                 const int64_t otherAfter = fx::FxMulDivS64(otherBefore, otherQ16, (uint64_t)face.otherInertiaQ16) +
                                            fx::FxMulDivS64(fluidAfter, pulledQ16, (uint64_t)face.massMg << 16);
                 // 主でない流体の孔の引きずり K_xo v_o は外へ(帳簿 FixedPhase)。残りが主の流体との受け渡し
@@ -861,6 +865,11 @@ namespace bicameral::sim::case_b {
             ApplyImpulse(box, CarrierFace(face), fluidImpulse, ImpulseSource::Pressure);
             const int64_t porous = fluidBefore - transfer - otherTransfer - fluidAfter;
             ApplyImpulse(box, CarrierFace(face), -porous, ImpulseSource::FixedPhase);
+            // 計器(T-1003): 孔の無い面の「残り」は丸めだけのはず(大きければ受け渡しの式が保存していない)
+            if (face.locked)
+                runtime.stats->lockedPorousImpulse += fx::FxAbsU64(porous);
+            else if (face.porousMg == 0)
+                runtime.stats->residualPorousImpulse += fx::FxAbsU64(porous);
             face.flowNl = CoupledFlowNl(box, FluidMomentum(box, face), face.carrierAreaMm2, face.massMg);
             if (face.twoFluid)
                 StopEmptyUpwind(runtime, box, face);

@@ -78,6 +78,8 @@ namespace bicameral::sim::case_b {
         bool drag = false;
         // 粒の形の抗力の定数 C₂(‰。C_d ≈ 24/Re + C₂。自然の砂 1000・滑らかな球 400。Ferguson & Church 2004)。法則の定数(仮)
         uint32_t grainShapeDragPermille = 1000;
+        // 粒と流体の引きずりの係数の倍率(‰。T-1003 の根の測りだけに使う。既定 1000 = そのまま)
+        uint32_t dragScalePermille = 1000;
 
         // --- 置き場 ①(T-0963)---
         // しずく・泡の形の抗力の定数 C₂(‰)。2 mm の雨粒は滑らかな球に近い 400(仮。法則の定数)
@@ -151,15 +153,17 @@ namespace bicameral::sim::case_b {
         uint64_t stoppedFluidFaces = 0;  // 主でない流体が、その相の無いセルから出る向きなので止めた面
 
         // --- 粒の降伏(R3・T-0996)---
-        uint64_t yieldMovingPairs = 0;         // 降伏して動いた面の柱(刻みの累計)
-        uint64_t yieldDynamicFaces = 0;        // 動いている面として書いた値の上限を使った面(T-1004。刻みの累計)
-        uint64_t impactGrainImpulse = 0;       // 詰まった粒が受け止めた縦の運動量の大きさの和(T-1046。mg·2^-20 m/s)
-        uint64_t turnedGrainImpulse = 0;       // そのうち横へ向け直した大きさの和
-        uint64_t yieldHeldPairs = 0;           // 摩擦で止めた面の柱(運動量か押す力があったもの)
-        uint64_t yieldBlockedPairs = 0;        // 降伏したが向かう側に空きが無く止めた面の柱
-        uint64_t holeBlockedFaces = 0;         // 穴より大きい粒で止めた面(S8 の口)
-        uint64_t overpackedCells = 0;          // 詰まりを 1/16 より多く超えたセル(刻みの累計)
-        uint32_t maxPackedQ16 = 0;             // 詰まりの最大(2^16 = ちょうど詰まった)
+        uint64_t yieldMovingPairs = 0;       // 降伏して動いた面の柱(刻みの累計)
+        uint64_t yieldDynamicFaces = 0;      // 動いている面として書いた値の上限を使った面(T-1004。刻みの累計)
+        uint64_t impactGrainImpulse = 0;     // 詰まった粒が受け止めた縦の運動量の大きさの和(T-1046。mg·2^-20 m/s)
+        uint64_t turnedGrainImpulse = 0;     // そのうち横へ向け直した大きさの和
+        uint64_t lockedPorousImpulse = 0;    // 粒が動けない面の孔の引きずりで流体から外へ出た大きさの和(T-1003 の測り)
+        uint64_t residualPorousImpulse = 0;  // 孔の無い面で「残り」として外へ出た大きさの和(T-1003 の測り。0 のはず)
+        uint64_t yieldHeldPairs = 0;         // 摩擦で止めた面の柱(運動量か押す力があったもの)
+        uint64_t yieldBlockedPairs = 0;      // 降伏したが向かう側に空きが無く止めた面の柱
+        uint64_t holeBlockedFaces = 0;       // 穴より大きい粒で止めた面(S8 の口)
+        uint64_t overpackedCells = 0;        // 詰まりを 1/16 より多く超えたセル(刻みの累計)
+        uint32_t maxPackedQ16 = 0;           // 詰まりの最大(2^16 = ちょうど詰まった)
         int64_t lastMaxStressMicroPascal = 0;  // 直近の刻みの有効応力 σ' の最大(µPa)
     };
 
