@@ -376,6 +376,8 @@ namespace bicameral::sim {
 
             if (setup.rule == TimeStepRule::Fixed)
                 steps.desired[slot] = setup.fixedExponent;
+            else if (setup.select == TimeTreeSelect::Jump)
+                return;  // 退く道: 決めるのは上限の倍数の刻みの試しの解きだけ(1 刻みの変化は丸めの揺れで測れない)
             else
                 steps.desired[slot] = TsDesiredExponent(TS_RULE_CHANGE, steps.exponent[slot], change, setup.budgetQ16);
         }
@@ -617,6 +619,16 @@ namespace bicameral::sim {
         }
 
         // slot の e を other の e + allowed までに(長すぎれば、始める側なら縮め、歩の途中なら打ち切って始め直す)。変えたら true
+        // 歩を終えた枠の次の e(退く道は 0 か上限だけ。上限で始められない刻みなら毎刻み)
+        int32_t FirstNext(const TimeTreeSetup& setup, const TimeTreeSteps& steps, const Choice& choice, uint32_t slot) {
+            if (setup.select != TimeTreeSelect::Jump)
+                return std::clamp(steps.desired[slot], 0, choice.cap);
+
+            const bool jump = steps.desired[slot] >= setup.maxExponent && choice.cap >= setup.maxExponent;
+
+            return jump ? setup.maxExponent : 0;
+        }
+
         bool LimitTo(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t slot, uint32_t other,
                      int32_t allowed) {
             TimeTreeSteps& steps = world.steps;
@@ -625,7 +637,7 @@ namespace bicameral::sim {
 
             if (choice.next[slot] < 0) {
                 TruncateBlock(setup, world, slot, choice.tick);
-                choice.next[slot] = std::clamp(steps.desired[slot], 0, choice.cap);
+                choice.next[slot] = FirstNext(setup, steps, choice, slot);
             }
 
             choice.next[slot] = std::min(choice.next[slot], Current(steps, choice, other) + allowed);
@@ -641,15 +653,23 @@ namespace bicameral::sim {
                           .cap = std::min(TsAlignedCap(tick), setup.maxExponent)};
             for (const uint32_t slot : world.layout.blocks) {
                 if (steps.open[slot] == 0)
-                    choice.next[slot] = std::clamp(steps.desired[slot], 0, choice.cap);
+                    choice.next[slot] = FirstNext(setup, steps, choice, slot);
             }
 
+            // 退く道: 毎刻みと決まった枠(望みの e が 0)の隣は毎刻み。ほかの隣とは差を問わない
+            const bool jump = setup.select == TimeTreeSelect::Jump;
             bool changed = true;
             while (changed) {
                 changed = false;
                 for (const uint32_t slot : world.layout.blocks) {
-                    for (const uint32_t neighbor : world.layout.neighbors[slot])
-                        changed = LimitTo(setup, world, choice, slot, neighbor, 1) || changed;
+                    for (const uint32_t neighbor : world.layout.neighbors[slot]) {
+                        const bool active = steps.desired[neighbor] == 0;
+                        if (jump && !active)
+                            continue;
+
+                        const int32_t allowed = jump || (setup.frontBuffer && active) ? 0 : 1;
+                        changed = LimitTo(setup, world, choice, slot, neighbor, allowed) || changed;
+                    }
 
                     for (const uint32_t mate : world.layout.mates[slot])
                         changed = LimitTo(setup, world, choice, slot, mate, 0) || changed;
@@ -679,8 +699,11 @@ namespace bicameral::sim {
                     if (change <= setup.budgetQ16)
                         continue;
 
-                    steps.desired[slot] = TsDesiredExponent(TS_RULE_CHANGE, span.span.exponent, change,
-                                                            setup.budgetQ16);
+                    if (setup.select == TimeTreeSelect::Jump)
+                        steps.desired[slot] = 0;
+                    else
+                        steps.desired[slot] = TsDesiredExponent(TS_RULE_CHANGE, span.span.exponent, change,
+                                                                setup.budgetQ16);
                     ++steps.retakes;
                     any = true;
                 }
@@ -721,7 +744,16 @@ namespace bicameral::sim {
             }
 
             // --- e を選んで解く。2 通り目は予算を超えた枠を縮めて選び直す(望みの e は減るだけなので終わる)---
-            const bool retake = setup.select == TimeTreeSelect::Retake && setup.rule != TimeStepRule::Fixed;
+            // 退く道: 上限の倍数の刻みで、触られていない枠は全部「一気に進めてみる」から(試しの解きで毎刻みへ落とす)
+            const bool jump = setup.select == TimeTreeSelect::Jump && setup.rule != TimeStepRule::Fixed;
+            if (jump && TsAlignedCap(tick) >= setup.maxExponent) {
+                for (const uint32_t slot : world.layout.blocks) {
+                    if (steps.open[slot] == 0 && steps.touched[slot] == 0)
+                        steps.desired[slot] = setup.maxExponent;
+                }
+            }
+
+            const bool retake = (setup.select == TimeTreeSelect::Retake || jump) && setup.rule != TimeStepRule::Fixed;
             std::vector<SolvedSpan> solved;
             do {
                 const std::vector<int32_t> next = ChooseExponents(setup, world, tick);

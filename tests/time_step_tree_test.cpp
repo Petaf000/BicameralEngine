@@ -12,7 +12,8 @@
 //   5. 費用: 夜・火事の CPU の秒数
 //   6. 歩の途中のセーブ(Q146 の一旦の決定 (A)): 木の状態 + 歩の記録を写して戻すと、続けたのとビット一致。歩の記録のバイト/セル
 // T-0985: 選び方の 2 通り目(select=retake)・細かさを同じ物の長さのブロックで(group=1)・毎刻みの写しを使い回す(ファイル)。
-// 引数: <forward|grain|grain-pond|grain-fire|night|fire> [select=previous|retake] [budget=予算のずらし] [group=揃える段]
+// T-1013: 退く道の 1 本目(select=jump。寝ている間だけ。e は 0 か上限)。
+// 引数: <forward|grain|grain-pond|grain-fire|night|fire> [select=previous|retake|jump] [budget=予算のずらし] [group=揃える段]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 #include <algorithm>
 #include <chrono>
@@ -113,7 +114,11 @@ namespace {
     TimeTreeSelect selectRule = TimeTreeSelect::Previous;
     uint32_t groupShift = 0;   // 細かさの比べで 0.5 m の木の枠を揃える段(1 = 8 m のブロックに)
     uint32_t trialCycles = 0;  // 0 = solverCycles と同じ
-    bool trialFixed = false;   // 試しも毎刻みに(V の回数だけ変えて、毎刻みどうしの揺れ = 床を測る)
+    bool trialFixed = false;
+    // 試しの初めに x(m)のセル(y = z = 0)へ熱を 1 単位だけ足す(わずかな揺らしが前線でどこまで広がるか = 着火の閾値の床。T-1014)
+    double perturbMeters = -1.0;
+    bool frontBuffer =
+        false;  // 前線の緩衝(buffer=1。T-1014)  // 試しも毎刻みに(V の回数だけ変えて、毎刻みどうしの揺れ = 床を測る)
 
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
@@ -137,6 +142,7 @@ namespace {
         setup.maxExponent = MAX_EXPONENT;
         setup.budgetQ16 = (1ull << 16) >> budgetShift;
         setup.select = selectRule;
+        setup.frontBuffer = frontBuffer;
 
         return setup;
     }
@@ -457,7 +463,11 @@ namespace {
         if (trialFixed)
             return std::format("毎刻み V {}", trialCycles != 0 ? trialCycles : solverCycles);
 
-        return std::format("{} 通り目・予算 1/{} mK", selectRule == TimeTreeSelect::Retake ? 2 : 1, 1u << budgetShift);
+        if (selectRule == TimeTreeSelect::Jump)
+            return std::format("退く道 1 本目・予算 1/{} mK", 1u << budgetShift);
+
+        return std::format("{} 通り目{}・予算 1/{} mK", selectRule == TimeTreeSelect::Retake ? 2 : 1,
+                           frontBuffer ? "・前線の緩衝" : "", 1u << budgetShift);
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -479,6 +489,25 @@ namespace {
     }
 
     // --- 1・4・5. 精度と費用(混ぜた木)---
+
+    // 試しの初めに perturbMeters の x を含むセル(y = z = 0)へ熱を 1 単位(T-1014 の床)
+    void Perturb(const TimeTreeSetup& setup, TimeTreeWorld& world) {
+        for (const uint32_t slot : world.layout.blocks) {
+            const MrBlock& block = world.nest.blocks[slot];
+            const double size = CellMeters(block.level);
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const double x = static_cast<double>(block.originX + MrCellX(index)) * size;
+                const bool inside = perturbMeters >= x && perturbMeters < x + size;
+                const bool corner = block.originY + MrCellY(index) == 0 && block.originZ + MrCellZ(index) == 0;
+                if (!inside || !corner || world.layout.stepped[slot * MR_BLOCK_CELLS + index] == 0)
+                    continue;
+
+                InjectTimeTreeHeat(setup, world, slot, index, 1);
+                Log(Channel::Sim, Level::Info, "揺らし: x {:.2f} m のセル(レベル {})へ熱 1 単位", x, block.level);
+                return;
+            }
+        }
+    }
 
     // 毎刻みの写し(ファイルにあれば読む。無ければ走らせて書く)
     std::vector<Snapshot> ReferenceSnapshots(std::string_view scene, std::string_view tag, const Material& material,
@@ -511,7 +540,10 @@ namespace {
         bool referenceConserved = true;
         const std::vector<Snapshot> referenceSnapshots = ReferenceSnapshots(scene, tag, material, profile, ticks,
                                                                             ignition, referenceConserved);
-        const TimeTreeWorld trialWorld = MakeWorld(trialSetup, material, shape, profile);
+        TimeTreeWorld trialWorld = MakeWorld(trialSetup, material, shape, profile);
+        if (perturbMeters >= 0.0)
+            Perturb(trialSetup, trialWorld);
+
         const RunResult trial = Run(trialSetup, material, trialWorld, ticks, ticks, ignition, true);
         LogRun(scene, TrialName(), trialWorld, trial, ticks);
 
@@ -557,7 +589,9 @@ namespace {
             scene, worst.temperatureMk, worst.reactantMillionth, reactantExact ? "(本当の値と)" : "", worst.groundMk,
             trial.asleepChecks, trial.asleepWrong);
         Expect(referenceConserved && trial.conserved, "保存: どの塊の境目でも Σ − 帳簿 が最初と同じ");
-        Expect(trial.steps.widestNeighborGap <= 1, "隣どうしの e の差は 1 段まで");
+        // 退く道は隣の差の決まりを使わない(0 と上限が隣り合う)
+        Expect(selectRule == TimeTreeSelect::Jump || trial.steps.widestNeighborGap <= 1,
+               "隣どうしの e の差は 1 段まで");
         Expect(trial.steps.negativeValues == 0, "真実が負にならない");
         Expect(worst.temperatureMk <= 1.0 && worst.reactantMillionth <= 1.0 && worst.groundMk <= 1.0,
                "長い刻みと毎刻みが計器の精度の内");
@@ -715,9 +749,11 @@ namespace {
             const size_t equal = argument.find('=');
             const std::string_view key = argument.substr(0, equal);
             const std::string value(equal == std::string_view::npos ? "" : argument.substr(equal + 1));
-            if (key == "select")
-                selectRule = value == "retake" ? TimeTreeSelect::Retake : TimeTreeSelect::Previous;
-            else if (key == "budget")
+            if (key == "select") {
+                selectRule = value == "retake" ? TimeTreeSelect::Retake
+                             : value == "jump" ? TimeTreeSelect::Jump
+                                               : TimeTreeSelect::Previous;
+            } else if (key == "budget")
                 budgetShift = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "group")
                 groupShift = static_cast<uint32_t>(std::atoi(value.c_str()));
@@ -725,6 +761,10 @@ namespace {
                 solverCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "trialcycles")
                 trialCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "buffer")
+                frontBuffer = value == "1";
+            else if (key == "perturb")
+                perturbMeters = std::atof(value.c_str());
             else if (key == "trial")
                 trialFixed = value == "fixed";
             else if (key == "galerkin")
@@ -736,8 +776,8 @@ namespace {
         const Material fire = Fire();
         const Ignition fireIgnition{FIRE_IGNITION_TICK, fire.groundKelvin};
         if (all || part == "forward") {
-            // 1 通り目と 2 通り目の両方で(ctest は引数なし = 両方)
-            for (const TimeTreeSelect select : {TimeTreeSelect::Previous, TimeTreeSelect::Retake}) {
+            // 1 通り目と退く道の 1 本目で(2 通り目は採らないので外した。T-1013)
+            for (const TimeTreeSelect select : {TimeTreeSelect::Previous, TimeTreeSelect::Jump}) {
                 selectRule = select;
                 CheckFastForward();
                 CheckSave();
