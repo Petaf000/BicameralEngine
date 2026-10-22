@@ -11,13 +11,21 @@
 //   4. 眠った所の導かれる値は眠った時の平均のまま(T-0854 の申し送り)
 //   5. 費用: 夜・火事の CPU の秒数
 //   6. 歩の途中のセーブ(Q146 の一旦の決定 (A)): 木の状態 + 歩の記録を写して戻すと、続けたのとビット一致。歩の記録のバイト/セル
+// T-0985: 選び方の 2 通り目(select=retake)・細かさを同じ物の長さのブロックで(group=1)・毎刻みの写しを使い回す(ファイル)。
+// 引数: <forward|grain|grain-pond|grain-fire|night|fire> [select=previous|retake] [budget=予算のずらし] [group=揃える段]
+//       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <functional>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -102,6 +110,10 @@ namespace {
     // 予算を 1 mK ÷ 2^これ に。木の上では 1 mK で違うレベルの境の近くが 8 mK ずれた(T-0950 の作業ログ)ので仮に 1/16 mK
     uint32_t budgetShift = 4;
     bool solverGalerkin = false;
+    TimeTreeSelect selectRule = TimeTreeSelect::Previous;
+    uint32_t groupShift = 0;   // 細かさの比べで 0.5 m の木の枠を揃える段(1 = 8 m のブロックに)
+    uint32_t trialCycles = 0;  // 0 = solverCycles と同じ
+    bool trialFixed = false;   // 試しも毎刻みに(V の回数だけ変えて、毎刻みどうしの揺れ = 床を測る)
 
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
@@ -124,6 +136,7 @@ namespace {
         setup.fixedExponent = 0;
         setup.maxExponent = MAX_EXPONENT;
         setup.budgetQ16 = (1ull << 16) >> budgetShift;
+        setup.select = selectRule;
 
         return setup;
     }
@@ -386,6 +399,67 @@ namespace {
         return worst;
     }
 
+    // --- 毎刻みの写しを使い回す(場面と V の回数ごとのファイル。試しの設定だけ変えて何度も測るため)---
+
+    template <typename T>
+    void WriteVector(std::ofstream& out, const std::vector<T>& values) {
+        const uint64_t count = values.size();
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        out.write(reinterpret_cast<const char*>(values.data()), static_cast<std::streamsize>(count * sizeof(T)));
+    }
+
+    template <typename T>
+    bool ReadVector(std::ifstream& in, std::vector<T>& values) {
+        uint64_t count = 0;
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!in || count > (1u << 24))
+            return false;
+
+        values.resize(count);
+        in.read(reinterpret_cast<char*>(values.data()), static_cast<std::streamsize>(count * sizeof(T)));
+
+        return static_cast<bool>(in);
+    }
+
+    void SaveSnapshots(const std::string& path, const std::vector<Snapshot>& snapshots) {
+        std::ofstream out(path, std::ios::binary);
+        const uint64_t count = snapshots.size();
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (const Snapshot& snapshot : snapshots) {
+            out.write(reinterpret_cast<const char*>(&snapshot.groundHeat), sizeof(snapshot.groundHeat));
+            WriteVector(out, snapshot.energy);
+            WriteVector(out, snapshot.reactant);
+            WriteVector(out, snapshot.x);
+            WriteVector(out, snapshot.level);
+        }
+    }
+
+    std::optional<std::vector<Snapshot>> LoadSnapshots(const std::string& path, size_t expected) {
+        std::ifstream in(path, std::ios::binary);
+        uint64_t count = 0;
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!in || count != expected)
+            return std::nullopt;
+
+        std::vector<Snapshot> snapshots(count);
+        for (Snapshot& snapshot : snapshots) {
+            in.read(reinterpret_cast<char*>(&snapshot.groundHeat), sizeof(snapshot.groundHeat));
+            const bool read = ReadVector(in, snapshot.energy) && ReadVector(in, snapshot.reactant) &&
+                              ReadVector(in, snapshot.x) && ReadVector(in, snapshot.level);
+            if (!read)
+                return std::nullopt;
+        }
+
+        return snapshots;
+    }
+
+    std::string TrialName() {
+        if (trialFixed)
+            return std::format("毎刻み V {}", trialCycles != 0 ? trialCycles : solverCycles);
+
+        return std::format("{} 通り目・予算 1/{} mK", selectRule == TimeTreeSelect::Retake ? 2 : 1, 1u << budgetShift);
+    }
+
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
                 uint64_t ticks) {
         uint64_t cells = 0;
@@ -396,30 +470,54 @@ namespace {
                                    (static_cast<double>(cells) * static_cast<double>(ticks));
         Log(Channel::Sim, Level::Info,
             "{} {}: {:.2f} 秒(CPU 1 スレッド・{} セル・{} 刻み)・解き {:.5f} 回/セル/刻み・部品を呼んだ {}・出来事 "
-            "{}・打ち切り {}・"
+            "{}・打ち切り {}・取り直し {}・"
             "隣の差の最大 {}・負 {}・眠る {}・起こす {}・残差の計器の最大 {}(V {} 回{})",
             scene, name, run.seconds, cells, ticks, perCellTick, run.steps.solves, run.steps.events,
-            run.steps.truncations, run.steps.widestNeighborGap, run.steps.negativeValues, run.steps.sleeps,
-            run.steps.wakes, run.steps.worstResidual, solverCycles, solverGalerkin ? "・Galerkin" : "");
+            run.steps.truncations, run.steps.retakes, run.steps.widestNeighborGap, run.steps.negativeValues,
+            run.steps.sleeps, run.steps.wakes, run.steps.worstResidual, solverCycles,
+            solverGalerkin ? "・Galerkin" : "");
     }
 
     // --- 1・4・5. 精度と費用(混ぜた木)---
 
-    void CheckScene(std::string_view scene, const Material& material, const Profile& profile, uint64_t ticks,
-                    const Ignition& ignition, bool reactantExact) {
+    // 毎刻みの写し(ファイルにあれば読む。無ければ走らせて書く)
+    std::vector<Snapshot> ReferenceSnapshots(std::string_view scene, std::string_view tag, const Material& material,
+                                             const Profile& profile, uint64_t ticks, const Ignition& ignition,
+                                             bool& conserved) {
+        const std::string path = std::format("time_step_tree_reference_{}_v{}{}.bin", tag, solverCycles,
+                                             solverGalerkin ? "g" : "");
+        if (auto loaded = LoadSnapshots(path, ticks / COMPARE_EVERY)) {
+            Log(Channel::Sim, Level::Info, "{} 毎刻み: 写し {} を使う", scene, path);
+            return *std::move(loaded);
+        }
+
+        const TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Fixed);
+        const TimeTreeWorld world = MakeWorld(setup, material, TreeShape{}, profile);
+        RunResult reference = Run(setup, material, world, ticks, ticks, ignition, true);
+        LogRun(scene, "毎刻み", world, reference, ticks);
+        conserved = reference.conserved;
+        SaveSnapshots(path, reference.snapshots);
+
+        return std::move(reference.snapshots);
+    }
+
+    void CheckScene(std::string_view scene, std::string_view tag, const Material& material, const Profile& profile,
+                    uint64_t ticks, const Ignition& ignition, bool reactantExact) {
         const TreeShape shape;
-        const TimeTreeSetup referenceSetup = MakeSetup(material, TimeStepRule::Fixed);
-        const TimeTreeSetup trialSetup = MakeSetup(material, TimeStepRule::Change);
-        const TimeTreeWorld referenceWorld = MakeWorld(referenceSetup, material, shape, profile);
+        TimeTreeSetup trialSetup = MakeSetup(material, trialFixed ? TimeStepRule::Fixed : TimeStepRule::Change);
+        if (trialCycles != 0)
+            trialSetup.cycles = trialCycles;
+
+        bool referenceConserved = true;
+        const std::vector<Snapshot> referenceSnapshots = ReferenceSnapshots(scene, tag, material, profile, ticks,
+                                                                            ignition, referenceConserved);
         const TimeTreeWorld trialWorld = MakeWorld(trialSetup, material, shape, profile);
-        const RunResult reference = Run(referenceSetup, material, referenceWorld, ticks, ticks, ignition, true);
         const RunResult trial = Run(trialSetup, material, trialWorld, ticks, ticks, ignition, true);
-        LogRun(scene, "毎刻み", referenceWorld, reference, ticks);
-        LogRun(scene, "試し 1", trialWorld, trial, ticks);
+        LogRun(scene, TrialName(), trialWorld, trial, ticks);
 
         Difference worst;
         for (size_t i = 0; i < trial.snapshots.size(); ++i) {
-            const Difference at = Compare(trialWorld, material, trial.snapshots[i], reference.snapshots[i]);
+            const Difference at = Compare(trialWorld, material, trial.snapshots[i], referenceSnapshots[i]);
             Log(Channel::Sim, Level::Info, "{} 刻み {}: セルの温度の差の最大 {:.3f} mK(x {:.2f} m・レベル {})", scene,
                 (i + 1) * COMPARE_EVERY, at.temperatureMk, at.worstX, at.worstLevel);
             worst = Worst(worst, at);
@@ -444,7 +542,7 @@ namespace {
             double trialCell = 0.0;
             double referenceCell = 0.0;
             const double trialMean = against(trial.snapshots.back(), trialCell);
-            const double referenceMean = against(reference.snapshots.back(), referenceCell);
+            const double referenceMean = against(referenceSnapshots.back(), referenceCell);
             Log(Channel::Sim, Level::Info,
                 "{} A の本当の値との差(100 万分の 1): 試し 1 セルの最大 {:.3f}・平均 {:.4f} / 毎刻み セルの最大 "
                 "{:.3f}・平均 {:.4f}",
@@ -458,7 +556,7 @@ namespace {
             "{} 回見て違い {}",
             scene, worst.temperatureMk, worst.reactantMillionth, reactantExact ? "(本当の値と)" : "", worst.groundMk,
             trial.asleepChecks, trial.asleepWrong);
-        Expect(reference.conserved && trial.conserved, "保存: どの塊の境目でも Σ − 帳簿 が最初と同じ");
+        Expect(referenceConserved && trial.conserved, "保存: どの塊の境目でも Σ − 帳簿 が最初と同じ");
         Expect(trial.steps.widestNeighborGap <= 1, "隣どうしの e の差は 1 段まで");
         Expect(trial.steps.negativeValues == 0, "真実が負にならない");
         Expect(worst.temperatureMk <= 1.0 && worst.reactantMillionth <= 1.0 && worst.groundMk <= 1.0,
@@ -476,9 +574,12 @@ namespace {
                           const Ignition& ignition) {
         constexpr uint64_t SAMPLE_EVERY = 1024;
         const TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        // group=1 なら 0.5 m の木は x に隣り合う 2 枠(4 m × 2 = 8 m)を同じ e に揃える = 1 m の木のブロックと同じ物の長さ(T-0985)
+        TimeTreeSetup fineSetup = setup;
+        fineSetup.groupShift = groupShift;
         const TreeShape fineShape{.rootLevel = 0, .roots = 8, .refine = false};
         const TreeShape coarseShape{.rootLevel = -1, .roots = 4, .refine = false};
-        TimeTreeWorld fine = MakeWorld(setup, material, fineShape, profile);
+        TimeTreeWorld fine = MakeWorld(fineSetup, material, fineShape, profile);
         TimeTreeWorld coarse = MakeWorld(setup, material, coarseShape, profile);
         // 根の枠を x の順に(0.5 m の根 i は 1 m の根 i / 2 の中)
         const auto byX = [](const TimeTreeWorld& world) {
@@ -508,11 +609,11 @@ namespace {
             if (ignition.tick > done && ignition.tick < done + size)
                 size = ignition.tick - done;
 
-            StepTimeTree(setup, fine, size);
+            StepTimeTree(fineSetup, fine, size);
             StepTimeTree(setup, coarse, size);
             done += size;
             if (ignition.tick != 0 && done == ignition.tick) {
-                Ignite(setup, material, fine, ignition);
+                Ignite(fineSetup, material, fine, ignition);
                 Ignite(setup, material, coarse, ignition);
             }
 
@@ -540,8 +641,12 @@ namespace {
 
         const double share = static_cast<double>(withinOne) / samples;
         Log(Channel::Sim, Level::Info,
-            "細かさ {}: 同じ場所の e の差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}・e の平均 0.5 m {:.2f} / 1 m {:.2f}",
-            scene, meanGap / samples, share * 100.0, widest, meanFine / samples, meanCoarse / samples);
+            "細かさ {}({}・0.5 m のブロック {} m): 同じ場所の e の差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}・e の平均 "
+            "0.5 m "
+            "{:.2f} / 1 m {:.2f}・解き 0.5 m {} / 1 m {}・取り直し {} / {}",
+            scene, TrialName(), 4u << groupShift, meanGap / samples, share * 100.0, widest, meanFine / samples,
+            meanCoarse / samples, fine.steps.cellSteps, coarse.steps.cellSteps, fine.steps.retakes,
+            coarse.steps.retakes);
         Log(Channel::Sim, Level::Info,
             "細かさ {}(1 m の e と 0.5 m の 2 つの小さい方): 差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}", scene,
             meanPair / pairs, 100.0 * withinOnePair / pairs, widestPair);
@@ -553,6 +658,7 @@ namespace {
     void CheckFastForward() {
         const Material material = Fire();
         const TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        Log(Channel::Sim, Level::Info, "早送り・セーブ: {}", TrialName());
         const TimeTreeWorld world = MakeWorld(setup, material, TreeShape{}, Ambient(material.groundKelvin));
         const Ignition ignition{FIRE_IGNITION_TICK, material.groundKelvin};
         const uint64_t ticks = 2 * COMPARE_EVERY + 777;
@@ -604,31 +710,51 @@ namespace {
 
     int Run(int argc, char** argv) {
         const std::string_view part = argc > 1 ? argv[1] : "all";
-        if (argc > 2)
-            solverCycles = static_cast<uint32_t>(std::atoi(argv[2]));
+        for (int i = 2; i < argc; ++i) {
+            const std::string_view argument = argv[i];
+            const size_t equal = argument.find('=');
+            const std::string_view key = argument.substr(0, equal);
+            const std::string value(equal == std::string_view::npos ? "" : argument.substr(equal + 1));
+            if (key == "select")
+                selectRule = value == "retake" ? TimeTreeSelect::Retake : TimeTreeSelect::Previous;
+            else if (key == "budget")
+                budgetShift = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "group")
+                groupShift = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "cycles")
+                solverCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "trialcycles")
+                trialCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "trial")
+                trialFixed = value == "fixed";
+            else if (key == "galerkin")
+                solverGalerkin = value == "1";
+        }
 
-        solverGalerkin = argc > 3 && std::string_view(argv[3]) == "galerkin";
-        if (argc > 4)
-            budgetShift = static_cast<uint32_t>(std::atoi(argv[4]));
         const bool all = part == "all";
         const Material pond = Pond();
         const Material fire = Fire();
         const Ignition fireIgnition{FIRE_IGNITION_TICK, fire.groundKelvin};
         if (all || part == "forward") {
-            CheckFastForward();
-            CheckSave();
+            // 1 通り目と 2 通り目の両方で(ctest は引数なし = 両方)
+            for (const TimeTreeSelect select : {TimeTreeSelect::Previous, TimeTreeSelect::Retake}) {
+                selectRule = select;
+                CheckFastForward();
+                CheckSave();
+            }
         }
 
-        if (all || part == "grain") {
+        if (all || part == "grain" || part == "grain-pond")
             CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {});
+
+        if (all || part == "grain" || part == "grain-fire")
             CheckGranularity("火事", fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition);
-        }
 
         if (all || part == "night")
-            CheckScene("池(静かな夜)", pond, PondProfile(WorldLength(TreeShape{})), NIGHT_TICKS, {}, true);
+            CheckScene("池(静かな夜)", "night", pond, PondProfile(WorldLength(TreeShape{})), NIGHT_TICKS, {}, true);
 
         if (all || part == "fire")
-            CheckScene("火事", fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition, false);
+            CheckScene("火事", "fire", fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition, false);
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "time_step_tree_test: FAILED ({} 件)", failureCount);

@@ -25,6 +25,12 @@ namespace bicameral::sim {
     inline constexpr uint32_t TIME_TREE_REACTANT = 1;  // 成分の物質 ID(A)
     inline constexpr uint32_t TIME_TREE_PRODUCT = 2;   // 成分の物質 ID(P)
 
+    // 刻みの長さの選び方(T-0985。研究 R-T2 の打ち切り条件の 2 通り)
+    enum class TimeTreeSelect : uint8_t {
+        Previous,  // 1 通り目(T-0950): 前の歩の変化だけで選ぶ
+        Retake,    // 2 通り目(T-0985): 前の歩で選び、解いた歩の変化が予算を超えた枠は縮めて取り直す(真実へ書く前に)
+    };
+
     struct TimeTreeSetup {
         // --- 熱(どれもレベルによらない数。面の係数だけレベル k で × 4^k)---
         uint64_t capacityQ32 = 0;          // セルの熱容量(2^-32 × そのレベルの単位 / mK)
@@ -46,6 +52,9 @@ namespace bicameral::sim {
         uint64_t budgetQ16 = 1ull << 16;  // 1 歩の変化の許す大きさ(mK × 2^16)
         uint32_t cycles = 4;              // C-0 の V サイクルの回数(法則ごとの定数)
         bool galerkin = false;            // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
+        TimeTreeSelect select = TimeTreeSelect::Previous;
+        // 同じレベルで 2^これ ブロック角の枠は同じ e に揃える(細かさを同じ物の長さのブロックで比べる。0 = ブロックごと)
+        uint32_t groupShift = 0;
     };
 
     // 面 1 つ(a = 細かい側か、同じレベルなら − 側。b = 相手)。係数は a の単位 / 刻み
@@ -65,6 +74,7 @@ namespace bicameral::sim {
         std::vector<TimeTreeFace> faces;
         std::vector<std::vector<uint32_t>> blockFaces;  // 枠ごと: 触れる面
         std::vector<std::vector<uint32_t>> neighbors;   // 枠ごと: 面でつながる枠(枠の順)
+        std::vector<std::vector<uint32_t>> mates;       // 枠ごと: 同じ e に揃える枠(groupShift。自分は入れない)
         int32_t finestLevel = 0;
     };
 
@@ -112,6 +122,7 @@ namespace bicameral::sim {
         uint64_t worstResidual = 0;  // 部品の残差の計器の最大(式の単位。解けきらなかった所)
         uint64_t events = 0;
         uint64_t truncations = 0;
+        uint64_t retakes = 0;  // 取り直した枠の数(2 通り目)
         int32_t widestNeighborGap = 0;
         uint32_t negativeValues = 0;
 

@@ -8,6 +8,7 @@
 #include "sim/time_step_tree.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <initializer_list>
 #include <span>
@@ -169,12 +170,33 @@ namespace bicameral::sim {
             }
         }
 
+        int64_t FloorDiv(int64_t value, int64_t divisor) {
+            return value >= 0 ? value / divisor : -((-value + divisor - 1) / divisor);
+        }
+
+        // 同じレベルで 2^groupShift ブロック角の枠どうしを、同じ e に揃える相手に(細かさを同じ物の長さで比べる。T-0985)
+        void AddMates(const MultiresNest& nest, const TimeTreeSetup& setup, TimeTreeLayout& layout) {
+            const int64_t edge = int64_t{MR_BLOCK_EDGE} << setup.groupShift;
+            const auto group = [&](uint32_t slot) {
+                const MrBlock& block = nest.blocks[slot];
+                return std::array{int64_t{block.level}, FloorDiv(block.originX, edge), FloorDiv(block.originY, edge),
+                                  FloorDiv(block.originZ, edge)};
+            };
+            for (const uint32_t slot : layout.blocks) {
+                for (const uint32_t other : layout.blocks) {
+                    if (other != slot && group(other) == group(slot))
+                        layout.mates[slot].push_back(other);
+                }
+            }
+        }
+
         TimeTreeLayout MakeLayout(const MultiresNest& nest, const TimeTreeSetup& setup) {
             TimeTreeLayout layout;
             const uint32_t slots = nest.capacity.worldBlocks;
             layout.stepped.assign(size_t{slots} * MR_BLOCK_CELLS, 0);
             layout.blockFaces.resize(slots);
             layout.neighbors.resize(slots);
+            layout.mates.resize(slots);
             layout.finestLevel = nest.capacity.rootLevel;
             for (uint32_t slot = 0; slot < slots; ++slot) {
                 const MrBlock& block = nest.blocks[slot];
@@ -209,6 +231,9 @@ namespace bicameral::sim {
 
             for (std::vector<uint32_t>& list : layout.neighbors)
                 std::ranges::sort(list);
+
+            if (setup.groupShift > 0)
+                AddMates(nest, setup, layout);
 
             return layout;
         }
@@ -498,36 +523,54 @@ namespace bicameral::sim {
             }
         }
 
-        void StartSpan(const TimeTreeSetup& setup, TimeTreeWorld& world, const Span& span,
-                       std::span<const int32_t> next) {
-            TimeTreeSteps& steps = world.steps;
-            const uint64_t ticks = Ticks(span.exponent);
+        // 解いた列(真実と歩の記録へ書く前。2 通り目はここで歩の変化を見て取り直す)。解きは真実と next だけを読むので、
+        // 全部の列を解いてから書いても、1 列ずつ解いて書いても同じ
+        struct SolvedSpan {
+            Span span;
             SpanSystem built;
-            built.system.rounding = EQ_ROUNDING_WEIGHT;
-            std::vector<uint32_t> nodeOf(world.layout.stepped.size(), NO_NODE);
-            AddNodes(setup, world, span, built, nodeOf);
-            AddFaces(setup, world, span, next, nodeOf, built);
+            EquilibriumState state;
+            std::vector<uint32_t> nodeOf;
+        };
+
+        SolvedSpan SolveSpan(const TimeTreeSetup& setup, TimeTreeWorld& world, const Span& span,
+                             std::span<const int32_t> next) {
+            TimeTreeSteps& steps = world.steps;
+            SolvedSpan solved{.span = span};
+            solved.built.system.rounding = EQ_ROUNDING_WEIGHT;
+            solved.nodeOf.assign(world.layout.stepped.size(), NO_NODE);
+            AddNodes(setup, world, span, solved.built, solved.nodeOf);
+            AddFaces(setup, world, span, next, solved.nodeOf, solved.built);
 
             // --- 解く(差の形。初めは δ = 0)---
             EquilibriumOptions options;
             options.solver.cycles = setup.cycles;
             options.faceValues = false;
             options.galerkinCoarse = setup.galerkin;
-            EquilibriumState state;
-            const EquilibriumResult result = SolveEquilibrium(built.system, options, state);
+            const EquilibriumResult result = SolveEquilibrium(solved.built.system, options, solved.state);
             steps.worstResidual = std::max(steps.worstResidual, result.worstResidual);
-            steps.cellSteps += built.cells.size();
+            steps.cellSteps += solved.built.cells.size();
             ++steps.solves;
+
+            return solved;
+        }
+
+        void CommitSpan(const TimeTreeSetup& setup, TimeTreeWorld& world, const SolvedSpan& solved) {
+            TimeTreeSteps& steps = world.steps;
+            const Span& span = solved.span;
+            const SpanSystem& built = solved.built;
+            const std::vector<uint32_t>& nodeOf = solved.nodeOf;
+            const std::vector<int64_t>& values = solved.state.values;
+            const uint64_t ticks = Ticks(span.exponent);
             const auto end = [&](uint32_t id) {
                 const uint32_t node = nodeOf[id];
-                return node != NO_NODE ? built.start[node] + state.values[node] : CellTemperature(setup, world, id);
+                return node != NO_NODE ? built.start[node] + values[node] : CellTemperature(setup, world, id);
             };
 
             // --- セルの記録・導かれる値(解いた温度。頁を持つ枠だけ。眠った所は眠った時の平均のまま)---
             const FxU128 ground = TimesTicks(ImWide(setup.groundQ32), span.exponent);
             for (uint32_t node = 0; node < built.cells.size(); ++node) {
                 const uint32_t id = built.cells[node];
-                const int64_t temperature = built.start[node] + state.values[node];
+                const int64_t temperature = built.start[node] + values[node];
                 TimeTreeCellRecord record{.start = span.start, .ticks = ticks, .reacted = built.reacted[node]};
                 record.ground = EqFaceValue(ground, temperature, setup.groundTemperatureQ16);
                 steps.cellRecords[id] = record;
@@ -563,39 +606,105 @@ namespace bicameral::sim {
 
         // --- 出来事(刻み tick): 終えた歩を閉じる → e を選ぶ(隣の差 1 段・長すぎる隣は打ち切る)→ 列ごとに歩を始める ---
 
-        std::vector<int32_t> ChooseExponents(const TimeTreeSetup& setup, TimeTreeWorld& world, uint64_t tick) {
+        struct Choice {
+            std::vector<int32_t> next;  // -1 = 歩の途中(か刻まない枠)
+            uint64_t tick = 0;
+            int32_t cap = 0;
+        };
+
+        int32_t Current(const TimeTreeSteps& steps, const Choice& choice, uint32_t slot) {
+            return choice.next[slot] >= 0 ? choice.next[slot] : steps.exponent[slot];
+        }
+
+        // slot の e を other の e + allowed までに(長すぎれば、始める側なら縮め、歩の途中なら打ち切って始め直す)。変えたら true
+        bool LimitTo(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t slot, uint32_t other,
+                     int32_t allowed) {
             TimeTreeSteps& steps = world.steps;
-            const int32_t cap = std::min(TsAlignedCap(tick), setup.maxExponent);
-            std::vector<int32_t> next(world.nest.blocks.size(), -1);  // -1 = 歩の途中(か刻まない枠)
-            for (const uint32_t slot : world.layout.blocks) {
-                if (steps.open[slot] == 0)
-                    next[slot] = std::clamp(steps.desired[slot], 0, cap);
+            if (Current(steps, choice, slot) <= Current(steps, choice, other) + allowed)
+                return false;
+
+            if (choice.next[slot] < 0) {
+                TruncateBlock(setup, world, slot, choice.tick);
+                choice.next[slot] = std::clamp(steps.desired[slot], 0, choice.cap);
             }
 
-            const auto current = [&](uint32_t slot) {
-                return next[slot] >= 0 ? next[slot] : steps.exponent[slot];
-            };
+            choice.next[slot] = std::min(choice.next[slot], Current(steps, choice, other) + allowed);
+
+            return true;
+        }
+
+        // 隣どうしの差は 1 段まで・揃える相手(groupShift)とは同じ e
+        std::vector<int32_t> ChooseExponents(const TimeTreeSetup& setup, TimeTreeWorld& world, uint64_t tick) {
+            TimeTreeSteps& steps = world.steps;
+            Choice choice{.next = std::vector<int32_t>(world.nest.blocks.size(), -1),
+                          .tick = tick,
+                          .cap = std::min(TsAlignedCap(tick), setup.maxExponent)};
+            for (const uint32_t slot : world.layout.blocks) {
+                if (steps.open[slot] == 0)
+                    choice.next[slot] = std::clamp(steps.desired[slot], 0, choice.cap);
+            }
+
             bool changed = true;
             while (changed) {
                 changed = false;
                 for (const uint32_t slot : world.layout.blocks) {
-                    for (const uint32_t neighbor : world.layout.neighbors[slot]) {
-                        if (current(slot) <= current(neighbor) + 1)
-                            continue;
+                    for (const uint32_t neighbor : world.layout.neighbors[slot])
+                        changed = LimitTo(setup, world, choice, slot, neighbor, 1) || changed;
 
-                        // --- 長すぎる: 始める側なら縮め、歩の途中なら打ち切って始め直す ---
-                        if (next[slot] < 0) {
-                            TruncateBlock(setup, world, slot, tick);
-                            next[slot] = std::clamp(steps.desired[slot], 0, cap);
-                        }
-
-                        next[slot] = std::min(next[slot], current(neighbor) + 1);
-                        changed = true;
-                    }
+                    for (const uint32_t mate : world.layout.mates[slot])
+                        changed = LimitTo(setup, world, choice, slot, mate, 0) || changed;
                 }
             }
 
-            return next;
+            return choice.next;
+        }
+
+        // 2 通り目: 解いた歩の変化(差 δ の最大。精度の単位 × 2^16)が予算を超えた枠は、望みの e を縮めて取り直す印を付ける。
+        // まだ真実にも歩の記録にも書いていないので、取り直しは解き直すだけ。取り直す枠があれば true
+        bool MarkRetakes(const TimeTreeSetup& setup, TimeTreeWorld& world, const std::vector<SolvedSpan>& solved) {
+            TimeTreeSteps& steps = world.steps;
+            bool any = false;
+            for (const SolvedSpan& span : solved) {
+                if (span.span.exponent == 0)
+                    continue;
+
+                for (const uint32_t slot : span.span.slots) {
+                    uint64_t change = 0;
+                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                        const uint32_t node = span.nodeOf[CellId(slot, index)];
+                        if (node != NO_NODE)
+                            change = std::max(change, FxAbsU64(span.state.values[node]));
+                    }
+
+                    if (change <= setup.budgetQ16)
+                        continue;
+
+                    steps.desired[slot] = TsDesiredExponent(TS_RULE_CHANGE, span.span.exponent, change,
+                                                            setup.budgetQ16);
+                    ++steps.retakes;
+                    any = true;
+                }
+            }
+
+            return any;
+        }
+
+        // 列: 始める枠を e ごとに(長い e から。面の持ち主は短い側)解く
+        std::vector<SolvedSpan> SolveSpans(const TimeTreeSetup& setup, TimeTreeWorld& world,
+                                           std::span<const int32_t> next) {
+            std::vector<SolvedSpan> solved;
+            for (int32_t exponent = setup.maxExponent; exponent >= 0; --exponent) {
+                Span span{.exponent = exponent, .start = world.steps.tick};
+                for (const uint32_t slot : world.layout.blocks) {
+                    if (next[slot] == exponent)
+                        span.slots.push_back(slot);
+                }
+
+                if (!span.slots.empty())
+                    solved.push_back(SolveSpan(setup, world, span, next));
+            }
+
+            return solved;
         }
 
         void ProcessEvent(const TimeTreeSetup& setup, TimeTreeWorld& world) {
@@ -611,23 +720,20 @@ namespace bicameral::sim {
                     steps.desired[slot] = 0;
             }
 
-            const std::vector<int32_t> next = ChooseExponents(setup, world, tick);
+            // --- e を選んで解く。2 通り目は予算を超えた枠を縮めて選び直す(望みの e は減るだけなので終わる)---
+            const bool retake = setup.select == TimeTreeSelect::Retake && setup.rule != TimeStepRule::Fixed;
+            std::vector<SolvedSpan> solved;
+            do {
+                const std::vector<int32_t> next = ChooseExponents(setup, world, tick);
+                solved = SolveSpans(setup, world, next);
+            } while (retake && MarkRetakes(setup, world, solved));
 
-            // --- 列: 始める枠を e ごとに(長い e から。値は真実だけを読むので順は結果に効かない。面の持ち主は短い側)---
-            for (int32_t exponent = setup.maxExponent; exponent >= 0; --exponent) {
-                Span span{.exponent = exponent, .start = tick};
-                for (const uint32_t slot : world.layout.blocks) {
-                    if (next[slot] == exponent)
-                        span.slots.push_back(slot);
-                }
-
-                if (span.slots.empty())
-                    continue;
-
-                for (const uint32_t slot : span.slots)
+            // --- 書く(長い e から。値は真実だけを読んだので順は結果に効かない)---
+            for (const SolvedSpan& span : solved) {
+                for (const uint32_t slot : span.span.slots)
                     steps.touched[slot] = 0;
 
-                StartSpan(setup, world, span, next);
+                CommitSpan(setup, world, span);
             }
 
             for (const uint32_t slot : world.layout.blocks) {
