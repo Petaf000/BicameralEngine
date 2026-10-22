@@ -19,6 +19,7 @@
 #include "sim/gas_pressure_system.h"
 #include "sim/gas_reference.h"
 #include "sim/implicit_conduction.h"
+#include "sim/world_physics.h"
 
 namespace bicameral::sim {
 
@@ -57,6 +58,9 @@ namespace bicameral::sim {
         bool equilibrium = true;
         // 部品の閉じた領域の長さ(mm。0 = 閉じない。20 §9.3 の陰の圧力 = 音の速さ × 刻みの倍数。equilibrium の時だけ)
         uint64_t closeLengthMm = 0;
+        // 前の x(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。equilibrium の時だけ。節 = 箱のセル〔レベル 0・箱の座標〕)。
+        // 置くと保存点とハッシュに入る(D-608 (A))。既定は置かない(GasProjection の控えだけ)
+        EquilibriumWarmStart warmStart;
 
         // --- 外側の反復(T-0530。上限に届いたら、その時の仮の状態を採り、残りの食い違いは次の刻みへ持ち越す〔回数は決まった上限まで。D-468〕)---
         // 上限(1 = 解き直さない〔T-0503 の線形の 1 回〕)。既定の 4・100 mg・傾きで割るは仮(ユーザー未確認。ADR-0234)
@@ -100,6 +104,13 @@ namespace bicameral::sim {
     };
 
     GasProjectionCost StepGasProjection(GasBox& box, GasProjection& state, const GasProjectionOptions& options);
+
+    // 世界のデータの V の回数(環境の balance_cycles.gas_pressure。T-0955)を決まった回数の道(fixedCycles)の solver.cycles へ。
+    // 許容差で止める道(solver.cycles は上限)は変えない。GPU(GpuGasProjectionOptions::solver)は CPU の options.solver を写すので同じ値
+    inline void ApplyBalanceCycles(const WorldPhysics& world, GasProjectionOptions& options) {
+        if (options.fixedCycles)
+            options.solver.cycles = world.balanceCycles.gasPressure;
+    }
 
     // 圧力の式を釣り合う家族の部品の系にする(T-0853。節 = セル・面 = 箱の中の面・開いた境界 = 外の x = 0 を固定した面・
     // 右辺の項 = E_i と −Σ F*〔値 × 係数 ÷ D〕)。options.equilibrium の道と試験・GPU の比べ(T-0915)が使う

@@ -66,6 +66,7 @@ add_library(bicameral_multires STATIC
   src/sim/implicit_conduction.cpp
   src/sim/equilibrium.cpp  # 釣り合う家族の共通部品(多重格子の段・決まった回数・面の形・閉じた領域。T-0853)
   src/sim/equilibrium_block.cpp  # 成分を持つ節の釣り合い(k × k の面・剛体の動きの延ばし方。T-0919)
+  src/sim/equilibrium_fields.cpp  # 部品の温めた始まりを C-1 の欄(温めた始まりの印)に置く口(T-0922)
   src/sim/support_law.cpp  # 支えの法則の試作(研究 R-B1。C-0 の使い手。T-0871)
   src/sim/lab_box.cpp
   src/sim/lab_gauge.cpp

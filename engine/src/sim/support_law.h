@@ -75,6 +75,10 @@ namespace bicameral::sim {
         // --- 解き方(T-0919)---
         SupportSolve solve = SupportSolve::Coupled;
         EquilibriumBlockOptions blocks;  // Coupled の V の回数など(法則の定数)
+
+        // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
+        // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)
+        EquilibriumWarmStart warmStart;
     };
 
     // 帳簿(上向きの力。mN)
@@ -95,11 +99,18 @@ namespace bicameral::sim {
         int64_t highSideMn = 0;  // +横の側の縁の力(x の面 = 上の縁・上の面 = +x の縁)
     };
 
+    // 世界のデータの V の回数(環境の balance_cycles.support。T-0955)を 1 つの系(blocks)と成分ごとの解き(equilibrium)の両方へ
+    inline void ApplySupportCycles(uint32_t cycles, SupportOptions& options) {
+        options.blocks.cycles = cycles;
+        options.equilibrium.solver.cycles = cycles;
+    }
+
     class SupportLaw {
     public:
         SupportLaw(const SupportScene& scene, const SupportOptions& options);
 
-        // 掘った後など: before と同じ座標のセルの値を温めた始まりにする(無いセルは 0)
+        // 掘った後など: before と同じ座標のセルの値を温めた始まりにする(無いセルは 0)。温めた始まりを欄に置く時(warmStart)は
+        // 欄が答えの元なので使わない(掘った所の欄は木の操作が持つ。T-0922)
         void CarryFrom(const SupportLaw& before);
 
         // 1 刻み(成分ごとに 1 回ずつ解く)
