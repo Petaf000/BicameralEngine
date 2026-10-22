@@ -49,6 +49,24 @@ namespace bicameral::sim {
             }
         };
 
+        struct CpuCatcher {
+            const SunCatcher* catcher = nullptr;
+
+            [[nodiscard]] mr::SunCatch Catch(uint32_t rayB, uint32_t rayC) const { return (*catcher)(rayB, rayC); }
+        };
+
+        // 光線 1 本の帳簿を語に足す(帯ごと)
+        void AddLedger(std::vector<uint64_t>& words, const mr::SunRay& walked) {
+            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_ENTERED)] += walked.enteredShort;
+            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_ABSORBED)] += walked.absorbedShort;
+            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_REFLECTED)] += walked.reflectedShort;
+            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_ESCAPED)] += walked.escapedShort;
+            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_ENTERED)] += walked.enteredLong;
+            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_ABSORBED)] += walked.absorbedLong;
+            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_REFLECTED)] += walked.reflectedLong;
+            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_ESCAPED)] += walked.escapedLong;
+        }
+
         int64_t Absolute(int64_t value) {
             return value < 0 ? -value : value;
         }
@@ -196,17 +214,31 @@ namespace bicameral::sim {
             const uint64_t ray = reverse ? rayCount - 1 - step : step;
             const auto rayB = static_cast<uint32_t>(ray % params.rayCountB);
             const auto rayC = static_cast<uint32_t>(ray / params.rayCountB);
-            const mr::SunRay walked = mr::SunWalkRay(tree, cells, lights, sink, params, rayB, rayC);
+            AddLedger(words, mr::SunWalkRay(tree, cells, lights, sink, params, rayB, rayC));
+        }
 
-            // --- 帳簿(帯ごと)---
-            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_ENTERED)] += walked.enteredShort;
-            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_ABSORBED)] += walked.absorbedShort;
-            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_REFLECTED)] += walked.reflectedShort;
-            words[mr::SunLedgerWord(rx::LT_BAND_SHORT, mr::SUN_LEDGER_ESCAPED)] += walked.escapedShort;
-            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_ENTERED)] += walked.enteredLong;
-            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_ABSORBED)] += walked.absorbedLong;
-            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_REFLECTED)] += walked.reflectedLong;
-            words[mr::SunLedgerWord(rx::LT_BAND_LONG, mr::SUN_LEDGER_ESCAPED)] += walked.escapedLong;
+        return words;
+    }
+
+    std::vector<uint64_t> SweepSunColumnCaught(const MultiresNest& nest, const BakedReactionTable& table,
+                                               const mr::SunParams& params, const SunCatcher& catcher,
+                                               std::vector<SunCaughtRay>& caught) {
+        std::vector<uint64_t> words(SunColumnWordCount(nest), 0);
+        const CpuTree tree{.nest = &nest};
+        const CpuCells cells{.nest = &nest};
+        const CpuLights lights{.lights = &table.speciesLight};
+        const CpuSink sink{.words = &words};
+        const CpuCatcher catching{.catcher = &catcher};
+
+        const uint64_t rayCount = uint64_t{params.rayCountB} * params.rayCountC;
+        for (uint64_t ray = 0; ray < rayCount; ++ray) {
+            const auto rayB = static_cast<uint32_t>(ray % params.rayCountB);
+            const auto rayC = static_cast<uint32_t>(ray / params.rayCountB);
+            const mr::SunRay walked = mr::SunWalkRayCaught(tree, cells, lights, sink, catching, params, rayB, rayC);
+            AddLedger(words, walked);
+            if (walked.caughtShort != 0 || walked.caughtLong != 0)
+                caught.push_back(
+                    {.rayB = rayB, .rayC = rayC, .caughtShort = walked.caughtShort, .caughtLong = walked.caughtLong});
         }
 
         return words;

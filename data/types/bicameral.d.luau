@@ -38,6 +38,7 @@ export type Species = {
     light_absorption_long_mm2_per_mol: number?, -- 1 mol が長い帯(赤外)を遮る面積(mm²/mol)
     light_reflectance_short_permille: number?, -- 当たった短い帯のうち吸わずに返す割合(千分率 0〜1000。光の値を 1 つも書かない固体・液体は 500)
     light_reflectance_long_permille: number?, -- 同じく長い帯
+    light_refraction_permille: number?, -- 屈折の値(屈折率 × 1000。1000〜4000。省ける = 1000 = 曲げない)。描画と日の光を集める法則が同じ値を使う
     phase: string?, -- 相("gas"・"solid"・"liquid" の 1 本。省ける = 気体)。どの流れがこの物質を運ぶかを決める(T-0609・T-0710)
     density_kg_per_m3: number?, -- 密度。液体には要る(無ければ誤り)。固体も書く(セルの場所を取る。書かないとベイクが警告する。ADR-0268・T-0616)
     -- 動き方の任意の値(T-0710・土台の決定 3。名前と単位は仮)。書かなければ今と同じ動き。相に合わない欄はベイクが誤りにする

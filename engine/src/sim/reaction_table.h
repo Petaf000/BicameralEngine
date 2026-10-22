@@ -107,6 +107,9 @@ namespace bicameral::sim {
         std::optional<uint32_t> lightAbsorptionLong;            // 1 mol が長い帯(赤外)を遮る面積(mm²/mol)
         std::optional<uint32_t> lightReflectanceShortPermille;  // 当たった短い帯を吸わずに返す割合(千分率)
         std::optional<uint32_t> lightReflectanceLongPermille;
+        // 屈折の値(屈折率 × 1000。任意。書かなければ 1000 = 曲げない)。描画と、日の光を集める法則(sim/sun_lens)が同じ値を使う
+        // (23 §2.2・§5・S12 の一つの道。T-0878・ADR-0425)
+        std::optional<uint32_t> lightRefractionPermille;
         // 密度(kg/m³。パッケージの density_kg_per_m3)。任意(既定 0 = 書かない)。液体には要る(セルに入る量 = セルの体積 ÷ モル体積)。
         // 固体の密度はセルの体積を分け合う所(sim/cell_volume。ADR-0268)が読む。固体に書かないとベイクが警告する(T-0616)
         uint32_t density = 0;
@@ -228,6 +231,8 @@ namespace bicameral::sim {
 
         // --- CPU だけ: 光の値(2 つの帯。太陽の影の柱が GPU へ自分で写す。T-0910・ADR-0395)---
         std::vector<reaction::LtSpeciesLight> speciesLight;  // 添字 = 物質 ID(ID 0 は全部 0)
+        // 屈折の値(Q16。1.0 = 65536。書かなければ 65536)。日の光を集める(sim/sun_lens。T-0878)が読む。添字 = 物質 ID
+        std::vector<uint32_t> speciesRefractionQ16;
 
         // --- CPU だけ(GPU は T-0612 の後): 液体(sim/probe_liquid。T-0609・ADR-0266)---
         std::vector<uint8_t> speciesLiquid;  // 1 = 液体(流れる。凝縮相でもある)。添字 = 物質 ID
