@@ -90,6 +90,7 @@ target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
 add_library(bicameral_gas STATIC
   src/sim/gas_reference.cpp
   src/sim/gas_tree.cpp
+  src/sim/gas_base_layers.cpp  # 基準の層を粗さをまたいで整数の和が合う形で(T-0953・ADR-0431)
 )
 target_include_directories(bicameral_gas PUBLIC src)
 target_link_libraries(bicameral_gas PUBLIC bicameral_fixed)
