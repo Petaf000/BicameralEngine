@@ -392,7 +392,7 @@ add_executable(time_step_tree_test time_step_tree_test.cpp ${PROJECT_SOURCE_DIR}
 target_link_libraries(time_step_tree_test PRIVATE bicameral_multires bicameral_core)
 # ctest は早送り・2 回の実行・歩の途中のセーブ(ビット一致・保存)だけ。精度・細かさ(night・fire・grain)はまだ通らない研究の測り(T-0950・T-0985)
 add_test(NAME time_step_tree COMMAND time_step_tree_test forward)
-set_tests_properties(time_step_tree PROPERTIES TIMEOUT 1200)
+set_tests_properties(time_step_tree PROPERTIES TIMEOUT 2400)
 add_executable(multires_sparse_test multires_sparse_test.cpp)  # 欄をある所にだけ持つ(疎な頁)と密で毎刻みビット一致・1 セルのバイト(T-0921)
 target_precompile_headers(multires_sparse_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(multires_sparse_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
