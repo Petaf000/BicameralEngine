@@ -10,8 +10,15 @@
 - **R-R2 日の光をレンズで集める(t-0878-rr2-lens・ADR-0425・ADR-0426 Proposed)を main へ**: CPU で合格(2 本目)。残り T-0990 GPU・**T-0991 溜めた熱の置き場と燃え続け(土台。司令塔・ユーザーへ)**・T-0992。
 - **T-0976 気体も面の開き具合を読む(t-0976-face-open-families・ADR-0429 Proposed)を main へ**。判断待ちに **Q150【エンジン】**(面の開き具合の欄を形と物の 2 値に分けるか。T-0977 の前に)。
 - **T-0953・T-0954(t-0953-base-layer・ADR-0431)を main へ**: 基準の層を粗さをまたいで整数の和が合う形に(10 km の柱で速さ 0・揺れ 0・境の段差 0)・細かい所の半径と移り目を世界のデータ `fine_region` で(木はまだ読まない → T-1008)。
-- **作業中**: wt2 T-1008・wt3 R3 T-0996(t-0996-r3-granular)・wt4 T-0950(t-0950-rt2-tree)・wt5 T-0991(t-0991-object-heat)・wt6 T-0959(t-0959-rc-gpu)。R-R1 は Q147 の答え待ち(t-0958-rr1-cpu・t-0972-rr1-fix はマージしない)。R3 は 2 本で打ち切り → T-0997(D-620)・t-0996-r3-granular はマージしない・wt3 T-0998(t-0998-hourglass)。
+- **T-1008 の CPU 分(t-0953-base-layer ee7f509・ADR-0436)を main へ**: 木の細かくする/粗くする要求が種からの距離で細かい所の規則を読む(呼ぶ側が選ぶ。今の木は変わらない)。残り T-1028 GPU とゲームの道で呼ぶ・20 km の実際の葉の数。
+- **作業中**: wt2 R-B2 T-0872(t-0872-rb2-fracture)・wt3 R3 T-0996(t-0996-r3-granular)・wt4 T-0950(t-0950-rt2-tree)・wt5 T-0991(t-0991-object-heat)・wt6 T-0959(t-0959-rc-gpu)。R-R1 は Q147 の答え待ち(t-0958-rr1-cpu・t-0972-rr1-fix はマージしない)。R3 は 2 本で打ち切り → T-0997(D-620)・t-0996-r3-granular はマージしない・wt3 T-0998(t-0998-hourglass)。
 - **次**: Q150 の答え → T-0977・T-0975・T-0990・T-0992・T-0997(R3 の 3 本目)・T-0966(T-0931 の GPU)・T-0969・T-0971・T-0951・T-0952・T-0939(C-0 GPU の閉じた領域)・R1 の残り T-0947/T-0948・R-B1 の残り T-0960・T-0981/T-0982(支えの GPU の残り)・T-0978(R2 の水面の層)・T-0920・T-0994・T-0993・T-0936/T-0938 → 最低機 Q11 → T-0858 棚卸し。
+
+## この仕事でしたこと(2026-10-22・本体の作業役・t-0953-base-layer の T-1008 分のマージ)
+- **マージ**(`--no-ff`・衝突なし): t-0953-base-layer(ee7f509。T-1008 の CPU 分: 木の細かくする/粗くする要求が種からの距離で `GradedCoarseness` を読む・呼ぶ側が選んで呼ぶ形で、呼ばない今の木は変わらない・試験 multires_graded・ADR-0436)。release のビルドが通った(警告 0)。
+  確かめ(release・1 本ずつ): multires_graded(114 秒)・multires・multires_activity・multires_grading・environment_package。全部合格。archmap --check OK。
+- 記録: ROADMAP の T-1008 を「CPU 済み。残り T-1028 GPU とゲームの道で呼ぶ・20 km の実際の葉の数」・T-0872(R-B2)を作業中(wt2 t-0872-rb2-fracture)。worker-common.md に「job.py を 20 秒前後で切ると投入されないことがある」。
+  COMMANDER: wt2 に T-1040〜T-1042・ADR-0440(T-1009・T-1029・T-1030 は使っていない)。**番号の重なり: ADR-0436(main の graded-tree-requests と wt3 の grain-moving-friction)・T-1019(描画 M7 と wt3 の impact-turn)。wt3 のマージの時に付け直す**。次の番号は **D-633・ADR-0441・T-1043・Q154**。
 
 ## この仕事でしたこと(2026-10-22・本体の作業役・t-0953-base-layer のマージ・R-T2/R3 の記録)
 - **マージ**(`--no-ff`・衝突なし): t-0953-base-layer(e1a4119。T-0953 基準の層を粗さをまたいで整数の和が合う形に〔10 km の柱で速さ 0・揺れ 0・境の段差 0〕・T-0954 細かい所の半径と移り目を世界のデータで〔fine_region。木はまだ読まない → T-1008〕・ADR-0431)。release のビルドが通った(警告 0)。
