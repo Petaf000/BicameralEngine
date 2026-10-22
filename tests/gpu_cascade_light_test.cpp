@@ -30,7 +30,7 @@ namespace rx = bicameral::reaction;
 namespace {
 
     constexpr uint32_t MEASURE_WARMUP = 30;
-    constexpr uint32_t MEASURE_TICKS = 10;
+    constexpr uint32_t MEASURE_TICKS = 30;  // 組の数 15 の 2 巡
     constexpr uint32_t FIRE_MK = 1200000;
     constexpr uint32_t ROOM_MK = 293000;
     constexpr uint32_t QUIET_MK = 500000;  // 室温の物は放たない(cascade_light_test と同じ)
@@ -106,13 +106,16 @@ namespace {
         uint32_t ticks = 3;
     };
 
-    sim::CascadeParams Params(uint32_t baseTexels, uint32_t levels, uint32_t raysPerBag) {
+    sim::CascadeParams Params(uint32_t baseTexels, uint32_t levels, uint32_t raysPerBag, uint32_t emitSlots = 1,
+                              bool thermalInSlots = false) {
         return {.baseTexels = baseTexels,
                 .levels = levels,
                 .intervalBlocks = 1,
                 .seed = 7,
                 .quietBelowMk = QUIET_MK,
-                .raysPerBag = raysPerBag};
+                .raysPerBag = raysPerBag,
+                .emitSlots = emitSlots,
+                .thermalInSlots = thermalInSlots};
     }
 
     std::vector<Case> MakeCases() {
@@ -150,6 +153,9 @@ namespace {
                                   }),
                          Params(2, 3, 1), 2});
         cases.push_back({"袋 4 本・n0 = 2", FireGround(32, 4, 4, Material::Stone), Params(2, 5, 4), 2});
+        cases.push_back({"放つ面の組 5・熱も待つ", FireGround(32, 4, 6, Material::Stone), Params(4, 5, 1, 5, true), 7});
+        cases.push_back(
+            {"放つ面の組 3・照り返しだけ", FireGround(32, 4, 4, Material::Stone), Params(4, 5, 1, 3, false), 4});
         Case shifted{"世界の隅が負の座標", FireGround(24, 4, 3, Material::Stone), Params(4, 4, 1), 2};
         shifted.grid.low = {-5, 3, -9};
         cases.push_back(std::move(shifted));
@@ -280,11 +286,14 @@ namespace {
         const char* name;
         uint32_t baseTexels;
         uint32_t raysPerBag;
+        uint32_t emitSlots;
+        bool thermalInSlots;
     };
 
     std::expected<void, std::string> MeasureOne(const GpuContext& context, const char* scene,
                                                 const sim::CascadeGrid& grid, const Form& form) {
-        const sim::CascadeParams params = Params(form.baseTexels, 5, form.raysPerBag);
+        const sim::CascadeParams params = Params(form.baseTexels, 5, form.raysPerBag, form.emitSlots,
+                                                 form.thermalInSlots);
         auto light = Prepare(context, grid, params, {.faces = 1u << 14, .bags = 1u << 21, .carry = 1u << 18});
         if (!light)
             return std::unexpected(light.error());
@@ -301,54 +310,86 @@ namespace {
         if (!context.queue->ExecuteAndWait())
             return std::unexpected("暖機で回せない");
 
-        // --- 測る(タイムスタンプは最初と最後)---
-        ID3D12GraphicsCommandList10* list = context.queue->Begin();
-        if (list == nullptr)
+        uint64_t frequency = 0;
+        if (FAILED(context.queue->Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
+            return std::unexpected("タイムスタンプの周波数を読めない");
+
+        // --- 平均: 30 刻みを 1 本のリストで(GPU が休まない。組の 2 巡)---
+        ID3D12GraphicsCommandList10* batch = context.queue->Begin();
+        if (batch == nullptr)
             return std::unexpected("リストを始められない");
 
-        context.nest->RecordTimestamp(list, 0);
+        context.nest->RecordTimestamp(batch, 0);
         for (uint32_t tick = 0; tick < MEASURE_TICKS; ++tick)
-            light->RecordTick(list, *context.nest, ring, MEASURE_WARMUP + tick);
+            light->RecordTick(batch, *context.nest, ring, MEASURE_WARMUP + tick);
 
-        context.nest->RecordTimestamp(list, 1);
-        context.nest->RecordReadback(list);
-        light->RecordReadback(list);
+        context.nest->RecordTimestamp(batch, 1);
+        context.nest->RecordReadback(batch);
         if (!context.queue->ExecuteAndWait())
             return std::unexpected("GPU での実行に失敗");
 
-        uint64_t frequency = 0;
-        const std::vector<uint64_t> stamps = context.nest->ReadTimestamps(2);
-        if (FAILED(context.queue->Native()->GetTimestampFrequency(&frequency)) || stamps.size() != 2 || frequency == 0)
+        const std::vector<uint64_t> batchStamps = context.nest->ReadTimestamps(2);
+        if (batchStamps.size() != 2)
             return std::unexpected("タイムスタンプを読めない");
 
-        const auto read = light->Read();
-        if (!read)
-            return std::unexpected(read.error());
+        const double averageMs = static_cast<double>(batchStamps[1] - batchStamps[0]) * 1000.0 /
+                                 (static_cast<double>(frequency) * MEASURE_TICKS);
 
-        if (read->overflow != 0)
-            return std::unexpected(std::format("置き場が溢れた({})", read->overflow));
+        // --- 最大と光線: 1 刻みずつ(リストの間で GPU が休むので、軽い刻みは重めに出る)---
+        double sumMs = 0;
+        double maxMs = 0;
+        uint64_t sumRays = 0;
+        uint32_t activeFaces = 0;
+        uint32_t bagPeak = 0;
+        size_t carryEntries = 0;
+        for (uint32_t tick = 0; tick < MEASURE_TICKS; ++tick) {
+            ID3D12GraphicsCommandList10* list = context.queue->Begin();
+            if (list == nullptr)
+                return std::unexpected("リストを始められない");
 
-        const double ms = static_cast<double>(stamps[1] - stamps[0]) * 1000.0 /
-                          (static_cast<double>(frequency) * MEASURE_TICKS);
-        const std::array<uint64_t, 8>& levels = read->result.raysPerLevel;
+            context.nest->RecordTimestamp(list, 0);
+            light->RecordTick(list, *context.nest, ring, MEASURE_WARMUP + MEASURE_TICKS + tick);
+            context.nest->RecordTimestamp(list, 1);
+            context.nest->RecordReadback(list);
+            light->RecordReadback(list);
+            if (!context.queue->ExecuteAndWait())
+                return std::unexpected("GPU での実行に失敗");
+
+            const std::vector<uint64_t> stamps = context.nest->ReadTimestamps(2);
+            const auto read = light->Read();
+            if (stamps.size() != 2 || !read)
+                return std::unexpected("タイムスタンプか結果を読めない");
+
+            if (read->overflow != 0)
+                return std::unexpected(std::format("置き場が溢れた({})", read->overflow));
+
+            const double ms = static_cast<double>(stamps[1] - stamps[0]) * 1000.0 / static_cast<double>(frequency);
+            sumMs += ms;
+            maxMs = std::max(maxMs, ms);
+            sumRays += read->result.rays;
+            activeFaces = std::max(activeFaces, read->activeFaces);
+            bagPeak = read->bagPeak;
+            carryEntries = std::max(carryEntries, read->result.carry.entries.size());
+        }
+
         Log(Channel::Gpu, Level::Info,
-            "費用 [{}] {}: {:.3f} ms/刻み・光線 {} 本/刻み(段ごと {}・{}・{}・{}・{})・通ったセル {}・放つ面 "
-            "{}・袋の最大 {}・"
-            "持ち越し {} 個・VRAM {:.1f} MB(袋の表 2 × 2^21 を含む)",
-            form.name, scene, ms, read->result.rays, levels[0], levels[1], levels[2], levels[3], levels[4],
-            read->result.steps, read->activeFaces, read->bagPeak, read->result.carry.entries.size(),
-            static_cast<double>(light->VramBytes()) / (1024.0 * 1024.0));
+            "費用 [{}] {}: 平均 {:.3f} ms/刻み(続けて)・1 刻みずつ 平均 {:.3f}・最大 {:.3f} ms・光線 平均 {} 本/刻み・"
+            "放つ面の最大 {}・袋の最大 {}・持ち越しの最大 {} 個・VRAM {:.1f} MB",
+            form.name, scene, averageMs, sumMs / MEASURE_TICKS, maxMs, sumRays / MEASURE_TICKS, activeFaces, bagPeak,
+            carryEntries, static_cast<double>(light->VramBytes()) / (1024.0 * 1024.0));
 
         return {};
     }
 
     std::expected<void, std::string> Measure(const GpuContext& context) {
-        constexpr std::array<Form, 2> FORMS = {Form{"今の形 n0 = 4・袋 1 本", 4, 1},
-                                               Form{"光線 約 8 倍 n0 = 4・袋 8 本", 4, 8}};
+        // T-0959 の (b) 光線 約 8 倍(袋 8 本)は T-0959 の記録で測ったので外した。T-1010: 放つ面の組
+        constexpr std::array<Form, 4> FORMS = {Form{"今の形", 4, 1, 1, false},
+                                               Form{"照り返しだけ 7 組", 4, 1, 7, false},
+                                               Form{"熱も 7 組", 4, 1, 7, true}, Form{"熱も 15 組", 4, 1, 15, true}};
         for (const Form& form : FORMS) {
             for (const int64_t side : {48, 64}) {
                 for (const Material ground : {Material::Stone, Material::Black}) {
-                    for (const int64_t hot : {0, 1, 16, 48}) {  // 0 = 熱いものが無い(1 刻みの決まった費用)
+                    for (const int64_t hot : {1, 16, 48}) {
                         const std::string scene = std::format("{}³・{}・熱いセル {}", side,
                                                               ground == Material::Stone ? "照り返す地面" : "黒い地面",
                                                               hot * hot);

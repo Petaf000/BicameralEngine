@@ -34,6 +34,10 @@ namespace bicameral::sim {
         uint32_t quietBelowMk = 0;
         // 段 k ≥ 1 の袋 1 つから出す光線の数(1 = 今の形。量を等分し、升目の中のずらしの巡りの続きを使う。T-0959 の費用の比べ)
         uint32_t raysPerBag = 1;
+        // 放つ面を最上段のブロックごとに何組に分けて刻みで回すか(1 = 毎刻み全部。奇数。T-1010・ADR-0444)。
+        // 自分の組でない刻みの光は持ち越しの表で待つ。thermalInSlots なら熱で放つ光も待つ(でなければ照り返しだけ)
+        uint32_t emitSlots = 1;
+        bool thermalInSlots = false;
     };
 
     // 段 0(レベル 0 のセル)の密な写し。添字 = IndexOf
@@ -72,13 +76,16 @@ namespace bicameral::sim {
         bool operator==(const CascadeCarry&) const = default;
     };
 
-    // 帯 1 つの帳簿(2^−16 mJ)。emitted + carriedIn = absorbed + reflected + escaped(ビット単位)
+    // 帯 1 つの帳簿(2^−16 mJ)。emitted + carriedIn = absorbed + reflected + escaped + held(ビット単位)。
+    // 次の刻みへの持ち越しの和 = reflected + held + kept
     struct CascadeBandLedger {
         uint64_t emitted = 0;    // 熱で放った(セルから引く量)
         uint64_t carriedIn = 0;  // 前の刻みに返された光を放った
         uint64_t absorbed = 0;   // 吸った(セルへ足す量)
         uint64_t reflected = 0;  // 返した(次の刻みへ持ち越す)
         uint64_t escaped = 0;    // 世界の外へ
+        uint64_t held = 0;       // 熱で放ったが、組の刻みまで持ち越しの表で待たせた(T-1010。emitted の内)
+        uint64_t kept = 0;       // 持ち越しの表で、組の刻みでないので次の刻みへそのまま送った(carriedIn の外)
 
         bool operator==(const CascadeBandLedger&) const = default;
     };

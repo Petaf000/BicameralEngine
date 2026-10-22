@@ -255,6 +255,11 @@ namespace bicameral::sim {
             return grid.lights[grid.IndexOf(across[0], across[1], across[2])];
         }
 
+        void HoldInCarry(TickWork& work, uint64_t cell, uint32_t face, uint32_t band, uint64_t amount) {
+            if (amount != 0)
+                work.carry[CarryKey(cell, face, band)] += amount;
+        }
+
         // 熱で放つ面(セルから引く量)と、前の刻みに返された光を、(セル・面) ごとに 1 つの放つ面にまとめる
         SourceMap CollectSources(TickWork& work, const CascadeCarry& carry) {
             const CascadeGrid& grid = *work.grid;
@@ -266,6 +271,8 @@ namespace bicameral::sim {
                     continue;
 
                 const Cell3 cell = CellOf(grid, index);
+                const bool active = !work.params->thermalInSlots ||
+                                    rx::RcEmitSlotActive(work.constants, cell[0], cell[1], cell[2]);
                 for (uint32_t face = 0; face < rx::RC_FACES; ++face) {
                     const rx::RcBands bands = rx::RcFaceEmission(temperature, grid.lights[index],
                                                                  LightAcross(grid, cell, face));
@@ -276,6 +283,15 @@ namespace bicameral::sim {
                     result.emitted[(index * rx::LT_BANDS) + rx::LT_BAND_LONG] += bands.longBand;
                     result.ledger[rx::LT_BAND_SHORT].emitted += bands.shortBand;
                     result.ledger[rx::LT_BAND_LONG].emitted += bands.longBand;
+                    if (!active) {
+                        // 組の刻みまで持ち越しの表で待つ(T-1010)
+                        HoldInCarry(work, index, face, rx::LT_BAND_SHORT, bands.shortBand);
+                        HoldInCarry(work, index, face, rx::LT_BAND_LONG, bands.longBand);
+                        result.ledger[rx::LT_BAND_SHORT].held += bands.shortBand;
+                        result.ledger[rx::LT_BAND_LONG].held += bands.longBand;
+                        continue;
+                    }
+
                     FaceSource& source = sources[(uint64_t{index} * rx::RC_FACES) + face];
                     source.energyShort += bands.shortBand;
                     source.energyLong += bands.longBand;
@@ -283,6 +299,13 @@ namespace bicameral::sim {
             }
 
             for (const CascadeCarryEntry& entry : carry.entries) {
+                const Cell3 cell = CellOf(grid, entry.cell);
+                if (!rx::RcEmitSlotActive(work.constants, cell[0], cell[1], cell[2])) {
+                    HoldInCarry(work, entry.cell, entry.face, entry.band, entry.amount);
+                    result.ledger[entry.band].kept += entry.amount;
+                    continue;
+                }
+
                 result.ledger[entry.band].carriedIn += entry.amount;
                 FaceSource& source = sources[(uint64_t{entry.cell} * rx::RC_FACES) + entry.face];
                 (entry.band == rx::LT_BAND_SHORT ? source.energyShort : source.energyLong) += entry.amount;
@@ -412,6 +435,9 @@ namespace bicameral::sim {
         if (params.raysPerBag == 0 || params.raysPerBag > RAYS_PER_BAG_LIMIT)
             return std::unexpected("袋 1 つの光線は 1〜64 本");
 
+        if (params.emitSlots == 0 || params.emitSlots > rx::RC_SLOTS_LIMIT || params.emitSlots % 2 == 0)
+            return std::unexpected("放つ面の組の数は 1〜63 の奇数(升目の中のずらしの巡りと互いに素)");
+
         return {};
     }
 
@@ -435,7 +461,9 @@ namespace bicameral::sim {
                                             .baseTexels = params.baseTexels,
                                             .levels = params.levels,
                                             .intervalBlocks = params.intervalBlocks,
-                                            .raysPerBag = params.raysPerBag};
+                                            .raysPerBag = params.raysPerBag,
+                                            .emitSlots = params.emitSlots,
+                                            .thermalInSlots = params.thermalInSlots ? 1u : 0u};
         TickWork work{
             .grid = &grid, .params = &params, .constants = constants, .result = &result, .carry = {}, .bags = {}};
         work.bags.resize(params.levels);

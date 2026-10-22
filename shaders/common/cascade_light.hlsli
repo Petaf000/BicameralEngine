@@ -490,7 +490,27 @@ struct RcStepConstants {
     uint32_t levels;
     uint32_t intervalBlocks;
     uint32_t raysPerBag;  // 段 k ≥ 1 の袋 1 つから出す光線の数(1 = 今の形。量を等分し、ずらしの巡りの続きを使う)
+    uint32_t emitSlots;   // 放つ面を最上段のブロックごとに何組に分けて刻みで回すか(1 = 毎刻み全部。T-1010・ADR-0444)
+    uint32_t thermalInSlots;  // 1 なら熱で放つ光も組の刻みまで持ち越しの表で待つ(0 なら照り返しだけが待つ)
 };
+
+FX_CONST uint32_t RC_SLOTS_LIMIT = 64;
+
+// 放つ面の組(T-1010・ADR-0444): 最上段のブロック(2^(段 − 1) セル)ごとに組を決め、刻み % 組の数 が自分の組の刻みにだけ、
+// 持ち越しの表にたまった光(照り返し・待った熱の光)を放つ。待つ間の光は表にあり、放つ時にまとめて出る(保存はそのまま)。
+// 組をブロックで揃えるのは、同じ刻みに放つ面が同じ最上段のブロックに集まり、段の袋の数(費用の芯)が組の数で割れるから。
+// 組の数は奇数にする(升目の中のずらしの巡り 159 × 組の数 が 256 と互いに素で、組の刻みだけでも 16 × 16 を一巡する)。
+FX_FN bool RcEmitSlotActive(FX_IN(RcStepConstants) constants, int64_t cellX, int64_t cellY, int64_t cellZ) {
+    if (constants.emitSlots <= 1)
+        return true;
+
+    const uint32_t shift = constants.levels - 1;
+    const int64_t slots = (int64_t)constants.emitSlots;
+    const int64_t spread = (cellX >> shift) + (3 * (cellZ >> shift)) + (5 * (cellY >> shift));
+    const int64_t slot = ((spread % slots) + slots) % slots;
+
+    return (uint64_t)slot == constants.tick % (uint64_t)constants.emitSlots;
+}
 
 // 乱数の用途(R6)
 FX_CONST uint32_t RC_PURPOSE_JITTER = 0x52430001u;
@@ -1035,6 +1055,10 @@ struct RcGpuParams {
     uint32_t stateBagList0;
     uint32_t stateBagList1;
     uint32_t stateWords;  // 状態のバッファの語の数
+    uint32_t emitSlots;   // RcStepConstants と同じ
+    uint32_t thermalInSlots;
+    uint32_t stateFaceFlags;  // 放つ面の列に入れた印(セル × 6 の uint32。T-1010)
+    uint32_t padding;
 };
 
 // 頭の語(uint64 の番号)
@@ -1046,6 +1070,8 @@ FX_CONST uint32_t RC_GPU_BAG_COUNT = 20;    // 袋の表ごとの袋の数(2)
 FX_CONST uint32_t RC_GPU_CARRY_COUNT = 22;  // 持ち越しの表ごとの数(2)
 FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 袋・4 = 持ち越し)
 FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;     // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
+FX_CONST uint32_t RC_GPU_HELD = 26;         // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
+FX_CONST uint32_t RC_GPU_KEPT = 28;         // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)
 FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
 FX_CONST uint32_t RC_GPU_LEDGER_KINDS = 5;
 FX_CONST uint32_t RC_GPU_BAG_WORDS = 10;                                   // 鍵・量 2・軸の割合 6・溜め

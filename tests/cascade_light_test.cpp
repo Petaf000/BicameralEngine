@@ -163,8 +163,12 @@ namespace {
                     carried += entry.amount;
             }
 
-            ok = ok && ledger.emitted + ledger.carriedIn == ledger.absorbed + ledger.reflected + ledger.escaped &&
-                 cellEmitted == ledger.emitted && cellAbsorbed == ledger.absorbed && carried == ledger.reflected;
+            // 放つ面の組(T-1010)で待つ光は持ち越しの表にある: 持ち越しの和 = 返した + 待たせた熱 + そのまま送った
+            ok = ok &&
+                 ledger.emitted + ledger.carriedIn ==
+                     ledger.absorbed + ledger.reflected + ledger.escaped + ledger.held &&
+                 cellEmitted == ledger.emitted && cellAbsorbed == ledger.absorbed &&
+                 carried == ledger.reflected + ledger.held + ledger.kept;
         }
 
         return ok;
@@ -182,7 +186,28 @@ namespace {
             carry = result.carry;
         }
 
-        std::printf("保存: 3 刻み(持ち越しつき)で帯ごとにビット単位\n");
+        // 放つ面の組(T-1010): 待った光も表から消えずに次の刻みへ(前の表の和 = 放った持ち越し + そのまま送った)
+        CascadeParams slotted = Params();
+        slotted.emitSlots = 3;
+        slotted.thermalInSlots = true;
+        carry = {};
+        for (uint64_t tick = 0; tick < 7; ++tick) {
+            const CascadeTickResult result = StepCascadeLight(grid, carry, slotted, tick);
+            EXPECT(Conserves(result));
+            for (uint32_t band = 0; band < rx::LT_BANDS; ++band) {
+                uint64_t before = 0;
+                for (const CascadeCarryEntry& entry : carry.entries) {
+                    if (entry.band == band)
+                        before += entry.amount;
+                }
+
+                EXPECT(before == result.ledger[band].carriedIn + result.ledger[band].kept);
+            }
+
+            carry = result.carry;
+        }
+
+        std::printf("保存: 3 刻み(持ち越しつき)・放つ面の組 3 で 7 刻み、帯ごとにビット単位\n");
     }
 
     // --- 3. 決定的 ---
@@ -343,13 +368,17 @@ namespace {
             uint32_t levels;
             uint32_t raysPerBag;
             uint32_t ticks;
+            uint32_t emitSlots = 1;
         };
-        const std::array<Form, 4> forms = {Form{"今の形 n0 = 4・5 段", 4, 5, 1, 500},
+        const std::array<Form, 5> forms = {Form{"放つ面の組 7(熱も)", 4, 5, 1, 504, 7},
+                                           Form{"今の形 n0 = 4・5 段", 4, 5, 1, 500},
                                            Form{"袋 8 本 n0 = 4・5 段", 4, 5, 8, 30}, Form{"n0 = 8・5 段", 8, 5, 1, 30},
                                            Form{"段なし n0 = 128・1 段", 128, 1, 1, 4}};
         for (const Form& form : forms) {
             CascadeParams params = Params(form.baseTexels, form.levels);
             params.raysPerBag = form.raysPerBag;
+            params.emitSlots = form.emitSlots;
+            params.thermalInSlots = form.emitSlots > 1;
             const RingResult ring = MeasureRing(params, form.ticks);
             std::printf(
                 "筋: %s: 8 m の円 瞬間 |ずれ|の最大 %.1f %%・二乗平均 %.1f %%(%u 刻みの平均)/ 平均 60 刻み %.1f "
@@ -361,7 +390,7 @@ namespace {
                 ring.averageWorst[1] * 100, ring.averageWorst[2] * 100, form.ticks, ring.low * 100, ring.high * 100,
                 static_cast<unsigned long long>(ring.raysPerTick), ring.msPerTick);
             // 研究の記録(合格の線は Q147 の答え待ち): 平均が悪くなっていないかだけを見る
-            EXPECT(form.ticks < 500 || ring.averageWorst[2] < 0.15);
+            EXPECT(form.ticks < 500 || form.emitSlots > 1 || ring.averageWorst[2] < 0.15);
         }
     }
 
@@ -379,15 +408,19 @@ namespace {
         struct Run {
             uint32_t levels;
             uint32_t ticks;
+            uint32_t emitSlots = 1;
         };
-        for (const Run run : {Run{1, 20}, Run{2, 200}, Run{5, 60}}) {
+        for (const Run run : {Run{1, 20}, Run{2, 200}, Run{5, 60}, Run{5, 105, 7}}) {
             const uint32_t levels = run.levels;
             const uint32_t ticks = run.ticks;
             std::vector<double> net(grid.CellCount(), 0);
             std::vector<double> emitted(grid.CellCount(), 0);
             CascadeCarry carry;
             for (uint32_t tick = 0; tick < ticks; ++tick) {
-                const CascadeTickResult result = StepCascadeLight(grid, carry, Params(4, levels), tick);
+                CascadeParams params = Params(4, levels);
+                params.emitSlots = run.emitSlots;
+                params.thermalInSlots = run.emitSlots > 1;
+                const CascadeTickResult result = StepCascadeLight(grid, carry, params, tick);
                 for (size_t cell = 0; cell < grid.CellCount(); ++cell) {
                     emitted[cell] += static_cast<double>(Emitted(result, cell));
                     net[cell] += static_cast<double>(Received(result, cell)) -
@@ -413,9 +446,9 @@ namespace {
             }
 
             std::printf(
-                "坂を下る(研究の記録): n0 = 4・%u 段: 正味 ÷ 放った 最大 %.1f %%・温度に直して最大 %.3f mK/刻み(%u "
-                "刻み)\n",
-                levels, worstShare * 100, worstMk, ticks);
+                "坂を下る(研究の記録): n0 = 4・%u 段・放つ面の組 %u: 正味 ÷ 放った 最大 %.1f %%・温度に直して最大 %.3f "
+                "mK/刻み(%u 刻み)\n",
+                levels, run.emitSlots, worstShare * 100, worstMk, ticks);
             EXPECT(worstMk < 1.0);
         }
     }

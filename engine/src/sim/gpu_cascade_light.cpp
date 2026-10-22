@@ -1,5 +1,5 @@
 // gpu_cascade_light.cpp — 距離ごとの段の GPU 側(gpu_cascade_light.h)。CPU リファレンスは sim/cascade_light.cpp の StepCascadeLight。
-// 置き場の並びは shaders/common/cascade_light.hlsli の RcGpuParams。1 刻み = 6 + 3 × (段 − 1) + 1 回の起動(間に UAV のバリア)。
+// 置き場の並びは shaders/common/cascade_light.hlsli の RcGpuParams。1 刻み = 6 + 3 × (段 − 1) + 1 回の起動(間に UAV のバリア)。世界の全部を掃くのは RcSources の読みだけ(T-1010)。
 #include "sim/gpu_cascade_light.h"
 
 #include <algorithm>
@@ -33,7 +33,7 @@ namespace bicameral::sim {
             BeginTick,
             Sources,
             CarryIn,
-            CollectFaces,
+            ClearFaces,
             Level0Prepare,
             Level0Walk,
             LevelWalk,
@@ -46,7 +46,7 @@ namespace bicameral::sim {
         constexpr std::array<const char*, PipelineCount> SHADER_NAMES = {
             "sim/cascade_light_init_state.cso",     "sim/cascade_light_init_bags.cso",
             "sim/cascade_light_begin_tick.cso",     "sim/cascade_light_sources.cso",
-            "sim/cascade_light_carry_in.cso",       "sim/cascade_light_collect_faces.cso",
+            "sim/cascade_light_carry_in.cso",       "sim/cascade_light_clear_faces.cso",
             "sim/cascade_light_level0_prepare.cso", "sim/cascade_light_level0_walk.cso",
             "sim/cascade_light_level_walk.cso",     "sim/cascade_light_clear_bags.cso",
             "sim/cascade_light_reset_bags.cso",     "sim/cascade_light_carry_out.cso",
@@ -99,6 +99,7 @@ namespace bicameral::sim {
             place(params.stateSources, cells * rx::RC_FACES * 16);
             place(params.stateCarryDense, cells * rx::RC_FACES * 16);
             place(params.stateFaces, uint64_t{capacity.faces} * 4);
+            place(params.stateFaceFlags, cells * rx::RC_FACES * 4);
             place(params.stateFaceInfo, uint64_t{capacity.faces} * rx::RC_GPU_FACE_INFO_WORDS * WORD_BYTES);
             place(params.stateBags0, uint64_t{capacity.bags} * rx::RC_GPU_BAG_WORDS * WORD_BYTES);
             place(params.stateBags1, uint64_t{capacity.bags} * rx::RC_GPU_BAG_WORDS * WORD_BYTES);
@@ -171,6 +172,8 @@ namespace bicameral::sim {
         gpu.levels = params.levels;
         gpu.intervalBlocks = params.intervalBlocks;
         gpu.raysPerBag = params.raysPerBag;
+        gpu.emitSlots = params.emitSlots;
+        gpu.thermalInSlots = params.thermalInSlots ? 1u : 0u;
         gpu.quietBelowMk = params.quietBelowMk;
         gpu.cellCount = static_cast<uint32_t>(cells);
         gpu.texelsPerFace = perFace;
@@ -260,23 +263,24 @@ namespace bicameral::sim {
         // --- 段 0: 放つ面 ---
         Dispatch(list, nest, debugRing, BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
         Dispatch(list, nest, debugRing, Sources, cells, {tickLow, in, 0, 0});
+        const uint32_t out = 1 - in;
         Dispatch(list, nest, debugRing, CarryIn, m_params.carryCapacity, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, CollectFaces, cells * rx::RC_FACES, {tickLow, in, 0, 0});
         Dispatch(list, nest, debugRing, Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
         Dispatch(list, nest, debugRing, Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace,
-                 {tickLow, in, 0, 0});
+                 {tickLow, in, 0, out << 1});
+        Dispatch(list, nest, debugRing, ClearFaces, m_params.faceCapacity, {tickLow, in, 0, 0});
 
         // --- 段 1 から: 袋の表を交互に ---
         for (uint32_t level = 1; level < m_params.levels; ++level) {
             const uint32_t table = (level - 1) & 1u;
             Dispatch(list, nest, debugRing, LevelWalk, uint64_t{m_params.bagCapacity} * m_params.raysPerBag,
-                     {tickLow, level, 0, table});
+                     {tickLow, level, 0, table | (out << 1)});
             Dispatch(list, nest, debugRing, ClearBags, m_params.bagCapacity, {tickLow, level, 0, table});
             Dispatch(list, nest, debugRing, ResetBags, 1, {tickLow, level, 0, table});
         }
 
         // --- 照り返しを次の刻みへ ---
-        Dispatch(list, nest, debugRing, CarryOut, cells * rx::RC_FACES * rx::LT_BANDS, {tickLow, 1 - in, 0, 0});
+        Dispatch(list, nest, debugRing, CarryOut, m_params.carryCapacity, {tickLow, out, 0, 0});
         nest.SetExternalViews(0, 0);
         m_parity = 1 - in;
     }
@@ -301,7 +305,9 @@ namespace bicameral::sim {
                                    .carriedIn = ledger[1],
                                    .absorbed = ledger[2],
                                    .reflected = ledger[3],
-                                   .escaped = ledger[4]};
+                                   .escaped = ledger[4],
+                                   .held = words[rx::RC_GPU_HELD + band],
+                                   .kept = words[rx::RC_GPU_KEPT + band]};
         }
 
         for (uint32_t level = 0; level < result.raysPerLevel.size(); ++level) {

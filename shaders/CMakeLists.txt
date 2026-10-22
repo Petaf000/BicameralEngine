@@ -205,7 +205,7 @@ bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcInitBags NAME
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcBeginTick NAME cascade_light_begin_tick)  # 距離ごとの段の GPU: 頭の語を 0 に(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcSources NAME cascade_light_sources)  # 距離ごとの段の GPU: 熱の放つ量(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcCarryIn NAME cascade_light_carry_in)  # 距離ごとの段の GPU: 持ち越しを放つ面へ(T-0959)
-bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcCollectFaces NAME cascade_light_collect_faces)  # 距離ごとの段の GPU: 放つ面の列(T-0959)
+bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcClearFaces NAME cascade_light_clear_faces)  # 距離ごとの段の GPU: 放つ面の量と印を 0 に(T-1010)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcLevel0Prepare NAME cascade_light_level0_prepare)  # 距離ごとの段の GPU: 段 0 の分け方(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcLevel0Walk NAME cascade_light_level0_walk)  # 距離ごとの段の GPU: 段 0 の光線(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcLevelWalk NAME cascade_light_level_walk)  # 距離ごとの段の GPU: 段 k の袋の光線(T-0959)

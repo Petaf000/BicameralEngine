@@ -3,9 +3,11 @@
 // (multires_bindings.hlsli)に外のバッファ u4・u5 を足して使う(太陽の影の柱と同じ形)。
 //
 // データの流れ(sim/gpu_cascade_light.cpp が 1 刻みを記録する。置き場は cascade_light.hlsli の RcGpuParams):
-//   RcBeginTick(頭の語を 0 に)→ RcSources(セルごとに 6 面の熱の放つ量・放った・吸ったを 0 に)→ RcCarryIn(前の刻みの持ち越しを放つ面へ)
-//   → RcCollectFaces(放つ面の列)→ RcLevel0Prepare(面ごとの升目の重みの和・余り)→ RcLevel0Walk(段 0 の光線。残りを段 1 の袋の表へ)
+//   RcBeginTick(頭の語を 0 に)→ RcSources(熱いセルの 6 面の熱の放つ量を書き、放つ面の列に足す。組の刻みでない面は持ち越しで待つ)
+//   → RcCarryIn(前の刻みの持ち越し: 組の刻みの面は放つ面へ、そうでなければ次の刻みへ)→ RcLevel0Prepare(面ごとの升目の重みの和・余り)
+//   → RcLevel0Walk(段 0 の光線。残りを段 1 の袋の表へ)→ RcClearFaces(使った放つ面を 0 に)
 //   → 段ごとに RcLevelWalk(袋 × raysPerBag 本。残りを次の段の袋の表へ)・RcClearBags・RcResetBags → RcCarryOut(照り返しを疎な表へ)
+// 持ち越しの受けは 0 から増えた鍵だけを表に並べる(AddCarry)ので、世界の全部のセルを掃くのは RcSources の読みだけ(T-1010)。
 // 足し算と min はすべて 64bit の atomic で可換なので、光線の処理の順によらず CPU とビット一致する(R3・R4)。
 // 帳簿・本数は波の和にしてから足す(同じ語への atomic を減らす)。どのカーネルも 1 スレッドが番号を歩幅 g_external2 で回す。
 #include "common/cascade_light.hlsli"
@@ -83,6 +85,8 @@ RcStepConstants ConstantsOf(RcGpuParams params) {
     constants.levels = params.levels;
     constants.intervalBlocks = params.intervalBlocks;
     constants.raysPerBag = params.raysPerBag;
+    constants.emitSlots = params.emitSlots;
+    constants.thermalInSlots = params.thermalInSlots;
 
     return constants;
 }
@@ -124,15 +128,53 @@ GpuRcGrid GridOf(RcGpuParams params) {
     return grid;
 }
 
+uint32_t CarryListOf(RcGpuParams params, uint32_t parity) {
+    return parity == 0 ? params.stateCarryList0 : params.stateCarryList1;
+}
+
+// 持ち越しの密な受け(鍵 = セル × 12 + 面 × 2 + 帯)へ足す。0 から増えた鍵だけを次の刻みの表(outParity)に並べる(T-1010。
+// 世界の全部の受けを掃かずに済む。0 から増やす足し算はちょうど 1 つなので、鍵は 1 度だけ並ぶ)
+void AddCarry(RcGpuParams params, uint32_t outParity, uint64_t key, uint64_t amount) {
+    if (amount == 0)
+        return;
+
+    uint64_t before;
+    g_rcState.InterlockedAdd64(params.stateCarryDense + (uint32_t)(key * 8), amount, before);
+    if (before != 0)
+        return;
+
+    uint32_t position;
+    g_rcState.InterlockedAdd(HeaderOffset(RC_GPU_CARRY_COUNT + outParity), 1u, position);
+    if (position < params.carryCapacity)
+        StoreWord(CarryListOf(params, outParity) + (position * 16), key);
+    else
+        SetOverflow(4);
+}
+
+// 放つ面を列に足す(印が 0 の面だけ。印は RcClearFaces が 0 に戻す)
+void ListFace(RcGpuParams params, uint32_t face) {
+    uint32_t marked;
+    g_rcState.InterlockedOr(params.stateFaceFlags + (face * 4), 1u, marked);
+    if (marked != 0)
+        return;
+
+    uint32_t position;
+    g_rcState.InterlockedAdd(HeaderOffset(RC_GPU_FACE_COUNT), 1u, position);
+    if (position < params.faceCapacity)
+        g_rcState.Store(params.stateFaces + (position * 4), face);
+    else
+        SetOverflow(1);
+}
+
 struct GpuRcSink {
     GpuRcGrid grid;
-    uint32_t absorbedOffset;
-    uint32_t carryOffset;
+    RcGpuParams params;
+    uint32_t outParity;
 
     void Deposit(int64_t x, int64_t y, int64_t z, uint32_t band, uint32_t face, uint64_t absorbed, uint64_t reflected) {
         const uint32_t cell = grid.IndexOf(x, y, z);
-        AddWord(absorbedOffset + (((cell * 2) + band) * 8), absorbed);
-        AddWord(carryOffset + (((((cell * RC_FACES) + face) * 2) + band) * 8), reflected);
+        AddWord(params.stateAbsorbed + (((cell * 2) + band) * 8), absorbed);
+        AddCarry(params, outParity, (((uint64_t)cell * RC_FACES) + face) * 2 + band, reflected);
     }
 };
 
@@ -237,12 +279,13 @@ RcBagShare LoadBag(RcGpuParams params, uint32_t table, uint32_t slot, uint32_t l
 
 // --- 段の光線 1 本を歩かせ、帳簿へ足し、残りを次の段へ ---
 
-void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay levelRay, uint32_t nextTable) {
+void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay levelRay, uint32_t nextTable,
+                 uint32_t outParity) {
     const GpuRcGrid grid = GridOf(params);
     GpuRcSink sink;
     sink.grid = grid;
-    sink.absorbedOffset = params.stateAbsorbed;
-    sink.carryOffset = params.stateCarryDense;
+    sink.params = params;
+    sink.outParity = outParity;
     const RcWalk walk = RcWalkLevelRay(constants, levelRay, grid, sink);
 
     AddHeaderWave(RC_GPU_RAYS + levelRay.level, 1);
@@ -280,6 +323,27 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         const int64_t z = params.lowZ + (flat / (params.sizeX * params.sizeY));
         const uint32_t temperature = g_rcWork.Load(params.workTemperatures + (cell * 4));
         const bool hot = temperature != 0 && temperature >= params.quietBelowMk;
+        if (!hot) {
+            // 冷たいセルは読むだけ(放つ面の量はいつも 0。放った・吸ったは前の刻みに 0 でなければ 0 に。T-1010)
+            const uint32_t emitted = params.stateEmitted + (cell * 16);
+            const uint32_t absorbed = params.stateAbsorbed + (cell * 16);
+            if ((LoadWord(emitted) | LoadWord(emitted + 8)) != 0) {
+                StoreWord(emitted, 0);
+                StoreWord(emitted + 8, 0);
+            }
+
+            if ((LoadWord(absorbed) | LoadWord(absorbed + 8)) != 0) {
+                StoreWord(absorbed, 0);
+                StoreWord(absorbed + 8, 0);
+            }
+
+            continue;
+        }
+
+        // 組の刻みでなければ、熱で放つ光は持ち越しの密な受けで待つ(T-1010。受けは前の刻みの RcCarryOut で 0)
+        const bool active = params.thermalInSlots == 0 || RcEmitSlotActive(ConstantsOf(params), x, y, z);
+        uint64_t heldShort = 0;
+        uint64_t heldLong = 0;
         const RcCellLight light = g_rcWork.Load<RcCellLight>(params.workLights + (cell * 24));
         uint64_t emittedShort = 0;
         uint64_t emittedLong = 0;
@@ -304,9 +368,20 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
                 bands = RcFaceEmission(temperature, light, across);
             }
 
-            const uint32_t source = params.stateSources + (((cell * RC_FACES) + face) * 16);
-            StoreWord(source, bands.shortBand);
-            StoreWord(source + 8, bands.longBand);
+            // 放つ面の量は使った後に RcClearFaces が 0 に戻すので、量のある面だけ書いて列に足す
+            const uint32_t sourceFace = (cell * RC_FACES) + face;
+            const bool some = (bands.shortBand | bands.longBand) != 0;
+            if (active && some) {
+                StoreWord(params.stateSources + (sourceFace * 16), bands.shortBand);
+                StoreWord(params.stateSources + (sourceFace * 16) + 8, bands.longBand);
+                ListFace(params, sourceFace);
+            } else if (some) {
+                AddCarry(params, 1 - g_external1, ((uint64_t)sourceFace * 2) + LT_BAND_SHORT, bands.shortBand);
+                AddCarry(params, 1 - g_external1, ((uint64_t)sourceFace * 2) + LT_BAND_LONG, bands.longBand);
+                heldShort += bands.shortBand;
+                heldLong += bands.longBand;
+            }
+
             emittedShort += bands.shortBand;
             emittedLong += bands.longBand;
         }
@@ -317,11 +392,9 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         StoreWord(params.stateAbsorbed + (cell * 16) + 8, 0);
         AddLedgerWave(LT_BAND_SHORT, 0, emittedShort);
         AddLedgerWave(LT_BAND_LONG, 0, emittedLong);
+        AddHeaderWave(RC_GPU_HELD + LT_BAND_SHORT, heldShort);
+        AddHeaderWave(RC_GPU_HELD + LT_BAND_LONG, heldLong);
     }
-}
-
-uint32_t CarryListOf(RcGpuParams params, uint32_t parity) {
-    return parity == 0 ? params.stateCarryList0 : params.stateCarryList1;
 }
 
 // --- 前の刻みの持ち越し(g_external1 の表)を放つ面へ足す(エントリは (セル・面・帯) ごとに 1 つ)---
@@ -333,28 +406,25 @@ uint32_t CarryListOf(RcGpuParams params, uint32_t parity) {
         const uint64_t key = LoadWord(list + (entry * 16));
         const uint64_t amount = LoadWord(list + (entry * 16) + 8);
         const uint32_t band = (uint32_t)(key % 2);
+        const uint32_t cell = (uint32_t)(key / (RC_FACES * 2));
+        const int64_t flat = (int64_t)cell;
+        const int64_t x = params.lowX + (flat % params.sizeX);
+        const int64_t y = params.lowY + ((flat / params.sizeX) % params.sizeY);
+        const int64_t z = params.lowZ + (flat / (params.sizeX * params.sizeY));
+        if (!RcEmitSlotActive(ConstantsOf(params), x, y, z)) {
+            // 組の刻みでない: 持ち越しの密な受けへ戻し、次の刻みへそのまま送る(T-1010)
+            AddCarry(params, 1 - g_external1, key, amount);
+            AddHeaderWave(RC_GPU_KEPT + LT_BAND_SHORT, band == LT_BAND_SHORT ? amount : 0);
+            AddHeaderWave(RC_GPU_KEPT + LT_BAND_LONG, band == LT_BAND_LONG ? amount : 0);
+            continue;
+        }
+
         const uint32_t source = params.stateSources + (uint32_t)((key / 2) * 16) + (band * 8);
         StoreWord(source, LoadWord(source) + amount);
+        ListFace(params, (uint32_t)(key / 2));
         // 波の和は語ごとに(帯がレーンごとに違うので、両方の帯を決まった語で呼ぶ)
         AddLedgerWave(LT_BAND_SHORT, 1, band == LT_BAND_SHORT ? amount : 0);
         AddLedgerWave(LT_BAND_LONG, 1, band == LT_BAND_LONG ? amount : 0);
-    }
-}
-
-    // --- 量のある放つ面を列にする(列の順は決まらないが、面ごとの計算は面の鍵だけで決まる)---
-    [numthreads(RC_GROUP_THREADS, 1, 1)] void RcCollectFaces(uint3 dispatchThreadId : SV_DispatchThreadID) {
-    const RcGpuParams params = LoadParams();
-    for (uint32_t face = dispatchThreadId.x; face < params.cellCount * RC_FACES; face += g_external2) {
-        const uint32_t source = params.stateSources + (face * 16);
-        if (LoadWord(source) == 0 && LoadWord(source + 8) == 0)
-            continue;
-
-        uint32_t position;
-        g_rcState.InterlockedAdd(HeaderOffset(RC_GPU_FACE_COUNT), 1u, position);
-        if (position < params.faceCapacity)
-            g_rcState.Store(params.stateFaces + (position * 4), face);
-        else
-            SetOverflow(1);
     }
 }
 
@@ -362,6 +432,18 @@ uint32_t FaceCountOf(RcGpuParams params) {
     const uint32_t count = (uint32_t)LoadWord(HeaderOffset(RC_GPU_FACE_COUNT));
 
     return count < params.faceCapacity ? count : params.faceCapacity;
+}
+
+// --- 段 0 の後: 列にした放つ面の量と印を 0 に戻す(次の刻みは冷たいセルの面を書かずに済む。T-1010)---
+[numthreads(RC_GROUP_THREADS, 1, 1)] void RcClearFaces(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const RcGpuParams params = LoadParams();
+    const uint32_t count = FaceCountOf(params);
+    for (uint32_t item = dispatchThreadId.x; item < count; item += g_external2) {
+        const uint32_t face = g_rcState.Load(params.stateFaces + (item * 4));
+        StoreWord(params.stateSources + (face * 16), 0);
+        StoreWord(params.stateSources + (face * 16) + 8, 0);
+        g_rcState.Store(params.stateFaceFlags + (face * 4), 0u);
+    }
 }
 
 RcLevelRay Level0RayOf(RcGpuParams params, RcStepConstants constants, uint32_t sourceKey, uint32_t texelIndex) {
@@ -445,7 +527,7 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
 
         const RcLevelRay levelRay = RcLevel0WithEnergy(Level0RayOf(params, constants, sourceKey, texelIndex),
                                                        sourceKey % RC_FACES, energyShort, energyLong);
-        WalkAndPass(params, constants, levelRay, 0);
+        WalkAndPass(params, constants, levelRay, 0, g_external3 >> 1);
     }
 }
 
@@ -453,7 +535,7 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcLevelWalk(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const RcStepConstants constants = ConstantsOf(params);
-    const uint32_t table = g_external3;
+    const uint32_t table = g_external3 & 1u;
     const uint32_t listOffset = table == 0 ? params.stateBagList0 : params.stateBagList1;
     const uint32_t bagCount = (uint32_t)LoadWord(HeaderOffset(RC_GPU_BAG_COUNT + table));
     const uint32_t count = (bagCount < params.bagCapacity ? bagCount : params.bagCapacity) * params.raysPerBag;
@@ -465,7 +547,7 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
         if (levelRay.ray.energyShort == 0 && levelRay.ray.energyLong == 0)
             continue;
 
-        WalkAndPass(params, constants, levelRay, 1 - table);
+        WalkAndPass(params, constants, levelRay, 1 - table, g_external3 >> 1);
     }
 }
 
@@ -497,25 +579,17 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
     StoreWord(HeaderOffset(RC_GPU_BAG_COUNT + g_external3), 0);
 }
 
-    // --- 照り返しの密な受けを疎な表(g_external1)へ移し、受けを 0 に ---
+    // --- 照り返しの密な受けの量を、次の刻みの表(g_external1。鍵は AddCarry が並べた)へ移し、受けを 0 に ---
     [numthreads(RC_GROUP_THREADS, 1, 1)] void RcCarryOut(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const uint32_t list = CarryListOf(params, g_external1);
-    for (uint32_t word = dispatchThreadId.x; word < params.cellCount * RC_FACES * 2; word += g_external2) {
-        const uint32_t at = params.stateCarryDense + (word * 8);
-        const uint64_t amount = LoadWord(at);
-        if (amount == 0)
-            continue;
-
+    const uint32_t listed = (uint32_t)LoadWord(HeaderOffset(RC_GPU_CARRY_COUNT + g_external1));
+    const uint32_t count = listed < params.carryCapacity ? listed : params.carryCapacity;
+    for (uint32_t entry = dispatchThreadId.x; entry < count; entry += g_external2) {
+        const uint64_t key = LoadWord(list + (entry * 16));
+        const uint32_t at = params.stateCarryDense + (uint32_t)(key * 8);
+        StoreWord(list + (entry * 16) + 8, LoadWord(at));
         StoreWord(at, 0);
-        uint32_t position;
-        g_rcState.InterlockedAdd(HeaderOffset(RC_GPU_CARRY_COUNT + g_external1), 1u, position);
-        if (position < params.carryCapacity) {
-            StoreWord(list + (position * 16), (uint64_t)word);
-            StoreWord(list + (position * 16) + 8, amount);
-        } else {
-            SetOverflow(4);
-        }
     }
 }
 
