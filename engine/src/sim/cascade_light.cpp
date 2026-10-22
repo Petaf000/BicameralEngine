@@ -16,14 +16,10 @@ namespace bicameral::sim {
 
         constexpr uint32_t TEXEL_LIMIT = 1u << 10;  // 升目の 1 辺の上限(RcFaceWeight の約束)
         constexpr uint32_t LEVEL_LIMIT = 8;
-        constexpr int64_t CELL_POSITION = int64_t{1} << rx::RC_POSITION_SHIFT;
-        constexpr uint32_t CHILD_TEXELS = 4;
-
-        // 乱数の用途(R6)
-        constexpr uint32_t PURPOSE_JITTER = 0x52430001u;
-        constexpr uint32_t PURPOSE_REMAINDER = 0x52430002u;
-        constexpr uint32_t PURPOSE_RESERVOIR = 0x52430003u;
-        constexpr uint32_t PURPOSE_FACE_POINT = 0x52430004u;
+        constexpr uint32_t RAYS_PER_BAG_LIMIT = 64;
+        // 溜めの出どころを 15bit × 3 に詰めるので、世界の 1 辺は 127 セルまで(RcPackReservoir。ADR-0432)
+        constexpr int64_t SIZE_LIMIT = ((int64_t{1} << rx::RC_ORIGIN_BITS) >> rx::RC_POSITION_SHIFT) - 1;
+        constexpr uint32_t PURPOSE_REMAINDER = rx::RC_PURPOSE_REMAINDER;
 
         using Cell3 = std::array<int64_t, 3>;
 
@@ -65,65 +61,80 @@ namespace bicameral::sim {
         // (ブロック x・y・z, 升目の面・i・j)。std::map の順 = 回す順(結果は順によらない)
         using BagKey = std::tuple<int64_t, int64_t, int64_t, uint32_t, uint32_t, uint32_t>;
 
-        // 袋の出どころは、袋に入った光線のうち 1 本を量に比例した確率で選んだその出どころ(重み付きの溜め。ReSTIR の reservoir と同じ形)。
-        // 鍵 = −ln(u) ÷ 量(u = (種・刻み・光線) のハッシュ)の一番小さいもの。min の畳み込みなので順によらない(R3・R4。GPU は 64bit の atomic min)。
-        // 重心 1 点から出すと向かいの壁の真ん中が焦点になり、広がりで散らすと遮る物の中から出る光線ができた(どちらも閉じた箱で正味の流れ。T-0958)
+        // 袋の量・量が出た軸ごとの和・溜め(RcPackReservoir の min。重み付きの溜め: 袋に入った光線から量に比例して 1 本の出どころを選ぶ。
+        // min の畳み込みなので順によらない。GPU は 64bit の atomic min 1 回。ADR-0419・ADR-0432)
         struct Bag {
             uint64_t energyShort = 0;
             uint64_t energyLong = 0;
-            uint64_t chosenKey = UINT64_MAX;
-            Cell3 chosenOrigin{};
+            std::array<uint64_t, 3> lobeShort{};
+            std::array<uint64_t, 3> lobeLong{};
+            uint64_t chosen = rx::RC_RESERVOIR_EMPTY;
         };
 
         using BagMap = std::map<BagKey, Bag>;
 
-        // 量 × 重み ÷ 重みの和(床。重み ≤ 重みの和なので商は 64bit に収まる)
-        uint64_t Share(uint64_t energy, uint64_t weight, uint64_t weightSum) {
-            return fx::FxDivU128By64(fx::FxMulU64Full(energy, weight), weightSum).quotient;
+        // RcPassToNextLevel に渡す道具
+        struct BagSink {
+            BagMap* bags = nullptr;
+
+            void Add(const rx::RcBagShare& share) const {
+                Bag& bag = (*bags)[{share.homeX, share.homeY, share.homeZ, share.face, share.i, share.j}];
+                bag.energyShort += share.energyShort;
+                bag.energyLong += share.energyLong;
+                bag.lobeShort[0] += share.lobeShortX;
+                bag.lobeShort[1] += share.lobeShortY;
+                bag.lobeShort[2] += share.lobeShortZ;
+                bag.lobeLong[0] += share.lobeLongX;
+                bag.lobeLong[1] += share.lobeLongY;
+                bag.lobeLong[2] += share.lobeLongZ;
+                bag.chosen = std::min(bag.chosen, share.chosen);
+            }
+        };
+
+        rx::RcBagShare ShareOf(uint32_t level, const BagKey& key, const Bag& bag) {
+            rx::RcBagShare share{};
+            share.homeX = std::get<0>(key);
+            share.homeY = std::get<1>(key);
+            share.homeZ = std::get<2>(key);
+            share.energyShort = bag.energyShort;
+            share.energyLong = bag.energyLong;
+            share.lobeShortX = bag.lobeShort[0];
+            share.lobeShortY = bag.lobeShort[1];
+            share.lobeShortZ = bag.lobeShort[2];
+            share.lobeLongX = bag.lobeLong[0];
+            share.lobeLongY = bag.lobeLong[1];
+            share.lobeLongZ = bag.lobeLong[2];
+            share.chosen = bag.chosen;
+            share.level = level;
+            share.face = std::get<3>(key);
+            share.i = std::get<4>(key);
+            share.j = std::get<5>(key);
+
+            return share;
         }
 
-        uint64_t BagId(uint32_t level, const BagKey& key) {
-            uint64_t hash = fx::FxHashCombine(level, static_cast<uint64_t>(std::get<0>(key)));
-            hash = fx::FxHashCombine(hash, static_cast<uint64_t>(std::get<1>(key)));
-            hash = fx::FxHashCombine(hash, static_cast<uint64_t>(std::get<2>(key)));
-            hash = fx::FxHashCombine(hash, std::get<3>(key));
-            hash = fx::FxHashCombine(hash, std::get<4>(key));
+        // --- 段 0 の升目(放つ面ごとに、升目の真ん中の向きが外を向くもの。セルによらないので前もって作る)---
 
-            return fx::FxHashCombine(hash, std::get<5>(key));
-        }
-
-        // --- 段 0 の重み(放つ面ごとに、升目の Lambert の重み。セルによらないので前もって作る)---
-
-        struct TexelWeight {
+        struct TexelOfFace {
             uint32_t face = 0;
             uint32_t i = 0;
             uint32_t j = 0;
-            uint64_t weight = 0;
         };
 
-        struct FaceWeights {
-            std::array<std::vector<TexelWeight>, rx::RC_FACES> texels;  // 重みが 0 でない升目だけ
-            std::array<uint64_t, rx::RC_FACES> sums{};
-        };
-
-        FaceWeights MakeFaceWeights(uint32_t texels) {
-            FaceWeights weights;
+        std::array<std::vector<TexelOfFace>, rx::RC_FACES> MakeFaceTexels(uint32_t texels) {
+            std::array<std::vector<TexelOfFace>, rx::RC_FACES> list;
             for (uint32_t source = 0; source < rx::RC_FACES; ++source) {
                 for (uint32_t face = 0; face < rx::RC_FACES; ++face) {
                     for (uint32_t j = 0; j < texels; ++j) {
                         for (uint32_t i = 0; i < texels; ++i) {
-                            const uint64_t weight = rx::RcFaceWeight(texels, face, i, j, source);
-                            if (weight == 0)
-                                continue;
-
-                            weights.texels[source].push_back({.face = face, .i = i, .j = j, .weight = weight});
-                            weights.sums[source] += weight;
+                            if (rx::RcFaceWeight(texels, face, i, j, source) != 0)
+                                list[source].push_back({.face = face, .i = i, .j = j});
                         }
                     }
                 }
             }
 
-            return weights;
+            return list;
         }
 
         // --- 1 刻みの作業 ---
@@ -131,21 +142,10 @@ namespace bicameral::sim {
         struct TickWork {
             const CascadeGrid* grid = nullptr;
             const CascadeParams* params = nullptr;
-            uint64_t tick = 0;
+            rx::RcStepConstants constants{};
             CascadeTickResult* result = nullptr;
             CarryMap carry;
             std::vector<BagMap> bags;  // [段]
-        };
-
-        // 段 level の光線(升目 face・i・j)。home = その段のブロックの番号(レベル −level の座標)
-        struct LevelRay {
-            rx::RcRay ray{};
-            uint32_t level = 0;
-            uint32_t face = 0;
-            uint32_t i = 0;
-            uint32_t j = 0;
-            Cell3 home{};
-            uint64_t id = 0;  // ずらし・余りの乱数の鍵
         };
 
         void AddLedger(CascadeTickResult& result, const rx::RcWalk& walk) {
@@ -158,119 +158,17 @@ namespace bicameral::sim {
             result.steps += walk.steps;
         }
 
-        // 段 level の区間(向きに沿った座標)。段 0 は放つセルから、段 k ≥ 1 は段 k のブロックの始まり + 区間の長さから。
-        // 終わり = 段 k + 1 のブロックの始まり + 区間の長さ × 2^(k+1)(RcIntervalEnd)。最後の段は世界の端まで
-        void SetInterval(rx::RcRay& ray, const Cell3& home, uint32_t level, const CascadeParams& params) {
-            const int64_t start = rx::RcBlockStartAlong(home[ray.axis], level, ray.sign);
-            const int64_t interval = int64_t{params.intervalBlocks} << level;
-            ray.firstA = level == 0 ? start : start + interval;
-            ray.endA = level + 1 >= params.levels ? rx::RC_ENDLESS
-                                                  : rx::RcIntervalEnd(start, level, params.intervalBlocks);
-        }
-
-        // 鍵 = −ln(u) ÷ 量(Q32 × 2^32 ÷ 量。指数分布の最小なので、量に比例した確率で選ばれる)。u は (0, 1] の Q32。
-        // 量が 64 未満の光線はほぼ選ばれない(鍵を最大の手前に)。同じ鍵は位置の小さい方(AddToBag)
-        uint64_t ReservoirKey(uint64_t hash, uint64_t energy) {
-            constexpr uint64_t LN_2_POW_32_Q32 = 95265423104;  // 32 ln 2(Q32)
-            constexpr uint64_t SMALL_ENERGY = 64;
-            if (energy < SMALL_ENERGY)
-                return UINT64_MAX - 1;
-
-            const uint64_t unit = (hash >> 32) + 1;  // (0, 2^32]
-            const auto lnUnit = static_cast<uint64_t>(fx::FxLnU64(unit));
-            const uint64_t minusLn = LN_2_POW_32_Q32 > lnUnit ? LN_2_POW_32_Q32 - lnUnit : 0;  // −ln(u / 2^32)(< 2^37)
-            const fx::FxU128 numerator = {.hi = minusLn >> 32, .lo = minusLn << 32};
-
-            return fx::FxDivU128By64(numerator, energy).quotient;
-        }
-
-        void AddToBag(Bag& bag, uint64_t energyShort, uint64_t energyLong, const Cell3& origin, uint64_t hash) {
-            bag.energyShort += energyShort;
-            bag.energyLong += energyLong;
-            const uint64_t key = ReservoirKey(hash, energyShort + energyLong);
-            if (key < bag.chosenKey || (key == bag.chosenKey && origin < bag.chosenOrigin)) {
-                bag.chosenKey = key;
-                bag.chosenOrigin = origin;
-            }
-        }
-
-        // 光線を升目へ向ける(升目の中はハッシュでずらす。R6)
-        rx::RcRay AimLevelRay(const TickWork& work, const LevelRay& levelRay) {
-            const uint32_t texels = work.params->baseTexels << levelRay.level;
-            const uint64_t hash = fx::FxHash64(work.params->seed, work.tick, levelRay.id, PURPOSE_JITTER);
-            const auto jitterU = static_cast<uint32_t>(hash & (rx::RC_JITTER - 1));
-            const auto jitterV = static_cast<uint32_t>((hash >> 4) & (rx::RC_JITTER - 1));
-
-            return rx::RcAimRay(levelRay.ray, levelRay.face, texels, levelRay.i, levelRay.j, jitterU, jitterV);
-        }
-
-        // 区間の終わりに残った量を段 level + 1 の袋(子の升目 4 つ)へ立体角の重みで分ける(余りはハッシュで決めた子へ)
-        void PassToNextLevel(TickWork& work, const LevelRay& from, const rx::RcWalk& walk) {
-            if (walk.remainingShort == 0 && walk.remainingLong == 0)
-                return;
-
-            // 子の袋の鍵と、その袋の光線が向く向き(ずらしは袋の鍵から決まるので、出どころによらず先に分かる)の立体角の密度で分ける
-            const uint32_t next = from.level + 1;
-            const Cell3 home = {from.home[0] >> 1, from.home[1] >> 1, from.home[2] >> 1};
-            std::array<BagKey, CHILD_TEXELS> keys{};
-            std::array<uint64_t, CHILD_TEXELS> weights{};
-            uint64_t weightSum = 0;
-            for (uint32_t child = 0; child < CHILD_TEXELS; ++child) {
-                keys[child] = {
-                    home[0], home[1], home[2], from.face, (2 * from.i) + (child & 1u), (2 * from.j) + (child >> 1)};
-                const LevelRay probe{.level = next,
-                                     .face = from.face,
-                                     .i = std::get<4>(keys[child]),
-                                     .j = std::get<5>(keys[child]),
-                                     .id = BagId(next, keys[child])};
-                weights[child] = rx::RcAimedSolidAngleWeight(AimLevelRay(work, probe));
-                weightSum += weights[child];
-            }
-
-            std::array<uint64_t, CHILD_TEXELS> shortShares{};
-            std::array<uint64_t, CHILD_TEXELS> longShares{};
-            uint64_t givenShort = 0;
-            uint64_t givenLong = 0;
-            for (uint32_t child = 0; child < CHILD_TEXELS; ++child) {
-                shortShares[child] = Share(walk.remainingShort, weights[child], weightSum);
-                longShares[child] = Share(walk.remainingLong, weights[child], weightSum);
-                givenShort += shortShares[child];
-                givenLong += longShares[child];
-            }
-
-            const uint64_t hash = fx::FxHash64(work.params->seed, work.tick, from.id, PURPOSE_REMAINDER);
-            const uint32_t lucky = fx::FxRandomBelow(hash, CHILD_TEXELS);
-            shortShares[lucky] += walk.remainingShort - givenShort;
-            longShares[lucky] += walk.remainingLong - givenLong;
-
-            const Cell3 origin = {from.ray.originX, from.ray.originY, from.ray.originZ};
-            for (uint32_t child = 0; child < CHILD_TEXELS; ++child) {
-                if (shortShares[child] == 0 && longShares[child] == 0)
-                    continue;
-
-                const BagKey& key = keys[child];
-                const uint64_t pick = fx::FxHash64(work.params->seed, work.tick, fx::FxHashCombine(from.id, child),
-                                                   PURPOSE_RESERVOIR);
-                AddToBag(work.bags[next][key], shortShares[child], longShares[child], origin, pick);
-            }
-        }
-
-        // 向けた光線の区間を歩かせ、残りを次の段へ
-        void WalkLevelRay(TickWork& work, LevelRay levelRay) {
-            const CascadeParams& params = *work.params;
-            levelRay.ray = AimLevelRay(work, levelRay);
-            SetInterval(levelRay.ray, levelRay.home, levelRay.level, params);
-            // 段 k ≥ 1 の光線は区間の始まりの板(向きの軸の面)から最初のセルに入る
-            if (levelRay.level != 0)
-                levelRay.ray.firstFace = rx::RcEnteredFace(levelRay.ray.axis, levelRay.ray.sign);
-
-            const SinkView sink{.grid = work.grid, .absorbed = &work.result->absorbed, .carry = &work.carry};
-            const rx::RcWalk walk = rx::RcWalkRay(GridView{.grid = work.grid}, sink, levelRay.ray);
+        // 段の光線 1 本を歩かせ、残りを次の段の袋へ(最後の段は世界の端まで)
+        void WalkLevelRay(TickWork& work, const rx::RcLevelRay& levelRay) {
+            const CascadeGrid& grid = *work.grid;
+            const SinkView sink{.grid = &grid, .absorbed = &work.result->absorbed, .carry = &work.carry};
+            const rx::RcWalk walk = rx::RcWalkLevelRay(work.constants, levelRay, GridView{.grid = &grid}, sink);
             work.result->rays += 1;
             work.result->raysPerLevel[levelRay.level] += 1;
             AddLedger(*work.result, walk);
-            if (levelRay.level + 1 < params.levels) {
-                PassToNextLevel(work, levelRay, walk);
+            if (levelRay.level + 1 < work.params->levels) {
+                const BagSink bags{.bags = &work.bags[levelRay.level + 1]};
+                rx::RcPassToNextLevel(work.constants, levelRay, walk, grid.low[0], grid.low[1], grid.low[2], bags);
                 return;
             }
 
@@ -298,38 +196,23 @@ namespace bicameral::sim {
             return {grid.low[0] + x, grid.low[1] + y, grid.low[2] + z};
         }
 
-        // 光線の出どころ: 面の上の点(1/256 セル)。面の中の位置は光線ごとにハッシュで散らす(R6)。
-        // 面の真ん中の 1 点から放つと、点から見た面と面から見た点の見え方が向き合う 2 面で揃わず、同じ温度の閉じた箱で
-        // 隣り合うセルの間に正味の流れが残る(T-0958 の測り: 17 %)。面の上で一様に散らすと期待値で対称(相反)になる
-        Cell3 FacePoint(const TickWork& work, const Cell3& cell, uint32_t face, uint64_t rayId) {
-            const uint64_t hash = fx::FxHash64(work.params->seed, work.tick, rayId, PURPOSE_FACE_POINT);
-            const uint32_t axis = face >> 1;
-            Cell3 point{};
-            for (uint32_t k = 0; k < 3; ++k) {
-                const auto inside = static_cast<int64_t>((hash >> (k * 8)) & (CELL_POSITION - 1));
-                point[k] = (cell[k] * CELL_POSITION) + inside;
-            }
-
-            point[axis] = (cell[axis] + ((face & 1u) == 0 ? 1 : 0)) * CELL_POSITION;
-
-            return point;
+        rx::RcLevelRay Level0Ray(const TickWork& work, uint64_t sourceKey, const Cell3& cell, uint32_t sourceFace,
+                                 size_t texelIndex, const TexelOfFace& texel) {
+            return rx::RcLevel0Ray(work.constants, sourceKey, cell[0], cell[1], cell[2], sourceFace,
+                                   static_cast<uint32_t>(texelIndex), texel.face, texel.i, texel.j);
         }
 
-        // 面 1 つの光を、外向きの升目へ「ずらした向きの重み」(RcAimedFaceWeight)で整数に分けて放つ(余りはハッシュで決めた升目へ)
-        void EmitFace(TickWork& work, const FaceWeights& weights, uint64_t sourceKey, const FaceSource& source) {
-            const auto cellIndex = static_cast<size_t>(sourceKey / rx::RC_FACES);
+        // 面 1 つの光を、外向きの升目へ「ずらした向きの重み」(RcLevel0Weight)で整数に分けて放つ(余りはハッシュで決めた升目へ)
+        void EmitFace(TickWork& work, const std::vector<TexelOfFace>& texels, uint64_t sourceKey,
+                      const FaceSource& source) {
             const auto sourceFace = static_cast<uint32_t>(sourceKey % rx::RC_FACES);
-            const std::vector<TexelWeight>& texels = weights.texels[sourceFace];
-            std::vector<uint64_t> aimedWeights(texels.size());
+            const Cell3 cell = CellOf(*work.grid, static_cast<size_t>(sourceKey / rx::RC_FACES));
+            std::vector<uint64_t> weights(texels.size());
             uint64_t weightSum = 0;
             for (size_t t = 0; t < texels.size(); ++t) {
-                const LevelRay probe{.level = 0,
-                                     .face = texels[t].face,
-                                     .i = texels[t].i,
-                                     .j = texels[t].j,
-                                     .id = fx::FxHashCombine(sourceKey, t)};
-                aimedWeights[t] = rx::RcAimedFaceWeight(AimLevelRay(work, probe), sourceFace);
-                weightSum += aimedWeights[t];
+                weights[t] = rx::RcLevel0Weight(work.constants,
+                                                Level0Ray(work, sourceKey, cell, sourceFace, t, texels[t]), sourceFace);
+                weightSum += weights[t];
             }
 
             if (weightSum == 0)
@@ -340,38 +223,26 @@ namespace bicameral::sim {
             uint64_t givenShort = 0;
             uint64_t givenLong = 0;
             for (size_t t = 0; t < texels.size(); ++t) {
-                shortShares[t] = Share(source.energyShort, aimedWeights[t], weightSum);
-                longShares[t] = Share(source.energyLong, aimedWeights[t], weightSum);
+                shortShares[t] = rx::RcShare(source.energyShort, weights[t], weightSum);
+                longShares[t] = rx::RcShare(source.energyLong, weights[t], weightSum);
                 givenShort += shortShares[t];
                 givenLong += longShares[t];
             }
 
-            const uint64_t hash = fx::FxHash64(work.params->seed, work.tick, sourceKey, PURPOSE_REMAINDER);
+            const uint64_t hash = fx::FxHash64(work.constants.seed, work.constants.tick, sourceKey, PURPOSE_REMAINDER);
             uint32_t lucky = fx::FxRandomBelow(hash, static_cast<uint32_t>(texels.size()));
-            while (aimedWeights[lucky] == 0)
+            while (weights[lucky] == 0)
                 lucky = (lucky + 1) % static_cast<uint32_t>(texels.size());
 
             shortShares[lucky] += source.energyShort - givenShort;
             longShares[lucky] += source.energyLong - givenLong;
 
-            const Cell3 cell = CellOf(*work.grid, cellIndex);
-            LevelRay levelRay{.level = 0, .home = cell};
-            levelRay.ray.firstFace = sourceFace ^ 1u;  // 面を越えた先のセルには、向かい合う面から入る
             for (size_t t = 0; t < texels.size(); ++t) {
                 if (shortShares[t] == 0 && longShares[t] == 0)
                     continue;
 
-                levelRay.id = fx::FxHashCombine(sourceKey, t);
-                const Cell3 origin = FacePoint(work, cell, sourceFace, levelRay.id);
-                levelRay.ray.originX = origin[0];
-                levelRay.ray.originY = origin[1];
-                levelRay.ray.originZ = origin[2];
-                levelRay.ray.energyShort = shortShares[t];
-                levelRay.ray.energyLong = longShares[t];
-                levelRay.face = texels[t].face;
-                levelRay.i = texels[t].i;
-                levelRay.j = texels[t].j;
-                WalkLevelRay(work, levelRay);
+                WalkLevelRay(work, rx::RcLevel0WithEnergy(Level0Ray(work, sourceKey, cell, sourceFace, t, texels[t]),
+                                                          sourceFace, shortShares[t], longShares[t]));
             }
         }
 
@@ -420,27 +291,21 @@ namespace bicameral::sim {
             return sources;
         }
 
-        // 段 level の袋を全部、袋の選んだ出どころから歩かせる
+        // 段 level の袋を全部、袋の選んだ出どころから raysPerBag 本ずつ歩かせる
         void WalkBags(TickWork& work, uint32_t level, bool reverse) {
             const BagMap bags = std::move(work.bags[level]);
+            const CascadeGrid& grid = *work.grid;
+            const uint32_t rays = work.params->raysPerBag;
             auto walkOne = [&](const BagKey& key, const Bag& bag) {
-                const uint64_t total = bag.energyShort + bag.energyLong;
-                LevelRay levelRay{.level = level,
-                                  .face = std::get<3>(key),
-                                  .i = std::get<4>(key),
-                                  .j = std::get<5>(key),
-                                  .home = {std::get<0>(key), std::get<1>(key), std::get<2>(key)},
-                                  .id = BagId(level, key)};
-                if (total == 0)
-                    return;
+                const rx::RcBagShare share = ShareOf(level, key, bag);
+                for (uint32_t sub = 0; sub < rays; ++sub) {
+                    const rx::RcLevelRay levelRay = rx::RcBagRay(share, sub, rays, grid.low[0], grid.low[1],
+                                                                 grid.low[2]);
+                    if (levelRay.ray.energyShort == 0 && levelRay.ray.energyLong == 0)
+                        continue;
 
-                const Cell3& origin = bag.chosenOrigin;
-                levelRay.ray.originX = origin[0];
-                levelRay.ray.originY = origin[1];
-                levelRay.ray.originZ = origin[2];
-                levelRay.ray.energyShort = bag.energyShort;
-                levelRay.ray.energyLong = bag.energyLong;
-                WalkLevelRay(work, levelRay);
+                    WalkLevelRay(work, levelRay);
+                }
             };
 
             if (reverse) {
@@ -544,6 +409,16 @@ namespace bicameral::sim {
         if (params.intervalBlocks == 0 || params.intervalBlocks > 64)
             return std::unexpected("区間の長さは 1〜64 ブロック");
 
+        if (params.raysPerBag == 0 || params.raysPerBag > RAYS_PER_BAG_LIMIT)
+            return std::unexpected("袋 1 つの光線は 1〜64 本");
+
+        return {};
+    }
+
+    std::expected<void, std::string> CheckCascadeGrid(const CascadeGrid& grid) {
+        if (std::ranges::any_of(grid.size, [](int64_t side) { return side <= 0 || side > SIZE_LIMIT; }))
+            return std::unexpected("世界の箱の 1 辺は 1〜127 セル(溜めの出どころを 15bit × 3 に詰める。ADR-0432)");
+
         return {};
     }
 
@@ -552,21 +427,31 @@ namespace bicameral::sim {
         CascadeTickResult result;
         result.emitted.assign(grid.CellCount() * rx::LT_BANDS, 0);
         result.absorbed.assign(grid.CellCount() * rx::LT_BANDS, 0);
-        TickWork work{.grid = &grid, .params = &params, .tick = tick, .result = &result, .carry = {}, .bags = {}};
+        if (std::ranges::any_of(grid.size, [](int64_t side) { return side > SIZE_LIMIT; }))
+            return result;  // 溜めの出どころを詰められない(CheckCascadeGrid が先に断る)
+
+        const rx::RcStepConstants constants{.seed = params.seed,
+                                            .tick = tick,
+                                            .baseTexels = params.baseTexels,
+                                            .levels = params.levels,
+                                            .intervalBlocks = params.intervalBlocks,
+                                            .raysPerBag = params.raysPerBag};
+        TickWork work{
+            .grid = &grid, .params = &params, .constants = constants, .result = &result, .carry = {}, .bags = {}};
         work.bags.resize(params.levels);
 
         // --- 段 0: 面から放つ ---
-        const FaceWeights weights = MakeFaceWeights(params.baseTexels);
+        const std::array<std::vector<TexelOfFace>, rx::RC_FACES> texels = MakeFaceTexels(params.baseTexels);
         const SourceMap sources = CollectSources(work, carry);
         if (reverse) {
             for (auto it = sources.rbegin(); it != sources.rend(); ++it)
-                EmitFace(work, weights, it->first, it->second);
+                EmitFace(work, texels[it->first % rx::RC_FACES], it->first, it->second);
         } else {
             for (const auto& [key, source] : sources)
-                EmitFace(work, weights, key, source);
+                EmitFace(work, texels[key % rx::RC_FACES], key, source);
         }
 
-        // --- 段 1 から: 袋の重心から ---
+        // --- 段 1 から: 袋の溜めが選んだ出どころから ---
         for (uint32_t level = 1; level < params.levels; ++level)
             WalkBags(work, level, reverse);
 

@@ -193,7 +193,7 @@ views:
           note: "研究 R-R2(23 §5・§6)。影の柱が SunWalkRayCaught でレンズに入った量を取り、物の格子の点の光線を µm・Q30 の整数で屈折させて世界のセルへ(LnWalkWorld)。当たった面の強さは 2 mm の升。燃え始めの仮の行 LnHeatDoseStep(ADR-0426)。CPU リファレンス sim/sun_lens(FocusSunLight)。GPU は T-0990" }
       - { id: cascadelight, group: shared, status: research, label: "cascade_light.hlsli<br/>世界の中の光: 距離ごとの段(Radiance Cascades の型)",
           code: "shaders/common/cascade_light.hlsli::RcWalkRay", ticket: T-0958, doc: docs/decisions/ADR-0419-cascade-light-reciprocity.md,
-          note: "研究 R-R1。面から放つ(面の上で散らす・ずらした向きの cos)→ 整数の DDA で区間を歩く → 段 k + 1 の袋(ブロック × 升目。溜めから出どころを 1 本選ぶ)。CPU リファレンス sim/cascade_light(StepCascadeLight)。保存はビット単位・照り返しは次の刻みへ持ち越す(CascadeCarry)。GPU は T-0959" }
+          note: "研究 R-R1。面から放つ(面の上で散らす・ずらした向きの cos)→ 整数の DDA で区間を歩く → 段 k + 1 の袋(ブロック × 升目。溜めから出どころを 1 本選ぶ)。CPU リファレンス sim/cascade_light(StepCascadeLight)。保存はビット単位・照り返しは次の刻みへ持ち越す(CascadeCarry)。段の受け渡し(RcPassToNextLevel。T-0972 の 1b + 2)・溜め(RcPackReservoir)も核に置き、GPU sim/gpu_cascade_light(cascade_light.hlsl。袋は hash の表・64bit の atomic。ADR-0432)と CPU がビット一致(T-0959)" }
       - { id: lightvalues, group: shared, label: "light.hlsli<br/>物質の光の値(2 つの帯の吸い込み・照り返し)",
           code: "shaders/common/light.hlsli::LtCellBandOf", ticket: T-0910, doc: docs/decisions/ADR-0395-species-light-values-two-bands.md,
           note: "ベイク sim::BakeSpeciesLight(書かない固体・液体は灰色で通さない・気体は透明。D-610)→ BakedReactionTable::speciesLight → セルの帯ごとの Σ a·n と照り返し" }

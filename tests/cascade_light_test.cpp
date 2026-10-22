@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <functional>
 #include <numbers>
+#include <utility>
 #include <vector>
 
 #include "sim/cascade_light.h"
@@ -234,11 +235,31 @@ namespace {
     // --- 5. 筋(研究の記録)---
 
     struct RingResult {
-        double low = 0;
+        double low = 0;  // 全部の刻みの平均の、平均からのずれ
         double high = 0;
+        std::array<double, 3> averageWorst{};  // 60・250・500 刻みの平均の |ずれ| の最大(そこまで回した時)
+        double instantWorstMean = 0;           // 1 刻みごとの |ずれ| の最大の、刻みの平均(瞬間の筋)
+        double instantRms = 0;                 // 1 刻みごとの二乗平均のずれの、刻みの平均
         uint64_t raysPerTick = 0;
         double msPerTick = 0;
     };
+
+    // 受け手ごとの量(見かけの面と距離で割ったもの)の平均からのずれの |最大| と二乗平均
+    std::pair<double, double> Deviation(const std::vector<double>& values) {
+        double mean = 0;
+        for (const double value : values)
+            mean += value / static_cast<double>(values.size());
+
+        double worst = 0;
+        double squares = 0;
+        for (const double value : values) {
+            const double deviation = (value / mean) - 1;
+            worst = std::max(worst, std::fabs(deviation));
+            squares += deviation * deviation / static_cast<double>(values.size());
+        }
+
+        return {worst, std::sqrt(squares)};
+    }
 
     // 焚き火(1 セル)から 8 m(16 セル)の円の 24 か所の黒い受け手。受け手の見かけの面と距離で割って比べる
     RingResult MeasureRing(const CascadeParams& params, uint32_t ticks) {
@@ -262,15 +283,39 @@ namespace {
 
             return receiver ? Voxel{Material::Black, 0} : Voxel{};
         });
+        // 受け手の見かけの面と距離の重み。焚き火も受け手も立方体なので、向き θ の強さ ∝ 放つ側の見かけの面 × 受ける側の見かけの面 ÷ 距離²
+        // (どちらも |cos θ| + |sin θ|)。T-0958 の試験は受ける側だけで割っていて、軸の向きが 30 % 低く見えていた(T-0959 で直した。
+        // T-0972 の試作の測りは両方で割っていた)
+        std::vector<double> scale(COUNT, 0);
+        for (uint32_t k = 0; k < COUNT; ++k) {
+            const double dx = static_cast<double>(receivers[k][0] - CENTER);
+            const double dz = static_cast<double>(receivers[k][2] - CENTER);
+            const double distanceSquared = (dx * dx) + (dz * dz);
+            const double projected = (std::fabs(dx) + std::fabs(dz)) / std::sqrt(distanceSquared);
+            scale[k] = distanceSquared / (projected * projected);
+        }
+
         std::vector<double> sums(COUNT, 0);
         CascadeCarry carry;
         RingResult ring;
         const auto start = std::chrono::steady_clock::now();
         for (uint32_t tick = 0; tick < ticks; ++tick) {
             const CascadeTickResult result = StepCascadeLight(grid, carry, params, tick);
-            for (uint32_t k = 0; k < COUNT; ++k)
-                sums[k] += static_cast<double>(
-                    Received(result, grid.IndexOf(receivers[k][0], receivers[k][1], receivers[k][2])));
+            std::vector<double> one(COUNT, 0);
+            for (uint32_t k = 0; k < COUNT; ++k) {
+                one[k] = static_cast<double>(
+                             Received(result, grid.IndexOf(receivers[k][0], receivers[k][1], receivers[k][2]))) *
+                         scale[k];
+                sums[k] += one[k];
+            }
+
+            const auto [worst, rms] = Deviation(one);
+            ring.instantWorstMean += worst / ticks;
+            ring.instantRms += rms / ticks;
+            for (size_t at = 0; at < 3; ++at) {
+                if (tick + 1 == std::array<uint32_t, 3>{60, 250, 500}[at])
+                    ring.averageWorst[at] = Deviation(sums).first;
+            }
 
             ring.raysPerTick += result.rays;
             carry = result.carry;
@@ -280,15 +325,8 @@ namespace {
                          ticks;
         ring.raysPerTick /= ticks;
         double mean = 0;
-        for (uint32_t k = 0; k < COUNT; ++k) {
-            const double dx = static_cast<double>(receivers[k][0] - CENTER);
-            const double dz = static_cast<double>(receivers[k][2] - CENTER);
-            const double distanceSquared = (dx * dx) + (dz * dz);
-            const double projected = (std::fabs(dx) + std::fabs(dz)) /
-                                     std::sqrt(distanceSquared);  // 立方体の見かけの面
-            sums[k] /= projected / distanceSquared;
-            mean += sums[k] / COUNT;
-        }
+        for (const double sum : sums)
+            mean += sum / COUNT;
 
         ring.low = (*std::ranges::min_element(sums) / mean) - 1;
         ring.high = (*std::ranges::max_element(sums) / mean) - 1;
@@ -296,20 +334,34 @@ namespace {
         return ring;
     }
 
+    // 筋を 60 刻みの平均・250・500 刻みの平均・瞬間(1 刻み)で見る。形: 今の形(n0 = 4・5 段・袋 1 本)、光線を約 8 倍にした 2 つ
+    // (袋 8 本・n0 = 8)、段なしで向きを細かくした形(n0 = 128・1 段。瞬間の筋が光線の数でどう減るかの目安)。T-0959
     void RecordRing() {
         struct Form {
+            const char* name;
             uint32_t baseTexels;
             uint32_t levels;
+            uint32_t raysPerBag;
+            uint32_t ticks;
         };
-        for (const Form shape : {Form{4, 5}, Form{2, 5}}) {
-            const RingResult ring = MeasureRing(Params(shape.baseTexels, shape.levels), 60);
+        const std::array<Form, 4> forms = {Form{"今の形 n0 = 4・5 段", 4, 5, 1, 500},
+                                           Form{"袋 8 本 n0 = 4・5 段", 4, 5, 8, 30}, Form{"n0 = 8・5 段", 8, 5, 1, 30},
+                                           Form{"段なし n0 = 128・1 段", 128, 1, 1, 4}};
+        for (const Form& form : forms) {
+            CascadeParams params = Params(form.baseTexels, form.levels);
+            params.raysPerBag = form.raysPerBag;
+            const RingResult ring = MeasureRing(params, form.ticks);
             std::printf(
-                "筋(研究の記録): n0 = %u・%u 段: 8 m の円 %+.1f 〜 %+.1f %%(60 刻みの平均・線 ±10 %%)・%llu "
-                "本/刻み・%.1f ms/刻み\n",
-                shape.baseTexels, shape.levels, ring.low * 100, ring.high * 100,
+                "筋: %s: 8 m の円 瞬間 |ずれ|の最大 %.1f %%・二乗平均 %.1f %%(%u 刻みの平均)/ 平均 60 刻み %.1f "
+                "%%・250 刻み "
+                "%.1f %%・500 刻み %.1f %%(線 ±10 %%。0 は回していない)/ %u 刻みの平均 %+.1f 〜 %+.1f %%・%llu "
+                "本/刻み・"
+                "%.1f ms/刻み\n",
+                form.name, ring.instantWorstMean * 100, ring.instantRms * 100, form.ticks, ring.averageWorst[0] * 100,
+                ring.averageWorst[1] * 100, ring.averageWorst[2] * 100, form.ticks, ring.low * 100, ring.high * 100,
                 static_cast<unsigned long long>(ring.raysPerTick), ring.msPerTick);
-            // 研究が閉じるまでは悪くなっていないかだけを見る(種で ±15〜35 % と揺れる。T-0972)
-            EXPECT(shape.baseTexels != 4 || (ring.low > -0.50 && ring.high < 0.50));
+            // 研究の記録(合格の線は Q147 の答え待ち): 平均が悪くなっていないかだけを見る
+            EXPECT(form.ticks < 500 || ring.averageWorst[2] < 0.15);
         }
     }
 
@@ -324,12 +376,17 @@ namespace {
 
             return shell || block ? Voxel{Material::Stone, 1000000} : Voxel{};
         });
-        for (const uint32_t levels : {1u, 5u}) {
-            constexpr uint32_t TICKS = 20;
+        struct Run {
+            uint32_t levels;
+            uint32_t ticks;
+        };
+        for (const Run run : {Run{1, 20}, Run{2, 200}, Run{5, 60}}) {
+            const uint32_t levels = run.levels;
+            const uint32_t ticks = run.ticks;
             std::vector<double> net(grid.CellCount(), 0);
             std::vector<double> emitted(grid.CellCount(), 0);
             CascadeCarry carry;
-            for (uint32_t tick = 0; tick < TICKS; ++tick) {
+            for (uint32_t tick = 0; tick < ticks; ++tick) {
                 const CascadeTickResult result = StepCascadeLight(grid, carry, Params(4, levels), tick);
                 for (size_t cell = 0; cell < grid.CellCount(); ++cell) {
                     emitted[cell] += static_cast<double>(Emitted(result, cell));
@@ -352,13 +409,13 @@ namespace {
                     continue;
 
                 worstShare = std::max(worstShare, std::fabs(net[cell]) / emitted[cell]);
-                worstMk = std::max(worstMk, std::fabs(net[cell]) / TICKS / 65536.0 / 170000.0);
+                worstMk = std::max(worstMk, std::fabs(net[cell]) / ticks / 65536.0 / 170000.0);
             }
 
             std::printf(
                 "坂を下る(研究の記録): n0 = 4・%u 段: 正味 ÷ 放った 最大 %.1f %%・温度に直して最大 %.3f mK/刻み(%u "
                 "刻み)\n",
-                levels, worstShare * 100, worstMk, TICKS);
+                levels, worstShare * 100, worstMk, ticks);
             EXPECT(worstMk < 1.0);
         }
     }
@@ -463,6 +520,7 @@ namespace {
 }  // namespace
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // 途中で切れても(時間切れ)出した行が残るように
     TestGridFromTree();
     TestConservation();
     TestDeterministic();

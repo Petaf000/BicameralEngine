@@ -95,7 +95,7 @@ add_test(NAME object_heat COMMAND object_heat_test)
 add_executable(cascade_light_test cascade_light_test.cpp)
 target_link_libraries(cascade_light_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
 add_test(NAME cascade_light COMMAND cascade_light_test)
-set_tests_properties(cascade_light PROPERTIES TIMEOUT 600)
+set_tests_properties(cascade_light PROPERTIES TIMEOUT 1500)  # 筋の 500 刻み・坂の 200 刻み(T-0959)
 add_executable(radiation_lines_test radiation_lines_test.cpp)
 target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
 add_test(NAME radiation_lines COMMAND radiation_lines_test)
@@ -573,6 +573,12 @@ target_link_libraries(gpu_sun_column_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_sun_column gpu_sun_column_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_sun_column_warp gpu_sun_column_test warp --warp --queue compute)
 set_tests_properties(gpu_sun_column gpu_sun_column_warp PROPERTIES TIMEOUT 900)
+
+bicameral_add_gpu_test(gpu_cascade_light_test)  # 距離ごとの段の GPU と CPU のビット一致・費用(T-0959)
+target_link_libraries(gpu_cascade_light_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_cascade_light gpu_cascade_light_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_cascade_light_warp gpu_cascade_light_test warp --warp --queue compute)
+set_tests_properties(gpu_cascade_light gpu_cascade_light_warp PROPERTIES TIMEOUT 900)
 
 bicameral_add_gpu_test(gpu_multires_uniform_test)  # 一様なブロックの GPU と CPU のビット一致(T-0102)
 target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
@@ -1109,7 +1115,7 @@ foreach(_name IN ITEMS
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
     multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test cascade_light_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
-    gpu_reaction_test gpu_sun_column_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
+    gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test

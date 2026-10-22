@@ -5,7 +5,8 @@
 //   世界の木(MultiresNest。今はレベル 0 = 0.5 m の根だけ)+ 物質の光の値(BakedReactionTable::speciesLight)
 //   → MakeCascadeGrid(セルごとの温度と帯ごとの τ・照り返しの密な写し)
 //   → StepCascadeLight(1 刻み): 段 0 = 各セルの 6 面が熱(σT⁴ × 帯の割合 × α(1 − ρ))と前の刻みに返された光を Lambert で升目へ分けて放つ
-//     → 区間の終わりに残った量を段 k + 1 の袋(ブロック × 升目)へ → 袋の重心から段 k + 1 の光線 → … → 最後の段は世界の端まで
+//     → 区間の終わりに残った量を、量が出た軸ごとに段 k + 1 の袋(ブロック × 升目)へ(RcPassToNextLevel)→ 袋の溜めが選んだ出どころから
+//     段 k + 1 の光線(袋ごとに raysPerBag 本)→ … → 最後の段は世界の端まで。升目の中のずらしは刻みで巡る(T-0972 の 1b + 2。T-0959)
 //   → 出力: セルごと・帯ごとの「放った(熱で。セルから引く量)」「吸った(セルへ足す量)」、次の刻みへ持ち越す照り返し(CascadeCarry)、帯ごとの帳簿。
 // 出力はセルを書き換えない。吸った・放った分をセルのエネルギーへ当てる段・帳簿の理由の行・刻みの順(S42 の 7)は土台の仕事(T-0958 の申し送り)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
@@ -31,6 +32,8 @@ namespace bicameral::sim {
         uint64_t seed = 0;            // 世界の種(升目の中のずらし・余りの行き先。R6)
         // これより冷たいセルは熱で放たない(mK。0 = 全部放つ)。眠り(23 §4)を測るための口。返された光は温度によらず放つ
         uint32_t quietBelowMk = 0;
+        // 段 k ≥ 1 の袋 1 つから出す光線の数(1 = 今の形。量を等分し、升目の中のずらしの巡りの続きを使う。T-0959 の費用の比べ)
+        uint32_t raysPerBag = 1;
     };
 
     // 段 0(レベル 0 のセル)の密な写し。添字 = IndexOf
@@ -99,7 +102,10 @@ namespace bicameral::sim {
     [[nodiscard]] std::expected<CascadeGrid, std::string> MakeCascadeGrid(const MultiresNest& nest,
                                                                           const BakedReactionTable& table);
 
-    // 段の形を確かめる(升目は 1 辺 2^10 まで・段は 1〜8・区間は 1 以上)
+    // 世界の箱を確かめる(1 辺 127 セルまで。溜めの出どころを 15bit × 3 に詰める。ADR-0432。細かい葉・粗い根を読む形は T-0973)
+    [[nodiscard]] std::expected<void, std::string> CheckCascadeGrid(const CascadeGrid& grid);
+
+    // 段の形を確かめる(升目は 1 辺 2^10 まで・段は 1〜8・区間は 1 以上・袋の光線は 1〜64)
     [[nodiscard]] std::expected<void, std::string> CheckCascadeParams(const CascadeParams& params);
 
     // 1 刻み。carry = 前の刻みに返された光。reverse なら放つセル・袋を逆の順に回す(結果は順によらない: R3 の確かめ用)
