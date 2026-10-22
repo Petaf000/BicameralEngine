@@ -284,6 +284,11 @@ target_precompile_headers(face_opening_test PRIVATE ${PROJECT_SOURCE_DIR}/engine
 target_link_libraries(face_opening_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME face_opening COMMAND face_opening_test)
 set_tests_properties(face_opening PROPERTIES TIMEOUT 900)
+add_executable(face_open_gas_test face_open_gas_test.cpp)  # 気体が面の開き具合の欄を読む(陽解法・陰の圧力・溝に沿って煙と熱。T-0976)
+target_precompile_headers(face_open_gas_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_gas.h が D3D12 の型を使う
+target_link_libraries(face_open_gas_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME face_open_gas COMMAND face_open_gas_test)
+set_tests_properties(face_open_gas PROPERTIES TIMEOUT 1800)
 
 add_executable(case_b_box_test case_b_box_test.cpp)
 target_link_libraries(case_b_box_test PRIVATE bicameral_case_b bicameral_core)

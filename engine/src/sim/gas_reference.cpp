@@ -14,6 +14,7 @@
 #include <format>
 #include <limits>
 
+#include "common/face_opening.hlsli"
 #include "common/fixed.hlsli"
 #include "common/transport_apply.hlsli"
 #include "sim/gas_internal.h"
@@ -234,9 +235,21 @@ namespace bicameral::sim {
             return box.openQ16[side.index];
         }
 
-        // 面の開き(Q16)= 両側の空きの小さい方
+        // 面の塞ぐ割合(Q16。面の開き具合の欄の写し GasBox::faceBlockedQ16。持ち主は − 側のセル。無ければ 0 = 塞がない。T-0976)
+        uint32_t FaceBlocked(const GasBox& box, const GasFace& face) {
+            const std::vector<uint32_t>& blocked = box.faceBlockedQ16[face.axis];
+            if (blocked.empty() || face.left.kind != SideKind::Cell)
+                return 0;
+
+            return blocked[face.left.index];
+        }
+
+        // 面の開き(Q16)= min(両側の空きの小さい方, 1 − 塞ぐ割合)(face_opening.hlsli の FoFaceOpen。塞ぐ割合 0 なら両側の空きの小さい方のまま)
         uint32_t FaceOpen(const GasBox& box, const GasFace& face) {
-            return std::min(SideOpen(box, face.left), SideOpen(box, face.right));
+            assert(box.faceBlockedQ16[face.axis].empty() || !box.openQ16.empty());
+            const uint32_t cellsOpen = std::min(SideOpen(box, face.left), SideOpen(box, face.right));
+
+            return face_opening::FoFaceOpen(cellsOpen, FaceBlocked(box, face));
         }
 
         // value × numerator ÷ denominator(0 の向きへ切り捨て。投影も使う)
@@ -333,9 +346,10 @@ namespace bicameral::sim {
             if (face.left.kind == SideKind::Wall || face.right.kind == SideKind::Wall)
                 return;
 
-            face.flow = gas::GfFaceFlow(FlowParams(box), SideCell(box, forced, face.left).momentum[face.axis],
-                                        SideCell(box, forced, face.right).momentum[face.axis], SideOpen(box, face.left),
-                                        SideOpen(box, face.right), DrivingPressure(box, derived, face));
+            face.flow = gas::GfFaceFlowOpen(FlowParams(box), SideCell(box, forced, face.left).momentum[face.axis],
+                                            SideCell(box, forced, face.right).momentum[face.axis],
+                                            SideOpen(box, face.left), SideOpen(box, face.right), FaceOpen(box, face),
+                                            DrivingPressure(box, derived, face));
         }
 
         // 風上のセルの中身のうち移す割合(Q32。抑える前)

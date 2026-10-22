@@ -339,10 +339,10 @@ FX_FN int64_t GfPartialImpulse(GfParams params, uint32_t axis, int64_t scaledPre
 
 // 両側が箱の中か開いた境界の外の面の質量の流れ(mg/小刻み。左 → 右が正)。壁の面は呼ばない(0)。
 // 中心の流れ(両側の運動量の和)+ 圧力の拡散(Rusanov の散逸を圧力の差にかける: 接触面を散らさず、静止大気では 0)。
-// 一部だけ開いた面(T-0593)は、各側の運動量を「面の開き ÷ その側の空き」倍(孔の中の速さ × 開いた面積)、圧力の拡散を開きの倍。開き 0 は流さない
-FX_FN int64_t GfFaceFlow(GfParams params, int64_t momentumLeft, int64_t momentumRight, uint32_t openLeft,
-                         uint32_t openRight, int64_t driving) {
-    const uint32_t open = openLeft < openRight ? openLeft : openRight;
+// 一部だけ開いた面(T-0593)は、各側の運動量を「面の開き ÷ その側の空き」倍(孔の中の速さ × 開いた面積)、圧力の拡散を開きの倍。開き 0 は流さない。
+// 面の開き open は両側の空きの小さい方以下(面の開き具合の欄を読む面は face_opening.hlsli の FoFaceOpen。T-0976)
+FX_FN int64_t GfFaceFlowOpen(GfParams params, int64_t momentumLeft, int64_t momentumRight, uint32_t openLeft,
+                             uint32_t openRight, uint32_t open, int64_t driving) {
     if (open == 0)
         return 0;
 
@@ -358,6 +358,14 @@ FX_FN int64_t GfFaceFlow(GfParams params, int64_t momentumLeft, int64_t momentum
     const int64_t diffusion = FxMulShiftS64(scaledDriving, (int64_t)params.pressureFlow, 40);
 
     return central + diffusion;
+}
+
+// 面の開き = 両側の空きの小さい方(面の開き具合の欄を読まない面。GPU の段もこれ)
+FX_FN int64_t GfFaceFlow(GfParams params, int64_t momentumLeft, int64_t momentumRight, uint32_t openLeft,
+                         uint32_t openRight, int64_t driving) {
+    const uint32_t open = openLeft < openRight ? openLeft : openRight;
+
+    return GfFaceFlowOpen(params, momentumLeft, momentumRight, openLeft, openRight, open, driving);
 }
 
 // 風上のセルの中身のうち移す割合(Q32。抑える前)= |F| ÷ 風上の質量

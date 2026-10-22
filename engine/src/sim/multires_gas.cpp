@@ -14,6 +14,7 @@
 #include "core/aliases.h"
 #include "core/log.h"
 #include "sim/cell_view.h"
+#include "sim/face_opening.h"
 #include "sim/multires_fields.h"
 #include "sim/world_physics.h"
 
@@ -162,6 +163,8 @@ namespace bicameral::sim {
         struct GasRead {
             std::vector<reaction::RxCell> cells;
             std::vector<uint32_t> open;  // Q16。全部のセルが全部なら空(仮の世界と同じ = 空きを読まない見立ての値)
+            // 面の塞ぐ割合(Q16。気体の箱の軸ごと・セルの + 側の面。面の開き具合の欄の写し。塞ぐ面が無ければ空。T-0976)
+            std::array<std::vector<uint32_t>, GAS_AXES> blocked;
             GasCellFields fields;
         };
 
@@ -208,6 +211,40 @@ namespace bicameral::sim {
                 read.open.clear();
 
             return read;
+        }
+
+        // 面の開き具合の欄(sim/face_opening。登録した世界だけ。名前で引く。T-0976・ADR-0420)を気体の箱の軸の順に写す。
+        // 欄の軸は世界の軸なので、箱の軸 a は世界の軸 WeAxisUpLast(a) を読む。塞ぐ面が 1 つも無ければ写さない(今とビット単位で同じ)。
+        // 塞ぐ面がある時は空きを読む箱にする(空きが全部 1 でも。面の開き = min(両側の空き, 1 − 塞ぐ割合) を空きを読む式で読む)
+        void ReadFaceBlocked(const MultiresNest& nest, const GasGrid& grid, GasRead& read) {
+            const uint32_t field = FindNestField(nest, FACE_BLOCKED_FIELD_NAME);
+            if (field == MULTIRES_NO_FIELD)
+                return;
+
+            bool any = false;
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                read.blocked[axis].assign(grid.Count(), 0);
+
+            for (uint32_t order = 0; order < grid.slots.size(); ++order) {
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    const uint32_t cell = (order * MR_BLOCK_CELLS) + index;
+                    for (uint32_t axis = 0; axis < GAS_AXES; ++axis) {
+                        const uint32_t worldAxis = multires::WeAxisUpLast(axis);
+                        read.blocked[axis][cell] = LoadFaceBlockedQ16(nest, field, grid.slots[order], index, worldAxis);
+                        any = any || read.blocked[axis][cell] != 0;
+                    }
+                }
+            }
+
+            if (!any) {
+                for (std::vector<uint32_t>& axisBlocked : read.blocked)
+                    axisBlocked.clear();
+
+                return;
+            }
+
+            if (read.open.empty())
+                read.open.assign(grid.Count(), GAS_OPEN_FULL);
         }
 
         // 変わったブロックだけ書き戻す(セルか欄が変わったブロックを頁に広げる。セルが変わったブロックはつつく)
@@ -434,6 +471,7 @@ namespace bicameral::sim {
 
         // --- 刻みの初めの値(セル・気体の空き・欄)---
         GasRead read = ReadCells(nest, table, grid, m_fields, report);
+        ReadFaceBlocked(nest, grid, read);
 
         // --- セル → 気体の箱(層 = 世界の箱の z。基準の大気は一番下の層の高さから。層の厚さ・係数は根のレベル)---
         const GasAtmosphereLayers layers = MakeLayers(nest, table, grid.size[UP_AXIS], m_options);
@@ -446,6 +484,7 @@ namespace bicameral::sim {
         step.box.cells.resize(grid.Count());  // 抜けのある世界は箱より少ない
         step.box.tick = tick;
         step.box.openQ16 = read.open;
+        step.box.faceBlockedQ16 = read.blocked;
         step.box.cellLayers.resize(grid.Count());
         for (uint32_t cell = 0; cell < grid.Count(); ++cell)
             step.box.cellLayers[cell] = grid.places[cell][UP_AXIS];
