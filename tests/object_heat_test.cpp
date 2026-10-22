@@ -17,10 +17,12 @@
 //   5. 細かさ: 0.5 m と 0.25 m の世界で、燃え始めの刻みと燃え続けた時間が ±10 %(仮)
 // 試験の中の仮の口(土台の共通の口は足さない。CLAUDE.md §1.9)。シミュの値は整数で、double は表示だけ。
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <map>
 #include <set>
+#include <string_view>
 #include <vector>
 
 #include "common/heat_conduction.hlsli"
@@ -62,14 +64,18 @@ namespace {
 
     // 紙: 5 × 5 のボクセル 1 層の物(厚さ 0.1 mm の紙を、地面のすぐ上に枠で支える。地面との接触は試作に入れない)
     constexpr int32_t BODY_LEVEL = 6;  // 物の箱の細かさ: 0.5 m ÷ 2^6 = 7.8 mm
-    constexpr int32_t SHEET_SIDE = 5;
+    constexpr int32_t
+        SHEET_SIDE = 5;  // 箱 7.8 mm(レベル 6)の時の 1 辺のボクセルの数。ほかの細かさでは同じ大きさ(約 4 cm)になる奇数
     constexpr int64_t CELL_UM = 500000;
     constexpr uint64_t
         FULL_PAPER_UNITS = 1157000000;  // 紙で満たした箱(cellulose 1500 kg/m³。sun_column_scene と同じ数)
     constexpr uint64_t PAPER_THICKNESS_UM = 100;
     constexpr uint64_t AIR_OXYGEN_UNITS = 1092000;  // 空気(sun_column_scene と同じ。どのレベルでも同じ数 = 同じ濃さ)
     constexpr uint64_t AIR_NITROGEN_UNITS = 4108000;
-    constexpr uint32_t DEFAULT_DIFFUSIVITY_MM2_PER_S = 20;  // 混ざる速さを書いていない気体(O2 の現実の値の目安)
+    constexpr uint32_t DEFAULT_DIFFUSIVITY_MM2_PER_S = 20;
+    // 境の膜の厚さ(物の形と流れで決まる物理の長さ。箱の細かさによらない。T-1016 の 2 本目)。試作は 4 cm の紙の目安の定数 3.9 mm
+    // (箱 7.8 mm の半分と同じ値なので、箱 7.8 mm の結果は 1 本目と同じ)。0 = 箱の半分(T-0991 の形・T-1016 の 1 本目)
+    constexpr int64_t FILM_UM = 3906;  // 混ざる速さを書いていない気体(O2 の現実の値の目安)
 
     // 試験の表の伝導率の倍率を外して現実の値に戻す(data/packages/combustion_test/units.luau。放射と対流の代わりの倍率)
     constexpr uint32_t GAS_CONDUCTIVITY_SCALE = 5000;
@@ -186,12 +192,32 @@ namespace {
         return {.diffusionQ16 = (ratioQ16 * rootQ16) >> 16, .conductionQ16 = rootQ16};
     }
 
+    // 紙の 1 辺のボクセルの数(紙の大きさを細かさによらず約 4 cm に。奇数にして焦点をボクセルの真ん中に)
+    int32_t SheetSide(int32_t bodyLevel) {
+        const int32_t side = bodyLevel >= 6 ? SHEET_SIDE << (bodyLevel - 6) : SHEET_SIDE >> (6 - bodyLevel);
+
+        return std::max(side, 1) | 1;
+    }
+
+    // 物の中の隣のボクセルどうしの伝導率の決め方(T-1016 の調べ)。MoleWeighted: 今のセルと同じ(HcCellConductance。物質量で重み付けた平均)。
+    // VolumeWeighted: 体積で重み付けた平行の道(固体の体積の割合 × 固体の伝導率 + 残り × 気体の伝導率)。Off: 物の中の伝導なし
+    enum class InnerLaw : uint8_t {
+        MoleWeighted,
+        VolumeWeighted,
+        Off,
+    };
+
     // 試作の場面: 紙の物と、それを囲む空気のセル 1 つ(セルのレベルの単位)と、対の端数・帳簿
     struct Scene {
         int32_t bodyLevel = BODY_LEVEL;
         int32_t cellLevel = 0;
         FilmLaw film = FilmLaw::KineticTheory;
-        std::vector<rx::RxCell> voxels;  // [x + SHEET_SIDE × z]
+        InnerLaw inner = InnerLaw::VolumeWeighted;
+        int64_t filmUm = FILM_UM;
+        int32_t side = SHEET_SIDE;
+        // 対の面の小刻み(1 刻みに何回。箱 7.8 mm で 1、細かい箱は 4^(L − 6)。広がる家族の陽の小刻み 4^σ と同じ形。T-1016)
+        uint32_t substeps = 1;
+        std::vector<rx::RxCell> voxels;  // [x + side × z]
         std::vector<int64_t> light;      // ボクセルが 1 刻みに吸うレンズの光(ボクセルの単位)
         rx::RxCell air{};
         int64_t energyCarry = 0;                  // 対の端数(ボクセルの単位。まだセルへ渡していない分)
@@ -221,7 +247,8 @@ namespace {
                                  .micromolesPerCell = LENS_MICROMOLES_PER_CELL,
                                  .lensLevel = 9};
         const auto focused = FocusSunLight(nest, table, VERTICAL_SUN, cellLevel, shape);
-        std::vector<int64_t> light(SHEET_SIDE * SHEET_SIDE, 0);
+        const int32_t side = SheetSide(bodyLevel);
+        std::vector<int64_t> light(static_cast<size_t>(side * side), 0);
         if (!focused) {
             std::printf("FAILED: 集められない: %s\n", focused.error().c_str());
             ++failureCount;
@@ -241,15 +268,15 @@ namespace {
             // 升の真ん中から紙のボクセルの番号(紙の真ん中 = レンズの軸)
             const int64_t centreX = (spot[1] * mr::LN_SPOT_UM) + (mr::LN_SPOT_UM / 2);
             const int64_t centreZ = (spot[2] * mr::LN_SPOT_UM) + (mr::LN_SPOT_UM / 2);
-            const int64_t x = FloorDivide(
-                (2 * (centreX - LENS_X_UM) * (int64_t{1} << bodyLevel)) + (SHEET_SIDE * CELL_UM), 2 * CELL_UM);
-            const int64_t z = FloorDivide(
-                (2 * (centreZ - LENS_Z_UM) * (int64_t{1} << bodyLevel)) + (SHEET_SIDE * CELL_UM), 2 * CELL_UM);
-            if (x < 0 || x >= SHEET_SIDE || z < 0 || z >= SHEET_SIDE)
+            const int64_t x = FloorDivide((2 * (centreX - LENS_X_UM) * (int64_t{1} << bodyLevel)) + (side * CELL_UM),
+                                          2 * CELL_UM);
+            const int64_t z = FloorDivide((2 * (centreZ - LENS_Z_UM) * (int64_t{1} << bodyLevel)) + (side * CELL_UM),
+                                          2 * CELL_UM);
+            if (x < 0 || x >= side || z < 0 || z >= side)
                 continue;
 
             const uint64_t fine = (energy << toFine) >> fromRays;
-            light[static_cast<size_t>(x + (SHEET_SIDE * z))] += static_cast<int64_t>((fine * absorbQ16) >> 16);
+            light[static_cast<size_t>(x + (side * z))] += static_cast<int64_t>((fine * absorbQ16) >> 16);
         }
 
         return light;
@@ -269,7 +296,10 @@ namespace {
             {.species = table.SpeciesId("cellulose"), .amount = paperUnits},
             {.species = table.SpeciesId("oxygen"), .amount = AIR_OXYGEN_UNITS},
             {.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_UNITS}};
-        scene.voxels.assign(SHEET_SIDE * SHEET_SIDE, MakeReactionCell(table, voxel, test::SUN_ROOM_TEMPERATURE_MK));
+        scene.side = SheetSide(bodyLevel);
+        scene.substeps = bodyLevel > BODY_LEVEL ? 1u << (2 * (bodyLevel - BODY_LEVEL)) : 1u;
+        scene.voxels.assign(static_cast<size_t>(scene.side * scene.side),
+                            MakeReactionCell(table, voxel, test::SUN_ROOM_TEMPERATURE_MK));
         scene.air = test::MakeSunCell(table, test::SunMaterial::Air);
         scene.light = LensLightPerVoxel(table, cellLevel, bodyLevel);
 
@@ -284,9 +314,12 @@ namespace {
         std::map<uint32_t, int64_t> amounts;
     };
 
-    // 紙の両面の「面の広さ ÷ 細かい側の半分の長さ」(µm)= 2 s² ÷ (s ÷ 2) = 4 s
-    int64_t PairLengthUm(int32_t bodyLevel) {
-        return (4 * CELL_UM) >> bodyLevel;
+    // 紙の両面の「面の広さ ÷ 膜の厚さ」(µm)= 2 s² ÷ 膜。膜が 0 なら箱の半分(= 4 s。箱の細かさで変わる)
+    int64_t PairLengthUm(const Scene& scene) {
+        if (scene.filmUm == 0)
+            return (4 * CELL_UM) >> scene.bodyLevel;
+
+        return (2 * CELL_UM * CELL_UM >> (2 * scene.bodyLevel)) / scene.filmUm;
     }
 
     // 伝導: 囲むセルの気体の伝導率 × 4 s × ΔT × Δt(ボクセルの単位)
@@ -295,12 +328,12 @@ namespace {
         const uint64_t conductivity = uint64_t{rx::HcCellConductance(view, scene.air)} << rx::HC_CONDUCTANCE_SHIFT;
         const int64_t difference = int64_t{voxel.temperature} - int64_t{air.temperature};
         const FilmScale scale = FilmScaleOf(scene.film, voxel.temperature, air.temperature);
-        const uint64_t multiplier = (conductivity * static_cast<uint64_t>(PairLengthUm(scene.bodyLevel)) *
-                                     scale.conductionQ16) >>
+        const uint64_t multiplier = (conductivity * static_cast<uint64_t>(PairLengthUm(scene)) * scale.conductionQ16) >>
                                     16;
 
         // mW/(m·K) × µm × mK = 10^-12 W・1/60 s → mJ は ÷ (10^6 × 60000)。ボクセルの単位は × 8^L
-        return MulDivToward0(difference * (int64_t{1} << (3 * scene.bodyLevel)), multiplier, 60000000000ull);
+        return MulDivToward0(difference * (int64_t{1} << (3 * scene.bodyLevel)), multiplier,
+                             60000000000ull * scene.substeps);
     }
 
     // 放射: 紙の吸い込み(長い帯)× 囲む所(吸い込み 1)。RdPairCoefficient は 0.25 m² の面の値なので、紙の両面 2 s² に縮め、
@@ -320,7 +353,7 @@ namespace {
         const uint64_t limit = rx::RdPairLimit(voxel.heatCapacity, voxel.heatCapacity, 32768);
 
         return rx::RdPairFlow(static_cast<uint32_t>(voxel.temperature), static_cast<uint32_t>(air.temperature),
-                              std::min(coefficient, limit));
+                              std::min(coefficient, limit) / scene.substeps);
     }
 
     // 気体の混ざり: 物質ごとに 濃さの差 × 混ざる速さ × 4 s × Δt。運ぶ気体は出ていく側の温度の熱と化学のエネルギーを持っていく
@@ -344,11 +377,11 @@ namespace {
             const uint64_t diffusivity = table.speciesTransport[species].diffusivityMm2PerS.value_or(
                 DEFAULT_DIFFUSIVITY_MM2_PER_S);
             // mm²/s × µm × (単位 ÷ 0.125 m³)× 1/60 s = 単位 × 8 ÷ (60 × 10^12)。ボクセルの単位は × 8^L
-            const uint64_t multiplier = (diffusivity * static_cast<uint64_t>(PairLengthUm(scene.bodyLevel)) *
+            const uint64_t multiplier = (diffusivity * static_cast<uint64_t>(PairLengthUm(scene)) *
                                          film.diffusionQ16) >>
                                         16;
             int64_t moved = MulDivToward0(difference * (int64_t{8} << (3 * scene.bodyLevel)), multiplier,
-                                          60000000000000ull);
+                                          60000000000000ull * scene.substeps);
             if (moved > 0)
                 moved = std::min(moved, static_cast<int64_t>(AmountOf(cell, species)));
 
@@ -360,23 +393,64 @@ namespace {
             const int64_t temperature = moved > 0 ? voxel.temperature : air.temperature;
             const int64_t perUnit = (values.h0 * 1000000) + (int64_t{values.heatCapacity} * temperature);
             flow.amounts[species] += moved;
-            flow.energy += FloorDivide(moved * perUnit, 1000000000);
+            // 量 × 1 単位のエネルギーは 64bit を超えうる(熱分解の直後の水蒸気。T-1016 で見つけた桁あふれ)ので 128bit の積で
+            const int64_t carried = MulDivToward0(moved, static_cast<uint64_t>(perUnit < 0 ? -perUnit : perUnit),
+                                                  1000000000);
+            flow.energy += perUnit < 0 ? -carried : carried;
         }
     }
 
     // 物の中の伝導(隣のボクセルどうし。面 s²・距離 s。伝導率は両側の小さい方)。a → b が正
-    int64_t InnerConduction(const ReactionTableView& view, const Scene& scene, const rx::RxCell& a, const rx::RxCell& b,
-                            const rx::RxThermal& thermalA, const rx::RxThermal& thermalB) {
-        const uint64_t conductivity = uint64_t{std::min(rx::HcCellConductance(view, a), rx::HcCellConductance(view, b))}
-                                      << rx::HC_CONDUCTANCE_SHIFT;
+    // 体積で重み付けた箱の伝導率(mW/(m·K))。固体・液体の体積 = 量 × モル体積、残りは気体(気体どうしは物質量の平均)
+    uint64_t VolumeConductivity(const BakedReactionTable& table, const rx::RxCell& cell) {
+        constexpr uint64_t BOX_MM3 = 125000000000;  // 0.125 m³(そのレベルの単位の量は 濃さ × 0.125 m³)
+        uint64_t condensedMm3 = 0;
+        uint64_t condensedWeighted = 0;
+        uint64_t gasAmount = 0;
+        uint64_t gasWeighted = 0;
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            const uint32_t species = cell.species[i];
+            const uint64_t conductivity = table.species[species].conductivity;
+            if (table.speciesPhase[species] == SpeciesPhase::Gas) {
+                gasAmount += cell.amounts[i];
+                gasWeighted += cell.amounts[i] * conductivity;
+                continue;
+            }
+
+            const uint64_t volume = (cell.amounts[i] * table.speciesMolarVolume[species]) / 1000000;
+            condensedMm3 += volume;
+            condensedWeighted += volume * conductivity;
+        }
+
+        const uint64_t gasConductivity = gasAmount == 0 ? 0 : gasWeighted / gasAmount;
+        const uint64_t gasMm3 = BOX_MM3 - std::min(condensedMm3, BOX_MM3);
+
+        return (condensedWeighted + (gasMm3 * gasConductivity)) / BOX_MM3;
+    }
+
+    uint64_t InnerConductivity(const BakedReactionTable& table, const Scene& scene, const rx::RxCell& cell) {
+        if (scene.inner == InnerLaw::VolumeWeighted)
+            return VolumeConductivity(table, cell);
+
+        return uint64_t{rx::HcCellConductance(table.View(), cell)} << rx::HC_CONDUCTANCE_SHIFT;
+    }
+
+    // 物の中の伝導(隣のボクセルどうし。面 s²・距離 s。伝導率は両側の小さい方)。a → b が正
+    int64_t InnerConduction(const BakedReactionTable& table, const Scene& scene, const rx::RxCell& a,
+                            const rx::RxCell& b, const rx::RxThermal& thermalA, const rx::RxThermal& thermalB) {
+        if (scene.inner == InnerLaw::Off)
+            return 0;
+
+        const uint64_t conductivity = std::min(InnerConductivity(table, scene, a), InnerConductivity(table, scene, b));
         const int64_t difference = int64_t{thermalA.temperature} - int64_t{thermalB.temperature};
         const uint64_t multiplier = conductivity * static_cast<uint64_t>(CELL_UM >> scene.bodyLevel);
 
-        return MulDivToward0(difference * (int64_t{1} << (3 * scene.bodyLevel)), multiplier, 60000000000ull);
+        return MulDivToward0(difference * (int64_t{1} << (3 * scene.bodyLevel)), multiplier,
+                             60000000000ull * scene.substeps);
     }
 
     // 1 刻みの受け渡し(Jacobi: 刻みの初めの値だけから計算し、全部を後で当てる)。reverse ならボクセルを逆の順に
-    void StepExchange(const BakedReactionTable& table, Scene& scene, bool lensOn, bool reverse) {
+    void StepExchangeOnce(const BakedReactionTable& table, Scene& scene, bool lensOn, bool reverse, uint32_t sub) {
         const ReactionTableView view = table.View();
         const size_t count = scene.voxels.size();
         std::vector<rx::RxThermal> thermals(count);
@@ -396,18 +470,19 @@ namespace {
             PairGas(table, scene, cell, thermals[i], air, flows[i]);
 
             // 物の中の面は +x と +z の隣だけを持ち主として 1 回
-            const auto x = static_cast<int32_t>(i % SHEET_SIDE);
-            const auto z = static_cast<int32_t>(i / SHEET_SIDE);
-            if (x + 1 < SHEET_SIDE) {
-                const int64_t heat = InnerConduction(view, scene, cell, scene.voxels[i + 1], thermals[i],
+            const auto side = static_cast<size_t>(scene.side);
+            const auto x = static_cast<int32_t>(i % side);
+            const auto z = static_cast<int32_t>(i / side);
+            if (x + 1 < scene.side) {
+                const int64_t heat = InnerConduction(table, scene, cell, scene.voxels[i + 1], thermals[i],
                                                      thermals[i + 1]);
                 inner[i] -= heat;
                 inner[i + 1] += heat;
             }
 
-            if (z + 1 < SHEET_SIDE) {
-                const size_t next = i + SHEET_SIDE;
-                const int64_t heat = InnerConduction(view, scene, cell, scene.voxels[next], thermals[i],
+            if (z + 1 < scene.side) {
+                const size_t next = i + side;
+                const int64_t heat = InnerConduction(table, scene, cell, scene.voxels[next], thermals[i],
                                                      thermals[next]);
                 inner[i] -= heat;
                 inner[next] += heat;
@@ -419,7 +494,10 @@ namespace {
         std::map<uint32_t, int64_t> toCellAmounts;
         for (size_t i = 0; i < count; ++i) {
             rx::RxCell& cell = scene.voxels[i];
-            const int64_t sunlight = lensOn ? scene.light[i] : 0;
+            // 光は小刻みに等しく分ける(端数は後ろの小刻みへ。足すと 1 刻みの量に戻る)
+            const int64_t steps = scene.substeps;
+            const int64_t sunlight = lensOn ? ((scene.light[i] * (sub + 1)) / steps) - ((scene.light[i] * sub) / steps)
+                                            : 0;
             cell.energy += sunlight + inner[i] - flows[i].energy;
             scene.sunIn += sunlight;
             toCellEnergy += flows[i].energy;
@@ -440,6 +518,12 @@ namespace {
             scene.amountCarry[species] = total - (coarse * scale);
             scene.overflowed |= !AddAmount(scene.air, species, coarse);
         }
+    }
+
+    // 1 刻みの受け渡し = 対の面の小刻みを scene.substeps 回(刻みの初めの値は小刻みごと)
+    void StepExchange(const BakedReactionTable& table, Scene& scene, bool lensOn, bool reverse) {
+        for (uint32_t sub = 0; sub < scene.substeps; ++sub)
+            StepExchangeOnce(table, scene, lensOn, reverse, sub);
     }
 
     // 反応(セルと同じ関数)。ボクセルごとの反応の熱(化学のエネルギーの減り。ボクセルの単位の µJ/刻み)を返す
@@ -524,20 +608,33 @@ namespace {
         uint32_t burntVoxels = 0;           // 燃える固体が半分以下になったボクセル
         int32_t peakMilliKelvin = 0;
         int32_t airMilliKelvin = 0;
-        double lensWatts = 0.0;  // 表示だけ
+        double lensWatts = 0.0;           // 表示だけ
+        uint32_t focalLightPermille = 0;  // 紙が吸う光のうち焦点のボクセルの分
+        int32_t voxelCount = 0;
         bool conserved = true;
+        bool heatStayedPositive =
+            true;  // ボクセルの熱が負にならなかった(桁あふれの見張り。保存の検査は両側に同じ値なので見つけない)
         uint64_t digest = 0;
     };
 
     BurnRun RunBurn(const BakedReactionTable& table, int32_t cellLevel, int32_t bodyLevel,
-                    FilmLaw film = FilmLaw::KineticTheory, bool reverse = false, bool trace = false) {
+                    FilmLaw film = FilmLaw::KineticTheory, bool reverse = false, bool trace = false,
+                    InnerLaw inner = InnerLaw::VolumeWeighted, int64_t filmUm = FILM_UM) {
         Scene scene = MakeScene(table, cellLevel, bodyLevel, film);
+        scene.inner = inner;
+        scene.filmUm = filmUm;
         const ReactionTableView view = table.View();
         const auto focal = static_cast<size_t>(std::max_element(scene.light.begin(), scene.light.end()) -
                                                scene.light.begin());
         const uint64_t focalFuel = FuelCarbon(table, scene.voxels[focal]);
         const Totals initial = Measure(table, scene);
         BurnRun run;
+        run.voxelCount = scene.side * scene.side;
+        int64_t lightSum = 0;
+        for (const int64_t light : scene.light)
+            lightSum += light;
+
+        run.focalLightPermille = static_cast<uint32_t>((scene.light[focal] * 1000) / std::max<int64_t>(lightSum, 1));
         for (const int64_t light : scene.light)
             run.lensWatts += static_cast<double>(light) * 60.0 / 1000.0 /
                              static_cast<double>(int64_t{1} << (3 * bodyLevel));
@@ -556,20 +653,25 @@ namespace {
                 if (AtLeastMilliwatts(released[i], BURNING_MILLIWATTS, bodyLevel))
                     run.lastBurningTick = tick;
 
-                run.peakMilliKelvin = std::max(run.peakMilliKelvin,
-                                               rx::RxComputeThermal(view, scene.voxels[i]).temperature);
+                const rx::RxThermal thermal = rx::RxComputeThermal(view, scene.voxels[i]);
+                run.peakMilliKelvin = std::max(run.peakMilliKelvin, thermal.temperature);
+                run.heatStayedPositive = run.heatStayedPositive && thermal.heat > 0;
             }
 
-            if (trace && tick % 15 == 0 && tick <= 600) {
+            if (trace && tick % 5 == 0 && tick <= 200) {
                 const rx::RxCell& cell = scene.voxels[focal];
-                std::printf("  刻み %u: 焦点 %.0f K・O2 %llu・紙 %llu・炭 %llu・CO2 %llu・反応の熱 %.3f W\n", tick,
-                            rx::RxComputeThermal(view, cell).temperature / 1000.0,
-                            static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("oxygen"))),
-                            static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("cellulose"))),
-                            static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("carbon"))),
-                            static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("carbon_dioxide"))),
-                            static_cast<double>(released[focal]) * 60.0 / 1.0e6 /
-                                static_cast<double>(int64_t{1} << (3 * bodyLevel)));
+                std::printf(
+                    "  刻み %u: 焦点 %.0f K・隣 %.0f K・O2 %llu・H2O %llu・紙 %llu・炭 %llu・CO2 %llu・反応の熱 %.3f "
+                    "W\n",
+                    tick, rx::RxComputeThermal(view, cell).temperature / 1000.0,
+                    rx::RxComputeThermal(view, scene.voxels[focal + 1]).temperature / 1000.0,
+                    static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("oxygen"))),
+                    static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("water_vapor"))),
+                    static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("cellulose"))),
+                    static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("carbon"))),
+                    static_cast<unsigned long long>(AmountOf(cell, table.SpeciesId("carbon_dioxide"))),
+                    static_cast<double>(released[focal]) * 60.0 / 1.0e6 /
+                        static_cast<double>(int64_t{1} << (3 * bodyLevel)));
             }
 
             run.conserved = run.conserved && !scene.overflowed && Measure(table, scene) == initial;
@@ -592,11 +694,11 @@ namespace {
         std::printf(
             "%s: 紙が吸うレンズの光 %.2f W・燃え始め %u 刻み(%.2f s)・レンズを外した %u 刻み・最後に燃えていた %u 刻み"
             "(外してから %.2f s 燃え続けた)・焦点のボクセルの燃える固体の残り %.1f %%・燃えたボクセル %u / %d・"
-            "一番熱い %.0f K・囲むセル %.4f K・保存 %s\n",
+            "一番熱い %.0f K・囲むセル %.4f K・保存 %s・熱 %s\n",
             label, run.lensWatts, run.ignitionTick, run.ignitionTick / 60.0, run.lensOffTick, run.lastBurningTick,
             run.lastBurningTick > run.lensOffTick ? (run.lastBurningTick - run.lensOffTick) / 60.0 : 0.0,
-            run.focalLeftPermille / 10.0, run.burntVoxels, SHEET_SIDE * SHEET_SIDE, run.peakMilliKelvin / 1000.0,
-            run.airMilliKelvin / 1000.0, run.conserved ? "0" : "崩れた");
+            run.focalLeftPermille / 10.0, run.burntVoxels, run.voxelCount, run.peakMilliKelvin / 1000.0,
+            run.airMilliKelvin / 1000.0, run.conserved ? "0" : "崩れた", run.heatStayedPositive ? "正" : "負になった");
     }
 
     uint32_t BurnTicks(const BurnRun& run) {
@@ -607,7 +709,7 @@ namespace {
         // 1 本目(膜の値は室温のまま)は記録だけ: 燃え始めるが、炭が O2 の入りより放射で冷えて 1 s ほどで消える
         PrintBurn("1 本目(0.5 m の世界・紙の箱 7.8 mm・膜の値は室温のまま)",
                   RunBurn(table, 0, BODY_LEVEL, FilmLaw::Constant));
-        const BurnRun coarse = RunBurn(table, 0, BODY_LEVEL, FilmLaw::KineticTheory, false, true);
+        const BurnRun coarse = RunBurn(table, 0, BODY_LEVEL);
         const BurnRun fine = RunBurn(table, 1, BODY_LEVEL);
         PrintBurn("燃え続ける(0.5 m の世界・紙の箱 7.8 mm)", coarse);
         PrintBurn("燃え続ける(0.25 m の世界・紙の箱 7.8 mm)", fine);
@@ -619,6 +721,7 @@ namespace {
 
         // 3. 保存
         EXPECT(coarse.conserved && fine.conserved);
+        EXPECT(coarse.heatStayedPositive && fine.heatStayedPositive);
 
         // 5. 細かさ: 燃え始めの刻みと燃え続けた時間が ±10 %(仮)
         EXPECT(fine.ignitionTick != 0);
@@ -639,8 +742,17 @@ namespace {
                     static_cast<unsigned long long>(reversed.digest));
         EXPECT(coarse.digest == again.digest && coarse.digest == reversed.digest);
 
-        // 物の箱の細かさを変えた記録(箱が焦点より粗いと焦点の熱が箱に均される。合否にしない)
-        PrintBurn("記録(0.5 m の世界・紙の箱 3.9 mm)", RunBurn(table, 0, BODY_LEVEL + 1));
+        // 6. 物の箱の細かさ(T-1016): 箱 3.9 mm でも燃え始めて燃え続け、焦点のボクセルが燃え切る。燃え続けた時間は箱 7.8 mm と ±20 %(仮)。
+        //    燃え始めの時刻は箱で変わる(細かい箱ほど焦点の強い所を分けて持つ。記録だけ)
+        const BurnRun finerBox = RunBurn(table, 0, BODY_LEVEL + 1);
+        PrintBurn("箱の細かさ(0.5 m の世界・紙の箱 3.9 mm)", finerBox);
+        std::printf("箱の細かさ: 燃え続けた時間の差 %.2f %%\n",
+                    100.0 * difference(BurnTicks(coarse), BurnTicks(finerBox)));
+        EXPECT(finerBox.ignitionTick != 0 && finerBox.focalLeftPermille <= 100 && finerBox.conserved &&
+               finerBox.heatStayedPositive);
+        EXPECT(difference(BurnTicks(coarse), BurnTicks(finerBox)) <= 0.20);
+
+        // 箱が焦点より粗いと焦点の熱が箱に均される(合否にしない)
         PrintBurn("記録(0.5 m の世界・紙の箱 15.6 mm)", RunBurn(table, 0, BODY_LEVEL - 1));
     }
 
@@ -685,10 +797,41 @@ namespace {
         EXPECT(end - start < 10000 && releasedTotal < 1000000);
     }
 
+    // --- T-1016 の調べ(--probe。合否にしない): 物の箱の細かさ × 物の中の伝導率の決め方 ---
+
+    void Probe(const BakedReactionTable& table) {
+        struct Model {
+            const char* name;
+            InnerLaw inner;
+            int64_t filmUm;
+        };
+        constexpr std::array<Model, 4> MODELS = {
+            Model{"1 本目の形: 膜 = 箱の半分・物の中は物質量の平均", InnerLaw::MoleWeighted, 0},
+            Model{"膜 = 箱の半分・物の中は体積の平行", InnerLaw::VolumeWeighted, 0},
+            Model{"膜 = 3.9 mm の定数・物の中は物質量の平均", InnerLaw::MoleWeighted, FILM_UM},
+            Model{"2 本目: 膜 = 3.9 mm の定数・物の中は体積の平行", InnerLaw::VolumeWeighted, FILM_UM}};
+        for (const Model& model : MODELS) {
+            for (int32_t level = 5; level <= 8; ++level) {
+                const BurnRun run = RunBurn(table, 0, level, FilmLaw::KineticTheory, false, false, model.inner,
+                                            model.filmUm);
+                char label[200];
+                std::snprintf(label, sizeof(label), "調べ(%s・箱 %.1f mm・焦点の光 %.1f %%)", model.name,
+                              500.0 / static_cast<double>(1 << level), run.focalLightPermille / 10.0);
+                PrintBurn(label, run);
+            }
+        }
+    }
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const BakedReactionTable table = MakeTable();
+    if (argc > 1 && std::string_view(argv[1]) == "--probe") {
+        Probe(table);
+
+        return 0;
+    }
+
     TestBurnsOn(table);
     TestMixedIntoCell(table);
     if (failureCount != 0) {
