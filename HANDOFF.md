@@ -18,7 +18,8 @@
 - **マージ**(`--no-ff`・衝突なし): t-0953-base-layer(ee7f509。T-1008 の CPU 分: 木の細かくする/粗くする要求が種からの距離で `GradedCoarseness` を読む・呼ぶ側が選んで呼ぶ形で、呼ばない今の木は変わらない・試験 multires_graded・ADR-0436)。release のビルドが通った(警告 0)。
   確かめ(release・1 本ずつ): multires_graded(114 秒)・multires・multires_activity・multires_grading・environment_package。全部合格。archmap --check OK。
 - 記録: ROADMAP の T-1008 を「CPU 済み。残り T-1028 GPU とゲームの道で呼ぶ・20 km の実際の葉の数」・T-0872(R-B2)を作業中(wt2 t-0872-rb2-fracture)。worker-common.md に「job.py を 20 秒前後で切ると投入されないことがある」。
-  COMMANDER: wt2 に T-1040〜T-1042・ADR-0440(T-1009・T-1029・T-1030 は使っていない)。**番号の重なり: ADR-0436(main の graded-tree-requests と wt3 の grain-moving-friction)・T-1019(描画 M7 と wt3 の impact-turn)。wt3 のマージの時に付け直す**。次の番号は **D-633・ADR-0441・T-1043・Q154**。
+  COMMANDER: wt2 に T-1040〜T-1042・ADR-0440(T-1009・T-1029・T-1030 は使っていない)。**番号の重なり: ADR-0436(main の graded-tree-requests と wt3 の grain-moving-friction)・T-1019(描画 M7 と wt3 の impact-turn)。wt3 のマージの時に付け直す**。wt3 に T-1043〜T-1045・ADR-0441。次の番号は **D-633・ADR-0442・T-1046・Q154**。
+  R3: wt3 の T-1019(縦の運動量を横へ)も打ち切り(ADR-0438 Rejected)。真空なら 0.25 m で 6.50 m まで伸びる → 根は粒と空気の引きずり(T-1003。砂時計と同じ根)。R3 の判定は T-1003 の後(司令塔)。T-1003 作業中(wt3)・T-1034・T-1035 の行。
 
 ## この仕事でしたこと(2026-10-22・本体の作業役・t-0953-base-layer のマージ・R-T2/R3 の記録)
 - **マージ**(`--no-ff`・衝突なし): t-0953-base-layer(e1a4119。T-0953 基準の層を粗さをまたいで整数の和が合う形に〔10 km の柱で速さ 0・揺れ 0・境の段差 0〕・T-0954 細かい所の半径と移り目を世界のデータで〔fine_region。木はまだ読まない → T-1008〕・ADR-0431)。release のビルドが通った(警告 0)。
