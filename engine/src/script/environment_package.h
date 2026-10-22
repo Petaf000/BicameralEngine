@@ -48,6 +48,8 @@ namespace bicameral::script {
     constexpr std::string_view ENVIRONMENT_GAS_PRESSURE_SPEED_KEY = "gas_pressure_speed";
     // 釣り合う家族の V の回数 = { gas_pressure, liquid_pressure, support }(1〜16。書かない法則は 2。T-0955。名前は仮)
     constexpr std::string_view ENVIRONMENT_BALANCE_CYCLES_KEY = "balance_cycles";
+    // 細かい所の半径と移り目 = { radius_mm, far_leaf_mm, levels_per_doubling }(書かない欄は既定。T-0954。名前は仮)
+    constexpr std::string_view ENVIRONMENT_FINE_REGION_KEY = "fine_region";
     constexpr std::string_view ATMOSPHERE_CATEGORY = "atmosphere";
 
     // 合わせた表から世界の物理の値を作る。分類が無ければブランク(全部 0)。誤りは「パッケージ X: environment.鍵: 何が違うか」。

@@ -221,6 +221,41 @@ namespace {
             EXPECT(Contains(checked.error(), "V の回数"));
     }
 
+    // 細かい所の半径と移り目(T-0954): 書かない世界・書かない欄は既定。長さは 0〜1000 km の整数(遠くの葉は 1 以上)・段の数は 1〜8。
+    // 外・知らない欄・小数は名前付きで誤り
+    void TestFineRegion() {
+        const auto blank = ReadEnvironmentInit("return { elements = {} }");
+        EXPECT(blank && blank->fineRegion == sim::FineRegion{});
+        EXPECT(blank && blank->fineRegion.radiusMm == sim::FINE_REGION_RADIUS_DEFAULT_MM &&
+               blank->fineRegion.farLeafMm == sim::FINE_REGION_FAR_LEAF_DEFAULT_MM &&
+               blank->fineRegion.levelsPerDoubling == sim::FINE_REGION_LEVELS_PER_DOUBLING_DEFAULT);
+
+        const auto wide = ReadEnvironmentInit("return { environment = { fine_region = { radius_mm = 256000 } } }");
+        EXPECT(wide && wide->fineRegion.radiusMm == 256000 &&
+               wide->fineRegion.farLeafMm == sim::FINE_REGION_FAR_LEAF_DEFAULT_MM);
+
+        const auto all = ReadEnvironmentInit(
+            "return { environment = { fine_region = { radius_mm = 64000, "
+            "far_leaf_mm = 16000, levels_per_doubling = 2 } } }");
+        EXPECT(all && all->fineRegion.radiusMm == 64000 && all->fineRegion.farLeafMm == 16000 &&
+               all->fineRegion.levelsPerDoubling == 2);
+
+        ExpectRejected("return { environment = { fine_region = { levels_per_doubling = 0 } } }", "範囲");
+        ExpectRejected("return { environment = { fine_region = { levels_per_doubling = 9 } } }", "範囲");
+        ExpectRejected("return { environment = { fine_region = { far_leaf_mm = 0 } } }", "範囲");
+        ExpectRejected("return { environment = { fine_region = { radius_mm = -1 } } }", "範囲");
+        ExpectRejected("return { environment = { fine_region = { radius_mm = 1.5 } } }", "整数");
+        ExpectRejected("return { environment = { fine_region = { radius = 4 } } }", "fine_region");
+        ExpectRejected("return { environment = { fine_region = 4 } }", "fine_region");
+
+        sim::WorldPhysics zero;
+        zero.fineRegion.levelsPerDoubling = 0;
+        const auto checked = sim::CheckWorldPhysics(zero);
+        EXPECT(!checked);
+        if (!checked)
+            EXPECT(Contains(checked.error(), "移り目"));
+    }
+
     // 気体の圧力の伝わる速さ(T-0804・D-526 ②): 書かない世界は本物の音速(D-519)・"sound" / "instant"・ほかの文字や数は名前付きで誤り。
     // 最速がまだ効かない置き場の知らせは最速の世界だけ
     void TestGasPressureSpeed() {
@@ -341,6 +376,7 @@ int main() {
     TestWorldEdges();
     TestGasPressureSpeed();
     TestBalanceCycles();
+    TestFineRegion();
     TestWorldNotices();
     TestBakedTableCarriesEnvironment();
     TestHotReloadChecksEnvironment();
