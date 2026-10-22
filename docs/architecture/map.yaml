@@ -388,6 +388,11 @@ views:
       - { id: timesteplab, group: simlib, label: "StepTimeStepLab<br/>研究 R-T2 の試作(T-0856)<br/>状態が変わる速さで刻みの長さ 2^e を選ぶ",
           code: "engine/src/sim/time_step_lab.cpp::StepTimeStepLab", ticket: T-0856, doc: docs/decisions/ADR-0410-step-length-rule-trial.md,
           note: "捨てる試作(CPU・1 本の列)。歩の終わりの刻みだけを回すので早送り = 待ったがビット一致。運ぶ・広がるは後ろ向きの Euler(長さを C・g・源に)・反応は閉じた形。式は shaders/common/time_step.hlsli" }
+      - { id: timesteptree, group: simlib, label: "StepTimeTree<br/>研究 R-T2 の 2(T-0950)<br/>木のブロックの歩 2^e で熱を C-0 で解く",
+          code: "engine/src/sim/time_step_tree.cpp::StepTimeTree", ticket: T-0950, doc: docs/decisions/ADR-0423-step-length-on-tree.md,
+          note: "捨てる試作(CPU)。セルは MultiresCellStore・解きは SolveEquilibrium(差の形・長さを C・g・源に)・導かれる値は C-1 の欄(眠った所は眠った時の平均)。歩の記録は仮の口 TimeTreeSteps(C-1 に要る口は T-0950)" }
+      - { id: timesteptreetest, group: tests, label: "time_step_tree_test<br/>木の上で長い刻みと毎刻み・0.5 m と 1 m・早送り・歩の途中のセーブ",
+          code: "tests/time_step_tree_test.cpp::CheckScene", ticket: T-0950 }
       - { id: timesteplabtest, group: tests, label: "time_step_lab_test<br/>長い刻みと毎刻みが計器の精度の内・0.5 m と 2 m で同じ e・早送りのビット一致",
           code: "tests/time_step_lab_test.cpp::CheckRiver", ticket: T-0856 }
       - { id: gpugasprojection, group: simlib, label: "GpuImplicit::RecordSolve<br/>圧力の投影の解く部分を GPU で(T-0531)<br/>一般の右辺の V サイクル・式の誤差で止める",
@@ -690,6 +695,8 @@ views:
       - [equilibrium, equilibriumfields, "温めた始まりを欄から読む・書く(T-0922)"]
       - [equilibriumblock, equilibriumfields, "同(k 成分)"]
       - [timesteplabtest, timesteplab, "精度・細かさ・早送り"]
+      - [timesteptreetest, timesteptree, "精度・細かさ・早送り・セーブ"]
+      - [timesteptree, equilibrium, "長さを C・g・源に入れて解く"]
       - [gpugasprojection, gasprojection, "同じ解きをビット一致で"]
       - [gpugasprojection, gpuimplicit, "V サイクルの段を使い回す"]
       - [gpugasprojectionstep, gpuequilibrium, "部品の上で解く(T-0915)"]
