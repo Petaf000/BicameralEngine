@@ -76,7 +76,7 @@ namespace bicameral::sim {
 
     // --- 細かい所の半径と移り目(T-0954・ADR-0431。20 §11.1。物理の長さ mm)---
     // 環境の fine_region = { radius_mm, far_leaf_mm, levels_per_doubling }(名前は仮)。距離は局所の状態で細かくした所(種: 活性・前線・割れの先端)
-    // からで、視点からではない(D-544)。半径の内は細かいセルのまま、その外は距離が 2 倍になるごとに levels_per_doubling 段ずつ粗く、
+    // からで、視点からではない(D-544・D-623)。半径の内は細かいセルのまま、その外は距離が 2 倍になるごとに levels_per_doubling 段ずつ粗く、
     // 遠くの葉の大きさで頭打ち(規則は sim/multires_grading)。既定は T-0900 M-0 の仮の幅の内(半径 128 m・遠くの葉 32 m・1 段。
     // 20 km の見込みは docs/perf.md)。どの値にするかは描画と並ぶ VRAM の線(D-209)で決まるゲームの中身
     inline constexpr uint64_t FINE_REGION_RADIUS_DEFAULT_MM = 128000;

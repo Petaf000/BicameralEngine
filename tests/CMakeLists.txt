@@ -311,6 +311,9 @@ add_test(NAME gas_base_layers COMMAND gas_base_layers_test)
 add_executable(multires_grading_test multires_grading_test.cpp)  # 細かい所の半径と移り目を世界のデータの長さで(T-0954)
 target_link_libraries(multires_grading_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_grading COMMAND multires_grading_test)
+add_executable(multires_graded_test multires_graded_test.cpp)  # 木の細かくする/粗くする要求が種からの距離で規則を読む(T-1008)
+target_link_libraries(multires_graded_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_graded COMMAND multires_graded_test)
 set_tests_properties(equilibrium PROPERTIES TIMEOUT 3000)
 
 # 部品の温めた始まりを C-1 の欄に置く: 保存点から続けてハッシュ一致・セーブの大きさと費用(T-0922・ADR-0427。CPU だけ)
@@ -1103,6 +1106,6 @@ foreach(_name IN ITEMS
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
     gpu_probe_liquid_test world_layout_test play_metric_test
-    gpu_play_metric_test environment_package_test)
+    gpu_play_metric_test environment_package_test multires_graded_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()
