@@ -358,6 +358,12 @@ namespace bicameral::sim {
         // 陽解法(StepGas)だけが読む(投影は T-0617)。世界のセルから毎刻み作る(sim/cell_volume。sim/probe_gas)
         std::vector<uint32_t> openQ16;
 
+        // 面の塞ぐ割合(Q16。軸ごと・セルの + 側の面。面の開き具合の欄 face.blocked〔sim/face_opening。21 §2.7・ADR-0420〕の写し。T-0976)。
+        // 空 = 塞がない(今まで通り。ビット単位で同じ)。面の開き = min(両側の空きの小さい方, 1 − 塞ぐ割合)(face_opening.hlsli の FoFaceOpen)。
+        // 欄の持ち主は面の − 側(left)のセル。left が箱の外(開いた境界の外・壁)の面は塞がない。使う時は openQ16 も入れる(空きを読む箱の式で読む)。
+        // 陽解法(StepGas・StepGasLinks)と陰の圧力(BeginGasPressure・FinishGasPressure)が同じ FaceOpen で読む。GPU はまだ読まない(T-0975。GpuGas は断る)
+        std::array<std::vector<uint32_t>, GAS_AXES> faceBlockedQ16;
+
         // セルの番号 → 層 z(基準と開いた境界の外を読む層)。空 = 箱の並び(番号 ÷ (sizeX × sizeY))。
         // 箱の並びの外のセルを面の一覧で回す時(StepGasLinks(box, links))に呼ぶ側が書く(T-0720)
         std::vector<uint32_t> cellLayers;

@@ -235,6 +235,10 @@ namespace bicameral::sim {
         if (GroupsFor(result.m_cellCount) > MAX_GROUPS)
             return std::unexpected("気体の箱が大きすぎる(セルの段の Dispatch の上限)");
 
+        // 面の開き具合の欄(GasBox::faceBlockedQ16。T-0976)はまだ GPU の段に無い(T-0975)。黙って違う値にしない
+        if (std::ranges::any_of(box.faceBlockedQ16, [](const std::vector<uint32_t>& axis) { return !axis.empty(); }))
+            return std::unexpected("GPU の気体はまだ面の開き具合の欄を読まない(T-0975)");
+
         // 気体の粘り(静まる性質。T-0758・D-516)がある箱だけ、刻みの終わりに粘りの 2 段を投げる(T-0775)
         result.m_viscous = GasHasViscosity(box.config);
         if (result.m_viscous && box.config.cellLevel != 0)
