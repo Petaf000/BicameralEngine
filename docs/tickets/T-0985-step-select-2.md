@@ -89,3 +89,5 @@
 - 2026-10-22(wt4・1 チャット目): t-0950-rt2-tree(233eff5)から t-0985-rt2-select。試作に揃える段(groupShift)・取り直し(TimeTreeSelect::Retake。
   解いてから書く形に StartSpan を SolveSpan / CommitSpan へ分けた)・試験の key=value の引数・毎刻みの写しのファイルを足した。
   火事の細かさはブロックの長さを揃えると通過、池の細かさと火事の精度は 2 通り目でも落ち → 退く道へ移る判断。床(毎刻み V 4 と V 16)は 0。
+  ctest(release): time_step_tree(forward = 1 通り目と 2 通り目の両方で早送り・2 回・歩の途中のセーブがビット一致。1,687 秒なので上限を 3,600 秒へ)・
+  time_step_lab・multires*(15 本)・field_storage の 17 本が通過。release の警告 0・archmap --check OK。
