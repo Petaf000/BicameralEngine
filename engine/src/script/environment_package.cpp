@@ -3,6 +3,7 @@
 // どの値も Luau の倍精度から誤差なしで整数に直せるものだけ通す(04 R7。reaction_package.cpp と同じ決まり)。
 #include "script/environment_package.h"
 
+#include <array>
 #include <cstdint>
 #include <format>
 #include <iterator>
@@ -208,6 +209,38 @@ namespace bicameral::script {
             return cycles;
         }
 
+        // environment.fine_region = { radius_mm, far_leaf_mm, levels_per_doubling }(T-0954)。書かない欄は既定
+        std::expected<sim::FineRegion, std::string> ReadFineRegion(const TableEntry& entry) {
+            const std::string path = std::format("{}.{}", ENVIRONMENT_CATEGORY, ENVIRONMENT_FINE_REGION_KEY);
+            static constexpr std::string_view FIELDS[] = {"radius_mm", "far_leaf_mm", "levels_per_doubling"};
+            if (auto record = CheckRecord(entry.value, FIELDS, path); !record)
+                return std::unexpected(std::format("パッケージ {}: {}", entry.package, record.error()));
+
+            sim::FineRegion region;
+            const auto lengthMax = static_cast<int64_t>(sim::FINE_REGION_LENGTH_MAX_MM);
+            const std::array<int64_t, 3> minimums = {0, 1, 1};
+            const std::array<int64_t, 3> maximums = {lengthMax, lengthMax, sim::FINE_REGION_LEVELS_PER_DOUBLING_MAX};
+            std::array<int64_t, 3> values = {static_cast<int64_t>(region.radiusMm),
+                                             static_cast<int64_t>(region.farLeafMm), region.levelsPerDoubling};
+            for (size_t i = 0; i < std::size(FIELDS); ++i) {
+                const ScriptValue* value = entry.value.Find(FIELDS[i]);
+                if (value == nullptr)
+                    continue;
+
+                const auto read = ReadInteger(*value, std::format("{}.{}", path, FIELDS[i]), minimums[i], maximums[i]);
+                if (!read)
+                    return std::unexpected(std::format("パッケージ {}: {}", entry.package, read.error()));
+
+                values[i] = *read;
+            }
+
+            region.radiusMm = static_cast<uint64_t>(values[0]);
+            region.farLeafMm = static_cast<uint64_t>(values[1]);
+            region.levelsPerDoubling = static_cast<uint32_t>(values[2]);
+
+            return region;
+        }
+
     }  // namespace
 
     std::expected<sim::WorldPhysics, std::string> ReadWorldEnvironment(const PackageSetResult& packages) {
@@ -257,6 +290,12 @@ namespace bicameral::script {
                     return std::unexpected(cycles.error());
 
                 world.balanceCycles = *cycles;
+            } else if (key == ENVIRONMENT_FINE_REGION_KEY) {
+                const auto region = ReadFineRegion(entry);
+                if (!region)
+                    return std::unexpected(region.error());
+
+                world.fineRegion = *region;
             } else if (key == ENVIRONMENT_ATMOSPHERE_TEMPERATURE_KEY || key == ENVIRONMENT_ATMOSPHERE_PRESSURE_KEY ||
                        key == ENVIRONMENT_ATMOSPHERE_PROFILE_KEY) {
                 continue;  // 基準の大気の値(ReadWorldAtmosphere が読む)

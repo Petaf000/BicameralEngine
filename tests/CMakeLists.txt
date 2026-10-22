@@ -303,6 +303,14 @@ set_tests_properties(case_b_box case_b_gauge PROPERTIES TIMEOUT 600)
 add_executable(equilibrium_test equilibrium_test.cpp)
 target_link_libraries(equilibrium_test PRIVATE bicameral_gas_projection bicameral_core)
 add_test(NAME equilibrium COMMAND equilibrium_test)
+
+add_executable(gas_base_layers_test gas_base_layers_test.cpp)  # 基準の層を粗さをまたいで整数の和が合う形で・10 km の空気の柱(T-0953)
+target_link_libraries(gas_base_layers_test PRIVATE bicameral_gas_projection bicameral_core)
+add_test(NAME gas_base_layers COMMAND gas_base_layers_test)
+
+add_executable(multires_grading_test multires_grading_test.cpp)  # 細かい所の半径と移り目を世界のデータの長さで(T-0954)
+target_link_libraries(multires_grading_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_grading COMMAND multires_grading_test)
 set_tests_properties(equilibrium PROPERTIES TIMEOUT 3000)
 
 # 部品の温めた始まりを C-1 の欄に置く: 保存点から続けてハッシュ一致・セーブの大きさと費用(T-0922・ADR-0427。CPU だけ)

@@ -74,6 +74,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_conduction.cpp
   src/sim/transport_packet.cpp  # 当てる段の包みをセルに当てる CPU(液体・気体。T-0770)
   src/sim/multires_fields.cpp
+  src/sim/multires_grading.cpp  # 細かい所の半径と移り目を世界のデータの長さで(T-0954)
   src/sim/multires_implicit_conduction.cpp
   src/sim/multires_cell_store.cpp  # セルの頁を成分の数に合わせた幅で持つ(T-0931)
   src/sim/multires_nest.cpp
@@ -90,6 +91,7 @@ target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
 add_library(bicameral_gas STATIC
   src/sim/gas_reference.cpp
   src/sim/gas_tree.cpp
+  src/sim/gas_base_layers.cpp  # 基準の層を粗さをまたいで整数の和が合う形で(T-0953・ADR-0431)
 )
 target_include_directories(bicameral_gas PUBLIC src)
 target_link_libraries(bicameral_gas PUBLIC bicameral_fixed)

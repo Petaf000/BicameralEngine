@@ -74,6 +74,25 @@ namespace bicameral::sim {
         [[nodiscard]] bool operator==(const BalanceCycles&) const = default;
     };
 
+    // --- 細かい所の半径と移り目(T-0954・ADR-0431。20 §11.1。物理の長さ mm)---
+    // 環境の fine_region = { radius_mm, far_leaf_mm, levels_per_doubling }(名前は仮)。距離は局所の状態で細かくした所(種: 活性・前線・割れの先端)
+    // からで、視点からではない(D-544)。半径の内は細かいセルのまま、その外は距離が 2 倍になるごとに levels_per_doubling 段ずつ粗く、
+    // 遠くの葉の大きさで頭打ち(規則は sim/multires_grading)。既定は T-0900 M-0 の仮の幅の内(半径 128 m・遠くの葉 32 m・1 段。
+    // 20 km の見込みは docs/perf.md)。どの値にするかは描画と並ぶ VRAM の線(D-209)で決まるゲームの中身
+    inline constexpr uint64_t FINE_REGION_RADIUS_DEFAULT_MM = 128000;
+    inline constexpr uint64_t FINE_REGION_FAR_LEAF_DEFAULT_MM = 32000;
+    inline constexpr uint32_t FINE_REGION_LEVELS_PER_DOUBLING_DEFAULT = 1;
+    inline constexpr uint64_t FINE_REGION_LENGTH_MAX_MM = 1000000000;  // 1000 km(書き間違いの知らせ。20 §1.4)
+    inline constexpr uint32_t FINE_REGION_LEVELS_PER_DOUBLING_MAX = 8;
+
+    struct FineRegion {
+        uint64_t radiusMm = FINE_REGION_RADIUS_DEFAULT_MM;                     // 種からこの距離までは細かいセルのまま
+        uint64_t farLeafMm = FINE_REGION_FAR_LEAF_DEFAULT_MM;                  // 遠くの葉の大きさ(これより粗くしない)
+        uint32_t levelsPerDoubling = FINE_REGION_LEVELS_PER_DOUBLING_DEFAULT;  // 距離が 2 倍ごとに粗くする段の数
+
+        [[nodiscard]] bool operator==(const FineRegion&) const = default;
+    };
+
     // --- 世界の物理の値 ---
     struct WorldPhysics {
         // 重力の強さ(µm/s²。0 = 無重力。上限 fx::GRAVITY_MAX_MICROMETERS_PER_SECOND2)。ブランクの世界は 0(D-480)
@@ -99,6 +118,9 @@ namespace bicameral::sim {
 
         // 釣り合う家族の V の回数(T-0955。既定は全部 2 = 今まで通り)
         BalanceCycles balanceCycles;
+
+        // 細かい所の半径と移り目(T-0954。既定は FINE_REGION_*_DEFAULT)
+        FineRegion fineRegion;
 
         [[nodiscard]] bool operator==(const WorldPhysics&) const = default;
     };
@@ -146,6 +168,19 @@ namespace bicameral::sim {
                 return std::unexpected(std::format("釣り合う家族の V の回数 {} は 1〜{} で書く(費用は回数に比例)",
                                                    count, BALANCE_CYCLES_MAX));
             }
+        }
+
+        const FineRegion& fine = world.fineRegion;
+        if (fine.radiusMm > FINE_REGION_LENGTH_MAX_MM || fine.farLeafMm == 0 ||
+            fine.farLeafMm > FINE_REGION_LENGTH_MAX_MM) {
+            return std::unexpected(
+                std::format("細かい所の半径 {} mm・遠くの葉 {} mm は 0〜{} mm(遠くの葉は 1 以上)で書く", fine.radiusMm,
+                            fine.farLeafMm, FINE_REGION_LENGTH_MAX_MM));
+        }
+
+        if (fine.levelsPerDoubling == 0 || fine.levelsPerDoubling > FINE_REGION_LEVELS_PER_DOUBLING_MAX) {
+            return std::unexpected(std::format("細かい所の移り目の段の数 {} は 1〜{} で書く", fine.levelsPerDoubling,
+                                               FINE_REGION_LEVELS_PER_DOUBLING_MAX));
         }
 
         if (world.gasEddyViscosityMm2PerS > gas::GF_VISCOSITY_LIMIT_MM2_PER_S) {
