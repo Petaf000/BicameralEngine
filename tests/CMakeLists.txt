@@ -336,6 +336,12 @@ add_executable(support_law_test support_law_test.cpp)
 target_link_libraries(support_law_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME support_law COMMAND support_law_test)
 set_tests_properties(support_law PROPERTIES TIMEOUT 3000)
+
+# 支えの法則の割れ(研究 R-B2・T-0872): 2 通り(強さ / 強さで割れ始め + 割れ面のエネルギー)を片持ち梁・張り出し・洞窟で 0.5 / 0.25 m
+add_executable(support_fracture_test support_fracture_test.cpp)
+target_link_libraries(support_fracture_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME support_fracture COMMAND support_fracture_test)
+set_tests_properties(support_fracture PROPERTIES TIMEOUT 3000)
 # 案 B の研究 R1(T-0868): 硬い液体を気体と同じ陰の圧力で。1 本目(本物の水)と液体の段 (2) 柔らかく・(1) 回数を増やす を同じ試験で測る
 add_executable(case_b_r1_test case_b_r1_test.cpp)
 target_link_libraries(case_b_r1_test PRIVATE bicameral_case_b bicameral_core)

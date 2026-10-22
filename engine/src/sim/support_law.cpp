@@ -96,6 +96,19 @@ namespace bicameral::sim {
             return ImFaceFlow(ImWide(coefficient), difference);
         }
 
+        // 係数 × 面の残りの硬さ(Q16)。割れていない面は掛けない(今までとビット一致)
+        uint64_t Scaled(uint64_t coefficient, uint32_t intact) {
+            if (intact >= SUPPORT_INTACT_FULL)
+                return coefficient;
+
+            return FxShiftRightU128(FxMulU64Full(coefficient, intact), 16);
+        }
+
+        // ばねの仕事 ½ F d(F mN・d 2^-16 nm → pJ)。F は d と同じ符号(係数が正)
+        int64_t SpringWork(int64_t forceMn, int64_t difference) {
+            return (int64_t)FxShiftRightU128(FxMulU64Full(FxAbsU64(forceMn), FxAbsU64(difference)), 17);
+        }
+
     }  // namespace
 
     SupportLaw::SupportLaw(const SupportScene& scene, const SupportOptions& options)
@@ -137,6 +150,8 @@ namespace bicameral::sim {
             }
         }
 
+        m_bondAt.assign(m_cells.size() * 2, (uint32_t)NO_CELL);
+
         for (uint32_t c = 0; c < ComponentCount(); ++c) {
             m_systems[c].rounding = EQ_ROUNDING_EXACT;
             for (const auto& [x, up] : m_cells)
@@ -173,8 +188,12 @@ namespace bicameral::sim {
                 const uint32_t diagonal = m_index[(size_t)sideX + (size_t)width * (up + 1)];
                 const bool side = m_index[(size_t)sideX + (size_t)width * up] != NO_CELL;
                 const bool above = m_index[x + (size_t)width * (up + 1)] != NO_CELL;
-                if (diagonal != NO_CELL && side != above)
-                    AddBrace({.low = cell, .high = diagonal, .across = across});
+                if (diagonal == NO_CELL || side == above)
+                    continue;
+
+                const uint32_t intact = BraceIntact(x, up, (uint32_t)sideX, side);
+                if (intact != 0)
+                    AddBrace({.low = cell, .high = diagonal, .across = across, .unit = Scaled(m_brace, intact)});
             }
         }
     }
@@ -190,7 +209,7 @@ namespace bicameral::sim {
 
         // 面: ½ 6b Δn² + ½ 6b (Δt ∓ (φ_a + φ_b))² + ½ 2b Δφ²(∓ は x の面で −・上の面で +)
         for (const Bond& bond : m_bonds) {
-            const uint64_t b = bond.axis == 0 ? m_bondX : m_bondUp;
+            const uint64_t b = bond.unit;
             const uint32_t along = bond.axis == 0 ? SUPPORT_X : SUPPORT_UP;
             const uint32_t across = bond.axis == 0 ? SUPPORT_UP : SUPPORT_X;
             const int64_t turnSign = bond.axis == 0 ? -1 : 1;
@@ -216,7 +235,7 @@ namespace bicameral::sim {
         // 段の斜めの棒: ½ q (s Δx + Δup)²(同じレベルの斜めの 2 節の面。x ⇄ 上の非対角も面の中)
         for (const Brace& brace : m_braces) {
             EquilibriumBlockFace face{.low = brace.low, .high = brace.high};
-            AddTerm(face, m_brace, {-brace.across, -1, 0}, {brace.across, 1, 0});
+            AddTerm(face, brace.unit, {-brace.across, -1, 0}, {brace.across, 1, 0});
             system.faces.push_back(face);
         }
 
@@ -241,15 +260,48 @@ namespace bicameral::sim {
 
         for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
             system.sources.push_back(
-                {.node = cell, .component = SUPPORT_UP, .value = -(m_weight << BLOCK_FORCE_SHIFT)});
+                {.node = cell, .component = SUPPORT_UP, .value = -(CellLoad(cell) << BLOCK_FORCE_SHIFT)});
         }
 
         m_blockGrid = BuildEquilibriumBlockGrid(system);
     }
 
-    void SupportLaw::AddBond(const Bond& bond) {
+    // 面の残りの硬さ(Q16)。scene の intactX / intactUp が空なら割れていない
+    uint32_t SupportLaw::Intact(uint32_t x, uint32_t up, uint32_t axis) const {
+        const std::vector<uint32_t>& intact = axis == 0 ? m_scene.intactX : m_scene.intactUp;
+
+        return intact.empty() ? SUPPORT_INTACT_FULL : intact[x + (size_t)m_scene.width * up];
+    }
+
+    // 段の斜めの棒は、間にあるセルを回る 2 つの面の残りの硬さの小さい方(仮。棒の力を面の応力へ配る形は R-B2 の残り)
+    uint32_t SupportLaw::BraceIntact(uint32_t x, uint32_t up, uint32_t sideX, bool side) const {
+        const uint32_t lowX = std::min(x, sideX);
+        if (side)
+            return std::min(Intact(lowX, up, 0), Intact(sideX, up, 1));
+
+        return std::min(Intact(x, up, 1), Intact(lowX, up + 1, 0));
+    }
+
+    int64_t SupportLaw::CellLoad(uint32_t cell) const {
+        if (m_scene.loadMn.empty())
+            return m_weight;
+
+        const auto [x, up] = m_cells[cell];
+
+        return m_weight + m_scene.loadMn[x + (size_t)m_scene.width * up];
+    }
+
+    void SupportLaw::AddBond(const Bond& candidate) {
+        const auto [lowX, lowUp] = m_cells[candidate.low];
+        const uint32_t intact = Intact(lowX, lowUp, candidate.axis);
+        if (intact == 0)
+            return;
+
+        Bond bond = candidate;
+        bond.unit = Scaled(bond.axis == 0 ? m_bondX : m_bondUp, intact);
+        m_bondAt[(size_t)bond.low * 2 + bond.axis] = (uint32_t)m_bonds.size();
         m_bonds.push_back(bond);
-        const uint64_t b = bond.axis == 0 ? m_bondX : m_bondUp;
+        const uint64_t b = bond.unit;
         const uint32_t along = bond.axis == 0 ? SUPPORT_X : SUPPORT_UP;
         const uint32_t across = bond.axis == 0 ? SUPPORT_UP : SUPPORT_X;
         const bool beam = m_options.form == SupportForm::BeamLattice;
@@ -302,7 +354,7 @@ namespace bicameral::sim {
     // ½ q (s Δx + Δup)²: x と上の面に q・x ⇄ 上の項(同じセルに +s q・相手のセルに −s q)は遅らせる
     void SupportLaw::AddBrace(const Brace& brace) {
         m_braces.push_back(brace);
-        const uint64_t q = m_brace;
+        const uint64_t q = brace.unit;
         for (const uint32_t c : {SUPPORT_X, SUPPORT_UP})
             m_systems[c].faces.push_back({.fine = brace.low, .coarse = brace.high, .gap = 0, .coefficient = ImWide(q)});
 
@@ -375,7 +427,7 @@ namespace bicameral::sim {
             if (c == SUPPORT_UP) {
                 for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
                     system.sources.push_back(
-                        {.node = cell, .value = -m_weight, .factor = ImWide((uint64_t)1 << FORCE_SHIFT)});
+                        {.node = cell, .value = -CellLoad(cell), .factor = ImWide((uint64_t)1 << FORCE_SHIFT)});
                 }
             }
 
@@ -420,14 +472,14 @@ namespace bicameral::sim {
         const auto [highX, highUp] = m_cells[bond.high];
         const int64_t difference = Value(highX, highUp, SUPPORT_UP) - Value(lowX, lowUp, SUPPORT_UP);
         if (bond.axis == 1)
-            return -Flow(6 * m_bondUp, difference);
+            return -Flow(6 * bond.unit, difference);
 
         if (m_options.form == SupportForm::PerComponent)
-            return -Flow(3 * m_bondX, difference);
+            return -Flow(3 * bond.unit, difference);
 
         const int64_t turns = Value(lowX, lowUp, SUPPORT_TURN) + Value(highX, highUp, SUPPORT_TURN);
 
-        return -Flow(6 * m_bondX, difference - turns);
+        return -Flow(6 * bond.unit, difference - turns);
     }
 
     int64_t SupportLaw::UpForceOnBrace(const Brace& brace) const {
@@ -436,7 +488,7 @@ namespace bicameral::sim {
         const int64_t slide = Value(highX, highUp, SUPPORT_X) - Value(lowX, lowUp, SUPPORT_X);
         const int64_t lift = Value(highX, highUp, SUPPORT_UP) - Value(lowX, lowUp, SUPPORT_UP);
 
-        return -Flow(m_brace, brace.across * slide + lift);
+        return -Flow(brace.unit, brace.across * slide + lift);
     }
 
     int64_t SupportLaw::UpForceOnClamp(const Clamp& clamp) const {
@@ -460,11 +512,15 @@ namespace bicameral::sim {
         if (m_options.form != SupportForm::BeamLattice || highX >= m_scene.width || highUp >= m_scene.height)
             return {};
 
-        if (m_index[x + (size_t)m_scene.width * up] == NO_CELL ||
-            m_index[highX + (size_t)m_scene.width * highUp] == NO_CELL)
+        const uint32_t cell = m_index[x + (size_t)m_scene.width * up];
+        if (cell == NO_CELL || m_index[highX + (size_t)m_scene.width * highUp] == NO_CELL)
             return {};
 
-        const uint64_t b = axis == 0 ? m_bondX : m_bondUp;
+        const uint32_t bondIndex = m_bondAt[(size_t)cell * 2 + axis];
+        if (bondIndex == NO_CELL)
+            return {};  // 割れた面
+
+        const uint64_t b = m_bonds[bondIndex].unit;
         const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
         const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
         const int64_t turnLow = Value(x, up, SUPPORT_TURN);
@@ -480,13 +536,23 @@ namespace bicameral::sim {
         forces.lowSideMn = axis == 0 ? forces.axialMn + bend : forces.axialMn - bend;
         forces.highSideMn = axis == 0 ? forces.axialMn - bend : forces.axialMn + bend;
 
+        // ½ 6b Δn² + ½ 6b (Δt ∓ (φ_a + φ_b))² + ½ 2b Δφ²(BuildBlocks の面の項と同じ)
+        const int64_t bendDifference = turnHigh - turnLow;
+        forces.energyPj = SpringWork(forces.axialMn, stretch) + SpringWork(forces.shearMn, slide + turns) +
+                          SpringWork(Flow(2 * b, bendDifference), bendDifference);
+        forces.intact = Intact(x, up, axis);
+
         return forces;
     }
 
     SupportLedger SupportLaw::Ledger() const {
         SupportLedger ledger;
-        std::vector<int64_t> net(m_cells.size(), -m_weight);
-        ledger.weightMn = m_weight * (int64_t)m_cells.size();
+        std::vector<int64_t> net(m_cells.size());
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            net[cell] = -CellLoad(cell);
+            ledger.weightMn += CellLoad(cell);
+        }
+
         for (const Bond& bond : m_bonds) {
             const int64_t force = UpForceOnBond(bond);
             net[bond.high] += force;

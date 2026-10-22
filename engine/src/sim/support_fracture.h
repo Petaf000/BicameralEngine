@@ -1,0 +1,114 @@
+// support_fracture.h — 支えの法則の割れ(研究 R-B2・T-0872。docs/design/22-support-law.md §3.3・§3.4・§6)の試作。CPU だけ・浮動小数点なし(04 §4)。
+// 支えの釣り合い(sim/support_law。C-0 の使い手)を 1 刻み解いた後、面ごとに割れの進み(真実。0〜1 = 割れた面積の割合)を進め、
+// 進んだ分だけ面の係数を下げる(割れた面は係数 0。C-0 の部品の型は変えない = 法則の側で面を外す)。割れの判定は 2 通り(FractureRule):
+//   - Strength(1 本目): 面の縁の応力が強さの形(引きの切り口 + 押し合い × 摩擦 + くっつく強さ〔c・φ は押しと引きの強さ 2 つから〕+ 押しの強さ)を
+//     超えたら、その面は割れ切るまで進む
+//   - Energy(2 本目): 強さを超えた面だけが割れ始め(どこで・どの向きに)、進みは面のたわみのエネルギーで決める(線形の軟化。
+//     割れ切るまでに面が払うエネルギーが割れ面のエネルギー G × 面積 になるように軟化の傾きを細かさで決める = crack band)。
+//     進みの分だけ解放されるエネルギー(変位を止めて面の硬さが落ちた分)は、払う割れ面のエネルギー以上(坂を下る時だけ進む)
+// 割れの速さは物質の値(m/s。D-612 の既定 = この宇宙の速さとして遅く)。1 刻みに進む割合 = 速さ × 刻み ÷ セル(1 を超える値は 1 で止める。
+// 速さから決まる小刻み〔D-612 (a)〕の道はまだ無い: T-0943)。
+// 割れて地面・壁(固定した面)につながらなくなったセルは「分かれた」印を付けて釣り合いから外す(物の物理へ渡すのは R-O1。ここでは印まで)。
+// データの流れ: SupportScene + SupportStrength → SupportLaw(釣り合い)→ 面の力・エネルギー(FaceForces)→ 割れの進み → scene の intactX / intactUp
+//   → 次の刻みの SupportLaw(前の答えから温めて始める)。帳簿: 解放されたエネルギー = 割れ面のエネルギー + 熱(pJ。整数で厳密)
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+#include "sim/support_law.h"
+
+namespace bicameral::sim {
+
+    enum class FractureRule : uint8_t {
+        Strength,  // 1 本目: 強さを超えた面が割れる
+        Energy,    // 2 本目: 強さで割れ始め、進みは割れ面のエネルギーで(線形の軟化)
+    };
+
+    // 物質の強さ(22 §1.1。名前・単位は仮)
+    struct SupportStrength {
+        uint64_t compressiveKpa = 0;  // 押しの強さ σc
+        uint64_t tensileKpa = 0;      // 引きの強さ σt
+        uint64_t
+            fractureEnergyMjPerM2 = 0;     // 割れ面のエネルギー G(mJ/m²)。0 = 導く: σt² × 破片の大きさ ÷ 硬さ(22 §3.4)
+        uint64_t fragmentMm = 500;         // 破片の大きさ(G を導く時だけ)
+        uint64_t crackSpeedMmPerS = 5000;  // 割れの速さ(仮 5 m/s。D-612 の既定 = この宇宙の速さとして遅く)
+    };
+
+    struct SupportFractureOptions {
+        FractureRule rule = FractureRule::Energy;
+        uint64_t stepUs = 16667;  // 1 刻み(µs。60 刻み/秒)
+    };
+
+    // 割れの帳簿(pJ)。releasedPj == surfacePj + heatPj が整数で厳密(熱は残りとして数える)
+    struct SupportFractureLedger {
+        int64_t releasedPj = 0;       // 面の硬さが落ちた分のたわみのエネルギー(変位を止めて。割れが受け取った分)
+        int64_t surfacePj = 0;        // 割れ面のエネルギー(払った分)
+        int64_t heatPj = 0;           // released − surface(負 = 坂を上った = エネルギーを借りた)
+        int64_t worstStepHeatPj = 0;  // 面 1 つ・1 刻みの熱の最小(Energy は 0 以上のはず)
+        uint32_t brokenFaces = 0;     // 割れ切った面
+        uint32_t crackingFaces = 0;   // 割れかけの面(0 < 進み < 1)
+        uint32_t separatedCells = 0;  // 分かれた印のセル
+    };
+
+    class SupportFracture {
+    public:
+        SupportFracture(const SupportScene& scene, const SupportOptions& options, const SupportStrength& strength,
+                        const SupportFractureOptions& fracture);
+
+        // セルに足す下向きの力(mN。並びは scene の [x + width × up])
+        void SetLoads(const std::vector<int64_t>& loadMn);
+        // 掘る: セル (x, up) を取り除く(地面につながらなくなった所は分かれる)
+        void Dig(const std::vector<std::array<uint32_t, 2>>& cells);
+        // 1 刻み: 釣り合いを解き、面ごとに割れの進みを進める(全部の面を同じ解から決めてから当てる = 順によらない)
+        void Step();
+
+        // --- 読む ---
+        const SupportLaw& Law() const { return *m_law; }
+        const SupportScene& Scene() const { return m_scene; }
+        // 面(セル (x, up) と +軸の隣の間)の割れの進み(Q16。SUPPORT_INTACT_FULL = 割れ切った)
+        uint32_t Progress(uint32_t x, uint32_t up, uint32_t axis) const;
+        // 分かれた印(並びは scene。1 = 割れて地面・壁につながらなくなり、釣り合いから外したセル。物の物理へ渡すのは R-O1)
+        const std::vector<uint8_t>& Separated() const { return m_separated; }
+        const SupportFractureLedger& Ledger() const { return m_ledger; }
+        uint64_t FractureEnergyMjPerM2() const { return m_fractureEnergy; }
+        // 軟化の比 r = 割れ切る伸び ÷ 割れ始める伸び = 2 × (E G ÷ σt²) ÷ セル(Q16)。1 以下ならセルが粗すぎて軟化できない(もろく割れる)
+        uint64_t SofteningRatio() const { return m_softening; }
+        // 面の強さの比(Q16。1 = SUPPORT_INTACT_FULL で強さちょうど。割れていない硬さに戻した応力で)
+        uint32_t FailureIndex(uint32_t x, uint32_t up, uint32_t axis) const;
+        uint64_t Hash() const;
+
+    private:
+        uint32_t IndexOf(const SupportFaceForces& forces) const;
+        uint32_t EnergyIndex(int64_t undamagedPj) const;
+        uint32_t TargetProgress(const SupportFaceForces& forces, uint32_t progress) const;
+        int64_t SurfacePj(uint32_t progress) const;
+        bool Advance(uint32_t x, uint32_t up, uint32_t axis);
+        void Separate();
+        void Rebuild();
+        std::vector<uint32_t>& ProgressOf(uint32_t axis) { return axis == 0 ? m_progressX : m_progressUp; }
+
+        SupportScene m_scene;
+        SupportOptions m_options;
+        SupportStrength m_strength;
+        SupportFractureOptions m_fracture;
+        std::unique_ptr<SupportLaw> m_law;
+
+        uint64_t m_fractureEnergy = 0;  // G(mJ/m²)
+        uint64_t m_faceSurfacePj = 0;   // G × セルの面積(pJ)
+        uint64_t m_faceUnitPj = 0;      // 面が引きの強さちょうどで一様に伸びた時のエネルギー σt² dx³ ÷ (2E)(pJ)
+        uint64_t m_softening = 0;       // r(Q16)
+        uint32_t m_speedStep = 0;       // 1 刻みに進む割合の上限(Q16)
+        uint64_t m_rootStrength = 0;    // √(σc σt)(kPa。くっつく強さ c = これ ÷ 2)
+
+        std::vector<uint32_t> m_progressX;
+        std::vector<uint32_t> m_progressUp;
+        std::vector<uint32_t> m_nextX;  // 同じ解から決めた次の進み(当てる前)
+        std::vector<uint32_t> m_nextUp;
+        std::vector<uint8_t> m_separated;
+        SupportFractureLedger m_ledger;
+    };
+
+}  // namespace bicameral::sim
