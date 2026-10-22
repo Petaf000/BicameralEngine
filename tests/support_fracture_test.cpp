@@ -1,11 +1,11 @@
 // support_fracture_test.cpp — 支えの法則の割れ(sim/support_fracture。研究 R-B2・T-0872・22 §6)の CPU の測り。
 // 物質: 弱い岩(硬さ 5 GPa・密度 2600 kg/m³・引きの強さ 500 kPa・押しの強さ 10 MPa・破片の大きさ 0.5 m → 割れ面のエネルギー 25 J/m²・
 //   割れの速さ 5 m/s)。縦の面・奥行 1 セル(力は奥行 1 m あたりに直して比べる)。60 刻み/秒。
-// 場面(どれも 0.5 m と 0.25 m。2 通りの割れ方〔Strength / Energy〕の両方):
+// 場面(どれも 0.5 m と 0.25 m。3 通りの割れ方〔Strength / Energy / Window(T-1042・ℓ = 0.5 m の区間の平均)〕。Window は A・B を 0.125 m でも):
 //   A. 壁(幅 1 m・高さ 3 m)から出た片持ち梁(長さ 2 m・厚さ 1 m)の先の 1 m に荷を 1 kN/m ずつ足す(4 秒ごと)→ 根で折れる荷
 //   B. 厚さ 0.5 m の棚(幅 6 m)の下を先から 0.5 m ずつ掘る(4 秒ごと)→ 折れる張り出しの長さ
 //   C. 岩(16 × 8 m。左右と下を固定)に高さ 4 m・天井の厚さ 1 m の洞窟を真ん中から 1 m ずつ広げて掘る(4 秒ごと)→ 天井が落ちる幅
-//   D. すぐ折れるはずの棚(1 セルの厚さ 0.5 m・長さ 4 m。冷えた始まり)→ 割れ始め・分かれるまでの刻み(T-0919 の測りと同じ見方)
+//   D. すぐ折れるはずの棚(厚さ 0.5 m・長さ 8 m。冷えた始まり)→ 割れ始め・分かれるまでの刻み(T-0919 の測りと同じ見方)
 // 確かめ(落ちるのは帳簿・決定性・Energy の熱の符号だけ。細かさの差・場所は研究の記録としてログへ。結果は T-0872):
 //   - 力の帳簿: 毎刻み Σ セルの上向きの力 = 固定した面の力 − 重さ − 荷(割れた後も)
 //   - 割れの帳簿: 解放 = 割れ面 + 熱(整数で厳密)・割れ切った面の割れ面のエネルギー = G × 面積・Energy は熱 ≥ 0(坂を下る時だけ進む)
@@ -55,7 +55,10 @@ namespace {
     }
 
     const char* RuleName(sim::FractureRule rule) {
-        return rule == sim::FractureRule::Strength ? "強さ" : "エネルギー";
+        if (rule == sim::FractureRule::Strength)
+            return "強さ";
+
+        return rule == sim::FractureRule::Energy ? "エネルギー" : "ℓ の平均";
     }
 
     // 何もない width × height(mm)の箱。solid(x, up) で埋める
@@ -130,9 +133,9 @@ namespace {
         return scene;
     }
 
-    // D: 壁(x < 1 m・高さ 3 m)+ 厚さ 0.5 m・長さ 4 m の棚(高さ 1.5〜2 m)
+    // D: 壁(x < 1 m・高さ 3 m)+ 厚さ 0.5 m・長さ 8 m の棚(高さ 1.5〜2 m。3 本目の見込み 3.6 m の 2 倍強)
     sim::SupportScene Shelf(uint64_t cellMm) {
-        sim::SupportScene scene = Box(5000, 3000, cellMm);
+        sim::SupportScene scene = Box(9000, 3000, cellMm);
         for (uint32_t up = 0; up < scene.height; ++up) {
             for (uint32_t x = 0; x < scene.width; ++x) {
                 const uint64_t cx = Center(x, cellMm);
@@ -239,7 +242,7 @@ namespace {
                    ledger.surfacePj <= faceSurfacePj * (ledger.brokenFaces + ledger.crackingFaces),
                std::format("{}: 割れ面のエネルギー = G × 割れた面積", label));
         // 丸め: 割れ面のエネルギーの表(Q16)の 1 目盛り = G × 面積 ÷ 65536 の数個分まで
-        if (rule == sim::FractureRule::Energy)
+        if (rule != sim::FractureRule::Strength)
             Expect(ledger.worstStepHeatPj >= -faceSurfacePj / 16384,
                    std::format("{}: 熱 ≥ 0(坂を下る時だけ進む)", label));
     }
@@ -405,6 +408,13 @@ namespace {
             "見込み(梁の式・引きの強さで): A 折れる荷 {:.1f} kN/m / B 張り出し {:.2f} m / C 両端固定の梁の端 {:.2f} "
             "m・真ん中 {:.2f} m",
             cantilever, ledge, caveEnds, caveMiddle);
+        // 3 本目(ℓ = 0.5 m の区間の引きの側の平均 = 強さ): 直線の分布の縁 σ から、厚さ h の梁の外の ℓ の平均は σ (1 − ℓ/h)(ℓ ≤ h/2)・
+        // 厚さ ℓ の棚(全部が 1 区間)は σ/4
+        Log(Channel::Sim, Level::Info,
+            "見込み(3 本目・ℓ = 0.5 m の平均): A 折れる荷 {:.1f} kN/m / B 張り出し {:.2f} m / C 端 {:.2f} m・真ん中 "
+            "{:.2f} m",
+            (2.0 * tensile / 6.0 - weight * 4.0 / 2.0) / 1.5, std::sqrt(4.0 * tensile * 0.5 / (3.0 * weight)),
+            std::sqrt(2.0 * 2.0 * tensile / weight), std::sqrt(4.0 * 2.0 * tensile / weight));
         Log(Channel::Sim, Level::Info,
             "強さの形(22 §3.3): 弱い岩 c = {:.0f} kPa・φ = {:.1f}° / 石(100 MPa・5 MPa)φ = "
             "{:.1f}°(瓦礫の崩れる角度の既定にすると急すぎる)",
@@ -413,7 +423,8 @@ namespace {
 
     int RunAll() {
         LogExpectations();
-        for (const sim::FractureRule rule : {sim::FractureRule::Strength, sim::FractureRule::Energy}) {
+        for (const sim::FractureRule rule :
+             {sim::FractureRule::Strength, sim::FractureRule::Energy, sim::FractureRule::Window}) {
             for (const uint64_t cellMm : {500ull, 250ull}) {
                 TestShelf(cellMm, rule);
                 if (rule == sim::FractureRule::Strength)
@@ -425,11 +436,15 @@ namespace {
             }
         }
 
+        // 3 本目は 0.125 m でも(A・B。C は大きいので 0.5 / 0.25 m だけ)
+        TestCantilever(125, sim::FractureRule::Window, nullptr);
+        TestLedge(125, sim::FractureRule::Window);
+
         // 決定性
         uint64_t first = 0;
         uint64_t second = 0;
-        TestCantilever(500, sim::FractureRule::Energy, &first);
-        TestCantilever(500, sim::FractureRule::Energy, &second);
+        TestCantilever(250, sim::FractureRule::Window, &first);
+        TestCantilever(250, sim::FractureRule::Window, &second);
         Expect(first == second, "決定性: 2 回の実行でハッシュ一致");
 
         if (failureCount != 0) {

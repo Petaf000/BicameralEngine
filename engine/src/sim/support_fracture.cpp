@@ -32,6 +32,19 @@ namespace bicameral::sim {
             return (uint32_t)std::min<int64_t>(value, INDEX_CAP);
         }
 
+        // 面の中の直線の分布(縁の力 a・b)の正の部分の平均(力。両方正なら平均・両方負なら 0・混ざれば三角形)
+        int64_t PositivePart(int64_t a, int64_t b) {
+            const int64_t high = std::max(a, b);
+            const int64_t low = std::min(a, b);
+            if (low >= 0)
+                return (a + b) / 2;
+
+            if (high <= 0)
+                return 0;
+
+            return FxMulDivS64(high, (uint64_t)high, (uint64_t)(2 * (high - low)));
+        }
+
     }  // namespace
 
     SupportFracture::SupportFracture(const SupportScene& scene, const SupportOptions& options,
@@ -74,6 +87,7 @@ namespace bicameral::sim {
                                   .quotient;
         m_speedStep = (uint32_t)std::clamp<uint64_t>(step, 1, ONE);
         m_rootStrength = FxSqrtU64(m_strength.compressiveKpa * tensile);
+        m_windowMm = m_strength.materialLengthMm != 0 ? m_strength.materialLengthMm : m_strength.fragmentMm;
 
         Separate();
         Rebuild();
@@ -117,9 +131,6 @@ namespace bicameral::sim {
         if (forces.intact == 0 || m_strength.tensileKpa == 0)
             return 0;
 
-        const uint64_t area = m_scene.cellMm * m_scene.cellMm;
-        const uint64_t tensile = m_strength.tensileKpa;
-        const uint64_t compressive = m_strength.compressiveKpa;
         const auto restore = [&](int64_t force) {
             return FxMulDivS64(force, ONE, forces.intact);
         };
@@ -128,12 +139,18 @@ namespace bicameral::sim {
         const int64_t axial = restore(forces.axialMn);
         const int64_t shear = restore(forces.shearMn);
 
+        return IndexFrom(std::max(low, high), -std::min(low, high), axial, shear);
+    }
+
+    // 引きの力 pull・押しの力 push(どちらも応力 × 面積)・軸の力・ずれの力から強さの比(Q16)
+    uint32_t SupportFracture::IndexFrom(int64_t pull, int64_t push, int64_t axial, int64_t shear) const {
+        const uint64_t area = m_scene.cellMm * m_scene.cellMm;
+        const uint64_t tensile = m_strength.tensileKpa;
+        const uint64_t compressive = m_strength.compressiveKpa;
         int64_t index = 0;
-        const int64_t pull = std::max(low, high);
         if (pull > 0)
             index = std::max(index, FxMulDivS64(pull, ONE, tensile * area));
 
-        const int64_t push = -std::min(low, high);
         if (push > 0)
             index = std::max(index, FxMulDivS64(push, ONE, compressive * area));
 
@@ -168,13 +185,17 @@ namespace bicameral::sim {
 
     // 今の解で進んでよい所(進みは戻らない)
     uint32_t SupportFracture::TargetProgress(const SupportFaceForces& forces, uint32_t progress) const {
-        if (IndexOf(forces) < ONE)
-            return progress;  // 強さを超えていない面は割れ始めない(どちらの形でも)
+        return TargetFrom(IndexOf(forces), FxMulDivS64(forces.energyPj, ONE, forces.intact), progress);
+    }
+
+    // 強さの比 index(Q16)と、割れていない硬さに戻したエネルギー undamagedPj から
+    uint32_t SupportFracture::TargetFrom(uint32_t index, int64_t undamagedPj, uint32_t progress) const {
+        if (index < ONE)
+            return progress;  // 強さを超えていない面は割れ始めない(どの形でも)
 
         if (m_fracture.rule == FractureRule::Strength)
             return (uint32_t)ONE;
 
-        const int64_t undamagedPj = FxMulDivS64(forces.energyPj, ONE, forces.intact);
         if (m_softening <= ONE)
             return undamagedPj >= (int64_t)m_faceSurfacePj ? (uint32_t)ONE : progress;
 
@@ -238,8 +259,8 @@ namespace bicameral::sim {
         m_nextUp = m_progressUp;
 
         const uint32_t width = m_scene.width;
-        bool changed = false;
-        for (uint32_t up = 0; up < m_scene.height; ++up) {
+        bool changed = m_fracture.rule == FractureRule::Window && WindowStep();
+        for (uint32_t up = 0; up < m_scene.height && m_fracture.rule != FractureRule::Window; ++up) {
             for (uint32_t x = 0; x < width; ++x) {
                 if (m_scene.solid[x + (size_t)width * up] == 0)
                     continue;
@@ -270,6 +291,102 @@ namespace bicameral::sim {
 
         Separate();
         Rebuild();
+    }
+
+    // --- 3 本目(T-1042): 割れの面を材料の長さ ℓ の区間(世界の原点からそろえる)に分け、区間の平均で判定して区間の面を一緒に進める ---
+    bool SupportFracture::WindowStep() {
+        struct Sum {
+            int64_t pull = 0;  // 引きの側の応力の平均 × 面積の和
+            int64_t push = 0;
+            int64_t axial = 0;
+            int64_t shear = 0;
+            int64_t energyPj = 0;  // 割れていない硬さに戻したエネルギーの和
+            int64_t heatPj = 0;
+            uint32_t count = 0;
+            uint32_t progress = (uint32_t)ONE;  // 区間の面の進みの小さい方
+        };
+
+        struct Face {
+            uint32_t x = 0;
+            uint32_t up = 0;
+            uint32_t axis = 0;
+            uint32_t window = 0;
+            SupportFaceForces forces;
+        };
+
+        const uint32_t width = m_scene.width;
+        const size_t cells = (size_t)width * m_scene.height;
+        const uint64_t dx = m_scene.cellMm;
+        const auto windowOf = [&](uint32_t along) {
+            return m_windowMm > dx ? (uint32_t)(along * dx / m_windowMm) : along;
+        };
+
+        // --- 面を区間に集める(区間 = 同じ境の面の並びの ℓ ごと。x の面は上の向き・上の面は x の向きに並ぶ)---
+        std::vector<Sum> sums(2 * cells);
+        std::vector<Face> faces;
+        for (uint32_t up = 0; up < m_scene.height; ++up) {
+            for (uint32_t x = 0; x < width; ++x) {
+                if (m_scene.solid[x + (size_t)width * up] == 0)
+                    continue;
+
+                for (uint32_t axis = 0; axis < 2; ++axis) {
+                    const SupportFaceForces forces = m_law->FaceForces(x, up, axis);
+                    if (forces.intact == 0)
+                        continue;
+
+                    const uint32_t window = axis == 0 ? x + width * windowOf(up)
+                                                      : (uint32_t)cells + windowOf(x) + width * up;
+                    const auto restore = [&](int64_t force) {
+                        return FxMulDivS64(force, ONE, forces.intact);
+                    };
+                    const int64_t low = restore(forces.lowSideMn);
+                    const int64_t high = restore(forces.highSideMn);
+                    Sum& sum = sums[window];
+                    sum.pull += PositivePart(low, high);
+                    sum.push += PositivePart(-low, -high);
+                    sum.axial += restore(forces.axialMn);
+                    sum.shear += restore(forces.shearMn);
+                    sum.energyPj += restore(forces.energyPj);
+                    ++sum.count;
+                    sum.progress = std::min(sum.progress, Progress(x, up, axis));
+                    faces.push_back({.x = x, .up = up, .axis = axis, .window = window, .forces = forces});
+                }
+            }
+        }
+
+        // --- 区間ごとの進み(区間の平均で 2 本目と同じ判定)→ 区間の面を同じ進みまで ---
+        bool changed = false;
+        for (const Face& face : faces) {
+            Sum& sum = sums[face.window];
+            const auto count = (int64_t)sum.count;
+            const uint32_t index = IndexFrom(sum.pull / count, sum.push / count, sum.axial / count, sum.shear / count);
+            const uint32_t target = TargetFrom(index, sum.energyPj / count, sum.progress);
+            if (target <= sum.progress)
+                continue;
+
+            const size_t at = face.x + (size_t)width * face.up;
+            const uint32_t progress = face.axis == 0 ? m_progressX[at] : m_progressUp[at];
+            const uint32_t next = std::max(progress, sum.progress + std::min(target - sum.progress, m_speedStep));
+            if (next <= progress)
+                continue;
+
+            const int64_t released = FxMulDivS64(face.forces.energyPj, next - progress, face.forces.intact);
+            const int64_t surface = SurfacePj(next) - SurfacePj(progress);
+            m_ledger.releasedPj += released;
+            m_ledger.surfacePj += surface;
+            m_ledger.heatPj += released - surface;
+            sum.heatPj += released - surface;
+            (face.axis == 0 ? m_nextX : m_nextUp)[at] = next;
+            changed = true;
+        }
+
+        // 熱 ≥ 0 は区間ごと(区間の面は同じ進みで、区間の平均のエネルギーで進めたので)
+        for (const Sum& sum : sums) {
+            if (sum.count != 0)
+                m_ledger.worstStepHeatPj = std::min(m_ledger.worstStepHeatPj, sum.heatPj);
+        }
+
+        return changed;
     }
 
     // --- 固定した面(地面・壁)から割れていない面でたどれないセルに「分かれた」印を付け、釣り合いから外す ---
