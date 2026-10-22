@@ -287,6 +287,7 @@ namespace bicameral::sim {
             baked.speciesCondensed.push_back(0);
             baked.speciesRadiationAbsorption.push_back(0);
             baked.speciesLight.push_back({});
+            baked.speciesRefractionQ16.push_back(reaction::LT_ONE_Q16);
             baked.speciesLiquid.push_back(0);
             baked.speciesMolarVolume.push_back(0);
             baked.speciesPhase.push_back(SpeciesPhase::Gas);
@@ -313,6 +314,8 @@ namespace bicameral::sim {
                 baked.species.back().flags = entry.phase != SpeciesPhase::Gas ? 0u : RX_SPECIES_GAS;  // T-0622
                 baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
                 baked.speciesLight.push_back(BakeSpeciesLight(entry));
+                baked.speciesRefractionQ16.push_back(
+                    reaction::LtPermilleToQ16(entry.lightRefractionPermille.value_or(reaction::LT_PERMILLE)));
 
                 // モル体積(mm³/mol)= モル質量(mg/mol)× 1000 ÷ 密度(kg/m³)の最も近い整数(液体は密度が要る。T-0609・ADR-0266)
                 const uint64_t molarVolume = entry.density == 0

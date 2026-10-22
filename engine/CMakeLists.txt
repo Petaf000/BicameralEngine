@@ -81,6 +81,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_tree.cpp
   src/sim/multires_wide_cell.cpp
   src/sim/sun_column.cpp  # 太陽の影の柱の CPU リファレンス(T-0910・ADR-0396)
+  src/sim/sun_lens.cpp  # 日の光を物で集める CPU リファレンス(研究 R-R2・T-0878・ADR-0425)
 )
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)

@@ -18,6 +18,9 @@
 // Cells の約束: RxCell Cell(uint32_t slot, uint32_t index)。Lights の約束(light.hlsli): LtSpeciesLight Light(uint32_t speciesId)。
 // Sink の約束: void Deposit(slot, index, band, absorbed, reflected)(セルごとに足す。状態を持たない: 値で渡しても同じ所へ書く)。
 // 帳簿(入った・吸った・返した・外へ)は SunWalkRay が光線ごとに返し、呼ぶ側が足す。
+// 物に取らせる口(T-0878・R-R2・ADR-0425): SunWalkRayCaught は Catcher の約束 SunCatch Catch(rayB, rayC) で、決まった板で
+// 光線の残りのうち count ÷ 2^shift を「取られた」(caught)にする(レンズの物に入った量)。入った = 吸った + 返した + 外へ + 取られた。
+// SunWalkRay は何も取らない版(SunNoCatch)で、前と同じ語を出す。
 // 浮動小数点は使わない。
 #ifndef BICAMERAL_SUN_COLUMN_HLSLI
 #define BICAMERAL_SUN_COLUMN_HLSLI
@@ -335,6 +338,8 @@ struct SunRay {
     uint64_t reflectedLong;
     uint64_t escapedShort;
     uint64_t escapedLong;
+    uint64_t caughtShort;  // 物に取られた(SunWalkRayCaught だけ。T-0878)
+    uint64_t caughtLong;
 };
 
 FX_FN SunRay SunMakeRay(SunParams params) {
@@ -349,8 +354,55 @@ FX_FN SunRay SunMakeRay(SunParams params) {
     ray.reflectedLong = 0;
     ray.escapedShort = 0;
     ray.escapedLong = 0;
+    ray.caughtShort = 0;
+    ray.caughtLong = 0;
 
     return ray;
+}
+
+// --- 物に取らせる口(T-0878・ADR-0425)---
+// 光線 1 本が板 slab で物に取られる割合 count ÷ 2^shift(slab < 0 なら取られない)
+struct SunCatch {
+    int32_t slab;
+    uint32_t count;
+    uint32_t shift;
+    uint32_t padding;
+};
+
+// 何も取らない(SunWalkRay)
+struct SunNoCatch {
+    uint32_t unused;
+
+    SunCatch Catch(uint32_t rayB, uint32_t rayC) {
+        RX_UNUSED(rayB);
+        RX_UNUSED(rayC);
+        SunCatch none;
+        none.slab = -1;
+        none.count = 0;
+        none.shift = 0;
+        none.padding = 0;
+
+        return none;
+    }
+};
+
+// 残す量 = energy × (2^shift − count) ÷ 2^shift(切り捨て)。取られた = energy − 残す(余りは取られた側へ。保存はビット単位)
+FX_FN uint64_t SunCatchKept(uint64_t energy, SunCatch caught) {
+    const uint64_t whole = (uint64_t)1 << caught.shift;
+
+    return FxShiftRightU128(FxMulU64Full(energy, whole - (uint64_t)caught.count), caught.shift);
+}
+
+FX_FN SunRay SunTakeCatch(SunRay ray, SunCatch caught) {
+    SunRay result = ray;
+    const uint64_t keptShort = SunCatchKept(ray.energyShort, caught);
+    const uint64_t keptLong = SunCatchKept(ray.energyLong, caught);
+    result.caughtShort += ray.energyShort - keptShort;
+    result.caughtLong += ray.energyLong - keptLong;
+    result.energyShort = keptShort;
+    result.energyLong = keptLong;
+
+    return result;
 }
 
 // 2 つの帯を同じ区間で通す(木の無い所・素通しのブロック・空の区間は何もしない。セルは 1 回だけ読む)
@@ -380,10 +432,11 @@ FX_FN SunRay SunPassBoth(Cells cells, Lights lights, Sink sink, SunLeaf leaf, ui
 }
 
 // 光線 1 本(格子の番号 rayB・rayC。0 から rayCountB・rayCountC 未満)を走らせ、帳簿を返す
-// (入った = 吸った + 返した + 外へ。箱に入らなかった光線は全部 0)
-template <typename Tree, typename Cells, typename Lights, typename Sink>
-FX_FN SunRay SunWalkRay(Tree tree, Cells cells, Lights lights, Sink sink, SunParams params, uint32_t rayB,
-                        uint32_t rayC) {
+// (入った = 吸った + 返した + 外へ + 取られた。箱に入らなかった光線は全部 0)。取られる板では、手前の区間を通してから取る
+template <typename Tree, typename Cells, typename Lights, typename Sink, typename Catcher>
+FX_FN SunRay SunWalkRayCaught(Tree tree, Cells cells, Lights lights, Sink sink, Catcher catcher, SunParams params,
+                              uint32_t rayB, uint32_t rayC) {
+    const SunCatch caught = catcher.Catch(rayB, rayC);
     SunAcross acrossB = SunStartAcross(params.firstRayB + (int64_t)rayB, params.stepB, params.stepA);
     SunAcross acrossC = SunStartAcross(params.firstRayC + (int64_t)rayC, params.stepC, params.stepA);
     SunRay ray = SunMakeRay(params);
@@ -411,6 +464,14 @@ FX_FN SunRay SunWalkRay(Tree tree, Cells cells, Lights lights, Sink sink, SunPar
             entered = true;
             ray.enteredShort = ray.energyShort;
             ray.enteredLong = ray.energyLong;
+        }
+
+        if (slab == (int64_t)caught.slab) {
+            ray = SunPassBoth(cells, lights, sink, current, slabs, params, ray);
+            current.slot = MR_NO_BLOCK;
+            current.index = 0;
+            slabs = 0;
+            ray = SunTakeCatch(ray, caught);
         }
 
         const int64_t a = params.signA > 0 ? params.lowA + slab : params.lowA + params.sizeA - 1 - slab;
@@ -441,6 +502,16 @@ FX_FN SunRay SunWalkRay(Tree tree, Cells cells, Lights lights, Sink sink, SunPar
     }
 
     return ray;
+}
+
+// 何も取らない版(R-R0 の掃き。T-0910)
+template <typename Tree, typename Cells, typename Lights, typename Sink>
+FX_FN SunRay SunWalkRay(Tree tree, Cells cells, Lights lights, Sink sink, SunParams params, uint32_t rayB,
+                        uint32_t rayC) {
+    SunNoCatch none;
+    none.unused = 0;
+
+    return SunWalkRayCaught(tree, cells, lights, sink, none, params, rayB, rayC);
 }
 
 MR_NAMESPACE_END

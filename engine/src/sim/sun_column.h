@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,22 @@ namespace bicameral::sim {
     // 光線を全部走らせる(reverse なら逆の順。結果は順によらない: R3 の確かめ用)
     [[nodiscard]] std::vector<uint64_t> SweepSunColumn(const MultiresNest& nest, const BakedReactionTable& table,
                                                        const multires::SunParams& params, bool reverse = false);
+
+    // 物に取らせる掃き(T-0878・R-R2・ADR-0425): catcher が光線ごとに取られる板と割合を決める。取られた量は光線ごとに caught へ
+    // (取られた量が 0 の光線は入れない。並びは光線の番号の順)。帳簿は 入った = 吸った + 返した + 外へ + Σ 取られた
+    using SunCatcher = std::function<multires::SunCatch(uint32_t rayB, uint32_t rayC)>;
+
+    struct SunCaughtRay {
+        uint32_t rayB = 0;
+        uint32_t rayC = 0;
+        uint64_t caughtShort = 0;
+        uint64_t caughtLong = 0;
+    };
+
+    [[nodiscard]] std::vector<uint64_t> SweepSunColumnCaught(const MultiresNest& nest, const BakedReactionTable& table,
+                                                             const multires::SunParams& params,
+                                                             const SunCatcher& catcher,
+                                                             std::vector<SunCaughtRay>& caught);
 
     // MakeSunParams + SweepSunColumn
     [[nodiscard]] std::expected<SunColumnResult, std::string> SweepSunColumn(const MultiresNest& nest,

@@ -214,7 +214,9 @@ namespace bicameral::script {
         std::expected<void, std::string> ReadSpeciesLight(const ScriptValue& value, const std::string& path,
                                                           sim::SpeciesDefinition& species) {
             constexpr int64_t PERMILLE_LIMIT = 1000;
-            const std::array<std::expected<void, std::string>, 4> results = {
+            // 屈折の値は 1.000〜4.000(屈折率。千分率で書く。T-0878)
+            constexpr int64_t REFRACTION_LIMIT = 4000;
+            const std::array<std::expected<void, std::string>, 5> results = {
                 ReadOptionalLight(value, "light_absorption_short_mm2_per_mol", path, UINT32_LIMIT,
                                   species.lightAbsorptionShort),
                 ReadOptionalLight(value, "light_absorption_long_mm2_per_mol", path, UINT32_LIMIT,
@@ -222,11 +224,16 @@ namespace bicameral::script {
                 ReadOptionalLight(value, "light_reflectance_short_permille", path, PERMILLE_LIMIT,
                                   species.lightReflectanceShortPermille),
                 ReadOptionalLight(value, "light_reflectance_long_permille", path, PERMILLE_LIMIT,
-                                  species.lightReflectanceLongPermille)};
+                                  species.lightReflectanceLongPermille),
+                ReadOptionalLight(value, "light_refraction_permille", path, REFRACTION_LIMIT,
+                                  species.lightRefractionPermille)};
             for (const auto& result : results) {
                 if (!result)
                     return std::unexpected(result.error());
             }
+
+            if (species.lightRefractionPermille && *species.lightRefractionPermille < 1000)
+                return std::unexpected(path + ".light_refraction_permille: 1000(屈折率 1)以上で書く");
 
             return {};
         }
@@ -244,6 +251,7 @@ namespace bicameral::script {
                                                           "light_absorption_long_mm2_per_mol",
                                                           "light_reflectance_short_permille",
                                                           "light_reflectance_long_permille",
+                                                          "light_refraction_permille",
                                                           "phase",
                                                           "density_kg_per_m3",
                                                           "viscosity_upa_s",

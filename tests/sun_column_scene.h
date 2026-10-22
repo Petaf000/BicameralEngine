@@ -1,5 +1,6 @@
 // sun_column_scene.h — 太陽の影の柱の試験(tests/sun_column_test.cpp・gpu_sun_column_test.cpp)が同じ場面を作る道具(T-0910)。
 // 表は試験の表(combustion_test)に、光の値を書かない石(灰色で通さない・照り返し 0.5。D-610)と、短い帯を通し長い帯を吸うガラスを足したもの。
+// 日の光を集める試験(tests/sun_lens_test.cpp。T-0878)は、呼ぶ側が物質を足せる(extend)・紙(標準の cellulose。乾いた草・紙)の地面を使う。
 // 場面は 0.25 m(レベル 1)の座標で書き、レベル 0 の世界はセルの低い角の 0.25 m のセルで決める(どの場面も 0.5 m のセルの中で一様)。
 // 公開側に置く試験データで、ゲームの中身ではない(D-006)。
 #pragma once
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <functional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "reaction_test_table.h"
@@ -23,6 +25,7 @@ namespace bicameral::test {
         Air,
         Stone,
         Glass,
+        Paper,  // 標準の cellulose(固体 1500 kg/m³。T-0878)
     };
 
     // 場面: 0.25 m のセルの座標 (x, y, z)(上は +y)→ 物質
@@ -32,7 +35,8 @@ namespace bicameral::test {
     constexpr uint32_t SUN_IRRADIANCE_SHORT = 600000;  // mW/m²(試験の値。晴れた日の見える光の目安)
     constexpr uint32_t SUN_IRRADIANCE_LONG = 400000;
 
-    inline sim::BakedReactionTable MakeSunTable() {
+    // extend: 呼ぶ側が物質を足す(T-0878 のレンズのガラスなど)
+    inline sim::BakedReactionTable MakeSunTable(const std::function<void(sim::ReactionTableDefinition&)>& extend = {}) {
         sim::ReactionTableDefinition definition = sim::MakeCombustionTestTable();
         definition.species.push_back({.name = "sun_test_stone",
                                       .composition = {{.element = "C", .count = 1}},
@@ -53,6 +57,8 @@ namespace bicameral::test {
         glass.lightReflectanceShortPermille = 0;
         glass.lightReflectanceLongPermille = 0;
         definition.species.push_back(glass);
+        if (extend)
+            extend(definition);
 
         auto baked = sim::BakeReactionTable(definition);
         if (!baked) {
@@ -66,6 +72,15 @@ namespace bicameral::test {
     inline reaction::RxCell MakeSunCell(const sim::BakedReactionTable& table, SunMaterial material) {
         // 石・ガラス(0.125 m³ に 2 万 mol。レベルによらず同じ数 = 同じ密度)
         constexpr uint64_t SOLID_MICROMOLES = 20000000000;
+        // 紙・乾いた草(cellulose 162 g/mol・1500 kg/m³ を 0.125 m³ に)
+        constexpr uint64_t PAPER_MICROMOLES = 1157000000;
+        if (material == SunMaterial::Paper) {
+            const std::vector<sim::SpeciesAmount> paper = {
+                {.species = table.SpeciesId("cellulose"), .amount = PAPER_MICROMOLES}};
+
+            return sim::MakeReactionCell(table, paper, SUN_ROOM_TEMPERATURE_MK);
+        }
+
         if (material != SunMaterial::Air) {
             const char* name = material == SunMaterial::Stone ? "sun_test_stone" : "sun_test_glass";
             const std::vector<sim::SpeciesAmount> solid = {
@@ -96,9 +111,9 @@ namespace bicameral::test {
              .ledgerColumns = 1 + static_cast<uint32_t>(table.species.size()),
              .rootLevel = level});
         const auto toQuarter = static_cast<uint32_t>(1 - level);  // 0.25 m のセルへのずらし
-        const std::array<reaction::RxCell, 3> materials = {MakeSunCell(table, SunMaterial::Air),
-                                                           MakeSunCell(table, SunMaterial::Stone),
-                                                           MakeSunCell(table, SunMaterial::Glass)};
+        const std::array<reaction::RxCell, 4> materials = {
+            MakeSunCell(table, SunMaterial::Air), MakeSunCell(table, SunMaterial::Stone),
+            MakeSunCell(table, SunMaterial::Glass), MakeSunCell(table, SunMaterial::Paper)};
         std::vector<reaction::RxCell> cells(multires::MR_BLOCK_CELLS);
         for (uint32_t rootZ = 0; rootZ < rootsZ; ++rootZ) {
             for (uint32_t rootY = 0; rootY < rootsY; ++rootY) {
