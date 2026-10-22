@@ -107,6 +107,8 @@ namespace bicameral::sim::case_b {
             // --- 粒の降伏(R3・T-0996)---
             std::vector<uint32_t> grainRoomQ16;       // 詰まりまでの残り(2^16 = セル全部)
             std::vector<int64_t> grainMassPerFillMg;  // 詰まったセル 1 つぶんの粒の質量(セルの粒の混ざり方で)
+            std::vector<uint8_t>
+                grainMovingCells;  // 粒が動いているセル(T-1004 の 2 本目。降伏の段の初めの面の速さから)
         };
 
         // --- 単位の換算 ---
@@ -1855,7 +1857,8 @@ namespace bicameral::sim::case_b {
             uint32_t fillQ16 = 0;             // 詰まりの割合(2^16 で詰まった。上限 2^16)
             int64_t weightMicroPascal = 0;    // 粒の浮力を引いた重さ ÷ 面積
             int64_t stressMicroPascal = 0;    // 有効応力 σ'(セルの中心。支えられた粒だけ)
-            int64_t frictionQ16 = 0;          // tan φ(体積の割合で平均した崩れる角度から。S9)
+            int64_t frictionQ16 = 0;          // tan(φ + 差)= 止まった粒の上限(体積の割合で平均した止まる角度から。S9)
+            int64_t movingFrictionQ16 = 0;    // tan φ = 動いている粒の上限(T-1004)
             int64_t cohesionMicroPascal = 0;  // c_eff = cohesion + suction × 4S(1−S)(21 §2.5)
         };
 
@@ -1863,7 +1866,8 @@ namespace bicameral::sim::case_b {
         struct YieldFace {
             uint32_t index = 0;
             int64_t push = 0;
-            int64_t friction = 0;
+            int64_t friction = 0;        // 止まった粒の上限(崩れ始める角度)
+            int64_t movingFriction = 0;  // 動いている粒の上限(止まる角度。T-1004)
         };
 
         constexpr uint32_t DEGREE_Q8_TO_TURN32_SHIFT = 24;  // 度の Q8 × 2^24 ÷ 360 = 1 周 2^32 の角度
@@ -1909,6 +1913,7 @@ namespace bicameral::sim::case_b {
             result.fillQ16 = std::min(view.cells[cell].grainPackedQ16, Q16_ONE);
             // 書いた角度は山が止まる角度(D-620)。降伏の上限は崩れ始める角度 = 止まる角度 + 差(T-0997)
             result.frictionQ16 = TangentQ16((angleSum / volumeSum) + ((uint64_t)startOffsetDegrees << 8));
+            result.movingFrictionQ16 = TangentQ16(angleSum / volumeSum);
 
             // 孔の満ち具合 S = 液体 ÷ 流体(Q16)。くっつく強さの山形 4S(1−S)
             const int64_t fluidNl = flow.liquidNl + flow.gasNl;
@@ -1959,6 +1964,7 @@ namespace bicameral::sim::case_b {
                 if (!yield.rests) {
                     yield.weightMicroPascal = 0;
                     yield.frictionQ16 = 0;
+                    yield.movingFrictionQ16 = 0;
                     yield.cohesionMicroPascal = 0;
                     above = 0;
                     continue;
@@ -1981,13 +1987,17 @@ namespace bicameral::sim::case_b {
             const int64_t frictionHold = (fx::FxMulShiftS64(left.weightMicroPascal, left.frictionQ16, 16) +
                                           fx::FxMulShiftS64(right.weightMicroPascal, right.frictionQ16, 16)) /
                                          2;
+            const int64_t movingHold = (fx::FxMulShiftS64(left.weightMicroPascal, left.movingFrictionQ16, 16) +
+                                        fx::FxMulShiftS64(right.weightMicroPascal, right.movingFrictionQ16, 16)) /
+                                       2;
             const int64_t cohesionHold = (fx::FxMulShiftS64(left.cohesionMicroPascal, left.fillQ16, 16) +
                                           fx::FxMulShiftS64(right.cohesionMicroPascal, right.fillQ16, 16)) /
                                          2;
 
             return {.index = index,
                     .push = PressureImpulse(box, leftPush - rightPush, area),
-                    .friction = PressureImpulse(box, frictionHold + cohesionHold, area)};
+                    .friction = PressureImpulse(box, frictionHold + cohesionHold, area),
+                    .movingFriction = PressureImpulse(box, movingHold + cohesionHold, area)};
         }
 
         // 降伏した運動量を載せられる面か(風上に粒があり、向かう側に空きがある)
@@ -2014,6 +2024,22 @@ namespace bicameral::sim::case_b {
             }
         }
 
+        // 面の粒が動いているか(T-1004): 刻みの初めの面の運動量(前の刻みから持ち越した分 + この刻みの圧力)の速さが
+        // grainMovingSpeedMmPerS 以上。0 なら分けない(いつも止まった粒の上限)
+        bool GrainFaceMoving(FlowRuntime& runtime, Box& box, const FlowFace& face) {
+            const uint32_t still = runtime.options.grainMovingSpeedMmPerS;
+            if (still == 0)
+                return false;
+
+            const int64_t momentum = GrainMomentum(box, face);
+            if (momentum == 0)
+                return false;
+
+            // 速さ v ≥ v_s ⇔ |M| ≥ v_s × 面の粒の質量 × 2^20 ÷ 1000(M は mg·2^-20 m/s)
+            const int64_t threshold = fx::FxMulDivS64(face.grainMassMg << 20, still, 1000);
+            return (momentum < 0 ? -momentum : momentum) >= threshold;
+        }
+
         // 面の柱(隣り合う 2 本の列の間の、重さの軸に沿って続いた面)の降伏: 押す力の和 D と摩擦の上限の和 F で
         // P' = P + D。|P'| ≤ F なら 0(ちょうど止まる)、超えたら F だけ減らす(降伏の後の運動量は持ち越す)。
         // 和をとるので「2 本の列の粒の高さの差 ÷ Δx > tan φ」で崩れる(深さ・Δx によらない)。
@@ -2028,9 +2054,13 @@ namespace bicameral::sim::case_b {
             int64_t friction = 0;
             for (const YieldFace& yield : segment) {
                 const FlowFace& face = scratch.faces[yield.index];
+                const bool moving = runtime.options.grainMovingByCell ? (scratch.grainMovingCells[face.left] != 0 ||
+                                                                         scratch.grainMovingCells[face.right] != 0)
+                                                                      : GrainFaceMoving(runtime, box, face);
+                stats.yieldDynamicFaces += moving ? 1u : 0u;
                 ApplyImpulse(box, GrainFace(box, face.axis, face.left), yield.push, ImpulseSource::Pressure);
                 total += GrainMomentum(box, face);
-                friction += yield.friction;
+                friction += moving ? yield.movingFriction : yield.friction;
             }
 
             int64_t moving = 0;
@@ -2132,6 +2162,18 @@ namespace bicameral::sim::case_b {
             }
 
             MeasureYieldRoom(runtime, view, cells);
+
+            // 粒が動いているセル(T-1004 の 2 本目): 降伏の前の横の面の粒の速さで決める(どの面も刻みの初めの値。順によらない)
+            scratch.grainMovingCells.assign(count, 0);
+            if (runtime.options.grainMovingByCell) {
+                for (const FlowFace& face : scratch.faces) {
+                    if (face.axis == gravity || !face.open || !GrainFaceMoving(runtime, box, face))
+                        continue;
+
+                    scratch.grainMovingCells[face.left] = 1;
+                    scratch.grainMovingCells[face.right] = 1;
+                }
+            }
 
             // 横の面を、重さの軸に沿って続いた「面の柱」に分けて降伏を決める(支えられた粒のある面だけ)。
             // どの面の柱も刻みの初めの応力から決め、自分の面の運動量だけを変える(順によらない)

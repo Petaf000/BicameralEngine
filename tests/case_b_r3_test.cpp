@@ -244,6 +244,10 @@ namespace {
         return FormatFixed(value, 3);
     }
 
+    // 動いている粒の速さのしきい値(T-1004。mm/s)。引数で替えて測る時だけ(無ければ FlowOptions の既定)
+    std::optional<uint32_t> movingSpeedOverride;
+    bool movingByCellOverride = false;  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
+
     struct RunOptions {
         int32_t level = 0;
         MomentumLayout layout = MomentumLayout::GrainSeparate;
@@ -276,6 +280,11 @@ namespace {
         if (options.startOffsetDegrees.has_value())
             flowOptions.reposeStartOffsetDegrees = *options.startOffsetDegrees;
 
+        if (movingSpeedOverride.has_value())
+            flowOptions.grainMovingSpeedMmPerS = *movingSpeedOverride;
+
+        flowOptions.grainMovingByCell = movingByCellOverride;
+
         const FlowStages flow = MakeFlowStages(flowOptions);
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         uint64_t tick = 0;
@@ -297,11 +306,12 @@ namespace {
     void PrintStats(const Run& run) {
         std::printf(
             "    費用 %lld ns/セル/刻み(計器込み)・降伏で動いた面の柱 %llu・止めた %llu・空きが無く止めた %llu・"
-            "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u\n",
+            "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u・動く面の上限 %llu\n",
             (long long)run.recording.NanosecondsPerCellTick(), (unsigned long long)run.stats.yieldMovingPairs,
             (unsigned long long)run.stats.yieldHeldPairs, (unsigned long long)run.stats.yieldBlockedPairs,
             (unsigned)((uint64_t)run.stats.maxPackedQ16 * 1000 >> 16), (unsigned long long)run.stats.overpackedCells,
-            (unsigned long long)run.stats.grainLimitedCells, run.stats.maxCycles);
+            (unsigned long long)run.stats.grainLimitedCells, run.stats.maxCycles,
+            (unsigned long long)run.stats.yieldDynamicFaces);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -935,7 +945,15 @@ int main(int argc, char** argv) {
     // 引数で場面を 1 つに絞れる(1 = 砂山と決定性・2 = 掘る・3 = 勢いで走る・4 = 砂時計・5 = 濡れた砂・
     // 6 = 詰めると重い・7 = 穴の口・8 = 置き場 ①・9 = 斜面 25° と 45°)。無ければ全部
     // 10 = 止まる角度と崩れ始める角度(T-0997。全部には入れない。2 つ目の引数 = 差の度)
+    // 動いている粒の速さのしきい値(T-1004): 場面 1〜9 は 2 つ目の引数・場面 10 は 3 つ目の引数(mm/s。0 = 分けない)
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
+    const int speedArgument = only == 10 ? 3 : 2;
+    if (argc > speedArgument) {
+        const int speed = std::stoi(argv[speedArgument]);
+        movingSpeedOverride = (uint32_t)std::abs(speed);
+        movingByCellOverride = speed < 0;
+    }
+
     if (only == 10) {
         ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
         std::printf("case_b r3: %d failure(s)\n", failureCount);
