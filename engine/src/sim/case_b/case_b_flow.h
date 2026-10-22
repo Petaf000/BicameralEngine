@@ -51,12 +51,12 @@
 //         P' は、向かう側のセルに空きがある面(詰まっていない・据わる物が無い)だけに質量の割合で載せる(表面を流れる)。差は帳簿 Wall。
 //   くっつく強さ c_eff = cohesion + suction × 4S(1−S)(S = 孔の満ち具合 = 液体 ÷ 流体の体積)。混ざった粒は体積の平均(S9)。
 //   詰まり: 詰まった粒へ入る面は止める(R2 のまま。押し返しの形は接触で、共有の陰の圧力には粒そのものの体積で入る)。
-//   穴を通る口(S8): FlowOptions::faceHoleSizeUm が穴の大きさを返したら、粒の大きさ ÷ 穴 > grain_pass_ratio_pct の面は流さない(口だけ。既定は穴なし)。
+//   面の開き具合(T-0937・ADR-0420): 箱の faceBlockedQ16(欄 face.blocked と同じ形)を、面の開き = min(セルの空き, 1 − 塞ぐ割合)で読む(FoFaceOpen)。
+//   穴を通る口(S8): 箱の faceHoleSizeUm と面の開きを FoGrainFaceOpen に渡し、粒の開きが 0 の面は流さない(粒 ÷ 穴 > grain_pass_ratio_pct。既定 100 %)。
 
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 
 #include "sim/case_b/case_b_box.h"
@@ -93,8 +93,6 @@ namespace bicameral::sim::case_b {
         // 降伏を面ごとに決める(2 本目・既定)。false = 面の柱(重さの軸に沿って続いた面)の和で決め、表面の面に載せる(1 本目。
         // 柱の深さ ÷ Δx に比例して表面が速くなり、山が平らになりすぎた。T-0996)
         bool yieldPerFace = true;
-        // 面の穴の大きさ(µm。S8 の口。T-0937 の面の開き具合を後で読む所)。null か 0 = 穴の情報なし(通す)
-        std::function<uint32_t(const Box&, uint32_t axis, uint32_t cell)> faceHoleSizeUm;
     };
 
     // 1 つのセルの状態式の結果(刻みの初めの中身から)

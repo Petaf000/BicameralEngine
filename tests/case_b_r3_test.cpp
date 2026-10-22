@@ -2,7 +2,8 @@
 // 粒は詰まった時だけ押し返し(詰まりを超えて入らない)、支えられた粒だけが浮力を引いた重さを持つ。横の面の柱で
 // 押す力が「tan φ × 重さ + くっつく強さ」を超えた分だけ動く(崩れる角度は φ から出る)。
 // 場面(この試験の中で絵を書く): 砂山の崩れる角度・掘ると崩れ直す・高い柱が勢いで走る・砂時計の流量(Beverloo)・
-// 濡れた砂の急な面(c_eff の山形)・詰まりで重くなる(D-613)・穴を通る口(S8。口だけ)。置き場は ④ を既定に、① でも流す。
+// 濡れた砂の急な面(c_eff の山形)・詰まりで重くなる(D-613)・穴を通る口(S8。面の開き具合を FoGrainFaceOpen で読む)。
+// 砂時計は 0.5 m・0.25 m・0.125 m で口を 1〜12 セルにして Beverloo と比べる(T-0998)。置き場は ④ を既定に、① でも流す。
 // 研究の記録なので、落ちて止まるのは保存・決定性・式の壊れ(負の質量)だけ。目安の合否は表に出す(結果は docs/tickets/T-0996)。
 #include <algorithm>
 #include <cstdint>
@@ -247,8 +248,8 @@ namespace {
         uint32_t ticksPerSecond = 60;
         uint64_t seconds = 60;
         bool grainYield = true;
-        bool perFace = true;  // 2 本目(面ごと)。false = 1 本目(面の柱の和)
-        std::function<uint32_t(const Box&, uint32_t, uint32_t)> holes;
+        bool perFace = true;                // 2 本目(面ごと)。false = 1 本目(面の柱の和)
+        std::function<void(Box&)> prepare;  // 場面を作った後・走らせる前の手直し(面の開き具合・板を薄くする)
         std::function<void(Box&, uint64_t)> afterTick;  // 刻みの後の操作(掘るなど。刻みの番号)
     };
 
@@ -257,6 +258,11 @@ namespace {
         EXPECT(created.has_value());
         Run run{.recording = {}, .stats = {}, .box = std::move(*created), .grainSpeed = {}};
         run.box.config.ticksPerSecond = options.ticksPerSecond;
+        if (options.prepare) {
+            options.prepare(run.box);
+            ResetLedger(run.box);
+        }
+
         std::vector<BoxRegion> regions;
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, options.level));
@@ -264,7 +270,6 @@ namespace {
         FlowOptions flowOptions = {.drag = true};
         flowOptions.grainYield = options.grainYield;
         flowOptions.yieldPerFace = options.perFace;
-        flowOptions.faceHoleSizeUm = options.holes;
         const FlowStages flow = MakeFlowStages(flowOptions);
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         uint64_t tick = 0;
@@ -531,44 +536,213 @@ namespace {
         PrintStats(run);
     }
 
-    // --- 4. 砂時計(2 次元のサイロ。記録): 流量 W(kg/s・奥行き 1 m あたり)を Beverloo の 2 次元の形 C ρ_b √g D^(3/2) と比べる ---
-    // ρ_b = 2650 × 0.6 = 1590 kg/m³(D-613)。C = 1 の時の W: D 0.5 m = 1760 kg/s・1 m = 4979 kg/s。
-    // Beverloo の芯は「流量が積もった高さによらず D^(3/2)」。2 次元の C の文献値は未確認(0.5〜1 の桁の見込み)
-    int64_t HourglassRate(int32_t level, uint32_t holeCellsAtHalf, uint32_t fill, MomentumLayout layout) {
-        const uint32_t factor = level == 1 ? 2 : 1;
-        const Scene scene = MakeHourglassScene(holeCellsAtHalf, fill);
-        (void)factor;
-        const Run run = RunR3(scene, {.level = level, .layout = layout, .seconds = 3}, {"upper", "lower"});
-        const uint32_t edge = CellEdgeUm(level);
-        const auto lower = [&](size_t tick) {
+    // --- 4. 砂時計(2 次元のサイロ。記録。T-0996 → T-0998 で細かい箱へ): 流量 W(kg/s・奥行き 1 m あたり)を Beverloo と比べる ---
+    // 2 次元の Beverloo: W = C ρ_b √g (D − k d)^(3/2)(d = 300 µm は D に比べて無視)。ρ_b = 2650 × 0.6 = 1590 kg/m³(D-613)。
+    // C = 1 の時の W: D 0.5 m = 1760・1 m = 4979・1.5 m = 9147 kg/s/m。芯は「積もった高さによらない」と「D^(3/2)」。
+    // 3/2 乗は「口の速さ ∝ √(g D)」×「口の幅 D」から出る(口の詰まりは D によらない)。口の速さは √(γ g D)・γ = 1.07
+    // (2 次元の実験。Janda ほか 2012 PRL 108 248001)。2 次元の C は 1.2〜1.6 の桁(Staron ほか 2014 の粒の計算 1.22・μ(I) の連続体 1.55。
+    // 流量の数え方〔体積か質量か〕は未確認)。0.5 m では口が 1〜2 セルで比が合わなかった(T-0996)ので、0.25 m・0.125 m で口を 4〜12 セルにして、
+    // 細かさで Beverloo に近づくか(粗さの問題)・近づかないか(降伏の形の問題)を分ける。降伏なし(R2 の粒)を対照に並べる。
+    struct HourglassCase {
+        int32_t level = 0;
+        uint32_t holeCells = 2;  // 口の幅(0.5 m の絵のセル)
+        uint32_t fill = 10;      // 砂の段(0.5 m の絵のセル)
+        bool grainYield = true;
+        bool thinPlate = false;  // 底の板を箱の 1 セルの厚さに(口の長さ 0.5 m の影響を見る)
+        bool vacuum = false;     // 空気を抜く(粒と空気の引きずりの影響を見る。孔も真空)
+        uint32_t ticksPerSecond = 60;
+        MomentumLayout layout = MomentumLayout::GrainSeparate;
+    };
+
+    struct HourglassResult {
+        int64_t rate = 0;         // 0.5〜1.5 秒の平均(kg/s/m)
+        int64_t late = 0;         // 1.5〜2.5 秒
+        int64_t mouthSpeed = 0;   // 口の出口の面の粒の速さ(質量の重みの平均・下向き・mm/s。0.5〜1.5 秒)
+        int64_t mouthPacked = 0;  // 口の出口のセルの詰まり(‰。同じ時間の平均)
+    };
+
+    // 口の出口(箱のセル): 板の下の面の下のセルの行と、口の列 [xBegin, xEnd)
+    struct Mouth {
+        uint32_t below = 0;  // 出口の面 = このセルの + y の面
+        uint32_t xBegin = 0;
+        uint32_t xEnd = 0;
+    };
+
+    Mouth FindMouth(const HourglassCase& hourglass) {
+        const uint32_t fine = 1u << (uint32_t)hourglass.level;
+        const uint32_t left = 8 - (hourglass.holeCells / 2);
+        const uint32_t below = hourglass.thinPlate ? (12 * fine) - 2 : (11 * fine) - 1;
+
+        return {.below = below, .xBegin = left * fine, .xEnd = (left + hourglass.holeCells) * fine};
+    }
+
+    int64_t GrainMassMg(const Box& box, uint32_t cell) {
+        int64_t mass = 0;
+        for (uint32_t index = 0; index < box.materials.size(); ++index) {
+            if (box.materials[index].phase == Phase::Grain)
+                mass += CellMass(box, cell, index);
+        }
+
+        return mass;
+    }
+
+    // 底の板を上の 1 セルだけ残して、下の行を空気に替える(石を外へ・大気の空気を外から。帳簿は呼ぶ側が初めに戻す)
+    void ThinPlate(Box& box) {
+        const uint32_t fine = 1u << (uint32_t)box.config.level;
+        const uint32_t stone = MaterialIndex(box, "stone");
+        const uint32_t air = MaterialIndex(box, "air");
+        const int64_t gas = IdealGasMassMg((uint64_t)ATMOSPHERE_PA, CellVolumeMm3(box),
+                                           box.materials[air].molarMassMgPerMol, 300000);
+        for (uint32_t y = 11 * fine; y + 1 < 12 * fine; ++y) {
+            for (uint32_t x = 2 * fine; x < 14 * fine; ++x) {
+                const uint32_t cell = CellIndex(box, x, y, 0);
+                const int64_t rock = CellMass(box, cell, stone);
+                if (rock == 0)
+                    continue;
+
+                ExchangeMass(box, cell, stone, -rock);
+                ExchangeMass(box, cell, air, gas);
+                const int64_t energy = ThermalEnergyMillijoules(box, cell, 300000);
+                ExchangeEnergy(box, cell, energy - box.energyMillijoules[cell], EnergySource::Outside);
+                box.pressureMicroPascal[cell] = box.pressureMicroPascal[CellIndex(box, x, (11 * fine) - 1, 0)];
+            }
+        }
+    }
+
+    // 口の出口の面の粒の運動量と質量・出口のセルの詰まりを足していく
+    struct MouthSum {
+        int64_t momentum = 0;
+        int64_t mass = 0;
+        int64_t packed = 0;
+        int64_t cells = 0;
+    };
+
+    void AddMouth(const Box& box, const Mouth& mouth, MouthSum& sum) {
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
+        const View view = BuildView(box);
+        for (uint32_t x = mouth.xBegin; x < mouth.xEnd; ++x) {
+            const uint32_t cell = CellIndex(box, x, mouth.below, 0);
+            const uint32_t above = CellIndex(box, x, mouth.below + 1, 0);
+            sum.momentum += box.faceMomentum[1][FaceIndex(box, cell, slot)];
+            sum.mass += (GrainMassMg(box, cell) + GrainMassMg(box, above)) / 2;
+            sum.packed += ((int64_t)view.cells[above].grainPackedQ16 * 1000) >> 16;
+            ++sum.cells;
+        }
+    }
+
+    HourglassResult HourglassRun(const HourglassCase& hourglass) {
+        Scene scene = MakeHourglassScene(hourglass.holeCells, hourglass.fill);
+        if (hourglass.vacuum) {
+            for (LegendEntry& entry : scene.legend) {
+                entry.gasPressurePa = 0;
+                entry.gas.clear();
+            }
+        }
+
+        const Mouth mouth = FindMouth(hourglass);
+        const uint64_t ticks = hourglass.ticksPerSecond;
+        MouthSum sum;
+        RunOptions options = {.level = hourglass.level,
+                              .layout = hourglass.layout,
+                              .ticksPerSecond = hourglass.ticksPerSecond,
+                              .seconds = 3,
+                              .grainYield = hourglass.grainYield};
+        if (hourglass.thinPlate)
+            options.prepare = ThinPlate;
+
+        options.afterTick = [&](Box& box, uint64_t tick) {
+            if (tick > ticks / 2 && tick <= (3 * ticks) / 2)
+                AddMouth(box, mouth, sum);
+        };
+        const Run run = RunR3(scene, options, {"upper", "lower"});
+        const auto edge = (int64_t)CellEdgeUm(hourglass.level);
+        const auto lower = [&](uint64_t tick) {
             return RegionGrainMg(run.recording.samples[tick], 1);
         };
-        // 0.5〜1.5 秒の平均(mg/s ÷ 奥行き µm = kg/s/m)
-        const int64_t rate = (lower(90) - lower(30)) / (int64_t)edge;
-        const int64_t late = (lower(150) - lower(90)) / (int64_t)edge;
-        const int64_t reference = holeCellsAtHalf == 1 ? 1760 : 4979;
-        std::printf(
-            "  砂時計 %s m %s 口 %s m・砂 %u 段: 流量 0.5〜1.5 秒 %lld kg/s/m・1.5〜2.5 秒 %lld(C = %s)・最大の速さ "
-            "%lld mm/s\n",
-            level == 0 ? "0.5" : "0.25", LayoutName(layout), holeCellsAtHalf == 1 ? "0.5" : "1", fill, (long long)rate,
-            (long long)late, Fixed3(rate * 1000 / reference).c_str(),
-            (long long)MillimetersPerSecond(PeakOf(run.grainSpeed).value));
-        PrintStats(run);
+        HourglassResult result;
+        // mg/s ÷ 奥行き µm = kg/s/m(1 秒の幅の差)
+        result.rate = (lower((3 * ticks) / 2) - lower(ticks / 2)) / edge;
+        result.late = (lower((5 * ticks) / 2) - lower((3 * ticks) / 2)) / edge;
+        result.mouthSpeed = sum.mass == 0 ? 0 : MillimetersPerSecond(-sum.momentum / sum.mass);
+        result.mouthPacked = sum.cells == 0 ? 0 : sum.packed / sum.cells;
 
-        return rate;
+        return result;
+    }
+
+    // C = 1 の Beverloo の流量(kg/s/m)と √(g D)(mm/s)。口 0.5 m・1 m・1.5 m
+    int64_t BeverlooUnitRate(uint32_t holeCells) {
+        return holeCells == 1 ? 1760 : holeCells == 2 ? 4979 : 9147;
+    }
+
+    int64_t FreeFallSpeedMmPerS(uint32_t holeCells) {
+        return holeCells == 1 ? 2214 : holeCells == 2 ? 3132 : 3835;
+    }
+
+    const char* LevelName(int32_t level) {
+        return level == 0 ? "0.5" : level == 1 ? "0.25" : "0.125";
+    }
+
+    HourglassResult HourglassRow(const HourglassCase& hourglass) {
+        const HourglassResult result = HourglassRun(hourglass);
+        const uint32_t mouthCells = hourglass.holeCells << (uint32_t)hourglass.level;
+        std::printf(
+            "  | %s m | %s%s%s%s | 口 %s m(%u セル)・砂 %u 段 | %lld | %lld | C %s | 口の速さ %lld mm/s"
+            "(÷ √(gD) %s)| 口の詰まり %lld ‰ |\n",
+            LevelName(hourglass.level), hourglass.grainYield ? "降伏" : "降伏なし",
+            hourglass.thinPlate ? "・薄い板" : "", hourglass.vacuum ? "・真空" : "",
+            hourglass.ticksPerSecond == 60 ? "" : "・1/120", Fixed3(hourglass.holeCells * 500).c_str(), mouthCells,
+            hourglass.fill, (long long)result.rate, (long long)result.late,
+            Fixed3(result.rate * 1000 / BeverlooUnitRate(hourglass.holeCells)).c_str(), (long long)result.mouthSpeed,
+            Fixed3(result.mouthSpeed * 1000 / FreeFallSpeedMmPerS(hourglass.holeCells)).c_str(),
+            (long long)result.mouthPacked);
+
+        return result;
+    }
+
+    std::string Ratio(int64_t numerator, int64_t denominator) {
+        return Fixed3(denominator == 0 ? 0 : numerator * 1000 / denominator);
+    }
+
+    // 1 つの細かさと降伏の有無で、口 0.5・1・1.5 m(砂 10 段)と口 1 m・砂 5 段を流し、比を Beverloo と並べる
+    void HourglassSeries(int32_t level, bool grainYield, bool thinPlate = false, bool vacuum = false) {
+        HourglassCase base = {.level = level, .grainYield = grainYield, .thinPlate = thinPlate, .vacuum = vacuum};
+        std::vector<HourglassResult> rows;
+        for (const uint32_t hole : {1u, 2u, 3u}) {
+            base.holeCells = hole;
+            rows.push_back(HourglassRow(base));
+        }
+
+        base.holeCells = 2;
+        base.fill = 5;
+        const HourglassResult shallow = HourglassRow(base);
+        std::printf(
+            "  → %s m %s%s: 口 1 m ÷ 0.5 m %s(Beverloo 2.828)・1.5 m ÷ 1 m %s(1.837)・砂 5 段 ÷ 10 段 %s(1)・"
+            "口の速さ 1 m ÷ 0.5 m %s(1.414)・1.5 m ÷ 1 m %s(1.225)\n",
+            LevelName(level), grainYield ? "降伏" : "降伏なし",
+            thinPlate ? "・薄い板"
+            : vacuum  ? "・真空"
+                      : "",
+            Ratio(rows[1].rate, rows[0].rate).c_str(), Ratio(rows[2].rate, rows[1].rate).c_str(),
+            Ratio(shallow.rate, rows[1].rate).c_str(), Ratio(rows[1].mouthSpeed, rows[0].mouthSpeed).c_str(),
+            Ratio(rows[2].mouthSpeed, rows[1].mouthSpeed).c_str());
     }
 
     void Hourglass() {
-        const int64_t small = HourglassRate(0, 1, 10, MomentumLayout::GrainSeparate);
-        const int64_t wide = HourglassRate(0, 2, 10, MomentumLayout::GrainSeparate);
-        const int64_t shallow = HourglassRate(0, 2, 5, MomentumLayout::GrainSeparate);
-        const int64_t fine = HourglassRate(1, 2, 10, MomentumLayout::GrainSeparate);
-        // 2^(3/2) = 2.83
         std::printf(
-            "  砂時計(記録): 口 1 m ÷ 0.5 m の流量の比 %s(Beverloo 2.828)・砂 5 段 ÷ 10 段 %s(Beverloo 1)・"
-            "0.25 m ÷ 0.5 m %s\n",
-            Fixed3(small == 0 ? 0 : wide * 1000 / small).c_str(), Fixed3(wide == 0 ? 0 : shallow * 1000 / wide).c_str(),
-            Fixed3(wide == 0 ? 0 : fine * 1000 / wide).c_str());
+            "  砂時計(記録。| 細かさ | 形 | 口・砂 | W 0.5〜1.5 秒 | W 1.5〜2.5 秒 kg/s/m | C | 口の速さ |"
+            " 口の詰まり |)\n");
+        for (const int32_t level : {0, 1, 2}) {
+            HourglassSeries(level, true);
+            HourglassSeries(level, false);
+        }
+
+        // 0.125 m だけ: 口の長さ(板の厚さ 0.5 m → 0.125 m)と刻み(1/60 → 1/120)の影響
+        HourglassSeries(2, true, true);
+        HourglassRow({.level = 2, .holeCells = 2, .ticksPerSecond = 120});
+
+        // 空気を抜く: 口の速さが √(g D) で伸びるか(粒と空気の引きずりが口の速さを抑えているかを分ける)
+        for (const int32_t level : {0, 1, 2})
+            HourglassSeries(level, true, false, true);
     }
 
     // --- 5. 濡れた砂は急な面を保つ(#34。R4 の先取りの記録): 孔の半分が水の砂山(c_eff = 吸い上げ × 4S(1−S))---
@@ -648,23 +822,34 @@ namespace {
                     Verdict(ratio >= 1176 && ratio <= 1224));
     }
 
-    // --- 7. 穴を通る口(S8。口だけ): 砂時計の口の面に穴 200 µm を返すと、300 µm の砂は通らない ---
+    // --- 7. 穴を通る口(S8): 砂時計の口の出口の面に穴 200 µm の網(面の半分を塞ぐ)を置くと、300 µm の砂は通らない ---
+    // 箱の面の開き具合(face.blocked と同じ形)に塞ぐ割合と穴の大きさを書き、運ぶ段が FoFaceOpen・FoGrainFaceOpen で読む(T-0937・T-0998)
     void HolePort() {
-        const auto holes = [](const Box& box, uint32_t axis, uint32_t cell) -> uint32_t {
-            const uint32_t plate = (11u << (uint32_t)std::max(box.config.level, 0)) - 1;
-            return axis == 1 && CellCoordinates(box, cell)[1] == plate ? 200 : 0;
+        const auto sieve = [](Box& box) {
+            const Mouth mouth = FindMouth({.level = box.config.level, .holeCells = 2});
+            const uint32_t count = CellCount(box);
+            box.faceBlockedQ16[1].assign(count, 0);
+            box.faceHoleSizeUm[1].assign(count, 0);
+            for (uint32_t x = mouth.xBegin; x < mouth.xEnd; ++x) {
+                const uint32_t cell = CellIndex(box, x, mouth.below, 0);
+                box.faceBlockedQ16[1][cell] = 1u << 15;
+                box.faceHoleSizeUm[1][cell] = 200;
+            }
         };
-        const Run run = RunR3(MakeHourglassScene(2, 10), {.seconds = 2, .holes = holes}, {"upper", "lower"});
+        const Run run = RunR3(MakeHourglassScene(2, 10), {.seconds = 2, .prepare = sieve}, {"upper", "lower"});
         const int64_t passed = RegionGrainMg(run.recording.samples.back(), 1);
-        std::printf("  穴の口(S8): 穴 200 µm・砂 300 µm で 2 秒後に下の室の砂 %lld mg・止めた面 %llu(通らない %s)\n",
-                    (long long)passed, (unsigned long long)run.stats.holeBlockedFaces, Verdict(passed == 0));
+        std::printf(
+            "  穴の口(S8): 穴 200 µm・塞ぐ割合 1/2・砂 300 µm で 2 秒後に下の室の砂 %lld mg・止めた面 %llu(通らない "
+            "%s)\n",
+            (long long)passed, (unsigned long long)run.stats.holeBlockedFaces, Verdict(passed == 0));
+        EXPECT(run.stats.holeBlockedFaces > 0);
     }
 
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
         Runout(0, MomentumLayout::PerPhase);
-        HourglassRate(0, 2, 10, MomentumLayout::PerPhase);
+        HourglassRow({.holeCells = 2, .layout = MomentumLayout::PerPhase});
         std::printf("  ①: 砂山 %u°(ほぼ止まる %s)\n", pile.angle, Verdict(pile.calm));
     }
 

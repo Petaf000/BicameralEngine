@@ -7,6 +7,7 @@
 #include <span>
 #include <vector>
 
+#include "common/face_opening.hlsli"
 #include "common/fixed.hlsli"
 #include "common/units.hlsli"
 
@@ -15,6 +16,7 @@ namespace bicameral::sim::case_b {
     namespace {
 
         namespace fx = bicameral::fx;
+        namespace fo = bicameral::face_opening;
 
         constexpr uint32_t Q16_ONE = 1u << 16;
         constexpr uint32_t CAPACITY_SHIFT = 48;
@@ -325,7 +327,9 @@ namespace bicameral::sim::case_b {
                         continue;
 
                     FlowFace face = {.axis = axis, .left = cell, .right = *neighbor};
-                    const uint32_t open = std::min(cells[cell].openQ16, cells[*neighbor].openQ16);
+                    // 面の開き = min(両側のセルの空き, 1 − 面の塞ぐ割合)(T-0937 の FoFaceOpen。塞ぐ割合 0 なら今のまま)
+                    const uint32_t cellsOpen = std::min(cells[cell].openQ16, cells[*neighbor].openQ16);
+                    const uint32_t open = fo::FoFaceOpen(cellsOpen, FaceBlockedQ16(box, axis, cell));
                     face.open = !cells[cell].closed && !cells[*neighbor].closed && open > 0;
                     face.areaMm2 = (areaMm2 * open) >> 16;
                     face.open = face.open && face.areaMm2 > 0;
@@ -2071,21 +2075,21 @@ namespace bicameral::sim::case_b {
             }
         }
 
-        // 穴を通る口(S8): 粒の大きさ ÷ 穴の大きさが grain_pass_ratio_pct を超える面は流さない(既定が未確認の間は、穴より大きい粒だけ)
+        // 穴を通る口(S8): 粒の相の面の開き = FoGrainFaceOpen(面の開き, 穴の大きさ, 粒の大きさ, grain_pass_ratio_pct)(T-0937)。
+        // 面の開き・穴の大きさは箱の面の開き具合(face.blocked と同じ形)から読む。開いた面で粒の開きが 0 なら止める。
+        // 粒の大きさは両側の大きい方(混ざった粒の平均の大きさ。S9)。比を書かない世界の既定は 100 %(穴より大きい粒が詰まる。仮)
         bool HoleBlocks(const FlowRuntime& runtime, const Box& box, const FlowFace& face) {
-            if (!runtime.options.faceHoleSizeUm)
+            const uint32_t hole = FaceHoleSizeUm(box, face.axis, face.left);
+            if (hole == 0)
                 return false;
 
-            const uint32_t hole = runtime.options.faceHoleSizeUm(box, face.axis, face.left);
             const uint32_t grain = std::max(runtime.scratch.grains[face.left].grainUm,
                                             runtime.scratch.grains[face.right].grainUm);
-            if (hole == 0 || grain == 0)
-                return false;
+            const uint32_t cellsOpen = std::min(runtime.scratch.cells[face.left].openQ16,
+                                                runtime.scratch.cells[face.right].openQ16);
+            const uint32_t open = fo::FoFaceOpen(cellsOpen, FaceBlockedQ16(box, face.axis, face.left));
 
-            const uint64_t ratioPct = (uint64_t)grain * 100 / hole;
-            const uint32_t pass = box.environment.grainPassRatioPct;
-
-            return pass == 0 ? ratioPct >= 100 : ratioPct > pass;
+            return open != 0 && fo::FoGrainFaceOpen(open, hole, grain, box.environment.grainPassRatioPct) == 0;
         }
 
         // 計器と、運ぶ段が使う詰まりの残り(入る粒を詰まりまでに縮める。粒は詰まった時だけ押し返す = 詰まりを超えて入らない)
