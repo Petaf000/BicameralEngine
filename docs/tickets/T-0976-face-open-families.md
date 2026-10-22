@@ -44,7 +44,8 @@ T-0937 の面の開き具合の欄(`face.blocked`。導かれる値)を、液体
 - (3) 合格: Σ 保存量 − 帳簿が毎刻み一定(欄あり・なし)・2 回作って流すと同じ要約。箱は物質・エネルギー・運動量 − 帳簿が毎刻み一定(両方の道・塞いだ・隙間・塞がない)。
 - (4) 両方の道: 真ん中の面を全部塞ぐと右の半分の物質の変化 0 µmol(陽解法・陰の圧力)。4 面の隙間だけ開けると +9.51 M / +9.52 M µmol(塞がない時 +9.75 M / +9.53 M。
   1 秒で圧力がほぼ揃う)。2 回で同じ HashGas。
-- 既存: `multires_gas`・`gas_projection`・`probe_gas`・`face_opening`・`multires.*` は下の作業ログ。
+- 既存(release・2026-10-22): `^(face_opening|multires.*|gas_projection|probe_gas|face_open_gas)$` 18 本(multires.* 14 本)が通った。release 警告 0・archmap --check。
+  equilibrium(陰の圧力を部品の上で解く比べ)は流していない(gas_projection が同じ道を通る。塞ぐ割合の表なしは FaceOpen が前と同じ値)。
 
 ## 熱の伝導(仮: 読まない。ADR-0429)
 - 今の `face.blocked` は表面の細かい形から作る(`DeriveFaceBlocked`)。形の固い物はセル自身の固い物(D-615: 真実はセルの固い物の量)で、**固い物は熱を通す**。
