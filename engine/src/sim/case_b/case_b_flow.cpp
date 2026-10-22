@@ -109,6 +109,8 @@ namespace bicameral::sim::case_b {
             std::vector<int64_t> grainMassPerFillMg;  // 詰まったセル 1 つぶんの粒の質量(セルの粒の混ざり方で)
             std::vector<uint8_t>
                 grainMovingCells;  // 粒が動いているセル(T-1004 の 2 本目。降伏の段の初めの面の速さから)
+            std::vector<int64_t>
+                grainImpact;  // 詰まった粒が受け止めた縦の運動量(面ごと。T-1019。陰の圧力の段で書き、降伏の段で向け直す)
         };
 
         // --- 単位の換算 ---
@@ -716,6 +718,15 @@ namespace bicameral::sim::case_b {
             const bool intoLeft = grainNow < 0;
             const bool locked = (left.packed && right.packed) || (intoLeft ? left.noRoom : right.noRoom);
             if (locked) {
+                // 落ちてきた粒を詰まった粒が受け止めた(T-1019): 持ち越した縦の運動量を覚えておき、降伏の段で横へ向け直す
+                const uint32_t below = intoLeft ? face.left : face.right;
+                const bool down = view.gravityDown ? grainStart < 0 : grainStart > 0;
+                const CellView& belowView = view.cells[below];
+                if (runtime.options.grainImpactTurn && face.axis == view.gravityAxis && down && grainNow != 0 &&
+                    (grainNow < 0) == (grainStart < 0) && scratch.grains[below].packed && belowView.fixedQ16 == 0 &&
+                    belowView.bodyQ16 == 0 && !scratch.cells[below].closed)
+                    scratch.grainImpact[(size_t)(&face - scratch.faces.data())] = grainStart;
+
                 // 粒は動けない(押し合いは R3)。流体から見た粒は据わる孔
                 StopGrain(box, face);
                 face.porousMg += drag >> 16;
@@ -1254,6 +1265,7 @@ namespace bicameral::sim::case_b {
 
             if (runtime.options.drag) {
                 MeasureGrains(runtime, box, context.view);
+                scratch.grainImpact.assign(scratch.faces.size(), 0);
                 for (FlowFace& face : scratch.faces)
                     PrepareCoupledFace(runtime, box, context.view, face);
             }
@@ -2144,6 +2156,100 @@ namespace bicameral::sim::case_b {
             }
         }
 
+        // 下のセルの横の隣 (axis, +/-) の空き(Q16。表面がそちらへ何セル下がるか。0〜1)。箱の外・据わる固体・物は 0
+        int64_t SideDropQ16(const Box& box, const FlowScratch& scratch, const View& view, uint32_t cell, uint32_t axis,
+                            bool plus) {
+            std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+            const std::array<uint32_t, 3> size = {box.config.sizeX, box.config.sizeY, box.config.sizeZ};
+            if (plus ? at[axis] + 1 >= size[axis] : at[axis] == 0)
+                return 0;
+
+            at[axis] = plus ? at[axis] + 1 : at[axis] - 1;
+            const uint32_t side = CellIndex(box, at[0], at[1], at[2]);
+            const CellView& sideView = view.cells[side];
+            if (scratch.cells[side].closed || sideView.fixedQ16 > 0 || sideView.bodyQ16 > 0)
+                return 0;
+
+            return (int64_t)Q16_ONE - std::min<int64_t>(sideView.grainPackedQ16, Q16_ONE);
+        }
+
+        // 詰まった粒が受け止めた縦の運動量を、当たった表面に沿う向きへ向け直す(T-1019 の 1 本目)。
+        // 表面の傾き ∇h(軸ごとに下のセルの両隣の空きの差 ÷ 2。高さの中心差分)に、縦の速さの面に沿う分の横の成分 M |∇h_a| ÷ (1 + |∇h|²)。
+        // 渡す先は上のセルの下り側の横の面で、向かう先に空きがある面だけ。面の粒の質量が縦の面より軽ければその割合に縮める(速さを増やさない)。
+        // 受け止めた縦の運動量は陰の圧力の段で消えている(帳簿 Wall)。横へ渡す分も帳簿 Wall(当たった面が押し返す力)。刻みの初めの値から決める(順によらない)
+        void TurnGrainImpacts(FlowRuntime& runtime, Box& box, const View& view) {
+            FlowScratch& scratch = runtime.scratch;
+            FlowStats& stats = *runtime.stats;
+            if (!runtime.options.grainImpactTurn || scratch.grainImpact.size() != scratch.faces.size())
+                return;
+
+            const FaceTable table = IndexFaces(scratch, CellCount(box));
+            const uint32_t gravity = view.gravityAxis;
+            for (size_t index = 0; index < scratch.faces.size(); ++index) {
+                const int64_t impact = scratch.grainImpact[index];
+                if (impact == 0)
+                    continue;
+
+                const FlowFace& face = scratch.faces[index];
+                const bool belowLeft = view.gravityDown;
+                const uint32_t below = belowLeft ? face.left : face.right;
+                const uint32_t above = belowLeft ? face.right : face.left;
+                const uint64_t size = fx::FxAbsU64(impact);
+                stats.impactGrainImpulse += size;
+
+                std::array<int64_t, 3> slope{};  // ∇h の軸ごと(Q16。+ = + 側へ下がる)
+                int64_t slopeSquare = 0;         // |∇h|²(Q16)
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    if (axis == gravity)
+                        continue;
+
+                    slope[axis] = (SideDropQ16(box, scratch, view, below, axis, true) -
+                                   SideDropQ16(box, scratch, view, below, axis, false)) /
+                                  2;
+                    slopeSquare += (slope[axis] * slope[axis]) >> 16;
+                }
+
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    if (axis == gravity || slope[axis] == 0)
+                        continue;
+
+                    const bool plus = slope[axis] > 0;
+                    std::optional<uint32_t> leftCell = above;
+                    if (!plus) {
+                        std::array<uint32_t, 3> at = CellCoordinates(box, above);
+                        leftCell = at[axis] == 0 ? std::nullopt : std::optional<uint32_t>(above);
+                        if (leftCell.has_value()) {
+                            --at[axis];
+                            leftCell = CellIndex(box, at[0], at[1], at[2]);
+                        }
+                    }
+
+                    if (!leftCell.has_value() || table[axis][*leftCell] < 0)
+                        continue;
+
+                    FlowFace& side = scratch.faces[(size_t)table[axis][*leftCell]];
+                    const uint32_t target = plus ? side.right : side.left;
+                    if (!side.open || scratch.grains[target].noRoom || side.grainMassMg <= 0)
+                        continue;
+
+                    // M |∇h_a| ÷ (1 + |∇h|²)、横の面が縦の面より軽ければ質量の割合で縮める
+                    const int64_t tangent = fx::FxMulDivS64((int64_t)size, (uint64_t)std::abs(slope[axis]),
+                                                            (uint64_t)(Q16_ONE + slopeSquare));
+                    const int64_t amount = side.grainMassMg >= face.grainMassMg
+                                               ? tangent
+                                               : fx::FxMulDivS64(tangent, (uint64_t)side.grainMassMg,
+                                                                 (uint64_t)std::max<int64_t>(face.grainMassMg, 1));
+                    if (amount == 0)
+                        continue;
+
+                    ApplyImpulse(box, GrainFace(box, side.axis, side.left), plus ? amount : -amount,
+                                 ImpulseSource::Wall);
+                    side.locked = false;
+                    stats.turnedGrainImpulse += (uint64_t)amount;
+                }
+            }
+        }
+
         void GrainYieldStage(FlowRuntime& runtime, Box& box, const StepContext& context) {
             if (!runtime.options.drag)
                 return;
@@ -2152,6 +2258,7 @@ namespace bicameral::sim::case_b {
             FlowScratch& scratch = runtime.scratch;
             const uint32_t count = CellCount(box);
             const uint32_t gravity = view.gravityAxis;
+            TurnGrainImpacts(runtime, box, view);
             std::vector<YieldCell> cells(count);
             for (uint32_t cell = 0; cell < count; ++cell)
                 cells[cell] = MeasureYieldCell(box, scratch, view, cell, runtime.options.reposeStartOffsetDegrees);

@@ -246,7 +246,10 @@ namespace {
 
     // 動いている粒の速さのしきい値(T-1004。mm/s)。引数で替えて測る時だけ(無ければ FlowOptions の既定)
     std::optional<uint32_t> movingSpeedOverride;
-    bool movingByCellOverride = false;  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
+    bool movingByCellOverride = false;
+    bool vacuumOverride = false;  // 空気を抜く(粒と空気の引きずりの影響を見る。T-1019)。引数のどこかに vacuum
+    bool impactTurnOverride =
+        false;  // 受け止めた縦の運動量を横へ向け直す(T-1019)。引数のどこかに turn  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
 
     struct RunOptions {
         int32_t level = 0;
@@ -260,7 +263,15 @@ namespace {
         std::function<void(Box&, uint64_t)> afterTick;  // 刻みの後の操作(掘るなど。刻みの番号)
     };
 
-    Run RunR3(const Scene& scene, const RunOptions& options, const std::vector<std::string>& regionNames) {
+    Run RunR3(const Scene& source, const RunOptions& options, const std::vector<std::string>& regionNames) {
+        Scene scene = source;
+        if (vacuumOverride) {
+            for (LegendEntry& entry : scene.legend) {
+                entry.gasPressurePa = 0;
+                entry.gas.clear();
+            }
+        }
+
         auto created = BuildScene(scene, options.level, options.layout);
         EXPECT(created.has_value());
         Run run{.recording = {}, .stats = {}, .box = std::move(*created), .grainSpeed = {}};
@@ -284,6 +295,7 @@ namespace {
             flowOptions.grainMovingSpeedMmPerS = *movingSpeedOverride;
 
         flowOptions.grainMovingByCell = movingByCellOverride;
+        flowOptions.grainImpactTurn = impactTurnOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
@@ -306,12 +318,14 @@ namespace {
     void PrintStats(const Run& run) {
         std::printf(
             "    費用 %lld ns/セル/刻み(計器込み)・降伏で動いた面の柱 %llu・止めた %llu・空きが無く止めた %llu・"
-            "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u・動く面の上限 %llu\n",
+            "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u・動く面の上限 "
+            "%llu・受け止めた縦 %llu・横へ %llu\n",
             (long long)run.recording.NanosecondsPerCellTick(), (unsigned long long)run.stats.yieldMovingPairs,
             (unsigned long long)run.stats.yieldHeldPairs, (unsigned long long)run.stats.yieldBlockedPairs,
             (unsigned)((uint64_t)run.stats.maxPackedQ16 * 1000 >> 16), (unsigned long long)run.stats.overpackedCells,
             (unsigned long long)run.stats.grainLimitedCells, run.stats.maxCycles,
-            (unsigned long long)run.stats.yieldDynamicFaces);
+            (unsigned long long)run.stats.yieldDynamicFaces, (unsigned long long)run.stats.impactGrainImpulse,
+            (unsigned long long)run.stats.turnedGrainImpulse);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -946,6 +960,19 @@ int main(int argc, char** argv) {
     // 6 = 詰めると重い・7 = 穴の口・8 = 置き場 ①・9 = 斜面 25° と 45°)。無ければ全部
     // 10 = 止まる角度と崩れ始める角度(T-0997。全部には入れない。2 つ目の引数 = 差の度)
     // 動いている粒の速さのしきい値(T-1004): 場面 1〜9 は 2 つ目の引数・場面 10 は 3 つ目の引数(mm/s。0 = 分けない)
+    // 引数の turn(受け止めた縦の運動量を横へ。T-1019)・vacuum(空気を抜く)は数えずに取り除く
+    int kept = 1;
+    for (int index = 1; index < argc; ++index) {
+        const std::string word = argv[index];
+        if (word == "turn")
+            impactTurnOverride = true;
+        else if (word == "vacuum")
+            vacuumOverride = true;
+        else
+            argv[kept++] = argv[index];
+    }
+
+    argc = kept;
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
     const int speedArgument = only == 10 ? 3 : 2;
     if (argc > speedArgument) {
