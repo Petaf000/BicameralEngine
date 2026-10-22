@@ -110,7 +110,7 @@ namespace bicameral::sim::case_b {
             std::vector<uint8_t>
                 grainMovingCells;  // 粒が動いているセル(T-1004 の 2 本目。降伏の段の初めの面の速さから)
             std::vector<int64_t>
-                grainImpact;  // 詰まった粒が受け止めた縦の運動量(面ごと。T-1019。陰の圧力の段で書き、降伏の段で向け直す)
+                grainImpact;  // 詰まった粒が受け止めた縦の運動量(面ごと。T-1046。陰の圧力の段で書き、降伏の段で向け直す)
         };
 
         // --- 単位の換算 ---
@@ -718,7 +718,7 @@ namespace bicameral::sim::case_b {
             const bool intoLeft = grainNow < 0;
             const bool locked = (left.packed && right.packed) || (intoLeft ? left.noRoom : right.noRoom);
             if (locked) {
-                // 落ちてきた粒を詰まった粒が受け止めた(T-1019): 持ち越した縦の運動量を覚えておき、降伏の段で横へ向け直す
+                // 落ちてきた粒を詰まった粒が受け止めた(T-1046): 持ち越した縦の運動量を覚えておき、降伏の段で横へ向け直す
                 const uint32_t below = intoLeft ? face.left : face.right;
                 const bool down = view.gravityDown ? grainStart < 0 : grainStart > 0;
                 const CellView& belowView = view.cells[below];
@@ -2173,7 +2173,7 @@ namespace bicameral::sim::case_b {
             return (int64_t)Q16_ONE - std::min<int64_t>(sideView.grainPackedQ16, Q16_ONE);
         }
 
-        // 詰まった粒が受け止めた縦の運動量を、当たった表面に沿う向きへ向け直す(T-1019 の 1 本目)。
+        // 詰まった粒が受け止めた縦の運動量を、当たった表面に沿う向きへ向け直す(T-1046 の 1 本目)。
         // 表面の傾き ∇h(軸ごとに下のセルの両隣の空きの差 ÷ 2。高さの中心差分)に、縦の速さの面に沿う分の横の成分 M |∇h_a| ÷ (1 + |∇h|²)。
         // 渡す先は上のセルの下り側の横の面で、向かう先に空きがある面だけ。面の粒の質量が縦の面より軽ければその割合に縮める(速さを増やさない)。
         // 受け止めた縦の運動量は陰の圧力の段で消えている(帳簿 Wall)。横へ渡す分も帳簿 Wall(当たった面が押し返す力)。刻みの初めの値から決める(順によらない)
