@@ -1879,7 +1879,8 @@ namespace bicameral::sim::case_b {
         }
 
         // 粒の欄の体積の平均(崩れる角度・くっつく強さ・吸い上げ)と重さ。支えは列で決める(SupportColumn)
-        YieldCell MeasureYieldCell(const Box& box, const FlowScratch& scratch, const View& view, uint32_t cell) {
+        YieldCell MeasureYieldCell(const Box& box, const FlowScratch& scratch, const View& view, uint32_t cell,
+                                   uint32_t startOffsetDegrees) {
             YieldCell result;
             const FlowCell& flow = scratch.cells[cell];
             const int64_t grainMass = scratch.grains[cell].massMg;
@@ -1906,7 +1907,8 @@ namespace bicameral::sim::case_b {
                 return result;
 
             result.fillQ16 = std::min(view.cells[cell].grainPackedQ16, Q16_ONE);
-            result.frictionQ16 = TangentQ16(angleSum / volumeSum);
+            // 書いた角度は山が止まる角度(D-620)。降伏の上限は崩れ始める角度 = 止まる角度 + 差(T-0997)
+            result.frictionQ16 = TangentQ16((angleSum / volumeSum) + ((uint64_t)startOffsetDegrees << 8));
 
             // 孔の満ち具合 S = 液体 ÷ 流体(Q16)。くっつく強さの山形 4S(1−S)
             const int64_t fluidNl = flow.liquidNl + flow.gasNl;
@@ -2122,7 +2124,7 @@ namespace bicameral::sim::case_b {
             const uint32_t gravity = view.gravityAxis;
             std::vector<YieldCell> cells(count);
             for (uint32_t cell = 0; cell < count; ++cell)
-                cells[cell] = MeasureYieldCell(box, scratch, view, cell);
+                cells[cell] = MeasureYieldCell(box, scratch, view, cell, runtime.options.reposeStartOffsetDegrees);
 
             for (uint32_t cell = 0; cell < count; ++cell) {
                 if (CellCoordinates(box, cell)[gravity] == 0)

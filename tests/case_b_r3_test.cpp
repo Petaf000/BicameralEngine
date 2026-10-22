@@ -6,11 +6,13 @@
 // 砂時計は 0.5 m・0.25 m・0.125 m で口を 1〜12 セルにして Beverloo と比べる(T-0998)。置き場は ④ を既定に、① でも流す。
 // 研究の記録なので、落ちて止まるのは保存・決定性・式の壊れ(負の質量)だけ。目安の合否は表に出す(結果は docs/tickets/T-0996)。
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -248,8 +250,9 @@ namespace {
         uint32_t ticksPerSecond = 60;
         uint64_t seconds = 60;
         bool grainYield = true;
-        bool perFace = true;                // 2 本目(面ごと)。false = 1 本目(面の柱の和)
-        std::function<void(Box&)> prepare;  // 場面を作った後・走らせる前の手直し(面の開き具合・板を薄くする)
+        bool perFace = true;                         // 2 本目(面ごと)。false = 1 本目(面の柱の和)
+        std::optional<uint32_t> startOffsetDegrees;  // 崩れ始めと止まる角度の差(T-0997。無ければ FlowOptions の既定)
+        std::function<void(Box&)> prepare;           // 場面を作った後・走らせる前の手直し(面の開き具合・板を薄くする)
         std::function<void(Box&, uint64_t)> afterTick;  // 刻みの後の操作(掘るなど。刻みの番号)
     };
 
@@ -270,6 +273,9 @@ namespace {
         FlowOptions flowOptions = {.drag = true};
         flowOptions.grainYield = options.grainYield;
         flowOptions.yieldPerFace = options.perFace;
+        if (options.startOffsetDegrees.has_value())
+            flowOptions.reposeStartOffsetDegrees = *options.startOffsetDegrees;
+
         const FlowStages flow = MakeFlowStages(flowOptions);
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         uint64_t tick = 0;
@@ -845,6 +851,76 @@ namespace {
         EXPECT(run.stats.holeBlockedFaces > 0);
     }
 
+    // --- 10. 止まる角度と崩れ始める角度(T-0997。D-620: 書いた repose_angle_deg は山が止まる角度)---
+    // 書いた角度 φ を 25°・34°・40° に替えて、砂山(4 列 × 12 段)が止まる角度(斜面の芯)と、斜面が崩れ始める角度
+    // (初めの角度を φ から 2° ずつ上げ、10 秒で降伏した面の柱が出た最初の角度)・急な斜面(φ + 11°)が止まる角度を測る。
+    // 差(FlowOptions::reposeStartOffsetDegrees)を引数で替え、止まる角度が φ ±4°・0.5 m と 0.25 m で同じになる差を探す
+    constexpr std::array<uint32_t, 36> TAN_Q16_FROM_20 = {
+        23853, 25157, 26478, 27818, 29179, 30560, 31964, 33392, 34846, 36327, 37837, 39378,
+        40951, 42560, 44205, 45889, 47615, 49385, 51202, 53070, 54991, 56970, 59009, 61113,
+        63287, 65536, 67865, 70279, 72785, 75391, 78103, 80930, 83882, 86969, 90203, 93595};
+
+    void SetSandAngle(Scene& scene, uint32_t degrees) {
+        for (MaterialDefinition& material : scene.materials) {
+            if (material.grainSizeUm.has_value())
+                material.reposeAngleDegrees = degrees;
+        }
+    }
+
+    // 斜面(初めの角度 degrees)を seconds 秒。返すのは止まった芯の角度・降伏で動いた面の柱の数・初めの芯
+    struct SlopeResult {
+        uint32_t startCore = 0;
+        uint32_t core = 0;
+        uint64_t moving = 0;
+        bool calm = false;
+    };
+
+    SlopeResult SlopeAt(uint32_t sand, uint32_t degrees, int32_t level, uint32_t offset, uint64_t seconds) {
+        Scene scene = MakeSlopeScene(TAN_Q16_FROM_20[degrees - 20]);
+        SetSandAngle(scene, sand);
+        const Run run = RunR3(scene, {.level = level, .seconds = seconds, .startOffsetDegrees = offset}, {"slope"});
+        auto created = BuildScene(scene, level, MomentumLayout::GrainSeparate);
+        return {.startCore = CoreAngle(ColumnHeightsUm(*created), CellEdgeUm(level)),
+                .core = CoreAngle(ColumnHeightsUm(run.box), CellEdgeUm(level)),
+                .moving = run.stats.yieldMovingPairs,
+                .calm = Calm(run)};
+    }
+
+    void ReposeSweep(uint32_t offset) {
+        std::printf("  止まる角度と崩れ始める角度(差 %u°)\n", offset);
+        for (const uint32_t sand : {25u, 34u, 40u}) {
+            std::vector<uint32_t> piles;
+            for (const int32_t level : {0, 1}) {
+                Scene scene = MakePileScene();
+                SetSandAngle(scene, sand);
+                const Run run = RunR3(scene, {.level = level, .startOffsetDegrees = offset}, {"pile"});
+                piles.push_back(CoreAngle(ColumnHeightsUm(run.box), CellEdgeUm(level)));
+                std::printf("    φ %u° 砂山 %s m: 芯 %u°・計器 %u°・%s\n", sand, level == 0 ? "0.5" : "0.25",
+                            piles.back(), FinalAngle(run), Calm(run) ? "ほぼ止まる" : "動いている");
+            }
+
+            uint32_t start = 0;
+            for (uint32_t degrees = sand; degrees <= sand + offset + 8 && degrees < 56; degrees += 2) {
+                const SlopeResult slope = SlopeAt(sand, degrees, 0, offset, 10);
+                std::printf("    φ %u° 斜面 %u°(芯 %u°)0.5 m 10 秒: 芯 %u°・降伏で動いた面の柱 %llu\n", sand, degrees,
+                            slope.startCore, slope.core, (unsigned long long)slope.moving);
+                if (slope.core + 1 < slope.startCore) {
+                    start = slope.startCore;
+                    break;
+                }
+            }
+
+            const SlopeResult steep = SlopeAt(sand, sand + 11, 0, offset, 20);
+            std::printf(
+                "  → φ %u°(差 %u°): 砂山の止まる角度 0.5 m %u°・0.25 m %u°(φ ±4° %s・同じ %s)・崩れ始める角度 %u°・"
+                "斜面 %u° → %u°(%s)\n",
+                sand, offset, piles[0], piles[1],
+                Verdict(piles[0] + 4 >= sand && piles[0] <= sand + 4 && piles[1] + 4 >= sand && piles[1] <= sand + 4),
+                Verdict((piles[0] > piles[1] ? piles[0] - piles[1] : piles[1] - piles[0]) <= 3), start, steep.startCore,
+                steep.core, steep.calm ? "ほぼ止まる" : "動いている");
+        }
+    }
+
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
@@ -858,7 +934,15 @@ namespace {
 int main(int argc, char** argv) {
     // 引数で場面を 1 つに絞れる(1 = 砂山と決定性・2 = 掘る・3 = 勢いで走る・4 = 砂時計・5 = 濡れた砂・
     // 6 = 詰めると重い・7 = 穴の口・8 = 置き場 ①・9 = 斜面 25° と 45°)。無ければ全部
+    // 10 = 止まる角度と崩れ始める角度(T-0997。全部には入れない。2 つ目の引数 = 差の度)
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
+    if (only == 10) {
+        ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
     if (only < 0 || only == 1)
         PileScenes();
 
