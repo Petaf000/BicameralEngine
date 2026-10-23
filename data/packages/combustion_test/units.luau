@@ -1,10 +1,9 @@
--- units.luau — 熱伝導率の試験の倍率(T-0089)。
--- サンプルの世界の遊びのための値: species.luau が標準パッケージ real_matter の現実の値に掛けて書き直す(T-0498)。
--- 現実の値(mW/(m·K))だと木の中を 0.5 m 伝わるのに数日かかり、空気の伝導はほぼ 0(現実の火は放射と対流で広がる。M3)。
--- 「リアルっぽいが、反応が遅すぎない」ように大きくする(ユーザー 2026-10-01)。倍率は gpu_probe_fire_test で決めた。
--- M3 で放射と対流が入ったら見直す。
-local SOLID_CONDUCTIVITY_SCALE = 20000
-local GAS_CONDUCTIVITY_SCALE = 5000
+-- units.luau — 熱伝導率の書き直しの倍率(T-0089)。
+-- species.luau が標準パッケージ real_matter の現実の値に掛けて書き直す(T-0498。作り手が自分の世界の値を決める形の見本)。
+-- 2026-10-24 に試験の倍率(固体 20000・気体 5000)を外して 1 にした(D-637・T-1066)。セルの伝導率は体積で重み付けた平行の道になり、
+-- 燃え広がりは放射と気体の流れで支える(T-1018)。現実の値(mW/(m·K))のまま
+local SOLID_CONDUCTIVITY_SCALE = 1
+local GAS_CONDUCTIVITY_SCALE = 1
 
 return {
     -- 現実の値(mW/(m·K))→ 試験の値

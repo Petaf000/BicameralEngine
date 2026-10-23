@@ -198,7 +198,7 @@ namespace {
         EXPECT(view.heatCapacity == rxThermal.heatCapacity);
         if (level == 0) {
             const reaction::HcThermalCache cache = reaction::HcMakeCache(
-                rxThermal, reaction::HcCellConductance(reactionView, cell));
+                rxThermal, reaction::HcCellConductance(reactionView, cell, reaction::HcCacheTemperature(rxThermal)));
             EXPECT(view.thermal.temperature == cache.temperature);
             EXPECT(view.thermal.conductance == cache.conductance);
             EXPECT(view.faceLimit == cache.faceLimit);

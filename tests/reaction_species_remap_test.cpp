@@ -33,7 +33,7 @@ namespace {
     constexpr uint64_t SWAP_TICK = 4;  // debug の CPU リファレンスは 1 刻み約 5 秒(全部のセルを毎刻み計算する)
     constexpr uint64_t TOTAL_TICKS = 10;
     constexpr int32_t ROOM_MILLIKELVIN = 300000;
-    constexpr uint32_t GAS_CONDUCTIVITY = 18 * 5000;  // 試験の倍率(data/packages/combustion_test/units.luau と同じ形)
+    constexpr uint32_t GAS_CONDUCTIVITY = 180;  // 現実の値(試験の倍率は T-1066 で外した)
 
     int failureCount = 0;
 
