@@ -21,18 +21,18 @@
 
 RX_NAMESPACE_BEGIN
 
-// --- 決まった値 ---
+// --- 決まった値(32bit を超える値は FX_U64 で書く。HLSL の数の書き方は 32bit に切れる)---
 
 FX_CONST uint32_t OH_MAX_GASES = 8;  // 対の面で混ざる気体の数の上限(表の気体。最小の形。超える表は T-1076)
 FX_CONST uint32_t OH_NO_GAS = 0xFFFFFFFFu;
-FX_CONST int64_t OH_CELL_UM = 500000;               // レベル 0 の一辺(µm)
-FX_CONST uint64_t OH_BOX_MM3 = 125000000000;        // 0.125 m³(そのレベルの単位の量 = 濃さ × 0.125 m³)
-FX_CONST uint64_t OH_ROOM_TEMPERATURE_MK = 293150;  // 物質の値(混ざる速さ・伝導率)を書いた温度(D-639)
+FX_CONST int64_t OH_CELL_UM = 500000;                       // レベル 0 の一辺(µm)
+FX_CONST uint64_t OH_BOX_MM3 = FX_U64(0x1Du, 0x1A94A200u);  // 0.125 m³(そのレベルの単位の量 = 濃さ × 0.125 m³)
+FX_CONST uint64_t OH_ROOM_TEMPERATURE_MK = 293150;          // 物質の値(混ざる速さ・伝導率)を書いた温度(D-639)
 // mW/(m·K) × µm × mK = 10^-12 W・1/60 s → mJ: ÷ (10^6 × 60000)
-FX_CONST uint64_t OH_CONDUCTION_DIVISOR = 60000000000;
+FX_CONST uint64_t OH_CONDUCTION_DIVISOR = FX_U64(0xDu, 0xF8475800u);  // 6 × 10^10
 // mm²/s × µm × (単位 ÷ 0.125 m³)× 1/60 s → 単位 × 8 ÷ (60 × 10^12)
-FX_CONST uint64_t OH_DIFFUSION_DIVISOR = 60000000000000;
-FX_CONST uint32_t OH_RADIATION_SHARE_Q16 = 32768;  // 放射の 1 小刻みの上限(熱容量 × ΔT の半分)
+FX_CONST uint64_t OH_DIFFUSION_DIVISOR = FX_U64(0x3691u, 0xD6AFC000u);  // 6 × 10^13
+FX_CONST uint32_t OH_RADIATION_SHARE_Q16 = 32768;                       // 放射の 1 小刻みの上限(熱容量 × ΔT の半分)
 
 // ボクセルの形の語(OhVoxelInfo::shape)
 FX_CONST uint32_t OH_NEIGHBOUR_MASK = 0x3Fu;  // ビット 0〜5 = 隣のボクセルがある(−x・+x・−y・+y・−z・+z)
@@ -104,6 +104,15 @@ FX_FN int64_t OhMulDivToward0(int64_t value, uint64_t multiplier, uint64_t divis
     const int64_t result = (int64_t)FxDivU128By64(FxMulU64Full(magnitude, multiplier), divisor).quotient;
 
     return value < 0 ? -result : result;
+}
+
+// 64bit ÷ 64bit(FxDivU128By64 で。GPU で定数の 64bit の割り算〔÷ 0.125 m³ など〕が CPU と食い違ったので、この式では整数の / を使わない。T-1064)
+FX_FN uint64_t OhDivideU64(uint64_t numerator, uint64_t divisor) {
+    FxU128 wide;
+    wide.hi = 0;
+    wide.lo = numerator;
+
+    return FxDivU128By64(wide, divisor).quotient;
 }
 
 FX_FN OhFlow OhZeroFlow() {
@@ -208,15 +217,15 @@ FX_FN uint64_t OhVolumeConductivity(Table table, RxCell cell) {
             continue;
         }
 
-        const uint64_t volume = (amount * (uint64_t)values.molarVolumeMm3PerMol) / 1000000;
+        const uint64_t volume = OhDivideU64(amount * (uint64_t)values.molarVolumeMm3PerMol, 1000000);
         condensedMm3 += volume;
         condensedWeighted += volume * conductivity;
     }
 
-    const uint64_t gasConductivity = gasAmount == 0 ? (uint64_t)0 : gasWeighted / gasAmount;
+    const uint64_t gasConductivity = gasAmount == 0 ? (uint64_t)0 : OhDivideU64(gasWeighted, gasAmount);
     const uint64_t gasMm3 = OH_BOX_MM3 - (condensedMm3 < OH_BOX_MM3 ? condensedMm3 : OH_BOX_MM3);
 
-    return (condensedWeighted + (gasMm3 * gasConductivity)) / OH_BOX_MM3;
+    return OhDivideU64(condensedWeighted + (gasMm3 * gasConductivity), OH_BOX_MM3);
 }
 
 template <typename Table>

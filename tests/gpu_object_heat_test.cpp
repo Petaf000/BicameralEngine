@@ -5,7 +5,7 @@
 // 薪(10 × 10 × 51・Ø 8 cm × 40 cm を四角の箱で)。木は試験の表の cellulose を薄めた量。外に面するボクセルを 900 K から始める(燃えている物)。
 //   既定: 紙 2・小枝 3(同じセル)・薪 1(別のセル)を 60 刻み、20 刻みごとにボクセル・セル・対の端数を読み戻して CPU と比べる。
 //         CPU の側でエネルギーの保存(セル × 8^6 + ボクセル + 対の端数 − 入った光)も毎刻み確かめる。
-//   --measure: 紙・小枝・薪をそれぞれ 10・100・1000 個(10 個ずつ同じセル)並べ、1 刻みの GPU の時間(タイムスタンプ)を測る(CPU とは比べない)。
+//   --measure(--measure-only は CPU と比べずに測るだけ): 紙・小枝・薪をそれぞれ 10・100・1000 個(10 個ずつ同じセル)並べ、1 刻みの GPU の時間(タイムスタンプ)を測る(CPU とは比べない)。
 // 引数は gpu_test_options.h と --measure。
 #include <cstring>
 
@@ -301,30 +301,24 @@ namespace {
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(), 0);
     }
 
+    // 1 段を記録する(後に UAV のバリア)
+    void RecordStage(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world, Stage stage,
+                     bool lightOn, uint64_t tick) {
+        const Grid voxels = GridFor(world.voxelCount);
+        const Grid ranges = GridFor(world.rangeCount);
+        const Grid grid = stage == StageReduce ? Grid{world.objectCount, 1}
+                                               : (stage == StageApplyCells ? ranges : voxels);
+        SetConstants(list, world, 0, lightOn, tick, grid.groupsX * THREADS);
+        list->SetPipelineState(pipelines.stages[stage].Get());
+        list->Dispatch(grid.groupsX, grid.groupsY, 1);
+        Barrier(list);
+    }
+
     // 1 刻み(小刻み 1 回。全部の物がレベル 6)を記録する
     void RecordTick(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world, bool lightOn,
                     uint64_t tick) {
-        const Grid voxels = GridFor(world.voxelCount);
-        const Grid ranges = GridFor(world.rangeCount);
-        const uint32_t voxelRow = voxels.groupsX * THREADS;
-        SetConstants(list, world, 0, lightOn, tick, voxelRow);
-        list->SetPipelineState(pipelines.stages[StagePrepare].Get());
-        list->Dispatch(voxels.groupsX, voxels.groupsY, 1);
-        Barrier(list);
-        list->SetPipelineState(pipelines.stages[StageFlow].Get());
-        list->Dispatch(voxels.groupsX, voxels.groupsY, 1);
-        Barrier(list);
-        list->SetPipelineState(pipelines.stages[StageReduce].Get());
-        list->Dispatch(world.objectCount, 1, 1);
-        Barrier(list);
-        SetConstants(list, world, 0, lightOn, tick, ranges.groupsX * THREADS);
-        list->SetPipelineState(pipelines.stages[StageApplyCells].Get());
-        list->Dispatch(ranges.groupsX, ranges.groupsY, 1);
-        Barrier(list);
-        SetConstants(list, world, 0, lightOn, tick, voxelRow);
-        list->SetPipelineState(pipelines.stages[StageReact].Get());
-        list->Dispatch(voxels.groupsX, voxels.groupsY, 1);
-        Barrier(list);
+        for (const Stage stage : {StagePrepare, StageFlow, StageReduce, StageApplyCells, StageReact})
+            RecordStage(list, pipelines, world, stage, lightOn, tick);
     }
 
     void BindRoot(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
@@ -467,6 +461,104 @@ namespace {
         const test::OhTables& tables;
     };
 
+    // --- 段ごとの切り分け(刻み 1 を段ごとに流し、段ごとに CPU と比べる)---
+
+    template <typename T>
+    std::expected<std::vector<T>, std::string> ReadUav(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                       ID3D12Resource* resource, size_t count) {
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, count * sizeof(T), gpu::BufferKind::Readback);
+        ID3D12GraphicsCommandList10* list = queue.Begin();
+        if (!readback || list == nullptr)
+            return std::unexpected("読み戻しを作れない");
+
+        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(resource, D3D12_RESOURCE_STATE_COMMON,
+                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list->ResourceBarrier(1, &toUav);
+        gpu::RecordCopyToReadback(list, resource, readback.Get());
+        std::vector<T> values(count);
+        if (!queue.ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(values))))
+            return std::unexpected("読み戻せない");
+
+        return values;
+    }
+
+    template <typename T>
+    size_t CountDifferent(std::span<const T> cpu, std::span<const T> gpuValues, const char* label) {
+        size_t different = 0;
+        for (size_t i = 0; i < cpu.size(); ++i) {
+            if (std::memcmp(&cpu[i], &gpuValues[i], sizeof(T)) == 0)
+                continue;
+
+            if (different++ < 3) {
+                std::array<int64_t, sizeof(T) / 8> a{};
+                std::array<int64_t, sizeof(T) / 8> b{};
+                std::memcpy(a.data(), &cpu[i], sizeof(a));
+                std::memcpy(b.data(), &gpuValues[i], sizeof(b));
+                Log(Channel::Gpu, Level::Error, "{} [{}]: cpu {} / gpu {}", label, i, a, b);
+            }
+        }
+
+        Log(Channel::Gpu, Level::Info, "段ごと: {} 食い違い {} / {}", label, different, cpu.size());
+
+        return different;
+    }
+
+    std::expected<void, std::string> RunStageCheck(const Context& context, test::OhWorld& world) {
+        auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
+        auto debugRing = gpu::DebugRing::Create(context.device);
+        auto pipelines = CreatePipelines(context.device);
+        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world);
+        if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
+            return std::unexpected("GPU の準備に失敗");
+
+        const test::OhCpuTable cpuTable{.view = context.table.View(), .objectSpecies = context.tables.species};
+        const auto runStage = [&](Stage stage) {
+            ID3D12GraphicsCommandList10* list = queue->Begin();
+            BindRoot(list, *pipelines, *gpuWorld, *debugRing);
+            RecordStage(list, *pipelines, *gpuWorld, stage, true, 1);
+            return queue->ExecuteAndWait();
+        };
+        const auto read = [&]<typename T>(size_t uav, size_t count, T) {
+            return ReadUav<T>(context.device, *queue, gpuWorld->uavs[uav].Get(), count);
+        };
+
+        const std::vector<rx::OhVoxelHeat> heats = test::PrepareObjectHeat(cpuTable, world);
+        for (uint32_t i = 0; i < world.voxels[0].speciesCount; ++i) {
+            const uint32_t id = world.voxels[0].species[i];
+            const rx::OhSpecies values = context.tables.species[id];
+            Log(Channel::Gpu, Level::Info,
+                "ボクセル 0 の成分: {} 量 {} 伝導率 {} 気体 {} モル体積 {} 混ざる {} 吸い込み {}", id,
+                world.voxels[0].amounts[i], context.table.species[id].conductivity, values.gasIndex,
+                values.molarVolumeMm3PerMol, values.diffusivityMm2PerS, values.absorptionLongMm2PerMol);
+        }
+
+        runStage(StagePrepare);
+        const auto gpuHeats = read(1, heats.size(), rx::OhVoxelHeat{});
+        const std::vector<rx::OhFlow> flows = test::FlowObjectHeat(cpuTable, context.tables.gases, world, heats, true,
+                                                                   0);
+        runStage(StageFlow);
+        const auto gpuFlows = read(2, flows.size(), rx::OhFlow{});
+        const auto gpuVoxels = read(0, world.voxels.size(), rx::RxCell{});
+        const std::vector<rx::OhFlow> coarse = test::CarryObjectHeat(world, flows);
+        runStage(StageReduce);
+        const auto gpuCoarse = read(4, coarse.size(), rx::OhFlow{});
+        test::ApplyObjectHeatToCells(context.tables.gases, world, coarse);
+        runStage(StageApplyCells);
+        const auto gpuCells = read(5, world.cells.size(), rx::RxCell{});
+        if (!gpuHeats || !gpuFlows || !gpuVoxels || !gpuCoarse || !gpuCells)
+            return std::unexpected("段ごとの読み戻しに失敗");
+
+        const size_t different = CountDifferent<rx::OhVoxelHeat>(heats, *gpuHeats, "① 下ごしらえ") +
+                                 CountDifferent<rx::OhFlow>(flows, *gpuFlows, "② 流れ") +
+                                 CountDifferent<rx::RxCell>(world.voxels, *gpuVoxels, "② ボクセル") +
+                                 CountDifferent<rx::OhFlow>(coarse, *gpuCoarse, "③ 粗い量") +
+                                 CountDifferent<rx::RxCell>(world.cells, *gpuCells, "④ セル");
+        if (different != 0)
+            return std::unexpected(std::format("段ごとに食い違い {}", different));
+
+        return {};
+    }
+
     std::expected<uint64_t, std::string> RunCompare(const Context& context) {
         test::OhWorld world;
         AddAirCells(context.table, world, 2);
@@ -476,6 +568,11 @@ namespace {
         AddObject(context.table, world, Kind::Twig, 0, false);
         AddObject(context.table, world, Kind::Twig, 0, false);
         AddObject(context.table, world, Kind::Log, 1, true);
+
+        // 刻み 1 を段ごとに流して比べる(食い違った段が分かる)
+        test::OhWorld staged = world;
+        if (auto checked = RunStageCheck(context, staged); !checked)
+            return std::unexpected(checked.error());
 
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
@@ -582,17 +679,21 @@ namespace {
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measure = false;
+        bool compare = true;
         for (char* argument : arguments) {
             if (std::string_view(argument) == "--measure")
                 measure = true;
-            else
+            else if (std::string_view(argument) == "--measure-only") {
+                measure = true;
+                compare = false;
+            } else
                 rest.push_back(argument);
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_object_heat_test [--warp] [--queue direct|compute] [--measure]");
+                "使い方: gpu_object_heat_test [--warp] [--queue direct|compute] [--measure | --measure-only]");
             return 2;
         }
 
@@ -606,7 +707,7 @@ namespace {
 
         const Context context{
             .device = device->Get(), .queueType = options->queueType, .table = table, .tables = *tables};
-        const auto digest = RunCompare(context);
+        const auto digest = compare ? RunCompare(context) : std::expected<uint64_t, std::string>(0);
         if (!digest) {
             Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED({})", digest.error());
             return 1;

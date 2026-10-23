@@ -89,20 +89,22 @@ namespace bicameral::test {
         bool failed = false;                        // 量が負になる・成分の枠があふれた
     };
 
-    // 小刻み 1 回(①〜④)
-    inline void StepObjectHeatSubstep(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, bool lightOn,
-                                      uint32_t substep) {
+    // ① 下ごしらえ(ボクセルの温度・熱容量・物の中の伝導率)
+    inline std::vector<reaction::OhVoxelHeat> PrepareObjectHeat(const OhCpuTable& table, const OhWorld& world) {
+        std::vector<reaction::OhVoxelHeat> heats(world.voxels.size());
+        for (size_t i = 0; i < heats.size(); ++i)
+            heats[i] = reaction::OhPrepareVoxel(table, world.voxels[i]);
+
+        return heats;
+    }
+
+    // ② 流れ(ボクセルごと。読むのは ① の作業場と囲むセルだけ)。ボクセルに当て、セルへ出す分を返す
+    inline std::vector<reaction::OhFlow> FlowObjectHeat(const OhCpuTable& table, const OhGasList& gases, OhWorld& world,
+                                                        std::span<const reaction::OhVoxelHeat> heats, bool lightOn,
+                                                        uint32_t substep) {
         namespace rx = bicameral::reaction;
-        const size_t count = world.voxels.size();
-
-        // --- ① 下ごしらえ ---
-        std::vector<rx::OhVoxelHeat> heats(count);
-        for (size_t i = 0; i < count; ++i)
-            heats[i] = rx::OhPrepareVoxel(table, world.voxels[i]);
-
-        // --- ② 流れ(ボクセルごと。読むのは ① の作業場と囲むセルだけ)---
-        std::vector<rx::OhFlow> flows(count, rx::OhZeroFlow());
-        for (size_t i = 0; i < count; ++i) {
+        std::vector<rx::OhFlow> flows(world.voxels.size(), rx::OhZeroFlow());
+        for (size_t i = 0; i < flows.size(); ++i) {
             const rx::OhVoxelInfo info = world.infos[i];
             const rx::OhObject object = world.objects[info.object];
             if (substep >= object.substeps)
@@ -130,29 +132,47 @@ namespace bicameral::test {
             world.failed = world.failed || step.ok == 0;
         }
 
-        // --- ③ 物ごとの和と対の端数 ---
-        std::vector<rx::OhFlow> coarse(world.objects.size());
-        for (size_t o = 0; o < world.objects.size(); ++o) {
-            const rx::OhObject object = world.objects[o];
-            rx::OhFlow total = rx::OhZeroFlow();
-            for (uint32_t v = 0; v < object.voxelCount; ++v)
-                total = rx::OhAddFlow(total, flows[object.voxelBegin + v]);
+        return flows;
+    }
 
-            const rx::OhCarryStep step = rx::OhSplitCarry(object, total, world.carries[o]);
+    // ③ 物ごとの和と対の端数。物ごとのセルへ渡す量(セルの単位)を返す
+    inline std::vector<reaction::OhFlow> CarryObjectHeat(OhWorld& world, std::span<const reaction::OhFlow> flows) {
+        std::vector<reaction::OhFlow> coarse(world.objects.size());
+        for (size_t o = 0; o < world.objects.size(); ++o) {
+            const reaction::OhObject object = world.objects[o];
+            reaction::OhFlow total = reaction::OhZeroFlow();
+            for (uint32_t v = 0; v < object.voxelCount; ++v)
+                total = reaction::OhAddFlow(total, flows[object.voxelBegin + v]);
+
+            const reaction::OhCarryStep step = reaction::OhSplitCarry(object, total, world.carries[o]);
             world.carries[o] = step.carry;
             coarse[o] = step.coarse;
         }
 
-        // --- ④ セルへ当てる ---
-        for (const rx::OhCellRange& range : world.ranges) {
-            rx::OhFlow sum = rx::OhZeroFlow();
-            for (uint32_t o = 0; o < range.objectCount; ++o)
-                sum = rx::OhAddFlow(sum, coarse[range.objectBegin + o]);
+        return coarse;
+    }
 
-            const rx::OhAmountChange change = rx::OhApplyToCell(gases, world.cells[range.cell], sum);
+    // ④ セルへ当てる(そのセルの物の粗い量の和)
+    inline void ApplyObjectHeatToCells(const OhGasList& gases, OhWorld& world,
+                                       std::span<const reaction::OhFlow> coarse) {
+        for (const reaction::OhCellRange& range : world.ranges) {
+            reaction::OhFlow sum = reaction::OhZeroFlow();
+            for (uint32_t o = 0; o < range.objectCount; ++o)
+                sum = reaction::OhAddFlow(sum, coarse[range.objectBegin + o]);
+
+            const reaction::OhAmountChange change = reaction::OhApplyToCell(gases, world.cells[range.cell], sum);
             world.cells[range.cell] = change.cell;
             world.failed = world.failed || change.ok == 0;
         }
+    }
+
+    // 小刻み 1 回(①〜④)
+    inline void StepObjectHeatSubstep(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, bool lightOn,
+                                      uint32_t substep) {
+        const std::vector<reaction::OhVoxelHeat> heats = PrepareObjectHeat(table, world);
+        const std::vector<reaction::OhFlow> flows = FlowObjectHeat(table, gases, world, heats, lightOn, substep);
+        const std::vector<reaction::OhFlow> coarse = CarryObjectHeat(world, flows);
+        ApplyObjectHeatToCells(gases, world, coarse);
     }
 
     // ⑤ 反応(セルと同じ関数。受け渡しで毎刻み変わるので、変わった刻みは前の刻み。セルの ID = ボクセルの通し番号)
