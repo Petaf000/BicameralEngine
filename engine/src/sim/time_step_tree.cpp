@@ -174,11 +174,18 @@ namespace bicameral::sim {
             return value >= 0 ? value / divisor : -((-value + divisor - 1) / divisor);
         }
 
-        // 同じレベルで 2^groupShift ブロック角の枠どうしを、同じ e に揃える相手に(細かさを同じ物の長さで比べる。T-0985)
+        // 揃える段(レベルごと): groupShift と、単位の物の長さ(D-640)に届くまでの段の大きい方
+        uint32_t GroupShiftAt(const TimeTreeSetup& setup, int32_t level) {
+            const int32_t byLength = setup.unitByLength ? std::max(level - setup.unitLevel, 0) : 0;
+
+            return std::max(setup.groupShift, static_cast<uint32_t>(byLength));
+        }
+
+        // 同じレベルで 2^揃える段 ブロック角の枠どうしを、同じ e に揃える相手に(細かさを同じ物の長さで比べる。T-0985・D-640)
         void AddMates(const MultiresNest& nest, const TimeTreeSetup& setup, TimeTreeLayout& layout) {
-            const int64_t edge = int64_t{MR_BLOCK_EDGE} << setup.groupShift;
             const auto group = [&](uint32_t slot) {
                 const MrBlock& block = nest.blocks[slot];
+                const int64_t edge = int64_t{MR_BLOCK_EDGE} << GroupShiftAt(setup, block.level);
                 return std::array{int64_t{block.level}, FloorDiv(block.originX, edge), FloorDiv(block.originY, edge),
                                   FloorDiv(block.originZ, edge)};
             };
@@ -232,8 +239,7 @@ namespace bicameral::sim {
             for (std::vector<uint32_t>& list : layout.neighbors)
                 std::ranges::sort(list);
 
-            if (setup.groupShift > 0)
-                AddMates(nest, setup, layout);
+            AddMates(nest, setup, layout);
 
             return layout;
         }
@@ -576,7 +582,8 @@ namespace bicameral::sim {
 
             // --- 解く(差の形。初めは δ = 0)---
             EquilibriumOptions options;
-            options.solver.cycles = setup.cycles;
+            options.solver.cycles = span.exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero
+                                                                                                    : setup.cycles;
             options.faceValues = false;
             options.galerkinCoarse = setup.galerkin;
             const EquilibriumResult result = SolveEquilibrium(solved.built.system, options, solved.state);

@@ -54,12 +54,23 @@ namespace bicameral::sim {
         TimeStepRule rule = TimeStepRule::Change;
         int32_t fixedExponent = 0;
         int32_t maxExponent = 14;
-        uint64_t budgetQ16 = 1ull << 16;  // 1 歩の変化の許す大きさ(mK × 2^16)
-        uint32_t cycles = 4;              // C-0 の V サイクルの回数(法則ごとの定数)
-        bool galerkin = false;            // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
+        // 1 歩の変化の許す大きさ(mK × 2^16)。既定 0.1 K(D-642。T-1063)
+        uint64_t budgetQ16 = uint64_t{100} << 16;
+        uint32_t cycles = 4;  // C-0 の V サイクルの回数(法則ごとの定数)
+        // 短い刻み(e ≤ shortExponent)の列の V の回数(0 = cycles と同じ)。短い刻みの系は 1 回の V で解け切る
+        // (T-1090。火事で V 4 とビット一致。長い刻みは解け切らない)
+        uint32_t cyclesAtZero = 1;
+        int32_t
+            shortExponent = 8;  // 2^8 刻み ≈ 4.3 秒まで(静かな夜で e ≤ 8 は V 4 と同じ差・e ≤ 10 から増える。T-1090)
+        bool galerkin = false;  // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
         TimeTreeSelect select = TimeTreeSelect::Previous;
         // 同じレベルで 2^これ ブロック角の枠は同じ e に揃える(細かさを同じ物の長さのブロックで比べる。0 = ブロックごと)
         uint32_t groupShift = 0;
+        // 刻みを選ぶ単位の物の長さ(D-640。一旦 4 m): レベル unitLevel のブロックの長さ(0 = 4 m)。それより細かいレベルは
+        // 同じ長さの組に揃える(2 m のブロックなら 2³ 枠)。粗いレベル(8 m のブロック)はブロックのまま(短くする形は T-1089)。
+        // false なら groupShift だけ(T-0985・T-1074 の比べ)
+        bool unitByLength = true;
+        int32_t unitLevel = 0;
         // 前線の緩衝(T-1014 の見立ての確かめ): 望みの e が 0 の枠(歩の変化が予算の 1/4 を超えた・触られた)の隣も e = 0 に。
         // 隣の差 1 段の決まりだけだと、前線の隣は予算と関係なく e = 1 になれる
         bool frontBuffer = false;

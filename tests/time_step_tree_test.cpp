@@ -15,8 +15,9 @@
 // T-1013: 退く道の 1 本目(select=jump。寝ている間だけ。e は 0 か上限)。
 // T-1063(D-633): 予算を mK の整数で(budgetmk=10・100・1000)。毎刻みとの差は記録だけ(合格の判定に使わない)。
 //   火事は前線(着火した・半分燃えた最も遠い x)が届いた刻みと燃えた量を毎刻みと比べる(遊びに効く結果が予算で変わるか)。
-// 引数: <forward|grain|grain-pond|grain-fire|night|fire> [select=previous|retake|jump] [budget=予算のずらし]
+// 引数: <forward|grain|grain-pond|grain-fire|grain-fine-pond|grain-fine-fire|night|fire> [select=previous|retake|jump] [budget=予算のずらし]
 //       [budgetmk=予算(mK)] [group=揃える段] [buffer=1(前線の緩衝)]
+//       [zerocycles=1 刻みの V の回数(既定 1)] [unit=block(単位 4 m を外す)]
 //       [bufferunits=前線の緩衝の単位の数(T-1074)] [shape=mixed|coarse|fine|finer(night・fire の木。1 m・0.5 m・0.25 m の根だけ)]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 #include <algorithm>
@@ -114,7 +115,10 @@ namespace {
     uint32_t solverCycles = 4;
     // 予算を 1 mK ÷ 2^これ に。木の上では 1 mK で違うレベルの境の近くが 8 mK ずれた(T-0950 の作業ログ)ので仮に 1/16 mK
     uint32_t budgetShift = 4;
-    uint64_t budgetMk = 0;  // 予算を mK の整数で(0 = budgetShift を使う。T-1063)
+    uint64_t budgetMk = 100;    // 予算を mK の整数で(0 = budgetShift を使う。既定 0.1 K = D-642)
+    uint32_t zeroCycles = 1;    // 短い刻みの列の V の回数(T-1090。0 = cycles と同じ)
+    int32_t shortExponent = 8;  // 短い刻み = e がこれ以下(shorte=。既定 8)
+    bool unitByLength = true;   // 刻みを選ぶ単位を物の長さ 4 m で(D-640 の一旦。unit=block で外す)
     bool solverGalerkin = false;
     TimeTreeSelect selectRule = TimeTreeSelect::Previous;
     uint32_t groupShift = 0;   // 細かさの比べで 0.5 m の木の枠を揃える段(1 = 8 m のブロックに)
@@ -153,6 +157,9 @@ namespace {
         setup.select = selectRule;
         setup.frontBuffer = frontBuffer;
         setup.frontBufferUnits = bufferUnits;
+        setup.cyclesAtZero = zeroCycles;
+        setup.shortExponent = shortExponent;
+        setup.unitByLength = unitByLength;
 
         return setup;
     }
@@ -544,9 +551,10 @@ namespace {
         if (bufferUnits > 0)
             buffer = std::format("・前線の緩衝 {} 単位", bufferUnits);
 
-        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}",
+        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
-                           trialCycles != 0 ? trialCycles : solverCycles);
+                           trialCycles != 0 ? trialCycles : solverCycles, zeroCycles,
+                           unitByLength ? "4 m" : "ブロック");
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -626,7 +634,9 @@ namespace {
             return *std::move(loaded);
         }
 
-        const TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Fixed);
+        // 毎刻みは V 4 のまま(写しのファイルの名前の V の回数どおり)
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Fixed);
+        setup.cyclesAtZero = 0;
         const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
         RunResult reference = Run(setup, material, world, ticks, ticks, ignition, true, fronts != nullptr);
         LogRun(scene, "毎刻み", world, reference, ticks);
@@ -793,15 +803,16 @@ namespace {
 
     // --- 2. 細かさ: 0.5 m(根 0.5 m・8 つ)と 1 m(根 1 m・4 つ)で同じ場所に選ばれる e ---
 
+    // pair: 0 = 0.5 m と 1 m(既定)・1 = 0.25 m と 0.5 m(どちらも単位 4 m。T-1063 の既定の確かめ)
     void CheckGranularity(std::string_view scene, const Material& material, const Profile& profile, uint64_t ticks,
-                          const Ignition& ignition) {
+                          const Ignition& ignition, int32_t pair = 0) {
         constexpr uint64_t SAMPLE_EVERY = 1024;
         const TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         // group=1 なら 0.5 m の木は x に隣り合う 2 枠(4 m × 2 = 8 m)を同じ e に揃える = 1 m の木のブロックと同じ物の長さ(T-0985)
         TimeTreeSetup fineSetup = setup;
         fineSetup.groupShift = groupShift;
-        const TreeShape fineShape{.rootLevel = 0, .roots = 8, .refine = false};
-        const TreeShape coarseShape{.rootLevel = -1, .roots = 4, .refine = false};
+        const TreeShape fineShape{.rootLevel = pair, .roots = 8u << pair, .refine = false};
+        const TreeShape coarseShape{.rootLevel = pair - 1, .roots = 4u << pair, .refine = false};
         TimeTreeWorld fine = MakeWorld(fineSetup, material, fineShape, profile);
         TimeTreeWorld coarse = MakeWorld(setup, material, coarseShape, profile);
         // 根の枠を x の順に(0.5 m の根 i は 1 m の根 i / 2 の中)
@@ -864,12 +875,13 @@ namespace {
 
         const double share = static_cast<double>(withinOne) / samples;
         Log(Channel::Sim, Level::Info,
-            "細かさ {}({}・0.5 m のブロック {} m): 同じ場所の e の差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}・e の平均 "
+            "細かさ {}({}・組 {}〔1 = 0.25 m と 0.5 m。e の平均の名前は 0.5 m / 1 m のまま〕・細かい方のブロック {:g} "
+            "m): 同じ場所の e の差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}・e の平均 "
             "0.5 m "
             "{:.2f} / 1 m {:.2f}・解き 0.5 m {} / 1 m {}・取り直し {} / {}",
-            scene, TrialName(), 4u << groupShift, meanGap / samples, share * 100.0, widest, meanFine / samples,
-            meanCoarse / samples, fine.steps.cellSteps, coarse.steps.cellSteps, fine.steps.retakes,
-            coarse.steps.retakes);
+            scene, TrialName(), pair, std::ldexp(4.0, static_cast<int>(groupShift) - pair), meanGap / samples,
+            share * 100.0, widest, meanFine / samples, meanCoarse / samples, fine.steps.cellSteps,
+            coarse.steps.cellSteps, fine.steps.retakes, coarse.steps.retakes);
         Log(Channel::Sim, Level::Info,
             "細かさ {}(1 m の e と 0.5 m の 2 つの小さい方): 差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}", scene,
             meanPair / pairs, 100.0 * withinOnePair / pairs, widestPair);
@@ -943,10 +955,17 @@ namespace {
                 selectRule = value == "retake" ? TimeTreeSelect::Retake
                              : value == "jump" ? TimeTreeSelect::Jump
                                                : TimeTreeSelect::Previous;
-            } else if (key == "budget")
+            } else if (key == "budget") {
                 budgetShift = static_cast<uint32_t>(std::atoi(value.c_str()));
-            else if (key == "budgetmk")
+                budgetMk = 0;
+            } else if (key == "budgetmk")
                 budgetMk = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "zerocycles")
+                zeroCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "shorte")
+                shortExponent = std::atoi(value.c_str());
+            else if (key == "unit")
+                unitByLength = value != "block";
             else if (key == "bufferunits")
                 bufferUnits = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "shape") {
@@ -996,6 +1015,12 @@ namespace {
 
         if (all || part == "grain" || part == "grain-fire")
             CheckGranularity("火事", fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition);
+
+        if (part == "grain-fine-pond")
+            CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {}, 1);
+
+        if (part == "grain-fine-fire")
+            CheckGranularity("火事", fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition, 1);
 
         if (all || part == "night")
             CheckScene("池(静かな夜)", "night", pond, PondProfile(WorldLength(TreeShape{})), NIGHT_TICKS, {}, true);
