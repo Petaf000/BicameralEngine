@@ -5,6 +5,7 @@
 // 薪(10 × 10 × 51・Ø 8 cm × 40 cm を四角の箱で)。木は試験の表の cellulose を薄めた量。外に面するボクセルを 900 K から始める(燃えている物)。
 //   既定: 紙 2・小枝 3(同じセル)・薪 1(別のセル)を 60 刻み、20 刻みごとにボクセル・セル・対の端数を読み戻して CPU と比べる。
 //         CPU の側でエネルギーの保存(セル × 8^6 + ボクセル + 対の端数 − 入った光)も毎刻み確かめる。
+//   --profile: 燃える薪・紙 100 個を 600 刻み回し、30 刻みごとに段ごとの GPU の ms とボクセルの中身を出す(燃え進むほど重くなる理由。T-1065)
 //   --measure(--measure-only は CPU と比べずに測るだけ): 紙・小枝・薪をそれぞれ 10・100・1000 個(10 個ずつ同じセル)並べ、1 刻みの GPU の時間(タイムスタンプ)を測る(CPU とは比べない)。
 // 引数は gpu_test_options.h と --measure。
 #include <cstring>
@@ -45,6 +46,7 @@ namespace {
     constexpr uint32_t THREADS = 64;
     constexpr uint32_t ROW_GROUPS = 1024;  // グループの数が 65535 を超える時の x の数
     constexpr uint32_t ROOT_CONSTANT_COUNT = 10;
+    constexpr uint32_t TIMESTAMP_COUNT = 6;  // 刻みの初め + 5 つの段の後(--profile)
 
     // u0〜u6 / b0 / デバッグのリング / t0〜t9(object_heat.hlsl)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
@@ -244,8 +246,10 @@ namespace {
         result.carryReadback = gpu::CreateBuffer(device, initial[3].size(), gpu::BufferKind::Readback);
         result.cellReadback = gpu::CreateBuffer(device, initial[5].size(), gpu::BufferKind::Readback);
         result.failureReadback = gpu::CreateBuffer(device, initial[6].size(), gpu::BufferKind::Readback);
-        result.timestampReadback = gpu::CreateBuffer(device, 2 * sizeof(uint64_t), gpu::BufferKind::Readback);
-        const D3D12_QUERY_HEAP_DESC heapDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2, .NodeMask = 0};
+        result.timestampReadback = gpu::CreateBuffer(device, TIMESTAMP_COUNT * sizeof(uint64_t),
+                                                     gpu::BufferKind::Readback);
+        const D3D12_QUERY_HEAP_DESC heapDesc{
+            .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = TIMESTAMP_COUNT, .NodeMask = 0};
         if (FAILED(device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&result.timestamps))) || !result.voxelReadback ||
             !result.carryReadback || !result.cellReadback || !result.failureReadback || !result.timestampReadback)
             return std::unexpected("読み戻しかタイムスタンプを作れない");
@@ -523,15 +527,6 @@ namespace {
         };
 
         const std::vector<rx::OhVoxelHeat> heats = test::PrepareObjectHeat(cpuTable, world);
-        for (uint32_t i = 0; i < world.voxels[0].speciesCount; ++i) {
-            const uint32_t id = world.voxels[0].species[i];
-            const rx::OhSpecies values = context.tables.species[id];
-            Log(Channel::Gpu, Level::Info,
-                "ボクセル 0 の成分: {} 量 {} 伝導率 {} 気体 {} モル体積 {} 混ざる {} 吸い込み {}", id,
-                world.voxels[0].amounts[i], context.table.species[id].conductivity, values.gasIndex,
-                values.molarVolumeMm3PerMol, values.diffusivityMm2PerS, values.absorptionLongMm2PerMol);
-        }
-
         runStage(StagePrepare);
         const auto gpuHeats = read(1, heats.size(), rx::OhVoxelHeat{});
         const std::vector<rx::OhFlow> flows = test::FlowObjectHeat(cpuTable, context.tables.gases, world, heats, true,
@@ -676,14 +671,104 @@ namespace {
         return {};
     }
 
+    // --- 燃え進むほど重くなる理由の切り分け(--profile。T-1065)---
+    // 燃える薪 100 本(10 本ずつ同じセル)を 600 刻み(10 s)回し、30 刻みごとに段ごとの GPU の ms と、ボクセルの中身(成分の数・温度)を出す
+
+    struct VoxelStats {
+        double meanSpecies = 0.0;
+        uint32_t maxSpecies = 0;
+        uint32_t hotVoxels = 0;  // 600 K 以上
+        double meanKelvin = 0.0;
+    };
+
+    VoxelStats StatsOf(const sim::BakedReactionTable& table, std::span<const rx::RxCell> voxels) {
+        VoxelStats stats;
+        const sim::ReactionTableView view = table.View();
+        for (const rx::RxCell& voxel : voxels) {
+            const int32_t temperature = rx::RxComputeThermal(view, voxel).temperature;
+            stats.meanSpecies += voxel.speciesCount;
+            stats.maxSpecies = std::max(stats.maxSpecies, voxel.speciesCount);
+            stats.hotVoxels += temperature >= 600000 ? 1u : 0u;
+            stats.meanKelvin += temperature / 1000.0;
+        }
+
+        stats.meanSpecies /= static_cast<double>(voxels.size());
+        stats.meanKelvin /= static_cast<double>(voxels.size());
+
+        return stats;
+    }
+
+    std::expected<void, std::string> Profile(const Context& context, Kind kind, uint32_t count) {
+        test::OhWorld world;
+        AddAirCells(context.table, world, (count + OBJECTS_PER_CELL - 1) / OBJECTS_PER_CELL);
+        for (uint32_t i = 0; i < count; ++i)
+            AddObject(context.table, world, kind, i / OBJECTS_PER_CELL, false);
+
+        auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
+        auto debugRing = gpu::DebugRing::Create(context.device);
+        auto pipelines = CreatePipelines(context.device);
+        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world);
+        if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
+            return std::unexpected("GPU の準備に失敗");
+
+        uint64_t frequency = 0;
+        if (FAILED(queue->Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
+            return std::unexpected("時計を読めない");
+
+        std::array<double, 5> sums{};
+        for (uint64_t tick = 1; tick <= 600; ++tick) {
+            ID3D12GraphicsCommandList10* list = queue->Begin();
+            BindRoot(list, *pipelines, *gpuWorld, *debugRing);
+            list->EndQuery(gpuWorld->timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            for (uint32_t stage = 0; stage < 5; ++stage) {
+                RecordStage(list, *pipelines, *gpuWorld, static_cast<Stage>(stage), false, tick);
+                list->EndQuery(gpuWorld->timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, stage + 1);
+            }
+
+            list->ResolveQueryData(gpuWorld->timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, TIMESTAMP_COUNT,
+                                   gpuWorld->timestampReadback.Get(), 0);
+            std::array<uint64_t, TIMESTAMP_COUNT> stamps{};
+            if (!queue->ExecuteAndWait() ||
+                !gpu::ReadBuffer(gpuWorld->timestampReadback.Get(), std::as_writable_bytes(std::span(stamps))))
+                return std::unexpected("刻みを流せない");
+
+            for (size_t stage = 0; stage < sums.size(); ++stage)
+                sums[stage] += static_cast<double>(stamps[stage + 1] - stamps[stage]) * 1000.0 /
+                               static_cast<double>(frequency);
+
+            if (tick % 30 != 0)
+                continue;
+
+            auto read = ReadWorld(*queue, *gpuWorld);
+            if (!read)
+                return std::unexpected(read.error());
+
+            const VoxelStats stats = StatsOf(context.table, read->voxels);
+            Log(Channel::Gpu, Level::Info,
+                "燃え進み: {} × {} 刻み {:3}: 段の ms(30 刻みの平均)下ごしらえ {:.2f}・流れ {:.2f}・物ごと "
+                "{:.2f}・セル {:.2f}・反応 {:.2f}"
+                "・ボクセルの成分 平均 {:.2f} 最大 {}・600 K 以上 {} / {}・平均 {:.0f} K・GPU の失敗 {}",
+                ShapeOf(kind).name, count, tick, sums[0] / 30, sums[1] / 30, sums[2] / 30, sums[3] / 30, sums[4] / 30,
+                stats.meanSpecies, stats.maxSpecies, stats.hotVoxels, read->voxels.size(), stats.meanKelvin,
+                read->failures[0]);
+            sums = {};
+        }
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measure = false;
         bool compare = true;
+        bool profile = false;
         for (char* argument : arguments) {
             if (std::string_view(argument) == "--measure")
                 measure = true;
-            else if (std::string_view(argument) == "--measure-only") {
+            else if (std::string_view(argument) == "--profile") {
+                profile = true;
+                compare = false;
+            } else if (std::string_view(argument) == "--measure-only") {
                 measure = true;
                 compare = false;
             } else
@@ -693,7 +778,8 @@ namespace {
         const auto options = test::ParseGpuTestOptions(rest);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
-                "使い方: gpu_object_heat_test [--warp] [--queue direct|compute] [--measure | --measure-only]");
+                "使い方: gpu_object_heat_test [--warp] [--queue direct|compute] [--measure | --measure-only | "
+                "--profile]");
             return 2;
         }
 
@@ -711,6 +797,15 @@ namespace {
         if (!digest) {
             Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED({})", digest.error());
             return 1;
+        }
+
+        if (profile) {
+            for (const Kind kind : {Kind::Log, Kind::Paper}) {
+                if (auto profiled = Profile(context, kind, 100); !profiled) {
+                    Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(切り分け: {})", profiled.error());
+                    return 1;
+                }
+            }
         }
 
         if (measure) {

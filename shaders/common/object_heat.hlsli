@@ -21,18 +21,19 @@
 
 RX_NAMESPACE_BEGIN
 
-// --- 決まった値(32bit を超える値は FX_U64 で書く。HLSL の数の書き方は 32bit に切れる)---
+// --- 決まった値(32bit を超える定数を式に書かない。32bit の定数の積と割り算で書く。T-1078)---
 
 FX_CONST uint32_t OH_MAX_GASES = 8;  // 対の面で混ざる気体の数の上限(表の気体。最小の形。超える表は T-1076)
 FX_CONST uint32_t OH_NO_GAS = 0xFFFFFFFFu;
-FX_CONST int64_t OH_CELL_UM = 500000;                       // レベル 0 の一辺(µm)
-FX_CONST uint64_t OH_BOX_MM3 = FX_U64(0x1Du, 0x1A94A200u);  // 0.125 m³(そのレベルの単位の量 = 濃さ × 0.125 m³)
-FX_CONST uint64_t OH_ROOM_TEMPERATURE_MK = 293150;          // 物質の値(混ざる速さ・伝導率)を書いた温度(D-639)
+FX_CONST int64_t OH_CELL_UM = 500000;  // レベル 0 の一辺(µm)
+FX_CONST uint64_t OH_MEGA = 1000000;
+FX_CONST uint64_t OH_BOX_MEGA_MM3 = 125000;  // 0.125 m³ = 125000 × 10^6 mm³(そのレベルの単位の量 = 濃さ × 0.125 m³)
+FX_CONST uint64_t OH_ROOM_TEMPERATURE_MK = 293150;  // 物質の値(混ざる速さ・伝導率)を書いた温度(D-639)
 // mW/(m·K) × µm × mK = 10^-12 W・1/60 s → mJ: ÷ (10^6 × 60000)
-FX_CONST uint64_t OH_CONDUCTION_DIVISOR = FX_U64(0xDu, 0xF8475800u);  // 6 × 10^10
+FX_CONST uint64_t OH_CONDUCTION_DIVISOR_MEGA = 60000;  // × 10^6
 // mm²/s × µm × (単位 ÷ 0.125 m³)× 1/60 s → 単位 × 8 ÷ (60 × 10^12)
-FX_CONST uint64_t OH_DIFFUSION_DIVISOR = FX_U64(0x3691u, 0xD6AFC000u);  // 6 × 10^13
-FX_CONST uint32_t OH_RADIATION_SHARE_Q16 = 32768;                       // 放射の 1 小刻みの上限(熱容量 × ΔT の半分)
+FX_CONST uint64_t OH_DIFFUSION_DIVISOR_MEGA = 60000000;  // × 10^6
+FX_CONST uint32_t OH_RADIATION_SHARE_Q16 = 32768;        // 放射の 1 小刻みの上限(熱容量 × ΔT の半分)
 
 // ボクセルの形の語(OhVoxelInfo::shape)
 FX_CONST uint32_t OH_NEIGHBOUR_MASK = 0x3Fu;  // ビット 0〜5 = 隣のボクセルがある(−x・+x・−y・+y・−z・+z)
@@ -222,10 +223,15 @@ FX_FN uint64_t OhVolumeConductivity(Table table, RxCell cell) {
         condensedWeighted += volume * conductivity;
     }
 
+    // (固体の重み + (箱 − 固体の体積)× 気体の伝導率)÷ 箱。箱 = 125000 × 10^6 mm³ を 32bit の定数の積と 2 回の割り算で書く
+    // (floor(floor(x ÷ a) ÷ b) = floor(x ÷ ab)。GPU で 32bit を超える定数との引き算・選ぶが上の語を壊した。T-1078)
     const uint64_t gasConductivity = gasAmount == 0 ? (uint64_t)0 : OhDivideU64(gasWeighted, gasAmount);
-    const uint64_t gasMm3 = OH_BOX_MM3 - (condensedMm3 < OH_BOX_MM3 ? condensedMm3 : OH_BOX_MM3);
+    const bool full = OhDivideU64(condensedMm3, OH_MEGA) >= OH_BOX_MEGA_MM3;
+    const uint64_t boxTimesGas = gasConductivity * OH_BOX_MEGA_MM3 * OH_MEGA;
+    const uint64_t numerator = full ? condensedWeighted
+                                    : condensedWeighted + boxTimesGas - (condensedMm3 * gasConductivity);
 
-    return OhDivideU64(condensedWeighted + (gasMm3 * gasConductivity), OH_BOX_MM3);
+    return OhDivideU64(OhDivideU64(numerator, OH_MEGA), OH_BOX_MEGA_MM3);
 }
 
 template <typename Table>
@@ -249,7 +255,7 @@ FX_FN int64_t OhPairConduction(OhObject object, uint64_t airConductivity, int64_
     const uint64_t multiplier = (airConductivity * (uint64_t)pairLengthUm * film.conductionQ16) >> 16;
 
     return OhMulDivToward0(difference * ((int64_t)1 << (3 * object.bodyLevel)), multiplier,
-                           OH_CONDUCTION_DIVISOR * (uint64_t)object.substeps);
+                           (uint64_t)object.substeps * OH_CONDUCTION_DIVISOR_MEGA * OH_MEGA);
 }
 
 // 放射: ボクセルの吸い込み(長い帯)× 囲む所(吸い込み 1)。RdPairCoefficient は 0.25 m² の面の値なので、
@@ -294,7 +300,7 @@ FX_FN OhFlow OhPairGas(Table table, GasList gases, OhObject object, int64_t pair
         const uint64_t diffusivity = (uint64_t)table.ObjectSpecies(species).diffusivityMm2PerS;
         const uint64_t multiplier = (diffusivity * (uint64_t)pairLengthUm * film.diffusionQ16) >> 16;
         int64_t moved = OhMulDivToward0(difference * ((int64_t)8 << (3 * object.bodyLevel)), multiplier,
-                                        OH_DIFFUSION_DIVISOR * (uint64_t)object.substeps);
+                                        (uint64_t)object.substeps * OH_DIFFUSION_DIVISOR_MEGA * OH_MEGA);
         if (moved > (int64_t)inVoxel)
             moved = (int64_t)inVoxel;
 
@@ -321,7 +327,7 @@ FX_FN int64_t OhInnerConduction(OhObject object, OhVoxelHeat self, OhVoxelHeat o
     const uint64_t multiplier = conductivity * (uint64_t)(OH_CELL_UM >> object.bodyLevel);
 
     return OhMulDivToward0(difference * ((int64_t)1 << (3 * object.bodyLevel)), multiplier,
-                           OH_CONDUCTION_DIVISOR * (uint64_t)object.substeps);
+                           (uint64_t)object.substeps * OH_CONDUCTION_DIVISOR_MEGA * OH_MEGA);
 }
 
 // 隣のボクセルの番号の差(方向 0〜5 = −x・+x・−y・+y・−z・+z)
