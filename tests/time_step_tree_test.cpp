@@ -544,8 +544,9 @@ namespace {
         if (bufferUnits > 0)
             buffer = std::format("・前線の緩衝 {} 単位", bufferUnits);
 
-        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}", selectRule == TimeTreeSelect::Retake ? 2 : 1,
-                           buffer, BudgetText(), shapeName, groupShift);
+        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}",
+                           selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
+                           trialCycles != 0 ? trialCycles : solverCycles);
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -570,6 +571,11 @@ namespace {
             "{:.5f}・解いたセル {}",
             scene, name, static_cast<double>(run.steps.zeroCellSteps) / cellTicks,
             static_cast<double>(run.steps.forcedCellSteps) / cellTicks, run.steps.cellSteps);
+        Log(Channel::Sim, Level::Info,
+            "{} {}: e = 0 の解き {}・枠の組が変わった {}・組は同じで温度の帯が変わった 1 K {} / 10 K {} / 100 K "
+            "{}(T-1090)",
+            scene, name, run.steps.zeroSolves, run.steps.zeroReshaped, run.steps.zeroRebanded[0],
+            run.steps.zeroRebanded[1], run.steps.zeroRebanded[2]);
     }
 
     // --- 1・4・5. 精度と費用(混ぜた木)---

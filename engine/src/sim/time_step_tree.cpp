@@ -534,6 +534,37 @@ namespace bicameral::sim {
             std::vector<uint32_t> nodeOf;
         };
 
+        // 段の重みを使い回せるかの測り(T-1090。結果に効かない): 枠の組が変わったか・温度の帯が変わったセルがあるか
+        void MeasureReweights(const TimeTreeSetup& setup, TimeTreeWorld& world, const Span& span) {
+            constexpr std::array<int64_t, 3> BAND_Q16 = {int64_t{1000} << 16, int64_t{10000} << 16,
+                                                         int64_t{100000} << 16};
+            TimeTreeSteps& steps = world.steps;
+            ++steps.zeroSolves;
+            const bool reshaped = span.slots != steps.lastZeroSlots;
+            steps.zeroReshaped += reshaped ? 1u : 0u;
+            steps.lastZeroSlots = span.slots;
+            for (size_t b = 0; b < BAND_Q16.size(); ++b) {
+                std::vector<int64_t>& bands = steps.cellBand[b];
+                if (bands.size() != world.layout.stepped.size())
+                    bands.assign(world.layout.stepped.size(), INT64_MIN);
+
+                bool changed = false;
+                for (const uint32_t slot : span.slots) {
+                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                        const uint32_t id = CellId(slot, index);
+                        if (world.layout.stepped[id] == 0)
+                            continue;
+
+                        const int64_t band = FloorDiv(CellTemperature(setup, world, id), BAND_Q16[b]);
+                        changed = changed || bands[id] != band;
+                        bands[id] = band;
+                    }
+                }
+
+                steps.zeroRebanded[b] += !reshaped && changed ? 1u : 0u;
+            }
+        }
+
         SolvedSpan SolveSpan(const TimeTreeSetup& setup, TimeTreeWorld& world, const Span& span,
                              std::span<const int32_t> next) {
             TimeTreeSteps& steps = world.steps;
@@ -553,6 +584,7 @@ namespace bicameral::sim {
             steps.cellSteps += solved.built.cells.size();
             ++steps.solves;
             if (span.exponent == 0) {
+                MeasureReweights(setup, world, span);
                 steps.zeroCellSteps += solved.built.cells.size();
                 for (const uint32_t slot : span.slots) {
                     if (steps.desired[slot] == 0)

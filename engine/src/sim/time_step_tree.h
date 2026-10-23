@@ -13,6 +13,7 @@
 //   長すぎる隣の歩は打ち切る。浮動小数点は使わない(04 §4)。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -135,6 +136,15 @@ namespace bicameral::sim {
         uint64_t retakes = 0;          // 取り直した枠の数(2 通り目)
         uint64_t zeroCellSteps = 0;    // e = 0 の列で解いたセル(T-1074)
         uint64_t forcedCellSteps = 0;  // そのうち自分の望みの e は 0 でない枠(緩衝・隣の差・揃える相手で毎刻みにされた)
+
+        // --- 段の重みを使い回せるか(T-1090。測りだけ。結果にも要約にも効かない)---
+        // e = 0 の解きのうち、枠の組が前の e = 0 の解きと違った回(段の形が変わる = 段の重みを作り直す)と、組は同じでも
+        // どれかのセルの温度の帯(1 K・10 K・100 K ごと)が変わった回(伝導率が温度で変わる D-639 なら係数が変わる見込み)
+        uint64_t zeroSolves = 0;
+        uint64_t zeroReshaped = 0;
+        std::array<uint64_t, 3> zeroRebanded{};
+        std::vector<uint32_t> lastZeroSlots;
+        std::array<std::vector<int64_t>, 3> cellBand;
         int32_t widestNeighborGap = 0;
         uint32_t negativeValues = 0;
 
