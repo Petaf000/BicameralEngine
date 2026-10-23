@@ -249,6 +249,8 @@ namespace {
     std::shared_ptr<FlowStats> currentStats;  // 走っている場面の段の数え(刻みの後の操作から読む。T-1003 の測り)
     bool movingByCellOverride = false;
     uint32_t dragScaleOverride = 1000;  // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
+    bool restLayerOverride = false;     // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
+    bool restLockOverride = true;       // 解く前に止める(T-1043)。引数のどこかに norestlock で解いた後で止める(T-0996)
     bool vacuumOverride = false;        // 空気を抜く(粒と空気の引きずりの影響を見る。T-1046)。引数のどこかに vacuum
     bool impactTurnOverride =
         false;  // 受け止めた縦の運動量を横へ向け直す(T-1046)。引数のどこかに turn  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
@@ -299,6 +301,8 @@ namespace {
         flowOptions.grainMovingByCell = movingByCellOverride;
         flowOptions.grainImpactTurn = impactTurnOverride;
         flowOptions.dragScalePermille = dragScaleOverride;
+        flowOptions.grainRestLock = restLockOverride;
+        flowOptions.grainRestLayer = restLayerOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
@@ -323,13 +327,14 @@ namespace {
         std::printf(
             "    費用 %lld ns/セル/刻み(計器込み)・降伏で動いた面の柱 %llu・止めた %llu・空きが無く止めた %llu・"
             "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u・動く面の上限 "
-            "%llu・受け止めた縦 %llu・横へ %llu\n",
+            "%llu・受け止めた縦 %llu・横へ %llu・層の面 %llu・解く前に止めた面 %llu\n",
             (long long)run.recording.NanosecondsPerCellTick(), (unsigned long long)run.stats.yieldMovingPairs,
             (unsigned long long)run.stats.yieldHeldPairs, (unsigned long long)run.stats.yieldBlockedPairs,
             (unsigned)((uint64_t)run.stats.maxPackedQ16 * 1000 >> 16), (unsigned long long)run.stats.overpackedCells,
             (unsigned long long)run.stats.grainLimitedCells, run.stats.maxCycles,
             (unsigned long long)run.stats.yieldDynamicFaces, (unsigned long long)run.stats.impactGrainImpulse,
-            (unsigned long long)run.stats.turnedGrainImpulse);
+            (unsigned long long)run.stats.turnedGrainImpulse, (unsigned long long)run.stats.restLayerGrainFaces,
+            (unsigned long long)run.stats.restLockedGrainFaces);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -1059,6 +1064,10 @@ int main(int argc, char** argv) {
             impactTurnOverride = true;
         else if (word == "vacuum")
             vacuumOverride = true;
+        else if (word == "norestlock")
+            restLockOverride = false;
+        else if (word == "layer")
+            restLayerOverride = true;
         else if (word.starts_with("drag="))
             dragScaleOverride = (uint32_t)std::stoi(word.substr(5));
         else

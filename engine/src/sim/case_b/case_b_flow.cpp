@@ -84,7 +84,9 @@ namespace bicameral::sim::case_b {
             uint32_t permeabilityUm2 = 0;  // 据わる固体の孔の通しやすさ(質量の平均。0 = 孔の引きずり無し)
             bool packed = false;           // 粒が詰まっている(grainPackedQ16 がほぼ 1)
             bool noRoom = false;           // 粒が入れない(詰まった・据わる固体か物がある。穴の大きさ S8 は 2 周目。仮)
-            uint64_t porousMg = 0;         // 孔の引きずり K_x(1 刻みぶん)
+            bool rests =
+                false;  // 粒が支えられている(下が支えられた詰まった粒・据わる物・床。T-1043。grainRestLock の時だけ数える)
+            uint64_t porousMg = 0;  // 孔の引きずり K_x(1 刻みぶん)
         };
 
         struct FlowScratch {
@@ -572,6 +574,29 @@ namespace bicameral::sim::case_b {
             }
         }
 
+        // 支えられた粒(T-1043): 列を下から見て、下が「支えられた詰まった粒・閉じたセル・据わる固体・物・床」の時だけ支えられる
+        // (降伏の段の SupportColumn と同じ決め方。刻みの初めの値なので順によらない)
+        void MeasureGrainRest(FlowScratch& scratch, const Box& box, const View& view) {
+            const std::array<uint32_t, 3> size = {box.config.sizeX, box.config.sizeY, box.config.sizeZ};
+            const uint32_t axis = view.gravityAxis;
+            for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+                std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                if (at[axis] != 0)
+                    continue;
+
+                bool supported = true;  // 床(箱の端)
+                for (uint32_t step = 0; step < size[axis]; ++step) {
+                    at[axis] = view.gravityDown ? step : size[axis] - 1 - step;
+                    const uint32_t index = CellIndex(box, at[0], at[1], at[2]);
+                    GrainCell& grain = scratch.grains[index];
+                    const CellView& cellView = view.cells[index];
+                    grain.rests = supported && grain.massMg > 0 && cellView.grainPackedQ16 > 0;
+                    const bool solid = scratch.cells[index].closed || cellView.fixedQ16 > 0 || cellView.bodyQ16 > 0;
+                    supported = solid || (grain.packed && grain.rests);
+                }
+            }
+        }
+
         // 粒の重さと浮力を陽に当てる。流体の重さは R1 のまま(重さの軸は柱と打ち消して 0・横は柱の差)。
         // 浮力 = 押しのけた流体の重さで、流体 → 粒の受け渡し(和 0)。粒の重さの浮力を引いた残りは引きずりで流体へ渡り、陰の圧力が支える
         void ApplyGrainWeight(Box& box, const View& view, const FlowScratch& scratch, const FlowFace& face) {
@@ -718,7 +743,12 @@ namespace bicameral::sim::case_b {
             stats.cappedDragFaces += drag >= DRAG_LIMIT_Q16 ? 1u : 0u;
             const int64_t grainNow = GrainMomentum(box, face);
             const bool intoLeft = grainNow < 0;
-            const bool locked = (left.packed && right.packed) || (intoLeft ? left.noRoom : right.noRoom);
+            // 粒の無いセルから支えられた粒へ向かう面(T-1043): 動かせる粒が無く、重さだけで空気を押すので、解く前に止めて孔にする
+            const GrainCell& upwind = intoLeft ? right : left;
+            const GrainCell& downwind = intoLeft ? left : right;
+            const bool restLocked = grainNow != 0 && upwind.massMg == 0 && downwind.rests;
+            stats.restLockedGrainFaces += restLocked ? 1u : 0u;
+            const bool locked = (left.packed && right.packed) || (intoLeft ? left.noRoom : right.noRoom) || restLocked;
             if (locked) {
                 // 落ちてきた粒を詰まった粒が受け止めた(T-1046): 持ち越した縦の運動量を覚えておき、降伏の段で横へ向け直す
                 const uint32_t below = intoLeft ? face.left : face.right;
@@ -736,6 +766,19 @@ namespace bicameral::sim::case_b {
                 face.grainAreaMm2 = 0;
                 drag = 0;
                 ++stats.blockedGrainFaces;
+            }
+
+            // 支えられた粒だけの横の面(T-1043): 積もった層は、解く間は空気から見て動かない障害物(孔でもない。層の上を空気が流れる)。
+            // 粒の運動量は止めずに持ち越し、降伏の段(押す力と摩擦)だけで動かす(1 回目の「つながずに圧力の系に残す」は、
+            // 粒が圧力に押される別の相になって 100 m/s まで暴れた)
+            const bool leftRests = left.massMg == 0 || left.rests;
+            const bool rightRests = right.massMg == 0 || right.rests;
+            if (!locked && runtime.options.grainRestLayer && face.axis != view.gravityAxis && leftRests && rightRests &&
+                (left.rests || right.rests)) {
+                face.locked = true;
+                face.grainAreaMm2 = 0;
+                drag = 0;
+                ++stats.restLayerGrainFaces;
             }
 
             face.dragQ16 = drag;
@@ -1274,6 +1317,9 @@ namespace bicameral::sim::case_b {
 
             if (runtime.options.drag) {
                 MeasureGrains(runtime, box, context.view);
+                if (runtime.options.grainYield && (runtime.options.grainRestLock || runtime.options.grainRestLayer))
+                    MeasureGrainRest(scratch, box, context.view);
+
                 scratch.grainImpact.assign(scratch.faces.size(), 0);
                 for (FlowFace& face : scratch.faces)
                     PrepareCoupledFace(runtime, box, context.view, face);
