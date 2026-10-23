@@ -236,7 +236,8 @@ namespace {
 
         Expect(drifts == 0, "閉じた箱: エネルギーの合計が毎刻み一定");
         Expect(widenings == 0, "閉じた箱: 温度の幅が広がらない");
-        Expect(width * 4 < start.high - start.low, "閉じた箱: 温度の幅が 1/4 より小さくなった");
+        // 現実の伝導率(T-1066)では 0.5 m の空気のセルが均されるのに約 3 時間かかる(L² ÷ α = 0.25 ÷ 2.2e-5 s)ので、200 刻みでは縮むことだけを見る
+        Expect(width < start.high - start.low, "閉じた箱: 温度の幅が縮んだ");
         Log(Channel::Sim, Level::Info, "閉じた箱: {} 刻みで温度の幅 {} → {} mK", BOX_TICKS, start.high - start.low,
             width);
     }

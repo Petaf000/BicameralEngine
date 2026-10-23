@@ -74,8 +74,10 @@ FX_FN HcGasScale HcGasScaleAt(uint32_t temperatureMk) {
 
 // --- セルの伝導率(体積で重み付けた平行の道。D-637)---
 
-// 1 セル(レベル 0 の 0.5 m 角)の体積(pL = µmol × mm³/mol)。量の数は 濃さ × 0.125 m³ なので、どのレベルでもこの体積で割合を出す
-FX_CONST uint64_t HC_CELL_VOLUME_PL = FX_U64(0x71AFu, 0xD498D000u);  // 1.25 × 10^14
+// 1 セル(レベル 0 の 0.5 m 角)の体積(pL = µmol × mm³/mol)= 1.25 × 10^8 × 10^6 pL。量の数は 濃さ × 0.125 m³ なので、どのレベルでもこの体積で割合を出す。
+// 32bit を超える定数をシミュの式に書かない(32bit の定数の積と割り算に分ける。GPU で上の語が壊れた実例: T-1078・ADR-0451)
+FX_CONST uint64_t HC_MEGA = 1000000;
+FX_CONST uint64_t HC_CELL_VOLUME_MEGA_PL = 125000000;
 
 // 伝導率の和(1 成分ずつ足す。GPU の溢れを持つセルも同じ順で足す。T-0272)
 struct HcConductivitySums {
@@ -93,6 +95,14 @@ FX_FN FxU128 HcAddU128(FxU128 a, FxU128 b) {
     sum.hi = a.hi + b.hi + (sum.lo < a.lo ? (uint64_t)1 : (uint64_t)0);
 
     return sum;
+}
+
+FX_FN FxU128 HcSubU128(FxU128 a, FxU128 b) {
+    FxU128 difference;
+    difference.lo = a.lo - b.lo;
+    difference.hi = a.hi - b.hi - (a.lo < b.lo ? (uint64_t)1 : (uint64_t)0);
+
+    return difference;
 }
 
 FX_FN HcConductivitySums HcMakeConductivitySums() {
@@ -127,6 +137,14 @@ FX_FN HcConductivitySums HcAddConductivity(HcConductivitySums sums, RxSpecies en
     return sums;
 }
 
+// a × q(q < 2^32。a.hi × q は 64bit に収まる)
+FX_FN FxU128 HcMulU128ByU64(FxU128 a, uint64_t q) {
+    FxU128 product = FxMulU64Full(a.lo, q);
+    product.hi += a.hi * q;
+
+    return product;
+}
+
 // (a × q) >> 16(q は Q16)。a.hi × q は 64bit に収まる(伝導率の和の上位語は小さい)
 FX_FN FxU128 HcMulU128ByQ16(FxU128 a, uint32_t q) {
     FxU128 product = FxMulU64Full(a.lo, (uint64_t)q);
@@ -151,16 +169,28 @@ FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatu
         poolConductivity = FxDivU128By64(poolWeighted, poolAmount).quotient;
     }
 
-    // --- 凝縮相の体積と残りの体積。詰め過ぎ(体積の和 > セル)はその和で割る(残り 0)。
-    // 残りは符号付きの差で出す(64bit の「0 で止める引き算」は NVIDIA で誤って下ろされる。T-0185)---
-    const int64_t room = (int64_t)HC_CELL_VOLUME_PL - (int64_t)sums.condensedVolume;
-    const uint64_t remaining = room > 0 ? (uint64_t)room : (uint64_t)0;
-    const uint64_t denominator = room > 0 ? HC_CELL_VOLUME_PL : sums.condensedVolume;
-
+    // --- 凝縮相の体積と残りの体積で重み付ける。詰め過ぎ(体積の和 ≥ セル)は凝縮相だけをその和で割る ---
+    // セルの体積は 32bit の定数の積(HC_CELL_VOLUME_MEGA_PL × HC_MEGA)で、割り算は 2 回に分ける
+    // (floor(floor(x ÷ a) ÷ b) = floor(x ÷ ab))。64bit の「0 で止める引き算」も書かない(T-0185)
     uint64_t conductivity = poolConductivity;
     if (sums.condensedVolume != 0) {
-        const FxU128 total = HcAddU128(sums.condensedWeighted, FxMulU64Full(poolConductivity, remaining));
-        conductivity = FxDivU128By64(total, denominator).quotient;
+        FxU128 volume;
+        volume.hi = 0;
+        volume.lo = sums.condensedVolume;
+        const bool full = FxDivU128By64(volume, HC_MEGA).quotient >= HC_CELL_VOLUME_MEGA_PL;
+        if (full) {
+            conductivity = FxDivU128By64(sums.condensedWeighted, sums.condensedVolume).quotient;
+        } else {
+            // 凝縮相の重み + 残りの伝導率 × (セル − 凝縮相の体積)。セル > 凝縮相の体積なので 128bit の差は負にならない
+            const FxU128 poolTimesCell = HcMulU128ByU64(FxMulU64Full(poolConductivity, HC_CELL_VOLUME_MEGA_PL),
+                                                        HC_MEGA);
+            const FxU128 total = HcSubU128(HcAddU128(sums.condensedWeighted, poolTimesCell),
+                                           FxMulU64Full(poolConductivity, sums.condensedVolume));
+            FxU128 perMega;
+            perMega.hi = 0;
+            perMega.lo = FxDivU128By64(total, HC_MEGA).quotient;
+            conductivity = FxDivU128By64(perMega, HC_CELL_VOLUME_MEGA_PL).quotient;
+        }
     }
 
     const uint64_t conductance = conductivity >> HC_CONDUCTANCE_SHIFT;
@@ -208,7 +238,12 @@ FX_FN int64_t HcFaceFlow(HcThermalCache self, HcThermalCache neighbor) {
     const uint64_t coefficient = self.faceLimit < neighbor.faceLimit ? self.faceLimit : neighbor.faceLimit;
 
     // |ΔT| < 2^32、係数 < 2^64 なので積 < 2^96、流れ = 積 >> 32 < 2^64。符号付きに収まらない値は熱の上限の外(assert)
-    const FxU128 product = FxMulU64Full(difference, coefficient);
+    // 最も近い整数に丸める(切り捨てだと現実の伝導率の粗いセルで流れが 1 mJ 単位で系統的に小さくなる: 空気のレベル 0 で実効の拡散率 −23 %。T-1066)。
+    // 両側が同じ大きさを出すので保存は変わらない。上限 1/8 を超える分は高々 0.5 mJ
+    FxU128 product = FxMulU64Full(difference, coefficient);
+    const uint64_t rounded = product.lo + (uint64_t)0x80000000u;
+    product.hi += rounded < product.lo ? (uint64_t)1 : (uint64_t)0;
+    product.lo = rounded;
     const uint64_t magnitude = (product.hi << 32) | (product.lo >> 32);
     FX_ASSERT((product.hi >> 32) == 0 && magnitude < FX_U64(0x80000000u, 0u));
 
