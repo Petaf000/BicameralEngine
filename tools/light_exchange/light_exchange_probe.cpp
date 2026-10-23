@@ -14,6 +14,7 @@
 // 刻みの量(放つ・配る・吸う・返す・空へ)は整数で、保存はビット単位。ツールなので浮動小数点を使ってよい(CLAUDE.md 原則 2)。
 // 使い方: light_exchange_probe [theta=0.5] [n|h|r|g|c] [勾配の上限=0.25] [c の場面の番号]
 //   n = 全部(64³ を除く)・h = 64³ も・r = 筋と箱と板・g = 地面の受け方(1 本目と 2 本目)・c = 重い場面を 1 つ。
+//   f = 炎・形の変化・煙の道筋(T-1080 の 1 本目。c の場面の番号の代わりに地形の大きさ)・m = 動く物の箱(T-1080 の 2 本目)。
 //   Linux でも g++ -std=c++20 -O2 で通る(研究の時の回し方)。
 #include <algorithm>
 #include <array>
@@ -75,6 +76,7 @@ namespace {
         Air,
         Stone,  // 灰色で通さない・照り返し 0.5(D-610 の既定。RC の試験と同じ)
         Black,  // 通さない・照り返し 0
+        Flame,  // 炎(毎刻み動く熱い気体。T-1080): 光線は通す・外側の面から放つ(体積の光源を面の要素にする仮の形)
     };
 
     struct Voxel {
@@ -104,7 +106,12 @@ namespace {
         [[nodiscard]] size_t IndexOf(int x, int y, int z) const { return ((static_cast<size_t>(z) * sy) + y) * sx + x; }
 
         [[nodiscard]] bool Opaque(int x, int y, int z) const {
-            return Inside(x, y, z) && voxels[IndexOf(x, y, z)].material != Material::Air;
+            if (!Inside(x, y, z))
+                return false;
+
+            const Material material = voxels[IndexOf(x, y, z)].material;
+
+            return material != Material::Air && material != Material::Flame;
         }
     };
 
@@ -184,6 +191,12 @@ namespace {
                         const int ny = y + static_cast<int>(n[1]);
                         const int nz = z + static_cast<int>(n[2]);
                         if (scene.Opaque(nx, ny, nz))
+                            continue;
+
+                        // 炎どうしの内側の面は要素にしない(炎の塊の外側だけが放つ)
+                        const bool neighborFlame = scene.Inside(nx, ny, nz) &&
+                                                   scene.voxels[scene.IndexOf(nx, ny, nz)].material == Material::Flame;
+                        if (voxel.material == Material::Flame && neighborFlame)
                             continue;
 
                         Face face{.x = x, .y = y, .z = z, .dir = dir, .cell = scene.IndexOf(x, y, z)};
@@ -378,6 +391,9 @@ namespace {
         double meanSelf = 0;
         double buildMs = 0;
         bool linear = true;
+        // 決めた対(つながりを作った・遮られて作らなかった・面と面を測った)。形が変わった時に作り直す対を探す(T-1080)
+        std::vector<std::array<int, 2>> records;
+        uint64_t pairRays = 0;  // Rebuild で、決め直した対に使った光線(残りは新しい要素)
     };
 
     class Builder {
@@ -395,6 +411,28 @@ namespace {
                 NormalizeAndSky();
 
             m_net.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        }
+
+        // 形が変わった後の場面で、選んだ対(前の木のブロックの場所で渡す)と新しい要素(セル)だけを作り直す。光線の数を数える
+        void Rebuild(const std::vector<std::array<std::array<int, 4>, 2>>& pairs,
+                     const std::vector<std::array<int, 3>>& cells) {
+            m_net.linear = m_settings.linear;
+            m_net.faces = CollectFaces(m_scene);
+            BuildTree();
+            for (const auto& pair : pairs) {
+                const auto a = m_index.find(KeyOf(pair[0][0], pair[0][1], pair[0][2], pair[0][3]));
+                const auto b = m_index.find(KeyOf(pair[1][0], pair[1][1], pair[1][2], pair[1][3]));
+                if (a != m_index.end() && b != m_index.end())
+                    Refine(a->second, b->second);
+            }
+
+            m_net.pairRays = m_net.rays.rays;
+
+            for (const auto& cell : cells) {
+                const auto leaf = m_index.find(KeyOf(0, cell[0], cell[1], cell[2]));
+                if (leaf != m_index.end())
+                    Refine(leaf->second, m_root);
+            }
         }
 
     private:
@@ -555,13 +593,16 @@ namespace {
             const Node& nb = m_net.nodes[b];
             if (na.level == 0 && nb.level == 0) {
                 LeafLink(a, b);
+                m_net.records.push_back({a, b});
                 return;
             }
 
             const double distance = std::sqrt(Dot(Sub(CenterOf(a), CenterOf(b)), Sub(CenterOf(a), CenterOf(b))));
             const double radii = (std::sqrt(3.0) / 2) * ((1 << na.level) + (1 << nb.level));
-            if (radii < m_settings.theta * distance && ClusterLink(a, b))
+            if (radii < m_settings.theta * distance && ClusterLink(a, b)) {
+                m_net.records.push_back({a, b});
                 return;
+            }
 
             const std::vector<int> kidsA = na.level >= nb.level ? na.children : std::vector<int>{a};
             const std::vector<int> kidsB = nb.level >= na.level ? nb.children : std::vector<int>{b};
@@ -861,6 +902,7 @@ namespace {
         uint64_t reflected = 0;
         uint64_t escaped = 0;
         uint64_t selfReturned = 0;
+        uint64_t objectAbsorbed = 0;  // 動く物の箱が遮って吸った(T-1080)
         bool negativeSelf = false;
     };
 
@@ -886,7 +928,117 @@ namespace {
         }
     }
 
-    TickResult Step(const Scene& scene, const Network& net, const std::vector<uint64_t>& carryIn, bool reverse) {
+    // 線分 p0–p1 が箱 [boxMin, boxMax] に入るか(板の方法)
+    bool SegmentHitsBox(Vec p0, Vec p1, Vec boxMinCorner, Vec boxMaxCorner) {
+        double low = 0;
+        double high = 1;
+        for (int a = 0; a < 3; ++a) {
+            const double d = p1[a] - p0[a];
+            const double boxLow = boxMinCorner[a];
+            const double boxHigh = boxMaxCorner[a];
+            if (std::fabs(d) < 1e-12) {
+                if (p0[a] < boxLow || p0[a] > boxHigh)
+                    return false;
+
+                continue;
+            }
+
+            double t0 = (boxLow - p0[a]) / d;
+            double t1 = (boxHigh - p0[a]) / d;
+            if (t0 > t1)
+                std::swap(t0, t1);
+
+            low = std::max(low, t0);
+            high = std::min(high, t1);
+            if (low > high)
+                return false;
+        }
+
+        return true;
+    }
+
+    bool SegmentHitsCell(Vec p0, Vec p1, const std::array<int, 3>& cell) {
+        return SegmentHitsBox(p0, p1, {cell[0] - 1e-6, cell[1] - 1e-6, cell[2] - 1e-6},
+                              {cell[0] + 1 + 1e-6, cell[1] + 1 + 1e-6, cell[2] + 1 + 1e-6});
+    }
+
+    std::vector<int> RepresentativesOf(const Group& group) {
+        const size_t count = group.faces.size();
+        const size_t want = std::min<size_t>(4, count);
+        std::vector<int> picked;
+        for (size_t i = 0; i < want; ++i)
+            picked.push_back(group.faces[((2 * i + 1) * count) / (2 * want)]);
+
+        return picked;
+    }
+
+    // 動く物の箱(T-1080 の 2 本目): つながりは形の変わらない所で作っておき、刻みごとにつながりの決めた光線(16 本)を箱と解いて
+    // 通る割合を掛ける。遮られた分は物が吸う(帳簿 objectAbsorbed。物の面のつながり〔物が放つ〕は作っていない)
+    struct MovingBox {
+        bool active = false;
+        Vec low{};
+        Vec high{};
+    };
+
+    struct BoxCost {
+        uint64_t candidates = 0;    // 包みの検査を通ったつながり
+        uint64_t segmentTests = 0;  // 線分と箱の検査
+        uint64_t shadowed = 0;      // 通る割合が 1 でないつながり
+    };
+
+    // つながりの決めた光線のうち箱を通らない割合(Q16)
+    uint32_t LinkPassQ16(const Network& net, const Link& link, const MovingBox& box, BoxCost& cost) {
+        const Group& groupA = net.groups[link.groupA];
+        const Group& groupB = net.groups[link.groupB];
+        // 包み: 中心を結ぶ線から、組の箱の大きい方の半径 + 箱の半径以内
+        const Vec ca = groupA.centroid;
+        const Vec cb = groupB.centroid;
+        const Vec boxCenter = Scale(Add(box.low, box.high), 0.5);
+        const Vec ab = Sub(cb, ca);
+        const double t = std::clamp(Dot(Sub(boxCenter, ca), ab) / std::max(1e-12, Dot(ab, ab)), 0.0, 1.0);
+        const Vec near = Add(ca, Scale(ab, t));
+        const auto spread = [](const Group& g) {
+            const Vec d = Sub(g.boxMax, g.boxMin);
+            return 0.5 * std::sqrt(Dot(d, d)) + 1.0;
+        };
+        const Vec boxHalf = Scale(Sub(box.high, box.low), 0.5);
+        const double reach = std::max(spread(groupA), spread(groupB)) + std::sqrt(Dot(boxHalf, boxHalf));
+        if (Dot(Sub(boxCenter, near), Sub(boxCenter, near)) > reach * reach)
+            return 65536;
+
+        ++cost.candidates;
+        int tried = 0;
+        int blocked = 0;
+        if (groupA.children.empty() && groupB.children.empty()) {
+            const Face& fa = net.faces[groupA.faces[0]];
+            const Face& fb = net.faces[groupB.faces[0]];
+            for (int i = 0; i < 16; ++i) {
+                const Vec pa = PointOnFace(fa, ((i % 2) * 0.5) - 0.25, (((i / 2) % 2) * 0.5) - 0.25);
+                const Vec pb = PointOnFace(fb, (((i / 4) % 2) * 0.5) - 0.25, ((i / 8) * 0.5) - 0.25);
+                ++tried;
+                blocked += SegmentHitsBox(pa, pb, box.low, box.high) ? 1 : 0;
+            }
+        } else {
+            for (const int fa : RepresentativesOf(groupA)) {
+                for (const int fb : RepresentativesOf(groupB)) {
+                    ++tried;
+                    blocked += SegmentHitsBox(PointOnFace(net.faces[fa], 0, 0), PointOnFace(net.faces[fb], 0, 0),
+                                              box.low, box.high)
+                                   ? 1
+                                   : 0;
+                }
+            }
+        }
+
+        cost.segmentTests += static_cast<uint64_t>(tried);
+        if (blocked != 0)
+            ++cost.shadowed;
+
+        return static_cast<uint32_t>((65536 * (tried - blocked)) / tried);
+    }
+
+    TickResult Step(const Scene& scene, const Network& net, const std::vector<uint64_t>& carryIn, bool reverse,
+                    const MovingBox& box = {}, BoxCost* boxCost = nullptr) {
         const size_t faceCount = net.faces.size();
         const size_t groupCount = net.groups.size();
         TickResult result;
@@ -927,6 +1079,7 @@ namespace {
         std::vector<double> debitAt(groupCount, 0);               // 出す割合(組の重心で)
         std::vector<Vec> debitSlope(groupCount, Vec{0, 0, 0});    // 出す割合の勾配
         std::vector<Vec> creditMoment(groupCount, Vec{0, 0, 0});  // 受けた量 × 勾配
+        uint32_t passQ16 = 65536;
         const auto send = [&](int from, int to, uint64_t fractionQ32, Vec slopeFrom, Vec slopeTo) {
             const double fraction = static_cast<double>(fractionQ32) / 4294967296.0;
             double base = static_cast<double>(sum[from]);
@@ -934,15 +1087,19 @@ namespace {
                 base = std::clamp(base + Dot(slopeFrom, moment[from]), 0.0, 2.0 * static_cast<double>(sum[from]));
 
             const auto amount = static_cast<uint64_t>(base * fraction);
+            const uint64_t passed = (amount * passQ16) >> 16;
             debit[from] += amount;
-            credit[to] += amount;
+            credit[to] += passed;
+            result.objectAbsorbed += amount - passed;
             debitAt[from] += fraction;
             debitSlope[from] = Add(debitSlope[from], Scale(slopeFrom, fraction));
-            creditMoment[to] = Add(creditMoment[to], Scale(slopeTo, static_cast<double>(amount)));
+            creditMoment[to] = Add(creditMoment[to], Scale(slopeTo, static_cast<double>(passed)));
         };
         for (size_t k = 0; k < net.links.size(); ++k) {
             const Link& link = net.links[reverse ? net.links.size() - 1 - k : k];
             const Vec gradientA = Scale(link.gradientB, -1);
+            BoxCost unused;
+            passQ16 = box.active ? LinkPassQ16(net, link, box, boxCost != nullptr ? *boxCost : unused) : 65536;
             send(link.groupA, link.groupB, link.fractionAbQ32, gradientA, link.gradientB);
             send(link.groupB, link.groupA, link.fractionBaQ32, link.gradientB, gradientA);
         }
@@ -1070,8 +1227,8 @@ namespace {
     }
 
     bool Conserves(const TickResult& result) {
-        return !result.negativeSelf &&
-               result.emitted + result.carriedIn == result.absorbed + result.reflected + result.escaped;
+        return !result.negativeSelf && result.emitted + result.carriedIn ==
+                                           result.absorbed + result.reflected + result.escaped + result.objectAbsorbed;
     }
 
     // --- 場面ごとの測り(RC の cascade_light_test と同じ場面)---
@@ -1463,6 +1620,117 @@ namespace {
         });
     }
 
+    // 決めた対の見えるかを決めた光線(試作の Builder と同じ点)のどれかがセルを通るか = 形が変わると決め直す対
+    bool RecordCrosses(const Network& net, const std::array<int, 2>& record, const std::array<int, 3>& cell) {
+        const Node& na = net.nodes[record[0]];
+        const Node& nb = net.nodes[record[1]];
+        for (const int ga : na.groups) {
+            if (ga < 0)
+                continue;
+
+            for (const int gb : nb.groups) {
+                if (gb < 0)
+                    continue;
+
+                const Group& groupA = net.groups[ga];
+                const Group& groupB = net.groups[gb];
+                if (na.level == 0 && nb.level == 0) {
+                    const Face& fa = net.faces[groupA.faces[0]];
+                    const Face& fb = net.faces[groupB.faces[0]];
+                    for (int i = 0; i < 16; ++i) {
+                        const Vec pa = PointOnFace(fa, ((i % 2) * 0.5) - 0.25, (((i / 2) % 2) * 0.5) - 0.25);
+                        const Vec pb = PointOnFace(fb, (((i / 4) % 2) * 0.5) - 0.25, ((i / 8) * 0.5) - 0.25);
+                        if (SegmentHitsCell(pa, pb, cell))
+                            return true;
+                    }
+
+                    continue;
+                }
+
+                for (const int fa : RepresentativesOf(groupA)) {
+                    for (const int fb : RepresentativesOf(groupB)) {
+                        if (SegmentHitsCell(PointOnFace(net.faces[fa], 0, 0), PointOnFace(net.faces[fb], 0, 0), cell))
+                            return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // 形が 1 セル変わった時に、決めた光線がそのセルを通る対だけを決め直す + 新しく出た面のつながりを作る(T-1080 の 1 本目)
+    void RecordChangeExact(const char* name, Scene scene, std::array<int, 3> cell, const Settings& settings,
+                           const Network& before, Material to) {
+        const bool added = to != Material::Air;
+        scene.voxels[scene.IndexOf(cell[0], cell[1], cell[2])] = Voxel{to, to == Material::Flame ? FIRE_K : ROOM_K};
+        std::vector<std::array<std::array<int, 4>, 2>> pairs;
+        // 炎は光線を通すので、遮りは変わらない(新しい要素だけ)
+        if (to != Material::Flame) {
+            for (const auto& record : before.records) {
+                if (!RecordCrosses(before, record, cell))
+                    continue;
+
+                const Node& a = before.nodes[record[0]];
+                const Node& b = before.nodes[record[1]];
+                pairs.push_back({std::array<int, 4>{a.level, a.block[0], a.block[1], a.block[2]},
+                                 std::array<int, 4>{b.level, b.block[0], b.block[1], b.block[2]}});
+            }
+        }
+
+        std::vector<std::array<int, 3>> cells;
+        if (added)
+            cells.push_back(cell);
+        else {
+            for (int dir = 0; dir < 6; ++dir) {
+                const Vec n = NormalOf(dir);
+                const std::array<int, 3> next = {cell[0] + static_cast<int>(n[0]), cell[1] + static_cast<int>(n[1]),
+                                                 cell[2] + static_cast<int>(n[2])};
+                if (scene.Opaque(next[0], next[1], next[2]))
+                    cells.push_back(next);
+            }
+        }
+
+        Network net;
+        Builder(scene, settings, net).Rebuild(pairs, cells);
+        std::printf(
+            "  形の変化(決めた光線で探す)%s (%d, %d, %d) を %s: 決め直す対 %zu(決めた対 %zu)・新しい要素のセル "
+            "%zu・光線 %llu 本(うち決め直した対 %llu。歩いたセル %llu)\n",
+            name, cell[0], cell[1], cell[2], to == Material::Flame ? "炎に" : (added ? "石に" : "空気に"), pairs.size(),
+            before.records.size(), cells.size(), static_cast<unsigned long long>(net.rays.rays),
+            static_cast<unsigned long long>(net.pairRays), static_cast<unsigned long long>(net.rays.steps));
+    }
+
+    // 煙の柱(箱 low〜high)を、つながりごとの粗い道筋(4³ セルのブロック)で通しやすさを掛ける時の 1 刻みの手間の見込み(T-1080)
+    void RecordSmokeCost(const char* name, const Network& net, std::array<int, 3> low, std::array<int, 3> high) {
+        constexpr int BLOCK = 4;
+        uint64_t crossing = 0;
+        uint64_t blockSteps = 0;
+        for (const Link& link : net.links) {
+            const Vec p0 = net.groups[link.groupA].centroid;
+            const Vec p1 = net.groups[link.groupB].centroid;
+            // 道筋をブロックの細かさで歩く(線分の長さ ÷ ブロック × 2 点を数える目安)
+            const double length = std::sqrt(Dot(Sub(p1, p0), Sub(p1, p0)));
+            const int samples = std::max(2, static_cast<int>(std::ceil(2 * length / BLOCK)));
+            bool smoky = false;
+            for (int i = 0; i <= samples && !smoky; ++i) {
+                const Vec p = Add(p0, Scale(Sub(p1, p0), static_cast<double>(i) / samples));
+                smoky = p[0] >= low[0] && p[0] < high[0] && p[1] >= low[1] && p[1] < high[1] && p[2] >= low[2] &&
+                        p[2] < high[2];
+            }
+
+            if (!smoky)
+                continue;
+
+            ++crossing;
+            blockSteps += static_cast<uint64_t>(std::ceil(length / BLOCK)) + 1;
+        }
+
+        std::printf("  煙の柱 %s: 道筋が煙を通るつながり %llu(全体 %zu)・ブロックを歩く手間 %llu/刻み\n", name,
+                    static_cast<unsigned long long>(crossing), net.links.size(),
+                    static_cast<unsigned long long>(blockSteps));
+    }
+
     // 形が 1 セル変わった時に作り直す対の費用(光線)。変わったセルを通りうる対だけを作り直す見込み
     void RecordChange(const char* name, Scene scene, std::array<int, 3> cell, const Settings& settings,
                       const Network& before) {
@@ -1518,8 +1786,19 @@ namespace {
                     conserves ? "ビット単位" : "崩れた");
         PrintNetwork(name, net);
         EXPECT(conserves);
-        if (changed[0] >= 0)
+        if (changed[0] >= 0) {
             RecordChange(name, scene, changed, settings, net);
+            const bool air = scene.voxels[scene.IndexOf(changed[0], changed[1], changed[2])].material == Material::Air;
+            RecordChangeExact(name, scene, changed, settings, net, air ? Material::Stone : Material::Air);
+            // 地面の真ん中の 1 セルを掘る(石 → 空気)
+            for (int y = scene.sy - 1; y >= 0; --y) {
+                if (!scene.Opaque(scene.sx / 2 + 5, y, scene.sz / 2))
+                    continue;
+
+                RecordChangeExact(name, scene, {scene.sx / 2 + 5, y, scene.sz / 2}, settings, net, Material::Air);
+                break;
+            }
+        }
     }
 
 }  // namespace
@@ -1534,6 +1813,112 @@ int main(int argc, char** argv) {
 
     const char mode = argc > 2 ? argv[2][0] : 'n';
     const bool heavy = mode == 'h';
+    // 炎と煙(T-1080): 段のある地形の焚き火の上に炎 2 × 2 × 3・その上に煙の柱 4 × 4 × 16。
+    // 炎のセルが 1 つ増える時の新しい要素の光線・1 セルの形の変化・動く箱(2³ が 1 セル動く = 8 セルが変わる)の見込み
+    if (mode == 'f') {
+        const int size = argc > 4 ? std::atoi(argv[4]) : 48;
+        Scene scene = Terrain(size, 4);
+        const int center = size / 2;
+        int ground = 0;
+        while (scene.Opaque(center, ground, center))
+            ++ground;
+
+        for (int y = ground; y < ground + 3; ++y) {
+            for (int z = center - 1; z < center + 1; ++z) {
+                for (int x = center - 1; x < center + 1; ++x)
+                    scene.voxels[scene.IndexOf(x, y, z)] = Voxel{Material::Flame, FIRE_K};
+            }
+        }
+
+        const Network net = BuildNetwork(scene, settings);
+        PrintNetwork("地形 + 炎", net);
+        RecordChangeExact("炎が 1 セル増える", scene, {center + 1, ground + 1, center}, settings, net, Material::Flame);
+        RecordChangeExact("炎の横に石を置く", scene, {center + 3, ground + 1, center}, settings, net, Material::Stone);
+        RecordChangeExact("空中に石を置く", scene, {center + 6, ground + 4, center + 2}, settings, net,
+                          Material::Stone);
+        RecordSmokeCost("4 × 4 × 16", net, {center - 2, ground + 3, center - 2}, {center + 2, ground + 19, center + 2});
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    // 動く物の箱(T-1080 の 2 本目): 箱を石として作り直したつながり(正しい)と、箱の無いつながり + 刻みごとの箱の検査を比べる
+    if (mode == 'm') {
+        const auto shape = [](bool withBox) {
+            return [withBox](int x, int y, int z) {
+                if (x == 8 && y == 12 && z == 12)
+                    return Voxel{Material::Stone, FIRE_K};
+
+                if (withBox && x >= 13 && x < 16 && y >= 10 && y < 14 && z >= 10 && z < 14)
+                    return Voxel{Material::Black, 0};
+
+                return x == 22 && y >= 4 && y < 20 && z >= 4 && z < 20 ? Voxel{Material::Black, 0} : Voxel{};
+            };
+        };
+        const Scene withBox = MakeScene(32, 24, 24, shape(true));
+        const Scene without = MakeScene(32, 24, 24, shape(false));
+        const Network exactNet = BuildNetwork(withBox, settings);
+        const Network openNet = BuildNetwork(without, settings);
+        const MovingBox box{.active = true, .low = {13, 10, 10}, .high = {16, 14, 14}};
+        BoxCost cost;
+        const TickResult exact = Step(withBox, exactNet, {}, false);
+        const TickResult moving = Step(without, openNet, {}, false, box, &cost);
+        const TickResult open = Step(without, openNet, {}, false);
+        double exactSum = 0;
+        double movingSum = 0;
+        double peak = 0;
+        double worst = 0;
+        int exactDark = 0;
+        int movingDark = 0;
+        for (int z = 4; z < 20; ++z) {
+            for (int y = 4; y < 20; ++y) {
+                const size_t at = without.IndexOf(22, y, z);
+                const auto e = static_cast<double>(exact.absorbedPerCell[at]);
+                const auto m = static_cast<double>(moving.absorbedPerCell[at]);
+                const auto o = static_cast<double>(open.absorbedPerCell[at]);
+                exactSum += e;
+                movingSum += m;
+                peak = std::max(peak, o);
+                worst = std::max(worst, std::fabs(m - e));
+                exactDark += e < 0.05 * o ? 1 : 0;
+                movingDark += m < 0.05 * o ? 1 : 0;
+            }
+        }
+
+        std::printf(
+            "動く箱 3 × 4 × 4(焚き火と受け手の板の間): 板が受けた和 刻みの検査 / 作り直し = %.3f・セルごとの差の最大 "
+            "%.1f %%(箱の無い時の最大に対して)・"
+            "陰(5 %% 未満)のセル 作り直し %d / 刻みの検査 %d・保存 %s・つながり %zu のうち包みを通った "
+            "%llu・線分と箱の検査 %llu・陰のつながり %llu\n",
+            movingSum / exactSum, worst / peak * 100, exactDark, movingDark,
+            Conserves(moving) ? "ビット単位" : "崩れた", openNet.links.size(),
+            static_cast<unsigned long long>(cost.candidates), static_cast<unsigned long long>(cost.segmentTests),
+            static_cast<unsigned long long>(cost.shadowed));
+        EXPECT(Conserves(moving));
+
+        // 費用: 段のある地形の焚き火の近くに 2³ の箱
+        const int size = argc > 4 ? std::atoi(argv[4]) : 32;
+        const Scene terrain = Terrain(size, 4);
+        const Network net = BuildNetwork(terrain, settings);
+        const int center = size / 2;
+        int ground = 0;
+        while (terrain.Opaque(center + 4, ground, center))
+            ++ground;
+
+        BoxCost terrainCost;
+        const MovingBox cart{.active = true,
+                             .low = {center + 4.0, ground + 0.0, center + 0.0},
+                             .high = {center + 6.0, ground + 2.0, center + 2.0}};
+        const auto start = std::chrono::steady_clock::now();
+        const TickResult tick = Step(terrain, net, {}, false, cart, &terrainCost);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        std::printf(
+            "  %d³ の地形で 2³ の箱: つながり %zu のうち包みを通った %llu・線分と箱の検査 %llu/刻み・陰のつながり "
+            "%llu・刻み %.1f ms(CPU)・保存 %s\n",
+            size, net.links.size(), static_cast<unsigned long long>(terrainCost.candidates),
+            static_cast<unsigned long long>(terrainCost.segmentTests),
+            static_cast<unsigned long long>(terrainCost.shadowed), ms, Conserves(tick) ? "ビット単位" : "崩れた");
+        return failureCount == 0 ? 0 : 1;
+    }
+
     // 重い場面を 1 つずつ(argv[4] = 番号)
     if (mode == 'c') {
         const int which = argc > 4 ? std::atoi(argv[4]) : 0;
