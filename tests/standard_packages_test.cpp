@@ -268,7 +268,7 @@ namespace {
                    entry.package == "combustion_test";
         }));
 
-        // 熱伝導率は現実の値に試験の倍率(固体 20000・気体 5000。units.luau)。ほかの欄は現実の値のまま
+        // 熱伝導率は現実の値に書き直しの倍率(units.luau。T-1066 から固体・気体とも 1)。ほかの欄も現実の値のまま
         const auto standardOnly = LoadMix(*catalog, Names{"real_elements", "real_matter"});
         if (standardOnly) {
             const auto conductivity = [](const sim::BakedReactionTable& table, std::string_view name) -> int64_t {
@@ -279,9 +279,9 @@ namespace {
 
                 return -1;
             };
-            EXPECT(conductivity(sample->table, "cellulose") == conductivity(standardOnly->table, "cellulose") * 20000);
-            EXPECT(conductivity(sample->table, "oxygen") == conductivity(standardOnly->table, "oxygen") * 5000);
-            EXPECT(conductivity(sample->table, "argon") == conductivity(standardOnly->table, "argon") * 5000);
+            EXPECT(conductivity(sample->table, "cellulose") == conductivity(standardOnly->table, "cellulose"));
+            EXPECT(conductivity(sample->table, "oxygen") == conductivity(standardOnly->table, "oxygen"));
+            EXPECT(conductivity(sample->table, "argon") == conductivity(standardOnly->table, "argon"));
         }
 
         const auto mixed = LoadReactionTable({.packageRoot = fs::path(BICAMERAL_DATA_PACKAGES_DIR),

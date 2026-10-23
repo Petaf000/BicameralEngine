@@ -77,10 +77,6 @@ namespace {
     // (箱 7.8 mm の半分と同じ値なので、箱 7.8 mm の結果は 1 本目と同じ)。0 = 箱の半分(T-0991 の形・T-1016 の 1 本目)
     constexpr int64_t FILM_UM = 3906;  // 混ざる速さを書いていない気体(O2 の現実の値の目安)
 
-    // 試験の表の伝導率の倍率を外して現実の値に戻す(data/packages/combustion_test/units.luau。放射と対流の代わりの倍率)
-    constexpr uint32_t GAS_CONDUCTIVITY_SCALE = 5000;
-    constexpr uint32_t SOLID_CONDUCTIVITY_SCALE = 20000;
-
     constexpr uint64_t WORLD_SEED = 0x0991;
     constexpr uint32_t TICK_LIMIT = 60 * 240;
     constexpr uint32_t LENS_OFF_AFTER_TICKS = 30;  // 燃え始めから 0.5 s でレンズを外す
@@ -144,14 +140,8 @@ namespace {
     // --- 表と世界 ---
 
     BakedReactionTable MakeTable() {
+        // 伝導率は現実の値(試験の倍率は T-1066 で表から外した)
         return test::MakeSunTable([](ReactionTableDefinition& definition) {
-            for (SpeciesDefinition& species : definition.species) {
-                if (species.phase == SpeciesPhase::Gas)
-                    species.thermalConductivity /= GAS_CONDUCTIVITY_SCALE;
-                else if (species.name == "cellulose" || species.name == "carbon")
-                    species.thermalConductivity /= SOLID_CONDUCTIVITY_SCALE;
-            }
-
             SpeciesDefinition glass{.name = "object_heat_lens_glass",
                                     .composition = {{.element = "C", .count = 1}},
                                     .formationEnthalpy = 0,
@@ -185,11 +175,11 @@ namespace {
         if (law == FilmLaw::Constant)
             return {};
 
+        // 膜の温度の気体の値(エンジンの式 HcGasScaleAt。伝導率 ∝ T^0.5・混ざる速さ ∝ T^1.5。D-639・T-1066)
         const uint64_t film = (static_cast<uint64_t>(voxelMilliKelvin) + static_cast<uint64_t>(airMilliKelvin)) / 2;
-        const uint64_t ratioQ16 = (film << 16) / static_cast<uint64_t>(test::SUN_ROOM_TEMPERATURE_MK);
-        const uint64_t rootQ16 = fx::FxSqrtU64(ratioQ16 << 16);
+        const rx::HcGasScale scale = rx::HcGasScaleAt(static_cast<uint32_t>(film));
 
-        return {.diffusionQ16 = (ratioQ16 * rootQ16) >> 16, .conductionQ16 = rootQ16};
+        return {.diffusionQ16 = scale.diffusionQ16, .conductionQ16 = scale.conductionQ16};
     }
 
     // 紙の 1 辺のボクセルの数(紙の大きさを細かさによらず約 4 cm に。奇数にして焦点をボクセルの真ん中に)
@@ -325,7 +315,9 @@ namespace {
     // 伝導: 囲むセルの気体の伝導率 × 4 s × ΔT × Δt(ボクセルの単位)
     int64_t PairConduction(const ReactionTableView& view, const Scene& scene, const rx::RxThermal& voxel,
                            const rx::RxThermal& air) {
-        const uint64_t conductivity = uint64_t{rx::HcCellConductance(view, scene.air)} << rx::HC_CONDUCTANCE_SHIFT;
+        // 室温の値(膜の温度の倍率は下で掛ける)
+        const uint64_t conductivity = uint64_t{rx::HcCellConductance(view, scene.air, rx::HC_ROOM_TEMPERATURE_MK)}
+                                      << rx::HC_CONDUCTANCE_SHIFT;
         const int64_t difference = int64_t{voxel.temperature} - int64_t{air.temperature};
         const FilmScale scale = FilmScaleOf(scene.film, voxel.temperature, air.temperature);
         const uint64_t multiplier = (conductivity * static_cast<uint64_t>(PairLengthUm(scene)) * scale.conductionQ16) >>
@@ -400,39 +392,28 @@ namespace {
         }
     }
 
-    // 物の中の伝導(隣のボクセルどうし。面 s²・距離 s。伝導率は両側の小さい方)。a → b が正
-    // 体積で重み付けた箱の伝導率(mW/(m·K))。固体・液体の体積 = 量 × モル体積、残りは気体(気体どうしは物質量の平均)
-    uint64_t VolumeConductivity(const BakedReactionTable& table, const rx::RxCell& cell) {
-        constexpr uint64_t BOX_MM3 = 125000000000;  // 0.125 m³(そのレベルの単位の量は 濃さ × 0.125 m³)
-        uint64_t condensedMm3 = 0;
-        uint64_t condensedWeighted = 0;
-        uint64_t gasAmount = 0;
-        uint64_t gasWeighted = 0;
+    // 物質量で重み付けた平均(T-1066 より前のセルの式。調べの比べ用)
+    uint64_t MoleConductivity(const BakedReactionTable& table, const rx::RxCell& cell) {
+        uint64_t amount = 0;
+        uint64_t weighted = 0;
         for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-            const uint32_t species = cell.species[i];
-            const uint64_t conductivity = table.species[species].conductivity;
-            if (table.speciesPhase[species] == SpeciesPhase::Gas) {
-                gasAmount += cell.amounts[i];
-                gasWeighted += cell.amounts[i] * conductivity;
-                continue;
-            }
-
-            const uint64_t volume = (cell.amounts[i] * table.speciesMolarVolume[species]) / 1000000;
-            condensedMm3 += volume;
-            condensedWeighted += volume * conductivity;
+            amount += cell.amounts[i];
+            weighted += cell.amounts[i] * table.species[cell.species[i]].conductivity;
         }
 
-        const uint64_t gasConductivity = gasAmount == 0 ? 0 : gasWeighted / gasAmount;
-        const uint64_t gasMm3 = BOX_MM3 - std::min(condensedMm3, BOX_MM3);
-
-        return (condensedWeighted + (gasMm3 * gasConductivity)) / BOX_MM3;
+        return amount == 0 ? 0 : weighted / amount;
     }
 
-    uint64_t InnerConductivity(const BakedReactionTable& table, const Scene& scene, const rx::RxCell& cell) {
-        if (scene.inner == InnerLaw::VolumeWeighted)
-            return VolumeConductivity(table, cell);
+    // 箱の伝導率(mW/(m·K))。VolumeWeighted はエンジンのセルの式(HcCellConductance。体積の平行の道・気体は ∝ √T。T-1066)
+    uint64_t InnerConductivity(const BakedReactionTable& table, const Scene& scene, const rx::RxCell& cell,
+                               int32_t temperatureMk) {
+        if (scene.inner == InnerLaw::VolumeWeighted) {
+            const auto temperature = static_cast<uint32_t>(std::max(temperatureMk, 0));
 
-        return uint64_t{rx::HcCellConductance(table.View(), cell)} << rx::HC_CONDUCTANCE_SHIFT;
+            return uint64_t{rx::HcCellConductance(table.View(), cell, temperature)} << rx::HC_CONDUCTANCE_SHIFT;
+        }
+
+        return MoleConductivity(table, cell);
     }
 
     // 物の中の伝導(隣のボクセルどうし。面 s²・距離 s。伝導率は両側の小さい方)。a → b が正
@@ -441,7 +422,8 @@ namespace {
         if (scene.inner == InnerLaw::Off)
             return 0;
 
-        const uint64_t conductivity = std::min(InnerConductivity(table, scene, a), InnerConductivity(table, scene, b));
+        const uint64_t conductivity = std::min(InnerConductivity(table, scene, a, thermalA.temperature),
+                                               InnerConductivity(table, scene, b, thermalB.temperature));
         const int64_t difference = int64_t{thermalA.temperature} - int64_t{thermalB.temperature};
         const uint64_t multiplier = conductivity * static_cast<uint64_t>(CELL_UM >> scene.bodyLevel);
 
