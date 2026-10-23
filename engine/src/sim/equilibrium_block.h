@@ -76,6 +76,9 @@ namespace bicameral::sim {
         uint32_t preSmooth = 2;       // 下る前の掃き出し(8 色で 1 回)
         uint32_t postSmooth = 2;      // 上った後の掃き出し
         uint32_t coarsestSweeps = 8;  // 最も粗い段の掃き出し
+        // V の直しを前処理とする共役勾配で進める(刻みの中だけ。V ごとに歩幅をエネルギー最小に)(T-1068・ADR-0455。研究中の比べ。既定 false = 今とビット一致。
+        // GPU 版〔gpu_equilibrium_block〕にはまだ無い)
+        bool lineSearch = false;
         // 温めた始まりを欄に置く(T-0922。欄の値の数 ≥ component + k)。既定は置かない(state.values だけ)
         EquilibriumWarmStart warmStart;
     };

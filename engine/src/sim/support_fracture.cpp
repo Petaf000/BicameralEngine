@@ -293,97 +293,158 @@ namespace bicameral::sim {
         Rebuild();
     }
 
-    // --- 3 本目(T-1042): 割れの面を材料の長さ ℓ の区間(世界の原点からそろえる)に分け、区間の平均で判定して区間の面を一緒に進める ---
+    // --- 3 本目(T-1042・T-1069): 割れの面を線ごとの「面の続き」(割れ切っていない面の並び)に分け、続きの両端
+    //     (物の表面・割れ切った面)から ℓ ずつの区間で判定する(世界の原点にそろえない = 置く場所によらない)。
+    //     面は近い方の端から数えた区間に属し(持ち主の区間)、持ち主の区間の面は一緒に進む。
+    //     強さの判定 = 区間の範囲(端から k ℓ〜(k + 1) ℓ。続きが 2ℓ より短ければ反対の半分にかかる)の応力の平均。
+    //     エネルギーと進み = 持ち主の区間の面の平均(同じ進みで、その平均のエネルギーで進めるので、熱 ≥ 0 が区間ごとに成り立つ)
     bool SupportFracture::WindowStep() {
-        struct Sum {
-            int64_t pull = 0;  // 引きの側の応力の平均 × 面積の和
-            int64_t push = 0;
-            int64_t axial = 0;
-            int64_t shear = 0;
-            int64_t energyPj = 0;  // 割れていない硬さに戻したエネルギーの和
-            int64_t heatPj = 0;
-            uint32_t count = 0;
-            uint32_t progress = (uint32_t)ONE;  // 区間の面の進みの小さい方
-        };
-
-        struct Face {
-            uint32_t x = 0;
-            uint32_t up = 0;
-            uint32_t axis = 0;
-            uint32_t window = 0;
-            SupportFaceForces forces;
-        };
-
-        const uint32_t width = m_scene.width;
-        const size_t cells = (size_t)width * m_scene.height;
+        const size_t cells = (size_t)m_scene.width * m_scene.height;
         const uint64_t dx = m_scene.cellMm;
-        const auto windowOf = [&](uint32_t along) {
-            return m_windowMm > dx ? (uint32_t)(along * dx / m_windowMm) : along;
-        };
+        const auto span = (uint32_t)std::max<uint64_t>(1, m_windowMm / dx);
 
-        // --- 面を区間に集める(区間 = 同じ境の面の並びの ℓ ごと。x の面は上の向き・上の面は x の向きに並ぶ)---
-        std::vector<Sum> sums(2 * cells);
-        std::vector<Face> faces;
+        // --- 面の値(割れていない硬さに戻した応力 × 面積・エネルギー)。並びは axis × cells + セル ---
+        std::vector<WindowFace> faces(2 * cells);
         for (uint32_t up = 0; up < m_scene.height; ++up) {
-            for (uint32_t x = 0; x < width; ++x) {
-                if (m_scene.solid[x + (size_t)width * up] == 0)
-                    continue;
-
-                for (uint32_t axis = 0; axis < 2; ++axis) {
-                    const SupportFaceForces forces = m_law->FaceForces(x, up, axis);
-                    if (forces.intact == 0)
-                        continue;
-
-                    const uint32_t window = axis == 0 ? x + width * windowOf(up)
-                                                      : (uint32_t)cells + windowOf(x) + width * up;
-                    const auto restore = [&](int64_t force) {
-                        return FxMulDivS64(force, ONE, forces.intact);
-                    };
-                    const int64_t low = restore(forces.lowSideMn);
-                    const int64_t high = restore(forces.highSideMn);
-                    Sum& sum = sums[window];
-                    sum.pull += PositivePart(low, high);
-                    sum.push += PositivePart(-low, -high);
-                    sum.axial += restore(forces.axialMn);
-                    sum.shear += restore(forces.shearMn);
-                    sum.energyPj += restore(forces.energyPj);
-                    ++sum.count;
-                    sum.progress = std::min(sum.progress, Progress(x, up, axis));
-                    faces.push_back({.x = x, .up = up, .axis = axis, .window = window, .forces = forces});
+            for (uint32_t x = 0; x < m_scene.width; ++x) {
+                if (m_scene.solid[x + (size_t)m_scene.width * up] != 0) {
+                    for (uint32_t axis = 0; axis < 2; ++axis)
+                        faces[axis * cells + x + (size_t)m_scene.width * up] = ReadWindowFace(x, up, axis);
                 }
             }
         }
 
-        // --- 区間ごとの進み(区間の平均で 2 本目と同じ判定)→ 区間の面を同じ進みまで ---
+        // --- 線ごとに面の続きを集め、区間を決める(x の面は上の向き・上の面は x の向きに並ぶ)---
+        std::vector<uint32_t> homeOf(2 * cells, NO_WINDOW);
+        std::vector<WindowSum> windows;
+        std::vector<size_t> run;
+        for (uint32_t axis = 0; axis < 2; ++axis) {
+            const uint32_t lines = axis == 0 ? m_scene.width : m_scene.height;
+            const uint32_t length = axis == 0 ? m_scene.height : m_scene.width;
+            for (uint32_t line = 0; line < lines; ++line) {
+                for (uint32_t along = 0; along <= length; ++along) {
+                    const size_t key = axis * cells + (axis == 0 ? line + (size_t)m_scene.width * along
+                                                                 : along + (size_t)m_scene.width * line);
+                    if (along < length && faces[key].present) {
+                        run.push_back(key);
+                        continue;
+                    }
+
+                    AssignRun(run, span, faces, homeOf, windows);
+                    run.clear();
+                }
+            }
+        }
+
+        return AdvanceWindows(faces, homeOf, windows);
+    }
+
+    SupportFracture::WindowFace SupportFracture::ReadWindowFace(uint32_t x, uint32_t up, uint32_t axis) const {
+        const SupportFaceForces forces = m_law->FaceForces(x, up, axis);
+        if (forces.intact == 0)
+            return {};
+
+        const auto restore = [&](int64_t force) {
+            return FxMulDivS64(force, ONE, forces.intact);
+        };
+        const int64_t low = restore(forces.lowSideMn);
+        const int64_t high = restore(forces.highSideMn);
+
+        return {.pull = PositivePart(low, high),
+                .push = PositivePart(-low, -high),
+                .axial = restore(forces.axialMn),
+                .shear = restore(forces.shearMn),
+                .energyPj = restore(forces.energyPj),
+                .forces = forces,
+                .progress = Progress(x, up, axis),
+                .present = true};
+    }
+
+    // 面の続き 1 つ(run。端から順)を区間に分ける。続きが ℓ 以下なら 1 区間。長ければ、面は近い方の端から数えて k = 距離 ÷ ℓ 番目の区間に属し、
+    // その区間の強さは端から [k ℓ, (k + 1) ℓ) の範囲の平均で見る(真ん中をまたいでよい)
+    void SupportFracture::AssignRun(const std::vector<size_t>& run, uint32_t span, const std::vector<WindowFace>& faces,
+                                    std::vector<uint32_t>& homeOf, std::vector<WindowSum>& windows) {
+        const auto count = (uint32_t)run.size();
+        if (count == 0)
+            return;
+
+        const bool single = count <= span;
+        const uint32_t perSide = single ? 1 : count / span + 1;
+        const auto first = (uint32_t)windows.size();
+        windows.resize(first + 2 * perSide);
+        for (uint32_t side = 0; side < 2; ++side) {
+            for (uint32_t k = 0; k < perSide; ++k) {
+                // 強さを見る範囲(端から数えた番号 → 続きの中の番号)
+                const uint32_t begin = single ? 0 : std::min(k * span, count);
+                const uint32_t end = single ? count : std::min((k + 1) * span, count);
+                WindowSum& window = windows[first + 2 * k + side];
+                for (uint32_t d = begin; d < end && (side == 0 || !single); ++d) {
+                    const WindowFace& face = faces[run[side == 0 ? d : count - 1 - d]];
+                    window.pull += face.pull;
+                    window.push += face.push;
+                    window.axial += face.axial;
+                    window.shear += face.shear;
+                    ++window.rangeCount;
+                }
+            }
+        }
+
+        for (uint32_t j = 0; j < count; ++j) {
+            const uint32_t side = single || 2 * j < count ? 0 : 1;
+            const uint32_t distance = side == 0 ? j : count - 1 - j;
+            const uint32_t home = first + 2 * (single ? 0 : distance / span) + side;
+            const WindowFace& face = faces[run[j]];
+            WindowSum& window = windows[home];
+            window.energyPj += face.energyPj;
+            ++window.count;
+            window.progress = std::min(window.progress, face.progress);
+            homeOf[run[j]] = home;
+        }
+    }
+
+    // 区間ごとの進み(区間の平均で 2 本目と同じ判定)→ 持ち主の区間の面を同じ進みまで
+    bool SupportFracture::AdvanceWindows(const std::vector<WindowFace>& faces, const std::vector<uint32_t>& homeOf,
+                                         std::vector<WindowSum>& windows) {
+        const size_t cells = (size_t)m_scene.width * m_scene.height;
+        for (WindowSum& window : windows) {
+            if (window.count == 0 || window.rangeCount == 0)
+                continue;
+
+            const auto range = (int64_t)window.rangeCount;
+            const uint32_t index = IndexFrom(window.pull / range, window.push / range, window.axial / range,
+                                             window.shear / range);
+            window.target = TargetFrom(index, window.energyPj / (int64_t)window.count, window.progress);
+        }
+
         bool changed = false;
-        for (const Face& face : faces) {
-            Sum& sum = sums[face.window];
-            const auto count = (int64_t)sum.count;
-            const uint32_t index = IndexFrom(sum.pull / count, sum.push / count, sum.axial / count, sum.shear / count);
-            const uint32_t target = TargetFrom(index, sum.energyPj / count, sum.progress);
-            if (target <= sum.progress)
+        for (size_t key = 0; key < faces.size(); ++key) {
+            if (homeOf[key] == NO_WINDOW)
                 continue;
 
-            const size_t at = face.x + (size_t)width * face.up;
-            const uint32_t progress = face.axis == 0 ? m_progressX[at] : m_progressUp[at];
-            const uint32_t next = std::max(progress, sum.progress + std::min(target - sum.progress, m_speedStep));
-            if (next <= progress)
+            WindowSum& window = windows[homeOf[key]];
+            if (window.target <= window.progress)
                 continue;
 
-            const int64_t released = FxMulDivS64(face.forces.energyPj, next - progress, face.forces.intact);
-            const int64_t surface = SurfacePj(next) - SurfacePj(progress);
+            const WindowFace& face = faces[key];
+            const uint32_t next = std::max(face.progress,
+                                           window.progress + std::min(window.target - window.progress, m_speedStep));
+            if (next <= face.progress)
+                continue;
+
+            const int64_t released = FxMulDivS64(face.forces.energyPj, next - face.progress, face.forces.intact);
+            const int64_t surface = SurfacePj(next) - SurfacePj(face.progress);
             m_ledger.releasedPj += released;
             m_ledger.surfacePj += surface;
             m_ledger.heatPj += released - surface;
-            sum.heatPj += released - surface;
-            (face.axis == 0 ? m_nextX : m_nextUp)[at] = next;
+            window.heatPj += released - surface;
+            (key < cells ? m_nextX : m_nextUp)[key % cells] = next;
             changed = true;
         }
 
-        // 熱 ≥ 0 は区間ごと(区間の面は同じ進みで、区間の平均のエネルギーで進めたので)
-        for (const Sum& sum : sums) {
-            if (sum.count != 0)
-                m_ledger.worstStepHeatPj = std::min(m_ledger.worstStepHeatPj, sum.heatPj);
+        // 熱 ≥ 0 は区間ごと(持ち主の区間の面は同じ進みで、区間の平均のエネルギーで進めたので)
+        for (const WindowSum& window : windows) {
+            if (window.count != 0)
+                m_ledger.worstStepHeatPj = std::min(m_ledger.worstStepHeatPj, window.heatPj);
         }
 
         return changed;

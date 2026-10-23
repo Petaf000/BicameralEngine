@@ -108,22 +108,30 @@ namespace {
         uint64_t bottomMm = 1000;
         uint64_t thicknessMm = 1000;
         uint64_t lengthMm = 2000;
+        uint64_t liftMm =
+            0;  // 場面全体を上へずらす(下は空。壁の下の面は壁の一番下のセルで固定。置く場所によらないかの確かめ T-1069)
     };
 
     sim::SupportScene Cantilever(uint64_t cellMm, const BeamShape& shape = {}) {
-        sim::SupportScene scene = Box(1000 + shape.lengthMm, shape.bottomMm + shape.thicknessMm + 1000, cellMm);
+        const uint64_t heightMm = shape.bottomMm + shape.thicknessMm + 1000;
+        sim::SupportScene scene = Box(1000 + shape.lengthMm, shape.liftMm + heightMm, cellMm);
+        const auto groundRow = (uint32_t)(shape.liftMm / cellMm);
         for (uint32_t up = 0; up < scene.height; ++up) {
             for (uint32_t x = 0; x < scene.width; ++x) {
                 const uint64_t cx = Center(x, cellMm);
                 const uint64_t cy = Center(up, cellMm);
+                if (cy < shape.liftMm)
+                    continue;
+
+                const uint64_t above = cy - shape.liftMm;
                 const bool wall = cx < 1000;
-                const bool beam = cy > shape.bottomMm && cy < shape.bottomMm + shape.thicknessMm;
+                const bool beam = above > shape.bottomMm && above < shape.bottomMm + shape.thicknessMm;
                 const size_t at = x + (size_t)scene.width * up;
                 scene.solid[at] = wall || beam ? 1 : 0;
                 if (wall && x == 0)
                     scene.clamps[at] |= sim::SUPPORT_CLAMP_LEFT;
 
-                if (wall && up == 0)
+                if (wall && up == groundRow)
                     scene.clamps[at] |= sim::SUPPORT_CLAMP_BOTTOM;
             }
         }
@@ -410,19 +418,21 @@ namespace {
 
     // T-1041 の場面: 長さ 8 m の棚(高さ bottomMm〜topMm)。wall なら壁(x < 1 m・高さ 3 m。左と下を固定)につながり、
     // そうでなければ棚の根のセル(x 1〜1 m + セル)の左の面を固定する(T-0919 の棚と同じ「根が固定した面」)
-    sim::SupportScene SettleShelf(uint64_t cellMm, uint64_t bottomMm, uint64_t topMm, bool wall,
-                                  uint64_t wallMm = 1000) {
-        sim::SupportScene scene = Box(wallMm + 8000, 3000, cellMm);
-        const auto rootColumn = (uint32_t)(wallMm / cellMm);
+    // shiftMm: 場面全体を右へずらす(左は空。壁の左の面は壁の一番左のセルで固定。粗い段の箱と継ぎ目の位置だけを変える)
+    sim::SupportScene SettleShelf(uint64_t cellMm, uint64_t bottomMm, uint64_t topMm, bool wall, uint64_t wallMm = 1000,
+                                  uint64_t shiftMm = 0) {
+        sim::SupportScene scene = Box(shiftMm + wallMm + 8000, 3000, cellMm);
+        const auto rootColumn = (uint32_t)((shiftMm + wallMm) / cellMm);
+        const auto wallColumn = (uint32_t)(shiftMm / cellMm);
         for (uint32_t up = 0; up < scene.height; ++up) {
             for (uint32_t x = 0; x < scene.width; ++x) {
                 const uint64_t cx = Center(x, cellMm);
                 const uint64_t cy = Center(up, cellMm);
-                const bool inWall = wall && cx < wallMm;
-                const bool shelf = cx > wallMm && cy > bottomMm && cy < topMm;
+                const bool inWall = wall && cx > shiftMm && cx < shiftMm + wallMm;
+                const bool shelf = cx > shiftMm + wallMm && cy > bottomMm && cy < topMm;
                 const size_t at = x + (size_t)scene.width * up;
                 scene.solid[at] = inWall || shelf ? 1 : 0;
-                if (inWall && x == 0)
+                if (inWall && x == wallColumn)
                     scene.clamps[at] |= sim::SUPPORT_CLAMP_LEFT;
 
                 if (inWall && up == 0)
@@ -499,6 +509,18 @@ namespace {
                            std::format("T-1041 {} m 壁の棚 0.5 m(V {} 回)", cell, cycles), STUDY_TICKS);
             }
 
+            // T-1068: 2 回目の V の直しの向きにエネルギー最小の歩幅へ伸ばす(lineSearch)
+            for (const uint32_t cycles : {2u, 4u}) {
+                sim::SupportOptions options;
+                options.blocks.cycles = cycles;
+                options.blocks.lineSearch = true;
+                SettleOnce(wallShelf, options, wallRootX, topUp(2000),
+                           std::format("T-1041 {} m 壁の棚 0.5 m(V {} 回 + 歩幅)", cell, cycles), STUDY_TICKS);
+                SettleOnce(SettleShelf(cellMm, 1500, 2000, false), options, clampRootX, topUp(2000),
+                           std::format("T-1041 {} m 根が固定した面の棚 0.5 m(V {} 回 + 歩幅)", cell, cycles),
+                           STUDY_TICKS);
+            }
+
             sim::SupportOptions smooth;
             smooth.blocks.preSmooth = 4;
             smooth.blocks.postSmooth = 4;
@@ -521,6 +543,14 @@ namespace {
             for (const uint64_t wallMm : {2000ull, 4000ull}) {
                 SettleOnce(SettleShelf(cellMm, 1500, 2000, true, wallMm), {}, (uint32_t)(wallMm / cellMm) - 1,
                            topUp(2000), std::format("T-1041 {} m 壁の棚 0.5 m・壁の幅 {} m", cell, wallMm / 1000),
+                           STUDY_TICKS);
+            }
+
+            // 壁の幅は 1 m のまま、場面を右へ 1 m・3 m ずらす(継ぎ目が壁の幅 2 m・4 m と同じセルに来る。広さの効きと箱の境の効きを分ける)
+            for (const uint64_t shiftMm : {1000ull, 3000ull}) {
+                SettleOnce(SettleShelf(cellMm, 1500, 2000, true, 1000, shiftMm), {},
+                           (uint32_t)((shiftMm + 1000) / cellMm) - 1, topUp(2000),
+                           std::format("T-1041 {} m 壁の棚 0.5 m・右へ {} m ずらす", cell, shiftMm / 1000),
                            STUDY_TICKS);
             }
 
@@ -658,6 +688,16 @@ namespace {
         // 3 本目は 0.125 m でも(A・B。C は大きいので 0.5 / 0.25 m だけ)
         TestCantilever(125, sim::FractureRule::Window, nullptr);
         TestLedge(125, sim::FractureRule::Window);
+
+        // 置く場所によらない(T-1069): ℓ 1 m の片持ち梁を 0.5 m・0.25 m 上へずらしても同じ荷で折れる
+        // (世界の原点からそろえた区間だと、ずらすと区間の境が梁の中に入って荷が変わった)
+        for (const uint64_t cellMm : {500ull, 250ull}) {
+            const double base = TestCantilever(cellMm, sim::FractureRule::Window, nullptr, 1000, 150);
+            const double lifted = TestCantilever(cellMm, sim::FractureRule::Window, nullptr, 1000, 150,
+                                                 {.liftMm = cellMm == 500 ? 500ull : 250ull});
+            Expect(base > 0 && base == lifted,
+                   std::format("置く場所によらない(ℓ 1 m・{} m): {:.0f} / {:.0f} kN/m", cellMm / 1000.0, base, lifted));
+        }
 
         // 決定性
         uint64_t first = 0;

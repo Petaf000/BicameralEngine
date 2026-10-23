@@ -6,7 +6,7 @@
 //   - Energy(2 本目): 強さを超えた面だけが割れ始め(どこで・どの向きに)、進みは面のたわみのエネルギーで決める(線形の軟化。
 //     割れ切るまでに面が払うエネルギーが割れ面のエネルギー G × 面積 になるように軟化の傾きを細かさで決める = crack band)。
 //     進みの分だけ解放されるエネルギー(変位を止めて面の硬さが落ちた分)は、払う割れ面のエネルギー以上(坂を下る時だけ進む)
-//   - Window(3 本目・T-1042): 割れの面(同じ境の面の並び)を、世界の原点からそろえた材料の長さ ℓ の区間に分け、区間ごとに
+//   - Window(3 本目・T-1042・T-1069): 割れの面(同じ境の面の並び)を、面の続きの両端(物の表面)から材料の長さ ℓ ずつの区間に分け、区間ごとに
 //     引きの側・押しの側の応力の平均(面の中の直線の分布の正の部分・負の部分)・ずれ・エネルギーを平均して 2 本目と同じ判定をし、
 //     区間の面を一緒に進める(有限の割れの判定〔Leguillon の coupled criterion〕と同じ形。セル ≤ ℓ なら判定がセルの大きさによらない)。
 //     セル > ℓ の所は区間 = 面 1 つ(粗い所は ℓ の細かさに下りて割る = 22 §3.5。下りる道は多重解像度の側)
@@ -87,6 +87,41 @@ namespace bicameral::sim {
         uint64_t Hash() const;
 
     private:
+        // 3 本目(Window)の面 1 つの値と区間の和(T-1069)
+        struct WindowFace {
+            int64_t pull = 0;  // 引きの側の応力の平均 × 面積(割れていない硬さに戻して)
+            int64_t push = 0;
+            int64_t axial = 0;
+            int64_t shear = 0;
+            int64_t energyPj = 0;
+            SupportFaceForces forces;
+            uint32_t progress = 0;
+            bool present = false;  // 割れ切っていない面がある
+        };
+
+        struct WindowSum {
+            // --- 強さを見る範囲の和 ---
+            int64_t pull = 0;
+            int64_t push = 0;
+            int64_t axial = 0;
+            int64_t shear = 0;
+            uint32_t rangeCount = 0;
+
+            // --- 持ち主の区間の面 ---
+            int64_t energyPj = 0;
+            int64_t heatPj = 0;
+            uint32_t count = 0;
+            uint32_t progress = SUPPORT_INTACT_FULL;  // 面の進みの小さい方
+            uint32_t target = 0;                      // 今の解で進んでよい所
+        };
+
+        static constexpr uint32_t NO_WINDOW = 0xffffffffu;
+
+        WindowFace ReadWindowFace(uint32_t x, uint32_t up, uint32_t axis) const;
+        void AssignRun(const std::vector<size_t>& run, uint32_t span, const std::vector<WindowFace>& faces,
+                       std::vector<uint32_t>& homeOf, std::vector<WindowSum>& windows);
+        bool AdvanceWindows(const std::vector<WindowFace>& faces, const std::vector<uint32_t>& homeOf,
+                            std::vector<WindowSum>& windows);
         uint32_t IndexOf(const SupportFaceForces& forces) const;
         uint32_t IndexFrom(int64_t pull, int64_t push, int64_t axial, int64_t shear) const;
         uint32_t EnergyIndex(int64_t undamagedPj) const;
