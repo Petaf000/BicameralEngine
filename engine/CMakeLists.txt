@@ -84,6 +84,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_wide_cell.cpp
   src/sim/sun_column.cpp  # 太陽の影の柱の CPU リファレンス(T-0910・ADR-0396)
   src/sim/sun_lens.cpp  # 日の光を物で集める CPU リファレンス(研究 R-R2・T-0878・ADR-0425)
+  src/sim/cascade_light.cpp  # 世界の中の光: 距離ごとの段の CPU リファレンス(T-0958・ADR-0413)
 )
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)
@@ -137,6 +138,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_gas_projection.cpp  # 気体の圧力の投影の 1 刻みの GPU(T-0845。計測と比べる口)
   src/sim/gpu_lab_box.cpp
   src/sim/gpu_sun_column.cpp  # 太陽の影の柱の GPU(T-0910)
+  src/sim/gpu_cascade_light.cpp  # 世界の中の光: 距離ごとの段の GPU(T-0959・ADR-0432)
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp
   src/sim/gpu_implicit_build.cpp

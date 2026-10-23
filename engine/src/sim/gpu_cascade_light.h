@@ -1,0 +1,85 @@
+// gpu_cascade_light.h — 世界の中の光: 距離ごとの段を GPU で(Compute。shaders/sim/cascade_light.hlsl。T-0959・ADR-0432)。
+// CPU リファレンスは sim/cascade_light.h の StepCascadeLight(同じ刻みの結果がビット一致)。
+// 多重解像度の木(sim/gpu_multires)のルート署名と外のバッファ u4・u5 を借りる(太陽の影の柱と同じ形)。今は段 0 の密な写し(CascadeGrid)を読む
+// (木の細かい葉・粗い根を読む形は T-0973)。
+//
+// データの流れ: CPU の CascadeGrid・CascadeParams・初めの持ち越し → 作業のバッファ(u4。既定のヒープへ写す)
+//   → 刻みごとに RecordTick(1 刻みの全部の段。持ち越しは GPU の中で次の刻みへ)→ RecordReadback → Read(CascadeTickResult の形)
+// 照り返しの持ち越しは疎な表(セル・面・帯の鍵と量)で刻みをまたぐ(D-619。セーブとハッシュに入れる形は CPU と同じ CascadeCarry に読める)。
+//
+// 使い方:
+//   auto light = GpuCascadeLight::Create(device, nest, grid, params, {});
+//   light->RecordUpload(list, carry) → 投げて待つ → light->RecordTick(list, nest, ring, tick) …  light->RecordReadback(list) → 待つ → light->Read()
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <expected>
+#include <string>
+#include <vector>
+
+#include "gpu/com_ptr.h"
+#include "sim/cascade_light.h"
+#include "sim/gpu_multires.h"
+
+namespace bicameral::sim {
+
+    // 置き場の大きさ(溢れたら Read の overflow に印。場面に合わせて呼ぶ側が決める)
+    struct GpuCascadeCapacity {
+        uint32_t faces = 1u << 15;  // 1 刻みに放つ面の数
+        uint32_t bags = 1u << 20;   // 袋の表 1 つの番地(2 の冪。段 1 つの袋の数の 2 倍ほど)
+        uint32_t carry = 1u << 18;  // 照り返しの持ち越しの (セル・面・帯) の数
+    };
+
+    struct GpuCascadeTickResult {
+        CascadeTickResult result;  // CPU と同じ形(持ち越しはセル・面・帯の順に並べ直す)
+        uint32_t activeFaces = 0;  // 段 0 で放った面の数
+        uint32_t overflow = 0;     // 1 = 放つ面・2 = 袋・4 = 持ち越しが溢れた
+        uint32_t bagPeak = 0;      // 段 1 つの袋の数の最大(作ってから)
+    };
+
+    class GpuCascadeLight {
+    public:
+        [[nodiscard]] static std::expected<GpuCascadeLight, std::string> Create(ID3D12Device5* device,
+                                                                                const GpuMultires& nest,
+                                                                                const CascadeGrid& grid,
+                                                                                const CascadeParams& params,
+                                                                                const GpuCascadeCapacity& capacity);
+
+        // 作業(段の形・光の値・温度・初めの持ち越し)を写し、状態を 0 にする。1 本のリストに 1 回
+        [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
+                                        D3D12_GPU_VIRTUAL_ADDRESS debugRing, const CascadeCarry& carry);
+
+        // 1 刻み(前の刻みの持ち越しを読み、次の刻みへの持ち越しを書く)
+        void RecordTick(ID3D12GraphicsCommandList10* list, GpuMultires& nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                        uint64_t tick);
+
+        // 最後の刻みの結果(頭の語・放った・吸った・持ち越し)を読み戻す
+        void RecordReadback(ID3D12GraphicsCommandList10* list);
+
+        [[nodiscard]] std::expected<GpuCascadeTickResult, std::string> Read() const;
+
+        // 置いたバッファの大きさ(作業 + 状態。読み戻しは除く)
+        [[nodiscard]] uint64_t VramBytes() const { return m_workBytes + m_stateBytes; }
+
+    private:
+        GpuCascadeLight() = default;
+
+        void Dispatch(ID3D12GraphicsCommandList10* list, GpuMultires& nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                      size_t pipeline, uint64_t items, std::array<uint32_t, 4> external) const;
+
+        std::vector<ComPtr<ID3D12PipelineState>> m_pipelines;
+        ComPtr<ID3D12Resource> m_work;        // u4(既定のヒープ)
+        ComPtr<ID3D12Resource> m_workUpload;  // その写しの元
+        ComPtr<ID3D12Resource> m_state;       // u5
+        ComPtr<ID3D12Resource> m_readback;
+        std::vector<std::byte> m_workBytesImage;  // 作業の中身(初めの持ち越しの前まで)
+        reaction::RcGpuParams m_params{};
+        uint64_t m_workBytes = 0;
+        uint64_t m_stateBytes = 0;
+        uint64_t m_readbackBytes = 0;
+        uint32_t m_parity = 0;  // 次の刻みが読む持ち越しの表
+        size_t m_cellCount = 0;
+    };
+
+}  // namespace bicameral::sim
