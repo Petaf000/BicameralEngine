@@ -701,9 +701,14 @@ namespace bicameral::sim::case_b {
                                                        options.grainShapeDragPermille);
             // 詰まった粒(Kozeny–Carman)はセルごとに K を作ってから面で平均する(φ_s² の形なので、面で割合を平均してから掛けると
             // 栓の端の面が 1/4 になり、栓が半セル短く見えた。T-0963 の砂の芯で 14 % 速かった)
-            const uint64_t packed = (PackedCellDragQ16(box, scratch, face.left, grainUm) +
-                                     PackedCellDragQ16(box, scratch, face.right, grainUm)) /
-                                    2;
+            // 表面のセルを層に分ける時(T-1071)は、Kozeny–Carman は詰まったセルの中だけ(詰まり切らないセルはばらけた粒)
+            const bool layered = options.grainYield && options.grainSurfaceLayer;
+            const uint64_t leftPacked = layered && !left.packed ? 0
+                                                                : PackedCellDragQ16(box, scratch, face.left, grainUm);
+            const uint64_t rightPacked = layered && !right.packed
+                                             ? 0
+                                             : PackedCellDragQ16(box, scratch, face.right, grainUm);
+            const uint64_t packed = (leftPacked + rightPacked) / 2;
 
             const uint64_t drag = std::max(DragFromBeta(box, dispersed, face.grainNl), packed);
             return options.dragScalePermille == 1000 ? drag
@@ -790,14 +795,19 @@ namespace bicameral::sim::case_b {
             }
 
             // 摩擦(T-1070): 上限以下なら止まった粒(解く間は据わる孔)、超えたら上限を引いて動く粒として解く
+            // 表面のセルの層(T-1071): 粒のある側がどれも支えられ、どちらかが詰まり切らない面は、空気とつながない
+            const bool leftSurface = left.rests && !left.packed;
+            const bool rightSurface = right.rests && !right.packed;
+            const bool surfaceLayer = runtime.options.grainSurfaceLayer && (leftSurface || rightSurface) &&
+                                      (left.massMg == 0 || left.rests) && (right.massMg == 0 || right.rests);
             if (!locked && face.frictionFace) {
                 const int64_t now = GrainMomentum(box, face);
                 if (fx::FxAbsU64(now) <= (uint64_t)face.frictionLimit) {
                     face.held = true;
                     face.heldMomentum = now;
-                    face.heldDragMg = drag >> 16;
+                    face.heldDragMg = surfaceLayer ? 0 : drag >> 16;
                     StopGrain(box, face);
-                    face.porousMg += drag >> 16;
+                    face.porousMg += face.heldDragMg;
                     face.locked = true;
                     face.grainAreaMm2 = 0;
                     drag = 0;
@@ -805,7 +815,11 @@ namespace bicameral::sim::case_b {
                 } else {
                     ApplyImpulse(box, GrainFace(box, face.axis, face.left),
                                  now > 0 ? -face.frictionLimit : face.frictionLimit, ImpulseSource::Wall);
+                    if (surfaceLayer && runtime.options.grainSurfaceLayerMoving)
+                        drag = 0;
                 }
+
+                stats.surfaceLayerGrainFaces += surfaceLayer ? 1u : 0u;
             }
 
             // 支えられた粒だけの横の面(T-1043): 積もった層は、解く間は空気から見て動かない障害物(孔でもない。層の上を空気が流れる)。

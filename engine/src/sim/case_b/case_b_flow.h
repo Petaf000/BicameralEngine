@@ -129,6 +129,13 @@ namespace bicameral::sim::case_b {
         // 0 = 詰まった時だけ(T-0996 のまま。詰まりの 98.4 %)。0 でない値は、崩れて流れている粒(セルで平均すると詰まり切らない)を舞う粒にせず、
         // 空気の圧力だけで支えられた重い流体として水のように広がらないようにする
         uint32_t grainContactPermille = 0;
+        // 粒の表面のセルを層に分けて数える(T-1071。grainYield と grainFrictionInSolve の時だけ。水面のセル ① と同じ芯)。
+        // 支えられた詰まり切らないセル(表面のセル)は「下の詰まった層 + 上の澄んだ空気」: 層の横の面は空気とつながず(止まった粒は孔でもない障害物・
+        // 動く粒は摩擦と押す力と重さで動く。境の剪断 = 浸食は 2 周目)、支えられていない詰まり切らないセル(舞う・落ちる粒)は、ばらけた粒の引きずり
+        // (1 粒の抗力 × 粒の数)だけでつなぐ(① の混ざったセルのしずくと同じ。セルで平均した詰まりの Kozeny–Carman は詰まったセルの中だけ)
+        bool grainSurfaceLayer = false;
+        // 表面のセルの層で、動いている粒の面も空気とつながない(T-1071 の 1 本目)。false = 止まった粒の面だけ障害物にし、動く面はつなぐ(2 本目)
+        bool grainSurfaceLayerMoving = true;
     };
 
     // 1 つのセルの状態式の結果(刻みの初めの中身から)
@@ -158,16 +165,17 @@ namespace bicameral::sim::case_b {
         uint64_t viscousPairs = 0;  // 粘りで運動量を受け渡した面の組(0 でない量)
 
         // --- 引きずり(R2)---
-        uint64_t dragFaces = 0;             // 相どうしの引きずりを圧力と一緒に解いた面
-        uint64_t porousFaces = 0;           // 孔の引きずり(Darcy)を解いた面
-        uint64_t cappedDragFaces = 0;       // 引きずりの係数を頭打ちにした面(21 §1.3 の計器)
-        uint64_t grainLimitedCells = 0;     // 出る粒の体積を中の粒で縮めたセル
-        uint64_t blockedGrainFaces = 0;     // 詰まった所へ入る粒の面を止めた数(R3 まで・仮)
-        uint64_t restLayerGrainFaces = 0;   // 支えられた粒だけの面で空気とつながなかった数(T-1043)
-        uint64_t heldGrainFaces = 0;        // 摩擦で止まった粒として解いた面の数(T-1070)
-        uint64_t releasedGrainFaces = 0;    // 止まった粒の面が空気に押されて上限を超えた数(T-1070)
-        uint64_t restLockedGrainFaces = 0;  // 粒の無いセルから支えられた粒へ向かうので解く前に止めた面の数(T-1043)
-        uint64_t vanishedGrainFaces = 0;    // 粒が消えた面の運動量を流体へ渡した数(相が消える所)
+        uint64_t dragFaces = 0;               // 相どうしの引きずりを圧力と一緒に解いた面
+        uint64_t porousFaces = 0;             // 孔の引きずり(Darcy)を解いた面
+        uint64_t cappedDragFaces = 0;         // 引きずりの係数を頭打ちにした面(21 §1.3 の計器)
+        uint64_t grainLimitedCells = 0;       // 出る粒の体積を中の粒で縮めたセル
+        uint64_t blockedGrainFaces = 0;       // 詰まった所へ入る粒の面を止めた数(R3 まで・仮)
+        uint64_t restLayerGrainFaces = 0;     // 支えられた粒だけの面で空気とつながなかった数(T-1043)
+        uint64_t surfaceLayerGrainFaces = 0;  // 表面のセルの層として空気とつながなかった面の数(T-1071)
+        uint64_t heldGrainFaces = 0;          // 摩擦で止まった粒として解いた面の数(T-1070)
+        uint64_t releasedGrainFaces = 0;      // 止まった粒の面が空気に押されて上限を超えた数(T-1070)
+        uint64_t restLockedGrainFaces = 0;    // 粒の無いセルから支えられた粒へ向かうので解く前に止めた面の数(T-1043)
+        uint64_t vanishedGrainFaces = 0;      // 粒が消えた面の運動量を流体へ渡した数(相が消える所)
 
         // --- 置き場 ①(T-0963)---
         uint64_t fluidPairFaces = 0;     // 気体と液体を別の速さで解いた面

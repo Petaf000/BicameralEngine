@@ -250,6 +250,8 @@ namespace {
     bool movingByCellOverride = false;
     uint32_t dragScaleOverride = 1000;     // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
+    bool surfaceHeldOnlyOverride = false;  // 層の止まった粒の面だけ障害物(T-1071 の 2 本目)。引数 surface2
+    bool surfaceLayerOverride = false;     // 表面のセルを層に(T-1071)。引数 surface(摩擦を解きの中へも入れる)
     uint32_t contactOverride = 0;          // 上の粒を支える詰まり(‰。T-1070 の 2 本目)。引数 contact=<‰>
     bool frictionInSolveOverride = false;  // 摩擦を解きの中へ(T-1070。打ち切り)。引数 friction
     bool restLockOverride = true;  // 解く前に止める(T-1043)。引数のどこかに norestlock で解いた後で止める(T-0996)
@@ -307,6 +309,8 @@ namespace {
         flowOptions.grainRestLayer = restLayerOverride;
         flowOptions.grainFrictionInSolve = frictionInSolveOverride;
         flowOptions.grainContactPermille = contactOverride;
+        flowOptions.grainSurfaceLayer = surfaceLayerOverride;
+        flowOptions.grainSurfaceLayerMoving = !surfaceHeldOnlyOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
@@ -332,7 +336,7 @@ namespace {
             "    費用 %lld ns/セル/刻み(計器込み)・降伏で動いた面の柱 %llu・止めた %llu・空きが無く止めた %llu・"
             "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u・動く面の上限 "
             "%llu・受け止めた縦 %llu・横へ %llu・層の面 %llu・解く前に止めた面 %llu・止まった粒の面 "
-            "%llu・押されて動いた %llu\n",
+            "%llu・押されて動いた %llu・表面の層の面 %llu\n",
             (long long)run.recording.NanosecondsPerCellTick(), (unsigned long long)run.stats.yieldMovingPairs,
             (unsigned long long)run.stats.yieldHeldPairs, (unsigned long long)run.stats.yieldBlockedPairs,
             (unsigned)((uint64_t)run.stats.maxPackedQ16 * 1000 >> 16), (unsigned long long)run.stats.overpackedCells,
@@ -340,7 +344,7 @@ namespace {
             (unsigned long long)run.stats.yieldDynamicFaces, (unsigned long long)run.stats.impactGrainImpulse,
             (unsigned long long)run.stats.turnedGrainImpulse, (unsigned long long)run.stats.restLayerGrainFaces,
             (unsigned long long)run.stats.restLockedGrainFaces, (unsigned long long)run.stats.heldGrainFaces,
-            (unsigned long long)run.stats.releasedGrainFaces);
+            (unsigned long long)run.stats.releasedGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -1047,6 +1051,43 @@ namespace {
                     (long long)MillimetersPerSecond(run.grainSpeed.back()));
     }
 
+    // --- 12. 部分セルが沈み固まる時間(T-1091。記録): 壁から壁までの床の上に、詰まり切らない砂(高さ 3 m)を置き、
+    // 粒の 9 割が詰まったセルに入るまでの時間を測る(横へは広がらない。縦に沈むだけ)。
+    // 本物の目安: 真空は上の端が自由に落ちる時間 √(2 (1 − f) H ÷ g)。空気は群れの沈み(Richardson–Zaki。300 µm・n ≈ 3)で約 2 秒
+    void Settle(int32_t level, char symbol) {
+        Scene scene = BaseR3Scene("settle", 12, 12);
+        Fill(scene, 0, 11, 0, 0, '#');
+        Fill(scene, 0, 11, 1, 6, symbol);
+        scene.regions = {{.name = "all", .xBegin = 0, .xEnd = 12, .yBegin = 1, .yEnd = 12}};
+        std::string series;
+        int64_t settledTick = -1;
+        const auto sample = [&](Box& box, uint64_t tick) {
+            const View view = BuildView(box);
+            int64_t packedMass = 0;
+            int64_t total = 0;
+            for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+                const int64_t mass = view.cells[cell].phaseMassMg[2];
+                total += mass;
+                if (view.cells[cell].grainPackedQ16 + (1u << 10) >= (1u << 16))
+                    packedMass += mass;
+            }
+
+            const int64_t permille = total == 0 ? 0 : packedMass * 1000 / total;
+            if (settledTick < 0 && permille >= 900)
+                settledTick = (int64_t)tick;
+
+            if (tick % 30 == 0)
+                series += std::format(" {}s {}‰", Fixed3((int64_t)tick * 1000 / 60), permille);
+        };
+        const Run run = RunR3(scene, {.level = level, .seconds = 6, .afterTick = sample}, {"all"});
+        std::printf(
+            "  沈み固まる %s m 「%c」%s: 9 割が詰まったセルに入る時間 %s 秒(-1 = 6 秒で入らない)・%s・最大の速さ %lld "
+            "mm/s\n",
+            level == 0 ? "0.5" : "0.25", symbol, vacuumOverride ? "・真空" : "",
+            settledTick < 0 ? "-1" : Fixed3(settledTick * 1000 / 60).c_str(), series.c_str(),
+            (long long)MillimetersPerSecond(run.grainSpeed.back()));
+    }
+
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
@@ -1076,6 +1117,10 @@ int main(int argc, char** argv) {
             contactOverride = (uint32_t)std::stoi(word.substr(8));
         else if (word == "friction")
             frictionInSolveOverride = true;
+        else if (word == "surface")
+            surfaceLayerOverride = frictionInSolveOverride = true;
+        else if (word == "surface2")
+            surfaceLayerOverride = frictionInSolveOverride = surfaceHeldOnlyOverride = true;
         else if (word == "layer")
             restLayerOverride = true;
         else if (word.starts_with("drag="))
@@ -1095,6 +1140,17 @@ int main(int argc, char** argv) {
 
     if (only == 10) {
         ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 12) {
+        // 部分セルが沈み固まる時間(T-1091。全部には入れない): 詰まりの 30 %・50 %・80 %(凡例 3・5・8)
+        for (const char symbol : {'3', '5', '8'})
+            Settle(0, symbol);
+
+        Settle(1, '5');
         std::printf("case_b r3: %d failure(s)\n", failureCount);
 
         return failureCount == 0 ? 0 : 1;
