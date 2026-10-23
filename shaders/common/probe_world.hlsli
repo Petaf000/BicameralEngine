@@ -68,7 +68,9 @@ FX_FN bool ProbeHasRules(Table table, RxCell cell) {
 // セルのキャッシュを一から作る(初めの状態・つつきの後)
 template <typename Table>
 FX_FN HcThermalCache ProbeMakeCache(Table table, RxCell cell) {
-    return HcMakeCache(RxComputeThermal(table, cell), HcCellConductance(table, cell));
+    const RxThermal thermal = RxComputeThermal(table, cell);
+
+    return HcMakeCache(thermal, HcCellConductance(table, cell, HcCacheTemperature(thermal)));
 }
 
 // 刻み tick の印(ブロックが最後に変わった刻み・次に評価の要る刻みに使う。64bit なので一周しない)
@@ -111,12 +113,8 @@ FX_FN ProbeCellStep ProbeStepCell(Table table, RxCell cell, HcThermalCache self,
     result.limits = step.limits;
     result.changed = ProbeSameCell(step.cell, cell) ? 0 : 1;
 
-    // 反応で成分が変わったときだけコンダクタンスを作り直す(割り算を減らす。HLSL の ?: は両辺を評価しうるので if で)
-    uint32_t conductance = self.conductance;
-    if (!ProbeSameCell(step.cell, conducted))
-        conductance = HcCellConductance(table, step.cell);
-
-    result.cache = HcMakeCache(step.thermal, conductance);
+    // コンダクタンスは成分と温度で変わる(気体の伝導率 ∝ √T。D-639・T-1066)ので作り直す
+    result.cache = HcMakeCache(step.thermal, HcCellConductance(table, step.cell, HcCacheTemperature(step.thermal)));
 
     return result;
 }
