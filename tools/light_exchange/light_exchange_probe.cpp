@@ -1192,16 +1192,6 @@ namespace {
                 total += static_cast<double>(received);
             }
 
-            if (tick == 0 && std::getenv("LX_DEBUG") != nullptr) {
-                double mean = 0;
-                for (const double value : one)
-                    mean += value / COUNT;
-
-                for (int k = 0; k < COUNT; ++k)
-                    std::printf("  受け手 %d (%d, %d): %+.2f %%\n", k, receivers[k][0] - center,
-                                receivers[k][2] - center, (one[k] / mean - 1) * 100);
-            }
-
             const auto [worst, rms] = Deviation(one);
             instantWorst = std::max(instantWorst, worst);
             instantRms = std::max(instantRms, rms);
