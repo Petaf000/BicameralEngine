@@ -59,6 +59,14 @@ namespace bicameral::sim::case_b {
             int64_t grainFlowNl = 0;       // 解いた後の粒の質量の流れ(mg の Q32。持ち越しと一緒に運ぶ)
             int64_t grainMovedMassMg = 0;  // 運ぶ段が移した粒の質量
 
+            // --- 摩擦を解きの中へ(T-1070。grainFrictionInSolve の時だけ)---
+            bool frictionFace = false;  // 支えられた粒のある横の面(押す力と摩擦の上限を解く前に決めた)
+            int64_t frictionPush = 0;   // 押す力 D(1 刻みの力積。+ = left → right)
+            int64_t frictionLimit = 0;  // 摩擦の上限 F(1 刻みの力積)
+            bool held = false;          // 摩擦で止まった粒(解く間は据わる孔)
+            int64_t heldMomentum = 0;   // 止めた時の P + D
+            uint64_t heldDragMg = 0;    // 止まった粒の引きずり(孔の引きずり K_x のうち粒の分)
+
             // --- 置き場 ①(T-0963)。④ は carrierSlot = 流体の置き場・carrierAreaMm2 = areaMm2 のまま ---
             uint32_t carrierSlot = 0;     // 圧力の式の主の流体の置き場(① は面の体積の大きい相)
             uint64_t carrierAreaMm2 = 0;  // 主の流体の面積
@@ -536,6 +544,7 @@ namespace bicameral::sim::case_b {
         };
 
         void ApplyViscosity(FlowRuntime& runtime, Box& box);
+        void MeasureFaceFriction(FlowRuntime& runtime, const Box& box, const View& view);
         void StopEmptyUpwind(FlowRuntime& runtime, Box& box, const FlowFace& face);
 
         // --- 引きずりを圧力と一緒に解く(R2・T-0869)---
@@ -576,7 +585,16 @@ namespace bicameral::sim::case_b {
 
         // 支えられた粒(T-1043): 列を下から見て、下が「支えられた詰まった粒・閉じたセル・据わる固体・物・床」の時だけ支えられる
         // (降伏の段の SupportColumn と同じ決め方。刻みの初めの値なので順によらない)
-        void MeasureGrainRest(FlowScratch& scratch, const Box& box, const View& view) {
+        // 上の粒を支えるほど詰まっているか(T-1070 の 2 本目。contactQ16 = 0 は詰まった時だけ)
+        bool GrainContact(const GrainCell& grain, uint32_t packedQ16, uint32_t contactQ16) {
+            return grain.packed || (contactQ16 > 0 && packedQ16 >= contactQ16);
+        }
+
+        uint32_t ContactQ16(const FlowOptions& options) {
+            return (uint32_t)(((uint64_t)options.grainContactPermille << 16) / 1000);
+        }
+
+        void MeasureGrainRest(FlowScratch& scratch, const Box& box, const View& view, uint32_t contactQ16) {
             const std::array<uint32_t, 3> size = {box.config.sizeX, box.config.sizeY, box.config.sizeZ};
             const uint32_t axis = view.gravityAxis;
             for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
@@ -592,7 +610,7 @@ namespace bicameral::sim::case_b {
                     const CellView& cellView = view.cells[index];
                     grain.rests = supported && grain.massMg > 0 && cellView.grainPackedQ16 > 0;
                     const bool solid = scratch.cells[index].closed || cellView.fixedQ16 > 0 || cellView.bodyQ16 > 0;
-                    supported = solid || (grain.packed && grain.rests);
+                    supported = solid || (GrainContact(grain, cellView.grainPackedQ16, contactQ16) && grain.rests);
                 }
             }
         }
@@ -731,6 +749,9 @@ namespace bicameral::sim::case_b {
             const int64_t fluidStart = FluidMomentum(box, face);
             const int64_t grainStart = GrainMomentum(box, face);
             ApplyGrainWeight(box, view, scratch, face);
+            if (face.frictionFace && face.grainMassMg > 0)
+                ApplyImpulse(box, GrainFace(box, face.axis, face.left), face.frictionPush, ImpulseSource::Pressure);
+
             if (face.grainMassMg > 0)
                 face.grainAreaMm2 = UpwindGrainArea(face, GrainMomentum(box, face));
 
@@ -768,13 +789,32 @@ namespace bicameral::sim::case_b {
                 ++stats.blockedGrainFaces;
             }
 
+            // 摩擦(T-1070): 上限以下なら止まった粒(解く間は据わる孔)、超えたら上限を引いて動く粒として解く
+            if (!locked && face.frictionFace) {
+                const int64_t now = GrainMomentum(box, face);
+                if (fx::FxAbsU64(now) <= (uint64_t)face.frictionLimit) {
+                    face.held = true;
+                    face.heldMomentum = now;
+                    face.heldDragMg = drag >> 16;
+                    StopGrain(box, face);
+                    face.porousMg += drag >> 16;
+                    face.locked = true;
+                    face.grainAreaMm2 = 0;
+                    drag = 0;
+                    ++stats.heldGrainFaces;
+                } else {
+                    ApplyImpulse(box, GrainFace(box, face.axis, face.left),
+                                 now > 0 ? -face.frictionLimit : face.frictionLimit, ImpulseSource::Wall);
+                }
+            }
+
             // 支えられた粒だけの横の面(T-1043): 積もった層は、解く間は空気から見て動かない障害物(孔でもない。層の上を空気が流れる)。
             // 粒の運動量は止めずに持ち越し、降伏の段(押す力と摩擦)だけで動かす(1 回目の「つながずに圧力の系に残す」は、
             // 粒が圧力に押される別の相になって 100 m/s まで暴れた)
             const bool leftRests = left.massMg == 0 || left.rests;
             const bool rightRests = right.massMg == 0 || right.rests;
-            if (!locked && runtime.options.grainRestLayer && face.axis != view.gravityAxis && leftRests && rightRests &&
-                (left.rests || right.rests)) {
+            if (!face.locked && runtime.options.grainRestLayer && face.axis != view.gravityAxis && leftRests &&
+                rightRests && (left.rests || right.rests)) {
                 face.locked = true;
                 face.grainAreaMm2 = 0;
                 drag = 0;
@@ -913,6 +953,17 @@ namespace bicameral::sim::case_b {
                 runtime.stats->lockedPorousImpulse += fx::FxAbsU64(porous);
             else if (face.porousMg == 0)
                 runtime.stats->residualPorousImpulse += fx::FxAbsU64(porous);
+
+            // 止まった粒(T-1070): 空気が粒を押した力積 J(孔の引きずりの粒の分)を足して上限を超えたら、超えた分を次の刻みへ持ち越す
+            if (face.held && face.heldDragMg > 0 && face.porousMg > 0) {
+                const int64_t pushed = fx::FxMulDivS64(porous, face.heldDragMg, face.porousMg);
+                const int64_t total = face.heldMomentum + pushed;
+                if (fx::FxAbsU64(total) > (uint64_t)face.frictionLimit) {
+                    const int64_t excess = total > 0 ? total - face.frictionLimit : total + face.frictionLimit;
+                    ApplyImpulse(box, GrainFace(box, face.axis, face.left), excess, ImpulseSource::FixedPhase);
+                    ++runtime.stats->releasedGrainFaces;
+                }
+            }
             face.flowNl = CoupledFlowNl(box, FluidMomentum(box, face), face.carrierAreaMm2, face.massMg);
             if (face.twoFluid)
                 StopEmptyUpwind(runtime, box, face);
@@ -1318,7 +1369,10 @@ namespace bicameral::sim::case_b {
             if (runtime.options.drag) {
                 MeasureGrains(runtime, box, context.view);
                 if (runtime.options.grainYield && (runtime.options.grainRestLock || runtime.options.grainRestLayer))
-                    MeasureGrainRest(scratch, box, context.view);
+                    MeasureGrainRest(scratch, box, context.view, ContactQ16(runtime.options));
+
+                if (runtime.options.grainYield && runtime.options.grainFrictionInSolve)
+                    MeasureFaceFriction(runtime, box, context.view);
 
                 scratch.grainImpact.assign(scratch.faces.size(), 0);
                 for (FlowFace& face : scratch.faces)
@@ -2014,15 +2068,16 @@ namespace bicameral::sim::case_b {
         }
 
         // 支え(下から)と有効応力(上から)。支えられていない粒(舞う・落ちる)は押し合いを持たない
-        void SupportColumn(const FlowScratch& scratch, const View& view, std::span<const uint32_t> column,
-                           std::vector<YieldCell>& cells) {
+        void SupportColumn(const FlowScratch& scratch, const View& view, uint32_t contactQ16,
+                           std::span<const uint32_t> column, std::vector<YieldCell>& cells) {
             bool supported = true;  // 床(箱の端)
             for (const uint32_t cell : column) {
                 const CellView& cellView = view.cells[cell];
                 YieldCell& yield = cells[cell];
                 yield.rests = supported && scratch.grains[cell].massMg > 0 && yield.fillQ16 > 0;
                 const bool solid = scratch.cells[cell].closed || cellView.fixedQ16 > 0 || cellView.bodyQ16 > 0;
-                supported = solid || (scratch.grains[cell].packed && yield.rests);
+                supported = solid ||
+                            (GrainContact(scratch.grains[cell], cellView.grainPackedQ16, contactQ16) && yield.rests);
             }
 
             int64_t above = 0;
@@ -2211,6 +2266,33 @@ namespace bicameral::sim::case_b {
             }
         }
 
+        // 摩擦を解きの中へ(T-1070): 刻みの初めの支えと有効応力から、支えられた粒のある横の面の押す力 D と摩擦の上限 F を決める
+        // (降伏の段の面ごとの形と同じ式。刻みの初めの値だけなので順によらない)
+        void MeasureFaceFriction(FlowRuntime& runtime, const Box& box, const View& view) {
+            FlowScratch& scratch = runtime.scratch;
+            const uint32_t count = CellCount(box);
+            std::vector<YieldCell> cells(count);
+            for (uint32_t cell = 0; cell < count; ++cell)
+                cells[cell] = MeasureYieldCell(box, scratch, view, cell, runtime.options.reposeStartOffsetDegrees);
+
+            for (uint32_t cell = 0; cell < count; ++cell) {
+                if (CellCoordinates(box, cell)[view.gravityAxis] == 0)
+                    SupportColumn(scratch, view, ContactQ16(runtime.options),
+                                  ColumnFromBottom(box, view, CellCoordinates(box, cell)), cells);
+            }
+
+            for (uint32_t index = 0; index < scratch.faces.size(); ++index) {
+                FlowFace& face = scratch.faces[index];
+                if (face.axis == view.gravityAxis || !face.open || !(cells[face.left].rests || cells[face.right].rests))
+                    continue;
+
+                const YieldFace yield = MeasureYieldFace(box, cells, index, face);
+                face.frictionFace = true;
+                face.frictionPush = yield.push;
+                face.frictionLimit = yield.friction;
+            }
+        }
+
         // 下のセルの横の隣 (axis, +/-) の空き(Q16。表面がそちらへ何セル下がるか。0〜1)。箱の外・据わる固体・物は 0
         int64_t SideDropQ16(const Box& box, const FlowScratch& scratch, const View& view, uint32_t cell, uint32_t axis,
                             bool plus) {
@@ -2320,7 +2402,8 @@ namespace bicameral::sim::case_b {
 
             for (uint32_t cell = 0; cell < count; ++cell) {
                 if (CellCoordinates(box, cell)[gravity] == 0)
-                    SupportColumn(scratch, view, ColumnFromBottom(box, view, CellCoordinates(box, cell)), cells);
+                    SupportColumn(scratch, view, ContactQ16(runtime.options),
+                                  ColumnFromBottom(box, view, CellCoordinates(box, cell)), cells);
             }
 
             MeasureYieldRoom(runtime, view, cells);
@@ -2341,7 +2424,8 @@ namespace bicameral::sim::case_b {
             // どの面の柱も刻みの初めの応力から決め、自分の面の運動量だけを変える(順によらない)
             const FaceTable table = IndexFaces(scratch, count);
             std::vector<YieldFace> segment;
-            for (uint32_t axis = 0; axis < 3; ++axis) {
+            // 摩擦を解きの中へ入れた時(T-1070)は、面の押す力と摩擦は陰の圧力の段で当てた(ここでは面を動かさない)
+            for (uint32_t axis = 0; axis < (runtime.options.grainFrictionInSolve ? 0u : 3u); ++axis) {
                 if (axis == gravity)
                     continue;
 
