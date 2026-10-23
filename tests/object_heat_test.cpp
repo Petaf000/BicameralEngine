@@ -15,6 +15,8 @@
 //   3. 保存: ボクセル + セル + 対の端数 − 帳簿(入った日の光)がエネルギーと元素で毎刻み一定(ビット単位)
 //   4. 決定的: 2 回で同じ・ボクセルを逆の順に回しても同じ
 //   5. 細かさ: 0.5 m と 0.25 m の世界で、燃え始めの刻みと燃え続けた時間が ±10 %(仮)
+//   7. 共有の式(shaders/common/object_heat.hlsli。GPU と同じ関数。T-1064)が試作と毎刻みビット一致
+//   8. 眠らせ方(T-1065): 冷えた紙は何刻みか回すと 1 刻み回しても何も変わらない
 // 試験の中の仮の口(土台の共通の口は足さない。CLAUDE.md §1.9)。シミュの値は整数で、double は表示だけ。
 #include <algorithm>
 #include <array>
@@ -27,6 +29,7 @@
 
 #include "common/heat_conduction.hlsli"
 #include "common/radiation.hlsli"
+#include "object_heat_cpu.h"
 #include "sim/sun_lens.h"
 #include "sun_column_scene.h"
 
@@ -822,6 +825,149 @@ namespace {
         }
     }
 
+    // --- 7. 共有の式(shaders/common/object_heat.hlsli・tests/object_heat_cpu.h。GPU と同じ関数。T-1064)が試作とビット一致 ---
+
+    // 試作の場面を共有の形の世界にする(物 1 つ・紙は x と z に隣・外に面するのは両面)
+    test::OhWorld SharedWorldOf(const Scene& scene, const test::OhTables& tables) {
+        test::OhWorld world;
+        const auto side = static_cast<uint32_t>(scene.side);
+        world.objects.push_back({.voxelBegin = 0,
+                                 .voxelCount = side * side,
+                                 .sizeX = side,
+                                 .sizeY = 1,
+                                 .cell = 0,
+                                 .bodyLevel = scene.bodyLevel,
+                                 .cellLevel = scene.cellLevel,
+                                 .substeps = scene.substeps,
+                                 .filmUm = static_cast<uint32_t>(scene.filmUm)});
+        for (uint32_t z = 0; z < side; ++z) {
+            for (uint32_t x = 0; x < side; ++x) {
+                const uint32_t neighbours = (x > 0 ? 1u : 0u) | (x + 1 < side ? 2u : 0u) | (z > 0 ? 16u : 0u) |
+                                            (z + 1 < side ? 32u : 0u);
+                world.infos.push_back({.object = 0, .shape = neighbours | (2u << rx::OH_EXPOSED_SHIFT)});
+            }
+        }
+
+        world.voxels = scene.voxels;
+        world.light = scene.light;
+        world.cells = {scene.air};
+        world.ranges = {{.cell = 0, .objectBegin = 0, .objectCount = 1}};
+        rx::OhFlow carry = rx::OhZeroFlow();
+        carry.energy = scene.energyCarry;
+        for (const auto& [species, amount] : scene.amountCarry)
+            carry.amounts[tables.species[species].gasIndex] = amount;
+
+        world.carries = {carry};
+        world.sunIn = scene.sunIn;
+
+        return world;
+    }
+
+    bool SameAsShared(const Scene& scene, const test::OhWorld& world, const test::OhTables& tables) {
+        if (HashReactionCell(scene.air) != HashReactionCell(world.cells[0]) ||
+            scene.energyCarry != world.carries[0].energy || scene.sunIn != world.sunIn)
+            return false;
+
+        for (size_t i = 0; i < scene.voxels.size(); ++i) {
+            if (HashReactionCell(scene.voxels[i]) != HashReactionCell(world.voxels[i]))
+                return false;
+        }
+
+        for (uint32_t g = 0; g < rx::OH_MAX_GASES; ++g) {
+            const uint32_t species = tables.gases.species[g];
+            const auto found = scene.amountCarry.find(species);
+            const int64_t carry = found == scene.amountCarry.end() ? 0 : found->second;
+            if (species != 0 && carry != world.carries[0].amounts[g])
+                return false;
+        }
+
+        return true;
+    }
+
+    // 試作の燃える場面(レンズは燃え始めから 0.5 s で外す)を、試作と共有の形で並べて回し、毎刻み比べる。食い違った刻み(0 = 最後まで同じ)
+    uint32_t RunSharedAlongside(const BakedReactionTable& table, const test::OhTables& tables, int32_t cellLevel,
+                                int32_t bodyLevel, uint32_t* ticks) {
+        Scene scene = MakeScene(table, cellLevel, bodyLevel);
+        test::OhWorld world = SharedWorldOf(scene, tables);
+        const test::OhCpuTable shared{.view = table.View(), .objectSpecies = tables.species};
+        const auto focal = static_cast<size_t>(std::max_element(scene.light.begin(), scene.light.end()) -
+                                               scene.light.begin());
+        uint32_t ignitionTick = 0;
+        uint32_t lastBurningTick = 0;
+        for (uint32_t tick = 1; tick <= TICK_LIMIT; ++tick) {
+            const bool lensOn = ignitionTick == 0 || tick < ignitionTick + LENS_OFF_AFTER_TICKS;
+            StepExchange(table, scene, lensOn, false);
+            const std::vector<int64_t> released = StepReactions(table, scene, tick);
+            test::StepObjectHeat(shared, tables.gases, world, lensOn, WORLD_SEED, tick);
+            *ticks = tick;
+            if (!SameAsShared(scene, world, tables) || world.failed)
+                return tick;
+
+            if (ignitionTick == 0 && AtLeastMilliwatts(released[focal], IGNITION_MILLIWATTS, bodyLevel))
+                ignitionTick = tick;
+
+            for (const int64_t heat : released) {
+                if (AtLeastMilliwatts(heat, BURNING_MILLIWATTS, bodyLevel))
+                    lastBurningTick = tick;
+            }
+
+            if (ignitionTick != 0 && tick >= ignitionTick + LENS_OFF_AFTER_TICKS &&
+                tick > lastBurningTick + QUIET_TICKS)
+                break;
+        }
+
+        return 0;
+    }
+
+    void TestSharedForm(const BakedReactionTable& table, const test::OhTables& tables) {
+        struct Case {
+            const char* name;
+            int32_t cellLevel;
+            int32_t bodyLevel;
+        };
+        constexpr std::array<Case, 3> CASES = {Case{"0.5 m の世界・箱 7.8 mm", 0, BODY_LEVEL},
+                                               Case{"0.25 m の世界・箱 7.8 mm", 1, BODY_LEVEL},
+                                               Case{"0.5 m の世界・箱 3.9 mm(小刻み 4)", 0, BODY_LEVEL + 1}};
+        for (const Case& item : CASES) {
+            uint32_t ticks = 0;
+            const uint32_t mismatch = RunSharedAlongside(table, tables, item.cellLevel, item.bodyLevel, &ticks);
+            std::printf("共有の式(object_heat.hlsli)と試作(%s): %u 刻み %s\n", item.name, ticks,
+                        mismatch == 0 ? "毎刻みビット一致" : "食い違った");
+            EXPECT(mismatch == 0);
+        }
+    }
+
+    // --- 8. 眠らせ方(T-1065): 冷えた紙は、何刻みか回すと 1 刻み回しても何も変わらない(眠れる)か ---
+
+    void TestColdSleeps(const BakedReactionTable& table, const test::OhTables& tables) {
+        constexpr uint32_t COLD_TICKS = 1200;
+        Scene scene = MakeScene(table, 0, BODY_LEVEL);
+        test::OhWorld world = SharedWorldOf(scene, tables);
+        const test::OhCpuTable shared{.view = table.View(), .objectSpecies = tables.species};
+        uint32_t lastChanged = 0;
+        uint64_t previous = 0;
+        for (uint32_t tick = 1; tick <= COLD_TICKS; ++tick) {
+            test::StepObjectHeat(shared, tables.gases, world, false, WORLD_SEED, tick);
+            uint64_t digest = HashReactionCell(world.cells[0]);
+            for (const rx::RxCell& voxel : world.voxels)
+                digest = fx::FxHashCombine(digest, HashReactionCell(voxel));
+
+            digest = fx::FxHashCombine(digest, static_cast<uint64_t>(world.carries[0].energy));
+            for (const int64_t amount : world.carries[0].amounts)
+                digest = fx::FxHashCombine(digest, static_cast<uint64_t>(amount));
+
+            if (digest != previous)
+                lastChanged = tick;
+
+            previous = digest;
+        }
+
+        std::printf(
+            "眠らせ方: 冷えた紙(室温の空気の中・光なし)は %u 刻み目から %u 刻みまで 1 刻み回しても何も変わらない(%s)\n",
+            lastChanged + 1, COLD_TICKS, lastChanged < COLD_TICKS ? "眠れる" : "眠れない");
+        EXPECT(lastChanged < COLD_TICKS / 2);
+    }
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -834,6 +980,13 @@ int main(int argc, char** argv) {
 
     TestBurnsOn(table);
     TestMixedIntoCell(table);
+    const auto tables = test::MakeObjectHeatTables(table, DEFAULT_DIFFUSIVITY_MM2_PER_S);
+    EXPECT(tables.has_value());
+    if (tables) {
+        TestSharedForm(table, *tables);
+        TestColdSleeps(table, *tables);
+    }
+
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
 
