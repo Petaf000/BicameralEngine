@@ -83,9 +83,10 @@ struct RxSpecies {
     uint32_t heatCapacity;  // 比熱(mJ/(mol·K))。相ごとの値は M2
     uint32_t ruleBegin;     // 索引(この物質を「ID が最小の反応物」に持つ規則)の始まり
     uint32_t ruleCount;
-    uint32_t conductivity;  // 熱伝導率(mW/(m·K))。セルの値は物質量で重み付けた平均(heat_conduction.hlsli。T-0089)
-    uint32_t flags;         // RX_SPECIES_*(気体のぶんに数えるか。T-0622)
-    uint32_t padding;
+    uint32_t
+        conductivity;  // 熱伝導率(mW/(m·K)。室温の値)。セルの値は体積で重み付けた平行の道(heat_conduction.hlsli。D-637)
+    uint32_t flags;    // RX_SPECIES_*(気体のぶんに数えるか。T-0622)
+    uint32_t molarVolume;  // 凝縮相が占める体積(mm³/mol)。気体と密度を書いていない物質は 0(場所を取らない。T-1066)
 };
 
 // 反応の規則

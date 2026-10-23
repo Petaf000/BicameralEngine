@@ -9,8 +9,11 @@
 //   - 両側が同じ式(min は対称、|ΔT| は同じ)で大きさを出し、向きだけ逆にするので、足し引きが打ち消して**エネルギーは構造的に保存**される(D-206)。
 //   - 1/8 の上限: 6 面の重みの合計が 6/8 < 1 なので、新しい温度は自分と隣の温度の凸結合になり、行き過ぎない(陽解法の安定)。
 //   - 係数は「2^-32 mJ / mK」の整数で持つ(割り算を面ごとに使わない。04 §6・ADR-0010)。
-// コンダクタンス(mW/K)= セルの伝導率(物質量で重み付けた平均、mW/(m·K))× 面積 ÷ 距離(0.25 m² ÷ 0.5 m = 0.5 m)。
-// 伝導率は物質の値。試験の表の値は、放射と対流(M3)が無い間も燃え広がりが見えるよう大きくしてある(data/packages/combustion_test/units.luau)。
+// コンダクタンス(mW/K)= セルの伝導率(mW/(m·K))× 面積 ÷ 距離(0.25 m² ÷ 0.5 m = 0.5 m)。
+// セルの伝導率は体積で重み付けた平行の道(D-637・T-1066。物の箱 tests/object_heat_test.cpp と同じ形):
+//   k = (Σ 凝縮相の体積 × 伝導率 + 残りの体積 × 残りの伝導率) ÷ セルの体積
+//   残り(気体と、密度を書いていない物質 = 場所を取らない物質。cell_volume.h)は物質量の平均。気体の伝導率は ∝ √(T ÷ 室温)(D-639)。
+// 伝導率は物質の室温の値(試験の倍率は外した。T-1066)。
 #ifndef BICAMERAL_HEAT_CONDUCTION_HLSLI
 #define BICAMERAL_HEAT_CONDUCTION_HLSLI
 
@@ -40,35 +43,145 @@ struct HcThermalCache {
     uint64_t faceLimit;    // min(G の係数, C の上限の係数)。面の係数 = min(両側の faceLimit)
 };
 
-// 伝導率 × 物質量の和(weighted)と物質量の和(total)からコンダクタンス(mW/K)。HcCellConductance の後半
-// (溢れを 1 成分ずつ読んで足す GPU の変種も使う。T-0272)
-FX_FN uint32_t HcConductanceFromSums(FxU128 weighted, uint64_t total) {
-    if (total == 0)
-        return 0;
+// --- 温度で変わる気体の値(D-639。物質の値は室温の値として書く)---
 
-    const uint64_t conductivity = FxDivU128By64(weighted, total).quotient;
+// 室温(mK)。物質の伝導率・混ざる速さはこの温度の値
+FX_CONST uint32_t HC_ROOM_TEMPERATURE_MK = 298150;
+
+// √(T ÷ 室温)(Q16)= √(T × round(2^48 ÷ 298150)) >> 8。T < 2^32 mK なので積 < 2^62
+FX_CONST uint64_t HC_ROOT_MULTIPLIER = 944071698;
+
+// T ÷ 室温(Q16)= (T × round(2^40 ÷ 298150)) >> 24
+FX_CONST uint64_t HC_RATIO_MULTIPLIER = 3687780;
+
+// 気体の値の温度の倍率
+struct HcGasScale {
+    uint32_t conductionQ16;  // 伝導率 ∝ T^0.5
+    uint32_t diffusionQ16;   // 混ざる速さ ∝ T^1.5
+};
+
+FX_FN HcGasScale HcGasScaleAt(uint32_t temperatureMk) {
+    const uint64_t rootQ16 = (uint64_t)FxSqrtU64((uint64_t)temperatureMk * HC_ROOT_MULTIPLIER) >> 8;
+    const uint64_t ratioQ16 = ((uint64_t)temperatureMk * HC_RATIO_MULTIPLIER) >> 24;
+    const uint64_t diffusionQ16 = (ratioQ16 * rootQ16) >> 16;
+
+    HcGasScale scale;
+    scale.conductionQ16 = (uint32_t)rootQ16;
+    scale.diffusionQ16 = diffusionQ16 < HC_UINT32_MAX ? (uint32_t)diffusionQ16 : (uint32_t)HC_UINT32_MAX;
+
+    return scale;
+}
+
+// --- セルの伝導率(体積で重み付けた平行の道。D-637)---
+
+// 1 セル(レベル 0 の 0.5 m 角)の体積(pL = µmol × mm³/mol)。量の数は 濃さ × 0.125 m³ なので、どのレベルでもこの体積で割合を出す
+FX_CONST uint64_t HC_CELL_VOLUME_PL = FX_U64(0x71AFu, 0xD498D000u);  // 1.25 × 10^14
+
+// 伝導率の和(1 成分ずつ足す。GPU の溢れを持つセルも同じ順で足す。T-0272)
+struct HcConductivitySums {
+    FxU128 condensedWeighted;  // Σ 凝縮相の体積(pL)× 伝導率
+    uint64_t condensedVolume;  // Σ 凝縮相の体積(pL)
+    FxU128 gasWeighted;        // Σ 気体の物質量 × 伝導率(室温の値)
+    uint64_t gasAmount;
+    FxU128 looseWeighted;  // Σ 場所を取らない凝縮相(密度を書いていない)の物質量 × 伝導率
+    uint64_t looseAmount;
+};
+
+FX_FN FxU128 HcAddU128(FxU128 a, FxU128 b) {
+    FxU128 sum;
+    sum.lo = a.lo + b.lo;
+    sum.hi = a.hi + b.hi + (sum.lo < a.lo ? (uint64_t)1 : (uint64_t)0);
+
+    return sum;
+}
+
+FX_FN HcConductivitySums HcMakeConductivitySums() {
+    HcConductivitySums sums;
+    sums.condensedWeighted.hi = 0;
+    sums.condensedWeighted.lo = 0;
+    sums.condensedVolume = 0;
+    sums.gasWeighted = sums.condensedWeighted;
+    sums.gasAmount = 0;
+    sums.looseWeighted = sums.condensedWeighted;
+    sums.looseAmount = 0;
+
+    return sums;
+}
+
+FX_FN HcConductivitySums HcAddConductivity(HcConductivitySums sums, RxSpecies entry, uint64_t amount) {
+    if ((entry.flags & RX_SPECIES_GAS) != 0) {
+        sums.gasWeighted = HcAddU128(sums.gasWeighted, FxMulU64Full(amount, (uint64_t)entry.conductivity));
+        sums.gasAmount += amount;
+    } else if (entry.molarVolume == 0) {
+        sums.looseWeighted = HcAddU128(sums.looseWeighted, FxMulU64Full(amount, (uint64_t)entry.conductivity));
+        sums.looseAmount += amount;
+    } else {
+        // 体積 = 量 × モル体積(µmol × mm³/mol = pL)。セル 1 つ分の固体で約 10^14 なので 64bit に収まる
+        const FxU128 volume = FxMulU64Full(amount, (uint64_t)entry.molarVolume);
+        FX_ASSERT(volume.hi == 0);
+        sums.condensedWeighted = HcAddU128(sums.condensedWeighted,
+                                           FxMulU64Full(volume.lo, (uint64_t)entry.conductivity));
+        sums.condensedVolume += volume.lo;
+    }
+
+    return sums;
+}
+
+// (a × q) >> 16(q は Q16)。a.hi × q は 64bit に収まる(伝導率の和の上位語は小さい)
+FX_FN FxU128 HcMulU128ByQ16(FxU128 a, uint32_t q) {
+    FxU128 product = FxMulU64Full(a.lo, (uint64_t)q);
+    product.hi += a.hi * (uint64_t)q;
+
+    FxU128 result;
+    result.lo = (product.lo >> 16) | (product.hi << 48);
+    result.hi = product.hi >> 16;
+
+    return result;
+}
+
+// 和と温度からコンダクタンス(mW/K。レベル 0 の大きさのセルとして)
+FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatureMk) {
+    // --- 残り(気体 + 場所を取らない物質)の伝導率: 物質量の平均。気体の分は ∝ √(T ÷ 室温)---
+    const uint64_t poolAmount = sums.gasAmount + sums.looseAmount;
+    uint64_t poolConductivity = 0;
+    if (poolAmount != 0) {
+        const HcGasScale scale = HcGasScaleAt(temperatureMk);
+        const FxU128 poolWeighted = HcAddU128(HcMulU128ByQ16(sums.gasWeighted, scale.conductionQ16),
+                                              sums.looseWeighted);
+        poolConductivity = FxDivU128By64(poolWeighted, poolAmount).quotient;
+    }
+
+    // --- 凝縮相の体積と残りの体積。詰め過ぎ(体積の和 > セル)はその和で割る(残り 0)。
+    // 残りは符号付きの差で出す(64bit の「0 で止める引き算」は NVIDIA で誤って下ろされる。T-0185)---
+    const int64_t room = (int64_t)HC_CELL_VOLUME_PL - (int64_t)sums.condensedVolume;
+    const uint64_t remaining = room > 0 ? (uint64_t)room : (uint64_t)0;
+    const uint64_t denominator = room > 0 ? HC_CELL_VOLUME_PL : sums.condensedVolume;
+
+    uint64_t conductivity = poolConductivity;
+    if (sums.condensedVolume != 0) {
+        const FxU128 total = HcAddU128(sums.condensedWeighted, FxMulU64Full(poolConductivity, remaining));
+        conductivity = FxDivU128By64(total, denominator).quotient;
+    }
+
     const uint64_t conductance = conductivity >> HC_CONDUCTANCE_SHIFT;
 
     return conductance < HC_UINT32_MAX ? (uint32_t)conductance : (uint32_t)HC_UINT32_MAX;
 }
 
-// セルのコンダクタンス(mW/K)。伝導率を物質量で重み付けた平均(割り算 1 回。成分が変わった刻みだけ)
+// セルのコンダクタンス(mW/K)。temperatureMk = セルの温度(負なら 0 にした値)
 // セルの形 Cell のテンプレート(RxCell・C++ の RxWideCell。T-0187)
 template <typename Table, typename Cell>
-FX_FN uint32_t HcCellConductance(Table table, Cell cell) {
-    FxU128 weighted;
-    weighted.hi = 0;
-    weighted.lo = 0;
-    uint64_t total = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        const FxU128 term = FxMulU64Full(cell.amounts[i], (uint64_t)table.Species(cell.species[i]).conductivity);
-        const uint64_t low = weighted.lo + term.lo;
-        weighted.hi += term.hi + (low < weighted.lo ? (uint64_t)1 : (uint64_t)0);
-        weighted.lo = low;
-        total += cell.amounts[i];
-    }
+FX_FN uint32_t HcCellConductance(Table table, Cell cell, uint32_t temperatureMk) {
+    HcConductivitySums sums = HcMakeConductivitySums();
+    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+        sums = HcAddConductivity(sums, table.Species(cell.species[i]), cell.amounts[i]);
 
-    return HcConductanceFromSums(weighted, total);
+    return HcConductanceFromSums(sums, temperatureMk);
+}
+
+// キャッシュの温度(mK。負なら 0)
+FX_FN uint32_t HcCacheTemperature(RxThermal thermal) {
+    return thermal.temperature > 0 ? (uint32_t)thermal.temperature : 0;
 }
 
 FX_FN uint64_t HcFaceLimit(uint32_t conductance, uint64_t heatCapacity) {
@@ -80,7 +193,7 @@ FX_FN uint64_t HcFaceLimit(uint32_t conductance, uint64_t heatCapacity) {
 
 FX_FN HcThermalCache HcMakeCache(RxThermal thermal, uint32_t conductance) {
     HcThermalCache cache;
-    cache.temperature = thermal.temperature > 0 ? (uint32_t)thermal.temperature : 0;
+    cache.temperature = HcCacheTemperature(thermal);
     cache.conductance = conductance;
     cache.faceLimit = HcFaceLimit(conductance, thermal.heatCapacity);
 
