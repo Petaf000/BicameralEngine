@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <functional>
 #include <numbers>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -978,18 +979,193 @@ namespace {
         bool active = false;
         Vec low{};
         Vec high{};
+        // 陰のつながりをその刻みに子の対へ細かくするか(T-1094): 0 = しない(つながり全体に通る割合)・1 = 両側を細かく・2 = 受ける側だけ
+        int subdivide = 0;
+        // 煙(T-1095): 与えれば箱で遮る代わりに、線分の通しやすさ(0〜1)を掛ける。box.low / high は煙のある所の箱
+        std::function<double(Vec, Vec)> transmit;
     };
+
+    // 煙の濃さ(セルの長さあたりの光学的な厚さ)を、細かさ blockCells のブロックの平均にした格子を線分に沿って歩き、厚さの和を出す
+    struct SmokeGrid {
+        int blockCells = 1;
+        std::array<int, 3> size{};
+        std::vector<double> depth;
+        uint64_t* steps = nullptr;
+
+        [[nodiscard]] double Depth(Vec p0, Vec p1) const {
+            const double scale = 1.0 / blockCells;
+            const Vec a = Scale(p0, scale);
+            const Vec b = Scale(p1, scale);
+            const Vec d = Sub(b, a);
+            std::array<int, 3> cell{static_cast<int>(std::floor(a[0])), static_cast<int>(std::floor(a[1])),
+                                    static_cast<int>(std::floor(a[2]))};
+            std::array<int, 3> step{};
+            Vec tMax{};
+            Vec tDelta{};
+            for (int k = 0; k < 3; ++k) {
+                step[k] = d[k] > 0 ? 1 : (d[k] < 0 ? -1 : 0);
+                if (step[k] == 0) {
+                    tMax[k] = 1e30;
+                    tDelta[k] = 1e30;
+                    continue;
+                }
+
+                const double boundary = step[k] > 0 ? cell[k] + 1.0 : static_cast<double>(cell[k]);
+                tMax[k] = (boundary - a[k]) / d[k];
+                tDelta[k] = std::fabs(1.0 / d[k]);
+            }
+
+            const double length = std::sqrt(Dot(Sub(p1, p0), Sub(p1, p0)));
+            double t = 0;
+            double sum = 0;
+            while (t < 1) {
+                int k = 0;
+                if (tMax[1] < tMax[k])
+                    k = 1;
+
+                if (tMax[2] < tMax[k])
+                    k = 2;
+
+                const double next = std::min(1.0, tMax[k]);
+                const bool inside = cell[0] >= 0 && cell[1] >= 0 && cell[2] >= 0 && cell[0] < size[0] &&
+                                    cell[1] < size[1] && cell[2] < size[2];
+                if (inside)
+                    sum += depth[(((static_cast<size_t>(cell[2]) * size[1]) + cell[1]) * size[0]) + cell[0]] *
+                           (next - t) * length;
+
+                if (steps != nullptr)
+                    ++*steps;
+
+                t = next;
+                cell[k] += step[k];
+                tMax[k] += tDelta[k];
+            }
+
+            return sum;
+        }
+    };
+
+    SmokeGrid MakeSmokeGrid(const Scene& scene, const std::vector<double>& cellDepth, int blockCells) {
+        SmokeGrid grid;
+        grid.blockCells = blockCells;
+        grid.size = {(scene.sx + blockCells - 1) / blockCells, (scene.sy + blockCells - 1) / blockCells,
+                     (scene.sz + blockCells - 1) / blockCells};
+        grid.depth.assign(static_cast<size_t>(grid.size[0]) * grid.size[1] * grid.size[2], 0);
+        const double share = 1.0 / (blockCells * blockCells * blockCells);
+        for (int z = 0; z < scene.sz; ++z) {
+            for (int y = 0; y < scene.sy; ++y) {
+                for (int x = 0; x < scene.sx; ++x) {
+                    const size_t at = (((static_cast<size_t>(z / blockCells) * grid.size[1]) + (y / blockCells)) *
+                                       grid.size[0]) +
+                                      (x / blockCells);
+                    grid.depth[at] += cellDepth[scene.IndexOf(x, y, z)] * share;
+                }
+            }
+        }
+
+        return grid;
+    }
 
     struct BoxCost {
         uint64_t candidates = 0;    // 包みの検査を通ったつながり
         uint64_t segmentTests = 0;  // 線分と箱の検査
         uint64_t shadowed = 0;      // 通る割合が 1 でないつながり
+        uint64_t subPairs = 0;      // 細かくして調べた子の対(T-1094)
     };
+
+    // 箱が 2 つの組の包み(重心を結ぶ線から、組の面の箱の大きい方の半径 + 箱の半径以内)に入りうるか(控えめ = 入らなければ必ず通る)
+    bool BoxNearPair(const Network& net, int ga, int gb, const MovingBox& box) {
+        const Group& groupA = net.groups[ga];
+        const Group& groupB = net.groups[gb];
+        const Vec ca = groupA.centroid;
+        const Vec ab = Sub(groupB.centroid, ca);
+        const Vec boxCenter = Scale(Add(box.low, box.high), 0.5);
+        const double t = std::clamp(Dot(Sub(boxCenter, ca), ab) / std::max(1e-12, Dot(ab, ab)), 0.0, 1.0);
+        const Vec near = Add(ca, Scale(ab, t));
+        const auto spread = [](const Group& g) {
+            const Vec d = Sub(g.boxMax, g.boxMin);
+            return 0.5 * std::sqrt(Dot(d, d)) + 1.0;
+        };
+        const Vec boxHalf = Scale(Sub(box.high, box.low), 0.5);
+        const double reach = std::max(spread(groupA), spread(groupB)) + std::sqrt(Dot(boxHalf, boxHalf));
+
+        return Dot(Sub(boxCenter, near), Sub(boxCenter, near)) <= reach * reach;
+    }
+
+    // 組 A と組 B の決めた光線(両方が面なら 2 × 2 の点どうし 16 本、でなければ代表の面どうし)を箱と解く。{試した, 遮られた}
+    std::pair<int, int> BundleAgainstBox(const Network& net, int ga, int gb, const MovingBox& box, BoxCost& cost) {
+        const Group& groupA = net.groups[ga];
+        const Group& groupB = net.groups[gb];
+        int tried = 0;
+        int blocked = 0;
+        // 煙: 決めた光線の通しやすさの平均を 1/65536 で返す
+        if (box.transmit) {
+            double sum = 0;
+            int count = 0;
+            if (groupA.children.empty() && groupB.children.empty()) {
+                const Face& fa = net.faces[groupA.faces[0]];
+                const Face& fb = net.faces[groupB.faces[0]];
+                for (int i = 0; i < 16; ++i) {
+                    sum += box.transmit(PointOnFace(fa, ((i % 2) * 0.5) - 0.25, (((i / 2) % 2) * 0.5) - 0.25),
+                                        PointOnFace(fb, (((i / 4) % 2) * 0.5) - 0.25, ((i / 8) * 0.5) - 0.25));
+                    ++count;
+                }
+            } else {
+                for (const int fa : RepresentativesOf(groupA)) {
+                    for (const int fb : RepresentativesOf(groupB)) {
+                        sum += box.transmit(PointOnFace(net.faces[fa], 0, 0), PointOnFace(net.faces[fb], 0, 0));
+                        ++count;
+                    }
+                }
+            }
+
+            cost.segmentTests += static_cast<uint64_t>(count);
+            const int pass = static_cast<int>(std::lround(65536 * sum / count));
+
+            return {65536, 65536 - pass};
+        }
+
+        if (groupA.children.empty() && groupB.children.empty()) {
+            const Face& fa = net.faces[groupA.faces[0]];
+            const Face& fb = net.faces[groupB.faces[0]];
+            for (int i = 0; i < 16; ++i) {
+                const Vec pa = PointOnFace(fa, ((i % 2) * 0.5) - 0.25, (((i / 2) % 2) * 0.5) - 0.25);
+                const Vec pb = PointOnFace(fb, (((i / 4) % 2) * 0.5) - 0.25, ((i / 8) * 0.5) - 0.25);
+                ++tried;
+                blocked += SegmentHitsBox(pa, pb, box.low, box.high) ? 1 : 0;
+            }
+        } else {
+            for (const int fa : RepresentativesOf(groupA)) {
+                for (const int fb : RepresentativesOf(groupB)) {
+                    ++tried;
+                    blocked += SegmentHitsBox(PointOnFace(net.faces[fa], 0, 0), PointOnFace(net.faces[fb], 0, 0),
+                                              box.low, box.high)
+                                   ? 1
+                                   : 0;
+                }
+            }
+        }
+
+        cost.segmentTests += static_cast<uint64_t>(tried);
+
+        return {tried, blocked};
+    }
 
     // つながりの決めた光線のうち箱を通らない割合(Q16)
     uint32_t LinkPassQ16(const Network& net, const Link& link, const MovingBox& box, BoxCost& cost) {
         const Group& groupA = net.groups[link.groupA];
         const Group& groupB = net.groups[link.groupB];
+        // 煙をつながり全体で: 重心を結ぶ 1 本の線分の通しやすさ(1 本目)
+        if (box.transmit) {
+            if (!BoxNearPair(net, link.groupA, link.groupB, box))
+                return 65536;
+
+            ++cost.candidates;
+            ++cost.segmentTests;
+
+            return static_cast<uint32_t>(std::lround(65536 * box.transmit(groupA.centroid, groupB.centroid)));
+        }
+
         // 包み: 中心を結ぶ線から、組の箱の大きい方の半径 + 箱の半径以内
         const Vec ca = groupA.centroid;
         const Vec cb = groupB.centroid;
@@ -1080,6 +1256,87 @@ namespace {
         std::vector<Vec> debitSlope(groupCount, Vec{0, 0, 0});    // 出す割合の勾配
         std::vector<Vec> creditMoment(groupCount, Vec{0, 0, 0});  // 受けた量 × 勾配
         uint32_t passQ16 = 65536;
+        BoxCost unusedCost;
+        BoxCost& cost = boxCost != nullptr ? *boxCost : unusedCost;
+        // 陰のつながりの量を子の対へ分けて配る(T-1094)。見える対は受け手の組へ(1 次の分け直しに乗る)、遮られた対は物が吸う。
+        // 和はちょうど amount(整数で分ける)。形の変わらない所では子の対も見えると分かっているので、格子を歩く光線は要らない
+        std::function<void(int, int, uint64_t, Vec)> distribute = [&](int from, int to, uint64_t amount, Vec slopeTo) {
+            if (amount == 0)
+                return;
+
+            ++cost.subPairs;
+            const Group& groupFrom = net.groups[from];
+            const Group& groupTo = net.groups[to];
+            const bool splitFrom = box.subdivide == 1 && !groupFrom.children.empty();
+            const bool splitTo = !groupTo.children.empty();
+            // 包みに箱が入らない対は必ず通る。細かくできない対だけを決めた光線で解く(代表の光線だけで決めると陰の中の面を見落とす)
+            if (!BoxNearPair(net, from, to, box)) {
+                credit[to] += amount;
+                creditMoment[to] = Add(creditMoment[to], Scale(slopeTo, static_cast<double>(amount)));
+                return;
+            }
+
+            int tried = 1;
+            int blocked = 0;
+            if (!splitFrom && !splitTo)
+                std::tie(tried, blocked) = BundleAgainstBox(net, from, to, box, cost);
+
+            if (!splitFrom && !splitTo) {
+                const uint64_t passed = (amount * static_cast<uint64_t>(tried - blocked)) /
+                                        static_cast<uint64_t>(tried);
+                credit[to] += passed;
+                creditMoment[to] = Add(creditMoment[to], Scale(slopeTo, static_cast<double>(passed)));
+                result.objectAbsorbed += amount - passed;
+                return;
+            }
+
+            std::vector<uint64_t> w;
+            std::vector<uint64_t> part;
+            const bool byFrom = splitFrom &&
+                                (!splitTo || net.nodes[groupFrom.node].level >= net.nodes[groupTo.node].level);
+            if (byFrom) {
+                uint64_t total = 0;
+                for (const int child : groupFrom.children) {
+                    w.push_back(sum[child]);
+                    total += sum[child];
+                }
+
+                if (total == 0) {
+                    w.clear();
+                    for (const int child : groupFrom.children)
+                        w.push_back(net.groups[child].faces.size());
+
+                    total = groupFrom.faces.size();
+                }
+
+                SplitByWeights(amount, w, total, part);
+                for (size_t i = 0; i < part.size(); ++i)
+                    distribute(groupFrom.children[i], to, part[i], slopeTo);
+
+                return;
+            }
+
+            uint64_t total = 0;
+            for (const int child : groupTo.children) {
+                const Group& kid = net.groups[child];
+                const double faces = static_cast<double>(kid.faces.size());
+                const double linear = net.linear ? Dot(slopeTo, Sub(kid.centroid, groupTo.centroid)) : 0.0;
+                w.push_back(static_cast<uint64_t>(std::max(0.0, faces * (1 + linear)) * 1024));
+                total += w.back();
+            }
+
+            if (total == 0) {
+                w.clear();
+                for (const int child : groupTo.children)
+                    w.push_back(net.groups[child].faces.size());
+
+                total = groupTo.faces.size();
+            }
+
+            SplitByWeights(amount, w, total, part);
+            for (size_t i = 0; i < part.size(); ++i)
+                distribute(from, groupTo.children[i], part[i], slopeTo);
+        };
         const auto send = [&](int from, int to, uint64_t fractionQ32, Vec slopeFrom, Vec slopeTo) {
             const double fraction = static_cast<double>(fractionQ32) / 4294967296.0;
             double base = static_cast<double>(sum[from]);
@@ -1087,19 +1344,23 @@ namespace {
                 base = std::clamp(base + Dot(slopeFrom, moment[from]), 0.0, 2.0 * static_cast<double>(sum[from]));
 
             const auto amount = static_cast<uint64_t>(base * fraction);
-            const uint64_t passed = (amount * passQ16) >> 16;
             debit[from] += amount;
-            credit[to] += passed;
-            result.objectAbsorbed += amount - passed;
             debitAt[from] += fraction;
             debitSlope[from] = Add(debitSlope[from], Scale(slopeFrom, fraction));
+            if (box.subdivide != 0 && box.active && BoxNearPair(net, from, to, box)) {
+                distribute(from, to, amount, slopeTo);
+                return;
+            }
+
+            const uint64_t passed = (amount * passQ16) >> 16;
+            credit[to] += passed;
+            result.objectAbsorbed += amount - passed;
             creditMoment[to] = Add(creditMoment[to], Scale(slopeTo, static_cast<double>(passed)));
         };
         for (size_t k = 0; k < net.links.size(); ++k) {
             const Link& link = net.links[reverse ? net.links.size() - 1 - k : k];
             const Vec gradientA = Scale(link.gradientB, -1);
-            BoxCost unused;
-            passQ16 = box.active ? LinkPassQ16(net, link, box, boxCost != nullptr ? *boxCost : unused) : 65536;
+            passQ16 = box.active ? LinkPassQ16(net, link, box, cost) : 65536;
             send(link.groupA, link.groupB, link.fractionAbQ32, gradientA, link.gradientB);
             send(link.groupB, link.groupA, link.fractionBaQ32, link.gradientB, gradientA);
         }
@@ -1840,6 +2101,160 @@ int main(int argc, char** argv) {
         return failureCount == 0 ? 0 : 1;
     }
 
+    // 煙(T-1095): 焚き火と受け手の板の間の煙の壁(厚さ 4 セル・セルあたりの光学的な厚さ 0.7)。正しい値はセルの細かさの通しやすさで面の積分
+    if (mode == 's') {
+        const Scene scene = MakeScene(32, 24, 24, [](int x, int y, int z) {
+            if (x == 8 && y == 12 && z == 12)
+                return Voxel{Material::Stone, FIRE_K};
+
+            return x == 22 && y >= 4 && y < 20 && z >= 4 && z < 20 ? Voxel{Material::Black, 0} : Voxel{};
+        });
+        std::vector<double> cellDepth(scene.voxels.size(), 0);
+        for (int z = 10; z < 14; ++z) {
+            for (int y = 4; y < 20; ++y) {
+                for (int x = 13; x < 17; ++x)
+                    cellDepth[scene.IndexOf(x, y, z)] = 0.7;
+            }
+        }
+
+        uint64_t fineSteps = 0;
+        uint64_t coarseSteps = 0;
+        SmokeGrid fine = MakeSmokeGrid(scene, cellDepth, 1);
+        SmokeGrid coarse = MakeSmokeGrid(scene, cellDepth, 4);
+        const auto fineTransmit = [&fine](Vec a, Vec b) {
+            return std::exp(-fine.Depth(a, b));
+        };
+        const auto coarseTransmit = [&coarse](Vec a, Vec b) {
+            return std::exp(-coarse.Depth(a, b));
+        };
+        const Network net = BuildNetwork(scene, settings);
+        std::vector<double> truth(scene.voxels.size(), 0);
+        std::vector<double> truthOpen(scene.voxels.size(), 0);
+        for (const Face& fire : net.faces) {
+            if (fire.emission == 0)
+                continue;
+
+            for (const Face& face : net.faces) {
+                if (face.x != 22 || Dot(NormalOf(fire.dir), Sub(face.center, fire.center)) <= 0 ||
+                    Dot(NormalOf(face.dir), Sub(face.center, fire.center)) >= 0)
+                    continue;
+
+                constexpr int MM = 4;
+                for (int i = 0; i < MM * MM; ++i) {
+                    const Vec pa = PointOnFace(fire, ((i % MM) + 0.5) / MM - 0.5, ((i / MM) + 0.5) / MM - 0.5);
+                    for (int k = 0; k < MM * MM; ++k) {
+                        const Vec pb = PointOnFace(face, ((k % MM) + 0.5) / MM - 0.5, ((k / MM) + 0.5) / MM - 0.5);
+                        const Vec d = Sub(pb, pa);
+                        const double r2 = Dot(d, d);
+                        const double g = std::max(0.0, Dot(NormalOf(fire.dir), d)) *
+                                         std::max(0.0, -Dot(NormalOf(face.dir), d)) /
+                                         (std::numbers::pi * r2 * r2 * MM * MM * MM * MM);
+                        const double amount = g * static_cast<double>(fire.emission);
+                        truthOpen[face.cell] += amount;
+                        truth[face.cell] += amount * fineTransmit(pa, pb);
+                    }
+                }
+            }
+        }
+
+        fine.steps = &fineSteps;
+        coarse.steps = &coarseSteps;
+        const struct {
+            const char* name;
+            int subdivide;
+            bool useFine;
+        } forms[] = {{"1 本目: つながり全体に粗い道筋(4³ のブロック)の通しやすさ", 0, false},
+                     {"2 本目: 煙の近くのつながりを細かくし、面と面はセルの細かさの通しやすさ", 1, true}};
+        for (const auto& form : forms) {
+            fineSteps = 0;
+            coarseSteps = 0;
+            MovingBox smoke{.active = true, .low = {13, 4, 10}, .high = {17, 20, 14}, .subdivide = form.subdivide};
+            if (form.useFine)
+                smoke.transmit = fineTransmit;
+            else
+                smoke.transmit = coarseTransmit;
+
+            BoxCost cost;
+            const TickResult result = Step(scene, net, {}, false, smoke, &cost);
+            double worst = 0;
+            double peak = 0;
+            double sum = 0;
+            double truthSum = 0;
+            for (int z = 4; z < 20; ++z) {
+                for (int y = 4; y < 20; ++y) {
+                    const size_t at = scene.IndexOf(22, y, z);
+                    worst = std::max(worst, std::fabs(static_cast<double>(result.absorbedPerCell[at]) - truth[at]));
+                    peak = std::max(peak, truthOpen[at]);
+                    sum += static_cast<double>(result.absorbedPerCell[at]);
+                    truthSum += truth[at];
+                }
+            }
+
+            std::printf(
+                "煙の壁 %s: 正しい値からのセルごとの差の最大 %.1f %%(煙の無い時の最大に対して)・板の和 %.3f・保存 %s・"
+                "煙の近くのつながり %llu・子の対 %llu・線分 %llu・格子を歩いた手間 %llu\n",
+                form.name, worst / peak * 100, sum / truthSum, Conserves(result) ? "ビット単位" : "崩れた",
+                static_cast<unsigned long long>(cost.candidates), static_cast<unsigned long long>(cost.subPairs),
+                static_cast<unsigned long long>(cost.segmentTests),
+                static_cast<unsigned long long>(fineSteps + coarseSteps));
+            EXPECT(Conserves(result));
+        }
+
+        // 費用: 段のある地形の焚き火の上の煙の柱(4 × 4 × 16。セルあたり 0.3)
+        const int size = argc > 4 ? std::atoi(argv[4]) : 32;
+        const Scene terrain = Terrain(size, 4);
+        const Network terrainNet = BuildNetwork(terrain, settings);
+        const int center = size / 2;
+        int ground = 0;
+        while (terrain.Opaque(center, ground, center))
+            ++ground;
+
+        std::vector<double> column(terrain.voxels.size(), 0);
+        for (int y = ground + 1; y < std::min(terrain.sy, ground + 17); ++y) {
+            for (int z = center - 2; z < center + 2; ++z) {
+                for (int x = center - 2; x < center + 2; ++x)
+                    column[terrain.IndexOf(x, y, z)] = 0.3;
+            }
+        }
+
+        SmokeGrid terrainFine = MakeSmokeGrid(terrain, column, 1);
+        SmokeGrid terrainCoarse = MakeSmokeGrid(terrain, column, 4);
+        for (int form = 0; form < 2; ++form) {
+            uint64_t steps = 0;
+            terrainFine.steps = &steps;
+            terrainCoarse.steps = &steps;
+            MovingBox smoke{.active = true,
+                            .low = {center - 2.0, ground + 1.0, center - 2.0},
+                            .high = {center + 2.0, ground + 17.0, center + 2.0},
+                            .subdivide = form};
+            if (form == 0)
+                smoke.transmit = [&terrainCoarse](Vec a, Vec b) {
+                    return std::exp(-terrainCoarse.Depth(a, b));
+                };
+            else
+                smoke.transmit = [&terrainFine](Vec a, Vec b) {
+                    return std::exp(-terrainFine.Depth(a, b));
+                };
+
+            BoxCost cost;
+            const std::vector<uint64_t> warm = Step(terrain, terrainNet, {}, false).carry;
+            const auto start = std::chrono::steady_clock::now();
+            const TickResult tick = Step(terrain, terrainNet, warm, false, smoke, &cost);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                                  .count();
+            std::printf(
+                "  %d³ の地形の煙の柱(%d 本目): つながり %zu のうち煙の近く %llu・子の対 %llu・線分 "
+                "%llu・格子を歩いた手間 %llu/刻み・"
+                "刻み %.1f ms(CPU)・保存 %s\n",
+                size, form + 1, terrainNet.links.size(), static_cast<unsigned long long>(cost.candidates),
+                static_cast<unsigned long long>(cost.subPairs), static_cast<unsigned long long>(cost.segmentTests),
+                static_cast<unsigned long long>(steps), ms, Conserves(tick) ? "ビット単位" : "崩れた");
+            EXPECT(Conserves(tick));
+        }
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
     // 動く物の箱(T-1080 の 2 本目): 箱を石として作り直したつながり(正しい)と、箱の無いつながり + 刻みごとの箱の検査を比べる
     if (mode == 'm') {
         const auto shape = [](bool withBox) {
@@ -1857,42 +2272,95 @@ int main(int argc, char** argv) {
         const Scene without = MakeScene(32, 24, 24, shape(false));
         const Network exactNet = BuildNetwork(withBox, settings);
         const Network openNet = BuildNetwork(without, settings);
-        const MovingBox box{.active = true, .low = {13, 10, 10}, .high = {16, 14, 14}};
-        BoxCost cost;
-        const TickResult exact = Step(withBox, exactNet, {}, false);
-        const TickResult moving = Step(without, openNet, {}, false, box, &cost);
-        const TickResult open = Step(without, openNet, {}, false);
-        double exactSum = 0;
-        double movingSum = 0;
-        double peak = 0;
-        double worst = 0;
-        int exactDark = 0;
-        int movingDark = 0;
-        for (int z = 4; z < 20; ++z) {
-            for (int y = 4; y < 20; ++y) {
-                const size_t at = without.IndexOf(22, y, z);
-                const auto e = static_cast<double>(exact.absorbedPerCell[at]);
-                const auto m = static_cast<double>(moving.absorbedPerCell[at]);
-                const auto o = static_cast<double>(open.absorbedPerCell[at]);
-                exactSum += e;
-                movingSum += m;
-                peak = std::max(peak, o);
-                worst = std::max(worst, std::fabs(m - e));
-                exactDark += e < 0.05 * o ? 1 : 0;
-                movingDark += m < 0.05 * o ? 1 : 0;
+        // 正しい値: 焚き火の 6 面から受け手の板の各面へ、4 × 4 の点どうしの積分(箱は解析で遮る)。直接の光だけ(1 刻み目・黒い受け手)
+        const MovingBox truthBox{.active = true, .low = {13, 10, 10}, .high = {16, 14, 14}};
+        std::vector<double> truth(without.voxels.size(), 0);
+        std::vector<double> truthOpen(without.voxels.size(), 0);
+        for (const Face& fire : openNet.faces) {
+            if (fire.emission == 0)
+                continue;
+
+            for (const Face& face : openNet.faces) {
+                if (face.x != 22 || Dot(NormalOf(fire.dir), Sub(face.center, fire.center)) <= 0 ||
+                    Dot(NormalOf(face.dir), Sub(face.center, fire.center)) >= 0)
+                    continue;
+
+                constexpr int MM = 4;
+                for (int i = 0; i < MM * MM; ++i) {
+                    const Vec pa = PointOnFace(fire, ((i % MM) + 0.5) / MM - 0.5, ((i / MM) + 0.5) / MM - 0.5);
+                    for (int k = 0; k < MM * MM; ++k) {
+                        const Vec pb = PointOnFace(face, ((k % MM) + 0.5) / MM - 0.5, ((k / MM) + 0.5) / MM - 0.5);
+                        const Vec d = Sub(pb, pa);
+                        const double r2 = Dot(d, d);
+                        const double g = std::max(0.0, Dot(NormalOf(fire.dir), d)) *
+                                         std::max(0.0, -Dot(NormalOf(face.dir), d)) /
+                                         (std::numbers::pi * r2 * r2 * MM * MM * MM * MM);
+                        const double amount = g * static_cast<double>(fire.emission);
+                        truthOpen[face.cell] += amount;
+                        if (!SegmentHitsBox(pa, pb, truthBox.low, truthBox.high))
+                            truth[face.cell] += amount;
+                    }
+                }
             }
         }
 
-        std::printf(
-            "動く箱 3 × 4 × 4(焚き火と受け手の板の間): 板が受けた和 刻みの検査 / 作り直し = %.3f・セルごとの差の最大 "
-            "%.1f %%(箱の無い時の最大に対して)・"
-            "陰(5 %% 未満)のセル 作り直し %d / 刻みの検査 %d・保存 %s・つながり %zu のうち包みを通った "
-            "%llu・線分と箱の検査 %llu・陰のつながり %llu\n",
-            movingSum / exactSum, worst / peak * 100, exactDark, movingDark,
-            Conserves(moving) ? "ビット単位" : "崩れた", openNet.links.size(),
-            static_cast<unsigned long long>(cost.candidates), static_cast<unsigned long long>(cost.segmentTests),
-            static_cast<unsigned long long>(cost.shadowed));
-        EXPECT(Conserves(moving));
+        for (const int subdivide : {0, 1, 2}) {
+            const MovingBox box{.active = true, .low = {13, 10, 10}, .high = {16, 14, 14}, .subdivide = subdivide};
+            BoxCost cost;
+            const TickResult exact = Step(withBox, exactNet, {}, false);
+            const TickResult moving = Step(without, openNet, {}, false, box, &cost);
+            const TickResult open = Step(without, openNet, {}, false);
+            double exactSum = 0;
+            double movingSum = 0;
+            double peak = 0;
+            double worst = 0;
+            int exactDark = 0;
+            int movingDark = 0;
+            int truthDark = 0;
+            double worstExact = 0;
+            double worstMoving = 0;
+            double worstOpen = 0;
+            double truthPeak = 0;
+            double truthSum = 0;
+            for (int z = 4; z < 20; ++z) {
+                for (int y = 4; y < 20; ++y) {
+                    const size_t at = without.IndexOf(22, y, z);
+                    const auto e = static_cast<double>(exact.absorbedPerCell[at]);
+                    const auto m = static_cast<double>(moving.absorbedPerCell[at]);
+                    const auto o = static_cast<double>(open.absorbedPerCell[at]);
+                    exactSum += e;
+                    movingSum += m;
+                    peak = std::max(peak, o);
+                    worst = std::max(worst, std::fabs(m - e));
+                    exactDark += e < 0.05 * o ? 1 : 0;
+                    movingDark += m < 0.05 * o ? 1 : 0;
+                    truthDark += truth[at] < 0.05 * truthOpen[at] ? 1 : 0;
+                    truthPeak = std::max(truthPeak, truthOpen[at]);
+                    truthSum += truth[at];
+                    worstExact = std::max(worstExact, std::fabs(e - truth[at]));
+                    worstMoving = std::max(worstMoving, std::fabs(m - truth[at]));
+                    worstOpen = std::max(worstOpen, std::fabs(o - truthOpen[at]));
+                }
+            }
+
+            std::printf(
+                "動く箱 3 × 4 × 4(細かくする %d): 板が受けた和 刻みの検査 / 作り直し = %.3f・セルごとの差の最大 "
+                "%.1f %%(箱の無い時の最大に対して)・"
+                "陰(5 %% 未満)のセル 作り直し %d / 刻みの検査 %d・保存 %s・つながり %zu のうち包みを通った "
+                "%llu・線分と箱の検査 %llu・陰のつながり %llu\n",
+                subdivide, movingSum / exactSum, worst / peak * 100, exactDark, movingDark,
+                Conserves(moving) ? "ビット単位" : "崩れた", openNet.links.size(),
+                static_cast<unsigned long long>(cost.candidates), static_cast<unsigned long long>(cost.segmentTests),
+                static_cast<unsigned long long>(cost.shadowed));
+            std::printf(
+                "  子の対 %llu・正しい値(面の積分)からのセルごとの差の最大: 作り直し %.1f %%・刻みの検査 %.1f "
+                "%%(箱の無い時の最大に対して)・"
+                "和 作り直し %.3f・刻みの検査 %.3f・陰のセル 正しくは %d・箱の無い時のつながりの差の最大 %.1f %%\n",
+                static_cast<unsigned long long>(cost.subPairs), worstExact / truthPeak * 100,
+                worstMoving / truthPeak * 100, exactSum / truthSum, movingSum / truthSum, truthDark,
+                worstOpen / truthPeak * 100);
+            EXPECT(Conserves(moving));
+        }
 
         // 費用: 段のある地形の焚き火の近くに 2³ の箱
         const int size = argc > 4 ? std::atoi(argv[4]) : 32;
@@ -1903,19 +2371,28 @@ int main(int argc, char** argv) {
         while (terrain.Opaque(center + 4, ground, center))
             ++ground;
 
-        BoxCost terrainCost;
-        const MovingBox cart{.active = true,
-                             .low = {center + 4.0, ground + 0.0, center + 0.0},
-                             .high = {center + 6.0, ground + 2.0, center + 2.0}};
-        const auto start = std::chrono::steady_clock::now();
-        const TickResult tick = Step(terrain, net, {}, false, cart, &terrainCost);
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        std::printf(
-            "  %d³ の地形で 2³ の箱: つながり %zu のうち包みを通った %llu・線分と箱の検査 %llu/刻み・陰のつながり "
-            "%llu・刻み %.1f ms(CPU)・保存 %s\n",
-            size, net.links.size(), static_cast<unsigned long long>(terrainCost.candidates),
-            static_cast<unsigned long long>(terrainCost.segmentTests),
-            static_cast<unsigned long long>(terrainCost.shadowed), ms, Conserves(tick) ? "ビット単位" : "崩れた");
+        for (const int subdivide : {0, 1, 2}) {
+            BoxCost terrainCost;
+            const MovingBox cart{.active = true,
+                                 .low = {center + 4.0, ground + 0.0, center + 0.0},
+                                 .high = {center + 6.0, ground + 2.0, center + 2.0},
+                                 .subdivide = subdivide};
+            const std::vector<uint64_t> warm = Step(terrain, net, {}, false).carry;
+            const auto start = std::chrono::steady_clock::now();
+            const TickResult tick = Step(terrain, net, warm, false, cart, &terrainCost);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                                  .count();
+            std::printf("  細かくする %d: 子の対 %llu\n", subdivide,
+                        static_cast<unsigned long long>(terrainCost.subPairs));
+            std::printf(
+                "  %d³ の地形で 2³ の箱: つながり %zu のうち包みを通った %llu・線分と箱の検査 %llu/刻み・陰のつながり "
+                "%llu・刻み %.1f ms(CPU)・保存 %s\n",
+                size, net.links.size(), static_cast<unsigned long long>(terrainCost.candidates),
+                static_cast<unsigned long long>(terrainCost.segmentTests),
+                static_cast<unsigned long long>(terrainCost.shadowed), ms, Conserves(tick) ? "ビット単位" : "崩れた");
+            EXPECT(Conserves(tick));
+        }
+
         return failureCount == 0 ? 0 : 1;
     }
 
