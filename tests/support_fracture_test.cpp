@@ -52,12 +52,15 @@ namespace {
     constexpr double GRAVITY = 9.80665;
     constexpr double ONE = sim::SUPPORT_INTACT_FULL;
 
-    // windowMm = 割れの判定の長さ ℓ(Window だけ。0 = 破片の大きさ 0.5 m)。割れ面のエネルギーは破片の大きさから(ℓ によらず 25 J/m²)
+    // windowMm = 割れの判定の長さ ℓ(0 = 破片の大きさ 0.5 m)。ℓ = 硬さ × 割れ面のエネルギー ÷ 引きの強さ²(D-644)なので、
+    // ℓ を変える = 割れ面のエネルギー G = ℓ × σt² ÷ 硬さ を書く(ℓ 0.5 / 1 / 2 m = 25 / 50 / 100 J/m²。G が変わると軟化の傾きも変わる)
     sim::SupportStrength Strength(uint64_t windowMm = 0) {
+        const uint64_t energyMj = windowMm * ROCK_TENSILE_KPA * ROCK_TENSILE_KPA * 1000 / ROCK_KPA;
+
         return {.compressiveKpa = ROCK_COMPRESSIVE_KPA,
                 .tensileKpa = ROCK_TENSILE_KPA,
-                .fragmentMm = 500,
-                .materialLengthMm = windowMm};
+                .fractureEnergyMjPerM2 = energyMj,
+                .fragmentMm = 500};
     }
 
     std::string RuleName(sim::FractureRule rule, uint64_t windowMm = 0) {

@@ -87,7 +87,11 @@ namespace bicameral::sim {
                                   .quotient;
         m_speedStep = (uint32_t)std::clamp<uint64_t>(step, 1, ONE);
         m_rootStrength = FxSqrtU64(m_strength.compressiveKpa * tensile);
-        m_windowMm = m_strength.materialLengthMm != 0 ? m_strength.materialLengthMm : m_strength.fragmentMm;
+        // 割れの判定の長さ ℓ = 硬さ × 割れ面のエネルギー ÷ 引きの強さ²(Irwin の長さ。D-644 = ADR-0448 の (C))。法則の下限 ℓ_min 0.5 m
+        // (kPa × mJ/m² ÷ kPa² = 10^-3 m → ÷ 1000 で mm)
+        const FxU128 irwin = FxMulU64Full(stiffness, m_fractureEnergy);
+        const uint64_t lengthMm = FxDivU128By64(irwin, std::max<uint64_t>(tensile * tensile * 1000, 1)).quotient;
+        m_windowMm = std::max(lengthMm, SUPPORT_FRACTURE_MIN_LENGTH_MM);
 
         Separate();
         Rebuild();
