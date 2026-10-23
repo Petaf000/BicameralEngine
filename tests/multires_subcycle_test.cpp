@@ -113,16 +113,12 @@ namespace {
         return result;
     }
 
-    // 現実の伝導率(試験の表の 1/5000〜1/20000。multires_conduction_test の計測)なら、頭打ちにならない最後のレベルと、
+    // 現実の伝導率(T-1066 から表の値そのもの)で、頭打ちにならない最後のレベルと、
     // Δk ≤ 3 で本当の速さになるレベルの上限(レベル k の一辺 = 0.5 m × 2^-k)
     void LogRealBaseLevel(const BakedReactionTable& table) {
-        constexpr uint32_t AIR_SCALE = 5000;
-        constexpr uint32_t CRATE_SCALE = 20000;
         const ReactionTableView view = table.View();
-        MrThermal air = MrCellThermal(view, test::MakeConductionAir(table, 300000));
-        MrThermal crate = MrCellThermal(view, test::MakeMultiresRootCells(table)[MrCellIndex(3, 4, 5)]);
-        air.conductance /= AIR_SCALE;
-        crate.conductance /= CRATE_SCALE;
+        const MrThermal air = MrCellThermal(view, test::MakeConductionAir(table, 300000));
+        const MrThermal crate = MrCellThermal(view, test::MakeMultiresRootCells(table)[MrCellIndex(3, 4, 5)]);
         const int32_t airBase = MrSubcycleBaseLevel(air);
         const int32_t crateBase = MrSubcycleBaseLevel(crate);
         const auto gap = static_cast<int32_t>(MAX_GAP);
