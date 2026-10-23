@@ -129,6 +129,7 @@
 - **シェーダーが毎段読む大きい SRV をアップロードのヒープから直接読まない**(既定のヒープへ写す。PCIe 越しの読みでセルの数に対して超線形に遅くなる。T-0374)。
 - **シミュの共通のコード(reaction.hlsli・multires.hlsli など)で、書き換えた構造体の配列を動的な添字で読まない**(GPU でローカルの配列になり、
   HW の Work Graph が止まった。決まった数の回し + `FX_UNROLL` で選ぶ。速さ・優先度・反応物だけ読む所は表の `RateRule`。T-0397)。
+- **シミュの HLSL の式に 32bit を超える定数を書かない**(32bit の定数の積と割り算に分ける。例 1.25 × 10^14 → 125000000 × 1000000 の積・2 回の割り算。GPU で上の 32bit が壊れた実例あり: T-1078・ADR-0451)。
 - **欄の値は `field.values` を直接読まず `LoadNestField` か `FieldPageValues(store, page)` で読む**(欄の頁は疎で、無い頁は 0。T-0921・ADR-0403)。
 - GBV(GPU-based validation)は **debug のビルドだけ**に付く(BICAMERAL_GPU_VALIDATION。release には付かない)。`--no-gbv` は **GPU の試験の実行ファイル(gpu_*_test。tests/gpu_test_options.h)の引数**で、bicameral(エンジン本体)には無い(bicameral は物理を入れると自分で GBV を切る。T-0098)。debug で多重解像度・溢れの HW を `run -Exe gpu_multires_test -- ... --no-gbv` のように流す時は付ける(付けないと極端に遅く、止まったように見える。T-0384)。ctest の重い組(gpu_multires_wide_*・gpu_probe_sim など)は登録で付けてある。
 - **.ps1 は UTF-8(BOM 付き)+ CRLF で保存する。** BOM が無いと Windows PowerShell 5.1 が日本語を CP932 で読み、文字化けや構文エラーになる。
