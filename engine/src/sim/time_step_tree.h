@@ -62,6 +62,9 @@ namespace bicameral::sim {
         // 前線の緩衝(T-1014 の見立ての確かめ): 望みの e が 0 の枠(歩の変化が予算の 1/4 を超えた・触られた)の隣も e = 0 に。
         // 隣の差 1 段の決まりだけだと、前線の隣は予算と関係なく e = 1 になれる
         bool frontBuffer = false;
+        // 前線の緩衝を揃える単位(groupShift の枠の組)の数で(T-1074。0 = 上の frontBuffer の形): 動いている単位(どれかの枠の
+        // 望みの e が 0)から面の隣をたどってこの数の単位までを e = 0 に。単位の物の長さ × これ が緩衝の幅
+        uint32_t frontBufferUnits = 0;
     };
 
     // 面 1 つ(a = 細かい側か、同じレベルなら − 側。b = 相手)。係数は a の単位 / 刻み
@@ -129,7 +132,9 @@ namespace bicameral::sim {
         uint64_t worstResidual = 0;  // 部品の残差の計器の最大(式の単位。解けきらなかった所)
         uint64_t events = 0;
         uint64_t truncations = 0;
-        uint64_t retakes = 0;  // 取り直した枠の数(2 通り目)
+        uint64_t retakes = 0;          // 取り直した枠の数(2 通り目)
+        uint64_t zeroCellSteps = 0;    // e = 0 の列で解いたセル(T-1074)
+        uint64_t forcedCellSteps = 0;  // そのうち自分の望みの e は 0 でない枠(緩衝・隣の差・揃える相手で毎刻みにされた)
         int32_t widestNeighborGap = 0;
         uint32_t negativeValues = 0;
 

@@ -552,6 +552,16 @@ namespace bicameral::sim {
             steps.worstResidual = std::max(steps.worstResidual, result.worstResidual);
             steps.cellSteps += solved.built.cells.size();
             ++steps.solves;
+            if (span.exponent == 0) {
+                steps.zeroCellSteps += solved.built.cells.size();
+                for (const uint32_t slot : span.slots) {
+                    if (steps.desired[slot] == 0)
+                        continue;
+
+                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                        steps.forcedCellSteps += world.layout.stepped[CellId(slot, index)];
+                }
+            }
 
             return solved;
         }
@@ -645,6 +655,46 @@ namespace bicameral::sim {
             return true;
         }
 
+        // 前線の緩衝を単位で(T-1074): 動いている単位から面の隣をたどって frontBufferUnits 単位までの枠に印
+        std::vector<uint8_t> BufferedBlocks(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
+            const TimeTreeSteps& steps = world.steps;
+            std::vector<uint32_t> distance(world.nest.blocks.size(), UINT32_MAX);
+            std::vector<uint32_t> frontier;
+            const auto reach = [&](uint32_t slot, uint32_t d, std::vector<uint32_t>& into) {
+                if (distance[slot] <= d)
+                    return;
+
+                distance[slot] = d;
+                into.push_back(slot);
+                for (const uint32_t mate : world.layout.mates[slot]) {
+                    if (distance[mate] > d) {
+                        distance[mate] = d;
+                        into.push_back(mate);
+                    }
+                }
+            };
+            for (const uint32_t slot : world.layout.blocks) {
+                if (steps.desired[slot] == 0)
+                    reach(slot, 0, frontier);
+            }
+
+            for (uint32_t d = 1; d <= setup.frontBufferUnits && !frontier.empty(); ++d) {
+                std::vector<uint32_t> next;
+                for (const uint32_t slot : frontier) {
+                    for (const uint32_t neighbor : world.layout.neighbors[slot])
+                        reach(neighbor, d, next);
+                }
+
+                frontier = std::move(next);
+            }
+
+            std::vector<uint8_t> buffered(world.nest.blocks.size(), 0);
+            for (const uint32_t slot : world.layout.blocks)
+                buffered[slot] = distance[slot] <= setup.frontBufferUnits ? 1 : 0;
+
+            return buffered;
+        }
+
         // 隣どうしの差は 1 段まで・揃える相手(groupShift)とは同じ e
         std::vector<int32_t> ChooseExponents(const TimeTreeSetup& setup, TimeTreeWorld& world, uint64_t tick) {
             TimeTreeSteps& steps = world.steps;
@@ -658,16 +708,29 @@ namespace bicameral::sim {
 
             // 退く道: 毎刻みと決まった枠(望みの e が 0)の隣は毎刻み。ほかの隣とは差を問わない
             const bool jump = setup.select == TimeTreeSelect::Jump;
+            const bool units = setup.frontBufferUnits > 0 && !jump;
+            const std::vector<uint8_t> buffered = units ? BufferedBlocks(setup, world) : std::vector<uint8_t>{};
             bool changed = true;
             while (changed) {
                 changed = false;
                 for (const uint32_t slot : world.layout.blocks) {
+                    if (units && buffered[slot] != 0 && Current(steps, choice, slot) > 0) {
+                        // 0 に縮める(歩の途中なら打ち切る)= 長さ 0 の相手に揃えるのと同じ
+                        if (choice.next[slot] < 0) {
+                            TruncateBlock(setup, world, slot, choice.tick);
+                            choice.next[slot] = FirstNext(setup, steps, choice, slot);
+                        }
+
+                        choice.next[slot] = 0;
+                        changed = true;
+                    }
+
                     for (const uint32_t neighbor : world.layout.neighbors[slot]) {
                         const bool active = steps.desired[neighbor] == 0;
                         if (jump && !active)
                             continue;
 
-                        const int32_t allowed = jump || (setup.frontBuffer && active) ? 0 : 1;
+                        const int32_t allowed = jump || (setup.frontBuffer && !units && active) ? 0 : 1;
                         changed = LimitTo(setup, world, choice, slot, neighbor, allowed) || changed;
                     }
 

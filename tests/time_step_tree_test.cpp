@@ -17,6 +17,7 @@
 //   火事は前線(着火した・半分燃えた最も遠い x)が届いた刻みと燃えた量を毎刻みと比べる(遊びに効く結果が予算で変わるか)。
 // 引数: <forward|grain|grain-pond|grain-fire|night|fire> [select=previous|retake|jump] [budget=予算のずらし]
 //       [budgetmk=予算(mK)] [group=揃える段] [buffer=1(前線の緩衝)]
+//       [bufferunits=前線の緩衝の単位の数(T-1074)] [shape=mixed|coarse|fine|finer(night・fire の木。1 m・0.5 m・0.25 m の根だけ)]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 #include <algorithm>
 #include <chrono>
@@ -126,6 +127,7 @@ namespace {
     bool frontBuffer = false;
     // select= を書いた時は forward をその選び方だけで(T-1063。予算ごとに 1 通り目 + 前線の緩衝だけ確かめる)
     bool selectGiven = false;
+    uint32_t bufferUnits = 0;  // 前線の緩衝を単位(groupShift の組)の数で(T-1074。0 = buffer= の形)
 
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
@@ -150,6 +152,7 @@ namespace {
         setup.budgetQ16 = budgetMk != 0 ? budgetMk << 16 : (1ull << 16) >> budgetShift;
         setup.select = selectRule;
         setup.frontBuffer = frontBuffer;
+        setup.frontBufferUnits = bufferUnits;
 
         return setup;
     }
@@ -160,6 +163,11 @@ namespace {
         uint32_t roots = 4;
         bool refine = true;
     };
+
+    // night・fire の木(shape=。T-1074): mixed = 既定(1 m の根 4 つ + 0.5 m の子 1 つ)・coarse / fine / finer = 1 m・0.5 m・0.25 m の根だけ
+    // (どれも x に 32 m。ブロックの物の長さ 8 m・4 m・2 m)
+    TreeShape sceneShape{};
+    std::string shapeName = "mixed";
 
     double CellMeters(int32_t level) {
         return 0.5 * std::ldexp(1.0, -level);
@@ -195,11 +203,12 @@ namespace {
 
     TimeTreeWorld MakeWorld(const TimeTreeSetup& setup, const Material& material, const TreeShape& shape,
                             const Profile& profile) {
-        MultiresCapacity capacity{.worldBlocks = 16,
+        const uint32_t blocks = std::max(16u, 2 * shape.roots);
+        MultiresCapacity capacity{.worldBlocks = blocks,
                                   .observerBlocks = 0,
                                   .fractions = 16,
-                                  .pages = 16,
-                                  .indexEntries = 32,
+                                  .pages = blocks,
+                                  .indexEntries = 2 * blocks,
                                   .ledgerColumns = 4,
                                   .rootLevel = shape.rootLevel};
         MultiresNest nest = MakeMultiresNest(capacity);
@@ -531,8 +540,12 @@ namespace {
         if (selectRule == TimeTreeSelect::Jump)
             return std::format("退く道 1 本目・予算 {}", BudgetText());
 
-        return std::format("{} 通り目{}・予算 {}", selectRule == TimeTreeSelect::Retake ? 2 : 1,
-                           frontBuffer ? "・前線の緩衝" : "", BudgetText());
+        std::string buffer = frontBuffer ? "・前線の緩衝" : "";
+        if (bufferUnits > 0)
+            buffer = std::format("・前線の緩衝 {} 単位", bufferUnits);
+
+        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}", selectRule == TimeTreeSelect::Retake ? 2 : 1,
+                           buffer, BudgetText(), shapeName, groupShift);
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -551,6 +564,12 @@ namespace {
             run.steps.truncations, run.steps.retakes, run.steps.widestNeighborGap, run.steps.negativeValues,
             run.steps.sleeps, run.steps.wakes, run.steps.worstResidual, solverCycles,
             solverGalerkin ? "・Galerkin" : "");
+        const double cellTicks = static_cast<double>(cells) * static_cast<double>(ticks);
+        Log(Channel::Sim, Level::Info,
+            "{} {}: 毎刻み(e = 0)で解いたセル {:.5f} /セル/刻み・そのうち自分の望みの e が 0 でない枠 "
+            "{:.5f}・解いたセル {}",
+            scene, name, static_cast<double>(run.steps.zeroCellSteps) / cellTicks,
+            static_cast<double>(run.steps.forcedCellSteps) / cellTicks, run.steps.cellSteps);
     }
 
     // --- 1・4・5. 精度と費用(混ぜた木)---
@@ -602,7 +621,7 @@ namespace {
         }
 
         const TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Fixed);
-        const TimeTreeWorld world = MakeWorld(setup, material, TreeShape{}, profile);
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
         RunResult reference = Run(setup, material, world, ticks, ticks, ignition, true, fronts != nullptr);
         LogRun(scene, "毎刻み", world, reference, ticks);
         conserved = reference.conserved;
@@ -686,16 +705,20 @@ namespace {
 
     void CheckScene(std::string_view scene, std::string_view tag, const Material& material, const Profile& profile,
                     uint64_t ticks, const Ignition& ignition, bool reactantExact) {
-        const TreeShape shape;
+        const TreeShape shape = sceneShape;
         TimeTreeSetup trialSetup = MakeSetup(material, trialFixed ? TimeStepRule::Fixed : TimeStepRule::Change);
+        trialSetup.groupShift = groupShift;
         if (trialCycles != 0)
             trialSetup.cycles = trialCycles;
+
+        const std::string fullTag = shapeName == "mixed" ? std::string(tag) : std::format("{}_{}", tag, shapeName);
 
         bool referenceConserved = true;
         const bool fronts = ignition.tick != 0;
         std::vector<FrontSample> referenceFronts;
-        const std::vector<Snapshot> referenceSnapshots = ReferenceSnapshots(
-            scene, tag, material, profile, ticks, ignition, referenceConserved, fronts ? &referenceFronts : nullptr);
+        const std::vector<Snapshot> referenceSnapshots = ReferenceSnapshots(scene, fullTag, material, profile, ticks,
+                                                                            ignition, referenceConserved,
+                                                                            fronts ? &referenceFronts : nullptr);
         TimeTreeWorld trialWorld = MakeWorld(trialSetup, material, shape, profile);
         if (perturbMeters >= 0.0)
             Perturb(trialSetup, trialWorld);
@@ -918,7 +941,19 @@ namespace {
                 budgetShift = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "budgetmk")
                 budgetMk = static_cast<uint64_t>(std::atoll(value.c_str()));
-            else if (key == "group")
+            else if (key == "bufferunits")
+                bufferUnits = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "shape") {
+                shapeName = value;
+                if (value == "coarse")
+                    sceneShape = {.rootLevel = -1, .roots = 4, .refine = false};
+                else if (value == "fine")
+                    sceneShape = {.rootLevel = 0, .roots = 8, .refine = false};
+                else if (value == "finer")
+                    sceneShape = {.rootLevel = 1, .roots = 16, .refine = false};
+                else
+                    shapeName = "mixed";
+            } else if (key == "group")
                 groupShift = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "cycles")
                 solverCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
