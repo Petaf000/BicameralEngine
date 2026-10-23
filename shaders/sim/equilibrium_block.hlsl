@@ -240,3 +240,247 @@ EqbWideBlock CoarseSum(EqbGpuNode entry, uint32_t parent, uint32_t target) {
 
     StoreWork(word, values);
 }
+
+// --- 解き: 共役勾配(EquilibriumBlockOptions::lineSearch。T-1085・ADR-0455。equilibrium_block.cpp の ConjugateStep と同じ式)---
+// 段 0 のセル(節 0〜セルの数 − 1。セルの数は g_eqbList)だけ。V の 1 回ごとに
+//   ConjugateSave → (V サイクル)→ ConjugateResidual → ConjugateBeta → ConjugateDirection → ConjugatePush → ConjugateAlpha → ConjugateUpdate。
+// 内積は 128bit の和(2^128 を法として厳密。足す順によらない)を 1 つのグループで集める。g_eqbFirst = 何回目の V か(0 なら前の向きを捨てる)
+static const uint32_t EQB_REDUCE_THREADS = 256;
+
+groupshared uint64_t s_eqbHighA[EQB_REDUCE_THREADS];
+groupshared uint64_t s_eqbLowA[EQB_REDUCE_THREADS];
+groupshared uint64_t s_eqbHighB[EQB_REDUCE_THREADS];
+groupshared uint64_t s_eqbLowB[EQB_REDUCE_THREADS];
+
+uint32_t ConjugateWord(uint32_t which, uint32_t cell) {
+    return EqbConjugateWord(EQB_COMPONENTS, g_eqbNodeCapacity, g_eqbList, which, cell);
+}
+
+uint32_t ConjugateScalarWord(uint32_t index) {
+    return EqbConjugateScalarWord(EQB_COMPONENTS, g_eqbNodeCapacity, g_eqbList, index);
+}
+
+FxU128 LoadWide(uint32_t index) {
+    FxU128 value;
+    value.hi = (uint64_t)g_eqbWork[ConjugateScalarWord(index)];
+    value.lo = (uint64_t)g_eqbWork[ConjugateScalarWord(index + 1)];
+
+    return value;
+}
+
+void StoreWide(uint32_t index, FxU128 value) {
+    g_eqbWork[ConjugateScalarWord(index)] = (int64_t)value.hi;
+    g_eqbWork[ConjugateScalarWord(index + 1)] = (int64_t)value.lo;
+}
+
+// 段 0 の節 node の rhs − A x(x は作業場の base から節 × k で並ぶ。withRhs でなければ −A x。NodeResidual と同じ和)
+EqbVector NodeResidualOf(uint32_t node, uint32_t base, bool withRhs) {
+    const EqbGpuNode entry = g_eqbNodes[node];
+    EqbWideVector sums = EqbZeroWideVector();
+    sums = EqbAddProduct(sums, LoadBlock(EqbDiagonalWord(EQB_COMPONENTS, node)), LoadWork(base + node * EQB_COMPONENTS),
+                         EQB_COMPONENTS);
+    for (uint32_t link = entry.rowStart; link < entry.rowEnd; ++link) {
+        const uint32_t neighbor = g_eqbIndices[link];
+        sums = EqbAddProduct(sums, LoadBlock(EqbBlockWord(EQB_COMPONENTS, g_eqbNodeCapacity, link)),
+                             LoadWork(base + neighbor * EQB_COMPONENTS), EQB_COMPONENTS);
+    }
+
+    EqbVector rhs = EqbZeroVector();
+    if (withRhs)
+        rhs = LoadWork(EqbRhsWord(EQB_COMPONENTS, g_eqbNodeCapacity, node));
+
+    return EqbResidual(rhs, sums, EQB_COMPONENTS, g_eqbShift);
+}
+
+// グループの 2 つの和(A・B)を足し合わせ、スレッド 0 に残す
+void ReduceTwo(uint32_t thread, FxU128 sumA, FxU128 sumB) {
+    s_eqbHighA[thread] = sumA.hi;
+    s_eqbLowA[thread] = sumA.lo;
+    s_eqbHighB[thread] = sumB.hi;
+    s_eqbLowB[thread] = sumB.lo;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint32_t stride = EQB_REDUCE_THREADS / 2; stride > 0; stride >>= 1) {
+        if (thread < stride) {
+            FxU128 mine;
+            FxU128 other;
+            mine.hi = s_eqbHighA[thread];
+            mine.lo = s_eqbLowA[thread];
+            other.hi = s_eqbHighA[thread + stride];
+            other.lo = s_eqbLowA[thread + stride];
+            const FxU128 addedA = EqbWideAdd(mine, other);
+            s_eqbHighA[thread] = addedA.hi;
+            s_eqbLowA[thread] = addedA.lo;
+            mine.hi = s_eqbHighB[thread];
+            mine.lo = s_eqbLowB[thread];
+            other.hi = s_eqbHighB[thread + stride];
+            other.lo = s_eqbLowB[thread + stride];
+            const FxU128 addedB = EqbWideAdd(mine, other);
+            s_eqbHighB[thread] = addedB.hi;
+            s_eqbLowB[thread] = addedB.lo;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+FxU128 ReducedA() {
+    FxU128 value;
+    value.hi = s_eqbHighA[0];
+    value.lo = s_eqbLowA[0];
+
+    return value;
+}
+
+FxU128 ReducedB() {
+    FxU128 value;
+    value.hi = s_eqbHighB[0];
+    value.lo = s_eqbLowB[0];
+
+    return value;
+}
+
+FxU128 ZeroWide() {
+    FxU128 value;
+    value.hi = 0;
+    value.lo = 0;
+
+    return value;
+}
+
+// V の前の値を控える(1 回目の V なら前の向きを捨てる)
+[numthreads(64, 1, 1)] void EquilibriumBlockConjugateSave(uint32_t thread : SV_DispatchThreadID) {
+    if (thread == 0 && g_eqbFirst == 0)
+        g_eqbWork[ConjugateScalarWord(0)] = 0;
+
+    if (thread >= g_eqbCount)
+        return;
+
+    StoreWork(ConjugateWord(EQB_CONJUGATE_BEFORE, thread), LoadWork(EqbValueWord(EQB_COMPONENTS, thread)));
+}
+
+    // z = V の後 − V の前(向きの置き場へ)・r = b − A × V の前
+    [numthreads(64, 1, 1)] void EquilibriumBlockConjugateResidual(uint32_t thread : SV_DispatchThreadID) {
+    if (thread >= g_eqbCount)
+        return;
+
+    const EqbVector after = LoadWork(EqbValueWord(EQB_COMPONENTS, thread));
+    const EqbVector before = LoadWork(ConjugateWord(EQB_CONJUGATE_BEFORE, thread));
+    EqbVector direction = EqbZeroVector();
+    FX_UNROLL for (uint32_t c = 0; c < EQB_MAX_COMPONENTS; ++c) {
+        if (c < EQB_COMPONENTS)
+            direction.v[c] = after.v[c] - before.v[c];
+    }
+
+    StoreWork(ConjugateWord(EQB_CONJUGATE_DIRECTION, thread), direction);
+    StoreWork(ConjugateWord(EQB_CONJUGATE_RESIDUAL, thread),
+              NodeResidualOf(thread, ConjugateWord(EQB_CONJUGATE_BEFORE, 0), true));
+}
+
+// zᵀr と zᵀ(r − r_前)→ β = zᵀ(r − r_前) ÷ z_前ᵀr_前(前の向きが使える時だけ。Polak–Ribière)
+[numthreads(256, 1, 1)] void EquilibriumBlockConjugateBeta(uint32_t thread : SV_GroupThreadID) {
+    const uint32_t words = g_eqbCount * EQB_COMPONENTS;
+    const uint32_t direction = ConjugateWord(EQB_CONJUGATE_DIRECTION, 0);
+    const uint32_t residual = ConjugateWord(EQB_CONJUGATE_RESIDUAL, 0);
+    const uint32_t previous = ConjugateWord(EQB_CONJUGATE_RESIDUAL_PREVIOUS, 0);
+    FxU128 zr = ZeroWide();
+    FxU128 change = ZeroWide();
+    for (uint32_t i = thread; i < words; i += EQB_REDUCE_THREADS) {
+        const int64_t z = g_eqbWork[direction + i];
+        const int64_t r = g_eqbWork[residual + i];
+        zr = EqbWideAdd(zr, FxMulS64Full(z, r));
+        change = EqbWideAdd(change, FxMulS64Full(z, r - g_eqbWork[previous + i]));
+    }
+
+    ReduceTwo(thread, zr, change);
+    if (thread != 0)
+        return;
+
+    const bool valid = g_eqbWork[ConjugateScalarWord(0)] != 0;
+    int64_t beta = 0;
+    if (valid)
+        beta = EqbSignedRatio(ReducedB(), LoadWide(1));
+
+    g_eqbWork[ConjugateScalarWord(3)] = beta;
+    StoreWide(6, ReducedA());
+}
+
+    // p = z + β p_前(前の向きが使える時だけ)
+    [numthreads(64, 1, 1)] void EquilibriumBlockConjugateDirection(uint32_t thread : SV_DispatchThreadID) {
+    if (thread >= g_eqbCount || g_eqbWork[ConjugateScalarWord(0)] == 0)
+        return;
+
+    const int64_t beta = g_eqbWork[ConjugateScalarWord(3)];
+    const EqbVector previous = LoadWork(ConjugateWord(EQB_CONJUGATE_DIRECTION_PREVIOUS, thread));
+    EqbVector direction = LoadWork(ConjugateWord(EQB_CONJUGATE_DIRECTION, thread));
+    FX_UNROLL for (uint32_t c = 0; c < EQB_MAX_COMPONENTS; ++c) {
+        if (c < EQB_COMPONENTS)
+            direction.v[c] += EqbScaleQ16(previous.v[c], beta);
+    }
+
+    StoreWork(ConjugateWord(EQB_CONJUGATE_DIRECTION, thread), direction);
+}
+
+// −A p
+[numthreads(64, 1, 1)] void EquilibriumBlockConjugatePush(uint32_t thread : SV_DispatchThreadID) {
+    if (thread >= g_eqbCount)
+        return;
+
+    StoreWork(ConjugateWord(EQB_CONJUGATE_PUSHED, thread),
+              NodeResidualOf(thread, ConjugateWord(EQB_CONJUGATE_DIRECTION, 0), false));
+}
+
+    // rᵀp と pᵀAp → 当てるか・歩幅 α = rᵀp ÷ pᵀAp・次の歩で前の向きが使えるか
+    [numthreads(256, 1, 1)] void EquilibriumBlockConjugateAlpha(uint32_t thread : SV_GroupThreadID) {
+    const uint32_t words = g_eqbCount * EQB_COMPONENTS;
+    const uint32_t direction = ConjugateWord(EQB_CONJUGATE_DIRECTION, 0);
+    const uint32_t residual = ConjugateWord(EQB_CONJUGATE_RESIDUAL, 0);
+    const uint32_t pushed = ConjugateWord(EQB_CONJUGATE_PUSHED, 0);
+    FxU128 along = ZeroWide();
+    FxU128 energy = ZeroWide();
+    for (uint32_t i = thread; i < words; i += EQB_REDUCE_THREADS) {
+        const int64_t p = g_eqbWork[direction + i];
+        along = EqbWideAdd(along, FxMulS64Full(p, g_eqbWork[residual + i]));
+        energy = EqbWideAdd(energy, EqbWideNegate(FxMulS64Full(p, g_eqbWork[pushed + i])));
+    }
+
+    ReduceTwo(thread, along, energy);
+    if (thread != 0)
+        return;
+
+    const FxU128 alongSum = ReducedA();
+    const FxU128 energySum = ReducedB();
+    const bool accept = !EqbWideIsNegative(alongSum) && !EqbWideIsNegative(energySum) &&
+                        EqbWideBitLength(alongSum) != 0 && EqbWideBitLength(energySum) != 0;
+    const FxU128 zr = LoadWide(6);
+    bool valid = false;
+    int64_t alpha = 0;
+    if (accept) {
+        alpha = (int64_t)EqbStepRatio(alongSum, energySum);
+        valid = !EqbWideIsNegative(zr) && EqbWideBitLength(zr) != 0;
+        StoreWide(1, zr);
+    }
+
+    g_eqbWork[ConjugateScalarWord(0)] = valid ? 1 : 0;
+    g_eqbWork[ConjugateScalarWord(4)] = alpha;
+    g_eqbWork[ConjugateScalarWord(5)] = accept ? 1 : 0;
+}
+
+// 当てる歩なら 値 = V の前 + α p、向きと残差を前の歩として控える
+[numthreads(64, 1, 1)] void EquilibriumBlockConjugateUpdate(uint32_t thread : SV_DispatchThreadID) {
+    if (thread >= g_eqbCount || g_eqbWork[ConjugateScalarWord(5)] == 0)
+        return;
+
+    const uint64_t alpha = (uint64_t)g_eqbWork[ConjugateScalarWord(4)];
+    const EqbVector before = LoadWork(ConjugateWord(EQB_CONJUGATE_BEFORE, thread));
+    const EqbVector direction = LoadWork(ConjugateWord(EQB_CONJUGATE_DIRECTION, thread));
+    EqbVector values = EqbZeroVector();
+    FX_UNROLL for (uint32_t c = 0; c < EQB_MAX_COMPONENTS; ++c) {
+        if (c < EQB_COMPONENTS)
+            values.v[c] = before.v[c] + FxMulDivS64(direction.v[c], alpha, EQB_STEP_ONE);
+    }
+
+    StoreWork(EqbValueWord(EQB_COMPONENTS, thread), values);
+    StoreWork(ConjugateWord(EQB_CONJUGATE_DIRECTION_PREVIOUS, thread), direction);
+    StoreWork(ConjugateWord(EQB_CONJUGATE_RESIDUAL_PREVIOUS, thread),
+              LoadWork(ConjugateWord(EQB_CONJUGATE_RESIDUAL, thread)));
+}

@@ -289,21 +289,24 @@ namespace {
     std::expected<void, std::string> TestComponents(Context& context) {
         constexpr uint32_t EDGE = 8;
         constexpr uint32_t TICKS = 5;
-        for (const uint32_t k : {1u, 2u, 3u, 6u}) {
-            const sim::EquilibriumBlockSystem system = BoxSystem(k, EDGE);
-            const sim::EquilibriumBlockGrid grid = sim::BuildEquilibriumBlockGrid(system);
-            const sim::EquilibriumBlockOptions solve;
-            sim::EquilibriumBlockState state;
-            std::vector<std::vector<int64_t>> cpuTicks;
-            for (uint32_t tick = 0; tick < TICKS; ++tick) {
-                sim::SolveEquilibriumBlocks(system, grid, solve, state);
-                cpuTicks.push_back(state.values);
-            }
+        // V 2 回だけ(前の既定)と、V 4 回 + 共役勾配(lineSearch。T-1085・ADR-0455。支えの今の既定)
+        for (const bool conjugate : {false, true}) {
+            for (const uint32_t k : {1u, 2u, 3u, 6u}) {
+                const sim::EquilibriumBlockSystem system = BoxSystem(k, EDGE);
+                const sim::EquilibriumBlockGrid grid = sim::BuildEquilibriumBlockGrid(system);
+                const sim::EquilibriumBlockOptions solve{.cycles = conjugate ? 4u : 2u, .lineSearch = conjugate};
+                sim::EquilibriumBlockState state;
+                std::vector<std::vector<int64_t>> cpuTicks;
+                for (uint32_t tick = 0; tick < TICKS; ++tick) {
+                    sim::SolveEquilibriumBlocks(system, grid, solve, state);
+                    cpuTicks.push_back(state.values);
+                }
 
-            const auto compared = CompareRuns(context, std::format("箱 一辺 {}・k = {}", EDGE, k), system, grid, solve,
-                                              {}, cpuTicks);
-            if (!compared)
-                return compared;
+                const std::string name = std::format("箱 一辺 {}・k = {}{}", EDGE, k, conjugate ? "・共役勾配" : "");
+                const auto compared = CompareRuns(context, name, system, grid, solve, {}, cpuTicks);
+                if (!compared)
+                    return compared;
+            }
         }
 
         return {};

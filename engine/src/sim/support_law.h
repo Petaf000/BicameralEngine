@@ -84,7 +84,9 @@ namespace bicameral::sim {
 
         // --- 解き方(T-0919)---
         SupportSolve solve = SupportSolve::Coupled;
-        EquilibriumBlockOptions blocks;  // Coupled の V の回数など(法則の定数)
+        // Coupled の V の回数など(法則の定数)。既定は V 4 回 + V を前処理とする共役勾配(T-1085・ADR-0455。壁につながる棚が
+        // 9/10 に 32 / 69 刻み。V 2 回だけだと 1153 / 1711 刻み)
+        EquilibriumBlockOptions blocks{.cycles = 4, .lineSearch = true};
 
         // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)

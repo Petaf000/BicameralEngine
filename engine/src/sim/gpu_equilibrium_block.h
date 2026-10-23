@@ -74,7 +74,22 @@ namespace bicameral::sim {
         static constexpr uint32_t MAX_TIMESTAMPS = 64;
 
     private:
-        enum class Pass : uint8_t { Finish, Coarsen, Smooth, Restrict, Prolong, Count };
+        enum class Pass : uint8_t {
+            Finish,
+            Coarsen,
+            Smooth,
+            Restrict,
+            Prolong,
+            // 共役勾配(solve.lineSearch。T-1085・ADR-0455)
+            ConjugateSave,
+            ConjugateResidual,
+            ConjugateBeta,
+            ConjugateDirection,
+            ConjugatePush,
+            ConjugateAlpha,
+            ConjugateUpdate,
+            Count
+        };
 
         // b0(equilibrium_block.hlsl の EquilibriumBlockConstants と同じ順)
         struct Constants {
@@ -111,6 +126,7 @@ namespace bicameral::sim {
         void RecordSmooth(ID3D12GraphicsCommandList* list, uint64_t debugRing, const Level& level,
                           uint32_t sweeps) const;
         void RecordCycle(ID3D12GraphicsCommandList* list, uint64_t debugRing, size_t depth) const;
+        void RecordConjugate(ID3D12GraphicsCommandList* list, uint64_t debugRing, Pass pass, uint32_t cycle) const;
         [[nodiscard]] Constants BaseConstants() const;
 
         uint32_t m_components = 0;

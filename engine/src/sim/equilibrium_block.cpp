@@ -9,7 +9,6 @@
 #include "sim/equilibrium_block.h"
 
 #include <algorithm>
-#include <bit>
 #include <map>
 #include <tuple>
 
@@ -363,9 +362,7 @@ namespace bicameral::sim {
         // V サイクルの直し z = after − before を前処理した残差として、刻みの中で共役勾配を進める(ConjugateStep)。粗い段が運べない遅い形
         // (壁と棚の継ぎ目で回る形。1 回の V で (1 − ρ) しか進まない)は、前処理した系の孤立した小さい固有値になり、共役な向きで消える。
         // 刻みをまたいで持つものは無い(セーブ・ハッシュは今のまま)。整数: 内積は 128bit で厳密(足す順によらない = GPU でも同じ和)。
-        // 歩幅と β は Q16・大きさの上限 LINE_SEARCH_MAX。rᵀp ≤ 0 か pᵀAp ≤ 0 なら V のまま(その歩で覚えを捨てる)
-        constexpr uint64_t LINE_SEARCH_ONE = 1u << 16;
-        constexpr uint64_t LINE_SEARCH_MAX = LINE_SEARCH_ONE << 12;
+        // 歩幅と β は Q16・大きさの上限 EQB_STEP_MAX(式は common/equilibrium_block.hlsli で GPU と共有)。rᵀp ≤ 0 か pᵀAp ≤ 0 なら V のまま(その歩で覚えを捨てる)
 
         // 共役勾配の前の歩(刻みの中だけ)
         struct ConjugateMemory {
@@ -374,28 +371,6 @@ namespace bicameral::sim {
             FxU128 zr = {.hi = 0, .lo = 0};
             bool valid = false;
         };
-
-        uint32_t BitLength(FxU128 value) {
-            if (value.hi != 0)
-                return 128 - (uint32_t)std::countl_zero(value.hi);
-
-            return value.lo == 0 ? 0 : 64 - (uint32_t)std::countl_zero(value.lo);
-        }
-
-        // 正の num ÷ den を Q16 で(上限 LINE_SEARCH_MAX)。den の上の 47 bit で割る
-        uint64_t StepRatio(FxU128 num, FxU128 den) {
-            const uint32_t length = BitLength(den);
-            const uint32_t drop = length > 47 ? length - 47 : 0;
-            const uint64_t denominator = FxShiftRightU128(den, drop);
-            if (denominator == 0 || BitLength(num) > drop + 60)
-                return LINE_SEARCH_MAX;
-
-            const uint64_t numerator = FxShiftRightU128(num, drop);
-            if (numerator / denominator >= (LINE_SEARCH_MAX >> 16))
-                return LINE_SEARCH_MAX;
-
-            return FxDivU128By64(FxMulU64Full(numerator, LINE_SEARCH_ONE), denominator).quotient;
-        }
 
         // 節 × k の並びどうしの内積(128bit で厳密)
         FxU128 Dot(const std::vector<int64_t>& a, const std::vector<int64_t>& b) {
@@ -419,20 +394,6 @@ namespace bicameral::sim {
             return result;
         }
 
-        // 符号つきの num ÷ den(den > 0)を Q16 で。大きさは LINE_SEARCH_MAX まで
-        int64_t SignedRatio(FxU128 num, FxU128 den) {
-            const bool negative = SignedNegative(num);
-            const uint64_t magnitude = StepRatio(negative ? SignedNegate(num) : num, den);
-
-            return negative ? -(int64_t)magnitude : (int64_t)magnitude;
-        }
-
-        int64_t ScaleQ16(int64_t value, int64_t ratio) {
-            const int64_t scaled = FxMulDivS64(value, FxAbsU64(ratio), LINE_SEARCH_ONE);
-
-            return ratio < 0 ? -scaled : scaled;
-        }
-
         // V の直し z を前処理とする共役勾配の 1 歩(刻みの中だけ覚える。刻みをまたいで持つ状態は無い = セーブ・ハッシュは今のまま)。
         // p = z + β p_前(β は Polak–Ribière = zᵀ(r − r_前) ÷ z_前ᵀr_前)、歩幅 α = rᵀp ÷ pᵀAp。粗い段が運べない遅い形は、
         // 前処理した系の孤立した小さい固有値になり、共役な向きで 1〜2 歩で消える
@@ -450,9 +411,9 @@ namespace bicameral::sim {
                 for (size_t i = 0; i < residual.size(); ++i)
                     change[i] = residual[i] - memory.residual[i];
 
-                const int64_t beta = SignedRatio(Dot(direction, change), memory.zr);
+                const int64_t beta = EqbSignedRatio(Dot(direction, change), memory.zr);
                 for (size_t i = 0; i < direction.size(); ++i)
-                    direction[i] += ScaleQ16(memory.direction[i], beta);
+                    direction[i] += EqbScaleQ16(memory.direction[i], beta);
             }
 
             const std::vector<int64_t> zero(values.size(), 0);
@@ -460,14 +421,15 @@ namespace bicameral::sim {
             const FxU128 along = Dot(direction, residual);
             const FxU128 energy = SignedNegate(Dot(direction, pushed));
             memory.valid = false;
-            if (SignedNegative(along) || SignedNegative(energy) || BitLength(along) == 0 || BitLength(energy) == 0)
+            if (SignedNegative(along) || SignedNegative(energy) || EqbWideBitLength(along) == 0 ||
+                EqbWideBitLength(energy) == 0)
                 return;
 
-            const uint64_t alpha = StepRatio(along, energy);
+            const uint64_t alpha = EqbStepRatio(along, energy);
             for (size_t i = 0; i < values.size(); ++i)
-                values[i] = before[i] + FxMulDivS64(direction[i], alpha, LINE_SEARCH_ONE);
+                values[i] = before[i] + FxMulDivS64(direction[i], alpha, EQB_STEP_ONE);
 
-            memory.valid = !SignedNegative(zr) && BitLength(zr) != 0;
+            memory.valid = !SignedNegative(zr) && EqbWideBitLength(zr) != 0;
             memory.zr = zr;
             memory.direction = std::move(direction);
             memory.residual = residual;

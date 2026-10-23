@@ -491,6 +491,9 @@ namespace {
     void RunSettleStudy() {
         // 長さ 8 m の棚は 600 刻みでも着ききらない(D' の 9/10 が 500 刻みほど)ので、40 秒回して最後の値を取る
         constexpr uint32_t STUDY_TICKS = 2400;
+        // 比べの元: 前の既定(V 2 回・共役勾配なし)。今の既定(V 4 回 + 共役勾配。T-1085)は「既定」の行
+        sim::SupportOptions plain;
+        plain.blocks = sim::EquilibriumBlockOptions{};
         for (const uint64_t cellMm : {500ull, 250ull}) {
             const auto wallRootX = (uint32_t)(1000 / cellMm) - 1;
             const auto clampRootX = (uint32_t)(1000 / cellMm);
@@ -499,11 +502,13 @@ namespace {
             };
             const double cell = cellMm / 1000.0;
             const sim::SupportScene wallShelf = SettleShelf(cellMm, 1500, 2000, true);
-
             SettleOnce(wallShelf, {}, wallRootX, topUp(2000),
-                       std::format("T-1041 {} m 壁の棚 0.5 m(既定 V 2 回)", cell), STUDY_TICKS);
+                       std::format("T-1041 {} m 壁の棚 0.5 m(既定 = V 4 回 + 共役勾配)", cell), STUDY_TICKS);
+
+            SettleOnce(wallShelf, plain, wallRootX, topUp(2000),
+                       std::format("T-1041 {} m 壁の棚 0.5 m(V 2 回・前の既定)", cell), STUDY_TICKS);
             for (const uint32_t cycles : {4u, 8u}) {
-                sim::SupportOptions options;
+                sim::SupportOptions options = plain;
                 options.blocks.cycles = cycles;
                 SettleOnce(wallShelf, options, wallRootX, topUp(2000),
                            std::format("T-1041 {} m 壁の棚 0.5 m(V {} 回)", cell, cycles), STUDY_TICKS);
@@ -511,7 +516,7 @@ namespace {
 
             // T-1068: 2 回目の V の直しの向きにエネルギー最小の歩幅へ伸ばす(lineSearch)
             for (const uint32_t cycles : {2u, 4u}) {
-                sim::SupportOptions options;
+                sim::SupportOptions options = plain;
                 options.blocks.cycles = cycles;
                 options.blocks.lineSearch = true;
                 SettleOnce(wallShelf, options, wallRootX, topUp(2000),
@@ -521,27 +526,27 @@ namespace {
                            STUDY_TICKS);
             }
 
-            sim::SupportOptions smooth;
+            sim::SupportOptions smooth = plain;
             smooth.blocks.preSmooth = 4;
             smooth.blocks.postSmooth = 4;
             SettleOnce(wallShelf, smooth, wallRootX, topUp(2000),
                        std::format("T-1041 {} m 壁の棚 0.5 m(掃き出し 4 / 4)", cell), STUDY_TICKS);
 
-            sim::SupportOptions coarsest;
+            sim::SupportOptions coarsest = plain;
             coarsest.blocks.coarsestSweeps = 32;
             SettleOnce(wallShelf, coarsest, wallRootX, topUp(2000),
                        std::format("T-1041 {} m 壁の棚 0.5 m(最も粗い段 32 回)", cell), STUDY_TICKS);
 
-            SettleOnce(SettleShelf(cellMm, 1500, 2000, false), {}, clampRootX, topUp(2000),
+            SettleOnce(SettleShelf(cellMm, 1500, 2000, false), plain, clampRootX, topUp(2000),
                        std::format("T-1041 {} m 根が固定した面の棚 0.5 m", cell), STUDY_TICKS);
             // 粗い段の箱のそろい方: 厚さ 1 m の棚を 1〜2 m(粗い段の箱にそろう)と 1.5〜2.5 m(半分ずれる)に置く
-            SettleOnce(SettleShelf(cellMm, 1000, 2000, true), {}, wallRootX, topUp(2000),
+            SettleOnce(SettleShelf(cellMm, 1000, 2000, true), plain, wallRootX, topUp(2000),
                        std::format("T-1041 {} m 壁の棚 1 m・高さ 1〜2 m(箱にそろう)", cell), STUDY_TICKS);
-            SettleOnce(SettleShelf(cellMm, 1500, 2500, true), {}, wallRootX, topUp(2500),
+            SettleOnce(SettleShelf(cellMm, 1500, 2500, true), plain, wallRootX, topUp(2500),
                        std::format("T-1041 {} m 壁の棚 1 m・高さ 1.5〜2.5 m(箱から半分ずれる)", cell), STUDY_TICKS);
             // 壁と棚の継ぎ目を粗い段の箱の境にそろえる(壁の幅 2 m・4 m。0.5 m なら継ぎ目はセル 4・8 = 2・3 段上までの箱の境)
             for (const uint64_t wallMm : {2000ull, 4000ull}) {
-                SettleOnce(SettleShelf(cellMm, 1500, 2000, true, wallMm), {}, (uint32_t)(wallMm / cellMm) - 1,
+                SettleOnce(SettleShelf(cellMm, 1500, 2000, true, wallMm), plain, (uint32_t)(wallMm / cellMm) - 1,
                            topUp(2000), std::format("T-1041 {} m 壁の棚 0.5 m・壁の幅 {} m", cell, wallMm / 1000),
                            STUDY_TICKS);
             }
@@ -554,7 +559,7 @@ namespace {
                            STUDY_TICKS);
             }
 
-            SettleOnce(SettleShelf(cellMm, 1000, 2000, false), {}, clampRootX, topUp(2000),
+            SettleOnce(SettleShelf(cellMm, 1000, 2000, false), plain, clampRootX, topUp(2000),
                        std::format("T-1041 {} m 根が固定した面の棚 1 m・高さ 1〜2 m", cell), STUDY_TICKS);
         }
     }
