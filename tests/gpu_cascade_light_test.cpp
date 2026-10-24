@@ -414,6 +414,88 @@ namespace {
         return {};
     }
 
+    // 1 刻みの最大が跳ねる理由を見る(T-1116): 15 刻みを 1 本のリストで、刻みごとにタイムスタンプ(GPU が休まない)と、
+    // 同じ 15 刻みを 1 刻みずつのリスト(間で GPU が休む)で。刻みごとの ms・光線・放つ面を並べる
+    std::expected<void, std::string> ProfileTicks(const GpuContext& context, const char* scene,
+                                                  const sim::CascadeGrid& grid, const Form& form) {
+        constexpr uint32_t COUNT = 15;
+        const sim::CascadeParams params = Params(form.baseTexels, 5, form.raysPerBag, form.emitSlots,
+                                                 form.thermalInSlots);
+        auto light = Prepare(context, grid, params, {.faces = 1u << 15, .bags = 1u << 21, .carry = 1u << 19});
+        if (!light)
+            return std::unexpected(light.error());
+
+        const D3D12_GPU_VIRTUAL_ADDRESS ring = context.ring->GpuAddress();
+        ID3D12GraphicsCommandList10* warm = context.queue->Begin();
+        if (warm == nullptr)
+            return std::unexpected("暖機のリストを始められない");
+
+        for (uint32_t tick = 0; tick < MEASURE_WARMUP; ++tick)
+            light->RecordTick(warm, *context.nest, ring, tick);
+
+        if (!context.queue->ExecuteAndWait())
+            return std::unexpected("暖機で回せない");
+
+        uint64_t frequency = 0;
+        if (FAILED(context.queue->Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
+            return std::unexpected("タイムスタンプの周波数を読めない");
+
+        ID3D12GraphicsCommandList10* batch = context.queue->Begin();
+        if (batch == nullptr)
+            return std::unexpected("リストを始められない");
+
+        for (uint32_t tick = 0; tick < COUNT; ++tick) {
+            context.nest->RecordTimestamp(batch, tick);
+            light->RecordTick(batch, *context.nest, ring, MEASURE_WARMUP + tick);
+        }
+
+        context.nest->RecordTimestamp(batch, COUNT);
+        context.nest->RecordReadback(batch);
+        if (!context.queue->ExecuteAndWait())
+            return std::unexpected("GPU での実行に失敗");
+
+        const std::vector<uint64_t> stamps = context.nest->ReadTimestamps(COUNT + 1);
+        if (stamps.size() != COUNT + 1)
+            return std::unexpected("タイムスタンプを読めない");
+
+        std::string continuous;
+        for (uint32_t tick = 0; tick < COUNT; ++tick)
+            continuous += std::format(" {:.2f}", static_cast<double>(stamps[tick + 1] - stamps[tick]) * 1000.0 /
+                                                     static_cast<double>(frequency));
+
+        // 同じ刻みの番号(組の巡り)を 1 刻みずつ
+        std::string separate;
+        std::string rays;
+        for (uint32_t tick = 0; tick < COUNT; ++tick) {
+            ID3D12GraphicsCommandList10* list = context.queue->Begin();
+            if (list == nullptr)
+                return std::unexpected("リストを始められない");
+
+            context.nest->RecordTimestamp(list, 0);
+            light->RecordTick(list, *context.nest, ring, MEASURE_WARMUP + COUNT + tick);
+            context.nest->RecordTimestamp(list, 1);
+            context.nest->RecordReadback(list);
+            light->RecordReadback(list);
+            if (!context.queue->ExecuteAndWait())
+                return std::unexpected("GPU での実行に失敗");
+
+            const std::vector<uint64_t> one = context.nest->ReadTimestamps(2);
+            const auto read = light->Read();
+            if (one.size() != 2 || !read)
+                return std::unexpected("タイムスタンプか結果を読めない");
+
+            separate += std::format(" {:.2f}",
+                                    static_cast<double>(one[1] - one[0]) * 1000.0 / static_cast<double>(frequency));
+            rays += std::format(" {}", read->result.rays / 1000);
+        }
+
+        Log(Channel::Gpu, Level::Info,
+            "刻みごと [{}] {}: 続けて ms(刻み {}〜):{} / 1 刻みずつ ms(刻み {}〜):{} / 光線 千本:{}", form.name, scene,
+            MEASURE_WARMUP, continuous, MEASURE_WARMUP + COUNT, separate, rays);
+
+        return {};
+    }
+
     // 世界の広さで回した時の費用(T-1101): 96³・127³(世界の箱の上限。ADR-0432)の照り返す地面。--wide の時だけ
     std::expected<void, std::string> MeasureWide(const GpuContext& context) {
         constexpr std::array<Form, 2> FORMS = {Form{"今の形", 4, 1, 1, false}, Form{"熱も 15 組", 4, 1, 15, true}};
@@ -424,6 +506,11 @@ namespace {
                     const sim::CascadeGrid grid = FireGround(side, 8, hot, Material::Stone);
                     if (auto measured = MeasureOne(context, scene.c_str(), grid, form); !measured)
                         return std::unexpected(std::format("{} {}: {}", form.name, scene, measured.error()));
+
+                    if (form.emitSlots > 1 && side >= 96) {
+                        if (auto profiled = ProfileTicks(context, scene.c_str(), grid, form); !profiled)
+                            return std::unexpected(std::format("{} {}: {}", form.name, scene, profiled.error()));
+                    }
                 }
             }
         }
