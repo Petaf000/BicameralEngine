@@ -17,6 +17,8 @@
 // 引数: [--edge n](既定 16)[--ticks n](既定 3)[--measure](GPU の時間を表に出す)[--breakdown](解きを固定費・V・止めた後の回に分ける)
 //       [--stages](場面ごとに 1 回、V 1 回の段ごとの時間。T-0587)[--global-tail](ImTail を前の形で。T-0587)
 // [--inner-tolerance mg][--inner-cycles n](内側の止め方を変えて比べる。ADR-0254)と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
+// T-1047(--t1047): 1 出来事の固定費。V を段ごとの Dispatch で積む形と、2 回目からの V を 1 グループの安い回(ImTail が段 0 から。
+//   Dispatch 3 つ)にした形を、一辺 8〜32 の小さい系で V 1・4・8 回で比べる(値は同じ。ms をそのまま出す)。
 // T-0900(--t0900): 測り M-1。投影の 1 刻みの ns/セル・VRAM の差(作った前後)・V 2/4/8 回の費用を一辺 32・64・128 で(値は比べない)。
 // ctest は一辺 16・3 刻み(gpu_gas_projection)。計測は `job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32`。
 // 合わなければ失敗(どの場面・何回目の解き・何番のセルか)。
@@ -77,9 +79,10 @@ namespace {
         // 内側の解きの止め方を変えて比べる(0 なら GasProjectionOptions の既定。T-0531 の 2 チャット目)
         uint32_t innerToleranceMilligrams = 0;
         uint32_t innerCycles = 0;
-        bool t0843 = false;         // V 2 回固定・外側 0・音速 340 だけ(T-0843)
-        bool replan = false;        // 解きのたびに計画の表を作り直す(T-0843。系の形が刻みごとに変わる時の固定費)
-        bool shapeFromCost = true;  // T-0845 の計測: V の記録の形を 1 刻み目の数から選ぶ(--default-shape で既定の形)
+        bool t0843 = false;            // V 2 回固定・外側 0・音速 340 だけ(T-0843)
+        bool replan = false;           // 解きのたびに計画の表を作り直す(T-0843。系の形が刻みごとに変わる時の固定費)
+        bool shapeFromCost = true;     // T-0845 の計測: V の記録の形を 1 刻み目の数から選ぶ(--default-shape で既定の形)
+        bool cheapAfterFirst = false;  // T-1047: 選んだ形の 2 回目からの V を 1 グループの安い回に(段 0 から ImTail)
         std::optional<sim::GpuImplicit> gpu;
         std::optional<sim::GpuImplicitCost> previous;  // 前の解きの GPU の数(記録の形を選ぶ。T-0154・T-0505)
 
@@ -861,8 +864,15 @@ namespace {
             return std::unexpected("1 刻み目の記録か実行に失敗");
 
         projection->ReleaseStaging();  // 形の写しの元は写した後は要らない(T-0918。形が変わる刻みで作り直す)
-        if (replay.shapeFromCost)
-            projection->SetSolveShape(sim::GpuImplicit::ShapeFrom(cost));
+        if (replay.shapeFromCost) {
+            sim::GpuImplicitRecordShape shape = sim::GpuImplicit::ShapeFrom(cost);
+            if (replay.cheapAfterFirst) {
+                shape.dispatchCycles = 1;
+                shape.cheapLevels = 0;
+            }
+
+            projection->SetSolveShape(shape);
+        }
 
         list = replay.queue->Begin();
         if (list == nullptr)
@@ -1053,6 +1063,34 @@ namespace {
         return {};
     }
 
+    // --- T-1047(--t1047): 1 出来事の固定費。段ごとの V と 1 グループの安い回の V を小さい系で比べる(ms)---
+    std::expected<void, std::string> RunT1047(Replay& replay, uint32_t edge) {
+        for (const uint32_t cycles : {1u, 4u, 8u}) {
+            for (const bool cheap : {false, true}) {
+                if (cycles == 1 && cheap)
+                    continue;  // 1 回目はいつも段ごと
+
+                replay.cheapAfterFirst = cheap;
+                sim::GasProjectionOptions options = FullOptions();
+                options.solver.cycles = cycles;
+                const auto timing = MeasureFullScene(replay, Scene::Door, edge, options);
+                replay.cheapAfterFirst = false;
+                if (!timing)
+                    return std::unexpected(std::format("{}³ V {}: {}", edge, cycles, timing.error()));
+
+                Log(Channel::Sim, Level::Info,
+                    "| T-1047 費用 | {}³ | V {} 回 | {} | 段 {} | 通し {:.3f} ms(中央 {:.3f})| 式 {:.3f} | 段の重み "
+                    "{:.3f} | V "
+                    "{:.3f} | 当てる {:.3f} | 運ぶ {:.3f} |",
+                    edge, cycles, cheap ? "2 回目から 1 グループ" : "段ごとの Dispatch", timing->levels, timing->total,
+                    timing->median, timing->parts[0], timing->parts[1], timing->parts[2], timing->parts[3],
+                    timing->parts[4]);
+            }
+        }
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         uint32_t edge = 16;
@@ -1066,6 +1104,7 @@ namespace {
         bool t0843 = false;
         bool t0845 = false;
         bool t0900 = false;
+        bool t1047 = false;
         bool t0915 = false;
         bool defaultShape = false;
         uint32_t checkEvery = 1;
@@ -1081,6 +1120,8 @@ namespace {
                 t0845 = true;
             else if (argument == "--t0900")
                 t0900 = true;
+            else if (argument == "--t1047")
+                t1047 = true;
             else if (argument == "--t0915")
                 t0915 = true;
             else if (argument == "--default-shape")
@@ -1106,11 +1147,11 @@ namespace {
         }
 
         const auto options = test::ParseGpuTestOptions(rest);
-        if (!options || edge < 4 || (ticks == 0 && !t0845 && !t0900 && !t0915)) {
+        if (!options || edge < 4 || (ticks == 0 && !t0845 && !t0900 && !t1047 && !t0915)) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_gas_projection_test [--warp] [--queue direct|compute] [--no-gbv] [--edge N] [--ticks N] "
                 "[--measure] [--breakdown] [--stages] [--global-tail] [--inner-tolerance mg] [--inner-cycles n] "
-                "[--t0843] [--t0845 [--check-every n]] [--t0900] [--t0915 [--ticks n]]");
+                "[--t0843] [--t0845 [--check-every n]] [--t0900] [--t1047] [--t0915 [--ticks n]]");
             return 2;
         }
 
@@ -1162,8 +1203,12 @@ namespace {
         if (t0900 && !edgeGiven)
             edges = {32, 64, 128};
 
+        if (t1047 && !edgeGiven)
+            edges = {8, 12, 16, 24, 32};
+
         for (const uint32_t each : edges) {
-            const auto ran = t0900   ? RunCostStudy(replay, each)
+            const auto ran = t1047   ? RunT1047(replay, each)
+                             : t0900 ? RunCostStudy(replay, each)
                              : t0845 ? RunFull(replay, each, ticks, checkEvery, measure)
                                      : RunAll(replay, each, ticks, measure);
             if (!ran) {
