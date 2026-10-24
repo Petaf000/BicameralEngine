@@ -56,12 +56,16 @@ namespace bicameral::sim {
         int32_t maxExponent = 14;
         // 1 歩の変化の許す大きさ(mK × 2^16)。既定 0.1 K(D-642。T-1063)
         uint64_t budgetQ16 = uint64_t{100} << 16;
-        uint32_t cycles = 4;  // C-0 の V サイクルの回数(法則ごとの定数)
+        // C-0 の V サイクルの回数(法則ごとの定数)。長い刻み(e > shortExponent)の列。静かな夜で V 2 は V 4 と同じ精度の内(T-1108)
+        uint32_t cycles = 2;
         // 短い刻み(e ≤ shortExponent)の列の V の回数(0 = cycles と同じ)。短い刻みの系は 1 回の V で解け切る
         // (T-1090。火事で V 4 とビット一致。長い刻みは解け切らない)
         uint32_t cyclesAtZero = 1;
-        int32_t
-            shortExponent = 8;  // 2^8 刻み ≈ 4.3 秒まで(静かな夜で e ≤ 8 は V 4 と同じ差・e ≤ 10 から増える。T-1090)
+        // 2^8 刻み ≈ 4.3 秒まで(静かな夜で e ≤ 8 は V 4 と同じ差・e ≤ 10 から増える。T-1090)
+        int32_t shortExponent = 8;
+        // 残差で止める(T-1108。0 = 決まった回数): 列ごとに V を 1 回ずつ、残差の計器の最大(式の単位)がこれ以下になるまで
+        // (上限は上の回数)
+        uint64_t residualStop = 0;
         bool galerkin = false;  // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
         TimeTreeSelect select = TimeTreeSelect::Previous;
         // 同じレベルで 2^これ ブロック角の枠は同じ e に揃える(細かさを同じ物の長さのブロックで比べる。0 = ブロックごと)
@@ -141,6 +145,7 @@ namespace bicameral::sim {
         // --- 測り ---
         uint64_t cellSteps = 0;      // セル × 解いた回数
         uint64_t solves = 0;         // 部品を呼んだ回数
+        uint64_t vCycles = 0;        // 回した V の数(T-1108)
         uint64_t worstResidual = 0;  // 部品の残差の計器の最大(式の単位。解けきらなかった所)
         uint64_t events = 0;
         uint64_t truncations = 0;

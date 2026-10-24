@@ -582,11 +582,20 @@ namespace bicameral::sim {
 
             // --- 解く(差の形。初めは δ = 0)---
             EquilibriumOptions options;
-            options.solver.cycles = span.exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero
+            const uint32_t cycles = span.exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero
                                                                                                     : setup.cycles;
+            options.solver.cycles = setup.residualStop == 0 ? cycles : 1;
             options.faceValues = false;
             options.galerkinCoarse = setup.galerkin;
-            const EquilibriumResult result = SolveEquilibrium(solved.built.system, options, solved.state);
+            // 残差で止める形(T-1108): V を 1 回ずつ、残差の計器の最大が閾値以下になるか上限 cycles 回まで(整数の判定 = 決定的)
+            EquilibriumResult result = SolveEquilibrium(solved.built.system, options, solved.state);
+            uint32_t done = options.solver.cycles;
+            while (setup.residualStop != 0 && done < cycles && result.worstResidual > setup.residualStop) {
+                result = SolveEquilibrium(solved.built.system, options, solved.state);
+                ++done;
+            }
+
+            steps.vCycles += done;
             steps.worstResidual = std::max(steps.worstResidual, result.worstResidual);
             steps.cellSteps += solved.built.cells.size();
             ++steps.solves;

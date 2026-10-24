@@ -112,17 +112,19 @@ namespace {
     }
 
     // 解きの回数(引数で変えて収束を見る)
-    uint32_t solverCycles = 4;
+    uint32_t solverCycles = 4;  // 毎刻み(写し)の V の回数(cycles=)
+    uint32_t longCycles = 2;    // 長い刻み(e > shorte)の V の回数(T-1108。既定 2。trialcycles= か longcycles= で変える)
     // 予算を 1 mK ÷ 2^これ に。木の上では 1 mK で違うレベルの境の近くが 8 mK ずれた(T-0950 の作業ログ)ので仮に 1/16 mK
     uint32_t budgetShift = 4;
     uint64_t budgetMk = 100;    // 予算を mK の整数で(0 = budgetShift を使う。既定 0.1 K = D-642)
     uint32_t zeroCycles = 1;    // 短い刻みの列の V の回数(T-1090。0 = cycles と同じ)
+    uint64_t residualStop = 0;  // 残差で止める閾値(stop=。T-1108)
     int32_t shortExponent = 8;  // 短い刻み = e がこれ以下(shorte=。既定 8)
     bool unitByLength = true;   // 刻みを選ぶ単位を物の長さ 4 m で(D-640 の一旦。unit=block で外す)
     bool solverGalerkin = false;
     TimeTreeSelect selectRule = TimeTreeSelect::Previous;
     uint32_t groupShift = 0;   // 細かさの比べで 0.5 m の木の枠を揃える段(1 = 8 m のブロックに)
-    uint32_t trialCycles = 0;  // 0 = solverCycles と同じ
+    uint32_t trialCycles = 0;  // 0 = longCycles と同じ
     // 試しも毎刻みに(V の回数だけ変えて、毎刻みどうしの揺れ = 床を測る)
     bool trialFixed = false;
     // 試しの初めに x(m)のセル(y = z = 0)へ熱を 1 単位だけ足す(わずかな揺らしが前線でどこまで広がるか = 着火の閾値の床。T-1014)
@@ -135,7 +137,7 @@ namespace {
 
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
-        setup.cycles = solverCycles;
+        setup.cycles = rule == TimeStepRule::Fixed ? solverCycles : longCycles;
         setup.galerkin = solverGalerkin;
         setup.capacityQ32 = ToQ(material.heatPerCubic * LEVEL0_VOLUME, Q32);
         setup.conductLevel0Q32 = {0, ToQ(material.conductivity * 0.25 / 0.5 * TICK_SECONDS, Q32)};
@@ -159,6 +161,7 @@ namespace {
         setup.frontBufferUnits = bufferUnits;
         setup.cyclesAtZero = zeroCycles;
         setup.shortExponent = shortExponent;
+        setup.residualStop = residualStop;
         setup.unitByLength = unitByLength;
 
         return setup;
@@ -553,8 +556,7 @@ namespace {
 
         return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
-                           trialCycles != 0 ? trialCycles : solverCycles, zeroCycles,
-                           unitByLength ? "4 m" : "ブロック");
+                           trialCycles != 0 ? trialCycles : longCycles, zeroCycles, unitByLength ? "4 m" : "ブロック");
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -580,9 +582,10 @@ namespace {
             scene, name, static_cast<double>(run.steps.zeroCellSteps) / cellTicks,
             static_cast<double>(run.steps.forcedCellSteps) / cellTicks, run.steps.cellSteps);
         Log(Channel::Sim, Level::Info,
-            "{} {}: e = 0 の解き {}・枠の組が変わった {}・組は同じで温度の帯が変わった 1 K {} / 10 K {} / 100 K "
+            "{} {}: V の数 {}・e = 0 の解き {}・枠の組が変わった {}・組は同じで温度の帯が変わった 1 K {} / 10 K {} / "
+            "100 K "
             "{}(T-1090)",
-            scene, name, run.steps.zeroSolves, run.steps.zeroReshaped, run.steps.zeroRebanded[0],
+            scene, name, run.steps.vCycles, run.steps.zeroSolves, run.steps.zeroReshaped, run.steps.zeroRebanded[0],
             run.steps.zeroRebanded[1], run.steps.zeroRebanded[2]);
     }
 
@@ -962,6 +965,10 @@ namespace {
                 budgetMk = static_cast<uint64_t>(std::atoll(value.c_str()));
             else if (key == "zerocycles")
                 zeroCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "longcycles")
+                longCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "stop")
+                residualStop = static_cast<uint64_t>(std::atoll(value.c_str()));
             else if (key == "shorte")
                 shortExponent = std::atoi(value.c_str());
             else if (key == "unit")
