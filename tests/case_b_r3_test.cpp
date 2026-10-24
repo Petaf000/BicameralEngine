@@ -250,6 +250,8 @@ namespace {
     bool movingByCellOverride = false;
     uint32_t dragScaleOverride = 1000;     // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
+    bool poreDragOverride = false;         // 層の中の空気だけ孔の引きずり(T-1092 の 2 本目)。引数 prescribed2
+    bool prescribedOverride = false;       // 表面のセルの層を速さの決まった相に(T-1092)。引数 prescribed
     bool surfaceHeldOnlyOverride = false;  // 層の止まった粒の面だけ障害物(T-1071 の 2 本目)。引数 surface2
     bool surfaceLayerOverride = false;     // 表面のセルを層に(T-1071)。引数 surface(摩擦を解きの中へも入れる)
     uint32_t contactOverride = 0;          // 上の粒を支える詰まり(‰。T-1070 の 2 本目)。引数 contact=<‰>
@@ -311,6 +313,8 @@ namespace {
         flowOptions.grainContactPermille = contactOverride;
         flowOptions.grainSurfaceLayer = surfaceLayerOverride;
         flowOptions.grainSurfaceLayerMoving = !surfaceHeldOnlyOverride;
+        flowOptions.grainLayerPrescribed = prescribedOverride;
+        flowOptions.grainLayerPoreDrag = poreDragOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
@@ -1119,6 +1123,10 @@ int main(int argc, char** argv) {
             frictionInSolveOverride = true;
         else if (word == "surface")
             surfaceLayerOverride = frictionInSolveOverride = true;
+        else if (word == "prescribed")
+            prescribedOverride = frictionInSolveOverride = true;
+        else if (word == "prescribed2")
+            prescribedOverride = frictionInSolveOverride = poreDragOverride = true;
         else if (word == "surface2")
             surfaceLayerOverride = frictionInSolveOverride = surfaceHeldOnlyOverride = true;
         else if (word == "layer")

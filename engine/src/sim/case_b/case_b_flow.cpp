@@ -64,6 +64,7 @@ namespace bicameral::sim::case_b {
             int64_t frictionPush = 0;   // 押す力 D(1 刻みの力積。+ = left → right)
             int64_t frictionLimit = 0;  // 摩擦の上限 F(1 刻みの力積)
             bool held = false;          // 摩擦で止まった粒(解く間は据わる孔)
+            bool prescribed = false;    // 速さの決まった粒の層(T-1092。圧力の式には右辺だけで入る)
             int64_t heldMomentum = 0;   // 止めた時の P + D
             uint64_t heldDragMg = 0;    // 止まった粒の引きずり(孔の引きずり K_x のうち粒の分)
 
@@ -798,14 +799,21 @@ namespace bicameral::sim::case_b {
             // 表面のセルの層(T-1071): 粒のある側がどれも支えられ、どちらかが詰まり切らない面は、空気とつながない
             const bool leftSurface = left.rests && !left.packed;
             const bool rightSurface = right.rests && !right.packed;
-            const bool surfaceLayer = runtime.options.grainSurfaceLayer && (leftSurface || rightSurface) &&
-                                      (left.massMg == 0 || left.rests) && (right.massMg == 0 || right.rests);
+            const bool surfaceLayer = (runtime.options.grainSurfaceLayer || runtime.options.grainLayerPrescribed) &&
+                                      (leftSurface || rightSurface) && (left.massMg == 0 || left.rests) &&
+                                      (right.massMg == 0 || right.rests);
+            // 層の中の空気の孔の引きずり(T-1092 の 2 本目): セルの引きずり × 層の詰まり(両側の平均)
+            const uint64_t layerFillQ16 = std::min<uint64_t>(
+                ((uint64_t)view.cells[face.left].grainPackedQ16 + view.cells[face.right].grainPackedQ16) / 2, Q16_ONE);
+            const uint64_t layerPoreMg = surfaceLayer && runtime.options.grainLayerPoreDrag
+                                             ? ((drag >> 16) * layerFillQ16) >> 16
+                                             : 0;
             if (!locked && face.frictionFace) {
                 const int64_t now = GrainMomentum(box, face);
                 if (fx::FxAbsU64(now) <= (uint64_t)face.frictionLimit) {
                     face.held = true;
                     face.heldMomentum = now;
-                    face.heldDragMg = surfaceLayer ? 0 : drag >> 16;
+                    face.heldDragMg = surfaceLayer ? layerPoreMg : drag >> 16;
                     StopGrain(box, face);
                     face.porousMg += face.heldDragMg;
                     face.locked = true;
@@ -815,8 +823,13 @@ namespace bicameral::sim::case_b {
                 } else {
                     ApplyImpulse(box, GrainFace(box, face.axis, face.left),
                                  now > 0 ? -face.frictionLimit : face.frictionLimit, ImpulseSource::Wall);
-                    if (surfaceLayer && runtime.options.grainSurfaceLayerMoving)
+                    if (surfaceLayer &&
+                        (runtime.options.grainSurfaceLayerMoving || runtime.options.grainLayerPrescribed))
                         drag = 0;
+
+                    face.prescribed = surfaceLayer && runtime.options.grainLayerPrescribed;
+                    if (face.prescribed)
+                        face.porousMg += layerPoreMg;
                 }
 
                 stats.surfaceLayerGrainFaces += surfaceLayer ? 1u : 0u;
@@ -889,7 +902,10 @@ namespace bicameral::sim::case_b {
                 const int64_t grainMomentum = GrainMomentum(box, face);
                 combined += fx::FxMulDivS64(grainMomentum, face.dragQ16, (uint64_t)face.grainInertiaQ16);
                 if (face.grainAreaMm2 > 0) {
-                    face.coefficientQ48 += CoefficientQ48(box, face.grainAreaMm2, GrainInertiaMg(face));
+                    // 速さの決まった層(T-1092)は右辺だけ(圧力に押されない)
+                    if (!face.prescribed)
+                        face.coefficientQ48 += CoefficientQ48(box, face.grainAreaMm2, GrainInertiaMg(face));
+
                     face.predictedNl += CoupledFlowNl(box, grainMomentum, face.grainAreaMm2, GrainInertiaMg(face));
                 }
             }
@@ -911,7 +927,8 @@ namespace bicameral::sim::case_b {
         // 解いた y から、圧力の力積 → 相どうしの受け渡し → 孔の引きずり(残り)を当てる。足し合わせて保存
         void SolveCoupledFace(FlowRuntime& runtime, Box& box, FlowFace& face, int64_t deltaMicroPascal) {
             const int64_t fluidImpulse = PressureImpulse(box, deltaMicroPascal, face.carrierAreaMm2);
-            const int64_t grainImpulse = PressureImpulse(box, deltaMicroPascal, face.grainAreaMm2);
+            const int64_t grainImpulse = face.prescribed ? 0
+                                                         : PressureImpulse(box, deltaMicroPascal, face.grainAreaMm2);
             const int64_t fluidBefore = FluidMomentum(box, face) + fluidImpulse;
             const int64_t grainBefore = GrainMomentum(box, face) + grainImpulse;
             int64_t combined = fluidBefore;
