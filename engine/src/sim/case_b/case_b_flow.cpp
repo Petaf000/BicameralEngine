@@ -307,7 +307,8 @@ namespace bicameral::sim::case_b {
         }
 
         // 柱 p_col = 上の流体の重さ + 自分の重さの半分(閉じたセルで切る)
-        std::vector<int64_t> BuildFluidColumns(const Box& box, const View& view, const std::vector<FlowCell>& cells) {
+        std::vector<int64_t> BuildFluidColumns(const Box& box, const View& view, const std::vector<FlowCell>& cells,
+                                               bool perOpenArea) {
             const uint64_t areaMm2 = CellAreaMm2(box);
             const std::array<uint32_t, 3> size = {box.config.sizeX, box.config.sizeY, box.config.sizeZ};
             const uint32_t axis = view.gravityAxis;
@@ -321,7 +322,11 @@ namespace bicameral::sim::case_b {
                 for (uint32_t step = 0; step < size[axis]; ++step) {
                     const uint32_t index = CellIndex(box, at[0], at[1], at[2]);
                     const FlowCell& flow = cells[index];
-                    const int64_t weight = flow.fluidMassMg * view.gravityUmPerS2 / (int64_t)areaMm2;
+                    int64_t weight = flow.fluidMassMg * view.gravityUmPerS2 / (int64_t)areaMm2;
+                    // 開いた面積あたり(T-1105)。空きがほぼ無いセルは 1/64 で頭打ち
+                    if (perOpenArea && !flow.closed)
+                        weight = fx::FxMulDivS64(weight, Q16_ONE, std::max<uint32_t>(flow.openQ16, Q16_ONE / 64));
+
                     above = flow.closed ? 0 : above;
                     columns[index] = flow.closed ? 0 : above + (weight / 2);
                     above += flow.closed ? 0 : weight;
@@ -618,7 +623,8 @@ namespace bicameral::sim::case_b {
 
         // 粒の重さと浮力を陽に当てる。流体の重さは R1 のまま(重さの軸は柱と打ち消して 0・横は柱の差)。
         // 浮力 = 押しのけた流体の重さで、流体 → 粒の受け渡し(和 0)。粒の重さの浮力を引いた残りは引きずりで流体へ渡り、陰の圧力が支える
-        void ApplyGrainWeight(Box& box, const View& view, const FlowScratch& scratch, const FlowFace& face) {
+        void ApplyGrainWeight(Box& box, const View& view, const FlowScratch& scratch, const FlowOptions& options,
+                              const FlowFace& face) {
             if (face.grainMassMg <= 0)
                 return;
 
@@ -629,7 +635,11 @@ namespace bicameral::sim::case_b {
             const int64_t displacedQ20 = fx::FxMulDivS64(face.grainNl, density << 20, 1000000000);
             const int64_t buoyancy = -fx::FxMulDivS64(box.config.accelerationUmPerS2[face.axis], (uint64_t)displacedQ20,
                                                       (uint64_t)box.config.ticksPerSecond * 1000000);
-            MoveMomentum(box, CarrierFace(face), grain, buoyancy);
+            if (options.buoyancyFromColumn)
+                ApplyImpulse(box, grain, buoyancy, ImpulseSource::Pressure);
+            else
+                MoveMomentum(box, CarrierFace(face), grain, buoyancy);
+
             if (face.axis == view.gravityAxis)
                 return;
 
@@ -754,7 +764,7 @@ namespace bicameral::sim::case_b {
             face.grainAreaMm2 = face.grainMassMg > 0 ? meanArea : 0;
             const int64_t fluidStart = FluidMomentum(box, face);
             const int64_t grainStart = GrainMomentum(box, face);
-            ApplyGrainWeight(box, view, scratch, face);
+            ApplyGrainWeight(box, view, scratch, runtime.options, face);
             if (face.frictionFace && face.grainMassMg > 0)
                 ApplyImpulse(box, GrainFace(box, face.axis, face.left), face.frictionPush, ImpulseSource::Pressure);
 
@@ -1387,7 +1397,8 @@ namespace bicameral::sim::case_b {
                 stats.voidCells += scratch.cells[cell].voidNl > 0 ? 1u : 0u;
             }
 
-            scratch.columnMicroPascal = BuildFluidColumns(box, context.view, scratch.cells);
+            scratch.columnMicroPascal = BuildFluidColumns(box, context.view, scratch.cells,
+                                                          runtime.options.columnPerOpenArea);
             scratch.faces = BuildFaces(box, scratch.cells, stats);
             if (PerPhase(box)) {
                 MeasureSurfaceCells(box, context.view, scratch);

@@ -250,6 +250,10 @@ namespace {
     bool movingByCellOverride = false;
     uint32_t dragScaleOverride = 1000;     // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
+    uint32_t cyclesOverride = CYCLES;      // 陰の圧力の V サイクルの回数(T-1105)。引数 cycles=<回>
+    uint32_t ticksOverride = 0;            // 1 秒の刻みの数(T-1105)。引数 tps=<数>。0 = 場面の既定
+    bool buoyancyOverride = false;         // 浮力を柱から(T-1105)。引数 buoyancy
+    bool openColumnOverride = false;       // 流体の柱を開いた面積あたりで(T-1105)。引数 opencolumn
     bool poreDragOverride = false;         // 層の中の空気だけ孔の引きずり(T-1092 の 2 本目)。引数 prescribed2
     bool prescribedOverride = false;       // 表面のセルの層を速さの決まった相に(T-1092)。引数 prescribed
     bool surfaceHeldOnlyOverride = false;  // 層の止まった粒の面だけ障害物(T-1071 の 2 本目)。引数 surface2
@@ -285,7 +289,7 @@ namespace {
         auto created = BuildScene(scene, options.level, options.layout);
         EXPECT(created.has_value());
         Run run{.recording = {}, .stats = {}, .box = std::move(*created), .grainSpeed = {}};
-        run.box.config.ticksPerSecond = options.ticksPerSecond;
+        run.box.config.ticksPerSecond = ticksOverride != 0 ? ticksOverride : options.ticksPerSecond;
         if (options.prepare) {
             options.prepare(run.box);
             ResetLedger(run.box);
@@ -315,10 +319,12 @@ namespace {
         flowOptions.grainSurfaceLayerMoving = !surfaceHeldOnlyOverride;
         flowOptions.grainLayerPrescribed = prescribedOverride;
         flowOptions.grainLayerPoreDrag = poreDragOverride;
+        flowOptions.columnPerOpenArea = openColumnOverride;
+        flowOptions.buoyancyFromColumn = buoyancyOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
-        const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
+        const PressureSolver solver = MakeImplicitGridSolver(cyclesOverride, TOLERANCE_NL);
         uint64_t tick = 0;
         run.recording = RunScene(run.box, flow.stages, solver, options.seconds * options.ticksPerSecond, regions,
                                  [&](Box& box) {
@@ -1092,6 +1098,69 @@ namespace {
             (long long)MillimetersPerSecond(run.grainSpeed.back()));
     }
 
+    // --- 13. 空気が暴れる元(T-1105。記録): 斜面 25°(初めは止まっている)で、空気の面の速さの最大と場所・陰の圧力の誤差・
+    // 運ぶ段で縮めたセル(解いた流れと運んだ流れが食い違う所)を 0.25 秒ごとに ---
+    struct AirPeak {
+        int64_t speed = 0;
+        std::string where;
+    };
+
+    AirPeak MaxGasSpeed(const Box& box) {
+        const View view = BuildView(box);
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Gas);
+        AirPeak peak;
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (!neighbor.has_value())
+                    continue;
+
+                const int64_t mass = (view.cells[cell].phaseMassMg[0] + view.cells[*neighbor].phaseMassMg[0] + 1) / 2;
+                if (mass <= 0)
+                    continue;
+
+                const int64_t speed = std::abs(box.faceMomentum[axis][FaceIndex(box, cell, slot)]) / mass;
+                if (speed <= peak.speed)
+                    continue;
+
+                const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                peak.speed = speed;
+                peak.where = std::format("({},{})軸{}・詰まり {}/{}‰", at[0], at[1], axis,
+                                         ((uint64_t)view.cells[cell].grainPackedQ16 * 1000) >> 16,
+                                         ((uint64_t)view.cells[*neighbor].grainPackedQ16 * 1000) >> 16);
+            }
+        }
+
+        return peak;
+    }
+
+    void AirWatch(int32_t level) {
+        std::string series;
+        uint64_t limited = 0;
+        uint64_t grainLimited = 0;
+        const auto sample = [&](Box& box, uint64_t tick) {
+            const uint64_t perQuarter = box.config.ticksPerSecond / 4;
+            if (tick % perQuarter != 0)
+                return;
+
+            const AirPeak air = MaxGasSpeed(box);
+            series += std::format(
+                "\n    {} 秒: 空気 {} mm/s {}・粒 {} mm/s・誤差 {} nL(最大 {})・縮めたセル 流体 {} / 粒 {}",
+                Fixed3((int64_t)tick * 1000 / box.config.ticksPerSecond), MillimetersPerSecond(air.speed), air.where,
+                MillimetersPerSecond(MaxGrainSpeed(box)), currentStats->lastErrorNl, currentStats->maxErrorNl,
+                currentStats->limitedCells - limited, currentStats->grainLimitedCells - grainLimited);
+            limited = currentStats->limitedCells;
+            grainLimited = currentStats->grainLimitedCells;
+        };
+        const Run run = RunR3(MakeSlopeScene(30560), {.level = level, .seconds = 4, .afterTick = sample}, {"slope"});
+        std::printf(
+            "  空気の見張り 斜面 25° %s m(V %u 回・%u 刻み/秒):%s\n    V 最大 %u・止まった粒の面 %llu・表面の層の面 "
+            "%llu\n",
+            level == 0 ? "0.5" : "0.25", cyclesOverride, run.box.config.ticksPerSecond, series.c_str(),
+            run.stats.maxCycles, (unsigned long long)run.stats.heldGrainFaces,
+            (unsigned long long)run.stats.surfaceLayerGrainFaces);
+    }
+
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
@@ -1125,6 +1194,14 @@ int main(int argc, char** argv) {
             surfaceLayerOverride = frictionInSolveOverride = true;
         else if (word == "prescribed")
             prescribedOverride = frictionInSolveOverride = true;
+        else if (word.starts_with("cycles="))
+            cyclesOverride = (uint32_t)std::stoi(word.substr(7));
+        else if (word.starts_with("tps="))
+            ticksOverride = (uint32_t)std::stoi(word.substr(4));
+        else if (word == "opencolumn")
+            openColumnOverride = true;
+        else if (word == "buoyancy")
+            buoyancyOverride = true;
         else if (word == "prescribed2")
             prescribedOverride = frictionInSolveOverride = poreDragOverride = true;
         else if (word == "surface2")
@@ -1148,6 +1225,13 @@ int main(int argc, char** argv) {
 
     if (only == 10) {
         ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 13) {
+        AirWatch(argc > 2 ? std::stoi(argv[2]) : 1);
         std::printf("case_b r3: %d failure(s)\n", failureCount);
 
         return failureCount == 0 ? 0 : 1;
