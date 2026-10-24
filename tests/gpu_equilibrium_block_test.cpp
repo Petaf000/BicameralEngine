@@ -289,21 +289,24 @@ namespace {
     std::expected<void, std::string> TestComponents(Context& context) {
         constexpr uint32_t EDGE = 8;
         constexpr uint32_t TICKS = 5;
-        for (const uint32_t k : {1u, 2u, 3u, 6u}) {
-            const sim::EquilibriumBlockSystem system = BoxSystem(k, EDGE);
-            const sim::EquilibriumBlockGrid grid = sim::BuildEquilibriumBlockGrid(system);
-            const sim::EquilibriumBlockOptions solve;
-            sim::EquilibriumBlockState state;
-            std::vector<std::vector<int64_t>> cpuTicks;
-            for (uint32_t tick = 0; tick < TICKS; ++tick) {
-                sim::SolveEquilibriumBlocks(system, grid, solve, state);
-                cpuTicks.push_back(state.values);
-            }
+        // V 2 回だけ(前の既定)と、V 4 回 + 共役勾配(lineSearch。T-1085・ADR-0455。支えの今の既定)
+        for (const bool conjugate : {false, true}) {
+            for (const uint32_t k : {1u, 2u, 3u, 6u}) {
+                const sim::EquilibriumBlockSystem system = BoxSystem(k, EDGE);
+                const sim::EquilibriumBlockGrid grid = sim::BuildEquilibriumBlockGrid(system);
+                const sim::EquilibriumBlockOptions solve{.cycles = conjugate ? 4u : 2u, .lineSearch = conjugate};
+                sim::EquilibriumBlockState state;
+                std::vector<std::vector<int64_t>> cpuTicks;
+                for (uint32_t tick = 0; tick < TICKS; ++tick) {
+                    sim::SolveEquilibriumBlocks(system, grid, solve, state);
+                    cpuTicks.push_back(state.values);
+                }
 
-            const auto compared = CompareRuns(context, std::format("箱 一辺 {}・k = {}", EDGE, k), system, grid, solve,
-                                              {}, cpuTicks);
-            if (!compared)
-                return compared;
+                const std::string name = std::format("箱 一辺 {}・k = {}{}", EDGE, k, conjugate ? "・共役勾配" : "");
+                const auto compared = CompareRuns(context, name, system, grid, solve, {}, cpuTicks);
+                if (!compared)
+                    return compared;
+            }
         }
 
         return {};
@@ -366,8 +369,8 @@ namespace {
 
     std::expected<void, std::string> MeasureOne(Context& context, std::string_view name,
                                                 const sim::EquilibriumBlockSystem& system,
-                                                const sim::EquilibriumBlockGrid& grid, bool quiet = false) {
-        const sim::EquilibriumBlockOptions solve;
+                                                const sim::EquilibriumBlockGrid& grid, bool quiet = false,
+                                                const sim::EquilibriumBlockOptions& solve = {}) {
         auto gpu = sim::GpuEquilibriumBlock::Create(context.device, system, grid, {.solve = solve});
         if (!gpu)
             return std::unexpected(gpu.error());
@@ -381,10 +384,11 @@ namespace {
 
         const double cells = (double)gpu->Cells();
         Log(Channel::Sim, Level::Info,
-            "費用 {}: 節 {}(全部の段 {})・段 {}・隣 {}・1 回の解き(V {} 回){:.3f} ms = {:.1f} ns/節・Dispatch {}・"
+            "費用 {}: 節 {}(全部の段 {})・段 {}・隣 {}・1 回の解き(V {} 回{}){:.3f} ms = {:.1f} ns/節・Dispatch {}・"
             "段を作る {:.3f} ms = {:.1f} ns/節・VRAM {:.1f} MB = {:.0f} B/節",
-            name, gpu->Cells(), gpu->Nodes(), gpu->Levels(), gpu->Links(), solve.cycles, cost->solveMs,
-            cost->solveMs * 1.0e6 / cells, gpu->DispatchesPerSolve(), cost->prepareMs, cost->prepareMs * 1.0e6 / cells,
+            name, gpu->Cells(), gpu->Nodes(), gpu->Levels(), gpu->Links(), solve.cycles,
+            solve.lineSearch ? " + 共役勾配" : "", cost->solveMs, cost->solveMs * 1.0e6 / cells,
+            gpu->DispatchesPerSolve(), cost->prepareMs, cost->prepareMs * 1.0e6 / cells,
             (double)gpu->DeviceBytes() / 1.0e6, (double)gpu->DeviceBytes() / cells);
 
         return {};
@@ -413,12 +417,16 @@ namespace {
             }
         }
 
+        // 支えの洞窟: 前の既定(V 2 回)と今の既定(V 4 回 + 共役勾配。T-1085)
+        const sim::SupportOptions support{.solve = sim::SupportSolve::Coupled};
         for (const uint64_t cellMm : {500ull, 250ull}) {
-            const sim::SupportLaw law(test::Cave(cellMm), {.solve = sim::SupportSolve::Coupled});
-            const auto measured = MeasureOne(context, std::format("支えの洞窟 {} mm・k = 3", cellMm), law.BlockSystem(),
-                                             law.BlockGrid());
-            if (!measured)
-                return measured;
+            const sim::SupportLaw law(test::Cave(cellMm), support);
+            for (const sim::EquilibriumBlockOptions& solve : {sim::EquilibriumBlockOptions{}, support.blocks}) {
+                const auto measured = MeasureOne(context, std::format("支えの洞窟 {} mm・k = 3", cellMm),
+                                                 law.BlockSystem(), law.BlockGrid(), false, solve);
+                if (!measured)
+                    return measured;
+            }
         }
 
         return {};

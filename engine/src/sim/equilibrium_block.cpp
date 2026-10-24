@@ -358,6 +358,83 @@ namespace bicameral::sim {
             Smooth(level, rhs, values, options.postSmooth, k, shift, updates);
         }
 
+        // --- V の直しを前処理とする共役勾配(T-1068。lineSearch のときだけ)---
+        // V サイクルの直し z = after − before を前処理した残差として、刻みの中で共役勾配を進める(ConjugateStep)。粗い段が運べない遅い形
+        // (壁と棚の継ぎ目で回る形。1 回の V で (1 − ρ) しか進まない)は、前処理した系の孤立した小さい固有値になり、共役な向きで消える。
+        // 刻みをまたいで持つものは無い(セーブ・ハッシュは今のまま)。整数: 内積は 128bit で厳密(足す順によらない = GPU でも同じ和)。
+        // 歩幅と β は Q16・大きさの上限 EQB_STEP_MAX(式は common/equilibrium_block.hlsli で GPU と共有)。rᵀp ≤ 0 か pᵀAp ≤ 0 なら V のまま(その歩で覚えを捨てる)
+
+        // 共役勾配の前の歩(刻みの中だけ)
+        struct ConjugateMemory {
+            std::vector<int64_t> direction;
+            std::vector<int64_t> residual;
+            FxU128 zr = {.hi = 0, .lo = 0};
+            bool valid = false;
+        };
+
+        // 節 × k の並びどうしの内積(128bit で厳密)
+        FxU128 Dot(const std::vector<int64_t>& a, const std::vector<int64_t>& b) {
+            FxU128 sum = WideZero();
+            for (size_t i = 0; i < a.size(); ++i)
+                sum = SignedAdd(sum, SignedProduct(a[i], b[i]));
+
+            return sum;
+        }
+
+        // 全部の節の b − A x(rhs が 0 なら −A x)
+        std::vector<int64_t> Residuals(const EquilibriumBlockLevel& level, const std::vector<int64_t>& rhs,
+                                       const std::vector<int64_t>& values, uint32_t k, uint32_t shift) {
+            std::vector<int64_t> result(values.size());
+            for (size_t i = 0; i < level.x.size(); ++i) {
+                const EquilibriumVector residual = NodeResidual(level, rhs, values, i, k, shift);
+                for (uint32_t c = 0; c < k; ++c)
+                    result[i * k + c] = residual[c];
+            }
+
+            return result;
+        }
+
+        // V の直し z を前処理とする共役勾配の 1 歩(刻みの中だけ覚える。刻みをまたいで持つ状態は無い = セーブ・ハッシュは今のまま)。
+        // p = z + β p_前(β は Polak–Ribière = zᵀ(r − r_前) ÷ z_前ᵀr_前)、歩幅 α = rᵀp ÷ pᵀAp。粗い段が運べない遅い形は、
+        // 前処理した系の孤立した小さい固有値になり、共役な向きで 1〜2 歩で消える
+        void ConjugateStep(const EquilibriumBlockLevel& level, const std::vector<int64_t>& rhs,
+                           const std::vector<int64_t>& before, std::vector<int64_t>& values, uint32_t k, uint32_t shift,
+                           ConjugateMemory& memory) {
+            std::vector<int64_t> direction(values.size());
+            for (size_t i = 0; i < values.size(); ++i)
+                direction[i] = values[i] - before[i];
+
+            const std::vector<int64_t> residual = Residuals(level, rhs, before, k, shift);
+            const FxU128 zr = Dot(direction, residual);
+            if (memory.valid) {
+                std::vector<int64_t> change(residual.size());
+                for (size_t i = 0; i < residual.size(); ++i)
+                    change[i] = residual[i] - memory.residual[i];
+
+                const int64_t beta = EqbSignedRatio(Dot(direction, change), memory.zr);
+                for (size_t i = 0; i < direction.size(); ++i)
+                    direction[i] += EqbScaleQ16(memory.direction[i], beta);
+            }
+
+            const std::vector<int64_t> zero(values.size(), 0);
+            const std::vector<int64_t> pushed = Residuals(level, zero, direction, k, shift);  // −A p
+            const FxU128 along = Dot(direction, residual);
+            const FxU128 energy = SignedNegate(Dot(direction, pushed));
+            memory.valid = false;
+            if (SignedNegative(along) || SignedNegative(energy) || EqbWideBitLength(along) == 0 ||
+                EqbWideBitLength(energy) == 0)
+                return;
+
+            const uint64_t alpha = EqbStepRatio(along, energy);
+            for (size_t i = 0; i < values.size(); ++i)
+                values[i] = before[i] + FxMulDivS64(direction[i], alpha, EQB_STEP_ONE);
+
+            memory.valid = !SignedNegative(zr) && EqbWideBitLength(zr) != 0;
+            memory.zr = zr;
+            memory.direction = std::move(direction);
+            memory.residual = residual;
+        }
+
     }  // namespace
 
     EquilibriumBlockGrid BuildEquilibriumBlockGrid(const EquilibriumBlockSystem& system) {
@@ -413,8 +490,34 @@ namespace bicameral::sim {
         if (count == 0)
             return result;
 
-        for (uint32_t cycle = 0; cycle < options.cycles; ++cycle)
+        ConjugateMemory memory;
+        const bool across = options.lineSearch && options.conjugateAcrossTicks;
+        if (across && state.conjugateValid && state.conjugateDirection.size() == state.values.size()) {
+            memory.direction = state.conjugateDirection;
+            memory.residual = state.conjugateResidual;
+            memory.zr = {.hi = state.conjugateZrHigh, .lo = state.conjugateZrLow};
+            memory.valid = true;
+        }
+
+        for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
+            if (!options.lineSearch) {
+                VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
+                continue;
+            }
+
+            // V の直しを前処理とする共役勾配の 1 歩(T-1068)
+            const std::vector<int64_t> before = state.values;
             VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
+            ConjugateStep(grid.levels[0], rhs, before, state.values, k, system.coefficientShift, memory);
+        }
+
+        if (across) {
+            state.conjugateValid = memory.valid;
+            state.conjugateDirection = memory.direction;
+            state.conjugateResidual = memory.residual;
+            state.conjugateZrHigh = memory.zr.hi;
+            state.conjugateZrLow = memory.zr.lo;
+        }
 
         if (options.warmStart.nest != nullptr)
             (void)StoreWarmStart(options.warmStart, system.nodes, state.values, k);

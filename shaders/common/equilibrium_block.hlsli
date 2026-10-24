@@ -356,6 +356,80 @@ FX_FN uint32_t EqbWorkWords(uint32_t k, uint32_t nodeCapacity, uint32_t cells) {
     return EqbSourceWord(k, nodeCapacity, cells);
 }
 
+// 共役勾配(EquilibriumBlockOptions::lineSearch。T-1068・T-1085・ADR-0455)の作業場: 段 0 のセル × k の並び 6 本と、刻みの中の数 8 語
+//   並び: 0 = V の前の値・1 = 向き p(初めは V の直し z)・2 = 残差 r・3 = 前の向き・4 = 前の残差・5 = −A p
+//   数: 0 = 前の向きが使えるか(0 / 1)・1〜2 = 前の zᵀr(128bit の上・下)・3 = β(Q16)・4 = α(Q16)・5 = この歩を当てるか・6〜7 = 今の zᵀr
+FX_CONST uint32_t EQB_CONJUGATE_BEFORE = 0;
+FX_CONST uint32_t EQB_CONJUGATE_DIRECTION = 1;
+FX_CONST uint32_t EQB_CONJUGATE_RESIDUAL = 2;
+FX_CONST uint32_t EQB_CONJUGATE_DIRECTION_PREVIOUS = 3;
+FX_CONST uint32_t EQB_CONJUGATE_RESIDUAL_PREVIOUS = 4;
+FX_CONST uint32_t EQB_CONJUGATE_PUSHED = 5;
+FX_CONST uint32_t EQB_CONJUGATE_ARRAYS = 6;
+FX_CONST uint32_t EQB_CONJUGATE_SCALARS = 8;
+
+FX_FN uint32_t EqbConjugateWord(uint32_t k, uint32_t nodeCapacity, uint32_t cells, uint32_t which, uint32_t cell) {
+    return EqbWorkWords(k, nodeCapacity, cells) + (which * cells + cell) * k;
+}
+
+FX_FN uint32_t EqbConjugateScalarWord(uint32_t k, uint32_t nodeCapacity, uint32_t cells, uint32_t index) {
+    return EqbWorkWords(k, nodeCapacity, cells) + EQB_CONJUGATE_ARRAYS * cells * k + index;
+}
+
+FX_FN uint32_t EqbConjugateWorkWords(uint32_t k, uint32_t nodeCapacity, uint32_t cells) {
+    return EqbConjugateScalarWord(k, nodeCapacity, cells, EQB_CONJUGATE_SCALARS);
+}
+
+// --- 共役勾配の数(CPU の SolveEquilibriumBlocks と GPU で同じ式)---
+FX_CONST uint64_t EQB_STEP_ONE = 65536;                             // α・β の Q16 の 1
+FX_CONST uint64_t EQB_STEP_MAX = (uint64_t)65536 * (uint64_t)4096;  // 大きさの上限(4096 倍)
+
+FX_FN bool EqbWideIsNegative(FxU128 value) {
+    return (value.hi >> 63) != 0;
+}
+
+// 128bit の値の桁の数(0 なら 0)
+FX_FN uint32_t EqbWideBitLength(FxU128 value) {
+    if (value.hi != 0)
+        return 65 + FxMsbU64(value.hi);
+
+    return value.lo == 0 ? 0 : 1 + FxMsbU64(value.lo);
+}
+
+// 正の num ÷ den を Q16 で(上限 EQB_STEP_MAX)。den の上の 47 bit で割る
+FX_FN uint64_t EqbStepRatio(FxU128 num, FxU128 den) {
+    const uint32_t length = EqbWideBitLength(den);
+    const uint32_t drop = length > 47 ? length - 47 : 0;
+    const uint64_t denominator = FxShiftRightU128(den, drop);
+    if (denominator == 0 || EqbWideBitLength(num) > drop + 60)
+        return EQB_STEP_MAX;
+
+    const uint64_t numerator = FxShiftRightU128(num, drop);
+    if (numerator / denominator >= (EQB_STEP_MAX >> 16))
+        return EQB_STEP_MAX;
+
+    return FxDivU128By64(FxMulU64Full(numerator, EQB_STEP_ONE), denominator).quotient;
+}
+
+// 符号つきの num ÷ den(den > 0)を Q16 で。大きさは EQB_STEP_MAX まで
+FX_FN int64_t EqbSignedRatio(FxU128 num, FxU128 den) {
+    const bool negative = EqbWideIsNegative(num);
+    FxU128 magnitude = num;  // 構造体の三項演算子は HLSL に無い
+    if (negative)
+        magnitude = EqbWideNegate(num);
+
+    const uint64_t ratio = EqbStepRatio(magnitude, den);
+
+    return negative ? -(int64_t)ratio : (int64_t)ratio;
+}
+
+// value × ratio(Q16。符号つき)を 0 方向へ切り捨て
+FX_FN int64_t EqbScaleQ16(int64_t value, int64_t ratio) {
+    const int64_t scaled = FxMulDivS64(value, FxAbsU64(ratio), EQB_STEP_ONE);
+
+    return ratio < 0 ? -scaled : scaled;
+}
+
 // --- GPU の置き場の形(gpu_equilibrium_block.cpp が詰め、equilibrium_block.hlsl が読む)---
 // 節(全部の段を続けた番号)。番地はどれもバッファの中の絶対の位置
 struct EqbGpuNode {

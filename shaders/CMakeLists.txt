@@ -259,7 +259,9 @@ endforeach()
 
 # 成分を持つ節の釣り合いの GPU の段(T-0970。成分の数 k = 1・2・3・6 ごとに別々に作る。呼ぶ順は engine/src/sim/gpu_equilibrium_block.cpp)
 foreach(_k IN ITEMS 1 2 3 6)
-  foreach(_entry IN ITEMS Finish Coarsen Smooth Restrict Prolong)
+  # Conjugate*: 共役勾配(EquilibriumBlockOptions::lineSearch。T-1085・ADR-0455)
+  foreach(_entry IN ITEMS Finish Coarsen Smooth Restrict Prolong ConjugateSave ConjugateResidual ConjugateBeta
+                          ConjugateDirection ConjugatePush ConjugateAlpha ConjugateUpdate)
     string(TOLOWER "${_entry}" _lower)
     bicameral_add_shader(sim/equilibrium_block.hlsl PROFILE cs_6_8 ENTRY EquilibriumBlock${_entry}
                          NAME equilibrium_block_k${_k}_${_lower} DEFINES EQB_K=${_k})

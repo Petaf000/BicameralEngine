@@ -21,7 +21,10 @@ namespace bicameral::sim {
         constexpr uint32_t THREADS_PER_GROUP = 64;  // equilibrium_block.hlsl の numthreads
         constexpr uint32_t ROOT_CONSTANT_COUNT = 6;
         constexpr std::array<uint32_t, 4> SHADER_COMPONENTS = {1, 2, 3, 6};
-        constexpr std::array<const char*, 5> PASS_NAMES = {"finish", "coarsen", "smooth", "restrict", "prolong"};
+        constexpr std::array<const char*, 12> PASS_NAMES = {
+            "finish",         "coarsen",           "smooth",        "restrict",           "prolong",
+            "conjugatesave",  "conjugateresidual", "conjugatebeta", "conjugatedirection", "conjugatepush",
+            "conjugatealpha", "conjugateupdate"};
 
         // u0 係数・u1 作業場 / b0 / デバッグのリング / t0 節・t1 添字
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
@@ -163,7 +166,10 @@ namespace bicameral::sim {
         const uint64_t coefficientBytes = uint64_t{EqbCoefficientWords(k, m_nodeCapacity, m_linkCapacity,
                                                                        m_fixedCapacity)} *
                                           sizeof(int64_t);
-        const uint64_t workBytes = uint64_t{EqbWorkWords(k, m_nodeCapacity, m_cells)} * sizeof(int64_t);
+        // 共役勾配は段 0 の並び 6 本と数 8 語を作業場の後ろに足す(切なら今と同じ大きさ)
+        const uint32_t workWords = m_options.solve.lineSearch ? EqbConjugateWorkWords(k, m_nodeCapacity, m_cells)
+                                                              : EqbWorkWords(k, m_nodeCapacity, m_cells);
+        const uint64_t workBytes = uint64_t{workWords} * sizeof(int64_t);
         const uint64_t valueBytes = uint64_t{m_cells} * k * sizeof(int64_t);
         m_coefficients = gpu::CreateBuffer(m_device, coefficientBytes, gpu::BufferKind::UnorderedAccess);
         m_work = gpu::CreateBuffer(m_device, workBytes, gpu::BufferKind::UnorderedAccess);
@@ -330,7 +336,8 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(0), m_nodes.buffer->GetGPUVirtualAddress());
         list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(1), m_indices.buffer->GetGPUVirtualAddress());
-        list->Dispatch(GroupsFor(constants.count), 1, 1);
+        const bool reduce = pass == Pass::ConjugateBeta || pass == Pass::ConjugateAlpha;
+        list->Dispatch(reduce ? 1 : GroupsFor(constants.count), 1, 1);
 
         const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
         list->ResourceBarrier(1, &barrier);
@@ -385,9 +392,30 @@ namespace bicameral::sim {
         RecordSmooth(list, debugRing, level, solve.postSmooth);
     }
 
+    // 共役勾配の段(段 0 のセルだけ。first = 何回目の V か・list = セルの数)
+    void GpuEquilibriumBlock::RecordConjugate(ID3D12GraphicsCommandList* list, uint64_t debugRing, Pass pass,
+                                              uint32_t cycle) const {
+        Constants constants = BaseConstants();
+        constants.first = cycle;
+        constants.count = m_cells;
+        constants.list = m_cells;
+        RecordPass(list, debugRing, pass, constants);
+    }
+
+    // equilibrium_block.cpp の SolveEquilibriumBlocks と同じ順(lineSearch なら V ごとに共役勾配の 1 歩)
     void GpuEquilibriumBlock::RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing) const {
-        for (uint32_t cycle = 0; cycle < m_options.solve.cycles; ++cycle)
+        for (uint32_t cycle = 0; cycle < m_options.solve.cycles; ++cycle) {
+            if (!m_options.solve.lineSearch) {
+                RecordCycle(list, debugRing, 0);
+                continue;
+            }
+
+            RecordConjugate(list, debugRing, Pass::ConjugateSave, cycle);
             RecordCycle(list, debugRing, 0);
+            for (const Pass pass : {Pass::ConjugateResidual, Pass::ConjugateBeta, Pass::ConjugateDirection,
+                                    Pass::ConjugatePush, Pass::ConjugateAlpha, Pass::ConjugateUpdate})
+                RecordConjugate(list, debugRing, pass, cycle);
+        }
     }
 
     uint64_t GpuEquilibriumBlock::DispatchesPerSolve() const {
@@ -400,7 +428,9 @@ namespace bicameral::sim {
             count += coarsest ? colors * solve.coarsestSweeps : colors * (solve.preSmooth + solve.postSmooth) + 2;
         }
 
-        return count * solve.cycles;
+        const uint64_t conjugate = solve.lineSearch ? 7 : 0;
+
+        return (count + conjugate) * solve.cycles;
     }
 
     // --- 読み戻し・計測 ---

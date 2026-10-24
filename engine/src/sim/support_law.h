@@ -34,6 +34,9 @@ namespace bicameral::sim {
     inline constexpr uint32_t SUPPORT_TURN = 2;  // 成分: 回り φ(BeamLattice だけ)
     inline constexpr uint32_t SUPPORT_COMPONENTS = 3;
 
+    // 面の残りの硬さ(Q16)の「割れていない」(R-B2・T-0872)
+    inline constexpr uint32_t SUPPORT_INTACT_FULL = 65536;
+
     enum class SupportForm : uint8_t {
         PerComponent,  // 成分ごと(結合なし)
         BeamLattice,   // 格子の梁(回りを持つ。結合は遅らせる)
@@ -58,6 +61,13 @@ namespace bicameral::sim {
             stiffnessUpKpa = 0;  // 上の向きの面と下の固定した面の硬さ(0 = stiffnessKpa。向きごとの硬さ Q143 の材料)
         uint64_t densityKgPerM3 = 0;  // 重さの元
         uint64_t gravityUmPerS2 = 9806650;
+
+        // --- 割れと荷(R-B2・T-0872。割れの法則 sim/support_fracture が書く)---
+        // 面の残りの硬さ(Q16。SUPPORT_INTACT_FULL = 割れていない・0 = 割れた面 = 係数 0)。[x + width × up] のセルと +軸の隣の間の面。
+        // 空 = 全部割れていない(今までと同じ答え)
+        std::vector<uint32_t> intactX;
+        std::vector<uint32_t> intactUp;
+        std::vector<int64_t> loadMn;  // セルに足す下向きの力(mN。荷を載せる)。空 = 0
     };
 
     struct SupportOptions {
@@ -74,7 +84,9 @@ namespace bicameral::sim {
 
         // --- 解き方(T-0919)---
         SupportSolve solve = SupportSolve::Coupled;
-        EquilibriumBlockOptions blocks;  // Coupled の V の回数など(法則の定数)
+        // Coupled の V の回数など(法則の定数)。既定は V 4 回 + V を前処理とする共役勾配(T-1085・ADR-0455。壁につながる棚が
+        // 9/10 に 32 / 69 刻み。V 2 回だけだと 1153 / 1711 刻み)
+        EquilibriumBlockOptions blocks{.cycles = 4, .lineSearch = true};
 
         // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)
@@ -97,6 +109,8 @@ namespace bicameral::sim {
         int64_t shearMn = 0;     // ずれの力(横の向きの正へ +軸の側のセルを押し返す向き)
         int64_t lowSideMn = 0;   // −横の側の縁の力(x の面 = 下の縁・上の面 = −x の縁)。N ± 6M/dx
         int64_t highSideMn = 0;  // +横の側の縁の力(x の面 = 上の縁・上の面 = +x の縁)
+        int64_t energyPj = 0;    // 面の梁に蓄えたたわみのエネルギー(pJ。伸び・ずれ・曲げの和。割れの帳簿 R-B2 が読む)
+        uint32_t intact = 0;     // 面の残りの硬さ(Q16。力とエネルギーはこの硬さでの値)
     };
 
     // 世界のデータの V の回数(環境の balance_cycles.support。T-0955)を 1 つの系(blocks)と成分ごとの解き(equilibrium)の両方へ
@@ -137,6 +151,7 @@ namespace bicameral::sim {
             uint32_t low = 0;   // −軸の側のセル
             uint32_t high = 0;  // +軸の側のセル
             uint32_t axis = 0;  // 0 = x・1 = 上
+            uint64_t unit = 0;  // b(面の残りの硬さを掛けた後)
         };
 
         // 段の斜めの棒: low = 下のセル・high = 斜め上のセル・across = 横の向き(+1 = +x へ・−1 = −x へ)
@@ -144,6 +159,7 @@ namespace bicameral::sim {
             uint32_t low = 0;
             uint32_t high = 0;
             int32_t across = 0;
+            uint64_t unit = 0;  // 式の係数(間の面の残りの硬さの小さい方を掛けた後)
         };
 
         struct Clamp {
@@ -174,6 +190,9 @@ namespace bicameral::sim {
         int64_t UpForceOnClamp(const Clamp& clamp) const;
         int64_t UpForceOnBond(const Bond& bond) const;  // high のセルへ low のセルから(low へは同じ値の逆)
         uint32_t ComponentCount() const;
+        uint32_t Intact(uint32_t x, uint32_t up, uint32_t axis) const;
+        uint32_t BraceIntact(uint32_t x, uint32_t up, uint32_t sideX, bool side) const;
+        int64_t CellLoad(uint32_t cell) const;  // 重さ + 載せた荷(mN。下向きが正)
 
         SupportScene m_scene;
         SupportOptions m_options;
@@ -185,6 +204,7 @@ namespace bicameral::sim {
         std::vector<std::array<uint32_t, 2>> m_cells;  // セルの (x, up)
         std::vector<uint32_t> m_index;                 // [x + width × up] → セル(無ければ UINT32_MAX)
         std::vector<Bond> m_bonds;
+        std::vector<uint32_t> m_bondAt;  // [セル × 2 + 軸] → 面(無ければ UINT32_MAX)
         std::vector<Clamp> m_clamps;
         std::vector<Brace> m_braces;
 
