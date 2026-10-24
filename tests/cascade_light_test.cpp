@@ -267,7 +267,64 @@ namespace {
         double instantRms = 0;                 // 1 刻みごとの二乗平均のずれの、刻みの平均
         uint64_t raysPerTick = 0;
         double msPerTick = 0;
+
+        // --- 正しい値(焚き火の面から受け手の面への遮る物の無い G の面の積分)からのずれ(ADR-0453・T-1081)---
+        std::array<double, 3> averageExactWorst{};  // 60・250・500 刻みの平均
+        double exactAll = 0;                        // 全部の刻みの平均
+        double instantExactWorstMean = 0;           // 瞬間(1 刻み)の |ずれ| の最大の、刻みの平均
+        double instantExactRms = 0;
     };
+
+    // 面(セル・向き dir = 軸 × 2 + 負なら 1)の上の点(u, v は −0.5〜0.5)
+    std::array<double, 3> FacePoint(const std::array<int64_t, 3>& cell, int dir, double u, double v) {
+        const int axis = dir / 2;
+        std::array<double, 3> p = {static_cast<double>(cell[0]) + 0.5, static_cast<double>(cell[1]) + 0.5,
+                                   static_cast<double>(cell[2]) + 0.5};
+        p[axis] += (dir % 2) != 0 ? -0.5 : 0.5;
+        p[(axis + 1) % 3] += u;
+        p[(axis + 2) % 3] += v;
+
+        return p;
+    }
+
+    // 遮る物の無い面と面の G(セルの面積 = 1)。mm × mm の点どうしの積分(T-1062 の試作 GeometricExchange と同じ)
+    double FaceExchange(const std::array<int64_t, 3>& cellA, int dirA, const std::array<int64_t, 3>& cellB, int dirB,
+                        int mm) {
+        const double signA = (dirA % 2) != 0 ? -1.0 : 1.0;
+        const double signB = (dirB % 2) != 0 ? -1.0 : 1.0;
+        const double weight = 1.0 / (static_cast<double>(mm) * mm * mm * mm);
+        double g = 0;
+        for (int i = 0; i < mm * mm; ++i) {
+            const auto pa = FacePoint(cellA, dirA, ((i % mm) + 0.5) / mm - 0.5, ((i / mm) + 0.5) / mm - 0.5);
+            for (int j = 0; j < mm * mm; ++j) {
+                const auto pb = FacePoint(cellB, dirB, ((j % mm) + 0.5) / mm - 0.5, ((j / mm) + 0.5) / mm - 0.5);
+                const std::array<double, 3> d = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
+                const double r2 = (d[0] * d[0]) + (d[1] * d[1]) + (d[2] * d[2]);
+                const double cosA = std::max(0.0, signA * d[dirA / 2]);
+                const double cosB = std::max(0.0, -signB * d[dirB / 2]);
+                g += weight * cosA * cosB / (std::numbers::pi * r2 * r2);
+            }
+        }
+
+        return g;
+    }
+
+    // 受け手ごとの正しい値の重み(焚き火の 6 面 × 受け手の 6 面。焚き火の 6 面は同じだけ放つ)
+    std::vector<double> ExactRingWeights(const std::array<int64_t, 3>& fire,
+                                         const std::vector<std::array<int64_t, 3>>& receivers) {
+        std::vector<double> weights;
+        for (const auto& receiver : receivers) {
+            double sum = 0;
+            for (int dirA = 0; dirA < 6; ++dirA) {
+                for (int dirB = 0; dirB < 6; ++dirB)
+                    sum += FaceExchange(fire, dirA, receiver, dirB, 8);
+            }
+
+            weights.push_back(sum);
+        }
+
+        return weights;
+    }
 
     // 受け手ごとの量(見かけの面と距離で割ったもの)の平均からのずれの |最大| と二乗平均
     std::pair<double, double> Deviation(const std::vector<double>& values) {
@@ -320,26 +377,43 @@ namespace {
             scale[k] = distanceSquared / (projected * projected);
         }
 
+        const std::vector<double> exact = ExactRingWeights({CENTER, CENTER, CENTER}, receivers);
+        const auto exactDeviation = [&](const std::vector<double>& raw) {
+            std::vector<double> ratio(COUNT, 0);
+            for (uint32_t k = 0; k < COUNT; ++k)
+                ratio[k] = raw[k] / exact[k];
+
+            return Deviation(ratio);
+        };
+
         std::vector<double> sums(COUNT, 0);
+        std::vector<double> rawSums(COUNT, 0);
         CascadeCarry carry;
         RingResult ring;
         const auto start = std::chrono::steady_clock::now();
         for (uint32_t tick = 0; tick < ticks; ++tick) {
             const CascadeTickResult result = StepCascadeLight(grid, carry, params, tick);
             std::vector<double> one(COUNT, 0);
+            std::vector<double> raw(COUNT, 0);
             for (uint32_t k = 0; k < COUNT; ++k) {
-                one[k] = static_cast<double>(
-                             Received(result, grid.IndexOf(receivers[k][0], receivers[k][1], receivers[k][2]))) *
-                         scale[k];
+                raw[k] = static_cast<double>(
+                    Received(result, grid.IndexOf(receivers[k][0], receivers[k][1], receivers[k][2])));
+                one[k] = raw[k] * scale[k];
                 sums[k] += one[k];
+                rawSums[k] += raw[k];
             }
 
             const auto [worst, rms] = Deviation(one);
             ring.instantWorstMean += worst / ticks;
             ring.instantRms += rms / ticks;
+            const auto [exactWorst, exactRms] = exactDeviation(raw);
+            ring.instantExactWorstMean += exactWorst / ticks;
+            ring.instantExactRms += exactRms / ticks;
             for (size_t at = 0; at < 3; ++at) {
-                if (tick + 1 == std::array<uint32_t, 3>{60, 250, 500}[at])
+                if (tick + 1 == std::array<uint32_t, 3>{60, 250, 500}[at]) {
                     ring.averageWorst[at] = Deviation(sums).first;
+                    ring.averageExactWorst[at] = exactDeviation(rawSums).first;
+                }
             }
 
             ring.raysPerTick += result.rays;
@@ -353,6 +427,7 @@ namespace {
         for (const double sum : sums)
             mean += sum / COUNT;
 
+        ring.exactAll = exactDeviation(rawSums).first;
         ring.low = (*std::ranges::min_element(sums) / mean) - 1;
         ring.high = (*std::ranges::max_element(sums) / mean) - 1;
 
@@ -389,6 +464,12 @@ namespace {
                 form.name, ring.instantWorstMean * 100, ring.instantRms * 100, form.ticks, ring.averageWorst[0] * 100,
                 ring.averageWorst[1] * 100, ring.averageWorst[2] * 100, form.ticks, ring.low * 100, ring.high * 100,
                 static_cast<unsigned long long>(ring.raysPerTick), ring.msPerTick);
+            std::printf(
+                "  正しい値(面の積分)から: 瞬間 |ずれ|の最大 %.1f %%・二乗平均 %.1f %% / 平均 60 刻み %.1f %%・250 "
+                "刻み %.1f %%・"
+                "500 刻み %.1f %%(0 は回していない)/ %u 刻みの平均 %.1f %%\n",
+                ring.instantExactWorstMean * 100, ring.instantExactRms * 100, ring.averageExactWorst[0] * 100,
+                ring.averageExactWorst[1] * 100, ring.averageExactWorst[2] * 100, form.ticks, ring.exactAll * 100);
             // 研究の記録(合格の線は Q147 の答え待ち): 平均が悪くなっていないかだけを見る
             EXPECT(form.ticks < 500 || form.emitSlots > 1 || ring.averageWorst[2] < 0.15);
         }

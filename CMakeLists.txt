@@ -63,3 +63,5 @@ add_subdirectory(tests)
 
 # 試作の道具(T-0016 の物理の試作)
 add_subdirectory(tools/physics_lab)
+# 世界の中の光の別の運び方の試作(T-1062。研究)
+add_subdirectory(tools/light_exchange)
