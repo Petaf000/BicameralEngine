@@ -172,7 +172,13 @@ namespace {
         int32_t rootLevel = -1;
         uint32_t roots = 4;
         bool refine = true;
+        uint32_t rootsY = 1;  // y・z にも根を並べる(広い世界の火事。T-1089)
+        uint32_t rootsZ = 1;
     };
+
+    // 火を付ける所(T-1089): 負なら x < 1 m の面の全部、0 以上なら x < 1 m かつ y・z がこれ(m)より小さい所だけ(角の 1 か所の火事)
+    double igniteCorner = -1.0;
+    uint64_t sceneTicks = 0;  // fire-cost の刻みの数(0 = 火事 18 分)
 
     // night・fire の木(shape=。T-1074): mixed = 既定(1 m の根 4 つ + 0.5 m の子 1 つ)・coarse / fine / finer = 1 m・0.5 m・0.25 m の根だけ
     // (どれも x に 32 m。ブロックの物の長さ 8 m・4 m・2 m)
@@ -213,7 +219,7 @@ namespace {
 
     TimeTreeWorld MakeWorld(const TimeTreeSetup& setup, const Material& material, const TreeShape& shape,
                             const Profile& profile) {
-        const uint32_t blocks = std::max(16u, 2 * shape.roots);
+        const uint32_t blocks = std::max(16u, 2 * shape.roots * shape.rootsY * shape.rootsZ);
         MultiresCapacity capacity{.worldBlocks = blocks,
                                   .observerBlocks = 0,
                                   .fractions = 16,
@@ -228,7 +234,11 @@ namespace {
                                            state_field::SF_PHASE_NONE, false, 1));
         const std::vector<RxCell> empty(MR_BLOCK_CELLS, RxMakeEmptyCell(0));
         for (uint32_t root = 0; root < shape.roots; ++root)
-            PlaceRootBlock(nest, int64_t{root} * MR_BLOCK_EDGE, 0, 0, empty);
+            for (uint32_t y = 0; y < shape.rootsY; ++y) {
+                for (uint32_t z = 0; z < shape.rootsZ; ++z)
+                    PlaceRootBlock(nest, int64_t{root} * MR_BLOCK_EDGE, int64_t{y} * MR_BLOCK_EDGE,
+                                   int64_t{z} * MR_BLOCK_EDGE, empty);
+            }
 
         if (shape.refine) {
             // 根 1 の原点の近くの 0.5 m の点(1 m の根の 1 つ下 = レベル 0 の子が八分の一を覆う)
@@ -360,7 +370,10 @@ namespace {
             const double size = CellMeters(block.level);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 const double x = (static_cast<double>(block.originX + MrCellX(index)) + 0.5) * size;
-                if (world.layout.stepped[slot * MR_BLOCK_CELLS + index] != 0 && x < 1.0)
+                const double y = (static_cast<double>(block.originY + MrCellY(index)) + 0.5) * size;
+                const double z = (static_cast<double>(block.originZ + MrCellZ(index)) + 0.5) * size;
+                const bool corner = igniteCorner < 0.0 || (y < igniteCorner && z < igniteCorner);
+                if (world.layout.stepped[slot * MR_BLOCK_CELLS + index] != 0 && x < 1.0 && corner)
                     InjectTimeTreeHeat(setup, world, slot, index, heat);
             }
         }
@@ -891,6 +904,20 @@ namespace {
         Expect(meanGap / samples <= 0.5 && share >= 0.9, "細かさ: 平均 0.5 段以下・9 割が 1 段の内");
     }
 
+    // --- T-1089: 広い世界の火事の解きの数(毎刻みとは比べない。試しだけ)---
+    void CheckFireCost(const Material& material, const Ignition& ignition) {
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        setup.groupShift = groupShift;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : FIRE_TICKS;
+        const RunResult run = Run(setup, material, world, ticks, ticks, ignition, false, true);
+        LogRun("火事の費用", TrialName(), world, run, ticks);
+        const FrontSample& last = run.fronts.back();
+        Log(Channel::Sim, Level::Info, "火事の費用: 角の火 {:g} m・終わりの着火した前線 x {:.2f} m・燃えた量 {:.4f} %",
+            igniteCorner, last.ignitedX, last.burned * 100.0);
+        Expect(run.conserved && run.steps.negativeValues == 0, "火事の費用: 保存・負 0");
+    }
+
     // --- 3. 早送り = 待った(ビット一致)・6. 歩の途中のセーブ ---
 
     void CheckFastForward() {
@@ -967,6 +994,10 @@ namespace {
                 zeroCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "longcycles")
                 longCycles = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "corner")
+                igniteCorner = std::atof(value.c_str());
+            else if (key == "ticks")
+                sceneTicks = static_cast<uint64_t>(std::atoll(value.c_str()));
             else if (key == "stop")
                 residualStop = static_cast<uint64_t>(std::atoll(value.c_str()));
             else if (key == "shorte")
@@ -983,6 +1014,10 @@ namespace {
                     sceneShape = {.rootLevel = 0, .roots = 8, .refine = false};
                 else if (value == "finer")
                     sceneShape = {.rootLevel = 1, .roots = 16, .refine = false};
+                else if (value == "big")  // 1 m の根 8 × 4 × 4 = 65,536 セル(64 m × 32 m × 32 m)
+                    sceneShape = {.rootLevel = -1, .roots = 8, .refine = false, .rootsY = 4, .rootsZ = 4};
+                else if (value == "bigfine")  // 0.5 m の根 8 × 4 × 4 = 65,536 セル(32 m × 16 m × 16 m)
+                    sceneShape = {.rootLevel = 0, .roots = 8, .refine = false, .rootsY = 4, .rootsZ = 4};
                 else
                     shapeName = "mixed";
             } else if (key == "group")
@@ -1022,6 +1057,9 @@ namespace {
 
         if (all || part == "grain" || part == "grain-fire")
             CheckGranularity("火事", fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition);
+
+        if (part == "fire-cost")
+            CheckFireCost(fire, fireIgnition);
 
         if (part == "grain-fine-pond")
             CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {}, 1);
