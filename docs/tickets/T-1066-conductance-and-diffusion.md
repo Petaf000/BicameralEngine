@@ -101,6 +101,14 @@
 - この WIP で落ちるもの: reaction_package line 374(セルロースの「光の値を書いていない」警告の試験。書いたので警告が変わった → 試験を直す)・object_heat line 935(wt5 の T-1098 が足した共有の口と試作の一致。
   試作は T-1066 の式〔HcCellConductance・室温 298.15 K〕、共有の object_heat.hlsli は自前の体積の平行〔OhVolumeConductivity・293.15 K〕で、式が 2 つある → 物の熱の式を Hc の関数へ寄せて一つにする。T-1076 と一緒に)。
 
+## 4 回目(2026-10-24 本体・ブランチ t-1066-c3 = t-1066-conductance を main へ rebase したもの)
+- 司令塔の判断: 基準を「炭になる」に書き換えない。放射の段をすべての世界へ(T-1113)。それまで reaction_package_scene・lab_box・gpu_probe_fire は T-1113、probe_gas は T-0691、probe_phase は T-1110 を指して DISABLED(tests/CMakeLists.txt)。
+- 伝導率の式を一つに: 物の熱(object_heat.hlsli)の箱の伝導率と膜の気体の値を HcCellConductivity・HcGasScaleAt に寄せた(OhVolumeConductivity と 293.15 K の室温を消した)。object_heat line 935 が通った。
+  紙(箱 7.8 mm): 燃え始め 1.00 s・外してから 10.45 s 燃え続けた(3.9 mm: 0.37 s・9.58 s)。
+- 草原の延焼の測りの既定 0 が表の放射の吸い込みを消していた(radiation_scene_measure の ac・ak・as・aw)→ 書かなければ表の値に。**既定の場面で燃え広がる**: 手前の草の 9 割 14 s・2 m の川を 18 s で越える・最高 3026 K・前線は 26 s 火のまま・40 s で消えない(95.9 ms/刻み)。
+- reaction_package line 374: 放射の吸い込みを書いた時の警告(両帯にその値を使う)を足して直した。
+- 合格(release・1 本ずつ): object_heat・reaction_package・standard_packages・cell_view・multires_wide・gpu_object_heat・radiation_scene。
+
 ## 作業ログ
 - 2026-10-24(本体の作業役): 式を入れた(heat_conduction.hlsli・multires_conduction.hlsli・probe_world.hlsli・RxSpecies.molarVolume・object_heat_test を共有の式に)。release ビルド警告 0・archmap OK。CPU 94 本で 7 本が落ちた(上の表)。2 時間を超えたので、main へは入れずブランチ t-1066-conductance に置いて返す。
 - 2026-10-24(本体の作業役・2 回目): 負の熱と lab_box の範囲の外を調べた(式の誤りではない)。面の流れの丸めを直して物差し 2 本が通った・32bit を超える定数を外した・閉じた箱の基準。放射が支えれば現実の値で燃え広がる(15 s・川 20 s)。残り 4 本は判断待ち。

@@ -157,8 +157,8 @@ FX_FN FxU128 HcMulU128ByQ16(FxU128 a, uint32_t q) {
     return result;
 }
 
-// 和と温度からコンダクタンス(mW/K。レベル 0 の大きさのセルとして)
-FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatureMk) {
+// 和と温度から伝導率(mW/(m·K))。セルの伝導と物の熱(object_heat.hlsli)が使う一つの式(D-637・D-639)
+FX_FN uint64_t HcConductivityFromSums(HcConductivitySums sums, uint32_t temperatureMk) {
     // --- 残り(気体 + 場所を取らない物質)の伝導率: 物質量の平均。気体の分は ∝ √(T ÷ 室温)---
     const uint64_t poolAmount = sums.gasAmount + sums.looseAmount;
     uint64_t poolConductivity = 0;
@@ -193,9 +193,24 @@ FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatu
         }
     }
 
-    const uint64_t conductance = conductivity >> HC_CONDUCTANCE_SHIFT;
+    return conductivity;
+}
+
+// 和と温度からコンダクタンス(mW/K。レベル 0 の大きさのセルとして)
+FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatureMk) {
+    const uint64_t conductance = HcConductivityFromSums(sums, temperatureMk) >> HC_CONDUCTANCE_SHIFT;
 
     return conductance < HC_UINT32_MAX ? (uint32_t)conductance : (uint32_t)HC_UINT32_MAX;
+}
+
+// セル(または物のボクセル)の伝導率(mW/(m·K))。temperatureMk = 温度(負なら 0 にした値)
+template <typename Table, typename Cell>
+FX_FN uint64_t HcCellConductivity(Table table, Cell cell, uint32_t temperatureMk) {
+    HcConductivitySums sums = HcMakeConductivitySums();
+    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+        sums = HcAddConductivity(sums, table.Species(cell.species[i]), cell.amounts[i]);
+
+    return HcConductivityFromSums(sums, temperatureMk);
 }
 
 // セルのコンダクタンス(mW/K)。temperatureMk = セルの温度(負なら 0 にした値)

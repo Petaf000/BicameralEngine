@@ -5,7 +5,7 @@
 //
 // 設定(1 つの引数 = 1 回。カンマ区切り。書かない鍵は既定):
 //   w=<川の幅のセル>(既定 4 = 2 m。向こう岸 x 44〜63 は変えず、手前の岸を伸び縮みさせる)・gap=1(川の代わりに草の無い土の隙間)
-//   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。既定 0)・rad=0(放射の段を入れない)
+//   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。書かなければ表の値。T-1066 の前は既定 0 で表の値を消していた)・rad=0(放射の段を入れない)
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)・tall=<草の層の数>・trace=1(1 秒ごとの経過)
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -53,10 +54,10 @@ namespace {
         uint32_t riverCells = 4;
         bool gap = false;
         bool radiation = true;
-        uint32_t absorptionCellulose = 0;
-        uint32_t absorptionCarbon = 0;
-        uint32_t absorptionSilica = 0;
-        uint32_t absorptionWater = 0;
+        std::optional<uint32_t> absorptionCellulose;  // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> absorptionCarbon;     // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> absorptionSilica;     // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> absorptionWater;      // 書かなければ表の値のまま(T-1066)
         uint64_t seed = 0;
         uint64_t seconds = 60;
         uint32_t grassLayers = 1;  // 草の層の数(火の強さの代わり。y 4 から上へ重ねる。既定 1 = 場面のまま)
@@ -156,10 +157,13 @@ namespace {
         return setting;
     }
 
-    void SetAbsorption(BakedReactionTable& table, std::string_view name, uint32_t value) {
+    void SetAbsorption(BakedReactionTable& table, std::string_view name, std::optional<uint32_t> value) {
+        if (!value)
+            return;
+
         for (size_t id = 0; id < table.speciesNames.size(); ++id) {
             if (table.speciesNames[id] == name && id < table.speciesRadiationAbsorption.size())
-                table.speciesRadiationAbsorption[id] = value;
+                table.speciesRadiationAbsorption[id] = *value;
         }
     }
 
