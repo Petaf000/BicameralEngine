@@ -105,6 +105,8 @@ return {
             density_kg_per_m3 = 2260,
             light_absorption_short_mm2_per_mol = 170000000,
             light_absorption_long_mm2_per_mol = 40000000,
+            -- 熱の放射の吸い込み(放射の段。長い帯の光と同じ値。Q161 の一旦の決定 = 書く・⑤ で見直す。T-1066)
+            radiation_absorption_mm2_per_mol = 40000000,
             light_reflectance_short_permille = 50,
             light_reflectance_long_permille = 50,
         },
@@ -148,6 +150,8 @@ return {
             density_kg_per_m3 = 1500,
             light_absorption_short_mm2_per_mol = 320000,
             light_absorption_long_mm2_per_mol = 11000000,
+            -- 熱の放射の吸い込み(放射の段。長い帯の光と同じ値。Q161 の一旦の決定 = 書く・⑤ で見直す。T-1066)
+            radiation_absorption_mm2_per_mol = 11000000,
             light_reflectance_short_permille = 400,
             light_reflectance_long_permille = 100,
         },

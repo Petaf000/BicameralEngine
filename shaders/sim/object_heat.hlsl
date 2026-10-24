@@ -149,7 +149,8 @@ uint32_t FlowVoxel(OhObject object, uint32_t voxel) {
     const GpuObjectHeatTable table = MakeTable();
     const RxCell air = g_cells[object.cell];
     const RxThermal airThermal = RxComputeThermal(table, air);
-    const uint64_t airConductivity = ((uint64_t)HcCellConductance(table, air)) << HC_CONDUCTANCE_SHIFT;
+    const uint64_t airConductivity = ((uint64_t)HcCellConductance(table, air, HC_ROOM_TEMPERATURE_MK))
+                                     << HC_CONDUCTANCE_SHIFT;  // 室温の値(膜の温度の倍率は対の面で掛ける。T-1066)
     const OhVoxelHeat heat = g_heats[voxel];
     int64_t inner = 0;
     bool faceFlow = false;

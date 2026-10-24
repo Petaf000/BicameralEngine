@@ -196,7 +196,8 @@ namespace bicameral::test {
         const rx::OhObject object = world.objects[info.object];
         const rx::RxCell air = world.cells[object.cell];
         const rx::RxThermal airThermal = rx::RxComputeThermal(table, air);
-        const uint64_t airConductivity = uint64_t{rx::HcCellConductance(table, air)} << rx::HC_CONDUCTANCE_SHIFT;
+        const uint64_t airConductivity = uint64_t{rx::HcCellConductance(table, air, rx::HC_ROOM_TEMPERATURE_MK)}
+                                         << rx::HC_CONDUCTANCE_SHIFT;  // 室温の値(T-1066)
         int64_t inner = 0;
         bool faceFlow = false;
         for (uint32_t direction = 0; direction < 6; ++direction) {
