@@ -3,8 +3,8 @@
 //   → 変わったセルを世界へ書く(ExpandNestPage・StoreNestCell・PokeNestBlock。液体の 1 段〔T-0717〕と同じ「刻みの段の外から書く」口)。
 // 場面: 4 m 角の箱(下 1 m が石、上は空気)の真ん中の空気のセルに燃えている小枝 3 本と紙 1 枚、+x の隣のセルに冷えた薪 1 本。
 // 確かめる:
-//   1. 保存: 世界(ComputeConservedTotals。帳簿込み)+ 物のボクセル + 対の端数 がエネルギーと元素で毎 60 刻み一定(物との受け渡しは世界の帳簿に載せていない。
-//      載せるには帳簿の理由「物との受け渡し」が要る = 土台の共通部分。司令塔へ。T-1077 のチケット)
+//   1. 保存(帳簿の上で): 物との受け渡しを世界の帳簿の理由「物との受け渡し」(WL_REASON_OBJECT_EXCHANGE)に載せ、
+//      世界だけ(ComputeConservedTotals = セル − 帳簿)と、物(ボクセル + 対の端数)+ 帳簿のその理由の入 − 出 が、エネルギーと元素で毎 60 刻み一定
 //   2. 決定的: 2 回で同じ
 //   3. 世界のセルが物の熱を受け取る(燃えている所の空気が温まる)・冷えた薪のブロックは眠る
 //   4. 0.5 m と 0.25 m の世界で、燃える固体の残りを並べる(記録だけ)
@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "common/world_ledger.hlsli"
 #include "object_heat_cpu.h"
 #include "sun_column_scene.h"
 
@@ -148,13 +149,36 @@ namespace {
         }
     }
 
-    // 物の熱で変わったセルを世界へ書き、ブロックをつつく(次の刻みに反応と伝導が見る)
+    // 量の差 after − before を、帳簿の理由「物との受け渡し」の列 column に載せる(増えた = 入・減った = 出)
+    void AddLedgerDelta(sim::MultiresNest& nest, int32_t level, uint32_t column, int64_t delta) {
+        if (delta == 0)
+            return;
+
+        const uint32_t direction = delta > 0 ? mr::WL_DIRECTION_IN : mr::WL_DIRECTION_OUT;
+        sim::AddWorldLedgerUnits(nest, mr::WlSlot(mr::WL_REASON_OBJECT_EXCHANGE, direction), level, column,
+                                 static_cast<uint64_t>(delta > 0 ? delta : -delta));
+    }
+
+    // 物との受け渡しでセルが変わった分を帳簿へ(エネルギーと、どちらかのセルにある物質ごと)
+    void LedgerCellChange(sim::MultiresNest& nest, int32_t level, const rx::RxCell& before, const rx::RxCell& after,
+                          uint32_t speciesCount) {
+        AddLedgerDelta(nest, level, mr::WL_COLUMN_ENERGY, after.energy - before.energy);
+        for (uint32_t species = 1; species < speciesCount; ++species) {
+            const int64_t delta = static_cast<int64_t>(rx::OhAmountOf(after, species)) -
+                                  static_cast<int64_t>(rx::OhAmountOf(before, species));
+            AddLedgerDelta(nest, level, mr::WL_COLUMN_SPECIES_BASE + species, delta);
+        }
+    }
+
+    // 物の熱で変わったセルを世界へ書き、帳簿に載せ、ブロックをつつく(次の刻みに反応と伝導が見る)
     bool StoreCells(sim::MultiresNest& nest, std::span<const NestCellRef> refs, const test::OhWorld& world,
-                    std::span<const rx::RxCell> before) {
+                    std::span<const rx::RxCell> before, int32_t level, uint32_t speciesCount) {
         bool stored = true;
         for (size_t c = 0; c < refs.size(); ++c) {
             if (rx::RxSameCell(world.cells[c], before[c]))
                 continue;
+
+            LedgerCellChange(nest, level, before[c], world.cells[c], speciesCount);
 
             stored = stored && sim::ExpandNestPage(nest, refs[c].slot);
             sim::StoreNestCell(nest, refs[c].slot, refs[c].index, world.cells[c]);
@@ -164,82 +188,12 @@ namespace {
         return stored;
     }
 
-    // --- 保存の検査: 世界(2^-64 × レベル 6 の単位の 256bit)+ 物(レベル 6 の単位)---
-
-    using Wide = sim::Wide256;
-
-    Wide AddInt(Wide value, int64_t units) {
-        // units × 2^64 を足す(語 0 が一番下。語 1 から足す。符号は上の語へ広げる)
-        uint64_t carry = static_cast<uint64_t>(units);
-        const uint64_t fill = units < 0 ? ~uint64_t{0} : 0;
-        uint64_t extra = 0;
-        for (size_t word = 1; word < value.size(); ++word) {
-            const uint64_t add = word == 1 ? carry : fill;
-            const uint64_t sum = value[word] + add + extra;
-            extra = (sum < value[word] || (extra != 0 && sum == value[word])) ? 1 : 0;
-            value[word] = sum;
-        }
-
-        return value;
-    }
-
-    struct Totals {
-        Wide energy{};
-        std::vector<Wide> elements;
-
-        bool operator==(const Totals&) const = default;
-    };
-
-    Totals Measure(const sim::MultiresNest& nest, const sim::BakedReactionTable& table, const test::OhWorld& world) {
-        const sim::ConservedTotals conserved = sim::ComputeConservedTotals(nest, table, BODY_LEVEL);
-        Totals totals{.energy = conserved.energy, .elements = conserved.elements};
-        int64_t energy = 0;
-        std::vector<int64_t> elements(totals.elements.size(), 0);
-        for (const rx::RxCell& voxel : world.voxels) {
-            energy += voxel.energy;
-            const std::vector<uint64_t> counts = sim::CountElements(table, voxel);
-            for (size_t e = 0; e < elements.size(); ++e)
-                elements[e] += static_cast<int64_t>(counts[e]);
-        }
-
-        for (const rx::OhFlow& carry : world.carries) {
-            energy += carry.energy;
-            for (uint32_t g = 0; g < rx::OH_MAX_GASES; ++g) {
-                const uint32_t species = 0;  // 気体の番号 → 物質 ID は表から(下で足す)
-                static_cast<void>(species);
-            }
-        }
-
-        totals.energy = AddInt(totals.energy, energy);
-        for (size_t e = 0; e < elements.size(); ++e)
-            totals.elements[e] = AddInt(totals.elements[e], elements[e]);
-
-        return totals;
-    }
-
-    // 対の端数の物質の分(気体の番号ごと)を元素に足す
-    void AddCarryElements(const sim::BakedReactionTable& table, const test::OhTables& tables,
-                          const test::OhWorld& world, Totals& totals) {
-        const size_t elementCount = totals.elements.size();
-        for (const rx::OhFlow& carry : world.carries) {
-            for (uint32_t g = 0; g < rx::OH_MAX_GASES; ++g) {
-                const uint32_t species = tables.gases.species[g];
-                if (species == 0 || carry.amounts[g] == 0)
-                    continue;
-
-                for (size_t e = 0; e < elementCount; ++e) {
-                    const int64_t count = carry.amounts[g] * table.speciesElements[(species * elementCount) + e];
-                    totals.elements[e] = AddInt(totals.elements[e], count);
-                }
-            }
-        }
-    }
-
     // --- 場面 ---
 
     struct Run {
         uint64_t digest = 0;
-        bool conserved = true;
+        bool ledgerWorld = true;    // 世界の保存の検査(帳簿込み)が一定
+        bool ledgerObjects = true;  // 物 + 帳簿の物との受け渡しが一定
         bool stored = true;
         int32_t fireAirStartMilliKelvin = 0;
         int32_t fireAirEndMilliKelvin = 0;
@@ -265,6 +219,46 @@ namespace {
         return total;
     }
 
+    // 物(ボクセル + 対の端数。ボクセルの単位)+ 帳簿の物との受け渡しの入 − 出(セルの単位 × 8^(L − Lc))を、エネルギーと元素ごとに
+    std::vector<int64_t> ObjectColumns(const sim::BakedReactionTable& table, const test::OhTables& tables,
+                                       const test::OhWorld& world, const sim::MultiresNest& nest, int32_t level) {
+        const auto speciesCount = static_cast<uint32_t>(table.species.size());
+        const auto shift = static_cast<uint32_t>(3 * (BODY_LEVEL - level));
+        std::vector<int64_t> columns(1 + speciesCount, 0);
+        for (const rx::RxCell& voxel : world.voxels) {
+            columns[0] += voxel.energy;
+            for (uint32_t i = 0; i < voxel.speciesCount; ++i)
+                columns[1 + voxel.species[i]] += static_cast<int64_t>(voxel.amounts[i]);
+        }
+
+        for (const rx::OhFlow& carry : world.carries) {
+            columns[0] += carry.energy;
+            for (uint32_t g = 0; g < rx::OH_MAX_GASES; ++g) {
+                if (tables.gases.species[g] != 0)
+                    columns[1 + tables.gases.species[g]] += carry.amounts[g];
+            }
+        }
+
+        columns[0] += sim::WorldLedgerNetUnits(nest, mr::WL_REASON_OBJECT_EXCHANGE, mr::WL_COLUMN_ENERGY, level)
+                      << shift;
+        for (uint32_t species = 1; species < speciesCount; ++species) {
+            const int64_t net = sim::WorldLedgerNetUnits(nest, mr::WL_REASON_OBJECT_EXCHANGE,
+                                                         mr::WL_COLUMN_SPECIES_BASE + species, level);
+            columns[1 + species] += net << shift;
+        }
+
+        // 物の中で反応が物質を変えるので、物質の列を元素に直して比べる(エネルギーはそのまま)
+        const size_t elementCount = table.elementNames.size();
+        std::vector<int64_t> totals(1 + elementCount, 0);
+        totals[0] = columns[0];
+        for (uint32_t species = 1; species < speciesCount; ++species) {
+            for (size_t e = 0; e < elementCount; ++e)
+                totals[1 + e] += columns[1 + species] * table.speciesElements[(species * elementCount) + e];
+        }
+
+        return totals;
+    }
+
     Run RunScene(const sim::BakedReactionTable& table, const test::OhTables& tables, int32_t level) {
         const uint32_t roots = level == 0 ? 1u : 2u;
         sim::MultiresNest nest = test::MakeSunWorld(table, level, roots, roots, roots, [](int64_t, int64_t y, int64_t) {
@@ -287,24 +281,33 @@ namespace {
         const sim::ReactionTableView view = table.View();
         run.fireAirStartMilliKelvin = rx::RxComputeThermal(view, world.cells[0]).temperature;
         run.fuelStart = FuelCarbon(table, world, 4);
-        Totals initial = Measure(nest, table, world);
-        AddCarryElements(table, tables, world, initial);
+        const sim::ConservedTotals worldInitial = sim::ComputeConservedTotals(nest, table, BODY_LEVEL);
+        const std::vector<int64_t> objectInitial = ObjectColumns(table, tables, world, nest, level);
         uint64_t logAwakeAtHalf = 0;
         for (uint32_t tick = 1; tick <= TICKS; ++tick) {
-            sim::StepNest(nest, table, WORLD_SEED, tick);
+            // 世界のセルどうしの熱の伝導を入れる(StepNest の既定は伝導なし。T-1077 の 1 回目はこれを付けずに隣のセルが動かなかった)
+            sim::StepNest(nest, table, WORLD_SEED, tick, {.conduction = true});
             LoadCells(nest, refs, world);
             const std::vector<rx::RxCell> before = world.cells;
             test::StepObjectHeat(shared, tables.gases, world, false, WORLD_SEED, tick);
-            run.stored = run.stored && StoreCells(nest, refs, world, before) && !world.failed;
+            const auto speciesCount = static_cast<uint32_t>(table.species.size());
+            run.stored = run.stored && StoreCells(nest, refs, world, before, level, speciesCount) && !world.failed;
             if (tick == TICKS / 2)
                 logAwakeAtHalf = world.awakeExchangeBlocks;
 
             if (tick % 60 != 0)
                 continue;
 
-            Totals now = Measure(nest, table, world);
-            AddCarryElements(table, tables, world, now);
-            run.conserved = run.conserved && now == initial;
+            // 帳簿の上で: 世界だけ(セル − 帳簿)が一定・物 + 帳簿の「物との受け渡し」の入 − 出 が一定(T-1077)。旧の検査(世界 + 物)も
+            run.ledgerWorld = run.ledgerWorld && sim::ComputeConservedTotals(nest, table, BODY_LEVEL) == worldInitial;
+            const std::vector<int64_t> objectNow = ObjectColumns(table, tables, world, nest, level);
+            for (size_t column = 0; column < objectNow.size() && run.ledgerObjects; ++column) {
+                if (objectNow[column] != objectInitial[column])
+                    std::printf("物 + 帳簿が崩れた: 刻み %u 列(0 = エネルギー・1 + 元素)%zu 差 %lld\n", tick, column,
+                                static_cast<long long>(objectNow[column] - objectInitial[column]));
+            }
+
+            run.ledgerObjects = run.ledgerObjects && objectNow == objectInitial;
         }
 
         run.fireAirEndMilliKelvin = rx::RxComputeThermal(view, world.cells[0]).temperature;
@@ -324,12 +327,14 @@ namespace {
     void Print(const char* label, const Run& run) {
         std::printf(
             "%s: 燃える物の囲むセル %.3f K → %.3f K・冷えた薪の囲むセル %.3f K・燃える固体の残り %.1f %%・"
-            "後半 %u 刻みで回したブロック(全部の物)%llu・保存 %s・書き込み %s・要約 %016llx\n",
+            "後半 %u 刻みで回したブロック(全部の物)%llu・保存(帳簿の上で)世界 %s・物 + 帳簿 %s・書き込み %s・要約 "
+            "%016llx\n",
             label, run.fireAirStartMilliKelvin / 1000.0, run.fireAirEndMilliKelvin / 1000.0,
             run.logAirEndMilliKelvin / 1000.0,
             100.0 * static_cast<double>(run.fuelEnd) / static_cast<double>(std::max<uint64_t>(run.fuelStart, 1)),
-            TICKS / 2, static_cast<unsigned long long>(run.logAwakeBlocks), run.conserved ? "0" : "崩れた",
-            run.stored ? "OK" : "失敗", static_cast<unsigned long long>(run.digest));
+            TICKS / 2, static_cast<unsigned long long>(run.logAwakeBlocks), run.ledgerWorld ? "0" : "崩れた",
+            run.ledgerObjects ? "0" : "崩れた", run.stored ? "OK" : "失敗",
+            static_cast<unsigned long long>(run.digest));
     }
 
 }  // namespace
@@ -346,7 +351,7 @@ int main() {
     const Run fine = RunScene(table, *tables, 1);
     Print("0.5 m の世界", coarse);
     Print("0.25 m の世界", fine);
-    EXPECT(coarse.conserved && fine.conserved);
+    EXPECT(coarse.ledgerWorld && fine.ledgerWorld && coarse.ledgerObjects && fine.ledgerObjects);
     EXPECT(coarse.stored && fine.stored);
     EXPECT(coarse.digest == again.digest);
     EXPECT(coarse.fireAirEndMilliKelvin > coarse.fireAirStartMilliKelvin);
