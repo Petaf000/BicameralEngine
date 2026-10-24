@@ -79,6 +79,8 @@ namespace bicameral::sim {
         // V の直しを前処理とする共役勾配で進める(刻みの中だけ。V ごとに歩幅をエネルギー最小に)(T-1068・ADR-0455。研究中の比べ。既定 false = 今とビット一致。
         // GPU 版〔gpu_equilibrium_block〕にはまだ無い)
         bool lineSearch = false;
+        // 共役勾配の前の向きを刻みをまたいで持つ(T-1086 の研究の比べ。既定 false)
+        bool conjugateAcrossTicks = false;
         // 温めた始まりを欄に置く(T-0922。欄の値の数 ≥ component + k)。既定は置かない(state.values だけ)
         EquilibriumWarmStart warmStart;
     };
@@ -117,6 +119,13 @@ namespace bicameral::sim {
     // 温めた始まり(節 × k の値。数が変わったら 0 から)
     struct EquilibriumBlockState {
         std::vector<int64_t> values;
+
+        // --- 共役勾配の向きを刻みをまたいで持つ時だけ(conjugateAcrossTicks。T-1086 の研究。セーブ・ハッシュにはまだ入れていない)---
+        std::vector<int64_t> conjugateDirection;
+        std::vector<int64_t> conjugateResidual;
+        uint64_t conjugateZrHigh = 0;
+        uint64_t conjugateZrLow = 0;
+        bool conjugateValid = false;
     };
 
     struct EquilibriumBlockResult {

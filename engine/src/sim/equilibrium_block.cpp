@@ -491,6 +491,14 @@ namespace bicameral::sim {
             return result;
 
         ConjugateMemory memory;
+        const bool across = options.lineSearch && options.conjugateAcrossTicks;
+        if (across && state.conjugateValid && state.conjugateDirection.size() == state.values.size()) {
+            memory.direction = state.conjugateDirection;
+            memory.residual = state.conjugateResidual;
+            memory.zr = {.hi = state.conjugateZrHigh, .lo = state.conjugateZrLow};
+            memory.valid = true;
+        }
+
         for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
             if (!options.lineSearch) {
                 VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
@@ -501,6 +509,14 @@ namespace bicameral::sim {
             const std::vector<int64_t> before = state.values;
             VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
             ConjugateStep(grid.levels[0], rhs, before, state.values, k, system.coefficientShift, memory);
+        }
+
+        if (across) {
+            state.conjugateValid = memory.valid;
+            state.conjugateDirection = memory.direction;
+            state.conjugateResidual = memory.residual;
+            state.conjugateZrHigh = memory.zr.hi;
+            state.conjugateZrLow = memory.zr.lo;
         }
 
         if (options.warmStart.nest != nullptr)

@@ -530,6 +530,16 @@ namespace {
                            STUDY_TICKS);
             }
 
+            // T-1086: 共役勾配の向きを刻みをまたいで持つ
+            for (const uint32_t cycles : {2u, 4u}) {
+                sim::SupportOptions options;
+                options.blocks.cycles = cycles;
+                options.blocks.conjugateAcrossTicks = true;
+                SettleOnce(wallShelf, options, wallRootX, topUp(2000),
+                           std::format("T-1086 {} m 壁の棚 0.5 m(V {} 回 + 共役勾配・刻みをまたぐ)", cell, cycles),
+                           STUDY_TICKS);
+            }
+
             sim::SupportOptions smooth = plain;
             smooth.blocks.preSmooth = 4;
             smooth.blocks.postSmooth = 4;

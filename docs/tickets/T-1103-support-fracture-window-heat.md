@@ -1,6 +1,6 @@
 # T-1103 割れの区間の熱 ≥ 0 を、進める所を下げて守る(support_fracture_thick が落ちた)
 
-- Status: Todo(2026-10-24・wt2 で見つけた。ブランチ t-0872-rb2-fracture の support_fracture_thick が落ちたまま)
+- Status: Done(2026-10-24・wt2)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -16,4 +16,10 @@
 - [ ] support_fracture・support_fracture_window・support_fracture_thick が通る・折れる荷と場所が今と同じか、変わるなら記録
 - [ ] 熱が負になった場面と刻みを記録(見立ての確かめ: 持ち主の区間の面の進みがそろっていなかったか)
 
+## 結果
+- AdvanceWindows: 持ち主の区間の面をつなぎ、共通の届く所で区間の熱を数え、負なら二分(17 回)で熱 ≥ 0 の所まで下げる(`ledger.heatLimitedSteps`)。
+- 下げたのは厚い梁 0.25 m の ℓ 0.5 m と ℓ 2 m で 1 歩ずつだけ。熱の最小は 0.000 J。折れる荷と場所はすべて前と同じ(A2 100 / 91・209 / 193・428 / 422・430 / 424、A・B・C・D も同じ)。
+- support_fracture(822 秒)・support_fracture_window(1307 秒)・support_fracture_thick(473 秒)が通った(ほかの作業ツリーと重なりあり)。
+
 ## 作業ログ
+- 2026-10-24(wt2): 区間の熱が負なら届く所を二分で下げる形にした。3 本の試験が通った。
