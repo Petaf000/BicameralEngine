@@ -38,6 +38,9 @@ namespace bicameral::sim {
         // 自分の組でない刻みの光は持ち越しの表で待つ。thermalInSlots なら熱で放つ光も待つ(でなければ照り返しだけ)
         uint32_t emitSlots = 1;
         bool thermalInSlots = false;
+        // 研究(T-1102・ADR-0461): 0 でなければ、熱で放つ量を「この温度の黒体との差」(放つ量 − この温度で放つ量。負は 0)にする。
+        // 同じ温度の閉じた箱では何も運ばないので、正味の出入りは構造で 0。釣り合いの分(この温度で放ち合う分)の交換は別の形が要る(ADR-0461)。CPU だけ
+        uint32_t referenceMk = 0;
     };
 
     // 段 0(レベル 0 のセル)の密な写し。添字 = IndexOf

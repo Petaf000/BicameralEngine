@@ -95,6 +95,11 @@ add_test(NAME object_heat COMMAND object_heat_test)
 add_executable(cascade_light_test cascade_light_test.cpp)
 target_link_libraries(cascade_light_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
 add_test(NAME cascade_light COMMAND cascade_light_test)
+# 研究の測り(T-1100: 筋が物の温度を揺らす幅・T-1102: 釣り合いとの差だけを運ぶ形の閉じた箱)
+add_executable(cascade_light_swing_test cascade_light_swing_test.cpp)
+target_link_libraries(cascade_light_swing_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
+add_test(NAME cascade_light_swing COMMAND cascade_light_swing_test)
+set_tests_properties(cascade_light_swing PROPERTIES TIMEOUT 1500)
 set_tests_properties(cascade_light PROPERTIES TIMEOUT 1500)  # 筋の 500 刻み・坂の 200 刻み(T-0959)
 add_executable(radiation_lines_test radiation_lines_test.cpp)
 target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
@@ -612,6 +617,9 @@ target_link_libraries(gpu_cascade_light_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_cascade_light gpu_cascade_light_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_cascade_light_warp gpu_cascade_light_test warp --warp --queue compute)
 set_tests_properties(gpu_cascade_light gpu_cascade_light_warp PROPERTIES TIMEOUT 900)
+# 世界の広さの費用だけ(T-1101。96³・127³)
+bicameral_add_gpu_test_case(gpu_cascade_light_wide gpu_cascade_light_test gpu --queue compute --wide)
+set_tests_properties(gpu_cascade_light_wide PROPERTIES TIMEOUT 900)
 
 bicameral_add_gpu_test(gpu_object_heat_test)  # 物の熱(物の箱のボクセルの熱と反応・セルとの対の面)の GPU と CPU のビット一致・費用(T-1064・T-1065)
 target_link_libraries(gpu_object_heat_test PRIVATE bicameral_sim)
@@ -1152,7 +1160,7 @@ add_test(NAME float_check_source_accepts
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test cascade_light_test
+    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test cascade_light_test cascade_light_swing_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test

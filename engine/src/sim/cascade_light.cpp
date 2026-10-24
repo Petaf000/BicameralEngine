@@ -274,8 +274,16 @@ namespace bicameral::sim {
                 const bool active = !work.params->thermalInSlots ||
                                     rx::RcEmitSlotActive(work.constants, cell[0], cell[1], cell[2]);
                 for (uint32_t face = 0; face < rx::RC_FACES; ++face) {
-                    const rx::RcBands bands = rx::RcFaceEmission(temperature, grid.lights[index],
-                                                                 LightAcross(grid, cell, face));
+                    rx::RcBands bands = rx::RcFaceEmission(temperature, grid.lights[index],
+                                                           LightAcross(grid, cell, face));
+                    if (work.params->referenceMk != 0) {
+                        const rx::RcBands reference = rx::RcFaceEmission(work.params->referenceMk, grid.lights[index],
+                                                                         LightAcross(grid, cell, face));
+                        bands.shortBand = bands.shortBand > reference.shortBand ? bands.shortBand - reference.shortBand
+                                                                                : 0;
+                        bands.longBand = bands.longBand > reference.longBand ? bands.longBand - reference.longBand : 0;
+                    }
+
                     if (bands.shortBand == 0 && bands.longBand == 0)
                         continue;
 

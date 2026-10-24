@@ -11,6 +11,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/log.h"
@@ -294,7 +295,7 @@ namespace {
                                                 const sim::CascadeGrid& grid, const Form& form) {
         const sim::CascadeParams params = Params(form.baseTexels, 5, form.raysPerBag, form.emitSlots,
                                                  form.thermalInSlots);
-        auto light = Prepare(context, grid, params, {.faces = 1u << 14, .bags = 1u << 21, .carry = 1u << 18});
+        auto light = Prepare(context, grid, params, {.faces = 1u << 15, .bags = 1u << 21, .carry = 1u << 19});
         if (!light)
             return std::unexpected(light.error());
 
@@ -404,7 +405,35 @@ namespace {
         return {};
     }
 
-    int Run(std::span<char*> arguments) {
+    // 世界の広さで回した時の費用(T-1101): 96³・127³(世界の箱の上限。ADR-0432)の照り返す地面。--wide の時だけ
+    std::expected<void, std::string> MeasureWide(const GpuContext& context) {
+        constexpr std::array<Form, 2> FORMS = {Form{"今の形", 4, 1, 1, false}, Form{"熱も 15 組", 4, 1, 15, true}};
+        for (const Form& form : FORMS) {
+            for (const int64_t side : {64, 96, 127}) {
+                for (const int64_t hot : {1, 16}) {
+                    const std::string scene = std::format("{}³・照り返す地面・熱いセル {}", side, hot * hot);
+                    const sim::CascadeGrid grid = FireGround(side, 8, hot, Material::Stone);
+                    if (auto measured = MeasureOne(context, scene.c_str(), grid, form); !measured)
+                        return std::unexpected(std::format("{} {}: {}", form.name, scene, measured.error()));
+                }
+            }
+        }
+
+        return {};
+    }
+
+    int Run(std::span<char*> given) {
+        // --wide は費用の広さの測りだけ(ビット一致は通常の組で見る)。残りの引数は共通の口へ
+        std::vector<char*> kept;
+        bool wide = false;
+        for (char* argument : given) {
+            if (std::string_view(argument) == "--wide")
+                wide = true;
+            else
+                kept.push_back(argument);
+        }
+
+        const std::span<char*> arguments(kept);
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
@@ -435,6 +464,16 @@ namespace {
         }
 
         const GpuContext context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .nest = &*nest};
+        if (wide) {
+            if (auto measured = MeasureWide(context); !measured) {
+                Log(Channel::Gpu, Level::Error, "gpu_cascade_light_test: FAILED(広さの費用: {})", measured.error());
+                return 1;
+            }
+
+            Log(Channel::Gpu, Level::Info, "gpu_cascade_light_test: OK(広さの費用)");
+            return 0;
+        }
+
         const auto compared = CompareCases(context);
         if (!compared) {
             Log(Channel::Gpu, Level::Error, "gpu_cascade_light_test: FAILED ({})", compared.error());
