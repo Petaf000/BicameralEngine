@@ -297,10 +297,11 @@ namespace {
         Log(Channel::Sim, Level::Info,
             "{}: {} / 割れ始め 段 {}(刻み {})・分かれた 段 {}(刻み {})/ {} / 割れ面 {:.1f} J・熱 {:.1f} J(1 面 1 "
             "刻みの最小 "
-            "{:.3f} J)・分かれたセル {}・r {:.2f}・{} 刻みに {:.1f} 秒",
+            "{:.3f} J)・分かれたセル {}・熱で下げた歩 {}・r {:.2f}・{} 刻みに {:.1f} 秒",
             label, measure, outcome.startStage, outcome.startTick, outcome.brokenStage, outcome.brokenTick,
             outcome.where, ledger.surfacePj * 1.0e-12, ledger.heatPj * 1.0e-12, ledger.worstStepHeatPj * 1.0e-12,
-            ledger.separatedCells, fracture.SofteningRatio() / ONE, outcome.ticks, outcome.seconds);
+            ledger.separatedCells, ledger.heatLimitedSteps, fracture.SofteningRatio() / ONE, outcome.ticks,
+            outcome.seconds);
     }
 
     // --- A. 片持ち梁に荷を足す ---

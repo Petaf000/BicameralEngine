@@ -369,8 +369,8 @@ namespace {
 
     std::expected<void, std::string> MeasureOne(Context& context, std::string_view name,
                                                 const sim::EquilibriumBlockSystem& system,
-                                                const sim::EquilibriumBlockGrid& grid, bool quiet = false) {
-        const sim::EquilibriumBlockOptions solve;
+                                                const sim::EquilibriumBlockGrid& grid, bool quiet = false,
+                                                const sim::EquilibriumBlockOptions& solve = {}) {
         auto gpu = sim::GpuEquilibriumBlock::Create(context.device, system, grid, {.solve = solve});
         if (!gpu)
             return std::unexpected(gpu.error());
@@ -384,10 +384,11 @@ namespace {
 
         const double cells = (double)gpu->Cells();
         Log(Channel::Sim, Level::Info,
-            "費用 {}: 節 {}(全部の段 {})・段 {}・隣 {}・1 回の解き(V {} 回){:.3f} ms = {:.1f} ns/節・Dispatch {}・"
+            "費用 {}: 節 {}(全部の段 {})・段 {}・隣 {}・1 回の解き(V {} 回{}){:.3f} ms = {:.1f} ns/節・Dispatch {}・"
             "段を作る {:.3f} ms = {:.1f} ns/節・VRAM {:.1f} MB = {:.0f} B/節",
-            name, gpu->Cells(), gpu->Nodes(), gpu->Levels(), gpu->Links(), solve.cycles, cost->solveMs,
-            cost->solveMs * 1.0e6 / cells, gpu->DispatchesPerSolve(), cost->prepareMs, cost->prepareMs * 1.0e6 / cells,
+            name, gpu->Cells(), gpu->Nodes(), gpu->Levels(), gpu->Links(), solve.cycles,
+            solve.lineSearch ? " + 共役勾配" : "", cost->solveMs, cost->solveMs * 1.0e6 / cells,
+            gpu->DispatchesPerSolve(), cost->prepareMs, cost->prepareMs * 1.0e6 / cells,
             (double)gpu->DeviceBytes() / 1.0e6, (double)gpu->DeviceBytes() / cells);
 
         return {};
@@ -416,12 +417,16 @@ namespace {
             }
         }
 
+        // 支えの洞窟: 前の既定(V 2 回)と今の既定(V 4 回 + 共役勾配。T-1085)
+        const sim::SupportOptions support{.solve = sim::SupportSolve::Coupled};
         for (const uint64_t cellMm : {500ull, 250ull}) {
-            const sim::SupportLaw law(test::Cave(cellMm), {.solve = sim::SupportSolve::Coupled});
-            const auto measured = MeasureOne(context, std::format("支えの洞窟 {} mm・k = 3", cellMm), law.BlockSystem(),
-                                             law.BlockGrid());
-            if (!measured)
-                return measured;
+            const sim::SupportLaw law(test::Cave(cellMm), support);
+            for (const sim::EquilibriumBlockOptions& solve : {sim::EquilibriumBlockOptions{}, support.blocks}) {
+                const auto measured = MeasureOne(context, std::format("支えの洞窟 {} mm・k = 3", cellMm),
+                                                 law.BlockSystem(), law.BlockGrid(), false, solve);
+                if (!measured)
+                    return measured;
+            }
         }
 
         return {};

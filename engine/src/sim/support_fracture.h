@@ -54,13 +54,14 @@ namespace bicameral::sim {
 
     // 割れの帳簿(pJ)。releasedPj == surfacePj + heatPj が整数で厳密(熱は残りとして数える)
     struct SupportFractureLedger {
-        int64_t releasedPj = 0;       // 面の硬さが落ちた分のたわみのエネルギー(変位を止めて。割れが受け取った分)
-        int64_t surfacePj = 0;        // 割れ面のエネルギー(払った分)
-        int64_t heatPj = 0;           // released − surface(負 = 坂を上った = エネルギーを借りた)
-        int64_t worstStepHeatPj = 0;  // 面 1 つ・1 刻みの熱の最小(Energy は 0 以上のはず)
-        uint32_t brokenFaces = 0;     // 割れ切った面
-        uint32_t crackingFaces = 0;   // 割れかけの面(0 < 進み < 1)
-        uint32_t separatedCells = 0;  // 分かれた印のセル
+        int64_t releasedPj = 0;         // 面の硬さが落ちた分のたわみのエネルギー(変位を止めて。割れが受け取った分)
+        int64_t surfacePj = 0;          // 割れ面のエネルギー(払った分)
+        int64_t heatPj = 0;             // released − surface(負 = 坂を上った = エネルギーを借りた)
+        int64_t worstStepHeatPj = 0;    // 面 1 つ・1 刻みの熱の最小(Energy は 0 以上のはず)
+        uint32_t brokenFaces = 0;       // 割れ切った面
+        uint32_t crackingFaces = 0;     // 割れかけの面(0 < 進み < 1)
+        uint32_t separatedCells = 0;    // 分かれた印のセル
+        uint32_t heatLimitedSteps = 0;  // 区間の熱が負になるので届く所を下げた歩の数(Window だけ。T-1103)
     };
 
     class SupportFracture {
@@ -120,6 +121,11 @@ namespace bicameral::sim {
         };
 
         static constexpr uint32_t NO_WINDOW = 0xffffffffu;
+        static constexpr size_t NO_FACE = ~size_t{0};
+
+        int64_t FaceHeat(const WindowFace& face, uint32_t reach) const;
+        int64_t WindowHeat(const std::vector<WindowFace>& faces, const std::vector<size_t>& nextOf, size_t first,
+                           uint32_t reach) const;
 
         WindowFace ReadWindowFace(uint32_t x, uint32_t up, uint32_t axis) const;
         void AssignRun(const std::vector<size_t>& run, uint32_t span, const std::vector<WindowFace>& faces,

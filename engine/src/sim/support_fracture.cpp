@@ -406,6 +406,26 @@ namespace bicameral::sim {
         }
     }
 
+    // 面 1 つを reach まで進めた時の熱(解放 − 払う割れ面のエネルギー)
+    int64_t SupportFracture::FaceHeat(const WindowFace& face, uint32_t reach) const {
+        if (reach <= face.progress)
+            return 0;
+
+        const int64_t released = FxMulDivS64(face.forces.energyPj, reach - face.progress, face.forces.intact);
+
+        return released - (SurfacePj(reach) - SurfacePj(face.progress));
+    }
+
+    // 持ち主の区間(first からつないだ面)を reach まで進めた時の熱の和
+    int64_t SupportFracture::WindowHeat(const std::vector<WindowFace>& faces, const std::vector<size_t>& nextOf,
+                                        size_t first, uint32_t reach) const {
+        int64_t heat = 0;
+        for (size_t key = first; key != NO_FACE; key = nextOf[key])
+            heat += FaceHeat(faces[key], reach);
+
+        return heat;
+    }
+
     // 区間ごとの進み(区間の平均で 2 本目と同じ判定)→ 持ち主の区間の面を同じ進みまで
     bool SupportFracture::AdvanceWindows(const std::vector<WindowFace>& faces, const std::vector<uint32_t>& homeOf,
                                          std::vector<WindowSum>& windows) {
@@ -420,32 +440,62 @@ namespace bicameral::sim {
             window.target = TargetFrom(index, window.energyPj / (int64_t)window.count, window.progress);
         }
 
-        bool changed = false;
+        // 持ち主の区間ごとの面の一覧(つないだ並び。面の番号の順)
+        std::vector<size_t> firstOf(windows.size(), NO_FACE);
+        std::vector<size_t> lastOf(windows.size(), NO_FACE);
+        std::vector<size_t> nextOf(faces.size(), NO_FACE);
         for (size_t key = 0; key < faces.size(); ++key) {
-            if (homeOf[key] == NO_WINDOW)
+            const uint32_t home = homeOf[key];
+            if (home == NO_WINDOW)
                 continue;
 
-            WindowSum& window = windows[homeOf[key]];
-            if (window.target <= window.progress)
-                continue;
+            if (firstOf[home] == NO_FACE)
+                firstOf[home] = key;
+            else
+                nextOf[lastOf[home]] = key;
 
-            const WindowFace& face = faces[key];
-            const uint32_t next = std::max(face.progress,
-                                           window.progress + std::min(window.target - window.progress, m_speedStep));
-            if (next <= face.progress)
-                continue;
-
-            const int64_t released = FxMulDivS64(face.forces.energyPj, next - face.progress, face.forces.intact);
-            const int64_t surface = SurfacePj(next) - SurfacePj(face.progress);
-            m_ledger.releasedPj += released;
-            m_ledger.surfacePj += surface;
-            m_ledger.heatPj += released - surface;
-            window.heatPj += released - surface;
-            (key < cells ? m_nextX : m_nextUp)[key % cells] = next;
-            changed = true;
+            lastOf[home] = key;
         }
 
-        // 熱 ≥ 0 は区間ごと(持ち主の区間の面は同じ進みで、区間の平均のエネルギーで進めたので)
+        bool changed = false;
+        for (size_t w = 0; w < windows.size(); ++w) {
+            WindowSum& window = windows[w];
+            if (window.count == 0 || window.target <= window.progress)
+                continue;
+
+            // 共通の届く所。区間の熱が負なら(面の進みがそろっていない時など)、熱 ≥ 0 の所まで二分で下げる(T-1103。坂を下る所までしか進まない)
+            uint32_t reach = window.progress + std::min(window.target - window.progress, m_speedStep);
+            if (WindowHeat(faces, nextOf, firstOf[w], reach) < 0) {
+                uint32_t low = window.progress;
+                uint32_t high = reach;
+                for (uint32_t attempt = 0; attempt < 17; ++attempt) {
+                    const uint32_t middle = low + (high - low + 1) / 2;
+                    if (WindowHeat(faces, nextOf, firstOf[w], middle) >= 0)
+                        low = middle;
+                    else
+                        high = middle - 1;
+                }
+
+                reach = low;
+                ++m_ledger.heatLimitedSteps;
+            }
+
+            for (size_t key = firstOf[w]; key != NO_FACE; key = nextOf[key]) {
+                const WindowFace& face = faces[key];
+                if (reach <= face.progress)
+                    continue;
+
+                const int64_t heat = FaceHeat(face, reach);
+                m_ledger.releasedPj += FxMulDivS64(face.forces.energyPj, reach - face.progress, face.forces.intact);
+                m_ledger.surfacePj += SurfacePj(reach) - SurfacePj(face.progress);
+                m_ledger.heatPj += heat;
+                window.heatPj += heat;
+                (key < cells ? m_nextX : m_nextUp)[key % cells] = reach;
+                changed = true;
+            }
+        }
+
+        // 熱 ≥ 0 は区間ごと(同じ進みで区間の平均のエネルギーで進めた上に、負なら届く所を下げたので)
         for (const WindowSum& window : windows) {
             if (window.count != 0)
                 m_ledger.worstStepHeatPj = std::min(m_ledger.worstStepHeatPj, window.heatPj);
