@@ -227,6 +227,9 @@ namespace {
         std::map<uint32_t, int64_t> amountCarry;  // 物質 ID → 対の端数(ボクセルの単位)
         int64_t sunIn = 0;                        // 帳簿: 入った日の光(ボクセルの単位)
         bool overflowed = false;                  // 量が負になる・成分の枠があふれた(試作の誤り)
+        // ボクセルが最後に変わった刻み(反応の待ちの丸めの changedTick。受け渡しで変わった刻み t は t − 1、反応で変わった刻み t は t。T-1098)
+        std::vector<uint64_t> changedTicks;
+        uint64_t tick = 0;  // 今の刻み(StepExchange の前に書く)
     };
 
     int64_t FineScale(const Scene& scene) {
@@ -301,6 +304,7 @@ namespace {
             {.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_UNITS}};
         scene.side = SheetSide(bodyLevel);
         scene.substeps = bodyLevel > BODY_LEVEL ? 1u << (2 * (bodyLevel - BODY_LEVEL)) : 1u;
+        scene.changedTicks.assign(static_cast<size_t>(scene.side * scene.side), 0);
         scene.voxels.assign(static_cast<size_t>(scene.side * scene.side),
                             MakeReactionCell(table, voxel, test::SUN_ROOM_TEMPERATURE_MK));
         scene.air = test::MakeSunCell(table, test::SunMaterial::Air);
@@ -497,6 +501,7 @@ namespace {
         std::map<uint32_t, int64_t> toCellAmounts;
         for (size_t i = 0; i < count; ++i) {
             rx::RxCell& cell = scene.voxels[i];
+            const rx::RxCell before = cell;
             // 光は小刻みに等しく分ける(端数は後ろの小刻みへ。足すと 1 刻みの量に戻る)
             const int64_t steps = scene.substeps;
             const int64_t sunlight = lensOn ? ((scene.light[i] * (sub + 1)) / steps) - ((scene.light[i] * sub) / steps)
@@ -508,6 +513,9 @@ namespace {
                 scene.overflowed |= !AddAmount(cell, species, -moved);
                 toCellAmounts[species] += moved;
             }
+
+            if (!rx::RxSameCell(before, cell))
+                scene.changedTicks[i] = scene.tick - 1;
         }
 
         const int64_t scale = FineScale(scene);
@@ -536,8 +544,12 @@ namespace {
         for (size_t i = 0; i < scene.voxels.size(); ++i) {
             rx::RxCell& cell = scene.voxels[i];
             const int64_t before = rx::RxChemicalEnergy(view, cell);
-            // 受け渡しで毎刻み変わるので、変わった刻みは前の刻み
-            cell = StepReactionCellWait(table, cell, WORLD_SEED, tick, tick - 1, i).cell;
+            const rx::RxCell stepped = StepReactionCellWait(table, cell, WORLD_SEED, tick, scene.changedTicks[i], i)
+                                           .cell;
+            if (!rx::RxSameCell(stepped, cell))
+                scene.changedTicks[i] = tick;
+
+            cell = stepped;
             released[i] = before - rx::RxChemicalEnergy(view, cell);
         }
 
@@ -647,6 +659,7 @@ namespace {
             if (!lensOn && run.lensOffTick == 0)
                 run.lensOffTick = tick;
 
+            scene.tick = tick;
             StepExchange(table, scene, lensOn, reverse);
             const std::vector<int64_t> released = StepReactions(table, scene, tick);
             if (run.ignitionTick == 0 && AtLeastMilliwatts(released[focal], IGNITION_MILLIWATTS, bodyLevel))
@@ -859,6 +872,9 @@ namespace {
 
         world.carries = {carry};
         world.sunIn = scene.sunIn;
+        test::FinishObjectHeatWorld(world);
+        for (size_t i = 0; i < scene.changedTicks.size(); ++i)
+            world.waits[i].changedTick = scene.changedTicks[i];
 
         return world;
     }
@@ -896,6 +912,7 @@ namespace {
         uint32_t lastBurningTick = 0;
         for (uint32_t tick = 1; tick <= TICK_LIMIT; ++tick) {
             const bool lensOn = ignitionTick == 0 || tick < ignitionTick + LENS_OFF_AFTER_TICKS;
+            scene.tick = tick;
             StepExchange(table, scene, lensOn, false);
             const std::vector<int64_t> released = StepReactions(table, scene, tick);
             test::StepObjectHeat(shared, tables.gases, world, lensOn, WORLD_SEED, tick);
@@ -946,8 +963,12 @@ namespace {
         const test::OhCpuTable shared{.view = table.View(), .objectSpecies = tables.species};
         uint32_t lastChanged = 0;
         uint64_t previous = 0;
+        uint64_t awakeAtHalf = 0;
         for (uint32_t tick = 1; tick <= COLD_TICKS; ++tick) {
             test::StepObjectHeat(shared, tables.gases, world, false, WORLD_SEED, tick);
+            if (tick == COLD_TICKS / 2)
+                awakeAtHalf = world.awakeExchangeBlocks + world.awakeReactBlocks;
+
             uint64_t digest = HashReactionCell(world.cells[0]);
             for (const rx::RxCell& voxel : world.voxels)
                 digest = fx::FxHashCombine(digest, HashReactionCell(voxel));
@@ -966,6 +987,12 @@ namespace {
             "眠らせ方: 冷えた紙(室温の空気の中・光なし)は %u 刻み目から %u 刻みまで 1 刻み回しても何も変わらない(%s)\n",
             lastChanged + 1, COLD_TICKS, lastChanged < COLD_TICKS ? "眠れる" : "眠れない");
         EXPECT(lastChanged < COLD_TICKS / 2);
+
+        // ブロックごとに眠らせる(T-1098): 後半の 600 刻みで回したブロックは 0(費用 0)
+        const uint64_t awakeLater = world.awakeExchangeBlocks + world.awakeReactBlocks - awakeAtHalf;
+        std::printf("眠らせ方(ブロック): 後半 %u 刻みで回したブロック %llu(ブロック %zu)\n", COLD_TICKS / 2,
+                    static_cast<unsigned long long>(awakeLater), world.blocks.size());
+        EXPECT(awakeLater == 0);
     }
 
 }  // namespace

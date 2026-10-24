@@ -64,10 +64,113 @@ struct OhObject {
 
     // --- 膜 ---
     uint32_t filmUm;  // 境の膜の厚さ(物の形と流れで決まる物理の長さ。0 は使わない)
+
+    // --- 物の中のブロック(64 ボクセル以下。眠らせる単位。T-1098)---
+    uint32_t blockBegin;  // 全部の物のブロックの並びの中の始まり
+    uint32_t blocksX;
+    uint32_t blocksY;
+    uint32_t blocksZ;
+    uint32_t blockEdgeX;  // ブロックの一辺のボクセルの数(物の形で選ぶ。積は 64 以下)
+    uint32_t blockEdgeY;
+    uint32_t blockEdgeZ;
+    uint32_t padding;
+};
+
+// --- 物の中のブロック(眠らせる単位。T-1098・ADR-0459)---
+// 刻みの中の受け渡し(小刻みごと)と反応を、それぞれ通し番号の「段」(pass。1 から)で数える。
+// ブロックは、最後に評価した時に静か(どのボクセルも変わらず、どの流れも 0)で、それから自分・隣のブロック・囲むセル・光のどれも
+// 変わっていなければ、受け渡しを回しても厳密に何も起きない(流れは段の初めの値だけの関数なので同じ 0 になる)ので回さない。
+// 反応は、ボクセルが変わった刻み(changedTick)と待ちの丸めの起こす刻み(wakeTick)で同じく決まる(ADR-0018)。
+FX_CONST uint32_t OH_BLOCK_VOXELS = 64;
+FX_CONST uint32_t OH_NO_BLOCK = 0xFFFFFFFFu;
+FX_CONST uint32_t OH_BLOCK_EXPOSED = 1u;  // 囲むセルに面するボクセルがある
+FX_CONST uint32_t OH_BLOCK_LIT = 2u;      // 光を吸うボクセルがある
+
+struct OhBlock {
+    uint32_t object;
+    uint32_t x;  // ブロックの座標(物の箱の中。ボクセルは × 4)
+    uint32_t y;
+    uint32_t z;
+};
+
+struct OhBlockState {
+    // --- 段の番号 ---
+    uint32_t changedPass;   // どれかのボクセルが最後に変わった段
+    uint32_t exchangePass;  // 受け渡しを最後に評価した段
+    uint32_t reactPass;     // 反応を最後に評価した段
+    uint32_t quiet;         // 最後の受け渡しの評価で静かだった(1)
+
+    // --- 反応・この段 ---
+    uint64_t minWakeTick;  // ボクセルの起こす刻みの最小
+    uint32_t awake;        // この段で回す(OhWakeBlocks が書く)
+    uint32_t flags;        // OH_BLOCK_*(変わらない)
+
+    // --- 面ごと(方向 0〜5)に、その面に並ぶボクセルが最後に変わった段。隣のブロックはこれだけを読む ---
+    uint32_t facePass[6];
     uint32_t padding0;
     uint32_t padding1;
-    uint32_t padding2;
 };
+
+// ボクセルの待ち(反応の待ちの丸め)
+struct OhVoxelWait {
+    uint64_t changedTick;  // 最後に変わった刻み(受け渡しで変わった刻み t は t − 1、反応で変わった刻み t は t)
+    uint64_t wakeTick;     // 変わらなければ次に反応を評価する刻み
+};
+
+// ブロックの中の番号(0〜63)のボクセルの番号(箱の外なら OH_NO_BLOCK)
+FX_FN uint32_t OhBlockVoxel(OhObject object, OhBlock block, uint32_t local) {
+    const uint32_t edgeXY = object.blockEdgeX * object.blockEdgeY;
+    const uint32_t localZ = local / edgeXY;
+    const uint32_t x = (block.x * object.blockEdgeX) + (local % object.blockEdgeX);
+    const uint32_t y = (block.y * object.blockEdgeY) + ((local / object.blockEdgeX) % object.blockEdgeY);
+    const uint32_t z = (block.z * object.blockEdgeZ) + localZ;
+    const uint32_t sizeZ = object.voxelCount / (object.sizeX * object.sizeY);
+    if (localZ >= object.blockEdgeZ || x >= object.sizeX || y >= object.sizeY || z >= sizeZ)
+        return OH_NO_BLOCK;
+
+    return object.voxelBegin + x + (object.sizeX * (y + (object.sizeY * z)));
+}
+
+// ブロックの中の番号のボクセルが並ぶブロックの面(ビット 0〜5 = −x・+x・−y・+y・−z・+z)
+FX_FN uint32_t OhVoxelFaces(OhObject object, uint32_t local) {
+    const uint32_t x = local % object.blockEdgeX;
+    const uint32_t y = (local / object.blockEdgeX) % object.blockEdgeY;
+    const uint32_t z = local / (object.blockEdgeX * object.blockEdgeY);
+
+    return (x == 0 ? 1u : 0u) | (x + 1 == object.blockEdgeX ? 2u : 0u) | (y == 0 ? 4u : 0u) |
+           (y + 1 == object.blockEdgeY ? 8u : 0u) | (z == 0 ? 16u : 0u) | (z + 1 == object.blockEdgeZ ? 32u : 0u);
+}
+
+// 隣のブロックの番号(方向 0〜5 = −x・+x・−y・+y・−z・+z。物の外なら OH_NO_BLOCK)
+FX_FN uint32_t OhNeighbourBlock(OhObject object, OhBlock block, uint32_t direction) {
+    int32_t x = (int32_t)block.x;
+    int32_t y = (int32_t)block.y;
+    int32_t z = (int32_t)block.z;
+    const int32_t step = (direction & 1) != 0 ? 1 : -1;
+    x += direction < 2 ? step : 0;
+    y += (direction == 2 || direction == 3) ? step : 0;
+    z += direction >= 4 ? step : 0;
+    const bool outside = x < 0 || y < 0 || z < 0 || x >= (int32_t)object.blocksX || y >= (int32_t)object.blocksY ||
+                         z >= (int32_t)object.blocksZ;
+    if (outside)
+        return OH_NO_BLOCK;
+
+    return object.blockBegin + (uint32_t)x + (object.blocksX * ((uint32_t)y + (object.blocksY * (uint32_t)z)));
+}
+
+// この受け渡しの段で回すか。newestChange = 自分の changedPass と、隣のブロックの自分に向いた面の facePass の最大。
+// 隣・セルが自分を評価したのと同じ段で変わった時(自分が読んだ後に変わった)も起こすので ≥ で比べる
+FX_FN bool OhExchangeAwake(OhBlockState state, uint32_t newestChange, uint32_t cellChangedPass, bool lightOn) {
+    const bool cellChanged = (state.flags & OH_BLOCK_EXPOSED) != 0 && cellChangedPass >= state.exchangePass;
+    const bool lit = lightOn && (state.flags & OH_BLOCK_LIT) != 0;
+
+    return state.quiet == 0 || newestChange >= state.exchangePass || cellChanged || lit;
+}
+
+// この刻みに反応を評価するか(最後の評価から変わった・起こす刻みが来た)
+FX_FN bool OhReactAwake(OhBlockState state, uint64_t tick) {
+    return state.changedPass > state.reactPass || state.minWakeTick <= tick;
+}
 
 // ボクセルの変わらない値
 struct OhVoxelInfo {
@@ -124,6 +227,15 @@ FX_FN OhFlow OhZeroFlow() {
         flow.amounts[g] = 0;
 
     return flow;
+}
+
+FX_FN bool OhFlowIsZero(OhFlow flow) {
+    bool zero = flow.energy == 0;
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g)
+        zero = zero && flow.amounts[g] == 0;
+
+    return zero;
 }
 
 template <typename Cell>
@@ -350,7 +462,8 @@ FX_FN int64_t OhLightShare(int64_t lightPerTick, uint32_t substep, uint32_t subs
 struct OhVoxelStep {
     RxCell cell;
     OhFlow toCell;
-    uint32_t ok;  // 0 = 量が負になる・成分の枠があふれる(試作の誤り。R8)
+    uint32_t ok;         // 0 = 量が負になる・成分の枠があふれる(試作の誤り。R8)
+    uint32_t flowsZero;  // 1 = 光もセルとの流れも 0(静かなブロックの見分け。T-1098)
 };
 
 // 外に面する口(伝導・放射・気体)をまとめて。inner = 物の中の伝導で入る熱、sunlight = この小刻みに吸う光
@@ -381,6 +494,7 @@ FX_FN OhVoxelStep OhApplyVoxel(Table table, GasList gases, OhObject object, uint
     }
 
     step.cell = cell;
+    step.flowsZero = (sunlight == 0 && OhFlowIsZero(step.toCell)) ? 1u : 0u;
 
     return step;
 }
