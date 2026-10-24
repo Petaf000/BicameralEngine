@@ -268,7 +268,7 @@ namespace bicameral::sim::case_b {
         resolved.pressureRelaxMsPerM = environment.pressureRelaxMsPerM.value_or(DEFAULT_PRESSURE_RELAX_MS_PER_M);
         resolved.shockZoneSpeedMmPerS = environment.shockZoneSpeedMmPerS.value_or(0);
         resolved.shockZoneMarginMm = environment.shockZoneMarginMm.value_or(0);
-        resolved.grainPassRatioPct = environment.grainPassRatioPct.value_or(0);
+        resolved.grainPassRatioPct = environment.grainPassRatioPct.value_or(DEFAULT_GRAIN_PASS_RATIO_PCT);
         if (resolved.shockZonePa <= 0)
             Add(diagnostics.errors, "環境: shock_zone_pa が 0 以下");
         else if (resolved.shockZonePa * 100 < ATMOSPHERE_PA)
@@ -366,6 +366,16 @@ namespace bicameral::sim::case_b {
         ++at[axis];
 
         return CellIndex(box, at[0], at[1], at[2]);
+    }
+
+    uint32_t FaceBlockedQ16(const Box& box, uint32_t axis, uint32_t cell) {
+        const std::vector<uint32_t>& values = box.faceBlockedQ16[axis];
+        return cell < values.size() ? values[cell] : 0u;
+    }
+
+    uint32_t FaceHoleSizeUm(const Box& box, uint32_t axis, uint32_t cell) {
+        const std::vector<uint32_t>& values = box.faceHoleSizeUm[axis];
+        return cell < values.size() ? values[cell] : 0u;
     }
 
     uint32_t CellEdgeUm(int32_t level) {
@@ -631,6 +641,9 @@ namespace bicameral::sim::case_b {
         for (uint32_t axis = 0; axis < 3; ++axis) {
             coarse.faceMomentum[axis].assign((size_t)cells * slots, 0);
             coarse.faceCarry[axis].assign((size_t)cells * slots, 0);
+            // 面の開き具合は導かれる値(形から作り直す)。試作の箱は形を持たないので空(塞がない)に戻す
+            coarse.faceBlockedQ16[axis].clear();
+            coarse.faceHoleSizeUm[axis].clear();
         }
 
         // 和(真実)と平均(導かれる値・割合)

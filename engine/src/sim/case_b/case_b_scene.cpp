@@ -13,7 +13,7 @@ namespace bicameral::sim::case_b {
     namespace {
 
         constexpr int32_t SCENE_MIN_LEVEL = -2;
-        constexpr int32_t SCENE_MAX_LEVEL = 1;
+        constexpr int32_t SCENE_MAX_LEVEL = 2;  // 0.125 m(箱の細かさの上限。砂時計の口を 4〜8 セルに。T-0998)
         constexpr uint64_t ATMOSPHERE = (uint64_t)ATMOSPHERE_PA;
 
         // 絵(0.5 m のセル。y は下から)

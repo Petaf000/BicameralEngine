@@ -68,7 +68,7 @@ namespace bicameral::sim::case_b {
     [[nodiscard]] uint32_t SceneWidth(const Scene& scene);
     [[nodiscard]] uint32_t SceneHeight(const Scene& scene);
 
-    // 箱を作る(level は −2〜1。粗くするなら絵の大きさが 2^-level で割り切れること)。初めの帳簿は作った後の中身
+    // 箱を作る(level は −2〜2。粗くするなら絵の大きさが 2^-level で割り切れること)。初めの帳簿は作った後の中身
     [[nodiscard]] std::expected<Box, std::string> BuildScene(const Scene& scene, int32_t level,
                                                              MomentumLayout layout = MomentumLayout::PerPhase,
                                                              Diagnostics* diagnostics = nullptr);

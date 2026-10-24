@@ -88,7 +88,7 @@ namespace bicameral::sim::case_b {
         std::optional<int64_t> pressureRelaxMsPerM;    // pressure_relax_ms_per_m
         std::optional<uint32_t> shockZoneSpeedMmPerS;  // 既定は未確認(R1 と床の試験で置く)
         std::optional<uint32_t> shockZoneMarginMm;     // 同上
-        std::optional<uint32_t> grainPassRatioPct;     // 1 周目は読むだけ
+        std::optional<uint32_t> grainPassRatioPct;     // 穴を通る口(S8)。0 を書くと制限しない(FoGrainFaceOpen)
     };
 
     struct Environment {
@@ -116,6 +116,8 @@ namespace bicameral::sim::case_b {
     inline constexpr uint32_t DEFAULT_DROP_SIZE_UM = 2000;
     inline constexpr int64_t DEFAULT_SHOCK_ZONE_PA = 10000;        // B-d(仮)
     inline constexpr int64_t DEFAULT_PRESSURE_RELAX_MS_PER_M = 3;  // B-d(仮)
+    // grain_pass_ratio_pct を書かない時 = 穴より大きい粒は通らない(仮。T-0996・T-0998。21 §1.1 の既定は未確認)
+    inline constexpr uint32_t DEFAULT_GRAIN_PASS_RATIO_PCT = 100;
     inline constexpr int64_t ATMOSPHERE_PA = 101325;
 
     // --- 箱の形と刻み ---
@@ -167,6 +169,12 @@ namespace bicameral::sim::case_b {
         std::vector<std::array<int64_t, 3>> bodyVelocity;  // 物の速さ(2^-20 m/s。決まった相)
         std::vector<int64_t> pressureMicroPascal;          // 導かれる圧力(段が書く。次の刻みの初めの近似)
 
+        // --- 面の開き具合(導かれる値。ハッシュ・保存・粗くするの外。T-0937 の欄 face.blocked と同じ形と意味・ADR-0420)---
+        // 番号 = セル(+ 側の面)。空の軸は全部 0(欄の無い頁 = 塞がない)。運ぶ段が FoFaceOpen・FoGrainFaceOpen で読む
+        std::array<std::vector<uint32_t>, 3> faceBlockedQ16;  // 面の塞ぐ割合(Q16)
+        // 塞ぐ面の穴の大きさ(µm。S8)。0 = 穴の情報なし。置き場は仮(欄にするか・物の塞ぐ面に持つかは T-0977)
+        std::array<std::vector<uint32_t>, 3> faceHoleSizeUm;
+
         // --- 面(軸ごと。セルの + 側の面 × 置き場。番号 = cell × 置き場の数 + 置き場。箱の外側の面は壁で 0 のまま)---
         std::array<std::vector<int64_t>, 3> faceMomentum;
         std::array<std::vector<int64_t>, 3> faceCarry;  // 運ぶ家族の面の持ち越し(端数。21 §2.10。単位は運ぶ段が決める)
@@ -197,6 +205,9 @@ namespace bicameral::sim::case_b {
     [[nodiscard]] uint32_t FaceIndex(const Box& box, uint32_t cell, uint32_t slot);
     // 軸 axis で cell の + 側の隣(無ければ std::nullopt = 壁)
     [[nodiscard]] std::optional<uint32_t> Neighbor(const Box& box, uint32_t cell, uint32_t axis);
+    // セル cell の + 側の面 axis の塞ぐ割合(Q16)・穴の大きさ(µm)。空の軸は 0(sim/face_opening の LoadFaceBlockedQ16 と同じ意味)
+    [[nodiscard]] uint32_t FaceBlockedQ16(const Box& box, uint32_t axis, uint32_t cell);
+    [[nodiscard]] uint32_t FaceHoleSizeUm(const Box& box, uint32_t axis, uint32_t cell);
     [[nodiscard]] uint32_t CellEdgeUm(int32_t level);
     [[nodiscard]] uint64_t CellAreaMm2(const Box& box);
     [[nodiscard]] uint64_t CellVolumeMm3(const Box& box);

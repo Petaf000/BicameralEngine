@@ -385,7 +385,7 @@ namespace {
         Scene broken = MakeDamBreakScene();
         broken.rows[0][0] = '?';
         EXPECT(!BuildScene(broken, 0).has_value());
-        EXPECT(!BuildScene(MakeSiphonScene(), 2).has_value());
+        EXPECT(!BuildScene(MakeSiphonScene(), 3).has_value());
     }
 
     // 計器が分かっている形で正しい値を出す
