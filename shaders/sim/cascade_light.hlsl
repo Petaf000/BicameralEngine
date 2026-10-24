@@ -322,7 +322,8 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         const int64_t y = params.lowY + ((flat / params.sizeX) % params.sizeY);
         const int64_t z = params.lowZ + (flat / (params.sizeX * params.sizeY));
         const uint32_t temperature = g_rcWork.Load(params.workTemperatures + (cell * 4));
-        const bool hot = temperature != 0 && temperature >= params.quietBelowMk;
+        // 参照の温度との差を運ぶ時(T-1102)は、冷たい物も負の側で放つので quietBelowMk は使わない
+        const bool hot = temperature != 0 && (params.referenceWord != 0 || temperature >= params.quietBelowMk);
         if (!hot) {
             // 冷たいセルは読むだけ(放つ面の量はいつも 0。放った・吸ったは前の刻みに 0 でなければ 0 に。T-1010)
             const uint32_t emitted = params.stateEmitted + (cell * 16);
@@ -365,7 +366,7 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
                 if (grid.Contains(acrossX, acrossY, acrossZ))
                     across = grid.Light(acrossX, acrossY, acrossZ);
 
-                bands = RcFaceEmission(temperature, light, across);
+                bands = RcFaceEmissionRelative(temperature, params.referenceWord, light, across);
             }
 
             // 放つ面の量は使った後に RcClearFaces が 0 に戻すので、量のある面だけ書いて列に足す

@@ -267,23 +267,18 @@ namespace bicameral::sim {
             SourceMap sources;
             for (size_t index = 0; index < grid.CellCount(); ++index) {
                 const uint32_t temperature = grid.temperatureMk[index];
-                if (temperature == 0 || temperature < work.params->quietBelowMk)
+                const bool relative = work.params->referenceMk != 0 || work.params->negativePart;
+                if (temperature == 0 || (!relative && temperature < work.params->quietBelowMk))
                     continue;
 
                 const Cell3 cell = CellOf(grid, index);
                 const bool active = !work.params->thermalInSlots ||
                                     rx::RcEmitSlotActive(work.constants, cell[0], cell[1], cell[2]);
                 for (uint32_t face = 0; face < rx::RC_FACES; ++face) {
-                    rx::RcBands bands = rx::RcFaceEmission(temperature, grid.lights[index],
-                                                           LightAcross(grid, cell, face));
-                    if (work.params->referenceMk != 0) {
-                        const rx::RcBands reference = rx::RcFaceEmission(work.params->referenceMk, grid.lights[index],
+                    const uint32_t referenceWord = work.params->referenceMk |
+                                                   (work.params->negativePart ? rx::RC_REFERENCE_NEGATIVE : 0u);
+                    const rx::RcBands bands = rx::RcFaceEmissionRelative(temperature, referenceWord, grid.lights[index],
                                                                          LightAcross(grid, cell, face));
-                        bands.shortBand = bands.shortBand > reference.shortBand ? bands.shortBand - reference.shortBand
-                                                                                : 0;
-                        bands.longBand = bands.longBand > reference.longBand ? bands.longBand - reference.longBand : 0;
-                    }
-
                     if (bands.shortBand == 0 && bands.longBand == 0)
                         continue;
 
@@ -443,6 +438,9 @@ namespace bicameral::sim {
         if (params.raysPerBag == 0 || params.raysPerBag > RAYS_PER_BAG_LIMIT)
             return std::unexpected("袋 1 つの光線は 1〜64 本");
 
+        if ((params.referenceMk & rx::RC_REFERENCE_NEGATIVE) != 0)
+            return std::unexpected("参照の温度は 2^31 mK 未満");
+
         if (params.emitSlots == 0 || params.emitSlots > rx::RC_SLOTS_LIMIT || params.emitSlots % 2 == 0)
             return std::unexpected("放つ面の組の数は 1〜63 の奇数(升目の中のずらしの巡りと互いに素)");
 
@@ -517,6 +515,18 @@ namespace bicameral::sim {
         }
 
         return bytes;
+    }
+
+    CascadeRelativeResult StepCascadeLightRelative(const CascadeGrid& grid, const std::array<CascadeCarry, 2>& carry,
+                                                   const CascadeParams& params, uint64_t tick, bool reverse) {
+        CascadeRelativeResult result;
+        CascadeParams side = params;
+        for (size_t at = 0; at < 2; ++at) {
+            side.negativePart = at == 1;
+            result.sides[at] = StepCascadeLight(grid, carry[at], side, tick, reverse);
+        }
+
+        return result;
     }
 
 }  // namespace bicameral::sim

@@ -115,6 +115,38 @@ FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLi
     return bands;
 }
 
+// 参照の温度との差の放つ量(T-1102・ADR-0461)。referenceWord の下 31bit = 参照の温度(mK。0 なら今のまま)・bit 31 = 負の側。
+// 正の側は「自分 − 参照」、負の側は「参照 − 自分」の大きさ(どちらも 0 未満は 0)。正の側と負の側を別の刻みの組で運び、差を取ると
+// 参照の温度の黒体との差だけを運んだことになる(同じ温度の所は何も放たない = 坂を下るが構造で 0)。
+// 64bit の「0 で止める引き算」は HW で誤るので符号付きの差で(T-0185。量は 2^63 未満)
+FX_CONST uint32_t RC_REFERENCE_NEGATIVE = 0x80000000u;
+
+FX_FN uint64_t RcPositivePart(uint64_t a, uint64_t b) {
+    const int64_t difference = (int64_t)a - (int64_t)b;
+    if (difference <= 0)
+        return 0;
+
+    return (uint64_t)difference;
+}
+
+FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light,
+                                     RcCellLight across) {
+    const uint32_t referenceMk = referenceWord & ~RC_REFERENCE_NEGATIVE;
+    const bool negative = (referenceWord & RC_REFERENCE_NEGATIVE) != 0;
+    const RcBands own = RcFaceEmission(temperatureMk, light, across);
+    if (referenceMk == 0 && !negative)
+        return own;
+
+    const RcBands reference = RcFaceEmission(referenceMk, light, across);
+    RcBands bands;
+    bands.shortBand = negative ? RcPositivePart(reference.shortBand, own.shortBand)
+                               : RcPositivePart(own.shortBand, reference.shortBand);
+    bands.longBand = negative ? RcPositivePart(reference.longBand, own.longBand)
+                              : RcPositivePart(own.longBand, reference.longBand);
+
+    return bands;
+}
+
 // 軸 axis に a、(axis + 1) % 3 に u、(axis + 2) % 3 に v を置いた時の、軸 want の値
 FX_FN int64_t RcAxisValueOf(uint32_t want, uint32_t axis, int64_t a, int64_t u, int64_t v) {
     return want == axis ? a : (want == (axis + 1) % 3 ? u : v);
@@ -1058,7 +1090,7 @@ struct RcGpuParams {
     uint32_t emitSlots;   // RcStepConstants と同じ
     uint32_t thermalInSlots;
     uint32_t stateFaceFlags;  // 放つ面の列に入れた印(セル × 6 の uint32。T-1010)
-    uint32_t padding;
+    uint32_t referenceWord;   // 参照の温度と負の側の印(RcFaceEmissionRelative。0 = 今のまま。T-1102)
 };
 
 // 頭の語(uint64 の番号)

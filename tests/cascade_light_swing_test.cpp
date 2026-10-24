@@ -234,12 +234,96 @@ namespace {
         }
     }
 
-    // --- 2. 釣り合いとの差だけを運ぶ形の閉じた箱(T-1102・ADR-0461)---
+    // --- 2. 釣り合い(参照の温度)との差だけを運ぶ形(T-1102・ADR-0461)---
+
+    // 期待: Zero = どのセルも正味ちょうど 0・NoLoss = 参照の温度のセルは熱を失わない・NoGain = 参照の温度のセルは熱を得ない
+    enum class Expect3 : uint8_t {
+        Zero,
+        NoLoss,
+        NoGain,
+    };
+
+    // 場面を今の形(参照なし)と差だけを運ぶ形で回し、参照の温度のセル(殻の一番外の層を除く)の正味を比べる
+    void RecordScene(const char* name, const CascadeGrid& grid, uint32_t referenceMk, uint32_t ticks, Expect3 expect) {
+        const int64_t side = grid.size[0];
+        const auto outer = [side](size_t cell) {
+            const auto flat = static_cast<int64_t>(cell);
+            const std::array<int64_t, 3> at = {flat % side, (flat / side) % side, flat / (side * side)};
+
+            return std::ranges::any_of(at, [side](int64_t v) { return v == 0 || v == side - 1; });
+        };
+
+        for (const bool relative : {false, true}) {
+            std::vector<double> net(grid.CellCount(), 0);
+            std::array<CascadeCarry, 2> carry{};
+            bool conserved = true;
+            const auto conserve = [&conserved](const CascadeTickResult& result) {
+                for (const auto& band : result.ledger)
+                    conserved = conserved && band.emitted + band.carriedIn ==
+                                                 band.absorbed + band.reflected + band.escaped + band.held;
+            };
+            for (uint32_t tick = 0; tick < ticks; ++tick) {
+                if (!relative) {
+                    const CascadeTickResult result = StepCascadeLight(grid, carry[0], Params(0, 0), tick);
+                    conserve(result);
+                    for (size_t cell = 0; cell < grid.CellCount(); ++cell)
+                        net[cell] += static_cast<double>(Received(result, cell)) -
+                                     static_cast<double>(Emitted(result, cell));
+
+                    carry[0] = result.carry;
+                    continue;
+                }
+
+                const CascadeRelativeResult result = StepCascadeLightRelative(grid, carry, Params(referenceMk, 0),
+                                                                              tick);
+                for (size_t at = 0; at < 2; ++at) {
+                    const double sign = at == 0 ? 1.0 : -1.0;
+                    conserve(result.sides[at]);
+                    for (size_t cell = 0; cell < grid.CellCount(); ++cell)
+                        net[cell] += sign * (static_cast<double>(Received(result.sides[at], cell)) -
+                                             static_cast<double>(Emitted(result.sides[at], cell)));
+
+                    carry[at] = result.sides[at].carry;
+                }
+            }
+
+            double worstMk = 0;
+            double worstLossMk = 0;
+            double worstGainMk = 0;
+            for (size_t cell = 0; cell < grid.CellCount(); ++cell) {
+                if (outer(cell) || grid.temperatureMk[cell] != referenceMk)
+                    continue;
+
+                const double mk = net[cell] / ticks / UNIT_PER_J /
+                                  170.0;  // 1 セル = 170 kJ/K(cascade_light_test と同じ)
+                worstMk = std::max(worstMk, std::fabs(mk));
+                worstLossMk = std::max(worstLossMk, -mk);
+                worstGainMk = std::max(worstGainMk, mk);
+            }
+
+            std::printf(
+                "%s(%s・%u 刻み): 参照の温度のセルの正味 最大 %.4f mK/刻み・失った最大 %.4f・得た最大 %.4f "
+                "mK/刻み・保存 %s\n",
+                name, relative ? "差だけを運ぶ" : "今の形", ticks, worstMk, std::max(0.0, worstLossMk),
+                std::max(0.0, worstGainMk), conserved ? "ビット単位" : "崩れた");
+            EXPECT(conserved);
+            if (!relative)
+                continue;
+
+            if (expect == Expect3::Zero)
+                EXPECT(worstMk == 0);
+            else if (expect == Expect3::NoLoss)
+                EXPECT(worstLossMk <= 0);
+            else
+                EXPECT(worstGainMk <= 0);
+        }
+    }
 
     // 1 m 厚の石の殻(内のり 7 m)の中に石の塊。殻は wallMk・塊は blockMk
-    void RecordBox(uint32_t wallMk, uint32_t blockMk, uint32_t ticks) {
+    CascadeGrid ShellWithBlock(uint32_t wallMk, uint32_t blockMk) {
         constexpr int64_t SIZE = 18;
-        const CascadeGrid grid = MakeGrid(SIZE, [=](int64_t x, int64_t y, int64_t z) {
+
+        return MakeGrid(SIZE, [=](int64_t x, int64_t y, int64_t z) {
             const bool shell = x < 2 || y < 2 || z < 2 || x >= SIZE - 2 || y >= SIZE - 2 || z >= SIZE - 2;
             const bool block = x >= 7 && x < 10 && y >= 2 && y < 6 && z >= 7 && z < 10;
             if (block)
@@ -247,74 +331,19 @@ namespace {
 
             return shell ? Voxel{Material::Stone, wallMk} : Voxel{};
         });
-        const auto outer = [](size_t cell) {
-            const auto flat = static_cast<int64_t>(cell);
-            const std::array<int64_t, 3> at = {flat % SIZE, (flat / SIZE) % SIZE, flat / (SIZE * SIZE)};
+    }
 
-            return std::ranges::any_of(at, [](int64_t v) { return v == 0 || v == SIZE - 1; });
-        };
-        const auto isBlock = [](size_t cell) {
-            const auto flat = static_cast<int64_t>(cell);
-            const int64_t x = flat % SIZE;
-            const int64_t y = (flat / SIZE) % SIZE;
-            const int64_t z = flat / (SIZE * SIZE);
+    // 空へ開いた石の板(24³ の世界の高さ 4〜5。世界の外 = 空)。hotMk が 0 でなければ板の上に 1 セルの熱い石
+    CascadeGrid OpenSlab(uint32_t slabMk, uint32_t hotMk) {
+        return MakeGrid(24, [=](int64_t x, int64_t y, int64_t z) {
+            if (y >= 4 && y < 6)
+                return Voxel{Material::Stone, slabMk};
 
-            return x >= 7 && x < 10 && y >= 2 && y < 6 && z >= 7 && z < 10;
-        };
+            if (hotMk != 0 && y == 6 && x == 12 && z == 12)
+                return Voxel{Material::Stone, hotMk};
 
-        for (const uint32_t reference : {0u, wallMk}) {
-            std::vector<double> net(grid.CellCount(), 0);
-            std::vector<double> emitted(grid.CellCount(), 0);
-            CascadeCarry carry;
-            bool conserved = true;
-            for (uint32_t tick = 0; tick < ticks; ++tick) {
-                const CascadeTickResult result = StepCascadeLight(grid, carry, Params(reference, 0), tick);
-                for (size_t cell = 0; cell < grid.CellCount(); ++cell) {
-                    emitted[cell] += static_cast<double>(Emitted(result, cell));
-                    net[cell] += static_cast<double>(Received(result, cell)) -
-                                 static_cast<double>(Emitted(result, cell));
-                }
-
-                for (const auto& band : result.ledger)
-                    conserved = conserved && band.emitted + band.carriedIn ==
-                                                 band.absorbed + band.reflected + band.escaped + band.held;
-
-                carry = result.carry;
-            }
-
-            // 殻の内側の層(外の層を除く)のセル: 熱を失ったもの(= 同じ温度の壁どうしの偏り、または冷たい壁から熱い塊へ)
-            double worstWallLossMk = 0;
-            double worstWallMk = 0;
-            double blockLoss = 0;
-            double wallGain = 0;
-            for (size_t cell = 0; cell < grid.CellCount(); ++cell) {
-                if (outer(cell) || (emitted[cell] == 0 && net[cell] == 0))
-                    continue;
-
-                const double mk = net[cell] / ticks / UNIT_PER_J /
-                                  170.0;  // 1 セル = 170 kJ/K(cascade_light_test と同じ)
-                if (isBlock(cell)) {
-                    blockLoss -= net[cell];
-                    continue;
-                }
-
-                wallGain += net[cell];
-                worstWallMk = std::max(worstWallMk, std::fabs(mk));
-                if (mk < 0)
-                    worstWallLossMk = std::max(worstWallLossMk, -mk);
-            }
-
-            std::printf(
-                "閉じた箱(殻 %u K・塊 %u K・%s・%u 刻み): 壁のセルの正味の最大 %.4f mK/刻み・熱を失った壁のセルの最大 "
-                "%.4f mK/刻み・"
-                "塊が失った %.4g J/刻み・壁が得た %.4g J/刻み・保存 %s\n",
-                wallMk / 1000, blockMk / 1000, reference == 0 ? "今の形" : "釣り合いとの差だけを運ぶ", ticks,
-                worstWallMk, worstWallLossMk, blockLoss / ticks / UNIT_PER_J, wallGain / ticks / UNIT_PER_J,
-                conserved ? "ビット単位" : "崩れた");
-            EXPECT(conserved);
-            if (reference != 0 && blockMk == wallMk)
-                EXPECT(worstWallMk == 0);
-        }
+            return Voxel{};
+        });
     }
 
 }  // namespace
@@ -322,9 +351,12 @@ namespace {
 int main() {
     RecordSwing(16, 500);
     RecordSwing(32, 250);
-    RecordBox(1000000, 1000000, 60);
-    RecordBox(1000000, 1100000, 60);
-    RecordBox(1000000, 1010000, 60);
+    RecordScene("閉じた箱 1000 K", ShellWithBlock(1000000, 1000000), 1000000, 60, Expect3::Zero);
+    RecordScene("閉じた箱 1000 K + 熱い塊 1100 K", ShellWithBlock(1000000, 1100000), 1000000, 60, Expect3::NoLoss);
+    RecordScene("閉じた箱 1000 K + 熱い塊 1010 K", ShellWithBlock(1000000, 1010000), 1000000, 60, Expect3::NoLoss);
+    RecordScene("閉じた箱 1000 K + 冷たい塊 900 K", ShellWithBlock(1000000, 900000), 1000000, 60, Expect3::NoGain);
+    RecordScene("空へ開いた板 1000 K(空も参照の温度)", OpenSlab(1000000, 0), 1000000, 60, Expect3::Zero);
+    RecordScene("空へ開いた板 1000 K + 熱い石 1100 K", OpenSlab(1000000, 1100000), 1000000, 60, Expect3::NoLoss);
     if (failureCount != 0) {
         std::printf("FAILED: %d\n", failureCount);
         return 1;

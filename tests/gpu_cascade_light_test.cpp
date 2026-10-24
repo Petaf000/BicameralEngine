@@ -157,6 +157,15 @@ namespace {
         cases.push_back({"放つ面の組 5・熱も待つ", FireGround(32, 4, 6, Material::Stone), Params(4, 5, 1, 5, true), 7});
         cases.push_back(
             {"放つ面の組 3・照り返しだけ", FireGround(32, 4, 4, Material::Stone), Params(4, 5, 1, 3, false), 4});
+        // 参照の温度との差(T-1102): 正の側(焚き火)と負の側(参照より冷たい地面)。冷たい物も放つので quietBelowMk は使わない
+        for (const bool negative : {false, true}) {
+            sim::CascadeParams relative = Params(4, 5, 1);
+            relative.referenceMk = 600000;
+            relative.negativePart = negative;
+            cases.push_back({negative ? "参照の温度との差・負の側" : "参照の温度との差・正の側",
+                             FireGround(32, 4, 4, Material::Stone), relative, 3});
+        }
+
         Case shifted{"世界の隅が負の座標", FireGround(24, 4, 3, Material::Stone), Params(4, 4, 1), 2};
         shifted.grid.low = {-5, 3, -9};
         cases.push_back(std::move(shifted));
