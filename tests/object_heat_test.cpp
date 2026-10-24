@@ -417,7 +417,7 @@ namespace {
         if (scene.inner == InnerLaw::VolumeWeighted) {
             const auto temperature = static_cast<uint32_t>(std::max(temperatureMk, 0));
 
-            return uint64_t{rx::HcCellConductance(table.View(), cell, temperature)} << rx::HC_CONDUCTANCE_SHIFT;
+            return rx::HcCellConductivity(table.View(), cell, temperature);
         }
 
         return MoleConductivity(table, cell);

@@ -367,6 +367,9 @@ namespace {
         cellulose->lightAbsorptionLong.reset();
         cellulose->lightReflectanceShortPermille.reset();
         cellulose->lightReflectanceLongPermille.reset();
+        // 放射の吸い込みも消す(T-1066 で標準の物質に書いた。書いてあると、光の値が無い時は両帯にその値を使うと知らせる)
+        const uint32_t radiation = cellulose->radiationAbsorption;
+        cellulose->radiationAbsorption = 0;
         const auto unwritten = BakeReactionTable(definition);
         EXPECT(unwritten && LightWarningCount(*unwritten) == 1);
         EXPECT(unwritten && HasLightWarning(*unwritten, "物質 cellulose: 固体") &&
@@ -374,6 +377,13 @@ namespace {
                !HasLightWarning(*unwritten, "mana_test"));
         if (unwritten)
             PrintWarnings(*unwritten);
+
+        // 放射の吸い込みだけ書いてある時は、その値を両帯に使うと知らせる(1 行)
+        cellulose->radiationAbsorption = radiation;
+        const auto radiationOnly = BakeReactionTable(definition);
+        EXPECT(radiation != 0 && radiationOnly && LightWarningCount(*radiationOnly) == 1 &&
+               HasLightWarning(*radiationOnly, "radiation_absorption_mm2_per_mol"));
+        cellulose->radiationAbsorption = 0;
 
         // 両方の帯を書けば知らせない(照り返しは書かなくてよい: 吸い込みだけで光の値を書いた物質)
         cellulose->lightAbsorptionShort = 50000;
