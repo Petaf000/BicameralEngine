@@ -776,9 +776,10 @@ namespace {
         }
 
         if (measure) {
-            const std::array<Scene, 4> scenes = {
+            const std::array<Scene, 5> scenes = {
                 logs, campfire, Scene{"薪の山 100 本(燃えているのは 10 本)", {{Kind::Log, 100}}, 10},
-                Scene{"紙の山 1000 枚(燃えているのは 100 枚)", {{Kind::Paper, 1000}}, 100}};
+                Scene{"紙の山 1000 枚(燃えているのは 100 枚)", {{Kind::Paper, 1000}}, 100},
+                Scene{"薪の山 1000 本(燃えているのは 10 本)", {{Kind::Log, 1000}}, 10}};
             for (const Scene& scene : scenes) {
                 for (const bool sleeping : {false, true}) {
                     for (const uint32_t warm : {4u, 300u}) {
