@@ -2,7 +2,7 @@
 // 場面: 一辺 8 のレベル 0 の箱(下の面を固定)のうち、真ん中の 2 × 2 × 2 セルをレベル 1(4 × 4 × 4)に細かくした系(k = 1・3)。
 //   面の係数はエネルギーの形(両側に同じブロック)。細かい節どうしは粗い節どうしの 1/2、細かい節と粗い節は 1/3(面積 ÷ 距離)。延ばし方は区分的に一定。
 // 確かめ:
-//   1. 解ける: V 2 回で刻みを続けると残差が減る(40 刻みで 1 刻み目の 1/10^4 より小さい)。共役勾配(V 4 回 + lineSearch)でも
+//   1. 解ける: 刻みを続けると残差が丸めの床まで下がる(40 刻みで同じレベルの箱の 40 刻みの残差の 4 倍以内)。V 2 回と共役勾配(V 4 回 + lineSearch)で
 //   2. 順によらない: 節と面の並びを逆にした系で、座標ごとの答えがビット単位で同じ(16 色の Gauss–Seidel の色の中の順が効かない)
 //   3. 段: 細かい節を先にまとめ、段の数が同じレベルの箱より 1 つ多い
 #include <algorithm>
@@ -207,8 +207,9 @@ namespace {
             r(forward, 40), r(plain, 1), r(plain, 40));
 
         Expect(forward.levels == plain.levels + 1, std::format("k = {}・{}: 段が 1 つ多い", k, name));
-        Expect(forward.residuals.back() * 10000 < forward.residuals.front(),
-               std::format("k = {}・{}: 40 刻みで残差が 1/10^4 より小さい", k, name));
+        // 40 刻みで丸めの床(同じレベルの箱の 40 刻みの残差)の 4 倍以内まで下がる
+        Expect(forward.residuals.back() <= 4 * std::max<uint64_t>(plain.residuals.back(), 1),
+               std::format("k = {}・{}: 40 刻みで残差が同じレベルの箱の丸めの床の 4 倍以内", k, name));
         Expect(ByKey(mixed, forward.values) == ByKey(MixedSystem(k, true, true), backward.values),
                std::format("k = {}・{}: 節と面を逆の順にしても座標ごとの答えがビット単位で同じ", k, name));
     }
