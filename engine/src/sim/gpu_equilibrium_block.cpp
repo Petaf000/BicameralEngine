@@ -192,6 +192,10 @@ namespace bicameral::sim {
         if (!Supports(system.components) || grid.levels.empty() || system.nodes.empty())
             return std::unexpected(std::format("成分を持つ節の GPU 版で解けない系(成分 {})", system.components));
 
+        // 違うレベルの節が混ざる系(16 色・残した節の延ばし方)は CPU だけ(T-0969。GPU は T-1104)
+        if (rng::any_of(grid.levels, [](const EquilibriumBlockLevel& level) { return level.colorCount != EQ_OCTANTS; }))
+            return std::unexpected("違うレベルの節が混ざる系は GPU 版にまだ無い(T-1104)");
+
         GpuEquilibriumBlock result;
         result.m_device = device;
         result.m_options = options;

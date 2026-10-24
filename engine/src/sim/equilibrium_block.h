@@ -28,13 +28,16 @@ namespace bicameral::sim {
     inline constexpr uint32_t EQ_PROLONG_SHIFT = equilibrium_block::EQB_PROLONG_SHIFT;      // 延ばし方の行列の Q
     inline constexpr uint32_t EQ_OCTANTS = equilibrium_block::EQB_OCTANTS;                  // 子の八分割
     inline constexpr uint32_t EQ_BLOCK_FACTOR_SHIFT = equilibrium_block::EQB_FACTOR_SHIFT;  // LDLᵀ の L の Q
+    // 違うレベルの節が混ざる系(T-0969・ADR-0462)で、粗くしない節(その段でいちばん細かくない節)の「延ばし方」= 単位の行列の置き場
+    inline constexpr uint32_t EQ_PASS_OCTANT = EQ_OCTANTS;
 
     // k × k の係数([行 × EQ_MAX_COMPONENTS + 列]。k を超える所は 0)と k 成分の値(GPU と共有する式の型)
     using EquilibriumBlock = equilibrium_block::EqbBlock;
     using EquilibriumVector = equilibrium_block::EqbVector;
 
     // 面(2 つの節のつながり)。エネルギー ½ [x_low; x_high]ᵀ [[lowLow, lowHigh], [lowHighᵀ, highHigh]] [x_low; x_high]。
-    // 同じレベルの節どうし(軸の隣・斜めの隣のどちらでも。各軸の座標の差は 1 以内)
+    // 同じレベルの節どうし(軸の隣・斜めの隣のどちらでも。各軸の座標の差は 1 以内)か、レベルの差 1 の節どうし(T-0969。係数は法則が
+    // エネルギーの形で渡す = 両側とも同じブロックの転置。スカラーの EquilibriumFace の「粗い側の行 ÷ 8^差」は体積あたりの式の形で、ここでは要らない)
     struct EquilibriumBlockFace {
         uint32_t low = 0;
         uint32_t high = 0;
@@ -62,7 +65,7 @@ namespace bicameral::sim {
         uint32_t coefficientShift = 0;  // A × x ÷ 2^この値 = 右辺の単位
 
         std::vector<EquilibriumNode>
-            nodes;  // レベルと座標だけ使う(capacity は見ない。対角は面と固定した面から)。全部同じレベル
+            nodes;  // レベルと座標だけ使う(capacity は見ない。対角は面と固定した面から)。隣どうしのレベルの差は 1 まで(T-0969)
         std::vector<EquilibriumBlockFace> faces;
         std::vector<EquilibriumBlockFixed> fixedFaces;
         std::vector<EquilibriumBlockSource> sources;
@@ -94,7 +97,9 @@ namespace bicameral::sim {
         std::vector<int64_t> x;
         std::vector<int64_t> y;
         std::vector<int64_t> z;
-        std::vector<uint8_t> colors;  // 8 色
+        std::vector<int32_t> depths;  // 木のレベル(段 0 は節のレベル。粗くした節は 1 小さい)
+        std::vector<uint8_t> colors;  // 8 色(同じレベル)/ 16 色(違うレベルが混ざる段: 座標の奇偶 + 8 × レベルの奇偶)
+        uint32_t colorCount = 8;
 
         // --- 式(係数の単位)---
         std::vector<EquilibriumBlock> diagonals;
@@ -111,8 +116,9 @@ namespace bicameral::sim {
     struct EquilibriumBlockGrid {
         uint32_t components = 1;
         uint32_t coefficientShift = 0;
-        std::array<EquilibriumBlock, EQ_OCTANTS> prolongation{};
-        std::array<EquilibriumBlock, EQ_OCTANTS> restriction{};  // Pᵀ
+        // [0, 8) = 法則の延ばし方・[EQ_PASS_OCTANT] = 単位の行列(粗くしない節)
+        std::array<EquilibriumBlock, EQ_OCTANTS + 1> prolongation{};
+        std::array<EquilibriumBlock, EQ_OCTANTS + 1> restriction{};  // Pᵀ
         std::vector<EquilibriumBlockLevel> levels;
     };
 

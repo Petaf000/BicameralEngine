@@ -12,6 +12,7 @@
 #include <map>
 #include <tuple>
 
+#include "core/aliases.h"
 #include "sim/equilibrium_fields.h"
 
 using namespace bicameral::fx;
@@ -21,7 +22,6 @@ namespace bicameral::sim {
 
     namespace {
 
-        constexpr uint32_t COLOR_COUNT = 8;
         constexpr size_t MAX_LEVELS = 32;
         constexpr uint32_t ROW_WIDTH = EQ_MAX_COMPONENTS;  // ブロックの行の幅
 
@@ -159,11 +159,24 @@ namespace bicameral::sim {
             return (uint8_t)((x & 1) + 2 * (y & 1) + 4 * (z & 1));
         }
 
-        void PushNode(EquilibriumBlockLevel& level, int64_t x, int64_t y, int64_t z) {
+        void PushNode(EquilibriumBlockLevel& level, int32_t depth, int64_t x, int64_t y, int64_t z) {
             level.x.push_back(x);
             level.y.push_back(y);
             level.z.push_back(z);
-            level.colors.push_back(ColorOf(x, y, z));
+            level.depths.push_back(depth);
+        }
+
+        // 色: 同じレベルの段は座標の奇偶の 8 色(今と同じ)。違うレベルが混ざる段は + 8 × レベルの奇偶の 16 色
+        // (隣のレベルの差は 1 までなので、レベルの違う隣は違う色。同じレベルの隣〔27 点〕は座標の奇偶で違う色)
+        void FinishColors(EquilibriumBlockLevel& level) {
+            const bool mixed = !level.depths.empty() &&
+                               rng::any_of(level.depths, [&](int32_t depth) { return depth != level.depths.front(); });
+            level.colorCount = mixed ? 16 : 8;
+            level.colors.resize(level.x.size());
+            for (size_t i = 0; i < level.x.size(); ++i) {
+                const uint8_t parity = ColorOf(level.x[i], level.y[i], level.z[i]);
+                level.colors[i] = (uint8_t)(parity + (mixed ? 8 * (level.depths[i] & 1) : 0));
+            }
         }
 
         // 行と対角(128bit)から段を仕上げる(÷ 2^shift・対角の分解)
@@ -208,7 +221,9 @@ namespace bicameral::sim {
             const uint32_t k = system.components;
             EquilibriumBlockLevel level;
             for (const EquilibriumNode& node : system.nodes)
-                PushNode(level, node.x, node.y, node.z);
+                PushNode(level, node.level, node.x, node.y, node.z);
+
+            FinishColors(level);
 
             std::vector<WideBlock> diagonals(system.nodes.size(), ZeroWideBlock());
             Rows rows(system.nodes.size());
@@ -239,20 +254,31 @@ namespace bicameral::sim {
             const uint32_t k = grid.components;
             const size_t count = fine.x.size();
             EquilibriumBlockLevel coarse;
-            std::map<std::tuple<int64_t, int64_t, int64_t>, uint32_t> index;
+            // いちばん細かいレベルの節だけを親(座標 ÷ 2)へまとめ、ほかの節はそのまま次の段へ(延ばし方は単位の行列。T-0969)。
+            // 同じレベルの系は全部がまとまる(今と同じ)。木の決まり(ある所は粗い節か子のどちらか)で、まとめた親と残した節は重ならない
+            const int32_t finest = *rng::max_element(fine.depths);
+            std::map<std::tuple<int32_t, int64_t, int64_t, int64_t>, uint32_t> index;
+            std::vector<uint8_t> passed;  // 粗い段の節が「残した節」か(重なりの確かめ)
             fine.parents.resize(count);
             fine.octants.resize(count);
             for (size_t i = 0; i < count; ++i) {
-                const int64_t x = fine.x[i] >> 1;
-                const int64_t y = fine.y[i] >> 1;
-                const int64_t z = fine.z[i] >> 1;
-                const auto [found, added] = index.emplace(std::tuple{x, y, z}, (uint32_t)coarse.x.size());
-                if (added)
-                    PushNode(coarse, x, y, z);
+                const bool merge = fine.depths[i] == finest;
+                const int32_t depth = merge ? finest - 1 : fine.depths[i];
+                const int64_t x = merge ? fine.x[i] >> 1 : fine.x[i];
+                const int64_t y = merge ? fine.y[i] >> 1 : fine.y[i];
+                const int64_t z = merge ? fine.z[i] >> 1 : fine.z[i];
+                const auto [found, added] = index.emplace(std::tuple{depth, x, y, z}, (uint32_t)coarse.x.size());
+                if (added) {
+                    PushNode(coarse, depth, x, y, z);
+                    passed.push_back(merge ? 0 : 1);
+                }
 
+                FX_ASSERT(added || (merge && passed[found->second] == 0));
                 fine.parents[i] = found->second;
-                fine.octants[i] = ColorOf(fine.x[i], fine.y[i], fine.z[i]);
+                fine.octants[i] = merge ? ColorOf(fine.x[i], fine.y[i], fine.z[i]) : (uint8_t)EQ_PASS_OCTANT;
             }
+
+            FinishColors(coarse);
 
             std::vector<WideBlock> diagonals(coarse.x.size(), ZeroWideBlock());
             Rows rows(coarse.x.size());
@@ -300,7 +326,7 @@ namespace bicameral::sim {
                     uint32_t sweeps, uint32_t k, uint32_t shift, uint64_t& updates) {
             const size_t count = level.x.size();
             for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
-                for (uint8_t color = 0; color < COLOR_COUNT; ++color) {
+                for (uint8_t color = 0; color < level.colorCount; ++color) {
                     for (size_t i = 0; i < count; ++i) {
                         if (level.colors[i] != color)
                             continue;
@@ -442,14 +468,12 @@ namespace bicameral::sim {
         EquilibriumBlockGrid grid;
         grid.components = system.components;
         grid.coefficientShift = system.coefficientShift;
-        grid.prolongation = system.prolongation;
-        for (uint32_t octant = 0; octant < EQ_OCTANTS; ++octant)
-            grid.restriction[octant] = Transposed(system.prolongation[octant], system.components);
+        rng::copy(system.prolongation, grid.prolongation.begin());
+        for (uint32_t c = 0; c < system.components; ++c)
+            grid.prolongation[EQ_PASS_OCTANT][(c * ROW_WIDTH) + c] = int64_t{1} << EQ_PROLONG_SHIFT;
 
-        // 違うレベルの節が混ざる系は T-0969
-        [[maybe_unused]] const bool sameLevel = std::ranges::all_of(
-            system.nodes, [&](const EquilibriumNode& node) { return node.level == system.nodes.front().level; });
-        FX_ASSERT(sameLevel);
+        for (uint32_t octant = 0; octant <= EQ_PASS_OCTANT; ++octant)
+            grid.restriction[octant] = Transposed(grid.prolongation[octant], system.components);
 
         grid.levels.push_back(MakeNodeLevel(system));
         while (grid.levels.size() < MAX_LEVELS && grid.levels.back().x.size() > 1) {
