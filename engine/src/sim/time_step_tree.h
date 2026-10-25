@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "common/fixed.hlsli"
@@ -35,6 +36,19 @@ namespace bicameral::sim {
         // ほかは毎刻み。毎刻みの枠の隣は毎刻み(前線が長い歩の枠に入らないための 1 枠の緩衝)。隣の差 1 段の決まりは使わない
         Jump,
     };
+
+    struct EquilibriumSystem;
+
+    // 列の解きを見る口(T-1111。GPU の試験が同じ系を GPU で解き直す)。系は δ = 0 から V を cycles 回で解く(SolveSpan と同じ)。
+    // 残差で止める形(residualStop)の時は呼ばない
+    struct TimeTreeSpanSolve {
+        const EquilibriumSystem& system;
+        int32_t exponent = 0;  // 列の刻みの長さ e(2^e 刻み)
+        uint64_t start = 0;    // 列の歩の初めの刻み
+        uint32_t cycles = 0;   // V の回数(e ごとの表。TimeTreeSetup の cycles・cyclesAtZero・shortExponent)
+    };
+
+    using TimeTreeSpanObserver = std::function<void(const TimeTreeSpanSolve&)>;
 
     struct TimeTreeSetup {
         // --- 熱(どれもレベルによらない数。面の係数だけレベル k で × 4^k)---
@@ -81,6 +95,9 @@ namespace bicameral::sim {
         // 前線の緩衝を揃える単位(groupShift の枠の組)の数で(T-1074。0 = 上の frontBuffer の形): 動いている単位(どれかの枠の
         // 望みの e が 0)から面の隣をたどってこの数の単位までを e = 0 に。単位の物の長さ × これ が緩衝の幅
         uint32_t frontBufferUnits = 0;
+
+        // --- 見る口(結果に効かない)---
+        const TimeTreeSpanObserver* spanObserver = nullptr;  // 列の解き(T-1111)
     };
 
     // 面 1 つ(a = 細かい側か、同じレベルなら − 側。b = 相手)。係数は a の単位 / 刻み

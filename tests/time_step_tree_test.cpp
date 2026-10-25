@@ -20,7 +20,9 @@
 //       [zerocycles=1 刻みの V の回数(既定 1)] [unit=block(単位 4 m を外す)]
 //       [bufferunits=前線の緩衝の単位の数(T-1074)] [shape=mixed|coarse|fine|finer(night・fire の木。1 m・0.5 m・0.25 m の根だけ)]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
+// T-1111: span-dump dump=<ファイル>(火事〔shape= の木〕の途中の列の系を書く。gpu_time_step_span_test が GPU で解き比べる)
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -42,6 +44,7 @@
 #include "sim/multires_nest.h"
 #include "sim/multires_state.h"
 #include "sim/time_step_tree.h"
+#include "time_step_span_file.h"
 
 using namespace bicameral;
 using namespace bicameral::multires;
@@ -918,6 +921,50 @@ namespace {
         Expect(run.conserved && run.steps.negativeValues == 0, "火事の費用: 保存・負 0");
     }
 
+    // --- T-1111: 火事の途中の列の系を書く(GPU で解き比べる)---
+    std::string dumpPath;
+
+    // 着火から何刻み後の e = 0 の系を取るか(着火の直後・前線が広がる途中。1 つ目の 1 刻みの系から)
+    constexpr std::array<uint64_t, 8> SPAN_DUMP_AFTER = {1, 16, 64, 256, 512, 1024, 2048, 4000};
+    constexpr uint32_t SPAN_DUMP_LONG = 4;  // e > 0 の系(違う e を 4 つ。e > 8〔V の回数が違う〕を含める)
+
+    void CheckSpanDump(const Material& material, const Ignition& ignition) {
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        setup.groupShift = groupShift;
+        std::vector<test::TimeStepSpanRecord> records;
+        size_t nextZero = 0;
+        std::vector<int32_t> longSeen;
+        const TimeTreeSpanObserver observer = [&](const TimeTreeSpanSolve& solve) {
+            if (solve.exponent == 0 && nextZero < SPAN_DUMP_AFTER.size() &&
+                solve.start >= ignition.tick + SPAN_DUMP_AFTER[nextZero]) {
+                ++nextZero;
+            } else if (solve.exponent > 0 && longSeen.size() < SPAN_DUMP_LONG &&
+                       std::ranges::find(longSeen, solve.exponent) == longSeen.end() &&
+                       (solve.exponent > setup.shortExponent || solve.start >= ignition.tick)) {
+                longSeen.push_back(solve.exponent);
+            } else
+                return;
+
+            records.push_back(
+                {.exponent = solve.exponent, .start = solve.start, .cycles = solve.cycles, .system = solve.system});
+        };
+
+        setup.spanObserver = &observer;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
+        const uint64_t ticks = ignition.tick + SPAN_DUMP_AFTER.back() + 1;
+        const RunResult run = Run(setup, material, world, ticks, ticks, ignition);
+        LogRun("火事の系", TrialName(), world, run, ticks);
+        for (const test::TimeStepSpanRecord& record : records) {
+            Log(Channel::Sim, Level::Info,
+                "火事の系: e {}・歩の初め {}・V {}・節 {}・面 {}・固定した面 {}・右辺の項 {}", record.exponent,
+                record.start, record.cycles, record.system.nodes.size(), record.system.faces.size(),
+                record.system.fixedFaces.size(), record.system.sources.size());
+        }
+
+        Expect(nextZero == SPAN_DUMP_AFTER.size(), "火事の系: e = 0 の系を全部取った");
+        Expect(!dumpPath.empty() && test::WriteTimeStepSpans(dumpPath, records), "火事の系: ファイルに書けた");
+    }
+
     // --- 3. 早送り = 待った(ビット一致)・6. 歩の途中のセーブ ---
 
     void CheckFastForward() {
@@ -1034,6 +1081,8 @@ namespace {
                 trialFixed = value == "fixed";
             else if (key == "galerkin")
                 solverGalerkin = value == "1";
+            else if (key == "dump")
+                dumpPath = value;
         }
 
         const bool all = part == "all";
@@ -1060,6 +1109,9 @@ namespace {
 
         if (part == "fire-cost")
             CheckFireCost(fire, fireIgnition);
+
+        if (part == "span-dump")
+            CheckSpanDump(fire, fireIgnition);
 
         if (part == "grain-fine-pond")
             CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {}, 1);

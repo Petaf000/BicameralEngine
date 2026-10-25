@@ -829,6 +829,16 @@ target_link_libraries(gpu_equilibrium_block_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_equilibrium_block gpu_equilibrium_block_test gpu --queue compute --no-gbv)
 set_tests_properties(gpu_equilibrium_block PROPERTIES TIMEOUT 900)
 
+# 時間を飛ばす試作の列の系を部品の GPU 版で解き、CPU とビット一致(T-1111)。系は time_step_tree_test の span-dump が火事(0.5 m の根だけ)から書く
+# 計測は job.py run -Preset release -Exe gpu_time_step_span_test -- --spans <ファイル> --no-gbv --measure
+bicameral_add_gpu_test(gpu_time_step_span_test)
+target_link_libraries(gpu_time_step_span_test PRIVATE bicameral_sim)
+add_test(NAME time_step_span_dump COMMAND time_step_tree_test span-dump shape=fine dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_spans.bin)
+set_tests_properties(time_step_span_dump PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_spans)
+bicameral_add_gpu_test_case(gpu_time_step_span gpu_time_step_span_test gpu --queue compute --no-gbv
+                            --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_spans.bin)
+set_tests_properties(gpu_time_step_span PROPERTIES FIXTURES_REQUIRED time_step_spans)
+
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)
 target_link_libraries(gpu_gas_projection_test PRIVATE bicameral_sim bicameral_gas_projection)
