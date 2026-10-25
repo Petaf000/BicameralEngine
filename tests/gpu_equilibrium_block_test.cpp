@@ -417,7 +417,7 @@ namespace {
             }
         }
 
-        // 支えの洞窟: 前の既定(V 2 回)と今の既定(V 4 回 + 共役勾配。T-1085)
+        // 支えの洞窟: 前の前の既定(V 2 回)と今の既定(V 2 回 + 共役勾配・刻みをまたぐ。D-649)
         const sim::SupportOptions support{.solve = sim::SupportSolve::Coupled};
         for (const uint64_t cellMm : {500ull, 250ull}) {
             const sim::SupportLaw law(test::Cave(cellMm), support);

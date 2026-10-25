@@ -99,9 +99,9 @@ namespace bicameral::sim {
 
         // --- 解き方(T-0919)---
         SupportSolve solve = SupportSolve::Coupled;
-        // Coupled の V の回数など(法則の定数)。既定は V 4 回 + V を前処理とする共役勾配(T-1085・ADR-0455。壁につながる棚が
-        // 9/10 に 32 / 69 刻み。V 2 回だけだと 1153 / 1711 刻み)
-        EquilibriumBlockOptions blocks{.cycles = 4, .lineSearch = true};
+        // Coupled の V の回数など(法則の定数)。既定は V 2 回 + V を前処理とする共役勾配・向きを刻みをまたいで持つ
+        // (D-649・T-1086・ADR-0455。持つのは支えの解きに入っている節の向きと残差 = 48 B/セル。系の形・荷が変わったら捨てる)
+        EquilibriumBlockOptions blocks{.cycles = 2, .lineSearch = true, .conjugateAcrossTicks = true};
 
         // 違う大きさのセルの間の梁(T-1120)
         MixedBeam mixedBeam = MixedBeam::FaceOffset;
@@ -109,6 +109,10 @@ namespace bicameral::sim {
         // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)
         EquilibriumWarmStart warmStart;
+        // 刻みをまたぐ共役勾配の向きと残差を C-1 の温めた始まりの欄に置く(D-649。値の数 ≥ 成分の数。Coupled だけ)。
+        // 置けば保存点とハッシュに入る。既定は置かない(法則の控えだけ)
+        EquilibriumWarmStart conjugateDirection;
+        EquilibriumWarmStart conjugateResidual;
     };
 
     // 帳簿(上向きの力。mN)
@@ -142,7 +146,7 @@ namespace bicameral::sim {
         SupportLaw(const SupportScene& scene, const SupportOptions& options);
 
         // 掘った後など: before と同じ座標のセルの値を温めた始まりにする(無いセルは 0)。温めた始まりを欄に置く時(warmStart)は
-        // 欄が答えの元なので使わない(掘った所の欄は木の操作が持つ。T-0922)
+        // 欄が答えの元なので使わない(掘った所の欄は木の操作が持つ。T-0922)。刻みをまたぐ共役勾配の向きは捨てる(D-649)
         void CarryFrom(const SupportLaw& before);
 
         // 1 刻み(成分ごとに 1 回ずつ解く)

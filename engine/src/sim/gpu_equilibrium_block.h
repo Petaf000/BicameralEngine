@@ -149,6 +149,8 @@ namespace bicameral::sim {
         gpu::ResidentBuffer m_nodes;    // EqbGpuNode(t0)
         gpu::ResidentBuffer m_indices;  // 隣・子・色の一覧(t1)
         bool m_residentPending = true;
+        // 写した直後で、刻みをまたぐ共役勾配の向きがまだ無い(RecordSolve が積んだら下ろす。記録の順の印なので const の記録でも書く)
+        mutable bool m_conjugateFresh = true;
         ComPtr<ID3D12Resource> m_coefficients;  // u0
         ComPtr<ID3D12Resource> m_work;          // u1
         ComPtr<ID3D12Resource> m_coefficientUpload;

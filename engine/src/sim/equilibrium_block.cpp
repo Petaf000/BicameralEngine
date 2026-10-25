@@ -387,7 +387,8 @@ namespace bicameral::sim {
         // --- V の直しを前処理とする共役勾配(T-1068。lineSearch のときだけ)---
         // V サイクルの直し z = after − before を前処理した残差として、刻みの中で共役勾配を進める(ConjugateStep)。粗い段が運べない遅い形
         // (壁と棚の継ぎ目で回る形。1 回の V で (1 − ρ) しか進まない)は、前処理した系の孤立した小さい固有値になり、共役な向きで消える。
-        // 刻みをまたいで持つものは無い(セーブ・ハッシュは今のまま)。整数: 内積は 128bit で厳密(足す順によらない = GPU でも同じ和)。
+        // 刻みをまたいで持つ時(conjugateAcrossTicks。T-1086・D-649)は向き p と残差 r を持ち、β の分母を p_前ᵀ r_前 で数える(下)。
+        // 整数: 内積は 128bit で厳密(足す順によらない = GPU でも同じ和)。
         // 歩幅と β は Q16・大きさの上限 EQB_STEP_MAX(式は common/equilibrium_block.hlsli で GPU と共有)。rᵀp ≤ 0 か pᵀAp ≤ 0 なら V のまま(その歩で覚えを捨てる)
 
         // 共役勾配の前の歩(刻みの中だけ)
@@ -420,12 +421,14 @@ namespace bicameral::sim {
             return result;
         }
 
-        // V の直し z を前処理とする共役勾配の 1 歩(刻みの中だけ覚える。刻みをまたいで持つ状態は無い = セーブ・ハッシュは今のまま)。
+        // V の直し z を前処理とする共役勾配の 1 歩。
         // p = z + β p_前(β は Polak–Ribière = zᵀ(r − r_前) ÷ z_前ᵀr_前)、歩幅 α = rᵀp ÷ pᵀAp。粗い段が運べない遅い形は、
-        // 前処理した系の孤立した小さい固有値になり、共役な向きで 1〜2 歩で消える
+        // 前処理した系の孤立した小さい固有値になり、共役な向きで 1〜2 歩で消える。
+        // 刻みをまたぐ時(across)は分母に p_前ᵀ r_前 を覚える: 前の歩の厳密な線探索で p_前前ᵀ r_前 = 0 なので z_前ᵀ r_前 と同じ値で、
+        // 持つ向きと残差から数え直せる(保存点から続けてもビット一致・持つ状態は節 × k × 2 だけ。T-1086・D-649)
         void ConjugateStep(const EquilibriumBlockLevel& level, const std::vector<int64_t>& rhs,
                            const std::vector<int64_t>& before, std::vector<int64_t>& values, uint32_t k, uint32_t shift,
-                           ConjugateMemory& memory) {
+                           bool across, ConjugateMemory& memory) {
             std::vector<int64_t> direction(values.size());
             for (size_t i = 0; i < values.size(); ++i)
                 direction[i] = values[i] - before[i];
@@ -455,10 +458,52 @@ namespace bicameral::sim {
             for (size_t i = 0; i < values.size(); ++i)
                 values[i] = before[i] + FxMulDivS64(direction[i], alpha, EQB_STEP_ONE);
 
-            memory.valid = !SignedNegative(zr) && EqbWideBitLength(zr) != 0;
-            memory.zr = zr;
+            const FxU128 remembered = across ? along : zr;
+            memory.valid = !SignedNegative(remembered) && EqbWideBitLength(remembered) != 0;
+            memory.zr = remembered;
             memory.direction = std::move(direction);
             memory.residual = residual;
+        }
+
+        // 刻みをまたぐ向きと残差を読む(欄に置いた時は欄から = 保存点から続けても同じ。T-1086・D-649)。
+        // 分母 p_前ᵀ r_前 は数え直す。捨てる印・数の違い・0 の並びは向きなしで始める
+        ConjugateMemory LoadConjugate(const EquilibriumBlockSystem& system, const EquilibriumBlockOptions& options,
+                                      EquilibriumBlockState& state) {
+            ConjugateMemory memory;
+            const bool discard = state.conjugateDiscard;
+            state.conjugateDiscard = false;
+            if (discard)
+                return memory;
+
+            const uint32_t k = system.components;
+            if (options.conjugateDirection.nest != nullptr) {
+                memory.direction = LoadWarmStart(options.conjugateDirection, system.nodes, k);
+                memory.residual = LoadWarmStart(options.conjugateResidual, system.nodes, k);
+            } else if (state.conjugateValid && state.conjugateDirection.size() == system.nodes.size() * k) {
+                memory.direction = state.conjugateDirection;
+                memory.residual = state.conjugateResidual;
+            } else {
+                return memory;
+            }
+
+            memory.zr = Dot(memory.direction, memory.residual);
+            memory.valid = !SignedNegative(memory.zr) && EqbWideBitLength(memory.zr) != 0;
+
+            return memory;
+        }
+
+        // 次の刻みへ持つ(使えない向きは 0 の並び = 読み戻すと向きなし)
+        void StoreConjugate(const EquilibriumBlockSystem& system, const EquilibriumBlockOptions& options,
+                            const ConjugateMemory& memory, EquilibriumBlockState& state) {
+            const size_t count = system.nodes.size() * system.components;
+            state.conjugateValid = memory.valid && memory.direction.size() == count;
+            state.conjugateDirection = state.conjugateValid ? memory.direction : std::vector<int64_t>(count, 0);
+            state.conjugateResidual = state.conjugateValid ? memory.residual : std::vector<int64_t>(count, 0);
+            if (options.conjugateDirection.nest == nullptr)
+                return;
+
+            (void)StoreWarmStart(options.conjugateDirection, system.nodes, state.conjugateDirection, system.components);
+            (void)StoreWarmStart(options.conjugateResidual, system.nodes, state.conjugateResidual, system.components);
         }
 
     }  // namespace
@@ -514,14 +559,8 @@ namespace bicameral::sim {
         if (count == 0)
             return result;
 
-        ConjugateMemory memory;
         const bool across = options.lineSearch && options.conjugateAcrossTicks;
-        if (across && state.conjugateValid && state.conjugateDirection.size() == state.values.size()) {
-            memory.direction = state.conjugateDirection;
-            memory.residual = state.conjugateResidual;
-            memory.zr = {.hi = state.conjugateZrHigh, .lo = state.conjugateZrLow};
-            memory.valid = true;
-        }
+        ConjugateMemory memory = across ? LoadConjugate(system, options, state) : ConjugateMemory{};
 
         for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
             if (!options.lineSearch) {
@@ -532,16 +571,11 @@ namespace bicameral::sim {
             // V の直しを前処理とする共役勾配の 1 歩(T-1068)
             const std::vector<int64_t> before = state.values;
             VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
-            ConjugateStep(grid.levels[0], rhs, before, state.values, k, system.coefficientShift, memory);
+            ConjugateStep(grid.levels[0], rhs, before, state.values, k, system.coefficientShift, across, memory);
         }
 
-        if (across) {
-            state.conjugateValid = memory.valid;
-            state.conjugateDirection = memory.direction;
-            state.conjugateResidual = memory.residual;
-            state.conjugateZrHigh = memory.zr.hi;
-            state.conjugateZrLow = memory.zr.lo;
-        }
+        if (across)
+            StoreConjugate(system, options, memory, state);
 
         if (options.warmStart.nest != nullptr)
             (void)StoreWarmStart(options.warmStart, system.nodes, state.values, k);

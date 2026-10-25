@@ -381,7 +381,12 @@ FX_FN uint32_t EqbConjugateWorkWords(uint32_t k, uint32_t nodeCapacity, uint32_t
 }
 
 // --- 共役勾配の数(CPU の SolveEquilibriumBlocks と GPU で同じ式)---
-FX_CONST uint64_t EQB_STEP_ONE = 65536;                             // α・β の Q16 の 1
+FX_CONST uint64_t EQB_STEP_ONE = 65536;  // α・β の Q16 の 1
+// 共役勾配の段の「何回目の V か」(GPU の g_eqbFirst)に足す印(T-1086・D-649)。ACROSS = 刻みをまたぐ(β の分母に pᵀr を覚える)・
+// KEEP = 1 回目の V でも前の向きを捨てない(写した直後の最初の解きは付けない = CPU の「向きなしで始める」と同じ)
+FX_CONST uint32_t EQB_CONJUGATE_ACROSS = 0x80000000u;
+FX_CONST uint32_t EQB_CONJUGATE_KEEP = 0x40000000u;
+FX_CONST uint32_t EQB_CONJUGATE_CYCLE_MASK = 0x3fffffffu;
 FX_CONST uint64_t EQB_STEP_MAX = (uint64_t)65536 * (uint64_t)4096;  // 大きさの上限(4096 倍)
 
 FX_FN bool EqbWideIsNegative(FxU128 value) {

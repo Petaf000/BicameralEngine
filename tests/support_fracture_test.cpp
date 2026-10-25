@@ -495,7 +495,8 @@ namespace {
     void RunSettleStudy() {
         // 長さ 8 m の棚は 600 刻みでも着ききらない(D' の 9/10 が 500 刻みほど)ので、40 秒回して最後の値を取る
         constexpr uint32_t STUDY_TICKS = 2400;
-        // 比べの元: 前の既定(V 2 回・共役勾配なし)。今の既定(V 4 回 + 共役勾配。T-1085)は「既定」の行
+        // 比べの元: 前の前の既定(V 2 回・共役勾配なし)。今の既定(V 2 回 + 共役勾配・刻みをまたぐ。D-649・T-1086)は「既定」の行、
+        // 前の既定(V 4 回 + 刻みの中の共役勾配。T-1085)も並べる
         sim::SupportOptions plain;
         plain.blocks = sim::EquilibriumBlockOptions{};
         for (const uint64_t cellMm : {500ull, 250ull}) {
@@ -507,7 +508,13 @@ namespace {
             const double cell = cellMm / 1000.0;
             const sim::SupportScene wallShelf = SettleShelf(cellMm, 1500, 2000, true);
             SettleOnce(wallShelf, {}, wallRootX, topUp(2000),
-                       std::format("T-1041 {} m 壁の棚 0.5 m(既定 = V 4 回 + 共役勾配)", cell), STUDY_TICKS);
+                       std::format("T-1041 {} m 壁の棚 0.5 m(既定 = V 2 回 + 共役勾配・刻みをまたぐ)", cell),
+                       STUDY_TICKS);
+            sim::SupportOptions previous;
+            previous.blocks = {.cycles = 4, .lineSearch = true};
+            SettleOnce(wallShelf, previous, wallRootX, topUp(2000),
+                       std::format("T-1041 {} m 壁の棚 0.5 m(V 4 回 + 刻みの中の共役勾配 = 前の既定)", cell),
+                       STUDY_TICKS);
 
             SettleOnce(wallShelf, plain, wallRootX, topUp(2000),
                        std::format("T-1041 {} m 壁の棚 0.5 m(V 2 回・前の既定)", cell), STUDY_TICKS);

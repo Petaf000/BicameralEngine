@@ -301,6 +301,7 @@ namespace bicameral::sim {
 
         const std::vector<int64_t> coefficients = CoefficientImage(system, grid);
         const std::vector<int64_t> work = WorkImage(system, warmValues);
+        m_conjugateFresh = true;
         m_coefficientUpload = gpu::CreateBuffer(m_device, coefficients.size() * sizeof(int64_t),
                                                 gpu::BufferKind::Upload);
         m_workUpload = gpu::CreateBuffer(m_device, work.size() * sizeof(int64_t), gpu::BufferKind::Upload);
@@ -407,19 +408,27 @@ namespace bicameral::sim {
     }
 
     // equilibrium_block.cpp の SolveEquilibriumBlocks と同じ順(lineSearch なら V ごとに共役勾配の 1 歩)
+    // 刻みをまたぐ共役勾配(conjugateAcrossTicks。T-1086・D-649)は作業場の向きと残差を次の解きへ残す(写した直後の最初の解きだけ捨てる)
     void GpuEquilibriumBlock::RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing) const {
+        const bool across = m_options.solve.lineSearch && m_options.solve.conjugateAcrossTicks;
         for (uint32_t cycle = 0; cycle < m_options.solve.cycles; ++cycle) {
             if (!m_options.solve.lineSearch) {
                 RecordCycle(list, debugRing, 0);
                 continue;
             }
 
-            RecordConjugate(list, debugRing, Pass::ConjugateSave, cycle);
+            uint32_t mark = cycle;
+            if (across)
+                mark |= EQB_CONJUGATE_ACROSS | (m_conjugateFresh ? 0u : EQB_CONJUGATE_KEEP);
+
+            RecordConjugate(list, debugRing, Pass::ConjugateSave, mark);
             RecordCycle(list, debugRing, 0);
             for (const Pass pass : {Pass::ConjugateResidual, Pass::ConjugateBeta, Pass::ConjugateDirection,
                                     Pass::ConjugatePush, Pass::ConjugateAlpha, Pass::ConjugateUpdate})
-                RecordConjugate(list, debugRing, pass, cycle);
+                RecordConjugate(list, debugRing, pass, mark);
         }
+
+        m_conjugateFresh = false;
     }
 
     uint64_t GpuEquilibriumBlock::DispatchesPerSolve() const {

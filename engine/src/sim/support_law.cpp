@@ -124,6 +124,8 @@ namespace bicameral::sim {
         : m_scene(scene), m_options(options) {
         m_options.equilibrium.faceValues = false;
         m_options.blocks.warmStart = m_options.warmStart;
+        m_options.blocks.conjugateDirection = m_options.conjugateDirection;
+        m_options.blocks.conjugateResidual = m_options.conjugateResidual;
         Build();
         if (Coupled())
             BuildBlocks();
@@ -573,6 +575,7 @@ namespace bicameral::sim {
 
     void SupportLaw::CarryFrom(const SupportLaw& before) {
         if (Coupled()) {
+            m_blockState.conjugateDiscard = true;  // 形・荷が変わった刻みは共役勾配の向きを捨てる(D-649)
             m_blockState.values.assign(m_cells.size() * SUPPORT_COMPONENTS, 0);
             for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
                 for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c)
@@ -842,6 +845,15 @@ namespace bicameral::sim {
             for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
                 for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
                     hash ^= (uint64_t)CellValue(cell, c);
+                    hash *= 1099511628211ull;
+                }
+            }
+
+            // 刻みをまたぐ共役勾配の向きと残差(D-649。持たない時は空)
+            for (const std::vector<int64_t>* carried :
+                 {&m_blockState.conjugateDirection, &m_blockState.conjugateResidual}) {
+                for (const int64_t value : *carried) {
+                    hash ^= (uint64_t)value;
                     hash *= 1099511628211ull;
                 }
             }

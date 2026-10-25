@@ -82,10 +82,16 @@ namespace bicameral::sim {
         // V の直しを前処理とする共役勾配で進める(刻みの中だけ。V ごとに歩幅をエネルギー最小に)(T-1068・ADR-0455。研究中の比べ。既定 false = 今とビット一致。
         // GPU 版〔gpu_equilibrium_block〕にはまだ無い)
         bool lineSearch = false;
-        // 共役勾配の前の向きを刻みをまたいで持つ(T-1086 の研究の比べ。既定 false)
+        // 共役勾配の前の向きを刻みをまたいで持つ(T-1086・D-649。lineSearch の時だけ。部品の既定 false・支えの法則の既定 true)。
+        // 持つのは向き p と残差 r(節 × k)だけ: β の分母は p_前ᵀ r_前(厳密な線探索で z_前ᵀ r_前 と同じ値。128bit で厳密)を
+        // 読み戻すたびに数え直す = 持つ状態に 128bit の和を置かない
         bool conjugateAcrossTicks = false;
         // 温めた始まりを欄に置く(T-0922。欄の値の数 ≥ component + k)。既定は置かない(state.values だけ)
         EquilibriumWarmStart warmStart;
+        // 刻みをまたぐ向き p と残差 r を置く温めた始まりの欄(T-1086・D-649。欄の値の数 ≥ component + k。2 つとも置くか、どちらも置かない)。
+        // 置けば保存点とハッシュに入る(D-608 と同じ)。置かなければ state だけ(法則の控え)
+        EquilibriumWarmStart conjugateDirection;
+        EquilibriumWarmStart conjugateResidual;
     };
 
     // 節の対角のブロックの LDLᵀ(L の対角は 1。pivots ≤ 0 の成分は解かない = 支えの無い向き。lower は Q30)
@@ -126,12 +132,13 @@ namespace bicameral::sim {
     struct EquilibriumBlockState {
         std::vector<int64_t> values;
 
-        // --- 共役勾配の向きを刻みをまたいで持つ時だけ(conjugateAcrossTicks。T-1086 の研究。セーブ・ハッシュにはまだ入れていない)---
+        // --- 共役勾配の向きを刻みをまたいで持つ時だけ(conjugateAcrossTicks。T-1086・D-649)---
+        // 欄に置く時(options.conjugateDirection)も同じ値の写しを持つ(法則のハッシュが読む)。使えない向きは 0 の並び
         std::vector<int64_t> conjugateDirection;
         std::vector<int64_t> conjugateResidual;
-        uint64_t conjugateZrHigh = 0;
-        uint64_t conjugateZrLow = 0;
         bool conjugateValid = false;
+        // 次の解きは前の向きを捨てて始める(系の形・荷が変わった: 掘った・割れた・荷を載せた・起きた。法則が立てる。解くと下ろす)
+        bool conjugateDiscard = false;
     };
 
     struct EquilibriumBlockResult {

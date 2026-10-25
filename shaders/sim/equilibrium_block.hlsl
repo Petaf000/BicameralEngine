@@ -347,9 +347,9 @@ FxU128 ZeroWide() {
     return value;
 }
 
-// V の前の値を控える(1 回目の V なら前の向きを捨てる)
+// V の前の値を控える(1 回目の V なら前の向きを捨てる。刻みをまたぐ時は KEEP の印で捨てない)
 [numthreads(64, 1, 1)] void EquilibriumBlockConjugateSave(uint32_t thread : SV_DispatchThreadID) {
-    if (thread == 0 && g_eqbFirst == 0)
+    if (thread == 0 && (g_eqbFirst & EQB_CONJUGATE_CYCLE_MASK) == 0 && (g_eqbFirst & EQB_CONJUGATE_KEEP) == 0)
         g_eqbWork[ConjugateScalarWord(0)] = 0;
 
     if (thread >= g_eqbCount)
@@ -451,13 +451,18 @@ FxU128 ZeroWide() {
     const FxU128 energySum = ReducedB();
     const bool accept = !EqbWideIsNegative(alongSum) && !EqbWideIsNegative(energySum) &&
                         EqbWideBitLength(alongSum) != 0 && EqbWideBitLength(energySum) != 0;
+    // 次の β の分母: 刻みの中だけなら zᵀr・刻みをまたぐなら pᵀr(厳密な線探索で同じ値。持つ向きと残差から数え直せる。T-1086)
     const FxU128 zr = LoadWide(6);
+    FxU128 remembered = zr;  // 構造体は条件演算子で選べない(HLSL)
+    if ((g_eqbFirst & EQB_CONJUGATE_ACROSS) != 0)
+        remembered = alongSum;
+
     bool valid = false;
     int64_t alpha = 0;
     if (accept) {
         alpha = (int64_t)EqbStepRatio(alongSum, energySum);
-        valid = !EqbWideIsNegative(zr) && EqbWideBitLength(zr) != 0;
-        StoreWide(1, zr);
+        valid = !EqbWideIsNegative(remembered) && EqbWideBitLength(remembered) != 0;
+        StoreWide(1, remembered);
     }
 
     g_eqbWork[ConjugateScalarWord(0)] = valid ? 1 : 0;

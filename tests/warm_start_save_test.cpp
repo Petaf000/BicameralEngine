@@ -3,7 +3,8 @@
 //   1. 気体の陰の圧力(T-0845 の 5 場面・16³ と 32³ の爆発): 欄に置いても答えは控えだけの時と毎刻みビット一致。途中で保存点
 //      (気体の箱の写し + 欄を持つ木の SaveNestState)を取り、戻して法則の控えを捨てて続けると、続けた場合と毎刻み HashGas と
 //      HashWholeNest が一致(D-608 の (A))。欄を 0 にして続ける(= (B) 真実だけ)と、どこかの刻みでずれる(ずれた刻みを記録)
-//   2. 支えの法則(成分を持つ節 k = 3 の 1 つの系・成分ごとに遅らせる形。片持ち梁・洞窟の天井): 1 と同じ
+//   2. 支えの法則(成分を持つ節 k = 3 の 1 つの系・成分ごとに遅らせる形。片持ち梁・洞窟の天井): 1 と同じ。1 つの系は刻みをまたぐ
+//      共役勾配の向きと残差も欄に置く(D-649・T-1086)。向きの欄だけを 0 にして続けるとずれる(= 持つ状態に入っている)ことも確かめる
 //   3. 測り(ログの表。docs/perf.md へ): 温めた始まりの欄の 1 セルあたりのバイト(k = 1・3)・保存点を取る / 戻す / 状態のハッシュの時間を、
 //      欄を持つ木と持たない木(= SF_WARM_START_IN_STATE を切った時に保存点に入る量)で比べた差
 // 欄を持つ木は「部品の節 = 木のセル」を置くだけの木(根のブロックを箱に敷き詰め、全部の頁を起こしておく)。本物の世界の気体・支えの欄の
@@ -51,10 +52,13 @@ namespace {
     struct WarmHost {
         sim::MultiresNest nest;
         uint32_t field = sim::MULTIRES_NO_FIELD;
+        uint32_t direction = sim::MULTIRES_NO_FIELD;  // 刻みをまたぐ共役勾配の向き(D-649)
+        uint32_t residual = sim::MULTIRES_NO_FIELD;   // 同じく残差
         uint64_t cells = 0;
     };
 
-    WarmHost MakeWarmHost(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ, uint32_t components, bool withField) {
+    WarmHost MakeWarmHost(uint32_t sizeX, uint32_t sizeY, uint32_t sizeZ, uint32_t components, bool withField,
+                          bool conjugate = false) {
         constexpr uint32_t EDGE = multires::MR_BLOCK_EDGE;
         const uint32_t blocksX = (sizeX + EDGE - 1) / EDGE;
         const uint32_t blocksY = (sizeY + EDGE - 1) / EDGE;
@@ -74,6 +78,13 @@ namespace {
         if (withField) {
             host.field = sim::RegisterWarmStartField(host.nest, "balance.warm_start", state_field::SF_PHASE_NONE,
                                                      components);
+        }
+
+        if (conjugate) {
+            host.direction = sim::RegisterWarmStartField(host.nest, "balance.conjugate_direction",
+                                                         state_field::SF_PHASE_NONE, components);
+            host.residual = sim::RegisterWarmStartField(host.nest, "balance.conjugate_residual",
+                                                        state_field::SF_PHASE_NONE, components);
         }
 
         // セルのエネルギーをセルごとに変え、根を一様にしない(頁を持つ = 起きている)
@@ -196,7 +207,8 @@ namespace {
                          uint32_t ticks, uint32_t saveTick) {
         const std::string name = std::format("支え {} {}", shape,
                                              solve == sim::SupportSolve::Coupled ? "1 つの系" : "遅らせる");
-        WarmHost host = MakeWarmHost(scene.width, scene.height, 1, sim::SUPPORT_COMPONENTS, true);
+        const bool coupled = solve == sim::SupportSolve::Coupled;
+        WarmHost host = MakeWarmHost(scene.width, scene.height, 1, sim::SUPPORT_COMPONENTS, true, coupled);
         sim::SupportOptions options{.solve = solve};
         options.blocks.cycles = 2;
 
@@ -211,6 +223,11 @@ namespace {
         }
 
         options.warmStart = WarmOf(host);
+        if (coupled) {
+            options.conjugateDirection = {.nest = &host.nest, .field = host.direction, .component = 0};
+            options.conjugateResidual = {.nest = &host.nest, .field = host.residual, .component = 0};
+        }
+
         Hashes continued;
         RunSupport(scene, options, host, 0, saveTick, continued);
         const sim::MultiresSaveState saved = sim::SaveNestState(host.nest);
@@ -240,11 +257,23 @@ namespace {
         const int64_t truthDiff = FirstDifference(continued.law, truthOnly.law, saveTick);
         Expect(truthDiff >= 0, std::format("{}: 温めた始まりを 0 にしても答えが変わらない(試験が弱い)", name));
 
+        // --- (C) 刻みをまたぐ共役勾配の向きだけ捨てる(1 つの系。D-649: 向きも持つ状態に入っている)---
+        int64_t directionDiff = -1;
+        if (coupled) {
+            (void)sim::RestoreNestState(host.nest, saved);
+            sim::ClearFieldStore(host.nest.fields[host.direction].store);
+            sim::ClearFieldStore(host.nest.fields[host.residual].store);
+            Hashes noDirection;
+            RunSupport(scene, options, host, saveTick, ticks, noDirection);
+            directionDiff = FirstDifference(continued.law, noDirection.law, saveTick);
+            Expect(directionDiff >= 0, std::format("{}: 向きの欄を 0 にしても答えが変わらない", name));
+        }
+
         Log(Channel::Sim, Level::Info,
             "| T-0922 支え | {} | {} 刻み・保存点 {} | (A) 欄も保存: 毎刻み一致 {} | (B) 真実だけ: 刻み {} "
-            "からずれ・最後も{} |",
+            "からずれ・最後も{} | (C) 共役勾配の向きだけ捨てる: 刻み {} からずれ(-1 = 持たない形)|",
             name, ticks, saveTick, lawDiff < 0 && wholeDiff < 0 ? "○" : "×", truthDiff,
-            truthOnly.law.back() != continued.law.back() ? "ずれたまま" : "戻った");
+            truthOnly.law.back() != continued.law.back() ? "ずれたまま" : "戻った", directionDiff);
     }
 
     // --- 3. 測り: 欄を持つ木と持たない木で、保存点・戻す・要約の時間と量の差 ---
