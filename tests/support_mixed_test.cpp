@@ -228,15 +228,7 @@ namespace {
     }
 
     // --- 場面 ---
-    sim::SupportScene Marked(sim::SupportScene scene, uint32_t fromX, uint32_t toX, uint32_t fromUp, uint32_t toUp) {
-        scene.fine.assign(scene.solid.size(), 0);
-        for (uint32_t up = fromUp; up < toUp; ++up) {
-            for (uint32_t x = fromX; x < toX; ++x)
-                scene.fine[x + (size_t)scene.width * up] = 1;
-        }
-
-        return scene;
-    }
+    using test::Marked;
 
     std::vector<MixedCase> Cases() {
         const sim::SupportScene shelf = test::Beam(8, 1, COARSE_MM, false);

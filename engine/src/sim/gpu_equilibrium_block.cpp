@@ -129,7 +129,8 @@ namespace bicameral::sim {
         // --- 色の一覧(段ごと・色ごと)---
         for (size_t depth = 0; depth < grid.levels.size(); ++depth) {
             const EquilibriumBlockLevel& level = grid.levels[depth];
-            for (uint32_t color = 0; color < EQB_OCTANTS; ++color) {
+            m_levels[depth].colorCount = level.colorCount;
+            for (uint32_t color = 0; color < level.colorCount; ++color) {
                 std::vector<uint32_t> members;
                 for (size_t i = 0; i < level.x.size(); ++i) {
                     if (level.colors[i] == color)
@@ -192,9 +193,10 @@ namespace bicameral::sim {
         if (!Supports(system.components) || grid.levels.empty() || system.nodes.empty())
             return std::unexpected(std::format("成分を持つ節の GPU 版で解けない系(成分 {})", system.components));
 
-        // 違うレベルの節が混ざる系(16 色・残した節の延ばし方)は CPU だけ(T-0969。GPU は T-1104)
-        if (rng::any_of(grid.levels, [](const EquilibriumBlockLevel& level) { return level.colorCount != EQ_OCTANTS; }))
-            return std::unexpected("違うレベルの節が混ざる系は GPU 版にまだ無い(T-1104)");
+        // 違うレベルの節が混ざる系(T-0969・T-1104): 段の色は 8 か 16、粗くしない節の延ばし方は置き場 EQ_PASS_OCTANT
+        if (rng::any_of(grid.levels,
+                        [](const EquilibriumBlockLevel& level) { return level.colorCount > EQB_MAX_COLORS; }))
+            return std::unexpected("段の色が多すぎる");
 
         GpuEquilibriumBlock result;
         result.m_device = device;
@@ -234,7 +236,8 @@ namespace bicameral::sim {
                                                                const EquilibriumBlockGrid& grid) const {
         const uint32_t k = m_components;
         std::vector<int64_t> image(EqbCoefficientWords(k, m_nodeCapacity, m_linkCapacity, m_fixedCapacity), 0);
-        for (uint32_t octant = 0; octant < EQB_OCTANTS; ++octant) {
+        static_assert(EQ_PASS_OCTANT + 1 == EQB_PROLONG_SLOTS);
+        for (uint32_t octant = 0; octant < EQB_PROLONG_SLOTS; ++octant) {
             PackBlock(image, EqbProlongWord(k, octant), grid.prolongation[octant], k);
             PackBlock(image, EqbRestrictWord(k, octant), grid.restriction[octant], k);
         }
@@ -364,7 +367,7 @@ namespace bicameral::sim {
                                            uint32_t sweeps) const {
         Constants constants = BaseConstants();
         for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
-            for (uint32_t color = 0; color < EQB_OCTANTS; ++color) {
+            for (uint32_t color = 0; color < level.colorCount; ++color) {
                 constants.list = level.colorStarts[color];
                 constants.count = level.colorCounts[color];
                 RecordPass(list, debugRing, Pass::Smooth, constants);

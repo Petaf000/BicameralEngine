@@ -104,8 +104,10 @@ namespace bicameral::sim {
         struct Level {
             uint32_t first = 0;  // 節の始まり(全部の段の番号)
             uint32_t count = 0;
-            std::array<uint32_t, equilibrium_block::EQB_OCTANTS> colorStarts{};  // 添字のバッファの中の色の一覧
-            std::array<uint32_t, equilibrium_block::EQB_OCTANTS> colorCounts{};
+            // 添字のバッファの中の色の一覧(同じレベルの段は 8 色・違うレベルが混ざる段は 16 色。T-1104)
+            uint32_t colorCount = equilibrium_block::EQB_OCTANTS;
+            std::array<uint32_t, equilibrium_block::EQB_MAX_COLORS> colorStarts{};
+            std::array<uint32_t, equilibrium_block::EQB_MAX_COLORS> colorCounts{};
         };
 
         GpuEquilibriumBlock() = default;
