@@ -1,6 +1,21 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-25(本体の作業役・T-1066 を main へ・D-658・D-659)
+最終更新: 2026-10-26(本体の作業役・T-0691 を main へ・D-660)
+
+## この仕事でしたこと(2026-10-26・本体の作業役・T-0691)
+- **T-0691 を main へ**(t-0691-gas-stable を --no-ff)。燃える木箱(probe_gas)の負の熱の根: 塊は運動量を割合 F で、質量を移す物質量(MUSCL)で持って出るので、風上に残る運動のエネルギーが (1 − F) K を超え、
+  その差(燃える木箱で F 0.7167・μ 0.7200、1 セル 4 J)が熱の列(ADR-0355)を通り抜けて熱を食っていた(全部「運ぶ側」。T-0814 の見込み 1)。
+  熱の列の出ていく和にその差を足した(gas_reference.cpp の RestKineticExcess・gas_flow.hlsli の GfRestKineticExcess / GfKineticShare。ADR-0355 追記)。ふつうの流れでは列が効かないので値は変わらない。
+- **probe_gas の DISABLED を外した**(全部 OK: 燃える木箱 熱が負のセル 0・熱の重心 11324 ミリセル・露の 4 場面も 0)。止めたままは reaction_package_scene・lab_box・gpu_probe_fire(T-1113)・probe_phase(T-1110)。
+- 分けた: **T-1130**(力積の側で小刻みの中だけ熱が負・露の燃える木箱で 1 小刻み 4 セル)・**T-1131**(投影で燃える木箱を流すと区画のほぼ全部の熱が負。前からある見込み)。T-0814 は Done。
+- **wt4 の t-0813(GPU の熱の列。main へはまだ)をマージする時は GfRestKineticExcess も GPU の列へ**(無いと燃える木箱で CPU と一致しない。ROADMAP の T-0813 の行に注)。
+- 根から一つの芯で解く案(運動量も移す質量に比例して運ぶ)は、案 B の運動量の式(土台)を決める時に一緒に(ADR-0355 追記。司令塔へ)。
+- 記録: **D-660**(2026-10-26 ユーザー。wt5 T-1097: 標準の木・草・紙は熱分解で燃える気体を出す・物の周りの空気を物と同じ細かさで持つ口が要る)。
+  **wt5 の物の放射の吸い込みの頭打ちの直し(OhAbsorptanceQ16)で ADR-0434 の「紙が燃え切る」が崩れた**(T-1097 で扱う)。
+- 通した試験: release 警告 0・archmap OK・CPU 7 本(probe_gas 544 s・multires_gas・gas_reference〔衝撃波の管の値そのまま〕・gas_projection・face_open_gas・gas_base_layers・gas_tree)・GPU 6 本(gpu_gas・gpu_gas_flow・gpu_gas_blast・gpu_gas_species・gpu_gas_tree・gpu_probe_gas 180 s)
+- T-1110 は時間切れで着手していない。
+
+(前の版の最終更新: 2026-10-25 本体の作業役・T-1066 を main へ・D-658・D-659)
 
 ## この仕事でしたこと(2026-10-25・本体の作業役・T-1066 の仕上げ)
 - **T-1066 を main へ入れた**(t-1066-c3 を main へ rebase して --no-ff。セルの伝導率を体積の平行の道に・気体の伝導率 ∝ √T・混ざる速さ ∝ T^1.5・試験の倍率を外す。D-637・D-639・ADR-0454)。D-648(滑らか)に合っている(HcGasScaleAt は mK ごとの整数の平方根)。

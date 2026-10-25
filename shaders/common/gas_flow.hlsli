@@ -529,13 +529,28 @@ FX_FN int64_t GfGravityWork(GfParams params, uint32_t axis, int64_t flow, uint64
 // 余裕(µJ): 面ごとの丸め(最も近い mJ)× 6 面
 FX_CONST int64_t GF_HEAT_LIMIT_MARGIN_MICROJOULES = 6000;
 
+// 塊が持って出る運動のエネルギーの分け前(µJ)= 風上の運動のエネルギー × 割合(GfMovedEnergy・GfMovedHeatPart と同じ式)
+FX_FN uint64_t GfKineticShare(int64_t sourceKinetic, uint64_t fraction) {
+    const uint64_t kinetic = sourceKinetic > 0 ? (uint64_t)sourceKinetic : 0;
+
+    return GfMulShiftU64(kinetic, fraction, 32);
+}
+
 // 塊の熱のぶん(µJ)= 塊のエネルギー(GfMovedEnergy)− 化学 − 運動の分け前(= 熱の分け前 + 押し出す仕事 n R T)。
 // 0 以下の塊も 1 と数える(力で熱が一時的に負になったセルは負の熱を下流へ持ち出さない = 出ていく面を 0 に縮める)
 FX_FN uint64_t GfMovedHeatPart(int64_t movedEnergy, int64_t movedChemical, int64_t sourceKinetic, uint64_t fraction) {
-    const uint64_t kinetic = sourceKinetic > 0 ? (uint64_t)sourceKinetic : 0;
-    const int64_t heat = movedEnergy - movedChemical - (int64_t)GfMulShiftU64(kinetic, fraction, 32);
+    const int64_t heat = movedEnergy - movedChemical - (int64_t)GfKineticShare(sourceKinetic, fraction);
 
     return heat > 0 ? (uint64_t)heat : 1;
+}
+
+// 残る運動のエネルギーが「風上の運動のエネルギー − 分け前の和」を超える分(µJ。熱の列に足す。T-0691)。
+// 運動量は割合で、質量は移す物質量(MUSCL)で出ていくので、両者が違うと残りの速さが変わり、その差の運動のエネルギーは風上の熱から出る。
+// 超えない時は 0(熱が増える側。数えない)
+FX_FN uint64_t GfRestKineticExcess(int64_t restKinetic, int64_t sourceKinetic, uint64_t sharedKinetic) {
+    const int64_t excess = restKinetic - (sourceKinetic - (int64_t)sharedKinetic);
+
+    return excess > 0 ? (uint64_t)excess : 0;
 }
 
 // 風上が塊で持ち出せる熱(µJ)= 熱(力を当てた後)− 余裕。0 以下は 0
