@@ -66,6 +66,17 @@
 - 坂の計器(sim/slope_gauge・slope_check)が放射の流れを数えない(刻みの前後の差から伝導と反応だけを数える)。slope_check と physics_heat(物理の熱の帳簿だけを見る)は放射の段を切って流している。
   放射の坂(同じ温度で正味 0・熱い側から冷たい側へ)を計器に入れる形は R-R1 の「坂を下る」の合格と一緒に決める。
 
+- **gpu_play_metric が落ちた**(2026-10-26 wt6・release): 「反応の速さを変えた表では sealed_fire_out の値が変わる」(gpu_play_metric_test.cpp:55)。落ちたのは GPU だけで測る所で、
+  この枝は GPU の刻みを変えていない(CPU リファレンスの fire_prefix は一致)。T-1066(現実の伝導率で密室の火が広がらない → 速さを変えても消える刻みが同じ)由来の見込み。**未確認: main で流して確かめる**。
+
+- **gpu_world_copy も落ちた**: 「つつきを当てない写しは本物と違う(コマンドが効いている)」(gpu_world_copy_test.cpp:472。写しが条件で止まる刻みが、違いを生むつつきの刻みより前)。
+  CPU との一致の判定は通っている(この試験の CPU リファレンスは放射を切って比べている)。GPU の刻みはこの枝で変えていないので、これも T-1066 由来の場面の変化の見込み(**未確認: main で流す**)。
+
+## 試験(2026-10-26 wt6・release・警告 0)
+- 合格: probe_radiation(新)・reaction_package_scene(戻した)・reaction_package・reaction_replay_table・blank_world・physics_heat・rest_return・reaction_species_remap・slope_check・probe_liquid・probe_phase_porous_stone、
+  GPU: gpu_probe_sim・gpu_probe_liquid・gpu_probe_blank・gpu_probe_place・gpu_probe_trace・gpu_probe_peek・gpu_probe_gas(CPU は放射を切って一致)
+- 落ちた(この枝の変更と別の見込み・未確認): gpu_play_metric・gpu_world_copy(上)。流していない: gpu_probe_physics・window_* など
+
 ## 作業ログ
 - 2026-10-26(wt6・t-1113-radiation-all): 仮の世界の CPU リファレンスに RC の放射の段を既定で入れた(probe_reference_radiation.cpp・保存と決定性の試験 probe_radiation)。GPU と比べる試験は切って比べる。
   reaction_package_scene を基準の取り直しで戻した。木箱の火は放射でも広がらない(測り)。GPU・多重解像度・燃え広がりは T-1154〜T-1156 に分けた。release 警告 0。
