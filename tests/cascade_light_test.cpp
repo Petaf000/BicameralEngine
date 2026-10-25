@@ -267,9 +267,33 @@ namespace {
             }
         }
 
-        // 前の式(bx + 3 bz + 5 by)は 16 × 16 で 9 個の差・8 × 8 で 2〜6 個。今の式は 2 × 2〜16 × 16 のどの軸の面も、割り切れる時の最小の差 + 2 以内
-        EXPECT(worstExcess <= 2);
-        std::printf("組の釣り合い: 15 組・軸に揃った面 2×2〜16×16 で、組ごとの数の差は最小 + %u 以内\n", worstExcess);
+        // 前の式(bx + 3 bz + 5 by)は 16 × 16 で 9 個の差・8 × 8 で 2〜6 個。今の式は 2 × 2〜16 × 16 のどの軸の面も、割り切れる時の最小の差 + 3 以内
+        EXPECT(worstExcess <= 3);
+
+        // 光源の近く: どの軸の面でも隣り合う 3 × 3 のブロックは違う組
+        bool distinct = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            std::array<uint32_t, SLOTS> counts{};
+            for (int64_t u = -1; u <= 1; ++u) {
+                for (int64_t v = -1; v <= 1; ++v) {
+                    const std::array<int64_t, 3> cell = axis == 0   ? std::array<int64_t, 3>{0, u, v}
+                                                        : axis == 1 ? std::array<int64_t, 3>{u, 0, v}
+                                                                    : std::array<int64_t, 3>{u, v, 0};
+                    for (uint32_t slot = 0; slot < SLOTS; ++slot) {
+                        constants.tick = slot;
+                        if (rx::RcEmitSlotActive(constants, cell[0], cell[1], cell[2]))
+                            ++counts[slot];
+                    }
+                }
+            }
+
+            distinct = distinct && std::ranges::max(counts) == 1;
+        }
+
+        EXPECT(distinct);
+        std::printf(
+            "組の釣り合い: 15 組・軸に揃った面 2×2〜16×16 で組ごとの数の差は最小 + %u 以内・隣り合う 3×3 は違う組\n",
+            worstExcess);
     }
 
     // --- 3. 決定的 ---

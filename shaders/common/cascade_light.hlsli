@@ -545,15 +545,16 @@ FX_CONST uint32_t RC_SLOTS_LIMIT = 64;
 // 持ち越しの表にたまった光(照り返し・待った熱の光)を放つ。待つ間の光は表にあり、放つ時にまとめて出る(保存はそのまま)。
 // 組をブロックで揃えるのは、同じ刻みに放つ面が同じ最上段のブロックに集まり、段の袋の数(費用の芯)が組の数で割れるから。
 // 組の数は奇数にする(升目の中のずらしの巡り 159 × 組の数 が 256 と互いに素で、組の刻みだけでも 16 × 16 を一巡する)。
-// 組 = (bx + 2 bz + 4 by) mod 組の数(T-1145): 軸に揃った面(照り返す地面 1 段・壁 1 枚)のブロック n × n を組に配った時の偏りが小さい係数。
-// 15 組で 8 × 8 の面は どの軸でも 4〜5 個(前の bx + 3 bz + 5 by は 2〜6 個で、127³ の地面で刻みの光線が 3 倍揺れた: T-1116)、16 × 16 は 17〜18 個
+// 組 = (bx + 4 bz + 6 by) mod 組の数(T-1146)。光は光源の近くのブロックに集まるので、どの軸の面でも隣り合う 3 × 3 のブロックが
+// 違う組になること(前の bx + 3 bz + 5 by と同じ)を先に守り、その中で軸に揃った面のブロック n × n を組に配った偏りが小さい係数を選んだ
+// (15 組の 8 × 8 の面: 前の式は 2〜6 個 = 3 倍、今の式は地面 4〜5 個・壁 3〜5 個。2 × 2〜16 × 16 は「割り切れる時の最小の差 + 3」以内)
 FX_FN bool RcEmitSlotActive(FX_IN(RcStepConstants) constants, int64_t cellX, int64_t cellY, int64_t cellZ) {
     if (constants.emitSlots <= 1)
         return true;
 
     const uint32_t shift = constants.levels - 1;
     const int64_t slots = (int64_t)constants.emitSlots;
-    const int64_t spread = (cellX >> shift) + (2 * (cellZ >> shift)) + (4 * (cellY >> shift));
+    const int64_t spread = (cellX >> shift) + (4 * (cellZ >> shift)) + (6 * (cellY >> shift));
     const int64_t slot = ((spread % slots) + slots) % slots;
 
     return (uint64_t)slot == constants.tick % (uint64_t)constants.emitSlots;
