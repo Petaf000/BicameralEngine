@@ -11,17 +11,25 @@
 //    列ごと(今の口)と組ごとで比べ(どちらも段 0 + 段の重み + その V の回数・記録の形は前の解きから)、--events-total n で火事全体へ伸ばす。
 //    V 2 の組は部品を V 2 で作った形(V の回数を作る時に決める)とも比べる。
 // 4. --stage-variants: 系ごとに段 0 の段だけの時間を、本物・右辺の項を割らない・読むだけの 3 つの変種で(128bit の割り算の分)。
-// 引数: --spans <ファイル> [--measure] [--tile n(費用の系を n 個並べる)] [--events-total n] [--stage-variants] と
+// 5. --continuous(T-1152・出来事のファイル): 全部の組を 1 本のリストに続けて積んだ時間(GPU の時計が高いまま = 本物の早送りの形)と、
+//    組ごとに CPU で待ってから 1 回解いた時間(時計が下がる形)。費用の式を最小二乗で当て、起動時の測り(sim/gpu_time_tree_cost)の
+//    式と比べる。V 2 の組は部品を V 2 で作った形とも。
+// 6. --clock(T-1140・出来事のファイル): 最も大きい組を、間を空けて・続けて積んで・また間を空けて解き、時刻と時間を並べる。
+// 引数: --spans <ファイル> [--measure] [--tile n(費用の系を n 個並べる)] [--events-total n] [--stage-variants]
+//       [--continuous] [--clock] と
 //       GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <format>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "core/log.h"
@@ -32,6 +40,7 @@
 #include "gpu_test_options.h"
 #include "sim/equilibrium.h"
 #include "sim/gpu_equilibrium_upload.h"
+#include "sim/gpu_time_tree_cost.h"
 #include "sim/time_step_tree.h"
 #include "time_step_span_file.h"
 
@@ -47,6 +56,7 @@ namespace {
         gpu::ImmediateQueue* queue = nullptr;
         gpu::DebugRing* ring = nullptr;
         uint64_t frequency = 0;
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     };
 
     // --- CPU リファレンス(試作の SolveSpan と同じ形: δ = 0 から・面の値は出さない)---
@@ -397,6 +407,500 @@ namespace {
         return TimeSolve(context, *gpu, cpu.grid, cycles);
     }
 
+    // --- 5. 出来事を続けて積む形と間を空けた形(T-1152・T-1140。本物の早送りは出来事を続けて積む = GPU の時計が高いまま)---
+    constexpr uint32_t CONTINUOUS_ROUNDS = 5;  // 1 回目は暖機(数えない)
+    constexpr uint32_t GAP_MS = 20;            // 間を空けた形の、出来事の間の CPU の待ち
+
+    struct MeasuredGroup {
+        const sim::TimeTreeEventGroup* group = nullptr;
+        sim::ImplicitGrid grid;
+        std::optional<sim::GpuEquilibriumUpload> gpu;
+        std::optional<sim::GpuEquilibriumUpload> built;  // V 2 の組: 部品を V 2 で作った形
+        double gapMs = 0;
+        double minMs = 0;  // 続けて積んだ形の回の最小
+        double maxMs = 0;  // 回の最大(揺れ)
+        double builtMs = 0;
+    };
+
+    std::expected<void, std::string> ReadContinuous(Context& context, std::vector<MeasuredGroup>& measured);
+    std::expected<void, std::string> MeasureClockContinuous(Context& context, sim::GpuEquilibriumUpload& gpu,
+                                                            const sim::ImplicitGrid& grid, uint32_t cycles);
+
+    double SecondsSince(const Context& context) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - context.start).count();
+    }
+
+    std::expected<sim::GpuEquilibriumUpload, std::string> MakeFitted(Context& context,
+                                                                     const sim::EquilibriumSystem& system,
+                                                                     const sim::ImplicitGrid& grid,
+                                                                     uint32_t cyclesPerRecord) {
+        auto gpu = sim::GpuEquilibriumUpload::Create(context.device, system, grid,
+                                                     {.cyclesPerRecord = cyclesPerRecord});
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const auto shape = FitShape(context, *gpu, grid, cyclesPerRecord);
+        if (!shape)
+            return std::unexpected(shape.error());
+
+        gpu->SetSolveShape(*shape);
+
+        return gpu;
+    }
+
+    // 1 回だけの解き(前に CPU で待つ = GPU が休む)
+    std::expected<double, std::string> TimeSolveOnce(Context& context, sim::GpuEquilibriumUpload& gpu,
+                                                     const sim::ImplicitGrid& grid, uint32_t cycles) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(GAP_MS));
+        ID3D12GraphicsCommandList10* list = context.queue->Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        context.ring->RecordBegin(list);
+        if (!gpu.RecordUpload(list, grid))
+            return std::unexpected("段の形が合わない");
+
+        gpu.RecordTimestamp(list, 0);
+        if (!gpu.RecordSolve(list, context.ring->GpuAddress(), cycles, true))
+            return std::unexpected("解きを積めない");
+
+        gpu.RecordTimestamp(list, 1);
+        gpu.RecordTimestampReadback(list, 2);
+        gpu.RecordEnd(list);
+        const auto executed = Execute(context, list);
+        if (!executed)
+            return std::unexpected(executed.error());
+
+        gpu.ReleaseStaging();
+        const std::vector<uint64_t> ticks = gpu.ReadTimestamps(2);
+        if (ticks.size() != 2)
+            return std::unexpected("時間を読めない");
+
+        return ToMs(context, ticks[0], ticks[1]);
+    }
+
+    // 全部の組を 1 本のリストに CONTINUOUS_ROUNDS 回続けて積む(組ごとに回の最小と最大)
+    std::expected<void, std::string> TimeContinuous(Context& context, std::vector<MeasuredGroup>& measured) {
+        ID3D12GraphicsCommandList10* list = context.queue->Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        const uint64_t ring = context.ring->GpuAddress();
+        context.ring->RecordBegin(list);
+        for (MeasuredGroup& item : measured) {
+            if (!item.gpu->RecordUpload(list, item.grid) || (item.built && !item.built->RecordUpload(list, item.grid)))
+                return std::unexpected("段の形が合わない");
+        }
+
+        for (uint32_t pass = 0; pass < CONTINUOUS_ROUNDS; ++pass) {
+            for (MeasuredGroup& item : measured) {
+                item.gpu->RecordTimestamp(list, 2 * pass);
+                if (!item.gpu->RecordSolve(list, ring, item.group->cycles, true))
+                    return std::unexpected("解きを積めない");
+
+                item.gpu->RecordTimestamp(list, (2 * pass) + 1);
+                if (!item.built)
+                    continue;
+
+                item.built->RecordTimestamp(list, 2 * pass);
+                if (!item.built->RecordSolve(list, ring, 2, true))
+                    return std::unexpected("解きを積めない");
+
+                item.built->RecordTimestamp(list, (2 * pass) + 1);
+            }
+        }
+
+        for (MeasuredGroup& item : measured) {
+            item.gpu->RecordTimestampReadback(list, 2 * CONTINUOUS_ROUNDS);
+            item.gpu->RecordEnd(list);
+            if (item.built) {
+                item.built->RecordTimestampReadback(list, 2 * CONTINUOUS_ROUNDS);
+                item.built->RecordEnd(list);
+            }
+        }
+
+        const auto executed = Execute(context, list);
+        if (!executed)
+            return std::unexpected(executed.error());
+
+        return ReadContinuous(context, measured);
+    }
+
+    std::expected<void, std::string> ReadContinuous(Context& context, std::vector<MeasuredGroup>& measured) {
+        std::array<double, CONTINUOUS_ROUNDS> passMs{};
+        for (MeasuredGroup& item : measured) {
+            item.gpu->ReleaseStaging();
+            const std::vector<uint64_t> ticks = item.gpu->ReadTimestamps(2 * CONTINUOUS_ROUNDS);
+            if (ticks.size() != 2 * CONTINUOUS_ROUNDS)
+                return std::unexpected("時間を読めない");
+
+            item.minMs = 1.0e9;
+            for (uint32_t pass = 0; pass < CONTINUOUS_ROUNDS; ++pass) {
+                const double ms = ToMs(context, ticks[2 * pass], ticks[(2 * pass) + 1]);
+                passMs[pass] += ms;
+                if (pass == 0)
+                    continue;
+
+                item.minMs = std::min(item.minMs, ms);
+                item.maxMs = std::max(item.maxMs, ms);
+            }
+
+            if (!item.built)
+                continue;
+
+            item.built->ReleaseStaging();
+            const std::vector<uint64_t> built = item.built->ReadTimestamps(2 * CONTINUOUS_ROUNDS);
+            if (built.size() != 2 * CONTINUOUS_ROUNDS)
+                return std::unexpected("時間を読めない");
+
+            item.builtMs = 1.0e9;
+            for (uint32_t pass = 1; pass < CONTINUOUS_ROUNDS; ++pass)
+                item.builtMs = std::min(item.builtMs, ToMs(context, built[2 * pass], built[(2 * pass) + 1]));
+        }
+
+        std::string passes;
+        for (const double ms : passMs)
+            passes += std::format(" {:.2f}", ms);
+
+        Log(Channel::Sim, Level::Info, "続けて積んだ形: 回ごとの全部の組の和(ms。1 回目は暖機){}", passes);
+
+        return {};
+    }
+
+    // --- 式の当てはめ(最小二乗: t = 固定費 + V × V の固定費 + セル × 傾き + セル × V × 傾き)---
+    std::array<double, 4> Features(const sim::TimeTreeEventGroup& group) {
+        const auto cells = (double)group.system.nodes.size();
+        const auto cycles = (double)group.cycles;
+
+        return {1.0, cycles, cells, cells * cycles};
+    }
+
+    std::array<double, 4> FitLeastSquares(const std::vector<MeasuredGroup>& measured) {
+        std::array<std::array<double, 5>, 4> normal{};
+        for (const MeasuredGroup& item : measured) {
+            const std::array<double, 4> x = Features(*item.group);
+            const double ns = item.minMs * 1.0e6;
+            for (size_t r = 0; r < 4; ++r) {
+                for (size_t c = 0; c < 4; ++c)
+                    normal[r][c] += x[r] * x[c];
+
+                normal[r][4] += x[r] * ns;
+            }
+        }
+
+        // ガウスの消去(4 × 4。測りの道具なので浮動小数点でよい)
+        for (size_t pivot = 0; pivot < 4; ++pivot) {
+            if (normal[pivot][pivot] == 0.0)
+                return {};
+
+            for (size_t r = 0; r < 4; ++r) {
+                if (r == pivot)
+                    continue;
+
+                const double factor = normal[r][pivot] / normal[pivot][pivot];
+                for (size_t c = pivot; c < 5; ++c)
+                    normal[r][c] -= factor * normal[pivot][c];
+            }
+        }
+
+        std::array<double, 4> fit{};
+        for (size_t r = 0; r < 4; ++r)
+            fit[r] = normal[r][4] / normal[r][r];
+
+        return fit;
+    }
+
+    double PredictMs(const sim::TimeTreeSolveCost& cost, const sim::TimeTreeEventGroup& group) {
+        const uint64_t cells = group.system.nodes.size();
+
+        return (double)sim::TimeTreeEventNs(cost, cells, cells * group.cycles) * 1.0e-6;
+    }
+
+    // 式の見積もりと測りの比(全体の和の比・組ごとの比の最小と最大)
+    void LogPrediction(std::string_view name, const sim::TimeTreeSolveCost& cost,
+                       const std::vector<MeasuredGroup>& measured) {
+        double predicted = 0;
+        double actual = 0;
+        double gap = 0;
+        double low = 1.0e9;
+        double high = 0;
+        for (const MeasuredGroup& item : measured) {
+            const double ms = PredictMs(cost, *item.group);
+            predicted += ms;
+            actual += item.minMs;
+            gap += item.gapMs;
+            low = std::min(low, ms / item.minMs);
+            high = std::max(high, ms / item.minMs);
+        }
+
+        Log(Channel::Sim, Level::Info,
+            "式 {}(固定費 {} ns・V {} ns・セル {} ps・セル × V {} ps): 見積もり ÷ 続けて積んだ測り {:.2f}(組ごと "
+            "{:.2f}〜{:.2f})・"
+            "見積もり ÷ 間を空けた測り {:.2f}・余裕を見込んだ上の値 ÷ 間を空けた測り {:.2f}",
+            name, cost.eventNs, cost.cycleNs, cost.cellPs, cost.cellCyclePs, predicted / actual, low, high,
+            predicted / gap, predicted * (double)cost.marginPercent / 100.0 / gap);
+    }
+
+    // 出来事のセルの数の段ごとの平均(続けて積んだ・間を空けた・揺れ)
+    void LogBuckets(const std::vector<MeasuredGroup>& measured, const sim::TimeTreeSolveCost& cost) {
+        constexpr std::array<uint64_t, 6> BOUNDS = {512, 1024, 2048, 4096, 8192, UINT64_MAX};
+        for (size_t bucket = 0; bucket < BOUNDS.size(); ++bucket) {
+            const uint64_t lower = bucket == 0 ? 0 : BOUNDS[bucket - 1];
+            uint64_t count = 0;
+            double minMs = 0;
+            double gapMs = 0;
+            double predicted = 0;
+            double wobble = 0;
+            for (const MeasuredGroup& item : measured) {
+                const uint64_t cells = item.group->system.nodes.size();
+                if (cells <= lower || cells > BOUNDS[bucket])
+                    continue;
+
+                ++count;
+                minMs += item.minMs;
+                gapMs += item.gapMs;
+                predicted += PredictMs(cost, *item.group);
+                wobble = std::max(wobble, item.maxMs / item.minMs);
+            }
+
+            if (count == 0)
+                continue;
+
+            Log(Channel::Sim, Level::Info,
+                "セル {}〜{}: 組 {}・続けて積んだ {:.4f} ms・間を空けた {:.4f} ms(÷ {:.2f})・起動時の式 {:.4f} ms・"
+                "回の揺れの最大 {:.2f} 倍",
+                lower + 1, BOUNDS[bucket] == UINT64_MAX ? 0 : BOUNDS[bucket], count, minMs / (double)count,
+                gapMs / (double)count, gapMs / minMs, predicted / (double)count, wobble);
+        }
+    }
+
+    std::expected<sim::TimeTreeCostProbe, std::string> RunProbe(Context& context, std::string_view name,
+                                                                const sim::TimeTreeCostProbeOptions& options) {
+        const double at = SecondsSince(context);
+        auto probe = sim::ProbeTimeTreeSolveCost(context.device, *context.queue, *context.ring, context.frequency,
+                                                 options);
+        if (!probe)
+            return std::unexpected(probe.error());
+
+        Log(Channel::Sim, Level::Info,
+            "起動時の測り {}(箱 {}・{}・e {}・{:.1f} 秒の時点): 小 V 1 {} ns・小 V 2 {} ns・大 V 1 {} ns・大 V 2 {} "
+            "ns・"
+            "GPU {:.2f} ms → 固定費 {} ns・V {} ns・セル {} ps・セル × V {} ps",
+            name, options.smallSide, options.largeSide, options.exponent, at, probe->solveNs[0], probe->solveNs[1],
+            probe->solveNs[2], probe->solveNs[3], (double)probe->gpuNs * 1.0e-6, probe->cost.eventNs,
+            probe->cost.cycleNs, probe->cost.cellPs, probe->cost.cellCyclePs);
+
+        return probe;
+    }
+
+    std::expected<void, std::string> PrepareGroups(Context& context, const std::vector<sim::TimeTreeEventGroup>& groups,
+                                                   std::vector<MeasuredGroup>& measured) {
+        for (const sim::TimeTreeEventGroup& group : groups) {
+            MeasuredGroup item;
+            item.group = &group;
+            item.grid = SolveCpu(group.system, 1).grid;
+            auto gpu = MakeFitted(context, group.system, item.grid, 1);
+            if (!gpu)
+                return std::unexpected(gpu.error());
+
+            item.gpu.emplace(std::move(*gpu));
+            if (group.cycles == 2) {
+                auto built = MakeFitted(context, group.system, item.grid, 2);
+                if (!built)
+                    return std::unexpected(built.error());
+
+                item.built.emplace(std::move(*built));
+            }
+
+            measured.push_back(std::move(item));
+        }
+
+        return {};
+    }
+
+    void LogTotals(const std::vector<MeasuredGroup>& measured, uint64_t events, uint64_t eventsTotal) {
+        double minMs = 0;
+        double gapMs = 0;
+        std::map<uint32_t, std::array<double, 3>> byCycles;  // V → 数・続けて積んだ・V 2 で作った
+        for (const MeasuredGroup& item : measured) {
+            minMs += item.minMs;
+            gapMs += item.gapMs;
+            std::array<double, 3>& entry = byCycles[item.group->cycles];
+            entry[0] += 1;
+            entry[1] += item.minMs;
+            entry[2] += item.builtMs;
+        }
+
+        const double total = eventsTotal != 0 ? (double)eventsTotal : (double)events;
+        Log(Channel::Sim, Level::Info,
+            "1 出来事の GPU の待ち: 続けて積んだ {:.4f} ms・間を空けた {:.4f} ms → 出来事 {:.0f} で 続けて積んだ "
+            "{:.2f} 秒・"
+            "間を空けた {:.2f} 秒",
+            minMs / (double)events, gapMs / (double)events, total, minMs / (double)events * total * 1.0e-3,
+            gapMs / (double)events * total * 1.0e-3);
+        for (const auto& [cycles, entry] : byCycles) {
+            Log(Channel::Sim, Level::Info, "V {} の組 {}: 続けて積んだ {:.4f} ms{}", cycles, entry[0],
+                entry[1] / entry[0],
+                cycles == 2 ? std::format("・部品を V 2 で作って 1 回 {:.4f} ms", entry[2] / entry[0]) : "");
+        }
+    }
+
+    std::expected<void, std::string> MeasureContinuous(Context& context,
+                                                       const std::vector<sim::TimeTreeEventGroup>& groups,
+                                                       uint64_t events, uint64_t eventsTotal) {
+        // --- 起動時の測り(GPU が休んでいる状態から)---
+        const auto cold = RunProbe(context, "初め", {});
+        if (!cold)
+            return std::unexpected(cold.error());
+
+        std::vector<MeasuredGroup> measured;
+        const auto prepared = PrepareGroups(context, groups, measured);
+        if (!prepared)
+            return prepared;
+
+        // --- 間を空けた形(組ごとに CPU で待ってから 1 回)---
+        for (MeasuredGroup& item : measured) {
+            const auto ms = TimeSolveOnce(context, *item.gpu, item.grid, item.group->cycles);
+            if (!ms)
+                return std::unexpected(ms.error());
+
+            item.gapMs = *ms;
+        }
+
+        const auto timed = TimeContinuous(context, measured);
+        if (!timed)
+            return timed;
+
+        // --- 起動時の測りの変種(続けて積んだ直後 = 時計が高い・大きい箱 32^3・長い歩の形)---
+        std::vector<std::pair<std::string, sim::TimeTreeCostProbeOptions>> variants = {
+            {"直後", {}},
+            {"直後・大きい箱 32", {.largeSide = 32}},
+            {"直後・e 10", {.exponent = 10}},
+            {"直後・熱さない", {.heatSolves = 0}}};
+        std::vector<sim::TimeTreeCostProbe> probes = {*cold};
+        for (const auto& [name, options] : variants) {
+            const auto probe = RunProbe(context, name, options);
+            if (!probe)
+                return std::unexpected(probe.error());
+
+            probes.push_back(*probe);
+        }
+
+        const std::array<double, 4> fit = FitLeastSquares(measured);
+        Log(Channel::Sim, Level::Info,
+            "最小二乗(続けて積んだ測り・組 {}): 固定費 {:.0f} ns・V {:.0f} ns・セル {:.0f} ps・セル × V {:.0f} ps",
+            measured.size(), fit[0], fit[1], fit[2] * 1000.0, fit[3] * 1000.0);
+        const auto clampNs = [](double value) {
+            return (uint64_t)std::max(value, 0.0);
+        };
+        const sim::TimeTreeSolveCost fitted{.eventNs = clampNs(fit[0]),
+                                            .cycleNs = clampNs(fit[1]),
+                                            .cellPs = clampNs(fit[2] * 1000.0),
+                                            .cellCyclePs = clampNs(fit[3] * 1000.0)};
+        LogPrediction("最小二乗", fitted, measured);
+        LogPrediction("既定", sim::TimeTreeSolveCost{}, measured);
+        const std::array<std::string_view, 5> names = {"起動時(初め)", "起動時(直後)", "起動時(大きい箱 32)",
+                                                       "起動時(e 10)", "起動時(熱さない)"};
+        for (size_t index = 0; index < probes.size(); ++index)
+            LogPrediction(names[index], probes[index].cost, measured);
+
+        LogBuckets(measured, probes[0].cost);
+        LogTotals(measured, events, eventsTotal);
+
+        return {};
+    }
+
+    // --- 6. GPU の時計の揺れ(T-1140): 同じ系を間を空けて・続けて積んで・また間を空けて ---
+    std::expected<void, std::string> MeasureClock(Context& context, const sim::TimeTreeEventGroup& group) {
+        const sim::ImplicitGrid grid = SolveCpu(group.system, 1).grid;
+        auto gpu = MakeFitted(context, group.system, grid, 1);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const auto gapSeries = [&](std::string_view name) -> std::expected<void, std::string> {
+            std::string text;
+            for (uint32_t index = 0; index < 30; ++index) {
+                const auto ms = TimeSolveOnce(context, *gpu, grid, group.cycles);
+                if (!ms)
+                    return std::unexpected(ms.error());
+
+                if (index % 5 == 0)
+                    text += std::format(" {:.1f} 秒 {:.4f}", SecondsSince(context), *ms);
+            }
+
+            Log(Channel::Sim, Level::Info, "時計(組 {} セル・{}・{} ms ごと): {}", group.system.nodes.size(), name,
+                GAP_MS, text);
+
+            return {};
+        };
+
+        const auto before = gapSeries("間を空けた");
+        if (!before)
+            return before;
+
+        const auto continuous = MeasureClockContinuous(context, *gpu, grid, group.cycles);
+        if (!continuous)
+            return continuous;
+
+        return gapSeries("続けて積んだ後に間を空けた");
+    }
+
+    // 120 回の時刻印付きの解き、その間に 7 回ずつ時刻印なしの解き(GPU は休まない)
+    std::expected<void, std::string> MeasureClockContinuous(Context& context, sim::GpuEquilibriumUpload& gpu,
+                                                            const sim::ImplicitGrid& grid, uint32_t cycles) {
+        constexpr uint32_t TIMED = 120;
+        constexpr uint32_t BETWEEN = 7;
+        ID3D12GraphicsCommandList10* list = context.queue->Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        const uint64_t ring = context.ring->GpuAddress();
+        context.ring->RecordBegin(list);
+        if (!gpu.RecordUpload(list, grid))
+            return std::unexpected("段の形が合わない");
+
+        for (uint32_t index = 0; index < TIMED; ++index) {
+            gpu.RecordTimestamp(list, 2 * index);
+            bool recorded = gpu.RecordSolve(list, ring, cycles, true);
+            gpu.RecordTimestamp(list, (2 * index) + 1);
+            for (uint32_t extra = 0; extra < BETWEEN; ++extra)
+                recorded = recorded && gpu.RecordSolve(list, ring, cycles, true);
+
+            if (!recorded)
+                return std::unexpected("解きを積めない");
+        }
+
+        gpu.RecordTimestampReadback(list, 2 * TIMED);
+        gpu.RecordEnd(list);
+        const auto executed = Execute(context, list);
+        if (!executed)
+            return std::unexpected(executed.error());
+
+        gpu.ReleaseStaging();
+        const std::vector<uint64_t> ticks = gpu.ReadTimestamps(2 * TIMED);
+        if (ticks.size() != 2 * TIMED)
+            return std::unexpected("時間を読めない");
+
+        std::string text;
+        double low = 1.0e9;
+        double high = 0;
+        for (uint32_t index = 0; index < TIMED; ++index) {
+            const double ms = ToMs(context, ticks[2 * index], ticks[(2 * index) + 1]);
+            if (index % 15 == 0)
+                text += std::format(" {:.1f} ms 目 {:.4f}", ToMs(context, ticks[0], ticks[2 * index]), ms);
+
+            if (index >= TIMED / 4) {
+                low = std::min(low, ms);
+                high = std::max(high, ms);
+            }
+        }
+
+        Log(Channel::Sim, Level::Info, "時計(続けて積んだ・{} 回): {}・後ろ 3/4 の揺れ {:.4f}〜{:.4f} ms({:.2f} 倍)",
+            TIMED * (BETWEEN + 1), text, low, high, high / low);
+
+        return {};
+    }
+
     struct EventTotals {
         uint64_t events = 0;
         uint64_t spans = 0;
@@ -469,7 +973,7 @@ namespace {
     }
 
     std::expected<void, std::string> RunEvents(Context& context, const std::vector<test::TimeStepSpanRecord>& records,
-                                               bool measure, uint64_t eventsTotal) {
+                                               bool measure, uint64_t eventsTotal, bool continuous, bool clock) {
         std::map<uint32_t, std::vector<sim::TimeTreeEventSpan>> events;
         for (const test::TimeStepSpanRecord& record : records) {
             if (record.event != test::TimeStepSpanRecord::NO_EVENT)
@@ -478,6 +982,7 @@ namespace {
         }
 
         EventTotals totals;
+        std::vector<sim::TimeTreeEventGroup> allGroups;  // --continuous・--clock(T-1152)
         for (const auto& [event, spans] : events) {
             const std::vector<sim::TimeTreeEventGroup> groups = sim::GroupTimeTreeEvent(spans);
             const auto compared = CompareEvent(context, spans, groups);
@@ -490,6 +995,11 @@ namespace {
             for (const sim::TimeTreeEventSpan& span : spans)
                 totals.cells += span.system.nodes.size();
 
+            if (continuous || clock) {
+                allGroups.insert(allGroups.end(), groups.begin(), groups.end());
+                continue;
+            }
+
             if (!measure)
                 continue;
 
@@ -500,6 +1010,17 @@ namespace {
 
         Log(Channel::Sim, Level::Info, "出来事: {}(列 {}・組 {}・セル {})で組の値が列ごとの CPU とビット一致",
             totals.events, totals.spans, totals.groups, totals.cells);
+        if (clock && !allGroups.empty()) {
+            const auto largest = std::ranges::max_element(
+                allGroups, {}, [](const sim::TimeTreeEventGroup& group) { return group.system.nodes.size(); });
+            const auto clocked = MeasureClock(context, *largest);
+            if (!clocked)
+                return clocked;
+        }
+
+        if (continuous && !allGroups.empty())
+            return MeasureContinuous(context, allGroups, totals.events, eventsTotal);
+
         if (!measure || totals.events == 0)
             return {};
 
@@ -557,6 +1078,8 @@ namespace {
         uint32_t tile = 1;
         uint64_t eventsTotal = 0;
         bool stageVariants = false;
+        bool continuous = false;
+        bool clock = false;
         std::vector<char*> rest = {arguments[0]};
         for (size_t index = 1; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
@@ -570,6 +1093,10 @@ namespace {
                 eventsTotal = std::stoull(arguments[++index]);
             else if (argument == "--stage-variants")
                 stageVariants = true;
+            else if (argument == "--continuous")
+                continuous = true;
+            else if (argument == "--clock")
+                clock = true;
             else
                 rest.push_back(arguments[index]);
         }
@@ -606,7 +1133,7 @@ namespace {
         const bool eventFile = records->front().event != test::TimeStepSpanRecord::NO_EVENT;
         std::expected<void, std::string> ran;
         if (eventFile)
-            ran = RunEvents(context, *records, measure, eventsTotal);
+            ran = RunEvents(context, *records, measure, eventsTotal, continuous, clock);
         else if (stageVariants)
             ran = StageVariants(context, *records, tile);
         else {

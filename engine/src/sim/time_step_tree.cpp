@@ -1094,13 +1094,11 @@ namespace bicameral::sim {
         if (cells == 0)
             return 0;
 
-        // 小さい出来事は V を 1 グループで(V の回数は平均)。大きい出来事は固定費 + 傾き(下限あり)
-        if (cells <= cost.smallCells)
-            return cost.smallEventNs + ((cellCycles / cells) * cost.smallCycleNs);
-
+        // 固定費 + V の回数 × V 1 回の固定費 + セルの傾き(V の回数の違う列は別の組なので、平均の切り上げで数える)
+        const uint64_t cycles = (cellCycles + cells - 1) / cells;
         const uint64_t slope = ((cells * cost.cellPs) + (cellCycles * cost.cellCyclePs)) / 1000;
 
-        return std::max(cost.eventNs + slope, cost.eventFloorNs);
+        return cost.eventNs + (cycles * cost.cycleNs) + slope;
     }
 
     namespace {
@@ -1220,6 +1218,7 @@ namespace bicameral::sim {
         }
 
         estimate.waitMicroseconds = nanoseconds / 1000;
+        estimate.waitUpperMicroseconds = (nanoseconds / 1000) * cost.marginPercent / 100;
 
         return estimate;
     }

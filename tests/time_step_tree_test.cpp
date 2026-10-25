@@ -24,6 +24,7 @@
 //         forward-estimate(早送りの待ちの見積もり〔D-650〕と実際に進めた解きの数)
 // T-1141: event-merge [check=0] [every=n dump=<ファイル>](1 出来事の列を組ごとに 1 本の系にまとめ、列ごとに解いた値とビット一致か・
 //         組の数・費用の式での GPU の待ち。every= で n 出来事に 1 つ列の系を書く = gpu_time_step_span_test --events が解き比べて測る)
+//         [scene=night](T-1152: 池〔静かな夜〕の出来事。既定は火事)。出来事のセルの数の分布も出す
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -993,6 +994,7 @@ namespace {
     // --- T-1141: 1 出来事の列を 1 本の系にまとめる形(GroupTimeTreeEvent)を、列ごとに解いた値とビット一致で確かめ、数える ---
     bool mergeCheck = true;       // check=0 で比べない(数えるだけ)
     uint32_t mergeDumpEvery = 0;  // every=n: n 出来事に 1 つ、列の系を dump= に書く(GPU の試験が組ごとに解き比べて測る)
+    bool mergeNight = false;      // scene=night: 池(静かな夜)の出来事で(T-1152。e > 8 の V 2 の組)
 
     std::vector<int64_t> SolveSystem(const EquilibriumSystem& system, uint32_t cycles) {
         EquilibriumOptions options;
@@ -1018,7 +1020,24 @@ namespace {
         uint64_t groupWaitNs = 0;                      // 組ごと
         uint64_t eventWaitNs = 0;                      // 出来事を全部 1 本(T-1111 の見積もりの前提。値は組と違いうる)
         uint64_t largestGroup = 0;
+
+        // --- 出来事の大きさの分布(T-1152。費用の式の分け方を決める)---
+        // 出来事のセルの数: ≤512・≤1,024・≤2,048・≤4,096・≤8,192・≤16,384・≤65,536・それより上
+        std::array<uint64_t, 8> cellsPerEvent{};
+        std::map<uint32_t, uint64_t> groupsByCycles;  // 組の V の回数 → 組の数
+        uint64_t eventCells = 0;                      // Σ 出来事のセル
+        uint64_t eventCellCycles = 0;                 // Σ セル × V の回数
     };
+
+    size_t EventSizeBucket(uint64_t cells) {
+        constexpr std::array<uint64_t, 7> BOUNDS = {512, 1024, 2048, 4096, 8192, 16384, 65536};
+        for (size_t bucket = 0; bucket < BOUNDS.size(); ++bucket) {
+            if (cells <= BOUNDS[bucket])
+                return bucket;
+        }
+
+        return BOUNDS.size();
+    }
 
     void CountEvent(const std::vector<TimeTreeEventSpan>& spans, MergeCounts& counts) {
         const sim::TimeTreeSolveCost cost;
@@ -1038,10 +1057,14 @@ namespace {
         }
 
         counts.eventWaitNs += TimeTreeEventNs(cost, eventCells, eventCycles);
+        ++counts.cellsPerEvent[EventSizeBucket(eventCells)];
+        counts.eventCells += eventCells;
+        counts.eventCellCycles += eventCycles;
         for (const TimeTreeEventGroup& group : groups) {
             const uint64_t cells = group.system.nodes.size();
             counts.groupWaitNs += TimeTreeEventNs(cost, cells, cells * group.cycles);
             counts.largestGroup = std::max(counts.largestGroup, cells);
+            ++counts.groupsByCycles[group.cycles];
             for (const uint32_t index : group.spans) {
                 uint32_t& levels = counts.levelsByExponent[spans[index].exponent];
                 levels = std::max(levels, group.levels);
@@ -1067,7 +1090,8 @@ namespace {
         }
     }
 
-    void CheckEventMerge(const Material& material, const Ignition& ignition) {
+    void CheckEventMerge(const Material& material, const Profile& profile, uint64_t defaultTicks,
+                         const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         setup.groupShift = groupShift;
         MergeCounts counts;
@@ -1102,8 +1126,8 @@ namespace {
         };
 
         setup.spanObserver = &observer;
-        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
-        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : FIRE_TICKS;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : defaultTicks;
         const RunResult run = Run(setup, material, world, ticks, ticks, ignition);
         flush();
         LogRun("列のまとめ", TrialName(), world, run, ticks);
@@ -1124,6 +1148,19 @@ namespace {
             "比べた組 {}・食い違い {}",
             (double)counts.spanWaitNs * 1.0e-9, (double)counts.groupWaitNs * 1.0e-9,
             (double)counts.eventWaitNs * 1.0e-9, counts.compared, counts.mismatches);
+        std::string sizes;
+        for (const uint64_t count : counts.cellsPerEvent)
+            sizes += std::format(" {}", count);
+
+        std::string cyclesText;
+        for (const auto& [cycles, count] : counts.groupsByCycles)
+            cyclesText += std::format(" V{}:{}", cycles, count);
+
+        Log(Channel::Sim, Level::Info,
+            "列のまとめ: 出来事のセルの数の分布(≤512/1Ki/2Ki/4Ki/8Ki/16Ki/64Ki/上)={}・1 出来事の平均 {} セル・"
+            "V × セル {}・組の V の回数{}",
+            sizes, counts.events != 0 ? counts.eventCells / counts.events : 0,
+            counts.events != 0 ? counts.eventCellCycles / counts.events : 0, cyclesText);
         Expect(run.conserved && run.steps.negativeValues == 0, "列のまとめ: 保存・負 0");
         Expect(counts.spans == run.steps.solves, "列のまとめ: 見た列の数が試作の解きの数と同じ");
         Expect(counts.mismatches == 0, "列のまとめ: まとめた系の値が列ごとに解いた値とビット一致");
@@ -1286,6 +1323,8 @@ namespace {
                 mergeCheck = value != "0";
             else if (key == "every")
                 mergeDumpEvery = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "scene")
+                mergeNight = value == "night";
         }
 
         const bool all = part == "all";
@@ -1319,8 +1358,12 @@ namespace {
         if (part == "forward-estimate")
             CheckForwardEstimate(fire, fireIgnition);
 
-        if (part == "event-merge")
-            CheckEventMerge(fire, fireIgnition);
+        if (part == "event-merge") {
+            if (mergeNight)
+                CheckEventMerge(pond, PondProfile(WorldLength(sceneShape)), NIGHT_TICKS, {});
+            else
+                CheckEventMerge(fire, Ambient(fire.groundKelvin), FIRE_TICKS, fireIgnition);
+        }
 
         if (part == "grain-fine-pond")
             CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {}, 1);

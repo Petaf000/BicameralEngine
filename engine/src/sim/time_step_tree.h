@@ -254,22 +254,20 @@ namespace bicameral::sim {
     std::vector<TimeTreeEventGroup> GroupTimeTreeEvent(std::span<const TimeTreeEventSpan> spans);
 
     // --- 早送りの待ちの見積もり(D-650・T-1111。ゲームはこれを読んで眠れる条件などを決める。法則は変えない)---
-    // 1 出来事(その刻みに解く列を 1 本の系にまとめた形。T-0951)の GPU の費用の式。既定は RTX 3070 Ti・release の測り
-    // (gpu_time_step_span_test --measure・記録の形は前の解きから。docs/perf.md の T-1111)。浮動小数点を使わないので ps の整数
+    // 1 出来事(その刻みに解く列を組にまとめた形。T-1141)の GPU の費用の式(T-1152): 固定費 + V 1 回の固定費 × V の回数
+    // + セル × 傾き + セル × V の回数 × 傾き。出来事を続けて積んだ形(早送りの形。GPU の時計が高いまま)の測り。
+    // 値は起動時にその PC で測る(D-662: sim/gpu_time_tree_cost の ProbeTimeTreeSolveCost)。既定は RTX 3070 Ti・release の測り
+    // (docs/perf.md の T-1152)。浮動小数点を使わないので ps の整数
     struct TimeTreeSolveCost {
-        // 解くセルがこれ以下の出来事は V を 1 グループで回す(ImTail)
-        uint32_t smallCells = 1024;
-        uint64_t smallEventNs = 13300;  // 小さい出来事の段 0 + 段の重み(512 セル)
-        uint64_t smallCycleNs = 26000;  // 小さい出来事の V 1 回
-        // 大きい出来事: 固定費 + セルの数 × 傾き。ただし下限(8,192〜6.6 万セルはほぼこの値。測りで 0.06〜0.52 ms と揺れた:
-        // 512 セルの系を 16 並べた 8,192 は 0.06 ms・広げた木の 8,192 は 0.26〜0.52 ms。原因は未確認 = T-1140)
-        uint64_t eventNs = 120000;
-        uint64_t eventFloorNs = 260000;
+        uint64_t eventNs = 12000;     // 1 出来事の固定費(段 0 + 段の重みの起動)
+        uint64_t cycleNs = 25000;     // V 1 回の固定費(段ごとの起動)
         uint64_t cellPs = 2530;       // 段 0 + 段の重みのセル 1 つ
         uint64_t cellCyclePs = 1940;  // V 1 回のセル 1 つ
+        // 測りの揺れの余裕(D-662。見積もりの上の値 = 式 × これ ÷ 100。GPU の時計が下がった時・測りの揺れ。T-1140)
+        uint32_t marginPercent = 200;
     };
 
-    // 1 出来事の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数
+    // 1 出来事の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数(V の回数は平均を切り上げ)
     uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles);
 
     struct TimeTreeForwardEstimate {
@@ -277,6 +275,8 @@ namespace bicameral::sim {
         uint64_t cellSolves = 0;  // セル × 解く回数
         uint64_t cellCycles = 0;  // セル × V の回数(e ごとの表)
         uint64_t waitMicroseconds = 0;
+        uint64_t waitUpperMicroseconds =
+            0;  // 余裕を見込んだ上の値(× marginPercent ÷ 100。ゲームはこちらで決めるのがおすすめ)
     };
 
     // 今の枠ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。

@@ -1,0 +1,54 @@
+// gpu_time_tree_cost.h — 早送りの待ちの見積もり(D-650・D-661 の EstimateTimeTreeForward)が使う 1 出来事の GPU の費用の式
+// (TimeTreeSolveCost)の値を、起動時にその PC で小さい系を解いて測る口(D-662・T-1152)。機種の表は持たない。
+// 測る系は中身を持たない箱(セルの数と決まった係数だけ。法則の値によらない費用だけを見る)で、部品の GPU 版(GpuEquilibriumUpload)で解く。
+// 測り方: 先に解きを続けて積んで GPU の時計を上げ(早送りは出来事を続けて積むので、その形の値。T-1140)、
+//   小さい箱・大きい箱 × V 1・V 2 の 4 つの時間(回の最小)から式の 4 つの値(固定費・V 1 回の固定費・セルの傾き・セル × V の傾き)を解く。
+// データの流れ: 箱の系(CPU)→ 段の形(CPU の SolveEquilibrium の道)→ GPU で解いた時刻印 → 4 つの時間 → TimeTreeSolveCost
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <expected>
+#include <string>
+
+#include "sim/equilibrium.h"
+#include "sim/gpu_equilibrium_upload.h"
+#include "sim/time_step_tree.h"
+
+namespace bicameral::gpu {
+    class ImmediateQueue;
+    class DebugRing;
+}  // namespace bicameral::gpu
+
+namespace bicameral::sim {
+
+    struct TimeTreeCostProbeOptions {
+        uint32_t smallSide = 8;    // 小さい箱の辺(セル。8 = 512)
+        uint32_t largeSide = 16;   // 大きい箱の辺(16 = 4,096)
+        int32_t exponent = 0;      // 面の係数 × 2^e(長い歩の列の系の形。0 = 段 1 つ)
+        uint32_t heatSolves = 64;  // 測る前に続けて積む大きい箱の解き(GPU の時計を上げる)
+        uint32_t rounds = 8;       // 4 つの時間を測る回(最小を採る)
+        uint32_t marginPercent = 200;
+    };
+
+    struct TimeTreeCostProbe {
+        TimeTreeSolveCost cost;
+        std::array<uint64_t, 4> solveNs{};  // 小 V 1・小 V 2・大 V 1・大 V 2(1 回の解き = 段 0 + 段の重み + V)
+        uint64_t gpuNs = 0;                 // 測りの GPU の時間(熱する分も)
+    };
+
+    // 中身を持たない箱の系(辺 side の立方体・レベル 0・決まった係数。外の面は値 0 を固定した面)
+    EquilibriumSystem TimeTreeProbeBox(uint32_t side, int32_t exponent = 0);
+
+    // 4 つの時間から式の値を解く(負になる値は 0。浮動小数点は使わない)
+    TimeTreeSolveCost FitTimeTreeSolveCost(const std::array<uint64_t, 4>& solveNs, uint64_t smallCells,
+                                           uint64_t largeCells, uint32_t marginPercent);
+
+    // 測る(コマンドリストを 3 回投げて待つ。測りの GPU の時間は数 ms)。queue のタイムスタンプの周波数は timestampFrequency
+    std::expected<TimeTreeCostProbe, std::string> ProbeTimeTreeSolveCost(ID3D12Device5* device,
+                                                                         gpu::ImmediateQueue& queue,
+                                                                         gpu::DebugRing& ring,
+                                                                         uint64_t timestampFrequency,
+                                                                         const TimeTreeCostProbeOptions& options = {});
+
+}  // namespace bicameral::sim
