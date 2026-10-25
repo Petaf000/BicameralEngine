@@ -43,8 +43,11 @@ namespace {
     constexpr uint64_t UNKNOWN_TABLE_VERSION = 0x3333;
     constexpr uint32_t SWAP_RUN_TICKS = 100;                                     // 表を替えてから刻む数
     constexpr sim::LabCellPosition SWAP_IGNITE_CELL = {.x = 4, .y = 3, .z = 3};  // 表を替えた刻みに火を付ける木のセル
-    constexpr uint64_t SPECIES_TABLE_VERSION = 0x4444;                           // 物質を足す・消す表(T-0242)
-    constexpr uint32_t SPECIES_FIRE_TICKS = 30;                                  // 物質の一覧を替える前に燃やす刻み
+    // 燃え始めの温度(約 600 K)。燃焼の速さが孔の O2 で頭打ちにならず、燃焼を速くした表(MakeSwappedTable)の差が箱に出る。
+    // 1500 K のセルはどちらの表も 1 刻みで孔の O2 を使い切るので、差は燃え広がった先のセルでしか出ない(現実の伝導率では広がらない。T-1066)
+    constexpr uint32_t WARM_IGNITE_MILLIKELVIN = 600000;
+    constexpr uint64_t SPECIES_TABLE_VERSION = 0x4444;  // 物質を足す・消す表(T-0242)
+    constexpr uint32_t SPECIES_FIRE_TICKS = 30;         // 物質の一覧を替える前に燃やす刻み
 
     // --- 仮の魔素の実験(T-0225)---
     constexpr uint64_t MANA_TABLE_VERSION = 0x4444;
@@ -135,6 +138,10 @@ namespace {
         if (!session.SetTemperature({.x = 3, .y = 3, .z = 3}, IGNITE_MILLIKELVIN))
             return std::unexpected("温度を決められない");
 
+        // 向かいの角の木は燃え始めの温度に(表の差し替えを初めから流し直す RunRerun が、速さの違う表で箱が変わるのを見る)
+        if (!session.SetTemperature({.x = 4, .y = 4, .z = 4}, WARM_IGNITE_MILLIKELVIN))
+            return std::unexpected("温度を決められない");
+
         if (auto stepped = session.Step(RUN_TICKS - IGNITE_TICK); !stepped)
             return stepped;
 
@@ -204,8 +211,9 @@ namespace {
 
         // --- 替えた刻みに、まだ燃えていない木のセルへ火を付け直す(替えた規則が効く場面を表の替わり目に作る)---
         // 現実の伝導率(T-1066・D-637)では RunFire の火は付けたセルから広がらず、刻み RUN_TICKS には燃えている所が無い。
-        // 燃焼を速くした表は燃えていない箱を変えないので、替わり目に燃えている所を置く(比べる相手 CpuHashWithoutSwap も同じコマンドを流す)
-        if (!session.SetTemperature(SWAP_IGNITE_CELL, IGNITE_MILLIKELVIN))
+        // 燃焼を速くした表は燃えていない箱を変えないので、替わり目に燃え始める所を置く(比べる相手 CpuHashWithoutSwap も同じコマンドを流す)。
+        // 温度は燃焼が頭打ちにならない所(WARM_IGNITE_MILLIKELVIN)
+        if (!session.SetTemperature(SWAP_IGNITE_CELL, WARM_IGNITE_MILLIKELVIN))
             return std::unexpected("替わり目に火を付けられない");
 
         if (auto stepped = session.Step(SWAP_RUN_TICKS); !stepped)
