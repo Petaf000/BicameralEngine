@@ -198,7 +198,20 @@ FX_FN uint64_t HcConductivityFromSums(HcConductivitySums sums, uint32_t temperat
 
 // 和と温度からコンダクタンス(mW/K。レベル 0 の大きさのセルとして)
 FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatureMk) {
-    const uint64_t conductance = HcConductivityFromSums(sums, temperatureMk) >> HC_CONDUCTANCE_SHIFT;
+    uint64_t conductance = HcConductivityFromSums(sums, temperatureMk) >> HC_CONDUCTANCE_SHIFT;
+
+    // --- T-1110 の試作(捨てる。main へ入れない): 薄い凝縮相の層の道の長さ ---
+    // 凝縮相の体積の割合 φ < 1 なら、その層の厚さ φ × 0.5 m を道の長さにした層のコンダクタンス
+    // k_凝縮 × 0.25 m² ÷ (φ × 0.5 m) = k_凝縮 × セルの体積 ÷ (2 × 凝縮相の体積)。φ = 1 で今の式(k × 0.5 m)と同じ値。大きい方を使う
+    if (sums.condensedVolume != 0) {
+        const uint64_t condensedConductivity = FxDivU128By64(sums.condensedWeighted, sums.condensedVolume).quotient;
+        const FxU128 scaled = HcMulU128ByU64(FxMulU64Full(condensedConductivity, HC_CELL_VOLUME_MEGA_PL), HC_MEGA);
+        const uint64_t twiceVolume = sums.condensedVolume << 1;
+        const uint64_t layerConductance = scaled.hi >= twiceVolume ? (uint64_t)HC_UINT32_MAX
+                                                                   : FxDivU128By64(scaled, twiceVolume).quotient;
+        if (layerConductance > conductance)
+            conductance = layerConductance;
+    }
 
     return conductance < HC_UINT32_MAX ? (uint32_t)conductance : (uint32_t)HC_UINT32_MAX;
 }
