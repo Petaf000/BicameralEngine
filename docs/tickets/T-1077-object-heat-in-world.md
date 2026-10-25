@@ -1,6 +1,6 @@
 # T-1077 物の熱を世界の刻みに入れる(多重解像度のセルの口・起きている物の一覧で眠らせる・物のボクセル T-0821 の置き場)(T-1064 から分けた)
 
-- Status: Doing(CPU の形・GPU の形〔頁を持つブロック〕まで。2026-10-26 wt5。残りは下の引き継ぎメモ)
+- Status: Doing(① 一様のブロックを頁に広げる・② 起きている物の一覧まで。残りは ③ ハッシュとセーブ〔T-0821 の真実の置き場の後〕と下の引き継ぎメモ。2026-10-26 wt5)
 - 種類: 工学(土台の共通部分に掛かるので司令塔が配る)
 - PC: 必須
 - 見積もり: チャット 2 回分
@@ -14,8 +14,8 @@ T-1064 の段は囲むセルを平らな並びで持つ。世界のセル(Multir
 ## 完了条件
 - [x] 囲むセルを世界の口で読む・当てる(CPU の最初の形。LoadNestCell・ExpandNestPage・StoreNestCell・PokeNestBlock。試験 object_heat_nest)
 - [x] GPU の形(頁を持つブロックまで。写す・書き戻す口 shaders/sim/object_heat_nest.hlsl。試験 gpu_object_heat_nest で CPU とビット一致。2026-10-26)
-- [ ] GPU で一様のブロック(頁を持たない)を頁に広げてから書く(今は書かずに数える。下の引き継ぎメモ ①)
-- [ ] 起きている物の一覧(眠る = 1 刻みで受け渡しが全部 0 かつ反応が待ちで起きない。起こす = 囲むセルが変わった・光が当たった)。眠っている物 10,000 個で費用 0 を測る
+- [x] GPU で一様のブロック(頁を持たない)を頁に広げてから書く(OhNestMarkExpand → TreeExpand → OhNestFill。CPU も枠の順。2026-10-26。溢れを使う世界と欄の頁は残り)
+- [x] 起きている物の一覧(物の印 OhObjectState から段ごとに一覧を作り ExecuteIndirect。2026-10-26)。眠っている物 10,000 個で 約 0.02 ms(docs/perf.md)
 - [x] 帳簿(理由「物との受け渡し」WL_REASON_OBJECT_EXCHANGE。CPU・GPU とも。GPU の帳簿は CPU とビット一致)
 - [ ] 物の真実(ボクセル・待ち・対の端数)をハッシュとセーブへ(下の引き継ぎメモ ③)
 
@@ -49,15 +49,35 @@ T-1064 の段は囲むセルを平らな並びで持つ。世界のセル(Multir
   - 試験の道具を分けた: tests/gpu_object_heat_stages.h(GPU の段を回す道具。gpu_object_heat_test から)・tests/object_heat_nest_scene.h(場面と CPU の口。object_heat_nest_test から)。
   - T-1097 の放射の直し(OhAbsorptanceQ16)は、CPU と GPU が同じ shaders/common/object_heat.hlsli の OhPairRadiation を呼ぶので GPU にも同じ形で入っている(gpu_object_heat がビット一致で通る)。
 
-## 引き継ぎメモ(2026-10-26 wt5。残り 3 つ)
-- ① **GPU で一様のブロックを頁に広げる**: 書き戻す前に (a) 一様のブロックの枠に MR_PAGE_WANTED を付ける段 → (b) GpuMultires::RecordExpandPass(TreeExpand は枠の順に空きのスタックの上から頁を配る)
-  → (c) 配った枠の 512 セルを一様の値で埋める段(ExpandRecord の一覧を読む) → (d) 書き戻す。CPU の StoreCells は ExpandNestPage を囲むセルの順に 1 つずつ呼ぶので、
-  頁の番号の順が GPU(枠の順)と食い違う → CPU も「印を全部付けてから枠の順に広げる」形に直す(nest_detail::ExpandWantedPages を 1 回)。
-  確かめること: TreeExpand が刻みの外で伝導の作業場の印(SetSubstepMark)と GPU の入力の一覧を書く副作用・欄の頁(nest_fields::ExpandPage の GPU 版。GPU の欄は C-1 の後)・溢れを使う世界(MR_WIDE_CELLS)は書けない。
-  場面: 囲むセルを空の根(一様の空気)に置く(今の場面はどちらのセルも頁を持つ根にある)。
-- ② **起きている物の一覧**(眠っている物 10,000 個で費用 0): 起こす段の後に、起きているブロックの番号を R5 の順(前の和)で詰め、ExecuteIndirect で ①〜⑤ を起きているブロックの数だけ投げる。
-  前の測り(冷えた薪の山 1000 本で眠っている 115,830 ブロックが約 0.37 ms)を 0 に近づける。物ごとの和(③)と囲むセル(④)も起きている物だけ。
-- ③ **ハッシュとセーブ**: 真実 = ボクセル(RxCell)・待ち(OhVoxelWait の changedTick・wakeTick。待ちの丸めが結果を変えるので真実)・対の端数(物ごと)。
-  ブロックの状態(OhBlockState)は眠らせ方の印で、眠らせても眠らせなくても結果が同じ(T-1098)なので真実ではない(読み込んだら全部起きている状態から始めてよい。未確認: 読み込んだ直後にビット一致するかを試験で)。
-  セーブの形(15)に物の熱の世界の置き場が無い → T-0821(物のボクセル)の真実の置き場が決まってからそこに入れる。
+- 2026-10-26 wt5(2 回目): **① 一様のブロックを頁に広げてから書く**(shaders/sim/object_heat_nest.hlsl の OhNestMarkExpand・OhNestFill + GpuMultires::RecordExpandPass)。
+  書き戻す前に、変わった囲むセルの一様のブロックに MR_PAGE_WANTED → TreeExpand(刻みの中と同じ段。枠の順に空きのスタックの上から頁を配り、配った枠を GPU の入力の一覧に書く)
+  → OhNestFill(一覧の枠の 512 セルを一様の値〔g_cells[枠]〕で埋める。StepExpandedWait の埋める所と同じ)→ OhNestScatter。頁が足りなければ一様のまま残り、書けなかった数に数える(TreeExpand が種に足す)。
+  CPU(tests/object_heat_nest_scene.h の ExpandChangedBlocks)は印を全部付けてから nest_detail::ExpandWantedPages を 1 回(囲むセルの順に 1 つずつ広げると頁の番号の順が GPU と食い違う)。
+  - 試験: object_heat_nest・gpu_object_heat_nest に「一様の空気の根」の場面を足した(根を各軸 2 倍にして、物を石に触れない上の根に置く)。0.5 m で頁に広げた 1・0.25 m で 4(伝導で隣の根も広がる)。
+    世界のセル全部・帳簿・頁に広げた数・空きの頁の数・頁の足りなかった数・物の熱が CPU とビット一致。保存(帳簿の上で)0。
+  - TreeExpand を刻みの外で呼ぶ副作用: 伝導の作業場の印(SetSubstepMark の CONDUCT_MARK_EXPANDED・FROZEN)をその刻みの印で書くが、次の刻みは印が 1 つ進むので読まれない。
+    頁が足りない時の種(AppendSeedOnce)は CPU の seeds[枠] = 1 と同じ意味。GPU の入力の一覧(頁を配った枠)は次の刻みの TreeExpand が書き直す。
+  - **C-1 の問い(層の無い頁を囲むセルと同じ中身として読む)には当たらなかった**: ① で広げるのは世界のブロックで、埋める値は一様の値そのもの(0 ではない)。
+    欄の頁は GPU にまだ無い(CPU の nest_fields::ExpandPage は一様の欄の値を頁に書く。GPU の欄が来たら OhNestFill に同じ埋め方を足す)。問いが出るのは物の箱の層(T-1097 ③)の方。
+- 2026-10-26 wt5(2 回目): **② 起きている物の一覧**(shaders/sim/object_heat.hlsl の OhListMark・OhListTotals・OhListPlace・OhFinishObjects。眠らせ方 OH_SLEEP_LISTED)。
+  - 物の印 OhObjectState(shaders/common/object_heat.hlsli。眠らせ方の印で真実ではない): 受け渡しを最後に回した段 lastListed・物の中が最後に変わった / 静かでなかった段 busyPass(② と ⑤ が InterlockedMax)・
+    ③ を回した段・ブロックの印の和・物の中の起こす刻みの最小・受け渡しの一覧に入った刻み。
+  - 一覧に入れる条件(OhObjectExchangeListed・OhObjectReactListed): busyPass ≥ lastListed・囲むセルの変わった段 ≥ lastListed(外に面する物)・光(光を吸う物)/ この刻みの受け渡しの一覧に入った・起こす刻みの最小が来た。
+    入れなかった物のブロックは、全部を回しても OhExchangeAwake・OhReactAwake で眠っている(物の中の変化は物の中の隣どうしだけで伝わり、起こす段より前に書かれたセルの段は lastListed より小さい)。
+    小刻みを飛ばす物(g_substep ≥ 物の小刻み)は一覧に入れても lastListed を変えない。一覧から外れる物は前に起こしたブロックの awake を 0 に戻す(全部を回した時に書かれる値。ブロックの状態も CPU とビット一致)。
+    ④ はこの段に ③ を回した物だけ足す(眠っている物の対の端数は粗い側の 1 単位に満たないので、③ の粗い量は 0)。
+  - 一覧の作り方: 物 256 個ずつのグループで印とグループの和(整数の足し算)→ 1 グループでグループの和の前の和(R5)と間接の引数 → グループごとに位置を決めて物と物のブロックを一覧に書く。
+    1 グループで物を順になめる最初の形は物 1 万個で 1 回 約 70 µs かかり、眠らせる形より遅かったので直した。
+  - 試験 gpu_object_heat: 一覧の形と全部を Dispatch の形の 2 つの GPU を、20 刻みごとに CPU(眠らせる)とビット一致で比べる。小刻みを飛ばす段を作るため、小刻み 4 回の小枝を 1 本足した。
+    gpu_object_heat_nest も一覧の形で CPU とビット一致。
+  - 測り(RTX 3070 Ti。docs/perf.md): 眠っている小枝 10,000 本(30,000 ブロック)の分は、燃える小枝 10 本で 約 0.019 ms・100 本で 約 0.006 ms・1000 本で 0(誤差の内)。
+    眠らせる形(全部を Dispatch)では 約 0.05〜0.1 ms。薪の山 1000 本のうち 10 本が燃える(117,000 ブロック)0.93 → 0.64 ms。小さい場面(物 5 つ)では一覧を作る段の固定費で少し遅い(物の熱 0.139 → 0.156 ms)。
 
+## 引き継ぎメモ(2026-10-26 wt5 2 回目。① と ② は済み。残りは ③ と下の小さいもの)
+- ③ **ハッシュとセーブ**(T-0821 の真実の置き場が決まってから): 真実 = ボクセル(RxCell)・待ち(OhVoxelWait)・対の端数(物ごと)。
+  ブロックの状態(OhBlockState)と物の印(OhObjectState)は眠らせ方の印で真実ではない。読み込んだら「全部が一覧に入る」初めの値(MakeObjectStates・ブロックの状態 0)から始めてよい見込み
+  (一覧に多く入れても結果は同じ。ただしブロックの awake などの印は全部を回した世界と違う値から始まるので、読み込んだ直後のビット一致は印を除いて比べる。未確認: 試験で)。
+- ① の残り: 溢れを使う世界(MR_WIDE_CELLS。TreeExpand の溢れの変種と CopyUniformTails が要る)・欄の頁(GPU の欄が来たら OhNestFill に一様の欄の値を書く)。
+  大きい世界では TreeExpand が世界の枠を全部なめる 1 グループなので、物の熱の書き戻しの度に枠の数に比例する(未測。重ければ「変わったセルの枠だけ」の配り方を物の熱の側に持つ。ただし頁の番号の順を CPU と揃える)。
+- ② の残り: 一覧を作る段は物の数に比例する(物 1 万個で 1 回 約 5〜8 µs・1 刻みに 2 回)。物 100 万個なら、セルの変化・光・起こす刻みから物を起こす(事象で一覧に足す)形が要る見込み。
+  ④ セルへ当てる段は今も物の入っているセル全部(眠っている物のセルも)を回す(小枝 1 万本・1001 セルで 約 0.01 ms)。
