@@ -75,6 +75,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_conduction.cpp
   src/sim/transport_packet.cpp  # 当てる段の包みをセルに当てる CPU(液体・気体。T-0770)
   src/sim/multires_fields.cpp
+  src/sim/placement_refine.cpp  # 細かくする時の置かれ方で配る(T-1157。D-664・20 §10.5)
   src/sim/multires_grading.cpp  # 細かい所の半径と移り目を世界のデータの長さで(T-0954)
   src/sim/multires_graded.cpp  # 木の細かくする/粗くする要求が種からの距離で規則を読む(T-1008)
   src/sim/multires_implicit_conduction.cpp

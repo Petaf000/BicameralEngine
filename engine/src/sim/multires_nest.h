@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -135,6 +136,12 @@ namespace bicameral::sim {
         std::vector<reaction::RxCell> column;
     };
 
+    // 細かくする時の子 8 つの重み(T-1157。sim/placement_refine.h の PlaceChildWeights の形)
+    struct NestChildWeights {
+        std::array<uint64_t, 8> condensed{};  // 子の凝縮相の量
+        std::array<uint64_t, 8> open{};       // 子の空きの体積
+    };
+
     struct MultiresNest {
         MultiresCapacity capacity;
 
@@ -164,6 +171,13 @@ namespace bicameral::sim {
         //     sparseFields: 欄の頁を値のある所にだけ持つ(疎。T-0921・ADR-0403。仮の既定 = 疎)。欄を登録する前に決める ---
         bool sparseFields = true;
         std::vector<MultiresField> fields;
+
+        // --- 細かくする時の置かれ方(T-1157。D-664・20 §10.5。状態に入らない)。置かれ方の印(SF_FLAG_PLACE_*)の欄は、頁を持つ親の
+        //     セルごとにこれが返す子 8 つの重み(子の番号は MrChildCell の j)で配る。無い・false を返したセルは子は親と同じ数(SAME)。
+        //     一様な親の子は一様のまま(SAME)。セルの中身(成分・エネルギー)はまだ SAME(T-1159)---
+        std::function<bool(const MultiresNest& nest, uint32_t parentSlot, uint32_t parentCell,
+                           NestChildWeights& weights)>
+            refinePlacement;
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
         //     GPU は順の決まらない一覧で持つので、集合として比べる(状態の要約に入れない)---
