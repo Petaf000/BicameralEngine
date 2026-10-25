@@ -1,7 +1,7 @@
 // gpu_sun_column_test.cpp — 太陽の影の柱の GPU(sim/gpu_sun_column。shaders/sim/sun_column.hlsl)が CPU リファレンス
 // (sim/sun_column の SweepSunColumn)とビット一致すること(T-0910・23 §10 R-R0)。場面は tests/sun_column_scene.h(CPU の試験と同じ)。
 //   壁(0.5 m・0.25 m の世界)・温室・一部を細かくした木 × 真上・斜め・3 軸とも斜めの太陽で、出力の語(帳簿 + セルごとの吸った・返した)が全部同じ。
-//   同じ場面を 2 回掃いても同じ。費用: 64³ の地形(0.5 m)を真上と斜めの太陽で(release の HW。docs/perf.md)。
+//   同じ場面を 2 回掃いても同じ。空との交換の口(sim/sky_port。T-1145)の掃きの和も CPU と同じ。費用: 64³ の地形(0.5 m)を真上と斜めの太陽で(release の HW。docs/perf.md)。
 // 引数は gpu_test_options.h。
 #include <array>
 #include <format>
@@ -17,6 +17,7 @@
 #include "gpu_test_options.h"
 #include "sim/gpu_multires.h"
 #include "sim/gpu_sun_column.h"
+#include "sim/sky_port.h"
 #include "sun_column_scene.h"
 
 using namespace bicameral;
@@ -200,6 +201,63 @@ namespace {
         return compared;
     }
 
+    // 空との交換の口(sim/sky_port。T-1145): 口の掃きを 1 本ずつ GPU で走らせて正と負に足した語が、CPU の SweepSkyPort と同じ。
+    // 計測の地形では掃きの本数 × 1 本の時間を記録する(timed のとき)
+    std::expected<void, std::string> CompareSkyPort(const GpuContext& context, const sim::MultiresNest& nest,
+                                                    const char* name, bool timed) {
+        sim::SkyPortParams params{.referenceMk = 293150,
+                                  .skyShortMilliwatts = 100000,
+                                  .skyLongMilliwatts = sim::SkyBlackLongMilliwatts(250000)};
+        const auto plan = sim::PlanSkyPort(params);
+        const auto cpu = sim::SweepSkyPort(nest, *context.table, params);
+        if (!plan || !cpu)
+            return std::unexpected(std::format("{}: 口を作れない", name));
+
+        auto gpuScene = MakeGpuScene(context, nest);
+        if (!gpuScene)
+            return std::unexpected(std::format("{}: {}", name, gpuScene.error()));
+
+        std::array<std::vector<uint64_t>, 2> sums;
+        for (std::vector<uint64_t>& sum : sums)
+            sum.assign(sim::SunColumnWordCount(nest), 0);
+
+        double totalMs = 0.0;
+        for (const sim::SkyPortSweep& sweep : *plan) {
+            const auto sunParams = sim::MakeSunParams(nest, sweep.light, params.rayLevel);
+            if (!sunParams)
+                return std::unexpected(std::format("{}: {}", name, sunParams.error()));
+
+            double ms = 0.0;
+            const auto words = RunOnGpu(context, *gpuScene, *sunParams, timed ? MEASURE_REPEATS : 1,
+                                        timed ? &ms : nullptr);
+            if (!words)
+                return std::unexpected(std::format("{}: {}", name, words.error()));
+
+            std::vector<uint64_t>& sum = sums[sweep.negative ? 1 : 0];
+            for (size_t word = 0; word < words->size(); ++word)
+                sum[word] += (*words)[word];
+
+            totalMs += ms;
+        }
+
+        for (size_t side = 0; side < 2; ++side) {
+            if (sums[side] != cpu->words[side]) {
+                ReportMismatch(cpu->words[side], sums[side], std::format("{}・空との交換の口・側 {}", name, side));
+                return std::unexpected(std::format("{}: 空との交換の口で GPU と CPU が食い違う", name));
+            }
+        }
+
+        Log(Channel::Gpu, Level::Info, "{}: 空との交換の口(掃き {} 本・正と負)がビット一致", name, plan->size());
+        if (timed)
+            Log(Channel::Gpu, Level::Info,
+                "GPU 時間: {}・空との交換の口(既定の 4 向き × 正と負 = 掃き {} 本・光線の細かさ 0): {:.4f} "
+                "ms(掃きごとに "
+                "{} 回の平均の和)",
+                name, plan->size(), totalMs, MEASURE_REPEATS);
+
+        return {};
+    }
+
     std::expected<void, std::string> Measure(const GpuContext& context) {
         const sim::MultiresNest terrain = test::MakeSunWorld(*context.table, 0, 8, 8, 8, test::Terrain);
         auto gpuScene = MakeGpuScene(context, terrain);
@@ -260,8 +318,20 @@ namespace {
             return 1;
         }
 
+        const sim::MultiresNest portScene = test::MakeSunWorld(table, 0, 2, 1, 2, test::Terrain);
+        if (auto port = CompareSkyPort(context, portScene, "地形 16 × 4 × 16 m", false); !port) {
+            Log(Channel::Gpu, Level::Error, "gpu_sun_column_test: FAILED ({})", port.error());
+            return 1;
+        }
+
         // 計測は WARP では省く(ビット一致は上で見た)
         if (options->adapter != gpu::AdapterKind::Warp) {
+            const sim::MultiresNest terrain = test::MakeSunWorld(table, 0, 8, 8, 8, test::Terrain);
+            if (auto port = CompareSkyPort(context, terrain, "64³ の地形", true); !port) {
+                Log(Channel::Gpu, Level::Error, "gpu_sun_column_test: FAILED ({})", port.error());
+                return 1;
+            }
+
             if (auto measured = Measure(context); !measured) {
                 Log(Channel::Gpu, Level::Error, "gpu_sun_column_test: FAILED(計測: {})", measured.error());
                 return 1;

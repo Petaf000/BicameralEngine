@@ -86,6 +86,7 @@ add_library(bicameral_multires STATIC
   src/sim/sun_column.cpp  # 太陽の影の柱の CPU リファレンス(T-0910・ADR-0396)
   src/sim/sun_lens.cpp  # 日の光を物で集める CPU リファレンス(研究 R-R2・T-0878・ADR-0425)
   src/sim/cascade_light.cpp  # 世界の中の光: 距離ごとの段の CPU リファレンス(T-0958・ADR-0413)
+  src/sim/sky_port.cpp  # 空との交換の口: 参照の温度の分の空との出入り(T-1145・ADR-0474)
 )
 target_include_directories(bicameral_multires PUBLIC src)
 target_link_libraries(bicameral_multires PUBLIC bicameral_reaction)

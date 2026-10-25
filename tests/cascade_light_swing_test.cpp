@@ -87,6 +87,8 @@ namespace {
                 .intervalBlocks = 1,
                 .seed = 7,
                 .quietBelowMk = quietMk,
+                .emitSlots = 1,  // 前の巡目の 6 場面と比べるため毎刻み全部の形(既定の 15 組は空との交換の口の試験で)
+                .thermalInSlots = false,
                 .referenceMk = referenceMk};
     }
 

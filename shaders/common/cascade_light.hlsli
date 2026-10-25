@@ -147,6 +147,19 @@ FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceW
     return bands;
 }
 
+// 黒体が水平な面へ放つ強さ(帯ごとの mW/m²)。RcFaceBlackEmission(0.25 m²・1/60 s・2^−16 mJ)を W/m² に直す: × 240 ÷ 2^16。
+// 空との交換の口(sim/sky_port。T-1102)が、参照の温度の分の空との出入り(空の光 − 参照の黒体)を作るのに使う
+FX_FN RcBands RcBlackIrradianceMilliwatts(uint32_t temperatureMk) {
+    const uint64_t black = RcFaceBlackEmission(temperatureMk);
+    const uint64_t blackShort = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
+
+    RcBands bands;
+    bands.shortBand = (blackShort * 240) >> RC_ENERGY_SHIFT;
+    bands.longBand = ((black - blackShort) * 240) >> RC_ENERGY_SHIFT;
+
+    return bands;
+}
+
 // 軸 axis に a、(axis + 1) % 3 に u、(axis + 2) % 3 に v を置いた時の、軸 want の値
 FX_FN int64_t RcAxisValueOf(uint32_t want, uint32_t axis, int64_t a, int64_t u, int64_t v) {
     return want == axis ? a : (want == (axis + 1) % 3 ? u : v);
@@ -532,13 +545,15 @@ FX_CONST uint32_t RC_SLOTS_LIMIT = 64;
 // 持ち越しの表にたまった光(照り返し・待った熱の光)を放つ。待つ間の光は表にあり、放つ時にまとめて出る(保存はそのまま)。
 // 組をブロックで揃えるのは、同じ刻みに放つ面が同じ最上段のブロックに集まり、段の袋の数(費用の芯)が組の数で割れるから。
 // 組の数は奇数にする(升目の中のずらしの巡り 159 × 組の数 が 256 と互いに素で、組の刻みだけでも 16 × 16 を一巡する)。
+// 組 = (bx + 2 bz + 4 by) mod 組の数(T-1145): 軸に揃った面(照り返す地面 1 段・壁 1 枚)のブロック n × n を組に配った時の偏りが小さい係数。
+// 15 組で 8 × 8 の面は どの軸でも 4〜5 個(前の bx + 3 bz + 5 by は 2〜6 個で、127³ の地面で刻みの光線が 3 倍揺れた: T-1116)、16 × 16 は 17〜18 個
 FX_FN bool RcEmitSlotActive(FX_IN(RcStepConstants) constants, int64_t cellX, int64_t cellY, int64_t cellZ) {
     if (constants.emitSlots <= 1)
         return true;
 
     const uint32_t shift = constants.levels - 1;
     const int64_t slots = (int64_t)constants.emitSlots;
-    const int64_t spread = (cellX >> shift) + (3 * (cellZ >> shift)) + (5 * (cellY >> shift));
+    const int64_t spread = (cellX >> shift) + (2 * (cellZ >> shift)) + (4 * (cellY >> shift));
     const int64_t slot = ((spread % slots) + slots) % slots;
 
     return (uint64_t)slot == constants.tick % (uint64_t)constants.emitSlots;
