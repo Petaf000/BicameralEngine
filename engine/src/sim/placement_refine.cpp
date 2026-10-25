@@ -36,6 +36,12 @@ namespace bicameral::sim {
                 weightSum += weight[j];
             }
 
+            // 詰まりが Q16 の 1 目盛りに届かない(凝縮相がごくわずか)なら同じ重み(wt3 の場面では起きない形)
+            if (weightSum <= 0) {
+                weight.assign(columns, 1);
+                weightSum = columns;
+            }
+
             for (size_t index = 0; index < masses.size(); ++index) {
                 int64_t given = 0;
                 for (uint32_t j = 0; j + 1 < columns; ++j) {

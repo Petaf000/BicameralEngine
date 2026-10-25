@@ -277,6 +277,7 @@ namespace {
         int compared = 0;
         int sameSettle = 0;
         int sameMass = 0;
+        int settledCount = 0;  // 寄せたセル(凝縮相の量を比べた数)
         for (int picture = 0; picture < 40; ++picture) {
             std::vector<PictureCell> cells;
             std::vector<wt3::PictureSettle> reference;
@@ -330,12 +331,14 @@ namespace {
                     }
 
                     sameMass += same ? 1 : 0;
+                    ++settledCount;
                 }
             }
         }
 
-        Log(Channel::Sim, Level::Info, "wt3 と比べた (n = {}): {} セル・寄せる判定が同じ {}・凝縮相の量が同じ {}", n,
-            compared, sameSettle, sameMass);
+        Log(Channel::Sim, Level::Info,
+            "wt3 と比べた (n = {}): {} セル(寄せた {})・寄せる判定が同じ {}・凝縮相の量が同じ {}", n, compared,
+            settledCount, sameSettle, sameMass);
         Expect(sameSettle == compared, "wt3: 寄せるかの判定が同じ");
         Expect(sameMass == compared, "wt3: 凝縮相の子の量・傾きがビット単位で同じ");
 
