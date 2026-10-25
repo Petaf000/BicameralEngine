@@ -129,7 +129,8 @@ namespace bicameral::sim {
         // --- 色の一覧(段ごと・色ごと)---
         for (size_t depth = 0; depth < grid.levels.size(); ++depth) {
             const EquilibriumBlockLevel& level = grid.levels[depth];
-            for (uint32_t color = 0; color < EQB_OCTANTS; ++color) {
+            m_levels[depth].colorCount = level.colorCount;
+            for (uint32_t color = 0; color < level.colorCount; ++color) {
                 std::vector<uint32_t> members;
                 for (size_t i = 0; i < level.x.size(); ++i) {
                     if (level.colors[i] == color)
@@ -192,6 +193,11 @@ namespace bicameral::sim {
         if (!Supports(system.components) || grid.levels.empty() || system.nodes.empty())
             return std::unexpected(std::format("成分を持つ節の GPU 版で解けない系(成分 {})", system.components));
 
+        // 違うレベルの節が混ざる系(T-0969・T-1104): 段の色は 8 か 16、粗くしない節の延ばし方は置き場 EQ_PASS_OCTANT
+        if (rng::any_of(grid.levels,
+                        [](const EquilibriumBlockLevel& level) { return level.colorCount > EQB_MAX_COLORS; }))
+            return std::unexpected("段の色が多すぎる");
+
         GpuEquilibriumBlock result;
         result.m_device = device;
         result.m_options = options;
@@ -230,7 +236,8 @@ namespace bicameral::sim {
                                                                const EquilibriumBlockGrid& grid) const {
         const uint32_t k = m_components;
         std::vector<int64_t> image(EqbCoefficientWords(k, m_nodeCapacity, m_linkCapacity, m_fixedCapacity), 0);
-        for (uint32_t octant = 0; octant < EQB_OCTANTS; ++octant) {
+        static_assert(EQ_PASS_OCTANT + 1 == EQB_PROLONG_SLOTS);
+        for (uint32_t octant = 0; octant < EQB_PROLONG_SLOTS; ++octant) {
             PackBlock(image, EqbProlongWord(k, octant), grid.prolongation[octant], k);
             PackBlock(image, EqbRestrictWord(k, octant), grid.restriction[octant], k);
         }
@@ -297,6 +304,7 @@ namespace bicameral::sim {
 
         const std::vector<int64_t> coefficients = CoefficientImage(system, grid);
         const std::vector<int64_t> work = WorkImage(system, warmValues);
+        m_conjugateFresh = true;
         m_coefficientUpload = gpu::CreateBuffer(m_device, coefficients.size() * sizeof(int64_t),
                                                 gpu::BufferKind::Upload);
         m_workUpload = gpu::CreateBuffer(m_device, work.size() * sizeof(int64_t), gpu::BufferKind::Upload);
@@ -359,7 +367,7 @@ namespace bicameral::sim {
                                            uint32_t sweeps) const {
         Constants constants = BaseConstants();
         for (uint32_t sweep = 0; sweep < sweeps; ++sweep) {
-            for (uint32_t color = 0; color < EQB_OCTANTS; ++color) {
+            for (uint32_t color = 0; color < level.colorCount; ++color) {
                 constants.list = level.colorStarts[color];
                 constants.count = level.colorCounts[color];
                 RecordPass(list, debugRing, Pass::Smooth, constants);
@@ -403,19 +411,27 @@ namespace bicameral::sim {
     }
 
     // equilibrium_block.cpp の SolveEquilibriumBlocks と同じ順(lineSearch なら V ごとに共役勾配の 1 歩)
+    // 刻みをまたぐ共役勾配(conjugateAcrossTicks。T-1086・D-649)は作業場の向きと残差を次の解きへ残す(写した直後の最初の解きだけ捨てる)
     void GpuEquilibriumBlock::RecordSolve(ID3D12GraphicsCommandList* list, uint64_t debugRing) const {
+        const bool across = m_options.solve.lineSearch && m_options.solve.conjugateAcrossTicks;
         for (uint32_t cycle = 0; cycle < m_options.solve.cycles; ++cycle) {
             if (!m_options.solve.lineSearch) {
                 RecordCycle(list, debugRing, 0);
                 continue;
             }
 
-            RecordConjugate(list, debugRing, Pass::ConjugateSave, cycle);
+            uint32_t mark = cycle;
+            if (across)
+                mark |= EQB_CONJUGATE_ACROSS | (m_conjugateFresh ? 0u : EQB_CONJUGATE_KEEP);
+
+            RecordConjugate(list, debugRing, Pass::ConjugateSave, mark);
             RecordCycle(list, debugRing, 0);
             for (const Pass pass : {Pass::ConjugateResidual, Pass::ConjugateBeta, Pass::ConjugateDirection,
                                     Pass::ConjugatePush, Pass::ConjugateAlpha, Pass::ConjugateUpdate})
-                RecordConjugate(list, debugRing, pass, cycle);
+                RecordConjugate(list, debugRing, pass, mark);
         }
+
+        m_conjugateFresh = false;
     }
 
     uint64_t GpuEquilibriumBlock::DispatchesPerSolve() const {

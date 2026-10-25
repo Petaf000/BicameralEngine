@@ -181,15 +181,9 @@ namespace bicameral::sim {
                 return unknowns;
             }
 
-            std::vector<NodeBox> boxes(count);
-            for (uint32_t i = 0; i < count; ++i)
-                boxes[i] = BoxOf(system.nodes[i]);
-
-            const int64_t length = EqLengthUnits(options.closeLengthMm);
-            const int64_t bucket = std::max<int64_t>(length, EqCellEdgeUnits(0));
-            const std::map<Bucket, std::vector<uint32_t>> buckets = BucketSeeds(boxes, seeds, bucket);
+            const std::vector<uint8_t> inside = EquilibriumCloseRegion(system.nodes, seeds, options.closeLengthMm);
             for (uint32_t i = 0; i < count; ++i) {
-                if (seeds[i] != 0 || CloseToSeed(boxes[i], boxes, buckets, bucket, length))
+                if (inside[i] != 0)
                     unknowns.push_back(i);
             }
 
@@ -292,6 +286,25 @@ namespace bicameral::sim {
         }
 
     }  // namespace
+
+    std::vector<uint8_t> EquilibriumCloseRegion(std::span<const EquilibriumNode> nodes,
+                                                const std::vector<uint8_t>& seeds, uint64_t closeLengthMm) {
+        const auto count = (uint32_t)nodes.size();
+        std::vector<NodeBox> boxes(count);
+        for (uint32_t i = 0; i < count; ++i)
+            boxes[i] = BoxOf(nodes[i]);
+
+        const int64_t length = EqLengthUnits(closeLengthMm);
+        const int64_t bucket = std::max<int64_t>(length, EqCellEdgeUnits(0));
+        const std::map<Bucket, std::vector<uint32_t>> buckets = BucketSeeds(boxes, seeds, bucket);
+        std::vector<uint8_t> inside(count, 0);
+        for (uint32_t i = 0; i < count; ++i) {
+            if (seeds[i] != 0 || CloseToSeed(boxes[i], boxes, buckets, bucket, length))
+                inside[i] = 1;
+        }
+
+        return inside;
+    }
 
     EquilibriumResult SolveEquilibrium(const EquilibriumSystem& system, const EquilibriumOptions& options,
                                        EquilibriumState& state, const EquilibriumObserver* observer) {

@@ -345,10 +345,19 @@ add_test(NAME warm_start_save COMMAND warm_start_save_test)
 set_tests_properties(warm_start_save PROPERTIES TIMEOUT 1800)
 
 # 支えの法則の試作(研究 R-B1・T-0871。C-0 の使い手。CPU だけ)
+# T-0969: 成分を持つ節の釣り合いの CPU の試験(違うレベルの節が混ざる系)
+add_executable(equilibrium_block_test equilibrium_block_test.cpp)
+target_link_libraries(equilibrium_block_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME equilibrium_block COMMAND equilibrium_block_test)
 add_executable(support_law_test support_law_test.cpp)
 target_link_libraries(support_law_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME support_law COMMAND support_law_test)
 set_tests_properties(support_law PROPERTIES TIMEOUT 3000)
+# T-1120: 0.5 m と 0.25 m のセルが混ざる場面(違う大きさの梁 2 通り)を全部 0.25 m と比べる
+add_executable(support_mixed_test support_mixed_test.cpp)
+target_link_libraries(support_mixed_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME support_mixed COMMAND support_mixed_test)
+set_tests_properties(support_mixed PROPERTIES TIMEOUT 1200)
 
 # 支えの法則の割れ(研究 R-B2・T-0872): 2 通り(強さ / 強さで割れ始め + 割れ面のエネルギー)を片持ち梁・張り出し・洞窟で 0.5 / 0.25 m
 add_executable(support_fracture_test support_fracture_test.cpp)
@@ -360,6 +369,8 @@ add_test(NAME support_fracture_window COMMAND support_fracture_test --window-swe
 set_tests_properties(support_fracture_window PROPERTIES TIMEOUT 3000)
 add_test(NAME support_fracture_thick COMMAND support_fracture_test --thick-beam)
 set_tests_properties(support_fracture_thick PROPERTIES TIMEOUT 3000)
+add_test(NAME support_fracture_refine COMMAND support_fracture_test --refine)
+set_tests_properties(support_fracture_refine PROPERTIES TIMEOUT 3000)
 # T-1041 の見立て: 壁につながる棚の釣り合いに着く速さ(V の回数・掃き出し・粗い段の箱のそろい方・根が固定した面)
 add_test(NAME support_fracture_settle COMMAND support_fracture_test --settle)
 set_tests_properties(support_fracture_settle PROPERTIES TIMEOUT 3000)

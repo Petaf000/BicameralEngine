@@ -12,6 +12,7 @@
 #include <algorithm>
 
 #include "common/fixed.hlsli"
+#include "core/aliases.h"
 
 using namespace bicameral::fx;
 
@@ -32,20 +33,20 @@ namespace bicameral::sim {
             return (uint32_t)std::min<int64_t>(value, INDEX_CAP);
         }
 
-        // 面の中の直線の分布(縁の力 a・b)の正の部分の平均(力。両方正なら平均・両方負なら 0・混ざれば三角形)
-        int64_t PositivePart(int64_t a, int64_t b) {
-            const int64_t high = std::max(a, b);
-            const int64_t low = std::min(a, b);
-            if (low >= 0)
-                return (a + b) / 2;
-
-            if (high <= 0)
-                return 0;
-
-            return FxMulDivS64(high, (uint64_t)high, (uint64_t)(2 * (high - low)));
-        }
-
     }  // namespace
+
+    // 面の中の直線の分布(縁の力 a・b)の正の部分の平均(力。両方正なら平均・両方負なら 0・混ざれば三角形)
+    int64_t SupportFracture::PositivePart(int64_t a, int64_t b) {
+        const int64_t high = std::max(a, b);
+        const int64_t low = std::min(a, b);
+        if (low >= 0)
+            return (a + b) / 2;
+
+        if (high <= 0)
+            return 0;
+
+        return FxMulDivS64(high, (uint64_t)high, (uint64_t)(2 * (high - low)));
+    }
 
     SupportFracture::SupportFracture(const SupportScene& scene, const SupportOptions& options,
                                      const SupportStrength& strength, const SupportFractureOptions& fracture)
@@ -93,6 +94,11 @@ namespace bicameral::sim {
         const uint64_t lengthMm = FxDivU128By64(irwin, std::max<uint64_t>(tensile * tensile * 1000, 1)).quotient;
         m_windowMm = std::max(lengthMm, SUPPORT_FRACTURE_MIN_LENGTH_MM);
 
+        // 細かい格子で持つ(T-1067): 分けたセルがあるか、割れかけの所を細かくする時
+        m_fineMode = m_fracture.refine || rng::any_of(m_scene.fine, [](uint8_t fine) { return fine != 0; });
+        if (m_fineMode)
+            InitFine();
+
         Separate();
         Rebuild();
     }
@@ -115,6 +121,12 @@ namespace bicameral::sim {
             const size_t at = x + (size_t)m_scene.width * up;
             m_scene.solid[at] = 0;
             m_scene.clamps[at] = 0;
+            if (!m_fineMode)
+                continue;
+
+            m_scene.fine[at] = 0;
+            for (uint32_t part = 0; part < 4; ++part)
+                m_scene.fineAbsent[2 * x + (part & 1) + (size_t)2 * m_scene.width * (2 * up + (part >> 1))] = 0;
         }
 
         Separate();
@@ -125,9 +137,26 @@ namespace bicameral::sim {
         if (x >= m_scene.width || up >= m_scene.height)
             return 0;
 
+        if (m_fineMode) {
+            // 粗い面の 2 つの細かい面の小さい方(割れ切った = 2 つとも)
+            const uint32_t fx = axis == 0 ? 2 * x + 1 : 2 * x;
+            const uint32_t fup = axis == 0 ? 2 * up : 2 * up + 1;
+            return std::min(FineProgress(fx, fup, axis),
+                            FineProgress(axis == 0 ? fx : fx + 1, axis == 0 ? fup + 1 : fup, axis));
+        }
+
         const std::vector<uint32_t>& progress = axis == 0 ? m_progressX : m_progressUp;
 
         return progress[x + (size_t)m_scene.width * up];
+    }
+
+    uint32_t SupportFracture::FineProgress(uint32_t fx, uint32_t fup, uint32_t axis) const {
+        if (!m_fineMode || fx >= 2 * m_scene.width || fup >= 2 * m_scene.height)
+            return 0;
+
+        const std::vector<uint32_t>& progress = axis == 0 ? m_progressFineX : m_progressFineUp;
+
+        return progress[fx + (size_t)2 * m_scene.width * fup];
     }
 
     // --- 強さの比(Q16)。面の力を割れていない硬さに戻して応力にし、強さの形の 3 つの切り口のいちばん近いもの ---
@@ -148,7 +177,13 @@ namespace bicameral::sim {
 
     // 引きの力 pull・押しの力 push(どちらも応力 × 面積)・軸の力・ずれの力から強さの比(Q16)
     uint32_t SupportFracture::IndexFrom(int64_t pull, int64_t push, int64_t axial, int64_t shear) const {
-        const uint64_t area = m_scene.cellMm * m_scene.cellMm;
+        return IndexFromArea(pull, push, axial, shear, m_scene.cellMm * m_scene.cellMm);
+    }
+
+    // 同じ。面積 areaMm2 の面(細かい格子の面・区間の和。T-1067)
+    uint32_t SupportFracture::IndexFromArea(int64_t pull, int64_t push, int64_t axial, int64_t shear,
+                                            uint64_t areaMm2) const {
+        const uint64_t area = areaMm2;
         const uint64_t tensile = m_strength.tensileKpa;
         const uint64_t compressive = m_strength.compressiveKpa;
         int64_t index = 0;
@@ -176,13 +211,18 @@ namespace bicameral::sim {
 
     // κ = √(U ÷ U_t)(Q16)
     uint32_t SupportFracture::EnergyIndex(int64_t undamagedPj) const {
+        return EnergyIndexOf(undamagedPj, m_faceUnitPj);
+    }
+
+    // κ = √(U ÷ U_t)(Q16。U_t = unitPj)
+    uint32_t SupportFracture::EnergyIndexOf(int64_t undamagedPj, uint64_t unitPj) const {
         if (undamagedPj <= 0)
             return 0;
 
-        if ((uint64_t)undamagedPj / m_faceUnitPj >= (uint64_t{1} << 20))
+        if ((uint64_t)undamagedPj / unitPj >= (uint64_t{1} << 20))
             return INDEX_CAP;
 
-        const uint64_t ratio = FxDivU128By64(FxMulU64Full((uint64_t)undamagedPj, ONE * ONE), m_faceUnitPj).quotient;
+        const uint64_t ratio = FxDivU128By64(FxMulU64Full((uint64_t)undamagedPj, ONE * ONE), unitPj).quotient;
 
         return FxSqrtU64(ratio);
     }
@@ -194,25 +234,32 @@ namespace bicameral::sim {
 
     // 強さの比 index(Q16)と、割れていない硬さに戻したエネルギー undamagedPj から
     uint32_t SupportFracture::TargetFrom(uint32_t index, int64_t undamagedPj, uint32_t progress) const {
+        return TargetFromSums(index, undamagedPj, m_faceUnitPj, m_faceSurfacePj, progress);
+    }
+
+    // 同じ。エネルギー・U_t・割れ面のエネルギーの和から(区間の面の和でもよい: r = ΣGA ÷ ΣU_t・κ = √(ΣU ÷ ΣU_t)。T-1067)
+    uint32_t SupportFracture::TargetFromSums(uint32_t index, int64_t undamagedPj, uint64_t unitPj, uint64_t surfacePj,
+                                             uint32_t progress) const {
         if (index < ONE)
             return progress;  // 強さを超えていない面は割れ始めない(どの形でも)
 
         if (m_fracture.rule == FractureRule::Strength)
             return (uint32_t)ONE;
 
-        if (m_softening <= ONE)
-            return undamagedPj >= (int64_t)m_faceSurfacePj ? (uint32_t)ONE : progress;
+        const uint64_t softening = std::min(FxDivU128By64(FxMulU64Full(surfacePj, ONE), unitPj).quotient,
+                                            SOFTENING_CAP);
+        if (softening <= ONE)
+            return undamagedPj >= (int64_t)surfacePj ? (uint32_t)ONE : progress;
 
-        const uint64_t kappa = EnergyIndex(undamagedPj);
+        const uint64_t kappa = EnergyIndexOf(undamagedPj, unitPj);
         if (kappa <= ONE)
             return progress;
 
-        if (kappa >= m_softening)
+        if (kappa >= softening)
             return (uint32_t)ONE;
 
         // p = 1 − (r − κ) ÷ (κ (r − 1))。残りは切り上げる(進みを切り捨て、κ(p) ≤ 今の κ = 熱 ≥ 0 を丸めで破らない)
-        const FxDivResult rest = FxDivU128By64(FxMulU64Full((m_softening - kappa) * ONE, ONE),
-                                               kappa * (m_softening - ONE));
+        const FxDivResult rest = FxDivU128By64(FxMulU64Full((softening - kappa) * ONE, ONE), kappa * (softening - ONE));
         const uint64_t restUp = rest.quotient + (rest.remainder != 0 ? 1 : 0);
 
         return std::max(progress, (uint32_t)(ONE - std::min(restUp, ONE)));
@@ -220,15 +267,20 @@ namespace bicameral::sim {
 
     // 進み p までに払った割れ面のエネルギー(pJ)
     int64_t SupportFracture::SurfacePj(uint32_t progress) const {
-        if (m_fracture.rule == FractureRule::Strength || m_softening <= ONE)
-            return (int64_t)FxShiftRightU128(FxMulU64Full(m_faceSurfacePj, progress), 16);
+        return SurfaceOf(progress, m_faceSurfacePj, m_softening);
+    }
+
+    // 同じ。面の G A = surfacePj・r = softening(細かい格子の面の種類ごと。T-1067)
+    int64_t SupportFracture::SurfaceOf(uint32_t progress, uint64_t surfacePj, uint64_t softening) const {
+        if (m_fracture.rule == FractureRule::Strength || softening <= ONE)
+            return (int64_t)FxShiftRightU128(FxMulU64Full(surfacePj, progress), 16);
 
         // κ(p) = r ÷ (1 + (1 − p)(r − 1))・D = G A (κ − 1) ÷ (r − 1)
-        const uint64_t denominator = ONE + (ONE - progress) * (m_softening - ONE) / ONE;
-        const uint64_t kappa = m_softening * ONE / denominator;
-        const uint64_t fraction = (kappa - ONE) * ONE / (m_softening - ONE);
+        const uint64_t denominator = ONE + (ONE - progress) * (softening - ONE) / ONE;
+        const uint64_t kappa = softening * ONE / denominator;
+        const uint64_t fraction = (kappa - ONE) * ONE / (softening - ONE);
 
-        return (int64_t)FxShiftRightU128(FxMulU64Full(m_faceSurfacePj, std::min(fraction, ONE)), 16);
+        return (int64_t)FxShiftRightU128(FxMulU64Full(surfacePj, std::min(fraction, ONE)), 16);
     }
 
     // 面 1 つ: 進める分を決め、帳簿に載せる(当てるのは全部の面を決めた後)
@@ -259,6 +311,11 @@ namespace bicameral::sim {
 
     void SupportFracture::Step() {
         m_law->Step();
+        if (m_fineMode) {
+            FineStep();
+            return;
+        }
+
         m_nextX = m_progressX;
         m_nextUp = m_progressUp;
 
@@ -506,6 +563,11 @@ namespace bicameral::sim {
 
     // --- 固定した面(地面・壁)から割れていない面でたどれないセルに「分かれた」印を付け、釣り合いから外す ---
     void SupportFracture::Separate() {
+        if (m_fineMode) {
+            SeparateFine();
+            return;
+        }
+
         const uint32_t width = m_scene.width;
         const uint32_t height = m_scene.height;
         std::vector<uint8_t> reached(m_scene.solid.size(), 0);
@@ -557,6 +619,21 @@ namespace bicameral::sim {
             hash = FxHashCombine(hash, m_progressX[at]);
             hash = FxHashCombine(hash, m_progressUp[at]);
             hash = FxHashCombine(hash, m_separated[at]);
+        }
+
+        // 細かい格子の進みと分けたセル(T-1067)
+        for (size_t at = 0; at < m_progressFineX.size(); ++at) {
+            hash = FxHashCombine(hash, m_progressFineX[at]);
+            hash = FxHashCombine(hash, m_progressFineUp[at]);
+            hash = FxHashCombine(hash, m_scene.fineAbsent[at]);
+        }
+
+        if (m_fineMode) {
+            for (const uint8_t fine : m_scene.fine)
+                hash = FxHashCombine(hash, fine);
+
+            for (const uint16_t calm : m_calmTicks)
+                hash = FxHashCombine(hash, calm);
         }
 
         return hash;

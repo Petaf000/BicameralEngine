@@ -1,5 +1,5 @@
 // support_scenes.h — 支えの法則(sim/support_law)の試験の場面(石の張り出し・梁・アーチ・洞窟)。support_law_test(CPU。T-0871・T-0919)と
-// gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970)が同じ場面を使う。縦の面・奥行 1 セル。
+// gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970・T-1104)・support_mixed_test(T-1120)が同じ場面を使う。縦の面・奥行 1 セル。
 #pragma once
 
 #include <cstdint>
@@ -65,6 +65,18 @@ namespace bicameral::test {
                 scene.solid[x + (size_t)width * up] = hollow ? 0 : 1;
                 scene.clamps[x + (size_t)width * up] = !hollow && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0;
             }
+        }
+
+        return scene;
+    }
+
+    // 場面の [fromX, toX) × [fromUp, toUp) のセルに細かくする印(SupportScene::fine。T-1120・ADR-0470)を付ける
+    inline sim::SupportScene Marked(sim::SupportScene scene, uint32_t fromX, uint32_t toX, uint32_t fromUp,
+                                    uint32_t toUp) {
+        scene.fine.assign(scene.solid.size(), 0);
+        for (uint32_t up = fromUp; up < toUp; ++up) {
+            for (uint32_t x = fromX; x < toX; ++x)
+                scene.fine[x + (size_t)scene.width * up] = 1;
         }
 
         return scene;

@@ -28,7 +28,11 @@ EQB_NAMESPACE_BEGIN
 FX_CONST uint32_t EQB_MAX_COMPONENTS = 6;                                     // 3 次元の支え(変位 3 + 回り 3)まで
 FX_CONST uint32_t EQB_BLOCK_WORDS = EQB_MAX_COMPONENTS * EQB_MAX_COMPONENTS;  // k × k の置き場([行 × 6 + 列])
 FX_CONST uint32_t EQB_PROLONG_SHIFT = 16;                                     // 延ばし方の行列の Q
-FX_CONST uint32_t EQB_OCTANTS = 8;        // 子の八分割(x の奇偶 + 2 × y の奇偶 + 4 × z の奇偶)= 8 色
+FX_CONST uint32_t EQB_OCTANTS = 8;  // 子の八分割(x の奇偶 + 2 × y の奇偶 + 4 × z の奇偶)= 8 色
+// 延ばし方・縮約の置き場の数: 子の八分割 + 粗くしない節(違うレベルの節が混ざる段で次の段へそのまま渡す節。単位の行列。T-0969・T-1104)
+FX_CONST uint32_t EQB_PROLONG_SLOTS = EQB_OCTANTS + 1;
+// 色の数の上限: 違うレベルが混ざる段は座標の奇偶 8 + 8 × レベルの奇偶 = 16 色(ADR-0462)
+FX_CONST uint32_t EQB_MAX_COLORS = 2 * EQB_OCTANTS;
 FX_CONST uint32_t EQB_FACTOR_SHIFT = 30;  // LDLᵀ の L の Q
 // 消去の後の対角が元の対角のこの分の 1 より小さい向きは、支えの無い向きとして解かない
 FX_CONST uint32_t EQB_PIVOT_FLOOR_SHIFT = 20;
@@ -309,26 +313,26 @@ FX_FN EqbBlock EqbNarrowBlock(FX_IN(EqbWideBlock) wide, uint32_t k, uint32_t shi
 }
 
 // --- 置き場の番地(int64 の語。k × k のブロックは詰めて k² 語。CPU の詰めと GPU の読みが同じ関数)---------------
-// 係数のバッファ: 延ばし方 P(8 × k²)・縮約 Pᵀ(8 × k²)・対角(節 × k²)・面のブロック(隣 × k²)・LDLᵀ(節 × (k² + k))・
+// 係数のバッファ: 延ばし方 P(9 × k²。8 つ目の後ろは粗くしない節の単位の行列)・縮約 Pᵀ(9 × k²)・対角(節 × k²)・面のブロック(隣 × k²)・LDLᵀ(節 × (k² + k))・
 //   値を固定した面(件 × (k² + k)。ブロックと外の値)
 FX_FN uint32_t EqbProlongWord(uint32_t k, uint32_t octant) {
     return octant * k * k;
 }
 
 FX_FN uint32_t EqbRestrictWord(uint32_t k, uint32_t octant) {
-    return (EQB_OCTANTS + octant) * k * k;
+    return (EQB_PROLONG_SLOTS + octant) * k * k;
 }
 
 FX_FN uint32_t EqbDiagonalWord(uint32_t k, uint32_t node) {
-    return (2 * EQB_OCTANTS + node) * k * k;
+    return (2 * EQB_PROLONG_SLOTS + node) * k * k;
 }
 
 FX_FN uint32_t EqbBlockWord(uint32_t k, uint32_t nodeCapacity, uint32_t link) {
-    return (2 * EQB_OCTANTS + nodeCapacity + link) * k * k;
+    return (2 * EQB_PROLONG_SLOTS + nodeCapacity + link) * k * k;
 }
 
 FX_FN uint32_t EqbFactorWord(uint32_t k, uint32_t nodeCapacity, uint32_t linkCapacity, uint32_t node) {
-    return (2 * EQB_OCTANTS + nodeCapacity + linkCapacity) * k * k + node * (k * k + k);
+    return (2 * EQB_PROLONG_SLOTS + nodeCapacity + linkCapacity) * k * k + node * (k * k + k);
 }
 
 FX_FN uint32_t EqbFixedWord(uint32_t k, uint32_t nodeCapacity, uint32_t linkCapacity, uint32_t fixedFace) {
@@ -381,7 +385,12 @@ FX_FN uint32_t EqbConjugateWorkWords(uint32_t k, uint32_t nodeCapacity, uint32_t
 }
 
 // --- 共役勾配の数(CPU の SolveEquilibriumBlocks と GPU で同じ式)---
-FX_CONST uint64_t EQB_STEP_ONE = 65536;                             // α・β の Q16 の 1
+FX_CONST uint64_t EQB_STEP_ONE = 65536;  // α・β の Q16 の 1
+// 共役勾配の段の「何回目の V か」(GPU の g_eqbFirst)に足す印(T-1086・D-649)。ACROSS = 刻みをまたぐ(β の分母に pᵀr を覚える)・
+// KEEP = 1 回目の V でも前の向きを捨てない(写した直後の最初の解きは付けない = CPU の「向きなしで始める」と同じ)
+FX_CONST uint32_t EQB_CONJUGATE_ACROSS = 0x80000000u;
+FX_CONST uint32_t EQB_CONJUGATE_KEEP = 0x40000000u;
+FX_CONST uint32_t EQB_CONJUGATE_CYCLE_MASK = 0x3fffffffu;
 FX_CONST uint64_t EQB_STEP_MAX = (uint64_t)65536 * (uint64_t)4096;  // 大きさの上限(4096 倍)
 
 FX_FN bool EqbWideIsNegative(FxU128 value) {

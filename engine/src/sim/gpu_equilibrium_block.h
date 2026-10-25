@@ -104,8 +104,10 @@ namespace bicameral::sim {
         struct Level {
             uint32_t first = 0;  // 節の始まり(全部の段の番号)
             uint32_t count = 0;
-            std::array<uint32_t, equilibrium_block::EQB_OCTANTS> colorStarts{};  // 添字のバッファの中の色の一覧
-            std::array<uint32_t, equilibrium_block::EQB_OCTANTS> colorCounts{};
+            // 添字のバッファの中の色の一覧(同じレベルの段は 8 色・違うレベルが混ざる段は 16 色。T-1104)
+            uint32_t colorCount = equilibrium_block::EQB_OCTANTS;
+            std::array<uint32_t, equilibrium_block::EQB_MAX_COLORS> colorStarts{};
+            std::array<uint32_t, equilibrium_block::EQB_MAX_COLORS> colorCounts{};
         };
 
         GpuEquilibriumBlock() = default;
@@ -149,6 +151,8 @@ namespace bicameral::sim {
         gpu::ResidentBuffer m_nodes;    // EqbGpuNode(t0)
         gpu::ResidentBuffer m_indices;  // 隣・子・色の一覧(t1)
         bool m_residentPending = true;
+        // 写した直後で、刻みをまたぐ共役勾配の向きがまだ無い(RecordSolve が積んだら下ろす。記録の順の印なので const の記録でも書く)
+        mutable bool m_conjugateFresh = true;
         ComPtr<ID3D12Resource> m_coefficients;  // u0
         ComPtr<ID3D12Resource> m_work;          // u1
         ComPtr<ID3D12Resource> m_coefficientUpload;

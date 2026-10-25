@@ -5,6 +5,9 @@
 //    CPU の SupportLaw::Step と同じ系を GPU で 1 刻みずつ解き(1 本のリストに --ticks 刻み。答えは次の刻みの温めた始まり)、毎刻み節 × 3 の値を比べる。
 //    値が同じなので、帳簿(Σ セルの上向きの力 = 固定した面の力 − 重さ)と面の力も CPU と同じ(support_law_test が CPU で確かめる)。
 // 2. 成分の数 k = 1・2・3・6 の箱(一辺 8。軸の面の k × k の結合・下の面を固定・区分的に一定の延ばし方)を 5 刻み、同じく比べる。
+//    違うレベルの節が混ざる系(T-1104・ADR-0462): equilibrium_block_test の箱(k = 1・3。真ん中 2 × 2 × 2 をレベル 1)を V 2 回・
+//    V 4 回 + 共役勾配・V 2 回 + 刻みをまたぐ共役勾配(D-649)で 12 刻み、節と面の並びを逆にした系も。支えの違う大きさのセルの場面
+//    (support_mixed_test の場面。0.5 m と 0.25 m。支えの既定 = V 2 回 + 刻みをまたぐ共役勾配)を --ticks 刻み。
 // 3. 決定性(R3): 色の一覧・行・子・固定した面の順を逆に積んだ GPU と 2 回目の GPU が、最後の値のハッシュで一致。
 // 4. 費用(--measure): k ごとの箱(一辺 32。64 は k = 1・3)の 1 回の解き(V 2 回)の時間(暖機の後 8 回の最小)・段を作る時間・VRAM・Dispatch の数。
 //    支えの洞窟 0.25 m の 1 回の解きも。値は比べない(1 と 2 で比べてある)。
@@ -22,6 +25,7 @@
 
 #include "core/log.h"
 #include "core/singleton.h"
+#include "equilibrium_block_scenes.h"
 #include "gpu/debug_ring.h"
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
@@ -114,6 +118,22 @@ namespace {
         return {};
     }
 
+    // 段の中で隣どうしの節が同じ色なら、その節の組と段(無ければ空)。同じ色の隣は CPU の 1 本の回しと GPU の並びの答えを分ける(R3)
+    std::string SameColorLink(const sim::EquilibriumBlockGrid& grid) {
+        for (size_t depth = 0; depth < grid.levels.size(); ++depth) {
+            const sim::EquilibriumBlockLevel& level = grid.levels[depth];
+            for (size_t i = 0; i < level.x.size(); ++i) {
+                for (uint32_t link = level.rowStarts[i]; link < level.rowStarts[i + 1]; ++link) {
+                    if (level.colors[level.neighbors[link]] == level.colors[i])
+                        return std::format("段 {} の節 {} と {} が同じ色 {}", depth, i, level.neighbors[link],
+                                           level.colors[i]);
+                }
+            }
+        }
+
+        return {};
+    }
+
     // GPU(順のまま・逆順)を 1 回ずつ。CPU の刻みごとの値 cpuTicks と比べる
     std::expected<void, std::string> CompareRuns(Context& context, std::string_view name,
                                                  const sim::EquilibriumBlockSystem& system,
@@ -121,6 +141,10 @@ namespace {
                                                  const sim::EquilibriumBlockOptions& solve,
                                                  std::span<const int64_t> warm,
                                                  const std::vector<std::vector<int64_t>>& cpuTicks) {
+        const std::string sameColor = SameColorLink(grid);
+        if (!sameColor.empty())
+            return std::unexpected(std::format("{}: {}", name, sameColor));
+
         const auto ticks = (uint32_t)cpuTicks.size();
         uint64_t firstHash = 0;
         for (const bool reverse : {false, true}) {
@@ -168,6 +192,21 @@ namespace {
         };
     }
 
+    // 違う大きさのセル(0.5 m と 0.25 m)が混ざる場面(support_mixed_test と同じ。T-1120・T-1104)。Coupled の 1 つの系がレベル 0 と 1 の節を持つ
+    std::vector<SupportCase> MixedSupportCases() {
+        const sim::SupportScene shelf = test::Beam(8, 1, 500, false);
+        const sim::SupportScene cantilever = test::Beam(16, 2, 500, false);
+        const sim::SupportScene clamped = test::Beam(16, 2, 500, true);
+
+        return {
+            {.name = "張り出し 4 m の根 1 m を 0.25 m", .scene = test::Marked(shelf, 0, 2, 0, 1)},
+            {.name = "片持ち梁 8 × 1 m の根の半分を 0.25 m", .scene = test::Marked(cantilever, 0, 8, 0, 2)},
+            {.name = "片持ち梁 8 × 1 m の上の段だけ 0.25 m", .scene = test::Marked(cantilever, 0, 16, 1, 2)},
+            {.name = "両端を固定した梁 8 × 1 m の真ん中 3 m を 0.25 m", .scene = test::Marked(clamped, 5, 11, 0, 2)},
+            {.name = "洞窟の天井(と空洞の縁)を 0.25 m", .scene = test::Marked(test::Cave(500), 14, 34, 6, 20)},
+        };
+    }
+
     // CPU の law を ticks 刻み回した値(刻みごと)
     std::vector<std::vector<int64_t>> CpuTicks(sim::SupportLaw& law, uint32_t ticks) {
         std::vector<std::vector<int64_t>> result;
@@ -185,6 +224,18 @@ namespace {
         const auto cpuTicks = CpuTicks(law, ticks);
 
         return CompareRuns(context, name, law.BlockSystem(), law.BlockGrid(), options.blocks, warm, cpuTicks);
+    }
+
+    std::expected<void, std::string> TestMixedSupport(Context& context, const sim::SupportOptions& options,
+                                                      uint32_t ticks) {
+        for (const SupportCase& each : MixedSupportCases()) {
+            sim::SupportLaw law(each.scene, options);
+            const auto compared = CompareSupport(context, each.name, law, options, ticks);
+            if (!compared)
+                return compared;
+        }
+
+        return {};
     }
 
     std::expected<void, std::string> TestSupport(Context& context, uint32_t ticks) {
@@ -215,7 +266,11 @@ namespace {
         sim::SupportLaw dug(scene, options);
         dug.CarryFrom(before);
 
-        return CompareSupport(context, "掘った直後(16 × 8 m の下 8 × 3 m)", dug, options, ticks);
+        const auto compared = CompareSupport(context, "掘った直後(16 × 8 m の下 8 × 3 m)", dug, options, ticks);
+        if (!compared)
+            return compared;
+
+        return TestMixedSupport(context, options, ticks);
     }
 
     // --- 2. k 成分の箱 ---
@@ -306,6 +361,43 @@ namespace {
                 const auto compared = CompareRuns(context, name, system, grid, solve, {}, cpuTicks);
                 if (!compared)
                     return compared;
+            }
+        }
+
+        return {};
+    }
+
+    // 違うレベルの節が混ざる箱(T-1104)。CPU の刻みごとの値と比べる(GPU の逆順は CompareRuns。節と面の並びを逆にした系も)
+    std::expected<void, std::string> TestMixed(Context& context) {
+        constexpr uint32_t TICKS = 12;
+        struct Variant {
+            const char* name;
+            sim::EquilibriumBlockOptions solve;
+        };
+        const std::array<Variant, 3> variants = {{
+            {.name = "V 2 回", .solve = {}},
+            {.name = "V 4 回 + 共役勾配", .solve = {.cycles = 4, .lineSearch = true}},
+            {.name = "V 2 回 + 刻みをまたぐ共役勾配",
+             .solve = {.cycles = 2, .lineSearch = true, .conjugateAcrossTicks = true}},
+        }};
+        for (const Variant& variant : variants) {
+            for (const uint32_t k : {1u, 3u}) {
+                for (const bool reverse : {false, true}) {
+                    const sim::EquilibriumBlockSystem system = test::MixedSystem(k, true, reverse);
+                    const sim::EquilibriumBlockGrid grid = sim::BuildEquilibriumBlockGrid(system);
+                    sim::EquilibriumBlockState state;
+                    std::vector<std::vector<int64_t>> cpuTicks;
+                    for (uint32_t tick = 0; tick < TICKS; ++tick) {
+                        sim::SolveEquilibriumBlocks(system, grid, variant.solve, state);
+                        cpuTicks.push_back(state.values);
+                    }
+
+                    const std::string name = std::format("違うレベルの箱 k = {}・{}{}", k, variant.name,
+                                                         reverse ? "・節と面を逆に" : "");
+                    const auto compared = CompareRuns(context, name, system, grid, variant.solve, {}, cpuTicks);
+                    if (!compared)
+                        return compared;
+                }
             }
         }
 
@@ -417,7 +509,7 @@ namespace {
             }
         }
 
-        // 支えの洞窟: 前の既定(V 2 回)と今の既定(V 4 回 + 共役勾配。T-1085)
+        // 支えの洞窟: 前の前の既定(V 2 回)と今の既定(V 2 回 + 共役勾配・刻みをまたぐ。D-649)
         const sim::SupportOptions support{.solve = sim::SupportSolve::Coupled};
         for (const uint64_t cellMm : {500ull, 250ull}) {
             const sim::SupportLaw law(test::Cave(cellMm), support);
@@ -428,6 +520,21 @@ namespace {
                     return measured;
             }
         }
+
+        // 違う大きさのセルが混ざる洞窟(0.5 m の天井と空洞の縁を 0.25 m。T-1104)と、違うレベルの箱(k = 3)
+        const sim::SupportLaw mixedCave(test::Marked(test::Cave(500), 14, 34, 6, 20), support);
+        for (const sim::EquilibriumBlockOptions& solve : {sim::EquilibriumBlockOptions{}, support.blocks}) {
+            const auto measured = MeasureOne(context, "支えの洞窟 500 mm の天井を 250 mm・k = 3",
+                                             mixedCave.BlockSystem(), mixedCave.BlockGrid(), false, solve);
+            if (!measured)
+                return measured;
+        }
+
+        const sim::EquilibriumBlockSystem mixedBox = test::MixedSystem(3, true, false);
+        const auto measuredBox = MeasureOne(context, "違うレベルの箱 一辺 8・k = 3", mixedBox,
+                                            sim::BuildEquilibriumBlockGrid(mixedBox));
+        if (!measuredBox)
+            return measuredBox;
 
         return {};
     }
@@ -470,6 +577,9 @@ namespace {
 
         Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = frequency};
         auto ran = TestComponents(context);
+        if (ran)
+            ran = TestMixed(context);
+
         if (ran)
             ran = TestSupport(context, ticks);
 

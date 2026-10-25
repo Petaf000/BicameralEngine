@@ -10,10 +10,15 @@
 //     引きの側・押しの側の応力の平均(面の中の直線の分布の正の部分・負の部分)・ずれ・エネルギーを平均して 2 本目と同じ判定をし、
 //     区間の面を一緒に進める(有限の割れの判定〔Leguillon の coupled criterion〕と同じ形。セル ≤ ℓ なら判定がセルの大きさによらない)。
 //     ℓ = 硬さ × 割れ面のエネルギー ÷ 引きの強さ²(Irwin の長さ。下限 SUPPORT_FRACTURE_MIN_LENGTH_MM。D-644)で、物質の別の値は持たない。
-//     セル > ℓ の所は区間 = 面 1 つ(粗い所は ℓ の細かさに下りて割る = 22 §3.5。下りる道は多重解像度の側)
+//     セル > ℓ の所は区間 = 面 1 つ(粗い所は ℓ の細かさに下りて割る = 22 §3.5。下りる道は下の refine)
 // 割れの速さは物質の値(m/s。D-612 の既定 = この宇宙の速さとして遅く)。1 刻みに進む割合 = 速さ × 刻み ÷ セル(1 を超える値は 1 で止める。
 // 速さから決まる小刻み〔D-612 (a)〕の道はまだ無い: T-0943)。
 // 割れて地面・壁(固定した面)につながらなくなったセルは「分かれた」印を付けて釣り合いから外す(物の物理へ渡すのは R-O1。ここでは印まで)。
+// 細かくする道(T-1067・22 §3.5・ADR-0470「割れの判定の数え方」): 場面に分けたセル(SupportScene::fine)があるか refine を入れると、割れの進みを
+// 細かい格子(一辺 cellMm ÷ 2)の面ごとに持つ(粗い面は細かい面 2 つ分の幅で、2 つの値をそろえて持つ)。区間は面の数ではなく長さで切り、
+// 応力は面積 w × D の重み、割れ面のエネルギーは G × w × D、軟化の傾きは面の梁の長さ h(粗い面 2s・細かい面 s・違う大きさの面 1.5s)、
+// 1 刻みに進む割合は 速さ × 刻み ÷ w(support_fracture_fine.cpp)。refine は強さの比が refineIndex を超えた面の両側の粗いセルを 2 × 2 に分け、
+// 割れが止んだ所(中の面が割れていない・外の面の 2 つの細かい面の進みが同じ・比が coarsenIndex 未満)を戻す(状態だけで決まる = N1)
 // データの流れ: SupportScene + SupportStrength → SupportLaw(釣り合い)→ 面の力・エネルギー(FaceForces)→ 割れの進み → scene の intactX / intactUp
 //   → 次の刻みの SupportLaw(前の答えから温めて始める)。帳簿: 解放されたエネルギー = 割れ面のエネルギー + 熱(pJ。整数で厳密)
 #pragma once
@@ -50,6 +55,15 @@ namespace bicameral::sim {
     struct SupportFractureOptions {
         FractureRule rule = FractureRule::Energy;
         uint64_t stepUs = 16667;  // 1 刻み(µs。60 刻み/秒)
+
+        // --- 割れかけの所を細かくする(T-1067)---
+        bool refine = false;
+        uint32_t refineIndex = 32768;  // 分ける強さの比(Q16。1/2)
+        uint32_t refineRing = 1;  // 分ける周り(比が線を超えた面の両側のセルから、この数のセルまで。チェビシェフの距離)
+        uint32_t coarsenIndex = 16384;  // 戻す強さの比(Q16。1/4)
+        // 戻すのは、比が coarsenIndex 未満の刻みがこの数だけ続いた後(分けると比の測り方が変わるので、比の幅だけでは
+        // 線の近くのセルが毎刻み分ける・戻すを行き来した = 2026-10-26 の測り)。続いた数はセルごとの状態(ハッシュに入る)
+        uint32_t coarsenTicks = 120;
     };
 
     // 割れの帳簿(pJ)。releasedPj == surfacePj + heatPj が整数で厳密(熱は残りとして数える)
@@ -62,6 +76,12 @@ namespace bicameral::sim {
         uint32_t crackingFaces = 0;     // 割れかけの面(0 < 進み < 1)
         uint32_t separatedCells = 0;    // 分かれた印のセル
         uint32_t heatLimitedSteps = 0;  // 区間の熱が負になるので届く所を下げた歩の数(Window だけ。T-1103)
+
+        // --- 細かい格子で持つ時(T-1067)---
+        uint64_t brokenAreaMm2 = 0;    // 割れ切った面の面積の和(面の幅 × 奥行)
+        uint64_t crackingAreaMm2 = 0;  // 割れかけの面の面積の和
+        uint32_t fineCells = 0;        // 今の細かいセルの数
+        uint32_t refineSteps = 0;      // セルを分けた・戻した刻みの数
     };
 
     class SupportFracture {
@@ -81,6 +101,11 @@ namespace bicameral::sim {
         const SupportScene& Scene() const { return m_scene; }
         // 面(セル (x, up) と +軸の隣の間)の割れの進み(Q16。SUPPORT_INTACT_FULL = 割れ切った)
         uint32_t Progress(uint32_t x, uint32_t up, uint32_t axis) const;
+        // 細かい格子の面(細かい座標 (fx, fup) と +軸の隣の間)の割れの進み(Q16。細かい格子で持つ時だけ。ほかは 0)
+        uint32_t FineProgress(uint32_t fx, uint32_t fup, uint32_t axis) const;
+        bool FineMode() const { return m_fineMode; }
+        // 細かい格子の面の強さの比(Q16。縁の応力で。粗い面は 2 つの場所のどちらでも同じ値。面が無ければ 0)
+        uint32_t FineFailureIndex(uint32_t fx, uint32_t fup, uint32_t axis) const;
         // 分かれた印(並びは scene。1 = 割れて地面・壁につながらなくなり、釣り合いから外したセル。物の物理へ渡すのは R-O1)
         const std::vector<uint8_t>& Separated() const { return m_separated; }
         const SupportFractureLedger& Ledger() const { return m_ledger; }
@@ -123,6 +148,84 @@ namespace bicameral::sim {
         static constexpr uint32_t NO_WINDOW = 0xffffffffu;
         static constexpr size_t NO_FACE = ~size_t{0};
 
+        // --- 細かい格子で持つ時(T-1067。support_fracture_fine.cpp)---
+        // 面の種類ごとの値(粗い面・細かい面・違う大きさの面)
+        enum FaceKindIndex : uint32_t { FACE_COARSE = 0, FACE_FINE = 1, FACE_MIXED = 2, FACE_KINDS = 3 };
+
+        struct FaceKind {
+            uint32_t slots = 0;      // 面の幅(細かい格子の数)
+            uint64_t areaMm2 = 0;    // 面の幅 × 奥行
+            uint64_t surfacePj = 0;  // G × 面積
+            uint64_t unitPj = 0;     // 引きの強さちょうどで面の梁(長さ h)が一様に伸びた時のエネルギー σt² A h ÷ (2E)
+            uint64_t softening = 0;  // r = G A ÷ U_t(Q16)
+            uint32_t speedStep = 0;  // 1 刻みに進む割合の上限(Q16)= 速さ × 刻み ÷ 面の幅
+        };
+
+        struct FineFace {
+            uint32_t kind = FACE_COARSE;
+            uint32_t axis = 0;
+            uint32_t key = 0;                 // 細かい格子の低い側のセル(fx + 2 width × fup)
+            uint32_t pairKey = 0;             // 粗い面の 2 つ目の細かい面(粗い面でなければ key)
+            uint32_t line = 0;                // 面の並ぶ線(x の面は fx・上の面は fup)
+            uint32_t start = 0;               // 線に沿った位置(細かい格子)
+            std::array<uint32_t, 2> cells{};  // 両側の場面のセル([x + width × up])
+
+            // --- 今の解の値(割れていない硬さに戻して)---
+            int64_t pull = 0;  // 引きの側の応力の平均 × 面積
+            int64_t push = 0;
+            int64_t edgePull = 0;  // 縁の引きの力(1 本目・2 本目と細かくする判定)
+            int64_t edgePush = 0;
+            int64_t axial = 0;
+            int64_t shear = 0;
+            int64_t energyPj = 0;
+            SupportFaceForces forces;
+            uint32_t progress = 0;
+            bool present = false;  // 割れ切っていない面がある
+        };
+
+        struct FineWindow {
+            // --- 強さを見る範囲の和 ---
+            int64_t pull = 0;
+            int64_t push = 0;
+            int64_t axial = 0;
+            int64_t shear = 0;
+            uint64_t areaMm2 = 0;
+
+            // --- 持ち主の区間の面 ---
+            int64_t energyPj = 0;
+            uint64_t unitPj = 0;
+            uint64_t surfacePj = 0;
+            int64_t heatPj = 0;
+            uint32_t count = 0;
+            uint32_t progress = SUPPORT_INTACT_FULL;
+            uint32_t speedStep = SUPPORT_INTACT_FULL;
+            uint32_t target = 0;
+        };
+
+        void InitFine();
+        uint32_t SlotState(uint32_t fx, uint32_t fup) const;  // 0 = 無い・1 = 分けていないセル・2 = 細かいセル
+        std::vector<FineFace> FineFaces(bool read) const;
+        bool FaceAt(uint32_t fx, uint32_t fup, uint32_t axis, FineFace& face) const;
+        void ReadFineFace(FineFace& face) const;
+        void FineStep();
+        bool FineWindowStep(const std::vector<FineFace>& faces);
+        void AssignFineRun(const std::vector<size_t>& run, const std::vector<FineFace>& faces, uint32_t span,
+                           std::vector<uint32_t>& homeOf, std::vector<FineWindow>& windows) const;
+        bool AdvanceFineWindows(const std::vector<FineFace>& faces, const std::vector<uint32_t>& homeOf,
+                                std::vector<FineWindow>& windows);
+        int64_t FineFaceHeat(const FineFace& face, uint32_t reach) const;
+        bool Refine(const std::vector<FineFace>& faces);
+        bool CanMerge(uint32_t x, uint32_t up) const;
+        void ApplyFineProgress();
+        void SeparateFine();
+        uint32_t IndexFromArea(int64_t pull, int64_t push, int64_t axial, int64_t shear, uint64_t areaMm2) const;
+        uint32_t TargetFromSums(uint32_t index, int64_t energyPj, uint64_t unitPj, uint64_t surfacePj,
+                                uint32_t progress) const;
+        uint32_t EnergyIndexOf(int64_t energyPj, uint64_t unitPj) const;
+        int64_t SurfaceOf(uint32_t progress, uint64_t surfacePj, uint64_t softening) const;
+        std::vector<uint32_t>& FineProgressOf(uint32_t axis) { return axis == 0 ? m_progressFineX : m_progressFineUp; }
+
+        static int64_t PositivePart(int64_t a, int64_t b);
         int64_t FaceHeat(const WindowFace& face, uint32_t reach) const;
         int64_t WindowHeat(const std::vector<WindowFace>& faces, const std::vector<size_t>& nextOf, size_t first,
                            uint32_t reach) const;
@@ -164,6 +267,15 @@ namespace bicameral::sim {
         std::vector<uint32_t> m_nextUp;
         std::vector<uint8_t> m_separated;
         SupportFractureLedger m_ledger;
+
+        // --- 細かい格子で持つ時(T-1067)---
+        bool m_fineMode = false;
+        std::array<FaceKind, FACE_KINDS> m_kinds{};
+        std::vector<uint32_t> m_progressFineX;  // [fx + 2 width × fup]
+        std::vector<uint32_t> m_progressFineUp;
+        std::vector<uint32_t> m_nextFineX;
+        std::vector<uint32_t> m_nextFineUp;
+        std::vector<uint16_t> m_calmTicks;  // 分けたセルの、比が coarsenIndex 未満の刻みが続いた数([x + width × up])
     };
 
 }  // namespace bicameral::sim
