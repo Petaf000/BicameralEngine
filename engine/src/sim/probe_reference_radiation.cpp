@@ -114,6 +114,16 @@ namespace bicameral::sim {
             seeds[block] = 1;
             m_changedMarks[block] = ProbeChangeMark(tick) - 1;
         }
+
+        m_cascadeOutside += m_cascadeReport.escaped + static_cast<uint64_t>(m_cascadeReport.rounding);
+    }
+
+    uint64_t ProbeReference::CascadeRadiationUnits() const {
+        uint64_t units = m_cascadeOutside;
+        for (const CascadeCarryEntry& entry : m_cascadeCarry.entries)
+            units += entry.amount;
+
+        return units;
     }
 
 }  // namespace bicameral::sim

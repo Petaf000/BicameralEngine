@@ -745,6 +745,9 @@ namespace bicameral::sim {
         [[nodiscard]] const ProbeCascadeOptions& CascadeRadiation() const { return m_cascade; }
         [[nodiscard]] const ProbeCascadeReport& LastCascadeReport() const { return m_cascadeReport; }
         [[nodiscard]] const CascadeCarry& CascadeRadiationCarry() const { return m_cascadeCarry; }
+        // セルの外にある放射のエネルギー(2^−16 mJ の mod 2^64)= 持ち越しの和 + これまでに世界の外へ出た分 + 丸めの端数。
+        // 保存: ProbeEnergySum × 2^16 + これ − Σ つつき × 2^16 が刻みによらず一定(放射の段の無い世界では 0)
+        [[nodiscard]] uint64_t CascadeRadiationUnits() const;
         // 液体の区画を載せる(T-0609・ADR-0266。CPU だけ)。次の Advance から、気体の後・伝導と反応の前に液体の 1 刻みを入れる。
         // 区画が空・重力が 0 の表などは断る(呼ばなければ今までと同じ)
         [[nodiscard]] std::expected<void, std::string> EnableLiquid(const ProbeLiquidOptions& options);
@@ -791,6 +794,7 @@ namespace bicameral::sim {
         ProbeCascadeOptions m_cascade;  // 熱の放射の既定の段(T-1113)
         ProbeCascadeReport m_cascadeReport;
         CascadeCarry m_cascadeCarry;               // 次の刻みへの持ち越し(照り返し・組を待つ光)
+        uint64_t m_cascadeOutside = 0;             // これまでに世界の外へ出た分 + 丸めの端数(2^−16 mJ の mod 2^64)
         std::optional<ProbeLiquidField> m_liquid;  // 液体の区画(T-0609。無ければ流さない)
         ProbeLiquidStepReport m_liquidReport;
 
