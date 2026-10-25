@@ -1,9 +1,11 @@
 // multires_fields.cpp — 登録した欄の置き場と、木の操作に欄を付いて行かせる所(T-0711。ADR-0329。multires_fields.h)。
 // 細かく/粗くする時の値は shaders/common/state_field.hlsli の関数(GPU と同じ)で決める。浮動小数点は使わない。
 #include <algorithm>
+#include <array>
 #include <utility>
 
 #include "common/multires_tree.hlsli"
+#include "core/aliases.h"
 #include "sim/multires_fields.h"
 
 using namespace bicameral::multires;
@@ -399,10 +401,68 @@ namespace bicameral::sim {
             }
         }
 
+        // 置かれ方の重み(親の八分の一のセルごと。T-1157)。印の欄が無い・口が無い・一様な親なら作らない
+        struct OctantPlacement {
+            bool any = false;
+            std::array<bool, MR_OCTANT_CELLS> placed{};
+            std::array<NestChildWeights, MR_OCTANT_CELLS> weights{};
+        };
+
+        OctantPlacement MakeOctantPlacement(const MultiresNest& nest, uint32_t parentSlot, uint32_t octant) {
+            OctantPlacement placement;
+            const bool marked = rng::any_of(nest.fields, [](const MultiresField& field) {
+                return SfOnCells(field.desc) && SfRefinePlacement(field.desc) != SF_REFINE_SAME;
+            });
+            if (!marked || !nest.refinePlacement || MrIsUniform(nest.blocks[parentSlot]))
+                return placement;
+
+            placement.any = true;
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local)
+                placement.placed[local] = nest.refinePlacement(nest, parentSlot, MrOctantCell(octant, local),
+                                                               placement.weights[local]);
+
+            return placement;
+        }
+
+        // 置かれ方の印の欄を、親の八分の一のセルごとに重みで子へ配る(重みの和が 0・重みの無いセルは子は親と同じ数)
+        void RefinePlaced(MultiresFieldStore& store, uint32_t components, uint32_t rule, uint32_t parentPage,
+                          uint32_t octant, uint32_t childPage, const OctantPlacement& placement) {
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                const uint32_t parentCell = MrOctantCell(octant, local);
+                const NestChildWeights& weights = placement.weights[local];
+                const std::array<uint64_t, 8>& weight = rule == SF_REFINE_CONDENSED ? weights.condensed : weights.open;
+                uint64_t weightSum = 0;
+                uint32_t last = 7;  // 残りを持つ子 = 重みのある最後の子(重みの無い子に端数を入れない)
+                for (uint32_t j = 0; j < 8; ++j) {
+                    weightSum += weight[j];
+                    last = weight[j] > 0 ? j : last;
+                }
+
+                const bool same = !placement.placed[local] || weightSum == 0;
+                for (uint32_t c = 0; c < components; ++c) {
+                    const int64_t value = LoadPage(store, parentPage, parentCell, c);
+                    int64_t given = 0;
+                    for (uint32_t j = 0; j < 8; ++j) {
+                        if (!same && j == last)
+                            continue;
+
+                        const int64_t child = same ? SfRefineValue(value)
+                                                   : SfPlacedValue(value, weight[j], weightSum, 8);
+                        given += child;
+                        StorePage(store, childPage, MrChildCell(local, j), c, child);
+                    }
+
+                    if (!same)
+                        StorePage(store, childPage, MrChildCell(local, last), c, SfPlacedLastValue(value, given, 8));
+                }
+            }
+        }
+
         void Refine(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot, uint32_t childPage) {
             const MrBlock& parent = nest.blocks[parentSlot];
             const bool uniform = MrIsUniform(parent);
             FX_ASSERT(uniform == (childPage == MR_NO_PAGE));
+            const OctantPlacement placement = MakeOctantPlacement(nest, parentSlot, octant);
             for (MultiresField& field : nest.fields) {
                 const uint32_t components = field.desc.components;
 
@@ -427,11 +487,16 @@ namespace bicameral::sim {
                 }
 
                 StartPage(store, childPage);
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    const uint32_t parentCell = MrParentCellOfChild(octant, index);
-                    for (uint32_t c = 0; c < components; ++c)
-                        StorePage(store, childPage, index, c,
-                                  SfRefineValue(LoadPage(store, parent.page, parentCell, c)));
+                const uint32_t rule = SfRefinePlacement(field.desc);
+                if (placement.any && rule != SF_REFINE_SAME) {
+                    RefinePlaced(store, components, rule, parent.page, octant, childPage, placement);
+                } else {
+                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                        const uint32_t parentCell = MrParentCellOfChild(octant, index);
+                        for (uint32_t c = 0; c < components; ++c)
+                            StorePage(store, childPage, index, c,
+                                      SfRefineValue(LoadPage(store, parent.page, parentCell, c)));
+                    }
                 }
 
                 // --- 親を覆う(覆われた親のセルは 0。一様な親は覆われた所を 0 と読むので書かない)---

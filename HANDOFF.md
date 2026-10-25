@@ -7,7 +7,10 @@
   Q171 → D-667(物の箱を外へ広げた流れる空気の層・層 1 段流れなしから・帳簿で移す)・Q172 → D-668(T-1136 の 2 本目が外れたら粒の速さの置き場を足してよい)。
 - ADR-0469 は項目ごとの状態に分けた(問いにしなかった項目は一旦の決定)。直す順は ROADMAP「土台の変更要求の束」: T-1158(3-4)→ T-1157・T-1159(芯 2)→ T-1160(3-1〜3-3)→ T-1161(芯 4)→ T-1162(芯 5)→ 案 B の運動量の式(1-1)。
   設計: 20 §2.3(D-663)・§10.2・§10.5・§10.6・§12.5・17 §3.2。COMMANDER に「質問で作業を止めない」。
-- **T-1157(作業中・ブランチ t-1157-c1-refine)**: 置かれ方で配る 1 本目。状態は docs/tickets/T-1157。
+- **T-1157 Done(1 本目・t-1157-c1-refine を main へ)**: 置かれ方で配る式を state_field.hlsli に(CPU と GPU の 1 つの源)・登録の印 `SF_FLAG_PLACE_CONDENSED` / `SF_FLAG_PLACE_OPEN`(無印 = SAME)・
+  CPU リファレンス sim/placement_refine(wt3 の SettleColumn・SettlePictureCell と乱数の絵でビット一致・3 次元の保存)・欄の細かくするへの口 `MultiresNest::refinePlacement`。
+  今の世界はどの欄にも印が無く口も無いので結果は変わらない(multires の CPU の試験がそのまま通る)。**未確認**: 新しい式の DXC(include するシェーダーがまだ無い)・GPU のビット一致 → T-1159。
+  残り(木のセルの中身を置かれ方で・隣のブロックの読み方・GPU・2-2・2-3・2-5・影)は T-1159。wt3 の t-1105-air-agitation をマージする時は、場面の作り方の SettleColumn・SettlePictureCell を sim/placement_refine に置き換える(同じ答え)。
 - 次の番号は **D-669・ADR-0479・T-1163・Q173**。
 
 (前の版の最終更新: 2026-10-26 本体の作業役・T-1132 土台の変更要求の束・ADR-0469)

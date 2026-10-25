@@ -66,7 +66,19 @@ FX_CONST uint32_t SF_FLAG_DERIVED = 4u;
 // 温めた始まり(T-0854。20 §10.4): 決まった回数で解く法則の解き始め(前の刻みの答え)。導かれる値だが答えを変えるので、
 // SF_WARM_START_IN_STATE なら真実と同じくハッシュと保存点に入る。SF_FLAG_DERIVED と一緒に書く
 FX_CONST uint32_t SF_FLAG_WARM_START = 8u;
-FX_CONST uint32_t SF_FLAG_MASK = 15u;
+// 細かくする時の置かれ方(T-1157。D-664・20 §10.5): 無印 = 子は親と同じ数(SAME)。どちらかの印の欄は、細かくする時に
+// 置かれ方の重み(呼ぶ側が親のセルごとに 1 回作る。同じセルの欄が同じ重みを読む)で子へ配る。真実のセル・面の欄だけ。
+//   凝縮相に乗る: 子の凝縮相の量の重み(凝縮相の運動量など。子の速さが親と同じ)
+//   空きに乗る:   子の空きの体積の重み(気体の量・気体の運動量・舞う粒)
+// 置かれ方が一様(気体だけ・詰まり切った・据わる固体)なら SAME とビット単位で同じ
+FX_CONST uint32_t SF_FLAG_PLACE_CONDENSED = 16u;
+FX_CONST uint32_t SF_FLAG_PLACE_OPEN = 32u;
+FX_CONST uint32_t SF_FLAG_MASK = 63u;
+
+// --- 細かくする時の配り方(印から決まる。SfRefinePlacement)---
+FX_CONST uint32_t SF_REFINE_SAME = 0;
+FX_CONST uint32_t SF_REFINE_CONDENSED = 1;
+FX_CONST uint32_t SF_REFINE_OPEN = 2;
 
 // --- 欄の種類(印から決まる。SfFieldKind)---
 FX_CONST uint32_t SF_KIND_TRUTH = 0;       // 真実(状態そのもの)
@@ -137,8 +149,22 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
                     (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
         return false;
 
+    // 置かれ方の印は真実のセル・面の欄だけ・どちらか 1 つ(T-1157)
+    const uint32_t placeFlags = desc.flags & (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN);
+    if (placeFlags != 0u && (placeFlags == (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN) || derived ||
+                             (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
+        return false;
+
     // ブロック・世界の欄は細かく/粗くで和を取らない
     return desc.scale == SF_SCALE_SAME || desc.place == SF_PLACE_CELL || desc.place == SF_PLACE_FACE;
+}
+
+// 細かくする時の配り方(SF_REFINE_*。T-1157)
+FX_FN uint32_t SfRefinePlacement(SfFieldDesc desc) {
+    if ((desc.flags & SF_FLAG_PLACE_CONDENSED) != 0u)
+        return SF_REFINE_CONDENSED;
+
+    return (desc.flags & SF_FLAG_PLACE_OPEN) != 0u ? SF_REFINE_OPEN : SF_REFINE_SAME;
 }
 
 // 導かれる値の登録 1 行(T-0854): セル・面・SAME・保存量でない。warmStart なら温めた始まり
@@ -207,6 +233,142 @@ FX_FN bool SfValueFits(SfFieldDesc desc, int64_t value) {
 // --- 細かくする: 子は親と同じ数 ------------------------------------------------------------------
 FX_FN int64_t SfRefineValue(int64_t parentValue) {
     return parentValue;
+}
+
+// --- 細かくする: 置かれ方の重みで配る(T-1157。D-664・20 §10.5)------------------------------------------
+// 親の値 v(親のレベルの単位)を childCount 個の子へ、重み weight / weightSum で配る(子のレベルの単位。和は childCount × v)。
+// 重みのある最後の子以外はこれで、その子は残り(SfPlacedLastValue。重みの無い子に端数を入れない)。重みが全部同じなら子は v そのもの(= SAME)。weightSum が 0 なら呼ぶ側が SAME で配る
+FX_FN int64_t SfPlacedValue(int64_t parentValue, uint64_t weight, uint64_t weightSum, uint32_t childCount) {
+    return FxMulDivS64(parentValue, weight * childCount, weightSum);
+}
+
+FX_FN int64_t SfPlacedLastValue(int64_t parentValue, int64_t given, uint32_t childCount) {
+    FX_ASSERT(parentValue < (int64_t)FX_U64(0x08000000u, 0u) && parentValue > -(int64_t)FX_U64(0x08000000u, 0u));
+    return (parentValue * (int64_t)childCount) - given;
+}
+
+// --- 置かれ方(見立ての 1 関数。T-1157。wt3 T-1106 の SettleColumn・SettlePictureCell を移した。D-659 の積もった高さ・D-665 の層の形も読む)---
+// 凝縮相(粒・液体)は重さの向きに下の子から「沈み固まった体積」で詰め、横は隣の列の表面の傾き(minmod)に沿って列を分ける。
+// 量は mg、密度は kg/m³(= 1e-3 mg/mm³)、体積は mm³。詰まり・傾きは Q16(1 = 子の体積の和)。回しは呼ぶ側(CPU: sim/placement_refine.cpp)
+FX_CONST int64_t SF_SETTLE_FULL_Q16 = 65536;
+FX_CONST uint32_t SF_SETTLE_GAS = 0;
+FX_CONST uint32_t SF_SETTLE_LIQUID = 1;
+FX_CONST uint32_t SF_SETTLE_GRAIN = 2;
+FX_CONST uint32_t SF_SETTLE_ANCHORED = 3;  // 据わる固体(寄せない)
+
+// 量 → 物質そのものの体積(mm³)
+FX_FN uint64_t SfSubstanceVolume(int64_t massMg, uint32_t densityKgPerM3) {
+    if (densityKgPerM3 == 0u || massMg <= 0)
+        return 0;
+
+    return ((uint64_t)massMg * 1000u) / densityKgPerM3;
+}
+
+// 沈み固まった体積の足し合わせ: 粒は粒の体積 ÷ 詰まり、液体は粒の孔を満たしてから上に重なる(大きい方)。気体は数えない
+struct SfSettleSum {
+    uint64_t grainVolume;
+    uint64_t condensedVolume;
+    bool anchored;  // 据わる固体を含む
+};
+
+FX_FN SfSettleSum SfMakeSettleSum() {
+    SfSettleSum sum;
+    sum.grainVolume = 0;
+    sum.condensedVolume = 0;
+    sum.anchored = false;
+
+    return sum;
+}
+
+FX_FN SfSettleSum SfAddSettle(SfSettleSum sum, uint32_t kind, uint32_t densityKgPerM3, uint32_t packedFractionPct,
+                              int64_t massMg) {
+    const uint64_t volume = SfSubstanceVolume(massMg, densityKgPerM3);
+    if (kind == SF_SETTLE_GRAIN) {
+        const uint32_t packed = packedFractionPct == 0u ? 100u : packedFractionPct;
+        sum.grainVolume += (volume * 100u) / packed;
+    }
+
+    if (kind != SF_SETTLE_GAS)
+        sum.condensedVolume += volume;
+
+    if (kind == SF_SETTLE_ANCHORED && massMg > 0)
+        sum.anchored = true;
+
+    return sum;
+}
+
+FX_FN uint64_t SfSettledVolume(SfSettleSum sum) {
+    return sum.grainVolume > sum.condensedVolume ? sum.grainVolume : sum.condensedVolume;
+}
+
+// 寄せるか: 据わる固体が無く、沈み固まった体積が 0 より大きく器より小さい
+FX_FN bool SfSettles(uint64_t settledVolume, uint64_t capacityVolume, bool anchored) {
+    return !anchored && settledVolume > 0 && settledVolume < capacityVolume;
+}
+
+// 詰まり(Q16。隣の列が傾きを読む)。据わる固体・物は詰まり切る
+FX_FN int64_t SfSettleFullnessQ16(uint64_t settledVolume, uint64_t capacityVolume, bool anchored) {
+    if (anchored)
+        return SF_SETTLE_FULL_Q16;
+
+    const uint64_t fullness = (settledVolume * (uint64_t)SF_SETTLE_FULL_Q16) / capacityVolume;
+
+    return fullness < (uint64_t)SF_SETTLE_FULL_Q16 ? (int64_t)fullness : SF_SETTLE_FULL_Q16;
+}
+
+// 列の表面の高さ(段の下の端から。Q16): 段の下・段・段の上の詰まりの和 − 1。世界の外は下 = 詰まり切る・上 = 空で呼ぶ
+FX_FN int64_t SfColumnSurfaceQ16(int64_t belowQ16, int64_t hereQ16, int64_t aboveQ16) {
+    return belowQ16 + hereQ16 + aboveQ16 - SF_SETTLE_FULL_Q16;
+}
+
+// 表面の傾き(Q16。正の向きへ 1 セルで上がる高さ): 両側の差の小さい方・向きが違えば 0(MUSCL の minmod。山の頂や谷を作らない)。
+// 片側が無い(世界の端)なら 0
+FX_FN int64_t SfSurfaceSlopeQ16(int64_t lowSideQ16, int64_t hereQ16, int64_t highSideQ16, bool bothSides) {
+    if (!bothSides)
+        return 0;
+
+    const int64_t low = hereQ16 - lowSideQ16;
+    const int64_t high = highSideQ16 - hereQ16;
+    if (low == 0 || high == 0 || (low > 0) != (high > 0))
+        return 0;
+
+    const int64_t lowMagnitude = low < 0 ? -low : low;
+    const int64_t highMagnitude = high < 0 ? -high : high;
+
+    return lowMagnitude < highMagnitude ? low : high;
+}
+
+// 列の傾きを、n 列の詰まりが 0〜1 に収まるまで弱める(|g| ≤ min(r, 1 − r) × 2n ÷ (n − 1))
+FX_FN int64_t SfClampColumnSlopeQ16(int64_t fullnessQ16, int64_t slopeQ16, uint32_t columns) {
+    const int64_t empty = SF_SETTLE_FULL_Q16 - fullnessQ16;
+    const int64_t room = fullnessQ16 < empty ? fullnessQ16 : empty;
+    const int64_t limit = (room * 2 * (int64_t)columns) / ((int64_t)columns - 1);
+
+    if (slopeQ16 > limit)
+        return limit;
+
+    return slopeQ16 < -limit ? -limit : slopeQ16;
+}
+
+// 列 j(n 列の左から)の重み = 2n r + g (2j + 1 − n)(弱めた傾きで 0 以上)
+FX_FN int64_t SfColumnWeight(int64_t fullnessQ16, int64_t clampedSlopeQ16, uint32_t columns, uint32_t column) {
+    return (2 * (int64_t)columns * fullnessQ16) + (clampedSlopeQ16 * ((2 * (int64_t)column) + 1 - (int64_t)columns));
+}
+
+// 一番上の詰まった子(下から。その下の子は沈み固まった体積 = 子の体積)
+FX_FN uint32_t SfSettleTopChild(uint64_t settledVolume, uint64_t childVolume) {
+    FX_ASSERT(settledVolume > 0);
+    return (uint32_t)((settledVolume - 1) / childVolume);
+}
+
+// 一番上より下の子 1 つへ寄せる量(列の量 × 子の体積 ÷ 沈み固まった体積)。一番上の子は残り
+FX_FN int64_t SfSettleBelowShare(int64_t columnMassMg, uint64_t childVolume, uint64_t settledVolume) {
+    return FxMulDivS64(columnMassMg, childVolume, settledVolume);
+}
+
+// 子の空きの体積(気体・舞う粒の重み): 子の体積 − 凝縮相の体積(0 で止める)
+FX_FN uint64_t SfOpenVolume(uint64_t childVolume, uint64_t condensedVolume) {
+    return condensedVolume >= childVolume ? 0 : childVolume - condensedVolume;
 }
 
 // --- 粗くする: 子 8 つの和 ÷ 8(負の値も −∞ 向きの切り捨て)と余り(0〜7。子のレベルの単位)--------------
