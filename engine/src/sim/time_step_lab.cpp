@@ -245,6 +245,59 @@ namespace bicameral::sim {
         }
 
         // --- 歩を閉じる(歩の変化を真実へ)。measured なら規則 A の変化を測って次の e を選ぶ ---
+        // 係数(値 / y の単位 × 2^16 / 刻み)× y(× 2^16)÷ 容量 = 1 刻みにセルの y が変わる量(y × 2^16。符号付き)
+        int64_t SignedRate(uint64_t coefficientQ16, int64_t viewQ16, uint64_t capacityQ16) {
+            const FxU128 product = FxMulU64Full(coefficientQ16, FxAbsU64(viewQ16));
+            const auto magnitude = static_cast<int64_t>(FxDivU128By64(product, capacityQ16).quotient);
+
+            return viewQ16 < 0 ? -magnitude : magnitude;
+        }
+
+        // 今の状態での 1 刻みの変化の速さ(法則の右辺を今の値で。y × 2^16 / 刻み。T-1169 の rateLook)。
+        // 運ぶ(風上の値)・伝わる・地面・流れ込み・流れ出し。反応は閉じた形でゆっくりなので入れない
+        int64_t CellRate(const TimeStepLabSetup& setup, const TimeStepLabState& state, uint32_t q, uint32_t cell) {
+            const TimeStepCarried& law = setup.carried[q];
+            const uint64_t capacity = law.capacityQ16[cell];
+            const int64_t self = ViewOf(setup, q, cell, state.values[At(setup, q, cell)]);
+            int64_t rate = SignedRate(law.groundQ16[cell], law.groundValueQ16 - self, capacity);
+            if (cell > 0) {
+                const int64_t up = ViewOf(setup, q, cell - 1, state.values[At(setup, q, cell - 1)]);
+                rate += SignedRate(law.flowQ16[cell - 1], up, capacity);
+                rate += SignedRate(law.conductQ16[cell - 1], up - self, capacity);
+            }
+
+            if (cell + 1 < setup.cellCount) {
+                const int64_t down = ViewOf(setup, q, cell + 1, state.values[At(setup, q, cell + 1)]);
+                rate -= SignedRate(law.flowQ16[cell], self, capacity);
+                rate += SignedRate(law.conductQ16[cell], down - self, capacity);
+            }
+
+            if (cell == setup.inflowCell)
+                rate += SignedRate(uint64_t{1} << VIEW_BITS, law.inflowQ16, capacity);
+
+            if (cell == setup.outflowCell)
+                rate -= SignedRate(law.outflowQ16, self, capacity);
+
+            return rate;
+        }
+
+        // 今の変化の速さで決まる e の上限: 枠のどのセルも 2^e 刻みの変化の見積もりが予算の内(T-1169。rateLook)。
+        // 前の歩の変化で選ぶと、流れが運んでくる前線が静かな枠に入る直前に長い歩を取る。一定に流れる所は右辺が 0 なので長いまま
+        int32_t RateCap(const TimeStepLabSetup& setup, const TimeStepLabState& state, uint32_t block, uint64_t budget) {
+            const uint32_t first = block * setup.blockCells;
+            uint64_t fastest = 0;
+            for (uint32_t q = 0; q < CARRIED; ++q) {
+                for (uint32_t cell = first; cell < first + setup.blockCells; ++cell)
+                    fastest = std::max(fastest, FxAbsU64(CellRate(setup, state, q, cell)));
+            }
+
+            int32_t cap = TS_MAX_EXPONENT;
+            while (cap > 0 && fastest > (budget >> static_cast<uint32_t>(cap)))
+                --cap;
+
+            return cap;
+        }
+
         void CloseBlock(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t block, bool measured) {
             uint64_t change = 0;
             const uint32_t first = block * setup.blockCells;
@@ -277,6 +330,9 @@ namespace bicameral::sim {
                 state.desired[block] = TsDesiredExponent(TS_RULE_CHANGE, e, change, budget);
             else
                 state.desired[block] = TsDesiredExponent(TS_RULE_ESTIMATE, e, estimate, budget);
+
+            if (setup.rateLook && setup.rule == TimeStepRule::Change)
+                state.desired[block] = std::min(state.desired[block], RateCap(setup, state, block, budget));
         }
 
         // --- 歩を刻み tick で打ち切る(記録を経った刻みの割合に縮めてから閉じる。保存はそのまま)---

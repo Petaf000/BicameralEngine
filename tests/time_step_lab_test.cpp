@@ -11,10 +11,16 @@
 //   5. 費用: 一晩(1 日 = 現実の約 1 時間の世界の半日 = 108,000 刻み)を進めた CPU の時間と、セル 1 つあたりの解きの回数
 // 合格の線(静かな夜 5 秒・火事 30 秒)は CPU の試作の 1 回の解きの時間から、線の内に進められるセルの数をログに出す(未確認)。
 // 試し 2 は精度で落ちた(記録だけ。judged = false)。
+// T-1169: flow [scene=0〜5] [flowbudget=n](流れ続ける所〔川・速い川・風〕で選ばれる刻みの長さ・早送りの GPU の待ちの見積もり・毎刻みとの差。
+//         引数なしは今までの全部)
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <format>
+#include <iterator>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -409,6 +415,230 @@ namespace {
         }
     }
 
+    // --- T-1169: 流れ続ける所(川・風)で選ばれる刻みの長さ・早送りの待ち・毎刻みとの差 ---
+    // 流れの速さそのもの(運動量の家族)はこの試作では決まった値(面の流れの係数)で、運ばれる熱・溶けた物(風では煙)の変化の速さだけを見る
+    // (運動量を長い刻みで進めるのは T-0952)。予算は flowbudget=(精度の単位。既定 100 = 0.1 K・100 ppm = D-642)、
+    // 刻みを選ぶ単位(ブロック)は 4 m(D-643)。引数: flow [scene=0〜5(既定 全部)] [flowbudget=n]
+    struct FlowScene {
+        std::string_view name;
+        double speed = 0.3;       // m/s
+        double dispersion = 1.0;  // 乱れで混ざる(m²/s。熱と D に同じ)
+        double heatPerCubic = WATER_HEAT;
+        double dissolvedPerPpm = WATER_MICROMOL_PPM;  // µmol / (m³·ppm)
+        double groundPerCubic = 2.0;                  // W/(m³·K)
+        double groundKelvin = 283.0;
+        double inflowKelvin = 288.0;
+        double parcelKelvin = 0.0;  // 初めに下っていく暖かい所の高さ(K。0 = 流れ込みと同じ = 一定に流れる)
+        double inflowPpm = 200.0;
+        double parcelPpm = 0.0;
+        bool ferment = true;  // 底でゆっくり発酵(川)
+    };
+
+    constexpr double AIR_HEAT = 1200.0;        // J/(m³·K)
+    constexpr double AIR_MICROMOL_PPM = 41.6;  // 1 m³ の空気の 100 万分の 1(µmol)
+    constexpr double FLOW_CELL_METERS = 0.5;
+    constexpr double FLOW_LENGTH_METERS = 64.0;
+    double flowBlockMeters = 4.0;  // flowblock=(m)
+    constexpr uint64_t FLOW_SAMPLE_EVERY = 64;
+
+    constexpr FlowScene FLOW_SCENES[] = {
+        {.name = "川(一定に流れる・0.3 m/s)"},
+        {.name = "川(暖かい水が下る・0.3 m/s)", .parcelKelvin = 2.0, .parcelPpm = 60.0},
+        {.name = "速い川(1.5 m/s)", .speed = 1.5, .dispersion = 3.0, .parcelKelvin = 0.0},
+        {.name = "速い川(暖かい水が下る・1.5 m/s)",
+         .speed = 1.5,
+         .dispersion = 3.0,
+         .parcelKelvin = 2.0,
+         .parcelPpm = 60.0},
+        {.name = "風(一定に吹く・3 m/s)",
+         .speed = 3.0,
+         .dispersion = 5.0,
+         .heatPerCubic = AIR_HEAT,
+         .dissolvedPerPpm = AIR_MICROMOL_PPM,
+         .groundPerCubic = 10.0,
+         .inflowPpm = 0.0,
+         .ferment = false},
+        {.name = "風(暖かい空気と煙が流れる・3 m/s)",
+         .speed = 3.0,
+         .dispersion = 5.0,
+         .heatPerCubic = AIR_HEAT,
+         .dissolvedPerPpm = AIR_MICROMOL_PPM,
+         .groundPerCubic = 10.0,
+         .parcelKelvin = 2.0,
+         .inflowPpm = 0.0,
+         .parcelPpm = 60.0,
+         .ferment = false},
+    };
+
+    uint64_t flowBudget = 100;
+    bool flowLook = false;  // flowlook=1: 今の変化の速さで e に上限(rateLook)
+    int flowSceneIndex = -1;
+
+    TimeStepLabSetup MakeFlowSetup(const FlowScene& scene) {
+        const double dx = FLOW_CELL_METERS;
+        const uint32_t cells = CellCount(FLOW_LENGTH_METERS, dx);
+        TimeStepLabSetup setup;
+        setup.cellCount = cells;
+        setup.blockCells = CellCount(flowBlockMeters, dx);
+        setup.inflowCell = 0;
+        setup.outflowCell = cells - 1;
+
+        CarriedValues heat;
+        heat.capacity = scene.heatPerCubic;
+        heat.conductivity = scene.heatPerCubic * scene.dispersion;
+        heat.speed = scene.speed;
+        heat.ground = scene.groundPerCubic;
+        heat.groundValue = scene.groundKelvin * 1000.0;
+        heat.inflowValue = scene.inflowKelvin * 1000.0;
+        SetCarried(setup.carried[TIME_STEP_HEAT], heat, cells, dx);
+        CarriedValues dissolved;
+        dissolved.capacity = scene.dissolvedPerPpm;
+        dissolved.conductivity = scene.dissolvedPerPpm * scene.dispersion;
+        dissolved.speed = scene.speed;
+        dissolved.inflowValue = scene.inflowPpm;
+        SetCarried(setup.carried[TIME_STEP_DISSOLVED], dissolved, cells, dx);
+
+        const RiverParameters river;
+        setup.fuel.assign(cells, scene.ferment ? TIME_STEP_FUEL_SLOW : TIME_STEP_FUEL_NONE);
+        setup.rateColdQ32 = ToQ(std::log(2.0) / river.fermentHalfLifeSeconds * TICK_SECONDS, Q32);
+        setup.heatPerAmount = static_cast<int64_t>(std::llround(river.fermentJoulePerMol * 1e-3));
+        setup.referenceAmount = ToQ(river.fermentMolPerCubic * dx * 1e6, 1.0);
+
+        return setup;
+    }
+
+    TimeStepLabState FilledFlow(const FlowScene& scene, const TimeStepLabSetup& setup) {
+        TimeStepLabState state = MakeTimeStepLabState(setup);
+        const RiverParameters river;
+        const double dx = FLOW_CELL_METERS;
+        const uint32_t cells = setup.cellCount;
+        for (uint32_t cell = 0; cell < cells; ++cell) {
+            const double x = (cell + 0.5) * dx;
+            const double shape = 0.5 * (1.0 + std::tanh((x - FLOW_LENGTH_METERS * 0.25) / river.frontMeters));
+            const double temperature = scene.inflowKelvin + scene.parcelKelvin * shape;
+            const double ppm = scene.inflowPpm + scene.parcelPpm * shape;
+            state.values[cell] = std::llround(scene.heatPerCubic * dx * temperature * 1000.0);
+            state.values[cells + cell] = std::llround(scene.dissolvedPerPpm * dx * ppm);
+            state.values[2 * cells + cell] = scene.ferment ? std::llround(river.fermentMolPerCubic * dx * 1e6) : 0;
+        }
+
+        return state;
+    }
+
+    struct FlowRun {
+        RunResult run;
+        std::vector<double> meanExponent;  // 1/7 晩(COMPARE_EVERY 刻み)ごとのブロックの e の平均
+        std::vector<int32_t> lowestExponent;
+    };
+
+    FlowRun RunFlow(const TimeStepLabSetup& setup, TimeStepLabState state) {
+        FlowRun flow;
+        const TimeStepLabTotals first = ConservedTimeStepLab(setup, state);
+        const auto begin = std::chrono::steady_clock::now();
+        double sum = 0.0;
+        uint64_t samples = 0;
+        int32_t lowest = MAX_EXPONENT;
+        for (uint64_t done = 0; done < NIGHT_TICKS; done += FLOW_SAMPLE_EVERY) {
+            StepTimeStepLab(setup, state, FLOW_SAMPLE_EVERY);
+            for (const int32_t exponent : state.exponent) {
+                sum += exponent;
+                lowest = std::min(lowest, exponent);
+                ++samples;
+            }
+
+            if ((done + FLOW_SAMPLE_EVERY) % COMPARE_EVERY != 0)
+                continue;
+
+            flow.run.snapshots.push_back(TakeSnapshot(setup, state));
+            flow.run.conserved = flow.run.conserved && SameTotals(first, ConservedTimeStepLab(setup, state));
+            flow.meanExponent.push_back(sum / static_cast<double>(samples));
+            flow.lowestExponent.push_back(lowest);
+            sum = 0.0;
+            samples = 0;
+            lowest = MAX_EXPONENT;
+        }
+
+        flow.run.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        flow.run.state = std::move(state);
+
+        return flow;
+    }
+
+    // 早送りの GPU の待ちの見積もり(T-1152 の費用の式・RTX 3070 Ti の既定〔続けて積む形〕。1 出来事 = 段 1・V 1 の組 1 つと見る)。
+    // この列は断面 1 m² なので、川幅・風の幅 4 m × 深さ 4 m(0.5 m のセルで 8 × 8)の流れとして 64 倍のセルで数える(見積もり)
+    double FlowGpuSeconds(const TimeStepLabState& state) {
+        constexpr double EVENT_NS = 19000.0 + 20000.0;
+        constexpr double CELL_NS = 0.86 + 2.57;
+        constexpr double CROSS_SECTION_CELLS = 64.0;
+
+        return (static_cast<double>(state.events) * EVENT_NS +
+                static_cast<double>(state.cellSteps) * CROSS_SECTION_CELLS * CELL_NS) *
+               1e-9;
+    }
+
+    void CheckFlowScene(const FlowScene& scene) {
+        const TimeStepLabSetup base = MakeFlowSetup(scene);
+        TimeStepLabSetup reference = WithTrial(base, REFERENCE);
+        TimeStepLabSetup trial = WithTrial(base, TRIALS[0]);
+        trial.budget = flowBudget;
+        trial.rateLook = flowLook;
+        const FlowRun fixed = RunFlow(reference, FilledFlow(scene, reference));
+        const FlowRun chosen = RunFlow(trial, FilledFlow(scene, trial));
+        Difference worst;
+        for (size_t i = 0; i < chosen.run.snapshots.size(); ++i)
+            worst = Worst(worst,
+                          Compare(trial, chosen.run.snapshots[i], fixed.run.snapshots[i], (i + 1) * COMPARE_EVERY));
+
+        LogDifference(scene.name, std::format("予算 {}", flowBudget), worst);
+
+        // --- 温度の差がどこで・いつ大きいか(写しごと)---
+        const double capacity = static_cast<double>(trial.carried[TIME_STEP_HEAT].capacityQ16[0]) / Q16;
+        for (size_t i = 0; i < chosen.run.snapshots.size(); ++i) {
+            double largest = 0.0;
+            uint32_t where = 0;
+            for (uint32_t cell = 0; cell < trial.cellCount; ++cell) {
+                const double gap = Gap(chosen.run.snapshots[i].settled[cell], fixed.run.snapshots[i].settled[cell],
+                                       capacity);
+                if (gap > largest) {
+                    largest = gap;
+                    where = cell;
+                }
+            }
+
+            Log(Channel::Sim, Level::Info, "{} 予算 {}: 刻み {} の温度の差の最大 {:.3f} mK(x {:.2f} m)", scene.name,
+                flowBudget, (i + 1) * COMPARE_EVERY, largest, (where + 0.5) * FLOW_CELL_METERS);
+        }
+        LogCost(scene.name, "毎刻み", reference, fixed.run, NIGHT_TICKS);
+        LogCost(scene.name, std::format("予算 {}", flowBudget), trial, chosen.run, NIGHT_TICKS);
+        std::string exponents;
+        for (size_t i = 0; i < chosen.meanExponent.size(); ++i)
+            exponents += std::format("{}{:.2f}(最小 {})", i == 0 ? "" : "・", chosen.meanExponent[i],
+                                     chosen.lowestExponent[i]);
+
+        Log(Channel::Sim, Level::Info, "{} 予算 {}: e の平均(1/7 晩ごと){}", scene.name, flowBudget, exponents);
+        Log(Channel::Sim, Level::Info,
+            "{} 予算 {}: 一晩の早送りの GPU の待ち(見積もり・4 m × 4 m の流れ){:.3f} 秒・毎刻みなら {:.3f} 秒",
+            scene.name, flowBudget, FlowGpuSeconds(chosen.run.state), FlowGpuSeconds(fixed.run.state));
+        Log(Channel::Sim, Level::Info,
+            "FLOW scene=\"{}\" block={} look={} budget={} solves={:.6f} events={} fixedEvents={} gpu={:.4f} "
+            "fixedGpu={:.4f} "
+            "tempMk={:.3f} "
+            "ppm={:.3f} carriedMk={:.3f} meanE={}",
+            scene.name, flowBlockMeters, flowLook ? 1 : 0, flowBudget,
+            static_cast<double>(chosen.run.state.cellSteps) / (static_cast<double>(trial.cellCount) * NIGHT_TICKS),
+            chosen.run.state.events, fixed.run.state.events, FlowGpuSeconds(chosen.run.state),
+            FlowGpuSeconds(fixed.run.state), worst.temperatureMk, worst.dissolvedPpm, worst.carriedMk, exponents);
+        Expect(fixed.run.conserved && chosen.run.conserved, "流れ: 保存");
+        Expect(chosen.run.state.widestNeighborGap <= 1, "流れ: 隣どうしの e の差は 1 段まで");
+    }
+
+    void CheckFlow() {
+        for (size_t i = 0; i < std::size(FLOW_SCENES); ++i) {
+            if (flowSceneIndex < 0 || static_cast<size_t>(flowSceneIndex) == i)
+                CheckFlowScene(FLOW_SCENES[i]);
+        }
+    }
+
     // --- 3. 早送り = 待った(ビット一致)---
 
     void CheckFastForward() {
@@ -432,7 +662,29 @@ namespace {
         }
     }
 
-    int Run() {
+    int Run(int argc, char** argv) {
+        const std::string_view part = argc > 1 ? argv[1] : "all";
+        for (int i = 2; i < argc; ++i) {
+            const std::string_view argument = argv[i];
+            const size_t equal = argument.find('=');
+            const std::string_view key = argument.substr(0, equal);
+            const std::string value(equal == std::string_view::npos ? "" : argument.substr(equal + 1));
+            if (key == "scene")
+                flowSceneIndex = std::atoi(value.c_str());
+            else if (key == "flowlook")
+                flowLook = value == "1";
+            else if (key == "flowblock")
+                flowBlockMeters = std::atof(value.c_str());
+            else if (key == "flowbudget")
+                flowBudget = static_cast<uint64_t>(std::atoll(value.c_str()));
+        }
+
+        if (part == "flow") {
+            CheckFlow();
+
+            return failureCount == 0 ? 0 : 1;
+        }
+
         CheckFastForward();
         CheckGranularity();
         CheckRiver();
@@ -449,8 +701,8 @@ namespace {
 
 }  // namespace
 
-int main() {
-    const int exitCode = Run();
+int main(int argc, char** argv) {
+    const int exitCode = Run(argc, argv);
     SingletonFinalizer::Finalize();
 
     return exitCode;
