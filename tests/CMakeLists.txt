@@ -832,6 +832,27 @@ target_link_libraries(gpu_equilibrium_block_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_equilibrium_block gpu_equilibrium_block_test gpu --queue compute --no-gbv)
 set_tests_properties(gpu_equilibrium_block PROPERTIES TIMEOUT 900)
 
+# 時間を飛ばす試作の列の系を部品の GPU 版で解き、CPU とビット一致(T-1111)。系は time_step_tree_test の span-dump が火事(0.5 m の根だけ)から書く
+# 計測は job.py run -Preset release -Exe gpu_time_step_span_test -- --spans <ファイル> --no-gbv --measure
+bicameral_add_gpu_test(gpu_time_step_span_test)
+target_sources(gpu_time_step_span_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/sim/time_step_tree.cpp)  # 出来事の組(T-1141)
+target_link_libraries(gpu_time_step_span_test PRIVATE bicameral_sim)
+add_test(NAME time_step_span_dump COMMAND time_step_tree_test span-dump shape=fine dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_spans.bin)
+set_tests_properties(time_step_span_dump PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_spans)
+bicameral_add_gpu_test_case(gpu_time_step_span gpu_time_step_span_test gpu --queue compute --no-gbv
+                            --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_spans.bin)
+set_tests_properties(gpu_time_step_span PROPERTIES FIXTURES_REQUIRED time_step_spans)
+# 1 出来事の列を組にまとめた系(T-1141): CPU で列ごとの値とビット一致(火事の着火から約 4,000 刻み)・その途中の出来事を GPU で
+add_test(NAME time_step_event_merge COMMAND time_step_tree_test event-merge shape=fine ticks=16400 every=64 dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
+set_tests_properties(time_step_event_merge PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_events)
+bicameral_add_gpu_test_case(gpu_time_step_event gpu_time_step_span_test gpu --queue compute --no-gbv
+                            --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
+set_tests_properties(gpu_time_step_event PROPERTIES FIXTURES_REQUIRED time_step_events)
+# 起動時に費用の式の値を測る口(D-662)と、出来事を続けて積んだ・間を空けた形の時間(T-1152。値は比べず、口が通って式の値が出ること)
+bicameral_add_gpu_test_case(gpu_time_step_event_cost gpu_time_step_span_test gpu --queue compute --no-gbv --continuous
+                            --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
+set_tests_properties(gpu_time_step_event_cost PROPERTIES FIXTURES_REQUIRED time_step_events)
+
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)
 target_link_libraries(gpu_gas_projection_test PRIVATE bicameral_sim bicameral_gas_projection)

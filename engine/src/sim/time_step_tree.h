@@ -15,9 +15,12 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
+#include <span>
 #include <vector>
 
 #include "common/fixed.hlsli"
+#include "sim/equilibrium.h"
 #include "sim/multires_nest.h"
 #include "sim/time_step_lab.h"
 
@@ -35,6 +38,17 @@ namespace bicameral::sim {
         // ほかは毎刻み。毎刻みの枠の隣は毎刻み(前線が長い歩の枠に入らないための 1 枠の緩衝)。隣の差 1 段の決まりは使わない
         Jump,
     };
+
+    // 列の解きを見る口(T-1111。GPU の試験が同じ系を GPU で解き直す)。系は δ = 0 から V を cycles 回で解く(SolveSpan と同じ)。
+    // 残差で止める形(residualStop)の時は呼ばない
+    struct TimeTreeSpanSolve {
+        const EquilibriumSystem& system;
+        int32_t exponent = 0;  // 列の刻みの長さ e(2^e 刻み)
+        uint64_t start = 0;    // 列の歩の初めの刻み
+        uint32_t cycles = 0;   // V の回数(e ごとの表。TimeTreeSetup の cycles・cyclesAtZero・shortExponent)
+    };
+
+    using TimeTreeSpanObserver = std::function<void(const TimeTreeSpanSolve&)>;
 
     struct TimeTreeSetup {
         // --- 熱(どれもレベルによらない数。面の係数だけレベル k で × 4^k)---
@@ -56,12 +70,16 @@ namespace bicameral::sim {
         int32_t maxExponent = 14;
         // 1 歩の変化の許す大きさ(mK × 2^16)。既定 0.1 K(D-642。T-1063)
         uint64_t budgetQ16 = uint64_t{100} << 16;
-        uint32_t cycles = 4;  // C-0 の V サイクルの回数(法則ごとの定数)
+        // C-0 の V サイクルの回数(法則ごとの定数)。長い刻み(e > shortExponent)の列。静かな夜で V 2 は V 4 と同じ精度の内(T-1108)
+        uint32_t cycles = 2;
         // 短い刻み(e ≤ shortExponent)の列の V の回数(0 = cycles と同じ)。短い刻みの系は 1 回の V で解け切る
         // (T-1090。火事で V 4 とビット一致。長い刻みは解け切らない)
         uint32_t cyclesAtZero = 1;
-        int32_t
-            shortExponent = 8;  // 2^8 刻み ≈ 4.3 秒まで(静かな夜で e ≤ 8 は V 4 と同じ差・e ≤ 10 から増える。T-1090)
+        // 2^8 刻み ≈ 4.3 秒まで(静かな夜で e ≤ 8 は V 4 と同じ差・e ≤ 10 から増える。T-1090)
+        int32_t shortExponent = 8;
+        // 残差で止める(T-1108。0 = 決まった回数): 列ごとに V を 1 回ずつ、残差の計器の最大(式の単位)がこれ以下になるまで
+        // (上限は上の回数)
+        uint64_t residualStop = 0;
         bool galerkin = false;  // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
         TimeTreeSelect select = TimeTreeSelect::Previous;
         // 同じレベルで 2^これ ブロック角の枠は同じ e に揃える(細かさを同じ物の長さのブロックで比べる。0 = ブロックごと)
@@ -77,6 +95,9 @@ namespace bicameral::sim {
         // 前線の緩衝を揃える単位(groupShift の枠の組)の数で(T-1074。0 = 上の frontBuffer の形): 動いている単位(どれかの枠の
         // 望みの e が 0)から面の隣をたどってこの数の単位までを e = 0 に。単位の物の長さ × これ が緩衝の幅
         uint32_t frontBufferUnits = 0;
+
+        // --- 見る口(結果に効かない)---
+        const TimeTreeSpanObserver* spanObserver = nullptr;  // 列の解き(T-1111)
     };
 
     // 面 1 つ(a = 細かい側か、同じレベルなら − 側。b = 相手)。係数は a の単位 / 刻み
@@ -141,6 +162,7 @@ namespace bicameral::sim {
         // --- 測り ---
         uint64_t cellSteps = 0;      // セル × 解いた回数
         uint64_t solves = 0;         // 部品を呼んだ回数
+        uint64_t vCycles = 0;        // 回した V の数(T-1108)
         uint64_t worstResidual = 0;  // 部品の残差の計器の最大(式の単位。解けきらなかった所)
         uint64_t events = 0;
         uint64_t truncations = 0;
@@ -208,5 +230,66 @@ namespace bicameral::sim {
         uint64_t cells = 0;  // 刻むセルの数
     };
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world);
+
+    // --- 1 出来事の列を 1 本の系にまとめる(T-1141。GPU の早送りで起動の数と固定費を減らす)---
+    // 同じ刻みに解く列どうしは面を持たない(列の外は値 0 を固定した面)ので、節を並べただけの系(塊の対角)は列ごとに解いたのと
+    // ビット一致する。ただし部品の段の作り方は系全体で決まる(粗い段を足すかは「どれかの節の重み < 1/2」・縮約は座標の親)ので、
+    // まとめてよいのは V の回数・段の数・節のレベルが同じで、縮約がブロック(8 セル角)の中で閉じる(粗い段 3 つまで)列だけ。
+    // ほかは列ごとの系のまま(組を分ける)。CPU の試作の解き(列ごと)はこのまとめで変わらない(試験 event-merge で確かめる)
+    struct TimeTreeEventSpan {
+        EquilibriumSystem system;
+        int32_t exponent = 0;
+        uint32_t cycles = 0;  // V の回数(e ごとの表)
+    };
+
+    struct TimeTreeEventGroup {
+        EquilibriumSystem system;  // 列の系を入力の順に並べた(節・面・固定した面・右辺の項の番号をずらす)
+        uint32_t cycles = 0;
+        uint32_t levels = 0;               // 部品の段の数
+        std::vector<uint32_t> spans;       // まとめた列(入力の番号)
+        std::vector<uint32_t> nodeStarts;  // 列ごとの節の始まり(spans の順)
+    };
+
+    // 1 出来事の列(SolveSpans の順)を組に分けてまとめる。組は最初の列の順
+    std::vector<TimeTreeEventGroup> GroupTimeTreeEvent(std::span<const TimeTreeEventSpan> spans);
+
+    // --- 早送りの待ちの見積もり(D-650・T-1111。ゲームはこれを読んで眠れる条件などを決める。法則は変えない)---
+    // 1 組(その刻みに解く列を組にまとめた系 1 本。T-1141)の GPU の費用の式(T-1152):
+    //   固定費 + (段 − 1) × 段の固定費 + V × (V の固定費 + (段 − 1) × 段の V の固定費) + セル × 傾き + セル × V × 傾き。
+    // 4,096 セルまでの組はほぼ起動の固定費で決まり(段の数と V の回数)、セルの数はほとんど効かない(docs/perf.md の T-1152)。
+    // 出来事を続けて積んだ形(早送りの形。GPU の時計が高いまま)の測り。
+    // 値は起動時にその PC で測る(D-662: sim/gpu_time_tree_cost の ProbeTimeTreeSolveCost)。既定は RTX 3070 Ti・release のその測り
+    // (docs/perf.md の T-1152)。浮動小数点を使わないので ps の整数
+    struct TimeTreeSolveCost {
+        uint64_t eventNs = 19000;       // 1 組の固定費(段 0 の起動)
+        uint64_t levelNs = 38000;       // 粗い段 1 つの固定費(段の重み)
+        uint64_t cycleNs = 20000;       // V 1 回の固定費(段 1 つ)
+        uint64_t levelCycleNs = 20500;  // V 1 回の、粗い段 1 つぶんの固定費
+        uint64_t cellPs = 860;          // 段 0 + 段の重みのセル 1 つ
+        uint64_t cellCyclePs = 2570;    // V 1 回のセル 1 つ
+        // 測りの揺れの余裕(D-662。見積もりの上の値 = 式 × これ ÷ 100。GPU の時計が下がった時・測りの揺れ。T-1140)
+        uint32_t marginPercent = 200;
+    };
+
+    // 1 組の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数(V の回数は平均を切り上げ)、levels = 部品の段の数
+    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles, uint32_t levels = 1);
+
+    struct TimeTreeForwardEstimate {
+        uint64_t events = 0;      // 出来事(解く刻み)の数
+        uint64_t cellSolves = 0;  // セル × 解く回数
+        uint64_t cellCycles = 0;  // セル × V の回数(e ごとの表)
+        uint64_t waitMicroseconds = 0;
+        uint64_t waitUpperMicroseconds =
+            0;  // 余裕を見込んだ上の値(× marginPercent ÷ 100。ゲームはこちらで決めるのがおすすめ)
+    };
+
+    // 今の枠ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。
+    // 出来事は最も短い歩の終わりごと(長い歩の終わりはそれに重なり、同じ刻みの列は 1 本の系にまとめる)。
+    // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない。
+    // levelsAt[e] = e の列の系の部品の段の数(法則の係数で決まる。GPU の早送りが前に作った段から渡す。空・範囲の外は 1)。
+    // 1 出来事は (V の回数・段の数) が同じ e の列を 1 組に数える(GroupTimeTreeEvent と同じ見立て)
+    TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
+                                                    uint64_t ticks, const TimeTreeSolveCost& cost,
+                                                    std::span<const uint32_t> levelsAt = {});
 
 }  // namespace bicameral::sim

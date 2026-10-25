@@ -423,6 +423,11 @@ namespace bicameral::sim {
 
         // --- 列(同じ刻みに同じ e で始まる枠の集まり)の歩を始める: 反応・解き・記録 ---
 
+        // V の回数(法則の定数の表。e ごと。ADR-0465 の決めたこと 1)
+        uint32_t CyclesFor(const TimeTreeSetup& setup, int32_t exponent) {
+            return exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero : setup.cycles;
+        }
+
         struct Span {
             int32_t exponent = 0;
             uint64_t start = 0;
@@ -582,11 +587,24 @@ namespace bicameral::sim {
 
             // --- 解く(差の形。初めは δ = 0)---
             EquilibriumOptions options;
-            options.solver.cycles = span.exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero
-                                                                                                    : setup.cycles;
+            const uint32_t cycles = CyclesFor(setup, span.exponent);
+            options.solver.cycles = setup.residualStop == 0 ? cycles : 1;
             options.faceValues = false;
             options.galerkinCoarse = setup.galerkin;
-            const EquilibriumResult result = SolveEquilibrium(solved.built.system, options, solved.state);
+            if (setup.spanObserver != nullptr && setup.residualStop == 0) {
+                (*setup.spanObserver)(
+                    {.system = solved.built.system, .exponent = span.exponent, .start = span.start, .cycles = cycles});
+            }
+
+            // 残差で止める形(T-1108): V を 1 回ずつ、残差の計器の最大が閾値以下になるか上限 cycles 回まで(整数の判定 = 決定的)
+            EquilibriumResult result = SolveEquilibrium(solved.built.system, options, solved.state);
+            uint32_t done = options.solver.cycles;
+            while (setup.residualStop != 0 && done < cycles && result.worstResidual > setup.residualStop) {
+                result = SolveEquilibrium(solved.built.system, options, solved.state);
+                ++done;
+            }
+
+            steps.vCycles += done;
             steps.worstResidual = std::max(steps.worstResidual, result.worstResidual);
             steps.cellSteps += solved.built.cells.size();
             ++steps.solves;
@@ -1070,6 +1088,178 @@ namespace bicameral::sim {
         bytes.held = bytes.minimal + bytes.cells * CELL_DELTA_BYTES;
 
         return bytes;
+    }
+
+    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles, uint32_t levels) {
+        if (cells == 0)
+            return 0;
+
+        // 固定費 + 段と V の起動 + セルの傾き(V の回数の違う列は別の組なので、平均の切り上げで数える)
+        const uint64_t cycles = (cellCycles + cells - 1) / cells;
+        const uint64_t coarse = levels > 1 ? levels - 1 : 0;
+        const uint64_t launches = cost.eventNs + (coarse * cost.levelNs) +
+                                  (cycles * (cost.cycleNs + (coarse * cost.levelCycleNs)));
+        const uint64_t slope = ((cells * cost.cellPs) + (cellCycles * cost.cellCyclePs)) / 1000;
+
+        return launches + slope;
+    }
+
+    namespace {
+
+        // まとめてよい列の組の鍵(V の回数・段の数・節のレベル)。まとめられない列は own = true(その列だけの組)
+        struct GroupKey {
+            uint32_t cycles = 0;
+            uint32_t levels = 0;
+            int32_t level = 0;
+            bool own = false;
+        };
+
+        // 縮約がブロックの中で閉じる粗い段の数(8 セル角 = 2^3)
+        constexpr uint32_t MERGE_MAX_COARSE_LEVELS = 3;
+
+        GroupKey KeyOf(const TimeTreeEventSpan& span) {
+            const EquilibriumSystem& system = span.system;
+            GroupKey key{.cycles = span.cycles};
+
+            // --- 段の数(部品が作る段。解かずに数える)---
+            EquilibriumOptions options;
+            options.solver.cycles = 0;
+            options.faceValues = false;
+            EquilibriumState state;
+            key.levels = SolveEquilibrium(system, options, state).gridLevels;
+
+            // --- 節のレベルが 1 つで、縮約がブロックの中で閉じるか ---
+            key.level = system.nodes.empty() ? 0 : system.nodes.front().level;
+            const bool sameLevel = std::ranges::all_of(
+                system.nodes, [&key](const EquilibriumNode& node) { return node.level == key.level; });
+            key.own = !sameLevel || key.levels > MERGE_MAX_COARSE_LEVELS + 1;
+
+            return key;
+        }
+
+        bool SameGroup(const GroupKey& a, const GroupKey& b) {
+            return !a.own && !b.own && a.cycles == b.cycles && a.levels == b.levels && a.level == b.level;
+        }
+
+        // 列の系を組の系の後ろに足す(番号を節の数だけずらす)
+        void Append(EquilibriumSystem& into, const EquilibriumSystem& from) {
+            const auto offset = static_cast<uint32_t>(into.nodes.size());
+            into.rounding = from.rounding;
+            into.nodes.insert(into.nodes.end(), from.nodes.begin(), from.nodes.end());
+            for (EquilibriumFace face : from.faces) {
+                face.fine += offset;
+                face.coarse += offset;
+                into.faces.push_back(face);
+            }
+
+            for (EquilibriumFixedFace fixed : from.fixedFaces) {
+                fixed.node += offset;
+                into.fixedFaces.push_back(fixed);
+            }
+
+            for (EquilibriumSource source : from.sources) {
+                source.node += offset;
+                into.sources.push_back(source);
+            }
+        }
+
+    }  // namespace
+
+    std::vector<TimeTreeEventGroup> GroupTimeTreeEvent(std::span<const TimeTreeEventSpan> spans) {
+        std::vector<TimeTreeEventGroup> groups;
+        std::vector<GroupKey> keys;
+        for (uint32_t index = 0; index < spans.size(); ++index) {
+            const GroupKey key = KeyOf(spans[index]);
+            const auto found = std::ranges::find_if(keys,
+                                                    [&key](const GroupKey& other) { return SameGroup(key, other); });
+            const auto at = static_cast<size_t>(found - keys.begin());
+            if (found == keys.end()) {
+                keys.push_back(key);
+                groups.push_back({.cycles = key.cycles, .levels = key.levels});
+            }
+
+            TimeTreeEventGroup& group = groups[at];
+            group.spans.push_back(index);
+            group.nodeStarts.push_back(static_cast<uint32_t>(group.system.nodes.size()));
+            Append(group.system, spans[index].system);
+        }
+
+        return groups;
+    }
+
+    namespace {
+
+        // 見積もりの 1 出来事の組(V の回数・段の数が同じ列。T-1152)
+        struct EstimateGroup {
+            uint32_t cycles = 0;
+            uint32_t levels = 0;
+            uint64_t cells = 0;
+        };
+
+        void AddEstimateGroup(std::vector<EstimateGroup>& groups, uint32_t cycles, uint32_t levels, uint64_t cells) {
+            if (cells == 0)
+                return;
+
+            for (EstimateGroup& group : groups) {
+                if (group.cycles == cycles && group.levels == levels) {
+                    group.cells += cells;
+                    return;
+                }
+            }
+
+            groups.push_back({.cycles = cycles, .levels = levels, .cells = cells});
+        }
+
+    }  // namespace
+
+    TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
+                                                    uint64_t ticks, const TimeTreeSolveCost& cost,
+                                                    std::span<const uint32_t> levelsAt) {
+        // --- e ごとの刻むセルの数 ---
+        const auto exponents = static_cast<size_t>(std::max(setup.maxExponent, 0)) + 1;
+        std::vector<uint64_t> cellsAt(exponents, 0);
+        for (const uint32_t slot : world.layout.blocks) {
+            uint64_t cells = 0;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                cells += world.layout.stepped[CellId(slot, index)];
+
+            const int32_t exponent = std::clamp(world.steps.exponent[slot], 0, setup.maxExponent);
+            cellsAt[static_cast<size_t>(exponent)] += cells;
+        }
+
+        // --- 出来事の組 j = 2^j の倍数の刻み(2^(j+1) の倍数を除く。最後の組は残り全部): 解くのは e ≤ j の列 ---
+        // 列は (V の回数・段の数) ごとの組にまとまる
+        TimeTreeForwardEstimate estimate;
+        uint64_t nanoseconds = 0;
+        std::vector<EstimateGroup> groups;
+        for (size_t j = 0; j < exponents; ++j) {
+            const auto exponent = static_cast<int32_t>(j);
+            const uint32_t levels = j < levelsAt.size() ? std::max(levelsAt[j], 1u) : 1u;
+            AddEstimateGroup(groups, CyclesFor(setup, exponent), levels, cellsAt[j]);
+            const uint64_t multiples = ticks >> j;
+            const uint64_t events = j + 1 < exponents ? multiples - (ticks >> (j + 1)) : multiples;
+            uint64_t eventNs = 0;
+            uint64_t cells = 0;
+            uint64_t cycles = 0;
+            for (const EstimateGroup& group : groups) {
+                eventNs += TimeTreeEventNs(cost, group.cells, group.cells * group.cycles, group.levels);
+                cells += group.cells;
+                cycles += group.cells * group.cycles;
+            }
+
+            if (cells == 0 || events == 0)
+                continue;
+
+            estimate.events += events;
+            estimate.cellSolves += events * cells;
+            estimate.cellCycles += events * cycles;
+            nanoseconds += events * eventNs;
+        }
+
+        estimate.waitMicroseconds = nanoseconds / 1000;
+        estimate.waitUpperMicroseconds = (nanoseconds / 1000) * cost.marginPercent / 100;
+
+        return estimate;
     }
 
 }  // namespace bicameral::sim

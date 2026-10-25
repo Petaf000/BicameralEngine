@@ -137,6 +137,8 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_gas.cpp
   src/sim/gpu_gas_tree.cpp  # 気体の多重解像度の木の GPU(T-0209)
   src/sim/gpu_equilibrium.cpp  # 釣り合う家族の共通部品の GPU 版(T-0915)
+  src/sim/gpu_equilibrium_upload.cpp  # 部品の段 0 を CPU が組んだ系の写しから(時間を飛ばす試作の列の系。T-1111)
+  src/sim/gpu_time_tree_cost.cpp  # 早送りの費用の式の値を起動時に測る口(D-662・T-1152)
   src/sim/gpu_equilibrium_block.cpp  # 成分を持つ節の釣り合いの GPU 版(8 色・Galerkin の粗い段。T-0970)
   src/sim/gpu_gas_projection.cpp  # 気体の圧力の投影の 1 刻みの GPU(T-0845。計測と比べる口)
   src/sim/gpu_lab_box.cpp
