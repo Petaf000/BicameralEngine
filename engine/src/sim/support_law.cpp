@@ -212,7 +212,7 @@ namespace bicameral::sim {
                 if (diagonal == NO_CELL || side == above)
                     continue;
 
-                // 段の斜めの棒は同じ大きさのセルの間だけ(分けたセルが絡む段は T-1067 の残り)
+                // 段の斜めの棒は同じ大きさのセルの間だけ(細かいセルどうしは AddFineBraces。違う大きさの段は T-1133)
                 if (diagonal == SPLIT_CELL || sideCell == SPLIT_CELL || aboveCell == SPLIT_CELL)
                     continue;
 
@@ -263,6 +263,9 @@ namespace bicameral::sim {
                 for (uint32_t part = 0; part < 4; ++part) {
                     const uint32_t fx = 2 * x + (part & 1);
                     const uint32_t fup = 2 * up + (part >> 1);
+                    if (!m_scene.fineAbsent.empty() && m_scene.fineAbsent[fx + (size_t)2 * width * fup] != 0)
+                        continue;  // 割れて分かれた細かいセル(T-1067)
+
                     m_fineIndex[fx + (size_t)2 * width * fup] = (uint32_t)m_cells.size();
                     m_cells.push_back({fx, fup});
                     m_cellFine.push_back(1);
@@ -294,12 +297,21 @@ namespace bicameral::sim {
     void SupportLaw::BuildMixedBonds() {
         const uint32_t fineWidth = 2 * m_scene.width;
         const uint32_t fineHeight = 2 * m_scene.height;
+        m_mixedFaceAt.assign((size_t)fineWidth * fineHeight * 2, (uint32_t)NO_CELL);
+        const auto addMixed = [&](uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
+                                  uint32_t faceX, uint32_t faceUp) {
+            const auto first = (uint32_t)m_mixedTerms.size();
+            AddMixedBond(coarse, fine, axis, coarseLow, offset, FineIntact(faceX, faceUp, axis));
+            if (m_mixedTerms.size() != first)
+                m_mixedFaceAt[(faceX + (size_t)fineWidth * faceUp) * 2 + axis] = first;
+        };
         for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
             if (m_cellFine[cell] == 0)
                 continue;
 
             const auto [fx, fup] = m_cells[cell];
             AddFineClamps(cell);
+            AddFineBraces(cell);
             for (uint32_t axis = 0; axis < 2; ++axis) {
                 const uint32_t stepX = axis == 0 ? 1 : 0;
                 const uint32_t stepUp = 1 - stepX;
@@ -309,15 +321,12 @@ namespace bicameral::sim {
                 const uint32_t nextX = fx + stepX;
                 const uint32_t nextUp = fup + stepUp;
                 if (nextX < fineWidth && nextUp < fineHeight) {
-                    const uint32_t intact = (nextX / 2 == fx / 2 && nextUp / 2 == fup / 2)
-                                                ? SUPPORT_INTACT_FULL
-                                                : Intact(fx / 2, fup / 2, axis);
                     const uint32_t next = m_fineIndex[nextX + (size_t)fineWidth * nextUp];
                     const uint32_t coarse = m_index[nextX / 2 + (size_t)m_scene.width * (nextUp / 2)];
                     if (next != NO_CELL)
-                        AddBond({.low = cell, .high = next, .axis = axis}, intact);
+                        AddBond({.low = cell, .high = next, .axis = axis}, FineIntact(fx, fup, axis));
                     else if (coarse < SPLIT_CELL)
-                        AddMixedBond(coarse, cell, axis, false, offset, intact);
+                        addMixed(coarse, cell, axis, false, offset, fx, fup);
                 }
 
                 // − 側(分けていないセルとの間だけ。細かいセルどうしは − 側のセルが足す)
@@ -328,8 +337,39 @@ namespace bicameral::sim {
                 const uint32_t backUp = fup - stepUp;
                 const uint32_t coarse = m_index[backX / 2 + (size_t)m_scene.width * (backUp / 2)];
                 if (m_fineIndex[backX + (size_t)fineWidth * backUp] == NO_CELL && coarse < SPLIT_CELL)
-                    AddMixedBond(coarse, cell, axis, true, offset, Intact(backX / 2, backUp / 2, axis));
+                    addMixed(coarse, cell, axis, true, offset, backX, backUp);
             }
+        }
+    }
+
+    // 細かいセルどうしの段の斜めの棒(T-1067): 細かい格子で、斜め上の隣が細かいセル・間の 2 つの場所(横・上)の片方だけにセルがある所。
+    // 棒の硬さは大きさによらない(軸の硬さ E A ÷ L の A ∝ 一辺 × D・L ∝ 一辺)ので粗いセルと同じ m_brace。違う大きさのセルの段は置かない(T-1133)
+    void SupportLaw::AddFineBraces(uint32_t cell) {
+        const uint32_t fineWidth = 2 * m_scene.width;
+        const auto [fx, fup] = m_cells[cell];
+        if (!m_options.stairBraces || fup + 1 >= 2 * m_scene.height)
+            return;
+
+        const auto occupied = [&](uint32_t x, uint32_t up) {
+            return m_fineIndex[x + (size_t)fineWidth * up] != NO_CELL ||
+                   m_index[x / 2 + (size_t)m_scene.width * (up / 2)] < SPLIT_CELL;
+        };
+        for (const int32_t across : {-1, 1}) {
+            const int64_t sideX = (int64_t)fx + across;
+            if (sideX < 0 || sideX >= (int64_t)fineWidth)
+                continue;
+
+            const auto sx = (uint32_t)sideX;
+            const uint32_t diagonal = m_fineIndex[sx + (size_t)fineWidth * (fup + 1)];
+            const bool side = occupied(sx, fup);
+            if (diagonal == NO_CELL || side == occupied(fx, fup + 1))
+                continue;
+
+            const uint32_t lowX = std::min(fx, sx);
+            const uint32_t intact = side ? std::min(FineIntact(lowX, fup, 0), FineIntact(sx, fup, 1))
+                                         : std::min(FineIntact(fx, fup, 1), FineIntact(lowX, fup + 1, 0));
+            if (intact != 0)
+                AddBrace({.low = cell, .high = diagonal, .across = across, .unit = Scaled(m_brace, intact)});
         }
     }
 
@@ -361,8 +401,10 @@ namespace bicameral::sim {
         const int64_t fineSide = -coarseSide;
         const bool faceOffset = m_options.mixedBeam == MixedBeam::FaceOffset;
         const auto term = [&](uint64_t coefficient) {
-            return MixedTerm{
-                .low = coarseLow ? coarse : fine, .high = coarseLow ? fine : coarse, .coefficient = coefficient};
+            return MixedTerm{.low = coarseLow ? coarse : fine,
+                             .high = coarseLow ? fine : coarse,
+                             .coefficient = coefficient,
+                             .intact = intact};
         };
         const auto gradientOf = [&](MixedTerm& each, bool ofCoarse) -> std::array<int64_t, SUPPORT_COMPONENTS>& {
             return ofCoarse == coarseLow ? each.gradientLow : each.gradientHigh;
@@ -477,6 +519,20 @@ namespace bicameral::sim {
         return intact.empty() ? SUPPORT_INTACT_FULL : intact[x + (size_t)m_scene.width * up];
     }
 
+    // 細かい格子の面の残りの硬さ(T-1067)。細かい並びが空なら、分けたセルの中は割れていない・ほかは元のセルの面の値(T-1120 と同じ)
+    uint32_t SupportLaw::FineIntact(uint32_t fx, uint32_t fup, uint32_t axis) const {
+        const std::vector<uint32_t>& intact = axis == 0 ? m_scene.intactFineX : m_scene.intactFineUp;
+        if (!intact.empty())
+            return intact[fx + (size_t)2 * m_scene.width * fup];
+
+        const uint32_t nextX = axis == 0 ? fx + 1 : fx;
+        const uint32_t nextUp = axis == 0 ? fup : fup + 1;
+        if (nextX / 2 == fx / 2 && nextUp / 2 == fup / 2)
+            return SUPPORT_INTACT_FULL;
+
+        return Intact(fx / 2, fup / 2, axis);
+    }
+
     // 段の斜めの棒は、間にあるセルを回る 2 つの面の残りの硬さの小さい方(仮。棒の力を面の応力へ配る形は R-B2 の残り)
     uint32_t SupportLaw::BraceIntact(uint32_t x, uint32_t up, uint32_t sideX, bool side) const {
         const uint32_t lowX = std::min(x, sideX);
@@ -496,6 +552,7 @@ namespace bicameral::sim {
 
         Bond bond = candidate;
         bond.unit = Scaled(bond.axis == 0 ? m_bondX : m_bondUp, intact);
+        bond.intact = intact;
         m_bondAt[(size_t)bond.low * 2 + bond.axis] = (uint32_t)m_bonds.size();
         m_bonds.push_back(bond);
         const uint64_t b = bond.unit;
@@ -765,7 +822,7 @@ namespace bicameral::sim {
         if (m_options.form != SupportForm::BeamLattice || highX >= m_scene.width || highUp >= m_scene.height)
             return {};
 
-        // 分けたセル(SPLIT_CELL)が絡む面は読まない(違う大きさの面の割れの数え方は T-1067)
+        // 分けたセル(SPLIT_CELL)が絡む面は FineFaceForces(T-1067)
         const uint32_t cell = m_index[x + (size_t)m_scene.width * up];
         if (cell >= SPLIT_CELL || m_index[highX + (size_t)m_scene.width * highUp] >= SPLIT_CELL)
             return {};
@@ -774,29 +831,98 @@ namespace bicameral::sim {
         if (bondIndex == NO_CELL)
             return {};  // 割れた面
 
-        const uint64_t b = m_bonds[bondIndex].unit;
-        const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
-        const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
-        const int64_t turnLow = Value(x, up, SUPPORT_TURN);
-        const int64_t turnHigh = Value(highX, highUp, SUPPORT_TURN);
-        const int64_t stretch = Value(highX, highUp, along) - Value(x, up, along);
-        const int64_t slide = Value(highX, highUp, across) - Value(x, up, across);
-        const int64_t turns = axis == 0 ? -(turnLow + turnHigh) : turnLow + turnHigh;
+        return BondForces(m_bonds[bondIndex]);
+    }
+
+    // 同じ大きさのセルどうしの面の力(冒頭の式。大きさによらず同じ形 = ADR-0470 の 2)
+    SupportFaceForces SupportLaw::BondForces(const Bond& bond) const {
+        const uint64_t b = bond.unit;
+        const uint32_t along = bond.axis == 0 ? SUPPORT_X : SUPPORT_UP;
+        const uint32_t across = bond.axis == 0 ? SUPPORT_UP : SUPPORT_X;
+        const int64_t turnLow = CellValue(bond.low, SUPPORT_TURN);
+        const int64_t turnHigh = CellValue(bond.high, SUPPORT_TURN);
+        const int64_t stretch = CellValue(bond.high, along) - CellValue(bond.low, along);
+        const int64_t slide = CellValue(bond.high, across) - CellValue(bond.low, across);
+        const int64_t turns = bond.axis == 0 ? -(turnLow + turnHigh) : turnLow + turnHigh;
 
         SupportFaceForces forces;
         forces.axialMn = Flow(6 * b, stretch);
         forces.shearMn = Flow(6 * b, slide + turns);
         const int64_t bend = Flow(6 * b, turnHigh - turnLow);
-        forces.lowSideMn = axis == 0 ? forces.axialMn + bend : forces.axialMn - bend;
-        forces.highSideMn = axis == 0 ? forces.axialMn - bend : forces.axialMn + bend;
+        forces.lowSideMn = bond.axis == 0 ? forces.axialMn + bend : forces.axialMn - bend;
+        forces.highSideMn = bond.axis == 0 ? forces.axialMn - bend : forces.axialMn + bend;
 
         // ½ 6b Δn² + ½ 6b (Δt ∓ (φ_a + φ_b))² + ½ 2b Δφ²(BuildBlocks の面の項と同じ)
         const int64_t bendDifference = turnHigh - turnLow;
         forces.energyPj = SpringWork(forces.axialMn, stretch) + SpringWork(forces.shearMn, slide + turns) +
                           SpringWork(Flow(2 * b, bendDifference), bendDifference);
-        forces.intact = Intact(x, up, axis);
+        forces.intact = bond.intact;
 
         return forces;
+    }
+
+    // 違う大きさの梁の面の力(T-1067)。項 ½ c p²(p = g · x)の力 c p を勾配で配る: 軸 = Σ c p g_high,軸・ずれ = Σ c p g_high,横。
+    // 切り口(細かい側の面の位置。梁の長さ L = 1.5 s のうち粗い側の端から s)の曲げの力の回り M は、両端の回り(ずれと曲げの項の
+    // φ の勾配 f)の直線の内挿で、どちらの向きでも 6M/s = 2 (f_high − f_low)(同じ大きさの面の 6M/dx = 1.5 (f_high − f_low) と同じ形)。
+    // 軸の項の φ の勾配(粗い側の端を面の位置へずらす剛体の動き)は梁の曲げではないので入れない
+    SupportFaceForces SupportLaw::MixedForces(size_t first, uint32_t axis) const {
+        const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
+        const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
+        SupportFaceForces forces;
+        int64_t turnLow = 0;
+        int64_t turnHigh = 0;
+        for (size_t i = first; i < first + 3; ++i) {
+            const MixedTerm& term = m_mixedTerms[i];
+            int64_t projection = 0;
+            for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
+                projection += term.gradientLow[c] * CellValue(term.low, c);
+                projection += term.gradientHigh[c] * CellValue(term.high, c);
+            }
+
+            const int64_t force = Flow(term.coefficient, projection);
+            forces.axialMn += force * term.gradientHigh[along];
+            forces.shearMn += force * term.gradientHigh[across];
+            forces.energyPj += SpringWork(force, projection);
+            if (i == first)
+                continue;
+
+            turnLow += force * term.gradientLow[SUPPORT_TURN];
+            turnHigh += force * term.gradientHigh[SUPPORT_TURN];
+        }
+
+        const int64_t bend = 2 * (turnHigh - turnLow);
+        forces.lowSideMn = axis == 0 ? forces.axialMn + bend : forces.axialMn - bend;
+        forces.highSideMn = axis == 0 ? forces.axialMn - bend : forces.axialMn + bend;
+        forces.intact = m_mixedTerms[first].intact;
+
+        return forces;
+    }
+
+    SupportFaceForces SupportLaw::FineFaceForces(uint32_t fx, uint32_t fup, uint32_t axis) const {
+        const uint32_t fineWidth = 2 * m_scene.width;
+        const uint32_t nextX = axis == 0 ? fx + 1 : fx;
+        const uint32_t nextUp = axis == 0 ? fup : fup + 1;
+        if (!m_mixed || m_options.form != SupportForm::BeamLattice || nextX >= fineWidth ||
+            nextUp >= 2 * m_scene.height)
+            return {};
+
+        const uint32_t low = m_fineIndex[fx + (size_t)fineWidth * fup];
+        const uint32_t high = m_fineIndex[nextX + (size_t)fineWidth * nextUp];
+        if (low == NO_CELL && high == NO_CELL) {
+            if (nextX / 2 == fx / 2 && nextUp / 2 == fup / 2)
+                return {};  // 分けていないセルの中
+
+            return FaceForces(fx / 2, fup / 2, axis);
+        }
+
+        if (low != NO_CELL && high != NO_CELL) {
+            const uint32_t bondIndex = m_bondAt[(size_t)low * 2 + axis];
+            return bondIndex == NO_CELL ? SupportFaceForces{} : BondForces(m_bonds[bondIndex]);
+        }
+
+        const uint32_t first = m_mixedFaceAt[(fx + (size_t)fineWidth * fup) * 2 + axis];
+
+        return first == NO_CELL ? SupportFaceForces{} : MixedForces(first, axis);
     }
 
     SupportLedger SupportLaw::Ledger() const {

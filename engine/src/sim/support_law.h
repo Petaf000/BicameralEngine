@@ -81,8 +81,15 @@ namespace bicameral::sim {
         // --- 違う大きさのセル(T-1120)---
         // 同じ並び。1 = このセルを一辺 cellMm ÷ 2 の 2 × 2 のセル(全部ある)に分ける。空 = 分けない(今までとビット一致)。
         // 奥行は分けても cellMm(板の厚さは場面で 1 つ)。荷は 4 つに分ける。固定した面は向きの側の細かいセルへ。
-        // 分けたセルの中の面・分けたセルどうしの面・違う大きさの面の残りの硬さは、元のセルの面(intactX / intactUp)の値
+        // 分けたセルの中の面・分けたセルどうしの面・違う大きさの面の残りの硬さは intactFineX / intactFineUp(空なら元のセルの面の値)
         std::vector<uint8_t> fine;
+        // 細かい格子(一辺 cellMm ÷ 2・[fx + 2 width × fup])の面の残りの硬さ(Q16。T-1067)。細かい座標のセルと +軸の隣の間の面で、
+        // どちらかが細かいセルの面(分けたセルの中・分けたセルどうし・違う大きさの面)だけが読む。空 = 分けたセルの中は割れていない・
+        // ほかは元のセルの面(intactX / intactUp)の値(T-1120 とビット一致)
+        std::vector<uint32_t> intactFineX;
+        std::vector<uint32_t> intactFineUp;
+        // 同じ細かい並び。1 = 分けたセルのうち、この細かいセルは無い(割れて分かれた。T-1067)。空 = 全部ある
+        std::vector<uint8_t> fineAbsent;
     };
 
     struct SupportOptions {
@@ -164,6 +171,10 @@ namespace bicameral::sim {
         SupportLedger Ledger() const;
         // セル (x, up) と +軸(0 = x・1 = 上)の隣の間の面の力。面が無い(どちらかのセルが無い)・成分ごとの形なら全部 0
         SupportFaceForces FaceForces(uint32_t x, uint32_t up, uint32_t axis) const;
+        // 細かい座標 (fx, fup) のセルと +軸の隣の間の面の力(T-1067)。どちらかが細かいセルなら細かい面(幅 cellMm ÷ 2。
+        // 違う大きさの面は細かい側の面の位置の切り口)、両方が分けていない違うセルなら粗い面(FaceForces と同じ。幅 cellMm)、
+        // 同じ分けていないセルの中・面が無いなら全部 0
+        SupportFaceForces FineFaceForces(uint32_t fx, uint32_t fup, uint32_t axis) const;
         uint64_t Hash() const;
         // 前の Step で節の値を解いた回数(全部の段。Lagged は成分ごとの和。費用の比べ)
         uint64_t LastNodeUpdates() const { return m_lastNodeUpdates; }
@@ -180,6 +191,7 @@ namespace bicameral::sim {
             uint32_t high = 0;  // +軸の側のセル
             uint32_t axis = 0;  // 0 = x・1 = 上
             uint64_t unit = 0;  // b(面の残りの硬さを掛けた後)
+            uint32_t intact = SUPPORT_INTACT_FULL;
         };
 
         // 段の斜めの棒: low = 下のセル・high = 斜め上のセル・across = 横の向き(+1 = +x へ・−1 = −x へ)
@@ -203,6 +215,7 @@ namespace bicameral::sim {
             uint64_t coefficient = 0;
             std::array<int64_t, SUPPORT_COMPONENTS> gradientLow{};
             std::array<int64_t, SUPPORT_COMPONENTS> gradientHigh{};
+            uint32_t intact = SUPPORT_INTACT_FULL;
         };
 
         // 遅らせた結合: 行の成分の式に K × (列の成分の値) が入る
@@ -219,6 +232,7 @@ namespace bicameral::sim {
         void BuildMixedCells();
         void BuildMixedBonds();
         void AddFineClamps(uint32_t cell);
+        void AddFineBraces(uint32_t cell);
         void AddMixedBond(uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
                           uint32_t intact);
         void BuildBlocks();
@@ -237,6 +251,9 @@ namespace bicameral::sim {
         int64_t UpForceOnBond(const Bond& bond) const;  // high のセルへ low のセルから(low へは同じ値の逆)
         uint32_t ComponentCount() const;
         uint32_t Intact(uint32_t x, uint32_t up, uint32_t axis) const;
+        uint32_t FineIntact(uint32_t fx, uint32_t fup, uint32_t axis) const;
+        SupportFaceForces BondForces(const Bond& bond) const;
+        SupportFaceForces MixedForces(size_t first, uint32_t axis) const;
         uint32_t BraceIntact(uint32_t x, uint32_t up, uint32_t sideX, bool side) const;
         int64_t CellLoad(uint32_t cell) const;  // 重さ + 載せた荷(mN。下向きが正)
         void BuildLoads();
@@ -255,6 +272,8 @@ namespace bicameral::sim {
         std::vector<uint32_t> m_index;      // [x + width × up] → セル(無ければ UINT32_MAX・分けたセルは SPLIT_CELL)
         std::vector<uint32_t> m_fineIndex;  // [fx + 2 width × fup] → 細かいセル(混ざる場面だけ。無ければ UINT32_MAX)
         std::vector<MixedTerm> m_mixedTerms;
+        std::vector<uint32_t>
+            m_mixedFaceAt;  // [(fx + 2 width × fup) × 2 + 軸] → 違う大きさの梁の最初の項(T-1067。無ければ UINT32_MAX)
         std::vector<Bond> m_bonds;
         std::vector<uint32_t> m_bondAt;  // [セル × 2 + 軸] → 面(無ければ UINT32_MAX)
         std::vector<Clamp> m_clamps;

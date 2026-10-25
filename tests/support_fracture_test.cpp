@@ -2,6 +2,8 @@
 // 物質: 弱い岩(硬さ 5 GPa・密度 2600 kg/m³・引きの強さ 500 kPa・押しの強さ 10 MPa・破片の大きさ 0.5 m → 割れ面のエネルギー 25 J/m²・
 //   割れの速さ 5 m/s)。縦の面・奥行 1 セル(力は奥行 1 m あたりに直して比べる)。60 刻み/秒。
 // 場面(どれも 0.5 m と 0.25 m。3 通りの割れ方〔Strength / Energy / Window(T-1042・ℓ = 0.5 m の区間の平均)〕。Window は A・B を 0.125 m でも。
+// 引数 --refine で割れかけの所を 0.25 m に下りる道(T-1067。A を 0.5 m・0.25 m・根だけ 0.25 m・下りる で比べる)。
+// 引数 --root-compare [荷 kN/m] [刻み] で、全部 0.25 m と根だけ 0.25 m の釣り合いの根の面の縁の力を比べる(調べ用)。
 // 引数 --window-sweep で ℓ = 0.5・1・2 m の比べ〔T-1042 の続き。A・B は 0.5 / 0.25 / 0.125 m・C〔24 m の岩〕と D は 0.5 / 0.25 m〕):
 //   A. 壁(幅 1 m・高さ 3 m)から出た片持ち梁(長さ 2 m・厚さ 1 m)の先の 1 m に荷を 1 kN/m ずつ足す(4 秒ごと)→ 根で折れる荷
 //   B. 厚さ 0.5 m の棚(幅 6 m)の下を先から 0.5 m ずつ掘る(4 秒ごと)→ 折れる張り出しの長さ
@@ -15,6 +17,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <functional>
 #include <numbers>
@@ -696,6 +699,204 @@ namespace {
         Log(Channel::Sim, Level::Info, "厚い梁(厚さ 2 m・0.5 / 0.25 m):\n{}", summary);
     }
 
+    // --- 割れかけの所を細かくする(T-1067): 細かい格子の面で持つ時の帳簿・場所 ---
+    // 割れ切った細かい面の場所(縦の面の x・横の面の高さ。m)
+    std::string WhereFine(const sim::SupportFracture& fracture) {
+        const sim::SupportScene& scene = fracture.Scene();
+        const uint64_t side = scene.cellMm / 2;
+        std::set<uint64_t> vertical;
+        std::set<uint64_t> horizontal;
+        for (uint32_t fup = 0; fup < 2 * scene.height; ++fup) {
+            for (uint32_t fx = 0; fx < 2 * scene.width; ++fx) {
+                if (fracture.FineProgress(fx, fup, 0) >= sim::SUPPORT_INTACT_FULL)
+                    vertical.insert((fx + 1) * side);
+
+                if (fracture.FineProgress(fx, fup, 1) >= sim::SUPPORT_INTACT_FULL)
+                    horizontal.insert((fup + 1) * side);
+            }
+        }
+
+        std::string text = "縦の割れ x =";
+        for (const uint64_t mm : vertical)
+            text += std::format(" {:.2f}", mm / 1000.0);
+
+        text += " m・横の割れ 高さ =";
+        for (const uint64_t mm : horizontal)
+            text += std::format(" {:.2f}", mm / 1000.0);
+
+        return text + " m";
+    }
+
+    // 細かい格子の帳簿: 解放 = 割れ面 + 熱・割れ面のエネルギー = G × 割れた面積(面の幅で数える。ADR-0470)・熱 ≥ 0
+    void CheckFineLedger(const sim::SupportFracture& fracture, const sim::SupportFractureLedger& ledger,
+                         std::string_view label) {
+        Expect(ledger.releasedPj == ledger.surfacePj + ledger.heatPj, std::format("{}: 解放 = 割れ面 + 熱", label));
+        const auto energy = (int64_t)fracture.FractureEnergyMjPerM2() * 1000;  // pJ/mm²
+        Expect(ledger.surfacePj >= energy * (int64_t)ledger.brokenAreaMm2 &&
+                   ledger.surfacePj <= energy * (int64_t)(ledger.brokenAreaMm2 + ledger.crackingAreaMm2),
+               std::format("{}: 割れ面のエネルギー = G × 割れた面積", label));
+        const uint64_t side = fracture.Scene().cellMm / 2;
+        const auto fineFacePj = energy * (int64_t)(side * fracture.Scene().cellMm);
+        Expect(ledger.worstStepHeatPj >= -fineFacePj / 16384, std::format("{}: 熱 ≥ 0(坂を下る時だけ進む)", label));
+    }
+
+    struct RefineRun {
+        double load = -1.0;  // 折れた荷(kN/m)
+        uint64_t hash = 0;
+        std::string where;
+    };
+
+    // A の片持ち梁を割れの形 options で(荷は TestCantilever と同じ)。fine = 最初から分けておくセル(x, 上の範囲 mm。空 = なし)
+    RefineRun TestCantileverFine(uint64_t cellMm, const sim::SupportFractureOptions& options, uint32_t startKn,
+                                 std::string_view name, uint64_t fineFromMm = 0, uint64_t fineToMm = 0) {
+        sim::SupportScene scene = Cantilever(cellMm);
+        if (fineToMm > fineFromMm) {
+            scene.fine.assign(scene.solid.size(), 0);
+            for (uint32_t up = 0; up < scene.height; ++up) {
+                for (uint32_t x = 0; x < scene.width; ++x) {
+                    const uint64_t cx = Center(x, cellMm);
+                    scene.fine[x + (size_t)scene.width * up] = cx > fineFromMm && cx < fineToMm ? 1 : 0;
+                }
+            }
+        }
+
+        sim::SupportFracture fracture(scene, {}, Strength(), options);
+        std::vector<uint32_t> loaded;
+        for (uint32_t up = 0; up < scene.height; ++up) {
+            for (uint32_t x = 0; x < scene.width; ++x) {
+                const size_t at = x + (size_t)scene.width * up;
+                if (scene.solid[at] != 0 && Center(x, cellMm) > 2000)
+                    loaded.push_back((uint32_t)at);
+            }
+        }
+
+        uint32_t worstFine = 0;
+        const auto prepare = [&](uint32_t stage) {
+            worstFine = std::max(worstFine, fracture.Ledger().fineCells);
+            std::vector<int64_t> loads(scene.solid.size(), 0);
+            const auto perCell = (int64_t)((uint64_t)(startKn + stage) * 1000 * cellMm / loaded.size());
+            for (const uint32_t at : loaded)
+                loads[at] = perCell;
+
+            fracture.SetLoads(loads);
+        };
+        const std::string label = std::format("A 片持ち梁 {} m {}", cellMm / 1000.0, name);
+        const Outcome outcome = RunStages(fracture, 400, prepare, label);
+        if (fracture.FineMode())
+            CheckFineLedger(fracture, outcome.ledger, label);
+        else
+            CheckLedger(fracture, outcome, sim::FractureRule::Window, label);
+
+        const sim::SupportFractureLedger& ledger = outcome.ledger;
+        RefineRun result{.load = outcome.brokenStage < 0 ? -1.0 : (double)(startKn + outcome.brokenStage),
+                         .hash = outcome.hash,
+                         .where = fracture.FineMode() ? WhereFine(fracture) : outcome.where};
+        Log(Channel::Sim, Level::Info,
+            "{}: 割れ始めの荷 {} kN/m・折れた荷 {:.0f} kN/m{} / {} / 細かいセル 最大 {}・分けた刻み {} / 割れ面 {:.1f} "
+            "J・熱 "
+            "{:.1f} J(区間 1 刻みの最小 {:.4f} J)・熱で下げた歩 {} / {} 刻みに {:.1f} 秒({:.3f} ms/刻み)",
+            label, KnOf(startKn, outcome.startStage), result.load,
+            startKn != 0 && outcome.startStage == 0 ? "(最初の段で割れ始めた)" : "", result.where,
+            std::max(worstFine, ledger.fineCells), ledger.refineSteps, ledger.surfacePj * 1.0e-12,
+            ledger.heatPj * 1.0e-12, ledger.worstStepHeatPj * 1.0e-12, ledger.heatLimitedSteps, outcome.ticks,
+            outcome.seconds, outcome.seconds * 1000.0 / std::max<uint32_t>(outcome.ticks, 1));
+
+        return result;
+    }
+
+    // 0.5 m の場面で割れかけの所を 0.25 m に下りて判定した荷が、最初から 0.25 m で置いた荷と ±10 % で同じか(T-1067 の完了条件の 2 つ目を
+    // 2:1 で。ℓ = 0.5 m・岩の ℓ は下限ちょうど = 0.5 m のままでは 1 割強く折れる)
+    void RunRefine() {
+        constexpr uint32_t START_KN = 46;  // ℓ 0.5 m の見込み 77 kN/m の 6 割
+        const sim::SupportFractureOptions window{.rule = sim::FractureRule::Window};
+        const double coarse = TestCantileverFine(500, window, START_KN, "ℓ 0.5 m の平均(細かくしない)").load;
+        const RefineRun fineRun = TestCantileverFine(250, window, START_KN, "ℓ 0.5 m の平均(細かくしない)");
+        const double fine = fineRun.load;
+
+        // 細かい格子で持つが分けない(粗い面だけ = 面の数で数える形と同じ区間)
+        sim::SupportFractureOptions never = window;
+        never.refine = true;
+        never.refineIndex = UINT32_MAX;
+        never.coarsenIndex = 0;
+        const double same = TestCantileverFine(500, never, START_KN, "細かい格子で持つ・分けない").load;
+        Expect(same == coarse,
+               std::format("細かい格子で持っても分けなければ同じ荷: {:.0f} / {:.0f} kN/m", same, coarse));
+
+        // 根の 1 m(壁の 0.5 m と梁の 0.5 m)を最初から 0.25 m に
+        const sim::SupportFractureOptions fixedFine = window;
+        const RefineRun root = TestCantileverFine(500, fixedFine, START_KN, "根の 1 m を最初から 0.25 m", 500, 1500);
+
+        // 割れかけの所を下りる(強さの比 1/2 で分け・1/4 未満で戻す)
+        sim::SupportFractureOptions refine = window;
+        refine.refine = true;
+        const RefineRun first = TestCantileverFine(500, refine, START_KN, "割れかけの所を 0.25 m に下りる");
+        const RefineRun second = TestCantileverFine(500, refine, START_KN, "割れかけの所を 0.25 m に下りる(2 回目)");
+        Expect(first.hash == second.hash, "細かくする道の決定性: 2 回の実行でハッシュ一致");
+        sim::SupportFractureOptions tight = refine;
+        tight.refineRing = 0;
+        const RefineRun closest = TestCantileverFine(500, tight, START_KN, "割れかけの所を 0.25 m に下りる(周りなし)");
+
+        const auto near = [&](double load) {
+            return fine > 0 && load > 0 && std::abs(load - fine) <= 0.1 * fine;
+        };
+        Expect(near(first.load),
+               std::format("下りた荷が最初から 0.25 m の荷の ±10 %: {:.0f} / {:.0f} kN/m", first.load, fine));
+        Log(Channel::Sim, Level::Info,
+            "細かくする道(A・ℓ 0.5 m): 0.5 m {:.0f} / 0.25 m {:.0f} / 細かい格子で持つ・分けない {:.0f} / 根の 1 m を "
+            "0.25 m "
+            "{:.0f}({:+.1f} %) / 下りる {:.0f}({:+.1f} %)/ 下りる・周りなし {:.0f}({:+.1f} %)kN/m\n"
+            "  場所: 0.25 m {} / 根だけ {} / 下りる {} / 周りなし {}",
+            coarse, fine, same, root.load, 100.0 * (root.load - fine) / fine, first.load,
+            100.0 * (first.load - fine) / fine, closest.load, 100.0 * (closest.load - fine) / fine, fineRun.where,
+            root.where, first.where, closest.where);
+    }
+
+    // 根の面の力の比べ(調べ用): 全部 0.25 m と、0.5 m の根の 1 m だけ 0.25 m で、同じ荷の釣り合いの根の 2 つの線(x = 1.0・1.25 m)の縁の力
+    void RunRootCompare(uint32_t loadKn, uint32_t ticks) {
+        for (const bool mixed : {false, true}) {
+            const uint64_t cellMm = mixed ? 500 : 250;
+            sim::SupportScene scene = Cantilever(cellMm);
+            if (mixed) {
+                scene.fine.assign(scene.solid.size(), 0);
+                for (uint32_t at = 0; at < scene.solid.size(); ++at) {
+                    const uint64_t cx = Center(at % scene.width, cellMm);
+                    scene.fine[at] = cx > 500 && cx < 1500 ? 1 : 0;
+                }
+            }
+
+            std::vector<uint32_t> loaded;
+            for (uint32_t at = 0; at < scene.solid.size(); ++at) {
+                if (scene.solid[at] != 0 && Center(at % scene.width, cellMm) > 2000)
+                    loaded.push_back(at);
+            }
+
+            scene.loadMn.assign(scene.solid.size(), 0);
+            for (const uint32_t at : loaded)
+                scene.loadMn[at] = (int64_t)((uint64_t)loadKn * 1000 * cellMm / loaded.size());
+
+            sim::SupportLaw law(scene, {});
+            for (uint32_t tick = 0; tick < ticks; ++tick)
+                law.Step();
+
+            const sim::SupportLedger ledger = law.Ledger();
+            std::string text = std::format("{}: 残りの力の最大 {} mN(重さ {} mN)",
+                                           mixed ? "根だけ 0.25 m" : "全部 0.25 m", ledger.worstCellMn,
+                                           ledger.weightMn);
+            for (const uint32_t fx : {3u, 4u}) {
+                text += std::format(" / x = {:.2f} m:", (fx + 1) * 0.25);
+                for (uint32_t fup = 4; fup < 8; ++fup) {
+                    const sim::SupportFaceForces forces = mixed ? law.FineFaceForces(fx, fup, 0)
+                                                                : law.FaceForces(fx, fup, 0);
+                    const double scale = 1.0e-3 / (double)cellMm;  // 奥行 1 m あたりの kN
+                    text += std::format(" [{:.1f} {:.1f} ず {:.1f}]", forces.lowSideMn * scale,
+                                        forces.highSideMn * scale, forces.shearMn * scale);
+                }
+            }
+
+            Log(Channel::Sim, Level::Info, "{}", text);
+        }
+    }
+
     int RunAll() {
         LogExpectations();
         for (const sim::FractureRule rule :
@@ -754,6 +955,12 @@ int main(int argc, char** argv) {
         RunThickBeam();
         exitCode = failureCount == 0 ? 0 : 1;
         Log(Channel::Sim, Level::Info, "support_fracture_test --thick-beam: {}", exitCode == 0 ? "OK" : "FAILED");
+    } else if (mode == "--root-compare") {
+        RunRootCompare(argc > 2 ? (uint32_t)std::atoi(argv[2]) : 60, argc > 3 ? (uint32_t)std::atoi(argv[3]) : 2000);
+    } else if (mode == "--refine") {
+        RunRefine();
+        exitCode = failureCount == 0 ? 0 : 1;
+        Log(Channel::Sim, Level::Info, "support_fracture_test --refine: {}", exitCode == 0 ? "OK" : "FAILED");
     } else if (mode == "--window-sweep") {
         RunWindowSweep();
         exitCode = failureCount == 0 ? 0 : 1;

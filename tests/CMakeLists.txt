@@ -369,6 +369,8 @@ add_test(NAME support_fracture_window COMMAND support_fracture_test --window-swe
 set_tests_properties(support_fracture_window PROPERTIES TIMEOUT 3000)
 add_test(NAME support_fracture_thick COMMAND support_fracture_test --thick-beam)
 set_tests_properties(support_fracture_thick PROPERTIES TIMEOUT 3000)
+add_test(NAME support_fracture_refine COMMAND support_fracture_test --refine)
+set_tests_properties(support_fracture_refine PROPERTIES TIMEOUT 3000)
 # T-1041 の見立て: 壁につながる棚の釣り合いに着く速さ(V の回数・掃き出し・粗い段の箱のそろい方・根が固定した面)
 add_test(NAME support_fracture_settle COMMAND support_fracture_test --settle)
 set_tests_properties(support_fracture_settle PROPERTIES TIMEOUT 3000)
