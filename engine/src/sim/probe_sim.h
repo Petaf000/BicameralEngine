@@ -48,6 +48,7 @@
 #include "gpu/work_graph_stats.h"
 #include "sim/cascade_light.h"
 #include "sim/command.h"
+#include "sim/gpu_cascade_light.h"
 #include "sim/gpu_gas.h"
 #include "sim/gpu_physics.h"
 #include "sim/physics_scene.h"
@@ -244,6 +245,19 @@ namespace bicameral::sim {
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
+    // 熱の放射の段の既定(T-1113・D-646・D-658): 世界の中の光の距離ごとの段(RC。sim/cascade_light)で、熱の放射と照り返しを運び、
+    // 吸った・放った量をセルのエネルギーへ当てる。段は 気体 → 液体 → **放射** → 伝導と反応 の位置(23 §3.5)。
+    // 表のどの物質も光の値(light_absorption_*・light_reflectance_*・radiation_absorption_mm2_per_mol)を書いていなければ流さない
+    // (ProbeTableWritesLight。仮〔ユーザー未確認〕: 書いた表では書かない固体・液体は D-610 の灰色。T-1113 のチケット)。
+    // CPU(ProbeReference::SetCascadeRadiation)と GPU(ProbeSimOptions::cascadeRadiation。T-1154)に同じ値を渡すと毎刻みビット一致する
+    struct ProbeCascadeOptions {
+        bool enabled = true;
+        CascadeParams params;  // 既定は D-658 の形(15 組・熱も待つ)
+    };
+
+    // 表のどれかの物質が光の値を書いたか(書かない値はベイクが相の既定〔D-610〕にするので、既定と違えば書いた)。放射の段を流す条件
+    [[nodiscard]] bool ProbeTableWritesLight(const BakedReactionTable& table);
+
     struct ProbeSimOptions {
         // 1 刻みに足す繰り返しの合計(0 なら重さの単位は無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
         uint32_t busyIterations = 0;
@@ -275,6 +289,10 @@ namespace bicameral::sim {
         // 液体の区画(T-0613・ADR-0266。既定は無い = 今までと同じ)。CPU の ProbeReference::EnableLiquid と同じ値を渡すと毎刻みビット一致する
         // (段の順も CPU と同じ: 気体 → 液体)。区画のある世界では、気体と同じく表の差し替え・保存点・写しの早送りを断る(T-0620)
         ProbeLiquidOptions liquid;
+
+        // 熱の放射の段(T-1154。既定は入れる。表が光の値を書いていなければ作らない)。段の順は CPU と同じ: 気体 → 液体 → 放射。
+        // 段を流すかは作った時の表で決まる(表の差し替えで光の値は新しい表のものにするが、流す・流さないは変えない)
+        ProbeCascadeOptions cascadeRadiation;
     };
 
     // --- GPU で走らせる ---
@@ -443,6 +461,10 @@ namespace bicameral::sim {
                                                                     const BakedReactionTable& table);
         [[nodiscard]] std::expected<void, std::string> UploadLiquidHeader(ID3D12Device5* device,
                                                                           const BakedReactionTable& table);
+        // 熱の放射の段(T-1154。sim/probe_sim_radiation.cpp)
+        [[nodiscard]] std::expected<void, std::string> CreateRadiation(ID3D12Device5* device,
+                                                                       const BakedReactionTable& table);
+        [[nodiscard]] bool MakeRadiationLights(ID3D12Device5* device, const BakedReactionTable& table);
 
         // --- 入力とコマンド ---
         [[nodiscard]] bool ValidateInput(uint32_t slot, const ProbeFrameInput& input) const;
@@ -481,6 +503,14 @@ namespace bicameral::sim {
         void RecordLiquid(ID3D12GraphicsCommandList10* list) const;
         void RecordLiquidInitialization(ID3D12GraphicsCommandList10* list) const;
         void RecordLiquidHash(ID3D12GraphicsCommandList10* list) const;
+        // 熱の放射の段(液体の段の後・起こす刻みの来たブロックの前。CPU の (1d)。T-1154)
+        void RecordRadiationInitialization(ID3D12GraphicsCommandList10* list);
+        void RecordRadiationLights(ID3D12GraphicsCommandList10* list) const;
+        [[nodiscard]] bool RecordRadiationTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
+                                                    const BakedReactionTable& table);
+        void BindRadiationViews(ID3D12GraphicsCommandList10* list) const;
+        void RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
+        void RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) const;
         [[nodiscard]] std::expected<void, std::string> CheckLiquidTableSwap(const BakedReactionTable& table) const;
         // 表の差し替えで区画の作業場を作り直す(T-0670。sim/probe_sim_gas.cpp・probe_sim_liquid.cpp)。差し替えは持ち越す欄を写し、
         // 表の違う保存点へ戻す時は作り直すだけ(中身は保存点が写す)。どれも m_tableCopy が今の表のうちに呼ぶ
@@ -607,6 +637,13 @@ namespace bicameral::sim {
         std::array<ComPtr<ID3D12PipelineState>, 11>
             m_liquidPipelines;  // LiquidRead〜LiquidSettleCells(呼ぶ順)・LiquidHash
 
+        // --- 熱の放射の段(T-1154。shaders/sim/probe_radiation.hlsl + cascade_light.hlsl。表が光の値を書かなければ無い)---
+        std::optional<GpuCascadeLight> m_cascade;        // 距離ごとの段(自分のルート署名。作業と状態のバッファ)
+        ComPtr<ID3D12Resource> m_radiationLights;        // 物質の光の値(表ごと。段の間は u17 に結ぶ)
+        ComPtr<ID3D12Resource> m_radiationLightsUpload;  // その写しの元
+        std::array<ComPtr<ID3D12PipelineState>, 3>
+            m_radiationPipelines;  // RadiationGrid・RadiationApply・RadiationHash
+
         // --- 刻みの道具(表・キュー・イベント・活性)---
         ComPtr<ID3D12Resource> m_hashes;        // ハッシュの表(PROBE_HASH_BYTES)
         ComPtr<ID3D12Resource> m_commandQueue;  // GPU のコマンドキュー(PROBE_COMMAND_QUEUE_BYTES)
@@ -667,16 +704,6 @@ namespace bicameral::sim {
     // 放射の段(T-0585・ADR-0263。CPU だけ。GPU は T-0586)。物質の radiation_absorption_mm2_per_mol を書いた表でだけ動く
     struct ProbeRadiationOptions {
         uint64_t seed = 0;  // 向きの組と線の格子のずれを決める世界の種(R6。sim/radiation_lines)
-    };
-
-    // 熱の放射の段の既定(T-1113・D-646・D-658): 世界の中の光の距離ごとの段(RC。sim/cascade_light)で、熱の放射と照り返しを運び、
-    // 吸った・放った量をセルのエネルギーへ当てる。段は 気体 → 液体 → **放射** → 伝導と反応 の位置(23 §3.5)。
-    // 表のどの物質も光の値(light_absorption_*・light_reflectance_*・radiation_absorption_mm2_per_mol)を書いていなければ流さない
-    // (仮〔ユーザー未確認〕: 書いた表では書かない固体・液体は D-610 の灰色。T-1113 のチケット)。
-    // GPU の仮の世界にはまだ無い(T-1154)ので、GPU と比べる試験は enabled = false で比べる
-    struct ProbeCascadeOptions {
-        bool enabled = true;
-        CascadeParams params;  // 既定は D-658 の形(15 組・熱も待つ)
     };
 
     // 最後の Advance の放射の段(RC)で起きたこと。量は 2^−16 mJ(RC_ENERGY_SHIFT)

@@ -33,6 +33,17 @@ namespace bicameral::sim {
         return FxMix64(hash);
     }
 
+    // 熱の放射の段の次の刻みへの持ち越し 1 つ(セル・面・帯・量。T-1154・D-619)の寄与。和なので並びの順によらない
+    FX_CONST uint64_t PROBE_CASCADE_CARRY_HASH_SEED = FX_U64(0x72634361u, 0x52525931u);
+
+    FX_FN uint64_t ProbeCascadeCarryHashTerm(uint32_t cell, uint32_t face, uint32_t band, uint64_t amount) {
+        uint64_t term = ProbeRegionHashBegin(PROBE_CASCADE_CARRY_HASH_SEED, cell);
+        term = FxHashCombine(term, (uint64_t)((face << 8) | band));
+        term = FxHashCombine(term, amount);
+
+        return ProbeRegionHashEnd(term);
+    }
+
 #ifdef __cplusplus
 }  // namespace bicameral::sim
 #endif

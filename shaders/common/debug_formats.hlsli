@@ -37,3 +37,7 @@ DEBUG_FORMAT(WgLimitsChainRefused, WorkGraph, "work_graph_limits_probe/Chain",
 DEBUG_FORMAT(ProbeLiquidCellOverflow, Sim, "probe_liquid_tick/LiquidApply",
              "区画のセル {}: 液体を動かすと成分が {} 個(インラインの数・作業場の件数を超える。この刻みはセルを変えない)")
 DEBUG_FORMAT(ProbeLiquidInvariant, Sim, "probe_liquid_tick", "区画のセル {}: 液体の段の約束が崩れた(種類 {})")
+
+// --- T-1154 仮の世界の GPU の熱の放射の段(shaders/sim/probe_radiation.hlsl)---
+DEBUG_FORMAT(ProbeRadiationOverflow, Sim, "probe_radiation/RadiationHash",
+             "熱の放射の段の置き場が溢れた(印 {}: 1 = 放つ面・2 = 袋・4 = 持ち越し。sim/probe_sim_radiation.cpp の大きさ)")

@@ -165,25 +165,32 @@ namespace {
     Reference RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands,
                            std::span<const reaction::RxCell> world = {}, TableSwapPlan swap = {}) {
         ProbeReference reference(table, world);
-        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         Reference result;
         result.ticks.push_back(
             {.tick = 0, .hash = ProbeStateHash(reference.State(0)), .energy = ProbeEnergySum(reference.State(0))});
 
         const std::vector<uint64_t> initialElements = CountAllElements(table, reference.State(0));
+        // 保存: セルのエネルギー × 2^16 + 熱の放射の段がセルの外に持つ分(持ち越し・外へ・丸め。2^−16 mJ。T-1113)
+        const auto units = [&reference](std::span<const reaction::RxCell> cells) {
+            return (ProbeEnergySum(cells) << reaction::RC_ENERGY_SHIFT) + reference.CascadeRadiationUnits();
+        };
+        uint64_t previousUnits = units(reference.State(0));
         for (uint64_t tick = 0; tick < TOTAL_TICKS; ++tick) {
             reference.Advance(tick, commands, tick == swap.tick ? swap.table : nullptr);
             const std::span<const reaction::RxCell> state = reference.State(tick + 1);
             result.ticks.push_back({.tick = tick + 1,
-                                    .hash = ProbeStateHash(state),
+                                    .hash = reference.StateHash(tick + 1),
                                     .energy = ProbeEnergySum(state),
                                     .sourceEnergy = reference.SourceEnergy(),
                                     .scheduledBlocks = reference.ScheduledBlocks(),
                                     .limits = reference.Limits()});
 
             result.wokenBlocks += reference.WokenBlocks();
+            const uint64_t nowUnits = units(state);
             result.energyConserved = result.energyConserved &&
-                                     result.ticks.back().energy == result.ticks[tick].energy + reference.SourceEnergy();
+                                     nowUnits ==
+                                         previousUnits + (reference.SourceEnergy() << reaction::RC_ENERGY_SHIFT);
+            previousUnits = nowUnits;
         }
 
         // 差し替えた後のセルは新しい表の ID(物質の一覧が変わる差し替え。T-0223)

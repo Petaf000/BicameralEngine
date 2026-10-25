@@ -119,8 +119,6 @@ namespace bicameral::sim {
                                                const PlayMetricReferenceWatch& watch) {
         const std::vector<ProbeCommand> commands = MakePokeCommands(metric);
         ProbeReference reference(table);
-        reference.SetCascadeRadiation(
-            {.enabled = false});  // GPU と同じ法則で比べる(GPU の仮の世界に放射の段が入るまで。T-1154)
         PlayMetricObserver observer(metric);
         size_t nextCommand = 0;
 

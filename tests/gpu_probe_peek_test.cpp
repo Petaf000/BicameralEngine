@@ -243,7 +243,6 @@ namespace {
         }
 
         ProbeReference reference(table);
-        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         ProbePeekReference cpuPeek(table);
         const std::array<ProbeCommand, 1> ignition = {
             MakePokeCommand(0, 0, IGNITION_CELL.x, IGNITION_CELL.y, IGNITION_CELL.z)};

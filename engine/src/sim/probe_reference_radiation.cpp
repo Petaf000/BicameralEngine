@@ -7,7 +7,7 @@
 //   → セルごとの 吸った − 放った(2^−16 mJ)を最も近い mJ に丸めてセルのエネルギーへ当てる。丸めの端数と世界の外へ出た分は報告の帳簿へ
 //   → 変わったセルの熱のキャッシュを作り直し、そのブロックを予定の種にする(気体・液体の段と同じ)。持ち越しは次の刻みへ(ハッシュに入る)。
 // 保存: Σ セルのエネルギー × 2^16 + Σ 持ち越し + Σ 外へ出た + Σ 丸め = 一定(ビット単位。probe_radiation_test が確かめる)。
-// GPU の仮の世界にはまだ無い(T-1154)。共有の「当てる段」(20 §2.4)がまだ無いので、この段がセルへ直接足す(土台に足りないもの。T-1113)。
+// GPU の仮の世界は sim/probe_sim_radiation.cpp + shaders/sim/probe_radiation.hlsl(T-1154。毎刻みビット一致)。共有の「当てる段」(20 §2.4)がまだ無いので、この段がセルへ直接足す(土台に足りないもの。T-1113)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
 
@@ -40,15 +40,6 @@ namespace bicameral::sim {
                    light.reflectanceShortQ16 != greyReflectance || light.reflectanceLongQ16 != greyReflectance;
         }
 
-        bool TableWritesLight(const BakedReactionTable& table) {
-            for (size_t species = 1; species < table.speciesLight.size(); ++species) {
-                if (WritesLight(table, species))
-                    return true;
-            }
-
-            return false;
-        }
-
         // 2^−16 mJ の正味を最も近い mJ へ(半分は +∞ 側。算術シフト)
         int64_t RoundToMilliJoules(int64_t units) {
             return (units + (int64_t{1} << (rx::RC_ENERGY_SHIFT - 1))) >> rx::RC_ENERGY_SHIFT;
@@ -56,8 +47,17 @@ namespace bicameral::sim {
 
     }  // namespace
 
+    bool ProbeTableWritesLight(const BakedReactionTable& table) {
+        for (size_t species = 1; species < table.speciesLight.size(); ++species) {
+            if (WritesLight(table, species))
+                return true;
+        }
+
+        return false;
+    }
+
     void ProbeReference::StepCascadeRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds) {
-        if (m_table->speciesLight.empty() || !TableWritesLight(*m_table))
+        if (m_table->speciesLight.empty() || !ProbeTableWritesLight(*m_table))
             return;
 
         // --- 刻みの初めの写し(温度は熱のキャッシュ。順番によらない)---

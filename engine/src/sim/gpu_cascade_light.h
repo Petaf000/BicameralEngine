@@ -2,6 +2,9 @@
 // CPU リファレンスは sim/cascade_light.h の StepCascadeLight(同じ刻みの結果がビット一致)。
 // 多重解像度の木(sim/gpu_multires)のルート署名と外のバッファ u4・u5 を借りる(太陽の影の柱と同じ形)。今は段 0 の密な写し(CascadeGrid)を読む
 // (木の細かい葉・粗い根を読む形は T-0973)。
+// 仮の世界(sim/probe_sim。T-1154)は CreateStandalone で作る: 同じシェーダーを自分のルート署名(u0〜u5 + 定数 26 語 + デバッグのリング。
+// 木のルート署名と同じ並びの部分だけ)で動かし、光の値と温度は呼ぶ側の GPU の段が毎刻み作業のバッファ(Work の workLights・workTemperatures)へ書く。
+// 持ち越しの表は刻みの偶奇で選ぶ(刻み t は表 t & 1 を読み、表 1 − (t & 1) へ書く)ので、CPU に刻みをまたぐ状態が無い(写し・巻き戻しは状態のバッファの頭だけを写す)。
 //
 // データの流れ: CPU の CascadeGrid・CascadeParams・初めの持ち越し → 作業のバッファ(u4。既定のヒープへ写す)
 //   → 刻みごとに RecordTick(1 刻みの全部の段。持ち越しは GPU の中で次の刻みへ)→ RecordReadback → Read(CascadeTickResult の形)
@@ -46,6 +49,11 @@ namespace bicameral::sim {
                                                                                 const CascadeParams& params,
                                                                                 const GpuCascadeCapacity& capacity);
 
+        // 仮の世界用(T-1154): 自分のルート署名で動く。grid の光の値と温度は初めの値(毎刻み呼ぶ側が作業のバッファへ書き直す)
+        [[nodiscard]] static std::expected<GpuCascadeLight, std::string> CreateStandalone(
+            ID3D12Device5* device, const CascadeGrid& grid, const CascadeParams& params,
+            const GpuCascadeCapacity& capacity);
+
         // 作業(段の形・光の値・温度・初めの持ち越し)を写し、状態を 0 にする。1 本のリストに 1 回
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing, const CascadeCarry& carry);
@@ -53,6 +61,19 @@ namespace bicameral::sim {
         // 1 刻み(前の刻みの持ち越しを読み、次の刻みへの持ち越しを書く)
         void RecordTick(ID3D12GraphicsCommandList10* list, GpuMultires& nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                         uint64_t tick);
+
+        // --- 仮の世界用(CreateStandalone で作った時だけ)---
+        // 初めの持ち越しは表 0(刻み 0 から始める世界)。作業のバッファは既定のヒープへ写し、UAV の状態で返す
+        [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                        const CascadeCarry& carry);
+        // 刻み tick: 表 tick & 1 を読み、表 1 − (tick & 1) へ書く
+        void RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
+
+        [[nodiscard]] ID3D12Resource* Work() const { return m_work.Get(); }
+        [[nodiscard]] ID3D12Resource* State() const { return m_state.Get(); }
+        [[nodiscard]] const reaction::RcGpuParams& Params() const { return m_params; }
+        // 刻みをまたぐ状態(頭の語・放った・吸った・持ち越しの表 2 つ)のバイト数。状態のバッファの頭から。ほかは刻みの中で作って空に戻す
+        [[nodiscard]] uint64_t PersistentStateBytes() const { return m_readbackBytes; }
 
         // 最後の刻みの結果(頭の語・放った・吸った・持ち越し)を読み戻す
         void RecordReadback(ID3D12GraphicsCommandList10* list);
@@ -65,9 +86,20 @@ namespace bicameral::sim {
     private:
         GpuCascadeLight() = default;
 
-        void Dispatch(ID3D12GraphicsCommandList10* list, GpuMultires& nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+        // nest が nullptr なら自分のルート署名で(CreateStandalone)
+        void Dispatch(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                       size_t pipeline, uint64_t items, std::array<uint32_t, 4> external) const;
+        bool RecordUploadWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                              const CascadeCarry& carry);
+        void RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                            uint64_t tick, uint32_t in);
+        static std::expected<GpuCascadeLight, std::string> CreateWith(ID3D12Device5* device,
+                                                                      ID3D12RootSignature* rootSignature,
+                                                                      const CascadeGrid& grid,
+                                                                      const CascadeParams& params,
+                                                                      const GpuCascadeCapacity& capacity);
 
+        ComPtr<ID3D12RootSignature> m_ownRoot;  // CreateStandalone の時だけ
         std::vector<ComPtr<ID3D12PipelineState>> m_pipelines;
         ComPtr<ID3D12Resource> m_work;        // u4(既定のヒープ)
         ComPtr<ID3D12Resource> m_workUpload;  // その写しの元

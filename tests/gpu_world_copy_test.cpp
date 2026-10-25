@@ -134,7 +134,6 @@ namespace {
 
         CpuWorld(const BakedReactionTable& table, const PhysicsScene& scene)
             : reference(table), physics(scene, PhysicsParametersFor(StandardWorldPhysics())) {
-            reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         }
 
         // due: この刻みのコマンド(押すのは pushes が true の時だけ。コマンドを当てない写しは押さない)

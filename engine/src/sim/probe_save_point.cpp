@@ -85,8 +85,11 @@ namespace bicameral::sim {
 
         for (const ComPtr<ID3D12Resource>& buffer :
              {m_cells, m_thermal, m_busySink, m_hashes, m_commandQueue, m_tickEvents, m_blockSchedule, m_speciesRemap,
-              m_gasState, m_gasWork, m_liquidWork})
+              m_gasState, m_gasWork, m_liquidWork, m_radiationLights})
             add(buffer);
+
+        if (m_cascade)
+            bytes += m_cascade->VramBytes();
 
         rng::for_each(m_activeLists, add);
         rng::for_each(m_extractions, add);
@@ -137,6 +140,10 @@ namespace bicameral::sim {
 
         if (m_liquidWork)
             regions.push_back({.resource = m_liquidWork.Get(), .bytes = m_liquidWork->GetDesc().Width});
+
+        // 熱の放射の段(T-1154): 刻みをまたぐのは状態のバッファの頭(帳簿・放った・吸った・持ち越しの表)だけ。作業は毎刻み作り直す
+        if (m_cascade)
+            regions.push_back({.resource = m_cascade->State(), .bytes = m_cascade->PersistentStateBytes()});
 
         return regions;
     }
