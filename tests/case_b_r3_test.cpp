@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <format>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -235,6 +236,186 @@ namespace {
                     (long long)(totalMass == 0 ? 0 : movingMass * 1000 / totalMass), where.c_str());
     }
 
+    // --- 速さの出どころの測り(T-1137。引数 probe)---
+    // 段(陰の圧力・降伏・運ぶ・当てる)の前後で面の粒の速さ(運動量 ÷ 面の粒の質量)を比べ、段ごとに一番速さを上げた面を覚える。
+    // 面の粒の質量で 2 つに分ける(1 kg 以上 = 山の粒・未満 = 舞う粒のかす)。運動量だけあって質量 0 の面も数える
+    bool probeOverride = false;
+    struct SpeedJump {
+        int64_t speed = 0;  // 段の後の速さ(2^-20 m/s)
+        int64_t before = 0;
+        int64_t massMg = 0;
+        int64_t massBeforeMg = 0;
+        uint64_t tick = 0;
+        uint32_t x = 0;
+        uint32_t y = 0;
+        uint32_t axis = 0;
+    };
+    struct StageProbe {
+        std::array<SpeedJump, 2> jumps{};  // [0] = 1 kg 以上・[1] = 未満
+        uint64_t massless = 0;             // 段の後に質量 0 で運動量のある面(刻み × 面)
+        int64_t masslessMomentum = 0;      // その運動量の大きさの最大(mg·2^-20 m/s)
+    };
+    struct SpeedProbe {
+        std::array<StageProbe, 4> stages{};
+        uint64_t tick = 0;
+        std::vector<int64_t> massBefore;
+        std::array<std::vector<int64_t>, 3> momentumBefore;
+        std::vector<int64_t> airPerSecond;      // 1 秒ごとの空気の面の速さの最大(陰の圧力の段の後)
+        std::array<std::string, 2> airFirst{};  // 空気が初めて 1 m/s・10 m/s を超えた刻みと場所
+    };
+
+    int64_t FaceGrainMass(const Box& box, uint32_t cell, uint32_t neighbor) {
+        int64_t mass = 0;
+        for (uint32_t index = 0; index < box.materials.size(); ++index) {
+            if (box.materials[index].phase == Phase::Grain)
+                mass += std::max<int64_t>(CellMass(box, cell, index), 0) +
+                        std::max<int64_t>(CellMass(box, neighbor, index), 0);
+        }
+
+        return (mass + 1) / 2;
+    }
+
+    void ProbeBefore(SpeedProbe& probe, const Box& box) {
+        probe.massBefore.assign((size_t)CellCount(box) * 3, 0);
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (neighbor.has_value())
+                    probe.massBefore[((size_t)cell * 3) + axis] = FaceGrainMass(box, cell, *neighbor);
+            }
+        }
+
+        probe.momentumBefore = box.faceMomentum;
+    }
+
+    void ProbeAfter(SpeedProbe& probe, const Box& box, size_t stage) {
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
+        StageProbe& result = probe.stages[stage];
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (!neighbor.has_value())
+                    continue;
+
+                const size_t face = FaceIndex(box, cell, slot);
+                const int64_t mass = FaceGrainMass(box, cell, *neighbor);
+                const int64_t momentum = std::abs(box.faceMomentum[axis][face]);
+                if (mass == 0) {
+                    result.massless += momentum != 0 ? 1u : 0u;
+                    result.masslessMomentum = std::max(result.masslessMomentum, momentum);
+                    continue;
+                }
+
+                const int64_t massBefore = probe.massBefore[((size_t)cell * 3) + axis];
+                const int64_t before = massBefore == 0 ? 0 : std::abs(probe.momentumBefore[axis][face]) / massBefore;
+                const int64_t speed = momentum / mass;
+                SpeedJump& jump = result.jumps[mass >= 1000000 ? 0 : 1];
+                if (speed - before <= jump.speed - jump.before)
+                    continue;
+
+                const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                jump = {.speed = speed,
+                        .before = before,
+                        .massMg = mass,
+                        .massBeforeMg = massBefore,
+                        .tick = probe.tick,
+                        .x = at[0],
+                        .y = at[1],
+                        .axis = axis};
+            }
+        }
+    }
+
+    // 陰の圧力の段の後の空気の面の速さの最大(1 秒ごと)と、初めて 1 m/s・10 m/s を超えた所
+    void ProbeAir(SpeedProbe& probe, const Box& box) {
+        const View view = BuildView(box);
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Gas);
+        int64_t best = 0;
+        std::string where;
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (!neighbor.has_value())
+                    continue;
+
+                const int64_t mass = (view.cells[cell].phaseMassMg[0] + view.cells[*neighbor].phaseMassMg[0] + 1) / 2;
+                if (mass <= 0)
+                    continue;
+
+                const int64_t speed = std::abs(box.faceMomentum[axis][FaceIndex(box, cell, slot)]) / mass;
+                if (speed <= best)
+                    continue;
+
+                const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                best = speed;
+                where = std::format("({}, {}) 軸 {}・粒 {} / {} mg・詰まり {} / {} ‰", at[0], at[1], axis,
+                                    view.cells[cell].phaseMassMg[2], view.cells[*neighbor].phaseMassMg[2],
+                                    ((uint64_t)view.cells[cell].grainPackedQ16 * 1000) >> 16,
+                                    ((uint64_t)view.cells[*neighbor].grainPackedQ16 * 1000) >> 16);
+            }
+        }
+
+        const size_t second = (size_t)((probe.tick - 1) / box.config.ticksPerSecond);
+        if (probe.airPerSecond.size() <= second)
+            probe.airPerSecond.resize(second + 1, 0);
+        probe.airPerSecond[second] = std::max(probe.airPerSecond[second], best);
+        for (size_t index = 0; index < 2; ++index) {
+            const int64_t limit = index == 0 ? ((int64_t)1 << 20) : ((int64_t)10 << 20);
+            if (probe.airFirst[index].empty() && best > limit)
+                probe.airFirst[index] = std::format("刻み {}・{} mm/s・{}", probe.tick, (best * 1000) >> 20, where);
+        }
+    }
+
+    Stages WrapProbe(const Stages& stages, std::shared_ptr<SpeedProbe> probe) {
+        Stages wrapped = stages;
+        const std::array<Stage Stages::*, 4> members = {&Stages::pressure, &Stages::grainYield, &Stages::transport,
+                                                        &Stages::apply};
+        for (size_t index = 0; index < members.size(); ++index) {
+            const Stage inner = stages.*members[index];
+            if (!inner)
+                continue;
+
+            wrapped.*members[index] = [inner, probe, index](Box& box, const StepContext& context) {
+                if (index == 0)
+                    ++probe->tick;
+                ProbeBefore(*probe, box);
+                inner(box, context);
+                ProbeAfter(*probe, box, index);
+                if (index == 0)
+                    ProbeAir(*probe, box);
+            };
+        }
+
+        return wrapped;
+    }
+
+    void PrintProbe(const SpeedProbe& probe) {
+        std::string series;
+        for (const int64_t speed : probe.airPerSecond)
+            series += std::format("{} ", (speed * 1000) >> 20);
+        std::printf(
+            "    空気の面の速さの最大(mm/s・1 秒ごと)%s\n    初めて 1 m/s を超えた: %s\n    初めて 10 m/s を超えた: "
+            "%s\n",
+            series.c_str(), probe.airFirst[0].c_str(), probe.airFirst[1].c_str());
+        const std::array<const char*, 4> names = {"陰の圧力(受け渡し・重さ・引きずり)", "降伏", "運ぶ",
+                                                  "当てる(運動量を運ぶ)"};
+        for (size_t index = 0; index < probe.stages.size(); ++index) {
+            const StageProbe& stage = probe.stages[index];
+            std::string text;
+            for (size_t bucket = 0; bucket < 2; ++bucket) {
+                const SpeedJump& jump = stage.jumps[bucket];
+                text += std::format("{}: {} → {} mm/s・{} → {} mg・刻み {}・({}, {}) 軸 {} / ",
+                                    bucket == 0 ? "1 kg 以上" : "未満", (jump.before * 1000) >> 20,
+                                    (jump.speed * 1000) >> 20, jump.massBeforeMg, jump.massMg, jump.tick, jump.x,
+                                    jump.y, jump.axis);
+            }
+
+            std::printf("    速さを上げた面(段 %s)%s質量 0 で運動量のある面 %llu(最大 %lld mg·mm/s)\n", names[index],
+                        text.c_str(), (unsigned long long)stage.massless,
+                        (long long)((stage.masslessMomentum * 1000) >> 20));
+        }
+    }
+
     // 2^-20 m/s → mm/s
     int64_t MillimetersPerSecond(int64_t speed) {
         return (speed * 1000) >> 20;
@@ -250,6 +431,8 @@ namespace {
     bool movingByCellOverride = false;
     uint32_t dragScaleOverride = 1000;     // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
     bool sideDragOverride = false;         // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
+    bool restsOnLayerOverride = false;     // 2 本目の見直し 1(T-1137)。引数 keeplayer2
+    bool keepLayerOverride = false;        // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
     bool twoStatesOverride = false;        // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
     uint32_t cyclesOverride = CYCLES;      // 陰の圧力の V サイクルの回数(T-1105)。引数 cycles=<回>
@@ -326,12 +509,16 @@ namespace {
         flowOptions.buoyancyFromColumn = buoyancyOverride;
         flowOptions.grainTwoStates = twoStatesOverride;
         flowOptions.grainLayerSideDrag = sideDragOverride;
+        flowOptions.grainLayerKeepsFalling = keepLayerOverride;
+        flowOptions.grainLayerRestsOnLayer = restsOnLayerOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
         const PressureSolver solver = MakeImplicitGridSolver(cyclesOverride, TOLERANCE_NL);
         uint64_t tick = 0;
-        run.recording = RunScene(run.box, flow.stages, solver, options.seconds * options.ticksPerSecond, regions,
+        auto probe = std::make_shared<SpeedProbe>();
+        const Stages stages = probeOverride ? WrapProbe(flow.stages, probe) : flow.stages;
+        run.recording = RunScene(run.box, stages, solver, options.seconds * options.ticksPerSecond, regions,
                                  [&](Box& box) {
                                      ++tick;
                                      if (options.afterTick)
@@ -340,6 +527,8 @@ namespace {
                                      run.grainSpeed.push_back(MaxGrainSpeed(box));
                                  });
         run.stats = *flow.stats;
+        if (probeOverride)
+            PrintProbe(*probe);
         EXPECT(run.recording.AllConserved());
         EXPECT(!CheckConservation(run.box).negativeMass);
 
@@ -1252,6 +1441,12 @@ int main(int argc, char** argv) {
             restLayerOverride = true;
         else if (word == "twostate")
             twoStatesOverride = true;
+        else if (word == "keeplayer2")
+            twoStatesOverride = keepLayerOverride = restsOnLayerOverride = true;
+        else if (word == "keeplayer")
+            twoStatesOverride = keepLayerOverride = true;
+        else if (word == "probe")
+            probeOverride = true;
         else if (word == "sidedrag")
             sideDragOverride = true;
         else if (word == "nosidedrag")
@@ -1264,7 +1459,7 @@ int main(int argc, char** argv) {
 
     argc = kept;
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
-    const int speedArgument = only == 10 ? 3 : 2;
+    const int speedArgument = only == 10 ? 3 : (only == 14 ? argc : 2);  // 14 は 2 つ目がレベル
     if (argc > speedArgument) {
         const int speed = std::stoi(argv[speedArgument]);
         movingSpeedOverride = (uint32_t)std::abs(speed);
@@ -1273,6 +1468,15 @@ int main(int argc, char** argv) {
 
     if (only == 10) {
         ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 14) {
+        // 砂山 1 つ(T-1137。全部には入れない): 2 つ目の引数 = レベル(0 = 0.5 m・1 = 0.25 m・-2 = 2 m)・3 つ目 = 秒(既定 20)
+        const int32_t level = argc > 2 ? std::stoi(argv[2]) : 0;
+        Pile(level, MomentumLayout::GrainSeparate, argc > 3 ? (uint64_t)std::stoi(argv[3]) : 20);
         std::printf("case_b r3: %d failure(s)\n", failureCount);
 
         return failureCount == 0 ? 0 : 1;

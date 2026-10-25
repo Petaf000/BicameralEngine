@@ -25,6 +25,8 @@ namespace {
     using namespace bicameral::sim::case_b;
 
     int failureCount = 0;
+    bool restsOnLayerOverride = false;  // 2 本目の見直し 1(T-1137)。引数のどこかに keeplayer2
+    bool keepLayerOverride = false;     // 層は落ちても層のまま(T-1137 の 2 本目)。引数のどこかに keeplayer
     bool twoStatesOverride = false;  // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数のどこかに twostate
 
     void Expect(bool condition, const char* text, int line) {
@@ -199,7 +201,10 @@ namespace {
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages({.drag = drag, .grainTwoStates = twoStatesOverride});
+        const FlowStages flow = MakeFlowStages({.drag = drag,
+                                                .grainTwoStates = twoStatesOverride,
+                                                .grainLayerKeepsFalling = keepLayerOverride,
+                                                .grainLayerRestsOnLayer = restsOnLayerOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.grainHeightUm.push_back(GrainHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -552,8 +557,11 @@ namespace {
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages(
-            {.drag = drag, .splitSurfaceLayer = splitSurfaceLayer, .grainTwoStates = twoStatesOverride});
+        const FlowStages flow = MakeFlowStages({.drag = drag,
+                                                .splitSurfaceLayer = splitSurfaceLayer,
+                                                .grainTwoStates = twoStatesOverride,
+                                                .grainLayerKeepsFalling = keepLayerOverride,
+                                                .grainLayerRestsOnLayer = restsOnLayerOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.liquidHeightUm.push_back(LiquidHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -727,6 +735,10 @@ int main(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         if (std::string(argv[index]) == "twostate")
             twoStatesOverride = true;
+        else if (std::string(argv[index]) == "keeplayer2")
+            twoStatesOverride = keepLayerOverride = restsOnLayerOverride = true;
+        else if (std::string(argv[index]) == "keeplayer")
+            twoStatesOverride = keepLayerOverride = true;
         else
             argv[kept++] = argv[index];
     }
