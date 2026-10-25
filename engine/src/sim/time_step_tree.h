@@ -258,15 +258,15 @@ namespace bicameral::sim {
     //   固定費 + (段 − 1) × 段の固定費 + V × (V の固定費 + (段 − 1) × 段の V の固定費) + セル × 傾き + セル × V × 傾き。
     // 4,096 セルまでの組はほぼ起動の固定費で決まり(段の数と V の回数)、セルの数はほとんど効かない(docs/perf.md の T-1152)。
     // 出来事を続けて積んだ形(早送りの形。GPU の時計が高いまま)の測り。
-    // 値は起動時にその PC で測る(D-662: sim/gpu_time_tree_cost の ProbeTimeTreeSolveCost)。既定は RTX 3070 Ti・release の測り
+    // 値は起動時にその PC で測る(D-662: sim/gpu_time_tree_cost の ProbeTimeTreeSolveCost)。既定は RTX 3070 Ti・release のその測り
     // (docs/perf.md の T-1152)。浮動小数点を使わないので ps の整数
     struct TimeTreeSolveCost {
-        uint64_t eventNs = 13000;       // 1 組の固定費(段 0 の起動)
-        uint64_t levelNs = 30000;       // 粗い段 1 つの固定費(段の重み)
-        uint64_t cycleNs = 23000;       // V 1 回の固定費(段 1 つ)
-        uint64_t levelCycleNs = 10000;  // V 1 回の、粗い段 1 つぶんの固定費
-        uint64_t cellPs = 0;            // 段 0 + 段の重みのセル 1 つ
-        uint64_t cellCyclePs = 3100;    // V 1 回のセル 1 つ
+        uint64_t eventNs = 19000;       // 1 組の固定費(段 0 の起動)
+        uint64_t levelNs = 38000;       // 粗い段 1 つの固定費(段の重み)
+        uint64_t cycleNs = 20000;       // V 1 回の固定費(段 1 つ)
+        uint64_t levelCycleNs = 20500;  // V 1 回の、粗い段 1 つぶんの固定費
+        uint64_t cellPs = 860;          // 段 0 + 段の重みのセル 1 つ
+        uint64_t cellCyclePs = 2570;    // V 1 回のセル 1 つ
         // 測りの揺れの余裕(D-662。見積もりの上の値 = 式 × これ ÷ 100。GPU の時計が下がった時・測りの揺れ。T-1140)
         uint32_t marginPercent = 200;
     };
