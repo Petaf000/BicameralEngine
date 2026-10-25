@@ -632,6 +632,9 @@ set_tests_properties(gpu_cascade_light_wide PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test(gpu_object_heat_test)  # 物の熱(物の箱のボクセルの熱と反応・セルとの対の面)の GPU と CPU のビット一致・費用(T-1064・T-1065)
 target_link_libraries(gpu_object_heat_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_object_heat gpu_object_heat_test gpu --queue compute)
+bicameral_add_gpu_test(gpu_object_heat_nest_test)  # 物の熱を多重解像度の世界のセルにつないだ GPU の形と CPU のビット一致(T-1077)
+target_link_libraries(gpu_object_heat_nest_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_object_heat_nest gpu_object_heat_nest_test gpu --queue compute)
 
 bicameral_add_gpu_test(gpu_multires_uniform_test)  # 一様なブロックの GPU と CPU のビット一致(T-0102)
 target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
@@ -1170,7 +1173,7 @@ foreach(_name IN ITEMS
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
     multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test cascade_light_test sky_port_test cascade_light_swing_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
-    gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
+    gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_object_heat_nest_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test

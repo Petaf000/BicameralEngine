@@ -13,9 +13,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "common/world_ledger.hlsli"
-#include "object_heat_cpu.h"
-#include "sun_column_scene.h"
+#include "object_heat_nest_scene.h"
 
 namespace {
 
@@ -35,150 +33,9 @@ namespace {
 
 #define EXPECT(condition) Expect((condition), #condition, __LINE__)
 
-    // --- 試験の値(公開側の試験データ。ゲームの中身ではない。D-006。gpu_object_heat_test と同じ物)---
-    constexpr int32_t BODY_LEVEL = 6;
-    constexpr uint32_t FILM_UM = 3906;
-    constexpr uint64_t FULL_CELLULOSE_UNITS = 1157000000;
-    constexpr uint64_t AIR_OXYGEN_UNITS = 1092000;
-    constexpr uint64_t AIR_NITROGEN_UNITS = 4108000;
-    constexpr uint32_t DEFAULT_DIFFUSIVITY_MM2_PER_S = 20;
-    constexpr int32_t BURNING_MILLIKELVIN = 900000;
-    constexpr uint64_t WORLD_SEED = 0x1077;
+    using namespace test::object_heat_nest;  // 場面と CPU の口(object_heat_nest_scene.h)
+
     constexpr uint32_t TICKS = 600;
-
-    sim::BakedReactionTable MakeTable() {
-        // 伝導率は表の現実の値のまま(試験の倍率は T-1066 で表から外した。ここで割っていたのを外す)
-        return test::MakeSunTable();
-    }
-
-    // --- 物(箱の並び。外に面するボクセルの数を形の語に)---
-
-    struct Shape {
-        uint32_t sizeX;
-        uint32_t sizeY;
-        uint32_t sizeZ;
-        uint64_t celluloseUnits;
-        bool sheet;
-    };
-
-    constexpr Shape PAPER{27, 1, 38, (FULL_CELLULOSE_UNITS * 100 << BODY_LEVEL) / 500000, true};
-    constexpr Shape TWIG{2, 2, 38, (FULL_CELLULOSE_UNITS * 128) / 1000, false};
-    constexpr Shape LOG{10, 10, 51, (FULL_CELLULOSE_UNITS * 400) / 1000, false};
-
-    void AddObject(const sim::BakedReactionTable& table, test::OhWorld& world, const Shape& shape, uint32_t cell,
-                   int32_t cellLevel, bool burning) {
-        const auto objectIndex = static_cast<uint32_t>(world.objects.size());
-        world.objects.push_back({.voxelBegin = static_cast<uint32_t>(world.voxels.size()),
-                                 .voxelCount = shape.sizeX * shape.sizeY * shape.sizeZ,
-                                 .sizeX = shape.sizeX,
-                                 .sizeY = shape.sizeY,
-                                 .cell = cell,
-                                 .bodyLevel = BODY_LEVEL,
-                                 .cellLevel = cellLevel,
-                                 .substeps = 1,
-                                 .filmUm = FILM_UM});
-        world.carries.push_back(rx::OhZeroFlow());
-        const std::vector<sim::SpeciesAmount> amounts = {
-            {.species = table.SpeciesId("cellulose"), .amount = shape.celluloseUnits},
-            {.species = table.SpeciesId("oxygen"), .amount = AIR_OXYGEN_UNITS},
-            {.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_UNITS}};
-        const rx::RxCell hot = sim::MakeReactionCell(table, amounts, BURNING_MILLIKELVIN);
-        const rx::RxCell cold = sim::MakeReactionCell(table, amounts, test::SUN_ROOM_TEMPERATURE_MK);
-        for (uint32_t z = 0; z < shape.sizeZ; ++z) {
-            for (uint32_t y = 0; y < shape.sizeY; ++y) {
-                for (uint32_t x = 0; x < shape.sizeX; ++x) {
-                    const std::array<bool, 6> inside = {x > 0, x + 1 < shape.sizeX, y > 0, y + 1 < shape.sizeY,
-                                                        z > 0, z + 1 < shape.sizeZ};
-                    uint32_t neighbours = 0;
-                    uint32_t exposed = 0;
-                    for (uint32_t direction = 0; direction < 6; ++direction) {
-                        if (inside[direction])
-                            neighbours |= 1u << direction;
-                        else if (!shape.sheet || direction == 2 || direction == 3)
-                            ++exposed;
-                    }
-
-                    world.infos.push_back(
-                        {.object = objectIndex, .shape = neighbours | (exposed << rx::OH_EXPOSED_SHIFT)});
-                    world.voxels.push_back(exposed != 0 && burning ? hot : cold);
-                    world.light.push_back(0);
-                }
-            }
-        }
-
-        if (world.ranges.empty() || world.ranges.back().cell != cell)
-            world.ranges.push_back({.cell = cell, .objectBegin = objectIndex, .objectCount = 0});
-
-        ++world.ranges.back().objectCount;
-    }
-
-    // --- 世界のセルの口(T-1077 の最初の形)---
-
-    struct NestCellRef {
-        uint32_t slot;
-        uint32_t index;
-    };
-
-    // 0.25 m の座標(x, y, z)を含むレベル level のセル(根の枠だけの世界。枠は z・y・x の順に置いた)
-    NestCellRef CellAt(int32_t level, uint32_t roots, uint32_t quarterX, uint32_t quarterY, uint32_t quarterZ) {
-        const auto shift = static_cast<uint32_t>(1 - level);
-        const uint32_t x = quarterX >> shift;
-        const uint32_t y = quarterY >> shift;
-        const uint32_t z = quarterZ >> shift;
-
-        return {.slot = (x / 8) + (roots * ((y / 8) + (roots * (z / 8)))),
-                .index = mr::MrCellIndex(x % 8, y % 8, z % 8)};
-    }
-
-    // 世界から囲むセルを読む。世界の刻みで変わったセルは、物の外に面するブロックを起こす(変わった段 = 今の段)
-    void LoadCells(const sim::MultiresNest& nest, std::span<const NestCellRef> refs, test::OhWorld& world) {
-        for (size_t c = 0; c < refs.size(); ++c) {
-            const rx::RxCell cell = sim::LoadNestCell(nest, refs[c].slot, refs[c].index);
-            if (!rx::RxSameCell(cell, world.cells[c]))
-                world.cellChangedPasses[c] = world.pass;
-
-            world.cells[c] = cell;
-        }
-    }
-
-    // 量の差 after − before を、帳簿の理由「物との受け渡し」の列 column に載せる(増えた = 入・減った = 出)
-    void AddLedgerDelta(sim::MultiresNest& nest, int32_t level, uint32_t column, int64_t delta) {
-        if (delta == 0)
-            return;
-
-        const uint32_t direction = delta > 0 ? mr::WL_DIRECTION_IN : mr::WL_DIRECTION_OUT;
-        sim::AddWorldLedgerUnits(nest, mr::WlSlot(mr::WL_REASON_OBJECT_EXCHANGE, direction), level, column,
-                                 static_cast<uint64_t>(delta > 0 ? delta : -delta));
-    }
-
-    // 物との受け渡しでセルが変わった分を帳簿へ(エネルギーと、どちらかのセルにある物質ごと)
-    void LedgerCellChange(sim::MultiresNest& nest, int32_t level, const rx::RxCell& before, const rx::RxCell& after,
-                          uint32_t speciesCount) {
-        AddLedgerDelta(nest, level, mr::WL_COLUMN_ENERGY, after.energy - before.energy);
-        for (uint32_t species = 1; species < speciesCount; ++species) {
-            const int64_t delta = static_cast<int64_t>(rx::OhAmountOf(after, species)) -
-                                  static_cast<int64_t>(rx::OhAmountOf(before, species));
-            AddLedgerDelta(nest, level, mr::WL_COLUMN_SPECIES_BASE + species, delta);
-        }
-    }
-
-    // 物の熱で変わったセルを世界へ書き、帳簿に載せ、ブロックをつつく(次の刻みに反応と伝導が見る)
-    bool StoreCells(sim::MultiresNest& nest, std::span<const NestCellRef> refs, const test::OhWorld& world,
-                    std::span<const rx::RxCell> before, int32_t level, uint32_t speciesCount) {
-        bool stored = true;
-        for (size_t c = 0; c < refs.size(); ++c) {
-            if (rx::RxSameCell(world.cells[c], before[c]))
-                continue;
-
-            LedgerCellChange(nest, level, before[c], world.cells[c], speciesCount);
-
-            stored = stored && sim::ExpandNestPage(nest, refs[c].slot);
-            sim::StoreNestCell(nest, refs[c].slot, refs[c].index, world.cells[c]);
-            sim::PokeNestBlock(nest, refs[c].slot);
-        }
-
-        return stored;
-    }
 
     // --- 場面 ---
 
@@ -252,24 +109,11 @@ namespace {
     }
 
     Run RunScene(const sim::BakedReactionTable& table, const test::OhTables& tables, int32_t level) {
-        const uint32_t roots = level == 0 ? 1u : 2u;
-        sim::MultiresNest nest = test::MakeSunWorld(table, level, roots, roots, roots, [](int64_t, int64_t y, int64_t) {
-            return y < 4 ? test::SunMaterial::Stone : test::SunMaterial::Air;
-        });
-        const std::array<NestCellRef, 2> refs = {CellAt(level, roots, 8, 5, 8), CellAt(level, roots, 10, 5, 8)};
-        test::OhWorld world;
-        for (const NestCellRef& ref : refs)
-            world.cells.push_back(sim::LoadNestCell(nest, ref.slot, ref.index));
-
-        for (uint32_t i = 0; i < 3; ++i)
-            AddObject(table, world, TWIG, 0, level, true);
-
-        AddObject(table, world, PAPER, 0, level, true);
-        AddObject(table, world, LOG, 1, level, false);
-        test::FinishObjectHeatWorld(world);
+        NestScene scene = MakeNestScene(table, level);
+        sim::MultiresNest& nest = scene.nest;
+        test::OhWorld& world = scene.world;
 
         Run run;
-        const test::OhCpuTable shared{.view = table.View(), .objectSpecies = tables.species};
         const sim::ReactionTableView view = table.View();
         run.fireAirStartMilliKelvin = rx::RxComputeThermal(view, world.cells[0]).temperature;
         run.fuelStart = FuelCarbon(table, world, 4);
@@ -277,13 +121,7 @@ namespace {
         const std::vector<int64_t> objectInitial = ObjectColumns(table, tables, world, nest, level);
         uint64_t logAwakeAtHalf = 0;
         for (uint32_t tick = 1; tick <= TICKS; ++tick) {
-            // 世界のセルどうしの熱の伝導を入れる(StepNest の既定は伝導なし。T-1077 の 1 回目はこれを付けずに隣のセルが動かなかった)
-            sim::StepNest(nest, table, WORLD_SEED, tick, {.conduction = true});
-            LoadCells(nest, refs, world);
-            const std::vector<rx::RxCell> before = world.cells;
-            test::StepObjectHeat(shared, tables.gases, world, false, WORLD_SEED, tick);
-            const auto speciesCount = static_cast<uint32_t>(table.species.size());
-            run.stored = run.stored && StoreCells(nest, refs, world, before, level, speciesCount) && !world.failed;
+            run.stored = run.stored && StepNestScene(table, tables, scene, tick);
             if (tick == TICKS / 2)
                 logAwakeAtHalf = world.awakeExchangeBlocks;
 
