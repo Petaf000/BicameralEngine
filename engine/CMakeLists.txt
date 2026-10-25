@@ -140,6 +140,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_gas_projection.cpp  # 気体の圧力の投影の 1 刻みの GPU(T-0845。計測と比べる口)
   src/sim/gpu_lab_box.cpp
   src/sim/gpu_sun_column.cpp  # 太陽の影の柱の GPU(T-0910)
+  src/sim/gpu_sky_port.cpp  # 空との交換の口の GPU(T-1147)
   src/sim/gpu_cascade_light.cpp  # 世界の中の光: 距離ごとの段の GPU(T-0959・ADR-0432)
   src/sim/gpu_multires.cpp
   src/sim/gpu_implicit.cpp

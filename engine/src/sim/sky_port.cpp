@@ -2,6 +2,7 @@
 #include "sim/sky_port.h"
 
 #include <format>
+#include <optional>
 
 #include "common/cascade_light.hlsli"
 
@@ -53,6 +54,42 @@ namespace bicameral::sim {
             return {};
         }
 
+        // 今の刻みに掃く向き(回さないなら全部。回すなら tick mod n の 1 つを n 倍の取り分で)
+        std::vector<SkyDirection> ActiveDirections(const SkyPortParams& params) {
+            if (!params.rotateDirections || params.directions.empty())
+                return params.directions;
+
+            const auto count = static_cast<uint32_t>(params.directions.size());
+            SkyDirection active = params.directions[params.tick % count];
+            active.shareQ16 *= count;
+
+            return {active};
+        }
+
+        // 帯ごとの差(空 − 参照の黒体。mW/m²)
+        std::array<int64_t, 2> NetBands(const SkyPortParams& params) {
+            const rx::RcBands reference = rx::RcBlackIrradianceMilliwatts(params.referenceMk);
+
+            return {static_cast<int64_t>(params.skyShortMilliwatts) - static_cast<int64_t>(reference.shortBand),
+                    static_cast<int64_t>(params.skyLongMilliwatts) - static_cast<int64_t>(reference.longBand)};
+        }
+
+        // 向き 1 つの、帯ごとの大きさ magnitude を運ぶ光(どちらの帯も 0 なら無し)
+        std::expected<std::optional<SunLight>, std::string> DirectionLight(const SkyDirection& sky,
+                                                                           const std::array<uint64_t, 2>& magnitude) {
+            const auto shortBand = PerpendicularMilliwatts(magnitude[0], sky);
+            const auto longBand = PerpendicularMilliwatts(magnitude[1], sky);
+            if (!shortBand || !longBand)
+                return std::unexpected(!shortBand ? shortBand.error() : longBand.error());
+
+            if (*shortBand == 0 && *longBand == 0)
+                return std::nullopt;
+
+            return SunLight{.direction = sky.direction,
+                            .irradianceShortMilliwatts = *shortBand,
+                            .irradianceLongMilliwatts = *longBand};
+        }
+
     }  // namespace
 
     std::vector<SkyDirection> DefaultSkyDirections() {
@@ -75,11 +112,8 @@ namespace bicameral::sim {
         if (const auto checked = CheckDirections(params.directions); !checked)
             return std::unexpected(checked.error());
 
-        // --- 帯ごとの差(空 − 参照の黒体)---
-        const rx::RcBands reference = rx::RcBlackIrradianceMilliwatts(params.referenceMk);
-        const std::array<int64_t, 2> net = {
-            static_cast<int64_t>(params.skyShortMilliwatts) - static_cast<int64_t>(reference.shortBand),
-            static_cast<int64_t>(params.skyLongMilliwatts) - static_cast<int64_t>(reference.longBand)};
+        const std::array<int64_t, 2> net = NetBands(params);
+        const std::vector<SkyDirection> directions = ActiveDirections(params);
 
         // --- 向きごと × 正と負 ---
         std::vector<SkyPortSweep> sweeps;
@@ -93,46 +127,73 @@ namespace bicameral::sim {
             if (magnitude[0] == 0 && magnitude[1] == 0)
                 continue;
 
-            for (const SkyDirection& sky : params.directions) {
-                const auto shortBand = PerpendicularMilliwatts(magnitude[0], sky);
-                const auto longBand = PerpendicularMilliwatts(magnitude[1], sky);
-                if (!shortBand || !longBand)
-                    return std::unexpected(!shortBand ? shortBand.error() : longBand.error());
+            for (const SkyDirection& sky : directions) {
+                const auto light = DirectionLight(sky, magnitude);
+                if (!light)
+                    return std::unexpected(light.error());
 
-                if (*shortBand == 0 && *longBand == 0)
-                    continue;
-
-                sweeps.push_back({.light = {.direction = sky.direction,
-                                            .irradianceShortMilliwatts = *shortBand,
-                                            .irradianceLongMilliwatts = *longBand},
-                                  .negative = negative});
+                if (light->has_value())
+                    sweeps.push_back({.light = **light, .negative = negative});
             }
         }
 
         return sweeps;
     }
 
+    std::expected<SkyPortWork, std::string> MakeSkyPortWork(const MultiresNest& nest, const SkyPortParams& params) {
+        if (const auto checked = CheckDirections(params.directions); !checked)
+            return std::unexpected(checked.error());
+
+        if (params.directions.size() > mr::SKY_PORT_SWEEP_LIMIT)
+            return std::unexpected(std::format("空の向きが {} を超える", mr::SKY_PORT_SWEEP_LIMIT));
+
+        // --- 帯ごとの大きさと足す側(帯の差の符号)---
+        const std::array<int64_t, 2> net = NetBands(params);
+        SkyPortWork work;
+        std::array<uint64_t, 2> magnitude{};
+        for (size_t band = 0; band < 2; ++band) {
+            magnitude[band] = static_cast<uint64_t>(Absolute(net[band]));
+            work.bandSide[band] = net[band] < 0 ? 1u : 0u;
+        }
+
+        // --- 向きごとに掃き 1 本(両方の帯を運ぶ)---
+        for (const SkyDirection& sky : ActiveDirections(params)) {
+            const auto light = DirectionLight(sky, magnitude);
+            if (!light)
+                return std::unexpected(light.error());
+
+            if (!light->has_value())
+                continue;
+
+            const auto sunParams = MakeSunParams(nest, **light, params.rayLevel);
+            if (!sunParams)
+                return std::unexpected(sunParams.error());
+
+            work.sweeps.push_back(*sunParams);
+        }
+
+        return work;
+    }
+
     std::expected<SkyPortResult, std::string> SweepSkyPort(const MultiresNest& nest, const BakedReactionTable& table,
                                                            const SkyPortParams& params, bool reverse) {
-        const auto sweeps = PlanSkyPort(params);
-        if (!sweeps)
-            return std::unexpected(sweeps.error());
+        const auto work = MakeSkyPortWork(nest, params);
+        if (!work)
+            return std::unexpected(work.error());
 
         SkyPortResult result;
         for (std::vector<uint64_t>& words : result.words)
             words.assign(SunColumnWordCount(nest), 0);
 
-        const size_t count = sweeps->size();
+        // --- 向きごとに掃き、語を帯の側へ足す ---
+        const size_t count = work->sweeps.size();
         for (size_t step = 0; step < count; ++step) {
-            const SkyPortSweep& sweep = (*sweeps)[reverse ? count - 1 - step : step];
-            const auto sunParams = MakeSunParams(nest, sweep.light, params.rayLevel);
-            if (!sunParams)
-                return std::unexpected(sunParams.error());
-
-            const std::vector<uint64_t> words = SweepSunColumn(nest, table, *sunParams, reverse);
-            std::vector<uint64_t>& sum = result.words[sweep.negative ? 1 : 0];
-            for (size_t word = 0; word < words.size(); ++word)
-                sum[word] += words[word];
+            const mr::SunParams& sweep = work->sweeps[reverse ? count - 1 - step : step];
+            const std::vector<uint64_t> words = SweepSunColumn(nest, table, sweep, reverse);
+            for (size_t word = 0; word < words.size(); ++word) {
+                const uint32_t side = work->bandSide[mr::SkyPortWordBand(static_cast<uint32_t>(word))];
+                result.words[side][word] += words[word];
+            }
 
             ++result.sweeps;
         }

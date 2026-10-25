@@ -4,7 +4,11 @@
 //   3. 空の光 = 参照の黒体なら掃きは 0 本(口は何もしない)
 //   4. 保存(帯ごと・正と負ごとに 入った = 吸った + 返した + 外へ)・順によらない(逆の順で同じ語)
 //   5. 誤りの入力を断る
+//   6. 帯の正と負を 1 本の光線にまとめた掃き(SweepSkyPort・T-1147)が、帯を分けた掃き(PlanSkyPort を 1 本ずつ)の和とビット単位で同じ
+//   7. 向きを刻みで回す形(T-1147。仮): n 刻みの和が全部の向きの n 刻み分と丸めの差だけで同じ・1 刻みの揺れの大きさ(測り)
 // 公開側に置く試験データで、ゲームの中身ではない(D-006)。
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -164,11 +168,142 @@ namespace {
         if (!forward || !reversed)
             return;
 
-        EXPECT(forward->sweeps == 8);
+        EXPECT(forward->sweeps == 4);  // 向き 4 つ(帯の正と負は 1 本の光線にまとめる)
         EXPECT(forward->words == reversed->words);
         EXPECT(Conserves(*forward));
         std::printf("空 = 参照で掃き 0 本・地形で正と負の掃き %u 本が逆の順でも同じ語・帯ごとに保存\n",
                     forward->sweeps);
+    }
+
+    // --- 6. まとめた掃き = 帯を分けた掃きの和(T-1147)---
+
+    // 定義: PlanSkyPort の掃き(帯の正と負を別に)を 1 本ずつ太陽の影の柱で走らせて、正と負に足す
+    std::array<std::vector<uint64_t>, 2> SeparateSweeps(const sim::MultiresNest& nest, const BakedReactionTable& table,
+                                                        const SkyPortParams& params, uint32_t& sweeps) {
+        std::array<std::vector<uint64_t>, 2> sums;
+        for (std::vector<uint64_t>& sum : sums)
+            sum.assign(SunColumnWordCount(nest), 0);
+
+        sweeps = 0;
+        const auto plan = PlanSkyPort(params);
+        if (!plan)
+            return sums;
+
+        for (const SkyPortSweep& sweep : *plan) {
+            const auto sunParams = MakeSunParams(nest, sweep.light, params.rayLevel);
+            if (!sunParams)
+                continue;
+
+            const std::vector<uint64_t> words = SweepSunColumn(nest, table, *sunParams);
+            std::vector<uint64_t>& sum = sums[sweep.negative ? 1 : 0];
+            for (size_t word = 0; word < words.size(); ++word)
+                sum[word] += words[word];
+
+            ++sweeps;
+        }
+
+        return sums;
+    }
+
+    void TestMergedMatchesSeparate(const BakedReactionTable& table) {
+        const sim::MultiresNest terrain = test::MakeSunWorld(table, 0, 2, 1, 2, test::Terrain);
+        const sim::MultiresNest wall = test::MakeSunWorld(table, 0, 1, 1, 4, test::WallScene);
+        SkyPortParams day = Night();
+        day.skyShortMilliwatts = DIFFUSE_SHORT;  // 短い帯は正・長い帯は負
+        SkyPortParams warm = Night();
+        warm.skyLongMilliwatts = SkyBlackLongMilliwatts(310000);  // 長い帯も正(空が参照より暖かい)
+        bool same = true;
+        for (const sim::MultiresNest* nest : {&terrain, &wall}) {
+            for (const SkyPortParams& params : {Night(), day, warm}) {
+                uint32_t separate = 0;
+                const auto expected = SeparateSweeps(*nest, table, params, separate);
+                const auto merged = SweepSkyPort(*nest, table, params);
+                same = same && merged.has_value() && merged->words == expected && separate >= merged->sweeps;
+            }
+        }
+
+        EXPECT(same);
+        std::printf(
+            "まとめた掃き(向き 1 つに 1 本)= 帯を分けた掃き(正と負で最大 8 本)の和: 地形・壁 × "
+            "夜・昼・暖かい空でビット一致\n");
+    }
+
+    // --- 7. 向きを刻みで回す(T-1147。仮)---
+
+    // セルごとの受けた量(長い帯。正 − 負)を並べる
+    std::vector<int64_t> ReceivedCells(const sim::MultiresNest& nest, const SkyPortResult& result) {
+        std::vector<int64_t> cells;
+        test::ForEachSunLeafCell(nest, [&](uint32_t slot, uint32_t index, const mr::MrBlock& /*block*/) {
+            int64_t received = 0;
+            for (const uint32_t kind : {mr::SUN_KIND_ABSORBED, mr::SUN_KIND_REFLECTED}) {
+                const uint32_t word = mr::SunCellWord(slot, index, rx::LT_BAND_LONG, kind);
+                received += static_cast<int64_t>(result.words[0][word]) - static_cast<int64_t>(result.words[1][word]);
+            }
+
+            cells.push_back(received);
+        });
+
+        return cells;
+    }
+
+    int64_t Magnitude(int64_t value) {
+        return value < 0 ? -value : value;
+    }
+
+    void TestRotation(const BakedReactionTable& table) {
+        const sim::MultiresNest terrain = test::MakeSunWorld(table, 0, 2, 1, 2, test::Terrain);
+        const SkyPortParams params = Night();
+        const auto all = SweepSkyPort(terrain, table, params);
+        EXPECT(all.has_value());
+        if (!all)
+            return;
+
+        // --- 4 刻み(向き 4 つを 1 つずつ・4 倍の取り分)---
+        const std::vector<int64_t> once = ReceivedCells(terrain, *all);
+        std::vector<int64_t> rotatedSum(once.size(), 0);
+        std::vector<int64_t> worstTick(once.size(), 0);
+        const auto count = static_cast<uint32_t>(params.directions.size());
+        for (uint32_t tick = 0; tick < count; ++tick) {
+            SkyPortParams rotated = params;
+            rotated.rotateDirections = true;
+            rotated.tick = tick;
+            const auto result = SweepSkyPort(terrain, table, rotated);
+            EXPECT(result.has_value() && result->sweeps == 1);
+            if (!result)
+                return;
+
+            const std::vector<int64_t> cells = ReceivedCells(terrain, *result);
+            for (size_t cell = 0; cell < cells.size(); ++cell) {
+                rotatedSum[cell] += cells[cell];
+                worstTick[cell] = std::max(worstTick[cell], Magnitude(cells[cell] - once[cell]));
+            }
+        }
+
+        // --- 比べる(開けた地面の量の 1/10 以上を受けるセル)---
+        const int64_t open = Magnitude(
+            once.empty() ? 0 : *std::max_element(once.begin(), once.end(), [](int64_t a, int64_t b) {
+                return Magnitude(a) < Magnitude(b);
+            }));
+        int64_t sumErrorPpm = 0;
+        int64_t tickSwingPercent = 0;
+        uint32_t compared = 0;
+        for (size_t cell = 0; cell < once.size(); ++cell) {
+            const int64_t reference = Magnitude(once[cell]);
+            if (reference * 10 < open)
+                continue;
+
+            ++compared;
+            const int64_t sumError = Magnitude(rotatedSum[cell] - (once[cell] * count));
+            sumErrorPpm = std::max(sumErrorPpm, sumError * 1000000 / (reference * count));
+            tickSwingPercent = std::max(tickSwingPercent, worstTick[cell] * 100 / reference);
+        }
+
+        EXPECT(compared > 0);
+        EXPECT(sumErrorPpm <= 100);  // 4 刻みの和は丸めの差だけ(0.01 % 以内)
+        std::printf(
+            "向きを刻みで回す(地形 16 × 4 × 16 m・夜の空): 比べたセル %u・4 刻みの和のずれ 最大 %lld ppm・"
+            "1 刻みの揺れ 最大 %lld %%(全部の向きの 1 刻み分に対して)\n",
+            compared, static_cast<long long>(sumErrorPpm), static_cast<long long>(tickSwingPercent));
     }
 
     // --- 5. 誤りの入力 ---
@@ -196,6 +331,8 @@ int main() {
     TestWall(table);
     TestBalancedAndOrder(table);
     TestRejects();
+    TestMergedMatchesSeparate(table);
+    TestRotation(table);
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
         return 1;

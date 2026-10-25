@@ -200,6 +200,8 @@ bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY MirrorWorld NAM
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY ExtractShadow NAME multires_peek_extract)  # 覗き窓の抽出(T-0096)
 bicameral_add_shader(sim/sun_column.hlsl PROFILE cs_6_8 ENTRY SunClear NAME sun_column_clear)  # 太陽の影の柱の出力を 0 に(T-0910)
 bicameral_add_shader(sim/sun_column.hlsl PROFILE cs_6_8 ENTRY SunSweep NAME sun_column_sweep)  # 太陽の影の柱(T-0910・ADR-0396)
+bicameral_add_shader(sim/sky_port.hlsl PROFILE cs_6_8 ENTRY SkyPortClear NAME sky_port_clear)  # 空との交換の口の出力を 0 に(T-1147)
+bicameral_add_shader(sim/sky_port.hlsl PROFILE cs_6_8 ENTRY SkyPortSweep NAME sky_port_sweep)  # 空との交換の口を 1 回の起動で(T-1147・ADR-0474)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcInitState NAME cascade_light_init_state)  # 距離ごとの段の GPU: 状態を 0 に(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcInitBags NAME cascade_light_init_bags)  # 距離ごとの段の GPU: 袋の溜めを空に・初めの持ち越し(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcBeginTick NAME cascade_light_begin_tick)  # 距離ごとの段の GPU: 頭の語を 0 に(T-0959)
