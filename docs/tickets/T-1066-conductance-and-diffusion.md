@@ -1,6 +1,6 @@
 # T-1066 混ざった所の伝導率を体積の平行の道に・試験の倍率を外す・気体の値を温度で変える(D-637・D-639)
 
-- Status: Doing(式は入れた・ブランチ t-1066-conductance。2 回目で 3 本を直し、GPU のビット一致は通った。残り 4 本は遊びに効く変化なので main へまだ入れない)
+- Status: Done(2026-10-25 main へ〔t-1066-c3 を --no-ff〕。止めた試験 5 本は T-1113・T-0691・T-1110 を指して DISABLED)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -15,9 +15,9 @@
 - [x] セルの伝導率 = (Σ 凝縮相の体積 × 伝導率 + 残りの体積 × 残りの伝導率)÷ セルの体積(shaders/common/heat_conduction.hlsli。CPU と GPU が同じ関数)
 - [x] 気体の伝導率 ∝ √(T ÷ 室温)・混ざる速さ ∝ (T ÷ 室温)^1.5(HcGasScaleAt。整数の平方根。室温 298.15 K)
 - [x] 試験の倍率を外す(data/packages/combustion_test/units.luau・data/scenes/grass_fire_river の units.luau を 1 に。C++ の試験の表の 18 × 5000 など)
-- [ ] 基準の値を持つ試験を取り直し、変わった値を記録(下の表)
-- [ ] GPU と CPU のビット一致(GPU の試験を 1 本ずつ)
-- [ ] release 警告 0・archmap --check
+- [x] 基準の値を持つ試験を取り直し、変わった値を記録(下の表。燃える場面の 5 本は T-1113・T-0691・T-1110 まで DISABLED)
+- [x] GPU と CPU のビット一致(GPU の試験を 1 本ずつ・組で)
+- [x] release 警告 0・archmap --check
 
 ## 形(ADR-0454)
 - 物質の表 RxSpecies の空き欄(padding)を `molarVolume`(mm³/mol)にした。気体と密度を書いていない物質は 0(場所を取らない。cell_volume.h と同じ)。
@@ -123,3 +123,6 @@
 - 2026-10-24(本体の作業役): 式を入れた(heat_conduction.hlsli・multires_conduction.hlsli・probe_world.hlsli・RxSpecies.molarVolume・object_heat_test を共有の式に)。release ビルド警告 0・archmap OK。CPU 94 本で 7 本が落ちた(上の表)。2 時間を超えたので、main へは入れずブランチ t-1066-conductance に置いて返す。
 - 2026-10-24(本体の作業役・2 回目): 負の熱と lab_box の範囲の外を調べた(式の誤りではない)。面の流れの丸めを直して物差し 2 本が通った・32bit を超える定数を外した・閉じた箱の基準。放射が支えれば現実の値で燃え広がる(15 s・川 20 s)。残り 4 本は判断待ち。
 - 2026-10-24(本体の作業役・3 回目): main へ rebase(wt5 の object_heat.hlsl・object_heat_cpu.h を 3 引数の HcCellConductance に)。Q161 = 書く で real_matter に放射の吸い込み(WIP)。燃える場面の試験は放射の段の無い世界では直らない(上)。T-0691 が先なので main へまだ。
+- 2026-10-24(本体の作業役・4 回目): 伝導率の式を一つに(物の熱も Hc の口へ)・草原の測りの既定を直して既定の場面で燃え広がる。燃える場面の 5 本を DISABLED。CPU 104 本合格。
+- 2026-10-25(本体の作業役・5 回目): main へ rebase。gpu_lab_box の表の差し替えの試験の前提の崩れを直した(燃え始め 600 K の木を 2 か所。判定は緩めていない)。D-648 に合っている(滑らか)。
+  release 警告 0・archmap OK・GPU(gpu_lab_box・gpu_reaction・gpu_multires_implicit_conduction・gpu_object_heat・gpu_multires_conduction・gpu_probe_sim)・CPU 8 本合格。main へ --no-ff。.worktrees/t1066 は中身が main と同じだったので消した。
