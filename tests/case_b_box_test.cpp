@@ -5,6 +5,7 @@
 //   動作確認の段(ToyStages)は**物理ではない**(箱の受け渡し・帳簿・口が使えることを見るためだけの、保存する作り物の式)。
 // B1(--gauge): 6 つの場面が 0.25 m・0.5 m・2 m で読めて、同じ物の量になる / 計器の値(水位・角度・圧力・動く面・費用)と
 //   列の関数(揺り戻し・戻る時間・届いた時・最大・比べ)が分かっている入力で正しい。
+// 細かくする口(T-1106。引数なしの組): 詰まり切らない絵のセルの粒・液体を下の子から詰め、物質ごとの量は同じ数で配った時とビット一致。
 // 表示の小数は FormatFixed(整数)。結果は docs/tickets/T-0866・T-0867。
 #include <algorithm>
 #include <array>
@@ -458,6 +459,132 @@ namespace {
         }
     }
 
+    // --- 細かくする口(T-1106)---
+    // 8 列 × 2 段の絵: 下の段は石、上の段に石で隔てて 3/10・7/10 の詰まった砂・水 50 %・空気に舞う砂 1 %(隔てるので表面の傾きは 0)
+    Scene MakeRefineScene() {
+        Scene scene;
+        scene.name = "refine";
+        scene.materials = StandardMaterials();
+        const std::vector<GasFill> air = {{.material = "air", .molePermille = 1000}};
+        const auto atmosphere = (uint64_t)ATMOSPHERE_PA;
+        scene.legend = {
+            {.symbol = '#', .condensed = {{.material = "stone", .volumePct = 100}}, .gasPressurePa = 0, .gas = {}},
+            {.symbol = '3',
+             .condensed = {{.material = "sand", .volumePct = 18}},
+             .gasPressurePa = atmosphere,
+             .gas = air},
+            {.symbol = '7',
+             .condensed = {{.material = "sand", .volumePct = 42}},
+             .gasPressurePa = atmosphere,
+             .gas = air},
+            {.symbol = 'w',
+             .condensed = {{.material = "water", .volumePct = 50}},
+             .gasPressurePa = atmosphere,
+             .gas = air},
+            {.symbol = 'd',
+             .condensed = {{.material = "sand", .volumePct = 1}},
+             .gasPressurePa = atmosphere,
+             .gas = air,
+             .suspended = true},
+        };
+        scene.rows = {"#3#7#w#d", "########"};
+
+        return scene;
+    }
+
+    // 物質 name の、絵の列 pictureX・絵の段 1 の子(下から row 段目。左の子)の質量
+    int64_t ChildMass(const Box& box, uint32_t fine, uint32_t pictureX, uint32_t row, std::string_view name) {
+        return CellMass(box, CellIndex(box, pictureX * fine, fine + row, 0), MaterialIndex(box, name));
+    }
+
+    void TestRefineSettles() {
+        Scene scene = MakeRefineScene();
+        for (const int32_t level : {1, 2}) {
+            const uint32_t fine = 1u << level;
+            scene.refineFill = RefineFill::Same;
+            const Box same = std::move(*BuildScene(scene, level));
+            scene.refineFill = RefineFill::Settle;
+            const Box settled = std::move(*BuildScene(scene, level));
+            const Box again = std::move(*BuildScene(scene, level));
+
+            // 物質ごとの量は同じ数で配った時とビット一致・作り直すと同じ・帳簿は 0
+            for (const char* name : {"water", "sand", "stone"})
+                EXPECT(MaterialTotal(settled, name) == MaterialTotal(same, name));
+
+            EXPECT(HashBox(settled) == HashBox(again));
+            EXPECT(CheckConservation(settled).IsZero());
+
+            // 3/10: 列の和(fine × 18 %)は下の子に収まる
+            const int64_t packedChild = ChildMass(same, fine, 1, 0, "sand") * 60 / 18;
+            const int64_t columnThree = ChildMass(same, fine, 1, 0, "sand") * fine;
+            if (level == 1) {
+                EXPECT(ChildMass(settled, fine, 1, 0, "sand") == columnThree);
+                EXPECT(ChildMass(settled, fine, 1, 1, "sand") == 0);
+            }
+
+            // 7/10: 下の子は詰まり切る(±1 ‰)・上は残り。同じ数で配ると子は同じ
+            const int64_t bottom = ChildMass(settled, fine, 3, 0, "sand");
+            EXPECT(DifferencePermille(bottom, packedChild) <= 1);
+            int64_t columnSeven = 0;
+            for (uint32_t row = 0; row < fine; ++row)
+                columnSeven += ChildMass(settled, fine, 3, row, "sand");
+
+            EXPECT(columnSeven == ChildMass(same, fine, 3, 0, "sand") * fine);
+            EXPECT(level == 1 || ChildMass(settled, fine, 3, fine - 1, "sand") == 0);
+            EXPECT(ChildMass(same, fine, 3, 0, "sand") == ChildMass(same, fine, 3, fine - 1, "sand"));
+
+            // 水 50 %: 下の半分の子が水で満ちて空気はほぼ無い・上の子に水は無い
+            EXPECT(ChildMass(settled, fine, 5, 0, "water") > ChildMass(same, fine, 5, 0, "water") * 19 / 10);
+            EXPECT(ChildMass(settled, fine, 5, 0, "air") < ChildMass(same, fine, 5, 0, "air") / 100);
+            EXPECT(ChildMass(settled, fine, 5, fine - 1, "water") == 0);
+
+            // 舞う砂は同じ濃さのまま
+            for (uint32_t row = 0; row < fine; ++row)
+                EXPECT(ChildMass(settled, fine, 7, row, "sand") == ChildMass(same, fine, 7, row, "sand"));
+
+            std::printf("細かくする口 %s m: 7/10 の列の砂 下 %lld mg・上 %lld mg(同じ数なら %lld mg ずつ)\n",
+                        level == 1 ? "0.25" : "0.125", (long long)bottom,
+                        (long long)ChildMass(settled, fine, 3, 1, "sand"),
+                        (long long)ChildMass(same, fine, 3, 0, "sand"));
+        }
+
+        // 表面の傾き: 9/10・7/10・5/10・3/10 と下がる面は、中の 2 つの絵のセルで左の子の列が多い(絵のセルの中で量は同じ)。端の列は傾き 0
+        Scene tilt = MakeRefineScene();
+        tilt.rows = {"9753", "####"};
+        tilt.legend.push_back({.symbol = '9',
+                               .condensed = {{.material = "sand", .volumePct = 54}},
+                               .gasPressurePa = (uint64_t)ATMOSPHERE_PA,
+                               .gas = {{.material = "air", .molePermille = 1000}}});
+        tilt.legend.push_back({.symbol = '5',
+                               .condensed = {{.material = "sand", .volumePct = 30}},
+                               .gasPressurePa = (uint64_t)ATMOSPHERE_PA,
+                               .gas = {{.material = "air", .molePermille = 1000}}});
+        const Box tilted = std::move(*BuildScene(tilt, 1));
+        tilt.refineFill = RefineFill::Same;
+        const Box flat = std::move(*BuildScene(tilt, 1));
+        const uint32_t sandIndex = MaterialIndex(tilted, "sand");
+        for (uint32_t x = 0; x < 4; ++x) {
+            const auto columnSum = [&](const Box& box, uint32_t childX) {
+                return CellMass(box, CellIndex(box, childX, 2, 0), sandIndex) +
+                       CellMass(box, CellIndex(box, childX, 3, 0), sandIndex);
+            };
+            const int64_t left = columnSum(tilted, 2 * x);
+            const int64_t right = columnSum(tilted, (2 * x) + 1);
+            EXPECT(left + right == columnSum(flat, 2 * x) + columnSum(flat, (2 * x) + 1));
+            EXPECT((x == 0 || x == 3) ? left == right : left > right);
+            std::printf("  傾き: 絵の列 %u の砂 左 %lld mg・右 %lld mg\n", x, (long long)left, (long long)right);
+        }
+
+        // 据わる固体を含む列・沈み固まった体積が列以上の列は同じ数で(端数は下へ)
+        const Box box = std::move(*BuildScene(scene, 1));
+        std::vector<int64_t> column(box.materials.size(), 0);
+        column[MaterialIndex(box, "stone")] = 7;
+        column[MaterialIndex(box, "sand")] = 5;
+        const auto even = SettleColumn(box.materials, column, 2, CellVolumeMm3(box));
+        EXPECT(even[0][MaterialIndex(box, "stone")] == 4 && even[1][MaterialIndex(box, "stone")] == 3);
+        EXPECT(even[0][MaterialIndex(box, "sand")] == 3 && even[1][MaterialIndex(box, "sand")] == 2);
+    }
+
     void RunBoxTests() {
         TestMaterials();
         TestShape();
@@ -465,6 +592,7 @@ namespace {
         TestConservationAndDeterminism();
         TestCoarsen();
         TestPressurePort();
+        TestRefineSettles();
     }
 
     void RunGaugeTests() {

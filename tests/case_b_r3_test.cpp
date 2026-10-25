@@ -260,8 +260,9 @@ namespace {
     bool surfaceLayerOverride = false;     // 表面のセルを層に(T-1071)。引数 surface(摩擦を解きの中へも入れる)
     uint32_t contactOverride = 0;          // 上の粒を支える詰まり(‰。T-1070 の 2 本目)。引数 contact=<‰>
     bool frictionInSolveOverride = false;  // 摩擦を解きの中へ(T-1070。打ち切り)。引数 friction
-    bool restLockOverride = true;  // 解く前に止める(T-1043)。引数のどこかに norestlock で解いた後で止める(T-0996)
-    bool vacuumOverride = false;   // 空気を抜く(粒と空気の引きずりの影響を見る。T-1046)。引数のどこかに vacuum
+    bool restLockOverride = true;      // 解く前に止める(T-1043)。引数のどこかに norestlock で解いた後で止める(T-0996)
+    bool nativeSlopeOverride = false;  // 斜面を箱の細かさで描き直す(T-1106。絵の 2 × 2 の段を消す)。引数 native
+    bool vacuumOverride = false;       // 空気を抜く(粒と空気の引きずりの影響を見る。T-1046)。引数のどこかに vacuum
     bool impactTurnOverride =
         false;  // 受け止めた縦の運動量を横へ向け直す(T-1046)。引数のどこかに turn  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
 
@@ -1134,6 +1135,32 @@ namespace {
         return peak;
     }
 
+    // 斜面を箱の細かさ(レベル level のセル)で描き直す(T-1106 の切り分け): 0.5 m の絵を 2 × 2 に分けると、表面が
+    // 0.5 m ごとの段(平ら → 1 セル近い段差)になる。箱のセルの列ごとに頂上 4 m から tan θ で下げ、表面のセルは詰まりの 1/10 刻み。床の石はそのまま
+    void RefillSlopeNative(Box& box, uint64_t tanQ16) {
+        const uint32_t fine = 1u << (uint32_t)box.config.level;
+        const uint32_t sand = MaterialIndex(box, "sand");
+        const uint32_t air = MaterialIndex(box, "air");
+        const uint64_t volume = CellVolumeMm3(box);
+        const uint64_t top = (8ull * fine) << 16;  // 4 m(箱のセルの Q16)
+        for (uint32_t x = 0; x < box.config.sizeX; ++x) {
+            const uint64_t drop = tanQ16 * (2 * x + 1) / 2;
+            const uint64_t height = drop >= top ? 0 : top - drop;
+            const auto whole = (uint32_t)(height >> 16);
+            const auto tenth = (uint32_t)(((height & 0xffff) * 10 + 0x8000) >> 16);
+            for (uint32_t y = fine; y < box.config.sizeY; ++y) {
+                const uint32_t row = y - fine;
+                const uint32_t tenths = row < whole ? 10 : (row == whole ? tenth : 0);
+                const uint32_t cell = CellIndex(box, x, y, 0);
+                const uint64_t grainVolume = volume * 6 * tenths / 100;
+                CellMass(box, cell, sand) = (int64_t)(grainVolume * box.materials[sand].densityKgPerM3 / 1000);
+                CellMass(box, cell, air) = IdealGasMassMg((uint64_t)ATMOSPHERE_PA, volume - grainVolume,
+                                                          box.materials[air].molarMassMgPerMol, 300000);
+                box.energyMillijoules[cell] = ThermalEnergyMillijoules(box, cell, 300000);
+            }
+        }
+    }
+
     void AirWatch(int32_t level) {
         std::string series;
         uint64_t limited = 0;
@@ -1152,13 +1179,19 @@ namespace {
             limited = currentStats->limitedCells;
             grainLimited = currentStats->grainLimitedCells;
         };
-        const Run run = RunR3(MakeSlopeScene(30560), {.level = level, .seconds = 4, .afterTick = sample}, {"slope"});
+        RunOptions options{.level = level, .seconds = 4, .afterTick = sample};
+        if (nativeSlopeOverride)
+            options.prepare = [](Box& box) {
+                RefillSlopeNative(box, 30560);
+            };
+
+        const Run run = RunR3(MakeSlopeScene(30560), options, {"slope"});
         std::printf(
-            "  空気の見張り 斜面 25° %s m(V %u 回・%u 刻み/秒):%s\n    V 最大 %u・止まった粒の面 %llu・表面の層の面 "
+            "  空気の見張り 斜面 25° %s m%s(V %u 回・%u 刻み/秒):%s\n    V 最大 %u・止まった粒の面 %llu・表面の層の面 "
             "%llu\n",
-            level == 0 ? "0.5" : "0.25", cyclesOverride, run.box.config.ticksPerSecond, series.c_str(),
-            run.stats.maxCycles, (unsigned long long)run.stats.heldGrainFaces,
-            (unsigned long long)run.stats.surfaceLayerGrainFaces);
+            level == 0 ? "0.5" : "0.25", nativeSlopeOverride ? "・箱の細かさで描いた斜面" : "", cyclesOverride,
+            run.box.config.ticksPerSecond, series.c_str(), run.stats.maxCycles,
+            (unsigned long long)run.stats.heldGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
     }
 
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
@@ -1184,6 +1217,8 @@ int main(int argc, char** argv) {
             impactTurnOverride = true;
         else if (word == "vacuum")
             vacuumOverride = true;
+        else if (word == "native")
+            nativeSlopeOverride = true;
         else if (word == "norestlock")
             restLockOverride = false;
         else if (word.starts_with("contact="))
