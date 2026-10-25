@@ -232,12 +232,22 @@ namespace bicameral::sim {
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world);
 
     // --- 早送りの待ちの見積もり(D-650・T-1111。ゲームはこれを読んで眠れる条件などを決める。法則は変えない)---
-    // 1 出来事の解きの費用(GPU で測った値。docs/perf.md の T-1111。整数の ns)
+    // 1 出来事(その刻みに解く列を 1 本の系にまとめた形。T-0951)の GPU の費用の式。既定は RTX 3070 Ti・release の測り
+    // (gpu_time_step_span_test --measure・記録の形は前の解きから。docs/perf.md の T-1111)。浮動小数点を使わないので ps の整数
     struct TimeTreeSolveCost {
-        uint64_t eventNs = 0;      // 出来事 1 つの固定費(段の数で決まる Dispatch とバリア。セルの数によらない分)
-        uint64_t cellNs = 0;       // 解くセル 1 つの段 0 + 段の重み
-        uint64_t cellCycleNs = 0;  // 解くセル 1 つの V 1 回
+        // 解くセルがこれ以下の出来事は V を 1 グループで回す(ImTail)
+        uint32_t smallCells = 1024;
+        uint64_t smallEventNs = 13300;  // 小さい出来事の段 0 + 段の重み(512 セル)
+        uint64_t smallCycleNs = 26000;  // 小さい出来事の V 1 回
+        // 大きい出来事: 固定費 + セルの数 × 傾き。ただし下限(1 スレッドの 128bit の割り算の待ち。8,192〜6.6 万セルはほぼこの値)
+        uint64_t eventNs = 120000;
+        uint64_t eventFloorNs = 520000;
+        uint64_t cellPs = 2530;       // 段 0 + 段の重みのセル 1 つ
+        uint64_t cellCyclePs = 1940;  // V 1 回のセル 1 つ
     };
+
+    // 1 出来事の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数
+    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles);
 
     struct TimeTreeForwardEstimate {
         uint64_t events = 0;      // 出来事(解く刻み)の数
@@ -247,6 +257,7 @@ namespace bicameral::sim {
     };
 
     // 今の枠ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。
+    // 出来事は最も短い歩の終わりごと(長い歩の終わりはそれに重なり、同じ刻みの列は 1 本の系にまとめる)。
     // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない
     TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
                                                     uint64_t ticks, const TimeTreeSolveCost& cost);

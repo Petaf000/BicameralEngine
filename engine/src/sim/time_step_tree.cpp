@@ -1090,32 +1090,52 @@ namespace bicameral::sim {
         return bytes;
     }
 
+    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles) {
+        if (cells == 0)
+            return 0;
+
+        // 小さい出来事は V を 1 グループで(V の回数は平均)。大きい出来事は固定費 + 傾き(下限あり)
+        if (cells <= cost.smallCells)
+            return cost.smallEventNs + ((cellCycles / cells) * cost.smallCycleNs);
+
+        const uint64_t slope = ((cells * cost.cellPs) + (cellCycles * cost.cellCyclePs)) / 1000;
+
+        return std::max(cost.eventNs + slope, cost.eventFloorNs);
+    }
+
     TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
                                                     uint64_t ticks, const TimeTreeSolveCost& cost) {
-        TimeTreeForwardEstimate estimate;
-        int32_t shortest = setup.maxExponent;
+        // --- e ごとの刻むセルの数 ---
+        const auto exponents = static_cast<size_t>(std::max(setup.maxExponent, 0)) + 1;
+        std::vector<uint64_t> cellsAt(exponents, 0);
         for (const uint32_t slot : world.layout.blocks) {
             uint64_t cells = 0;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
                 cells += world.layout.stepped[CellId(slot, index)];
 
-            if (cells == 0)
-                continue;
-
-            // 歩の数(端の半端も 1 歩)× セル・V の回数
-            const int32_t exponent = std::max(world.steps.exponent[slot], 0);
-            const uint64_t solves = (ticks + Ticks(exponent) - 1) >> exponent;
-            estimate.cellSolves += solves * cells;
-            estimate.cellCycles += solves * cells * CyclesFor(setup, exponent);
-            shortest = std::min(shortest, exponent);
+            const int32_t exponent = std::clamp(world.steps.exponent[slot], 0, setup.maxExponent);
+            cellsAt[static_cast<size_t>(exponent)] += cells;
         }
 
-        // 出来事 = 最も短い歩の終わり(長い歩の終わりはそれに重なる)
-        if (estimate.cellSolves != 0)
-            estimate.events = (ticks + Ticks(shortest) - 1) >> shortest;
+        // --- 出来事の組 j = 2^j の倍数の刻み(2^(j+1) の倍数を除く。最後の組は残り全部): 解くのは e ≤ j の列 ---
+        TimeTreeForwardEstimate estimate;
+        uint64_t nanoseconds = 0;
+        uint64_t cells = 0;
+        uint64_t cycles = 0;
+        for (size_t j = 0; j < exponents; ++j) {
+            cells += cellsAt[j];
+            cycles += cellsAt[j] * CyclesFor(setup, static_cast<int32_t>(j));
+            const uint64_t multiples = ticks >> j;
+            const uint64_t events = j + 1 < exponents ? multiples - (ticks >> (j + 1)) : multiples;
+            if (cells == 0 || events == 0)
+                continue;
 
-        const uint64_t nanoseconds = (estimate.events * cost.eventNs) + (estimate.cellSolves * cost.cellNs) +
-                                     (estimate.cellCycles * cost.cellCycleNs);
+            estimate.events += events;
+            estimate.cellSolves += events * cells;
+            estimate.cellCycles += events * cycles;
+            nanoseconds += events * TimeTreeEventNs(cost, cells, cycles);
+        }
+
         estimate.waitMicroseconds = nanoseconds / 1000;
 
         return estimate;

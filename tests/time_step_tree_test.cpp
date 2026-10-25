@@ -21,7 +21,7 @@
 //       [bufferunits=前線の緩衝の単位の数(T-1074)] [shape=mixed|coarse|fine|finer(night・fire の木。1 m・0.5 m・0.25 m の根だけ)]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 // T-1111: span-dump dump=<ファイル>(火事〔shape= の木〕の途中の列の系を書く。gpu_time_step_span_test が GPU で解き比べる)
-//         forward-estimate [eventns=] [cellns=] [cyclens=](早送りの待ちの見積もり〔D-650〕と実際に進めた解きの数)
+//         forward-estimate(早送りの待ちの見積もり〔D-650〕と実際に進めた解きの数)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -32,6 +32,7 @@
 #include <format>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -912,10 +913,31 @@ namespace {
     void CheckFireCost(const Material& material, const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         setup.groupShift = groupShift;
+
+        // 実際に解いた列を出来事(歩の初めの刻み)ごとに 1 本の系にまとめた時の GPU の待ち(T-1111 の費用の式。D-650 の見積もりと比べる)
+        std::map<uint64_t, std::pair<uint64_t, uint64_t>> eventCells;  // 歩の初め → (セル, セル × V)
+        const TimeTreeSpanObserver observer = [&eventCells](const TimeTreeSpanSolve& solve) {
+            auto& [cells, cycles] = eventCells[solve.start];
+            cells += solve.system.nodes.size();
+            cycles += solve.system.nodes.size() * solve.cycles;
+        };
+        setup.spanObserver = &observer;
         const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
         const uint64_t ticks = sceneTicks != 0 ? sceneTicks : FIRE_TICKS;
         const RunResult run = Run(setup, material, world, ticks, ticks, ignition, false, true);
         LogRun("火事の費用", TrialName(), world, run, ticks);
+        uint64_t waitNs = 0;
+        uint64_t largest = 0;
+        for (const auto& [start, counts] : eventCells) {
+            waitNs += TimeTreeEventNs(sim::TimeTreeSolveCost{}, counts.first, counts.second);
+            largest = std::max(largest, counts.first);
+        }
+
+        Log(Channel::Sim, Level::Info,
+            "火事の費用: 出来事 {}(1 本の系にまとめて)・最も大きい出来事 {} セル・GPU の待ち(RTX 3070 Ti の式・V は e "
+            "の表・"
+            "重みは毎回){:.2f} 秒",
+            eventCells.size(), largest, (double)waitNs * 1.0e-9);
         const FrontSample& last = run.fronts.back();
         Log(Channel::Sim, Level::Info, "火事の費用: 角の火 {:g} m・終わりの着火した前線 x {:.2f} m・燃えた量 {:.4f} %",
             igniteCorner, last.ignitedX, last.burned * 100.0);
@@ -967,8 +989,8 @@ namespace {
     }
 
     // --- D-650・T-1111: 早送りの待ちの見積もりを、実際に進めた解きの数と比べる(合格の判定には使わない)---
-    // 1 出来事の GPU の費用(RTX 3070 Ti・T-1111 の gpu_time_step_span_test --measure。docs/perf.md)。eventns= cellns= cyclens= で変えられる
-    sim::TimeTreeSolveCost forwardCost{.eventNs = 0, .cellNs = 0, .cellCycleNs = 0};
+    // 1 出来事の GPU の費用(既定 = RTX 3070 Ti の測り。TimeTreeSolveCost)
+    const sim::TimeTreeSolveCost forwardCost;
 
     void CheckForwardEstimate(const Material& material, const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
@@ -986,13 +1008,13 @@ namespace {
                 StepTimeTree(setup, ahead, horizon);
                 const uint64_t cells = ahead.steps.cellSteps - world.steps.cellSteps;
                 const uint64_t events = ahead.steps.events - world.steps.events;
-                const uint64_t waitNs = (events * forwardCost.eventNs) + (cells * forwardCost.cellNs) +
-                                        (cells * forwardCost.cellCycleNs);
                 Log(Channel::Sim, Level::Info,
-                    "早送りの見積もり(着火の {} 刻み後から {} 刻み): 見積もり 出来事 {}・解くセル {}・待ち {:.3f} 秒 / "
-                    "実際 出来事 {}・解いたセル {}・待ち(同じ費用で V 1){:.3f} 秒",
-                    at, horizon, estimate.events, estimate.cellSolves, (double)estimate.waitMicroseconds * 1.0e-6,
-                    events, cells, (double)waitNs * 1.0e-9);
+                    "早送りの見積もり(着火の {} 刻み後から {} 刻み): 見積もり 出来事 {}・解くセル {}・V × セル {}・GPU "
+                    "の待ち "
+                    "{:.3f} 秒 / 実際 出来事 {}・解いたセル {}(見積もり ÷ 実際 {:.2f})",
+                    at, horizon, estimate.events, estimate.cellSolves, estimate.cellCycles,
+                    (double)estimate.waitMicroseconds * 1.0e-6, events, cells,
+                    cells != 0 ? (double)estimate.cellSolves / (double)cells : 0.0);
             }
         }
     }
@@ -1115,12 +1137,6 @@ namespace {
                 solverGalerkin = value == "1";
             else if (key == "dump")
                 dumpPath = value;
-            else if (key == "eventns")
-                forwardCost.eventNs = static_cast<uint64_t>(std::atoll(value.c_str()));
-            else if (key == "cellns")
-                forwardCost.cellNs = static_cast<uint64_t>(std::atoll(value.c_str()));
-            else if (key == "cyclens")
-                forwardCost.cellCycleNs = static_cast<uint64_t>(std::atoll(value.c_str()));
         }
 
         const bool all = part == "all";

@@ -6,7 +6,7 @@
 //    段 0 は CPU が組んだ系の写しから GPU が仕上げる(sim/gpu_equilibrium_upload)。粗い段の重み・V は部品のまま。
 // 2. 費用(--measure): 系ごとに、段 0 + 粗い段の重み(段の重みを作る)・V 1・V 2 の GPU の時刻印(暖機 2 回の後 8 回の最小)。
 //    形の写し(段の形・段 0 の写しのアップロード)と読み戻しは含めない。
-// 引数: --spans <ファイル> [--measure] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
+// 引数: --spans <ファイル> [--measure] [--tile n(費用の系を n 個並べる)] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -251,7 +251,45 @@ namespace {
             cost.cyclesMs[0] * perCell, cost.cyclesMs[1] * perCell, (double)gpu.DeviceBytes() / 1.0e6);
     }
 
-    std::expected<void, std::string> Measure(Context& context, const std::vector<test::TimeStepSpanRecord>& records) {
+    // 系を tile 個並べる(離れた所に写す。費用がセルの数でどう伸びるかを見る。値は比べない)
+    test::TimeStepSpanRecord Tile(const test::TimeStepSpanRecord& record, uint32_t tile) {
+        constexpr int64_t APART = 1 << 20;  // 写しどうしは面でつながらず、粗い段でも混ざらない
+        test::TimeStepSpanRecord tiled = record;
+        sim::EquilibriumSystem& system = tiled.system;
+        const auto count = static_cast<uint32_t>(record.system.nodes.size());
+        for (uint32_t copy = 1; copy < tile; ++copy) {
+            const uint32_t offset = copy * count;
+            for (sim::EquilibriumNode node : record.system.nodes) {
+                node.z += APART * copy;
+                system.nodes.push_back(node);
+            }
+
+            for (sim::EquilibriumFace face : record.system.faces) {
+                face.fine += offset;
+                face.coarse += offset;
+                system.faces.push_back(face);
+            }
+
+            for (sim::EquilibriumFixedFace fixed : record.system.fixedFaces) {
+                fixed.node += offset;
+                system.fixedFaces.push_back(fixed);
+            }
+
+            for (sim::EquilibriumSource source : record.system.sources) {
+                source.node += offset;
+                system.sources.push_back(source);
+            }
+        }
+
+        return tiled;
+    }
+
+    std::expected<void, std::string> Measure(Context& context, const std::vector<test::TimeStepSpanRecord>& source,
+                                             uint32_t tile) {
+        std::vector<test::TimeStepSpanRecord> records;
+        for (const test::TimeStepSpanRecord& record : source)
+            records.push_back(tile > 1 ? Tile(record, tile) : record);
+
         // 暖機(GPU の時計が上がるまで。最初の系を 3 回)
         for (size_t round = 0; round < 3 + records.size(); ++round) {
             const size_t index = round < 3 ? 0 : round - 3;
@@ -290,6 +328,7 @@ namespace {
     int Run(std::span<char*> arguments) {
         std::string spansPath;
         bool measure = false;
+        uint32_t tile = 1;
         std::vector<char*> rest = {arguments[0]};
         for (size_t index = 1; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
@@ -297,6 +336,8 @@ namespace {
                 spansPath = arguments[++index];
             else if (argument == "--measure")
                 measure = true;
+            else if (argument == "--tile" && index + 1 < arguments.size())
+                tile = std::max<uint32_t>((uint32_t)std::stoul(arguments[++index]), 1);
             else
                 rest.push_back(arguments[index]);
         }
@@ -332,7 +373,7 @@ namespace {
         Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = frequency};
         auto ran = Compare(context, *records);
         if (ran && measure)
-            ran = Measure(context, *records);
+            ran = Measure(context, *records, tile);
 
         if (!ran) {
             Log(Channel::Gpu, Level::Error, "gpu_time_step_span_test: FAILED({})", ran.error());
