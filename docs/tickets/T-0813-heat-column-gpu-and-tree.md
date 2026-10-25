@@ -18,6 +18,11 @@ CPU の木(gas_tree.cpp)・GPU の木の段にも同じ式(gas_flow.hlsli の Gf
 - [ ] CPU の木・GPU の木も同じ(木は粗い風上が何度も引くので「出した熱」を taken と同じく小刻みをまたいで数える)
 - [ ] 縮めた面の数を GPU の段からも読み戻せる(帳簿の欄か数える欄)
 
+## メモ・参考(T-0691 の追記・2026-10-26)
+- 熱の列の出ていく和に**残る運動のエネルギーの超える分**も足す(gas_flow.hlsli の GfRestKineticExcess・GfKineticShare。CPU は gas_reference.cpp の RestKineticExcess)。
+  セルの段で「出ていく成分の和・運動量の和(GfMovedMomentum)・分け前の和」を集め、残る成分から残りの質量を出して GfKineticEnergy で残りの運動のエネルギーを出す。
+  これが無いと燃える木箱で列が効いても熱が負になる(T-0691 の根)。
+
 ## メモ・参考(T-0787 の作業役の見立て)
 - 今の GPU の箱の段: 段 7(セル: 出ていく成分の和 OutgoingAddress)→ 段 8 GasFaceFinal(面: 成分を抑え、塊のエネルギーと運動量・帳簿)→ 段 9 GasTransfer。
   熱の列は「抑えた後の成分で塊のエネルギーを出す」→「セルで熱のぶんの和と倍率」→「面で割合と成分を縮めてエネルギーと運動量・帳簿」の 3 段が要る:
