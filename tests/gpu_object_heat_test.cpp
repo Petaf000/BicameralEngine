@@ -3,11 +3,13 @@
 // 式は shaders/common/object_heat.hlsli、段は shaders/sim/object_heat.hlsl、CPU は tests/object_heat_cpu.h。
 // 物は 3 種(箱 7.8 mm = レベル 6): A4 の紙(27 × 1 × 38・厚さ 0.1 mm を箱に薄めて両面が外)・小枝(2 × 2 × 38・Ø 1 cm の木を箱に薄めて)・
 // 薪(10 × 10 × 51・Ø 8 cm × 40 cm を四角の箱で)。木は試験の表の cellulose を薄めた量。外に面するボクセルを 900 K から始める(燃えている物)。
-//   既定: 紙 2・小枝 3(同じセル)・薪 1(別のセル)を 60 刻み、20 刻みごとにボクセル・セル・対の端数・待ち・ブロックの状態を読み戻して CPU と比べる。
+//   既定: 紙 2・小枝 3(同じセル)・薪 1 と小刻み 4 回の小枝 1(別のセル)を 60 刻み、20 刻みごとにボクセル・セル・対の端数・待ち・ブロックの状態を
+//         読み戻して CPU と比べる(GPU は起きている物の一覧の形と、全部を Dispatch して眠っているブロックを抜ける形の 2 つ。T-1077)。
 //         CPU の側で、眠らせた世界と全部回す世界が毎刻み同じこと(T-1098)と、エネルギーの保存(セル × 8^6 + ボクセル + 対の端数 − 入った光)も確かめる。
 //   --profile: 薪 100 本・焚き火を 600 刻み回し、60 刻みごとに段ごとの GPU の ms と起きているブロックの数を出す
-//   --measure(--measure-only は CPU と比べずに測るだけ): 薪 100 本・焚き火・紙 / 小枝 / 薪 1000 個(10 個ずつ同じセル)を、全部回す / 眠らせる で、
-//         暖機 4 刻みと 300 刻みの後の 1 刻みの GPU の時間(段ごとのタイムスタンプの和)を測る。
+//   --measure(--measure-only は CPU と比べずに測るだけ): 薪 100 本・焚き火・紙 / 小枝 / 薪 1000 個(10 個ずつ同じセル)を、全部回す / 眠らせる /
+//         起きている物の一覧 で、暖機 4 刻みと 300 刻みの後の 1 刻みの GPU の時間(段ごとのタイムスタンプの和)を測る。
+//         眠っている小枝 10,000 本 + 燃える小枝 10・100・1000 本は、眠らせる / 一覧 で 300 刻みの後(T-1077)。
 // 引数は gpu_test_options.h と --measure。
 #include <cstring>
 
@@ -90,7 +92,7 @@ namespace {
 
     // 物を 1 つ足す(セルの順に足すこと)。外に面するボクセルは燃えている温度から
     void AddObject(const sim::BakedReactionTable& table, test::OhWorld& world, Kind kind, uint32_t cell, bool spot,
-                   bool burning = true) {
+                   bool burning = true, uint32_t substeps = 1) {
         const KindShape shape = ShapeOf(kind);
         const auto objectIndex = static_cast<uint32_t>(world.objects.size());
         const auto begin = static_cast<uint32_t>(world.voxels.size());
@@ -101,7 +103,7 @@ namespace {
                                  .cell = cell,
                                  .bodyLevel = BODY_LEVEL,
                                  .cellLevel = 0,
-                                 .substeps = 1,
+                                 .substeps = substeps,
                                  .filmUm = FILM_UM});
         world.carries.push_back(rx::OhZeroFlow());
         const std::vector<sim::SpeciesAmount> amounts = {
@@ -181,7 +183,8 @@ namespace {
         const test::OhTables& tables;
     };
 
-    // 比べる場面: 紙 2・小枝 3(同じセル)・薪 1(別のセル)。最初の物は光を吸う
+    // 比べる場面: 紙 2・小枝 3(同じセル)・薪 1・小刻み 4 回の小枝 1(別のセル)。最初の物は光を吸う。
+    // 小刻み 4 回の小枝は、ほかの物が小刻みを飛ばす段(一覧に入れても受け渡しを回さない)を作るため(形は同じ箱で、対の面を細かい時間で回すだけ)
     test::OhWorld CompareScene(const sim::BakedReactionTable& table, bool sleeping) {
         test::OhWorld world;
         AddAirCells(table, world, 2);
@@ -191,6 +194,7 @@ namespace {
         AddObject(table, world, Kind::Twig, 0, false);
         AddObject(table, world, Kind::Twig, 0, false);
         AddObject(table, world, Kind::Log, 1, true);
+        AddObject(table, world, Kind::Twig, 1, false, true, 4);
         Finish(world, sleeping);
 
         return world;
@@ -203,16 +207,21 @@ namespace {
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         auto pipelines = CreatePipelines(context.device);
-        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED);
-        if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
+        auto listed = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED, true);
+        auto blocks = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED, false);
+        if (!queue || !debugRing || !pipelines || !listed || !blocks || !UploadWorld(*queue, *listed) ||
+            !UploadWorld(*queue, *blocks))
             return std::unexpected("GPU の準備に失敗");
 
+        const std::array<const GpuWorld*, 2> gpuWorlds = {&*listed, &*blocks};
         const test::OhCpuTable cpuTable{.view = context.table.View(), .objectSpecies = context.tables.species};
         const int64_t initialEnergy = TotalEnergy(world);
         for (uint32_t tick = 1; tick <= COMPARE_TICKS; tick += COMPARE_EVERY) {
-            const auto ran = RunTicks(*queue, *pipelines, *gpuWorld, *debugRing, tick, COMPARE_EVERY, true, false);
-            if (!ran)
-                return std::unexpected(ran.error());
+            for (const GpuWorld* gpuWorld : gpuWorlds) {
+                const auto ran = RunTicks(*queue, *pipelines, *gpuWorld, *debugRing, tick, COMPARE_EVERY, true, false);
+                if (!ran)
+                    return std::unexpected(ran.error());
+            }
 
             for (uint32_t t = tick; t < tick + COMPARE_EVERY; ++t) {
                 test::StepObjectHeat(cpuTable, context.tables.gases, world, true, WORLD_SEED, t);
@@ -224,9 +233,13 @@ namespace {
                     return std::unexpected(std::format("眠らせると結果が変わった(刻み {})", t));
             }
 
-            const auto different = CompareWorld(context.device, *queue, *gpuWorld, world);
-            if (!different || *different != 0)
-                return std::unexpected(std::format("刻み {} で GPU と CPU が食い違った", tick + COMPARE_EVERY - 1));
+            for (const GpuWorld* gpuWorld : gpuWorlds) {
+                const auto different = CompareWorld(context.device, *queue, *gpuWorld, world);
+                if (!different || *different != 0)
+                    return std::unexpected(std::format("刻み {} で GPU({})と CPU が食い違った",
+                                                       tick + COMPARE_EVERY - 1,
+                                                       gpuWorld == gpuWorlds[0] ? "一覧" : "全部を Dispatch"));
+            }
         }
 
         uint64_t digest = 0;
@@ -237,7 +250,7 @@ namespace {
             digest = fx::FxHashCombine(digest, sim::HashReactionCell(cell));
 
         Log(Channel::Gpu, Level::Info,
-            "ボクセル {}・ブロック {}・物 {}・セル {}・{} 刻み: GPU と CPU "
+            "ボクセル {}・ブロック {}・物 {}・セル {}・{} 刻み: GPU(一覧・全部を Dispatch)と CPU "
             "がビット一致・眠らせても同じ・エネルギーの保存 0"
             "(回したブロック 受け渡し {} / {}・反応 {} / {})",
             world.voxels.size(), world.blocks.size(), world.objects.size(), world.cells.size(), COMPARE_TICKS,
@@ -253,6 +266,14 @@ namespace {
         std::vector<std::pair<Kind, uint32_t>> parts;  // 物の種類と数(10 個ずつ同じセル)
         uint32_t burning = UINT32_MAX;                 // 初めの何個が燃えているか(残りは冷えた物)
     };
+
+    // 測る形(全部回す・眠らせる〔全部を Dispatch〕・起きている物の一覧)
+    const char* ModeName(uint32_t mode) {
+        if (mode == rx::OH_SLEEP_ALL)
+            return "全部回す";
+
+        return mode == rx::OH_SLEEP_BLOCKS ? "眠らせる" : "一覧";
+    }
 
     test::OhWorld BuildScene(const sim::BakedReactionTable& table, const Scene& scene, bool sleeping) {
         test::OhWorld world;
@@ -273,13 +294,14 @@ namespace {
     }
 
     // 暖機 warm 刻みの後、1 刻みずつ 8 回測る(最小・中央)。起きているブロックの数(最後の段)も
-    std::expected<void, std::string> MeasureOne(const Context& context, const Scene& scene, bool sleeping,
+    std::expected<void, std::string> MeasureOne(const Context& context, const Scene& scene, uint32_t mode,
                                                 uint32_t warm) {
-        const test::OhWorld world = BuildScene(context.table, scene, sleeping);
+        const test::OhWorld world = BuildScene(context.table, scene, mode != rx::OH_SLEEP_ALL);
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         auto pipelines = CreatePipelines(context.device);
-        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED);
+        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED,
+                                       mode == rx::OH_SLEEP_LISTED);
         if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
             return std::unexpected("GPU の準備に失敗");
 
@@ -316,8 +338,8 @@ namespace {
             "費用: {}(ボクセル {}・ブロック {}・{}・{} 刻み目から): 1 刻み 最小 {:.3f} ms・中央 {:.3f} ms・最大 {:.3f} "
             "ms・"
             "起きているブロック {}・GPU の失敗 {}",
-            scene.name, world.voxels.size(), world.blocks.size(), sleeping ? "眠らせる" : "全部回す", tick - 8,
-            times.front(), times[times.size() / 2], times.back(), awake, (*failures)[0]);
+            scene.name, world.voxels.size(), world.blocks.size(), ModeName(mode), tick - 8, times.front(),
+            times[times.size() / 2], times.back(), awake, (*failures)[0]);
 
         return {};
     }
@@ -423,12 +445,24 @@ namespace {
                 Scene{"紙の山 1000 枚(燃えているのは 100 枚)", {{Kind::Paper, 1000}}, 100},
                 Scene{"薪の山 1000 本(燃えているのは 10 本)", {{Kind::Log, 1000}}, 10}};
             for (const Scene& scene : scenes) {
-                for (const bool sleeping : {false, true}) {
+                for (const uint32_t mode : {rx::OH_SLEEP_ALL, rx::OH_SLEEP_BLOCKS, rx::OH_SLEEP_LISTED}) {
                     for (const uint32_t warm : {4u, 300u}) {
-                        if (auto measured = MeasureOne(context, scene, sleeping, warm); !measured) {
+                        if (auto measured = MeasureOne(context, scene, mode, warm); !measured) {
                             Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(計測: {})", measured.error());
                             return 1;
                         }
+                    }
+                }
+            }
+
+            // --- 眠っている物 10,000 個(冷えた小枝)の中で、燃える小枝 10・100・1000 本(T-1077)---
+            for (const uint32_t burning : {10u, 100u, 1000u}) {
+                const std::string name = std::format("眠っている小枝 10000 本 + 燃える小枝 {} 本", burning);
+                const Scene scene{name.c_str(), {{Kind::Twig, 10000 + burning}}, burning};
+                for (const uint32_t mode : {rx::OH_SLEEP_BLOCKS, rx::OH_SLEEP_LISTED}) {
+                    if (auto measured = MeasureOne(context, scene, mode, 300); !measured) {
+                        Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(計測: {})", measured.error());
+                        return 1;
                     }
                 }
             }

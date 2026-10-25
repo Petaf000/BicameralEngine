@@ -1,7 +1,9 @@
 // object_heat_nest_test.cpp — 物の熱(tests/object_heat_cpu.h)を多重解像度の世界(MultiresNest)のセルにつなぐ最初の形の CPU の試験(T-1077・ADR-0451・ADR-0459)。
 // 1 刻み = 世界の刻み(StepNest)→ 囲むセルを世界から読む(LoadNestCell。変わったセルは物のブロックを起こす)→ 物の熱の刻み(StepObjectHeat)
-//   → 変わったセルを世界へ書く(ExpandNestPage・StoreNestCell・PokeNestBlock。液体の 1 段〔T-0717〕と同じ「刻みの段の外から書く」口)。
+//   → 変わったセルの一様のブロックを枠の順に頁に広げ(ExpandChangedBlocks)、書く(StoreNestCell・PokeNestBlock。液体の 1 段〔T-0717〕と同じ
+//   「刻みの段の外から書く」口)。
 // 場面: 4 m 角の箱(下 1 m が石、上は空気)の真ん中の空気のセルに燃えている小枝 3 本と紙 1 枚、+x の隣のセルに冷えた薪 1 本。
+//   一様の空気の場面: 8 m 角の箱の上の根(石に触れない一様の空気。頁なし)に同じ物を置き、物の熱が初めて書く時に頁に広げる(T-1077 ①)。
 // 確かめる:
 //   1. 保存(帳簿の上で): 物との受け渡しを世界の帳簿の理由「物との受け渡し」(WL_REASON_OBJECT_EXCHANGE)に載せ、
 //      世界だけ(ComputeConservedTotals = セル − 帳簿)と、物(ボクセル + 対の端数)+ 帳簿のその理由の入 − 出 が、エネルギーと元素で毎 60 刻み一定
@@ -51,6 +53,7 @@ namespace {
         uint64_t fuelEnd = 0;
         uint64_t logAwakeBlocks = 0;  // 後半 300 刻みで冷えた薪の回したブロック(段の和)
         size_t logBlocks = 0;
+        uint32_t expanded = 0;  // 頁に広げたブロック(世界の数え)
     };
 
     uint64_t FuelCarbon(const sim::BakedReactionTable& table, const test::OhWorld& world, uint32_t objects) {
@@ -108,8 +111,9 @@ namespace {
         return totals;
     }
 
-    Run RunScene(const sim::BakedReactionTable& table, const test::OhTables& tables, int32_t level) {
-        NestScene scene = MakeNestScene(table, level);
+    Run RunScene(const sim::BakedReactionTable& table, const test::OhTables& tables, int32_t level,
+                 bool uniformAir = false) {
+        NestScene scene = MakeNestScene(table, level, uniformAir);
         sim::MultiresNest& nest = scene.nest;
         test::OhWorld& world = scene.world;
 
@@ -119,6 +123,7 @@ namespace {
         run.fuelStart = FuelCarbon(table, world, 4);
         const sim::ConservedTotals worldInitial = sim::ComputeConservedTotals(nest, table, BODY_LEVEL);
         const std::vector<int64_t> objectInitial = ObjectColumns(table, tables, world, nest, level);
+        const uint32_t expandedBefore = nest.counters[mr::MR_COUNTER_EXPANDED];
         uint64_t logAwakeAtHalf = 0;
         for (uint32_t tick = 1; tick <= TICKS; ++tick) {
             run.stored = run.stored && StepNestScene(table, tables, scene, tick);
@@ -145,6 +150,7 @@ namespace {
         run.fuelEnd = FuelCarbon(table, world, 4);
         run.logBlocks = world.objects[4].blocksX * world.objects[4].blocksY * world.objects[4].blocksZ;
         run.logAwakeBlocks = world.awakeExchangeBlocks - logAwakeAtHalf;
+        run.expanded = nest.counters[mr::MR_COUNTER_EXPANDED] - expandedBefore;
         for (const rx::RxCell& voxel : world.voxels)
             run.digest = fx::FxHashCombine(run.digest, sim::HashReactionCell(voxel));
 
@@ -157,13 +163,13 @@ namespace {
     void Print(const char* label, const Run& run) {
         std::printf(
             "%s: 燃える物の囲むセル %.3f K → %.3f K・冷えた薪の囲むセル %.3f K・燃える固体の残り %.1f %%・"
-            "後半 %u 刻みで回したブロック(全部の物)%llu・保存(帳簿の上で)世界 %s・物 + 帳簿 %s・書き込み %s・要約 "
-            "%016llx\n",
+            "後半 %u 刻みで回したブロック(全部の物)%llu・頁に広げた %u・保存(帳簿の上で)世界 %s・物 + 帳簿 %s・"
+            "書き込み %s・要約 %016llx\n",
             label, run.fireAirStartMilliKelvin / 1000.0, run.fireAirEndMilliKelvin / 1000.0,
             run.logAirEndMilliKelvin / 1000.0,
             100.0 * static_cast<double>(run.fuelEnd) / static_cast<double>(std::max<uint64_t>(run.fuelStart, 1)),
-            TICKS / 2, static_cast<unsigned long long>(run.logAwakeBlocks), run.ledgerWorld ? "0" : "崩れた",
-            run.ledgerObjects ? "0" : "崩れた", run.stored ? "OK" : "失敗",
+            TICKS / 2, static_cast<unsigned long long>(run.logAwakeBlocks), run.expanded,
+            run.ledgerWorld ? "0" : "崩れた", run.ledgerObjects ? "0" : "崩れた", run.stored ? "OK" : "失敗",
             static_cast<unsigned long long>(run.digest));
     }
 
@@ -183,6 +189,15 @@ int main() {
     Print("0.25 m の世界", fine);
     EXPECT(coarse.ledgerWorld && fine.ledgerWorld && coarse.ledgerObjects && fine.ledgerObjects);
     EXPECT(coarse.stored && fine.stored);
+
+    // --- 一様の空気の根(頁に広げてから書く。T-1077 ①)---
+    for (const int32_t level : {0, 1}) {
+        const Run uniform = RunScene(table, *tables, level, true);
+        Print(level == 0 ? "0.5 m の世界(一様の空気の根)" : "0.25 m の世界(一様の空気の根)", uniform);
+        EXPECT(uniform.ledgerWorld && uniform.ledgerObjects && uniform.stored);
+        EXPECT(uniform.expanded >= 1);
+        EXPECT(uniform.fireAirEndMilliKelvin > uniform.fireAirStartMilliKelvin);
+    }
     EXPECT(coarse.digest == again.digest);
     EXPECT(coarse.fireAirEndMilliKelvin > coarse.fireAirStartMilliKelvin);
     EXPECT(coarse.fuelEnd < coarse.fuelStart);

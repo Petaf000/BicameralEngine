@@ -1,10 +1,12 @@
 // gpu_object_heat_nest_test.cpp — 物の熱の GPU の段を多重解像度の世界(GpuMultires)のセルにつないだ形を、CPU リファレンスとビット一致で確かめる
 // (T-1077・ADR-0451・ADR-0360)。CPU は tests/object_heat_nest_scene.h(object_heat_nest と同じ場面と口)。
 // 1 刻み(GPU)= 世界の刻み(RecordStep。伝導つき)→ 囲むセルを写す(shaders/sim/object_heat_nest.hlsl の OhNestGather)
-//   → 物の熱の段(shaders/sim/object_heat.hlsl。gpu_object_heat_stages.h の RecordTick)→ 変わったセルを書き戻す(OhNestScatter。帳簿とつつき)。
-// 確かめる: 0.5 m と 0.25 m の世界で、30 刻みごとに 世界のセル(全部)・世界の帳簿・物のボクセル・囲むセル・対の端数・待ち・ブロックの状態が CPU とビット一致、
-//   一様のブロックへ書けなかった数が 0。
-//   --measure: 0.5 m の世界を 300 刻み回した後の 1 刻みの GPU の時間(世界の刻み・写す・物の熱・書き戻す)を出す。
+//   → 物の熱の段(shaders/sim/object_heat.hlsl。gpu_object_heat_stages.h の RecordTick。起きている物の一覧の形)
+//   → 変わったセルの一様のブロックを頁に広げる(OhNestMarkExpand → TreeExpand → OhNestFill)→ 変わったセルを書き戻す(OhNestScatter。帳簿とつつき)。
+// 確かめる: 0.5 m と 0.25 m の世界、物の囲むセルが頁を持つ根にある場面と一様の空気の根にある場面(頁に広げる。T-1077 ①)で、
+//   30 刻みごとに 世界のセル(全部)・世界の帳簿・頁に広げた数と空きの頁の数・物のボクセル・囲むセル・対の端数・待ち・ブロックの状態が CPU とビット一致、
+//   一様のブロックへ書けなかった数が 0。一様の空気の場面は頁に広げた数が 1 以上。
+//   --measure: 0.5 m の世界を 300 刻み回した後の 1 刻みの GPU の時間(世界の刻み・写す・物の熱・広げて書き戻す)を出す。
 // 引数は gpu_test_options.h と --measure。
 #include <array>
 #include <cstring>
@@ -28,7 +30,7 @@ namespace {
     constexpr uint32_t COMPARE_EVERY = 30;
     constexpr uint32_t MEASURE_WARM_TICKS = 300;
     constexpr uint32_t NEST_THREADS = 64;  // object_heat_nest.hlsl の NEST_GROUP_THREADS
-    constexpr uint32_t STAMP_COUNT = 5;    // 刻みの初め・世界の刻み・写す・物の熱・書き戻すの後
+    constexpr uint32_t STAMP_COUNT = 5;    // 刻みの初め・世界の刻み・写す・物の熱・広げて書き戻すの後
 
     struct Context {
         ID3D12Device5* device;
@@ -43,6 +45,8 @@ namespace {
         GpuWorld objects;
         Pipelines stages;
         ComPtr<ID3D12PipelineState> gather;
+        ComPtr<ID3D12PipelineState> markExpand;
+        ComPtr<ID3D12PipelineState> fill;
         ComPtr<ID3D12PipelineState> scatter;
         uint32_t cellCount = 0;
     };
@@ -75,18 +79,25 @@ namespace {
         auto objects = CreateGpuWorld(context.device, context.table, context.tables, WithNestTails(scene), WORLD_SEED);
         const auto gatherShader = gpu::LoadShader("sim/object_heat_nest_gather.cso");
         const auto scatterShader = gpu::LoadShader("sim/object_heat_nest_scatter.cso");
-        if (!stages || !objects || !gatherShader || !scatterShader)
+        const auto markShader = gpu::LoadShader("sim/object_heat_nest_mark_expand.cso");
+        const auto fillShader = gpu::LoadShader("sim/object_heat_nest_fill.cso");
+        if (!stages || !objects || !gatherShader || !scatterShader || !markShader || !fillShader)
             return std::unexpected("物の熱の段か口を作れない");
 
         GpuNestScene result{.nest = std::move(*nest),
                             .objects = std::move(*objects),
                             .stages = std::move(*stages),
                             .gather = nullptr,
+                            .markExpand = nullptr,
+                            .fill = nullptr,
                             .scatter = nullptr,
                             .cellCount = static_cast<uint32_t>(scene.refs.size())};
         result.gather = gpu::CreateComputePipeline(context.device, result.nest.RootSignature(), *gatherShader);
         result.scatter = gpu::CreateComputePipeline(context.device, result.nest.RootSignature(), *scatterShader);
-        if (!result.gather || !result.scatter || !UploadWorld(queue, result.objects))
+        result.markExpand = gpu::CreateComputePipeline(context.device, result.nest.RootSignature(), *markShader);
+        result.fill = gpu::CreateComputePipeline(context.device, result.nest.RootSignature(), *fillShader);
+        if (!result.gather || !result.scatter || !result.markExpand || !result.fill ||
+            !UploadWorld(queue, result.objects))
             return std::unexpected("口のパイプラインか物の世界を作れない");
 
         ID3D12GraphicsCommandList10* list = queue.Begin();
@@ -123,8 +134,14 @@ namespace {
         if (stamps)
             gpuScene.nest.RecordTimestamp(list, 3);
 
+        // --- 変わったセルの一様のブロックを頁に広げる(印 → 枠の順に頁を配る → 一様の値で埋める。CPU の ExpandChangedBlocks)---
+        const std::array<uint32_t, 4> cells = {gpuScene.cellCount, 0, 0, 0};
+        gpuScene.nest.RecordExternalDispatch(list, ring, gpuScene.markExpand.Get(), groups, cells);
+        gpuScene.nest.RecordExpandPass(list, ring);
+        gpuScene.nest.RecordExternalDispatch(list, ring, gpuScene.fill.Get(), gpuScene.cellCount, cells);
+
         // --- 変わったセルを世界へ書き戻す(帳簿・つつく)---
-        gpuScene.nest.RecordExternalDispatch(list, ring, gpuScene.scatter.Get(), groups, {gpuScene.cellCount, 0, 0, 0});
+        gpuScene.nest.RecordExternalDispatch(list, ring, gpuScene.scatter.Get(), groups, cells);
         if (stamps)
             gpuScene.nest.RecordTimestamp(list, 4);
     }
@@ -170,6 +187,16 @@ namespace {
             ++different;
         }
 
+        for (const uint32_t counter :
+             {multires::MR_COUNTER_EXPANDED, multires::MR_COUNTER_FREE_PAGES, multires::MR_COUNTER_PAGE_SHORTAGE}) {
+            if (read.counters[counter] == cpu.nest.counters[counter])
+                continue;
+
+            Log(Channel::Gpu, Level::Error, "世界の数え {} が食い違った: cpu {} / gpu {}", counter,
+                cpu.nest.counters[counter], read.counters[counter]);
+            ++different;
+        }
+
         const auto objects = CompareWorld(context.device, queue, gpuScene.objects, cpu.world);
         const auto words = ReadUav<uint32_t>(context.device, queue, gpuScene.objects.uavs[UavCellChanged].Get(),
                                              (3 * gpuScene.cellCount) + 1);
@@ -183,8 +210,9 @@ namespace {
         return different + *objects + unstored;
     }
 
-    std::expected<uint64_t, std::string> RunCompare(const Context& context, int32_t level) {
-        NestScene cpu = MakeNestScene(context.table, level);
+    std::expected<uint64_t, std::string> RunCompare(const Context& context, int32_t level, bool uniformAir) {
+        NestScene cpu = MakeNestScene(context.table, level, uniformAir);
+        const uint32_t expandedBefore = cpu.nest.counters[multires::MR_COUNTER_EXPANDED];
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         if (!queue || !debugRing)
@@ -218,10 +246,15 @@ namespace {
         for (const rx::RxCell& cell : sim::DenseCellImage(cpu.nest))
             digest = fx::FxHashCombine(digest, sim::HashReactionCell(cell));
 
+        const uint32_t expanded = cpu.nest.counters[multires::MR_COUNTER_EXPANDED] - expandedBefore;
+        if (uniformAir && expanded == 0)
+            return std::unexpected("一様の空気の根を頁に広げなかった");
+
         Log(Channel::Gpu, Level::Info,
-            "レベル {} の世界: {} 刻み、世界のセル・帳簿・物の熱が GPU と CPU でビット一致(回したブロック 受け渡し "
-            "{}・反応 {})",
-            level, COMPARE_TICKS, cpu.world.awakeExchangeBlocks, cpu.world.awakeReactBlocks);
+            "レベル {} の世界({}): {} 刻み、世界のセル・帳簿・物の熱が GPU と CPU でビット一致(頁に広げた {}・"
+            "回したブロック 受け渡し {}・反応 {})",
+            level, uniformAir ? "一様の空気の根" : "頁を持つ根", COMPARE_TICKS, expanded, cpu.world.awakeExchangeBlocks,
+            cpu.world.awakeReactBlocks);
 
         return digest;
     }
@@ -262,7 +295,7 @@ namespace {
         Log(Channel::Gpu, Level::Info,
             "計測(0.5 m の世界・物 5 つ・囲むセル 2・{} 刻みの後の 1 刻みの {} 回の平均): 世界の刻み {:.3f} ms・写す "
             "{:.3f} ms・"
-            "物の熱 {:.3f} ms・書き戻す {:.3f} ms",
+            "物の熱 {:.3f} ms・広げて書き戻す {:.3f} ms",
             MEASURE_WARM_TICKS, REPEATS, sums[0] / REPEATS, sums[1] / REPEATS, sums[2] / REPEATS, sums[3] / REPEATS);
 
         return {};
@@ -296,14 +329,17 @@ namespace {
         const Context context{
             .device = device->Get(), .queueType = options->queueType, .table = table, .tables = *tables};
         uint64_t digest = 0;
-        for (const int32_t level : {0, 1}) {
-            const auto ran = RunCompare(context, level);
-            if (!ran) {
-                Log(Channel::Gpu, Level::Error, "gpu_object_heat_nest_test: FAILED(レベル {}: {})", level, ran.error());
-                return 1;
-            }
+        for (const bool uniformAir : {false, true}) {
+            for (const int32_t level : {0, 1}) {
+                const auto ran = RunCompare(context, level, uniformAir);
+                if (!ran) {
+                    Log(Channel::Gpu, Level::Error, "gpu_object_heat_nest_test: FAILED(レベル {}・{}: {})", level,
+                        uniformAir ? "一様の空気" : "頁", ran.error());
+                    return 1;
+                }
 
-            digest = fx::FxHashCombine(digest, *ran);
+                digest = fx::FxHashCombine(digest, *ran);
+            }
         }
 
         if (measure) {

@@ -1,6 +1,7 @@
 // object_heat_nest_scene.h — 物の熱を多重解像度の世界のセルにつなぐ場面と CPU の口(T-1077。object_heat_nest_test.cpp から分けた)。
 // 1 刻み = 世界の刻み(StepNest)→ 囲むセルを世界から読む(LoadNestCell。変わったセルは物のブロックを起こす)→ 物の熱の刻み(StepObjectHeat)
-//   → 変わったセルを世界へ書く(ExpandNestPage・StoreNestCell・PokeNestBlock)と、その差を世界の帳簿の理由「物との受け渡し」に載せる。
+//   → 変わったセルの一様のブロックに印を付けて枠の順に頁に広げる(nest_detail::ExpandWantedPages を 1 回。GPU の TreeExpand と同じ順)
+//   → 変わったセルを世界へ書く(StoreNestCell・PokeNestBlock)と、その差を世界の帳簿の理由「物との受け渡し」に載せる。
 // 使うのは tests/object_heat_nest_test.cpp(CPU の保存と決定性)と tests/gpu_object_heat_nest_test.cpp(GPU の口とのビット一致)。
 #pragma once
 
@@ -11,6 +12,7 @@
 
 #include "common/world_ledger.hlsli"
 #include "object_heat_cpu.h"
+#include "sim/multires_nest_internal.h"
 #include "sun_column_scene.h"
 
 namespace bicameral::test::object_heat_nest {
@@ -101,7 +103,7 @@ namespace bicameral::test::object_heat_nest {
         uint32_t index;
     };
 
-    // 0.25 m の座標(x, y, z)を含むレベル level のセル(根の枠だけの世界。枠は z・y・x の順に置いた)
+    // 0.25 m の座標(x, y, z)を含むレベル level のセル(根の枠だけの世界。根は各軸 roots 個で、枠は z・y・x の順に置いた)
     inline NestCellRef CellAt(int32_t level, uint32_t roots, uint32_t quarterX, uint32_t quarterY, uint32_t quarterZ) {
         const auto shift = static_cast<uint32_t>(1 - level);
         const uint32_t x = quarterX >> shift;
@@ -144,17 +146,36 @@ namespace bicameral::test::object_heat_nest {
         }
     }
 
-    // 物の熱で変わったセルを世界へ書き、帳簿に載せ、ブロックをつつく(次の刻みに反応と伝導が見る)
+    // 変わったセルの一様のブロックに印を付け、枠の順に頁に広げる(GPU の OhNestMarkExpand → TreeExpand → OhNestFill と同じ頁の番号。
+    // 囲むセルの順に 1 つずつ広げると、頁の番号の順が GPU と食い違う)。頁が足りなければ一様のまま残る(数えて種にする)
+    inline void ExpandChangedBlocks(sim::MultiresNest& nest, std::span<const NestCellRef> refs, const OhWorld& world,
+                                    std::span<const rx::RxCell> before) {
+        for (size_t c = 0; c < refs.size(); ++c) {
+            mr::MrBlock& block = nest.blocks[refs[c].slot];
+            if (!rx::RxSameCell(world.cells[c], before[c]) && block.page == mr::MR_NO_PAGE)
+                block.page = mr::MR_PAGE_WANTED;
+        }
+
+        [[maybe_unused]] const std::vector<uint32_t> expanded = sim::nest_detail::ExpandWantedPages(nest);
+    }
+
+    // 物の熱で変わったセルを世界へ書き、帳簿に載せ、ブロックをつつく(次の刻みに反応と伝導が見る)。
+    // 頁が足りずに一様のまま残ったブロックへは書かない(false を返す)
     inline bool StoreCells(sim::MultiresNest& nest, std::span<const NestCellRef> refs, const OhWorld& world,
                            std::span<const rx::RxCell> before, int32_t level, uint32_t speciesCount) {
+        ExpandChangedBlocks(nest, refs, world, before);
+
         bool stored = true;
         for (size_t c = 0; c < refs.size(); ++c) {
             if (rx::RxSameCell(world.cells[c], before[c]))
                 continue;
 
-            LedgerCellChange(nest, level, before[c], world.cells[c], speciesCount);
+            if (mr::MrIsUniform(nest.blocks[refs[c].slot])) {
+                stored = false;
+                continue;
+            }
 
-            stored = stored && sim::ExpandNestPage(nest, refs[c].slot);
+            LedgerCellChange(nest, level, before[c], world.cells[c], speciesCount);
             sim::StoreNestCell(nest, refs[c].slot, refs[c].index, world.cells[c]);
             sim::PokeNestBlock(nest, refs[c].slot);
         }
@@ -163,6 +184,7 @@ namespace bicameral::test::object_heat_nest {
     }
 
     // --- 場面(0.5 m なら根 1 つ・0.25 m なら根 2 × 2 × 2 の 4 m 角の箱。下 1 m が石)---
+    // uniformAir: 根を各軸 2 倍(8 m 角)にして、物を石に触れない一様の空気の根(頁なし)に置く(物の熱が初めて書く時に頁に広げる。T-1077 ①)
 
     struct NestScene {
         sim::MultiresNest nest;
@@ -171,12 +193,13 @@ namespace bicameral::test::object_heat_nest {
         int32_t level = 0;
     };
 
-    inline NestScene MakeNestScene(const sim::BakedReactionTable& table, int32_t level) {
-        const uint32_t roots = level == 0 ? 1u : 2u;
+    inline NestScene MakeNestScene(const sim::BakedReactionTable& table, int32_t level, bool uniformAir = false) {
+        const uint32_t roots = (level == 0 ? 1u : 2u) * (uniformAir ? 2u : 1u);
+        const uint32_t quarterY = uniformAir ? 21u : 5u;  // 0.25 m の座標(5 = 地面のすぐ上・21 = 上の根の中)
         NestScene scene{.nest = MakeSunWorld(
                             table, level, roots, roots, roots,
                             [](int64_t, int64_t y, int64_t) { return y < 4 ? SunMaterial::Stone : SunMaterial::Air; }),
-                        .refs = {CellAt(level, roots, 8, 5, 8), CellAt(level, roots, 10, 5, 8)},
+                        .refs = {CellAt(level, roots, 8, quarterY, 8), CellAt(level, roots, 10, quarterY, 8)},
                         .world = {},
                         .level = level};
         for (const NestCellRef& ref : scene.refs)

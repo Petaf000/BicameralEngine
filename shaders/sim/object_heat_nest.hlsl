@@ -2,12 +2,16 @@
 // ルート署名は多重解像度のもの(multires_bindings.hlsli。sim/gpu_multires.cpp)に、外のバッファ u4・u5 を足して使う(覗き窓・実験室の箱と同じ口。T-0096)。
 // CPU リファレンスは tests/object_heat_nest_scene.h の LoadCells・StoreCells(試験 gpu_object_heat_nest がビット一致を確かめる)。
 //
-// データの流れ(1 刻み = 世界の刻み → 写す → 物の熱の段 → 書き戻す):
+// データの流れ(1 刻み = 世界の刻み → 写す → 物の熱の段 → 頁に広げる → 書き戻す):
 //   OhNestGather:  世界のセル(LoadCell。一様なら一様の値)→ 物の熱の囲むセル(u4 の前半)と写した時の値(u4 の後半)。
 //                  前の刻みの値と違えば、そのセルの「変わった段」(u5 の前半 = 物の熱の段の u9)を今の段にする(物のブロックを起こす)
+//   頁に広げる:     OhNestMarkExpand(変わったセルの一様のブロックに MR_PAGE_WANTED)→ TreeExpand(GpuMultires::RecordExpandPass。
+//                  枠の順に空きのスタックの上から頁を配る。刻みの中と同じ段)→ OhNestFill(配った頁を一様の値で埋める)。
+//                  CPU は印を全部付けてから nest_detail::ExpandWantedPages を 1 回(同じ枠の順・同じ頁の番号)
 //   OhNestScatter: 物の熱が変えたセル(写した時の値と違うセル)を世界の頁へ書き、差を帳簿の理由「物との受け渡し」に載せ、ブロックをつつく
 // 物の熱の段は囲むセルを平らな並びで持つ(写しは囲むセルの数だけ。費用は物の数ではなくセルの数)。
-// 頁を持たない(一様の)ブロックへは書けないので数える(u5 の最後の語)。一様のブロックを頁に広げるのは T-1077 の残り。
+// 頁が足りず一様のまま残ったブロックへは書けないので数える(u5 の最後の語。次の刻みにまた広げる。TreeExpand が種に足す)。
+// 溢れを使う世界(MR_WIDE_CELLS)と欄の頁(GPU の欄は C-1 の後)はまだ広げない(T-1077 の残り)。
 #include "sim/multires_bindings.hlsli"
 
 // u4 = RxCell [N](物の熱の段の u5 と同じバッファ)+ RxCell [N](写した時の値)
@@ -80,6 +84,36 @@ void LedgerCellChange(int32_t level, RxCell before, RxCell after) {
             continue;
 
         AddExchangeDelta(level, WL_COLUMN_SPECIES_BASE + before.species[j], -(int64_t)before.amounts[j]);
+    }
+}
+
+// --- 頁に広げる印: g_external0 = 囲むセルの数(同じブロックの印は同じ値を書くだけ)---
+[numthreads(NEST_GROUP_THREADS, 1, 1)] void OhNestMarkExpand(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t cell = dispatchThreadId.x;
+    if (cell >= CellCount())
+        return;
+
+    if (RxSameCell(g_objectCells[cell], g_objectCells[CellCount() + cell]))
+        return;
+
+    const uint32_t slot = RefSlot(cell);
+    if (g_blocks[slot].page == MR_NO_PAGE)
+        g_blocks[slot].page = MR_PAGE_WANTED;
+}
+
+    // --- 配った頁を一様の値で埋める(1 グループ = TreeExpand の一覧のレコード g + 1。グループの数は囲むセルの数 = 一覧の上限)---
+    [numthreads(NEST_GROUP_THREADS, 1, 1)] void OhNestFill(uint3 groupId : SV_GroupID,
+                                                           uint32_t thread : SV_GroupIndex) {
+    const uint32_t record = groupId.x + 1;
+    if (record >= ExpandRecordCount())
+        return;
+
+    const uint32_t slot = ExpandRecord(record);
+    const MrBlock block = g_blocks[slot];
+    const RxCell value = g_cells[slot];
+    for (uint32_t k = 0; k < MR_BLOCK_CELLS / NEST_GROUP_THREADS; ++k) {
+        const uint32_t index = thread + (NEST_GROUP_THREADS * k);
+        g_cells[PageCellAddress(block.page, index)] = MrUniformCell(block, value, index);
     }
 }
 

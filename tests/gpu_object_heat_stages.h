@@ -2,6 +2,7 @@
 // データの流れ: CPU の物の熱の世界(object_heat_cpu.h の OhWorld)→ CreateGpuWorld・UploadWorld で既定のヒープへ → RecordTick で 1 刻みの段を記録
 //   → ReadUav・CompareWorld で読み戻して CPU と比べる。使うのは tests/gpu_object_heat_test.cpp(平らなセル)と
 //   tests/gpu_object_heat_nest_test.cpp(多重解像度の世界のセル。T-1077)。
+// 眠らせ方は 3 つ(GpuWorld::sleepMode = OH_SLEEP_*)。既定は起きている物の一覧(ExecuteIndirect。T-1077)。
 #pragma once
 
 #include <algorithm>
@@ -32,9 +33,11 @@ namespace bicameral::test::object_heat_gpu {
     constexpr uint32_t SRV_COUNT = 11;
     constexpr uint32_t TIMESTAMP_COUNT = 7;  // 刻みの初め + 6 つの段の後
 
-    // u0〜u9 / b0 / デバッグのリング / t0〜t10(object_heat.hlsl)
+    // u0〜u12 / b0 / デバッグのリング / t0〜t10(object_heat.hlsl。13 × 2 + 13 + 2 + 11 × 2 = 63 語)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 10, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = SRV_COUNT};
+        .uavCount = 13, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = SRV_COUNT};
+    constexpr uint32_t LIST_ROW_THREADS = rx::OH_LIST_ROW_GROUPS * THREADS;
+    constexpr uint32_t DISPATCH_ARGS_BYTES = 3 * sizeof(uint32_t);
 
     enum Stage : uint8_t {
         StageWake,
@@ -46,9 +49,19 @@ namespace bicameral::test::object_heat_gpu {
         STAGE_COUNT,
     };
 
+    // 起きている物の一覧の段(T-1077。時間は前後の段に入れて数える: 一覧を作る段は起こす・反応に、反応の後の段は反応に)
+    enum ListStage : uint8_t {
+        ListObjects,
+        ListBlocks,
+        ListFinish,
+        LIST_STAGE_COUNT,
+    };
+
     struct Pipelines {
         ComPtr<ID3D12RootSignature> rootSignature;
         std::array<ComPtr<ID3D12PipelineState>, STAGE_COUNT> stages;
+        std::array<ComPtr<ID3D12PipelineState>, LIST_STAGE_COUNT> listStages;
+        ComPtr<ID3D12CommandSignature> dispatchSignature;  // ExecuteIndirect の Dispatch だけの引数
     };
 
     inline std::expected<Pipelines, std::string> CreatePipelines(ID3D12Device5* device) {
@@ -70,6 +83,26 @@ namespace bicameral::test::object_heat_gpu {
                 return std::unexpected(std::format("パイプラインを作れない: {}", names[i]));
         }
 
+        const std::array<const char*, LIST_STAGE_COUNT> listNames = {"sim/object_heat_list_objects.cso",
+                                                                     "sim/object_heat_list_blocks.cso",
+                                                                     "sim/object_heat_finish_objects.cso"};
+        for (size_t i = 0; i < listNames.size(); ++i) {
+            const auto bytecode = gpu::LoadShader(listNames[i]);
+            if (!bytecode)
+                return std::unexpected(bytecode.error());
+
+            result.listStages[i] = gpu::CreateComputePipeline(device, result.rootSignature.Get(), *bytecode);
+            if (!result.listStages[i])
+                return std::unexpected(std::format("パイプラインを作れない: {}", listNames[i]));
+        }
+
+        // --- 間接の Dispatch(引数は OhListObjects が書く。ルート定数は変えないので署名は要らない)---
+        const D3D12_INDIRECT_ARGUMENT_DESC argument{.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH};
+        const D3D12_COMMAND_SIGNATURE_DESC signature{
+            .ByteStride = DISPATCH_ARGS_BYTES, .NumArgumentDescs = 1, .pArgumentDescs = &argument, .NodeMask = 0};
+        if (FAILED(device->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&result.dispatchSignature))))
+            return std::unexpected("間接の Dispatch の署名を作れない");
+
         return result;
     }
 
@@ -85,6 +118,9 @@ namespace bicameral::test::object_heat_gpu {
         UavBlockStates,
         UavWaits,
         UavCellChanged,
+        UavObjectStates,
+        UavLists,
+        UavDispatchArgs,
         UAV_COUNT,
     };
 
@@ -99,7 +135,7 @@ namespace bicameral::test::object_heat_gpu {
         uint32_t rangeCount = 0;
         uint32_t blockCount = 0;
         uint32_t passesPerTick = 2;  // 小刻みの段 + 反応の段(CPU の world.pass と同じ数え方)
-        bool sleeping = true;
+        uint32_t sleepMode = rx::OH_SLEEP_LISTED;
         uint64_t worldSeed = 0;  // 世界の種(反応の乱数)
     };
 
@@ -108,28 +144,43 @@ namespace bicameral::test::object_heat_gpu {
         return std::as_bytes(std::span(values));
     }
 
+    // 物ごとの一覧の印の初めの値(どの物も最初の段で一覧に入る: busyPass = lastListed = 0・起こす刻み 0)
+    inline std::vector<rx::OhObjectState> MakeObjectStates(const test::OhWorld& world) {
+        std::vector<rx::OhObjectState> states(world.objects.size(), rx::OhObjectState{});
+        for (size_t b = 0; b < world.blocks.size(); ++b)
+            states[world.blocks[b].object].flags |= world.blockStates[b].flags;
+
+        return states;
+    }
+
+    // world.sleeping なら、listed で起きている物の一覧(既定)か、全部を Dispatch して眠っているブロックを抜けるか
     inline std::expected<GpuWorld, std::string> CreateGpuWorld(ID3D12Device5* device,
                                                                const sim::BakedReactionTable& table,
                                                                const test::OhTables& tables, const test::OhWorld& world,
-                                                               uint64_t worldSeed) {
+                                                               uint64_t worldSeed, bool listed = true) {
         GpuWorld result;
         result.voxelCount = static_cast<uint32_t>(world.voxels.size());
         result.objectCount = static_cast<uint32_t>(world.objects.size());
         result.rangeCount = static_cast<uint32_t>(world.ranges.size());
         result.blockCount = static_cast<uint32_t>(world.blocks.size());
-        result.sleeping = world.sleeping;
+        result.sleepMode = !world.sleeping ? rx::OH_SLEEP_ALL : (listed ? rx::OH_SLEEP_LISTED : rx::OH_SLEEP_BLOCKS);
         result.worldSeed = worldSeed;
         for (const rx::OhObject& object : world.objects)
             result.passesPerTick = std::max(result.passesPerTick, object.substeps + 1);
 
         const std::vector<rx::OhFlow> coarse(world.objects.size(), rx::OhZeroFlow());
         const std::vector<uint32_t> failures(4, 0);
+        const std::vector<rx::OhObjectState> objectStates = MakeObjectStates(world);
+        const std::vector<uint32_t> lists(rx::OH_LIST_HEADER + (2 * world.objects.size()) + world.blocks.size(), 0);
+        const std::vector<uint32_t> dispatchArgs(3 * rx::OH_LIST_ARGS_COUNT, 0);
         const std::array<std::span<const std::byte>, UAV_COUNT> initial = {
             BytesOf(world.voxels), BytesOf(world.heats),
             BytesOf(world.flows),  BytesOf(world.carries),
             BytesOf(coarse),       BytesOf(world.cells),
             BytesOf(failures),     BytesOf(world.blockStates),
-            BytesOf(world.waits),  BytesOf(world.cellChangedPasses)};
+            BytesOf(world.waits),  BytesOf(world.cellChangedPasses),
+            BytesOf(objectStates), BytesOf(lists),
+            BytesOf(dispatchArgs)};
         for (size_t i = 0; i < initial.size(); ++i) {
             result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
             result.uavUploads[i] = gpu::CreateFilledUpload(device, initial[i]);
@@ -215,7 +266,7 @@ namespace bicameral::test::object_heat_gpu {
                                                                      rowThreads,
                                                                      world.blockCount,
                                                                      pass,
-                                                                     world.sleeping ? 1u : 0u};
+                                                                     world.sleepMode};
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(), 0);
     }
 
@@ -226,7 +277,7 @@ namespace bicameral::test::object_heat_gpu {
         if (stage == StageWake)
             grid = ThreadsFor(world.blockCount);
         else if (stage == StageReduce)
-            grid = Grid{world.objectCount, 1};
+            grid = GroupsFor(world.objectCount);
         else if (stage == StageApplyCells)
             grid = ThreadsFor(world.rangeCount);
 
@@ -237,9 +288,78 @@ namespace bicameral::test::object_heat_gpu {
         Barrier(list);
     }
 
+    // --- 起きている物の一覧(T-1077)---
+
+    inline void TransitionArgs(ID3D12GraphicsCommandList10* list, const GpuWorld& world, bool toIndirect) {
+        const D3D12_RESOURCE_STATES uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        const D3D12_RESOURCE_STATES indirect = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        const D3D12_RESOURCE_BARRIER barrier = gpu::Transition(
+            world.uavs[UavDispatchArgs].Get(), toIndirect ? uav : indirect, toIndirect ? indirect : uav);
+        list->ResourceBarrier(1, &barrier);
+    }
+
+    // 一覧の段を 1 つ、間接の引数の組 args で回す(後に UAV のバリア)
+    inline void RecordIndirect(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
+                               ID3D12PipelineState* pipeline, uint32_t args, bool lightOn, uint64_t tick,
+                               uint32_t substep, bool react) {
+        SetConstants(list, world, substep, lightOn, tick, LIST_ROW_THREADS, PassOf(world, tick, substep, react));
+        list->SetPipelineState(pipeline);
+        list->ExecuteIndirect(pipelines.dispatchSignature.Get(), 1, world.uavs[UavDispatchArgs].Get(),
+                              uint64_t{args} * DISPATCH_ARGS_BYTES, nullptr, 0);
+        Barrier(list);
+    }
+
+    // 一覧を作る(物の印 → 一覧の物と間接の引数 → 一覧のブロック)。引数は INDIRECT_ARGUMENT のまま返す(使い終えたら TransitionArgs で戻す)
+    inline void RecordBuildList(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
+                                bool lightOn, uint64_t tick, uint32_t substep, bool react) {
+        SetConstants(list, world, react ? rx::OH_LIST_REACT : substep, lightOn, tick, LIST_ROW_THREADS,
+                     PassOf(world, tick, substep, react));
+        list->SetPipelineState(pipelines.listStages[ListObjects].Get());
+        list->Dispatch(1, 1, 1);
+        Barrier(list);
+        TransitionArgs(list, world, true);
+        RecordIndirect(list, pipelines, world, pipelines.listStages[ListBlocks].Get(), rx::OH_LIST_ARGS_OBJECTS,
+                       lightOn, tick, substep, react);
+    }
+
+    // 一覧の形の 1 刻み(RecordTick と同じ段の順。①〜③ と ⑤ は一覧のブロック・物だけ)
+    inline void RecordListedTick(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
+                                 bool lightOn, uint64_t tick, bool stamps) {
+        constexpr std::array<std::pair<Stage, uint32_t>, 4> LISTED = {
+            std::pair{StageWake, rx::OH_LIST_ARGS_WAKE}, std::pair{StagePrepare, rx::OH_LIST_ARGS_BLOCKS},
+            std::pair{StageFlow, rx::OH_LIST_ARGS_BLOCKS}, std::pair{StageReduce, rx::OH_LIST_ARGS_OBJECTS}};
+        for (uint32_t sub = 0; sub + 1 < world.passesPerTick; ++sub) {
+            RecordBuildList(list, pipelines, world, lightOn, tick, sub, false);
+            for (const auto& [stage, args] : LISTED) {
+                RecordIndirect(list, pipelines, world, pipelines.stages[stage].Get(), args, lightOn, tick, sub, false);
+                if (stamps)
+                    list->EndQuery(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1 + stage);
+            }
+
+            TransitionArgs(list, world, false);
+            RecordStage(list, pipelines, world, StageApplyCells, lightOn, tick, sub);
+            if (stamps)
+                list->EndQuery(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1 + StageApplyCells);
+        }
+
+        RecordBuildList(list, pipelines, world, lightOn, tick, 0, true);
+        RecordIndirect(list, pipelines, world, pipelines.stages[StageReact].Get(), rx::OH_LIST_ARGS_BLOCKS, lightOn,
+                       tick, 0, true);
+        RecordIndirect(list, pipelines, world, pipelines.listStages[ListFinish].Get(), rx::OH_LIST_ARGS_OBJECTS,
+                       lightOn, tick, 0, true);
+        TransitionArgs(list, world, false);
+        if (stamps)
+            list->EndQuery(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1 + StageReact);
+    }
+
     // 1 刻み(小刻みごとに 起こす・①〜④、最後に ⑤)を記録する。stamps なら段ごとにタイムスタンプ(1 + 段の番号。小刻み 1 の時だけ)
     inline void RecordTick(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
                            bool lightOn, uint64_t tick, bool stamps) {
+        if (world.sleepMode == rx::OH_SLEEP_LISTED) {
+            RecordListedTick(list, pipelines, world, lightOn, tick, stamps);
+            return;
+        }
+
         for (uint32_t sub = 0; sub + 1 < world.passesPerTick; ++sub) {
             for (const Stage stage : {StageWake, StagePrepare, StageFlow, StageReduce, StageApplyCells}) {
                 RecordStage(list, pipelines, world, stage, lightOn, tick, sub);
