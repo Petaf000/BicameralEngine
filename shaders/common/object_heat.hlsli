@@ -28,7 +28,6 @@ FX_CONST uint32_t OH_NO_GAS = 0xFFFFFFFFu;
 FX_CONST int64_t OH_CELL_UM = 500000;  // レベル 0 の一辺(µm)
 FX_CONST uint64_t OH_MEGA = 1000000;
 FX_CONST uint64_t OH_BOX_MEGA_MM3 = 125000;  // 0.125 m³ = 125000 × 10^6 mm³(そのレベルの単位の量 = 濃さ × 0.125 m³)
-FX_CONST uint64_t OH_ROOM_TEMPERATURE_MK = 293150;  // 物質の値(混ざる速さ・伝導率)を書いた温度(D-639)
 // mW/(m·K) × µm × mK = 10^-12 W・1/60 s → mJ: ÷ (10^6 × 60000)
 FX_CONST uint64_t OH_CONDUCTION_DIVISOR_MEGA = 60000;  // × 10^6
 // mm²/s × µm × (単位 ÷ 0.125 m³)× 1/60 s → 単位 × 8 ÷ (60 × 10^12)
@@ -293,13 +292,13 @@ struct OhFilmScale {
     uint64_t conductionQ16;
 };
 
+// 膜の温度の気体の値はセルと同じ式(HcGasScaleAt。室温 HC_ROOM_TEMPERATURE_MK。T-1066)
 FX_FN OhFilmScale OhFilmScaleOf(int32_t voxelMilliKelvin, int32_t airMilliKelvin) {
     const uint64_t film = ((uint64_t)voxelMilliKelvin + (uint64_t)airMilliKelvin) / 2;
-    const uint64_t ratioQ16 = (film << 16) / OH_ROOM_TEMPERATURE_MK;
-    const uint64_t rootQ16 = (uint64_t)FxSqrtU64(ratioQ16 << 16);
+    const HcGasScale gas = HcGasScaleAt((uint32_t)film);
     OhFilmScale scale;
-    scale.diffusionQ16 = (ratioQ16 * rootQ16) >> 16;
-    scale.conductionQ16 = rootQ16;
+    scale.diffusionQ16 = (uint64_t)gas.diffusionQ16;
+    scale.conductionQ16 = (uint64_t)gas.conductionQ16;
 
     return scale;
 }
@@ -311,40 +310,7 @@ FX_FN int64_t OhPairLengthUm(OhObject object, uint32_t exposedFaces) {
     return facesUm2 / (int64_t)object.filmUm;
 }
 
-// --- ① 下ごしらえ: 体積で重み付けた箱の伝導率(D-637。固体・液体の体積 = 量 × モル体積、残りは気体〔気体どうしは物質量の平均〕)---
-
-template <typename Table>
-FX_FN uint64_t OhVolumeConductivity(Table table, RxCell cell) {
-    uint64_t condensedMm3 = 0;
-    uint64_t condensedWeighted = 0;
-    uint64_t gasAmount = 0;
-    uint64_t gasWeighted = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        const uint32_t species = RX_SPECIES_AT(cell, i);
-        const uint64_t amount = RX_AMOUNT_AT(cell, i);
-        const uint64_t conductivity = (uint64_t)table.Species(species).conductivity;
-        const OhSpecies values = table.ObjectSpecies(species);
-        if (values.gasIndex != OH_NO_GAS) {
-            gasAmount += amount;
-            gasWeighted += amount * conductivity;
-            continue;
-        }
-
-        const uint64_t volume = OhDivideU64(amount * (uint64_t)values.molarVolumeMm3PerMol, 1000000);
-        condensedMm3 += volume;
-        condensedWeighted += volume * conductivity;
-    }
-
-    // (固体の重み + (箱 − 固体の体積)× 気体の伝導率)÷ 箱。箱 = 125000 × 10^6 mm³ を 32bit の定数の積と 2 回の割り算で書く
-    // (floor(floor(x ÷ a) ÷ b) = floor(x ÷ ab)。GPU で 32bit を超える定数との引き算・選ぶが上の語を壊した。T-1078)
-    const uint64_t gasConductivity = gasAmount == 0 ? (uint64_t)0 : OhDivideU64(gasWeighted, gasAmount);
-    const bool full = OhDivideU64(condensedMm3, OH_MEGA) >= OH_BOX_MEGA_MM3;
-    const uint64_t boxTimesGas = gasConductivity * OH_BOX_MEGA_MM3 * OH_MEGA;
-    const uint64_t numerator = full ? condensedWeighted
-                                    : condensedWeighted + boxTimesGas - (condensedMm3 * gasConductivity);
-
-    return OhDivideU64(OhDivideU64(numerator, OH_MEGA), OH_BOX_MEGA_MM3);
-}
+// --- ① 下ごしらえ: 箱の伝導率はセルと同じ式(HcCellConductivity。体積で重み付けた平行の道・気体は ∝ √T。D-637・D-639・T-1066)---
 
 template <typename Table>
 FX_FN OhVoxelHeat OhPrepareVoxel(Table table, RxCell cell) {
@@ -353,7 +319,7 @@ FX_FN OhVoxelHeat OhPrepareVoxel(Table table, RxCell cell) {
     heat.temperature = thermal.temperature;
     heat.padding = 0;
     heat.heatCapacity = thermal.heatCapacity;
-    heat.innerConductivity = OhVolumeConductivity(table, cell);
+    heat.innerConductivity = HcCellConductivity(table, cell, HcCacheTemperature(thermal));
 
     return heat;
 }

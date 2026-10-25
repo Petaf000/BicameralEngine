@@ -5,12 +5,12 @@
 //
 // 設定(1 つの引数 = 1 回。カンマ区切り。書かない鍵は既定):
 //   w=<川の幅のセル>(既定 4 = 2 m。向こう岸 x 44〜63 は変えず、手前の岸を伸び縮みさせる)・gap=1(川の代わりに草の無い土の隙間)
-//   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。既定 0)・rad=0(放射の段を入れない)
+//   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。書かなければ表の値。T-1066 の前は既定 0 で表の値を消していた)・rad=0(放射の段を入れない)
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)・tall=<草の層の数>・trace=1(1 秒ごとの経過)
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
 //   gxb・gyb・gzb=<0 壁 / 1 周期 / 2 開いた>(区画の外の面。軸ごと。既定は全部壁)
-//   gk=<割る数>・ck=<割る数>(気体・凝縮相の物質の熱伝導率を割る。gk=5000・ck=20000 で場面の試験の倍率を外す。砂は割らない)
+//   gk=<割る数>・ck=<割る数>(気体・凝縮相の物質の熱伝導率を割る。T-1066 で場面の倍率を外したので既定 1。砂は割らない)
 //   liq=1(液体の区画: 川の列・y 1〜5。gap では入れない)
 //   slow=<s>(草〔セルロース〕の 2 本の規則の速さを 1/2^s に。今の値は 1 セルが 1 秒足らずで燃え尽きる。T-0570 の文献の値の代わりの試し)
 //   wet=<µmol>(川の両岸 4 列〔2 m〕の草のセルに液体の水を足す。湿った岸の試し。川から水が染みる道は無い)
@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -53,10 +54,10 @@ namespace {
         uint32_t riverCells = 4;
         bool gap = false;
         bool radiation = true;
-        uint32_t absorptionCellulose = 0;
-        uint32_t absorptionCarbon = 0;
-        uint32_t absorptionSilica = 0;
-        uint32_t absorptionWater = 0;
+        std::optional<uint32_t> absorptionCellulose;  // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> absorptionCarbon;     // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> absorptionSilica;     // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> absorptionWater;      // 書かなければ表の値のまま(T-1066)
         uint64_t seed = 0;
         uint64_t seconds = 60;
         uint32_t grassLayers = 1;  // 草の層の数(火の強さの代わり。y 4 から上へ重ねる。既定 1 = 場面のまま)
@@ -156,10 +157,13 @@ namespace {
         return setting;
     }
 
-    void SetAbsorption(BakedReactionTable& table, std::string_view name, uint32_t value) {
+    void SetAbsorption(BakedReactionTable& table, std::string_view name, std::optional<uint32_t> value) {
+        if (!value)
+            return;
+
         for (size_t id = 0; id < table.speciesNames.size(); ++id) {
             if (table.speciesNames[id] == name && id < table.speciesRadiationAbsorption.size())
-                table.speciesRadiationAbsorption[id] = value;
+                table.speciesRadiationAbsorption[id] = *value;
         }
     }
 
@@ -181,7 +185,7 @@ namespace {
         }
     }
 
-    // 場面の熱伝導率の試験の倍率(units.luau: 気体 ×5000・凝縮相 ×20000。砂には掛けない)を割って外す(T-0697)。
+    // 物質の熱伝導率を割る(T-0697。場面の試験の倍率は T-1066 で外したので、今は既定 1 = 割らない。砂は割らない)。
     // 気体の区画は流れで熱を運ぶので、倍率(流れが無い間の代わり)と二重に数えていないかを比べる
     void DivideConductivity(BakedReactionTable& table, uint32_t gasDivisor, uint32_t condensedDivisor) {
         for (size_t id = 0; id < table.species.size(); ++id) {

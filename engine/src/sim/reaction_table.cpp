@@ -324,6 +324,10 @@ namespace bicameral::sim {
                                                        entry.density;
                 baked.speciesLiquid.push_back(entry.phase == SpeciesPhase::Liquid ? 1 : 0);
                 baked.speciesMolarVolume.push_back(molarVolume);
+
+                // 伝導率の体積の重み(D-637・T-1066)。気体は場所を取らない(cell_volume.h と同じ)。32bit を超える値は頭打ち
+                const uint64_t occupied = entry.phase == SpeciesPhase::Gas ? 0 : molarVolume;
+                baked.species.back().molarVolume = static_cast<uint32_t>(std::min<uint64_t>(occupied, UINT32_MAX));
             }
 
             return species;

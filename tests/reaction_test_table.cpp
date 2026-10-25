@@ -97,12 +97,12 @@ namespace bicameral::sim {
                                       .composition = {{.element = "H", .count = 2}},
                                       .formationEnthalpy = 0,
                                       .heatCapacity = 28836,
-                                      .thermalConductivity = 18 * 5000});
+                                      .thermalConductivity = 180});  // 現実の値(試験の倍率は T-1066 で外した)
         definition.species.push_back({.name = "ozone",
                                       .composition = {{.element = "O", .count = 3}},
                                       .formationEnthalpy = 142700,
                                       .heatCapacity = 39200,
-                                      .thermalConductivity = 19 * 5000});
+                                      .thermalConductivity = 19});
         std::erase_if(definition.species, [](const SpeciesDefinition& species) { return species.name == "cellulose"; });
         std::erase_if(definition.rules, [](const RuleDefinition& rule) {
             return std::ranges::any_of(rule.reactants,
