@@ -10,7 +10,7 @@
 //   ④ OhApplyCells(1 スレッド = 物の入っているセル 1 つ): そのセルの物の u4 を足してセルへ(u5)。変わったセルの段を u9 に
 //   ⑤ OhReact(1 グループ = 1 ブロック): 最後の評価から変わった・起こす刻みが来たブロックだけ反応(RxStepCellWait。ボクセルの changedTick は u8)
 // 眠らせ方は 3 つ(g_sleeping。OH_SLEEP_*): 全部回す・全部を Dispatch して眠っているブロックは 1 語読んで抜ける・
-// 起きている物の一覧(T-1077): 段ごとに OhListObjects(1 グループ)が物の印から一覧と間接の引数を作り、OhListBlocks が一覧の物のブロックを並べ、
+// 起きている物の一覧(T-1077): 段ごとに OhListMark・OhListTotals・OhListPlace が物の印から一覧と間接の引数を作り、
 // 起こす・①・②・③・⑤ は一覧だけを ExecuteIndirect で回す(眠っている物の費用は物 1 つに 1 スレッドの印の読みだけ)。
 // 反応の後に OhFinishObjects が一覧の物の起こす刻みの最小を直す。どの形でも結果はビット単位で同じ(試験 gpu_object_heat・gpu_object_heat_nest)。
 #include "common/object_heat.hlsli"
@@ -26,7 +26,8 @@ RWStructuredBuffer<OhBlockState> g_blockStates : register(u7);
 RWStructuredBuffer<OhVoxelWait> g_waits : register(u8);            // ボクセルごとの反応の待ち(真実)
 RWStructuredBuffer<uint32_t> g_cellChanged : register(u9);         // 囲むセルごとの最後に変わった段
 RWStructuredBuffer<OhObjectState> g_objectStates : register(u10);  // 物ごとの一覧の印(眠らせ方。真実ではない)
-// [頭 OH_LIST_HEADER][一覧の物 × 物の数][一覧の物のブロックの始まり × 物の数][一覧のブロック × ブロックの数]
+// [頭 OH_LIST_HEADER][一覧の物 × 物の数][一覧の物のブロックの始まり × 物の数][物の印 × 物の数][グループの和 × 2 × グループの数]
+// [一覧のブロック × ブロックの数](グループ = 物 OH_LIST_GROUP_OBJECTS 個)
 RWStructuredBuffer<uint32_t> g_lists : register(u11);
 RWStructuredBuffer<uint32_t> g_dispatchArgs
     : register(u12);  // 間接の引数(D3D12_DISPATCH_ARGUMENTS × OH_LIST_ARGS_COUNT)
@@ -117,7 +118,8 @@ bool Listed() {
 }
 
 uint32_t BlockListBase() {
-    return OH_LIST_HEADER + (2 * g_objectCount);
+    return OH_LIST_HEADER + (3 * g_objectCount) +
+           (2 * ((g_objectCount + OH_LIST_GROUP_OBJECTS - 1) / OH_LIST_GROUP_OBJECTS));
 }
 
 // 段の通し番号 position のブロック(一覧なら一覧の position 番目。外なら OH_NO_BLOCK = g_blockCount 以上)
@@ -415,15 +417,27 @@ groupshared uint64_t gs_wake[OH_THREADS];
     }
 }
 
-// --- 起きている物の一覧(T-1077。g_sleeping = OH_SLEEP_LISTED の時だけ)---
-// OhListObjects(1 グループ。g_substep = 小刻みの番号か OH_LIST_REACT): 物を物の番号の順になめ、一覧に入れる物とそのブロックの数の
-// 前の和(R5)で、一覧の物と一覧の中のブロックの始まりを決める。間接の引数(起こす・ブロック・物)も書く。
+// --- 起きている物の一覧(T-1077。g_sleeping = OH_SLEEP_LISTED の時だけ。g_substep = 小刻みの番号か OH_LIST_REACT)---
+// 3 段で作る(どれも物の数に比例して並列。一つのグループで物を順になめると、物 1 万個で 1 回 70 µs ほどかかった):
+//   OhListMark(1 グループ = 物 OH_LIST_GROUP 個): 物を一覧に入れるか・ブロックの数を印に書き、グループの和を書く(整数の足し算なので順によらない)
+//   OhListTotals(1 グループ): グループの和の前の和(R5)→ グループの始まり・一覧の物とブロックの数・間接の引数
+//   OhListPlace(1 グループ = 物 OH_LIST_GROUP 個): グループの中の前の和で一覧の中の位置を決め、物と物のブロックを一覧に書く
 // 一覧から外れる物は、前に起こしたブロックの awake を 0 に戻す(全部を回した時に眠っているブロックが書く値)
 
-static const uint32_t OH_LIST_THREADS = 1024;
+static const uint32_t OH_LIST_GROUP = OH_LIST_GROUP_OBJECTS;
+static const uint32_t OH_LIST_TOTAL_THREADS = 1024;
 
-groupshared uint32_t gs_listScan[OH_LIST_THREADS];
-groupshared uint32_t gs_listBlockScan[OH_LIST_THREADS];
+uint32_t ListGroupCount() {
+    return (g_objectCount + OH_LIST_GROUP - 1) / OH_LIST_GROUP;
+}
+
+uint32_t ListMarkBase() {
+    return OH_LIST_HEADER + (2 * g_objectCount);
+}
+
+uint32_t ListGroupBase() {
+    return OH_LIST_HEADER + (3 * g_objectCount);
+}
 
 // 受け渡しの段: 物を一覧に入れるか。入れたら印を書く(小刻みを飛ばす物は受け渡しを回さないので、最後に回した段を変えない)
 bool ListExchangeObject(uint32_t objectIndex) {
@@ -448,6 +462,53 @@ bool ListExchangeObject(uint32_t objectIndex) {
     return listed;
 }
 
+groupshared uint32_t gs_listObjects[OH_LIST_TOTAL_THREADS];
+groupshared uint32_t gs_listBlocks[OH_LIST_TOTAL_THREADS];
+
+// gs_listObjects・gs_listBlocks の前 count 個の前の和(含む。Hillis–Steele。グループの全部のスレッドが呼ぶ)
+void InclusiveListScan(uint32_t lane, uint32_t count) {
+    GroupMemoryBarrierWithGroupSync();
+    for (uint32_t width = 1; width < count; width *= 2) {
+        const uint32_t objectsLeft = (lane < count && lane >= width) ? gs_listObjects[lane - width] : 0u;
+        const uint32_t blocksLeft = (lane < count && lane >= width) ? gs_listBlocks[lane - width] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        if (lane < count) {
+            gs_listObjects[lane] += objectsLeft;
+            gs_listBlocks[lane] += blocksLeft;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+[numthreads(OH_LIST_GROUP, 1, 1)] void OhListMark(uint3 groupId : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+    const uint32_t objectIndex = (groupId.x * OH_LIST_GROUP) + lane;
+    if (lane == 0) {
+        gs_listObjects[0] = 0;
+        gs_listBlocks[0] = 0;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (objectIndex < g_objectCount) {
+        const bool react = g_substep == OH_LIST_REACT;
+        const bool listed = react ? OhObjectReactListed(g_objectStates[objectIndex], Tick())
+                                  : ListExchangeObject(objectIndex);
+        const uint32_t blocks = listed ? BlockCountOf(g_objects[objectIndex]) : 0u;
+        g_lists[ListMarkBase() + objectIndex] = listed ? (blocks << 1) | 1u : 0u;
+        if (listed) {
+            InterlockedAdd(gs_listObjects[0], 1u);
+            InterlockedAdd(gs_listBlocks[0], blocks);
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (lane != 0)
+        return;
+
+    g_lists[ListGroupBase() + (2 * groupId.x)] = gs_listObjects[0];
+    g_lists[ListGroupBase() + (2 * groupId.x) + 1] = gs_listBlocks[0];
+}
+
 void WriteListArgs(uint32_t slot, uint32_t groups) {
     const uint32_t base = 3 * slot;
     g_dispatchArgs[base] = min(groups, OH_LIST_ROW_GROUPS);
@@ -455,40 +516,27 @@ void WriteListArgs(uint32_t slot, uint32_t groups) {
     g_dispatchArgs[base + 2] = 1;
 }
 
-[numthreads(OH_LIST_THREADS, 1, 1)] void OhListObjects(uint32_t lane : SV_GroupIndex) {
-    const bool react = g_substep == OH_LIST_REACT;
-    uint32_t objectsBefore = 0;  // ここまでの区切りの一覧の物の数(グループで一様)
+[numthreads(OH_LIST_TOTAL_THREADS, 1, 1)] void OhListTotals(uint32_t lane : SV_GroupIndex) {
+    uint32_t objectsBefore = 0;  // ここまでの区切りの和(グループで一様)
     uint32_t blocksBefore = 0;
-    for (uint32_t first = 0; first < g_objectCount; first += OH_LIST_THREADS) {
-        const uint32_t objectIndex = first + lane;
-        bool listed = false;
-        uint32_t blocks = 0;
-        if (objectIndex < g_objectCount) {
-            listed = react ? OhObjectReactListed(g_objectStates[objectIndex], Tick()) : ListExchangeObject(objectIndex);
-            blocks = listed ? BlockCountOf(g_objects[objectIndex]) : 0u;
+    for (uint32_t first = 0; first < ListGroupCount(); first += OH_LIST_TOTAL_THREADS) {
+        const uint32_t group = first + lane;
+        const uint32_t address = ListGroupBase() + (2 * group);
+        const bool inside = group < ListGroupCount();
+        const uint32_t objects = inside ? g_lists[address] : 0u;
+        const uint32_t blocks = inside ? g_lists[address + 1] : 0u;
+        gs_listObjects[lane] = objects;
+        gs_listBlocks[lane] = blocks;
+        InclusiveListScan(lane, OH_LIST_TOTAL_THREADS);
+
+        // --- グループの始まり(含まない前の和)を同じ所に書き戻す ---
+        if (inside) {
+            g_lists[address] = objectsBefore + gs_listObjects[lane] - objects;
+            g_lists[address + 1] = blocksBefore + gs_listBlocks[lane] - blocks;
         }
 
-        // --- 前の和(含む。Hillis–Steele)---
-        gs_listScan[lane] = listed ? 1u : 0u;
-        gs_listBlockScan[lane] = blocks;
-        GroupMemoryBarrierWithGroupSync();
-        for (uint32_t width = 1; width < OH_LIST_THREADS; width *= 2) {
-            const uint32_t objectsLeft = lane >= width ? gs_listScan[lane - width] : 0u;
-            const uint32_t blocksLeft = lane >= width ? gs_listBlockScan[lane - width] : 0u;
-            GroupMemoryBarrierWithGroupSync();
-            gs_listScan[lane] += objectsLeft;
-            gs_listBlockScan[lane] += blocksLeft;
-            GroupMemoryBarrierWithGroupSync();
-        }
-
-        if (listed) {
-            const uint32_t position = objectsBefore + gs_listScan[lane] - 1;
-            g_lists[OH_LIST_HEADER + position] = objectIndex;
-            g_lists[OH_LIST_HEADER + g_objectCount + position] = blocksBefore + gs_listBlockScan[lane] - blocks;
-        }
-
-        objectsBefore += gs_listScan[OH_LIST_THREADS - 1];
-        blocksBefore += gs_listBlockScan[OH_LIST_THREADS - 1];
+        objectsBefore += gs_listObjects[OH_LIST_TOTAL_THREADS - 1];
+        blocksBefore += gs_listBlocks[OH_LIST_TOTAL_THREADS - 1];
         GroupMemoryBarrierWithGroupSync();  // 次の区切りが前の和を書き直す前に、全部が読み終える
     }
 
@@ -502,16 +550,25 @@ void WriteListArgs(uint32_t slot, uint32_t groups) {
     WriteListArgs(OH_LIST_ARGS_OBJECTS, objectsBefore);
 }
 
-    // 一覧の物のブロックを一覧に並べる(1 グループ = 一覧の物 1 つ)
-    [numthreads(OH_THREADS, 1, 1)] void OhListBlocks(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID) {
-    const uint32_t position = GroupIndex(groupId);
-    if (position >= g_lists[0])
+    [numthreads(OH_LIST_GROUP, 1, 1)] void OhListPlace(uint3 groupId : SV_GroupID, uint32_t lane : SV_GroupIndex) {
+    const uint32_t objectIndex = (groupId.x * OH_LIST_GROUP) + lane;
+    const uint32_t mark = objectIndex < g_objectCount ? g_lists[ListMarkBase() + objectIndex] : 0u;
+    const uint32_t blocks = mark >> 1;
+    gs_listObjects[lane] = mark & 1u;
+    gs_listBlocks[lane] = blocks;
+    InclusiveListScan(lane, OH_LIST_GROUP);
+    if ((mark & 1u) == 0)
         return;
 
-    const OhObject object = g_objects[g_lists[OH_LIST_HEADER + position]];
-    const uint32_t offset = g_lists[OH_LIST_HEADER + g_objectCount + position];
-    for (uint32_t b = threadId.x; b < BlockCountOf(object); b += OH_THREADS)
-        g_lists[BlockListBase() + offset + b] = object.blockBegin + b;
+    const uint32_t groupAddress = ListGroupBase() + (2 * groupId.x);
+    const uint32_t position = g_lists[groupAddress] + gs_listObjects[lane] - 1;
+    const uint32_t offset = g_lists[groupAddress + 1] + gs_listBlocks[lane] - blocks;
+    g_lists[OH_LIST_HEADER + position] = objectIndex;
+    g_lists[OH_LIST_HEADER + g_objectCount + position] = offset;
+
+    const uint32_t blockBegin = g_objects[objectIndex].blockBegin;
+    for (uint32_t b = 0; b < blocks; ++b)
+        g_lists[BlockListBase() + offset + b] = blockBegin + b;
 }
 
 // 反応の後: 一覧の物の起こす刻みの最小を直す(1 グループ = 一覧の物 1 つ。一覧の外の物のブロックは変わっていない)

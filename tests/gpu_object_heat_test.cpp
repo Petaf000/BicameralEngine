@@ -315,12 +315,15 @@ namespace {
         }
 
         std::vector<double> times;
+        std::array<double, STAGE_COUNT> stageSums{};
         for (uint32_t i = 0; i < 8; ++i) {
             auto ran = RunTicks(*queue, *pipelines, *gpuWorld, *debugRing, tick++, 1, false, true);
             if (!ran)
                 return std::unexpected(ran.error());
 
             times.push_back(Sum(*ran));
+            for (size_t stage = 0; stage < STAGE_COUNT; ++stage)
+                stageSums[stage] += (*ran)[stage] / 8;
         }
 
         rng::sort(times);
@@ -340,6 +343,11 @@ namespace {
             "起きているブロック {}・GPU の失敗 {}",
             scene.name, world.voxels.size(), world.blocks.size(), ModeName(mode), tick - 8, times.front(),
             times[times.size() / 2], times.back(), awake, (*failures)[0]);
+        Log(Channel::Gpu, Level::Info,
+            "  段の平均 ms: 起こす(一覧を作るを含む){:.3f}・下ごしらえ {:.3f}・流れ {:.3f}・物ごと {:.3f}・セル "
+            "{:.3f}・"
+            "反応(反応の一覧と物の起こす刻みを含む){:.3f}",
+            stageSums[0], stageSums[1], stageSums[2], stageSums[3], stageSums[4], stageSums[5]);
 
         return {};
     }
@@ -457,6 +465,14 @@ namespace {
 
             // --- 眠っている物 10,000 個(冷えた小枝)の中で、燃える小枝 10・100・1000 本(T-1077)---
             for (const uint32_t burning : {10u, 100u, 1000u}) {
+                // 比べ: 燃える小枝だけ(眠っている物なし)
+                const std::string alone = std::format("燃える小枝 {} 本だけ", burning);
+                const Scene aloneScene{alone.c_str(), {{Kind::Twig, burning}}, burning};
+                if (auto measured = MeasureOne(context, aloneScene, rx::OH_SLEEP_LISTED, 300); !measured) {
+                    Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(計測: {})", measured.error());
+                    return 1;
+                }
+
                 const std::string name = std::format("眠っている小枝 10000 本 + 燃える小枝 {} 本", burning);
                 const Scene scene{name.c_str(), {{Kind::Twig, 10000 + burning}}, burning};
                 for (const uint32_t mode : {rx::OH_SLEEP_BLOCKS, rx::OH_SLEEP_LISTED}) {

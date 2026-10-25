@@ -183,6 +183,7 @@ FX_CONST uint32_t
     OH_OBJECT_AWAKE_LEFT = 0x100u;  // 前に一覧に入れた(ブロックの awake が 1 のまま残りうる。外れる時に 0 に戻す)
 FX_CONST uint32_t OH_LIST_REACT = 0xFFFFFFFFu;  // 一覧を作る段の小刻みの番号: 反応の一覧
 FX_CONST uint32_t OH_LIST_HEADER = 4;           // 一覧の頭の語: [0] 一覧の物の数・[1] 一覧のブロックの数
+FX_CONST uint32_t OH_LIST_GROUP_OBJECTS = 256;  // 一覧を作る段の 1 グループの物の数
 FX_CONST uint32_t OH_LIST_ROW_GROUPS = 1024;    // 一覧で回す段のグループの x の数(超えたら y に折る)
 FX_CONST uint32_t OH_LIST_ARGS_WAKE = 0;        // 間接の引数の組: 起こす(1 スレッド = 1 ブロック)
 FX_CONST uint32_t OH_LIST_ARGS_BLOCKS = 1;      // 1 グループ = 1 ブロック

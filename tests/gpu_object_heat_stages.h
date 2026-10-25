@@ -51,8 +51,9 @@ namespace bicameral::test::object_heat_gpu {
 
     // 起きている物の一覧の段(T-1077。時間は前後の段に入れて数える: 一覧を作る段は起こす・反応に、反応の後の段は反応に)
     enum ListStage : uint8_t {
-        ListObjects,
-        ListBlocks,
+        ListMark,
+        ListTotals,
+        ListPlace,
         ListFinish,
         LIST_STAGE_COUNT,
     };
@@ -83,9 +84,9 @@ namespace bicameral::test::object_heat_gpu {
                 return std::unexpected(std::format("パイプラインを作れない: {}", names[i]));
         }
 
-        const std::array<const char*, LIST_STAGE_COUNT> listNames = {"sim/object_heat_list_objects.cso",
-                                                                     "sim/object_heat_list_blocks.cso",
-                                                                     "sim/object_heat_finish_objects.cso"};
+        const std::array<const char*, LIST_STAGE_COUNT> listNames = {
+            "sim/object_heat_list_mark.cso", "sim/object_heat_list_totals.cso", "sim/object_heat_list_place.cso",
+            "sim/object_heat_finish_objects.cso"};
         for (size_t i = 0; i < listNames.size(); ++i) {
             const auto bytecode = gpu::LoadShader(listNames[i]);
             if (!bytecode)
@@ -96,7 +97,7 @@ namespace bicameral::test::object_heat_gpu {
                 return std::unexpected(std::format("パイプラインを作れない: {}", listNames[i]));
         }
 
-        // --- 間接の Dispatch(引数は OhListObjects が書く。ルート定数は変えないので署名は要らない)---
+        // --- 間接の Dispatch(引数は OhListTotals が書く。ルート定数は変えないので署名は要らない)---
         const D3D12_INDIRECT_ARGUMENT_DESC argument{.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH};
         const D3D12_COMMAND_SIGNATURE_DESC signature{
             .ByteStride = DISPATCH_ARGS_BYTES, .NumArgumentDescs = 1, .pArgumentDescs = &argument, .NodeMask = 0};
@@ -171,7 +172,9 @@ namespace bicameral::test::object_heat_gpu {
         const std::vector<rx::OhFlow> coarse(world.objects.size(), rx::OhZeroFlow());
         const std::vector<uint32_t> failures(4, 0);
         const std::vector<rx::OhObjectState> objectStates = MakeObjectStates(world);
-        const std::vector<uint32_t> lists(rx::OH_LIST_HEADER + (2 * world.objects.size()) + world.blocks.size(), 0);
+        const size_t listGroups = (world.objects.size() + rx::OH_LIST_GROUP_OBJECTS - 1) / rx::OH_LIST_GROUP_OBJECTS;
+        const std::vector<uint32_t> lists(
+            rx::OH_LIST_HEADER + (3 * world.objects.size()) + (2 * listGroups) + world.blocks.size(), 0);
         const std::vector<uint32_t> dispatchArgs(3 * rx::OH_LIST_ARGS_COUNT, 0);
         const std::array<std::span<const std::byte>, UAV_COUNT> initial = {
             BytesOf(world.voxels), BytesOf(world.heats),
@@ -309,17 +312,22 @@ namespace bicameral::test::object_heat_gpu {
         Barrier(list);
     }
 
-    // 一覧を作る(物の印 → 一覧の物と間接の引数 → 一覧のブロック)。引数は INDIRECT_ARGUMENT のまま返す(使い終えたら TransitionArgs で戻す)
+    // 一覧を作る(物の印とグループの和 → 前の和と間接の引数 → 一覧の物とブロック)。
+    // 引数は INDIRECT_ARGUMENT にして返す(使い終えたら TransitionArgs で戻す)
     inline void RecordBuildList(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
                                 bool lightOn, uint64_t tick, uint32_t substep, bool react) {
+        const uint32_t groups = (world.objectCount + rx::OH_LIST_GROUP_OBJECTS - 1) / rx::OH_LIST_GROUP_OBJECTS;
+        const std::array<std::pair<ListStage, uint32_t>, 3> stages = {
+            std::pair{ListMark, groups}, std::pair{ListTotals, 1u}, std::pair{ListPlace, groups}};
         SetConstants(list, world, react ? rx::OH_LIST_REACT : substep, lightOn, tick, LIST_ROW_THREADS,
                      PassOf(world, tick, substep, react));
-        list->SetPipelineState(pipelines.listStages[ListObjects].Get());
-        list->Dispatch(1, 1, 1);
-        Barrier(list);
+        for (const auto& [stage, groupCount] : stages) {
+            list->SetPipelineState(pipelines.listStages[stage].Get());
+            list->Dispatch(std::max(groupCount, 1u), 1, 1);
+            Barrier(list);
+        }
+
         TransitionArgs(list, world, true);
-        RecordIndirect(list, pipelines, world, pipelines.listStages[ListBlocks].Get(), rx::OH_LIST_ARGS_OBJECTS,
-                       lightOn, tick, substep, react);
     }
 
     // 一覧の形の 1 刻み(RecordTick と同じ段の順。①〜③ と ⑤ は一覧のブロック・物だけ)
