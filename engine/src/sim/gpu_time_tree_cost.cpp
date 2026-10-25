@@ -114,17 +114,56 @@ namespace bicameral::sim {
             return {};
         }
 
-        // 熱する解き(大きい箱)の後、回ごとに 箱 × V 1・V 2 の時刻印。時刻印の番号: 小 = 回 × 4 + 部 × 2・大 = 1 + 同じ
+        uint64_t TicksToNs(uint64_t begin, uint64_t end, uint64_t frequency) {
+            return end > begin ? (end - begin) * 1000000000 / frequency : 0;
+        }
+
+        // 熱する: 大きい箱の解きを batchSolves 回ずつ、GPU の時間が heatNs に届くまで続けて投げる(T-1152: 休んだ GPU は
+        // 約 0.25 秒続けて回すと時計が上がり、1 回の解きが 6〜7 倍速くなる。早送りは続けて積むので、その時計の値を測る)
+        std::expected<void, std::string> Heat(gpu::ImmediateQueue& queue, gpu::DebugRing& ring, ProbeBox& box,
+                                              uint64_t frequency, const TimeTreeCostProbeOptions& options,
+                                              TimeTreeCostProbe& probe) {
+            for (uint32_t batch = 0; batch < options.maxHeatBatches && probe.heatNs < options.heatNs; ++batch) {
+                ID3D12GraphicsCommandList10* list = queue.Begin();
+                if (list == nullptr)
+                    return std::unexpected("コマンドリストを始められない");
+
+                ring.RecordBegin(list);
+                if (!box.gpu->RecordUpload(list, box.grid))
+                    return std::unexpected("段の形が合わない");
+
+                box.gpu->RecordTimestamp(list, 0);
+                for (uint32_t solve = 0; solve < options.heatBatchSolves; ++solve) {
+                    if (!box.gpu->RecordSolve(list, ring.GpuAddress(), 1))
+                        return std::unexpected("解きを積めない");
+                }
+
+                box.gpu->RecordTimestamp(list, 1);
+                box.gpu->RecordTimestampReadback(list, 2);
+                box.gpu->RecordEnd(list);
+                const auto executed = Execute(queue, ring, list);
+                if (!executed)
+                    return executed;
+
+                box.gpu->ReleaseStaging();
+                const std::vector<uint64_t> ticks = box.gpu->ReadTimestamps(2);
+                if (ticks.size() != 2)
+                    return std::unexpected("時刻印を読めない");
+
+                probe.heatNs += TicksToNs(ticks[0], ticks[1], frequency);
+                ++probe.heatBatches;
+            }
+
+            return {};
+        }
+
+        // 回ごとに 箱 × V 1・V 2 の時刻印。時刻印の番号: 小 = 回 × 4 + 部 × 2・大 = 1 + 同じ
         bool RecordProbe(ID3D12GraphicsCommandList* list, uint64_t ring, ProbeBox& smallBox, ProbeBox& largeBox,
-                         uint32_t heatSolves, uint32_t rounds) {
+                         uint32_t rounds) {
             if (!smallBox.gpu->RecordUpload(list, smallBox.grid) || !largeBox.gpu->RecordUpload(list, largeBox.grid))
                 return false;
 
             largeBox.gpu->RecordTimestamp(list, 0);
-            for (uint32_t solve = 0; solve < heatSolves; ++solve) {
-                if (!largeBox.gpu->RecordSolve(list, ring, 1))
-                    return false;
-            }
 
             for (uint32_t repeat = 0; repeat < rounds; ++repeat) {
                 for (uint32_t part = 0; part < 2 * PROBE_PARTS; ++part) {
@@ -148,10 +187,6 @@ namespace bicameral::sim {
             largeBox.gpu->RecordEnd(list);
 
             return true;
-        }
-
-        uint64_t TicksToNs(uint64_t begin, uint64_t end, uint64_t frequency) {
-            return end > begin ? (end - begin) * 1000000000 / frequency : 0;
         }
 
         int64_t AtLeastZero(int64_t value) {
@@ -241,13 +276,18 @@ namespace bicameral::sim {
         }
 
         // --- 熱してから 4 つの時間を続けて積む ---
+        TimeTreeCostProbe probe;
+        const auto heated = Heat(queue, ring, largeBox, timestampFrequency, options, probe);
+        if (!heated)
+            return std::unexpected(heated.error());
+
         const uint32_t rounds = std::clamp<uint32_t>(options.rounds, 1, PROBE_MAX_ROUNDS);
         ID3D12GraphicsCommandList10* list = queue.Begin();
         if (list == nullptr)
             return std::unexpected("コマンドリストを始められない");
 
         ring.RecordBegin(list);
-        if (!RecordProbe(list, ring.GpuAddress(), smallBox, largeBox, options.heatSolves, rounds))
+        if (!RecordProbe(list, ring.GpuAddress(), smallBox, largeBox, rounds))
             return std::unexpected("解きを積めない");
 
         const auto executed = Execute(queue, ring, list);
@@ -263,7 +303,6 @@ namespace bicameral::sim {
             return std::unexpected("時刻印を読めない");
 
         // --- 回ごとの最小 ---
-        TimeTreeCostProbe probe;
         probe.solveNs.fill(UINT64_MAX);
         for (uint32_t repeat = 0; repeat < rounds; ++repeat) {
             for (uint32_t part = 0; part < 2 * PROBE_PARTS; ++part) {

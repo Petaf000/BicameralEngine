@@ -567,47 +567,59 @@ namespace {
         return {};
     }
 
-    // --- 式の当てはめ(最小二乗: t = 固定費 + V × V の固定費 + セル × 傾き + セル × V × 傾き)---
-    std::array<double, 4> Features(const sim::TimeTreeEventGroup& group) {
-        const auto cells = (double)group.system.nodes.size();
-        const auto cycles = (double)group.cycles;
+    // --- 式の当てはめ(V の回数と段の数ごとに 最小二乗: t = 固定費 + セル × 傾き)---
+    struct LineFit {
+        uint64_t count = 0;
+        double fixedNs = 0;
+        double cellPs = 0;
+        double meanCells = 0;
+        double meanMs = 0;
+    };
 
-        return {1.0, cycles, cells, cells * cycles};
-    }
-
-    std::array<double, 4> FitLeastSquares(const std::vector<MeasuredGroup>& measured) {
-        std::array<std::array<double, 5>, 4> normal{};
-        for (const MeasuredGroup& item : measured) {
-            const std::array<double, 4> x = Features(*item.group);
-            const double ns = item.minMs * 1.0e6;
-            for (size_t r = 0; r < 4; ++r) {
-                for (size_t c = 0; c < 4; ++c)
-                    normal[r][c] += x[r] * x[c];
-
-                normal[r][4] += x[r] * ns;
-            }
+    LineFit FitLine(const std::vector<const MeasuredGroup*>& items) {
+        LineFit fit;
+        double sumX = 0;
+        double sumY = 0;
+        double sumXX = 0;
+        double sumXY = 0;
+        for (const MeasuredGroup* item : items) {
+            const auto x = (double)item->group->system.nodes.size();
+            const double y = item->minMs * 1.0e6;
+            sumX += x;
+            sumY += y;
+            sumXX += x * x;
+            sumXY += x * y;
         }
 
-        // ガウスの消去(4 × 4。測りの道具なので浮動小数点でよい)
-        for (size_t pivot = 0; pivot < 4; ++pivot) {
-            if (normal[pivot][pivot] == 0.0)
-                return {};
-
-            for (size_t r = 0; r < 4; ++r) {
-                if (r == pivot)
-                    continue;
-
-                const double factor = normal[r][pivot] / normal[pivot][pivot];
-                for (size_t c = pivot; c < 5; ++c)
-                    normal[r][c] -= factor * normal[pivot][c];
-            }
-        }
-
-        std::array<double, 4> fit{};
-        for (size_t r = 0; r < 4; ++r)
-            fit[r] = normal[r][4] / normal[r][r];
+        fit.count = items.size();
+        const auto n = (double)fit.count;
+        fit.meanCells = sumX / n;
+        fit.meanMs = sumY / n * 1.0e-6;
+        const double spread = (n * sumXX) - (sumX * sumX);
+        fit.cellPs = spread > 0 ? ((n * sumXY) - (sumX * sumY)) / spread * 1000.0 : 0.0;
+        fit.fixedNs = (sumY - (fit.cellPs / 1000.0 * sumX)) / n;
 
         return fit;
+    }
+
+    void LogFits(const std::vector<MeasuredGroup>& measured) {
+        std::map<std::pair<uint32_t, uint32_t>, std::vector<const MeasuredGroup*>> byShape;  // (V・段) → 組
+        for (const MeasuredGroup& item : measured)
+            byShape[{item.group->cycles, item.group->levels}].push_back(&item);
+
+        for (const auto& [shape, items] : byShape) {
+            const LineFit fit = FitLine(items);
+            double gapMs = 0;
+            for (const MeasuredGroup* item : items)
+                gapMs += item->gapMs;
+
+            Log(Channel::Sim, Level::Info,
+                "V {}・段 {}: 組 {}・平均 {:.0f} セル・続けて積んだ {:.4f} ms・間を空けた {:.4f} ms → 当てはめ 固定費 "
+                "{:.0f} ns・"
+                "セル {:.0f} ps",
+                shape.first, shape.second, fit.count, fit.meanCells, fit.meanMs, gapMs / (double)fit.count * 1.0,
+                fit.fixedNs, fit.cellPs);
+        }
     }
 
     double PredictMs(const sim::TimeTreeSolveCost& cost, const sim::TimeTreeEventGroup& group) {
@@ -683,11 +695,12 @@ namespace {
             return std::unexpected(probe.error());
 
         Log(Channel::Sim, Level::Info,
-            "起動時の測り {}(箱 {}・{}・e {}・{:.1f} 秒の時点): 小 V 1 {} ns・小 V 2 {} ns・大 V 1 {} ns・大 V 2 {} "
-            "ns・"
-            "GPU {:.2f} ms → 固定費 {} ns・V {} ns・セル {} ps・セル × V {} ps",
-            name, options.smallSide, options.largeSide, options.exponent, at, probe->solveNs[0], probe->solveNs[1],
-            probe->solveNs[2], probe->solveNs[3], (double)probe->gpuNs * 1.0e-6, probe->cost.eventNs,
+            "起動時の測り {}(箱 {}・{}・e {}・{:.1f} 秒の時点): 熱した {} 回 {:.1f} ms・小 V 1 {} ns・小 V 2 {} ns・"
+            "大 V 1 {} ns・大 V 2 {} ns・GPU {:.2f} ms・全体 {:.1f} ms → 固定費 {} ns・V {} ns・セル {} ps・セル × V "
+            "{} ps",
+            name, options.smallSide, options.largeSide, options.exponent, at, probe->heatBatches,
+            (double)probe->heatNs * 1.0e-6, probe->solveNs[0], probe->solveNs[1], probe->solveNs[2], probe->solveNs[3],
+            (double)probe->gpuNs * 1.0e-6, (SecondsSince(context) - at) * 1000.0, probe->cost.eventNs,
             probe->cost.cycleNs, probe->cost.cellPs, probe->cost.cellCyclePs);
 
         return probe;
@@ -745,14 +758,12 @@ namespace {
         }
     }
 
+    using NamedCost = std::pair<std::string, sim::TimeTreeSolveCost>;
+
     std::expected<void, std::string> MeasureContinuous(Context& context,
                                                        const std::vector<sim::TimeTreeEventGroup>& groups,
-                                                       uint64_t events, uint64_t eventsTotal) {
-        // --- 起動時の測り(GPU が休んでいる状態から)---
-        const auto cold = RunProbe(context, "初め", {});
-        if (!cold)
-            return std::unexpected(cold.error());
-
+                                                       uint64_t events, uint64_t eventsTotal,
+                                                       std::vector<NamedCost> probes) {
         std::vector<MeasuredGroup> measured;
         const auto prepared = PrepareGroups(context, groups, measured);
         if (!prepared)
@@ -772,39 +783,25 @@ namespace {
             return timed;
 
         // --- 起動時の測りの変種(続けて積んだ直後 = 時計が高い・大きい箱 32^3・長い歩の形)---
-        std::vector<std::pair<std::string, sim::TimeTreeCostProbeOptions>> variants = {
+        const std::vector<std::pair<std::string, sim::TimeTreeCostProbeOptions>> variants = {
+            {"直後・熱さない", {.heatNs = 0}},
             {"直後", {}},
             {"直後・大きい箱 32", {.largeSide = 32}},
-            {"直後・e 10", {.exponent = 10}},
-            {"直後・熱さない", {.heatSolves = 0}}};
-        std::vector<sim::TimeTreeCostProbe> probes = {*cold};
+            {"直後・e 10", {.exponent = 10}}};
         for (const auto& [name, options] : variants) {
             const auto probe = RunProbe(context, name, options);
             if (!probe)
                 return std::unexpected(probe.error());
 
-            probes.push_back(*probe);
+            probes.emplace_back(name, probe->cost);
         }
 
-        const std::array<double, 4> fit = FitLeastSquares(measured);
-        Log(Channel::Sim, Level::Info,
-            "最小二乗(続けて積んだ測り・組 {}): 固定費 {:.0f} ns・V {:.0f} ns・セル {:.0f} ps・セル × V {:.0f} ps",
-            measured.size(), fit[0], fit[1], fit[2] * 1000.0, fit[3] * 1000.0);
-        const auto clampNs = [](double value) {
-            return (uint64_t)std::max(value, 0.0);
-        };
-        const sim::TimeTreeSolveCost fitted{.eventNs = clampNs(fit[0]),
-                                            .cycleNs = clampNs(fit[1]),
-                                            .cellPs = clampNs(fit[2] * 1000.0),
-                                            .cellCyclePs = clampNs(fit[3] * 1000.0)};
-        LogPrediction("最小二乗", fitted, measured);
+        LogFits(measured);
         LogPrediction("既定", sim::TimeTreeSolveCost{}, measured);
-        const std::array<std::string_view, 5> names = {"起動時(初め)", "起動時(直後)", "起動時(大きい箱 32)",
-                                                       "起動時(e 10)", "起動時(熱さない)"};
-        for (size_t index = 0; index < probes.size(); ++index)
-            LogPrediction(names[index], probes[index].cost, measured);
+        for (const auto& [name, cost] : probes)
+            LogPrediction(name, cost, measured);
 
-        LogBuckets(measured, probes[0].cost);
+        LogBuckets(measured, probes.empty() ? sim::TimeTreeSolveCost{} : probes.front().second);
         LogTotals(measured, events, eventsTotal);
 
         return {};
@@ -981,6 +978,21 @@ namespace {
                     {.system = record.system, .exponent = record.exponent, .cycles = record.cycles});
         }
 
+        // --- 起動時の測り(プロセスの初め = GPU が休んでいる状態から。T-1152)---
+        std::vector<NamedCost> probes;
+        const std::vector<std::pair<std::string, sim::TimeTreeCostProbeOptions>> cold = {
+            {"初め・熱さない", {.heatNs = 0}}, {"初め", {}}};
+        for (const auto& [name, options] : cold) {
+            if (!continuous)
+                break;
+
+            const auto probe = RunProbe(context, name, options);
+            if (!probe)
+                return std::unexpected(probe.error());
+
+            probes.emplace_back(name, probe->cost);
+        }
+
         EventTotals totals;
         std::vector<sim::TimeTreeEventGroup> allGroups;  // --continuous・--clock(T-1152)
         for (const auto& [event, spans] : events) {
@@ -1019,7 +1031,7 @@ namespace {
         }
 
         if (continuous && !allGroups.empty())
-            return MeasureContinuous(context, allGroups, totals.events, eventsTotal);
+            return MeasureContinuous(context, allGroups, totals.events, eventsTotal, std::move(probes));
 
         if (!measure || totals.events == 0)
             return {};
