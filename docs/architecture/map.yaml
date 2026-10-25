@@ -188,6 +188,9 @@ views:
       - { id: suncolumn, group: shared, label: "sun_column.hlsli<br/>太陽の影の柱(向き 1 つの光線の束で木の葉を掃く)",
           code: "shaders/common/sun_column.hlsli::SunWalkRay", ticket: T-0910, doc: docs/decisions/ADR-0396-sun-shadow-column-sweep.md,
           note: "光線の細かさの格子・板の真ん中の点で葉を引き同じ葉を 1 区間に・e^−τ で通す・照り返しを返す。CPU リファレンス sim/sun_column(SweepSunColumn)と GPU sim/gpu_sun_column(sun_column.hlsl の SunSweep。1 スレッド = 光線 1 本・64bit の atomic)がビット一致。出力はセルごとの吸った・返した(当たる面へ渡す口)" }
+      - { id: skyport, group: shared, status: research, label: "sky_port<br/>空との交換の口(参照の温度との差の分の空との出入り)",
+          code: "engine/src/sim/sky_port.cpp::SweepSkyPort", ticket: T-1147, doc: docs/decisions/ADR-0474-rc-sky-port.md,
+          note: "ADR-0474 案。帯ごとの差(空 − 参照の黒体)を決めた向きの太陽の影の柱の掃きで運ぶ。帯の正と負を 1 本の光線にまとめ、GPU(sim/gpu_sky_port・sky_port.hlsl)は向きを全部 1 回の起動で掃く(CPU とビット一致。64³ で約 0.5 ms)" }
       - { id: sunlens, group: shared, status: research, label: "sun_lens.hlsli<br/>日の光を物で集める(レンズの光線を整数で曲げる)",
           code: "shaders/common/sun_lens.hlsli::LnTraceLens", ticket: T-0878, doc: docs/decisions/ADR-0425-sunlight-lens-rays.md,
           note: "研究 R-R2(23 §5・§6)。影の柱が SunWalkRayCaught でレンズに入った量を取り、物の格子の点の光線を µm・Q30 の整数で屈折させて世界のセルへ(LnWalkWorld)。当たった面の強さは 2 mm の升。燃え始めの仮の行 LnHeatDoseStep(ADR-0426)。CPU リファレンス sim/sun_lens(FocusSunLight)。GPU は T-0990" }
@@ -629,6 +632,7 @@ views:
       - [radiationlines, radiation, "対(見え方・分け前)"]
       - [suncolumn, lightvalues, "セルの帯ごとの吸い込み・照り返し"]
       - [sunlens, suncolumn, "レンズに入った量(SunWalkRayCaught)"]
+      - [skyport, suncolumn, "向きごとの掃き(SunWalkRay)"]
       - [cascadelight, lightvalues, "セルの帯ごとの吸い込み・照り返し"]
       - [caps, d3d12, "D3D12CreateDevice"]
       - [d3d12, sdkver, "起動時に読む"]
