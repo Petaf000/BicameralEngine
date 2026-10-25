@@ -40,6 +40,11 @@ namespace bicameral::sim {
         void RecordValuesReadback(ID3D12GraphicsCommandList* list);
         [[nodiscard]] bool ReadValues(std::vector<int64_t>& values) const;
 
+        // V の記録の形(値は同じ。前の解きの数から GpuImplicit::ShapeFrom で選ぶ)
+        void SetSolveShape(GpuImplicitRecordShape shape) { m_equilibrium.SetSolveShape(shape); }
+        void RecordCostReadback(ID3D12GraphicsCommandList* list) { m_equilibrium.RecordCostReadback(list); }
+        [[nodiscard]] bool ReadCost(GpuImplicitCost& cost) const { return m_equilibrium.ReadCost(cost); }
+
         void RecordEnd(ID3D12GraphicsCommandList* list) { m_equilibrium.RecordEnd(list); }
         void ReleaseStaging() { m_equilibrium.ReleaseStaging(); }
 

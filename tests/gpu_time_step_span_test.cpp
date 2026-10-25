@@ -212,6 +212,45 @@ namespace {
         return cost;
     }
 
+    // V の記録の形を前の解きの数から選ぶ(本物の GPU 版と同じ。GpuImplicit::ShapeFrom。値は同じ)
+    std::expected<sim::GpuImplicitRecordShape, std::string> FitShape(Context& context, sim::GpuEquilibriumUpload& gpu,
+                                                                     const sim::ImplicitGrid& grid) {
+        ID3D12GraphicsCommandList10* list = context.queue->Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        context.ring->RecordBegin(list);
+        if (!gpu.RecordUpload(list, grid) || !gpu.RecordSolve(list, context.ring->GpuAddress(), 1))
+            return std::unexpected("段の形が合わない");
+
+        gpu.RecordCostReadback(list);
+        gpu.RecordEnd(list);
+        const auto executed = Execute(context, list);
+        if (!executed)
+            return std::unexpected(executed.error());
+
+        gpu.ReleaseStaging();
+        sim::GpuImplicitCost cost;
+        if (!gpu.ReadCost(cost))
+            return std::unexpected("数を読めない");
+
+        return sim::GpuImplicit::ShapeFrom(cost);
+    }
+
+    void LogCost(std::string_view name, std::string_view shape, const sim::GpuEquilibriumUpload& gpu,
+                 const sim::ImplicitGrid& grid, const Cost& cost) {
+        const double perCell = 1.0e6 / (double)gpu.Cells();
+        Log(Channel::Sim, Level::Info,
+            "費用 {}・{}: 段 {}・段の重みを作る {:.4f} ms・V 1 {:.4f} ms・V 2 {:.4f} ms → 1 出来事(重みは毎回)V 1 "
+            "{:.4f} ms "
+            "= {:.0f} ns/セル・V 2 {:.4f} ms = {:.0f} ns/セル・(重みは使い回し)V 1 {:.0f} ns/セル・V 2 {:.0f} ns/セル・"
+            "VRAM {:.2f} MB",
+            name, shape, grid.levels.size(), cost.weightsMs, cost.cyclesMs[0], cost.cyclesMs[1],
+            cost.weightsMs + cost.cyclesMs[0], (cost.weightsMs + cost.cyclesMs[0]) * perCell,
+            cost.weightsMs + cost.cyclesMs[1], (cost.weightsMs + cost.cyclesMs[1]) * perCell,
+            cost.cyclesMs[0] * perCell, cost.cyclesMs[1] * perCell, (double)gpu.DeviceBytes() / 1.0e6);
+    }
+
     std::expected<void, std::string> Measure(Context& context, const std::vector<test::TimeStepSpanRecord>& records) {
         // 暖機(GPU の時計が上がるまで。最初の系を 3 回)
         for (size_t round = 0; round < 3 + records.size(); ++round) {
@@ -229,18 +268,20 @@ namespace {
             if (round < 3)
                 continue;
 
-            const double cells = (double)gpu->Cells();
-            const double perCell = 1.0e6 / cells;
-            Log(Channel::Sim, Level::Info,
-                "費用 {}: 段 {}・段の重みを作る {:.4f} ms・V 1 {:.4f} ms・V 2 {:.4f} ms → 1 出来事(重みは毎回)V 1 "
-                "{:.4f} ms = "
-                "{:.0f} ns/セル・V 2 {:.4f} ms = {:.0f} ns/セル・(重みは使い回し)V 1 {:.0f} ns/セル・V 2 {:.0f} "
-                "ns/セル・"
-                "VRAM {:.2f} MB",
-                NameOf(record, index), cpu.grid.levels.size(), cost->weightsMs, cost->cyclesMs[0], cost->cyclesMs[1],
-                cost->weightsMs + cost->cyclesMs[0], (cost->weightsMs + cost->cyclesMs[0]) * perCell,
-                cost->weightsMs + cost->cyclesMs[1], (cost->weightsMs + cost->cyclesMs[1]) * perCell,
-                cost->cyclesMs[0] * perCell, cost->cyclesMs[1] * perCell, (double)gpu->DeviceBytes() / 1.0e6);
+            LogCost(NameOf(record, index), "記録の形は既定", *gpu, cpu.grid, *cost);
+            const auto shape = FitShape(context, *gpu, cpu.grid);
+            if (!shape)
+                return std::unexpected(shape.error());
+
+            gpu->SetSolveShape(*shape);
+            const auto fitted = MeasureOne(context, *gpu, cpu.grid);
+            if (!fitted)
+                return std::unexpected(fitted.error());
+
+            LogCost(NameOf(record, index),
+                    std::format("記録の形は前の解きから(段 {}・最も粗い段の Dispatch {})", shape->dispatchLevels,
+                                shape->coarsestDispatch ? "あり" : "なし"),
+                    *gpu, cpu.grid, *fitted);
         }
 
         return {};

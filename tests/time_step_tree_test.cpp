@@ -21,6 +21,7 @@
 //       [bufferunits=前線の緩衝の単位の数(T-1074)] [shape=mixed|coarse|fine|finer(night・fire の木。1 m・0.5 m・0.25 m の根だけ)]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 // T-1111: span-dump dump=<ファイル>(火事〔shape= の木〕の途中の列の系を書く。gpu_time_step_span_test が GPU で解き比べる)
+//         forward-estimate [eventns=] [cellns=] [cyclens=](早送りの待ちの見積もり〔D-650〕と実際に進めた解きの数)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -926,7 +927,7 @@ namespace {
 
     // 着火から何刻み後の e = 0 の系を取るか(着火の直後・前線が広がる途中。1 つ目の 1 刻みの系から)
     constexpr std::array<uint64_t, 8> SPAN_DUMP_AFTER = {1, 16, 64, 256, 512, 1024, 2048, 4000};
-    constexpr uint32_t SPAN_DUMP_LONG = 4;  // e > 0 の系(違う e を 4 つ。e > 8〔V の回数が違う〕を含める)
+    constexpr uint32_t SPAN_DUMP_LONG = 4;  // e > 0 の系(着火の 256 刻み後から、違う e を 4 つ。前線の外の長い歩)
 
     void CheckSpanDump(const Material& material, const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
@@ -940,7 +941,7 @@ namespace {
                 ++nextZero;
             } else if (solve.exponent > 0 && longSeen.size() < SPAN_DUMP_LONG &&
                        std::ranges::find(longSeen, solve.exponent) == longSeen.end() &&
-                       (solve.exponent > setup.shortExponent || solve.start >= ignition.tick)) {
+                       solve.start >= ignition.tick + SPAN_DUMP_AFTER[3]) {
                 longSeen.push_back(solve.exponent);
             } else
                 return;
@@ -963,6 +964,37 @@ namespace {
 
         Expect(nextZero == SPAN_DUMP_AFTER.size(), "火事の系: e = 0 の系を全部取った");
         Expect(!dumpPath.empty() && test::WriteTimeStepSpans(dumpPath, records), "火事の系: ファイルに書けた");
+    }
+
+    // --- D-650・T-1111: 早送りの待ちの見積もりを、実際に進めた解きの数と比べる(合格の判定には使わない)---
+    // 1 出来事の GPU の費用(RTX 3070 Ti・T-1111 の gpu_time_step_span_test --measure。docs/perf.md)。eventns= cellns= cyclens= で変えられる
+    sim::TimeTreeSolveCost forwardCost{.eventNs = 0, .cellNs = 0, .cellCycleNs = 0};
+
+    void CheckForwardEstimate(const Material& material, const Ignition& ignition) {
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        setup.groupShift = groupShift;
+        TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
+        StepTimeTree(setup, world, ignition.tick);
+        Ignite(setup, material, world, ignition);
+        uint64_t done = 0;
+        for (const uint64_t at : {uint64_t{256}, uint64_t{2048}}) {
+            StepTimeTree(setup, world, at - done);
+            done = at;
+            for (const uint64_t horizon : {uint64_t{1024}, uint64_t{8192}}) {
+                const TimeTreeForwardEstimate estimate = EstimateTimeTreeForward(setup, world, horizon, forwardCost);
+                TimeTreeWorld ahead = world;
+                StepTimeTree(setup, ahead, horizon);
+                const uint64_t cells = ahead.steps.cellSteps - world.steps.cellSteps;
+                const uint64_t events = ahead.steps.events - world.steps.events;
+                const uint64_t waitNs = (events * forwardCost.eventNs) + (cells * forwardCost.cellNs) +
+                                        (cells * forwardCost.cellCycleNs);
+                Log(Channel::Sim, Level::Info,
+                    "早送りの見積もり(着火の {} 刻み後から {} 刻み): 見積もり 出来事 {}・解くセル {}・待ち {:.3f} 秒 / "
+                    "実際 出来事 {}・解いたセル {}・待ち(同じ費用で V 1){:.3f} 秒",
+                    at, horizon, estimate.events, estimate.cellSolves, (double)estimate.waitMicroseconds * 1.0e-6,
+                    events, cells, (double)waitNs * 1.0e-9);
+            }
+        }
     }
 
     // --- 3. 早送り = 待った(ビット一致)・6. 歩の途中のセーブ ---
@@ -1083,6 +1115,12 @@ namespace {
                 solverGalerkin = value == "1";
             else if (key == "dump")
                 dumpPath = value;
+            else if (key == "eventns")
+                forwardCost.eventNs = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "cellns")
+                forwardCost.cellNs = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "cyclens")
+                forwardCost.cellCycleNs = static_cast<uint64_t>(std::atoll(value.c_str()));
         }
 
         const bool all = part == "all";
@@ -1112,6 +1150,9 @@ namespace {
 
         if (part == "span-dump")
             CheckSpanDump(fire, fireIgnition);
+
+        if (part == "forward-estimate")
+            CheckForwardEstimate(fire, fireIgnition);
 
         if (part == "grain-fine-pond")
             CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {}, 1);

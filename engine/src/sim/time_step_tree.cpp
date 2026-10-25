@@ -423,6 +423,11 @@ namespace bicameral::sim {
 
         // --- 列(同じ刻みに同じ e で始まる枠の集まり)の歩を始める: 反応・解き・記録 ---
 
+        // V の回数(法則の定数の表。e ごと。ADR-0465 の決めたこと 1)
+        uint32_t CyclesFor(const TimeTreeSetup& setup, int32_t exponent) {
+            return exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero : setup.cycles;
+        }
+
         struct Span {
             int32_t exponent = 0;
             uint64_t start = 0;
@@ -582,8 +587,7 @@ namespace bicameral::sim {
 
             // --- 解く(差の形。初めは δ = 0)---
             EquilibriumOptions options;
-            const uint32_t cycles = span.exponent <= setup.shortExponent && setup.cyclesAtZero != 0 ? setup.cyclesAtZero
-                                                                                                    : setup.cycles;
+            const uint32_t cycles = CyclesFor(setup, span.exponent);
             options.solver.cycles = setup.residualStop == 0 ? cycles : 1;
             options.faceValues = false;
             options.galerkinCoarse = setup.galerkin;
@@ -1084,6 +1088,37 @@ namespace bicameral::sim {
         bytes.held = bytes.minimal + bytes.cells * CELL_DELTA_BYTES;
 
         return bytes;
+    }
+
+    TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
+                                                    uint64_t ticks, const TimeTreeSolveCost& cost) {
+        TimeTreeForwardEstimate estimate;
+        int32_t shortest = setup.maxExponent;
+        for (const uint32_t slot : world.layout.blocks) {
+            uint64_t cells = 0;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                cells += world.layout.stepped[CellId(slot, index)];
+
+            if (cells == 0)
+                continue;
+
+            // 歩の数(端の半端も 1 歩)× セル・V の回数
+            const int32_t exponent = std::max(world.steps.exponent[slot], 0);
+            const uint64_t solves = (ticks + Ticks(exponent) - 1) >> exponent;
+            estimate.cellSolves += solves * cells;
+            estimate.cellCycles += solves * cells * CyclesFor(setup, exponent);
+            shortest = std::min(shortest, exponent);
+        }
+
+        // 出来事 = 最も短い歩の終わり(長い歩の終わりはそれに重なる)
+        if (estimate.cellSolves != 0)
+            estimate.events = (ticks + Ticks(shortest) - 1) >> shortest;
+
+        const uint64_t nanoseconds = (estimate.events * cost.eventNs) + (estimate.cellSolves * cost.cellNs) +
+                                     (estimate.cellCycles * cost.cellCycleNs);
+        estimate.waitMicroseconds = nanoseconds / 1000;
+
+        return estimate;
     }
 
 }  // namespace bicameral::sim

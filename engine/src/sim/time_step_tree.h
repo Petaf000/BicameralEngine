@@ -231,4 +231,24 @@ namespace bicameral::sim {
     };
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world);
 
+    // --- 早送りの待ちの見積もり(D-650・T-1111。ゲームはこれを読んで眠れる条件などを決める。法則は変えない)---
+    // 1 出来事の解きの費用(GPU で測った値。docs/perf.md の T-1111。整数の ns)
+    struct TimeTreeSolveCost {
+        uint64_t eventNs = 0;      // 出来事 1 つの固定費(段の数で決まる Dispatch とバリア。セルの数によらない分)
+        uint64_t cellNs = 0;       // 解くセル 1 つの段 0 + 段の重み
+        uint64_t cellCycleNs = 0;  // 解くセル 1 つの V 1 回
+    };
+
+    struct TimeTreeForwardEstimate {
+        uint64_t events = 0;      // 出来事(解く刻み)の数
+        uint64_t cellSolves = 0;  // セル × 解く回数
+        uint64_t cellCycles = 0;  // セル × V の回数(e ごとの表)
+        uint64_t waitMicroseconds = 0;
+    };
+
+    // 今の枠ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。
+    // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない
+    TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
+                                                    uint64_t ticks, const TimeTreeSolveCost& cost);
+
 }  // namespace bicameral::sim
