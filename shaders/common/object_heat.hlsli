@@ -38,6 +38,10 @@ FX_CONST uint32_t OH_RADIATION_SHARE_Q16 = 32768;        // 放射の 1 小刻�
 FX_CONST uint32_t OH_NEIGHBOUR_MASK = 0x3Fu;  // ビット 0〜5 = 隣のボクセルがある(−x・+x・−y・+y・−z・+z)
 FX_CONST uint32_t OH_EXPOSED_SHIFT = 8;       // ビット 8〜11 = 囲むセルに面する面の数(0〜6)
 FX_CONST uint32_t OH_EXPOSED_MASK = 0xFu;
+// 物の箱が囲む空気の層(D-667・ADR-0469 3-4・T-1142)。層の無い物ではどちらも 0(今までと同じ式・同じ結果)
+FX_CONST uint32_t OH_SHELL_BIT = 1u << 12;  // 層のボクセル(骨格の外の空気。中身はセルと同じ RxCell。物専用の式 0)
+FX_CONST uint32_t OH_THROUGH_SHIFT =
+    16;  // ビット 16〜19 = 層を透かして囲む所へ放射する面の数(骨格のボクセル。層は気体で光学的に薄い)
 
 // --- 表(物質ごとの対の面の値。ベイクの値から作る。添字 = 物質 ID)---
 struct OhSpecies {
@@ -61,8 +65,9 @@ struct OhObject {
     int32_t cellLevel;  // 囲むセルのレベル
     uint32_t substeps;  // 対の面の小刻み(4^(L − 6)。T-1016)
 
-    // --- 膜 ---
-    uint32_t filmUm;  // 境の膜の厚さ(物の形と流れで決まる物理の長さ。0 は使わない)
+    // --- 膜と層 ---
+    uint32_t filmUm;       // 境の膜の厚さ(物の形と流れで決まる物理の長さ。0 は使わない)
+    uint32_t shellLayers;  // 骨格の外の空気の層の数(0 = 層なし・1 = 1 段目。D-667。箱の大きさは骨格 + 2 × 層)
 
     // --- 物の中のブロック(64 ボクセル以下。眠らせる単位。T-1098)---
     uint32_t blockBegin;  // 全部の物のブロックの並びの中の始まり
@@ -72,7 +77,6 @@ struct OhObject {
     uint32_t blockEdgeX;  // ブロックの一辺のボクセルの数(物の形で選ぶ。積は 64 以下)
     uint32_t blockEdgeY;
     uint32_t blockEdgeZ;
-    uint32_t padding;
 };
 
 // --- 物の中のブロック(眠らせる単位。T-1098・ADR-0459)---
@@ -465,6 +469,62 @@ FX_FN int64_t OhInnerConduction(OhObject object, OhVoxelHeat self, OhVoxelHeat o
                            (uint64_t)object.substeps * OH_CONDUCTION_DIVISOR_MEGA * OH_MEGA);
 }
 
+// --- 層に面する面の気体の混ざり(T-1142。層 ⇄ 骨格・層 ⇄ 層。骨格どうしは今まで通り伝導だけ)---
+
+// ① の作業場の気体(小刻みの初めの量。隣のボクセルが同じ小刻みに書き換えても、両側が同じ値から計算する = Jacobi)
+struct OhVoxelGas {
+    uint64_t amounts[OH_MAX_GASES];  // 対の面の気体の番号ごと
+};
+
+template <typename GasList>
+FX_FN OhVoxelGas OhPrepareGas(GasList gases, RxCell cell) {
+    OhVoxelGas gas;
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
+        const uint32_t species = gases.GasSpecies(g);
+        gas.amounts[g] = species == 0 ? (uint64_t)0 : OhAmountOf(cell, species);
+    }
+
+    return gas;
+}
+
+// 物の中の隣どうしの気体の混ざり: 膜の口と同じ式で「広さ ÷ 膜」を s² ÷ s = s にしたもの。自分 → 隣が正。
+// 両側が符号違いの同じ値を出す(膜の温度 = 両側の平均・運ぶ熱は出ていく側の温度・上限は出ていく側の量の 1/8〔面 6 つと膜で負にならない〕。
+// 丸めは 0 へ向かうので f(−x) = −f(x))
+template <typename Table, typename GasList>
+FX_FN OhFlow OhInnerGas(Table table, GasList gases, OhObject object, OhVoxelGas self, OhVoxelGas other,
+                        OhVoxelHeat selfHeat, OhVoxelHeat otherHeat) {
+    OhFlow flow = OhZeroFlow();
+    const OhFilmScale film = OhFilmScaleOf(selfHeat.temperature, otherHeat.temperature);
+    const uint64_t lengthUm = (uint64_t)(OH_CELL_UM >> object.bodyLevel);
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
+        const uint32_t species = gases.GasSpecies(g);
+        if (species == 0)
+            continue;
+
+        const int64_t difference = (int64_t)self.amounts[g] - (int64_t)other.amounts[g];
+        const uint64_t diffusivity = (uint64_t)table.ObjectSpecies(species).diffusivityMm2PerS;
+        const uint64_t multiplier = (diffusivity * lengthUm * film.diffusionQ16) >> 16;
+        int64_t moved = OhMulDivToward0(difference * ((int64_t)8 << (3 * object.bodyLevel)), multiplier,
+                                        (uint64_t)object.substeps * OH_DIFFUSION_DIVISOR_MEGA * OH_MEGA);
+        const int64_t limit = (int64_t)((moved > 0 ? self.amounts[g] : other.amounts[g]) >> 3);
+        moved = moved > limit ? limit : (moved < -limit ? -limit : moved);
+        if (moved == 0)
+            continue;
+
+        // 運ぶエネルギー(OhPairGas と同じ式)
+        const RxSpecies values = table.Species(species);
+        const int64_t temperature = moved > 0 ? (int64_t)selfHeat.temperature : (int64_t)otherHeat.temperature;
+        const int64_t perUnit = (values.h0 * 1000000) + ((int64_t)values.heatCapacity * temperature);
+        const int64_t carried = OhMulDivToward0(moved, FxAbsU64(perUnit), 1000000000);
+        flow.amounts[g] = moved;
+        flow.energy += perUnit < 0 ? -carried : carried;
+    }
+
+    return flow;
+}
+
 // 隣のボクセルの番号の差(方向 0〜5 = −x・+x・−y・+y・−z・+z)
 FX_FN int32_t OhNeighbourOffset(OhObject object, uint32_t direction) {
     const int32_t stride = direction < 2
@@ -489,29 +549,33 @@ struct OhVoxelStep {
     uint32_t flowsZero;  // 1 = 光もセルとの流れも 0(静かなブロックの見分け。T-1098)
 };
 
-// 外に面する口(伝導・放射・気体)をまとめて。inner = 物の中の伝導で入る熱、sunlight = この小刻みに吸う光
+// 外に面する口(伝導・放射・気体)をまとめて。inner = 物の中の隣から入る熱と気体(伝導 + 層に面する面の混ざり。隣 → 自分が正)、
+// sunlight = この小刻みに吸う光。放射は外に面する面と、層を透かす面(OH_THROUGH_SHIFT)から囲む所へ
 template <typename Table, typename GasList>
-FX_FN OhVoxelStep OhApplyVoxel(Table table, GasList gases, OhObject object, uint32_t shape, RxCell cell,
-                               OhVoxelHeat heat, RxCell air, RxThermal airThermal, uint64_t airConductivity,
-                               int64_t inner, int64_t sunlight) {
+FX_FN OhVoxelStep OhApplyVoxelInner(Table table, GasList gases, OhObject object, uint32_t shape, RxCell cell,
+                                    OhVoxelHeat heat, RxCell air, RxThermal airThermal, uint64_t airConductivity,
+                                    OhFlow inner, int64_t sunlight) {
     OhVoxelStep step;
     step.toCell = OhZeroFlow();
     const uint32_t exposed = (shape >> OH_EXPOSED_SHIFT) & OH_EXPOSED_MASK;
+    const uint32_t radiating = exposed + ((shape >> OH_THROUGH_SHIFT) & OH_EXPOSED_MASK);
     if (exposed != 0) {
         const int64_t pairLength = OhPairLengthUm(object, exposed);
         const OhFilmScale film = OhFilmScaleOf(heat.temperature, airThermal.temperature);
-        step.toCell.energy = OhPairConduction(object, airConductivity, pairLength, heat, airThermal.temperature, film) +
-                             OhPairRadiation(table, object, exposed, cell, heat, airThermal.temperature);
+        step.toCell.energy = OhPairConduction(object, airConductivity, pairLength, heat, airThermal.temperature, film);
         step.toCell = OhPairGas(table, gases, object, pairLength, cell, air, heat, airThermal.temperature, film,
                                 step.toCell);
     }
 
+    if (radiating != 0)
+        step.toCell.energy += OhPairRadiation(table, object, radiating, cell, heat, airThermal.temperature);
+
     // 当てる(気体は表の気体の番号の順。足し引きの順は結果を変えない)
     step.ok = 1;
-    cell.energy += sunlight + inner - step.toCell.energy;
+    cell.energy += sunlight + inner.energy - step.toCell.energy;
     FX_UNROLL
     for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
-        const OhAmountChange change = OhAddAmount(cell, gases.GasSpecies(g), -step.toCell.amounts[g]);
+        const OhAmountChange change = OhAddAmount(cell, gases.GasSpecies(g), inner.amounts[g] - step.toCell.amounts[g]);
         cell = change.cell;
         step.ok = step.ok & change.ok;
     }
@@ -520,6 +584,18 @@ FX_FN OhVoxelStep OhApplyVoxel(Table table, GasList gases, OhObject object, uint
     step.flowsZero = (sunlight == 0 && OhFlowIsZero(step.toCell)) ? 1u : 0u;
 
     return step;
+}
+
+// 層の無い物の形(物の中は伝導だけ)。inner = 物の中の伝導で入る熱
+template <typename Table, typename GasList>
+FX_FN OhVoxelStep OhApplyVoxel(Table table, GasList gases, OhObject object, uint32_t shape, RxCell cell,
+                               OhVoxelHeat heat, RxCell air, RxThermal airThermal, uint64_t airConductivity,
+                               int64_t inner, int64_t sunlight) {
+    OhFlow innerFlow = OhZeroFlow();
+    innerFlow.energy = inner;
+
+    return OhApplyVoxelInner(table, gases, object, shape, cell, heat, air, airThermal, airConductivity, innerFlow,
+                             sunlight);
 }
 
 // --- ③ 物ごとの和を粗い側の単位にし、1 単位に満たない分を対の端数に持ち越す ---
@@ -572,6 +648,64 @@ FX_FN OhAmountChange OhApplyToCell(GasList gases, RxCell cell, OhFlow coarse) {
     result.cell = cell;
 
     return result;
+}
+
+// --- 層を作る・返す(D-667・T-1142。セル ⇄ 層は流れとして ③ の対の端数 OhSplitCarry と ④ OhApplyToCell で受ける = 帳簿「物との受け渡し」)---
+
+// 気体の量とエネルギーを流れの形に(層を返す時。ボクセル → セルが正)
+template <typename GasList>
+FX_FN OhFlow OhGasFlowOf(GasList gases, RxCell cell) {
+    const OhVoxelGas gas = OhPrepareGas(gases, cell);
+    OhFlow flow = OhZeroFlow();
+    flow.energy = cell.energy;
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g)
+        flow.amounts[g] = (int64_t)gas.amounts[g];
+
+    return flow;
+}
+
+// 層のボクセルの初めの中身 = 囲むセルの気体(同じ濃さ = 同じ数。量の数は濃さ × 0.125 m³)と、その気体の熱と化学のエネルギー
+// (運ぶ気体と同じ式: 量 × (h0 + 比熱 × セルの温度))。セルの気体でない物(混ぜた草・煤・水)は移さない(層は空気の箱)
+struct OhShellFill {
+    RxCell cell;
+    uint32_t ok;
+};
+
+template <typename Table, typename GasList>
+FX_FN OhShellFill OhShellVoxelOf(Table table, GasList gases, RxCell air, int32_t airMilliKelvin) {
+    OhShellFill fill;
+    fill.ok = 1;
+    RxCell voxel = RxMakeEmptyCell(0);
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
+        const uint32_t species = gases.GasSpecies(g);
+        if (species == 0)
+            continue;
+
+        const uint64_t amount = OhAmountOf(air, species);
+        const RxSpecies values = table.Species(species);
+        const int64_t perUnit = (values.h0 * 1000000) + ((int64_t)values.heatCapacity * (int64_t)airMilliKelvin);
+        const int64_t carried = OhMulDivToward0((int64_t)amount, FxAbsU64(perUnit), 1000000000);
+        voxel.energy += perUnit < 0 ? -carried : carried;
+        const OhAmountChange change = OhAddAmount(voxel, species, (int64_t)amount);
+        voxel = change.cell;
+        fill.ok = fill.ok & change.ok;
+    }
+
+    fill.cell = voxel;
+
+    return fill;
+}
+
+// 層のボクセルを返せるか: 中身が全部、対の面の気体(流れの形で運べる物)
+template <typename Table>
+FX_FN bool OhShellReturnable(Table table, RxCell cell) {
+    bool returnable = true;
+    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+        returnable = returnable && table.ObjectSpecies(RX_SPECIES_AT(cell, i)).gasIndex != OH_NO_GAS;
+
+    return returnable;
 }
 
 RX_NAMESPACE_END

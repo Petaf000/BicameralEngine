@@ -91,13 +91,14 @@ namespace bicameral::test {
         // --- 眠らせ方(T-1098。FinishObjectHeatWorld が作る)---
         std::vector<reaction::OhBlock> blocks;
         std::vector<reaction::OhBlockState> blockStates;
-        std::vector<reaction::OhVoxelWait> waits;  // ボクセルごと(反応の待ち。真実)
-        std::vector<uint32_t> cellChangedPasses;   // 囲むセルごと: 最後に変わった段
-        std::vector<reaction::OhVoxelHeat> heats;  // ① の作業場(眠っているブロックは前の値のまま = 今の値)
-        std::vector<reaction::OhFlow> flows;       // ② の記録(眠っているブロックは 0 のまま)
-        uint32_t pass = 0;                         // 段の通し番号
-        bool sleeping = true;                      // false = 全部のブロックを毎段回す(眠らせ方の厳密さの比べ)
-        uint64_t awakeExchangeBlocks = 0;          // 数えるだけ: 回した受け渡しのブロック(段の和)
+        std::vector<reaction::OhVoxelWait> waits;     // ボクセルごと(反応の待ち。真実)
+        std::vector<uint32_t> cellChangedPasses;      // 囲むセルごと: 最後に変わった段
+        std::vector<reaction::OhVoxelHeat> heats;     // ① の作業場(眠っているブロックは前の値のまま = 今の値)
+        std::vector<reaction::OhVoxelGas> gasStarts;  // ① の作業場の気体(層に面する面の混ざりが読む。T-1142)
+        std::vector<reaction::OhFlow> flows;          // ② の記録(眠っているブロックは 0 のまま)
+        uint32_t pass = 0;                            // 段の通し番号
+        bool sleeping = true;                         // false = 全部のブロックを毎段回す(眠らせ方の厳密さの比べ)
+        uint64_t awakeExchangeBlocks = 0;             // 数えるだけ: 回した受け渡しのブロック(段の和)
         uint64_t awakeReactBlocks = 0;
     };
 
@@ -141,7 +142,10 @@ namespace bicameral::test {
                 if (voxel == rx::OH_NO_BLOCK)
                     continue;
 
-                const bool exposed = ((world.infos[voxel].shape >> rx::OH_EXPOSED_SHIFT) & rx::OH_EXPOSED_MASK) != 0;
+                // 外に面する = 囲むセルを読む面がある(膜の口か、層を透かす放射。T-1142)
+                const uint32_t shape = world.infos[voxel].shape;
+                const bool exposed = ((shape >> rx::OH_EXPOSED_SHIFT) & rx::OH_EXPOSED_MASK) != 0 ||
+                                     ((shape >> rx::OH_THROUGH_SHIFT) & rx::OH_EXPOSED_MASK) != 0;
                 world.blockStates[b].flags |= (exposed ? rx::OH_BLOCK_EXPOSED : 0u) |
                                               (world.light[voxel] != 0 ? rx::OH_BLOCK_LIT : 0u);
             }
@@ -150,6 +154,7 @@ namespace bicameral::test {
         world.waits.assign(world.voxels.size(), rx::OhVoxelWait{});
         world.cellChangedPasses.assign(world.cells.size(), 0);
         world.heats.assign(world.voxels.size(), rx::OhVoxelHeat{});
+        world.gasStarts.assign(world.voxels.size(), rx::OhVoxelGas{});
         world.flows.assign(world.voxels.size(), rx::OhZeroFlow());
         world.pass = 0;
     }
@@ -174,7 +179,7 @@ namespace bicameral::test {
     }
 
     // ① 下ごしらえ(起きているブロックのボクセルだけ)
-    inline void PrepareObjectHeat(const OhCpuTable& table, OhWorld& world) {
+    inline void PrepareObjectHeat(const OhCpuTable& table, const OhGasList& gases, OhWorld& world) {
         for (size_t b = 0; b < world.blocks.size(); ++b) {
             if (world.blockStates[b].awake == 0)
                 continue;
@@ -182,8 +187,11 @@ namespace bicameral::test {
             const reaction::OhObject object = world.objects[world.blocks[b].object];
             for (uint32_t local = 0; local < reaction::OH_BLOCK_VOXELS; ++local) {
                 const uint32_t voxel = reaction::OhBlockVoxel(object, world.blocks[b], local);
-                if (voxel != reaction::OH_NO_BLOCK)
-                    world.heats[voxel] = reaction::OhPrepareVoxel(table, world.voxels[voxel]);
+                if (voxel == reaction::OH_NO_BLOCK)
+                    continue;
+
+                world.heats[voxel] = reaction::OhPrepareVoxel(table, world.voxels[voxel]);
+                world.gasStarts[voxel] = reaction::OhPrepareGas(gases, world.voxels[voxel]);
             }
         }
     }
@@ -198,7 +206,7 @@ namespace bicameral::test {
         const rx::RxThermal airThermal = rx::RxComputeThermal(table, air);
         const uint64_t airConductivity = uint64_t{rx::HcCellConductance(table, air, rx::HC_ROOM_TEMPERATURE_MK)}
                                          << rx::HC_CONDUCTANCE_SHIFT;  // 室温の値(T-1066)
-        int64_t inner = 0;
+        rx::OhFlow inner = rx::OhZeroFlow();
         bool faceFlow = false;
         for (uint32_t direction = 0; direction < 6; ++direction) {
             if ((info.shape & (1u << direction)) == 0)
@@ -207,14 +215,26 @@ namespace bicameral::test {
             const auto other = static_cast<uint32_t>(static_cast<int64_t>(voxel) +
                                                      rx::OhNeighbourOffset(object, direction));
             const int64_t heat = rx::OhInnerConduction(object, world.heats[voxel], world.heats[other]);
-            inner -= heat;
+            inner.energy -= heat;
             faceFlow = faceFlow || heat != 0;
+
+            // 層に面する面は気体も混ざる(T-1142)
+            if (((info.shape | world.infos[other].shape) & rx::OH_SHELL_BIT) == 0)
+                continue;
+
+            const rx::OhFlow gas = rx::OhInnerGas(table, gases, object, world.gasStarts[voxel], world.gasStarts[other],
+                                                  world.heats[voxel], world.heats[other]);
+            inner.energy -= gas.energy;
+            for (uint32_t g = 0; g < rx::OH_MAX_GASES; ++g)
+                inner.amounts[g] -= gas.amounts[g];
+
+            faceFlow = faceFlow || !rx::OhFlowIsZero(gas);
         }
 
         const int64_t sunlight = lightOn ? rx::OhLightShare(world.light[voxel], substep, object.substeps) : 0;
-        const rx::OhVoxelStep step = rx::OhApplyVoxel(table, gases, object, info.shape, world.voxels[voxel],
-                                                      world.heats[voxel], air, airThermal, airConductivity, inner,
-                                                      sunlight);
+        const rx::OhVoxelStep step = rx::OhApplyVoxelInner(table, gases, object, info.shape, world.voxels[voxel],
+                                                           world.heats[voxel], air, airThermal, airConductivity, inner,
+                                                           sunlight);
         const bool changed = !rx::RxSameCell(step.cell, world.voxels[voxel]);
         world.sunIn += sunlight;
         world.voxels[voxel] = step.cell;
@@ -300,7 +320,7 @@ namespace bicameral::test {
                                       uint32_t substep, uint64_t tick) {
         ++world.pass;
         WakeObjectHeatBlocks(world, lightOn);
-        PrepareObjectHeat(table, world);
+        PrepareObjectHeat(table, gases, world);
         FlowObjectHeat(table, gases, world, lightOn, substep, tick);
         const std::vector<reaction::OhFlow> coarse = CarryObjectHeat(world);
         ApplyObjectHeatToCells(gases, world, coarse);
