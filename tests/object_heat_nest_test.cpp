@@ -42,21 +42,13 @@ namespace {
     constexpr uint64_t AIR_OXYGEN_UNITS = 1092000;
     constexpr uint64_t AIR_NITROGEN_UNITS = 4108000;
     constexpr uint32_t DEFAULT_DIFFUSIVITY_MM2_PER_S = 20;
-    constexpr uint32_t GAS_CONDUCTIVITY_SCALE = 5000;
-    constexpr uint32_t SOLID_CONDUCTIVITY_SCALE = 20000;
     constexpr int32_t BURNING_MILLIKELVIN = 900000;
     constexpr uint64_t WORLD_SEED = 0x1077;
     constexpr uint32_t TICKS = 600;
 
     sim::BakedReactionTable MakeTable() {
-        return test::MakeSunTable([](sim::ReactionTableDefinition& definition) {
-            for (sim::SpeciesDefinition& species : definition.species) {
-                if (species.phase == sim::SpeciesPhase::Gas)
-                    species.thermalConductivity /= GAS_CONDUCTIVITY_SCALE;
-                else if (species.name == "cellulose" || species.name == "carbon")
-                    species.thermalConductivity /= SOLID_CONDUCTIVITY_SCALE;
-            }
-        });
+        // 伝導率は表の現実の値のまま(試験の倍率は T-1066 で表から外した。ここで割っていたのを外す)
+        return test::MakeSunTable();
     }
 
     // --- 物(箱の並び。外に面するボクセルの数を形の語に)---

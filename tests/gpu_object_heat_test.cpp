@@ -36,8 +36,6 @@ namespace {
     constexpr uint64_t AIR_OXYGEN_UNITS = 1092000;
     constexpr uint64_t AIR_NITROGEN_UNITS = 4108000;
     constexpr uint32_t DEFAULT_DIFFUSIVITY_MM2_PER_S = 20;
-    constexpr uint32_t GAS_CONDUCTIVITY_SCALE = 5000;  // 試験の表の伝導率の倍率を外す(object_heat_test と同じ)
-    constexpr uint32_t SOLID_CONDUCTIVITY_SCALE = 20000;
     constexpr int32_t BURNING_MILLIKELVIN = 900000;
     constexpr int64_t SPOT_LIGHT = 10000000;  // 物の最初のボクセルが 1 刻みに吸う光(ボクセルの単位。約 2.3 W)
     constexpr uint64_t WORLD_SEED = 0x1064;
@@ -146,14 +144,8 @@ namespace {
     }
 
     sim::BakedReactionTable MakeTable() {
-        return test::MakeSunTable([](sim::ReactionTableDefinition& definition) {
-            for (sim::SpeciesDefinition& species : definition.species) {
-                if (species.phase == sim::SpeciesPhase::Gas)
-                    species.thermalConductivity /= GAS_CONDUCTIVITY_SCALE;
-                else if (species.name == "cellulose" || species.name == "carbon")
-                    species.thermalConductivity /= SOLID_CONDUCTIVITY_SCALE;
-            }
-        });
+        // 伝導率は表の現実の値のまま(試験の倍率は T-1066 で表から外した。ここで割っていたのを外す)
+        return test::MakeSunTable();
     }
 
     // 物を置いた後に呼ぶ: ブロックと眠らせ方の状態を作る
