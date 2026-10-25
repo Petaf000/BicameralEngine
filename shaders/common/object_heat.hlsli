@@ -336,6 +336,17 @@ FX_FN int64_t OhPairConduction(OhObject object, uint64_t airConductivity, int64_
                            (uint64_t)object.substeps * OH_CONDUCTION_DIVISOR_MEGA * OH_MEGA);
 }
 
+// 面の広さ s² の吸い込み(Q16): τ = Σ a·n ÷ (0.25 m² × 2^L)(n はボクセルの単位)。和を 2^L で割ってから τ にする
+// (τ にしてから割ると τ の飽和 32 が 32 ÷ 2^L に下がり、7.8 mm の箱では厚い紙・炭・草でも吸い込みが 1 − e^−0.5 = 0.39 で頭打ちだった。T-1097)
+FX_FN uint32_t OhAbsorptanceQ16(FxU128 sum, int32_t bodyLevel) {
+    const uint32_t shift = (uint32_t)bodyLevel;
+    FxU128 face;
+    face.hi = sum.hi >> shift;
+    face.lo = shift == 0 ? sum.lo : ((sum.lo >> shift) | (sum.hi << ((64 - shift) & 63)));
+
+    return RdAbsorptanceQ16(RdOpticalDepthQ32(face));
+}
+
 // 放射: ボクセルの吸い込み(長い帯)× 囲む所(吸い込み 1)。RdPairCoefficient は 0.25 m² の面の値なので、
 // 外に面する面の広さ(面の数 × s²)とボクセルの単位(× 8^L)にする: × 面の数 × 2^L
 template <typename Table>
@@ -349,8 +360,7 @@ FX_FN int64_t OhPairRadiation(Table table, OhObject object, uint32_t exposedFace
         sum = RdAddAbsorption(sum, absorption, RX_AMOUNT_AT(cell, i));
     }
 
-    // 面の広さ s² の吸い込み: τ = Σ a·n ÷ (0.25 m² × 2^L)(n はボクセルの単位)
-    const uint32_t absorptance = RdAbsorptanceQ16(RdOpticalDepthQ32(sum) >> object.bodyLevel);
+    const uint32_t absorptance = OhAbsorptanceQ16(sum, object.bodyLevel);
     const uint64_t weight = RdPairWeightQ32(absorptance, RD_ONE_Q16, RD_ONE_Q16);
     const uint64_t coefficient = (RdPairCoefficient((uint32_t)voxel.temperature, (uint32_t)airMilliKelvin, weight) *
                                   (uint64_t)exposedFaces)
